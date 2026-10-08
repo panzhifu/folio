@@ -68,6 +68,15 @@ impl ChapterImages {
         }
     }
 
+    /// 一张图都没有时的索引（Markdown / TXT 恒如此，EPUB 无图文时也成立）。
+    /// 任何 `src` 都解不出来，排版因此跳过每个 `<img>`，不会塌成空盒。
+    pub fn empty() -> Self {
+        Self {
+            book: Arc::new(BookImages::new(&[])),
+            base_dir: String::new(),
+        }
+    }
+
     /// 绘制用：容器路径 → 可渲染的 `Image`。
     pub fn render_source(&self, href: &str) -> Option<Arc<Image>> {
         self.book.get(href).map(|e| e.image.clone())

@@ -110,8 +110,7 @@ fn winner(dom: &Dom, set: &RuleSet, property: &str) -> String {
     let p = first_p(dom);
     set.matching_declarations(dom, p)
         .into_iter()
-        .filter(|d| d.property == property)
-        .last()
+        .rfind(|d| d.property == property)
         .map(|d| d.value.clone())
         .unwrap_or_default()
 }

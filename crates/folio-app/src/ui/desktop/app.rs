@@ -5,7 +5,6 @@ use folio_core::{Config, Locator, Store, open};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::setting::{SelectIndex, Settings};
 use gpui_kit::component::sidebar::{Sidebar, SidebarMenu, SidebarMenuItem, SidebarToggleButton};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -18,11 +17,13 @@ use gpui_kit::{
     ParentElement, Render, SharedString, Styled, Subscription, TestSupportExt, Window, div, px,
 };
 
-use crate::account::{account_avatar, display_name};
-use crate::config_model::ConfigHolder;
-use crate::l10n::{book_count, tf, tr};
-use crate::reader::ReaderView;
-use crate::settings_view;
+use super::reader::ReaderView;
+use super::settings::{self, SettingsPage};
+use crate::ui::shared::account::{account_avatar, display_name};
+use crate::ui::shared::chrome::muted_label;
+use crate::ui::shared::config_model::{ConfigHolder, ConfigPath};
+use crate::ui::shared::l10n::{book_count, tf, tr};
+use crate::ui::shared::theme;
 
 /// 侧栏展开宽度。阅读视图按它预留版心，所以这个数只能有一份。
 pub const SIDEBAR_WIDTH: f32 = 260.0;
@@ -36,12 +37,6 @@ pub struct FolioApp {
     tabs: Vec<Entity<ReaderView>>,
     active: usize,
     sidebar_collapsed: bool,
-    /// 正在看的设置页下标；`None` 表示在读书。
-    ///
-    /// 设置是**一个页面**而不是对话框：`Settings` 自带一页导航，组件的默认对话框只有
-    /// 448px，扣掉它自己的侧栏后正文不到 480px 的堆叠阈值，每个字段都会竖着堆成一列
-    /// 没法看的窄条。Design Guides 说的就是这件事：短决策用对话框，要看的字段多用整页。
-    settings: Option<usize>,
     /// 配置实体的句柄由 `ConfigHolder` 这个 Global 持有，这里只留订阅：
     /// 它一旦被 drop，阅读器就不会随设置变化重排。
     _config_watch: Subscription,
@@ -62,12 +57,12 @@ impl FolioApp {
         let config_state = ConfigHolder::install(config, cx);
         // 首帧就把外观配上。传窗口进去是为了直接读它所在的系统浅深 —— Linux 上
         // `cx.window_appearance()` 走一个 `RefCell`，而下面那个观察者正持有它的借用。
-        crate::theme::apply(&ConfigHolder::appearance(cx), Some(window), cx);
+        theme::apply(&ConfigHolder::appearance(cx), Some(window), cx);
         // 读者选了「跟随系统」时，系统在运行中换浅深，界面要跟着换。
         let appearance_id = window.window_handle();
         let _appearance = window.observe_window_appearance(move |_, cx| {
             let _ = appearance_id.update(cx, |_, window, cx| {
-                crate::theme::apply(&ConfigHolder::appearance(cx), Some(window), cx);
+                theme::apply(&ConfigHolder::appearance(cx), Some(window), cx);
             });
         });
         let library = store.list_books().unwrap_or_else(|e| {
@@ -78,7 +73,7 @@ impl FolioApp {
         // 没有这一步，设置面板改完字号要重开书才生效。
         let _config_watch = cx.observe(&config_state, |this, _, cx| {
             let prefs = ConfigHolder::reader(cx);
-            crate::theme::apply(&ConfigHolder::appearance(cx), None, cx);
+            theme::apply(&ConfigHolder::appearance(cx), None, cx);
             for reader in &this.tabs {
                 reader.update(cx, |reader, cx| reader.apply_prefs(prefs.clone(), cx));
             }
@@ -91,7 +86,6 @@ impl FolioApp {
             tabs: Vec::new(),
             active: 0,
             sidebar_collapsed: false,
-            settings: None,
             _appearance,
             _config_watch,
         };
@@ -141,8 +135,6 @@ impl FolioApp {
     }
 
     fn open_book(&mut self, row: &BookRow, window: &mut Window, cx: &mut Context<Self>) {
-        // 从书架选书就是回到阅读：设置页留着开着会让下一次点开还是设置。
-        self.settings = None;
         if let Some(ix) = self
             .tabs
             .iter()
@@ -225,7 +217,7 @@ impl FolioApp {
     /// 而不是被这次浅色循环顺手改掉。
     fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mode = cx.theme().mode;
-        let names = crate::theme::theme_names(cx, mode);
+        let names = theme::theme_names(cx, mode);
         if names.is_empty() {
             return;
         }
@@ -239,9 +231,9 @@ impl FolioApp {
             }
         };
         let fallback = if dark {
-            crate::theme::DEFAULT_DARK
+            theme::DEFAULT_DARK
         } else {
-            crate::theme::DEFAULT_LIGHT
+            theme::DEFAULT_LIGHT
         };
         let index = stored
             .as_deref()
@@ -263,17 +255,6 @@ impl FolioApp {
         });
         let message = tf(cx, "toast.theme", &[("name", &next)]);
         self.notify(message, window, cx);
-    }
-
-    /// 进设置页。`page` 是要定位到的页面下标（见 `settings_view::PAGE_*`）。
-    fn open_settings(&mut self, page: usize, cx: &mut Context<Self>) {
-        self.settings = Some(page);
-        cx.notify();
-    }
-
-    fn close_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings = None;
-        cx.notify();
     }
 
     fn open_import_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -308,7 +289,6 @@ impl FolioApp {
         let menu_entity = entity.clone();
         let import_entity = entity.clone();
         let toggle_entity = entity.clone();
-        let account_entity = entity.clone();
         let collapsed = self.sidebar_collapsed;
 
         let toggle = || {
@@ -357,21 +337,18 @@ impl FolioApp {
                 .child(toggle())
         };
 
-        // 底部账号入口：头像 + 读者名，进入设置并定位到「账号」页。
-        // 用 Button 而不是裸 h_flex：它是应用命令，需要 hover/pressed/selected 与可访问名。
+        // 底部账号入口：头像 + 读者名，打开设置窗口并定位到「账号」页。
+        // 用 Button 而不是裸 h_flex：它是应用命令，需要 hover / pressed 反馈与可访问名。
+        // 它**不显示 selected** —— 设置现在是一个独立窗口，可能开着也可能已经关了，
+        // 这一格代表的动作是「去改账号」，不是「当前停在这个视图」。
         let name = display_name(cx);
         let mut account = Button::new("account")
             .ghost()
             .small()
             .w_full()
-            .selected(self.settings == Some(settings_view::PAGE_ACCOUNT))
             .tooltip(tr(cx, "sidebar.account"))
             .accessibility_label(tr(cx, "sidebar.account"))
-            .on_click(move |_, _, cx| {
-                account_entity.update(cx, |this, cx| {
-                    this.open_settings(settings_view::PAGE_ACCOUNT, cx)
-                })
-            })
+            .on_click(move |_, _, cx| settings::open_at(SettingsPage::Account, cx))
             .child(account_avatar(&name, 24.0, cx));
         if collapsed {
             account = account.justify_center();
@@ -417,13 +394,7 @@ impl FolioApp {
         // `test_support` 让 UI 集成测试能查到这个标题栏内容节点（回归门：别把标题栏又弄丢）。
         bar = bar.child(div().id("app-title").test_support().child("Folio"));
         if let Some(book) = book {
-            bar = bar.child(
-                div()
-                    .ml_auto()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(book),
-            );
+            bar = bar.child(div().ml_auto().child(muted_label(book, cx)));
         }
         TitleBar::new().child(bar)
     }
@@ -434,7 +405,6 @@ impl FolioApp {
         let theme = cx.entity().clone();
         let chapter_nav = cx.entity().clone();
         let next_chapter = cx.entity().clone();
-        let settings = cx.entity().clone();
         let font_size = ConfigHolder::reader(cx).font_size;
         let has_reader = !self.tabs.is_empty();
         let no_book = tr(cx, "reader.no_book").to_string();
@@ -484,12 +454,9 @@ impl FolioApp {
                 ToolbarGroup::new("settings").child(
                     Button::new("settings")
                         .icon(IconName::Settings)
-                        .tooltip(tr(cx, "settings.title"))
-                        .on_click(move |_, _, cx| {
-                            settings.update(cx, |this, cx| {
-                                this.open_settings(settings_view::PAGE_TYPOGRAPHY, cx)
-                            })
-                        }),
+                        .tooltip(tr(cx, "settings.open"))
+                        .accessibility_label(tr(cx, "settings.open"))
+                        .on_click(move |_, _, cx| settings::open(cx)),
                 ),
             )
             .content(div().flex_1().px_3().child(chapter_label))
@@ -537,60 +504,6 @@ impl FolioApp {
             .right(format!("{:.0}%", progress * 100.0))
     }
 
-    /// 设置页：标题栏（窗口 chrome）+ 页头（返回 + 标题）+ `Settings` 整页。
-    ///
-    /// `Settings` 内部是一个 `h_resizable`（它自己的页面导航 + 正文两栏），它和它的
-    /// 正文都要一个**确定的**盒子，所以这里给的是 `flex_1().min_h_0()`，
-    /// 而不是对话框那种滚动容器。
-    ///
-    /// 侧栏保持可见：它是全局导航，「选一本书」就是回到阅读的那条路。
-    fn settings_screen(&self, page: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let back = cx.entity().clone();
-        // 组件的 `Settings` 只在**第一次**渲染时读 `default_selected_index` —— 它的选择
-        // 状态挂在 `window.use_keyed_state(id)` 上，之后再传这个参数也没用。所以
-        // 「从账号进账号页、从工具条进文字页」只能靠给每个入口一个自己的 id。
-        let id = format!("reader-settings-{page}");
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .child(self.title_bar(cx))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Button::new("settings-back")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ChevronLeft)
-                            .label(tr(cx, "settings.back"))
-                            .on_click(move |_, _, cx| {
-                                back.update(cx, |this, cx| this.close_settings(cx))
-                            }),
-                    )
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(tr(cx, "settings.title")),
-                    ),
-            )
-            .child(
-                div().flex_1().min_h_0().child(
-                    Settings::new(id)
-                        .pages(settings_view::pages(cx))
-                        .default_selected_index(SelectIndex {
-                            page_ix: page,
-                            group_ix: None,
-                        }),
-                ),
-            )
-    }
-
     fn reading_screen(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
         let tabs = self.tabs.clone();
@@ -631,11 +544,7 @@ impl FolioApp {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr(cx, "reader.empty_hint")),
-                )
+                .child(muted_label(tr(cx, "reader.empty_hint"), cx))
                 .child(
                     // 空库时的主要动作，但它是「加一条记录」这类普通命令，不是决策区的
                     // 默认提交 —— 按 Design Guides 用默认样式，不占 primary。
@@ -680,17 +589,14 @@ impl Render for FolioApp {
         }
 
         // 侧栏直通窗口顶部：标题栏只在右侧内容上方，窗口按钮仍在右上角。
-        let content: AnyElement = match self.settings {
-            Some(page) => self.settings_screen(page, cx).into_any_element(),
-            None => self.reading_screen(cx).into_any_element(),
-        };
+        // 主窗口只有阅读这一屏 —— 设置在隔壁那个开-or-聚焦的窗口里。
         h_flex()
             .size_full()
             .relative()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.sidebar(cx))
-            .child(content)
+            .child(self.reading_screen(cx))
     }
 }
 
@@ -707,7 +613,7 @@ fn shexpand(path: &str) -> String {
 /// 桌面入口：装主题集、开书库、开窗。
 ///
 /// 这段原先在 `main.rs` 里。合进一个 crate 后 bin 需要一份「桌面 / 移动」共用的门面，
-/// 就挪到这里，`main.rs` 只按 target 分流（移动端真正的入口在 `crate::mobile`）。
+/// 就挪到这里，`main.rs` 只按 target 分流（移动端真正的入口在 `crate::ui::mobile`）。
 pub fn run_desktop() {
     use gpui_kit::{App, Font, TitlebarOptions, size};
 
@@ -720,8 +626,8 @@ pub fn run_desktop() {
             // 主题集要在 `init` 之后装：那一步才把 `ThemeRegistry` 这个 Global 建出来。
             // 先装内置的（构建时从依赖源码嵌进来），再装读者自己放进 `themes/` 的，
             // 后者的同名项按 registry 的规则不覆盖已有名字，所以顺序决定谁优先。
-            crate::theme::register_builtin_themes(cx);
-            crate::theme::register_user_themes(cx);
+            theme::register_builtin_themes(cx);
+            theme::register_user_themes(cx);
 
             // 配置先读出来，并立刻把界面语言推给全局：下面任何一条要给人看的消息
             // （包括书库打不开）都得用读者自己选的语言写。
@@ -739,9 +645,7 @@ pub fn run_desktop() {
                 }
             };
             // 配置存成按系统标准目录的 JSON 文件；这里把落盘目标交给配置持有者。
-            cx.set_global(crate::config_model::ConfigPath(Some(
-                folio_core::config_path(),
-            )));
+            cx.set_global(ConfigPath(Some(folio_core::config_path())));
 
             // 命令行传入的路径直接导入并打开：既是「用 Folio 打开这本书」的正常用法，
             // 也让端到端验证可以不依赖 GUI 自动化。

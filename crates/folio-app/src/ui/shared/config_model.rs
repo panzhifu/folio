@@ -44,6 +44,12 @@ impl ConfigHolder {
         entity
     }
 
+    /// 配置实体的句柄。视图对它 `observe` 才能在改偏好后被唤醒；
+    /// 桌面外壳与移动端外壳都各留一份订阅，drop 掉就等于取消订阅。
+    pub fn handle(cx: &App) -> Entity<ConfigState> {
+        Self::entity(cx)
+    }
+
     fn entity(cx: &App) -> Entity<ConfigState> {
         cx.global::<ConfigHolder>().0.clone()
     }

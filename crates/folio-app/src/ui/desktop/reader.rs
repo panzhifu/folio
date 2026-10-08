@@ -9,8 +9,10 @@ use gpui_kit::{
     Render, SharedString, Styled, Subscription, TestSupportExt, Window, div, point, px,
 };
 
-use crate::engine::{Engine, engine_lines};
-use crate::images::{BookImages, ChapterImages};
+use super::engine::{engine_lines, item_sizes, render_range};
+use crate::ui::shared::document::Document;
+use crate::ui::shared::images::{BookImages, ChapterImages};
+use crate::ui::shared::l10n::tf;
 
 /// 用自研引擎渲染的格式。EPUB 的 XHTML 直接进 DOM → CSS → Layout；
 /// Markdown / TXT 还没接进引擎（要先把源文本转成 XHTML，见 M5），
@@ -25,7 +27,7 @@ pub struct ReaderView {
     chapters: Vec<Chapter>,
     chapter: usize,
     /// `Some` 时正文由自研引擎排版，`None` 时是 M1 的 TextView。
-    engine: Option<Engine>,
+    engine: Option<Document>,
     /// 整本书的图片索引，换章时按新章的目录重建视图（见 `reload`）。
     book_images: Arc<BookImages>,
     state: Entity<TextViewState>,
@@ -65,7 +67,7 @@ impl ReaderView {
         let book_images = Arc::new(BookImages::new(&flow.images));
         let engine = uses_engine(&book.format).then(|| {
             let images = Arc::new(ChapterImages::new(book_images.clone(), &spine_href));
-            Engine::new(source.clone(), &flow.css, prefs.clone(), images)
+            Document::new(source.clone(), &flow.css, prefs.clone(), images)
         });
         // 引擎路径不用 TextViewState，但仍要有一个句柄占位：`observe` 与
         // `reveal_range` 那套只对 TextView 有意义，引擎的位置恢复在 M5。
@@ -140,7 +142,7 @@ impl ReaderView {
         if self.chapters.is_empty() {
             return String::new();
         }
-        crate::l10n::tf(
+        tf(
             cx,
             "reader.chapter_position",
             &[
@@ -307,12 +309,12 @@ impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(engine) = self.engine.as_mut() {
             engine.ensure_layout(window, cx, self.pane_reserve);
-            let width = px(Engine::content_width(
+            let width = px(Document::content_width(
                 window,
                 &self.prefs,
                 self.pane_reserve,
             ));
-            let sizes = engine.item_sizes();
+            let sizes = item_sizes(engine);
             let view = cx.entity();
             return div()
                 .id("engine-scroll")
@@ -373,7 +375,7 @@ impl ReaderView {
         cx: &mut Context<Self>,
     ) -> Vec<gpui_kit::AnyElement> {
         match self.engine.as_ref() {
-            Some(engine) => crate::engine::render_range(engine, range, cx),
+            Some(engine) => render_range(engine, range, cx),
             None => Vec::new(),
         }
     }

@@ -136,10 +136,10 @@ fn headings_get_ua_size_and_weight_and_can_be_centered() {
     assert_eq!(layout.lines[0].x, 68.0, "两字 64px 居中于 200px 版心");
 
     let (dom, styles) = parse("<h1>x</h1><span>y</span>", "");
-    let h1 = styles.iter().nth(find(&dom, "h1") as usize).unwrap();
+    let h1 = styles.get(find(&dom, "h1") as usize).unwrap();
     assert_eq!(h1.font_weight, 700);
     assert_eq!(h1.display, Display::Block);
-    let span = styles.iter().nth(find(&dom, "span") as usize).unwrap();
+    let span = styles.get(find(&dom, "span") as usize).unwrap();
     assert_eq!(span.display, Display::Inline, "UA 必须知道 span 是行内");
 }
 

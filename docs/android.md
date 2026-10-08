@@ -30,7 +30,8 @@ fork 上这两处改动（`Cargo.toml` 四处 pin + `src/android/window.rs` 补�
 
 **为什么移动端以前是独立的 cargo workspace，现在又不独立了**：早先根 `Cargo.toml` 用
 `exclude = ["crates/folio-mobile"]`，理由是「两端链的不是同一个 `gpui` 包」。fork 换到
-`gpui-pre =0.3.8` 之后这条不成立了，于是**合并进 `crates/folio-app`，移动代码在 `src/mobile/`**，
+`gpui-pre =0.3.8` 之后这条不成立了，于是**合并进 `crates/folio-app`，移动代码在 `src/ui/mobile/`**
+（界面层现在分 `src/ui/{shared,desktop,mobile}/`，两端必须一致的东西放在 `shared`），
 整体由 `cfg(mobile)`（`crates/folio-app/build.rs` 设）与桌面模块互斥编译。代价是两边共用一张依赖图、
 一份 `Cargo.lock`：`[patch.crates-io]`（`async-task` 那条，fork 需要）和 `[profile.release]`
 因此都挪到了仓库根 `Cargo.toml`。`libc` 那次钉 0.2.189 的理由（`xattr` 按旧名引 `ENOATTR`）
@@ -65,9 +66,28 @@ adb shell am start -n dev.folio.reader/dev.gpui.mobile.GpuiActivity
   真机上字体由 cosmic-text 扫 `/system/fonts/`。
 - **target 目录放 `~/.cache` 而不是 `/tmp`**：`/tmp` 是 tmpfs，11 GB 的构建缓存会吃掉内存。
   产物 `libgpui_mobile.so` 由 fork 自己那次 `cargo ndk` 生成，改 fork 才需要重编它。
+- **只想过类型检查、不出 `.so`，就别用 `cargo ndk`**，直接 `cargo check --target aarch64-linux-android`，
+  但要把 NDK 的 C 工具链变量给全 —— `CC` / `CXX` / `AR` 是 `cargo ndk` 平时替我们注入的，
+  裸 `cargo` 不会。缺 `AR` 时 `libsqlite3-sys` 会在打包 `libsqlite3.a` 那步报
+  `failed to find tool "aarch64-linux-android-ar"`，看起来像代码问题，其实是环境：
+
+  ```bash
+  TC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+  CC_aarch64_linux_android=$TC/aarch64-linux-android26-clang \
+  CXX_aarch64_linux_android=$TC/aarch64-linux-android26-clang++ \
+  AR_aarch64_linux_android=$TC/llvm-ar \
+  CARGO_TARGET_DIR=~/.cache/folio-mobile-android \
+    cargo check -p folio-app --target aarch64-linux-android --lib
+  ```
+
+  `aarch64-linux-android-clang` 这种**不带 API 号**的名字在 NDK r30 里不存在，所以 `CC` 要指到
+  `aarch64-linux-android26-clang`（26 与上面 `-P 26` 同档）。
 
 移动模块整体由 `cfg(mobile)` 门控，所以宿主（不交叉编译）上 `cargo check` / `cargo clippy`
-编的是桌面模块，移动那套连同 `gpui-pre-mobile` 根本不会进依赖图。
+编的是桌面视图那一侧，`gpui-pre-mobile` 根本不会进依赖图。**但 `src/ui/shared/` 两端都编** ——
+断行、层叠、版心宽度、主题解析都在那里，所以宿主的 `cargo test`（`tests/shared_layout.rs`）
+确实覆盖了移动端排版的一部分，而不是「移动端一条测试都没有」。
+覆盖不到的仍然是移动 UI 自己：触摸滚动、换章按钮、真机上的浅深解析。
 
 ## 3. 设备事实（Meizu 20）
 
@@ -139,23 +159,36 @@ platform / wgpu / x11 / wayland / cosmic-text。
 不确定是本来就没有变化还是没抓到）；`Mode::System`（fork 有 `appearance()`，但宿主 Activity 没声明
 night 资源）。
 
-**由此定下的主题方案**（尚未实施）：两端都走 `ThemeRegistry::load_themes_from_str` + 读 `cx.theme()`，
-移动端不写任何 JSON 解析。这一步原先要先把主题嵌入从 `folio-app/build.rs` 挪到 `folio-core`，
-因为 `folio-mobile` 的依赖图里没有 gpui-kit、找不到那套 `themes/`；**合并后这条前置消了一半** ——
-`crates/folio-app/build.rs` 现在两端都会跑，而 `crates/folio-app` 的依赖图里有 gpui-kit。
-但 `cargo metadata` 仍要显式指向仓库根 workspace 且带 `--offline`（嵌套调用 cargo 不带 `--offline`
-会去抢 package cache 锁）。另一个前置：`paths::config_dir()` 在 Android 上会落到 `/tmp/.config/folio`
-（`$HOME` 未设），用户主题目录与 `config.json` 都卡在这条上。
+**由此定下的主题方案已经实施（2026-10-09）**：两端都走 `ThemeRegistry::load_themes_from_str` +
+读 `cx.theme()`，移动端不写任何 JSON 解析，界面上也没有一行裸色值。落地的三件事：
+
+- `crates/folio-app/src/ui/shared/theme.rs` 变成两端共用（它原先在 `cfg(not(mobile))` 那一侧）。
+  主题嵌入仍由 `crates/folio-app/build.rs` 做，合并后两端都会跑它，`FOLIO_THEMES_DIR` 照样可覆盖。
+- 移动入口的启动顺序是 `gpui_kit::init` → `register_builtin_themes` → `register_user_themes` →
+  读 `config.json` → `ConfigHolder::install` → `theme::apply`，窗口开起来后再用**窗口自己的**外观
+  涂一次。这一步不能省：`AndroidPlatform::window_appearance()` 是写死返回 `Dark` 的
+  （`gpui-mobile/src/android/platform.rs:1095`），真正的系统夜间模式只在窗口级
+  （`AndroidPlatformWindow::appearance()`，由 JNI 的 `query_night_mode_via_jni` 喂）。
+  所以「跟随系统」必须读 `window.appearance()`，`theme::repaint` 就是为这个留的入口 ——
+  它换肤但不刷所有窗口，可以在渲染那一帧里安全调用。
+- **`paths::config_dir()` 在 Android 上落到 `/tmp/.config/folio` 这条已经解决**：`folio-core::paths`
+  多了 `set_app_dirs(config, data)`，Android 入口在建 `Application` 之前用
+  `app.internal_data_path()/files/folio/{config,data}` 报上来。优先级是
+  环境变量 → 宿主报的目录 → 操作系统标准位置，只有第一次 `set_app_dirs` 生效。
+  这条原先挡住的不只是 `config.json`，还有 `themes/` 目录与 `folio.db`。
 
 一个留给产品的决定：Default Light 的 `background` 是纯白，而现在移动端的正文底色是为阅读写的暖纸色
 `(250,249,245)`。阅读区到底跟 `background`、跟 `surface`/`muted`，还是单独走暖色/sepia，
-不该由渲染层顺手定。
+不该由渲染层顺手定。**当前实现选了 `background` + `foreground`**（也就是纯白底），
+所以真机上看着会比改动前刺眼 —— 这一条要么由主题层给阅读区单独一个语义 token，
+要么由读者默认挑一套暖色主题，不该继续在视图里写死颜色。
 
 探针代码已回退，改动留成补丁：`~/.cache/folio-probe-backup/probe.patch`（`git apply` 可复原）。
 
 ## 7. 一处遗留的误导
 
-`src/lib.rs` 里还有 `#[cfg(target_env = "ohos")]` 的 HarmonyOS 入口，引用 `gpui_mobile::ohos::napi`
+`src/ui/mobile/mod.rs` 里还有 `#[cfg(target_env = "ohos")]` 的 HarmonyOS 入口，引用
+`gpui_mobile::ohos::napi`
 与 `gpui_ohos_napi_module!` —— 而 `longbridge/gpui-mobile` 这条线**没有 `ohos` 模块**（鸿蒙那份改动留在
 旧线的本地分支 `feat/harmonyos-support` 上）。那段代码在当前依赖下永远不会被编译，但模块文档注释还把
 HarmonyOS 列为入口之一。要么删掉，要么等鸿蒙那条线重接回来时一起处理，不要当成可用能力读。

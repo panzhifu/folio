@@ -1952,7 +1952,6 @@ dependencies = [
  "android_logger",
  "folio-core",
  "gpui-kit",
- "gpui-pre",
  "gpui-pre-mobile",
  "log",
 ]

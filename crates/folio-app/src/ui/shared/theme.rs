@@ -78,6 +78,19 @@ pub fn theme_names(cx: &App, mode: ThemeMode) -> Vec<SharedString> {
         .collect()
 }
 
+/// 把主题的**应用字体**换成这台设备上真的存在的那个家族。
+///
+/// `Theme::font_family` 是每一个框架组件取文字字体的地方（`semantic_tokens()` 直接从
+/// 这些公开字段算出 `typography.sans`），默认值 `.SystemUIFont` 在 Android 上可能连着
+/// 整串回退名都解析不出来，而 `TextSystem::resolve_font` 解析不到是 **panic**。
+/// 所以移动入口必须在建第一帧视图之前调它，之后再建视图才不会碰到那个 panic。
+///
+/// 桌面端不调：那里的字体由 fontconfig 解析，读者偏好里那个名字本来就能用，
+/// 而且桌面端换字体是偏好里的事（见 `settings::fonts_page`），不是兜底。
+pub fn set_application_font(family: &str, cx: &mut App) {
+    Theme::global_mut(cx).font_family = family.into();
+}
+
 /// 存下来的浅深选择，配上操作系统的当前外观，实际解析成哪一档。
 pub fn resolve_mode(appearance: Mode, os: WindowAppearance) -> ThemeMode {
     match appearance {
@@ -87,13 +100,26 @@ pub fn resolve_mode(appearance: Mode, os: WindowAppearance) -> ThemeMode {
     }
 }
 
-/// 按外观配置换肤。
+/// 按外观配置换肤，并刷所有窗口。
 ///
 /// `window` 是给「跟随系统」用的：Linux 上 `cx.window_appearance()` 走一个
 /// `RefRefCell`，外观观察者正持有它的借用，再从回调里查会 panic，所以开着窗口时
 /// 直接读那个窗口的外观。没有窗口（在设置界面里改）时查平台是安全的，
 /// 此时改成刷所有窗口 —— 主题 token 是应用级的，每个窗口都要重画。
 pub fn apply(appearance: &Appearance, window: Option<&mut Window>, cx: &mut App) {
+    repaint(appearance, window, cx);
+    // 主题 token 是应用级的：不在渲染那一帧里改的话，每个窗口都得刷一遍。
+    cx.refresh_windows();
+}
+
+/// 换肤的公共部分：解析浅深、挑两侧的主题、切 `Theme::mode`。
+/// **不刷任何窗口**，所以可以在渲染那一帧里安全调用。
+///
+/// 移动端就是这么用的：偏好一改，外壳自己会重画（订阅里 `cx.notify()`），
+/// 而那一帧必须用**这一窗口**的浅深 —— Android 上 `cx.window_appearance()` 恒为深色，
+/// 只有 `window.appearance()` 真的通过 JNI 问过系统的夜间模式。
+/// 返回解析出来的那一档，调用方要用它做别的判断时不必再算一遍。
+pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut App) -> ThemeMode {
     let os = window
         .as_ref()
         .map_or_else(|| cx.window_appearance(), |window| window.appearance());
@@ -122,7 +148,7 @@ pub fn apply(appearance: &Appearance, window: Option<&mut Window>, cx: &mut App)
     }
 
     Theme::change(mode, window, cx);
-    cx.refresh_windows();
+    mode
 }
 
 #[cfg(test)]

@@ -20,10 +20,10 @@ path = "src/main.rs"
 [dependencies]
 folio-core.workspace = true
 gpui-kit.workspace = true
-# 桌面与移动现在是同一个 gpui-pre —— 这正是能合进一个 crate 的前提。
-# 移动端的视图/度量直接 `use gpui::…`，所以这里显式引一份（桌面走 gpui-kit 转出）。
+# 只依赖 gpui-kit 一个门面：它顶层 `pub use ::gpui::*`，把移动端那份 `gpui-pre` 整个
+# 转了出来，所以两端都用 `use gpui_kit::…`，不再单独声明一条 `gpui` 依赖。
+# 以前移动端要显式引 `gpui-pre` 是因为它是独立 workspace、拿不到 gpui-kit。
 log = "0.4"
-gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false }
 
 # ── 移动端平台层：只在移动目标上链，桌面端根本不编译它 ──
 # 包名是 `gpui-pre-mobile`，lib 名仍是 `gpui_mobile`，所以 `use gpui_mobile::…` 不变。

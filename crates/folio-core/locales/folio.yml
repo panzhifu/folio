@@ -33,6 +33,14 @@ reader:
     en: Section %{index} of %{total}
     zh-CN: 第 %{index} / %{total} 节
     ja: 第%{index} / %{total} 節
+  prev_chapter:
+    en: Previous
+    zh-CN: 上一章
+    ja: 前の章
+  next_chapter:
+    en: Next
+    zh-CN: 下一章
+    ja: 次の章
   book_count_one:
     en: "%{count} book"
     zh-CN: "%{count} 本书"
@@ -55,10 +63,12 @@ settings:
     en: Reading settings
     zh-CN: 阅读设置
     ja: 表示設定
-  back:
-    en: Back to reading
-    zh-CN: 返回阅读
-    ja: 閲覧に戻る
+  # 工具条上那个入口。带省略号是因为点了它会**再开一个窗口**，
+  # 而不是当场执行某个动作 —— 这是这套控件的固定写法。
+  open:
+    en: Settings…
+    zh-CN: 设置…
+    ja: 設定…
 
 toast:
   font_size:
@@ -285,3 +295,38 @@ error:
     en: "Could not read the chapter: %{reason}"
     zh-CN: 读取章节失败：%{reason}
     ja: 章を読み込めません：%{reason}
+
+# 移动端外壳的四个目的地。标签是名词（目的地本身），「还缺什么」单独一条 ——
+# 「暂无数据」和「这台设备上还没有这个功能」必须能分开说，
+# 否则读者会以为是自己把书读空了。
+mobile:
+  tab:
+    shelf:
+      en: Shelf
+      zh-CN: 书架
+      ja: 本棚
+    stats:
+      en: Stats
+      zh-CN: 统计
+      ja: 統計
+    notes:
+      en: Notes
+      zh-CN: 笔记
+      ja: メモ
+    account:
+      en: Account
+      zh-CN: 我的
+      ja: マイページ
+  pending:
+    stats:
+      en: No reading time recorded yet
+      zh-CN: 还没有阅读时长记录
+      ja: 読書時間の記録はまだありません
+    notes:
+      en: No annotations added yet
+      zh-CN: 还没有添加过批注
+      ja: 注釈はまだ追加されていません
+    account:
+      en: Account settings are not on this device yet
+      zh-CN: 这台设备上还没有账号设置
+      ja: この端末にはアカウント設定がありません

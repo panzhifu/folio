@@ -106,11 +106,9 @@ fn parse_opf(xml: &str) -> Opf {
     let mut section = String::new();
     // 正在采集文本的元素（dc:title / dc:creator）。
     let mut pending: Option<(String, String)> = None;
-    loop {
-        let ev = match reader.read_event() {
-            Ok(ev) => ev,
-            Err(_) => break,
-        };
+    // 读不出下一个事件就到此为止（畸形 XML 与读完是同一档）：
+    // 已经采到的部分照样有用，一本书因为某处编码坏了就整本打不开是不可接受的。
+    while let Ok(ev) = reader.read_event() {
         match ev {
             Event::Start(e) => {
                 let n = e.name();
@@ -163,10 +161,8 @@ fn parse_opf(xml: &str) -> Opf {
                             out.spine.push(id);
                         }
                     }
-                    ("metadata", "meta") => {
-                        if attr(&e, "name").as_deref() == Some("cover") {
-                            out.cover_id = attr(&e, "content");
-                        }
+                    ("metadata", "meta") if attr(&e, "name").as_deref() == Some("cover") => {
+                        out.cover_id = attr(&e, "content");
                     }
                     _ => {}
                 }
@@ -202,11 +198,9 @@ fn parse_nav(xml: &str) -> Vec<TocEntry> {
     let mut li_has_entry: Vec<bool> = Vec::new();
     let mut in_toc = 0usize;
     let mut link: Option<(String, String)> = None;
-    loop {
-        let ev = match reader.read_event() {
-            Ok(ev) => ev,
-            Err(_) => break,
-        };
+    // 读不出下一个事件就到此为止（畸形 XML 与读完是同一档）：
+    // 已经采到的部分照样有用，一本书因为某处编码坏了就整本打不开是不可接受的。
+    while let Ok(ev) = reader.read_event() {
         match ev {
             Event::Start(e) => {
                 let n = e.name();
@@ -251,14 +245,14 @@ fn parse_nav(xml: &str) -> Vec<TocEntry> {
                             });
                         }
                     }
-                } else if name == "li" && in_toc > 0 {
-                    if li_has_entry.pop().unwrap_or(false) {
-                        if let Some(entry) = open.pop() {
-                            match open.last_mut() {
-                                Some(parent) => parent.children.push(entry),
-                                None => roots.push(entry),
-                            }
-                        }
+                } else if name == "li"
+                    && in_toc > 0
+                    && li_has_entry.pop().unwrap_or(false)
+                    && let Some(entry) = open.pop()
+                {
+                    match open.last_mut() {
+                        Some(parent) => parent.children.push(entry),
+                        None => roots.push(entry),
                     }
                 }
             }
@@ -285,11 +279,9 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
     let mut href = String::new();
     let mut in_text = false;
     let mut in_navmap = false;
-    loop {
-        let ev = match reader.read_event() {
-            Ok(ev) => ev,
-            Err(_) => break,
-        };
+    // 读不出下一个事件就到此为止（畸形 XML 与读完是同一档）：
+    // 已经采到的部分照样有用，一本书因为某处编码坏了就整本打不开是不可接受的。
+    while let Ok(ev) = reader.read_event() {
         match ev {
             Event::Start(e) => {
                 let n = e.name();
@@ -365,7 +357,7 @@ impl Zip {
         self.archive
             .file_names()
             .find(|n| normalize(n).eq_ignore_ascii_case(want))
-            .map(|n| normalize(n))
+            .map(normalize)
     }
 }
 

@@ -30,19 +30,10 @@ pub enum NodeKind {
 /// `TreeSink::elem_name` 要返回一个能借出 `&Namespace` / `&LocalName` 的东西，
 /// 但 sink 用 `RefCell` 做内部可变 —— 从 `Ref<'_, State>` 守卫里往外借引用编译不过。
 /// 所以这里返回**拥有所有权**的 Tag：GAT `type ElemName<'a>` 并不要求它借用 `'a`。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Tag {
     pub ns: Namespace,
     pub local: LocalName,
-}
-
-impl Default for Tag {
-    fn default() -> Self {
-        Self {
-            ns: Namespace::default(),
-            local: LocalName::default(),
-        }
-    }
 }
 
 impl ElemName for Tag {

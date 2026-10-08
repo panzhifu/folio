@@ -1,7 +1,8 @@
 //! 二进制入口。
 //!
-//! - **桌面**：走 gpui-kit 的 `application()`，开 `FolioApp` 窗口（[`folio_app::app::run_desktop`]）。
-//! - **iOS**：委托给 [`folio_app::mobile::ios_main`]；`main.m` 在 `run_app()` 之前先调
+//! - **桌面**：走 gpui-kit 的 `application()`，开 `FolioApp` 窗口
+//!   （[`folio_app::ui::desktop::app::run_desktop`]）。
+//! - **iOS**：委托给 [`folio_app::ui::mobile::ios_main`]；`main.m` 在 `run_app()` 之前先调
 //!   `mobile::gpui_ios_register_app`。
 //! - **Android**：真正的入口是 cdylib 里的 `mobile::android_main`，由 `android-activity`
 //!   从 `libfolio_app.so` 调起；这个 bin 用不到，但必须能编过（`cargo build` 不带
@@ -13,18 +14,15 @@
 
 #[cfg(not(mobile))]
 fn main() {
-    folio_app::app::run_desktop();
+    folio_app::ui::desktop::app::run_desktop();
 }
 
 #[cfg(target_os = "ios")]
 fn main() {
-    folio_app::mobile::ios_main();
+    folio_app::ui::mobile::ios_main();
 }
 
-#[cfg(any(target_os = "android", target_env = "ohos"))]
-fn main() {
-    eprintln!(
-        "This binary is not used on mobile. The app enters via the cdylib \
-         (android_main / NAPI module) in src/mobile/mod.rs."
-    );
-}
+// Android / HarmonyOS：入口在 cdylib 里，这个 bin 只为「`cargo build` 不带 `--lib`
+// 也要有个 `fn main`」而存在，什么都不做。
+#[cfg(any(target_env = "ohos", target_os = "android"))]
+fn main() {}

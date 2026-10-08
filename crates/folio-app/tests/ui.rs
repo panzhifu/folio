@@ -2,10 +2,10 @@
 //! 用生产视图 ReaderView，不在测试里另搭近似视图；滚动走真实滚轮事件，
 //! 因为直接 set_offset 会绕过要测的那段行为。
 
-use folio_app::reader::ReaderView;
+use folio_app::ui::desktop::reader::ReaderView;
 use folio_core::store::BookRow;
 use folio_core::{Chapter, Config, FlowDoc, Language, Locator, Reader};
-use gpui_kit::component::{Root, WindowExt as _};
+use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, ScrollDelta, TestAppContext, point, px, size,
@@ -109,57 +109,71 @@ fn locator_of(cx: &mut TestAppContext, view: &Entity<ReaderView>) -> Locator {
     cx.update(|cx| view.read(cx).locator(cx))
 }
 
-/// 设置要能真的**进入这一页**，并且改一个字段真的落到偏好实体上。
-/// 只测「能编译出这个面板」没有意义 —— 那测不到取值对。
+/// 设置要开成**一个独立窗口**，而且重复点只聚焦、不再叠第二个。
+///
+/// 这条验的是两次回归之后的形状：设置一度挂在 448px 的对话框里，扣掉它自己的页面导航
+/// 只剩一百多 px，每个字段竖着堆成一列没法看的窄条；后来它是主窗口的一个页面，
+/// 占掉了书名、进度、标签那条线，而且「返回阅读」成了必须多点一下的步骤。
 #[gpui_kit::test]
-fn the_settings_button_opens_a_settings_page(cx: &mut TestAppContext) {
+fn the_settings_button_opens_one_settings_window(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let store = folio_core::Store::in_memory().expect("内存库");
     let handle: AnyWindowHandle = cx
         .open_window(size(px(900.), px(600.)), |window, cx| {
             let view = cx.new(|cx| {
-                folio_app::app::FolioApp::new(store, Config::default(), Vec::new(), window, cx)
+                folio_app::ui::desktop::app::FolioApp::new(
+                    store,
+                    Config::default(),
+                    Vec::new(),
+                    window,
+                    cx,
+                )
             });
             Root::new(view, window, cx)
         })
         .into();
 
-    let before = cx.update(|cx| folio_app::config_model::ConfigHolder::reader(cx).font_size);
+    let before =
+        cx.update(|cx| folio_app::ui::shared::config_model::ConfigHolder::reader(cx).font_size);
     assert_eq!(before, 17.0, "默认字号应为 17px");
 
+    // 第一下：多出一个窗口。
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         window.click("settings", cx);
         window.render_frame(cx);
-        assert!(
-            window.try_find("settings-back").is_some(),
-            "点工具条的设置按钮应当进入设置页"
-        );
-        // 曾经的回归：设置挂在 448px 的对话框里，扣掉它自己的页面导航只剩一百多 px，
-        // 每个字段都竖着堆成一列没法看的窄条 —— 那不算「进入设置界面」。
-        assert!(
-            window.try_find("dialog").is_none(),
-            "设置是整页视图，不该再是对话框"
-        );
     })
-    .expect("设置页应能打开");
+    .expect("主窗口应当还在");
+    let windows = cx.update(|cx| cx.windows());
+    assert_eq!(windows.len(), 2, "点工具条的设置按钮应当新开一个设置窗口");
 
+    // 第二下：聚焦已有那个，不叠第二个。两个窗口各自记着读者刚改的字段是无从合并的。
     cx.update_window(handle, |_, window, cx| {
-        window.click("settings-back", cx);
         window.render_frame(cx);
-        assert!(
-            window.try_find("settings-back").is_none(),
-            "点返回应离开设置页回到阅读"
-        );
+        window.click("settings", cx);
+        window.render_frame(cx);
     })
-    .expect("设置页应能返回");
+    .expect("主窗口应当还在");
+    assert_eq!(
+        cx.update(|cx| cx.windows()).len(),
+        2,
+        "设置窗口已经开着时再点，应该聚焦它而不是再开一个"
+    );
 
-    // 从偏好实体读回 26，确认写入路径是通的而不是只画了个壳。
+    // 与主窗口共用同一份偏好实体：改字号立刻读得回来。
+    let settings = *windows
+        .iter()
+        .find(|window| **window != handle)
+        .expect("第二个窗口就是设置窗口");
     cx.update(|cx| {
-        folio_app::config_model::ConfigHolder::edit_reader(cx, |p| p.font_size = 26.0);
+        folio_app::ui::shared::config_model::ConfigHolder::edit_reader(cx, |p| p.font_size = 26.0);
     });
-    let after = cx.update(|cx| folio_app::config_model::ConfigHolder::reader(cx).font_size);
+    let after =
+        cx.update(|cx| folio_app::ui::shared::config_model::ConfigHolder::reader(cx).font_size);
     assert_eq!(after, 26.0);
+    // 设置窗口真能画出一帧：拿到空壳或组件建不起来都会在这里失败。
+    cx.update_window(settings, |_, window, cx| window.render_frame(cx))
+        .expect("设置窗口应当可渲染");
 }
 
 /// 越界的偏好值必须被夹住，否则排版会算出零高或无限宽。
@@ -170,7 +184,13 @@ fn out_of_range_preferences_are_clamped(cx: &mut TestAppContext) {
     let handle = cx.open_window(size(px(600.), px(400.)), |window, cx| {
         Root::new(
             cx.new(|cx| {
-                folio_app::app::FolioApp::new(store, Config::default(), Vec::new(), window, cx)
+                folio_app::ui::desktop::app::FolioApp::new(
+                    store,
+                    Config::default(),
+                    Vec::new(),
+                    window,
+                    cx,
+                )
             }),
             window,
             cx,
@@ -181,12 +201,12 @@ fn out_of_range_preferences_are_clamped(cx: &mut TestAppContext) {
         .unwrap();
 
     cx.update(|cx| {
-        folio_app::config_model::ConfigHolder::edit_reader(cx, |p| {
+        folio_app::ui::shared::config_model::ConfigHolder::edit_reader(cx, |p| {
             p.font_size = 9000.0;
             p.line_height = 0.0;
         });
     });
-    let prefs = cx.update(|cx| folio_app::config_model::ConfigHolder::reader(cx));
+    let prefs = cx.update(|cx| folio_app::ui::shared::config_model::ConfigHolder::reader(cx));
     assert_eq!(prefs.font_size, 72.0, "字号应被夹到上限");
     assert_eq!(prefs.line_height, 1.0, "行距应被夹到下限");
 }
@@ -378,7 +398,7 @@ fn the_engine_indents_centers_and_spaces_lines(cx: &mut TestAppContext) {
     // 长段落必须真的折了行：没有任何一行容得下整段原文，才算折过。
     let longest_paragraph = flow.chapters[0]
         .source
-        .split(|c| c == '<')
+        .split('<')
         .map(|s| s.chars().filter(|c| !c.is_whitespace()).count())
         .max()
         .unwrap_or(0);
@@ -457,7 +477,13 @@ fn switching_the_interface_language_changes_the_rendered_labels(cx: &mut TestApp
     let handle: AnyWindowHandle = cx
         .open_window(size(px(900.), px(600.)), |window, cx| {
             let view = cx.new(|cx| {
-                folio_app::app::FolioApp::new(store, config.clone(), Vec::new(), window, cx)
+                folio_app::ui::desktop::app::FolioApp::new(
+                    store,
+                    config.clone(),
+                    Vec::new(),
+                    window,
+                    cx,
+                )
             });
             Root::new(view, window, cx)
         })
@@ -478,7 +504,9 @@ fn switching_the_interface_language_changes_the_rendered_labels(cx: &mut TestApp
     );
 
     cx.update(|cx| {
-        folio_app::config_model::ConfigHolder::edit_language(cx, |l| l.locale = Locale::En);
+        folio_app::ui::shared::config_model::ConfigHolder::edit_language(cx, |l| {
+            l.locale = Locale::En
+        });
     });
     assert_eq!(
         import_label(cx).as_deref(),
@@ -488,7 +516,9 @@ fn switching_the_interface_language_changes_the_rendered_labels(cx: &mut TestApp
 
     // 章节位置这类带参文案：走的是同一套占位符，语言变了顺序也要对。
     cx.update(|cx| {
-        folio_app::config_model::ConfigHolder::edit_language(cx, |l| l.locale = Locale::Ja);
+        folio_app::ui::shared::config_model::ConfigHolder::edit_language(cx, |l| {
+            l.locale = Locale::Ja
+        });
     });
     let label = cx
         .update_window(handle, |_, window, cx| {
@@ -551,7 +581,7 @@ fn open_app(cx: &mut TestAppContext) -> AnyWindowHandle {
     cx.update(gpui_kit::init);
     cx.open_window(size(px(900.), px(600.)), |window, cx| {
         let view = cx.new(|cx| {
-            folio_app::app::FolioApp::new(
+            folio_app::ui::desktop::app::FolioApp::new(
                 folio_core::Store::in_memory().expect("内存库"),
                 Config::default(),
                 Vec::new(),
@@ -614,20 +644,22 @@ fn the_account_row_stays_fully_visible_when_collapsed(cx: &mut TestAppContext) {
     );
 }
 
-/// 侧栏底部的账号入口：点它应进入设置页。
+/// 侧栏底部的账号入口：点它应打开设置窗口。
 #[gpui_kit::test]
 fn the_account_entry_opens_settings(cx: &mut TestAppContext) {
     let handle = open_app(cx);
+    let before = cx.update(|cx| cx.windows()).len();
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         window.click("account", cx);
         window.render_frame(cx);
-        assert!(
-            window.try_find("settings-back").is_some(),
-            "点侧栏账号入口应进入设置页"
-        );
     })
     .expect("账号入口应能打开设置");
+    assert_eq!(
+        cx.update(|cx| cx.windows()).len(),
+        before + 1,
+        "点侧栏账号入口应新开一个设置窗口"
+    );
 }
 
 /// 账号名走的是配置实体：改完立刻能读回来（落盘由 `ConfigPath` 决定，测试里不落盘）。
@@ -637,8 +669,10 @@ fn editing_the_account_name_updates_the_holder(cx: &mut TestAppContext) {
     cx.update_window(handle, |_, window, cx| window.render_frame(cx))
         .unwrap();
     cx.update(|cx| {
-        folio_app::config_model::ConfigHolder::edit_account(cx, |a| a.name = "阿遥".into());
+        folio_app::ui::shared::config_model::ConfigHolder::edit_account(cx, |a| {
+            a.name = "阿遥".into()
+        });
     });
-    let name = cx.update(|cx| folio_app::config_model::ConfigHolder::account(cx).name);
+    let name = cx.update(|cx| folio_app::ui::shared::config_model::ConfigHolder::account(cx).name);
     assert_eq!(name, "阿遥");
 }

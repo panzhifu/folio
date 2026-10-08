@@ -14,7 +14,7 @@ use std::fmt::Display;
 use folio_core::i18n::{self, Locale};
 use gpui_kit::{App, SharedString};
 
-use crate::config_model::ConfigHolder;
+use super::config_model::ConfigHolder;
 
 pub fn locale(cx: &App) -> Locale {
     ConfigHolder::language(cx).locale

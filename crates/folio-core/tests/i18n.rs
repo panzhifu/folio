@@ -106,12 +106,18 @@ fn interpolation_is_by_name_not_by_order() {
     // 中文「第 %{index} / %{total} 节」与英文 "Section %{index} of %{total}" 语序不同，
     // 靠名字替换才不会被语序带跑。
     let args: &[(&str, &dyn Display)] = &[("index", &3usize), ("total", &12usize)];
-    assert_eq!(at(Locale::ZhHans, "reader.chapter_position", args), "第 3 / 12 节");
+    assert_eq!(
+        at(Locale::ZhHans, "reader.chapter_position", args),
+        "第 3 / 12 节"
+    );
     assert_eq!(
         at(Locale::En, "reader.chapter_position", args),
         "Section 3 of 12"
     );
-    assert_eq!(at(Locale::Ja, "reader.chapter_position", args), "第3 / 12 節");
+    assert_eq!(
+        at(Locale::Ja, "reader.chapter_position", args),
+        "第3 / 12 節"
+    );
 }
 
 #[test]

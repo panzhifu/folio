@@ -6,8 +6,8 @@
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{App, IntoElement, ParentElement, Styled, div, px};
 
-use crate::config_model::ConfigHolder;
-use crate::l10n::tr;
+use super::config_model::ConfigHolder;
+use super::l10n::tr;
 
 /// 侧栏/设置里显示的读者名；没设过时用「读者」。
 pub fn display_name(cx: &App) -> String {

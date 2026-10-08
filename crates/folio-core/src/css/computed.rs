@@ -209,17 +209,18 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle) -> StyledD
 /// text-indent，另有 line-height 也在其中。margin / padding / display 不继承，
 /// 从 `ComputedStyle::default()` 起算。
 pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
-    let mut style = ComputedStyle::default();
-    style.font_size = parent.font_size;
-    style.line_height = parent.line_height;
-    style.font_weight = parent.font_weight;
-    style.font_italic = parent.font_italic;
-    style.font_family = parent.font_family.clone();
-    style.text_align = parent.text_align;
-    style.color = parent.color;
-    style.letter_spacing = parent.letter_spacing;
-    style.text_indent = parent.text_indent;
-    style
+    ComputedStyle {
+        font_size: parent.font_size,
+        line_height: parent.line_height,
+        font_weight: parent.font_weight,
+        font_italic: parent.font_italic,
+        font_family: parent.font_family.clone(),
+        text_align: parent.text_align,
+        color: parent.color,
+        letter_spacing: parent.letter_spacing,
+        text_indent: parent.text_indent,
+        ..Default::default()
+    }
 }
 
 /// 返回 false 表示这条声明不认识（或值解析失败），由调用方计入 ignored。

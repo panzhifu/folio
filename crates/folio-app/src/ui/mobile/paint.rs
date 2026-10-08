@@ -10,8 +10,8 @@
 //! 于是偏移量与 `MobileMeasure::run_metrics` 量到的 ascent/descent 同源，
 //! 不会出现「按 A 算的行高、按 B 画的字形」。
 
-use gpui::{
-    App, Element, ElementId, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
+use gpui_kit::{
+    App, Bounds, Element, ElementId, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
     LayoutId, Length, Pixels, Point, SharedString, Style, TextRun, Window, black, fill, point, px,
     relative, size,
 };
@@ -95,7 +95,7 @@ impl Element for GlyphsElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: gpui::Bounds<Pixels>,
+        _bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         _window: &mut Window,
         _cx: &mut App,
@@ -106,7 +106,7 @@ impl Element for GlyphsElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        bounds: gpui::Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         _prepaint: &mut Self::PrepaintState,
         window: &mut Window,

@@ -223,7 +223,7 @@ fn parse_simple(cur: &mut Cursor, first: char) -> Option<Simple> {
                     }
                     let arg = read_until(cur, ')')?;
                     let arg = arg.trim().trim_matches('"').trim_matches('\'').to_string();
-                    (!arg.is_empty()).then(|| Simple::Lang(arg))
+                    (!arg.is_empty()).then_some(Simple::Lang(arg))
                 }
                 _ => None,
             }

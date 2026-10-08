@@ -637,15 +637,17 @@ impl<'a> Ctx<'a> {
         }
 
         let mut cursor = y;
-        for (range, lead) in plans {
+        for (range, indent) in plans {
             cursor += self.emit_line(
                 owner,
                 collected,
                 range,
-                x + lead,
-                cursor,
-                width,
-                lead,
+                LinePlace {
+                    x,
+                    y: cursor,
+                    width,
+                    indent,
+                },
                 style,
             );
         }
@@ -672,15 +674,15 @@ impl<'a> Ctx<'a> {
     }
 
     /// 把 `[start, end)` 收成一个行盒，返回它的高度。
+    ///
+    /// 落位的四个数打包成 [`LinePlace`]：折行只决定「这一行从哪起、占多高的一档」，
+    /// 剩下的宽度与对齐都在这里按它算。
     fn emit_line(
         &mut self,
         owner: NodeId,
         collected: &Collected,
         range: Range<usize>,
-        x: f32,
-        y: f32,
-        width: f32,
-        lead: f32,
+        place: LinePlace,
         style: &ComputedStyle,
     ) -> f32 {
         let end = trim_end_spaces(&collected.text, range.start, range.end);
@@ -709,7 +711,9 @@ impl<'a> Ctx<'a> {
         }
         // 行盒高至少要把字形本体装下：line-height 给得很小时也不能让两行叠在一起。
         let height = acc.height.max(acc.ascent + acc.descent);
-        let avail = (width - lead).max(1.0);
+        // 可用宽要扣掉这一行让出去的左边距（首行的 `text-indent`），
+        // 否则居中的标题会按整幅宽算偏移，把字推出版心。
+        let avail = (place.width - place.indent).max(1.0);
         let offset = match style.text_align {
             TextAlign::Right => (avail - acc.width).max(0.0),
             TextAlign::Center => (avail - acc.width).max(0.0) / 2.0,
@@ -718,8 +722,8 @@ impl<'a> Ctx<'a> {
         self.lines.push(LineBox {
             owner,
             fragments: acc.fragments,
-            x: x + offset,
-            y,
+            x: place.x + place.indent + offset,
+            y: place.y,
             width: acc.width,
             height,
             baseline: acc.ascent,
@@ -727,6 +731,20 @@ impl<'a> Ctx<'a> {
         });
         height
     }
+}
+
+/// 一行在版心里的落位。
+///
+/// 四个数各自的意义：`x` 是版心左缘，`y` 是这一行行顶（逐行推进的游标），
+/// `width` 是版心宽，`indent` 是这一行让出去的左边距 —— 首行是 `text-indent`，
+/// 后续行是 0。左缘与对齐偏移都按 `x + indent` 起算，可用宽度也按它扣一次，
+/// 两处口径不一致就会出现在「缩进正好等于一个字」时居中标题被推出去的情况。
+#[derive(Clone, Copy)]
+struct LinePlace {
+    x: f32,
+    y: f32,
+    width: f32,
+    indent: f32,
 }
 
 /// 一行的累积器：`[start, end)` 区间内按片段顺序拼接文本与图片，同时求行盒几何。

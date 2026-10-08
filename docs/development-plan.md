@@ -186,31 +186,39 @@ pub fn wrap_line<'a>(&'a mut self, fragments: &'a [LineFragment],
 
 ## 4. 架构设计（v2）
 
-### 4.1 workspace 分层
+### 4.1 workspace 分层（2026-10-09 更正为实际结构）
 
 ```
 folio/
-├── Cargo.toml                    virtual workspace：members = crates/folio-core, crates/folio-app
-├── crates/folio-core/            ★ 零 gpui 依赖
+├── Cargo.toml                    workspace：members = crates/folio-core, crates/folio-app
+│                                 （default-members 只有 folio-app，所以裸 `cargo run` 起桌面）
+├── crates/folio-core/            ★ 零 gpui 依赖，全部可 `cargo test`
 │   ├── dom/                      html5ever → NodeId arena DOM（可序列化、身份稳定）
-│   ├── style/                    cssparser 词法 → 规则集；selectors 匹配 + specificity → ComputedStyle
-│   ├── layout/                  纯计算排版：BlockBox / InlineLayout / FloatList / Fragmentation
-│   ├── text/                     文本规范化、UAX#14 断行候选、锚点空间 (NodeId + char offset)
-│   ├── anchor/                   DOM 锚点：MdRange→NodeRange 重定位 + 四级降级
-│   ├── format/                   trait FormatAdapter + 注册表（markdown / epub / pdf / cbz）
-│   ├── store/                    rusqlite：schema、迁移、书库 CRUD、FTS5
-│   └── measure.rs                trait Measure / trait TextWidth（由 app 用 TextSystem 实现）
-└── crates/folio-app/             gpui-kit 侧
-    ├── engine/                   Measure 实现（TextSystem）；LayoutBox → paint_glyph / Text 元素
-    ├── reader/                   阅读视图：连续滚动 / 分页 / 双页对开；断点重排调度
-    ├── select/                   TextSelectionHandle ↔ 我们的 run 表（命中测试、选区→锚点）
-    ├── library/                  书架、导入、封面缓存
-    ├── annotate/                 选中浮动菜单、批注面板、Markdown 导出
-    ├── shell/                    TitleBar / Sidebar / TabBar / Toolbar / StatusBar / DockArea
-    └── theme/                    light / dark / sepia JSON + 阅读专属 tokens
+│   ├── css/                      规则集 + 选择器匹配 + specificity → ComputedStyle（含 UA 表）
+│   ├── layout/                   纯计算排版：块级 + 多 run 行内 + UAX#14 断行 + 图片尺寸
+│   ├── format/                   epub / markdown / txt（pdf、cbz 属 M7/M8）
+│   ├── store.rs                  rusqlite：schema、迁移、书库 CRUD、位置
+│   ├── position.rs               Locator：章 + 章内字符偏移
+│   ├── config.rs                 读者偏好、外观、语言、账号（落盘为 config.json）
+│   ├── i18n.rs / paths.rs        文案与落点（paths 有 `set_app_dirs`，给没有标准目录的移动平台）
+│   └── locales/folio.yml         rust-i18n 表，一个 key 三种语言并排
+└── crates/folio-app/             gpui-kit 侧（`[lib] crate-type = rlib + cdylib + staticlib`）
+    ├── build.rs                  嵌上游主题集 + 设 `cfg(mobile)`
+    ├── ui/shared/                ★ 两端共用：config_model / l10n / theme / account / images /
+    │                             measure（`Measure` 的 gpui 实现）/ document（一章 → Layout）/ chrome
+    ├── ui/desktop/               app.rs 外壳、reader.rs、engine.rs（行盒进虚拟列表）、
+    │   └── settings/             一页一个文件 + window.rs（开-or-聚焦的独立窗口）
+    └── ui/mobile/                mod.rs 三平台入口、shell.rs（顶部章导航 + 底部栏）、
+                                  reader_view.rs（逐行绘制 + 触摸滚动 + 换章落盘）、paint.rs
 ```
 
 `folio` 二进制名由 `crates/folio-app` 产出（`[[bin]] name = "folio"`）。
+
+这一层分界的判据是**「这段代码在两个平台上必须不能长得不一样」**：断行口径、层叠、版心宽度、
+主题解析、颜色换算都在 `ui/shared`，只有一份实现；`desktop` 与 `mobile` 只负责把自己那侧的
+滚动与摆法接上去。旧结构里移动端另写了一份 `measure.rs` 与 `document.rs`（与桌面端逐行同义、
+只是 import 不同），那两份已经并进来 —— 并进来之后 `tests/shared_layout.rs` 同时就是移动端的
+排版测试，因为移动 UI 只在 `cfg(mobile)` 下编译，宿主测试本来碰不到它。
 
 ### 4.2 数据流：五段，每段都可单测
 
