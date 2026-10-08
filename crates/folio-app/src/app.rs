@@ -323,7 +323,10 @@ impl FolioApp {
 
     fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (progress, position) = match self.tabs.get(self.active) {
-            Some(reader) => (reader.read(cx).progress(), reader.read(cx).chapter_position()),
+            Some(reader) => (
+                reader.read(cx).progress(cx),
+                reader.read(cx).chapter_position(),
+            ),
             None => (0.0, String::new()),
         };
         StatusBar::new()

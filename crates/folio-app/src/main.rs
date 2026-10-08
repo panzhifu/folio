@@ -1,12 +1,8 @@
-mod app;
-mod reader;
-
 use std::path::PathBuf;
 
+use folio_app::app::FolioApp;
 use gpui_kit::component::*;
 use gpui_kit::*;
-
-use app::FolioApp;
 
 fn main() {
     gpui_kit::application()
@@ -31,16 +27,7 @@ fn main() {
                 .map(PathBuf::from)
                 .collect();
 
-            let options = WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Folio".into()),
-                    ..TitleBar::title_bar_options()
-                }),
-                app_id: Some("dev.folio.Reader".into()),
-                ..Default::default()
-            };
-
-            // 阅读字体是否已由 fontconfig 解析到，决定任务「字体随包」要不要立刻做。
+            // 阅读字体是否已由 fontconfig 解析到，决定「字体随包」的优先级。
             let probe = Font {
                 family: prefs.font_family.clone().into(),
                 ..Default::default()
@@ -50,6 +37,15 @@ fn main() {
                 prefs.font_family,
                 cx.text_system().resolve_font(&probe)
             );
+
+            let options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Folio".into()),
+                    ..TitleBar::title_bar_options()
+                }),
+                app_id: Some("dev.folio.Reader".into()),
+                ..Default::default()
+            };
 
             gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| FolioApp::new(store, prefs, startup, window, cx))

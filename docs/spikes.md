@@ -96,3 +96,20 @@ resolve_font(LXGW WenKai) -> FontId(FontId(2))
 - `FontFeatures(pub Arc<Vec<(String,u32)>>)` 公开 ⇒ `vert`/`vrt2` 可显式请求。
 - `TextRun` **无 size 字段** ⇒ 一次 `shape_line` 一个字号；混合字号（上标 / ruby 注文 / 首字下沉）需分段 shape 再手工对 baseline。
 - `cargo check` 冷启动全量编译约 1 分 08 秒（USTC 镜像）。
+
+## M1 接入 TextView 时踩到的八条（2026-10-08，直接决定 M2 引擎设计）
+
+这些不是风格问题，每一条都对应一次「看起来对、实际不工作」：
+
+1. **`TextViewState` 的 markdown 解析是异步的。** 不先 `cx.run_until_parked()` 就渲染，`list_state().item_count()` 是 0，整篇文档量不出高度。任何依赖块数的逻辑（进度、恢复、目录定位）都必须等解析落地。
+2. **TextView 自带 list 虚拟化，`scrollable(true)` 时它自己滚。** 外面再套一层 `overflow_y_scroll` 是错的：内层 list 吃掉视口高度，外层 `max_offset` 恒为 0 —— 表现就是「滚不动」。滚动状态从 `state.read(cx).list_state()` 读，不要自己再持一个 `ScrollHandle`。
+3. **gpui 的滚动偏移向下为负。** `scroll_px_offset_for_scrollbar().y` 是 `-900px` 这种值，直接 `offset / max` 会得到负比例并被 clamp 成 0，看起来就像"进度永远是 0%"。
+4. **`RenderedText` 只有 `range_for_source`（source→rendered）单向映射。** 反解渲染位置需要二分；但**单字节探针 `mid..mid+1` 在中文上必然失败**（落在一字三字节的中间 → 返回 None），会让二分一路把答案推向章首。探针必须先吸附到字符边界。
+5. **`reveal_range` 在 headless 测试里"请求被接受"但像素落点不可断言。** 其文档自己写明：请求会在「文本变化 / 行数被 clamp / 一秒内显示不出来」时被**静默丢弃**，`Ok(())` 只代表"被收下"。所以 M1 的验收断言只覆盖我们能拥有的一半（偏移↔比例一致、进度无损穿过 SQLite、恢复请求被消费），像素级恢复转成 M2 自研引擎的待办（任务已建）。
+6. **`TextSelectionLayer` 在 `gpui-base`，`gpui-component` 不转发。** 要用 `gpui_kit::base::TextSelectionLayer` 挂进选择容器；缺了它，TextView 的选择行为不成立（M3 标注的地基）。
+7. **`cx.observe(&entity, …)` 返回 `Subscription`，不是 `Observation<T>`。** 而 `TextViewState` 不实现 `EventEmitter`，所以"解析完成"只能靠 observe 该实体的一般变化来重试，没有专门事件。
+8. **UI 集成测试要求 crate 有 lib target。** 集成测试不能 import 二进制 crate，所以 `folio-app` 拆成 `src/lib.rs`（`pub mod app/reader`）+ `src/main.rs` 薄壳；测试因此能用**生产视图**而不是测试里另搭一份近似视图。
+
+另外两条测试写法上的教训，记下来防止重犯：
+- 测试辅助函数里的 `settle()` 需要**两轮**「跑空事件 → 渲染一帧」，一轮不够（reveal 请求在首帧才挂上，而 `run_until_parked` 只跑事件不画帧）。
+- 绝不要写 `assert!(x || true)` 这类永真断言占位。它比没有测试更糟，因为绿色会骗人。
