@@ -1,0 +1,19 @@
+[package]
+name = "folio-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 本 crate 禁止依赖 gpui：这是 folio-core 与 folio-app 之间唯一的架构边界，
+# 也是「书库 / 锚点 / 解析 / 进度」将来能在移动端复用的前提。
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

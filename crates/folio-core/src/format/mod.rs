@@ -1,0 +1,97 @@
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+pub mod markdown;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Format {
+    Markdown,
+    Text,
+}
+
+impl Format {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Format::Markdown => "markdown",
+            Format::Text => "text",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Format> {
+        match s {
+            "markdown" => Some(Format::Markdown),
+            "text" => Some(Format::Text),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocMeta {
+    pub title: String,
+    pub authors: Vec<String>,
+    pub format: Format,
+    pub size: u64,
+}
+
+/// 可重排文档的一章。`source` 是规范化后的源文本，
+/// 锚点与阅读进度都以它的 **字符偏移** 为坐标系（见 `crate::Locator`），
+/// 因此字号、行距、窗口宽度怎么变，位置都不会失效。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chapter {
+    pub title: String,
+    pub source: String,
+    pub spine_href: String,
+}
+
+impl Chapter {
+    pub fn char_len(&self) -> usize {
+        self.source.chars().count()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowDoc {
+    pub chapters: Vec<Chapter>,
+}
+
+impl FlowDoc {
+    pub fn char_len(&self) -> usize {
+        self.chapters.iter().map(Chapter::char_len).sum()
+    }
+}
+
+/// 定版式文档（PDF / 漫画）在 M7 接入时新增 `Fixed` 分支。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Content {
+    Reflow(FlowDoc),
+}
+
+pub trait FormatAdapter: Send + Sync {
+    fn format(&self) -> Format;
+
+    fn supports(&self, path: &Path) -> bool;
+
+    fn read(&self, path: &Path) -> crate::Result<(DocMeta, Content)>;
+}
+
+pub fn adapters() -> Vec<Box<dyn FormatAdapter>> {
+    vec![Box::new(markdown::MarkdownAdapter)]
+}
+
+pub fn detect(path: &Path) -> Option<Format> {
+    adapters().iter().find(|a| a.supports(path)).map(|a| a.format())
+}
+
+pub fn open(path: &Path) -> crate::Result<(DocMeta, Content)> {
+    let adapter = adapters()
+        .into_iter()
+        .find(|a| a.supports(path))
+        .ok_or_else(|| {
+            crate::Error::UnsupportedFormat(
+                path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+            )
+        })?;
+    adapter.read(path)
+}

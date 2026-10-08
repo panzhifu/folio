@@ -1,0 +1,13 @@
+/target
+
+# 本地真书样本一律不入库。
+# tests/fixtures/local/ 放你自己拥有的书，只用于本机冒烟与观感验收；
+# 提交它们等于公开再分发，private 仓库和事后删除都改变不了这个性质。
+# 需要可提交的样本时，用 tests/fixtures/oss/ 里由测试自己合成的 EPUB。
+/tests/fixtures/local/
+
+# 本机专属的 agent 权限设置，不该跟着仓库走。
+.qoder/settings.local.json
+
+# spike 证据截图是整张桌面抓取，含其他窗口内容，只留在本机。
+/docs/assets-*.png

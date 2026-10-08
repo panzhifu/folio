@@ -1,0 +1,18 @@
+[package]
+name = "folio-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "folio"
+path = "src/main.rs"
+
+[dependencies]
+folio-core.workspace = true
+gpui-kit.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
