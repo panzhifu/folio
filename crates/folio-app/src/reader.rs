@@ -7,13 +7,27 @@ use gpui_kit::{
     Render, SharedString, Styled, Subscription, TestSupportExt, Window, div, point, px,
 };
 
+use crate::engine::{Engine, engine_lines};
+
+/// 用自研引擎渲染的格式。EPUB 的 XHTML 直接进 DOM → CSS → Layout；
+/// Markdown / TXT 还没接进引擎（要先把源文本转成 XHTML，见 M5），
+/// 仍走 M1 的 `TextView` 占位实现。
+fn uses_engine(format: &str) -> bool {
+    matches!(format, "epub")
+}
+
 pub struct ReaderView {
     book_id: i64,
     title: SharedString,
     chapters: Vec<Chapter>,
     chapter: usize,
+    /// `Some` 时正文由自研引擎排版，`None` 时是 M1 的 TextView。
+    engine: Option<Engine>,
     state: Entity<TextViewState>,
     prefs: Prefs,
+    /// 外壳里不属于阅读栏的宽度（展开的侧栏）。引擎的版心必须扣掉它，
+    /// 否则会按整窗宽度折行、被窄栏裁掉。
+    pane_reserve: f32,
     /// 等正文解析完（`rendered_text` 非空）再落地。
     /// markdown 解析是异步的，构造时直接 reveal_range 会因文本为空而失败；
     /// 而 TextViewState 不实现 EventEmitter，所以用 `observe` 在它每次变化时重试。
@@ -30,29 +44,61 @@ impl ReaderView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let chapters = flow.chapters;
-        let chapter = (locator.chapter as usize).min(chapters.len().saturating_sub(1));
-        let source = chapters
+        let chapter = (locator.chapter as usize).min(flow.chapters.len().saturating_sub(1));
+        let source = flow
+            .chapters
             .get(chapter)
             .map(|c| c.source.as_str())
-            .unwrap_or_default();
-        let state = cx.new(|cx| TextViewState::markdown(source, cx).scrollable(true));
+            .unwrap_or_default()
+            .to_string();
+        let engine = uses_engine(&book.format)
+            .then(|| Engine::new(source.clone(), &flow.css, prefs.clone()));
+        // 引擎路径不用 TextViewState，但仍要有一个句柄占位：`observe` 与
+        // `reveal_range` 那套只对 TextView 有意义，引擎的位置恢复在 M5。
+        let state = if engine.is_some() {
+            cx.new(|cx| TextViewState::markdown("", cx))
+        } else {
+            cx.new(|cx| TextViewState::markdown(&source, cx).scrollable(true))
+        };
         let observe_state = cx.observe(&state, |this, _, cx| {
             if this.apply_pending_restore(cx) {
                 cx.notify();
             }
         });
-        let this = Self {
+        Self {
             book_id: book.id,
             title: book.title.clone().into(),
-            chapters,
+            chapters: flow.chapters,
             chapter,
+            engine,
             state,
             prefs,
+            pane_reserve: 0.0,
             pending_restore: (locator.offset > 0).then_some(locator),
             _observe_state: observe_state,
-        };
-        this
+        }
+    }
+
+    /// 引擎算好的行几何。测试与状态栏都从这里读，不在测试里另搭近似视图。
+    pub fn engine_lines(&self) -> Option<&[folio_core::layout::LineBox]> {
+        self.engine.as_ref().map(|e| e.lines())
+    }
+
+    /// 每行的可见文本，与 `engine_lines()` 一一对应。
+    pub fn engine_line_texts(&self) -> Option<Vec<String>> {
+        self.engine.as_ref().map(|e| e.line_texts())
+    }
+
+    /// 外壳在每次渲染时报告阅读栏之外的宽度。没变就不 notify，避免父子互相触发。
+    pub fn set_pane_reserve(&mut self, reserve: f32, cx: &mut Context<Self>) {
+        if (self.pane_reserve - reserve).abs() > 0.5 {
+            self.pane_reserve = reserve;
+            cx.notify();
+        }
+    }
+
+    pub fn is_engine(&self) -> bool {
+        self.engine.is_some()
     }
 
     pub fn book_id(&self) -> i64 {
@@ -89,6 +135,11 @@ impl ReaderView {
     /// `list_state()` 读。外面再套一层滚动容器是错的：内层 list 自己吃掉视口高度，
     /// 外层量不到内容高度，`max_offset` 恒为 0。
     pub fn progress(&self, cx: &App) -> f32 {
+        if self.is_engine() {
+            // 引擎路径的章内进度要读虚拟列表的滚动偏移；那属于 M5 的锚点接线
+            // （位置从「像素偏移」改成「行盒 + 节点内偏移」）。这里不猜一个数。
+            return 0.0;
+        }
         let list = self.state.read(cx).list_state();
         let max = list.max_offset_for_scrollbar().y;
         // gpui 的滚动偏移向下为负（与 `scroll_px_offset_for_scrollbar` 一致），
@@ -107,6 +158,13 @@ impl ReaderView {
     /// 探针必须落在**字符边界**上：中文一字三字节，用 `mid..mid+1` 这种单字节
     /// 探针会大量落到边界外而返回 None，反解就会被一路推向章首。
     pub fn locator(&self, cx: &App) -> Locator {
+        if self.is_engine() {
+            // 章级位置仍然准确（chapter 索引照存），只是章内偏移回到章首。
+            return Locator {
+                chapter: self.chapter as u32,
+                offset: 0,
+            };
+        }
         fn next_boundary(s: &str, from: usize) -> usize {
             let mut p = from.min(s.len());
             while p < s.len() && !s.is_char_boundary(p) {
@@ -151,6 +209,9 @@ impl ReaderView {
     }
 
     pub fn apply_prefs(&mut self, prefs: Prefs, cx: &mut Context<Self>) {
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_prefs(prefs.clone());
+        }
         self.prefs = prefs;
         cx.notify();
     }
@@ -173,6 +234,12 @@ impl ReaderView {
         let source = self.chapters[self.chapter].source.clone();
         // 换章即作废未落地的恢复请求，否则会把上一章的位置套到本章上。
         self.pending_restore = None;
+        if let Some(engine) = self.engine.as_mut() {
+            // 引擎自己按 (宽度, 字号, 行距) 缓存排版结果；换章要显式作废。
+            engine.set_chapter(source);
+            cx.notify();
+            return;
+        }
         self.state.update(cx, |state, cx| {
             state.set_text(&source, cx);
             state
@@ -209,7 +276,31 @@ impl ReaderView {
 }
 
 impl Render for ReaderView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(engine) = self.engine.as_mut() {
+            engine.ensure_layout(window, cx, self.pane_reserve);
+            let width = px(Engine::content_width(
+                window,
+                &self.prefs,
+                self.pane_reserve,
+            ));
+            let sizes = engine.item_sizes();
+            let view = cx.entity();
+            return div()
+                .id("engine-scroll")
+                .test_support()
+                .size_full()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .px(px(self.prefs.margin_x))
+                .child(div().mx_auto().w(width).h_full().child(engine_lines(
+                    view,
+                    sizes,
+                    |view: &mut Self, range, _window, cx| view.render_engine_range(range, cx),
+                )))
+                .into_any_element();
+        }
         // 解析未完时这里返回 false，留到下一次渲染再落地；落地后 reveal_range
         // 自己 notify 一帧，因为 pending_restore 已被取走，不会循环。
         self.apply_pending_restore(cx);
@@ -239,5 +330,20 @@ impl Render for ReaderView {
                             .text_color(cx.theme().foreground),
                     ),
             )
+            .into_any_element()
+    }
+}
+
+impl ReaderView {
+    /// 虚拟列表回调：把 `[start, end)` 的行盒画出来。
+    fn render_engine_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui_kit::AnyElement> {
+        match self.engine.as_ref() {
+            Some(engine) => crate::engine::render_range(engine, range, cx),
+            None => Vec::new(),
+        }
     }
 }

@@ -23,6 +23,9 @@ use crate::prefs_model::PrefsHolder;
 use crate::reader::ReaderView;
 use crate::settings_view;
 
+/// 侧栏展开宽度。阅读视图按它预留版心，所以这个数只能有一份。
+pub const SIDEBAR_WIDTH: f32 = 260.0;
+
 pub struct FolioApp {
     store: Store,
     library: Vec<BookRow>,
@@ -245,7 +248,7 @@ impl FolioApp {
         let toggle_entity = entity.clone();
 
         Sidebar::new("library")
-            .w(px(260.))
+            .w(px(SIDEBAR_WIDTH))
             .collapsed(self.sidebar_collapsed)
             .header(
                 SidebarHeader::new()
@@ -399,6 +402,12 @@ impl FolioApp {
 
 impl Render for FolioApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 阅读视图量不到 flex 之后的真实栏宽，所以由外壳把侧栏占位报给它。
+        // 折叠时也按展开宽度预留：版心宁可窄一点，也不能比实际栏宽更宽 ——
+        // 宽了就会被裁掉，标题会整块跑到栏外。
+        for reader in &self.tabs {
+            reader.update(cx, |reader, cx| reader.set_pane_reserve(SIDEBAR_WIDTH, cx));
+        }
         let entity = cx.entity().clone();
         let tabs = self.tabs.clone();
         let active = self.active;

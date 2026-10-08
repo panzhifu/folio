@@ -30,12 +30,16 @@ fn fixture() -> FlowDoc {
 }
 
 fn book() -> BookRow {
+    book_as("markdown")
+}
+
+fn book_as(format: &str) -> BookRow {
     BookRow {
         id: 1,
         path: "memory://fixture".into(),
         title: "测试书".into(),
         authors: Vec::new(),
-        format: "markdown".into(),
+        format: format.to_string(),
         size: 0,
         last_opened_at: None,
     }
@@ -47,7 +51,17 @@ fn open(
     prefs: Prefs,
     locator: Locator,
 ) -> (Entity<ReaderView>, AnyWindowHandle) {
-    let row = book();
+    open_as(cx, flow, "markdown", prefs, locator)
+}
+
+fn open_as(
+    cx: &mut TestAppContext,
+    flow: &FlowDoc,
+    format: &str,
+    prefs: Prefs,
+    locator: Locator,
+) -> (Entity<ReaderView>, AnyWindowHandle) {
+    let row = book_as(format);
     let mut view = None;
     let handle = cx.open_window(size(px(460.), px(520.)), |window, cx| {
         let created =
@@ -290,4 +304,92 @@ fn position_survives_a_restart_through_the_store(cx: &mut TestAppContext) {
         !reopened.read_with(cx, |v, _| v.has_pending_restore()),
         "解析完成后恢复请求应被消费掉，而不是永远挂着"
     );
+}
+
+/// M2 的验收门：中文排版基础三件事必须由**自研引擎**产出，而不是靠 TextView。
+/// 首行缩进、居中标题、按样式给行距 —— 全部从引擎的行盒几何里读出来断言。
+#[gpui_kit::test]
+fn the_engine_indents_centers_and_spaces_lines(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/oss/minimal-zh.epub");
+    let (meta, content) = folio_core::open(&path).expect("合成 EPUB 应能打开");
+    // Content 现在只有 Reflow 一个分支，这个模式是不可反驳的。
+    let folio_core::Content::Reflow(flow) = content;
+    assert_eq!(flow.chapters.len(), 3, "spine 三章");
+    assert_eq!(meta.title, "合成测试书");
+
+    let prefs = Prefs {
+        font_size: 20.0,
+        line_height: 1.8,
+        ..Default::default()
+    };
+    let (view, _handle) = open_as(cx, &flow, "epub", prefs, Locator::start());
+    let lines = cx
+        .update(|cx| view.read(cx).engine_lines().map(|l| l.to_vec()))
+        .expect("EPUB 走自研引擎");
+    let texts = cx
+        .update(|cx| view.read(cx).engine_line_texts())
+        .expect("EPUB 走自研引擎");
+    assert!(!lines.is_empty(), "引擎应产出行盒");
+
+    // 第一章首个行盒是标题：UA 的 h1 = 2em 之外，书自己的 CSS 写了 1.8em 且居中。
+    let title = &lines[0];
+    assert_eq!(texts[0], "第一章 蛇结");
+    assert!(
+        (title.font_size - 36.0).abs() < 0.5,
+        "h1 = 1.8em × 20px，实际 {}",
+        title.font_size
+    );
+    assert!(
+        title.x > 20.0,
+        "居中标题应离开版心左缘，实际 x = {}",
+        title.x
+    );
+
+    // 第二段起是正文：书自己的 CSS 写了 p { text-indent: 2em }。
+    let body = lines
+        .iter()
+        .find(|l| l.font_size == 20.0 && l.x > 0.0)
+        .expect("应有一个首行被缩进的正文行");
+    assert!(
+        (body.x - 40.0).abs() < 1.0,
+        "2em 缩进在 20px 字号下应是 40px，实际 {}",
+        body.x
+    );
+
+    // 行距按各自的字号给：标题一行比正文一行高。
+    assert!(
+        title.height > body.height * 1.5,
+        "行盒高应随字号走，标题 {} vs 正文 {}",
+        title.height,
+        body.height
+    );
+    assert!(
+        (body.height - 36.0).abs() < 0.5,
+        "正文行高 = 20 × 1.8，实际 {}",
+        body.height
+    );
+
+    // 长段落必须真的折了行：没有任何一行容得下整段原文，才算折过。
+    let longest_paragraph = flow.chapters[0]
+        .source
+        .split(|c| c == '<')
+        .map(|s| s.chars().filter(|c| !c.is_whitespace()).count())
+        .max()
+        .unwrap_or(0);
+    let longest_line = texts.iter().map(|t| t.chars().count()).max().unwrap_or(0);
+    assert!(
+        longest_line < longest_paragraph && longest_line > 4,
+        "段落应被折行：最长段 {longest_paragraph} 字，最长行只有 {longest_line} 字"
+    );
+    for pair in lines.windows(2) {
+        assert!(
+            pair[1].y >= pair[0].y + pair[0].height - 0.5,
+            "行盒不能重叠：{} + {} > {}",
+            pair[0].y,
+            pair[0].height,
+            pair[1].y
+        );
+    }
 }

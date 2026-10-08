@@ -99,6 +99,9 @@ pub struct LineBox {
     pub baseline: f32,
     pub align: TextAlign,
     pub font_size: f32,
+    /// 这一行**被测量时**用的字体。绘制侧必须用同一个字体，否则
+    /// 「按 A 量出来的居中偏移」配「按 B 画出来的字宽」，标题就会歪到版心外。
+    pub font: FontKey,
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +381,7 @@ impl<'a> Ctx<'a> {
                     baseline: metrics.ascent,
                     align: style.text_align,
                     font_size: style.font_size,
+                    font: font.clone(),
                 });
                 cursor += line_height;
                 first = false;
