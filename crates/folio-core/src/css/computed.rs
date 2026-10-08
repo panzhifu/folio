@@ -47,6 +47,8 @@ pub struct ComputedStyle {
     pub margin_right: f32,
     pub padding_top: f32,
     pub padding_bottom: f32,
+    pub padding_left: f32,
+    pub padding_right: f32,
     pub display: Display,
     pub color: Option<Color>,
     pub letter_spacing: f32,
@@ -69,6 +71,8 @@ impl Default for ComputedStyle {
             margin_right: 0.0,
             padding_top: 0.0,
             padding_bottom: 0.0,
+            padding_left: 0.0,
+            padding_right: 0.0,
             display: Display::Block,
             color: None,
             letter_spacing: 0.0,
@@ -147,7 +151,8 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle) -> StyledD
             styles[id as usize] = parent;
             continue;
         }
-        let mut style = inherit_from(&parent);
+        // 空标签名命中不到任何 UA 规则，等价于「只继承」。
+        let mut style = crate::css::ua::seed(&parent, dom.tag_name(id).unwrap_or_default());
         let decls = rules.matching_declarations(dom, id);
 
         // font-size 先算：em / % 都按**元素自己的**字号折算，
@@ -177,7 +182,7 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle) -> StyledD
 /// 可继承的就是下面抄走的这几项 —— font-* / color / text-align / letter-spacing /
 /// text-indent，另有 line-height 也在其中。margin / padding / display 不继承，
 /// 从 `ComputedStyle::default()` 起算。
-fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
+pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
     let mut style = ComputedStyle::default();
     style.font_size = parent.font_size;
     style.line_height = parent.line_height;
@@ -280,6 +285,18 @@ fn apply(
         "margin-right" => set_px(value, own, root_px, &mut style.margin_right),
         "padding-top" => set_px(value, own, root_px, &mut style.padding_top),
         "padding-bottom" => set_px(value, own, root_px, &mut style.padding_bottom),
+        "padding-left" => set_px(value, own, root_px, &mut style.padding_left),
+        "padding-right" => set_px(value, own, root_px, &mut style.padding_right),
+        "padding" => {
+            let Some(px) = length_px(value, own, root_px) else {
+                return false;
+            };
+            style.padding_top = px;
+            style.padding_bottom = px;
+            style.padding_left = px;
+            style.padding_right = px;
+            true
+        }
         "margin" => {
             let Some(px) = length_px(value, own, root_px) else {
                 return false;

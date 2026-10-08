@@ -92,6 +92,16 @@ impl Dom {
         &self.nodes[id as usize]
     }
 
+    /// 元素标签名（已小写）。非元素节点返回 `None`。
+    /// UA 样式表和排版层都按这个名字查表，所以不能有分配。
+    pub fn tag_name(&self, id: NodeId) -> Option<&str> {
+        self.get(id).tag.as_ref().map(|t| t.local.as_ref())
+    }
+
+    pub fn is_element(&self, id: NodeId, tag: &str) -> bool {
+        self.tag_name(id) == Some(tag)
+    }
+
     pub fn elements(&self) -> impl Iterator<Item = (NodeId, &Node)> {
         self.nodes
             .iter()
@@ -120,7 +130,6 @@ impl Dom {
             Some("script") | Some("style") | Some("head") | Some("title") | Some("template")
         )
     }
-
     fn collect_text(&self, id: NodeId, out: &mut String) {
         let node = self.get(id);
         if self.is_non_content_element(node) {

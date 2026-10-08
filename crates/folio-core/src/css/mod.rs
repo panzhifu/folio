@@ -6,6 +6,7 @@
 
 pub mod computed;
 pub mod selector;
+pub mod ua;
 
 use selector::Selector;
 

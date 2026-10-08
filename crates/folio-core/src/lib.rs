@@ -6,6 +6,7 @@ pub mod css;
 pub mod dom;
 pub mod error;
 pub mod format;
+pub mod layout;
 pub mod position;
 pub mod prefs;
 pub mod store;

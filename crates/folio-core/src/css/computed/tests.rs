@@ -148,7 +148,10 @@ fn only_inheritable_properties_flow_down() {
     assert_eq!(p.font_weight, 700);
     assert!(p.font_italic);
     assert_eq!(p.letter_spacing, 2.0);
-    assert_eq!(p.margin_bottom, 0.0, "margin 不该继承");
+    assert_eq!(
+        p.margin_bottom, 16.0,
+        "p 的 1em 下边距来自 UA 表，不是继承父元素的 12px"
+    );
     assert_eq!(p.padding_top, 0.0, "padding 不该继承");
     assert_eq!(p.display, Display::Block, "display 不该继承");
 }
@@ -211,12 +214,13 @@ fn unknown_values_count_as_ignored_but_known_lazily_supported_do_not() {
 }
 
 /// 百分比外边距要按包含块宽度算，层叠期不知道那个数，所以宁可判不支持。
+/// 用 div 而不是 p：div 的 UA 外边距是 0，能看清「被拒的声明什么都没留下」。
 #[test]
 fn percentage_boxes_are_rejected_rather_than_guessed() {
-    let page = author("<p>文</p>", "p { margin-top: 10%; text-indent: 5% }");
-    let p = style(&page, tag(&page, "p"));
-    assert_eq!(p.margin_top, 0.0);
-    assert_eq!(p.text_indent, 0.0);
+    let page = author("<div>文</div>", "div { margin-top: 10%; text-indent: 5% }");
+    let div = style(&page, tag(&page, "div"));
+    assert_eq!(div.margin_top, 0.0);
+    assert_eq!(div.text_indent, 0.0);
     assert_eq!(page.styled.ignored, 2);
 }
 
