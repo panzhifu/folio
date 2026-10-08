@@ -148,8 +148,12 @@ impl Engine {
         )
     }
 
-    /// 第 `ix` 行的元素。列表项本身按 `item_sizes` 依次下排，所以行盒的绝对 x
-    /// 直接就是它的左内边距 —— 不需要绝对定位，也不需要二次换算。
+    /// 第 `ix` 行的元素。列表项按 `item_sizes` 依次下排，所以行盒的绝对 x 就是它的左偏移。
+    ///
+    /// 一行里的每个 run 单独摆：字号、字重、斜体、颜色各自成立，
+    /// 纵向按**基线**对齐 —— gpui 把字形在自己的 line-height 盒里垂直居中，
+    /// 基线落在盒顶往下 `(盒高 + ascent - descent) / 2` 处，所以反推 top。
+    /// 度量与绘制用同一个 `gpui_font`，否则偏移与实宽会对不上（见 measure.rs）。
     fn line_element(&self, ix: usize, foreground: gpui_kit::Hsla) -> AnyElement {
         let Some(line) = self.layout.lines.get(ix) else {
             return div().into_any_element();
@@ -157,24 +161,36 @@ impl Engine {
         let Some(block) = self.layout.block_of_line(ix) else {
             return div().into_any_element();
         };
-        let start = line.fragments.first().map(|f| f.norm.start).unwrap_or(0);
-        let end = line.fragments.last().map(|f| f.norm.end).unwrap_or(0);
-        let text = block.text.get(start..end).unwrap_or("");
-        div()
-            .w_full()
-            .h(px(line.height))
-            .flex_none()
-            .pl(px(line.x))
-            .font(gpui_font(
-                &line.font,
-                &self.prefs.font_family.clone().into(),
-            ))
-            .text_size(px(line.font_size))
-            .line_height(px(line.height))
-            .text_color(foreground)
-            .whitespace_nowrap()
-            .child(text.to_string())
-            .into_any_element()
+        let family: gpui_kit::SharedString = self.prefs.font_family.clone().into();
+        let mut left = line.x;
+        let mut row = div().relative().w_full().h(px(line.height));
+        for run in &line.runs {
+            let text = block.text.get(run.norm.clone()).unwrap_or("");
+            let box_height = run.style.box_height();
+            let baseline_in_box = (box_height + run.ascent - run.descent) / 2.0;
+            row = row.child(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(line.baseline - baseline_in_box))
+                    .whitespace_nowrap()
+                    .font(gpui_font(&run.style.font, &family))
+                    .text_size(px(run.style.font_size))
+                    .line_height(px(box_height))
+                    .text_color(run.style.color.map_or(foreground, |c| {
+                        gpui_kit::Rgba {
+                            r: c.0 as f32 / 255.0,
+                            g: c.1 as f32 / 255.0,
+                            b: c.2 as f32 / 255.0,
+                            a: 1.0,
+                        }
+                        .into()
+                    }))
+                    .child(text.to_string()),
+            );
+            left += run.width;
+        }
+        row.into_any_element()
     }
 }
 

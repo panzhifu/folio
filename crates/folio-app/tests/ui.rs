@@ -337,9 +337,9 @@ fn the_engine_indents_centers_and_spaces_lines(cx: &mut TestAppContext) {
     let title = &lines[0];
     assert_eq!(texts[0], "第一章 蛇结");
     assert!(
-        (title.font_size - 36.0).abs() < 0.5,
+        (title.dominant_font_size() - 36.0).abs() < 0.5,
         "h1 = 1.8em × 20px，实际 {}",
-        title.font_size
+        title.dominant_font_size()
     );
     assert!(
         title.x > 20.0,
@@ -350,7 +350,7 @@ fn the_engine_indents_centers_and_spaces_lines(cx: &mut TestAppContext) {
     // 第二段起是正文：书自己的 CSS 写了 p { text-indent: 2em }。
     let body = lines
         .iter()
-        .find(|l| l.font_size == 20.0 && l.x > 0.0)
+        .find(|l| l.dominant_font_size() == 20.0 && l.x > 0.0)
         .expect("应有一个首行被缩进的正文行");
     assert!(
         (body.x - 40.0).abs() < 1.0,
@@ -392,4 +392,47 @@ fn the_engine_indents_centers_and_spaces_lines(cx: &mut TestAppContext) {
             pair[1].y
         );
     }
+}
+
+/// M3 的验收：一个段落里的局部字重、斜体与颜色必须各自成立。
+/// 这一条测的是**真实字体栈**上的多 run 度量与摆放，mock 测不到。
+#[gpui_kit::test]
+fn inline_styles_survive_into_runs(cx: &mut TestAppContext) {
+    use folio_core::css::computed::Color;
+
+    cx.update(gpui_kit::init);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/oss/minimal-zh.epub");
+    let (_, content) = folio_core::open(&path).expect("合成 EPUB 应能打开");
+    let folio_core::Content::Reflow(flow) = content;
+    let (view, _handle) = open_as(cx, &flow, "epub", Prefs::default(), Locator::start());
+    let lines = cx
+        .update(|cx| view.read(cx).engine_lines().map(|l| l.to_vec()))
+        .expect("EPUB 走自研引擎");
+
+    let rich = lines
+        .iter()
+        .find(|l| l.runs.len() >= 4)
+        .expect("带 em/strong/span 的那一行应被切成多个 run");
+    assert!(
+        rich.runs.iter().any(|r| r.style.font.weight >= 700),
+        "strong 应带粗体"
+    );
+    assert!(rich.runs.iter().any(|r| r.style.font.italic), "em 应带斜体");
+    assert!(
+        rich.runs
+            .iter()
+            .any(|r| r.style.color == Some(Color(0xC0, 0x39, 0x2B))),
+        "span.red 的局部颜色要落到 run 上"
+    );
+    assert!(
+        rich.runs.iter().all(|r| r.width > 0.0),
+        "每个 run 都要有实际绘制宽度"
+    );
+    let sum: f32 = rich.runs.iter().map(|r| r.width).sum();
+    assert!(
+        (sum - rich.width).abs() < 0.5,
+        "行宽应是各 run 宽度之和：{sum} vs {}",
+        rich.width
+    );
 }

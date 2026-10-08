@@ -8,7 +8,6 @@
 //! 一个必须同源的细节：**断行用的宽度累加**与**行盒报告的宽度**都来自同一套
 //! 单字 advance，否则会出现「按 A 算说放得下、按 B 量却溢出」。
 
-use std::ops::Range;
 use std::sync::Arc;
 
 use folio_core::layout::{FontKey, LineMetrics, Measure};
@@ -94,51 +93,16 @@ impl GpuiMeasure {
 }
 
 impl Measure for GpuiMeasure {
-    fn split(
-        &self,
-        text: &str,
-        font: &FontKey,
-        font_size: f32,
-        avail: f32,
-        first_indent: f32,
-    ) -> Vec<Range<usize>> {
-        if text.is_empty() {
-            return vec![0..0];
-        }
-        let size = px(font_size);
-        // `IndentAdjustment` 没有「显式像素缩进」这一档（只有 NoIndent / SameIndent /
-        // ExtraColumns），所以首行让出的宽度只能自己扣：每次只重排**剩下的部分**，
-        // 第一行按 avail - indent 断，后续行按满宽断。
-        // `wrap_line` 是惰性的，取第一个边界只扫到该行末尾，整体仍是线性。
-        let mut wrapper = self.texts.line_wrapper(self.font(font), size);
-        let mut out = Vec::new();
-        let mut start = 0usize;
-        let mut indent = first_indent.max(0.0);
-        while start < text.len() {
-            let rest = &text[start..];
-            let width = px((avail - indent).max(1.0));
-            let fragments = [LineFragment::text(rest)];
-            let first_break = wrapper
-                .wrap_line(&fragments, width, IndentAdjustment::NoIndent)
-                .next()
-                .map(|b| start + b.ix);
-            match first_break {
-                Some(ix) if ix > start => {
-                    out.push(start..ix);
-                    start = ix;
-                }
-                // 一个断点都没有（超长单词或整行放得下）：整段收进最后一行。
-                _ => {
-                    out.push(start..text.len());
-                    break;
-                }
-            }
-            indent = 0.0;
-        }
-        out
+    fn char_width(&self, ch: char, font: &FontKey, font_size: f32) -> f32 {
+        let font_id = self.texts.resolve_font(&self.font(font));
+        // 找不到字形时 advance 会报错；给一个 em 宽的占位，让断行继续而不是整段失败。
+        self.texts
+            .advance(font_id, px(font_size), ch)
+            .map(|size| size.width.as_f32())
+            .unwrap_or(font_size)
     }
 
-    fn metrics(&self, text: &str, font: &FontKey, font_size: f32) -> LineMetrics {
+    fn run_metrics(&self, text: &str, font: &FontKey, font_size: f32) -> LineMetrics {
         if text.is_empty() {
             return LineMetrics::default();
         }

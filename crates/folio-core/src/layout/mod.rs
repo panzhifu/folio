@@ -1,33 +1,43 @@
-//! 排版引擎 E1：块级布局 + 单 run 行内布局。
+//! 排版引擎 E1+E2：块级布局 + 多 run 行内布局。
 //!
 //! 输入 `Dom` + `StyledDom`，输出扁平的 `BlockBox` / `LineBox` 两张表。
 //! 之所以是扁平表而不是树：M4 的 fragmentation 要按高度切行盒，树形反而碍事；
 //! 需要父子关系时按 `BlockBox::lines` 的包含关系还原。
 //!
-//! 三段各自独立可测：
-//! 1. **收集** [`collect`]：把行内子树展平成一段文本 + piece 表（空白折叠、`<br>` 硬换行）。
-//! 2. **断行**：交给注入的 [`Measure`]（app 侧用 `TextSystem::line_wrapper` 实现）。
+//! 分工是刻意切开的：
+//! 1. **收集** [`collect`]：把行内子树展平成一段文本 + piece 表。每个 piece 带着
+//!    **它自己那个元素**的计算样式，所以 `<em>` 的斜体、`<small>` 的小字不会丢。
+//! 2. **断行** [`Ctx::wrap_lines`]：由引擎自己做，字体只提供两种能力 ——
+//!    单字前进量与整段绘制度量。断点取自 UAX #14（`unicode-linebreak`），
+//!    这正是中文禁则（标点不该出现在行首/行尾）的依据。
 //! 3. **摆放** [`Ctx::children`]：块级顺序、兄弟间外边距折叠、`text-indent`、`text-align`。
 //!
-//! 坐标一律是布局空间内的**绝对值**，绘制阶段直接取用，不再二次换算。
+//! 为什么断行要引擎自持而不是调 `TextSystem::line_wrapper`：那个 API 一次只能
+//! 按一种字体折一行，多 run 段落用不了；而且禁则与行盒基线要我们自己说了算。
+//! 断点按单字前进量累加判定（与 gpui 自己的 LineWrapper 同源），
+//! 行宽则按实际 shaping 报告并用于对齐 —— 对齐用后者，绘制出来的行不会超出可用宽度。
+//!
+//! 坐标一律是布局空间内的**绝对值**，绘制阶段直接取用。
 //! `blocks` 按**先序**入表：父块的 `lines` 区间包含子块，`block_of_line`
 //! 取最后一个命中的盒子，就是真正拥有这些行的那个叶子块。
 //!
 //! 本层的已知取舍（同步记在 docs/known-limitations.md）：
-//! - 段落内只用**块元素自己的**样式测行：`<strong>` 的粗、`<small>` 的小在这一层被
-//!   拉平成同一种度量。多 run 度量是 M3 的 E2。
 //! - 不做父子外边距折叠：嵌套容器里首个子块的 top margin 会计入父高度，
 //!   比浏览器多一档空白，但不会重叠、也不会丢间距。
-//! - 行内图片不产出片段（M3）；负外边距按 0；`width` / `max-width` / `float` 未接入。
+//! - 行内图片不产出 run（M3 的后半）；负外边距按 0；`width` / `max-width` / `float` 未接入。
+//! - 嵌套元素自己的 `white-space` 不单独判断，整段按外层块的设置走。
 
 use std::ops::Range;
+use std::rc::Rc;
 
-use crate::css::computed::{ComputedStyle, Display, StyledDom, TextAlign};
+use unicode_linebreak::linebreaks;
+
+use crate::css::computed::{Color, ComputedStyle, Display, StyledDom, TextAlign};
 use crate::dom::{Dom, NodeId, NodeKind};
 
 /// 一次度量需要的最小字体描述。`family == "monospace"` 是泛族名，
 /// 由 `Measure` 的实现决定它对应哪个真实 family。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FontKey {
     pub family: String,
     pub weight: u16,
@@ -44,6 +54,33 @@ impl FontKey {
     }
 }
 
+/// 一个行内 run 的绘制属性。从 `ComputedStyle` 里挑出排版层真正要用的那几项，
+/// 这样 `LineRun` 不必背着整份样式表。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RunStyle {
+    pub font: FontKey,
+    pub font_size: f32,
+    /// 倍数，不是像素。
+    pub line_height: f32,
+    pub color: Option<Color>,
+}
+
+impl RunStyle {
+    pub fn new(style: &ComputedStyle) -> Self {
+        Self {
+            font: FontKey::of(style),
+            font_size: style.font_size,
+            line_height: style.line_height,
+            color: style.color,
+        }
+    }
+
+    /// 该 run 的 inline box 高度。
+    pub fn box_height(&self) -> f32 {
+        (self.font_size * self.line_height).max(1.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LineMetrics {
     pub width: f32,
@@ -51,57 +88,60 @@ pub struct LineMetrics {
     pub descent: f32,
 }
 
-/// 度量与断行的注入点。
+/// 字体能力的注入点。
 ///
-/// spike① 的结论：`line_wrapper` / `advance` 挂在 App 级 `TextSystem` 上，
-/// 不要求 `&mut Window`，所以整条 DOM→Style→Layout 链可以进 `background_spawn`。
+/// spike① 的结论：度量与前进量挂在 App 级 `TextSystem` 上，不要求 `&mut Window`，
+/// 所以整条 DOM→Style→Layout 链可以进 `background_spawn`。
 /// 前提是本模块的输出全是 `Send` 纯数据。
 pub trait Measure: Send + Sync {
-    /// 把 `text` 按可用宽度切行，返回覆盖全文的不重叠字节区间。
-    /// `avail` 是整行可用的宽度，`first_indent` 是第一行要让出来的部分 ——
-    /// 与 `TextSystem::line_wrapper(..).wrap_line(text, width, IndentAdjustment)` 同形。
-    fn split(
-        &self,
-        text: &str,
-        font: &FontKey,
-        font_size: f32,
-        avail: f32,
-        first_indent: f32,
-    ) -> Vec<Range<usize>>;
+    /// 单个字符的前进量，只用于决定断点。
+    fn char_width(&self, ch: char, font: &FontKey, font_size: f32) -> f32;
 
-    /// 一段文本的自然宽度与基线。
-    fn metrics(&self, text: &str, font: &FontKey, font_size: f32) -> LineMetrics;
+    /// 一段同样式文本的实际绘制宽度与基线。
+    fn run_metrics(&self, text: &str, font: &FontKey, font_size: f32) -> LineMetrics;
 }
 
-/// 行盒里的一段连续文本，同时带着两套坐标。
+/// 行盒里的一段连续同样式文本，同时带着两套坐标。
 #[derive(Debug, Clone, PartialEq)]
-pub struct Fragment {
+pub struct LineRun {
     /// 文本节点。§4.2 把锚点定义在 Layout **之前**的坐标系上，就是这个 node。
     pub node: NodeId,
     /// `BlockBox::text` 的字节区间 —— 绘制用。
     pub norm: Range<usize>,
     /// `node.text` 的字节区间 —— 选择与锚点用。
     pub orig: Range<usize>,
+    pub style: RunStyle,
+    /// 实际绘制宽度与基线/下沉量。
+    pub width: f32,
+    pub ascent: f32,
+    pub descent: f32,
 }
 
 #[derive(Debug, Clone)]
 pub struct LineBox {
     /// 所属块的 DOM 节点。
     pub owner: NodeId,
-    /// 空行（`<p><br></p>`、整段空白）没有片段。
-    pub fragments: Vec<Fragment>,
+    /// 空行（`<p><br></p>`）没有 run。
+    pub runs: Vec<LineRun>,
     pub x: f32,
     pub y: f32,
+    /// 各 run 绘制宽度之和。
     pub width: f32,
-    /// 行盒高 = 字号 × 行距倍数。
+    /// 行盒高 = 各 run inline box 高度的最大值。
     pub height: f32,
-    /// 相对 `y` 的基线下沉量。
+    /// 相对 `y` 的基线下沉量：各 run 最大的 ascent。
     pub baseline: f32,
     pub align: TextAlign,
-    pub font_size: f32,
-    /// 这一行**被测量时**用的字体。绘制侧必须用同一个字体，否则
-    /// 「按 A 量出来的居中偏移」配「按 B 画出来的字宽」，标题就会歪到版心外。
-    pub font: FontKey,
+}
+
+impl LineBox {
+    /// 这一行里最大的字号。状态栏与「这行是不是标题」一类判断用。
+    pub fn dominant_font_size(&self) -> f32 {
+        self.runs
+            .iter()
+            .map(|r| r.style.font_size)
+            .fold(0.0f32, f32::max)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -113,7 +153,7 @@ pub struct BlockBox {
     /// 边框盒尺寸（含 padding，不含 margin）。
     pub width: f32,
     pub height: f32,
-    /// 本块行内内容的归一化文本；`Fragment::norm` 索引到这里。容器块为空串。
+    /// 本块行内内容的归一化文本；`LineRun::norm` 索引到这里。容器块为空串。
     pub text: String,
     /// `Layout::lines` 的下标区间。
     pub lines: Range<usize>,
@@ -145,8 +185,11 @@ impl Layout {
         let (Some(line), Some(block)) = (self.lines.get(i), self.block_of_line(i)) else {
             return "";
         };
-        let start = line.fragments.first().map(|f| f.norm.start).unwrap_or(0);
-        let end = line.fragments.last().map(|f| f.norm.end).unwrap_or(0);
+        let Some(first) = line.runs.first() else {
+            return "";
+        };
+        let start = first.norm.start;
+        let end = line.runs.last().map(|r| r.norm.end).unwrap_or(start);
         block.text.get(start..end).unwrap_or("")
     }
 }
@@ -200,11 +243,28 @@ struct Collected {
     pieces: Vec<Piece>,
 }
 
-/// 一个文本节点对段落的贡献：段内区间 + 原节点区间。
+/// 一个文本节点对段落的贡献：段内区间、原节点区间、以及**该文本所属元素**的样式。
 struct Piece {
     node: NodeId,
     norm: Range<usize>,
     orig: Range<usize>,
+    style: Rc<RunStyle>,
+}
+
+impl Collected {
+    /// 覆盖 `at` 的 piece 下标。落在 piece 之间的空白上时返回前一个 ——
+    /// 那个空格本来就是从上一个元素带过来的。
+    fn piece_at(&self, at: usize) -> Option<usize> {
+        let idx = self.pieces.partition_point(|p| p.norm.start <= at);
+        if idx == 0 {
+            return None;
+        }
+        Some(idx - 1)
+    }
+
+    fn style_at(&self, at: usize) -> Option<Rc<RunStyle>> {
+        self.piece_at(at).map(|i| Rc::clone(&self.pieces[i].style))
+    }
 }
 
 impl<'a> Ctx<'a> {
@@ -300,7 +360,7 @@ impl<'a> Ctx<'a> {
         width: f32,
         style: &ComputedStyle,
     ) -> f32 {
-        let collected = collect(pieces, self.dom, style.white_space_pre);
+        let collected = collect(pieces, self.dom, self.styles, style.white_space_pre);
         let index = self.push_block(owner, x, y, width, collected.text.clone());
         let height = self.wrap_lines(owner, &collected, x, y, width, style);
         self.close_block(index, height)
@@ -328,7 +388,8 @@ impl<'a> Ctx<'a> {
         height
     }
 
-    /// 断行 + 摆放，返回行盒总高。
+    /// 断行。先只算出「哪些字节区间构成一行、该行让出多少缩进」，
+    /// 再统一摆放 —— 分两趟是为了让 `&mut self.lines` 的写入不跟度量借用打架。
     fn wrap_lines(
         &mut self,
         owner: NodeId,
@@ -341,53 +402,185 @@ impl<'a> Ctx<'a> {
         if collected.text.is_empty() {
             return 0.0;
         }
-        let font = FontKey::of(style);
-        let line_height = (style.font_size * style.line_height).max(1.0);
         // 缩进最多吃掉半个版心，否则首行会被挤成零宽。
         let indent = style.text_indent.max(0.0).min(width * 0.5);
-        let mut cursor = y;
+        let mut plans: Vec<(Range<usize>, f32)> = Vec::new();
         let mut first = true;
+
         for hard in hard_lines(&collected.text) {
             let slice = collected.text.get(hard.clone()).unwrap_or("");
-            // 断行阶段先问「首行让出多少」，摆放阶段再逐行决定缩进与对齐偏移。
-            let lead = if first { indent } else { 0.0 };
-            let ranges = if slice.is_empty() {
-                vec![hard]
-            } else {
-                self.measure
-                    .split(slice, &font, style.font_size, width, lead)
-                    .into_iter()
-                    .map(|r| (hard.start + r.start)..(hard.start + r.end))
-                    .collect()
-            };
-            for norm in ranges {
-                // text-indent 只作用于块里的第一个行盒，后续行回到版心左缘。
-                let lead = if first { indent } else { 0.0 };
-                let avail = (width - lead).max(1.0);
-                let text = collected.text.get(norm.clone()).unwrap_or("");
-                let metrics = self.measure.metrics(text, &font, style.font_size);
-                let offset = match style.text_align {
-                    TextAlign::Right => (avail - metrics.width).max(0.0),
-                    TextAlign::Center => (avail - metrics.width).max(0.0) / 2.0,
-                    _ => 0.0,
+            // UAX #14：给出的下标是「下一行可以从这里开始」。
+            let breaks: Vec<usize> = linebreaks(slice)
+                .filter(|(ix, _)| *ix > 0 && *ix < slice.len())
+                .map(|(ix, _)| hard.start + ix)
+                .collect();
+            let mut line_start = hard.start;
+            // 首行让出去的宽度由 `avail` 扣，不再在 `used` 里加一遍：
+            // 两处都算会让首行少容两个字。
+            let mut used = 0.0f32;
+            for (i, ch) in slice.char_indices() {
+                let at = hard.start + i;
+                let Some(piece_style) = collected.style_at(at) else {
+                    continue;
                 };
-                self.lines.push(LineBox {
-                    owner,
-                    fragments: fragments_for(norm, &collected.pieces),
-                    x: x + lead + offset,
-                    y: cursor,
-                    width: metrics.width,
-                    height: line_height,
-                    baseline: metrics.ascent,
-                    align: style.text_align,
-                    font_size: style.font_size,
-                    font: font.clone(),
-                });
-                cursor += line_height;
+                let w = self
+                    .measure
+                    .char_width(ch, &piece_style.font, piece_style.font_size);
+                let avail = if first {
+                    (width - indent).max(1.0)
+                } else {
+                    width.max(1.0)
+                };
+                if at > line_start && used + w > avail {
+                    let cut = last_break_before(&breaks, at, line_start).unwrap_or(at);
+                    plans.push((line_start..cut, if first { indent } else { 0.0 }));
+                    line_start = cut;
+                    used = self.span_width(collected, cut..at) + w;
+                    first = false;
+                } else {
+                    used += w;
+                }
+            }
+            if line_start < hard.end {
+                plans.push((line_start..hard.end, if first { indent } else { 0.0 }));
+                first = false;
+            } else if hard.start == hard.end {
+                // 空硬行（`<br><br>`）也要占一行高，否则空行会塌掉。
+                plans.push((hard.clone(), if first { indent } else { 0.0 }));
                 first = false;
             }
         }
+
+        let mut cursor = y;
+        for (range, lead) in plans {
+            cursor += self.emit_line(
+                owner,
+                collected,
+                range,
+                x + lead,
+                cursor,
+                width,
+                lead,
+                style,
+            );
+        }
         cursor - y
+    }
+
+    /// 一段文本按各自 run 累加的前进量。断行后重算新行已用宽度要用。
+    fn span_width(&self, collected: &Collected, range: Range<usize>) -> f32 {
+        let Some(text) = collected.text.get(range.clone()) else {
+            return 0.0;
+        };
+        let mut sum = 0.0f32;
+        for (i, ch) in text.char_indices() {
+            if let Some(style) = collected.style_at(range.start + i) {
+                sum += self.measure.char_width(ch, &style.font, style.font_size);
+            }
+        }
+        sum
+    }
+
+    /// 把 `[start, end)` 收成一个行盒，返回它的高度。
+    fn emit_line(
+        &mut self,
+        owner: NodeId,
+        collected: &Collected,
+        range: Range<usize>,
+        x: f32,
+        y: f32,
+        width: f32,
+        lead: f32,
+        style: &ComputedStyle,
+    ) -> f32 {
+        let end = trim_end_spaces(&collected.text, range.start, range.end);
+        let mut runs = Vec::new();
+        let mut line_width = 0.0f32;
+        let mut ascent = 0.0f32;
+        let mut descent = 0.0f32;
+        let mut height = 0.0f32;
+        for piece in &collected.pieces {
+            let start = range.start.max(piece.norm.start);
+            let stop = end.min(piece.norm.end);
+            if start >= stop {
+                continue;
+            }
+            let norm = start..stop;
+            let text = collected.text.get(norm.clone()).unwrap_or("");
+            let metrics = self
+                .measure
+                .run_metrics(text, &piece.style.font, piece.style.font_size);
+            line_width += metrics.width;
+            ascent = ascent.max(metrics.ascent);
+            descent = descent.max(metrics.descent);
+            height = height.max(piece.style.box_height());
+            runs.push(LineRun {
+                node: piece.node,
+                orig: orig_of(piece, &norm),
+                norm,
+                style: (*piece.style).clone(),
+                width: metrics.width,
+                ascent: metrics.ascent,
+                descent: metrics.descent,
+            });
+        }
+        if runs.is_empty() {
+            // 空行取块自己的样式，否则 `<p><br></p>` 会塌成零高。
+            let block_style = RunStyle::new(style);
+            height = block_style.box_height();
+            ascent = block_style.font_size * 0.8;
+        }
+        // 行盒高至少要把字形本体装下：line-height 给得很小时也不能让两行叠在一起。
+        height = height.max(ascent + descent);
+        let avail = (width - lead).max(1.0);
+        let offset = match style.text_align {
+            TextAlign::Right => (avail - line_width).max(0.0),
+            TextAlign::Center => (avail - line_width).max(0.0) / 2.0,
+            _ => 0.0,
+        };
+        self.lines.push(LineBox {
+            owner,
+            runs,
+            x: x + offset,
+            y,
+            width: line_width,
+            height,
+            baseline: ascent,
+            align: style.text_align,
+        });
+        height
+    }
+}
+
+/// 最近的、不晚于 `at` 且严格晚于 `line_start` 的合法断点。
+fn last_break_before(breaks: &[usize], at: usize, line_start: usize) -> Option<usize> {
+    let idx = breaks.partition_point(|b| *b <= at);
+    for i in (0..idx).rev() {
+        if breaks[i] > line_start {
+            return Some(breaks[i]);
+        }
+    }
+    None
+}
+
+/// 行尾空白不计宽也不绘制（CSS 规定）：从 `end` 往回吞掉空格。
+fn trim_end_spaces(text: &str, start: usize, end: usize) -> usize {
+    let Some(slice) = text.get(start..end) else {
+        return end;
+    };
+    let trimmed = slice.trim_end_matches([' ', '\t']);
+    end - (slice.len() - trimmed.len())
+}
+
+/// piece 的 norm 与 orig 等长时（绝大多数）映射是仿射的，逐字符精确；
+/// 折叠掉内部空白后两者不等长，这时退化成整段 piece 的跨度 ——
+/// 精确还原留给 M5 的锚点重定位，那里本来就要按节点重跑一次同样的折叠。
+fn orig_of(piece: &Piece, norm: &Range<usize>) -> Range<usize> {
+    if piece.norm.len() == piece.orig.len() {
+        let base = piece.orig.start + (norm.start - piece.norm.start);
+        base..base + (norm.end - norm.start)
+    } else {
+        piece.orig.clone()
     }
 }
 
@@ -403,11 +596,18 @@ fn hard_lines(text: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// 把若干兄弟子树展平成一段文本，同时记下每个来源节点的区间。
-fn collect(pieces: &[NodeId], dom: &Dom, pre: bool) -> Collected {
-    let mut out = Collector::default();
+/// 把若干兄弟子树展平成一段文本，同时记下每个来源节点的区间与其元素样式。
+fn collect(pieces: &[NodeId], dom: &Dom, styles: &StyledDom, pre: bool) -> Collected {
+    let mut out = Collector {
+        text: String::new(),
+        pieces: Vec::new(),
+        pending_space: false,
+        dom,
+        styles,
+    };
     for node in pieces {
-        out.push_node(*node, dom, pre);
+        let style = out.style_of(*node);
+        out.push_node(*node, pre, &style);
     }
     Collected {
         text: out.text,
@@ -415,19 +615,25 @@ fn collect(pieces: &[NodeId], dom: &Dom, pre: bool) -> Collected {
     }
 }
 
-/// 折叠空白必须**跨节点**进行：`<p>前   <em>中</em></p>` 里上一段尾巴上的空白
-/// 和下一段开头的空白是同一次折叠，谁先落地谁占位，两边都不能各留一个空格。
-/// 所以「攒着一个空格」的状态挂在收集器上，而不是每个节点各算一遍。
-#[derive(Default)]
-struct Collector {
+struct Collector<'a> {
     text: String,
     pieces: Vec<Piece>,
+    /// 折叠空白是**跨节点**的：上一段尾巴上的空白与下一段开头的空白是同一次折叠，
+    /// 谁先落地谁占位，所以这个状态挂在收集器上。
     pending_space: bool,
+    dom: &'a Dom,
+    styles: &'a StyledDom,
 }
 
-impl Collector {
-    fn push_node(&mut self, node: NodeId, dom: &Dom, pre: bool) {
-        let dom_node = dom.get(node);
+impl<'a> Collector<'a> {
+    fn style_of(&self, node: NodeId) -> Rc<RunStyle> {
+        Rc::new(RunStyle::new(
+            &self.styles.get(node).cloned().unwrap_or_default(),
+        ))
+    }
+
+    fn push_node(&mut self, node: NodeId, pre: bool, style: &Rc<RunStyle>) {
+        let dom_node = self.dom.get(node);
         if dom_node.kind == NodeKind::Text {
             let src = dom_node.text.as_str();
             let norm_start = self.text.len();
@@ -442,23 +648,25 @@ impl Collector {
                     node,
                     norm: norm_start..self.text.len(),
                     orig,
+                    style: Rc::clone(style),
                 });
             }
             return;
         }
-        if dom.is_element(node, "br") {
+        if self.dom.is_element(node, "br") {
             self.text.push('\n');
             self.pending_space = false;
             return;
         }
+        // 文本继承的是**它所在元素**的样式，所以往下走要换成元素自己的样式。
+        let own = self.style_of(node);
         for child in dom_node.children.clone() {
-            // 嵌套元素自己的 white-space 不再单独判断，整段按外层处理（一期）。
-            self.push_node(child, dom, pre);
+            self.push_node(child, pre, &own);
         }
     }
 
-    /// 连续空白并成一个空格；段首（此前还没有任何内容）与段尾（还没遇到内容）的空白吞掉。
-    /// 返回真正落地的那段原文的字节跨度。
+    /// CSS 空白折叠：连续空白并成一个空格，段首与段尾的空白吞掉。
+    /// 返回真正落进 `text` 的那段原文的字节跨度。
     fn push_collapsed(&mut self, src: &str) -> Range<usize> {
         let bytes = src.as_bytes();
         let Some(first) = bytes.iter().position(|b| !b.is_ascii_whitespace()) else {
@@ -476,8 +684,6 @@ impl Collector {
         } else {
             first
         };
-        // 前导空白要先记账：下面的循环只处理内容**内部**的空白 run，
-        // 少了这步，`<em>中</em>   后` 里后一个节点的前导空白会被整个丢掉。
         self.pending_space = self.pending_space || first > 0;
         for ch in src[first..last + 1].chars() {
             if ch.is_whitespace() {
@@ -502,34 +708,6 @@ impl Collector {
             self.text.push(' ');
         }
     }
-}
-
-/// 把一个段内区间按来源节点切成片段。
-///
-/// piece 的 norm 与 orig 等长时（绝大多数）映射是仿射的，逐字符精确；
-/// 折叠掉内部空白后两者不等长，这时退化成整段 piece 的跨度 ——
-/// 精确还原留给 M5 的锚点重定位，那里本来就要按节点重跑一次同样的折叠。
-fn fragments_for(norm: Range<usize>, pieces: &[Piece]) -> Vec<Fragment> {
-    let mut out = Vec::new();
-    for piece in pieces {
-        let start = norm.start.max(piece.norm.start);
-        let end = norm.end.min(piece.norm.end);
-        if start >= end {
-            continue;
-        }
-        let orig = if piece.norm.len() == piece.orig.len() {
-            let base = piece.orig.start + (start - piece.norm.start);
-            base..base + (end - start)
-        } else {
-            piece.orig.clone()
-        };
-        out.push(Fragment {
-            node: piece.node,
-            norm: start..end,
-            orig,
-        });
-    }
-    out
 }
 
 #[cfg(test)]

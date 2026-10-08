@@ -1,7 +1,7 @@
 //! E1 块级 + 行内布局。几何用一份「汉字 1 em、拉丁 0.5 em」的 mock `Measure` 来断言，
 //! 真实字体度量在 app 侧接入，逻辑同一。
 
-use crate::css::computed::{ComputedStyle, Display};
+use crate::css::computed::{Color, ComputedStyle, Display};
 use crate::css::{Origin, RuleSet};
 use crate::dom::{Dom, NodeId};
 
@@ -26,57 +26,11 @@ fn slice_width(text: &str, size: f32) -> f32 {
 }
 
 impl Measure for Mono {
-    fn split(
-        &self,
-        text: &str,
-        _font: &FontKey,
-        font_size: f32,
-        avail: f32,
-        first_indent: f32,
-    ) -> Vec<std::ops::Range<usize>> {
-        let mut out = Vec::new();
-        let mut line_start = 0usize;
-        let mut used = first_indent;
-        let mut break_at: Option<usize> = None;
-        for (i, ch) in text.char_indices() {
-            let w = char_width(ch, font_size);
-            if i == line_start {
-                used += w;
-                continue;
-            }
-            if ch == ' ' {
-                used += w;
-                break_at = Some(i + 1);
-                continue;
-            }
-            if used + w > avail {
-                let cut = break_at.unwrap_or(i);
-                let raw = &text[line_start..cut];
-                let end = cut - (raw.len() - raw.trim_end().len());
-                if line_start < end {
-                    out.push(line_start..end);
-                }
-                line_start = end;
-                used = slice_width(&text[end..i], font_size) + w;
-                break_at = None;
-            } else {
-                used += w;
-            }
-        }
-        if line_start < text.len() {
-            let raw = &text[line_start..];
-            let end = text.len() - (raw.len() - raw.trim_end().len());
-            if line_start < end {
-                out.push(line_start..end);
-            }
-        }
-        if out.is_empty() {
-            out.push(0..0);
-        }
-        out
+    fn char_width(&self, ch: char, _font: &FontKey, font_size: f32) -> f32 {
+        char_width(ch, font_size)
     }
 
-    fn metrics(&self, text: &str, _font: &FontKey, font_size: f32) -> LineMetrics {
+    fn run_metrics(&self, text: &str, _font: &FontKey, font_size: f32) -> LineMetrics {
         LineMetrics {
             width: slice_width(text, font_size),
             ascent: font_size * 0.8,
@@ -175,7 +129,7 @@ fn sibling_paragraph_margins_collapse() {
 fn headings_get_ua_size_and_weight_and_can_be_centered() {
     let (_, layout) = typeset("<h1>章名</h1>", "h1 { text-align: center }", 200.0);
     assert_eq!(layout.lines.len(), 1);
-    assert_eq!(layout.lines[0].font_size, 32.0, "UA h1 = 2em");
+    assert_eq!(layout.lines[0].dominant_font_size(), 32.0, "UA h1 = 2em");
     assert_eq!(layout.lines[0].x, 68.0, "两字 64px 居中于 200px 版心");
 
     let (dom, styles) = parse("<h1>x</h1><span>y</span>", "");
@@ -217,9 +171,9 @@ fn display_none_removes_the_whole_subtree() {
 fn inline_pieces_keep_their_own_node_offsets() {
     let (dom, layout) = typeset("<p>甲<strong>乙</strong>丙</p>", "", 200.0);
     assert_eq!(layout.line_text(0), "甲乙丙");
-    let fragments = &layout.lines[0].fragments;
-    assert_eq!(fragments.len(), 3, "三个文本节点各一段");
-    let recovered: Vec<String> = fragments
+    let runs = &layout.lines[0].runs;
+    assert_eq!(runs.len(), 3, "三个文本节点各一段");
+    let recovered: Vec<String> = runs
         .iter()
         .map(|f| {
             let node = dom.get(f.node);
@@ -283,6 +237,86 @@ fn a_wider_viewport_yields_fewer_lines() {
 fn collection_trims_paragraph_edges() {
     let (dom, _) = parse("<p>  甲 乙  </p>", "");
     let p = find(&dom, "p");
-    let collected = collect(&dom.get(p).children.clone(), &dom, false);
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let collected = collect(&dom.get(p).children.clone(), &dom, &styles, false);
     assert_eq!(collected.text, "甲 乙", "段首段尾空白吞掉，中间并成一个");
+}
+
+// ---------------------------------------------------------------------------
+// E2：一个段落里的多种样式
+// ---------------------------------------------------------------------------
+
+/// 局部字号与颜色必须活到行盒里：这是「多 run」存在的全部理由。
+#[test]
+fn a_paragraph_keeps_per_run_size_weight_and_color() {
+    let html = "<p>正文<small>小字</small>正文</p>";
+    let css = "p { font-size: 20px } small { font-size: 12px; color: #808080 }";
+    let (_, layout) = typeset(html, css, 400.0);
+    let runs = &layout.lines[0].runs;
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[0].style.font_size, 20.0);
+    assert_eq!(runs[1].style.font_size, 12.0, "small 的小字号不该被拉平");
+    assert_eq!(runs[2].style.font_size, 20.0);
+    assert_eq!(runs[1].style.color, Some(Color(128, 128, 128)));
+    assert_eq!(runs[0].style.color, None);
+    // 行宽是各 run 实际绘制宽度之和：12px 的两个汉字只占 24px。
+    assert_eq!(layout.lines[0].width, 20.0 * 4.0 + 12.0 * 2.0);
+}
+
+#[test]
+fn bold_and_italic_survive_as_run_styles() {
+    let (_, layout) = typeset("<p>甲<strong>乙</strong><em>丙</em></p>", "", 400.0);
+    let runs = &layout.lines[0].runs;
+    assert_eq!(runs[1].style.font.weight, 700, "UA 的 b/strong 加粗");
+    assert!(runs[2].style.font.italic, "UA 的 em 斜体");
+    assert_eq!(runs[0].style.font.weight, 400);
+}
+
+/// 行盒高取各 run inline box 的最大值，而不是第一段的。
+#[test]
+fn line_box_height_follows_the_tallest_run() {
+    let (_, layout) = typeset(
+        "<p>正文<span class=big>大字</span></p>",
+        "p { font-size: 20px } .big { font-size: 40px }",
+        400.0,
+    );
+    assert_eq!(layout.lines[0].height, 40.0 * 1.75);
+    assert_eq!(layout.lines[0].baseline, 32.0, "基线取最大 ascent");
+}
+
+/// 中文禁则：行首不能是收尾标点，行尾不能是起句标点。
+/// 断点取自 UAX #14，所以这条是「引擎自持断行」换来的能力。
+#[test]
+fn kinsoku_keeps_punctuation_off_the_line_edges() {
+    // 「了不起」后面的右引号必须跟着引号里的字一起留在行尾，不能被挤到下一行行首。
+    let text = "于是我们奋力向前逆水行舟被许多人当作「了不起的盖茨比」中译本里那句检验样本";
+    let (_, layout) = typeset(&format!("<p>{text}</p>"), "", 160.0);
+    let lines = texts(&layout);
+    assert!(lines.len() >= 3, "这段应被折成多行");
+    for line in &lines {
+        let first = line.chars().next().unwrap_or(' ');
+        let last = line.chars().last().unwrap_or(' ');
+        assert!(
+            !"。，、！？」』；：）》".contains(first),
+            "行首出现了禁则标点：{line}"
+        );
+        assert!(!"「『（《".contains(last), "行尾出现了禁则标点：{line}");
+    }
+}
+
+#[test]
+fn a_tiny_line_height_still_cannot_make_lines_overlap() {
+    let text = "字".repeat(40);
+    let (_, layout) = typeset(
+        &format!("<p>{text}</p>"),
+        "p { font-size: 20px; line-height: 0.2 }",
+        100.0,
+    );
+    assert!(layout.lines.len() >= 3);
+    for pair in layout.lines.windows(2) {
+        assert!(
+            pair[1].y >= pair[0].y + pair[0].height,
+            "行盒不能重叠：line-height 再小也要装下字形本身"
+        );
+    }
 }
