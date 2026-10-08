@@ -25,6 +25,7 @@ fn fixture() -> FlowDoc {
             source,
             spine_href: String::new(),
         }],
+        ..Default::default()
     }
 }
 

@@ -9,8 +9,8 @@ edition = "2024"
 rust-version = "1.90"
 license = "MIT"
 
-# 只列已经在用的依赖；EPUB 的 zip / quick-xml、PDF 的 pdfium-render
-# 等各自里程碑真正要用时再加，避免空挂依赖。
+# 只列已经在用的依赖；PDF 的 pdfium-render 等各自里程碑真正要用时再加，
+# 避免空挂依赖。
 [workspace.dependencies]
 folio-core = { path = "crates/folio-core" }
 
@@ -18,6 +18,8 @@ gpui-kit = { version = "0.7", features = ["assets"] }
 
 rusqlite = { version = "0.40", features = ["bundled"] }
 html5ever = "0.40"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
 cssparser = "0.38"
 selectors = "0.41"
 unicode-linebreak = "0.1.5"

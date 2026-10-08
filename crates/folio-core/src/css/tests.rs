@@ -18,6 +18,18 @@ fn first_p(dom: &Dom) -> crate::dom::NodeId {
         .expect("应有 p")
 }
 
+/// `@charset` / `@import` 没有块，在分号处结束。把它们和后面那条规则一起当成
+/// 「at-rule 前奏」吞掉，是最典型的「样式表明明在、body 规则却凭空没了」。
+#[test]
+fn statement_at_rules_end_at_the_semicolon() {
+    let set =
+        rules("@charset \"utf-8\"; body { font-family: serif } @import \"x\"; p { color: red }");
+    assert_eq!(set.rules.len(), 2, "两条普通规则都要活下来");
+    assert_eq!(set.rules[0].declarations[0].property, "font-family");
+    assert_eq!(set.rules[1].declarations[0].property, "color");
+    assert_eq!(set.ignored, 2, "@charset 与 @import 各计一条不支持");
+}
+
 #[test]
 fn parses_plain_rules() {
     let set = rules("p { color: red; font-size: 14px } .intro { text-indent: 2em; }");

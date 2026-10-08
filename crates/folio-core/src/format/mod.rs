@@ -2,12 +2,14 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+pub mod epub;
 pub mod markdown;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Format {
     Markdown,
     Text,
+    Epub,
 }
 
 impl Format {
@@ -15,6 +17,7 @@ impl Format {
         match self {
             Format::Markdown => "markdown",
             Format::Text => "text",
+            Format::Epub => "epub",
         }
     }
 
@@ -22,6 +25,7 @@ impl Format {
         match s {
             "markdown" => Some(Format::Markdown),
             "text" => Some(Format::Text),
+            "epub" => Some(Format::Epub),
             _ => None,
         }
     }
@@ -51,9 +55,22 @@ impl Chapter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TocEntry {
+    pub title: String,
+    /// 解析后的绝对容器路径（已百分号解码、去 fragment），与 `Chapter::spine_href` 同形。
+    pub href: String,
+    pub children: Vec<TocEntry>,
+}
+
+/// 可重排文档。`css` 是全书作者样式按 manifest 顺序拼起来的一份，
+/// `toc` 与 `cover` 来自 OPF；这三项都是**文档级**数据，所以和章节分开存。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FlowDoc {
     pub chapters: Vec<Chapter>,
+    pub css: String,
+    pub toc: Vec<TocEntry>,
+    pub cover: Option<Vec<u8>>,
 }
 
 impl FlowDoc {
@@ -77,7 +94,10 @@ pub trait FormatAdapter: Send + Sync {
 }
 
 pub fn adapters() -> Vec<Box<dyn FormatAdapter>> {
-    vec![Box::new(markdown::MarkdownAdapter)]
+    vec![
+        Box::new(epub::EpubAdapter),
+        Box::new(markdown::MarkdownAdapter),
+    ]
 }
 
 pub fn detect(path: &Path) -> Option<Format> {

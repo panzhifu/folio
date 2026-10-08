@@ -11,12 +11,24 @@
 
 ## 怎么用 local/ 里的书
 
-排版观感靠人眼，不靠断言，所以这类样本走 `--ignored` 的显式冒烟测试，CI 上永远跳过：
+排版观感靠人眼，不靠断言，所以这类样本走 `#[ignore]` 的显式冒烟测试，CI 上永远跳过：
 
 ```bash
-FOLIO_LOCAL_BOOK=tests/fixtures/local/某书.epub \
-  cargo test -p folio-core -- --ignored --nocapture
+cargo test -p folio-core -- --ignored --nocapture
 ```
+
+被 `#[ignore]` 的测试**不能因为文件不在就通过**——那等于一盏永远绿的假灯。
+它们在没有本地样本时直接 panic，所以只会在你显式要求时跑，且跑了一定给结论。
+
+## 现有样本
+
+- `oss/minimal-zh.epub` —— 合成中文书，4.7 KB。故意布成会出错的形状：
+  manifest 顺序与 spine 顺序不同、文件名里有空格（href 写成 `%20`）、
+  nav 条目带 `#fragment`、两份 CSS 需要按声明顺序拼接、第三章没有 `<h1>`（测标题回退）。
+- `local/shejie-mauriac.epub` —— calibre 导出的 EPUB 2.0（无 nav，只有 `toc.ncx`），
+  28 章 / 25 条目录 / 一份 2.4 KB 的 CSS。它抓到了合成样本抓不到的两个真 bug：
+  **NCX 的元素名是大小写敏感的 `navMap` / `navPoint`**，以及出版书 CSS 里
+  开头的 `@charset` 语句会把后一条规则吃掉。
 
 ## 合成样本才是自动化测试的主力
 

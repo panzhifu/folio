@@ -40,7 +40,10 @@ impl FormatAdapter for MarkdownAdapter {
                 },
                 size: source.len() as u64,
             },
-            Content::Reflow(FlowDoc { chapters }),
+            Content::Reflow(FlowDoc {
+                chapters,
+                ..Default::default()
+            }),
         ))
     }
 }

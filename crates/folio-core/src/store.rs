@@ -100,6 +100,12 @@ CREATE TRIGGER chapter_fts_au AFTER UPDATE ON chapter_text BEGIN
     INSERT INTO chapter_fts(rowid, text) VALUES (new.chapter_id, new.text);
 END;
 "#,
+    // v3：EPUB 的文档级数据。CSS 与目录属于整本书，不属于任何一章，
+    // 所以它们跟着 books 走而不是被塞进每份章节源文本里重复存一遍。
+    r#"
+ALTER TABLE books ADD COLUMN css TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN toc_json TEXT NOT NULL DEFAULT '[]';
+"#,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,7 +274,7 @@ impl Store {
         Ok(())
     }
 
-    /// 整本替换章节与正文，一个事务保证不留半本。
+    /// 整本替换章节、CSS、目录与封面，一个事务保证不留半本。
     pub fn save_flow(&self, book_id: i64, doc: &FlowDoc) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM chapters WHERE book_id = ?1", params![book_id])?;
@@ -290,6 +296,15 @@ impl Store {
                 params![chapter_id, ch.source],
             )?;
         }
+        tx.execute(
+            "UPDATE books SET css = ?2, toc_json = ?3, cover = ?4 WHERE id = ?1",
+            params![
+                book_id,
+                doc.css,
+                serde_json::to_string(&doc.toc)?,
+                doc.cover
+            ],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -309,7 +324,27 @@ impl Store {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok((!chapters.is_empty()).then_some(FlowDoc { chapters }))
+        if chapters.is_empty() {
+            return Ok(None);
+        }
+        let (css, toc_json, cover) = self.conn.query_row(
+            "SELECT css, toc_json, cover FROM books WHERE id = ?1",
+            params![book_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<Vec<u8>>>(2)?,
+                ))
+            },
+        )?;
+        let toc = serde_json::from_str(&toc_json).unwrap_or_default();
+        Ok(Some(FlowDoc {
+            chapters,
+            css,
+            toc,
+            cover,
+        }))
     }
 
     pub fn set_position(&self, book_id: i64, mode: &str, locator: &Locator) -> Result<()> {

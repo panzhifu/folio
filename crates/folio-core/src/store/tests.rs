@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::params;
 
 use super::Store;
-use crate::format::{Chapter, DocMeta, FlowDoc, Format};
+use crate::format::{Chapter, DocMeta, FlowDoc, Format, TocEntry};
 use crate::position::Locator;
 use crate::prefs::{Prefs, ThemeName};
 
@@ -31,6 +31,14 @@ fn flow(parts: &[(&str, &str)]) -> FlowDoc {
                 spine_href: format!("#{i}"),
             })
             .collect(),
+        // 文档级三项一起进往返测试：EPUB 的 CSS / 目录 / 封面走的是 books 表的列。
+        css: "p { text-indent: 2em }".into(),
+        toc: vec![TocEntry {
+            title: parts.first().map(|t| t.0.to_string()).unwrap_or_default(),
+            href: "#0".into(),
+            children: Vec::new(),
+        }],
+        cover: Some(vec![0x89, b'P', b'N', b'G', 13, 10]),
     }
 }
 
@@ -40,13 +48,13 @@ fn migrations_are_idempotent_across_reopen() {
     let db = dir.path().join("folio.db");
 
     let store = Store::open_at(&db).unwrap();
-    assert_eq!(store.user_version().unwrap(), 2);
+    assert_eq!(store.user_version().unwrap(), 3);
     let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
     store.save_flow(id, &flow(&[("第一章", "正文一")])).unwrap();
     drop(store);
 
     let again = Store::open_at(&db).unwrap();
-    assert_eq!(again.user_version().unwrap(), 2, "重开不应重复跑迁移");
+    assert_eq!(again.user_version().unwrap(), 3, "重开不应重复跑迁移");
     assert_eq!(again.list_books().unwrap().len(), 1);
     assert_eq!(
         again.load_flow(id).unwrap().unwrap().chapters[0].title,

@@ -94,6 +94,16 @@ impl RuleSet {
                 return;
             };
             let prelude = rest[..open].trim();
+            // 语句型 at-rule（`@charset` / `@import`）没有块，在分号处就结束了。
+            // 不先单独吞掉它，prelude 会把下一条规则的整串选择器一起吃进去，
+            // 于是 `@charset "utf-8"; body { … }` 里的 body 规则凭空消失。
+            if prelude.starts_with('@')
+                && let Some(semi) = find_unquoted(&rest[..open], ';')
+            {
+                self.ignored += 1;
+                rest = &rest[semi + 1..];
+                continue;
+            }
             let Some(close) = matching_brace(&rest[open..]) else {
                 return; // 括号不闭合，剩下的整体放弃
             };
