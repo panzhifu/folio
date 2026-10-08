@@ -2,9 +2,6 @@
 resolver = "2"
 default-members = ["crates/folio-app"]
 members = ["crates/folio-core", "crates/folio-app"]
-# folio-mobile 是独立的 cargo workspace：它用的是 gpui-mobile fork（Zed 的 git gpui），
-# 与桌面端的 gpui-pre 不能进同一张依赖图（两个同名 lib `gpui` + 桌面端不该继承 [patch]）。
-exclude = ["crates/folio-mobile"]
 
 [workspace.package]
 version = "0.1.0"
@@ -35,3 +32,24 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 rust-i18n = "4"
+
+# gpui-mobile（移动平台层）带过来的补丁。原先在 folio-mobile 自己的 workspace 根
+# 才生效，现在两个 crate 共用一张依赖图，只能声明在这里 —— 于是桌面端也一起走这个 rev。
+# 注：上游 longbridge/gpui-mobile 已经不声明这条了，若实测确认不再需要，直接删。
+[patch.crates-io]
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+
+# 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
+# opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；
+# 代价是桌面 release 也一并生效（换掉 unwinding，行为差异仅限 panic 时）。
+# 需要只在移动端开这几项时，只能用 `cargo build -Zprofile` 或拆回两个 workspace。
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true

@@ -1,4 +1,4 @@
-// App module: packages the Rust cdylib libfolio_mobile.so into an APK hosted
+// App module: packages the Rust cdylib libfolio_app.so into an APK hosted
 // by NativeActivity. The Java bridge classes must stay in package
 // dev.gpui.mobile - the Rust platform looks them up by name (GpuiHelper,
 // GpuiPlatformView) - so only the app identity here is Folio's.
@@ -38,7 +38,7 @@ android {
         }
 
         // Forward the library name to the manifest via a placeholder.
-        manifestPlaceholders["nativeLibraryName"] = "folio_mobile"
+        manifestPlaceholders["nativeLibraryName"] = "folio_app"
     }
 
     buildTypes {
@@ -81,10 +81,10 @@ android {
         // release mode and stripping again can break backtraces.
         jniLibs {
             keepDebugSymbols += listOf(
-                "*/arm64-v8a/libfolio_mobile.so",
-                "*/armeabi-v7a/libfolio_mobile.so",
-                "*/x86_64/libfolio_mobile.so",
-                "*/x86/libfolio_mobile.so"
+                "*/arm64-v8a/libfolio_app.so",
+                "*/armeabi-v7a/libfolio_app.so",
+                "*/x86_64/libfolio_app.so",
+                "*/x86/libfolio_app.so"
             )
         }
     }

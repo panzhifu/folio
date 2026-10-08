@@ -1,8 +1,7 @@
 //! 字形级绘制元素：一条背景矩形 + 若干条「已定好基线」的 run。
 //!
-//! 这一层是移动端与桌面端差别最大的地方：这份 GPUI 快照没有 gpui-kit 的组件层
-//! （没有 `div!`、没有 `TextView`、没有 `v_virtual_list`），而且 **没有 `paint_text`**，
-//! 所以正文只能自己写 `Element`，逐字形 `paint_glyph`。
+//! 这一层是移动端与桌面端差别最大的地方：正文需要字形级控制（选择高亮、ruby、竖排），
+//! 而这份 GPUI 快照 **没有 `paint_text`**，所以正文自己写 `Element`，逐字形 `paint_glyph`。
 //!
 //! 落点算法照抄 gpui 自己的 `paint_line`（`text_system/line.rs:452` 起）：
 //! 它把字形画在「行框原点 + (0, padding_top + ascent) + glyph.position」，
@@ -12,9 +11,9 @@
 //! 不会出现「按 A 算的行高、按 B 画的字形」。
 
 use gpui::{
-    black, fill, point, px, relative, size, App, Element, ElementId, Font, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Length, Pixels, Point, SharedString, Style, TextRun,
-    Window,
+    App, Element, ElementId, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
+    LayoutId, Length, Pixels, Point, SharedString, Style, TextRun, Window, black, fill, point, px,
+    relative, size,
 };
 
 /// 一条已经定好位置的 run，等于 `folio_core::layout::LineRun` 的绘制侧投影。

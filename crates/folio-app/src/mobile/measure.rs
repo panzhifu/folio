@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use folio_core::layout::{FontKey, LineMetrics, Measure};
 use gpui::{
-    black, px, Font, FontStyle, FontWeight, SharedString, TextRun, TextSystem, WindowTextSystem,
+    Font, FontStyle, FontWeight, SharedString, TextRun, TextSystem, WindowTextSystem, black, px,
 };
 
 /// CSS 的泛族名。它们解析不出真实字体：`resolve_font` 找不到就叫平台默认，

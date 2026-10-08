@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+name = "folio_app"
+# rlib：桌面 bin 与 tests 链接；cdylib：Android / HarmonyOS 宿主 dlopen；
+# staticlib：iOS 由 Xcode 链接。三项都列，因为 crate-type 不能按 target 门控。
+crate-type = ["rlib", "cdylib", "staticlib"]
+path = "src/lib.rs"
+
 [[bin]]
 name = "folio"
 path = "src/main.rs"
@@ -13,6 +20,21 @@ path = "src/main.rs"
 [dependencies]
 folio-core.workspace = true
 gpui-kit.workspace = true
+# 桌面与移动现在是同一个 gpui-pre —— 这正是能合进一个 crate 的前提。
+# 移动端的视图/度量直接 `use gpui::…`，所以这里显式引一份（桌面走 gpui-kit 转出）。
+log = "0.4"
+gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false }
+
+# ── 移动端平台层：只在移动目标上链，桌面端根本不编译它 ──
+# 包名是 `gpui-pre-mobile`，lib 名仍是 `gpui_mobile`，所以 `use gpui_mobile::…` 不变。
+# TODO：这条依赖默认挂着 30 多个平台插件 feature，开发方案 §2.2b 要求关掉
+#       （`default-features = false`），还没落实。
+[target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
+gpui-pre-mobile = { path = "../../../gpui-mobile" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15"
+android-activity = { version = "0.6", features = ["native-activity"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

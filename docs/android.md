@@ -28,18 +28,21 @@ fork 上这两处改动（`Cargo.toml` 四处 pin + `src/android/window.rs` 补�
 **待办**：开发方案 §2.2b 要求这条依赖 `default-features = false`（它默认挂 30 多个平台插件 feature），
 目前还没关。
 
-**为什么 `crates/folio-mobile` 是独立的 cargo workspace**（根 `Cargo.toml` 里 `exclude`）：
-`[patch.crates-io]`（`async-task` 那条，fork 需要）只在 workspace 根生效，桌面端不该继承；
-分家之后移动端自己有一份 `Cargo.lock`，`libc` 被钉在 0.2.189（0.2.190 起 `ENOATTR` 从 android
-模块里删掉，而 `gpui → http_client → async-tar → xattr` 还按旧名字引它）。
+**为什么移动端以前是独立的 cargo workspace，现在又不独立了**：早先根 `Cargo.toml` 用
+`exclude = ["crates/folio-mobile"]`，理由是「两端链的不是同一个 `gpui` 包」。fork 换到
+`gpui-pre =0.3.8` 之后这条不成立了，于是**合并进 `crates/folio-app`，移动代码在 `src/mobile/`**，
+整体由 `cfg(mobile)`（`crates/folio-app/build.rs` 设）与桌面模块互斥编译。代价是两边共用一张依赖图、
+一份 `Cargo.lock`：`[patch.crates-io]`（`async-task` 那条，fork 需要）和 `[profile.release]`
+因此都挪到了仓库根 `Cargo.toml`。`libc` 那次钉 0.2.189 的理由（`xattr` 按旧名引 `ENOATTR`）
+在合并时已不存在——两个 lock 里都没有 `xattr`——所以取桌面端的 0.2.190，实测 Android 链接通过。
 
 ## 2. 构建与安装（本机实测可用）
 
 ```bash
 export ANDROID_NDK_HOME=/opt/android-ndk
-cd crates/folio-mobile
+cd crates/folio-app
 
-# 1) 交叉编译 cdylib → libfolio_mobile.so
+# 1) 交叉编译 cdylib → libfolio_app.so（[lib] name = "folio_app"）
 CARGO_TARGET_DIR=~/.cache/folio-mobile-android \
   cargo ndk -t arm64-v8a -P 26 -o android/app/src/main/jniLibs build --release --lib
 
@@ -57,13 +60,14 @@ adb shell am start -n dev.folio.reader/dev.gpui.mobile.GpuiActivity
 - **`-P 26` 必须显式给**。`cargo ndk` 默认 min-API 是 21，而 NDK r30 的 sysroot 里
   `libnativewindow.so`（`ndk-sys` / `android-activity` 要链）只在 API 26+ 目录里。
   写进 `.cargo/config.toml` 的 `[env]` 也没用 —— 那是给 cargo 的子进程的，`cargo ndk` 自己是外层。
-- **`RUST_FONTCONFIG_DLOPEN=on`**（已在 `crates/folio-mobile/.cargo/config.toml`）：
+- **`RUST_FONTCONFIG_DLOPEN=on`**（已在 `crates/folio-app/.cargo/config.toml`）：
   `yeslogic-fontconfig-sys` 默认要求链接期找到 libfontconfig，Android sysroot 里没有；
   真机上字体由 cosmic-text 扫 `/system/fonts/`。
 - **target 目录放 `~/.cache` 而不是 `/tmp`**：`/tmp` 是 tmpfs，11 GB 的构建缓存会吃掉内存。
   产物 `libgpui_mobile.so` 由 fork 自己那次 `cargo ndk` 生成，改 fork 才需要重编它。
 
-宿主侧（不交叉编译）只保留 `host_main()`，为的是 `cargo check` / `cargo clippy` 在 x86 上过得去。
+移动模块整体由 `cfg(mobile)` 门控，所以宿主（不交叉编译）上 `cargo check` / `cargo clippy`
+编的是桌面模块，移动那套连同 `gpui-pre-mobile` 根本不会进依赖图。
 
 ## 3. 设备事实（Meizu 20）
 
@@ -101,7 +105,55 @@ adb shell am start -n dev.folio.reader/dev.gpui.mobile.GpuiActivity
 - **`screencap` 的 md5 不能当比较依据**：状态栏时钟每秒变，整帧哈希必变。要比就裁掉状态栏与栏区，
   数内容区的差异像素。
 
-## 6. 一处遗留的误导
+## 6. 桌面组件层能不能上 Android：已实测，能（2026-10-09）
+
+**`gpui-kit` 与 fork 的 AndroidPlatform 可以链进同一个二进制并在真机跑起来。**
+旧文档里「`folio-app` 的组件层编译不到 Android」这句话已经不成立 —— 它是两个 gpui 快照冲突时期的
+推论，而 fork 换到 `gpui-pre =0.3.8` 之后，桌面与移动端用的是**同一个** `gpui` crate。
+
+结构上的理由：`gpui-pre` 核心里**没有平台代码**（`x11` / `wayland` 只是 feature 标记，真正的平台实现
+在 `gpui-pre-platform` 那个 crate 里），`Platform` 由外部注入 —— 桌面注 `gpui-pre-platform`，
+移动端注 `gpui_mobile::android`。所以组件层是平台无关的源码，实测也证实了这一点：
+`gpui-base` / `gpui-component` / `gpui-kit` 交叉 check 时，依赖图里根本没有
+platform / wgpu / x11 / wayland / cosmic-text。
+
+四道关的实测数（探针 = 给当时的 `crates/folio-mobile` 加一条 `gpui-kit` git 依赖；两端现在已合并进 `crates/folio-app`）：
+
+| 关 | 结果 |
+|---|---|
+| 依赖解析 | 重解析 323 个包；`libc` 的 0.2.189 钉住未被动 |
+| 交叉 check | 392 个 crate 通过，`aarch64-linux-android` 零错误 |
+| release 链接 | 通过（`lto = "fat"`，1m59s） |
+| 真机 | `gpui_kit::init(cx)` 在注入的平台下不崩；`ThemeRegistry` 报 2 套主题；窗口正常打开 |
+
+主题值确实到了绘制路径：栏底从写死的 `(250,249,245)` 变成 `(255,255,255)`，正是
+`crates/base/src/theme_tokens.rs:57` 里 Default Light 的 `background`。一个真 `Button` 画了出来
+（含中文），点击真的改变了应用状态并重绘；一次 tap 对应一条回调日志。
+
+**代价**：`libfolio_app.so` 11,601,808 → 15,398,560 字节（+3.80 MB，+32.7%）。APK 的增量与它逐项相等
+（+3,852,864 字节），但别拿当时的 APK 绝对值当基线 —— 那次量到的 36.7 MB 里有约 11 MB 是干净重编复现
+不出来的残留，同一份源码重新打过是 25.8 MB。
+
+**还没验的四件事**：`application().with_assets()` 那条图标通路在 Android 上怎么接（移动端走的是
+`with_platform`）；浮层类组件（`Dialog` / `Sheet` / `Popover`）；按下态视觉（实测常态与按下态像素零差异，
+不确定是本来就没有变化还是没抓到）；`Mode::System`（fork 有 `appearance()`，但宿主 Activity 没声明
+night 资源）。
+
+**由此定下的主题方案**（尚未实施）：两端都走 `ThemeRegistry::load_themes_from_str` + 读 `cx.theme()`，
+移动端不写任何 JSON 解析。这一步原先要先把主题嵌入从 `folio-app/build.rs` 挪到 `folio-core`，
+因为 `folio-mobile` 的依赖图里没有 gpui-kit、找不到那套 `themes/`；**合并后这条前置消了一半** ——
+`crates/folio-app/build.rs` 现在两端都会跑，而 `crates/folio-app` 的依赖图里有 gpui-kit。
+但 `cargo metadata` 仍要显式指向仓库根 workspace 且带 `--offline`（嵌套调用 cargo 不带 `--offline`
+会去抢 package cache 锁）。另一个前置：`paths::config_dir()` 在 Android 上会落到 `/tmp/.config/folio`
+（`$HOME` 未设），用户主题目录与 `config.json` 都卡在这条上。
+
+一个留给产品的决定：Default Light 的 `background` 是纯白，而现在移动端的正文底色是为阅读写的暖纸色
+`(250,249,245)`。阅读区到底跟 `background`、跟 `surface`/`muted`，还是单独走暖色/sepia，
+不该由渲染层顺手定。
+
+探针代码已回退，改动留成补丁：`~/.cache/folio-probe-backup/probe.patch`（`git apply` 可复原）。
+
+## 7. 一处遗留的误导
 
 `src/lib.rs` 里还有 `#[cfg(target_env = "ohos")]` 的 HarmonyOS 入口，引用 `gpui_mobile::ohos::napi`
 与 `gpui_ohos_napi_module!` —— 而 `longbridge/gpui-mobile` 这条线**没有 `ohos` 模块**（鸿蒙那份改动留在

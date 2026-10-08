@@ -1,16 +1,15 @@
 //! 一条文档路径 → `folio_core::layout::Layout`。
 //!
 //! 这一段是移动端的「外壳」：folio-core 负责 format → dom → css → layout，
-//! 这里只补上桌面端由 gpui-kit 组件层承担、而这份 GPUI 快照里没有的那部分 ——
-//! 把纯文本文档变成排版层认得的 XHTML。
+//! 这里只补上那一步 —— 把纯文本文档变成排版层认得的 XHTML。
 
 use std::path::Path;
 
-use folio_core::css::computed::{cascade, ComputedStyle, TextAlign};
+use folio_core::Reader;
+use folio_core::css::computed::{ComputedStyle, TextAlign, cascade};
 use folio_core::css::{Origin, RuleSet};
 use folio_core::dom::{Dom, NodeId};
-use folio_core::layout::{layout as typeset, Layout, LayoutOptions, NoImages};
-use folio_core::Reader;
+use folio_core::layout::{Layout, LayoutOptions, NoImages, layout as typeset};
 use folio_core::{Chapter, Content, DocMeta, FlowDoc, Format};
 use gpui::{App, Window};
 
@@ -27,7 +26,7 @@ pub fn open(path: &Path) -> folio_core::Result<(DocMeta, FlowDoc)> {
 /// EPUB 的章节本来就是 XHTML，原样透传。Markdown / TXT 的 `Chapter::source` 是
 /// **规范化后的纯文本**（见 `folio-core/src/format/markdown.rs`：它只做行尾统一、
 /// 压空行、按 `#` 分章，从不生成 HTML；桌面端把这两类交给 gpui-kit 的 TextView，
-/// 而这里没有组件层），所以要自己做一次最小规范化：
+/// 移动端走自研引擎，所以要自己做一次最小规范化）：
 /// 空行分段、段内换行 → `<br/>`、ATX 标题 → `<hN>`，文字全部 XML 转义。
 /// 段落顺序与字符内容都不改动原文，锚点坐标系（`Chapter::source` 的字节偏移）
 /// 因此仍然成立。
@@ -200,7 +199,7 @@ impl Page {
         if self.laid_out == Some(key) {
             return;
         }
-        let measure = crate::measure::MobileMeasure::new(
+        let measure = crate::mobile::measure::MobileMeasure::new(
             cx.text_system().clone(),
             window.text_system().clone(),
             self.prefs.font_family.clone(),

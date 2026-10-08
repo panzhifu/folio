@@ -1,12 +1,13 @@
 //! 移动端外壳：底部导航栏与它下面的四个目的地。
 //!
-//! 桌面端的导航来自 gpui-kit 的 `Sidebar` / `TabBar`。移动端两边都没有可复用的：
-//! `crates/folio-mobile` 链的 GPUI 是 crates.io 的 `gpui-pre` 快照，只有原语
-//! （`div` / `InteractiveElement` / `ParentElement`）；`gpui-mobile` 自带一套
-//! Material 组件（`gpui_mobile::components::material::NavigationBarBuilder`，
-//! 就是底部导航栏），但它把 MD3 的紫色系配色写死在 `build()` 里，图标位用的是
-//! emoji —— 而 emoji 要能画出来得先把字体推进应用 assets 并注册 AssetSource。
-//! 所以这条栏用 `div` 原语拼，颜色沿用 `reader_view` 那组纸墨值。
+//! 桌面端的导航来自 gpui-kit 的 `Sidebar` / `TabBar`。这条栏一开始是用 `div` 原语拼的 ——
+//! 当时移动端还没有组件层（独立的 `crates/folio-mobile` 只链了 `gpui-pre` 的原语），
+//! `gpui-mobile` 自带的 Material 组件（`NavigationBarBuilder`）又把 MD3 紫色写死、
+//! 图标位用 emoji，所以没有用。
+//!
+//! 现在两端已合并进 `crates/folio-app`，gpui-kit 在移动端也可用（真机实测见
+//! `docs/android.md` §6），换成 `TabBar`/`Button` + `cx.theme()` 是接下来的事；
+//! 在那之前这段保持原语写法，颜色沿用 `reader_view` 那组纸墨值。
 //!
 //! 点击在 Android 上成立，靠的是 gpui 自己的手势识别器：平台层只上报
 //! `PlatformInput::Touch`（`gpui-mobile/src/android/window.rs:1490`），
@@ -21,11 +22,11 @@
 
 use folio_core::layout::FontKey;
 use gpui::{
-    div, prelude::*, px, transparent_black, App, ClickEvent, Entity, Font, SharedString, Window,
+    App, ClickEvent, Entity, Font, SharedString, Window, div, prelude::*, px, transparent_black,
 };
 
-use crate::measure::mobile_font;
-use crate::reader_view::{device_family, ink, muted, paper, ReaderView};
+use crate::mobile::measure::mobile_font;
+use crate::mobile::reader_view::{ReaderView, device_family, ink, muted, paper};
 
 /// 栏高（逻辑像素）。同一个数既用来定这条栏的高度，也在 `ShellView::boot` 里
 /// 作为「底部被外壳占掉的高度」告诉正文，让正文的可滚范围据此缩短。
@@ -135,11 +136,7 @@ impl ShellView {
                         .w(px(INDICATOR_WIDTH))
                         .h(px(INDICATOR_HEIGHT))
                         .rounded(px(INDICATOR_HEIGHT / 2.0))
-                        .bg(if active {
-                            ink()
-                        } else {
-                            transparent_black()
-                        }),
+                        .bg(if active { ink() } else { transparent_black() }),
                 )
                 .child(
                     div()

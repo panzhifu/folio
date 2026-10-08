@@ -1,6 +1,6 @@
 //! 阅读视图：`Render` 实现 + 触摸滚动。
 //!
-//! 没有 gpui-kit 的组件层，所以这里只有两样东西：一个铺满窗口、接滚动事件的 `div`，
+//! 这里只有两样东西：一个铺满窗口、接滚动事件的 `div`，
 //! 和里面那个自己写的 [`GlyphsElement`]。滚动**不自己做惯量**：
 //! `gpui-mobile` 的平台层已经把触摸翻译成了 `ScrollWheel` 事件
 //! （`gpui-mobile/src/android/window.rs:1316` 起，用 `momentum::VelocityTracker` 估速度、
@@ -10,16 +10,16 @@
 
 use std::path::{Path, PathBuf};
 
-use folio_core::layout::{FontKey, Layout, LineFragment};
 use folio_core::Reader;
+use folio_core::layout::{FontKey, Layout, LineFragment};
 use gpui::{
-    div, hsla, App, Context, Hsla, InteractiveElement, IntoElement, ParentElement, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Window,
+    App, Context, Hsla, InteractiveElement, IntoElement, ParentElement, Render, Rgba, ScrollDelta,
+    ScrollWheelEvent, SharedString, Styled, Window, div, hsla,
 };
 
-use crate::document::{chapter_xhtml, open, Page};
-use crate::measure::mobile_font;
-use crate::paint::{GlyphRun, GlyphsElement};
+use crate::mobile::document::{Page, chapter_xhtml, open};
+use crate::mobile::measure::mobile_font;
+use crate::mobile::paint::{GlyphRun, GlyphsElement};
 
 /// 纸色背景 + 近黑正文。主题系统（桌面端从框架主题目录读）还没接到移动端，
 /// 所以先给一组固定值，不假装是主题。
@@ -147,7 +147,7 @@ impl ReaderView {
 
     pub fn title(&self) -> SharedString {
         match &self.source {
-            Source::Sample(_) => "folio-mobile".into(),
+            Source::Sample(_) => "folio".into(),
             Source::Document { title, .. } => title.clone(),
         }
     }

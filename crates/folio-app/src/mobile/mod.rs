@@ -1,23 +1,16 @@
-//! Folio 的移动端口：**一个独立的 cargo workspace**。
+//! 移动端（Android / iOS / HarmonyOS）：平台入口 + 外壳视图。
 //!
-//! 为什么要独立（根 Cargo.toml 里把本目录 `exclude` 了）：
-//! - 桌面端 `folio-app` 的 GPUI 是 crates.io 的 `gpui-pre`，Android 平台层来自
-//!   `gpui-mobile` fork，它带的是 Zed 的 git `gpui`。两个都叫 `gpui` 的 lib
-//!   不能进同一个二进制。
-//! - `[patch.crates-io]` 只在 workspace 根生效，而 `async-task` 那个补丁
-//!   桌面端不该继承。
-//!
-//! 所以这里只依赖 `folio-core`（不含 gpui，已验证能交叉编译到
-//! `aarch64-linux-android`），UI 层对着移动端的 GPUI 重写。
+//! 这是 `folio-app` 的一个子模块，只在移动 target 上编译（`cfg(mobile)`，见 `build.rs`）。
+//! 平台层来自 `gpui-pre-mobile`（lib 名 `gpui_mobile`，长桥/社区的兼容 fork），
+//! 排版与书库原样复用 `folio-core`。桌面模块与这里互斥，所以一个 crate 里两套 UI 并存。
 //!
 //! ## 入口
 //!
-//! - **Android**：`android-activity` 载入 `libfolio_mobile.so` 后在专用原生线程调
+//! - **Android**：`android-activity` 载入 `libfolio_app.so` 后在专用原生线程调
 //!   [`android_main`]，它**不返回**直到 activity 结束。
 //! - **iOS**：`main.m` 调 [`gpui_ios_register_app`] 注册根视图，再交给 UIKit 生命周期。
 //! - **HarmonyOS**：`XComponent` 按 `libraryname` 载入 `.so`，NAPI 模块构造器接上
 //!   [`ohos_napi_init`]。
-//! - **宿主（Linux/macOS）**：没有移动平台层，只保留 [`host_main`] 让 `cargo check` 过得去。
 //!
 //! ## 窗口生命周期（Android）
 //!
@@ -35,7 +28,9 @@
 //! export ANDROID_NDK_HOME=/opt/android-ndk
 //! # -P 26 不能省：cargo-ndk 默认 min-API 是 21，而 NDK r30 的 sysroot 里
 //! # libnativewindow.so（ndk-sys / android-activity 要链）只在 API 26+ 目录里。
-//! cargo ndk -t arm64-v8a -P 26 build      # → libfolio_mobile.so
+//! cd crates/folio-app
+//! cargo ndk -t arm64-v8a -P 26 -o android/app/src/main/jniLibs build --release --lib
+//! # → libfolio_app.so（[lib] name = "folio_app"）
 //! ```
 
 // 链接 gpui-mobile，让它的符号（jni 辅助、platform 等）在 cdylib 里可用。
@@ -127,7 +122,7 @@ pub fn ios_main() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// OHOS NAPI 运行时的模块初始化。ArkTS 的 `XComponent` 用
-/// `libraryname: 'folio_mobile'` 载入本 `.so` 时调用。
+/// `libraryname: 'folio_app'` 载入本 `.so` 时调用。
 /// 根视图同样等到 `OnSurfaceCreated` 交出原生窗口才打开。
 #[cfg(target_env = "ohos")]
 pub extern "C" fn ohos_napi_init(
@@ -139,16 +134,16 @@ pub extern "C" fn ohos_napi_init(
         gpui_mobile::ohos::napi::install(
             env,
             exports,
-            "folio_mobile",
+            "folio_app",
             Box::new(|cx: &mut App| open_main_window(cx)),
         );
     }
     exports
 }
 
-// 模块名必须与 `XComponent` 的 `libraryname`（即 `libfolio_mobile.so`）一致。
+// 模块名必须与 `XComponent` 的 `libraryname`（即 `libfolio_app.so`）一致。
 #[cfg(target_env = "ohos")]
-gpui_mobile::gpui_ohos_napi_module!("folio_mobile", crate::ohos_napi_init);
+gpui_mobile::gpui_ohos_napi_module!("folio_app", crate::mobile::ohos_napi_init);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 共享的窗口创建
@@ -169,18 +164,4 @@ fn open_main_window(cx: &mut App) {
         Err(err) => log::error!("open_main_window: 打开失败：{err:#}"),
     }
     cx.activate(true);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 宿主（非移动平台）
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// 宿主上没有移动平台层，窗口起不来。留着这个函数只为让 `cargo check` /
-/// `cargo clippy` 在 x86 主机上过得去（`main.rs` 里对应的 `fn main` 也只打一行提示）。
-#[cfg(not(any(target_os = "ios", target_os = "android", target_env = "ohos")))]
-pub fn host_main() {
-    eprintln!(
-        "folio-mobile 只为 iOS / Android / HarmonyOS 而写。\
-         请用 `cargo ndk -t arm64-v8a build`（Android）或 `--target aarch64-apple-ios`（iOS）。"
-    );
 }

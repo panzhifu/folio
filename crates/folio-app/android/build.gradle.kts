@@ -1,7 +1,8 @@
 // Root Gradle project for Folio on Android.
 //
-// The native library is produced by cargo-ndk from the `folio-mobile` crate one
-// directory up, into app/src/main/jniLibs; this project only packages it.
+// The native library is produced by cargo-ndk from the `folio-app` crate one
+// directory up (lib → libfolio_app.so), into app/src/main/jniLibs; this project
+// only packages it.
 //
 //   cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build --release
 //   ./gradlew assembleDebug

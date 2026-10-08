@@ -19,6 +19,16 @@ use std::process::Command;
 use std::{env, fs};
 
 fn main() {
+    // 自定义 cfg：`mobile` = Android / iOS / HarmonyOS。
+    // `lib.rs` 用它把桌面模块与 `mobile` 模块互斥编译。必须显式声明 check-cfg，
+    // 否则 rustc 会对 `#[cfg(mobile)]` 报 unexpected_cfgs。
+    println!("cargo:rustc-check-cfg=cfg(mobile)");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if matches!(target_os.as_str(), "android" | "ios") || target_env == "ohos" {
+        println!("cargo:rustc-cfg=mobile");
+    }
+
     println!("cargo:rerun-if-env-changed=FOLIO_THEMES_DIR");
     println!("cargo:rerun-if-changed=../../Cargo.lock");
     // 文案表是 `rust_i18n::i18n!` 在编译期读的，cargo 自己不知道这件事：

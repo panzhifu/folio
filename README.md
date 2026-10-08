@@ -18,10 +18,12 @@ gpui-kit 的富文本组件明确不做 CSS（其 Not Goals 原文：*As a HTML 
 
 ```
 crates/folio-core/   零 gpui 依赖：DOM、CSS、排版算法、锚点、SQLite、格式适配
-crates/folio-app/    gpui-kit 侧：视图、绘制、选择、快捷键、主题、设置
+crates/folio-app/    gpui 侧：桌面壳（app/reader/settings/theme）+ 移动端（src/mobile/）
 ```
 
-这条边界是硬约束：`folio-core` 不依赖 gpui，所以它能被 `cargo test` 全量覆盖，也是将来在 Android 宿主里复用的前提。
+这条边界是硬约束：`folio-core` 不依赖 gpui，所以它能被 `cargo test` 全量覆盖，也是 Android
+宿主里复用的前提。桌面与移动在同一个 `folio-app` 里，由 `cfg(mobile)` 互斥编译 ——
+两端用的是同一个 `gpui-pre` 快照，所以能进同一张依赖图。
 
 阅读位置与标注锚点都以**章内字符偏移**为坐标系，不是页码 —— 页码在字号或窗口宽度变化后就会失效。
 
@@ -34,6 +36,14 @@ cargo run --example spike   # M0 排版验证：stdout 出结论，窗口出自�
 ```
 
 Linux 需要 fontconfig、wayland、xkbcommon 的开发包与可用的 Vulkan 驱动。Wayland 与 X11 都已验证可跑。
+
+Android 交叉编译（构建配方与设备事实见 [`docs/android.md`](docs/android.md)）：
+
+```bash
+export ANDROID_NDK_HOME=/opt/android-ndk
+cd crates/folio-app
+cargo ndk -t arm64-v8a -P 26 -o android/app/src/main/jniLibs build --release --lib
+```
 
 ## 测试样本
 
