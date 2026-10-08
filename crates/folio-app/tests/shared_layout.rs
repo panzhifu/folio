@@ -73,15 +73,6 @@ fn layout_of(cx: &mut TestAppContext, xhtml: &str, prefs: &Reader, width: f32) -
     document
 }
 
-/// 每行的 `(左缘, 纵向位置)`。
-fn typeset(cx: &mut TestAppContext, xhtml: &str, prefs: &Reader, width: f32) -> Vec<(f32, f32)> {
-    layout_of(cx, xhtml, prefs, width)
-        .lines()
-        .iter()
-        .map(|line| (line.x, line.y))
-        .collect()
-}
-
 /// Markdown 的章源文本是规范化纯文本，进排版层之前要包成 XHTML。
 /// 这里钉住四件事：空行分段、段内换行成硬换行、ATX 标题成 `<hN>`、特殊字符转义。
 /// 少任何一条，移动端读 `.md` 就会把整篇排成一个段落，或把尖括号当标签吃掉。
@@ -167,17 +158,29 @@ fn the_pane_reserve_is_subtracted_from_the_measure(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn an_indent_change_reflows_the_document(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let xhtml = format!("<p>{}</p>", LONG.repeat(6));
+    let handle = window(cx, 600.0, 900.0);
+    let mut prefs = bare_prefs();
+    prefs.indent_em = 0.0;
+    let mut document = Document::new(
+        format!("<p>{}</p>", LONG.repeat(6)),
+        "",
+        prefs.clone(),
+        Arc::new(ChapterImages::empty()),
+    );
 
-    let first_line_left = |indent_em: f32, cx: &mut TestAppContext| {
-        let mut prefs = bare_prefs();
-        prefs.indent_em = indent_em;
-        let lines = typeset(cx, &xhtml, &prefs, 600.0);
-        lines.first().map(|(x, _)| *x).unwrap_or(0.0)
-    };
+    // 第一次排版：无缩进。
+    cx.update_window(handle, |_, win, cx| document.ensure_layout(win, cx, 0.0))
+        .expect("第一次排版应当成功");
+    let flat = document.lines().first().map(|line| line.x).unwrap_or(0.0);
 
-    let flat = first_line_left(0.0, cx);
-    let indented = first_line_left(2.0, cx);
+    // 同一个文档、同一个窗口，**只**改首行缩进：宽度、字号、行距都没变。
+    // 缓存键只记那三项时这里会直接复用上面的布局，第一行的左缘一动不动。
+    prefs.indent_em = 2.0;
+    document.set_prefs(prefs);
+    cx.update_window(handle, |_, win, cx| document.ensure_layout(win, cx, 0.0))
+        .expect("第二次排版应当成功");
+    let indented = document.lines().first().map(|line| line.x).unwrap_or(0.0);
+
     assert!(
         indented > flat,
         "首行缩进改了必须重排：不缩进时第一行左缘 {flat}，缩进两字后 {indented}"
