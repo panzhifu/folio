@@ -11,5 +11,5 @@ pub mod store;
 pub use error::{Error, Result};
 pub use format::{Chapter, Content, DocMeta, FlowDoc, Format, open};
 pub use position::Locator;
-pub use prefs::Prefs;
+pub use prefs::{Prefs, ThemeName};
 pub use store::Store;
