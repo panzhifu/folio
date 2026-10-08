@@ -1,106 +1,109 @@
-# Android 适配可行性（M0 附加 spike）
+# Android 移植：现状、依赖路线与构建配方
 
-> 日期：2026-10-08 · 结论：**路线可行，但有一道必须先过的依赖统一关，且本机 Android 工具链完全没装。**
+> 更新 2026-10-09。首次真机验证 2026-10-08（Meizu 20）：**正文渲染、平台滚动、底部导航栏四格切换成立**。
+> 这份文档原先记的是 M0 阶段的可行性判断，那些判断已经被实测推翻或落实，逐条更正如下。
+> 缺口清单在 `docs/known-limitations.md` 的「移动端」一节。
 
-## 1. 移动端走哪条路
+## 1. 依赖路线
 
-`panzhifu/gpui-mobile`（fork 自 `itsbalamurali/gpui-mobile`，默认分支 `main`，最后推送 2026-10-02），
-描述：*Mobile platform support for GPUI — iOS (wgpu/Metal) and Android (wgpu/Vulkan)*。
-
-Android 侧结构已成型，不是空壳：
-
-```
-src/android/{platform,window,dispatcher,display,keyboard,jni,platform_view}.rs
-example/android/            ← Gradle 工程 + native-activity 宿主
-crate-type = ["staticlib", "cdylib", "rlib"]
-```
-
-**许可证**：`GPL-3.0-or-later OR AGPL-3.0-or-later OR Apache-2.0` 三选一。我们取 **Apache-2.0**，
-所以不会把 Folio（MIT）拖进 copyleft。注意**不要**选 AGPL 那份 —— 网络服务条款对我们没好处。
-发布时要保留上游版权声明与 LICENSE 文件。
-
-它的 `default` features 挂了 30 多个平台插件（webview / camera / sensors / location…），
-Folio 一个都不要，必须 `default-features = false` 按需开。
-
-## 2. 真正的阻塞点：两个 gpui 快照
-
-| 层 | 依赖 | 来源 |
+| 层 | 来源 | 版本 |
 |---|---|---|
-| 桌面 `folio-app` | `gpui-kit 0.7.1` → **`gpui-pre 0.3.8`** | crates.io，描述写明是 *snapshot of **zed@279fe07*** |
-| 移动端 `gpui-mobile` | **`gpui`**（git） | `github.com/zed-industries/zed` rev **`5688167d`** |
+| 平台层（Android 后端） | `longbridge/gpui-mobile`，本机 clone 在 `~/Code/gpui-mobile`，分支 `line/gpui-pre` 跟踪 `longbridge/main` | crates.io 包名 **`gpui-pre-mobile`**，lib 名仍是 `gpui_mobile` |
+| GPUI 本体 | crates.io | **`gpui-pre =0.3.8`**，与桌面端 gpui-kit 钉的是同一版 |
+| 排版与书库 | `crates/folio-core` | 路径依赖，零 gpui，原样复用 |
 
-**同一个上游项目的两个不同 commit，但 Cargo 看是两个不同的包**（一个叫 `gpui-pre`，一个叫 `gpui`），
-因此**没法同时链进一个二进制**。直接结论：
+**原先判断的阻塞点已经解除。** 旧文档写的是：桌面 `gpui-kit` 钉 crates.io 的 `gpui-pre`，而
+`gpui-mobile` 依赖 Zed git 的 `gpui`，同一上游的两个快照被 Cargo 当作两个包，无法同时链进一个二进制，
+而「修掉两个快照之间的 `Platform` trait 漂移」是唯一未知数。实测：`gpui-mobile` 的活跃上游
+（`longbridge/gpui-mobile`）本身就跑在 `gpui-pre` 这条线上，从它的 0.3.7 跟到桌面端的 0.3.8，
+漂移只有**一处** —— `RequestFrameOptions` 新增 `signal_at: Option<Instant>` 与
+`signal_source: FrameRequestSource`，在 `src/android/window.rs` 的 AChoreographer 回调处填
+`None` + `NativeCallback` 即可。所以既不需要把桌面降到旧快照，也不需要接受「两套 UI 并存」。
 
-- ❌ `folio-app`（含 Sidebar / TabBar / Dialog 等 gpui-kit 组件层）现在**编译不到 Android**。
-- ✅ `folio-core` 零 gpui 依赖（已验证：29 个测试全绿，无 gpui）→ **Android 上原样复用，一行不改**。
+fork 上这两处改动（`Cargo.toml` 四处 pin + `src/android/window.rs` 补两个字段）目前**只在本机分支上，
+没有 push**。
 
-好消息是这**不是分叉的 fork**，只是同一上游的两个快照。所以统一路径是明确可做的：
+**许可证**：`GPL-3.0-or-later OR AGPL-3.0-or-later OR Apache-2.0` 三选一，取 **Apache-2.0**，
+不把 MIT 的 Folio 拖进 copyleft。发布时保留上游版权声明与 LICENSE。
+**待办**：开发方案 §2.2b 要求这条依赖 `default-features = false`（它默认挂 30 多个平台插件 feature），
+目前还没关。
 
-```
-把 gpui-mobile 的 gpui 依赖从 zed@5688167 改指 gpui-pre 0.3.8，
-修掉 279fe07 → 5688167 之间的 Platform trait 漂移。
-```
+**为什么 `crates/folio-mobile` 是独立的 cargo workspace**（根 `Cargo.toml` 里 `exclude`）：
+`[patch.crates-io]`（`async-task` 那条，fork 需要）只在 workspace 根生效，桌面端不该继承；
+分家之后移动端自己有一份 `Cargo.lock`，`libc` 被钉在 0.2.189（0.2.190 起 `ENOATTR` 从 android
+模块里删掉，而 `gpui → http_client → async-tar → xattr` 还按旧名字引它）。
 
-漂移量是这件事的唯一未知数，也是 Android spike 的**第一个待跑实验**（见 §4 步骤 2）。
+## 2. 构建与安装（本机实测可用）
 
-顺带说明为什么这比"移动端自己写一套 UI"划算：我们的排版引擎只用到 gpui 的文本与绘制原语
-（`shape_line` / `LineLayout.runs[].glyphs[]` / `paint_glyph` / `canvas`），
-这些在两个快照里都存在（gpui-pre 的那批 API 正是从 Zed 上游 snapshot 来的）。
-所以**引擎层可以跟着快照走，只有 gpui-kit 的组件层在移动端用不了** —— 而移动端的导航本来就该是原生的。
+```bash
+export ANDROID_NDK_HOME=/opt/android-ndk
+cd crates/folio-mobile
 
-## 3. 移动端的目标形态
+# 1) 交叉编译 cdylib → libfolio_mobile.so
+CARGO_TARGET_DIR=~/.cache/folio-mobile-android \
+  cargo ndk -t arm64-v8a -P 26 -o android/app/src/main/jniLibs build --release --lib
 
-```
-Android Activity (Kotlin/Java 壳，Gradle 工程)
-   └─ gpui-mobile 提供 surface + 触摸输入 + PlatformTextSystem
-        └─ folio-core（复用：书库 / DOM / CSS / 排版算法 / 锚点 / SQLite）
-             └─ folio-engine 的 Measure + Paint（对 gpui 抽象，两个快照都能实现）
-   导航、书架、设置 → 平台原生 UI，不搬桌面组件
-```
+# 2) 打 APK（用系统 gradle，不用 wrapper）
+cd android && gradle --no-daemon :app:assembleDebug
 
-这跟 `docs/development-plan.md` §2.2 里 gpui-kit 官方的移动端定位一致：移动端复用**部分组件**，
-不是把桌面壳搬过去。
-
-## 4. 要跑通还缺什么
-
-### 步骤 0：工具链（本机当前**全缺**）
-
-```
-rustup target add aarch64-linux-android   ← 未安装
-cargo-ndk                                 ← 缺
-Android SDK + sdkmanager                  ← 缺（ANDROID_HOME 未设置）
-Android NDK                               ← 缺
-gradle                                    ← 缺（java 已有）
+# 3) 装机并起 Activity
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am force-stop dev.folio.reader
+adb shell am start -n dev.folio.reader/dev.gpui.mobile.GpuiActivity
 ```
 
-体积约 3–5 GB，且要接受 Android SDK 许可。**这一步需要你确认要不要我装。**
+三个不能省的细节：
 
-### 步骤 1：先跑上游自己的 Android 示例
+- **`-P 26` 必须显式给**。`cargo ndk` 默认 min-API 是 21，而 NDK r30 的 sysroot 里
+  `libnativewindow.so`（`ndk-sys` / `android-activity` 要链）只在 API 26+ 目录里。
+  写进 `.cargo/config.toml` 的 `[env]` 也没用 —— 那是给 cargo 的子进程的，`cargo ndk` 自己是外层。
+- **`RUST_FONTCONFIG_DLOPEN=on`**（已在 `crates/folio-mobile/.cargo/config.toml`）：
+  `yeslogic-fontconfig-sys` 默认要求链接期找到 libfontconfig，Android sysroot 里没有；
+  真机上字体由 cosmic-text 扫 `/system/fonts/`。
+- **target 目录放 `~/.cache` 而不是 `/tmp`**：`/tmp` 是 tmpfs，11 GB 的构建缓存会吃掉内存。
+  产物 `libgpui_mobile.so` 由 fork 自己那次 `cargo ndk` 生成，改 fork 才需要重编它。
 
-`cd /tmp/gpui-mobile/example && ./build.sh android`（fork 里脚本行为需实测）。
-目的不是产出 Folio，而是确认「gpui-mobile 的 Android 路径在这台机器上真的能出 apk 并跑到手机上」。
-**这一步没通过之前，任何 Folio 侧的移动端改造都是空谈。**
+宿主侧（不交叉编译）只保留 `host_main()`，为的是 `cargo check` / `cargo clippy` 在 x86 上过得去。
 
-### 步骤 2：trait 漂移实验（决定后面怎么做）
+## 3. 设备事实（Meizu 20）
 
-在 fork 里把 `gpui` 依赖换成 `gpui-pre = "0.3.8"`，`cargo check --target aarch64-linux-android`，
-统计报错数量与性质：
+- Vulkan：Adreno 740，1.0.16 level 1 + compute —— 与宿主声明的 `android.hardware.vulkan.version=0x00401000` 一致。
+- 屏幕 1080×2400，scale 2.8（⇒ 逻辑尺寸约 386×857）。
+- 窗口打开时 fork 报 `safe_area_insets updated: top=116 bottom=70`，单位是**物理像素**（底部 ≈25 逻辑像素）。
+- 系统注册 **13 个字族**，能用的中文正文家族是 **`Noto Sans CJK SC`**。
 
-- 漂移小（几个方法签名）→ 直接做成 `panzhifu/gpui-mobile` 的一个分支，Folio 长期依赖它。
-- 漂移大 → 退一步：**Folio 桌面也改用同一个 gpui 快照**（放弃 gpui-kit 组件层，代价极大，
-  等于侧栏/标签/对话框/主题全部自绘），或者移动端只做「正文渲染 + 原生外壳」的最小闭环，
-  不接受统一依赖，两套 UI 长期并存。
+## 4. 三条最贵的知识
 
-### 步骤 3：Folio 侧改造（依赖统一之后）
+1. **`TextSystem::resolve_font` 是 panic 而不是回退**（`gpui-pre-0.3.8/src/text_system.rs:370`）：
+   请求家族连同整串桌面回退名（`.ZedSans` / Helvetica / Segoe UI / Noto Sans / DejaVu Sans / Arial…）
+   都不存在时直接 SIGABRT，而这在 Android 上是常态。唯一的公开判据是 `all_font_names()`
+   （`font_id` 是私有的），所以按名字比 —— `reader_view::device_family()` 干这件事。
+   任何新加的文字（包括导航栏标签）都要显式 `.font(...)` 指定这台设备真能解析的家族。
+2. **文档必须落在应用专属外部目录** `/sdcard/Android/data/dev.folio.reader/files/`。
+   `/sdcard/Download/` 里的文件属主是媒体提供者（另一个 uid），scoped storage 下本进程读到 EACCES，
+   文件名放对了也不会出现画面。见 `reader_view::candidate_paths()`。
+3. **Markdown 适配器按 `#` 和 `##` 一起分章**，所以以 `# 标题` 开头的样例会让 chapter 0 只剩那个标题 ——
+   看起来完全像「正文没渲染出来」，但不是。测试语料要把正文段落放在第一个标题之前。
 
-- workspace 加 `crates/folio-mobile`（Android cdylib，`crate-type = ["cdylib"]`）
-- `folio-engine` 的 `Measure` / `Paint` 拆成对 gpui 抽象的两份实现，按 `cfg(target_os)` 选
-- SQLite：`rusqlite` bundled 在 Android 上要 NDK 工具链编译 C，需验证交叉编译可用
-- 字体：桌面是 `add_fonts`，移动端 `PlatformTextSystem` 的字体加载路径要单独确认
+## 5. 触摸与滚动的实际路径
 
-## 5. 现在不该做的事
+- 平台层只上报 `PlatformInput::Touch`（`gpui-mobile/src/android/window.rs:1490`）。一次轻点由 gpui 的
+  手势识别器合成 `RecognizedTouchGesture::Tap { down, up }`，再派发 MouseDown/MouseUp
+  （`gpui-pre-0.3.8/src/window.rs:5719`），所以 `div().on_click(...)` 在真机上成立。
+- **惯量不自己做**。平台层的 `momentum::VelocityTracker` + `MomentumScroller` 已经把触摸翻译成
+  `ScrollWheel` 事件，视图只累加 dy；在这里再套一个 `MomentumScroller` 会把同一份惯量算两遍，滚起来翻倍。
+- `adb shell input tap` / `input swipe` 注入的是同一批事件，可以用来验证。
 
-- 不要为了移动端把 `folio-core` 里加任何 `cfg` 分支 —— 它零 gpui 依赖，本来就能跨平台，加判断只会污染它。
-- 不要在步骤 1 通过前开始写 `folio-mobile`。
-- 不要把 gpui-kit 的 `component` 层当成移动端目标 —— 官方明确只验证过一个 AI Chat 区域。
+两条验证卫生（都在这台设备上真踩过）：
+
+- **会出现幽灵触摸**：一次冷启动后没人碰屏幕，截图里却是第三格被选中。判断输入行为前先
+  `am force-stop` + `am start` 取基线。
+- **`screencap` 的 md5 不能当比较依据**：状态栏时钟每秒变，整帧哈希必变。要比就裁掉状态栏与栏区，
+  数内容区的差异像素。
+
+## 6. 一处遗留的误导
+
+`src/lib.rs` 里还有 `#[cfg(target_env = "ohos")]` 的 HarmonyOS 入口，引用 `gpui_mobile::ohos::napi`
+与 `gpui_ohos_napi_module!` —— 而 `longbridge/gpui-mobile` 这条线**没有 `ohos` 模块**（鸿蒙那份改动留在
+旧线的本地分支 `feat/harmonyos-support` 上）。那段代码在当前依赖下永远不会被编译，但模块文档注释还把
+HarmonyOS 列为入口之一。要么删掉，要么等鸿蒙那条线重接回来时一起处理，不要当成可用能力读。

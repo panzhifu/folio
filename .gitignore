@@ -11,3 +11,16 @@
 
 # spike 证据截图是整张桌面抓取，含其他窗口内容，只留在本机。
 /docs/assets-*.png
+
+# 借鉴用的上游仓库克隆（LaTeX 等），只读、体积大，一律不入库。
+# 里面放什么、怎么重新拉取见 reference/README.md。
+/reference/
+
+# Android 产物一律不入库。
+# jniLibs/*.so 是 cargo-ndk 每次构建重新生成的（debug 版单份就有 400M+），
+# gradle 的 build/ 与 .gradle/ 是它的缓存，local.properties 里写的是本机的 SDK 绝对路径 ——
+# 这四样都能在别的机器上由 `cargo ndk` + `./gradlew` 重建出来，提交只会让仓库膨胀且必然冲突。
+crates/folio-mobile/android/app/src/main/jniLibs/
+crates/folio-mobile/android/**/build/
+crates/folio-mobile/android/.gradle/
+crates/folio-mobile/android/local.properties

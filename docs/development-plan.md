@@ -35,17 +35,17 @@ gpui-kit 官方立场：首要目标仍是桌面，移动支持只是让**部分
 
 > **架构约束**：`folio-core` 不得依赖 gpui。v2 之后这条约束变得更关键 —— **DOM、CSS、布局算法全部是无 UI 的纯计算**，可以原样跑在移动端宿主里，只有 `Measure`（字体度量）和 `Paint`（绘制）两处需要平台实现。将来移动端只需替换这两个实现。
 
-#### 2.2b Android 先行（2026-10-08 决定，全文见 [`docs/android.md`](android.md)）
+#### 2.2b Android 先行（2026-10-08 决定；现状与构建配方见 [`docs/android.md`](android.md)）
 
-一期移动端**只做 Android**，走 `panzhifu/gpui-mobile`（fork 自 `itsbalamurali/gpui-mobile`；`src/android/{platform,window,dispatcher,display,keyboard,jni}.rs` 与 `example/android` 的 Gradle + native-activity 宿主已成型）。许可证是三选一 `GPL-3.0 OR AGPL-3.0 OR Apache-2.0`，我们取 **Apache-2.0**，不把 MIT 的 Folio 拖进 copyleft；依赖必须 `default-features = false`（它默认挂 30 多个平台插件）。
+一期移动端**只做 Android**。平台层来自 `longbridge/gpui-mobile`（crates.io 包名 `gpui-pre-mobile`，lib 名仍是 `gpui_mobile`）的 `gpui-pre` 那条线：`src/android/{platform,window,dispatcher,display,keyboard,jni}.rs` 与 Gradle + native-activity 宿主已成型。许可证是三选一 `GPL-3.0 OR AGPL-3.0 OR Apache-2.0`，我们取 **Apache-2.0**，不把 MIT 的 Folio 拖进 copyleft。
 
-上面那条架构约束已兑现：**`folio-core` 零 gpui 依赖，Android 原样复用**。
+上面那条架构约束已兑现：**`folio-core` 零 gpui 依赖，Android 原样复用**。移动端只需要替换 `Measure`（字体度量）与绘制两处，两份实现都在 `crates/folio-mobile/src/`（`measure.rs` / `paint.rs`）。
 
-**但有一个必须先解决的阻塞**：桌面 `gpui-kit 0.7.1` 钉 `gpui-pre 0.3.8`（其 Cargo.toml 自述为 *snapshot of zed@279fe07*），而 `gpui-mobile` 依赖 Zed git `5688167d` 的 `gpui` —— **同一上游的两个快照，Cargo 当作两个包，无法同时链进一个二进制**。因此 `folio-app` 的组件层当前编译不到 Android。
+当初判为「唯一未知数」的 trait 漂移，实测只有**一处**：`gpui-pre` 0.3.7 → 0.3.8 给 `RequestFrameOptions` 加了 `signal_at` 与 `signal_source` 两个字段，在 AChoreographer 回调处补齐即可。所以既不必把桌面降到旧快照，也不必接受「移动端只做正文 + 两套 UI 并存」。
 
-统一路径：把 fork 的 `gpui` 依赖改指 `gpui-pre 0.3.8`，修掉 `279fe07 → 5688167d` 之间的 `Platform` trait 漂移。**漂移量是 Android spike 的第一个实验**：小则长期用这个 fork 分支，大则要么桌面也换快照（等于放弃 gpui-kit 组件层，代价极大），要么接受「移动端只做正文渲染 + 原生外壳」的两套 UI 并存。
+`crates/folio-mobile` 是**独立的 cargo workspace**（根 `Cargo.toml` 里 `exclude`）：它链的 GPUI 与桌面端的 `gpui-pre` 是同一个版本，但 `[patch.crates-io]`（`async-task` 那条）只在 workspace 根生效，桌面端不该继承，所以只能分家。
 
-本机 Android 工具链（rustup android target / cargo-ndk / SDK / NDK / gradle）**当前全缺**，约 3–5 GB，需确认后安装。
+已达成（2026-10-08 在 Meizu 20 真机验证）：正文渲染、平台滚动、底部导航栏四格切换。缺口清单见 `docs/known-limitations.md` 的「移动端」一节 —— 其中一条是这份文档当初就写下的要求至今没落实：这条依赖**仍带着 default features**（30 多个平台插件全开），`default-features = false` 还没改。
 
 ### 2.3 gpui-kit skill（已安装）
 

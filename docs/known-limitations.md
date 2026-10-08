@@ -71,4 +71,30 @@
   中文标点是否越线要在 M2 用定向语料测（开发方案 R3、任务 #10）。
 - **justify 还没验**。`ShapedLine::paint(align, align_width)` 是唯一可用路径；
   spike① 实测 `force_width` **不会**压缩行宽，所以它不是对齐钩子（见 `docs/spikes.md`）。
-- Android 侧只有架构留门，工具链未装（任务 #11）。
+- Android 侧**已经跑通到屏幕上**（2026-10-08，Meizu 20）：正文渲染、平台滚动、底部导航栏都在真机验证过。
+  构建配方与依赖路线见 `docs/android.md`，缺口列在下面。
+
+## 移动端（`crates/folio-mobile`）
+
+- **只渲染第一章**。`reader_view.rs` 里章节号写死为 0，没有章节切换，也没有翻页。
+  样例文件在第 17 行有一个 `##`，所以「滚到底看到的不是全文末尾」是这一条造成的，不是排版丢了行。
+- **图片不画**。`LineFragment::Image` 只按宽度推进 x 占位；桌面端那套图片通路挂在 gpui-kit 的
+  `img` 元素上，`gpui-pre` 快照里要自己接解码 + 纹理上传。
+- **没有主题**。纸色/墨色/次要色三档写死在 `reader_view.rs`，桌面的框架主题目录、
+  `config.json` 偏好、i18n 文案、账号一个都没接过来。所以移动端改字号/字体目前只能改代码。
+- **文档靠 `adb push`**。冷启动按固定文件名（`folio-sample.md` / `.txt` / `.epub`）在应用专属外部目录里试，
+  没有书架界面、没有文件选择器、没有导入。`/sdcard/Download/` 那一档在 scoped storage 下读到 EACCES，
+  所以只能排最后。
+- **排版在主线程**。`Page::ensure_layout` 在渲染帧里做（宽度/字号/行距没变才跳过），
+  桌面端 M4 的后台排版在移动端同样欠着。
+- **不落盘**。`rusqlite`  bundled 能交叉编译到 `aarch64-linux-android`（已验证），但移动端没接库，
+  进度与偏好都不持久化，杀进程即回到第一章开头。
+- **底部导航栏不消费安全区**。fork 在窗口打开时报 `safe_area_insets top=116 bottom=70`（物理像素，
+  scale 2.8 ⇒ 底部 25 逻辑像素），栏的底边落进系统手势区。标签是垂直居中的，视觉上没被压住，
+  但点击热区下沿确实延伸进手势条。
+- **导航栏没有图标**。gpui-pre 快照没有图标通路，emoji 要先推字体进 assets 并注册 AssetSource
+  才画得出来，所以四格只有文字 + 选中标记。
+- **依赖仍带 default features**：`gpui-pre-mobile` 的 30 多个平台插件 feature 全开
+  （开发方案 §2.2b 要求的 `default-features = false` 还没落实）。
+- **零测试**。桌面端有 17 个套件，移动端一条都没有 —— 交叉编译能过 ≠ 排版与点击是对的，
+  目前每次改动都要真机截图才算验证。

@@ -2,6 +2,9 @@
 resolver = "2"
 default-members = ["crates/folio-app"]
 members = ["crates/folio-core", "crates/folio-app"]
+# folio-mobile 是独立的 cargo workspace：它用的是 gpui-mobile fork（Zed 的 git gpui），
+# 与桌面端的 gpui-pre 不能进同一张依赖图（两个同名 lib `gpui` + 桌面端不该继承 [patch]）。
+exclude = ["crates/folio-mobile"]
 
 [workspace.package]
 version = "0.1.0"

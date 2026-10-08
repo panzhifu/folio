@@ -1,0 +1,12 @@
+# 交叉编译到 Android 需要的构建期环境（与 gpui-mobile 仓库里那份一致，
+# 因为 cargo 只读「当前目录往上」的 config，依赖所在的 fork 目录不会生效）。
+#
+# RUST_FONTCONFIG_DLOPEN=on：yeslogic-fontconfig-sys 默认要在链接期找到 libfontconfig，
+# Android sysroot 里没有，改成运行时 dlopen —— 真机上字体由 cosmic-text 扫系统字体目录。
+[env]
+RUST_FONTCONFIG_DLOPEN = "on"
+
+# 注意：min-API 不能写在这里。cargo 的 [env] 只作用于「cargo 起的子进程」，
+# 而 `cargo ndk` 是外层进程，它自己按 --platform（默认 21）算 sysroot 路径，
+# 再经 _CARGO_NDK_SYSROOT_LIBS_PATH 传给链接器包装层。所以 26 必须在命令行上给：
+# `cargo ndk -t arm64-v8a -P 26 build`（或 export CARGO_NDK_PLATFORM=26）。
