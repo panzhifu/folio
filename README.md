@@ -43,6 +43,7 @@ Linux 需要 fontconfig、wayland、xkbcommon 的开发包与可用的 Vulkan �
 
 - [`docs/development-plan.md`](docs/development-plan.md) —— 完整开发方案：渲染路线取舍、引擎架构、CSS 子集范围、里程碑与风险
 - [`docs/spikes.md`](docs/spikes.md) —— M0 实测数据与被推翻的判断
+- [`docs/android.md`](docs/android.md) —— Android 适配可行性：依赖快照冲突、许可证、工具链清单
 
 ## License
 

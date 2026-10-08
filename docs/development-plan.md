@@ -29,11 +29,23 @@ Folio 是一款原生 GPU 渲染的桌面阅读器，不使用 Electron / Tauri 
 
 > v2 下这条结论的含义更明确：正文**由我们自己的引擎排版，交给 gpui 绘制**，框架与 WebView 都不参与正文渲染。
 
-### 2.2 移动端：本期不做，但架构必须留门
+### 2.2 移动端：架构必须留门（Android 已决定先行，见下方补充）
 
 gpui-kit 官方立场：首要目标仍是桌面，移动支持只是让**部分组件**能在 iOS / Android 原生界面里复用，**没有计划**做成 Flutter 那样的完整移动框架。现状基于社区 `gpui-mobile`，gpui-kit 通过兼容性 fork 的 `gpui-pre-mobile` 接入，**只能 git 依赖、未发布 crates.io**。仅 Swift 托管的 iOS 模拟器示例经过验证；已验证的是一个 AI Chat 区域（TextView / Button / Menu / Popover / Scrollbar / Input / Textarea / 文本选择），其他组件与完整布局未验证。
 
 > **架构约束**：`folio-core` 不得依赖 gpui。v2 之后这条约束变得更关键 —— **DOM、CSS、布局算法全部是无 UI 的纯计算**，可以原样跑在移动端宿主里，只有 `Measure`（字体度量）和 `Paint`（绘制）两处需要平台实现。将来移动端只需替换这两个实现。
+
+#### 2.2b Android 先行（2026-10-08 决定，全文见 [`docs/android.md`](android.md)）
+
+一期移动端**只做 Android**，走 `panzhifu/gpui-mobile`（fork 自 `itsbalamurali/gpui-mobile`；`src/android/{platform,window,dispatcher,display,keyboard,jni}.rs` 与 `example/android` 的 Gradle + native-activity 宿主已成型）。许可证是三选一 `GPL-3.0 OR AGPL-3.0 OR Apache-2.0`，我们取 **Apache-2.0**，不把 MIT 的 Folio 拖进 copyleft；依赖必须 `default-features = false`（它默认挂 30 多个平台插件）。
+
+上面那条架构约束已兑现：**`folio-core` 零 gpui 依赖，Android 原样复用**。
+
+**但有一个必须先解决的阻塞**：桌面 `gpui-kit 0.7.1` 钉 `gpui-pre 0.3.8`（其 Cargo.toml 自述为 *snapshot of zed@279fe07*），而 `gpui-mobile` 依赖 Zed git `5688167d` 的 `gpui` —— **同一上游的两个快照，Cargo 当作两个包，无法同时链进一个二进制**。因此 `folio-app` 的组件层当前编译不到 Android。
+
+统一路径：把 fork 的 `gpui` 依赖改指 `gpui-pre 0.3.8`，修掉 `279fe07 → 5688167d` 之间的 `Platform` trait 漂移。**漂移量是 Android spike 的第一个实验**：小则长期用这个 fork 分支，大则要么桌面也换快照（等于放弃 gpui-kit 组件层，代价极大），要么接受「移动端只做正文渲染 + 原生外壳」的两套 UI 并存。
+
+本机 Android 工具链（rustup android target / cargo-ndk / SDK / NDK / gradle）**当前全缺**，约 3–5 GB，需确认后安装。
 
 ### 2.3 gpui-kit skill（已安装）
 
