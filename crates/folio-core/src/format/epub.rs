@@ -14,7 +14,8 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use zip::ZipArchive;
 
-use super::{Chapter, Content, DocMeta, FlowDoc, Format, FormatAdapter, TocEntry};
+use super::{Chapter, Content, DocMeta, FlowDoc, Format, FormatAdapter, ImageRes, TocEntry};
+use super::{dir_of, resolve_href};
 use crate::error::{IoResultExt, Result};
 
 pub struct EpubAdapter;
@@ -77,49 +78,10 @@ fn text_of(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
-/// 把 `href` 相对 `base_dir`（OPF 所在目录）解析成容器内的规范路径。
-/// 去掉 `#fragment`，做百分号解码，折叠 `./` 与 `../`。
+/// 把 `href` 相对 `base_dir` 解析成容器内规范路径。实现收在 `format::resolve_href`，
+/// 与 app 侧图片 resolver 共用同一份（见那里的说明）。
 fn resolve(base_dir: &str, href: &str) -> String {
-    let href = href.split('#').next().unwrap_or(href).trim();
-    let decoded = percent_decode(href);
-    let merged = if decoded.starts_with('/') {
-        decoded.trim_start_matches('/').to_string()
-    } else if base_dir.is_empty() {
-        decoded
-    } else {
-        format!("{base_dir}{decoded}")
-    };
-    let mut stack: Vec<&str> = Vec::new();
-    for seg in merged.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                stack.pop();
-            }
-            other => stack.push(other),
-        }
-    }
-    stack.join("/")
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(n) = u8::from_str_radix(&input[i + 1..i + 3], 16) {
-                out.push(n);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    // href 按 UTF-8 百分号编码；解出来的字节流不一定落在字符边界上，
-    // 那种情况保留替换字符而不是整本读失败。
-    String::from_utf8_lossy(&out).into_owned()
+    resolve_href(base_dir, href)
 }
 
 fn container_path(xml: &str) -> Option<String> {
@@ -488,6 +450,28 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
         .and_then(|n| zip.locate(n))
         .and_then(|n| zip.read(&n));
 
+    // 全书图片：manifest 里所有 image/* 的 item。封面若在 manifest 里会一并被收录，
+    // 排版层按解析后的容器路径查表，所以这里存的 href 必须是 `resolve` 过的。
+    let mut images = Vec::new();
+    for item in opf
+        .items
+        .iter()
+        .filter(|i| i.media_type.starts_with("image/"))
+    {
+        let name = resolve(&base_dir, &item.href);
+        let Some(bytes) = zip.locate(&name).and_then(|n| zip.read(&n)) else {
+            continue;
+        };
+        let (width, height) = image_dims(&bytes);
+        images.push(ImageRes {
+            href: name,
+            media_type: item.media_type.clone(),
+            width,
+            height,
+            bytes,
+        });
+    }
+
     let mut chapters = Vec::new();
     for (idx, id) in opf.spine.iter().enumerate() {
         let Some(item) = by_id(id) else { continue };
@@ -529,15 +513,20 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
         css,
         toc,
         cover: cover_bytes,
+        images,
     };
     Ok((meta, Content::Reflow(flow)))
 }
 
-fn dir_of(path: &str) -> String {
-    match path.rsplit_once('/') {
-        Some((dir, _)) => format!("{dir}/"),
-        None => String::new(),
-    }
+/// 图片固有像素尺寸。只读 header，不解码像素。SVG / 未知格式等取不到时返回 0，
+/// 由排版层按容器的降级规则处理（用指定宽度或容器宽度兜底）。
+fn image_dims(bytes: &[u8]) -> (u32, u32) {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok();
+    reader
+        .and_then(|r| r.into_dimensions().ok())
+        .unwrap_or((0, 0))
 }
 
 /// nav 里的 href 相对 nav 文档自己，统一换成容器绝对路径。
@@ -577,6 +566,3 @@ fn unsupported(path: &Path) -> crate::Error {
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
     )
 }
-
-#[cfg(test)]
-mod tests;

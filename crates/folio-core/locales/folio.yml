@@ -1,0 +1,287 @@
+# Folio 界面文案。格式与 gpui-component 的 locales/ui.yml 一致（rust-i18n `_version: 2`）：
+# 一个 key 一份，三种语言并排放 —— 漏翻哪一格在这张表里一眼看得见，
+# 比「一种语言一个文件、靠行号对齐」好维护。
+#
+# key 用点号分层，取用时 `t!("page.font_size")`。命名规则：
+# `page.*` 设置页标题、`field.*` 设置项（`.desc` 是它的说明文字）、
+# `error.*` 会显示成通知的失败信息、其余按界面区域走。
+#
+# 占位符是 `%{名字}`，**必须带名字**：中英文语序不同，靠顺序替换会翻错。
+# tests/i18n.rs 会核对三种语言的占位符集合与 key 集合完全一致。
+_version: 2
+
+sidebar:
+  import:
+    en: Import book
+    zh-CN: 导入书籍
+    ja: 本を追加
+  account:
+    en: Account
+    zh-CN: 账号
+    ja: アカウント
+
+reader:
+  empty_hint:
+    en: Pick a book on the left, or use “Import book” in the sidebar header
+    zh-CN: 从左侧书架选一本书，或用侧栏标题栏的「导入书籍」
+    ja: 左の棚から本を選ぶか、サイドバー上部の「本を追加」から追加してください
+  no_book:
+    en: No book open
+    zh-CN: 没有打开的书
+    ja: 開いている本がありません
+  chapter_position:
+    en: Section %{index} of %{total}
+    zh-CN: 第 %{index} / %{total} 节
+    ja: 第%{index} / %{total} 節
+  book_count_one:
+    en: "%{count} book"
+    zh-CN: "%{count} 本书"
+    ja: "%{count} 冊"
+  book_count_other:
+    en: "%{count} books"
+    zh-CN: "%{count} 本书"
+    ja: "%{count} 冊"
+  zoom_in:
+    en: Increase font size
+    zh-CN: 增大字号
+    ja: 文字を大きく
+  zoom_out:
+    en: Decrease font size
+    zh-CN: 减小字号
+    ja: 文字を小さく
+
+settings:
+  title:
+    en: Reading settings
+    zh-CN: 阅读设置
+    ja: 表示設定
+  back:
+    en: Back to reading
+    zh-CN: 返回阅读
+    ja: 閲覧に戻る
+
+toast:
+  font_size:
+    en: Font size %{size}px
+    zh-CN: 字号 %{size}px
+    ja: 文字サイズ %{size}px
+  theme:
+    en: "Theme: %{name}"
+    zh-CN: 主题：%{name}
+    ja: テーマ：%{name}
+
+appearance:
+  follow_system:
+    en: Follow system
+    zh-CN: 跟随系统
+    ja: システムに従う
+  light:
+    en: Light
+    zh-CN: 浅色
+    ja: 明
+  dark:
+    en: Dark
+    zh-CN: 深色
+    ja: 暗
+
+page:
+  typography:
+    en: Text
+    zh-CN: 文字
+    ja: 文字
+  layout:
+    en: Page
+    zh-CN: 版面
+    ja: レイアウト
+  fonts:
+    en: Fonts
+    zh-CN: 字体
+    ja: フォント
+  appearance:
+    en: Appearance
+    zh-CN: 外观
+    ja: 外観
+  language:
+    en: Language
+    zh-CN: 语言
+    ja: 言語
+  account:
+    en: Account
+    zh-CN: 账号
+    ja: アカウント
+  about:
+    en: About
+    zh-CN: 关于
+    ja: このアプリについて
+
+field:
+  font_size:
+    en: Font size
+    zh-CN: 字号
+    ja: 文字サイズ
+  font_size.desc:
+    en: Body text size in pixels.
+    zh-CN: 正文的像素字号。
+    ja: 本文のピクセルサイズ。
+  line_height:
+    en: Line height
+    zh-CN: 行距
+    ja: 行送り
+  line_height.desc:
+    en: Line height = font size × this factor. Chinese books usually 1.6–2.0.
+    zh-CN: 行高 = 字号 × 这个倍数。中文书一般 1.6–2.0。
+    ja: 行高 = 文字サイズ × この倍率。日本語書籍は通常 1.6〜2.0。
+  paragraph_gap:
+    en: Paragraph gap
+    zh-CN: 段距
+    ja: 段落間隔
+  paragraph_gap.desc:
+    en: Space between paragraphs, in font sizes.
+    zh-CN: 段落之间的空白，单位是字号倍。
+    ja: 段落間の空き、単位は文字サイズ倍。
+  indent:
+    en: First-line indent
+    zh-CN: 首行缩进
+    ja: 一字下げ
+  indent.desc:
+    en: Chinese typography uses 2 characters; 0 means no indent.
+    zh-CN: 中文排版习惯是 2 个字符；0 表示不缩进。
+    ja: 中文の慣例は 2 文字。0 で字下げなし。
+  justify:
+    en: Justify
+    zh-CN: 两端对齐
+    ja: 両端揃え
+  justify.desc:
+    en: Recommended for Chinese text; it evens out the right edge.
+    zh-CN: 中文正文建议开启；开启后行尾会更整齐。
+    ja: 中文本文では推奨。行末が揃って見やすくなります。
+  max_measure:
+    en: Maximum line width
+    zh-CN: 最大行长
+    ja: 行長の上限
+  max_measure.desc:
+    en: Widest the text column may get, in pixels. 0 fills the window.
+    zh-CN: 正文栏的最大宽度（像素）。0 表示随窗口铺满。
+    ja: 本文欄の最大幅（ピクセル）。0 で窓幅いっぱい。
+  margin_x:
+    en: Side margins
+    zh-CN: 左右页边距
+    ja: 左右の余白
+  margin_x.desc:
+    en: Whitespace on both sides of the text column, in pixels.
+    zh-CN: 正文栏两侧留白（像素）。
+    ja: 本文欄の左右の余白（ピクセル）。
+  font_family:
+    en: Body font
+    zh-CN: 正文字体
+    ja: 本文フォント
+  font_family.desc:
+    en: A font family name, e.g. LXGW WenKai or Noto Serif CJK SC.
+    zh-CN: 填字体家族名，例如 LXGW WenKai、Noto Serif CJK SC。
+    ja: ファミリー名を入力（例：Noto Serif CJK JP）。
+  appearance_mode:
+    en: Mode
+    zh-CN: 浅深
+    ja: 明暗
+  appearance_mode.desc:
+    en: Follow the system, or pin light or dark.
+    zh-CN: 跟着系统走，或者钉死浅色 / 深色。
+    ja: システムに従うか、明または暗に固定するか。
+  theme_light:
+    en: Light theme
+    zh-CN: 浅色主题
+    ja: 浅色テーマ
+  theme_light.desc:
+    en: The theme used when the mode resolves to light.
+    zh-CN: 解析成浅色时用的那一套配色。
+    ja: 明に解決されたときに使う配色。
+  theme_dark:
+    en: Dark theme
+    zh-CN: 深色主题
+    ja: 暗色テーマ
+  theme_dark.desc:
+    en: The theme used when the mode resolves to dark.
+    zh-CN: 解析成深色时用的那一套配色。即使现在钉在浅色也照样记住，切过去还在。
+    ja: 暗に解決されたときに使う配色。今明に固定しても保存され、切り替えても残ります。
+  language:
+    en: Interface language
+    zh-CN: 界面语言
+    ja: 表示言語
+  language.desc:
+    en: Language of the interface, not of the book text.
+    zh-CN: 界面文案的语言，不影响书的正文语言。
+    ja: UI 表示の言語で、本文の言語は変わりません。
+  account_name:
+    en: Reader name
+    zh-CN: 读者名
+    ja: 読者名
+  account_name.desc:
+    en: Shown at the bottom of the sidebar; empty falls back to “Reader”.
+    zh-CN: 显示在侧栏底部；留空则用「读者」。
+    ja: サイドバー下部に表示。空欄なら「読者」を使います。
+  config_path:
+    en: Config file
+    zh-CN: 配置文件
+    ja: 設定ファイル
+  config_path.desc:
+    en: Reading preferences and account live in this JSON file; copy it to move machines.
+    zh-CN: 阅读偏好与账号都存在这个 JSON 文件里，换机器时拷过去即可。
+    ja: 閲覧設定とアカウントはこの JSON ファイルに保存されます。
+
+account:
+  fallback_name:
+    en: Reader
+    zh-CN: 读者
+    ja: 読者
+
+import:
+  title:
+    en: Import book
+    zh-CN: 导入书籍
+    ja: 本を追加
+  submit:
+    en: Import book…
+    zh-CN: 导入书籍…
+    ja: 本を追加…
+  placeholder:
+    en: Path to a book, e.g. /path/to/book.epub
+    zh-CN: 书的路径，例如 /path/to/book.epub
+    ja: 本のパス（例：/path/to/book.epub）
+  hint:
+    en: EPUB, Markdown and plain text are supported.
+    zh-CN: 支持 EPUB、Markdown 与纯文本。
+    ja: EPUB・Markdown・テキストに対応。
+
+error:
+  library_load_failed:
+    en: "Could not read the library: %{reason}"
+    zh-CN: 读取书库失败：%{reason}
+    ja: ライブラリを読み込めません：%{reason}
+  database_unopenable:
+    en: "Could not open the library database: %{reason}"
+    zh-CN: 打不开书库数据库：%{reason}
+    ja: ライブラリ DB を開けません：%{reason}
+  import_failed:
+    en: "Import failed: %{reason}"
+    zh-CN: 导入失败：%{reason}
+    ja: 追加に失敗：%{reason}
+  store_write_failed:
+    en: "Could not save to the library: %{reason}"
+    zh-CN: 写入书库失败：%{reason}
+    ja: ライブラリに保存できません：%{reason}
+  cache_chapters_failed:
+    en: "Could not cache the chapters: %{reason}"
+    zh-CN: 缓存章节失败：%{reason}
+    ja: 章をキャッシュできません：%{reason}
+  import_not_found:
+    en: The book disappeared after import
+    zh-CN: 导入后找不到这本书
+    ja: 追加後に見つかりません
+  book_not_parsed:
+    en: This book has not been parsed yet — import it again
+    zh-CN: 这本书还没有解析过，请重新导入
+    ja: この本はまだ解析されていません。もう一度追加してください
+  read_chapter_failed:
+    en: "Could not read the chapter: %{reason}"
+    zh-CN: 读取章节失败：%{reason}
+    ja: 章を読み込めません：%{reason}

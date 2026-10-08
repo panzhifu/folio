@@ -1,12 +1,14 @@
-//! E1 块级 + 行内布局。几何用一份「汉字 1 em、拉丁 0.5 em」的 mock `Measure` 来断言，
-//! 真实字体度量在 app 侧接入，逻辑同一。
+//! E1/E2/E3 块级 + 行内 + 图片布局。
+//! 几何用一份「汉字 1 em、拉丁 0.5 em」的 mock `Measure` 来断言，
+//! 真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
 
-use crate::css::computed::{Color, ComputedStyle, Display};
-use crate::css::{Origin, RuleSet};
-use crate::dom::{Dom, NodeId};
-
-use super::{FontKey, Layout, LayoutOptions, LineMetrics, Measure, collect};
-use crate::css::computed::cascade;
+use folio_core::css::computed::{Color, ComputedStyle, Display, cascade};
+use folio_core::css::{Origin, RuleSet};
+use folio_core::dom::{Dom, NodeId};
+use folio_core::layout::{
+    BlockBox, FontKey, ImageProvider, Layout, LayoutOptions, LineMetrics, Measure, NoImages,
+    ResolvedImage, layout,
+};
 
 /// 断行规则：空格后优先，CJK 逐字可断（硬断）。
 struct Mono;
@@ -39,7 +41,7 @@ impl Measure for Mono {
     }
 }
 
-fn parse(html: &str, css: &str) -> (Dom, Vec<crate::css::computed::ComputedStyle>) {
+fn parse(html: &str, css: &str) -> (Dom, Vec<ComputedStyle>) {
     let dom = Dom::parse(html.as_bytes());
     let rules = RuleSet::parse(css, Origin::Author);
     let styles = cascade(&dom, &rules, &ComputedStyle::default());
@@ -60,19 +62,20 @@ fn typeset(html: &str, css: &str, width: f32) -> (Dom, Layout) {
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
     );
-    let layout = super::layout(
+    let laid = layout(
         &dom,
         &styles,
         find(&dom, "body"),
         LayoutOptions { width },
         &Mono,
+        &NoImages,
     );
-    (dom, layout)
+    (dom, laid)
 }
 
 fn texts(layout: &Layout) -> Vec<String> {
     (0..layout.lines.len())
-        .map(|i| layout.line_text(i).to_string())
+        .map(|i| layout.line_text(i))
         .collect()
 }
 
@@ -111,7 +114,7 @@ fn text_indent_shifts_only_the_first_line() {
 #[test]
 fn sibling_paragraph_margins_collapse() {
     let (_, layout) = typeset("<p>甲</p><p>乙</p>", "", 200.0);
-    let paras: Vec<&super::BlockBox> = layout
+    let paras: Vec<&BlockBox> = layout
         .blocks
         .iter()
         .filter(|b| !b.text.is_empty())
@@ -171,7 +174,7 @@ fn display_none_removes_the_whole_subtree() {
 fn inline_pieces_keep_their_own_node_offsets() {
     let (dom, layout) = typeset("<p>甲<strong>乙</strong>丙</p>", "", 200.0);
     assert_eq!(layout.line_text(0), "甲乙丙");
-    let runs = &layout.lines[0].runs;
+    let runs: Vec<_> = layout.lines[0].text_runs().collect();
     assert_eq!(runs.len(), 3, "三个文本节点各一段");
     let recovered: Vec<String> = runs
         .iter()
@@ -233,13 +236,15 @@ fn a_wider_viewport_yields_fewer_lines() {
     assert!(wide.height < narrow.height, "变宽必须变矮");
 }
 
+/// 段首段尾空白被吞掉、中间并成一个空格 —— 现在从**行盒文本**这一层断言。
 #[test]
 fn collection_trims_paragraph_edges() {
-    let (dom, _) = parse("<p>  甲 乙  </p>", "");
-    let p = find(&dom, "p");
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
-    let collected = collect(&dom.get(p).children.clone(), &dom, &styles, false);
-    assert_eq!(collected.text, "甲 乙", "段首段尾空白吞掉，中间并成一个");
+    let (_, layout) = typeset("<p>  甲 乙  </p>", "", 200.0);
+    assert_eq!(
+        layout.line_text(0),
+        "甲 乙",
+        "段首段尾空白吞掉，中间并成一个"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +257,7 @@ fn a_paragraph_keeps_per_run_size_weight_and_color() {
     let html = "<p>正文<small>小字</small>正文</p>";
     let css = "p { font-size: 20px } small { font-size: 12px; color: #808080 }";
     let (_, layout) = typeset(html, css, 400.0);
-    let runs = &layout.lines[0].runs;
+    let runs: Vec<_> = layout.lines[0].text_runs().collect();
     assert_eq!(runs.len(), 3);
     assert_eq!(runs[0].style.font_size, 20.0);
     assert_eq!(runs[1].style.font_size, 12.0, "small 的小字号不该被拉平");
@@ -266,7 +271,7 @@ fn a_paragraph_keeps_per_run_size_weight_and_color() {
 #[test]
 fn bold_and_italic_survive_as_run_styles() {
     let (_, layout) = typeset("<p>甲<strong>乙</strong><em>丙</em></p>", "", 400.0);
-    let runs = &layout.lines[0].runs;
+    let runs: Vec<_> = layout.lines[0].text_runs().collect();
     assert_eq!(runs[1].style.font.weight, 700, "UA 的 b/strong 加粗");
     assert!(runs[2].style.font.italic, "UA 的 em 斜体");
     assert_eq!(runs[0].style.font.weight, 400);
@@ -319,4 +324,150 @@ fn a_tiny_line_height_still_cannot_make_lines_overlap() {
             "行盒不能重叠：line-height 再小也要装下字形本身"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// E3：图片（替换元素）
+// ---------------------------------------------------------------------------
+
+/// 固定尺寸的图片提供者：`src` 原样当 href，尺寸查表。
+struct MockImages(Vec<(&'static str, f32, f32)>);
+
+impl ImageProvider for MockImages {
+    fn resolve(&self, src: &str) -> Option<ResolvedImage> {
+        self.0
+            .iter()
+            .find(|(k, _, _)| *k == src)
+            .map(|(k, w, h)| ResolvedImage {
+                href: (*k).to_string(),
+                width: *w,
+                height: *h,
+            })
+    }
+}
+
+fn typeset_images(html: &str, css: &str, width: f32, images: &dyn ImageProvider) -> (Dom, Layout) {
+    let dom = Dom::parse(html.as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(css, Origin::Author),
+        &ComputedStyle::default(),
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions { width },
+        &Mono,
+        images,
+    );
+    (dom, laid)
+}
+
+/// 行内图片：变成图片片段，参与行宽累加，文本照旧在两侧。
+#[test]
+fn an_inline_image_becomes_a_fragment_and_adds_width() {
+    let imgs = MockImages(vec![("pic.png", 60.0, 40.0)]);
+    let (_, layout) = typeset_images("<p>前<img src=\"pic.png\">后</p>", "", 200.0, &imgs);
+    // 哨兵字符不能漏进可见文本。
+    assert_eq!(layout.line_text(0), "前后");
+    let img = layout.lines[0].images().next().expect("应有一个图片片段");
+    assert_eq!(img.href, "pic.png");
+    assert_eq!((img.width, img.height), (60.0, 40.0));
+    assert_eq!(
+        layout.lines[0].width,
+        16.0 + 60.0 + 16.0,
+        "汉字各 1em = 16px"
+    );
+    // 图片底贴基线，行盒还要容下文字 descender，所以 ≥ 图片高。
+    assert!(layout.lines[0].height >= 40.0, "行盒要装下图片高度");
+    assert_eq!(layout.lines[0].baseline, 40.0, "图片底贴基线");
+}
+
+/// 放不下的行内图要整体折到下一行，不能被拆开。
+#[test]
+fn an_image_wraps_to_the_next_line_intact() {
+    let imgs = MockImages(vec![("pic.png", 100.0, 20.0)]);
+    let (_, layout) = typeset_images("<p>甲甲甲<img src=\"pic.png\"></p>", "", 100.0, &imgs);
+    assert!(layout.lines.len() >= 2);
+    assert_eq!(layout.line_text(0), "甲甲甲");
+    assert_eq!(layout.lines[0].images().count(), 0, "第一行不该有图");
+    assert_eq!(layout.lines[1].images().count(), 1, "图整体落到第二行");
+}
+
+/// 块级图片：独立成行，按容器的 text-align 居中。
+#[test]
+fn a_block_image_is_centered_by_the_container() {
+    let imgs = MockImages(vec![("pic.png", 100.0, 50.0)]);
+    let (_, layout) = typeset_images(
+        "<div><img src=\"pic.png\"></div>",
+        "div { text-align: center } img { display: block }",
+        200.0,
+        &imgs,
+    );
+    assert_eq!(layout.lines.len(), 1);
+    assert_eq!(layout.lines[0].x, 50.0, "(200 - 100) / 2");
+    assert_eq!(layout.lines[0].images().next().unwrap().width, 100.0);
+}
+
+/// `width` 用 px：按指定宽，高度按纵横比。
+#[test]
+fn width_in_px_scales_the_height_by_aspect_ratio() {
+    let imgs = MockImages(vec![("pic.png", 60.0, 40.0)]);
+    let (_, layout) = typeset_images(
+        "<p><img src=\"pic.png\"></p>",
+        "img { width: 120px }",
+        300.0,
+        &imgs,
+    );
+    let img = layout.lines[0].images().next().unwrap();
+    assert_eq!((img.width, img.height), (120.0, 80.0));
+}
+
+/// `width: 100%`：按包含块内容宽度折算。
+#[test]
+fn width_percent_resolves_against_the_container() {
+    let imgs = MockImages(vec![("pic.png", 60.0, 40.0)]);
+    let (_, layout) = typeset_images(
+        "<p><img src=\"pic.png\"></p>",
+        "img { width: 100% }",
+        300.0,
+        &imgs,
+    );
+    let img = layout.lines[0].images().next().unwrap();
+    assert_eq!((img.width, img.height), (300.0, 200.0));
+}
+
+/// `max-width` 夹小图片，高度按纵横比跟着缩。
+#[test]
+fn max_width_clamps_and_scales_height() {
+    let imgs = MockImages(vec![("pic.png", 60.0, 40.0)]);
+    let (_, layout) = typeset_images(
+        "<p><img src=\"pic.png\"></p>",
+        "img { max-width: 30px }",
+        300.0,
+        &imgs,
+    );
+    let img = layout.lines[0].images().next().unwrap();
+    assert_eq!(img.width, 30.0);
+    assert!((img.height - 20.0).abs() < 0.01);
+}
+
+/// 没写 `max-width` 的超宽图也不能溢出容器。
+#[test]
+fn an_oversized_image_never_overflows() {
+    let imgs = MockImages(vec![("big.png", 500.0, 100.0)]);
+    let (_, layout) = typeset_images("<p><img src=\"big.png\"></p>", "", 300.0, &imgs);
+    let img = layout.lines[0].images().next().unwrap();
+    assert_eq!(img.width, 300.0);
+    assert!(img.width <= 300.0, "插图宽度不得超过版心");
+    assert!((img.height - 60.0).abs() < 0.01);
+}
+
+/// 解析不到的图整张跳过，不塌出空盒子、也不留哨兵。
+#[test]
+fn an_unresolvable_image_is_skipped_cleanly() {
+    let imgs = MockImages(vec![]);
+    let (_, layout) = typeset_images("<p><img src=\"missing.png\"></p>", "", 300.0, &imgs);
+    assert!(layout.lines.is_empty(), "没有文本也没有图，就不该有行盒");
 }

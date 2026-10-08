@@ -46,7 +46,9 @@ pub fn is_replaced_inline(tag: &str) -> bool {
 /// 父样式 + 标签 → 该元素的初始样式（含继承项）。
 pub fn seed(parent: &ComputedStyle, tag: &str) -> ComputedStyle {
     let mut style = inherit_from(parent);
-    style.display = if is_inline_tag(tag) {
+    // 替换元素（`<img>` 等）天生 inline：与浏览器一致，也让「独占一行的插图」
+    // 通过父块的 `text-align` 居中，而不必额外写 `display: block`。
+    style.display = if is_inline_tag(tag) || is_replaced_inline(tag) {
         Display::Inline
     } else if tag == "li" {
         Display::ListItem

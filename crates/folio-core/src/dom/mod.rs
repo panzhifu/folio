@@ -487,6 +487,3 @@ impl TreeSink for DomSink {
 fn state_set_parent(cell: &RefCell<DomState>, node: NodeId, parent: NodeId) {
     cell.borrow_mut().nodes[node as usize].parent = Some(parent);
 }
-
-#[cfg(test)]
-mod tests;

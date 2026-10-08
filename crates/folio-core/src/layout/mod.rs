@@ -32,7 +32,7 @@ use std::rc::Rc;
 
 use unicode_linebreak::linebreaks;
 
-use crate::css::computed::{Color, ComputedStyle, Display, StyledDom, TextAlign};
+use crate::css::computed::{Color, ComputedStyle, Display, Length, StyledDom, TextAlign};
 use crate::dom::{Dom, NodeId, NodeKind};
 
 /// 一次度量需要的最小字体描述。`family == "monospace"` 是泛族名，
@@ -101,6 +101,84 @@ pub trait Measure: Send + Sync {
     fn run_metrics(&self, text: &str, font: &FontKey, font_size: f32) -> LineMetrics;
 }
 
+/// 一张已解析的图片：容器路径 + 固有像素尺寸。CSS 的缩放由排版层再算。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedImage {
+    pub href: String,
+    /// 固有尺寸，取不到时（SVG 等）为 0，由 [`image_size`] 降级。
+    pub width: f32,
+    pub height: f32,
+}
+
+/// 图片固有尺寸的注入点。`src` 是 `<img>` 的**原始** `src` 属性值，
+/// 实现方负责按当前章的目录把它解析成容器路径再查表。
+///
+/// 与 `Measure` 分开是因为两者的数据来源根本不同：字体度量来自窗口文本系统，
+/// 图片尺寸来自书籍资源。
+pub trait ImageProvider {
+    fn resolve(&self, src: &str) -> Option<ResolvedImage>;
+}
+
+/// 没有图片时的空实现：一律返回 None，`<img>` 会被跳过。
+pub struct NoImages;
+
+impl ImageProvider for NoImages {
+    fn resolve(&self, _src: &str) -> Option<ResolvedImage> {
+        None
+    }
+}
+
+/// 按 CSS 与固有尺寸算一张图的显示尺寸（CSS px）。
+///
+/// 顺序：`width`（px/%/auto→固有宽）→ `height`（px/auto→按纵横比）→ `max-width` /
+/// `max-height` 夹 → 兜底不超容器。固有尺寸缺失（SVG）时用指定宽或容器宽，比例按 1:1。
+fn image_size(style: &ComputedStyle, iw: f32, ih: f32, container_w: f32) -> (f32, f32) {
+    let basis = container_w.max(1.0);
+    let has_intrinsic = iw > 0.0 && ih > 0.0;
+
+    let mut w = match style.width {
+        Some(l) => l.resolve(basis),
+        None if has_intrinsic => iw,
+        None => basis,
+    }
+    .max(0.0);
+
+    let mut h = match style.height {
+        // 百分比高度没有包含块高度作基准，按 auto 处理（见 known-limitations）。
+        Some(Length::Px(v)) => v,
+        _ if has_intrinsic && w > 0.0 => ih * (w / iw),
+        _ => w,
+    }
+    .max(0.0);
+
+    if let Some(max_w) = style.max_width.map(|l| l.resolve(basis))
+        && max_w >= 0.0
+        && w > max_w
+    {
+        if w > 0.0 {
+            h *= max_w / w;
+        }
+        w = max_w;
+    }
+    if let Some(Length::Px(max_h)) = style.max_height
+        && max_h >= 0.0
+        && h > max_h
+    {
+        if h > 0.0 {
+            w *= max_h / h;
+        }
+        h = max_h;
+    }
+    // 绝不溢出容器：书里没写 max-width 的插图也不该被裁掉。
+    if w > basis {
+        if w > 0.0 {
+            h *= basis / w;
+        }
+        w = basis;
+    }
+    (w, h)
+}
+
 /// 行盒里的一段连续同样式文本，同时带着两套坐标。
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineRun {
@@ -117,28 +195,61 @@ pub struct LineRun {
     pub descent: f32,
 }
 
+/// 行盒里的一段图片。`href` 是**解析后的容器绝对路径**，绘制层按它取字节解码。
+/// 宽度/高度已按 CSS 与内在尺寸算好，绘制层不需要再量。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageRun {
+    pub node: NodeId,
+    pub href: String,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// 行盒里的一段内容：文本或替换元素（图片）。M6 的 ruby 会加第三个分支。
+#[derive(Debug, Clone, PartialEq)]
+pub enum LineFragment {
+    Text(LineRun),
+    Image(ImageRun),
+}
+
 #[derive(Debug, Clone)]
 pub struct LineBox {
     /// 所属块的 DOM 节点。
     pub owner: NodeId,
-    /// 空行（`<p><br></p>`）没有 run。
-    pub runs: Vec<LineRun>,
+    /// 行内片段，按绘制顺序排列。空行（`<p><br></p>`）没有片段。
+    pub fragments: Vec<LineFragment>,
     pub x: f32,
     pub y: f32,
-    /// 各 run 绘制宽度之和。
+    /// 各片段绘制宽度之和。
     pub width: f32,
-    /// 行盒高 = 各 run inline box 高度的最大值。
+    /// 行盒高 = 各片段 inline box 高度的最大值。
     pub height: f32,
-    /// 相对 `y` 的基线下沉量：各 run 最大的 ascent。
+    /// 相对 `y` 的基线下沉量：各片段最大的 ascent。
     pub baseline: f32,
     pub align: TextAlign,
 }
 
 impl LineBox {
-    /// 这一行里最大的字号。状态栏与「这行是不是标题」一类判断用。
+    /// 文本片段，按绘制顺序。
+    pub fn text_runs(&self) -> impl Iterator<Item = &LineRun> {
+        self.fragments.iter().filter_map(|f| match f {
+            LineFragment::Text(r) => Some(r),
+            LineFragment::Image(_) => None,
+        })
+    }
+
+    /// 图片片段，按绘制顺序。
+    pub fn images(&self) -> impl Iterator<Item = &ImageRun> {
+        self.fragments.iter().filter_map(|f| match f {
+            LineFragment::Image(r) => Some(r),
+            LineFragment::Text(_) => None,
+        })
+    }
+
+    /// 这一行里最大的字号。状态栏与「这行是不是标题」一类判断用；
+    /// 纯图片行没有文本字号，返回 0。
     pub fn dominant_font_size(&self) -> f32 {
-        self.runs
-            .iter()
+        self.text_runs()
             .map(|r| r.style.font_size)
             .fold(0.0f32, f32::max)
     }
@@ -180,17 +291,21 @@ impl Layout {
         self.blocks.iter().rev().find(|b| b.lines.contains(&i))
     }
 
-    /// 第 `i` 行的文本。
-    pub fn line_text(&self, i: usize) -> &str {
+    /// 第 `i` 行的可见文本。图片片段不产出字符，行内图位置上的哨兵字符会被去掉。
+    pub fn line_text(&self, i: usize) -> String {
         let (Some(line), Some(block)) = (self.lines.get(i), self.block_of_line(i)) else {
-            return "";
+            return String::new();
         };
-        let Some(first) = line.runs.first() else {
-            return "";
+        let Some(first) = line.text_runs().next() else {
+            return String::new();
         };
         let start = first.norm.start;
-        let end = line.runs.last().map(|r| r.norm.end).unwrap_or(start);
-        block.text.get(start..end).unwrap_or("")
+        let end = line.text_runs().last().map(|r| r.norm.end).unwrap_or(start);
+        block
+            .text
+            .get(start..end)
+            .unwrap_or("")
+            .replace(IMAGE_GLYPH, "")
     }
 }
 
@@ -202,17 +317,21 @@ pub struct LayoutOptions {
 
 /// 排版 `root` 的全部内容。`root` 通常是 `<body>`：它的 padding 生效，
 /// 字号与字体取它自己的计算样式（读者偏好已经在 `cascade` 的根样式里注入）。
+///
+/// `images` 提供 `<img>` 的固有尺寸与解析后的路径；没有图片时传 [`NoImages`]。
 pub fn layout(
     dom: &Dom,
     styles: &StyledDom,
     root: NodeId,
     options: LayoutOptions,
     measure: &dyn Measure,
+    images: &dyn ImageProvider,
 ) -> Layout {
     let mut ctx = Ctx {
         dom,
         styles,
         measure,
+        images,
         blocks: Vec::new(),
         lines: Vec::new(),
     };
@@ -233,6 +352,7 @@ struct Ctx<'a> {
     dom: &'a Dom,
     styles: &'a StyledDom,
     measure: &'a dyn Measure,
+    images: &'a dyn ImageProvider,
     blocks: Vec<BlockBox>,
     lines: Vec<LineBox>,
 }
@@ -241,6 +361,8 @@ struct Ctx<'a> {
 struct Collected {
     text: String,
     pieces: Vec<Piece>,
+    /// 文本流里的图片占位。`at` 指向 `text` 里那个哨兵字符的字节起点。
+    images: Vec<ImageAtom>,
 }
 
 /// 一个文本节点对段落的贡献：段内区间、原节点区间、以及**该文本所属元素**的样式。
@@ -250,6 +372,20 @@ struct Piece {
     orig: Range<usize>,
     style: Rc<RunStyle>,
 }
+
+/// 段落里一张图片：锚定在文本流某个位置，宽度已按 CSS 与内在尺寸算好。
+struct ImageAtom {
+    node: NodeId,
+    href: String,
+    width: f32,
+    height: f32,
+    /// 哨兵在 `Collected::text` 里的字节起点。
+    at: usize,
+}
+
+/// 行内图片在文本流里的占位字符。用它而不是另建 atom 流，是为了复用既有的
+/// 字节区间机制（`linebreaks` / 切片 / 断行宽度累加全都按字节走）。
+const IMAGE_GLYPH: char = '\u{FFFC}';
 
 impl Collected {
     /// 覆盖 `at` 的 piece 下标。落在 piece 之间的空白上时返回前一个 ——
@@ -264,6 +400,12 @@ impl Collected {
 
     fn style_at(&self, at: usize) -> Option<Rc<RunStyle>> {
         self.piece_at(at).map(|i| Rc::clone(&self.pieces[i].style))
+    }
+
+    /// 正好落在 `at` 上的图片。
+    fn image_at(&self, at: usize) -> Option<&ImageAtom> {
+        let idx = self.images.partition_point(|im| im.at < at);
+        self.images.get(idx).filter(|im| im.at == at)
     }
 }
 
@@ -335,6 +477,37 @@ impl<'a> Ctx<'a> {
     /// 摆放一个块级元素，返回边框盒高度。
     fn block(&mut self, node: NodeId, x: f32, y: f32, width: f32) -> f32 {
         let style = self.style_of(node);
+        // 替换元素（`display: block` 的图片）：整块就是这张图，独立成行。
+        if self.dom.is_element(node, "img") {
+            let src = self.dom.attr(node, "src").map(str::to_string);
+            let Some(img) = src.as_deref().and_then(|s| self.images.resolve(s)) else {
+                return 0.0; // 图取不到就整块不留痕，不塌成空盒子
+            };
+            let (w, h) = image_size(&style, img.width, img.height, width);
+            let index = self.push_block(node, x, y, width, String::new());
+            let offset = match style.text_align {
+                TextAlign::Right => (width - w).max(0.0),
+                TextAlign::Center => (width - w).max(0.0) / 2.0,
+                _ => 0.0,
+            };
+            self.lines.push(LineBox {
+                owner: node,
+                fragments: vec![LineFragment::Image(ImageRun {
+                    node,
+                    href: img.href,
+                    width: w,
+                    height: h,
+                })],
+                x: x + offset,
+                y,
+                width: w,
+                height: h,
+                baseline: h,
+                align: style.text_align,
+            });
+            return self.close_block(index, h);
+        }
+
         let pl = style.padding_left.max(0.0);
         let pr = style.padding_right.max(0.0);
         let pt = style.padding_top.max(0.0);
@@ -360,7 +533,14 @@ impl<'a> Ctx<'a> {
         width: f32,
         style: &ComputedStyle,
     ) -> f32 {
-        let collected = collect(pieces, self.dom, self.styles, style.white_space_pre);
+        let collected = collect(
+            pieces,
+            self.dom,
+            self.styles,
+            style.white_space_pre,
+            self.images,
+            width,
+        );
         let index = self.push_block(owner, x, y, width, collected.text.clone());
         let height = self.wrap_lines(owner, &collected, x, y, width, style);
         self.close_block(index, height)
@@ -420,12 +600,17 @@ impl<'a> Ctx<'a> {
             let mut used = 0.0f32;
             for (i, ch) in slice.char_indices() {
                 let at = hard.start + i;
-                let Some(piece_style) = collected.style_at(at) else {
-                    continue;
+                let w = if ch == IMAGE_GLYPH {
+                    match collected.image_at(at) {
+                        Some(img) => img.width,
+                        None => continue,
+                    }
+                } else {
+                    match collected.style_at(at) {
+                        Some(s) => self.measure.char_width(ch, &s.font, s.font_size),
+                        None => continue,
+                    }
                 };
-                let w = self
-                    .measure
-                    .char_width(ch, &piece_style.font, piece_style.font_size);
                 let avail = if first {
                     (width - indent).max(1.0)
                 } else {
@@ -474,7 +659,12 @@ impl<'a> Ctx<'a> {
         };
         let mut sum = 0.0f32;
         for (i, ch) in text.char_indices() {
-            if let Some(style) = collected.style_at(range.start + i) {
+            let at = range.start + i;
+            if ch == IMAGE_GLYPH {
+                if let Some(img) = collected.image_at(at) {
+                    sum += img.width;
+                }
+            } else if let Some(style) = collected.style_at(at) {
                 sum += self.measure.char_width(ch, &style.font, style.font_size);
             }
         }
@@ -494,27 +684,78 @@ impl<'a> Ctx<'a> {
         style: &ComputedStyle,
     ) -> f32 {
         let end = trim_end_spaces(&collected.text, range.start, range.end);
-        let mut runs = Vec::new();
-        let mut line_width = 0.0f32;
-        let mut ascent = 0.0f32;
-        let mut descent = 0.0f32;
-        let mut height = 0.0f32;
+        let mut acc = LineAcc::default();
+        // 按位置把文本与图片交替收进一行：图片锚在文本流的字节偏移上。
+        let mut cursor = range.start;
+        for img in collected
+            .images
+            .iter()
+            .filter(|im| im.at >= range.start && im.at < end)
+        {
+            if img.at > cursor {
+                acc.push_text(self.measure, collected, cursor..img.at);
+            }
+            acc.push_image(img);
+            cursor = img.at + IMAGE_GLYPH.len_utf8();
+        }
+        if cursor < end {
+            acc.push_text(self.measure, collected, cursor..end);
+        }
+        if acc.fragments.is_empty() {
+            // 空行取块自己的样式，否则 `<p><br></p>` 会塌成零高。
+            let block_style = RunStyle::new(style);
+            acc.height = block_style.box_height();
+            acc.ascent = block_style.font_size * 0.8;
+        }
+        // 行盒高至少要把字形本体装下：line-height 给得很小时也不能让两行叠在一起。
+        let height = acc.height.max(acc.ascent + acc.descent);
+        let avail = (width - lead).max(1.0);
+        let offset = match style.text_align {
+            TextAlign::Right => (avail - acc.width).max(0.0),
+            TextAlign::Center => (avail - acc.width).max(0.0) / 2.0,
+            _ => 0.0,
+        };
+        self.lines.push(LineBox {
+            owner,
+            fragments: acc.fragments,
+            x: x + offset,
+            y,
+            width: acc.width,
+            height,
+            baseline: acc.ascent,
+            align: style.text_align,
+        });
+        height
+    }
+}
+
+/// 一行的累积器：`[start, end)` 区间内按片段顺序拼接文本与图片，同时求行盒几何。
+#[derive(Default)]
+struct LineAcc {
+    fragments: Vec<LineFragment>,
+    width: f32,
+    ascent: f32,
+    descent: f32,
+    height: f32,
+}
+
+impl LineAcc {
+    /// 把 `seg`（不跨图片）与各文本 piece 求交，逐 piece 产出一个文本 run。
+    fn push_text(&mut self, measure: &dyn Measure, collected: &Collected, seg: Range<usize>) {
         for piece in &collected.pieces {
-            let start = range.start.max(piece.norm.start);
-            let stop = end.min(piece.norm.end);
+            let start = seg.start.max(piece.norm.start);
+            let stop = seg.end.min(piece.norm.end);
             if start >= stop {
                 continue;
             }
             let norm = start..stop;
             let text = collected.text.get(norm.clone()).unwrap_or("");
-            let metrics = self
-                .measure
-                .run_metrics(text, &piece.style.font, piece.style.font_size);
-            line_width += metrics.width;
-            ascent = ascent.max(metrics.ascent);
-            descent = descent.max(metrics.descent);
-            height = height.max(piece.style.box_height());
-            runs.push(LineRun {
+            let metrics = measure.run_metrics(text, &piece.style.font, piece.style.font_size);
+            self.width += metrics.width;
+            self.ascent = self.ascent.max(metrics.ascent);
+            self.descent = self.descent.max(metrics.descent);
+            self.height = self.height.max(piece.style.box_height());
+            self.fragments.push(LineFragment::Text(LineRun {
                 node: piece.node,
                 orig: orig_of(piece, &norm),
                 norm,
@@ -522,33 +763,21 @@ impl<'a> Ctx<'a> {
                 width: metrics.width,
                 ascent: metrics.ascent,
                 descent: metrics.descent,
-            });
+            }));
         }
-        if runs.is_empty() {
-            // 空行取块自己的样式，否则 `<p><br></p>` 会塌成零高。
-            let block_style = RunStyle::new(style);
-            height = block_style.box_height();
-            ascent = block_style.font_size * 0.8;
-        }
-        // 行盒高至少要把字形本体装下：line-height 给得很小时也不能让两行叠在一起。
-        height = height.max(ascent + descent);
-        let avail = (width - lead).max(1.0);
-        let offset = match style.text_align {
-            TextAlign::Right => (avail - line_width).max(0.0),
-            TextAlign::Center => (avail - line_width).max(0.0) / 2.0,
-            _ => 0.0,
-        };
-        self.lines.push(LineBox {
-            owner,
-            runs,
-            x: x + offset,
-            y,
-            width: line_width,
-            height,
-            baseline: ascent,
-            align: style.text_align,
-        });
-        height
+    }
+
+    /// 图片底贴基线：它的整高就是本行的 ascent，行盒高也随之撑起。
+    fn push_image(&mut self, img: &ImageAtom) {
+        self.width += img.width;
+        self.ascent = self.ascent.max(img.height);
+        self.height = self.height.max(img.height);
+        self.fragments.push(LineFragment::Image(ImageRun {
+            node: img.node,
+            href: img.href.clone(),
+            width: img.width,
+            height: img.height,
+        }));
     }
 }
 
@@ -597,13 +826,24 @@ fn hard_lines(text: &str) -> Vec<Range<usize>> {
 }
 
 /// 把若干兄弟子树展平成一段文本，同时记下每个来源节点的区间与其元素样式。
-fn collect(pieces: &[NodeId], dom: &Dom, styles: &StyledDom, pre: bool) -> Collected {
+/// `width` 是段落的可用宽度，用来折算图片的百分比宽度。
+fn collect(
+    pieces: &[NodeId],
+    dom: &Dom,
+    styles: &StyledDom,
+    pre: bool,
+    images: &dyn ImageProvider,
+    width: f32,
+) -> Collected {
     let mut out = Collector {
         text: String::new(),
         pieces: Vec::new(),
+        images: Vec::new(),
         pending_space: false,
         dom,
         styles,
+        provider: images,
+        width,
     };
     for node in pieces {
         let style = out.style_of(*node);
@@ -612,17 +852,22 @@ fn collect(pieces: &[NodeId], dom: &Dom, styles: &StyledDom, pre: bool) -> Colle
     Collected {
         text: out.text,
         pieces: out.pieces,
+        images: out.images,
     }
 }
 
 struct Collector<'a> {
     text: String,
     pieces: Vec<Piece>,
+    images: Vec<ImageAtom>,
     /// 折叠空白是**跨节点**的：上一段尾巴上的空白与下一段开头的空白是同一次折叠，
     /// 谁先落地谁占位，所以这个状态挂在收集器上。
     pending_space: bool,
     dom: &'a Dom,
     styles: &'a StyledDom,
+    provider: &'a dyn ImageProvider,
+    /// 段落可用宽度，图片百分比宽度的基准。
+    width: f32,
 }
 
 impl<'a> Collector<'a> {
@@ -658,11 +903,39 @@ impl<'a> Collector<'a> {
             self.pending_space = false;
             return;
         }
+        if self.dom.is_element(node, "img") {
+            self.push_image(node);
+            return;
+        }
         // 文本继承的是**它所在元素**的样式，所以往下走要换成元素自己的样式。
         let own = self.style_of(node);
         for child in dom_node.children.clone() {
             self.push_node(child, pre, &own);
         }
+    }
+
+    /// 行内图片：命中资源就写一个哨兵占位并记下尺寸；命中不到就整张跳过
+    /// （不产出任何字符，也不会把段落撑乱）。
+    fn push_image(&mut self, node: NodeId) {
+        let Some(src) = self.dom.attr(node, "src").map(str::to_string) else {
+            return;
+        };
+        let Some(img) = self.provider.resolve(&src) else {
+            return;
+        };
+        let style = self.styles.get(node).cloned().unwrap_or_default();
+        let (w, h) = image_size(&style, img.width, img.height, self.width);
+        self.flush_space();
+        let at = self.text.len();
+        self.text.push(IMAGE_GLYPH);
+        self.images.push(ImageAtom {
+            node,
+            href: img.href,
+            width: w,
+            height: h,
+            at,
+        });
+        self.pending_space = false;
     }
 
     /// CSS 空白折叠：连续空白并成一个空格，段首与段尾的空白吞掉。
@@ -709,6 +982,3 @@ impl<'a> Collector<'a> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

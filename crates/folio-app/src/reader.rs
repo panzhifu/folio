@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use folio_core::store::BookRow;
-use folio_core::{Chapter, FlowDoc, Locator, Prefs};
+use folio_core::{Chapter, FlowDoc, Locator, Reader};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::{
@@ -8,6 +10,7 @@ use gpui_kit::{
 };
 
 use crate::engine::{Engine, engine_lines};
+use crate::images::{BookImages, ChapterImages};
 
 /// 用自研引擎渲染的格式。EPUB 的 XHTML 直接进 DOM → CSS → Layout；
 /// Markdown / TXT 还没接进引擎（要先把源文本转成 XHTML，见 M5），
@@ -23,8 +26,10 @@ pub struct ReaderView {
     chapter: usize,
     /// `Some` 时正文由自研引擎排版，`None` 时是 M1 的 TextView。
     engine: Option<Engine>,
+    /// 整本书的图片索引，换章时按新章的目录重建视图（见 `reload`）。
+    book_images: Arc<BookImages>,
     state: Entity<TextViewState>,
-    prefs: Prefs,
+    prefs: Reader,
     /// 外壳里不属于阅读栏的宽度（展开的侧栏）。引擎的版心必须扣掉它，
     /// 否则会按整窗宽度折行、被窄栏裁掉。
     pane_reserve: f32,
@@ -39,7 +44,7 @@ impl ReaderView {
     pub fn open(
         book: &BookRow,
         flow: FlowDoc,
-        prefs: Prefs,
+        prefs: Reader,
         locator: Locator,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -51,8 +56,17 @@ impl ReaderView {
             .map(|c| c.source.as_str())
             .unwrap_or_default()
             .to_string();
-        let engine = uses_engine(&book.format)
-            .then(|| Engine::new(source.clone(), &flow.css, prefs.clone()));
+        let spine_href = flow
+            .chapters
+            .get(chapter)
+            .map(|c| c.spine_href.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let book_images = Arc::new(BookImages::new(&flow.images));
+        let engine = uses_engine(&book.format).then(|| {
+            let images = Arc::new(ChapterImages::new(book_images.clone(), &spine_href));
+            Engine::new(source.clone(), &flow.css, prefs.clone(), images)
+        });
         // 引擎路径不用 TextViewState，但仍要有一个句柄占位：`observe` 与
         // `reveal_range` 那套只对 TextView 有意义，引擎的位置恢复在 M5。
         let state = if engine.is_some() {
@@ -71,6 +85,7 @@ impl ReaderView {
             chapters: flow.chapters,
             chapter,
             engine,
+            book_images,
             state,
             prefs,
             pane_reserve: 0.0,
@@ -121,11 +136,18 @@ impl ReaderView {
     }
 
     /// 状态栏用的「第几节 / 共几节」，比整本书名短得多。
-    pub fn chapter_position(&self) -> String {
+    pub fn chapter_position(&self, cx: &App) -> String {
         if self.chapters.is_empty() {
             return String::new();
         }
-        format!("第 {} / {} 节", self.chapter + 1, self.chapters.len())
+        crate::l10n::tf(
+            cx,
+            "reader.chapter_position",
+            &[
+                ("index", &(self.chapter + 1)),
+                ("total", &self.chapters.len()),
+            ],
+        )
     }
 
     /// 已滚过的比例。用它而不是页码来换算位置：字号与窗口宽度变化后
@@ -208,7 +230,7 @@ impl ReaderView {
         )
     }
 
-    pub fn apply_prefs(&mut self, prefs: Prefs, cx: &mut Context<Self>) {
+    pub fn apply_prefs(&mut self, prefs: Reader, cx: &mut Context<Self>) {
         if let Some(engine) = self.engine.as_mut() {
             engine.set_prefs(prefs.clone());
         }
@@ -232,11 +254,17 @@ impl ReaderView {
 
     fn reload(&mut self, cx: &mut Context<Self>) {
         let source = self.chapters[self.chapter].source.clone();
+        let spine_href = self.chapters[self.chapter].spine_href.clone();
         // 换章即作废未落地的恢复请求，否则会把上一章的位置套到本章上。
         self.pending_restore = None;
         if let Some(engine) = self.engine.as_mut() {
             // 引擎自己按 (宽度, 字号, 行距) 缓存排版结果；换章要显式作废。
+            // 图片的相对路径基准目录随章变化，所以索引也要重建。
             engine.set_chapter(source);
+            engine.set_images(Arc::new(ChapterImages::new(
+                self.book_images.clone(),
+                &spine_href,
+            )));
             cx.notify();
             return;
         }
@@ -305,6 +333,14 @@ impl Render for ReaderView {
         // 自己 notify 一帧，因为 pending_restore 已被取走，不会循环。
         self.apply_pending_restore(cx);
         let prefs = self.prefs.clone();
+        // `max_measure == 0` 是「不设上限、随窗口铺满」的哨兵值，所以只有真设了上限
+        // 才加 `max_w`：把它当 0 宽的上限用，这一栏就塌成零宽。
+        let column = div().mx_auto().w_full().h_full();
+        let column = if prefs.max_measure > 0.0 {
+            column.max_w(px(prefs.max_measure))
+        } else {
+            column
+        };
         div()
             .id("reader-scroll")
             .test_support()
@@ -315,20 +351,15 @@ impl Render for ReaderView {
             .px(px(prefs.margin_x))
             .child(gpui_kit::base::TextSelectionLayer)
             .child(
-                div()
-                    .mx_auto()
-                    .w_full()
-                    .h_full()
-                    .max_w(px(prefs.max_measure))
-                    .child(
-                        TextView::new(&self.state)
-                            .scrollable(true)
-                            .selectable(true)
-                            .text_size(px(prefs.font_size))
-                            .line_height(px(prefs.font_size * prefs.line_height))
-                            .font_family(prefs.font_family.clone())
-                            .text_color(cx.theme().foreground),
-                    ),
+                column.child(
+                    TextView::new(&self.state)
+                        .scrollable(true)
+                        .selectable(true)
+                        .text_size(px(prefs.font_size))
+                        .line_height(px(prefs.font_size * prefs.line_height))
+                        .font_family(prefs.font_family.clone())
+                        .text_color(cx.theme().foreground),
+                ),
             )
             .into_any_element()
     }

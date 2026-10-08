@@ -1,11 +1,13 @@
+//! 存储层：迁移、书库、章节/图片/进度/偏好的往返与级联。只依赖公开 API。
+//!
+//! 级联那条测试要看「牌面之下的表」，但绝不碰私有字段：用公开的 `Store::open_at`
+//! 建库，再用一条裸 `rusqlite` 连接按**库文件契约**查计数。
+
 use std::path::{Path, PathBuf};
 
-use rusqlite::params;
-
-use super::Store;
-use crate::format::{Chapter, DocMeta, FlowDoc, Format, TocEntry};
-use crate::position::Locator;
-use crate::prefs::{Prefs, ThemeName};
+use folio_core::Store;
+use folio_core::format::{Chapter, DocMeta, FlowDoc, Format, ImageRes, TocEntry};
+use folio_core::position::Locator;
 
 fn meta(title: &str) -> DocMeta {
     DocMeta {
@@ -39,6 +41,14 @@ fn flow(parts: &[(&str, &str)]) -> FlowDoc {
             children: Vec::new(),
         }],
         cover: Some(vec![0x89, b'P', b'N', b'G', 13, 10]),
+        // 一张图片一起进往返：EPUB 的内嵌图走 images 表。
+        images: vec![ImageRes {
+            href: "OEBPS/Images/fig1.png".into(),
+            media_type: "image/png".into(),
+            width: 640,
+            height: 480,
+            bytes: vec![0x89, b'P', b'N', b'G', 1, 2, 3],
+        }],
     }
 }
 
@@ -48,13 +58,13 @@ fn migrations_are_idempotent_across_reopen() {
     let db = dir.path().join("folio.db");
 
     let store = Store::open_at(&db).unwrap();
-    assert_eq!(store.user_version().unwrap(), 3);
+    assert_eq!(store.user_version().unwrap(), 4);
     let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
     store.save_flow(id, &flow(&[("第一章", "正文一")])).unwrap();
     drop(store);
 
     let again = Store::open_at(&db).unwrap();
-    assert_eq!(again.user_version().unwrap(), 3, "重开不应重复跑迁移");
+    assert_eq!(again.user_version().unwrap(), 4, "重开不应重复跑迁移");
     assert_eq!(again.list_books().unwrap().len(), 1);
     assert_eq!(
         again.load_flow(id).unwrap().unwrap().chapters[0].title,
@@ -84,6 +94,28 @@ fn flow_roundtrips_byte_for_byte() {
     ]);
     store.save_flow(id, &doc).unwrap();
     assert_eq!(store.load_flow(id).unwrap().unwrap(), doc);
+}
+
+/// 图片与尺寸必须原样回来，且重存时是替换而非追加。
+#[test]
+fn images_roundtrip_and_replace() {
+    let store = Store::in_memory().unwrap();
+    let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
+    let mut doc = flow(&[("一", "正文")]);
+    store.save_flow(id, &doc).unwrap();
+
+    let got = store.load_flow(id).unwrap().unwrap();
+    assert_eq!(got.images.len(), 1);
+    assert_eq!(got.images[0].href, "OEBPS/Images/fig1.png");
+    assert_eq!((got.images[0].width, got.images[0].height), (640, 480));
+    assert_eq!(got.images[0].bytes, vec![0x89, b'P', b'N', b'G', 1, 2, 3]);
+
+    doc.images.clear();
+    store.save_flow(id, &doc).unwrap();
+    assert!(
+        store.load_flow(id).unwrap().unwrap().images.is_empty(),
+        "重存应替换旧图片，而不是留下孤行"
+    );
 }
 
 #[test]
@@ -130,36 +162,33 @@ fn position_roundtrips_and_overwrites() {
     assert_eq!(got, moved, "同一本书只应有一份进度");
 }
 
+/// 删书要把章节、图片、进度一起带走。表之间是外键级联，所以按**库文件里的表**验，
+/// 不通过私有连接字段。
 #[test]
-fn prefs_default_then_roundtrip() {
-    let store = Store::in_memory().unwrap();
-    assert_eq!(store.prefs(), Prefs::default());
-    let p = Prefs {
-        theme: ThemeName::Sepia,
-        font_size: 22.0,
-        ..Default::default()
+fn removing_a_book_cascades_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    {
+        let store = Store::open_at(&db).unwrap();
+        let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
+        store.save_flow(id, &flow(&[("一", "内容一")])).unwrap();
+        store
+            .set_position(id, "continuous", &Locator::start())
+            .unwrap();
+
+        store.remove_book(id).unwrap();
+        assert_eq!(store.book(id).unwrap(), None);
+        assert!(store.load_flow(id).unwrap().is_none(), "章节随书一起消失");
+        assert!(store.position(id).unwrap().is_none(), "进度随书一起消失");
+    }
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let count = |table: &str| -> i64 {
+        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
     };
-    store.set_prefs(&p).unwrap();
-    assert_eq!(store.prefs(), p);
-}
-
-#[test]
-fn removing_a_book_cascades_its_chapters_and_position() {
-    let store = Store::in_memory().unwrap();
-    let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
-    store.save_flow(id, &flow(&[("一", "内容一")])).unwrap();
-    store
-        .set_position(id, "continuous", &Locator::start())
-        .unwrap();
-
-    store.remove_book(id).unwrap();
-    assert_eq!(store.book(id).unwrap(), None);
-    let chapter_rows: i64 = store
-        .conn
-        .query_row("SELECT count(*) FROM chapters", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(chapter_rows, 0, "章节必须随书一起消失");
-    assert!(store.position(id).unwrap().is_none());
+    assert_eq!(count("chapters"), 0, "章节必须随书一起消失");
+    assert_eq!(count("images"), 0, "图片必须随书一起消失");
 }
 
 #[test]
@@ -221,18 +250,14 @@ fn fts_query_syntax_in_user_input_is_treated_as_text() {
     assert!(store.search("NEAR/a", 10).unwrap().is_empty());
 }
 
+/// 打开过的书排在从没打开过的前面。
 #[test]
-fn list_orders_most_recently_opened_first() {
+fn opened_books_rank_before_never_opened_ones() {
     let store = Store::in_memory().unwrap();
     let a = store.add_book(&path("a.md"), &meta("A")).unwrap();
     let _b = store.add_book(&path("b.md"), &meta("B")).unwrap();
-    store
-        .conn
-        .execute(
-            "UPDATE books SET last_opened_at = 100 WHERE id = ?1",
-            params![a],
-        )
-        .unwrap();
+    store.touch_opened(a).unwrap();
     let books = store.list_books().unwrap();
-    assert_eq!(books[0].title, "A", "最近打开的排最前，没打开过的垫后");
+    assert_eq!(books.len(), 2);
+    assert_eq!(books[0].title, "A", "打开过的排最前，没打开过的垫后");
 }

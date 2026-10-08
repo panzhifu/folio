@@ -1,11 +1,13 @@
-use super::*;
-use crate::dom::Dom;
+//! CSS 子集：规则装配、层叠与 specificity。只依赖公开 API。
+
+use folio_core::css::{Origin, RuleSet};
+use folio_core::dom::{Dom, NodeId};
 
 fn rules(text: &str) -> RuleSet {
     RuleSet::parse(text, Origin::Author)
 }
 
-fn first_p(dom: &Dom) -> crate::dom::NodeId {
+fn first_p(dom: &Dom) -> NodeId {
     dom.elements()
         .find(|(_, n)| {
             n.tag

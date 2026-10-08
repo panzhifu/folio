@@ -14,12 +14,13 @@
 
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use folio_core::Reader;
 use folio_core::css::computed::{ComputedStyle, TextAlign, cascade};
 use folio_core::css::{Origin, RuleSet};
 use folio_core::dom::{Dom, NodeId};
-use folio_core::layout::{Layout, LayoutOptions, LineBox, layout as typeset};
-use folio_core::prefs::Prefs;
+use folio_core::layout::{Layout, LayoutOptions, LineBox, LineFragment, layout as typeset};
 use gpui_kit::base::v_virtual_list;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
@@ -27,20 +28,23 @@ use gpui_kit::{
     div, px, size,
 };
 
+use crate::images::ChapterImages;
 use crate::measure::{GpuiMeasure, gpui_font};
 
 pub struct Engine {
     /// 章源文本（XHTML）。排版每次从它重算，只在几何参数没变时复用结果。
     source: String,
     rules: RuleSet,
-    prefs: Prefs,
+    prefs: Reader,
+    /// 本章的图片索引：排版查固有尺寸，绘制取字节解码。
+    images: Arc<ChapterImages>,
     /// 上次排版时的 (内容宽度, 字号, 行距)。
     laid_out: Option<(f32, f32, f32)>,
     layout: Layout,
 }
 
 impl Engine {
-    pub fn new(source: String, css: &str, prefs: Prefs) -> Self {
+    pub fn new(source: String, css: &str, prefs: Reader, images: Arc<ChapterImages>) -> Self {
         let mut rules = RuleSet::default();
         // 书自己的 CSS 是作者层；读者偏好通过根样式进来，
         // 带 `!important` 的读者样式表留给 M5 的 reader.css。
@@ -49,12 +53,13 @@ impl Engine {
             source,
             rules,
             prefs,
+            images,
             laid_out: None,
             layout: Layout::default(),
         }
     }
 
-    pub fn set_prefs(&mut self, prefs: Prefs) {
+    pub fn set_prefs(&mut self, prefs: Reader) {
         self.prefs = prefs;
     }
 
@@ -63,6 +68,12 @@ impl Engine {
             self.source = source;
             self.laid_out = None;
         }
+    }
+
+    /// 换章时图片索引也要跟着换（相对路径的基准目录随章变化）。
+    pub fn set_images(&mut self, images: Arc<ChapterImages>) {
+        self.images = images;
+        self.laid_out = None;
     }
 
     pub fn lines(&self) -> &[LineBox] {
@@ -88,15 +99,23 @@ impl Engine {
     /// 版心宽度。**必须 ≤ 阅读栏实际宽度**，否则引擎按宽列折行、屏幕按窄栏裁剪，
     /// 居中的标题就会被推到栏外（这一步量不到 flex 之后的真实宽度，
     /// 所以由外壳把侧栏占位报进来）。
-    pub fn content_width(window: &Window, prefs: &Prefs, pane_reserve: f32) -> f32 {
+    pub fn content_width(window: &Window, prefs: &Reader, pane_reserve: f32) -> f32 {
         let viewport = window.viewport_size();
         let usable = viewport.width - px(pane_reserve + prefs.margin_x * 2.0);
-        f32::from(usable.min(px(prefs.max_measure))).max(1.0)
+        // `max_measure == 0` 是「不设上限、随窗口铺满」的哨兵值（见 `folio_core::Reader`），
+        // 不是真的 0 像素上限：当成上限时 `usable.min(0)` 会被下面的夹取变成 1px 版心，
+        // 一行只剩一个字。
+        let capped = if prefs.max_measure > 0.0 {
+            usable.min(px(prefs.max_measure))
+        } else {
+            usable
+        };
+        f32::from(capped).max(1.0)
     }
 
     /// 根样式 = 读者偏好。书自己的 CSS 能覆盖它（作者层高于读者普通层，
     /// 这与浏览器一致），但读者的 `!important` 终究能压回来（M5）。
-    fn root_base(prefs: &Prefs) -> ComputedStyle {
+    fn root_base(prefs: &Reader) -> ComputedStyle {
         ComputedStyle {
             font_size: prefs.font_size,
             line_height: prefs.line_height,
@@ -132,6 +151,7 @@ impl Engine {
             body_of(&dom),
             LayoutOptions { width },
             &measure,
+            self.images.as_ref(),
         );
         self.laid_out = Some(key);
     }
@@ -164,31 +184,50 @@ impl Engine {
         let family: gpui_kit::SharedString = self.prefs.font_family.clone().into();
         let mut left = line.x;
         let mut row = div().relative().w_full().h(px(line.height));
-        for run in &line.runs {
-            let text = block.text.get(run.norm.clone()).unwrap_or("");
-            let box_height = run.style.box_height();
-            let baseline_in_box = (box_height + run.ascent - run.descent) / 2.0;
-            row = row.child(
-                div()
-                    .absolute()
-                    .left(px(left))
-                    .top(px(line.baseline - baseline_in_box))
-                    .whitespace_nowrap()
-                    .font(gpui_font(&run.style.font, &family))
-                    .text_size(px(run.style.font_size))
-                    .line_height(px(box_height))
-                    .text_color(run.style.color.map_or(foreground, |c| {
-                        gpui_kit::Rgba {
-                            r: c.0 as f32 / 255.0,
-                            g: c.1 as f32 / 255.0,
-                            b: c.2 as f32 / 255.0,
-                            a: 1.0,
-                        }
-                        .into()
-                    }))
-                    .child(text.to_string()),
-            );
-            left += run.width;
+        for fragment in &line.fragments {
+            match fragment {
+                LineFragment::Text(run) => {
+                    let text = block.text.get(run.norm.clone()).unwrap_or("");
+                    let box_height = run.style.box_height();
+                    let baseline_in_box = (box_height + run.ascent - run.descent) / 2.0;
+                    row = row.child(
+                        div()
+                            .absolute()
+                            .left(px(left))
+                            .top(px(line.baseline - baseline_in_box))
+                            .whitespace_nowrap()
+                            .font(gpui_font(&run.style.font, &family))
+                            .text_size(px(run.style.font_size))
+                            .line_height(px(box_height))
+                            .text_color(run.style.color.map_or(foreground, |c| {
+                                gpui_kit::Rgba {
+                                    r: c.0 as f32 / 255.0,
+                                    g: c.1 as f32 / 255.0,
+                                    b: c.2 as f32 / 255.0,
+                                    a: 1.0,
+                                }
+                                .into()
+                            }))
+                            .child(text.to_string()),
+                    );
+                    left += run.width;
+                }
+                LineFragment::Image(img) => {
+                    // 图片底贴基线：盒顶 = 基线 - 图高。
+                    if let Some(source) = self.images.render_source(&img.href) {
+                        row = row.child(
+                            div()
+                                .absolute()
+                                .left(px(left))
+                                .top(px(line.baseline - img.height))
+                                .w(px(img.width))
+                                .h(px(img.height))
+                                .child(gpui_kit::img(source).size_full()),
+                        );
+                    }
+                    left += img.width;
+                }
+            }
         }
         row.into_any_element()
     }

@@ -5,9 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::format::{Chapter, DocMeta, FlowDoc};
+use crate::format::{Chapter, DocMeta, FlowDoc, ImageRes};
 use crate::position::Locator;
-use crate::prefs::Prefs;
 
 const MIGRATIONS: &[&str] = &[
     // v1：书库、章节、进度、偏好、标注、集合。
@@ -106,6 +105,20 @@ END;
 ALTER TABLE books ADD COLUMN css TEXT NOT NULL DEFAULT '';
 ALTER TABLE books ADD COLUMN toc_json TEXT NOT NULL DEFAULT '[]';
 "#,
+    // v4：整本书的图片资源。key 是解析后的容器绝对路径（与 chapter.spine_href 同形），
+    // 排版与绘制都按它查表；固有尺寸在读取时算好，省得每次打开都重新解 header。
+    r#"
+CREATE TABLE images (
+    id         INTEGER PRIMARY KEY,
+    book_id    INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    href       TEXT    NOT NULL,
+    media_type TEXT    NOT NULL DEFAULT '',
+    width      INTEGER NOT NULL DEFAULT 0,
+    height     INTEGER NOT NULL DEFAULT 0,
+    bytes      BLOB    NOT NULL
+);
+CREATE INDEX idx_images_book ON images(book_id, href);
+"#,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,15 +152,7 @@ fn now() -> i64 {
 }
 
 pub fn default_db_path() -> PathBuf {
-    let base = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
-                .join(".local/share")
-        });
-    base.join("folio").join("folio.db")
+    crate::paths::db_path()
 }
 
 fn book_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
@@ -274,10 +279,11 @@ impl Store {
         Ok(())
     }
 
-    /// 整本替换章节、CSS、目录与封面，一个事务保证不留半本。
+    /// 整本替换章节、CSS、目录、封面与图片，一个事务保证不留半本。
     pub fn save_flow(&self, book_id: i64, doc: &FlowDoc) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM chapters WHERE book_id = ?1", params![book_id])?;
+        tx.execute("DELETE FROM images WHERE book_id = ?1", params![book_id])?;
         for (idx, ch) in doc.chapters.iter().enumerate() {
             tx.execute(
                 "INSERT INTO chapters (book_id, idx, title, spine_href, char_len)
@@ -294,6 +300,20 @@ impl Store {
             tx.execute(
                 "INSERT INTO chapter_text (chapter_id, text) VALUES (?1, ?2)",
                 params![chapter_id, ch.source],
+            )?;
+        }
+        for img in &doc.images {
+            tx.execute(
+                "INSERT INTO images (book_id, href, media_type, width, height, bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    book_id,
+                    img.href,
+                    img.media_type,
+                    img.width as i64,
+                    img.height as i64,
+                    img.bytes
+                ],
             )?;
         }
         tx.execute(
@@ -339,11 +359,27 @@ impl Store {
             },
         )?;
         let toc = serde_json::from_str(&toc_json).unwrap_or_default();
+        let mut img_stmt = self.conn.prepare(
+            "SELECT href, media_type, width, height, bytes FROM images
+             WHERE book_id = ?1 ORDER BY id",
+        )?;
+        let images = img_stmt
+            .query_map(params![book_id], |r| {
+                Ok(ImageRes {
+                    href: r.get(0)?,
+                    media_type: r.get(1)?,
+                    width: r.get::<_, i64>(2)? as u32,
+                    height: r.get::<_, i64>(3)? as u32,
+                    bytes: r.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(Some(FlowDoc {
             chapters,
             css,
             toc,
             cover,
+            images,
         }))
     }
 
@@ -369,28 +405,6 @@ impl Store {
             )
             .optional()?
             .map(|(mode, json)| (mode, Locator::from_json(&json))))
-    }
-
-    pub fn set_prefs(&self, prefs: &Prefs) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO prefs (key, value_json) VALUES ('reader', ?1)
-             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-            params![prefs.to_json()],
-        )?;
-        Ok(())
-    }
-
-    pub fn prefs(&self) -> Prefs {
-        let json: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT value_json FROM prefs WHERE key = 'reader'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .unwrap_or(None);
-        json.map(|j| Prefs::from_json(&j)).unwrap_or_default()
     }
 
     /// trigram 分词要求查询串至少 3 个字符，短于 3 直接返回空而不是假装能搜。
@@ -422,6 +436,3 @@ impl Store {
 fn fts_phrase(query: &str) -> String {
     format!("\"{}\"", query.replace('"', "\"\""))
 }
-
-#[cfg(test)]
-mod tests;

@@ -1,4 +1,8 @@
-use super::*;
+//! DOM 层：html5ever → arena 的解析结果与结构不变量。
+//!
+//! 这是集成测试：只依赖 `folio_core` 的公开 API。
+
+use folio_core::dom::{Dom, Node, NodeId, NodeKind};
 
 fn parse(s: &str) -> Dom {
     Dom::parse(s.as_bytes())

@@ -31,6 +31,26 @@ pub enum Display {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color(pub u8, pub u8, pub u8);
 
+/// 一个尺寸值。`auto` / `none` 用 `Option::None` 表示，两种「没有显式值」在这里
+/// 是一回事（都用内在尺寸或默认值兜底）。百分比不在此刻折算 —— 它要按**包含块
+/// 的宽度**来算，那是排版期才知道的数，见 `Length::resolve`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Length {
+    Px(f32),
+    /// 比例，`50%` 存成 `0.5`。
+    Percent(f32),
+}
+
+impl Length {
+    /// 按包含块基准长度折算成 px。
+    pub fn resolve(self, basis: f32) -> f32 {
+        match self {
+            Length::Px(v) => v,
+            Length::Percent(p) => p * basis,
+        }
+    }
+}
+
 /// 排版层需要的计算后样式。长度一律已折算成 px，`line_height` 是倍数。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
@@ -53,6 +73,11 @@ pub struct ComputedStyle {
     pub color: Option<Color>,
     pub letter_spacing: f32,
     pub white_space_pre: bool,
+    /// 替换元素（图片）的尺寸。块级元素的 width 一期不做，只有图片用得上。
+    pub width: Option<Length>,
+    pub height: Option<Length>,
+    pub max_width: Option<Length>,
+    pub max_height: Option<Length>,
 }
 
 impl Default for ComputedStyle {
@@ -77,6 +102,10 @@ impl Default for ComputedStyle {
             color: None,
             letter_spacing: 0.0,
             white_space_pre: false,
+            width: None,
+            height: None,
+            max_width: None,
+            max_height: None,
         }
     }
 }
@@ -90,9 +119,6 @@ const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "text-decoration",
     "background",
     "background-color",
-    "width",
-    "height",
-    "max-width",
     "min-height",
     "border",
     "border-left",
@@ -356,8 +382,38 @@ fn apply(
             // nowrap / pre-line 一期不区分，按不支持计数而不是假装成功。
             _ => false,
         },
+        "width" => set_length(value, own, root_px, &mut style.width),
+        "height" => set_length(value, own, root_px, &mut style.height),
+        "max-width" => set_length(value, own, root_px, &mut style.max_width),
+        "max-height" => set_length(value, own, root_px, &mut style.max_height),
         _ => false,
     }
+}
+
+fn set_length(value: &str, font_size: f32, root_font_size: f32, out: &mut Option<Length>) -> bool {
+    match parse_length(value, font_size, root_font_size) {
+        Some(v) => {
+            *out = v;
+            true
+        }
+        None => false,
+    }
+}
+
+/// 外层 `None` = 值不认识（计入 ignored）；内层 `None` = `auto` / `none`（清掉显式值）。
+fn parse_length(value: &str, font_size: f32, root_font_size: f32) -> Option<Option<Length>> {
+    let v = value.trim().to_ascii_lowercase();
+    if v.is_empty() {
+        return None;
+    }
+    if v == "auto" || v == "none" {
+        return Some(None);
+    }
+    if let Some(percent) = v.strip_suffix('%') {
+        let n: f32 = percent.trim().parse().ok()?;
+        return Some(Some(Length::Percent(n / 100.0)));
+    }
+    length_px(&v, font_size, root_font_size).map(|px| Some(Length::Px(px)))
 }
 
 fn set_px(value: &str, font_size: f32, root_font_size: f32, out: &mut f32) -> bool {
@@ -500,6 +556,3 @@ fn document_order(dom: &Dom) -> Vec<NodeId> {
     }
     out
 }
-
-#[cfg(test)]
-mod tests;

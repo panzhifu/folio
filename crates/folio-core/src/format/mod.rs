@@ -63,6 +63,18 @@ pub struct TocEntry {
     pub children: Vec<TocEntry>,
 }
 
+/// 一本书里的一张图片。`href` 是解析后的**容器绝对路径**（与 `Chapter::spine_href`
+/// 同形），排版与绘制都用它当键；`width`/`height` 是解码前的固有像素尺寸，
+/// 读取时算好，布局期只查表。SVG 等取不到尺寸的格式为 0，由排版层降级。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRes {
+    pub href: String,
+    pub media_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Vec<u8>,
+}
+
 /// 可重排文档。`css` 是全书作者样式按 manifest 顺序拼起来的一份，
 /// `toc` 与 `cover` 来自 OPF；这三项都是**文档级**数据，所以和章节分开存。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -71,6 +83,8 @@ pub struct FlowDoc {
     pub css: String,
     pub toc: Vec<TocEntry>,
     pub cover: Option<Vec<u8>>,
+    /// 全书图片，按容器路径索引。封面若也在 manifest 里会一并收录。
+    pub images: Vec<ImageRes>,
 }
 
 impl FlowDoc {
@@ -105,6 +119,62 @@ pub fn detect(path: &Path) -> Option<Format> {
         .iter()
         .find(|a| a.supports(path))
         .map(|a| a.format())
+}
+
+/// 把 `href` 相对 `base_dir`（通常是 OPF 或某章所在的目录）解析成容器内的规范路径。
+/// 去掉 `#fragment`，做百分号解码，折叠 `./` 与 `../`。
+///
+/// 这是 epub 适配器与 app 侧图片 resolver 共用的同一份实现 —— 两边各写一次
+/// 迟早会在「文件名里有空格 / 百分号编码」这类书上分叉。
+pub fn resolve_href(base_dir: &str, href: &str) -> String {
+    let href = href.split('#').next().unwrap_or(href).trim();
+    let decoded = percent_decode(href);
+    let merged = if decoded.starts_with('/') {
+        decoded.trim_start_matches('/').to_string()
+    } else if base_dir.is_empty() {
+        decoded
+    } else {
+        format!("{base_dir}{decoded}")
+    };
+    let mut stack: Vec<&str> = Vec::new();
+    for seg in merged.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    stack.join("/")
+}
+
+/// 路径所在目录，带结尾 `/`；没有目录时是空串。
+pub fn dir_of(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/"),
+        None => String::new(),
+    }
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(n) = u8::from_str_radix(&input[i + 1..i + 3], 16) {
+                out.push(n);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // href 按 UTF-8 百分号编码；解出来的字节流不一定落在字符边界上，
+    // 那种情况保留替换字符而不是整本读失败。
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub fn open(path: &Path) -> crate::Result<(DocMeta, Content)> {

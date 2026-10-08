@@ -1,12 +1,13 @@
 //! `ComputedStyle` 计算：单位换算、继承、ignored 计数、层叠端到端。
 //!
-//! 选择器命中和 specificity / `!important` 的排序在 `css/tests.rs` 已覆盖，
+//! 只依赖公开 API。选择器命中和 specificity / `!important` 的排序在 `tests/css.rs` 已覆盖，
 //! 这里验的是「拿到有序声明之后算得对不对」。
 
-use crate::css::{Origin, RuleSet};
-use crate::dom::{Dom, NodeId};
-
-use super::*;
+use folio_core::css::computed::{
+    Color, ComputedStyle, Display, Length, StyledDom, TextAlign, cascade,
+};
+use folio_core::css::{Origin, RuleSet};
+use folio_core::dom::{Dom, NodeId};
 
 struct Page {
     dom: Dom,
@@ -318,4 +319,46 @@ fn root_base_from_reader_prefs_is_the_inheritance_seed() {
     assert_eq!(s.line_height, 2.0);
     assert_eq!(s.font_family, "Noto Serif CJK SC");
     assert_eq!(s.margin_top, 24.0, "1em 按偏好字号而不是 16px");
+}
+
+/// 图片尺寸用的长度：px / em / rem 折成 px，% 留到排版期，auto 清空。
+#[test]
+fn width_and_max_width_parse_units_percent_and_auto() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>\
+         <div class=\"c\"></div><div class=\"d\"></div>",
+        ".a { width: 120px } \
+         .b { width: 100% } \
+         .c { width: auto; max-width: 50% } \
+         .d { width: 2em; font-size: 20px; max-height: 3rem }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).width,
+        Some(Length::Px(120.0))
+    );
+    assert_eq!(
+        style(&page, class(&page, "b")).width,
+        Some(Length::Percent(1.0))
+    );
+    let c = style(&page, class(&page, "c"));
+    assert_eq!(c.width, None, "auto 清空显式宽度");
+    assert_eq!(c.max_width, Some(Length::Percent(0.5)));
+    let d = style(&page, class(&page, "d"));
+    assert_eq!(d.width, Some(Length::Px(40.0)), "2em 按自己的 20px 字号");
+    assert_eq!(d.max_height, Some(Length::Px(48.0)), "3rem 按根 16px 字号");
+    assert_eq!(page.styled.ignored, 0);
+
+    assert_eq!(Length::Px(30.0).resolve(200.0), 30.0);
+    assert_eq!(Length::Percent(0.5).resolve(200.0), 100.0);
+}
+
+/// `width` 不再是「认识但不做」：能算的声明不该被计进 ignored。
+#[test]
+fn implemented_width_is_not_counted_as_ignored() {
+    let page = author("<div></div>", "div { width: 100px; max-width: 100% }");
+    assert_eq!(page.styled.ignored, 0);
+    assert_eq!(
+        style(&page, tag(&page, "div")).width,
+        Some(Length::Px(100.0))
+    );
 }

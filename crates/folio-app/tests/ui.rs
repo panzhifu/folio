@@ -4,7 +4,7 @@
 
 use folio_app::reader::ReaderView;
 use folio_core::store::BookRow;
-use folio_core::{Chapter, FlowDoc, Locator, Prefs};
+use folio_core::{Chapter, Config, FlowDoc, Language, Locator, Reader};
 use gpui_kit::component::{Root, WindowExt as _};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -48,7 +48,7 @@ fn book_as(format: &str) -> BookRow {
 fn open(
     cx: &mut TestAppContext,
     flow: &FlowDoc,
-    prefs: Prefs,
+    prefs: Reader,
     locator: Locator,
 ) -> (Entity<ReaderView>, AnyWindowHandle) {
     open_as(cx, flow, "markdown", prefs, locator)
@@ -58,7 +58,7 @@ fn open_as(
     cx: &mut TestAppContext,
     flow: &FlowDoc,
     format: &str,
-    prefs: Prefs,
+    prefs: Reader,
     locator: Locator,
 ) -> (Entity<ReaderView>, AnyWindowHandle) {
     let row = book_as(format);
@@ -109,53 +109,57 @@ fn locator_of(cx: &mut TestAppContext, view: &Entity<ReaderView>) -> Locator {
     cx.update(|cx| view.read(cx).locator(cx))
 }
 
-/// 设置面板要能被真实点开，并且改一个字段真的会落到偏好实体上。
+/// 设置要能真的**进入这一页**，并且改一个字段真的落到偏好实体上。
 /// 只测「能编译出这个面板」没有意义 —— 那测不到取值对。
 #[gpui_kit::test]
-fn settings_dialog_opens_and_edits_preferences(cx: &mut TestAppContext) {
+fn the_settings_button_opens_a_settings_page(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let store = folio_core::Store::in_memory().expect("内存库");
-    let mut app = None;
-    let handle = cx.open_window(size(px(900.), px(600.)), |window, cx| {
-        let view = cx.new(|cx| {
-            folio_app::app::FolioApp::new(store, Prefs::default(), Vec::new(), window, cx)
-        });
-        app = Some(view.clone());
-        Root::new(view, window, cx)
-    });
-    let app = app.unwrap();
-    let handle: AnyWindowHandle = handle.into();
+    let handle: AnyWindowHandle = cx
+        .open_window(size(px(900.), px(600.)), |window, cx| {
+            let view = cx.new(|cx| {
+                folio_app::app::FolioApp::new(store, Config::default(), Vec::new(), window, cx)
+            });
+            Root::new(view, window, cx)
+        })
+        .into();
 
-    let before = cx.update(|cx| folio_app::prefs_model::PrefsHolder::get(cx).font_size);
+    let before = cx.update(|cx| folio_app::config_model::ConfigHolder::reader(cx).font_size);
     assert_eq!(before, 17.0, "默认字号应为 17px");
 
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         window.click("settings", cx);
         window.render_frame(cx);
-        // 断 "dialog" 而不是 "reader-settings"：Settings 元素自己不注册观测点，
-        // 而对话框层是 Root 挂的固定 id。
         assert!(
-            window.try_find("dialog").is_some(),
-            "点工具条的设置按钮应当打开设置对话框"
+            window.try_find("settings-back").is_some(),
+            "点工具条的设置按钮应当进入设置页"
+        );
+        // 曾经的回归：设置挂在 448px 的对话框里，扣掉它自己的页面导航只剩一百多 px，
+        // 每个字段都竖着堆成一列没法看的窄条 —— 那不算「进入设置界面」。
+        assert!(
+            window.try_find("dialog").is_none(),
+            "设置是整页视图，不该再是对话框"
         );
     })
-    .expect("设置面板应能打开");
+    .expect("设置页应能打开");
 
-    // 关掉面板后从偏好实体读，确认写入路径是通的而不是只画了个壳。
     cx.update_window(handle, |_, window, cx| {
-        window.close_dialog(cx);
+        window.click("settings-back", cx);
         window.render_frame(cx);
-        assert!(window.try_find("dialog").is_none(), "对话框应能关闭");
+        assert!(
+            window.try_find("settings-back").is_none(),
+            "点返回应离开设置页回到阅读"
+        );
     })
-    .expect("面板应能关闭");
+    .expect("设置页应能返回");
 
+    // 从偏好实体读回 26，确认写入路径是通的而不是只画了个壳。
     cx.update(|cx| {
-        folio_app::prefs_model::PrefsHolder::edit(cx, |p| p.font_size = 26.0);
+        folio_app::config_model::ConfigHolder::edit_reader(cx, |p| p.font_size = 26.0);
     });
-    let after = cx.update(|cx| folio_app::prefs_model::PrefsHolder::get(cx).font_size);
+    let after = cx.update(|cx| folio_app::config_model::ConfigHolder::reader(cx).font_size);
     assert_eq!(after, 26.0);
-    let _ = app;
 }
 
 /// 越界的偏好值必须被夹住，否则排版会算出零高或无限宽。
@@ -166,7 +170,7 @@ fn out_of_range_preferences_are_clamped(cx: &mut TestAppContext) {
     let handle = cx.open_window(size(px(600.), px(400.)), |window, cx| {
         Root::new(
             cx.new(|cx| {
-                folio_app::app::FolioApp::new(store, Prefs::default(), Vec::new(), window, cx)
+                folio_app::app::FolioApp::new(store, Config::default(), Vec::new(), window, cx)
             }),
             window,
             cx,
@@ -177,12 +181,12 @@ fn out_of_range_preferences_are_clamped(cx: &mut TestAppContext) {
         .unwrap();
 
     cx.update(|cx| {
-        folio_app::prefs_model::PrefsHolder::edit(cx, |p| {
+        folio_app::config_model::ConfigHolder::edit_reader(cx, |p| {
             p.font_size = 9000.0;
             p.line_height = 0.0;
         });
     });
-    let prefs = cx.update(|cx| folio_app::prefs_model::PrefsHolder::get(cx));
+    let prefs = cx.update(|cx| folio_app::config_model::ConfigHolder::reader(cx));
     assert_eq!(prefs.font_size, 72.0, "字号应被夹到上限");
     assert_eq!(prefs.line_height, 1.0, "行距应被夹到下限");
 }
@@ -194,7 +198,7 @@ fn wheel_scrolling_moves_the_reading_position(cx: &mut TestAppContext) {
     let (view, handle) = open(
         cx,
         &flow,
-        Prefs {
+        Reader {
             font_size: 16.0,
             ..Default::default()
         },
@@ -225,7 +229,7 @@ fn locator_matches_the_scrolled_ratio(cx: &mut TestAppContext) {
     let (view, handle) = open(
         cx,
         &flow,
-        Prefs {
+        Reader {
             font_size: 16.0,
             ..Default::default()
         },
@@ -257,7 +261,7 @@ fn position_survives_a_restart_through_the_store(cx: &mut TestAppContext) {
     let (view, handle) = open(
         cx,
         &flow,
-        Prefs {
+        Reader {
             font_size: 16.0,
             ..Default::default()
         },
@@ -294,7 +298,7 @@ fn position_survives_a_restart_through_the_store(cx: &mut TestAppContext) {
     let (reopened, _) = open(
         cx,
         &flow,
-        Prefs {
+        Reader {
             font_size: 16.0,
             ..Default::default()
         },
@@ -319,7 +323,7 @@ fn the_engine_indents_centers_and_spaces_lines(cx: &mut TestAppContext) {
     assert_eq!(flow.chapters.len(), 3, "spine 三章");
     assert_eq!(meta.title, "合成测试书");
 
-    let prefs = Prefs {
+    let prefs = Reader {
         font_size: 20.0,
         line_height: 1.8,
         ..Default::default()
@@ -405,34 +409,236 @@ fn inline_styles_survive_into_runs(cx: &mut TestAppContext) {
         .join("../../tests/fixtures/oss/minimal-zh.epub");
     let (_, content) = folio_core::open(&path).expect("合成 EPUB 应能打开");
     let folio_core::Content::Reflow(flow) = content;
-    let (view, _handle) = open_as(cx, &flow, "epub", Prefs::default(), Locator::start());
+    let (view, _handle) = open_as(cx, &flow, "epub", Reader::default(), Locator::start());
     let lines = cx
         .update(|cx| view.read(cx).engine_lines().map(|l| l.to_vec()))
         .expect("EPUB 走自研引擎");
 
     let rich = lines
         .iter()
-        .find(|l| l.runs.len() >= 4)
+        .find(|l| l.text_runs().count() >= 4)
         .expect("带 em/strong/span 的那一行应被切成多个 run");
     assert!(
-        rich.runs.iter().any(|r| r.style.font.weight >= 700),
+        rich.text_runs().any(|r| r.style.font.weight >= 700),
         "strong 应带粗体"
     );
-    assert!(rich.runs.iter().any(|r| r.style.font.italic), "em 应带斜体");
+    assert!(rich.text_runs().any(|r| r.style.font.italic), "em 应带斜体");
     assert!(
-        rich.runs
-            .iter()
+        rich.text_runs()
             .any(|r| r.style.color == Some(Color(0xC0, 0x39, 0x2B))),
         "span.red 的局部颜色要落到 run 上"
     );
     assert!(
-        rich.runs.iter().all(|r| r.width > 0.0),
+        rich.text_runs().all(|r| r.width > 0.0),
         "每个 run 都要有实际绘制宽度"
     );
-    let sum: f32 = rich.runs.iter().map(|r| r.width).sum();
+    let sum: f32 = rich.text_runs().map(|r| r.width).sum();
     assert!(
         (sum - rich.width).abs() < 0.5,
         "行宽应是各 run 宽度之和：{sum} vs {}",
         rich.width
     );
+}
+
+/// 多语言的验收：改偏好之后，**真实渲染出来的**按钮文案要立刻换成另一种语言。
+/// 只测 `tr()` 的返回值是不够的 —— 那测不到「视图有没有跟着重画」。
+#[gpui_kit::test]
+fn switching_the_interface_language_changes_the_rendered_labels(cx: &mut TestAppContext) {
+    use folio_core::i18n::Locale;
+
+    cx.update(gpui_kit::init);
+    let store = folio_core::Store::in_memory().expect("内存库");
+    let config = Config {
+        language: Language {
+            locale: Locale::ZhHans,
+        },
+        ..Default::default()
+    };
+    let handle: AnyWindowHandle = cx
+        .open_window(size(px(900.), px(600.)), |window, cx| {
+            let view = cx.new(|cx| {
+                folio_app::app::FolioApp::new(store, config.clone(), Vec::new(), window, cx)
+            });
+            Root::new(view, window, cx)
+        })
+        .into();
+
+    // 断言走空库引导那个**带文字**的按钮：侧栏的导入入口是纯图标，没有 label 可查。
+    let import_label = |cx: &mut TestAppContext| {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.find("empty-import").label().map(|s| s.to_string())
+        })
+        .expect("应能读到导入按钮的文案")
+    };
+    assert_eq!(
+        import_label(cx).as_deref(),
+        Some("导入书籍…"),
+        "偏好是中文时界面应为中文"
+    );
+
+    cx.update(|cx| {
+        folio_app::config_model::ConfigHolder::edit_language(cx, |l| l.locale = Locale::En);
+    });
+    assert_eq!(
+        import_label(cx).as_deref(),
+        Some("Import book…"),
+        "切换界面语言后，重画出来的文案要跟着变"
+    );
+
+    // 章节位置这类带参文案：走的是同一套占位符，语言变了顺序也要对。
+    cx.update(|cx| {
+        folio_app::config_model::ConfigHolder::edit_language(cx, |l| l.locale = Locale::Ja);
+    });
+    let label = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.find("empty-import").label().map(|s| s.to_string())
+        })
+        .expect("应能读到导入按钮的文案");
+    assert_eq!(label.as_deref(), Some("本を追加…"), "日文文案也要生效");
+}
+
+/// 一张 1×1 的合法 PNG，用来喂给引擎（解码由 gpui 负责，这里只要能过 header）。
+const PNG_1X1: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
+
+/// M3-E3 验收（app 侧）：EPUB 章里的内嵌图要经真实引擎变成图片片段，
+/// `src` 按本章目录解析到容器路径，且可见文本里不留哨兵字符。
+#[gpui_kit::test]
+fn images_flow_through_the_engine_as_fragments(cx: &mut TestAppContext) {
+    use folio_core::format::ImageRes;
+
+    cx.update(gpui_kit::init);
+    let flow = FlowDoc {
+        chapters: vec![Chapter {
+            title: "图".into(),
+            source: "<p>前<img src=\"../Images/pic.png\" alt=\"图\">后</p>".into(),
+            spine_href: "OEBPS/Text/chap.xhtml".into(),
+        }],
+        images: vec![ImageRes {
+            href: "OEBPS/Images/pic.png".into(),
+            media_type: "image/png".into(),
+            width: 40,
+            height: 20,
+            bytes: PNG_1X1.to_vec(),
+        }],
+        ..Default::default()
+    };
+    let (view, _handle) = open_as(cx, &flow, "epub", Reader::default(), Locator::start());
+    let lines = cx
+        .update(|cx| view.read(cx).engine_lines().map(|l| l.to_vec()))
+        .expect("EPUB 走自研引擎");
+    let texts = cx
+        .update(|cx| view.read(cx).engine_line_texts())
+        .expect("EPUB 走自研引擎");
+
+    assert_eq!(texts[0], "前后", "行内图不产出字符，哨兵要被去掉");
+    let img = lines[0]
+        .images()
+        .next()
+        .expect("../Images/pic.png 应解析成 OEBPS/Images/pic.png 并命中");
+    assert_eq!(img.href, "OEBPS/Images/pic.png");
+    assert_eq!((img.width, img.height), (40.0, 20.0));
+}
+
+fn open_app(cx: &mut TestAppContext) -> AnyWindowHandle {
+    cx.update(gpui_kit::init);
+    cx.open_window(size(px(900.), px(600.)), |window, cx| {
+        let view = cx.new(|cx| {
+            folio_app::app::FolioApp::new(
+                folio_core::Store::in_memory().expect("内存库"),
+                Config::default(),
+                Vec::new(),
+                window,
+                cx,
+            )
+        });
+        Root::new(view, window, cx)
+    })
+    .into()
+}
+
+/// 回归门：自定义标题栏必须挂在视图树里（曾经的 bug 是窗口选项声明了透明标题栏、
+/// 却没有任何人绘制它，于是顶上什么都没有）。
+#[gpui_kit::test]
+fn the_app_renders_a_custom_title_bar(cx: &mut TestAppContext) {
+    let handle = open_app(cx);
+    let present = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("app-title").is_some()
+        })
+        .expect("窗口应能渲染");
+    assert!(present, "标题栏里的应用标题应出现在视图树中");
+}
+
+/// 账号入口必须始终完整可见：折叠后侧栏只有 48px，任何一层多余的
+/// 内边距都会把 26px 的头像挤到被侧栏裁掉（组件的 `SidebarHeader` /
+/// `SidebarFooter` 各自还带一层 `p_2`，套在 `#header` / `#footer` 的
+/// `px_2` 里面就只剩 16px 可用宽度）。
+#[gpui_kit::test]
+fn the_account_row_stays_fully_visible_when_collapsed(cx: &mut TestAppContext) {
+    let handle = open_app(cx);
+    let measure = |cx: &mut TestAppContext| {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let account = window.find("account");
+            let toggle = window.find("collapse");
+            (
+                account.bounds().size.width.as_f32(),
+                account.visible(),
+                toggle.bounds().size.width.as_f32(),
+            )
+        })
+        .expect("应能读到折叠前后的几何")
+    };
+
+    let _ = measure(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("collapse", cx);
+        window.render_frame(cx);
+    })
+    .expect("点击折叠按钮");
+
+    let (account_w, account_visible, toggle_w) = measure(cx);
+    assert!(
+        account_w >= 26.0 && toggle_w >= 24.0,
+        "折叠态账号行应容得下 26px 头像、标题栏应容得下折叠按钮，实际 账号行 {account_w} / 折叠按钮 {toggle_w}（可见 {account_visible}）"
+    );
+}
+
+/// 侧栏底部的账号入口：点它应进入设置页。
+#[gpui_kit::test]
+fn the_account_entry_opens_settings(cx: &mut TestAppContext) {
+    let handle = open_app(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("account", cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find("settings-back").is_some(),
+            "点侧栏账号入口应进入设置页"
+        );
+    })
+    .expect("账号入口应能打开设置");
+}
+
+/// 账号名走的是配置实体：改完立刻能读回来（落盘由 `ConfigPath` 决定，测试里不落盘）。
+#[gpui_kit::test]
+fn editing_the_account_name_updates_the_holder(cx: &mut TestAppContext) {
+    let handle = open_app(cx);
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.update(|cx| {
+        folio_app::config_model::ConfigHolder::edit_account(cx, |a| a.name = "阿遥".into());
+    });
+    let name = cx.update(|cx| folio_app::config_model::ConfigHolder::account(cx).name);
+    assert_eq!(name, "阿遥");
 }

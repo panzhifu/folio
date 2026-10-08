@@ -294,6 +294,10 @@ CREATE VIRTUAL TABLE annotation_fts USING fts5(note, exact);
 
 外键 + `PRAGMA journal_mode=WAL`；迁移用 `user_version` 手写递增。
 
+**阅读偏好与账号另存为** `<系统配置目录>/folio/config.json`（`dirs::config_dir()`：Linux `~/.config`、
+macOS `~/Library/Application Support`、Windows `%APPDATA%`），不放进书库数据库 —— 它是应用级、跨书的数据，
+一个小 JSON 文件更方便用户查看/备份/手改。v1 迁移里建的 `prefs` 表已不再使用（迁移只增不改，故保留）。
+
 ---
 
 ### 4.8 竖排的四档实现（M6 的执行清单）
@@ -374,7 +378,7 @@ v1 的 `htmd` / `pulldown-cmark` 随 Markdown 中间层一并去掉。
 | **M0** | 环境与地基验证 | ✅ skill 已装；✅ workspace 分层 + `cargo check` 通过（gpui-kit 0.7.1）；窗口跑通 niri/Wayland。**spike①** 无 `Window` 能否 `line_wrapper`/`advance`；**spike②** `paint_glyph` 自绘一行中英混排并验证 baseline/行高；**spike③** `add_fonts` 加载自带中文 serif + `ThemeRegistry` 注册 light/dark/sepia 并 `Theme::change`；**spike④** CJK 断行表现（`wrap_line` 在中文语料上的断点、标点是否越线） | 窗口不崩、可拖拽缩放、分数缩放不发虚；四份结论写入 `docs/spikes.md` |
 | **M1** | 产品骨架（不含引擎） | `FormatAdapter` + Markdown/TXT 适配器（走临时 `TextView` 渲染，仅作为占位可读实现）；`Sidebar` 书库 + `TabBar` 多书 + `Toolbar` + `StatusBar`；设置面板与偏好持久化；主题切换；SQLite schema + 迁移；进度记忆 | ✅ **已完成**（34 测试全绿、零警告）。验收断言在 `crates/folio-app/tests/ui.rs`：滚轮真产生位移、字符偏移↔滚动比例一致、进度无损穿过 SQLite、设置面板可开可关、越界偏好被夹住。**遗留**：像素级恢复（TextView 的 `reveal_range` 是黑盒，M2 自研引擎后由我们保证）；sepia 主题注册 |
 | **M2** | **引擎 E1：DOM + CSS + 块级排版** | html5ever DOM（arena + NodeIdentity）；`selectors`/`cssparser` 接入与 cascade；Block layout + 外边距折叠 + `text-indent`；单字体 inline（`wrap_line`）；`Measure` 走 TextSystem；`text-align: center` | 一本地化中文 EPUB 的章节能显示出**首行缩进、居中标题、正确行距** —— 这是中文排版基础达成点。**✅ 已完成（2026-10-08）**：DOM（13 测试）、CSS 子集 + 层叠 + UA 表（61 测试）、E1 块级/行内排版（16 几何测试）、EPUB 容器（11 测试 + 真实书冒烟）、app 侧 `Measure` + 逐行虚拟列表。验收断言在 `crates/folio-app/tests/ui.rs::the_engine_indents_centers_and_spaces_lines`（首行缩进 2em、居中标题、行盒高按各自字号、真的折行、行互不重叠），并在 niri 下开真实窗口截图确认观感。遗留：`selectors`/`cssparser` 仍未接入（§5 偏离记录）；像素级位置恢复属 M5。限制清单见 `docs/known-limitations.md` |
-| **M3** | **引擎 E2 + E3：局部样式与图片** | 多 run inline（混合字重/字号/颜色）；`<span>/<em>/<strong>` 行内样式；图片按 `width/max-width` 缩放、块级图片对齐；`LineFragment::Element` 行内图片；封面与内嵌图 resolver | 局部颜色/字重正确；插图不溢出、可居中、可控宽度。**进度**：✅ E2 —— 断行改由引擎自持（UAX #14 禁则，`unicode-linebreak`），每个 `LineRun` 带自己的字体/字号/颜色与绘制宽度，行盒高取最高 run、基线取最大 ascent；验收见 `inline_styles_survive_into_runs` + niri 实机截图（斜体/粗体/局部颜色同线成立）。⏳ E3 图片未做 |
+| **M3** | **引擎 E2 + E3：局部样式与图片** | 多 run inline（混合字重/字号/颜色）；`<span>/<em>/<strong>` 行内样式；图片按 `width/max-width` 缩放、块级图片对齐；`LineFragment::Element` 行内图片；封面与内嵌图 resolver | 局部颜色/字重正确；插图不溢出、可居中、可控宽度。**✅ 已完成（2026-10-08）**：E2 —— 断行改由引擎自持（UAX #14 禁则），每个 `LineRun` 带自己的字体/字号/颜色与绘制宽度，行盒高取最高 run、基线取最大 ascent；验收见 `inline_styles_survive_into_runs`。E3 —— EPUB `image/*` 读出并入库（`images` 表 + v4 迁移），排版期按本章目录解析 `src`；`LineFragment::{Text,Image}` 枚举取代 `LineBox.runs`，行内图以哨兵字符 U+FFFC 参与折行、宽度计入断行，块级图（`display:block`）独立成行按容器 `text-align` 对齐；`layout::image_size` 实现 `width/height/max-width`（px/em/rem/%/auto）并按纵横比缩放、绝不溢出；app 侧 `ChapterImages` 提供内在尺寸与 `gpui::Image`。验收见 `layout::tests::*image*`（6 条）与 `ui.rs::images_flow_through_the_engine_as_fragments`。遗留：`float` 绕图属 M4 |
 | **M4** | **引擎 E4：Fragmentation = 连续/分页/双页** | `BreakToken` 分片引擎；`page-break-*`、`break-inside: avoid`、`orphans/widows`；连续滚动 = 单一无限分片；分页/双页 = 视口分片；`columns`/`column-gap` 多栏；布局结果后台 `background_spawn` 缓存 | 三种模式同源；缩放窗口后重排在后台完成，主线程不卡；**多栏达成** |
 | **M5** | 选择、标注、书库收尾 | `TextSelectionHandle` ↔ run 表；选中浮动菜单（4 色 / 笔记 / 复制 / 搜索）；`TextAnchor` 回显与四级降级重定位；批注侧栏；Markdown 导出；DOM/style 缓存使二次打开 < 100ms | 改 3 档字号 + 缩窗口 → 全部锚点命中或显式 stale；导出 diff 符合预期 |
 | **M6** | 脚注弹层 + ruby + 竖排 | 脚注：链接点击 → `Popover`/`Sheet`（相对 gpui-kit，成本低）；`<ruby>/<rt>` 双层定位与行盒扩展；`writing-mode: vertical-rl` 逐字堆叠（**拉丁侧转不支持，明确降级**） | 日文可读书；带注音的儿童读物可读书；竖排书籍可读书 |

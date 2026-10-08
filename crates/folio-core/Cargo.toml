@@ -11,15 +11,20 @@ publish = false
 
 [dependencies]
 rusqlite.workspace = true
+dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 html5ever.workspace = true
+image.workspace = true
 zip.workspace = true
 quick-xml.workspace = true
 cssparser.workspace = true
 selectors.workspace = true
 unicode-linebreak.workspace = true
+rust-i18n.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# tests/i18n.rs 直接对着 i18n 库的 backend 断言，所以要能用它的 trait。
+rust-i18n.workspace = true

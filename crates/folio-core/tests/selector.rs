@@ -1,5 +1,7 @@
-use super::*;
-use crate::dom::{Dom, NodeId};
+//! 选择器：子集范围、匹配、组合器与 specificity。只依赖公开 API。
+
+use folio_core::css::selector::Selector;
+use folio_core::dom::{Dom, Node, NodeId};
 
 fn parse_dom(html: &str) -> Dom {
     let wrapped = if html.contains("<html") || html.contains("<body") {
@@ -10,7 +12,7 @@ fn parse_dom(html: &str) -> Dom {
     Dom::parse(wrapped.as_bytes())
 }
 
-fn tag_of(node: &crate::dom::Node) -> String {
+fn tag_of(node: &Node) -> String {
     node.tag
         .as_ref()
         .map(|t| t.local.to_string())

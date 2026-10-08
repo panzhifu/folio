@@ -383,6 +383,3 @@ pub(crate) fn split_top_level(text: &str, sep: char) -> Vec<String> {
     out.retain(|s| !s.is_empty());
     out
 }
-
-#[cfg(test)]
-mod tests;

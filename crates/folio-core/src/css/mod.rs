@@ -295,6 +295,3 @@ fn matching_brace(text: &str) -> Option<usize> {
 fn split_top_level(text: &str, sep: char) -> Vec<String> {
     selector::split_top_level(text, sep)
 }
-
-#[cfg(test)]
-mod tests;
