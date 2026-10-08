@@ -4,6 +4,7 @@
 //! 因为真实出版书里总有些用不上的声明，为一两个 `transform` 让整本书排版失败
 //! 是最糟的失败方式。
 
+pub mod computed;
 pub mod selector;
 
 use selector::Selector;
@@ -73,7 +74,13 @@ impl RuleSet {
         set
     }
 
+    /// 追加另一张表。EPUB 常有多份 `.css` 按 spine 顺序生效，
+    /// 所以合并时必须重排 `order`，否则两张表的 specificity 打平时先后会错。
     pub fn extend(&mut self, mut other: RuleSet) {
+        let base = self.rules.len() as u32;
+        for (i, rule) in other.rules.iter_mut().enumerate() {
+            rule.order = base + i as u32;
+        }
         self.rules.append(&mut other.rules);
         self.ignored += other.ignored;
     }
@@ -82,7 +89,9 @@ impl RuleSet {
         let text = strip_comments(text);
         let mut rest = text.as_str();
         loop {
-            let Some(open) = find_unquoted(rest, '{') else { return };
+            let Some(open) = find_unquoted(rest, '{') else {
+                return;
+            };
             let prelude = rest[..open].trim();
             let Some(close) = matching_brace(&rest[open..]) else {
                 return; // 括号不闭合，剩下的整体放弃
