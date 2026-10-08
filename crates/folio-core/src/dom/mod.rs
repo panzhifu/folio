@@ -152,6 +152,49 @@ impl Dom {
         self.attr(id, "id")
     }
 
+    /// 由近及远的祖先元素链（不含自身）。
+    pub fn ancestors(&self, id: NodeId) -> impl Iterator<Item = NodeId> {
+        let mut cur = self.get(id).parent;
+        std::iter::from_fn(move || {
+            let node = cur?;
+            cur = self.get(node).parent;
+            Some(node)
+        })
+    }
+
+    pub fn ancestors_including_self(&self, id: NodeId) -> impl Iterator<Item = NodeId> {
+        [id].into_iter().chain(self.ancestors(id))
+    }
+
+    pub fn element_children(&self, id: NodeId) -> impl Iterator<Item = NodeId> {
+        self.get(id)
+            .children
+            .iter()
+            .copied()
+            .filter(|c| self.get(*c).kind == NodeKind::Element)
+    }
+
+    fn preceding_siblings(&self, id: NodeId) -> Vec<NodeId> {
+        let Some(parent) = self.get(id).parent else {
+            return Vec::new();
+        };
+        let siblings = &self.get(parent).children;
+        match siblings.iter().position(|c| *c == id) {
+            Some(at) => siblings[..at].iter().rev().copied().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn prev_element_sibling(&self, id: NodeId) -> Option<NodeId> {
+        self.prev_element_siblings(id).next()
+    }
+
+    pub fn prev_element_siblings(&self, id: NodeId) -> impl Iterator<Item = NodeId> {
+        self.preceding_siblings(id)
+            .into_iter()
+            .filter(move |c| self.get(*c).kind == NodeKind::Element)
+    }
+
     /// 后序一遍把路径写好。解析期间不能算：`create_element` 返回句柄时
     /// 树构造器还没决定它的父节点是谁。
     fn assign_paths(&mut self) {

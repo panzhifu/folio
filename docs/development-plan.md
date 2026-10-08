@@ -349,6 +349,20 @@ v1 的 `htmd` / `pulldown-cmark` 随 Markdown 中间层一并去掉。
 
 **避坑记录**：`rustpub` 是 ActivityPub 协议库不是 EPUB；`kuchiki` 自 2020 年归档；`epub` crate（2.1.5）偏写入、容器/导航覆盖不全，我们自研解析层。
 
+### 实现偏离记录：`selectors` / `cssparser` 未接入（2026-10-08）
+
+上面原计划用 `selectors` 做选择器匹配、`cssparser` 做 CSS 词法。**实现时改成了自写**，理由与代价都记在这里：
+
+- `selectors::SelectorImpl` 需要 10 个关联类型，外加 `NonTSPseudoClass` 与 `PseudoElement` 两套 trait 实现，再配 `cssparser` 的 `QualifiedRuleParser` + `DeclarationParser` 双 visitor —— 那是为 Servo 的全量 CSS Selectors 4 准备的骨架，而 §4.4 承诺的子集（`*` / type / `.class` / `#id` / `[attr]` / 四种组合器 / `,` / `:first-child` / `:last-child` / `:lang()`）用不上它。
+- 改成自写后：选择器与规则装配约 500 行、25 个测试覆盖（含 specificity 序、引号内逗号/花括号、注释、`@media` 递归、畸形输入不 panic）。
+- **换来的真实收益**：`cssparser` 只被当作工具箱而非现成 stylesheet 解析器，用它仍要自己写规则装配；自写版顺带把「清单外的构造让整条选择器作废」这条策略做实了（`selectors` 会尽力解析出可支持的部分，反而造成部分生效）。
+- **代价**：`:nth-child(An+B of S)`、属性选择器的 `i`/`s` 大小写标志、`:is()`/`:where()` 等语义要自己实现。当前策略是**一律拒绝并计入 `RuleSet::ignored`**，不猜语义。若将来某本书因此明显掉样式，再单独评估接 `selectors`（接口已收在 `Selector::parse` / `RuleSet::matching_declarations` 两处，替换成本可控）。
+
+**层叠模型的一条纠正**：`!important` 与 origin 是**交错**的，不是「先比来源再比重要」。CSS Cascade 从低到高是
+`UA normal < user normal < author normal < author !important < user !important`。
+第一版把 origin 放在重要位之上，导致「读者 !important 盖不过作者普通声明」，被测试抓出。
+同时 `!important` 是**逐声明**的属性，所以层叠以声明流（`matching_declarations`）而不是规则为单位输出。
+
 ---
 
 ## 6. 里程碑（v2）
