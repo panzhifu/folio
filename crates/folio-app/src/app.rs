@@ -16,18 +16,22 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, div, px,
+    SharedString, Styled, Subscription, Window, div, px,
 };
 
+use crate::prefs_model::PrefsHolder;
 use crate::reader::ReaderView;
+use crate::settings_view;
 
 pub struct FolioApp {
     store: Store,
-    prefs: Prefs,
     library: Vec<BookRow>,
     tabs: Vec<Entity<ReaderView>>,
     active: usize,
     sidebar_collapsed: bool,
+    /// 偏好实体的句柄由 `PrefsHolder` 这个 Global 持有，这里只留订阅：
+    /// 它一旦被 drop，阅读器就不会随设置变化重排。
+    _prefs_watch: Subscription,
 }
 
 impl FolioApp {
@@ -42,14 +46,26 @@ impl FolioApp {
             eprintln!("读取书库失败：{e}");
             Vec::new()
         });
-        apply_theme(&prefs, cx);
+        let prefs_state = PrefsHolder::install(prefs, cx);
+        apply_theme(&PrefsHolder::get(cx), cx);
+        // 偏好改一次就：重涂主题 → 推给所有已打开的书 → 落库。
+        // 没有这一步，设置面板改完字号要重开书才生效。
+        let _prefs_watch = cx.observe(&prefs_state, |this, _, cx| {
+            let prefs = PrefsHolder::get(cx);
+            apply_theme(&prefs, cx);
+            for reader in &this.tabs {
+                reader.update(cx, |reader, cx| reader.apply_prefs(prefs.clone(), cx));
+            }
+            let _ = this.store.set_prefs(&prefs);
+            cx.notify();
+        });
         let mut this = Self {
             store,
-            prefs,
             library,
             tabs: Vec::new(),
             active: 0,
             sidebar_collapsed: false,
+            _prefs_watch,
         };
         for path in startup {
             this.import(path, window, cx);
@@ -115,7 +131,9 @@ impl FolioApp {
             .map(|(_, loc)| loc)
             .unwrap_or_else(Locator::start);
         let _ = self.store.touch_opened(row.id);
-        let reader = cx.new(|cx| ReaderView::open(row, flow, self.prefs.clone(), locator, window, cx));
+        let prefs = PrefsHolder::get(cx);
+        let reader =
+            cx.new(|cx| ReaderView::open(row, flow, prefs, locator, window, cx));
         self.tabs.push(reader);
         self.active = self.tabs.len() - 1;
         cx.notify();
@@ -141,31 +159,49 @@ impl FolioApp {
         for reader in self.tabs.clone() {
             self.persist_position(&reader, cx);
         }
-        let _ = self.store.set_prefs(&self.prefs);
+        let _ = self.store.set_prefs(&PrefsHolder::get(cx));
     }
 
     fn notify(&mut self, message: impl Into<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
         window.push_notification(message.into(), cx);
     }
 
+    /// 只写偏好，传播交给 `_prefs_watch`：推给所有阅读器 + 落库 + 重涂主题。
     fn zoom(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.prefs.font_size = (self.prefs.font_size + delta).clamp(9.0, 72.0);
-        self.prefs = self.prefs.clone().clamped();
-        for reader in &self.tabs {
-            reader.update(cx, |reader, cx| reader.apply_prefs(self.prefs.clone(), cx));
-        }
-        let _ = self.store.set_prefs(&self.prefs);
-        self.notify(format!("字号 {:.0}px", self.prefs.font_size), window, cx);
+        PrefsHolder::edit(cx, |p| p.font_size += delta);
+        let size = PrefsHolder::get(cx).font_size;
+        self.notify(format!("字号 {:.0}px", size), window, cx);
     }
 
     fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.prefs.theme = match self.prefs.theme {
-            ThemeName::Light => ThemeName::Dark,
-            ThemeName::Dark | ThemeName::Sepia => ThemeName::Light,
-        };
-        apply_theme(&self.prefs, cx);
-        let _ = self.store.set_prefs(&self.prefs);
-        self.notify(format!("主题：{:?}", self.prefs.theme), window, cx);
+        PrefsHolder::edit(cx, |p| {
+            p.theme = match p.theme {
+                ThemeName::Light => ThemeName::Dark,
+                ThemeName::Dark | ThemeName::Sepia => ThemeName::Light,
+            };
+        });
+        let theme = PrefsHolder::get(cx).theme;
+        self.notify(format!("主题：{theme:?}"), window, cx);
+    }
+
+    fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::setting::{SettingPage, Settings};
+
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            // 每次重建页面：字段本身只是 (取值, 赋值) 对的包装，重建无成本，
+            // 而 open_dialog 的闭包是 Fn，不能把非 Copy 的 builder 移进去。
+            let page = SettingPage::new("阅读")
+                .icon(IconName::BookOpen)
+                .default_open(true)
+                .groups(vec![
+                    settings_view::typography_group(),
+                    settings_view::layout_group(),
+                    settings_view::font_group(),
+                ]);
+            dialog
+                .title("阅读设置")
+                .child(Settings::new("reader-settings").page(page))
+        });
     }
 
     fn open_import_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -247,6 +283,8 @@ impl FolioApp {
         let theme = cx.entity().clone();
         let chapter_nav = cx.entity().clone();
         let next_chapter = cx.entity().clone();
+        let settings = cx.entity().clone();
+        let font_size = PrefsHolder::get(cx).font_size;
         let has_reader = !self.tabs.is_empty();
         let chapter_label = self
             .tabs
@@ -284,9 +322,21 @@ impl FolioApp {
                         } else {
                             IconName::Moon
                         })
-                        .label(format!("{:.0}px", self.prefs.font_size))
+                        .label(format!("{:.0}px", font_size))
                         .on_click(move |_, window, cx| {
                             theme.update(cx, |this, cx| this.cycle_theme(window, cx))
+                        }),
+                ),
+            )
+            .child(
+                ToolbarGroup::new("settings").child(
+                    Button::new("settings")
+                        .icon(IconName::Settings)
+                        .tooltip("阅读设置")
+                        .on_click(move |_, window, cx| {
+                            settings.update(cx, |this, cx| {
+                                this.open_settings_dialog(window, cx)
+                            })
                         }),
                 ),
             )

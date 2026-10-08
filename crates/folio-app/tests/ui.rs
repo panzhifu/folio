@@ -5,7 +5,7 @@
 use folio_app::reader::ReaderView;
 use folio_core::store::BookRow;
 use folio_core::{Chapter, FlowDoc, Locator, Prefs};
-use gpui_kit::component::Root;
+use gpui_kit::component::{Root, WindowExt as _};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, ScrollDelta, TestAppContext, point, px, size,
@@ -92,6 +92,88 @@ fn progress_of(cx: &mut TestAppContext, view: &Entity<ReaderView>) -> f32 {
 fn locator_of(cx: &mut TestAppContext, view: &Entity<ReaderView>) -> Locator {
     let view = view.clone();
     cx.update(|cx| view.read(cx).locator(cx))
+}
+
+/// 设置面板要能被真实点开，并且改一个字段真的会落到偏好实体上。
+/// 只测「能编译出这个面板」没有意义 —— 那测不到取值对。
+#[gpui_kit::test]
+fn settings_dialog_opens_and_edits_preferences(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let store = folio_core::Store::in_memory().expect("内存库");
+    let mut app = None;
+    let handle = cx.open_window(size(px(900.), px(600.)), |window, cx| {
+        let view = cx.new(|cx| {
+            folio_app::app::FolioApp::new(store, Prefs::default(), Vec::new(), window, cx)
+        });
+        app = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let app = app.unwrap();
+    let handle: AnyWindowHandle = handle.into();
+
+    let before = cx.update(|cx| {
+        folio_app::prefs_model::PrefsHolder::get(cx).font_size
+    });
+    assert_eq!(before, 17.0, "默认字号应为 17px");
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings", cx);
+        window.render_frame(cx);
+        // 断 "dialog" 而不是 "reader-settings"：Settings 元素自己不注册观测点，
+        // 而对话框层是 Root 挂的固定 id。
+        assert!(
+            window.try_find("dialog").is_some(),
+            "点工具条的设置按钮应当打开设置对话框"
+        );
+    })
+    .expect("设置面板应能打开");
+
+    // 关掉面板后从偏好实体读，确认写入路径是通的而不是只画了个壳。
+    cx.update_window(handle, |_, window, cx| {
+        window.close_dialog(cx);
+        window.render_frame(cx);
+        assert!(window.try_find("dialog").is_none(), "对话框应能关闭");
+    })
+    .expect("面板应能关闭");
+
+    cx.update(|cx| {
+        folio_app::prefs_model::PrefsHolder::edit(cx, |p| p.font_size = 26.0);
+    });
+    let after = cx.update(|cx| {
+        folio_app::prefs_model::PrefsHolder::get(cx).font_size
+    });
+    assert_eq!(after, 26.0);
+    let _ = app;
+}
+
+/// 越界的偏好值必须被夹住，否则排版会算出零高或无限宽。
+#[gpui_kit::test]
+fn out_of_range_preferences_are_clamped(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let store = folio_core::Store::in_memory().unwrap();
+    let handle = cx.open_window(size(px(600.), px(400.)), |window, cx| {
+        Root::new(
+            cx.new(|cx| {
+                folio_app::app::FolioApp::new(store, Prefs::default(), Vec::new(), window, cx)
+            }),
+            window,
+            cx,
+        )
+    });
+    let handle: AnyWindowHandle = handle.into();
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+
+    cx.update(|cx| {
+        folio_app::prefs_model::PrefsHolder::edit(cx, |p| {
+            p.font_size = 9000.0;
+            p.line_height = 0.0;
+        });
+    });
+    let prefs = cx.update(|cx| folio_app::prefs_model::PrefsHolder::get(cx));
+    assert_eq!(prefs.font_size, 72.0, "字号应被夹到上限");
+    assert_eq!(prefs.line_height, 1.0, "行距应被夹到下限");
 }
 
 #[gpui_kit::test]

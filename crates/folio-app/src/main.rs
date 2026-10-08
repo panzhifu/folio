@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use folio_app::app::FolioApp;
+
 use gpui_kit::component::*;
 use gpui_kit::*;
 

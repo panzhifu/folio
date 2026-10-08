@@ -4,4 +4,6 @@
 //! 而不是在测试里另搭一套近似视图。
 
 pub mod app;
+pub mod prefs_model;
 pub mod reader;
+pub mod settings_view;
