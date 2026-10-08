@@ -113,3 +113,18 @@ resolve_font(LXGW WenKai) -> FontId(FontId(2))
 另外两条测试写法上的教训，记下来防止重犯：
 - 测试辅助函数里的 `settle()` 需要**两轮**「跑空事件 → 渲染一帧」，一轮不够（reveal 请求在首帧才挂上，而 `run_until_parked` 只跑事件不画帧）。
 - 绝不要写 `assert!(x || true)` 这类永真断言占位。它比没有测试更糟，因为绿色会骗人。
+
+## M2 补的两条测试卫生教训
+
+1. **headless 测试测不到「量与画用了不同字体」。**
+   `TextSystem::resolve_font(Font{family:"serif"})` 找不到家族时回落到平台默认
+   （一个拉丁字体，汉字量到 .notdef 的 0.65em），而**绘制**路径按字符串走
+   `fallback_chain_for_string` 会找到真的中文字体（1em）。两边各自解析，
+   数值自洽、屏幕上是错的：居中的标题整块跑到栏外。headless 断言里
+   `line.x` 与 `line.width` 都「正确」，只有真开窗口截图才看得见。
+   ⇒ 度量与绘制必须共用同一个 `FontKey → Font` 函数，且泛族名一律换成读者偏好字体。
+2. **视图量不到 flex 之后的真实栏宽。**
+   引擎按 `window.viewport_size()` 折行，而阅读栏是 `[sidebar(260), main(flex_1)]`
+   的第二项 —— 930px 窗宽下按 760 折行、装进 670 的栏里，正文与标题被裁。
+   ⇒ 要么由外壳把占位报给视图（现在的做法），要么走自定义 `Element`
+   在 `prepaint(bounds)` 里拿真实宽度排版。M4 做分页时一并解决。
