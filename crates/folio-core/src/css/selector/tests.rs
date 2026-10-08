@@ -11,7 +11,10 @@ fn parse_dom(html: &str) -> Dom {
 }
 
 fn tag_of(node: &crate::dom::Node) -> String {
-    node.tag.as_ref().map(|t| t.local.to_string()).unwrap_or_default()
+    node.tag
+        .as_ref()
+        .map(|t| t.local.to_string())
+        .unwrap_or_default()
 }
 
 fn find(dom: &Dom, tag: &str) -> NodeId {

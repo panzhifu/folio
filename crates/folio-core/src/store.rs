@@ -4,10 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use crate::Result;
 use crate::format::{Chapter, DocMeta, FlowDoc};
 use crate::position::Locator;
 use crate::prefs::Prefs;
-use crate::Result;
 
 const MIGRATIONS: &[&str] = &[
     // v1：书库、章节、进度、偏好、标注、集合。
@@ -150,7 +150,11 @@ fn book_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
         id: r.get(0)?,
         path: r.get(1)?,
         title: r.get(2)?,
-        authors: authors.lines().filter(|s| !s.is_empty()).map(String::from).collect(),
+        authors: authors
+            .lines()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
         format: r.get(4)?,
         size: r.get::<_, i64>(5)? as u64,
         last_opened_at: r.get(6)?,
@@ -192,7 +196,9 @@ impl Store {
     }
 
     pub fn user_version(&self) -> Result<i64> {
-        Ok(self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 
     /// 同一路径重复导入是更新，不是第二本书。
@@ -226,7 +232,9 @@ impl Store {
              ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        Ok(stmt.query_map([], book_from_row)?.collect::<std::result::Result<_, _>>()?)
+        Ok(stmt
+            .query_map([], book_from_row)?
+            .collect::<std::result::Result<_, _>>()?)
     }
 
     pub fn book(&self, id: i64) -> Result<Option<BookRow>> {
@@ -240,11 +248,15 @@ impl Store {
     pub fn book_by_path(&self, path: &Path) -> Result<Option<BookRow>> {
         let sql = format!("SELECT {BOOK_COLUMNS} FROM books WHERE path = ?1");
         let s = path.to_string_lossy().into_owned();
-        Ok(self.conn.query_row(&sql, params![s], book_from_row).optional()?)
+        Ok(self
+            .conn
+            .query_row(&sql, params![s], book_from_row)
+            .optional()?)
     }
 
     pub fn remove_book(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM books WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM books WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -264,7 +276,13 @@ impl Store {
             tx.execute(
                 "INSERT INTO chapters (book_id, idx, title, spine_href, char_len)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![book_id, idx as i64, ch.title, ch.spine_href, ch.char_len() as i64],
+                params![
+                    book_id,
+                    idx as i64,
+                    ch.title,
+                    ch.spine_href,
+                    ch.char_len() as i64
+                ],
             )?;
             let chapter_id = tx.last_insert_rowid();
             tx.execute(
@@ -330,7 +348,11 @@ impl Store {
     pub fn prefs(&self) -> Prefs {
         let json: Option<String> = self
             .conn
-            .query_row("SELECT value_json FROM prefs WHERE key = 'reader'", [], |r| r.get(0))
+            .query_row(
+                "SELECT value_json FROM prefs WHERE key = 'reader'",
+                [],
+                |r| r.get(0),
+            )
             .optional()
             .unwrap_or(None);
         json.map(|j| Prefs::from_json(&j)).unwrap_or_default()

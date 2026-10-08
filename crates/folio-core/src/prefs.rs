@@ -62,7 +62,9 @@ impl Prefs {
     }
 
     pub fn from_json(json: &str) -> Self {
-        serde_json::from_str::<Self>(json).unwrap_or_default().clamped()
+        serde_json::from_str::<Self>(json)
+            .unwrap_or_default()
+            .clamped()
     }
 
     pub fn to_json(&self) -> String {
@@ -94,7 +96,8 @@ mod tests {
 
     #[test]
     fn out_of_range_values_are_clamped() {
-        let p = Prefs::from_json(r#"{"font_size":9000,"line_height":0,"indent_em":-5,"margin_x":1e9}"#);
+        let p =
+            Prefs::from_json(r#"{"font_size":9000,"line_height":0,"indent_em":-5,"margin_x":1e9}"#);
         assert_eq!(p.font_size, 72.0);
         assert_eq!(p.line_height, 1.0);
         assert_eq!(p.indent_em, 0.0);

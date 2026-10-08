@@ -32,85 +32,80 @@ fn number(
 }
 
 pub fn typography_group() -> SettingGroup {
-    SettingGroup::new()
-        .title("文字")
-        .items(vec![
-            number(
-                "字号",
-                "正文的像素字号。",
-                9.0,
-                72.0,
-                1.0,
-                |cx| PrefsHolder::get(cx).font_size,
-                |v, cx| PrefsHolder::edit(cx, |p| p.font_size = v),
+    SettingGroup::new().title("文字").items(vec![
+        number(
+            "字号",
+            "正文的像素字号。",
+            9.0,
+            72.0,
+            1.0,
+            |cx| PrefsHolder::get(cx).font_size,
+            |v, cx| PrefsHolder::edit(cx, |p| p.font_size = v),
+        ),
+        number(
+            "行距",
+            "行高 = 字号 × 这个倍数。中文书一般 1.6–2.0。",
+            1.0,
+            4.0,
+            0.05,
+            |cx| PrefsHolder::get(cx).line_height,
+            |v, cx| PrefsHolder::edit(cx, |p| p.line_height = v),
+        ),
+        number(
+            "段距",
+            "段落之间的空白，单位是字号倍。",
+            0.0,
+            4.0,
+            0.05,
+            |cx| PrefsHolder::get(cx).paragraph_gap_em,
+            |v, cx| PrefsHolder::edit(cx, |p| p.paragraph_gap_em = v),
+        ),
+        number(
+            "首行缩进",
+            "中文排版习惯是 2 个字符；0 表示不缩进。",
+            0.0,
+            6.0,
+            0.25,
+            |cx| PrefsHolder::get(cx).indent_em,
+            |v, cx| PrefsHolder::edit(cx, |p| p.indent_em = v),
+        ),
+        SettingItem::new(
+            "两端对齐",
+            SettingField::switch(
+                |cx: &App| PrefsHolder::get(cx).justify,
+                |val: bool, cx| PrefsHolder::edit(cx, |p| p.justify = val),
             ),
-            number(
-                "行距",
-                "行高 = 字号 × 这个倍数。中文书一般 1.6–2.0。",
-                1.0,
-                4.0,
-                0.05,
-                |cx| PrefsHolder::get(cx).line_height,
-                |v, cx| PrefsHolder::edit(cx, |p| p.line_height = v),
-            ),
-            number(
-                "段距",
-                "段落之间的空白，单位是字号倍。",
-                0.0,
-                4.0,
-                0.05,
-                |cx| PrefsHolder::get(cx).paragraph_gap_em,
-                |v, cx| PrefsHolder::edit(cx, |p| p.paragraph_gap_em = v),
-            ),
-            number(
-                "首行缩进",
-                "中文排版习惯是 2 个字符；0 表示不缩进。",
-                0.0,
-                6.0,
-                0.25,
-                |cx| PrefsHolder::get(cx).indent_em,
-                |v, cx| PrefsHolder::edit(cx, |p| p.indent_em = v),
-            ),
-            SettingItem::new(
-                "两端对齐",
-                SettingField::switch(
-                    |cx: &App| PrefsHolder::get(cx).justify,
-                    |val: bool, cx| PrefsHolder::edit(cx, |p| p.justify = val),
-                ),
-            )
-            .description("中文正文建议开启；开启后行尾会更整齐。"),
-        ])
+        )
+        .description("中文正文建议开启；开启后行尾会更整齐。"),
+    ])
 }
 
 pub fn layout_group() -> SettingGroup {
-    SettingGroup::new()
-        .title("版面")
-        .items(vec![
-            number(
-                "最大行长",
-                "正文栏的最大宽度（像素）。太长会伤阅读节奏。",
-                280.0,
-                2400.0,
-                20.0,
-                |cx| PrefsHolder::get(cx).max_measure,
-                |v, cx| PrefsHolder::edit(cx, |p| p.max_measure = v),
-            ),
-            number(
-                "左右页边距",
-                "正文栏两侧留白（像素）。",
-                0.0,
-                400.0,
-                8.0,
-                |cx| PrefsHolder::get(cx).margin_x,
-                |v, cx| PrefsHolder::edit(cx, |p| p.margin_x = v),
-            ),
-        ])
+    SettingGroup::new().title("版面").items(vec![
+        number(
+            "最大行长",
+            "正文栏的最大宽度（像素）。太长会伤阅读节奏。",
+            280.0,
+            2400.0,
+            20.0,
+            |cx| PrefsHolder::get(cx).max_measure,
+            |v, cx| PrefsHolder::edit(cx, |p| p.max_measure = v),
+        ),
+        number(
+            "左右页边距",
+            "正文栏两侧留白（像素）。",
+            0.0,
+            400.0,
+            8.0,
+            |cx| PrefsHolder::get(cx).margin_x,
+            |v, cx| PrefsHolder::edit(cx, |p| p.margin_x = v),
+        ),
+    ])
 }
 
 pub fn font_group() -> SettingGroup {
-    SettingGroup::new()
-        .title("字体")
-        .items(vec![SettingItem::new(
+    SettingGroup::new().title("字体").items(vec![
+        SettingItem::new(
             "正文字体",
             SettingField::input(
                 |cx: &App| SharedString::from(PrefsHolder::get(cx).font_family),
@@ -121,5 +116,6 @@ pub fn font_group() -> SettingGroup {
                 },
             ),
         )
-        .description("填字体家族名，例如 LXGW WenKai、Noto Serif CJK SC。")])
+        .description("填字体家族名，例如 LXGW WenKai、Noto Serif CJK SC。"),
+    ])
 }

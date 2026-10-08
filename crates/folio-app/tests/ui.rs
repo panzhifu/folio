@@ -111,9 +111,7 @@ fn settings_dialog_opens_and_edits_preferences(cx: &mut TestAppContext) {
     let app = app.unwrap();
     let handle: AnyWindowHandle = handle.into();
 
-    let before = cx.update(|cx| {
-        folio_app::prefs_model::PrefsHolder::get(cx).font_size
-    });
+    let before = cx.update(|cx| folio_app::prefs_model::PrefsHolder::get(cx).font_size);
     assert_eq!(before, 17.0, "默认字号应为 17px");
 
     cx.update_window(handle, |_, window, cx| {
@@ -140,9 +138,7 @@ fn settings_dialog_opens_and_edits_preferences(cx: &mut TestAppContext) {
     cx.update(|cx| {
         folio_app::prefs_model::PrefsHolder::edit(cx, |p| p.font_size = 26.0);
     });
-    let after = cx.update(|cx| {
-        folio_app::prefs_model::PrefsHolder::get(cx).font_size
-    });
+    let after = cx.update(|cx| folio_app::prefs_model::PrefsHolder::get(cx).font_size);
     assert_eq!(after, 26.0);
     let _ = app;
 }
@@ -260,12 +256,15 @@ fn position_survives_a_restart_through_the_store(cx: &mut TestAppContext) {
     let store = folio_core::Store::in_memory().expect("内存库");
     let row = book();
     let id = store
-        .add_book(std::path::Path::new(&row.path), &folio_core::DocMeta {
-            title: row.title.clone(),
-            authors: Vec::new(),
-            format: folio_core::Format::Markdown,
-            size: 0,
-        })
+        .add_book(
+            std::path::Path::new(&row.path),
+            &folio_core::DocMeta {
+                title: row.title.clone(),
+                authors: Vec::new(),
+                format: folio_core::Format::Markdown,
+                size: 0,
+            },
+        )
         .expect("入库");
     store.save_flow(id, &flow).expect("章节入库");
     store
@@ -274,10 +273,7 @@ fn position_survives_a_restart_through_the_store(cx: &mut TestAppContext) {
 
     let (mode, restored) = store.position(id).expect("读回进度").expect("进度应存在");
     assert_eq!(mode, "continuous");
-    assert_eq!(
-        restored, locator,
-        "进度穿过 SQLite 之后必须逐字符一致"
-    );
+    assert_eq!(restored, locator, "进度穿过 SQLite 之后必须逐字符一致");
 
     // 用读回来的进度重开一本书，恢复请求应当被挂上并在解析完成后落地。
     let (reopened, _) = open(

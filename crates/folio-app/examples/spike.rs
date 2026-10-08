@@ -45,7 +45,10 @@ fn run(text: &str, font: Font, color: Hsla) -> TextRun {
 /// 能编译（两个 Arc 都被 move 进 Send 闭包）且数值合理，即为「可后台排版」的结论。
 fn probe_offthread(window_ts: Arc<WindowTextSystem>, app_ts: Arc<TextSystem>, font: Font) {
     let tid = format!("{:?}", std::thread::current().id());
-    println!("=== spike① 离窗排版（后台线程 {tid}，name={:?}）===", std::thread::current().name());
+    println!(
+        "=== spike① 离窗排版（后台线程 {tid}，name={:?}）===",
+        std::thread::current().name()
+    );
 
     let shaped = window_ts.shape_line(
         MIXED.into(),
@@ -97,9 +100,20 @@ fn probe_offthread(window_ts: Arc<WindowTextSystem>, app_ts: Arc<TextSystem>, fo
     let mut start = 0usize;
     for end in ends.iter().chain(std::iter::once(&WRAP_PROBE.len())) {
         let line = &WRAP_PROBE[start..*end];
-        let head_ban = line.chars().next().is_some_and(|c| "。，、！？」』；：）》".contains(c));
+        let head_ban = line
+            .chars()
+            .next()
+            .is_some_and(|c| "。，、！？」』；：）》".contains(c));
         let tail_ban = line.chars().last().is_some_and(|c| "「『《（".contains(c));
-        println!("  [{}] {}", if head_ban || tail_ban { "违规" } else { "  ok" }, line);
+        println!(
+            "  [{}] {}",
+            if head_ban || tail_ban {
+                "违规"
+            } else {
+                "  ok"
+            },
+            line
+        );
         start = *end;
     }
 }
@@ -168,11 +182,8 @@ impl Render for SpikeView {
             .child("Folio M0 spike —— stdout：spike① ③ ④；窗口：spike② 自绘")
             .children(self.samples.clone().into_iter().map(|s| {
                 let height = if s.vertical { px(460.0) } else { px(60.0) };
-                div()
-                    .v_flex()
-                    .gap_1()
-                    .child(s.label.to_string())
-                    .child(canvas(
+                div().v_flex().gap_1().child(s.label.to_string()).child(
+                    canvas(
                         move |_, _, _| s,
                         move |bounds, s, window, cx| {
                             let ts = window.text_system().clone();
@@ -196,9 +207,11 @@ impl Render for SpikeView {
                                 let column = shaped.width.max(px(24.0));
                                 let x0 = bounds.origin.x + bounds.size.width - column;
                                 for r in &shaped.runs {
-                                    let base_y = r.glyphs.first().map(|g| g.position.y).unwrap_or(px(0.0));
+                                    let base_y =
+                                        r.glyphs.first().map(|g| g.position.y).unwrap_or(px(0.0));
                                     for g in &r.glyphs {
-                                        let origin = point(x0 + g.position.y - base_y, top + g.position.x);
+                                        let origin =
+                                            point(x0 + g.position.y - base_y, top + g.position.x);
                                         let _ = window.paint_glyph(
                                             origin,
                                             r.font_id,
@@ -221,7 +234,8 @@ impl Render for SpikeView {
                         },
                     )
                     .w_full()
-                    .h(height))
+                    .h(height),
+                )
             }))
     }
 }
@@ -234,7 +248,9 @@ fn main() {
         match std::fs::read(FONT_PATH) {
             Ok(bytes) => println!(
                 "add_fonts -> {:?}",
-                cx.text_system().add_fonts(vec![Cow::Owned(bytes)]).map(|_| "Ok")
+                cx.text_system()
+                    .add_fonts(vec![Cow::Owned(bytes)])
+                    .map(|_| "Ok")
             ),
             Err(e) => println!("读不到 {FONT_PATH}：{e} —— 回退系统字体"),
         }

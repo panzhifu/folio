@@ -81,7 +81,10 @@ pub fn adapters() -> Vec<Box<dyn FormatAdapter>> {
 }
 
 pub fn detect(path: &Path) -> Option<Format> {
-    adapters().iter().find(|a| a.supports(path)).map(|a| a.format())
+    adapters()
+        .iter()
+        .find(|a| a.supports(path))
+        .map(|a| a.format())
 }
 
 pub fn open(path: &Path) -> crate::Result<(DocMeta, Content)> {
@@ -90,7 +93,8 @@ pub fn open(path: &Path) -> crate::Result<(DocMeta, Content)> {
         .find(|a| a.supports(path))
         .ok_or_else(|| {
             crate::Error::UnsupportedFormat(
-                path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                path.file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
             )
         })?;
     adapter.read(path)

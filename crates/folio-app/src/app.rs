@@ -107,7 +107,11 @@ impl FolioApp {
     }
 
     fn open_book(&mut self, row: &BookRow, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.tabs.iter().position(|t| t.read(cx).book_id() == row.id) {
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.read(cx).book_id() == row.id)
+        {
             self.active = ix;
             cx.notify();
             return;
@@ -132,8 +136,7 @@ impl FolioApp {
             .unwrap_or_else(Locator::start);
         let _ = self.store.touch_opened(row.id);
         let prefs = PrefsHolder::get(cx);
-        let reader =
-            cx.new(|cx| ReaderView::open(row, flow, prefs, locator, window, cx));
+        let reader = cx.new(|cx| ReaderView::open(row, flow, prefs, locator, window, cx));
         self.tabs.push(reader);
         self.active = self.tabs.len() - 1;
         cx.notify();
@@ -162,7 +165,12 @@ impl FolioApp {
         let _ = self.store.set_prefs(&PrefsHolder::get(cx));
     }
 
-    fn notify(&mut self, message: impl Into<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
+    fn notify(
+        &mut self,
+        message: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.push_notification(message.into(), cx);
     }
 
@@ -205,9 +213,8 @@ impl FolioApp {
     }
 
     fn open_import_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("/path/to/book.md 或 .txt")
-        });
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("/path/to/book.md 或 .txt"));
         let this = cx.entity().clone();
         window.open_dialog(cx, move |dialog, _window, _cx| {
             // open_dialog 的闭包是 Fn，所以每次重建都拿一份新的句柄。
@@ -244,37 +251,43 @@ impl FolioApp {
                 SidebarHeader::new()
                     .child(IconName::Library)
                     .child("Folio")
-                    .child(SidebarToggleButton::new().collapsed(self.sidebar_collapsed).on_click(
-                        move |_, _, cx| {
-                            toggle_entity.update(cx, |this, cx| {
-                                this.sidebar_collapsed = !this.sidebar_collapsed;
-                                cx.notify();
-                            })
-                        },
-                    )),
+                    .child(
+                        SidebarToggleButton::new()
+                            .collapsed(self.sidebar_collapsed)
+                            .on_click(move |_, _, cx| {
+                                toggle_entity.update(cx, |this, cx| {
+                                    this.sidebar_collapsed = !this.sidebar_collapsed;
+                                    cx.notify();
+                                })
+                            }),
+                    ),
             )
-            .child(SidebarMenu::new().children(
-                self.library.clone().into_iter().enumerate().map(move |(ix, book)| {
-                    let entity = menu_entity.clone();
-                    SidebarMenuItem::new(book.title.clone())
-                        .icon(IconName::Book)
-                        .active(active_book == Some(book.id))
+            .child(
+                SidebarMenu::new().children(self.library.clone().into_iter().enumerate().map(
+                    move |(ix, book)| {
+                        let entity = menu_entity.clone();
+                        SidebarMenuItem::new(book.title.clone())
+                            .icon(IconName::Book)
+                            .active(active_book == Some(book.id))
+                            .on_click(move |_, window, cx| {
+                                let row = entity.read(cx).library.get(ix).cloned();
+                                if let Some(row) = row {
+                                    entity.update(cx, |this, cx| this.open_book(&row, window, cx));
+                                }
+                            })
+                    },
+                )),
+            )
+            .footer(
+                SidebarFooter::new().child(
+                    Button::new("import")
+                        .label("导入书籍")
+                        .icon(IconName::Plus)
                         .on_click(move |_, window, cx| {
-                            let row = entity.read(cx).library.get(ix).cloned();
-                            if let Some(row) = row {
-                                entity.update(cx, |this, cx| this.open_book(&row, window, cx));
-                            }
-                        })
-                }),
-            ))
-            .footer(SidebarFooter::new().child(
-                Button::new("import")
-                    .label("导入书籍")
-                    .icon(IconName::Plus)
-                    .on_click(move |_, window, cx| {
-                        footer_entity.update(cx, |this, cx| this.open_import_dialog(window, cx))
-                    }),
-            ))
+                            footer_entity.update(cx, |this, cx| this.open_import_dialog(window, cx))
+                        }),
+                ),
+            )
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -334,9 +347,7 @@ impl FolioApp {
                         .icon(IconName::Settings)
                         .tooltip("阅读设置")
                         .on_click(move |_, window, cx| {
-                            settings.update(cx, |this, cx| {
-                                this.open_settings_dialog(window, cx)
-                            })
+                            settings.update(cx, |this, cx| this.open_settings_dialog(window, cx))
                         }),
                 ),
             )
@@ -475,7 +486,8 @@ fn apply_theme(prefs: &Prefs, cx: &mut App) {
 /// 展开 `~`，让用户能在导入框里直接写 `~/Books/x.md`。
 fn shexpand(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME") {
+        && let Ok(home) = std::env::var("HOME")
+    {
         return format!("{home}/{rest}");
     }
     path.to_string()

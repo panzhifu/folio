@@ -99,8 +99,9 @@ impl Compound {
                 .get(node)
                 .parent
                 .is_some_and(|p| dom.element_children(p).last() == Some(node)),
-            Simple::Lang(prefix) => nearest_lang(dom, node)
-                .is_some_and(|l| lang_matches(&l, prefix)),
+            Simple::Lang(prefix) => {
+                nearest_lang(dom, node).is_some_and(|l| lang_matches(&l, prefix))
+            }
         })
     }
 }
@@ -163,7 +164,10 @@ impl Selector {
 
 fn parse_complex(text: &str) -> Option<Complex> {
     let chars: Vec<char> = text.trim().chars().collect();
-    let mut cur = Cursor { chars: &chars, at: 0 };
+    let mut cur = Cursor {
+        chars: &chars,
+        at: 0,
+    };
     let mut left: Vec<(Combinator, Compound)> = Vec::new();
     let mut right = Compound::default();
     let mut pending: Option<Combinator> = None;
@@ -243,7 +247,13 @@ fn parse_attr(text: &str) -> Option<Simple> {
     match text.split_once('=') {
         Some((name, value)) => Some(Simple::Attr {
             name: name.trim().to_ascii_lowercase(),
-            value: Some(value.trim().trim_matches('"').trim_matches('\'').to_string()),
+            value: Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            ),
         }),
         None if !text.is_empty() => Some(Simple::Attr {
             name: text.to_ascii_lowercase(),

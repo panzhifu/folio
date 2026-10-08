@@ -42,15 +42,16 @@ fn migrations_are_idempotent_across_reopen() {
     let store = Store::open_at(&db).unwrap();
     assert_eq!(store.user_version().unwrap(), 2);
     let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
-    store
-        .save_flow(id, &flow(&[("第一章", "正文一")]))
-        .unwrap();
+    store.save_flow(id, &flow(&[("第一章", "正文一")])).unwrap();
     drop(store);
 
     let again = Store::open_at(&db).unwrap();
     assert_eq!(again.user_version().unwrap(), 2, "重开不应重复跑迁移");
     assert_eq!(again.list_books().unwrap().len(), 1);
-    assert_eq!(again.load_flow(id).unwrap().unwrap().chapters[0].title, "第一章");
+    assert_eq!(
+        again.load_flow(id).unwrap().unwrap().chapters[0].title,
+        "第一章"
+    );
 }
 
 #[test]
@@ -81,7 +82,9 @@ fn flow_roundtrips_byte_for_byte() {
 fn saving_a_flow_twice_replaces_rather_than_appends() {
     let store = Store::in_memory().unwrap();
     let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
-    store.save_flow(id, &flow(&[("一", "a"), ("二", "b")])).unwrap();
+    store
+        .save_flow(id, &flow(&[("一", "a"), ("二", "b")]))
+        .unwrap();
     store.save_flow(id, &flow(&[("新", "c")])).unwrap();
     let got = store.load_flow(id).unwrap().unwrap();
     assert_eq!(got.chapters.len(), 1);
@@ -100,13 +103,19 @@ fn position_roundtrips_and_overwrites() {
     let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
     assert_eq!(store.position(id).unwrap(), None);
 
-    let loc = Locator { chapter: 3, offset: 1024 };
+    let loc = Locator {
+        chapter: 3,
+        offset: 1024,
+    };
     store.set_position(id, "continuous", &loc).unwrap();
     let (mode, got) = store.position(id).unwrap().unwrap();
     assert_eq!(mode, "continuous");
     assert_eq!(got, loc);
 
-    let moved = Locator { chapter: 4, offset: 8 };
+    let moved = Locator {
+        chapter: 4,
+        offset: 8,
+    };
     store.set_position(id, "paged", &moved).unwrap();
     let (mode, got) = store.position(id).unwrap().unwrap();
     assert_eq!(mode, "paged");
@@ -131,7 +140,9 @@ fn removing_a_book_cascades_its_chapters_and_position() {
     let store = Store::in_memory().unwrap();
     let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
     store.save_flow(id, &flow(&[("一", "内容一")])).unwrap();
-    store.set_position(id, "continuous", &Locator::start()).unwrap();
+    store
+        .set_position(id, "continuous", &Locator::start())
+        .unwrap();
 
     store.remove_book(id).unwrap();
     assert_eq!(store.book(id).unwrap(), None);
@@ -160,9 +171,16 @@ fn chinese_fulltext_search_works_via_trigram() {
     let hits = store.search("逆水行舟", 10).unwrap();
     assert_eq!(hits.len(), 1, "只应命中第一章");
     assert_eq!(hits[0].chapter_title, "第一章");
-    assert!(hits[0].snippet.contains("逆水行舟"), "snippet={}", hits[0].snippet);
+    assert!(
+        hits[0].snippet.contains("逆水行舟"),
+        "snippet={}",
+        hits[0].snippet
+    );
 
-    assert!(store.search("逆水", 10).unwrap().is_empty(), "trigram 需要 3 个字符");
+    assert!(
+        store.search("逆水", 10).unwrap().is_empty(),
+        "trigram 需要 3 个字符"
+    );
     assert!(store.search("不存在的词", 10).unwrap().is_empty());
 }
 
@@ -173,7 +191,9 @@ fn search_index_follows_chapter_replacement() {
     store.save_flow(id, &flow(&[("一", "逆水行舟")])).unwrap();
     assert_eq!(store.search("逆水行舟", 10).unwrap().len(), 1);
 
-    store.save_flow(id, &flow(&[("一", "完全不同的内容")])).unwrap();
+    store
+        .save_flow(id, &flow(&[("一", "完全不同的内容")]))
+        .unwrap();
     assert!(
         store.search("逆水行舟", 10).unwrap().is_empty(),
         "重写章节后旧命中不该还在"
@@ -185,7 +205,9 @@ fn search_index_follows_chapter_replacement() {
 fn fts_query_syntax_in_user_input_is_treated_as_text() {
     let store = Store::in_memory().unwrap();
     let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
-    store.save_flow(id, &flow(&[("一", "这里有个 AND 关键字和引号 \"x\"")])).unwrap();
+    store
+        .save_flow(id, &flow(&[("一", "这里有个 AND 关键字和引号 \"x\"")]))
+        .unwrap();
     let hits = store.search("AND", 10).unwrap();
     assert_eq!(hits.len(), 1, "裸 AND 不该被当成布尔运算符");
     assert!(store.search("NEAR/a", 10).unwrap().is_empty());

@@ -10,7 +10,10 @@ pub struct Locator {
 
 impl Locator {
     pub fn start() -> Self {
-        Self { chapter: 0, offset: 0 }
+        Self {
+            chapter: 0,
+            offset: 0,
+        }
     }
 
     /// 字符数 → 字节索引，越界时夹到文本末尾。
@@ -60,7 +63,10 @@ mod tests {
 
     #[test]
     fn char_and_byte_roundtrip() {
-        let loc = Locator { chapter: 2, offset: 5 };
+        let loc = Locator {
+            chapter: 2,
+            offset: 5,
+        };
         let byte = loc.byte_of(SRC);
         assert_eq!(SRC[..byte].chars().count(), 5);
         assert_eq!(Locator::from_byte(2, SRC, byte), loc);
@@ -76,7 +82,10 @@ mod tests {
 
     #[test]
     fn emoji_counts_as_one_char_but_four_bytes() {
-        let emoji_at = Locator { chapter: 0, offset: 9 };
+        let emoji_at = Locator {
+            chapter: 0,
+            offset: 9,
+        };
         let byte = emoji_at.byte_of(SRC);
         assert_eq!(SRC[byte..].chars().next().unwrap(), '😀');
         assert_eq!(SRC[byte..].chars().next().unwrap().len_utf8(), 4);
@@ -85,10 +94,23 @@ mod tests {
 
     #[test]
     fn out_of_range_offsets_clamp() {
-        assert_eq!(Locator::from_byte(0, "abc", 99), Locator { chapter: 0, offset: 3 });
-        assert_eq!(Locator { chapter: 9, offset: 99 }.clamp_to_chapter(1, "abc"), Locator {
-            chapter: 1,
-            offset: 3
-        });
+        assert_eq!(
+            Locator::from_byte(0, "abc", 99),
+            Locator {
+                chapter: 0,
+                offset: 3
+            }
+        );
+        assert_eq!(
+            Locator {
+                chapter: 9,
+                offset: 99
+            }
+            .clamp_to_chapter(1, "abc"),
+            Locator {
+                chapter: 1,
+                offset: 3
+            }
+        );
     }
 }

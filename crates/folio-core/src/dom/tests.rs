@@ -6,7 +6,10 @@ fn parse(s: &str) -> Dom {
 
 /// `LocalName` 是 interned atom，不能直接和 `&str` 比较；测试里统一取字符串。
 fn tag_of(node: &Node) -> String {
-    node.tag.as_ref().map(|t| t.local.to_string()).unwrap_or_default()
+    node.tag
+        .as_ref()
+        .map(|t| t.local.to_string())
+        .unwrap_or_default()
 }
 
 fn first_element<'a>(dom: &'a Dom, tag: &str) -> Option<(NodeId, &'a Node)> {
@@ -29,10 +32,7 @@ fn parses_a_simple_chapter() {
 fn unclosed_tags_are_recovered_like_a_browser() {
     // 真实 EPUB 里最常见的畸形：段落不闭合。
     let dom = parse("<p>甲<p>乙<p>丙");
-    let ps: Vec<_> = dom
-        .elements()
-        .filter(|(_, n)| tag_of(n) == "p")
-        .collect();
+    let ps: Vec<_> = dom.elements().filter(|(_, n)| tag_of(n) == "p").collect();
     assert_eq!(ps.len(), 3, "三个未闭合的 <p> 应各自成节点");
     assert_eq!(dom.text_of_subtree(ps[1].0), "乙");
 }
@@ -82,14 +82,20 @@ fn same_tag_siblings_get_distinct_paths() {
         .collect();
     assert_eq!(ps.len(), 2);
     assert_ne!(ps[0], ps[1], "同标签兄弟节点的路径必须可区分：{ps:?}");
-    assert!(ps[0].ends_with("[1]") && ps[1].ends_with("[2]"), "got {ps:?}");
+    assert!(
+        ps[0].ends_with("[1]") && ps[1].ends_with("[2]"),
+        "got {ps:?}"
+    );
 }
 
 #[test]
 fn tag_and_attribute_names_are_lowercased() {
     let dom = parse("<P CLASS=\"intro\" Id=\"x1\">文</P>");
     let (id, node) = first_element(&dom, "p").expect("大写标签应被规范化");
-    assert!(matches!(node.tag.as_ref().map(|t| t.local.as_ref()), Some("p")));
+    assert!(matches!(
+        node.tag.as_ref().map(|t| t.local.as_ref()),
+        Some("p")
+    ));
     assert_eq!(dom.attr(id, "class"), Some("intro"));
     assert_eq!(dom.id_attr(id), Some("x1"));
 }
@@ -112,8 +118,7 @@ fn foreign_namespaces_are_preserved() {
         "svg 不应被当成 HTML 命名空间"
     );
     assert!(
-        dom.elements()
-            .any(|(_, n)| tag_of(n) == "rect"),
+        dom.elements().any(|(_, n)| tag_of(n) == "rect"),
         "svg 子树应被解析"
     );
     let _ = svg_id;

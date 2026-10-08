@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::{Attribute, LocalName, Namespace, QualName};
-use html5ever::{parse_document, ParseOpts};
+use html5ever::{ParseOpts, parse_document};
 
 pub type NodeId = u32;
 
@@ -269,11 +269,16 @@ impl DomSink {
 
     /// 相邻文本节点合并。不合并的话锚点偏移会在任意一处换段时错位。
     fn append_text(&self, parent: NodeId, text: String) {
-        let last = self.state.borrow().nodes[parent as usize].children.last().copied();
+        let last = self.state.borrow().nodes[parent as usize]
+            .children
+            .last()
+            .copied();
         if let Some(last) = last
             && self.state.borrow().nodes[last as usize].kind == NodeKind::Text
         {
-            self.state.borrow_mut().nodes[last as usize].text.push_str(&text);
+            self.state.borrow_mut().nodes[last as usize]
+                .text
+                .push_str(&text);
             return;
         }
         let id = self.push_node(Node {
@@ -292,7 +297,10 @@ impl DomSink {
 impl TreeSink for DomSink {
     type Handle = NodeId;
     type Output = Dom;
-    type ElemName<'a> = Tag where Self: 'a;
+    type ElemName<'a>
+        = Tag
+    where
+        Self: 'a;
 
     fn finish(self) -> Dom {
         let state = self.state.into_inner();
@@ -335,7 +343,12 @@ impl TreeSink for DomSink {
             }),
             attrs: attrs
                 .into_iter()
-                .map(|a| (a.name.local.to_string().to_ascii_lowercase(), a.value.to_string()))
+                .map(|a| {
+                    (
+                        a.name.local.to_string().to_ascii_lowercase(),
+                        a.value.to_string(),
+                    )
+                })
                 .collect(),
             text: String::new(),
             path: String::new(),
@@ -379,7 +392,9 @@ impl TreeSink for DomSink {
         prev_element: &NodeId,
         child: NodeOrText<NodeId>,
     ) {
-        let has_children = !self.state.borrow().nodes[*element as usize].children.is_empty();
+        let has_children = !self.state.borrow().nodes[*element as usize]
+            .children
+            .is_empty();
         let parent = if has_children {
             *element
         } else {

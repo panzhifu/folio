@@ -53,7 +53,9 @@ fn braces_inside_strings_are_balanced_correctly() {
 
 #[test]
 fn media_queries_are_inlined_and_other_at_rules_dropped() {
-    let set = rules("@media screen { p { color: red } } @font-face { font-family: X } @page { margin: 1cm }");
+    let set = rules(
+        "@media screen { p { color: red } } @font-face { font-family: X } @page { margin: 1cm }",
+    );
     assert_eq!(set.rules.len(), 1, "只有 @media 里的规则该被收进来");
     assert_eq!(set.rules[0].declarations[0].property, "color");
     assert_eq!(set.ignored, 2, "@font-face 与 @page 应计为忽略");
@@ -125,7 +127,10 @@ fn four_cascade_levels_follow_the_css_order() {
     // 两边都 !important 时仍是读者赢 —— CSS Cascade 从低到高是
     // UA normal < user normal < author normal < author !important < user !important。
     let mut both = RuleSet::parse("p { color: green !important }", Origin::Reader);
-    both.extend(RuleSet::parse("p { color: red !important }", Origin::Author));
+    both.extend(RuleSet::parse(
+        "p { color: red !important }",
+        Origin::Author,
+    ));
     assert_eq!(winner(&dom, &both, "color"), "green");
 }
 
@@ -134,9 +139,16 @@ fn important_is_ordered_per_declaration_not_per_rule() {
     // 一条规则里混了重要与普通声明：按规则聚合排序会把两条一起抬到
     // AuthorImportant 级，让普通的 font-size 错误地盖掉后面的作者规则。
     let dom = Dom::parse(b"<p>x</p>");
-    let mut set = RuleSet::parse("p { color: red !important; font-size: 99px }", Origin::Author);
+    let mut set = RuleSet::parse(
+        "p { color: red !important; font-size: 99px }",
+        Origin::Author,
+    );
     set.extend(RuleSet::parse("p { font-size: 20px }", Origin::Author));
-    assert_eq!(winner(&dom, &set, "font-size"), "20px", "普通声明不该被同规则里的 !important 抬级");
+    assert_eq!(
+        winner(&dom, &set, "font-size"),
+        "20px",
+        "普通声明不该被同规则里的 !important 抬级"
+    );
     assert_eq!(winner(&dom, &set, "color"), "red");
 }
 

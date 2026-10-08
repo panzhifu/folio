@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use super::{Chapter, Content, DocMeta, FlowDoc, Format, FormatAdapter};
-use crate::error::IoResultExt as _;
 use crate::Result;
+use crate::error::IoResultExt as _;
 
 pub struct MarkdownAdapter;
 
@@ -12,10 +12,7 @@ impl FormatAdapter for MarkdownAdapter {
     }
 
     fn supports(&self, path: &Path) -> bool {
-        matches!(
-            extension(path).as_deref(),
-            Some("md" | "markdown" | "txt")
-        )
+        matches!(extension(path).as_deref(), Some("md" | "markdown" | "txt"))
     }
 
     fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
@@ -36,7 +33,11 @@ impl FormatAdapter for MarkdownAdapter {
             DocMeta {
                 title,
                 authors: Vec::new(),
-                format: if plain { Format::Text } else { Format::Markdown },
+                format: if plain {
+                    Format::Text
+                } else {
+                    Format::Markdown
+                },
                 size: source.len() as u64,
             },
             Content::Reflow(FlowDoc { chapters }),
@@ -45,7 +46,9 @@ impl FormatAdapter for MarkdownAdapter {
 }
 
 fn extension(path: &Path) -> Option<String> {
-    path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase())
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
 }
 
 fn stem(path: &Path) -> String {
@@ -116,8 +119,18 @@ fn split_chapters(source: &str, fallback_title: &str) -> Vec<Chapter> {
         line_start += line.len() + 1;
     }
     // 收尾：全文一个标题都没有时，章名回落到文件名。
-    let tail_default = if saw_heading { "前言" } else { fallback_title };
-    flush(&mut buf, &mut title, chapter_start, tail_default, &mut chapters);
+    let tail_default = if saw_heading {
+        "前言"
+    } else {
+        fallback_title
+    };
+    flush(
+        &mut buf,
+        &mut title,
+        chapter_start,
+        tail_default,
+        &mut chapters,
+    );
 
     if chapters.is_empty() {
         chapters.push(Chapter {
