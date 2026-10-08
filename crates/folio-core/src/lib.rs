@@ -2,6 +2,7 @@
 //!
 //! 这里不放任何 UI 代码，也不引入 `gpui`。
 
+pub mod dom;
 pub mod error;
 pub mod format;
 pub mod position;
