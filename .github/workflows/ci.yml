@@ -1,13 +1,17 @@
 # 每一版都要过的那道门。
 #
-# 这个 workflow 存在的原因不是「有 CI 比较像样」，而是这个仓库有两处**只有干净环境才会暴露**的事实：
+# 这个 workflow 存在的原因不是「有 CI 比较像样」，而是有两处只有干净环境才暴露的事实：
 #
-# 1. `crates/folio-app` 对 `gpui-pre-mobile` 是一条**指向仓库外同级目录**的 path 依赖
-#    （`../../../gpui-mobile`）。全新克隆里连 `cargo metadata` 都跑不起来 —— 实测退出码 101、
-#    `failed to load manifest for dependency gpui-pre-mobile`。所以任何构建之前必须先把那份 fork
-#    检出到同级路径，而本地开发永远看不到这个问题。
-# 2. 移动端整套 UI 由 `cfg(mobile)` 门控，宿主的 `cargo check` / `clippy` / `test` **一行都不编它**。
-#    「桌面全绿」和「移动端还能编」是两件独立的事，所以这里单独一个 Android job。
+# 1. 移动端平台层 `gpui-pre-mobile` 以前是指向**仓库外同级目录**的 path 依赖，全新克隆
+#    连 `cargo metadata` 都跑不起来（实测退出 101：`failed to load manifest for dependency
+#    gpui-pre-mobile`），而 CI 也没法把依赖检出到 workspace 外面 —— `actions/checkout`
+#    直接拒绝：`Repository path '/home/runner/work/folio/gpui-mobile' is not under
+#    '/home/runner/work/folio/folio'`。这是第一版 CI 红掉的真实原因，跟编译无关。
+#    现在它是钉 rev 的 git 依赖（见 `crates/folio-app/Cargo.toml`），仓库自洽，
+#    于是这两个 job 跑的确实是「全新克隆能跑的那份」，Cargo.lock 也记下了具体 commit。
+# 2. 整套移动 UI 由 `cfg(mobile)` 门控，宿主的 `cargo check` / `clippy` / `test`
+#    **一行都不编它**。「桌面全绿」和「移动端还能编」是两件独立的事，所以单独一个 Android job。
+#    这个 job 第一次跑就抓到 4 条真问题，此后它是一条常态闸门。
 #
 # 工具链钉 1.99.0：本地与「clippy 零告警」这个状态就是在这个版本上量出来的。`Cargo.toml` 的
 # `rust-version = "1.90"` 是 MSRV 下限，不是这里要用的版本。升这个号可能带来新 lint 而让
@@ -28,9 +32,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # fork 的具体 commit，不是分支名。path 依赖不进 Cargo.lock 的哈希，
-  # 跟着分支头走等于让 CI 的上游由别人随时改动；要动就显式改这里。
-  GPUI_MOBILE_SHA: 791260dd16d05b3b11d312fb2010b5c32758a8cc
 
 jobs:
   check:
@@ -38,16 +39,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      # 检出到 `folio/` 的同级目录。actions/checkout 的 path 是相对 workspace
-      # （`/home/runner/work/folio/folio`）解析的，所以这一条正好落在
-      # `crates/folio-app` 往上数三层的那个 `gpui-mobile` 上。
-      - name: Check out the gpui-mobile fork beside the repo
-        uses: actions/checkout@v4
-        with:
-          repository: panzhifu/gpui-mobile
-          ref: ${{ env.GPUI_MOBILE_SHA }}
-          path: ../gpui-mobile
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.0
@@ -71,14 +62,14 @@ jobs:
           sudo apt-get update
           # 清单是从 Cargo.lock 推出来的，不是照别的仓库抄的：每一个都对应图里一个真的
           # 要在链接期找到系统库的 -sys crate。
-          #   libfontconfig-dev     yeslogic-fontconfig-sys
-          #   libxkbcommon*-dev     xkbcommon（键盘）
-          #   libwayland-dev        wayland-sys / wayland-client / wayland-cursor
-          #   libx11-dev libxcb1-dev x11 / x11rb / xcb
+          #   libfontconfig-dev       yeslogic-fontconfig-sys
+          #   libxkbcommon*-dev       xkbcommon（键盘）
+          #   libwayland-dev          wayland-sys / wayland-client / wayland-cursor
+          #   libx11-dev libxcb1-dev  x11 / x11rb / xcb
           #   libegl1-mesa-dev libgl1-mesa-dev   khronos-egl、GL 上下文
-          #   libdrm-dev            wgpu 的 GBM/DRM 路径
+          #   libdrm-dev              wgpu 的 GBM/DRM 路径
           # 没装的同样有理由：objc2-* 只在 macOS 目标上出现，ash（Vulkan）是运行时加载，
-          # CI 里不建窗口所以不需要任何 ICD。
+          # CI 里不建真窗口所以不需要任何 ICD。
           sudo apt-get install -y \
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-dev libxcb1-dev \
@@ -101,14 +92,19 @@ jobs:
           set -o pipefail
           cargo test --workspace --verbose 2>&1 | tee test-output.txt
 
+      # 只在真拿到过测试输出时标注。第一版这里自己也红了一次：上一步根本没跑到测试，
+      # `test-output.txt` 不存在，grep 于是以 2 退出，把一个「补充说明」的步骤变成
+      # 第二个失败信号 —— 排查时容易让人以为测试也挂了。
       - name: Emit test failures as annotations
         if: failure()
         shell: bash
         run: |
+          [ -s test-output.txt ] || exit 0
           grep -E "panicked at|test result: FAILED|^failures:" test-output.txt \
             | tr -d '\r' | cut -c1-380 | while IFS= read -r line; do
               echo "::error::$line"
             done
+          exit 0
 
   android:
     name: Android cross-check (aarch64)
@@ -116,18 +112,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check out the gpui-mobile fork beside the repo
-        uses: actions/checkout@v4
-        with:
-          repository: panzhifu/gpui-mobile
-          ref: ${{ env.GPUI_MOBILE_SHA }}
-          path: ../gpui-mobile
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: aarch64-linux-android
 
+      # 缓存目录必须是构建真正写入的那个。两个 job 各自跑在独立的 runner 上，
+      # 都用默认的 `target/` 就互不干扰；曾经写成 `target-android/` 而步骤里
+      # 没有设 CARGO_TARGET_DIR，结果是这份缓存永远是空的 —— 每次冷编整棵依赖树。
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -136,19 +128,17 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target-android/
+            target/
           key: android-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: android-cargo-
 
       # 编的是 `--lib`（也就是 `cfg(mobile)` 那一侧）而不是整个 bin：Android 上入口在
       # cdylib 里，bin 只为「cargo build 不带 --lib 也要有个 main」而存在。
       #
-      # 用 clippy 而不是 cargo check：宿主的 clippy 扫不到这些文件，而 `cfg(mobile)` 那一侧
-      # 从来没被 lint 过 —— 第一次跑就出了 4 条真问题（一处无用的 `into()`、一处
-      # `SharedString::new(x.to_string())`、一处冗余闭包，以及 `Source` 两臂差 360/24 字节
-      # 的大小编译器警告，已经改成装箱）。这条 job 的价值就在这儿。
-      # 注意 `cargo check` 不吃 `-- -D warnings`（那是 clippy/rustc 的参数），
-      # 靠 RUSTFLAGS 传又会连第三方crate一起 deny。
+      # 用 clippy 而不是 cargo check：宿主的 clippy 扫不到这些文件。注意 `cargo check`
+      # 不吃 `-- -D warnings`（那是 clippy/rustc 的参数，会直接 `unexpected argument '-D'`），
+      # 也别改用 RUSTFLAGS 传 —— 那样会连第三方 crate 一起 deny，CI 会红在一堆
+      # 不属于本仓库的告警上。
       - name: cargo clippy --target aarch64-linux-android
         working-directory: crates/folio-app
         run: |

@@ -8,9 +8,21 @@
 
 | 层 | 来源 | 版本 |
 |---|---|---|
-| 平台层（Android 后端） | `longbridge/gpui-mobile`，本机 clone 在 `~/Code/gpui-mobile`，分支 `line/gpui-pre` 跟踪 `longbridge/main` | crates.io 包名 **`gpui-pre-mobile`**，lib 名仍是 `gpui_mobile` |
+| 平台层（Android 后端） | `panzhifu/gpui-mobile` 的 `line/gpui-pre` 线（跟踪 `longbridge/gpui-mobile`），**以钉 rev 的 git 依赖接入** | crates.io 包名 **`gpui-pre-mobile`**，lib 名仍是 `gpui_mobile` |
 | GPUI 本体 | crates.io | **`gpui-pre =0.3.8`**，与桌面端 gpui-kit 钉的是同一版 |
 | 排版与书库 | `crates/folio-core` | 路径依赖，零 gpui，原样复用 |
+
+**依赖形式：git + 钉 rev，不再是仓库外的 path 依赖。** 以前是
+`gpui-pre-mobile = { path = "../../../gpui-mobile" }`，好处是能直接改 fork 不用推，
+代价是**仓库不自洽**：全新克隆（也就是 CI）里连 `cargo metadata` 都跑不起来，实测退出 101
+`failed to load manifest for dependency gpui-pre-mobile`；而 GitHub 的 `actions/checkout`
+拒绝把依赖检出到 workspace 外面（`Repository path ... is not under ...`），两条路都堵死。
+现在钉的是 `rev = "791260dd…"`，`Cargo.lock` 记下具体 commit —— 比跟分支头走更可复现，
+而且 fork 那份代码从此不会在没人改 Cargo.toml 的情况下换掉。
+
+要改 fork 本身而不先推上去：`~/.cargo/config.toml` 里加
+`paths = ["/home/noke/Code/gpui-mobile"]`，cargo 会用那个目录顶替同名的 git 依赖，
+不用动这里的 rev；这个覆盖只对本机生效，CI 永远按锁里那份取。
 
 **原先判断的阻塞点已经解除。** 旧文档写的是：桌面 `gpui-kit` 钉 crates.io 的 `gpui-pre`，而
 `gpui-mobile` 依赖 Zed git 的 `gpui`，同一上游的两个快照被 Cargo 当作两个包，无法同时链进一个二进制，

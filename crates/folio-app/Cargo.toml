@@ -27,10 +27,21 @@ log = "0.4"
 
 # ── 移动端平台层：只在移动目标上链，桌面端根本不编译它 ──
 # 包名是 `gpui-pre-mobile`，lib 名仍是 `gpui_mobile`，所以 `use gpui_mobile::…` 不变。
+#
+# 走 git 而不是 `path = "../../../gpui-mobile"`：path 那条把仓库外同级目录变成了构建前提，
+# 全新克隆里 `cargo metadata` 直接失败（实测退出 101：failed to load manifest for
+# dependency gpui-pre-mobile），CI 也因此无法自洽 —— `actions/checkout` 不许往 workspace
+# 外面检出（报 "Repository path ... is not under ..."）。钉 rev 之后 Cargo.lock 记下
+# 的就是这一个 commit，比跟分支头走更可复现。
+#
+# 要改 fork 本身而不先推上去：在 `~/.cargo/config.toml` 里加
+# `paths = ["/home/noke/Code/gpui-mobile"]`，cargo 会用那个目录替换同名的 git 依赖，
+# 不用动这里的 rev。（这个覆盖只对本地生效，CI 永远按锁里的 commit 取。）
+#
 # TODO：这条依赖默认挂着 30 多个平台插件 feature，开发方案 §2.2b 要求关掉
 #       （`default-features = false`），还没落实。
 [target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
-gpui-pre-mobile = { path = "../../../gpui-mobile" }
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "791260dd16d05b3b11d312fb2010b5c32758a8cc" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15"
