@@ -51,6 +51,11 @@ impl Host for MobileHost {
         Insets::ZERO
     }
 
+    fn extra_windows(&self) -> bool {
+        // 手机上没有「再开一个窗口」：设置那一整页字段是从阅读页 push 进导航栈的一屏。
+        false
+    }
+
     fn body_family(&self, wanted: &str, cx: &App) -> String {
         // 候选名单两端共用（`super::CJK_PREFERRED`）。命中与否都写一行：真机上
         // 「字体不对」只能从 logcat 看出来，屏幕上长得像对的字体未必是读者要的那套。

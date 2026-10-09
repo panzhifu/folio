@@ -40,6 +40,8 @@ pub trait Host: 'static {
     fn ime_insets(&self, window: &Window) -> Insets;
     /// 这台设备真能解析出来的正文家族名。见 [`device_family`]。
     fn body_family(&self, wanted: &str, cx: &App) -> String;
+    /// 这台设备能不能再开一个窗口。桌面能，手机上「窗口」这个概念不存在。
+    fn extra_windows(&self) -> bool;
 }
 
 #[cfg(not(mobile))]
@@ -105,6 +107,13 @@ const CJK_PREFERRED: &[&str] = &[
     "Droid Sans Fallback", // Android 上覆盖 CJK 的传统兜底家族
     "Roboto",              // 只剩拉丁，但至少不 panic
 ];
+
+/// 这台设备能不能再开一个窗口。没装平台服务（宿主测试里）当不能：
+/// 测试要钉的是界面本身，不是「点了那一格有没有真开出一个窗」。
+pub fn supports_extra_windows(cx: &App) -> bool {
+    cx.try_global::<HostServices>()
+        .is_some_and(|services| services.0.extra_windows())
+}
 
 /// 按名字比：先看偏好要的那个，再依次试 [`CJK_PREFERRED`]。
 ///

@@ -1,8 +1,10 @@
 //! 「我的」目的地（Account section）的根视图：主题、书库位置、关于。
 //!
 //! 它和同一目录下的设置页（`typography.rs` / `appearance.rs` / …）是同一件事的两半：
-//! 桌面从侧栏/工具条进设置**窗口**，移动从这一屏进各个设置**子页**。两者收在
-//! `features::settings` 下，P1 把设置容器统一之后会合到一处。
+//! 这一屏是**入口**，桌面从它再开设置**窗口**（一整页字段，见根屏那条「阅读设置…」），
+//! 移动从它进各个设置**子页**。两者收在 `features::settings` 下，P1 把设置容器统一之后会合到一处。
+//! 「能不能再开一个窗口」是平台事实，问 [`crate::ui::host::supports_extra_windows`]，
+//! 不在这里写 `cfg(mobile)`。
 //!
 //! **不用浮层**（下拉框、对话框、菜单）：这一屏全部由普通按钮组成。浮层在 Android 上
 //! 现在点不住（长按菜单那条路，见 `shelf_view` 的注释与 `docs/known-limitations.md`），
@@ -22,6 +24,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+use crate::ui::host;
 use crate::ui::shared::about;
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::l10n::tr;
@@ -118,6 +121,30 @@ impl AccountView {
             )
             .accessibility_label(label)
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.go(screen, cx)))
+    }
+
+    /// 一行「当场执行」的入口。与 [`AccountView::row`] 分开，是因为 `row` 的目标是这一栈里的
+    /// 另一屏（`go(screen)`），而这一条的目标在栈外 —— 桌面那个设置窗口就是一例。
+    fn action_row(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        label: SharedString,
+        on_click: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        ListItem::new(id)
+            .w_full()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(icon).small())
+                    .child(div().min_w_0().child(label.clone())),
+            )
+            .accessibility_label(label)
+            .on_click(move |_, window, cx| on_click(window, cx))
     }
 
     /// 一个可选项（主题名、目录、浅深模式）。选中那一项由 `selected` 画，
@@ -365,6 +392,18 @@ impl AccountView {
             Screen::About,
             cx,
         ));
+        // 桌面那一整页字段（版面、字体、语言）住在**独立窗口**里：448px 的对话框装不下
+        // 侧栏 + 正文两栏（见 `settings::window` 的注释）。手机上开不了第二个窗口，
+        // 这一格就不长出来 —— 留一个点了没反应的入口比没有更糟。
+        if host::supports_extra_windows(cx) {
+            body = body.child(self.action_row(
+                "account-reading-settings",
+                IconName::Settings,
+                tr(cx, "account.reading_settings"),
+                |_, cx| super::open(cx),
+                cx,
+            ));
+        }
         Self::scrollable(body)
     }
 

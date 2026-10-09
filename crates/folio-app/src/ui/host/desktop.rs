@@ -19,6 +19,10 @@ impl Host for DesktopHost {
         Insets::ZERO
     }
 
+    fn extra_windows(&self) -> bool {
+        true
+    }
+
     fn body_family(&self, wanted: &str, cx: &App) -> String {
         match find_family(wanted, cx) {
             Some(hit) => hit,
