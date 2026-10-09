@@ -1,6 +1,10 @@
 //! 文案表的形状测试。价值在于**结构性**：不管措辞好不好，
 //! 只管有没有漏翻、占位符对不对得上 —— 正是人眼最容易漏过去的两类错。
 //!
+//! 文案按语言分成 `locales/{en,zh-CN,ja}.toml` 三份之后，漏翻不再是「并排一张表里空着
+//! 的那一格」，而是另一个文件里少了一行 —— 三份各自看都像是完整的。所以这两件事只能由
+//! 这里来保证，别指望读文件的人发现。
+//!
 //! 换成 rust-i18n 之后 key 是字符串，写错只能运行时发现（界面上会原样显示
 //! `page.foo`），所以这里把「三种语言的 key 集合一致」变成一条会失败的测试，
 //! 顶替过去 `Msg` 枚举提供的编译期穷举。
@@ -18,7 +22,7 @@ use folio_core::i18n::{self, Locale};
 fn messages(locale: &str) -> BTreeSet<(String, String)> {
     _rust_i18n_backend()
         .messages_for_locale(locale)
-        .unwrap_or_else(|| panic!("locales/ 里没有 {locale} 这一列"))
+        .unwrap_or_else(|| panic!("locales/ 里没有 {locale}.toml 这一份"))
         .into_iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect()
@@ -198,7 +202,7 @@ fn from_label_accepts_every_spelling_a_human_or_an_old_version_writes() {
     assert_eq!(Locale::from_label("   "), None);
 }
 
-/// 存出去的必须是 `code()`：与界面标签、与 `locales/folio.yml` 的语言键同一形态。
+/// 存出去的必须是 `code()`：与界面标签、与 `locales/` 那三份的文件名同一形态。
 #[test]
 fn locale_serializes_as_its_bcp47_code() {
     for locale in Locale::ALL.iter().copied() {

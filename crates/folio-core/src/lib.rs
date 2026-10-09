@@ -2,7 +2,8 @@
 //!
 //! 这里不放任何 UI 代码，也不引入 `gpui`。
 
-// 界面文案表。`locales/` 下的 YAML 在编译期嵌进来，取文案走 `i18n::t` / `i18n::t_with`；
+// 界面文案表。`locales/` 下一门语言一份 TOML（文件名去掉扩展名就是语言标签），编译期嵌进来，
+// 取文案走 `i18n::t` / `i18n::t_with`；
 // `fallback = "en"` 与 gpui-kit 组件层一致，这样缺一条日文文案时框架和我们回落到同一种语言。
 rust_i18n::i18n!("locales", fallback = "en");
 

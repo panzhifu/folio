@@ -1,10 +1,11 @@
 //! 界面语言：`Locale` 是「用户选了哪种语言」这件事的表示，
-//! 文案本身在 `locales/folio.yml`，由 `rust_i18n` 在编译期嵌进来（见 `lib.rs` 的 `i18n!`）。
+//! 文案本身在 `locales/{en,zh-CN,ja}.toml`（一门语言一份，**文件名就是语言标签**），
+//! 由 `rust_i18n` 在编译期嵌进来（见 `lib.rs` 的 `i18n!`）。
 //!
 //! 为什么交给库而不是自己写一张表：`rust-i18n` 就是 gpui-kit 组件层自己在用的那套
 //! （`gpui-component/src/lib.rs` 里一句 `i18n!("locales", fallback = "en")`），
 //! 用它意味着 `Settings` 搜索框、下拉框这些框架文案能和 Folio 的文案同步切换，
-//! 而且加一条文案只是往 YAML 里加一个节点，不用同时改枚举、`ALL` 数组和三列大表。
+//! 而且加一条文案只是往三份 TOML 各加一行，不用同时改枚举、`ALL` 数组和三列大表。
 //!
 //! 两个必须知道的取舍：
 //! - **key 写错不再是编译期错误**。库里查不到的 key 会原样显示成 `page.foo`，
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// 界面语言。`Default` 是简体中文：这个项目的正文排版以中文书为第一目标。
 ///
 /// **JSON 形式由下面的 `Serialize` / `Deserialize` 手写，不用 derive。** derive 会把
-/// 变体名（`En` / `ZhHans`）当唯一合法值，而界面上、`locales/folio.yml` 里、
+/// 变体名（`En` / `ZhHans`）当唯一合法值，而界面上、`locales/` 那三份的文件名里、
 /// 以及 `code()` 给的标签都是 `en` / `zh-CN` / `ja` —— 读者照自己看到的写法手改
 /// `config.json` 就会读失败。失败在这里不是小事：`Config::load_from` 读不出来时会把
 /// **整节** `language` 退回默认值（也就是「跟随系统」），于是读者刚选的语言被无声改掉，
@@ -33,7 +34,7 @@ pub enum Locale {
 }
 
 impl Serialize for Locale {
-    /// 存出去的必须是 `code()`：与界面上的标签、与 `locales/folio.yml` 的语言键同一形态。
+    /// 存出去的必须是 `code()`：与界面上的标签、与 `locales/` 那三份的文件名同一形态。
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.code())
     }
@@ -82,7 +83,7 @@ impl Locale {
         })
     }
 
-    /// BCP-47 标签：既是 `locales/folio.yml` 里的语言键，也是设置项的「值」和 `lang` 属性。
+    /// BCP-47 标签：既是 `locales/<code>.toml` 的文件名，也是设置项的「值」和 `lang` 属性。
     pub fn code(self) -> &'static str {
         match self {
             Locale::ZhHans => "zh-CN",

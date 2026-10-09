@@ -1,6 +1,6 @@
 //! 视图侧取文案的三个函数。
 //!
-//! 文案表在 `folio-core` 的 `locales/folio.yml`，由 `rust-i18n` 在编译期嵌进来；
+//! 文案表在 `folio-core` 的 `locales/{en,zh-CN,ja}.toml`（一门语言一份），由 `rust-i18n` 在编译期嵌进来；
 //! 这里只多做一件事：**把当前语言从配置实体里读出来**再交给库。
 //!
 //! 为什么不用 `rust_i18n` 的全局 locale 当唯一来源：那个值是进程级的，

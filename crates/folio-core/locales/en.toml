@@ -1,0 +1,181 @@
+# Folio 界面文案 —— 英文（`en`）。文案表按语言分成三份，另两份是同目录的 `zh-CN.toml` / `ja.toml`。
+#
+# 三份的结构必须逐条对应：加一条文案就往三份各加一行，删一条也一起删。漏翻在这张表里不再是
+# 一眼看得见的事（从前三种语言并排一张表，看得见），所以靠 `tests/i18n.rs` 比对三种语言的
+# key 集合与占位符集合，再加 `folio-app/tests/i18n_keys.rs` 核对源码里用到的键每种语言都解得出来。
+#
+# 格式是 rust-i18n 的 v1：**文件名去掉扩展名就是语言标签**（`i18n!("locales")` 按文件名认语言），
+# 所以这一份里没有 `en` 那一层，`[section]` 直接就是键的前缀；取用仍是 `t!("page.font_size")`。
+# 文件名必须与 `Locale::code()` 一字不差 —— 改文件名等于改语言。
+#
+# 命名规则：`page.*` 设置页标题、`field.*` 设置项（`.desc` 是它的说明文字）、
+# `error.*` 会显示成通知的失败信息、其余按界面区域走。
+# `.desc` 这种「和同名的那一项平级」的键写成带引号的 `"font_size.desc"`：
+# TOML 里 `font_size.desc` 会把 `font_size` 当表来扩展，而它已经是字符串，两行会打架。
+#
+# 占位符是 `%{名字}`，**必须带名字**：中英文语序不同，靠顺序替换会翻错。
+
+[sidebar]
+import = "Import book"
+account = "Account"
+
+[reader]
+empty_hint = "Pick a book on the left, or use “Import book” in the sidebar header"
+no_book = "No book open"
+chapter_position = "Section %{index} of %{total}"
+prev_chapter = "Previous"
+next_chapter = "Next"
+book_count_one = "%{count} book"
+book_count_other = "%{count} books"
+zoom_in = "Increase font size"
+zoom_out = "Decrease font size"
+# 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
+# 不在这里再给同一个东西起第二个名字。
+toc = "Contents"
+night = "Night"
+day = "Day"
+progress = "Progress"
+
+[settings]
+title = "Reading settings"
+# 工具条上那个入口。带省略号是因为点了它会**再开一个窗口**，
+# 而不是当场执行某个动作 —— 这是这套控件的固定写法。
+open = "Settings…"
+
+[toast]
+font_size = "Font size %{size}px"
+theme = "Theme: %{name}"
+
+[appearance]
+follow_system = "Follow system"
+light = "Light"
+dark = "Dark"
+
+[page]
+typography = "Text"
+layout = "Page"
+fonts = "Fonts"
+appearance = "Appearance"
+language = "Language"
+account = "Account"
+about = "About"
+library = "Library"
+
+[field]
+font_size = "Font size"
+"font_size.desc" = "Body text size in pixels."
+line_height = "Line height"
+"line_height.desc" = "Line height = font size × this factor. Chinese books usually 1.6–2.0."
+paragraph_gap = "Paragraph gap"
+"paragraph_gap.desc" = "Space between paragraphs, in font sizes."
+indent = "First-line indent"
+"indent.desc" = "Chinese typography uses 2 characters; 0 means no indent."
+justify = "Justify"
+"justify.desc" = "Recommended for Chinese text; it evens out the right edge."
+max_measure = "Maximum line width"
+"max_measure.desc" = "Widest the text column may get, in pixels. 0 fills the window."
+margin_x = "Side margins"
+"margin_x.desc" = "Whitespace on both sides of the text column, in pixels."
+font_family = "Body font"
+"font_family.desc" = "A font family name, e.g. LXGW WenKai or Noto Serif CJK SC."
+appearance_mode = "Mode"
+"appearance_mode.desc" = "Follow the system, or pin light or dark."
+theme_light = "Light theme"
+"theme_light.desc" = "The theme used when the mode resolves to light."
+theme_dark = "Dark theme"
+"theme_dark.desc" = "The theme used when the mode resolves to dark."
+language = "Interface language"
+"language.desc" = "Language of the interface, not of the book text."
+account_name = "Reader name"
+"account_name.desc" = "Shown at the bottom of the sidebar; empty falls back to “Reader”."
+config_path = "Config file"
+"config_path.desc" = "Reading preferences and account live in this JSON file; copy it to move machines."
+library_dir = "Library folder"
+"library_dir.desc" = "Imported books are copied here. Leave it empty to be asked again on the next import."
+"library_dir.suggested" = "Suggested location"
+
+[account]
+fallback_name = "Reader"
+settings = "Settings"
+theme = "Theme"
+library = "Library folder"
+about = "About"
+library_hint = "Android cannot hand this app a folder — the picker returns a content URI, not a path it can write to. Pick one of the folders the app can actually write."
+library_unconfirmed = "Not confirmed yet — the next import will ask first"
+library_default = "Default suggestion"
+
+[import]
+title = "Import book"
+submit = "Import book…"
+placeholder = "Path to a book, e.g. /path/to/book.epub"
+hint = "EPUB, Markdown and plain text are supported."
+
+[error]
+library_load_failed = "Could not read the library: %{reason}"
+database_unopenable = "Could not open the library database: %{reason}"
+import_failed = "Import failed: %{reason}"
+store_write_failed = "Could not save to the library: %{reason}"
+cache_chapters_failed = "Could not cache the chapters: %{reason}"
+import_not_found = "The book disappeared after import"
+book_not_parsed = "This book has not been parsed yet — import it again"
+read_chapter_failed = "Could not read the chapter: %{reason}"
+stage_failed = "Could not copy the book into the library: %{reason}"
+
+# 一级导航的目的地（两端共用）。标签是名词（目的地本身），「还缺什么」单独一条 ——
+# 「暂无数据」和「这台设备上还没有这个功能」必须能分开说，
+# 否则读者会以为是自己把书读空了。
+[nav]
+shelf = "Shelf"
+stats = "Stats"
+notes = "Notes"
+account = "Account"
+
+[nav.pending]
+stats = "No reading time recorded yet"
+notes = "No annotations added yet"
+
+# 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
+[mobile.tab]
+shelf = "Shelf"
+stats = "Stats"
+notes = "Notes"
+account = "Account"
+
+[mobile.pending]
+stats = "No reading time recorded yet"
+notes = "No annotations added yet"
+
+# 移动端书架。空架与「搜不到」是两条不同的话：并成一句会让读者以为自己把书弄丢了。
+# `shelf.back` 是顶部那颗返回键，和底栏的目的地名（`mobile.tab.shelf`）故意不同 ——
+# 一个是动作，一个是去处。
+[shelf]
+search_placeholder = "Search titles or authors"
+import = "Import"
+back = "Back"
+empty = "Your shelf is empty"
+empty_hint = "Use “Import” to pick an epub, markdown or text file"
+no_results = "No book matches"
+no_results_hint = "Try another word — this searches titles and authors, not the text"
+
+# 书库管理。删除项的措辞带书名：长按（移动端）或右键（桌面端）之后指点已经离开那一行，
+# 只有标题能让读者确认自己按的是哪一本。
+# `library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置确认：
+# 移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
+[library]
+delete = "Delete “%{title}”"
+delete_failed = "Could not delete this book: %{reason}"
+title = "Where should imported books be copied?"
+hint = "Importing copies the file into this folder. Moving or deleting your original afterwards will not affect the book on the shelf."
+confirm = "Confirm and import"
+cancel = "Cancel"
+
+# 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs），
+# 「开发方案」「已知缺口」是 docs/ 里那两份的原文 —— 这一页的全部价值就是它不会另说一套。
+[about]
+version = "Version"
+gpui_pre = "GPUI"
+kit = "Component layer (gpui-kit)"
+mobile = "Mobile platform layer"
+plan = "Development plan"
+limitations = "Known gaps"
+docs_note = "Both documents above are the files in the repository, embedded at build time — not a summary written for this screen."

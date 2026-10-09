@@ -1,0 +1,181 @@
+# Folio 界面文案 —— 简体中文（`zh-CN`）。文案表按语言分成三份，另两份是同目录的 `en.toml` / `ja.toml`。
+#
+# 三份的结构必须逐条对应：加一条文案就往三份各加一行，删一条也一起删。漏翻在这张表里不再是
+# 一眼看得见的事（从前三种语言并排一张表，看得见），所以靠 `tests/i18n.rs` 比对三种语言的
+# key 集合与占位符集合，再加 `folio-app/tests/i18n_keys.rs` 核对源码里用到的键每种语言都解得出来。
+#
+# 格式是 rust-i18n 的 v1：**文件名去掉扩展名就是语言标签**（`i18n!("locales")` 按文件名认语言），
+# 所以这一份里没有 `zh-CN` 那一层，`[section]` 直接就是键的前缀；取用仍是 `t!("page.font_size")`。
+# 文件名必须与 `Locale::code()` 一字不差 —— 改文件名等于改语言。
+#
+# 命名规则：`page.*` 设置页标题、`field.*` 设置项（`.desc` 是它的说明文字）、
+# `error.*` 会显示成通知的失败信息、其余按界面区域走。
+# `.desc` 这种「和同名的那一项平级」的键写成带引号的 `"font_size.desc"`：
+# TOML 里 `font_size.desc` 会把 `font_size` 当表来扩展，而它已经是字符串，两行会打架。
+#
+# 占位符是 `%{名字}`，**必须带名字**：中英文语序不同，靠顺序替换会翻错。
+
+[sidebar]
+import = "导入书籍"
+account = "账号"
+
+[reader]
+empty_hint = "从左侧书架选一本书，或用侧栏标题栏的「导入书籍」"
+no_book = "没有打开的书"
+chapter_position = "第 %{index} / %{total} 节"
+prev_chapter = "上一章"
+next_chapter = "下一章"
+book_count_one = "%{count} 本书"
+book_count_other = "%{count} 本书"
+zoom_in = "增大字号"
+zoom_out = "减小字号"
+# 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
+# 不在这里再给同一个东西起第二个名字。
+toc = "目录"
+night = "夜间"
+day = "日间"
+progress = "进度"
+
+[settings]
+title = "阅读设置"
+# 工具条上那个入口。带省略号是因为点了它会**再开一个窗口**，
+# 而不是当场执行某个动作 —— 这是这套控件的固定写法。
+open = "设置…"
+
+[toast]
+font_size = "字号 %{size}px"
+theme = "主题：%{name}"
+
+[appearance]
+follow_system = "跟随系统"
+light = "浅色"
+dark = "深色"
+
+[page]
+typography = "文字"
+layout = "版面"
+fonts = "字体"
+appearance = "外观"
+language = "语言"
+account = "账号"
+about = "关于"
+library = "书库"
+
+[field]
+font_size = "字号"
+"font_size.desc" = "正文的像素字号。"
+line_height = "行距"
+"line_height.desc" = "行高 = 字号 × 这个倍数。中文书一般 1.6–2.0。"
+paragraph_gap = "段距"
+"paragraph_gap.desc" = "段落之间的空白，单位是字号倍。"
+indent = "首行缩进"
+"indent.desc" = "中文排版习惯是 2 个字符；0 表示不缩进。"
+justify = "两端对齐"
+"justify.desc" = "中文正文建议开启；开启后行尾会更整齐。"
+max_measure = "最大行长"
+"max_measure.desc" = "正文栏的最大宽度（像素）。0 表示随窗口铺满。"
+margin_x = "左右页边距"
+"margin_x.desc" = "正文栏两侧留白（像素）。"
+font_family = "正文字体"
+"font_family.desc" = "填字体家族名，例如 LXGW WenKai、Noto Serif CJK SC。"
+appearance_mode = "浅深"
+"appearance_mode.desc" = "跟着系统走，或者钉死浅色 / 深色。"
+theme_light = "浅色主题"
+"theme_light.desc" = "解析成浅色时用的那一套配色。"
+theme_dark = "深色主题"
+"theme_dark.desc" = "解析成深色时用的那一套配色。即使现在钉在浅色也照样记住，切过去还在。"
+language = "界面语言"
+"language.desc" = "界面文案的语言，不影响书的正文语言。"
+account_name = "读者名"
+"account_name.desc" = "显示在侧栏底部；留空则用「读者」。"
+config_path = "配置文件"
+"config_path.desc" = "阅读偏好与账号都存在这个 JSON 文件里，换机器时拷过去即可。"
+library_dir = "书库位置"
+"library_dir.desc" = "导入的书会复制到这里。填成空就等于没确认过：下次导入会再问一次。"
+"library_dir.suggested" = "建议位置"
+
+[account]
+fallback_name = "读者"
+settings = "设置"
+theme = "主题"
+library = "书库位置"
+about = "关于"
+library_hint = "Android 给不了这个应用任意文件夹：选择目录只会返回一个 content 链接，不是它能写的路径。所以这里只能在本应用真写得进去的目录里挑一个。"
+library_unconfirmed = "还没确认过：下一次导入会先问你"
+library_default = "默认建议"
+
+[import]
+title = "导入书籍"
+submit = "导入书籍…"
+placeholder = "书的路径，例如 /path/to/book.epub"
+hint = "支持 EPUB、Markdown 与纯文本。"
+
+[error]
+library_load_failed = "读取书库失败：%{reason}"
+database_unopenable = "打不开书库数据库：%{reason}"
+import_failed = "导入失败：%{reason}"
+store_write_failed = "写入书库失败：%{reason}"
+cache_chapters_failed = "缓存章节失败：%{reason}"
+import_not_found = "导入后找不到这本书"
+book_not_parsed = "这本书还没有解析过，请重新导入"
+read_chapter_failed = "读取章节失败：%{reason}"
+stage_failed = "拷进书库失败：%{reason}"
+
+# 一级导航的目的地（两端共用）。标签是名词（目的地本身），「还缺什么」单独一条 ——
+# 「暂无数据」和「这台设备上还没有这个功能」必须能分开说，
+# 否则读者会以为是自己把书读空了。
+[nav]
+shelf = "书架"
+stats = "统计"
+notes = "笔记"
+account = "我的"
+
+[nav.pending]
+stats = "还没有阅读时长记录"
+notes = "还没有添加过批注"
+
+# 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
+[mobile.tab]
+shelf = "书架"
+stats = "统计"
+notes = "笔记"
+account = "我的"
+
+[mobile.pending]
+stats = "还没有阅读时长记录"
+notes = "还没有添加过批注"
+
+# 移动端书架。空架与「搜不到」是两条不同的话：并成一句会让读者以为自己把书弄丢了。
+# `shelf.back` 是顶部那颗返回键，和底栏的目的地名（`mobile.tab.shelf`）故意不同 ——
+# 一个是动作，一个是去处。
+[shelf]
+search_placeholder = "搜索书名或作者"
+import = "导入"
+back = "返回"
+empty = "书架还是空的"
+empty_hint = "用右边的「导入」选一本 epub、markdown 或纯文本"
+no_results = "没有书名或作者对得上"
+no_results_hint = "换个词试试 —— 这里搜的是书名和作者，不是正文"
+
+# 书库管理。删除项的措辞带书名：长按（移动端）或右键（桌面端）之后指点已经离开那一行，
+# 只有标题能让读者确认自己按的是哪一本。
+# `library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置确认：
+# 移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
+[library]
+delete = "删除《%{title}》"
+delete_failed = "删除失败：%{reason}"
+title = "导入的书拷到哪儿"
+hint = "导入会把文件复制一份到这个目录；之后原文件移走或删掉，架上这本书都不受影响。"
+confirm = "确认并导入"
+cancel = "取消"
+
+# 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs），
+# 「开发方案」「已知缺口」是 docs/ 里那两份的原文 —— 这一页的全部价值就是它不会另说一套。
+[about]
+version = "版本"
+gpui_pre = "GPUI 本体"
+kit = "组件层 gpui-kit"
+mobile = "移动平台层"
+plan = "开发方案"
+limitations = "已知缺口"
+docs_note = "上面两份就是仓库里的那两个文件，编译时原样嵌进来 —— 不是为这一屏另写的一份说法。"

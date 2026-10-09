@@ -1,0 +1,181 @@
+# Folio 界面文案 —— 日文（`ja`）。文案表按语言分成三份，另两份是同目录的 `zh-CN.toml` / `en.toml`。
+#
+# 三份的结构必须逐条对应：加一条文案就往三份各加一行，删一条也一起删。漏翻在这张表里不再是
+# 一眼看得见的事（从前三种语言并排一张表，看得见），所以靠 `tests/i18n.rs` 比对三种语言的
+# key 集合与占位符集合，再加 `folio-app/tests/i18n_keys.rs` 核对源码里用到的键每种语言都解得出来。
+#
+# 格式是 rust-i18n 的 v1：**文件名去掉扩展名就是语言标签**（`i18n!("locales")` 按文件名认语言），
+# 所以这一份里没有 `ja` 那一层，`[section]` 直接就是键的前缀；取用仍是 `t!("page.font_size")`。
+# 文件名必须与 `Locale::code()` 一字不差 —— 改文件名等于改语言。
+#
+# 命名规则：`page.*` 设置页标题、`field.*` 设置项（`.desc` 是它的说明文字）、
+# `error.*` 会显示成通知的失败信息、其余按界面区域走。
+# `.desc` 这种「和同名的那一项平级」的键写成带引号的 `"font_size.desc"`：
+# TOML 里 `font_size.desc` 会把 `font_size` 当表来扩展，而它已经是字符串，两行会打架。
+#
+# 占位符是 `%{名字}`，**必须带名字**：中英文语序不同，靠顺序替换会翻错。
+
+[sidebar]
+import = "本を追加"
+account = "アカウント"
+
+[reader]
+empty_hint = "左の棚から本を選ぶか、サイドバー上部の「本を追加」から追加してください"
+no_book = "開いている本がありません"
+chapter_position = "第%{index} / %{total} 節"
+prev_chapter = "前の章"
+next_chapter = "次の章"
+book_count_one = "%{count} 冊"
+book_count_other = "%{count} 冊"
+zoom_in = "文字を大きく"
+zoom_out = "文字を小さく"
+# 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
+# 不在这里再给同一个东西起第二个名字。
+toc = "目次"
+night = "夜間"
+day = "昼間"
+progress = "進捗"
+
+[settings]
+title = "表示設定"
+# 工具条上那个入口。带省略号是因为点了它会**再开一个窗口**，
+# 而不是当场执行某个动作 —— 这是这套控件的固定写法。
+open = "設定…"
+
+[toast]
+font_size = "文字サイズ %{size}px"
+theme = "テーマ：%{name}"
+
+[appearance]
+follow_system = "システムに従う"
+light = "明"
+dark = "暗"
+
+[page]
+typography = "文字"
+layout = "レイアウト"
+fonts = "フォント"
+appearance = "外観"
+language = "言語"
+account = "アカウント"
+about = "このアプリについて"
+library = "書庫"
+
+[field]
+font_size = "文字サイズ"
+"font_size.desc" = "本文のピクセルサイズ。"
+line_height = "行送り"
+"line_height.desc" = "行高 = 文字サイズ × この倍率。日本語書籍は通常 1.6〜2.0。"
+paragraph_gap = "段落間隔"
+"paragraph_gap.desc" = "段落間の空き、単位は文字サイズ倍。"
+indent = "一字下げ"
+"indent.desc" = "中文の慣例は 2 文字。0 で字下げなし。"
+justify = "両端揃え"
+"justify.desc" = "中文本文では推奨。行末が揃って見やすくなります。"
+max_measure = "行長の上限"
+"max_measure.desc" = "本文欄の最大幅（ピクセル）。0 で窓幅いっぱい。"
+margin_x = "左右の余白"
+"margin_x.desc" = "本文欄の左右の余白（ピクセル）。"
+font_family = "本文フォント"
+"font_family.desc" = "ファミリー名を入力（例：Noto Serif CJK JP）。"
+appearance_mode = "明暗"
+"appearance_mode.desc" = "システムに従うか、明または暗に固定するか。"
+theme_light = "浅色テーマ"
+"theme_light.desc" = "明に解決されたときに使う配色。"
+theme_dark = "暗色テーマ"
+"theme_dark.desc" = "暗に解決されたときに使う配色。今明に固定しても保存され、切り替えても残ります。"
+language = "表示言語"
+"language.desc" = "UI 表示の言語で、本文の言語は変わりません。"
+account_name = "読者名"
+"account_name.desc" = "サイドバー下部に表示。空欄なら「読者」を使います。"
+config_path = "設定ファイル"
+"config_path.desc" = "閲覧設定とアカウントはこの JSON ファイルに保存されます。"
+library_dir = "書庫フォルダ"
+"library_dir.desc" = "追加した本はここにコピーされます。空にすると、次に追加する時にもう一度聞かれます。"
+"library_dir.suggested" = "推奨の場所"
+
+[account]
+fallback_name = "読者"
+settings = "設定"
+theme = "テーマ"
+library = "書庫フォルダ"
+about = "このアプリについて"
+library_hint = "Android ではこのアプリに任意のフォルダを渡せません（選択すると content URI が返るだけで、書き込み可能なパスにならないため）。ここでは実際に書き込めるフォルダから選べます。"
+library_unconfirmed = "未確認です。次の追加時にもう一度聞かれます"
+library_default = "既定の推奨"
+
+[import]
+title = "本を追加"
+submit = "本を追加…"
+placeholder = "本のパス（例：/path/to/book.epub）"
+hint = "EPUB・Markdown・テキストに対応。"
+
+[error]
+library_load_failed = "ライブラリを読み込めません：%{reason}"
+database_unopenable = "ライブラリ DB を開けません：%{reason}"
+import_failed = "追加に失敗：%{reason}"
+store_write_failed = "ライブラリに保存できません：%{reason}"
+cache_chapters_failed = "章をキャッシュできません：%{reason}"
+import_not_found = "追加後に見つかりません"
+book_not_parsed = "この本はまだ解析されていません。もう一度追加してください"
+read_chapter_failed = "章を読み込めません：%{reason}"
+stage_failed = "書庫へのコピーに失敗しました：%{reason}"
+
+# 一级导航的目的地（两端共用）。标签是名词（目的地本身），「还缺什么」单独一条 ——
+# 「暂无数据」和「这台设备上还没有这个功能」必须能分开说，
+# 否则读者会以为是自己把书读空了。
+[nav]
+shelf = "本棚"
+stats = "統計"
+notes = "メモ"
+account = "マイページ"
+
+[nav.pending]
+stats = "読書時間の記録はまだありません"
+notes = "注釈はまだ追加されていません"
+
+# 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
+[mobile.tab]
+shelf = "本棚"
+stats = "統計"
+notes = "メモ"
+account = "マイページ"
+
+[mobile.pending]
+stats = "読書時間の記録はまだありません"
+notes = "注釈はまだ追加されていません"
+
+# 移动端书架。空架与「搜不到」是两条不同的话：并成一句会让读者以为自己把书弄丢了。
+# `shelf.back` 是顶部那颗返回键，和底栏的目的地名（`mobile.tab.shelf`）故意不同 ——
+# 一个是动作，一个是去处。
+[shelf]
+search_placeholder = "タイトルまたは著者を検索"
+import = "追加"
+back = "戻る"
+empty = "本棚はまだ空です"
+empty_hint = "右の「追加」から epub・markdown・テキストを選んでください"
+no_results = "該当する本がありません"
+no_results_hint = "別の語でお試しください。検索対象は本文ではなくタイトルと著者です"
+
+# 书库管理。删除项的措辞带书名：长按（移动端）或右键（桌面端）之后指点已经离开那一行，
+# 只有标题能让读者确认自己按的是哪一本。
+# `library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置确认：
+# 移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
+[library]
+delete = "「%{title}」を削除"
+delete_failed = "この本を削除できません：%{reason}"
+title = "追加した本をどこにコピーしますか"
+hint = "追加するとファイルをこのフォルダにコピーします。コピー後、原本を移動しても書棚の本には影響しません。"
+confirm = "確認して追加"
+cancel = "キャンセル"
+
+# 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs），
+# 「开发方案」「已知缺口」是 docs/ 里那两份的原文 —— 这一页的全部价值就是它不会另说一套。
+[about]
+version = "バージョン"
+gpui_pre = "GPUI 本体"
+kit = "コンポーネント層 gpui-kit"
+mobile = "モバイル基盤層"
+plan = "開発計画"
+limitations = "既知の未実装"
+docs_note = "上の 2 つはリポジトリ内のファイルそのもので、ビルド時に埋め込んでいます。この画面用に書き直した要約ではありません。"

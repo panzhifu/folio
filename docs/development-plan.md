@@ -201,7 +201,7 @@ folio/
 │   ├── position.rs               Locator：章 + 章内字符偏移
 │   ├── config.rs                 读者偏好、外观、语言、账号（落盘为 config.json）
 │   ├── i18n.rs / paths.rs        文案与落点（paths 有 `set_app_dirs`，给没有标准目录的移动平台）
-│   └── locales/folio.yml         rust-i18n 表，一个 key 三种语言并排
+│   └── locales/                  rust-i18n 表，一门语言一份（`en.toml` / `zh-CN.toml` / `ja.toml`）
 └── crates/folio-app/             gpui-kit 侧（`[lib] crate-type = rlib + cdylib + staticlib`）
     ├── build.rs                  嵌上游主题集 + 设 `cfg(mobile)`
     ├── ui/shared/                ★ 两端共用：config_model / l10n / theme / account / images /
