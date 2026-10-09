@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::anchor::TextAnchor;
 use crate::format::{Chapter, DocMeta, FlowDoc, ImageRes};
 use crate::position::Locator;
 
@@ -138,6 +139,27 @@ pub struct SearchHit {
     pub chapter_id: i64,
     pub chapter_title: String,
     pub snippet: String,
+}
+
+/// 界面那四色高亮的合法取值。存的是**名字**而不是 ARGB：配色属于主题，
+/// 把颜色值写死进标注，将来换主题就成了修不了的数据问题。
+pub const ANNOTATION_COLORS: &[&str] = &["amber", "rose", "sky", "lime"];
+
+/// 一条标注：坐标（含找回它所需的指纹）+ 读者写的东西。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Annotation {
+    pub id: i64,
+    pub book_id: i64,
+    /// 章在 `FlowDoc::chapters` 里的下标。表里另有 `chapter_id` 外键，但那是索引与
+    /// 级删用的；**坐标属于哪一章以这里为准**，因为它和锚点是一起写进去的。
+    pub chapter: u32,
+    pub anchor: TextAnchor,
+    pub note: String,
+    pub color: String,
+    /// 锚点找不回来了。界面要显式标出来，而不是把批注画在猜出来的位置上。
+    pub stale: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 pub struct Store {
@@ -429,6 +451,152 @@ impl Store {
                 })
             })?
             .collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 记一条标注。`anchor` 是调用方从可见文本坐标建好的（见 `crate::anchor`），
+    /// 存储层不参与坐标换算 —— 它不知道排版，也不该知道。
+    ///
+    /// 颜色不认识时回落到默认那条，而不是拒写：写失败会让读者刚划的批注直接丢掉，
+    /// 那比颜色不对严重得多。
+    pub fn add_annotation(
+        &self,
+        book_id: i64,
+        anchor: &TextAnchor,
+        note: &str,
+        color: &str,
+    ) -> Result<i64> {
+        // `chapter_id` 只是索引与级删的挂钩，坐标里的章下标才是权威。
+        // 书没重新入库时这一列可能没有对应行，那就存 NULL —— 不能因为外键查不到
+        // 就把批注写失败。
+        let chapter_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM chapters WHERE book_id = ?1 AND idx = ?2",
+                params![book_id, anchor.chapter as i64],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let stamp = now();
+        self.conn.execute(
+            "INSERT INTO annotations (book_id, chapter_id, anchor_json, note, color, stale, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+            params![book_id, chapter_id, anchor.to_json(), note, color_of(color), stamp],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 一本书的全部标注，按创建顺序。
+    ///
+    /// **解不出锚点的行会被跳过**而不是让整个列表读失败：这一列可能来自旧版本或
+    /// 别的机器，为一块坏 JSON 让读者看不到他所有的批注，是最糟的失败方式。
+    pub fn annotations(&self, book_id: i64) -> Result<Vec<Annotation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, book_id, anchor_json, note, color, stale, created_at, updated_at
+             FROM annotations WHERE book_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![book_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)? != 0,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, book, json, note, color, stale, created_at, updated_at) = row?;
+            let Some(anchor) = TextAnchor::from_json(&json) else {
+                continue;
+            };
+            out.push(Annotation {
+                id,
+                book_id: book,
+                chapter: anchor.chapter,
+                anchor,
+                note,
+                color,
+                stale,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn annotation(&self, id: i64) -> Result<Option<Annotation>> {
+        let row: Option<(String, i64, i64, i64, i64, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT anchor_json, book_id, stale, created_at, updated_at, note, color
+                 FROM annotations WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.and_then(
+            |(json, book_id, stale, created_at, updated_at, note, color)| {
+                TextAnchor::from_json(&json).map(|anchor| Annotation {
+                    id,
+                    book_id,
+                    chapter: anchor.chapter,
+                    anchor,
+                    note,
+                    color,
+                    stale: stale != 0,
+                    created_at,
+                    updated_at,
+                })
+            },
+        ))
+    }
+
+    /// 改批注文字与颜色。`updated_at` 跟着走 —— 界面的「最近改动」排序用它。
+    pub fn update_annotation(&self, id: i64, note: &str, color: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE annotations SET note = ?2, color = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, note, color_of(color), now()],
+        )?;
+        Ok(())
+    }
+
+    /// 记下「锚点找不回来了」。这**不**碰 `updated_at`：stale 是排版结果的属性，
+    /// 不是读者编辑过的证据，跟着它排序会把从没动过的批注顶到列表最前。
+    pub fn set_annotation_stale(&self, id: i64, stale: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE annotations SET stale = ?2 WHERE id = ?1",
+            params![id, stale as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_annotation(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+}
+
+/// 颜色的规范化：小写、去空白，不在清单里的用默认值。
+fn color_of(input: &str) -> String {
+    let key = input.trim().to_ascii_lowercase();
+    if ANNOTATION_COLORS.contains(&key.as_str()) {
+        key
+    } else {
+        ANNOTATION_COLORS[0].to_string()
     }
 }
 

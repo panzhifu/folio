@@ -38,6 +38,13 @@ pub fn is_inline_tag(tag: &str) -> bool {
     INLINE_TAGS.contains(&tag)
 }
 
+/// 这一类标签的**内容**整块不进排版。锚点坐标系要用它把 `<style>` / `<script>` 里
+/// 的字符从「可见文本」里排除出去 —— 不然一章的「第 N 个字」会把内联 CSS 也算进去，
+/// 而重定位搜文也就会在 CSS 里命中。
+pub fn is_skipped_tag(tag: &str) -> bool {
+    SKIPPED_TAGS.contains(&tag)
+}
+
 /// 替换元素：自己没有文本，尺寸由内容决定，只能作为行内对象出现。
 pub fn is_replaced_inline(tag: &str) -> bool {
     matches!(tag, "img" | "svg" | "canvas" | "video" | "audio" | "iframe")
