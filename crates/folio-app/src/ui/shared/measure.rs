@@ -10,7 +10,7 @@
 //!
 //! 桌面与移动**共用这一份**。原先移动端有另一份逐行照抄的实现，唯一的区别是
 //! `f32::from(x)` 还是 `x.as_f32()`；两件事因此成立：一处改了断行口径两端同时生效，
-//! 以及同一本书在两端折出的行数可以逐行比对（`tests/mobile.rs` 就靠这个前提）。
+//! 以及同一本书在两端折出的行数可以逐行比对（`ui/shared/document.rs` 的 tests 就靠这个前提）。
 
 use std::sync::Arc;
 
@@ -38,15 +38,26 @@ const GENERIC_FAMILIES: &[&str] = &[
 
 /// `FontKey` → gpui `Font`。**度量与绘制必须走这一个函数**：
 /// 两边各自拼 Font 的话，一次字段改动就会让居中偏移与实际字宽对不上。
-pub fn gpui_font(key: &FontKey, default_family: &SharedString) -> Font {
+///
+/// `known` 是**这台设备注册的字族名**。非泛族的 CSS 家族（书里写的 `easypub`、
+/// `LXGW WenKai` 之类）只有在 `known` 里真的存在时才用 —— 否则落回 `default_family`。
+/// 理由很硬：`TextSystem::resolve_font` 解析不到时是 **panic**，不是回退，
+/// 而书的 `font-family` 在目标设备上几乎都不存在（实测《斗战狂潮》的 `easypub`
+/// 会让 Android 直接 SIGABRT）。泛族名（`serif` 等）本来就一律换成偏好字体，见
+/// [`GENERIC_FAMILIES`]。
+pub fn gpui_font(key: &FontKey, default_family: &SharedString, known: &[String]) -> Font {
     let generic = key.family.is_empty()
         || GENERIC_FAMILIES
             .iter()
             .any(|g| key.family.eq_ignore_ascii_case(g));
-    let family = if generic {
-        default_family.clone()
-    } else {
+    let available = !generic
+        && known
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&key.family));
+    let family = if available {
         SharedString::from(key.family.clone())
+    } else {
+        default_family.clone()
     };
     Font {
         family,
@@ -67,6 +78,8 @@ pub struct GpuiMeasure {
     window_texts: Arc<WindowTextSystem>,
     /// 样式没写 font-family 时用哪个族。来自读者偏好，不是书的 UA 值。
     default_family: SharedString,
+    /// 这台设备注册的字族名，供 [`gpui_font`] 判一个 CSS 家族能不能用。
+    known: Vec<String>,
 }
 
 impl GpuiMeasure {
@@ -75,15 +88,17 @@ impl GpuiMeasure {
         window_texts: Arc<WindowTextSystem>,
         default_family: impl Into<SharedString>,
     ) -> Self {
+        let known = texts.all_font_names();
         Self {
             texts,
             window_texts,
             default_family: default_family.into(),
+            known,
         }
     }
 
     fn font(&self, key: &FontKey) -> Font {
-        gpui_font(key, &self.default_family)
+        gpui_font(key, &self.default_family, &self.known)
     }
 
     /// 一个 run 的 shaping 描述。`color` 对度量没有影响，但 `TextRun` 要求填，

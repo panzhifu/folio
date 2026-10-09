@@ -75,6 +75,30 @@ pub struct ImageRes {
     pub bytes: Vec<u8>,
 }
 
+/// 从字节头猜一张图的 mime。
+///
+/// 存在的理由是 `books.cover` 那一列**只有字节、没有媒体类型**：封面是从容器里按
+/// OPF 的 cover id 捞出来的，那条记录不带 manifest 的 `media-type`。而 gpui 的
+/// `Image::from_bytes` 必须显式给格式（它按格式挑解码器，给错了解不出来，
+/// 一片空白且不报错），所以只能在画之前按 magic bytes 反推。
+///
+/// 只认根 `Cargo.toml` 给 `image` 开的那几种 feature；猜不出或没编译进来的格式返回
+/// `None`，由调用方决定降级成什么占位，而不是假装它是 PNG 去试一次。
+pub fn guess_media_type(bytes: &[u8]) -> Option<&'static str> {
+    let guessed = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .format()?;
+    match guessed {
+        image::ImageFormat::Png => Some("image/png"),
+        image::ImageFormat::Jpeg => Some("image/jpeg"),
+        image::ImageFormat::WebP => Some("image/webp"),
+        image::ImageFormat::Gif => Some("image/gif"),
+        image::ImageFormat::Bmp => Some("image/bmp"),
+        _ => None,
+    }
+}
+
 /// 可重排文档。`css` 是全书作者样式按 manifest 顺序拼起来的一份，
 /// `toc` 与 `cover` 来自 OPF；这三项都是**文档级**数据，所以和章节分开存。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

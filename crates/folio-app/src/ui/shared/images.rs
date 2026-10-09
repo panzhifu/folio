@@ -54,6 +54,20 @@ fn format_of(media_type: &str) -> ImageFormat {
     ImageFormat::from_mime_type(mime).unwrap_or(ImageFormat::Png)
 }
 
+/// 封面字节 → 可画的 `Image`；格式认不出时返回 `None`。
+///
+/// 返回 `None` 而不是按 PNG 试一把，是因为 `Image::from_bytes` 之后 gpui 就按那个
+/// 格式挑解码器（`platform.rs` 里 `to_image_data` 是 `match self.format`），
+/// 给错格式的结果是**静默画空**：书架上是一块和「没有封面」长得一样的空白，
+/// 而界面已经分不清这两件事了。认不出时调用方要画显式的占位块。
+pub fn cover_image(bytes: &[u8]) -> Option<Arc<Image>> {
+    let media_type = folio_core::format::guess_media_type(bytes)?;
+    Some(Arc::new(Image::from_bytes(
+        format_of(media_type),
+        bytes.to_vec(),
+    )))
+}
+
 /// 一章的图片视图：`src` 相对本章目录解析成容器路径后查 `BookImages`。
 pub struct ChapterImages {
     book: Arc<BookImages>,
@@ -92,5 +106,46 @@ impl ImageProvider for ChapterImages {
             width: entry.width,
             height: entry.height,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 共用图片层里「封面那一小块」在宿主上跑得动的部分。
+    //!
+    //! 为什么单独一个文件：`ui/shared/images.rs` 排版侧的索引（`<img src>` → 容器路径）
+    //! 由 `tests/shared_layout.rs` 管，而封面那条走的是另一件事 —— 从一列**没有媒体类型**
+    //! 的字节里把格式猜出来。它错了不会报错，只会让书架上那张卡片永远画不出来，
+    //! 所以按契约钉住：认得出的要给出图，认不出的要给 `None` 而不是「按 PNG 试一把」。
+
+    use crate::ui::shared::images::cover_image;
+
+    /// 够 `with_guessed_format` 探测的一段 PNG 头。
+    const PNG: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, b'I', b'H', b'D', b'R',
+    ];
+    const JPEG: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, b'J', b'F', b'I', b'F', 0, 0, 0, 0, 0, 0, 0,
+    ];
+
+    #[test]
+    fn recognised_cover_bytes_become_a_drawable_image() {
+        assert!(cover_image(PNG).is_some(), "PNG 封面要能画");
+        assert!(cover_image(JPEG).is_some(), "JPEG 封面要能画");
+    }
+
+    /// 认不出格式时给 `None`。
+    ///
+    /// 按 PNG 硬试的后果是**静默画空**：gpui 后面就照你给的那个格式挑解码器，
+    /// 解不出来不报错，界面上「没有封面」和「封面坏了」会长成同一块空白 ——
+    /// 而这两种情况要说的话不一样（见 `shelf_view` 的两个空状态）。
+    #[test]
+    fn unrecognised_cover_bytes_are_reported_as_absent_not_as_a_blank_image() {
+        assert!(
+            cover_image(b"<svg xmlns='x'></svg>").is_none(),
+            "SVG 封面不该被当成能画的位图"
+        );
+        assert!(cover_image(b"").is_none());
+        assert!(cover_image(b"not an image at all, just bytes").is_none());
     }
 }

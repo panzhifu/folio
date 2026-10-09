@@ -13,15 +13,21 @@
 
 mod about;
 mod account;
+pub mod account_view;
 mod appearance;
 mod fonts;
 mod language;
 mod layout;
+mod library;
 mod typography;
 pub mod window;
 
 // 宿主只和这三个动作打交道：开（默认页）、开到某一页、关。
 pub use window::{close, open, open_at};
+
+// 「我的」目的地（Account section）的根视图。它与设置页是同一件事的两半：
+// 桌面从侧栏/工具条进设置窗口，移动从这一屏进各个设置子页，所以收在同一个 feature 下。
+pub use account_view::AccountView;
 
 // 页面文件之间共用的前言：设置组件、主题、配置入口与文案函数。
 pub(super) use folio_core::Mode;
@@ -44,6 +50,7 @@ use appearance::appearance_page;
 use fonts::fonts_page;
 use language::language_page;
 use layout::layout_page;
+use library::library_page;
 use typography::typography_page;
 
 /// 各设置页。变体顺序就是 `Settings` 侧栏里从上到下的顺序，
@@ -57,11 +64,12 @@ pub enum SettingsPage {
     Language,
     Account,
     About,
+    Library,
 }
 
 impl SettingsPage {
     /// 全部页面，按导航顺序。
-    pub const ALL: [SettingsPage; 7] = [
+    pub const ALL: [SettingsPage; 8] = [
         SettingsPage::Typography,
         SettingsPage::Layout,
         SettingsPage::Fonts,
@@ -69,6 +77,7 @@ impl SettingsPage {
         SettingsPage::Language,
         SettingsPage::Account,
         SettingsPage::About,
+        SettingsPage::Library,
     ];
 
     /// 在 `Settings` 组件里的页序下标。必须与 [`pages`] 的组装顺序一致 ——
@@ -93,6 +102,7 @@ pub fn pages(cx: &App) -> Vec<SettingPage> {
         language_page(cx),
         account_page(cx),
         about_page(cx),
+        library_page(cx),
     ]
 }
 

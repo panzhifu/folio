@@ -1,24 +1,25 @@
-//! 界面层的目录约定：`shared` 是两端共用的地基，`desktop` 与 `mobile` 按 target 互斥编译。
+//! 界面层。
 //!
-//! 分层只有一条判据：**这段代码在两个平台上需不需要长得不同**。
+//! 分层（判据只有一条：**这段代码需不需要和平台不同**）：
 //!
-//! - [`shared`] —— 配置实体、文案、主题、字体度量、「一章 → `Layout`」这类两端必须
-//!   逐字一致的东西。这里出现 `cfg(mobile)` 就说明分层没做完。
-//! - [`desktop`] —— 桌面壳：侧栏、标签、工具条、状态栏、设置窗口，以及 `gpui_kit::component`
-//!   的虚拟列表接法。
-//! - [`mobile`] —— 移动端壳：平台入口、底部导航栏、自绘字形元素。
+//! - [`shared`] —— 领域与地基：配置、文案、主题、排版状态、图片、书库、度量。
+//! - [`widgets`] —— 无状态小件（发丝线、次要文字、空状态）。
+//! - [`features`] —— 按功能纵切：每个功能自带 view / state / 小组件。
+//! - [`shell`] —— 外壳：自适应导航（Material 3）+ 每个目的地一个导航栈。
+//! - [`host`] —— 平台服务边界（安全区、输入法）。
+//! - [`platform`] —— 入口与原生桥。
 //!
-//! 两端用的是**同一个 `gpui-pre` 快照**（`gpui_kit` 顶层 `pub use ::gpui::*` 把它整个转出），
-//! 所以视图代码统一 `use gpui_kit::…`，不直接引 `gpui` —— 那正是这些模块能共用的原因。
-//! 以前移动端是独立 workspace、只能链 `gpui-pre` 原语，才不得不自己拼导航栏、
-//! 另写一份度量；那条理由现在不成立了。
+//! 平台差异只允许出现在 [`host`]、[`platform`]，以及 [`features::reader`]（两套渲染实现）。
+//! 其余页面/部件一律不写 `cfg(mobile)`。
+//!
+//! 两端用的是同一个 `gpui-pre` 快照（`gpui_kit` 顶层 `pub use ::gpui::*` 把它整个转出），
+//! 所以视图统一 `use gpui_kit::…`，不直接引 `gpui`。
 
 pub mod shared;
 
-// ── 桌面专属 ──
-#[cfg(not(mobile))]
-pub mod desktop;
+pub mod features;
+pub mod shell;
+pub mod widgets;
 
-// ── 移动专属（Android / iOS / HarmonyOS）──
-#[cfg(mobile)]
-pub mod mobile;
+pub mod host;
+pub mod platform;

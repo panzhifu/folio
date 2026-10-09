@@ -126,6 +126,16 @@ pub fn db_path() -> PathBuf {
     data_dir().join("folio.db")
 }
 
+/// 应用自己收下的那份书本文件：`<数据根>/books/<原名>`。
+///
+/// 只有移动平台会往这里写 —— 系统文件选择器给的是它自己临时目录里的路径，随时会被清，
+/// 而 `books.path` 那一列是书的身份（同路径重复导入算更新，不是第二本），所以先复制到
+/// 这个常驻位置再入库。**这个目录也就是「哪些文件归本应用所有」的边界**：
+/// 删一本书时只有落在这里的文件才允许连带删掉，桌面端记的是读者自己的原文件。
+pub fn books_dir() -> PathBuf {
+    data_dir().join("books")
+}
+
 /// 建出 `path` 的父目录。写文件前都要过一次：首次启动时这些根目录还不存在。
 pub fn prepare_dir(path: &Path) -> std::io::Result<()> {
     match path.parent() {

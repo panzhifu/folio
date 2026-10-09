@@ -11,6 +11,7 @@
 //! `scroll_y`。在这里再套一个 `MomentumScroller` 会把同一份惯量算两遍，滚起来直接翻倍。
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use folio_core::layout::{FontKey, LineFragment};
@@ -23,12 +24,13 @@ use gpui_kit::{
 };
 
 use super::paint::{GlyphRun, GlyphsElement};
-use crate::ui::shared::chrome::run_color;
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::document::{Document, chapter_xhtml, open};
 use crate::ui::shared::images::{BookImages, ChapterImages};
 use crate::ui::shared::l10n::tf;
+use crate::ui::shared::library::PACKAGE;
 use crate::ui::shared::measure::gpui_font;
+use crate::ui::widgets::run_color;
 
 /// 视图现在拿的是什么内容。
 pub enum Source {
@@ -111,6 +113,17 @@ impl Book {
         self.chapter
     }
 
+    /// 跳到第 `index` 章。越界与「已经在这章」都返回 `false` 且不动任何东西 ——
+    /// 目录里点当前章不该把读者已经滚到的位置甩回章首。
+    pub fn goto(&mut self, index: usize, prefs: &Reader) -> bool {
+        if index >= self.chapters.len() || index == self.chapter {
+            return false;
+        }
+        self.chapter = index;
+        self.show_chapter(prefs);
+        true
+    }
+
     pub fn chapter_count(&self) -> usize {
         self.chapters.len()
     }
@@ -163,6 +176,11 @@ pub struct ReaderView {
     /// 正文的可见行与滚动上限都按「窗口高减掉它」这个有效视口算，
     /// 否则文档最后这么一截永远滚不进视野。
     bottom_reserve: f32,
+    /// 阅读页顶部那行小字（章名）占掉的高度。正文从它下面开始画，
+    /// 滚动上限也按它扣 —— 可见行筛选、`max_scroll`、`on_scroll` 的夹范围必须同一个数。
+    header_reserve: f32,
+    /// 阅读页底部那行小字（进度）占掉的高度。与 `header_reserve` 同理。
+    footer_reserve: f32,
     /// 还没落地的位置。恢复必须等排版做过一次才能做（坐标 → 行顶的映射要有行盒），
     /// 而构造时手上没有窗口，所以先记下来，第一帧渲染时取走。
     pending_restore: Option<Locator>,
@@ -172,7 +190,7 @@ pub struct ReaderView {
     saved_offset: usize,
     /// 书库。移动端的导入还没有界面，文件是 `adb push` 进应用目录的，
     /// 但位置与书目照常入库，所以杀掉进程回来还在同一章。
-    store: Option<Store>,
+    store: Option<Rc<Store>>,
     book_id: Option<i64>,
 }
 
@@ -188,9 +206,9 @@ impl ReaderView {
             log::info!("ReaderView: 没有可读文档，进入兜底的单行文本");
             return Self::sample(&prefs, cx);
         };
-        // 书库打不开不是 fatal：照样能读，只是进度与偏好落不了盘，
+        // 书库没装不是 fatal：照样能读，只是进度与偏好落不了盘，
         // 而「读了但没记住」比「直接退出」更可接受。
-        let store = Store::open_at(&folio_core::paths::db_path()).ok();
+        let store = crate::ui::shared::app_store::handle(cx);
         match Self::open_document(&path, &prefs, store, cx) {
             Ok(view) => {
                 log::info!("ReaderView: 打开 {path:?}");
@@ -217,6 +235,8 @@ impl ReaderView {
             content_height: 0.0,
             viewport_height: 0.0,
             bottom_reserve: 0.0,
+            header_reserve: 0.0,
+            footer_reserve: 0.0,
             pending_restore: None,
             saved_offset: 0,
             store: None,
@@ -232,7 +252,7 @@ impl ReaderView {
     pub fn open_document(
         path: &Path,
         prefs: &Reader,
-        store: Option<Store>,
+        store: Option<Rc<Store>>,
         cx: &App,
     ) -> folio_core::Result<Self> {
         let (meta, flow) = open(path)?;
@@ -264,9 +284,64 @@ impl ReaderView {
             content_height: 0.0,
             viewport_height: 0.0,
             bottom_reserve: 0.0,
+            header_reserve: 0.0,
+            footer_reserve: 0.0,
             store,
             book_id,
         })
+    }
+
+    /// 从书库打开一本书。
+    ///
+    /// 按主键读库而不是按 `books.path` 去开那个文件：导入时那份副本躺在系统给文件
+    /// 选择器的临时目录里，随时会被清掉，而正文、图片、CSS 早在 `save_flow` 时就
+    /// 进了 SQLite。书架点开一张卡片要的是「这本书还在」这个保证，不是「那个文件还在」。
+    ///
+    /// 读不到的一切情况都只写日志、不动当前那一屏：读者正在读的书不该因为点错一本
+    /// 坏记录而变成空白页。
+    pub fn open_book(&mut self, book_id: i64, cx: &mut Context<Self>) {
+        let opened = self.store.as_ref().and_then(|store| {
+            let row = store.book(book_id).ok().flatten()?;
+            let flow = store.load_flow(book_id).ok().flatten()?;
+            let format = Format::parse(&row.format)?;
+            let _ = store.touch_opened(book_id);
+            let locator = store
+                .position(book_id)
+                .ok()
+                .flatten()
+                .map(|(_, locator)| locator)
+                .unwrap_or_else(Locator::start);
+            Some((
+                DocMeta {
+                    title: row.title,
+                    authors: row.authors,
+                    format,
+                    size: row.size,
+                },
+                flow,
+                locator,
+            ))
+        });
+        let Some((meta, flow, locator)) = opened else {
+            log::error!("ReaderView: 书库里第 {book_id} 本读不出来（章节没入库或格式不认识）");
+            return;
+        };
+        // `self.prefs` 里的家族已经是这台设备解析得出来的那个，不再挑一遍。
+        let book = Book::new(&meta, flow, self.prefs.clone(), locator);
+        self.source = Source::Book(Box::new(book));
+        self.book_id = Some(book_id);
+        self.scroll_y = 0.0;
+        self.content_height = 0.0;
+        self.saved_offset = locator.offset;
+        // 章内偏移还是要等第一帧排版做完才能落地。
+        self.pending_restore = (locator.offset > 0).then_some(locator);
+        cx.notify();
+    }
+
+    /// 当前开着的那本书的主键；兜底那一行没有书，返回 `None`。
+    /// 外壳用它判断「被删掉的那本是不是正开着的那本」。
+    pub fn book_id(&self) -> Option<i64> {
+        self.book_id
     }
 
     pub fn title(&self) -> SharedString {
@@ -279,6 +354,109 @@ impl ReaderView {
     /// 告知底部导航栏的高度（逻辑像素），正文据此缩短自己的有效视口。
     pub(crate) fn set_bottom_reserve(&mut self, height: f32) {
         self.bottom_reserve = height;
+    }
+
+    /// 告知阅读页自己那两条带子的高度（页眉的章名、页脚的进度）。
+    ///
+    /// 与 `set_bottom_reserve` 分成两个入口是因为**归属不同**：那条由外壳每帧报告
+    /// （导航栏收起时是 0），这两条由阅读页自己定。合成一个数的话，外壳那一句
+    /// 「现在导航栏占 0」会把阅读页自己让出来的两条带一起冲掉。
+    pub(crate) fn set_chrome_bands(&mut self, header: f32, footer: f32, cx: &mut Context<Self>) {
+        if (self.header_reserve - header).abs() > 0.5 || (self.footer_reserve - footer).abs() > 0.5
+        {
+            self.header_reserve = header;
+            self.footer_reserve = footer;
+            cx.notify();
+        }
+    }
+
+    /// 本章还能往下滚多少像素。视口还没量过（第一帧之前）时是 0。
+    fn max_scroll(&self) -> f32 {
+        (self.content_height - self.viewport_height).max(0.0)
+    }
+
+    /// 本章已读比例。进度条与页脚都念它。
+    pub fn progress(&self) -> f32 {
+        let max = self.max_scroll();
+        if max <= 0.0 {
+            0.0
+        } else {
+            (self.scroll_y / max).clamp(0.0, 1.0)
+        }
+    }
+
+    /// 按「一屏」翻正文。
+    ///
+    /// 走 90% 而不是 100%：整屏跳会让上一屏的末行彻底消失，读者找不到接续的那句。
+    pub fn scroll_page(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let page = self.viewport_height * 0.9;
+        self.set_scroll_y(self.scroll_y + delta as f32 * page, cx);
+    }
+
+    /// 滚到本章的某个比例处（进度条）。
+    pub fn seek_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {
+        let target = ratio.clamp(0.0, 1.0) * self.max_scroll();
+        self.set_scroll_y(target, cx);
+    }
+
+    /// 两条滚动入口共用的落点：夹进范围、落库、重画。
+    fn set_scroll_y(&mut self, target: f32, cx: &mut Context<Self>) {
+        let clamped = target.clamp(0.0, self.max_scroll());
+        if (clamped - self.scroll_y).abs() < 0.5 {
+            return;
+        }
+        self.scroll_y = clamped;
+        // 与手势滚动同一条落库判据：跨过一行才写盘。
+        let offset = self.visible_offset();
+        if offset != self.saved_offset {
+            self.persist_position();
+        }
+        cx.notify();
+    }
+
+    /// 跳到第 `index` 章的章首。
+    pub fn goto_chapter(&mut self, index: usize, cx: &mut Context<Self>) {
+        let prefs = self.prefs.clone();
+        let moved = match &mut self.source {
+            Source::Book(book) => book.goto(index, &prefs),
+            Source::Sample(_) => false,
+        };
+        if !moved {
+            return;
+        }
+        self.scroll_y = 0.0;
+        self.content_height = 0.0;
+        self.pending_restore = None;
+        self.persist_position();
+        cx.notify();
+    }
+
+    /// 章节数（兜底那一行没有章，是 0）。目录面板的列表长度。
+    pub fn chapter_count(&self) -> usize {
+        match &self.source {
+            Source::Book(book) => book.chapter_count(),
+            Source::Sample(_) => 0,
+        }
+    }
+
+    /// 当前章的下标。
+    pub fn chapter_index(&self) -> usize {
+        match &self.source {
+            Source::Book(book) => book.chapter(),
+            Source::Sample(_) => 0,
+        }
+    }
+
+    /// 第 `index` 章的标题。越界是空串，不是 panic —— 列表在换章那一帧可能还按旧长度画。
+    pub fn chapter_title_at(&self, index: usize) -> String {
+        match &self.source {
+            Source::Book(book) => book
+                .chapters
+                .get(index)
+                .map(|chapter| chapter.title.clone())
+                .unwrap_or_default(),
+            Source::Sample(_) => String::new(),
+        }
     }
 
     /// 「第几节 / 共几节」，比整本书名短得多。顶部那条章导航用它。
@@ -408,8 +586,9 @@ impl ReaderView {
 
     /// 把 `[scroll_y, scroll_y + 视口高]` 覆盖到的行盒摊成绘制用的 run 与图片列表。
     ///
-    /// 几何全部来自排版层，这里只加两个偏移：左边的 `margin_x`（版心在窗口里的位置）
-    /// 和向上的 `scroll_y`。行内每个 run 用自己的宽度累加定 x；
+    /// 几何全部来自排版层，这里只加三个偏移：左边的 `margin_x`（版心在窗口里的位置）、
+    /// 向上的 `scroll_y`、以及 `offset_y` —— 页眉那条带子占掉的高度，正文从它下面开始画。
+    /// 行内每个 run 用自己的宽度累加定 x；
     /// 基线一律 `line.y + line.baseline` —— 桌面端 `line_element` 先把 run 的
     /// line-height 盒顶摆到 `baseline - (盒高 + ascent − descent)/2`，
     /// 再由 gpui 把基线落回盒内同一个偏移，两头抵消，结果就是这一条线。
@@ -421,7 +600,9 @@ impl ReaderView {
         document: &Document,
         scroll_y: f32,
         viewport: f32,
+        offset_y: f32,
         foreground: Hsla,
+        known: &[String],
     ) -> (Vec<GlyphRun>, Vec<VisibleImage>) {
         let prefs = document.prefs();
         let layout = document.layout();
@@ -439,7 +620,7 @@ impl ReaderView {
                 continue;
             };
             let mut x = prefs.margin_x + line.x;
-            let baseline = line.y + line.baseline - top;
+            let baseline = line.y + line.baseline - top + offset_y;
             for fragment in &line.fragments {
                 match fragment {
                     LineFragment::Text(run) => {
@@ -451,7 +632,7 @@ impl ReaderView {
                         runs.push(
                             GlyphRun::new(
                                 SharedString::new(text),
-                                gpui_font(&FontKey::clone(&run.style.font), &family),
+                                gpui_font(&FontKey::clone(&run.style.font), &family, known),
                                 run.style.font_size,
                             )
                             // 每条 run 自己的基线：`vertical-align` 折出来的偏移在这里减掉，
@@ -488,15 +669,24 @@ impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_prefs(cx);
         let viewport = window.viewport_size();
-        // 有效视口 = 窗口高 − 底部导航栏高。可见行筛选、滚动上限、`on_scroll` 的夹范围
-        // 全都从这里取，所以底部那一截内容仍然滚得进来，也不会滚出多余空白。
-        let viewport_height = (f32::from(viewport.height) - self.bottom_reserve).max(1.0);
+        // 有效视口 = 窗口高 − 底部导航栏 − 页眉 − 页脚。可见行筛选、滚动上限、
+        // `on_scroll` 的夹范围全都从这里取，所以底部那一截内容仍然滚得进来，
+        // 也不会滚出多余空白。浮层（顶栏/底栏/面板）压在正文**之上**，不参与这个数：
+        // 点一下屏幕字不该跳走。
+        let viewport_height = (f32::from(viewport.height)
+            - self.bottom_reserve
+            - self.header_reserve
+            - self.footer_reserve)
+            .max(1.0);
         // 内容高度 / 视口任一变化后重新夹一次滚动范围（转屏、换字号都在这一刻生效）。
         let max_scroll = (self.content_height - viewport_height).max(0.0);
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
         self.viewport_height = viewport_height;
 
         let foreground = cx.theme().foreground;
+        // 这台设备注册的字族名：`gpui_font` 靠它把书里不存在的 `font-family` 落回偏好字体
+        // （`resolve_font` 解析不到是 panic，不是回退）。
+        let known = cx.text_system().all_font_names();
         let mut element = GlyphsElement::new().background(cx.theme().background);
         let mut column = div().size_full().relative();
         // `&mut self.source` 只借用这一个字段，所以臂里写 `self.content_height`、
@@ -510,13 +700,14 @@ impl Render for ReaderView {
                         italic: false,
                     },
                     &self.family,
+                    &known,
                 );
-                // 单行：左边距 `margin_x`，基线给到 `margin_x + font_size` 处。
+                // 单行：左边距 `margin_x`，基线给到页眉下面 `margin_x + font_size` 处。
                 element.push(
                     GlyphRun::new(text.clone(), font, self.prefs.font_size)
                         .at(
                             self.prefs.margin_x,
-                            self.prefs.margin_x + self.prefs.font_size,
+                            self.header_reserve + self.prefs.margin_x + self.prefs.font_size,
                         )
                         .color(foreground),
                 );
@@ -534,7 +725,9 @@ impl Render for ReaderView {
                     book.document(),
                     self.scroll_y,
                     viewport_height,
+                    self.header_reserve,
                     foreground,
+                    &known,
                 );
                 element.extend(runs);
                 for image in images {
@@ -620,7 +813,6 @@ pub(crate) fn device_family(wanted: &str, cx: &App) -> String {
 /// 前面 —— 那里的文件属主是媒体提供者（另一个 uid），scoped storage 下我们的进程读到
 /// 的是 EACCES，放对了文件名也不会出现画面。`FOLIO_MOBILE_DOC` 留给调试时指任意路径。
 fn candidate_paths() -> Vec<PathBuf> {
-    const PACKAGE: &str = "dev.folio.reader";
     let mut out = Vec::new();
     if let Ok(path) = std::env::var("FOLIO_MOBILE_DOC") {
         out.push(PathBuf::from(path));
@@ -636,4 +828,45 @@ fn candidate_paths() -> Vec<PathBuf> {
         }
     }
     out
+}
+
+impl crate::ui::features::reader::ReaderHost for ReaderView {
+    fn book_id(&self) -> Option<i64> {
+        self.book_id
+    }
+
+    fn title(&self) -> gpui_kit::SharedString {
+        ReaderView::title(self)
+    }
+
+    fn position_label(&self, cx: &gpui_kit::App) -> String {
+        let title = self.chapter_title();
+        let position = self.chapter_position(cx);
+        match (title.is_empty(), position.is_empty()) {
+            (false, false) => format!("{title} · {position}"),
+            (false, true) => title,
+            (true, false) => position,
+            (true, true) => String::new(),
+        }
+    }
+
+    fn mode_name(&self) -> &'static str {
+        "continuous"
+    }
+
+    fn can_advance(&self, delta: isize) -> bool {
+        ReaderView::can_advance(self, delta)
+    }
+
+    fn advance_chapter(&mut self, delta: isize, cx: &mut gpui_kit::Context<Self>) {
+        ReaderView::advance_chapter(self, delta, cx);
+    }
+
+    fn set_reserve(&mut self, reserve: f32, _cx: &mut gpui_kit::Context<Self>) {
+        self.set_bottom_reserve(reserve);
+    }
+
+    fn persist(&mut self, _cx: &mut gpui_kit::Context<Self>) {
+        self.persist_position();
+    }
 }

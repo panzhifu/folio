@@ -132,7 +132,7 @@ cargo run -p folio-core --example css-gap -- 某本书.epub   # 也可以指别�
   `"font_size":"big"` 只归零 `reader` 一节，`appearance` / `library` / `account` 照旧读回。
   补救的粒度**止于节** —— 同一节里写对的键（如那节的 `line_height`）跟着一起退回本节默认。
   连 JSON 本身都不合法（截断、括号不配对）时没有可逐节尝试的载体，仍是整份回落。
-  两条行为分别由 `tests/config.rs::one_broken_section_does_not_take_the_others_down` 与
+  两条行为分别由 `folio_core::config::tests::one_broken_section_does_not_take_the_others_down` 与
   `unparseable_json_still_falls_back_as_a_whole` 钉住。
 - **移动平台没有「系统配置目录」**：Android / iOS 上 `$HOME` 与 XDG 都不存在，可写路径只有宿主
   在启动时给的那一个应用专属目录，所以由入口调 `folio_core::paths::set_app_dirs` 报上来
@@ -193,7 +193,7 @@ cargo run -p folio-core --example css-gap -- 某本书.epub   # 也可以指别�
 - **进度落盘了**。`Store::open_at(paths::db_path())` + `add_book` / `save_flow` / `set_position`，
   杀掉进程回来还在原来那一章。
 - **移动端的排版有测试了**。移动 UI 本身只在 `cfg(mobile)` 下编译、宿主碰不到，但断行、层叠、
-  版心宽度、缓存失效这些并进了 `ui/shared`，`tests/shared_layout.rs` 因此同时是那一侧的排版测试。
+  版心宽度、缓存失效这些并进了 `ui/shared`，`ui/shared/document.rs` 的 tests 因此同时是那一侧的排版测试。
 
 还没做的：
 
@@ -216,9 +216,11 @@ cargo run -p folio-core --example css-gap -- 某本书.epub   # 也可以指别�
   scale 2.8 ⇒ 底部 25 逻辑像素），栏的底边落进系统手势区。标签是垂直居中的，视觉上没被压住，
   但点击热区下沿确实延伸进手势条。`safe_area_insets_logical()` 挂在 `AndroidWindow` 上，
   视图手上的 `&mut Window` 拿不到它，要接得先开一条平台层的路。
+  （这一条数值现在只反映系统栏/手势/挖孔，弹键盘不再把它顶大 —— fork `96afdf2b` 起把输入法
+  inset 单独走 `ime_insets_logical()`，见 `docs/android.md`。）
 - **排版在主线程**。`Document::ensure_layout` 在渲染帧里做（宽度与偏好没变才跳过），
   桌面端 M4 的后台排版在移动端同样欠着。
 - **依赖仍带 default features**：`gpui-pre-mobile` 的 30 多个平台插件 feature 全开
   （开发方案 §2.2b 要求的 `default-features = false` 还没落实）。
 - **移动 UI 的交互仍只有真机算验证**。换章按钮的点击、主题在 Android 上解析到浅还是深、
-  插图是否真画出来 —— 这几条宿主测试覆盖不到，`tests/shared_layout.rs` 顶部写清了边界在哪。
+  插图是否真画出来 —— 这几条宿主测试覆盖不到，`ui/shared/document.rs` 的 tests 顶部写清了边界在哪。

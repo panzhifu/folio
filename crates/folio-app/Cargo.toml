@@ -41,7 +41,7 @@ log = "0.4"
 # TODO：这条依赖默认挂着 30 多个平台插件 feature，开发方案 §2.2b 要求关掉
 #       （`default-features = false`），还没落实。
 [target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "791260dd16d05b3b11d312fb2010b5c32758a8cc" }
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "5843b657429143895cce6590a9fb0a1e5f9913cc" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15"
@@ -49,3 +49,5 @@ android-activity = { version = "0.6", features = ["native-activity"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+# 删书那条测试要真的建文件、真的看它有没有被 unlink，所以需要临时目录。
+tempfile = "3"

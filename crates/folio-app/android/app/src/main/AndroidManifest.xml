@@ -59,6 +59,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/GpuiTheme"
+        android:enableOnBackInvokedCallback="true"
     >
 
         <!--
@@ -71,6 +72,18 @@
           The spawned Rust thread calls gpui_android_main() (defined in the
           android_app example) to start the application.
         -->
+        <!-- Folio's own entry. The Java bridge classes under dev.gpui.mobile are a
+             copy of the fork's example and are looked up by name from Rust, so keep
+             this file in sync when bumping gpui-pre-mobile.
+
+             `adjustNothing`: the soft keyboard overlays the window instead of
+             resizing it. Since the fork separates the system-bar insets (safe
+             area) from the IME (`nativeWindowInsets`), the bottom navigation bar
+             no longer moves when the keyboard opens.
+
+             `enableOnBackInvokedCallback`: required for GpuiInputActivity's
+             OnBackInvokedDispatcher callback to fire on Android 13+. Without it
+             the edge-swipe back gesture never reaches the app. -->
         <activity
             android:name="dev.gpui.mobile.GpuiActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density"
@@ -78,7 +91,7 @@
             android:launchMode="singleTask"
             android:screenOrientation="unspecified"
             android:theme="@style/GpuiSplashTheme"
-            android:windowSoftInputMode="adjustResize"
+            android:windowSoftInputMode="adjustNothing"
         >
 
             <!-- The native library name WITHOUT the "lib" prefix and ".so" suffix.
@@ -102,6 +115,16 @@
                 <data android:scheme="folio" />
             </intent-filter>
         </activity>
+        <!-- GPUI's Android path prompt (cx.prompt_for_paths) starts this Activity by
+             name via JNI. An unregistered Activity is an ActivityNotFoundException at
+             tap time, so this entry is part of the Rust side's contract, not optional
+             chrome. -->
+        <activity
+            android:name="dev.gpui.mobile.GpuiPathPicker"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        />
         <!-- Transparent helper Activity for file/image picker results. -->
         <activity
             android:name="dev.gpui.mobile.GpuiPickerActivity"

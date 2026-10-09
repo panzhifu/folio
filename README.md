@@ -34,7 +34,7 @@ crates/folio-app/src/ui/
 `ui/shared` 的分层判据只有一条 —— **这段代码在两个平台上必须不能长得不一样**。断行口径、层叠、
 版心宽度、主题解析都在这里共用一份实现；两端各自抄一份的旧写法（移动端曾有独立的
 `measure.rs` 与 `document.rs`）已经合并，代价是那些代码从此只在 `cfg(mobile)` 下编译、
-宿主测试碰不到，而合并之后 `tests/shared_layout.rs` 就同时是移动端的排版测试。
+宿主测试碰不到，而合并之后 `ui/shared/document.rs` 的 tests 就同时是移动端的排版测试。
 
 桌面与移动在同一个 `folio-app` 里，由 `cfg(mobile)` 互斥编译 ——
 两端用的是同一个 `gpui-pre` 快照（`gpui_kit` 顶层 `pub use ::gpui::*` 把它整个转了出来），
@@ -45,10 +45,50 @@ crates/folio-app/src/ui/
 ## 构建
 
 ```bash
-cargo run              # 起窗口（目前只有 spike 视图）
-cargo test -p folio-core
-cargo run --example spike   # M0 排版验证：stdout 出结论，窗口出自绘文本
+cargo run                      # 起窗口（目前只有 spike 视图）
+cargo test --workspace --lib   # 日常这一条：全部 272 条测试
+cargo run --example spike      # M0 排版验证：stdout 出结论，窗口出自绘文本
 ```
+
+### 测试为什么内联在 `src/`，以及这两条命令差在哪
+
+**测试本身跑完只花 0.1 秒**，慢的全是链接。原先 19 个 `tests/*.rs` 各是一个独立 crate：
+每个都要重新类型检查一遍、单独链接一次，而且拿不到 `src/` 的 incremental 缓存；
+更贵的是裸 `cargo test` 会把测试根本不需要的 target 一起编出来 —— `folio-app` 的
+`crate-type` 含 `cdylib`/`staticlib`，于是每次都要归档 1.96 GB 的 `libfolio_app.a`、
+610 MB 的 `.so`、775 MB 的 `folio`，外加 `spike` example。实测改一个叶子文件
+（`folio-core/src/format/epub.rs`）：
+
+| 命令 | 重构前 | 重构后 |
+|---|---|---|
+| `cargo test --workspace --lib`（覆盖 100% 用例） | 4 秒，但只跑 9 条 | **3–4 秒，跑全部 272 条** |
+| `cargo test --workspace` | **395 秒** | 395 秒（不变，见下） |
+
+所以日常循环是 `cargo test --workspace --lib`。测试全部内联之后，这一条就是**全集**，
+不再需要从 `--lib` 里漏掉什么。
+
+裸 `cargo test --workspace` 保持原样不动，CI 跑的也是它：它多花的那六分钟买的是
+「全新克隆里每个 target 都编得过」—— bin、cdylib、staticlib、example 都在这条上被编一遍，
+那些东西 `--lib` 根本不碰，而移动端宿主要的正是 cdylib 与 staticlib。这是有意保留的慢，
+不是没优化到。
+
+三条写测试的规矩（照 `trove` 的分法）：
+
+- 测试内联在**被测代码所在的那个文件**底部（`#[cfg(test)] mod tests`）；只有当一个模块的
+  公开面散在几个兄弟文件里，才用 `src/<模块>/tests.rs`。真需要外部环境的用例标
+  `#[ignore]` 并在注释里写清运行命令（例：`format/epub.rs` 里那本本机版权书）。
+- **不用 `use super::*`，点名导入**。`folio-app` 这条不是风格问题：`gpui_kit` 根做了
+  `pub use ::gpui::*`，里面带一个名叫 `test` 的属性宏，glob 进来会让 `#[test]`
+  递归展开成它。`ui/shared/theme.rs` 从搬进来之前就是这么写的。
+- **只引 `pub` 项**。这些测试以前住在 `tests/`，编译器天然只给它们公开面；搬进 `src/`
+  之后这层保证没了，就靠这条约定守 —— 想测私有实现请先想它为什么不是公开的。
+
+按平台门控的模块里，测试跟着模块走：`features/reader/{engine,desktop,page_desktop}.rs`
+本身已经在 `cfg(not(mobile))` 下，写普通 `#[cfg(test)]` 就够；恒编译的文件里若有
+只有桌面跑得动的用例，给它单独一层 `#[cfg(not(mobile))]`（见 `ui/shell/mod.rs` 的
+`tests::booted` 与 `ui/shared/document.rs` 的 `tests::list_metrics`）。Android 那个
+job 跑的是 `clippy --target aarch64-linux-android --lib`，不开 `cfg(test)`，
+所以移动目标上编不到的那部分测试不会影响它。
 
 Linux 需要 fontconfig、wayland、xkbcommon 的开发包与可用的 Vulkan 驱动。Wayland 与 X11 都已验证可跑。
 

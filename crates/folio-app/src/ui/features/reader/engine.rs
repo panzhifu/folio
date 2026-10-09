@@ -9,7 +9,7 @@
 //! 左缘偏移、居中偏移、行高全部来自引擎算好的几何 —— 这一屏的排版由引擎说了算，
 //! gpui 只把一行文字画在指定位置。
 //!
-//! 排版本身在 [`super::super::shared::document`]，这里只有绘制。
+//! 排版本身在 [`crate::ui::shared::document`]，这里只有绘制。
 //! 逐字形绘制（`shape_line` / `paint_glyph`）留给需要字形级控制的时候：
 //! 选择高亮、ruby 注音、竖排（M5/M6）。
 
@@ -24,9 +24,9 @@ use gpui_kit::{
     Styled, Window, div, px, size,
 };
 
-use crate::ui::shared::chrome::run_color;
 use crate::ui::shared::document::Document;
 use crate::ui::shared::measure::gpui_font;
+use crate::ui::widgets::run_color;
 
 /// 虚拟列表要的逐项尺寸：宽取版心，高取各行自己的行盒高。
 pub fn item_sizes(document: &Document) -> Rc<Vec<Size<Pixels>>> {
@@ -73,7 +73,7 @@ pub fn line_at_item_top(document: &Document, y: f32) -> usize {
 /// 纵向按**基线**对齐 —— gpui 把字形在自己的 line-height 盒里垂直居中，
 /// 基线落在盒顶往下 `(盒高 + ascent - descent) / 2` 处，所以反推 top。
 /// 度量与绘制用同一个 [`gpui_font`]，否则偏移与实宽会对不上。
-fn line_element(document: &Document, ix: usize, foreground: Hsla) -> AnyElement {
+fn line_element(document: &Document, ix: usize, foreground: Hsla, known: &[String]) -> AnyElement {
     let layout = document.layout();
     let Some(line) = layout.lines.get(ix) else {
         return div().into_any_element();
@@ -101,7 +101,7 @@ fn line_element(document: &Document, ix: usize, foreground: Hsla) -> AnyElement 
                         - run.style.baseline_shift
                         - baseline_in_box))
                     .whitespace_nowrap()
-                    .font(gpui_font(&run.style.font, &family))
+                    .font(gpui_font(&run.style.font, &family, known))
                     .text_size(px(run.style.font_size))
                     .line_height(px(box_height))
                     .text_color(run_color(run.style.color, foreground));
@@ -157,7 +157,10 @@ pub fn engine_lines<V: Render>(
 /// 书自己声明了 `color` 的 run 由 [`run_color`] 覆盖它。
 pub fn render_range(document: &Document, range: Range<usize>, cx: &App) -> Vec<AnyElement> {
     let foreground = cx.theme().foreground;
+    // 这台设备注册的字族名：`gpui_font` 靠它把书里不存在的 `font-family` 落回偏好字体
+    // （`resolve_font` 解析不到是 panic，不是回退）。
+    let known = cx.text_system().all_font_names();
     (range.start..range.end.min(document.line_count()))
-        .map(|ix| line_element(document, ix, foreground))
+        .map(|ix| line_element(document, ix, foreground, &known))
         .collect()
 }

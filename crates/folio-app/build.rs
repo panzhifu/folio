@@ -32,8 +32,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=FOLIO_THEMES_DIR");
     println!("cargo:rerun-if-changed=../../Cargo.lock");
     // 文案表是 `rust_i18n::i18n!` 在编译期读的，cargo 自己不知道这件事：
-    // 不写这一行，改了 `locales/*.yml` 也不会重编，旧文案会一直留在二进制里。
+    // 不写这一行，改了 `locales/*.toml` 也不会重编，旧文案会一直留在二进制里。
     println!("cargo:rerun-if-changed=../folio-core/locales");
+    // 关于页嵌的是 `docs/` 里那两份原文（见 `ui/shared/about.rs`），所以它们改了要重编，
+    // 否则二进制里留着旧的一份，而「实际情况」正是那一页唯一的存在理由。
+    println!("cargo:rerun-if-changed=../../docs");
+    emit_dependency_env();
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR 由 cargo 设好"));
     let mut generated = String::from(
@@ -129,4 +133,49 @@ fn theme_stems(dir: &Path) -> Vec<String> {
         .collect();
     stems.sort();
     stems
+}
+
+/// 把锁文件里的依赖身份抄成编译期常量，给关于页显示用。
+///
+/// 为什么在构建期做而不是让界面写死：那几串版本号和 commit 是**这份二进制**到底是什么
+/// 编出来的唯一凭据。手写的一份和 `Cargo.lock` 迟早分叉，而分叉的恰好是最需要准的信息。
+/// 锁文件已经挂了 `rerun-if-changed`，所以换依赖时这些常量一定跟着变。
+fn emit_dependency_env() {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let Ok(lock) = fs::read_to_string(manifest.join("../../Cargo.lock")) else {
+        // 读不到锁文件不算错误：关于页那几行会显示「未知」，界面照常起。
+        return;
+    };
+    for (package, variable) in [
+        ("gpui-pre", "FOLIO_GPUI_PRE"),
+        ("gpui-kit", "FOLIO_KIT"),
+        ("gpui-pre-mobile", "FOLIO_MOBILE"),
+    ] {
+        let version = lock_field(&lock, package, "version").unwrap_or_default();
+        // git 源的 `source` 以 `#<完整 commit>` 结尾；发布版没有这一段。
+        let rev = lock_field(&lock, package, "source")
+            .and_then(|source| source.rsplit_once('#').map(|(_, rev)| rev.to_string()))
+            .unwrap_or_default();
+        let rev = if rev.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", &rev[..7.min(rev.len())])
+        };
+        println!("cargo:rustc-env={variable}={version}{rev}");
+    }
+}
+
+/// 锁文件里某个 `[[package]]` 块下的一个字段值（不含两侧引号）。
+fn lock_field(lock: &str, package: &str, field: &str) -> Option<String> {
+    let header = format!("name = \"{package}\"\n");
+    let start = lock.find(&header)?;
+    let block = &lock[start
+        ..lock[start..]
+            .find("\n\n[[package]]")
+            .map_or(lock.len(), |end| start + end)];
+    let prefix = format!("{field} = \"");
+    block
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix))
+        .map(|value| value.trim_end_matches('"').to_string())
 }

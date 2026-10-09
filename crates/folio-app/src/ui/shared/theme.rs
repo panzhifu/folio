@@ -78,6 +78,15 @@ pub fn theme_names(cx: &App, mode: ThemeMode) -> Vec<SharedString> {
         .collect()
 }
 
+/// 那一侧没选过主题、或选过的名字已经不存在时用的主题名。
+/// 界面要把「当前用的是哪一套」显示出来时，得和 [`repaint`] 的回落规则同一个数。
+pub fn default_name(mode: ThemeMode) -> &'static str {
+    match mode {
+        ThemeMode::Light => DEFAULT_LIGHT,
+        ThemeMode::Dark => DEFAULT_DARK,
+    }
+}
+
 /// 把主题的**应用字体**换成这台设备上真的存在的那个家族。
 ///
 /// `Theme::font_family` 是每一个框架组件取文字字体的地方（`semantic_tokens()` 直接从

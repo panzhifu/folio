@@ -17,7 +17,7 @@
 代价是**仓库不自洽**：全新克隆（也就是 CI）里连 `cargo metadata` 都跑不起来，实测退出 101
 `failed to load manifest for dependency gpui-pre-mobile`；而 GitHub 的 `actions/checkout`
 拒绝把依赖检出到 workspace 外面（`Repository path ... is not under ...`），两条路都堵死。
-现在钉的是 `rev = "791260dd…"`，`Cargo.lock` 记下具体 commit —— 比跟分支头走更可复现，
+现在钉的是 `rev = "96afdf2b…"`，`Cargo.lock` 记下具体 commit —— 比跟分支头走更可复现，
 而且 fork 那份代码从此不会在没人改 Cargo.toml 的情况下换掉。
 
 要改 fork 本身而不先推上去：`~/.cargo/config.toml` 里加
@@ -32,8 +32,23 @@
 `signal_source: FrameRequestSource`，在 `src/android/window.rs` 的 AChoreographer 回调处填
 `None` + `NativeCallback` 即可。所以既不需要把桌面降到旧快照，也不需要接受「两套 UI 并存」。
 
-fork 上这两处改动（`Cargo.toml` 四处 pin + `src/android/window.rs` 补两个字段）目前**只在本机分支上，
-没有 push**。
+fork 上这两处改动（`Cargo.toml` 四处 pin + `src/android/window.rs` 补两个字段）已随
+`line/gpui-pre` 推到 `panzhifu/gpui-mobile`；本仓库钉的 `96afdf2b` 就是含这两处的那个 commit。
+
+**输入法与返回手势的宿主契约（2026-10-09，`96afdf2b`）。** 两处原先由应用侧绕过的平台问题
+现在收在 fork 的 `GpuiInputActivity` 里，做法照抄成熟实现（SDL 的 `SDLSurface.onApplyWindowInsets`、
+Godot 的 `Godot.kt`）：安全区只取系统栏 / 手势 / 挖孔那几类 inset，**不含** `WindowInsets.Type.ime()`；
+键盘的可见性与高度单独上报。于是：
+
+- `safe_area_insets_logical()` 在弹键盘时不再变（原先它从内容区推，而内容区把输入法算进去，
+  实测 `bottom` 会从 70 跳到 859 物理像素），底栏不再被顶到键盘上面。
+- 键盘另走 `ime_insets_logical()` / `keyboard_visible()`，需要把被聚焦的输入框挪出键盘时读它，
+  而不是改整个布局。宿主 Activity 用 `adjustNothing`（键盘覆盖窗口，不缩窗口）。
+- `ContentRectChanged` / `InsetsChanged` 不再被当成窗口 resize，只是刷新一个兜底值。
+- 返回手势：Android 13 起系统走 `OnBackInvokedDispatcher`，不再发 `AKEYCODE_BACK`。fork 注册
+  `OnBackInvokedCallback` 把它转成与输入队列同一条 BACK（→ `escape`）路径，manifest 需
+  `android:enableOnBackInvokedCallback="true"`。**返回由应用负责**：`ShellView` 把 escape 绑成
+  `Back`，到根页面 `cx.quit()`。
 
 **许可证**：`GPL-3.0-or-later OR AGPL-3.0-or-later OR Apache-2.0` 三选一，取 **Apache-2.0**，
 不把 MIT 的 Folio 拖进 copyleft。发布时保留上游版权声明与 LICENSE。
@@ -97,7 +112,7 @@ adb shell am start -n dev.folio.reader/dev.gpui.mobile.GpuiActivity
 
 移动模块整体由 `cfg(mobile)` 门控，所以宿主（不交叉编译）上 `cargo check` / `cargo clippy`
 编的是桌面视图那一侧，`gpui-pre-mobile` 根本不会进依赖图。**但 `src/ui/shared/` 两端都编** ——
-断行、层叠、版心宽度、主题解析都在那里，所以宿主的 `cargo test`（`tests/shared_layout.rs`）
+断行、层叠、版心宽度、主题解析都在那里，所以宿主的 `cargo test`（`ui/shared/document.rs` 的 tests）
 确实覆盖了移动端排版的一部分，而不是「移动端一条测试都没有」。
 覆盖不到的仍然是移动 UI 自己：触摸滚动、换章按钮、真机上的浅深解析。
 
