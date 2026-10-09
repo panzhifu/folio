@@ -12,8 +12,10 @@
 //! 用图标；iOS / HarmonyOS 的 `Application` 构造在 gpui-mobile 内部且没有注册口，图标会是
 //! 一片空白。
 //!
-//! 即便如此，下面的控件仍优先用短标签：按设计指南，图标是补充标签的，不该把陌生的动作换
-//! 成一个猜的符号；只用图标的按钮必须给可访问名。
+//! 图标是**补充**标签的，不是替换它：这一层每个控件都保留文字，图标加在文字前面。
+//! 两个理由。一是设计指南的立场——不该把一个陌生的动作换成一个猜的符号；二是
+//! iOS / HarmonyOS 上没有 `AssetSource`，只用图标的按钮在那两端会整颗隐形，
+//! 而「点不到的导航」比「少一个装饰」严重得多。
 //!
 //! ## 字体
 //!
@@ -31,6 +33,7 @@
 //! （`gpui-pre-0.3.8/src/window.rs:5719`）。因此这里用 `on_click`（抬起才算），
 //! 而不是 `on_mouse_down`（按下就算，误触率更高）。
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Disableable, Selectable, Sizable, h_flex, v_flex};
 use gpui_kit::{
@@ -74,6 +77,22 @@ impl Tab {
             Tab::Stats => "mobile.tab.stats",
             Tab::Notes => "mobile.tab.notes",
             Tab::Account => "mobile.tab.account",
+        }
+    }
+
+    /// 这一格的图标。名字与桌面端同一概念同一个符号：侧栏的品牌位是
+    /// `Library`、账号头像那格是 `CircleUser`，这里换了名字就等于让同一个目的地
+    /// 在两端长得不一样。
+    ///
+    /// `Stats` 用 `ChartColumn` 而不是 `BarChart3`：那套 Lucide 目录里没有
+    /// `bar-chart-3.svg`（改版后叫 `chart-column`），写错的名字不会报错，
+    /// 只会画出一片空白。
+    fn icon(self) -> IconName {
+        match self {
+            Tab::Shelf => IconName::Library,
+            Tab::Stats => IconName::ChartColumn,
+            Tab::Notes => IconName::NotebookPen,
+            Tab::Account => IconName::CircleUser,
         }
     }
 
@@ -197,6 +216,7 @@ impl ShellView {
                 Button::new("prev-chapter")
                     .ghost()
                     .small()
+                    .icon(IconName::ChevronLeft)
                     .label(tr(cx, "reader.prev_chapter").to_string())
                     .disabled(!can_prev)
                     .on_click(move |_, _, cx| {
@@ -207,6 +227,7 @@ impl ShellView {
                 Button::new("next-chapter")
                     .ghost()
                     .small()
+                    .icon(IconName::ChevronRight)
                     .label(tr(cx, "reader.next_chapter").to_string())
                     .disabled(!can_next)
                     .on_click(move |_, _, cx| {
@@ -233,6 +254,7 @@ impl ShellView {
                     .w_full()
                     .justify_center()
                     .selected(active)
+                    .icon(tab.icon())
                     .label(label.clone().to_string())
                     .accessibility_label(label)
                     .on_click(move |_, _, cx| {

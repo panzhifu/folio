@@ -110,9 +110,13 @@
   读到 EACCES，所以只能排最后。登记进书库是为了有个能回写进度的键，不是为了列一本书。
 - **没有设置界面**。字号、行距、主题、语言在手机上改不了，只能由桌面端改同一份 `config.json`，
   或者手动编辑那个文件。
-- **导航栏没有图标**。图标要先有一个 `AssetSource`：`IconName` 画的是 `svg().path("icons/x.svg")`，
-  而 `Application::with_platform(..)` 留下的默认 source 对任何路径都给 `Ok(None)` ——
-  结果是**静默空白，不报错**。所以按钮只有文字。
+- **图标只在 Android 上有**。`IconName` 画的是 `svg().path("icons/x.svg")`，字节要由应用的
+  `AssetSource` 给，而那个 source 只能在 `Application` 构造期注册：Android 入口链了
+  `.with_assets(gpui_kit::assets::AllAssets)`（代价是整套 Lucide —— 1830 个 SVG、源码 0.71 MB
+  嵌进 `.so`），而 iOS / HarmonyOS 的 `Application` 在 gpui-mobile 内部构造、没有注册口，
+  那两端的默认 source 对任何路径都给 `Ok(None)` —— **静默空白，不报错**。
+  所以移动端的每个控件都保留文字、图标只加在文字前面：只用图标的按钮在没有 source 的那两端
+  会整颗隐形，「点不到的导航」比「少一个装饰」严重得多。
 - **底部导航栏不消费安全区**。fork 在窗口打开时报 `safe_area_insets top=116 bottom=70`（物理像素，
   scale 2.8 ⇒ 底部 25 逻辑像素），栏的底边落进系统手势区。标签是垂直居中的，视觉上没被压住，
   但点击热区下沿确实延伸进手势条。`safe_area_insets_logical()` 挂在 `AndroidWindow` 上，
