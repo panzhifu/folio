@@ -7,7 +7,7 @@
 //!
 //! 所以这里的每个模块都不带 `cfg` 分支：它依赖的 `gpui_kit` 与 `folio_core`
 //! 在两个 target 上是同一份实现（`gpui_kit` 顶层 `pub use ::gpui::*` 转出的就是
-//! 移动端那份 `gpui-pre`），平台差异留给 [`super::desktop`] 与 [`super::mobile`] 去表达。
+//! 移动端那份 `gpui-pre`）。平台差异一律留给 `super::host` 与 `super::platform`。
 
 pub mod about;
 pub mod account;

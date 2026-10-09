@@ -57,9 +57,10 @@ Godot 的 `Godot.kt`）：安全区只取系统栏 / 手势 / 挖孔那几类 in
 
 **为什么移动端以前是独立的 cargo workspace，现在又不独立了**：早先根 `Cargo.toml` 用
 `exclude = ["crates/folio-mobile"]`，理由是「两端链的不是同一个 `gpui` 包」。fork 换到
-`gpui-pre =0.3.8` 之后这条不成立了，于是**合并进 `crates/folio-app`，移动代码在 `src/ui/mobile/`**
-（界面层现在分 `src/ui/{shared,desktop,mobile}/`，两端必须一致的东西放在 `shared`），
-整体由 `cfg(mobile)`（`crates/folio-app/build.rs` 设）与桌面模块互斥编译。代价是两边共用一张依赖图、
+`gpui-pre =0.3.8` 之后这条不成立了，于是**合并进 `crates/folio-app`**。界面层现在按功能纵切
+（`src/ui/{shared,widgets,features,shell,host,platform}/`），`cfg(mobile)`（`build.rs` 设）
+**只剩 `host` 与 `platform`**：阅读界面以前是桌面一套渲染、移动一套，2026-10-09 合成一份之后，
+移动端的渲染路径在宿主上也编译、也被 `cargo test` 覆盖。代价是两边共用一张依赖图、
 一份 `Cargo.lock`：`[patch.crates-io]`（`async-task` 那条，fork 需要）和 `[profile.release]`
 因此都挪到了仓库根 `Cargo.toml`。`libc` 那次钉 0.2.189 的理由（`xattr` 按旧名引 `ENOATTR`）
 在合并时已不存在——两个 lock 里都没有 `xattr`——所以取桌面端的 0.2.190，实测 Android 链接通过。
@@ -110,11 +111,17 @@ adb shell am start -n dev.folio.reader/dev.gpui.mobile.GpuiActivity
   `aarch64-linux-android-clang` 这种**不带 API 号**的名字在 NDK r30 里不存在，所以 `CC` 要指到
   `aarch64-linux-android26-clang`（26 与上面 `-P 26` 同档）。
 
-移动模块整体由 `cfg(mobile)` 门控，所以宿主（不交叉编译）上 `cargo check` / `cargo clippy`
-编的是桌面视图那一侧，`gpui-pre-mobile` 根本不会进依赖图。**但 `src/ui/shared/` 两端都编** ——
-断行、层叠、版心宽度、主题解析都在那里，所以宿主的 `cargo test`（`ui/shared/document.rs` 的 tests）
-确实覆盖了移动端排版的一部分，而不是「移动端一条测试都没有」。
-覆盖不到的仍然是移动 UI 自己：触摸滚动、换章按钮、真机上的浅深解析。
+只有 `src/ui/host/` 与 `src/ui/platform/` 由 `cfg(mobile)` 门控，所以宿主（不交叉编译）上
+`cargo check` / `cargo clippy` 编不到那两层，`gpui-pre-mobile` 也不会进依赖图。
+**其余全部两端都编** —— 断行、层叠、版心宽度、主题解析在 `ui/shared`，阅读视图与外壳在
+`ui/features` / `ui/shell`，所以宿主的 `cargo test` 覆盖的是移动端真正读的那条路径
+（滚动 → 字符偏移 → 恢复、分页与双页的退档、点击分区），而不是「移动端一条测试都没有」。
+覆盖不到的仍然只有那两层薄壳：JNI 报上来的 inset、真机上的浅深解析与触摸惯量。
+
+> 一条血的教训：合成一份之前，`cfg(mobile)` 那侧的界面代码宿主从不编译，CI 只有 android
+> 那个 job 编得到 —— 而那次「重新分层」的提交正好红在那儿（缺 `InteractiveElement` /
+> `Selectable` 两个 trait 导入，加上两处 `cx.new` 的二次可变借用）。界面只留一份之后，
+> 这类错误在本地 `cargo check` 就会撞见。
 
 ## 3. 设备事实（Meizu 20）
 
@@ -128,11 +135,11 @@ adb shell am start -n dev.folio.reader/dev.gpui.mobile.GpuiActivity
 1. **`TextSystem::resolve_font` 是 panic 而不是回退**（`gpui-pre-0.3.8/src/text_system.rs:370`）：
    请求家族连同整串桌面回退名（`.ZedSans` / Helvetica / Segoe UI / Noto Sans / DejaVu Sans / Arial…）
    都不存在时直接 SIGABRT，而这在 Android 上是常态。唯一的公开判据是 `all_font_names()`
-   （`font_id` 是私有的），所以按名字比 —— `reader_view::device_family()` 干这件事。
+   （`font_id` 是私有的），所以按名字比 —— `ui::host::device_family()` 干这件事。
    任何新加的文字（包括导航栏标签）都要显式 `.font(...)` 指定这台设备真能解析的家族。
 2. **文档必须落在应用专属外部目录** `/sdcard/Android/data/dev.folio.reader/files/`。
    `/sdcard/Download/` 里的文件属主是媒体提供者（另一个 uid），scoped storage 下本进程读到 EACCES，
-   文件名放对了也不会出现画面。见 `reader_view::candidate_paths()`。
+   文件名放对了也不会出现画面。见 `ui/features/reader/view.rs` 的 `candidate_paths()`。
 3. **Markdown 适配器按 `#` 和 `##` 一起分章**，所以以 `# 标题` 开头的样例会让 chapter 0 只剩那个标题 ——
    看起来完全像「正文没渲染出来」，但不是。测试语料要把正文段落放在第一个标题之前。
 
@@ -214,7 +221,7 @@ night 资源）。
 
 ## 7. 一处遗留的误导
 
-`src/ui/mobile/mod.rs` 里还有 `#[cfg(target_env = "ohos")]` 的 HarmonyOS 入口，引用
+`src/ui/platform/mod.rs` 里还有 `#[cfg(target_env = "ohos")]` 的 HarmonyOS 入口，引用
 `gpui_mobile::ohos::napi`
 与 `gpui_ohos_napi_module!` —— 而 `longbridge/gpui-mobile` 这条线**没有 `ohos` 模块**（鸿蒙那份改动留在
 旧线的本地分支 `feat/harmonyos-support` 上）。那段代码在当前依赖下永远不会被编译，但模块文档注释还把

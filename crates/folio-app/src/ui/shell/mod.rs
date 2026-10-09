@@ -1,11 +1,11 @@
 //! 应用外壳：自适应导航（Material 3）+ 每个目的地一个返回栈。
 //!
 //! 这是两端**唯一**的根视图。它只关心三件事：当前是哪个目的地、导航栏长什么样、
-//! 栈顶是哪个页面。平台特有的东西（安全区、输入法、阅读页的两套渲染）在
-//! `super::host` 与 `super::features::reader` 里，外壳不写 `cfg(mobile)`。
+//! 栈顶是哪个页面。平台特有的东西（安全区、输入法、正文字体）在 `super::host`，
+//! 阅读页的两种摆法在 `super::features::reader`，外壳对两者都只给数、不写 `cfg(mobile)`。
 //!
 //! 路由用 gpui-base 的 [`NavStack`]：每个目的地一条栈，进正文 = 往书架栈 push，
-//! 系统返回 = 当前栈 pop。等做双栏时，就是「root 列表 + 栈顶详情」并排，不用另起模型。
+//! 系统返回 = 当前栈 pop。
 
 pub mod navigation;
 
@@ -21,7 +21,7 @@ use gpui_kit::{
 };
 
 use crate::ui::features::notes::NotesView;
-use crate::ui::features::reader::{ReadingPage, device_family};
+use crate::ui::features::reader::{ReadingPage, Reserve};
 use crate::ui::features::settings::AccountView;
 use crate::ui::features::shelf::{ShelfEvent, ShelfView};
 use crate::ui::features::stats::StatsView;
@@ -51,19 +51,29 @@ pub fn immersive_nav(size: SizeClass, reading_on_top: bool) -> bool {
     size.is_compact() && reading_on_top
 }
 
-/// 导航栏占掉多少（逻辑像素）：Compact 是底栏高，其余是侧栏宽；收起时是 0。
+/// 导航栏占掉多少（逻辑像素），按**它压在哪一条边**分两个轴报给正文：Compact 是横躺的
+/// 底栏 ⇒ 高，Medium / Expanded 是竖着的图标栏 / 侧栏 ⇒ 宽。收起时那一轴跟着归零。
 ///
-/// 外壳自己按布局扣掉这一块（底栏是 `flex` 的一个 child），报告给阅读页只是为了让
-/// 正文的可见行与滚动上限按同一个数算 —— 所以收起时**必须**跟着归零，否则正文底下
-/// 白留一条滚不进去的空带。
-pub fn nav_reserve(size: SizeClass, immersive: bool) -> f32 {
+/// 为什么不是一个数：正文拿它去扣高、桌面拿它去扣宽，同一个参数两种读法，外壳就必须在
+/// 中间替两端各换算一次 —— 以前正是这一步让阅读视图长出两套。现在两个轴各归各的，
+/// 正文自己看哪一轴非零。
+pub fn nav_reserve(size: SizeClass, immersive: bool) -> Reserve {
     if immersive {
-        return 0.0;
+        return Reserve::ZERO;
     }
     match size {
-        SizeClass::Compact => BOTTOM_BAR_HEIGHT,
-        SizeClass::Medium => RAIL_WIDTH,
-        SizeClass::Expanded => SIDEBAR_WIDTH,
+        SizeClass::Compact => Reserve {
+            width: 0.0,
+            height: BOTTOM_BAR_HEIGHT,
+        },
+        SizeClass::Medium => Reserve {
+            width: RAIL_WIDTH,
+            height: 0.0,
+        },
+        SizeClass::Expanded => Reserve {
+            width: SIDEBAR_WIDTH,
+            height: 0.0,
+        },
     }
 }
 
@@ -94,7 +104,7 @@ impl AppShell {
         // 先把主题的应用字体换成这台设备真能解析出的家族，再建任何用文字的视图：
         // 顺序反了，第一帧就会拿一个不存在的家族去 resolve 而 panic。
         let wanted = ConfigHolder::reader(cx).font_family;
-        let family: SharedString = device_family(&wanted, cx).into();
+        let family: SharedString = host::device_family(&wanted, cx).into();
         theme::set_application_font(&family, cx);
 
         // 四个目的地的根视图。
@@ -127,10 +137,10 @@ impl AppShell {
 
         // 阅读页被 pop 出去时把位置落库（返回键与边缘滑动都走这条路）。
         let _stack_watch = cx.subscribe(&shelf_stack, |this, _, event, cx| {
-            if matches!(event, NavStackEvent::Popped) {
-                if let Some(reading) = this.reading.take() {
-                    reading.update(cx, |reading, cx| reading.close(cx));
-                }
+            if matches!(event, NavStackEvent::Popped)
+                && let Some(reading) = this.reading.take()
+            {
+                reading.update(cx, |reading, cx| reading.close(cx));
             }
         });
 
@@ -184,10 +194,10 @@ impl AppShell {
     fn back(&mut self, cx: &mut Context<Self>) {
         // 浮层是此刻最上面那一层，返回该先把它收掉而不是把人整页弹走。
         // 桌面那侧的阅读 chrome 是常驻的，`dismiss_chrome` 恒为 false，这一步等于不存在。
-        if let Some(reading) = self.reading.clone() {
-            if reading.update(cx, |reading, cx| reading.dismiss_chrome(cx)) {
-                return;
-            }
+        if let Some(reading) = self.reading.clone()
+            && reading.update(cx, |reading, cx| reading.dismiss_chrome(cx))
+        {
+            return;
         }
         let stack = self.stacks[self.destination.index()].clone();
         if stack.read(cx).depth() > 1 {
@@ -333,11 +343,12 @@ mod tests {
     /// 回归门：手机上正文压在栈顶时底栏收起，正文也不再为它预留那 56px。
     ///
     /// 宿主到不了 Compact 档（`SizeClass::of` 在桌面把窄窗口夹到 `Medium`，底栏只在真机
-    /// 长出来），所以钉住渲染时用的那两条判据：收起与否、以及随之而来的预留高度。
-    /// 预留高度不归零的话，正文底下会白留一条永远滚不进视野的空带。
+    /// 长出来），所以钉住渲染时用的那两条判据：收起与否、以及随之而来的预留量。
+    /// 预留不归零的话，正文底下会白留一条永远滚不进视野的空带；而预留报错了轴，
+    /// 另一端就会拿它去扣错的那一边。
     #[test]
     fn the_bottom_bar_yields_to_the_reading_page() {
-        use super::{immersive_nav, nav_reserve};
+        use super::{Reserve, immersive_nav, nav_reserve};
         use crate::ui::shell::navigation::{
             BOTTOM_BAR_HEIGHT, RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass,
         };
@@ -348,19 +359,39 @@ mod tests {
         );
         assert_eq!(
             nav_reserve(SizeClass::Compact, true),
-            0.0,
+            Reserve::ZERO,
             "底栏收起后正文不该再预留底栏高"
         );
 
-        // 没进阅读页就是原样：底栏在、预留高度也还在。
+        // 没进阅读页就是原样：底栏在、预留也还在 —— 而手机上它横躺着，占的是**高**。
         assert!(!immersive_nav(SizeClass::Compact, false));
-        assert_eq!(nav_reserve(SizeClass::Compact, false), BOTTOM_BAR_HEIGHT);
+        assert_eq!(
+            nav_reserve(SizeClass::Compact, false),
+            Reserve {
+                width: 0.0,
+                height: BOTTOM_BAR_HEIGHT
+            },
+            "手机的导航栏占的是正文的高，不是宽"
+        );
 
-        // 桌面（Medium / Expanded）的阅读不收起侧栏 —— 那是切目的地唯一的入口。
+        // 桌面（Medium / Expanded）的阅读不收起侧栏 —— 那是切目的地唯一的入口，
+        // 而它竖着，占的是**宽**。
         assert!(!immersive_nav(SizeClass::Medium, true));
         assert!(!immersive_nav(SizeClass::Expanded, true));
-        assert_eq!(nav_reserve(SizeClass::Medium, false), RAIL_WIDTH);
-        assert_eq!(nav_reserve(SizeClass::Expanded, false), SIDEBAR_WIDTH);
+        assert_eq!(
+            nav_reserve(SizeClass::Medium, false),
+            Reserve {
+                width: RAIL_WIDTH,
+                height: 0.0
+            }
+        );
+        assert_eq!(
+            nav_reserve(SizeClass::Expanded, false),
+            Reserve {
+                width: SIDEBAR_WIDTH,
+                height: 0.0
+            }
+        );
     }
 
     #[cfg(not(mobile))]

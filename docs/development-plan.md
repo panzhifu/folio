@@ -43,7 +43,7 @@ gpui-kit 官方立场：首要目标仍是桌面，移动支持只是让**部分
 
 当初判为「唯一未知数」的 trait 漂移，实测只有**一处**：`gpui-pre` 0.3.7 → 0.3.8 给 `RequestFrameOptions` 加了 `signal_at` 与 `signal_source` 两个字段，在 AChoreographer 回调处补齐即可。所以既不必把桌面降到旧快照，也不必接受「移动端只做正文 + 两套 UI 并存」。
 
-**（后记 2026-10-09）移动端现在与桌面端在同一个 crate**：`crates/folio-app` 下移动代码在 `src/mobile/`，由 `cfg(mobile)` 与桌面模块互斥编译。原先分家的理由「两端链的不是同一个 `gpui` 包」在 fork 换到 `gpui-pre =0.3.8` 之后不成立；`[patch.crates-io]`（`async-task` 那条）与 `[profile.release]` 随之挪到仓库根 `Cargo.toml`。见 `docs/android.md` §1 与 §6。
+**（后记 2026-10-09）移动端现在与桌面端在同一个 crate，而且共用一份界面**：`crates/folio-app` 下按功能纵切成 `ui/{shared,widgets,features,shell}`，`cfg(mobile)` 只剩 `ui/host`（平台服务）与 `ui/platform`（入口与原生桥）。原先分家的理由「两端链的不是同一个 `gpui` 包」在 fork 换到 `gpui-pre =0.3.8` 之后不成立；`[patch.crates-io]`（`async-task` 那条）与 `[profile.release]` 随之挪到仓库根 `Cargo.toml`。见 `docs/android.md` §1 与 §6。
 
 已达成（2026-10-08 在 Meizu 20 真机验证）：正文渲染、平台滚动、底部导航栏四格切换。缺口清单见 `docs/known-limitations.md` 的「移动端」一节 —— 其中一条是这份文档当初就写下的要求至今没落实：这条依赖**仍带着 default features**（30 多个平台插件全开），`default-features = false` 还没改。
 
@@ -205,11 +205,13 @@ folio/
 └── crates/folio-app/             gpui-kit 侧（`[lib] crate-type = rlib + cdylib + staticlib`）
     ├── build.rs                  嵌上游主题集 + 设 `cfg(mobile)`
     ├── ui/shared/                ★ 两端共用：config_model / l10n / theme / account / images /
-    │                             measure（`Measure` 的 gpui 实现）/ document（一章 → Layout）/ chrome
-    ├── ui/desktop/               app.rs 外壳、reader.rs、engine.rs（行盒进虚拟列表）、
-    │   └── settings/             一页一个文件 + window.rs（开-or-聚焦的独立窗口）
-    └── ui/mobile/                mod.rs 三平台入口、shell.rs（顶部章导航 + 底部栏）、
-                                  reader_view.rs（逐行绘制 + 触摸滚动 + 换章落盘）、paint.rs
+    │                             measure（`Measure` 的 gpui 实现）/ document（一章 → Layout → 切片）
+    ├── ui/widgets/               无状态小件（发丝线、次要文字、空状态）
+    ├── ui/features/              按功能纵切：reader（chrome 判据 + paint 逐字形 + view 摆片 +
+    │                             page 浮层）、shelf / notes / stats / settings（含独立设置窗口）
+    ├── ui/shell/                 自适应导航（侧栏 / 图标栏 / 底栏）+ 每目的地一条返回栈
+    ├── ui/host/                  平台服务边界：安全区、输入法 inset、正文字体家族（cfg(mobile)）
+    └── ui/platform/              三平台入口与原生桥（cfg(mobile)）
 ```
 
 `folio` 二进制名由 `crates/folio-app` 产出（`[[bin]] name = "folio"`）。
@@ -217,8 +219,9 @@ folio/
 这一层分界的判据是**「这段代码在两个平台上必须不能长得不一样」**：断行口径、层叠、版心宽度、
 主题解析、颜色换算都在 `ui/shared`，只有一份实现；`desktop` 与 `mobile` 只负责把自己那侧的
 滚动与摆法接上去。旧结构里移动端另写了一份 `measure.rs` 与 `document.rs`（与桌面端逐行同义、
-只是 import 不同），那两份已经并进来 —— 并进来之后 `ui/shared/document.rs` 的 tests 同时就是移动端的
-排版测试，因为移动 UI 只在 `cfg(mobile)` 下编译，宿主测试本来碰不到它。
+只是 import 不同），那两份已经并进来。阅读界面也并了：桌面以前是 `TextView` + 虚拟列表、移动是
+逐字形自绘，现在两端都走自绘那一份，`cfg(mobile)` 只剩 `ui/host` 与 `ui/platform`。
+于是宿主的 `cargo test` 编的就是移动端真正读的那条路径，而不是「那一侧只有 CI 的 android job 看得见」。
 
 ### 4.2 数据流：五段，每段都可单测
 
@@ -402,10 +405,14 @@ v1 的 `htmd` / `pulldown-cmark` 随 Markdown 中间层一并去掉。
 | # | 交付 | 内容 | 验收 |
 |---|---|---|---|
 | **M0** | 环境与地基验证 | ✅ skill 已装；✅ workspace 分层 + `cargo check` 通过（gpui-kit 0.7.1）；窗口跑通 niri/Wayland。**spike①** 无 `Window` 能否 `line_wrapper`/`advance`；**spike②** `paint_glyph` 自绘一行中英混排并验证 baseline/行高；**spike③** `add_fonts` 加载自带中文 serif + `ThemeRegistry` 注册 light/dark/sepia 并 `Theme::change`；**spike④** CJK 断行表现（`wrap_line` 在中文语料上的断点、标点是否越线） | 窗口不崩、可拖拽缩放、分数缩放不发虚；四份结论写入 `docs/spikes.md` |
-| **M1** | 产品骨架（不含引擎） | `FormatAdapter` + Markdown/TXT 适配器（走临时 `TextView` 渲染，仅作为占位可读实现）；`Sidebar` 书库 + `TabBar` 多书 + `Toolbar` + `StatusBar`；设置面板与偏好持久化；主题切换；SQLite schema + 迁移；进度记忆 | ✅ **已完成**（34 测试全绿、零警告）。验收断言在 `ui/features/reader/desktop.rs` 的 tests（原本单在 `tests/ui.rs`）：滚轮真产生位移、字符偏移↔滚动比例一致、进度无损穿过 SQLite、设置面板可开可关、越界偏好被夹住。**遗留**：像素级恢复（TextView 的 `reveal_range` 是黑盒，M2 自研引擎后由我们保证）；sepia 主题注册 |
+| **M1** | 产品骨架（不含引擎） | `FormatAdapter` + Markdown/TXT 适配器（走临时 `TextView` 渲染，仅作为占位可读实现）；`Sidebar` 书库 + `TabBar` 多书 + `Toolbar` + `StatusBar`；设置面板与偏好持久化；主题切换；SQLite schema + 迁移；进度记忆 | ✅ **已完成**（34 测试全绿、零警告）。验收断言在 `ui/features/reader/view.rs` 的 tests（原本单在 `tests/ui.rs`）：滚轮真产生位移、字符偏移↔滚动比例一致、进度无损穿过 SQLite、设置面板可开可关、越界偏好被夹住。**遗留**：像素级恢复（TextView 的 `reveal_range` 是黑盒，M2 自研引擎后由我们保证）；sepia 主题注册 |
 | **M2** | **引擎 E1：DOM + CSS + 块级排版** | html5ever DOM（arena + NodeIdentity）；`selectors`/`cssparser` 接入与 cascade；Block layout + 外边距折叠 + `text-indent`；单字体 inline（`wrap_line`）；`Measure` 走 TextSystem；`text-align: center` | 一本地化中文 EPUB 的章节能显示出**首行缩进、居中标题、正确行距** —— 这是中文排版基础达成点。**✅ 已完成（2026-10-08）**：DOM（13 测试）、CSS 子集 + 层叠 + UA 表（61 测试）、E1 块级/行内排版（16 几何测试）、EPUB 容器（11 测试 + 真实书冒烟）、app 侧 `Measure` + 逐行虚拟列表。验收断言在 `folio_app::ui::features::reader::desktop::tests::the_engine_indents_centers_and_spaces_lines`（首行缩进 2em、居中标题、行盒高按各自字号、真的折行、行互不重叠），并在 niri 下开真实窗口截图确认观感。遗留：`selectors`/`cssparser` 仍未接入（§5 偏离记录）；像素级位置恢复属 M5。限制清单见 `docs/known-limitations.md` |
 | **M3** | **引擎 E2 + E3：局部样式与图片** | 多 run inline（混合字重/字号/颜色）；`<span>/<em>/<strong>` 行内样式；图片按 `width/max-width` 缩放、块级图片对齐；`LineFragment::Element` 行内图片；封面与内嵌图 resolver | 局部颜色/字重正确；插图不溢出、可居中、可控宽度。**✅ 已完成（2026-10-08）**：E2 —— 断行改由引擎自持（UAX #14 禁则），每个 `LineRun` 带自己的字体/字号/颜色与绘制宽度，行盒高取最高 run、基线取最大 ascent；验收见 `inline_styles_survive_into_runs`。E3 —— EPUB `image/*` 读出并入库（`images` 表 + v4 迁移），排版期按本章目录解析 `src`；`LineFragment::{Text,Image}` 枚举取代 `LineBox.runs`，行内图以哨兵字符 U+FFFC 参与折行、宽度计入断行，块级图（`display:block`）独立成行按容器 `text-align` 对齐；`layout::image_size` 实现 `width/height/max-width`（px/em/rem/%/auto）并按纵横比缩放、绝不溢出；app 侧 `ChapterImages` 提供内在尺寸与 `gpui::Image`。验收见 `layout::tests::*image*`（6 条）与 `ui.rs::images_flow_through_the_engine_as_fragments`。遗留：`float` 绕图属 M4 |
-| **M4** | **引擎 E4：Fragmentation = 连续/分页/双页** | `BreakToken` 分片引擎；`page-break-*`、`break-inside: avoid`、`orphans/widows`；连续滚动 = 单一无限分片；分页/双页 = 视口分片；`columns`/`column-gap` 多栏；布局结果后台 `background_spawn` 缓存 | 三种模式同源；缩放窗口后重排在后台完成，主线程不卡；**多栏达成**。**进行中（2026-10-09）—— 分片核心已成立**：`layout::fragment` 是布局之后的纯后处理，读 `Layout` + 计算样式表，不重新折行；`Fragmentainer` 实现了 `Iterator`（`.count()` = 总页数、`.nth(k)` = 第 k 页），`BreakToken` 可存可续（`resumed`），所以翻到第 500 页不必先分完前 499 页。规则齐的：按高度切、`break-before/after: page\|always\|left\|right`（含左右页奇偶补空片）、`break-inside: avoid`（块比页高时让位，保证推进）、`orphans`/`widows`（两难时保 orphans，与排版传统一致）。CSS 侧 `orphans`/`widows`/`break-inside`/`page-break-*` 从「接受不生效」的名单移进了真生效。**多栏（视口级）已完成（2026-10-09）**：一片 = 一栏，一页 = 连续 `columns` 片，`Fragment{page, column}` 直接给位置；强制断点把本页剩下的栏补成空片，而这份补位状态存在 `BreakToken::pad_until` 里（所以从中间某一页续算仍然逐片相等，`resuming_in_the_middle_of_padding_still_pads` 就是专门钉这一条的）。四条切点规则一行没改。**还没做**：作者写的块级 `column-count`（栏宽决定折行，属排版期）、后台 `background_spawn` 排版缓存、以及 app 侧的分页/双页/分栏上屏接线（含把 `column_width` 算出的栏宽交给排版）—— 三者是 M4 剩下的全部 |
+| **M4** | **引擎 E4：Fragmentation = 连续/分页/双页** | `BreakToken` 分片引擎；`page-break-*`、`break-inside: avoid`、`orphans/widows`；连续滚动 = 单一无限分片；分页/双页 = 视口分片；`columns`/`column-gap` 多栏；布局结果后台 `background_spawn` 缓存 | 三种模式同源；缩放窗口后重排在后台完成，主线程不卡；**多栏达成**。**进行中（2026-10-09）—— 分片核心已成立**：`layout::fragment` 是布局之后的纯后处理，读 `Layout` + 计算样式表，不重新折行；`Fragmentainer` 实现了 `Iterator`（`.count()` = 总页数、`.nth(k)` = 第 k 页），`BreakToken` 可存可续（`resumed`），所以翻到第 500 页不必先分完前 499 页。规则齐的：按高度切、`break-before/after: page\|always\|left\|right`（含左右页奇偶补空片）、`break-inside: avoid`（块比页高时让位，保证推进）、`orphans`/`widows`（两难时保 orphans，与排版传统一致）。CSS 侧 `orphans`/`widows`/`break-inside`/`page-break-*` 从「接受不生效」的名单移进了真生效。**多栏（视口级）已完成（2026-10-09）**：一片 = 一栏，一页 = 连续 `columns` 片，`Fragment{page, column}` 直接给位置；强制断点把本页剩下的栏补成空片，而这份补位状态存在 `BreakToken::pad_until` 里（所以从中间某一页续算仍然逐片相等，`resuming_in_the_middle_of_padding_still_pads` 就是专门钉这一条的）。四条切点规则一行没改。**app 侧的分页 / 双页上屏接线已完成（2026-10-09）**：`Document::ensure_viewport` 按
+`PageMode` 把 `column_width(版心, 栏数, 中缝)` 交给排版、再切片，`ReaderView` 一片摆一栏；
+连续 / 分页 / 双页三档共用同一套坐标，双页在宽度不够时自动退回分页（判据按宽度不按 target，
+所以不需要 `cfg`）。**M4 剩下的**：作者写的块级 `column-count`（栏宽决定折行，属排版期）、
+后台 `background_spawn` 排版缓存 |
 | **M5** | 选择、标注、书库收尾 | `TextSelectionHandle` ↔ run 表；选中浮动菜单（4 色 / 笔记 / 复制 / 搜索）；`TextAnchor` 回显与四级降级重定位；批注侧栏；Markdown 导出；DOM/style 缓存使二次打开 < 100ms | 改 3 档字号 + 缩窗口 → 全部锚点命中或显式 stale；导出 diff 符合预期。**地基已完成（2026-10-09）**：`folio-core::anchor` 给了可见文本坐标系（`TextMap`）、带四个指纹的锚点（`TextAnchor`）、四级降级（`relocate`：原偏移 → 同 DOM 节点 → ±400 字窗口 → 全章 → 显式 stale）、以及坐标 ↔ 行盒 ↔ 滚动位置的双向映射；`Store` 补上 `annotations` 表的全套 CRUD（那张表 v1 就建好了，但整个仓库没有一行代码碰过它）。进度已从「章」落到「字」：两端存的都是章内字符偏移，验收那条「改字号 + 缩窗口 → 命中」由 `shared_layout.rs::the_progress_coordinate_survives_a_relayout` 与 `ui.rs::the_engine_progress_is_a_character_offset_that_comes_back` 钉住。**还没做**：选择交互（`TextSelectionHandle` ↔ run 表）、浮动菜单与批注侧栏、Markdown 导出、二次打开提速 |
 | **M6** | 脚注弹层 + ruby + 竖排 | 脚注：链接点击 → `Popover`/`Sheet`（相对 gpui-kit，成本低）；`<ruby>/<rt>` 双层定位与行盒扩展；`writing-mode: vertical-rl` 逐字堆叠（**拉丁侧转不支持，明确降级**） | 日文可读书；带注音的儿童读物可读书；竖排书籍可读书 |
 | **M7** | PDF | `pdfium-render` 栅格 + 文字层 → `{page,rects}` 锚点；缩放/适应宽度；LRU 页缓存与预取 | 1000 页 PDF 首次翻页 < 30ms，连续翻页不掉帧 |

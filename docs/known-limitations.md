@@ -11,7 +11,7 @@
 | 写法 | 现在的行为 | 为什么 |
 | --- | --- | --- |
 | `:nth-child()`、`:hover`、伪元素、属性选择器的 `~=^$|= ~` 变体 | 整条**选择器作废**，规则体一起丢，计入 `ignored` | 部分生效会让作者样式以不可预期的方式命中内容，宁可整条不要 |
-| `border` / `background` / `background-color` / `text-shadow` | 接受、不生效、**不计入** `ignored` | 出版书里满地都是；计入会把真正需要关注的「没预料到的写法」淹掉（`KNOWN_UNIMPLEMENTED`）。块级装饰要的是「块盒矩形」，而排版层现在只产出行盒，这条和分页/双页的上屏接线一起定 |
+| `border` / `background` / `background-color` / `text-shadow` | 接受、不生效、**不计入** `ignored` | 出版书里满地都是；计入会把真正需要关注的「没预料到的写法」淹掉（`KNOWN_UNIMPLEMENTED`）。块级装饰要的是「块盒矩形」，而排版层现在只产出行盒（分页与双页已经上屏，块盒还没有） |
 | `text-decoration` / `text-decoration-line` | **已生效**：`underline`、`line-through` 进 `ComputedStyle` → `RunStyle`，桌面走 gpui 的 `.underline()` / `.line_through()`，移动端走 `TextRun` 的 `underline` / `strikethrough`（都是 1px、按字色）。线型与颜色 token 认但不改画法；`overline` / `blink` 整条不接并计 `ignored` | 装饰线不计入行盒高（CSS 也是），所以它只是绘制信息。`<u>` / `<ins>` / `<s>` / `<del>` / `<strike>` 由 UA 表给默认值，作者不写也有 |
 | `width` / `height` / `max-width` / `max-height` | 只在**替换元素（图片）**上生效；块级元素的这些声明接受但不生效 | 一期只做图片的尺寸，块级盒宽跟随版心。图片尺寸见 `layout::image_size` |
 | `font` 简写 | **已生效**：`[style] [weight] size [/ line-height] family`，字族取第一候选并去引号。**有意不重置没写到的子属性** —— CSS 规定简写要把其余拉回初值（含 `line-height: normal`），而我们的行距来自读者偏好，一句 `font: 1em serif` 把读者的 1.75 改回 1.2 是产品级的错。`small-caps`、系统字体关键字（`caption` 等）整条作废并计 `ignored` | 老 EPUB 里 `font:` 简写满地都是，只认长写法等于把这些书的字号与字族丢掉 |
@@ -110,9 +110,14 @@ cargo run -p folio-core --example css-gap -- 某本书.epub   # 也可以指别�
   把它们悄悄当成 `auto` 或 `avoid` 会让作者的意图静默消失，比不认识更难查。
 - **分片只切行，不切块盒**：一片拿到的是 `Layout::lines` 的一个下标区间。块自己的背景、
   边框要按片裁剪的话得由绘制侧处理（现在两端的绘制都只画行）。
-- **分片器还没有任何界面消费者**：两端都只画连续滚动，`ReaderView` 直接读 `Layout` 的行，
-  `mode_name()` 固定返回 `"continuous"`。分页 / 双页 / 分栏的上屏接线（含把栏宽传给排版）
-  属 M4 的最后一块。
+- **三种模式已经同源**：`ui/features/reader/view.rs` 按 `PageMode` 给分片器喂那两个数 ——
+  连续滚动 = 一片高 0、一栏；分页 = 一个视口高、一栏；双页对开 = 一个视口高、两栏。
+  栏宽由 `column_width(版心, 栏数, 中缝)` 算出来交给排版，两边同一个式子。
+  进度与恢复在三种模式下都换算成同一个「第几个字」；`PageMode::storage_name()` 只是把当时
+  那一档记进库，重开时摆法跟着回来，位置本身与它无关。
+- **双页按宽度退档，不按 target**：装不下两栏（一栏窄于 200px）就自动变成分页。
+  判据是纯函数（`chrome::PageMode::effective`），所以窄桌窗 = 单页、宽手机 = 双页，
+  不需要任何 `cfg`。
 
 ## 格式（`crates/folio-core/src/format/`）
 
@@ -121,8 +126,9 @@ cargo run -p folio-core --example css-gap -- 某本书.epub   # 也可以指别�
   SVG 的固有尺寸取不到（见「排版」一节）。
 - NCX 目录**拍平成一层**，`nav` 目录保留层级。阅读器用它跳章，层级只是好看。
 - `@import` 引 external CSS 的书会少一份样式，计入 `ignored` 以便被发现。
-- Markdown / TXT 仍然走 M1 的 `TextView` 占位渲染；等 E1 接上屏幕后，
-  Markdown 要转成 XHTML 才能进新引擎（M5 一起做）。
+- Markdown / TXT 的源文本先经 `chapter_xhtml` 做一次最小包装（空行分段、段内换行 → `<br/>`、
+  ATX 标题 → `<hN>`，文字全部 XML 转义），再进同一套 DOM → CSS → Layout。三类格式从这一层起
+  只有一条排版链；M1 那套 `TextView` 占位渲染随两端两套视图一起删了。
 
 ## 配置与账号
 
@@ -151,21 +157,22 @@ cargo run -p folio-core --example css-gap -- 某本书.epub   # 也可以指别�
   拼所有文本节点，所以标签之间的换行与缩进也算（这本《蛇结》第一段正文的坐标是 1 而不是 0），
   `display:none` 块里的文字也在内。这个数只用于「回到原处」，界面上显示的是百分比。
   它必须与解析结果绑定：同一份 XHTML 换个缩进风格重排源码，坐标就平移，所以别用格式化工具改书。
-- **同一个 `Locator.offset` 字段在两条渲染路径下是两套坐标**：自研引擎是可见文本字符，
-  M1 留下的 `TextView` 路径（Markdown / TXT）是源文本字符。同一本书只会走一条，所以不会互相踩；
-  但「把一本 .md 换成 .epub 再打开」会让位置漂。等 Markdown 接进引擎（M5）时这一条自动消失。
+- **坐标只剩一套**：以前桌面的 Markdown / TXT 走 `TextView`，那条路上 `Locator.offset` 是
+  源文本字符、引擎路上是可见文本字符，「同一本书换端」就会漂。现在三类格式两端都进引擎，
+  `offset` 一律是可见文本字符 —— 那条分裂随 `TextView` 一起消失了。
 - **批注的读列表按行降级**：`anchor_json` 解不出来的那一行**跳过**，其余照常返回。
   这一列可能来自旧版本或别的机器，为一块坏 JSON 让读者看不到他所有的批注是最糟的失败方式。
 - **`annotations` 表的 `chapter_id` 只是外键挂钩**，权威是锚点里的章下标；章节行还没入库时
   那一列留 NULL。`set_annotation_stale` 有意不碰 `updated_at`（stale 是排版结果，不是编辑记录）。
-- **桌面端列表的项高不含块间空隙**（实测：三段各一行时，最后一行的行底在 132 之上，
-  而逐项高度之和只有 89.25）。两个后果：① 进度换算必须在**列表空间**里做
-  （`engine::item_top` / `line_at_item_top`），拿排版的绝对 y 会每段差一档 margin；
-  ② 段与段之间在桌面上少一档空白 —— 这是 M2 就存在的绘制问题，不是这一轮引入的，
-  修它要连 `line_element` 的 `top` 一起改，`shared_layout.rs::the_engine_list_counts_line_boxes_not_the_gaps_between_them`
-  是它的门（改对了那条会红，红才是提示你去改另一边）。
+- **桌面端段间不再少一档空白**。那条毛病来自 `TextView` + 虚拟列表那一套：列表的项高只取
+  行盒高，块与块之间的 margin 在列表空间里不存在，于是桌面读到的段落挤在一起，而手机上正常。
+  两端合成一份自绘实现之后，行是按排版的绝对 `y` 摆的，空隙自然就在；分页那一档的空隙由
+  分片器算（`Fragment.origin_y` 到末行行底），代价是**断点处的上下 margin 会被丢掉** ——
+  这是 `layout::fragment` 有意选的，见它模块头的说明。
 - **还没接的**：选择交互（`TextSelectionHandle` ↔ run 表）、选中浮动菜单、批注侧栏。
   锚点与存储这两层已经能用，缺的是把它们接到屏幕上。
+  **这一轮多欠下一笔**：桌面正文以前由 `TextView` 画，白拿过 gpui 自带的文本选择与滚动条；
+  换成自绘之后选择高亮要自己在 `paint` 那一层做（那也正是它存在的原因 —— 字形级控制）。
 
 ## 平台
 
@@ -180,7 +187,7 @@ cargo run -p folio-core --example css-gap -- 某本书.epub   # 也可以指别�
   aarch64-linux-android` 与宿主侧的排版测试。交叉编译能过 ≠ 那些行为是对的，
   下一次连真机时按这五条逐个看。
 
-## 移动端（`crates/folio-app/src/ui/mobile/`）
+## 移动端（`crates/folio-app/src/ui/host/` 与 `src/ui/platform/`）
 
 一期移动端缺过的东西里，**这一轮已经补上的**记在这儿，免得下次又当成缺口去查：
 
@@ -192,8 +199,10 @@ cargo run -p folio-core --example css-gap -- 某本书.epub   # 也可以指别�
   决定浅深与主题名，颜色一律从 `cx.theme()` 取，界面上不再有写死的纸墨值。
 - **进度落盘了**。`Store::open_at(paths::db_path())` + `add_book` / `save_flow` / `set_position`，
   杀掉进程回来还在原来那一章。
-- **移动端的排版有测试了**。移动 UI 本身只在 `cfg(mobile)` 下编译、宿主碰不到，但断行、层叠、
-  版心宽度、缓存失效这些并进了 `ui/shared`，`ui/shared/document.rs` 的 tests 因此同时是那一侧的排版测试。
+- **移动端的排版有测试了**。断行、层叠、版心宽度、缓存失效都在 `ui/shared`，
+  `ui/shared/document.rs` 的 tests 因此同时是那一侧的排版测试。而**阅读视图本身现在也在宿主上
+  编译**（两端一份），所以它的滚动、坐标、分页、退档都有门 —— 以前那一侧只能靠真机截图，
+  CI 的 android job 是唯一会编译它的地方。
 
 还没做的：
 

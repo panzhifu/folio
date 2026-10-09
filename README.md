@@ -23,22 +23,28 @@ crates/folio-core/   零 gpui 依赖：DOM、CSS、排版算法、锚点、SQLit
 
 crates/folio-app/src/ui/
   shared/            两端共用的地基：配置实体、文案、主题、字体度量、
-                     「一章 → Layout」的排版状态、图片索引、公共小件
-  desktop/           桌面壳：侧栏、标签、工具条、状态栏、引擎结果的虚拟列表，
-                     以及 settings/（一页一个文件 + 开-or-聚焦的设置窗口）
-  mobile/            移动壳：三平台入口、顶部章导航 + 底部导航栏、自绘字形元素
+                     「一章 → Layout → 切片」的排版状态、图片索引、书库
+  widgets/           无状态小件（发丝线、次要文字、空状态）
+  features/          按功能纵切：reader（一套渲染 + 连续/分页/双页）、shelf、notes、
+                     stats、settings（一页一个文件 + 开-or-聚焦的设置窗口）
+  shell/             应用外壳：自适应导航（侧栏 / 图标栏 / 底栏）+ 每目的地一条返回栈
+  host/              平台服务边界：安全区、输入法 inset、正文字体家族
+  platform/          三平台入口与原生桥
 ```
 
 `folio-core` 不依赖 gpui 这条边界是硬约束：所以它能被 `cargo test` 全量覆盖，也是 Android 宿主里复用的前提。
 
 `ui/shared` 的分层判据只有一条 —— **这段代码在两个平台上必须不能长得不一样**。断行口径、层叠、
 版心宽度、主题解析都在这里共用一份实现；两端各自抄一份的旧写法（移动端曾有独立的
-`measure.rs` 与 `document.rs`）已经合并，代价是那些代码从此只在 `cfg(mobile)` 下编译、
-宿主测试碰不到，而合并之后 `ui/shared/document.rs` 的 tests 就同时是移动端的排版测试。
+`measure.rs` 与 `document.rs`）已经合并。
 
-桌面与移动在同一个 `folio-app` 里，由 `cfg(mobile)` 互斥编译 ——
+阅读界面以前是第三个「各抄一份」的地方：桌面把行盒接进 `TextView` + 虚拟列表，移动自己逐字形
+画。现在两端共用逐字形那一份，`cfg(mobile)` **只剩 `ui/host` 与 `ui/platform`** —— 平台上留存的
+差别是「导航栏占的是宽还是高」这种数据（`reader::Reserve` 两个轴都带着）与字体回退，不再是两套
+代码。这也意味着宿主的 `cargo check` / `clippy` / `test` 第一次真的编到了移动端读的那条渲染路径。
+
 两端用的是同一个 `gpui-pre` 快照（`gpui_kit` 顶层 `pub use ::gpui::*` 把它整个转了出来），
-所以能进同一张依赖图，视图代码也统一 `use gpui_kit::…`。
+所以能进同一张依赖图，视图代码统一 `use gpui_kit::…`。
 
 阅读位置与标注锚点都以**章内字符偏移**为坐标系，不是页码 —— 页码在字号或窗口宽度变化后就会失效。
 
@@ -83,10 +89,9 @@ cargo run --example spike      # M0 排版验证：stdout 出结论，窗口出�
 - **只引 `pub` 项**。这些测试以前住在 `tests/`，编译器天然只给它们公开面；搬进 `src/`
   之后这层保证没了，就靠这条约定守 —— 想测私有实现请先想它为什么不是公开的。
 
-按平台门控的模块里，测试跟着模块走：`features/reader/{engine,desktop,page_desktop}.rs`
-本身已经在 `cfg(not(mobile))` 下，写普通 `#[cfg(test)]` 就够；恒编译的文件里若有
-只有桌面跑得动的用例，给它单独一层 `#[cfg(not(mobile))]`（见 `ui/shell/mod.rs` 的
-`tests::booted` 与 `ui/shared/document.rs` 的 `tests::list_metrics`）。Android 那个
+测试跟着被测代码走：`features/reader/view.rs` 的 `tests` 用真实滚轮事件驱动生产视图，
+`ui/shell/mod.rs` 的 `tests::booted` 那类只有桌面跑得动的用例单独一层 `#[cfg(not(mobile))]`
+（`TestSupportExt` 的注册路径在移动目标上不存在）。Android 那个
 job 跑的是 `clippy --target aarch64-linux-android --lib`，不开 `cfg(test)`，
 所以移动目标上编不到的那部分测试不会影响它。
 

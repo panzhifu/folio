@@ -1,7 +1,8 @@
 //! 字形级绘制元素：一条背景矩形 + 若干条「已定好基线」的 run。
 //!
-//! 这一层是移动端与桌面端差别最大的地方：正文需要字形级控制（选择高亮、ruby、竖排），
-//! 而这份 GPUI 快照 **没有 `paint_text`**，所以正文自己写 `Element`，逐字形 `paint_glyph`。
+//! 正文需要字形级控制（选择高亮、ruby、竖排），而这份 GPUI 快照 **没有 `paint_text`**，
+//! 所以正文自己写 `Element`，逐字形 `paint_glyph`。两端同一份：以前只有移动走这条路，
+//! 桌面交给 `TextView` + 虚拟列表，于是同一本书在两台上可能各排各的行。
 //!
 //! 落点算法照抄 gpui 自己的 `paint_line`（`text_system/line.rs:452` 起）：
 //! 它把字形画在「行框原点 + (0, padding_top + ascent) + glyph.position」，
@@ -151,14 +152,6 @@ impl GlyphsElement {
         }
     }
 
-    /// Increment A：只有一行硬编码文本，用来验证「生命周期 + 渲染器 + 字体」。
-    pub fn one(run: GlyphRun) -> Self {
-        Self {
-            runs: vec![run],
-            background: None,
-        }
-    }
-
     pub fn background(mut self, color: Hsla) -> Self {
         self.background = Some(color);
         self
@@ -170,10 +163,6 @@ impl GlyphsElement {
 
     pub fn extend(&mut self, runs: impl IntoIterator<Item = GlyphRun>) {
         self.runs.extend(runs);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.runs.is_empty()
     }
 }
 

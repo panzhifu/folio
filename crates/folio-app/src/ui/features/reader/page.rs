@@ -1,15 +1,20 @@
-//! 移动阅读页：正文 + 干净态的两行小字 + 点正文中间浮出的顶栏与底栏。
+//! 阅读页：正文 + 干净态的两行小字 + 点正文中间浮出的顶栏与底栏。
 //!
 //! 形态照 Reeden 的阅读界面量出来（1080×2400 @3.0）：干净态只剩左上角一行章名与底部
 //! 一行进度；点正文中间才浮出顶栏（返回 + 书名）与底栏（进度条 + 一排入口）。
 //! 入口就地换面板，**不弹浮层** —— 浮层在 Android 上现在点不住（同 `shelf` 里
 //! 「书要拷到哪儿」那块面板记的那条事实），而目录点不动等于没有目录。
 //!
+//! 这一屏两端**共用一份**：桌面上原来的工具条 + 状态栏那套常驻 chrome 换成了这个形态，
+//! 因为「以手机那一版为准」不只是挑一套皮肤 —— 两套 chrome 意味着每个新功能要落两次地，
+//! 而其中一端一定会漏。桌面多出来的那一格是「双页」，它按宽度自己退档（见
+//! [`chrome::PageMode::effective`]），所以这一格在窄窗口里就是分页，不需要 `cfg`。
+//!
 //! 顶栏与底栏**压在正文之上**，不推动正文重排：读者点一下屏幕，字不该跳走。
 //! 正文只让出干净态那两条带的高度，那两个数住在 [`chrome`] 里，布局与视口算法共用它。
 //!
-//! 点击分区也在 [`chrome`] 里判：那里是纯函数，宿主的 `cargo test` 直接跑，
-//! 这一屏只把结果落成动作。
+//! 点击分区、面板档位、模式退档都在 [`chrome`] 里判：那里是纯函数，宿主的 `cargo test`
+//! 直接跑，这一屏只把结果落成动作。
 
 use std::rc::Rc;
 
@@ -17,22 +22,23 @@ use folio_core::config::Mode;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{NavMotion, NavStackState, v_virtual_list};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Sizable, StyledExt as _, ThemeMode, ThemeStyled as _, h_flex, v_flex,
+    ActiveTheme, Disableable, Selectable, Sizable, StyledExt as _, ThemeMode, ThemeStyled as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Corners, ElementId, Entity, FontWeight,
-    IntoElement, ParentElement, Pixels, Render, SharedString, Size, StatefulInteractiveElement,
-    Styled, Subscription, WeakEntity, Window, div, px, size,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString, Size,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px, size,
 };
 
 use super::chrome::{
-    self, Chrome, Effect, FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, Panel, percent_label, zone,
+    self, Chrome, Effect, FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, PageMode, Panel, Reserve,
+    percent_label, zone,
 };
-use super::mobile::ReaderView;
-use super::{advance_chapter, book_id, can_advance, persist, set_reserve};
+use super::view::ReaderView;
 use crate::ui::features::settings::AccountView;
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::l10n::tr;
@@ -42,8 +48,8 @@ const TOC_ROW_HEIGHT: f32 = 48.0;
 
 pub struct ReadingPage {
     reader: Entity<ReaderView>,
-    /// 外壳报告底部导航栏的高度，正文据此缩短有效视口。
-    reserve: f32,
+    /// 外壳报告不属于正文的那条边占掉多少（桌面宽、移动高）。
+    reserve: Reserve,
     stack: WeakEntity<NavStackState>,
     /// 浮层的开合与面板档位。见 [`chrome`]。
     chrome: Chrome,
@@ -60,6 +66,9 @@ pub struct ReadingPage {
 impl ReadingPage {
     pub fn new(stack: WeakEntity<NavStackState>, cx: &mut Context<Self>) -> Self {
         let reader = cx.new(|cx| ReaderView::boot(cx));
+        // 字号与行距两条滑条的初值先取出来：`cx.new` 要 `&mut cx`，而把 `cx` 再关进
+        // 构造闭包里就是同一个 `Context` 的二次可变借用。
+        let prefs = ConfigHolder::reader(cx);
         let progress = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
@@ -72,14 +81,14 @@ impl ReadingPage {
                 .min(FONT_SIZE_RANGE.0)
                 .max(FONT_SIZE_RANGE.1)
                 .step(0.5)
-                .default_value(ConfigHolder::reader(cx).font_size)
+                .default_value(prefs.font_size)
         });
         let line_height = cx.new(|_| {
             SliderState::new()
                 .min(LINE_HEIGHT_RANGE.0)
                 .max(LINE_HEIGHT_RANGE.1)
                 .step(0.05)
-                .default_value(ConfigHolder::reader(cx).line_height)
+                .default_value(prefs.line_height)
         });
         // 三条滑条各订阅一次：拖动当场生效（正文滚到那一处 / 换字号重排），
         // 所以这里没有「应用」按钮，也没有改了不生效的中间态。
@@ -105,7 +114,7 @@ impl ReadingPage {
         ];
         Self {
             reader,
-            reserve: 0.0,
+            reserve: Reserve::ZERO,
             stack,
             chrome: Chrome::default(),
             progress,
@@ -124,17 +133,18 @@ impl ReadingPage {
 
     /// 落库。外壳在 pop 之前调它。
     pub fn close(&mut self, cx: &mut Context<Self>) {
-        self.reader.update(cx, |reader, cx| persist(reader, cx));
+        self.reader
+            .update(cx, |reader, _| reader.persist_position());
     }
 
     pub fn book_id(&self, cx: &App) -> Option<i64> {
-        book_id(&*self.reader.read(cx))
+        self.reader.read(cx).book_id()
     }
 
-    pub fn set_reserve(&mut self, reserve: f32, cx: &mut Context<Self>) {
+    pub fn set_reserve(&mut self, reserve: Reserve, cx: &mut Context<Self>) {
         self.reserve = reserve;
         self.reader
-            .update(cx, |reader, cx| set_reserve(reader, reserve, cx));
+            .update(cx, |reader, cx| reader.set_reserve(reserve, cx));
     }
 
     /// 浮层挡着的时候，系统返回先收它；收干净了才轮到 pop 这一页。
@@ -171,7 +181,7 @@ impl ReadingPage {
         }
     }
 
-    /// 把「别处也改得动」的三个数推回滑条：正文滚了要挪进度滑块，设置页改了字号
+    /// 把「别处也改得动」的数推回滑条：正文滚了要挪进度滑块，设置页改了字号
     /// 要挪字号滑块。
     ///
     /// 带阈值比较：拖动的时候滑条自己就是权威，每帧再按正文读回来的数写回去，
@@ -322,10 +332,16 @@ impl ReadingPage {
             .into_any_element()
     }
 
-    /// 状态行：章内位置与进度各占一端的边。
+    /// 状态行：章内位置与进度各占一端的边。分页 / 双页时左边那半念「第几页 / 共几页」，
+    /// 连续滚动念「第几节 / 共几节」—— 读者认的是自己那一档的刻度。
     fn status_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let position = self.reader.read(cx).chapter_position(cx);
-        let percent = percent_label(self.reader.read(cx).progress());
+        let reader = self.reader.read(cx);
+        let position = if reader.mode().is_continuous() {
+            reader.chapter_position(cx)
+        } else {
+            tf_page(reader, cx)
+        };
+        let percent = percent_label(reader.progress());
         let progress_label = format!("{} {}", tr(cx, "reader.progress"), percent);
         h_flex()
             .w_full()
@@ -345,8 +361,8 @@ impl ReadingPage {
     /// 也能顺手跨到隔壁一章。
     fn progress_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let reader = self.reader.read(cx);
-        let can_prev = can_advance(&*reader, -1);
-        let can_next = can_advance(&*reader, 1);
+        let can_prev = reader.can_advance(-1);
+        let can_next = reader.can_advance(1);
         let page_prev = cx.entity().clone();
         let page_next = cx.entity().clone();
         let prev_label = tr(cx, "reader.prev_chapter");
@@ -382,15 +398,19 @@ impl ReadingPage {
     }
 
     /// 一排入口。目录与排版是面板（选中态留在自己这一格的表面上），夜间是一个当场生效
-    /// 的动作，设置是另一屏 —— 三件事不同，所以只有前两格吃 `selected`。
+    /// 的动作，双页是当场换摆法，设置是另一屏 —— 四件事不同，所以只有带档位的那三格
+    /// 吃 `selected`。
     fn entry_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let panel = self.chrome.panel();
         let dark = cx.theme().mode == ThemeMode::Dark;
+        let spread = self.reader.read(cx).wanted_mode() != PageMode::Continuous;
         let page_toc = cx.entity().clone();
         let page_type = cx.entity().clone();
         let page_night = cx.entity().clone();
+        let page_spread = cx.entity().clone();
         let page_settings = cx.entity().clone();
         let night_label = tr(cx, if dark { "reader.day" } else { "reader.night" });
+        let spread_label = tr(cx, "reader.mode_spread");
         h_flex()
             .w_full()
             .items_center()
@@ -418,6 +438,22 @@ impl ReadingPage {
                     .label(tr(cx, "page.typography").to_string())
                     .on_click(move |_, _, cx| {
                         page_type.update(cx, |this, cx| this.pick(Panel::Typography, cx))
+                    }),
+            )
+            .child(
+                // 这一格只给图标：一排五个入口再各带两个字，手机上每格会被挤到点不准。
+                // 双页按宽度退档，所以这格在窄屏上也仍然按得下去（按下去就是分页）。
+                Button::new("entry-spread")
+                    .ghost()
+                    .small()
+                    .flex_1()
+                    .justify_center()
+                    .selected(spread)
+                    .icon(IconName::Columns3)
+                    .tooltip(spread_label.clone().to_string())
+                    .accessibility_label(spread_label)
+                    .on_click(move |_, _, cx| {
+                        page_spread.update(cx, |this, cx| this.toggle_spread(cx))
                     }),
             )
             .child(
@@ -456,6 +492,14 @@ impl ReadingPage {
         cx.notify();
     }
 
+    /// 连续 ⇄ 双页。换档不动位置：进度是「第几个字」，两档之间搬的是同一句话。
+    fn toggle_spread(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.reader.read(cx).wanted_mode();
+        let next = wanted.next();
+        self.reader
+            .update(cx, |reader, cx| reader.set_mode(next, cx));
+    }
+
     /// 浅深一键。
     ///
     /// 判据是**解析出来的**那一档（`cx.theme().mode`），不是配置里写的 `system`：
@@ -471,7 +515,8 @@ impl ReadingPage {
     ///
     /// 手机上没有独立设置窗口（那是桌面为了一整页字段开的小窗），而「我的」这一格里
     /// 站着主题、书库位置与关于。压进栈而不是切目的地：系统返回 pop 它就回到刚才那
-    /// 一行字，阅读位置一点没动。
+    /// 一行字，阅读位置一点没动。桌面同样走这条 —— 少一个只在一端存在的窗口，
+    /// 就少一处「这功能那端没有」。
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         let account = cx.new(AccountView::boot);
         let _ = self
@@ -481,7 +526,7 @@ impl ReadingPage {
 
     fn advance(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.reader
-            .update(cx, |reader, cx| advance_chapter(reader, delta, cx));
+            .update(cx, |reader, cx| reader.advance_chapter(delta, cx));
     }
 
     /// 目录面板：就地展开的一块章节表。
@@ -492,7 +537,7 @@ impl ReadingPage {
         let height = f32::from(window.viewport_size().height);
         // 顶栏 + 底栏自己（状态行、进度条、入口条）占掉的，加正文留的 120，是列表的下限。
         let chrome_bands = chrome::TOP_BAR_HEIGHT + chrome::BOTTOM_BAR_HEIGHT + 120.0;
-        let list_height = (height - chrome_bands).min(chrome::PANEL_HEIGHT).max(160.0);
+        let list_height = (height - chrome_bands).clamp(160.0, chrome::PANEL_HEIGHT);
         let width = f32::from(window.viewport_size().width);
         div()
             .w_full()
@@ -537,7 +582,9 @@ impl ReadingPage {
                 let active = ix == current;
                 let on_click = {
                     let page = page.clone();
-                    move |_, _, cx: &mut App| {
+                    // 三个参数都要写上类型：只标注最后一个，闭包就对不生命周期通用化，
+                    // 报的是「implementation of `Fn` is not general enough」。
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                         page.update(cx, |this, cx| this.jump_to_chapter(ix, cx))
                     }
                 };
@@ -622,6 +669,19 @@ impl ReadingPage {
             .child(Slider::new(state).w_full())
             .into_any_element()
     }
+}
+
+/// 「第几页 / 共几页」。分页与双页共用这一句：双页时一号就是一张纸，两栏算同一号，
+/// 所以不必为双页再念一种刻度。
+fn tf_page(reader: &ReaderView, cx: &App) -> String {
+    crate::ui::shared::l10n::tf(
+        cx,
+        "reader.page_position",
+        &[
+            ("index", &(reader.page() + 1)),
+            ("total", &reader.page_count()),
+        ],
+    )
 }
 
 impl Render for ReadingPage {

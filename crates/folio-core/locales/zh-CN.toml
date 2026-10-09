@@ -35,6 +35,10 @@ toc = "目录"
 night = "夜间"
 day = "日间"
 progress = "进度"
+# 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
+page_position = "第 %{index} / %{total} 页"
+# 底栏那一格：一页两栏的对开。窄窗口按不下去时自动退回单页，名字不必跟着改。
+mode_spread = "双页"
 
 [settings]
 title = "阅读设置"

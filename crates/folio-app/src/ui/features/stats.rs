@@ -7,6 +7,7 @@ use gpui_kit::{Context, IntoElement, ParentElement, Render, Styled, Window, div}
 use crate::ui::shared::l10n::tr;
 use crate::ui::widgets::empty_state;
 
+#[derive(Default)]
 pub struct StatsView;
 
 impl StatsView {

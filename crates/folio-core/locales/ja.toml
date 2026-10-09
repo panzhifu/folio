@@ -35,6 +35,10 @@ toc = "目次"
 night = "夜間"
 day = "昼間"
 progress = "進捗"
+# 見開き／1ページずつの目盛り（連続スクロールは「節」を読む）。
+page_position = "%{index} / %{total} ページ"
+# 下部バーのこのマス：1画面に2ページ。幅が足りないときは自動で1ページに戻る。
+mode_spread = "見開き"
 
 [settings]
 title = "表示設定"

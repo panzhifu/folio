@@ -35,6 +35,11 @@ toc = "Contents"
 night = "Night"
 day = "Day"
 progress = "Progress"
+# The scale for paged / spread; continuous scroll reads "section" instead.
+page_position = "Page %{index} of %{total}"
+# The bottom-bar entry: two pages side by side. Narrow windows fall back to one
+# page on their own, so the label does not change with it.
+mode_spread = "Two pages"
 
 [settings]
 title = "Reading settings"

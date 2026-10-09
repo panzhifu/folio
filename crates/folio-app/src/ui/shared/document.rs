@@ -1,10 +1,9 @@
 //! 「一章的源文本 → `folio_core::layout::Layout`」这一段，桌面与移动共用。
 //!
-//! 分成两件事：**怎么排**在这里，**怎么摆上屏**留在各平台自己的视图层
-//! （桌面 [`super::super::desktop::engine`] 把行盒接进虚拟列表，
-//! 移动 `ui/mobile/reader_view.rs` 自己逐行绘制）。这样同一本书在两端得到的是同一份
-//! `Layout`，屏幕上看到的行只可能因为视口宽度不同而不同，不会因为「两端各实现了一遍
-//! 层叠与断行」而不同。
+//! 分成两件事：**怎么排、切成几片**在这里，**怎么摆上屏**在视图层
+//! （`ui/features/reader`，两端一份实现）。这样同一本书在两端得到的是同一份
+//! `Layout` 与同一套分片，屏幕上看到的行只可能因为视口尺寸不同而不同，不会因为
+//! 「两端各实现了一遍层叠与断行」而不同。
 //!
 //! [`chapter_xhtml`] 是这段链子的入口之一：Markdown / TXT 的章源文本是规范化纯文本，
 //! 排版层只认 XHTML，所以先做一次最小包装（空行分段、段内换行 → `<br/>`、
@@ -12,13 +11,15 @@
 //! 所以这条链子不会让可见文本的坐标漂移（引擎路径的坐标见 `folio_core::anchor::TextMap`）。
 
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use folio_core::Reader;
 use folio_core::anchor::TextMap;
-use folio_core::css::computed::{ComputedStyle, TextAlign, cascade};
+use folio_core::css::computed::{ComputedStyle, StyledDom, TextAlign, cascade};
 use folio_core::css::{Origin, RuleSet};
 use folio_core::dom::{Dom, NodeId};
+use folio_core::layout::fragment::{Fragment, FragmentOptions, column_width, fragments};
 use folio_core::layout::{Layout, LayoutOptions, LineBox, layout as typeset};
 use folio_core::{Chapter, Content, DocMeta, FlowDoc, Format};
 use gpui_kit::{App, Window};
@@ -38,8 +39,8 @@ pub fn open(path: &Path) -> folio_core::Result<(DocMeta, FlowDoc)> {
 ///
 /// EPUB 的章节本来就是 XHTML，原样透传。Markdown / TXT 的 `Chapter::source` 是
 /// **规范化后的纯文本**（`folio-core/src/format/markdown.rs` 只做行尾统一、压空行、
-/// 按 `#` 分章，从不生成 HTML；桌面端把这两类交给 `gpui_kit::component::text::TextView`，
-/// 移动端走自研引擎），所以要在这里补一次最小规范化。
+/// 按 `#` 分章，从不生成 HTML），所以要在这里补一次最小规范化 —— 三类格式从这一层起
+/// 走同一条排版链，屏幕上也就只有「一片怎么摆」这一套代码。
 pub fn chapter_xhtml(chapter: &Chapter, format: Format) -> String {
     if format == Format::Epub {
         return chapter.source.clone();
@@ -120,10 +121,12 @@ pub fn body_of(dom: &Dom) -> NodeId {
 }
 
 /// 一章的排版状态：源文本 + 书自己的 CSS + 读者偏好 + 本章图片索引，
-/// 缓存上一次的 `Layout`。
+/// 缓存上一次的 `Layout` 与由它切出的片。
 ///
 /// 重排只在**排版输入真的变了**之后发生（版心宽度或任何一项读者偏好），所以逐帧调用
 /// [`Document::ensure_layout`] 是安全的：滚动、点击、别的窗口改标题都不触发重算。
+/// 分片同理，多出来的两个键是「一片高」与「一页几栏」（见 [`Document::ensure_viewport`]）——
+/// 连续滚动 / 分页 / 双页对开三种模式在核心层是同一套代码，差别只有这两个数。
 pub struct Document {
     source: String,
     /// 本章解析好的 DOM，与 `source` 同生命周期。
@@ -144,6 +147,37 @@ pub struct Document {
     /// 只按字号与行距判断就会让「改了缩进但不重排」这种毛病留在缓存里。
     laid_out: Option<(f32, Reader)>,
     layout: Layout,
+    /// 层叠结果。分片要读块级的 `break-*` 与 orphans/widows，而这些只在层叠之后存在，
+    /// 所以它跟排版结果同批算、同批存，不在分片时重来一遍。
+    styles: Option<StyledDom>,
+    /// 上次分片时的 `(栏宽, 读者偏好, 一片高, 一页几栏)`。宽与偏好也是它的键：
+    /// 换字号会改变行数，行变了切点就变了。
+    fragmented: Option<(f32, Reader, f32, usize)>,
+    /// 本章切出来的片。`Rc` 是因为渲染每帧都要拿一份而不必搬动整张表。
+    slices: Rc<Vec<Fragment>>,
+}
+
+/// 界面交给排版与分片的两个轴。**三种模式只差这里的三个数**：
+///
+/// | 模式 | `columns` | `height` |
+/// |---|---|---|
+/// | 连续滚动 | 1 | `0`（不分片，一片装完全部） |
+/// | 分页 | 1 | 一个视口高 |
+/// | 双页对开 | 2 | 一个视口高（一片 = 一栏 = 一页的一半） |
+///
+/// 折行发生在**栏宽**上，所以 `columns` 与 `gap` 影响排版，`height` 只影响切点：
+/// 改页高不重排，改栏宽才重排。这两个数由同一份 [`Viewport`] 传进去，界面不可能
+/// 把「按两栏排的版」切成「每页一栏」。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viewport {
+    /// 外壳里不属于阅读栏的**宽度**（桌面的侧栏 / 图标栏；手机上没有侧栏，是 0）。
+    pub reserve: f32,
+    /// 一页几栏。`0` 与 `1` 同义。
+    pub columns: usize,
+    /// 一栏可用的高（逻辑像素）。`0` = 不分片 = 连续滚动。
+    pub height: f32,
+    /// 栏间距，只在 `columns > 1` 时参与除法。
+    pub gap: f32,
 }
 
 impl Document {
@@ -162,6 +196,9 @@ impl Document {
             images,
             laid_out: None,
             layout: Layout::default(),
+            styles: None,
+            fragmented: None,
+            slices: Rc::new(Vec::new()),
         }
     }
 
@@ -174,6 +211,9 @@ impl Document {
 
     pub fn set_prefs(&mut self, prefs: Reader) {
         self.prefs = prefs;
+        // 偏好同时进排版键与分片键，所以两边一起作废：留着旧切片的话，
+        // 「换了字号但一页还是那么多行」这种毛病在屏幕上看不出来，只会在进度条上飘。
+        self.drop_fragments();
     }
 
     /// 换章。源文本没变就保留上一次的排版结果，来回翻同一章不必重算。
@@ -184,6 +224,7 @@ impl Document {
             self.dom = dom;
             self.map = map;
             self.laid_out = None;
+            self.drop_fragments();
         }
     }
 
@@ -191,6 +232,13 @@ impl Document {
     pub fn set_images(&mut self, images: Arc<ChapterImages>) {
         self.images = images;
         self.laid_out = None;
+        self.drop_fragments();
+    }
+
+    /// 作废切片缓存。排版一作废就必须跟着作废它 —— 切点读的是行盒。
+    fn drop_fragments(&mut self) {
+        self.fragmented = None;
+        self.slices = Rc::new(Vec::new());
     }
 
     pub fn prefs(&self) -> &Reader {
@@ -227,7 +275,8 @@ impl Document {
 
     /// 版心宽度 = 视口宽 − `pane_reserve` − 左右页边距。
     ///
-    /// **`pane_reserve` 是外壳里不属于阅读栏的宽度**（桌面是侧栏，移动端没有侧栏所以传 0）。
+    /// **`pane_reserve` 是外壳里不属于阅读栏的宽度**（桌面是侧栏 / 图标栏，移动端是 0：
+    /// 那边的导航栏在底部，占的是高，扣在视口高上而不是这里）。
     /// 这一步量不到 flex 之后的真实栏宽，所以由外壳把占位报进来；版心必须 ≤ 阅读栏实际宽度，
     /// 否则引擎按宽列折行、屏幕按窄栏裁剪，居中的标题就会被推到栏外。
     ///
@@ -265,6 +314,11 @@ impl Document {
     /// 所以这一步留在渲染帧里做；挪进 `background_spawn` 属 M4。
     pub fn ensure_layout(&mut self, window: &mut Window, cx: &mut App, pane_reserve: f32) {
         let width = Self::content_width(window, &self.prefs, pane_reserve);
+        self.typeset_to(window, cx, width);
+    }
+
+    /// 按给定宽度排版一章。宽度没变、偏好没变就直接复用上一次的结果。
+    fn typeset_to(&mut self, window: &mut Window, cx: &mut App, width: f32) {
         let key = (width, self.prefs.clone());
         if self.laid_out.as_ref() == Some(&key) {
             return;
@@ -285,7 +339,67 @@ impl Document {
             &measure,
             self.images.as_ref(),
         );
+        self.styles = Some(styles);
         self.laid_out = Some(key);
+        // 行盒换了，切点也就换了 —— 切片必须跟着作废，否则分页翻到的是上一页的行。
+        self.drop_fragments();
+    }
+
+    /// 排版 + 分片，返回**栏宽**（绘制要按它摆每栏的左边界）。
+    ///
+    /// 一次把整章切完而不是逐页现算：`Fragmentainer` 的游标是为「翻到第 500 页」准备的，
+    /// 而这里一片一章最多几千行，一次切完仍然只在 `(栏宽, 偏好, 片高, 栏数)` 变了时发生，
+    /// 换来的是进度条随手就有总页数。
+    pub fn ensure_viewport(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+        viewport: Viewport,
+    ) -> f32 {
+        let columns = viewport.columns.max(1);
+        let total = Self::content_width(window, &self.prefs, viewport.reserve);
+        let width = column_width(total, columns, viewport.gap).max(1.0);
+        self.typeset_to(window, cx, width);
+        let height = viewport.height.max(0.0);
+        let key = (width, self.prefs.clone(), height, columns);
+        if self.fragmented.as_ref() == Some(&key) {
+            return width;
+        }
+        let options = FragmentOptions { height, columns };
+        let slices = match &self.styles {
+            Some(styles) => fragments(&self.layout, styles, options),
+            // 没排过版就没有行盒可切（第一帧之前）。
+            None => Vec::new(),
+        };
+        self.fragmented = Some(key);
+        self.slices = Rc::new(slices);
+        width
+    }
+
+    /// 本章切出来的片，顺序是「页优先、页内按栏」。
+    pub fn slices(&self) -> Rc<Vec<Fragment>> {
+        self.slices.clone()
+    }
+
+    /// 一共几页。没分过片时算 1 —— 空的一页也得让读者翻得动、进度条也才有分母。
+    pub fn page_count(&self) -> usize {
+        self.slices.last().map_or(1, |last| last.page + 1)
+    }
+
+    /// 第 `page` 页第 `column` 栏。`columns` 由调用方给（界面才知道现在几栏），
+    /// 越界返回 `None`：最后一页本来就可能不满。
+    pub fn slice_of(&self, page: usize, column: usize, columns: usize) -> Option<&Fragment> {
+        self.slices
+            .get(page.saturating_mul(columns.max(1)) + column)
+    }
+
+    /// 第 `line` 行落在第几页。行号越界就给最后一页：恢复进度要的是「最接近的那一页」，
+    /// 不是「翻不到的一页」。
+    pub fn page_of_line(&self, line: usize) -> usize {
+        self.slices
+            .iter()
+            .find(|slice| !slice.empty && line < slice.lines.end)
+            .map_or_else(|| self.page_count() - 1, |slice| slice.page)
     }
 
     // ---- 进度与锚点：滚动位置 ↔ 可见文本偏移 ----
@@ -634,78 +748,5 @@ mod tests {
         assert_eq!(document.line_at_offset(1234), 0);
         // 坐标表不依赖排版，构造就有 —— 批注可以在排版之前建锚点。
         assert_eq!(document.text_map().text(), LONG);
-    }
-
-    /// 桌面端虚拟列表的项高换算。`engine` 只在 `cfg(not(mobile))` 下编译，所以这一整块
-    /// 跟着门控；它留在 `document` 的测试里而不搬去 `engine.rs`，是因为它复用上面对象
-    /// 的 `layout_of` / `bare_prefs` 脚手架 —— 搬过去就得把那套「开窗口把一段 XHTML
-    /// 排完」的东西抄第二份，两份几何会在不同的字体集上慢慢漂开。
-    #[cfg(not(mobile))]
-    mod list_metrics {
-        use super::{LONG, bare_prefs, layout_of};
-        use crate::ui::features::reader::engine::{item_top, line_at_item_top};
-        use gpui_kit::TestAppContext;
-
-        /// 桌面端那张虚拟列表的项高**不含块间空隙**，这是量出来的，不是推测：
-        /// 三段各一行时最后一行的行底在 132 之上，而逐项高度之和比排版总高小一档以上。
-        ///
-        /// 写这条测试有两个目的：① `engine::item_top` / `line_at_item_top` 必须在
-        /// **列表空间**里换算（用排版的绝对 y 会每段差一档 margin，恢复进度就偏半屏）；
-        /// ② 段与段之间在桌面上少一档空白这件事必须留一道门 —— 谁去修渲染（把
-        /// 「到下一行的推进量」当项高），这条会红，那时候要连 `line_element` 的
-        /// `top` 一起改，不能只改一边。
-        ///
-        /// 断言只写**关系**不写具体像素：行盒高取 `max(line-height 盒, ascent+descent)`，
-        /// 后者由解析出来的真字体给，本机与 CI 的字体集不同，钉死数字就是一条见机器就红的测试。
-        #[gpui_kit::test]
-        fn the_engine_list_counts_line_boxes_not_the_gaps_between_them(cx: &mut TestAppContext) {
-            cx.update(gpui_kit::init);
-            let xhtml = format!("<p>{LONG}</p><p>{LONG}</p><p>{LONG}</p>");
-            let document = layout_of(cx, &xhtml, &bare_prefs(), 600.0);
-            let lines = document.lines();
-            assert_eq!(
-                lines.len(),
-                3,
-                "27 个字 × 16px = 432px < 600px 版心，每段正好一行"
-            );
-
-            let boxes: f32 = lines.iter().map(|line| line.height).sum();
-            // UA 表给 `<p>` 上下各 1em，所以第一段不是从 0 开始排。
-            assert!(
-                lines[0].y > 0.0,
-                "首行行顶该在 UA 的段前距之下，实际 {}",
-                lines[0].y
-            );
-            let last_bottom = lines[2].y + lines[2].height;
-            assert!(
-                last_bottom > boxes,
-                "最后一行的行底（{last_bottom}）比项高之和（{boxes}）大 —— 差的就是列表里没有的那些档"
-            );
-            assert!(
-                document.height() > boxes,
-                "排版总高（{}）该大于项高之和（{boxes}），否则这两个空间就是一回事",
-                document.height()
-            );
-
-            // 列表空间的项顶就是逐项累加，与绝对 y 无关。
-            assert_eq!(item_top(&document, 0), 0.0);
-            assert_eq!(item_top(&document, 1), lines[0].height);
-            // 越界的行号**夹到最后一项的顶**，不是给出项高之和：调用方是「跳到第 k 行」，
-            // k 超界时要停在最后一行能到的位置，而不是滚出内容末尾。
-            assert_eq!(
-                item_top(&document, 3),
-                item_top(&document, 2),
-                "行号越界就夹住，别滚出一屏空白"
-            );
-            for (line, row) in lines.iter().enumerate() {
-                let top = item_top(&document, line);
-                assert_eq!(line_at_item_top(&document, top), line, "项顶反解回自己");
-                assert_eq!(
-                    line_at_item_top(&document, top + row.height / 2.0),
-                    line,
-                    "落在项内部任意一点也还是那一项"
-                );
-            }
-        }
     }
 }

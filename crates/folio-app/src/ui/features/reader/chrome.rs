@@ -1,10 +1,12 @@
-//! 阅读页浮层的决策部分：点在哪一区、浮层开到哪一档、各条带占多高、进度怎么念。
+//! 阅读页浮层的决策部分：点在哪一区、浮层开到哪一档、正文按哪种模式摆、进度怎么念。
 //!
 //! 这里只有**判断**，一个 gpui 元素都没有 —— 于是两端都编译，宿主的 `cargo test`
-//! 就能把点击分区与状态机整条跑一遍，不必上真机猜。渲染在 `page_mobile`。
+//! 就能把点击分区、状态机与模式退档整条跑一遍，不必上真机猜。渲染在 `page`。
 //!
 //! 顶栏与底栏是**压在正文上**的浮层，不推动正文重排：读者点一下屏幕，字不该跳走。
 //! 正文让出的只有干净态那两行小字的高度（[`HEADER_HEIGHT`] / [`FOOTER_HEIGHT`]）。
+
+use folio_core::layout::fragment::column_width;
 
 /// 顶栏高（逻辑像素，不含系统状态栏）。
 pub const TOP_BAR_HEIGHT: f32 = 44.0;
@@ -24,6 +26,113 @@ pub const PANEL_HEIGHT: f32 = 320.0;
 pub const FONT_SIZE_RANGE: (f32, f32) = (12.0, 40.0);
 /// 排版面板里行距滑条的范围，同样是设置页 1.0–4.0 里常用的那一段。
 pub const LINE_HEIGHT_RANGE: (f32, f32) = (1.2, 2.4);
+
+/// 双页对开时一栏最少要多宽（逻辑像素）。低于这个宽度，一行只容得下十几个字，
+/// 「两页」就变成了两条窄柱子，读者的眼球要在柱子间来回跳 —— 那是比单页更差的阅读。
+pub const MIN_COLUMN_WIDTH: f32 = 200.0;
+/// 读者把页边距调到 0 时中缝的下限：两页之间总得有一条缝，否则页界靠猜。
+pub const MIN_SPREAD_GAP: f32 = 24.0;
+
+/// 外壳在不属于正文的那一侧占掉多少（逻辑像素）。
+///
+/// 分成两个轴是因为**导航栏在两端的对边不同**：手机上横躺着占高，桌面上竖着占宽。
+/// 合成一个数的话另一端就得拿它去扣错的那一轴 —— 以前正是这样：桌面把它当宽扣、
+/// 移动把它当高扣，同一个参数两种读法，读者看不出差别，但版心会少扣或多扣一条边。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Reserve {
+    /// 左侧占掉的宽度（侧栏 / 图标栏）。
+    pub width: f32,
+    /// 底部占掉的高度（导航栏）。
+    pub height: f32,
+}
+
+impl Reserve {
+    pub const ZERO: Self = Self {
+        width: 0.0,
+        height: 0.0,
+    };
+}
+
+/// 正文的呈现模式。**三种模式是同一套分片代码的三个参数**，不是三条代码路
+/// （见 `folio_core::layout::fragment`）：区别只有「一片多高」与「一页几栏」。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PageMode {
+    /// 连续滚动：一章一条到底的正文。手机上默认这一档。
+    #[default]
+    Continuous,
+    /// 整页翻，一页一栏。双页装不下时退回的就是它。
+    Paged,
+    /// 双页对开：一页两栏。
+    Spread,
+}
+
+impl PageMode {
+    /// 一页几栏。
+    pub fn columns(self) -> usize {
+        match self {
+            Self::Spread => 2,
+            Self::Continuous | Self::Paged => 1,
+        }
+    }
+
+    /// 是不是连续滚动（只有它是「一片高 0」，也就只有它靠滚动位置而不是页号定位）。
+    pub fn is_continuous(self) -> bool {
+        matches!(self, Self::Continuous)
+    }
+
+    /// 装不下两栏时退回整页翻。手机上点「双页」不会得到两条窄柱子，而是分页 ——
+    /// 这一档由宽度决定、不由 target 决定，所以横屏的平板真能双页，竖屏手机不能。
+    pub fn effective(self, total_width: f32, gap: f32) -> Self {
+        if self == Self::Spread && !spread_fits(total_width, gap) {
+            Self::Paged
+        } else {
+            self
+        }
+    }
+
+    /// 落库用的模式名。进度本身存的是「第几个字」，与模式无关，所以换模式不丢位置；
+    /// 这个名字记的是「这份进度当时长什么样」，重开一本书时照它把模式也带回来。
+    pub fn storage_name(self) -> &'static str {
+        match self {
+            Self::Continuous => "continuous",
+            Self::Paged => "page",
+            Self::Spread => "spread",
+        }
+    }
+
+    /// 读回的模式名认不出来就当连续滚动：旧库里的名字、手改过的配置都不该让书打不开。
+    pub fn from_storage_name(name: &str) -> Self {
+        match name {
+            "spread" => Self::Spread,
+            "page" => Self::Paged,
+            _ => Self::Continuous,
+        }
+    }
+
+    /// 点一下切到哪一档：连续 ⇄ 双页。
+    ///
+    /// 三档循环会把「分页」做成一格谁都不会点的中间态：读者要的是「一直滚」或
+    /// 「像书一样翻」，分页只在装不下双页时作为退路自动出现。
+    pub fn next(self) -> Self {
+        match self {
+            Self::Continuous => Self::Spread,
+            Self::Spread | Self::Paged => Self::Continuous,
+        }
+    }
+}
+
+/// 双页的中缝：取读者自己那条页边距，并给一条下限。
+///
+/// 为什么跟着 `margin_x` 走而不是定一个数：左右两页读起来该是「两页」，中缝比外面
+/// 那条边距窄就会变成「一块被硬切开的正文」，页界靠猜。
+pub fn spread_gap(margin_x: f32) -> f32 {
+    margin_x.max(MIN_SPREAD_GAP)
+}
+
+/// 这宽度装不装得下双页。`total` 是**已扣掉左右页边距**的可用宽（[`column_width`] 只算栏）。
+pub fn spread_fits(total: f32, gap: f32) -> bool {
+    column_width(total, 2, gap) >= MIN_COLUMN_WIDTH
+}
 
 /// 正文被点中的哪一区。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -96,23 +205,6 @@ impl Chrome {
         self.panel
     }
 
-    /// 浮层一共压住多高（逻辑像素）。
-    ///
-    /// 正文的可滚范围**不**按它算（浮层压字不重排），但浮层里那些条带自己的高度、
-    /// 以及「面板展开时列表有多高」都从这里派生，所以这个数只能有一份。
-    pub fn covered_height(self) -> f32 {
-        if !self.open {
-            return 0.0;
-        }
-        TOP_BAR_HEIGHT
-            + BOTTOM_BAR_HEIGHT
-            + if self.panel == Panel::None {
-                0.0
-            } else {
-                PANEL_HEIGHT
-            }
-    }
-
     /// 正文上的一次点击。
     ///
     /// 浮层开着的时候**任何一区都只收浮层**：面板正挡着下半屏，这时候翻屏等于让读者
@@ -171,5 +263,137 @@ pub fn percent_label(ratio: f32) -> String {
         format!("{:.0}%", percent)
     } else {
         format!("{:.1}%", percent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 这些是阅读页唯一「能在宿主上跑完」的那一层：分区、开合、模式退档、进度念法。
+    //! 渲染那一侧要窗口和字体，这一侧只要数，所以真机上「点左下为什么没翻页」这类问题
+    //! 应该先在这里红过一次。
+
+    use super::{
+        Chrome, Effect, MIN_COLUMN_WIDTH, PageMode, Panel, Zone, percent_label, spread_fits,
+        spread_gap, zone,
+    };
+
+    #[test]
+    fn the_body_is_split_into_three_zones() {
+        // 三分之一 / 三分之二是拇指去够左右两页的距离，不是精确刻度；这里钉的是边界归属。
+        assert_eq!(zone(0.0, 300.0), Zone::PrevPage);
+        assert_eq!(zone(99.0, 300.0), Zone::PrevPage);
+        assert_eq!(zone(150.0, 300.0), Zone::ToggleChrome);
+        assert_eq!(zone(201.0, 300.0), Zone::NextPage);
+        // 宽度非正是能发生的（窗口正在销毁或还没量过），那种时候按中间那档算。
+        assert_eq!(zone(10.0, 0.0), Zone::ToggleChrome);
+        assert_eq!(zone(10.0, -1.0), Zone::ToggleChrome);
+    }
+
+    #[test]
+    fn a_tap_collapses_the_overlay_before_it_pages() {
+        let mut chrome = Chrome::default();
+        // 干净态：点中间开浮层，点两边翻屏。
+        assert_eq!(
+            chrome.handle_body_tap(Zone::ToggleChrome),
+            Effect::OpenChrome
+        );
+        assert!(chrome.is_open());
+        // 浮层开着（还带着面板）时点哪一区都只收，不翻屏：字不该在读者眼皮底下跑走。
+        // 两层（面板 + 整层）要两下才收干净，收的过程中一区都不产生翻页。
+        chrome.select(Panel::Toc);
+        for zone in [Zone::PrevPage, Zone::NextPage] {
+            assert_eq!(chrome.handle_body_tap(zone), Effect::DismissChrome);
+        }
+        assert!(!chrome.is_open(), "两下之后该收干净");
+        // 收干净之后才轮得到翻屏。
+        assert_eq!(chrome.handle_body_tap(Zone::NextPage), Effect::NextPage);
+        assert_eq!(chrome.handle_body_tap(Zone::PrevPage), Effect::PrevPage);
+    }
+
+    #[test]
+    fn dismissing_peels_the_panel_before_the_whole_layer() {
+        let mut chrome = Chrome::default();
+        chrome.select(Panel::Typography);
+        assert!(chrome.dismiss(), "第一下该被面板消费");
+        assert_eq!(chrome.panel(), Panel::None);
+        assert!(chrome.is_open(), "面板收了，底栏还在");
+        assert!(chrome.dismiss(), "第二下收整层");
+        assert!(!chrome.is_open());
+        assert!(!chrome.dismiss(), "已经干净了，这一下该交还给系统返回");
+    }
+
+    #[test]
+    fn picking_the_same_panel_twice_closes_it_without_hiding_the_bar() {
+        let mut chrome = Chrome::default();
+        chrome.select(Panel::Toc);
+        assert_eq!(chrome.panel(), Panel::Toc);
+        chrome.select(Panel::Toc);
+        assert_eq!(chrome.panel(), Panel::None, "再点同一格是「不要了」");
+        assert!(chrome.is_open(), "但顶栏底栏不该跟着闪一下");
+        // 换面板不经过「全关」这一态。
+        chrome.select(Panel::Toc);
+        chrome.select(Panel::Typography);
+        assert_eq!(chrome.panel(), Panel::Typography);
+    }
+
+    #[test]
+    fn spread_yields_to_paged_when_two_columns_do_not_fit() {
+        // 手机上那点宽度（减掉 48×2 页边距后约 190）装不下两栏 → 退回整页翻。
+        assert_eq!(
+            PageMode::Spread.effective(190.0, spread_gap(48.0)),
+            PageMode::Paged
+        );
+        // 桌面窗口铺开就装得下。
+        assert_eq!(
+            PageMode::Spread.effective(900.0, spread_gap(48.0)),
+            PageMode::Spread
+        );
+        // 连续滚动与分页不改变档：退档只可能发生在使用户要双页的那一步。
+        assert_eq!(
+            PageMode::Continuous.effective(0.0, 0.0),
+            PageMode::Continuous
+        );
+        assert_eq!(PageMode::Paged.effective(0.0, 0.0), PageMode::Paged);
+
+        // 判据是「一栏至少多宽」，所以正好卡在临界点上。
+        let gap = 24.0;
+        assert!(spread_fits(MIN_COLUMN_WIDTH * 2.0 + gap, gap));
+        assert!(!spread_fits(MIN_COLUMN_WIDTH * 2.0 + gap - 1.0, gap));
+        // 页边距调到 0 也留一条缝，别让两页贴成一条。
+        assert_eq!(spread_gap(0.0), 24.0);
+        assert_eq!(spread_gap(64.0), 64.0);
+    }
+
+    #[test]
+    fn the_mode_cycle_and_the_stored_name_agree() {
+        assert_eq!(PageMode::Continuous.next(), PageMode::Spread);
+        assert_eq!(PageMode::Spread.next(), PageMode::Continuous);
+        // 退档后的分页再点一次也回连续，不会绕进「三档循环」出不来。
+        assert_eq!(PageMode::Paged.next(), PageMode::Continuous);
+        for mode in [PageMode::Continuous, PageMode::Paged, PageMode::Spread] {
+            assert_eq!(
+                PageMode::from_storage_name(mode.storage_name()),
+                mode,
+                "{} 存出去再读回来必须是同一档",
+                mode.storage_name()
+            );
+        }
+        // 认不出的名字（旧库、手改的 JSON）当连续滚动，不是 panic、不是双页。
+        assert_eq!(PageMode::from_storage_name(""), PageMode::Continuous);
+        assert_eq!(
+            PageMode::from_storage_name("paginated"),
+            PageMode::Continuous
+        );
+    }
+
+    #[test]
+    fn the_progress_label_distinguishes_nobody_from_a_little() {
+        assert_eq!(percent_label(0.0), "0%", "没读与读了一点点是两件事");
+        assert_eq!(percent_label(0.005), "0.5%", "一成以下保留一位小数");
+        assert_eq!(percent_label(0.12), "12%");
+        assert_eq!(percent_label(1.0), "100%");
+        // 越界的比例（滚动位置刚从上一个模式残留下来时会遇到）夹住而不是念出 130%。
+        assert_eq!(percent_label(1.7), "100%");
+        assert_eq!(percent_label(-0.3), "0%");
     }
 }
