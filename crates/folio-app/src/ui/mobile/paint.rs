@@ -33,7 +33,7 @@ impl GlyphRun {
     /// 在这里泛型化会把调用点逼成 `'static`。构造点自己 `SharedString::new(...)`。
     pub fn new(text: SharedString, font: Font, font_size: f32) -> Self {
         Self {
-            text: text.into(),
+            text,
             font,
             font_size,
             color: black(),

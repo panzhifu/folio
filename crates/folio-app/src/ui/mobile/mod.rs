@@ -229,7 +229,7 @@ fn open_main_window(cx: &mut App) {
             // 平台级实现，那个实现固定返回深色；窗口级 appearance 由 JNI 真的查了
             // 系统的夜间模式（`gpui-mobile/src/android/window.rs:1285`）。
             theme::apply(&ConfigHolder::appearance(cx), Some(window), cx);
-            let shell = cx.new(|cx| ShellView::boot(cx));
+            let shell = cx.new(ShellView::boot);
             cx.new(|cx| Root::new(shell, window, cx))
         },
     ) {

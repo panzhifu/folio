@@ -36,7 +36,11 @@ pub enum Source {
     /// 而不是一片黑 —— 「装上了但读不到书」和「根本没起来」在 logcat 里很难分开。
     Sample(SharedString),
     /// 一本打开的书。
-    Book(Book),
+    ///
+    /// 装箱是因为两臂差着数量级：`Book` 带着章节表与排版结果（三百多字节），
+    /// 而兜底那一行只要 24。不装箱的话，整个 `Source` 连同它外面的视图都按大的那臂算，
+    /// 每次赋值都在搬一整本书。
+    Book(Box<Book>),
 }
 
 /// 一台设备上打开着的一本书：章节表、当前章、以及当前章的排版状态。
@@ -240,7 +244,7 @@ impl ReaderView {
             .unwrap_or_else(Locator::start);
         let book = Book::new(&meta, flow, effective.clone(), locator);
         Ok(Self {
-            source: Source::Book(book),
+            source: Source::Book(Box::new(book)),
             wanted_family: prefs.font_family.clone(),
             prefs: effective,
             family: family.into(),
@@ -418,7 +422,7 @@ impl ReaderView {
                         }
                         runs.push(
                             GlyphRun::new(
-                                SharedString::new(text.to_string()),
+                                SharedString::new(text),
                                 gpui_font(&FontKey::clone(&run.style.font), &family),
                                 run.style.font_size,
                             )
