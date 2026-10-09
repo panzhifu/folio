@@ -15,7 +15,9 @@ use folio_core::css::RuleSet;
 use folio_core::css::computed::{BreakWhen, ComputedStyle, StyledDom, cascade};
 use folio_core::dom::{Dom, NodeId};
 use folio_core::layout::LayoutOptions;
-use folio_core::layout::fragment::{Fragment, FragmentOptions, Fragmentainer, fragments};
+use folio_core::layout::fragment::{
+    Fragment, FragmentOptions, Fragmentainer, column_offset, column_width, fragments,
+};
 use folio_core::layout::{Layout, LineMetrics, Measure, NoImages, layout};
 
 struct Mono;
@@ -63,8 +65,26 @@ fn find(dom: &Dom, want: &str) -> NodeId {
 
 /// 排版 + 分片，返回分片结果与行盒总数。
 fn paginated(html: &str, css: &str, width: f32, page: f32) -> (Layout, Vec<Fragment>) {
+    split_columns(html, css, width, page, 1)
+}
+
+/// 同上，但指定一页几栏。
+fn split_columns(
+    html: &str,
+    css: &str,
+    width: f32,
+    page: f32,
+    columns: usize,
+) -> (Layout, Vec<Fragment>) {
     let styled = styled(html, css, width);
-    let out = fragments(&styled.0, &styled.1, FragmentOptions { height: page });
+    let out = fragments(
+        &styled.0,
+        &styled.1,
+        FragmentOptions {
+            height: page,
+            columns,
+        },
+    );
     (styled.0, out)
 }
 
@@ -90,6 +110,21 @@ fn styled(html: &str, css: &str, width: f32) -> (Layout, StyledDom) {
 fn ranges(pages: &[Fragment]) -> Vec<(usize, usize)> {
     pages
         .iter()
+        .map(|page| (page.lines.start, page.lines.end))
+        .collect()
+}
+
+/// 每片的 `(页号, 栏号)`。多栏的断言全靠它 —— 「第几片」读者不关心，
+/// 「这一栏落在哪一页的第几格」才是界面要画对的东西。
+fn slots(pages: &[Fragment]) -> Vec<(usize, usize)> {
+    pages.iter().map(|page| (page.page, page.column)).collect()
+}
+
+/// 只留有内容的片的行区间：补出来的空栏不该参与「切点有没有被挪动」这种比较。
+fn content_ranges(pages: &[Fragment]) -> Vec<(usize, usize)> {
+    pages
+        .iter()
+        .filter(|page| !page.empty)
         .map(|page| (page.lines.start, page.lines.end))
         .collect()
 }
@@ -265,7 +300,10 @@ fn break_before_right_inserts_a_blank_page_for_parity() {
 fn resuming_from_a_token_matches_the_full_run() {
     let html = format!("<p>{}</p>", cjk(120));
     let (laid, styles) = styled(&html, "", 200.0);
-    let options = FragmentOptions { height: 60.0 };
+    let options = FragmentOptions {
+        height: 60.0,
+        columns: 1,
+    };
     let all = fragments(&laid, &styles, options);
     assert_eq!(all.len(), 5, "10 行、每页 2 行");
 
@@ -280,7 +318,7 @@ fn resuming_from_a_token_matches_the_full_run() {
     assert_eq!(seen.len(), 2);
     assert_eq!(rest, all[2..], "从游标接着算必须和一次性算完逐片相等");
     assert_eq!(token.line, 4);
-    assert_eq!(token.page, 2);
+    assert_eq!(token.fragment, 2);
 }
 
 #[test]
@@ -288,7 +326,15 @@ fn an_empty_document_yields_no_pages() {
     let (laid, styles) = styled("<p></p>", "", 200.0);
     assert!(laid.lines.is_empty(), "空段落不该产出行盒");
     assert!(
-        fragments(&laid, &styles, FragmentOptions { height: 60.0 }).is_empty(),
+        fragments(
+            &laid,
+            &styles,
+            FragmentOptions {
+                height: 60.0,
+                columns: 1
+            }
+        )
+        .is_empty(),
         "没有行就没有片"
     );
 }
@@ -350,4 +396,164 @@ fn a_broken_value_is_counted_rather_than_guessed() {
         styles.ignored, 2,
         "两条都要计入 ignored，否则没预料到的写法会被静默吞掉"
     );
+}
+
+// ---- 多栏：一栏一片，页是 `columns` 片 ----
+//
+// 下面每一条都用同一个基准：**先按 `columns: 1` 跑一遍**。栏这件事只该改变
+// 「第几页第几栏」的归组，不该改变任何一处切点；把它跟基准比对，就是在钉这一点。
+
+/// 十行的书、页高 60 ⇒ 每栏两行、共五栏。分栏前后各栏的行区间必须一模一样。
+fn ten_lines() -> String {
+    format!("<p>{}</p>", cjk(120))
+}
+
+#[test]
+fn columns_do_not_move_a_single_cut_point() {
+    let html = ten_lines();
+    let (laid, one) = paginated(&html, "", 200.0, 60.0);
+    let (_, two) = split_columns(&html, "", 200.0, 60.0, 2);
+    let (_, three) = split_columns(&html, "", 200.0, 60.0, 3);
+    assert_eq!(laid.lines.len(), 10, "120 个字、一行 12 个 → 10 行");
+    assert_eq!(
+        content_ranges(&one),
+        vec![(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)],
+        "基准：每栏两行"
+    );
+    assert_eq!(
+        content_ranges(&two),
+        content_ranges(&one),
+        "两栏不该挪动任何切点"
+    );
+    assert_eq!(content_ranges(&three), content_ranges(&one), "三栏同样不该");
+    assert_eq!(two.iter().filter(|page| !page.empty).count(), 5);
+}
+
+#[test]
+fn a_page_carries_exactly_the_configured_number_of_columns() {
+    let html = ten_lines();
+    let (laid, pages) = split_columns(&html, "", 200.0, 60.0, 2);
+    assert_eq!(
+        ranges(&pages),
+        vec![(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
+    );
+    assert_eq!(
+        slots(&pages),
+        vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)],
+        "第 0、1 页各两栏，末页只有一栏"
+    );
+    assert_tiles(&pages, laid.lines.len());
+    // 末页不补满：补出来的空白栏会让读者翻到一页什么都没有。
+    assert_eq!(pages.last().expect("有内容就该有末页").column, 0);
+}
+
+#[test]
+fn a_forced_break_pads_the_rest_of_its_page() {
+    // 第一段一行 + `break-after: page`，第二段五行。页高 60 ⇒ 每栏两行，两栏一页。
+    let html = format!("<p class=stop>{}</p><p>{}</p>", cjk(10), cjk(60));
+    let (laid, pages) = split_columns(&html, ".stop { break-after: page; }", 200.0, 60.0, 2);
+    assert_eq!(laid.lines.len(), 6, "1 行 + 5 行");
+    // 强制断点只交出第一栏，本页剩下那栏补空片，内容从下一页第一栏继续。
+    assert_eq!(
+        ranges(&pages),
+        vec![(0, 1), (1, 1), (1, 3), (3, 5), (5, 6)],
+        "第二项是补出来的空栏"
+    );
+    assert_eq!(
+        slots(&pages),
+        vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)],
+        "补齐之后每页恰好两栏"
+    );
+    assert!(pages[1].empty && pages[1].lines.end == pages[1].lines.start);
+    assert_tiles(&pages, laid.lines.len());
+    // 对照：同样内容不分栏时不需要补位，片数就是页数。
+    let (_, flat) = paginated(&html, ".stop { break-after: page; }", 200.0, 60.0);
+    assert_eq!(ranges(&flat), vec![(0, 1), (1, 3), (3, 5), (5, 6)]);
+    assert!(flat.iter().all(|page| !page.empty), "单栏时不该出现空片");
+}
+
+#[test]
+fn parity_padding_fills_a_whole_page_when_there_are_columns() {
+    // 两段各一行、页高够装两行，第二段要 `break-before: right`。
+    // 单栏时补一张空片就换到右页；两栏时「补一张」只挪动一栏，那一页就同时是左页
+    // 又是右页 —— 必须补满整页，内容才真的落在下一页。
+    let html = format!("<p>{}</p><p class=r>{}</p>", cjk(10), cjk(10));
+    let css = ".r { break-before: right; }";
+    let (laid, pages) = split_columns(&html, css, 200.0, 1000.0, 2);
+    assert_eq!(laid.lines.len(), 2);
+    assert_eq!(
+        slots(&pages),
+        vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)],
+        "第 0 页被强制断点截掉半页，第 1 页整页空白，内容落到第 2 页"
+    );
+    assert_eq!(pages.iter().filter(|page| page.empty).count(), 3);
+    let last = pages.last().expect("末页");
+    assert_eq!(last.page, 2, "偶数页号当右页");
+    assert_eq!((last.lines.start, last.lines.end), (1, 2));
+    assert_tiles(&pages, laid.lines.len());
+    // 对照单栏：同一个声明只补一张。
+    let (_, flat) = paginated(&html, css, 200.0, 1000.0);
+    assert_eq!(flat.iter().filter(|page| page.empty).count(), 1);
+}
+
+#[test]
+fn continuous_mode_ignores_columns() {
+    let html = ten_lines();
+    let (_, pages) = split_columns(&html, "", 200.0, 0.0, 3);
+    assert_eq!(ranges(&pages), vec![(0, 10)], "没有页就没有栏：整篇一片");
+    assert_eq!(slots(&pages), vec![(0, 0)]);
+}
+
+#[test]
+fn columns_zero_is_the_same_as_one() {
+    // `0` 在选项里是「没设」，不是除数。漏夹一次就是 panic。
+    let html = ten_lines();
+    let (_, none) = split_columns(&html, "", 200.0, 60.0, 0);
+    let (_, one) = split_columns(&html, "", 200.0, 60.0, 1);
+    assert_eq!(ranges(&none), ranges(&one));
+    assert_eq!(slots(&none), slots(&one));
+}
+
+/// 补位状态存在游标里，而不是分片器的私有队列里 —— 这条就是那个决定的验证：
+/// 只走一片就存下 Token，续算必须仍然把剩下的空栏补出来。
+#[test]
+fn resuming_in_the_middle_of_padding_still_pads() {
+    let html = format!("<p class=stop>{}</p><p>{}</p>", cjk(10), cjk(60));
+    let (laid, styles) = styled(&html, ".stop { break-after: page; }", 200.0);
+    let options = FragmentOptions {
+        height: 60.0,
+        columns: 2,
+    };
+    let all = fragments(&laid, &styles, options);
+    let mut first = Fragmentainer::new(&laid, &styles, options);
+    let head = first.next().expect("第一栏");
+    let token = first.token();
+    assert_eq!(
+        token.pad_until,
+        token.fragment + 1,
+        "断点在这一页第一栏，还剩一栏要补：{token:?}"
+    );
+    let rest: Vec<Fragment> = Fragmentainer::resumed(&laid, &styles, options, token).collect();
+    let mut seen = vec![head];
+    seen.extend(rest);
+    assert_eq!(seen, all, "续算必须和一次性算完逐片相等");
+    assert!(all[1].empty, "补的那一栏不能因为换了游标就丢掉");
+}
+
+#[test]
+fn column_width_and_offset_are_the_numbers_the_layout_needs() {
+    // 640px 四栏、栏间 20px：三条间距共 60px，剩下 580 分四份。
+    assert_eq!(column_width(640.0, 4, 20.0), 145.0);
+    assert_eq!(column_width(640.0, 1, 20.0), 640.0, "一栏没有间距");
+    assert_eq!(column_width(640.0, 0, 20.0), 640.0, "`0` 当一栏");
+    // 窄到放不下间距时给 0，不给负数 —— 负宽传进折行会直接算不出行。
+    assert_eq!(column_width(100.0, 4, 40.0), 0.0);
+    assert_eq!(column_offset(145.0, 20.0, 0), 0.0);
+    assert_eq!(
+        column_offset(145.0, 20.0, 2),
+        330.0,
+        "第三栏 = 2 × (栏宽 + 间距)"
+    );
+    // 间距为负按 0 算：读者设置里不该出现负数，但算式不能因此把栏推到左边去。
+    assert_eq!(column_offset(145.0, -50.0, 1), 145.0);
 }

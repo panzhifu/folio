@@ -182,7 +182,9 @@ const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "writing-mode",
     // `orphans` / `widows` / `break-inside` / `page-break-*` 以前在这份名单里
     // （「接受、不生效」），M4 的分片器把它们变成真生效的属性，所以移出去了。
-    // `columns` / `column-gap` 仍然只是被接受 —— 多栏还没接。
+    // `columns` / `column-gap` 留下：分片器认的是**视口**栏数（`FragmentOptions::columns`，
+    // 由界面或读者给），作者写的块级 `column-count` 要改排版期的折行宽度，还没接。
+    // 详见 `docs/known-limitations.md`「分片」一节。
     "float",
     "clear",
     "columns",
