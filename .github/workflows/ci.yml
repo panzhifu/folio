@@ -32,6 +32,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # `folio-app` 的 crate-type 含 staticlib（iOS 由 Xcode 链接），而带全量 debug info 的
+  # `libfolio_app.a` 实测 **1.9 GB**（本机 target/debug 因此涨到 62 GB）。GitHub 的
+  # ubuntu runner 系统盘没那么多，第一次 CI 就是死在
+  # `failed to build archive ... No space left on device (os error 28)`。
+  # `line-tables-only` 把它压到实测 864 MB，同时保留能用的回溯 —— CI 不需要逐步调试。
+  # 只在这里设，不动仓库的 `[profile.dev]`：本地开发仍然要完整 debug info。
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   check:
@@ -45,7 +53,10 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo
+      # 只缓存下载与 git 依赖，**不缓存 `target/`**：构建产物里那个 1 GB 级的静态库
+      # 恢复一份、再编一份，磁盘就是双倍 —— 第一次 CI 正是这么满的。registry 与 git db
+      # 才是重编之外真正的成本（gpui-kit / gpui-pre 那一串），留着。
+      - name: Cache cargo home
         uses: actions/cache@v4
         with:
           path: |
@@ -53,9 +64,8 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
-          key: ubuntu-24.04-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ubuntu-24.04-cargo-
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-
 
       - name: Install system dependencies
         run: |
@@ -81,9 +91,8 @@ jobs:
       - name: clippy (warnings are errors)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build
-        run: cargo build --workspace
-
+      # 不再单列 `cargo build --workspace`：上面 clippy --all-targets 已经把每个 target
+      # 编到位，`cargo test` 自己会做代码生成。多一遍 build 只是多一遍那个 1 GB 的归档。
       # 无头是实测过的：本机把 WAYLAND_DISPLAY / DISPLAY / XDG_RUNTIME_DIR 全清掉之后
       # 13 条 UI 集成测试仍然全绿，所以不需要 xvfb。测试用的是 gpui 的测试平台，
       # 开的是无头窗口，不碰显示服务器也不碰 GPU。
@@ -116,11 +125,13 @@ jobs:
         uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: aarch64-linux-android
+          # 第一次 CI 这个 job 红在这儿，而且与代码无关：`error: 'cargo-clippy' is not
+          # installed for the toolchain '1.99.0-…'` —— 我只给了 `targets:`，忘了 clippy
+          # 不是随 toolchain 装的，得显式要。
+          components: clippy
 
-      # 缓存目录必须是构建真正写入的那个。两个 job 各自跑在独立的 runner 上，
-      # 都用默认的 `target/` 就互不干扰；曾经写成 `target-android/` 而步骤里
-      # 没有设 CARGO_TARGET_DIR，结果是这份缓存永远是空的 —— 每次冷编整棵依赖树。
-      - name: Cache cargo
+      # 同样只缓存 `~/.cargo`，不缓存 `target/`（见 workflow 顶部 env 的磁盘说明）。
+      - name: Cache cargo home
         uses: actions/cache@v4
         with:
           path: |
@@ -128,7 +139,6 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
           key: android-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: android-cargo-
 
