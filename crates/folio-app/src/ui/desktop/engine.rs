@@ -17,7 +17,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use folio_core::layout::LineFragment;
-use gpui_kit::base::v_virtual_list;
+use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
     AnyElement, App, Context, Entity, Hsla, IntoElement, ParentElement, Pixels, Render, Size,
@@ -38,6 +38,33 @@ pub fn item_sizes(document: &Document) -> Rc<Vec<Size<Pixels>>> {
             .map(|line| size(px(width), px(line.height)))
             .collect(),
     )
+}
+
+/// 第 `line` 项在虚拟列表里的顶部偏移：逐项高度累加。
+///
+/// 为什么不用 `Layout` 的绝对 `y`：列表排的是**项**，`item_sizes` 给的就是
+/// `line.height`，块之间的外边距在列表空间里不存在。滚动位置要跟这套坐标对齐，
+/// 用排版绝对 y 就会每段差一档 margin —— 而那正是「恢复后差半屏」那类 bug 的形状。
+/// 越界的 `line` 夹到最后一项。
+pub fn item_top(document: &Document, line: usize) -> f32 {
+    document
+        .lines()
+        .iter()
+        .take(line.min(document.line_count().saturating_sub(1)))
+        .map(|row| row.height)
+        .sum()
+}
+
+/// 列表滚过 `y` 个像素时顶边在第几行。[`item_top`] 的逆。
+pub fn line_at_item_top(document: &Document, y: f32) -> usize {
+    let mut used = 0.0f32;
+    for (ix, row) in document.lines().iter().enumerate() {
+        if used + row.height > y {
+            return ix;
+        }
+        used += row.height;
+    }
+    document.line_count().saturating_sub(1)
 }
 
 /// 第 `ix` 行的元素。列表项按 [`item_sizes`] 依次下排，所以行盒的绝对 x 就是它的左偏移。
@@ -112,13 +139,18 @@ pub const ENGINE_LIST_ID: &str = "engine-lines";
 
 /// 把引擎的行列表接到视图上。`render_item` 由视图提供，因为虚拟列表的闭包签名
 /// 要求它拿到 `&mut V` 与 `Context<V>`（滚动位置一类的副作用要能回写视图）。
+///
+/// `handle` 是**视图持有**的滚动句柄：进度（偏移 → 第几个字）与恢复（第几个字 → 滚到
+/// 哪一行）都要从同一个句柄读同一个数。每帧新建一个句柄的话，滚动位置就成了
+/// 「这一帧才知道」的局部量，`locator()` 永远读到 0。
 pub fn engine_lines<V: Render>(
     view: Entity<V>,
     sizes: Rc<Vec<Size<Pixels>>>,
+    handle: &VirtualListScrollHandle,
     render_item: impl 'static
     + Fn(&mut V, Range<usize>, &mut Window, &mut Context<V>) -> Vec<AnyElement>,
 ) -> impl IntoElement {
-    v_virtual_list(view, ENGINE_LIST_ID, sizes, render_item)
+    v_virtual_list(view, ENGINE_LIST_ID, sizes, render_item).track_scroll(handle)
 }
 
 /// 一帧内把 `[start, end)` 的行画出来。正文色取当前主题，

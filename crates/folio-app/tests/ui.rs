@@ -676,3 +676,81 @@ fn editing_the_account_name_updates_the_holder(cx: &mut TestAppContext) {
     let name = cx.update(|cx| folio_app::ui::shared::config_model::ConfigHolder::account(cx).name);
     assert_eq!(name, "阿遥");
 }
+
+fn epub_flow() -> FlowDoc {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/oss/minimal-zh.epub");
+    let (_, content) = folio_core::open(&path).expect("合成 EPUB 应能打开");
+    let folio_core::Content::Reflow(flow) = content;
+    flow
+}
+
+#[gpui_kit::test]
+fn the_engine_progress_is_a_character_offset_that_comes_back(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = epub_flow();
+    // 字号故意给到 60：这本合成书的第一章很短，默认字号下整章只有几行、比窗口还短，
+    // 列表没有可滚的范围（`max_offset` 实测为 0），那样的话这条测试测的是空集。
+    let prefs = Reader {
+        font_size: 60.0,
+        ..Default::default()
+    };
+    let (view, handle) = open_as(cx, &flow, "epub", prefs.clone(), Locator::start());
+    let lines = view.read_with(cx, |v, _| v.engine_lines().map(|l| l.len()).unwrap_or(0));
+    assert!(lines > 4, "大字号下第一章该排出多行，实际 {lines}");
+    // 跳转目标取「本章中点」。写死一个坐标的话，CI 上字体不同 → 行高不同 →
+    // 可能落在第一行里，那条测试就变成测空集了。
+    let total = view.read_with(cx, |v, _| v.text_length());
+    assert!(total > 40, "第一章该有几十个字可跳，实际 {total}");
+    let target = total / 2;
+    // 章首那一行的坐标不是 0：pretty-print 过的 XHTML 里 `<body>` 与 `<p>` 之间的
+    // 换行本身是文本节点，也进坐标系。这里钉的是「刚打开时还在最前面」，
+    // 而不是「等于 0」—— 见 `anchor` 模块头对坐标系的说明。
+    let start = locator_of(cx, &view).offset;
+    assert!(start < 8, "刚打开该在章首附近，实际坐标 {start}");
+
+    // 引擎那张列表的 `ElementId` 不在测试支持的注册路径里（它注册在
+    // `engine-scroll` 之下），所以滚动这件事走产品本来就要有的那个入口：
+    // 「跳到章内第 N 个字」。目录跳章、书签、恢复进度后面用的都是它。
+    view.update(cx, |v, _| v.jump_to_offset(target));
+    settle(cx, handle);
+
+    let saved = locator_of(cx, &view);
+    assert!(
+        saved.offset > start,
+        "跳到中点坐标 {target} 之后章内偏移该往前走，实际 {start} → {}",
+        saved.offset
+    );
+    assert!(
+        saved.offset <= target,
+        "落点该是覆盖 {target} 那一行的行首，不该越过它：{}",
+        saved.offset
+    );
+    // 也不能越过一整行太多：下一行的行首都比目标早，说明跳过头了。
+    assert!(
+        target - saved.offset < target / 4,
+        "落点离目标 {target} 太远：{}",
+        saved.offset
+    );
+    let progress = progress_of(cx, &view);
+    assert!(
+        progress > 0.0 && progress < 1.0,
+        "滚动比例该在 (0,1) 之间，实际 {progress}"
+    );
+
+    // 用同一个坐标重开：落回的行反解出来的偏移必须还是它。
+    let (reopened, _handle) = open_as(cx, &flow, "epub", prefs, saved);
+    assert!(
+        !reopened.read_with(cx, |v, _| v.has_pending_restore()),
+        "恢复请求该在排版做完的那一帧被消费掉"
+    );
+    assert_eq!(
+        locator_of(cx, &reopened).offset,
+        saved.offset,
+        "坐标 → 行顶 → 再反解回坐标，必须回到同一个字"
+    );
+    assert!(
+        progress_of(cx, &reopened) > 0.0,
+        "重开之后列表真的滚出去了，不是只记了个数"
+    );
+}

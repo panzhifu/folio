@@ -235,3 +235,127 @@ fn body_of_picks_the_body_element() {
         );
     }
 }
+
+/// 进度坐标的往返：行顶像素 → 「第几个字」→ 行号，在**同一份排版**里必须是同一行；
+/// 而换了版心宽与字号之后，它必须还落在同一段里。
+///
+/// 这就是开发方案 M5 那句验收（改字号 + 缩窗口 → 锚点命中）在共用层的落地检查。
+/// 三段文本各带一个段号标记，所以「还在同一段」是可判定的，而不是靠感觉像。
+#[gpui_kit::test]
+fn the_progress_coordinate_survives_a_relayout(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let xhtml = (0..3)
+        .map(|i| format!("<p>第{i}段{LONG}</p>"))
+        .collect::<Vec<_>>()
+        .join("");
+    let base = layout_of(cx, &xhtml, &bare_prefs(), 600.0);
+    let texts = base.line_texts();
+    // 找第二段的第一行：它的文本一定含「第1段」，且行顶像素可反解成坐标。
+    let target = (0..texts.len())
+        .find(|&k| texts[k].starts_with("第1段"))
+        .expect("三段都该排出来");
+    let y = base.lines()[target].y;
+
+    let offset = base.offset_at_y(y);
+    assert!(offset > 0, "第二段不可能从第 0 个字开始");
+    assert_eq!(
+        base.line_at_offset(offset),
+        target,
+        "同一份排版里，像素 → 坐标 → 行号必须回到原行"
+    );
+    // 反向也成立：坐标 → 行顶像素，得到的就是那一行的行顶。
+    assert_eq!(base.y_at_offset(offset), y);
+
+    for (width, size) in [(300.0, 16.0), (900.0, 24.0), (420.0, 30.0)] {
+        let mut prefs = bare_prefs();
+        prefs.font_size = size;
+        let moved = layout_of(cx, &xhtml, &prefs, width);
+        let landed = moved.line_at_offset(offset);
+        let landed_text = &moved.line_texts()[landed];
+        assert!(
+            landed_text.contains("第1段"),
+            "宽 {width}、字号 {size}：坐标 {offset} 落到了「{landed_text}」，不在第二段里"
+        );
+    }
+}
+
+/// 排版还没做过时这套换算不能给出假坐标：一个全新的 `Document` 没有行盒，
+/// 任何偏移都只能映射到「章首」，否则恢复进度会把人送到看不见的地方。
+#[test]
+fn an_unlaid_out_document_maps_everything_to_the_chapter_start() {
+    let document = Document::new(
+        format!("<p>{LONG}</p>"),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+    );
+    assert_eq!(document.line_count(), 0, "没排过版就没有行盒");
+    assert_eq!(document.offset_at_y(4000.0), 0);
+    assert_eq!(document.y_at_offset(1234), 0.0);
+    assert_eq!(document.line_at_offset(1234), 0);
+    // 坐标表不依赖排版，构造就有 —— 批注可以在排版之前建锚点。
+    assert_eq!(document.text_map().text(), LONG);
+}
+
+/// 桌面端那张虚拟列表的项高**不含块间空隙**，这是量出来的，不是推测：
+/// 三段各一行时最后一行的行底在 132 之上，而逐项高度之和比排版总高小一档以上。
+///
+/// 写这条测试有两个目的：① `engine::item_top` / `line_at_item_top` 必须在
+/// **列表空间**里换算（用排版的绝对 y 会每段差一档 margin，恢复进度就偏半屏）；
+/// ② 段与段之间在桌面上少一档空白这件事必须留一道门 —— 谁去修渲染（把
+/// 「到下一行的推进量」当项高），这条会红，那时候要连 `line_element` 的
+/// `top` 一起改，不能只改一边。
+///
+/// 断言只写**关系**不写具体像素：行盒高取 `max(line-height 盒, ascent+descent)`，
+/// 后者由解析出来的真字体给，本机与 CI 的字体集不同，钉死数字就是一条见机器就红的测试。
+#[gpui_kit::test]
+fn the_engine_list_counts_line_boxes_not_the_gaps_between_them(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let xhtml = format!("<p>{LONG}</p><p>{LONG}</p><p>{LONG}</p>");
+    let document = layout_of(cx, &xhtml, &bare_prefs(), 600.0);
+    let lines = document.lines();
+    assert_eq!(
+        lines.len(),
+        3,
+        "27 个字 × 16px = 432px < 600px 版心，每段正好一行"
+    );
+
+    let boxes: f32 = lines.iter().map(|line| line.height).sum();
+    // UA 表给 `<p>` 上下各 1em，所以第一段不是从 0 开始排。
+    assert!(
+        lines[0].y > 0.0,
+        "首行行顶该在 UA 的段前距之下，实际 {}",
+        lines[0].y
+    );
+    let last_bottom = lines[2].y + lines[2].height;
+    assert!(
+        last_bottom > boxes,
+        "最后一行的行底（{last_bottom}）比项高之和（{boxes}）大 —— 差的就是列表里没有的那些档"
+    );
+    assert!(
+        document.height() > boxes,
+        "排版总高（{}）该大于项高之和（{boxes}），否则这两个空间就是一回事",
+        document.height()
+    );
+
+    use folio_app::ui::desktop::engine::{item_top, line_at_item_top};
+    // 列表空间的项顶就是逐项累加，与绝对 y 无关。
+    assert_eq!(item_top(&document, 0), 0.0);
+    assert_eq!(item_top(&document, 1), lines[0].height);
+    // 越界的行号**夹到最后一项的顶**，不是给出项高之和：调用方是「跳到第 k 行」，
+    // k 超界时要停在最后一行能到的位置，而不是滚出内容末尾。
+    assert_eq!(
+        item_top(&document, 3),
+        item_top(&document, 2),
+        "行号越界就夹住，别滚出一屏空白"
+    );
+    for (line, row) in lines.iter().enumerate() {
+        let top = item_top(&document, line);
+        assert_eq!(line_at_item_top(&document, top), line, "项顶反解回自己");
+        assert_eq!(
+            line_at_item_top(&document, top + row.height / 2.0),
+            line,
+            "落在项内部任意一点也还是那一项"
+        );
+    }
+}

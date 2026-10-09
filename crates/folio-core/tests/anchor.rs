@@ -357,3 +357,26 @@ fn a_point_anchor_carries_only_a_coordinate() {
     let chapter = typeset("<body><p>正文</p></body>", "", 200.0);
     assert_eq!(relocate(&point, &chapter.map).confidence, Confidence::Stale);
 }
+
+/// 标签之间的换行与缩进也是文本节点，所以「第一段正文的第一个字」坐标通常是 1，
+/// 不是 0。这不是 bug，是坐标系的定义（见模块头），但它必须被钉住 ——
+/// 否则将来谁把空白节点滤掉，整本书已存的锚点就会集体平移而没人知道。
+#[test]
+fn whitespace_between_tags_is_part_of_the_coordinate_space() {
+    let pretty = typeset("<body>\n  <p>正文</p>\n  <p>第二段</p>\n</body>", "", 600.0);
+    // 实测的解析形状：`</p>\n  <p>` 之间是一段空白 ⇒ 一个文本节点，不是两个。
+    assert_eq!(
+        pretty.map.text(),
+        "\n  正文\n  第二段\n",
+        "文本节点按文档序原样拼，包括标签之间的空白"
+    );
+    let offset = line_offset(&pretty.layout, &pretty.dom, &pretty.map, 0).unwrap_or(999);
+    assert!(offset > 0, "第一行的坐标不该是 0：{offset}");
+    assert_eq!(pretty.map.slice(offset..offset + 2), "正文");
+    // 同一份内容压掉空白之后坐标就变了 —— 所以坐标系只能有一套定义。
+    let tight = typeset("<body><p>正文</p><p>第二段</p></body>", "", 600.0);
+    assert_eq!(
+        line_offset(&tight.layout, &tight.dom, &tight.map, 0).unwrap_or(999),
+        0
+    );
+}

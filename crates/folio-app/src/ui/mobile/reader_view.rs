@@ -163,6 +163,13 @@ pub struct ReaderView {
     /// 正文的可见行与滚动上限都按「窗口高减掉它」这个有效视口算，
     /// 否则文档最后这么一截永远滚不进视野。
     bottom_reserve: f32,
+    /// 还没落地的位置。恢复必须等排版做过一次才能做（坐标 → 行顶的映射要有行盒），
+    /// 而构造时手上没有窗口，所以先记下来，第一帧渲染时取走。
+    pending_restore: Option<Locator>,
+    /// 上一次落库的章内偏移。滚动的落库按它去重：偏移只在**跨过一行**时才变，
+    /// 所以「变了才写」等于「每行至多写一次」，比每帧一次或每次触摸一次都便宜，
+    /// 也不需要定时器。
+    saved_offset: usize,
     /// 书库。移动端的导入还没有界面，文件是 `adb push` 进应用目录的，
     /// 但位置与书目照常入库，所以杀掉进程回来还在同一章。
     store: Option<Store>,
@@ -210,6 +217,8 @@ impl ReaderView {
             content_height: 0.0,
             viewport_height: 0.0,
             bottom_reserve: 0.0,
+            pending_restore: None,
+            saved_offset: 0,
             store: None,
             book_id: None,
         }
@@ -248,6 +257,9 @@ impl ReaderView {
             wanted_family: prefs.font_family.clone(),
             prefs: effective,
             family: family.into(),
+            // 章已经由 `Book::new` 定好了；章内偏移留到第一帧排版做完再落地。
+            pending_restore: (locator.offset > 0).then_some(locator),
+            saved_offset: locator.offset,
             scroll_y: 0.0,
             content_height: 0.0,
             viewport_height: 0.0,
@@ -307,9 +319,8 @@ impl ReaderView {
 
     /// 换一章：作废滚动位置并把新位置落库。
     ///
-    /// 位置只存到**章**这一级 —— 章内偏移要从行盒反解回源文本字节，那是 M5 锚点接线
-    /// 的活，桌面端的引擎路径同样如此。这里不猜一个章内偏移，因为它会在换字号后
-    /// 把人送到完全不同的地方，比回到章首更难解释。
+    /// 换章后 `scroll_y` 归零，于是落库的章内偏移也就是新章的开头 —— 这是对的，
+    /// 不是妥协：读者要求的就是从新的一章开始读。
     pub fn advance_chapter(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Source::Book(book) = &mut self.source else {
             return;
@@ -326,15 +337,26 @@ impl ReaderView {
 
     /// 当前这一章的位置写进书库。没有 `book_id`（库打不开）时静默跳过 ——
     /// 进度落盘失败不该让阅读停下来。
-    fn persist_position(&self) {
+    /// 当前屏幕顶那一行的可见文本偏移。排版还没做过时是 0（章首），不是脏数据。
+    fn visible_offset(&self) -> usize {
+        match &self.source {
+            Source::Book(book) => book.document().offset_at_y(self.scroll_y),
+            Source::Sample(_) => 0,
+        }
+    }
+
+    fn persist_position(&mut self) {
         let (Some(store), Some(id), Source::Book(book)) = (&self.store, self.book_id, &self.source)
         else {
             return;
         };
         let locator = Locator {
             chapter: book.chapter() as u32,
-            offset: 0,
+            // 可见文本的字符偏移。换算在共用层（与桌面端同一个函数），
+            // 所以「滚到哪个像素」这件事在两台上不会各算各的。
+            offset: book.document().offset_at_y(self.scroll_y),
         };
+        self.saved_offset = locator.offset;
         if let Err(err) = store.set_position(id, "continuous", &locator) {
             log::warn!("persist_position: 写入失败 {err}");
         }
@@ -354,6 +376,12 @@ impl ReaderView {
         }
         let max = (self.content_height - self.viewport_height).max(0.0);
         self.scroll_y = (self.scroll_y - dy).clamp(0.0, max);
+        // 跨行才落库：进度不是「滚到第几个像素」而是「读到第几个字」，
+        // 同一个字里再怎么滑都不必写盘。杀进程回来还在同一行，靠的就是这一步。
+        let offset = self.visible_offset();
+        if offset != self.saved_offset {
+            self.persist_position();
+        }
     }
 
     /// 读者在设置里改了字号、行距、缩进或字体，在这一帧同步进来。
@@ -496,6 +524,11 @@ impl Render for ReaderView {
             }
             Source::Book(book) => {
                 book.document_mut().ensure_layout(window, cx, 0.0);
+                // 上次读到第几个字 → 那一行的行顶。只有排版做完了才映射得出，
+                // 所以这一步在 `ensure_layout` 之后而不是构造时。
+                if let Some(locator) = self.pending_restore.take() {
+                    self.scroll_y = book.document().y_at_offset(locator.offset);
+                }
                 self.content_height = book.document().height();
                 let (runs, images) = ReaderView::visible_fragments(
                     book.document(),

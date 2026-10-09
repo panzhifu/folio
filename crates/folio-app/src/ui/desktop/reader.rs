@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use folio_core::store::BookRow;
 use folio_core::{Chapter, FlowDoc, Locator, Reader};
+use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::{
@@ -9,7 +10,7 @@ use gpui_kit::{
     Render, SharedString, Styled, Subscription, TestSupportExt, Window, div, point, px,
 };
 
-use super::engine::{engine_lines, item_sizes, render_range};
+use super::engine::{engine_lines, item_sizes, item_top, line_at_item_top, render_range};
 use crate::ui::shared::document::Document;
 use crate::ui::shared::images::{BookImages, ChapterImages};
 use crate::ui::shared::l10n::tf;
@@ -39,6 +40,9 @@ pub struct ReaderView {
     /// markdown 解析是异步的，构造时直接 reveal_range 会因文本为空而失败；
     /// 而 TextViewState 不实现 EventEmitter，所以用 `observe` 在它每次变化时重试。
     pending_restore: Option<Locator>,
+    /// 引擎那张虚拟列表的滚动句柄。**视图持有**：进度要从这里读偏移、
+    /// 恢复要往这里写行号，每帧新建就等于两条路都读不到东西。
+    engine_scroll: VirtualListScrollHandle,
     _observe_state: Subscription,
 }
 
@@ -92,8 +96,17 @@ impl ReaderView {
             prefs,
             pane_reserve: 0.0,
             pending_restore: (locator.offset > 0).then_some(locator),
+            engine_scroll: VirtualListScrollHandle::new(),
             _observe_state: observe_state,
         }
+    }
+
+    /// 本章可见文本的字数（锚点坐标系的长度）。状态栏的「共 N 字」与恢复/跳转
+    /// 的目标位置都从它推。TextView 那条路径还没接坐标表，所以给 0。
+    pub fn text_length(&self) -> usize {
+        self.engine
+            .as_ref()
+            .map_or(0, |engine| engine.text_map().chars())
     }
 
     /// 引擎算好的行几何。测试与状态栏都从这里读，不在测试里另搭近似视图。
@@ -160,9 +173,14 @@ impl ReaderView {
     /// 外层量不到内容高度，`max_offset` 恒为 0。
     pub fn progress(&self, cx: &App) -> f32 {
         if self.is_engine() {
-            // 引擎路径的章内进度要读虚拟列表的滚动偏移；那属于 M5 的锚点接线
-            // （位置从「像素偏移」改成「行盒 + 节点内偏移」）。这里不猜一个数。
-            return 0.0;
+            // 引擎路径读虚拟列表自己的滚动偏移。gpui 的约定是「往下滚为负」，
+            // 与下面 TextView 那条同一套符号处理：取绝对值相除，不猜正负号。
+            let scrolled = f32::from(self.engine_scroll.offset().y).abs();
+            let reachable = f32::from(self.engine_scroll.max_offset().y).abs();
+            if reachable <= 0.0 {
+                return 0.0;
+            }
+            return (scrolled / reachable).clamp(0.0, 1.0);
         }
         let list = self.state.read(cx).list_state();
         let max = list.max_offset_for_scrollbar().y;
@@ -182,11 +200,16 @@ impl ReaderView {
     /// 探针必须落在**字符边界**上：中文一字三字节，用 `mid..mid+1` 这种单字节
     /// 探针会大量落到边界外而返回 None，反解就会被一路推向章首。
     pub fn locator(&self, cx: &App) -> Locator {
-        if self.is_engine() {
-            // 章级位置仍然准确（chapter 索引照存），只是章内偏移回到章首。
+        if let Some(engine) = self.engine.as_ref() {
+            // 可见文本的字符偏移：字号、行距、版心宽、分页模式怎么改，这个数都不动。
+            // 像素先换成**行号**（在列表自己的坐标空间里，见 `line_at_item_top`），
+            // 再由共用层把行号换成坐标 —— 中间那一跳不经过布局绝对 y，
+            // 所以块间 margin 不会把滚动位置和文字位置错开。
+            let scrolled = f32::from(self.engine_scroll.offset().y).abs();
+            let line = line_at_item_top(engine, scrolled);
             return Locator {
                 chapter: self.chapter as u32,
-                offset: 0,
+                offset: engine.coordinate_of_line(line),
             };
         }
         fn next_boundary(s: &str, from: usize) -> usize {
@@ -303,12 +326,46 @@ impl ReaderView {
         }
         true
     }
+
+    /// 跳到章内第 `offset` 个字那一行的行顶。
+    ///
+    /// 目录跳转、书签、恢复进度共用这一个入口。落点是**列表自己的坐标空间**
+    /// （逐项高度累加，见 `engine::item_top`），不是排版的绝对 `y` —— 后者含块间
+    /// margin，列表项不含，拿错一套就会「恢复后差半屏」。
+    pub fn jump_to_offset(&mut self, offset: usize) {
+        let Some(engine) = self.engine.as_ref() else {
+            // TextView 那条路径的位置恢复走 `reveal_range`，与坐标不同源，别混在这里。
+            return;
+        };
+        let top = item_top(engine, engine.line_at_offset(offset));
+        self.engine_scroll.set_offset(point(px(0.0), -px(top)));
+    }
+
+    /// 引擎路径的位置恢复：坐标 → 行号 → 列表滚到那一行的行顶。
+    ///
+    /// 必须在 `ensure_layout` 之后调用（要的是这一帧的行盒）—— 排版没做过时
+    /// `line_at_offset` 只会给第 0 行，那是「章首」不是「上次的位置」。
+    fn apply_engine_restore(
+        engine: &Document,
+        pending: &mut Option<Locator>,
+        scroll: &VirtualListScrollHandle,
+    ) {
+        // 三个参数分开传，是为了躲开一个纯 borrow-checker 的形状问题：渲染帧里
+        // `self.engine` 已经借成 `&mut`，再调 `&mut self` 的方法就是二次可变借用。
+        // 字段之间互不相干，逐个借出来就行。
+        let Some(locator) = pending.take() else {
+            return;
+        };
+        let top = item_top(engine, engine.line_at_offset(locator.offset));
+        scroll.set_offset(point(px(0.0), -px(top)));
+    }
 }
 
 impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(engine) = self.engine.as_mut() {
             engine.ensure_layout(window, cx, self.pane_reserve);
+            Self::apply_engine_restore(engine, &mut self.pending_restore, &self.engine_scroll);
             let width = px(Document::content_width(
                 window,
                 &self.prefs,
@@ -327,6 +384,7 @@ impl Render for ReaderView {
                 .child(div().mx_auto().w(width).h_full().child(engine_lines(
                     view,
                     sizes,
+                    &self.engine_scroll,
                     |view: &mut Self, range, _window, cx| view.render_engine_range(range, cx),
                 )))
                 .into_any_element();

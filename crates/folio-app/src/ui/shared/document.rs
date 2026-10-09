@@ -9,12 +9,13 @@
 //! [`chapter_xhtml`] 是这段链子的入口之一：Markdown / TXT 的章源文本是规范化纯文本，
 //! 排版层只认 XHTML，所以先做一次最小包装（空行分段、段内换行 → `<br/>`、
 //! ATX 标题 → `<hN>`，文字全部 XML 转义）。段落顺序与字符内容都不改动原文，
-//! 锚点坐标系（`Chapter::source` 的字节偏移）因此仍然成立。
+//! 所以这条链子不会让可见文本的坐标漂移（引擎路径的坐标见 `folio_core::anchor::TextMap`）。
 
 use std::path::Path;
 use std::sync::Arc;
 
 use folio_core::Reader;
+use folio_core::anchor::TextMap;
 use folio_core::css::computed::{ComputedStyle, TextAlign, cascade};
 use folio_core::css::{Origin, RuleSet};
 use folio_core::dom::{Dom, NodeId};
@@ -125,6 +126,14 @@ pub fn body_of(dom: &Dom) -> NodeId {
 /// [`Document::ensure_layout`] 是安全的：滚动、点击、别的窗口改标题都不触发重算。
 pub struct Document {
     source: String,
+    /// 本章解析好的 DOM，与 `source` 同生命周期。
+    ///
+    /// 为什么留着它有两层：① 锚点换算要用（`LineRun::orig` 是**节点内**的字节区间，
+    /// 没有节点文本就换不成可见文本坐标）；② 解析只做一次 —— 排版可以每帧重做
+    /// （宽度、字号变了），但 HTML 解析不该跟着重做，它比层叠贵。
+    dom: Dom,
+    /// 本章的可见文本坐标表。锚点与进度都存在这套坐标里，它不随行盒变化。
+    map: TextMap,
     rules: RuleSet,
     prefs: Reader,
     /// 本章的图片索引：排版期查固有尺寸，绘制期取可渲染的 `Image`。
@@ -143,14 +152,24 @@ impl Document {
         // 书自己的 CSS 是作者层；读者偏好通过根样式进来（`root_base`），
         // 带 `!important` 的读者样式表留给 M5 的 reader.css。
         rules.extend(RuleSet::parse(css, Origin::Author));
+        let (dom, map) = Self::parse_chapter(&source);
         Self {
             source,
+            dom,
+            map,
             rules,
             prefs,
             images,
             laid_out: None,
             layout: Layout::default(),
         }
+    }
+
+    /// 源文本 → DOM + 可见文本坐标。两者必须一起换，否则坐标指的就是上一章的文本。
+    fn parse_chapter(source: &str) -> (Dom, TextMap) {
+        let dom = Dom::parse(source.as_bytes());
+        let map = TextMap::build(&dom, body_of(&dom));
+        (dom, map)
     }
 
     pub fn set_prefs(&mut self, prefs: Reader) {
@@ -160,7 +179,10 @@ impl Document {
     /// 换章。源文本没变就保留上一次的排版结果，来回翻同一章不必重算。
     pub fn set_chapter(&mut self, source: String) {
         if source != self.source {
+            let (dom, map) = Self::parse_chapter(&source);
             self.source = source;
+            self.dom = dom;
+            self.map = map;
             self.laid_out = None;
         }
     }
@@ -252,16 +274,63 @@ impl Document {
             window.text_system().clone(),
             self.prefs.font_family.clone(),
         );
-        let dom = Dom::parse(self.source.as_bytes());
-        let styles = cascade(&dom, &self.rules, &Self::root_base(&self.prefs));
+        let styles = cascade(&self.dom, &self.rules, &Self::root_base(&self.prefs));
+        // 解析不做在这里（`dom` 是字段）；换章才重解析，见 `parse_chapter`。
+        let body = body_of(&self.dom);
         self.layout = typeset(
-            &dom,
+            &self.dom,
             &styles,
-            body_of(&dom),
+            body,
             LayoutOptions { width },
             &measure,
             self.images.as_ref(),
         );
         self.laid_out = Some(key);
+    }
+
+    // ---- 进度与锚点：滚动位置 ↔ 可见文本偏移 ----
+    //
+    // 两端各自换算过一次就会各错一次：桌面读虚拟列表的像素偏移、移动读自己的
+    // `scroll_y`，但「哪一行覆盖这个像素、这行的第一个字是第几个字」必须是同一个答案。
+    // 所以这三个方法放在共用层，实现全在 `folio_core::anchor`。
+
+    /// 本章的可见文本坐标表（批注与书签在上面建锚点）。
+    pub fn text_map(&self) -> &TextMap {
+        &self.map
+    }
+
+    /// 章内第 `y` 个像素那一行的行首字符偏移。滚动位置换成进度用这个。
+    ///
+    /// `y` 超过内容末尾时给末尾那一行的偏移，不是总字数 —— 读者停在最后一屏，
+    /// 下次该回到最后一屏，而不是回到「章尾但看不见任何字」的地方。
+    pub fn offset_at_y(&self, y: f32) -> usize {
+        let line = folio_core::anchor::line_at_y(self.layout(), y);
+        folio_core::anchor::line_offset(self.layout(), &self.dom, &self.map, line).unwrap_or(0)
+    }
+
+    /// 第 `line` 行的行首字符偏移。越界给 0（没有行就没有坐标）。
+    ///
+    /// 桌面端用它做「列表滚过多少像素 → 第几行 → 第几个字」的最后一跳：
+    /// 行号是从虚拟列表自己的坐标空间反解出来的，不能再拿布局绝对 `y` 去换算。
+    pub fn coordinate_of_line(&self, line: usize) -> usize {
+        folio_core::anchor::line_offset(self.layout(), &self.dom, &self.map, line).unwrap_or(0)
+    }
+
+    /// 可见文本偏移落在第几行（行盒下标）。
+    pub fn line_at_offset(&self, offset: usize) -> usize {
+        folio_core::anchor::line_at_offset(self.layout(), &self.dom, &self.map, offset)
+    }
+
+    /// 要把 `offset` 那一行摆上屏，滚动位置该是多少（行顶的绝对 y）。
+    ///
+    /// 排版还没做过（`layout` 是空的）时给 0，等于回到章首 —— 这是唯一不骗人的兜底。
+    pub fn y_at_offset(&self, offset: usize) -> f32 {
+        let layout = self.layout();
+        let line = folio_core::anchor::line_at_offset(layout, &self.dom, &self.map, offset);
+        layout
+            .lines
+            .get(line)
+            .map(|box_| box_.y)
+            .unwrap_or_default()
     }
 }
