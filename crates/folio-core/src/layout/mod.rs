@@ -67,6 +67,14 @@ pub struct RunStyle {
     /// 倍数，不是像素。
     pub line_height: f32,
     pub color: Option<Color>,
+    /// 每个空格之后额外加的宽度（px），来自 CSS 的 `word-spacing`。
+    pub word_spacing: f32,
+    /// 基线偏移，px，正数往上。来自 `vertical-align`，绘制层把它从行的基线里减掉。
+    pub baseline_shift: f32,
+    /// `text-decoration` 的两条线。装饰线**不计入行盒高**（CSS 也是这样），
+    /// 所以排版层只负责把它带到 run 上。
+    pub underline: bool,
+    pub line_through: bool,
 }
 
 impl RunStyle {
@@ -76,12 +84,37 @@ impl RunStyle {
             font_size: style.font_size,
             line_height: style.line_height,
             color: style.color,
+            word_spacing: style.word_spacing.max(0.0),
+            baseline_shift: style.baseline_shift,
+            underline: style.underline,
+            line_through: style.line_through,
         }
     }
 
     /// 该 run 的 inline box 高度。
     pub fn box_height(&self) -> f32 {
         (self.font_size * self.line_height).max(1.0)
+    }
+
+    /// 一个字符的前进量。`word-spacing` 叠在空格上 —— CSS 里它加在 word separator 之后，
+    /// 而我们的折行就是按字符累加的，所以两处（折行与重算已用宽）都走这一个函数，
+    /// 不会出现「折行算得下、画出来超出」的错位。
+    pub fn advance(&self, measure: &dyn Measure, ch: char) -> f32 {
+        let base = measure.char_width(ch, &self.font, self.font_size);
+        if ch == ' ' {
+            base + self.word_spacing
+        } else {
+            base
+        }
+    }
+
+    /// 这段文本里所有空格叠出来的额外宽度。绘制宽度由 `run_metrics` 给，
+    /// 它不认识词距，所以 run 的宽度要在这里补上。
+    pub fn extra_for_spaces(&self, text: &str) -> f32 {
+        if self.word_spacing == 0.0 {
+            return 0.0;
+        }
+        text.chars().filter(|ch| *ch == ' ').count() as f32 * self.word_spacing
     }
 }
 
@@ -611,7 +644,7 @@ impl<'a> Ctx<'a> {
                     }
                 } else {
                     match collected.style_at(at) {
-                        Some(s) => self.measure.char_width(ch, &s.font, s.font_size),
+                        Some(s) => s.advance(self.measure, ch),
                         None => continue,
                     }
                 };
@@ -671,7 +704,7 @@ impl<'a> Ctx<'a> {
                     sum += img.width;
                 }
             } else if let Some(style) = collected.style_at(at) {
-                sum += self.measure.char_width(ch, &style.font, style.font_size);
+                sum += style.advance(self.measure, ch);
             }
         }
         sum
@@ -773,16 +806,22 @@ impl LineAcc {
             let norm = start..stop;
             let text = collected.text.get(norm.clone()).unwrap_or("");
             let metrics = measure.run_metrics(text, &piece.style.font, piece.style.font_size);
-            self.width += metrics.width;
-            self.ascent = self.ascent.max(metrics.ascent);
-            self.descent = self.descent.max(metrics.descent);
+            // 词距要叠在绘制宽度上：`run_metrics` 只按字形给前进量，不认识 `word-spacing`。
+            let width = metrics.width + piece.style.extra_for_spaces(text);
+            // 基线偏移同时改这一段的 ascent / descent：往上抬就多吃 ascent、少占 descent，
+            // 行盒高与基线（下面 `emit_line` 用 `acc.ascent`）因此自动跟着涨 ——
+            // 上标不再会被下一行压到，这是这个字段唯一需要参与几何的地方。
+            let shift = piece.style.baseline_shift;
+            self.width += width;
+            self.ascent = self.ascent.max(metrics.ascent + shift);
+            self.descent = self.descent.max(metrics.descent - shift);
             self.height = self.height.max(piece.style.box_height());
             self.fragments.push(LineFragment::Text(LineRun {
                 node: piece.node,
                 orig: orig_of(piece, &norm),
                 norm,
                 style: (*piece.style).clone(),
-                width: metrics.width,
+                width,
                 ascent: metrics.ascent,
                 descent: metrics.descent,
             }));

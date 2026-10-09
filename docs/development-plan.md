@@ -268,6 +268,17 @@ pub struct TextAnchor {
 - **明确不支持并降级**：`position: fixed/sticky`、`transform`、`transition/animation`、`flex`/`grid`（除非接 `taffy`，属独立决策）、`background-image`、`opacity`、`z-index`、`writing-mode: vertical-*` 中的拉丁侧转。
 降级策略统一为「忽略该声明、保留内容」，并写入 `docs/known-limitations.md`。
 
+**2026-10-09 的落地情况**（不在上面清单里的东西一律按「接受不生效 + 计 `ignored`」处理）：
+`margin` / `padding` 的 1–4 值简写、`font` 简写（有意不重置未写到的子属性）、`word-spacing`、
+`vertical-align: super|sub|<length>|<percentage>`、`text-decoration` / `text-decoration-line`
+都已经真生效；`text-transform` 仍留在不生效名单里，理由不是工作量而是坐标系 —— 它会改变字符本身，
+而锚点与进度建立在源文本字节偏移上，要接得连 §4.6 的锚点映射一起定。
+
+这份清单准不准可以用书来量：`cargo run -p folio-core --example css-gap`（无界面）按**元素**排名，
+判定与层叠共用 `css::computed::declaration_status`。仓库那本《蛇结》在这一轮从
+「41.8% 的元素身上有胜出却没接住的声明」降到 2.1%，「不认识」归零；同一轮正文总高只动了
++0.04%。两个数都要看，只有前者会诱导去补没有视觉收益的属性，只有后者会漏掉正在骗人的统计。
+
 ### 4.5 排版引擎的四个硬骨头（按依赖顺序）
 
 1. **Inline formatting context（E2）**：把 DOM 内联子树展平成 `Run` 流（每 run 携带字体/字号/颜色/区间），用 §3.2 的 `advance` 累加宽度、§3.3 的 `wrap_line` 定断点（跨 run 时按 run 分段喂或自建 wrapper 池），求每行的 max-ascent/descent 定行盒高，`justify`/`text-align` 在此层生效。

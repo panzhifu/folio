@@ -12,8 +12,8 @@
 
 use gpui_kit::{
     App, Bounds, Element, ElementId, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    LayoutId, Length, Pixels, Point, SharedString, Style, TextRun, Window, black, fill, point, px,
-    relative, size,
+    LayoutId, Length, Pixels, Point, SharedString, StrikethroughStyle, Style, TextRun,
+    UnderlineStyle, Window, black, fill, point, px, relative, size,
 };
 
 /// 一条已经定好位置的 run，等于 `folio_core::layout::LineRun` 的绘制侧投影。
@@ -25,6 +25,11 @@ pub struct GlyphRun {
     pub color: Hsla,
     pub x: f32,
     pub baseline: f32,
+    /// `text-decoration` 的两条线。gpui 的 shaping 直接支持，所以这里只是把
+    /// CSS 算出来的布尔传到 `TextRun` 上；线宽 1px、颜色跟字，与桌面端 `.underline()`
+    /// 那条样式方法的默认值一致 —— 两端各定一个数的话，同一本书在两处会画得不一样。
+    pub underline: bool,
+    pub line_through: bool,
 }
 
 impl GlyphRun {
@@ -39,6 +44,8 @@ impl GlyphRun {
             color: black(),
             x: 0.0,
             baseline: font_size,
+            underline: false,
+            line_through: false,
         }
     }
 
@@ -50,6 +57,13 @@ impl GlyphRun {
 
     pub fn color(mut self, color: Hsla) -> Self {
         self.color = color;
+        self
+    }
+
+    /// 装饰线。两个布尔直接来自 `RunStyle`，不在这层做取舍。
+    pub fn decorate(mut self, underline: bool, line_through: bool) -> Self {
+        self.underline = underline;
+        self.line_through = line_through;
         self
     }
 }
@@ -180,8 +194,16 @@ fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) {
         font: run.font.clone(),
         color: run.color,
         background_color: None,
-        underline: None,
-        strikethrough: None,
+        // 1px、按字色，与桌面端 gpui 的 `.underline()` / `.line_through()` 默认值同源。
+        underline: run.underline.then_some(UnderlineStyle {
+            thickness: px(1.),
+            color: Some(run.color),
+            wavy: false,
+        }),
+        strikethrough: run.line_through.then_some(StrikethroughStyle {
+            thickness: px(1.),
+            color: Some(run.color),
+        }),
     };
     let shaped = window
         .text_system()

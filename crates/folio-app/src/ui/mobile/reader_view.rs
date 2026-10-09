@@ -426,8 +426,12 @@ impl ReaderView {
                                 gpui_font(&FontKey::clone(&run.style.font), &family),
                                 run.style.font_size,
                             )
-                            .at(x, baseline)
-                            .color(run_color(run.style.color, foreground)),
+                            // 每条 run 自己的基线：`vertical-align` 折出来的偏移在这里减掉，
+                            // 正数（往上抬）就是基线 y 变小。行盒高与行基线已由排版层算过，
+                            // 这里只搬运那一个数。
+                            .at(x, baseline - run.style.baseline_shift)
+                            .color(run_color(run.style.color, foreground))
+                            .decorate(run.style.underline, run.style.line_through),
                         );
                         x += run.width;
                     }

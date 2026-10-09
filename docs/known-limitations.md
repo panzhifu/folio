@@ -11,16 +11,49 @@
 | 写法 | 现在的行为 | 为什么 |
 | --- | --- | --- |
 | `:nth-child()`、`:hover`、伪元素、属性选择器的 `~=^$|= ~` 变体 | 整条**选择器作废**，规则体一起丢，计入 `ignored` | 部分生效会让作者样式以不可预期的方式命中内容，宁可整条不要 |
-| `border` / `background` / `text-decoration` / `text-shadow` | 接受、不生效、**不计入** `ignored` | 出版书里满地都是；计入会把真正需要关注的「没预料到的写法」淹掉（`KNOWN_UNIMPLEMENTED`） |
+| `border` / `background` / `background-color` / `text-shadow` | 接受、不生效、**不计入** `ignored` | 出版书里满地都是；计入会把真正需要关注的「没预料到的写法」淹掉（`KNOWN_UNIMPLEMENTED`）。块级装饰要的是「块盒矩形」，而排版层现在只产出行盒，这条和分页/双页的上屏接线一起定 |
+| `text-decoration` / `text-decoration-line` | **已生效**：`underline`、`line-through` 进 `ComputedStyle` → `RunStyle`，桌面走 gpui 的 `.underline()` / `.line_through()`，移动端走 `TextRun` 的 `underline` / `strikethrough`（都是 1px、按字色）。线型与颜色 token 认但不改画法；`overline` / `blink` 整条不接并计 `ignored` | 装饰线不计入行盒高（CSS 也是），所以它只是绘制信息。`<u>` / `<ins>` / `<s>` / `<del>` / `<strike>` 由 UA 表给默认值，作者不写也有 |
 | `width` / `height` / `max-width` / `max-height` | 只在**替换元素（图片）**上生效；块级元素的这些声明接受但不生效 | 一期只做图片的尺寸，块级盒宽跟随版心。图片尺寸见 `layout::image_size` |
-| `font: 1em serif` 简写 | 同上，接受不生效 | 一期只认长写法 |
-| `margin` / `padding` 多值（`0 auto`、`1em 2em`） | 判为不支持，值保持默认 | 四值简写的展开规则还没接，`auto` 更是需要包含块宽度 |
+| `font` 简写 | **已生效**：`[style] [weight] size [/ line-height] family`，字族取第一候选并去引号。**有意不重置没写到的子属性** —— CSS 规定简写要把其余拉回初值（含 `line-height: normal`），而我们的行距来自读者偏好，一句 `font: 1em serif` 把读者的 1.75 改回 1.2 是产品级的错。`small-caps`、系统字体关键字（`caption` 等）整条作废并计 `ignored` | 老 EPUB 里 `font:` 简写满地都是，只认长写法等于把这些书的字号与字族丢掉 |
+| `margin` / `padding` 简写 | **已生效**：1 / 2 / 3 / 4 值按 CSS 的规则展开成上右下左；值数超过 4 或任一个值不认识则**整条作废**（不做半套）。`margin` 的 `auto` 折成 **0**：当前盒模型里正文块使用宽度等于可用宽度，CSS 自己也算出 0；等排版层按 `max-width` 收窄块级宽度时才需要改成均分（那一条改动的位置就在 `computed::edge_px`）。`padding: auto` 仍非法 | 这本《蛇结》917 个元素带胜出的 `margin` 简写，旧实现只认单值形式，于是整条作废 |
+| `word-spacing` | **已生效**：可继承，折行与绘制宽度都算它（每个空格之后加一次，行尾被裁掉的那个空格不算） | 见 `RunStyle::advance` 与 `RunStyle::extra_for_spaces` |
+| `vertical-align` | **部分生效**：`super` / `sub` / `<length>` / `<percentage>`（百分比按 CSS 相对自己的 line-height）折成 `RunStyle::baseline_shift`，绘制层减一次；`baseline` 是 0。**`top` / `bottom` / `middle` / `text-top` / `text-bottom` 不接并计 `ignored`** —— 它们要的是行盒对齐机制。上标位移是**我们自己定的常数**（super 1/3 em、sub 1/4 em，按各自字号），没有浏览器可量，所以不假装那是实现值 | `<sup>` / `<sub>` 由 UA 表用同一条式子给，带 class 的上标与裸 `<sup>` 同字号时一样高 |
+| `list-style` / `-type` / `-position` / `-image` | 接受、不生效。列表标记一期**根本不画**，所以作者写 `none` 时恰好与我们的输出一致，写 `disc` / `decimal` 时是真落差 | 后处理标记要的是「合成一个 marker 盒」，属排版层；《蛇结》那 51 个元素写的正是 `none` |
 | `margin-top: 10%`、`text-indent: 5%` | 判为不支持，**不猜** | 百分比按包含块宽度折算，那是排版期才知道的数，层叠期算不出来 |
 | `line-height: 1.5px` 之类带单位行高 | 折算成倍数（除以**自己的**字号） | 与 CSS 一致；代价是行高倍数被冻在计算结果上，改字号时不会重算 |
 | `@media` / `@supports` | 无条件收进内容，不做条件判断 | 阅读器没有「屏幕宽度切换样式」这种语义 |
 | `@font-face` / `@page` / `@keyframes` | 丢弃，计入 `ignored` | `@font-face` 真要接是 `add_fonts` + 字体清单的事，属 M6 |
 | `position` / `flex` / `grid` / `transform` / `transition` | 完全不在清单内 | 自研排版引擎不承担版式级布局，见开发方案 §2.1 |
 | 外部字体、`rem` 的根字号跟随 `html { font-size }` | `rem` 一律按**读者偏好字号**折算 | 让读者的字号说了算，比让书自己改全局字号更符合阅读器的立场 |
+
+### 这一张表有多准：用仓库里的书量
+
+上面每一行是「定性」的，落差到底多大要数出来。工具在
+`crates/folio-core/examples/css-gap.rs`，无界面、纯引擎，跑法：
+
+```sh
+cargo run -p folio-core --example css-gap                 # 仓库那两本 fixture
+cargo run -p folio-core --example css-gap -- 某本书.epub   # 也可以指别的书
+```
+
+它按**元素**而不是按声明排名（`border-bottom` 写三十次只落在三个小元素上，和
+`text-align` 落在全书两千个段落上不是同一种落差），判定走层叠用的同一份
+`css::computed::declaration_status`，所以这张表和实际渲染行为不会分叉。
+
+仓库里那本《蛇结》（28 章、2440 个元素、4960 条胜出声明）在 2026-10-09 这一轮前后的数：
+
+| | 改前 | 改后 |
+| --- | --- | --- |
+| 至少有一条「胜出但没接住」声明的元素 | 1019（41.8%） | 52（2.1%） |
+| 值/属性完全不认识的声明 | 917 | **0** |
+| 认得但不生效 | 205 | 154（只剩 list-style 三件 + 一处 `background-color`） |
+
+**但几何上的差很小**：全书每章最后一行的行底累加，正文高从 102179px 到 102224px（+45px，+0.04%），
+行盒数 3120 一条没变，平均行左缘也没动。原因是这本书的 `margin: 1em 0` / `0.67em 0`
+与 UA 表给 `<p>` 的 1em 上下边距本来就基本重合，被丢掉的常常是「同一件事的第二次声明」；
+而那 917 条里的左右边距多数写在 `<body>` 的 class 上，排版从 body 起算，不吃它自己的外边距。
++45px 就是 51 个注号被抬起来的那部分（每个约 0.9px）。结论：**声明落差表说明「我们在骗谁」，
+几何差说明「读者看得见多少」，两个都要看，只看一个都会做错决定。**
 
 ## 排版（`crates/folio-core/src/layout/`）
 

@@ -76,6 +76,16 @@ CARGO_TARGET_DIR=~/.cache/folio-mobile-android \
 
 见 [`tests/fixtures/README.md`](tests/fixtures/README.md)：自动化测试用**程序合成**的 EPUB（可提交、可进 CI），真书只放 `tests/fixtures/local/` 且不入库。
 
+手上的书到底还差多少样式，用这本书自己量（无界面，纯引擎）：
+
+```sh
+cargo run -p folio-core --example css-gap          # 仓库 fixtures 里的书
+cargo run -p folio-core --example css-gap -- x.epub # 或任意一本
+```
+
+按**元素**排名的落差表 + 一份「把这些声明全丢掉 vs 现在」的几何对比都在 stdout。口径与限制见
+[`docs/known-limitations.md`](docs/known-limitations.md)「这一张表有多准」一节。
+
 ## 文档
 
 - [`docs/development-plan.md`](docs/development-plan.md) —— 完整开发方案：渲染路线取舍、引擎架构、CSS 子集范围、里程碑与风险

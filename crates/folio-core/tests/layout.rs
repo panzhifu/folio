@@ -471,3 +471,105 @@ fn an_unresolvable_image_is_skipped_cleanly() {
     let (_, layout) = typeset_images("<p><img src=\"missing.png\"></p>", "", 300.0, &imgs);
     assert!(layout.lines.is_empty(), "没有文本也没有图，就不该有行盒");
 }
+
+// ---- `word-spacing` / `vertical-align` / `text-decoration` 在几何里长什么样 ----
+//
+// 这三个属性的落差都发生在「样式表已经算出数、排版层没用」这一步，所以断言的必须是
+// 行盒的数，而不是 `ComputedStyle` 的数（后者在 `tests/computed.rs` 已经钉过）。
+
+#[test]
+fn word_spacing_widens_the_line_and_pulls_the_break_earlier() {
+    // mock 度量：拉丁 0.5em、空格 0.25em，字号 16 ⇒ 字母 8px、空格 4px。
+    let html = "<p>a b c d e f</p>";
+    let (_, plain) = typeset(html, "", 100.0);
+    assert_eq!(plain.lines.len(), 1, "68px 的内容在 100px 版心里是一行");
+    assert_eq!(plain.lines[0].width, 68.0);
+
+    // 每个空格后再加 8px：内容变成 68 + 5 × 8 = 108px，100px 放不下，必须提前折。
+    let (_, spread) = typeset(html, "p { word-spacing: 8px }", 100.0);
+    assert_eq!(spread.lines.len(), 2, "词距该参与折行，不只是画出来宽一点");
+    // 第一行 5 个字母 + 4 个空格（行尾空格被裁掉，所以它的词距也不算）。
+    assert_eq!(spread.lines[0].width, 88.0, "5 × 8 + 4 × (4 + 8)");
+    assert_eq!(spread.lines[1].width, 8.0);
+    assert_eq!(spread.line_text(1), "f");
+}
+
+/// 上标要的是两件事：这一行的基线被抬高，行盒高把抬出去的那截也装下。
+/// `line-height: 1` 是为了让行盒高真的由字形决定 —— 否则 line-height 的 28px 早就盖住了。
+#[test]
+fn vertical_align_lifts_the_baseline_and_grows_the_line_box() {
+    let html = "<p>文<em class=s>上</em>文</p>";
+    let css = "p { line-height: 1 } .s { vertical-align: super }";
+    let (_, laid) = typeset(html, css, 200.0);
+    assert_eq!(laid.lines.len(), 1);
+    let line = &laid.lines[0];
+    let shift = 16.0 / 3.0;
+    assert!(
+        (line.baseline - (12.8 + shift)).abs() < 0.01,
+        "基线该是最高那段（被抬过的）ascent，实际 {}",
+        line.baseline
+    );
+    assert!(
+        (line.height - (12.8 + shift + 3.2)).abs() < 0.01,
+        "行盒高要把上标抬出去的一截装下，否则它会压到下一行，实际 {}",
+        line.height
+    );
+    // 只有那个 run 带偏移，邻居不受影响。
+    let shifts: Vec<f32> = line
+        .fragments
+        .iter()
+        .filter_map(|f| match f {
+            folio_core::layout::LineFragment::Text(run) => Some(run.style.baseline_shift),
+            folio_core::layout::LineFragment::Image(_) => None,
+        })
+        .collect();
+    assert_eq!(shifts.len(), 3);
+    assert!(shifts[1].abs() - shift < 0.01, "中间那段是 <em>");
+    assert_eq!(shifts[0], 0.0);
+    assert_eq!(shifts[2], 0.0);
+}
+
+/// `sub` 反过来：多吃 descent，基线不动。
+#[test]
+fn vertical_align_sub_extends_the_descent_without_moving_the_baseline() {
+    let (_, laid) = typeset(
+        "<p>文<em class=s>下</em>文</p>",
+        "p { line-height: 1 } .s { vertical-align: sub }",
+        200.0,
+    );
+    let line = &laid.lines[0];
+    assert!((line.baseline - 12.8).abs() < 0.01, "基线仍由正文那段决定");
+    assert!(
+        (line.height - (12.8 + 3.2 + 4.0)).abs() < 0.01,
+        "descent 多出 0.25em（4px），行盒高跟着长，实际 {}",
+        line.height
+    );
+}
+
+/// 装饰线不改变几何（CSS 也是如此），它必须**原样到达 run**，绘制层才有东西可画。
+#[test]
+fn decorations_reach_the_run_without_changing_geometry() {
+    let (_, plain) = typeset("<p>正文<em class=u>下划</em></p>", "", 200.0);
+    let (_, marked) = typeset(
+        "<p>正文<em class=u>下划</em></p>",
+        ".u { text-decoration: underline }",
+        200.0,
+    );
+    let flags = |layout: &Layout| -> Vec<bool> {
+        layout.lines[0]
+            .fragments
+            .iter()
+            .filter_map(|f| match f {
+                folio_core::layout::LineFragment::Text(run) => Some(run.style.underline),
+                folio_core::layout::LineFragment::Image(_) => None,
+            })
+            .collect()
+    };
+    assert_eq!(flags(&plain), vec![false, false], "没声明就不该有下划线");
+    assert_eq!(flags(&marked), vec![false, true]);
+    assert_eq!(
+        marked.lines[0].height, plain.lines[0].height,
+        "装饰线不计入行盒高，两次的几何必须一模一样"
+    );
+    assert_eq!(marked.lines[0].width, plain.lines[0].width);
+}

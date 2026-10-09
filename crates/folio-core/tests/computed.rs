@@ -225,11 +225,109 @@ fn percentage_boxes_are_rejected_rather_than_guessed() {
     assert_eq!(page.styled.ignored, 2);
 }
 
+/// `auto` 边距折成 **0**，并且不再计进 `ignored`。
+///
+/// 这条改动是因为仓库里那本《蛇结》写了 `margin: 5px auto`：旧规则把整条声明判为不认识，
+/// 于是连那 5px 的上下边距一起丢掉 —— 静默丢一半比折成 0 糟得多。折成 0 也不是降级：
+/// CSS 的 `auto` 前后边距是均分剩余宽度，而我们的正文块使用宽度就等于可用宽度
+/// （块级不吃 `max-width` 收窄），剩余宽度本来就是 0。等排版层支持块级 `max-width`
+/// 时这里要改成均分，那时才会出现块级居中。
 #[test]
-fn auto_margin_is_rejected() {
+fn auto_margin_computes_to_zero() {
     let page = author("<p>文</p>", "p { margin-left: auto }");
-    assert_eq!(style(&page, tag(&page, "p")).margin_left, 0.0);
-    assert_eq!(page.styled.ignored, 1);
+    let p = style(&page, tag(&page, "p"));
+    assert_eq!(p.margin_left, 0.0);
+    assert_eq!(p.margin_top, 16.0, "UA 给 <p> 的 1em 不该被这条声明碰坏");
+    assert_eq!(page.styled.ignored, 0, "认得的合法值不该计进 ignored");
+}
+
+/// 四边简写是这本书里最大的一处落差：917 个元素身上有胜出的 `margin` 简写，
+/// 而旧实现只认单值形式（`margin: 1em`），`margin: 1em 0` 这种最常见的写法整条作废。
+#[test]
+fn the_margin_shorthand_expands_one_to_four_values() {
+    // em 按元素自己的字号折算，12pt 按 CSS 的 96/72 比例 —— 两种单位都出现过。
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>\
+         <div class=\"c\"></div><div class=\"d\"></div>",
+        ".a { margin: 12pt 0 } \
+         .b { margin: 5px 0 1em } \
+         .c { margin: 1px 2px 3px 4px } \
+         .d { margin: 0.5em 0 } \
+         .d { font-size: 30px }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert_eq!(
+        (a.margin_top, a.margin_right, a.margin_bottom, a.margin_left),
+        (16.0, 0.0, 16.0, 0.0),
+        "两值 = 「上下 左右」"
+    );
+    let b = style(&page, class(&page, "b"));
+    assert_eq!(
+        (b.margin_top, b.margin_right, b.margin_bottom, b.margin_left),
+        (5.0, 0.0, 16.0, 0.0),
+        "三值 = 「上 左右 下」"
+    );
+    let c = style(&page, class(&page, "c"));
+    assert_eq!(
+        (c.margin_top, c.margin_right, c.margin_bottom, c.margin_left),
+        (1.0, 2.0, 3.0, 4.0),
+        "四值顺时针"
+    );
+    let d = style(&page, class(&page, "d"));
+    assert_eq!(
+        d.margin_top, 15.0,
+        "0.5em 按它自己的 30px 字号，不是根的 16px"
+    );
+    assert_eq!(page.styled.ignored, 0, "这四种写法都该被接住");
+}
+
+/// `padding` 简写走同一份展开，但**不**吃 `auto`：CSS 里 `padding: auto` 是非法值。
+#[test]
+fn the_padding_shorthand_expands_without_auto() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>",
+        ".a { padding: 0 1em } .b { padding: 4px auto }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert_eq!(
+        (
+            a.padding_top,
+            a.padding_right,
+            a.padding_bottom,
+            a.padding_left
+        ),
+        (0.0, 16.0, 0.0, 16.0)
+    );
+    let b = style(&page, class(&page, "b"));
+    assert_eq!(
+        (b.padding_top, b.padding_right),
+        (0.0, 0.0),
+        "`padding: auto` 非法，整条作废而不是半信半疑"
+    );
+    assert_eq!(page.styled.ignored, 1, "只有那一条该计 ignored");
+}
+
+/// 值数超出 1–4、或任一个值不认识，整条作废。静默只取前两个值是最难查的错法。
+#[test]
+fn a_shorthand_with_too_many_or_bad_values_is_dropped_whole() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>",
+        ".a { margin: 1px 2px 3px 4px 5px } \
+         .b { margin: 1px nonsense } \
+         .c { margin: 5% }",
+    );
+    for name in ["a", "b", "c"] {
+        let s = style(&page, class(&page, name));
+        assert_eq!(
+            (s.margin_top, s.margin_left),
+            (0.0, 0.0),
+            ".{name} 的写法都该整条不生效"
+        );
+    }
+    assert_eq!(
+        page.styled.ignored, 3,
+        "三条都要计进 ignored，落差不然会被静默吞掉"
+    );
 }
 
 #[test]
@@ -360,5 +458,279 @@ fn implemented_width_is_not_counted_as_ignored() {
     assert_eq!(
         style(&page, tag(&page, "div")).width,
         Some(Length::Px(100.0))
+    );
+}
+
+/// `vertical-align` 折成基线偏移。这本《蛇结》的注号用的就是 `super`（51 个元素），
+/// 而旧实现把它整个丢掉 —— 上标写成正文位置，读者看不出那是个脚注引用。
+#[test]
+fn vertical_align_becomes_a_baseline_shift() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>\
+         <div class=\"c\"></div><div class=\"d\"></div>",
+        ".a { vertical-align: super } \
+         .b { vertical-align: sub } \
+         .c { vertical-align: 4px } \
+         .d { vertical-align: baseline }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert!(
+        (a.baseline_shift - 16.0 / 3.0).abs() < 0.01,
+        "super 抬三分之一 em（自己的 16px 字号），实际 {}",
+        a.baseline_shift
+    );
+    assert_eq!(
+        style(&page, class(&page, "b")).baseline_shift,
+        -4.0,
+        "sub 压 0.25em"
+    );
+    assert_eq!(style(&page, class(&page, "c")).baseline_shift, 4.0);
+    assert_eq!(
+        style(&page, class(&page, "d")).baseline_shift,
+        0.0,
+        "`baseline` 就是初值，不该计进 ignored"
+    );
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// 百分比相对**自己的 line-height**（CSS 的规定），长度可以是 em；
+/// `top` / `middle` 这些要行盒对齐机制的不接，也不假装接住。
+#[test]
+fn vertical_align_percent_is_against_own_line_height_and_unkowns_are_counted() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>",
+        ".a { vertical-align: 50%; font-size: 20px; line-height: 2 } \
+         .b { vertical-align: middle }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).baseline_shift,
+        20.0,
+        "50% × (20px × 2)"
+    );
+    assert_eq!(
+        style(&page, class(&page, "b")).baseline_shift,
+        0.0,
+        "`middle` 要的是行盒对齐，一期不折成偏移"
+    );
+    assert_eq!(
+        page.styled.ignored, 1,
+        "不认的取值必须计 ignored，否则落差被静默吞掉"
+    );
+}
+
+/// `text-decoration` 的简写与 `text-decoration-line` 长写法：同一件事的两个入口。
+#[test]
+fn text_decorations_are_recorded_per_line_kind() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>\
+         <div class=\"c\"></div><div class=\"d\"></div>",
+        ".a { text-decoration: underline } \
+         .b { text-decoration: underline line-through } \
+         .c { text-decoration-line: line-through } \
+         .d { text-decoration: none }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert!(a.underline && !a.line_through);
+    let b = style(&page, class(&page, "b"));
+    assert!(b.underline && b.line_through, "多值简写要两条都算");
+    let c = style(&page, class(&page, "c"));
+    assert!(!c.underline && c.line_through);
+    let d = style(&page, class(&page, "d"));
+    assert!(!d.underline && !d.line_through);
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// 线型与颜色 token 认得但不改画法；`overline` 画不出来就整条不接。
+#[test]
+fn decoration_line_style_and_color_tokens_are_recognised_but_overline_is_not() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>",
+        ".a { text-decoration: underline wavy #f00 } .b { text-decoration: overline }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert!(a.underline, "线型与颜色不改变「有没有下划线」这件事");
+    assert!(
+        !style(&page, class(&page, "b")).underline,
+        "overline 画不出来，不该显示成接住了"
+    );
+    assert_eq!(page.styled.ignored, 1, "只有 overline 那条计 ignored");
+}
+
+/// 装饰线在 CSS 里不是继承属性，但会向后代**传播**；词距则老老实实是可继承的。
+#[test]
+fn decoration_propagates_and_word_spacing_inherits() {
+    let page = author(
+        "<div class=outer><p><span class=inner>文</span></p></div>",
+        ".outer { text-decoration: underline; word-spacing: 6px }",
+    );
+    let inner = style(&page, class(&page, "inner"));
+    assert!(inner.underline, "父元素的下划线要盖到子元素的文字上");
+    assert_eq!(inner.word_spacing, 6.0, "`word-spacing` 在 CSS 里可继承");
+    // `vertical-align` **不**继承：上标只抬自己那一小段，不能让整段正文上浮。
+    let page = author(
+        "<div class=outer><p>文</p></div>",
+        ".outer { vertical-align: super }",
+    );
+    let p = style(&page, tag(&page, "p"));
+    assert_eq!(p.baseline_shift, 0.0, "`vertical-align` 不该跟着继承下来");
+}
+
+#[test]
+fn word_spacing_normal_is_zero_and_units_resolve() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>",
+        ".a { word-spacing: normal } \
+         .b { word-spacing: 12pt } \
+         .c { word-spacing: 0.5em; font-size: 20px }",
+    );
+    assert_eq!(style(&page, class(&page, "a")).word_spacing, 0.0);
+    assert_eq!(
+        style(&page, class(&page, "b")).word_spacing,
+        16.0,
+        "12pt 按 96/72"
+    );
+    assert_eq!(
+        style(&page, class(&page, "c")).word_spacing,
+        10.0,
+        "0.5em 按自己的 20px"
+    );
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// `font` 简写：老 EPUB 满地都是。**有意不重置没写到的子属性** —— 读者偏好走的是
+/// `root_base` 的继承链，一句 `font: 1em serif` 把人家的行距改回 normal 是产品级的错。
+#[test]
+fn the_font_shorthand_sets_what_it_names_and_resets_nothing() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>",
+        ".a { font: italic bold 12pt/1.5 \"Noto Serif CJK SC\", serif } \
+         .b { font-size: 22px; line-height: 2; font: 1em serif }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert!(a.font_italic);
+    assert_eq!(a.font_weight, 700, "bold");
+    assert_eq!(a.font_size, 16.0, "12pt");
+    assert_eq!(a.line_height, 1.5, "斜杠后是行距");
+    assert_eq!(a.font_family, "Noto Serif CJK SC", "带空格的家族名要整个取");
+    let b = style(&page, class(&page, "b"));
+    assert_eq!(b.font_size, 16.0, "1em 按它自己的 22px？不，em 按父字号");
+    assert_eq!(
+        b.line_height, 2.0,
+        "简写没写行距就不动它：读者设的行距不该被一句 `font` 抹掉"
+    );
+    assert_eq!(b.font_family, "serif");
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// 认不出的 token（`small-caps`、系统字体关键字）整条作废，不做半套。
+#[test]
+fn a_font_shorthand_with_unsupported_tokens_is_dropped_whole() {
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>",
+        ".a { font: small-caps 12pt serif } .b { font: caption }",
+    );
+    for name in ["a", "b"] {
+        let s = style(&page, class(&page, name));
+        assert_eq!(s.font_family, "", ".{name} 整条都不该生效");
+        assert_eq!(s.font_size, 16.0);
+    }
+    assert_eq!(page.styled.ignored, 2);
+}
+
+/// `declaration_status` 是 `examples/css-gap.rs` 的唯一判定口，所以它必须和层叠一致：
+/// 三种状态各钉一条，错一个统计就会把「没接」说成「接住」。
+#[test]
+fn declaration_status_agrees_with_the_cascade() {
+    use folio_core::css::Declaration;
+    use folio_core::css::computed::{DeclStatus, declaration_status};
+
+    let base = ComputedStyle::default();
+    let decl = |property: &str, value: &str| Declaration {
+        property: property.into(),
+        value: value.into(),
+        important: false,
+    };
+    assert_eq!(
+        declaration_status(&decl("font-size", "20px"), &base, 16.0),
+        DeclStatus::Applied
+    );
+    assert_eq!(
+        declaration_status(&decl("text-transform", "uppercase"), &base, 16.0),
+        DeclStatus::Inert,
+        "名单里的属性该报 Inert，而不是不认识"
+    );
+    assert_eq!(
+        declaration_status(&decl("font-size", "huge"), &base, 16.0),
+        DeclStatus::Unparsed
+    );
+    assert_eq!(
+        declaration_status(&decl("margin", "1em auto"), &base, 16.0),
+        DeclStatus::Applied,
+        "`auto` 折成 0 之后这条就是接住的，不该再出现在落差表里"
+    );
+    assert_eq!(
+        declaration_status(&decl("color", "inherit"), &base, 16.0),
+        DeclStatus::Applied,
+        "`inherit` 是合法值，继承由 inherit_from 负责"
+    );
+    assert_eq!(
+        declaration_status(&decl("color", ""), &base, 16.0),
+        DeclStatus::Unparsed
+    );
+}
+
+/// UA 表那一份最小副本负责「作者没写、浏览器会给」的默认值。上标与装饰线都在这里，
+/// 因为出版书的 XHTML 通常只写 `<sup>`、`<u>`、`<del>` 而不带 class。
+#[test]
+fn the_ua_sheet_carries_superscripts_and_decorations() {
+    let page = author(
+        "<p><sup>a</sup><sub>b</sub><u>c</u><del>d</del><s>e</s></p>",
+        "",
+    );
+    let sup = style(&page, tag(&page, "sup"));
+    assert_eq!(sup.font_size, 16.0 / 1.5);
+    assert!(
+        (sup.baseline_shift - 16.0 / 1.5 / 3.0).abs() < 0.01,
+        "位移按缩过之后的自己字号折，实际 {}",
+        sup.baseline_shift
+    );
+    let sub = style(&page, tag(&page, "sub"));
+    assert!(
+        (sub.baseline_shift + 16.0 / 1.5 * 0.25).abs() < 0.01,
+        "下标是负偏移（往下），实际 {}",
+        sub.baseline_shift
+    );
+    assert!(style(&page, tag(&page, "u")).underline, "<u> 天生有下划线");
+    assert!(style(&page, tag(&page, "del")).line_through);
+    assert!(style(&page, tag(&page, "s")).line_through);
+    assert!(!sup.underline, "上标不该顺手带上下划线");
+    assert_eq!(
+        page.styled.ignored, 0,
+        "UA 值不来自声明，本就不该计 ignored"
+    );
+}
+
+/// 同一个式子：作者写 `vertical-align: super` 与 UA 给 `<sup>` 的偏移，
+/// 在**同样字号**下必须相等 —— 否则带 class 的注号和裸 `<sup>` 会排成两种高度。
+#[test]
+fn ua_superscript_and_the_author_declaration_agree() {
+    let page = author(
+        "<p><sup>a</sup><span class=v>b</span></p>",
+        ".v { vertical-align: super; font-size: 10.666666px }",
+    );
+    let sup = style(&page, tag(&page, "sup"));
+    let v = style(&page, class(&page, "v"));
+    assert!(
+        (sup.font_size - v.font_size).abs() < 0.01,
+        "先确认两处字号对齐：{} vs {}",
+        sup.font_size,
+        v.font_size
+    );
+    assert!(
+        (sup.baseline_shift - v.baseline_shift).abs() < 0.01,
+        "同一字号下 UA 的 `<sup>` 与作者的 `vertical-align: super` 该给同一个偏移，\
+         实际 {} vs {}",
+        sup.baseline_shift,
+        v.baseline_shift
     );
 }

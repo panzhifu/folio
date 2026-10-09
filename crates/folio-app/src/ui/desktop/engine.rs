@@ -64,18 +64,27 @@ fn line_element(document: &Document, ix: usize, foreground: Hsla) -> AnyElement 
                 let text = block.text.get(run.norm.clone()).unwrap_or("");
                 let box_height = run.style.box_height();
                 let baseline_in_box = (box_height + run.ascent - run.descent) / 2.0;
-                row = row.child(
-                    div()
-                        .absolute()
-                        .left(px(left))
-                        .top(px(line.baseline - baseline_in_box))
-                        .whitespace_nowrap()
-                        .font(gpui_font(&run.style.font, &family))
-                        .text_size(px(run.style.font_size))
-                        .line_height(px(box_height))
-                        .text_color(run_color(run.style.color, foreground))
-                        .child(text.to_string()),
-                );
+                // 基线偏移（`vertical-align`）与装饰线都按 run 走：偏移在这里减一次，
+                // 线的有无由 gpui 的 `.underline()` / `.line_through()` 负责（1px、按字色），
+                // 移动端那条 `TextRun` 用的是同一组默认值。
+                let mut cell = div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(line.baseline
+                        - run.style.baseline_shift
+                        - baseline_in_box))
+                    .whitespace_nowrap()
+                    .font(gpui_font(&run.style.font, &family))
+                    .text_size(px(run.style.font_size))
+                    .line_height(px(box_height))
+                    .text_color(run_color(run.style.color, foreground));
+                if run.style.underline {
+                    cell = cell.underline();
+                }
+                if run.style.line_through {
+                    cell = cell.line_through();
+                }
+                row = row.child(cell.child(text.to_string()));
                 left += run.width;
             }
             LineFragment::Image(img) => {

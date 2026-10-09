@@ -8,7 +8,7 @@
 //! 只做 `layout` 用得上的属性。顺序永远是 `inherit_from(parent)` → 本文件的
 //! UA 值 → 作者声明，所以作者写 `h2 { display: inline }` 时照样能盖掉这里。
 
-use super::computed::{ComputedStyle, Display, inherit_from};
+use super::computed::{ComputedStyle, Display, inherit_from, sub_shift, super_shift};
 
 /// 天生 inline 的标签。清单外的一律按 block 处理：
 /// 新出现的容器标签按 block 降级不会丢内容，反过来会把整段撑散。
@@ -102,8 +102,21 @@ pub fn seed(parent: &ComputedStyle, tag: &str) -> ComputedStyle {
             style.font_italic = false;
         }
         "sub" | "sup" => {
-            // 只缩字号；上/下标的垂直位移属 vertical-align，一期不做。
+            // 缩字号 + 位移。位移走 `super_shift` / `sub_shift`，与作者写
+            // `vertical-align: super` 是同一条式子，所以裸 `<sup>` 与
+            // `<span class=fn>` 带声明的上标一样高。
             style.font_size = parent.font_size / 1.5;
+            style.baseline_shift = if tag == "sup" {
+                super_shift(style.font_size)
+            } else {
+                sub_shift(style.font_size)
+            };
+        }
+        "u" | "ins" => {
+            style.underline = true;
+        }
+        "s" | "strike" | "del" => {
+            style.line_through = true;
         }
         "hr" => {
             style.margin_top = style.font_size;

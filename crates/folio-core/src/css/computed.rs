@@ -106,6 +106,19 @@ pub struct ComputedStyle {
     pub display: Display,
     pub color: Option<Color>,
     pub letter_spacing: f32,
+    /// 词间额外宽度（px）。CSS 初值 `normal` 折成 0；它叠在**每个空格之后**，
+    /// 所以折行与行宽都要算它（见 `layout::run_width`）。
+    pub word_spacing: f32,
+    /// 基线偏移，px，**正数往上**。`vertical-align: super` 折出来的就是它。
+    ///
+    /// 0 意味着「贴基线」（CSS 的 `baseline`）。`top` / `bottom` / `middle` 要的是
+    /// 行盒对齐机制，一期不折成这个数，并且按不认识计数 —— 悄悄当 0 会把作者的
+    /// 上标写成正常位置还查不出来。
+    pub baseline_shift: f32,
+    /// `text-decoration` 的下划线与删除线。绘制层用它画线；CSS 里装饰线**不计入行盒高**，
+    /// 所以排版层只用它透传到 run 上。
+    pub underline: bool,
+    pub line_through: bool,
     pub white_space_pre: bool,
     /// 替换元素（图片）的尺寸。块级元素的 width 一期不做，只有图片用得上。
     pub width: Option<Length>,
@@ -146,6 +159,10 @@ impl Default for ComputedStyle {
             display: Display::Block,
             color: None,
             letter_spacing: 0.0,
+            word_spacing: 0.0,
+            baseline_shift: 0.0,
+            underline: false,
+            line_through: false,
             white_space_pre: false,
             width: None,
             height: None,
@@ -167,7 +184,6 @@ impl Default for ComputedStyle {
 /// （`border`、`width`、`text-decoration`），若按不支持计数，ignored 会被刷到
 /// 几百条，真正需要关注的「我们没预料到的写法」就淹没了。
 const KNOWN_UNIMPLEMENTED: &[&str] = &[
-    "text-decoration",
     "background",
     "background-color",
     "min-height",
@@ -177,7 +193,6 @@ const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "border-top",
     "border-bottom",
     "text-shadow",
-    "word-spacing",
     "direction",
     "writing-mode",
     // `orphans` / `widows` / `break-inside` / `page-break-*` 以前在这份名单里
@@ -189,12 +204,20 @@ const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "clear",
     "columns",
     "column-gap",
-    "vertical-align",
+    // 列表标记一期根本不画，所以 `list-style-type: none` 恰好与我们的输出一致，而
+    // `disc` / `decimal` 是真落差。`list-style-image` / `list-style-position` 以前
+    // **不在这份名单里**，于是被当成不认识的属性计进 `ignored` —— 那会让统计说
+    // 「这些属性我们听都没听过」，而事实是听得出、只是没有标记可画。
     "list-style",
     "list-style-type",
+    "list-style-image",
+    "list-style-position",
+    // 它会改变字符本身，而锚点与进度都建立在**源文本字节偏移**上（`Locator` 的坐标系）：
+    // `capitalize` / `ß → SS` 这类一改就让偏移对不上。要接就得连 M5 的锚点映射一起定，
+    // 不是加一条 `to_uppercase()` 的事。
     "text-transform",
-    // `font: 1em serif` 简写在老 EPUB 里不少，一期只认长写法。
-    "font",
+    // 块级装饰（底色、边框）与 `min-height` 需要的是「块盒的矩形」，而排版层现在
+    // 只产出行盒；这条和分页/双页的上屏接线是同一件事，一起定。
 ];
 
 #[derive(Debug, Default)]
@@ -203,6 +226,46 @@ pub struct StyledDom {
     pub styles: Vec<ComputedStyle>,
     /// 认识不了的值。`KNOWN_UNIMPLEMENTED` 里的属性不计入。
     pub ignored: usize,
+}
+
+/// 一条声明在我们引擎里的落地情况。
+///
+/// 判定走的是 [`declaration_status`]，而它内部就是层叠用的同一个 `apply` ——
+/// 所以「这本书有多少样式还没接」可以从外部统计出来，不会和实际渲染行为分叉。
+/// 这份统计是 `examples/css-gap.rs` 的唯一依据，也是它 before/after 可比的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclStatus {
+    /// 认得，且写进了 `ComputedStyle`。
+    Applied,
+    /// 属性名认得，但一期不生效（在 `KNOWN_UNIMPLEMENTED` 名单里）。
+    Inert,
+    /// 属性名或值不认识；`cascade` 会把这一条计入 `ignored`。
+    Unparsed,
+}
+
+/// 判定一条声明的落地情况，不碰任何长期状态：在一份临时的 `ComputedStyle` 上试算。
+///
+/// `parent` 与 `root_px` 只影响 `em` / `%` 折算成多少像素，**不影响认不认得**，
+/// 所以纯统计时可以一律传 `ComputedStyle::default()`。
+/// `inherit` 这个关键字算 `Applied`：它是合法值，继承到的值由 `inherit_from` 负责给。
+/// 名单里的属性不看值 —— 一期整体不生效，值写对写错都不改变「有没有生效」这件事。
+pub fn declaration_status(decl: &Declaration, parent: &ComputedStyle, root_px: f32) -> DeclStatus {
+    let value = decl.value.trim();
+    if value.is_empty() {
+        return DeclStatus::Unparsed;
+    }
+    if value.eq_ignore_ascii_case("inherit") {
+        return DeclStatus::Applied;
+    }
+    if KNOWN_UNIMPLEMENTED.contains(&decl.property.as_str()) {
+        return DeclStatus::Inert;
+    }
+    let mut scratch = parent.clone();
+    if apply(&mut scratch, parent, root_px, decl) {
+        DeclStatus::Applied
+    } else {
+        DeclStatus::Unparsed
+    }
 }
 
 impl StyledDom {
@@ -270,6 +333,16 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         color: parent.color,
         letter_spacing: parent.letter_spacing,
         text_indent: parent.text_indent,
+        word_spacing: parent.word_spacing,
+        // 装饰线在 CSS 里**不是继承属性**，但会向后代**传播**（`text-decoration: none`
+        // 写在子元素上并不会去掉父元素的下划线，这是那条规则最有名的坑）。对我们的
+        // 行内/块级盒来说，「传播」与「继承」算出来的结果一致，所以这里按继承实现，
+        // 差别只留在原子行内盒（inline-block、图片）上 —— 那种盒一期没有内容会吃到
+        // 父级装饰，见 `docs/known-limitations.md`。
+        underline: parent.underline,
+        line_through: parent.line_through,
+        // `vertical-align` **不**继承（CSS 规定），所以 `baseline_shift` 不在这里出现：
+        // 上标只该抬高它自己那一小段，而不是让整段正文跟着上浮。
         // orphans / widows 在 CSS 里是**可继承**的（分片属性里只有这两个继承），
         // 所以书里在 `<body>` 上写一次就够；`break-*` 不继承，它们是「这一块怎么断」
         // 而不是「这一带的默认值」。
@@ -304,6 +377,143 @@ fn parse_break_when(value: &str) -> Option<BreakWhen> {
 fn parse_count(value: &str) -> Option<u16> {
     let n: u16 = value.trim().parse().ok()?;
     (n >= 1).then_some(n)
+}
+
+/// 上标抬多高、下标压多低。这两个数**是我们定的**，不是浏览器的实现值：
+/// 这台机器上没有浏览器可量，抄一个「大家都这么写」的常数等于把猜测写成标准。
+/// 三分之一 em / 四分之一 em 是中文排版里注号常见的观感尺度，且与字号成比例，
+/// 读者改字号时偏移跟着走。
+const SUPER_SHIFT_EM: f32 = 1.0 / 3.0;
+const SUB_SHIFT_EM: f32 = 0.25;
+
+/// 上标的位移，按**自己的**字号。UA 表给 `<sup>` / `<sub>` 用的就是这两个式子，
+/// 与作者写 `vertical-align: super` 走的是同一条路 —— 两条路径给不同的数，
+/// 就意味着「带 class 的上标」和「裸 `<sup>`」排出来不一样高。
+pub(crate) fn super_shift(font_size: f32) -> f32 {
+    font_size * SUPER_SHIFT_EM
+}
+
+/// 下标的位移（负数 = 往下）。见 [`super_shift`]。
+pub(crate) fn sub_shift(font_size: f32) -> f32 {
+    -font_size * SUB_SHIFT_EM
+}
+
+/// `vertical-align` 折成基线偏移（px，正数往上）。
+///
+/// - `baseline` → 0，也就是「不偏移」，与初值同义，所以它算接住了。
+/// - `super` / `sub` → 见上面那两个常数的说明。
+/// - `<length>` → 直接按长度；`<percentage>` → 按 CSS 相对**自己的 line-height**
+///   （`line_height` 是倍数，所以基准是 `font_size × line_height`）。
+/// - `top` / `bottom` / `middle` / `text-top` / `text-bottom` → 返回 `None`：
+///   它们要的是行盒对齐机制（拿整行的 tallest box 对齐），悄悄当 0 会把作者的
+///   表格基线写成正常位置还查不出来。
+fn parse_baseline_shift(value: &str, own: f32, root_px: f32, line_height: f32) -> Option<f32> {
+    let v = value.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "baseline" => Some(0.0),
+        "super" => Some(super_shift(own)),
+        "sub" => Some(sub_shift(own)),
+        "top" | "bottom" | "middle" | "text-top" | "text-bottom" => None,
+        _ => {
+            if let Some(percent) = v.strip_suffix('%') {
+                let n: f32 = percent.trim().parse().ok()?;
+                return Some(n / 100.0 * own * line_height);
+            }
+            length_px(&v, own, root_px)
+        }
+    }
+}
+
+/// `text-decoration` / `text-decoration-line` → `(下划线, 删除线)`。
+///
+/// 简写在 CSS 里还能带线型与颜色（`underline wavy #f00`）。那些 token **认得但不改变
+/// 画法**：一期一律按当前文字颜色画 1px 实线。`overline` 与 `blink` 整条不接 ——
+/// 画不出来的东西不该在统计里显示成「接住了」。
+fn parse_decoration(value: &str) -> Option<(bool, bool)> {
+    let mut underline = false;
+    let mut through = false;
+    for token in value.split_whitespace() {
+        match token.to_ascii_lowercase().as_str() {
+            "underline" => underline = true,
+            "line-through" => through = true,
+            "none" => return Some((false, false)),
+            "overline" | "blink" => return None,
+            // 线型、厚度、`from-font`：认得，画法不变。
+            "solid" | "double" | "dotted" | "dashed" | "wavy" | "thick" | "thin" | "from-font" => {}
+            other => {
+                // 颜色可以，别的都不行 —— 猜一个作者没写的线型比丢掉这条更糟。
+                if parse_color(other).is_none() && !other.starts_with('#') {
+                    return None;
+                }
+            }
+        }
+    }
+    // 空值（或只剩空白）不算接住：`text-decoration: ;` 那种写坏的声明要有痕迹。
+    value.split_whitespace().next()?;
+    Some((underline, through))
+}
+
+/// `font` 简写：`[[style] [weight] size [/ line-height] family]`。
+///
+/// **有意不重置没写到的子属性。** CSS 规定 `font` 会把 `font-variant`、`font-stretch`、
+/// `line-height`、`font-size`… 一律拉回初值，而我们的行距与字重是通过 `root_base`
+/// 从读者偏好走进继承链的：一句 `font: 1em serif` 把读者的 1.75 行距改回 `normal`
+/// 是产品级的错，不是排版细节。除此之外按 CSS：字号支持 `/行距`，
+/// 字族取第一个候选并去引号（与 `font-family` 同一套规则）。
+/// `small-caps` / `condensed` / `caption` 这类 token 我们不认，整条作废并计 `ignored`。
+fn apply_font_shorthand(
+    style: &mut ComputedStyle,
+    parent: &ComputedStyle,
+    root_px: f32,
+    value: &str,
+) -> bool {
+    if value.eq_ignore_ascii_case("initial") || value.eq_ignore_ascii_case("unset") {
+        return false;
+    }
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    // 字号是这条声明里唯一的必需项，也是「前面是 style/weight、后面是 family」的分界。
+    let Some(at) = parts.iter().position(|part| {
+        let head = part.split('/').next().unwrap_or(part);
+        parse_font_size(head, parent.font_size, root_px).is_some()
+    }) else {
+        return false;
+    };
+    for part in &parts[..at] {
+        let token = part.to_ascii_lowercase();
+        match token.as_str() {
+            "normal" => {}
+            "italic" | "oblique" => style.font_italic = true,
+            _ => {
+                let Some(weight) = parse_font_weight(&token) else {
+                    return false;
+                };
+                style.font_weight = weight;
+            }
+        }
+    }
+    let size_token = parts[at];
+    let (size_part, leading) = match size_token.split_once('/') {
+        Some((size, leading)) => (size, Some(leading)),
+        None => (size_token, None),
+    };
+    let Some(px) = parse_font_size(size_part, parent.font_size, root_px) else {
+        return false;
+    };
+    style.font_size = px;
+    if let Some(leading) = leading {
+        let Some(lh) = parse_line_height(leading, px, root_px) else {
+            return false;
+        };
+        style.line_height = lh;
+    }
+    // family 可能带空格（`"Times New Roman", serif`），所以把剩下的 token 重新拼回去。
+    let family = parts[at + 1..].join(" ");
+    let first = family.split(',').next().unwrap_or("").trim();
+    if first.is_empty() {
+        return false;
+    }
+    style.font_family = first.trim_matches('"').trim_matches('\'').to_string();
+    true
 }
 
 /// 在别处按自己的字号 —— 这是 CSS 的规定，不是我们的选择。
@@ -385,6 +595,30 @@ fn apply(
             _ => false,
         },
         "text-indent" => set_px(value, own, root_px, &mut style.text_indent),
+        // 词距：CSS 初值 `normal` 折成 0，其余按长度。它可继承（`inherit_from` 里带着）。
+        "word-spacing" => {
+            if value.eq_ignore_ascii_case("normal") {
+                style.word_spacing = 0.0;
+                return true;
+            }
+            set_px(value, own, root_px, &mut style.word_spacing)
+        }
+        "vertical-align" => match parse_baseline_shift(value, own, root_px, style.line_height) {
+            Some(px) => {
+                style.baseline_shift = px;
+                true
+            }
+            None => false,
+        },
+        "text-decoration" | "text-decoration-line" => match parse_decoration(value) {
+            Some((underline, line_through)) => {
+                style.underline = underline;
+                style.line_through = line_through;
+                true
+            }
+            None => false,
+        },
+        "font" => apply_font_shorthand(style, parent, root_px, value),
         "break-before" | "page-break-before" => match parse_break_when(value) {
             Some(when) => {
                 style.break_before = when;
@@ -426,34 +660,37 @@ fn apply(
             }
             None => false,
         },
-        "margin-top" => set_px(value, own, root_px, &mut style.margin_top),
-        "margin-bottom" => set_px(value, own, root_px, &mut style.margin_bottom),
-        "margin-left" => set_px(value, own, root_px, &mut style.margin_left),
-        "margin-right" => set_px(value, own, root_px, &mut style.margin_right),
+        "margin-top" => set_margin(value, own, root_px, &mut style.margin_top),
+        "margin-bottom" => set_margin(value, own, root_px, &mut style.margin_bottom),
+        // 左右边的 `auto` 折成 0，理由见 `edge_px`：当前盒模型里这就是 CSS 的结果。
+        "margin-left" => set_margin(value, own, root_px, &mut style.margin_left),
+        "margin-right" => set_margin(value, own, root_px, &mut style.margin_right),
         "padding-top" => set_px(value, own, root_px, &mut style.padding_top),
         "padding-bottom" => set_px(value, own, root_px, &mut style.padding_bottom),
         "padding-left" => set_px(value, own, root_px, &mut style.padding_left),
         "padding-right" => set_px(value, own, root_px, &mut style.padding_right),
-        "padding" => {
-            let Some(px) = length_px(value, own, root_px) else {
-                return false;
-            };
-            style.padding_top = px;
-            style.padding_bottom = px;
-            style.padding_left = px;
-            style.padding_right = px;
-            true
-        }
-        "margin" => {
-            let Some(px) = length_px(value, own, root_px) else {
-                return false;
-            };
-            style.margin_top = px;
-            style.margin_bottom = px;
-            style.margin_left = px;
-            style.margin_right = px;
-            true
-        }
+        // 两个四边简写。`padding` 不吃 `auto`（CSS 里 `padding: auto` 是非法值），
+        // `margin` 吃 —— 差别只在 `box_sides` 的那一个参数上，展开逻辑共用一份。
+        "padding" => match box_sides(value, own, root_px, false) {
+            Some([top, right, bottom, left]) => {
+                style.padding_top = top;
+                style.padding_right = right;
+                style.padding_bottom = bottom;
+                style.padding_left = left;
+                true
+            }
+            None => false,
+        },
+        "margin" => match box_sides(value, own, root_px, true) {
+            Some([top, right, bottom, left]) => {
+                style.margin_top = top;
+                style.margin_right = right;
+                style.margin_bottom = bottom;
+                style.margin_left = left;
+                true
+            }
+            None => false,
+        },
         "display" => match value.to_ascii_lowercase().as_str() {
             "block" => {
                 style.display = Display::Block;
@@ -545,6 +782,62 @@ fn set_px(value: &str, font_size: f32, root_font_size: f32, out: &mut f32) -> bo
         }
         None => false,
     }
+}
+
+/// 一条边的长度。`auto_in_zero` 为真时 `auto` 折成 0，而不是当不认识。
+///
+/// 为什么 `auto` 取 0 不是降级而是当前盒模型下的正确结果：CSS 里块级盒的
+/// `auto` 前后边距是「均分剩余宽度」，而我们的正文块使用宽度就等于可用宽度
+/// （`layout` 里 `content_width = width − padding − margin`，块级不吃 `max-width`
+/// 的收窄），剩余宽度恒为 0。等排版层真按 `max-width` 收窄正文时，这里要改成均分，
+/// 块级居中才会出现 —— 那一条改动的位置就在这儿，不在别处。
+///
+/// 但**不能整条作废**：`margin: 5px auto` 是书里真实出现的写法（这本《蛇结》就有），
+/// 拒掉它等于连那 5px 的上下边距一起丢，那才是把作者意图静默抹掉。
+fn edge_px(value: &str, font_size: f32, root_font_size: f32, auto_is_zero: bool) -> Option<f32> {
+    if auto_is_zero && value.eq_ignore_ascii_case("auto") {
+        return Some(0.0);
+    }
+    length_px(value, font_size, root_font_size)
+}
+
+/// 单边 `margin`：与 [`set_px`] 同形，只是 `auto` 折成 0（`margin` 认 `auto`，
+/// `padding` 不认 —— 所以 padding 那四条继续用 `set_px`）。
+fn set_margin(value: &str, font_size: f32, root_font_size: f32, out: &mut f32) -> bool {
+    match edge_px(value, font_size, root_font_size, true) {
+        Some(px) => {
+            *out = px;
+            true
+        }
+        None => false,
+    }
+}
+
+/// `margin` / `padding` 简写的四边展开，返回 `[上, 右, 下, 左]`。
+///
+/// 分配的规则是 CSS 的：1 值四边相同；2 值「上下 左右」；3 值「上 左右 下」；
+/// 4 值顺时针。值数不对（0 个或 5 个以上）或任一个解析失败，**整条作废** ——
+/// 半套边距比没边距更难解释，而且静默只吃前两个值会让 `margin: 1px 2px 3px 4px 5px`
+/// 这种写错的书看起来「已经处理了」。
+fn box_sides(
+    value: &str,
+    font_size: f32,
+    root_font_size: f32,
+    auto_is_zero: bool,
+) -> Option<[f32; 4]> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut parsed = Vec::with_capacity(parts.len());
+    for part in parts {
+        parsed.push(edge_px(part, font_size, root_font_size, auto_is_zero)?);
+    }
+    let top = parsed[0];
+    let right = parsed.get(1).copied().unwrap_or(top);
+    let bottom = parsed.get(2).copied().unwrap_or(top);
+    let left = parsed.get(3).copied().unwrap_or(right);
+    Some([top, right, bottom, left])
 }
 
 fn parse_font_size(value: &str, parent_px: f32, root_px: f32) -> Option<f32> {
