@@ -48,6 +48,27 @@
 - 空白折叠跨节点是一次性的（`Collector::pending_space`），但**嵌套元素自己的
   `white-space` 不单独判断**，整段按外层块的设置走。`<p>` 里藏一个 `<pre>` 会按 `p` 折叠。
 
+## 分片（`crates/folio-core/src/layout/fragment.rs`）
+
+行为统一是「尽量照作者的意图，实在不行先保证能读」：
+
+- **断点处的上下 margin 被丢掉**：第 N 页末行下面那段空白不会出现在第 N+1 页开头。
+  CSS 规定两侧都保留，但那会让每页顶部多出一段随书而异的空白，看起来像「排版不稳」。
+  这里选稳定，并且是有意选的。
+- **`orphans` 与 `widows` 冲突时保 `orphans`**：一页只剩三行的段落里切一刀，两侧不可能都满足
+  初值 2。这时宁可让下一页顶着一行，也不让本页底部剩一行 —— 页底孤行比页顶寡行更刺眼是
+  排版传统的共识。整段能挪到下一页时优先挪（`orphans_and_widows_conflict_moves_the_whole_paragraph`）。
+- **`break-inside: avoid` 在块比一页高时让位**：照样强切。一本书因为一张长表格或一幅插图
+  排不出版，是比违反作者意图严重得多的失败。
+- **`columns` / `column-gap` 接受、不生效**（在 `KNOWN_UNIMPLEMENTED` 名单里，不计入 `ignored`）：
+  多栏是 M4 剩下的部分，需要的是平衡高度的分栏分片，不是把现有分片器换个参数就行。
+- **`recto` / `verso` / `avoid-column` / `avoid-page` 这些取值不认**，计入 `ignored`。
+  把它们悄悄当成 `auto` 或 `avoid` 会让作者的意图静默消失，比不认识更难查。
+- **分片只切行，不切块盒**：一片拿到的是 `Layout::lines` 的一个下标区间。块自己的背景、
+  边框要按片裁剪的话得由绘制侧处理（现在两端的绘制都只画行）。
+- **阅读界面还没接分页**：引擎能分片，`ReaderView` 仍然只有连续滚动，`mode_name()` 固定返回
+  `"continuous"`。分页 / 双页的 UI 与手势属 M4 的最后一块。
+
 ## 格式（`crates/folio-core/src/format/`）
 
 - EPUB 的图片按 manifest 里 `image/*` 的条目读出并入库（`images` 表），附带解码前的

@@ -26,6 +26,10 @@
 //!   比浏览器多一档空白，但不会重叠、也不会丢间距。
 //! - 行内图片不产出 run（M3 的后半）；负外边距按 0；`width` / `max-width` / `float` 未接入。
 //! - 嵌套元素自己的 `white-space` 不单独判断，整段按外层块的设置走。
+//! - 分片（[`fragment`]）在断点处**丢掉上下 margin**：第 N 页末行下面那段空白不会出现在
+//!   第 N+1 页开头。CSS 是两侧都留，这里选每页顶部稳定。
+
+pub mod fragment;
 
 use std::ops::Range;
 use std::rc::Rc;

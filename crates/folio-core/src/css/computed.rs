@@ -28,6 +28,40 @@ pub enum Display {
     None,
 }
 
+/// 分片（分页 / 分栏）时的断点意图。
+///
+/// `Left` / `Right` 会补出空片占位，「双页对开」的左右页才不会错位；
+/// `Always` 是 CSS2.1 的旧写法，与 `Page` 同义 —— 老 EPUB 里满地都是，
+/// 认不出它就等于把这些书的作者意图丢掉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BreakWhen {
+    /// 没有声明：由剩余可用高度决定。
+    #[default]
+    Auto,
+    /// 这里尽量不断（`break-after: avoid` 常见于标题，意思是别把标题孤零零留在页尾）。
+    Avoid,
+    Page,
+    Left,
+    Right,
+    Always,
+}
+
+impl BreakWhen {
+    /// 是不是「强制断在这里」的意图。`Avoid` 与 `Auto` 都不是。
+    pub fn is_forced(self) -> bool {
+        matches!(self, Self::Page | Self::Left | Self::Right | Self::Always)
+    }
+
+    /// 强制断之后应当落在哪一侧。`None` = 不关心奇偶。
+    pub fn parity(self) -> Option<bool> {
+        match self {
+            Self::Left => Some(false),
+            Self::Right => Some(true),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color(pub u8, pub u8, pub u8);
 
@@ -78,6 +112,17 @@ pub struct ComputedStyle {
     pub height: Option<Length>,
     pub max_width: Option<Length>,
     pub max_height: Option<Length>,
+    /// 分片意图。见 `fragment` 模块：连续滚动 / 分页 / 双页对开共用同一套分片代码，
+    /// 差别只是「可用高度」这一个数。
+    pub break_before: BreakWhen,
+    pub break_after: BreakWhen,
+    /// `break-inside: avoid`：整块尽量不被切开。装不下一整页时仍然必须切开 ——
+    /// 排不出版来比违反作者意图更糟。
+    pub break_inside_avoid: bool,
+    /// 一段被切开后，前一片至少要留几行。CSS 初值 2。
+    pub orphans: u16,
+    /// 一段被切开后，后一片至少要留几行。CSS 初值 2。
+    pub widows: u16,
 }
 
 impl Default for ComputedStyle {
@@ -106,6 +151,12 @@ impl Default for ComputedStyle {
             height: None,
             max_width: None,
             max_height: None,
+            break_before: BreakWhen::Auto,
+            break_after: BreakWhen::Auto,
+            break_inside_avoid: false,
+            // 2 是 CSS 的初值，不是我们挑的：一行的孤行（或寡行）在任何排版传统里都算缺陷。
+            orphans: 2,
+            widows: 2,
         }
     }
 }
@@ -129,11 +180,9 @@ const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "word-spacing",
     "direction",
     "writing-mode",
-    "orphans",
-    "widows",
-    "page-break-before",
-    "page-break-after",
-    "break-inside",
+    // `orphans` / `widows` / `break-inside` / `page-break-*` 以前在这份名单里
+    // （「接受、不生效」），M4 的分片器把它们变成真生效的属性，所以移出去了。
+    // `columns` / `column-gap` 仍然只是被接受 —— 多栏还没接。
     "float",
     "clear",
     "columns",
@@ -219,6 +268,11 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         color: parent.color,
         letter_spacing: parent.letter_spacing,
         text_indent: parent.text_indent,
+        // orphans / widows 在 CSS 里是**可继承**的（分片属性里只有这两个继承），
+        // 所以书里在 `<body>` 上写一次就够；`break-*` 不继承，它们是「这一块怎么断」
+        // 而不是「这一带的默认值」。
+        orphans: parent.orphans,
+        widows: parent.widows,
         ..Default::default()
     }
 }
@@ -227,6 +281,29 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
 ///
 /// `root_px` 是根元素（读者偏好）的字号，rem 只按它折算；
 /// `parent` 提供 font-size 的相对基准。em 在 `font-size` 里按父字号、
+/// `break-before` / `break-after` 与它们的 CSS2.1 同名前缀版本（`page-break-*`）。
+///
+/// `recto` / `verso` / `avoid-column` 这些变体一期不认：按不支持计数，而不是悄悄
+/// 当成 `auto` —— 后者会让作者写的意图静默消失，比不认识更难查。
+fn parse_break_when(value: &str) -> Option<BreakWhen> {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => Some(BreakWhen::Auto),
+        "avoid" => Some(BreakWhen::Avoid),
+        "page" => Some(BreakWhen::Page),
+        "left" => Some(BreakWhen::Left),
+        "right" => Some(BreakWhen::Right),
+        "always" => Some(BreakWhen::Always),
+        _ => None,
+    }
+}
+
+/// `orphans` / `widows` 的取值：正整数。`0` 按不支持处理 —— 它意味着「一段可以被切成
+/// 剩下零行」，那不是排版参数，是写错了。
+fn parse_count(value: &str) -> Option<u16> {
+    let n: u16 = value.trim().parse().ok()?;
+    (n >= 1).then_some(n)
+}
+
 /// 在别处按自己的字号 —— 这是 CSS 的规定，不是我们的选择。
 fn apply(
     style: &mut ComputedStyle,
@@ -306,6 +383,47 @@ fn apply(
             _ => false,
         },
         "text-indent" => set_px(value, own, root_px, &mut style.text_indent),
+        "break-before" | "page-break-before" => match parse_break_when(value) {
+            Some(when) => {
+                style.break_before = when;
+                true
+            }
+            None => false,
+        },
+        "break-after" | "page-break-after" => match parse_break_when(value) {
+            Some(when) => {
+                style.break_after = when;
+                true
+            }
+            None => false,
+        },
+        "break-inside" | "page-break-inside" => {
+            // 两个值都是「设定」而不是「查询」：`auto` 显式取消前面的 `avoid`
+            // （同一份样式表里先 `avoid` 后 `auto` 是合法写法）。认不出的值不改任何东西。
+            let avoid = value.eq_ignore_ascii_case("avoid");
+            let auto = value.eq_ignore_ascii_case("auto");
+            if avoid {
+                style.break_inside_avoid = true;
+            }
+            if auto {
+                style.break_inside_avoid = false;
+            }
+            avoid || auto
+        }
+        "orphans" => match parse_count(value) {
+            Some(n) => {
+                style.orphans = n;
+                true
+            }
+            None => false,
+        },
+        "widows" => match parse_count(value) {
+            Some(n) => {
+                style.widows = n;
+                true
+            }
+            None => false,
+        },
         "margin-top" => set_px(value, own, root_px, &mut style.margin_top),
         "margin-bottom" => set_px(value, own, root_px, &mut style.margin_bottom),
         "margin-left" => set_px(value, own, root_px, &mut style.margin_left),
