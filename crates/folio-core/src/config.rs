@@ -52,9 +52,9 @@ impl Mode {
     }
 }
 
-/// 自己实现序列化而不是 derive：derive 遇到 `"mode":"anything"` 会报错，
-/// 而 `Config::load_from` 的回落是**整份**配置归零 —— 用户手改坏一个字符串，
-/// 代价不该是字号、行距、书库目录全没了。
+/// 自己实现序列化而不是 derive：derive 遇到 `"mode":"anything"` 会直接报错，而报错的
+/// 后果是**整节**外观退回默认值（见 [`salvage`]）—— 用户手改坏一个字符串，代价不该是
+/// 浅、深两侧选过的主题名一起没了。`parse` 认不出来时自己回落 `System`，连错误都不发。
 impl Serialize for Mode {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(self.as_str())
@@ -200,8 +200,11 @@ pub struct Config {
 }
 
 impl Config {
-    /// 把读回来的、或界面改过的值规整一遍：排版数值夹取、外观去掉空主题名、
-    /// 语言推给全局。所有写入方都过一次这里，规整规则就只有一处。
+    /// 把读回来的、或界面改过的值规整一遍：排版数值夹住越界项、外观去掉空主题名。
+    /// 所有写入方都过一次这里，规整规则就只有一处。
+    ///
+    /// 界面语言**不**在这里推给全局：那是 `folio_app` 的 `ConfigHolder` 在装载配置和
+    /// 每次改动时做的事，核心模块不该在读配置时顺手改全局状态。
     pub fn normalized(mut self) -> Self {
         self.reader = self.reader.clamped();
         self.appearance = self.appearance.normalized();
@@ -218,9 +221,10 @@ impl Config {
             return Config::default();
         };
         // 手改过 / 旧版本 / 别的机器同步来的值都不可信，读进来先规整一遍。
-        serde_json::from_str::<Config>(&text)
-            .unwrap_or_default()
-            .normalized()
+        if let Ok(config) = serde_json::from_str::<Config>(&text) {
+            return config.normalized();
+        }
+        salvage(&text).normalized()
     }
 
     /// 写默认位置的配置。
@@ -236,4 +240,45 @@ impl Config {
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, path)
     }
+}
+
+/// 整份读不出来时的补救：**按节**退回默认值。
+///
+/// 为什么需要它：`serde_json::from_str::<Config>` 是一根绳上的五个节，任何一个节的
+/// 任何一个字段类型不对（`"font_size":"big"`、`"mode":3`、手滑多打的一个引号），
+/// 整个调用就返回 `Err`，于是全部配置归零 —— 读者看到的是字号、主题、书库目录、
+/// 账号一起消失，而且完全不知道原因。分节解析后，坏的那一节归零，其余各节照旧。
+///
+/// 只处理「JSON 本身合法、某一节的内容不合结构」这一类；连 JSON 都解析不了
+/// （截断、少括号）时没有可逐节尝试的载体，仍然整份退回默认值。
+fn salvage(text: &str) -> Config {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Config::default();
+    };
+    let mut config = Config::default();
+    if let Some(reader) = section(&value, "reader") {
+        config.reader = reader;
+    }
+    if let Some(appearance) = section(&value, "appearance") {
+        config.appearance = appearance;
+    }
+    if let Some(library) = section(&value, "library") {
+        config.library = library;
+    }
+    if let Some(language) = section(&value, "language") {
+        config.language = language;
+    }
+    if let Some(account) = section(&value, "account") {
+        config.account = account;
+    }
+    config
+}
+
+/// 取一节。缺这一节、或者这一节自己解不出来，都返回 `None` 让调用方保留默认值 ——
+/// 具体类型由赋值目标推断，所以每个节的 `#[serde(default)]`（少键时用**本节**的默认）
+/// 在这里同样成立。
+fn section<T: serde::de::DeserializeOwned>(value: &serde_json::Value, key: &str) -> Option<T> {
+    value
+        .get(key)
+        .and_then(|raw| serde_json::from_value::<T>(raw.clone()).ok())
 }

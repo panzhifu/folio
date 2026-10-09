@@ -83,6 +83,12 @@
 
 - 阅读偏好与账号存在 `<系统配置目录>/folio/config.json`（`dirs::config_dir()`）。改了设置**即时落盘**
   （写临时文件再 rename）；文件缺失或坏掉都回落默认值，绝不让程序起不来。
+- **坏一处的代价是一节，不是整份**：整份解析失败时按节重试（`config.rs::salvage`），
+  `"font_size":"big"` 只归零 `reader` 一节，`appearance` / `library` / `account` 照旧读回。
+  补救的粒度**止于节** —— 同一节里写对的键（如那节的 `line_height`）跟着一起退回本节默认。
+  连 JSON 本身都不合法（截断、括号不配对）时没有可逐节尝试的载体，仍是整份回落。
+  两条行为分别由 `tests/config.rs::one_broken_section_does_not_take_the_others_down` 与
+  `unparseable_json_still_falls_back_as_a_whole` 钉住。
 - **移动平台没有「系统配置目录」**：Android / iOS 上 `$HOME` 与 XDG 都不存在，可写路径只有宿主
   在启动时给的那一个应用专属目录，所以由入口调 `folio_core::paths::set_app_dirs` 报上来
   （Android 取 `internal_data_path()/files/folio/{config,data}`）。环境变量 `FOLIO_CONFIG_DIR` /

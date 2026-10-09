@@ -306,6 +306,13 @@ CREATE VIRTUAL TABLE annotation_fts USING fts5(note, exact);
 macOS `~/Library/Application Support`、Windows `%APPDATA%`），不放进书库数据库 —— 它是应用级、跨书的数据，
 一个小 JSON 文件更方便用户查看/备份/手改。v1 迁移里建的 `prefs` 表已不再使用（迁移只增不改，故保留）。
 
+**手改坏一处的爆炸半径是一节，不是整份**：`Config::load_from` 先整份解析，失败时按节重试
+（`config.rs::salvage`），所以 `"font_size":"big"` 只会让 `reader` 一节退回默认，主题名、书库目录、
+读者名都还在。粒度止于节 —— 同一节里写对的键跟着一起退，serde 的字段级默认只有整节解成功才有机会生效。
+枚举一律手写序列化、不用 derive（`Mode`、`Locale`）：derive 只认变体名，而界面上显示的是
+`system` / `zh-CN` 这类标签，读者照看到的写法手改就会读失败。`Locale` 存出去是 BCP-47 的 `code()`，
+读回来宽松到认 `en` / `en-US` / `English` / 变体名 `En`（老文件里的值），见 `i18n::Locale::from_label`。
+
 ---
 
 ### 4.8 竖排的四档实现（M6 的执行清单）

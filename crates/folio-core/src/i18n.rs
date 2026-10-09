@@ -17,7 +17,14 @@ use std::fmt::Display;
 use serde::{Deserialize, Serialize};
 
 /// 界面语言。`Default` 是简体中文：这个项目的正文排版以中文书为第一目标。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+///
+/// **JSON 形式由下面的 `Serialize` / `Deserialize` 手写，不用 derive。** derive 会把
+/// 变体名（`En` / `ZhHans`）当唯一合法值，而界面上、`locales/folio.yml` 里、
+/// 以及 `code()` 给的标签都是 `en` / `zh-CN` / `ja` —— 读者照自己看到的写法手改
+/// `config.json` 就会读失败。失败在这里不是小事：`Config::load_from` 读不出来时会把
+/// **整节** `language` 退回默认值（也就是「跟随系统」），于是读者刚选的语言被无声改掉，
+/// 界面下一次打开还是他看不懂的那门语言。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Locale {
     #[default]
     ZhHans,
@@ -25,8 +32,55 @@ pub enum Locale {
     Ja,
 }
 
+impl Serialize for Locale {
+    /// 存出去的必须是 `code()`：与界面上的标签、与 `locales/folio.yml` 的语言键同一形态。
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.code())
+    }
+}
+
+impl<'de> Deserialize<'de> for Locale {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Locale::from_label(&raw).ok_or_else(|| {
+            serde::de::Error::custom(format!("不认识的语言 {raw:?}；可用的是 zh-CN / en / ja"))
+        })
+    }
+}
+
+/// 比较语言写法用的归一化：去首尾空白、转小写、把 `_` 和 `-` 这类分隔符抹平，
+/// 于是 `zh_CN`、`zh-CN`、`ZH-cn` 在比较时是同一个键。
+fn normalize(input: &str) -> String {
+    input
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .collect()
+}
+
 impl Locale {
     pub const ALL: &'static [Locale] = &[Locale::ZhHans, Locale::En, Locale::Ja];
+
+    /// 宽松到「凡是人能写出来的形式都认」：`en`、`en-US`、`EN_us`、以及 BCP-47 的
+    /// `zh-Hans-CN`。老配置文件里还可能是 derive 时代的 serde 变体名 `En` / `ZhHans`，
+    /// 语言自己的名字 `English` / `简体中文` 同样认 —— 那些文件必须继续读得出来，
+    /// 读失败的那一节会退回「跟随系统」，等于把读者选过的语言无声改掉
+    /// （见上面的 `Deserialize` 与 `config.rs::salvage`）。
+    ///
+    /// 与 [`Locale::parse`] 的区别只在覆盖面：`parse` 认的是环境变量的形如
+    /// `zh_CN.UTF-8` 的前缀写法，这里还要认标签、变体名和本族名。
+    pub fn from_label(input: &str) -> Option<Locale> {
+        if let Some(found) = Locale::parse(input) {
+            return Some(found);
+        }
+        let key = normalize(input);
+        Locale::ALL.iter().copied().find(|locale| {
+            key == normalize(locale.code())
+                || key == normalize(&format!("{locale:?}"))
+                || key == normalize(locale.endonym())
+        })
+    }
 
     /// BCP-47 标签：既是 `locales/folio.yml` 里的语言键，也是设置项的「值」和 `lang` 属性。
     pub fn code(self) -> &'static str {

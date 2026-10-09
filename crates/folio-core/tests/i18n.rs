@@ -166,6 +166,66 @@ fn codes_round_trip_through_parse() {
     }
 }
 
+/// 配置文件里人能写出来的形式，以及 **derive serde 时代写进老配置里的变体名**。
+/// 老文件必须继续认得：读失败的那一节会退回「跟随系统」，等于把读者选过的语言无声改掉。
+#[test]
+fn from_label_accepts_every_spelling_a_human_or_an_old_version_writes() {
+    for (input, want) in [
+        ("en", Locale::En),
+        ("EN", Locale::En),
+        ("English", Locale::En),
+        ("En", Locale::En),
+        ("en-US", Locale::En),
+        ("en_US", Locale::En),
+        ("zh-CN", Locale::ZhHans),
+        ("zh-cn", Locale::ZhHans),
+        ("zh_CN", Locale::ZhHans),
+        ("简体中文", Locale::ZhHans),
+        ("ZhHans", Locale::ZhHans),
+        ("ja", Locale::Ja),
+        ("JA_jp", Locale::Ja),
+        ("日本語", Locale::Ja),
+        ("Ja", Locale::Ja),
+    ] {
+        assert_eq!(
+            Locale::from_label(input),
+            Some(want),
+            "{input:?} 应该认成 {want:?}"
+        );
+    }
+    assert_eq!(Locale::from_label("fr"), None);
+    assert_eq!(Locale::from_label(""), None);
+    assert_eq!(Locale::from_label("   "), None);
+}
+
+/// 存出去的必须是 `code()`：与界面标签、与 `locales/folio.yml` 的语言键同一形态。
+#[test]
+fn locale_serializes_as_its_bcp47_code() {
+    for locale in Locale::ALL.iter().copied() {
+        let json = serde_json::to_string(&locale).unwrap();
+        assert_eq!(
+            json,
+            format!("{:?}", locale.code()),
+            "存出去的应该是 {:?}，不是变体名",
+            locale.code()
+        );
+        assert_eq!(serde_json::from_str::<Locale>(&json).unwrap(), locale);
+    }
+    // 写只写 code()，读却宽松：老文件里的变体名照样能读回来。
+    assert_eq!(
+        serde_json::from_str::<Locale>(r#""En""#).unwrap(),
+        Locale::En
+    );
+    assert_eq!(
+        serde_json::from_str::<Locale>(r#""ZhHans""#).unwrap(),
+        Locale::ZhHans
+    );
+    // 认不出的值要**报错**，好让 `Config::load_from` 的分节补救接管 ——
+    // 静默回落某一个语言会把「跟随系统」和「简体中文」混成一件事。
+    assert!(serde_json::from_str::<Locale>(r#""klingon""#).is_err());
+    assert!(serde_json::from_str::<Locale>("3").is_err());
+}
+
 #[test]
 fn unknown_system_locale_falls_back_to_the_default() {
     // detect 读环境变量，所以只能断言「它一定给出三种之一」而不是具体某个。

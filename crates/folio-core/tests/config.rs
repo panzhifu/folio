@@ -6,6 +6,7 @@
 use folio_core::config::Config;
 use folio_core::i18n::Locale;
 use folio_core::{Account, Appearance, Language, Library, Mode, Reader};
+use serde_json::json;
 
 fn load(text: &str) -> Config {
     let dir = tempfile::tempdir().unwrap();
@@ -86,10 +87,78 @@ fn an_unknown_locale_key_falls_back_to_the_system_language() {
     assert_eq!(got.language.locale, Locale::detect());
 }
 
+/// 这一条必须**与运行环境无关**。`language` 一节缺 locale 键时用的是
+/// `Locale::detect()`，而 detect 读 `LANGUAGE`/`LC_ALL`/`LANG`，所以原来那句
+/// 「`"en"` 读回来是 `En`」在 `LANG=en_US.UTF-8` 的机器上，即便 JSON 里的语言
+/// 完全没被读到（整节退回 detect）也一样通过 —— 本机全绿、CI 上红的就是它。
+/// 这里显式挑一个**与本机系统语言不同**的值，让「读到了」和「回落了」不可能同值。
+///
+/// JSON 用 `json!` 现搭，不手写转义花括号：这一条测试曾经因为多打的一个引号
+/// 变成了「整份 JSON 无效」，于是要验的 locale 从没被解过一遍。
 #[test]
 fn the_locale_survives_the_json_round_trip() {
-    let got = load(r#"{"language":{"locale":"en"}}"#);
-    assert_eq!(got.language.locale, Locale::En);
+    let different = Locale::ALL
+        .iter()
+        .copied()
+        .find(|locale| *locale != Locale::detect())
+        .expect("三种语言里总能找到一个和系统语言不同的");
+
+    // 界面上看到的就是 `code()`，读者照它手改，所以这一种写法是主路径。
+    let got = load(&json!({ "language": { "locale": different.code() } }).to_string());
+    assert_eq!(got.language.locale, different);
+
+    // 老配置（derive serde 时代）里存的是变体名。这条同时钉住另一件事：
+    // 认不出来时只该坏掉 language 一节，`font_size` 必须还在 —— 如果 locale
+    // 让整份解析失败，退回默认的就是 17.0。
+    let legacy = load(
+        &json!({
+            "language": { "locale": format!("{different:?}") },
+            "reader": { "font_size": 21.0 },
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        legacy.language.locale, different,
+        "derive 时代写出去的变体名必须继续认得"
+    );
+    assert_eq!(legacy.reader.font_size, 21.0);
+}
+
+/// 一处类型写错的字段只该毁掉**它自己那一节**：读者手改 `"font_size":"big"` 之后，
+/// 不该看到主题名、书库目录、读者名一起消失，而且没有任何提示。
+#[test]
+fn one_broken_section_does_not_take_the_others_down() {
+    let got = load(
+        r#"{"reader":{"font_size":"big","line_height":2.5},
+            "appearance":{"mode":"dark","light":"Gruvbox"},
+            "library":{"dirs":["~/Books"]},
+            "account":{"name":"阿遥"}}"#,
+    );
+    assert_eq!(
+        got.reader,
+        Reader::default(),
+        "坏的是 reader 一节，就只有这一节退回默认"
+    );
+    assert_eq!(got.appearance.mode, Mode::Dark);
+    assert_eq!(got.appearance.light.as_deref(), Some("Gruvbox"));
+    assert_eq!(got.library.dirs, vec!["~/Books".to_string()]);
+    assert_eq!(got.account.name, "阿遥");
+}
+
+/// 补救的粒度是「一节」而不是「一个键」：`line_height` 没写错，但它的同节邻居错了，
+/// 于是整节一起退回。serde 的字段级默认只在整节解成功时才有机会生效，
+/// 这里把它明确成预期行为，而不是让人以为是 bug。
+#[test]
+fn the_good_keys_in_a_broken_section_fall_back_too() {
+    let got = load(r#"{"reader":{"font_size":"big","line_height":2.5}}"#);
+    assert_eq!(got.reader.line_height, Reader::default().line_height);
+}
+
+/// 连 JSON 本身都解析不了（截断、括号不配对）时没有「节」可以逐节尝试，
+/// 仍然整份退回默认值。
+#[test]
+fn unparseable_json_still_falls_back_as_a_whole() {
+    assert_eq!(load(r#"{"reader":{"font_size":21.0}"#), Config::default());
 }
 
 /// 手改过的越界值在读入时要被夹住（否则排版会算出零高或无限宽）。
