@@ -2,15 +2,15 @@
 
 用 Rust + [gpui-kit](https://gpui-kit.com) 写的原生 GPU 桌面阅读器。不嵌浏览器，不用 WebView。
 
-**状态**：M0/M1/M2 完成，M3 完成（局部样式 + 图片）。目前可用：EPUB 导入 → 侧栏书库 → 多标签阅读 → 自研引擎排版（首行缩进、居中、多 run 局部样式、行内/块级图片按 width/max-width 缩放）→ 字号/行距/字体/主题设置（在独立的设置窗口里，一页一项）→ 进度记忆（重启回到原位置）。Markdown/TXT 仍走占位渲染。
+**状态**：M0–M4 引擎主线完成（排版、局部样式、图片、连续/分页/双页）。目前可用：EPUB 导入 → 侧栏书库 → 多标签阅读 → 自研引擎排版（首行缩进、居中、多 run 局部样式、行内/块级图片按 width/max-width 缩放）→ 字号/行距/字体/主题设置 → 进度记忆（重启回到原位置）。进行中：M5 架构重构 + 绘制简化，M6 选中功能，见 [`plans/`](plans/README.md)。
 Android 侧（Meizu 20 实测）：正文与插图上屏、章节可前后翻、偏好与主题从同一份 `config.json` 读、
-进度落库、界面文案跟随语言。移动 UI 还没有的是图标、书库导入与安全区适配，见 `docs/known-limitations.md`。
+进度落库、界面文案跟随语言。实测约束清单见 [`plans/facts.md`](plans/facts.md)。
 
 ## 为什么自研排版
 
 gpui-kit 的富文本组件明确不做 CSS（其 Not Goals 原文：*As a HTML viewer, we not support CSS*），而中文出版书需要的首行缩进、居中标题、扉页、局部字重、多栏、绕图、ruby 注音、竖排，全都得自己实现。所以正文由 Folio 自己的 DOM → CSS 子集 → 排版引擎产出，gpui-kit 承担应用壳（侧栏、标签、工具条、主题、对话框）与文本原语（shaping、断行、逐字形绘制）。
 
-三条实测结论支撑这个决定，细节见 [`docs/spikes.md`](docs/spikes.md)：
+三条实测结论支撑这个决定，细节见 [`plans/facts.md`](plans/facts.md)：
 
 - **排版可以离开窗口在后台线程完成** —— `Arc<WindowTextSystem>` 可 move 进 `background_spawn`，缩放窗口时布局不卡主线程。
 - **gpui 自带 shaping**（cosmic-text + swash + harfrust），kerning / 连字 / bidi 都是现成的；`ShapedLine::paint` 还内建了文本对齐。
@@ -19,7 +19,11 @@ gpui-kit 的富文本组件明确不做 CSS（其 Not Goals 原文：*As a HTML 
 ## 架构
 
 ```
-crates/folio-core/   零 gpui 依赖：DOM、CSS、排版算法、锚点、SQLite、格式适配
+crates/folio-core/   零 gpui 依赖：统一文档接口（Document trait：可重排 / 定版式）、
+                     DOM、CSS、排版算法、锚点与批注（重定位/分组/导出）、书架分组、
+                     SQLite（书目/进度/批注/集合/阅读统计/定版式页表）、
+                     格式 provider 注册表（EPUB / FB2 / HTML / Markdown / TXT / CBZ）、
+                     WebDAV、配置（含 `logging` 一节）、日志（`tracing` subscriber 装在这）
 
 crates/folio-app/src/ui/
   shared/            两端共用的地基：配置实体、文案、主题、字体度量、
@@ -97,7 +101,7 @@ job 跑的是 `clippy --target aarch64-linux-android --lib`，不开 `cfg(test)`
 
 Linux 需要 fontconfig、wayland、xkbcommon 的开发包与可用的 Vulkan 驱动。Wayland 与 X11 都已验证可跑。
 
-Android 交叉编译（构建配方与设备事实见 [`docs/android.md`](docs/android.md)）：
+Android 交叉编译（构建配方与设备事实见 [`plans/facts.md`](plans/facts.md)）：
 
 ```bash
 export ANDROID_NDK_HOME=/opt/android-ndk
@@ -117,6 +121,71 @@ CARGO_TARGET_DIR=~/.cache/folio-mobile-android \
   cargo check -p folio-app --target aarch64-linux-android --lib
 ```
 
+## 日志
+
+日志是**后端的一部分**，不是界面的一条附属功能：`folio-core` 里那些最容易出错的地方
+（书库迁移、EPUB 容器、WebDAV 往返、排版）都直接发 `tracing` 事件，而 subscriber 装在
+[`folio_core::logging`](crates/folio-core/src/logging.rs)。用 `tracing` 而不是自己排行文本，
+是因为级别过滤、时间戳、字段渲染、span 耗时这些恰好就是调试要看的东西；而它**不是新依赖** ——
+`gpui-pre-ztracing` 带的就是同一份 `tracing-subscriber`（`env-filter` 与 `tracing-appender`
+故意不开，见根 `Cargo.toml` 那段说明）。
+
+三层输出，共用一个过滤器：**文件** `<数据根>/logs/folio.log`（开机轮转成 `.1`/`.2`，
+本轮写满就停手）、**stderr**（桌面默认开）、**宿主**（Android 的 logcat，tag 还是 `folio-mobile`）。
+
+级别写在 `config.json` 的 `logging` 一节里，**改完重启就生效，不用重新编译** ——
+真机上出问题最怕的就是「什么都不显示」，而重新编一遍 Android 是十几分钟加一次重装：
+
+```json
+{
+  "logging": {
+    "level": "debug",
+    "targets": ["folio_core::layout=trace"],
+    "file": true,
+    "stderr": true,
+    "dir": "",
+    "max_bytes": 4194304,
+    "keep": 3
+  }
+}
+```
+
+`level` 只管 folio 自己的代码（`folio_core` / `folio_app`）；依赖库（wgpu、cosmic-text 那一串）
+固定在 `warn` 以上，否则「打开 debug」等于把整个 GPU 栈的日志一起打开。要连它们一起看，
+用 `FOLIO_LOG`，它按 `RUST_LOG` 的写法解释并压过配置里的同类项：
+
+```bash
+FOLIO_LOG=debug cargo run                          # 一切 debug，包括依赖库
+FOLIO_LOG=warn,folio_core::layout=trace cargo run  # 只逐行看排版
+```
+
+设备上取日志：
+
+```bash
+adb pull /data/user/0/dev.folio.reader/files/folio/data/logs/folio.log
+adb logcat -s folio-mobile                          # 或看实时那一份
+```
+
+`FOLIO_DATA_DIR` 仍然压过一切（挪走整个数据根，日志跟着走），所以日志指不到应用目录时
+还能手动挪到一个 `adb pull` 得到的地方。
+
+## 错误处理
+
+一条分界线，两个库：
+
+- **后端 `folio-core` → `thiserror`**。`Error` 是一个能按分支处理的枚举：这一层不知道自己
+  会被谁调，而「没有这本书」与「sqlite 打不开」的处置完全不同（一个提示读者，一个退出程序）。
+  约定是每个变体都自带上下文（哪个路径、哪本书），并且**底层错误留在 `#[source]` 链上** ——
+  压成字符串之后 `.source()` 走不下去，上层想按类型判断就只能匹配文案了。
+- **界面 `folio-app` → `anyhow`**。界面对错误只有两个动作：把一条因果链说清楚，以及决定这
+  一次要不要拦住那个操作。`ui::shared::error` 是那一条约定：干活的函数返回 `Result`，每个
+  `?` 挂一句「当时在做哪件事」；回调没有调用方可 `?`，就在那一层 `report` 一次（`{:#}` 把整条
+  链写进日志）。尽力而为的那些步（登记书目、落章节、记「最近打开」）走 `or_log`，
+  而不是从前那句把原因一起丢掉的 `.ok()`。
+
+`anyhow` 只挂在 folio-app 上：后端不许反向依赖界面的错误类型。它也不是新依赖树 ——
+`gpui-base` / `gpui-component` 本来就带着。
+
 ## 测试样本
 
 见 [`tests/fixtures/README.md`](tests/fixtures/README.md)：自动化测试用**程序合成**的 EPUB（可提交、可进 CI），真书只放 `tests/fixtures/local/` 且不入库。
@@ -129,13 +198,17 @@ cargo run -p folio-core --example css-gap -- x.epub # 或任意一本
 ```
 
 按**元素**排名的落差表 + 一份「把这些声明全丢掉 vs 现在」的几何对比都在 stdout。口径与限制见
-[`docs/known-limitations.md`](docs/known-limitations.md)「这一张表有多准」一节。
+[`plans/facts.md`](plans/facts.md)。
 
 ## 文档
 
-- [`docs/development-plan.md`](docs/development-plan.md) —— 完整开发方案：渲染路线取舍、引擎架构、CSS 子集范围、里程碑与风险
-- [`docs/spikes.md`](docs/spikes.md) —— M0 实测数据与被推翻的判断
-- [`docs/android.md`](docs/android.md) —— Android 移植现状：依赖路线（gpui-pre 0.3.8 + gpui-mobile）、构建配方、设备事实与触摸路径
+开发计划在 [`plans/`](plans/README.md)（按里程碑拆文件）：
+
+- [`plans/README.md`](plans/README.md) —— 索引、架构、钉死的架构决策、roadmap
+- [`plans/facts.md`](plans/facts.md) —— 已钉死的事实：框架/平台/构建的实测约束
+- [`plans/M5-refactor.md`](plans/M5-refactor.md) —— 架构重构 + 绘制简化 + 引擎查询接口
+- [`plans/M6-selection.md`](plans/M6-selection.md) —— 选中一期
+- [`plans/M7-annotations.md`](plans/M7-annotations.md) —— 批注二期设计
 
 ## License
 
