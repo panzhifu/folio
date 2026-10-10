@@ -2,13 +2,13 @@
 #
 # 三份的结构必须逐条对应：加一条文案就往三份各加一行，删一条也一起删。漏翻在这张表里不再是
 # 一眼看得见的事（从前三种语言并排一张表，看得见），所以靠 `src/i18n.rs` 的 tests 模块比对三种语言的
-# key 集合与占位符集合，再加 `folio-app/tests/i18n_keys.rs` 核对源码里用到的键每种语言都解得出来。
+# key 集合与占位符集合，再加 `ui/shared/l10n.rs` 的 tests 核对源码里用到的键每种语言都解得出来。
 #
 # 格式是 rust-i18n 的 v1：**文件名去掉扩展名就是语言标签**（`i18n!("locales")` 按文件名认语言），
 # 所以这一份里没有 `ja` 那一层，`[section]` 直接就是键的前缀；取用仍是 `t!("page.font_size")`。
 # 文件名必须与 `Locale::code()` 一字不差 —— 改文件名等于改语言。
 #
-# 命名规则：`page.*` 设置页标题、`field.*` 设置项（`.desc` 是它的说明文字）、
+# 命名规则：`page.*` 设置页标题、`group.*` 设置页里的分组标题、`field.*` 设置项（`.desc` 是它的说明文字）、
 # `error.*` 会显示成通知的失败信息、其余按界面区域走。
 # `.desc` 这种「和同名的那一项平级」的键写成带引号的 `"font_size.desc"`：
 # TOML 里 `font_size.desc` 会把 `font_size` 当表来扩展，而它已经是字符串，两行会打架。
@@ -39,12 +39,10 @@ progress = "進捗"
 page_position = "%{index} / %{total} ページ"
 # 下部バーのこのマス：1画面に2ページ。幅が足りないときは自動で1ページに戻る。
 mode_spread = "見開き"
-
-[settings]
-title = "表示設定"
-# 工具条上那个入口。带省略号是因为点了它会**再开一个窗口**，
-# 而不是当场执行某个动作 —— 这是这套控件的固定写法。
-open = "設定…"
+# 選択メニューバー（M6）：アクションはその場で展開し、ポップオーバーは使わない。
+sel_copy = "コピー"
+sel_paragraph = "段落を選択"
+sel_cancel = "キャンセル"
 
 [toast]
 font_size = "文字サイズ %{size}px"
@@ -60,10 +58,22 @@ typography = "文字"
 layout = "レイアウト"
 fonts = "フォント"
 appearance = "外観"
-language = "言語"
 account = "アカウント"
 about = "このアプリについて"
 library = "書庫"
+
+# 設定ページ内のグループ見出し。1 ページに 2 つ以上あるとサイドバーの項目として
+# 出てくるので、それぞれの字段に何の共通点があるかを名前で示す。
+[group]
+body = "本文"
+paragraph = "段落"
+measure = "本文幅"
+family = "フォントファミリー"
+themes = "テーマ"
+custom_themes = "カスタムテーマ"
+reader = "読者"
+location = "保存先"
+docs = "ドキュメント"
 
 [field]
 font_size = "文字サイズ"
@@ -88,6 +98,8 @@ theme_light = "浅色テーマ"
 "theme_light.desc" = "明に解決されたときに使う配色。"
 theme_dark = "暗色テーマ"
 "theme_dark.desc" = "暗に解決されたときに使う配色。今明に固定しても保存され、切り替えても残ります。"
+theme_dir = "テーマフォルダ"
+"theme_dir.desc" = "このフォルダに置いた `.json` テーマは次回起動時に読み込まれます。"
 language = "表示言語"
 "language.desc" = "UI 表示の言語で、本文の言語は変わりません。"
 account_name = "読者名"
@@ -97,6 +109,7 @@ config_path = "設定ファイル"
 library_dir = "書庫フォルダ"
 "library_dir.desc" = "追加した本はここにコピーされます。空にすると、次に追加する時にもう一度聞かれます。"
 "library_dir.suggested" = "推奨の場所"
+"library_dir.pick" = "フォルダを選択…"
 
 [account]
 fallback_name = "読者"
@@ -104,10 +117,10 @@ settings = "設定"
 theme = "テーマ"
 library = "書庫フォルダ"
 about = "このアプリについて"
-reading_settings = "閲覧設定…"
-library_hint = "Android ではこのアプリに任意のフォルダを渡せません（選択すると content URI が返るだけで、書き込み可能なパスにならないため）。ここでは実際に書き込めるフォルダから選べます。"
+library_hint = "システムのフォルダ選択で書庫フォルダを選べます。既定で書き込めるフォルダから選ぶこともできます。"
 library_unconfirmed = "未確認です。次の追加時にもう一度聞かれます"
 library_default = "既定の推奨"
+pick_dir = "フォルダを選択…"
 
 [import]
 title = "本を追加"
@@ -173,14 +186,24 @@ title = "追加した本をどこにコピーしますか"
 hint = "追加するとファイルをこのフォルダにコピーします。コピー後、原本を移動しても書棚の本には影響しません。"
 confirm = "確認して追加"
 cancel = "キャンセル"
+pick_dir = "フォルダを選択…"
 
 # 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs），
 # 「开发方案」「已知缺口」是 docs/ 里那两份的原文 —— 这一页的全部价值就是它不会另说一套。
 [about]
 version = "バージョン"
+version_desc = "現在起動中のバイナリがビルドされたバージョン。"
 gpui_pre = "GPUI 本体"
 kit = "コンポーネント層 gpui-kit"
 mobile = "モバイル基盤層"
 plan = "開発計画"
 limitations = "既知の未実装"
-docs_note = "上の 2 つはリポジトリ内のファイルそのもので、ビルド時に埋め込んでいます。この画面用に書き直した要約ではありません。"
+open_doc = "表示"
+docs_note = "この 2 つはリポジトリ内のファイルそのもので、ビルド時に埋め込んでいます。この画面用に書き直した要約ではありません。"
+
+# 初回起動のウェルカム画面：アプリに入る前に書庫フォルダを選んでもらう。
+# 「キャンセル」は無い —— フォルダを選ぶか、既定の場所を使うかのどちらか。
+[welcome]
+title = "Folio へようこそ"
+pick = "書庫フォルダを選択…"
+use_default = "既定の場所を使う"

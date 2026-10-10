@@ -1,11 +1,19 @@
-//! 把命中的声明算成 `ComputedStyle`：值解析 + 继承 + 沿树展开。
+//! 把命中的声明算成 `ComputedStyle`：一条声明进哪几个字段 + 继承 + 沿树展开。
 //!
-//! 支持的属性就是 docs/development-plan.md §4.4 那份清单。清单外的声明**被忽略而不是报错**，
+//! 单个值怎么解成 Rust 在 [`super::value`]；这里只管属性名到字段的对应关系。
+//!
+//! 支持的属性就是 `css/computed.rs` 顶部那份清单。清单外的声明**被忽略而不是报错**，
 //! 因为真实出版书里总有些用不上的声明，为一两个 `transform` 让整本书排版失败
 //! 是最糟的失败方式。
 
 use crate::dom::{Dom, NodeId, NodeKind};
 
+use super::value::{
+    BorderElement, border_target, border_width_px, box_sides, four_of, parse_baseline_shift,
+    parse_border_style, parse_break_when, parse_color, parse_count, parse_decoration,
+    parse_font_family_list, parse_font_size, parse_font_weight, parse_line_height, relative_weight,
+    set_length, set_margin, set_px,
+};
 use super::{Declaration, RuleSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -17,7 +25,7 @@ pub enum TextAlign {
     Justify,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Display {
     #[default]
     Block,
@@ -26,6 +34,68 @@ pub enum Display {
     ListItem,
     /// `display: none`：排版层负责整块跳过。
     None,
+}
+
+/// 一条边的画法。CSS 的 `border-style` 有八种实线以外的样式；这里只接
+/// `none` / `hidden`（都不画）与 `solid` / `double` —— 出版书的章标题色带左边那道
+/// 双线就是 `double`，正文插图框是 `solid`。`dashed` / `dotted` / `groove` 这些
+/// 解析失败、按「没接住」计数：把它们悄悄画成实线，书里的虚线框就变成了另一回事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderStyle {
+    #[default]
+    None,
+    Solid,
+    Double,
+}
+
+/// 一条边的三要素。CSS 的 `border-style: none` 时宽度**按 0 参与盒模型**，
+/// 所以「画不画」不能只看 `width`：`border-width: 5px` 而没写 style 的声明
+/// 在浏览器里就是一条不存在的边。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BorderEdge {
+    pub width: f32,
+    pub style: BorderStyle,
+    /// 没写就是 `currentColor`：留 `None`，由绘制层取这一块的 `color`
+    /// （`color` 可继承，所以那一色在层叠期不一定写在本元素上）。
+    pub color: Option<Color>,
+}
+
+impl BorderEdge {
+    /// 这一边在盒模型里占多宽：不画就是 0。
+    pub fn drawn(&self) -> f32 {
+        match self.style {
+            BorderStyle::None => 0.0,
+            _ if self.width > 0.0 => self.width,
+            _ => 0.0,
+        }
+    }
+}
+
+impl ComputedStyle {
+    /// 四条边各自在盒模型里占多宽，顺序 `[上, 右, 下, 左]`。
+    ///
+    /// 走 [`BorderEdge::drawn`] 而不是直接取 `width`：`border-style` 是 `none` 时这一边
+    /// 按 0 参与计算，所以书里那句只写了 `border-width: 20px` 而没配 style 的声明，
+    /// 不该把正文挤窄 40px。
+    pub fn border_drawn(&self) -> [f32; 4] {
+        self.border.map(|edge| edge.drawn())
+    }
+}
+
+/// 连字符相关的折行意图，来自 `hyphens`（含 EPUB 的 `-epub-` / `-webkit-` 前缀写法）。
+///
+/// 一期没有连字词典，所以 `Auto` 与 `Manual` 的**行为**相同：都只在已有的连字符处断，
+/// 不会把 `sais` 拆成 `sa-is`。差别留在「作者的意图有没有被记下来」——词典接上时不用
+/// 回头改书的样式表。这条边界记在 `plans/facts.md` 的 CSS 一节。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Hyphens {
+    /// CSS 初值：已有连字符可断，不主动造连字符。
+    #[default]
+    Manual,
+    /// 连字符**不是**断点：`je-ne-sais-quoi` 整个留着。
+    None,
+    /// 请求词典连字；一期按 `Manual` 执行。
+    Auto,
 }
 
 /// 分片（分页 / 分栏）时的断点意图。
@@ -62,7 +132,7 @@ impl BreakWhen {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color(pub u8, pub u8, pub u8);
 
 /// 一个尺寸值。`auto` / `none` 用 `Option::None` 表示，两种「没有显式值」在这里
@@ -93,6 +163,12 @@ pub struct ComputedStyle {
     pub font_weight: u16,
     pub font_italic: bool,
     pub font_family: String,
+    /// `font-family` 的**整条候选链**，按书写顺序；`font_family` 就是它的第一个。
+    ///
+    /// 只留第一个是以前的一处真落差：书里写 `font-family: "MyFont", "Noto Serif CJK SC"`
+    /// 时，设备上没装 `MyFont` 就直接落回读者的字体，作者排在第二位的那一份明明装着。
+    /// 逐个试的工作在平台层做（只有它知道这台设备注册了哪些家族，见 `ui::reader::measure`）。
+    pub font_families: Vec<String>,
     pub text_align: TextAlign,
     pub text_indent: f32,
     pub margin_top: f32,
@@ -105,6 +181,13 @@ pub struct ComputedStyle {
     pub padding_right: f32,
     pub display: Display,
     pub color: Option<Color>,
+    /// `background-color`。`None` = 书里没写过这一条（CSS 的初值是 `transparent`，
+    /// 与「写了一个颜色」在绘制上是两件事：前者什么都不画，后者要盖住读者的主题底色）。
+    /// 背景色在 CSS 里**不继承**，所以 `inherit_from` 不带它。
+    pub background_color: Option<Color>,
+    /// 四边边框，顺序 `[上, 右, 下, 左]`（与 `box_sides` 同一套展开规则）。
+    /// 布局拿它算盒宽与盒高，绘制拿它画线；不继承。
+    pub border: [BorderEdge; 4],
     pub letter_spacing: f32,
     /// 词间额外宽度（px）。CSS 初值 `normal` 折成 0；它叠在**每个空格之后**，
     /// 所以折行与行宽都要算它（见 `layout::run_width`）。
@@ -136,6 +219,15 @@ pub struct ComputedStyle {
     pub orphans: u16,
     /// 一段被切开后，后一片至少要留几行。CSS 初值 2。
     pub widows: u16,
+    /// 连字符能不能当断点。见 [`Hyphens`]；CSS 里它是**可继承**的，
+    /// 所以书在 `<body>` 上写一次 `hyphens: none` 就管全书。
+    pub hyphens: Hyphens,
+    /// `::first-letter` 算出来的那一份，只在书写过首字符样式时才有。
+    ///
+    /// 装的是**完整的 ComputedStyle** 而不是几个字段：首字符要的东西就是「一套字体」，
+    /// 以后 `font-family` 的候选链、字距这些加进来不用再动这里。
+    /// 排版层拿它给首字符单成一个 run，并据此决定它压住几行（`layout` 里的 `drop_cap`）。
+    pub first_letter: Option<Box<ComputedStyle>>,
 }
 
 impl Default for ComputedStyle {
@@ -146,6 +238,7 @@ impl Default for ComputedStyle {
             font_weight: 400,
             font_italic: false,
             font_family: String::new(),
+            font_families: Vec::new(),
             text_align: TextAlign::Left,
             text_indent: 0.0,
             margin_top: 0.0,
@@ -158,6 +251,8 @@ impl Default for ComputedStyle {
             padding_right: 0.0,
             display: Display::Block,
             color: None,
+            background_color: None,
+            border: [BorderEdge::default(); 4],
             letter_spacing: 0.0,
             word_spacing: 0.0,
             baseline_shift: 0.0,
@@ -174,6 +269,82 @@ impl Default for ComputedStyle {
             // 2 是 CSS 的初值，不是我们挑的：一行的孤行（或寡行）在任何排版传统里都算缺陷。
             orphans: 2,
             widows: 2,
+            hyphens: Hyphens::Manual,
+            first_letter: None,
+        }
+    }
+}
+
+/// 手写 `Hash`：块级排版缓存要按「**这个块子树的样式**」判命中（改一个块的样式，
+/// 只有那一块失效），所以需要一份能覆盖**每个字段**的样式哈希。`ComputedStyle` 带
+/// `f32`，不能 derive `Hash`，于是逐字段手写。
+///
+/// **新增字段时必须在这里补一行**，否则漏掉的字段改了而哈希不变，块级缓存会读到过期结果。
+/// 浮点走 `to_bits`：`0.0` 与 `-0.0` 会被当成不同的值，最坏也只是多一次未命中，不会错命中。
+impl std::hash::Hash for ComputedStyle {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        fn f<H: std::hash::Hasher>(x: f32, h: &mut H) {
+            x.to_bits().hash(h);
+        }
+        fn opt_len<H: std::hash::Hasher>(l: &Option<Length>, h: &mut H) {
+            match l {
+                None => 0u8.hash(h),
+                Some(Length::Px(v)) => {
+                    1u8.hash(h);
+                    f(*v, h);
+                }
+                Some(Length::Percent(p)) => {
+                    2u8.hash(h);
+                    f(*p, h);
+                }
+            }
+        }
+        f(self.font_size, h);
+        f(self.line_height, h);
+        self.font_weight.hash(h);
+        self.font_italic.hash(h);
+        self.font_family.hash(h);
+        self.font_families.hash(h);
+        (self.text_align as u8).hash(h);
+        f(self.text_indent, h);
+        f(self.margin_top, h);
+        f(self.margin_bottom, h);
+        f(self.margin_left, h);
+        f(self.margin_right, h);
+        f(self.padding_top, h);
+        f(self.padding_bottom, h);
+        f(self.padding_left, h);
+        f(self.padding_right, h);
+        (self.display as u8).hash(h);
+        self.color.hash(h);
+        self.background_color.hash(h);
+        for edge in &self.border {
+            f(edge.width, h);
+            (edge.style as u8).hash(h);
+            edge.color.hash(h);
+        }
+        f(self.letter_spacing, h);
+        f(self.word_spacing, h);
+        f(self.baseline_shift, h);
+        self.underline.hash(h);
+        self.line_through.hash(h);
+        self.white_space_pre.hash(h);
+        opt_len(&self.width, h);
+        opt_len(&self.height, h);
+        opt_len(&self.max_width, h);
+        opt_len(&self.max_height, h);
+        (self.break_before as u8).hash(h);
+        (self.break_after as u8).hash(h);
+        self.break_inside_avoid.hash(h);
+        self.orphans.hash(h);
+        self.widows.hash(h);
+        (self.hyphens as u8).hash(h);
+        match &self.first_letter {
+            None => 0u8.hash(h),
+            Some(inner) => {
+                1u8.hash(h);
+                inner.hash(h);
+            }
         }
     }
 }
@@ -181,17 +352,13 @@ impl Default for ComputedStyle {
 /// 认识但一期不实现：接受、不生效、不计入 ignored。
 ///
 /// 这一份和下面 `inherit_from` 的区别在于：这些属性**真实出版书里满地都是**
-/// （`border`、`width`、`text-decoration`），若按不支持计数，ignored 会被刷到
+/// （`width`、`text-decoration`、`float`），若按不支持计数，ignored 会被刷到
 /// 几百条，真正需要关注的「我们没预料到的写法」就淹没了。
 const KNOWN_UNIMPLEMENTED: &[&str] = &[
+    // `background` 简写还能带图（`background: #fff url(x.png)`），图那条一期不接；
+    // 单条 `background-color` 已经生效，不再在这份名单里。
     "background",
-    "background-color",
     "min-height",
-    "border",
-    "border-left",
-    "border-right",
-    "border-top",
-    "border-bottom",
     "text-shadow",
     "direction",
     "writing-mode",
@@ -199,7 +366,7 @@ const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // （「接受、不生效」），M4 的分片器把它们变成真生效的属性，所以移出去了。
     // `columns` / `column-gap` 留下：分片器认的是**视口**栏数（`FragmentOptions::columns`，
     // 由界面或读者给），作者写的块级 `column-count` 要改排版期的折行宽度，还没接。
-    // 详见 `docs/known-limitations.md`「分片」一节。
+    // 详见 `plans/facts.md` 与 `css/computed.rs` 的忽略清单。
     "float",
     "clear",
     "columns",
@@ -216,8 +383,16 @@ const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // `capitalize` / `ß → SS` 这类一改就让偏移对不上。要接就得连 M5 的锚点映射一起定，
     // 不是加一条 `to_uppercase()` 的事。
     "text-transform",
-    // 块级装饰（底色、边框）与 `min-height` 需要的是「块盒的矩形」，而排版层现在
-    // 只产出行盒；这条和分页/双页的上屏接线是同一件事，一起定。
+    // 字体的 OpenType 层：小写大写（`font-variant` / `font-variant-caps`）、横向压缩
+    // （`font-stretch`）、字距调整开关（`font-kerning`）、特性开关表（`font-feature-settings`）。
+    // 这四条以前**不在这份名单里**，于是被算成「不认识」，`examples/css-gap` 的表就会说
+    // 「这些属性我们听都没听过」—— 事实是认得，但要的是 gpui 的 `FontFeatures` 通道
+    // （见开发方案 §3.2），那是接字体文件那一层的事，不是层叠期能折出来的数。
+    "font-variant",
+    "font-variant-caps",
+    "font-stretch",
+    "font-kerning",
+    "font-feature-settings",
 ];
 
 #[derive(Debug, Default)]
@@ -272,6 +447,21 @@ impl StyledDom {
     pub fn get(&self, id: NodeId) -> Option<&ComputedStyle> {
         self.styles.get(id as usize)
     }
+
+    pub fn len(&self) -> usize {
+        self.styles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.styles.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (NodeId, &ComputedStyle)> {
+        self.styles
+            .iter()
+            .enumerate()
+            .map(|(id, style)| (id as NodeId, style))
+    }
 }
 
 /// 层叠整棵树。`root_base` 是读者偏好折算出来的根样式（字号、行距、字体等）。
@@ -294,27 +484,78 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle) -> StyledD
         // 空标签名命中不到任何 UA 规则，等价于「只继承」。
         let mut style = crate::css::ua::seed(&parent, dom.tag_name(id).unwrap_or_default());
         let decls = rules.matching_declarations(dom, id);
+        // 元素的 `style="…"`。CSS 把它排在「作者普通声明」之上、`!important` 那两档之下：
+        // 整份追加到最后会让行内普通声明盖掉书里的 `color: red !important`，
+        // 放在最前又等于作者的行内样式没有优先权。
+        // `matching_declarations` 已经按层叠级别从低到高排好，而**普通声明全在重要声明
+        // 之前**，所以按 `important` 一刀切成两半，中间插入行内那两半，就是那个位置。
+        let inline = dom
+            .attr(id, "style")
+            .map(parse_inline_style)
+            .unwrap_or_default();
+        let mut ordered: Vec<&Declaration> = Vec::with_capacity(decls.len() + inline.len());
+        ordered.extend(decls.iter().filter(|d| !d.important));
+        ordered.extend(inline.iter().filter(|d| !d.important));
+        ordered.extend(inline.iter().filter(|d| d.important));
+        ordered.extend(decls.iter().filter(|d| d.important));
 
-        // font-size 先算：em / % 都按**元素自己的**字号折算，
-        // 若按声明书写顺序来，`text-indent: 2em; font-size: 20px` 会算错。
-        // line-height 其次，理由相同（百分比与 px 都要除以自己的字号）。
-        for group in 0..3 {
-            for decl in &decls {
-                let is_font_size = decl.property == "font-size";
-                let is_line_height = decl.property == "line-height";
-                let mine = match group {
-                    0 => is_font_size,
-                    1 => is_line_height,
-                    _ => !is_font_size && !is_line_height,
-                };
-                if mine && !apply(&mut style, &parent, root_base.font_size, decl) {
-                    ignored += 1;
-                }
-            }
+        ignored += apply_in_cascade_order(&mut style, &parent, root_base.font_size, &ordered);
+
+        // `::first-letter`：首字符的盒要等这个元素自己算完才能起算（`3em` 的基准
+        // 就是它），所以放在后面。一份都没命中时留 `None`，排版层因此完全不走下沉那条路。
+        let cap_decls = rules.matching_first_letter(dom, id);
+        if !cap_decls.is_empty() {
+            let mut cap = style.clone();
+            // `parent` 传的是**这个元素自己**：`::first-letter` 的父盒就是它，
+            // 所以 `font-size: 3em` 的 em 按段落自己的字号折，不是按段落的父。
+            ignored += apply_in_cascade_order(&mut cap, &style, root_base.font_size, &cap_decls);
+            style.first_letter = Some(Box::new(cap));
         }
         styles[id as usize] = style;
     }
     StyledDom { styles, ignored }
+}
+
+/// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
+///
+/// 分批而不是照书写顺序：`em` / `%` 都按**元素自己的**字号折算，
+/// 若照书写顺序，`text-indent: 2em; font-size: 20px` 会按继承字号算错一档。
+/// 同一批内部仍严格按传进来的层叠顺序。
+fn apply_in_cascade_order(
+    style: &mut ComputedStyle,
+    parent: &ComputedStyle,
+    root_px: f32,
+    decls: &[&Declaration],
+) -> usize {
+    let mut ignored = 0usize;
+    for group in 0..3 {
+        for decl in decls {
+            let is_font_size = decl.property == "font-size";
+            let is_line_height = decl.property == "line-height";
+            let mine = match group {
+                0 => is_font_size,
+                1 => is_line_height,
+                _ => !is_font_size && !is_line_height,
+            };
+            if mine && !apply(style, parent, root_px, decl) {
+                ignored += 1;
+            }
+        }
+    }
+    ignored
+}
+
+/// 元素的 `style="…"` 属性 → 声明列表，按书写顺序（同一属性后面那条盖前面那条）。
+///
+/// 分号落在 `url(…)` 或引号里时不是分隔符，所以复用样式表那一份 `split_top_level`；
+/// 单条声明也复用 `css::parse_declaration` —— 行内写法与样式表写法对 `!important`、
+/// 大小写、空值的处理必须一字不差，否则同一句话写在两处结果不同。
+/// 认不出的整条丢掉，由调用方在 `apply` 那一步按「不认识」计数。
+fn parse_inline_style(text: &str) -> Vec<Declaration> {
+    crate::css::selector::split_top_level(text, ';')
+        .into_iter()
+        .filter_map(|decl| crate::css::parse_declaration(&decl))
+        .collect()
 }
 
 /// 元素节点：可继承属性从父样式带下来，其余从默认值起算。
@@ -329,16 +570,20 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         font_weight: parent.font_weight,
         font_italic: parent.font_italic,
         font_family: parent.font_family.clone(),
+        font_families: parent.font_families.clone(),
         text_align: parent.text_align,
         color: parent.color,
         letter_spacing: parent.letter_spacing,
         text_indent: parent.text_indent,
         word_spacing: parent.word_spacing,
+        // `hyphens` 在 CSS 里可继承，写法与 `word_spacing` 同一档：书里通常在
+        // `<body>` 或 `html` 上声明一次「这本书不许在连字符处断行」。
+        hyphens: parent.hyphens,
         // 装饰线在 CSS 里**不是继承属性**，但会向后代**传播**（`text-decoration: none`
         // 写在子元素上并不会去掉父元素的下划线，这是那条规则最有名的坑）。对我们的
         // 行内/块级盒来说，「传播」与「继承」算出来的结果一致，所以这里按继承实现，
         // 差别只留在原子行内盒（inline-block、图片）上 —— 那种盒一期没有内容会吃到
-        // 父级装饰，见 `docs/known-limitations.md`。
+        // 父级装饰，见 `plans/facts.md`。
         underline: parent.underline,
         line_through: parent.line_through,
         // `vertical-align` **不**继承（CSS 规定），所以 `baseline_shift` 不在这里出现：
@@ -352,114 +597,13 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
     }
 }
 
-/// 返回 false 表示这条声明不认识（或值解析失败），由调用方计入 ignored。
-///
-/// `root_px` 是根元素（读者偏好）的字号，rem 只按它折算；
-/// `parent` 提供 font-size 的相对基准。em 在 `font-size` 里按父字号、
-/// `break-before` / `break-after` 与它们的 CSS2.1 同名前缀版本（`page-break-*`）。
-///
-/// `recto` / `verso` / `avoid-column` 这些变体一期不认：按不支持计数，而不是悄悄
-/// 当成 `auto` —— 后者会让作者写的意图静默消失，比不认识更难查。
-fn parse_break_when(value: &str) -> Option<BreakWhen> {
-    match value.to_ascii_lowercase().as_str() {
-        "auto" => Some(BreakWhen::Auto),
-        "avoid" => Some(BreakWhen::Avoid),
-        "page" => Some(BreakWhen::Page),
-        "left" => Some(BreakWhen::Left),
-        "right" => Some(BreakWhen::Right),
-        "always" => Some(BreakWhen::Always),
-        _ => None,
-    }
-}
-
-/// `orphans` / `widows` 的取值：正整数。`0` 按不支持处理 —— 它意味着「一段可以被切成
-/// 剩下零行」，那不是排版参数，是写错了。
-fn parse_count(value: &str) -> Option<u16> {
-    let n: u16 = value.trim().parse().ok()?;
-    (n >= 1).then_some(n)
-}
-
-/// 上标抬多高、下标压多低。这两个数**是我们定的**，不是浏览器的实现值：
-/// 这台机器上没有浏览器可量，抄一个「大家都这么写」的常数等于把猜测写成标准。
-/// 三分之一 em / 四分之一 em 是中文排版里注号常见的观感尺度，且与字号成比例，
-/// 读者改字号时偏移跟着走。
-const SUPER_SHIFT_EM: f32 = 1.0 / 3.0;
-const SUB_SHIFT_EM: f32 = 0.25;
-
-/// 上标的位移，按**自己的**字号。UA 表给 `<sup>` / `<sub>` 用的就是这两个式子，
-/// 与作者写 `vertical-align: super` 走的是同一条路 —— 两条路径给不同的数，
-/// 就意味着「带 class 的上标」和「裸 `<sup>`」排出来不一样高。
-pub(crate) fn super_shift(font_size: f32) -> f32 {
-    font_size * SUPER_SHIFT_EM
-}
-
-/// 下标的位移（负数 = 往下）。见 [`super_shift`]。
-pub(crate) fn sub_shift(font_size: f32) -> f32 {
-    -font_size * SUB_SHIFT_EM
-}
-
-/// `vertical-align` 折成基线偏移（px，正数往上）。
-///
-/// - `baseline` → 0，也就是「不偏移」，与初值同义，所以它算接住了。
-/// - `super` / `sub` → 见上面那两个常数的说明。
-/// - `<length>` → 直接按长度；`<percentage>` → 按 CSS 相对**自己的 line-height**
-///   （`line_height` 是倍数，所以基准是 `font_size × line_height`）。
-/// - `top` / `bottom` / `middle` / `text-top` / `text-bottom` → 返回 `None`：
-///   它们要的是行盒对齐机制（拿整行的 tallest box 对齐），悄悄当 0 会把作者的
-///   表格基线写成正常位置还查不出来。
-fn parse_baseline_shift(value: &str, own: f32, root_px: f32, line_height: f32) -> Option<f32> {
-    let v = value.trim().to_ascii_lowercase();
-    match v.as_str() {
-        "baseline" => Some(0.0),
-        "super" => Some(super_shift(own)),
-        "sub" => Some(sub_shift(own)),
-        "top" | "bottom" | "middle" | "text-top" | "text-bottom" => None,
-        _ => {
-            if let Some(percent) = v.strip_suffix('%') {
-                let n: f32 = percent.trim().parse().ok()?;
-                return Some(n / 100.0 * own * line_height);
-            }
-            length_px(&v, own, root_px)
-        }
-    }
-}
-
-/// `text-decoration` / `text-decoration-line` → `(下划线, 删除线)`。
-///
-/// 简写在 CSS 里还能带线型与颜色（`underline wavy #f00`）。那些 token **认得但不改变
-/// 画法**：一期一律按当前文字颜色画 1px 实线。`overline` 与 `blink` 整条不接 ——
-/// 画不出来的东西不该在统计里显示成「接住了」。
-fn parse_decoration(value: &str) -> Option<(bool, bool)> {
-    let mut underline = false;
-    let mut through = false;
-    for token in value.split_whitespace() {
-        match token.to_ascii_lowercase().as_str() {
-            "underline" => underline = true,
-            "line-through" => through = true,
-            "none" => return Some((false, false)),
-            "overline" | "blink" => return None,
-            // 线型、厚度、`from-font`：认得，画法不变。
-            "solid" | "double" | "dotted" | "dashed" | "wavy" | "thick" | "thin" | "from-font" => {}
-            other => {
-                // 颜色可以，别的都不行 —— 猜一个作者没写的线型比丢掉这条更糟。
-                if parse_color(other).is_none() && !other.starts_with('#') {
-                    return None;
-                }
-            }
-        }
-    }
-    // 空值（或只剩空白）不算接住：`text-decoration: ;` 那种写坏的声明要有痕迹。
-    value.split_whitespace().next()?;
-    Some((underline, through))
-}
-
 /// `font` 简写：`[[style] [weight] size [/ line-height] family]`。
 ///
 /// **有意不重置没写到的子属性。** CSS 规定 `font` 会把 `font-variant`、`font-stretch`、
 /// `line-height`、`font-size`… 一律拉回初值，而我们的行距与字重是通过 `root_base`
 /// 从读者偏好走进继承链的：一句 `font: 1em serif` 把读者的 1.75 行距改回 `normal`
 /// 是产品级的错，不是排版细节。除此之外按 CSS：字号支持 `/行距`，
-/// 字族取第一个候选并去引号（与 `font-family` 同一套规则）。
+/// 字族取整条候选链并去引号（与 `font-family` 共用一个解析器）。
 /// `small-caps` / `condensed` / `caption` 这类 token 我们不认，整条作废并计 `ignored`。
 fn apply_font_shorthand(
     style: &mut ComputedStyle,
@@ -508,15 +652,21 @@ fn apply_font_shorthand(
     }
     // family 可能带空格（`"Times New Roman", serif`），所以把剩下的 token 重新拼回去。
     let family = parts[at + 1..].join(" ");
-    let first = family.split(',').next().unwrap_or("").trim();
-    if first.is_empty() {
+    let list = parse_font_family_list(&family);
+    let Some(first) = list.first().cloned() else {
         return false;
-    }
-    style.font_family = first.trim_matches('"').trim_matches('\'').to_string();
+    };
+    style.font_family = first;
+    style.font_families = list;
     true
 }
 
-/// 在别处按自己的字号 —— 这是 CSS 的规定，不是我们的选择。
+/// 返回 false 表示这条声明不认识（或值解析失败），由调用方计入 ignored。
+///
+/// `root_px` 是根元素（读者偏好）的字号，rem 只按它折算；`parent` 提供 font-size 的
+/// 相对基准 —— `em` 在 `font-size` 里按父字号，在别处按自己的字号，这是 CSS 的规定，
+/// 不是我们的选择。`break-before` / `break-after` 与它们的 CSS2.1 同名前缀版本
+/// （`page-break-*`）共用一条解析。
 fn apply(
     style: &mut ComputedStyle,
     parent: &ComputedStyle,
@@ -549,13 +699,24 @@ fn apply(
             }
             None => false,
         },
-        "font-weight" => match parse_font_weight(value) {
-            Some(w) => {
-                style.font_weight = w;
-                true
+        "font-weight" => {
+            // `bolder` / `lighter` 是**相对**父字重的，不是两个固定档位：`<strong>` 套在
+            // 一段已经 700 的标题里应当变成 900，写成常量就等于全书所有嵌套强调同粗。
+            // 这两个词在这里截走，其余仍走 `parse_font_weight`（`@font-face` 的描述符共用它）。
+            let value = value.to_ascii_lowercase();
+            let weight = match value.as_str() {
+                "bolder" => Some(relative_weight(parent.font_weight, true)),
+                "lighter" => Some(relative_weight(parent.font_weight, false)),
+                _ => parse_font_weight(&value),
+            };
+            match weight {
+                Some(w) => {
+                    style.font_weight = w;
+                    true
+                }
+                None => false,
             }
-            None => false,
-        },
+        }
         "font-style" => match value.to_ascii_lowercase().as_str() {
             "normal" => {
                 style.font_italic = false;
@@ -568,11 +729,12 @@ fn apply(
             _ => false,
         },
         "font-family" => {
-            let first = value.split(',').next().unwrap_or("").trim();
-            if first.is_empty() {
+            let list = parse_font_family_list(value);
+            let Some(first) = list.first().cloned() else {
                 return false;
-            }
-            style.font_family = first.trim_matches('"').trim_matches('\'').to_string();
+            };
+            style.font_family = first;
+            style.font_families = list;
             true
         }
         "text-align" => match value.to_ascii_lowercase().as_str() {
@@ -602,6 +764,26 @@ fn apply(
                 return true;
             }
             set_px(value, own, root_px, &mut style.word_spacing)
+        }
+        // 连字符。EPUB3 的样式表里三条拼法都见得到（`-webkit-` 是历史包袱，
+        // `-epub-` 是 EPUB 风格规范点名的那条），所以一起认，别把认得的写法
+        // 报成「不认识」。
+        "hyphens" | "-webkit-hyphens" | "-epub-hyphens" | "-moz-hyphens" => {
+            match value.to_ascii_lowercase().as_str() {
+                "manual" => {
+                    style.hyphens = Hyphens::Manual;
+                    true
+                }
+                "none" => {
+                    style.hyphens = Hyphens::None;
+                    true
+                }
+                "auto" => {
+                    style.hyphens = Hyphens::Auto;
+                    true
+                }
+                _ => false,
+            }
         }
         "vertical-align" => match parse_baseline_shift(value, own, root_px, style.line_height) {
             Some(px) => {
@@ -691,6 +873,24 @@ fn apply(
             }
             None => false,
         },
+        // 背景色。`transparent` 是「有这条声明、但不画」，与「书里没写过」在层叠上
+        // 是两件事（后者可能被更高 specificity 的一条颜色盖住），所以两条都要认。
+        "background-color" => {
+            if value.eq_ignore_ascii_case("transparent") {
+                style.background_color = None;
+                return true;
+            }
+            match parse_color(value) {
+                Some(color) => {
+                    style.background_color = Some(color);
+                    true
+                }
+                None => false,
+            }
+        }
+        // 边框一族（`border` / `border-top` / `border-left-width` / `border-color` …）
+        // 用一条前缀分支收：三要素 × 四边写开是二十个 match 臂，而解析规则只有一条。
+        name if name.starts_with("border") => apply_border(style, name, value, own, root_px),
         "display" => match value.to_ascii_lowercase().as_str() {
             "block" => {
                 style.display = Display::Block;
@@ -748,216 +948,107 @@ fn apply(
     }
 }
 
-fn set_length(value: &str, font_size: f32, root_font_size: f32, out: &mut Option<Length>) -> bool {
-    match parse_length(value, font_size, root_font_size) {
-        Some(v) => {
-            *out = v;
-            true
-        }
-        None => false,
-    }
-}
-
-/// 外层 `None` = 值不认识（计入 ignored）；内层 `None` = `auto` / `none`（清掉显式值）。
-fn parse_length(value: &str, font_size: f32, root_font_size: f32) -> Option<Option<Length>> {
-    let v = value.trim().to_ascii_lowercase();
-    if v.is_empty() {
-        return None;
-    }
-    if v == "auto" || v == "none" {
-        return Some(None);
-    }
-    if let Some(percent) = v.strip_suffix('%') {
-        let n: f32 = percent.trim().parse().ok()?;
-        return Some(Some(Length::Percent(n / 100.0)));
-    }
-    length_px(&v, font_size, root_font_size).map(|px| Some(Length::Px(px)))
-}
-
-fn set_px(value: &str, font_size: f32, root_font_size: f32, out: &mut f32) -> bool {
-    match length_px(value, font_size, root_font_size) {
-        Some(px) => {
-            *out = px;
-            true
-        }
-        None => false,
-    }
-}
-
-/// 一条边的长度。`auto_in_zero` 为真时 `auto` 折成 0，而不是当不认识。
-///
-/// 为什么 `auto` 取 0 不是降级而是当前盒模型下的正确结果：CSS 里块级盒的
-/// `auto` 前后边距是「均分剩余宽度」，而我们的正文块使用宽度就等于可用宽度
-/// （`layout` 里 `content_width = width − padding − margin`，块级不吃 `max-width`
-/// 的收窄），剩余宽度恒为 0。等排版层真按 `max-width` 收窄正文时，这里要改成均分，
-/// 块级居中才会出现 —— 那一条改动的位置就在这儿，不在别处。
-///
-/// 但**不能整条作废**：`margin: 5px auto` 是书里真实出现的写法（这本《蛇结》就有），
-/// 拒掉它等于连那 5px 的上下边距一起丢，那才是把作者意图静默抹掉。
-fn edge_px(value: &str, font_size: f32, root_font_size: f32, auto_is_zero: bool) -> Option<f32> {
-    if auto_is_zero && value.eq_ignore_ascii_case("auto") {
-        return Some(0.0);
-    }
-    length_px(value, font_size, root_font_size)
-}
-
-/// 单边 `margin`：与 [`set_px`] 同形，只是 `auto` 折成 0（`margin` 认 `auto`，
-/// `padding` 不认 —— 所以 padding 那四条继续用 `set_px`）。
-fn set_margin(value: &str, font_size: f32, root_font_size: f32, out: &mut f32) -> bool {
-    match edge_px(value, font_size, root_font_size, true) {
-        Some(px) => {
-            *out = px;
-            true
-        }
-        None => false,
-    }
-}
-
-/// `margin` / `padding` 简写的四边展开，返回 `[上, 右, 下, 左]`。
-///
-/// 分配的规则是 CSS 的：1 值四边相同；2 值「上下 左右」；3 值「上 左右 下」；
-/// 4 值顺时针。值数不对（0 个或 5 个以上）或任一个解析失败，**整条作废** ——
-/// 半套边距比没边距更难解释，而且静默只吃前两个值会让 `margin: 1px 2px 3px 4px 5px`
-/// 这种写错的书看起来「已经处理了」。
-fn box_sides(
+/// 边框一族的一条声明 → 写进 `style.border`。入口是 [`apply`] 里那条 `border` 前缀分支。
+fn apply_border(
+    style: &mut ComputedStyle,
+    property: &str,
     value: &str,
-    font_size: f32,
-    root_font_size: f32,
-    auto_is_zero: bool,
-) -> Option<[f32; 4]> {
+    own: f32,
+    root_px: f32,
+) -> bool {
+    let Some((side, element)) = border_target(property) else {
+        return false;
+    };
     let parts: Vec<&str> = value.split_whitespace().collect();
-    if parts.is_empty() || parts.len() > 4 {
-        return None;
+    if parts.is_empty() {
+        return false;
     }
-    let mut parsed = Vec::with_capacity(parts.len());
-    for part in parts {
-        parsed.push(edge_px(part, font_size, root_font_size, auto_is_zero)?);
+    // `border-top-width: 1px 2px` 这种是错的：边已经定死一条，值只能有一个。
+    if side.is_some() && element != BorderElement::All && parts.len() != 1 {
+        return false;
     }
-    let top = parsed[0];
-    let right = parsed.get(1).copied().unwrap_or(top);
-    let bottom = parsed.get(2).copied().unwrap_or(top);
-    let left = parsed.get(3).copied().unwrap_or(right);
-    Some([top, right, bottom, left])
-}
-
-fn parse_font_size(value: &str, parent_px: f32, root_px: f32) -> Option<f32> {
-    let v = value.to_ascii_lowercase();
-    if let Some(percent) = v.strip_suffix('%') {
-        let n: f32 = percent.trim().parse().ok()?;
-        return Some(n / 100.0 * parent_px);
-    }
-    let keyword = match v.as_str() {
-        "xx-small" => Some(9.0),
-        "x-small" => Some(10.0),
-        "small" => Some(13.0),
-        "medium" => Some(16.0),
-        "large" => Some(18.0),
-        "x-large" => Some(24.0),
-        "xx-large" => Some(32.0),
-        "smaller" => Some(parent_px / 1.2),
-        "larger" => Some(parent_px * 1.2),
-        _ => None,
+    // 这条声明落到哪几条边上（`None` = 四条都要）。
+    let targets: [usize; 4] = match side {
+        Some(ix) => [ix, ix, ix, ix],
+        None => [0, 1, 2, 3],
     };
-    keyword.or_else(|| length_px(&v, parent_px, root_px))
-}
-
-/// `normal` 与无单位倍数直接当倍数；带单位的换算成 px 再除以**自己的**字号。
-fn parse_line_height(value: &str, font_size: f32, root_px: f32) -> Option<f32> {
-    let v = value.trim().to_ascii_lowercase();
-    if v == "normal" {
-        return Some(1.2);
-    }
-    if let Some(percent) = v.strip_suffix('%') {
-        let n: f32 = percent.trim().parse().ok()?;
-        return Some(n / 100.0);
-    }
-    if let Ok(multiplier) = v.parse::<f32>() {
-        return Some(multiplier);
-    }
-    length_px(&v, font_size, root_px).map(|px| px / font_size)
-}
-
-fn parse_font_weight(value: &str) -> Option<u16> {
-    match value.to_ascii_lowercase().as_str() {
-        "normal" => Some(400),
-        "bold" | "bolder" => Some(700),
-        "lighter" => Some(300),
-        other => other
-            .parse::<f32>()
-            .ok()
-            .map(|n| n.clamp(1.0, 1000.0) as u16),
-    }
-}
-
-/// 支持 px / em / rem / pt / 裸数字。`%` 不在这里：外边距和缩进的百分比
-/// 要按**包含块的宽度**折算，那是排版期才知道的数，层叠期猜不出来，
-/// 所以 `auto` / `calc()` / `%` 一律判为不支持（计入 ignored，值保持默认）。
-fn length_px(value: &str, font_size: f32, root_font_size: f32) -> Option<f32> {
-    let v = value.trim().to_ascii_lowercase();
-    if v.is_empty() || v == "auto" || v.starts_with("calc(") || v.ends_with('%') {
-        return None;
-    }
-    let (number, unit) = [("rem", "rem"), ("px", "px"), ("pt", "pt"), ("em", "em")]
-        .into_iter()
-        .find_map(|(suffix, unit)| v.strip_suffix(suffix).map(|n| (n, unit)))
-        .unwrap_or((v.as_str(), "none"));
-    let n: f32 = number.trim().parse().ok()?;
-    Some(match unit {
-        "px" | "none" => n,
-        "pt" => n * 96.0 / 72.0,
-        "em" => n * font_size,
-        "rem" => n * root_font_size,
-        _ => return None,
-    })
-}
-
-fn parse_color(value: &str) -> Option<Color> {
-    let v = value.trim().to_ascii_lowercase();
-    if let Some(hex) = v.strip_prefix('#') {
-        let parts: Vec<u32> = match hex.len() {
-            3 => hex
-                .chars()
-                .filter_map(|c| u32::from_str_radix(&c.to_string(), 16).ok())
-                .collect(),
-            6 => (0..3)
-                .filter_map(|i| u32::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
-                .collect(),
-            _ => return None,
-        };
-        if parts.len() != 3 {
-            return None;
+    match element {
+        // 简写把三要素**全部**写一遍：缺的那一项按 CSS 初值重置，而不是保持原样。
+        // 书里 `border: 2px` 因此等于「宽 2px、样式 none、颜色 currentColor」，
+        // 而样式是 none 就没有边可画（`BorderEdge::drawn` 随之给 0）—— 这是那条规则
+        // 最有名的坑，照抄比「看起来更合理」的保留原样要对。
+        BorderElement::All => {
+            let mut width = 3.0; // `medium`
+            let mut line = BorderStyle::None;
+            let mut color = None;
+            for part in &parts {
+                if let Some(px) = border_width_px(part, own, root_px) {
+                    width = px;
+                } else if let Some(kind) = parse_border_style(part) {
+                    line = kind;
+                } else if part.eq_ignore_ascii_case("transparent") {
+                    color = None;
+                } else if let Some(parsed) = parse_color(part) {
+                    color = Some(parsed);
+                } else {
+                    return false;
+                }
+            }
+            for ix in targets {
+                style.border[ix] = BorderEdge {
+                    width,
+                    style: line,
+                    color,
+                };
+            }
+            true
         }
-        let scale = if hex.len() == 3 { 17 } else { 1 };
-        return Some(Color(
-            (parts[0] * scale) as u8,
-            (parts[1] * scale) as u8,
-            (parts[2] * scale) as u8,
-        ));
+        BorderElement::Width => match box_sides(value, own, root_px, false) {
+            Some(each) => {
+                for ix in targets {
+                    style.border[ix].width = each[ix];
+                }
+                true
+            }
+            None => false,
+        },
+        BorderElement::Style => {
+            let mut each = Vec::with_capacity(parts.len());
+            for part in &parts {
+                match parse_border_style(part) {
+                    Some(kind) => each.push(kind),
+                    None => return false,
+                }
+            }
+            let Some(sides) = four_of(&each) else {
+                return false;
+            };
+            for ix in targets {
+                style.border[ix].style = sides[ix];
+            }
+            true
+        }
+        BorderElement::Color => {
+            let mut each = Vec::with_capacity(parts.len());
+            for part in &parts {
+                if part.eq_ignore_ascii_case("transparent") {
+                    each.push(None);
+                } else {
+                    match parse_color(part) {
+                        Some(color) => each.push(Some(color)),
+                        None => return false,
+                    }
+                }
+            }
+            let Some(sides) = four_of(&each) else {
+                return false;
+            };
+            for ix in targets {
+                style.border[ix].color = sides[ix];
+            }
+            true
+        }
     }
-    if let Some(inner) = v.strip_prefix("rgb(").and_then(|s| s.strip_suffix(')')) {
-        let parts: Vec<f32> = inner
-            .split(|c: char| c == ',' || c.is_whitespace())
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse::<f32>().ok())
-            .collect();
-        return if parts.len() >= 3 {
-            Some(Color(parts[0] as u8, parts[1] as u8, parts[2] as u8))
-        } else {
-            None
-        };
-    }
-    let named = match v.as_str() {
-        "black" => (0, 0, 0),
-        "white" => (255, 255, 255),
-        "red" => (255, 0, 0),
-        "green" => (0, 128, 0),
-        "blue" => (0, 0, 255),
-        "yellow" => (255, 255, 0),
-        "gray" | "grey" => (128, 128, 128),
-        "silver" => (192, 192, 192),
-        _ => return None,
-    };
-    Some(Color(named.0, named.1, named.2))
 }
 
 fn document_order(dom: &Dom) -> Vec<NodeId> {
@@ -979,7 +1070,8 @@ mod tests {
     //! 这里验的是「拿到有序声明之后算得对不对」。
 
     use crate::css::computed::{
-        Color, ComputedStyle, Display, Length, StyledDom, TextAlign, cascade,
+        BorderEdge, BorderStyle, Color, ComputedStyle, Display, Hyphens, Length, StyledDom,
+        TextAlign, cascade,
     };
     use crate::css::{Origin, RuleSet};
     use crate::dom::{Dom, NodeId};
@@ -1321,10 +1413,292 @@ mod tests {
         assert_eq!(page.styled.ignored, 0);
     }
 
+    /// `hyphens` 三个值 + EPUB 前缀拼法 + 可继承。认不出的值回 CSS 初值 `manual`
+    /// 并计一条 ignored —— 静悄悄变成 `none` 会把整本书的折行改掉还没人知道。
+    #[test]
+    fn hyphens_parses_the_three_values_and_inherits() {
+        let page = author(
+            "<div><p class=a>一</p></div><p class=b>二</p><p class=c>三</p>",
+            "div { hyphens: none } .b { -epub-hyphens: auto } .c { hyphens: tall }",
+        );
+        assert_eq!(
+            style(&page, class(&page, "a")).hyphens,
+            Hyphens::None,
+            "子元素继承到 div 的 none"
+        );
+        assert_eq!(
+            style(&page, class(&page, "b")).hyphens,
+            Hyphens::Auto,
+            "`-epub-hyphens` 这种拼法也认"
+        );
+        assert_eq!(
+            style(&page, class(&page, "c")).hyphens,
+            Hyphens::Manual,
+            "认不出的值回到 CSS 初值"
+        );
+        assert_eq!(page.styled.ignored, 1, "`hyphens: tall` 要留一条痕迹");
+    }
+
+    /// 元素的 `style="…"` 是作者写的、压在作者样式表之上那一档（CSS Cascade §6.4：
+    /// 作者普通 < 行内普通 < 行内 `!important` < 作者 `!important`）。
+    /// 追加到最后是常见错法 —— 那会让行内的普通声明盖掉书里的 `color: blue !important`。
+    #[test]
+    fn inline_style_beats_author_normal_but_not_important() {
+        let plain = author(r#"<p style="color: red">文</p>"#, "p { color: blue }");
+        assert_eq!(
+            style(&plain, tag(&plain, "p")).color,
+            Some(Color(255, 0, 0)),
+            "行内的普通声明该压过样式表的普通声明"
+        );
+
+        let important = author(
+            r#"<p style="color: red">文</p>"#,
+            "p { color: blue !important }",
+        );
+        assert_eq!(
+            style(&important, tag(&important, "p")).color,
+            Some(Color(0, 0, 255)),
+            "行内的普通声明不该盖掉作者的 !important"
+        );
+
+        let both = author(
+            r#"<p style="color: red !important">文</p>"#,
+            "p { color: blue !important }",
+        );
+        assert_eq!(
+            style(&both, tag(&both, "p")).color,
+            Some(Color(0, 0, 255)),
+            "两边都 !important 时仍是样式表那份赢"
+        );
+    }
+
+    /// 读者的普通声明（偏好折算出来的那一份）在作者行内样式之下，
+    /// 但读者的 `!important` 仍在所有作者声明之上。
+    #[test]
+    fn inline_style_sits_between_reader_normal_and_reader_important() {
+        let over_reader = page(
+            r#"<p style="font-size: 30px">文</p>"#,
+            &[("p { font-size: 12px }", Origin::Reader)],
+        );
+        assert_eq!(style(&over_reader, tag(&over_reader, "p")).font_size, 30.0);
+
+        let under_reader = page(
+            r#"<p style="font-size: 30px">文</p>"#,
+            &[("p { font-size: 12px !important }", Origin::Reader)],
+        );
+        assert_eq!(
+            style(&under_reader, tag(&under_reader, "p")).font_size,
+            12.0,
+            "读者的 !important 是最高一档，行内也拦不住"
+        );
+    }
+
+    /// 行内那份同样讲「font-size 先算」：`text-indent: 2em` 的 em 要按这条声明
+    /// 自己的 20px 折，不是按继承来的 16px。
+    #[test]
+    fn inline_em_resolves_against_the_inline_font_size() {
+        let page = author(r#"<p style="text-indent: 2em; font-size: 20px">文</p>"#, "");
+        assert_eq!(style(&page, tag(&page, "p")).text_indent, 40.0);
+    }
+
+    /// 行内样式不进任何样式表，所以 `ignored` 是它唯一的痕迹 ——
+    /// 没有这个计数，「这本书写了我们不支持的东西」就彻底没人说了。
+    #[test]
+    fn unsupported_inline_declarations_are_counted_as_ignored() {
+        let page = author(
+            r#"<p style="transform: rotate(3deg); color: green">文</p>"#,
+            "",
+        );
+        assert_eq!(style(&page, tag(&page, "p")).color, Some(Color(0, 128, 0)));
+        assert_eq!(page.styled.ignored, 1, "transform 那条要留痕");
+    }
+
+    /// 引号里的分号不是声明分隔符：切错了会把 `color: green` 削成半条，
+    /// 而半条与整条在 ignored 上看不出区别，所以断言落在颜色上。
+    #[test]
+    fn semicolon_inside_quotes_is_not_a_declaration_separator() {
+        let page = author(r#"<p style='content: "a;b"; color: green'>文</p>"#, "");
+        assert_eq!(
+            style(&page, tag(&page, "p")).color,
+            Some(Color(0, 128, 0)),
+            "引号里的分号不该把 color 切开"
+        );
+        assert_eq!(page.styled.ignored, 1, "只有 content 那一条是不认识的");
+    }
+
+    /// `p::first-letter` 的声明只进首字符那一份，元素自己一点不受影响。
+    /// 两边混在一起是最典型的错法：`p::first-letter { color: red }` 会把整段涂红。
+    #[test]
+    fn first_letter_declarations_land_on_the_cap_not_the_element() {
+        let page = author(
+            "<p>文</p><h1>题</h1>",
+            "p { font-size: 20px } p::first-letter { font-size: 3em; color: red } h1 { color: blue }",
+        );
+        let p = style(&page, tag(&page, "p"));
+        assert_eq!(p.font_size, 20.0, "元素自己的字号不该被首字符那条改掉");
+        assert_eq!(p.color, None, "元素自己不该拿到首字符的颜色");
+
+        let cap = p.first_letter.as_deref().expect("应有首字符那一份");
+        assert_eq!(cap.font_size, 60.0, "3em 按元素自己的 20px 折");
+        assert_eq!(cap.color, Some(Color(255, 0, 0)));
+        assert_eq!(cap.font_weight, 400, "没写就沿用元素的值");
+
+        // 没写 `::first-letter` 的元素必须是 `None` —— 排版层靠这一个判走不走下沉。
+        assert!(style(&page, tag(&page, "h1")).first_letter.is_none());
+        assert_eq!(page.styled.ignored, 0);
+    }
+
+    /// 首字符那份**不继承**给后代：子元素自己没写 `::first-letter` 就是 `None`，
+    /// 否则一个块的下沉会顺着树一路复制到每个嵌套容器。
+    #[test]
+    fn first_letter_does_not_inherit() {
+        let page = author(
+            "<div><p>文</p></div>",
+            "div::first-letter { font-size: 3em } p::first-letter { font-size: 2em }",
+        );
+        let cap = style(&page, tag(&page, "p"))
+            .first_letter
+            .as_deref()
+            .expect("p 自己写过");
+        assert_eq!(cap.font_size, 32.0, "2em 按 p 的 16px，不是按 div 的 3em");
+    }
+
+    /// 候选链整条留下来（只留第一个的话，设备上没装第一名就等于作者的第二名也没了），
+    /// 引号与空白都清掉，逗号在引号里的不算分隔符。
+    #[test]
+    fn font_family_keeps_the_whole_candidate_chain() {
+        let page = author(
+            "<p class=a>一</p><p class=b>二</p><p class=c>三</p>",
+            ".a { font-family: \"LXGW WenKai\", 'Noto Serif CJK SC', serif } \
+         .b { font-family: easypub, \"Times New Roman\" } \
+         .c { font: 1em \"Book Body\", serif }",
+        );
+        assert_eq!(
+            style(&page, class(&page, "a")).font_families,
+            ["LXGW WenKai", "Noto Serif CJK SC", "serif"]
+        );
+        assert_eq!(
+            style(&page, class(&page, "b")).font_families,
+            ["easypub", "Times New Roman"]
+        );
+        assert_eq!(
+            style(&page, class(&page, "c")).font_families,
+            ["Book Body", "serif"],
+            "`font` 简写的字族部分同样留整条链"
+        );
+        assert_eq!(
+            style(&page, class(&page, "a")).font_family,
+            "LXGW WenKai",
+            "第一个候选仍是 `font_family`"
+        );
+    }
+
+    /// 引号里的逗号属于家族名，不是候选分隔符。
+    #[test]
+    fn comma_inside_quotes_is_not_a_candidate_separator() {
+        let page = author("<p>文</p>", "p { font-family: \"A, B\", serif }");
+        let s = style(&page, tag(&page, "p"));
+        assert_eq!(s.font_families, ["A, B", "serif"]);
+        assert_eq!(s.font_family, "A, B");
+    }
+
+    /// 候选链可继承：`body { font-family: X, Y }` 之后每个段落都带着这两名。
+    #[test]
+    fn the_candidate_chain_inherits() {
+        let page = author(
+            "<div><p>文</p></div>",
+            "div { font-family: \"My Font\", \"Noto Serif\" }",
+        );
+        let p = style(&page, tag(&page, "p"));
+        assert_eq!(p.font_families, ["My Font", "Noto Serif"]);
+        assert_eq!(page.styled.ignored, 0);
+    }
+
     #[test]
     fn font_family_takes_the_first_entry_and_strips_quotes() {
         let page = author("<p>文</p>", "p { font-family: \"LXGW WenKai\", serif }");
         assert_eq!(style(&page, tag(&page, "p")).font_family, "LXGW WenKai");
+    }
+
+    /// `bolder` / `lighter` 相对**父字重**查表，不是两个常量。
+    /// 这条真落差在标题里：`<h1>` 已经是 700，里面再写 `bolder` 应当到 900，
+    /// 写成常量就与外层一样粗 —— 读者看到的是「强调没生效」。
+    #[test]
+    fn bolder_and_lighter_are_relative_to_the_parent_weight() {
+        let page = author(
+            "<div class=deep><p class=a>一</p></div><p class=b>二</p><p class=c>三</p>",
+            "div { font-weight: 700 } \
+         .a { font-weight: bolder } \
+         .b { font-weight: bolder } \
+         .c { font-weight: lighter }",
+        );
+        assert_eq!(
+            style(&page, class(&page, "a")).font_weight,
+            900,
+            "父 700 → 900"
+        );
+        assert_eq!(
+            style(&page, class(&page, "b")).font_weight,
+            700,
+            "父 400 → 700"
+        );
+        assert_eq!(
+            style(&page, class(&page, "c")).font_weight,
+            100,
+            "父 400 的 lighter → 100（表就是这数）"
+        );
+    }
+
+    /// 书里写非整档字重（`font-weight: 450`）是常态，查表前先归到最近的百位档。
+    #[test]
+    fn relative_weight_buckets_a_non_round_parent() {
+        let page = author(
+            "<div class=five><p class=a>一</p></div><div class=six><p class=b>二</p></div>",
+            ".five { font-weight: 450 } .six { font-weight: 550 } \
+         .a { font-weight: bolder } .b { font-weight: bolder }",
+        );
+        assert_eq!(
+            style(&page, class(&page, "a")).font_weight,
+            700,
+            "450 归到 500 档"
+        );
+        assert_eq!(
+            style(&page, class(&page, "b")).font_weight,
+            800,
+            "550 归到 600 档"
+        );
+    }
+
+    /// 名单里的字体 OpenType 属性报 `Inert`，不再算「不认识」——
+    /// `examples/css-gap` 的表要是把认得的属性写成「听都没听过」，
+    /// 看的人就会去补根本没有落差的地方。
+    #[test]
+    fn opentype_font_properties_report_inert_not_unknown() {
+        use crate::css::Declaration;
+        use crate::css::computed::{DeclStatus, declaration_status};
+
+        let base = ComputedStyle::default();
+        let status = |property: &str, value: &str| {
+            declaration_status(
+                &Declaration {
+                    property: property.into(),
+                    value: value.into(),
+                    important: false,
+                },
+                &base,
+                16.0,
+            )
+        };
+        assert_eq!(status("font-variant", "small-caps"), DeclStatus::Inert);
+        assert_eq!(status("font-variant-caps", "small-caps"), DeclStatus::Inert);
+        assert_eq!(status("font-stretch", "condensed"), DeclStatus::Inert);
+        assert_eq!(status("font-kerning", "none"), DeclStatus::Inert);
+        assert_eq!(
+            status("font-feature-settings", "\"liga\" 0"),
+            DeclStatus::Inert
+        );
+        // 值写什么都不改变「不生效」这件事，所以不认识的值也不该把它们打成 Unparsed。
+        assert_eq!(status("font-variant", "全角"), DeclStatus::Inert);
     }
 
     /// 端到端：读者的 `!important` 压过作者的 `!important`。
@@ -1708,5 +2082,133 @@ mod tests {
             sup.baseline_shift,
             v.baseline_shift
         );
+    }
+
+    /// 边框一族：四边简写要把三要素一次写全，颜色认 hex 与 `rgb()`。
+    #[test]
+    fn border_shorthand_fills_all_four_edges() {
+        let page = author(
+            "<p>正文</p>",
+            "p { border: 2px solid #586357; background-color: rgb(193, 204, 192) }",
+        );
+        let style = style(&page, tag(&page, "p"));
+        assert_eq!(style.border_drawn(), [2.0, 2.0, 2.0, 2.0]);
+        assert_eq!(style.border[0].style, BorderStyle::Solid);
+        assert_eq!(style.border[0].color, Some(Color(88, 99, 87)));
+        assert_eq!(style.background_color, Some(Color(193, 204, 192)));
+    }
+
+    /// `border: 20px` 没写样式 —— CSS 里这一条等于「这条边不存在」，宽度按 0 参与盒模型。
+    /// 把它当成「20px 的实线」来画，或者反过来保留上一条声明的样式，都是改作者的意思。
+    #[test]
+    fn a_border_width_without_a_style_draws_nothing() {
+        let page = author("<p>正文</p>", "p { border: 20px }");
+        assert_eq!(
+            style(&page, tag(&page, "p")).border_drawn(),
+            [0.0; 4],
+            "样式是 none 时宽度不占位"
+        );
+    }
+
+    /// 出版书章标题那一条：四值宽度 + 四值样式 + 一个颜色，左边一道 20px 双线。
+    #[test]
+    fn four_value_border_shorthands_land_on_the_matching_edges() {
+        let page = author(
+            "<h2 class=t>章</h2>",
+            ".t { border-width: 0px 5px 0px 20px; border-style: none double none solid; border-color: #586357 }",
+        );
+        let style = style(&page, class(&page, "t"));
+        assert_eq!(style.border_drawn(), [0.0, 5.0, 0.0, 20.0]);
+        assert_eq!(
+            style.border.map(|edge| edge.style),
+            [
+                BorderStyle::None,
+                BorderStyle::Double,
+                BorderStyle::None,
+                BorderStyle::Solid
+            ]
+        );
+    }
+
+    /// 单边长写只动那一条边；一条边给两个宽度是错的，整条作废而不是取第一个。
+    #[test]
+    fn single_side_longhand_touches_one_edge_only() {
+        let page = author(
+            "<p>正文</p>",
+            "p { border: 1px solid black; border-left-width: 6px }",
+        );
+        assert_eq!(
+            style(&page, tag(&page, "p")).border_drawn(),
+            [1.0, 1.0, 1.0, 6.0]
+        );
+        let wrong = author("<p>正文</p>", "p { border-top-width: 1px 2px }");
+        assert_eq!(wrong.styled.ignored, 1, "一条边只能给一个宽度");
+    }
+
+    /// 认不得的边框样式与属性按「没接住」计数，而不是悄悄画成实线。
+    #[test]
+    fn unsupported_border_styles_count_as_the_gap() {
+        let dashed = author("<p>正文</p>", "p { border: 1px dashed black }");
+        assert_eq!(
+            dashed.styled.ignored, 1,
+            "dashed 还没做，画成 solid 是另一回事"
+        );
+        let radius = author("<p>正文</p>", "p { border-radius: 4px }");
+        assert_eq!(radius.styled.ignored, 1, "border-radius 不在认得的名单里");
+    }
+
+    /// 背景色与边框都**不**继承（CSS 规定）；`transparent` 是「有这条声明、但不画」。
+    #[test]
+    fn background_and_border_are_not_inherited() {
+        let page = author(
+            "<div><p>正文</p></div>",
+            "div { background-color: #C1CCC0; border: 4px solid black } p { background-color: transparent }",
+        );
+        let div = style(&page, tag(&page, "div"));
+        assert_eq!(div.background_color, Some(Color(193, 204, 192)));
+        assert_eq!(div.border_drawn(), [4.0; 4]);
+        let p = style(&page, tag(&page, "p"));
+        assert_eq!(p.background_color, None, "子元素不继承父元素的背景色");
+        assert_eq!(p.border_drawn(), [0.0; 4], "也不继承父元素的边框");
+    }
+
+    /// 手写 `Hash` 要覆盖**每个字段** —— 块级排版缓存靠它判「这个块的样式变了没」，
+    /// 漏一个字段就会把过期结果当成命中。这里抽几个代表字段（含浮点、枚举、子结构）
+    /// 钉住「改了就变」，并钉住「不改就一样」。
+    #[test]
+    fn style_hash_covers_fields() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        fn h(s: &ComputedStyle) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            s.hash(&mut hasher);
+            hasher.finish()
+        }
+        let base = ComputedStyle::default();
+        assert_eq!(h(&base), h(&base.clone()), "同一份样式两次哈希要一样");
+
+        let mut bigger = base.clone();
+        bigger.font_size = 20.0;
+        assert_ne!(h(&base), h(&bigger), "字号变了哈希该变");
+
+        let mut spaced = base.clone();
+        spaced.word_spacing = 3.0;
+        assert_ne!(h(&base), h(&spaced), "词距变了哈希该变");
+
+        let mut centered = base.clone();
+        centered.text_align = TextAlign::Center;
+        assert_ne!(h(&base), h(&centered), "对齐变了哈希该变");
+
+        let mut family = base.clone();
+        family.font_families = vec!["Noto Serif".to_string()];
+        assert_ne!(h(&base), h(&family), "候选字体链变了哈希该变");
+
+        let mut bordered = base.clone();
+        bordered.border[0] = BorderEdge {
+            width: 2.0,
+            style: BorderStyle::Solid,
+            color: None,
+        };
+        assert_ne!(h(&base), h(&bordered), "边框变了哈希该变");
     }
 }

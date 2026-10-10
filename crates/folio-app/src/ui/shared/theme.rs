@@ -31,7 +31,7 @@ pub fn register_builtin_themes(cx: &mut App) {
     let registry = ThemeRegistry::global_mut(cx);
     for json in BUILTIN_THEME_JSON {
         if let Err(error) = registry.load_themes_from_str(json) {
-            eprintln!("加载内置主题失败：{error}");
+            tracing::warn!("theme: 加载内置主题失败：{error}");
         }
     }
 }
@@ -59,10 +59,10 @@ pub fn register_user_themes(cx: &mut App) -> usize {
                 let registry = ThemeRegistry::global_mut(cx);
                 match registry.load_themes_from_str(&json) {
                     Ok(()) => loaded += 1,
-                    Err(error) => eprintln!("加载主题 {} 失败：{error}", path.display()),
+                    Err(error) => tracing::warn!("theme: 加载 {} 失败：{error}", path.display()),
                 }
             }
-            Err(error) => eprintln!("读取主题 {} 失败：{error}", path.display()),
+            Err(error) => tracing::warn!("theme: 读取 {} 失败：{error}", path.display()),
         }
     }
     loaded

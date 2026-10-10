@@ -1,13 +1,15 @@
 //! 平台服务边界：视图通过它拿平台相关的东西，自己不写 `cfg(mobile)`。
 //!
 //! 平台差异只允许出现在这里（服务）与 `super::platform`（入口与原生桥）。
-//! 其余页面/部件一律走这个边界。目前边界上是三件事：
+//! 其余页面/部件一律走这个边界。目前边界上是四件事：
 //!
 //! - **安全区**（系统栏 / 手势条 / 挖孔），用来给自绘外壳留出上下两条。
 //! - **输入法 inset**，键盘盖住多少。**刻意与安全区分开**：弹键盘不该移动外壳，
 //!   需要把被聚焦的输入框挪出键盘时读它。
 //! - **正文字体家族**，这台设备真能解析出哪一个（见 [`device_family`]）—— 阅读视图
 //!   从此不再按 target 分叉，这条也一起搬进了边界。
+//! - **浮层控件点不点得住**（[`supports_overlay_controls`]），决定「我的」那一格
+//!   画整页设置还是行列表。
 //!
 //! 桌面端前两者都是 0；Android 端读 fork 报上来的值（`gpui-pre-mobile` 的
 //! `AndroidWindow::safe_area_insets_logical()` / `ime_insets_logical()`）。
@@ -40,8 +42,8 @@ pub trait Host: 'static {
     fn ime_insets(&self, window: &Window) -> Insets;
     /// 这台设备真能解析出来的正文家族名。见 [`device_family`]。
     fn body_family(&self, wanted: &str, cx: &App) -> String;
-    /// 这台设备能不能再开一个窗口。桌面能，手机上「窗口」这个概念不存在。
-    fn extra_windows(&self) -> bool;
+    /// gpui-kit 的浮层控件（下拉框、菜单、对话框、侧边面板）在这端**点得住**吗。
+    fn overlay_controls(&self) -> bool;
 }
 
 #[cfg(not(mobile))]
@@ -108,11 +110,11 @@ const CJK_PREFERRED: &[&str] = &[
     "Roboto",              // 只剩拉丁，但至少不 panic
 ];
 
-/// 这台设备能不能再开一个窗口。没装平台服务（宿主测试里）当不能：
-/// 测试要钉的是界面本身，不是「点了那一格有没有真开出一个窗」。
-pub fn supports_extra_windows(cx: &App) -> bool {
+/// gpui-kit 的浮层控件在这端点不点得住。没装平台服务（宿主测试里）当不能：
+/// 测试要钉的是界面本身，而不是某个浮层能不能真的点开。
+pub fn supports_overlay_controls(cx: &App) -> bool {
     cx.try_global::<HostServices>()
-        .is_some_and(|services| services.0.extra_windows())
+        .is_some_and(|services| services.0.overlay_controls())
 }
 
 /// 按名字比：先看偏好要的那个，再依次试 [`CJK_PREFERRED`]。
@@ -132,7 +134,7 @@ pub(crate) fn find_family(wanted: &str, cx: &App) -> Option<String> {
 /// 候选全落空时的那句日志。两个平台都说同一件事，就不各写一遍、也就不用猜对方写没写。
 pub(crate) fn log_no_family(cx: &App) {
     let names = cx.text_system().all_font_names();
-    log::error!(
+    tracing::error!(
         "候选家族一个都没命中；设备注册的 {} 个名字：{names:?}",
         names.len()
     );

@@ -2,13 +2,13 @@
 #
 # 三份的结构必须逐条对应：加一条文案就往三份各加一行，删一条也一起删。漏翻在这张表里不再是
 # 一眼看得见的事（从前三种语言并排一张表，看得见），所以靠 `src/i18n.rs` 的 tests 模块比对三种语言的
-# key 集合与占位符集合，再加 `folio-app/tests/i18n_keys.rs` 核对源码里用到的键每种语言都解得出来。
+# key 集合与占位符集合，再加 `ui/shared/l10n.rs` 的 tests 核对源码里用到的键每种语言都解得出来。
 #
 # 格式是 rust-i18n 的 v1：**文件名去掉扩展名就是语言标签**（`i18n!("locales")` 按文件名认语言），
 # 所以这一份里没有 `en` 那一层，`[section]` 直接就是键的前缀；取用仍是 `t!("page.font_size")`。
 # 文件名必须与 `Locale::code()` 一字不差 —— 改文件名等于改语言。
 #
-# 命名规则：`page.*` 设置页标题、`field.*` 设置项（`.desc` 是它的说明文字）、
+# 命名规则：`page.*` 设置页标题、`group.*` 设置页里的分组标题、`field.*` 设置项（`.desc` 是它的说明文字）、
 # `error.*` 会显示成通知的失败信息、其余按界面区域走。
 # `.desc` 这种「和同名的那一项平级」的键写成带引号的 `"font_size.desc"`：
 # TOML 里 `font_size.desc` 会把 `font_size` 当表来扩展，而它已经是字符串，两行会打架。
@@ -40,12 +40,10 @@ page_position = "Page %{index} of %{total}"
 # The bottom-bar entry: two pages side by side. Narrow windows fall back to one
 # page on their own, so the label does not change with it.
 mode_spread = "Two pages"
-
-[settings]
-title = "Reading settings"
-# 工具条上那个入口。带省略号是因为点了它会**再开一个窗口**，
-# 而不是当场执行某个动作 —— 这是这套控件的固定写法。
-open = "Settings…"
+# Selection menu bar (M6): actions expand in place, no popover.
+sel_copy = "Copy"
+sel_paragraph = "Select paragraph"
+sel_cancel = "Cancel"
 
 [toast]
 font_size = "Font size %{size}px"
@@ -61,10 +59,23 @@ typography = "Text"
 layout = "Page"
 fonts = "Fonts"
 appearance = "Appearance"
-language = "Language"
 account = "Account"
 about = "About"
 library = "Library"
+
+# Group titles inside a settings page. With more than one group on a page these
+# also show up as that page's sub-entries in the sidebar, so each one has to name
+# what its fields have in common.
+[group]
+body = "Body text"
+paragraph = "Paragraph"
+measure = "Text block"
+family = "Font family"
+themes = "Themes"
+custom_themes = "Custom themes"
+reader = "Reader"
+location = "Location"
+docs = "Documents"
 
 [field]
 font_size = "Font size"
@@ -89,6 +100,8 @@ theme_light = "Light theme"
 "theme_light.desc" = "The theme used when the mode resolves to light."
 theme_dark = "Dark theme"
 "theme_dark.desc" = "The theme used when the mode resolves to dark."
+theme_dir = "Themes folder"
+"theme_dir.desc" = "Extra `.json` themes dropped in here are read at the next launch."
 language = "Interface language"
 "language.desc" = "Language of the interface, not of the book text."
 account_name = "Reader name"
@@ -98,6 +111,7 @@ config_path = "Config file"
 library_dir = "Library folder"
 "library_dir.desc" = "Imported books are copied here. Leave it empty to be asked again on the next import."
 "library_dir.suggested" = "Suggested location"
+"library_dir.pick" = "Choose folder…"
 
 [account]
 fallback_name = "Reader"
@@ -105,10 +119,10 @@ settings = "Settings"
 theme = "Theme"
 library = "Library folder"
 about = "About"
-reading_settings = "Reading settings…"
-library_hint = "Android cannot hand this app a folder — the picker returns a content URI, not a path it can write to. Pick one of the folders the app can actually write."
+library_hint = "Use the system folder picker to choose a library folder, or pick one of the folders this app can write by default."
 library_unconfirmed = "Not confirmed yet — the next import will ask first"
 library_default = "Default suggestion"
+pick_dir = "Choose folder…"
 
 [import]
 title = "Import book"
@@ -174,14 +188,24 @@ title = "Where should imported books be copied?"
 hint = "Importing copies the file into this folder. Moving or deleting your original afterwards will not affect the book on the shelf."
 confirm = "Confirm and import"
 cancel = "Cancel"
+pick_dir = "Choose folder…"
 
 # 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs），
 # 「开发方案」「已知缺口」是 docs/ 里那两份的原文 —— 这一页的全部价值就是它不会另说一套。
 [about]
 version = "Version"
+version_desc = "The version this running binary was built from."
 gpui_pre = "GPUI"
 kit = "Component layer (gpui-kit)"
 mobile = "Mobile platform layer"
 plan = "Development plan"
 limitations = "Known gaps"
-docs_note = "Both documents above are the files in the repository, embedded at build time — not a summary written for this screen."
+open_doc = "View"
+docs_note = "These two documents are the files in the repository, embedded at build time — not a summary written for this screen."
+
+# The first-run welcome screen: pick a library location before entering the app.
+# There is no cancel — either choose a folder or use the default location.
+[welcome]
+title = "Welcome to Folio"
+pick = "Choose library folder…"
+use_default = "Use the default location"

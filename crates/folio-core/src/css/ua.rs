@@ -8,7 +8,8 @@
 //! 只做 `layout` 用得上的属性。顺序永远是 `inherit_from(parent)` → 本文件的
 //! UA 值 → 作者声明，所以作者写 `h2 { display: inline }` 时照样能盖掉这里。
 
-use super::computed::{ComputedStyle, Display, inherit_from, sub_shift, super_shift};
+use super::computed::{ComputedStyle, Display, inherit_from};
+use super::value::{sub_shift, super_shift};
 
 /// 天生 inline 的标签。清单外的一律按 block 处理：
 /// 新出现的容器标签按 block 降级不会丢内容，反过来会把整段撑散。
@@ -69,6 +70,11 @@ pub fn seed(parent: &ComputedStyle, tag: &str) -> ComputedStyle {
         // 外边距按自己的字号，这是规范的规定也是浏览器实际的效果。
         style.margin_top = style.font_size * margin;
         style.margin_bottom = style.font_size * margin;
+        // `text-indent` 是可继承属性，而读者的「首行缩进」是挂在根样式上进来的
+        // （`ui::reader::document`），照继承走会连章标题一起推进版心。浏览器渲染同一份
+        // 作者 CSS 时标题不缩（那边没有这个继承源），真实阅读器把缩进注入成 `p { … }` 也是
+        // 这个结果。作者自己写了 `text-indent` 仍在上面那一层胜出。
+        style.text_indent = 0.0;
     }
 
     match tag {
@@ -135,4 +141,70 @@ pub fn seed(parent: &ComputedStyle, tag: &str) -> ComputedStyle {
         _ => {}
     }
     style
+}
+
+#[cfg(test)]
+mod tests {
+    //! UA 层给的值：显示类型、标题的字号与边距，以及「哪些继承值到这一层为止」。
+
+    use super::seed;
+    use crate::css::computed::{ComputedStyle, cascade};
+    use crate::css::{Origin, RuleSet};
+    use crate::dom::Dom;
+
+    fn node_id(dom: &Dom, tag: &str) -> crate::dom::NodeId {
+        dom.elements()
+            .find(|(_, n)| {
+                n.tag
+                    .as_ref()
+                    .map(|t| t.local.to_string())
+                    .unwrap_or_default()
+                    == tag
+            })
+            .map(|(id, _)| id)
+            .expect("标签在该页内")
+    }
+
+    /// 读者的「首行缩进」是挂在根样式上进来的，而 `text-indent` 可继承：
+    /// 标题要在 UA 这一层把它断掉，正文那一份留着。
+    #[test]
+    fn headings_stop_the_inherited_indent_while_paragraphs_keep_it() {
+        let parent = ComputedStyle {
+            text_indent: 34.0,
+            ..ComputedStyle::default()
+        };
+        assert_eq!(seed(&parent, "h1").text_indent, 0.0);
+        assert_eq!(seed(&parent, "h2").text_indent, 0.0);
+        assert_eq!(seed(&parent, "h6").text_indent, 0.0);
+        assert_eq!(
+            seed(&parent, "p").text_indent,
+            34.0,
+            "正文的首行缩进不该被动到"
+        );
+        assert_eq!(seed(&parent, "div").text_indent, 34.0);
+    }
+
+    /// 走完整层叠：UA 的归零在作者声明之下，书自己写了 `h2 { text-indent }` 时仍按书的。
+    #[test]
+    fn an_author_indent_on_a_heading_still_wins() {
+        let base = ComputedStyle {
+            text_indent: 34.0,
+            ..ComputedStyle::default()
+        };
+        let html = "<div><h2>章</h2><p>文</p></div>";
+
+        let dom = Dom::parse(html.as_bytes());
+        let styled = cascade(&dom, &RuleSet::default(), &base);
+        assert_eq!(styled.get(node_id(&dom, "h2")).unwrap().text_indent, 0.0);
+        assert_eq!(styled.get(node_id(&dom, "p")).unwrap().text_indent, 34.0);
+
+        let dom = Dom::parse(html.as_bytes());
+        let rules = RuleSet::parse("h2 { text-indent: 40px }", Origin::Author);
+        let styled = cascade(&dom, &rules, &base);
+        assert_eq!(
+            styled.get(node_id(&dom, "h2")).unwrap().text_indent,
+            40.0,
+            "UA 的归零只是初值，压不过作者声明"
+        );
+    }
 }

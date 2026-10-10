@@ -36,7 +36,7 @@
 //! - **最后一片可能不满一页**：内容尽了就直接结束。补满只会让读者翻到一页空白。
 //!
 //! 栏**宽**不在这里算 —— 折行发生在排版期，所以 [`column_width`] 给排版方用，
-//! 分片器只接收「一栏这么高」这个数。两者由调用方对齐，见 `docs/known-limitations.md`。
+//! 分片器只接收「一栏这么高」这个数。两者由调用方对齐，见 `plans/facts.md`。
 
 use std::ops::Range;
 
@@ -58,7 +58,7 @@ pub struct FragmentOptions {
     ///
     /// 这是**视口参数**，不是作者的 `column-count`：一栏的宽度决定折行，得在排版期就用，
     /// 而作者的 per-block 分栏（同一本书里某几段分栏、其余不分）需要块级的多栏布局，
-    /// 引擎还没有。见 `docs/known-limitations.md`「分片」一节。
+    /// 引擎还没有。见 `plans/facts.md` 与 `css/computed.rs` 的忽略清单。
     pub columns: usize,
 }
 
@@ -571,7 +571,10 @@ mod tests {
             &dom,
             &styles,
             find(&dom, "body"),
-            LayoutOptions { width },
+            LayoutOptions {
+                width,
+                light: false,
+            },
             &Mono,
             &NoImages,
         );

@@ -8,6 +8,10 @@
 //! 这里的一切颜色都从 `cx.theme()` 取，不留裸色值：设计规范要求应用层不出现
 //! hex / `rgb(...)`，缺哪个语义角色就在主题层补，而不是在调用点嵌一个调色板值。
 
+mod search_box;
+
+pub use search_box::{SearchBox, SearchBoxEvent};
+
 use folio_core::css::computed::Color;
 use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::{App, Hsla, IntoElement, ParentElement, SharedString, Styled, div, px};

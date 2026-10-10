@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use folio_core::css::computed::{ComputedStyle, DeclStatus, cascade, declaration_status};
 use folio_core::css::{Origin, RuleSet};
 use folio_core::dom::Dom;
-use folio_core::format::{Content, FlowDoc};
+use folio_core::format::FlowDoc;
 
 /// 一个属性的落地面。`elements` 是**这个属性上有任何一条胜出且没接住的声明**的元素数。
 #[derive(Debug, Default)]
@@ -76,9 +76,12 @@ fn books() -> Vec<PathBuf> {
 }
 
 fn survey(path: &Path) -> Result<String, String> {
-    let (meta, content) = folio_core::format::open(path).map_err(|e| format!("{e:?}"))?;
-    // `Content` 目前只有 `Reflow` 一个分支（定版式文档属 M7），所以这里不用 else。
-    let Content::Reflow(flow) = content;
+    let doc = folio_core::document::open(path).map_err(|e| format!("{e:?}"))?;
+    let meta = doc.meta();
+    // 这个度量工具只对可重排有意义：定版式没有 CSS 可谈。
+    let Some(flow) = doc.flow() else {
+        return Err(format!("{}：定版式文档，没有 CSS 落差可量", path.display()));
+    };
     let mut out = String::new();
     out.push_str(&format!(
         "## {} —— {}（{} 章、{} 字）\n\n",
@@ -96,7 +99,7 @@ fn survey(path: &Path) -> Result<String, String> {
         return Ok(out);
     }
     let rules = RuleSet::parse(&flow.css, Origin::Author);
-    let stats = measure(&flow, &rules);
+    let stats = measure(flow, &rules);
 
     let mut rows: Vec<(&String, &Gap)> = stats.gaps.iter().collect();
     // 先按影响的元素数，再按声明数；完全同名时按属性名字典序，保证输出可复现。
@@ -140,7 +143,7 @@ fn survey(path: &Path) -> Result<String, String> {
     if rows.is_empty() {
         out.push_str("| — | 0 | 0 | — | 全部接住 |\n");
     }
-    out.push_str(&impact(&flow, &rules));
+    out.push_str(&impact(flow, &rules));
     Ok(out)
 }
 
@@ -281,6 +284,9 @@ fn without_unsupported(rules: &RuleSet) -> RuleSet {
     }
     RuleSet {
         rules: kept,
+        // 内嵌字体清单不参与这份对比：它不落在任何元素上，「丢掉没接住的声明」这一步
+        // 与它无关，照原样带过去只会让两份数据的字体数看着有出入。
+        font_faces: Vec::new(),
         ignored: rules.ignored,
     }
 }
@@ -309,7 +315,10 @@ fn geometry(flow: &FlowDoc, rules: &RuleSet) -> (usize, f32, f32) {
             &dom,
             &styles,
             body,
-            LayoutOptions { width: 600.0 },
+            LayoutOptions {
+                width: 600.0,
+                light: false,
+            },
             &Mock,
             &folio_core::layout::NoImages,
         );

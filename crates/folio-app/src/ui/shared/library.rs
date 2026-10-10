@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 
 use folio_core::Library;
 use folio_core::Store;
+use gpui_kit::{App, PathPromptOptions, Task};
+
+use super::config_model::ConfigHolder;
+use super::error::{Context as _, Result, anyhow};
 
 /// 导入的目标目录：读者确认过的那个。
 ///
@@ -30,10 +34,11 @@ pub const PACKAGE: &str = "dev.folio.reader";
 
 /// 能当书库用的候选目录：本应用**真的写得进去**的那几个。
 ///
-/// 为什么是候选而不是文件夹选择器：Android 的 SAF 选目录返回的是 tree URI
-/// （`content://…`）而不是文件系统路径，而拷副本用的是 `std::fs` —— fork 的
-/// `prompt_for_paths` 正因此显式拒绝 `directories`。要真支持任选目录，得在 Java 侧
-/// 另写一段「往 tree 里落文件」的实现。
+/// 这是「默认建议」与「没装文件选择器时」的兜底；读者也可以直接用系统文件夹选择器
+/// 挑任意目录（[`pick_dir`]）——`gpui-mobile` 的 `prompt_for_paths{directories: true}`
+/// 现在走 `ACTION_OPEN_DOCUMENT_TREE`：本地卷（内部存储 / SD 卡）会尽量解析回真实文件
+/// 路径，所以 `std::fs` 拷副本这条路走得通；解析不出真实路径的提供方（云盘等）退回
+/// tree URI，那种位置拷不了，会在导入时报错而不是静默失败。
 ///
 /// 外部那条排在前面：它在系统文件管理器和 `adb push` 里都看得见，读者既能自己放书，
 /// 也能自己核对拷过去的是什么。内部那条就是 [`suggested_dir`]。
@@ -48,6 +53,35 @@ pub fn candidate_dirs() -> Vec<PathBuf> {
     out
 }
 
+/// 打开系统文件夹选择器，选中就把书库位置写进配置。返回的 `Task` 要不要持有由调用方定：
+/// 静态设置页拿不住句柄，用 `detach()` 让它跑完即可；有实体的页面可以存起来随页面一起取消。
+///
+/// 取消（`Ok(None)`）与出错都只记一条日志，不改配置 —— 读者点「取消」不该把书库位置清空。
+pub fn pick_dir(cx: &mut App) -> Task<()> {
+    let receiver = cx.prompt_for_paths(PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: None,
+    });
+    cx.spawn(async move |cx| {
+        let picked = match receiver.await {
+            Ok(Ok(Some(mut paths))) => paths.pop(),
+            Ok(Ok(None)) => None,
+            Ok(Err(err)) => {
+                tracing::error!("pick_dir: 文件夹选择器失败 {err}");
+                None
+            }
+            Err(_) => None,
+        };
+        if let Some(dir) = picked {
+            let path = dir.display().to_string();
+            tracing::info!("pick_dir: 书库位置选为 {path}");
+            cx.update(|cx| ConfigHolder::edit_library(cx, |library| library.dir = path.clone()));
+        }
+    })
+}
+
 /// 把选中的文件复制进书库，返回那份常驻副本的路径。
 ///
 /// 复制而不是引用，是为了让「书还在」这件事不依赖原文件之后被移走、改名或删掉；
@@ -56,13 +90,13 @@ pub fn candidate_dirs() -> Vec<PathBuf> {
 ///
 /// 副本保留原文件名，代价是**同名即同书** —— 两本都叫 `book.epub` 的不同文件会互相
 /// 覆盖。这比「每次导入都多出一格」好修，也好向读者解释。
-pub fn stage(source: &Path, dir: &Path) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
+pub fn stage(source: &Path, dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir).with_context(|| format!("建书库目录 {}", dir.display()))?;
     let name = source
         .file_name()
-        .ok_or_else(|| std::io::Error::other("选择结果没有文件名"))?;
+        .ok_or_else(|| anyhow!("选择结果里没有文件名：{}", source.display()))?;
     let dest = dir.join(name);
-    std::fs::copy(source, &dest)?;
+    std::fs::copy(source, &dest).with_context(|| format!("复制到 {}", dest.display()))?;
     Ok(dest)
 }
 
@@ -75,16 +109,26 @@ pub fn stage(source: &Path, dir: &Path) -> std::io::Result<PathBuf> {
 ///
 /// 顺序是有意的：文件先删而库没删成，会留下一条指向不存在文件的记录，界面上就是
 /// 一本点不开的书；库先删成而文件没删掉，只是多占一点空间，读者看不见任何异常。
-pub fn delete_book(store: &Store, id: i64, staged_dir: Option<&Path>) -> folio_core::Result<()> {
-    let path = store.book(id).ok().flatten().map(|row| row.path);
-    store.remove_book(id)?;
+pub fn delete_book(store: &Store, id: i64, staged_dir: Option<&Path>) -> Result<()> {
+    let path = match store.book(id) {
+        Ok(row) => row.map(|row| row.path),
+        Err(err) => {
+            // 查路径是尽力而为：查不到只是不认领那份副本，不该拦住删行 ——
+            // 删行才是「删除」的本体，剩下的只是一个占地方的文件。
+            tracing::warn!("delete_book: 查第 {id} 本的路径失败：{err}");
+            None
+        }
+    };
+    store
+        .remove_book(id)
+        .with_context(|| format!("删掉第 {id} 本的库内记录"))?;
     let copy = path
         .as_deref()
         .and_then(|path| staged_dir.and_then(|dir| owned_copy(path, dir)));
     if let Some(copy) = copy
         && let Err(err) = std::fs::remove_file(&copy)
     {
-        log::warn!("delete_book: 副本 {copy:?} 没删掉：{err}");
+        tracing::warn!("delete_book: 副本 {copy:?} 没删掉：{err}");
     }
     Ok(())
 }
@@ -127,7 +171,9 @@ mod tests {
         FlowDoc {
             chapters: vec![Chapter {
                 title: "第一章".into(),
-                source: "正文".into(),
+                // 契约：`Chapter::source` 是引擎就绪的 XHTML。这里不进排版，
+                // 但造数据也照契约来，免得下次有人拿它当「纯文本也能塞」的例子。
+                source: "<p>正文</p>".into(),
                 spine_href: "c1.xhtml".into(),
             }],
             ..Default::default()

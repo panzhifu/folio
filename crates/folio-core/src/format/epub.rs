@@ -4,23 +4,24 @@
 //! 我们自己的 `Dom`，不再转 Markdown —— 锚点坐标系是**我们存进去的那份源文本**，
 //! 所以原样保存比转换更安全，也省掉一层会丢信息的中间态。
 //!
-//! 明确留在 M3 的事：`<img>` 的 src 不改写、图片不入库。排版层现在还不产出
-//! 行内图片片段，先不碰这条路。
+//! 正文图片只存元数据（`href` + 固有尺寸），字节按容器路径现取，见
+//! `Document::image_bytes` 那条路；封面例外，缩成缩略图后入库，见 [`COVER_MAX_EDGE`]。
 
-use std::io::{BufReader, Read};
 use std::path::Path;
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use zip::ZipArchive;
 
-use super::{Chapter, Content, DocMeta, FlowDoc, Format, FormatAdapter, ImageRes, TocEntry};
-use super::{dir_of, resolve_href};
-use crate::error::{IoResultExt, Result};
+use super::zip::Zip;
+use super::{
+    Chapter, Content, DocMeta, DocumentProvider, FlowDoc, FontBytes, Format, ImageRes, TocEntry,
+};
+use super::{dir_of, fragment_of, image_dims, resolve_href, shrink_image};
+use crate::error::Result;
 
 pub struct EpubAdapter;
 
-impl FormatAdapter for EpubAdapter {
+impl DocumentProvider for EpubAdapter {
     fn format(&self) -> Format {
         Format::Epub
     }
@@ -33,6 +34,145 @@ impl FormatAdapter for EpubAdapter {
     fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
         read(path)
     }
+
+    /// `@font-face` 声明的那几个路径 → 字节。回空而不是报错的理由见 [`FontBytes`]。
+    fn fonts(&self, path: &Path, wanted: &[String]) -> Vec<FontBytes> {
+        font_bytes(path, wanted)
+    }
+
+    /// 容器绝对路径 → 图片字节。每次调用重开容器，见 [`crate::format::ImageRes`]。
+    fn image_bytes(&self, path: &Path, href: &str) -> Option<Vec<u8>> {
+        let mut zip = Zip::open(path).ok()?;
+        let name = zip.locate(href)?;
+        zip.read(&name)
+    }
+}
+
+/// 单本书取字节的三道闸：face 数、单文件、总量。
+///
+/// 不是优化，是护栏 —— 一套完整的中文字体是 20 MB 量级，而内嵌字体在现在的定位里只
+/// 用来**补缺字形**（见 `ui::reader::measure::gpui_font`）。读者不会为了几百个生僻字
+/// 预付 30 MB 内存，超出的部分按声明顺序取，取满即停。
+const MAX_FACES: usize = 32;
+const MAX_ONE: usize = 8 << 20;
+const MAX_TOTAL: usize = 32 << 20;
+
+/// 封面缩略图的长边上限（存储尺寸，非显示尺寸）。
+///
+/// 书架卡片与详情页都远远用不到原图尺寸，而原图往往就是全书最大的一两个字节块
+/// —— 一本《蛇结》封面原图 404 KB，缩到 1024 以内后只剩几十 KB。
+/// 1024 是留出高 dpi 屏上放大一档的余量，不是精确的显示尺寸。
+const COVER_MAX_EDGE: u32 = 1024;
+
+/// 认得哪些 media-type 是字体，以及要不要先过一道 WOFF。
+///
+/// `woff2` **认得出但不取**：gpui 那侧的 fontdb 用 ttf-parser 解字节，只吃 TTF/OTF，
+/// WOFF2 还要 brotli，一期不引这个依赖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontKind {
+    Sfnt,
+    Woff,
+    Woff2,
+    Other,
+}
+
+fn font_kind(media_type: &str) -> FontKind {
+    // `application/x-font-otf`、`font/otf`、带参数的 `font/ttf;charset=utf-8` 都归到同一类。
+    let mime = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        "font/ttf"
+        | "font/otf"
+        | "font/opentype"
+        | "application/font-sfnt"
+        | "application/vnd.ms-opentype"
+        | "application/x-font-ttf"
+        | "application/x-font-opentype"
+        | "application/x-font-otf" => FontKind::Sfnt,
+        "font/woff" | "application/font-woff" | "application/x-font-woff" => FontKind::Woff,
+        "font/woff2" | "application/font-woff2" => FontKind::Woff2,
+        _ => FontKind::Other,
+    }
+}
+
+/// 容器路径 → 字体字节。
+///
+/// 与 [`read`] 走同一条定位链（container.xml → OPF → manifest），因为 `src` 里那个路径
+/// 是**相对 OPF 目录**解出来的，只有再读一遍 manifest 才能把它对上 zip 里的条目名。
+/// 这一步只在开书时做一次，几个小文件，不值当为它加一层缓存。
+fn font_bytes(path: &Path, wanted: &[String]) -> Vec<FontBytes> {
+    let mut zip = match Zip::open(path) {
+        Ok(zip) => zip,
+        Err(_) => return Vec::new(),
+    };
+    let Some(opf_path) = zip
+        .locate("META-INF/container.xml")
+        .and_then(|n| zip.read_text(&n))
+        .and_then(|c| container_path(&c))
+    else {
+        return Vec::new();
+    };
+    let Some(opf_text) = zip
+        .read_text(&opf_path)
+        .or_else(|| zip.locate(&opf_path).and_then(|n| zip.read_text(&n)))
+    else {
+        return Vec::new();
+    };
+    let opf = parse_opf(&opf_text);
+    let base_dir = dir_of(&opf_path);
+
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for item in &opf.items {
+        let kind = font_kind(&item.media_type);
+        if matches!(kind, FontKind::Other | FontKind::Woff2) {
+            continue;
+        }
+        // `src` 解出来的是容器绝对路径，`locate` 那一步已经把大小写与反斜杠抹平了，
+        // 两边同形才能直接比。
+        let name = resolve(&base_dir, &item.href);
+        if !wanted.iter().any(|w| w == &name) {
+            continue;
+        }
+        let Some(bytes) = zip.locate(&name).and_then(|n| zip.read(&n)) else {
+            continue;
+        };
+        // 单个文件过大只丢它自己（后面那份可能是能用的）；face 数或总量到顶才整批停。
+        if bytes.len() > MAX_ONE {
+            tracing::debug!(
+                "epub: 字体 {name} 有 {} 字节，超过单份上限，丢掉",
+                bytes.len()
+            );
+            continue;
+        }
+        if out.len() >= MAX_FACES || total + bytes.len() > MAX_TOTAL {
+            tracing::debug!(
+                "epub: 内嵌字体到量（已取 {} 份 / {total} 字节），剩下的不读了",
+                out.len()
+            );
+            break;
+        }
+        // WOFF 先解回 sfnt；解不开就当这个 item 不存在，继续找下一个声明的字体。
+        let bytes = match kind {
+            FontKind::Woff => crate::format::woff::decode(&bytes),
+            _ => Some(bytes),
+        };
+        let Some(bytes) = bytes else {
+            tracing::debug!("epub: 字体 {name} 声明是 WOFF，但解不回 sfnt");
+            continue;
+        };
+        total += bytes.len();
+        out.push(FontBytes {
+            href: name,
+            media_type: item.media_type.clone(),
+            bytes,
+        });
+    }
+    out
 }
 
 #[derive(Debug, Default)]
@@ -241,6 +381,8 @@ fn parse_nav(xml: &str) -> Vec<TocEntry> {
                             open.push(TocEntry {
                                 title,
                                 href,
+                                // 采下来的是原始 href；换成绝对路径时（`rebase`）才拆出 fragment。
+                                fragment: None,
                                 children: Vec::new(),
                             });
                         }
@@ -309,6 +451,8 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
                         out.push(TocEntry {
                             title,
                             href: std::mem::take(&mut href),
+                            // 采下来的是原始 src；换成绝对路径时（`rebase`）才拆出 fragment。
+                            fragment: None,
                             children: Vec::new(),
                         });
                     }
@@ -324,45 +468,93 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
     out
 }
 
-struct Zip {
-    archive: ZipArchive<BufReader<std::fs::File>>,
+/// 把一份 CSS 里的 `url(…)` 按**那份 CSS 自己的目录**解成容器绝对路径。
+///
+/// 为什么必须趁拼接前做：`FlowDoc.css` 是全书多份 CSS 拼起来的**一个**字符串
+/// （SQLite 里 `books.css` 那一列就是它），拼完就再也不知道某条 `url(Fonts/a.otf)`
+/// 原本写在 `OEBPS/Styles/` 还是 `OEBPS/` 下面。而 `@font-face` 的 `src` 要拿去查
+/// 容器里的条目 —— 差一层目录的表现是「书里明明有字体，就是读不到」，
+/// 且屏幕上完全看不出原因。
+///
+/// 输出**一律带引号**：解出来的路径常含空格（真书里的 `body italic.otf`），
+/// 不加引号那是非法 CSS，解析器会在空格处断开。
+fn absolutize_css_urls(css: &str, base_dir: &str) -> String {
+    // 先清注释：注释里的 `url(x)` 不是声明，改写它等于往 CSS 里塞假路径。
+    let text = crate::css::strip_comments(css);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while !rest.is_empty() {
+        let Some(start) = find_url_function(rest) else {
+            out.push_str(rest);
+            return out;
+        };
+        // `rest[start..start + 4]` 就是 `url(`，`open` 是它之后第一位。
+        let open = start + 4;
+        let Some(close) = find_close_paren(&rest[open..]) else {
+            // 括号不闭合：剩下的原样抄走，不猜。
+            out.push_str(rest);
+            return out;
+        };
+        let token_end = open + close + 1; // 整个 `url(…)` 函数 token 的结束（不含）
+        let inner = rest[open..open + close]
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .trim();
+        // `url(` 之前的部分先抄走；`url(` 本身**不能**跟着抄，否则改写会变成
+        // `url(url("解出来的路径")` —— 括号一下就不配对了。
+        out.push_str(&rest[..start]);
+        if inner.is_empty() || crate::css::is_remote(inner) {
+            // 远程与空的都原样留着：一期不取外部字体，也不假装取过。
+            out.push_str(&rest[start..token_end]);
+        } else {
+            out.push_str("url(\"");
+            out.push_str(&resolve_href(base_dir, inner));
+            out.push_str("\")");
+        }
+        rest = &rest[token_end..];
+    }
+    out
 }
 
-impl Zip {
-    fn open(path: &Path) -> Result<Self> {
-        let file = std::fs::File::open(path).io_path(path)?;
-        let archive = ZipArchive::new(BufReader::new(file)).io_path(path)?;
-        Ok(Zip { archive })
-    }
-
-    fn read(&mut self, name: &str) -> Option<Vec<u8>> {
-        let mut entry = self.archive.by_name(name).ok()?;
-        if entry.is_dir() {
-            return None;
+/// 下一个 `url(` 函数 token 的起始字节偏移。
+///
+/// 要判前一个字符：`dataurl(` / `my-url(` 里都含 `url(`，按子串找会把它们当函数改写。
+fn find_url_function(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i + 4 <= bytes.len() {
+        if bytes[i..i + 4].eq_ignore_ascii_case(b"url(")
+            && (i == 0 || !is_function_char(bytes[i - 1]))
+        {
+            return Some(i);
         }
-        let mut buf = Vec::with_capacity(entry.size().min(1 << 24) as usize);
-        entry.read_to_end(&mut buf).ok().map(|_| buf)
+        i += 1;
     }
-
-    fn read_text(&mut self, name: &str) -> Option<String> {
-        self.read(name)
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-    }
-
-    /// 容器里的路径大小写与分隔符都可能和 OPF 写的不一致，做一次宽松匹配。
-    fn locate(&self, want: &str) -> Option<String> {
-        if self.archive.file_names().any(|n| normalize(n) == want) {
-            return Some(want.to_string());
-        }
-        self.archive
-            .file_names()
-            .find(|n| normalize(n).eq_ignore_ascii_case(want))
-            .map(normalize)
-    }
+    None
 }
 
-fn normalize(name: &str) -> String {
-    name.replace('\\', "/")
+/// 能构成一个标识符的字符：命中的话它前面那串就不是独立的 `url` 函数名。
+fn is_function_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b >= 0x80
+}
+
+/// 从 `text` 开头找到配对 `)` 的位置（不含）。引号里的括号跳过。
+fn find_close_paren(text: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    for (i, c) in text.char_indices() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            ')' => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn read(path: &Path) -> Result<(DocMeta, Content)> {
@@ -370,12 +562,13 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
     let container = zip
         .locate("META-INF/container.xml")
         .and_then(|n| zip.read_text(&n))
-        .ok_or_else(|| unsupported(path))?;
-    let opf_path = container_path(&container).ok_or_else(|| unsupported(path))?;
+        .ok_or_else(|| unsupported(path, "容器里没有 META-INF/container.xml"))?;
+    let opf_path = container_path(&container)
+        .ok_or_else(|| unsupported(path, "container.xml 里没写出 OPF 路径"))?;
     let opf_text = zip
         .read_text(&opf_path)
         .or_else(|| zip.locate(&opf_path).and_then(|n| zip.read_text(&n)))
-        .ok_or_else(|| unsupported(path))?;
+        .ok_or_else(|| unsupported(path, &format!("container.xml 指的 OPF「{opf_path}」读不到")))?;
     let opf = parse_opf(&opf_text);
     let base_dir = match opf_path.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/"),
@@ -388,10 +581,17 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
     let mut css = String::new();
     for item in opf.items.iter().filter(|i| i.media_type == "text/css") {
         let name = resolve(&base_dir, &item.href);
-        if let Some(text) = zip.locate(&name).and_then(|n| zip.read_text(&n)) {
-            css.push_str(&text);
-            css.push('\n');
-        }
+        // `locate` 返回容器里**真实**那条目名（大小写与分隔符都可能和 OPF 写的不一样），
+        // 目录要按它算：按 OPF 那串解出来的 `url()` 会在书名大小写混用时指错地方。
+        let Some(found) = zip.locate(&name) else {
+            tracing::debug!("epub: manifest 声明的样式 {name} 不在容器里");
+            continue;
+        };
+        let Some(text) = zip.read_text(&found) else {
+            continue;
+        };
+        css.push_str(&absolutize_css_urls(&text, &dir_of(&found)));
+        css.push('\n');
     }
 
     // 目录：EPUB3 靠 manifest 的 `properties="nav"` 认（nav 文档常常不在 spine 里），
@@ -408,6 +608,10 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
         .chain(ncx_item.iter().map(|i| (*i, false)))
     {
         let Some(found) = zip.locate(&resolve(&base_dir, &item.href)) else {
+            tracing::debug!(
+                "epub: 目录文档不在容器里（{} 声明的那份）",
+                if is_nav { "nav" } else { "NCX" }
+            );
             continue;
         };
         let Some(text) = zip.read_text(&found) else {
@@ -423,6 +627,10 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
         if !toc.is_empty() {
             break;
         }
+    }
+    if toc.is_empty() {
+        // 没目录只是侧栏少一栏，但它常常是「容器结构不合常规」的第一个信号。
+        tracing::debug!("epub: nav 与 NCX 都没解出目录条目，这本书没有目录");
     }
 
     let mut cover = opf
@@ -440,7 +648,15 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
     let cover_bytes = cover
         .as_deref()
         .and_then(|n| zip.locate(n))
-        .and_then(|n| zip.read(&n));
+        .and_then(|n| zip.read(&n))
+        // 封面是**故意**存下来的那一份：书架不打开容器就要画出那张卡片，所以它进
+        // `books.cover`。但存的是缩略图不是原图 —— 对应 KOReader
+        // 的 `bookinfo_cache.sqlite3` 里那份按显示尺寸缩完再 zstd 压的 blitbuffer。
+        // 一张 1500×2200 的封面原图就有 400 KB，而书架上它只显示几十像素宽。
+        .map(|bytes| match shrink_image(&bytes, COVER_MAX_EDGE) {
+            Some((small, _mime)) => small,
+            None => bytes,
+        });
 
     // 全书图片：manifest 里所有 image/* 的 item。封面若在 manifest 里会一并被收录，
     // 排版层按解析后的容器路径查表，所以这里存的 href 必须是 `resolve` 过的。
@@ -452,6 +668,8 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
     {
         let name = resolve(&base_dir, &item.href);
         let Some(bytes) = zip.locate(&name).and_then(|n| zip.read(&n)) else {
+            // 插图缺失是按页降级的一种（排版会留一块占位），一条一张，所以放到 trace。
+            tracing::trace!("epub: 插图 {name} 不在容器里");
             continue;
         };
         let (width, height) = image_dims(&bytes);
@@ -460,18 +678,29 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
             media_type: item.media_type.clone(),
             width,
             height,
-            bytes,
         });
     }
 
     let mut chapters = Vec::new();
     for (idx, id) in opf.spine.iter().enumerate() {
-        let Some(item) = by_id(id) else { continue };
+        let Some(item) = by_id(id) else {
+            // spine 指着一个 manifest 里没有的 id：这一节整个没了，而且界面上看不出来。
+            tracing::warn!(
+                "epub: spine 第 {} 项指向的 id {id:?} 不在 manifest 里",
+                idx + 1
+            );
+            continue;
+        };
         if !item.media_type.contains("html") || item.properties.iter().any(|p| p == "nav") {
             continue;
         }
         let name = resolve(&base_dir, &item.href);
         let Some(found) = zip.locate(&name).and_then(|n| zip.read_text(&n)) else {
+            // 同上：正文少一章在界面上的表现是「翻到那里是空的」，说不清原因。
+            tracing::warn!(
+                "epub: 容器里没有 {name}（spine 第 {} 项），这一章读不到",
+                idx + 1
+            );
             continue;
         };
         let source = found;
@@ -507,26 +736,31 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
         cover: cover_bytes,
         images,
     };
+    // 一本「读出来不对」的书，第一件要知道的事是哪一节空了：正文、样式、目录还是插图。
+    tracing::debug!(
+        "epub: {} 读到 {} 章（spine {} 项）、css {} 字节、目录 {} 项、插图 {} 张、封面 {}",
+        path.display(),
+        flow.chapters.len(),
+        opf.spine.len(),
+        flow.css.len(),
+        flow.toc.len(),
+        flow.images.len(),
+        flow.cover.as_ref().map_or("无", |_| "有"),
+    );
     Ok((meta, Content::Reflow(flow)))
 }
 
-/// 图片固有像素尺寸。只读 header，不解码像素。SVG / 未知格式等取不到时返回 0，
-/// 由排版层按容器的降级规则处理（用指定宽度或容器宽度兜底）。
-fn image_dims(bytes: &[u8]) -> (u32, u32) {
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok();
-    reader
-        .and_then(|r| r.into_dimensions().ok())
-        .unwrap_or((0, 0))
-}
-
 /// nav 里的 href 相对 nav 文档自己，统一换成容器绝对路径。
+///
+/// `#` 后面那一截要在 `resolve_href` 剥掉它之前先取下来存进 `fragment`：剥掉之后只剩
+/// 「哪一章」，而 nav 里最常见的形态恰恰是同一个章文件挂着一串不同小节的锚点。
 fn rebase(entry: TocEntry, base: &str) -> TocEntry {
+    let fragment = fragment_of(&entry.href);
     let href = resolve(base, &entry.href);
     TocEntry {
         title: entry.title,
         href,
+        fragment,
         children: entry
             .children
             .into_iter()
@@ -552,7 +786,12 @@ fn heading_of(source: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn unsupported(path: &Path) -> crate::Error {
+/// 容器读不出来的那几条路，收成一条错。
+///
+/// `why` 只进日志、不进错误文案：界面上给读者看的仍然是「不支持的格式」（那三件事在
+/// 读者眼里是同一件事：这本书打不开），而开发者要的恰好是**哪一步**断了。
+fn unsupported(path: &Path, why: &str) -> crate::Error {
+    tracing::warn!("epub: {} 打不开 —— {why}", path.display());
     crate::Error::UnsupportedFormat(
         path.file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
@@ -563,7 +802,7 @@ fn unsupported(path: &Path) -> crate::Error {
 mod tests {
     //! EPUB 容器读取。测的是一份**合成**的书（`tests/fixtures/oss/minimal-zh.epub`），
     //! 故意把 manifest 顺序、spine 顺序、文件名里的空格、nav 里的 fragment
-    //! 都设成会出错的样子。只依赖公开的 `open()` / `resolve_href` 等。
+    //! 都设成会出错的样子。只依赖公开的 `document::open` / `resolve_href` 等。
 
     use std::path::{Path, PathBuf};
 
@@ -571,18 +810,29 @@ mod tests {
     use crate::css::{Origin, RuleSet};
     use crate::dom::Dom;
     use crate::format::detect;
-    use crate::format::{Content, DocMeta, FlowDoc, Format, dir_of, resolve_href};
-    use crate::open;
+    use crate::format::{DocMeta, FlowDoc, Format, dir_of, resolve_href};
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/minimal-zh.epub")
     }
 
+    /// 打开一个容器，返回**统一接口** —— 测试也走 `document::open` 这条 app 唯一的
+    /// 「文件 → 文档」入口（`format` 那一层不再有 `open`）。
+    fn doc_of(path: &Path) -> Box<dyn crate::document::Document> {
+        crate::document::open(path).expect("合成容器应能打开")
+    }
+
+    /// 可重排的那一半：绝大多数用例只关心 `FlowDoc`。
+    fn flow_of(path: &Path) -> FlowDoc {
+        doc_of(path).flow().expect("这个容器该读成可重排").clone()
+    }
+
     fn opened() -> (DocMeta, FlowDoc) {
-        let (meta, content) = open(&fixture()).unwrap();
-        // Content 目前只有 Reflow 一个分支，模式是不可反驳的。
-        let Content::Reflow(flow) = content;
-        (meta, flow)
+        let doc = doc_of(&fixture());
+        (
+            doc.meta().clone(),
+            doc.flow().expect("该读成可重排").clone(),
+        )
     }
 
     #[test]
@@ -674,6 +924,10 @@ mod tests {
             flow.toc[1].href, "OEBPS/Text/chap 2.xhtml",
             "fragment 要去掉"
         );
+        // 去掉的同时它得留在 `fragment` 里：合成书第二条写的就是 `chap%202.xhtml#court`，
+        // 一个章文件挂多个小节是 nav 最常见的形态，丢了这截它们会全并成同一个落点。
+        assert_eq!(flow.toc[1].fragment.as_deref(), Some("court"));
+        assert_eq!(flow.toc[0].fragment, None, "没有 # 的条目就是章首");
         assert_eq!(
             flow.toc[2].title, "第三章 空白",
             "nav 标签里的多余空格要压掉"
@@ -741,7 +995,7 @@ mod tests {
         let bad = dir.path().join("bad.epub");
         std::fs::write(&bad, b"not a zip at all").unwrap();
         assert!(
-            open(&bad).is_err(),
+            crate::document::open(&bad).is_err(),
             "读不出 container.xml 必须报错，不能给一本空书"
         );
     }
@@ -797,6 +1051,113 @@ mod tests {
         path
     }
 
+    /// 出版书形状的那一份：28 章、25 条目录、开头带 `@charset` 的一份 CSS，
+    /// 导航只有 `toc.ncx`（EPUB 2.0，calibre 导出就是这一档）。
+    ///
+    /// 这些数字是在本机那本不入库的样本里量出来的（`tests/fixtures/README.md`），
+    /// 但容器本身**当场合成** —— 一条要每次 `cargo test` 与 CI 都真跑的测试，
+    /// 输入必须在仓库里。它验的不是「能不能打开」，而是合成小样本装不下的那几个形状：
+    /// manifest 与 spine 反着排、几十条 NCX 条目、条目里的 `#fragment`、章数多于目录数。
+    fn published_shape_epub(dir: &tempfile::TempDir) -> PathBuf {
+        const CHAPTERS: usize = 28;
+        const TOC_ENTRIES: usize = 25;
+        let path = dir.path().join("published-shape.epub");
+
+        // manifest 倒着写、ncx 与 css 垫底：出版书就是这么排的，而读成 spine 顺序才对。
+        let mut manifest = String::new();
+        for n in (1..=CHAPTERS).rev() {
+            manifest.push_str(&format!(
+                "    <item id=\"c{n}\" href=\"Text/chap{n}.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+            ));
+        }
+        manifest.push_str(
+            "    <item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n",
+        );
+        manifest
+            .push_str("    <item id=\"css\" href=\"Styles/style.css\" media-type=\"text/css\"/>\n");
+
+        let mut spine = String::from("    <spine toc=\"ncx\">\n");
+        for n in 1..=CHAPTERS {
+            spine.push_str(&format!("      <itemref idref=\"c{n}\"/>\n"));
+        }
+        spine.push_str("    </spine>\n");
+
+        let opf = format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>合成出版书</dc:title>
+    <dc:creator>某人</dc:creator>
+  </metadata>
+  <manifest>
+{manifest}  </manifest>
+{spine}</package>"#
+        );
+
+        // 元素名按规范的大小写（`navMap` / `navPoint`）：NCX 是大小写敏感的 XML，
+        // 全小写的解析器在这份文件上会读出零条目录，而在合成小样本上不一定看得出来。
+        // 头两条指着章内锚点，那是出版书目录把「章 + 小节」一起列出来时的写法。
+        let mut nav_points = String::new();
+        for n in 1..=TOC_ENTRIES {
+            let src = match n {
+                1 => "Text/chap1.xhtml#opening".to_string(),
+                2 => "Text/chap2.xhtml#second".to_string(),
+                _ => format!("Text/chap{n}.xhtml"),
+            };
+            nav_points.push_str(&format!(
+                "    <navPoint id=\"p{n}\" playOrder=\"{n}\"><navLabel><text>第{n}章</text></navLabel><content src=\"{src}\"/></navPoint>\n"
+            ));
+        }
+        let ncx = format!(
+            r#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="synth-published"/></head>
+  <docTitle><text>合成出版书</text></docTitle>
+  <navMap>
+{nav_points}  </navMap>
+</ncx>"#
+        );
+
+        // 开头那条 `@charset` 是出版书的标配；它曾是「把后一条规则整条吃掉」的现场
+        // （解析侧的回归由 `css` 那一层的测试钉住，这里保住它出现在容器里）。
+        let css = "@charset \"utf-8\";\nbody { line-height: 1.8 }\nh1 { text-align: center }\n";
+
+        let mut entries: Vec<(String, Vec<u8>)> = vec![
+            ("mimetype".to_string(), b"application/epub+zip".to_vec()),
+            (
+                "META-INF/container.xml".to_string(),
+                CONTAINER.as_bytes().to_vec(),
+            ),
+            ("OEBPS/content.opf".to_string(), opf.into_bytes()),
+            ("OEBPS/toc.ncx".to_string(), ncx.into_bytes()),
+            (
+                "OEBPS/Styles/style.css".to_string(),
+                css.as_bytes().to_vec(),
+            ),
+        ];
+        for n in 1..=CHAPTERS {
+            // 前两章把目录点到的那两个锚放下来，其余章没有 —— 目录数少于章数是常态。
+            let anchor = match n {
+                1 => " id=\"opening\"",
+                2 => " id=\"second\"",
+                _ => "",
+            };
+            entries.push((
+                format!("OEBPS/Text/chap{n}.xhtml"),
+                format!(
+                    "<html><head><title>第{n}章</title></head><body><h1>第{n}章</h1><p{anchor}>第{n}章的正文。</p></body></html>"
+                )
+                    .into_bytes(),
+            ));
+        }
+        let refs: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
+        write_epub(&path, &refs);
+        path
+    }
+
     /// 章标题的回落：没有目录条目时读章内第一个 h1/h2/h3。
     #[test]
     fn heading_fallback_reads_the_first_heading_of_a_chapter() {
@@ -805,8 +1166,7 @@ mod tests {
             &dir,
             "<html><body><h2>第二章 庭院</h2><p>正文</p></body></html>",
         );
-        let (_, content) = open(&path).unwrap();
-        let Content::Reflow(flow) = content;
+        let flow = flow_of(&path);
         assert_eq!(flow.chapters[0].title, "第二章 庭院");
     }
 
@@ -815,12 +1175,12 @@ mod tests {
     fn a_chapter_without_a_heading_falls_back_to_a_numbered_title() {
         let dir = tempfile::tempdir().unwrap();
         let path = synth_epub(&dir, "<html><body><p>没有标题</p></body></html>");
-        let (_, content) = open(&path).unwrap();
-        let Content::Reflow(flow) = content;
+        let flow = flow_of(&path);
         assert_eq!(flow.chapters[0].title, "第 1 节");
     }
 
-    /// M3-E3：manifest 里的 `image/*` 要按容器路径读出、带上固有尺寸与字节。
+    /// M3-E3：manifest 里的 `image/*` 要按容器路径读出固有尺寸；字节**不入** `FlowDoc`，
+    /// 而是按容器路径现取（学 KOReader）。
     #[test]
     fn images_are_read_with_dimensions_and_resolved_hrefs() {
         let dir = tempfile::tempdir().unwrap();
@@ -852,14 +1212,23 @@ mod tests {
             ],
         );
 
-        let (_, content) = open(&epub).unwrap();
-        let Content::Reflow(flow) = content;
+        let flow = flow_of(&epub);
         assert_eq!(flow.images.len(), 1, "只应收到那一张图");
         let img = &flow.images[0];
         assert_eq!(img.href, "OEBPS/Images/pic.png");
         assert_eq!(img.media_type, "image/png");
         assert_eq!((img.width, img.height), (3, 2), "固有尺寸来自解码 header");
-        assert_eq!(&img.bytes[..8], b"\x89PNG\r\n\x1a\n");
+        // 字节不在 FlowDoc 里，按容器路径现取 —— 这正是 KOReader 的
+        // `getObjectImageStream()` 那条路。
+        let bytes = doc_of(&epub)
+            .image_bytes(&img.href)
+            .expect("容器里那张图该能按 href 取回来");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(bytes, png, "取回来的就是写进去的那份字节");
+        assert!(
+            doc_of(&epub).image_bytes("OEBPS/Images/nope.png").is_none(),
+            "容器里没有的路径要给 None，不是空 Vec"
+        );
 
         // 排版层解析 `src` 用的就是这一对函数，这里顺带锁死行为。
         assert_eq!(
@@ -868,46 +1237,185 @@ mod tests {
         );
     }
 
-    /// 真实出版书的校验。默认 `--ignored`：CI 上没有这份受版权保护的文件，
-    /// 一个「文件不在就算通过」的测试迟早会变成假绿灯。
-    /// 本机跑法：`cargo test -p folio-core -- --ignored real_book`
+    /// `@font-face` 的 `src` 相对的是**那份 CSS 自己的目录**，而 `FlowDoc.css` 是多份
+    /// CSS 拼成的一个字符串（SQLite 里 `books.css` 那一列就是它）。拼接前不把 `url()`
+    /// 解成容器绝对路径，读字节那一步就会拿 `Fonts/body.otf` 去要一个其实躺在
+    /// `OEBPS/Styles/` 下面的文件 —— 表现是「书里明明有字体，就是读不到」，
+    /// 而屏幕上一点痕迹都没有。
     #[test]
-    #[ignore = "需要 tests/fixtures/local 里的本机版权书，不入库"]
-    fn real_book_opens_and_has_readable_chapters() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/local/shejie-mauriac.epub");
-        let Ok(path) = path.canonicalize() else {
-            panic!("没有本机测试书：{path:?}");
-        };
-        let (meta, content) = open(&path).unwrap();
-        let Content::Reflow(flow) = content;
-        eprintln!(
-            "{} ｜ {} 章 ｜ CSS {} 字节 ｜ 目录 {} 条 ｜ 封面 {:?} ｜ 图片 {} 张",
-            meta.title,
-            flow.chapters.len(),
-            flow.css.len(),
-            flow.toc.len(),
-            flow.cover.as_ref().map(|c| c.len()),
-            flow.images.len()
+    fn css_urls_are_absolutized_before_concatenation() {
+        let dir = tempfile::tempdir().unwrap();
+        let epub = dir.path().join("with-font.epub");
+        // 故意写成 `../Fonts/`：解错的目录是最常见的真实形态，也最容易被自己的测试放过去。
+        let css = "@charset \"utf-8\";\n@font-face { font-family: \"Book Body\"; src: url(../Fonts/body.otf) format(\"opentype\"), local(\"Noto Serif\"); }\nbody { font-family: \"Book Body\", serif }\n";
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>带字体</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="css" href="Styles/style.css" media-type="text/css"/>
+    <item id="f1" href="Fonts/body.otf" media-type="font/opentype"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+        let fake = b"\x00\x01\x00\x00 fake sfnt";
+        write_epub(
+            &epub,
+            &[
+                ("mimetype", b"application/epub+zip"),
+                ("META-INF/container.xml", CONTAINER.as_bytes()),
+                ("OEBPS/content.opf", opf.as_bytes()),
+                (
+                    "OEBPS/Text/chap1.xhtml",
+                    "<html><body><p>正文</p></body></html>".as_bytes(),
+                ),
+                ("OEBPS/Styles/style.css", css.as_bytes()),
+                ("OEBPS/Fonts/body.otf", fake),
+            ],
         );
-        assert!(flow.chapters.len() >= 5, "一本正常书不该只切出几章");
+
+        let flow = flow_of(&epub);
+        assert!(
+            flow.css.contains("url(\"OEBPS/Fonts/body.otf\")"),
+            "src 要解成容器绝对路径、带引号、括号配对：{}",
+            flow.css
+        );
+
+        // 层叠那一步拿到的就是能直接查容器的路径。
+        let rules = RuleSet::parse(&flow.css, Origin::Author);
+        assert_eq!(rules.font_faces.len(), 1, "@font-face 该留下来");
+        assert_eq!(rules.font_faces[0].family, "Book Body");
+        assert_eq!(
+            rules.font_faces[0].src,
+            vec![
+                crate::css::FontSrc::Url("OEBPS/Fonts/body.otf".into()),
+                crate::css::FontSrc::Local("Noto Serif".into()),
+            ]
+        );
+
+        // 正文那条 `font-family` 的第一候选就是声明名 —— app 侧靠整串同名把它认出来。
+        let dom = Dom::parse(flow.chapters[0].source.as_bytes());
+        let body = dom
+            .elements()
+            .find(|(_, n)| n.tag.as_ref().map(|t| t.local.to_string()) == Some("body".into()))
+            .map(|(id, _)| id)
+            .unwrap();
+        let styles = cascade(&dom, &rules, &ComputedStyle::default());
+        assert_eq!(styles.get(body).unwrap().font_family, "Book Body");
+        assert!(crate::css::font_face_matches(
+            &styles.get(body).unwrap().font_family,
+            &rules.font_faces[0].family
+        ));
+
+        // 取字节：声明过的路径给字节，没声明的不给。
+        let got = doc_of(&epub).fonts(&[
+            "OEBPS/Fonts/body.otf".to_string(),
+            "OEBPS/Fonts/nope.otf".to_string(),
+        ]);
+        assert_eq!(got.len(), 1, "只取 wanted 里真在 manifest 的那一份");
+        assert_eq!(got[0].href, "OEBPS/Fonts/body.otf");
+        assert_eq!(got[0].bytes, fake.to_vec());
+        assert!(
+            doc_of(&epub)
+                .fonts(&["OEBPS/Fonts/nope.otf".to_string()])
+                .is_empty(),
+            "声明了一个不存在的路径不该读到别的东西"
+        );
+    }
+
+    /// WOFF2 认得出但不取（gpui 那侧的 ttf-parser 不吃，一期不引 brotli）；
+    /// 单个文件过大只丢它自己，后面那份正常的还得照常拿到。
+    #[test]
+    fn woff2_is_skipped_and_an_oversized_font_only_costs_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let epub = dir.path().join("odd-fonts.epub");
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>怪字体</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="big" href="Fonts/big.otf" media-type="font/opentype"/>
+    <item id="w2" href="Fonts/x.woff2" media-type="font/woff2"/>
+    <item id="ok" href="Fonts/ok.otf" media-type="font/opentype"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+        let huge = vec![0u8; super::MAX_ONE + 1];
+        write_epub(
+            &epub,
+            &[
+                ("mimetype", b"application/epub+zip"),
+                ("META-INF/container.xml", CONTAINER.as_bytes()),
+                ("OEBPS/content.opf", opf.as_bytes()),
+                (
+                    "OEBPS/Text/chap1.xhtml",
+                    "<html><body><p>正文</p></body></html>".as_bytes(),
+                ),
+                ("OEBPS/Fonts/big.otf", &huge),
+                ("OEBPS/Fonts/x.woff2", b"wOF2 whatever"),
+                ("OEBPS/Fonts/ok.otf", b"\x00\x01\x00\x00 ok"),
+            ],
+        );
+        let wanted = [
+            "OEBPS/Fonts/big.otf",
+            "OEBPS/Fonts/x.woff2",
+            "OEBPS/Fonts/ok.otf",
+        ]
+        .map(String::from)
+        .to_vec();
+        let got = doc_of(&epub).fonts(&wanted);
+        assert_eq!(
+            got.iter().map(|f| f.href.as_str()).collect::<Vec<_>>(),
+            ["OEBPS/Fonts/ok.otf"],
+            "过大那份与 woff2 都不该出现，且不能把排在它们后面的那份也带走"
+        );
+    }
+
+    /// 一本整书规模的容器读出来是什么样子：章数、正文、CSS、目录能不能对上 spine。
+    ///
+    /// 合成书里三章的小样本测的是**单个结构**，这一条测的是**规模**：几十条目录、
+    /// 目录数少于章数、manifest 与 spine 反序、`@charset` 打头的一份 CSS。
+    /// 输入是 `published_shape_epub` 当场写进临时目录的那一份，不读任何本机文件，
+    /// 所以它跟着默认套件与 CI 每次真跑 —— 一条需要「某人手上那本书」的测试做不到这点，
+    /// 而把它改成「文件不在就算通过」又是一盏永远绿的假灯（见 `tests/fixtures/README.md`）。
+    #[test]
+    fn a_whole_published_shaped_book_reads_back_chapters_css_and_toc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = published_shape_epub(&dir);
+        let doc = doc_of(&path);
+        let meta = doc.meta();
+        let flow = doc.flow().expect("该读成可重排");
+
+        assert_eq!(meta.title, "合成出版书", "书名从 OPF 的 dc:title 来");
+        assert_eq!(
+            flow.chapters.len(),
+            28,
+            "一章都不该在 spine 到源文件的路上丢掉"
+        );
         assert!(
             flow.chapters
                 .iter()
-                .any(|c| c.source.contains("charset") || c.source.contains("<p")),
-            "章节源文本里应有正文标记"
+                .all(|c| c.source.contains("<p") && c.source.contains("</p>")),
+            "每一章都要带得回它的正文"
         );
         assert!(!flow.css.is_empty(), "出版书一定带 CSS");
-        // 目录条目要能对上章节，否则侧栏点击无处可跳。
+        // 目录条目要能对上章节，否则侧栏点击无处可跳。带着 `#fragment` 的那两条也算：
+        // 对上说明 fragment 在解 href 时被剥掉了，而不是留在路径里比对不上。
         let matched = flow
             .toc
             .iter()
             .filter(|e| flow.chapters.iter().any(|c| c.spine_href == e.href))
             .count();
-        eprintln!("目录 {} 条，其中 {} 条对上 spine", flow.toc.len(), matched);
-        assert!(
-            matched * 2 >= flow.toc.len(),
-            "过半目录条目对不上章节：href 解析有 bug"
+        assert_eq!(
+            matched,
+            flow.toc.len(),
+            "有目录条目对不上章节：href 解析有 bug"
+        );
+        // 标题：目录里有的那条用它，目录排到 25 之后的三章回落到章内 `<h1>`。
+        assert_eq!(flow.chapters[0].title, "第1章", "章名来自目录");
+        assert_eq!(
+            flow.chapters[27].title, "第28章",
+            "目录没覆盖到的章回落到 h1"
         );
     }
 }

@@ -11,14 +11,17 @@
 
 ## 怎么用 local/ 里的书
 
-排版观感靠人眼，不靠断言，所以这类样本走 `#[ignore]` 的显式冒烟测试，CI 上永远跳过：
+排版观感靠人眼，不靠断言，所以这类样本走**手动工具**，不进测试套件：
 
 ```bash
-cargo test -p folio-core -- --ignored --nocapture
+cargo run -p folio-core --example css-gap
 ```
 
-被 `#[ignore]` 的测试**不能因为文件不在就通过**——那等于一盏永远绿的假灯。
-它们在没有本地样本时直接 panic，所以只会在你显式要求时跑，且跑了一定给结论。
+需要「整本书规模」那道闸门时，把它的形状**合成**进测试（`src/format/epub.rs` 的
+`published_shape_epub`：28 章 / 25 条目录 / `@charset` 打头的 CSS），而不是让测试去读一个
+只有某台机器上才存在的文件。后者只有两种下场：挂着 `#[ignore]` 永远不跑，或者改成
+「文件不在就算通过」变成一盏永远绿的假灯。仓库里现在没有任何 `#[ignore]` 的测试，
+要加之前先想清楚它的输入能不能入库。
 
 ## 现有样本
 
@@ -27,8 +30,9 @@ cargo test -p folio-core -- --ignored --nocapture
   nav 条目带 `#fragment`、两份 CSS 需要按声明顺序拼接、第三章没有 `<h1>`（测标题回退）。
 - `local/shejie-mauriac.epub` —— calibre 导出的 EPUB 2.0（无 nav，只有 `toc.ncx`），
   28 章 / 25 条目录 / 一份 2.4 KB 的 CSS。它抓到了合成样本抓不到的两个真 bug：
-  **NCX 的元素名是大小写敏感的 `navMap` / `navPoint`**，以及出版书 CSS 里
-  开头的 `@charset` 语句会把后一条规则吃掉。
+  **NCX 的元素名是大小写敏感的 `navMap` / `navPoint`**（目标写在 `<content src="…"/>` 里，
+  不是 `<src>`），以及出版书 CSS 里开头的 `@charset` 语句会把后一条规则吃掉。
+  它这些形状现在由 `published_shape_epub` 合成进默认套件，本机这一份只给 `css-gap` 看观感。
 
 ## 合成样本才是自动化测试的主力
 

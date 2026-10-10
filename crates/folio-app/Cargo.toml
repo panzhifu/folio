@@ -23,7 +23,19 @@ gpui-kit.workspace = true
 # 只依赖 gpui-kit 一个门面：它顶层 `pub use ::gpui::*`，把移动端那份 `gpui-pre` 整个
 # 转了出来，所以两端都用 `use gpui_kit::…`，不再单独声明一条 `gpui` 依赖。
 # 以前移动端要显式引 `gpui-pre` 是因为它是独立 workspace、拿不到 gpui-kit。
-log = "0.4"
+# 联网用的 HTTP client（见 `ui::shared::http`）走同一个 gpui 快照的版本，不另起一份 reqwest。
+reqwest_client.workspace = true
+# 日志走 `tracing` 那一套（装配在 `folio_core::logging`），app 侧要直接引两个：
+# 宏用它，`Layer` 类型是用来递 logcat 那一层的。
+# `log` 留着只为 Android：`android_logger` 是它的后端，logcat 那层通过它落地。
+tracing.workspace = true
+tracing-subscriber.workspace = true
+log.workspace = true
+# 界面侧的错误一律收成 `anyhow`（约定与那个 `report` 助手见 `ui::shared::error`）。
+# 后端那层的 `thiserror` 枚举不需要在这里被认识：`folio_core::Error` 是个标准的
+# `std::error::Error`，`?` 自动把它接进 anyhow 的链，`{err:#}` 于是能一路看到底。
+anyhow.workspace = true
+
 
 # ── 移动端平台层：只在移动目标上链，桌面端根本不编译它 ──
 # 包名是 `gpui-pre-mobile`，lib 名仍是 `gpui_mobile`，所以 `use gpui_mobile::…` 不变。
@@ -41,7 +53,10 @@ log = "0.4"
 # TODO：这条依赖默认挂着 30 多个平台插件 feature，开发方案 §2.2b 要求关掉
 #       （`default-features = false`），还没落实。
 [target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "5843b657429143895cce6590a9fb0a1e5f9913cc" }
+# rev 取的是 fork 的 `line/gpui-pre`：在 `5843b657`（延迟退出重试）之上多了
+# `057c103`（`prompt_for_paths{directories:true}` 走 ACTION_OPEN_DOCUMENT_TREE，路径提示能选文件夹）
+# 与一个 rustfmt 收尾提交 `c694ec8`。folio 的「选文件夹做书库」要靠它。
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "c694ec8707a56eba48b00e9178504f5100eca97b" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15"

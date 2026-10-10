@@ -1,15 +1,15 @@
-//! 「一章的源文本 → `folio_core::layout::Layout`」这一段，桌面与移动共用。
+//! 「一章的 XHTML → `folio_core::layout::Layout`」这一段，桌面与移动共用。
 //!
 //! 分成两件事：**怎么排、切成几片**在这里，**怎么摆上屏**在视图层
 //! （`ui/features/reader`，两端一份实现）。这样同一本书在两端得到的是同一份
 //! `Layout` 与同一套分片，屏幕上看到的行只可能因为视口尺寸不同而不同，不会因为
 //! 「两端各实现了一遍层叠与断行」而不同。
 //!
-//! [`chapter_xhtml`] 是这段链子的入口之一：Markdown / TXT 的章源文本是规范化纯文本，
-//! 排版层只认 XHTML，所以先做一次最小包装（空行分段、段内换行 → `<br/>`、
-//! ATX 标题 → `<hN>`，文字全部 XML 转义）。段落顺序与字符内容都不改动原文，
-//! 所以这条链子不会让可见文本的坐标漂移（引擎路径的坐标见 `folio_core::anchor::TextMap`）。
+//! 入口的 `Chapter::source` **一定是引擎就绪的 XHTML**（契约见 `format::Chapter`）。
+//! 纯文本的包装已经在 provider 里做完（`folio_core::format::xhtml`），所以这里
+//! 没有「这个格式要不要先包一下」的分支 —— `Format` 不参与排版链。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,99 +19,27 @@ use folio_core::anchor::TextMap;
 use folio_core::css::computed::{ComputedStyle, StyledDom, TextAlign, cascade};
 use folio_core::css::{Origin, RuleSet};
 use folio_core::dom::{Dom, NodeId};
+use folio_core::hit::Hit;
 use folio_core::layout::fragment::{Fragment, FragmentOptions, column_width, fragments};
 use folio_core::layout::{Layout, LayoutOptions, LineBox, layout as typeset};
-use folio_core::{Chapter, Content, DocMeta, FlowDoc, Format};
 use gpui_kit::{App, Window};
 
-use super::images::ChapterImages;
 use super::measure::GpuiMeasure;
+use crate::ui::features::reader::book_fonts::BookFonts;
+use crate::ui::shared::images::ChapterImages;
 
-/// 打开一个文档。folio-core 的 `open` 按扩展名挑适配器（epub / md / txt）。
-pub fn open(path: &Path) -> folio_core::Result<(DocMeta, FlowDoc)> {
-    let (meta, content) = folio_core::open(path)?;
-    match content {
-        Content::Reflow(flow) => Ok((meta, flow)),
-    }
+/// 打开一个文档，返回统一接口。
+///
+/// 走 `folio_core::document::open`：`Content` 的两个家族都从那里出去，界面这一层只按
+/// `kind()` 分流，不看扩展名，也不再有第二个「按格式查 provider」的入口。
+///
+/// 返回 `Arc` 而不是 `Box`：`Book` / `FixedBook` 与绘制那条链（图片字节来源）要共用
+/// 同一份文档，而字节按需取用的是它手里那个 provider。
+pub fn open(path: &Path) -> folio_core::Result<Arc<dyn folio_core::document::Document>> {
+    Ok(Arc::from(folio_core::document::open(path)?))
 }
 
 /// 章节源文本 → 交给排版层的 XHTML 片段。
-///
-/// EPUB 的章节本来就是 XHTML，原样透传。Markdown / TXT 的 `Chapter::source` 是
-/// **规范化后的纯文本**（`folio-core/src/format/markdown.rs` 只做行尾统一、压空行、
-/// 按 `#` 分章，从不生成 HTML），所以要在这里补一次最小规范化 —— 三类格式从这一层起
-/// 走同一条排版链，屏幕上也就只有「一片怎么摆」这一套代码。
-pub fn chapter_xhtml(chapter: &Chapter, format: Format) -> String {
-    if format == Format::Epub {
-        return chapter.source.clone();
-    }
-    let mut out = String::with_capacity(chapter.source.len() + 64);
-    for block in chapter.source.split("\n\n") {
-        let lines: Vec<&str> = block.lines().collect();
-        if lines.iter().all(|line| line.trim().is_empty()) {
-            continue;
-        }
-        // 1–6 个 `#` 加空格才是 ATX 标题，其余一律当正文。
-        if let Some((level, text)) = lines
-            .first()
-            .and_then(|first| atx_heading(first.trim_start()))
-        {
-            // 标题独占一行：整块只有它是标题，正文留给后面的段。
-            out.push_str(&format!("<h{level}>"));
-            escape(&mut out, text);
-            out.push_str(&format!("</h{level}>"));
-            let rest = &block[block.find('\n').map(|i| i + 1).unwrap_or(block.len())..];
-            if !rest.trim().is_empty() {
-                out.push('\n');
-                paragraph(&mut out, rest);
-            }
-            out.push('\n');
-            continue;
-        }
-        paragraph(&mut out, block);
-        out.push('\n');
-    }
-    out
-}
-
-/// 一段正文：内部换行保留成 `<br/>`（`white-space: normal` 下 `\n` 仍是硬换行，
-/// 见 `folio-core/src/layout/mod.rs` 的 `hard_lines`）。
-fn paragraph(out: &mut String, text: &str) {
-    out.push_str("<p>");
-    for (ix, line) in text.lines().enumerate() {
-        if ix > 0 {
-            out.push_str("<br/>");
-        }
-        escape(out, line.trim());
-    }
-    out.push_str("</p>");
-}
-
-fn atx_heading(line: &str) -> Option<(u8, &str)> {
-    let hashes = line.chars().take_while(|c| *c == '#').count();
-    if hashes == 0 || hashes > 6 {
-        return None;
-    }
-    let rest = &line[hashes..];
-    if !rest.starts_with([' ', '\t']) {
-        return None;
-    }
-    let text = rest.trim().trim_end_matches('#').trim();
-    (!text.is_empty()).then_some((hashes as u8, text))
-}
-
-fn escape(out: &mut String, text: &str) {
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(ch),
-        }
-    }
-}
-
 /// `<body>` 不在（纯片段或畸形 XHTML）时退回文档根：排版层只认「从这里往下找内容」。
 pub fn body_of(dom: &Dom) -> NodeId {
     dom.elements()
@@ -141,6 +69,9 @@ pub struct Document {
     prefs: Reader,
     /// 本章的图片索引：排版期查固有尺寸，绘制期取可渲染的 `Image`。
     images: Arc<ChapterImages>,
+    /// 整本书的内嵌字体（别名表 + 已经注册进设备的家族名）。换章不换这一份，
+    /// 所以由 `Book` 建好灌进来，而不是每章自己注册一遍。
+    faces: Arc<BookFonts>,
     /// 上次排版时的 `(内容宽度, 读者偏好)`。
     ///
     /// 记的是**整份偏好**而不是字号与行距：首行缩进、段距、是否两端对齐同样进排版，
@@ -181,7 +112,13 @@ pub struct Viewport {
 }
 
 impl Document {
-    pub fn new(source: String, css: &str, prefs: Reader, images: Arc<ChapterImages>) -> Self {
+    pub fn new(
+        source: String,
+        css: &str,
+        prefs: Reader,
+        images: Arc<ChapterImages>,
+        faces: Arc<BookFonts>,
+    ) -> Self {
         let mut rules = RuleSet::default();
         // 书自己的 CSS 是作者层；读者偏好通过根样式进来（`root_base`），
         // 带 `!important` 的读者样式表留给 M5 的 reader.css。
@@ -194,12 +131,18 @@ impl Document {
             rules,
             prefs,
             images,
+            faces,
             laid_out: None,
             layout: Layout::default(),
             styles: None,
             fragmented: None,
             slices: Rc::new(Vec::new()),
         }
+    }
+
+    /// 这本书的内嵌字体。绘制路径与度量共用它，两边不可能拿不同的别名表。
+    pub fn fonts(&self) -> &BookFonts {
+        &self.faces
     }
 
     /// 源文本 → DOM + 可见文本坐标。两者必须一起换，否则坐标指的就是上一章的文本。
@@ -241,6 +184,7 @@ impl Document {
         self.slices = Rc::new(Vec::new());
     }
 
+    #[allow(dead_code)] // 面板与测试读；渲染路径目前直接走字段
     pub fn prefs(&self) -> &Reader {
         &self.prefs
     }
@@ -251,6 +195,14 @@ impl Document {
 
     pub fn layout(&self) -> &Layout {
         &self.layout
+    }
+
+    /// 某个 DOM 节点层叠完的计算样式。排版没做过（`styles` 还没建）时是 `None`。
+    ///
+    /// 绘制层用它取块级装饰（背景色、边框）—— 那些是「盒子长什么样」的信息，
+    /// 只有层叠完才知道。
+    pub fn style_of(&self, node: NodeId) -> Option<&ComputedStyle> {
+        self.styles.as_ref()?.get(node)
     }
 
     pub fn lines(&self) -> &[LineBox] {
@@ -312,6 +264,7 @@ impl Document {
 
     /// 排版一章。度量要用**窗口级**文本系统（`layout_line` 只挂在它上面），
     /// 所以这一步留在渲染帧里做；挪进 `background_spawn` 属 M4。
+    #[allow(dead_code)] // 测试与 M4 的后台化接线用
     pub fn ensure_layout(&mut self, window: &mut Window, cx: &mut App, pane_reserve: f32) {
         let width = Self::content_width(window, &self.prefs, pane_reserve);
         self.typeset_to(window, cx, width);
@@ -319,14 +272,20 @@ impl Document {
 
     /// 按给定宽度排版一章。宽度没变、偏好没变就直接复用上一次的结果。
     fn typeset_to(&mut self, window: &mut Window, cx: &mut App, width: f32) {
-        let key = (width, self.prefs.clone());
-        if self.laid_out.as_ref() == Some(&key) {
+        // 逐帧比引用而不是先 `prefs.clone()` 再比：`Reader` 里有两个 `String`，
+        // 而这一条几乎每帧都要问一次（滚动、点选、改标题都重画）。只有真重排时才克隆。
+        if let Some((laid_width, laid_prefs)) = &self.laid_out
+            && *laid_width == width
+            && *laid_prefs == self.prefs
+        {
             return;
         }
         let measure = GpuiMeasure::new(
             cx.text_system().clone(),
             window.text_system().clone(),
             self.prefs.font_family.clone(),
+            self.prefs.mono_font_family.clone(),
+            self.faces.clone(),
         );
         let styles = cascade(&self.dom, &self.rules, &Self::root_base(&self.prefs));
         // 解析不做在这里（`dom` 是字段）；换章才重解析，见 `parse_chapter`。
@@ -335,12 +294,16 @@ impl Document {
             &self.dom,
             &styles,
             body,
-            LayoutOptions { width },
+            LayoutOptions {
+                width,
+                // 完整排版：界面要行盒来摆字，不能用只算高的轻量档。
+                light: false,
+            },
             &measure,
             self.images.as_ref(),
         );
         self.styles = Some(styles);
-        self.laid_out = Some(key);
+        self.laid_out = Some((width, self.prefs.clone()));
         // 行盒换了，切点也就换了 —— 切片必须跟着作废，否则分页翻到的是上一页的行。
         self.drop_fragments();
     }
@@ -361,8 +324,11 @@ impl Document {
         let width = column_width(total, columns, viewport.gap).max(1.0);
         self.typeset_to(window, cx, width);
         let height = viewport.height.max(0.0);
-        let key = (width, self.prefs.clone(), height, columns);
-        if self.fragmented.as_ref() == Some(&key) {
+        // 同上：先比引用，缓存命中就不克隆 `prefs`。
+        let cached = self.fragmented.as_ref().is_some_and(|(w, p, h, c)| {
+            *w == width && *p == self.prefs && *h == height && *c == columns
+        });
+        if cached {
             return width;
         }
         let options = FragmentOptions { height, columns };
@@ -371,7 +337,7 @@ impl Document {
             // 没排过版就没有行盒可切（第一帧之前）。
             None => Vec::new(),
         };
-        self.fragmented = Some(key);
+        self.fragmented = Some((width, self.prefs.clone(), height, columns));
         self.slices = Rc::new(slices);
         width
     }
@@ -413,6 +379,109 @@ impl Document {
         &self.map
     }
 
+    /// 本章所有带 `id` 的元素 → 它第一个可见字符的偏移。目录跳转与「现在读到哪一条」
+    /// 都查这张表。
+    ///
+    /// 一次走完 DOM 而不是逐个按 id 查：一章里挂着十几个小节锚点是常态，逐个查就是
+    /// 十几趟全树遍历，而合成一张表只要一趟。
+    ///
+    /// 元素自己的 `node_chars` 一定是 `None`（坐标表只给文本节点建区间），所以往下找到
+    /// 子树里第一个进了表的节点 —— 标题的文字就在它自己那棵子树的最前面。
+    pub fn id_offsets(&self) -> HashMap<String, usize> {
+        let mut out: HashMap<String, usize> = HashMap::new();
+        for (node, _) in self.dom.elements() {
+            let Some(id) = self.dom.id_attr(node) else {
+                continue;
+            };
+            // 规范要求 `id` 全章唯一。真出现重复就留文档序里在前的那个，而不是让后面
+            // 冒出来的把落点改掉。
+            if out.contains_key(id) {
+                continue;
+            }
+            if let Some(start) = self.first_text_offset(node) {
+                out.insert(id.to_string(), start);
+            }
+        }
+        out
+    }
+
+    /// `root` 那棵子树里第一个进了可见文本坐标表的节点，它的区间起点。
+    fn first_text_offset(&self, root: NodeId) -> Option<usize> {
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if let Some(chars) = self.map.node_chars(node) {
+                return Some(chars.start);
+            }
+            // 逆序压栈，弹出来的就是文档序。
+            let children = &self.dom.get(node).children;
+            stack.extend(children.iter().rev().copied());
+        }
+        None
+    }
+
+    /// 命中测试与选中矩形（M6 选中、M7 批注回显共用的三个薄包装）。
+    ///
+    /// 坐标与返回值都是**排版坐标**（行盒那一套），调用方负责换算
+    /// （连续滚动减 `scroll_y`，分页/双页减片的 `origin_y` 与栏位 `x`）。
+    /// 度量现建一个 `GpuiMeasure` —— 与排版用同一个构造参数，字符前进量同源。
+    /// 排版还没做过（窗口第一帧之前）时 `lines` 是空的，命中给 `None`。
+    #[allow(dead_code)] // M6 选中接线的入口，先立契约（见 plans/M6-selection.md）
+    pub fn hit_test(&self, window: &Window, cx: &App, x: f32, y: f32) -> Option<Hit> {
+        folio_core::hit::hit_test(
+            self.layout(),
+            &self.dom,
+            &self.map,
+            &self.measure(window, cx),
+            x,
+            y,
+        )
+    }
+
+    /// 一段字符区间在排版里的矩形（排版坐标，每行一条）。
+    #[allow(dead_code)] // M6 选中接线的入口（见 plans/M6-selection.md）
+    pub fn selection_rects(
+        &self,
+        window: &Window,
+        cx: &App,
+        range: std::ops::Range<usize>,
+    ) -> Vec<folio_core::hit::SelectionRect> {
+        folio_core::hit::rects_for_range(
+            self.layout(),
+            &self.dom,
+            &self.map,
+            &self.measure(window, cx),
+            range,
+        )
+    }
+
+    /// 长按落点吸到一个词上（纯坐标表运算，不碰度量）。
+    #[allow(dead_code)] // M6 长按选词的入口（见 plans/M6-selection.md）
+    pub fn snap_word(&self, offset: usize) -> std::ops::Range<usize> {
+        folio_core::hit::snap_word(&self.map, offset)
+    }
+
+    /// 长按所在段落的字符区间（「全选本段」）。
+    pub fn paragraph_range(
+        &self,
+        window: &Window,
+        cx: &App,
+        offset: usize,
+    ) -> Option<std::ops::Range<usize>> {
+        let _ = (window, cx);
+        folio_core::hit::paragraph_range(self.layout(), &self.dom, &self.map, offset)
+    }
+
+    #[allow(dead_code)] // 上面三个 M6 入口共用
+    fn measure(&self, window: &Window, cx: &App) -> GpuiMeasure {
+        GpuiMeasure::new(
+            cx.text_system().clone(),
+            window.text_system().clone(),
+            self.prefs.font_family.clone(),
+            self.prefs.mono_font_family.clone(),
+            self.faces.clone(),
+        )
+    }
+
     /// 章内第 `y` 个像素那一行的行首字符偏移。滚动位置换成进度用这个。
     ///
     /// `y` 超过内容末尾时给末尾那一行的偏移，不是总字数 —— 读者停在最后一屏，
@@ -451,7 +520,7 @@ impl Document {
 
 #[cfg(test)]
 mod tests {
-    //! 两端共用的排版地基（`ui/shared/document.rs` 与 `measure.rs`）在宿主上跑的用例。
+    //! 本章的排版状态（本文件）与 `measure.rs` 在宿主上跑的用例。
     //!
     //! 为什么这些算移动端的测试：移动 UI 本身只在 `cfg(mobile)` 下编译，宿主的
     //! `cargo test` 碰不到那一侧的视图。但「同一本书在两端排出一样的行」这件事
@@ -463,10 +532,11 @@ mod tests {
 
     use std::sync::Arc;
 
-    use crate::ui::shared::document::{Document, body_of, chapter_xhtml};
+    use crate::ui::features::reader::book_fonts::BookFonts;
+    use crate::ui::features::reader::document::{Document, body_of};
     use crate::ui::shared::images::ChapterImages;
+    use folio_core::Reader;
     use folio_core::layout::LineFragment;
-    use folio_core::{Chapter, Format, Reader};
     use gpui_kit::{
         AnyWindowHandle, AppContext as _, Context, Render, Styled, TestAppContext, div, px, size,
     };
@@ -518,49 +588,15 @@ mod tests {
             "",
             prefs.clone(),
             Arc::new(ChapterImages::empty()),
+            // 这些用例钉的是排版与坐标，不是字体：空别名表 = 没有内嵌字体，
+            // 与没有这个功能时逐字节同一条路径。
+            Arc::new(BookFonts::empty()),
         );
         cx.update_window(handle, |_, win, cx| {
             document.ensure_layout(win, cx, 0.0);
         })
         .expect("窗口应当可排版");
         document
-    }
-
-    /// Markdown 的章源文本是规范化纯文本，进排版层之前要包成 XHTML。
-    /// 这里钉住四件事：空行分段、段内换行成硬换行、ATX 标题成 `<hN>`、特殊字符转义。
-    /// 少任何一条，移动端读 `.md` 就会把整篇排成一个段落，或把尖括号当标签吃掉。
-    #[test]
-    fn markdown_blocks_become_xhtml_without_losing_text() {
-        let chapter = Chapter {
-            title: "第一章".into(),
-            source: "# 标题\n\n第一段\n还是第一段\n\n第二段\n\n<script>x</script>".into(),
-            spine_href: String::new(),
-        };
-        let xhtml = chapter_xhtml(&chapter, Format::Markdown);
-
-        assert!(
-            xhtml.contains("<h1>标题</h1>"),
-            "ATX 标题要成 `<h1>`：{xhtml}"
-        );
-        assert!(
-            xhtml.contains("<p>第一段<br/>还是第一段</p>"),
-            "段内换行要成硬换行：{xhtml}"
-        );
-        assert!(xhtml.contains("<p>第二段</p>"), "空行分段：{xhtml}");
-        // 转义后不能剩下裸的 `<script>`，否则 html5ever 会真当标签解析，正文就少一段。
-        assert!(
-            !xhtml.contains("<script>"),
-            "正文里的尖括号必须转义：{xhtml}"
-        );
-        assert!(xhtml.contains("&lt;script&gt;"));
-
-        // EPUB 的章节本来就是 XHTML，一个字节都不该动。
-        let epub = Chapter {
-            title: String::new(),
-            source: "<body><p>原样</p></body>".into(),
-            spine_href: String::new(),
-        };
-        assert_eq!(chapter_xhtml(&epub, Format::Epub), epub.source);
     }
 
     /// `max_measure == 0` 是「不设上限、随窗口铺满」的**哨兵值**，不是 0 像素的上限。
@@ -619,6 +655,9 @@ mod tests {
             "",
             prefs.clone(),
             Arc::new(ChapterImages::empty()),
+            // 这些用例钉的是排版与坐标，不是字体：空别名表 = 没有内嵌字体，
+            // 与没有这个功能时逐字节同一条路径。
+            Arc::new(BookFonts::empty()),
         );
 
         // 第一次排版：无缩进。
@@ -643,7 +682,7 @@ mod tests {
     /// **解不出资源的 `<img>` 整张跳过**，不塌成空盒、也不留一块画不出来的空白。
     ///
     /// 这条对移动端尤其要紧：那一侧的图片现在按引擎给的位真画
-    /// （`ui/mobile/reader_view.rs` 用 gpui 的 `img` 元素），所以一个解不出来的 `src`
+    /// （`view.rs` 用 gpui 的 `img` 元素），所以一个解不出来的 `src`
     /// 若还留着位子，读者看到的就是一块空洞，还会以为正文排错了。
     /// 跳过之后行里的文本必须依然完整。
     #[gpui_kit::test]
@@ -741,6 +780,9 @@ mod tests {
             "",
             prefs(),
             Arc::new(ChapterImages::empty()),
+            // 这些用例钉的是排版与坐标，不是字体：空别名表 = 没有内嵌字体，
+            // 与没有这个功能时逐字节同一条路径。
+            Arc::new(BookFonts::empty()),
         );
         assert_eq!(document.line_count(), 0, "没排过版就没有行盒");
         assert_eq!(document.offset_at_y(4000.0), 0);

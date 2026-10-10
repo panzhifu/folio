@@ -2,12 +2,12 @@
 //!
 //! 不接 `selectors` crate 是有意为之：它的 `SelectorImpl` 要 10 个关联类型外加
 //! `NonTSPseudoClass` / `PseudoElement` 两套 trait，那是为 Servo 的全量
-//! CSS Selectors 4 准备的；本引擎承诺的范围见 docs/development-plan.md §4.4，
+//! CSS Selectors 4 准备的；本引擎承诺的范围见 `css/computed.rs` 顶部的清单，
 //! 背那套样板换不来用得上的能力。
 //!
 //! 支持：`*`、type、`.class`、`#id`、`[attr]`、`[attr=v]`、
 //! 后代 / `>` 子代 / `+` 相邻兄弟 / `~` 一般兄弟、`,` 分组、
-//! `:first-child`、`:last-child`、`:lang()`。
+//! `:first-child`、`:last-child`、`:nth-child(An+B)`、`:lang()`。
 //! 清单外的构造让**整条选择器作废**，而不是部分生效 ——
 //! 部分生效会让作者样式以不可预期的方式命中内容。
 
@@ -19,10 +19,27 @@ pub enum Simple {
     Type(String),
     Class(String),
     Id(String),
-    Attr { name: String, value: Option<String> },
+    Attr {
+        name: String,
+        value: Option<String>,
+    },
     FirstChild,
     LastChild,
+    /// `:nth-child(An+B)`，`a` / `b` 已折成整数：`odd` = `(2,1)`、`even` = `(2,0)`、
+    /// 裸整数 `3` = `(0,3)`、`-n+3` = `(-1,3)`。
+    NthChild {
+        a: i32,
+        b: i32,
+    },
     Lang(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoElement {
+    /// 首字下沉。清单里只有它：`::before` / `::after` 要的是「凭空造一个盒」，
+    /// 而我们的盒全部来自 DOM 节点，锚点坐标系也建在那些节点的字节偏移上 ——
+    /// 造出来的字符没有地方可锚。
+    FirstLetter,
 }
 
 /// 一串紧挨着的简单选择器，如 `p.intro#first`。
@@ -40,10 +57,16 @@ pub enum Combinator {
 }
 
 /// 复合选择器：`left` 里每一项带着它与自己右侧之间的组合器。
+///
+/// `pseudo` 是这条规则**作用在哪个盒**上的标记：`Some(FirstLetter)` 的声明不属于
+/// 元素自己，而是排版层给首字符单独算的那一份。所以 `matches` 只认 `None`，
+/// 伪元素的声明由 `matches_pseudo` 取走 —— 混在一起会让 `p::first-letter { color: red }`
+/// 把整段正文都涂红。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Complex {
     pub left: Vec<(Combinator, Compound)>,
     pub right: Compound,
+    pub pseudo: Option<PseudoElement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +89,7 @@ impl Compound {
                 | Simple::Attr { .. }
                 | Simple::FirstChild
                 | Simple::LastChild
+                | Simple::NthChild { .. }
                 | Simple::Lang(_) => classes += 1,
                 Simple::Type(_) => types += 1,
                 Simple::Universal => {}
@@ -99,6 +123,19 @@ impl Compound {
                 .get(node)
                 .parent
                 .is_some_and(|p| dom.element_children(p).last() == Some(node)),
+            // 数的是**元素**子节点里的 1 基位置：文本与注释节点不算一个孩子，
+            // 这与 `:first-child` / `:last-child` 走 `element_children` 同一口径。
+            Simple::NthChild { a, b } => {
+                let Some(parent) = dom.get(node).parent else {
+                    return false;
+                };
+                let index = dom
+                    .element_children(parent)
+                    .take_while(|c| *c != node)
+                    .count() as i32
+                    + 1;
+                nth_matches(*a, *b, index)
+            }
             Simple::Lang(prefix) => {
                 nearest_lang(dom, node).is_some_and(|l| lang_matches(&l, prefix))
             }
@@ -114,6 +151,10 @@ impl Complex {
             ids += i;
             classes += c;
             types += t;
+        }
+        // 伪元素按一个 type 计（CSS Selectors §17），`p::first-letter` 因此与 `p em` 同级。
+        if self.pseudo.is_some() {
+            types += 1;
         }
         pack(ids, classes, types)
     }
@@ -150,7 +191,18 @@ impl Selector {
     }
 
     pub fn matches(&self, dom: &Dom, node: NodeId) -> bool {
-        self.complexes.iter().any(|c| c.matches(dom, node))
+        self.matches_pseudo(dom, node, None)
+    }
+
+    /// 命中这个元素、且声明属于 `want` 那个盒吗。
+    ///
+    /// 按**每一条**复合选择器判，不按整条规则：`p::first-letter, h1 { color: red }`
+    /// 里 `h1` 那条属于 h1 自己、`p::first-letter` 那条属于 p 的首字符，
+    /// 整条规则只归一类会把两种落点之一丢掉。
+    pub fn matches_pseudo(&self, dom: &Dom, node: NodeId, want: Option<PseudoElement>) -> bool {
+        self.complexes
+            .iter()
+            .any(|c| c.pseudo == want && c.matches(dom, node))
     }
 
     pub fn parse(text: &str) -> Option<Selector> {
@@ -171,6 +223,7 @@ fn parse_complex(text: &str) -> Option<Complex> {
     let mut left: Vec<(Combinator, Compound)> = Vec::new();
     let mut right = Compound::default();
     let mut pending: Option<Combinator> = None;
+    let mut pseudo: Option<PseudoElement> = None;
 
     while let Some(c) = cur.next() {
         if c.is_whitespace() {
@@ -178,6 +231,26 @@ fn parse_complex(text: &str) -> Option<Complex> {
                 pending = Some(Combinator::Descendant);
             }
             continue;
+        }
+        // 伪元素挂在最右侧那个复合选择器之后，声明落在这个元素**之外**的一个盒上。
+        // 单冒号的 `:first-letter` 是遗留写法，这里不认 —— 认了就得在每个伪类名上
+        // 再判一次「它到底是不是伪元素」，而清单里的伪类一共才三个。
+        if c == ':' && cur.peek() == Some(':') {
+            cur.next();
+            let name = read_ident(&mut cur)?;
+            pseudo = match name.to_ascii_lowercase().as_str() {
+                "first-letter" => Some(PseudoElement::FirstLetter),
+                _ => return None,
+            };
+            // 之后不许再挂选择器内容：`p::first-letter em` 在 CSS 里就是非法的。
+            while let Some(rest) = cur.peek() {
+                if rest.is_whitespace() {
+                    cur.next();
+                    continue;
+                }
+                return None;
+            }
+            break;
         }
         let explicit = match c {
             '>' => Some(Combinator::Child),
@@ -203,7 +276,11 @@ fn parse_complex(text: &str) -> Option<Complex> {
     if right.simples.is_empty() {
         return None;
     }
-    Some(Complex { left, right })
+    Some(Complex {
+        left,
+        right,
+        pseudo,
+    })
 }
 
 fn parse_simple(cur: &mut Cursor, first: char) -> Option<Simple> {
@@ -217,6 +294,14 @@ fn parse_simple(cur: &mut Cursor, first: char) -> Option<Simple> {
             match name.to_ascii_lowercase().as_str() {
                 "first-child" => Some(Simple::FirstChild),
                 "last-child" => Some(Simple::LastChild),
+                "nth-child" => {
+                    if !cur.eat('(') {
+                        return None;
+                    }
+                    let arg = read_until(cur, ')')?;
+                    let (a, b) = parse_nth_arg(&arg)?;
+                    Some(Simple::NthChild { a, b })
+                }
                 "lang" => {
                     if !cur.eat('(') {
                         return None;
@@ -240,6 +325,58 @@ fn parse_simple(cur: &mut Cursor, first: char) -> Option<Simple> {
         }
         _ => None,
     }
+}
+
+/// `An+B` 的参数 → `(A, B)`。认得的形态：`odd` / `even` / 裸整数 / `An+B`
+/// （A、B 可带符号，符号与数字之间的空白允许，`2 n + 1` 也算）。
+///
+/// `of S` 后缀不认：它要的是「先按 S 过滤兄弟再数」那套命中逻辑，而写它的书
+/// 基本都在给表格用。整条选择器作废，与清单外的其它构造同一纪律。
+fn parse_nth_arg(text: &str) -> Option<(i32, i32)> {
+    // 语法里所有空白都是可选的，先整段去掉，剩下的就只有三种形状：
+    // 关键字、纯数字、`[…]n[…]`。
+    let s: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match s.as_str() {
+        "odd" => return Some((2, 1)),
+        "even" => return Some((2, 0)),
+        _ => {}
+    }
+    let Some(at) = s.find('n') else {
+        let b: i32 = s.parse().ok()?;
+        return Some((0, b));
+    };
+    // `n` 左边：空串和单符号是「省略的 1 / -1」，即 `n` 与 `-n`。
+    let a = match &s[..at] {
+        "" | "+" => 1,
+        "-" => -1,
+        other => other.parse::<i32>().ok()?,
+    };
+    let b = match &s[at + 1..] {
+        "" => 0,
+        // CSS 要求 `n` 后面的 `B` **带符号**：`2n+1` 是第 3、5、7……，
+        // 而 `2n3` 是写坏了的语法。悄悄当成 `(2,3)` 会让一条本应作废的规则
+        // 命中一批谁也没预期的元素。
+        other => {
+            if !other.starts_with(['+', '-']) {
+                return None;
+            }
+            other.parse::<i32>().ok()?
+        }
+    };
+    Some((a, b))
+}
+
+/// 第 `index`（1 基）个元素是否命中 `An+B`（`n` 只能取非负整数）。
+fn nth_matches(a: i32, b: i32, index: i32) -> bool {
+    if a == 0 {
+        return index == b;
+    }
+    let d = index - b;
+    d % a == 0 && d / a >= 0
 }
 
 fn parse_attr(text: &str) -> Option<Simple> {
@@ -388,7 +525,7 @@ pub(crate) fn split_top_level(text: &str, sep: char) -> Vec<String> {
 mod tests {
     //! 选择器：子集范围、匹配、组合器与 specificity。只依赖公开 API。
 
-    use crate::css::selector::Selector;
+    use crate::css::selector::{PseudoElement, Selector};
     use crate::dom::{Dom, Node, NodeId};
 
     fn parse_dom(html: &str) -> Dom {
@@ -445,6 +582,15 @@ mod tests {
             ":first-child",
             "p:first-child",
             ":lang(zh)",
+            ":nth-child(2n)",
+            ":nth-child(2n+1)",
+            ":nth-child(odd)",
+            ":nth-child(even)",
+            ":nth-child(3)",
+            ":nth-child(-n+2)",
+            ":nth-child(+ 2 n - 1)",
+            "p::first-letter",
+            "body > p.intro::first-letter",
             "a, b > c",
         ] {
             assert!(Selector::parse(text).is_some(), "应能解析 {text:?}");
@@ -457,7 +603,6 @@ mod tests {
         for text in [
             "p:hover",
             "div::first-line",
-            "p:nth-child(2n)",
             "a:not(b)",
             "div span::before",
             "p > ",
@@ -466,9 +611,92 @@ mod tests {
             "",
             "p:has(span)",
             "div ~ ",
+            // `:nth-child()` 的清单只到 `An+B`：`of S` 要的是「先过滤兄弟再数」，
+            // `nth-last-child` / `nth-of-type` 根本不在承诺范围内。
+            ":nth-child(2n of .x)",
+            ":nth-child()",
+            ":nth-child(2n3)",
+            ":nth-child(nn)",
+            ":nth-last-child(2)",
+            ":nth-of-type(2)",
+            // 伪元素：只接 `::first-letter`，其余构造要造出不存在的盒。
+            // 单冒号的遗留写法也不接 —— 接了就得给每个伪类名再判一次「它是不是伪元素」。
+            "p:first-letter",
+            "p::before",
+            "p::first-letter em",
+            "::first-letter",
         ] {
             assert!(Selector::parse(text).is_none(), "不该接受 {text:?}");
         }
+    }
+
+    /// `An+B` 里 `n` 只能取非负整数，所以 `-n+3` 是「前 3 个」、`2n` 是「偶数」。
+    #[test]
+    fn nth_child_counts_element_siblings_from_one() {
+        let dom = parse_dom("<p>一</p><span>中</span><p>二</p><p>三</p><p>四</p>");
+        let ps = of(&dom, "p");
+        assert!(sel("p:nth-child(1)").matches(&dom, ps[0]));
+        assert!(!sel("p:nth-child(1)").matches(&dom, ps[1]));
+        // 第三个 p 在兄弟里排第 4（span 占了一位），文本节点不占。
+        assert!(sel("p:nth-child(4)").matches(&dom, ps[2]));
+        assert!(
+            sel("p:nth-child(even)").matches(&dom, ps[2]),
+            "第 4 个是偶数"
+        );
+        assert!(!sel("p:nth-child(odd)").matches(&dom, ps[2]));
+        assert!(sel("p:nth-child(2n+1)").matches(&dom, ps[3]), "第 5 个");
+        // `-n+3` = 前三个；第 4、5 个不再命中。
+        assert!(sel("p:nth-child(-n+3)").matches(&dom, ps[1]));
+        assert!(!sel("p:nth-child(-n+3)").matches(&dom, ps[3]));
+        // `0` 与负数命中不到任何元素，因为 n 非负、位置从 1 起。
+        assert!(!sel("p:nth-child(0)").matches(&dom, ps[0]));
+        assert!(!sel("p:nth-child(-2)").matches(&dom, ps[0]));
+    }
+
+    /// `:nth-child()` 是个伪类，specificity 与 `:first-child` 同级 ——
+    /// 写成 id 级会让它盖掉真正该赢的 `#id` 规则。
+    #[test]
+    fn nth_child_specificity_is_one_pseudo_class() {
+        assert_eq!(
+            sel("p:nth-child(2n+1)").specificity(),
+            sel("p:first-child").specificity()
+        );
+        assert!(sel("#a").specificity() > sel("p:nth-child(2)").specificity());
+        assert!(sel("p:nth-child(2)").specificity() > sel("p").specificity());
+    }
+
+    /// 首字符的声明属于**另一个盒**：`matches` 认它不出来，只有 `matches_pseudo` 认。
+    /// 两者混为一谈的话，`p::first-letter { color: red }` 会把整段正文都涂红。
+    #[test]
+    fn first_letter_declarations_have_a_separate_target() {
+        let dom = parse_dom("<p>文</p><h1>题</h1>");
+        let p = find(&dom, "p");
+        let h1 = find(&dom, "h1");
+
+        let cap = sel("p::first-letter");
+        assert!(!cap.matches(&dom, p), "元素自己不该拿到首字符的声明");
+        assert!(cap.matches_pseudo(&dom, p, Some(PseudoElement::FirstLetter)));
+
+        let plain = sel("p");
+        assert!(plain.matches_pseudo(&dom, p, None));
+        assert!(!plain.matches_pseudo(&dom, p, Some(PseudoElement::FirstLetter)));
+
+        // 分组里两条各归各的落点。
+        let mixed = sel("p::first-letter, h1");
+        assert!(mixed.matches(&dom, h1), "h1 那条属于 h1 自己");
+        assert!(!mixed.matches(&dom, p));
+        assert!(mixed.matches_pseudo(&dom, p, Some(PseudoElement::FirstLetter)));
+    }
+
+    /// 伪元素按一个 type 计 specificity：高于裸 `p`，与 `p em` 同级。
+    #[test]
+    fn pseudo_element_specificity_counts_as_one_type() {
+        assert!(sel("p::first-letter").specificity() > sel("p").specificity());
+        assert_eq!(
+            sel("p::first-letter").specificity(),
+            sel("p em").specificity(),
+            "两个 type 级的东西该同级"
+        );
     }
 
     #[test]

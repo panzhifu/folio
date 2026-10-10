@@ -5,8 +5,8 @@
 //! 这样加一页只需要动两处：新文件 + [`SettingsPage`] 里一个变体，
 //! 而不是在一个越来越长的文件里找位置。
 //!
-//! 这里只负责**描述**每一页：标题、说明、控件、取值与赋值。挂到哪儿是 [`window`] 的事 ——
-//! 设置是一个独立的、开-or-聚焦的窗口，不是对话框，理由写在那个子模块里。
+//! 这里只负责**描述**每一页：标题、分组、控件、取值与赋值。挂到哪儿是 [`view`] 的事 ——
+//! 这一组页面是主窗口里的一屏（桌面把它当作「我的」那一个目的地），理由写在那个子模块里。
 //!
 //! 字段一律走 `SettingField` 的 (取值, 赋值) 对，两端都通过 [`ConfigHolder`]
 //! 触碰同一个实体，所以改完立刻反映到已打开的书上并落盘。
@@ -16,18 +16,16 @@ mod account;
 pub mod account_view;
 mod appearance;
 mod fonts;
-mod language;
 mod layout;
 mod library;
 mod typography;
-pub mod window;
-
-// 宿主只和这三个动作打交道：开（默认页）、开到某一页、关。
-pub use window::{close, open, open_at};
+mod view;
 
 // 「我的」目的地（Account section）的根视图。它与设置页是同一件事的两半：
-// 桌面从侧栏/工具条进设置窗口，移动从这一屏进各个设置子页，所以收在同一个 feature 下。
+// 桌面直接画这一组页面，手机那一屏仍是行列表（放不进那块小屏），
+// 所以收在同一个 feature 下。
 pub use account_view::AccountView;
+pub use view::SettingsView;
 
 // 页面文件之间共用的前言：设置组件、主题、配置入口与文案函数。
 pub(super) use folio_core::Mode;
@@ -43,12 +41,11 @@ pub(super) use crate::ui::shared::config_model::ConfigHolder;
 pub(super) use crate::ui::shared::l10n::tr;
 pub(super) use crate::ui::shared::theme;
 
-// 每一页的构造函数只在 `pages` 里用，所以是私有导入而不是再导出。
+// 每一页的构造函数只在 [`pages`] 里用，所以是私有导入而不是再导出。
 use about::about_page;
 use account::account_page;
 use appearance::appearance_page;
 use fonts::fonts_page;
-use language::language_page;
 use layout::layout_page;
 use library::library_page;
 use typography::typography_page;
@@ -61,7 +58,6 @@ pub enum SettingsPage {
     Layout,
     Fonts,
     Appearance,
-    Language,
     Account,
     About,
     Library,
@@ -69,53 +65,58 @@ pub enum SettingsPage {
 
 impl SettingsPage {
     /// 全部页面，按导航顺序。
-    pub const ALL: [SettingsPage; 8] = [
+    pub const ALL: [SettingsPage; 7] = [
         SettingsPage::Typography,
         SettingsPage::Layout,
         SettingsPage::Fonts,
         SettingsPage::Appearance,
-        SettingsPage::Language,
         SettingsPage::Account,
         SettingsPage::About,
         SettingsPage::Library,
     ];
 
     /// 在 `Settings` 组件里的页序下标。必须与 [`pages`] 的组装顺序一致 ——
-    /// 「从账号进账号页、从工具条进文字页」全靠这个下标定位。
+    /// 「从阅读页进来落在文字那一页」全靠这个下标定位。
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|page| *page == self).unwrap_or(0)
-    }
-
-    /// 从下标反解，越界时回落到第一页（工具条那种「打开设置」不指定页时也是第一页）。
-    pub fn from_index(ix: usize) -> Self {
-        Self::ALL.get(ix).copied().unwrap_or(Self::Typography)
     }
 }
 
 /// 按 [`SettingsPage`] 的顺序组装全部页面。
-pub fn pages(cx: &App) -> Vec<SettingPage> {
+pub(super) fn pages(cx: &App) -> Vec<SettingPage> {
     vec![
         typography_page(cx),
         layout_page(cx),
         fonts_page(cx),
         appearance_page(cx),
-        language_page(cx),
         account_page(cx),
         about_page(cx),
         library_page(cx),
     ]
 }
 
-/// 一页 = 标题 + 图标 + 一组（不带组标题，页面标题已经说明了一切）。
+/// 一页 = 标题 + 图标 + 若干**带标题的分组**。
+///
+/// 分组必须带标题：一页只有一组时侧栏不列子项，一页有多组时子项就是这些标题，
+/// 没有标题的那一组等于在导航里消失。
+///
+/// `resettable(false)`：这一页的每一项都是写入即生效的，控件里也没有「默认值」那份信息，
+/// 所以页头不该出现一颗「恢复默认」的按钮。
 pub(super) fn page(
     title: impl Into<SharedString>,
     icon: IconName,
-    items: Vec<SettingItem>,
+    groups: Vec<SettingGroup>,
 ) -> SettingPage {
     SettingPage::new(title)
         .icon(icon)
+        .resettable(false)
         .default_open(true)
-        .groups(vec![SettingGroup::new().items(items)])
+        .groups(groups)
+}
+
+/// 一组 = 标题 + 若干项。
+pub(super) fn group(title: impl Into<SharedString>, items: Vec<SettingItem>) -> SettingGroup {
+    SettingGroup::new().title(title).items(items)
 }
 
 /// 一个数值字段的规格：标签键、说明键、搜索关键词，以及可填范围与步长。
@@ -152,4 +153,29 @@ pub(super) fn number(
     )
     .description(tr(cx, spec.description))
     .keywords(spec.keywords.iter().map(|word| (*word).to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    //! 这一层能被钉住的是**两份顺序是不是同一份**：页面由 [`pages`] 组装，
+    //! 而「从阅读页进来落在文字那一页」用的是 [`SettingsPage::index`] 数出来的下标。
+
+    use super::*;
+    use folio_core::Config;
+    use gpui_kit::TestAppContext;
+
+    /// 回归门：加一页时只动了页面文件、忘了在 [`SettingsPage`] 里补变体，
+    /// 侧栏就会多出一格没有下标可指的页 —— 深链会跳到别处去。两份数量必须相等。
+    #[gpui_kit::test]
+    fn the_page_set_and_the_navigation_list_stay_in_step(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            assert_eq!(
+                pages(cx).len(),
+                SettingsPage::ALL.len(),
+                "`pages` 组出来的页数与 `SettingsPage::ALL` 对不上"
+            );
+        });
+    }
 }

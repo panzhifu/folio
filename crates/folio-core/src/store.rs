@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -6,8 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::anchor::TextAnchor;
-use crate::format::{Chapter, DocMeta, FlowDoc, ImageRes};
+use crate::format::{Chapter, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, ImageRes};
+use crate::group::{GroupBy, ShelfGroup, UNGROUPED, group_shelf};
 use crate::position::Locator;
+use crate::time::{civil_date, day_start, local_day};
 
 const MIGRATIONS: &[&str] = &[
     // v1：书库、章节、进度、偏好、标注、集合。
@@ -120,6 +123,36 @@ CREATE TABLE images (
 );
 CREATE INDEX idx_images_book ON images(book_id, href);
 "#,
+    // v5：图片字节不再入库，只留元数据（href / media_type / 宽高）。学 KOReader：
+    // 原图随时能从容器里按 href 再拿一次，就不该在库里留第二份。
+    //
+    // 旧库的 `bytes` 在这里被丢掉。SQLite 的 `DROP COLUMN` 只改 schema、不还磁盘
+    // （腾出的页给后续写入复用），所以库文件不会立即变小；真要在意体积，得手动
+    // `VACUUM` —— 那是一次写全套，不在开书路径上做。
+    r#"
+ALTER TABLE images DROP COLUMN bytes;
+"#,
+    // v6：阅读统计。存**原始会话**而不是按天汇总 —— 「今天读了多久」依赖读者所在
+    // 时区，而时区只有界面侧知道。core 只留事实（何时开始、多久、前进多少字），
+    // 汇总时把偏移当参数收进来（见 [`crate::time`]），不把某个时区的日界线写死进表。
+    r#"
+CREATE TABLE reading_sessions (
+    id         INTEGER PRIMARY KEY,
+    book_id    INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    started_at INTEGER NOT NULL,
+    ended_at   INTEGER NOT NULL,
+    seconds    INTEGER NOT NULL,
+    chars      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_sessions_book ON reading_sessions(book_id, started_at);
+CREATE INDEX idx_sessions_time ON reading_sessions(started_at);
+"#,
+    // v7：定版式文档（漫画 / 将来的 PDF）。页表存成 JSON 一列 —— 页是一条线性的
+    // 「一页接一页」，没有要按列查的东西，为它单建一张表只会多一层 join。
+    // 图片字节照旧不入库（见 v5）：页表里的 href 只是去容器里现取的钥匙。
+    r#"
+ALTER TABLE books ADD COLUMN fixed_json TEXT NOT NULL DEFAULT '';
+"#,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +210,59 @@ pub struct Annotation {
     pub stale: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// 一个集合（分组）。名字是用户输入的、跨书存在的东西，所以它跟着库走而不是配置。
+///
+/// `book_count` 是列表页要显示的那个数。带上它而不是让调用方为每个集合再查一次，
+/// 是因为「N 本」本来就在这条 `LEFT JOIN ... GROUP BY` 里算得出来，多一次往返只是白费。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Collection {
+    pub id: i64,
+    pub name: String,
+    pub book_count: usize,
+}
+
+/// 一次阅读会话。时间都是 Unix 秒。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadingSession {
+    pub id: i64,
+    pub book_id: i64,
+    pub started_at: i64,
+    pub ended_at: i64,
+    pub seconds: i64,
+    /// 会话期间净前进的字符数。翻回前面会让它变小甚至变负 —— 它记的是「位置移动」，
+    /// 不是「翻了多少」，所以显示时按 `max(0)` 的语义读。
+    pub chars: i64,
+}
+
+/// 一本书的阅读累计。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BookReading {
+    pub book_id: i64,
+    pub seconds: i64,
+    pub sessions: i64,
+    pub chars: i64,
+    /// 最后一次会话的结束时间。没读过是 `None`。
+    pub last_read_at: Option<i64>,
+}
+
+/// 读过的书的合计。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReadingTotals {
+    pub seconds: i64,
+    pub sessions: i64,
+    /// 至少读过一次的书有几本。
+    pub books: i64,
+    pub chars: i64,
+}
+
+/// 一天（读者本地日）的合计。`day` 是 `YYYY-MM-DD`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyReading {
+    pub day: String,
+    pub seconds: i64,
+    pub chars: i64,
 }
 
 pub struct Store {
@@ -237,6 +323,7 @@ impl Store {
         Self::open_at(&default_db_path())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(path = %path.display()))]
     pub fn open_at(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
@@ -258,8 +345,12 @@ impl Store {
             if current >= target {
                 continue;
             }
+            // 每条迁移各自一句：`execute_batch` 中间失败时，日志里最后一条「完成」的就是
+            // 该看的那条 —— 库停在 v3 还是 v4，决定的是后面怎么修。
+            tracing::debug!("store: 应用迁移 v{target}");
             conn.execute_batch(sql)?;
             conn.pragma_update(None, "user_version", target)?;
+            tracing::info!("store: 迁移 v{target} 完成");
         }
         Ok(Self { conn })
     }
@@ -288,11 +379,18 @@ impl Store {
                 now()
             ],
         )?;
-        Ok(self.conn.query_row(
+        let id: i64 = self.conn.query_row(
             "SELECT id FROM books WHERE path = ?1",
             params![path_s],
             |r| r.get(0),
-        )?)
+        )?;
+        tracing::info!(
+            "store: 第 {id} 本《{}》入库（{}，{} 字节）",
+            meta.title,
+            meta.format.as_str(),
+            meta.size
+        );
+        Ok(id)
     }
 
     pub fn list_books(&self) -> Result<Vec<BookRow>> {
@@ -349,8 +447,16 @@ impl Store {
     }
 
     pub fn remove_book(&self, id: i64) -> Result<()> {
-        self.conn
+        let rows = self
+            .conn
             .execute("DELETE FROM books WHERE id = ?1", params![id])?;
+        // 删掉 0 行只有两种可能：那本书本来就不在，或者调用方拿错了 id。
+        // 两种都表现为「界面上按了删除但书还在」，所以这里要说一句。
+        if rows == 0 {
+            tracing::warn!("store: 删第 {id} 本，但没有这一行");
+        } else {
+            tracing::debug!("store: 删第 {id} 本（连带 {rows} 行外键）");
+        }
         Ok(())
     }
 
@@ -387,15 +493,14 @@ impl Store {
         }
         for img in &doc.images {
             tx.execute(
-                "INSERT INTO images (book_id, href, media_type, width, height, bytes)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO images (book_id, href, media_type, width, height)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     book_id,
                     img.href,
                     img.media_type,
                     img.width as i64,
-                    img.height as i64,
-                    img.bytes
+                    img.height as i64
                 ],
             )?;
         }
@@ -409,6 +514,13 @@ impl Store {
             ],
         )?;
         tx.commit()?;
+        tracing::debug!(
+            "store: 第 {book_id} 本落库 {} 章、{} 张图、css {} 字节、目录 {} 项",
+            doc.chapters.len(),
+            doc.images.len(),
+            doc.css.len(),
+            doc.toc.len()
+        );
         Ok(())
     }
 
@@ -428,6 +540,7 @@ impl Store {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         if chapters.is_empty() {
+            tracing::debug!("store: 第 {book_id} 本没有入库的章节，回 None");
             return Ok(None);
         }
         let (css, toc_json, cover) = self.conn.query_row(
@@ -441,9 +554,17 @@ impl Store {
                 ))
             },
         )?;
-        let toc = serde_json::from_str(&toc_json).unwrap_or_default();
+        let toc = match serde_json::from_str(&toc_json) {
+            Ok(toc) => toc,
+            Err(err) => {
+                // 目录读不出来只是没有目录，正文照读 —— 但这一句必须留下，
+                // 否则「这本书没有目录」将来查起来和「它本来就没目录」完全一样。
+                tracing::warn!("store: 第 {book_id} 本的 toc_json 解不开，当没有目录：{err}");
+                Vec::new()
+            }
+        };
         let mut img_stmt = self.conn.prepare(
-            "SELECT href, media_type, width, height, bytes FROM images
+            "SELECT href, media_type, width, height FROM images
              WHERE book_id = ?1 ORDER BY id",
         )?;
         let images = img_stmt
@@ -453,7 +574,6 @@ impl Store {
                     media_type: r.get(1)?,
                     width: r.get::<_, i64>(2)? as u32,
                     height: r.get::<_, i64>(3)? as u32,
-                    bytes: r.get(4)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -502,7 +622,7 @@ impl Store {
              WHERE chapter_fts MATCH ?1 LIMIT ?2",
         )?;
         let quoted = fts_phrase(query);
-        Ok(stmt
+        let hits = stmt
             .query_map(params![quoted, limit as i64], |r| {
                 Ok(SearchHit {
                     book_id: r.get(0)?,
@@ -511,7 +631,14 @@ impl Store {
                     snippet: r.get(3)?,
                 })
             })?
-            .collect::<std::result::Result<_, _>>()?)
+            .collect::<std::result::Result<Vec<SearchHit>, rusqlite::Error>>()?;
+        // 0 条命中有两种成因（trigram 的 3 字下限、FTS 把输入当短语），界面上看不出是哪种。
+        tracing::debug!(
+            "store: 全文搜 {:?} 命中 {} 条（上限 {limit}）",
+            query,
+            hits.len()
+        );
+        Ok(hits)
     }
 
     /// 记一条标注。`anchor` 是调用方从可见文本坐标建好的（见 `crate::anchor`），
@@ -649,6 +776,439 @@ impl Store {
             .execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    /// 新建一个集合；**同名即复用**（`UNIQUE` 上的 `DO NOTHING` 再回查 id）。
+    ///
+    /// 做成幂等而不是报「名字已存在」，是照 [`Store::add_book`] 的同一套判据：
+    /// 集合在用户眼里是文件夹，重复点「新建」时他要的是「进到那个文件夹」，
+    /// 不是一条报错。真要拦重名，那是界面在提交前该提示的事。
+    pub fn create_collection(&self, name: &str) -> Result<i64> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(crate::Error::EmptyCollectionName);
+        }
+        self.conn.execute(
+            "INSERT INTO collections (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+            params![name],
+        )?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM collections WHERE name = ?1",
+            params![name],
+            |r| r.get(0),
+        )?;
+        tracing::debug!("store: 集合「{name}」→ id {id}");
+        Ok(id)
+    }
+
+    /// 全部集合，按名字排序，每条带上书数。
+    pub fn collections(&self) -> Result<Vec<Collection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.name, count(cb.book_id)
+             FROM collections c
+             LEFT JOIN collection_books cb ON cb.collection_id = c.id
+             GROUP BY c.id, c.name
+             ORDER BY c.name, c.id",
+        )?;
+        Ok(stmt
+            .query_map([], collection_from_row)?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn collection(&self, id: i64) -> Result<Option<Collection>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT c.id, c.name, count(cb.book_id)
+                 FROM collections c
+                 LEFT JOIN collection_books cb ON cb.collection_id = c.id
+                 WHERE c.id = ?1
+                 GROUP BY c.id, c.name",
+                params![id],
+                collection_from_row,
+            )
+            .optional()?)
+    }
+
+    /// 改名。撞上别的集合的名字会让 `UNIQUE` 报错（不是静默合并）——
+    /// 改名是用户明确说的「从此以后叫这个」，替他并进另一个集合属于乱猜。
+    pub fn rename_collection(&self, id: i64, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(crate::Error::EmptyCollectionName);
+        }
+        let rows = self.conn.execute(
+            "UPDATE collections SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        if rows == 0 {
+            tracing::warn!("store: 改集合 {id} 的名字，但没有这一行");
+        }
+        Ok(())
+    }
+
+    /// 删集合。只断链接，里头的书一本都不动（`collection_books` 上那条级联）。
+    pub fn delete_collection(&self, id: i64) -> Result<()> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM collections WHERE id = ?1", params![id])?;
+        if rows == 0 {
+            tracing::warn!("store: 删集合 {id}，但没有这一行");
+        } else {
+            tracing::debug!("store: 删集合 {id}");
+        }
+        Ok(())
+    }
+
+    /// 把一本书放进集合。返回「这次真的放进去没有」——重复调用是 `false`，不是错。
+    pub fn add_to_collection(&self, collection_id: i64, book_id: i64) -> Result<bool> {
+        let rows = self.conn.execute(
+            "INSERT OR IGNORE INTO collection_books (collection_id, book_id, added_at)
+             VALUES (?1, ?2, ?3)",
+            params![collection_id, book_id, now()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// 把一本书移出集合。返回「这次真的移出了没有」。
+    pub fn remove_from_collection(&self, collection_id: i64, book_id: i64) -> Result<bool> {
+        let rows = self.conn.execute(
+            "DELETE FROM collection_books WHERE collection_id = ?1 AND book_id = ?2",
+            params![collection_id, book_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// 一本书属于哪几个集合，按名字排序。书详情页要显示「在哪些分组里」。
+    pub fn collections_of_book(&self, book_id: i64) -> Result<Vec<Collection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.name,
+                    (SELECT count(*) FROM collection_books x WHERE x.collection_id = c.id)
+             FROM collections c
+             JOIN collection_books cb ON cb.collection_id = c.id
+             WHERE cb.book_id = ?1
+             ORDER BY c.name, c.id",
+        )?;
+        Ok(stmt
+            .query_map(params![book_id], collection_from_row)?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 集合里的书，最近放进去的在前（同一秒靠 id 定序，保证稳定）。
+    /// 排序与 [`Store::list_books`] 那条「最近在读」无关：这里的主语是集合，
+    /// 读者刚往这个文件夹里丢的那本应当先看见。
+    pub fn books_in_collection(&self, collection_id: i64) -> Result<Vec<BookRow>> {
+        let sql = format!(
+            "SELECT {BOOK_COLUMNS} FROM books
+             JOIN collection_books cb ON cb.book_id = books.id
+             WHERE cb.collection_id = ?1
+             ORDER BY cb.added_at DESC, books.id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        Ok(stmt
+            .query_map(params![collection_id], book_from_row)?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 记一次阅读会话。`seconds` 由起止时间算，负数夹到 0 —— 调用方给起止就够了，
+    /// 两处各报一个「时长」迟早会对不上。
+    pub fn record_session(
+        &self,
+        book_id: i64,
+        started_at: i64,
+        ended_at: i64,
+        chars: i64,
+    ) -> Result<i64> {
+        let seconds = (ended_at - started_at).max(0);
+        self.conn.execute(
+            "INSERT INTO reading_sessions (book_id, started_at, ended_at, seconds, chars)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![book_id, started_at, ended_at, seconds, chars],
+        )?;
+        tracing::debug!("store: 第 {book_id} 本记了 {seconds} 秒阅读（{chars:+} 字）");
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 一本书的会话，最近的在先。
+    pub fn sessions(&self, book_id: i64, limit: usize) -> Result<Vec<ReadingSession>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, book_id, started_at, ended_at, seconds, chars
+             FROM reading_sessions WHERE book_id = ?1
+             ORDER BY started_at DESC, id DESC LIMIT ?2",
+        )?;
+        Ok(stmt
+            .query_map(params![book_id, limit as i64], session_from_row)?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 全部读过的书的合计。跟时区挂钩的「读了多少天」不在这里 —— 它属于
+    /// [`Store::daily_reading`]，调用时要带偏移。
+    pub fn reading_totals(&self) -> Result<ReadingTotals> {
+        let (seconds, sessions, books, chars) = self.conn.query_row(
+            "SELECT coalesce(sum(seconds), 0), count(*), count(DISTINCT book_id),
+                    coalesce(sum(chars), 0)
+             FROM reading_sessions",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        Ok(ReadingTotals {
+            seconds,
+            sessions,
+            books,
+            chars,
+        })
+    }
+
+    /// 一本书的累计。没读过时各项为零、`last_read_at` 为 `None`，不是错误 ——
+    /// 「这本书还没读」是常见状态，不是异常。
+    pub fn book_reading(&self, book_id: i64) -> Result<BookReading> {
+        let (seconds, sessions, chars, last_read_at) = self.conn.query_row(
+            "SELECT coalesce(sum(seconds), 0), count(*), coalesce(sum(chars), 0), max(ended_at)
+             FROM reading_sessions WHERE book_id = ?1",
+            params![book_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )?;
+        Ok(BookReading {
+            book_id,
+            seconds,
+            sessions,
+            chars,
+            last_read_at,
+        })
+    }
+
+    /// 最近 `days` 天（读者本地日）每天的合计，**含没有记录的天（补零）**，
+    /// 最后一条是今天。图表的 x 轴要连续，空日不能让两边的柱子贴在一起。
+    ///
+    /// 一次会话整个记在**开始那天**（跨午夜的那段不摊开）：把一次会话按秒拆到两天
+    /// 需要存更细的数据，而阅读界面根本不产生那种粒度 —— 凌晨读着读着跨过零点，
+    /// 归到开始那天完全说得通。
+    pub fn daily_reading(&self, days: usize, tz_offset_secs: i64) -> Result<Vec<DailyReading>> {
+        if days == 0 {
+            return Ok(Vec::new());
+        }
+        let today = local_day(now(), tz_offset_secs);
+        let first = today - days as i64 + 1;
+        let mut stmt = self.conn.prepare(
+            "SELECT started_at, seconds, chars FROM reading_sessions
+             WHERE started_at >= ?1 ORDER BY started_at",
+        )?;
+        let mut buckets: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
+        let rows = stmt.query_map(params![day_start(first, tz_offset_secs)], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (started_at, seconds, chars) = row?;
+            let slot = buckets
+                .entry(local_day(started_at, tz_offset_secs))
+                .or_default();
+            slot.0 += seconds;
+            slot.1 += chars;
+        }
+        Ok((first..=today)
+            .map(|day| {
+                let (seconds, chars) = buckets.get(&day).copied().unwrap_or((0, 0));
+                DailyReading {
+                    day: civil_date(day),
+                    seconds,
+                    chars,
+                }
+            })
+            .collect())
+    }
+
+    /// 书架分组：先按 `query` 过滤，再按 `by` 分。
+    ///
+    /// 分组本身是纯函数（[`crate::group::group_shelf`]），这里只负责先取书架。
+    /// 集合那种「组是读者建的、存在库里」的情形不走这里，见
+    /// [`Store::collection_groups`]。
+    pub fn shelf_grouped(&self, query: &str, by: GroupBy) -> Result<Vec<ShelfGroup>> {
+        Ok(group_shelf(self.shelf(query)?, by))
+    }
+
+    /// 每个集合一组，末尾追一个「未分组」（装了但还没进任何集合的书）。
+    ///
+    /// **空集合也留着**：读者刚建的空组如果在分组视图里消失，他会以为没建成。
+    /// 组名用 [`UNGROUPED`] 而不是空串，理由见那里的说明。
+    pub fn collection_groups(&self) -> Result<Vec<ShelfGroup>> {
+        let mut groups = Vec::new();
+        for c in self.collections()? {
+            groups.push(ShelfGroup {
+                name: c.name,
+                items: self.shelf_in_collection(c.id)?,
+            });
+        }
+        let loose = self.shelf_in_no_collection()?;
+        if !loose.is_empty() {
+            groups.push(ShelfGroup {
+                name: UNGROUPED.to_string(),
+                items: loose,
+            });
+        }
+        Ok(groups)
+    }
+
+    /// 一个集合里的书，最近放进去的在先 —— 与 [`Store::books_in_collection`] 同一条排序，
+    /// 只是这里带着封面字节，给分组视图直接画卡片用。
+    pub fn shelf_in_collection(&self, collection_id: i64) -> Result<Vec<ShelfItem>> {
+        let sql = format!(
+            "SELECT {SHELF_COLUMNS} FROM books
+             JOIN collection_books cb ON cb.book_id = books.id
+             WHERE cb.collection_id = ?1
+             ORDER BY cb.added_at DESC, books.id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        Ok(stmt
+            .query_map(params![collection_id], shelf_from_row)?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 还没进任何集合的书，排序与 [`Store::shelf`] 同一条。
+    fn shelf_in_no_collection(&self) -> Result<Vec<ShelfItem>> {
+        let sql = format!(
+            "SELECT {SHELF_COLUMNS} FROM books
+             WHERE id NOT IN (SELECT book_id FROM collection_books)
+             ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        Ok(stmt
+            .query_map([], shelf_from_row)?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 存一本定版式文档。与 [`Store::save_flow`] 对称：封面与目录跟着一起写。
+    pub fn save_fixed(&self, book_id: i64, doc: &FixedDoc) -> Result<()> {
+        let pages = serde_json::to_string(&doc.pages)?;
+        self.conn.execute(
+            "UPDATE books SET fixed_json = ?2, toc_json = ?3, cover = ?4 WHERE id = ?1",
+            params![book_id, pages, serde_json::to_string(&doc.toc)?, doc.cover],
+        )?;
+        tracing::debug!(
+            "store: 第 {book_id} 本落库 {} 页（定版式）",
+            doc.pages.len()
+        );
+        Ok(())
+    }
+
+    /// 读一本定版式文档。没存过、或存的是可重排时返回 `None`。
+    ///
+    /// 坏 JSON 一律当「没有」而不是让整本书打不开：这一列可能来自以后的版本。
+    /// 图片表由页表**重建**（href + 尺寸），不单独存一遍。
+    pub fn load_fixed(&self, book_id: i64) -> Result<Option<FixedDoc>> {
+        let row: Option<(String, String, Option<Vec<u8>>)> = self
+            .conn
+            .query_row(
+                "SELECT fixed_json, toc_json, cover FROM books WHERE id = ?1",
+                params![book_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((pages_json, toc_json, cover)) = row else {
+            return Ok(None);
+        };
+        if pages_json.trim().is_empty() {
+            return Ok(None);
+        }
+        let pages: Vec<FixedPage> = match serde_json::from_str(&pages_json) {
+            Ok(pages) => pages,
+            Err(err) => {
+                tracing::warn!("store: 第 {book_id} 本的 fixed_json 解不开，当没有：{err}");
+                return Ok(None);
+            }
+        };
+        let toc = serde_json::from_str(&toc_json).unwrap_or_default();
+        let (width, height) = pages.first().map_or((0, 0), |p| (p.width, p.height));
+        let images = pages.iter().filter_map(page_image).collect();
+        Ok(Some(FixedDoc {
+            pages,
+            toc,
+            cover,
+            images,
+            width,
+            height,
+        }))
+    }
+
+    /// 按内容家族存。界面拿到 [`Content`] 直接丢进来，不必自己分流。
+    pub fn save_content(&self, book_id: i64, content: &Content) -> Result<()> {
+        match content {
+            Content::Reflow(flow) => self.save_flow(book_id, flow),
+            Content::Fixed(fixed) => self.save_fixed(book_id, fixed),
+        }
+    }
+
+    /// 把一份已解析的文档落库。
+    ///
+    /// 与 [`Self::save_content`] 同一件事，只是入口收在「文档」而不是「内容」：
+    /// 导入那一步手上只有一份 `dyn Document`（`document::open` 的产物），
+    /// 让它自己 match 家族等于把 `Content` 的形状又散给调用方一次。
+    pub fn save_document(&self, book_id: i64, doc: &dyn crate::document::Document) -> Result<()> {
+        match doc.content() {
+            crate::document::ContentRef::Reflow(flow) => self.save_flow(book_id, flow),
+            crate::document::ContentRef::Fixed(fixed) => self.save_fixed(book_id, fixed),
+        }
+    }
+
+    /// 读一本已入库的书。先试可重排、再试定版式 —— 两边的「有没有」互斥
+    /// （有章节的必定是可重排），不会歧义。
+    pub fn load_content(&self, book_id: i64) -> Result<Option<Content>> {
+        if let Some(flow) = self.load_flow(book_id)? {
+            return Ok(Some(Content::Reflow(flow)));
+        }
+        Ok(self.load_fixed(book_id)?.map(Content::Fixed))
+    }
+}
+
+/// 定版式的一页 → 图片元数据。渲染型（PDF）没有 href，不进图片表。
+fn page_image(page: &FixedPage) -> Option<ImageRes> {
+    let href = page.image_href()?.to_string();
+    let ext = Path::new(&href)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    Some(ImageRes {
+        href,
+        media_type: crate::format::media_type_of(&ext).to_string(),
+        width: page.width,
+        height: page.height,
+    })
+}
+
+fn session_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReadingSession> {
+    Ok(ReadingSession {
+        id: r.get(0)?,
+        book_id: r.get(1)?,
+        started_at: r.get(2)?,
+        ended_at: r.get(3)?,
+        seconds: r.get(4)?,
+        chars: r.get(5)?,
+    })
+}
+
+fn collection_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
+    Ok(Collection {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        book_count: r.get::<_, i64>(2)? as usize,
+    })
 }
 
 /// 颜色的规范化：小写、去空白，不在清单里的用默认值。
@@ -700,6 +1260,7 @@ mod tests {
     use crate::Store;
     use crate::format::{Chapter, DocMeta, FlowDoc, Format, ImageRes, TocEntry, guess_media_type};
     use crate::position::Locator;
+    use crate::store::MIGRATIONS;
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {
@@ -730,6 +1291,7 @@ mod tests {
             toc: vec![TocEntry {
                 title: parts.first().map(|t| t.0.to_string()).unwrap_or_default(),
                 href: "#0".into(),
+                fragment: Some("sec1".into()),
                 children: Vec::new(),
             }],
             cover: Some(vec![0x89, b'P', b'N', b'G', 13, 10]),
@@ -739,7 +1301,6 @@ mod tests {
                 media_type: "image/png".into(),
                 width: 640,
                 height: 480,
-                bytes: vec![0x89, b'P', b'N', b'G', 1, 2, 3],
             }],
         }
     }
@@ -750,18 +1311,78 @@ mod tests {
         let db = dir.path().join("folio.db");
 
         let store = Store::open_at(&db).unwrap();
-        assert_eq!(store.user_version().unwrap(), 4);
+        assert_eq!(store.user_version().unwrap(), MIGRATIONS.len() as i64);
         let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
         store.save_flow(id, &flow(&[("第一章", "正文一")])).unwrap();
         drop(store);
 
         let again = Store::open_at(&db).unwrap();
-        assert_eq!(again.user_version().unwrap(), 4, "重开不应重复跑迁移");
+        assert_eq!(
+            again.user_version().unwrap(),
+            MIGRATIONS.len() as i64,
+            "重开不应重复跑迁移"
+        );
         assert_eq!(again.list_books().unwrap().len(), 1);
         assert_eq!(
             again.load_flow(id).unwrap().unwrap().chapters[0].title,
             "第一章"
         );
+    }
+
+    /// v5 迁移：旧库（v4，`images.bytes` 还在）升上来时，字节要被丢掉、元数据留下。
+    ///
+    /// 这条不是形式主义 —— 已经装过的 `folio.db` 就是 v4 形状，
+    /// `ALTER TABLE ... DROP COLUMN` 在它上面成功与否，决定老用户开不开得了书。
+    #[test]
+    fn the_v5_migration_drops_image_bytes_from_an_old_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("folio.db");
+        // 手工造一个 v4 库：跑前四条迁移（到 v4 为止），塞一张带字节的图，
+        // 然后把版本号停在 4。
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            for sql in &MIGRATIONS[..4] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 4).unwrap();
+            conn.execute(
+                "INSERT INTO books (path, title, authors, format, size, added_at)
+                 VALUES ('a.epub', 'A', '', 'epub', 0, 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO images (book_id, href, media_type, width, height, bytes)
+                 VALUES (1, 'OEBPS/i.png', 'image/png', 3, 2, x'89504E47')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open_at(&db).unwrap();
+        assert_eq!(store.user_version().unwrap(), MIGRATIONS.len() as i64);
+        drop(store);
+
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(images)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert!(
+            !cols.iter().any(|c| c == "bytes"),
+            "v5 之后 images 表不该还有 bytes 列：{cols:?}"
+        );
+        let (href, w, h): (String, i64, i64) = conn
+            .query_row(
+                "SELECT href, width, height FROM images WHERE book_id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((href.as_str(), w, h), ("OEBPS/i.png", 3, 2), "元数据要留下");
     }
 
     #[test]
@@ -788,7 +1409,7 @@ mod tests {
         assert_eq!(store.load_flow(id).unwrap().unwrap(), doc);
     }
 
-    /// 图片与尺寸必须原样回来，且重存时是替换而非追加。
+    /// 图片的元数据必须原样回来（字节不入库，见 v5 迁移），且重存时是替换而非追加。
     #[test]
     fn images_roundtrip_and_replace() {
         let store = Store::in_memory().unwrap();
@@ -799,8 +1420,8 @@ mod tests {
         let got = store.load_flow(id).unwrap().unwrap();
         assert_eq!(got.images.len(), 1);
         assert_eq!(got.images[0].href, "OEBPS/Images/fig1.png");
+        assert_eq!(got.images[0].media_type, "image/png");
         assert_eq!((got.images[0].width, got.images[0].height), (640, 480));
-        assert_eq!(got.images[0].bytes, vec![0x89, b'P', b'N', b'G', 1, 2, 3]);
 
         doc.images.clear();
         store.save_flow(id, &doc).unwrap();
@@ -1356,5 +1977,628 @@ mod annotations {
             1,
             "别人的批注一根手指都不能碰"
         );
+    }
+}
+
+#[cfg(test)]
+mod collections {
+    //! 集合（分组）：新建/改名/删除、书的进出、与书的级联。
+    //!
+    //! 与本文件其他测试同一套办法：只用公开 API；要看「API 之下那一列」时用裸
+    //! `rusqlite` 连接按**库文件契约**查，不碰私有字段。
+
+    use std::path::{Path, PathBuf};
+
+    use crate::Store;
+    use crate::format::{DocMeta, Format};
+
+    fn meta(title: &str) -> DocMeta {
+        DocMeta {
+            title: title.into(),
+            authors: vec!["作者甲".into()],
+            format: Format::Epub,
+            size: 1,
+        }
+    }
+
+    fn path(name: &str) -> PathBuf {
+        Path::new("/books").join(name)
+    }
+
+    fn book(store: &Store, name: &str) -> i64 {
+        store.add_book(&path(name), &meta(name)).unwrap()
+    }
+
+    #[test]
+    fn a_collection_round_trips_with_its_book_count() {
+        let store = Store::in_memory().unwrap();
+        let a = book(&store, "a.epub");
+        let b = book(&store, "b.epub");
+        let shelf = store.create_collection("想读").unwrap();
+
+        assert_eq!(store.collection(shelf).unwrap().unwrap().name, "想读");
+        assert!(store.add_to_collection(shelf, a).unwrap());
+        assert!(store.add_to_collection(shelf, b).unwrap());
+
+        let got = store.collection(shelf).unwrap().unwrap();
+        assert_eq!(got.book_count, 2, "书数是列表页要显示的那个");
+        let all = store.collections().unwrap();
+        assert_eq!(all, vec![got]);
+    }
+
+    /// 同名再建是「回到那个集合」，不是第二条同名行 —— 否则 `UNIQUE` 会先报错。
+    #[test]
+    fn recreating_a_name_reuses_the_row_instead_of_failing() {
+        let store = Store::in_memory().unwrap();
+        let first = store.create_collection("想读").unwrap();
+        let again = store.create_collection("  想读  ").unwrap();
+        assert_eq!(first, again, "同名集合是同一个，且首尾空白先去掉");
+        assert_eq!(store.collections().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_empty_name_is_rejected_on_create_and_rename() {
+        let store = Store::in_memory().unwrap();
+        assert!(matches!(
+            store.create_collection("   ").unwrap_err(),
+            crate::Error::EmptyCollectionName
+        ));
+        let ok = store.create_collection("有名字").unwrap();
+        assert!(matches!(
+            store.rename_collection(ok, "").unwrap_err(),
+            crate::Error::EmptyCollectionName
+        ));
+    }
+
+    #[test]
+    fn joining_twice_is_a_no_op_and_leaving_twice_is_too() {
+        let store = Store::in_memory().unwrap();
+        let a = book(&store, "a.epub");
+        let shelf = store.create_collection("想读").unwrap();
+        assert!(store.add_to_collection(shelf, a).unwrap(), "第一次是新增");
+        assert!(!store.add_to_collection(shelf, a).unwrap(), "第二次是重复");
+        assert_eq!(store.collection(shelf).unwrap().unwrap().book_count, 1);
+
+        assert!(store.remove_from_collection(shelf, a).unwrap());
+        assert!(!store.remove_from_collection(shelf, a).unwrap());
+        assert_eq!(store.collection(shelf).unwrap().unwrap().book_count, 0);
+    }
+
+    #[test]
+    fn collections_of_a_book_are_listed_by_name() {
+        let store = Store::in_memory().unwrap();
+        let a = book(&store, "a.epub");
+        let b = book(&store, "b.epub");
+        let z = store.create_collection("b 组").unwrap();
+        let y = store.create_collection("a 组").unwrap();
+        store.add_to_collection(z, a).unwrap();
+        store.add_to_collection(y, a).unwrap();
+
+        let names: Vec<String> = store
+            .collections_of_book(a)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["a 组", "b 组"]);
+        assert!(
+            store.collections_of_book(b).unwrap().is_empty(),
+            "b 不在任何组里"
+        );
+    }
+
+    #[test]
+    fn books_in_a_collection_come_back_newest_first() {
+        let store = Store::in_memory().unwrap();
+        let a = book(&store, "a.epub");
+        let b = book(&store, "b.epub");
+        let shelf = store.create_collection("想读").unwrap();
+        store.add_to_collection(shelf, a).unwrap();
+        store.add_to_collection(shelf, b).unwrap();
+
+        let ids: Vec<i64> = store
+            .books_in_collection(shelf)
+            .unwrap()
+            .into_iter()
+            .map(|x| x.id)
+            .collect();
+        assert_eq!(ids, vec![b, a]);
+        assert!(store.books_in_collection(9999).unwrap().is_empty());
+    }
+
+    /// 删集合只断链接，书本身必须还在 —— 这是集合与「删除」最容易搞混的一条。
+    #[test]
+    fn deleting_a_collection_keeps_its_books() {
+        let store = Store::in_memory().unwrap();
+        let a = book(&store, "a.epub");
+        let shelf = store.create_collection("想读").unwrap();
+        store.add_to_collection(shelf, a).unwrap();
+        store.delete_collection(shelf).unwrap();
+
+        assert!(store.collection(shelf).unwrap().is_none());
+        assert_eq!(
+            store.collections_of_book(a).unwrap().len(),
+            0,
+            "链接随集合走"
+        );
+        assert_eq!(
+            store.book(a).unwrap().unwrap().title,
+            "a.epub",
+            "书本身还在"
+        );
+    }
+
+    /// 删书要把它在各个集合里的名分一起带走（`collection_books` 上那条级联）。
+    #[test]
+    fn removing_a_book_clears_its_membership() {
+        let store = Store::in_memory().unwrap();
+        let a = book(&store, "a.epub");
+        let shelf = store.create_collection("想读").unwrap();
+        store.add_to_collection(shelf, a).unwrap();
+        store.remove_book(a).unwrap();
+        assert_eq!(store.collection(shelf).unwrap().unwrap().book_count, 0);
+    }
+
+    #[test]
+    fn renaming_keeps_membership_and_a_duplicate_is_an_error() {
+        let store = Store::in_memory().unwrap();
+        let a = book(&store, "a.epub");
+        let one = store.create_collection("甲").unwrap();
+        let other = store.create_collection("乙").unwrap();
+        store.add_to_collection(one, a).unwrap();
+
+        store.rename_collection(one, " 新名字 ").unwrap();
+        let got = store.collection(one).unwrap().unwrap();
+        assert_eq!(got.name, "新名字");
+        assert_eq!(got.book_count, 1, "改名不动名分");
+
+        assert!(
+            store.rename_collection(other, "新名字").is_err(),
+            "撞上已有名字要被 UNIQUE 挡下，而不是静默合并"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reading {
+    //! 阅读统计：会话往返、时长派生、按本地日的汇总与补零、级联删除。
+    //!
+    //! 「今天」取自 `SystemTime::now()`，所以这里的日序断言全部是**相对**算出来的：
+    //! 测试从不断言 `civil_date(now)` 是哪个字面量（那会随运行时刻翻车），
+    //! 而是先拿真实时刻定出今天，再往前后推。
+
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::Store;
+    use crate::format::{DocMeta, Format};
+    use crate::store::DailyReading;
+    use crate::time::{civil_date, day_start, local_day};
+
+    fn meta(title: &str) -> DocMeta {
+        DocMeta {
+            title: title.into(),
+            authors: vec!["作者甲".into()],
+            format: Format::Epub,
+            size: 1,
+        }
+    }
+
+    fn path(name: &str) -> PathBuf {
+        Path::new("/books").join(name)
+    }
+
+    fn now_secs() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    fn at_days(days: &[DailyReading], day: i64) -> i64 {
+        days.iter()
+            .find(|d| d.day == civil_date(day))
+            .map(|d| d.seconds)
+            .unwrap_or_else(|| panic!("第 {day} 天不在窗口里：{days:?}"))
+    }
+
+    #[test]
+    fn a_session_round_trips_and_seconds_come_from_the_bounds() {
+        let store = Store::in_memory().unwrap();
+        let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        let id = store.record_session(book, 1_000, 1_600, 42).unwrap();
+
+        let got = store.sessions(book, 10).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, id);
+        assert_eq!(got[0].started_at, 1_000);
+        assert_eq!(got[0].ended_at, 1_600);
+        assert_eq!(got[0].seconds, 600, "时长由起止算出，不由调用方另报");
+        assert_eq!(got[0].chars, 42);
+    }
+
+    #[test]
+    fn an_inverted_session_is_clamped_to_zero_seconds() {
+        let store = Store::in_memory().unwrap();
+        let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        store.record_session(book, 1_000, 900, 0).unwrap();
+        assert_eq!(store.sessions(book, 10).unwrap()[0].seconds, 0);
+    }
+
+    #[test]
+    fn sessions_are_newest_first_and_limited() {
+        let store = Store::in_memory().unwrap();
+        let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        store.record_session(book, 100, 160, 0).unwrap();
+        store.record_session(book, 200, 260, 0).unwrap();
+        store.record_session(book, 300, 360, 0).unwrap();
+
+        let first_two = store.sessions(book, 2).unwrap();
+        assert_eq!(first_two.len(), 2);
+        assert_eq!(first_two[0].started_at, 300, "最近的在先");
+        assert_eq!(first_two[1].started_at, 200);
+    }
+
+    #[test]
+    fn totals_add_up_across_books() {
+        let store = Store::in_memory().unwrap();
+        let a = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        let b = store.add_book(&path("b.epub"), &meta("B")).unwrap();
+        store.record_session(a, 0, 100, 10).unwrap();
+        store.record_session(a, 1_000, 1_200, 20).unwrap();
+        store.record_session(b, 2_000, 2_050, 5).unwrap();
+
+        let totals = store.reading_totals().unwrap();
+        assert_eq!(totals.seconds, 350);
+        assert_eq!(totals.sessions, 3);
+        assert_eq!(totals.books, 2, "两本书都读过");
+        assert_eq!(totals.chars, 35);
+    }
+
+    #[test]
+    fn book_reading_is_per_book_and_empty_until_read() {
+        let store = Store::in_memory().unwrap();
+        let a = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        let b = store.add_book(&path("b.epub"), &meta("B")).unwrap();
+
+        let empty = store.book_reading(b).unwrap();
+        assert_eq!(empty.seconds, 0);
+        assert_eq!(empty.sessions, 0);
+        assert_eq!(empty.last_read_at, None, "没读过不是错误，只是没有");
+
+        store.record_session(a, 500, 800, 30).unwrap();
+        let got = store.book_reading(a).unwrap();
+        assert_eq!(got.seconds, 300);
+        assert_eq!(got.sessions, 1);
+        assert_eq!(got.chars, 30);
+        assert_eq!(got.last_read_at, Some(800));
+        assert_eq!(store.book_reading(b).unwrap().sessions, 0, "不串到别人的书");
+    }
+
+    #[test]
+    fn daily_reading_buckets_by_local_day_and_zero_fills() {
+        let store = Store::in_memory().unwrap();
+        let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        let tz = 8 * 3600;
+        let today = local_day(now_secs(), tz);
+        let noon = |day: i64| day_start(day, tz) + 12 * 3600;
+
+        // 今天两次、昨天一次，前天没有。
+        store
+            .record_session(book, noon(today), noon(today) + 600, 100)
+            .unwrap();
+        store
+            .record_session(book, noon(today) + 60, noon(today) + 180, 10)
+            .unwrap();
+        store
+            .record_session(book, noon(today - 1), noon(today - 1) + 300, 50)
+            .unwrap();
+
+        let days = store.daily_reading(3, tz).unwrap();
+        assert_eq!(days.len(), 3);
+        assert_eq!(days[0].day, civil_date(today - 2));
+        assert_eq!(
+            days[0].seconds, 0,
+            "没有记录的那天补零，不能把两边柱子挤到一起"
+        );
+        assert_eq!(days[1].day, civil_date(today - 1));
+        assert_eq!(days[1].seconds, 300);
+        assert_eq!(days[2].day, civil_date(today), "最后一条是今天");
+        assert_eq!(days[2].seconds, 720, "同一天的两段要相加");
+        assert_eq!(days[2].chars, 110);
+        assert!(store.daily_reading(0, tz).unwrap().is_empty());
+    }
+
+    /// 同一个 Unix 秒在两个时区可以落在不同的日序上 —— 这就是为什么
+    /// 汇总必须把偏移当参数收进来，而不是在表里写死一个日界线。
+    #[test]
+    fn the_day_boundary_follows_the_offset() {
+        let store = Store::in_memory().unwrap();
+        let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        let tz_east = 8 * 3600;
+        let now = now_secs();
+        let today_east = local_day(now, tz_east);
+        // 东八区的「昨天 01:00」：UTC 下已是前天的 17:00。
+        let at = day_start(today_east - 1, tz_east) + 3600;
+        store.record_session(book, at, at + 60, 0).unwrap();
+
+        let east = store.daily_reading(3, tz_east).unwrap();
+        let utc = store.daily_reading(3, 0).unwrap();
+        assert_eq!(at_days(&east, local_day(at, tz_east)), 60);
+        assert_eq!(at_days(&utc, local_day(at, 0)), 60);
+        assert_ne!(
+            local_day(at, tz_east),
+            local_day(at, 0),
+            "同一瞬间，两个时区的日序本来就不同"
+        );
+    }
+
+    #[test]
+    fn removing_a_book_takes_its_sessions_with_it() {
+        let store = Store::in_memory().unwrap();
+        let a = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        let b = store.add_book(&path("b.epub"), &meta("B")).unwrap();
+        store.record_session(a, 0, 100, 0).unwrap();
+        store.record_session(b, 0, 100, 0).unwrap();
+
+        store.remove_book(a).unwrap();
+        assert!(
+            store.sessions(a, 10).unwrap().is_empty(),
+            "删书带走它的会话"
+        );
+        assert_eq!(
+            store.reading_totals().unwrap().sessions,
+            1,
+            "别人的会话一根手指都不能碰"
+        );
+    }
+}
+
+#[cfg(test)]
+mod grouping {
+    //! 书架分组：按作者/格式分，以及集合那一种「组存在库里」的分组。
+    //!
+    //! 组内顺序只在确定时才断言（同一秒入库的书之间没有稳定先后），
+    //! 组名与成员集合才是这几条要钉住的。
+
+    use std::path::{Path, PathBuf};
+
+    use crate::Store;
+    use crate::format::{DocMeta, Format};
+    use crate::group::{GroupBy, UNGROUPED};
+    use crate::store::ShelfItem;
+
+    fn meta(title: &str, author: &str) -> DocMeta {
+        DocMeta {
+            title: title.into(),
+            authors: vec![author.into()],
+            format: Format::Epub,
+            size: 1,
+        }
+    }
+
+    fn path(name: &str) -> PathBuf {
+        Path::new("/books").join(name)
+    }
+
+    fn ids(items: &[ShelfItem]) -> Vec<i64> {
+        items.iter().map(|i| i.id).collect()
+    }
+
+    #[test]
+    fn shelf_grouped_splits_by_author() {
+        let store = Store::in_memory().unwrap();
+        let a = store
+            .add_book(&path("a.epub"), &meta("甲书", "纪德"))
+            .unwrap();
+        let b = store
+            .add_book(&path("b.epub"), &meta("乙书", "莫里亚克"))
+            .unwrap();
+        let c = store
+            .add_book(&path("c.epub"), &meta("丙书", "纪德"))
+            .unwrap();
+
+        let groups = store.shelf_grouped("", GroupBy::Author).unwrap();
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["纪德", "莫里亚克"]);
+        assert_eq!(ids(&groups[0].items), vec![a, c]);
+        assert_eq!(ids(&groups[1].items), vec![b]);
+    }
+
+    #[test]
+    fn shelf_grouped_applies_the_query_filter_first() {
+        let store = Store::in_memory().unwrap();
+        let a = store
+            .add_book(&path("a.epub"), &meta("蛇结", "莫里亚克"))
+            .unwrap();
+        let _b = store
+            .add_book(&path("b.epub"), &meta("窄门", "纪德"))
+            .unwrap();
+        let groups = store.shelf_grouped("蛇结", GroupBy::Author).unwrap();
+        assert_eq!(groups.len(), 1, "只留下命中的那一组");
+        assert_eq!(ids(&groups[0].items), vec![a]);
+    }
+
+    #[test]
+    fn collection_groups_end_with_an_ungrouped_bucket() {
+        let store = Store::in_memory().unwrap();
+        let a = store
+            .add_book(&path("a.epub"), &meta("甲", "作者"))
+            .unwrap();
+        let b = store
+            .add_book(&path("b.epub"), &meta("乙", "作者"))
+            .unwrap();
+        let c = store
+            .add_book(&path("c.epub"), &meta("丙", "作者"))
+            .unwrap();
+        let shelf = store.create_collection("想读").unwrap();
+        store.add_to_collection(shelf, a).unwrap();
+
+        let groups = store.collection_groups().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "想读");
+        assert_eq!(ids(&groups[0].items), vec![a]);
+        assert_eq!(groups[1].name, UNGROUPED);
+        let mut loose = ids(&groups[1].items);
+        loose.sort_unstable();
+        assert_eq!(loose, vec![b, c]);
+    }
+
+    /// 刚建的空组也要在分组里看得见，否则读者会以为没建成。
+    #[test]
+    fn an_empty_collection_still_shows_up_as_an_empty_group() {
+        let store = Store::in_memory().unwrap();
+        store.create_collection("空组").unwrap();
+        let groups = store.collection_groups().unwrap();
+        assert_eq!(groups.len(), 1, "没有未入组的书时不追加那个桶");
+        assert_eq!(groups[0].name, "空组");
+        assert!(groups[0].items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fixed {
+    //! 定版式持久化：v7 迁移、页表往返、按内容家族读写。
+
+    use std::path::{Path, PathBuf};
+
+    use crate::Store;
+    use crate::format::{
+        Chapter, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, PageSource,
+    };
+    use crate::store::MIGRATIONS;
+
+    fn meta(title: &str) -> DocMeta {
+        DocMeta {
+            title: title.into(),
+            authors: vec!["作者".into()],
+            format: Format::Epub,
+            size: 1,
+        }
+    }
+
+    fn path(name: &str) -> PathBuf {
+        Path::new("/books").join(name)
+    }
+
+    fn page(href: &str) -> FixedPage {
+        FixedPage {
+            source: PageSource::Image {
+                href: href.to_string(),
+            },
+            width: 800,
+            height: 1200,
+        }
+    }
+
+    fn fixed_doc() -> FixedDoc {
+        FixedDoc {
+            pages: vec![page("1.png"), page("2.png")],
+            toc: Vec::new(),
+            cover: Some(vec![1, 2, 3]),
+            // 存的时候会由页表重建，这里故意留空。
+            images: Vec::new(),
+            width: 800,
+            height: 1200,
+        }
+    }
+
+    fn flow_doc() -> FlowDoc {
+        FlowDoc {
+            chapters: vec![Chapter {
+                title: "一".into(),
+                source: "正文".into(),
+                spine_href: "#0".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// 已发布的 v6 库要能升到 v7，而且它原有的书一本不能少。
+    #[test]
+    fn a_v6_database_upgrades_and_keeps_its_books() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("folio.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            for sql in &MIGRATIONS[..6] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 6).unwrap();
+            conn.execute(
+                "INSERT INTO books (path, title, authors, format, size, added_at)
+                 VALUES ('a.epub', 'A', '', 'epub', 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open_at(&db).unwrap();
+        assert_eq!(store.user_version().unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(store.book(1).unwrap().unwrap().title, "A");
+        assert!(
+            store.load_fixed(1).unwrap().is_none(),
+            "升级上来的书没有定版式，该是 None 而不是空页表"
+        );
+    }
+
+    /// 页表要逐字段往返，图片表由它重建（不单独存一遍）。
+    #[test]
+    fn a_fixed_document_round_trips_and_rebuilds_its_image_table() {
+        let store = Store::in_memory().unwrap();
+        let book = store.add_book(&path("c.cbz"), &meta("漫画")).unwrap();
+        let doc = fixed_doc();
+        store.save_fixed(book, &doc).unwrap();
+
+        let got = store.load_fixed(book).unwrap().expect("刚存的该读得回来");
+        assert_eq!(got.pages, doc.pages);
+        assert_eq!(got.cover, doc.cover);
+        assert_eq!((got.width, got.height), (800, 1200));
+        assert_eq!(got.images.len(), 2, "图片表由页表重建");
+        assert_eq!(got.images[0].href, "1.png");
+        assert_eq!(got.images[0].media_type, "image/png");
+        assert_eq!((got.images[0].width, got.images[0].height), (800, 1200));
+    }
+
+    #[test]
+    fn content_dispatch_reads_back_the_right_family() {
+        let store = Store::in_memory().unwrap();
+        let reflow = store.add_book(&path("a.md"), &meta("文")).unwrap();
+        store
+            .save_content(reflow, &Content::Reflow(flow_doc()))
+            .unwrap();
+        assert!(matches!(
+            store.load_content(reflow).unwrap(),
+            Some(Content::Reflow(_))
+        ));
+
+        let comic = store.add_book(&path("b.cbz"), &meta("图")).unwrap();
+        store
+            .save_content(comic, &Content::Fixed(fixed_doc()))
+            .unwrap();
+        assert!(matches!(
+            store.load_content(comic).unwrap(),
+            Some(Content::Fixed(_))
+        ));
+        assert!(store.load_content(9999).unwrap().is_none(), "没这本书");
+    }
+
+    /// 渲染型（PDF）没有 href，不该被塞进图片表。
+    #[test]
+    fn a_render_page_does_not_become_an_image_row() {
+        let store = Store::in_memory().unwrap();
+        let book = store.add_book(&path("d.pdf"), &meta("PDF")).unwrap();
+        let doc = FixedDoc {
+            pages: vec![FixedPage {
+                source: PageSource::Render { index: 0 },
+                width: 595,
+                height: 842,
+            }],
+            ..Default::default()
+        };
+        store.save_fixed(book, &doc).unwrap();
+        let got = store.load_fixed(book).unwrap().unwrap();
+        assert_eq!(got.pages.len(), 1);
+        assert!(got.images.is_empty(), "渲染型没有 href，不进图片表");
     }
 }

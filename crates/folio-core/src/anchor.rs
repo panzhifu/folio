@@ -127,8 +127,18 @@ impl TextMap {
     ) -> Option<Range<usize>> {
         let span = self.spans.get(node as usize).and_then(|s| s.as_ref())?;
         let own = dom.get(node).text.as_str();
-        let start = bytes.start.min(bytes.end).min(own.len());
-        let end = bytes.end.min(own.len());
+        // 字节偏移夹回**字符边界**。调用方给的跨度绝大多数来自引擎的原样区间，
+        // 但退化档位的仿射映射（`orig_of`）在折叠与原文边界结构不一致时可能
+        // 落进多字节字符的中间 —— 真机（图文版《人类简史》，段里满是「（」）
+        // 实测过直接 panic。这里宁可把那一格算进前一个字符，也不能崩掉整本书。
+        let floor = |mut at: usize| -> usize {
+            while at > 0 && !own.is_char_boundary(at) {
+                at -= 1;
+            }
+            at
+        };
+        let start = floor(bytes.start.min(bytes.end).min(own.len()));
+        let end = floor(bytes.end.min(own.len()));
         if start > end {
             return None;
         }
@@ -527,7 +537,10 @@ mod tests {
             &dom,
             &styles,
             root,
-            LayoutOptions { width },
+            LayoutOptions {
+                width,
+                light: false,
+            },
             &Mono,
             &NoImages,
         );

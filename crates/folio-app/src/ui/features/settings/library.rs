@@ -7,38 +7,51 @@
 //! 填成空串等于「没确认过」：下一次导入会重新问一遍。清掉这一格和第一次用这个应用
 //! 是同一个状态，不需要额外的开关。
 
+use gpui_kit::component::button::Button;
 use gpui_kit::{ParentElement, SharedString, Styled, div};
 
 use super::*;
-use crate::ui::shared::library::suggested_dir;
+use crate::ui::shared::library::{pick_dir, suggested_dir};
 use crate::ui::widgets::muted_label;
 
 pub(super) fn library_page(cx: &App) -> SettingPage {
+    let dir = SettingItem::new(
+        tr(cx, "field.library_dir"),
+        SettingField::input(
+            |cx: &App| SharedString::from(ConfigHolder::library(cx).dir),
+            |val: SharedString, cx| {
+                ConfigHolder::edit_library(cx, |library| library.dir = val.to_string());
+            },
+        ),
+    )
+    .description(tr(cx, "field.library_dir.desc"))
+    .keywords(["library", "书库", "目录", "folder"]);
+
+    // 用系统文件夹选择器挑任意目录。静态设置页每帧重建、拿不住 `Task`，所以 `detach()`
+    // 让这次选择跑完（取消或选区结束都不需要回调界面）。
+    let pick = SettingItem::render(move |_, _, cx| {
+        Button::new("library-pick-dir")
+            .label(tr(cx, "field.library_dir.pick").to_string())
+            .on_click(|_, _, cx| {
+                pick_dir(cx).detach();
+            })
+    })
+    .keywords(["library", "folder", "选择", "pick"]);
+
+    // 建议位置照实写出来：读者要的是知道不管填没填、默认会去哪儿，
+    // 而不是自己去猜一个路径。
+    let suggested = SettingItem::render(move |_, _, cx| {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(muted_label(tr(cx, "field.library_dir.suggested"), cx))
+            .child(div().child(suggested_dir().display().to_string()))
+    });
+
     page(
         tr(cx, "page.library"),
         IconName::FolderOpen,
-        vec![
-            SettingItem::new(
-                tr(cx, "field.library_dir"),
-                SettingField::input(
-                    |cx: &App| SharedString::from(ConfigHolder::library(cx).dir),
-                    |val: SharedString, cx| {
-                        ConfigHolder::edit_library(cx, |library| library.dir = val.to_string());
-                    },
-                ),
-            )
-            .description(tr(cx, "field.library_dir.desc"))
-            .keywords(["library", "书库", "目录", "folder"]),
-            // 建议位置照实写出来：读者要的是知道不管填没填、默认会去哪儿，
-            // 而不是自己去猜一个路径。
-            SettingItem::render(move |_, _, cx| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(muted_label(tr(cx, "field.library_dir.suggested"), cx))
-                    .child(div().child(suggested_dir().display().to_string()))
-            }),
-        ],
+        vec![group(tr(cx, "group.location"), vec![dir, pick, suggested])],
     )
 }

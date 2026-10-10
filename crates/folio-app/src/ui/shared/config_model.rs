@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use folio_core::{Account, Appearance, Config, Language, Library, Reader};
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
+use super::error::{Context as _, report};
+
 pub struct ConfigState {
     pub config: Config,
     /// 保存目标；`None` 表示不落盘。
@@ -79,11 +81,16 @@ impl ConfigHolder {
     ///
     /// 规整是因为面板里填进 9000 号字会把排版算成零高或无限宽，而认不出的浅深选择
     /// 该落回「跟随系统」；语言那一步是因为 `rust_i18n` 只认全局值，不认我们这份配置。
+    ///
+    /// **收尾要 `cx.notify()`**：观察者（外壳那份落盘 + 重画、欢迎页门禁）只在被观察实体
+    /// `notify` 时才收到回调 —— `Entity::update` 本身不会替我们通知。少了这一句，配置
+    /// 改得动、读得回，却永远不落盘、界面也不重画（这一句就是为修掉那个问题而加的）。
     pub fn edit(cx: &mut App, f: impl FnOnce(&mut Config)) {
-        Self::entity(cx).update(cx, |state, _| {
+        Self::entity(cx).update(cx, |state, cx| {
             f(&mut state.config);
             state.config = state.config.clone().normalized();
             state.config.language.locale.apply();
+            cx.notify();
         });
     }
 
@@ -108,6 +115,9 @@ impl ConfigHolder {
     }
 
     /// 落盘。`path` 为 `None`（测试）时跳过；写失败只打日志，不让 UI 崩。
+    ///
+    /// 这里是「改了但没存住」唯一会露出来的地方：屏幕上当场就生效了，重启才发现回到旧值，
+    /// 所以链上必须留得住是哪一步（建目录 / 写临时文件 / rename）失败的。
     pub fn save(cx: &App) {
         let (config, path) = {
             let state = Self::entity(cx).read(cx);
@@ -116,8 +126,11 @@ impl ConfigHolder {
         let Some(path) = path else {
             return;
         };
-        if let Err(e) = config.save_to(&path) {
-            eprintln!("保存配置失败：{e}");
+        if let Err(err) = config
+            .save_to(&path)
+            .with_context(|| format!("保存到 {}", path.display()))
+        {
+            report("配置落盘", &err);
         }
     }
 }
@@ -186,5 +199,24 @@ mod tests {
         });
         let name = cx.update(|cx| ConfigHolder::account(cx).name);
         assert_eq!(name, "阿遥");
+    }
+
+    /// 回归门：改配置必须通知观察者。
+    ///
+    /// 外壳把「落盘 + 重画」和欢迎页门禁都挂在对配置实体的 `observe` 上，而
+    /// `Entity::update` 本身**不会**触发观察者 —— 少了一次 `cx.notify()`，配置就改得动、
+    /// 读得回，却永远不落盘、界面也不重画。这条钉住的就是那句 `notify`。
+    #[gpui_kit::test]
+    fn editing_config_notifies_its_observers(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        cx.update(|cx| {
+            let holder = ConfigHolder::install(Config::default(), cx);
+            let seen2 = seen.clone();
+            cx.observe(&holder, move |_, _| seen2.set(seen2.get() + 1))
+                .detach();
+            ConfigHolder::edit_reader(cx, |p| p.font_size = 20.0);
+        });
+        assert!(seen.get() > 0, "改配置应通知观察者，实际 0 次");
     }
 }

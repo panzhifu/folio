@@ -8,67 +8,87 @@
 
 use gpui_kit::{App, Window};
 
+#[cfg(target_os = "android")]
+use gpui_mobile::android::jni;
+
 use super::{Host, Insets, find_family, log_no_family};
 
 pub(super) struct MobileHost;
 
 impl Host for MobileHost {
     fn safe_area(&self, _window: &Window) -> Insets {
-        #[cfg(target_os = "android")]
-        {
-            use gpui_mobile::android::jni;
-            if let Some(insets) = jni::platform()
-                .and_then(|platform| platform.primary_window())
-                .map(|window| window.safe_area_insets_logical())
-            {
-                return Insets {
-                    top: insets.top.max(0.0),
-                    bottom: insets.bottom.max(0.0),
-                    left: insets.left.max(0.0),
-                    right: insets.right.max(0.0),
-                };
-            }
-        }
-        Insets::ZERO
+        read_insets(InsetsKind::SafeArea)
     }
 
     fn ime_insets(&self, _window: &Window) -> Insets {
-        #[cfg(target_os = "android")]
-        {
-            use gpui_mobile::android::jni;
-            if let Some(insets) = jni::platform()
-                .and_then(|platform| platform.primary_window())
-                .map(|window| window.ime_insets_logical())
-            {
-                return Insets {
-                    top: insets.top.max(0.0),
-                    bottom: insets.bottom.max(0.0),
-                    left: insets.left.max(0.0),
-                    right: insets.right.max(0.0),
-                };
-            }
-        }
-        Insets::ZERO
+        read_insets(InsetsKind::Ime)
     }
 
-    fn extra_windows(&self) -> bool {
-        // 手机上没有「再开一个窗口」：设置那一整页字段是从阅读页 push 进导航栈的一屏。
+    fn overlay_controls(&self) -> bool {
+        // Android 上 gpui-kit 的浮层点不住（见 `shelf_view` 长按菜单那条路与
+        // `plans/facts.md`），而设置项点不动等于设置没有。
         false
     }
 
     fn body_family(&self, wanted: &str, cx: &App) -> String {
-        // 候选名单两端共用（`super::CJK_PREFERRED`）。命中与否都写一行：真机上
-        // 「字体不对」只能从 logcat 看出来，屏幕上长得像对的字体未必是读者要的那套。
-        if let Some(hit) = find_family(wanted, cx) {
-            log::info!("body_family: 用 {hit:?}");
-            return hit;
+        // 命中与否都写一行：真机上「字体不对」只能从 logcat 看出来，
+        // 屏幕上长得像对的字体未必是读者要的那套。
+        match find_family(wanted, cx) {
+            Some(hit) => {
+                tracing::info!("body_family: 用 {hit:?}");
+                hit
+            }
+            None => fallback_body_family(wanted, cx),
         }
-        log_no_family(cx);
-        // 兜底也必须是一个真实存在的名字，否则下一次 resolve 还是 panic。
-        cx.text_system()
-            .all_font_names()
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| wanted.to_string())
     }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 内部辅助
+// ────────────────────────────────────────────────────────────────────
+
+/// 要读哪一类 inset。
+#[derive(Clone, Copy)]
+enum InsetsKind {
+    SafeArea,
+    Ime,
+}
+
+/// 从当前窗口读一类 inset，并做钳位；拿不到就返回零值。
+#[cfg(target_os = "android")]
+fn read_insets(kind: InsetsKind) -> Insets {
+    let Some(win) = jni::platform().and_then(|p| p.primary_window()) else {
+        return Insets::ZERO;
+    };
+
+    let raw = match kind {
+        InsetsKind::SafeArea => win.safe_area_insets_logical(),
+        InsetsKind::Ime => win.ime_insets_logical(),
+    };
+
+    Insets {
+        top: raw.top.max(0.0),
+        bottom: raw.bottom.max(0.0),
+        left: raw.left.max(0.0),
+        right: raw.right.max(0.0),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn read_insets(_: InsetsKind) -> Insets {
+    // iOS / HarmonyOS 目前读不到，返回 0 —— 界面会贴边但不会崩。
+    Insets::ZERO
+}
+
+/// 一个候选都没命中时的兜底。
+///
+/// 移动端 GPUI **没有**字体回退表，`resolve_font` 拿到不存在的名字会直接 panic，
+/// 所以这里必须返回一个设备真报出来的名字——哪怕只是列表里的第一个。
+fn fallback_body_family(wanted: &str, cx: &App) -> String {
+    log_no_family(cx);
+    cx.text_system()
+        .all_font_names()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| wanted.to_string())
 }

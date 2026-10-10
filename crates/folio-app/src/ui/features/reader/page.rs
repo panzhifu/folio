@@ -38,7 +38,7 @@ use super::chrome::{
     self, Chrome, Effect, FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, PageMode, Panel, Reserve,
     percent_label, zone,
 };
-use super::view::ReaderView;
+use super::session::ReaderSession;
 use crate::ui::features::settings::AccountView;
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::l10n::tr;
@@ -47,7 +47,7 @@ use crate::ui::shared::l10n::tr;
 const TOC_ROW_HEIGHT: f32 = 48.0;
 
 pub struct ReadingPage {
-    reader: Entity<ReaderView>,
+    reader: Entity<ReaderSession>,
     /// 外壳报告不属于正文的那条边占掉多少（桌面宽、移动高）。
     reserve: Reserve,
     stack: WeakEntity<NavStackState>,
@@ -65,7 +65,7 @@ pub struct ReadingPage {
 
 impl ReadingPage {
     pub fn new(stack: WeakEntity<NavStackState>, cx: &mut Context<Self>) -> Self {
-        let reader = cx.new(|cx| ReaderView::boot(cx));
+        let reader = cx.new(|cx| ReaderSession::boot(cx));
         // 字号与行距两条滑条的初值先取出来：`cx.new` 要 `&mut cx`，而把 `cx` 再关进
         // 构造闭包里就是同一个 `Context` 的二次可变借用。
         let prefs = ConfigHolder::reader(cx);
@@ -673,7 +673,7 @@ impl ReadingPage {
 
 /// 「第几页 / 共几页」。分页与双页共用这一句：双页时一号就是一张纸，两栏算同一号，
 /// 所以不必为双页再念一种刻度。
-fn tf_page(reader: &ReaderView, cx: &App) -> String {
+fn tf_page(reader: &ReaderSession, cx: &App) -> String {
     crate::ui::shared::l10n::tf(
         cx,
         "reader.page_position",
@@ -703,7 +703,7 @@ impl Render for ReadingPage {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
-                // 正文的点击落在这层而不是 `ReaderView` 自己身上：浮层是它的**兄弟**，
+                // 正文的点击落在这层而不是 `ReaderSession` 自己身上：浮层是它的**兄弟**，
                 // 点击只沿祖先链冒泡，所以点在顶栏/底栏上不会被当成「点了一下正文」。
                 div()
                     .id("reader-body")

@@ -2,6 +2,9 @@
 //!
 //! 五项都是**即时生效**的：写入即规整、即落盘、即让所有已打开的书重排，
 //! 所以这里没有「应用」按钮，也没有改了不生效的中间态。
+//!
+//! 分成两组是照读者改它们的时机分的：「正文」那一组是行的高度（一路跟着眼睛走），
+//! 「段落」那一组是每一段的形状（开头缩进与行尾齐不齐）。
 
 use super::*;
 
@@ -10,67 +13,77 @@ pub(super) fn typography_page(cx: &App) -> SettingPage {
         tr(cx, "page.typography"),
         IconName::Type,
         vec![
-            number(
-                cx,
-                NumberSpec {
-                    title: "field.font_size",
-                    description: "field.font_size.desc",
-                    keywords: &["font", "size", "字号"],
-                    min: 9.0,
-                    max: 72.0,
-                    step: 1.0,
-                },
-                |cx| ConfigHolder::reader(cx).font_size,
-                |v, cx| ConfigHolder::edit_reader(cx, |p| p.font_size = v),
+            group(
+                tr(cx, "group.body"),
+                vec![
+                    number(
+                        cx,
+                        NumberSpec {
+                            title: "field.font_size",
+                            description: "field.font_size.desc",
+                            keywords: &["font", "size", "字号"],
+                            min: 9.0,
+                            max: 72.0,
+                            step: 1.0,
+                        },
+                        |cx| ConfigHolder::reader(cx).font_size,
+                        |v, cx| ConfigHolder::edit_reader(cx, |p| p.font_size = v),
+                    ),
+                    number(
+                        cx,
+                        NumberSpec {
+                            title: "field.line_height",
+                            description: "field.line_height.desc",
+                            keywords: &["line-height", "行距", "行高"],
+                            min: 1.0,
+                            max: 4.0,
+                            step: 0.05,
+                        },
+                        |cx| ConfigHolder::reader(cx).line_height,
+                        |v, cx| ConfigHolder::edit_reader(cx, |p| p.line_height = v),
+                    ),
+                    number(
+                        cx,
+                        NumberSpec {
+                            title: "field.paragraph_gap",
+                            description: "field.paragraph_gap.desc",
+                            keywords: &["paragraph", "段距", "段间距"],
+                            min: 0.0,
+                            max: 4.0,
+                            step: 0.05,
+                        },
+                        |cx| ConfigHolder::reader(cx).paragraph_gap_em,
+                        |v, cx| ConfigHolder::edit_reader(cx, |p| p.paragraph_gap_em = v),
+                    ),
+                ],
             ),
-            number(
-                cx,
-                NumberSpec {
-                    title: "field.line_height",
-                    description: "field.line_height.desc",
-                    keywords: &["line-height", "行距", "行高"],
-                    min: 1.0,
-                    max: 4.0,
-                    step: 0.05,
-                },
-                |cx| ConfigHolder::reader(cx).line_height,
-                |v, cx| ConfigHolder::edit_reader(cx, |p| p.line_height = v),
+            group(
+                tr(cx, "group.paragraph"),
+                vec![
+                    number(
+                        cx,
+                        NumberSpec {
+                            title: "field.indent",
+                            description: "field.indent.desc",
+                            keywords: &["indent", "缩进"],
+                            min: 0.0,
+                            max: 6.0,
+                            step: 0.25,
+                        },
+                        |cx| ConfigHolder::reader(cx).indent_em,
+                        |v, cx| ConfigHolder::edit_reader(cx, |p| p.indent_em = v),
+                    ),
+                    SettingItem::new(
+                        tr(cx, "field.justify"),
+                        SettingField::switch(
+                            |cx: &App| ConfigHolder::reader(cx).justify,
+                            |val: bool, cx| ConfigHolder::edit_reader(cx, |p| p.justify = val),
+                        ),
+                    )
+                    .description(tr(cx, "field.justify.desc"))
+                    .keywords(["justify", "align", "对齐", "两端"]),
+                ],
             ),
-            number(
-                cx,
-                NumberSpec {
-                    title: "field.paragraph_gap",
-                    description: "field.paragraph_gap.desc",
-                    keywords: &["paragraph", "段距", "段间距"],
-                    min: 0.0,
-                    max: 4.0,
-                    step: 0.05,
-                },
-                |cx| ConfigHolder::reader(cx).paragraph_gap_em,
-                |v, cx| ConfigHolder::edit_reader(cx, |p| p.paragraph_gap_em = v),
-            ),
-            number(
-                cx,
-                NumberSpec {
-                    title: "field.indent",
-                    description: "field.indent.desc",
-                    keywords: &["indent", "缩进"],
-                    min: 0.0,
-                    max: 6.0,
-                    step: 0.25,
-                },
-                |cx| ConfigHolder::reader(cx).indent_em,
-                |v, cx| ConfigHolder::edit_reader(cx, |p| p.indent_em = v),
-            ),
-            SettingItem::new(
-                tr(cx, "field.justify"),
-                SettingField::switch(
-                    |cx: &App| ConfigHolder::reader(cx).justify,
-                    |val: bool, cx| ConfigHolder::edit_reader(cx, |p| p.justify = val),
-                ),
-            )
-            .description(tr(cx, "field.justify.desc"))
-            .keywords(["justify", "align", "对齐", "两端"]),
         ],
     )
 }

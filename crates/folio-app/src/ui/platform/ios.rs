@@ -1,7 +1,7 @@
 //! iOS 入口。
 //!
 //! `Application` 在 gpui-mobile 内部构造（`ios::ffi::run_app`），没有注册 `AssetSource`
-//! 的口子，所以 iOS 上的图标目前是空白（见 `docs/android.md`）。
+//! 的口子，所以 iOS 上的图标目前是空白（见 `plans/facts.md`）。
 
 use gpui_kit::App;
 

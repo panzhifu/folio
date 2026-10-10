@@ -19,11 +19,24 @@ folio-core = { path = "crates/folio-core" }
 # 所以换依赖源不影响可复现构建。
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit.git", branch = "main", features = ["assets"] }
 
+# folio 唯一的联网出口（远程书库走 WebDAV）。`gpui-pre-` 前缀不是第二个 HTTP 栈：
+# 它就是 gpui 那条依赖图里已经在编译的 reqwest（`gpui-pre-reqwest`，rustls 而非 OpenSSL），
+# 这个包只是给同一套 `http_client::HttpClient` trait 补一个能发请求的实现。
+# `=0.3.8` 的钉法跟 gpui-pre 本身一致 —— 它是整套快照的一部分，跳版本要一起跳，
+# 单独提前会拿到一个 trait 签名不同的版本。
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.8" }
+
 rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "6"
 html5ever = "0.40"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# EPUB 里的 WOFF1 是「sfnt 逐表 zlib 压缩」。`zip` 已经带进 flate2（锁里 1.1.10），
+# 这里只是把它转成 folio-core 的直接依赖，不新增依赖树。
+flate2 = "1"
+# Basic 认证头要 base64。锁里已经有 0.22.1（reqwest 那条链带进来的），
+# 这里把既有的一份转成直接依赖，不新增依赖树 —— 和上面 flate2 同样的理由。
+base64 = "0.22"
 quick-xml = "0.42"
 cssparser = "0.38"
 selectors = "0.41"
@@ -32,6 +45,37 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 rust-i18n = "4"
+
+# 错误处理分两层，各用一个库，这是 Rust 社区那套惯用分工：
+#   `folio-core`（后端）→ `thiserror`：定义一个能按分支处理的枚举。这一层不知道自己
+#       会被谁调，「没有这本书」和「sqlite 打不开」要能被分开数、分开提示。
+#   `folio-app`（界面）→ `anyhow`：界面对错误只有两个动作 —— 把一条因果链说清楚，
+#       以及决定这次要不要拦住那个操作。erased 的错误类型让同一个 `Result` 里
+#       `store.add_book(..)?` 与 `std::fs::copy(..)?` 直接共存，不必先互相 `From`。
+# 只挂在 folio-app 上：后端不许反向依赖界面的错误类型。
+# gpui 那条链上本来就有 `anyhow`（`gpui-base` / `gpui-component` 都用它），所以这不是新依赖树。
+anyhow = "1"
+
+# 日志。**`tracing` 与 `tracing-subscriber` 都不是新依赖树**：gpui 那条链上
+# `gpui-pre-ztracing` 已经带了同一份 `tracing-subscriber`（默认那组 feature：
+# `fmt` / `registry` / `ansi` / `tracing-log`），`tracing` 本身则是 gpui-base、cosmic-text、
+# h2、zbus 共同的依赖。所以这里只是把图上已有的两个包转成 folio 的直接依赖。
+#
+# `tracing-subscriber` 显式关掉 default 再列 feature，是为了不开 `env-filter`：它要
+# `matchers`（新的），而 folio 用的过滤器是 `Targets` —— 同样能写 `前缀=级别`，
+# 同样按最长前缀赢，只是不支持通配符，而这一条不需要通配符。
+# `tracing-appender` 同理没进来：它按天轮转、还要为 non_blocking 拉 crossbeam-channel
+# 并起一个线程，而 folio 的规则是「开机轮转 + 本轮封顶」，见 `folio_core::logging`。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "std",
+    "registry",
+    "smallvec",
+    "fmt",
+    "ansi",
+    "tracing-log",
+] }
+log = "0.4"
 
 # gpui-mobile（移动平台层）带过来的补丁。原先在 folio-mobile 自己的 workspace 根
 # 才生效，现在两个 crate 共用一张依赖图，只能声明在这里 —— 于是桌面端也一起走这个 rev。

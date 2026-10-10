@@ -1,11 +1,12 @@
 //! 应用配置：软件里所有「用户能改、改完要记住」的东西都在这一个模块里。
 //!
-//! 分成五节，每节对应设置界面里的一类：
+//! 分成六节，前五节各自对应设置界面里的一类，第六节是给调试用的、界面上没有：
 //! - [`Reader`] —— 排版输入（字号、行距、缩进、版心、字体），排版引擎只认这一节；
 //! - [`Appearance`] —— 浅深三态和两侧各用哪套主题，属于界面外观而不是排版输入；
 //! - [`Library`] —— 书库目录；
 //! - [`Language`] —— 界面语言；
-//! - [`Account`] —— 本地占位账号。
+//! - [`Account`] —— 本地占位账号；
+//! - [`Logging`] —— 日志落到哪儿、说到多细（改完重启生效，界面上没有这一页）。
 //!
 //! 落盘位置由 [`crate::paths`] 决定（`~/.config/folio/config.json`）。
 //!
@@ -18,6 +19,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::IoResultExt as _;
 use crate::i18n::Locale;
 use crate::paths;
 
@@ -109,6 +111,11 @@ pub struct Reader {
     /// 正文栏最大宽度（像素）。**`0` 表示不设上限、随窗口铺满**，
     /// 所以拿到 `0` 时**不能**当成「宽度上限是 0」去夹任何东西。
     pub max_measure: f32,
+    /// 正文栏两侧留白（像素），左右各一份。
+    ///
+    /// 定在 24 是按手机量的：那块屏一般 360–400 逻辑像素宽，两侧各 48 就吃掉 25%，
+    /// 一行只剩十几个字，读起来像窄栏报纸；24 留 12% 上下，边到字仍够拇指按不到。
+    /// 桌面上这一条只是最小留白，行长由 `max_measure` 管，所以这个数变小不影响宽窗口。
     pub margin_x: f32,
     pub justify: bool,
     pub font_family: String,
@@ -124,7 +131,7 @@ impl Default for Reader {
             indent_em: 2.0,
             // 0 = 随窗口铺满（全屏时正文栏跟着变宽）。
             max_measure: 0.0,
-            margin_x: 48.0,
+            margin_x: 24.0,
             justify: true,
             font_family: "LXGW WenKai".into(),
             mono_font_family: "monospace".into(),
@@ -195,6 +202,84 @@ pub struct Account {
     pub name: String,
 }
 
+/// 日志：调试时要不要落盘、写到哪儿、每一支代码说到多细。
+///
+/// 这一节存在理由是**不改代码就能调级**：真机上出问题往往是「这次什么都不显示」，
+/// 而重新编一遍 Android 是十几分钟加一次签名重装。手改 `config.json` 里的一行、重启，
+/// 就拿到现场了。（要连依赖库一起打开，仍然有 `FOLIO_LOG` 那条环境变量，见 [`crate::logging`]。）
+///
+/// 默认值分平台：桌面 stderr 本来就开着，而移动平台上没人对着控制台。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Logging {
+    /// folio 自己的代码（`folio_core` / `folio_app`）说到多细：
+    /// `off` `error` `warn` `info` `debug` `trace`。**依赖库不跟着走**，它们固定在
+    /// `warn` 以上 —— 否则「打开 debug」等于把整个 GPU 栈的日志一起打开，两秒就写满一份文件。
+    /// 认不出的值回落 `info`，不是整档关掉。
+    pub level: String,
+    /// 按模块覆盖，写法同 `RUST_LOG` 的逗号分隔那一段：`"folio_core::layout=trace"`。
+    /// 前缀要**整段对上模块边界**，最深的那一条赢。
+    pub targets: Vec<String>,
+    /// 落盘到 `<数据根>/logs/folio.log`（或 [`Self::dir`] 指的地点）。
+    pub file: bool,
+    /// 同时写 stderr。桌面默认开（是终端才带颜色），移动平台默认关。
+    pub stderr: bool,
+    /// 日志目录。空串 = 用默认的 `<数据根>/logs`。
+    ///
+    /// 单独给一格是因为设备上的数据根常常拿不到：Android 上把它指到
+    /// `/storage/emulated/0/Android/data/dev.folio.reader/files` 那一类位置，
+    /// `adb pull` 直接就能取走。
+    pub dir: String,
+    /// 一次运行最多写多少字节，写满就停手（`0` = 不限）。
+    ///
+    /// 上限是「本轮」的，不是文件的：上一次运行那份在开机时被挪成 `.1`，
+    /// 所以磁盘上总量是这个数乘以 [`Self::keep`] 加一。
+    pub max_bytes: u64,
+    /// 保留几份历史运行（`.1`、`.2`……）。`0` 就只留当前这一份。
+    pub keep: usize,
+}
+
+impl Default for Logging {
+    fn default() -> Self {
+        Self {
+            // debug 构建默认开到 debug：本地跑一次就该看见排版与容器里发生了什么。
+            // release 默认 info：只留生命周期与「静默降级」那几条，不刷正文。
+            level: if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "info"
+            }
+            .into(),
+            targets: Vec::new(),
+            file: true,
+            stderr: !cfg!(any(
+                target_os = "android",
+                target_os = "ios",
+                target_env = "ohos"
+            )),
+            dir: String::new(),
+            // 4 MiB 一份：一次长会话把 trace 全开也够用，而 `adb pull` 不用等。
+            max_bytes: 4 * 1024 * 1024,
+            keep: 3,
+        }
+    }
+}
+
+impl Logging {
+    /// 去掉各处的手滑空白。`level` 的**取值**不在这里判：认不出是 [`crate::logging`]
+    /// 装配过滤器时的事，那一处已经有「回落 info 并在 stderr 说一句」的口径，
+    /// 在这里再判一遍就成了两份会各自漂移的规则。
+    pub fn normalized(mut self) -> Self {
+        self.level = self.level.trim().to_ascii_lowercase();
+        self.dir = self.dir.trim().to_string();
+        self.targets.retain(|piece| !piece.trim().is_empty());
+        self.targets
+            .iter_mut()
+            .for_each(|piece| *piece = piece.trim().to_string());
+        self
+    }
+}
+
 /// 一份完整的应用配置。
 ///
 /// 只 `PartialEq`：`Reader` 里是浮点数，`Eq` 在 f32 上本来就不成立。
@@ -206,6 +291,7 @@ pub struct Config {
     pub library: Library,
     pub language: Language,
     pub account: Account,
+    pub logging: Logging,
 }
 
 impl Config {
@@ -220,6 +306,7 @@ impl Config {
         // 书库位置去掉首尾空白：填成 "  /x  " 会让 `is_confirmed` 说「确认过」，
         // 而后面按这个串去找目录会找不到。
         self.library.dir = self.library.dir.trim().to_string();
+        self.logging = self.logging.normalized();
         self
     }
 
@@ -230,27 +317,35 @@ impl Config {
 
     pub fn load_from(path: &Path) -> Config {
         let Ok(text) = std::fs::read_to_string(path) else {
+            // 「没有配置文件」与「有但读不进去」是两件事，日志里要分得开：
+            // 前者是新机器，后者是权限或路径出了问题。
+            tracing::debug!("config: 没有 {}，用默认值", path.display());
             return Config::default();
         };
         // 手改过 / 旧版本 / 别的机器同步来的值都不可信，读进来先规整一遍。
         if let Ok(config) = serde_json::from_str::<Config>(&text) {
             return config.normalized();
         }
+        tracing::warn!("config: {} 整份解不开，按节抢救", path.display());
         salvage(&text).normalized()
     }
 
     /// 写默认位置的配置。
-    pub fn save(&self) -> std::io::Result<()> {
+    pub fn save(&self) -> crate::Result<()> {
         self.save_to(&paths::config_path())
     }
 
     /// 写文件：先建父目录，写临时文件再 rename，避免写到一半崩掉留下半份坏 JSON。
-    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+    ///
+    /// 序列化失败时**什么都不要写**。原来这里 `unwrap_or_else(|_| "{}")`：一次编码失败
+    /// 会把读者全部偏好换成一坨空配置落盘，而那正是下一次启动读进去的东西 ——
+    /// 配置编码不出问题是「不可能的」，真出了就报错，别拿写坏文件当兜底。
+    pub fn save_to(&self, path: &Path) -> crate::Result<()> {
         paths::prepare_dir(path)?;
-        let json = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into());
+        let json = serde_json::to_string_pretty(self)?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)
+        std::fs::write(&tmp, &json).io_path(&tmp)?;
+        std::fs::rename(&tmp, path).io_path(path)
     }
 }
 
@@ -265,6 +360,9 @@ impl Config {
 /// （截断、少括号）时没有可逐节尝试的载体，仍然整份退回默认值。
 fn salvage(text: &str) -> Config {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        // 连 JSON 都不合：没有可逐节尝试的载体，整份退回默认值。这一句是唯一能区分
+        // 「读者手改坏了一节」与「这文件被写坏了一半」的信号。
+        tracing::warn!("config: 不是合法 JSON，整份退回默认值");
         return Config::default();
     };
     let mut config = Config::default();
@@ -282,6 +380,9 @@ fn salvage(text: &str) -> Config {
     }
     if let Some(account) = section(&value, "account") {
         config.account = account;
+    }
+    if let Some(logging) = section(&value, "logging") {
+        config.logging = logging;
     }
     config
 }

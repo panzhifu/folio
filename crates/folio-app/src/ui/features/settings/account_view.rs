@@ -1,15 +1,13 @@
 //! 「我的」目的地（Account section）的根视图：主题、书库位置、关于。
 //!
-//! 它和同一目录下的设置页（`typography.rs` / `appearance.rs` / …）是同一件事的两半：
-//! 这一屏是**入口**，桌面从它再开设置**窗口**（一整页字段，见根屏那条「阅读设置…」），
-//! 移动从它进各个设置**子页**。两者收在 `features::settings` 下，P1 把设置容器统一之后会合到一处。
-//! 「能不能再开一个窗口」是平台事实，问 [`crate::ui::host::supports_extra_windows`]，
-//! 不在这里写 `cfg(mobile)`。
+//! **只有手机端用这一屏**。桌面那一格画的是一整页字段（[`super::SettingsView`]），
+//! 这里留下的行列表在桌面不会长出来。为什么手机上还是列表而不是整页字段：
+//! 那些字段（下拉框、滚动下拉、数字框的补全）全靠浮层，而 gpui-kit 的浮层在 Android 上
+//! 现在点不住（长按菜单那条路，见 `shelf_view` 的注释与 `plans/facts.md`），
+//! 设置项点不动等于设置没有。所以这一屏全部由普通按钮组成。
 //!
-//! **不用浮层**（下拉框、对话框、菜单）：这一屏全部由普通按钮组成。浮层在 Android 上
-//! 现在点不住（长按菜单那条路，见 `shelf_view` 的注释与 `docs/known-limitations.md`），
-//! 而设置项点不动等于设置没有。
-//!
+//! 「我的」改配置与整页字段改的是同一个 [`ConfigHolder`]，所以在手机上选了主题、
+//! 在桌面上看到的也是那一套；两份界面只是同一个配置的两个面子。
 //! 改配置只走 [`ConfigHolder`]：外壳订阅了那个实体，改完自动落盘并重画，主题也跟着
 //! 重涂 —— 这里不自己调 `theme::apply`，那是渲染那一帧的事（Android 上只有那一帧拿得到
 //! 真的窗口浅深）。
@@ -24,11 +22,10 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use crate::ui::host;
 use crate::ui::shared::about;
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::l10n::tr;
-use crate::ui::shared::library::{candidate_dirs, suggested_dir};
+use crate::ui::shared::library::{candidate_dirs, pick_dir, suggested_dir};
 use crate::ui::shared::theme;
 use crate::ui::widgets::{hairline, muted_label};
 
@@ -121,30 +118,6 @@ impl AccountView {
             )
             .accessibility_label(label)
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.go(screen, cx)))
-    }
-
-    /// 一行「当场执行」的入口。与 [`AccountView::row`] 分开，是因为 `row` 的目标是这一栈里的
-    /// 另一屏（`go(screen)`），而这一条的目标在栈外 —— 桌面那个设置窗口就是一例。
-    fn action_row(
-        &self,
-        id: &'static str,
-        icon: IconName,
-        label: SharedString,
-        on_click: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        ListItem::new(id)
-            .w_full()
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_2()
-                    .child(Icon::new(icon).small())
-                    .child(div().min_w_0().child(label.clone())),
-            )
-            .accessibility_label(label)
-            .on_click(move |_, window, cx| on_click(window, cx))
     }
 
     /// 一个可选项（主题名、目录、浅深模式）。选中那一项由 `selected` 画，
@@ -281,17 +254,27 @@ impl AccountView {
         Self::scrollable(body)
     }
 
-    /// 书库屏：从**可写的候选**里挑一个。
+    /// 书库屏：先用系统文件夹选择器挑一个（[`pick_dir`]），或从**可写的候选**里挑一个。
     ///
-    /// 这里给的是候选而不是文件夹选择器：Android 的 SAF 选目录返回 tree URI
-    /// （`content://…`）而不是文件系统路径，拷副本用的 `std::fs` 用不了它
-    /// （见 `shared::library::candidate_dirs`）。
+    /// `gpui-mobile` 的 `prompt_for_paths{directories: true}` 现在走
+    /// `ACTION_OPEN_DOCUMENT_TREE`：本地卷会尽量解析回真实路径，`std::fs` 拷副本就可用；
+    /// 所以这里给的第一条路是真·任选文件夹，候选目录只是默认建议。
     fn library_screen(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = ConfigHolder::library(cx);
         let mut body = v_flex()
             .w_full()
             .gap_1()
             .child(muted_label(tr(cx, "account.library_hint"), cx));
+        // 选择器：选中即写进配置（`pick_dir` 里做），取消不动。
+        body = body.child(self.choice(
+            "lib-pick-dir".into(),
+            tr(cx, "account.pick_dir"),
+            false,
+            |_, cx| {
+                pick_dir(cx).detach();
+            },
+            cx,
+        ));
         for dir in candidate_dirs() {
             let path = dir.display().to_string();
             let picked = current.dir == path;
@@ -392,18 +375,6 @@ impl AccountView {
             Screen::About,
             cx,
         ));
-        // 桌面那一整页字段（版面、字体、语言）住在**独立窗口**里：448px 的对话框装不下
-        // 侧栏 + 正文两栏（见 `settings::window` 的注释）。手机上开不了第二个窗口，
-        // 这一格就不长出来 —— 留一个点了没反应的入口比没有更糟。
-        if host::supports_extra_windows(cx) {
-            body = body.child(self.action_row(
-                "account-reading-settings",
-                IconName::Settings,
-                tr(cx, "account.reading_settings"),
-                |_, cx| super::open(cx),
-                cx,
-            ));
-        }
         Self::scrollable(body)
     }
 

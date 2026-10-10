@@ -1,12 +1,16 @@
 //! CSS 子集：样式表装配 + 层叠出 `ComputedStyle`。
 //!
-//! 范围就是 docs/development-plan.md §4.4 那份清单。清单外的声明**被忽略而不是报错**，
+//! 三个模块各管一段：`selector` 认「这条规则命中哪些元素」，`value` 认「一个值是什么」，
+//! `computed` 管「一条声明写进计算样式的哪里」并把结果沿 DOM 树展开；`ua` 是没命中时的初值表。
+//!
+//! 范围就是 `css/computed.rs` 顶部那份清单。清单外的声明**被忽略而不是报错**，
 //! 因为真实出版书里总有些用不上的声明，为一两个 `transform` 让整本书排版失败
 //! 是最糟的失败方式。
 
 pub mod computed;
 pub mod selector;
 pub mod ua;
+pub(crate) mod value;
 
 use selector::Selector;
 
@@ -30,6 +34,33 @@ pub struct Rule {
     pub origin: Origin,
     /// 同一层叠来源内的出现顺序，用于 specificity 打平时后者优先。
     pub order: u32,
+}
+
+/// `@font-face` 的一条声明。**只存声明，不存字节** —— 字节由 `format` 那层按
+/// `src` 里的容器路径去读，CSS 这层不该知道 ZIP 的存在。
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFaceRule {
+    /// `font-family` 描述符，已去引号。一条 `@font-face` 写了逗号列表时**每个名字一条**。
+    pub family: String,
+    /// `src`，按书写顺序，第一个是首选。
+    pub src: Vec<FontSrc>,
+    /// `font-weight`。写了区间（`400 700`）取第一个值。缺省 400。
+    pub weight: u16,
+    /// `font-style`：`italic` / `oblique` 为 `Some(true)`，`normal` 为 `Some(false)`，
+    /// **没写是 `None`**，不等于 `normal` —— 没写时书的意图是「这套字体的常规面」，
+    /// 而注册进来的内部名自己带面信息。
+    pub italic: Option<bool>,
+}
+
+/// `src` 描述符里的一项。`format()` / `tech()` 这些修饰下一个来源的函数认得但不影响
+/// 来源本身，解析时跳过。
+#[derive(Debug, Clone, PartialEq)]
+pub enum FontSrc {
+    /// 容器内的规范路径。EPUB 的 CSS 在拼接前把 `url(../Fonts/a.otf)` 改写成了绝对路径
+    /// （见 `format::epub`），所以这里的串可以直接当查表键。
+    Url(String),
+    /// 设备上已装的字体名：只查注册名单，不注册字节。
+    Local(String),
 }
 
 /// 层叠级别，从低到高。
@@ -64,6 +95,9 @@ impl Rule {
 #[derive(Debug, Clone, Default)]
 pub struct RuleSet {
     pub rules: Vec<Rule>,
+    /// 这本书声明的内嵌字体，按出现顺序。它不参与层叠（没有选择器可言），
+    /// 是**给平台层看的清单**：谁去注册字节、注册成哪个名字。
+    pub font_faces: Vec<FontFaceRule>,
     /// 被丢弃的声明数，用于「这本书有多少样式我们不支持」的诊断与文档。
     pub ignored: usize,
 }
@@ -83,6 +117,9 @@ impl RuleSet {
             rule.order = base + i as u32;
         }
         self.rules.append(&mut other.rules);
+        // 字体清单同样靠后出现者胜：两份 CSS 声明同一个 `font-family` 时，
+        // 后那份才是作者要的（与规则层的 `order` 一个道理）。
+        self.font_faces.append(&mut other.font_faces);
         self.ignored += other.ignored;
     }
 
@@ -116,7 +153,14 @@ impl RuleSet {
                 match name.to_ascii_lowercase().as_str() {
                     // 一期不分屏幕/打印媒体查询，一律当普通规则收进来。
                     "media" | "supports" => self.consume(body, origin),
-                    // @font-face / @page / @keyframes 的声明不属于任何元素。
+                    // @font-face 不属于任何元素，但**要留下来**：它是「这本书带了自己的字体」
+                    // 的唯一线索，落到 ignored 就等于对着一份 30MB 的内嵌字体装看不见。
+                    "font-face" => {
+                        let (faces, dropped) = parse_font_face(body);
+                        self.font_faces.extend(faces);
+                        self.ignored += dropped;
+                    }
+                    // @page / @keyframes 的声明确实没有去处。
                     _ => self.ignored += 1,
                 }
                 continue;
@@ -152,10 +196,29 @@ impl RuleSet {
         dom: &crate::dom::Dom,
         node: crate::dom::NodeId,
     ) -> Vec<&Declaration> {
+        self.matched_in(dom, node, None)
+    }
+
+    /// 命中该元素、且声明属于**首字符那个盒**的声明（`p::first-letter { … }`）。
+    /// 层叠排序与 [`Self::matching_declarations`] 完全同一份，所以两条路径不会分叉。
+    pub fn matching_first_letter(
+        &self,
+        dom: &crate::dom::Dom,
+        node: crate::dom::NodeId,
+    ) -> Vec<&Declaration> {
+        self.matched_in(dom, node, Some(selector::PseudoElement::FirstLetter))
+    }
+
+    fn matched_in(
+        &self,
+        dom: &crate::dom::Dom,
+        node: crate::dom::NodeId,
+        part: Option<selector::PseudoElement>,
+    ) -> Vec<&Declaration> {
         let hits: Vec<&Rule> = self
             .rules
             .iter()
-            .filter(|r| r.selector.matches(dom, node))
+            .filter(|r| r.selector.matches_pseudo(dom, node, part))
             .collect();
         let mut out = Vec::new();
         for level in [
@@ -176,7 +239,182 @@ impl RuleSet {
     }
 }
 
-fn parse_declaration(text: &str) -> Option<Declaration> {
+/// `@font-face` 的块体 → face 清单。
+///
+/// `font-family` 写逗号列表时**每个名字出一条**（CSS 就是这个语义：同一份字体数据
+/// 挂了两个别名），因为下游是按声明名查表的。缺 `font-family` 的整块作废：那样一条
+/// 谁也引用不到，留着只会让日志里的「这本书有字体」变成假象。
+/// 认不出的声明计 `ignored`，与 `font` 简写同一套纪律；`unicode-range` /
+/// `font-stretch` / 三个 `*-override` 认得但一期用不上，不计数。
+fn parse_font_face(body: &str) -> (Vec<FontFaceRule>, usize) {
+    let mut family = String::new();
+    let mut src: Vec<FontSrc> = Vec::new();
+    let mut weight = 400u16;
+    let mut italic = None;
+    let mut ignored = 0usize;
+
+    for decl in split_top_level(body, ';') {
+        let Some(d) = parse_declaration(&decl) else {
+            ignored += 1;
+            continue;
+        };
+        match d.property.as_str() {
+            // 原样留着：逗号列表要**先切再去引号**，先去引号会把 `"A", "B"` 削成 `A", "B`。
+            "font-family" => family = d.value.clone(),
+            "src" => src = parse_font_src(&d.value),
+            "font-weight" => {
+                // 区间写法 `400 700` 取第一个值：一期一个 face 只匹配一个字重，
+                // 认区间要的是「同一声明名下的多份数据怎么挑」那套算法。
+                let head = d.value.split_whitespace().next().unwrap_or("");
+                match value::parse_font_weight(head) {
+                    Some(w) => weight = w,
+                    None => ignored += 1,
+                }
+            }
+            "font-style" => {
+                italic = match d.value.to_ascii_lowercase().as_str() {
+                    "normal" => Some(false),
+                    "italic" | "oblique" => Some(true),
+                    _ => None,
+                };
+                if italic.is_none() {
+                    ignored += 1;
+                }
+            }
+            "font-stretch"
+            | "font-variant"
+            | "font-feature-settings"
+            | "unicode-range"
+            | "ascent-override"
+            | "descent-override"
+            | "line-gap-override" => {}
+            _ => ignored += 1,
+        }
+    }
+    // 认不出来的写法只是少一条线索，不该让整块作废 —— 除了缺 font-family，
+    // 那条让这块声明无处可查。
+    if family.is_empty() {
+        return (Vec::new(), ignored);
+    }
+    let faces = split_top_level(&family, ',')
+        .into_iter()
+        .map(|name| unquote(&name))
+        .filter(|name| !name.is_empty())
+        .map(|name| FontFaceRule {
+            family: name,
+            src: src.clone(),
+            weight,
+            italic,
+        })
+        .collect::<Vec<_>>();
+    (faces, ignored)
+}
+
+/// `src: url(a.otf) format("opentype"), local("Book Serif")` → 来源列表。
+///
+/// `format()` / `tech()` 是修饰**前一个**来源的，认得就跳过；`url()` 里协议开头的
+/// 一律丢（远程字体一期不取，也不该让读者以为取了）。引号与空格都清掉，
+/// 因为下游拿这个串直接当容器路径查表。
+fn parse_font_src(value: &str) -> Vec<FontSrc> {
+    let mut out = Vec::new();
+    for part in split_top_level(value, ',') {
+        let Some((head, rest)) = split_function(&part) else {
+            continue;
+        };
+        let inner = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+        match head.to_ascii_lowercase().as_str() {
+            "url" => {
+                if !is_remote(inner) {
+                    out.push(FontSrc::Url(inner.to_string()));
+                }
+            }
+            "local" => out.push(FontSrc::Local(unquote(inner))),
+            // format / tech 与其余函数：修饰或暂不支持，不动已收到的来源。
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `url(...)` / `local(...)` 这类函数 token → `(函数名, 括号内)`。
+fn split_function(text: &str) -> Option<(String, &str)> {
+    let open = text.find('(')?;
+    let name = text[..open].trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
+        return None;
+    }
+    let body = &text[open + 1..];
+    let close = matching_paren(body)?;
+    Some((name.to_string(), &body[..close]))
+}
+
+/// 返回第一个配对 `)` 的结束偏移（不含）。括号里只可能有引号包裹的路径，
+/// 所以按引号跳过就行，不必再数一层嵌套。
+fn matching_paren(text: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    for (i, c) in text.char_indices() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            ')' => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 协议开头的 url（`http://…` / `//…` / `data:…`）。一期不取外部资源，也不假装取过。
+/// 盘符（`C:/`）不算协议：单字母的 scheme 一律当路径看待。
+///
+/// `format::epub` 改写 `url()` 时用的是同一条判据 —— 两边各判一次迟早会在
+/// `data:` 这种「有冒号但不是协议」的写法上分叉。
+pub(crate) fn is_remote(url: &str) -> bool {
+    if url.starts_with("//") {
+        return true;
+    }
+    let Some(scheme_end) = url.find(':') else {
+        return false;
+    };
+    let scheme = &url[..scheme_end];
+    scheme.len() > 1
+        && scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+fn unquote(text: &str) -> String {
+    text.trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
+/// 一条 run 的字族名是不是在引用某个 `@font-face` 声明的名字。
+///
+/// **整串同名**才算，不是子串：`font-family: "Book Serif", serif` 在层叠期已经折成
+/// 第一个候选（`computed` 的 `font-family` 分支），所以这里比较的是完整家族名。
+/// 用子串会误认 —— `"Book Serif"` 里就含 `serif`。
+pub fn font_face_matches(run_family: &str, declared_family: &str) -> bool {
+    !run_family.is_empty()
+        && !declared_family.is_empty()
+        && run_family.eq_ignore_ascii_case(declared_family)
+}
+
+/// 一条声明：`property: value`，末尾的 `!important` 折成标志位。
+///
+/// `computed` 解析元素的 `style="…"` 属性时走的是这同一个函数 —— 行内写法与样式表
+/// 写法对 `!important`、大小写、空值的处理必须一字不差，否则同一句话写在两处结果不同。
+pub(crate) fn parse_declaration(text: &str) -> Option<Declaration> {
     let (property, value) = text.split_once(':')?;
     let property = property.trim().to_ascii_lowercase();
     if property.is_empty() {
@@ -209,7 +447,10 @@ fn count_declarations(body: &str) -> usize {
 
 /// 把 `/* … */` 换成等长空格。必须在上层做：注释常夹在选择器前面，
 /// 留着它 `p` 就变成 `/* … */ p`，选择器解析直接失败。
-fn strip_comments(text: &str) -> String {
+///
+/// 等长是刻意的：`format::epub` 在拼接前拿同一份文本做过一遍 `url()` 改写，
+/// 注释若改变了长度，那一步算出的字节区间就全错位了。
+pub(crate) fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut quote: Option<char> = None;
@@ -373,7 +614,115 @@ mod tests {
         );
         assert_eq!(set.rules.len(), 1, "只有 @media 里的规则该被收进来");
         assert_eq!(set.rules[0].declarations[0].property, "color");
-        assert_eq!(set.ignored, 2, "@font-face 与 @page 应计为忽略");
+        assert_eq!(
+            set.ignored, 1,
+            "@page 计一条；@font-face 有去处，不算被忽略"
+        );
+        assert_eq!(
+            set.font_faces.len(),
+            1,
+            "@font-face 是「这本书带了字体」的唯一线索，丢了就等于对内嵌字体装看不见"
+        );
+        assert_eq!(set.font_faces[0].family, "X");
+    }
+
+    /// `src` 的写法比我们能用的多：`format()` 与 `tech()` 是修饰前一个来源的函数，
+    /// 逗号把多个来源分开，而 `url()` 里的路径自己可能带逗号。
+    #[test]
+    fn font_face_src_keeps_urls_and_locals() {
+        let set = rules(
+            "@font-face { font-family: Body; src: url(../Fonts/body.otf) format(\"opentype\"), \
+             local(\"Book Serif\"), url(\"Fonts/body italic.otf\") }",
+        );
+        assert_eq!(set.font_faces.len(), 1);
+        assert_eq!(
+            set.font_faces[0].src,
+            vec![
+                crate::css::FontSrc::Url("../Fonts/body.otf".into()),
+                crate::css::FontSrc::Local("Book Serif".into()),
+                crate::css::FontSrc::Url("Fonts/body italic.otf".into()),
+            ],
+            "来源要保住书写顺序：第一个是首选"
+        );
+    }
+
+    /// 远程字体一期不取，但也不能假装这本书没有字体：只丢这一条来源，同块里的
+    /// 本地来源照收。
+    #[test]
+    fn remote_src_is_dropped_but_local_ones_survive() {
+        let set = rules(
+            "@font-face { font-family: Body; src: url(https://x/y.otf), url(//z.otf), \
+             url(C:/Fonts/y.otf), url(y.otf) }",
+        );
+        assert_eq!(
+            set.font_faces[0].src,
+            vec![
+                crate::css::FontSrc::Url("C:/Fonts/y.otf".into()),
+                crate::css::FontSrc::Url("y.otf".into()),
+            ],
+            "带协议的三条被丢；盘符开头的不是协议，得留着"
+        );
+    }
+
+    /// 一条声明挂两个别名是 CSS 的正常写法（同一份数据，两个名字都能引用到）。
+    #[test]
+    fn font_face_family_list_yields_one_face_per_name() {
+        let set = rules("@font-face { font-family: \"Body\", BodyAlt; src: url(y.otf) }");
+        let families: Vec<&str> = set.font_faces.iter().map(|f| f.family.as_str()).collect();
+        assert_eq!(
+            families,
+            ["Body", "BodyAlt"],
+            "先去引号再切逗号会把这串削坏"
+        );
+    }
+
+    #[test]
+    fn font_face_weight_and_style_are_parsed() {
+        let set = rules(
+            "@font-face { font-family: B; font-weight: 700 900; font-style: oblique; src: url(b.otf) }",
+            // 区间取第一个值；oblique 在 FontKey 那一侧与 italic 同一个布尔。
+        );
+        assert_eq!(set.font_faces[0].weight, 700);
+        assert_eq!(set.font_faces[0].italic, Some(true));
+
+        let plain = rules("@font-face { font-family: B; src: url(b.otf) }");
+        assert_eq!(plain.font_faces[0].weight, 400);
+        assert_eq!(
+            plain.font_faces[0].italic, None,
+            "没写 font-style 不等于写了 normal"
+        );
+    }
+
+    /// 缺 `font-family` 的那块无处可查，整块作废；其余认不出的写法只少一条线索。
+    #[test]
+    fn font_face_without_family_is_dropped_but_stray_declarations_are_not() {
+        let no_family = rules("@font-face { src: url(y.otf) }");
+        assert!(no_family.font_faces.is_empty());
+
+        let stray = rules("@font-face { font-family: B; src: url(y.otf); panax: 3 }");
+        assert_eq!(stray.font_faces.len(), 1, "认不出的声明不该带走整块");
+        assert_eq!(stray.ignored, 1);
+    }
+
+    #[test]
+    fn font_faces_from_both_stylesheets_are_kept_in_order() {
+        let mut set = rules("@font-face { font-family: A; src: url(a.otf) }");
+        set.extend(rules("@font-face { font-family: B; src: url(b.otf) }"));
+        let families: Vec<&str> = set.font_faces.iter().map(|f| f.family.as_str()).collect();
+        assert_eq!(
+            families,
+            ["A", "B"],
+            "两份 CSS 的字体声明都要活着，按出现顺序"
+        );
+    }
+
+    /// 字族匹配是**整串同名**。`"Book Serif"` 里就含 `serif`，用子串会把泛族名
+    /// 也认成书的字体，而那正是要落回读者偏好字体的那一种。
+    #[test]
+    fn font_face_matches_are_whole_string_and_case_insensitive() {
+        assert!(crate::css::font_face_matches("Book Serif", "book serif"));
+        assert!(!crate::css::font_face_matches("serif", "Book Serif"));
+        assert!(!crate::css::font_face_matches("", "Book Serif"));
     }
 
     #[test]

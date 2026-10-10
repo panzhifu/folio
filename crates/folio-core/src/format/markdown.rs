@@ -1,51 +1,82 @@
 use std::path::Path;
 
-use super::{Chapter, Content, DocMeta, FlowDoc, Format, FormatAdapter};
+use super::{Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format};
 use crate::Result;
 use crate::error::IoResultExt as _;
 
+/// Markdown 与纯文本是两种东西（[`Format::Markdown`] / [`Format::Text`]），但共用
+/// 「读成字符串 → 规范化 → 分章（或不分）」这条链，所以住同一个模块。
+///
+/// 分成两个 provider、而不是一个 provider 按扩展名返回不同格式，是因为
+/// `DocumentProvider::format()` 是**身份**：一个 provider 只能有一个 `Format`，
+/// 而 `books.format` 那一列要能把 Markdown 与纯文本分开（它们的排版预处理其实不同：
+/// 一个按 `#` 分章，一个整篇一章）。两边共用的是同一份 `read()`。
 pub struct MarkdownAdapter;
+pub struct PlainTextAdapter;
 
-impl FormatAdapter for MarkdownAdapter {
+impl DocumentProvider for MarkdownAdapter {
     fn format(&self) -> Format {
         Format::Markdown
     }
 
     fn supports(&self, path: &Path) -> bool {
-        matches!(extension(path).as_deref(), Some("md" | "markdown" | "txt"))
+        matches!(extension(path).as_deref(), Some("md" | "markdown"))
     }
 
     fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        let raw = std::fs::read_to_string(path).io_path(path)?;
-        let source = normalize(&raw);
-        let plain = matches!(extension(path).as_deref(), Some("txt"));
-        let chapters = if plain {
-            vec![Chapter {
-                title: stem(path),
-                spine_href: String::new(),
-                source: source.clone(),
-            }]
-        } else {
-            split_chapters(&source, &stem(path))
-        };
-        let title = first_heading(&source).unwrap_or_else(|| stem(path));
-        Ok((
-            DocMeta {
-                title,
-                authors: Vec::new(),
-                format: if plain {
-                    Format::Text
-                } else {
-                    Format::Markdown
-                },
-                size: source.len() as u64,
-            },
-            Content::Reflow(FlowDoc {
-                chapters,
-                ..Default::default()
-            }),
-        ))
+        read(path, false)
     }
+}
+
+impl DocumentProvider for PlainTextAdapter {
+    fn format(&self) -> Format {
+        Format::Text
+    }
+
+    fn supports(&self, path: &Path) -> bool {
+        matches!(extension(path).as_deref(), Some("txt"))
+    }
+
+    fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
+        read(path, true)
+    }
+}
+
+fn read(path: &Path, plain: bool) -> Result<(DocMeta, Content)> {
+    let raw = std::fs::read_to_string(path).io_path(path)?;
+    let source = normalize(&raw);
+    let mut chapters = if plain {
+        vec![Chapter {
+            title: stem(path),
+            spine_href: String::new(),
+            source: source.clone(),
+        }]
+    } else {
+        split_chapters(&source, &stem(path))
+    };
+    // 归一化收到的是一份**纯文本**（分章也是按纯文本的行做的），而引擎只吃 XHTML。
+    // 包装放在这里而不是界面里：`Chapter::source` 的契约是「引擎就绪」，
+    // 界面就不必知道哪个格式需要包一层（见 `super::xhtml` 的模块说明）。
+    for chapter in &mut chapters {
+        chapter.source = super::xhtml::from_plain_text(&chapter.source);
+    }
+    let title = first_heading(&source).unwrap_or_else(|| stem(path));
+    Ok((
+        DocMeta {
+            title,
+            authors: Vec::new(),
+            format: if plain {
+                Format::Text
+            } else {
+                Format::Markdown
+            },
+            size: source.len() as u64,
+        },
+        Content::Reflow(FlowDoc {
+            chapters,
+            ..Default::default()
+        }),
+    ))
 }
 
 fn extension(path: &Path) -> Option<String> {
@@ -199,23 +230,39 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use crate::format::{Content, DocMeta, FlowDoc};
-    use crate::open;
+    use crate::anchor::TextMap;
+    use crate::dom::Dom;
+    use crate::format::{DocMeta, FlowDoc};
 
     fn opened(name: &str, body: &str) -> (DocMeta, FlowDoc) {
         let dir = tempfile::tempdir().unwrap();
         let path: PathBuf = dir.path().join(name);
         std::fs::write(&path, body).unwrap();
-        let (meta, content) = open(&path).expect("临时 .md 应能读入");
-        let Content::Reflow(flow) = content;
-        (meta, flow)
+        let doc = crate::document::open(&path).expect("临时 .md 应能读入");
+        let flow = doc.flow().expect("该读成可重排").clone();
+        (doc.meta().clone(), flow)
+    }
+
+    /// 一段 XHTML 的可见文本。契约里最要紧的一条是「包装不改内容」，断言就得看可见文本，
+    /// 而不是看标记 —— 后者一改包装口径就红，前者才钉得住真正的不变量。
+    fn visible(xhtml: &str) -> String {
+        let dom = Dom::parse(xhtml.as_bytes());
+        let body = dom
+            .elements()
+            .find(|(id, _)| dom.tag_name(*id) == Some("body"))
+            .map_or(dom.document, |(id, _)| id);
+        TextMap::build(&dom, body).text().to_string()
+    }
+
+    fn without_whitespace(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
     #[test]
     fn normalize_unifies_crlf_and_blank_runs() {
         let (_, flow) = opened("d.md", "a\r\n\r\n\r\n\r\nb\n\n");
         assert_eq!(flow.chapters.len(), 1);
-        assert_eq!(flow.chapters[0].source, "a\n\nb\n");
+        assert_eq!(flow.chapters[0].source, "<p>a</p>\n<p>b</p>\n");
     }
 
     #[test]
@@ -225,7 +272,11 @@ mod tests {
         assert_eq!(flow.chapters.len(), 3);
         assert_eq!(flow.chapters[0].title, "书名");
         assert_eq!(flow.chapters[1].title, "第一章");
-        assert!(flow.chapters[1].source.starts_with("## 第一章"));
+        assert!(
+            flow.chapters[1].source.starts_with("<h2>第一章</h2>"),
+            "标题要包成 `<h2>`：{}",
+            flow.chapters[1].source
+        );
         assert!(flow.chapters[1].source.contains("正文一"));
         assert_eq!(flow.chapters[2].title, "第二章");
     }
@@ -243,14 +294,19 @@ mod tests {
         assert!(flow.chapters[0].source.contains("# not a heading"));
     }
 
+    /// 分章不能丢字符，也不能凭空造字符 —— 把各章各自的可见文本拼起来，
+    /// 去掉空白后必须等于原文。包装成 XHTML 之后这条不变量只能这样验。
     #[test]
     fn chapter_sources_reconcatenate_losslessly() {
         let src = "# A\ntext\n## B\nmore\n";
         let (_, flow) = opened("d.md", src);
-        let joined: String = flow.chapters.iter().map(|c| c.source.clone()).collect();
-        assert_eq!(joined, src);
+        let joined: String = flow.chapters.iter().map(|c| visible(&c.source)).collect();
+        let expected = crate::format::xhtml::atx_markers_removed(src);
+        assert_eq!(without_whitespace(&joined), without_whitespace(&expected));
     }
 
+    /// `spine_href` 是**包装之前**那份规范化纯文本里的字节偏移（分章时算的），
+    /// 所以它指向的是原文里这一章自己的标题行。
     #[test]
     fn spine_offsets_land_on_char_boundaries_and_their_own_heading() {
         let src = "# A\ntext\n## B\nmore\n";
@@ -259,7 +315,13 @@ mod tests {
         for c in &flow.chapters {
             let byte: usize = c.spine_href.trim_start_matches('#').parse().unwrap();
             assert!(src.is_char_boundary(byte));
-            assert!(src[byte..].starts_with(&c.source[..c.source.find('\n').unwrap()]));
+            let heading = src[byte..].lines().next().unwrap();
+            assert!(heading.starts_with('#'), "{heading:?}");
+            assert!(
+                heading.contains(&c.title),
+                "{heading:?} 该是 {} 的标题",
+                c.title
+            );
         }
     }
 

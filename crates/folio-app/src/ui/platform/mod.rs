@@ -34,6 +34,10 @@ use crate::ui::host;
 #[cfg(mobile)]
 use crate::ui::shared::config_model::{ConfigHolder, ConfigPath};
 #[cfg(mobile)]
+use crate::ui::shared::error::{Context as _, report};
+#[cfg(mobile)]
+use crate::ui::shared::http;
+#[cfg(mobile)]
 use crate::ui::shared::theme;
 #[cfg(mobile)]
 use crate::ui::shell::AppShell;
@@ -45,20 +49,32 @@ use crate::ui::shell::AppShell;
 #[cfg(mobile)]
 pub(crate) fn boot(cx: &mut App) {
     gpui_kit::init(cx);
+    // 移动三端的 `Application` 都是框架内部建的，构造链够不着，所以在这里换掉
+    // gpui 默认那份「不发请求」的 client。
+    http::install(cx);
     theme::register_builtin_themes(cx);
     theme::register_user_themes(cx);
     host::install(cx);
 
     let config = Config::load();
+    // 日志要等配置：`logging` 那一节就在里面。Android 已经在 `android_main` 里装过了
+    // （那里拿到应用目录就得马上装，否则启动那几行没有去处），`tracing` 只允许一个全局
+    // subscriber，所以这一句在 Android 上是「已经装了，忽略」，在 iOS / HarmonyOS 上
+    // 才是真正的那一次。
+    let _ = folio_core::logging::init(&config.logging, None);
     config.language.locale.apply();
     cx.set_global(ConfigPath(Some(folio_core::config_path())));
     ConfigHolder::install(config, cx);
 
     // 书库挂成全局（与桌面同一份实现）。打不开时只记日志：界面照起，
-    // 只是导入与进度落不了盘。
-    match folio_core::Store::open_default() {
+    // 只是导入与进度落不了盘。`report` 落的是整条链 —— 「打不开」在设备上可能是
+    // 目录不存在、权限、也可能是上一轮留下的坏库文件，只有链说得出是哪种。
+    match folio_core::Store::open_default()
+        .map_err(anyhow::Error::from)
+        .context("装书库")
+    {
         Ok(store) => crate::ui::shared::app_store::install(store, cx),
-        Err(err) => log::error!("boot: 书库打不开：{err}"),
+        Err(err) => report("boot", &err),
     }
 
     // 还没有窗口，浅深只能问平台 —— 而 Android 上平台级那一问恒为深色。
@@ -87,7 +103,7 @@ fn open_main_window(cx: &mut App) {
             cx.new(|cx| Root::new(shell, window, cx))
         },
     ) {
-        Ok(_handle) => log::info!("open_main_window: 窗口已打开"),
-        Err(err) => log::error!("open_main_window: 打开失败：{err:#}"),
+        Ok(_handle) => tracing::info!("open_main_window: 窗口已打开"),
+        Err(err) => tracing::error!("open_main_window: 打开失败：{err:#}"),
     }
 }

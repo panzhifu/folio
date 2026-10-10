@@ -9,3 +9,4 @@ pub mod reader;
 pub mod settings;
 pub mod shelf;
 pub mod stats;
+pub mod welcome;

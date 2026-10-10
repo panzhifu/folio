@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! 配置  ~/.config/folio            config.json、themes/
-//! 数据  ~/.local/share/folio       书库数据库
+//! 数据  ~/.local/share/folio       书库数据库、logs/、books/
 //! ```
 //!
 //! `FOLIO_CONFIG_DIR` / `FOLIO_DATA_DIR` 存在时优先生效：测试要把配置读写关在
@@ -17,6 +17,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+use crate::error::IoResultExt as _;
 
 /// 各标准目录下用来分隔本应用的子目录名。
 pub const APP_DIR: &str = "folio";
@@ -126,6 +128,14 @@ pub fn db_path() -> PathBuf {
     data_dir().join("folio.db")
 }
 
+/// 日志目录：`<数据根>/logs`。
+///
+/// 放在数据根而不是配置根：它是程序自己产出的东西，不是读者编辑的东西，
+/// 而且会一直长。[`crate::logging`] 按它排 `folio.log`，写满了轮转成 `.1`、`.2`。
+pub fn log_dir() -> PathBuf {
+    data_dir().join("logs")
+}
+
 /// 应用自己收下的那份书本文件：`<数据根>/books/<原名>`。
 ///
 /// 只有移动平台会往这里写 —— 系统文件选择器给的是它自己临时目录里的路径，随时会被清，
@@ -137,11 +147,15 @@ pub fn books_dir() -> PathBuf {
 }
 
 /// 建出 `path` 的父目录。写文件前都要过一次：首次启动时这些根目录还不存在。
-pub fn prepare_dir(path: &Path) -> std::io::Result<()> {
-    match path.parent() {
-        Some(dir) => std::fs::create_dir_all(dir),
-        None => Ok(()),
-    }
+///
+/// 返回的是 [`crate::Error`] 而不是 `std::io::Error`：后端对外只有一套错误词汇，
+/// 而套上路径的那一条正好说清「哪个目录建不出来」——这在只读文件系统与 Android
+/// 沙箱目录那两类真机上是最常撞到的第一步。
+pub fn prepare_dir(path: &Path) -> crate::Result<()> {
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(dir).io_path(path)
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ impl Host for DesktopHost {
         Insets::ZERO
     }
 
-    fn extra_windows(&self) -> bool {
+    fn overlay_controls(&self) -> bool {
         true
     }
 
