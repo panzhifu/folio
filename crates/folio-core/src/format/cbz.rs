@@ -17,7 +17,7 @@ use super::{
 use crate::Result;
 
 /// 封面缩略图上限，与 EPUB / FB2 同一条口径。
-const COVER_MAX_EDGE: u32 = 1024;
+const COVER_MAX_EDGE: u32 = 512;
 
 pub struct CbzAdapter;
 
@@ -30,7 +30,8 @@ impl DocumentProvider for CbzAdapter {
         matches!(extension_of(path).as_deref(), Some("cbz"))
     }
 
-    fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
+    /// 定版式没有「章」也没有正文：索引就是它的全部（页表 + 封面 + 图片元数据）。
+    fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
         let mut zip = Zip::open(path)?;
         let mut names: Vec<String> = zip
             .names()
@@ -260,7 +261,11 @@ mod tests {
         let (_, fixed) = fixed(&path);
         let cover = fixed.cover.expect("该有封面");
         let decoded = image::load_from_memory(&cover).unwrap();
-        assert_eq!(decoded.width().max(decoded.height()), 1024);
+        assert_eq!(
+            decoded.width().max(decoded.height()),
+            super::COVER_MAX_EDGE,
+            "封面缩到存储尺寸上限"
+        );
     }
 
     #[test]

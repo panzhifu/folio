@@ -6,6 +6,7 @@
 use folio_core::Locator;
 use gpui_kit::{Context, ScrollDelta, ScrollWheelEvent};
 
+use super::super::book::Book;
 use super::super::chrome::PageMode;
 use super::super::session::ReaderSession;
 
@@ -17,9 +18,17 @@ impl ReaderSession {
             return;
         }
         self.mode = mode;
-        let offset = self.current_offset().unwrap_or_default();
-        self.pending_restore = (offset > 0).then_some(Locator {
-            chapter: self.chapter_index() as u32,
+        // 这一下是读者选的：默认档那面旗落下，之后落库就写他选的这一档。
+        self.mode_undecided = false;
+        // 摆法换了，同一句话会挪到另一处坐标位置；选中跟着字走虽不至于指错，
+        // 但「换摆法」在读者心里是一次新动作，留着一个旧高亮只会碍事。
+        self.clear_selection();
+        // 连续模式的落点是**全局 y**（章基线 + 章内行顶），基线未必是 0 ——
+        // 上一章可能正拼在上方，所以哪怕偏移是 0 也挂恢复请求，让渲染帧把它
+        // 摆到正确的那一像素。分页落到页号，偏移 0 就是第 0 页，不需要请求。
+        let (chapter, offset) = self.resolve_position().unwrap_or((self.chapter_index(), 0));
+        self.pending_restore = (mode.is_continuous() || offset > 0).then_some(Locator {
+            chapter: chapter as u32,
             offset,
         });
         self.scroll_y = 0.0;
@@ -42,9 +51,27 @@ impl ReaderSession {
     }
 
     /// 跳到本章的某个比例处（进度条）。
+    ///
+    /// 连续模式里进度条是**视口顶那一章**的章内刻度（与 `progress()` 同一口径），
+    /// 拖到 1.0 就是把这一章的末屏摆上来。
     pub fn seek_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {
         if self.laid_out.mode.is_continuous() {
-            let target = ratio.clamp(0.0, 1.0) * self.max_scroll();
+            let target = {
+                let Some(book) = self.book() else {
+                    return;
+                };
+                let gap = Book::chapter_gap(&self.prefs);
+                let chapter = book
+                    .chapter_at_y(self.scroll_y, gap)
+                    .unwrap_or_else(|| book.chapter_index());
+                let base = book.base_of(chapter, gap).unwrap_or(0.0);
+                let height = book
+                    .span_doc(chapter)
+                    .map(|doc| doc.height())
+                    .unwrap_or(0.0);
+                let local_max = (height - self.laid_out.viewport).max(0.0);
+                base + ratio.clamp(0.0, 1.0) * local_max
+            };
             self.set_scroll_y(target, cx);
         } else {
             let last = self.laid_out.pages.saturating_sub(1);
@@ -64,12 +91,14 @@ impl ReaderSession {
     }
 
     /// 翻到第 `target` 页（越界夹到最后一页）。页号变了才落库、才重画。
+    /// 翻走即清选中：高亮还指得上字，但被翻走的内容留在看不见的那一页上没有意义。
     pub(super) fn set_page(&mut self, target: usize, cx: &mut Context<Self>) {
         let target = target.min(self.laid_out.pages.saturating_sub(1));
         if target == self.page {
             return;
         }
         self.page = target;
+        self.clear_selection();
         self.wheel_accum = 0.0;
         self.persist_if_moved();
         cx.notify();
@@ -94,11 +123,16 @@ impl ReaderSession {
             // 分页模式下滚轮不「滚」，它翻页：攒够半屏翻一页，方向与连续滚动一致。
             self.wheel_accum -= dy;
             let threshold = (self.laid_out.viewport * 0.5).max(1.0);
+            let before = self.page;
             while self.wheel_accum.abs() >= threshold {
                 let step = if self.wheel_accum > 0.0 { 1 } else { -1 };
                 self.wheel_accum -= step as f32 * threshold;
                 let last = self.laid_out.pages.saturating_sub(1) as isize;
                 self.page = (self.page as isize + step).clamp(0, last) as usize;
+            }
+            // 翻走即清选中（与 `set_page` 同一条规矩；这里直接动页号，绕过了它）。
+            if self.page != before {
+                self.clear_selection();
             }
         }
         self.persist_if_moved();

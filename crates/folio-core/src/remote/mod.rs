@@ -10,9 +10,8 @@
 //! 无网络、无窗口、假传输的条件下测（见 [`dav`] 的测试）。
 
 pub mod dav;
+pub mod ureq;
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -21,20 +20,18 @@ use std::sync::atomic::AtomicBool;
 /// 方法只有两个，差别在响应体去哪儿：小东西（PROPFIND 的 XML、备份的 JSON）整个进内存，
 /// 一本几百多万字的全本 epub 不能。
 pub trait Transport: Send + Sync + 'static {
-    fn request(&self, req: Request) -> BoxFuture<Result<Response>>;
+    fn request(&self, req: Request) -> Result<Response>;
 
     /// 流式下载，响应体按块交给 `sink`。
     ///
     /// 契约：无论成功、失败还是取消，`Sink` 的 `finish` 与 `abort` **恰好调一个** ——
     /// 临时文件要么变成正式文件，要么被清掉，不会留下第三种状态。
     /// 取消不是抢占，只在块与块之间检查，所以最多晚一个块生效。
-    fn download(&self, req: Request, sink: Box<dyn Sink>, cancel: Cancel)
-    -> BoxFuture<Result<u64>>;
+    ///
+    /// **同步签名是有意的**：管线的作业跑在后台线程上，「一个请求流到底」的形状
+    /// 用阻塞读最直白（见 `crate::import`）；`UreqTransport` 就是为此而来的实现。
+    fn download(&self, req: Request, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64>;
 }
-
-/// 传输层方法的返回类型。用 `std` 的 `Pin<Box<dyn Future>>` 而不是 `futures::BoxFuture`，
-/// 这样 core 不必为了一个别名多挂一条依赖。
-pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

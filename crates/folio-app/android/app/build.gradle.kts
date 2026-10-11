@@ -14,7 +14,7 @@
 //   cargo ndk -t arm64-v8a -o example/android_app/gradle/app/src/main/jniLibs \
 //       build --example android_app --release
 //   cd example/android_app/gradle
-//   ./gradlew assembleDebug
+//   gradle assembleDebug --offline
 
 plugins {
     id("com.android.application")

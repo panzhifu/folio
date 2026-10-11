@@ -1,6 +1,7 @@
 //! 目录：章节表的查询与跳转。章节本身住在 [`super::super::book::Book`] 里，
 //! 这里只是把它摊平成会话对界面承诺的那几个读法（第几章 / 共几章 / 各章标题 / 能不能翻）。
 
+use folio_core::Locator;
 use gpui_kit::{App, Context};
 
 use super::super::session::{ReaderSession, Source};
@@ -68,7 +69,11 @@ impl ReaderSession {
             return;
         }
         self.reset_after_chapter();
-        self.persist_position();
+        // 拼接链此刻还没就位，反解不出「当前」位置 —— 落库直接写已知的目标章首。
+        self.persist_locator(Locator {
+            chapter: index as u32,
+            offset: 0,
+        });
         cx.notify();
     }
 
@@ -85,17 +90,37 @@ impl ReaderSession {
         if !moved {
             return;
         }
+        let target = self.chapter_index();
         self.reset_after_chapter();
-        self.persist_position();
+        self.persist_locator(Locator {
+            chapter: target as u32,
+            offset: 0,
+        });
         cx.notify();
     }
 
     /// 换章共用的那段：位置归零、作废恢复请求与上一帧的内容高。
+    /// 选中一并丢：章内字符偏移是按章算的坐标系，换章后旧选区指向的是别人的字。
+    ///
+    /// 连续模式的落点是全局 y：章首未必拼在 0 的位置（上一章可能正占着上方），
+    /// 所以挂一个**章首恢复请求**，锚章排完的那一帧把它落到正确的那一像素。
     fn reset_after_chapter(&mut self) {
         self.scroll_y = 0.0;
         self.page = 0;
         self.wheel_accum = 0.0;
         self.content_height = 0.0;
-        self.pending_restore = None;
+        self.pending_restore = self.mode.is_continuous().then(|| Locator {
+            chapter: self.chapter_index() as u32,
+            offset: 0,
+        });
+        self.clear_selection();
+    }
+
+    /// 拼进坐标窗口的章（含锚章）。测试读：窗口必须钉在锚章 ± 邻章半窗宽。
+    #[cfg(test)]
+    pub(in crate::ui::features::reader) fn span_window(&self) -> Vec<usize> {
+        self.book()
+            .map(|book| book.span_indices())
+            .unwrap_or_default()
     }
 }

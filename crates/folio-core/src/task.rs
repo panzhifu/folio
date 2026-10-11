@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
@@ -37,49 +37,86 @@ pub struct ProgressEvent {
     pub message: String,
 }
 
+/// 字节级进度的一条读数：下载与拷贝用。`total == None` 表示总大小未知
+/// （服务器没给 `Content-Length` 的那种），界面要画不定进度。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteProgress {
+    pub done: u64,
+    pub total: Option<u64>,
+    /// 正在传的那个东西的名字（「《某本》 41%」里的《某本》）。core 不组文案，
+    /// 只交事实 —— 屏幕上的一句话由界面按 locale 组（core 的字符串只进日志）。
+    pub name: String,
+}
+
 /// 后台作业流回界面的事件。
 #[derive(Debug)]
 pub enum TaskEvent<R> {
     /// 被工作线程取到、开始跑（排队阶段没有事件）。
     Started,
     Progress(ProgressEvent),
+    /// 字节级读数（下载 / 拷贝）。与 [`TaskEvent::Progress`] 是两级独立的读数，
+    /// 各画各的，不互相覆盖。
+    Bytes(ByteProgress),
     /// 跑完了（成功或失败）。
     Finished(Result<R, TaskError>),
     /// 被取消（见模块文档：作业返回时 `cancel` 已置位就落这里）。
     Cancelled,
 }
 
-/// 作业用来报进度的把手。克隆是廉价的（只是一条发送端），可以在作业内部传。
-///
-/// 泛型参数与所属 [`TaskManager`] 一致 —— 事件要装回同一条通道，所以它得知道自己运的是
-/// 哪种结果。多数时候不用手写：`submit` 的闭包签名会把它推断出来。
-pub struct Progress<R> {
-    tx: Sender<TaskEvent<R>>,
+/// 作业用来报进度与看取消的把手。**非泛型** —— 事件通道的类型随结果 `R` 走，而
+/// `dyn Source` 这类 trait object 里写不出泛型参数，所以读数口收成两个装箱闭包，
+/// 取消旗标也收在里面，`R` 不出现在签名上。一份作业一个 `StageCtx`，作业内部传引用。
+pub struct StageCtx {
+    item_tx: Box<dyn Fn(ProgressEvent) + Send + Sync>,
+    bytes_tx: Box<dyn Fn(ByteProgress) + Send + Sync>,
+    cancel: Cancel,
 }
 
-impl<R> Progress<R> {
-    /// 报一次「已完成 `done` / 共 `total`」。`total == 0` 表示不定进度。
-    pub fn report(&self, done: u64, total: u64, message: impl Into<String>) {
-        let _ = self.tx.send(TaskEvent::Progress(ProgressEvent {
+impl StageCtx {
+    /// 协作式取消的旗标：作业在检查点自己看见（见模块文档的取消语义）。
+    pub fn cancel(&self) -> &Cancel {
+        &self.cancel
+    }
+
+    /// 报一次整批读数：「第 `done` 本 / 共 `total` 本」。`total == 0` 表示不定进度。
+    pub fn item(&self, done: u64, total: u64) {
+        (self.item_tx)(ProgressEvent {
             done,
             total,
-            message: message.into(),
-        }));
+            message: String::new(),
+        });
     }
 
-    /// 只发一句文案，进度不定（`done` / `total` 都是 0）。
+    /// 只发一句文案，进度不动（`done` / `total` 都是 0）。core 组的文案只进日志：
+    /// 屏幕上的一句话要走 locale，由界面自己组。
     pub fn message(&self, message: impl Into<String>) {
-        self.report(0, 0, message);
+        (self.item_tx)(ProgressEvent {
+            done: 0,
+            total: 0,
+            message: message.into(),
+        });
+    }
+
+    /// 报一次字节级读数（下载与拷贝）。与 [`Self::item`] 是两级独立的读数，
+    /// 界面上各画各的，不互相覆盖。
+    pub fn bytes(&self, done: u64, total: Option<u64>, name: &str) {
+        (self.bytes_tx)(ByteProgress {
+            done,
+            total,
+            name: name.to_string(),
+        });
     }
 }
 
-#[cfg(test)]
-impl<R> Progress<R> {
-    /// 测试用：造一个**没有接收端**的进度把手（`report` 静默丢弃）。
-    /// 让不经过 [`TaskManager`] 的管线本体（比如 `import::import_books`）也能被直接测。
+impl StageCtx {
+    /// 造一个**没有接收端**、取消未置位的读数口（发出去的静默丢弃）。给两类
+    /// 调用方：测试里直接测管线本体，以及「没人看进度」的后台驱动（监听的初扫）。
     pub(crate) fn detached() -> Self {
-        let (tx, _rx) = mpsc::channel();
-        Self { tx }
+        Self {
+            item_tx: Box::new(|_| {}),
+            bytes_tx: Box::new(|_| {}),
+            cancel: Cancel::new(),
+        }
     }
 }
 
@@ -167,23 +204,34 @@ impl<R: Send + 'static> TaskManager<R> {
 
     /// 提交一个作业，拿到它的 [`TaskHandle`]。
     ///
-    /// 闭包在后台线程上跑，能拿到 [`Progress`] 报进度、[`Cancel`] 看取消。
-    /// 它的返回值就是 [`TaskEvent::Finished`] 里那份结果。
+    /// 闭包在后台线程上跑，经 [`StageCtx`] 报进度、看取消（[`TaskHandle::cancel`]
+    /// 与它共享同一面旗）。它的返回值就是 [`TaskEvent::Finished`] 里那份结果。
     pub fn submit<F>(&self, job: F) -> TaskHandle<R>
     where
-        F: FnOnce(&Progress<R>, &Cancel) -> Result<R, TaskError> + Send + 'static,
+        F: FnOnce(&StageCtx) -> Result<R, TaskError> + Send + 'static,
     {
         let (tx, events) = mpsc::channel();
         let cancel = Cancel::new();
         let id = TaskId(self.next_id.fetch_add(1, Ordering::Relaxed));
 
-        let progress_tx = tx.clone();
+        let item_tx = tx.clone();
+        let bytes_tx = tx.clone();
         let job_cancel = cancel.clone();
+        // 收尾判定用自己的一份：`cancel` 本体要活着走出这个闭包，进 [`TaskHandle`]。
+        let finish_cancel = cancel.clone();
         let wrapped: Job = Box::new(move || {
             let _ = tx.send(TaskEvent::Started);
-            let progress = Progress { tx: progress_tx };
-            let result = job(&progress, &job_cancel);
-            let event = if job_cancel.triggered() {
+            let stage = StageCtx {
+                item_tx: Box::new(move |event| {
+                    let _ = item_tx.send(TaskEvent::Progress(event));
+                }),
+                bytes_tx: Box::new(move |event| {
+                    let _ = bytes_tx.send(TaskEvent::Bytes(event));
+                }),
+                cancel: job_cancel,
+            };
+            let result = job(&stage);
+            let event = if finish_cancel.triggered() {
                 TaskEvent::Cancelled
             } else {
                 TaskEvent::Finished(result)
@@ -265,9 +313,10 @@ mod tests {
     #[test]
     fn a_job_runs_and_reports_progress_and_result() {
         let manager = TaskManager::<u32>::new(1);
-        let handle = manager.submit(|progress, _cancel| {
-            progress.report(1, 3, "三步走");
-            progress.report(3, 3, "到位");
+        let handle = manager.submit(|stage| {
+            stage.item(1, 3);
+            stage.message("三步走");
+            stage.item(3, 3);
             Ok(42)
         });
         let events = drain(handle.events);
@@ -283,18 +332,48 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(done, vec![1, 3], "两次进度都该到");
+        assert_eq!(done, vec![1, 0, 3], "三次读数都该到（中间那条只是文案）");
         match finished(&events) {
             Some(Ok(42)) => {}
             other => panic!("应以 Finished(Ok(42)) 收尾，实际 {other:?}"),
         }
     }
 
+    /// 两级读数是两条独立的流：整批读数不盖掉字节级，反过来也一样。
+    #[test]
+    fn item_and_bytes_are_two_independent_channels() {
+        let manager = TaskManager::<()>::new(1);
+        let handle = manager.submit(|stage| {
+            stage.item(1, 12);
+            stage.bytes(41, Some(100), "某本");
+            stage.item(2, 12);
+            stage.bytes(100, Some(100), "某本");
+            Ok(())
+        });
+        let events = drain(handle.events);
+        let items: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                TaskEvent::Progress(p) => Some(p.done),
+                _ => None,
+            })
+            .collect();
+        let bytes: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                TaskEvent::Bytes(b) => Some(b.done),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, vec![1, 2], "整批读数不被字节级打断");
+        assert_eq!(bytes, vec![41, 100], "字节级读数不被整批盖掉");
+    }
+
     /// 作业失败：`Finished(Err(..))` 带着错原文回来。
     #[test]
     fn a_failing_job_surfaces_its_error() {
         let manager = TaskManager::<()>::new(1);
-        let handle = manager.submit(|_p, _c| Err("炸了".into()));
+        let handle = manager.submit(|_stage| Err("炸了".into()));
         let events = drain(handle.events);
         match finished(&events) {
             Some(Err(e)) => assert_eq!(e.to_string(), "炸了"),
@@ -306,10 +385,10 @@ mod tests {
     #[test]
     fn cancel_lands_as_cancelled() {
         let manager = TaskManager::<()>::new(1);
-        let handle = manager.submit(|progress, cancel| {
+        let handle = manager.submit(|stage| {
             let mut i = 0u64;
-            while !cancel.triggered() {
-                progress.report(i, 0, "等取消");
+            while !stage.cancel().triggered() {
+                stage.item(i, 0);
                 i += 1;
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -330,7 +409,7 @@ mod tests {
     fn many_jobs_all_finish() {
         let manager = TaskManager::<u64>::new(4);
         let handles: Vec<_> = (0..12)
-            .map(|i| manager.submit(move |_p, _c| Ok(i * 2)))
+            .map(|i| manager.submit(move |_stage| Ok(i * 2)))
             .collect();
         let mut sum = 0;
         for handle in handles {

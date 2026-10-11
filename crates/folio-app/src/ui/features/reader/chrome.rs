@@ -134,6 +134,20 @@ pub fn spread_fits(total: f32, gap: f32) -> bool {
     column_width(total, 2, gap) >= MIN_COLUMN_WIDTH
 }
 
+/// 读者从没为这本书选过档位时，按窗口宽给一个默认：**装得下两栏就双页**，装不下就
+/// 连续滚动。平板与桌面上那条侧栏让出来之后（见 `ui::shell::immersive_nav`），
+/// 1024 宽的横屏正是靠这一条长出双页的。
+///
+/// 装不下时给 `Continuous` 而不是 `Paged`：分页是「一屏一页、要动手翻」，那是读者
+/// 主动选的读法；从没选过的人默认拿到最不需要学的那一种。
+pub fn default_mode(total: f32, gap: f32) -> PageMode {
+    if spread_fits(total, gap) {
+        PageMode::Spread
+    } else {
+        PageMode::Continuous
+    }
+}
+
 /// 正文被点中的哪一区。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Zone {
@@ -273,8 +287,8 @@ mod tests {
     //! 应该先在这里红过一次。
 
     use super::{
-        Chrome, Effect, MIN_COLUMN_WIDTH, PageMode, Panel, Zone, percent_label, spread_fits,
-        spread_gap, zone,
+        Chrome, Effect, MIN_COLUMN_WIDTH, PageMode, Panel, Zone, default_mode, percent_label,
+        spread_fits, spread_gap, zone,
     };
 
     #[test]
@@ -362,6 +376,32 @@ mod tests {
         // 页边距调到 0 也留一条缝，别让两页贴成一条。
         assert_eq!(spread_gap(0.0), 24.0);
         assert_eq!(spread_gap(64.0), 64.0);
+    }
+
+    /// 默认档的那条线画在哪：装得下两栏给双页，装不下给**连续滚动**而不是分页。
+    /// 分页是「一屏一页、要动手翻」，那是读者主动选的读法，不该由默认给。
+    #[test]
+    fn the_default_mode_follows_the_width_without_ever_defaulting_to_paged() {
+        let gap = spread_gap(24.0);
+        assert_eq!(default_mode(1200.0, gap), PageMode::Spread);
+        assert_eq!(default_mode(400.0, gap), PageMode::Continuous);
+        // 临界点与 spread_fits 同一条线，不多让也不早让。
+        assert_eq!(
+            default_mode(MIN_COLUMN_WIDTH * 2.0 + gap, gap),
+            PageMode::Spread
+        );
+        assert_eq!(
+            default_mode(MIN_COLUMN_WIDTH * 2.0 + gap - 1.0, gap),
+            PageMode::Continuous
+        );
+        // 默认档永远不会算出 Paged —— 退档是读者选了双页之后的事，不是默认的事。
+        for width in [0.0, 100.0, 400.0, 900.0, 1200.0, 4000.0] {
+            assert_ne!(
+                default_mode(width, gap),
+                PageMode::Paged,
+                "{width} 算出了分页"
+            );
+        }
     }
 
     #[test]

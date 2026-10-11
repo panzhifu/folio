@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use super::{ContentRef, Document, unsupported};
 use crate::Result;
-use crate::format::{self, Content, ContentKind, DocMeta, DocumentProvider, FontBytes};
+use crate::format::{
+    self, ChapterLocator, ChapterText, Content, ContentKind, DocMeta, DocumentProvider, FontBytes,
+};
 
 pub struct BookDocument {
     /// 留住 provider：图片与字体的字节要按 href 现取，只有它知道容器怎么开。
@@ -22,14 +24,18 @@ pub struct BookDocument {
 
 impl BookDocument {
     /// 从文件读一本：选 provider → 读成 [`Content`] → 校验结构完整性。
+    ///
+    /// 走的是 [`DocumentProvider::index`]：**只读索引，不解正文**。正文不在库里
+    /// （见 `plans/text-out-of-db.md`），导入时解出来再丢掉等于白付一次全量解压 ——
+    /// 一本 1000 多章的 EPUB 就是白解 1000 多个 zip 条目。
     pub fn open(path: &Path) -> Result<Self> {
         let provider = format::provider_for(path).ok_or_else(|| unsupported(path))?;
         tracing::debug!(
-            "document: {} 交给 {} provider",
+            "document: {} 交给 {} provider（只读索引）",
             path.display(),
             provider.format().as_str()
         );
-        let (meta, content) = provider.read(path)?;
+        let (meta, content) = provider.index(path)?;
         // 校验只写日志，不阻塞阅读。
         crate::validate::check(&content, path);
         Ok(Self {
@@ -55,8 +61,9 @@ impl BookDocument {
 
     /// 内容来自书库、字节仍从**原文件**现取。
     ///
-    /// 这是「按主键打开」那条路：章文本早在落库时就进了 SQLite，重解一遍 ZIP 只为拿
-    /// 文本是白付；但图片与内嵌字体刻意不入库，得回到容器里读。
+    /// 这是「按主键打开」那条路：库里只有章节位置（[`ChapterLocator`]），正文按
+    /// 位置回容器现取（[`Document::chapter_source`]）；图片与内嵌字体同样刻意
+    /// 不入库，按 `href` 现取。
     ///
     /// 文件不在了**不是错误**：`provider_for` 只按扩展名认领，真正的读取失败会在
     /// 取字节时回空 —— 表现就是没有插图、没有补缺字的那一份，正文照排。
@@ -103,10 +110,95 @@ impl Document for BookDocument {
         provider.image_bytes(path, href)
     }
 
+    fn stylesheet(&self) -> String {
+        let ContentRef::Reflow(flow) = self.content() else {
+            // 定版式没有作者样式表。
+            return String::new();
+        };
+        if !flow.css.is_empty() {
+            // 文本就在手上（`read` 全文路径、`from_content`、旧库兜底）—— 直接用。
+            return flow.css.clone();
+        }
+        if flow.css_hrefs.is_empty() {
+            return String::new();
+        }
+        let Some((provider, path)) = self.container() else {
+            // 清单在、容器不在：与取不到章正文同一表现 —— 没有作者样式，正文照排。
+            tracing::warn!(
+                "document: 作者样式 {} 份取不到（容器不在）",
+                flow.css_hrefs.len()
+            );
+            return String::new();
+        };
+        let mut css = String::new();
+        for href in &flow.css_hrefs {
+            let Some(text) = provider.entry_text(path, href) else {
+                tracing::debug!("document: 样式表 {href} 不在容器里，跳过");
+                continue;
+            };
+            // 每份用它自己的目录解 `url()` —— 拼接之前做，基准才不会串。
+            css.push_str(&crate::format::absolutize_css_urls(
+                &text,
+                &crate::format::dir_of(href),
+            ));
+            css.push('\n');
+        }
+        css
+    }
+
     fn fonts(&self, wanted: &[String]) -> Vec<FontBytes> {
         match self.container() {
             Some((provider, path)) => provider.fonts(path, wanted),
             None => Vec::new(),
+        }
+    }
+
+    fn chapter_source(&self, index: usize) -> Result<String> {
+        let ContentRef::Reflow(flow) = self.content() else {
+            // 定版式没有「章」，也没有正文要取 —— 页面自己就是内容。
+            return Ok(String::new());
+        };
+        let Some(chapter) = flow.chapters.get(index) else {
+            return Ok(String::new());
+        };
+        let at = chapter.locator().cloned().unwrap_or_default();
+        // 正文已经在手上（测试替身、`from_content`）。
+        if let ChapterText::Inline(text) = &chapter.text {
+            return Ok(text.clone());
+        }
+        if let ChapterLocator::Inline(text) = &at {
+            return Ok(text.clone());
+        }
+        // 剩下两种都要容器。没有容器（内容从库里读回、而正文又没跟着回来）就是
+        // 「这本书读不了」——不是空章，得让上面看得见。
+        let (path, provider) = match self.container() {
+            Some((provider, path)) => (path, provider),
+            None => {
+                return Err(crate::Error::ChapterUnavailable {
+                    path: self.path.clone().unwrap_or_default(),
+                    index,
+                    at: format!("{at:?}"),
+                });
+            }
+        };
+        match &at {
+            ChapterLocator::Entry(entry) => {
+                provider.entry_text(path, entry).ok_or_else(|| crate::Error::ChapterUnavailable {
+                    path: path.to_path_buf(),
+                    index,
+                    at: entry.clone(),
+                })
+            }
+            // 单文件容器：provider 重读一遍再取第 N 章 —— 只有它知道怎么分章。
+            ChapterLocator::Section(_) => provider.chapter_source(path, &at).map_err(|err| {
+                let _ = err;
+                crate::Error::ChapterUnavailable {
+                    path: path.to_path_buf(),
+                    index,
+                    at: format!("{at:?}"),
+                }
+            }),
+            ChapterLocator::Inline(text) => Ok(text.clone()),
         }
     }
 }
@@ -120,7 +212,28 @@ mod tests {
     use std::path::Path;
 
     use crate::document::{BookDocument, ContentRef, Document, LocatorKind, metadata};
-    use crate::format::{ContentKind, Format};
+    use crate::format::{ChapterLocator, Content, ContentKind, Format};
+
+    /// 把「正文在手上」的内容变成**库里那一份**：每章只留位置。
+    ///
+    /// 落库走的是 `Store::save_flow_in`，这里只复现它的那一句 `locator_for`
+    /// —— 测试不想为了一个形状去拉一份 SQLite。
+    fn at_locators(flow: &crate::format::FlowDoc, format: crate::format::Format) -> crate::format::FlowDoc {
+        let chapters = flow
+            .chapters
+            .iter()
+            .enumerate()
+            .map(|(ix, ch)| crate::format::Chapter {
+                title: ch.title.clone(),
+                spine_href: ch.spine_href.clone(),
+                text: crate::format::ChapterText::At(crate::format::locator_for(format, ch, ix)),
+            })
+            .collect();
+        crate::format::FlowDoc {
+            chapters,
+            ..flow.clone()
+        }
+    }
 
     fn write(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join(name);
@@ -170,6 +283,158 @@ mod tests {
             panic!("该读成可重排");
         };
         assert!(!flow.chapters.is_empty());
+    }
+
+    /// **正文出库之后的主要回路**：库里的章表只有位置，正文要能按位置从容器里回来。
+    ///
+    /// 这条链子就是打开一本书真正走的那一条：`document::open`（导入时）→ 落库 →
+    /// `with_container`（开书时）→ `chapter_source`。中间任何一环把位置算错，
+    /// 读者看到的就是「翻到第二章是空的」。
+    #[test]
+    fn a_lazily_loaded_chapter_comes_back_from_the_container() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "a.md",
+            "# 标题\n\n正文第一段。\n\n# 第二章\n\n第二段。\n".as_bytes(),
+        );
+        // 导入时：读到内容，把正文换成位置。
+        let opened = BookDocument::open(&path).unwrap();
+        let (meta, content) = (
+            opened.meta().clone(),
+            match opened.content() {
+                ContentRef::Reflow(flow) => flow.clone(),
+                ContentRef::Fixed(_) => panic!("该读成可重排"),
+            },
+        );
+        // `open` 给的是索引：每一章有标题与位置，正文按位置现取。
+        let full: Vec<String> = (0..content.chapters.len())
+            .map(|ix| opened.chapter_source(ix).unwrap())
+            .collect();
+        assert!(content.chapters.iter().all(|c| c.locator().is_some()));
+
+        // 开书时的那一份：只有位置 + 容器（`save_flow_in` 存出来的就是这个形状）。
+        let stored = at_locators(&content, meta.format);
+        assert!(
+            stored
+                .chapters
+                .iter()
+                .all(|c| matches!(c.locator(), Some(ChapterLocator::Section(_)))),
+            "单文件格式该按序号存位置"
+        );
+        let book = BookDocument::with_container(meta, Content::Reflow(stored), &path);
+        for (ix, want) in full.iter().enumerate() {
+            assert_eq!(&book.chapter_source(ix).unwrap(), want, "第 {ix} 章");
+        }
+        assert!(book.chapter_source(999).unwrap().is_empty(), "越界给空");
+    }
+
+    /// EPUB 走的是**另一条**取章路：按容器条目名解一个 zip 条目（`Entry`），
+    /// 而不是重读整本。这条拿仓库里那本合成 EPUB 跑完整条链。
+    #[test]
+    fn an_epub_chapter_comes_back_from_its_zip_entry() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/oss/minimal-zh.epub");
+        let opened = BookDocument::open(&path).unwrap();
+        let (meta, content) = (
+            opened.meta().clone(),
+            match opened.content() {
+                ContentRef::Reflow(flow) => flow.clone(),
+                ContentRef::Fixed(_) => panic!("合成 EPUB 该读成可重排"),
+            },
+        );
+        let full: Vec<String> = (0..content.chapters.len())
+            .map(|ix| opened.chapter_source(ix).unwrap())
+            .collect();
+        // 开书时的那一份：只剩位置与容器。
+        let stored = at_locators(&content, meta.format);
+        assert!(
+            stored
+                .chapters
+                .iter()
+                .all(|c| matches!(c.locator(), Some(ChapterLocator::Entry(_)))),
+            "EPUB 该按条目名存位置"
+        );
+        let book = BookDocument::with_container(meta, Content::Reflow(stored), &path);
+        assert!(!full.is_empty());
+        for (ix, want) in full.iter().enumerate() {
+            assert_eq!(&book.chapter_source(ix).unwrap(), want, "第 {ix} 章");
+        }
+    }
+
+    /// 容器不在了：要报 **`ChapterUnavailable`**，不是给一页空白。
+    ///
+    /// 这个区别决定界面说「这一章是空的」还是「源文件不在了」——
+    /// 后者要引导读者重新导入或重新定位，不能静悄悄地画一页白。
+    #[test]
+    fn a_missing_container_is_an_error_not_an_empty_chapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "a.md", "# 一\n\n正文。\n".as_bytes());
+        let opened = BookDocument::open(&path).unwrap();
+        let (meta, content) = (
+            opened.meta().clone(),
+            match opened.content() {
+                ContentRef::Reflow(flow) => flow.clone(),
+                ContentRef::Fixed(_) => panic!("该读成可重排"),
+            },
+        );
+        let content = at_locators(&content, meta.format);
+        std::fs::remove_file(&path).unwrap();
+
+        let book = BookDocument::with_container(meta, Content::Reflow(content), &path);
+        assert!(book.chapter_source(0).is_err(), "文件没了不该当空章");
+    }
+
+    /// 样式表与正文同一立场：索引只给**位置清单**，打开时按清单回容器现取、
+    /// 按文档序拼接。夹具里有两份 CSS，正好钉住「作者样式不是单文件」的形态 ——
+    /// 库里读回的那一份（只有清单）要与全文路径拼出同一份文本。
+    #[test]
+    fn a_stylesheet_comes_back_from_its_container_by_href_list() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/oss/minimal-zh.epub");
+        let opened = BookDocument::open(&path).unwrap();
+        let ContentRef::Reflow(flow) = opened.content() else {
+            panic!("合成 EPUB 该读成可重排");
+        };
+        assert!(
+            flow.css.is_empty(),
+            "索引不该带样式文本，实际 {} 字节",
+            flow.css.len()
+        );
+        assert_eq!(
+            flow.css_hrefs.len(),
+            2,
+            "manifest 里的两份 CSS 都该在清单上：{:?}",
+            flow.css_hrefs
+        );
+        let from_index = opened.stylesheet();
+        assert!(!from_index.is_empty(), "两份样式都要从容器里取到");
+
+        // 开书的那一份：库里读回来只有清单（save_flow_in 存出来的形状）。
+        let (meta, content) = (opened.meta().clone(), flow.clone());
+        let book = BookDocument::with_container(meta, Content::Reflow(content), &path);
+        assert_eq!(
+            book.stylesheet(),
+            from_index,
+            "按清单现取要与索引拼出同一份样式"
+        );
+    }
+
+    /// 容器不在了：清单在手上也取不到样式 —— 回空而不是报错，与图片缺失同一表现。
+    #[test]
+    fn a_missing_container_leaves_the_stylesheet_empty() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/oss/minimal-zh.epub");
+        let opened = BookDocument::open(&path).unwrap();
+        let (meta, content) = (
+            opened.meta().clone(),
+            match opened.content() {
+                ContentRef::Reflow(flow) => flow.clone(),
+                ContentRef::Fixed(_) => panic!("该读成可重排"),
+            },
+        );
+        let book = BookDocument::with_container(meta, Content::Reflow(content), Path::new("/gone/missing.epub"));
+        assert_eq!(book.stylesheet(), "", "容器丢了就是没有作者样式，正文照排");
     }
 
     /// 定版式走的是同一个 trait，但坐标、页数、`ContentRef` 都换了一套 ——

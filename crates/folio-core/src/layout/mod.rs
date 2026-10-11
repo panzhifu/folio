@@ -438,6 +438,13 @@ pub struct BlockBox {
     pub text: String,
     /// `Layout::lines` 的下标区间。
     pub lines: Range<usize>,
+    /// 这条注册是不是**边框盒**（几何含边框与 padding，绘制背景/边框用）。
+    ///
+    /// 一个块级节点可能注册两条：`block_uncached` 的边框盒（true），以及
+    /// `wrap_paragraph` 为正文映射补注册的**内容盒**副本（false —— 几何内缩了
+    /// 边框与 padding，只承载归一化文本）。装饰只画边框盒：内容盒副本要是也画，
+    /// 它的边框条会不偏不倚落在文字起点上（真书《斗战狂潮》目录页踩过）。
+    pub border_box: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1348,6 +1355,7 @@ impl<'a> Ctx<'a> {
                 height,
                 text: String::new(),
                 lines: 0..0,
+                border_box: true,
             });
             cursor += height;
             prev_bottom = mb;
@@ -1480,7 +1488,7 @@ impl<'a> Ctx<'a> {
             };
             let content_width = (width - pl - pr).max(1.0);
             let (w, h) = image_size(style, img.width, img.height, content_width);
-            let index = self.push_block(node, x, y, width, String::new());
+            let index = self.push_block(node, x, y, width, String::new(), true);
             let offset = match style.text_align {
                 TextAlign::Right => (content_width - w).max(0.0),
                 TextAlign::Center => (content_width - w).max(0.0) / 2.0,
@@ -1505,7 +1513,7 @@ impl<'a> Ctx<'a> {
         }
 
         let content_width = (width - pl - pr).max(1.0);
-        let index = self.push_block(node, x, y, width, String::new());
+        let index = self.push_block(node, x, y, width, String::new(), true);
         let inner = if self.has_block_children(node) {
             self.children(node, x + pl, y + pt, content_width)
         } else {
@@ -1599,13 +1607,24 @@ impl<'a> Ctx<'a> {
             self.measure,
             width,
         );
-        let index = self.push_block(owner, x, y, width, collected.text.clone());
+        let index = self.push_block(owner, x, y, width, collected.text.clone(), false);
         let height = self.wrap_lines(owner, &collected, x, y, width, style);
         self.close_block(index, height)
     }
 
     /// 先序入表：盒子必须在断行之前拿到自己的下标，否则 `lines` 区间无法回填。
-    fn push_block(&mut self, node: NodeId, x: f32, y: f32, width: f32, text: String) -> usize {
+    ///
+    /// `border_box` 见 [`BlockBox::border_box`]：`block_uncached` 走 true，
+    /// `wrap_paragraph` 的内容盒副本走 false。
+    fn push_block(
+        &mut self,
+        node: NodeId,
+        x: f32,
+        y: f32,
+        width: f32,
+        text: String,
+        border_box: bool,
+    ) -> usize {
         let start = self.lines.len();
         self.blocks.push(BlockBox {
             node,
@@ -1615,6 +1634,7 @@ impl<'a> Ctx<'a> {
             height: 0.0,
             text,
             lines: start..start,
+            border_box,
         });
         self.blocks.len() - 1
     }
@@ -1835,9 +1855,15 @@ impl<'a> Ctx<'a> {
         let height = (acc.ascent + acc.descent).max(0.0);
         // 基线离行顶就是累积出来的上方 extent（每个片段自己那份 leading 已经算在里面）。
         let baseline = acc.ascent;
+        // 纯图片行不吃首行缩进：一行里只有一张图（封面页的常态）时，把读者偏好的
+        // 2em 缩进套上去只会把整幅宽的图推出版心右缘（《斗战狂潮》封面踩过）。
+        // 对齐仍有效：居中样式的图片按整幅版心居中，与块级图片同一待遇。
+        let image_only = acc.fragments.len() == 1 && matches!(acc.fragments[0], LineFragment::Image(_));
+        let indent = if image_only { 0.0 } else { place.indent };
+        let reserved = if image_only { 0.0 } else { place.reserved };
         // 可用宽要扣掉这一行让出去的左边距（首行的 `text-indent`、被首字符压着的
         // 那几行让开的一格），否则居中的标题会按整幅宽算偏移，把字推出版心。
-        let avail = (place.width - place.indent - place.reserved).max(1.0);
+        let avail = (place.width - indent - reserved).max(1.0);
         let offset = match style.text_align {
             TextAlign::Right => (avail - acc.width).max(0.0),
             TextAlign::Center => (avail - acc.width).max(0.0) / 2.0,
@@ -1846,7 +1872,7 @@ impl<'a> Ctx<'a> {
         self.lines.push(LineBox {
             owner,
             fragments: acc.fragments,
-            x: place.x + place.indent + offset,
+            x: place.x + indent + offset,
             y: place.y,
             width: acc.width,
             height,
@@ -3110,6 +3136,34 @@ mod tests {
         // 图片底贴基线，行盒还要容下文字 descender，所以 ≥ 图片高。
         assert!(layout.lines[0].height >= 40.0, "行盒要装下图片高度");
         assert_eq!(layout.lines[0].baseline, 40.0, "图片底贴基线");
+    }
+
+    /// 纯图片行不吃首行缩进：一行里只有一张图时，`text-indent` 若照样套上去，
+    /// 整幅宽的封面图会被推出版心右缘（真书《斗战狂潮》封面页踩过）。
+    /// 图文混排的首行不受影响：缩进是 CSS 语义，照套。
+    #[test]
+    fn an_image_only_line_skips_the_first_line_indent() {
+        // 图片独占一行：x 不含 2em 缩进。
+        let imgs = MockImages(vec![("cover.jpg", 80.0, 150.0)]);
+        let (_, layout) = typeset_images(
+            "<p><img src=\"cover.jpg\"></p>",
+            "p { text-indent: 2em; font-size: 16px }",
+            120.0,
+            &imgs,
+        );
+        assert_eq!(layout.lines.len(), 1);
+        assert_eq!(layout.lines[0].x, 0.0, "纯图片行不缩进");
+        assert_eq!(layout.lines[0].width, 80.0);
+
+        // 图文混排：首行缩进照套（CSS 语义）。
+        let imgs = MockImages(vec![("pic.png", 20.0, 20.0)]);
+        let (_, layout) = typeset_images(
+            "<p>甲<img src=\"pic.png\"></p>",
+            "p { text-indent: 2em; font-size: 16px }",
+            200.0,
+            &imgs,
+        );
+        assert_eq!(layout.lines[0].x, 32.0, "图文混排的首行缩进不变");
     }
 
     /// 放不下的行内图要整体折到下一行，不能被拆开。

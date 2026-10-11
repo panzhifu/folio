@@ -10,8 +10,10 @@
 //! - [`modules`] —— 会话的三个功能模块：导航 / 位置 / 目录。
 //! - [`scene`] —— 排版结果 → 绘制单元（`GlyphRun` + 图片）。
 //! - [`view`] —— `impl Render`：把会话状态摆成元素、接住滚轮。
+//! - [`selection_menu`] —— 选中的就地菜单（图标格子卡）与它的摆位判断。
 //! - [`page`] —— 被外壳 push 进书架栈的那一屏：干净态两条小字 + 浮出的顶栏与底栏。
 //! - [`chrome`] —— 纯判断（分区、面板档位、模式退档、进度念法），无 gpui，宿主测试直接跑。
+//! - [`bands`] —— 干净态那两条读数带（顶上章名、底下位置与进度）。
 //! - [`paint`] —— 字形级绘制元素（`shape_line` / `paint_glyph`）。
 //!
 //! 这里**没有 `cfg`**：以前桌面是「`TextView` + 虚拟列表」、移动是「自绘字形」两套实现，
@@ -20,6 +22,7 @@
 //! - 外壳占的是宽还是高：[`Reserve`] 两个轴都带着，谁用哪个由模式自己决定。
 //! - 正文家族在这台设备上解析不解析得出来：`crate::ui::host`。
 
+mod bands;
 mod book;
 mod book_fonts;
 mod chrome;
@@ -29,6 +32,7 @@ mod modules;
 mod page;
 mod paint;
 mod scene;
+mod selection_menu;
 mod session;
 mod view;
 

@@ -109,6 +109,20 @@ cd crates/folio-app
 cargo ndk -t arm64-v8a -P 26 -o android/app/src/main/jniLibs build --release --lib
 ```
 
+打包安装启动走系统里的 Gradle（本机 9.8.0），**不用 `./gradlew`** —— wrapper 会重新
+下载发行版，而 wrapper 缓存里那份 9.4.1 已删；`--offline` 保证依赖只来自本地缓存，
+冷缓存的新机器去掉它即可：
+
+```bash
+cd crates/folio-app/android
+gradle assembleDebug --offline
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n dev.folio.reader/dev.gpui.mobile.GpuiActivity
+```
+
+重打出比上一份大得离谱的 APK（实测 372M 对 36M）不是依赖坏了：AGP 的 zipflinger
+复用旧 APK 就地改写，新内容比旧的小时留下空洞。删掉 outputs 里的旧 APK 再打就好。
+
 只想过一遍移动端的类型检查、不出 `.so`，用裸 `cargo check` 并把 NDK 的 C 工具链指全 ——
 `cargo ndk` 会自动注入这几个变量，裸 `cargo` 不会，缺 `AR` 时 `libsqlite3-sys` 会在打包静态库那步失败：
 

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// 变体名（`En` / `ZhHans`）当唯一合法值，而界面上、`locales/` 那三份的文件名里、
 /// 以及 `code()` 给的标签都是 `en` / `zh-CN` / `ja` —— 读者照自己看到的写法手改
 /// `config.json` 就会读失败。失败在这里不是小事：`Config::load_from` 读不出来时会把
-/// **整节** `language` 退回默认值（也就是「跟随系统」），于是读者刚选的语言被无声改掉，
+/// **整节** `language` 退回默认值（简体中文），于是读者刚选的语言被无声改掉，
 /// 界面下一次打开还是他看不懂的那门语言。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Locale {
@@ -66,11 +66,11 @@ impl Locale {
     /// 宽松到「凡是人能写出来的形式都认」：`en`、`en-US`、`EN_us`、以及 BCP-47 的
     /// `zh-Hans-CN`。老配置文件里还可能是 derive 时代的 serde 变体名 `En` / `ZhHans`，
     /// 语言自己的名字 `English` / `简体中文` 同样认 —— 那些文件必须继续读得出来，
-    /// 读失败的那一节会退回「跟随系统」，等于把读者选过的语言无声改掉
+    /// 读失败的那一节会退回默认值（简体中文），等于把读者选过的语言无声改掉
     /// （见上面的 `Deserialize` 与 `config.rs::salvage`）。
     ///
-    /// 与 [`Locale::parse`] 的区别只在覆盖面：`parse` 认的是环境变量的形如
-    /// `zh_CN.UTF-8` 的前缀写法，这里还要认标签、变体名和本族名。
+    /// 与 [`Locale::parse`] 的区别只在覆盖面：`parse` 只认 `zh`/`en`/`ja` 打头的
+    /// 前缀写法（BCP-47 标签就够它认），这里还要认变体名和本族名。
     pub fn from_label(input: &str) -> Option<Locale> {
         if let Some(found) = Locale::parse(input) {
             return Some(found);
@@ -114,24 +114,6 @@ impl Locale {
         }
     }
 
-    /// 跟随系统环境。`LANGUAGE`（glibc 的优先级列表）先看，再看 `LC_ALL`/`LANG`。
-    /// 认不出来的语言用默认值，不猜成英文 —— 猜错会让首次启动的界面整体变味。
-    pub fn detect() -> Locale {
-        for key in ["LANGUAGE", "LC_ALL", "LANG"] {
-            let Ok(value) = std::env::var(key) else {
-                continue;
-            };
-            let value = value.split(':').next().unwrap_or("").to_string();
-            if value.is_empty() || value.eq_ignore_ascii_case("C") || value == "POSIX" {
-                continue;
-            }
-            if let Some(locale) = Self::parse(&value) {
-                return locale;
-            }
-        }
-        Locale::default()
-    }
-
     /// 该语言里 `n` 是否用「单数」那条文案。中日文没有单复数形态变化。
     ///
     /// rust-i18n 4 不做复数，所以「选哪条文案」这件事留在这里由我们判断。
@@ -148,7 +130,8 @@ impl Locale {
     }
 }
 
-/// 当前生效的界面语言。没同步过配置时（测试、移动端宿主）就是系统语言。
+/// 当前生效的界面语言。没同步过配置时（测试）就是 rust_i18n 自己的缺省 locale
+/// （`en`）；真机上 [`crate::Config`] 一装好就会 apply 一次，之后跟着配置走。
 pub fn current() -> Locale {
     Locale::parse(&rust_i18n::locale()).unwrap_or_default()
 }
@@ -355,7 +338,8 @@ mod tests {
     }
 
     /// 配置文件里人能写出来的形式，以及 **derive serde 时代写进老配置里的变体名**。
-    /// 老文件必须继续认得：读失败的那一节会退回「跟随系统」，等于把读者选过的语言无声改掉。
+    /// 老文件必须继续认得：读失败的那一节会退回默认值（简体中文），
+    /// 等于把读者选过的语言无声改掉。
     #[test]
     fn from_label_accepts_every_spelling_a_human_or_an_old_version_writes() {
         for (input, want) in [
@@ -409,15 +393,9 @@ mod tests {
             Locale::ZhHans
         );
         // 认不出的值要**报错**，好让 `Config::load_from` 的分节补救接管 ——
-        // 静默回落某一个语言会把「跟随系统」和「简体中文」混成一件事。
+        // 静默吞成一个看似合理的语言，读者手改配置出错时就得不到任何反馈。
         assert!(serde_json::from_str::<Locale>(r#""klingon""#).is_err());
         assert!(serde_json::from_str::<Locale>("3").is_err());
-    }
-
-    #[test]
-    fn unknown_system_locale_falls_back_to_the_default() {
-        // detect 读环境变量，所以只能断言「它一定给出三种之一」而不是具体某个。
-        assert!(Locale::ALL.contains(&Locale::detect()));
     }
 
     #[test]

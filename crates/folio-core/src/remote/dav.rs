@@ -119,11 +119,11 @@ impl Client {
     }
 
     /// 列一层。`path` 为空就是根。
-    pub async fn list(&self, path: &str) -> Result<Vec<Entry>> {
+    pub fn list(&self, path: &str) -> Result<Vec<Entry>> {
         let resp = self
             .transport
             .request(propfind_request(&self.endpoint, path))
-            .await?;
+            ?;
         check_status(&resp, &[207, 200])?;
         let raw = parse_multistatus(&String::from_utf8_lossy(&resp.body))?;
         let entries = children(&self.endpoint, &raw);
@@ -137,24 +137,24 @@ impl Client {
     }
 
     /// 读一个小对象（备份那份 JSON）。整本书走 [`Client::download`]，不要读进内存。
-    pub async fn get(&self, path: &str) -> Result<Vec<u8>> {
+    pub fn get(&self, path: &str) -> Result<Vec<u8>> {
         let resp = self
             .transport
             .request(self.authed(Method::Get, path, false))
-            .await?;
+            ?;
         check_status(&resp, &[200, 206])?;
         Ok(resp.body)
     }
 
     /// 写一个小对象。父目录必须已存在，所以流程上是 `mkdir` 在前。
-    pub async fn put(&self, path: &str, body: Vec<u8>) -> Result<()> {
+    pub fn put(&self, path: &str, body: Vec<u8>) -> Result<()> {
         let mut req = self.authed(Method::Put, path, false);
         // 声明成 octet-stream 而不是 json：这里的内容是我们自己写的，不需要服务器解释，
         // 而各家对 octet-stream 的接受度是唯一一个能当常量用的东西。
         req.headers
             .push(("Content-Type".into(), "application/octet-stream".into()));
         req.body = body;
-        let resp = self.transport.request(req).await?;
+        let resp = self.transport.request(req)?;
         check_status(&resp, &[201, 204, 200])
     }
 
@@ -162,11 +162,11 @@ impl Client {
     ///
     /// 「已经存在」在协议上没有统一说法（405 / 409 / 423 都见得到），而备份流程要的是
     /// 「这个目录可用」，不是「我亲手建了它」，所以这三种都算成功。
-    pub async fn mkdir(&self, path: &str) -> Result<()> {
+    pub fn mkdir(&self, path: &str) -> Result<()> {
         let resp = self
             .transport
             .request(self.authed(Method::Mkcol, path, true))
-            .await?;
+            ?;
         if matches!(resp.status, 201 | 200 | 405 | 409 | 423) {
             return Ok(());
         }
@@ -174,11 +174,11 @@ impl Client {
     }
 
     /// 下载到一个 [`Sink`]。字节怎么落地（临时文件、改名、清理）是 sink 的事。
-    pub async fn download(&self, path: &str, sink: Box<dyn Sink>, cancel: &Cancel) -> Result<u64> {
+    pub fn download(&self, path: &str, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64> {
         let got = self
             .transport
-            .download(self.authed(Method::Get, path, false), sink, cancel.clone())
-            .await;
+            .download(self.authed(Method::Get, path, false), sink, cancel)
+            ;
         match &got {
             Ok(bytes) => tracing::debug!("dav: 下载 {:?} → {bytes} 字节", path),
             // 取消与真失败在界面上是两种表现（一个安静地回到原页，一个报错），
@@ -587,62 +587,36 @@ impl Mock {
 
 #[cfg(test)]
 impl Transport for Mock {
-    fn request(&self, req: Request) -> super::BoxFuture<Result<Response>> {
-        let answer = self.answer(req);
-        Box::pin(async move { answer })
+    fn request(&self, req: Request) -> super::Result<Response> {
+        self.answer(req)
     }
 
     /// 照 [`Transport::download`] 的契约实现：块之间检查取消，结束时 `finish` 与 `abort`
-    /// 恰好调一个。真实实现也在 app 侧守着同一条，所以这条契约在这里被当协议测。
-    fn download(
-        &self,
-        req: Request,
-        mut sink: Box<dyn Sink>,
-        cancel: Cancel,
-    ) -> super::BoxFuture<Result<u64>> {
-        let answer = self.answer(req);
-        let chunks = self.chunks.clone();
-        Box::pin(async move {
-            // 先让 `download` 也能被「没给响应」的用例测到，再决定要不要写块。
-            answer?;
-            let mut written = 0u64;
-            for chunk in chunks {
-                if cancel.triggered() {
-                    sink.abort();
-                    return Err(Error::Cancelled);
-                }
-                match sink.write(&chunk) {
-                    Ok(()) => written += chunk.len() as u64,
-                    Err(e) => {
-                        sink.abort();
-                        return Err(Error::Io(e));
-                    }
-                }
+    /// 恰好调一个。真实实现守着同一条，所以这条契约在这里被当协议测。
+    fn download(&self, req: Request, sink: &mut dyn Sink, cancel: &Cancel) -> super::Result<u64> {
+        // 先让 `download` 也能被「没给响应」的用例测到，再决定要不要写块。
+        self.answer(req)?;
+        let mut written = 0u64;
+        for chunk in &self.chunks {
+            if cancel.triggered() {
+                sink.abort();
+                return Err(Error::Cancelled);
             }
-            match sink.finish() {
-                Ok(()) => Ok(written),
+            match sink.write(chunk) {
+                Ok(()) => written += chunk.len() as u64,
                 Err(e) => {
                     sink.abort();
-                    Err(Error::Io(e))
+                    return Err(Error::Io(e));
                 }
             }
-        })
-    }
-}
-
-/// 测试专用：驱动一个「第一次 poll 就该完成」的 future。
-///
-/// 本 crate 里没有 runtime（`folio-core` 不碰异步生态是刻意的），而 [`Mock`] 的 future
-/// 全部立即就绪，所以一次 poll 就够。**挂起型的 future 不该走这条路** —— 它会在这里直接
-/// panic，而不是变成一场偶发的死等。
-#[cfg(test)]
-pub(crate) fn poll_ready<F: std::future::Future>(fut: F) -> F::Output {
-    use std::task::{Context, Poll};
-    let mut fut = std::pin::pin!(fut);
-    let mut cx = Context::from_waker(std::task::Waker::noop());
-    match fut.as_mut().poll(&mut cx) {
-        Poll::Ready(v) => v,
-        Poll::Pending => panic!("假传输给了一个没就绪的 future"),
+        }
+        match sink.finish() {
+            Ok(()) => Ok(written),
+            Err(e) => {
+                sink.abort();
+                Err(Error::Io(e))
+            }
+        }
     }
 }
 
@@ -719,14 +693,14 @@ mod tests {
           </d:prop></d:propstat>
         </response></d:multistatus>"#;
         let (client, _mock) = client(vec![ok207(xml)]);
-        let entries = poll_ready(client.list("")).unwrap();
+        let entries = client.list("").unwrap();
         assert_eq!(entries[0].name, "蜗牛 & 熊 中，与“引号”");
     }
 
     #[test]
     fn list_returns_one_level_with_decoded_paths() {
         let (client, mock) = client(vec![ok207(SHELF)]);
-        let entries = poll_ready(client.list("")).expect("应当解析出列表");
+        let entries = client.list("").expect("应当解析出列表");
         let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
         // 被查询的集合自己不该出现在结果里。
         assert_eq!(paths, ["斗战狂潮", "shejie.epub"]);
@@ -744,7 +718,7 @@ mod tests {
     #[test]
     fn propfind_carries_depth_one_and_basic_credentials() {
         let (client, mock) = client(vec![ok207(SHELF)]);
-        poll_ready(client.list("")).unwrap();
+        client.list("").unwrap();
         let req = mock.last_request();
         // 钉住这个值：以后改凭据来源（钥匙串、应用密码）时这条必须跟着变，
         // 否则等于悄悄换了认证方式而没人知道。`noke:app-pass` 的 base64。
@@ -825,7 +799,7 @@ mod tests {
         let xml = r#"<multistatus xmlns="DAV:"><response><href>/dav/books/a.epub</href>
         <propstat><prop><getcontentlength>10</getcontentlength></prop></propstat></response></multistatus>"#;
         let (client, _mock) = client(vec![ok207(xml)]);
-        let entries = poll_ready(client.list("")).unwrap();
+        let entries = client.list("").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "a.epub");
         assert_eq!(entries[0].size, Some(10));
@@ -846,7 +820,7 @@ mod tests {
             <d:status>HTTP/1.1 404 Not Found</d:status></d:response>
         </d:multistatus>"#;
         let (client, _mock) = client(vec![ok207(xml)]);
-        let entries = poll_ready(client.list("")).unwrap();
+        let entries = client.list("").unwrap();
         assert_eq!(
             entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
             ["keep.epub"]
@@ -860,7 +834,7 @@ mod tests {
           <d:propstat><d:prop><d:displayname>斗战狂潮.epub</d:displayname></d:prop></d:propstat>
         </response></d:multistatus>"#;
         let (client, _mock) = client(vec![ok207(xml)]);
-        let entries = poll_ready(client.list("")).unwrap();
+        let entries = client.list("").unwrap();
         assert_eq!(entries[0].name, "斗战狂潮.epub");
         assert_eq!(
             entries[0].path, "x-123.epub",
@@ -918,7 +892,7 @@ mod tests {
     #[test]
     fn list_of_a_subdirectory_queries_that_collection_url() {
         let (client, mock) = client(vec![ok207(SHELF)]);
-        poll_ready(client.list("斗战狂潮")).unwrap();
+        client.list("斗战狂潮").unwrap();
         assert_eq!(
             mock.last_request().url,
             "https://dav.example.com/dav/books/%E6%96%97%E6%88%98%E7%8B%82%E6%BD%AE/"
@@ -950,7 +924,7 @@ mod tests {
         let log = Log::default();
         let (client, _mock) = client(vec![Response::new(200, Vec::new())]);
         let n =
-            poll_ready(client.download("a.epub", Box::new(log.clone()), &Cancel::new())).unwrap();
+            client.download("a.epub", &mut log.clone(), &Cancel::new()).unwrap();
         assert_eq!(n, 7, "abc + defg");
         assert_eq!(
             log.0.lock().unwrap().as_slice(),
@@ -983,7 +957,7 @@ mod tests {
         let (client, _mock) = client(vec![Response::new(200, Vec::new())]);
         let cancel = Cancel::new();
         cancel.trigger();
-        let err = poll_ready(client.download("a.epub", Box::new(log.clone()), &cancel))
+        let err = client.download("a.epub", &mut log.clone(), &cancel)
             .expect_err("取消要当成一次失败返回");
         assert!(matches!(err, Error::Cancelled), "{err:?}");
         assert_eq!(log.0.lock().unwrap().as_slice(), ["abort"]);
@@ -995,8 +969,8 @@ mod tests {
             Response::new(201, Vec::new()),
             Response::new(204, Vec::new()),
         ]);
-        poll_ready(client.mkdir("备份/书库")).unwrap();
-        poll_ready(client.put("备份/书库/folio.json", b"{}".to_vec())).unwrap();
+        client.mkdir("备份/书库").unwrap();
+        client.put("备份/书库/folio.json", b"{}".to_vec()).unwrap();
         let seen = mock.seen.lock().unwrap();
         assert_eq!(seen[0].method, Method::Mkcol);
         assert!(
@@ -1018,7 +992,7 @@ mod tests {
         // 第二次跑备份会撞「目录已存在」，各家给的状态码不统一，流程不该因此中断。
         for status in [405u16, 409, 423] {
             let (client, _mock) = client(vec![Response::new(status, Vec::new())]);
-            poll_ready(client.mkdir("备份")).expect("已存在就等于可用");
+            client.mkdir("备份").expect("已存在就等于可用");
         }
     }
 

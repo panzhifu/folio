@@ -1,14 +1,16 @@
 # 后台任务管线与导入管线
 
-> 状态：**后端（folio-core）已完成**；应用层还没接（`folio-app` 当前因未完成的模块搬迁编不过，
-> 见文末）。两个模块都在 core，不依赖 gpui，`cargo test -p folio-core` 全量覆盖。
+> 状态：**两端都接上了，且导入管线已在 2026-10-11 换成 trait 形状**（见
+> `plans/import-trait.md`：落库进管线、`Store` 变 `Sync`、七种来源）。本文保留的是
+> `folio_core::task` 那条通用后台任务管线的记录；`import` 一节的历史结论
+> （「落库留在调用方」）已经不成立，以 trait 文档为准。
 
 ## 为什么
 
-导入以前是**同步跑在 UI 线程**上的（`shelf/view.rs::import_step`）：拷文件 → 解析 → 写库，
-五步一路 `?`。解析一本 EPUB 是几十到几百毫秒，一次选十本就是几秒的卡顿；而这几件事本来
-就不需要窗口。于是把「可取消、可报进度的作业丢到后台」这件事做成一条通用管线，导入是它的
-第一个用户。
+导入曾经**同步跑在 UI 线程上**（`shelf/view.rs` 里的 `import_one` / `import_step`）：
+拷文件 → 解析 → 写库，五步一路 `?`。解析一本 EPUB 是几十到几百毫秒，一次选十本就是几秒的
+卡顿；而这几件事本来不需要窗口。于是把「可取消、可报进度的作业丢到后台」这件事做成一条
+通用管线，导入是它的第一个用户。
 
 ## 一、通用后台任务管线：`folio_core::task`
 
@@ -67,22 +69,42 @@ for event in handle.events {
   不把整批拖垮。对应旧流程里「一次选多本是常态」的取舍。
 - **进度**：每开始一个源报一次 `done/total`（配「导入《名字》」），收尾再报一次完成。
 - **取消**：在**源与源之间**检查；单个源内部（拷贝 / 解析）不可中断。
-- **落库留在调用方**：`Imported` 里带着解析好的 `Box<dyn Document>` 与副本路径，
-  `Store::add_book` / `save_document` 由调用方做 —— `Store` 里的 `rusqlite::Connection` 是
-  `Send` 但**不是** `Sync`，搬到工作线程要么挪走要么套锁，而写库是毫秒级的一步，
-  留在它本来的线程上最干净。管线的职责到此为止：把最贵的拷贝与解析挪到后台。
+- ~~**落库留在调用方**~~ **（已过时）**：`Store` 内部加了一把 `Mutex` 之后
+  `Send + Sync`，落库（`add_book` + `save_document`）已经搬进管线、逐本在后台完成
+  —— `ImportOutcome` 也随之从 `Imported{.., document}` 换成了 `Registered{book_id, ..}`。
+  锁纪律与理由见 `plans/import-trait.md` 第二节。
 
-## 测试（`cargo test -p folio-core`，新增 8 条）
+## 测试（`cargo test -p folio-core`，新增 9 条）
 
 - `task::*`：作业跑起来 + 进度 + 结果、失败带回错原文、取消落 `Cancelled`、
   一批作业都完成（4 条线程）、关停回收线程。
-- `import::*`：逐源拷贝 + 解析、坏源不拖垮整批、一上来取消则一个源都不碰。
+- `import::*`：逐源拷贝 + 解析（副本保留原名、内容与原件一致、原件不动）、
+  同名重复导入落到同一个文件、坏源不拖垮整批、一上来取消则一个源都不碰。
 
-## 还没做的（应用层）
+## 应用层接上的样子
 
-- `folio-app` 编不过（未完成的模块搬迁：`features/reader/mod.rs` 没声明 `mod document; mod measure;`，
-  `view.rs` 还 import 旧的 `shared::document` / `shared::measure`，且 `book_fonts` 模块缺失、
-  `BookImages::new` 少一个参数）。所以**核心管线已备好，但书架还没改成调它**。
-- 接法（下一步）：`ShelfView` 持一个 `TaskManager<Vec<ImportOutcome>>`；选文件后
-  `submit_import`，每帧读事件更新进度条，`Finished` 后对每条成功的 `Imported` 调
-  `store.add_book` + `save_document` 并刷新架面。
+- `ShelfView::open_picker` 选完文件就 `submit_import`：拷贝与解析都在工作线程上，界面线程
+  只留两件本来就该它做的事 —— 读配置里的书库位置、把解析好的结果登记进库。
+- 工作线程池是**进程级一份、一条线程**（`shelf/view.rs::import_queue`）。一份而不是每屏一份：
+  `TaskManager` 被丢弃时会 join 它的工作线程，挂在架面上就等于切走这一屏时把界面线程钉住。
+  一条而不是按核数开：副本按原文件名落进书库、同名即覆盖，两批并发写同一个目标文件会拷出半本。
+- 事件回流：管线交回的是 `std::sync::mpsc::Receiver`（只会阻塞读它的那条线程），所以在后台读、
+  逐条转进 `async_channel`，界面那侧 `await`。架面因此在命令行与网格之间画一行读数
+  （`shelf.importing` / `shelf.importing_of`）。
+- 前端那份重复实现已经删掉：`ui/shared/library.rs::stage`、`shelf/view.rs` 的 `import_one` /
+  `import_step` 都不在了，界面侧只剩 `register_imported`（记书目 + 落章节）。
+- 接线测试：`ui/shared/library::tests::the_shelf_registers_what_the_backends_pipeline_handed_back`
+  真的走一遍后端管线再把结果喂给落库，钉住「记的是书库里的副本而不是选择器的临时路径」
+  「章节要跟着落库」「坏的那本不拖垮整批」。去掉 `save_document` 那一步它会红。
+
+## 还没做的（2026-10-11 复核）
+
+- ~~**取消入口**~~ **已做**：读数行旁有「取消」；`Cancelled` 的语义改成了
+  「已落库的那些是真的」（取消在书与书之间检查），架面收到就重查一次。
+- **进度条**：读数还是一行文字；`StageCtx` 已有字节级 `bytes` 读数（`TaskEvent::Bytes`），
+  链接下载接上后可以画真正的进度条 —— 界面目前对 `Bytes` 只记日志。
+- ~~`Progress::message` 是 core 写死的中文~~ **已改**：`StageCtx::message` 只进日志，
+  屏幕文案由界面按 locale 组。
+- `reader/session.rs::open_document` **不算**导入，没有接进管线：它不拷文件，只是把已经躺在
+  设备上的那一本登记进库，好让阅读进度有 `book_id` 可回写。管线的 `Policy::copy_in = false`
+  就是给这类入口留的位。

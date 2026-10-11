@@ -16,7 +16,8 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 
 use super::{
-    Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes, image_dims,
+    Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
+    image_dims,
     shrink_image, stem_of,
 };
 use crate::Result;
@@ -24,9 +25,82 @@ use crate::error::IoResultExt as _;
 
 /// 封面上限与 EPUB 同一条口径（见 `epub` 里的 `COVER_MAX_EDGE`）：书架用缩略图，
 /// 原图随时能从文件里再解一次，不该在库里留第二份。
-const COVER_MAX_EDGE: u32 = 1024;
+const COVER_MAX_EDGE: u32 = 512;
 
 pub struct Fb2Adapter;
+
+/// `with_text == false` 的那一趟：章表只有标题与序号，正文等打开时再扫。
+fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
+    let raw = std::fs::read_to_string(path).io_path(path)?;
+    let parsed = parse_metadata(&raw);
+
+let images: Vec<ImageRes> = parsed
+        .binaries
+        .iter()
+        .map(|b| {
+            let (width, height) = image_dims(&b.bytes);
+            ImageRes {
+                href: b.id.clone(),
+                media_type: b.media_type.clone(),
+                width,
+                height,
+            }
+        })
+        .collect();
+    let cover = parsed
+        .cover_id
+        .as_ref()
+        .and_then(|id| parsed.binaries.iter().find(|b| &b.id == id))
+        .map(|b| match shrink_image(&b.bytes, COVER_MAX_EDGE) {
+            Some((bytes, _)) => bytes,
+            None => b.bytes.clone(),
+        });
+
+    let title = if parsed.title.is_empty() {
+        stem_of(path)
+    } else {
+        parsed.title
+    };
+    let mut chapters = parse_chapters(&raw);
+    if chapters.is_empty() {
+        // 结构怪到一段正文都没抽出来时，仍然给一章空白，让「打开了一本没内容的书」
+        // 与「打不开这本书」在界面上能分开。
+        chapters.push(Chapter::inline(title.clone(), "<body></body>"));
+    }
+    let meta = DocMeta {
+        title,
+        authors: parsed.authors,
+        format: Format::Fb2,
+        size: raw.len() as u64,
+    };
+    // 索引那一趟：章表只留标题与序号。
+    let chapters = if with_text {
+        chapters
+    } else {
+        chapters
+            .into_iter()
+            .enumerate()
+            .map(|(ix, chapter)| Chapter::section(chapter.title.clone(), ix))
+            .collect()
+    };
+    let flow = FlowDoc {
+        chapters,
+        css: String::new(),
+        css_hrefs: Vec::new(),
+        toc: Vec::new(),
+        cover,
+        images,
+    };
+    tracing::debug!(
+        "fb2: {} 读到 {} 章、{} 张内嵌图、封面 {}",
+        path.display(),
+        flow.chapters.len(),
+        flow.images.len(),
+        flow.cover.as_ref().map_or("无", |_| "有"),
+    );
+    Ok((meta, Content::Reflow(flow)))
+}
+
 
 impl DocumentProvider for Fb2Adapter {
     fn format(&self) -> Format {
@@ -37,69 +111,49 @@ impl DocumentProvider for Fb2Adapter {
         matches!(super::extension_of(path).as_deref(), Some("fb2"))
     }
 
-    fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        let raw = std::fs::read_to_string(path).io_path(path)?;
-        let parsed = parse_metadata(&raw);
-
-        let images: Vec<ImageRes> = parsed
-            .binaries
-            .iter()
-            .map(|b| {
-                let (width, height) = image_dims(&b.bytes);
-                ImageRes {
-                    href: b.id.clone(),
-                    media_type: b.media_type.clone(),
-                    width,
-                    height,
-                }
-            })
-            .collect();
-        let cover = parsed
-            .cover_id
-            .as_ref()
-            .and_then(|id| parsed.binaries.iter().find(|b| &b.id == id))
-            .map(|b| match shrink_image(&b.bytes, COVER_MAX_EDGE) {
-                Some((bytes, _)) => bytes,
-                None => b.bytes.clone(),
-            });
-
-        let title = if parsed.title.is_empty() {
-            stem_of(path)
-        } else {
-            parsed.title
-        };
-        let mut chapters = parse_chapters(&raw);
-        if chapters.is_empty() {
-            // 结构怪到一段正文都没抽出来时，仍然给一章空白，让「打开了一本没内容的书」
-            // 与「打不开这本书」在界面上能分开。
-            chapters.push(Chapter {
-                title: title.clone(),
-                spine_href: String::new(),
-                source: "<body></body>".into(),
-            });
-        }
-        let meta = DocMeta {
-            title,
-            authors: parsed.authors,
-            format: Format::Fb2,
-            size: raw.len() as u64,
-        };
-        let flow = FlowDoc {
-            chapters,
-            css: String::new(),
-            toc: Vec::new(),
-            cover,
-            images,
-        };
-        tracing::debug!(
-            "fb2: {} 读到 {} 章、{} 张内嵌图、封面 {}",
-            path.display(),
-            flow.chapters.len(),
-            flow.images.len(),
-            flow.cover.as_ref().map_or("无", |_| "有"),
-        );
-        Ok((meta, Content::Reflow(flow)))
+    /// 只读索引：章表（标题 + 序号）、封面、内嵌图元数据。
+    ///
+    /// FB2 是**单文件 XML**，标题与正文出自同一趟扫描，所以这一趟仍然要过一遍
+    /// XML —— 省下的是把每一段的 XHTML 拼出来（`parse_chapters` 里那部分），
+    /// 不是读盘。
+    fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
+        read_with(path, false)
     }
+
+    /// 单文件容器里的第 N 章：重新扫一遍 XML 取第 N 段。
+    fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
+        let index = match at {
+            ChapterLocator::Section(index) => *index,
+            other => {
+                return Err(crate::Error::ChapterUnavailable {
+                    path: path.to_path_buf(),
+                    index: 0,
+                    at: format!("{other:?}"),
+                });
+            }
+        };
+        let (_, content) = read_with(path, true)?;
+        let Content::Reflow(flow) = content else {
+            return Err(crate::Error::ChapterUnavailable {
+                path: path.to_path_buf(),
+                index,
+                at: format!("{at:?}"),
+            });
+        };
+        flow.chapters
+            .get(index)
+            .map(|c| c.source().to_string())
+            .ok_or_else(|| crate::Error::ChapterUnavailable {
+                path: path.to_path_buf(),
+                index,
+                at: format!("{at:?}"),
+            })
+    }
+
+    fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
+        read_with(path, true)
+    }
+
 
     fn image_bytes(&self, path: &Path, href: &str) -> Option<Vec<u8>> {
         // 图片在文件里是 base64 的 `<binary>`，每次按 id 现解一次 —— 与 EPUB 每次
@@ -468,16 +522,15 @@ fn flush(chapters: &mut Vec<Chapter>, buf: &mut String, chapter_title: &mut Stri
     let source = std::mem::take(buf);
     let title = std::mem::take(chapter_title);
     let index = chapters.len();
-    chapters.push(Chapter {
-        title: if title.is_empty() {
+    chapters.push(Chapter::inline(
+        if title.is_empty() {
             format!("第 {} 节", index + 1)
         } else {
             title
         },
-        spine_href: format!("#{index}"),
         // 包一层 body：排版层从 body 往下找正文，缺了它只能退到文档根。
-        source: format!("<body>{source}</body>"),
-    });
+        format!("<body>{source}</body>"),
+    ));
 }
 
 /// 去掉标签与实体之后还有没有字，或者有没有一张图。
@@ -592,8 +645,8 @@ mod tests {
         let (_, flow) = flow(&path);
         assert_eq!(flow.chapters.len(), 2);
         assert_eq!(flow.chapters[0].title, "第一章");
-        assert!(flow.chapters[0].source.contains("<h1>第一章</h1>"));
-        assert!(flow.chapters[0].source.contains("<p>甲</p>"));
+        assert!(flow.chapters[0].source().contains("<h1>第一章</h1>"));
+        assert!(flow.chapters[0].source().contains("<p>甲</p>"));
         assert_eq!(flow.chapters[1].title, "第二章");
     }
 
@@ -613,7 +666,7 @@ mod tests {
         );
         let (_, flow) = flow(&path);
         assert_eq!(flow.chapters.len(), 1, "嵌套小节不另起一章");
-        let src = &flow.chapters[0].source;
+        let src = &flow.chapters[0].source();
         assert!(src.contains("<h1>卷一</h1>"), "{src}");
         assert!(src.contains("<h2>小节</h2>"), "{src}");
         assert!(src.contains("<p>里面</p>"), "{src}");
@@ -631,7 +684,7 @@ mod tests {
             ),
         );
         let (_, flow) = flow(&path);
-        let src = &flow.chapters[0].source;
+        let src = &flow.chapters[0].source();
         assert!(src.contains("前<em>着重</em>后"), "{src}");
         assert!(src.contains("<p>&#160;</p>"), "空行要留出空白：{src}");
     }
@@ -651,7 +704,7 @@ mod tests {
         );
         let (_, flow) = flow(&path);
         assert_eq!(flow.chapters.len(), 1);
-        assert!(!flow.chapters[0].source.contains("脚注"));
+        assert!(!flow.chapters[0].source().contains("脚注"));
     }
 
     #[test]
@@ -693,9 +746,9 @@ mod tests {
         );
         let (_, flow) = flow(&path);
         assert!(
-            flow.chapters[0].source.contains("<img src=\"pic.png\"/>"),
+            flow.chapters[0].source().contains("<img src=\"pic.png\"/>"),
             "{}",
-            flow.chapters[0].source
+            flow.chapters[0].source()
         );
     }
 

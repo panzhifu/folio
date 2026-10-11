@@ -163,7 +163,9 @@ fn check_flow(flow: &FlowDoc, issues: &mut Issues) {
 
     // 5. 章节源文本非空。
     for (ix, chapter) in flow.chapters.iter().enumerate() {
-        if chapter.source.trim().is_empty() {
+        // 正文可能还没取（索引那一趟只有位置，见 `ChapterText::At`）——
+        // 那种情况说不了「这一章是空的」，只有正文真在手上且真为空才算。
+        if matches!(&chapter.text, crate::format::ChapterText::Inline(text) if text.trim().is_empty()) {
             issues.push(
                 IssueKind::Warn,
                 &chapter.spine_href,
@@ -264,16 +266,8 @@ mod tests {
     fn duplicate_spine_href_is_a_warning() {
         let flow = FlowDoc {
             chapters: vec![
-                Chapter {
-                    title: "A".into(),
-                    source: "<p>a</p>".into(),
-                    spine_href: "chap.xhtml".into(),
-                },
-                Chapter {
-                    title: "B".into(),
-                    source: "<p>b</p>".into(),
-                    spine_href: "chap.xhtml".into(),
-                },
+                Chapter::inline("A", "<p>a</p>").with_spine_href("chap.xhtml"),
+                Chapter::inline("B", "<p>b</p>").with_spine_href("chap.xhtml"),
             ],
             ..Default::default()
         };
@@ -285,11 +279,9 @@ mod tests {
     #[test]
     fn toc_pointing_outside_spine_is_a_warning() {
         let flow = FlowDoc {
-            chapters: vec![Chapter {
-                title: "唯一一章".into(),
-                source: "<p>唯一一章</p>".into(),
-                spine_href: "chap1.xhtml".into(),
-            }],
+            chapters: vec![
+                Chapter::inline("唯一一章", "<p>唯一一章</p>").with_spine_href("chap1.xhtml"),
+            ],
             toc: vec![TocEntry {
                 title: "不存在的章".into(),
                 href: "nowhere.xhtml".into(),

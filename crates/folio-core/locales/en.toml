@@ -42,6 +42,8 @@ page_position = "Page %{index} of %{total}"
 mode_spread = "Two pages"
 # Selection menu bar (M6): actions expand in place, no popover.
 sel_copy = "Copy"
+sel_highlight = "Highlight"
+sel_chapter = "Select chapter"
 sel_paragraph = "Select paragraph"
 sel_cancel = "Cancel"
 
@@ -59,7 +61,6 @@ typography = "Text"
 layout = "Page"
 fonts = "Fonts"
 appearance = "Appearance"
-account = "Account"
 about = "About"
 library = "Library"
 
@@ -73,9 +74,9 @@ measure = "Text block"
 family = "Font family"
 themes = "Themes"
 custom_themes = "Custom themes"
-reader = "Reader"
 location = "Location"
-docs = "Documents"
+watch = "Folder watching"
+transfer = "Wi-Fi transfer"
 
 [field]
 font_size = "Font size"
@@ -104,17 +105,24 @@ theme_dir = "Themes folder"
 "theme_dir.desc" = "Extra `.json` themes dropped in here are read at the next launch."
 language = "Interface language"
 "language.desc" = "Language of the interface, not of the book text."
-account_name = "Reader name"
-"account_name.desc" = "Shown at the bottom of the sidebar; empty falls back to “Reader”."
 config_path = "Config file"
-"config_path.desc" = "Reading preferences and account live in this JSON file; copy it to move machines."
+"config_path.desc" = "Reading preferences live in this JSON file; copy it to move machines."
 library_dir = "Library folder"
 "library_dir.desc" = "Imported books are copied here. Leave it empty to be asked again on the next import."
 "library_dir.suggested" = "Suggested location"
+"watch" = "Watch a folder"
+"watch.desc" = "Watch an inbox folder: drop books in and they import themselves. Turning it on without a folder starts at the suggested one below."
+"watch.dir.pick" = "Choose watch folder…"
+"watch.suggested" = "Suggested inbox"
+"transfer" = "Wi-Fi transfer"
+
+"transfer.desc" = "Open the address below in a browser on the same Wi-Fi to push books straight to the shelf. The server runs until you turn it off — it never starts on its own."
+"transfer.off" = "Turn the switch on to see the address and the pairing code."
+"transfer.pin" = "Pairing code: %{pin}"
+"transfer.no_url" = "No LAN address found — type this device's IP in your browser (port is in the log)."
 "library_dir.pick" = "Choose folder…"
 
 [account]
-fallback_name = "Reader"
 settings = "Settings"
 theme = "Theme"
 library = "Library folder"
@@ -170,12 +178,54 @@ notes = "No annotations added yet"
 # 一个是动作，一个是去处。
 [shelf]
 search_placeholder = "Search titles or authors"
+# The top-right kebab: the button itself does nothing, it opens a menu of the
+# ways to import. This line is the accessibility label and the desktop tooltip.
+more = "Ways to import"
 import = "Import"
+# 导入进行中的那一行读数，摆在命令行与架面之间。后端报的第一条读数还没上来时总数
+# 不知道，那一句不带数字。
+importing = "Importing…"
+importing_of = "Importing %{done}/%{total}"
+# Device-wide scan. Scan only finds: candidates land on a checklist, the reader
+# picks and imports (checking = hand-picked, same name means update).
+cancel = "Cancel"
+url_import = "From link"
+url_title = "Import from a link"
+url_placeholder = "Paste a book download link (http…)"
+url_hint = "Downloading runs in the background; progress shows on the shelf. The title comes from the link's last segment."
+scan = "Scan"
+scan_title = "Find books on this device"
+scan_running = "Scanning…"
+scan_found = "Scanning… %{n} found"
+scan_stop = "Stop"
+scan_none = "No importable books found on this device"
+scan_summary = "%{n} found — check the ones to import"
+scan_skipped = "%{n} places unreadable (permissions), skipped"
+scan_truncated = "Too many books — showing part of the results"
+scan_row = "%{name} (%{size})"
+scan_on_shelf = "On shelf"
+scan_select_all = "Select all"
+scan_clear = "Clear"
+scan_import = "Import %{n} selected"
+scan_close = "Close"
+cancel_import = "Cancel"
 back = "Back"
 empty = "Your shelf is empty"
 empty_hint = "Use “Import” to pick an epub, markdown or text file"
 no_results = "No book matches"
 no_results_hint = "Try another word — this searches titles and authors, not the text"
+# The card's manage menu: long-press (mobile) or right-click (desktop), the same
+# component as the import menu on the toolbar. Open and info go first; delete
+# sits last behind a separator — a destructive action does not take the easy slot.
+book_open = "Open"
+book_info = "Book info"
+# The book-info panel: the facts of this one book, fetched from the library the
+# moment the menu item is tapped.
+info_title = "Book info"
+info_format = "Format"
+info_size = "Size"
+info_path = "File location"
+info_close = "Close"
 
 # 书库管理。删除项的措辞带书名：长按（移动端）或右键（桌面端）之后指点已经离开那一行，
 # 只有标题能让读者确认自己按的是哪一本。
@@ -190,18 +240,13 @@ confirm = "Confirm and import"
 cancel = "Cancel"
 pick_dir = "Choose folder…"
 
-# 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs），
-# 「开发方案」「已知缺口」是 docs/ 里那两份的原文 —— 这一页的全部价值就是它不会另说一套。
+# 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs）。
 [about]
 version = "Version"
 version_desc = "The version this running binary was built from."
 gpui_pre = "GPUI"
 kit = "Component layer (gpui-kit)"
 mobile = "Mobile platform layer"
-plan = "Development plan"
-limitations = "Known gaps"
-open_doc = "View"
-docs_note = "These two documents are the files in the repository, embedded at build time — not a summary written for this screen."
 
 # The first-run welcome screen: pick a library location before entering the app.
 # There is no cancel — either choose a folder or use the default location.

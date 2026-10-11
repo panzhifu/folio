@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes, extension_of,
-    image_dims, media_type_of, percent_decode, stem_of,
+    Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
+    extension_of, image_dims, media_type_of, percent_decode, stem_of,
 };
 use crate::Result;
 use crate::dom::{Dom, NodeId, NodeKind};
@@ -31,7 +31,21 @@ impl DocumentProvider for HtmlAdapter {
         )
     }
 
-    fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
+    /// 整篇一章：索引这一步读到的东西（标题 / CSS / 图片 / 封面）本来就要进库，
+    /// 正文等打开时再取。
+    /// 整篇就是那一章：重读一遍文件。
+    fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
+        match at {
+            ChapterLocator::Section(_) => std::fs::read_to_string(path).io_path(path),
+            other => Err(crate::Error::ChapterUnavailable {
+                path: path.to_path_buf(),
+                index: 0,
+                at: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
         let raw = std::fs::read_to_string(path).io_path(path)?;
         let title = document_title(&raw).unwrap_or_else(|| stem_of(path));
         let (css, images) = styles_and_images(&raw, path);
@@ -42,11 +56,7 @@ impl DocumentProvider for HtmlAdapter {
             size: raw.len() as u64,
         };
         let flow = FlowDoc {
-            chapters: vec![Chapter {
-                title,
-                spine_href: String::new(),
-                source: raw,
-            }],
+            chapters: vec![Chapter::section(title, 0)],
             css,
             images,
             ..Default::default()
@@ -241,7 +251,7 @@ mod tests {
         assert!(flow.css.contains("text-indent: 2em"), "{}", flow.css);
         // 正文原样透传：坐标系的稳定性靠「不转换」。
         assert_eq!(flow.chapters.len(), 1);
-        assert!(flow.chapters[0].source.contains("<p>x</p>"));
+        assert!(flow.chapters[0].source().contains("<p>x</p>"));
     }
 
     #[test]

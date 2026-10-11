@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format};
+use super::{Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format};
 use crate::Result;
 use crate::error::IoResultExt as _;
 
@@ -23,8 +23,19 @@ impl DocumentProvider for MarkdownAdapter {
         matches!(extension(path).as_deref(), Some("md" | "markdown"))
     }
 
+    /// 只分章、**不包装**：正文等翻开那一章再取。
+    fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
+        read(path, false, false)
+    }
+
+    /// 单文件容器里的第 N 章：重读一遍、重分一次章，取第 N 段。
+    /// 分章规则是确定的，所以同一个序号每次都指到同一章。
+    fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
+        section_source(path, false, at)
+    }
+
     fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        read(path, false)
+        read(path, false, true)
     }
 }
 
@@ -37,46 +48,93 @@ impl DocumentProvider for PlainTextAdapter {
         matches!(extension(path).as_deref(), Some("txt"))
     }
 
+    fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
+        read(path, true, false)
+    }
+
+    fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
+        section_source(path, true, at)
+    }
+
     fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        read(path, true)
+        read(path, true, true)
     }
 }
 
-fn read(path: &Path, plain: bool) -> Result<(DocMeta, Content)> {
+/// 读一遍、规范化、分章。返回 (书目, 规范化后的全文, 章表[纯文本])。
+///
+/// 分章本来就得把整份文本过一遍（标题在行里），所以「只读索引」这一趟省下的是
+/// **包装**（`from_plain_text`）与把正文搬来搬去，不是读盘 —— 单文件格式的
+/// I/O 是躲不掉的。
+fn load(path: &Path, plain: bool) -> Result<(DocMeta, String, Vec<Chapter>)> {
     let raw = std::fs::read_to_string(path).io_path(path)?;
     let source = normalize(&raw);
-    let mut chapters = if plain {
-        vec![Chapter {
-            title: stem(path),
-            spine_href: String::new(),
-            source: source.clone(),
-        }]
+    let chapters = if plain {
+        vec![Chapter::inline(stem(path), source.clone())]
     } else {
         split_chapters(&source, &stem(path))
     };
-    // 归一化收到的是一份**纯文本**（分章也是按纯文本的行做的），而引擎只吃 XHTML。
-    // 包装放在这里而不是界面里：`Chapter::source` 的契约是「引擎就绪」，
-    // 界面就不必知道哪个格式需要包一层（见 `super::xhtml` 的模块说明）。
-    for chapter in &mut chapters {
-        chapter.source = super::xhtml::from_plain_text(&chapter.source);
-    }
     let title = first_heading(&source).unwrap_or_else(|| stem(path));
-    Ok((
-        DocMeta {
-            title,
-            authors: Vec::new(),
-            format: if plain {
-                Format::Text
+    let meta = DocMeta {
+        title,
+        authors: Vec::new(),
+        format: if plain { Format::Text } else { Format::Markdown },
+        size: source.len() as u64,
+    };
+    Ok((meta, source, chapters))
+}
+
+/// 把一章的纯文本包成引擎就绪的 XHTML。
+///
+/// 包装放在这里而不是界面里：正文的契约是「引擎就绪」，界面就不必知道哪个格式
+/// 需要包一层（见 [`super::xhtml`] 的模块说明）。
+fn wrap(chapter: Chapter) -> Chapter {
+    let wrapped = super::xhtml::from_plain_text(chapter.source());
+    Chapter::inline(chapter.title.clone(), wrapped)
+}
+
+/// 索引那一趟：章表只留标题与位置，正文等翻开那一章再包。
+fn read(path: &Path, plain: bool, with_text: bool) -> Result<(DocMeta, Content)> {
+    let (meta, _source, chapters) = load(path, plain)?;
+    let chapters = chapters
+        .into_iter()
+        .enumerate()
+        .map(|(ix, chapter)| {
+            if with_text {
+                wrap(chapter)
             } else {
-                Format::Markdown
-            },
-            size: source.len() as u64,
-        },
-        Content::Reflow(FlowDoc {
-            chapters,
-            ..Default::default()
-        }),
-    ))
+                Chapter::section(chapter.title.clone(), ix)
+            }
+        })
+        .collect();
+    Ok((meta, Content::Reflow(FlowDoc { chapters, ..Default::default() })))
+}
+
+/// [`ChapterLocator::Section`] 那一路：重读整本、重分一次章，取第 N 段并包装。
+///
+/// 每次翻章都要过一遍全文件 —— 阅读会话按章缓存，所以一本书里一章只付一次
+/// （见 `reader::Book::chapter_text`）。
+fn section_source(path: &Path, plain: bool, at: &ChapterLocator) -> Result<String> {
+    let index = match at {
+        ChapterLocator::Section(index) => *index,
+        other => {
+            return Err(crate::Error::ChapterUnavailable {
+                path: path.to_path_buf(),
+                index: 0,
+                at: format!("{other:?}"),
+            });
+        }
+    };
+    let (_, _, chapters) = load(path, plain)?;
+    let text = chapters
+        .get(index)
+        .map(|c| super::xhtml::from_plain_text(c.source()))
+        .ok_or_else(|| crate::Error::ChapterUnavailable {
+            path: path.to_path_buf(),
+            index,
+            at: format!("{at:?}"),
+        })?;
+    Ok(text)
 }
 
 fn extension(path: &Path) -> Option<String> {
@@ -124,8 +182,6 @@ fn split_chapters(source: &str, fallback_title: &str) -> Vec<Chapter> {
     let mut chapters = Vec::new();
     let mut buf = String::new();
     let mut title: Option<String> = None;
-    let mut chapter_start = 0usize;
-    let mut line_start = 0usize;
     let mut fence = false;
     let mut saw_heading = false;
 
@@ -143,14 +199,12 @@ fn split_chapters(source: &str, fallback_title: &str) -> Vec<Chapter> {
 
         if let Some(heading_title) = heading {
             // 由标题触发的收尾：这一段没有标题，说明它位于首个标题之前，是「前言」。
-            flush(&mut buf, &mut title, chapter_start, "前言", &mut chapters);
+            flush(&mut buf, &mut title, "前言", &mut chapters);
             title = Some(heading_title);
-            chapter_start = line_start;
             saw_heading = true;
         }
         buf.push_str(line);
         buf.push('\n');
-        line_start += line.len() + 1;
     }
     // 收尾：全文一个标题都没有时，章名回落到文件名。
     let tail_default = if saw_heading {
@@ -158,20 +212,10 @@ fn split_chapters(source: &str, fallback_title: &str) -> Vec<Chapter> {
     } else {
         fallback_title
     };
-    flush(
-        &mut buf,
-        &mut title,
-        chapter_start,
-        tail_default,
-        &mut chapters,
-    );
+    flush(&mut buf, &mut title, tail_default, &mut chapters);
 
     if chapters.is_empty() {
-        chapters.push(Chapter {
-            title: fallback_title.to_string(),
-            source: source.to_string(),
-            spine_href: String::new(),
-        });
+        chapters.push(Chapter::inline(fallback_title, source));
     }
     chapters
 }
@@ -179,7 +223,6 @@ fn split_chapters(source: &str, fallback_title: &str) -> Vec<Chapter> {
 fn flush(
     buf: &mut String,
     title: &mut Option<String>,
-    chapter_start: usize,
     default_title: &str,
     chapters: &mut Vec<Chapter>,
 ) {
@@ -187,11 +230,10 @@ fn flush(
     if text.trim().is_empty() {
         return;
     }
-    chapters.push(Chapter {
-        title: title.take().unwrap_or_else(|| default_title.to_string()),
-        spine_href: format!("#{chapter_start}"),
-        source: text,
-    });
+    chapters.push(Chapter::inline(
+        title.take().unwrap_or_else(|| default_title.to_string()),
+        text,
+    ));
 }
 
 /// `max_level` 以内的 ATX 标题返回其文字。
@@ -232,14 +274,19 @@ mod tests {
 
     use crate::anchor::TextMap;
     use crate::dom::Dom;
-    use crate::format::{DocMeta, FlowDoc};
+    use crate::format::{Chapter, DocMeta, FlowDoc};
 
     fn opened(name: &str, body: &str) -> (DocMeta, FlowDoc) {
         let dir = tempfile::tempdir().unwrap();
         let path: PathBuf = dir.path().join(name);
         std::fs::write(&path, body).unwrap();
         let doc = crate::document::open(&path).expect("临时 .md 应能读入");
-        let flow = doc.flow().expect("该读成可重排").clone();
+        // `open` 只给索引；这一层要断言的绝大多数是正文，按位置取回来。
+        let mut flow = doc.flow().expect("该读成可重排").clone();
+        for (ix, chapter) in flow.chapters.iter_mut().enumerate() {
+            let text = doc.chapter_source(ix).expect("正文该取得到");
+            *chapter = Chapter::inline(chapter.title.clone(), text);
+        }
         (doc.meta().clone(), flow)
     }
 
@@ -262,7 +309,7 @@ mod tests {
     fn normalize_unifies_crlf_and_blank_runs() {
         let (_, flow) = opened("d.md", "a\r\n\r\n\r\n\r\nb\n\n");
         assert_eq!(flow.chapters.len(), 1);
-        assert_eq!(flow.chapters[0].source, "<p>a</p>\n<p>b</p>\n");
+        assert_eq!(flow.chapters[0].source(), "<p>a</p>\n<p>b</p>\n");
     }
 
     #[test]
@@ -273,11 +320,11 @@ mod tests {
         assert_eq!(flow.chapters[0].title, "书名");
         assert_eq!(flow.chapters[1].title, "第一章");
         assert!(
-            flow.chapters[1].source.starts_with("<h2>第一章</h2>"),
+            flow.chapters[1].source().starts_with("<h2>第一章</h2>"),
             "标题要包成 `<h2>`：{}",
-            flow.chapters[1].source
+            flow.chapters[1].source()
         );
-        assert!(flow.chapters[1].source.contains("正文一"));
+        assert!(flow.chapters[1].source().contains("正文一"));
         assert_eq!(flow.chapters[2].title, "第二章");
     }
 
@@ -291,7 +338,7 @@ mod tests {
     fn fence_content_is_not_a_heading() {
         let (_, flow) = opened("d.md", "# A\n```\n# not a heading\n```\nstill A\n");
         assert_eq!(flow.chapters.len(), 1);
-        assert!(flow.chapters[0].source.contains("# not a heading"));
+        assert!(flow.chapters[0].source().contains("# not a heading"));
     }
 
     /// 分章不能丢字符，也不能凭空造字符 —— 把各章各自的可见文本拼起来，
@@ -300,7 +347,7 @@ mod tests {
     fn chapter_sources_reconcatenate_losslessly() {
         let src = "# A\ntext\n## B\nmore\n";
         let (_, flow) = opened("d.md", src);
-        let joined: String = flow.chapters.iter().map(|c| visible(&c.source)).collect();
+        let joined: String = flow.chapters.iter().map(|c| visible(&c.source())).collect();
         let expected = crate::format::xhtml::atx_markers_removed(src);
         assert_eq!(without_whitespace(&joined), without_whitespace(&expected));
     }
@@ -308,18 +355,18 @@ mod tests {
     /// `spine_href` 是**包装之前**那份规范化纯文本里的字节偏移（分章时算的），
     /// 所以它指向的是原文里这一章自己的标题行。
     #[test]
-    fn spine_offsets_land_on_char_boundaries_and_their_own_heading() {
+    fn each_chapter_starts_at_its_own_heading() {
+        // 以前这条靠 `spine_href` 里塞的字节偏移看切点（`#<offset>`）。
+        // 正文出库之后那个字段不再外带偏移，而分章要保证的那件事本来就是
+        // 「这一章的正文以它自己的标题开头」—— 直接从正文看。
         let src = "# A\ntext\n## B\nmore\n";
         let (_, flow) = opened("d.md", src);
         assert_eq!(flow.chapters.len(), 2);
         for c in &flow.chapters {
-            let byte: usize = c.spine_href.trim_start_matches('#').parse().unwrap();
-            assert!(src.is_char_boundary(byte));
-            let heading = src[byte..].lines().next().unwrap();
-            assert!(heading.starts_with('#'), "{heading:?}");
+            let first = c.source().lines().next().unwrap_or_default();
             assert!(
-                heading.contains(&c.title),
-                "{heading:?} 该是 {} 的标题",
+                first.contains(&c.title),
+                "每一章该以它自己的标题开头：{first:?} vs {:?}",
                 c.title
             );
         }

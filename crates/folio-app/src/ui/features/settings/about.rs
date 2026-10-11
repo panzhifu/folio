@@ -1,21 +1,16 @@
-//! 关于：这份二进制是什么、界面说什么语言、以及两份讲实际情况的文档。
+//! 关于：这份二进制是什么、界面说什么语言、配置文件在哪儿。
 //!
 //! 分组照的是参照应用同一页的形状 —— **版本与语言在同一页**，语言不自成一页：读者到这一页
 //! 要问的是「关于这个应用」这两件事，而字、版面那些是要改的东西，各归各页。
 //!
 //! 这里没有那颗「检查更新」的开关，也没有许可证那一组：本应用还没有更新检查与授权子系统，
 //! 为了对齐样式先摆一颗点了没用的控件是错的。依赖版本那几行是构建时从 `Cargo.lock` 抄来的
-//! （见 `folio-app/build.rs`），两份文档是 `docs/` 里那两个文件的原文 —— 这一页的全部价值
-//! 就是它不会另说一套。
+//! （见 `folio-app/build.rs`）—— 这一页的全部价值就是它不会另说一套。
 
 use folio_core::i18n::Locale;
 use folio_core::paths::config_path;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::{Sizable, WindowExt, h_flex, v_flex};
-use gpui_kit::{
-    DefiniteLength, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div,
-};
+use gpui_kit::component::h_flex;
+use gpui_kit::{ParentElement, SharedString, Styled, div};
 
 use super::*;
 use crate::ui::shared::about;
@@ -24,12 +19,7 @@ pub(super) fn about_page(cx: &App) -> SettingPage {
     page(
         tr(cx, "page.about"),
         IconName::Info,
-        vec![
-            version_group(cx),
-            language_group(cx),
-            docs_group(cx),
-            config_group(cx),
-        ],
+        vec![version_group(cx), language_group(cx), config_group(cx)],
     )
 }
 
@@ -89,114 +79,55 @@ fn value_item(
 /// 界面语言。选项用**该语言自己的写法**标注：用户切换语言往往正是在看不懂
 /// 当前界面的时候，把 "English" 翻成「英语」反而认不出来。
 fn language_group(cx: &App) -> SettingGroup {
-    let options: Vec<(SharedString, SharedString)> = Locale::ALL
-        .iter()
-        .map(|locale| {
-            (
-                SharedString::from(locale.endonym()),
-                SharedString::from(locale.code()),
-            )
-        })
-        .collect();
     group(
         tr(cx, "field.language"),
         vec![
             SettingItem::new(
                 tr(cx, "field.language"),
                 SettingField::dropdown(
-                    options,
+                    language_options(),
                     |cx: &App| SharedString::from(ConfigHolder::language(cx).locale.code()),
                     |val: SharedString, cx| {
                         // 认不出的值不改：下拉框给不出认不出的值，
                         // 真出现时保留当前语言比切成未知语言好。
-                        if let Some(locale) = Locale::parse(&val) {
+                        if let Some(locale) = Locale::from_label(&val) {
                             ConfigHolder::edit_language(cx, |l| l.locale = locale);
                         }
                     },
                 ),
             )
             .description(tr(cx, "field.language.desc"))
-            .keywords(["language", "locale", "语言"]),
+            .keywords([
+                "language",
+                "locale",
+                "语言",
+                "中文",
+                "简体",
+                "English",
+                "日本語",
+            ]),
         ],
     )
 }
 
-/// 两份嵌进来的文档，各占一行。点开是一侧展开的面板：整篇文档不是
-/// 「一个简短的决定」，那一格装不下它。
-fn docs_group(cx: &App) -> SettingGroup {
-    SettingGroup::new()
-        .title(tr(cx, "group.docs"))
-        .description(tr(cx, "about.docs_note"))
-        .items(vec![
-            doc_item(
-                "plan",
-                tr(cx, "about.plan"),
-                tr(cx, "about.open_doc"),
-                about::PLAN,
-                &["doc", "plan", "文档", "方案"],
-            ),
-            doc_item(
-                "limitations",
-                tr(cx, "about.limitations"),
-                tr(cx, "about.open_doc"),
-                about::LIMITATIONS,
-                &["doc", "gap", "文档", "缺口"],
-            ),
-        ])
-}
-
-/// `slug` 是那颗按钮的元素 id 的一部分：用 ASCII 而不是标签文字，措辞改了
-/// 元素树里的状态键不用跟着改。
-fn doc_item(
-    slug: &'static str,
-    label: SharedString,
-    button_label: SharedString,
-    doc: &'static str,
-    keywords: &[&'static str],
-) -> SettingItem {
-    SettingItem::new(
-        label.clone(),
-        SettingField::render(move |_, _, _| {
-            // 渲染闭包是 `Fn`，所以标题只能一次一次拷给那颗按钮的点击闭包 ——
-            // 后者要把这份标题带进面板的构造里，而面板的构造又是另一层 `Fn`。
-            let sheet_title = label.clone();
-            h_flex().w_full().justify_end().child(
-                Button::new(format!("open-doc-{slug}"))
-                    .outline()
-                    .small()
-                    .label(button_label.to_string())
-                    .accessibility_label(button_label.clone())
-                    .on_click(move |_, window, cx| {
-                        let sheet_title = sheet_title.clone();
-                        window.open_sheet(cx, move |sheet, _, _| {
-                            // 默认那 350px 是给一行表单用的；一篇文档要读就得宽得多。
-                            sheet
-                                .title(sheet_title.clone())
-                                .size(DefiniteLength::Fraction(0.5))
-                                .child(doc_body(doc))
-                        });
-                    }),
-            )
-        }),
-    )
-    .keywords(keywords.iter().map(|word| (*word).to_string()))
-}
-
-/// 文档全文：按行摊开的一块滚动区。
+/// 语言下拉框的选项：`(值, 标签)`，值是 BCP-47 码（配置里存的就是它），
+/// 标签是语言自己的名字。
 ///
-/// 整篇一个文字元素会让这一格变成一个比屏幕高几十倍的元素，滚动范围与裁剪都不好算。
-fn doc_body(doc: &'static str) -> impl IntoElement {
-    div()
-        .id("about-doc-scroll")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .child(v_flex().gap_0().children(doc.lines().map(|line| {
-            div()
-                .w_full()
-                .text_sm()
-                .child(if line.is_empty() { " " } else { line })
-        })))
+/// **值必须在第一位**：`SettingField::dropdown` 的约定是元组首项作为选中值
+/// （与取值闭包给出的 `locale.code()` 对得上）与写回 setter 的实参，次项才是
+/// 按钮和菜单里显示的文字。写反了会出现两重故障：当前语言对不上任何一个
+/// 选项值，按钮只能显示裸代码；点菜单项传给 setter 的是语言名，`from_label`
+/// 之外的路径认不出来，改动被静默丢弃 —— 读者点什么语言都不生效。
+fn language_options() -> Vec<(SharedString, SharedString)> {
+    Locale::ALL
+        .iter()
+        .map(|locale| {
+            (
+                SharedString::from(locale.code()),
+                SharedString::from(locale.endonym()),
+            )
+        })
+        .collect()
 }
 
 /// 配置文件在哪儿。
@@ -223,4 +154,43 @@ fn config_group(cx: &App) -> SettingGroup {
             .keywords(["config", "path", "配置", "文件"]),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! 下拉框的选项是一份 (值, 标签) 的表格，写错顺序不会有任何编译期或运行期报错
+    //! —— setter 对认不出的值是**静默丢弃**（见 [`language_group`] 的取值对）。
+    //! 这里把「值必须认得回来、标签必须是语言自己的名字」钉成会失败的测试。
+
+    use super::*;
+
+    /// 每个选项的值都要能被写回路径（`Locale::from_label`）认出来，
+    /// 且认出来的就是标签写的那个语言。这里曾经把 (值, 标签) 写反：
+    /// 值成了语言名，setter 认不出，点什么语言都不生效。
+    #[test]
+    fn every_language_option_round_trips_through_its_own_value() {
+        for (value, label) in language_options() {
+            let locale = Locale::from_label(&value)
+                .unwrap_or_else(|| panic!("选项值 {value:?} 必须被写回路径认出来"));
+            assert_eq!(
+                label,
+                locale.endonym(),
+                "{value:?} 的标签应是这个语言自己的名字"
+            );
+        }
+    }
+
+    /// 取值闭包给出的是 `locale.code()`，它必须对得上某个选项值，
+    /// 否则按钮显示的不是当前语言的标签，而是裸代码的兜底。
+    #[test]
+    fn the_current_locale_is_always_representable_as_an_option_value() {
+        let values: Vec<_> = language_options().into_iter().map(|(v, _)| v).collect();
+        for locale in Locale::ALL {
+            assert!(
+                values.iter().any(|value| *value == locale.code()),
+                "{} 应该作为选项值出现",
+                locale.code()
+            );
+        }
+    }
 }

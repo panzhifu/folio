@@ -5,10 +5,20 @@
 //!
 //! 与 KOReader 的差别只有一处：那边 provider 就是 `Document` 子类（解析 + 渲染一体），
 //! 这里拆成了「provider（怎么解析）」与 [`crate::document::Document`]（读者看到什么）。
+//!
+//! 两个入口，差别是**要不要正文**：
+//!
+//! - [`DocumentProvider::index`]：只读章表（标题 + 位置）、CSS、目录、图片元数据、封面。
+//!   **导入走这一条** —— 正文不在库里（见 `plans/text-out-of-db.md`），
+//!   导入时把它解出来再丢掉是白付费：一本 EPUB 就是白解 1000 多个 zip 条目。
+//! - [`DocumentProvider::chapter_source`]：按位置取一章的正文，打开书时才付。
+//!
+//! [`DocumentProvider::read`] 是「两样都要」的合成品，只给测试与「我就是要全文」
+//! 的调用方用。
 
 use std::path::Path;
 
-use super::{Content, DocMeta, FontBytes, Format};
+use super::{Chapter, ChapterLocator, ChapterText, Content, DocMeta, FlowDoc, FontBytes, Format};
 use crate::Result;
 
 pub trait DocumentProvider: Send + Sync {
@@ -23,14 +33,76 @@ pub trait DocumentProvider: Send + Sync {
         100
     }
 
-    /// 只读书目元信息，不建正文模型（学 FBReader 的 `readMetaInfo` / `readModel` 之分）。
-    /// 默认实现读完就丢正文；provider 想省这一趟解析可以自己覆盖。
-    fn metadata(&self, path: &Path) -> Result<DocMeta> {
-        self.read(path).map(|(meta, _)| meta)
+    /// 只读**索引**：章表（只有标题与位置）、CSS、目录、图片元数据、封面。
+    ///
+    /// **不产出正文**：章表里的每一章是 [`ChapterText::At`]，正文得叫
+    /// [`DocumentProvider::chapter_source`]。这是导入那一步唯一该调的入口。
+    fn index(&self, path: &Path) -> Result<(DocMeta, Content)>;
+
+    /// 一章的引擎就绪 XHTML，按位置取。
+    ///
+    /// 默认能处理 [`ChapterLocator::Inline`]（正文就在位置上）与
+    /// [`ChapterLocator::Entry`]（让容器报一个条目，见 [`DocumentProvider::entry_text`]）；
+    /// [`ChapterLocator::Section`] 必须由单文件格式自己实现 —— 只有它知道怎么分章。
+    fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
+        match at {
+            ChapterLocator::Inline(text) => Ok(text.clone()),
+            ChapterLocator::Entry(entry) => self.entry_text(path, entry).ok_or_else(|| {
+                crate::Error::ChapterUnavailable {
+                    path: path.to_path_buf(),
+                    index: 0,
+                    at: entry.clone(),
+                }
+            }),
+            ChapterLocator::Section(_) => Err(crate::Error::ChapterUnavailable {
+                path: path.to_path_buf(),
+                index: 0,
+                at: format!("{at:?}"),
+            }),
+        }
     }
 
-    /// 读成文档内容。
-    fn read(&self, path: &Path) -> Result<(DocMeta, Content)>;
+    /// 索引 **加上** 每一章的正文。
+    ///
+    /// 给测试、校验与「我就是要全文」的调用方用；**导入不要用它** ——
+    /// 正文进了库还要被丢掉，而这里付的是解压全本的钱。
+    fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
+        let (meta, content) = self.index(path)?;
+        let chapters = match &content {
+            Content::Reflow(flow) => flow
+                .chapters
+                .iter()
+                .map(|chapter| -> Result<Chapter> {
+                    let text = match chapter.locator() {
+                        Some(at) => self.chapter_source(path, at)?,
+                        None => chapter.source().to_string(),
+                    };
+                    Ok(Chapter {
+                        title: chapter.title.clone(),
+                        spine_href: chapter.spine_href.clone(),
+                        text: ChapterText::Inline(text),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            // 定版式没有章，也没有正文可填。
+            Content::Fixed(_) => return Ok((meta, content)),
+        };
+        let Content::Reflow(flow) = &content else {
+            unreachable!("上面已经挡掉了定版式")
+        };
+        Ok((
+            meta,
+            Content::Reflow(FlowDoc {
+                chapters,
+                ..flow.clone()
+            }),
+        ))
+    }
+
+    /// 只读书目元信息。默认走索引 —— 它已经够便宜了。
+    fn metadata(&self, path: &Path) -> Result<DocMeta> {
+        self.index(path).map(|(meta, _)| meta)
+    }
 
     /// `@font-face` 要的那几份内嵌字体。默认空 —— 没有容器可谈的格式本来就没有。
     ///
@@ -43,6 +115,19 @@ pub trait DocumentProvider: Send + Sync {
     /// 容器内某个路径的图片字节。读不到一律 `None`：
     /// 「这本书没这张图」与「容器丢了」在屏幕上是同一件事（那块地方空着）。
     fn image_bytes(&self, _path: &Path, _href: &str) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// 容器内某个条目 → 一章的引擎就绪 XHTML。
+    ///
+    /// 只对**名单式**容器（[`Format::Epub`]，将来的 zip 族）有意义：库里存了
+    /// `ChapterLocator::Entry`，打开时按名字现取。默认 `None` 的格式（单文件那几个）
+    /// 由 [`crate::document::Document::chapter_source`] 走「整本重读 + 取第 N 章」的
+    /// 降级路，所以它们不必实现这一个。
+    ///
+    /// 读不到是 `None` 而不是 `Err`：路径给错了、容器没了、条目是目录……在调用方
+    /// 眼里都是「这一章取不到」，由它决定怎样把它说给读者。
+    fn entry_text(&self, _path: &Path, _entry: &str) -> Option<String> {
         None
     }
 }
@@ -79,6 +164,22 @@ pub fn provider_for(path: &Path) -> Option<Box<dyn DocumentProvider>> {
     best
 }
 
+/// 全部被认领的扩展名（小写）。**整机扫描**用这份清单初筛，而不是对每个文件
+/// 走一遍 [`provider_for`]：一次扫描要过几千个文件，每个现造一遍 provider 不值。
+///
+/// 与注册表的一致性由测试钉住（清单里的每一个都能被 [`provider_for`] 认下）——
+/// 往注册表加新格式时忘了这里，扫描会静默漏掉那一类书。
+pub fn supported_extensions() -> &'static [&'static str] {
+    &["epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "cbz"]
+}
+
+/// 扩展名（不分大小写）是否有 provider 认领。
+pub fn supports_extension(ext: &str) -> bool {
+    supported_extensions()
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(ext))
+}
+
 #[cfg(test)]
 mod tests {
     //! 注册表：认领与权重。用一个只认 `.zzz` 的假 provider 钉住选择规则 ——
@@ -86,7 +187,7 @@ mod tests {
 
     use std::path::Path;
 
-    use super::{DocumentProvider, provider_for, providers};
+    use super::{DocumentProvider, provider_for, providers, supported_extensions};
     use crate::format::{Content, DocMeta, Format};
 
     struct Fake {
@@ -104,7 +205,7 @@ mod tests {
         fn weight(&self) -> u32 {
             self.weight
         }
-        fn read(&self, _path: &Path) -> crate::Result<(DocMeta, Content)> {
+        fn index(&self, _path: &Path) -> crate::Result<(DocMeta, Content)> {
             Ok((
                 DocMeta {
                     title: self.extension.into(),
@@ -131,6 +232,19 @@ mod tests {
             }
         }
         best
+    }
+
+    /// 扫描初筛清单与注册表必须同步：清单里的每个扩展名都要有 provider 真的认领。
+    /// 往注册表加新格式忘了更新清单，扫描就会静默漏掉那一类书。
+    #[test]
+    fn every_supported_extension_is_claimed_by_a_provider() {
+        for ext in supported_extensions() {
+            let probe = Path::new("/x/a").with_extension(ext);
+            assert!(
+                provider_for(&probe).is_some(),
+                "supported_extensions 声明了 .{ext}，但没有 provider 认领它"
+            );
+        }
     }
 
     #[test]

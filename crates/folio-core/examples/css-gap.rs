@@ -165,7 +165,7 @@ fn measure(flow: &FlowDoc, rules: &RuleSet) -> Totals {
     let base = ComputedStyle::default();
     let root_px = base.font_size;
     for chapter in &flow.chapters {
-        let dom = Dom::parse(chapter.source.as_bytes());
+        let dom = Dom::parse(chapter.source().as_bytes());
         let styled = cascade(&dom, rules, &base);
         for (id, _) in dom.elements() {
             tot.elements += 1;
@@ -303,7 +303,7 @@ fn geometry(flow: &FlowDoc, rules: &RuleSet) -> (usize, f32, f32) {
     let mut height = 0.0f32;
     let mut left_sum = 0.0f32;
     for chapter in &flow.chapters {
-        let dom = Dom::parse(chapter.source.as_bytes());
+        let dom = Dom::parse(chapter.source().as_bytes());
         let styles = cascade(&dom, rules, &ComputedStyle::default());
         // 没有 `<body>` 的章（手写得很野的老书）从文档根节点排，行为与 app 侧一致。
         let body = dom

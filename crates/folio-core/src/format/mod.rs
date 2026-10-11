@@ -14,7 +14,7 @@ pub mod xhtml;
 pub(crate) mod zip;
 
 pub use content::{Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageSource};
-pub use provider::{DocumentProvider, provider_for, providers};
+pub use provider::{DocumentProvider, provider_for, providers, supported_extensions, supports_extension};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Format {
@@ -54,6 +54,17 @@ impl Format {
     }
 }
 
+/// 索引方案的版本。**分章规则或位置方案一改就要加一。**
+///
+/// 库里的位置（[`ChapterLocator`]）是「拿什么规则算出来的」这件事的承诺：
+/// `Section(3)` 只在「按今天这套规则分章」的前提下指到第三章。Markdown 的标题层级、
+/// FB2 的 section 嵌套、EPUB 的 spine 过滤，任一改动都会让老库的序号指到别处 ——
+/// 那时版本号对不上，[`crate::store::Store::stale_reason`] 会说「该重扫」。
+///
+/// v2：CSS 出库 —— `books.css` 列从拼接文本改成位置清单（`CssStored` 信封），
+/// 老库靠重扫改写成新格式；重扫前旧文本当内联样式兜底。
+pub const INDEX_VERSION: i64 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocMeta {
     pub title: String,
@@ -64,26 +75,164 @@ pub struct DocMeta {
 
 /// 可重排文档的一章。
 ///
-/// **`source` 的契约：永远是引擎就绪的 XHTML 片段。** 这是格式差异的终点 —— provider
+/// **正文的契约：永远是引擎就绪的 XHTML 片段。** 这是格式差异的终点 —— provider
 /// 负责把自家格式归约成它（EPUB / FB2 / HTML 本来就产出 XHTML，Markdown / TXT 经
 /// [`xhtml::from_plain_text`] 包一层），引擎只管吃。所以界面上不存在
 /// 「这个格式要不要先包一下」这种分支，`Format` 也不参与排版链。
 ///
 /// 阅读位置不在这套坐标里：`crate::Locator` 的 `offset` 是**章内可见文本偏移**
-/// （`crate::anchor::TextMap`），进度、锚点、选中都用它；`source` 怎么包不影响它。
+/// （`crate::anchor::TextMap`），进度、锚点、选中都用它；正文怎么包不影响它。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chapter {
     pub title: String,
-    pub source: String,
+    /// 容器内的条目名（EPUB 的 spine 项）。单文件格式是空串。
+    ///
+    /// 两个用处：相对资源（`<img src>`）的基准目录，以及 EPUB 那一路的
+    /// [`ChapterLocator::Entry`]。**不落库** —— 位置列里已经有了，见
+    /// `plans/text-out-of-db.md`。
     pub spine_href: String,
+    /// 正文在哪儿。**这一格取代了「一个 `String` 加一个平行数组」**：
+    /// 之前 `source` 空串 + `FlowDoc::chapter_locators[i]` 两个东西拼出来「正文在不在
+    /// 手上」，还得靠约定保证等长；现在它是类型里的一个字段。
+    pub text: ChapterText,
+}
+
+/// 一章的正文在哪儿。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChapterText {
+    /// 正文就在手上（provider 刚读完、测试替身、`from_content`）。
+    Inline(String),
+    /// 正文在容器里，按位置现取。
+    At(ChapterLocator),
 }
 
 impl Chapter {
-    /// `source` 的字符数。只是**书目层的权重**（进度百分比的近似、SQLite 那一列），
-    /// 不是可见文本长度 —— XHTML 的标记也算在内，所以 Markdown / TXT 会比纯文本时
-    /// 略大（每段多几个字节）。真需要精确的可见文本长度，问 `anchor::TextMap`。
+    /// 正文就在手上的那一章。
+    pub fn inline(title: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            spine_href: String::new(),
+            text: ChapterText::Inline(source.into()),
+        }
+    }
+
+    /// 容器里的一章，正文按条目名现取（EPUB 的 spine 项）。
+    pub fn entry(title: impl Into<String>, href: impl Into<String>) -> Self {
+        let href = href.into();
+        Self {
+            title: title.into(),
+            spine_href: href.clone(),
+            text: ChapterText::At(ChapterLocator::Entry(href)),
+        }
+    }
+
+    /// 单文件容器里的第 N 章，正文重读一遍现分。
+    pub fn section(title: impl Into<String>, index: usize) -> Self {
+        Self {
+            title: title.into(),
+            spine_href: String::new(),
+            text: ChapterText::At(ChapterLocator::Section(index)),
+        }
+    }
+
+    /// 补上条目名（相对资源的基准目录）。
+    pub fn with_spine_href(mut self, href: impl Into<String>) -> Self {
+        self.spine_href = href.into();
+        self
+    }
+
+    /// 正文；不在手上时是空串。要区分「空章」与「正文在别处」，看 [`Chapter::text`]。
+    pub fn source(&self) -> &str {
+        match &self.text {
+            ChapterText::Inline(text) => text,
+            ChapterText::At(_) => "",
+        }
+    }
+
+    /// 正文的位置；在手上时是 `None`（还没算过它该在哪儿）。
+    pub fn locator(&self) -> Option<&ChapterLocator> {
+        match &self.text {
+            ChapterText::At(at) => Some(at),
+            ChapterText::Inline(_) => None,
+        }
+    }
+
+    /// 正文的字符数。只是**书目层的权重**（SQLite 那一列），不是可见文本长度 ——
+    /// XHTML 的标记也算在内。正文不在手上时是 0（那要读一遍才算得出）。
     pub fn char_len(&self) -> usize {
-        self.source.chars().count()
+        self.source().chars().count()
+    }
+}
+
+/// 一章正文在容器里的位置 —— 库里只存这个，不存正文。
+///
+/// 判据与图片同一条（见 `plans/images-lazy.md`）：**库里只放「算出来贵、且原文件
+/// 给不了」的东西**。正文原文件给得了 —— 重开一次容器就回来了 —— 而一本二十万字的
+/// 中文书入库是 0.4 MB（还要再加一倍以上的全文索引），库于是与内容同量级。
+///
+/// 三种位置对应两类容器：
+///
+/// - [`ChapterLocator::Entry`]：容器里能按名字取一个条目。EPUB 的 spine 项、CBZ 的一页。
+///   取一章 = 解一个 zip 条目，最便宜的一种。
+/// - [`ChapterLocator::Section`]：单文件容器（TXT / MD / HTML / FB2）里的第 N 段。
+///   重新分一次章就能拿回它 —— 需要 provider 的分章规则稳定，见 [`ChapterLocator::Section`]
+///   自己的说明。
+/// - [`ChapterLocator::Inline`]：正文就在手上（测试、`from_content`、没有可寻址容器
+///   的格式）。这一档是**降级**，不是常态：能算出前两种时不该落回它。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChapterLocator {
+    /// 容器内条目名（与 [`TocEntry::href`] 同形）。
+    Entry(String),
+    /// 单文件容器里的第几章（0 起）。
+    ///
+    /// 存序号而不是字节区间：分章规则（Markdown 的 `#`、FB2 的 `<section>`）一旦
+    /// 调整，字节区间就指到别处，而序号只会让「第几章」这个说法本身失效 —— 两者都
+    /// 要重扫，但后者坏得看得见。
+    Section(usize),
+    /// 正文随文档一起来（那就是说没有可寻址的容器）。
+    Inline(String),
+}
+
+impl Default for ChapterLocator {
+    fn default() -> Self {
+        Self::Inline(String::new())
+    }
+}
+
+impl ChapterLocator {
+    /// 这一档的正文是否就在位置上。
+    pub fn is_inline(&self) -> bool {
+        matches!(self, Self::Inline(_))
+    }
+
+    pub fn as_inline(&self) -> Option<&str> {
+        match self {
+            Self::Inline(text) => Some(text),
+            _ => None,
+        }
+    }
+}
+
+/// 一章该按哪种位置存。
+///
+/// 名单式容器（EPUB）按 [`Chapter::spine_href`] 认条目；其余是单文件，按序号认。
+/// CBZ 是定版式，没有章，走不到这里。
+///
+/// 已经算过位置的（从库里读回来又存回去）原样保留 —— 重算一遍只会多一次分支，
+/// 而两种来源算出来的结果本来就该一致。
+pub fn locator_for(format: Format, chapter: &Chapter, index: usize) -> ChapterLocator {
+    if let Some(at) = chapter.locator() {
+        return at.clone();
+    }
+    match format {
+        Format::Epub if !chapter.spine_href.is_empty() => {
+            ChapterLocator::Entry(chapter.spine_href.clone())
+        }
+        Format::Text | Format::Markdown | Format::Html | Format::Fb2 => {
+            ChapterLocator::Section(index)
+        }
+        // 没有可寻址的位置（EPUB 少了 href、将来的格式、测试替身）：只能说正文在手上。
+        _ => ChapterLocator::Inline(chapter.source().to_string()),
     }
 }
 
@@ -122,10 +271,11 @@ pub struct ImageRes {
 
 /// 这本书里取到的一份字体字节，按容器绝对路径索引。
 ///
-/// **不进 [`FlowDoc`]、也不进 SQLite**：正文与图片入库是因为「再开一本书不该依赖那个
-/// 文件还在」，而字体是**锦上添花**的那一层 —— 副本被清掉时的表现是「回到今天的样子」
-/// （读者字体照常排，只是没有补缺字的那一份），不是少一页正文。
-/// 于是 `fonts_at` 每次开书去容器现读一次，几个小文件、一次解压，不常驻。
+/// **不进 [`FlowDoc`]、也不进 SQLite**：字体是**锦上添花**的那一层 —— 容器不在时的
+/// 表现是「回到今天的样子」（读者字体照常排，只是没有补缺字的那一份），
+/// 而不是少一页正文。于是 `fonts_at` 每次开书去容器现读一次，几个小文件、一次解压，
+/// 不常驻。（正文也不在库里，但它有 [`ChapterLocator`] 那条位置线，
+/// 见 `plans/text-out-of-db.md`；字体没有，只能每次现读。）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontBytes {
     /// 容器内的规范路径，与 `@font-face` 的 `src` 改写后同形（见 `css::FontSrc::Url`）。
@@ -199,27 +349,31 @@ pub fn shrink_image(bytes: &[u8], max_edge: u32) -> Option<(Vec<u8>, &'static st
 
     let (width, height) = (image.width(), image.height());
     let longest = width.max(height);
-    if longest <= max_edge {
+    // **不管原图多大都重编一遍**：封面的问题不是「太大」而是「按原格式存」。
+    // 一张 800×1200 的 PNG 封面就有 400 KB，而书架上显示几十像素宽 —— 它过不了
+    // 「超过 max_edge 才缩」那道门，于是原样进了库。缩到显示尺寸 + 一律 JPEG，
+    // 才是这一列真正该占的地方。
+    let image = if longest > max_edge {
+        let scale = max_edge as f32 / longest as f32;
+        let width = ((width as f32 * scale).round() as u32).max(1);
+        let height = ((height as f32 * scale).round() as u32).max(1);
+        image.resize_exact(width, height, image::imageops::FilterType::Triangle)
+    } else {
+        image
+    };
+
+    // 带 alpha 的封面先铺一层白底再编 JPEG：JPEG 没有 alpha，直接丢掉会让透明区
+    // 变成黑的。书封极少靠透明表达什么，白底是印刷品的默认。
+    let rgb = image.to_rgb8();
+    let mut out = Vec::new();
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut out), 82);
+    encoder.encode_image(&rgb).ok()?;
+    // 重编之后反而更大的（小图、或者已经高度优化的 JPEG）就退回原图。
+    if out.len() >= bytes.len() {
         return None;
     }
-    let scale = max_edge as f32 / longest as f32;
-    let width = ((width as f32 * scale).round() as u32).max(1);
-    let height = ((height as f32 * scale).round() as u32).max(1);
-    let image = image.resize_exact(width, height, image::imageops::FilterType::Triangle);
-
-    let mut out = Vec::new();
-    if image.color().has_alpha() {
-        image
-            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-            .ok()?;
-        Some((out, "image/png"))
-    } else {
-        let rgb = image.to_rgb8();
-        let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut out), 82);
-        encoder.encode_image(&rgb).ok()?;
-        Some((out, "image/jpeg"))
-    }
+    Some((out, "image/jpeg"))
 }
 
 // 内容家族（可重排 / 定版式）与 provider 注册表各自成文件，见 `content` / `provider`。
@@ -346,6 +500,94 @@ pub(crate) fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// 把一份 CSS 里的 `url(…)` 按**那份 CSS 自己的目录**解成容器绝对路径。
+///
+/// 正文出库之后样式表按清单回容器现取（见 `crate::document::Document::stylesheet`），
+/// 每一份都要在拼接前进这一步 —— 拼完就再也不知道某条 `url(Fonts/a.otf)` 原本写在
+/// `OEBPS/Styles/` 还是 `OEBPS/` 下面。而 `@font-face` 的 `src` 要拿去查容器里的
+/// 条目 —— 差一层目录的表现是「书里明明有字体，就是读不到」，且屏幕上看不出原因。
+///
+/// 输出**一律带引号**：解出来的路径常含空格（真书里的 `body italic.otf`），
+/// 不加引号那是非法 CSS，解析器会在空格处断开。
+pub(crate) fn absolutize_css_urls(css: &str, base_dir: &str) -> String {
+    // 先清注释：注释里的 `url(x)` 不是声明，改写它等于往 CSS 里塞假路径。
+    let text = crate::css::strip_comments(css);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while !rest.is_empty() {
+        let Some(start) = find_url_function(rest) else {
+            out.push_str(rest);
+            return out;
+        };
+        // `rest[start..start + 4]` 就是 `url(`，`open` 是它之后第一位。
+        let open = start + 4;
+        let Some(close) = find_close_paren(&rest[open..]) else {
+            // 括号不闭合：剩下的原样抄走，不猜。
+            out.push_str(rest);
+            return out;
+        };
+        let token_end = open + close + 1; // 整个 `url(…)` 函数 token 的结束（不含）
+        let inner = rest[open..open + close]
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .trim();
+        // `url(` 之前的部分先抄走；`url(` 本身**不能**跟着抄，否则改写会变成
+        // `url(url("解出来的路径")` —— 括号一下就不配对了。
+        out.push_str(&rest[..start]);
+        if inner.is_empty() || crate::css::is_remote(inner) {
+            // 远程与空的都原样留着：一期不取外部字体，也不假装取过。
+            out.push_str(&rest[start..token_end]);
+        } else {
+            out.push_str("url(\"");
+            out.push_str(&resolve_href(base_dir, inner));
+            out.push_str("\")");
+        }
+        rest = &rest[token_end..];
+    }
+    out
+}
+
+/// 下一个 `url(` 函数 token 的起始字节偏移。
+///
+/// 要判前一个字符：`dataurl(` / `my-url(` 里都含 `url(`，按子串找会把它们当函数改写。
+fn find_url_function(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i + 4 <= bytes.len() {
+        if bytes[i..i + 4].eq_ignore_ascii_case(b"url(")
+            && (i == 0 || !is_function_char(bytes[i - 1]))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 能构成一个标识符的字符：命中的话它前面那串就不是独立的 `url` 函数名。
+fn is_function_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b >= 0x80
+}
+
+/// 从 `text` 开头找到配对 `)` 的位置（不含）。引号里的括号跳过。
+fn find_close_paren(text: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    for (i, c) in text.char_indices() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            ')' => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     //! href 的 fragment 拆分，以及目录条目在 SQLite 那一列上的往返。
@@ -365,24 +607,29 @@ mod tests {
 
     /// 大图缩下来、小图原样：这是手机上图片能不能上屏的那一条。
     #[test]
-    fn only_oversized_bitmaps_are_shrunk() {
-        // 已经够小：不动它，调用方继续用原字节。
-        assert!(shrink_image(&png(100, 80), 256).is_none());
-        // 解不出来的字节也不动：不能把「不是图」当成「要缩的图」。
+    fn covers_are_bounded_and_re_encoded_as_jpeg() {
+        // 解不出来的字节不动：不能把「不是图」当成「要缩的图」。
         assert!(shrink_image(b"not an image", 256).is_none());
         // 0 是「不设上限」的哨兵，不能被当成要缩到 0。
         assert!(shrink_image(&png(100, 80), 0).is_none());
+        // 无字可压缩的极小图：重编反而更大，退回原图（`None` = 用原字节）。
+        assert!(shrink_image(&png(2, 2), 256).is_none());
 
-        // 超长边：缩到上限内，并给回描述新字节的 mime。
+        // 超长边：缩到上限内，纵横比保住，而且**一律 JPEG** —— 带 alpha 的封面
+        // 铺白底再编，不然透明区会变黑。
         let (small, mime) = shrink_image(&png(1024, 512), 256).expect("大图该被缩");
         let decoded = image::load_from_memory(&small).expect("缩过的字节要还能解");
-        assert_eq!(decoded.width().max(decoded.height()), 256);
         assert_eq!(
             (decoded.width(), decoded.height()),
             (256, 128),
             "纵横比要保住"
         );
-        assert_eq!(mime, "image/png", "带 alpha 的走 PNG");
+        assert_eq!(mime, "image/jpeg");
+
+        // **没超过上限**的也要重编：封面的问题是「按原格式存」，不是「太大」——
+        // 一张 800×1200 的 PNG 原样进库就是 400 KB。
+        let (_, mime) = shrink_image(&png(400, 600), 512).expect("没过上限也要重编");
+        assert_eq!(mime, "image/jpeg");
     }
 
     #[test]
@@ -527,11 +774,11 @@ mod contract {
             assert!(!flow.chapters.is_empty(), "{name} 一章都没有");
             for (ix, chapter) in flow.chapters.iter().enumerate() {
                 assert!(
-                    chapter.source.contains('<'),
+                    chapter.source().contains('<'),
                     "{name} 第 {ix} 章的 source 不是标记：{:?}",
-                    &chapter.source[..chapter.source.len().min(120)]
+                    &chapter.source()[..chapter.source().len().min(120)]
                 );
-                let text = visible(&chapter.source);
+                let text = visible(&chapter.source());
                 assert!(
                     !text.trim().is_empty(),
                     "{name} 第 {ix} 章解析出来没有可见文本"
@@ -559,7 +806,7 @@ mod contract {
             let Content::Reflow(flow) = content else {
                 panic!("{name} 该读成可重排");
             };
-            let joined: String = flow.chapters.iter().map(|c| visible(&c.source)).collect();
+            let joined: String = flow.chapters.iter().map(|c| visible(&c.source())).collect();
             let expected = super::xhtml::atx_markers_removed(body);
             assert_eq!(
                 without_whitespace(&joined),

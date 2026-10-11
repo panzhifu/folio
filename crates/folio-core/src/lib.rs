@@ -23,6 +23,9 @@ pub mod group;
 pub mod hit;
 pub mod i18n;
 pub mod import;
+pub mod scan;
+pub mod watch;
+pub mod transfer;
 pub mod layout;
 pub mod logging;
 pub mod paths;
@@ -40,21 +43,26 @@ pub use anchor::{
 pub use annotation::{
     ResolvedAnnotation, annotations_by_chapter, annotations_markdown, resolve_annotations,
 };
-pub use config::{Account, Appearance, Config, Language, Library, Logging, Mode, Reader};
+pub use config::{Appearance, Config, Language, Library, Logging, Mode, Reader};
 pub use document::{BookDocument, ContentRef, Document, LocatorKind};
 pub use error::{Error, Result};
 pub use format::{
-    Chapter, Content, ContentKind, DocMeta, DocumentProvider, FixedDoc, FixedPage, FlowDoc, Format,
-    PageSource,
+    Chapter, ChapterLocator, ChapterText, Content, ContentKind, DocMeta, DocumentProvider,
+    FixedDoc, FixedPage, FlowDoc, Format, PageSource,
 };
 pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use i18n::Locale;
-pub use import::{ImportOutcome, Imported, import_books, submit_import};
+pub use scan::{ScanReport, ScanSource, find};
+pub use import::{
+    Candidate, ImportKind, ImportOutcome, NameClash, Origin, PathsSource, Policy, Registered,
+    Source, UrlSource, import_from, reindex, submit_import,
+};
+pub use store::StaleReason;
 pub use paths::{config_dir, config_path, data_dir, db_path, log_dir, themes_dir};
 pub use position::Locator;
 pub use store::{
     ANNOTATION_COLORS, Annotation, BookReading, Collection, DailyReading, ReadingSession,
-    ReadingTotals, SearchHit, ShelfItem, Store,
+    ReadingTotals, ShelfItem, Store,
 };
-pub use task::{Cancel, Progress, TaskEvent, TaskId, TaskManager};
+pub use task::{ByteProgress, Cancel, StageCtx, TaskEvent, TaskId, TaskManager};
 pub use time::{civil_date, day_start, local_day};

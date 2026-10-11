@@ -51,6 +51,14 @@ pub trait Document: Send + Sync {
     /// 读不到是 `None`，不是错误 —— 那块地方空着就好。
     fn image_bytes(&self, href: &str) -> Option<Vec<u8>>;
 
+    /// 这本书的作者样式表（拼接后的 CSS 文本）。
+    ///
+    /// 索引路径下库里只有位置清单（[`crate::format::FlowDoc::css_hrefs`]），
+    /// 这里按清单回容器现取：每份用它**自己所在目录**做 `url()` 绝对化，按文档序
+    /// 拼接（顺序即层叠顺序）。某一份读不到就跳过并记日志 —— 与图片缺失同一个
+    /// 立场：少一份样式，正文照排。调用方（阅读会话）每书取一次。
+    fn stylesheet(&self) -> String;
+
     /// `@font-face` 要的那几份内嵌字体。默认没有。
     fn fonts(&self, _wanted: &[String]) -> Vec<FontBytes> {
         Vec::new()
@@ -112,6 +120,20 @@ pub trait Document: Send + Sync {
     fn page_count(&self) -> Option<usize> {
         self.fixed().map(FixedDoc::page_count)
     }
+
+    /// 第 `index` 章的**引擎就绪 XHTML**，需要时才去容器里取。
+    ///
+    /// 库里只存位置不存正文（见 [`crate::format::ChapterLocator`] 与
+    /// `plans/text-out-of-db.md`），所以这是「读一本已经打开的书」唯一的正文入口：
+    ///
+    /// - 位置是 [`ChapterLocator::Inline`]：正文就在手上（测试、旧库兜底），直接给。
+    /// - 位置是 [`ChapterLocator::Entry`]：让 provider 解一个 zip 条目（EPUB）。
+    /// - 位置是 [`ChapterLocator::Section`]：单文件格式，重读一遍再取第 N 章。
+    ///
+    /// **不做缓存**：调用方（阅读会话）按章缓存，因为只有它知道哪些章还会被翻到。
+    /// 取不到时是 [`crate::Error::ChapterUnavailable`]，不是空串 —— 那个区别决定了
+    /// 界面要说「这一章是空的」还是「源文件不在了」。
+    fn chapter_source(&self, index: usize) -> Result<String>;
 }
 
 /// 打开一本书，返回统一接口。
@@ -133,10 +155,12 @@ pub fn from_content(meta: DocMeta, content: Content) -> Box<dyn Document> {
     Box::new(BookDocument::from_content(meta, content))
 }
 
-/// 内容来自书库、图片与字体的字节仍从**原文件**现取。
+/// 内容来自书库（**只有索引**），正文、图片与字体的字节都从**原文件**现取。
 ///
-/// 「按主键打开」那条路用它：章文本入库了，重解 ZIP 是白付；而图片与内嵌字体刻意
-/// 不入库（见 `format::ImageRes` / `format::FontBytes`），得回到容器里读。
+/// 「按主键打开」那条路用它：库里存的是章节表、CSS、目录、封面与图片元数据，
+/// 而正经的正文、图片字节、内嵌字体都要回到容器里读 —— 前者按
+/// [`format::ChapterLocator`]，后两者按 `href`（见 `format::ImageRes` /
+/// `format::FontBytes`）。
 pub fn with_container(meta: DocMeta, content: Content, path: &Path) -> Box<dyn Document> {
     Box::new(BookDocument::with_container(meta, content, path))
 }

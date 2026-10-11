@@ -14,7 +14,8 @@ use quick_xml::events::Event;
 
 use super::zip::Zip;
 use super::{
-    Chapter, Content, DocMeta, DocumentProvider, FlowDoc, FontBytes, Format, ImageRes, TocEntry,
+    Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, FontBytes, Format,
+    ImageRes, TocEntry,
 };
 use super::{dir_of, fragment_of, image_dims, resolve_href, shrink_image};
 use crate::error::Result;
@@ -31,8 +32,33 @@ impl DocumentProvider for EpubAdapter {
             .is_some_and(|e| e.eq_ignore_ascii_case("epub"))
     }
 
+    /// 只读索引：**一个 zip 条目都不解压**（正文、封面、图片、CSS 除外 ——
+    /// 那几样本来就要进库，见 `save_document`）。
+    fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
+        read_with(path, false)
+    }
+
+    /// 一章的正文：解它自己那一个条目。这是打开一本书时主要付的那一笔钱。
+    fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
+        match at {
+            ChapterLocator::Entry(entry) => self.entry_text(path, entry).ok_or_else(|| {
+                crate::Error::ChapterUnavailable {
+                    path: path.to_path_buf(),
+                    index: 0,
+                    at: entry.clone(),
+                }
+            }),
+            other => Err(crate::Error::ChapterUnavailable {
+                path: path.to_path_buf(),
+                index: 0,
+                at: format!("{other:?}"),
+            }),
+        }
+    }
+
+    /// 全文那一趟（索引 + 每一章的正文）。只给测试与「我就是要全文」的调用方。
     fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        read(path)
+        read_with(path, true)
     }
 
     /// `@font-face` 声明的那几个路径 → 字节。回空而不是报错的理由见 [`FontBytes`]。
@@ -46,6 +72,14 @@ impl DocumentProvider for EpubAdapter {
         let name = zip.locate(href)?;
         zip.read(&name)
     }
+
+    /// 容器绝对路径 → 那一章的 XHTML。与 `image_bytes` 同一条路：库里只有位置，
+    /// 打开时现取（见 `ChapterLocator::Entry`）。
+    fn entry_text(&self, path: &Path, entry: &str) -> Option<String> {
+        let mut zip = Zip::open(path).ok()?;
+        let name = zip.locate(entry)?;
+        zip.read_text(&name)
+    }
 }
 
 /// 单本书取字节的三道闸：face 数、单文件、总量。
@@ -57,12 +91,13 @@ const MAX_FACES: usize = 32;
 const MAX_ONE: usize = 8 << 20;
 const MAX_TOTAL: usize = 32 << 20;
 
-/// 封面缩略图的长边上限（存储尺寸，非显示尺寸）。
+/// 封面的长边上限（**存储**尺寸，非显示尺寸）。
 ///
-/// 书架卡片与详情页都远远用不到原图尺寸，而原图往往就是全书最大的一两个字节块
-/// —— 一本《蛇结》封面原图 404 KB，缩到 1024 以内后只剩几十 KB。
-/// 1024 是留出高 dpi 屏上放大一档的余量，不是精确的显示尺寸。
-const COVER_MAX_EDGE: u32 = 1024;
+/// 书架卡片宽 100–200 逻辑像素、详情页也就 400 上下，512 留了高 dpi 与「点开看大图」
+/// 的余量。以前是 1024 且「不超过就不动」，于是 800×1200 的 PNG 原样进库 ——
+/// 实测一本《蛇结》封面 404 KB，占掉整个库的 8 成。正文出库之后封面就是库里最大的一项，
+/// 这里按显示尺寸重编（见 [`shrink_image`]）。
+const COVER_MAX_EDGE: u32 = 512;
 
 /// 认得哪些 media-type 是字体，以及要不要先过一道 WOFF。
 ///
@@ -468,96 +503,7 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
     out
 }
 
-/// 把一份 CSS 里的 `url(…)` 按**那份 CSS 自己的目录**解成容器绝对路径。
-///
-/// 为什么必须趁拼接前做：`FlowDoc.css` 是全书多份 CSS 拼起来的**一个**字符串
-/// （SQLite 里 `books.css` 那一列就是它），拼完就再也不知道某条 `url(Fonts/a.otf)`
-/// 原本写在 `OEBPS/Styles/` 还是 `OEBPS/` 下面。而 `@font-face` 的 `src` 要拿去查
-/// 容器里的条目 —— 差一层目录的表现是「书里明明有字体，就是读不到」，
-/// 且屏幕上完全看不出原因。
-///
-/// 输出**一律带引号**：解出来的路径常含空格（真书里的 `body italic.otf`），
-/// 不加引号那是非法 CSS，解析器会在空格处断开。
-fn absolutize_css_urls(css: &str, base_dir: &str) -> String {
-    // 先清注释：注释里的 `url(x)` 不是声明，改写它等于往 CSS 里塞假路径。
-    let text = crate::css::strip_comments(css);
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while !rest.is_empty() {
-        let Some(start) = find_url_function(rest) else {
-            out.push_str(rest);
-            return out;
-        };
-        // `rest[start..start + 4]` 就是 `url(`，`open` 是它之后第一位。
-        let open = start + 4;
-        let Some(close) = find_close_paren(&rest[open..]) else {
-            // 括号不闭合：剩下的原样抄走，不猜。
-            out.push_str(rest);
-            return out;
-        };
-        let token_end = open + close + 1; // 整个 `url(…)` 函数 token 的结束（不含）
-        let inner = rest[open..open + close]
-            .trim()
-            .trim_matches(|c| c == '"' || c == '\'')
-            .trim();
-        // `url(` 之前的部分先抄走；`url(` 本身**不能**跟着抄，否则改写会变成
-        // `url(url("解出来的路径")` —— 括号一下就不配对了。
-        out.push_str(&rest[..start]);
-        if inner.is_empty() || crate::css::is_remote(inner) {
-            // 远程与空的都原样留着：一期不取外部字体，也不假装取过。
-            out.push_str(&rest[start..token_end]);
-        } else {
-            out.push_str("url(\"");
-            out.push_str(&resolve_href(base_dir, inner));
-            out.push_str("\")");
-        }
-        rest = &rest[token_end..];
-    }
-    out
-}
-
-/// 下一个 `url(` 函数 token 的起始字节偏移。
-///
-/// 要判前一个字符：`dataurl(` / `my-url(` 里都含 `url(`，按子串找会把它们当函数改写。
-fn find_url_function(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i + 4 <= bytes.len() {
-        if bytes[i..i + 4].eq_ignore_ascii_case(b"url(")
-            && (i == 0 || !is_function_char(bytes[i - 1]))
-        {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
-/// 能构成一个标识符的字符：命中的话它前面那串就不是独立的 `url` 函数名。
-fn is_function_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b >= 0x80
-}
-
-/// 从 `text` 开头找到配对 `)` 的位置（不含）。引号里的括号跳过。
-fn find_close_paren(text: &str) -> Option<usize> {
-    let mut quote: Option<char> = None;
-    for (i, c) in text.char_indices() {
-        if let Some(q) = quote {
-            if c == q {
-                quote = None;
-            }
-            continue;
-        }
-        match c {
-            '"' | '\'' => quote = Some(c),
-            ')' => return Some(i),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn read(path: &Path) -> Result<(DocMeta, Content)> {
+fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
     let mut zip = Zip::open(path)?;
     let container = zip
         .locate("META-INF/container.xml")
@@ -577,20 +523,28 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
 
     let by_id = |id: &str| opf.items.iter().find(|i| i.id == id);
 
-    // CSS 按 manifest 里的声明顺序拼接：真实书里后一份覆盖前一份是常态。
+    // CSS 按 manifest 里的声明顺序记下**位置清单**：正文出库之后样式表同样不入库，
+    // 打开时按这份清单回容器现取（见 `Document::stylesheet`）。顺序 = manifest 顺序
+    // = 层叠顺序，真实书里后一份覆盖前一份是常态。全文路径（`with_text`）才把字节
+    // 读出来拼好 —— 那是测试与「我就是要全文」的调用方。
+    let mut css_hrefs = Vec::new();
     let mut css = String::new();
     for item in opf.items.iter().filter(|i| i.media_type == "text/css") {
         let name = resolve(&base_dir, &item.href);
         // `locate` 返回容器里**真实**那条目名（大小写与分隔符都可能和 OPF 写的不一样），
-        // 目录要按它算：按 OPF 那串解出来的 `url()` 会在书名大小写混用时指错地方。
+        // 位置清单要按它记：按 OPF 那串解出来的 `url()` 会在书名大小写混用时指错地方。
         let Some(found) = zip.locate(&name) else {
             tracing::debug!("epub: manifest 声明的样式 {name} 不在容器里");
             continue;
         };
+        css_hrefs.push(found.clone());
+        if !with_text {
+            continue;
+        }
         let Some(text) = zip.read_text(&found) else {
             continue;
         };
-        css.push_str(&absolutize_css_urls(&text, &dir_of(&found)));
+        css.push_str(&super::absolutize_css_urls(&text, &dir_of(&found)));
         css.push('\n');
     }
 
@@ -695,26 +649,33 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
             continue;
         }
         let name = resolve(&base_dir, &item.href);
-        let Some(found) = zip.locate(&name).and_then(|n| zip.read_text(&n)) else {
-            // 同上：正文少一章在界面上的表现是「翻到那里是空的」，说不清原因。
+        // 索引那一趟**只核一下条目在不在**（`locate` 走中央目录，不解压），
+        // 正文等打开这一章时再取 —— 这就是「导入不再解压全本」的全部。
+        if zip.locate(&name).is_none() {
+            // 正文少一章在界面上的表现是「翻到那里是空的」，说不清原因。
             tracing::warn!(
                 "epub: 容器里没有 {name}（spine 第 {} 项），这一章读不到",
                 idx + 1
             );
             continue;
+        }
+        let source = if with_text {
+            zip.read_text(&name)
+        } else {
+            None
         };
-        let source = found;
         let title = toc
             .iter()
             .find(|e| e.href == name)
             .map(|e| e.title.clone())
             .filter(|t| !t.is_empty())
-            .or_else(|| heading_of(&source))
+            // `heading_of` 要读正文才拿得到 —— 只有「全文那一趟」才试它。
+            .or_else(|| source.as_deref().and_then(heading_of))
             .unwrap_or_else(|| format!("第 {} 节", idx + 1));
-        chapters.push(Chapter {
-            title,
-            source,
-            spine_href: name,
+        chapters.push(match source {
+            Some(text) => Chapter::inline(title, text).with_spine_href(name),
+            // 位置就是条目名，正是打开时 `Entry` 那一路要的东西。
+            None => Chapter::entry(title, name),
         });
     }
 
@@ -732,16 +693,18 @@ fn read(path: &Path) -> Result<(DocMeta, Content)> {
     let flow = FlowDoc {
         chapters,
         css,
+        css_hrefs,
         toc,
         cover: cover_bytes,
         images,
     };
     // 一本「读出来不对」的书，第一件要知道的事是哪一节空了：正文、样式、目录还是插图。
     tracing::debug!(
-        "epub: {} 读到 {} 章（spine {} 项）、css {} 字节、目录 {} 项、插图 {} 张、封面 {}",
+        "epub: {} 读到 {} 章（spine {} 项）、样式 {} 份（{} 字节）、目录 {} 项、插图 {} 张、封面 {}",
         path.display(),
         flow.chapters.len(),
         opf.spine.len(),
+        flow.css_hrefs.len(),
         flow.css.len(),
         flow.toc.len(),
         flow.images.len(),
@@ -806,11 +769,12 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
+    use super::read_with;
     use crate::css::computed::{ComputedStyle, TextAlign, cascade};
     use crate::css::{Origin, RuleSet};
     use crate::dom::Dom;
     use crate::format::detect;
-    use crate::format::{DocMeta, FlowDoc, Format, dir_of, resolve_href};
+    use crate::format::{Chapter, Content, DocMeta, FlowDoc, Format, dir_of, resolve_href};
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/minimal-zh.epub")
@@ -822,17 +786,25 @@ mod tests {
         crate::document::open(path).expect("合成容器应能打开")
     }
 
-    /// 可重排的那一半：绝大多数用例只关心 `FlowDoc`。
+    /// 可重排的那一半：绝大多数用例只关心 `FlowDoc`，而且是**正文已经取回来**的那种。
+    ///
+    /// `document::open` 现在只给索引（库里就存这个，见 `plans/text-out-of-db.md`），
+    /// 而这一层要断言的是正文本身，所以按位置把每一章取回来。
     fn flow_of(path: &Path) -> FlowDoc {
-        doc_of(path).flow().expect("这个容器该读成可重排").clone()
+        let doc = doc_of(path);
+        let mut flow = doc.flow().expect("这个容器该读成可重排").clone();
+        for (ix, chapter) in flow.chapters.iter_mut().enumerate() {
+            let text = doc.chapter_source(ix).expect("正文该取得到");
+            *chapter = Chapter::inline(chapter.title.clone(), text)
+                .with_spine_href(chapter.spine_href.clone());
+        }
+        flow
     }
 
     fn opened() -> (DocMeta, FlowDoc) {
         let doc = doc_of(&fixture());
-        (
-            doc.meta().clone(),
-            doc.flow().expect("该读成可重排").clone(),
-        )
+        let flow = flow_of(&fixture());
+        (doc.meta().clone(), flow)
     }
 
     #[test]
@@ -892,7 +864,7 @@ mod tests {
             ]
         );
         assert_eq!(flow.chapters[0].title, "第一章 蛇结");
-        assert!(flow.chapters[0].source.contains("夜色从花园那头压过来"));
+        assert!(flow.chapters[0].source().contains("夜色从花园那头压过来"));
         // nav 文档本身是 spine 里的一节，但它不该变成「一章」。
         assert_eq!(
             flow.chapters
@@ -903,12 +875,26 @@ mod tests {
         );
     }
 
-    /// 两份 CSS 都在 manifest 里，拼接顺序就是声明顺序。
+    /// 两份 CSS 都在 manifest 里：索引记下的是**位置清单**，顺序就是声明顺序；
+    /// 全文路径才把文本按同一顺序拼好（正文出库之后样式表同样不入库）。
     #[test]
     fn css_is_concatenated_in_manifest_order() {
         let (_, flow) = opened();
-        let extra = flow.css.find("body.cover").expect("应有 cover.css 的内容");
-        let style = flow.css.find("text-indent").expect("应有 style.css 的内容");
+        assert!(flow.css.is_empty(), "索引只给位置清单，不该带样式文本");
+        assert_eq!(flow.css_hrefs.len(), 2, "{:?}", flow.css_hrefs);
+        assert!(
+            flow.css_hrefs[0].ends_with("cover.css"),
+            "清单按 manifest 顺序：{:?}",
+            flow.css_hrefs
+        );
+        assert!(flow.css_hrefs[1].ends_with("style.css"), "{:?}", flow.css_hrefs);
+
+        let (_, full) = read_with(&fixture(), true).unwrap();
+        let Content::Reflow(full) = full else {
+            panic!("该读成可重排");
+        };
+        let extra = full.css.find("body.cover").expect("应有 cover.css 的内容");
+        let style = full.css.find("text-indent").expect("应有 style.css 的内容");
         assert!(
             extra < style,
             "cover.css 在 manifest 里先出现，拼接顺序要保住"
@@ -935,12 +921,16 @@ mod tests {
     }
 
     /// 中文书的排版地基：这三条样式必须能从合成书的 CSS 里落到元素上。
+    /// 层叠吃的是**拼好的文本** —— 全文路径（`read`）给的那一份。
     #[test]
     fn the_books_own_css_reaches_the_elements() {
-        let (_, flow) = opened();
+        let (_, full) = read_with(&fixture(), true).unwrap();
+        let Content::Reflow(flow) = full else {
+            panic!("该读成可重排");
+        };
         let rules = RuleSet::parse(&flow.css, Origin::Author);
         assert_eq!(rules.ignored, 1, "只有 @charset 是清单外的语句型 at-rule");
-        let dom = Dom::parse(flow.chapters[0].source.as_bytes());
+        let dom = Dom::parse(flow.chapters[0].source().as_bytes());
         let body = dom
             .elements()
             .find(|(_, n)| n.tag.as_ref().map(|t| t.local.to_string()) == Some("body".into()))
@@ -1158,16 +1148,71 @@ mod tests {
         path
     }
 
-    /// 章标题的回落：没有目录条目时读章内第一个 h1/h2/h3。
+    /// 章标题的回落：目录里没有这一章时，**全文那一趟**读章内第一个 h1/h2/h3。
+    ///
+    /// 这一档是「只读索引」的代价：标题的回落要读正文才拿得到，而导入不再读正文
+    /// （见 `plans/text-out-of-db.md`）。所以索引那一趟的标题只能来自目录，
+    /// 目录里没有就是「第 N 节」。故意写成两条断言，把那个差别钉在那里。
     #[test]
-    fn heading_fallback_reads_the_first_heading_of_a_chapter() {
+    fn heading_fallback_only_exists_on_the_full_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = synth_epub(
             &dir,
             "<html><body><h2>第二章 庭院</h2><p>正文</p></body></html>",
         );
-        let flow = flow_of(&path);
+        // 索引：目录里没有 → 第 N 节（导入看到的，也是进库的那个）。
+        let indexed = doc_of(&path);
+        assert_eq!(
+            indexed.flow().unwrap().chapters[0].title,
+            "第 1 节",
+            "索引那一趟读不到正文，也就无从回落"
+        );
+        // 全文：读得到正文，回落成立。
+        let provider = crate::format::provider_for(&path).unwrap();
+        let (_, content) = provider.read(&path).unwrap();
+        let crate::format::Content::Reflow(flow) = content else {
+            panic!("该读成可重排");
+        };
         assert_eq!(flow.chapters[0].title, "第二章 庭院");
+    }
+
+    /// 导入那一趟（`index`）**不产出正文**：章表里每一章都是「位置」。
+    ///
+    /// 这条钉的是「导入不再解压全本」本身 —— 以前 `read()` 会在导入时把每一章的
+    /// XHTML 都解出来，然后被 `save_flow_in` 丢掉。
+    #[test]
+    fn the_index_pass_produces_no_chapter_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = synth_epub(
+            &dir,
+            "<html><body><h2>标题</h2><p>正文</p></body></html>",
+        );
+        let provider = crate::format::provider_for(&path).unwrap();
+
+        let (_, content) = provider.index(&path).unwrap();
+        let crate::format::Content::Reflow(indexed) = content else {
+            panic!("该读成可重排");
+        };
+        assert!(
+            indexed.chapters.iter().all(|c| c.source().is_empty()),
+            "索引那一趟不该有正文"
+        );
+        assert!(
+            indexed
+                .chapters
+                .iter()
+                .all(|c| matches!(c.locator(), Some(crate::format::ChapterLocator::Entry(_)))),
+            "每一章都该只带一个容器条目"
+        );
+
+        let (_, content) = provider.read(&path).unwrap();
+        let crate::format::Content::Reflow(full) = content else {
+            panic!("该读成可重排");
+        };
+        assert!(
+            full.chapters.iter().all(|c| !c.source().is_empty()),
+            "全文那一趟才有正文"
+        );
     }
 
     /// 连标题都没有时，章名回落成「第 N 节」。
@@ -1274,12 +1319,22 @@ mod tests {
             ],
         );
 
-        let flow = flow_of(&epub);
+        let (_, full) = read_with(&epub, true).unwrap();
+        let Content::Reflow(flow) = full else {
+            panic!("该读成可重排");
+        };
         assert!(
             flow.css.contains("url(\"OEBPS/Fonts/body.otf\")"),
             "src 要解成容器绝对路径、带引号、括号配对：{}",
             flow.css
         );
+        // 索引路径记下的是位置清单，文本一个字节都不读。
+        let (_, indexed) = read_with(&epub, false).unwrap();
+        let Content::Reflow(indexed) = indexed else {
+            panic!("该读成可重排");
+        };
+        assert_eq!(indexed.css_hrefs, vec!["OEBPS/Styles/style.css".to_string()]);
+        assert!(indexed.css.is_empty(), "索引不该带样式文本");
 
         // 层叠那一步拿到的就是能直接查容器的路径。
         let rules = RuleSet::parse(&flow.css, Origin::Author);
@@ -1294,7 +1349,7 @@ mod tests {
         );
 
         // 正文那条 `font-family` 的第一候选就是声明名 —— app 侧靠整串同名把它认出来。
-        let dom = Dom::parse(flow.chapters[0].source.as_bytes());
+        let dom = Dom::parse(flow.chapters[0].source().as_bytes());
         let body = dom
             .elements()
             .find(|(_, n)| n.tag.as_ref().map(|t| t.local.to_string()) == Some("body".into()))
@@ -1384,7 +1439,8 @@ mod tests {
         let path = published_shape_epub(&dir);
         let doc = doc_of(&path);
         let meta = doc.meta();
-        let flow = doc.flow().expect("该读成可重排");
+        // 正文要按位置取回来（索引里只有位置）。
+        let flow = flow_of(&path);
 
         assert_eq!(meta.title, "合成出版书", "书名从 OPF 的 dc:title 来");
         assert_eq!(
@@ -1395,10 +1451,13 @@ mod tests {
         assert!(
             flow.chapters
                 .iter()
-                .all(|c| c.source.contains("<p") && c.source.contains("</p>")),
+                .all(|c| c.source().contains("<p") && c.source().contains("</p>")),
             "每一章都要带得回它的正文"
         );
-        assert!(!flow.css.is_empty(), "出版书一定带 CSS");
+        assert!(
+            !flow.css_hrefs.is_empty(),
+            "出版书一定带 CSS（清单上至少一份）"
+        );
         // 目录条目要能对上章节，否则侧栏点击无处可跳。带着 `#fragment` 的那两条也算：
         // 对上说明 fragment 在解 href 时被剥掉了，而不是留在路径里比对不上。
         let matched = flow
@@ -1411,11 +1470,17 @@ mod tests {
             flow.toc.len(),
             "有目录条目对不上章节：href 解析有 bug"
         );
-        // 标题：目录里有的那条用它，目录排到 25 之后的三章回落到章内 `<h1>`。
+        // 标题：目录里有的那条用它。
         assert_eq!(flow.chapters[0].title, "第1章", "章名来自目录");
-        assert_eq!(
-            flow.chapters[27].title, "第28章",
-            "目录没覆盖到的章回落到 h1"
-        );
+        // 目录排到 25 之后的那几章：**导入看到的**是「第 N 节」（索引那一趟不读正文，
+        // 回落无从谈起），**全文那一趟**才读得到章内的 `<h1>`。这个差别是
+        // 「导入不再解压全本」的代价，故意两条都钉住。
+        assert_eq!(flow.chapters[27].title, "第 28 节", "索引那一趟只能给编号");
+        let provider = crate::format::provider_for(&path).unwrap();
+        let (_, content) = provider.read(&path).unwrap();
+        let crate::format::Content::Reflow(full) = content else {
+            panic!("该读成可重排");
+        };
+        assert_eq!(full.chapters[27].title, "第28章", "全文那一趟回落到 h1");
     }
 }

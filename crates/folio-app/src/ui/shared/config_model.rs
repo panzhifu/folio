@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use folio_core::{Account, Appearance, Config, Language, Library, Reader};
+use folio_core::{Appearance, Config, Language, Library, Reader};
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
 use super::error::{Context as _, report};
@@ -68,10 +68,6 @@ impl ConfigHolder {
         Self::entity(cx).read(cx).config.language.clone()
     }
 
-    pub fn account(cx: &App) -> Account {
-        Self::entity(cx).read(cx).config.account.clone()
-    }
-
     /// 书库位置那一节。导入前要先问它确认过没有（见 `library::target_dir`）。
     pub fn library(cx: &App) -> Library {
         Self::entity(cx).read(cx).config.library.clone()
@@ -106,10 +102,6 @@ impl ConfigHolder {
         Self::edit(cx, |config| f(&mut config.language));
     }
 
-    pub fn edit_account(cx: &mut App, f: impl FnOnce(&mut Account)) {
-        Self::edit(cx, |config| f(&mut config.account));
-    }
-
     pub fn edit_library(cx: &mut App, f: impl FnOnce(&mut Library)) {
         Self::edit(cx, |config| f(&mut config.library));
     }
@@ -137,7 +129,7 @@ impl ConfigHolder {
 
 #[cfg(test)]
 mod tests {
-    //! 配置实体在**已启动的外壳里**的两件事：越界偏好被夹住、账号名改完立刻读得回来。
+    //! 配置实体在**已启动的外壳里**的两件事：越界偏好被夹住、偏好改完立刻读得回来。
     //!
     //! 两条都要一个真的 `App`：`ConfigHolder` 是挂在 `Global` 上的实体，不走启动流程
     //! 就造不出「视图能看到的那份配置」。`ConfigPath` 不设 → `save` 直接跳过，
@@ -177,9 +169,9 @@ mod tests {
         assert_eq!(prefs.line_height, 1.0, "行距应被夹到下限");
     }
 
-    /// 账号名走的是配置实体：改完立刻能读回来（落盘由 `ConfigPath` 决定，测试里不落盘）。
+    /// 外观模式走的是配置实体：改完立刻能读回来（落盘由 `ConfigPath` 决定，测试里不落盘）。
     #[gpui_kit::test]
-    fn editing_the_account_name_updates_the_holder(cx: &mut TestAppContext) {
+    fn editing_the_appearance_updates_the_holder(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let handle: AnyWindowHandle = cx
             .open_window(size(px(900.), px(600.)), |window, cx| {
@@ -195,10 +187,10 @@ mod tests {
         cx.update_window(handle, |_, window, cx| window.render_frame(cx))
             .unwrap();
         cx.update(|cx| {
-            ConfigHolder::edit_account(cx, |a| a.name = "阿遥".into());
+            ConfigHolder::edit_appearance(cx, |a| a.mode = folio_core::Mode::Dark);
         });
-        let name = cx.update(|cx| ConfigHolder::account(cx).name);
-        assert_eq!(name, "阿遥");
+        let mode = cx.update(|cx| ConfigHolder::appearance(cx).mode);
+        assert_eq!(mode, folio_core::Mode::Dark);
     }
 
     /// 回归门：改配置必须通知观察者。

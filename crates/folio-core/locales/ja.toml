@@ -41,6 +41,8 @@ page_position = "%{index} / %{total} ページ"
 mode_spread = "見開き"
 # 選択メニューバー（M6）：アクションはその場で展開し、ポップオーバーは使わない。
 sel_copy = "コピー"
+sel_highlight = "線引き"
+sel_chapter = "章全体を選択"
 sel_paragraph = "段落を選択"
 sel_cancel = "キャンセル"
 
@@ -58,7 +60,6 @@ typography = "文字"
 layout = "レイアウト"
 fonts = "フォント"
 appearance = "外観"
-account = "アカウント"
 about = "このアプリについて"
 library = "書庫"
 
@@ -71,9 +72,9 @@ measure = "本文幅"
 family = "フォントファミリー"
 themes = "テーマ"
 custom_themes = "カスタムテーマ"
-reader = "読者"
 location = "保存先"
-docs = "ドキュメント"
+watch = "フォルダ監視"
+transfer = "Wi-Fi 転送"
 
 [field]
 font_size = "文字サイズ"
@@ -102,17 +103,24 @@ theme_dir = "テーマフォルダ"
 "theme_dir.desc" = "このフォルダに置いた `.json` テーマは次回起動時に読み込まれます。"
 language = "表示言語"
 "language.desc" = "UI 表示の言語で、本文の言語は変わりません。"
-account_name = "読者名"
-"account_name.desc" = "サイドバー下部に表示。空欄なら「読者」を使います。"
 config_path = "設定ファイル"
-"config_path.desc" = "閲覧設定とアカウントはこの JSON ファイルに保存されます。"
+"config_path.desc" = "閲覧設定はこの JSON ファイルに保存されます。"
 library_dir = "書庫フォルダ"
 "library_dir.desc" = "追加した本はここにコピーされます。空にすると、次に追加する時にもう一度聞かれます。"
 "library_dir.suggested" = "推奨の場所"
+"watch" = "フォルダを監視"
+"watch.desc" = "「受信箱」フォルダを見守ります：本を放り込むと自動で追加されます。オンにした時フォルダ未指定なら、下の候補場所を使います。"
+"watch.dir.pick" = "監視フォルダを選ぶ…"
+"watch.suggested" = "候補の受信箱"
+"transfer" = "Wi-Fi 転送"
+
+"transfer.desc" = "同じ Wi-Fi のブラウザで下のアドレスを開くと、本を直接本棚へ送れます。サーバーはオフにするまで動き、再起動しても自動では開きません。"
+"transfer.off" = "スイッチを入れると、アドレスとペアリングコードがここに表示されます。"
+"transfer.pin" = "ペアリングコード：%{pin}"
+"transfer.no_url" = "LAN アドレスが見つかりません — ブラウザにこの端末の IP を入力してください（ポートはログに）。"
 "library_dir.pick" = "フォルダを選択…"
 
 [account]
-fallback_name = "読者"
 settings = "設定"
 theme = "テーマ"
 library = "書庫フォルダ"
@@ -168,12 +176,51 @@ notes = "注釈はまだ追加されていません"
 # 一个是动作，一个是去处。
 [shelf]
 search_placeholder = "タイトルまたは著者を検索"
+# 右上角の三点ボタン：本体は何もせず、開くと追加方法のメニューを出す。文面は
+# アクセシビリティラベルとデスクトップのツールチップに使う。
+more = "追加方法"
 import = "追加"
+# 导入进行中的那一行读数，摆在命令行与架面之间。后端报的第一条读数还没上来时总数
+# 不知道，那一句不带数字。
+importing = "追加中…"
+importing_of = "追加中 %{done}/%{total}"
+cancel = "キャンセル"
+url_import = "リンクから追加"
+url_title = "リンクから本を追加"
+url_placeholder = "本のダウンロードリンクを貼り付け（http…）"
+url_hint = "ダウンロードはバックグラウンドで行われ、進捗は本棚に表示されます。名前はリンクの末尾から取ります。"
+scan = "検索"
+scan_title = "端末内の本を探す"
+scan_running = "検索中…"
+scan_found = "検索中… %{n} 件見つかりました"
+scan_stop = "中止"
+scan_none = "この端末に追加できる本は見つかりませんでした"
+scan_summary = "%{n} 件見つかりました — 追加するものにチェック"
+scan_skipped = "読めない場所が %{n} か所ありました（権限）— スキップ"
+scan_truncated = "本が多すぎるため一部のみ表示しています"
+scan_row = "%{name}（%{size}）"
+scan_on_shelf = "追加済み"
+scan_select_all = "すべて選択"
+scan_clear = "解除"
+scan_import = "選択した %{n} 冊を追加"
+scan_close = "閉じる"
+cancel_import = "中止"
 back = "戻る"
 empty = "本棚はまだ空です"
 empty_hint = "右の「追加」から epub・markdown・テキストを選んでください"
 no_results = "該当する本がありません"
 no_results_hint = "別の語でお試しください。検索対象は本文ではなくタイトルと著者です"
+# カードの管理メニュー：長押し（モバイル）または右クリック（デスクトップ）で開く。
+# 右上の追加メニューと同じコンポーネント。開く・情報が先で、削除は最後に
+# 区切り線を挟んで置く —— 破壊的な操作を指の届きやすい位置に置かない。
+book_open = "開く"
+book_info = "書籍情報"
+# 「書籍情報」パネル：この一冊の事実。メニューをタップした時点で一度だけ照会する。
+info_title = "書籍情報"
+info_format = "形式"
+info_size = "サイズ"
+info_path = "ファイルの場所"
+info_close = "閉じる"
 
 # 书库管理。删除项的措辞带书名：长按（移动端）或右键（桌面端）之后指点已经离开那一行，
 # 只有标题能让读者确认自己按的是哪一本。
@@ -188,18 +235,13 @@ confirm = "確認して追加"
 cancel = "キャンセル"
 pick_dir = "フォルダを選択…"
 
-# 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs），
-# 「开发方案」「已知缺口」是 docs/ 里那两份的原文 —— 这一页的全部价值就是它不会另说一套。
+# 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs）。
 [about]
 version = "バージョン"
 version_desc = "現在起動中のバイナリがビルドされたバージョン。"
 gpui_pre = "GPUI 本体"
 kit = "コンポーネント層 gpui-kit"
 mobile = "モバイル基盤層"
-plan = "開発計画"
-limitations = "既知の未実装"
-open_doc = "表示"
-docs_note = "この 2 つはリポジトリ内のファイルそのもので、ビルド時に埋め込んでいます。この画面用に書き直した要約ではありません。"
 
 # 初回起動のウェルカム画面：アプリに入る前に書庫フォルダを選んでもらう。
 # 「キャンセル」は無い —— フォルダを選ぶか、既定の場所を使うかのどちらか。

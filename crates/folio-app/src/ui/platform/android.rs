@@ -77,6 +77,31 @@ fn android_main(app: android_activity::AndroidApp) {
     tracing::info!("android_main: Application::run returned — activity will finish");
 }
 
+/// 藏起 / 还原系统栏（阅读沉浸）。递给 Java，它自己切回 UI 线程，所以这里可以在
+/// GPUI 的原生线程上调用而不阻塞。失败只写日志：藏不成只是顶上一条状态栏，
+/// 不该把阅读页拖退。
+pub(crate) fn set_immersive(on: bool) {
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    // 本文件顶部把 `gpui_mobile::android::jni` 引进成了 `jni`，所以这里必须写 `::jni`
+    // 走 crate 根，否则 `jni::objects` 指的是 fork 那个模块而不是 jni crate。
+    use ::jni::objects::JValue;
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("setImmersive"),
+            ::jni::jni_sig!("(Landroid/app/Activity;Z)V"),
+            &[JValue::Object(&act), JValue::Bool(on)],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::debug!("set_immersive: {on} 已递给系统"),
+        Err(err) => tracing::warn!("set_immersive: {err}"),
+    }
+}
+
 /// logcat 那一层：把 `tracing` 的事件转给 `log` facade（它的后端是 `android_logger`）。
 ///
 /// 只带正文与字段，不带时间戳与级别前缀 —— logcat 每行自己会打时间、优先级与 tag，

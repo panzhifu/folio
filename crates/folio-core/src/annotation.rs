@@ -201,11 +201,7 @@ mod tests {
     }
 
     fn chapter(title: &str) -> Chapter {
-        Chapter {
-            title: title.into(),
-            source: String::new(),
-            spine_href: String::new(),
-        }
+        Chapter::inline(title, "")
     }
 
     #[test]

@@ -14,7 +14,6 @@ use gpui_kit::{App, AppContext as _, Font, TitlebarOptions, px, size};
 
 use crate::ui::host;
 use crate::ui::shared::config_model::{ConfigHolder, ConfigPath};
-use crate::ui::shared::http;
 use crate::ui::shared::theme;
 use crate::ui::shell::AppShell;
 
@@ -34,8 +33,7 @@ pub fn run_desktop() {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             // 替换gpui 默认的「不发请求」的 client，方便后续进行同步
-            http::install(cx);
-
+        
             // 主题集要在 `init` 之后装：那一步才把 `ThemeRegistry` 这个 Global 建出来。
             // 先装内置的（构建时从依赖源码嵌进来），再装读者自己放进 `themes/` 的。
             theme::register_builtin_themes(cx);
@@ -60,6 +58,16 @@ pub fn run_desktop() {
                     std::process::exit(1);
                 }
             };
+            // 源文件不在的那些书：连数据一起删掉。正文只在文件里（见
+            // `plans/text-out-of-db.md`），文件没了这本书就是死的，留在架上只会
+            // 让读者点开一片空白。删的是数据与副本，**不动读者自己的原件**。
+            match store.prune_missing() {
+                Ok(gone) if !gone.is_empty() => {
+                    tracing::warn!("desktop: 清理了 {} 本源文件已不在的书：{gone:?}", gone.len());
+                }
+                Ok(_) => {}
+                Err(err) => tracing::warn!("desktop: 清理失效的书失败：{err:#}"),
+            }
             // 书库挂成全局：书架、阅读、批注都从这里读同一个库。
             crate::ui::shared::app_store::install(store, cx);
             // 配置落盘到系统标准目录，再把配置挂成可观察的 Global。
@@ -67,6 +75,8 @@ pub fn run_desktop() {
             // 而外壳的订阅要拿到那个实体 —— 晚一步就是「no state of type ConfigHolder」。
             cx.set_global(ConfigPath(Some(folio_core::config_path())));
             ConfigHolder::install(config, cx);
+            // 监听是后台能力：配置开着就随启动起，活过任何一屏。
+            crate::ui::shared::watch::sync_from_config(cx);
 
             // 阅读字体是否已由 fontconfig 解析到，决定「字体随包」的优先级。
             let probe = Font {

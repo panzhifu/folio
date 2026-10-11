@@ -9,15 +9,20 @@
 //!   CBZ 归它；将来的 PDF / DJVU 也是这一族。
 
 use serde::{Deserialize, Serialize};
-
 use super::{Chapter, ImageRes, TocEntry};
 
-/// 可重排文档。`css` 是全书作者样式按 manifest 顺序拼起来的一份，
-/// `toc` 与 `cover` 来自 OPF；这三项都是**文档级**数据，所以和章节分开存。
+/// 可重排文档。`toc` 与 `cover` 来自 OPF；这两项是**文档级**数据，所以和章节分开存。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FlowDoc {
     pub chapters: Vec<Chapter>,
+    /// 拼接好的作者样式表。**索引路径下为空**：正文出库之后 CSS 同样不入库，
+    /// 存的是 [`Self::css_hrefs`]，打开时按清单回容器现取（见
+    /// `crate::document::Document::stylesheet`）。全文路径（`read`）与
+    /// 「文本已在手上」的场合（`from_content`、旧库兜底）才直接带文本。
     pub css: String,
+    /// 作者样式表在**容器里**的位置清单（容器绝对路径，按文档序 —— 顺序即层叠
+    /// 顺序）。索引路径填这里；单文件格式没有独立样式表，为空。
+    pub css_hrefs: Vec<String>,
     pub toc: Vec<TocEntry>,
     pub cover: Option<Vec<u8>>,
     /// 全书图片，按容器路径索引。封面若也在 manifest 里会一并收录。

@@ -10,13 +10,18 @@
 //! `impl ReaderSession`，靠 `pub(super)` 字段打进同一个实体 —— 一个会话一个实体，
 //! 不为拆文件而拆实体。
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
+use folio_core::annotation::ResolvedAnnotation;
 use folio_core::document::Document as OpenedDocument;
-use folio_core::store::Store;
-use folio_core::{DocMeta, Format, Locator, Reader};
-use gpui_kit::{App, Context, SharedString};
+use folio_core::store::{Annotation, Store};
+use folio_core::{DocMeta, Format, Locator, Reader, StaleReason};
+use gpui_kit::{App, Bounds, Context, Pixels, Point, SharedString};
 
 use super::book::Book;
 use super::chrome::{PageMode, Reserve};
@@ -35,6 +40,17 @@ pub enum Source {
     /// 装箱是因为两臂差着数量级：`Book` 带着章节表与排版结果，而兜底那一行只要 24。
     /// 不装箱的话，整个 `Source` 连同它外面的会话都按大的那臂算，每次赋值都在搬一整本书。
     Book(Box<Book>),
+}
+
+/// 一个成立的选区：挂在**某一章**的章内字符坐标上。
+///
+/// 跨章滚动之后屏上可能同时摆着两章的行，选区属于它成立时的那一章 —— 复制、
+/// 高亮、把手都按它自己的章取数据，不跟锚章走。它的章被裁出拼接窗口（滚远了）
+/// 时选区一并丢（渲染帧里 `span_doc` 查不到就清）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Selection {
+    pub(super) chapter: usize,
+    pub(super) range: Range<usize>,
 }
 
 /// 上一帧真正摆上屏的那几个数。
@@ -71,6 +87,12 @@ pub struct ReaderSession {
     pub(super) wanted_family: String,
     /// 读者**选**的那一档。装不下双页时实际生效的是分页，见 [`ReaderSession::mode`]。
     pub(super) mode: PageMode,
+    /// 这一档**不是**读者选的：库里那本书没存过模式（第一次读它，或从没换过档）。
+    ///
+    /// 挂着这面旗时渲染帧每帧按当前窗口宽重算默认档（[`chrome::default_mode`]），
+    /// 落库也不写这一档 —— 否则「在平板上第一次打开」会把双页钉死，回到手机上
+    /// `effective` 只能把它退成分页，而不是它本来该是的样子。
+    pub(super) mode_undecided: bool,
     pub(super) laid_out: LaidOut,
     /// 已滚过的像素（内容坐标，向下为正）。只在连续滚动里有意义。
     pub(super) scroll_y: f32,
@@ -90,18 +112,107 @@ pub struct ReaderSession {
     /// 还没落地的位置。恢复必须等排版做过一次才能做（坐标 → 行顶的映射要有行盒），
     /// 而构造时手上没有窗口，所以先记下来，第一帧渲染时取走。
     pub(super) pending_restore: Option<Locator>,
-    /// 上一次落库的章内偏移。滚动的落库按它去重：偏移只在**跨过一行**时才变，
+    /// 上一次落库的位置。滚动的落库按它去重：偏移只在**跨过一行**时才变，
     /// 所以「变了才写」等于「每行至多写一次」，比每帧一次或每次触摸一次都便宜，
-    /// 也不需要定时器。
+    /// 也不需要定时器。章号与偏移一起比 —— 跨进下一章的第一个字偏移可能还是 0，
+    /// 只比偏移会漏掉那一次落库。
+    pub(super) saved_chapter: usize,
     pub(super) saved_offset: usize,
     /// 书库。移动端的导入还没有界面，文件是 `adb push` 进应用目录的，
     /// 但位置与书目照常入库，所以杀掉进程回来还在同一章。
-    pub(super) store: Option<Rc<Store>>,
+    pub(super) store: Option<Arc<Store>>,
     pub(super) book_id: Option<i64>,
     /// `FontKey → Font` 的解析缓存。渲染每帧对每条可见 run 都要一次，缓存后只做哈希查表
     /// （见 [`FontCache`]：body / mono / faces / 设备表变了必须 `clear` 或 `reset`）。
     pub(super) font_cache: FontCache,
+
+    // ---- 选中（M6）：状态在这里，交互逻辑在 modules/selection.rs，绘制在 paint.rs / view.rs ----
+    /// 当前选中（某章的章内可见文本坐标，含头不含尾）。滚动不动它，重排不丢它，
+    /// 它所属的章被裁出窗口时丢。
+    pub(super) selection: Option<Selection>,
+    /// 就地菜单条开合。拖动期间收起（让位），成选即开。
+    pub(super) selection_menu_open: bool,
+    /// 指针拖选的临时态：按下锚点 + 起始位置 + 是否已拖过阈值。
+    pub(super) mouse_drag: Option<MouseDrag>,
+    /// 长按扩展的锚点：长按吸成词后手指继续拖，活动端绕它走。
+    /// 连同它所属的章一起记（跨章滚动后坐标按章隔离）。
+    pub(super) long_press_anchor: Option<(usize, usize)>,
+    /// 把手拖动：哪一端 + 手指→插入符的偏移。
+    pub(super) edge_drag: Option<EdgeDrag>,
+    /// 拖选/把手拖动松手后吃掉紧跟着的那一下 click（否则 `page::on_body_tap`
+    /// 会把刚选的清掉、还会翻页）。
+    pub(super) suppress_tap: bool,
+    /// 浮层（顶栏/底栏）开着。开着时指针让位——那一击的语义是收浮层。
+    pub(super) overlay_open: bool,
+    /// 正文元素这一帧画在窗口里的位置。事件坐标 → 排版坐标的原点，
+    /// 由 `GlyphsElement::paint` 每帧写入（gpui 事件只有窗口坐标）。
+    pub(super) content_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 本帧两端把手的命中区（窗口坐标，44px）。paint 每帧写入，事件时读。
+    pub(super) handle_hits: HandleHits,
+    /// 本帧菜单条的位置（窗口坐标）。视图每帧写入；压在它上面的一击属于菜单，
+    /// 不算「点别处清除」。
+    pub(super) menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+
+    // ---- 批注（M7）：状态在这里，读写在 modules/annotations.rs，绘制在 view.rs ----
+    /// 这本书在库里的全部批注，**原样**（还没解锚）。开书时读一次，写入时追加一条。
+    pub(super) annotations: Vec<Annotation>,
+    /// 按章解好锚的批注：章下标 →（排版代数，解出来的区间）。
+    ///
+    /// 缓存键里那个代数是必需的：解锚读的是「这一章的可见文本坐标」，换章、改字号、
+    /// 换窗口宽都会让它进位，而进位之后旧区间指的就是别的字了。
+    pub(super) annotation_spans: RefCell<AnnotationSpans>,
 }
+
+/// 按章缓存的解锚结果：章下标 →（这批结果出自哪一代排版，区间表）。
+///
+/// 起别名是因为它出现在三处签名里（会话字段、解算入口、渲染帧），摊开写每次都得
+/// 把四层嵌套重抄一遍，clippy 也嫌复杂。
+pub(super) type AnnotationSpans = HashMap<usize, (u64, Rc<Vec<ResolvedAnnotation>>)>;
+
+/// 选区的一端：起点（首个选中字符之前）或终点（末个选中字符之后）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SelectionEdge {
+    Start,
+    End,
+}
+
+impl SelectionEdge {
+    /// 被拖动时按住不动的另一端。
+    pub(super) fn opposite(self) -> Self {
+        match self {
+            SelectionEdge::Start => SelectionEdge::End,
+            SelectionEdge::End => SelectionEdge::Start,
+        }
+    }
+}
+
+/// 指针拖选的临时态。
+pub(super) struct MouseDrag {
+    /// 按下落点所属的章。整手拖选都锁在这一章里：跨章拖选是罕见场景，
+    /// v1 直接不允许 —— 拖过章界的手势就停在章界上。
+    pub chapter: usize,
+    /// 按下落点的章内字符偏移。
+    pub anchor: usize,
+    /// 按下的窗口位置，阈值判据的基准。
+    pub origin: Point<Pixels>,
+    /// 是否已经拖过阈值。只有拖过的松手才算「拖选成了一次」，才拦 click。
+    pub dragged: bool,
+}
+
+/// 把手拖动的临时态。
+pub(super) struct EdgeDrag {
+    pub edge: SelectionEdge,
+    /// 起拖时记下的「手指 → 插入符」偏移：圆钮长在行的上/下侧，
+    /// 手指不压在文字上，后续每帧用它还原「手指指的是哪个字」。
+    pub offset: Point<Pixels>,
+}
+
+/// 把手命中区：`(哪一端, 命中盒)` 的每帧快照。paint 每帧整表重写，事件侧只读。
+type HandleHits = Rc<RefCell<Vec<(SelectionEdge, Bounds<Pixels>)>>>;
+
+/// 拖选成立要越过的位移（逻辑像素）。更小的位移是手抖，不是选择——
+/// 普通点击（含触摸合成的按下/抬起）不该留下高亮。
+pub(super) const DRAG_THRESHOLD_PX: f32 = 4.0;
 
 /// 兜底用的那行字。中英混排，顺带把 fallback 路径也验一遍。
 const SAMPLE_LINE: &str = "Folio — 中文正文与 Latin 混排的一行";
@@ -110,14 +221,14 @@ impl ReaderSession {
     /// 冷启动：读偏好、挑设备字体，找得到文档就打开书，否则退回那一行兜底文本。
     pub fn boot(cx: &App) -> Self {
         let prefs = ConfigHolder::reader(cx);
-        let found = candidate_paths().into_iter().find(|path| path.is_file());
-        let Some(path) = found else {
-            log::info!("ReaderSession: 没有可读文档，进入兜底的单行文本");
-            return Self::sample(&prefs, cx);
-        };
         // 书库没装不是 fatal：照样能读，只是进度与偏好落不了盘，
         // 而「读了但没记住」比「直接退出」更可接受。
         let store = crate::ui::shared::app_store::handle(cx);
+        let found = candidate_paths().into_iter().find(|path| path.is_file());
+        let Some(path) = found else {
+            log::info!("ReaderSession: 没有可读文档，进入兜底的单行文本");
+            return Self::sample(&prefs, store, cx);
+        };
         match Self::open_document(&path, &prefs, store, cx) {
             Ok(view) => {
                 log::info!("ReaderSession: 打开 {path:?}");
@@ -125,13 +236,15 @@ impl ReaderSession {
             }
             Err(err) => {
                 log::error!("ReaderSession: 打开 {path:?} 失败：{err:#}");
-                Self::sample(&prefs, cx)
+                Self::sample(&prefs, crate::ui::shared::app_store::handle(cx), cx)
             }
         }
     }
 
-    /// 只有那一行兜底文本时用。
-    fn sample(prefs: &Reader, cx: &App) -> Self {
+    /// 只有那一行兜底文本时用。书库句柄**照样带上**：这一屏不是终点，
+    /// 外壳紧接着就用 [`Self::open_book`] 把读者点的那本换上来，
+    /// 句柄丢了那条路就永远读不出东西（只报「章节没入库」）。
+    fn sample(prefs: &Reader, store: Option<Arc<Store>>, cx: &App) -> Self {
         let family = device_family(&prefs.font_family, cx);
         let mut effective = prefs.clone();
         effective.font_family = family.clone();
@@ -141,6 +254,7 @@ impl ReaderSession {
             prefs: effective,
             family: family.into(),
             mode: PageMode::default(),
+            mode_undecided: false,
             laid_out: LaidOut::default(),
             scroll_y: 0.0,
             page: 0,
@@ -150,10 +264,23 @@ impl ReaderSession {
             header_reserve: 0.0,
             footer_reserve: 0.0,
             pending_restore: None,
+            saved_chapter: 0,
             saved_offset: 0,
-            store: None,
+            store,
             book_id: None,
             font_cache: FontCache::new(cx.text_system().all_font_names()),
+            selection: None,
+            selection_menu_open: false,
+            mouse_drag: None,
+            long_press_anchor: None,
+            edge_drag: None,
+            suppress_tap: false,
+            overlay_open: false,
+            content_bounds: Rc::default(),
+            handle_hits: Rc::default(),
+            menu_bounds: Rc::default(),
+            annotations: Vec::new(),
+            annotation_spans: RefCell::default(),
         }
     }
 
@@ -165,7 +292,7 @@ impl ReaderSession {
     pub fn open_document(
         path: &Path,
         prefs: &Reader,
-        store: Option<Rc<Store>>,
+        store: Option<Arc<Store>>,
         cx: &App,
     ) -> folio_core::Result<Self> {
         let doc = super::document::open(path)?;
@@ -197,7 +324,7 @@ impl ReaderSession {
     pub fn with_document(
         doc: std::sync::Arc<dyn OpenedDocument>,
         prefs: Reader,
-        store: Option<Rc<Store>>,
+        store: Option<Arc<Store>>,
         book_id: Option<i64>,
         locator: Locator,
         cx: &App,
@@ -205,18 +332,25 @@ impl ReaderSession {
         let family = device_family(&prefs.font_family, cx);
         let mut effective = prefs.clone();
         effective.font_family = family.clone();
-        let wanted_mode = book_id
+        // 库里存过档位就用读者的选择。没存过（第一次读这本书，或读了但从没换过档）
+        // 先按连续滚动摆着，等渲染帧量到窗口宽再定默认档 —— 构造时手上没有窗口，
+        // 而「装不装得下两栏」只有量出来的宽能回答。
+        let stored_mode = book_id
             .and_then(|id| store.as_ref()?.position(id).ok().flatten())
-            .map_or(PageMode::Continuous, |(mode, _)| {
-                PageMode::from_storage_name(&mode)
-            });
+            .map(|(mode, _)| mode);
+        let mode_undecided = stored_mode.as_deref().is_none_or(|name| name.is_empty());
+        let wanted_mode = stored_mode
+            .as_deref()
+            .map(PageMode::from_storage_name)
+            .unwrap_or(PageMode::Continuous);
         let book = Book::new(doc, effective.clone(), locator, cx);
-        Self {
+        let mut session = Self {
             source: Source::Book(Box::new(book)),
             wanted_family: prefs.font_family.clone(),
             prefs: effective,
             family: family.into(),
             mode: wanted_mode,
+            mode_undecided,
             laid_out: LaidOut::default(),
             scroll_y: 0.0,
             page: 0,
@@ -226,24 +360,70 @@ impl ReaderSession {
             header_reserve: 0.0,
             footer_reserve: 0.0,
             // 章已经由 `Book::new` 定好了；章内偏移留到第一帧排版做完再落地。
-            pending_restore: (locator.offset > 0).then_some(locator),
+            // 连续模式的落点是**全局 y**（章基线 + 章内行顶）：哪怕偏移是 0 也要挂
+            // 请求，把「这一章的开头」摆到它拼出来的位置 —— 上一章可能正占着上方。
+            pending_restore: (wanted_mode.is_continuous() || locator.offset > 0).then_some(locator),
+            saved_chapter: locator.chapter as usize,
             saved_offset: locator.offset,
             store,
             book_id,
             // 设备字体表在这里读一次；换书（可能注册了新内嵌字体）时由 `open_book` reset。
             font_cache: FontCache::new(cx.text_system().all_font_names()),
-        }
+            selection: None,
+            selection_menu_open: false,
+            mouse_drag: None,
+            long_press_anchor: None,
+            edge_drag: None,
+            suppress_tap: false,
+            overlay_open: false,
+            content_bounds: Rc::default(),
+            handle_hits: Rc::default(),
+            menu_bounds: Rc::default(),
+            annotations: Vec::new(),
+            annotation_spans: RefCell::default(),
+        };
+        // 屏上要有读者划过的痕迹，就得先知道库里有哪些。开书这一条路（`with_document`）
+        // 与换书那一条（`open_book`）都要过一遍，漏一处就是「重开书批注不见了」。
+        session.load_annotations();
+        session
     }
 
     /// 从书库打开一本书。
     ///
-    /// 按主键读库而不是按 `books.path` 去开那个文件：导入时那份副本躺在系统给文件
-    /// 选择器的临时目录里，随时会被清掉，而正文、图片、CSS 早在 `save_document` 时就
-    /// 进了 SQLite。书架点开一张卡片要的是「这本书还在」这个保证，不是「那个文件还在」。
+    /// 按主键读库而不是拿 `books.path` 重新解析一遍：库里存的是**索引**
+    /// （章表 + 每章在容器里的位置、CSS、目录、封面、图片元数据），正文本身按位置
+    /// 回容器现取（见 `plans/text-out-of-db.md`）。这样开书不必等一次全量解析，
+    /// 而库也不会与书的内容同量级。
+    ///
+    /// 源文件不在了的表现是「这一章取不到」而不是「书没了」：条目、进度、作者与
+    /// 封面都还在，读者能看见是哪一本出了问题。
     ///
     /// 读不到的一切情况都只写日志、不动当前那一屏：读者正在读的书不该因为点错一本
     /// 坏记录而变成空白页。
     pub fn open_book(&mut self, book_id: i64, cx: &mut Context<Self>) {
+        // 正文只在源文件里，所以「文件还是那份文件吗」是能不能读的前提。
+        // 三种不可信各自处置：文件不在 → 连数据一起删（读者看见的是这本书从架上消失，
+        // 而不是点开一片空白）；文件换了 / 索引是旧算法算的 → 重扫一遍，位置与批注
+        // 都还在（`book_id` 没变）。
+        if let Some(store) = self.store.clone() {
+            match store.stale_reason(book_id) {
+                Ok(Some(StaleReason::Missing)) => {
+                    log::warn!("ReaderSession: 第 {book_id} 本的源文件不在了，连数据一起删");
+                    if let Err(err) = store.remove_book(book_id) {
+                        log::error!("ReaderSession: 删第 {book_id} 本失败：{err:#}");
+                    }
+                    return;
+                }
+                Ok(Some(reason)) => {
+                    log::info!("ReaderSession: 第 {book_id} 本的索引要重扫（{reason:?}）");
+                    if let Err(err) = folio_core::reindex(&store, book_id) {
+                        log::error!("ReaderSession: 重扫第 {book_id} 本失败，照旧打开：{err:#}");
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => log::warn!("ReaderSession: 查第 {book_id} 本的文件状态失败：{err:#}"),
+            }
+        }
         let opened = self.store.as_ref().and_then(|store| {
             let row = store.book(book_id).ok().flatten()?;
             let content = store.load_content(book_id).ok().flatten()?;
@@ -271,7 +451,7 @@ impl ReaderSession {
             log::error!("ReaderSession: 书库里第 {book_id} 本读不出来（章节没入库或格式不认识）");
             return;
         };
-        // 章文本早在落库时就进了库，但图片与内嵌字体刻意不入库 —— 回到原文件现取。
+        // 库里只有章节位置，正文按位置回容器取；图片与内嵌字体同样不入库，也现取。
         let doc: std::sync::Arc<dyn OpenedDocument> = std::sync::Arc::from(
             folio_core::document::with_container(meta, content, Path::new(&path)),
         );
@@ -280,18 +460,26 @@ impl ReaderSession {
         // 换了一本书：`Book::new` 可能刚把书里的内嵌字体注册进设备，字体表要重读一份，
         // 缓存按新表重建（否则旧 FontKey 会命中到上一本书解析出的 Font）。
         self.font_cache.reset(cx.text_system().all_font_names());
+        // 换了坐标系（章内字符偏移是按章算的）：旧选中指向的是上一章的字，必须丢。
+        self.clear_selection();
         // 上次是以哪一档读的，这次还用那一档：进度存的是「第几个字」，与模式无关，
-        // 但读者认得的是那**一张纸**的样子。
+        // 但读者认得的是那**一张纸**的样子。没存过就当读者还没选，
+        // 交给渲染帧按窗口宽定默认档。
         self.mode = PageMode::from_storage_name(&mode);
+        self.mode_undecided = mode.is_empty();
         self.source = Source::Book(Box::new(book));
         self.book_id = Some(book_id);
+        // 换了一本书，屏上的底色也得跟着换：批注是按 `book_id` 存的。
+        self.load_annotations();
         self.scroll_y = 0.0;
         self.page = 0;
         self.wheel_accum = 0.0;
         self.content_height = 0.0;
+        self.saved_chapter = locator.chapter as usize;
         self.saved_offset = locator.offset;
-        // 章内偏移还是要等第一帧排版做完才能落地。
-        self.pending_restore = (locator.offset > 0).then_some(locator);
+        // 章内偏移还是要等第一帧排版做完才能落地。连续模式哪怕偏移是 0 也挂请求：
+        // 落点是全局 y，章首未必拼在 0 的位置。
+        self.pending_restore = (self.mode.is_continuous() || locator.offset > 0).then_some(locator);
         cx.notify();
     }
 
@@ -387,21 +575,34 @@ impl ReaderSession {
     }
 
     /// 本章已读比例。进度条与页脚都念它。
+    ///
+    /// 连续滚动读**视口顶那一章**的章内比例：进度条是那一章的刻度，跨章滚动时
+    /// 每进一章归零重来。落库存的「第几个字」与此无关，两种口径互不干扰。
     pub fn progress(&self) -> f32 {
         if self.laid_out.mode.is_continuous() {
-            let max = self.max_scroll();
-            if max <= 0.0 {
-                0.0
-            } else {
-                (self.scroll_y / max).clamp(0.0, 1.0)
+            let Some(book) = self.book() else {
+                return 0.0;
+            };
+            let gap = super::book::Book::chapter_gap(&self.prefs);
+            let Some(chapter) = book.chapter_at_y(self.scroll_y, gap) else {
+                return 0.0;
+            };
+            let base = book.base_of(chapter, gap).unwrap_or(0.0);
+            let height = book
+                .span_doc(chapter)
+                .map(|doc| doc.height())
+                .unwrap_or(0.0);
+            let local_max = (height - self.laid_out.viewport).max(0.0);
+            if local_max <= 0.0 {
+                return 0.0;
             }
+            return ((self.scroll_y - base) / local_max).clamp(0.0, 1.0);
+        }
+        let last = self.laid_out.pages.saturating_sub(1);
+        if last == 0 {
+            0.0
         } else {
-            let last = self.laid_out.pages.saturating_sub(1);
-            if last == 0 {
-                0.0
-            } else {
-                (self.page as f32 / last as f32).clamp(0.0, 1.0)
-            }
+            (self.page as f32 / last as f32).clamp(0.0, 1.0)
         }
     }
 
@@ -467,7 +668,8 @@ impl ReaderSession {
             // body / mono 不入 `FontKey`，换了必须让缓存失效，否则同一个 key 会命中旧字体。
             self.font_cache.clear();
             if let Some(book) = self.book_mut() {
-                book.document_mut().set_prefs(effective);
+                // 拼接窗口里的每一章都吃同一份偏好：一起作废，一起重排。
+                book.set_prefs_on_all(effective);
             }
         }
     }

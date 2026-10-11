@@ -28,6 +28,16 @@ reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.8" }
 
 rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "6"
+# 文件夹监听：Linux 走 inotify，无系统监听 API 的平台由它内置的 PollWatcher 兜底。
+notify = "8"
+# 出网方向的同步 HTTP 客户端（URL 下载、将来的 WebDAV）：同步 API 对上「一个请求流
+# 到底」的管线形状，rustls + webpki-roots（打包根证书，Android 上没有 /etc/ssl 可靠）。
+ureq = "2"
+# 只给 `folio-core::transfer`（Wi-Fi 传书服务器）用：长驻、多连接并发的 HTTP 服务
+# 与现成的 multipart 流式解析。tokio 被 transfer 模块关在自己家里，core 其余部分
+# 照旧是同步形状，公共签名不漏 Future。
+tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util"] }
+axum = { version = "0.8", features = ["multipart"] }
 html5ever = "0.40"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
@@ -55,6 +65,13 @@ rust-i18n = "4"
 # 只挂在 folio-app 上：后端不许反向依赖界面的错误类型。
 # gpui 那条链上本来就有 `anyhow`（`gpui-base` / `gpui-component` 都用它），所以这不是新依赖树。
 anyhow = "1"
+
+# 把后台作业的事件流回界面线程，要一条**能 await** 的通道：`folio_core::task` 交回来的是
+# `std::sync::mpsc::Receiver`，它的 `recv` 只会阻塞线程，而界面线程一阻塞整个窗口就停了。
+# **这不是新依赖树**：gpui 的 `prompt_for_paths` 返回的接收端就是 `async-channel` 的
+# （锁里已有 2.5.0，随 gpui 那条链在编译），这里只是把图上已有的这份转成 folio-app 的
+# 直接依赖 —— 与上面 `flate2` / `base64` 那两条同样的理由。
+async-channel = "2"
 
 # 日志。**`tracing` 与 `tracing-subscriber` 都不是新依赖树**：gpui 那条链上
 # `gpui-pre-ztracing` 已经带了同一份 `tracing-subscriber`（默认那组 feature：

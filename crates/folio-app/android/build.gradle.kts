@@ -5,7 +5,7 @@
 // only packages it.
 //
 //   cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build --release
-//   ./gradlew assembleDebug
+//   gradle assembleDebug --offline
 //   adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 buildscript {

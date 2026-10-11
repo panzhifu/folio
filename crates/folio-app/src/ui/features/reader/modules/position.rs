@@ -2,24 +2,34 @@
 //!
 //! 整套设计的前提是**进度落在「第几个字」上**（见 `plans/README.md` 架构决策 ②）：
 //! 换字号、缩窗口、换摆法都不动位置，页号与像素只是那一个字的读数方式。所以这里
-//! 只有一个真源（`current_offset`），其余都是它的正/反解。
+//! 只有一个真源（[`ReaderSession::resolve_position`]），其余都是它的正/反解。
+//!
+//! 连续滚动的坐标是**拼接窗口的全局 y**：视口顶落在哪一章（缝归后一章）就反解
+//! 哪一章的章内偏移 —— 落库存出去的 `Locator { chapter, offset }` 与单章时代
+//! 逐字节同形，恢复、书签、批注锚点都不用知道「拼接」的存在。
 
 use folio_core::Locator;
 use gpui_kit::Context;
 
+use super::super::book::Book;
 use super::super::session::{ReaderSession, Source};
 
 impl ReaderSession {
-    /// 当前屏幕上顶那一条的可见文本偏移。
+    /// 当前视口顶的位置：**(哪一章, 章内第几个字)**。
     ///
-    /// 连续滚动读视口顶；分页 / 双页读这一页第一栏的首行 —— 空片（作者强制断点补出来的）
-    /// 跳过，全空才给章首。三种模式收敛到同一个数，进度与批注才在同一套坐标上。
-    pub(in crate::ui::features::reader) fn current_offset(&self) -> Option<usize> {
+    /// 连续滚动读视口顶所在章（全局坐标，[`Book::chapter_at_y`]）；分页 / 双页读
+    /// 这一页第一栏的首行 —— 空片（作者强制断点补出来的）跳过，全空才给章首。
+    /// 三种模式收敛到同一套坐标，进度与批注才对得上。
+    pub(in crate::ui::features::reader) fn resolve_position(&self) -> Option<(usize, usize)> {
         let Source::Book(book) = &self.source else {
             return None;
         };
         if self.laid_out.mode.is_continuous() {
-            return Some(book.document().offset_at_y(self.scroll_y));
+            let gap = Book::chapter_gap(&self.prefs);
+            let chapter = book.chapter_at_y(self.scroll_y, gap)?;
+            let base = book.base_of(chapter, gap).unwrap_or(0.0);
+            let offset = book.span_doc(chapter)?.offset_at_y(self.scroll_y - base);
+            return Some((chapter, offset));
         }
         let columns = self.laid_out.columns.max(1);
         for column in 0..columns {
@@ -29,48 +39,78 @@ impl ReaderSession {
             if slice.empty {
                 continue;
             }
-            return Some(book.document().coordinate_of_line(slice.lines.start));
+            return Some((
+                book.chapter_index(),
+                book.document().coordinate_of_line(slice.lines.start),
+            ));
         }
-        Some(0)
+        Some((book.chapter_index(), 0))
+    }
+
+    /// 当前屏幕上顶那一条的可见文本偏移。宿主测试读。
+    #[cfg(test)]
+    pub(in crate::ui::features::reader) fn current_offset(&self) -> Option<usize> {
+        self.resolve_position().map(|(_, offset)| offset)
     }
 
     /// 字偏移跨过了一行才写盘：进度不是「滚到第几个像素」而是「读到第几个字」，
     /// 同一个字里再怎么滑都不必写盘。杀进程回来还在同一行，靠的就是这一步。
     pub(super) fn persist_if_moved(&mut self) {
-        if self
-            .current_offset()
-            .is_some_and(|offset| offset != self.saved_offset)
+        if let Some((chapter, offset)) = self.resolve_position()
+            && (chapter != self.saved_chapter || offset != self.saved_offset)
         {
-            self.persist_position();
+            self.persist_locator(Locator {
+                chapter: chapter as u32,
+                offset,
+            });
         }
     }
 
     /// 当前这一章的位置写进书库。没有 `book_id`（库打不开）时静默跳过 ——
     /// 进度落盘失败不该让阅读停下来。
     pub fn persist_position(&mut self) {
+        let Some((chapter, offset)) = self.resolve_position() else {
+            return;
+        };
+        self.persist_locator(Locator {
+            chapter: chapter as u32,
+            offset,
+        });
+    }
+
+    /// 把一个已知的位置写进书库（换章后的章首、恢复落点都用它）：
+    /// 那些时刻拼接链还没就位，反解不出「当前」位置，只能直接给。
+    pub(super) fn persist_locator(&mut self, locator: Locator) {
+        self.saved_chapter = locator.chapter as usize;
+        self.saved_offset = locator.offset;
         let (Some(store), Some(id)) = (&self.store, self.book_id) else {
             return;
         };
-        let locator = Locator {
-            chapter: self.chapter_index() as u32,
-            offset: self.current_offset().unwrap_or_default(),
+        // 默认档不落库：那一档是渲染帧按窗口宽算出来的，不是读者的选择。写进去
+        // 就等于替他把这本书钉死，换到窄设备只能被 `effective` 降级，回不到连续滚动。
+        let mode = if self.mode_undecided {
+            String::new()
+        } else {
+            self.laid_out.mode.storage_name().to_string()
         };
-        self.saved_offset = locator.offset;
-        let mode = self.laid_out.mode.storage_name();
-        if let Err(err) = store.set_position(id, mode, &locator) {
+        if let Err(err) = store.set_position(id, &mode, &locator) {
             log::warn!("persist_position: 写入失败 {err}");
         }
     }
 
-    /// 跳到章内第 `offset` 个字所在的那一屏。目录跳转、书签、恢复进度共用这一个入口。
+    /// 跳到**锚章**内第 `offset` 个字所在的那一屏。目录跳转、书签、恢复进度共用这一个入口。
     pub fn jump_to_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
-        let Source::Book(book) = &self.source else {
+        let gap = Book::chapter_gap(&self.prefs);
+        let Source::Book(book) = &mut self.source else {
             return;
         };
-        let line = book.document().line_at_offset(offset);
         if self.laid_out.mode.is_continuous() {
-            self.scroll_y = book.document().y_at_offset(offset);
+            // 全局 y = 锚章基线 + 章内行顶。锚章还没进链（没排完）时基线是 0，
+            // 与「排版没做过就回章首」的既有兜底一致。
+            let base = book.base_of(book.chapter_index(), gap).unwrap_or(0.0);
+            self.scroll_y = base + book.document().y_at_offset(offset);
         } else {
+            let line = book.document().line_at_offset(offset);
             self.page = book
                 .document()
                 .page_of_line(line)

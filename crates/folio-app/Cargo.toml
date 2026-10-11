@@ -23,8 +23,6 @@ gpui-kit.workspace = true
 # 只依赖 gpui-kit 一个门面：它顶层 `pub use ::gpui::*`，把移动端那份 `gpui-pre` 整个
 # 转了出来，所以两端都用 `use gpui_kit::…`，不再单独声明一条 `gpui` 依赖。
 # 以前移动端要显式引 `gpui-pre` 是因为它是独立 workspace、拿不到 gpui-kit。
-# 联网用的 HTTP client（见 `ui::shared::http`）走同一个 gpui 快照的版本，不另起一份 reqwest。
-reqwest_client.workspace = true
 # 日志走 `tracing` 那一套（装配在 `folio_core::logging`），app 侧要直接引两个：
 # 宏用它，`Layer` 类型是用来递 logcat 那一层的。
 # `log` 留着只为 Android：`android_logger` 是它的后端，logcat 那层通过它落地。
@@ -35,6 +33,10 @@ log.workspace = true
 # 后端那层的 `thiserror` 枚举不需要在这里被认识：`folio_core::Error` 是个标准的
 # `std::error::Error`，`?` 自动把它接进 anyhow 的链，`{err:#}` 于是能一路看到底。
 anyhow.workspace = true
+# 导入作业的事件从 `folio_core::task` 的工作线程搬回界面线程（用它的原因见 workspace 根
+# 那段说明：`std::sync::mpsc` 的 `recv` 只能阻塞，界面线程不能阻塞）。挂在
+# `ui::features::shelf::view` 的导入链上。
+async-channel.workspace = true
 
 
 # ── 移动端平台层：只在移动目标上链，桌面端根本不编译它 ──
@@ -54,13 +56,21 @@ anyhow.workspace = true
 #       （`default-features = false`），还没落实。
 [target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
 # rev 取的是 fork 的 `line/gpui-pre`：在 `5843b657`（延迟退出重试）之上多了
-# `057c103`（`prompt_for_paths{directories:true}` 走 ACTION_OPEN_DOCUMENT_TREE，路径提示能选文件夹）
-# 与一个 rustfmt 收尾提交 `c694ec8`。folio 的「选文件夹做书库」要靠它。
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "c694ec8707a56eba48b00e9178504f5100eca97b" }
+# `057c103`（`prompt_for_paths{directories:true}` 走 ACTION_OPEN_DOCUMENT_TREE，路径提示能选文件夹）、
+# `c694ec8`（rustfmt 收尾）与 `29f19d3`（permission_handler 增加 MANAGE_EXTERNAL_STORAGE，
+# 「所有文件访问」—— 整机扫描在 Android 上要先拿它）。
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "29f19d3e9e4889d79dccad67ba9902dbc6bf6091", features = [
+    "permission_handler",
+] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15"
 android-activity = { version = "0.6", features = ["native-activity"] }
+# 只为一件事：从 Rust 调我们自己的 Java（`GpuiSystemUi` 藏系统栏）。fork 里那份
+# `gpui_mobile::android::jni` 给的是 `&mut jni::Env`，要构造实参与签名字面量就得直接
+# 用 `jni` 这个 crate。版本与 `gpui-pre-mobile` 依赖的那一份对齐（锁里只有 0.22.4），
+# 对不上就会链进第二个 jni。
+jni = "0.22"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

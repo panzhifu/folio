@@ -12,7 +12,6 @@
 //! 触碰同一个实体，所以改完立刻反映到已打开的书上并落盘。
 
 mod about;
-mod account;
 pub mod account_view;
 mod appearance;
 mod fonts;
@@ -38,12 +37,11 @@ pub(super) use gpui_kit::component::setting::{
 pub(super) use gpui_kit::{App, SharedString};
 
 pub(super) use crate::ui::shared::config_model::ConfigHolder;
-pub(super) use crate::ui::shared::l10n::tr;
+pub(super) use crate::ui::shared::l10n::{tf, tr};
 pub(super) use crate::ui::shared::theme;
 
 // 每一页的构造函数只在 [`pages`] 里用，所以是私有导入而不是再导出。
 use about::about_page;
-use account::account_page;
 use appearance::appearance_page;
 use fonts::fonts_page;
 use layout::layout_page;
@@ -54,24 +52,22 @@ use typography::typography_page;
 /// [`SettingsPage::index`] 靠它定位，所以**新增变体只能加在末尾**。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsPage {
+    About,
+    Appearance,
     Typography,
     Layout,
     Fonts,
-    Appearance,
-    Account,
-    About,
     Library,
 }
 
 impl SettingsPage {
     /// 全部页面，按导航顺序。
-    pub const ALL: [SettingsPage; 7] = [
+    pub const ALL: [SettingsPage; 6] = [
+        SettingsPage::About,
+        SettingsPage::Appearance,
         SettingsPage::Typography,
         SettingsPage::Layout,
         SettingsPage::Fonts,
-        SettingsPage::Appearance,
-        SettingsPage::Account,
-        SettingsPage::About,
         SettingsPage::Library,
     ];
 
@@ -85,12 +81,11 @@ impl SettingsPage {
 /// 按 [`SettingsPage`] 的顺序组装全部页面。
 pub(super) fn pages(cx: &App) -> Vec<SettingPage> {
     vec![
+        about_page(cx),
+        appearance_page(cx),
         typography_page(cx),
         layout_page(cx),
         fonts_page(cx),
-        appearance_page(cx),
-        account_page(cx),
-        about_page(cx),
         library_page(cx),
     ]
 }
@@ -102,6 +97,10 @@ pub(super) fn pages(cx: &App) -> Vec<SettingPage> {
 ///
 /// `resettable(false)`：这一页的每一项都是写入即生效的，控件里也没有「默认值」那份信息，
 /// 所以页头不该出现一颗「恢复默认」的按钮。
+///
+/// `default_open(false)`：侧栏默认只列页名，各页的分组子项折起来 —— 全摊开时六页几十行
+/// 子项，找一页得先穿过一屏标题树。点页名照样展开并跳过去（`Settings` 组件里的
+/// `click_to_open` 恒开），折着不影响到达。
 pub(super) fn page(
     title: impl Into<SharedString>,
     icon: IconName,
@@ -110,7 +109,7 @@ pub(super) fn page(
     SettingPage::new(title)
         .icon(icon)
         .resettable(false)
-        .default_open(true)
+        .default_open(false)
         .groups(groups)
 }
 

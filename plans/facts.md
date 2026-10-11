@@ -41,7 +41,9 @@
 - **长按也不是平台事件**：`gpui-mobile` 只发 `PlatformInput::Touch`，`LongPressEvent` 由
   gpui 的 `TouchGestureRecognizer`（500ms 定时器 → `offer_long_press`）合成。2026-10-10
   在 Meizu 20 实测这条链通：选中的长按吸字、两端把手、菜单条都上屏，不必自己写计时器兜底。
-- **浮层（Popover）在 Android 上点不住** —— 需要交互的面板一律就地展开（阅读页底栏模式）。
+- **浮层（Popover）在 Android 上可以点住**（2026-10-11 读者更正：早前「点不住」的记录已过时）——
+  需要交互的面板可以走浮层；存量代码里那几处内联面板（书库确认、阅读页底栏模式）照旧工作，
+  迁移到浮层是可选的后续优化，不是必须。
 - 屏 1080×2400，scale 2.8；可用中文正文字族 `Noto Sans CJK SC`。
 - 验证卫生：`screencap` 整帧 md5 必变（状态栏时钟），比对要裁状态栏数内容区差异像素；
   判断输入行为前先 `am force-stop` + `am start` 取基线（出现过幽灵触摸）。

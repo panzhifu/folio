@@ -87,6 +87,11 @@ impl ImageEntry {
         self.rendered
             .get_or_init(|| {
                 let raw = bytes(&self.href)?;
+                tracing::info!(
+                    "ImageEntry::rendered: {} 现取到 {} 字节",
+                    self.href,
+                    raw.len()
+                );
                 let (data, declared) = match shrink_image(&raw, MAX_IMAGE_EDGE) {
                     Some((small, mime)) => (small, mime),
                     None => (raw, self.media_type.as_str()),
@@ -95,6 +100,12 @@ impl ImageEntry {
                     .or(Some(declared))
                     .and_then(format_of_mime)
                     .unwrap_or(ImageFormat::Png);
+                tracing::info!(
+                    "ImageEntry::rendered: {} 解码格式 {:?}，{} 字节",
+                    self.href,
+                    format,
+                    data.len()
+                );
                 Some(Arc::new(Image::from_bytes(format, data)))
             })
             .clone()
@@ -200,6 +211,11 @@ impl ImageProvider for ChapterImages {
     fn resolve(&self, src: &str) -> Option<ResolvedImage> {
         let href = resolve_href(&self.base_dir, src);
         let entry = self.book.get(&href)?;
+        tracing::info!(
+            "ChapterImages::resolve: {src:?} → {href:?} 命中 {}×{}",
+            entry.width,
+            entry.height
+        );
         Some(ResolvedImage {
             href: entry.href.clone(),
             width: entry.width,

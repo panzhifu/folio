@@ -24,6 +24,18 @@
     <!-- Vibration permission -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!--
+      整机扫描（书架上的「扫描」）要读共享存储里的书。请求走 permission_handler
+      的 MANAGE_EXTERNAL_STORAGE（「所有文件访问」，fork gpui-pre-mobile 29f19d3
+      暴露的 API）：它不是运行时权限，而是带读者去系统设置页开开关。没授权时
+      扫描照跑，但 roots 只剩应用自己的目录；读不了的地方计入清单页的「跳过 N 处」，
+      这是设计好的退化路径。
+    -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <!-- Camera feature (optional — app works without camera) -->
 
     <!-- Vulkan feature declaration.

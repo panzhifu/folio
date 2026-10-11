@@ -42,15 +42,15 @@ use gpui_kit::TestSupportExt as _;
 // `OnBackInvokedCallback` 都翻成 **escape**，所以绑住 escape 就接住了返回。
 actions!(folio_shell, [Back]);
 
-/// 导航栏该不该整条收起。
-///
-/// 只收 Compact 档（手机底栏）：桌面的 rail / 侧栏还是切目的地的主要入口，
-/// 且桌面阅读页自带工具条，不缺这一条。
+/// 导航栏该不该整条收起。**阅读页在最上面就收**，不分档位：读者点开一本书要的是
+/// 一整屏正文，而平板与桌面上那条侧栏会吃掉 260 逻辑像素 —— 双页对开正是靠这 260
+/// 才摆得下（[`crate::ui::features::reader::chrome::MIN_COLUMN_WIDTH`]）。
+/// 回出的路不缺：阅读页自己那条顶栏有返回，系统返回键也接住。
 ///
 /// 抽成自由函数是因为宿主测试进不到 Compact 档 —— [`SizeClass::of`] 在桌面把窄窗口
 /// 夹到 `Medium`，只有真机能长出底栏。
-pub fn immersive_nav(size: SizeClass, reading_on_top: bool) -> bool {
-    size.is_compact() && reading_on_top
+pub fn immersive_nav(_size: SizeClass, reading_on_top: bool) -> bool {
+    reading_on_top
 }
 
 /// 导航栏占掉多少（逻辑像素），按**它压在哪一条边**分两个轴报给正文：Compact 是横躺的
@@ -127,6 +127,11 @@ pub struct AppShell {
     _stack_watch: Subscription,
     /// 上一次涂到界面上的外观配置。渲染时比较它。
     applied: Option<Appearance>,
+    /// 上一次向系统**要过**的全屏态（阅读页在最上面 = 要）。渲染时比较它。
+    ///
+    /// 要存这一份而不是每帧比 `window.is_fullscreen()`：桌面上那一档是异步生效的
+    /// （合成器 configure 回来才算数），比实际值会在等回执的那几帧里反复翻转窗口。
+    fullscreen_asked: Option<bool>,
 }
 
 impl AppShell {
@@ -196,6 +201,8 @@ impl AppShell {
         // 配置改一次就落盘并重画这一屏（重涂主题在渲染那一帧做）。
         let _config_watch = cx.observe(&ConfigHolder::handle(cx), |this, _, cx| {
             ConfigHolder::save(cx);
+            // 监听跟着配置走：开关、目录、节奏变了就换一只服务。
+            crate::ui::shared::watch::sync_from_config(cx);
             // 欢迎页那一关：读者挑完书库位置后位置被确认，就该把这一屏换掉。
             // 不用欢迎页自己回调 —— 位置写进配置是唯一的信号，这里观察到即可。
             if this.onboarding && ConfigHolder::library(cx).is_confirmed() {
@@ -227,6 +234,7 @@ impl AppShell {
             _shelf_watch,
             _stack_watch,
             applied: None,
+            fullscreen_asked: None,
         }
     }
 
@@ -347,6 +355,14 @@ impl Render for AppShell {
             reading.update(cx, |reading, cx| reading.set_reserve(reserve, cx));
         }
 
+        // 系统级那一层也跟着沉浸：桌面上窗口真全屏、Android 上藏掉状态栏与导航栏，
+        // 应用内那层（侧栏 / 自绘标题栏）在 `body` 里收。只在**期望变了**的那一帧动手，
+        // 理由见 [`AppShell::fullscreen_asked`]。
+        if self.fullscreen_asked != Some(immersive) {
+            self.fullscreen_asked = Some(immersive);
+            crate::ui::platform::set_reader_fullscreen(immersive, window);
+        }
+
         // 欢迎页先于主界面：书库位置没确认前，导航与内容都不画，整屏让给欢迎页。
         // 安全区照样扣（顶/底都 pad）：移动端手势条与状态栏是系统的地盘，不是应用 chrome。
         let body: AnyElement = if self.onboarding {
@@ -376,24 +392,28 @@ impl Render for AppShell {
                     .child(div().w_full().h(px(safe.bottom)))
                     .into_any_element()
             } else {
-                h_flex()
+                // 阅读页在最上面时这条侧栏整条不画（不是留个空位）：它占的那 260
+                // 逻辑像素要还给正文，双页才摆得开。
+                let mut row = h_flex()
                     .size_full()
                     .bg(cx.theme().background)
-                    .text_color(cx.theme().foreground)
-                    .child(self.nav(size, cx))
-                    .child(
-                        div()
-                            // `h_full` 不能省：`h_flex` 在交叉轴上是**居中**而不是拉伸的
-                            // （与 `v_flex` 不对称），所以这一格不给高度就只按内容高、
-                            // 整页浮在中间，而页面自己的 `flex_1` 与滚动区拿不到可解析的高。
-                            .h_full()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .pt(px(safe.top))
-                            .child(content),
-                    )
-                    .into_any_element()
+                    .text_color(cx.theme().foreground);
+                if !immersive {
+                    row = row.child(self.nav(size, cx));
+                }
+                row.child(
+                    div()
+                        // `h_full` 不能省：`h_flex` 在交叉轴上是**居中**而不是拉伸的
+                        // （与 `v_flex` 不对称），所以这一格不给高度就只按内容高、
+                        // 整页浮在中间，而页面自己的 `flex_1` 与滚动区拿不到可解析的高。
+                        .h_full()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .pt(px(safe.top))
+                        .child(content),
+                )
+                .into_any_element()
             }
         };
 
@@ -402,19 +422,30 @@ impl Render for AppShell {
         // 正文那一格给 `flex_1` 而不是让它自己 `size_full`：标题栏已经占掉一段高，
         // 再按 100% 算就会把页面底边（连同底栏）挤出窗口外。
         #[cfg(not(mobile))]
-        let body = v_flex()
-            .size_full()
-            .child(
-                gpui_kit::component::TitleBar::new().child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .gap_2()
-                        .child(div().id("app-title").test_support().child("Folio")),
-                ),
-            )
-            .child(div().flex_1().min_h_0().child(body))
-            .into_any_element();
+        let body = {
+            // 沉浸态连这条自绘标题栏一起收起：窗口 chrome 本来就是应用自己画的
+            // （窗口选项声明了透明自定义标题栏），收掉那一段高就还给正文；读者回到
+            // 任何一个目的地它都会跟着回来。拖窗与最大化在读书这几十分钟里不需要。
+            let stack = v_flex().size_full();
+            let stack = if immersive {
+                stack
+            } else {
+                stack.child(
+                    gpui_kit::component::TitleBar::new().child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .child(div().id("app-title").test_support().child("Folio")),
+                    ),
+                )
+            };
+            // 正文那一格给 `flex_1` 而不是让它自己 `size_full`：标题栏已经占掉一段高，
+            // 再按 100% 算就会把页面底边（连同底栏）挤出窗口外。
+            stack
+                .child(div().flex_1().min_h_0().child(body))
+                .into_any_element()
+        };
 
         div()
             .id("folio-shell")
@@ -481,10 +512,24 @@ mod tests {
             "手机的导航栏占的是正文的高，不是宽"
         );
 
-        // 桌面（Medium / Expanded）的阅读不收起侧栏 —— 那是切目的地唯一的入口，
-        // 而它竖着，占的是**宽**。
-        assert!(!immersive_nav(SizeClass::Medium, true));
-        assert!(!immersive_nav(SizeClass::Expanded, true));
+        // 桌面（Medium / Expanded）的阅读同样收起侧栏 —— 它竖着，占的是**宽**，
+        // 而那一条宽正是双页对开要用的。收的是导航，不是目的地：回出有阅读页顶栏的返回。
+        assert!(
+            immersive_nav(SizeClass::Medium, true),
+            "平板与桌面上进阅读页也该把侧栏让出来"
+        );
+        assert!(immersive_nav(SizeClass::Expanded, true));
+        assert_eq!(
+            nav_reserve(SizeClass::Medium, true),
+            Reserve::ZERO,
+            "侧栏收起后正文不该再预留那条宽"
+        );
+        assert_eq!(
+            nav_reserve(SizeClass::Expanded, true),
+            Reserve::ZERO
+        );
+        // 没进阅读页就是原样：侧栏在、预留也还在。
+        assert!(!immersive_nav(SizeClass::Expanded, false));
         assert_eq!(
             nav_reserve(SizeClass::Medium, false),
             Reserve {
@@ -558,7 +603,11 @@ mod tests {
         use crate::ui::shell::AppShell;
         use crate::ui::shell::navigation::Destination;
         use folio_core::i18n::{Locale, t_in};
-        use folio_core::{Config, Language, Library, Store};
+        use folio_core::task::ProgressEvent;
+        use folio_core::{
+            Candidate, Config, ImportOutcome, Language, Library, PathsSource, ScanReport, Store,
+            TaskEvent, TaskManager, submit_import,
+        };
         use gpui_kit::component::Root;
         use gpui_kit::test::TestWindowExt;
         use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
@@ -598,6 +647,7 @@ mod tests {
             Config {
                 library: Library {
                     dir: "/tmp/folio-books".into(),
+                    watch: None,
                 },
                 ..Config::default()
             }
@@ -770,6 +820,176 @@ mod tests {
                 assert!(
                     window.focused(cx).is_none(),
                     "点在架面空白上应退掉搜索框的编辑态"
+                );
+            })
+            .expect("窗口应能渲染");
+        }
+
+        /// 回归门：后端导入管线交回的东西要真的变成架上一格，那一行导入读数要跟着收掉。
+        ///
+        /// 两头都是真的：结果来自跑过一遍的 `folio_core::import`（真的把文件拷进书库、真的
+        /// 解析），架面是外壳里挂着的那一个（内存书库）。钉住的是接线之后的三个方向 ——
+        /// 事件进模型、架上多一格、读数不再挂着。少任何一环，真机上都是「点了导入，过了几秒
+        /// 什么也没发生」，而这正是这条链从界面线程挪去后台之后新引入的风险：以前那一份是
+        /// 同步跑完的，屏幕下一帧自然就是新的。
+        ///
+        /// 起点选在「事件已经上了界面线程」：系统文件选择器在测试窗口里不会返回，那一段只能
+        /// 由 [`ShelfView::feed_import_event`] 代劳，剩下的都是真实路径。
+        #[gpui_kit::test]
+        fn the_backends_import_events_redraw_the_shelf(cx: &mut TestAppContext) {
+            let (handle, shell) = boot(cx, false);
+            let stack = shell.read_with(cx, |this, _| {
+                this.stacks[Destination::Shelf.index()].clone()
+            });
+
+            // 一次交两本给后端：一本认得、一本认不出 —— 坏的那本不该把好的挡在架外。
+            let tmp = tempfile::tempdir().unwrap();
+            let picked = tmp.path().join("原处");
+            std::fs::create_dir_all(&picked).unwrap();
+            std::fs::write(picked.join("a.txt"), "第一本\n").unwrap();
+            std::fs::write(picked.join("b.mobi"), "后端不认这个扩展名\n").unwrap();
+            let manager = TaskManager::<Vec<ImportOutcome>>::new(1);
+            // 落库在管线里做完：作业跑完，库里已经有那本好的；喂给架面的
+            // 只是「结果到了」的信号，架面自己重查库。
+            let store = cx
+                .update(|cx| crate::ui::shared::app_store::handle(cx))
+                .expect("书库应已装上");
+            let job = submit_import(
+                &manager,
+                Box::new(PathsSource::picked(vec![
+                    picked.join("a.txt"),
+                    picked.join("b.mobi"),
+                ])),
+                tmp.path().join("books"),
+                store,
+            );
+            let outcomes = job
+                .events
+                .into_iter()
+                .find_map(|event| match event {
+                    TaskEvent::Finished(Ok(outcomes)) => Some(outcomes),
+                    _ => None,
+                })
+                .expect("导入作业要以 Finished(Ok(..)) 收尾");
+
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                let shelf = stack
+                    .read(cx)
+                    .current()
+                    .cloned()
+                    .and_then(|top| top.downcast::<ShelfView>().ok())
+                    .expect("书架栈底就是架面本身");
+                assert_eq!(shelf.read(cx).card_count(), 0, "还没导书时架上是空的");
+                assert!(
+                    window.try_find("shelf-importing").is_none(),
+                    "没在导入时不该有那一行读数"
+                );
+
+                shelf.update(cx, |shelf, cx| {
+                    shelf.feed_import_event(
+                        TaskEvent::Progress(ProgressEvent {
+                            done: 1,
+                            total: 2,
+                            message: "导入《第一本》".into(),
+                        }),
+                        cx,
+                    );
+                });
+                window.render_frame(cx);
+                assert!(
+                    window.try_find("shelf-importing").is_some(),
+                    "进度读数要画出来：这几秒里架面不动，读者只有这一行可看"
+                );
+
+                shelf.update(cx, |shelf, cx| {
+                    shelf.feed_import_event(TaskEvent::Finished(Ok(outcomes)), cx);
+                });
+                window.render_frame(cx);
+                assert!(
+                    window.try_find("shelf-importing").is_none(),
+                    "导完那一行读数要收掉"
+                );
+                assert_eq!(
+                    shelf.read(cx).card_count(),
+                    1,
+                    "好的那本要立刻成为架上一格，坏的那本不该把它挡在架外"
+                );
+            })
+            .expect("窗口应能渲染");
+        }
+
+        /// 回归门：扫描清单是「找到 → 勾选 → 导入所选」的那条路，勾中的要走
+        /// 与选文件导入同一条管线。
+        ///
+        /// 扫描结果由 [`ShelfView::feed_scan_event`] 喂进来（真实的整机扫描要扫
+        /// 测试机的家目录，那条不是门该扫的），**勾选之后的导入是真跑**：
+        /// `import_checked` 把勾中的路径交给后端管线，架上要出现「导入中」的读数。
+        /// 面板要在扫描结果到手时出现、在读数出现时收掉 —— 清单在时盖着架面，
+        /// 导入开始就该换回「导入中」那一行。
+        #[gpui_kit::test]
+        fn the_scan_panel_hands_the_checked_rows_to_the_pipeline(cx: &mut TestAppContext) {
+            let (handle, shell) = boot(cx, false);
+            let stack = shell.read_with(cx, |this, _| {
+                this.stacks[Destination::Shelf.index()].clone()
+            });
+
+            // 两本候选：一本好的、一本后端不认的 —— 与导入门同一组文件。
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("下载");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("a.txt"), "第一本\n").unwrap();
+            std::fs::write(dir.join("b.mobi"), "后端不认这个扩展名\n").unwrap();
+            let report = ScanReport {
+                candidates: vec![
+                    Candidate {
+                        origin: folio_core::Origin::Local(dir.join("a.txt")),
+                        name: "a.txt".into(),
+                        size: None,
+                    },
+                    Candidate {
+                        origin: folio_core::Origin::Local(dir.join("b.mobi")),
+                        name: "b.mobi".into(),
+                        size: None,
+                    },
+                ],
+                skipped: 2,
+                truncated: false,
+            };
+
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                let shelf = stack
+                    .read(cx)
+                    .current()
+                    .cloned()
+                    .and_then(|top| top.downcast::<ShelfView>().ok())
+                    .expect("书架栈底就是架面本身");
+                assert!(
+                    window.try_find("shelf-scan-panel").is_none(),
+                    "没在扫描时不该有面板"
+                );
+
+                shelf.update(cx, |shelf, cx| {
+                    shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
+                });
+                window.render_frame(cx);
+                assert!(
+                    window.try_find("shelf-scan-panel").is_some(),
+                    "结果到手面板要出现"
+                );
+
+                // 勾第一行（a.txt）。清单两项同目录：一条头 + 两行，第 1 项就是 a.txt。
+                shelf.update(cx, |shelf, cx| shelf.check_scan_row(1, true, cx));
+                shelf.update(cx, |shelf, cx| shelf.import_checked_for_test(cx));
+                window.render_frame(cx);
+                assert!(
+                    window.try_find("shelf-importing").is_some(),
+                    "导入所选要接上管线：读数行要出现"
+                );
+                assert!(
+                    window.try_find("shelf-scan-panel").is_none(),
+                    "清单在导入开始时要收掉"
                 );
             })
             .expect("窗口应能渲染");

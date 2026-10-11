@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use folio_core::Reader;
 use folio_core::anchor::TextMap;
@@ -22,7 +22,8 @@ use folio_core::dom::{Dom, NodeId};
 use folio_core::hit::Hit;
 use folio_core::layout::fragment::{Fragment, FragmentOptions, column_width, fragments};
 use folio_core::layout::{Layout, LayoutOptions, LineBox, layout as typeset};
-use gpui_kit::{App, Window};
+use folio_core::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
+use gpui_kit::{App, TextSystem, Window, WindowTextSystem};
 
 use super::measure::GpuiMeasure;
 use crate::ui::features::reader::book_fonts::BookFonts;
@@ -72,18 +73,22 @@ pub struct Document {
     /// 整本书的内嵌字体（别名表 + 已经注册进设备的家族名）。换章不换这一份，
     /// 所以由 `Book` 建好灌进来，而不是每章自己注册一遍。
     faces: Arc<BookFonts>,
-    /// 上次排版时的 `(内容宽度, 读者偏好)`。
-    ///
-    /// 记的是**整份偏好**而不是字号与行距：首行缩进、段距、是否两端对齐同样进排版，
-    /// 只按字号与行距判断就会让「改了缩进但不重排」这种毛病留在缓存里。
-    laid_out: Option<(f32, Reader)>,
+    /// 排版代数：章源或偏好一变就 +1。后台作业带着提交时的代数回来，对不上就丢 ——
+    /// 连着改三次字号，只有最后一代的结果会上屏。
+    generation: u64,
+    /// 已应用（上屏可用）的排版键 `(代数, 内容宽)`。宽度进键：转屏、改边距算新排版。
+    /// 旧世界里的 `laid_out: (宽, 偏好)`：偏好并进代数（`set_prefs` 也加一代）。
+    applied: Option<(u64, f32)>,
+    /// 在飞的排版作业：`(键, 句柄)`。至多一个 —— 新作业提交时旧句柄被丢弃
+    /// （作业照跑完，结果没人收；队列单线程 FIFO，天然不会堆积）。
+    pending: Option<((u64, f32), TaskHandle<Typeset>)>,
     layout: Layout,
     /// 层叠结果。分片要读块级的 `break-*` 与 orphans/widows，而这些只在层叠之后存在，
     /// 所以它跟排版结果同批算、同批存，不在分片时重来一遍。
     styles: Option<StyledDom>,
-    /// 上次分片时的 `(栏宽, 读者偏好, 一片高, 一页几栏)`。宽与偏好也是它的键：
-    /// 换字号会改变行数，行变了切点就变了。
-    fragmented: Option<(f32, Reader, f32, usize)>,
+    /// 上次分片时的 `(代数, 栏宽, 读者偏好, 一片高, 一页几栏)`。宽与偏好也是它的键：
+    /// 换字号会改变行数，行变了切点就变了；代数守着「片是哪一章的」。
+    fragmented: Option<(u64, f32, Reader, f32, usize)>,
     /// 本章切出来的片。`Rc` 是因为渲染每帧都要拿一份而不必搬动整张表。
     slices: Rc<Vec<Fragment>>,
 }
@@ -111,6 +116,79 @@ pub struct Viewport {
     pub gap: f32,
 }
 
+/// 一章的后台排版产出：解析、层叠、行盒，一批算完一批换。
+///
+/// 全是 `Send` 的纯数据（core 那一侧不碰 gpui），所以能整份从作业线程搬回 UI 线程。
+/// 分片**不在**这里面：它便宜且依赖「排好了才切」，留在渲染帧里同步做。
+struct Typeset {
+    /// 提交时的排版键 `(代数, 内容宽)`，应用前对一遍，防旧结果盖新的。
+    key: (u64, f32),
+    dom: Dom,
+    map: TextMap,
+    styles: StyledDom,
+    layout: Layout,
+}
+
+/// 作业的输入。度量要的两份文本系统以 `Arc` 搬进后台线程 —— spike① 验证过
+/// `Arc<WindowTextSystem>` 可以 move 出去用，这正是排版能出渲染帧的前提。
+struct TypesetInput {
+    key: (u64, f32),
+    source: String,
+    /// 书自己的样式（作者层）。章里的 `<style>` 不在这里 —— 它随 DOM 解析就地收。
+    rules: RuleSet,
+    prefs: Reader,
+    width: f32,
+    images: Arc<ChapterImages>,
+    texts: Arc<TextSystem>,
+    window_texts: Arc<WindowTextSystem>,
+    body_family: String,
+    mono_family: String,
+    faces: Arc<BookFonts>,
+}
+
+/// 后台排版队列：整个进程一份、一条线程，与导入池同款
+/// （[`folio_core::task::TaskManager`]，`std` 实现、不依赖 gpui）。排版作业是
+/// 毫秒级的活，FIFO 单线程就够；「最新一代才上屏」由 [`Typeset::key`] 把关。
+fn typeset_queue() -> &'static Arc<TaskManager<Typeset>> {
+    static QUEUE: OnceLock<Arc<TaskManager<Typeset>>> = OnceLock::new();
+    QUEUE.get_or_init(|| Arc::new(TaskManager::new(1)))
+}
+
+/// 作业体：解析 → 层叠 → 排版。测试里被同步调用，线上在后台线程里跑 —— 同一份代码。
+fn typeset_job(input: TypesetInput) -> Result<Typeset, TaskError> {
+    let dom = Dom::parse(input.source.as_bytes());
+    let map = TextMap::build(&dom, body_of(&dom));
+    let mut rules = input.rules;
+    rules.extend(Document::chapter_style_rules(&dom));
+    let styles = cascade(&dom, &rules, &Document::root_base(&input.prefs));
+    let measure = GpuiMeasure::new(
+        input.texts,
+        input.window_texts,
+        input.body_family,
+        input.mono_family,
+        input.faces,
+    );
+    let layout = typeset(
+        &dom,
+        &styles,
+        body_of(&dom),
+        LayoutOptions {
+            width: input.width,
+            // 完整排版：界面要行盒来摆字，不能用只算高的轻量档。
+            light: false,
+        },
+        &measure,
+        input.images.as_ref(),
+    );
+    Ok(Typeset {
+        key: input.key,
+        dom,
+        map,
+        styles,
+        layout,
+    })
+}
+
 impl Document {
     pub fn new(
         source: String,
@@ -132,7 +210,9 @@ impl Document {
             prefs,
             images,
             faces,
-            laid_out: None,
+            generation: 0,
+            applied: None,
+            pending: None,
             layout: Layout::default(),
             styles: None,
             fragmented: None,
@@ -152,21 +232,48 @@ impl Document {
         (dom, map)
     }
 
+    /// 章节自己的 `<style>` 块 → 作者层规则。
+    ///
+    /// 样式表**文件**按位置清单回容器取（见 `folio_core::document::Document::stylesheet`），
+    /// 而**写在章里的** `<style>` 随正文一起到达 —— 解析 DOM 时就地收进来，作者把
+    /// 样式写在哪一份里，层叠结果都不该有差别（EasyPub 之类工具的封面页就是这么写的）。
+    fn chapter_style_rules(dom: &Dom) -> RuleSet {
+        let mut css = String::new();
+        for (id, _) in dom.elements() {
+            if dom.tag_name(id) != Some("style") {
+                continue;
+            }
+            for &child in &dom.get(id).children {
+                css.push_str(&dom.get(child).text);
+                css.push('\n');
+            }
+        }
+        let mut rules = RuleSet::default();
+        if !css.trim().is_empty() {
+            rules.extend(RuleSet::parse(&css, Origin::Author));
+        }
+        rules
+    }
+
     pub fn set_prefs(&mut self, prefs: Reader) {
         self.prefs = prefs;
-        // 偏好同时进排版键与分片键，所以两边一起作废：留着旧切片的话，
+        // 偏好进排版代数（后台作业的键）与分片键，两边一起作废：留着旧切片的话，
         // 「换了字号但一页还是那么多行」这种毛病在屏幕上看不出来，只会在进度条上飘。
+        self.generation += 1;
+        self.applied = None;
         self.drop_fragments();
     }
 
     /// 换章。源文本没变就保留上一次的排版结果，来回翻同一章不必重算。
+    ///
+    /// 解析与排版都搬进了后台作业（见 [`Self::request_typeset`]），这里只作废：
+    /// 旧章的 DOM 与行盒留着，新结果回来之前屏幕上还是上一章（一帧的功夫）——
+    /// 锚点换算在这段时间里指着旧章，不会指到半个新章上。
     pub fn set_chapter(&mut self, source: String) {
         if source != self.source {
-            let (dom, map) = Self::parse_chapter(&source);
             self.source = source;
-            self.dom = dom;
-            self.map = map;
-            self.laid_out = None;
+            self.generation += 1;
+            self.applied = None;
             self.drop_fragments();
         }
     }
@@ -174,8 +281,24 @@ impl Document {
     /// 换章时图片索引也要跟着换：`<img src>` 的相对路径基准目录随章变化。
     pub fn set_images(&mut self, images: Arc<ChapterImages>) {
         self.images = images;
-        self.laid_out = None;
+        self.generation += 1;
+        self.applied = None;
         self.drop_fragments();
+    }
+
+    /// 排版结果是否已经跟上当前的输入（章源、偏好、宽度）。恢复阅读进度要等它：
+    /// 「第几个字摆在哪一像素」只有当代的排版才答得对。
+    pub fn is_current(&self) -> bool {
+        self.applied
+            .is_some_and(|(applied, _)| applied == self.generation)
+    }
+
+    /// 当前这一份输入的排版代数（换章、改偏好都会进位）。
+    ///
+    /// 给「按章缓存一份解好锚的批注」当键用：代数没变，行盒与可见文本坐标就没变，
+    /// 上一帧解出来的位置照样作数；进了位就必须重解。
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// 作废切片缓存。排版一作废就必须跟着作废它 —— 切点读的是行盒。
@@ -262,57 +385,118 @@ impl Document {
         }
     }
 
-    /// 排版一章。度量要用**窗口级**文本系统（`layout_line` 只挂在它上面），
-    /// 所以这一步留在渲染帧里做；挪进 `background_spawn` 属 M4。
-    #[allow(dead_code)] // 测试与 M4 的后台化接线用
-    pub fn ensure_layout(&mut self, window: &mut Window, cx: &mut App, pane_reserve: f32) {
-        let width = Self::content_width(window, &self.prefs, pane_reserve);
-        self.typeset_to(window, cx, width);
-    }
-
-    /// 按给定宽度排版一章。宽度没变、偏好没变就直接复用上一次的结果。
-    fn typeset_to(&mut self, window: &mut Window, cx: &mut App, width: f32) {
-        // 逐帧比引用而不是先 `prefs.clone()` 再比：`Reader` 里有两个 `String`，
-        // 而这一条几乎每帧都要问一次（滚动、点选、改标题都重画）。只有真重排时才克隆。
-        if let Some((laid_width, laid_prefs)) = &self.laid_out
-            && *laid_width == width
-            && *laid_prefs == self.prefs
+    /// 请求一次排版（不阻塞）：键没变就什么都不做，变了就把整章的解析 + 层叠 +
+    /// 排版丢给后台队列，渲染帧照常用上一份结果画。测试里同步跑同一段作业体，
+    /// 结果当帧可断言 —— 覆盖的代码与线上同一条。
+    fn request_typeset(
+        &mut self,
+        width: f32,
+        texts: Arc<TextSystem>,
+        window_texts: Arc<WindowTextSystem>,
+    ) {
+        let key = (self.generation, width);
+        if self.applied == Some(key) {
+            return; // 已应用的这份就是想要的
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending == key)
         {
+            return; // 同一代同一宽度的作业在飞
+        }
+        let input = TypesetInput {
+            key,
+            source: self.source.clone(),
+            rules: self.rules.clone(),
+            prefs: self.prefs.clone(),
+            width,
+            images: self.images.clone(),
+            texts,
+            window_texts,
+            body_family: self.prefs.font_family.clone(),
+            mono_family: self.prefs.mono_font_family.clone(),
+            faces: self.faces.clone(),
+        };
+        if cfg!(test) {
+            match typeset_job(input) {
+                Ok(out) => self.apply_typeset(out),
+                Err(err) => tracing::error!("typeset: 排版失败：{err}"),
+            }
             return;
         }
-        let measure = GpuiMeasure::new(
-            cx.text_system().clone(),
-            window.text_system().clone(),
-            self.prefs.font_family.clone(),
-            self.prefs.mono_font_family.clone(),
-            self.faces.clone(),
-        );
-        let styles = cascade(&self.dom, &self.rules, &Self::root_base(&self.prefs));
-        // 解析不做在这里（`dom` 是字段）；换章才重解析，见 `parse_chapter`。
-        let body = body_of(&self.dom);
-        self.layout = typeset(
-            &self.dom,
-            &styles,
-            body,
-            LayoutOptions {
-                width,
-                // 完整排版：界面要行盒来摆字，不能用只算高的轻量档。
-                light: false,
-            },
-            &measure,
-            self.images.as_ref(),
-        );
-        self.styles = Some(styles);
-        self.laid_out = Some((width, self.prefs.clone()));
-        // 行盒换了，切点也就换了 —— 切片必须跟着作废，否则分页翻到的是上一页的行。
+        let handle = typeset_queue().submit(move |_| typeset_job(input));
+        self.pending = Some((key, handle));
+    }
+
+    /// 收后台排版的结果（渲染帧经 [`Self::ensure_viewport`] 间接调用）。
+    /// 新一代的上来就换上；旧代的丢掉 —— 这期间章或偏好又变了，新作业已排队。
+    fn poll_typeset(&mut self) {
+        let Some((key, handle)) = self.pending.as_ref() else {
+            return;
+        };
+        // 键是 Copy 的小元组，抄一份出来，后面要改 `self.pending`。
+        let key = *key;
+        let mut outcome: Option<Result<Typeset, TaskError>> = None;
+        let mut done = false;
+        while let Ok(event) = handle.events.try_recv() {
+            match event {
+                TaskEvent::Finished(result) => {
+                    outcome = Some(result);
+                    done = true;
+                }
+                TaskEvent::Cancelled => done = true,
+                _ => {}
+            }
+        }
+        if !done {
+            return;
+        }
+        self.pending = None;
+        match outcome {
+            Some(Ok(out)) => {
+                if out.key == key && key.0 == self.generation {
+                    self.apply_typeset(out);
+                }
+            }
+            Some(Err(err)) => tracing::error!("typeset: 后台排版失败：{err}"),
+            None => {}
+        }
+    }
+
+    /// 把一份后台产出换进来。行盒换了，切点也就换了 —— 切片必须跟着作废，
+    /// 否则分页翻到的是上一页的行；重切在下一帧的 `ensure_viewport` 里同步做。
+    fn apply_typeset(&mut self, out: Typeset) {
+        self.dom = out.dom;
+        self.map = out.map;
+        self.styles = Some(out.styles);
+        self.layout = out.layout;
+        self.applied = Some(out.key);
         self.drop_fragments();
+    }
+
+    /// 排版一章。度量要用**窗口级**文本系统（`layout_line` 只挂在它上面），
+    /// 这两个 `Arc` 在这里拿，随作业搬进后台线程；这一步本身不再阻塞帧。
+    #[allow(dead_code)] // 面板与测试读；渲染路径走 `ensure_viewport`
+    pub fn ensure_layout(&mut self, window: &mut Window, cx: &mut App, pane_reserve: f32) {
+        let _ = self.ensure_viewport(
+            window,
+            cx,
+            Viewport {
+                reserve: pane_reserve,
+                columns: 1,
+                height: 0.0,
+                gap: 0.0,
+            },
+        );
     }
 
     /// 排版 + 分片，返回**栏宽**（绘制要按它摆每栏的左边界）。
     ///
     /// 一次把整章切完而不是逐页现算：`Fragmentainer` 的游标是为「翻到第 500 页」准备的，
-    /// 而这里一片一章最多几千行，一次切完仍然只在 `(栏宽, 偏好, 片高, 栏数)` 变了时发生，
-    /// 换来的是进度条随手就有总页数。
+    /// 而这里一片一章最多几千行，一次切完仍然只在 `(代数, 栏宽, 偏好, 片高, 栏数)` 变了时发生，
+    /// 换来的是进度条随手就有总页数。排版本身在后台队列上跑（见 [`Self::request_typeset`]），
+    /// 首帧拿不到行盒就先空着一帧 —— 结果回来，下一帧整章上屏。
     pub fn ensure_viewport(
         &mut self,
         window: &mut Window,
@@ -322,11 +506,32 @@ impl Document {
         let columns = viewport.columns.max(1);
         let total = Self::content_width(window, &self.prefs, viewport.reserve);
         let width = column_width(total, columns, viewport.gap).max(1.0);
-        self.typeset_to(window, cx, width);
+        // 先收上一帧的作业成果，再看要不要派新活 —— 顺序反了会把刚回来的结果当旧的丢掉。
+        self.poll_typeset();
+        self.request_typeset(
+            width,
+            cx.text_system().clone(),
+            window.text_system().clone(),
+        );
+        // 作业在飞就必须再要一帧：`poll_typeset` 只有渲染帧会调，而后台那一份完成时
+        // 没有任何人知道。不主动要帧的话，「排版早就排好了、屏上却一个字都没有」会一直
+        // 挂着，直到读者随手碰一下屏幕 —— 平板上尤其明显（没有键盘与鼠标带来的零散重绘）。
+        if self.pending.is_some() {
+            window.request_animation_frame();
+        }
+
+        // 排版在手（代数与宽度都对上）才切片；否则沿用上一份（首帧可能还没有）。
+        let current = self.applied == Some((self.generation, width));
+        if !current {
+            return width;
+        }
         let height = viewport.height.max(0.0);
-        // 同上：先比引用，缓存命中就不克隆 `prefs`。
-        let cached = self.fragmented.as_ref().is_some_and(|(w, p, h, c)| {
-            *w == width && *p == self.prefs && *h == height && *c == columns
+        let cached = self.fragmented.as_ref().is_some_and(|(g, w, p, h, c)| {
+            *g == self.generation
+                && *w == width
+                && *p == self.prefs
+                && *h == height
+                && *c == columns
         });
         if cached {
             return width;
@@ -337,7 +542,7 @@ impl Document {
             // 没排过版就没有行盒可切（第一帧之前）。
             None => Vec::new(),
         };
-        self.fragmented = Some((width, self.prefs.clone(), height, columns));
+        self.fragmented = Some((self.generation, width, self.prefs.clone(), height, columns));
         self.slices = Rc::new(slices);
         width
     }
@@ -559,6 +764,34 @@ mod tests {
     fn window(cx: &mut TestAppContext, width: f32, height: f32) -> AnyWindowHandle {
         cx.open_window(size(px(width), px(height)), |_, _| Blank)
             .into()
+    }
+
+    /// 章里写的 `<style>` 也要进层叠：样式表**文件**按清单回容器取，而写在章里的
+    /// 那一份随正文到达 —— 作者把样式写在哪一份里，层叠结果都不该有差别。
+    #[test]
+    fn a_chapters_own_style_block_reaches_the_cascade() {
+        use folio_core::css::computed::{Color, cascade};
+        let source = "<html><head><style>p { color: #C0392B }</style></head>\
+                      <body><p>字</p></body></html>";
+        let (dom, _) = Document::parse_chapter(source);
+        let rules = Document::chapter_style_rules(&dom);
+        assert_eq!(rules.rules.len(), 1, "章里就一条规则：{:?}", rules.rules);
+
+        let styles = cascade(
+            &dom,
+            &rules,
+            &folio_core::css::computed::ComputedStyle::default(),
+        );
+        let p = dom
+            .elements()
+            .find(|(id, _)| dom.tag_name(*id) == Some("p"))
+            .map(|(id, _)| id)
+            .expect("该有 p");
+        assert_eq!(
+            styles.get(p).unwrap().color,
+            Some(Color(0xC0, 0x39, 0x2B)),
+            "章内 <style> 的颜色要落到 p 上"
+        );
     }
 
     /// 一段足够长的中文，保证它会折行 —— 不折行的话「缩进改变了布局」这种断言无从成立。

@@ -1,7 +1,8 @@
-//! 书架：顶部一行命令（搜索 + 导入），下面一片按封面排的网格。
+//! 书架：顶部一行命令（搜索 + 导入入口），下面一片按封面排的网格。
 //!
 //! 两端用的是同一份架面，只有顶部那一行和一行放几本按窗口档位换：手机上是一条
-//! 满幅的搜索框，桌面与平板上是右上角一组定宽命令。见 `toolbar` 与 [`columns_for`]。
+//! 满幅的搜索框，桌面与平板上是定宽搜索框加一颗三点按钮 —— 三种导入方式收在
+//! 点开的那条菜单里（见 [`Self::more_button`]）。见 `toolbar` 与 [`columns_for`]。
 //!
 //! 搜索框查的是**书名与作者**（`Store::shelf`，一条 `LIKE`），不是正文。
 //! 正文的全文检索是另一件事（`Store::search`，trigram FTS，短于 3 个字命中不了）：
@@ -13,31 +14,42 @@
 //! 否则「导入了一本但看不见」和「根本没导进来」在真机上没法分开。
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use folio_core::Store;
 use folio_core::store::ShelfItem;
+use folio_core::remote::Transport;
+use folio_core::{Cancel, ImportOutcome, PathsSource, Store, TaskEvent, UrlSource, submit_import};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight, Image,
+    Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight, Image,
     InteractiveElement, IntoElement, ObjectFit, ParentElement, PathPromptOptions, Render,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, Subscription, Task, WeakEntity,
-    Window, div, img, px,
+    SharedString, StatefulInteractiveElement, Styled, StyledImage, Subscription, Task,
+    TestSupportExt as _, WeakEntity, Window, div, img, px,
 };
 
 use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::error::{Context as _, Result, report};
+use crate::ui::shared::import_queue::import_queue;
+use crate::ui::shared::error::{Context as _, report};
 use crate::ui::shared::images::cover_image;
 use crate::ui::shared::l10n::{tf, tr};
-use crate::ui::shared::library::{delete_book, pick_dir, stage, suggested_dir, target_dir};
+use crate::ui::shared::library::{delete_book, pick_dir, suggested_dir, target_dir};
+use super::scan::{ScanPhase, fmt_size};
 use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
 use crate::ui::widgets::{SearchBox, SearchBoxEvent, empty_state, muted_label};
+
+/// 出网共用的那一份传输（`ureq` + rustls）。一个进程一个连接池就够 ——
+/// 所有 URL 下载都从这里拿。
+fn url_transport() -> Arc<dyn Transport> {
+    static TRANSPORT: OnceLock<Arc<dyn Transport>> = OnceLock::new();
+    TRANSPORT
+        .get_or_init(folio_core::remote::ureq::shared)
+        .clone()
+}
 
 /// 手机上一行放几本。
 ///
@@ -66,7 +78,7 @@ const COVER_RATIO: f32 = 2.0 / 3.0;
 
 /// 网格与搜索行两侧的留白（逻辑像素）。和顶部那条章导航的 `px_3` 不同一档，
 /// 因为这里是整片卡片的边，视觉上要比一条文字栏松。
-const GUTTER: f32 = 12.0;
+pub(super) const GUTTER: f32 = 12.0;
 
 /// 一行放几本：手机固定 [`COLUMNS`]，桌面与平板按**内容区实际宽度**排到每格
 /// 不低于 [`MIN_CARD`]。
@@ -111,10 +123,22 @@ struct Card {
     cover: Option<Arc<Image>>,
 }
 
+/// 「书籍信息」面板上摆的那几行。点菜单那一刻查一次库取齐，面板只摆现成的事实、
+/// 不再回头碰书库 —— 书删了面板还开着也只是几句旧话，关掉即走。
+struct BookInfo {
+    title: SharedString,
+    authors: SharedString,
+    /// 库里存的小写格式名（`epub` / `markdown`…），照原样摆：架上空架提示用的
+    /// 就是这套小写，不另造一套大小写。
+    format: SharedString,
+    size: u64,
+    path: SharedString,
+}
+
 pub struct ShelfView {
     /// 书库句柄，来自 [`crate::ui::shared::app_store`]。放 `None` 时架面是空的，
     /// 但界面照常起得来。
-    store: Option<Rc<Store>>,
+    store: Option<Arc<Store>>,
     items: Vec<Card>,
     /// 上一次查库用的串。
     query: SharedString,
@@ -126,7 +150,7 @@ pub struct ShelfView {
     /// 导入会把文件**拷一份**进硬盘，所以位置要先说定。没定过的时候点导入不开选择器，
     /// 而是就地换成这块面板 —— 用普通按钮而不是浮层：浮层（长按菜单那条路）在
     /// Android 上现在点不住，见 `plans/facts.md`。
-    confirming: bool,
+    pub(super) confirming: bool,
     /// 封面解码结果，按书的主键存着。
     ///
     /// 键用 `id` 而不是每次现解：改一个搜索词会把同一本书再查出来一遍，
@@ -134,8 +158,32 @@ pub struct ShelfView {
     /// `None` 也要存 —— 不记住这次失败，每查一次都会再试一遍同样的失败。
     covers: HashMap<i64, Option<Arc<Image>>>,
     _search_watch: Subscription,
-    /// 导入那条异步链。Task 一 drop 任务就取消，于是「选了文件但界面已经忘了」。
+    /// 导入那条异步链：等选择器 → 把选中的文件交给后端管线 → 收事件直到这批结束。
+    /// Task 一 drop 链就断，于是「选了文件但界面已经忘了」；而断在管线跑到一半时，
+    /// 后台那份拷贝照旧跑完、结果却没人登记 —— 架上少一本，书库目录里多一份副本。
+    /// 所以这条链要活到整批导完。
     _import: Option<Task<()>>,
+    /// 正在进行的那批导入的读数：`(已完成, 总数)`。`total == 0` 是不定进度 ——
+    /// 刚提交、管线第一条读数还没上来时就是这个样子；`None` 表示没在导入。
+    /// 读数来自后端报的 `Progress` 事件，画在哪一处见 `Render` 那一段。
+    pub(super) importing: Option<(u64, u64)>,
+    /// 正在进行的这批导入的取消旗标，来自 [`TaskHandle`](folio_core::task::TaskHandle)。
+    /// 读数行旁那颗「取消」按钮置位它；管线在两本书之间看见，已落库的那些是真的
+    /// （`Cancelled` 事件来了重查一次架面就有）。
+    import_cancel: Option<Cancel>,
+    /// 整机扫描面板的状态：正在扫 / 已出清单。`None` = 没在扫，架面照常。
+    /// 面板本体与全部动作在 [`super::scan`]。
+    pub(super) scan: Option<ScanPhase>,
+    /// 扫描那条异步链（事件桥）。与 `_import` 同理，要活到整轮结束。
+    pub(super) _scan: Option<Task<()>>,
+    /// 自动导入（监听 / 传书）事件的订阅链。这些批次不是这个视图提交的，
+    /// 靠共享事件通道流回来 —— 处理与手工导入同一套（读数、重查架面）。
+    _auto_import: Option<Task<()>>,
+    /// 「从链接导入」面板上的输入框。`Some` = 面板开着；收面板即 drop。
+    url_entry: Option<Entity<InputState>>,
+    /// 「书籍信息」面板的内容。`Some` = 面板开着；与链接导入面板同一套门面 ——
+    /// 内联画在架面上而不是浮层里。事实在 [`Self::show_info`] 查库那一刻就定死。
+    info: Option<BookInfo>,
     /// 「书要拷到哪儿」那块面板里，系统文件夹选择器那条异步链。与 `_import` 同理，要活到选完。
     _pick: Option<Task<()>>,
     /// 导入完成后的**下一帧兜底重查**。选择器把应用切到后台，恢复前台的那一帧上
@@ -164,6 +212,18 @@ impl ShelfView {
             let SearchBoxEvent::Change(query) = event;
             this.reload(query, cx);
         });
+        // 自动导入（监听、传书）的事件流。处理与手工导入完全同一套。
+        let auto_events = crate::ui::shared::import_queue::auto_import_events();
+        let _auto_import = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            while let Ok(event) = auto_events.recv().await {
+                if this
+                    .update(cx, |this, cx| this.import_event(event, cx))
+                    .is_err()
+                {
+                    return; // 架面没了，订阅跟着收。
+                }
+            }
+        });
         let mut this = Self {
             store,
             items: Vec::new(),
@@ -173,6 +233,13 @@ impl ShelfView {
             covers: HashMap::new(),
             _search_watch,
             _import: None,
+            importing: None,
+            import_cancel: None,
+            scan: None,
+            _scan: None,
+            _auto_import: Some(_auto_import),
+            url_entry: None,
+            info: None,
             _pick: None,
             pending_reload: false,
         };
@@ -232,7 +299,14 @@ impl ShelfView {
     }
 
     /// 点「导入」。书库位置没确认过就不开选择器，先把那块面板摆出来。
+    ///
+    /// 一批还没导完时这一颗按不动：再开一个选择器会把上一条链挤掉（`_import` 只有一格），
+    /// 而链断在管线跑到一半时，后台那份拷贝照样跑完、结果却没人登记 —— 书库目录里就多了
+    /// 几本架上看不见的副本。命令行下面那一行读数（见 `Render`）就是「等一下再点」的提示。
     fn import(&mut self, cx: &mut Context<Self>) {
+        if self.importing.is_some() {
+            return;
+        }
         if target_dir(&ConfigHolder::library(cx)).is_some() {
             self.open_picker(cx);
             return;
@@ -265,10 +339,15 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 打开系统文件选择器选书。选中的每个文件先复制进书库再入库。
+    /// 打开系统文件选择器选书，把选中的文件交给**后端导入管线**（`folio_core::import`）。
     ///
     /// **先复制**不是多余的一步：选择器给的是它自己临时目录里的路径，系统随时会清，
     /// 而 `books.path` 那一列是书的身份（同路径重复导入算更新，不算第二本书）。
+    ///
+    /// 拷贝、解析、落库都发生在 `folio_core::task` 的工作线程上：解析一本 EPUB 是几十
+    /// 到几百毫秒，一次选十本串在界面线程上跑就是几秒的卡顿。界面线程只留两件本来
+    /// 就该它做的事 —— 读配置里的书库位置，以及按管线交回的结果刷新架面
+    /// （见 [`Self::finish_import`]）。
     fn open_picker(&mut self, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -276,7 +355,9 @@ impl ShelfView {
             multiple: true,
             prompt: None,
         });
-        self._import = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+        // 选择器那条链 detached 即可：它只等选择器回来，真正的长活（事件桥）
+        // 由 [`Self::dispatch_import`] 存进 `_import`。
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let paths = match receiver.await {
                 Ok(Ok(Some(paths))) => paths,
                 Ok(Ok(None)) => return,
@@ -286,59 +367,381 @@ impl ShelfView {
                 }
                 Err(_) => return,
             };
-            let _ = this.update(cx, |this, cx| {
-                let Some(dir) = target_dir(&ConfigHolder::library(cx)) else {
-                    tracing::error!("ShelfView: 书库位置没确认，选中的文件没有导入");
-                    return;
-                };
-                for path in &paths {
-                    this.import_one(path, &dir);
+            if paths.is_empty() {
+                // 一个都没选上：不去敲后端，也别让架面闪一下「导入中」。
+                return;
+            }
+            let _ = this
+                .update(cx, |this, cx| {
+                    this.dispatch_import(Box::new(PathsSource::picked(paths)), cx)
+                });
+        })
+        .detach();
+    }
+
+    /// 把一个来源交给后端导入管线，并把事件桥挂起来 —— 选择器选完文件与
+    /// 扫描清单勾选「导入所选」走的是同一条路。
+    ///
+    /// 架面已经不在了（`update` 报错的那些时刻）就直接返回：后面没有界面可画了。
+    pub(super) fn dispatch_import(&mut self, source: Box<dyn folio_core::import::Source>, cx: &mut Context<Self>) {
+        // 书库位置到这一刻再问一次：选择器开着的那段时间里读者可能改过它。
+        let Some(dir) = target_dir(&ConfigHolder::library(cx)) else {
+            tracing::error!("ShelfView: 书库位置没确认过，这一批没有导入");
+            return;
+        };
+        // 管线在后台落库，要的是能跨线程的 `Arc<Store>`。
+        let Some(store) = crate::ui::shared::app_store::handle(cx) else {
+            tracing::error!("ShelfView: 书库没装上，这一批没有导入");
+            return;
+        };
+        // 拷贝、解析、落库都在后端管线里逐本完成（`folio_core::import`）。
+        let handle = submit_import(import_queue(), source, dir, store);
+        let cancel = handle.cancel.clone();
+        self.importing = Some((0, 0));
+        self.import_cancel = Some(cancel);
+        cx.notify();
+
+        // 管线交回的是 `std::sync::mpsc` 的接收端：它只会阻塞读它的那条线程，
+        // 而界面线程一阻塞整个窗口就停了。所以把读的那一手整个搬到后台，每条事件
+        // 转成一次界面更新 —— `async_channel` 这一头能 await，进度就是一条条流上来的。
+        let (forward, events) = async_channel::unbounded::<TaskEvent<Vec<ImportOutcome>>>();
+        cx.background_spawn(async move {
+            // 只有「接收端已经没了」才会报错，也就是这条链断掉（架面关了、或整批结束）。
+            // 那时候剩下的事件没有要的人，收手即可。
+            for event in handle.events.iter() {
+                if forward.send_blocking(event).is_err() {
+                    break;
                 }
-                let query = this.query.clone();
-                // 新入库的书要立刻上架，但搜索词得留着：读者可能正搜到一半。
-                // `reload` 的去重按「词没变且架面非空」判，所以先把它清空逼它重查。
-                // 下一帧再兜底重查一次：选择器切后台期间发的 notify 可能丢。
-                this.items.clear();
-                this.pending_reload = true;
-                this.reload(&query, cx);
+            }
+        })
+        .detach();
+
+        self._import = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            while let Ok(event) = events.recv().await {
+                if this
+                    .update(cx, |this, cx| this.import_event(event, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // 通道关了：要么这批结束了（`Finished` 那条本来就已经把读数收掉），要么后台
+            // 那条线程出事了、结果永远不会来。两种都不能让「导入中」永远挂在架面上。
+            let _ = this.update(cx, |this, cx| {
+                if this.importing.take().is_some() {
+                    cx.notify();
+                }
             });
         }));
     }
 
-    /// 一个选中的文件 → 架上的一本。失败只写日志：一次选多本时，坏掉的那本
-    /// 不该把其余的也挡在架外。
-    fn import_one(&mut self, source: &Path, dir: &Path) {
-        match self.import_step(source, dir) {
-            Ok(book_id) => {
-                // 封面可能跟着这次导入换了；缓存里那条旧的要清掉。
-                self.covers.remove(&book_id);
-                tracing::info!("ShelfView: 导入 {source:?} → 第 {book_id} 本");
+    /// 把后端管线的一条事件喂进架面。只在跑那几扇回归门的那一端编译。
+    ///
+    /// 存在的理由只有一条：这条链的起点是系统文件选择器，而测试窗口里它不会返回，
+    /// 于是门只能从「事件已经上了界面线程」这一处进 —— 自己造一份 `ShelfView` 就绕过了
+    /// 外壳里真正挂在树上的那一个，测到的只是测试自己（`shell::booted` 里同理）。
+    #[cfg(all(test, not(mobile)))]
+    pub(crate) fn feed_import_event(
+        &mut self,
+        event: TaskEvent<Vec<ImportOutcome>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.import_event(event, cx);
+    }
+
+    /// 架上此刻摆着几本。只给外壳那几扇回归门读：门要钉的是「后端交回的结果有没有变成
+    /// 架面上的格子」，而数格子这件事不该成为一个公开接口。
+    #[cfg(all(test, not(mobile)))]
+    pub(crate) fn card_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// 后端导入管线的一条事件 → 架面的一次变化。
+    fn import_event(&mut self, event: TaskEvent<Vec<ImportOutcome>>, cx: &mut Context<Self>) {
+        match event {
+            // 开始那条不带读数：提交的那一行已经把架面标成「导入中」了。
+            TaskEvent::Started => {}
+            TaskEvent::Progress(progress) => {
+                self.importing = Some((progress.done, progress.total));
+                // 管线附送的文案只进日志：它是 core 里的事实描述，屏幕上的一句话
+                // 要走 locale（见 `shelf.importing_of`），否则英文界面上会冒出中文来。
+                if !progress.message.is_empty() {
+                    tracing::info!(
+                        "ShelfView: 导入进度 {}/{} —— {}",
+                        progress.done,
+                        progress.total,
+                        progress.message
+                    );
+                }
+                cx.notify();
             }
-            Err(err) => report(&format!("ShelfView: 导入 {source:?}"), &err),
+            TaskEvent::Bytes(bytes) => {
+                // 字节级读数（下载 / 拷贝）。本地导入不报这一级；等链接下载
+                // 接上后这里换画「正在传《名字》」的读数。
+                tracing::debug!("ShelfView: 字节进度 {}（{:?}）", bytes.done, bytes.total);
+            }
+            TaskEvent::Finished(Ok(outcomes)) => self.finish_import(outcomes, cx),
+            TaskEvent::Finished(Err(err)) => {
+                // 管线不会整体失败：一个源解不开只影响它自己，其余的照常交回（见
+                // `folio_core::import`）。走到这一条只有一种可能 —— 后台那件事根本没跑成。
+                tracing::error!("ShelfView: 导入作业失败 {err}");
+                self.importing = None;
+                self.import_cancel = None;
+                cx.notify();
+            }
+            TaskEvent::Cancelled => {
+                // 取消的语义（`folio_core::import`）：**已经落库的那些是真的**。
+                // 重查一次架面，读者就能看见取消那一刻已经进去的书。
+                tracing::info!("ShelfView: 导入被取消，已登记的那些保留");
+                self.importing = None;
+                self.import_cancel = None;
+                self.items.clear();
+                let query = self.query.clone();
+                self.reload(&query, cx);
+                self.pending_reload = true;
+                cx.notify();
+            }
         }
     }
 
-    /// 导入的四步：拷进书库 → 解出文档 → 记书目 → 落章节。
+    /// 后端管线交回的一批结果 → 架面刷新：清掉换过封面的缓存条目，重查库。
     ///
-    /// 拆成一个返回 [`Result`] 的函数，是为了让每一步都挂上一句「当时在做哪件事」——
-    /// 原来这里是五个各写一遍的 `match`，每条日志只说自己那半句，读者报「导入失败」时
-    /// 分不清是拷贝、解析还是入库。现在是一条完整的因果链落进日志文件。
-    /// 某一步挂了不影响其余的：一次选多本是常态，坏掉的那本不该挡在架外。
-    fn import_step(&self, source: &Path, dir: &Path) -> Result<i64> {
-        let store = self.store.as_deref().context("书库没装上")?;
-        let dest = stage(source, dir)?;
-        // 打开副本：`Content` 的两个家族都从这一个入口出去，落库按家族分流
-        // （`save_document`），导入这一步因此不必知道这本书是怎么存的。
-        let doc = crate::ui::features::reader::document::open(&dest)
-            .with_context(|| format!("打开副本 {}", dest.display()))?;
-        let title = doc.meta().title.clone();
-        let book_id = store
-            .add_book(&dest, doc.meta())
-            .with_context(|| format!("登记《{title}》"))?;
-        store
-            .save_document(book_id, doc.as_ref())
-            .with_context(|| format!("第 {book_id} 本落章节"))?;
-        Ok(book_id)
+    /// 落库已经在管线里做完了；这里只消费「哪几本的 id 变了」—— 封面可能跟着
+    /// 这次导入换了，缓存里那条旧的要清掉。
+    fn finish_import(&mut self, outcomes: Vec<ImportOutcome>, cx: &mut Context<Self>) {
+        self.importing = None;
+        self.import_cancel = None;
+        for outcome in &outcomes {
+            match &outcome.result {
+                Ok(Some(registered)) => {
+                    // 封面可能跟着这次导入换了；缓存里那条旧的要清掉。
+                    self.covers.remove(&registered.book_id);
+                }
+                Ok(None) => {}
+                // 坏的那本指名道姓进日志：读者只知道少了几本，得有人能查为什么。
+                Err(err) => tracing::error!(
+                    "ShelfView: 导入《{}》失败 {err:#}",
+                    outcome.candidate.name
+                ),
+            }
+        }
+        // 新入库的书要立刻上架，但搜索词得留着：读者可能正搜到一半。
+        // `reload` 的去重按「词没变且架面非空」判，所以先把它清空逼它重查。
+        self.items.clear();
+        let query = self.query.clone();
+        self.reload(&query, cx);
+        // 这一批是后台跑完才回到这里的一次更新，没有别的动作会顺带把架面弄脏 ——
+        // 不 `notify` 的话读者得等到下一次别的输入才看见新上来的那几本。
+        // 下一帧再兜底重查一次：选择器把应用切到后台期间发的 notify 可能丢。
+        self.pending_reload = true;
+        cx.notify();
+    }
+
+    /// 打开「从链接导入」面板。书库位置没确认过先摆确认面板 —— 与选文件导入
+    /// 同一道门禁：往哪儿拷还没说清楚，就不该动手。
+    fn open_url_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.url_entry.is_some() || self.importing.is_some() || self.scan.is_some() {
+            return;
+        }
+        if target_dir(&ConfigHolder::library(cx)).is_none() {
+            self.confirming = true;
+            cx.notify();
+            return;
+        }
+        self.url_entry = Some(cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr(cx, "shelf.url_placeholder"))
+        }));
+        cx.notify();
+    }
+
+    fn close_url_panel(&mut self, cx: &mut Context<Self>) {
+        self.url_entry = None;
+        cx.notify();
+    }
+
+    /// 面板上那颗「导入」。链接不对（不是 http/https）就不动 —— 假链接交给
+    /// 管线只会得到一条谁都看不懂的网络错误。
+    fn import_from_url(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = &self.url_entry else {
+            return;
+        };
+        let url = entry.read(cx).value().trim().to_string();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            tracing::info!("ShelfView: 不是 http(s) 链接，不导入：{}", &url[..url.len().min(80)]);
+            return;
+        }
+        self.url_entry = None;
+        self.dispatch_import(
+            Box::new(UrlSource::new(url, url_transport())),
+            cx,
+        );
+    }
+
+    /// 「从链接导入」面板。
+    fn url_panel(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity().clone();
+        let close_entity = entity.clone();
+        let import_entity = entity.clone();
+        let cancel_label = tr(cx, "shelf.cancel");
+        let import_label = tr(cx, "shelf.url_import");
+        v_flex()
+            .id("shelf-url-panel")
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .gap_3()
+            .px(px(GUTTER))
+            .py_4()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(tr(cx, "shelf.url_title")),
+            )
+            .child(muted_label(tr(cx, "shelf.url_hint"), cx))
+            .child(
+                div()
+                    .w_full()
+                    .child(Input::new(&entry).cleanable(true)),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Button::new("shelf-url-cancel")
+                            .ghost()
+                            .label(cancel_label.to_string())
+                            .accessibility_label(cancel_label)
+                            .on_click(move |_, _, cx| {
+                                close_entity.update(cx, |this, cx| this.close_url_panel(cx))
+                            }),
+                    )
+                    .child(
+                        Button::new("shelf-url-import")
+                            .primary()
+                            .label(import_label.to_string())
+                            .accessibility_label(import_label)
+                            .on_click(move |_, _, cx| {
+                                import_entity.update(cx, |this, cx| this.import_from_url(cx))
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 读数行旁那颗「取消」。置位旗标就返回：管线在两本书之间看见它，已落库的
+    /// 那些是真的（`Cancelled` 事件来了重查架面）。
+    fn cancel_import(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = &self.import_cancel {
+            cancel.trigger();
+            tracing::info!("ShelfView: 请求取消导入");
+        }
+        cx.notify();
+    }
+
+    /// 长按菜单里那颗「书籍信息」：查一次库，把这一本的事实摆进面板。
+    ///
+    /// 只查不拦 —— 书查不到（已删、库坏了）就不开面板，留一条日志；菜单是瞬间的事，
+    /// 这里没有要保的旧状态。面板本体在 [`Self::info_panel`]。
+    fn show_info(&mut self, book_id: i64, cx: &mut Context<Self>) {
+        let queried = self.store.as_ref().map(|store| store.book(book_id));
+        match queried {
+            Some(Ok(Some(row))) => {
+                self.info = Some(BookInfo {
+                    title: row.title.into(),
+                    authors: row.authors.join(" · ").into(),
+                    format: row.format.into(),
+                    size: row.size,
+                    path: row.path.into(),
+                });
+                cx.notify();
+            }
+            Some(Ok(None)) => tracing::warn!("ShelfView: 第 {book_id} 本已经不在库里，不开信息面板"),
+            Some(Err(err)) => report(
+                "ShelfView",
+                &anyhow::Error::new(err).context(format!("查第 {book_id} 本的信息")),
+            ),
+            None => tracing::error!("ShelfView: 没有书库，查不了第 {book_id} 本的信息"),
+        }
+    }
+
+    fn close_info(&mut self, cx: &mut Context<Self>) {
+        self.info = None;
+        cx.notify();
+    }
+
+    /// 「书籍信息」面板：这一本是什么、多大、那份文件在哪儿。
+    ///
+    /// 与链接导入面板同一套内联样式（占据架面，不叠浮层）。路径摆在最后一块灰底里：
+    /// 它是最长的一行，也是删书语义（[`delete_book`] 只删书库里自己拷的那份）能被
+    /// 读者核对的那一处 —— 抹掉它，「删的到底是哪个文件」就只剩开发者知道了。
+    fn info_panel(&self, info: &BookInfo, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity().clone();
+        let close_label = tr(cx, "shelf.info_close");
+        v_flex()
+            .id("shelf-book-info")
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap_3()
+            .px(px(GUTTER))
+            .py_4()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(tr(cx, "shelf.info_title")),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(info.title.clone()),
+            )
+            // 作者可能缺：导入管线的书目是从文件里抠的，抠不到就是空 —— 不摆一行空白。
+            .when(!info.authors.is_empty(), |this| {
+                this.child(muted_label(info.authors.clone(), cx))
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(muted_label(tr(cx, "shelf.info_format"), cx))
+                    .child(info.format.clone()),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(muted_label(tr(cx, "shelf.info_size"), cx))
+                    .child(fmt_size(info.size)),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(muted_label(tr(cx, "shelf.info_path"), cx))
+                    .child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(cx.theme().muted)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(info.path.clone()),
+                    ),
+            )
+            .child(
+                Button::new("shelf-info-close")
+                    .ghost()
+                    .label(close_label.to_string())
+                    .accessibility_label(close_label)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.close_info(cx))
+                    }),
+            )
+            .into_any_element()
     }
 
     /// 删掉一本：库里的行、属于我们自己的那份副本，然后重查一次架面。
@@ -362,6 +765,8 @@ impl ShelfView {
             return;
         }
         self.covers.remove(&book_id);
+        // 信息面板若还开着，摆的正是这一本的旧事实 —— 收掉，别让删掉的书留一面板。
+        self.info = None;
         cx.emit(ShelfEvent::Deleted(book_id));
         // 清空是为了绕过 `reload` 的去重：搜索词没变，但架面少了一本，必须重查一次。
         self.items.clear();
@@ -369,10 +774,64 @@ impl ShelfView {
         self.reload(&query, cx);
     }
 
-    /// 搜索框那一行：框占满剩下的宽度，导入按钮钉在右边。
-    fn search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 右上角那颗三点按钮：本体不做任何事，点开一条菜单，三种导入方式摆在菜单里。
+    ///
+    /// 三颗按钮并排把搜索框挤成一条缝，而导入是偶尔才用一次的命令 —— 收进一条
+    /// 「⋮」后面，这一行就只剩「搜书」与「更多」两件事。组件是 gpui-kit 的
+    /// [`DropdownMenu`]：按钮负责开合，浮层内容是一条 [`PopupMenu`]，与架面卡片
+    /// 长按（`ContextMenuExt`）弹出的那一份同源，只是触发从右键/长按换成了点击。
+    /// 浮层在 Android 上点得住（`plans/facts.md`，2026-10-11 读者更正过旧的记录），
+    /// 所以两端共用这一颗。
+    ///
+    /// 菜单项各自把命令派回本视图的既有方法（`import` / `open_url_panel` /
+    /// `start_scan`），门禁照旧：书库位置没确认过先摆确认面板，一批没导完就按不动。
+    /// 菜单每次打开都会重建一遍（builder 是 `Fn`），所以闭包里先 clone 再 move：
+    /// 从捕获的句柄里现摘一份，而不是把上次那一份搬走。
+    fn more_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
+        let url_entity = entity.clone();
+        let scan_entity = entity.clone();
         let import_label = tr(cx, "shelf.import");
+        let scan_label = tr(cx, "shelf.scan");
+        let url_label = tr(cx, "shelf.url_import");
+        let more_label = tr(cx, "shelf.more");
+        Button::new("shelf-more")
+            .ghost()
+            .small()
+            .icon(IconName::EllipsisVertical)
+            .tooltip(more_label.clone().to_string())
+            .accessibility_label(more_label)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let entity = entity.clone();
+                let url_entity = url_entity.clone();
+                let scan_entity = scan_entity.clone();
+                menu.min_w(px(140.))
+                    .item(
+                        PopupMenuItem::new(import_label.clone())
+                            .icon(IconName::Plus)
+                            .on_click(move |_, _, cx| {
+                                entity.update(cx, |this, cx| this.import(cx))
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(url_label.clone())
+                            .icon(IconName::Link)
+                            .on_click(move |_, window, cx| {
+                                url_entity.update(cx, |this, cx| this.open_url_panel(window, cx))
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(scan_label.clone())
+                            .icon(IconName::ScanSearch)
+                            .on_click(move |_, _, cx| {
+                                scan_entity.update(cx, |this, cx| this.start_scan(cx))
+                            }),
+                    )
+            })
+    }
+
+    /// 搜索框那一行：框占满剩下的宽度，三点按钮钉在右边。
+    fn search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .w_full()
             .items_center()
@@ -380,29 +839,19 @@ impl ShelfView {
             .px(px(GUTTER))
             .py_2()
             .child(div().flex_1().min_w_0().child(self.search.clone()))
-            .child(
-                Button::new("shelf-import")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Plus)
-                    .label(import_label.clone().to_string())
-                    .accessibility_label(import_label)
-                    .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.import(cx))),
-            )
+            .child(self.more_button(cx))
     }
 
-    /// 桌面/平板的工具栏：钉在架面最上方，搜索框与导入靠右。
+    /// 桌面/平板的工具栏：钉在架面最上方，搜索框与三点按钮靠右。
     ///
     /// 不复用手机上那一行，因为两者要回答的问题不同：手机上宽度只够一条满幅的框，
     /// 框被拉满就是「先搜」；桌面上把同一颗框拉到 1300 像素宽，它就从一条命令
     /// 变成一块空白。所以这里给它一个和「书名或作者」这句话相称的定宽，
-    /// 与导入一起收成右上角的一组命令。
+    /// 与三点按钮一起收在右上角。
     ///
     /// 左右留白与网格共用 [`GUTTER`]：两行不共用一条对齐脊线的话，
     /// 搜索框的左边会莫名其妙地比第一格封面缩进一截。
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity().clone();
-        let import_label = tr(cx, "shelf.import");
         h_flex()
             .w_full()
             .flex_shrink_0()
@@ -416,16 +865,7 @@ impl ShelfView {
                 // 框的 small 档在 `boot` 建组件时就定下了。
                 div().w_64().child(self.search.clone()),
             )
-            .child(
-                // 工具栏里的一条普通命令用 default 档，不用 primary：
-                // primary 表达的是「这一组决定里回车要走的那一条」，而这里没有决定。
-                Button::new("shelf-import")
-                    .small()
-                    .icon(IconName::Plus)
-                    .label(import_label.clone().to_string())
-                    .accessibility_label(import_label)
-                    .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.import(cx))),
-            )
+            .child(self.more_button(cx))
     }
 
     /// 「书要拷到哪儿」那块面板。
@@ -510,6 +950,20 @@ impl ShelfView {
         if self.confirming {
             return self.confirm_panel(cx);
         }
+        // 扫描面板盖过架面：清单在时读者要看的就是它，不是底下一片旧格子。
+        if self.scan.is_some() {
+            return self.scan_panel(cx);
+        }
+        // 「从链接导入」面板：一行输入 + 两颗按钮。内联面板与书库确认面板同一套
+        // 样式（浮层在 Android 上也能点住了，迁浮层是可选项）。
+        if let Some(entry) = &self.url_entry {
+            return self.url_panel(entry.clone(), cx);
+        }
+        // 「书籍信息」面板排在导入那几扇之后：导入是读者点进去要做的事，
+        // 信息是顺手看的，不该盖过它。
+        if let Some(info) = &self.info {
+            return self.info_panel(info, cx);
+        }
         if !self.items.is_empty() {
             return self.grid(cx, columns).into_any_element();
         }
@@ -527,6 +981,9 @@ impl ShelfView {
         let entity = cx.entity().clone();
         let placeholder_bg = cx.theme().muted;
         let muted_fg = cx.theme().muted_foreground;
+        // 管理菜单里不带书名的那两条：每张卡都一样，查一次、逐卡 clone。
+        let open_label = tr(cx, "shelf.book_open");
+        let info_label = tr(cx, "shelf.book_info");
         let cards: Vec<AnyElement> = self
             .items
             .iter()
@@ -538,6 +995,10 @@ impl ShelfView {
                 let has_cover = cover.is_some();
                 let tapped = entity.clone();
                 let menu_entity = entity.clone();
+                // 管理菜单的条目名对每张卡都一样，取一次文案、逐卡 clone 进闭包：
+                // 菜单每次打开都会重建一遍（builder 是 `Fn`），闭包里先摘一份再 move。
+                let open_label = open_label.clone();
+                let info_label = info_label.clone();
                 // 菜单上写的是书名而不是光一个「删除」：长按之后手指已经离开卡片，
                 // 只有标题能让读者确认自己按的是哪一本。
                 let delete_label: SharedString =
@@ -597,18 +1058,43 @@ impl ShelfView {
                             .text_ellipsis()
                             .child(authors),
                     )
-                    // 长按开菜单。框架里 `ContextMenuExt` 就是这么设计的：手指没有右键，
-                    // 所以长按走的是右键那条路；而且长按一旦被菜单认领，这一次触摸就
-                    // 不会再派发成 tap —— 不会出现「长按想删书，顺手把书打开了」。
+                    // 长按（移动端）或右键（桌面端）开管理菜单。与右上角导入那条
+                    // （`more_button`）是同一套组件：`PopupMenu` + 图标文字项 + 同一档
+                    // `min_w`，只是触发从点击换成了长按 —— 框架里 `ContextMenuExt`
+                    // 就是这么设计的：手指没有右键，长按走的是右键那条路；而且长按
+                    // 一旦被菜单认领，这一次触摸就不会再派发成 tap，不会出现
+                    // 「长按想删书，顺手把书打开了」。
                     .context_menu(move |menu, _, _| {
-                        let entity = menu_entity.clone();
-                        menu.item(
-                            PopupMenuItem::new(delete_label.clone())
-                                .icon(IconName::Trash)
-                                .on_click(move |_, _, cx| {
-                                    entity.update(cx, |this, cx| this.remove(book_id, cx))
-                                }),
-                        )
+                        let open_entity = menu_entity.clone();
+                        let info_entity = menu_entity.clone();
+                        let delete_entity = menu_entity.clone();
+                        menu.min_w(px(140.))
+                            .item(
+                                PopupMenuItem::new(open_label.clone())
+                                    .icon(IconName::BookOpen)
+                                    .on_click(move |_, _, cx| {
+                                        open_entity
+                                            .update(cx, |_, cx| cx.emit(ShelfEvent::Open(book_id)))
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new(info_label.clone())
+                                    .icon(IconName::Info)
+                                    .on_click(move |_, _, cx| {
+                                        info_entity
+                                            .update(cx, |this, cx| this.show_info(book_id, cx))
+                                    }),
+                            )
+                            // 删除垫底、用分隔线隔开：破坏性的动作不排在顺手的位置。
+                            .separator()
+                            .item(
+                                PopupMenuItem::new(delete_label.clone())
+                                    .icon(IconName::Trash)
+                                    .on_click(move |_, _, cx| {
+                                        delete_entity
+                                            .update(cx, |this, cx| this.remove(book_id, cx))
+                                    }),
+                            )
                     })
                     .into_any_element()
             })
@@ -651,10 +1137,49 @@ impl Render for ShelfView {
             self.toolbar(cx).into_any_element()
         };
         let columns = columns_for(f32::from(window.viewport_size().width), size);
+        // 导入进行中的那一句读数摆在命令行与架面之间：这几秒里架面是不动的，读者要确认
+        // 的是「它还在干活」，而不是又看见一片和点导入之前一模一样的格子。
+        // `total == 0` 是不定进度（刚提交、第一条读数还没上来），那句不带数字。
+        // 旁边一颗「取消」：管线在两本书之间看见旗标，已落库的那些是真的。
+        let status = self.importing.map(|(done, total)| {
+            let text: SharedString = if total == 0 {
+                tr(cx, "shelf.importing")
+            } else {
+                tf(
+                    cx,
+                    "shelf.importing_of",
+                    &[("done", &done), ("total", &total)],
+                )
+                .into()
+            };
+            let entity = cx.entity().clone();
+            let cancel_label = tr(cx, "shelf.cancel_import");
+            h_flex()
+                .id("shelf-importing")
+                // 外壳那扇回归门要按 id 认出这一行画没画出来。非 `test-support` 构建里
+                // 这一层是透明的（`Observed` 原样转交内部元素），真机不多花一个节点。
+                .test_support()
+                .px(px(GUTTER))
+                .pb_1()
+                .gap_2()
+                .child(muted_label(text, cx))
+                .child(
+                    Button::new("shelf-import-cancel")
+                        .ghost()
+                        .small()
+                        .label(cancel_label.clone().to_string())
+                        .accessibility_label(cancel_label)
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.cancel_import(cx))
+                        }),
+                )
+                .into_any_element()
+        });
         v_flex()
             .id("folio-shelf")
             .size_full()
             .child(top)
+            .children(status)
             .child(self.body(cx, columns))
     }
 }

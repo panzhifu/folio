@@ -34,9 +34,9 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px, size,
 };
 
+use super::bands;
 use super::chrome::{
-    self, Chrome, Effect, FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, PageMode, Panel, Reserve,
-    percent_label, zone,
+    self, Chrome, Effect, FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, PageMode, Panel, Reserve, zone,
 };
 use super::session::ReaderSession;
 use crate::ui::features::settings::AccountView;
@@ -164,10 +164,21 @@ impl ReadingPage {
             .update(cx, |state, cx| state.pop(NavMotion::Animated, cx));
     }
 
-    /// 正文上的一击：分区判完就照结果动。见 [`chrome::Chrome::handle_body_tap`]。
+    /// 正文上的一击：先让选中说话（拖选松手的豁免、选中的清除/菜单回开），
+    /// 再按分区照结果动。见 [`chrome::Chrome::handle_body_tap`] 与
+    /// `modules/selection.rs` 的 `tap_with_selection`。
     fn on_body_tap(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let position = event.position();
+        // 三条判据的归因与顺序都在 `ReaderSession::tap_on_body` 里（那里才测得到）。
+        let consumed = self
+            .reader
+            .update(cx, |reader, cx| reader.tap_on_body(window, cx, position));
+        if consumed {
+            cx.notify();
+            return;
+        }
         let width = f32::from(window.viewport_size().width);
-        let tap = zone(f32::from(event.position().x), width);
+        let tap = zone(f32::from(position.x), width);
         match self.chrome.handle_body_tap(tap) {
             Effect::OpenChrome | Effect::DismissChrome => cx.notify(),
             Effect::PrevPage => {
@@ -201,61 +212,14 @@ impl ReadingPage {
         }
     }
 
-    /// 干净态页眉：只有章名，一行小字。
-    fn header(&self, cx: &mut Context<Self>) -> AnyElement {
-        let chapter: SharedString = self.reader.read(cx).chapter_title().into();
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .h(px(chrome::HEADER_HEIGHT))
-            .px_4()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .whitespace_nowrap()
-                    .when(!chapter.is_empty(), |label| label.child(chapter)),
-            )
-            .into_any_element()
-    }
-
-    /// 干净态页脚：左边章内位置，右边进度。两端各占一条边，所以是 `justify_between`。
-    fn footer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let position = self.reader.read(cx).chapter_position(cx);
-        let percent = percent_label(self.reader.read(cx).progress());
-        h_flex()
-            .absolute()
-            .bottom_0()
-            .left_0()
-            .right_0()
-            .h(px(chrome::FOOTER_HEIGHT))
-            .px_4()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(position),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(percent),
-            )
-            .into_any_element()
-    }
-
-    /// 顶栏：返回 + 书名。只有这两样，因为这一屏现在只有这两件事可做 ——
-    /// 摆一排点不动的图标比空着更糟。
+    /// 顶栏：返回 + 书名，右边是这一章的章名。
+    ///
+    /// 三处与底栏对齐：同一套左右内缩（那颗 `pl_1` 会让箭头比底栏的入口缩进一截）、
+    /// 同一份 `popover_style` 表面、同一档文字层级。右边不摆页码 —— 底栏那条状态行
+    /// 已经念过一遍，而「读到哪一章了」是两栏都想一眼看到的。
     fn top_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let title = self.reader.read(cx).title();
+        let chapter: SharedString = self.reader.read(cx).chapter_title().into();
         let radius = cx.theme().radius_lg;
         let page = cx.entity().clone();
         let back_label = tr(cx, "shelf.back");
@@ -267,8 +231,8 @@ impl ReadingPage {
             .right_0()
             .h(px(chrome::TOP_BAR_HEIGHT))
             .items_center()
-            .pl_1()
-            .pr_3()
+            .px_4()
+            .gap_2()
             .popover_style(cx)
             // 只圆下面两个角：这一条是从屏幕顶边长出来的，上面不该有缝。
             .corner_radii(Corners {
@@ -285,15 +249,17 @@ impl ReadingPage {
                     .accessibility_label(back_label)
                     .on_click(move |_, _, cx| page.update(cx, |this, cx| this.pop(cx))),
             )
+            .child(div().flex_1().min_w_0().truncate().text_sm().child(title))
             .child(
+                // 章名给一个上限而不是 `flex_1`：长章名会把书名挤成三个字，
+                // 而读者认路的顺序是先「哪本书」再「哪一章」。
                 div()
-                    .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .max_w(px(320.))
+                    .truncate()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(title),
+                    .when(!chapter.is_empty(), |label| label.child(chapter)),
             )
             .into_any_element()
     }
@@ -335,13 +301,10 @@ impl ReadingPage {
     /// 状态行：章内位置与进度各占一端的边。分页 / 双页时左边那半念「第几页 / 共几页」，
     /// 连续滚动念「第几节 / 共几节」—— 读者认的是自己那一档的刻度。
     fn status_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let reader = self.reader.read(cx);
-        let position = if reader.mode().is_continuous() {
-            reader.chapter_position(cx)
-        } else {
-            tf_page(reader, cx)
-        };
-        let percent = percent_label(reader.progress());
+        // 与干净态那条页脚共用 `bands::readouts`：两处念的必须是同一份数。
+        let bands::Readouts {
+            position, percent, ..
+        } = bands::readouts(&self.reader, cx);
         let progress_label = format!("{} {}", tr(cx, "reader.progress"), percent);
         h_flex()
             .w_full()
@@ -671,24 +634,14 @@ impl ReadingPage {
     }
 }
 
-/// 「第几页 / 共几页」。分页与双页共用这一句：双页时一号就是一张纸，两栏算同一号，
-/// 所以不必为双页再念一种刻度。
-fn tf_page(reader: &ReaderSession, cx: &App) -> String {
-    crate::ui::shared::l10n::tf(
-        cx,
-        "reader.page_position",
-        &[
-            ("index", &(reader.page() + 1)),
-            ("total", &reader.page_count()),
-        ],
-    )
-}
-
 impl Render for ReadingPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 正文让出干净态那两条带。浮层不参与：它压字，不推字。
+        // 浮层开合同时报给会话：开着时指针拖选让位（那一击的语义是收浮层）。
+        let chrome_open = self.chrome.is_open();
         self.reader.update(cx, |reader, cx| {
-            reader.set_chrome_bands(chrome::HEADER_HEIGHT, chrome::FOOTER_HEIGHT, cx)
+            reader.set_chrome_bands(chrome::HEADER_HEIGHT, chrome::FOOTER_HEIGHT, cx);
+            reader.set_overlay_open(chrome_open, cx);
         });
         self.sync_sliders(window, cx);
         let tap = cx.listener(
@@ -720,7 +673,8 @@ impl Render for ReadingPage {
             root.child(self.top_bar(cx))
                 .child(self.bottom_bar(cx, window))
         } else {
-            root.child(self.header(cx)).child(self.footer(cx))
+            root.child(bands::header(&self.reader, cx))
+                .child(bands::footer(&self.reader, cx))
         };
         root
     }

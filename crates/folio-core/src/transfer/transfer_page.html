@@ -1,0 +1,77 @@
+<!doctype html>
+<!-- Wi-Fi 传书的上传页。内嵌进二进制（见 transfer/mod.rs），独立于 app 的 locale：
+     它画在**另一台设备**的浏览器里，只用一句中文 + 图标说话也能被看懂。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>folio 传书</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f6f6f4; color: #1f2937;
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  main { width: min(560px, 92vw); }
+  h1 { font-size: 1.25rem; margin: 0 0 .5rem; }
+  p { color: #6b7280; margin: .25rem 0 1rem; font-size: .875rem; }
+  #drop { border: 2px dashed #d1d5db; border-radius: 16px; padding: 48px 16px;
+          text-align: center; background: #fff; transition: border-color .15s; }
+  #drop.over { border-color: #10b981; background: #ecfdf5; }
+  #drop strong { font-size: 1rem; }
+  ul { list-style: none; padding: 0; margin: 1rem 0 0; font-size: .875rem; }
+  li { padding: .35rem .5rem; border-radius: 8px; background: #fff; margin-bottom: .4rem;
+       display: flex; justify-content: space-between; }
+  li.ok { color: #047857; } li.err { color: #b91c1c; } li.busy { color: #6b7280; }
+</style>
+</head>
+<body>
+<main>
+  <h1>📖 folio 传书</h1>
+  <p>选几个文件拖进来，它们会直接出现在这本书架上。</p>
+  <div id="drop">
+    <strong>把书拖到这里</strong><br>
+    <span style="font-size:.8rem;color:#9ca3af">或点这里选文件（可多选）</span>
+    <input id="pick" type="file" multiple style="display:none">
+  </div>
+  <ul id="log"></ul>
+</main>
+<script>
+  const drop = document.getElementById('drop');
+  const pick = document.getElementById('pick');
+  const log = document.getElementById('log');
+  const pin = new URLSearchParams(location.search).get('pin') || '';
+
+  drop.addEventListener('click', () => pick.click());
+  ['dragover', 'dragenter'].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => send([...e.dataTransfer.files]));
+  pick.addEventListener('change', () => send([...pick.files]));
+
+  function row(name, cls, text) {
+    const li = document.createElement('li');
+    li.className = cls;
+    const label = document.createElement('span');
+    label.textContent = name;
+    const state = document.createElement('span');
+    state.textContent = text;
+    li.append(label, state);
+    log.prepend(li);
+    return state;
+  }
+
+  function send(files) {
+    for (const file of files) {
+      const state = row(file.name, 'busy', '传输中…');
+      const body = new FormData();
+      body.append('file', file, file.name);
+      fetch('/upload?pin=' + encodeURIComponent(pin), { method: 'POST', body })
+        .then(resp => {
+          if (resp.ok) { state.textContent = '✓ 已收到'; state.parentElement.className = 'ok'; }
+          else { state.textContent = '✗ 失败（' + resp.status + '）'; state.parentElement.className = 'err'; }
+        })
+        .catch(() => { state.textContent = '✗ 传不出去'; state.parentElement.className = 'err'; });
+    }
+  }
+</script>
+</body>
+</html>

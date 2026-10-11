@@ -1,8 +1,10 @@
-//! 书库管理里两端共用的那几件事：书往哪儿拷、怎么认出一份副本、删一本书删掉哪些东西。
+//! 书库管理里两端共用的那几件事：怎么认出一份副本、删一本书删掉哪些东西、
+//! 书库目录从哪儿来。
 //!
-//! 判据只有一条：**库里的行一定删，文件只删我们自己拷进来的那份**。两端现在都是
-//! 「先复制到书库再入库」（见 [`stage`]），所以删掉一本书不该牵连到读者自己手里
-//! 那个原件 —— 原件在别的目录里，从书库里移掉一本书不等于把人家硬盘上的文件删了。
+//! 判据只有一条：**库里的行一定删，文件只删我们自己拷进来的那份**。两端导入时都会
+//! 先复制一份进书库（拷贝、解析、落库都在后端管线里，见 `folio_core::import`），
+//! 所以删掉一本书不该牵连到读者自己手里那个原件 —— 原件在别的目录里，从书库里
+//! 移掉一本书不等于把人家硬盘上的文件删了。
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +13,7 @@ use folio_core::Store;
 use gpui_kit::{App, PathPromptOptions, Task};
 
 use super::config_model::ConfigHolder;
-use super::error::{Context as _, Result, anyhow};
+use super::error::{Context as _, Result};
 
 /// 导入的目标目录：读者确认过的那个。
 ///
@@ -26,6 +28,43 @@ pub fn target_dir(library: &Library) -> Option<PathBuf> {
 /// 建议位置：`<数据根>/books`。确认面板里默认填的就是它。
 pub fn suggested_dir() -> PathBuf {
     folio_core::paths::books_dir()
+}
+
+/// 整机扫描的起点。判据与 [`candidate_dirs`] 同一条：只扫读者放得进东西的地方 ——
+/// 桌面扫**家目录**（`/` 全盘会把 `/proc`、`/sys` 也卷进来，那里没有书），
+/// Android 扫共享存储根（本应用自己的外部目录在 `Android/data` 底下，要作为噪音
+/// 规则的豁免区传给 [`folio_core::scan::find`]），iOS / 鸿蒙的沙盒就那么大，扫数据根。
+///
+/// Android 上 `all_files` 说的是「所有文件访问」拿到了没有（[`crate::ui::platform`]::
+/// request_storage_access 的结果）：拿到了才扫共享存储根；没拿到时能扫的只有应用
+/// 自己的外部目录 —— 那里是 `adb push` 的法定落点，退化路径也有东西可找。
+pub fn scan_roots(all_files: bool) -> Vec<PathBuf> {
+    if cfg!(target_os = "android") {
+        if all_files {
+            return vec![PathBuf::from("/storage/emulated/0")];
+        }
+        return vec![PathBuf::from(format!(
+            "/storage/emulated/0/Android/data/{PACKAGE}/files"
+        ))];
+    }
+    // iOS 的沙盒就那么大；鸿蒙的 `cfg!` 不认识 `target_os = "ohos"`（编译目标名
+    // 不在标准清单里），桌面分支拿不到 HOME 时也落回数据根 —— 三者共用这条。
+    if !cfg!(target_os = "android") && std::env::var_os("HOME").is_none_or(|h| h.is_empty()) {
+        return vec![folio_core::paths::data_dir()];
+    }
+    match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => vec![PathBuf::from(home)],
+        _ => Vec::new(),
+    }
+}
+
+/// Android 上噪音规则的豁免区：本应用自己的外部目录（`adb push` 的书都堆在那儿），
+/// 虽然在 `Android/data` 底下但必须照扫。其他平台没有这一层，返回空。
+pub fn scan_noise_exempt() -> Vec<PathBuf> {
+    if cfg!(target_os = "android") {
+        return candidate_dirs();
+    }
+    Vec::new()
 }
 
 /// 本应用的 Android 包名。应用专属外部目录的路径里有它，
@@ -58,6 +97,19 @@ pub fn candidate_dirs() -> Vec<PathBuf> {
 ///
 /// 取消（`Ok(None)`）与出错都只记一条日志，不改配置 —— 读者点「取消」不该把书库位置清空。
 pub fn pick_dir(cx: &mut App) -> Task<()> {
+    choose_dir(cx, |cx, dir| {
+        let path = dir.display().to_string();
+        tracing::info!("pick_dir: 书库位置选为 {path}");
+        ConfigHolder::edit_library(cx, |library| library.dir = path);
+    })
+}
+
+/// 打开系统文件夹选择器，选中把目录交给 `picked`（在界面线程上执行）。
+/// 取消与出错只记日志 —— 读者点「取消」不该清掉任何东西。
+pub fn choose_dir(
+    cx: &mut App,
+    picked: impl Fn(&mut App, &std::path::Path) + 'static,
+) -> Task<()> {
     let receiver = cx.prompt_for_paths(PathPromptOptions {
         files: false,
         directories: true,
@@ -65,39 +117,25 @@ pub fn pick_dir(cx: &mut App) -> Task<()> {
         prompt: None,
     });
     cx.spawn(async move |cx| {
-        let picked = match receiver.await {
+        let picked_dir = match receiver.await {
             Ok(Ok(Some(mut paths))) => paths.pop(),
             Ok(Ok(None)) => None,
             Ok(Err(err)) => {
-                tracing::error!("pick_dir: 文件夹选择器失败 {err}");
+                tracing::error!("choose_dir: 文件夹选择器失败 {err}");
                 None
             }
             Err(_) => None,
         };
-        if let Some(dir) = picked {
-            let path = dir.display().to_string();
-            tracing::info!("pick_dir: 书库位置选为 {path}");
-            cx.update(|cx| ConfigHolder::edit_library(cx, |library| library.dir = path.clone()));
+        if let Some(dir) = picked_dir {
+            cx.update(|cx| picked(cx, &dir));
         }
     })
 }
 
-/// 把选中的文件复制进书库，返回那份常驻副本的路径。
-///
-/// 复制而不是引用，是为了让「书还在」这件事不依赖原文件之后被移走、改名或删掉；
-/// 入库的那份内容（章节、图片、CSS）本来就在 SQLite 里，`books.path` 真正的作用是
-/// **书的身份**：同一路径重复导入算更新，不会多出第二本。
-///
-/// 副本保留原文件名，代价是**同名即同书** —— 两本都叫 `book.epub` 的不同文件会互相
-/// 覆盖。这比「每次导入都多出一格」好修，也好向读者解释。
-pub fn stage(source: &Path, dir: &Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(dir).with_context(|| format!("建书库目录 {}", dir.display()))?;
-    let name = source
-        .file_name()
-        .ok_or_else(|| anyhow!("选择结果里没有文件名：{}", source.display()))?;
-    let dest = dir.join(name);
-    std::fs::copy(source, &dest).with_context(|| format!("复制到 {}", dest.display()))?;
-    Ok(dest)
+/// 监听的默认去处：`<数据根>/inbox`。开关打开时没选过目录就落在这里 ——
+/// 一个独立于书库的「收件箱」，往里丢书就自动入库。
+pub fn suggested_watch_dir() -> PathBuf {
+    folio_core::paths::data_dir().join("inbox")
 }
 
 /// 删掉一本书：先删库里的行（章节、正文、图片、进度、批注、集合都跟着级联走），
@@ -145,18 +183,17 @@ pub fn owned_copy(path: &str, dir: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    //! 删一本书里最贵的那条判据：**只有应用自己收下的文件才跟着删**。
+    //! 这一层只有两件事值得钉住：**导入落库落全了没有**，以及**删一本书删掉的是哪些文件**。
     //!
-    //! 判错的代价不对称。库里存的路径在两端长得一样 —— 移动端是
-    //! `<数据根>/books/x.epub`（导入时我们拷的），桌面端是 `/home/…/我的书/x.epub`
+    //! 删的那条判据最贵，因为判错的代价不对称。库里存的路径在两端长得一样 —— 移动端是
+    //! `<数据根>/books/x.epub`（导入时拷的），桌面端是 `/home/…/我的书/x.epub`
     //! （读者自己的）。前者不删是留垃圾，后者删了是删掉人家硬盘上的原件，所以两头都要钉住。
 
     use std::path::Path;
 
-    use crate::ui::shared::library::{delete_book, owned_copy, stage, target_dir};
-    use folio_core::Library;
-    use folio_core::Store;
+    use crate::ui::shared::library::{delete_book, owned_copy, target_dir};
     use folio_core::format::{Chapter, DocMeta, FlowDoc, Format};
+    use folio_core::{Library, Store};
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {
@@ -169,13 +206,13 @@ mod tests {
 
     fn flow() -> FlowDoc {
         FlowDoc {
-            chapters: vec![Chapter {
-                title: "第一章".into(),
+            chapters: vec![Chapter::inline(
+                "第一章",
                 // 契约：`Chapter::source` 是引擎就绪的 XHTML。这里不进排版，
                 // 但造数据也照契约来，免得下次有人拿它当「纯文本也能塞」的例子。
-                source: "<p>正文</p>".into(),
-                spine_href: "c1.xhtml".into(),
-            }],
+                "<p>正文</p>",
+            )
+            .with_spine_href("c1.xhtml")],
             ..Default::default()
         }
     }
@@ -201,32 +238,14 @@ mod tests {
     #[test]
     fn an_unconfirmed_library_blocks_the_import_rather_than_picking_for_the_reader() {
         assert_eq!(target_dir(&Library::default()), None);
-        assert_eq!(target_dir(&Library { dir: "   ".into() }), None);
+        assert_eq!(target_dir(&Library { dir: "   ".into(), watch: None }), None);
         assert_eq!(
             target_dir(&Library {
-                dir: " /x/books ".into()
+                dir: " /x/books ".into(),
+                watch: None
             }),
             Some(Path::new("/x/books").to_path_buf())
         );
-    }
-
-    #[test]
-    fn staging_copies_the_file_into_the_library_under_its_own_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("原处").join("a.epub");
-        touch(&source);
-        let books = dir.path().join("books");
-
-        let dest = stage(&source, &books).unwrap();
-
-        assert_eq!(dest, books.join("a.epub"), "副本保留原文件名");
-        assert!(source.exists(), "原件不该被动");
-        assert_eq!(
-            std::fs::read(&dest).unwrap(),
-            std::fs::read(&source).unwrap()
-        );
-        // 同一路径重复导入落到同一个文件上，`books.path` 才是书的身份。
-        assert_eq!(stage(&source, &books).unwrap(), dest);
     }
 
     #[test]
@@ -238,7 +257,7 @@ mod tests {
 
         let store = Store::in_memory().unwrap();
         let id = store.add_book(&staged, &meta("甲")).unwrap();
-        store.save_flow(id, &flow()).unwrap();
+        store.save_flow(id, &flow(), Format::Epub).unwrap();
 
         delete_book(&store, id, Some(&books)).unwrap();
 
@@ -257,7 +276,7 @@ mod tests {
 
         let store = Store::in_memory().unwrap();
         let id = store.add_book(&original, &meta("乙")).unwrap();
-        store.save_flow(id, &flow()).unwrap();
+        store.save_flow(id, &flow(), Format::Epub).unwrap();
 
         delete_book(&store, id, Some(&books)).unwrap();
 

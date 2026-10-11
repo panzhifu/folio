@@ -40,9 +40,6 @@ enum Screen {
     Theme,
     Library,
     About,
-    /// 嵌进二进制的两份文档全文。
-    Plan,
-    Limitations,
 }
 
 impl Screen {
@@ -53,8 +50,6 @@ impl Screen {
             Screen::Theme => "account.theme",
             Screen::Library => "account.library",
             Screen::About => "account.about",
-            Screen::Plan => "about.plan",
-            Screen::Limitations => "about.limitations",
         }
     }
 }
@@ -82,7 +77,6 @@ impl AccountView {
     pub fn go_back(&mut self, cx: &mut Context<Self>) -> bool {
         let up = match self.screen {
             Screen::Root => return false,
-            Screen::Plan | Screen::Limitations => Screen::About,
             Screen::Theme | Screen::Library | Screen::About => Screen::Root,
         };
         self.go(up, cx);
@@ -302,7 +296,7 @@ impl AccountView {
         Self::scrollable(body)
     }
 
-    /// 关于屏：这份二进制是用哪几版依赖编的，以及两份讲实际情况的文档的入口。
+    /// 关于屏：这份二进制是用哪几版依赖编的。
     fn about_screen(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut body = v_flex().w_full().gap_1();
         for (key, value) in [
@@ -315,35 +309,6 @@ impl AccountView {
                 .child(Self::section_title(tr(cx, key), cx))
                 .child(div().w_full().child(value));
         }
-        body = body
-            .child(hairline(cx).into_any_element())
-            .child(self.row(
-                "about-plan",
-                IconName::BookOpen,
-                tr(cx, "about.plan"),
-                Screen::Plan,
-                cx,
-            ))
-            .child(self.row(
-                "about-limits",
-                IconName::TriangleAlert,
-                tr(cx, "about.limitations"),
-                Screen::Limitations,
-                cx,
-            ))
-            .child(muted_label(tr(cx, "about.docs_note"), cx));
-        Self::scrollable(body)
-    }
-
-    /// 一份嵌进来的文档全文。按行摊开而不是整篇一个文字元素：整篇会让这一格变成一个
-    /// 比屏幕高几十倍的元素，滚动范围与裁剪都不好算。
-    fn doc_screen(text: &'static str) -> AnyElement {
-        let body = v_flex().w_full().gap_0().children(text.lines().map(|line| {
-            div()
-                .w_full()
-                .text_sm()
-                .child(if line.is_empty() { " " } else { line })
-        }));
         Self::scrollable(body)
     }
 
@@ -404,8 +369,6 @@ impl Render for AccountView {
             Screen::Theme => self.theme_screen(cx),
             Screen::Library => self.library_screen(cx),
             Screen::About => self.about_screen(cx),
-            Screen::Plan => Self::doc_screen(about::PLAN),
-            Screen::Limitations => Self::doc_screen(about::LIMITATIONS),
         };
         root.child(body)
     }

@@ -42,11 +42,27 @@ pub enum Error {
     #[error("没有这一章：{0}")]
     NoSuchChapter(i64),
 
+    /// 库里只有正文的**位置**（v8 起），而按它回容器取时取不到。
+    ///
+    /// 单独立一条而不是回空串：它的后果与「这一章本来就是空的」完全不同 ——
+    /// 前者要告诉读者「源文件不在了」（该重新导入或重新定位），而不是画一页空白。
+    #[error("读不出第 {index} 章的正文：{path} 取不到 {at}")]
+    ChapterUnavailable {
+        path: PathBuf,
+        index: usize,
+        at: String,
+    },
+
     /// 集合名是用户直接敲进来的东西。空名不只是「难看」：空串在 `UNIQUE` 上只容得下
     /// 一条，第二个人再建一个空名集合会收到「名字已存在」这种看不懂的报错。
     /// 所以在入口挡掉，而不是让它变成一条数据库错误。
     #[error("集合名不能为空")]
     EmptyCollectionName,
+
+    /// 网络传输那一层的错（`remote`）。整条链保留：URL 下载、将来的 WebDAV
+    /// 同步失败时，界面拿到的是「连不上 / 认证被拒 / 已取消」的原文。
+    #[error(transparent)]
+    Remote(#[from] crate::remote::Error),
 
     /// 日志装不起来。只有一个位置：`tracing` 的全局 subscriber 全程只能装一次。
     ///

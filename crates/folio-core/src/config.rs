@@ -1,11 +1,10 @@
 //! 应用配置：软件里所有「用户能改、改完要记住」的东西都在这一个模块里。
 //!
-//! 分成六节，前五节各自对应设置界面里的一类，第六节是给调试用的、界面上没有：
+//! 分成五节，前四节各自对应设置界面里的一类，第五节是给调试用的、界面上没有：
 //! - [`Reader`] —— 排版输入（字号、行距、缩进、版心、字体），排版引擎只认这一节；
 //! - [`Appearance`] —— 浅深三态和两侧各用哪套主题，属于界面外观而不是排版输入；
 //! - [`Library`] —— 书库目录；
 //! - [`Language`] —— 界面语言；
-//! - [`Account`] —— 本地占位账号；
 //! - [`Logging`] —— 日志落到哪儿、说到多细（改完重启生效，界面上没有这一页）。
 //!
 //! 落盘位置由 [`crate::paths`] 决定（`~/.config/folio/config.json`）。
@@ -167,6 +166,30 @@ impl Reader {
 pub struct Library {
     /// 确认过的书库目录。空串 = 没确认过。
     pub dir: String,
+    /// 文件夹监听：`Some` = 开着。盯一个「收件箱」目录，新出现的书自动入库
+    /// （`folio_core::watch`）。监听书库目录自己没有意义 —— 导进来的就是从
+    /// 那里拷出去的，会自我循环，normalize 把它当没开。
+    pub watch: Option<WatchDir>,
+}
+
+/// 监听的目标与节奏。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WatchDir {
+    /// 盯住的目录。
+    pub dir: String,
+    /// 兜底轮询间隔（秒）。事件驱动（inotify）的平台上不起作用，只在
+    /// 没有系统级监听 API 的平台上是真实的节奏。
+    pub interval_secs: u32,
+}
+
+impl Default for WatchDir {
+    fn default() -> Self {
+        Self {
+            dir: String::new(),
+            interval_secs: 30,
+        }
+    }
 }
 
 impl Library {
@@ -178,28 +201,13 @@ impl Library {
 
 /// 界面语言。换设备同步配置时它应当跟着走，而它不属于任何一本书，
 /// 也不影响书的正文语言，所以单独一节。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 默认是简体中文（[`Locale`] 的 `Default`）：这个项目的读者以中文书为第一目标；
+/// 之后读回来的是用户选过的那个。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Language {
-    #[serde(default = "Locale::detect")]
     pub locale: Locale,
-}
-
-impl Default for Language {
-    fn default() -> Self {
-        // 首次启动跟随系统；之后读回来的是用户选过的那个。
-        Self {
-            locale: Locale::detect(),
-        }
-    }
-}
-
-/// 占位账号：目前只有一个可改的读者名，将来接真正的账号/同步时再扩展。
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Account {
-    /// 空串表示没设过，界面用兜底名显示。
-    pub name: String,
 }
 
 /// 日志：调试时要不要落盘、写到哪儿、每一支代码说到多细。
@@ -290,7 +298,6 @@ pub struct Config {
     pub appearance: Appearance,
     pub library: Library,
     pub language: Language,
-    pub account: Account,
     pub logging: Logging,
 }
 
@@ -306,6 +313,15 @@ impl Config {
         // 书库位置去掉首尾空白：填成 "  /x  " 会让 `is_confirmed` 说「确认过」，
         // 而后面按这个串去找目录会找不到。
         self.library.dir = self.library.dir.trim().to_string();
+        if let Some(watch) = &mut self.library.watch {
+            watch.dir = watch.dir.trim().to_string();
+            watch.interval_secs = watch.interval_secs.clamp(5, 3600);
+            // 空目录、或监听的就是书库目录自己：前者没得盯，后者会自我循环
+            // （书库里出现的书就是刚从那里拷进来的）。都当没开。
+            if watch.dir.is_empty() || watch.dir == self.library.dir {
+                self.library.watch = None;
+            }
+        }
         self.logging = self.logging.normalized();
         self
     }
@@ -351,10 +367,10 @@ impl Config {
 
 /// 整份读不出来时的补救：**按节**退回默认值。
 ///
-/// 为什么需要它：`serde_json::from_str::<Config>` 是一根绳上的五个节，任何一个节的
+/// 为什么需要它：`serde_json::from_str::<Config>` 是一根绳上的几个节，任何一个节的
 /// 任何一个字段类型不对（`"font_size":"big"`、`"mode":3`、手滑多打的一个引号），
 /// 整个调用就返回 `Err`，于是全部配置归零 —— 读者看到的是字号、主题、书库目录、
-/// 账号一起消失，而且完全不知道原因。分节解析后，坏的那一节归零，其余各节照旧。
+/// 界面语言一起消失，而且完全不知道原因。分节解析后，坏的那一节归零，其余各节照旧。
 ///
 /// 只处理「JSON 本身合法、某一节的内容不合结构」这一类；连 JSON 都解析不了
 /// （截断、少括号）时没有可逐节尝试的载体，仍然整份退回默认值。
@@ -378,9 +394,6 @@ fn salvage(text: &str) -> Config {
     if let Some(language) = section(&value, "language") {
         config.language = language;
     }
-    if let Some(account) = section(&value, "account") {
-        config.account = account;
-    }
     if let Some(logging) = section(&value, "logging") {
         config.logging = logging;
     }
@@ -403,9 +416,9 @@ mod tests {
     //! 这些测试盯的是「用户手改这个 JSON 之后程序会怎样」，所以全部从 JSON 文本出发，
     //! 不去直接改结构体 —— 结构体改不出坏输入。
 
-    use crate::config::Config;
+    use crate::config::{Config, WatchDir};
     use crate::i18n::Locale;
-    use crate::{Account, Appearance, Language, Library, Mode, Reader};
+    use crate::{Appearance, Language, Library, Mode, Reader};
     use serde_json::json;
 
     fn load(text: &str) -> Config {
@@ -431,9 +444,6 @@ mod tests {
                 dark: Some("Molokai".into()),
             },
             language: Language { locale: Locale::Ja },
-            account: Account {
-                name: "阿遥".into(),
-            },
             ..Default::default()
         };
         config.save_to(&path).unwrap();
@@ -470,7 +480,6 @@ mod tests {
             got.library.dir.is_empty(),
             "没确认过书库位置就是空串，不是某个默认目录"
         );
-        assert!(got.account.name.is_empty());
     }
 
     /// 老版本的 `reader` 一节里有 `theme`；新版在 `appearance`。
@@ -482,29 +491,22 @@ mod tests {
         assert_eq!(got.appearance.mode, Mode::System);
     }
 
-    /// 老版本把界面语言存在 reader 里；新版在 language 一节。
-    /// 认不出来的字段 serde 会直接忽略，于是语言回到「跟随系统」而不是报错。
+    /// 老版本的 `reader` 一节里有 `locale`；新版在 language 一节。
+    /// 认不出来的字段 serde 会直接忽略，于是语言回到默认（简体中文）而不是报错。
     #[test]
-    fn an_unknown_locale_key_falls_back_to_the_system_language() {
+    fn an_unknown_locale_key_falls_back_to_the_default_language() {
         let got = load(r#"{"reader":{"locale":"fr"}}"#);
-        assert_eq!(got.language.locale, Locale::detect());
+        assert_eq!(got.language.locale, Locale::ZhHans);
     }
 
-    /// 这一条必须**与运行环境无关**。`language` 一节缺 locale 键时用的是
-    /// `Locale::detect()`，而 detect 读 `LANGUAGE`/`LC_ALL`/`LANG`，所以原来那句
-    /// 「`"en"` 读回来是 `En`」在 `LANG=en_US.UTF-8` 的机器上，即便 JSON 里的语言
-    /// 完全没被读到（整节退回 detect）也一样通过 —— 本机全绿、CI 上红的就是它。
-    /// 这里显式挑一个**与本机系统语言不同**的值，让「读到了」和「回落了」不可能同值。
+    /// `language` 一节缺 locale 键时用的是缺省语言（简体中文），所以这里显式挑一个
+    /// 与缺省不同的值，让「读到了」和「回落了」不可能同值。
     ///
     /// JSON 用 `json!` 现搭，不手写转义花括号：这一条测试曾经因为多打的一个引号
     /// 变成了「整份 JSON 无效」，于是要验的 locale 从没被解过一遍。
     #[test]
     fn the_locale_survives_the_json_round_trip() {
-        let different = Locale::ALL
-            .iter()
-            .copied()
-            .find(|locale| *locale != Locale::detect())
-            .expect("三种语言里总能找到一个和系统语言不同的");
+        let different = Locale::En;
 
         // 界面上看到的就是 `code()`，读者照它手改，所以这一种写法是主路径。
         let got = load(&json!({ "language": { "locale": different.code() } }).to_string());
@@ -528,14 +530,14 @@ mod tests {
     }
 
     /// 一处类型写错的字段只该毁掉**它自己那一节**：读者手改 `"font_size":"big"` 之后，
-    /// 不该看到主题名、书库目录、读者名一起消失，而且没有任何提示。
+    /// 不该看到主题名、书库目录一起消失，而且没有任何提示。
     #[test]
     fn one_broken_section_does_not_take_the_others_down() {
         let got = load(
             r#"{"reader":{"font_size":"big","line_height":2.5},
             "appearance":{"mode":"dark","light":"Gruvbox"},
             "library":{"dir":"~/Books"},
-            "account":{"name":"阿遥"}}"#,
+            "language":{"locale":"ja"}}"#,
         );
         assert_eq!(
             got.reader,
@@ -545,7 +547,7 @@ mod tests {
         assert_eq!(got.appearance.mode, Mode::Dark);
         assert_eq!(got.appearance.light.as_deref(), Some("Gruvbox"));
         assert_eq!(got.library.dir, "~/Books");
-        assert_eq!(got.account.name, "阿遥");
+        assert_eq!(got.language.locale, Locale::Ja);
     }
 
     /// 补救的粒度是「一节」而不是「一个键」：`line_height` 没写错，但它的同节邻居错了，
@@ -568,13 +570,13 @@ mod tests {
     #[test]
     fn out_of_range_values_are_clamped_on_load() {
         let got = load(
-            r#"{"reader":{"font_size":9000,"line_height":0,"indent_em":-5,"margin_x":1e9},"account":{"name":"x"}}"#,
+            r#"{"reader":{"font_size":9000,"line_height":0,"indent_em":-5,"margin_x":1e9},"language":{"locale":"ja"}}"#,
         );
         assert_eq!(got.reader.font_size, 72.0);
         assert_eq!(got.reader.line_height, 1.0);
         assert_eq!(got.reader.indent_em, 0.0);
         assert_eq!(got.reader.margin_x, 400.0);
-        assert_eq!(got.account.name, "x", "夹取只管排版数值，不碰别的节");
+        assert_eq!(got.language.locale, Locale::Ja, "夹取只管排版数值，不碰别的节");
     }
 
     /// 空白主题名被当成「没设」；0 的 max_measure 是合法的铺满，不能被夹成别的值。
@@ -609,11 +611,56 @@ mod tests {
         assert_eq!(got.reader.font_family, Reader::default().font_family);
     }
 
+    /// 监听目录为空、或就是书库目录自己：前者没得盯、后者会自我循环
+    /// （书库里出现的书就是刚从那里拷进来的），normalize 都当没开。
+    #[test]
+    fn the_watch_section_needs_a_distinct_directory() {
+        let config = Config {
+            library: Library {
+                dir: "/books".into(),
+                watch: Some(WatchDir {
+                    dir: "/books".into(),
+                    interval_secs: 30,
+                }),
+            },
+            ..Default::default()
+        };
+        assert!(config.normalized().library.watch.is_none());
+
+        let config = Config {
+            library: Library {
+                dir: "/books".into(),
+                watch: Some(WatchDir {
+                    dir: "  ".into(),
+                    interval_secs: 30,
+                }),
+            },
+            ..Default::default()
+        };
+        assert!(config.normalized().library.watch.is_none());
+
+        // 节奏越界夹回界内；正经目录原样保留。
+        let config = Config {
+            library: Library {
+                dir: "/books".into(),
+                watch: Some(WatchDir {
+                    dir: " /inbox ".into(),
+                    interval_secs: 1,
+                }),
+            },
+            ..Default::default()
+        };
+        let watch = config.normalized().library.watch.expect("正经目录该留着");
+        assert_eq!(watch.dir, "/inbox");
+        assert_eq!(watch.interval_secs, 5);
+    }
+
     #[test]
     fn the_library_section_holds_its_dir() {
         let config = Config {
             library: Library {
                 dir: "~/Books".into(),
+                watch: None,
             },
             ..Default::default()
         };

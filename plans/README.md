@@ -10,7 +10,9 @@
 | [M6-selection.md](M6-selection.md) | 选中一期：长按选词、拖动扩展、复制 |
 | [M7-annotations.md](M7-annotations.md) | 批注二期设计：TextAnchor 落库、回显、侧栏 |
 | [images-lazy.md](images-lazy.md) | 图片不落字节：学 KOReader 从容器按需读（images 表只剩元数据） |
-| [background-pipeline.md](background-pipeline.md) | 后台任务管线（`task`）+ 导入管线（`import`）：可取消、可报进度的后台作业 |
+| [text-out-of-db.md](text-out-of-db.md) | 正文出库：库里只存「怎么加载」（`chapters.locator`），打开时回容器取 |
+| [background-pipeline.md](background-pipeline.md) | 后台任务管线（`task`）：可取消、可报进度的后台作业 |
+| [import-trait.md](import-trait.md) | 导入管线：`Source` trait 一条抽象七种来源（选文件/批量/整机扫描/监听/Wi-Fi 传书/URL/WebDAV），落库在后台 |
 | [layout-optimization.md](layout-optimization.md) | 排版引擎优化记录（Tier 1 + §7.1–§7.5：两阶段排版 / 块级缓存 / 词级断行等） |
 | [facts.md](facts.md) | 已钉死的事实：框架/平台/构建的实测约束（写代码前先读） |
 
@@ -32,9 +34,12 @@ crates/folio-core/          纯 Rust，无 gpui
     provider.rs             DocumentProvider trait + 注册表（认领 / 权重）
     zip.rs / cbz.rs         zip 容器共用层；CBZ（定版式，自然序页表）
     epub.rs / fb2.rs / html.rs / markdown.rs  可重排容器
-  src/remote/               WebDAV：传输 trait + 协议规则（离线可测）
+  src/remote/               WebDAV + 传输 trait（同步签名）：dav 协议规则离线可测，ureq 是同步实现
   src/task.rs               后台任务管线：可取消、可报进度的后台作业（thread + mpsc）
-  src/import.rs             导入管线：拷进书库 + 解析，建在 task 上（落库留在调用方）
+  src/import.rs             导入管线：Source trait + 逐本「拷 → 解析 → 落库」（后台完成）
+  src/scan.rs               整机扫描：找书不导入，候选清单勾选再走管线
+  src/watch.rs              文件夹监听：inotify 事件攒批自动入库（notify）
+  src/transfer/             Wi-Fi 传书：HTTP 服务器收上传（tokio/axum 只住这里）
   src/store.rs              SQLite：书目、进度、批注、集合、阅读统计、定版式页表（图片只存元数据）
 
 crates/folio-app/src/ui/    gpui-kit 界面
