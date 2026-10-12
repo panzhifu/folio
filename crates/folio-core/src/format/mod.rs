@@ -422,15 +422,10 @@ pub fn guess_media_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// 封面缩略图的**规格版本**（`plans/基础设施.md` §5.1：缩略图要有规格版本）。
-///
-/// 它给「这批封面是按什么规格生成的」一个数：`COVER_MAX_EDGE`（尺寸）、或
-/// [`shrink_image`] 的编码口径（有 alpha 走 PNG、没有走 JPEG）一改就 +1。各格式
-/// provider 生成封面时把它写进 `books.cover_spec`，对不上的书在开书时重扫重生成。
-///
-/// 为什么需要：`books.cover` 只是字节，换过尺寸/编码之后没有任何东西能认出老封面 ——
-/// 不重生成的话，规格换了只有新导入的书受益，已经在架上的那些永远是旧样子。
-pub const COVER_SPEC_VERSION: u32 = 1;
+// `COVER_SPEC_VERSION` 在 v16 作废：它记的是「这份封面字节是按哪一版规格生成的」，
+// 用来让 `stale_reason` 认出该重生成的封面。封面改成 `covers/` 里的文件之后，
+// 换规格只要重新生成缩略图（`format::thumb::purge` + 重新生成），
+// 不需要「按规格重扫全书」这个概念了。
 
 /// 一张位图缩到长边不超过 `max_edge`，再编码回一个紧凑格式。
 ///

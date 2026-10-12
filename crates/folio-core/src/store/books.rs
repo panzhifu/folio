@@ -865,8 +865,9 @@ pub enum StaleReason {
     Changed,
     /// 索引是旧算法算的（分章规则 / 位置方案改过）。
     OldIndex,
-    /// 封面是按旧规格（尺寸 / 编码）生成的（见 [`crate::format::COVER_SPEC_VERSION`]）。
-    OldCover,
+    // 曾经还有一档 `OldCover`（封面按旧规格生成）：v16 之后封面是一个文件，
+    // 换规格只要重新生成缩略图（`format::thumb`），不必重扫全书 —— 所以这一档
+    // 连同它的判据（`cover_spec` 那一列）一起作废了。
 }
 
 impl Store {
