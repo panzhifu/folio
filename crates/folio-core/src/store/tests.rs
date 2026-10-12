@@ -278,6 +278,48 @@ fn an_old_cover_spec_is_reported_as_stale() {
     assert_eq!(store.stale_reason(id).unwrap(), None, "没有封面就不管规格");
 }
 
+/// **「有封面」有两档，`stale_reason` 必须两档都认。**
+///
+/// v15 之后封面的正主是 `covers/<哈希>.<扩展名>` 那个文件，库里那一列只留描述；
+/// 而老行（v15 之前入库、还没被重扫过）的字节还只在 `books.cover` 这个 BLOB 里。
+/// 判据只认 BLOB 的话，**新导入的那一批会被判成「没有封面」**，于是
+/// `COVER_SPEC_VERSION` 换代时它们永远等不到重扫 —— 症状是「换了封面规格、
+/// 架上还是旧图」，而这条链上没有任何报错。
+///
+/// 这条钉的是那个「只认一档」的写法，所以先把 BLOB 清掉、只留描述，
+/// 再验它照样被认出来。
+#[test]
+fn a_cover_stored_as_a_file_is_still_seen_as_a_cover() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let path = dir.path().join("a.md");
+    std::fs::write(&path, "# 一\n\n正文\n").unwrap();
+    let store = Store::open_at(&db).unwrap();
+    let id = store.add_book(&path, &meta("A")).unwrap();
+    let mut doc = flow(&[("一", "正文")]);
+    doc.cover_ref = Some(crate::format::cover::CoverRef {
+        hash: "abcdef0123456789abcdef".into(),
+        mime: "image/jpeg".into(),
+    });
+    store.save_flow(id, &doc, Format::Markdown).unwrap();
+    assert_eq!(store.stale_reason(id).unwrap(), None, "规格是当前的");
+
+    // 只留描述、把 BLOB 清掉 —— 这正是 v15 之后新导入那一批的形状。
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE books SET cover = NULL, cover_spec = 0 WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store.stale_reason(id).unwrap(),
+        Some(StaleReason::OldCover),
+        "封面在文件里也算「有封面」，规格落后照样要重扫"
+    );
+}
+
 /// 定版式文档（CBZ 等）落库时也要盖 `index_version` —— 不然 `stale_reason` 永远说它旧，
 /// 每次开书都白重扫一遍。这是那个既存 bug 的回归门。
 #[test]

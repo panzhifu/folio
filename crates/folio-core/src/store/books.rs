@@ -113,6 +113,13 @@ const SHELF_ORDER: &str =
 /// 「哪一格是什么」只存在于 `SELECT` 那一行的顺序里，改列序时编译器帮不上忙。
 type CoverRow = (Option<Vec<u8>>, String, Option<String>, Option<String>);
 
+/// `stale_reason` 要的那几格：路径、大小、mtime、索引版本、封面字节长度、
+/// 封面规格版本、封面哈希。
+///
+/// 与 [`CoverRow`] 同一个理由：七元组摊在 `query_row` 闭包里的话，
+/// 「哪一格是什么」只存在于 `SELECT` 那一行的顺序里，改列序时编译器帮不上忙。
+type StaleRow = (String, i64, i64, i64, Option<i64>, i64, Option<String>);
+
 pub fn book_root(copy_path: &Path) -> std::path::PathBuf {
     let parent = copy_path.parent().unwrap_or(Path::new(""));
     if parent.file_name().and_then(|n| n.to_str()) == Some(".staging") {
@@ -879,11 +886,13 @@ impl Store {
     /// 第一种可以直接删数据（`prune_missing`），其余该重扫 —— 调用方选。
     pub fn stale_reason(&self, book_id: i64) -> Result<Option<StaleReason>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        // 封面的两格：`length(cover)` 为 NULL = 没有封面（`cover` 那一列可能是 MB 级
-        // 的字节，所以只问长度、不把整块图读出来）。
-        let row: Option<(String, i64, i64, i64, Option<i64>, i64)> = conn
+        // 封面的两格：`length(cover)` 是**老那一档**（字节在 BLOB 里），
+        // `cover_hash` 是**新那一档**（字节在 `covers/` 里）。两档任一非空就算「有封面」——
+        // 只认 BLOB 会让新导入的书被判成「没有封面」，于是 `cover_spec` 换代时
+        // 那一批**永远等不到重扫**（症状是换了封面规格而架上还是旧图）。
+        let row: Option<StaleRow> = conn
             .query_row(
-                "SELECT path, size, mtime, index_version, length(cover), cover_spec
+                "SELECT path, size, mtime, index_version, length(cover), cover_spec, cover_hash
                    FROM books WHERE id = ?1",
                 params![book_id],
                 |r| {
@@ -894,13 +903,15 @@ impl Store {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((path, size, mtime, version, cover_len, cover_spec)) = row else {
+        let Some((path, size, mtime, version, cover_len, cover_spec, cover_hash)) = row else {
             return Ok(None);
         };
+        let has_cover = cover_len.is_some() || cover_hash.is_some_and(|h| !h.is_empty());
         // 顺序即优先级：文件不在最严重（要删数据），其次才是「算法换了」与「文件换了」。
         let meta = std::fs::metadata(&path);
         let Ok(meta) = meta else {
@@ -923,7 +934,7 @@ impl Store {
         }
         // 有封面、但记下的是旧规格（或迁移前的 0）：值得重扫一次把它换成新规格。
         // 没有封面的书不受这条影响 —— 本来就没有东西要重生成。
-        if cover_len.is_some() && cover_spec != i64::from(crate::format::COVER_SPEC_VERSION) {
+        if has_cover && cover_spec != i64::from(crate::format::COVER_SPEC_VERSION) {
             return Ok(Some(StaleReason::OldCover));
         }
         let _ = size;
