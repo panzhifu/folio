@@ -730,16 +730,15 @@ fn a_whole_published_shaped_book_reads_back_chapters_css_and_toc() {
 
 /// **接线那一步的验收线**：读同一本书的一百张图，容器只该被打开一次。
 ///
-/// 这条今天必然是红的：`image_bytes` 每次调用都重新 `Zip::open`（读一遍中央目录）并扫一遍
-/// 条目名建索引，一百次取图就是一百次开容器。目标形状是把容器索引留成一份共享的不可变结果，
-/// 取字节只按条目偏移定位——见 `plans/阅读管线.md` 第七节「打开一本书：不走解析器」与
-/// 第八节「容器共用层与 ZIP 直读」。
+/// 这条曾经挂着 `#[ignore]`：`image_bytes` 每次调用都 `Zip::open`（重读一遍中央
+/// 目录、重建几千个条目名的索引），一百次取图就是一百次开容器，跑出来
+/// `left: 100, right: 1`。它当时是一句**写好的承诺** —— 目标形状是把容器索引留成
+/// 一份共享的不可变结果（`plans/导入管线.md` §十 的 `Container`）。
 ///
-/// 因为它现在过不了，用 `#[ignore]` 挡在 CI 之外；接线完成后删掉那行属性，这条断言就从
-/// 一句承诺变成一名守门员。单独跑它：
-/// `cargo test -p folio-core --lib -- --ignored format::epub::tests`
+/// 那个形状落地之后（`format::container`，`BookDocument` 持有它并按需懒开），
+/// 这行属性就去掉了：它从承诺变成了守门员。谁把 `BookDocument::image_bytes`
+/// 改回「每次问 provider 要」，这条会立刻红。
 #[test]
-#[ignore = "容器索引复用尚未接线：见 plans/阅读管线.md 第十三节第 2 步"]
 fn a_hundred_image_fetches_should_open_the_container_once() {
     use crate::metrics::{Metric, take_local};
 

@@ -75,6 +75,29 @@ impl Zip {
         entry.read_to_end(&mut buf).ok().map(|_| buf)
     }
 
+    /// **按归一化名取字节**：`locate` 与 `read` 合成一步。
+    ///
+    /// 给 [`Container`](super::container::Container) 用 —— 它拿到的是调用方给的
+    /// **归一化**路径（清单里怎么写就怎么给），而 zip 要的是自己那个原始串。
+    /// 中间那次「归一化名 → 原始名」的映射只在 `locate` 里做一次，别让每个
+    /// 取字节的调用点各拼一遍。
+    ///
+    /// 返回 `None` 覆盖四种情况：名字查不到、条目是目录、解压失败、以及名字
+    /// 在索引里但中央目录里读不出来（容器被改过）。四种都不该让调用方崩。
+    pub(crate) fn read_at(&mut self, want: &str) -> Option<Vec<u8>> {
+        let name = self.locate(want)?;
+        self.read(&name)
+    }
+
+    /// [`Zip::read_at`] 的文本版，零拷贝那条路与 [`Zip::read_text`] 一致。
+    pub(crate) fn read_text_at(&mut self, want: &str) -> Option<String> {
+        let bytes = self.read_at(want)?;
+        Some(match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned(),
+        })
+    }
+
     /// 条目文本。合法 UTF-8 时**不复制**：直接吃掉那个 `Vec<u8>`。
     ///
     /// 之前用 `from_utf8_lossy(...).into_owned()`，那在"本来就是 UTF-8"这条最常见的路上

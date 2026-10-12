@@ -18,6 +18,17 @@ pub struct BookDocument {
     /// 那时取字节一律回空 —— 与「容器丢了」是同一个表现（那块地方空着，正文照排）。
     provider: Option<Box<dyn DocumentProvider>>,
     path: Option<PathBuf>,
+    /// **开一次的容器句柄**（`plans/导入管线.md` §十）。
+    ///
+    /// 与 `provider` 并存而不是取代它：`Container` 管的是「按条目名取字节」这件
+    /// 与格式无关的事，而封面怎么认、字体清单怎么读、`@font-face` 指哪个条目
+    /// 都是格式知识，仍归 provider。取字节时容器先试，试不到（单文件格式、
+    /// 名字不是条目名）再退回 provider —— 两条路都在，谁先谁后见
+    /// [`BookDocument::image_bytes`]。
+    ///
+    /// 懒开：绝大多数书在这次会话里根本不会被取字节，所以 `OnceLock` 里的
+    /// `Container` 要等第一次取字节才真的 `Zip::open`（见那个模块的头）。
+    container: std::sync::OnceLock<crate::format::container::Container>,
     meta: DocMeta,
     content: Content,
 }
@@ -41,6 +52,7 @@ impl BookDocument {
         Ok(Self {
             provider: Some(provider),
             path: Some(path.to_path_buf()),
+            container: std::sync::OnceLock::new(),
             meta,
             content,
         })
@@ -54,6 +66,7 @@ impl BookDocument {
         Self {
             provider: None,
             path: None,
+            container: std::sync::OnceLock::new(),
             meta,
             content,
         }
@@ -71,6 +84,7 @@ impl BookDocument {
         Self {
             provider: format::provider_for(path),
             path: Some(path.to_path_buf()),
+            container: std::sync::OnceLock::new(),
             meta,
             content,
         }
@@ -86,6 +100,18 @@ impl BookDocument {
 impl BookDocument {
     fn container(&self) -> Option<(&dyn DocumentProvider, &Path)> {
         Some((self.provider.as_deref()?, self.path.as_deref()?))
+    }
+
+    /// 那个**开一次的容器句柄**；没有文件可谈时是 `None`。
+    ///
+    /// 第一次调用把它建起来（但**不**开文件 —— `Container` 自己懒开），之后每次
+    /// 取字节都命中同一个句柄。
+    fn shared(&self) -> Option<&crate::format::container::Container> {
+        let path = self.path.as_deref()?;
+        Some(
+            self.container
+                .get_or_init(|| crate::format::container::Container::new(path)),
+        )
     }
 }
 
@@ -106,6 +132,13 @@ impl Document for BookDocument {
     }
 
     fn image_bytes(&self, href: &str) -> Option<Vec<u8>> {
+        // 容器先试：`href` 就是归一化条目名（资源表里存的那一形），命中就免掉
+        // 「重新打开 + 重扫中央目录」那两笔 —— 这是滚动取图的热路径。
+        if let Some(bytes) = self.shared().and_then(|container| container.read(href)) {
+            return Some(bytes);
+        }
+        // 退回 provider：单文件格式（HTML 的图是磁盘上挨着它的另一个文件）、
+        // 或者 `href` 不是条目名（FB2 用 `#id` 指 `<binary>`）。
         let (provider, path) = self.container()?;
         provider.image_bytes(path, href)
     }
@@ -132,7 +165,12 @@ impl Document for BookDocument {
         };
         let mut css = String::new();
         for href in &flow.css_hrefs {
-            let Some(text) = provider.entry_text(path, href) else {
+            // 与取图同一条：容器先试（几份样式表共用一次打开），再退回 provider。
+            let text = self
+                .shared()
+                .and_then(|container| container.read_text(href))
+                .or_else(|| provider.entry_text(path, href));
+            let Some(text) = text else {
                 tracing::debug!("document: 样式表 {href} 不在容器里，跳过");
                 continue;
             };
@@ -183,6 +221,14 @@ impl Document for BookDocument {
         };
         match &at {
             ChapterLocator::Entry(entry) => {
+                // 容器先试：翻章要读一整章正文，而「重开一次容器」在这里是纯亏
+                // （条目名索引在同一本书里不变）。命中就免掉那次打开。
+                if let Some(text) = self
+                    .shared()
+                    .and_then(|container| container.read_text(entry))
+                {
+                    return Ok(text);
+                }
                 provider.entry_text(path, entry).ok_or_else(|| crate::Error::ChapterUnavailable {
                     path: path.to_path_buf(),
                     index,

@@ -3,6 +3,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub mod cbz;
+pub mod container;
 pub mod content;
 pub mod epub;
 pub mod fb2;
