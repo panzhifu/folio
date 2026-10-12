@@ -15,6 +15,11 @@ impl Store {
     ///
     /// 颜色不认识时回落到默认那条，而不是拒写：写失败会让读者刚划的批注直接丢掉，
     /// 那比颜色不对严重得多。
+    ///
+    /// **章只在 `anchor_json` 里，表里没有第二个地方记它**（v13 之前那一列
+    /// `chapter_id` 是外键挂到 `chapters(id)` 上的，重扫一次就被级联删光，
+    /// 见 `store/schema.rs` 的 v13）。所以这一条语句不查任何别的表：
+    /// 批注能不能活下来与章表当时有没有那一行彻底无关。
     pub fn add_annotation(
         &self,
         book_id: i64,
@@ -23,21 +28,11 @@ impl Store {
         color: &str,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        // `chapter_id` 只是索引与级删的挂钩，坐标里的章下标才是权威。
-        // 书没重新入库时这一列可能没有对应行，那就存 NULL —— 不能因为外键查不到
-        // 就把批注写失败。
-        let chapter_id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM chapters WHERE book_id = ?1 AND idx = ?2",
-                params![book_id, anchor.chapter as i64],
-                |r| r.get(0),
-            )
-            .optional()?;
         let stamp = now();
         conn.execute(
-            "INSERT INTO annotations (book_id, chapter_id, anchor_json, note, color, stale, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
-            params![book_id, chapter_id, anchor.to_json(), note, color_of(color), stamp],
+            "INSERT INTO annotations (book_id, anchor_json, note, color, stale, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
+            params![book_id, anchor.to_json(), note, color_of(color), stamp],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -232,7 +227,7 @@ mod tests {
             got.anchor, want,
             "锚点必须逐字段回来，坐标与四个指纹都是数据"
         );
-        // 章以锚点里的为准：表里那一列 `chapter_id` 只是索引与级删的挂钩。
+        // 章以锚点里的为准 —— 表里没有第二个地方记它（v13 摘掉了 `chapter_id`）。
         assert_eq!(got.chapter, 3);
         assert_eq!(got.note, "这一段写得真好");
         assert_eq!(got.color, "rose");
@@ -372,8 +367,11 @@ mod tests {
         );
     }
 
-    /// 章节还没入库（第一次打开、或 `save_flow` 之前就有批注）时外键列留 NULL，
-    /// 但批注本身必须写得进去 —— 坐标里已经有章下标了。
+    /// **批注与章表的存亡无关**：没有章节行时记得进去，章节行被删光重插之后还在。
+    ///
+    /// 这条是 v13 摘掉 `annotations.chapter_id` 的正面理由，也是那条丢数据路的
+    /// 最小复现 —— 旧形状下第二半会红（外键 `ON DELETE CASCADE` 把批注整批带走）。
+    /// 完整的那条（`reindex` 之后批注仍在）在 `store/tests.rs`，因为那里才有文件与格式。
     #[test]
     fn an_annotation_survives_a_missing_chapter_row() {
         let (dir, store) = store();
@@ -382,24 +380,20 @@ mod tests {
             .add_annotation(book, &anchor(7, 0, 4), "没有章节行也能记", "amber")
             .unwrap();
 
-        let db = dir.path().join("folio.db");
-        drop(store);
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        let chapter_id: Option<i64> = conn
-            .query_row(
-                "SELECT chapter_id FROM annotations WHERE id = ?1",
-                rusqlite::params![id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            chapter_id, None,
-            "查不到对应章节行时留 NULL，而不是拒写或写一个错 id"
-        );
-        // 列表仍然按锚点里的章下标报回来。
-        drop(conn);
-        let store = Store::open_at(&db).unwrap();
+        // 当时根本没有第 7 章那一行，批注照样读得回来，章号从锚点里报。
         assert_eq!(store.annotation(id).unwrap().unwrap().chapter, 7);
+
+        // 章表整批被重扫换掉（`save_flow` 落库的第一句就是这个形状）。
+        // 从同一个库文件再开一条连接删：走的是 SQLite 自己那条路，与连接上的外键开关
+        // 无关 —— 因为这一列已经不在了（v13），级联根本没有挂钩可挂。
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("folio.db")).unwrap();
+            conn.execute("DELETE FROM chapters", []).unwrap();
+        }
+
+        let left = store.annotations(book).unwrap();
+        assert_eq!(left.len(), 1, "章表被清掉不该带走批注");
+        assert_eq!(left[0].chapter, 7, "章号仍然从锚点里报");
     }
 
     /// 删书要连带删掉它的批注 —— 这一条走的是 schema 里的 `ON DELETE CASCADE`，

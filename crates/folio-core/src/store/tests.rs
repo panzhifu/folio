@@ -672,6 +672,73 @@ fn folio_core_reindex(store: &Store, id: i64) {
     crate::reindex(store, id).unwrap();
 }
 
+/// **重扫一本书不许动读者的数据**（`plans/导入管线.md` §九 那条门）。
+///
+/// 旧形状下这条会红，而且红在最要命的那一格：`annotations.chapter_id` 带着
+/// `ON DELETE CASCADE` 挂在 `chapters(id)` 上，而 `save_flow_in` 落库的第一句是
+/// 「删光这本书的章行再重插」—— 于是**每重扫一次就清空一次批注**，界面上那句
+/// 「位置与批注都还在」是一句谎话。触发它的路是日常的：文件被换过，或者
+/// `INDEX_VERSION` 被 bump 过一次（改分章规则时必须 bump）。
+///
+/// 五问合一条，因为「重扫」这个动作的正确性本来就是一个整体：
+/// 不重读来源、不改文件名、不新增记录、章表真的跟着新内容走了、读者的批注还在。
+/// 分开写会漏掉组合出来的状态（比如「章表更新了但批注没了」）。
+#[test]
+fn reindexing_keeps_the_reader_data_and_touches_no_new_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    // 副本躺在书库里，与真实导入之后的位置同形（重扫读的是它，不是来源）。
+    let copy = dir.path().join("copy.md");
+    std::fs::write(&copy, "# 一\n\n正文\n").unwrap();
+
+    let store = Store::open_at(&db).unwrap();
+    let id = store.add_book(&copy, &meta("A")).unwrap();
+    store
+        .save_flow(id, &flow(&[("一", "正文")]), Format::Markdown)
+        .unwrap();
+    let before_rows = store.list_books().unwrap().len();
+
+    // 读者在这一章划了一条批注：章 0 的第 1 个字之后（插入点，避开长度边界）。
+    let anchor = crate::anchor::TextAnchor {
+        chapter: 0,
+        start: 1,
+        end: 1,
+        exact: String::new(),
+        prefix: String::new(),
+        suffix: String::new(),
+        path: "/html[1]/body[1]/p[1]#0".into(),
+    };
+    store
+        .add_annotation(id, &anchor, "这一段写得真好", "amber")
+        .unwrap();
+    assert_eq!(store.annotations(id).unwrap().len(), 1);
+
+    // 文件被换掉（多了一章），然后重扫 —— 走的就是 `stale_reason` 之后那条路。
+    std::fs::write(&copy, "# 一\n\n正文\n\n# 二\n\n又一章\n").unwrap();
+    crate::reindex(&store, id).unwrap();
+
+    assert_eq!(
+        store.load_flow(id).unwrap().unwrap().chapters.len(),
+        2,
+        "章表要跟着新文件走，否则这条测试没在验真的重扫"
+    );
+    assert_eq!(
+        store.annotations(id).unwrap().len(),
+        1,
+        "重扫不该清掉读者的批注（§九：历史批注一条都不漂）"
+    );
+    assert_eq!(
+        store.book(id).unwrap().unwrap().path,
+        copy.to_string_lossy(),
+        "重扫不重读来源、也不改副本文件名"
+    );
+    assert_eq!(
+        store.list_books().unwrap().len(),
+        before_rows,
+        "重扫不该新增记录"
+    );
+}
+
 /// 打开过的书排在从没打开过的前面。
 #[test]
 fn opened_books_rank_before_never_opened_ones() {

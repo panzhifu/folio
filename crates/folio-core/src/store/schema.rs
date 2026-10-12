@@ -225,4 +225,35 @@ ALTER TABLE books ADD COLUMN content_hash TEXT;
 ALTER TABLE books ADD COLUMN hash_algo TEXT NOT NULL DEFAULT '';
 CREATE INDEX idx_books_content_hash ON books(content_hash) WHERE content_hash IS NOT NULL;
 "#,
+    // v13：**摘掉 `annotations.chapter_id`** —— 它是「重扫一次书就清空批注」那条
+    // 丢数据路的根，见 `plans/导入管线.md` §九 那条门（「历史批注一条都不漂」）。
+    //
+    // 这一列从 v1 起就带着 `REFERENCES chapters(id) ON DELETE CASCADE`，而
+    // `save_flow_in` 落库的第一句是 `DELETE FROM chapters WHERE book_id = ?1` 再重插。
+    // `foreign_keys` 是开着的，于是**每次 reindex（文件换过、或 `index_version` 被
+    // bump 过）都把这本书的批注整批级联删掉**，而界面上那句注释还写着「批注都还在」。
+    // 实测复现：两条批注 → `save_flow` 之后 0 条。
+    //
+    // 修法不是「重指一遍」而是**把这一列去掉**，因为它是设计里明确不要的东西：
+    //
+    // - 它是**纯写入列，零读取**：`annotations()` 的 SELECT 里没有它，按章分组走的是
+    //   `anchor_json` 里的 `chapter`（类型文档与那两处注释都写明了「坐标里的章下标才是
+    //   权威」）。没人读的列只会在读的人出现那天开始漂。
+    // - 它是一份**第二真相**：章的真实身份是锚点里的 `chapter` 下标，而这一列记的是
+    //   一个行号。行的 `id` 在每次重扫时都会换（删了重插），所以这一列从落库那刻起
+    //   就注定了要么漂、要么把主人一起拖走 —— 两种结局都已经在代码里发生过一次。
+    // - 它带来的「按章筛批注」并不需要它：批注数是每本几条到几百条，读回来按锚点分组的
+    //   成本可以忽略，而正确性归一处。
+    //
+    // 连带删掉 `idx_annotations_book(book_id, chapter_id)`：这一列一走它只剩 `book_id`，
+    // 而 `annotations()` 就是按 `book_id` 查，所以换成一条只含 `book_id` 的索引，
+    // 顺带把「书→批注」这条路的索引长度收回去。
+    //
+    // 只删列、不改形状：不动 `books` 与 `chapters` 任何一列，所以 v13 在旧库上是
+    // 「删一列 + 换一条索引」，在新建库上是空操作（v1 建表之后随即被这一条修掉）。
+    r#"
+DROP INDEX IF EXISTS idx_annotations_book;
+ALTER TABLE annotations DROP COLUMN chapter_id;
+CREATE INDEX idx_annotations_book ON annotations(book_id);
+"#,
 ];
