@@ -293,7 +293,10 @@ fn wheel_scrolling_moves_the_reading_position(cx: &mut TestAppContext) {
 fn locator_matches_the_scrolled_ratio(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let flow = flow();
-    let total = flow.chapters[0].char_len();
+    // 语料是 `Chapter::inline` 建的，正文就在手上，所以字数一定算得出来。
+    let total = flow.chapters[0]
+        .char_len()
+        .expect("正文在手上的章该有字数");
     assert!(total > 1000, "语料要够长才滚得动，实际 {total} 字");
 
     let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);

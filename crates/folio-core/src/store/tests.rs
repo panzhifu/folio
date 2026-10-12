@@ -1062,3 +1062,89 @@ fn the_v12_migration_adds_identity_columns_without_backfilling_them() {
     assert_eq!(again.user_version().unwrap(), MIGRATIONS.len() as i64);
     assert!(again.rows_missing_hash().unwrap().is_empty());
 }
+
+/// v14 迁移：请回 `chapters.char_len`，**老行留 NULL**（懒补），新行才带真数。
+///
+/// 这一条钉的是「`NULL` 与 `0` 必须分得开」这件事，因为它是这一列唯一容易做错的地方：
+/// 折成一个数，进度条就会把「还没算过」的章当成「这一章是空的」，于是分母偏小、
+/// 百分比偏大 —— 读者读到一半进度条已经满了，而且没有任何报错。
+///
+/// 三个来源都要能表达「知道」：`Chapter::inline`（正文在手，建的时候就数）、
+/// provider 的 `index()`（导入那一趟数的）、以及老库读回来的 `NULL`（不知道）。
+#[test]
+fn the_v14_migration_brings_back_char_len_as_nullable() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    {
+        // 手工造一个 v13 库：跑前 13 条迁移，塞一本带两章的书，版本停在 13。
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for sql in &MIGRATIONS[..13] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 13).unwrap();
+        conn.execute(
+            "INSERT INTO books (path, title, authors, format, size, added_at)
+             VALUES ('/books/老.md', '老书', '作者甲', 'markdown', 10, 0)",
+            [],
+        )
+        .unwrap();
+        for idx in 0..2 {
+            conn.execute(
+                "INSERT INTO chapters (book_id, idx, title, locator)
+                 VALUES (1, ?1, '旧章', '{\"v\":1,\"chapter\":0,\"offset\":0}')",
+                [idx],
+            )
+            .unwrap();
+        }
+    }
+
+    let store = Store::open_at(&db).unwrap();
+    assert_eq!(
+        store.user_version().unwrap(),
+        MIGRATIONS.len() as i64,
+        "v14 要跑到位"
+    );
+
+    // 老行读回来是「不知道」而不是「0 字」。
+    let flow = store.load_flow(1).unwrap().expect("章表还在");
+    assert_eq!(flow.chapters.len(), 2, "加一列不许动到已有的章");
+    assert_eq!(
+        flow.chapters[0].char_len(),
+        None,
+        "老行没算过字数，必须是 NULL 而不是 0"
+    );
+    assert_eq!(
+        flow.char_len(),
+        None,
+        "有一章不知道，全书总字数就不能报一个数"
+    );
+    let (known, unknown) = flow.known_char_len();
+    assert_eq!((known, unknown), (0, 2), "降级读数要能说清几章不知道");
+
+    // 新写的一份：正文在手，字数建的时候就数出来，落库读回一致。
+    let fresh = crate::format::FlowDoc {
+        chapters: vec![
+            crate::format::Chapter::inline("一", "<p>正文四个字</p>"),
+            crate::format::Chapter::inline("二", "<p>短</p>"),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(
+        fresh.chapters[0].char_len(),
+        Some(5),
+        "可见文本是「正文四个字」五个字，标签不算"
+    );
+    let book = store.add_book(&path("新.md"), &meta("新书")).unwrap();
+    store.save_flow(book, &fresh, Format::Markdown).unwrap();
+    let back = store.load_flow(book).unwrap().unwrap();
+    assert_eq!(
+        back.chapters[0].char_len(),
+        Some(5),
+        "字数要能原样落库读回"
+    );
+    assert_eq!(
+        back.char_len(),
+        Some(6),
+        "两章一共 5 + 1 = 6 字，这就是全局字符进度的分母"
+    );
+}

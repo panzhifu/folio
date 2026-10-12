@@ -81,6 +81,10 @@ pub trait DocumentProvider: Send + Sync {
                     Ok(Chapter {
                         title: chapter.title.clone(),
                         spine_href: chapter.spine_href.clone(),
+                        // 正文在这一趟真的到手了，字数就在这儿定下来 —— 与
+                        // `Chapter::inline` 同一条口径，别让 `read` 出来的章与
+                        // `index` 出来的章对同一个字段给两个答案。
+                        char_len: super::visible_chars(&text),
                         text: ChapterText::Inline(text),
                     })
                 })

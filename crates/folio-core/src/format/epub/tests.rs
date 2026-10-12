@@ -386,26 +386,33 @@ fn published_shape_epub(dir: &tempfile::TempDir) -> PathBuf {
     path
 }
 
-/// 章标题的回落：目录里没有这一章时，**全文那一趟**读章内第一个 h1/h2/h3。
+/// 章标题的回落：目录里没有这一章时，读章内第一个 h1/h2/h3 —— 两趟**给同一个答案**。
 ///
-/// 这一档是「只读索引」的代价：标题的回落要读正文才拿得到，而导入不再读正文
-/// （见 `plans/text-out-of-db.md`）。所以索引那一趟的标题只能来自目录，
-/// 目录里没有就是「第 N 节」。故意写成两条断言，把那个差别钉在那里。
+/// 这里曾经钉的是一个差别：标题回落要读正文才拿得到，而「只读索引」那一趟不读正文
+/// （`plans/text-out-of-db.md`），所以索引只能给「第 N 节」，而全文给真标题。
+/// 同一个字段两条路两个答案，是漂 —— 症状是「导入时书签里叫『第 3 节』，
+/// 打开之后叫『第三章 庭院』」。
+///
+/// 现在两趟一致了，因为**索引那一趟本来就要读正文**：`chapters.char_len` 是
+/// 全局字符进度的分母，必须在导入时算准（`plans/导入管线.md` §八 第 3 条、
+/// 已决第 11 条）。正文既然已经在手上，标题回落就是白拿的，没有理由不用它。
+///
+/// 代价写明白：条目标题不再来自目录就能定，导入要多付一遍解压。
 #[test]
-fn heading_fallback_only_exists_on_the_full_read() {
+fn heading_fallback_gives_the_same_title_on_both_passes() {
     let dir = tempfile::tempdir().unwrap();
     let path = synth_epub(
         &dir,
         "<html><body><h2>第二章 庭院</h2><p>正文</p></body></html>",
     );
-    // 索引：目录里没有 → 第 N 节（导入看到的，也是进库的那个）。
+    // 索引：目录里没有 → 回落读正文（导入看到的，也是进库的那个）。
     let indexed = doc_of(&path);
     assert_eq!(
         indexed.flow().unwrap().chapters[0].title,
-        "第 1 节",
-        "索引那一趟读不到正文，也就无从回落"
+        "第二章 庭院",
+        "索引那一趟有正文（要数字数），标题回落因此成立"
     );
-    // 全文：读得到正文，回落成立。
+    // 全文：同一个答案。
     let provider = crate::format::provider_for(&path).unwrap();
     let (_, content) = provider.read(&path).unwrap();
     let crate::format::Content::Reflow(flow) = content else {
@@ -710,16 +717,15 @@ fn a_whole_published_shaped_book_reads_back_chapters_css_and_toc() {
     );
     // 标题：目录里有的那条用它。
     assert_eq!(flow.chapters[0].title, "第1章", "章名来自目录");
-    // 目录排到 25 之后的那几章：**导入看到的**是「第 N 节」（索引那一趟不读正文，
-    // 回落无从谈起），**全文那一趟**才读得到章内的 `<h1>`。这个差别是
-    // 「导入不再解压全本」的代价，故意两条都钉住。
-    assert_eq!(flow.chapters[27].title, "第 28 节", "索引那一趟只能给编号");
+    // 目录排到 25 之后的那几章：两趟**给同一个答案**（索引那一趟也读正文，
+    // 因为 `chapters.char_len` 要在导入时算准，见 `heading_fallback_gives_the_same_title_on_both_passes`）。
+    assert_eq!(flow.chapters[27].title, "第28章", "索引那一趟也回落到 h1");
     let provider = crate::format::provider_for(&path).unwrap();
     let (_, content) = provider.read(&path).unwrap();
     let crate::format::Content::Reflow(full) = content else {
         panic!("该读成可重排");
     };
-    assert_eq!(full.chapters[27].title, "第28章", "全文那一趟回落到 h1");
+    assert_eq!(full.chapters[27].title, "第28章", "全文那一趟同答案");
 }
 
 /// **接线那一步的验收线**：读同一本书的一百张图，容器只该被打开一次。

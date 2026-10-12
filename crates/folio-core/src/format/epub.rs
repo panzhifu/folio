@@ -660,24 +660,36 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
             );
             continue;
         }
-        let source = if with_text {
-            zip.read_text(&name)
-        } else {
-            None
-        };
+        // 正文这一趟**一定要解出来一次**，但只有「全文那一趟」才留下来。
+        //
+        // 留下来的是正文，丢掉的只是那份 `String`：字数（`chapters.char_len`）必须
+        // 在索引这一趟算准 —— 它是全局字符进度的分母，而「算不出来就不要估」是硬要求
+        // （`plans/导入管线.md` §八 第 3 条）。所以这里付的是**解压**的钱，
+        // 省下的是「把正文搬进库里再丢掉」的钱。
+        //
+        // 注意别为了这一格改成按章回调 `chapter_source`：那会每章重开一次容器
+        // （EPUB 无随机读，只能整本 inflate），于是导入从 O(章数) 掉成 O(章数²)。
+        let text = zip.read_text(&name);
+        let source = if with_text { text.clone() } else { None };
+        let char_len = text.as_deref().and_then(super::visible_chars);
         let title = toc
             .iter()
             .find(|e| e.href == name)
             .map(|e| e.title.clone())
             .filter(|t| !t.is_empty())
-            // `heading_of` 要读正文才拿得到 —— 只有「全文那一趟」才试它。
-            .or_else(|| source.as_deref().and_then(heading_of))
+            // `heading_of` 要读正文才拿得到。以前只有「全文那一趟」有正文，
+            // 现在索引这一趟也解出来了，所以两种路径拿到的标题**一致**了 ——
+            // 顺手修掉一处「同一本书索引说「第 3 节」、全文说真标题」的漂移。
+            .or_else(|| text.as_deref().and_then(heading_of))
             .unwrap_or_else(|| format!("第 {} 节", idx + 1));
-        chapters.push(match source {
-            Some(text) => Chapter::inline(title, text).with_spine_href(name),
-            // 位置就是条目名，正是打开时 `Entry` 那一路要的东西。
-            None => Chapter::entry(title, name),
-        });
+        chapters.push(
+            match source {
+                Some(text) => Chapter::inline(title, text).with_spine_href(name),
+                // 位置就是条目名，正是打开时 `Entry` 那一路要的东西。
+                None => Chapter::entry(title, name),
+            }
+            .with_char_len(char_len),
+        );
     }
 
     let meta = DocMeta {

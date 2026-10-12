@@ -98,6 +98,11 @@ fn wrap(chapter: Chapter) -> Chapter {
 }
 
 /// 索引那一趟：章表只留标题与位置，正文等翻开那一章再包。
+///
+/// **字数在这一趟算**（`chapters.char_len`，见 `plans/导入管线.md` §八 第 3 条）：
+/// 单文件格式的 I/O 本来就躲不掉（分章要把整份文本过一遍），所以这一趟的正文
+/// 已经在手上，数一遍是白拿的。数的是**包装之后**那份 XHTML 的可见文本 ——
+/// 与 `Chapter::inline` 同一条口径，也与引擎真正吃到的东西同一份。
 fn read(path: &Path, plain: bool, with_text: bool) -> Result<(DocMeta, Content)> {
     let (meta, _source, chapters) = load(path, plain)?;
     let chapters = chapters
@@ -107,7 +112,8 @@ fn read(path: &Path, plain: bool, with_text: bool) -> Result<(DocMeta, Content)>
             if with_text {
                 wrap(chapter)
             } else {
-                Chapter::section(chapter.title.clone(), ix)
+                let chars = chapter.char_len();
+                Chapter::section(chapter.title.clone(), ix).with_char_len(chars)
             }
         })
         .collect();

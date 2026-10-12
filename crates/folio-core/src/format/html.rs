@@ -56,7 +56,12 @@ impl DocumentProvider for HtmlAdapter {
             size: raw.len() as u64,
         };
         let flow = FlowDoc {
-            chapters: vec![Chapter::section(title, 0)],
+            // 字数在索引这一趟数出来（`chapters.char_len`）：文件已经整份读过一遍，
+            // 而 `chapter_source` 交回来的正文与这里数的是同一份原始内容 ——
+            // `visible_chars` 走 DOM，标记不计入，只有可见文本进那根尺。
+            chapters: vec![
+                Chapter::section(title, 0).with_char_len(super::visible_chars(&raw)),
+            ],
             css,
             images,
             ..Default::default()

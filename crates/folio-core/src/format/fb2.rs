@@ -72,14 +72,22 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
         format: Format::Fb2,
         size: raw.len() as u64,
     };
-    // 索引那一趟：章表只留标题与序号。
+    // 索引那一趟：章表只留标题与序号，**但字数要留下来**。
+    //
+    // `parse_chapters` 这一趟已经把每章的 XHTML 拼出来了（单文件 XML，标题与正文
+    // 出自同一趟扫描），所以字数在这里是白拿的。换成 `Chapter::section` 会把那份
+    // 正文丢掉，而丢掉之后「这一章有多少字」就再也算不出来 ——
+    // `Chapter::section` 那一支只留位置，正文要等翻开才回容器取。
     let chapters = if with_text {
         chapters
     } else {
         chapters
             .into_iter()
             .enumerate()
-            .map(|(ix, chapter)| Chapter::section(chapter.title.clone(), ix))
+            .map(|(ix, chapter)| {
+                let chars = chapter.char_len();
+                Chapter::section(chapter.title.clone(), ix).with_char_len(chars)
+            })
             .collect()
     };
     let flow = FlowDoc {

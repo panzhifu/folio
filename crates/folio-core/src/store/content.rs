@@ -54,14 +54,19 @@ impl Store {
             // 正文本身**不进库**：存的是它在容器里的位置。这一句是整条不变量的落点 ——
             // 它在写路径上没有第二个分支，所以「正文被存进库」在结构上不可能发生。
             let at = locator_for(format, ch, idx);
+            // 字数随索引那一趟一起进来（`plans/导入管线.md` §八 第 3 条：需要读完
+            // 整本书才知道的数，全部在导入时算完）。`None` 原样写 NULL，不折成 0 ——
+            // 「不知道」与「这一章是空的」必须分得开。
+            let char_len: Option<i64> = ch.char_len().map(|n| n as i64);
             tx.execute(
-                "INSERT INTO chapters (book_id, idx, title, locator)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO chapters (book_id, idx, title, locator, char_len)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     book_id,
                     idx as i64,
                     ch.title,
-                    serde_json::to_string(&at)?
+                    serde_json::to_string(&at)?,
+                    char_len,
                 ],
             )?;
         }
@@ -120,16 +125,24 @@ impl Store {
 
     /// `load_flow` 的不上锁版本；只由已经持了锁的一方调用（公开方法与 `load_content`）。
     fn load_flow_in(conn: &Connection, book_id: i64) -> Result<Option<FlowDoc>> {
+        // `char_len` 可空：NULL = 这一章的字数还没算过（旧库升上来的行、
+        // 或 provider 那一趟只读了清单）。读取端要把 NULL 与 0 分开 ——
+        // 合成一个就会让进度条把「没算过」当成「这一章是空的」。
         let mut stmt = conn.prepare(
-            "SELECT title, locator FROM chapters WHERE book_id = ?1 ORDER BY idx",
+            "SELECT title, locator, char_len FROM chapters WHERE book_id = ?1 ORDER BY idx",
         )?;
         let mut chapters = Vec::new();
         let rows = stmt
             .query_map(params![book_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (title, locator) in rows {
+        for (title, locator, char_len) in rows {
+            let char_len = char_len.and_then(|n| usize::try_from(n).ok());
             // 认不出来的位置（以后加的变体、手改过的库）当作「位置不明」：
             // 打开时回容器重读一遍，而不是把这一章当空的。
             let at = serde_json::from_str::<ChapterLocator>(&locator).unwrap_or_default();
@@ -140,11 +153,15 @@ impl Store {
             };
             let chapter = if let ChapterLocator::Inline(text) = &at {
                 // 唯一的例外：正文真的在库里（`from_content` 那一档、手改过的库）。
+                // 正文在手，字数由 `inline` 自己算 —— 库里那一列这时是多余的。
                 Chapter::inline(title, text.clone()).with_spine_href(spine_href)
             } else {
                 Chapter {
                     title,
                     spine_href,
+                    // 索引那一趟落的字数原样带回来：正文不在手上时它是**唯一**
+                    // 能算出全局字符进度的东西（见 `plans/Locator.md` 第二节）。
+                    char_len,
                     text: ChapterText::At(at),
                 }
             };

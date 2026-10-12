@@ -83,6 +83,11 @@ fn survey(path: &Path) -> Result<String, String> {
         return Err(format!("{}：定版式文档，没有 CSS 落差可量", path.display()));
     };
     let mut out = String::new();
+    // 字数可能算不出来（正文不在手上、或 provider 那一趟没读）—— 写成「未算」
+    // 而不是 0，免得报表读者以为这本书是空的。
+    let chars = flow
+        .char_len()
+        .map_or_else(|| "未算".to_string(), |n| n.to_string());
     out.push_str(&format!(
         "## {} —— {}（{} 章、{} 字）\n\n",
         path.display(),
@@ -92,7 +97,7 @@ fn survey(path: &Path) -> Result<String, String> {
             &meta.title
         },
         flow.chapters.len(),
-        flow.char_len(),
+        chars,
     ));
     if flow.css.trim().is_empty() {
         out.push_str("**这本书没有作者样式表**，落差为零不是因为接住了，是因为没东西可接。\n");

@@ -124,6 +124,12 @@ pub struct Chapter {
     /// 之前 `source` 空串 + `FlowDoc::chapter_locators[i]` 两个东西拼出来「正文在不在
     /// 手上」，还得靠约定保证等长；现在它是类型里的一个字段。
     pub text: ChapterText,
+    /// **规范化可见字数**，`index()` 那一趟算出来、落进 `chapters.char_len`。
+    ///
+    /// `None` = 这一趟没算过（旧库读回来的行、或 provider 只读了清单）。
+    /// 与 `Some(0)` 分开：前者是「不知道」，后者是「这一章真的是空的」，
+    /// 合起来会让进度条把没算过的章当成空章（见 [`Chapter::char_len`]）。
+    pub char_len: Option<usize>,
 }
 
 /// 一章的正文在哪儿。
@@ -135,13 +141,37 @@ pub enum ChapterText {
     At(ChapterLocator),
 }
 
+impl ChapterText {
+    /// 正文在手上时给那一份；在容器里时 `None`。
+    pub fn inline(&self) -> Option<&str> {
+        match self {
+            Self::Inline(text) => Some(text),
+            Self::At(_) => None,
+        }
+    }
+}
+
 impl Chapter {
     /// 正文就在手上的那一章。
     pub fn inline(title: impl Into<String>, source: impl Into<String>) -> Self {
+        let source = source.into();
+        // 正文在手就顺手把字数定下来：所有调用方要的都是同一个数，而
+        // `visible_chars` 要解析一遍 DOM —— 在这里算一次，比让每个读的地方
+        // 各算一次便宜，也让 `char_len` 一建出来就是确定的。
+        //
+        // **空串不算**，它是「正文不在手上」在这套类型里的哨兵：`locator_for`
+        // 在「没有可寻址位置」那一档写的正是 `Inline(chapter.source())`，而正文不在
+        // 手上时 `source()` 就是空串；`load_flow_in` 对认不出来的位置也回落到
+        // `ChapterLocator::default()`（同样是 `Inline("")`）。拿它去数会得到
+        // `Some(0)`，于是「库里没记字数」被读成「这一章是空的」—— 分母偏小、
+        // 百分比偏大，而且没有任何报错。真正的空章走 `Some(0)`，
+        // 它的标记（`<p></p>` 之类）不会退化成空串。
+        let char_len = (!source.is_empty()).then(|| visible_chars(&source)).flatten();
         Self {
             title: title.into(),
             spine_href: String::new(),
-            text: ChapterText::Inline(source.into()),
+            text: ChapterText::Inline(source),
+            char_len,
         }
     }
 
@@ -152,6 +182,8 @@ impl Chapter {
             title: title.into(),
             spine_href: href.clone(),
             text: ChapterText::At(ChapterLocator::Entry(href)),
+            // 正文不在手上，字数要等 `index()` 那一趟读过才算得出。
+            char_len: None,
         }
     }
 
@@ -161,12 +193,19 @@ impl Chapter {
             title: title.into(),
             spine_href: String::new(),
             text: ChapterText::At(ChapterLocator::Section(index)),
+            char_len: None,
         }
     }
 
     /// 补上条目名（相对资源的基准目录）。
     pub fn with_spine_href(mut self, href: impl Into<String>) -> Self {
         self.spine_href = href.into();
+        self
+    }
+
+    /// 补上规范化可见字数（`index()` 那一趟算出来的那一格）。
+    pub fn with_char_len(mut self, chars: Option<usize>) -> Self {
+        self.char_len = chars;
         self
     }
 
@@ -186,11 +225,52 @@ impl Chapter {
         }
     }
 
-    /// 正文的字符数。只是**书目层的权重**（SQLite 那一列），不是可见文本长度 ——
-    /// XHTML 的标记也算在内。正文不在手上时是 0（那要读一遍才算得出）。
-    pub fn char_len(&self) -> usize {
-        self.source().chars().count()
+    /// 正文在**手上**时的规范化可见字数；不在手上、或这一趟没算过，都是 `None`。
+    ///
+    /// 这一格是 [`visible_chars`] 的结果，随 `index()` 一起产出并落进
+    /// `chapters.char_len`。它与位置坐标系**同一个口径**：`TextMap::chars()`
+    /// 数的就是 `Locator.offset` 的推进轴，所以「前面各章字数之和 + 章内偏移」
+    /// 是一个可以相减的全局字符进度（见 `plans/Locator.md` 第二节）。
+    ///
+    /// `None` 与 `Some(0)` 是两件事：前者是「还没算」（旧库、或这一趟只读了清单），
+    /// 后者是「这一章真的是空的」。合成一个就会让进度条把没算过的章当成空章。
+    ///
+    /// 空串那一支**不算**：`ChapterLocator::default()` 是 `Inline("")`，而
+    /// `load_flow_in` 对认不出来的位置正是回落到它（「位置不明」那一档）。
+    /// 拿它去数会得到 0，于是「库没记字数」被读成「这一章是空的」——
+    /// 分母偏小、百分比偏大，而且没有任何报错。真正的空章走 `Some(0)`
+    /// （`Chapter::inline` 建的时候就把它数下来了）。
+    pub fn char_len(&self) -> Option<usize> {
+        self.char_len.or_else(|| {
+            self.text
+                .inline()
+                .filter(|text| !text.is_empty())
+                .and_then(visible_chars)
+        })
     }
+}
+
+/// 一段引擎就绪的 XHTML 里**可见文本**的字符数 —— 与 [`crate::anchor::TextMap::chars`]
+/// 同一个口径（空白折叠、行内图占一个字符位）。
+///
+/// 存在的理由：`chapters.char_len` 要的是「读者能数出来的字数」，而
+/// `source().chars().count()` 数的是**标记**——同一段正文标点多几个 `<span>`，
+/// 字数就变了。而进度百分比要跨设备显示同一个数、还要能前后相减，所以它必须
+/// 与 `Locator.offset` 走同一把尺。
+///
+/// 解析不了时回 `None`（坏 XHTML、空片段）：**绝不用字节数估**。字节↔字符的比例
+/// 在各章之间不均匀（中英混排、标签密度），估出来的百分比会不单调 ——
+/// 读者往下读而进度条后退，是产品上不可接受的（`plans/导入管线.md` §八 第 3 条）。
+pub fn visible_chars(xhtml: &str) -> Option<usize> {
+    let dom = crate::dom::Dom::parse(xhtml.as_bytes());
+    // 没有 `<body>` 的片段（FB2 / Markdown 的包装产物都带，但裸片段不带）
+    // 就整棵当正文根 —— `TextMap::build` 自己会跳过 `<script>` / `<style>`。
+    let body = dom
+        .elements()
+        .find(|(id, _)| dom.tag_name(*id) == Some("body"))
+        .map_or(dom.document, |(id, _)| id);
+    let map = crate::anchor::TextMap::build(&dom, body);
+    Some(map.chars())
 }
 
 /// 一章正文在容器里的位置 —— 库里只存这个，不存正文。

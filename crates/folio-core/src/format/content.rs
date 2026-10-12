@@ -30,8 +30,34 @@ pub struct FlowDoc {
 }
 
 impl FlowDoc {
-    pub fn char_len(&self) -> usize {
-        self.chapters.iter().map(Chapter::char_len).sum()
+    /// 全书**规范化可见字数** —— 全局字符进度的分母（`plans/Locator.md` 第二节）。
+    ///
+    /// 只要有一章的字数不知道，整本就回 `None`：**不把未知折成 0**。
+    /// 折了会让分母偏小、百分比偏大，而症状是「读到一半进度条已经满了」——
+    /// 比不显示百分比更糟，因为它是个安静的错数。
+    ///
+    /// 老库升上来的行（v14 之前）与只读了清单的 provider 都会走到 `None`；
+    /// 前者的处置是让下一次 `reindex` 把它填上。
+    pub fn char_len(&self) -> Option<usize> {
+        let mut total = 0usize;
+        for chapter in &self.chapters {
+            total = total.checked_add(chapter.char_len()?)?;
+        }
+        Some(total)
+    }
+
+    /// 已知道字数的那几章之和 + 还有几章不知道 —— 进度条在「部分章没算过」时
+    /// 用的降级读数。第二项非零就说明这个百分比是**下界**。
+    pub fn known_char_len(&self) -> (usize, usize) {
+        let mut total = 0usize;
+        let mut unknown = 0usize;
+        for chapter in &self.chapters {
+            match chapter.char_len() {
+                Some(n) => total = total.saturating_add(n),
+                None => unknown += 1,
+            }
+        }
+        (total, unknown)
     }
 }
 

@@ -226,6 +226,8 @@ mod tests {
             .map(|(ix, ch)| crate::format::Chapter {
                 title: ch.title.clone(),
                 spine_href: ch.spine_href.clone(),
+                // 字数不跟着位置走掉：它是索引那一趟的产物，落库之后仍要读得回来。
+                char_len: ch.char_len(),
                 text: crate::format::ChapterText::At(crate::format::locator_for(format, ch, ix)),
             })
             .collect();
