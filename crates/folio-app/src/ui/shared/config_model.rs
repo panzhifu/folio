@@ -5,6 +5,11 @@
 //! 而阅读器需要在改字号后立刻重排 —— 因此 Global 里存的不是配置本身，
 //! 而是配置的实体句柄：视图对它 `observe`，写入方 `update` 它，两边都通。
 //!
+//! 读写的形状是**持 `Arc<Config>`，变更换整个 Arc**（`plans/基础设施.md` §2.3）：
+//! `edit` 在旧值上克隆、改、规整，再整体换掉，**绝不原地改**。这样持旧 Arc 的一方
+//! （比如一个正在跑的排版作业）继续看到旧值，一帧之内不会撕裂；需要在一帧里一致地
+//! 读多处时，抓一次 [`ConfigHolder::snapshot`] 就行。
+//!
 //! 还有一件事在这里做而不是在别处：界面语言对 `rust_i18n` 而言是**进程全局**的，
 //! 而它的真源是 `config.language.locale`。所有写入都过 [`ConfigHolder::edit`]，
 //! 所以「改完配置顺手把全局 locale 同步一次」只有一处需要负责。
@@ -13,14 +18,22 @@
 //! 于是 `save` 直接跳过 —— 测试绝不会写到用户的真实配置目录。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use folio_core::{Appearance, Config, Language, Library, Reader};
+use folio_core::{Appearance, Config, Env, Language, Library, Provenance, Reader, Resolved};
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
 use super::error::{Context as _, report};
 
 pub struct ConfigState {
-    pub config: Config,
+    /// **用户层**：内置默认 ⊕ 用户文件。**落盘写的是它**（§2.1 写回只写用户层）。
+    pub user: Config,
+    /// **生效值**：用户层 ⊕ 环境变量。视图读它。**换 Arc，不改内容**（§2.3）。
+    pub config: Arc<Config>,
+    /// 每一项由哪一层定下来（诊断用，§2.1）。
+    pub provenance: Provenance,
+    /// 读盘时那份环境变量覆盖层：编辑后要重新叠一次才能算出新的生效值。
+    pub env: Env,
     /// 保存目标；`None` 表示不落盘。
     pub path: Option<PathBuf>,
 }
@@ -36,12 +49,42 @@ pub struct ConfigPath(pub Option<PathBuf>);
 impl Global for ConfigPath {}
 
 impl ConfigHolder {
+    /// 装配置（凭一份「生效值」，不带环境覆盖）—— 测试与旧调用方用：用户层 == 生效值。
     pub fn install(config: Config, cx: &mut App) -> Entity<ConfigState> {
-        let path = cx.try_global::<ConfigPath>().and_then(|p| p.0.clone());
         let config = config.normalized();
+        Self::install_inner(
+            Resolved {
+                user: config.clone(),
+                effective: config,
+                provenance: Provenance::default(),
+            },
+            Env::default(),
+            cx,
+        )
+    }
+
+    /// 装一份**读过盘**的配置：保留用户层与 provenance（§2.1）。入口用它 —— 用户层是
+    /// 落盘内容，provenance 是诊断内容，都得从读盘那一刻一起交进来。
+    pub fn install_resolved(resolved: Resolved, cx: &mut App) -> Entity<ConfigState> {
+        Self::install_inner(resolved, Env::from_env(), cx)
+    }
+
+    fn install_inner(resolved: Resolved, env: Env, cx: &mut App) -> Entity<ConfigState> {
+        let path = cx.try_global::<ConfigPath>().and_then(|p| p.0.clone());
+        let Resolved {
+            user,
+            effective,
+            provenance,
+        } = resolved;
         // 启动时同步一次：框架组件（下拉框、搜索框）读的是同一个全局 locale。
-        config.language.locale.apply();
-        let entity = cx.new(|_| ConfigState { config, path });
+        effective.language.locale.apply();
+        let entity = cx.new(|_| ConfigState {
+            user,
+            config: Arc::new(effective),
+            provenance,
+            env,
+            path,
+        });
         cx.set_global(ConfigHolder(entity.clone()));
         entity
     }
@@ -56,24 +99,35 @@ impl ConfigHolder {
         cx.global::<ConfigHolder>().0.clone()
     }
 
+    /// 当前这份配置的句柄。需要在一帧里**一致地**读多处时抓一次这个 —— 换 Arc 不会改到
+    /// 手里这份（§2.3）。只要一小节就用下面那几个 `reader` / `appearance` / …。
+    pub fn snapshot(cx: &App) -> Arc<Config> {
+        Arc::clone(&Self::entity(cx).read(cx).config)
+    }
+
     pub fn reader(cx: &App) -> Reader {
-        Self::entity(cx).read(cx).config.reader.clone()
+        Self::snapshot(cx).reader.clone()
     }
 
     pub fn appearance(cx: &App) -> Appearance {
-        Self::entity(cx).read(cx).config.appearance.clone()
+        Self::snapshot(cx).appearance.clone()
     }
 
     pub fn language(cx: &App) -> Language {
-        Self::entity(cx).read(cx).config.language.clone()
+        Self::snapshot(cx).language.clone()
     }
 
     /// 书库位置那一节。导入前要先问它确认过没有（见 `library::target_dir`）。
     pub fn library(cx: &App) -> Library {
-        Self::entity(cx).read(cx).config.library.clone()
+        Self::snapshot(cx).library.clone()
     }
 
-    /// 唯一的写入口：写入即规整，并同步全局 locale。
+    /// 每一项的配置来自哪一层（§2.1）。诊断 dump 用。
+    pub fn provenance(cx: &App) -> Provenance {
+        Self::entity(cx).read(cx).provenance.clone()
+    }
+
+    /// 唯一的写入口：改的是**用户层**（§2.1），改完重算生效值，并同步全局 locale。
     ///
     /// 规整是因为面板里填进 9000 号字会把排版算成零高或无限宽，而认不出的浅深选择
     /// 该落回「跟随系统」；语言那一步是因为 `rust_i18n` 只认全局值，不认我们这份配置。
@@ -83,9 +137,17 @@ impl ConfigHolder {
     /// 改得动、读得回，却永远不落盘、界面也不重画（这一句就是为修掉那个问题而加的）。
     pub fn edit(cx: &mut App, f: impl FnOnce(&mut Config)) {
         Self::entity(cx).update(cx, |state, cx| {
-            f(&mut state.config);
-            state.config = state.config.clone().normalized();
-            state.config.language.locale.apply();
+            // 改**用户层**：生效值是「用户层 ⊕ 环境变量」算出来的，不能反过来改它 ——
+            // 那样一次编辑就会把环境变量的值固化进落盘内容（§2.1 第 3 条要防的正是这个）。
+            let mut user = state.user.clone();
+            f(&mut user);
+            let user = user.normalized();
+            user.language.locale.apply();
+            state.user = user;
+            // 重算生效值，换整个 Arc（§2.3）：手上有旧 Arc 的一方不受影响。
+            let mut effective = state.user.clone();
+            state.env.apply(&mut effective);
+            state.config = Arc::new(effective);
             cx.notify();
         });
     }
@@ -111,14 +173,16 @@ impl ConfigHolder {
     /// 这里是「改了但没存住」唯一会露出来的地方：屏幕上当场就生效了，重启才发现回到旧值，
     /// 所以链上必须留得住是哪一步（建目录 / 写临时文件 / rename）失败的。
     pub fn save(cx: &App) {
-        let (config, path) = {
+        // 落盘写的是**用户层**，不是生效值（§2.1 第 3 条）：把生效值整体烤回文件，等于把
+        // 环境变量的值固化成读者的选择，之后默认值的升级就对他永远失效了。
+        let (user, path) = {
             let state = Self::entity(cx).read(cx);
-            (state.config.clone(), state.path.clone())
+            (state.user.clone(), state.path.clone())
         };
         let Some(path) = path else {
             return;
         };
-        if let Err(err) = config
+        if let Err(err) = user
             .save_to(&path)
             .with_context(|| format!("保存到 {}", path.display()))
         {

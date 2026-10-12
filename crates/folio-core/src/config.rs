@@ -14,6 +14,7 @@
 //! 反过来说，一切需要「按书存」的东西（进度、标注、缓存的章节）都在 `store` 里，
 //! 两边不重叠。
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,174 @@ use serde::{Deserialize, Serialize};
 use crate::error::IoResultExt as _;
 use crate::i18n::Locale;
 use crate::paths;
+
+/// 配置文件的**格式版本**。加字段、改某个键的含义时 +1。
+///
+/// 为什么要有它（`plans/基础设施.md` §2.6）：格式会演进，而读者会跨版本回退 —— 降级回
+/// 旧版程序读一份新版写的文件，得能认出「这份比我新」，而不是把认不出的字段当没有就完事。
+/// 它只描述**文件格式**，与环境变量覆盖无关。
+pub const CONFIG_VERSION: u32 = 1;
+
+// ── §2.1 三层来源：内置默认 < 用户配置文件 < 环境变量 ────────────────────────────
+
+/// 配置的来源层，优先级从低到高。合并粒度是**字段级**（§2.1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// 内置默认（代码里的 `Default`）。
+    Default,
+    /// 用户的 `config.json`。
+    File,
+    /// 环境变量覆盖。
+    Env,
+}
+
+impl Layer {
+    /// 诊断 dump 里显示的名字。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::File => "file",
+            Self::Env => "env",
+        }
+    }
+}
+
+/// 「每一项由哪一层定下来」的旁路表（§2.1 的 provenance）。
+///
+/// 形状是旁路表而不是给每个字段挂标签（§六待决 #9 推荐的那一种）：不侵入 `Config` 的
+/// 结构，键是点分路径（`logging.level`、`reader.font_size`…）。这是「我明明改了配置怎么
+/// 没生效」这类事故唯一的解药 —— 诊断入口能打印「生效值 + 来源层」。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Provenance {
+    layers: BTreeMap<String, Layer>,
+}
+
+impl Provenance {
+    /// 这一项由哪一层定下来；没记到的按 [`Layer::Default`]（内置默认）。
+    pub fn layer_of(&self, key: &str) -> Layer {
+        self.layers.get(key).copied().unwrap_or(Layer::Default)
+    }
+
+    /// 遍历（按点分键排序）。
+    pub fn entries(&self) -> impl Iterator<Item = (&str, Layer)> {
+        self.layers
+            .iter()
+            .map(|(key, layer)| (key.as_str(), *layer))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    fn mark(&mut self, key: impl Into<String>, layer: Layer) {
+        self.layers.insert(key.into(), layer);
+    }
+}
+
+/// 忽略配置文件的应急开关（§2.1）：配置读坏了起不来时，用它空跑一次默认值。
+pub const IGNORE_CONFIG_ENV: &str = "FOLIO_IGNORE_CONFIG";
+
+/// 日志总开关（§2.1）：压过配置里的落盘与 stderr。
+pub const LOG_OFF_ENV: &str = "FOLIO_LOG_OFF";
+
+/// 环境变量覆盖层。数量按 §2.1 压到最少：数据根在 [`crate::paths`] 里（那是「覆盖根」，
+/// 不是配置的一项）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Env {
+    /// [`IGNORE_CONFIG_ENV`]：跳过用户配置文件。
+    pub ignore_file: bool,
+    /// [`LOG_OFF_ENV`]：日志总开关。
+    pub log_off: bool,
+    /// `FOLIO_LOG`（[`crate::logging::LEVEL_ENV`]）的原文，没设就是 `None`。
+    ///
+    /// 它照 `RUST_LOG` 的写法解释，**还能连依赖库一起开**，落不进 `logging.level` 那一格
+    /// （那一格只管 folio 自己），所以这里只留原文、供 provenance 记「它压着哪几格」；
+    /// 真正生效的地方是 [`crate::logging`]。
+    pub log: Option<String>,
+}
+
+impl Env {
+    /// 从进程环境读一份。
+    pub fn from_env() -> Self {
+        Self {
+            ignore_file: env_flag(std::env::var_os(IGNORE_CONFIG_ENV)),
+            log_off: env_flag(std::env::var_os(LOG_OFF_ENV)),
+            log: std::env::var(crate::logging::LEVEL_ENV)
+                .ok()
+                .filter(|spec| !spec.trim().is_empty()),
+        }
+    }
+
+    /// 把这一层盖到配置上（就地改）。**字段级**：只碰它负责的那几格。
+    ///
+    /// `FOLIO_LOG` 不在这里盖值：它按 `RUST_LOG` 写法解释、还能连依赖库一起开，落不进
+    /// `logging.level`（只管 folio 自己）那一格 —— 它真正生效的地方是 [`crate::logging`]。
+    /// 这里只在 provenance 上记「它压着 `logging.level` / `logging.targets`」。
+    pub fn apply(&self, config: &mut Config) {
+        if self.log_off {
+            config.logging.file = false;
+            config.logging.stderr = false;
+        }
+    }
+
+    /// 这一层改了哪些键（给 provenance 用）。
+    fn touched_keys(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.log_off {
+            keys.push("logging.file");
+            keys.push("logging.stderr");
+        }
+        if self.log.is_some() {
+            keys.push("logging.level");
+            keys.push("logging.targets");
+        }
+        keys
+    }
+}
+
+/// 非空且不为 `0` 即为开（与 [`crate::diagnostics`] 那条开关同口径）。
+pub(crate) fn env_flag(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|raw| {
+        let text = raw.to_string_lossy();
+        let text = text.trim();
+        !text.is_empty() && text != "0"
+    })
+}
+
+/// 一次读盘的结果：用户层、生效值、以及每一项的来源。
+///
+/// **写回只写 [`Resolved::user`]**（§2.1 第 3 条）：把生效值整体烤回文件，等于把环境变量
+/// 的值和默认值固化成用户的选择，之后默认值的升级就对他永远失效了。
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    /// 用户层：内置默认 ⊕ 用户文件（没叠环境变量）。**落盘写的是它。**
+    pub user: Config,
+    /// 生效值：用户层再叠环境变量。界面读的是它。
+    pub effective: Config,
+    /// 每一项由哪一层定下来。
+    pub provenance: Provenance,
+}
+
+/// 把 JSON 摊成点分键，用来判「文件里到底写了哪几项」（provenance 的 File 一档）。
+fn flatten_keys(value: &serde_json::Value, prefix: &str, out: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_keys(child, &path, out);
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.insert(prefix.to_string());
+            }
+        }
+    }
+}
 
 /// 浅深怎么选。`System` 跟着操作系统走，也是默认值。
 ///
@@ -69,6 +238,62 @@ impl<'de> Deserialize<'de> for Mode {
     }
 }
 
+/// 目录每一行的松紧。
+///
+/// 两档的行高是在真机上量出来的（紧凑 38dp / 宽松 46dp，只有后者过了 Android 那颗
+/// 48dp 的触控下限），所以这里是**枚举而不是一个行高数**：读者选的是「挤一点还是
+/// 松一点」，不该让他去调一个自己看不出意义的浮点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TocDensity {
+    /// 一屏多看十几条，代价是指尖要按得更准。
+    Compact,
+    /// 拇指能稳定命中的那一档。默认它。
+    #[default]
+    Comfortable,
+}
+
+impl TocDensity {
+    /// 一行的行高（逻辑像素）。
+    pub fn row_height(self) -> f32 {
+        match self {
+            Self::Compact => 38.0,
+            Self::Comfortable => 46.0,
+        }
+    }
+
+    /// 配置文件与设置界面用的键名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Comfortable => "comfortable",
+        }
+    }
+
+    /// 认不出的值回落 `Comfortable`：手改坏一个键不该让整节偏好退回默认。
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "compact" => Self::Compact,
+            _ => Self::Comfortable,
+        }
+    }
+}
+
+/// 自己实现序列化，理由与 [`Mode`] 那条一样：derive 碰到认不出的字符串会报错，
+/// 而报错的代价是**整节** `Reader` 退回默认（见 [`salvage`]）—— 字号、行距、字体家族
+/// 会跟着一起没，而那只是目录的一档写坏了。
+impl Serialize for TocDensity {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TocDensity {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(Self::parse(&text))
+    }
+}
+
 /// 界面外观：浅深怎么选，以及解析到浅、深时各用哪套主题。
 ///
 /// 主题**名字**存在这里，主题**本身**不存：配色来自 UI 框架的主题集和用户
@@ -100,6 +325,11 @@ impl Appearance {
 
 /// 排版输入。全部是纯数据、不含任何 UI 类型，因此同一份配置既能在桌面端用，
 /// 也能给移动端宿主用。
+///
+/// 它是排版失效键的一格（`layout::LayoutKey::prefs_hash`），那里按**序列化后的整份**
+/// 取哈希而不是手挑字段 —— 手挑会漏，漏的那个字段改了不触发重排，而屏幕上看不出来。
+/// 所以这里不 derive `Hash`：derive 出来的实现要 `f32: Hash`，只能把浮点改成按位哈希，
+/// 那就又回到一张需要人肉维护的清单。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Reader {
@@ -119,6 +349,15 @@ pub struct Reader {
     pub justify: bool,
     pub font_family: String,
     pub mono_font_family: String,
+    /// 目录那一屏的行高档位。只影响目录，不影响正文 —— 正文的松紧是 `line_height`。
+    pub toc_density: TocDensity,
+    /// 目录标题最多排几行，超了截成省略号。
+    ///
+    /// 默认 2 而不是 1：书名里「第 3.2 节 论……」这类长标题在手机上会占两行，
+    /// 只给一行的话目录会退化成一片省略号，读者没法靠三个点认路。
+    pub toc_max_title_lines: u8,
+    /// 到过的章在目录里画成浅色。关掉它，目录就只剩「当前在哪」一个信号。
+    pub toc_dim_read: bool,
 }
 
 impl Default for Reader {
@@ -134,6 +373,9 @@ impl Default for Reader {
             justify: true,
             font_family: "LXGW WenKai".into(),
             mono_font_family: "monospace".into(),
+            toc_density: TocDensity::default(),
+            toc_max_title_lines: 2,
+            toc_dim_read: true,
         }
     }
 }
@@ -152,6 +394,8 @@ impl Reader {
         if self.font_family.trim().is_empty() {
             self.font_family = Reader::default().font_family;
         }
+        // 0 行是「什么都不画」，4 行会让一条目录占掉小半屏 —— 两头的错法都收进这一格。
+        self.toc_max_title_lines = self.toc_max_title_lines.clamp(1, 3);
         self
     }
 }
@@ -291,14 +535,32 @@ impl Logging {
 /// 一份完整的应用配置。
 ///
 /// 只 `PartialEq`：`Reader` 里是浮点数，`Eq` 在 f32 上本来就不成立。
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// 这份配置的格式版本（[`CONFIG_VERSION`]）。老文件里没有这一格 → serde 缺省成 `0`，
+    /// 于是 `load` 能认出「这是没版本戳的老文件」并迁移（见 [`Config::migrated`]）。
+    pub version: u32,
     pub reader: Reader,
     pub appearance: Appearance,
     pub library: Library,
     pub language: Language,
     pub logging: Logging,
+}
+
+impl Default for Config {
+    /// 手写而不是 derive：`version` 的默认是 [`CONFIG_VERSION`]，不是 `0` —— derive 会把
+    /// 整数给 0，那样「新装的机器」（读不到文件，用默认）与「老文件缺版本戳」就分不开了。
+    fn default() -> Self {
+        Self {
+            version: CONFIG_VERSION,
+            reader: Reader::default(),
+            appearance: Appearance::default(),
+            library: Library::default(),
+            language: Language::default(),
+            logging: Logging::default(),
+        }
+    }
 }
 
 impl Config {
@@ -326,24 +588,106 @@ impl Config {
         self
     }
 
-    /// 读默认位置的配置。文件不存在或内容坏了都退回默认值 —— 配置绝不该让程序起不来。
+    /// 读默认位置的**生效值**。文件不存在或内容坏了都退回默认值 —— 配置绝不该让程序起不来。
     pub fn load() -> Config {
-        Self::load_from(&paths::config_path())
+        Self::load_resolved().effective
     }
 
+    /// 读默认位置，并保留用户层与 provenance（§2.1）。入口用它，好知道「落盘该写哪一层」。
+    pub fn load_resolved() -> Resolved {
+        Self::resolve(&paths::config_path(), &Env::from_env())
+    }
+
+    /// 读一次配置：内置默认 ← 用户文件 ← 环境变量，**字段级**合并，并记下每一项的来源。
+    ///
+    /// 只读一次磁盘（§2.3）；环境变量是叠在已读进来的文件之上的，运行期不再重读。
+    pub fn resolve(path: &Path, env: &Env) -> Resolved {
+        // 文件层：`Env::ignore_file` 时整层跳过（应急开关）。
+        let file_value = if env.ignore_file {
+            tracing::warn!("config: {IGNORE_CONFIG_ENV} 开着，跳过 {}", path.display());
+            None
+        } else {
+            Self::read_value(path)
+        };
+
+        // 用户层 = 内置默认 ⊕ 文件。
+        let user = match &file_value {
+            Some(value) => {
+                // 手改过 / 旧版本 / 别的机器同步来的值都不可信，读进来先规整一遍。
+                if let Ok(config) = serde_json::from_value::<Config>(value.clone()) {
+                    warn_missing_sections(value);
+                    config.migrated().normalized()
+                } else {
+                    tracing::warn!("config: {} 整份解不开，按节抢救", path.display());
+                    salvage(value).migrated().normalized()
+                }
+            }
+            None => Config::default(),
+        };
+
+        // provenance：文件里出现过的键标成 File，其余留 Default。
+        let mut provenance = Provenance::default();
+        if let Some(value) = &file_value {
+            let mut keys = BTreeSet::new();
+            flatten_keys(value, "", &mut keys);
+            for key in keys {
+                provenance.mark(key, Layer::File);
+            }
+        }
+
+        // 生效值 = 用户层 ⊕ 环境变量；被环境盖到的键标成 Env。
+        let mut effective = user.clone();
+        env.apply(&mut effective);
+        for key in env.touched_keys() {
+            provenance.mark(key, Layer::Env);
+        }
+
+        Resolved {
+            user,
+            effective,
+            provenance,
+        }
+    }
+
+    /// 按已有签名读一份**生效值**（不带环境变量覆盖）—— 测试与旧调用方用。
     pub fn load_from(path: &Path) -> Config {
+        Self::resolve(path, &Env::default()).effective
+    }
+
+    /// 读文件并解成 `Value`；读不到 / 不是合法 JSON 都给 `None`（各留一句日志）。
+    fn read_value(path: &Path) -> Option<serde_json::Value> {
         let Ok(text) = std::fs::read_to_string(path) else {
             // 「没有配置文件」与「有但读不进去」是两件事，日志里要分得开：
             // 前者是新机器，后者是权限或路径出了问题。
             tracing::debug!("config: 没有 {}，用默认值", path.display());
-            return Config::default();
+            return None;
         };
-        // 手改过 / 旧版本 / 别的机器同步来的值都不可信，读进来先规整一遍。
-        if let Ok(config) = serde_json::from_str::<Config>(&text) {
-            return config.normalized();
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                tracing::warn!("config: {} 不是合法 JSON，整份退回默认值", path.display());
+                None
+            }
         }
-        tracing::warn!("config: {} 整份解不开，按节抢救", path.display());
-        salvage(&text).normalized()
+    }
+
+    /// 把版本戳对齐到本程序：老文件（没有 `version`，serde 缺省成 `0`）迁到当前版本；
+    /// 比本程序**新**的按认得的部分读、并说一声。**读到旧版本 = 迁移，不是崩溃，
+    /// 也不是静默当新版用**（§2.6 / §5.1）。
+    fn migrated(mut self) -> Self {
+        if self.version == CONFIG_VERSION {
+            return self;
+        }
+        if self.version > CONFIG_VERSION {
+            tracing::warn!(
+                "config: 文件版本 v{} 比本程序（v{CONFIG_VERSION}）新，多出来的字段已忽略",
+                self.version
+            );
+        } else {
+            tracing::info!("config: 版本 v{} → v{CONFIG_VERSION}", self.version);
+        }
+        self.version = CONFIG_VERSION;
+        self
     }
 
     /// 写默认位置的配置。
@@ -373,31 +717,47 @@ impl Config {
 /// 界面语言一起消失，而且完全不知道原因。分节解析后，坏的那一节归零，其余各节照旧。
 ///
 /// 只处理「JSON 本身合法、某一节的内容不合结构」这一类；连 JSON 都解析不了
-/// （截断、少括号）时没有可逐节尝试的载体，仍然整份退回默认值。
-fn salvage(text: &str) -> Config {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        // 连 JSON 都不合：没有可逐节尝试的载体，整份退回默认值。这一句是唯一能区分
-        // 「读者手改坏了一节」与「这文件被写坏了一半」的信号。
-        tracing::warn!("config: 不是合法 JSON，整份退回默认值");
-        return Config::default();
-    };
+/// （截断、少括号）时没有可逐节尝试的载体，仍然整份退回默认值（那一步在 [`Config::load_from`]）。
+fn salvage(value: &serde_json::Value) -> Config {
     let mut config = Config::default();
-    if let Some(reader) = section(&value, "reader") {
+    // 版本戳能读出来就先留着，交给 `migrated` 对齐 —— 抢救的是坏掉的那一节，
+    // 不该顺手把文件声明的版本也抹成默认。
+    if let Some(version) = value.get("version").and_then(serde_json::Value::as_u64) {
+        config.version = version as u32;
+    }
+    if let Some(reader) = section(value, "reader") {
         config.reader = reader;
     }
-    if let Some(appearance) = section(&value, "appearance") {
+    if let Some(appearance) = section(value, "appearance") {
         config.appearance = appearance;
     }
-    if let Some(library) = section(&value, "library") {
+    if let Some(library) = section(value, "library") {
         config.library = library;
     }
-    if let Some(language) = section(&value, "language") {
+    if let Some(language) = section(value, "language") {
         config.language = language;
     }
-    if let Some(logging) = section(&value, "logging") {
+    if let Some(logging) = section(value, "logging") {
         config.logging = logging;
     }
     config
+}
+
+/// 有文件、但缺了某些节：各节照常用默认值，但**留一条 WARN**（§2.6）——静默会让
+/// 「我的设置没保存住」变成无法诊断的问题。只在文件已经存在时才会走到这儿，
+/// 新机器（读不到文件）不会因此报一句。
+fn warn_missing_sections(value: &serde_json::Value) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    const SECTIONS: [&str; 5] = ["reader", "appearance", "library", "language", "logging"];
+    let missing: Vec<&str> = SECTIONS
+        .into_iter()
+        .filter(|key| !object.contains_key(*key))
+        .collect();
+    if !missing.is_empty() {
+        tracing::warn!("config: 缺这些节，各用默认值：{missing:?}");
+    }
 }
 
 /// 取一节。缺这一节、或者这一节自己解不出来，都返回 `None` 让调用方保留默认值 ——
@@ -416,7 +776,9 @@ mod tests {
     //! 这些测试盯的是「用户手改这个 JSON 之后程序会怎样」，所以全部从 JSON 文本出发，
     //! 不去直接改结构体 —— 结构体改不出坏输入。
 
-    use crate::config::{Config, WatchDir};
+    use std::path::Path;
+
+    use crate::config::{Config, Env, Layer, WatchDir};
     use crate::i18n::Locale;
     use crate::{Appearance, Language, Library, Mode, Reader};
     use serde_json::json;
@@ -426,6 +788,118 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(&path, text).unwrap();
         Config::load_from(&path)
+    }
+
+    /// 老文件没有版本戳（serde 缺省成 0）：按当前版本读，字段照旧，版本对齐到当前。
+    /// §2.6：读到旧版本是**迁移**，不是崩溃。
+    #[test]
+    fn a_versionless_file_is_read_and_realigned_to_the_current_version() {
+        let got = load(r#"{"reader":{"font_size":21.0}}"#);
+        assert_eq!(got.reader.font_size, 21.0, "老文件的字段照旧读出来");
+        assert_eq!(got.version, crate::config::CONFIG_VERSION);
+    }
+
+    /// 比本程序**新**的文件：认得的部分照读、未知字段忽略，版本对齐到本程序
+    /// （不是崩溃，也不是静默当新版用 —— 有一条 WARN）。
+    #[test]
+    fn a_newer_file_version_is_read_not_rejected() {
+        let got = load(r#"{"version":999,"reader":{"font_size":21.0},"future_thing":true}"#);
+        assert_eq!(got.reader.font_size, 21.0, "认得的字段要留下");
+        assert_eq!(got.version, crate::config::CONFIG_VERSION);
+    }
+
+    /// 写出去再读回来，版本戳要保住（往返相等已覆盖，这里把「版本」单点钉一下）。
+    #[test]
+    fn the_version_is_written_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        Config::default().save_to(&path).unwrap();
+        assert_eq!(
+            Config::load_from(&path).version,
+            crate::config::CONFIG_VERSION
+        );
+    }
+
+    /// §2.1：文件里写了的项记成 `File`，没写的是 `Default`。
+    #[test]
+    fn provenance_tells_file_from_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"reader":{"font_size":21.0}}"#).unwrap();
+
+        let resolved = Config::resolve(&path, &Env::default());
+        assert_eq!(
+            resolved.provenance.layer_of("reader.font_size"),
+            Layer::File
+        );
+        assert_eq!(
+            resolved.provenance.layer_of("reader.line_height"),
+            Layer::Default,
+            "文件里没写的项是内置默认"
+        );
+        assert_eq!(resolved.effective.reader.font_size, 21.0);
+    }
+
+    /// §2.1：环境变量只盖它负责的键、并记成 `Env`；**用户层不动**——落盘写的是用户层，
+    /// 所以环境变量的值不会被烤回文件。
+    #[test]
+    fn env_overrides_do_not_leak_into_the_user_layer() {
+        let env = Env {
+            ignore_file: false,
+            log_off: true,
+            log: None,
+        };
+        let resolved = Config::resolve(Path::new("/nonexistent/folio.json"), &env);
+        assert!(!resolved.effective.logging.file, "环境变量把日志关掉了");
+        assert!(
+            resolved.user.logging.file,
+            "用户层没被环境变量改到（它才是落盘内容）"
+        );
+        assert_eq!(resolved.provenance.layer_of("logging.file"), Layer::Env);
+    }
+
+    /// §2.1：`FOLIO_LOG` 压着 logging 那两格 —— provenance 必须说实话。它不在 `resolve`
+    /// 里盖值（RUST_LOG 写法落不进 `logging.level`），但「这两格归环境变量说了算」要标出来，
+    /// 否则读者会以为 `logging.level` 的「生效值」就是最终生效的。
+    #[test]
+    fn the_log_env_marks_the_logging_keys_as_env() {
+        let env = Env {
+            ignore_file: false,
+            log_off: false,
+            log: Some("debug,wgpu_core=error".into()),
+        };
+        let resolved = Config::resolve(Path::new("/nonexistent/folio.json"), &env);
+        assert_eq!(resolved.provenance.layer_of("logging.level"), Layer::Env);
+        assert_eq!(resolved.provenance.layer_of("logging.targets"), Layer::Env);
+        assert_eq!(
+            resolved.provenance.layer_of("reader.font_size"),
+            Layer::Default,
+            "只管日志那两格，不碰别的"
+        );
+    }
+
+    /// §2.1：忽略配置文件的应急开关跳过文件层，全用默认 + 环境变量。
+    #[test]
+    fn the_emergency_switch_skips_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"reader":{"font_size":40.0}}"#).unwrap();
+
+        let env = Env {
+            ignore_file: true,
+            log_off: false,
+            log: None,
+        };
+        let resolved = Config::resolve(&path, &env);
+        assert_eq!(
+            resolved.effective.reader.font_size,
+            Reader::default().font_size,
+            "文件被跳过"
+        );
+        assert_eq!(
+            resolved.provenance.layer_of("reader.font_size"),
+            Layer::Default
+        );
     }
 
     #[test]
@@ -576,7 +1050,11 @@ mod tests {
         assert_eq!(got.reader.line_height, 1.0);
         assert_eq!(got.reader.indent_em, 0.0);
         assert_eq!(got.reader.margin_x, 400.0);
-        assert_eq!(got.language.locale, Locale::Ja, "夹取只管排版数值，不碰别的节");
+        assert_eq!(
+            got.language.locale,
+            Locale::Ja,
+            "夹取只管排版数值，不碰别的节"
+        );
     }
 
     /// 空白主题名被当成「没设」；0 的 max_measure 是合法的铺满，不能被夹成别的值。

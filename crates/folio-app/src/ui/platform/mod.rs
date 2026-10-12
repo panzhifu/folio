@@ -26,7 +26,7 @@ pub mod ohos;
 // ── 移动三端共用的启动 ────────────────────────────────────────────────────────
 
 #[cfg(mobile)]
-use folio_core::Config;
+use folio_core::Resolved;
 #[cfg(mobile)]
 use gpui_kit::component::Root;
 #[cfg(mobile)]
@@ -103,12 +103,16 @@ use crate::ui::shared::theme;
 #[cfg(mobile)]
 use crate::ui::shell::AppShell;
 
-/// 装框架、主题集、读偏好、装书库与平台服务，然后开窗。顺序与桌面的 `run_desktop` 一致。
+/// 装框架、主题集、书库与平台服务，然后开窗。顺序与桌面的 `run_desktop` 一致。
+///
+/// `config` 由**入口**读好、日志也由入口装好之后再传进来（Android 在 `android_main` 里、
+/// iOS / HarmonyOS 在各自的注册回调里，都走 `logging::init_from_config`）——`boot` 不再
+/// 自己读配置，配置因此**只读一次**（§2.3）。
 ///
 /// `gpui_kit::init` 必须最先：它把 `Theme` 与 `ThemeRegistry` 这两个 Global 建出来，
 /// 之后任何一次 `cx.theme()` 才有东西可读。主题集要在它之后装，理由同理。
 #[cfg(mobile)]
-pub(crate) fn boot(cx: &mut App) {
+pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
     gpui_kit::init(cx);
     // 移动三端的 `Application` 都是框架内部建的，构造链够不着，所以在这里换掉
     // gpui 默认那份「不发请求」的 client。
@@ -116,24 +120,33 @@ pub(crate) fn boot(cx: &mut App) {
     theme::register_user_themes(cx);
     host::install(cx);
 
-    let config = Config::load();
-    // 日志要等配置：`logging` 那一节就在里面。Android 已经在 `android_main` 里装过了
-    // （那里拿到应用目录就得马上装，否则启动那几行没有去处），`tracing` 只允许一个全局
-    // subscriber，所以这一句在 Android 上是「已经装了，忽略」，在 iOS / HarmonyOS 上
-    // 才是真正的那一次。
-    let _ = folio_core::logging::init(&config.logging, None);
-    config.language.locale.apply();
+    // 配置由入口读好、日志由入口装好再传进来（§5.6 配置→日志、§2.3 启动读一次）：
+    // 以前这里自己再 `Config::load()` 一次，于是 Android 上读了两遍。`boot` 只负责
+    // 界面与书库的接线，不再碰配置的来源与日志的装配。
+    resolved.effective.language.locale.apply();
     cx.set_global(ConfigPath(Some(folio_core::config_path())));
-    ConfigHolder::install(config, cx);
+    ConfigHolder::install_resolved(resolved, cx);
 
     // 书库挂成全局（与桌面同一份实现）。打不开时只记日志：界面照起，
     // 只是导入与进度落不了盘。`report` 落的是整条链 —— 「打不开」在设备上可能是
     // 目录不存在、权限、也可能是上一轮留下的坏库文件，只有链说得出是哪种。
+    let mut db_version = None;
     match folio_core::Store::open_default()
         .map_err(anyhow::Error::from)
         .context("装书库")
     {
         Ok(store) => {
+            // 启动现场（§4.2）：库是哪个 schema 版本。留一份给下面的诊断 dump（§5.8）。
+            db_version = match store.user_version() {
+                Ok(version) => {
+                    tracing::info!("库 schema v{version}");
+                    Some(version)
+                }
+                Err(err) => {
+                    tracing::warn!("库 schema 版本读不出：{err:#}");
+                    None
+                }
+            };
             // 源文件不在的那些书：连数据一起删掉（理由同桌面那一处）。
             match store.prune_missing() {
                 Ok(gone) if !gone.is_empty() => {
@@ -146,6 +159,26 @@ pub(crate) fn boot(cx: &mut App) {
         }
         Err(err) => report("boot", &err),
     }
+
+    // 常驻资源（导入作业池 + 监听 + 传书）收拢到一个进程级句柄里；书库句柄也交过去，
+    // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
+    crate::ui::shared::services::install(cx);
+    // 诊断 dump（§5.8）：`FOLIO_DUMP=1` 时把生效配置 + 库版本 + 队列长度打一份。
+    if folio_core::diagnostics::enabled() {
+        let provenance = ConfigHolder::provenance(cx);
+        folio_core::diagnostics::dump(
+            &ConfigHolder::snapshot(cx),
+            Some(&provenance),
+            db_version,
+            Some(crate::ui::shared::services::pool().queued()),
+            // 物理内存还没接（平台层给），所以给 `None` —— 报「未知」也不报假数。
+            None,
+        );
+    }
+    // 清掉上次崩溃留在书库目录里的 `.part` 半成品（§1.3 末条）。
+    crate::ui::shared::library::sweep_partials(cx);
+    // 老副本改名的那一趟：投进 Cleanup 档，不等它、也不在界面线程上算哈希。
+    crate::ui::shared::library::schedule_backfill(cx);
 
     // 还没有窗口，浅深只能问平台 —— 而 Android 上平台级那一问恒为深色。
     // 这只是「先有个能看的配色」，真正的跟随系统由 `AppShell::render` 拿窗口自己的外观再涂。

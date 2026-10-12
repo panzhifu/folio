@@ -9,8 +9,9 @@
 //!   的四级降级：原偏移 → 同 DOM 节点 → ±400 字窗口 → 全章）。
 //!
 //! 解锚比整章扫一遍文本便宜不了多少，而渲染帧是每帧都来的 —— 所以按章缓存一份，
-//! 键里带上排版的**代数**（`Document::generation`）：代数没变，行盒与可见文本坐标
-//! 就没变，上一帧解出来的位置照样作数。
+//! 键是章文本的哈希（`Document::chapter_hash`）：章文本没变，可见文本坐标就没变，
+//! 上一帧解出来的位置照样作数。这里**不**用排版代数当键 —— 解出来的是第几个字到
+//! 第几个字，字号、栏宽、片高都动不着它，用代数当键等于读者每动一次设置就重解整章。
 //!
 //! 解不回来的那一条（`is_stale()`）**不画**：宁可少一处底色，也不把读者的批注
 //! 画到别的字上去。库里那条的 `stale` 标记照实回写，批注侧栏（后续里程碑）才有依据
@@ -45,7 +46,11 @@ impl ReaderSession {
             Ok(rows) => self.annotations = rows,
             Err(err) => {
                 // 读不出批注不影响正文：这一屏照读，只是底色没了。
-                tracing::warn!("划线: 读第 {:?} 本的批注失败：{err:#}", self.book_id);
+                tracing::warn!(
+                    book_id = ?self.book_id,
+                    error = %err,
+                    "划线: 读批注失败"
+                );
                 self.annotations = Vec::new();
             }
         }
@@ -63,25 +68,39 @@ impl ReaderSession {
         self.selection_menu_open = false;
         let Some(anchor) = self.anchor_for(&selected) else {
             tracing::warn!(
-                "划线: 第 {} 章的排版还没跟上，这一条没落库",
-                selected.chapter + 1
+                book_id = ?self.book_id,
+                chapter = selected.chapter + 1,
+                "划线: 排版还没跟上，这一条没落库"
             );
             cx.notify();
             return;
         };
         let (Some(book_id), Some(store)) = (self.book_id, self.store.clone()) else {
-            tracing::warn!("划线: 这本书没登记进书库（没有 book_id 或书库没装），批注没处落");
+            tracing::warn!(
+                book_id = ?self.book_id,
+                "划线: 没登记进书库（没有 book_id 或书库没装），批注没处落"
+            );
             cx.notify();
             return;
         };
         match store.add_annotation(book_id, &anchor, "", DEFAULT_COLOR) {
             Ok(id) => {
-                tracing::info!("划线: 第 {} 章落一条批注（id {id}）", selected.chapter + 1);
+                tracing::info!(
+                    book_id,
+                    chapter = selected.chapter + 1,
+                    annotation_id = id,
+                    "划线: 落一条批注"
+                );
                 self.load_annotations();
                 // 选区收掉：此刻屏上那片底色来自刚落的批注，不是来自「选中」。
                 self.clear_selection();
             }
-            Err(err) => tracing::error!("划线: 写库失败：{err:#}"),
+            Err(err) => tracing::error!(
+                book_id,
+                chapter = selected.chapter + 1,
+                error = %err,
+                "划线: 写库失败"
+            ),
         }
         cx.notify();
     }
@@ -155,21 +174,25 @@ impl Palette {
     }
 }
 
-/// 第 `chapter` 章现在该画在哪几段字上：命中缓存就直接给，代数变了才重解。
+/// 第 `chapter` 章现在该画在哪几段字上：命中缓存就直接给，章文本换了才重解。
 ///
 /// 做成自由函数而不是 `ReaderSession` 的方法：渲染帧里 `self.source` 正被可变借用
 /// （那一臂里要改排版状态），任何 `&self` 的方法都调不动，只能按字段分开递进来。
+///
+/// 键是**章文本的哈希**而不是排版代数：这里解出来的是可见文本坐标（第几个字到哪几个字），
+/// 它只跟章文本有关，字号、栏宽、片高都动不着它。用代数当键的旧写法会让读者每动一次
+/// 设置就把整章批注重解一遍。
 pub(in crate::ui::features::reader) fn resolved_for(
     cache: &RefCell<AnnotationSpans>,
     stored: &[Annotation],
     chapter: usize,
-    generation: u64,
+    chapter_hash: u64,
     map: &TextMap,
 ) -> Rc<Vec<ResolvedAnnotation>> {
     let fresh = cache
         .borrow()
         .get(&chapter)
-        .filter(|(cached, _)| *cached == generation)
+        .filter(|(cached, _)| *cached == chapter_hash)
         .map(|(_, spans)| spans.clone());
     if let Some(spans) = fresh {
         return spans;
@@ -177,6 +200,6 @@ pub(in crate::ui::features::reader) fn resolved_for(
     let resolved = Rc::new(resolve_annotations(stored, chapter as u32, map));
     cache
         .borrow_mut()
-        .insert(chapter, (generation, resolved.clone()));
+        .insert(chapter, (chapter_hash, resolved.clone()));
     resolved
 }

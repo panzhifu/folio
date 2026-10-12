@@ -130,7 +130,9 @@ impl Scene {
                         // 图片交给 gpui 自己的 `img` 元素画（纹理上传由它负责），
                         // 底贴基线：盒顶 = 基线 − 图高。解不出资源的 `<img>` 留位不画。
                         let rendered = document.images().render_source(&placed.href);
-                        tracing::info!(
+                        // 每张图片每帧一条 `info!` 会把日志刷爆，而格式化本身就是要省的开销
+                        // （`plans/阅读管线.md` §十一 第 11 条）：这一句降到 `trace!`。
+                        tracing::trace!(
                             "Scene: 图片 {} {}×{}，可绘制 = {}",
                             placed.href,
                             placed.width,
@@ -226,12 +228,9 @@ mod tests {
 
     /// 挑拣只关心块的几何与样式，行盒给空表就够。
     fn layout_of(blocks: Vec<BlockBox>) -> Layout {
-        Layout {
-            blocks,
-            lines: Vec::new(),
-            width: 336.0,
-            height: 500.0,
-        }
+        // 只能走 `assemble`：索引是私有的，拼结构体字面量会造出「有块盒但没有归属表」的
+        // 排版结果，那种东西在生产里就是「底色一片空白」那种查不出根因的症状。
+        Layout::assemble(blocks, Vec::new(), 336.0, 500.0)
     }
 
     fn block(node: u32, y: f32) -> BlockBox {

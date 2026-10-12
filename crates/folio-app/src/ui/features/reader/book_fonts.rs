@@ -16,22 +16,58 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use folio_core::css::{FontSrc, Origin, RuleSet};
 use folio_core::document::Document;
 use gpui_kit::App;
 
+/// 进程级「字体注册事件」计数：每成功往文本系统里注册一批字体就 +1。
+///
+/// 它是排版失效键里 `fonts_rev` 那一格的来源（`folio_core::layout::LayoutKey`）。数的是
+/// **事件**而不是「第几本书」：两本都没有内嵌字体的书拿到同一个版本（设备字体表确实没变，
+/// 缓存不该白清），而新书带来新字体时版本跳一格，于是所有按旧字体表算出的行宽全部作废 ——
+/// 那正是块级缓存接线前记成「已知口径缺口」的那一处。
+static FACE_EVENTS: AtomicU32 = AtomicU32::new(0);
+
+/// 当前字体表版本。
+fn face_revision() -> u32 {
+    FACE_EVENTS.load(Ordering::Relaxed)
+}
+
+/// 记一次「设备字体表变宽了」。只在 `add_fonts` 真成功之后调。
+fn face_registered() {
+    FACE_EVENTS.fetch_add(1, Ordering::Relaxed);
+}
+
 /// 声明名 → 设备家族名。`Send + Sync`：会在后台线程的度量里被拿着。
-#[derive(Default)]
 pub struct BookFonts {
     fallbacks: HashMap<String, Vec<String>>,
+    /// 建这张表时的字体表版本，见 [`FACE_EVENTS`]。
+    revision: u32,
+}
+
+impl Default for BookFonts {
+    /// 空表 + **当下**的字体表版本。默认值取当下而不是 0：一张表登记了什么不重要，
+    /// 重要的是它建出来时设备上的字体是哪一批。
+    fn default() -> Self {
+        Self {
+            fallbacks: HashMap::new(),
+            revision: face_revision(),
+        }
+    }
 }
 
 impl BookFonts {
     /// 没有内嵌字体（Markdown / TXT，或容器丢了的那条降级路）。空表 = 逐字节同一条路径。
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// 这张表对应的字体表版本，进排版失效键。
+    pub fn revision(&self) -> u32 {
+        self.revision
     }
 
     /// 登记一条别名。同名重复登记不会重复条目，`@font-face` 的多条 `src` 归到同一个家族。
@@ -106,6 +142,8 @@ impl BookFonts {
                     if texts.add_fonts(vec![Cow::Owned(face.bytes)]).is_err() {
                         continue;
                     }
+                    // 字体表真的变宽了：让后续建的表都带上新版本。
+                    face_registered();
                     let added: Vec<String> = texts
                         .all_font_names()
                         .into_iter()
@@ -119,6 +157,10 @@ impl BookFonts {
                 fonts.insert(declared, names);
             }
         }
+        // 版本取**建完之后**那个值：这一趟自己注册的字体也算「字体表变了」。
+        // 取建之前的值就漏了 —— 下一本书的字体集不同，却可能拿到与这一本相同的版本号，
+        // 于是块级缓存把按旧字体表算出的行宽当成作数的。
+        fonts.revision = face_revision();
         Arc::new(fonts)
     }
 }

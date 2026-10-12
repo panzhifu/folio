@@ -78,7 +78,11 @@ fn load(path: &Path, plain: bool) -> Result<(DocMeta, String, Vec<Chapter>)> {
     let meta = DocMeta {
         title,
         authors: Vec::new(),
-        format: if plain { Format::Text } else { Format::Markdown },
+        format: if plain {
+            Format::Text
+        } else {
+            Format::Markdown
+        },
         size: source.len() as u64,
     };
     Ok((meta, source, chapters))
@@ -107,7 +111,13 @@ fn read(path: &Path, plain: bool, with_text: bool) -> Result<(DocMeta, Content)>
             }
         })
         .collect();
-    Ok((meta, Content::Reflow(FlowDoc { chapters, ..Default::default() })))
+    Ok((
+        meta,
+        Content::Reflow(FlowDoc {
+            chapters,
+            ..Default::default()
+        }),
+    ))
 }
 
 /// [`ChapterLocator::Section`] 那一路：重读整本、重分一次章，取第 N 段并包装。

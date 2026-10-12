@@ -32,6 +32,12 @@ zoom_out = "文字を小さく"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "目次"
+# 目次屏のヘッダ行と二つの入口。
+"toc.read" = "既読 %{read} / %{total} 章"
+"toc.search" = "目次を検索"
+"toc.style" = "目次の表示"
+"toc.placeholder" = "%{count} 章を検索"
+"toc.empty" = "この本には目次がありません"
 night = "夜間"
 day = "昼間"
 progress = "進捗"
@@ -55,6 +61,11 @@ follow_system = "システムに従う"
 light = "明"
 dark = "暗"
 
+# 目次の行の高さの二段階（「行の詰み」）。
+[density]
+compact = "詰める"
+comfortable = "ゆったり"
+
 [page]
 typography = "文字"
 layout = "レイアウト"
@@ -62,6 +73,7 @@ fonts = "フォント"
 appearance = "外観"
 about = "このアプリについて"
 library = "書庫"
+toc = "目次"
 
 # 設定ページ内のグループ見出し。1 ページに 2 つ以上あるとサイドバーの項目として
 # 出てくるので、それぞれの字段に何の共通点があるかを名前で示す。
@@ -75,6 +87,7 @@ custom_themes = "カスタムテーマ"
 location = "保存先"
 watch = "フォルダ監視"
 transfer = "Wi-Fi 転送"
+rows = "行"
 
 [field]
 font_size = "文字サイズ"
@@ -119,16 +132,15 @@ library_dir = "書庫フォルダ"
 "transfer.pin" = "ペアリングコード：%{pin}"
 "transfer.no_url" = "LAN アドレスが見つかりません — ブラウザにこの端末の IP を入力してください（ポートはログに）。"
 "library_dir.pick" = "フォルダを選択…"
+toc_density = "行の詰み"
+"toc_density.desc" = "目次の一行の高さ。詰めるほど一屏に多く乗り、ゆったりは指で当たりやすい。"
+toc_max_lines = "題名の最大行数"
+"toc_max_lines.desc" = "長い題名が目次で何行まで並ぶか。超えると省略記号で切る。"
+toc_dim_read = "読んだ章を薄く表示"
+"toc_dim_read.desc" = "開いたことのある章を目次で薄く描画する。"
 
 [account]
 settings = "設定"
-theme = "テーマ"
-library = "書庫フォルダ"
-about = "このアプリについて"
-library_hint = "システムのフォルダ選択で書庫フォルダを選べます。既定で書き込めるフォルダから選ぶこともできます。"
-library_unconfirmed = "未確認です。次の追加時にもう一度聞かれます"
-library_default = "既定の推奨"
-pick_dir = "フォルダを選択…"
 
 [import]
 title = "本を追加"
@@ -157,8 +169,36 @@ notes = "メモ"
 account = "マイページ"
 
 [nav.pending]
-stats = "読書時間の記録はまだありません"
 notes = "注釈はまだ追加されていません"
+
+# 「统计」那一屏。三条措辞约束决定了这里的形状（另两份见 `zh-CN.toml` / `en.toml` 的同名一节）。
+# 这一门的读数紧凑到 `時間` / `分` 两个假名单位，而不足一小时要整段省掉 `時間`，
+# 所以单位与句式留在这里，代码只交给 `folio_core::time::duration_parts` 拆数。
+[stats]
+today = "今日"
+today_none = "今日はまだ読んでいません"
+streak = "%{days} 日連続"
+streak_none = "連続記録はまだありません"
+range_7 = "直近 7 日間"
+range_14 = "直近 14 日間"
+range_30 = "直近 30 日間"
+trend = "推移"
+trend_note = "%{days} 日間で %{total}、1 日平均 %{avg}"
+duration_hours_minutes = "%{hours} 時間 %{minutes} 分"
+duration_hours = "%{hours} 時間"
+duration_minutes = "%{minutes} 分"
+duration_seconds = "%{seconds} 秒"
+minutes_unit = "分"
+total = "累計"
+total_time = "総読書時間"
+total_days = "読んだ日数"
+total_books = "読んだ冊数"
+total_notes = "注釈の数"
+top = "どの本に時間を使ったか"
+hours = "いつ読むか"
+hours_peak = "よく読むのは %{hour} 時ごろ"
+no_store = "書庫を開けません"
+no_store_hint = "統計はローカルの書庫を読みます。書庫フォルダが開けるか確認してください。"
 
 # 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
 [mobile.tab]
@@ -211,23 +251,30 @@ empty_hint = "右の「追加」から epub・markdown・テキストを選ん�
 no_results = "該当する本がありません"
 no_results_hint = "別の語でお試しください。検索対象は本文ではなくタイトルと著者です"
 # カードの管理メニュー：長押し（モバイル）または右クリック（デスクトップ）で開く。
-# 右上の追加メニューと同じコンポーネント。開く・情報が先で、削除は最後に
-# 区切り線を挟んで置く —— 破壊的な操作を指の届きやすい位置に置かない。
-book_open = "開く"
-book_info = "書籍情報"
-# 「書籍情報」パネル：この一冊の事実。メニューをタップした時点で一度だけ照会する。
-info_title = "書籍情報"
+# 右上の追加メニューと同じコンポーネント。二行ともアイコン + 短いラベルで、本名は
+# 載せない —— メニューは開いたカード自身がどの本か知っている。情報が先で、
+# 削除は最後に区切り線を挟んで置く —— 破壊的な操作を指の届きやすい位置に置かない。
+# 「開く」行はない —— カードをタップすることが本を開くこと。
+book_delete = "削除"
+# 「情報」パネル：この一冊の事実。メニューをタップした時点で一度だけ照会する。
+# メニューの行もパネルの見出しもこの一本の文言 —— 「書籍情報」と「情報」を分けない。
+info_title = "情報"
+# 直せる二行 —— 書名と著者は読み手がこの本を何と呼ぶかであり、`books` のその二列へ
+# 書き戻す（`Store::set_book_meta`）。形式・サイズ・ファイルの場所はファイルの事実
+# なので表示だけ。
+info_field_title = "タイトル"
+info_field_author = "著者"
+# 複数の著者の書き方を示す —— 一列に「甲 · 乙」と並べ、保存時に同じ区切りで割る。
+info_author_hint = "複数の著者は · で区切る"
+# タイトルが空のあいだ保存は押せない。理由を隣に書く。
+info_title_required = "タイトルは空にできません"
+info_save = "保存"
 info_format = "形式"
 info_size = "サイズ"
-info_path = "ファイルの場所"
-info_close = "閉じる"
 
-# 书库管理。删除项的措辞带书名：长按（移动端）或右键（桌面端）之后指点已经离开那一行，
-# 只有标题能让读者确认自己按的是哪一本。
-# `library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置确认：
+# 书库管理。`library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置确认：
 # 移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
 [library]
-delete = "「%{title}」を削除"
 delete_failed = "この本を削除できません：%{reason}"
 title = "追加した本をどこにコピーしますか"
 hint = "追加するとファイルをこのフォルダにコピーします。コピー後、原本を移動しても書棚の本には影響しません。"

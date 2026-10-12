@@ -9,36 +9,39 @@
 //! 书架上这颗框在读者眼里是「找我那本书」，输入两个字就该立刻把书名对得上的那几本
 //! 列出来 —— 把两件事混在一个入口会让短查询静默返回空。
 //!
-//! 封面走 gpui 的 `img` 元素，纹理上传由它负责（正文里的 `<img>` 用的是同一条路径，
-//! 见 `reader_view`）。没有封面的书**必须**照样出现在架上并占住一格，
-//! 否则「导入了一本但看不见」和「根本没导进来」在真机上没法分开。
+//! 一片格子怎么排（几列、格间距、整片滚动）在 `grid`；一格长什么样在
+//! [`super::book_card`] —— 包括「没有封面的书也要照样占住一格」那一条。
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use folio_core::store::ShelfItem;
 use folio_core::remote::Transport;
-use folio_core::{Cancel, ImportOutcome, PathsSource, Store, TaskEvent, UrlSource, submit_import};
+use folio_core::{
+    Cancel, ImportOutcome, ImportReport, Imported, PathsSource, Store, TaskEvent, UrlSource,
+    submit_import,
+};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::NavStackState;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight, Image,
-    InteractiveElement, IntoElement, ObjectFit, ParentElement, PathPromptOptions, Render,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, Subscription, Task,
-    TestSupportExt as _, WeakEntity, Window, div, img, px,
+    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _,
+    UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 
 use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::import_queue::import_queue;
 use crate::ui::shared::error::{Context as _, report};
-use crate::ui::shared::images::cover_image;
 use crate::ui::shared::l10n::{tf, tr};
 use crate::ui::shared::library::{delete_book, pick_dir, suggested_dir, target_dir};
-use super::scan::{ScanPhase, fmt_size};
+use crate::ui::shared::services;
+use super::book_card::Card;
+use super::book_menu;
+use super::scan::ScanPhase;
 use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
 use crate::ui::widgets::{SearchBox, SearchBoxEvent, empty_state, muted_label};
 
@@ -68,13 +71,6 @@ const GAP: f32 = 8.0;
 /// 比手机的 112 宽：鼠标桌面上书名要一眼读完，而不是靠点进去看，而一格多宽，
 /// 标题那一行就能塞下几个字。再往下加一列会开始把长书名截成看不懂的半句。
 const MIN_CARD: f32 = 168.0;
-
-/// 封面格的宽高比（宽 ÷ 高），出版物的通行比例。
-///
-/// 行高由它定而不是由图片自己定：图片的真实比例五花八门（方图、长条都有），
-/// 让每格按图算高会得到一片参差的边。统一裁成这一档，多出来的部分由
-/// `ObjectFit::Cover` 裁掉。
-const COVER_RATIO: f32 = 2.0 / 3.0;
 
 /// 网格与搜索行两侧的留白（逻辑像素）。和顶部那条章导航的 `px_3` 不同一档，
 /// 因为这里是整片卡片的边，视觉上要比一条文字栏松。
@@ -115,31 +111,24 @@ pub enum ShelfEvent {
     Deleted(i64),
 }
 
-/// 一张卡片：库行摊平到界面直接用的样子 —— 封面已解码，作者已并成一行。
-struct Card {
-    id: i64,
-    title: SharedString,
-    authors: SharedString,
-    cover: Option<Arc<Image>>,
-}
-
-/// 「书籍信息」面板上摆的那几行。点菜单那一刻查一次库取齐，面板只摆现成的事实、
-/// 不再回头碰书库 —— 书删了面板还开着也只是几句旧话，关掉即走。
-struct BookInfo {
-    title: SharedString,
-    authors: SharedString,
-    /// 库里存的小写格式名（`epub` / `markdown`…），照原样摆：架上空架提示用的
-    /// 就是这套小写，不另造一套大小写。
-    format: SharedString,
-    size: u64,
-    path: SharedString,
-}
-
 pub struct ShelfView {
     /// 书库句柄，来自 [`crate::ui::shared::app_store`]。放 `None` 时架面是空的，
     /// 但界面照常起得来。
-    store: Option<Arc<Store>>,
+    ///
+    /// `pub(super)` 只为 [`super::book_info`] 那一页：它要在点开的时刻自己查一次库。
+    pub(super) store: Option<Arc<Store>>,
+    /// 书架这一目的地的导航栈（外壳建的，见 `AppShell::boot`）。
+    ///
+    /// 「信息」那一页由架面自己压上去 —— 与阅读页把设置屏压进同一条栈是同一条路。
+    /// 弱句柄：栈是外壳的东西，架面不该反过来把它拽住不让它退。
+    pub(super) stack: WeakEntity<NavStackState>,
     items: Vec<Card>,
+    /// 架面那片虚拟格子滚到哪儿了。
+    ///
+    /// 句柄归视图拿着，不是每帧现造：`uniform_list` 的滚动位置、可见区间都记在它里面，
+    /// 帧与帧之间换了句柄就等于每次重画都跳回第一排。滚轴也从这一个读位置
+    /// （[`super::view`] 的 `grid` 里 `.vertical_scrollbar(&...)`）。
+    grid_scroll: UniformListScrollHandle,
     /// 上一次查库用的串。
     query: SharedString,
     /// 顶上那颗搜索框。外观与「点外面退编辑态」都在 [`SearchBox`] 里，这里只
@@ -156,7 +145,9 @@ pub struct ShelfView {
     /// 键用 `id` 而不是每次现解：改一个搜索词会把同一本书再查出来一遍，
     /// 没缓存的话每敲一个字都要把整个架面的 JPEG 重解一遍。
     /// `None` 也要存 —— 不记住这次失败，每查一次都会再试一遍同样的失败。
-    covers: HashMap<i64, Option<Arc<Image>>>,
+    ///
+    /// `pub(super)` 只为 [`super::book_card`] 那一格：它按需解码，缓存得跟着架面活。
+    pub(super) covers: HashMap<i64, Option<Arc<Image>>>,
     _search_watch: Subscription,
     /// 导入那条异步链：等选择器 → 把选中的文件交给后端管线 → 收事件直到这批结束。
     /// Task 一 drop 链就断，于是「选了文件但界面已经忘了」；而断在管线跑到一半时，
@@ -181,9 +172,11 @@ pub struct ShelfView {
     _auto_import: Option<Task<()>>,
     /// 「从链接导入」面板上的输入框。`Some` = 面板开着；收面板即 drop。
     url_entry: Option<Entity<InputState>>,
-    /// 「书籍信息」面板的内容。`Some` = 面板开着；与链接导入面板同一套门面 ——
-    /// 内联画在架面上而不是浮层里。事实在 [`Self::show_info`] 查库那一刻就定死。
-    info: Option<BookInfo>,
+    /// 压上栈的那页「信息」的订阅。`Some` = 那一页还开着。
+    ///
+    /// 只要一条：那一页写回书名作者之后报一声，架面重查 —— 那一行字就是这张卡上的。
+    /// 每压一页换掉它，上一页的订阅跟着 drop（`Subscription` 一没就退订）。
+    pub(super) _info_watch: Option<Subscription>,
     /// 「书要拷到哪儿」那块面板里，系统文件夹选择器那条异步链。与 `_import` 同理，要活到选完。
     _pick: Option<Task<()>>,
     /// 导入完成后的**下一帧兜底重查**。选择器把应用切到后台，恢复前台的那一帧上
@@ -193,7 +186,11 @@ pub struct ShelfView {
 }
 
 impl ShelfView {
-    pub fn boot(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn boot(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        stack: WeakEntity<NavStackState>,
+    ) -> Self {
         let store = crate::ui::shared::app_store::handle(cx);
         if store.is_none() {
             tracing::error!("ShelfView: 书库没装，架面会是空的");
@@ -226,7 +223,9 @@ impl ShelfView {
         });
         let mut this = Self {
             store,
+            stack,
             items: Vec::new(),
+            grid_scroll: UniformListScrollHandle::new(),
             query: SharedString::default(),
             search,
             confirming: false,
@@ -239,7 +238,7 @@ impl ShelfView {
             _scan: None,
             _auto_import: Some(_auto_import),
             url_entry: None,
-            info: None,
+            _info_watch: None,
             _pick: None,
             pending_reload: false,
         };
@@ -268,6 +267,18 @@ impl ShelfView {
         cx.notify();
     }
 
+    /// 按当前搜索词**强制**重查一遍架面。
+    ///
+    /// `reload` 的去重按「词没变且架面非空」判，而这几处要办的正是「词没变、架上的字却变了」：
+    /// 删了一本、导进来一本、读者在「信息」那一页改了书名 —— 先清空逼它重查，这一手不必每个
+    /// 调用处各自记着。`pub(crate)` 是为最后那一条：外壳收到 [`BookInfoEvent::Saved`](super::BookInfoEvent)
+    /// 后叫它一次。
+    pub(crate) fn force_reload(&mut self, cx: &mut Context<Self>) {
+        self.items.clear();
+        let query = self.query.clone();
+        self.reload(&query, cx);
+    }
+
     /// 把焦点放进搜索框。
     ///
     /// 外壳那条「返回先退编辑态」的回归门要走**真实**焦点路径：gpui 的测试窗口没有
@@ -278,24 +289,6 @@ impl ShelfView {
     pub(crate) fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.search
             .update(cx, |search, cx| search.focus(window, cx));
-    }
-
-    /// 一条库行 → 一张卡。封面没解过才解，解不出的那本记住 `None`。
-    fn card(&mut self, item: ShelfItem) -> Card {
-        let cover = match self.covers.get(&item.id) {
-            Some(cached) => cached.clone(),
-            None => {
-                let decoded = item.cover.as_deref().and_then(cover_image);
-                self.covers.insert(item.id, decoded.clone());
-                decoded
-            }
-        };
-        Card {
-            id: item.id,
-            title: item.title.into(),
-            authors: item.authors.join(" · ").into(),
-            cover,
-        }
     }
 
     /// 点「导入」。书库位置没确认过就不开选择器，先把那块面板摆出来。
@@ -395,7 +388,7 @@ impl ShelfView {
             return;
         };
         // 拷贝、解析、落库都在后端管线里逐本完成（`folio_core::import`）。
-        let handle = submit_import(import_queue(), source, dir, store);
+        let handle = submit_import(&services::pool(), source, dir, store);
         let cancel = handle.cancel.clone();
         self.importing = Some((0, 0));
         self.import_cancel = Some(cancel);
@@ -456,6 +449,13 @@ impl ShelfView {
         self.items.len()
     }
 
+    /// 架上第 `ix` 格此刻摆的书名。同样只给回归门读：那一行字是「信息」那一页改完
+    /// 该立刻看到的结果，而读格子这件事不该成为公开接口。
+    #[cfg(all(test, not(mobile)))]
+    pub(crate) fn card_title(&self, ix: usize) -> Option<SharedString> {
+        self.items.get(ix).map(|card| card.title.clone())
+    }
+
     /// 后端导入管线的一条事件 → 架面的一次变化。
     fn import_event(&mut self, event: TaskEvent<Vec<ImportOutcome>>, cx: &mut Context<Self>) {
         match event {
@@ -513,11 +513,16 @@ impl ShelfView {
         self.import_cancel = None;
         for outcome in &outcomes {
             match &outcome.result {
-                Ok(Some(registered)) => {
+                Ok(Imported::Added(registered)) => {
                     // 封面可能跟着这次导入换了；缓存里那条旧的要清掉。
                     self.covers.remove(&registered.book_id);
                 }
-                Ok(None) => {}
+                // 同内容的第二个来源：架上那一本早就在了，没有要刷的东西。
+                // 「已存在」与「成功」在报表里是两栏，这里也分开说（见下面那句总结）。
+                Ok(Imported::Duplicate { .. }) => tracing::debug!(
+                    "ShelfView: 《{}》与架上某一本同内容，没收下第二份",
+                    outcome.candidate.name
+                ),
                 // 坏的那本指名道姓进日志：读者只知道少了几本，得有人能查为什么。
                 Err(err) => tracing::error!(
                     "ShelfView: 导入《{}》失败 {err:#}",
@@ -525,6 +530,22 @@ impl ShelfView {
                 ),
             }
         }
+        // 一句分类总结（`plans/基础设施.md` §3.2：批量作业要能聚合报表）。界面上那张
+        // 卡片还是待决（`plans/导入管线.md` §十一 #7），但数已经先落进日志了 —— 读者问
+        // 「我少了哪三本」时，这一行加上上面那几条指名道姓的，就是全部证据。
+        tracing::info!(
+            "ShelfView: 一批 {} 本结清 —— {}",
+            outcomes.len(),
+            ImportReport::tally(&outcomes).summary()
+        );
+        // 一句分类总结。界面上那张可折叠的作业卡片还是 `plans/导入管线.md` §十一 待决
+        // 第 7 条，但数已经先落进日志：读者问「我少了哪三本」时，这一行加上上面那几条
+        // 指名道姓的 `Err`，就是全部证据（`plans/基础设施.md` §3.2）。
+        tracing::info!(
+            "ShelfView: 一批 {} 本结清 —— {}",
+            outcomes.len(),
+            ImportReport::tally(&outcomes).summary()
+        );
         // 新入库的书要立刻上架，但搜索词得留着：读者可能正搜到一半。
         // `reload` 的去重按「词没变且架面非空」判，所以先把它清空逼它重查。
         self.items.clear();
@@ -639,117 +660,12 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 长按菜单里那颗「书籍信息」：查一次库，把这一本的事实摆进面板。
-    ///
-    /// 只查不拦 —— 书查不到（已删、库坏了）就不开面板，留一条日志；菜单是瞬间的事，
-    /// 这里没有要保的旧状态。面板本体在 [`Self::info_panel`]。
-    fn show_info(&mut self, book_id: i64, cx: &mut Context<Self>) {
-        let queried = self.store.as_ref().map(|store| store.book(book_id));
-        match queried {
-            Some(Ok(Some(row))) => {
-                self.info = Some(BookInfo {
-                    title: row.title.into(),
-                    authors: row.authors.join(" · ").into(),
-                    format: row.format.into(),
-                    size: row.size,
-                    path: row.path.into(),
-                });
-                cx.notify();
-            }
-            Some(Ok(None)) => tracing::warn!("ShelfView: 第 {book_id} 本已经不在库里，不开信息面板"),
-            Some(Err(err)) => report(
-                "ShelfView",
-                &anyhow::Error::new(err).context(format!("查第 {book_id} 本的信息")),
-            ),
-            None => tracing::error!("ShelfView: 没有书库，查不了第 {book_id} 本的信息"),
-        }
-    }
-
-    fn close_info(&mut self, cx: &mut Context<Self>) {
-        self.info = None;
-        cx.notify();
-    }
-
-    /// 「书籍信息」面板：这一本是什么、多大、那份文件在哪儿。
-    ///
-    /// 与链接导入面板同一套内联样式（占据架面，不叠浮层）。路径摆在最后一块灰底里：
-    /// 它是最长的一行，也是删书语义（[`delete_book`] 只删书库里自己拷的那份）能被
-    /// 读者核对的那一处 —— 抹掉它，「删的到底是哪个文件」就只剩开发者知道了。
-    fn info_panel(&self, info: &BookInfo, cx: &mut Context<Self>) -> AnyElement {
-        let entity = cx.entity().clone();
-        let close_label = tr(cx, "shelf.info_close");
-        v_flex()
-            .id("shelf-book-info")
-            .test_support()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .gap_3()
-            .px(px(GUTTER))
-            .py_4()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr(cx, "shelf.info_title")),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(info.title.clone()),
-            )
-            // 作者可能缺：导入管线的书目是从文件里抠的，抠不到就是空 —— 不摆一行空白。
-            .when(!info.authors.is_empty(), |this| {
-                this.child(muted_label(info.authors.clone(), cx))
-            })
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(muted_label(tr(cx, "shelf.info_format"), cx))
-                    .child(info.format.clone()),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(muted_label(tr(cx, "shelf.info_size"), cx))
-                    .child(fmt_size(info.size)),
-            )
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .child(muted_label(tr(cx, "shelf.info_path"), cx))
-                    .child(
-                        div()
-                            .w_full()
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(cx.theme().muted)
-                            .text_color(cx.theme().muted_foreground)
-                            .child(info.path.clone()),
-                    ),
-            )
-            .child(
-                Button::new("shelf-info-close")
-                    .ghost()
-                    .label(close_label.to_string())
-                    .accessibility_label(close_label)
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.close_info(cx))
-                    }),
-            )
-            .into_any_element()
-    }
-
     /// 删掉一本：库里的行、属于我们自己的那份副本，然后重查一次架面。
     ///
     /// 「哪些文件算我们自己的」这条判据在 [`delete_book`] 里，不在这里：桌面端记的是
     /// 读者手里的原文件，和移动端的副本在库里长得一模一样，只有位置能分开它们，
-    /// 而删错的那一头是不可逆的。
-    fn remove(&mut self, book_id: i64, cx: &mut Context<Self>) {
+    /// 而删错的那一头是不可逆的。菜单上那颗「删除」见 [`super::book_menu`]。
+    pub(super) fn remove(&mut self, book_id: i64, cx: &mut Context<Self>) {
         let Some(store) = &self.store else {
             tracing::error!("ShelfView: 没有书库，删不掉第 {book_id} 本");
             return;
@@ -765,8 +681,6 @@ impl ShelfView {
             return;
         }
         self.covers.remove(&book_id);
-        // 信息面板若还开着，摆的正是这一本的旧事实 —— 收掉，别让删掉的书留一面板。
-        self.info = None;
         cx.emit(ShelfEvent::Deleted(book_id));
         // 清空是为了绕过 `reload` 的去重：搜索词没变，但架面少了一本，必须重查一次。
         self.items.clear();
@@ -805,7 +719,7 @@ impl ShelfView {
                 let entity = entity.clone();
                 let url_entity = url_entity.clone();
                 let scan_entity = scan_entity.clone();
-                menu.min_w(px(140.))
+                menu.min_w(px(book_menu::MIN_WIDTH))
                     .item(
                         PopupMenuItem::new(import_label.clone())
                             .icon(IconName::Plus)
@@ -959,11 +873,6 @@ impl ShelfView {
         if let Some(entry) = &self.url_entry {
             return self.url_panel(entry.clone(), cx);
         }
-        // 「书籍信息」面板排在导入那几扇之后：导入是读者点进去要做的事，
-        // 信息是顺手看的，不该盖过它。
-        if let Some(info) = &self.info {
-            return self.info_panel(info, cx);
-        }
         if !self.items.is_empty() {
             return self.grid(cx, columns).into_any_element();
         }
@@ -977,143 +886,65 @@ impl ShelfView {
         empty_state(tr(cx, title), tr(cx, note), cx).into_any_element()
     }
 
+    /// 一片格子：只画看得见的那几排。一格长什么样在 [`super::book_card`]，不在这里。
+    ///
+    /// 用 GPUI 的 `uniform_list`（等高虚拟列表）而不是把整片格子搭进一个会滚的 div：
+    /// 它以「一横排」为项，每帧只渲染视区里那 `Range<usize>` 几排，架上有多少本与每帧
+    /// 建出多少张卡就此脱钩。它也不走 taffy 那套完整排版，只量一项的高度按等高排
+    /// （所以只适用于等高项）—— 一横排是「封面格 + 一行书名 + 一行作者」，两行文字都
+    /// 截断，天生等高。
+    ///
+    /// 滚动归这个 list 自己（它内部就是 `overflow-y: scroll` + `track_scroll`），所以这里
+    /// **不再**套 `Scrollable`：两层滚动会各吃一次同一根手指。滚轴由
+    /// `.vertical_scrollbar(&句柄)` 画在这一格的边沿上 —— list 自己故意不画轴。
+    /// 句柄存在 [`ShelfView::grid_scroll`] 里，不是每帧现造。
+    ///
+    /// 排间距烘进每一项（`.py_1()`）而不是靠容器的 `gap`：虚拟列表不在项之间插空隙，
+    /// 上下各 4 就是原来 `gap_2` 那 8 的节律，头一排与尾一排也各留一点边。
     fn grid(&self, cx: &mut Context<Self>, columns: u16) -> impl IntoElement {
-        let entity = cx.entity().clone();
-        let placeholder_bg = cx.theme().muted;
-        let muted_fg = cx.theme().muted_foreground;
-        // 管理菜单里不带书名的那两条：每张卡都一样，查一次、逐卡 clone。
-        let open_label = tr(cx, "shelf.book_open");
-        let info_label = tr(cx, "shelf.book_info");
-        let cards: Vec<AnyElement> = self
-            .items
-            .iter()
-            .map(|card| {
-                let book_id = card.id;
-                let title = card.title.clone();
-                let authors = card.authors.clone();
-                let cover = card.cover.clone();
-                let has_cover = cover.is_some();
-                let tapped = entity.clone();
-                let menu_entity = entity.clone();
-                // 管理菜单的条目名对每张卡都一样，取一次文案、逐卡 clone 进闭包：
-                // 菜单每次打开都会重建一遍（builder 是 `Fn`），闭包里先摘一份再 move。
-                let open_label = open_label.clone();
-                let info_label = info_label.clone();
-                // 菜单上写的是书名而不是光一个「删除」：长按之后手指已经离开卡片，
-                // 只有标题能让读者确认自己按的是哪一本。
-                let delete_label: SharedString =
-                    tf(cx, "library.delete", &[("title", &card.title)]).into();
-                div()
-                    // 元素 id 用书库主键而不是标题：重新查库它不变，而标题会随导入更新，
-                    // 拿标题当键会让一张卡片每次改名都丢掉自己的按下态。
-                    .id(format!("shelf-card-{book_id}"))
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .on_click(move |_, _, cx| {
-                        tapped.update(cx, |_, cx| cx.emit(ShelfEvent::Open(book_id)))
+        // 卡片管理菜单的两条文案：整个架面取一次，逐卡 clone 进菜单。条目本身
+        // （哪几条、什么图标、点了派给谁）在 [`book_menu`]。
+        let labels = book_menu::Labels::resolve(cx);
+        let columns = columns as usize;
+        // 一横排算一项；不满一排的尾巴也算一排，不然最后那几本会画不出来。
+        let rows = self.items.len().div_ceil(columns);
+        let shelf = cx.entity().clone();
+        let scroll = self.grid_scroll.clone();
+        let list = uniform_list("shelf-grid", rows, move |range, _window, cx| {
+            range
+                .map(|row| {
+                    let from = row * columns;
+                    // 句柄只在这一排真要画的时候读那几行数据：整片 `items` 不 clone。
+                    shelf.update(cx, |this, cx| {
+                        let to = (from + columns).min(this.items.len());
+                        div()
+                            .w_full()
+                            .grid()
+                            .grid_cols(columns as u16)
+                            .gap_2()
+                            // 左右留白仍归每一排自己：滚轴贴的是这块区域真正的边。
+                            .px(px(GUTTER))
+                            .py_1()
+                            .children(
+                                this.items[from..to]
+                                    .iter()
+                                    .map(|card| this.card_element(card, &labels, cx)),
+                            )
+                            .into_any_element()
                     })
-                    .child(
-                        div()
-                            .w_full()
-                            .aspect_ratio(COVER_RATIO)
-                            .rounded_md()
-                            .overflow_hidden()
-                            .bg(placeholder_bg)
-                            .when_some(cover, |this, image| {
-                                this.child(img(image).size_full().object_fit(ObjectFit::Cover))
-                            })
-                            // 没封面的那格把书名当封面画：一整格空白看起来像这本坏了，
-                            // 而它只是没有图。
-                            .when(!has_cover, |this| {
-                                this.child(
-                                    div()
-                                        .size_full()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .px_2()
-                                        .text_center()
-                                        .text_color(muted_fg)
-                                        .child(title.clone()),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .text_xs()
-                            .text_color(muted_fg)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(authors),
-                    )
-                    // 长按（移动端）或右键（桌面端）开管理菜单。与右上角导入那条
-                    // （`more_button`）是同一套组件：`PopupMenu` + 图标文字项 + 同一档
-                    // `min_w`，只是触发从点击换成了长按 —— 框架里 `ContextMenuExt`
-                    // 就是这么设计的：手指没有右键，长按走的是右键那条路；而且长按
-                    // 一旦被菜单认领，这一次触摸就不会再派发成 tap，不会出现
-                    // 「长按想删书，顺手把书打开了」。
-                    .context_menu(move |menu, _, _| {
-                        let open_entity = menu_entity.clone();
-                        let info_entity = menu_entity.clone();
-                        let delete_entity = menu_entity.clone();
-                        menu.min_w(px(140.))
-                            .item(
-                                PopupMenuItem::new(open_label.clone())
-                                    .icon(IconName::BookOpen)
-                                    .on_click(move |_, _, cx| {
-                                        open_entity
-                                            .update(cx, |_, cx| cx.emit(ShelfEvent::Open(book_id)))
-                                    }),
-                            )
-                            .item(
-                                PopupMenuItem::new(info_label.clone())
-                                    .icon(IconName::Info)
-                                    .on_click(move |_, _, cx| {
-                                        info_entity
-                                            .update(cx, |this, cx| this.show_info(book_id, cx))
-                                    }),
-                            )
-                            // 删除垫底、用分隔线隔开：破坏性的动作不排在顺手的位置。
-                            .separator()
-                            .item(
-                                PopupMenuItem::new(delete_label.clone())
-                                    .icon(IconName::Trash)
-                                    .on_click(move |_, _, cx| {
-                                        delete_entity
-                                            .update(cx, |this, cx| this.remove(book_id, cx))
-                                    }),
-                            )
-                    })
-                    .into_any_element()
-            })
-            .collect();
+                })
+                .collect()
+        })
+        .track_scroll(&scroll)
+        .size_full();
+
         div()
-            .id("shelf-grid")
-            .size_full()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .grid()
-                    .grid_cols(columns)
-                    .gap_2()
-                    .px(px(GUTTER))
-                    .pt_2()
-                    .pb(px(GUTTER))
-                    .w_full()
-                    .children(cards),
-            )
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(list)
+            .vertical_scrollbar(&scroll)
     }
 }
 

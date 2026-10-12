@@ -8,8 +8,8 @@
 //! - [`FixedDoc`]（定版式）：页是既定的，缩放与裁剪只是显示变换。
 //!   CBZ 归它；将来的 PDF / DJVU 也是这一族。
 
-use serde::{Deserialize, Serialize};
 use super::{Chapter, ImageRes, TocEntry};
+use serde::{Deserialize, Serialize};
 
 /// 可重排文档。`toc` 与 `cover` 来自 OPF；这两项是**文档级**数据，所以和章节分开存。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

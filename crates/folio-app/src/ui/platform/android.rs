@@ -50,8 +50,10 @@ fn android_main(app: android_activity::AndroidApp) {
     // 不在 `super::boot` 里：那之前的这几行（JNI、平台、应用目录）正是真机上最容易出问题
     // 的一段，不能等到界面起来才有记录。`boot` 里那一次会返回 Err 并被忽略，
     // 这是预期的：一个进程只有一个 subscriber。
-    let config = folio_core::Config::load();
-    if let Err(err) = folio_core::logging::init(&config.logging, logcat_layer()) {
+    // 读配置 + 装日志一步到位（§5.6 配置 → 日志），配置留着传给 `boot` ——
+    // **只读一次**（§2.3）：以前这里读一次、`boot` 里又读一次。
+    let (resolved, log_err) = folio_core::logging::init_from_config(logcat_layer());
+    if let Err(err) = log_err {
         log::error!("android_main: 日志装不上，只有 logcat：{err}");
     }
 
@@ -69,10 +71,14 @@ fn android_main(app: android_activity::AndroidApp) {
     // `with_assets` 决定 `svg().path("icons/xxx.svg")` 能否解析出字节；不调它图标会是一片空白。
     Application::with_platform(shared.into_rc())
         .with_assets(gpui_kit::assets::AllAssets)
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
             tracing::info!("android_main: run callback — booting the app shell");
-            super::boot(cx);
+            super::boot(cx, resolved);
         });
+
+    // `run` 返回 = activity 即将结束、`App` 已 drop（它的 `AppStore` 句柄也放了）。
+    // 这时按 §1.3/§5.6 的有序收尾：停监听/传书 → 关作业池 → 放掉最后一个书库句柄。
+    crate::ui::shared::services::shutdown();
 
     tracing::info!("android_main: Application::run returned — activity will finish");
 }

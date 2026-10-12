@@ -16,7 +16,11 @@ pub extern "C" fn ohos_napi_init(
             env,
             exports,
             "folio_app",
-            Box::new(|cx: &mut App| super::boot(cx)),
+            Box::new(|cx: &mut App| {
+                // 与 iOS 同一条：在模块初始化回调里读配置 + 装日志，再把配置交给 `boot`。
+                let (resolved, _) = folio_core::logging::init_from_config(None);
+                super::boot(cx, resolved);
+            }),
         );
     }
     exports

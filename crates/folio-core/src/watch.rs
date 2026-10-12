@@ -21,10 +21,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::import::{ImportKind, ImportOutcome, NameClash, PathsSource, Policy, submit_import};
+use crate::import::{ImportKind, ImportReport, Imported, PathsSource, forward, submit_import};
 use crate::scan;
 use crate::store::Store;
-use crate::task::{StageCtx, TaskManager};
+use crate::task::{StageCtx, TaskEvent, TaskManager};
 
 /// 相邻两轮 tick 的间隔，也是「尺寸稳定」的判据窗口。1 秒：本地拷贝早已结束，
 /// 网络盘的大文件拖过几轮也只会晚几秒入库。
@@ -53,7 +53,7 @@ impl WatchService {
     pub fn start(
         config: WatchConfig,
         store: Arc<Store>,
-        queue: Arc<TaskManager<Vec<ImportOutcome>>>,
+        queue: Arc<TaskManager>,
         dest_dir: PathBuf,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
@@ -90,7 +90,7 @@ fn run(
     config: WatchConfig,
     dest_dir: PathBuf,
     store: Arc<Store>,
-    queue: Arc<TaskManager<Vec<ImportOutcome>>>,
+    queue: Arc<TaskManager>,
     stop: Arc<AtomicBool>,
 ) {
     // 先初扫：目录里现有的书先进库（跳过判定开着，已有的不会动）。
@@ -164,41 +164,44 @@ fn submit_batch(
     paths: &[PathBuf],
     dest_dir: &Path,
     store: &Arc<Store>,
-    queue: &TaskManager<Vec<ImportOutcome>>,
+    queue: &TaskManager,
 ) {
-    let source = PathsSource::with_policy(
-        paths.to_vec(),
-        ImportKind::Watch,
-        Policy {
-            skip_existing: true,
-            copy_in: true,
-            on_name_clash: NameClash::Suffix,
-        },
-    );
+    // 只报「这是监听交的」：重扫同一本由管线的哈希判重认出来（`Imported::Duplicate`），
+    // 副本名由内容决定，所以旧形状那份 `Policy`（skip_existing / 后缀改名）在这里没用了。
+    let source = PathsSource::new(paths.to_vec(), ImportKind::Watch);
     let handle = submit_import(queue, Box::new(source), dest_dir.to_path_buf(), store.clone());
     // 事件不回流（服务没有界面可接）：作业的成败都在日志里。
-    std::thread::spawn(move || {
-        for event in handle.events.iter() {
-            match event {
-                crate::task::TaskEvent::Finished(Ok(outcomes)) => {
-                    for outcome in &outcomes {
-                        match &outcome.result {
-                            Ok(Some(registered)) => tracing::info!(
-                                "watch: 自动入库《{}》（第 {} 本）",
-                                registered.title,
-                                registered.book_id
-                            ),
-                            Ok(None) => {}
-                            Err(err) => tracing::warn!("watch: 自动导入《{}》失败：{err:#}", outcome.candidate.name),
-                        }
+    forward(handle, |event| match event {
+        TaskEvent::Finished(Ok(outcomes)) => {
+            for outcome in &outcomes {
+                match &outcome.result {
+                    Ok(Imported::Added(registered)) => tracing::info!(
+                        "watch: 自动入库《{}》（第 {} 本）",
+                        registered.title,
+                        registered.book_id
+                    ),
+                    // 同一本书再出现在收件箱里不是新闻：判重认得它，也没再落一份副本。
+                    Ok(Imported::Duplicate { .. }) => tracing::debug!(
+                        "watch: 《{}》与库里某一本同内容，没收下第二份",
+                        outcome.candidate.name
+                    ),
+                    Err(err) => {
+                        tracing::warn!("watch: 自动导入《{}》失败：{err:#}", outcome.candidate.name)
                     }
                 }
-                crate::task::TaskEvent::Finished(Err(err)) => {
-                    tracing::warn!("watch: 自动导入作业失败：{err:#}");
-                }
-                _ => {}
             }
+            // 一批一句总结。自动导入不打扰读者，但日志里要查得出这批是怎么结清的
+            // （`plans/基础设施.md` §3.2：批量作业要出报表）。
+            tracing::info!(
+                "watch: 一批 {} 本结清 —— {}",
+                outcomes.len(),
+                ImportReport::tally(&outcomes).summary()
+            );
         }
+        TaskEvent::Finished(Err(err)) => {
+            tracing::warn!("watch: 自动导入作业失败：{err:#}");
+        }
+        _ => {}
     });
 }
 

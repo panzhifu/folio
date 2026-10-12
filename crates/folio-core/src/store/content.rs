@@ -84,15 +84,19 @@ impl Store {
         } else {
             CssStored::At(doc.css_hrefs.clone())
         };
+        // 封面与它的**规格版本**一起写：`cover` 是字节，`cover_spec` 记下它是按哪一版
+        // 规格生成的，换规格后 `stale_reason` 才能认出老封面该重生成（§5.1）。
         tx.execute(
-            "UPDATE books SET css = ?2, toc_json = ?3, cover = ?4, index_version = ?5
-             WHERE id = ?1",
+            "UPDATE books
+                SET css = ?2, toc_json = ?3, cover = ?4, index_version = ?5, cover_spec = ?6
+              WHERE id = ?1",
             params![
                 book_id,
                 serde_json::to_string(&css)?,
                 serde_json::to_string(&doc.toc)?,
                 doc.cover,
-                crate::format::INDEX_VERSION
+                crate::format::INDEX_VERSION,
+                crate::format::COVER_SPEC_VERSION
             ],
         )?;
         tx.commit()?;
@@ -257,9 +261,22 @@ impl Store {
     /// [`Store::save_fixed`] 的不上锁版本；只由已经持了锁的一方调用。
     fn save_fixed_in(conn: &Connection, book_id: i64, doc: &FixedDoc) -> Result<()> {
         let pages = serde_json::to_string(&doc.pages)?;
+        // `index_version` 与 `cover_spec` 都要盖：
+        // - `index_version` 不盖的话，`stale_reason` 永远说这份定版式索引是旧的
+        //   （定版式的页表同样由「当前这套算法」产出），于是**每次开书都白重扫一遍**；
+        // - `cover_spec` 与 `save_flow_in` 同一条口径（§5.1）。
         conn.execute(
-            "UPDATE books SET fixed_json = ?2, toc_json = ?3, cover = ?4 WHERE id = ?1",
-            params![book_id, pages, serde_json::to_string(&doc.toc)?, doc.cover],
+            "UPDATE books
+                SET fixed_json = ?2, toc_json = ?3, cover = ?4, index_version = ?5, cover_spec = ?6
+              WHERE id = ?1",
+            params![
+                book_id,
+                pages,
+                serde_json::to_string(&doc.toc)?,
+                doc.cover,
+                crate::format::INDEX_VERSION,
+                crate::format::COVER_SPEC_VERSION
+            ],
         )?;
         tracing::debug!(
             "store: 第 {book_id} 本落库 {} 页（定版式）",

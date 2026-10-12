@@ -72,6 +72,47 @@ pub enum Error {
     /// 原文留在链上，别压掉。
     #[error("日志装不上：这个进程里只有一个 subscriber 的位置（{0}）")]
     Logging(#[source] Source),
+
+    /// 导入把一本候选**拒了**。`why` 是给人看的那一句，底层原因留在 `source` 上。
+    ///
+    /// 单独立一条而不是复用 [`Error::UnsupportedFormat`]：报表要按类别分组
+    /// （「跳过 3（格式不支持）」），而「不是书」「容器坏了」「读不动」是三件不同的事，
+    /// 界面上读者该做的动作也不同（换一个文件、去修那个文件、重新下载一次）。
+    /// 判据装在类型上而不是靠匹配文案 —— `plans/基础设施.md` §4.1 第 3 条说的就是这个。
+    #[error("收不下《{name}》：{why}")]
+    Rejected {
+        name: String,
+        why: String,
+        reject: ImportReject,
+        #[source]
+        source: Option<Source>,
+    },
+}
+
+/// 导入拒绝的类别。第四类 `Cancelled` 不在这里：取消由作业层
+/// （`crate::task::TaskEvent::Cancelled`）报，那是一次中断而不是一句判决。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportReject {
+    /// 三层判定认得出但这一版读不动，或者根本认不出来。
+    UnsupportedFormat,
+    /// 头四字节说它是个 ZIP，中央目录却读不出来 —— 文件可能是坏的，值得留档查。
+    CorruptContainer,
+    /// 收得下、也认得出，但打开 / 解析失败。副本是那份刚拷进来的字节，问题在字节里。
+    Unreadable,
+}
+
+impl Error {
+    /// 这条错误是不是「导入拒了这本书」，属于哪一类。批量报表按它分组。
+    ///
+    /// 认 [`Error::UnsupportedFormat`] 那一条是因为 provider 那一路仍在用它；
+    /// 两条迟早合成一条，先都认，免得报表少算。
+    pub fn import_reject(&self) -> Option<ImportReject> {
+        match self {
+            Error::Rejected { reject, .. } => Some(*reject),
+            Error::UnsupportedFormat(_) => Some(ImportReject::UnsupportedFormat),
+            _ => None,
+        }
+    }
 }
 
 impl From<tracing_subscriber::util::TryInitError> for Error {

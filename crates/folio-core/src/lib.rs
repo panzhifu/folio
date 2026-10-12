@@ -13,8 +13,10 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 pub mod anchor;
 pub mod annotation;
+pub mod budget;
 pub mod config;
 pub mod css;
+pub mod diagnostics;
 pub mod document;
 pub mod dom;
 pub mod error;
@@ -22,15 +24,18 @@ pub mod format;
 pub mod group;
 pub mod hit;
 pub mod i18n;
+pub mod identity;
 pub mod import;
 pub mod scan;
 pub mod watch;
 pub mod transfer;
 pub mod layout;
 pub mod logging;
+pub mod metrics;
 pub mod paths;
 pub mod position;
 pub mod remote;
+pub mod services;
 pub mod store;
 pub mod task;
 pub mod time;
@@ -43,9 +48,13 @@ pub use anchor::{
 pub use annotation::{
     ResolvedAnnotation, annotations_by_chapter, annotations_markdown, resolve_annotations,
 };
-pub use config::{Appearance, Config, Language, Library, Logging, Mode, Reader};
+pub use budget::{EvictStep, MemoryBudget, Pressure};
+pub use config::{
+    Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, Language, Layer, Library, LOG_OFF_ENV,
+    Logging, Mode, Provenance, Reader, Resolved, TocDensity,
+};
 pub use document::{BookDocument, ContentRef, Document, LocatorKind};
-pub use error::{Error, Result};
+pub use error::{Error, ImportReject, Result};
 pub use format::{
     Chapter, ChapterLocator, ChapterText, Content, ContentKind, DocMeta, DocumentProvider,
     FixedDoc, FixedPage, FlowDoc, Format, PageSource,
@@ -54,15 +63,19 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use i18n::Locale;
 pub use scan::{ScanReport, ScanSource, find};
 pub use import::{
-    Candidate, ImportKind, ImportOutcome, NameClash, Origin, PathsSource, Policy, Registered,
-    Source, UrlSource, import_from, reindex, submit_import,
+    BackfillReport, Candidate, ImportKind, ImportOutcome, ImportReport, Imported, Origin,
+    PathsSource, Registered, Source, UrlSource, backfill_copies, forward, import_from, reindex,
+    submit_import, sweep_partials,
 };
+pub use services::Services;
 pub use store::StaleReason;
 pub use paths::{config_dir, config_path, data_dir, db_path, log_dir, themes_dir};
-pub use position::Locator;
+pub use position::{LOCATOR_FORMAT_VERSION, Locator};
 pub use store::{
-    ANNOTATION_COLORS, Annotation, BookReading, Collection, DailyReading, ReadingSession,
-    ReadingTotals, ShelfItem, Store,
+    ANNOTATION_COLORS, Annotation, BookReading, Collection, DailyReading, ReadingRank,
+    ReadingSession, ReadingSummary, ReadingTotals, ShelfItem, Store,
 };
-pub use task::{ByteProgress, Cancel, StageCtx, TaskEvent, TaskId, TaskManager};
-pub use time::{civil_date, day_start, local_day};
+pub use task::{ByteProgress, Cancel, Priority, StageCtx, TaskEvent, TaskId, TaskManager};
+pub use time::{
+    DurationParts, civil_date, day_start, duration_parts, local_day, local_hour,
+};

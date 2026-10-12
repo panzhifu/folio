@@ -27,10 +27,10 @@ impl ReaderSession {
         // 上一章可能正拼在上方，所以哪怕偏移是 0 也挂恢复请求，让渲染帧把它
         // 摆到正确的那一像素。分页落到页号，偏移 0 就是第 0 页，不需要请求。
         let (chapter, offset) = self.resolve_position().unwrap_or((self.chapter_index(), 0));
-        self.pending_restore = (mode.is_continuous() || offset > 0).then_some(Locator {
+        self.pend_restore((mode.is_continuous() || offset > 0).then_some(Locator {
             chapter: chapter as u32,
             offset,
-        });
+        }));
         self.scroll_y = 0.0;
         self.page = 0;
         self.wheel_accum = 0.0;
@@ -108,6 +108,9 @@ impl ReaderSession {
     ///
     /// 触摸向下滑（dy > 0）时内容跟着手指往下走 ⇒ 露出的行号变小，所以是减。
     pub(in crate::ui::features::reader) fn on_scroll(&mut self, event: &ScrollWheelEvent) {
+        // 手指还按在屏幕上这件事，即使内容已被夹在章尾、一个字都没挪，也是「在读」。
+        // 所以这一条不只靠 `persist_locator` 那个证据点（它要求位置真的变过）。
+        self.note_reading_activity();
         let dy = match event.delta {
             ScrollDelta::Pixels(delta) => f32::from(delta.y),
             // 鼠标滚轮（外接键盘/调试时）按「行」给增量，按正文字号折算，别当 0 忽略。

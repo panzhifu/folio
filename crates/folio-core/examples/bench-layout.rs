@@ -19,9 +19,8 @@ use folio_core::css::computed::{ComputedStyle, StyledDom, cascade};
 use folio_core::css::{Origin, RuleSet};
 use folio_core::dom::{Dom, NodeId};
 use folio_core::layout::{
-    BlockCache, FontKey, LayoutCache, LayoutOptions, LineMetrics, Measure, NoImages, dom_hash,
-    layout, layout_cached, layout_with_blocks, measure_chapter, prefs_hash, render_window,
-    styles_hash,
+    BlockCache, FontKey, LayoutCache, LayoutKey, LayoutOptions, LineMetrics, Measure, NoImages,
+    layout, layout_cached, layout_with_blocks, measure_chapter, render_window,
 };
 
 /// 每批跑多少次。批内取平均，摊平单次中断。
@@ -173,7 +172,8 @@ fn main() {
     println!("== 排版基准（每批 {BATCH} 次取平均，{BATCHES} 批取最快）==\n");
 
     // ---- 中文：CJK 每字可断，走「直接落在 k」那一支 ----
-    let (dom, styles, root) = setup(&chapter(600, 800));
+    let src = chapter(600, 800);
+    let (dom, styles, root) = setup(&src);
     println!("中文章：{} 字节、{} 节点", dom.nodes.len(), dom.nodes.len());
     let (full, lines) = time_layout(
         &dom,
@@ -292,14 +292,14 @@ fn main() {
 
     // ---- 缓存命中 ----
     let reader = Reader::default();
-    let h = prefs_hash(&reader);
-    let sh = styles_hash(&styles);
-    let dh = dom_hash(&dom, root);
+    // 键按公开构造点来 —— 与生产路径（`folio-app` 的排版作业）同一把键的形状。
+    let key = LayoutKey::compose(&src, "", &reader, WIDTH, 1, 0, 0);
     let mut cache = LayoutCache::new();
     println!();
     let hit = {
         let first = layout_cached(
             &mut cache,
+            &key,
             &dom,
             &styles,
             root,
@@ -309,9 +309,6 @@ fn main() {
             },
             &Mock,
             &NoImages,
-            h,
-            sh,
-            dh,
         );
         std::hint::black_box(first.height);
         let mut fastest = Duration::MAX;
@@ -320,6 +317,7 @@ fn main() {
             for _ in 0..BATCH {
                 let out = layout_cached(
                     &mut cache,
+                    &key,
                     &dom,
                     &styles,
                     root,
@@ -329,9 +327,6 @@ fn main() {
                     },
                     &Mock,
                     &NoImages,
-                    h,
-                    sh,
-                    dh,
                 );
                 std::hint::black_box(out.height);
             }
@@ -351,7 +346,8 @@ fn main() {
     // 重排，其余块命中复用（复用会按新落点平移，所以下面几段整体下移也不影响命中）。
     // 打印的「重排 N 块 / 命中 M 块」就是这套机制是否生效的直接证据。
     {
-        let (dom_b, styles_b, root_b) = setup(&chapter_with_hot(600, 800, 300));
+        let src_b = chapter_with_hot(600, 800, 300);
+        let (dom_b, styles_b, root_b) = setup(&src_b);
         // 只改带 `.hot` 的那一段的字号。
         let hot = cascade(
             &dom_b,
@@ -362,7 +358,7 @@ fn main() {
             width: WIDTH,
             light: false,
         };
-        let dh = dom_hash(&dom_b, root_b);
+        let key_b = LayoutKey::compose(&src_b, "", &Reader::default(), WIDTH, 1, 0, 0);
 
         let (full_hot, _) = time_layout(&dom_b, &hot, root_b, opts);
         report("改一段后整章重排（无缓存）", full_hot, "");
@@ -374,12 +370,13 @@ fn main() {
             // 不计时：把缓存填成「改之前」的那一版。
             cache.clear();
             layout_with_blocks(
-                &mut cache, &dom_b, &styles_b, root_b, opts, &Mock, &NoImages, dh,
+                &mut cache, &key_b, &dom_b, &styles_b, root_b, opts, &Mock, &NoImages,
             );
             let (h0, m0) = (cache.hits, cache.misses);
             let t = Instant::now();
-            let out =
-                layout_with_blocks(&mut cache, &dom_b, &hot, root_b, opts, &Mock, &NoImages, dh);
+            let out = layout_with_blocks(
+                &mut cache, &key_b, &dom_b, &hot, root_b, opts, &Mock, &NoImages,
+            );
             std::hint::black_box(out.height);
             best = best.min(t.elapsed());
             hits = cache.hits - h0;

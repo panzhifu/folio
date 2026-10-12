@@ -9,13 +9,11 @@
 
 use folio_core::i18n::Locale;
 use folio_core::paths::config_path;
-use gpui_kit::component::h_flex;
-use gpui_kit::{ParentElement, SharedString, Styled, div};
+use gpui_kit::{IntoElement as _, ParentElement, SharedString, Styled, div};
 
 use super::*;
-use crate::ui::shared::about;
 
-pub(super) fn about_page(cx: &App) -> SettingPage {
+pub(super) fn about_page(cx: &App) -> Page {
     page(
         tr(cx, "page.about"),
         IconName::Info,
@@ -24,33 +22,49 @@ pub(super) fn about_page(cx: &App) -> SettingPage {
 }
 
 /// 「关于」这一组：跑着的这一份二进制，以及它是用哪几版依赖编出来的。
-fn version_group(cx: &App) -> SettingGroup {
-    SettingGroup::new().title(tr(cx, "page.about")).items(vec![
-        value_item(
-            tr(cx, "about.version"),
-            about::version(),
-            Some(tr(cx, "about.version_desc")),
-            &["version", "build", "版本"],
-        ),
-        value_item(
-            tr(cx, "about.gpui_pre"),
-            about::gpui_pre(),
-            None,
-            &["gpui", "engine"],
-        ),
-        value_item(
-            tr(cx, "about.kit"),
-            about::kit(),
-            None,
-            &["gpui-kit", "component"],
-        ),
-        value_item(
-            tr(cx, "about.mobile"),
-            about::mobile_layer(),
-            None,
-            &["android", "mobile", "移动"],
-        ),
-    ])
+fn version_group(cx: &App) -> Group {
+    group(
+        tr(cx, "page.about"),
+        vec![
+            value_item(
+                tr(cx, "about.version"),
+                version(),
+                Some(tr(cx, "about.version_desc")),
+                &["version", "build", "版本"],
+            ),
+            value_item(tr(cx, "about.gpui_pre"), gpui_pre(), None, &["gpui", "engine"]),
+            value_item(tr(cx, "about.kit"), kit(), None, &["gpui-kit", "component"]),
+            value_item(
+                tr(cx, "about.mobile"),
+                mobile_layer(),
+                None,
+                &["android", "mobile", "移动"],
+            ),
+        ],
+    )
+}
+
+// 下面四份事实刻意不手写：值由 `build.rs` 从 `Cargo.lock` 抄成编译期常量，
+// 手写的一份和锁文件迟早分叉，而分叉的恰好是最需要准的那几行。
+
+/// 本应用版本（`Cargo.toml` 里那一份 workspace 版本）。
+fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// GPUI 本体（crates.io 上的 `gpui-pre` 快照）。
+fn gpui_pre() -> &'static str {
+    option_env!("FOLIO_GPUI_PRE").unwrap_or("未知")
+}
+
+/// 组件层 gpui-kit：版本号 + 用的那个 commit。
+fn kit() -> &'static str {
+    option_env!("FOLIO_KIT").unwrap_or("未知")
+}
+
+/// 移动平台层 gpui-pre-mobile（fork）：版本号 + 钉住的那个 commit。
+fn mobile_layer() -> &'static str {
+    option_env!("FOLIO_MOBILE").unwrap_or("未知")
 }
 
 /// 一行「读得出但改不了」的事实：标签在左，值在右 —— 与每项字段那一行的动作位同一侧。
@@ -58,66 +72,54 @@ fn value_item(
     label: SharedString,
     value: &str,
     description: Option<SharedString>,
-    keywords: &[&'static str],
-) -> SettingItem {
-    let value: SharedString = value.into();
-    let mut item = SettingItem::new(
-        label,
-        SettingField::render(move |_, _, _| {
-            h_flex()
-                .w_full()
-                .justify_end()
-                .child(div().text_sm().child(value.clone()))
-        }),
-    );
+    keywords: &'static [&'static str],
+) -> Row {
+    let mut row = Row::info(label, value);
     if let Some(description) = description {
-        item = item.description(description);
+        row = row.description(description);
     }
-    item.keywords(keywords.iter().map(|word| (*word).to_string()))
+    row.keywords(keywords)
 }
 
 /// 界面语言。选项用**该语言自己的写法**标注：用户切换语言往往正是在看不懂
 /// 当前界面的时候，把 "English" 翻成「英语」反而认不出来。
-fn language_group(cx: &App) -> SettingGroup {
+fn language_group(cx: &App) -> Group {
     group(
         tr(cx, "field.language"),
-        vec![
-            SettingItem::new(
-                tr(cx, "field.language"),
-                SettingField::dropdown(
-                    language_options(),
-                    |cx: &App| SharedString::from(ConfigHolder::language(cx).locale.code()),
-                    |val: SharedString, cx| {
-                        // 认不出的值不改：下拉框给不出认不出的值，
-                        // 真出现时保留当前语言比切成未知语言好。
-                        if let Some(locale) = Locale::from_label(&val) {
-                            ConfigHolder::edit_language(cx, |l| l.locale = locale);
-                        }
-                    },
-                ),
-            )
-            .description(tr(cx, "field.language.desc"))
-            .keywords([
-                "language",
-                "locale",
-                "语言",
-                "中文",
-                "简体",
-                "English",
-                "日本語",
-            ]),
-        ],
+        vec![Row::dropdown(
+            tr(cx, "field.language"),
+            language_options(),
+            false,
+            |cx: &App| SharedString::from(ConfigHolder::language(cx).locale.code()),
+            |val: SharedString, cx| {
+                // 认不出的值不改：下拉框给不出认不出的值，
+                // 真出现时保留当前语言比切成未知语言好。
+                if let Some(locale) = Locale::from_label(&val) {
+                    ConfigHolder::edit_language(cx, |l| l.locale = locale);
+                }
+            },
+        )
+        .description(tr(cx, "field.language.desc"))
+        .keywords(&[
+            "language",
+            "locale",
+            "语言",
+            "中文",
+            "简体",
+            "English",
+            "日本語",
+        ])],
     )
 }
 
 /// 语言下拉框的选项：`(值, 标签)`，值是 BCP-47 码（配置里存的就是它），
 /// 标签是语言自己的名字。
 ///
-/// **值必须在第一位**：`SettingField::dropdown` 的约定是元组首项作为选中值
-/// （与取值闭包给出的 `locale.code()` 对得上）与写回 setter 的实参，次项才是
-/// 按钮和菜单里显示的文字。写反了会出现两重故障：当前语言对不上任何一个
-/// 选项值，按钮只能显示裸代码；点菜单项传给 setter 的是语言名，`from_label`
-/// 之外的路径认不出来，改动被静默丢弃 —— 读者点什么语言都不生效。
+/// **值必须在第一位**：下拉框的约定是元组首项作为选中值（与取值闭包给出的
+/// `locale.code()` 对得上）与写回 setter 的实参，次项才是按钮和菜单里显示的文字。
+/// 写反了会出现两重故障：当前语言对不上任何一个选项值，按钮只能显示裸代码；
+/// 点菜单项传给 setter 的是语言名，`from_label` 之外的路径认不出来，改动被静默
+/// 丢弃 —— 读者点什么语言都不生效。
 fn language_options() -> Vec<(SharedString, SharedString)> {
     Locale::ALL
         .iter()
@@ -134,25 +136,22 @@ fn language_options() -> Vec<(SharedString, SharedString)> {
 ///
 /// 它是这一页少数几条「读者改不了但需要知道」的事实之一：换主题要往哪个目录放 JSON、
 /// 偏好存在哪个文件，都从这一条推出来。
-fn config_group(cx: &App) -> SettingGroup {
+fn config_group(cx: &App) -> Group {
     let path = config_path().display().to_string();
     group(
         tr(cx, "field.config_path"),
-        vec![
-            SettingItem::new(
-                tr(cx, "field.config_path"),
-                // 自己拼这一行而不是用 `widgets::muted_label`：那个小件返回的类型借用着
-                // `&App`，而字段的渲染闭包要一个 `'static` 的元素。
-                SettingField::render(move |_, _, cx| {
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(path.clone())
-                }),
-            )
-            .description(tr(cx, "field.config_path.desc"))
-            .keywords(["config", "path", "配置", "文件"]),
-        ],
+        vec![Row::custom_titled(
+            tr(cx, "field.config_path"),
+            move |cx| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(path.clone())
+                    .into_any_element()
+            },
+        )
+        .description(tr(cx, "field.config_path.desc"))
+        .keywords(&["config", "path", "配置", "文件"])],
     )
 }
 

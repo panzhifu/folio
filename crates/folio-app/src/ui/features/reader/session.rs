@@ -11,7 +11,7 @@
 //! 不为拆文件而拆实体。
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -21,7 +21,7 @@ use folio_core::annotation::ResolvedAnnotation;
 use folio_core::document::Document as OpenedDocument;
 use folio_core::store::{Annotation, Store};
 use folio_core::{DocMeta, Format, Locator, Reader, StaleReason};
-use gpui_kit::{App, Bounds, Context, Pixels, Point, SharedString};
+use gpui_kit::{App, Bounds, Context, Pixels, Point, SharedString, Task};
 
 use super::book::Book;
 use super::chrome::{PageMode, Reserve};
@@ -112,8 +112,22 @@ pub struct ReaderSession {
     /// 还没落地的位置。恢复必须等排版做过一次才能做（坐标 → 行顶的映射要有行盒），
     /// 而构造时手上没有窗口，所以先记下来，第一帧渲染时取走。
     pub(super) pending_restore: Option<Locator>,
-    /// 上一次落库的位置。滚动的落库按它去重：偏移只在**跨过一行**时才变，
-    /// 所以「变了才写」等于「每行至多写一次」，比每帧一次或每次触摸一次都便宜，
+    /// 那一趟恢复要落到的**章内锚点**（目录条目的 `id`）。
+    ///
+    /// 为什么不直接换算成偏移存进 [`Self::pending_restore`]：偏移表是排版产物
+    /// （`Document::id_offsets`），挂请求那一刻目标章通常还没排版。所以带着 `id`
+    /// 等一等，落地那一帧再换算。
+    ///
+    /// 与 `pending_restore` 同生共死：挂新请求必须把它清掉，否则上一次没落地的
+    /// 锚点会跟着下一次恢复跳错地方。清它的活儿收在 [`Self::pend_restore`] 里。
+    pub(super) pending_anchor: Option<String>,
+    /// 到过的章（`chapters.idx`）。目录那一屏按它把来过的画成浅色。
+    ///
+    /// 开书时从 `chapter_read` 读一次，之后只增。这张集合同时是「要不要再写一笔」的
+    /// 去重位（`HashSet::insert` 返回是否新入），所以每章最多打一次库，
+    /// 而不是每跨过一行一次。
+    pub(super) read: HashSet<usize>,
+    /// 上一次落库的位置。滚动的落库按它去重：偏移只在**跨过一行**时才变，    /// 所以「变了才写」等于「每行至多写一次」，比每帧一次或每次触摸一次都便宜，
     /// 也不需要定时器。章号与偏移一起比 —— 跨进下一章的第一个字偏移可能还是 0，
     /// 只比偏移会漏掉那一次落库。
     pub(super) saved_chapter: usize,
@@ -161,6 +175,15 @@ pub struct ReaderSession {
     /// 缓存键里那个代数是必需的：解锚读的是「这一章的可见文本坐标」，换章、改字号、
     /// 换窗口宽都会让它进位，而进位之后旧区间指的就是别的字了。
     pub(super) annotation_spans: RefCell<AnnotationSpans>,
+
+    // ---- 阅读时长（统计页的数据源）：状态在这里，判断在 modules/reading_time.rs ----
+    /// 这一段还没结账的阅读从哪一刻起算（Unix 秒）。0 = 此刻没在读任何书。
+    pub(super) reading_segment_start: i64,
+    /// 最后一次「人还在」的证据落在哪一刻。宽限线按它算，见 `modules/reading_time`。
+    pub(super) reading_last_activity: i64,
+    /// 那条每来一次就问「到点结了没有」的时钟。换书时它已经挂着就不重挂；
+    /// 关书时把它 drop 掉（`Task` 一 drop，计时就取消）。
+    pub(super) reading_clock: Option<Task<()>>,
 }
 
 /// 按章缓存的解锚结果：章下标 →（这批结果出自哪一代排版，区间表）。
@@ -226,16 +249,20 @@ impl ReaderSession {
         let store = crate::ui::shared::app_store::handle(cx);
         let found = candidate_paths().into_iter().find(|path| path.is_file());
         let Some(path) = found else {
-            log::info!("ReaderSession: 没有可读文档，进入兜底的单行文本");
+            tracing::info!("ReaderSession: 没有可读文档，进入兜底的单行文本");
             return Self::sample(&prefs, store, cx);
         };
         match Self::open_document(&path, &prefs, store, cx) {
             Ok(view) => {
-                log::info!("ReaderSession: 打开 {path:?}");
+                tracing::info!(path = %path.display(), "ReaderSession: 打开");
                 view
             }
             Err(err) => {
-                log::error!("ReaderSession: 打开 {path:?} 失败：{err:#}");
+                tracing::error!(
+                    path = %path.display(),
+                    error = %err,
+                    "ReaderSession: 打开失败"
+                );
                 Self::sample(&prefs, crate::ui::shared::app_store::handle(cx), cx)
             }
         }
@@ -264,6 +291,8 @@ impl ReaderSession {
             header_reserve: 0.0,
             footer_reserve: 0.0,
             pending_restore: None,
+            pending_anchor: None,
+            read: HashSet::new(),
             saved_chapter: 0,
             saved_offset: 0,
             store,
@@ -281,6 +310,11 @@ impl ReaderSession {
             menu_bounds: Rc::default(),
             annotations: Vec::new(),
             annotation_spans: RefCell::default(),
+            // 时长不在这里起算：构造的那一刻读者还没真的翻开任何东西。
+            // 起点由 `open_book` 里的 `begin_reading` 定，兜底那一屏则永远不进账。
+            reading_segment_start: 0,
+            reading_last_activity: 0,
+            reading_clock: None,
         }
     }
 
@@ -363,6 +397,8 @@ impl ReaderSession {
             // 连续模式的落点是**全局 y**（章基线 + 章内行顶）：哪怕偏移是 0 也要挂
             // 请求，把「这一章的开头」摆到它拼出来的位置 —— 上一章可能正占着上方。
             pending_restore: (wanted_mode.is_continuous() || locator.offset > 0).then_some(locator),
+            pending_anchor: None,
+            read: read_at_open(book_id, store.as_ref()),
             saved_chapter: locator.chapter as usize,
             saved_offset: locator.offset,
             store,
@@ -381,6 +417,11 @@ impl ReaderSession {
             menu_bounds: Rc::default(),
             annotations: Vec::new(),
             annotation_spans: RefCell::default(),
+            // 时长不在这里起算：构造的那一刻读者还没真的翻开任何东西。
+            // 起点由 `open_book` 里的 `begin_reading` 定，兜底那一屏则永远不进账。
+            reading_segment_start: 0,
+            reading_last_activity: 0,
+            reading_clock: None,
         };
         // 屏上要有读者划过的痕迹，就得先知道库里有哪些。开书这一条路（`with_document`）
         // 与换书那一条（`open_book`）都要过一遍，漏一处就是「重开书批注不见了」。
@@ -408,20 +449,22 @@ impl ReaderSession {
         if let Some(store) = self.store.clone() {
             match store.stale_reason(book_id) {
                 Ok(Some(StaleReason::Missing)) => {
-                    log::warn!("ReaderSession: 第 {book_id} 本的源文件不在了，连数据一起删");
+                    tracing::warn!(book_id, "ReaderSession: 源文件不在了，连数据一起删");
                     if let Err(err) = store.remove_book(book_id) {
-                        log::error!("ReaderSession: 删第 {book_id} 本失败：{err:#}");
+                        tracing::error!(book_id, error = %err, "ReaderSession: 删书失败");
                     }
                     return;
                 }
                 Ok(Some(reason)) => {
-                    log::info!("ReaderSession: 第 {book_id} 本的索引要重扫（{reason:?}）");
+                    tracing::info!(book_id, reason = ?reason, "ReaderSession: 索引要重扫");
                     if let Err(err) = folio_core::reindex(&store, book_id) {
-                        log::error!("ReaderSession: 重扫第 {book_id} 本失败，照旧打开：{err:#}");
+                        tracing::error!(book_id, error = %err, "ReaderSession: 重扫失败，照旧打开");
                     }
                 }
                 Ok(None) => {}
-                Err(err) => log::warn!("ReaderSession: 查第 {book_id} 本的文件状态失败：{err:#}"),
+                Err(err) => {
+                    tracing::warn!(book_id, error = %err, "ReaderSession: 查文件状态失败")
+                }
             }
         }
         let opened = self.store.as_ref().and_then(|store| {
@@ -448,7 +491,10 @@ impl ReaderSession {
             ))
         });
         let Some((meta, content, path, mode, locator)) = opened else {
-            log::error!("ReaderSession: 书库里第 {book_id} 本读不出来（章节没入库或格式不认识）");
+            tracing::error!(
+                book_id,
+                "ReaderSession: 书库里读不出来（章节没入库或格式不认识）"
+            );
             return;
         };
         // 库里只有章节位置，正文按位置回容器取；图片与内嵌字体同样不入库，也现取。
@@ -468,7 +514,12 @@ impl ReaderSession {
         self.mode = PageMode::from_storage_name(&mode);
         self.mode_undecided = mode.is_empty();
         self.source = Source::Book(Box::new(book));
+        // 上一本那一段必须先结账：`settle_reading` 按 `self.book_id` 归属，
+        // 顺序写反了就会把上一本读的时间记到这一本头上（两本的账一起错）。
+        self.settle_reading();
         self.book_id = Some(book_id);
+        // 从这一刻起为这一本计时。
+        self.begin_reading(cx);
         // 换了一本书，屏上的底色也得跟着换：批注是按 `book_id` 存的。
         self.load_annotations();
         self.scroll_y = 0.0;
@@ -479,10 +530,21 @@ impl ReaderSession {
         self.saved_offset = locator.offset;
         // 章内偏移还是要等第一帧排版做完才能落地。连续模式哪怕偏移是 0 也挂请求：
         // 落点是全局 y，章首未必拼在 0 的位置。
-        self.pending_restore = (self.mode.is_continuous() || locator.offset > 0).then_some(locator);
+        self.pend_restore(
+            (self.mode.is_continuous() || locator.offset > 0).then_some(locator),
+        );
         cx.notify();
     }
 
+    /// 挂（或作废）一趟还没落地的恢复请求，并清掉还没落地的锚点。
+    ///
+    /// 除了带锚点的那一跳（`modules::toc::ReaderSession::restore_to_entry`，它俩必须
+    /// 一起写）之外，这是**唯一**该写 [`Self::pending_restore`] 的地方：留着上一次
+    /// 没落地的锚点，下一次恢复就会跳到那一跳的地方去。
+    pub(super) fn pend_restore(&mut self, locator: Option<Locator>) {
+        self.pending_anchor = None;
+        self.pending_restore = locator;
+    }
     /// 当前那本书的只读借用；兜底那一行没有书，返回 `None`。
     pub(super) fn book(&self) -> Option<&Book> {
         match &self.source {
@@ -672,6 +734,42 @@ impl ReaderSession {
                 book.set_prefs_on_all(effective);
             }
         }
+    }
+}
+
+/// 开书时读一次「到过的章」。
+///
+/// 没有 `book_id`（`with_document` 直连的测试、兜底那一行）或库读不动时给**空集**：
+/// 表现是目录里全都还没来过，而不是弹一个错误 —— 进度读不出来才是事故，
+/// 浅色画不出来只是少个提示。
+fn read_at_open(book_id: Option<i64>, store: Option<&Arc<Store>>) -> HashSet<usize> {
+    let (Some(id), Some(store)) = (book_id, store) else {
+        return HashSet::new();
+    };
+    store.read_chapters(id).unwrap_or_default()
+}
+
+/// 把目录那一跳带来的章内锚点 `id` 换算成章内偏移。
+///
+/// 只有渲染帧做得了这一步：偏移表（`Document::id_offsets`）是**排版产物**，挂恢复
+/// 请求的那一刻目标章往往还没排版，所以请求里先带着 `id` 等一等。
+///
+/// 表里没有这个 `id`（书里的目录指向一个不存在的锚点，或锚点挂在一节没有正文的元素上）
+/// 就**留在请求原本的偏移上**，也就是章首 —— 宁可跳到本章开头，也不要凭猜落在正文中间。
+///
+/// 做成自由函数而不是方法：调用点在 `match &mut self.source` 的分支里，那时 `self.source`
+/// 已被可变借用，任何 `&mut self` 的方法都过不去；而这里的锚点与请求是两个独立字段。
+pub(super) fn land_at_anchor(
+    anchor: Option<String>,
+    locator: Locator,
+    book: &Book,
+) -> Locator {
+    let Some(fragment) = anchor else {
+        return locator;
+    };
+    match book.document().id_offsets().get(&fragment).copied() {
+        Some(offset) => Locator { offset, ..locator },
+        None => locator,
     }
 }
 

@@ -1,7 +1,7 @@
 //! 平台服务边界：视图通过它拿平台相关的东西，自己不写 `cfg(mobile)`。
 //!
 //! 平台差异只允许出现在这里（服务）与 `super::platform`（入口与原生桥）。
-//! 其余页面/部件一律走这个边界。目前边界上是四件事：
+//! 其余页面/部件一律走这个边界。目前边界上是六件事：
 //!
 //! - **安全区**（系统栏 / 手势条 / 挖孔），用来给自绘外壳留出上下两条。
 //! - **输入法 inset**，键盘盖住多少。**刻意与安全区分开**：弹键盘不该移动外壳，
@@ -10,6 +10,11 @@
 //!   从此不再按 target 分叉，这条也一起搬进了边界。
 //! - **浮层控件点不点得住**（[`supports_overlay_controls`]），决定「我的」那一格
 //!   画整页设置还是行列表。
+//! - **返回键走到栈底之后退不退程序**（[`back_exits_app`]），手机要退，桌面的窗口
+//!   由窗口管理器管，不该被一次返回关掉。
+//! - **这台设备此刻的本地时区偏移**（[`local_offset_secs`]），统计按本地日分桶要把它
+//!   当参数交给 core。这一项两端同一个实现，所以它是这个模块上的一个自由函数，
+//!   不在 [`Host`] trait 上。
 //!
 //! 桌面端前两者都是 0；Android 端读 fork 报上来的值（`gpui-pre-mobile` 的
 //! `AndroidWindow::safe_area_insets_logical()` / `ime_insets_logical()`）。
@@ -44,6 +49,11 @@ pub trait Host: 'static {
     fn body_family(&self, wanted: &str, cx: &App) -> String;
     /// gpui-kit 的浮层控件（下拉框、菜单、对话框、侧边面板）在这端**点得住**吗。
     fn overlay_controls(&self) -> bool;
+    /// 返回键走到栈底（当前目的地那条栈已经弹不动了）时，这一端要不要**就此退出**。
+    ///
+    /// 手机要：那一端没有别的退出入口，宿主也不该留着前台空转。桌面不要：窗口归窗口
+    /// 管理器管，一次返回键把进程关掉是错的。
+    fn back_exits_app(&self) -> bool;
 }
 
 #[cfg(not(mobile))]
@@ -115,6 +125,28 @@ const CJK_PREFERRED: &[&str] = &[
 pub fn supports_overlay_controls(cx: &App) -> bool {
     cx.try_global::<HostServices>()
         .is_some_and(|services| services.0.overlay_controls())
+}
+
+/// 返回键走到栈底要不要就此退出应用。没装平台服务（宿主测试里）当**不退**：
+/// 那条路是 `AppShell::back()` 的最后一档，测试里一次返回键不该把整个测试循环关掉。
+pub fn back_exits_app(cx: &App) -> bool {
+    cx.try_global::<HostServices>()
+        .is_some_and(|services| services.0.back_exits_app())
+}
+
+/// 这台设备此刻的本地时区偏移（秒，东为正）。统计那几屏按本地日分桶要用它当参数
+/// 交给 `folio_core`（core 自己不读环境，见 `folio_core::time` 的模块文档）。
+///
+/// 它站在 `host` 这一侧，但**不是** `Host` trait 的一项：桌面与移动走的是同一次调用，
+/// 没有需要分叉的实现。trait 上只该挂「两端答案不同」的服务，否则边界上长出来的
+/// 是两份一模一样的代码。
+///
+/// 认不出时区时 `chrono` 回退 UTC ⇒ 这里给 0，日界线就按 UTC 那天。这是**降级而不是
+/// 事故**：统计页照样能画，只是那一天的分界挪了几小时，所以不打错误日志。
+/// （Android 与 HarmonyOS 上这条路是通的：`iana-time-zone` 读 `persist.sys.timezone`
+/// 系统属性，`chrono` 对这两个目标用它内嵌的时区数据而不是去读 `/usr/share/zoneinfo`。）
+pub fn local_offset_secs() -> i64 {
+    i64::from(chrono::Local::now().offset().local_minus_utc())
 }
 
 /// 按名字比：先看偏好要的那个，再依次试 [`CJK_PREFERRED`]。

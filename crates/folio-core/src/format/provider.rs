@@ -47,13 +47,14 @@ pub trait DocumentProvider: Send + Sync {
     fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
         match at {
             ChapterLocator::Inline(text) => Ok(text.clone()),
-            ChapterLocator::Entry(entry) => self.entry_text(path, entry).ok_or_else(|| {
-                crate::Error::ChapterUnavailable {
-                    path: path.to_path_buf(),
-                    index: 0,
-                    at: entry.clone(),
-                }
-            }),
+            ChapterLocator::Entry(entry) => {
+                self.entry_text(path, entry)
+                    .ok_or_else(|| crate::Error::ChapterUnavailable {
+                        path: path.to_path_buf(),
+                        index: 0,
+                        at: entry.clone(),
+                    })
+            }
             ChapterLocator::Section(_) => Err(crate::Error::ChapterUnavailable {
                 path: path.to_path_buf(),
                 index: 0,
@@ -170,7 +171,9 @@ pub fn provider_for(path: &Path) -> Option<Box<dyn DocumentProvider>> {
 /// 与注册表的一致性由测试钉住（清单里的每一个都能被 [`provider_for`] 认下）——
 /// 往注册表加新格式时忘了这里，扫描会静默漏掉那一类书。
 pub fn supported_extensions() -> &'static [&'static str] {
-    &["epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "cbz"]
+    &[
+        "epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "cbz",
+    ]
 }
 
 /// 扩展名（不分大小写）是否有 provider 认领。

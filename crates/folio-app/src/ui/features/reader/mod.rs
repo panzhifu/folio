@@ -13,6 +13,7 @@
 //! - [`selection_menu`] —— 选中的就地菜单（图标格子卡）与它的摆位判断。
 //! - [`page`] —— 被外壳 push 进书架栈的那一屏：干净态两条小字 + 浮出的顶栏与底栏。
 //! - [`chrome`] —— 纯判断（分区、面板档位、模式退档、进度念法），无 gpui，宿主测试直接跑。
+//! - [`toc_tree`] —— 目录树的纯判断（摊平、折叠、当前行、搜索），同上。
 //! - [`bands`] —— 干净态那两条读数带（顶上章名、底下位置与进度）。
 //! - [`paint`] —— 字形级绘制元素（`shape_line` / `paint_glyph`）。
 //!
@@ -34,6 +35,7 @@ mod paint;
 mod scene;
 mod selection_menu;
 mod session;
+mod toc_tree;
 mod view;
 
 pub use chrome::Reserve;

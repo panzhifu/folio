@@ -1,11 +1,33 @@
 use serde::{Deserialize, Serialize};
 
+/// 位置串（`positions.locator_json` 那一段文本）的**格式版本**。
+///
+/// `plans/基础设施.md` §5.1：一切持久化格式带版本戳。这串文本换个写法时 +1；读到
+/// **没有 `v`** 的老串 = 版本 0（信封还没加），字段照旧读得出来并迁到当前 ——
+/// 「读到旧版本 = 迁移，不是崩溃，也不是静默当新版用」。
+pub const LOCATOR_FORMAT_VERSION: u32 = 1;
+
 /// 阅读位置。**存字符数而不是页码或行号**：字号、行距、窗口宽度、
 /// 分页还是连续滚动，都会让页码失效，但一章里的第 N 个字不会变。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Locator {
     pub chapter: u32,
     pub offset: usize,
+}
+
+/// 落库时套在 [`Locator`] 外面的信封：加一个版本戳，字段名保持稳定。
+///
+/// 单独一个类型而不是给 `Locator` 直接加字段：`Locator` 是 `Copy` 的小结构、到处按
+/// `{ chapter, offset }` 字面量构造，多一个字段会让每一处构造点都要改。版本是**存储格式**
+/// 的事，压在这一层即可。
+#[derive(Serialize, Deserialize)]
+struct LocatorWire {
+    /// 缺省 `0`：老串没有这一格，正好被认成「版本 0」。
+    #[serde(default)]
+    v: u32,
+    chapter: u32,
+    #[serde(default)]
+    offset: usize,
 }
 
 impl Locator {
@@ -47,11 +69,41 @@ impl Locator {
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| r#"{"chapter":0,"offset":0}"#.into())
+        let wire = LocatorWire {
+            v: LOCATOR_FORMAT_VERSION,
+            chapter: self.chapter,
+            offset: self.offset,
+        };
+        // 编码出错不该发生；真出了给一串**带版本戳**的零值，别退回一个没版本的老形状。
+        serde_json::to_string(&wire).unwrap_or_else(|_| {
+            format!(r#"{{"v":{LOCATOR_FORMAT_VERSION},"chapter":0,"offset":0}}"#)
+        })
     }
 
     pub fn from_json(json: &str) -> Locator {
-        serde_json::from_str(json).unwrap_or_default()
+        match serde_json::from_str::<LocatorWire>(json) {
+            Ok(wire) => {
+                if wire.v > LOCATOR_FORMAT_VERSION {
+                    tracing::warn!(
+                        from = wire.v,
+                        to = LOCATOR_FORMAT_VERSION,
+                        "locator: 位置串比本程序新，认得的字段照读"
+                    );
+                } else if wire.v < LOCATOR_FORMAT_VERSION {
+                    tracing::debug!(
+                        from = wire.v,
+                        to = LOCATOR_FORMAT_VERSION,
+                        "locator: 旧格式位置串，按当前字段迁移"
+                    );
+                }
+                Locator {
+                    chapter: wire.chapter,
+                    offset: wire.offset,
+                }
+            }
+            // 连字段都对不上（被截断、被别的程序写过）：退回章首，不崩。
+            Err(_) => Locator::default(),
+        }
     }
 }
 
@@ -92,6 +144,48 @@ mod tests {
         assert_eq!(SRC[byte..].chars().next().unwrap(), '😀');
         assert_eq!(SRC[byte..].chars().next().unwrap().len_utf8(), 4);
         assert_eq!(Locator::from_byte(0, SRC, byte + 1).offset, 9);
+    }
+
+    /// §5.1：老的位置串没有版本戳，照样按当前字段读出来 —— 旧版本是**迁移**不是崩溃。
+    #[test]
+    fn a_versionless_position_string_is_read_as_legacy() {
+        assert_eq!(
+            Locator::from_json(r#"{"chapter":2,"offset":5}"#),
+            Locator {
+                chapter: 2,
+                offset: 5
+            }
+        );
+    }
+
+    /// 写出去的串带版本戳，且往返一致。
+    #[test]
+    fn the_position_string_carries_the_format_version() {
+        let loc = Locator {
+            chapter: 3,
+            offset: 7,
+        };
+        let json = loc.to_json();
+        assert!(json.contains("\"v\":1"), "要带版本戳，实际 {json}");
+        assert_eq!(Locator::from_json(&json), loc);
+    }
+
+    /// 版本比本程序新的串：认得的字段照读，不崩（也不是静默当新版用）。
+    #[test]
+    fn a_newer_position_string_is_read_not_rejected() {
+        assert_eq!(
+            Locator::from_json(r#"{"v":99,"chapter":4,"offset":1,"future":true}"#),
+            Locator {
+                chapter: 4,
+                offset: 1
+            }
+        );
+    }
+
+    /// 完全解析不了的串退回章首。
+    #[test]
+    fn a_garbage_position_string_falls_back_to_start() {
+        assert_eq!(Locator::from_json("不是 json"), Locator::default());
     }
 
     #[test]

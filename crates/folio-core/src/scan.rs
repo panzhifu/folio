@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::format::supports_extension;
-use crate::import::{Candidate, ImportKind, NameClash, Origin, Policy, Source, stage_local};
+use crate::import::{Candidate, ImportKind, Origin, Source, stage_local};
 use crate::task::StageCtx;
 use crate::Result;
 
@@ -250,22 +250,14 @@ impl Source for ScanSource {
         ImportKind::Scan
     }
 
-    fn policy(&self) -> Policy {
-        Policy {
-            skip_existing: true,
-            copy_in: true,
-            on_name_clash: NameClash::Suffix,
-        }
-    }
-
     fn candidates(&self, dest_dir: &Path, ctx: &StageCtx) -> Result<Vec<Candidate>> {
         let mut exclude = self.exclude.clone();
         exclude.push(dest_dir.to_path_buf());
         Ok(find(&self.roots, &exclude, &self.noise_exempt, ctx).candidates)
     }
 
-    fn stage(&self, candidate: &Candidate, dest_dir: &Path, _ctx: &StageCtx) -> Result<PathBuf> {
-        stage_local(candidate, dest_dir, NameClash::Suffix)
+    fn stage(&self, candidate: &Candidate, staging_dir: &Path, ctx: &StageCtx) -> Result<PathBuf> {
+        stage_local(candidate, staging_dir, ctx)
     }
 }
 
@@ -274,7 +266,7 @@ mod tests {
     use std::path::Path;
 
     use super::{Limits, ScanSource, find_with};
-    use crate::import::{ImportKind, NameClash, Policy, Source as _};
+    use crate::import::{ImportKind, Source as _};
     use crate::task::StageCtx;
 
     fn touch(dir: &Path, rel: &str, body: &str) {
@@ -427,18 +419,14 @@ mod tests {
         assert_eq!(names(&report), vec!["push进来的.epub"]);
     }
 
-    /// `ScanSource` 的立场：skip_existing、Suffix —— 全量直导也不该覆盖库里的书。
+    /// 扫描这一类来源交得出「这是扫描」这一个身份，别的立场它说了不算。
+    ///
+    /// 旧形状里这里断言的是 `Policy { skip_existing: true, on_name_clash: Suffix }`：
+    /// 全量直导不该覆盖库里的书。那两件事现在都不再是来源的立场 —— 重扫同一本会在
+    /// 判重那一步被认成同一本书（`Imported::Duplicate`），而副本名由内容哈希定，
+    /// 撞不上别人那一份。两条都由 `import::tests` 钉住，这里只留 `kind`。
     #[test]
-    fn scan_source_carries_the_scan_policy() {
-        let source = ScanSource::new(vec![]);
-        assert_eq!(source.kind(), ImportKind::Scan);
-        assert_eq!(
-            source.policy(),
-            Policy {
-                skip_existing: true,
-                copy_in: true,
-                on_name_clash: NameClash::Suffix,
-            }
-        );
+    fn scan_source_reports_its_kind() {
+        assert_eq!(ScanSource::new(vec![]).kind(), ImportKind::Scan);
     }
 }

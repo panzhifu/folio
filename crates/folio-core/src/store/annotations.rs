@@ -143,6 +143,15 @@ impl Store {
         Ok(())
     }
 
+    /// 库里一共有几条批注。统计那一屏要的那个数，不需要把批注本身读出来。
+    ///
+    /// 不拿 [`Store::annotations`] 的返回值去 `.len()`：那个入口会把每一条的锚点 JSON
+    /// 解析一遍，而统计只要一个数。
+    pub fn annotation_count(&self) -> Result<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(conn.query_row("SELECT count(*) FROM annotations", [], |r| r.get(0))?)
+    }
+
     pub fn delete_annotation(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn

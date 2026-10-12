@@ -9,12 +9,15 @@ pub mod fb2;
 pub mod html;
 pub mod markdown;
 pub mod provider;
+pub(crate) mod sniff;
 pub mod woff;
 pub mod xhtml;
 pub(crate) mod zip;
 
 pub use content::{Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageSource};
-pub use provider::{DocumentProvider, provider_for, providers, supported_extensions, supports_extension};
+pub use provider::{
+    DocumentProvider, provider_for, providers, supported_extensions, supports_extension,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Format {
@@ -41,6 +44,28 @@ impl Format {
         }
     }
 
+    /// 落地副本该用的扩展名（不带点、小写）。
+    ///
+    /// **问的是 provider 注册表**，不是在这里手写一张对照表：副本存成
+    /// `<哈希前缀>.<这一格>`，而下一次按扩展名认领文件的正是那张表 —— 两处各写一份
+    /// 就会漂，而漂的症狀最狠：导进去一本书，它自己的副本再也认不出来
+    /// （实测过一次，`Format::as_str` 给的是 `text` / `markdown`，注册表认的是
+    /// `txt` / `md`）。
+    ///
+    /// 认法：拿注册表全部被认领的扩展名逐个探，取第一个「provider 认下它，且它
+    /// 报出的格式就是自己」的那个。剩下没有命中的（例如还没写 provider 的格式）
+    /// 退回 `as_str`，让日志里至少有个说得清的名字。
+    pub fn copy_extension(self) -> &'static str {
+        crate::format::provider::supported_extensions()
+            .iter()
+            .copied()
+            .find(|ext| {
+                let probe = std::path::Path::new("probe").with_extension(ext);
+                crate::format::provider::provider_for(&probe).is_some_and(|p| p.format() == self)
+            })
+            .unwrap_or_else(|| self.as_str())
+    }
+
     pub fn parse(s: &str) -> Option<Format> {
         match s {
             "markdown" => Some(Format::Markdown),
@@ -54,12 +79,16 @@ impl Format {
     }
 }
 
-/// 索引方案的版本。**分章规则或位置方案一改就要加一。**
+/// 索引方案的版本。**分章规则、位置方案、或定版式的页表算法一改就要加一。**
 ///
 /// 库里的位置（[`ChapterLocator`]）是「拿什么规则算出来的」这件事的承诺：
 /// `Section(3)` 只在「按今天这套规则分章」的前提下指到第三章。Markdown 的标题层级、
 /// FB2 的 section 嵌套、EPUB 的 spine 过滤，任一改动都会让老库的序号指到别处 ——
 /// 那时版本号对不上，[`crate::store::Store::stale_reason`] 会说「该重扫」。
+///
+/// 定版式文档（CBZ / 将来的 PDF）没有章表，但页表同样是「按某套算法产出的索引」，
+/// 所以**两条落库路径都要盖这一格** —— 不盖的话定版式书会被永远判成「索引旧了」，
+/// 每次开书都白重扫一遍。
 ///
 /// v2：CSS 出库 —— `books.css` 列从拼接文本改成位置清单（`CssStored` 信封），
 /// 老库靠重扫改写成新格式；重扫前旧文本当内联样式兜底。
@@ -309,6 +338,16 @@ pub fn guess_media_type(bytes: &[u8]) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// 封面缩略图的**规格版本**（`plans/基础设施.md` §5.1：缩略图要有规格版本）。
+///
+/// 它给「这批封面是按什么规格生成的」一个数：`COVER_MAX_EDGE`（尺寸）、或
+/// [`shrink_image`] 的编码口径（有 alpha 走 PNG、没有走 JPEG）一改就 +1。各格式
+/// provider 生成封面时把它写进 `books.cover_spec`，对不上的书在开书时重扫重生成。
+///
+/// 为什么需要：`books.cover` 只是字节，换过尺寸/编码之后没有任何东西能认出老封面 ——
+/// 不重生成的话，规格换了只有新导入的书受益，已经在架上的那些永远是旧样子。
+pub const COVER_SPEC_VERSION: u32 = 1;
 
 /// 一张位图缩到长边不超过 `max_edge`，再编码回一个紧凑格式。
 ///
@@ -589,265 +628,7 @@ fn find_close_paren(text: &str) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
-    //! href 的 fragment 拆分，以及目录条目在 SQLite 那一列上的往返。
-
-    use super::{TocEntry, fragment_of, shrink_image};
-
-    /// 造一张真位图 —— `shrink_image` 要真的解码+重编，够 header 的假字节过不了。
-    fn png(width: u32, height: u32) -> Vec<u8> {
-        use image::ImageEncoder as _;
-        let img = image::RgbaImage::from_pixel(width, height, image::Rgba([10, 20, 30, 255]));
-        let mut out = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut out)
-            .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgba8)
-            .expect("合成 PNG 应能编码");
-        out
-    }
-
-    /// 大图缩下来、小图原样：这是手机上图片能不能上屏的那一条。
-    #[test]
-    fn covers_are_bounded_and_re_encoded_as_jpeg() {
-        // 解不出来的字节不动：不能把「不是图」当成「要缩的图」。
-        assert!(shrink_image(b"not an image", 256).is_none());
-        // 0 是「不设上限」的哨兵，不能被当成要缩到 0。
-        assert!(shrink_image(&png(100, 80), 0).is_none());
-        // 无字可压缩的极小图：重编反而更大，退回原图（`None` = 用原字节）。
-        assert!(shrink_image(&png(2, 2), 256).is_none());
-
-        // 超长边：缩到上限内，纵横比保住，而且**一律 JPEG** —— 带 alpha 的封面
-        // 铺白底再编，不然透明区会变黑。
-        let (small, mime) = shrink_image(&png(1024, 512), 256).expect("大图该被缩");
-        let decoded = image::load_from_memory(&small).expect("缩过的字节要还能解");
-        assert_eq!(
-            (decoded.width(), decoded.height()),
-            (256, 128),
-            "纵横比要保住"
-        );
-        assert_eq!(mime, "image/jpeg");
-
-        // **没超过上限**的也要重编：封面的问题是「按原格式存」，不是「太大」——
-        // 一张 800×1200 的 PNG 原样进库就是 400 KB。
-        let (_, mime) = shrink_image(&png(400, 600), 512).expect("没过上限也要重编");
-        assert_eq!(mime, "image/jpeg");
-    }
-
-    #[test]
-    fn fragments_are_taken_after_the_first_hash() {
-        assert_eq!(
-            fragment_of("Text/chap2.xhtml#court").as_deref(),
-            Some("court")
-        );
-        assert_eq!(fragment_of("Text/chap1.xhtml"), None, "没有 # 就是章首");
-        assert_eq!(
-            fragment_of("Text/chap1.xhtml#"),
-            None,
-            "空 fragment 也是章首"
-        );
-        // fragment 是第一个 # 之后的全部：它自己可以含 #（`a#b#c` 的落点是 `b#c`）。
-        assert_eq!(fragment_of("a.xhtml#b#c").as_deref(), Some("b#c"));
-        assert_eq!(fragment_of("a.xhtml#%20x").as_deref(), Some(" x"));
-        // 只有第一段是元素 id，后面的 xpointer 部分丢掉。
-        assert_eq!(
-            fragment_of("a.xhtml#sec,xpointer()").as_deref(),
-            Some("sec")
-        );
-    }
-
-    /// 认不出来的两套 fragment 语法都当「没有」，也就是落到章首，而不是跳到一个错的位置。
-    #[test]
-    fn unsupported_fragments_read_as_chapter_start() {
-        assert_eq!(fragment_of("a.xhtml#epubcfi(/6/8[chap2]!4:12)"), None);
-    }
-
-    /// 库里已有的 `toc_json` 没有 fragment 这一项。解不开旧数据比少一个落点严重得多 ——
-    /// 那是一整本书的目录凭空消失。
-    #[test]
-    fn toc_entries_without_a_fragment_field_still_load() {
-        let old = r#"[{"title":"第一章","href":"OEBPS/Text/chap1.xhtml","children":[]}]"#;
-        let entries: Vec<TocEntry> = serde_json::from_str(old).expect("旧 toc_json 要能解");
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].fragment, None);
-        assert_eq!(entries[0].href, "OEBPS/Text/chap1.xhtml");
-    }
-}
+mod contract;
 
 #[cfg(test)]
-mod contract {
-    //! **引擎输入契约**：`Chapter::source` 永远是引擎就绪的 XHTML。
-    //!
-    //! 这一层以前是破的 —— EPUB / FB2 / HTML 的章源是 XHTML，Markdown / TXT 是规范化
-    //! 纯文本，于是界面必须知道「哪个格式还要包一层」（`Format::source_is_xhtml` +
-    //! `chapter_xhtml`），`Format` 就这样渗进了排版链。包装下沉到 provider 之后，
-    //! 这条契约成为 provider 的**唯一输出约定**，界面与引擎都不再问格式。
-    //!
-    //! 这里用真实 provider 跑（不是构造 `Chapter`），因为要钉住的正是「provider 有没有
-    //! 真的守约」。三种源都覆盖：本来就是标记的（HTML / FB2 / EPUB）、纯文本的
-    //! （Markdown / TXT）、以及不进引擎的定版式（CBZ）。
-
-    use std::path::{Path, PathBuf};
-
-    use crate::anchor::TextMap;
-    use crate::dom::Dom;
-    use crate::format::{Content, Format, provider_for};
-
-    /// 一段 XHTML 的可见文本。契约里真正要保的是**内容**，不是标记 —— 断言只能看它。
-    fn visible(xhtml: &str) -> String {
-        let dom = Dom::parse(xhtml.as_bytes());
-        let body = dom
-            .elements()
-            .find(|(id, _)| dom.tag_name(*id) == Some("body"))
-            .map_or(dom.document, |(id, _)| id);
-        TextMap::build(&dom, body).text().to_string()
-    }
-
-    fn without_whitespace(text: &str) -> String {
-        text.chars().filter(|c| !c.is_whitespace()).collect()
-    }
-
-    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, body).unwrap();
-        path
-    }
-
-    /// EPUB 用仓库里那份合成书（`tests/fixtures/oss/minimal-zh.epub`），
-    /// 它是唯一一个「真容器」样本，其余格式临时造一份就够。
-    fn epub_fixture() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/minimal-zh.epub")
-    }
-
-    fn fb2(dir: &Path) -> PathBuf {
-        write(
-            dir,
-            "a.fb2",
-            r#"<?xml version="1.0" encoding="utf-8"?>
-<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
-<description><title-info><book-title>契约</book-title></title-info></description>
-<body><section><title><p>第一章</p></title><p>正文</p></section></body>
-</FictionBook>"#,
-        )
-    }
-
-    /// 可重排的每一种 provider：产物必须能直接进引擎。
-    ///
-    /// 断言是「能解析 + body 里有可见文本」，不是「标签在白名单里」—— 引擎对不认识的
-    /// 标签本来就有 block 降级（`css::ua`），把清单写死会把合法的新标签误判成违约，
-    /// 而这条契约真正要保的是**引擎拿到的东西是标记、且内容没丢**。
-    #[test]
-    fn every_reflow_provider_hands_the_engine_parseable_xhtml() {
-        let dir = tempfile::tempdir().unwrap();
-        let cases: Vec<(&str, PathBuf)> = vec![
-            (
-                "markdown",
-                write(
-                    dir.path(),
-                    "a.md",
-                    "# 第一章\n\n正文一\n\n## 第二章\n\n正文二\n",
-                ),
-            ),
-            ("text", write(dir.path(), "a.txt", "第一段\n\n第二段\n")),
-            (
-                "html",
-                write(
-                    dir.path(),
-                    "a.html",
-                    "<html><body><h1>标题</h1><p>正文</p></body></html>",
-                ),
-            ),
-            ("fb2", fb2(dir.path())),
-            ("epub", epub_fixture()),
-        ];
-
-        for (name, path) in cases {
-            let provider = provider_for(&path).unwrap_or_else(|| panic!("{name} 该有 provider"));
-            let (_, content) = provider
-                .read(&path)
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
-            let Content::Reflow(flow) = content else {
-                panic!("{name} 该读成可重排");
-            };
-            assert!(
-                provider.format().as_str() == name,
-                "{name} 的 format 对不上"
-            );
-            assert!(!flow.chapters.is_empty(), "{name} 一章都没有");
-            for (ix, chapter) in flow.chapters.iter().enumerate() {
-                assert!(
-                    chapter.source().contains('<'),
-                    "{name} 第 {ix} 章的 source 不是标记：{:?}",
-                    &chapter.source()[..chapter.source().len().min(120)]
-                );
-                let text = visible(&chapter.source());
-                assert!(
-                    !text.trim().is_empty(),
-                    "{name} 第 {ix} 章解析出来没有可见文本"
-                );
-            }
-        }
-    }
-
-    /// 纯文本那一支的核心不变量：**包装不增删一个可见字符**。
-    ///
-    /// 这条断了，读者的进度与批注坐标会整体漂移 —— 而屏幕上什么都看不出来。
-    #[test]
-    fn the_plain_text_wrapper_preserves_visible_text() {
-        let dir = tempfile::tempdir().unwrap();
-        for (name, body) in [
-            (
-                "a.md",
-                "# 第一章\n\n正文一\n第二行\n\n## 第二章\n\n正文二\n",
-            ),
-            ("a.txt", "第一段\n\n第二段\n"),
-        ] {
-            let path = write(dir.path(), name, body);
-            let provider = provider_for(&path).unwrap();
-            let (_, content) = provider.read(&path).unwrap();
-            let Content::Reflow(flow) = content else {
-                panic!("{name} 该读成可重排");
-            };
-            let joined: String = flow.chapters.iter().map(|c| visible(&c.source())).collect();
-            let expected = super::xhtml::atx_markers_removed(body);
-            assert_eq!(
-                without_whitespace(&joined),
-                without_whitespace(&expected),
-                "{name} 的包装改了内容"
-            );
-        }
-    }
-
-    /// 定版式走另一族：产出的是页表，不是章源。它压根不该有 `Chapter`。
-    #[test]
-    fn the_fixed_family_hands_pages_not_chapters() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.cbz");
-        let file = std::fs::File::create(&path).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let opts = zip::write::SimpleFileOptions::default();
-        use std::io::Write as _;
-        for (name, w, h) in [("1.png", 4u32, 6u32), ("10.png", 4, 6)] {
-            zip.start_file(name, opts).unwrap();
-            let img = image::RgbaImage::from_pixel(w, h, image::Rgba([1, 2, 3, 255]));
-            let mut bytes = Vec::new();
-            image::DynamicImage::ImageRgba8(img)
-                .write_to(
-                    &mut std::io::Cursor::new(&mut bytes),
-                    image::ImageFormat::Png,
-                )
-                .unwrap();
-            zip.write_all(&bytes).unwrap();
-        }
-        zip.finish().unwrap();
-
-        let provider = provider_for(&path).unwrap();
-        assert_eq!(provider.format(), Format::Cbz);
-        let (_, content) = provider.read(&path).unwrap();
-        let Content::Fixed(fixed) = content else {
-            panic!("CBZ 该读成定版式");
-        };
-        assert_eq!(fixed.page_count(), 2);
-        for page in &fixed.pages {
-            assert!(page.image_href().is_some(), "CBZ 的页都是图源");
-        }
-    }
-}
+mod tests;

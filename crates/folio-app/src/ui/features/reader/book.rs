@@ -22,11 +22,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use folio_core::document::Document as OpenedDocument;
+use folio_core::format::TocEntry;
 use folio_core::{Chapter, Locator, Reader};
 use gpui_kit::{App, SharedString};
 
 use super::book_fonts::BookFonts;
 use super::document::Document;
+use super::toc_tree::{self, TocRow};
 use crate::ui::shared::images::{BookImages, ChapterImages, document_source};
 
 /// 章文本缓存的半窗宽：手里留「当前章 ± 3」章的正文。
@@ -62,6 +64,9 @@ pub(super) struct Placement {
 pub struct Book {
     title: SharedString,
     chapters: Vec<Chapter>,
+    /// 目录树，原样从文档拿（EPUB 的 nav.xhtml / toc.ncx）。单文件格式（TXT / MD / FB2）
+    /// 与定版式没有它 —— 那时 [`Self::toc_rows`] 退回章节表，读者那屏目录不该是空的。
+    toc: Vec<TocEntry>,
     /// 锚章：连续滚动时是「视口顶所在的那一章」。页眉章名、进度、落库全跟它走。
     chapter: usize,
     /// 整本书的图片索引，换章时按新章的目录重建视图。字节按需从文档现取。
@@ -105,9 +110,9 @@ impl Book {
         // 图片索引与内嵌字体别名表都从这份文档建一次；字节按需现取（`ByteSource` 持一份
         // `Arc<dyn Document>`，所以 `doc` 不必再存进 `Book`）。
         tracing::info!(
-            "Book::new: 章节 {} 章、图片索引 {} 张（doc.images()）",
-            chapters.len(),
-            doc.images().len()
+            chapters = chapters.len(),
+            images = doc.images().len(),
+            "Book::new: 建索引"
         );
         let book_images = Arc::new(BookImages::new(doc.images(), document_source(doc.clone())));
         let fonts = BookFonts::for_document(doc.as_ref(), &css, cx);
@@ -121,6 +126,7 @@ impl Book {
         let mut this = Self {
             title: doc.meta().title.clone().into(),
             chapters,
+            toc: doc.toc().to_vec(),
             chapter,
             book_images,
             document,
@@ -262,7 +268,7 @@ impl Book {
                 text
             }
             Err(err) => {
-                tracing::error!("Book: 第 {} 章取不到正文：{err:#}", index + 1);
+                tracing::error!(chapter = index + 1, error = %err, "Book: 取不到正文");
                 String::new()
             }
         }
@@ -475,6 +481,46 @@ impl Book {
             .get(index)
             .map(|chapter| chapter.title.clone())
             .unwrap_or_default()
+    }
+
+    /// 「容器路径 → 章号」。目录条目靠它对上正文：`TocEntry::href` 与
+    /// `Chapter::spine_href` 同形（都已百分号解码、去掉 fragment），所以是一次查表
+    /// 而不是模糊匹配。
+    ///
+    /// 空 `spine_href` 不进表：单文件格式（TXT / MD / FB2）每一章都是空串，进了表
+    /// 就等于「所有目录条目都指向第 0 章」—— 那是比跳错更糟的错，因为它看着是好的。
+    /// 同一条 href 出现两次时留文档序在前的那一章。
+    fn toc_hrefs(&self) -> HashMap<String, usize> {
+        let mut map = HashMap::new();
+        for (index, chapter) in self.chapters.iter().enumerate() {
+            if chapter.spine_href.is_empty() {
+                continue;
+            }
+            map.entry(chapter.spine_href.clone()).or_insert(index);
+        }
+        map
+    }
+
+    /// 目录那一屏要的行，带层级。**每次问都重算**：树只有几十到几百条，
+    /// 而缓存它要处理的失效情形（换书、重排、导入后重新解析）比这点开销贵得多。
+    ///
+    /// 书自己没有目录时退回章节表：TXT 一本十万行没有 nav 是常态，
+    /// 给读者一屏空白等于把「跳到某一章」这个功能拿走。
+    pub fn toc_rows(&self) -> Vec<TocRow> {
+        if self.toc.is_empty() {
+            return (0..self.chapters.len())
+                .map(|index| TocRow {
+                    ix: index,
+                    parent: None,
+                    depth: 0,
+                    title: self.chapters[index].title.clone(),
+                    branch: false,
+                    chapter: Some(index),
+                    fragment: None,
+                })
+                .collect();
+        }
+        toc_tree::build(&self.toc, &self.toc_hrefs())
     }
 
     pub fn document(&self) -> &Document {

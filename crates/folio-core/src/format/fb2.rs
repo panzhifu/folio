@@ -17,8 +17,7 @@ use quick_xml::events::Event;
 
 use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
-    image_dims,
-    shrink_image, stem_of,
+    image_dims, shrink_image, stem_of,
 };
 use crate::Result;
 use crate::error::IoResultExt as _;
@@ -34,7 +33,7 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
     let raw = std::fs::read_to_string(path).io_path(path)?;
     let parsed = parse_metadata(&raw);
 
-let images: Vec<ImageRes> = parsed
+    let images: Vec<ImageRes> = parsed
         .binaries
         .iter()
         .map(|b| {
@@ -101,7 +100,6 @@ let images: Vec<ImageRes> = parsed
     Ok((meta, Content::Reflow(flow)))
 }
 
-
 impl DocumentProvider for Fb2Adapter {
     fn format(&self) -> Format {
         Format::Fb2
@@ -153,7 +151,6 @@ impl DocumentProvider for Fb2Adapter {
     fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
         read_with(path, true)
     }
-
 
     fn image_bytes(&self, path: &Path, href: &str) -> Option<Vec<u8>> {
         // 图片在文件里是 base64 的 `<binary>`，每次按 id 现解一次 —— 与 EPUB 每次

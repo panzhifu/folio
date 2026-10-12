@@ -20,7 +20,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, params};
 
@@ -53,13 +52,11 @@ const _: () = {
     assert_send_sync::<Store>();
 };
 
-/// 当前 Unix 秒。全库只走这一个时钟，测试要改也只改一处。
-pub(super) fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+/// 当前 Unix 秒。全库只走这一个时钟,测试要改也只改一处。
+///
+/// 实现搬到 [`crate::time::now`]：界面侧记阅读会话的起止要读**同一个**钟,否则
+/// 「库里那一段的时长」和「屏幕上算出来的」会差出几十秒,而那没有任何报错。
+pub(super) use crate::time::now;
 
 pub fn default_db_path() -> PathBuf {
     crate::paths::db_path()
@@ -70,6 +67,12 @@ impl Store {
         Self::open_at(&default_db_path())
     }
 
+    /// 打开（必要时建）库文件并跑迁移。
+    ///
+    /// **一份打不开的库只报错，绝不删掉重来**（`plans/基础设施.md` §5.2）：进度、批注、
+    /// 集合都只在这里，损坏的库被自动重建等于丢数据。`Connection::open` 对已存在的坏文件
+    /// 不会覆写，迁移失败会把错误原样抛上来 —— 怎么提示是入口的事，这层保证**磁盘上那个
+    /// 文件一个字节都不动**（`a_corrupt_database_is_reported_not_overwritten` 钉住这条）。
     #[tracing::instrument(level = "debug", skip_all, fields(path = %path.display()))]
     pub fn open_at(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {

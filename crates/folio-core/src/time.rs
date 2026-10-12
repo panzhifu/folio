@@ -10,6 +10,59 @@
 /// 一天的秒数。放在这里，省得 `86400` 这个魔数散落到各调用点。
 pub const DAY: i64 = 86_400;
 
+/// 当前 Unix 秒。
+///
+/// 全项目只走这一个时钟：库里那条 `store::now` 就是它（一次转发），而阅读界面记会话
+/// 起止、统计页算「今天」也读它。两处各读一遍 `SystemTime` 迟早会漂出几十秒,
+/// 而那种漂移在屏幕上表现为「时长比自己算的少一点」，没有任何报错。
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 一小时的秒数。与 [`DAY`] 配对，省得 `3600` 散落到各调用点。
+pub const HOUR: i64 = 3_600;
+
+/// 一天的小时数 = 时段分布那张表的宽度（`store::reading` 的 `hour_distribution`）。
+pub const HOURS_PER_DAY: usize = 24;
+
+/// Unix 秒 + 时区偏移（秒）→ 本地小时（0..24）。
+///
+/// 先取**日内余数**再除：`(x / 3600) % 24` 那种写法在 `x` 为负时（偏移把时刻推过 1970
+/// 年元旦之前）会算出负小时，而那个返回值直接拿去索引一张 24 格的表。
+pub fn local_hour(unix_secs: i64, tz_offset_secs: i64) -> usize {
+    (unix_secs + tz_offset_secs).rem_euclid(DAY) as usize / HOUR as usize
+}
+
+/// 一段时长的**分量**，不带任何文字。
+///
+/// 为什么只拆数不拼字符串：措辞属于文案，不属于日历算术（`plans/基础设施.md` §五.4）。
+/// 中文是「1 小时 24 分钟」，英文是 `1h 24m`，日文是「1 時間 24 分」，而「不足一小时就说
+/// 分钟」那条规则各语言也不一样。在这里写死一句，等于替三门语言挑了一门。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DurationParts {
+    pub hours: i64,
+    /// 去掉整小时之后的余下分钟。
+    pub minutes: i64,
+    /// 去掉整分钟之后的余下秒。
+    pub seconds: i64,
+    /// 不足一分钟。为 0 时界面只报分钟，不然「0 分 30 秒」这种读数比「0 分钟」还难懂。
+    pub sub_minute: bool,
+}
+
+/// 秒 → 时/分/秒的分量。负数夹到 0（时长不可能是负的，但两个时刻相减可能是）。
+pub fn duration_parts(secs: i64) -> DurationParts {
+    let secs = secs.max(0);
+    DurationParts {
+        hours: secs / 3_600,
+        minutes: secs / 60 % 60,
+        seconds: secs % 60,
+        sub_minute: secs < 60,
+    }
+}
+
 /// Unix 秒 + 时区偏移（秒）→ 本地日序号（1970-01-01 是第 0 天）。
 ///
 /// `div_euclid` 而不是 `/`：1970 年以前的秒数除以一天会往 0 取整，
@@ -45,7 +98,7 @@ pub fn civil_date(epoch_day: i64) -> String {
 mod tests {
     //! 日历换算：已知日期、闰年、以及 1970 年前后的负日序号。
 
-    use crate::time::{DAY, civil_date, day_start, local_day};
+    use crate::time::{DAY, civil_date, day_start, duration_parts, local_day, local_hour};
 
     #[test]
     fn known_days_round_trip_to_the_right_date() {
@@ -81,5 +134,41 @@ mod tests {
         let late = day_start(19_723, 0) - 30 * 60;
         assert_eq!(civil_date(local_day(late, 0)), "2023-12-31");
         assert_eq!(civil_date(local_day(late, 8 * 3600)), "2024-01-01");
+    }
+
+    /// 小时桶跟着偏移走，且**永远落在 0..24**。
+    ///
+    /// 后面那条断言钉的是越界下标：时段那张图按 24 格索引，一个负小时就是 panic。
+    #[test]
+    fn the_hour_follows_the_offset_and_stays_in_range() {
+        // 2024-01-01 00:30 UTC。
+        let at = day_start(19_723, 0) + 30 * 60;
+        assert_eq!(local_hour(at, 0), 0);
+        assert_eq!(local_hour(at + 8 * 3600 - 30 * 60, 0), 8, "同一天的第 8 小时");
+        // 东八区看那一刻是 08:30 ⇒ 8 点。
+        assert_eq!(local_hour(at, 8 * 3600), 8);
+        // 西五区看那一刻是前一天 19:30 ⇒ 19 点，且不能是负数。
+        assert_eq!(local_hour(at, -5 * 3600), 19);
+        for offset in [0, 8 * 3600, -11 * 3600, 13 * 3600 + 45 * 60] {
+            for shift in 0..48 {
+                assert!(local_hour(at + shift * 3_600, offset) < 24);
+            }
+        }
+        // 1970 年以前（负秒数）也要落在 range 里。
+        assert!(local_hour(-7_000_000_000, 0) < 24);
+    }
+
+    #[test]
+    fn durations_split_into_parts_without_any_words() {
+        let parts = duration_parts(5_040);
+        assert_eq!((parts.hours, parts.minutes, parts.seconds), (1, 24, 0));
+        assert!(!parts.sub_minute);
+
+        let just = duration_parts(45);
+        assert!(just.sub_minute, "不足一分钟要能问出来，界面向这之下才说秒");
+        assert_eq!((just.hours, just.minutes, just.seconds), (0, 0, 45));
+
+        assert_eq!(duration_parts(3_600).minutes, 0, "整点不额外报 60 分");
+        assert_eq!(duration_parts(-500).seconds, 0, "负时长夹到 0");
     }
 }

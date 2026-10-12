@@ -11,21 +11,22 @@ pub mod navigation;
 
 use std::time::Duration;
 
+use folio_core::Library;
 use folio_core::config::Appearance;
 use gpui_kit::base::motion::Transition;
 use gpui_kit::base::{NavMotion, NavStack, NavStackEvent, NavStackState};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, Context, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement, Render, SharedString, Styled, Subscription, Window, actions, div,
-    px,
+    KeyBinding, ParentElement, Render, SharedString, Styled, Subscription, Task, Window, actions,
+    div, px,
 };
 
 use crate::ui::features::notes::NotesView;
 use crate::ui::features::reader::{ReadingPage, Reserve};
-use crate::ui::features::settings::{AccountView, SettingsPage, SettingsView};
+use crate::ui::features::settings::{CompactSettings, SettingsPage, SettingsView};
 use crate::ui::features::shelf::{ShelfEvent, ShelfView};
-use crate::ui::features::stats::StatsView;
+use crate::ui::features::stats::{StatsEvent, StatsView};
 use crate::ui::features::welcome::WelcomeView;
 use crate::ui::host;
 use crate::ui::shared::config_model::ConfigHolder;
@@ -104,16 +105,23 @@ fn field_holds_focus(window: &Window) -> bool {
         .any(|context| context.primary().is_some_and(|entry| entry.key == "Input"))
 }
 
+/// 配置落盘的去抖窗口（`plans/基础设施.md` §2.5）。拖一次字号滑条会产出几十次改动，
+/// 逐次 `save` 就是逐次文件写；攒几百毫秒，一次落盘。退出时由 `on_app_quit` 兜底 flush。
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+
 pub struct AppShell {
     /// 当前目的地。
     destination: Destination,
     /// 每个目的地一条返回栈，下标见 [`Destination::index`]。
     stacks: Vec<gpui_kit::Entity<NavStackState>>,
-    /// 「我的」那一个目的地的行列表视图，只有手机端有：那一屏自管内部子屏
-    /// （P0 暂不搬上栈），返回要问它。桌面那一格画的是设置整页，没有子屏要问。
-    account: Option<gpui_kit::Entity<AccountView>>,
+    /// 「我的」那一个目的地的钻入式设置视图，只有手机端有：那一屏自管内部子屏
+    /// （页列表 → 全屏子页），返回要问它。桌面那一格画的是设置整页，没有子屏要问。
+    account: Option<gpui_kit::Entity<CompactSettings>>,
     /// 被 push 进书架栈的阅读页（两端单本）。
     reading: Option<gpui_kit::Entity<ReadingPage>>,
+    /// 「统计」那一格的视图。外壳留着它有两个理由：榜单那一行点开的订阅要挂在它上面，
+    /// 而**关掉一本书之后要叫它重取一次**（读者读的那几分钟不进账，那一屏就还是旧数）。
+    stats: gpui_kit::Entity<StatsView>,
     /// 首次启动的欢迎页。书库位置没确认前，外壳画的是它而不是主界面。
     welcome: gpui_kit::Entity<WelcomeView>,
     /// 现在是不是停在欢迎页。启动时由「书库位置确认过没有」决定（见 [`AppShell::boot`]），
@@ -123,10 +131,18 @@ pub struct AppShell {
     _config_watch: Subscription,
     /// 书架「打开一本书」的订阅。
     _shelf_watch: Subscription,
+    /// 统计榜单「打开一本书」的订阅。与 `_shelf_watch` 走的是同一个 `open_reading`。
+    _stats_watch: Subscription,
     /// 书架栈的 `Popped` 订阅：pop 出阅读页时把位置落库。
     _stack_watch: Subscription,
     /// 上一次涂到界面上的外观配置。渲染时比较它。
     applied: Option<Appearance>,
+    /// 上一次已经同步给监听服务的 `library` 一节。配置观察者比较它，
+    /// 只有书库目录或监听那几项真的变了才重启监听（`plans/基础设施.md` §2.5）。
+    watched_library: Library,
+    /// 待落盘的去抖任务。每来一次配置改动就换掉它（drop 即取消计时），
+    /// 安静 [`SAVE_DEBOUNCE`] 之后才真的写一次盘（§2.5）。
+    _save_debounce: Option<Task<()>>,
     /// 上一次向系统**要过**的全屏态（阅读页在最上面 = 要）。渲染时比较它。
     ///
     /// 要存这一份而不是每帧比 `window.is_fullscreen()`：桌面上那一档是异步生效的
@@ -151,23 +167,28 @@ impl AppShell {
         let onboarding = !ConfigHolder::library(cx).is_confirmed();
 
         // 四个目的地的根视图。
-        let shelf = cx.new(|cx| ShelfView::boot(window, cx));
+        //
+        // 书架那条栈**先于**架面建：架面手上要留一份栈的弱句柄，「信息」那一整页由它
+        // 自己压上去 —— 与阅读页把设置屏压进同一条栈是同一条路。栈归外壳这件事没变，
+        // 变的只是「谁往里放一页」。
+        let shelf_stack = cx.new(|_| NavStackState::new());
+        let shelf = cx.new(|cx| ShelfView::boot(window, cx, shelf_stack.downgrade()));
         let stats = cx.new(|_| StatsView::new());
         let notes = cx.new(|_| NotesView::new());
-        // 「我的」这一格两端画的不一样：能点浮层的那一端直接画整页字段（[`SettingsView`]，
-        // 落点是「关于」那一页），另一端仍是行列表（[`AccountView`] 的子屏入口）。
-        // 「这一端点得住浮层吗」问 host，不在这里写 `cfg(mobile)`。
-        let (account, account_root): (Option<gpui_kit::Entity<AccountView>>, AnyView) =
+        // 「我的」这一格两端画的不一样：桌面直接画整页字段（[`SettingsView`]，
+        // 落点是「关于」那一页），手机画钻入式的紧凑列表（[`CompactSettings`]）——
+        // 两份界面吃的是同一份页面规格。「这一端塞不塞得下两栏」问 host，不写 `cfg(mobile)`。
+        let (account, account_root): (Option<gpui_kit::Entity<CompactSettings>>, AnyView) =
             if host::supports_overlay_controls(cx) {
                 let settings = cx.new(|_| SettingsView::new(SettingsPage::About));
                 (None, settings.into())
             } else {
-                let view = cx.new(AccountView::boot);
+                let view = cx.new(|_| CompactSettings::new());
                 let root: AnyView = view.clone().into();
                 (Some(view), root)
             };
 
-        // 每个目的地一条栈，根视图先压进去。
+        // 每个目的地一条栈，根视图先压进去。书架那一条已经在架面之前建好了。
         let mut stacks = Vec::with_capacity(Destination::ALL.len());
         for destination in Destination::ALL {
             let root: AnyView = match destination {
@@ -176,7 +197,11 @@ impl AppShell {
                 Destination::Notes => notes.clone().into(),
                 Destination::Account => account_root.clone(),
             };
-            let stack = cx.new(|_| NavStackState::new());
+            let stack = if destination == Destination::Shelf {
+                shelf_stack.clone()
+            } else {
+                cx.new(|_| NavStackState::new())
+            };
             stack.update(cx, |state, cx| state.push(root, NavMotion::Immediate, cx));
             stacks.push(stack);
         }
@@ -191,18 +216,40 @@ impl AppShell {
 
         // 阅读页被 pop 出去时把位置落库（返回键与边缘滑动都走这条路）。
         let _stack_watch = cx.subscribe(&shelf_stack, |this, _, event, cx| {
-            if matches!(event, NavStackEvent::Popped)
-                && let Some(reading) = this.reading.take()
-            {
-                reading.update(cx, |reading, cx| reading.close(cx));
+            if matches!(event, NavStackEvent::Popped) {
+                if let Some(reading) = this.reading.take() {
+                    reading.update(cx, |reading, cx| reading.close(cx));
+                }
+                // 刚结掉的那一段要出现在统计上：读者从阅读页切去「统计」看自己读了多久，
+                // 那一屏拿的还是上一次进来的快照，就少算了刚才那几十分钟。
+                this.stats.update(cx, |stats, cx| stats.refresh(cx));
+                // 导航栏画不画看栈上压了几页，所以栈一变这一帧就得重画 ——
+                // 不敲这一下，pop 回架面后那条底栏不会自己回来。
+                cx.notify();
             }
+        });
+
+        // 统计的榜单点开一本书 = 与书架同一动作、同一条路（往书架栈 push 阅读页）。
+        // 目的地也顺手切过去：读者点的是「去读这本」，落点必须是正文而不是留在报告里，
+        // 而切目的地正是 [`go`](Self::go) 那一格该做的事，不绕过它自己改字段。
+        let _stats_watch = cx.subscribe(&stats, move |this, _, event, cx| {
+            // 只有一种事件，所以这一下不必判（写成 `if let` 会是个永真的模式匹配，
+            // 编译器也会说它 irrefutable）。将来统计页多出别的动作，这里再换回 `match`。
+            let StatsEvent::Open(book_id) = event;
+            this.open_reading(*book_id, cx);
         });
 
         // 配置改一次就落盘并重画这一屏（重涂主题在渲染那一帧做）。
         let _config_watch = cx.observe(&ConfigHolder::handle(cx), |this, _, cx| {
-            ConfigHolder::save(cx);
-            // 监听跟着配置走：开关、目录、节奏变了就换一只服务。
-            crate::ui::shared::watch::sync_from_config(cx);
+            // 落盘**去抖**（§2.5）：拖滑条会产出几十次改动，攒一攒再写一次盘。
+            this.schedule_save(cx);
+            // 监听只在**监听相关的那几项**真的变了才动：书库目录或 `watch`（开关/目录/节奏）。
+            // 改个字号也去重启一遍监听服务，是文档 §2.5 点名要避免的「无关服务重启」。
+            let library = ConfigHolder::library(cx);
+            if library != this.watched_library {
+                this.watched_library = library;
+                crate::ui::shared::watch::sync_from_config(cx);
+            }
             // 欢迎页那一关：读者挑完书库位置后位置被确认，就该把这一屏换掉。
             // 不用欢迎页自己回调 —— 位置写进配置是唯一的信号，这里观察到即可。
             if this.onboarding && ConfigHolder::library(cx).is_confirmed() {
@@ -210,6 +257,19 @@ impl AppShell {
             }
             cx.notify();
         });
+
+        // 退出时把去抖窗口里那份配置立刻落盘，并把还开着的那本书的位置与阅读时长一起
+        // 结掉（§1.3：退出要 flush 的只有位置与配置 —— 而时长和位置是同一次离席的两笔账，
+        // 漏掉后一笔，那一段就只能等那条五分钟一次的时钟，而读者往往不会在五分钟里回来）。
+        // `on_app_quit` 的回调在 `App` 的全局 drop **之前**跑，两次同步写远在它的预算内。
+        cx.on_app_quit(|this, cx| {
+            ConfigHolder::save(cx);
+            if let Some(reading) = this.reading.take() {
+                reading.update(cx, |reading, cx| reading.close(cx));
+            }
+            async {}
+        })
+        .detach();
 
         // 全局返回兜底。Android 上返回键 / 边缘滑动被 fork 翻成 escape；而停在书架上
         // （焦点路径里没有任何会处理 escape 的元素）时，元素级的 `.on_action` 收不到它。
@@ -228,14 +288,27 @@ impl AppShell {
             stacks,
             account,
             reading: None,
+            stats,
             welcome,
             onboarding,
             _config_watch,
             _shelf_watch,
+            _stats_watch,
             _stack_watch,
             applied: None,
+            watched_library: ConfigHolder::library(cx),
+            _save_debounce: None,
             fullscreen_asked: None,
         }
+    }
+
+    /// 把「落盘」排到 [`SAVE_DEBOUNCE`] 之后；这期间又来一次改动，就换掉这个任务
+    /// （drop `Task` 即取消计时）并重新计时。exit 前的最后一份由 `on_app_quit` flush。
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        self._save_debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DEBOUNCE).await;
+            let _ = this.update(cx, |_, cx| ConfigHolder::save(cx));
+        }));
     }
 
     /// 打开一本书：已经开着就换书，否则新建阅读页 push 进书架栈。
@@ -278,10 +351,11 @@ impl AppShell {
         {
             return;
         }
-        #[cfg(mobile)]
-        cx.quit();
-        #[cfg(not(mobile))]
-        let _ = cx;
+        // 栈底再往后要不要退出，问平台边界：`#[cfg(mobile)]` 写在外壳里就是越界
+        // （`plans/基础设施.md` §5.9 —— 平台判断只允许出现在 `host` 与 `platform`）。
+        if host::back_exits_app(cx) {
+            cx.quit();
+        }
     }
 
     /// 切到一个目的地。导航栏那一次点击与宿主测试都走这一条 —— 抽出来就是为了测试能
@@ -292,6 +366,12 @@ impl AppShell {
         // （`text_input_state_changed(FocusLost)`）。桌面同一刀：换页后输入框
         // 留着焦点圈也不像话。
         window.blur(cx);
+        // 进「统计」重取一次快照。统计页不在 `render` 里查库（那会把画一屏变成做一轮
+        // IO），所以它自己不会知道库里刚才多了什么 —— 进来这一格就是它该问的时刻。
+        // 每次都取而不是「只在第一次进来时取」：读者会读一读、切回架面、再切回来看数。
+        if destination == Destination::Stats {
+            self.stats.update(cx, |stats, cx| stats.refresh(cx));
+        }
         self.destination = destination;
         cx.notify();
     }
@@ -321,6 +401,18 @@ impl AppShell {
             .is_some_and(|top| top.entity_id() == reading.entity_id())
     }
 
+    /// 当前目的地这条栈上是不是压着页（栈底之外还有东西）。
+    ///
+    /// 判据只看栈的形状，不看压上来的是谁：阅读页、「信息」那一页、阅读里压进去的设置屏
+    /// 要的都是整屏，而它们各自到外壳报一次「我开着呢」迟早会漏报一个。
+    /// 问的是**当前目的地**那一条栈：切去别的目的地时，那边的导航栏不该跟着消失。
+    fn page_pushed(&self, cx: &App) -> bool {
+        self.stacks[self.destination.index()]
+            .read(cx)
+            .depth()
+            > 1
+    }
+
     /// 当前档位的导航栏：点击即切目的地。
     fn nav(&self, size: SizeClass, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
@@ -347,10 +439,14 @@ impl Render for AppShell {
 
         let size = SizeClass::of(window);
         let safe = host::safe_area(window, cx);
-        // 手机上点开一本书 = 整屏都是正文，底栏收起。
+        // 栈上压了页 = 那一页要吃满整屏 → 导航栏整条收起。阅读页、「信息」那一页、
+        // 阅读里压进去的设置屏都走这一条：收不收是**栈的形状**，不必每页到外壳来报一次自己是谁。
+        let nav_gone = self.page_pushed(cx);
+        // 系统级那一层（真全屏、藏状态栏）只跟着阅读页：一页表单不该把状态栏也藏掉。
         let immersive = immersive_nav(size, self.reading_on_top(cx));
         // 阅读页要扣掉的那两条边（导航栏 + 安全区），见 [`reading_reserve`]。
-        let reserve = reading_reserve(size, immersive, &safe);
+        // 扣的是**画出来的**那条导航栏，所以跟着 `nav_gone` 而不是 `immersive`。
+        let reserve = reading_reserve(size, nav_gone, &safe);
         if let Some(reading) = self.reading.clone() {
             reading.update(cx, |reading, cx| reading.set_reserve(reserve, cx));
         }
@@ -385,7 +481,7 @@ impl Render for AppShell {
                     .child(div().flex_1().min_h_0().overflow_hidden().child(content));
                 // 底栏连同它上面那条发丝线一起收起；底部的留白是系统安全区，不是应用
                 // chrome，收起导航栏也不动它，否则正文会滑进手势条下面。
-                if !immersive {
+                if !nav_gone {
                     column = column.child(hairline(cx)).child(self.nav(size, cx));
                 }
                 column
@@ -398,7 +494,7 @@ impl Render for AppShell {
                     .size_full()
                     .bg(cx.theme().background)
                     .text_color(cx.theme().foreground);
-                if !immersive {
+                if !nav_gone {
                     row = row.child(self.nav(size, cx));
                 }
                 row.child(
@@ -470,667 +566,6 @@ impl Render for AppShell {
     }
 }
 
+
 #[cfg(test)]
-mod tests {
-    //! 外壳要钉住的两层：导航栏在哪些档位收起（纯判据，两端都编译），
-    //! 以及「外壳起得来、标题栏真在视图树里、换语言能重画」这串启动回路。
-    //!
-    //! 后半截只在桌面跑：`try_find` 来自 `TestSupportExt`，那个 trait 在本文件是
-    //! `#[cfg(not(mobile))]` 才挂上的（移动端没有测试支持注册路径）。
-
-    /// 回归门：手机上正文压在栈顶时底栏收起，正文也不再为它预留那 56px。
-    ///
-    /// 宿主到不了 Compact 档（`SizeClass::of` 在桌面把窄窗口夹到 `Medium`，底栏只在真机
-    /// 长出来），所以钉住渲染时用的那两条判据：收起与否、以及随之而来的预留量。
-    /// 预留不归零的话，正文底下会白留一条永远滚不进视野的空带；而预留报错了轴，
-    /// 另一端就会拿它去扣错的那一边。
-    #[test]
-    fn the_bottom_bar_yields_to_the_reading_page() {
-        use super::{Reserve, immersive_nav, nav_reserve};
-        use crate::ui::shell::navigation::{
-            BOTTOM_BAR_HEIGHT, RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass,
-        };
-
-        assert!(
-            immersive_nav(SizeClass::Compact, true),
-            "阅读页在栈顶时底栏应收起"
-        );
-        assert_eq!(
-            nav_reserve(SizeClass::Compact, true),
-            Reserve::ZERO,
-            "底栏收起后正文不该再预留底栏高"
-        );
-
-        // 没进阅读页就是原样：底栏在、预留也还在 —— 而手机上它横躺着，占的是**高**。
-        assert!(!immersive_nav(SizeClass::Compact, false));
-        assert_eq!(
-            nav_reserve(SizeClass::Compact, false),
-            Reserve {
-                width: 0.0,
-                height: BOTTOM_BAR_HEIGHT
-            },
-            "手机的导航栏占的是正文的高，不是宽"
-        );
-
-        // 桌面（Medium / Expanded）的阅读同样收起侧栏 —— 它竖着，占的是**宽**，
-        // 而那一条宽正是双页对开要用的。收的是导航，不是目的地：回出有阅读页顶栏的返回。
-        assert!(
-            immersive_nav(SizeClass::Medium, true),
-            "平板与桌面上进阅读页也该把侧栏让出来"
-        );
-        assert!(immersive_nav(SizeClass::Expanded, true));
-        assert_eq!(
-            nav_reserve(SizeClass::Medium, true),
-            Reserve::ZERO,
-            "侧栏收起后正文不该再预留那条宽"
-        );
-        assert_eq!(
-            nav_reserve(SizeClass::Expanded, true),
-            Reserve::ZERO
-        );
-        // 没进阅读页就是原样：侧栏在、预留也还在。
-        assert!(!immersive_nav(SizeClass::Expanded, false));
-        assert_eq!(
-            nav_reserve(SizeClass::Medium, false),
-            Reserve {
-                width: RAIL_WIDTH,
-                height: 0.0
-            }
-        );
-        assert_eq!(
-            nav_reserve(SizeClass::Expanded, false),
-            Reserve {
-                width: SIDEBAR_WIDTH,
-                height: 0.0
-            }
-        );
-    }
-
-    /// 回归门：报给阅读页的那份扣减里必须含外壳 pad 掉的安全区。
-    ///
-    /// 阅读页自己量的是**窗口**高，正文盒 = 窗口高 − 报过去的这一条 − 页眉 − 页脚。
-    /// 少扣一条安全区，那个盒子就比真能画的地方高几十逻辑像素，多出来的一段被裁在
-    /// 页脚带下面 —— 屏幕上的表现是「已经滚到底了，最后几行还是看不见」。
-    #[test]
-    fn the_reading_page_is_told_about_the_safe_areas_too() {
-        use super::{Reserve, SizeClass, nav_reserve, reading_reserve};
-        use crate::ui::host::Insets;
-        use crate::ui::shell::navigation::{BOTTOM_BAR_HEIGHT, SIDEBAR_WIDTH};
-
-        let safe = Insets {
-            top: 41.0,
-            bottom: 25.0,
-            ..Default::default()
-        };
-
-        // Compact：底栏 + 上下两条一起扣。底栏收起时那两条还在 —— 那是系统的地盘，
-        // 不是应用 chrome，收起导航栏不动它。
-        assert_eq!(
-            reading_reserve(SizeClass::Compact, false, &safe),
-            Reserve {
-                width: 0.0,
-                height: BOTTOM_BAR_HEIGHT + 41.0 + 25.0
-            }
-        );
-        assert_eq!(
-            reading_reserve(SizeClass::Compact, true, &safe),
-            Reserve {
-                width: 0.0,
-                height: 41.0 + 25.0
-            }
-        );
-
-        // 桌面那一支：导航栏占的是宽，纵向只 pad 上面那条安全区，所以高里只加它。
-        assert_eq!(
-            reading_reserve(SizeClass::Expanded, false, &safe),
-            Reserve {
-                width: SIDEBAR_WIDTH,
-                height: 41.0
-            }
-        );
-
-        // 安全区全 0（桌面的真实值）时这条退回 `nav_reserve` 原样：不多扣一个像素。
-        assert_eq!(
-            reading_reserve(SizeClass::Medium, false, &Insets::ZERO),
-            nav_reserve(SizeClass::Medium, false)
-        );
-    }
-
-    #[cfg(not(mobile))]
-    mod booted {
-        use crate::ui::features::shelf::ShelfView;
-        use crate::ui::shared::config_model::ConfigHolder;
-        use crate::ui::shell::AppShell;
-        use crate::ui::shell::navigation::Destination;
-        use folio_core::i18n::{Locale, t_in};
-        use folio_core::task::ProgressEvent;
-        use folio_core::{
-            Candidate, Config, ImportOutcome, Language, Library, PathsSource, ScanReport, Store,
-            TaskEvent, TaskManager, submit_import,
-        };
-        use gpui_kit::component::Root;
-        use gpui_kit::test::TestWindowExt;
-        use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
-
-        /// 起一版外壳，顺带把它那个实体也交出来 —— 「切个目的地」这个动作要从它上面调，
-        /// 而设置整页正站在「我的」那一个目的地里。
-        ///
-        /// `desktop_host` 决定装不装平台服务：装了就是「这一端点得住浮层」（桌面那一档），
-        /// 没装按点不住算（宿主测试的默认，与手机同一档）。
-        ///
-        /// 书库位置**显式确认过**：没确认时外壳画的是欢迎页（见
-        /// [`the_welcome_screen_gates_the_app_until_a_library_is_chosen`]），
-        /// 既有用例要验的是正常的壳路径，不能被欢迎页挡在门外。
-        fn boot(
-            cx: &mut TestAppContext,
-            desktop_host: bool,
-        ) -> (AnyWindowHandle, Entity<AppShell>) {
-            cx.update(gpui_kit::init);
-            let mut shell = None;
-            let handle = cx
-                .open_window(size(px(900.), px(600.)), |window, cx| {
-                    crate::ui::shared::app_store::install(Store::in_memory().expect("内存库"), cx);
-                    ConfigHolder::install(confirmed_config(), cx);
-                    if desktop_host {
-                        crate::ui::host::install(cx);
-                    }
-                    let view = cx.new(|cx| AppShell::boot(window, cx));
-                    shell = Some(view.clone());
-                    Root::new(view, window, cx)
-                })
-                .into();
-            (handle, shell.expect("外壳应已建起"))
-        }
-
-        /// 已确认书库位置的一份配置。壳里的正常用例都从这里起。
-        fn confirmed_config() -> Config {
-            Config {
-                library: Library {
-                    dir: "/tmp/folio-books".into(),
-                    watch: None,
-                },
-                ..Config::default()
-            }
-        }
-
-        /// 起一版**首次启动**的外壳：书库位置为空串（＝没确认过），应当停在欢迎页。
-        fn boot_first_run(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<AppShell>) {
-            cx.update(gpui_kit::init);
-            let mut shell = None;
-            let handle = cx
-                .open_window(size(px(900.), px(600.)), |window, cx| {
-                    crate::ui::shared::app_store::install(Store::in_memory().expect("内存库"), cx);
-                    ConfigHolder::install(Config::default(), cx);
-                    let view = cx.new(|cx| AppShell::boot(window, cx));
-                    shell = Some(view.clone());
-                    Root::new(view, window, cx)
-                })
-                .into();
-            (handle, shell.expect("外壳应已建起"))
-        }
-
-        fn open_app(cx: &mut TestAppContext) -> AnyWindowHandle {
-            boot(cx, false).0
-        }
-
-        /// 切到「我的」再画一帧，问那一格里长出的是设置整页还是行列表。
-        fn account_shows_the_settings_page(
-            cx: &mut TestAppContext,
-            handle: AnyWindowHandle,
-            shell: &Entity<AppShell>,
-        ) -> bool {
-            cx.update_window(handle, |_, window, cx| {
-                shell.update(cx, |this, cx| this.go(Destination::Account, window, cx));
-                window.render_frame(cx);
-                window.try_find("folio-settings").is_some()
-            })
-            .expect("窗口应能渲染")
-        }
-
-        /// 回归门：自定义标题栏必须挂在视图树里（曾经的 bug 是窗口选项声明了透明标题栏、
-        /// 却没有任何人绘制它，于是顶上什么都没有）。
-        #[gpui_kit::test]
-        fn the_app_renders_a_custom_title_bar(cx: &mut TestAppContext) {
-            let handle = open_app(cx);
-            let present = cx
-                .update_window(handle, |_, window, cx| {
-                    window.render_frame(cx);
-                    window.try_find("app-title").is_some()
-                })
-                .expect("窗口应能渲染");
-            assert!(present, "标题栏里的应用标题应出现在视图树中");
-        }
-
-        /// 回归门：首次启动（书库位置没确认过）时停在欢迎页，不进主界面；选完位置就放行。
-        ///
-        /// 判据就是 `Library::is_confirmed()` —— 与「导入要不要拦住」同一条。写反的代价是
-        /// 读者第一次打开应用直接撞见书架（导入时又被拦下问位置），或者永远卡在欢迎页出不来。
-        #[gpui_kit::test]
-        fn the_welcome_screen_gates_the_app_until_a_library_is_chosen(cx: &mut TestAppContext) {
-            let (handle, shell) = boot_first_run(cx);
-
-            let welcome_shown = cx
-                .update_window(handle, |_, window, cx| {
-                    window.render_frame(cx);
-                    window.try_find("folio-welcome").is_some()
-                })
-                .expect("窗口应能渲染");
-            assert!(welcome_shown, "书库位置没确认时应画欢迎页");
-            assert!(
-                shell.read_with(cx, |this, _| this.onboarding),
-                "没确认位置时外壳该停在欢迎页"
-            );
-
-            // 选完位置（等价于选择器选中或点「使用默认位置」）：配置一变，门禁就该放行。
-            cx.update(|cx| {
-                ConfigHolder::edit_library(cx, |library| library.dir = "/tmp/folio-books".into());
-            });
-            let welcome_shown = cx
-                .update_window(handle, |_, window, cx| {
-                    window.render_frame(cx);
-                    window.try_find("folio-welcome").is_some()
-                })
-                .expect("窗口应能渲染");
-            assert!(!welcome_shown, "位置确认后欢迎页应消失");
-            assert!(
-                !shell.read_with(cx, |this, _| this.onboarding),
-                "位置确认后外壳该离开欢迎页、进主界面"
-            );
-        }
-
-        /// 回归门：返回键先退掉输入框的编辑态，而不是把这一屏弹走。
-        ///
-        /// Android 上系统返回与软键盘的「完成」都被 fork 翻成 `escape`，而软键盘**只在焦点
-        /// 离开输入框时**才收（`gpui-mobile` 的 `text_input_state_changed(FocusLost)`），
-        /// gpui-kit 的输入框对 escape 又只做 `cx.propagate()`。两头都不接，读者就看见键盘停在
-        /// 屏上收不掉，而同一键还会顺手把当前那一屏弹走（栈底那一档在手机上就是退出应用）。
-        #[gpui_kit::test]
-        fn back_gives_up_the_field_focus_instead_of_navigating(cx: &mut TestAppContext) {
-            let (handle, shell) = boot(cx, false);
-            let stack = shell.read_with(cx, |this, _| {
-                this.stacks[Destination::Shelf.index()].clone()
-            });
-
-            // 焦点走真实那一条路：架面渲染过一帧，搜索框的元素真在树上。
-            cx.update_window(handle, |_, window, cx| {
-                window.render_frame(cx);
-                let shelf = stack
-                    .read(cx)
-                    .current()
-                    .cloned()
-                    .and_then(|top| top.downcast::<ShelfView>().ok())
-                    .expect("书架栈底就是架面本身");
-                shelf.update(cx, |shelf, cx| shelf.focus_search(window, cx));
-                assert!(window.focused(cx).is_some(), "搜索框应真的拿到焦点");
-            })
-            .expect("窗口应能渲染");
-
-            cx.simulate_keystrokes(handle, "escape");
-
-            cx.update_window(handle, |_, window, cx| {
-                assert!(
-                    window.focused(cx).is_none(),
-                    "返回该先把编辑态退掉：焦点还在框上时，键盘没有任何一条路能收起来"
-                );
-            })
-            .expect("窗口应能渲染");
-            // 退编辑态与弹栈是两件事，一次按键只做前者。
-            assert_eq!(
-                stack.read_with(cx, |state, _| state.depth()),
-                1,
-                "退掉焦点的那一次返回不该把这一屏弹走"
-            );
-            assert!(
-                shell.read_with(cx, |this, _| this.reading.is_none()),
-                "同上：不该顺手 push 出别的一屏"
-            );
-        }
-
-        /// 回归门：点在架面的空白上，搜索框的编辑态要退掉。
-        ///
-        /// 这条走的是**真实嵌入**（书架顶上那颗 [`SearchBox`]）：组件自测钉的是
-        /// 判点机制本身，这里钉的是书架没有把它包丢 —— 哪天有人把搜索框换回裸
-        /// `Input` 或在外面多套一层容器，判点失聪，真机上的表现又是键盘钉在屏上。
-        #[gpui_kit::test]
-        fn clicking_blank_on_the_shelf_gives_up_the_search_focus(cx: &mut TestAppContext) {
-            let (handle, shell) = boot(cx, false);
-            let stack = shell.read_with(cx, |this, _| {
-                this.stacks[Destination::Shelf.index()].clone()
-            });
-
-            cx.update_window(handle, |_, window, cx| {
-                window.render_frame(cx);
-                let shelf = stack
-                    .read(cx)
-                    .current()
-                    .cloned()
-                    .and_then(|top| top.downcast::<ShelfView>().ok())
-                    .expect("书架栈底就是架面本身");
-                shelf.update(cx, |shelf, cx| shelf.focus_search(window, cx));
-                assert!(window.focused(cx).is_some(), "搜索框应真的拿到焦点");
-            })
-            .expect("窗口应能渲染");
-
-            // 窗口正中落一次点击：900×600 的桌面上那是空架说明文所在的空白 ——
-            // 框外的空白。（测试观测只注册带交互的元素，架面根上没有可点目标，
-            // 所以这里像组件自测一样按坐标落点。）
-            cx.update_window(handle, |_, window, cx| {
-                let at = gpui_kit::point(px(450.), px(300.));
-                window.drag(at, at, cx);
-                assert!(
-                    window.focused(cx).is_none(),
-                    "点在架面空白上应退掉搜索框的编辑态"
-                );
-            })
-            .expect("窗口应能渲染");
-        }
-
-        /// 回归门：后端导入管线交回的东西要真的变成架上一格，那一行导入读数要跟着收掉。
-        ///
-        /// 两头都是真的：结果来自跑过一遍的 `folio_core::import`（真的把文件拷进书库、真的
-        /// 解析），架面是外壳里挂着的那一个（内存书库）。钉住的是接线之后的三个方向 ——
-        /// 事件进模型、架上多一格、读数不再挂着。少任何一环，真机上都是「点了导入，过了几秒
-        /// 什么也没发生」，而这正是这条链从界面线程挪去后台之后新引入的风险：以前那一份是
-        /// 同步跑完的，屏幕下一帧自然就是新的。
-        ///
-        /// 起点选在「事件已经上了界面线程」：系统文件选择器在测试窗口里不会返回，那一段只能
-        /// 由 [`ShelfView::feed_import_event`] 代劳，剩下的都是真实路径。
-        #[gpui_kit::test]
-        fn the_backends_import_events_redraw_the_shelf(cx: &mut TestAppContext) {
-            let (handle, shell) = boot(cx, false);
-            let stack = shell.read_with(cx, |this, _| {
-                this.stacks[Destination::Shelf.index()].clone()
-            });
-
-            // 一次交两本给后端：一本认得、一本认不出 —— 坏的那本不该把好的挡在架外。
-            let tmp = tempfile::tempdir().unwrap();
-            let picked = tmp.path().join("原处");
-            std::fs::create_dir_all(&picked).unwrap();
-            std::fs::write(picked.join("a.txt"), "第一本\n").unwrap();
-            std::fs::write(picked.join("b.mobi"), "后端不认这个扩展名\n").unwrap();
-            let manager = TaskManager::<Vec<ImportOutcome>>::new(1);
-            // 落库在管线里做完：作业跑完，库里已经有那本好的；喂给架面的
-            // 只是「结果到了」的信号，架面自己重查库。
-            let store = cx
-                .update(|cx| crate::ui::shared::app_store::handle(cx))
-                .expect("书库应已装上");
-            let job = submit_import(
-                &manager,
-                Box::new(PathsSource::picked(vec![
-                    picked.join("a.txt"),
-                    picked.join("b.mobi"),
-                ])),
-                tmp.path().join("books"),
-                store,
-            );
-            let outcomes = job
-                .events
-                .into_iter()
-                .find_map(|event| match event {
-                    TaskEvent::Finished(Ok(outcomes)) => Some(outcomes),
-                    _ => None,
-                })
-                .expect("导入作业要以 Finished(Ok(..)) 收尾");
-
-            cx.update_window(handle, |_, window, cx| {
-                window.render_frame(cx);
-                let shelf = stack
-                    .read(cx)
-                    .current()
-                    .cloned()
-                    .and_then(|top| top.downcast::<ShelfView>().ok())
-                    .expect("书架栈底就是架面本身");
-                assert_eq!(shelf.read(cx).card_count(), 0, "还没导书时架上是空的");
-                assert!(
-                    window.try_find("shelf-importing").is_none(),
-                    "没在导入时不该有那一行读数"
-                );
-
-                shelf.update(cx, |shelf, cx| {
-                    shelf.feed_import_event(
-                        TaskEvent::Progress(ProgressEvent {
-                            done: 1,
-                            total: 2,
-                            message: "导入《第一本》".into(),
-                        }),
-                        cx,
-                    );
-                });
-                window.render_frame(cx);
-                assert!(
-                    window.try_find("shelf-importing").is_some(),
-                    "进度读数要画出来：这几秒里架面不动，读者只有这一行可看"
-                );
-
-                shelf.update(cx, |shelf, cx| {
-                    shelf.feed_import_event(TaskEvent::Finished(Ok(outcomes)), cx);
-                });
-                window.render_frame(cx);
-                assert!(
-                    window.try_find("shelf-importing").is_none(),
-                    "导完那一行读数要收掉"
-                );
-                assert_eq!(
-                    shelf.read(cx).card_count(),
-                    1,
-                    "好的那本要立刻成为架上一格，坏的那本不该把它挡在架外"
-                );
-            })
-            .expect("窗口应能渲染");
-        }
-
-        /// 回归门：扫描清单是「找到 → 勾选 → 导入所选」的那条路，勾中的要走
-        /// 与选文件导入同一条管线。
-        ///
-        /// 扫描结果由 [`ShelfView::feed_scan_event`] 喂进来（真实的整机扫描要扫
-        /// 测试机的家目录，那条不是门该扫的），**勾选之后的导入是真跑**：
-        /// `import_checked` 把勾中的路径交给后端管线，架上要出现「导入中」的读数。
-        /// 面板要在扫描结果到手时出现、在读数出现时收掉 —— 清单在时盖着架面，
-        /// 导入开始就该换回「导入中」那一行。
-        #[gpui_kit::test]
-        fn the_scan_panel_hands_the_checked_rows_to_the_pipeline(cx: &mut TestAppContext) {
-            let (handle, shell) = boot(cx, false);
-            let stack = shell.read_with(cx, |this, _| {
-                this.stacks[Destination::Shelf.index()].clone()
-            });
-
-            // 两本候选：一本好的、一本后端不认的 —— 与导入门同一组文件。
-            let tmp = tempfile::tempdir().unwrap();
-            let dir = tmp.path().join("下载");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("a.txt"), "第一本\n").unwrap();
-            std::fs::write(dir.join("b.mobi"), "后端不认这个扩展名\n").unwrap();
-            let report = ScanReport {
-                candidates: vec![
-                    Candidate {
-                        origin: folio_core::Origin::Local(dir.join("a.txt")),
-                        name: "a.txt".into(),
-                        size: None,
-                    },
-                    Candidate {
-                        origin: folio_core::Origin::Local(dir.join("b.mobi")),
-                        name: "b.mobi".into(),
-                        size: None,
-                    },
-                ],
-                skipped: 2,
-                truncated: false,
-            };
-
-            cx.update_window(handle, |_, window, cx| {
-                window.render_frame(cx);
-                let shelf = stack
-                    .read(cx)
-                    .current()
-                    .cloned()
-                    .and_then(|top| top.downcast::<ShelfView>().ok())
-                    .expect("书架栈底就是架面本身");
-                assert!(
-                    window.try_find("shelf-scan-panel").is_none(),
-                    "没在扫描时不该有面板"
-                );
-
-                shelf.update(cx, |shelf, cx| {
-                    shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
-                });
-                window.render_frame(cx);
-                assert!(
-                    window.try_find("shelf-scan-panel").is_some(),
-                    "结果到手面板要出现"
-                );
-
-                // 勾第一行（a.txt）。清单两项同目录：一条头 + 两行，第 1 项就是 a.txt。
-                shelf.update(cx, |shelf, cx| shelf.check_scan_row(1, true, cx));
-                shelf.update(cx, |shelf, cx| shelf.import_checked_for_test(cx));
-                window.render_frame(cx);
-                assert!(
-                    window.try_find("shelf-importing").is_some(),
-                    "导入所选要接上管线：读数行要出现"
-                );
-                assert!(
-                    window.try_find("shelf-scan-panel").is_none(),
-                    "清单在导入开始时要收掉"
-                );
-            })
-            .expect("窗口应能渲染");
-        }
-
-        /// 回归门：切目的地时输入框的编辑态要跟着退。
-        ///
-        /// 每条导航栈都常驻，切去别的页面只是不画书架了，输入框实体还活着 ——
-        /// 焦点不清，手机上软键盘就压在新的一屏上不下来。这一刀在 [`AppShell::go`]
-        /// 里，导航栏那一次点击与宿主测试走的是同一条路。
-        #[gpui_kit::test]
-        fn switching_destination_gives_up_the_field_focus(cx: &mut TestAppContext) {
-            let (handle, shell) = boot(cx, false);
-            let stack = shell.read_with(cx, |this, _| {
-                this.stacks[Destination::Shelf.index()].clone()
-            });
-
-            cx.update_window(handle, |_, window, cx| {
-                window.render_frame(cx);
-                let shelf = stack
-                    .read(cx)
-                    .current()
-                    .cloned()
-                    .and_then(|top| top.downcast::<ShelfView>().ok())
-                    .expect("书架栈底就是架面本身");
-                shelf.update(cx, |shelf, cx| shelf.focus_search(window, cx));
-                assert!(window.focused(cx).is_some(), "搜索框应真的拿到焦点");
-            })
-            .expect("窗口应能渲染");
-
-            cx.update_window(handle, |_, window, cx| {
-                shell.update(cx, |this, cx| this.go(Destination::Stats, window, cx));
-                assert!(
-                    window.focused(cx).is_none(),
-                    "切走目的地后编辑态不应留着：焦点不清键盘就收不起来"
-                );
-            })
-            .expect("窗口应能渲染");
-        }
-
-        /// 回归门：没有焦点时，返回照常弹栈 —— 上面那一档只在真有异议时才吃掉这一键。
-        #[gpui_kit::test]
-        fn back_still_pops_when_nothing_has_focus(cx: &mut TestAppContext) {
-            let (handle, shell) = boot(cx, false);
-            let stack = shell.read_with(cx, |this, _| {
-                this.stacks[Destination::Shelf.index()].clone()
-            });
-            shell.update(cx, |this, cx| this.open_reading(1, cx));
-            assert_eq!(
-                stack.read_with(cx, |state, _| state.depth()),
-                2,
-                "阅读页应已压上书架栈"
-            );
-
-            cx.update_window(handle, |_, window, cx| {
-                window.render_frame(cx);
-                assert!(window.focused(cx).is_none(), "点开书之后没有输入框拿着焦点");
-            })
-            .expect("窗口应能渲染");
-            cx.simulate_keystrokes(handle, "escape");
-
-            assert_eq!(
-                stack.read_with(cx, |state, _| state.depth()),
-                1,
-                "没有焦点时返回要弹栈，而不是空转一次"
-            );
-        }
-
-        /// 回归门：桌面上「我的」那一格是**一整页字段**（`SettingsView`）。
-        ///
-        /// 独立设置窗口删掉之后，那一整页字段只有这一个落脚处；这条钉住它真的被挂上去了，
-        /// 而不是留在原地等一个再也没人调的 `open`。
-        #[gpui_kit::test]
-        fn the_account_destination_is_the_settings_page_where_overlays_work(
-            cx: &mut TestAppContext,
-        ) {
-            let (handle, shell) = boot(cx, true);
-            assert!(
-                account_shows_the_settings_page(cx, handle, &shell),
-                "桌面那一格应画设置整页"
-            );
-        }
-
-        /// 回归门：浮层点不住的那一端，「我的」那一格仍是行列表。
-        ///
-        /// 整页字段的每一项控件都是浮层（下拉框、滚动下拉、数字框），在这端挂上去等于
-        /// 给读者一屏按不动的开关 —— 判据写反时这条会红。
-        #[gpui_kit::test]
-        fn the_account_destination_stays_a_list_where_overlays_cannot_be_tapped(
-            cx: &mut TestAppContext,
-        ) {
-            let (handle, shell) = boot(cx, false);
-            assert!(
-                !account_shows_the_settings_page(cx, handle, &shell),
-                "浮层点不住的那一端不该画出设置整页"
-            );
-        }
-
-        /// 多语言的验收：导航栏的文案由配置里的语言驱动，改偏好后视图能重画到新语言。
-        ///
-        /// 不断言侧栏那一格的元素 id —— `SidebarMenuItem` 的 id 是内部拼的
-        /// （`"{menu-id}-{ix}"`），不是标签。这里渲染一帧确认能重画，再按当前语言解出
-        /// 导航标签，等于同时验了「配置 → locale」与「视图可重画」两件事。
-        #[gpui_kit::test]
-        fn switching_the_interface_language_changes_the_rendered_labels(cx: &mut TestAppContext) {
-            cx.update(gpui_kit::init);
-            let store = Store::in_memory().expect("内存库");
-            let config = Config {
-                language: Language {
-                    locale: Locale::ZhHans,
-                },
-                ..Default::default()
-            };
-            let handle: AnyWindowHandle = cx
-                .open_window(size(px(900.), px(600.)), |window, cx| {
-                    crate::ui::shared::app_store::install(store, cx);
-                    ConfigHolder::install(config.clone(), cx);
-                    let view = cx.new(|cx| AppShell::boot(window, cx));
-                    Root::new(view, window, cx)
-                })
-                .into();
-
-            let nav_shelf = |cx: &mut TestAppContext| {
-                cx.update_window(handle, |_, window, cx| {
-                    window.render_frame(cx);
-                    let locale = ConfigHolder::language(cx).locale;
-                    t_in(locale, "nav.shelf", &[])
-                })
-                .expect("窗口应能渲染")
-            };
-            assert_eq!(nav_shelf(cx), "书架", "偏好是中文时导航标签应为中文");
-
-            cx.update(|cx| {
-                ConfigHolder::edit_language(cx, |l| l.locale = Locale::En);
-            });
-            assert_eq!(nav_shelf(cx), "Shelf", "切英文后导航标签应跟着变");
-
-            cx.update(|cx| {
-                ConfigHolder::edit_language(cx, |l| l.locale = Locale::Ja);
-            });
-            assert_eq!(nav_shelf(cx), "本棚", "日文文案也要生效");
-        }
-    }
-}
+mod tests;

@@ -10,9 +10,8 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
 
-use folio_core::{Cancel, Candidate, ScanReport, TaskEvent, TaskManager, find};
+use folio_core::{Cancel, Candidate, Priority, ScanReport, TaskEvent, TaskManager, find};
 use gpui_kit::base::v_virtual_list;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -67,22 +66,18 @@ pub(crate) enum ScanPhase {
     },
 }
 
-/// 扫描作业的线程池：整个进程一份、一条线程。扫描一跑几秒到几十秒，
-/// 不该和导入队列抢那一条工作线程。
-fn scan_queue() -> &'static Arc<TaskManager<ScanReport>> {
-    static QUEUE: OnceLock<Arc<TaskManager<ScanReport>>> = OnceLock::new();
-    QUEUE.get_or_init(|| Arc::new(TaskManager::new(1)))
-}
-
-/// 把一轮整机扫描包成后台作业。`exclude` 至少含书库目录 —— 扫到自己拷的副本
-/// 再导一遍是无意义的循环。
+/// 把一轮整机扫描包成后台作业，走**共用的池**（§1.1「一条队列」），按**预热档**排队：
+/// 扫描能与导入并行（池有两条 worker），但让在跑的交互/预热作业排在前面。`exclude`
+/// 至少含书库目录 —— 扫到自己拷的副本再导一遍是无意义的循环。
 fn submit_scan(
-    manager: &TaskManager<ScanReport>,
+    manager: &TaskManager,
     roots: Vec<PathBuf>,
     exclude: Vec<PathBuf>,
     noise_exempt: Vec<PathBuf>,
 ) -> folio_core::task::TaskHandle<ScanReport> {
-    manager.submit(move |ctx| Ok(find(&roots, &exclude, &noise_exempt, ctx)))
+    manager.submit_with(Priority::Prewarm, move |ctx| {
+        Ok(find(&roots, &exclude, &noise_exempt, ctx))
+    })
 }
 
 impl ShelfView {
@@ -124,7 +119,8 @@ impl ShelfView {
         }
         let exclude = vec![target_dir(&ConfigHolder::library(cx)).expect("start_scan 刚确认过")];
         let noise_exempt = scan_noise_exempt();
-        let handle = submit_scan(scan_queue(), roots, exclude, noise_exempt);
+        // 与导入共用同一个池（§1.1）：扫描走预热档，导入走落库档。
+        let handle = submit_scan(&crate::ui::shared::services::pool(), roots, exclude, noise_exempt);
         let cancel = handle.cancel.clone();
         self.scan = Some(ScanPhase::Scanning { found: 0, cancel });
         self._scan = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
@@ -611,7 +607,7 @@ fn flatten(
 }
 
 /// 字节数 → 人读的大小。一本书正文几 MB，单位给到 MB 就够；扫描清单与卡片
-/// 长按菜单的「书籍信息」面板（`view.rs`）共用这一条。
+/// 长按菜单点开的「信息」那一页（[`super::book_info`]）共用这一条。
 pub(super) fn fmt_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / (1024 * 1024) as f64)

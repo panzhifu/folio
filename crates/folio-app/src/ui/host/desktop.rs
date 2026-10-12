@@ -23,6 +23,12 @@ impl Host for DesktopHost {
         true
     }
 
+    fn back_exits_app(&self) -> bool {
+        // 桌面的窗口归窗口管理器与那条标题栏管：返回键弹完栈就该停在那儿，
+        // 把整个进程关掉是错的动作。
+        false
+    }
+
     fn body_family(&self, wanted: &str, cx: &App) -> String {
         match find_family(wanted, cx) {
             Some(hit) => hit,

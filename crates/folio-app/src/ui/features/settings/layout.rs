@@ -7,7 +7,7 @@
 
 use super::*;
 
-pub(super) fn layout_page(cx: &App) -> SettingPage {
+pub(super) fn layout_page(cx: &App) -> Page {
     page(
         tr(cx, "page.layout"),
         IconName::Columns3,

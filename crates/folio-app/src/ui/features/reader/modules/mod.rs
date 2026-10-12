@@ -1,5 +1,6 @@
 //! 阅读会话的功能模块：`navigation`（翻页/滚动/模式）、`position`（进度 ↔ 坐标、恢复、
-//! 落库）、`toc`（章节表）、`selection`（选中：长按吸词/指针拖选/把手/菜单条）。
+//! 落库）、`toc`（章节表）、`selection`（选中：长按吸词/指针拖选/把手/菜单条）、
+//! `reading_time`（把这本书读了多久切成一段一段写进库，喂「统计」那一屏）。
 //!
 //! 每个文件都写 `impl [`ReaderSession`]`，而不是另造一套被会话持有的子 struct：
 //! 这些命令要读写的正是会话自己那点状态（`scroll_y` / `page` / `pending_restore` …），
@@ -14,5 +15,6 @@
 pub(super) mod annotations;
 mod navigation;
 mod position;
+mod reading_time;
 mod selection;
 mod toc;

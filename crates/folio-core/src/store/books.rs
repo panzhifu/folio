@@ -1,11 +1,15 @@
-//! 书目与书架：入库、查询、删除，以及「读到哪儿了」和分组。
+//! 书目与书架：入库、查询、删除，以及「读到哪儿了」「到过哪些章」和分组。
 //!
-//! 判据都围着 `books.path` 一条：**路径是书的身份**（同一路径重复导入是更新，不是
-//! 第二本书），所以查、删、跳过都按它走。
+//! 书的**身份**是内容哈希（`books.content_hash`，v12 起，见 `plans/导入管线.md` §六），
+//! 判重走 [`Store::book_by_hash`]；`books.path` 从那一刻起只回答「副本躺在哪儿」，
+//! 查与删仍然按它走，但它不再是「是不是同一本书」的判据。
+//! 这一列此刻**可为空**（懒补：老行由补齐作业逐本填），所以「按路径认」那条路还要留着
+//! —— [`Store::book_by_path`] 现在的用处是「这条副本路径被哪一行认领着」，不是判存在性。
 //!
 //! 分组查询（[`Store::shelf_grouped`] / [`Store::collection_groups`]）也住在这里：
 //! 它们不是另一张表的事，只是同一个书架换一种摆法。
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -52,6 +56,19 @@ pub(super) const BOOK_COLUMNS: &str = "id, path, title, authors, format, size, l
 /// 书架要的那几列：书目那些再加封面字节。
 const SHELF_COLUMNS: &str = "id, path, title, authors, format, size, last_opened_at, cover";
 
+/// 书架那套排序，几处查询共用一条常量。
+///
+/// **末尾的 `books.id DESC` 不是装饰，是必需的终结符**：入库时间戳是**秒**
+/// （`store::now`），一次批量导入的十几本会拿到同一个 `added_at`，于是 `added_at DESC`
+/// 全是并列 —— 并列之间 SQLite 不保证任何顺序，实测同一份数据能给出两种先后（本项目的
+/// `store::books::grouping::shelf_grouped_splits_by_author` 就是这么翻车的）。后果不只是
+/// 难看：书架与「未分组」那一栏在两次查询之间换序，读者的眼睛跟着丢一行。
+///
+/// 按 `id DESC` 收尾 = 「同秒入库的，后落库的在先」，与 `added_at DESC` 同向，也和
+/// `shelf_in_collection_in` 那条早就在用的 `cb.added_at DESC, books.id DESC` 一致。
+const SHELF_ORDER: &str =
+    "ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC, books.id DESC";
+
 fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     let authors: String = r.get(3)?;
     Ok(ShelfItem {
@@ -68,9 +85,15 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     })
 }
 
-
 impl Store {
-    /// 同一路径重复导入是更新，不是第二本书。
+    /// 落一行书目：同一**路径**重复入库是更新，不是第二本书。
+    ///
+    /// 「这本书是不是已经在了」不由这里判——管线在落地之前就按内容哈希判过重了
+    /// （[`Store::book_by_hash`]）。这里只管把那一行写成现在这个样子。
+    ///
+    /// `content_hash` 不在本语句里写：管线随后单独调 [`Store::set_content_hash`]。
+    /// 中间崩溃留下的是一条**没有身份的行**，而懒补本来就有这个状态（NULL），
+    /// 补齐作业会重算哈希把它填上——所以这两步不需要包在一个事务里。
     pub fn add_book(&self, path: &Path, meta: &DocMeta) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let path_s = path.to_string_lossy().into_owned();
@@ -107,10 +130,7 @@ impl Store {
 
     pub fn list_books(&self) -> Result<Vec<BookRow>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let sql = format!(
-            "SELECT {BOOK_COLUMNS} FROM books
-             ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC"
-        );
+        let sql = format!("SELECT {BOOK_COLUMNS} FROM books {SHELF_ORDER}");
         let mut stmt = conn.prepare(&sql)?;
         Ok(stmt
             .query_map([], book_from_row)?
@@ -142,19 +162,148 @@ impl Store {
             .optional()?)
     }
 
+    /// 单拿这一本的封面字节（生成时按 `cover_spec` 那档规格缩过）。
+    ///
+    /// 为什么不在 [`Store::book`] 里一起给：`BookRow` 被桌面端整库握在手里当标签页列表用，
+    /// 那一用不需要字节（见 [`BookRow`] 的说明）；而「点开一本书的信息」这一屏要的正好
+    /// 只是这一本的图，一次一条语句取回，比把整库的图读进内存便宜得多。
+    /// 没有封面（Markdown / TXT，或 EPUB 里没声明）时是 `None`，界面要画占位而不是空白。
+    pub fn book_cover(&self, id: i64) -> Result<Option<Vec<u8>>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // 两层 `Option` 各说一件事，别把它们混成一层：外层是「库里没有这一行」（书被删了），
+        // 由 `.optional()` 把 `QueryReturnedNoRows` 收成 `None`；内层是「这一行的封面列是空的」
+        // （Markdown / TXT，或 EPUB 里没声明），由 `get::<Option<Vec<u8>>>` 给。
+        // 读到「这本书」而它没封面，与根本没这本书，界面都要画占位，所以这里摊平成一层。
+        Ok(conn
+            .query_row("SELECT cover FROM books WHERE id = ?1", params![id], |r| {
+                r.get::<_, Option<Vec<u8>>>(0)
+            })
+            .optional()?
+            .flatten())
+    }
+
     pub fn book_by_path(&self, path: &Path) -> Result<Option<BookRow>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let sql = format!("SELECT {BOOK_COLUMNS} FROM books WHERE path = ?1");
         let s = path.to_string_lossy().into_owned();
+        Ok(conn.query_row(&sql, params![s], book_from_row).optional()?)
+    }
+
+    /// 按**内容哈希**找那一行：`plans/导入管线.md` §六 的判重入口，同哈希 = 同一本书。
+    ///
+    /// 走这一列而不是 `path`：书库搬家、读者改文件名、同一本书从三个来源进来，都不该
+    /// 因此多出第二行（而第二行意味着第二套进度与批注）。
+    pub fn book_by_hash(&self, hash_hex: &str) -> Result<Option<BookRow>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let sql = format!("SELECT {BOOK_COLUMNS} FROM books WHERE content_hash = ?1");
         Ok(conn
-            .query_row(&sql, params![s], book_from_row)
+            .query_row(&sql, params![hash_hex], book_from_row)
             .optional()?)
+    }
+
+    /// 记下这本书的内容身份。`NULL → 有值` 是懒补唯一的状态转移，所以这里既不改路径
+    /// 也不判重：改名由调用方做完之后把新位置交给 [`Store::retarget_book_path`]。
+    pub fn set_content_hash(&self, id: i64, hash_hex: &str, algo: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE books SET content_hash = ?2, hash_algo = ?3 WHERE id = ?1",
+            params![id, hash_hex, algo],
+        )?;
+        Ok(())
+    }
+
+    /// 把那一行的「副本在哪儿」改成新位置。身份那一列不动 —— 内容没变，变的是它躺在哪。
+    ///
+    /// 两个用处：补齐作业把旧名字副本改成哈希名之后回写；以及判重命中**但旧副本文件已经不
+    /// 在了**那次自愈 —— 记录重新接上一份内容相同的文件（§六「判重的语义」）。
+    /// `size` 与 `mtime` 一起刷：文件换了就该被 [`Store::stale_reason`] 认出来，留着旧数
+    /// 等于让自愈过的书一直报「文件被外部改过」。
+    ///
+    /// 新位置撞上别的行的 `path`（`UNIQUE`）时这里返回 `Err`：那种情况只能是两行在往同一个
+    /// 哈希名落地，判重本该先把它们合成一行，所以不静默覆盖，报出去让人看见。
+    pub fn retarget_book_path(&self, id: i64, path: &Path) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let s = path.to_string_lossy().into_owned();
+        let mtime = mtime_of(path);
+        let rows = match std::fs::metadata(path) {
+            Ok(meta) => conn.execute(
+                "UPDATE books SET path = ?2, size = ?3, mtime = ?4 WHERE id = ?1",
+                params![id, s, meta.len() as i64, mtime],
+            )?,
+            // 文件刚被 rename 走又读不到 metadata（权限、竞态）：位置还是要改，尺寸留着旧数。
+            Err(_) => conn.execute(
+                "UPDATE books SET path = ?2, mtime = ?3 WHERE id = ?1",
+                params![id, s, mtime],
+            )?,
+        };
+        if rows == 0 {
+            tracing::warn!("store: 把第 {id} 本改指 {s:?}，但没有这一行");
+        }
+        Ok(())
+    }
+
+    /// 改掉读者**自己认**的书名与作者：只动 `title` 与 `authors` 两列。
+    ///
+    /// 为什么只有这两列改得动：`format` / `size` / `path` 是那份文件的事实，读者说了不算；
+    /// 而入库时从文件里抠出来的书目经常是错的 —— EPUB 的 `<dc:title>` 写着 `Untitled`、
+    /// 作者栏塞的是出版社，架面上认错一本靠的正是这两条。正文、进度、批注一概不碰。
+    ///
+    /// `authors` 按 `\n` 存，读回时 [`book_from_row`] 用 `.lines()` 拆 —— 与
+    /// [`Store::add_book`] 写的那份是同一个编码，两侧不必再约定一遍分隔符。
+    /// 空串与只有空白的作者**不存**：`authors = ''` 读回来是空 `Vec`，界面上那一行随之消失
+    /// （`shelf::book_info` 的「作者可能缺」那条规则）。
+    ///
+    /// **同一路径再导一次会把它盖掉**：[`Store::add_book`] 的 `ON CONFLICT DO UPDATE`
+    /// 用文件里的书目重写这两列。这里不留「读者改过」的标记 —— 此刻认文件与内容是权威，
+    /// 手动改的名字属于「重导就没了」那一类，界面不另加解释。
+    pub fn set_book_meta(&self, id: i64, title: &str, authors: &[String]) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let rows = conn.execute(
+            "UPDATE books SET title = ?2, authors = ?3 WHERE id = ?1",
+            params![id, title, authors.join("\n")],
+        )?;
+        if rows == 0 {
+            tracing::warn!("store: 改第 {id} 本的书名作者，但没有这一行");
+        }
+        Ok(())
+    }
+
+    /// 还没算过内容身份的行（`content_hash IS NULL`），整行交出去。
+    ///
+    /// 这是懒补的那半张清单：补齐作业按它逐本算哈希、把旧名字的副本改成哈希名、回写
+    /// 位置（`Cleanup` 档，见 `crate::task::Priority` 与 `crate::import::backfill_copies`）。
+    /// 空表 = 全库都已认得自己的书。
+    /// 按 `id` 排是为了断言可复现，也让一次中断之后剩下的那批是确定的。
+    pub fn rows_missing_hash(&self) -> Result<Vec<BookRow>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let sql =
+            format!("SELECT {BOOK_COLUMNS} FROM books WHERE content_hash IS NULL ORDER BY id");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], book_from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// 还有多少行指着同一个副本路径（不算 `except_id` 自己）。
+    ///
+    /// 删一本书的副本之前问这一句：内容寻址之后「两条记录共用一个文件」是一个**可能**的
+    /// 状态（自愈会把记录接到一份已存在的副本上），连带删掉另一本的正文与批注不可接受
+    /// （`plans/导入管线.md` §六 末段、§十一 已决第 3 条）。计数从库里查，不另设计数表 ——
+    /// 计数表与记录本身迟早会漂开。
+    pub fn rows_sharing_path(&self, path: &str, except_id: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM books WHERE path = ?1 AND id != ?2",
+            params![path, except_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
     }
 
     pub fn remove_book(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let rows = conn
-            .execute("DELETE FROM books WHERE id = ?1", params![id])?;
+        let rows = conn.execute("DELETE FROM books WHERE id = ?1", params![id])?;
         // 删掉 0 行只有两种可能：那本书本来就不在，或者调用方拿错了 id。
         // 两种都表现为「界面上按了删除但书还在」，所以这里要说一句。
         if rows == 0 {
@@ -199,6 +348,44 @@ impl Store {
             )
             .optional()?
             .map(|(mode, json)| (mode, Locator::from_json(&json))))
+    }
+
+    /// 记下「这一章读到过」。
+    ///
+    /// 与 [`Store::set_position`] 是两件事：那一行只说「现在在哪儿」，读者翻过去就
+    /// 覆盖；这一条说的是「来过」，所以只插不改（`INSERT OR IGNORE`）—— 第二次进同一章
+    /// 不该把第一次的时间冲掉，也不该多出一行。
+    pub fn mark_chapter_read(&self, book_id: i64, idx: usize) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR IGNORE INTO chapter_read (book_id, idx, read_at) VALUES (?1, ?2, ?3)",
+            params![book_id, idx as i64, now()],
+        )?;
+        Ok(())
+    }
+
+    /// 某本书到过的章号集合。目录那一屏按它把「来过的」画成浅色。
+    pub fn read_chapters(&self, book_id: i64) -> Result<HashSet<usize>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rows =
+            conn.prepare("SELECT idx FROM chapter_read WHERE book_id = ?1 ORDER BY idx")?;
+        let out = rows
+            .query_map(params![book_id], |r| r.get::<_, i64>(0))?
+            .filter_map(|value| value.ok())
+            .map(|idx| idx as usize)
+            .collect();
+        Ok(out)
+    }
+
+    /// 抹掉某本书的「来过」痕迹。重新开读一本书时读者要的是那张白纸，
+    /// 而进度与标注都不在这一条里 —— 只清这一张表。
+    pub fn clear_chapter_read(&self, book_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "DELETE FROM chapter_read WHERE book_id = ?1",
+            params![book_id],
+        )?;
+        Ok(())
     }
 
     /// 书架分组：先按 `query` 过滤，再按 `by` 分。
@@ -249,7 +436,7 @@ impl Store {
              WHERE (?1 = ''
                     OR title LIKE ?2 ESCAPE '\'
                     OR authors LIKE ?2 ESCAPE '\')
-             ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC"#
+             {SHELF_ORDER}"#
         );
         let mut stmt = conn.prepare(&sql)?;
         let pattern = like_pattern(trimmed);
@@ -272,13 +459,13 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?)
     }
 
-    /// 还没进任何集合的书，排序与 [`Store::shelf`] 同一条。
+    /// 还没进任何集合的书，排序与 [`Store::shelf`] 同一条（同一个 `SHELF_ORDER` 常量）。
     /// [`Store::collection_groups`] 专属，不上锁。
     fn shelf_in_no_collection_in(conn: &Connection) -> Result<Vec<ShelfItem>> {
         let sql = format!(
             "SELECT {SHELF_COLUMNS} FROM books
              WHERE id NOT IN (SELECT book_id FROM collection_books)
-             ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC"
+             {SHELF_ORDER}"
         );
         let mut stmt = conn.prepare(&sql)?;
         Ok(stmt
@@ -313,8 +500,9 @@ fn like_pattern(query: &str) -> String {
 mod grouping {
     //! 书架分组：按作者/格式分，以及集合那一种「组存在库里」的分组。
     //!
-    //! 组内顺序只在确定时才断言（同一秒入库的书之间没有稳定先后），
-    //! 组名与成员集合才是这几条要钉住的。
+    //! 组内先后**是**可以断言的：`SHELF_ORDER` 末尾带 `books.id DESC` 那个终结符，
+    //! 同秒入库的书因此有确定顺序（接线前没有，那时这几条只能比集合，见
+    //! `shelf_order_breaks_the_import_tie`）。组名、成员、先后三样都钉。
 
     use std::path::{Path, PathBuf};
 
@@ -356,8 +544,46 @@ mod grouping {
         let groups = store.shelf_grouped("", GroupBy::Author).unwrap();
         let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(names, vec!["纪德", "莫里亚克"]);
-        assert_eq!(ids(&groups[0].items), vec![a, c]);
+        // 组内是 `[c, a]` 而不是 `[a, c]`：三本同一秒入库，`added_at DESC` 并列，
+        // 由 `books.id DESC` 收尾 —— 后落库的在先。见 `shelf_order_breaks_the_import_tie`。
+        assert_eq!(ids(&groups[0].items), vec![c, a]);
         assert_eq!(ids(&groups[1].items), vec![b]);
+    }
+
+    /// 同秒入库必须有终结符，否则书架的顺序是不确定的。
+    ///
+    /// 入库时间戳按**秒**存（`store::now`），所以这三本 `added_at` 完全相同，
+    /// `added_at DESC` 排不出先后；SQLite 对并列行不保证顺序，实测**同一份数据在同一次
+    /// 运行里就能给出两种先后**（这条测试在加 `books.id DESC` 之前大约每五六次翻一次红，
+    /// 而它每次都是新开的 `:memory:` 库，与别的测试无关 —— 那不是 flaky 的借口，是缺终结符）。
+    /// 生产上的后果更实在：批量导入完刷新书架，同一本书换了一格。
+    #[test]
+    fn shelf_order_breaks_the_import_tie() {
+        let store = Store::in_memory().unwrap();
+        for name in ["a.epub", "b.epub", "c.epub"] {
+            store
+                .add_book(&path(name), &meta("同秒入库", "纪德"))
+                .unwrap();
+        }
+        // 三本同一秒：先确认这条测试的前提成立，否则它什么都没钉住。
+        let tied = store
+            .shelf("")
+            .unwrap()
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        assert_eq!(tied.len(), 3);
+        // 后落库的在先，且连查两次同序 —— 少了终结符，第二条就可能变。
+        assert_eq!(tied, vec![3, 2, 1], "同秒入库该按行号倒序");
+        assert_eq!(
+            store
+                .shelf("")
+                .unwrap()
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<_>>(),
+            tied
+        );
     }
 
     #[test]
@@ -420,29 +646,44 @@ pub enum StaleReason {
     Changed,
     /// 索引是旧算法算的（分章规则 / 位置方案改过）。
     OldIndex,
+    /// 封面是按旧规格（尺寸 / 编码）生成的（见 [`crate::format::COVER_SPEC_VERSION`]）。
+    OldCover,
 }
 
 impl Store {
     /// 这本书记下的索引还可信吗？`None` = 可信。
     ///
     /// 正文只在文件里（见 `plans/text-out-of-db.md`），所以「文件还是那份文件吗」从
-    /// 锦上添花变成了**能不能读**的前提。三种不可信各自有后果：
+    /// 锦上添花变成了**能不能读**的前提。四种不可信各自有后果：
     ///
     /// - 文件不在 → 这一章取不到，重扫也没用；
     /// - 文件换了 → 位置指到别的内容上，进度与批注也跟着漂；
-    /// - 索引旧了 → 序号（`Section(n)`）按旧规则算的，可能整体错位。
+    /// - 索引旧了 → 序号（`Section(n)`）按旧规则算的，可能整体错位；
+    /// - 封面旧了 → 只影响书架那张缩略图，重扫一次就按新规格重生成。
     ///
-    /// 前两种可以直接删数据（`prune_missing`），第三种该重扫 —— 调用方选。
+    /// 第一种可以直接删数据（`prune_missing`），其余该重扫 —— 调用方选。
     pub fn stale_reason(&self, book_id: i64) -> Result<Option<StaleReason>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let row: Option<(String, i64, i64, i64)> = conn
+        // 封面的两格：`length(cover)` 为 NULL = 没有封面（`cover` 那一列可能是 MB 级
+        // 的字节，所以只问长度、不把整块图读出来）。
+        let row: Option<(String, i64, i64, i64, Option<i64>, i64)> = conn
             .query_row(
-                "SELECT path, size, mtime, index_version FROM books WHERE id = ?1",
+                "SELECT path, size, mtime, index_version, length(cover), cover_spec
+                   FROM books WHERE id = ?1",
                 params![book_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((path, size, mtime, version)) = row else {
+        let Some((path, size, mtime, version, cover_len, cover_spec)) = row else {
             return Ok(None);
         };
         // 顺序即优先级：文件不在最严重（要删数据），其次才是「算法换了」与「文件换了」。
@@ -464,6 +705,11 @@ impl Store {
         let changed = mtime != 0 && now_mtime != 0 && mtime != now_mtime;
         if changed {
             return Ok(Some(StaleReason::Changed));
+        }
+        // 有封面、但记下的是旧规格（或迁移前的 0）：值得重扫一次把它换成新规格。
+        // 没有封面的书不受这条影响 —— 本来就没有东西要重生成。
+        if cover_len.is_some() && cover_spec != i64::from(crate::format::COVER_SPEC_VERSION) {
+            return Ok(Some(StaleReason::OldCover));
         }
         let _ = size;
         Ok(None)

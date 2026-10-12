@@ -22,6 +22,8 @@ zip.workspace = true
 flate2.workspace = true
 # Basic 认证头（`remote::dav`）。锁里已有这份，不新增依赖树。
 base64.workspace = true
+# 内容哈希（`identity`）：书的身份是它的内容，不是文件路径。
+sha2.workspace = true
 # 文件夹监听（`watch`）：事件驱动的新书自动入库。
 notify.workspace = true
 # 同步 HTTP（`remote::ureq`）。

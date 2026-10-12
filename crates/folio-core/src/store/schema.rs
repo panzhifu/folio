@@ -182,4 +182,47 @@ ALTER TABLE chapters DROP COLUMN char_len;
 ALTER TABLE books ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE books ADD COLUMN index_version INTEGER NOT NULL DEFAULT 0;
 "#,
+    // v10：读过的章。目录那一屏要把「来过的章」和「没来的章」分开画（浅色 / 正常），
+    // 而 `positions` 每本书只有一行 —— 它记的是「现在在哪儿」，答不了「到过哪些地方」。
+    //
+    // 键是 `chapters.idx` 而不是位置串：章号是界面上唯一用来寻址的东西，且
+    // `books.index_version` 已经负责在分章规则改了的时候认出一份旧索引。
+    // 只插不改（`INSERT OR IGNORE`）：这条记录说的是「来过」，第二次来不该把
+    // 第一次的时间冲掉，也不该多出一行。
+    r#"
+CREATE TABLE chapter_read (
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    idx     INTEGER NOT NULL,
+    read_at INTEGER NOT NULL,
+    PRIMARY KEY (book_id, idx)
+);
+"#,
+    // v11：封面缩略图的**规格版本**。`books.cover` 只是字节，没有「按什么规格生成的」，
+    // 换了尺寸 / 编码之后老封面认不出来，只能一直用下去（`plans/基础设施.md` §5.1）。
+    // 这一列记下生成它的 `format::COVER_SPEC_VERSION`；缺省的 0 = 迁移之前生成的封面，
+    // 一律当旧规格，开书时由 `stale_reason` 认出来、走重扫重生成。
+    r#"
+ALTER TABLE books ADD COLUMN cover_spec INTEGER NOT NULL DEFAULT 0;
+"#,
+    // v12：**书的身份从「它在哪儿」换成「它是什么」**（`plans/导入管线.md` §六）。
+    //
+    // `content_hash` 可空而不是 `NOT NULL DEFAULT ''`：这一列是**懒补**的。迁移本身不许
+    // 读全库——几百本的一次性顺序读与哈希不该压在开库那一下（`plans/基础设施.md` §1.2 第 1
+    // 条），所以「还没算过」必须是一个能表达的状态，而空串会和它混起来。NULL 的行由
+    // [`Store::rows_missing_hash`] 数出来，逐本填上（导入命中时、`reindex` 时，以及
+    // `Cleanup` 档那个补齐副本改名的后台作业）。
+    //
+    // `hash_algo` 记下「用哪个算的」：哈希函数被写进了身份本身，将来换算法是重算这一对列，
+    // 不是把老数据作废。
+    //
+    // 索引只建在非空那一段（partial index）：老库此刻绝大多数行是 NULL，全表索引等于给一堆
+    // 空值建一棵用不上的 B 树。
+    //
+    // `books.path` 的 UNIQUE 留着不动，但它的身份退休了：从现在起它是「副本在哪儿」，
+    // 判重走那一列完整哈希（§六「同哈希 = 同一本书」）。
+    r#"
+ALTER TABLE books ADD COLUMN content_hash TEXT;
+ALTER TABLE books ADD COLUMN hash_algo TEXT NOT NULL DEFAULT '';
+CREATE INDEX idx_books_content_hash ON books(content_hash) WHERE content_hash IS NOT NULL;
+"#,
 ];

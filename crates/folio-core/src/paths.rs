@@ -139,8 +139,8 @@ pub fn log_dir() -> PathBuf {
 /// 应用自己收下的那份书本文件：`<数据根>/books/<原名>`。
 ///
 /// 只有移动平台会往这里写 —— 系统文件选择器给的是它自己临时目录里的路径，随时会被清，
-/// 而 `books.path` 那一列是书的身份（同路径重复导入算更新，不是第二本），所以先复制到
-/// 这个常驻位置再入库。**这个目录也就是「哪些文件归本应用所有」的边界**：
+/// 身份现在由内容哈希定（`books.content_hash`，见 `plans/导入管线.md` §六），`books.path`
+/// 只记副本躺在哪儿 —— 但「先复制到应用常驻的位置再入库」这一步没变。**这个目录也就是「哪些文件归本应用所有」的边界**：
 /// 删一本书时只有落在这里的文件才允许连带删掉，桌面端记的是读者自己的原文件。
 pub fn books_dir() -> PathBuf {
     data_dir().join("books")
@@ -158,9 +158,50 @@ pub fn prepare_dir(path: &Path) -> crate::Result<()> {
     std::fs::create_dir_all(dir).io_path(path)
 }
 
+// 下面四个是**书库根**里那几个区（`plans/导入管线.md` 第一、八节的磁盘形状）。
+// 都收一个 `root` 而不是读全局：书库位置是读者在设置里确认过的那个目录，
+// core 不知道它被配成了什么，也不该知道——知道的人（界面）把它传进来。
+//
+// 与文档的一处偏离要说明：文档写的是 `<书库>/books/<哈希名>`，这里**副本直接躺在根上**，
+// 根就是那一层 `books/`。理由是老库的 `books.path` 有几百条指向现在这个位置，
+// 加一层等于给每一条都搬一次家，而搬家本身是一次真实的 IO 与一次真实的失败面。
+
+/// 暂存区：`<书库>/.staging`。导入第 2 步把来源的字节流整个写在这里，
+/// 算完哈希、判完重才改名进根。**点开头**是为了让任何「扫目录找书」的逻辑
+/// 天然跳过它（半成品不是书，见第九节那条测试门）。
+pub fn staging_dir(root: &Path) -> PathBuf {
+    root.join(".staging")
+}
+
+/// 封面区：`<书库>/covers`。按**封面自己的字节哈希**命名，不按书的哈希
+/// （第八节：两本书共用一张系列封面时自然去重，重解析也不改名）。
+pub fn covers_dir(root: &Path) -> PathBuf {
+    root.join("covers")
+}
+
+/// 缩略图缓存的根：`<书库>/.thumbs`。整个目录删掉只需重跑生成——
+/// 它是缓存，不是数据，所以库里只记尺寸与格式，不记图像字节。
+pub fn thumbs_dir(root: &Path) -> PathBuf {
+    root.join(".thumbs")
+}
+
+/// 某一档缩略图的去处：`<书库>/.thumbs/<像素数>`。
+pub fn thumb_dir(root: &Path, px: u32) -> PathBuf {
+    thumbs_dir(root).join(px.to_string())
+}
+
+/// 书架卡片那一档的宽（像素）。
+pub const THUMB_CARD_PX: u32 = 400;
+
+/// 列表那一档的高（像素）。
+pub const THUMB_LIST_PX: u32 = 96;
+
 #[cfg(test)]
 mod tests {
-    use super::{APP_DIR, config_dir, config_path, data_dir, db_path, resolved, root, themes_dir};
+    use super::{
+        APP_DIR, THUMB_CARD_PX, THUMB_LIST_PX, config_dir, config_path, covers_dir, data_dir,
+        db_path, resolved, root, staging_dir, themes_dir, thumb_dir, thumbs_dir,
+    };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -240,5 +281,27 @@ mod tests {
         assert!(dir.is_dir());
         assert!(super::prepare_dir(Path::new("config.json")).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 书库那几个区都挂在**同一个根**底下，且半成品与缩略图那两个区以点开头：
+    /// 「扫目录找书」的那条路（`scan`）因此天然不会把 `.staging` 里没写完的字节、
+    /// 也不会把 `.thumbs` 里那些缓存当成一本书。`covers` 不藏：它就是数据。
+    #[test]
+    fn the_library_areas_hang_under_one_root() {
+        let lib = Path::new("/书库");
+        assert_eq!(staging_dir(lib), lib.join(".staging"));
+        assert_eq!(covers_dir(lib), lib.join("covers"));
+        assert_eq!(thumbs_dir(lib), lib.join(".thumbs"));
+        assert_eq!(thumb_dir(lib, THUMB_CARD_PX), lib.join(".thumbs/400"));
+        assert_eq!(thumb_dir(lib, THUMB_LIST_PX), lib.join(".thumbs/96"));
+        // 两档的尺寸是文档第八节点名的两个数，改它要连着改生成那一处。
+        assert_eq!((THUMB_CARD_PX, THUMB_LIST_PX), (400, 96));
+        // 藏起来的那两个，名字必须真的以点开头。
+        let hidden = |name: &Path| {
+            name.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        };
+        assert!(hidden(&staging_dir(lib)));
+        assert!(hidden(&thumbs_dir(lib)));
     }
 }

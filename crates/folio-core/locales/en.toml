@@ -32,6 +32,12 @@ zoom_out = "Decrease font size"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "Contents"
+# The header row and the two entries of the contents screen.
+"toc.read" = "Read %{read} / %{total} chapters"
+"toc.search" = "Search contents"
+"toc.style" = "Contents style"
+"toc.placeholder" = "Search %{count} chapters"
+"toc.empty" = "This book has no table of contents"
 night = "Night"
 day = "Day"
 progress = "Progress"
@@ -56,6 +62,11 @@ follow_system = "Follow system"
 light = "Light"
 dark = "Dark"
 
+# The two settings of the contents row height ("Row density").
+[density]
+compact = "Compact"
+comfortable = "Comfortable"
+
 [page]
 typography = "Text"
 layout = "Page"
@@ -63,6 +74,7 @@ fonts = "Fonts"
 appearance = "Appearance"
 about = "About"
 library = "Library"
+toc = "Contents"
 
 # Group titles inside a settings page. With more than one group on a page these
 # also show up as that page's sub-entries in the sidebar, so each one has to name
@@ -77,6 +89,7 @@ custom_themes = "Custom themes"
 location = "Location"
 watch = "Folder watching"
 transfer = "Wi-Fi transfer"
+rows = "Rows"
 
 [field]
 font_size = "Font size"
@@ -121,16 +134,15 @@ library_dir = "Library folder"
 "transfer.pin" = "Pairing code: %{pin}"
 "transfer.no_url" = "No LAN address found — type this device's IP in your browser (port is in the log)."
 "library_dir.pick" = "Choose folder…"
+toc_density = "Row density"
+"toc_density.desc" = "How tall each contents row is. Compact fits more on screen; Comfortable is easier to hit."
+toc_max_lines = "Title lines"
+"toc_max_lines.desc" = "How many lines a long title may take before it is truncated with an ellipsis."
+toc_dim_read = "Dim chapters you have read"
+"toc_dim_read.desc" = "Chapters you have opened are drawn faded in the contents list."
 
 [account]
 settings = "Settings"
-theme = "Theme"
-library = "Library folder"
-about = "About"
-library_hint = "Use the system folder picker to choose a library folder, or pick one of the folders this app can write by default."
-library_unconfirmed = "Not confirmed yet — the next import will ask first"
-library_default = "Default suggestion"
-pick_dir = "Choose folder…"
 
 [import]
 title = "Import book"
@@ -159,8 +171,42 @@ notes = "Notes"
 account = "Account"
 
 [nav.pending]
-stats = "No reading time recorded yet"
 notes = "No annotations added yet"
+
+# 「统计」那一屏。三条措辞约束决定了这里的形状：
+# - 读数本身是**数**（`folio_core::time::duration_parts` 只拆时/分/秒，不出文字），
+#   单位与句式留在这里 —— `plans/基础设施.md` §五.4：日期与数字的呈现格式也不许写进代码。
+# - 「今天还没读」与「读不到书库」是两句话：前者是真实读数 0，后者是功能没有数据源。
+# - 时间范围是这一屏内的筛选，不是三个页面，所以措辞是「Last 7 days」而不是名词化的标签页名。
+# `duration_hours_minutes` 之所以是模板而不是代码里一句 `format!("{h}h {m}m")`：这一门语言要
+# 的是紧凑写法，中英各自要自己的单位，而不足一小时的读数要整段去掉小时 —— 三条规则各不一样。
+[stats]
+today = "Today"
+today_none = "Nothing read yet today"
+streak = "Day %{days} in a row"
+streak_none = "No streak yet"
+range_7 = "Last 7 days"
+range_14 = "Last 14 days"
+range_30 = "Last 30 days"
+trend = "Trend"
+# Spelled out under the chart on purpose: tooltips are not tappable on mobile, so a
+# reading must not live only in one — and "which bar is today" cannot rely on colour alone.
+trend_note = "%{total} read in %{days} days, %{avg} a day"
+duration_hours_minutes = "%{hours}h %{minutes}m"
+duration_hours = "%{hours}h"
+duration_minutes = "%{minutes} min"
+duration_seconds = "%{seconds} sec"
+minutes_unit = "min"
+total = "All time"
+total_time = "Total time"
+total_days = "Days read"
+total_books = "Books read"
+total_notes = "Annotations"
+top = "Where the time went"
+hours = "When you read"
+hours_peak = "Most reading happens around %{hour}:00"
+no_store = "Couldn't open the library"
+no_store_hint = "Stats read the local library. Check that its folder is accessible."
 
 # 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
 [mobile.tab]
@@ -215,24 +261,31 @@ empty_hint = "Use “Import” to pick an epub, markdown or text file"
 no_results = "No book matches"
 no_results_hint = "Try another word — this searches titles and authors, not the text"
 # The card's manage menu: long-press (mobile) or right-click (desktop), the same
-# component as the import menu on the toolbar. Open and info go first; delete
-# sits last behind a separator — a destructive action does not take the easy slot.
-book_open = "Open"
-book_info = "Book info"
-# The book-info panel: the facts of this one book, fetched from the library the
-# moment the menu item is tapped.
-info_title = "Book info"
+# component as the import menu on the toolbar. Both rows are an icon plus a short
+# label, no book title — the menu knows which card it popped from. Info goes first;
+# delete sits last behind a separator — a destructive action does not take the easy
+# slot. There is no "Open" row: tapping the card is opening it.
+book_delete = "Delete"
+# The info panel — the menu row and the panel header share this one wording.
+# Fetched from the library the moment the menu item is tapped.
+info_title = "Info"
+# Two rows the reader can change: title and author are what they call this book, and go
+# back to those two `books` columns (`Store::set_book_meta`). Format, size and file
+# location are facts about the file — shown, never edited.
+info_field_title = "Title"
+info_field_author = "Author"
+# Say how several authors are written: the field shows one line "A · B" and splits on
+# that same separator when saving.
+info_author_hint = "Separate authors with ·"
+# Save stays disabled while the title is empty — say why beside it.
+info_title_required = "Title is required"
+info_save = "Save"
 info_format = "Format"
 info_size = "Size"
-info_path = "File location"
-info_close = "Close"
 
-# 书库管理。删除项的措辞带书名：长按（移动端）或右键（桌面端）之后指点已经离开那一行，
-# 只有标题能让读者确认自己按的是哪一本。
-# `library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置确认：
-# 移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
+# 书库管理。`library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置
+# 确认：移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
 [library]
-delete = "Delete “%{title}”"
 delete_failed = "Could not delete this book: %{reason}"
 title = "Where should imported books be copied?"
 hint = "Importing copies the file into this folder. Moving or deleting your original afterwards will not affect the book on the shelf."

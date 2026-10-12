@@ -332,6 +332,8 @@ impl ReaderSession {
         cx: &mut Context<Self>,
         at: Point<Pixels>,
     ) -> bool {
+        // 点一下正文就是「人还在」的证据 —— 哪怕这一击只把浮层收起来、位置一点没动。
+        self.note_reading_activity();
         if self.consume_tap_suppression() {
             return true;
         }

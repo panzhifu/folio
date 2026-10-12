@@ -47,6 +47,16 @@ flate2 = "1"
 # Basic 认证头要 base64。锁里已经有 0.22.1（reqwest 那条链带进来的），
 # 这里把既有的一份转成直接依赖，不新增依赖树 —— 和上面 flate2 同样的理由。
 base64 = "0.22"
+# 书的身份改成内容哈希（见 `plans/导入管线.md` 第六节），算它要 SHA-256。
+# **`sha2` 同样不是新依赖树**，但有一条坑要避开：锁里现在并存两个版本（0.10.9 由 oo7
+# 带进来、0.11.0 由 rust-embed-utils 带进来），直接依赖必须对齐其中的一个 —— 写一个谁
+# 都不沾的版本号会把**第三条** `sha2` 拉进来，与 folio-app 那条「`jni` 要和
+# gpui-pre-mobile 依赖的那份对齐」是同一个问题。这里钉 0.11。
+# 选 `sha2` 而不用同样已在图上的 `ring`：它是纯 Rust 构建，依赖只有 cfg-if /
+# cpufeatures / digest，**没有 `cc` 也没有 `sha-asm`**，交叉编译到 Android 与鸿蒙时
+# 少一个工具链变量。`cpufeatures` 是运行时探测，x86 的 SHA-NI 与 aarch64 的 ARMv8
+# SHA 扩展都在覆盖范围内，所以不要预设「手机上只能软算」。
+sha2 = "0.11"
 quick-xml = "0.42"
 cssparser = "0.38"
 selectors = "0.41"
@@ -72,6 +82,18 @@ anyhow = "1"
 # （锁里已有 2.5.0，随 gpui 那条链在编译），这里只是把图上已有的这份转成 folio-app 的
 # 直接依赖 —— 与上面 `flate2` / `base64` 那两条同样的理由。
 async-channel = "2"
+
+# 只为一件事：把「读者在哪个时区」这个数问出来（`ui::host::local_offset_secs`），
+# 好把它作为参数交给 `folio_core` 的那些按本地日汇总的查询。
+#
+# **`chrono` 同样不是新依赖树**：`gpui-base` 已经带着 0.4.45，而且 `clock` feature 是开着的
+# （实测 `cargo tree -i chrono -e features`），这里只是把图上已有的那份转成 folio-app 的直接
+# 依赖 —— 与上面 `flate2` / `base64` / `async-channel` 同样的理由。
+#
+# `clock` 而不要 `default` 里其余那几项：`serde` / `wasmbind` 这类我们用不上，写清楚
+# 是为了让「只认这一个用途」留在文件里。（feature 是按整张依赖图取并集的，所以这里收紧
+# 并不会改变实际编进去的东西，它改变的只是这份声明传达的意图。）
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # 日志。**`tracing` 与 `tracing-subscriber` 都不是新依赖树**：gpui 那条链上
 # `gpui-pre-ztracing` 已经带了同一份 `tracing-subscriber`（默认那组 feature：

@@ -30,6 +30,12 @@ impl Host for MobileHost {
         false
     }
 
+    fn back_exits_app(&self) -> bool {
+        // 那一侧的返回键与边缘滑动都被 fork 翻成 escape（见 `plans/facts.md`），
+        // 走到栈底就是「没有可退的了」—— 不退出就只能让读者自己去划掉卡片。
+        true
+    }
+
     fn body_family(&self, wanted: &str, cx: &App) -> String {
         // 命中与否都写一行：真机上「字体不对」只能从 logcat 看出来，
         // 屏幕上长得像对的字体未必是读者要的那套。

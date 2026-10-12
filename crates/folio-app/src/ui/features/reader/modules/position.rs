@@ -81,6 +81,10 @@ impl ReaderSession {
     /// 把一个已知的位置写进书库（换章后的章首、恢复落点都用它）：
     /// 那些时刻拼接链还没就位，反解不出「当前」位置，只能直接给。
     pub(super) fn persist_locator(&mut self, locator: Locator) {
+        // 「位置动过一下」就是「人还在」的证据，阅读时长的宽限线按它算
+        // （见 `modules/reading_time`）。放在这里而不是各个输入口：滚、翻、跳、
+        // 拖进度条最终都要落这一条。
+        self.note_reading_activity();
         self.saved_chapter = locator.chapter as usize;
         self.saved_offset = locator.offset;
         let (Some(store), Some(id)) = (&self.store, self.book_id) else {
@@ -94,7 +98,24 @@ impl ReaderSession {
             self.laid_out.mode.storage_name().to_string()
         };
         if let Err(err) = store.set_position(id, &mode, &locator) {
-            log::warn!("persist_position: 写入失败 {err}");
+            tracing::warn!(
+                book_id = id,
+                chapter = locator.chapter,
+                error = %err,
+                "persist_position: 写入失败"
+            );
+        }
+        // 「到过这一章」每章记一笔。集合的 `insert` 返回是不是新入，所以「每跨过一行
+        // 写一次进度」不会变成「每跨过一行打一次库」。目录那一屏的浅色按它画。
+        if self.read.insert(locator.chapter as usize)
+            && let Err(err) = store.mark_chapter_read(id, locator.chapter as usize)
+        {
+            tracing::warn!(
+                book_id = id,
+                chapter = locator.chapter,
+                error = %err,
+                "mark_chapter_read: 写入失败"
+            );
         }
     }
 

@@ -6,22 +6,20 @@
 
 use super::*;
 
-pub(super) fn fonts_page(cx: &App) -> SettingPage {
-    let family = SettingItem::new(
+pub(super) fn fonts_page(cx: &App) -> Page {
+    let family = Row::text(
         tr(cx, "field.font_family"),
-        SettingField::input(
-            |cx: &App| SharedString::from(ConfigHolder::reader(cx).font_family),
-            |val: SharedString, cx| {
-                // 空串不改：清空输入框不该把正文换成 gpui 的默认家族，
-                // 那是个没有汉字的拉丁字体。
-                if !val.trim().is_empty() {
-                    ConfigHolder::edit_reader(cx, |p| p.font_family = val.to_string());
-                }
-            },
-        ),
+        |cx: &App| SharedString::from(ConfigHolder::reader(cx).font_family),
+        |val: SharedString, cx| {
+            // 空串不改：清空输入框不该把正文换成 gpui 的默认家族，
+            // 那是个没有汉字的拉丁字体。
+            if !val.trim().is_empty() {
+                ConfigHolder::edit_reader(cx, |p| p.font_family = val.to_string());
+            }
+        },
     )
     .description(tr(cx, "field.font_family.desc"))
-    .keywords(["font", "family", "字体"]);
+    .keywords(&["font", "family", "字体"]);
 
     page(
         tr(cx, "page.fonts"),

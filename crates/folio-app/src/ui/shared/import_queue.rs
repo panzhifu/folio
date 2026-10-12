@@ -1,23 +1,11 @@
-//! 导入的进程级基础设施：**一条导入队列**与**一条自动导入事件通道**。
+//! 自动导入（监听、传书）回界面的**一条事件桥**。
 //!
-//! 队列整个进程一份、一条工作线程：副本按原文件名落进书库、同名即覆盖，
-//! 两批并发写同一个目标文件会拷出半本（手工导入、监听、传书都排这一条队，
-//! 谁也别并发）。挂在 `static` 里它就活到进程结束 —— `TaskManager` 被丢弃会
-//! `join` 工作线程，挂谁身上谁都得等。
-//!
-//! 事件通道是自动导入（监听、传书）回界面的桥：这些批次不是书架提交的，
-//! 书架那侧的链接不到它们 —— 服务把作业的事件逐条转发进这条通道，
+//! 导入作业池不在这里 —— 它是进程级常驻资源，归 [`super::services`] 管（`plans/基础设施.md`
+//! §1.1「一条队列，不要三条」）。本模块只剩桥：自动导入的批次不是书架提交的，书架那侧的
+//! 链接不到它们，所以服务把作业的事件逐条转发进这条通道，
 //! [`crate::ui::features::shelf::ShelfView`] 开屏时订阅，读数照常出现。
 
-use std::sync::{Arc, OnceLock};
-
-use folio_core::{ImportOutcome, TaskEvent, TaskManager};
-
-/// 导入作业的工作线程池：整个进程一份、一条线程。
-pub fn import_queue() -> &'static Arc<TaskManager<Vec<ImportOutcome>>> {
-    static QUEUE: OnceLock<Arc<TaskManager<Vec<ImportOutcome>>>> = OnceLock::new();
-    QUEUE.get_or_init(|| Arc::new(TaskManager::new(1)))
-}
+use folio_core::{ImportOutcome, TaskEvent};
 
 /// 一条自动导入事件通道的两端（`Sender` / `Receiver`），全进程共用一份。
 type ImportChannel = (
@@ -27,7 +15,7 @@ type ImportChannel = (
 
 /// 全进程唯一的一条自动导入事件通道。
 fn channel() -> &'static ImportChannel {
-    static CHANNEL: OnceLock<ImportChannel> = OnceLock::new();
+    static CHANNEL: std::sync::OnceLock<ImportChannel> = std::sync::OnceLock::new();
     CHANNEL.get_or_init(async_channel::unbounded)
 }
 
@@ -44,19 +32,12 @@ pub(crate) fn auto_import_sender() -> async_channel::Sender<TaskEvent<Vec<Import
 }
 
 /// 把一条后台作业的事件转发进自动导入通道。给监听 / 传书这类「没有界面可接」
-/// 的提交方用：一个作业一条转发线程，作业结束（通道关闭）线程随之退出。
-pub fn forward_to_auto_imports(
-    handle: folio_core::task::TaskHandle<Vec<ImportOutcome>>,
-) {
+/// 的提交方用：事件的收干交给 [`folio_core::import::forward`]（它管线程创建），
+/// 这里只管逐条往桥上送。
+pub fn forward_to_auto_imports(handle: folio_core::task::TaskHandle<Vec<ImportOutcome>>) {
     let sender = channel().0.clone();
-    std::thread::Builder::new()
-        .name("folio-auto-import".to_string())
-        .spawn(move || {
-            for event in handle.events.iter() {
-                if sender.send_blocking(event).is_err() {
-                    break; // 接收端没了：没有要的人，收手。
-                }
-            }
-        })
-        .expect("起自动导入转发线程");
+    folio_core::import::forward(handle, move |event| {
+        // 接收端没了：没有要的人，收手（后面的事件也跟着没有意义）。
+        let _ = sender.send_blocking(event);
+    });
 }

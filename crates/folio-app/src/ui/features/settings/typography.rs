@@ -8,7 +8,7 @@
 
 use super::*;
 
-pub(super) fn typography_page(cx: &App) -> SettingPage {
+pub(super) fn typography_page(cx: &App) -> Page {
     page(
         tr(cx, "page.typography"),
         IconName::Type,
@@ -73,15 +73,13 @@ pub(super) fn typography_page(cx: &App) -> SettingPage {
                         |cx| ConfigHolder::reader(cx).indent_em,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.indent_em = v),
                     ),
-                    SettingItem::new(
+                    Row::toggle(
                         tr(cx, "field.justify"),
-                        SettingField::switch(
-                            |cx: &App| ConfigHolder::reader(cx).justify,
-                            |val: bool, cx| ConfigHolder::edit_reader(cx, |p| p.justify = val),
-                        ),
+                        |cx: &App| ConfigHolder::reader(cx).justify,
+                        |val: bool, cx| ConfigHolder::edit_reader(cx, |p| p.justify = val),
                     )
                     .description(tr(cx, "field.justify.desc"))
-                    .keywords(["justify", "align", "对齐", "两端"]),
+                    .keywords(&["justify", "align", "对齐", "两端"]),
                 ],
             ),
         ],

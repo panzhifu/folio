@@ -30,6 +30,22 @@ pub fn suggested_dir() -> PathBuf {
     folio_core::paths::books_dir()
 }
 
+/// 启动时清掉书库目录里上次崩溃留下的 `.part` 半成品（`plans/基础设施.md` §1.3 末条）。
+///
+/// 位置没确认过就没什么可清的。清掉几个只记日志 —— 这是自愈动作，不该刷屏。
+pub fn sweep_partials(cx: &App) {
+    let Some(dir) = target_dir(&ConfigHolder::library(cx)) else {
+        return;
+    };
+    let removed = folio_core::sweep_partials(&dir);
+    if removed > 0 {
+        tracing::warn!(
+            "library: 清掉 {removed} 个上次留下的 .part 半成品（{}）",
+            dir.display()
+        );
+    }
+}
+
 /// 整机扫描的起点。判据与 [`candidate_dirs`] 同一条：只扫读者放得进东西的地方 ——
 /// 桌面扫**家目录**（`/` 全盘会把 `/proc`、`/sys` 也卷进来，那里没有书），
 /// Android 扫共享存储根（本应用自己的外部目录在 `Android/data` 底下，要作为噪音
@@ -138,6 +154,35 @@ pub fn suggested_watch_dir() -> PathBuf {
     folio_core::paths::data_dir().join("inbox")
 }
 
+/// 启动时投一趟「补齐」的后台作业：给没有内容身份的行算哈希，并把书库里的旧名字
+/// 副本改成哈希名。
+///
+/// 这一趟存在的理由是两条决定凑在一起的样子（`plans/导入管线.md` §六 + §一 步 5）：
+/// 哈希列是**懒补**的（迁移不许读全库，否则开库那一下要等几百本的顺序读），
+/// 而副本改名又必须真的做完（不然「书库目录可以整目录 GC」一直不成立）。
+/// 所以它不能放在开库路径上，也不能放在界面线程上 —— 它落在作业池的
+/// [`Cleanup`](folio_core::Priority) 档：界面空闲才跑的那一档，也是 `plans/基础设施.md`
+/// §1.1 那张表里此前**唯一一个没有作业**的档。
+///
+/// 位置没确认过、书库没装上时什么都不投（没有目录可搬）。取消没人按：这一趟是
+/// 自愈档，做完为止；退出时由 `Services::shutdown` 排干队列（§1.3）。
+pub fn schedule_backfill(cx: &App) {
+    let Some(dir) = target_dir(&ConfigHolder::library(cx)) else {
+        return;
+    };
+    let Some(store) = super::app_store::handle(cx) else {
+        tracing::debug!("library: 书库没装上，补齐这一趟不投");
+        return;
+    };
+    // 句柄直接丢：这一趟没有界面读数（它不改书目内容，只改文件名与身份列）。
+    // 作业照跑，跑完自己结束 —— 池在关停时会等它把已排的做完（`plans/基础设施.md` §1.3）。
+    let for_log = dir.clone();
+    let _report = super::services::pool().submit_with(folio_core::Priority::Cleanup, move |ctx| {
+        Ok(folio_core::backfill_copies(&store, &dir, ctx))
+    });
+    tracing::info!("library: 补齐这一趟已投进 Cleanup 档（{for_log:?}）");
+}
+
 /// 删掉一本书：先删库里的行（章节、正文、图片、进度、批注、集合都跟着级联走），
 /// 再连带删掉属于书库的那份副本。
 ///
@@ -163,9 +208,21 @@ pub fn delete_book(store: &Store, id: i64, staged_dir: Option<&Path>) -> Result<
     let copy = path
         .as_deref()
         .and_then(|path| staged_dir.and_then(|dir| owned_copy(path, dir)));
-    if let Some(copy) = copy
-        && let Err(err) = std::fs::remove_file(&copy)
-    {
+    let Some(copy) = copy else { return Ok(()) };
+    // 内容寻址之后「两条记录共用一个副本」是允许的状态（自愈会把一条记录接到一份已存在的
+    // 文件上），所以删之前问一句：还有别人指着它就不删 —— 删了的代价是另一本的正文与
+    // 批注一起没，而「多占一个文件」没有任何可见后果
+    // （`plans/导入管线.md` §六 末段、§十一 已决第 3 条）。
+    let others = store
+        .rows_sharing_path(&copy.to_string_lossy(), id)
+        // 问不出来（语句出错、库被别处锁着）按「有人指着」处理：偏向少删一次。
+        .with_context(|| format!("问 {copy:?} 还有几条记录指着"))
+        .unwrap_or(1);
+    if others > 0 {
+        tracing::info!("delete_book: 副本 {copy:?} 还有 {others} 条记录指着，删行不删文件");
+        return Ok(());
+    }
+    if let Err(err) = std::fs::remove_file(&copy) {
         tracing::warn!("delete_book: 副本 {copy:?} 没删掉：{err}");
     }
     Ok(())

@@ -110,3 +110,58 @@ pub struct DailyReading {
     pub seconds: i64,
     pub chars: i64,
 }
+
+/// 一段时间窗口（读者本地日）的全部读数，一次查询算完。
+///
+/// 为什么不是一个一个数各查一遍：这一屏上的每个数都必须来自**同一批会话行**。分开查
+/// 除了多打几次库，还会让「今天 + 本周 = 合计」这种关系在两次查询之间被新写入的会话
+/// 打断 —— 界面正画到一半，读者切了个屏回来,那一栏的加总就对不上图。
+///
+/// 派生的那几个数（连续天数、活跃天数）都是 [`DailyReading`] 这串**补过零**的桶上的
+/// 纯算术，所以它们与图共用同一条数据通路，不可能出现「图上有那根柱子，天数却没算它」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadingSummary {
+    /// 窗口内每天一条，**含没有记录的天（补零）**，最后一条是今天。x 轴要连续。
+    pub days: Vec<DailyReading>,
+    pub seconds: i64,
+    pub sessions: i64,
+    /// 窗口内读过的书有几本。
+    pub books: i64,
+    /// 有读的那些天有几天（= `days` 里 `seconds > 0` 的条数）。
+    pub active_days: usize,
+    /// 连着读的天数。**今天还没读时从昨天起算**，否则每天早晨这个数都会归零一次。
+    pub streak: usize,
+    /// 窗口内最长的一段连续。
+    pub longest_streak: usize,
+}
+
+impl ReadingSummary {
+    /// 今天（窗口最后那一格）的时长。窗口为空时是 0。
+    pub fn seconds_at_today(&self) -> i64 {
+        self.days.last().map_or(0, |day| day.seconds)
+    }
+
+    /// 有读的那些天的日均。
+    ///
+    /// 除以**活跃天数**而不是窗口天数：「近 14 天日均」要回答的是「他坐下来读的时候
+    /// 一次读多久」，把没读的那几天摊进去会把这个数一路压低到没有意义。
+    pub fn average_per_active_day(&self) -> i64 {
+        if self.active_days == 0 {
+            0
+        } else {
+            self.seconds / self.active_days as i64
+        }
+    }
+}
+
+/// 一本书在某个窗口内的排行（「时间花在哪些书上」那一条）。
+///
+/// 带着 `title` 而不是只给 `book_id` 让界面再查一次书：那一列本来就在这条
+/// `JOIN books` 里，多一次往返只是白费（与 `Collection` 的 `book_count` 同一条理由）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadingRank {
+    pub book_id: i64,
+    pub title: String,
+    pub seconds: i64,
+    pub sessions: i64,
+}

@@ -111,17 +111,28 @@ fn unsupported(path: &Path, why: &str) -> crate::Error {
     ))
 }
 
-/// 这一层里算不算一页。漫画包里常混着 `__MACOSX/`、`.DS_Store`、`thumbs/` 这些噪音。
-fn is_page_image(name: &str) -> bool {
+/// 容器里根本不该看一眼的噪音：目录、以点开头的文件、`__MACOSX/` 那一类。
+///
+/// 单独立一条而不是并进 [`is_page_image`]，因为判定层要的是两个不同的问题：
+/// 「这一条算不算一页」与「这一条该不该参与判断」。混在一起的话，一个装着
+/// `__MACOSX/._001.jpg` 的正常漫画包会因为那条噪音被评成「不是漫画包」。
+pub(crate) fn is_container_noise(name: &str) -> bool {
     if name.ends_with('/') || name.starts_with('.') || name.contains("__MACOSX/") {
-        return false;
+        return true;
     }
-    let file = name.rsplit('/').next().unwrap_or(name);
-    if file.starts_with('.') {
+    name.rsplit('/').next().is_some_and(|file| file.starts_with('.'))
+}
+
+/// 这一层里算不算一页。漫画包里常混着 `__MACOSX/`、`.DS_Store`、`thumbs/` 这些噪音。
+///
+/// `pub(crate)` 的理由是**只有一份**：判定层（`format::sniff`）要按同一条规则回答
+/// 「这个 zip 里全是图吗」，两处各写一份就会在同一本漫画上分叉。
+pub(crate) fn is_page_image(name: &str) -> bool {
+    if is_container_noise(name) {
         return false;
     }
     matches!(
-        extension_of(Path::new(file)).as_deref(),
+        extension_of(Path::new(name)).as_deref(),
         Some("jpg" | "jpeg" | "jpe" | "png" | "gif" | "webp" | "bmp")
     )
 }

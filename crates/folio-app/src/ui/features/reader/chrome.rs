@@ -16,8 +16,6 @@ pub const HEADER_HEIGHT: f32 = 28.0;
 pub const FOOTER_HEIGHT: f32 = 28.0;
 /// 底栏高：状态行 + 进度条 + 一排入口。
 pub const BOTTOM_BAR_HEIGHT: f32 = 128.0;
-/// 底栏上方展开的面板高（目录列表 / 排版滑条共用一档）。
-pub const PANEL_HEIGHT: f32 = 320.0;
 
 /// 排版面板里字号滑条的范围。
 ///

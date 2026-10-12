@@ -32,6 +32,12 @@ zoom_out = "减小字号"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "目录"
+# 目录那一屏的头部行与两个入口。
+"toc.read" = "已读 %{read} / %{total} 章"
+"toc.search" = "搜索目录"
+"toc.style" = "目录样式"
+"toc.placeholder" = "搜索 %{count} 章"
+"toc.empty" = "这本书没有目录"
 night = "夜间"
 day = "日间"
 progress = "进度"
@@ -55,6 +61,11 @@ follow_system = "跟随系统"
 light = "浅色"
 dark = "深色"
 
+# 目录行高档位的两个选项（设置里「排列密度」那一格）。
+[density]
+compact = "紧凑"
+comfortable = "宽松"
+
 [page]
 typography = "文字"
 layout = "版面"
@@ -62,6 +73,7 @@ fonts = "字体"
 appearance = "外观"
 about = "关于"
 library = "书库"
+toc = "目录"
 
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
@@ -75,6 +87,7 @@ custom_themes = "自定义主题"
 location = "位置"
 watch = "文件夹监听"
 transfer = "Wi-Fi 传书"
+rows = "条目"
 
 [field]
 font_size = "字号"
@@ -119,16 +132,16 @@ library_dir = "书库位置"
 "transfer.pin" = "配对码：%{pin}"
 "transfer.no_url" = "没探到局域网地址 —— 请在浏览器里输入这台设备的 IP（端口见开关旁的日志）。"
 "library_dir.pick" = "选择文件夹…"
+toc_density = "排列密度"
+"toc_density.desc" = "目录每一行占多高。紧凑一屏看得更多，宽松的手指更好点。"
+toc_max_lines = "标题最大行数"
+"toc_max_lines.desc" = "长标题在目录里最多排几行，超了截成省略号。"
+toc_dim_read = "读过的章节浅色显示"
+"toc_dim_read.desc" = "到过的章在目录里画成浅色，没读过的保持正常颜色。"
 
+# 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
 settings = "设置"
-theme = "主题"
-library = "书库位置"
-about = "关于"
-library_hint = "用系统的文件夹选择器挑一个目录当书库；也可以从下面本应用默认写得进去的目录里选一个。"
-library_unconfirmed = "还没确认过：下一次导入会先问你"
-library_default = "默认建议"
-pick_dir = "选择文件夹…"
 
 [import]
 title = "导入书籍"
@@ -157,8 +170,40 @@ notes = "笔记"
 account = "我的"
 
 [nav.pending]
-stats = "还没有阅读时长记录"
 notes = "还没有添加过批注"
+
+# 「统计」那一屏。三条措辞约束决定了这里的形状：
+# - 读数本身是**数**（`folio_core::time::duration_parts` 只拆时/分/秒，不出文字），
+#   单位与句式留在这里 —— `plans/基础设施.md` §五.4：日期与数字的呈现格式也不许写进代码。
+# - 「今天还没读」与「读不到书库」是两句话：前者是真实读数 0，后者是功能没数据源。
+# - 时间范围是这一屏内的筛选，不是三个页面，所以措辞是「近 N 天」而不是名词化的标签。
+[stats]
+today = "今天"
+today_none = "今天还没开始读"
+streak = "连续第 %{days} 天"
+streak_none = "还没有连续记录"
+range_7 = "近 7 天"
+range_14 = "近 14 天"
+range_30 = "近 30 天"
+trend = "趋势"
+# 结论写成一句话摆在图下面：移动端浮层点不住，tooltip 不能是唯一那条读数通路，
+# 而「今天那根」也不该只靠颜色认（Design Guides：不许只用颜色传义）。
+trend_note = "%{days} 天里读了 %{total}，日均 %{avg}"
+duration_hours_minutes = "%{hours} 小时 %{minutes} 分钟"
+duration_hours = "%{hours} 小时"
+duration_minutes = "%{minutes} 分钟"
+duration_seconds = "%{seconds} 秒"
+minutes_unit = "分钟"
+total = "累计"
+total_time = "总时长"
+total_days = "读过天数"
+total_books = "读过的书"
+total_notes = "批注条数"
+top = "时间花在哪些书上"
+hours = "一般几点读"
+hours_peak = "最常在读 %{hour} 点前后"
+no_store = "读不到书库"
+no_store_hint = "统计读的是本地书库，请确认书库目录能打开。"
 
 # 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
 [mobile.tab]
@@ -213,23 +258,27 @@ empty_hint = "用右边的「导入」选一本 epub、markdown 或纯文本"
 no_results = "没有书名或作者对得上"
 no_results_hint = "换个词试试 —— 这里搜的是书名和作者，不是正文"
 # 卡片上的管理菜单：长按（移动端）或右键（桌面端）弹出，与右上角那条导入菜单
-# 是同一套组件。打开与信息在前，删除垫底并用分隔线隔开 —— 破坏性的动作
-# 不排在顺手的位置。
-book_open = "打开"
-book_info = "书籍信息"
-# 「书籍信息」面板：这一本的事实，点菜单那一刻查库取一次。
-info_title = "书籍信息"
+# 是同一套组件。两条都是图标 + 短标签；信息在前，删除垫底并用分隔线隔开 ——
+# 破坏性的动作不排在顺手的位置。「打开」不在菜单里：点卡片本身就是打开。
+book_delete = "删除"
+# 「信息」：菜单里那一条与面板标题共用这一条文案 —— 都叫「信息」，不叫「书籍信息」。
+# 面板摆这一本的事实，点菜单那一刻查库取一次。
+info_title = "信息"
+# 面板上改得动的两格：书名与作者是读者自己认的，写回 `books` 的那两列
+# （`Store::set_book_meta`）；格式、大小、文件位置是那份文件的事实，只摆不改。
+info_field_title = "书名"
+info_field_author = "作者"
+# 多位作者怎么写要说清：那一格里摆的是一行「甲 · 乙」，保存时按同一个分隔拆回人名。
+info_author_hint = "多位作者用 · 分隔"
+# 书名清空时那颗「保存」按不动 —— 只禁用不解释，读者得自己猜是哪里不对。
+info_title_required = "书名不能为空"
+info_save = "保存"
 info_format = "格式"
 info_size = "大小"
-info_path = "文件位置"
-info_close = "关闭"
 
-# 书库管理。删除项的措辞带书名：长按（移动端）或右键（桌面端）之后指点已经离开那一行，
-# 只有标题能让读者确认自己按的是哪一本。
-# `library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置确认：
-# 移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
+# 书库管理。`library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置
+# 确认：移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
 [library]
-delete = "删除《%{title}》"
 delete_failed = "删除失败：%{reason}"
 title = "导入的书拷到哪儿"
 hint = "导入会把文件复制一份到这个目录；之后原文件移走或删掉，架上这本书都不受影响。"

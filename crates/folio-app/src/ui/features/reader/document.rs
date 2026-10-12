@@ -10,6 +10,7 @@
 //! 没有「这个格式要不要先包一下」的分支 —— `Format` 不参与排版链。
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
@@ -21,7 +22,10 @@ use folio_core::css::{Origin, RuleSet};
 use folio_core::dom::{Dom, NodeId};
 use folio_core::hit::Hit;
 use folio_core::layout::fragment::{Fragment, FragmentOptions, column_width, fragments};
-use folio_core::layout::{Layout, LayoutOptions, LineBox, layout as typeset};
+use folio_core::layout::{
+    BlockCache, Layout, LayoutKey, LayoutOptions, LineBox, content_hash, layout_with_blocks,
+    quantize_px,
+};
 use folio_core::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
 use gpui_kit::{App, TextSystem, Window, WindowTextSystem};
 
@@ -49,46 +53,88 @@ pub fn body_of(dom: &Dom) -> NodeId {
         .unwrap_or(dom.document)
 }
 
+/// 一章的**解析产物**：与读者偏好无关，所以改字号、拖窗口都不必重新解析。
+///
+/// 缓存挂在产物而不是挂在「取回来的章文本」上，理由见 `plans/阅读管线.md` §五：
+/// 文本本来就存在库里，重复付的钱在解析与可见文本坐标表上。`Arc` 是因为它同时被界面
+/// （命中、锚点换算）与在飞的排版作业拿着，而这两份必须是同一章。
+struct ChapterArtifacts {
+    /// 建它时那段源文本的哈希（与 [`LayoutKey::chapter_hash`] 同源，见 `layout::content_hash`）。
+    ///
+    /// 复用前对一遍：对不上就是换章了，`NodeId` 指的是上一章，绝不能拿去排版。
+    key: u64,
+    dom: Dom,
+    /// 本章的可见文本坐标表。锚点与进度都存在这套坐标里，它不随行盒变化。
+    map: TextMap,
+}
+
+impl ChapterArtifacts {
+    /// 源文本 → DOM + 可见文本坐标。两者必须一起建，否则坐标指的就是上一章的文本。
+    fn build(source: &str) -> Self {
+        let dom = Dom::parse(source.as_bytes());
+        let map = TextMap::build(&dom, body_of(&dom));
+        Self {
+            key: content_hash(source),
+            dom,
+            map,
+        }
+    }
+}
+
 /// 一章的排版状态：源文本 + 书自己的 CSS + 读者偏好 + 本章图片索引，
 /// 缓存上一次的 `Layout` 与由它切出的片。
 ///
-/// 重排只在**排版输入真的变了**之后发生（版心宽度或任何一项读者偏好），所以逐帧调用
-/// [`Document::ensure_layout`] 是安全的：滚动、点击、别的窗口改标题都不触发重算。
-/// 分片同理，多出来的两个键是「一片高」与「一页几栏」（见 [`Document::ensure_viewport`]）——
-/// 连续滚动 / 分页 / 双页对开三种模式在核心层是同一套代码，差别只有这两个数。
+/// 重排只在**排版输入真的变了**之后发生，而「真的变了」只有一个判据：
+/// [`LayoutKey`](folio_core::layout::LayoutKey) 这把键换了。所以逐帧调用
+/// [`Document::ensure_viewport`] 是安全的：滚动、点击、别的窗口改标题都不触发重算。
+/// 过去这里有三套各自数「变了没有」的手搓键（`generation`、`applied` 那个元组、
+/// `fragmented` 那个五元组），同一个失效问题在三处各答一遍；键统一之后，切片那一级
+/// 只需再回答「我这把键配的那片高」—— 连续滚动 / 分页 / 双页对开三种模式在核心层
+/// 是同一套代码，差别只有片高与栏数两个数。
 pub struct Document {
     source: String,
-    /// 本章解析好的 DOM，与 `source` 同生命周期。
+    /// 作者层样式表的**原文**（书自己那份 CSS）。键里要有它的哈希，而 `RuleSet` 已经是
+    /// 解析后的结构 —— 哈希原文与哈希结构是两件事，「作者改了一个字」是原文那件事。
+    /// 章里挂的 `<style>` 不在这里：它长在 `source` 里，`chapter_hash` 已经盖住它。
+    author_css: String,
+    /// 本章的解析产物（DOM + 可见文本坐标），按章内容跨代次复用。
     ///
     /// 为什么留着它有两层：① 锚点换算要用（`LineRun::orig` 是**节点内**的字节区间，
     /// 没有节点文本就换不成可见文本坐标）；② 解析只做一次 —— 排版可以每帧重做
     /// （宽度、字号变了），但 HTML 解析不该跟着重做，它比层叠贵。
-    dom: Dom,
-    /// 本章的可见文本坐标表。锚点与进度都存在这套坐标里，它不随行盒变化。
-    map: TextMap,
+    artifacts: Arc<ChapterArtifacts>,
     rules: RuleSet,
     prefs: Reader,
     /// 本章的图片索引：排版期查固有尺寸，绘制期取可渲染的 `Image`。
     images: Arc<ChapterImages>,
+    /// 本章图片索引的版本。`<img>` 的固有尺寸是排版输入，换索引就可能换几何，
+    /// 而它既不在章文本里也不在样式里，只能单独数一格（键里的 `images_rev`）。
+    images_rev: u32,
     /// 整本书的内嵌字体（别名表 + 已经注册进设备的家族名）。换章不换这一份，
     /// 所以由 `Book` 建好灌进来，而不是每章自己注册一遍。
     faces: Arc<BookFonts>,
-    /// 排版代数：章源或偏好一变就 +1。后台作业带着提交时的代数回来，对不上就丢 ——
-    /// 连着改三次字号，只有最后一代的结果会上屏。
-    generation: u64,
-    /// 已应用（上屏可用）的排版键 `(代数, 内容宽)`。宽度进键：转屏、改边距算新排版。
-    /// 旧世界里的 `laid_out: (宽, 偏好)`：偏好并进代数（`set_prefs` 也加一代）。
-    applied: Option<(u64, f32)>,
+    /// 块级排版缓存，随排版作业移进移出（队列单线程、在飞作业至多一个，所以不需要锁）。
+    ///
+    /// 它的键是「块节点 + 该块子树的样式哈希 + 宽度」，所以改字号只重排样式真的变了的那些块；
+    /// **复用范围**（章文本、图片索引、字体集、度量口径）由 `BlockCache` 按
+    /// [`context_rev`](LayoutKey::context_rev) 自己守：字体表换了而样式没换，旧块也不再复用
+    /// —— 接线前那是这条缓存文档里写的「已知口径缺口」，现在那一格进了键。
+    blocks: BlockCache,
+    /// 手上这份排版是哪把键的产物。`None` = 还没排过（窗口第一帧之前）。
+    applied: Option<LayoutKey>,
+    /// 最近一次**想要**的键。作业带回它自己那把键，只有与这一格相等才采纳 ——
+    /// 连着改三次字号，只有最后一代的结果会上屏（`plans/阅读管线.md` 已决第 12 条）。
+    desired: Option<LayoutKey>,
     /// 在飞的排版作业：`(键, 句柄)`。至多一个 —— 新作业提交时旧句柄被丢弃
     /// （作业照跑完，结果没人收；队列单线程 FIFO，天然不会堆积）。
-    pending: Option<((u64, f32), TaskHandle<Typeset>)>,
+    pending: Option<(LayoutKey, TaskHandle<Typeset>)>,
     layout: Layout,
     /// 层叠结果。分片要读块级的 `break-*` 与 orphans/widows，而这些只在层叠之后存在，
     /// 所以它跟排版结果同批算、同批存，不在分片时重来一遍。
     styles: Option<StyledDom>,
-    /// 上次分片时的 `(代数, 栏宽, 读者偏好, 一片高, 一页几栏)`。宽与偏好也是它的键：
-    /// 换字号会改变行数，行变了切点就变了；代数守着「片是哪一章的」。
-    fragmented: Option<(u64, f32, Reader, f32, usize)>,
+    /// 上次分片时的 `(排版键, 一片高)`。排版键与切片之间唯一的差别就是那片高：
+    /// 栏宽与栏数都已经在键里了，字号也在（换字号会改行数，行变了切点就变了）。
+    fragmented: Option<(LayoutKey, u32)>,
     /// 本章切出来的片。`Rc` 是因为渲染每帧都要拿一份而不必搬动整张表。
     slices: Rc<Vec<Fragment>>,
 }
@@ -116,15 +162,17 @@ pub struct Viewport {
     pub gap: f32,
 }
 
-/// 一章的后台排版产出：解析、层叠、行盒，一批算完一批换。
+/// 一章的后台排版产出：层叠、行盒，一批算完一批换。
 ///
 /// 全是 `Send` 的纯数据（core 那一侧不碰 gpui），所以能整份从作业线程搬回 UI 线程。
 /// 分片**不在**这里面：它便宜且依赖「排好了才切」，留在渲染帧里同步做。
 struct Typeset {
-    /// 提交时的排版键 `(代数, 内容宽)`，应用前对一遍，防旧结果盖新的。
-    key: (u64, f32),
-    dom: Dom,
-    map: TextMap,
+    /// 用完还给 `Document` 的块级缓存：下一代的排版在它上面接着复用。
+    blocks: BlockCache,
+    /// 作业算的是哪把键。上屏前与 [`Document::desired`] 对一遍，对不上就是陈旧的，丢掉。
+    key: LayoutKey,
+    /// 章的解析产物：可能是复用来的那一份（改字号、拖窗口都是这种），也可能是新解析的。
+    artifacts: Arc<ChapterArtifacts>,
     styles: StyledDom,
     layout: Layout,
 }
@@ -132,12 +180,19 @@ struct Typeset {
 /// 作业的输入。度量要的两份文本系统以 `Arc` 搬进后台线程 —— spike① 验证过
 /// `Arc<WindowTextSystem>` 可以 move 出去用，这正是排版能出渲染帧的前提。
 struct TypesetInput {
-    key: (u64, f32),
+    /// 从 `Document` 搬来的块级缓存，随结果搬回（见 [`Typeset::blocks`]）。
+    blocks: BlockCache,
+    /// 这一趟要算的那把键；排版宽度取键里量化后的 `width`，别在传一个未量化的数进来，
+    /// 那样「键相同而版心差半像素」的两次排版会互相复用缓存。
+    key: LayoutKey,
     source: String,
+    /// 界面手上那份解析产物。键的 `chapter_hash` 对得上就直接用，对不上才重新解析 ——
+    /// 「改一次字号不许重解析」那条计数断言（`folio_core::metrics::Metric::DomParses`）
+    /// 钉的就是这一格。
+    artifacts: Arc<ChapterArtifacts>,
     /// 书自己的样式（作者层）。章里的 `<style>` 不在这里 —— 它随 DOM 解析就地收。
     rules: RuleSet,
     prefs: Reader,
-    width: f32,
     images: Arc<ChapterImages>,
     texts: Arc<TextSystem>,
     window_texts: Arc<WindowTextSystem>,
@@ -148,19 +203,27 @@ struct TypesetInput {
 
 /// 后台排版队列：整个进程一份、一条线程，与导入池同款
 /// （[`folio_core::task::TaskManager`]，`std` 实现、不依赖 gpui）。排版作业是
-/// 毫秒级的活，FIFO 单线程就够；「最新一代才上屏」由 [`Typeset::key`] 把关。
-fn typeset_queue() -> &'static Arc<TaskManager<Typeset>> {
-    static QUEUE: OnceLock<Arc<TaskManager<Typeset>>> = OnceLock::new();
+/// 毫秒级的活，FIFO 单线程就够；「只有还想要的那把键才上屏」由 [`Typeset::key`] 把关。
+fn typeset_queue() -> &'static Arc<TaskManager> {
+    static QUEUE: OnceLock<Arc<TaskManager>> = OnceLock::new();
     QUEUE.get_or_init(|| Arc::new(TaskManager::new(1)))
 }
 
-/// 作业体：解析 → 层叠 → 排版。测试里被同步调用，线上在后台线程里跑 —— 同一份代码。
-fn typeset_job(input: TypesetInput) -> Result<Typeset, TaskError> {
-    let dom = Dom::parse(input.source.as_bytes());
-    let map = TextMap::build(&dom, body_of(&dom));
+/// 作业体：解析（按需）→ 层叠 → 排版。测试里被同步调用，线上在后台线程里跑 —— 同一份代码。
+fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
+    // 第 3 级（解析）与可见文本坐标：按章内容复用。`chapter_hash` 对得上就说明手上这份
+    // DOM 正是从这段文本来的，里面每个 `NodeId` 都还作数 —— 换字号、拖窗口都不必重解析。
+    let artifacts = if input.artifacts.key == input.key.chapter_hash {
+        input.artifacts
+    } else {
+        Arc::new(ChapterArtifacts::build(&input.source))
+    };
     let mut rules = input.rules;
-    rules.extend(Document::chapter_style_rules(&dom));
-    let styles = cascade(&dom, &rules, &Document::root_base(&input.prefs));
+    rules.extend(Document::chapter_style_rules(&artifacts.dom));
+    // 读者层的段间距。放在这里而不是 `Document::new`：那一份 `rules` 跟着作者 CSS 存，
+    // 偏好一改就会让「章的样式」看起来也变了。
+    rules.extend(Document::reader_rules(&input.prefs));
+    let styles = cascade(&artifacts.dom, &rules, &Document::root_base(&input.prefs));
     let measure = GpuiMeasure::new(
         input.texts,
         input.window_texts,
@@ -168,12 +231,15 @@ fn typeset_job(input: TypesetInput) -> Result<Typeset, TaskError> {
         input.mono_family,
         input.faces,
     );
-    let layout = typeset(
-        &dom,
+    // 走带块级缓存的入口：与裸 `layout` 同一条主流程，只是把「样式没变的块」直接搬过来。
+    let layout = layout_with_blocks(
+        &mut input.blocks,
+        &input.key,
+        &artifacts.dom,
         &styles,
-        body_of(&dom),
+        body_of(&artifacts.dom),
         LayoutOptions {
-            width: input.width,
+            width: input.key.width as f32,
             // 完整排版：界面要行盒来摆字，不能用只算高的轻量档。
             light: false,
         },
@@ -181,9 +247,9 @@ fn typeset_job(input: TypesetInput) -> Result<Typeset, TaskError> {
         input.images.as_ref(),
     );
     Ok(Typeset {
+        blocks: input.blocks,
         key: input.key,
-        dom,
-        map,
+        artifacts,
         styles,
         layout,
     })
@@ -201,17 +267,20 @@ impl Document {
         // 书自己的 CSS 是作者层；读者偏好通过根样式进来（`root_base`），
         // 带 `!important` 的读者样式表留给 M5 的 reader.css。
         rules.extend(RuleSet::parse(css, Origin::Author));
-        let (dom, map) = Self::parse_chapter(&source);
+        // 建好才交出去：`text_map()` 与锚点换算在第一次排版回来之前也要能用。
+        let artifacts = Arc::new(ChapterArtifacts::build(&source));
         Self {
             source,
-            dom,
-            map,
+            author_css: css.to_string(),
+            artifacts,
             rules,
             prefs,
             images,
+            images_rev: 0,
             faces,
-            generation: 0,
+            blocks: BlockCache::default(),
             applied: None,
+            desired: None,
             pending: None,
             layout: Layout::default(),
             styles: None,
@@ -223,13 +292,6 @@ impl Document {
     /// 这本书的内嵌字体。绘制路径与度量共用它，两边不可能拿不同的别名表。
     pub fn fonts(&self) -> &BookFonts {
         &self.faces
-    }
-
-    /// 源文本 → DOM + 可见文本坐标。两者必须一起换，否则坐标指的就是上一章的文本。
-    fn parse_chapter(source: &str) -> (Dom, TextMap) {
-        let dom = Dom::parse(source.as_bytes());
-        let map = TextMap::build(&dom, body_of(&dom));
-        (dom, map)
     }
 
     /// 章节自己的 `<style>` 块 → 作者层规则。
@@ -255,50 +317,94 @@ impl Document {
         rules
     }
 
+    /// 读者偏好里**只能用 CSS 表达**的那几项 → 读者层规则。
+    ///
+    /// 段间距走这一层而不是根样式：`margin` 不是继承属性，挂在根上穿不到 `<p>`。
+    /// 读者层在层叠里位于作者层之下（`Origin::Reader` < `Origin::Author`，与浏览器一致），
+    /// 所以书自己写了 `p { margin-bottom: 2em }` 时仍按书的；没有作者声明时，
+    /// `css/ua.rs` 给 `<p>` 的那一对 1em 才是兜底。
+    ///
+    /// 它与章文本无关，所以**不进 `ChapterArtifacts`**（那一份按 `chapter_hash` 复用，
+    /// 掺进偏好就等于把偏好烘进了缓存），每次作业现拼一条。
+    fn reader_rules(prefs: &Reader) -> RuleSet {
+        let gap = prefs.paragraph_gap_em;
+        // 固定三位小数：滑条的步长到不了第四位，而写全精度会让同一段距在不同机器上
+        // 拼出两条字面不同的串（键里的作者样式哈希不管这一格，但日志与调试要对得上）。
+        RuleSet::parse(
+            &format!("p {{ margin-top: {gap:.3}em; margin-bottom: {gap:.3}em }}"),
+            Origin::Reader,
+        )
+    }
+
+    /// 换读者的偏好。**这里不推进任何代数**：排版键是从输入现算的，下一帧
+    /// [`Self::ensure_viewport`] 一算就发现 `prefs_hash` 那格变了，作业自然派出去。
+    /// 只有切片必须当场作废 —— 字号改了行数就改，切点跟着改。
     pub fn set_prefs(&mut self, prefs: Reader) {
         self.prefs = prefs;
-        // 偏好进排版代数（后台作业的键）与分片键，两边一起作废：留着旧切片的话，
-        // 「换了字号但一页还是那么多行」这种毛病在屏幕上看不出来，只会在进度条上飘。
-        self.generation += 1;
-        self.applied = None;
+        // 「想要哪把键」只有 `ensure_viewport` 知道（键要含栏宽与栏数），所以这里只能把它
+        // 清成「还不知道」。不清的话 `applied` 仍等于旧的 `desired`，`is_current()` 会答
+        // 「跟上了」，而恢复进度与批注回显等的就是这一句。
+        self.desired = None;
         self.drop_fragments();
     }
 
     /// 换章。源文本没变就保留上一次的排版结果，来回翻同一章不必重算。
     ///
     /// 解析与排版都搬进了后台作业（见 [`Self::request_typeset`]），这里只作废：
-    /// 旧章的 DOM 与行盒留着，新结果回来之前屏幕上还是上一章（一帧的功夫）——
+    /// 旧章的产物与行盒留着，新结果回来之前屏幕上还是上一章（一帧的功夫）——
     /// 锚点换算在这段时间里指着旧章，不会指到半个新章上。
     pub fn set_chapter(&mut self, source: String) {
-        if source != self.source {
-            self.source = source;
-            self.generation += 1;
-            self.applied = None;
-            self.drop_fragments();
+        if source == self.source {
+            return;
         }
-    }
-
-    /// 换章时图片索引也要跟着换：`<img src>` 的相对路径基准目录随章变化。
-    pub fn set_images(&mut self, images: Arc<ChapterImages>) {
-        self.images = images;
-        self.generation += 1;
+        self.source = source;
         self.applied = None;
+        self.desired = None;
         self.drop_fragments();
     }
 
-    /// 排版结果是否已经跟上当前的输入（章源、偏好、宽度）。恢复阅读进度要等它：
-    /// 「第几个字摆在哪一像素」只有当代的排版才答得对。
-    pub fn is_current(&self) -> bool {
-        self.applied
-            .is_some_and(|(applied, _)| applied == self.generation)
+    /// 换章时图片索引也要跟着换：`<img src>` 的相对路径基准目录随章变化。
+    ///
+    /// 图片索引单独进位：`<img>` 的固有尺寸是排版输入，而它既不在章文本里也不在样式里，
+    /// 不换这一格就没人知道「同一段文字现在该占多大的洞」。
+    pub fn set_images(&mut self, images: Arc<ChapterImages>) {
+        self.images = images;
+        self.images_rev += 1;
+        self.applied = None;
+        self.desired = None;
+        self.drop_fragments();
     }
 
-    /// 当前这一份输入的排版代数（换章、改偏好都会进位）。
+    /// **排版失效键的唯一构造点**（`plans/阅读管线.md` §四：一个键、一处构造、各级缓存共用）。
     ///
-    /// 给「按章缓存一份解好锚的批注」当键用：代数没变，行盒与可见文本坐标就没变，
-    /// 上一帧解出来的位置照样作数；进了位就必须重解。
-    pub fn generation(&self) -> u64 {
-        self.generation
+    /// 界面不许自己拼键、也不许只比其中几格：`width` 是**栏宽**（折行发生在它上头），
+    /// 整窗宽不进键 —— 窗口变宽而栏宽被 `max_measure` 卡住时，排版本来就不该重做。
+    pub fn layout_key(&self, width: f32, columns: usize) -> LayoutKey {
+        LayoutKey::compose(
+            &self.source,
+            &self.author_css,
+            &self.prefs,
+            width,
+            columns,
+            self.images_rev,
+            self.faces.revision(),
+        )
+    }
+
+    /// 排版结果是否已经跟上当前的输入。恢复阅读进度要等它：
+    /// 「第几个字摆在哪一像素」只有当下那把键的排版才答得对。
+    pub fn is_current(&self) -> bool {
+        self.desired.is_some_and(|want| self.applied == Some(want))
+    }
+
+    /// 本章源文本的哈希 —— 「按章缓存一份解好锚的批注」那级的键。
+    ///
+    /// 从前的这里是排版代数，于是读者每动一次设置都要把整章批注重解一遍；而批注解出的
+    /// 是**可见文本坐标**，它只跟章文本有关，与字号、栏宽都无关。换章之后这一格必然变，
+    /// 因为它取的就是当前那份解析产物的键 —— 缓存与 `text_map()` 出自同一份 DOM，
+    /// 这正是「不许拿上一章的坐标答本章的问题」那条。
+    pub fn chapter_hash(&self) -> u64 {
+        self.artifacts.key
     }
 
     /// 作废切片缓存。排版一作废就必须跟着作废它 —— 切点读的是行盒。
@@ -330,6 +436,15 @@ impl Document {
 
     pub fn lines(&self) -> &[LineBox] {
         &self.layout.lines
+    }
+
+    /// 可见带 `[from_y, to_y)` 里那些行的下标区间 —— 绘制那一帧只该遍历这一段。
+    ///
+    /// 把 `0..行数` 整个交给场景层再逐行比 y，等于每帧付一次「整章行数」的钱，而其中
+    /// 绝大多数行根本不在屏上（`plans/阅读管线.md` §十一 第 4 条）。区间是引擎在排版结果
+    /// 自己那张索引上二分出来的，界面不算几何。
+    pub fn visible_lines(&self, band: Range<f32>) -> Range<usize> {
+        self.layout.lines_in_band(band.start, band.end)
     }
 
     pub fn line_count(&self) -> usize {
@@ -385,16 +500,15 @@ impl Document {
         }
     }
 
-    /// 请求一次排版（不阻塞）：键没变就什么都不做，变了就把整章的解析 + 层叠 +
-    /// 排版丢给后台队列，渲染帧照常用上一份结果画。测试里同步跑同一段作业体，
-    /// 结果当帧可断言 —— 覆盖的代码与线上同一条。
+    /// 请求一次排版（不阻塞）：键没变就什么都不做，变了就把层叠 + 排版丢给后台队列
+    /// （解析按需 —— 产物对得上就不重解析，见 [`typeset_job`]），渲染帧照常用上一份结果画。
+    /// 测试里同步跑同一段作业体，结果当帧可断言 —— 覆盖的代码与线上同一条。
     fn request_typeset(
         &mut self,
-        width: f32,
+        key: LayoutKey,
         texts: Arc<TextSystem>,
         window_texts: Arc<WindowTextSystem>,
     ) {
-        let key = (self.generation, width);
         if self.applied == Some(key) {
             return; // 已应用的这份就是想要的
         }
@@ -403,14 +517,15 @@ impl Document {
             .as_ref()
             .is_some_and(|(pending, _)| *pending == key)
         {
-            return; // 同一代同一宽度的作业在飞
+            return; // 同一把键的作业已经在飞
         }
         let input = TypesetInput {
+            blocks: std::mem::take(&mut self.blocks),
             key,
             source: self.source.clone(),
+            artifacts: self.artifacts.clone(),
             rules: self.rules.clone(),
             prefs: self.prefs.clone(),
-            width,
             images: self.images.clone(),
             texts,
             window_texts,
@@ -421,7 +536,12 @@ impl Document {
         if cfg!(test) {
             match typeset_job(input) {
                 Ok(out) => self.apply_typeset(out),
-                Err(err) => tracing::error!("typeset: 排版失败：{err}"),
+                Err(err) => tracing::error!(
+                    chapter_hash = key.chapter_hash,
+                    width = key.width,
+                    error = %err,
+                    "typeset: 排版失败"
+                ),
             }
             return;
         }
@@ -430,12 +550,13 @@ impl Document {
     }
 
     /// 收后台排版的结果（渲染帧经 [`Self::ensure_viewport`] 间接调用）。
-    /// 新一代的上来就换上；旧代的丢掉 —— 这期间章或偏好又变了，新作业已排队。
+    /// 只有**仍然想要**的那把键的结果才采纳；这期间章、偏好、宽度又变了，这一份就陈旧，
+    /// 丢掉即可 —— 新的作业已经排在后面。
     fn poll_typeset(&mut self) {
         let Some((key, handle)) = self.pending.as_ref() else {
             return;
         };
-        // 键是 Copy 的小元组，抄一份出来，后面要改 `self.pending`。
+        // 键是 Copy 的小结构，抄一份出来，后面要改 `self.pending`。
         let key = *key;
         let mut outcome: Option<Result<Typeset, TaskError>> = None;
         let mut done = false;
@@ -455,20 +576,27 @@ impl Document {
         self.pending = None;
         match outcome {
             Some(Ok(out)) => {
-                if out.key == key && key.0 == self.generation {
+                if out.key == key && self.desired == Some(key) {
                     self.apply_typeset(out);
                 }
             }
-            Some(Err(err)) => tracing::error!("typeset: 后台排版失败：{err}"),
+            Some(Err(err)) => tracing::error!(
+                chapter_hash = key.chapter_hash,
+                width = key.width,
+                error = %err,
+                "typeset: 后台排版失败"
+            ),
             None => {}
         }
     }
 
     /// 把一份后台产出换进来。行盒换了，切点也就换了 —— 切片必须跟着作废，
-    /// 否则分页翻到的是上一页的行；重切在下一帧的 `ensure_viewport` 里同步做。
+    /// 否则分页翻到的是上一页的行；重切在同一帧的 `ensure_viewport` 里同步做。
     fn apply_typeset(&mut self, out: Typeset) {
-        self.dom = out.dom;
-        self.map = out.map;
+        // 缓存不论这一份结果采不采纳都要收回来：它是可再生的中间物，
+        // 留着比扔掉省一次整章重排，而复用范围（章 / 字体 / 度量）变了它自己会清。
+        self.blocks = out.blocks;
+        self.artifacts = out.artifacts;
         self.styles = Some(out.styles);
         self.layout = out.layout;
         self.applied = Some(out.key);
@@ -494,7 +622,7 @@ impl Document {
     /// 排版 + 分片，返回**栏宽**（绘制要按它摆每栏的左边界）。
     ///
     /// 一次把整章切完而不是逐页现算：`Fragmentainer` 的游标是为「翻到第 500 页」准备的，
-    /// 而这里一片一章最多几千行，一次切完仍然只在 `(代数, 栏宽, 偏好, 片高, 栏数)` 变了时发生，
+    /// 而这里一片一章最多几千行，一次切完仍然只在 `(排版键, 片高)` 这一对变了时发生，
     /// 换来的是进度条随手就有总页数。排版本身在后台队列上跑（见 [`Self::request_typeset`]），
     /// 首帧拿不到行盒就先空着一帧 —— 结果回来，下一帧整章上屏。
     pub fn ensure_viewport(
@@ -506,13 +634,17 @@ impl Document {
         let columns = viewport.columns.max(1);
         let total = Self::content_width(window, &self.prefs, viewport.reserve);
         let width = column_width(total, columns, viewport.gap).max(1.0);
+        // 键在这里算，算是「这一帧想要什么」的唯一表述：排版、切片、绘制三级都从它出发。
+        let key = self.layout_key(width, columns);
+        let width = key.width as f32;
+        // 片高同样量化一档，且**切片用的就是量化后的那个数**：排版按 A 宽折行、切片按 B 高切、
+        // 绘制按 C 摆，三方都以为自己对，其实是三方各对（`quantize_px` 那条纪律的另一半）。
+        let slice_height = quantize_px(viewport.height.max(0.0));
+        let height = slice_height as f32;
+        self.desired = Some(key);
         // 先收上一帧的作业成果，再看要不要派新活 —— 顺序反了会把刚回来的结果当旧的丢掉。
         self.poll_typeset();
-        self.request_typeset(
-            width,
-            cx.text_system().clone(),
-            window.text_system().clone(),
-        );
+        self.request_typeset(key, cx.text_system().clone(), window.text_system().clone());
         // 作业在飞就必须再要一帧：`poll_typeset` 只有渲染帧会调，而后台那一份完成时
         // 没有任何人知道。不主动要帧的话，「排版早就排好了、屏上却一个字都没有」会一直
         // 挂着，直到读者随手碰一下屏幕 —— 平板上尤其明显（没有键盘与鼠标带来的零散重绘）。
@@ -520,20 +652,11 @@ impl Document {
             window.request_animation_frame();
         }
 
-        // 排版在手（代数与宽度都对上）才切片；否则沿用上一份（首帧可能还没有）。
-        let current = self.applied == Some((self.generation, width));
-        if !current {
+        // 排版在手（键对得上）才切片；否则沿用上一份（首帧可能还没有）。
+        if self.applied != Some(key) {
             return width;
         }
-        let height = viewport.height.max(0.0);
-        let cached = self.fragmented.as_ref().is_some_and(|(g, w, p, h, c)| {
-            *g == self.generation
-                && *w == width
-                && *p == self.prefs
-                && *h == height
-                && *c == columns
-        });
-        if cached {
+        if self.fragmented == Some((key, slice_height)) {
             return width;
         }
         let options = FragmentOptions { height, columns };
@@ -542,7 +665,7 @@ impl Document {
             // 没排过版就没有行盒可切（第一帧之前）。
             None => Vec::new(),
         };
-        self.fragmented = Some((self.generation, width, self.prefs.clone(), height, columns));
+        self.fragmented = Some((key, slice_height));
         self.slices = Rc::new(slices);
         width
     }
@@ -580,8 +703,16 @@ impl Document {
     // 所以这三个方法放在共用层，实现全在 `folio_core::anchor`。
 
     /// 本章的可见文本坐标表（批注与书签在上面建锚点）。
+    ///
+    /// 它与 [`Self::dom`] 必须出自同一份解析产物 —— 坐标表的区间是按那棵 DOM 的
+    /// 文本节点算的，配错了就是把上一章的偏移安到本章的字上。两者都只从 `artifacts` 取。
     pub fn text_map(&self) -> &TextMap {
-        &self.map
+        &self.artifacts.map
+    }
+
+    /// 本章的 DOM。命中、锚点、目录落点都从它出发。
+    fn dom(&self) -> &Dom {
+        &self.artifacts.dom
     }
 
     /// 本章所有带 `id` 的元素 → 它第一个可见字符的偏移。目录跳转与「现在读到哪一条」
@@ -593,9 +724,10 @@ impl Document {
     /// 元素自己的 `node_chars` 一定是 `None`（坐标表只给文本节点建区间），所以往下找到
     /// 子树里第一个进了表的节点 —— 标题的文字就在它自己那棵子树的最前面。
     pub fn id_offsets(&self) -> HashMap<String, usize> {
+        let dom = self.dom();
         let mut out: HashMap<String, usize> = HashMap::new();
-        for (node, _) in self.dom.elements() {
-            let Some(id) = self.dom.id_attr(node) else {
+        for (node, _) in dom.elements() {
+            let Some(id) = dom.id_attr(node) else {
                 continue;
             };
             // 规范要求 `id` 全章唯一。真出现重复就留文档序里在前的那个，而不是让后面
@@ -614,11 +746,11 @@ impl Document {
     fn first_text_offset(&self, root: NodeId) -> Option<usize> {
         let mut stack = vec![root];
         while let Some(node) = stack.pop() {
-            if let Some(chars) = self.map.node_chars(node) {
+            if let Some(chars) = self.text_map().node_chars(node) {
                 return Some(chars.start);
             }
             // 逆序压栈，弹出来的就是文档序。
-            let children = &self.dom.get(node).children;
+            let children = &self.dom().get(node).children;
             stack.extend(children.iter().rev().copied());
         }
         None
@@ -634,8 +766,8 @@ impl Document {
     pub fn hit_test(&self, window: &Window, cx: &App, x: f32, y: f32) -> Option<Hit> {
         folio_core::hit::hit_test(
             self.layout(),
-            &self.dom,
-            &self.map,
+            self.dom(),
+            self.text_map(),
             &self.measure(window, cx),
             x,
             y,
@@ -652,8 +784,8 @@ impl Document {
     ) -> Vec<folio_core::hit::SelectionRect> {
         folio_core::hit::rects_for_range(
             self.layout(),
-            &self.dom,
-            &self.map,
+            self.dom(),
+            self.text_map(),
             &self.measure(window, cx),
             range,
         )
@@ -662,7 +794,7 @@ impl Document {
     /// 长按落点吸到一个词上（纯坐标表运算，不碰度量）。
     #[allow(dead_code)] // M6 长按选词的入口（见 plans/M6-selection.md）
     pub fn snap_word(&self, offset: usize) -> std::ops::Range<usize> {
-        folio_core::hit::snap_word(&self.map, offset)
+        folio_core::hit::snap_word(self.text_map(), offset)
     }
 
     /// 长按所在段落的字符区间（「全选本段」）。
@@ -673,7 +805,7 @@ impl Document {
         offset: usize,
     ) -> Option<std::ops::Range<usize>> {
         let _ = (window, cx);
-        folio_core::hit::paragraph_range(self.layout(), &self.dom, &self.map, offset)
+        folio_core::hit::paragraph_range(self.layout(), self.dom(), self.text_map(), offset)
     }
 
     #[allow(dead_code)] // 上面三个 M6 入口共用
@@ -693,7 +825,8 @@ impl Document {
     /// 下次该回到最后一屏，而不是回到「章尾但看不见任何字」的地方。
     pub fn offset_at_y(&self, y: f32) -> usize {
         let line = folio_core::anchor::line_at_y(self.layout(), y);
-        folio_core::anchor::line_offset(self.layout(), &self.dom, &self.map, line).unwrap_or(0)
+        folio_core::anchor::line_offset(self.layout(), self.dom(), self.text_map(), line)
+            .unwrap_or(0)
     }
 
     /// 第 `line` 行的行首字符偏移。越界给 0（没有行就没有坐标）。
@@ -701,12 +834,13 @@ impl Document {
     /// 桌面端用它做「列表滚过多少像素 → 第几行 → 第几个字」的最后一跳：
     /// 行号是从虚拟列表自己的坐标空间反解出来的，不能再拿布局绝对 `y` 去换算。
     pub fn coordinate_of_line(&self, line: usize) -> usize {
-        folio_core::anchor::line_offset(self.layout(), &self.dom, &self.map, line).unwrap_or(0)
+        folio_core::anchor::line_offset(self.layout(), self.dom(), self.text_map(), line)
+            .unwrap_or(0)
     }
 
     /// 可见文本偏移落在第几行（行盒下标）。
     pub fn line_at_offset(&self, offset: usize) -> usize {
-        folio_core::anchor::line_at_offset(self.layout(), &self.dom, &self.map, offset)
+        folio_core::anchor::line_at_offset(self.layout(), self.dom(), self.text_map(), offset)
     }
 
     /// 要把 `offset` 那一行摆上屏，滚动位置该是多少（行顶的绝对 y）。
@@ -714,7 +848,7 @@ impl Document {
     /// 排版还没做过（`layout` 是空的）时给 0，等于回到章首 —— 这是唯一不骗人的兜底。
     pub fn y_at_offset(&self, offset: usize) -> f32 {
         let layout = self.layout();
-        let line = folio_core::anchor::line_at_offset(layout, &self.dom, &self.map, offset);
+        let line = folio_core::anchor::line_at_offset(layout, self.dom(), self.text_map(), offset);
         layout
             .lines
             .get(line)
@@ -724,304 +858,4 @@ impl Document {
 }
 
 #[cfg(test)]
-mod tests {
-    //! 本章的排版状态（本文件）与 `measure.rs` 在宿主上跑的用例。
-    //!
-    //! 为什么这些算移动端的测试：移动 UI 本身只在 `cfg(mobile)` 下编译，宿主的
-    //! `cargo test` 碰不到那一侧的视图。但「同一本书在两端排出一样的行」这件事
-    //! 完全落在这一层 —— 源文本包装、层叠、版心宽度、断行与缓存都在这里，
-    //! 移动端只是把它们摆上屏的那层薄壳。所以这一层被测住，移动端的排版就不是没测过。
-    //!
-    //! 反过来讲也很清楚：这里**测不到**的是触摸滚动、章节按钮的点击、主题在 Android 上
-    //! 解析到浅还是深 —— 那几件只有真开窗口、真上机器才算验证。
-
-    use std::sync::Arc;
-
-    use crate::ui::features::reader::book_fonts::BookFonts;
-    use crate::ui::features::reader::document::{Document, body_of};
-    use crate::ui::shared::images::ChapterImages;
-    use folio_core::Reader;
-    use folio_core::layout::LineFragment;
-    use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Context, Render, Styled, TestAppContext, div, px, size,
-    };
-
-    /// 一个只占满窗口的空视图。这些用例要的是**窗口**（度量与视口都挂在窗口上），
-    /// 界面内容无关，所以给它最小的那一副。
-    struct Blank;
-
-    impl Render for Blank {
-        fn render(
-            &mut self,
-            _window: &mut gpui_kit::Window,
-            _cx: &mut Context<Self>,
-        ) -> impl gpui_kit::IntoElement {
-            div().size_full()
-        }
-    }
-
-    /// 开一个指定尺寸的窗口，返回它的句柄。版心宽度的用例靠它给视口。
-    fn window(cx: &mut TestAppContext, width: f32, height: f32) -> AnyWindowHandle {
-        cx.open_window(size(px(width), px(height)), |_, _| Blank)
-            .into()
-    }
-
-    /// 章里写的 `<style>` 也要进层叠：样式表**文件**按清单回容器取，而写在章里的
-    /// 那一份随正文到达 —— 作者把样式写在哪一份里，层叠结果都不该有差别。
-    #[test]
-    fn a_chapters_own_style_block_reaches_the_cascade() {
-        use folio_core::css::computed::{Color, cascade};
-        let source = "<html><head><style>p { color: #C0392B }</style></head>\
-                      <body><p>字</p></body></html>";
-        let (dom, _) = Document::parse_chapter(source);
-        let rules = Document::chapter_style_rules(&dom);
-        assert_eq!(rules.rules.len(), 1, "章里就一条规则：{:?}", rules.rules);
-
-        let styles = cascade(
-            &dom,
-            &rules,
-            &folio_core::css::computed::ComputedStyle::default(),
-        );
-        let p = dom
-            .elements()
-            .find(|(id, _)| dom.tag_name(*id) == Some("p"))
-            .map(|(id, _)| id)
-            .expect("该有 p");
-        assert_eq!(
-            styles.get(p).unwrap().color,
-            Some(Color(0xC0, 0x39, 0x2B)),
-            "章内 <style> 的颜色要落到 p 上"
-        );
-    }
-
-    /// 一段足够长的中文，保证它会折行 —— 不折行的话「缩进改变了布局」这种断言无从成立。
-    const LONG: &str = "于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。";
-
-    fn prefs() -> Reader {
-        Reader::default().clamped()
-    }
-
-    /// 把版心相关的两项设成「不参与这段」的值：`margin_x` 归零、上限关掉。
-    /// 留白与上限本身另有用例，这里只关心缩进与折行。
-    fn bare_prefs() -> Reader {
-        let mut prefs = prefs();
-        prefs.margin_x = 0.0;
-        prefs.max_measure = 0.0;
-        prefs
-    }
-
-    /// 在窗口里把一段 XHTML 排完，返回排好的 [`Document`]。
-    ///
-    /// 返回整个文档而不是行坐标，是因为要断言的东西有一半在文本里（哪一行是什么、
-    /// 有没有留下一个画不出来的图片位）。
-    fn layout_of(cx: &mut TestAppContext, xhtml: &str, prefs: &Reader, width: f32) -> Document {
-        let handle = window(cx, width, 900.0);
-        let mut document = Document::new(
-            xhtml.to_string(),
-            "",
-            prefs.clone(),
-            Arc::new(ChapterImages::empty()),
-            // 这些用例钉的是排版与坐标，不是字体：空别名表 = 没有内嵌字体，
-            // 与没有这个功能时逐字节同一条路径。
-            Arc::new(BookFonts::empty()),
-        );
-        cx.update_window(handle, |_, win, cx| {
-            document.ensure_layout(win, cx, 0.0);
-        })
-        .expect("窗口应当可排版");
-        document
-    }
-
-    /// `max_measure == 0` 是「不设上限、随窗口铺满」的**哨兵值**，不是 0 像素的上限。
-    /// 当成上限去夹就会塌成 1px 版心、一行只剩一个字 —— 全屏阅读时整个正文会变成一列竖字。
-    #[gpui_kit::test]
-    fn a_zero_max_measure_means_no_cap(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        let handle = window(cx, 1000.0, 600.0);
-        let mut uncapped = prefs();
-        uncapped.margin_x = 48.0;
-        uncapped.max_measure = 0.0;
-        let mut capped = uncapped.clone();
-        capped.max_measure = 400.0;
-
-        let (free, limited) = cx
-            .update_window(handle, |_, win, _| {
-                (
-                    Document::content_width(win, &uncapped, 0.0),
-                    Document::content_width(win, &capped, 0.0),
-                )
-            })
-            .expect("窗口应当可读");
-        assert_eq!(free, 1000.0 - 48.0 * 2.0, "不设上限时版心随视口铺满");
-        assert_eq!(limited, 400.0, "设了上限就按上限");
-    }
-
-    /// 侧栏那种「不属于阅读栏的宽度」必须从版心里扣掉，否则引擎按整窗宽折行、
-    /// 屏幕按窄栏裁剪，居中的标题会被推到栏外。移动端没有侧栏，所以传 0 ——
-    /// 同一个函数、同一个语义，这里也替那条路径把式子钉住。
-    #[gpui_kit::test]
-    fn the_pane_reserve_is_subtracted_from_the_measure(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        let handle = window(cx, 1000.0, 600.0);
-        let prefs = bare_prefs();
-        let width = cx
-            .update_window(handle, |_, win, _| {
-                Document::content_width(win, &prefs, 260.0)
-            })
-            .expect("窗口应当可读");
-        assert_eq!(width, 740.0, "侧栏占位要从视口宽里扣掉");
-    }
-
-    /// **缓存的键必须覆盖所有排版输入**。
-    ///
-    /// 这一条是回归门：缓存键曾经只记 `(宽度, 字号, 行距)`，于是读者在设置里改首行缩进或段距
-    /// 时，`ensure_layout` 认定几何参数没变而直接复用旧布局 —— 界面上看不到任何报错，
-    /// 只是那一项设置怎么改都不生效。现在键里带整份偏好，这条断言才会成立。
-    #[gpui_kit::test]
-    fn an_indent_change_reflows_the_document(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        let handle = window(cx, 600.0, 900.0);
-        let mut prefs = bare_prefs();
-        prefs.indent_em = 0.0;
-        let mut document = Document::new(
-            format!("<p>{}</p>", LONG.repeat(6)),
-            "",
-            prefs.clone(),
-            Arc::new(ChapterImages::empty()),
-            // 这些用例钉的是排版与坐标，不是字体：空别名表 = 没有内嵌字体，
-            // 与没有这个功能时逐字节同一条路径。
-            Arc::new(BookFonts::empty()),
-        );
-
-        // 第一次排版：无缩进。
-        cx.update_window(handle, |_, win, cx| document.ensure_layout(win, cx, 0.0))
-            .expect("第一次排版应当成功");
-        let flat = document.lines().first().map(|line| line.x).unwrap_or(0.0);
-
-        // 同一个文档、同一个窗口，**只**改首行缩进：宽度、字号、行距都没变。
-        // 缓存键只记那三项时这里会直接复用上面的布局，第一行的左缘一动不动。
-        prefs.indent_em = 2.0;
-        document.set_prefs(prefs);
-        cx.update_window(handle, |_, win, cx| document.ensure_layout(win, cx, 0.0))
-            .expect("第二次排版应当成功");
-        let indented = document.lines().first().map(|line| line.x).unwrap_or(0.0);
-
-        assert!(
-            indented > flat,
-            "首行缩进改了必须重排：不缩进时第一行左缘 {flat}，缩进两字后 {indented}"
-        );
-    }
-
-    /// **解不出资源的 `<img>` 整张跳过**，不塌成空盒、也不留一块画不出来的空白。
-    ///
-    /// 这条对移动端尤其要紧：那一侧的图片现在按引擎给的位真画
-    /// （`view.rs` 用 gpui 的 `img` 元素），所以一个解不出来的 `src`
-    /// 若还留着位子，读者看到的就是一块空洞，还会以为正文排错了。
-    /// 跳过之后行里的文本必须依然完整。
-    #[gpui_kit::test]
-    fn an_unresolvable_image_is_skipped_not_left_as_a_gap(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        let document = layout_of(
-            cx,
-            "<p>前<img src=\"missing.png\" width=\"120\" height=\"80\">后</p>",
-            &bare_prefs(),
-            600.0,
-        );
-        let line = document.lines().first().expect("至少要有一行");
-        assert!(
-            !line
-                .fragments
-                .iter()
-                .any(|fragment| matches!(fragment, LineFragment::Image(_))),
-            "解不出资源的 `<img>` 该整张跳过，不该留一个画不出来的位"
-        );
-        assert_eq!(
-            document.line_texts().concat(),
-            "前后",
-            "跳过之后行里的文字仍然是完整的"
-        );
-    }
-
-    /// 排版层要找的那个根：html5ever 会替片段补出 `<body>`，所以裸片段也有一个 body 可用；
-    /// 取到的必须是那个元素而不是文档根，否则 `<body>` 自己的 padding 与样式不生效。
-    #[test]
-    fn body_of_picks_the_body_element() {
-        for source in [
-            "<html><body><p>有 body</p></body></html>",
-            "<p>只有正文</p>",
-            "",
-        ] {
-            let dom = folio_core::dom::Dom::parse(source.as_bytes());
-            let body = body_of(&dom);
-            assert_eq!(
-                dom.tag_name(body),
-                Some("body"),
-                "{source:?} 该排到 `<body>` 下面，实际取到了别的节点"
-            );
-        }
-    }
-
-    /// 进度坐标的往返：行顶像素 → 「第几个字」→ 行号，在**同一份排版**里必须是同一行；
-    /// 而换了版心宽与字号之后，它必须还落在同一段里。
-    ///
-    /// 这就是开发方案 M5 那句验收（改字号 + 缩窗口 → 锚点命中）在共用层的落地检查。
-    /// 三段文本各带一个段号标记，所以「还在同一段」是可判定的，而不是靠感觉像。
-    #[gpui_kit::test]
-    fn the_progress_coordinate_survives_a_relayout(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        let xhtml = (0..3)
-            .map(|i| format!("<p>第{i}段{LONG}</p>"))
-            .collect::<Vec<_>>()
-            .join("");
-        let base = layout_of(cx, &xhtml, &bare_prefs(), 600.0);
-        let texts = base.line_texts();
-        // 找第二段的第一行：它的文本一定含「第1段」，且行顶像素可反解成坐标。
-        let target = (0..texts.len())
-            .find(|&k| texts[k].starts_with("第1段"))
-            .expect("三段都该排出来");
-        let y = base.lines()[target].y;
-
-        let offset = base.offset_at_y(y);
-        assert!(offset > 0, "第二段不可能从第 0 个字开始");
-        assert_eq!(
-            base.line_at_offset(offset),
-            target,
-            "同一份排版里，像素 → 坐标 → 行号必须回到原行"
-        );
-        // 反向也成立：坐标 → 行顶像素，得到的就是那一行的行顶。
-        assert_eq!(base.y_at_offset(offset), y);
-
-        for (width, size) in [(300.0, 16.0), (900.0, 24.0), (420.0, 30.0)] {
-            let mut prefs = bare_prefs();
-            prefs.font_size = size;
-            let moved = layout_of(cx, &xhtml, &prefs, width);
-            let landed = moved.line_at_offset(offset);
-            let landed_text = &moved.line_texts()[landed];
-            assert!(
-                landed_text.contains("第1段"),
-                "宽 {width}、字号 {size}：坐标 {offset} 落到了「{landed_text}」，不在第二段里"
-            );
-        }
-    }
-
-    /// 排版还没做过时这套换算不能给出假坐标：一个全新的 `Document` 没有行盒，
-    /// 任何偏移都只能映射到「章首」，否则恢复进度会把人送到看不见的地方。
-    #[test]
-    fn an_unlaid_out_document_maps_everything_to_the_chapter_start() {
-        let document = Document::new(
-            format!("<p>{LONG}</p>"),
-            "",
-            prefs(),
-            Arc::new(ChapterImages::empty()),
-            // 这些用例钉的是排版与坐标，不是字体：空别名表 = 没有内嵌字体，
-            // 与没有这个功能时逐字节同一条路径。
-            Arc::new(BookFonts::empty()),
-        );
-        assert_eq!(document.line_count(), 0, "没排过版就没有行盒");
-        assert_eq!(document.offset_at_y(4000.0), 0);
-        assert_eq!(document.y_at_offset(1234), 0.0);
-        assert_eq!(document.line_at_offset(1234), 0);
-        // 坐标表不依赖排版，构造就有 —— 批注可以在排版之前建锚点。
-        assert_eq!(document.text_map().text(), LONG);
-    }
-}
+mod tests;

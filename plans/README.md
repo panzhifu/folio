@@ -6,6 +6,10 @@
 
 | 文件 | 内容 |
 |---|---|
+| [阅读管线.md](阅读管线.md) | 七级管线与三套坐标：三级前缀和、`LayoutKey` 一处构造、章的解析产物缓存、后端形状与四个函数、线程归属、**接线顺序与验收（计数断言）** |
+| [导入管线.md](导入管线.md) | 导入七步：`ingest` / `index` 那道缝、`sha2` 当身份、去重统计旧文件、封面自哈希、`Source` trait 一条管线 |
+| [基础设施.md](基础设施.md) | 作业（含关闭时排空队列）、配置三层 + provenance + Arc 换页 + 热/重启清单、错误三档、日志纪律、十一件没人管的事、**§七 实现台账（2026-10-12）** |
+| [Locator.md](Locator.md) | 坐标系：存的五个字段含原文快照、不依赖排版的**全局字符进度**、按格式的 source_key、四级降级复用 `anchor::relocate` |
 | [M5-refactor.md](M5-refactor.md) | 架构重构（KOReader 式模块化）+ 绘制层简化 + 引擎查询接口 |
 | [M6-selection.md](M6-selection.md) | 选中一期：长按选词、拖动扩展、复制 |
 | [M7-annotations.md](M7-annotations.md) | 批注二期设计：TextAnchor 落库、回显、侧栏 |
@@ -24,6 +28,8 @@ crates/folio-core/          纯 Rust，无 gpui
   src/dom/                  html5ever arena DOM
   src/css/                  cssparser + selectors，层叠与 UA 表
   src/layout/               排版引擎：行盒 / 分页 / 双栏分片（fragment.rs）
+    key.rs                  失效键 `LayoutKey`：**一处构造，各级缓存共用**
+    cache.rs                整章 `LayoutCache` 与块级 `BlockCache`（改一段只重排一段）
   src/anchor.rs             TextMap（可见文本坐标系）/ TextAnchor / 四级降级 relocate
   src/annotation.rs         批注读侧：relocate 批量解析 / 按章分组 / Markdown 导出
   src/group.rs              书架分组（按作者 / 格式；集合见 store）
@@ -59,7 +65,7 @@ crates/folio-app/src/ui/    gpui-kit 界面
 `ReaderSession` 持有并转发命令；跨屏事件用 gpui 的 `cx.emit/subscribe`（它就是事件总线，
 不另造）。`view.rs` 只读状态、翻译输入，不写业务状态。
 
-**三个钉死的架构决策**：
+**五个钉死的架构决策**：
 
 1. **自研排版引擎**（folio-core/layout）而非 gpui-kit `TextView`：分页、双栏分片、
    字偏移坐标系是阅读器的命根，`TextView` 的流式布局给不了。KOReader 同样保留 crengine。
@@ -69,6 +75,11 @@ crates/folio-app/src/ui/    gpui-kit 界面
 4. **统一文档接口 + 两种内容家族**（学 KOReader）：`Document` trait 是唯一的阅读入口，
    底下只分「可重排」（行由排版引擎按视口算出）与「定版式」（页是既定的）两族，
    格式差异全部收敛在 `format::provider` 的注册表里。不做「把所有格式预转成一种文件」。
+5. **失效键只有一把**（`layout::LayoutKey`）：排版结果、块级缓存、切片、批注解算缓存
+   都问同一把键，构造点只有 `Document::layout_key` 一处。理由不是性能而是防漂 ——
+   同一个「变了没有」在两处各答一遍，两处必然漂，症状是「改了设置版式不动」或
+   「缓存看起来命中、屏上却是旧行盒」。（接线前这里有三套手搓键：`generation`、
+   `applied` 的元组、`fragmented` 的五元组。）
 
 ## Roadmap（M8+ 摘要，启动时再展开成独立文件）
 

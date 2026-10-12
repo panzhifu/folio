@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crate::Store;
 use crate::format::{
-    Chapter, ChapterLocator, Content, DocMeta, FlowDoc, Format, ImageRes, TocEntry, guess_media_type,
+    Chapter, ChapterLocator, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
+    PageSource, TocEntry, guess_media_type,
 };
 use crate::position::Locator;
 use crate::store::{MIGRATIONS, StaleReason};
@@ -203,6 +204,143 @@ fn the_v8_migration_drops_the_text_and_keeps_a_locator() {
 
     // 再来一次不该出事（迁移可重入）。
     Store::open_at(&db).unwrap();
+}
+
+/// v11 迁移：旧库（v10）升上来时要有 `cover_spec` 列，缺省 `0` = 迁移之前生成的封面，
+/// 一律当旧规格 —— 开书时由 `stale_reason` 认出来重扫重生成（`plans/基础设施.md` §5.1）。
+#[test]
+fn the_v11_migration_adds_the_cover_spec_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for sql in &MIGRATIONS[..10] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 10).unwrap();
+        conn.execute(
+            "INSERT INTO books (path, title, authors, format, size, added_at, cover)
+             VALUES ('a.epub', 'A', '', 'epub', 0, 0, x'89504E47')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let store = Store::open_at(&db).unwrap();
+    assert_eq!(store.user_version().unwrap(), MIGRATIONS.len() as i64);
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let spec: i64 = conn
+        .query_row("SELECT cover_spec FROM books WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(spec, 0, "迁移之前生成的封面一律当旧规格");
+}
+
+/// §5.1：有封面、但记的是旧规格 → 认成 `OldCover`，好让开书路径重扫重生成；
+/// 没有封面的书不受这条影响。
+#[test]
+fn an_old_cover_spec_is_reported_as_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let path = dir.path().join("a.md");
+    std::fs::write(&path, "# 一\n\n正文\n").unwrap();
+    let store = Store::open_at(&db).unwrap();
+    let id = store.add_book(&path, &meta("A")).unwrap();
+    store
+        .save_flow(id, &flow(&[("一", "正文")]), Format::Markdown)
+        .unwrap();
+    assert_eq!(store.stale_reason(id).unwrap(), None, "刚存完规格是当前的");
+
+    // 手工把规格退回迁移前的 0（模拟老库升上来）。
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE books SET cover_spec = 0 WHERE id = ?1", [id])
+            .unwrap();
+    }
+    assert_eq!(
+        store.stale_reason(id).unwrap(),
+        Some(StaleReason::OldCover),
+        "有封面且规格落后，该认出来"
+    );
+
+    // 没有封面就没什么可重生成 —— 同一条规则不该再触发。
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE books SET cover = NULL WHERE id = ?1", [id])
+            .unwrap();
+    }
+    assert_eq!(store.stale_reason(id).unwrap(), None, "没有封面就不管规格");
+}
+
+/// 定版式文档（CBZ 等）落库时也要盖 `index_version` —— 不然 `stale_reason` 永远说它旧，
+/// 每次开书都白重扫一遍。这是那个既存 bug 的回归门。
+#[test]
+fn a_fixed_document_is_not_perpetually_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let path = dir.path().join("m.cbz");
+    std::fs::write(&path, b"fake zip bytes").unwrap();
+    let store = Store::open_at(&db).unwrap();
+    let id = store.add_book(&path, &meta("M")).unwrap();
+
+    let fixed = FixedDoc {
+        pages: vec![FixedPage {
+            source: PageSource::Image {
+                href: "1.png".into(),
+            },
+            width: 800,
+            height: 1200,
+        }],
+        toc: Vec::new(),
+        cover: Some(vec![0x89, b'P', b'N', b'G']),
+        images: Vec::new(),
+        width: 800,
+        height: 1200,
+    };
+    store.save_fixed(id, &fixed).unwrap();
+
+    // `index_version` 要盖上当前版本（修之前它是 0，于是下面那条断言永远报 OldIndex）。
+    let version: i64 = {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.query_row("SELECT index_version FROM books WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(version, crate::format::INDEX_VERSION);
+    assert_eq!(
+        store.stale_reason(id).unwrap(),
+        None,
+        "定版式书不该每次开都被判重扫"
+    );
+}
+
+/// §5.2 护栏：库文件坏了，`open_at` 要**报错**而不是把它删掉重建 —— 损坏的库被自动
+/// 重建等价于丢数据（进度、批注、集合都在里面）。
+#[test]
+fn a_corrupt_database_is_reported_not_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let garbage = b"this is not a sqlite database at all, not even close".as_slice();
+    std::fs::write(&db, garbage).unwrap();
+
+    // `Store` 不是 `Debug`，所以不用 `expect_err`。
+    let err = match Store::open_at(&db) {
+        Ok(_) => panic!("坏库该报错，实际打开了"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, crate::Error::Sql(_)),
+        "该是 sqlite 那一层的错，实际 {err:?}"
+    );
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        garbage,
+        "坏库一个字节都不许被动过"
+    );
 }
 
 /// 删掉一本书之后，文件要**缩回去**，而不是把空间留在 freelist 里。
@@ -632,6 +770,58 @@ fn shelf_filters_by_title_or_author() {
     assert_eq!(store.shelf("  蛇结  ").unwrap().len(), 1, "首尾空白先去掉");
 }
 
+/// 读者改掉自己认的书名与作者：写回的只有那两列，而且**立刻**参与书架搜索。
+///
+/// 钉四件编译看不出来的事：多个人名按 `\n` 存、读回还是原来那几个人（界面那侧串成
+/// 一行摆，写回再拆开，两侧必须认同一个编码，否则「A · B」会变成一个人 `A · B`）；
+/// 改完按新书名搜得到、按旧书名搜不到（架上那根框查的就是这两列）；`format` / `size`
+/// 这些文件的事实不被顺手改掉；作者清空后读回是空 `Vec`（界面上那一行随之不摆）。
+#[test]
+fn editing_the_title_and_authors_roundtrips_and_refilters() {
+    let store = Store::in_memory().unwrap();
+    let id = store
+        .add_book(&path("a.epub"), &meta_by("未命名", &["出版社"]))
+        .unwrap();
+    store
+        .save_flow(id, &flow(&[("一", "正文")]), Format::Markdown)
+        .unwrap();
+
+    store
+        .set_book_meta(id, "窄门", &["安德烈·纪德".into(), "译者甲".into()])
+        .unwrap();
+    let row = store.book(id).unwrap().expect("改完还在库里");
+    assert_eq!(row.title, "窄门");
+    assert_eq!(
+        row.authors,
+        vec!["安德烈·纪德", "译者甲"],
+        "多位作者要按原来的人数读回来"
+    );
+    assert_eq!(row.format, "markdown", "文件的事实不该被碰到");
+    assert_eq!(row.size, 1234, "同上");
+    // 那一屏的封面走单独一条取字节：`BookRow` 不带图（整库握在手里时不需要）。
+    assert!(
+        store.book_cover(id).unwrap().is_some(),
+        "点开信息那一屏要能单独拿到这一本的封面字节"
+    );
+    assert!(
+        store.book_cover(4242).unwrap().is_none(),
+        "没有那一行给 None，不是报错"
+    );
+
+    assert_eq!(store.shelf("窄门").unwrap().len(), 1, "新书名立刻可搜");
+    assert_eq!(store.shelf("纪德").unwrap().len(), 1, "新作者立刻可搜");
+    assert!(store.shelf("未命名").unwrap().is_empty(), "旧书名不再命中");
+
+    store.set_book_meta(id, "窄门", &[]).unwrap();
+    assert!(
+        store.book(id).unwrap().unwrap().authors.is_empty(),
+        "清空作者读回应是空 `Vec`"
+    );
+
+    // 没有那一行：只留一条日志，不报错（与 `retarget_book_path` 同一语义）。
+    store.set_book_meta(4242, "别的书", &[]).unwrap();
+}
+
 /// 书名里的 `%` 和 `_` 是字面字符，不是通配符。
 ///
 /// 不转义的话搜 `100%` 会把整个书架列出来（`%` 匹配任意串），
@@ -696,4 +886,112 @@ fn meta_by(title: &str, authors: &[&str]) -> DocMeta {
         format: Format::Markdown,
         size: 1234,
     }
+}
+
+/// v12 迁移：老库升上来要拿到 `content_hash` / `hash_algo` 两列，而**老行留空**（懒补）。
+///
+/// 这一条钉三件事，每件都是选「懒补」而不是「迁移里一次算完」要买的东西：
+/// 1. 开库**不读磁盘**：几百本的一次性顺序读不该压在开库那一下
+///    （`plans/基础设施.md` §1.2 第 1 条），所以迁移里没有回填循环；
+/// 2. 「还没算过」是一个能表达的状态（`NULL`），不是空串，也不是某个假的哈希；
+/// 3. 旧数据照旧读得出来 —— 加两列不许动到书目、章节、进度任何一行。
+#[test]
+fn the_v12_migration_adds_identity_columns_without_backfilling_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    {
+        // 手工造一个 v11 库：跑前 11 条迁移，塞一本带章带进度的书，版本停在 11。
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for sql in &MIGRATIONS[..11] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 11).unwrap();
+        conn.execute(
+            "INSERT INTO books (path, title, authors, format, size, added_at)
+             VALUES ('/books/老名字.md', '老名字', '作者甲', 'markdown', 10, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chapters (book_id, idx, title, locator)
+             VALUES (1, 0, '第一章', '{\"v\":1,\"chapter\":0,\"offset\":0}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO positions (book_id, mode, locator_json, updated_at)
+             VALUES (1, 'scroll', '{\"v\":1,\"chapter\":0,\"offset\":12}', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let store = Store::open_at(&db).unwrap();
+    assert_eq!(
+        store.user_version().unwrap(),
+        MIGRATIONS.len() as i64,
+        "v12 要跑到位"
+    );
+
+    // 旧数据照旧：书目、章节位置、进度都读得出来。
+    let rows = store.list_books().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, "老名字");
+    let flow = store.load_flow(rows[0].id).unwrap().expect("章表还在");
+    assert_eq!(flow.chapters[0].title, "第一章");
+    let (mode, locator) = store.position(rows[0].id).unwrap().expect("进度还在");
+    assert_eq!(mode, "scroll");
+    assert_eq!(locator.offset, 12);
+
+    // 身份列在，而老行是空的 —— 这就是「懒补」的形状。
+    let missing = store.rows_missing_hash().unwrap();
+    assert_eq!(
+        missing.len(),
+        1,
+        "老行一条都没补，等后台那一趟（或它自己被碰到）"
+    );
+    assert_eq!(missing[0].id, rows[0].id);
+    assert!(
+        store
+            .book_by_hash("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+            .unwrap()
+            .is_none(),
+        "没算过的行不许被任何哈希命中"
+    );
+
+    // 补上之后：从「缺身份」那张清单里消失，而按哈希能找回来。
+    let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    store
+        .set_content_hash(rows[0].id, hash, crate::identity::HASH_ALGO)
+        .unwrap();
+    assert!(store.rows_missing_hash().unwrap().is_empty());
+    assert_eq!(
+        store.book_by_hash(hash).unwrap().unwrap().id,
+        rows[0].id,
+        "判重的入口要认得补过的那一行"
+    );
+
+    // 记下的是算法名，换算法时这是唯一线索。
+    let algo: String = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT hash_algo FROM books WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(algo, crate::identity::HASH_ALGO);
+
+    // 索引只建在非空那一段上：老库此刻绝大多数行是 NULL，全表索引是给空值建 B 树。
+    let indexed: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_books_content_hash'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed, 1, "那条 partial index 要在");
+
+    drop(store);
+    // 重开不重复跑迁移，也不把补好的哈希冲掉。
+    let again = Store::open_at(&db).unwrap();
+    assert_eq!(again.user_version().unwrap(), MIGRATIONS.len() as i64);
+    assert!(again.rows_missing_hash().unwrap().is_empty());
 }

@@ -8,7 +8,7 @@
     windows_subsystem = "windows"
 )]
 
-use folio_core::{Config, Store};
+use folio_core::Store;
 use gpui_kit::component::TitleBar;
 use gpui_kit::{App, AppContext as _, Font, TitlebarOptions, px, size};
 
@@ -19,11 +19,11 @@ use crate::ui::shell::AppShell;
 
 /// 桌面入口：`main.rs` 在非移动 target 上调它。
 pub fn run_desktop() {
-    // 第一件事是**读配置并装日志**：`logging` 那一节就在配置里，而它得在第一条日志之前
-    // 生效。`Config::load` 只要文件系统，不需要 App 上下文，所以放在这里而不是 `run` 里 ——
-    // 装不上（比如别处已经占了这个槽）只影响诊断输出，程序照起。
-    let config = Config::load();
-    if let Err(err) = folio_core::logging::init(&config.logging, None) {
+    // 第一件事是**读配置并装日志**（§5.6：配置 → 日志）：`logging` 那一节就在配置里，
+    // 而它得在第一条日志之前生效。`Config::load` 只要文件系统，不需要 App 上下文，所以放在
+    // 这里而不是 `run` 里。装不上（比如别处已经占了这个槽）只影响诊断输出，程序照起。
+    let (resolved, log_err) = folio_core::logging::init_from_config(None);
+    if let Err(err) = log_err {
         eprintln!("日志装不上，这一轮只有 stderr 上的这一句：{err}");
     }
 
@@ -42,7 +42,7 @@ pub fn run_desktop() {
             host::install(cx);
 
             // 配置在外面读好了带进来，这里只把界面语言推给全局。
-            config.language.locale.apply();
+            resolved.effective.language.locale.apply();
 
             let store = match Store::open_default() {
                 Ok(store) => store,
@@ -56,6 +56,18 @@ pub fn run_desktop() {
                         folio_core::i18n::t_with("error.database_unopenable", &[("reason", &e)])
                     );
                     std::process::exit(1);
+                }
+            };
+            // 启动现场（§4.2）：库是哪个 schema 版本 —— 报障时这一行能把「迁移没跑」
+            // 与「跑过了」分开。留一份给下面的诊断 dump（§5.8）。
+            let db_version = match store.user_version() {
+                Ok(version) => {
+                    tracing::info!("库 schema v{version}");
+                    Some(version)
+                }
+                Err(err) => {
+                    tracing::warn!("库 schema 版本读不出：{err:#}");
+                    None
                 }
             };
             // 源文件不在的那些书：连数据一起删掉。正文只在文件里（见
@@ -74,7 +86,26 @@ pub fn run_desktop() {
             // `install` 必须在开窗前：`AppShell::boot` 一上来就查读者偏好定字体，
             // 而外壳的订阅要拿到那个实体 —— 晚一步就是「no state of type ConfigHolder」。
             cx.set_global(ConfigPath(Some(folio_core::config_path())));
-            ConfigHolder::install(config, cx);
+            ConfigHolder::install_resolved(resolved, cx);
+            // 常驻资源（导入作业池 + 监听 + 传书）收拢到一个进程级句柄里；书库句柄也交过去，
+            // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
+            crate::ui::shared::services::install(cx);
+            // 诊断 dump（§5.8）：`FOLIO_DUMP=1` 时把生效配置 + 库版本 + 队列长度打一份。
+            if folio_core::diagnostics::enabled() {
+                let provenance = ConfigHolder::provenance(cx);
+                folio_core::diagnostics::dump(
+                    &ConfigHolder::snapshot(cx),
+                    Some(&provenance),
+                    db_version,
+                    Some(crate::ui::shared::services::pool().queued()),
+                    // 物理内存还没接（平台层给），所以给 `None` —— 报「未知」也不报假数。
+                    None,
+                );
+            }
+            // 清掉上次崩溃留在书库目录里的 `.part` 半成品（§1.3 末条）。
+            crate::ui::shared::library::sweep_partials(cx);
+            // 老副本改名的那一趟：投进 Cleanup 档，不等它、也不在界面线程上算哈希。
+            crate::ui::shared::library::schedule_backfill(cx);
             // 监听是后台能力：配置开着就随启动起，活过任何一屏。
             crate::ui::shared::watch::sync_from_config(cx);
 
@@ -104,4 +135,8 @@ pub fn run_desktop() {
             })
             .expect("failed to open Folio window");
         });
+
+    // `run` 返回 = 窗口全关、`App` 已 drop（它的 `AppStore` 句柄也放了）。
+    // 这时按 §1.3/§5.6 的有序收尾：停监听/传书 → 关作业池 → 放掉我们这份最后一个书库句柄。
+    crate::ui::shared::services::shutdown();
 }
