@@ -36,7 +36,9 @@ impl GroupBy {
 }
 
 /// 一组书。`items` 保持入参顺序（也就是书架那条「最近在读在前」的排序）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 没有 `Eq`：`ShelfItem` 带着 `f32` 的已读比例（见那条派生上的说明）。
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShelfGroup {
     pub name: String,
     pub items: Vec<ShelfItem>,
@@ -85,6 +87,8 @@ mod tests {
             format: format.to_string(),
             cover: None,
             last_opened_at: None,
+            // 分组这件事不看进度：这一格在下面几条断言里都不参与。
+            progress: None,
         }
     }
 

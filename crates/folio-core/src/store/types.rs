@@ -25,7 +25,9 @@ pub struct BookRow {
 /// 单开一个类型而不是往 `BookRow` 上加 `cover`，是因为封面是这排里唯一大的东西
 /// （一本几百 KB 到几 MB）。桌面端的侧栏把整个书库握在手里当标签页列表用，
 /// 那个用途不需要封面字节，也就没必要为它把每本书的字节都读进内存。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 没有 `Eq`，因为 [`ShelfItem::progress`] 是 `f32`（`NaN` 之下 `Eq` 会撒谎）。
+/// 书架上的比较是给人看的排序与断言，`PartialEq` 够用。
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShelfItem {
     pub id: i64,
     pub title: String,
@@ -35,6 +37,16 @@ pub struct ShelfItem {
     /// 界面要画一块占位而不是空的一格。
     pub cover: Option<Vec<u8>>,
     pub last_opened_at: Option<i64>,
+    /// **已读比例**（0.0–1.0），书架那颗进度条读它。
+    ///
+    /// 它是**数字数**算出来的，不是排版几何：`(前面各章字数之和 + 章内偏移) ÷ 全书总字数`
+    /// （`plans/Locator.md` 第二节）。两条好处都由这一点买来：**不用打开书**就能显示，
+    /// 而且两台屏宽不同的设备显示的是同一个数。
+    ///
+    /// `None` 有三种来路，界面都该按「没有进度可显示」处理，而不是当成 0%：
+    /// 从没打开过（`positions` 里没有这一行）、全书字数还没算过（v14 之前入库的行，
+    /// 或 provider 那一趟只读了清单）、或从没落过库的书。
+    pub progress: Option<f32>,
 }
 
 /// 界面那四色高亮的合法取值。存的是**名字**而不是 ARGB：配色属于主题，

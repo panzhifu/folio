@@ -1148,3 +1148,153 @@ fn the_v14_migration_brings_back_char_len_as_nullable() {
         "两章一共 5 + 1 = 6 字，这就是全局字符进度的分母"
     );
 }
+
+/// **书架上的已读比例**：`(前面各章字数之和 + 章内偏移) ÷ 全书总字数`。
+///
+/// 这条门护的是三件事，每一件错了都只会在界面上表现为「进度条数字不对」——
+/// 没有报错、没有崩溃，所以必须有断言：
+///
+/// 1. **数字要对**：它是**数字数**算的，不是排版几何。所以这一条完全不需要窗口、
+///    不需要排版，也不需要打开书 —— 这正是书架能显示「读了 37%」的原因，也正是
+///    两台屏宽不同的设备会显示同一个数的原因（`plans/Locator.md` 第二节）。
+/// 2. **没打开过就没有进度**，而不是 0%。合成 0 会让「从没打开」与「刚翻开第一页」
+///    在架上长得一样。
+/// 3. **有一章字数不知道就不报进度**，而不是报一个偏大的数。`SUM` 会跳过 NULL，
+///    分母因此偏小、百分比偏大 —— 读者读到一半进度条已经满了，而且无人报警。
+///    这是 v14 那一列可空带来的唯一风险，所以单独钉一条。
+#[test]
+fn shelf_reports_progress_from_character_counts() {
+    let store = Store::in_memory().unwrap();
+    let book = store.add_book(&path("a.md"), &meta("A")).unwrap();
+
+    // 三章，字数由 `visible_chars` 数出来：各 10 / 20 / 30 字。
+    let chapters: Vec<(String, String)> = [10, 20, 30]
+        .iter()
+        .map(|n| ("章".to_string(), format!("<p>{}</p>", "字".repeat(*n))))
+        .collect();
+    let parts: Vec<(&str, &str)> = chapters
+        .iter()
+        .map(|(t, s)| (t.as_str(), s.as_str()))
+        .collect();
+    store.save_flow(book, &flow(&parts), Format::Markdown).unwrap();
+    // 三章一共 60 字，是下面每个分母。
+
+    // 从没打开过：没有进度，**不是** 0%。
+    let item = |store: &Store| store.shelf("").unwrap().remove(0);
+    assert_eq!(
+        item(&store).progress,
+        None,
+        "没打开过的书不该报进度（0% 会让它和「刚翻开」长得一样）"
+    );
+
+    // 正中间：第 1 章（0 起）第 10 字 → (10 + 10) / 60。
+    store
+        .set_position(book, "scroll", &Locator { chapter: 1, offset: 10 })
+        .unwrap();
+    let got = item(&store).progress.expect("位置在、字数全，该有进度");
+    assert!(
+        (got - 20.0 / 60.0).abs() < 1e-6,
+        "第 1 章第 10 字该是 20/60，实际 {got}"
+    );
+
+    // 章首是 10/60，章尾是 30/60 —— 「章内偏移」那一格真的进了式子。
+    store
+        .set_position(book, "scroll", &Locator { chapter: 1, offset: 0 })
+        .unwrap();
+    let at_head = item(&store).progress.unwrap();
+    assert!(
+        (at_head - 10.0 / 60.0).abs() < 1e-6,
+        "第 1 章章首该是 10/60，实际 {at_head}"
+    );
+
+    // 越界偏移夹到 100%，不冲出进度条。
+    store
+        .set_position(book, "scroll", &Locator { chapter: 2, offset: 99_999 })
+        .unwrap();
+    assert_eq!(item(&store).progress, Some(1.0), "越界偏移夹在 100%");
+
+    // ── 现在把「有一章字数不知道」这一档单独验一遍 ──
+    // 直接改库造出 v14 之前那种行：字数留 NULL。
+    // 用文件库才能另开一条连接（与别的迁移测试同一条路）。
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let store = Store::open_at(&db).unwrap();
+    let book = store.add_book(&path("b.md"), &meta("B")).unwrap();
+    store.save_flow(book, &flow(&parts), Format::Markdown).unwrap();
+    store
+        .set_position(book, "scroll", &Locator { chapter: 1, offset: 10 })
+        .unwrap();
+    assert!(
+        store.shelf("").unwrap()[0].progress.is_some(),
+        "前提：字数齐的时候是有进度的"
+    );
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE chapters SET char_len = NULL WHERE idx = 2", [])
+            .unwrap();
+    }
+    assert_eq!(
+        store.shelf("").unwrap()[0].progress,
+        None,
+        "有一章字数不知道就不报进度 —— 报出来的百分比会偏大（SUM 跳过 NULL）"
+    );
+}
+
+/// 书架的**三条查询**（整架 / 集合内 / 未分组）都要能算出已读比例。
+///
+/// 这三条各写一句 SQL、共用一个 `SHELF_COLUMNS` 与 `shelf_from_row`，所以它们是
+/// 「一处改动三处生效」的典型：加投影列时漏掉任何一条的 JOIN，那一处就会在运行期
+/// 报「no such column: positions.locator_json」—— 而不是编译期。所以三条都过一遍。
+///
+/// 顺带钉住 JOIN 的**方向**：`LEFT JOIN` 而不是 `JOIN`。用内连接的话，
+/// 「一本都没打开过的新书库」会查出**零行** —— 一整架书凭空消失，而这比没有
+/// 进度条严重得多。
+#[test]
+fn every_shelf_query_can_report_progress() {
+    let store = Store::in_memory().unwrap();
+    let a = store.add_book(&path("a.md"), &meta("A")).unwrap();
+    let b = store.add_book(&path("b.md"), &meta("B")).unwrap();
+    let parts: Vec<(&str, &str)> = vec![("一", "<p>正文</p>")];
+    store.save_flow(a, &flow(&parts), Format::Markdown).unwrap();
+    store.save_flow(b, &flow(&parts), Format::Markdown).unwrap();
+
+    // 一本都没打开过：三条路都必须把书查出来（LEFT JOIN 的意义）。
+    assert_eq!(store.shelf("").unwrap().len(), 2, "整架不该因为没进度就少书");
+    assert_eq!(
+        store.shelf("").unwrap()[0].progress,
+        None,
+        "没打开过就没有进度"
+    );
+
+    let group = store.create_collection("合集").unwrap();
+    store.add_to_collection(group, a).unwrap();
+    assert_eq!(
+        store.shelf_in_collection(group).unwrap().len(),
+        1,
+        "集合内那条要查得出来"
+    );
+    // 未分组那一组由 `collection_groups` 带出来（它是 `shelf_in_no_collection_in`
+    // 唯一的调用方），所以从那里取。
+    let groups = store.collection_groups().unwrap();
+    let loose = groups
+        .iter()
+        .find(|g| g.name == crate::group::UNGROUPED)
+        .expect("末尾该有「未分组」那一组");
+    assert_eq!(loose.items.len(), 1, "未分组那条要查得出来");
+    assert_eq!(loose.items[0].id, b);
+
+    // 打开其中一本，三条路都要给出同一个比例。
+    store
+        .set_position(a, "scroll", &Locator { chapter: 0, offset: 1 })
+        .unwrap();
+    let want = store
+        .shelf("")
+        .unwrap()
+        .into_iter()
+        .find(|i| i.id == a)
+        .unwrap()
+        .progress;
+    assert!(want.is_some(), "开了就该有进度");
+    let in_collection = store.shelf_in_collection(group).unwrap()[0].progress;
+    assert_eq!(in_collection, want, "集合内那条给同一个数");
+}

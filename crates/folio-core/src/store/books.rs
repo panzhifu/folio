@@ -53,8 +53,34 @@ fn mtime_of(path: &Path) -> i64 {
 /// 集合那几个查询要按同一列序取 `BookRow`，所以它对 `store` 内可见。
 pub(super) const BOOK_COLUMNS: &str = "id, path, title, authors, format, size, last_opened_at";
 
-/// 书架要的那几列：书目那些再加封面字节。
-const SHELF_COLUMNS: &str = "id, path, title, authors, format, size, last_opened_at, cover";
+/// 书架投影：书目那几列，加上算已读比例要的四格。
+///
+/// 后四格（下标 8–11）都可空，因为「算不出来」是常态而不是异常：
+///
+/// - `total_chars` —— 全书规范化字数（`SUM` 跳过 NULL）。
+/// - `unknown_chapters` —— 有几章的字数还没算过。**有它就整个不报进度**：
+///   `SUM` 跳过 NULL 会让分母偏小、百分比偏大，而那种错是安静的
+///   （读者读到一半进度条已经满了）。
+/// - `read_chars` —— 读者当前位置**之前**各章的字数之和。
+/// - `unknown_read` —— 那些章里有几章字数不知道（理由同上）。
+///
+/// SQL 只读 `json_extract(positions.locator_json, '$.chapter')` **一个整数**，
+/// 用来跟 `chapters.idx` 比大小；位置串本身仍由 Rust 侧的 [`Locator`] 反序列化
+/// （见 `progress_of`）。之所以敢在 SQL 里碰 JSON，是因为这里把 `chapter` 当
+/// **不透明的位置指示**用：这个键从 v1 的位置格式起就没改过，改动它本来就要
+/// 升 `LOCATOR_FORMAT_VERSION` 并走迁移，那时这里会跟着一起改（有测试盯着）。
+const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, books.format, \
+     books.size, books.last_opened_at, books.cover, \
+     (SELECT SUM(char_len) FROM chapters c WHERE c.book_id = books.id) AS total_chars, \
+     (SELECT COUNT(*) FROM chapters c \
+       WHERE c.book_id = books.id AND c.char_len IS NULL) AS unknown_chapters, \
+     (SELECT SUM(c.char_len) FROM chapters c \
+       WHERE c.book_id = books.id AND c.char_len IS NOT NULL \
+         AND c.idx < json_extract(positions.locator_json, '$.chapter')) AS read_chars, \
+     (SELECT COUNT(*) FROM chapters c \
+       WHERE c.book_id = books.id AND c.char_len IS NULL \
+         AND c.idx < json_extract(positions.locator_json, '$.chapter')) AS unknown_read, \
+     positions.locator_json";
 
 /// 书架那套排序，几处查询共用一条常量。
 ///
@@ -71,6 +97,13 @@ const SHELF_ORDER: &str =
 
 fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     let authors: String = r.get(3)?;
+    // 「算不出分母」与「没读过」都回 `None` —— 界面两者都该按「没有进度可显示」
+    // 处理，而不是画一条 0% 的进度条（那会让「还没算过」看起来像「一字未读」）。
+    let total: Option<i64> = r.get(8)?;
+    let unknown_chapters: i64 = r.get(9)?;
+    let read_chars: Option<i64> = r.get(10)?;
+    let unknown_read: i64 = r.get(11)?;
+    let locator: Option<String> = r.get(12)?;
     Ok(ShelfItem {
         id: r.get(0)?,
         title: r.get(2)?,
@@ -82,7 +115,47 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
         format: r.get(4)?,
         last_opened_at: r.get(6)?,
         cover: r.get::<_, Option<Vec<u8>>>(7)?,
+        progress: progress_of(
+            total,
+            unknown_chapters,
+            read_chars,
+            unknown_read,
+            locator.as_deref(),
+        ),
     })
+}
+
+/// **已读比例**：`(前面各章字数之和 + 章内偏移) ÷ 全书总字数`。
+///
+/// 五个入参就是 [`SHELF_COLUMNS`] 那几格：全书字数、还没算过字数的章数、
+/// 当前位置之前各章的字数之和、那些章里有几章不知道、以及位置 JSON 原文。
+///
+/// 四种情况回 `None`，每一种都是「不该显示进度」而不是「显示 0%」：
+///
+/// - **没打开过**（没有位置行）—— 「从没打开」在界面上通常要画成另一种样子，
+///   所以这里不替界面决定，把判断权交出去。
+/// - **有章字数不知道** —— 无论不知道的那章在当前位置之前还是之后，分母都可能
+///   偏小、百分比偏大。这是安静的错误，所以宁可整本不报；`reindex` 一次就会补上。
+/// - **总字数为 0** —— 空书，除法没有意义。
+/// - **位置串读不出来** —— 坏 JSON、或来自更新版本的位置格式。
+///
+/// `offset` 要夹：它可能来自改过字号之前的旧串，越界不该让进度条冲出 100%。
+fn progress_of(
+    total: Option<i64>,
+    unknown_chapters: i64,
+    read_chars: Option<i64>,
+    unknown_read: i64,
+    locator: Option<&str>,
+) -> Option<f32> {
+    let total = total.filter(|n| *n > 0)?;
+    if unknown_chapters > 0 || unknown_read > 0 {
+        return None;
+    }
+    let at = Locator::try_from_json(locator?)?;
+    let read = read_chars.unwrap_or(0).max(0) as f32;
+    let offset = at.offset as f32;
+    // 章内偏移可能比整本书还大（旧串、或章表变过），夹到分母以内。
+    Some(((read + offset) / total as f32).clamp(0.0, 1.0))
 }
 
 impl Store {
@@ -433,9 +506,10 @@ impl Store {
         let trimmed = query.trim();
         let sql = format!(
             r#"SELECT {SHELF_COLUMNS} FROM books
+             LEFT JOIN positions ON positions.book_id = books.id
              WHERE (?1 = ''
-                    OR title LIKE ?2 ESCAPE '\'
-                    OR authors LIKE ?2 ESCAPE '\')
+                    OR books.title LIKE ?2 ESCAPE '\'
+                    OR books.authors LIKE ?2 ESCAPE '\')
              {SHELF_ORDER}"#
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -449,6 +523,7 @@ impl Store {
     fn shelf_in_collection_in(conn: &Connection, collection_id: i64) -> Result<Vec<ShelfItem>> {
         let sql = format!(
             "SELECT {SHELF_COLUMNS} FROM books
+             LEFT JOIN positions ON positions.book_id = books.id
              JOIN collection_books cb ON cb.book_id = books.id
              WHERE cb.collection_id = ?1
              ORDER BY cb.added_at DESC, books.id DESC"
@@ -464,7 +539,8 @@ impl Store {
     fn shelf_in_no_collection_in(conn: &Connection) -> Result<Vec<ShelfItem>> {
         let sql = format!(
             "SELECT {SHELF_COLUMNS} FROM books
-             WHERE id NOT IN (SELECT book_id FROM collection_books)
+             LEFT JOIN positions ON positions.book_id = books.id
+             WHERE books.id NOT IN (SELECT book_id FROM collection_books)
              {SHELF_ORDER}"
         );
         let mut stmt = conn.prepare(&sql)?;

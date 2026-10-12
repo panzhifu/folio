@@ -23,7 +23,7 @@ use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Image, InteractiveElement, IntoElement, ObjectFit, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, div, img,
+    SharedString, StatefulInteractiveElement, Styled, StyledImage, div, img, px, relative,
 };
 
 use crate::ui::shared::images::cover_image;
@@ -54,6 +54,9 @@ pub(super) struct Card {
     pub(super) title: SharedString,
     pub(super) authors: SharedString,
     pub(super) cover: Option<Arc<Image>>,
+    /// 已读比例（0.0–1.0）；`None` = 没有可显示的进度（从没打开过，或字数还没算过）。
+    /// 库里算它不打开书、不排版，见 [`folio_core::store::ShelfItem::progress`]。
+    pub(super) progress: Option<f32>,
 }
 
 impl ShelfView {
@@ -76,6 +79,7 @@ impl ShelfView {
             title: item.title.into(),
             authors: item.authors.join(AUTHOR_SEP).into(),
             cover,
+            progress: item.progress,
         }
     }
 
@@ -94,8 +98,10 @@ impl ShelfView {
         let authors = card.authors.clone();
         let cover = card.cover.clone();
         let has_cover = cover.is_some();
+        let progress = card.progress;
         let placeholder_bg = cx.theme().muted;
         let muted_fg = cx.theme().muted_foreground;
+        let accent_fg = cx.theme().primary;
         let tapped = cx.entity().clone();
         let menu_entity = cx.entity().clone();
         // 菜单每次打开都重建一遍，闭包要一份自己的文案拷贝。
@@ -153,6 +159,32 @@ impl ShelfView {
                     .text_ellipsis()
                     .child(authors),
             )
+            // 已读进度：一条细槽 + 一段填充，比例由库里的字数算出来（不打开书）。
+            //
+            // `None` 时**整条不画**，而不是画一条空的：空槽与「读了一点点」
+            // 在这么细的一条上分不出来，而把「从没打开过」画成「0%」会让读者
+            // 以为这本书他开过。宁可少一行。
+            .when_some(progress, |this, ratio| {
+                this.child(
+                    div()
+                        .w_full()
+                        .h(px(3.0))
+                        .rounded_full()
+                        .bg(placeholder_bg)
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .h_full()
+                                .rounded_full()
+                                .bg(accent_fg)
+                                // 宽度按比例给：`relative` 让 1.0 铺满整条槽。
+                                .w(relative(ratio.clamp(0.0, 1.0)))
+                                // 极小的一段也要看得见：0.3% 宽在 3px 高的槽里
+                                // 等于没有，而那本书确实已经开了头。
+                                .min_w(px(3.0)),
+                        ),
+                )
+            })
             // 长按（移动端）或右键（桌面端）开管理菜单，条目见 [`super::book_menu`]。
             // 与右上角那颗三点按钮的导入菜单是同一套组件，只是触发从点击换成了长按，
             // 两档浮层同宽（[`book_menu::MIN_WIDTH`]）。

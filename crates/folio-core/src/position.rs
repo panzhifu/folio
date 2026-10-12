@@ -80,6 +80,28 @@ impl Locator {
         })
     }
 
+    /// 读不出字段时**不崩也不猜**：回 `None`，让调用方自己决定当作「没有位置」
+    /// 还是「章首」。
+    ///
+    /// 与 [`Locator::from_json`] 的分工：那个是**恢复阅读位置**那条路，它必须交回
+    /// 一个能用的坐标（退回章首是对的 —— 总比打不开书好）。而报告进度这条路上
+    /// 「读不出来」与「读到章首」是两件事：前者该没有进度条，后者该显示 0%。
+    /// 合成一个数会让一段坏位置串显示成「一字未读」。
+    pub fn try_from_json(json: &str) -> Option<Locator> {
+        let wire: LocatorWire = serde_json::from_str(json).ok()?;
+        if wire.v > LOCATOR_FORMAT_VERSION {
+            tracing::warn!(
+                from = wire.v,
+                to = LOCATOR_FORMAT_VERSION,
+                "locator: 位置串比本程序新，认得的字段照读"
+            );
+        }
+        Some(Locator {
+            chapter: wire.chapter,
+            offset: wire.offset,
+        })
+    }
+
     pub fn from_json(json: &str) -> Locator {
         match serde_json::from_str::<LocatorWire>(json) {
             Ok(wire) => {
