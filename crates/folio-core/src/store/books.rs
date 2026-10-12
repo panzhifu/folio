@@ -80,7 +80,7 @@ const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, b
      (SELECT COUNT(*) FROM chapters c \
        WHERE c.book_id = books.id AND c.char_len IS NULL \
          AND c.idx < json_extract(positions.locator_json, '$.chapter')) AS unknown_read, \
-     positions.locator_json";
+     positions.locator_json, books.cover_hash, books.cover_mime";
 
 /// 书架那套排序，几处查询共用一条常量。
 ///
@@ -113,7 +113,7 @@ const SHELF_ORDER: &str =
 /// 「哪一格是什么」只存在于 `SELECT` 那一行的顺序里，改列序时编译器帮不上忙。
 type CoverRow = (Option<Vec<u8>>, String, Option<String>, Option<String>);
 
-pub(crate) fn book_root(copy_path: &Path) -> std::path::PathBuf {
+pub fn book_root(copy_path: &Path) -> std::path::PathBuf {
     let parent = copy_path.parent().unwrap_or(Path::new(""));
     if parent.file_name().and_then(|n| n.to_str()) == Some(".staging") {
         return parent
@@ -132,6 +132,16 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     let read_chars: Option<i64> = r.get(10)?;
     let unknown_read: i64 = r.get(11)?;
     let locator: Option<String> = r.get(12)?;
+    let cover_hash: Option<String> = r.get(13)?;
+    let cover_mime: Option<String> = r.get(14)?;
+    // 两格要么都有、要么都没有：只剩一格拼不出文件名（见 `load_flow_in` 同一句）。
+    let cover_ref = match (cover_hash, cover_mime) {
+        (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
+            Some(crate::format::cover::CoverRef { hash, mime })
+        }
+        _ => None,
+    };
+    let copy: String = r.get(1)?;
     Ok(ShelfItem {
         id: r.get(0)?,
         title: r.get(2)?,
@@ -150,6 +160,10 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
             unknown_read,
             locator.as_deref(),
         ),
+        cover_ref,
+        // 反推书库根：缩略图缓存目录挂在它底下。副本路径来自 `books.path`，
+        // 所以这一格与封面、正文用的是同一个来源（不是界面另推一遍）。
+        cover_root: Some(book_root(Path::new(&copy))),
     })
 }
 

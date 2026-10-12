@@ -87,8 +87,10 @@ mod tests {
             format: format.to_string(),
             cover: None,
             last_opened_at: None,
-            // 分组这件事不看进度：这一格在下面几条断言里都不参与。
+            // 分组这件事不看进度，也不看封面：这两格在下面几条断言里都不参与。
             progress: None,
+            cover_ref: None,
+            cover_root: None,
         }
     }
 

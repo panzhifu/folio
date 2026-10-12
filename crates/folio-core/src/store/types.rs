@@ -47,6 +47,14 @@ pub struct ShelfItem {
     /// 从没打开过（`positions` 里没有这一行）、全书字数还没算过（v14 之前入库的行，
     /// 或 provider 那一趟只读了清单）、或从没落过库的书。
     pub progress: Option<f32>,
+    /// 封面在 `covers/` 里的描述（哈希 + MIME）。`None` = 老库那一档，封面只在
+    /// [`ShelfItem::cover`] 那个 BLOB 里。
+    pub cover_ref: Option<crate::format::cover::CoverRef>,
+    /// **书库根**（副本所在的那一层）。缩略图缓存目录挂在它底下
+    /// （`<书库>/.thumbs/<尺寸>/`），而界面手上只有副本路径，所以这一格由库里
+    /// 那一列 `books.path` 反推出来（`store::book_root`）一起带出来 ——
+    /// 界面不该自己再推一遍（那是第二处真相）。
+    pub cover_root: Option<std::path::PathBuf>,
 }
 
 /// 界面那四色高亮的合法取值。存的是**名字**而不是 ARGB：配色属于主题，

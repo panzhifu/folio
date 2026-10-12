@@ -37,9 +37,10 @@ mod types;
 mod tests;
 
 pub use books::StaleReason;
-// 封面落盘要按「这本副本在哪儿」反推书库根，而书库位置不在 `Store` 上
-// （那是读者确认过的目录）—— 这个函数就是那条反推规则，只给 crate 内用。
-pub(crate) use books::book_root;
+// 封面落盘与缩略图都要按「这本副本在哪儿」反推书库根，而书库位置不在 `Store` 上
+// （那是读者确认过的目录）—— 这个函数就是那条反推规则。公开它是因为界面侧也要用：
+// 缩略图缓存目录挂在书库底下，而界面手上只有副本路径。
+pub use books::book_root;
 pub use types::*;
 
 use schema::MIGRATIONS;
