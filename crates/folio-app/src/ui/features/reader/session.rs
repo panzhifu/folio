@@ -13,7 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -28,7 +28,6 @@ use super::chrome::{PageMode, Reserve};
 use super::measure::FontCache;
 use crate::ui::host::device_family;
 use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::library::PACKAGE;
 
 /// 视图现在拿的是什么内容。
 pub enum Source {
@@ -241,31 +240,28 @@ pub(super) const DRAG_THRESHOLD_PX: f32 = 4.0;
 const SAMPLE_LINE: &str = "Folio — 中文正文与 Latin 混排的一行";
 
 impl ReaderSession {
-    /// 冷启动：读偏好、挑设备字体，找得到文档就打开书，否则退回那一行兜底文本。
+    /// 冷启动：只读偏好、挑设备字体，**自己不找书**。
+    ///
+    /// 它以前会在几个硬编码路径里翻 `folio-sample.*` 并直接打开，那是书架还没有的时候
+    /// 的临时办法。现在书从书架点开（[`Self::open_book`]），所以这里一律进
+    /// [`Self::sample`] 那一屏，等外壳把读者点的那本换上来。
+    ///
+    /// **删掉那条自动打开不是清理，是修一个真 bug**：`/sdcard/Download` 也在它翻的
+    /// 那几个路径里，而「全盘扫描」(`scan_roots(all_files = true)`) 扫的正是
+    /// `/storage/emulated/0` —— 于是同一个文件被两处认领：阅读器把它当启动占位读，
+    /// 导入管线把它当一本书收进库。实测症状就是「书架顶上有一本叫『版心样本』的书，
+    /// 删掉之后下次全盘扫描又回来」。
+    ///
+    /// 兜底那一行仍然要留（`Source::Sample`）：它是「起来了但还没打开书」这一屏，
+    /// 没有它就得让外壳保证永远不先构造阅读页，而那是个更脆的约定。
+    /// 书库句柄照样带上 —— 外壳紧接着就用 `open_book` 换书，句柄丢了那条路读不出东西。
     pub fn boot(cx: &App) -> Self {
         let prefs = ConfigHolder::reader(cx);
         // 书库没装不是 fatal：照样能读，只是进度与偏好落不了盘，
         // 而「读了但没记住」比「直接退出」更可接受。
         let store = crate::ui::shared::app_store::handle(cx);
-        let found = candidate_paths().into_iter().find(|path| path.is_file());
-        let Some(path) = found else {
-            tracing::info!("ReaderSession: 没有可读文档，进入兜底的单行文本");
-            return Self::sample(&prefs, store, cx);
-        };
-        match Self::open_document(&path, &prefs, store, cx) {
-            Ok(view) => {
-                tracing::info!(path = %path.display(), "ReaderSession: 打开");
-                view
-            }
-            Err(err) => {
-                tracing::error!(
-                    path = %path.display(),
-                    error = %err,
-                    "ReaderSession: 打开失败"
-                );
-                Self::sample(&prefs, crate::ui::shared::app_store::handle(cx), cx)
-            }
-        }
+        tracing::debug!("ReaderSession: 启动进占位屏，等外壳按书架点选换书");
+        Self::sample(&prefs, store, cx)
     }
 
     /// 只有那一行兜底文本时用。书库句柄**照样带上**：这一屏不是终点，
@@ -773,28 +769,3 @@ pub(super) fn land_at_anchor(
     }
 }
 
-/// 冷启动时依次试探的文档位置。
-///
-/// 首选**应用专属外部目录** `/sdcard/Android/data/<包名>/files/`：它的属主就是本应用，
-/// 所以不需要任何存储权限，`adb push` 也写得进去。`/sdcard/Download/` 排在后面而不是
-/// 前面 —— 那里的文件属主是媒体提供者（另一个 uid），scoped storage 下我们的进程读到
-/// 的是 EACCES，放对了文件名也不会出现画面。`FOLIO_MOBILE_DOC` 留给调试时指任意路径。
-/// 桌面上这些路径都不存在，`boot` 于是直接落到那一行兜底文本 —— 桌面的书从书架点开，
-/// 走的是 `open_book`，不是这条路。
-fn candidate_paths() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(path) = std::env::var("FOLIO_MOBILE_DOC") {
-        out.push(PathBuf::from(path));
-    }
-    for dir in [
-        format!("/sdcard/Android/data/{PACKAGE}/files"),
-        format!("/storage/emulated/0/Android/data/{PACKAGE}/files"),
-        format!("/data/user/0/{PACKAGE}/files"),
-        "/sdcard/Download".to_string(),
-    ] {
-        for name in ["folio-sample.md", "folio-sample.txt", "folio-sample.epub"] {
-            out.push(PathBuf::from(format!("{dir}/{name}")));
-        }
-    }
-    out
-}

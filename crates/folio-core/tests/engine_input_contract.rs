@@ -74,3 +74,47 @@ fn the_layout_engine_never_learns_about_formats() {
         offenses.join("\n")
     );
 }
+
+/// **阅读器不许自己从硬编码路径抓书来读。**
+///
+/// 这条守的是一个真实事故：`ReaderSession::boot` 曾经在几个写死的目录里依次翻
+/// `folio-sample.{md,txt,epub}`，找到就打开。那几个目录里包含 `/sdcard/Download`，
+/// 而「全盘扫描」（`scan_roots(all_files = true)`）扫的正是 `/storage/emulated/0`
+/// —— 于是同一个文件被两处认领：阅读器把它当启动占位读，导入管线把它当一本书收进库。
+///
+/// 实测症状：书架顶上多出一本《版心样本》，删掉之后下次全盘扫描又回来 —— 因为生成它
+/// 的那份文件还在 `Download` 里，而**没有任何一处代码说得出它是怎么进库的**。
+///
+/// 现在的形状：书一律从书架点开（`ReaderSession::open_book`），`boot` 只进占位屏。
+/// 这条断言把「别再偷偷翻文件」写成可执行的：`crates/folio-app/src` 里出现
+/// `folio-sample` 就红。
+///
+/// 注意它扫的是**应用源码**，不是 core —— 这个约定属于界面那一层。
+#[test]
+fn the_reader_never_opens_a_book_from_a_hardcoded_path() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("core 上一级是 crates/")
+        .join("folio-app/src");
+    let mut files = Vec::new();
+    rust_files(&root, &mut files);
+    assert!(!files.is_empty(), "找不到 folio-app 的源码，路径写错了？");
+
+    let mut offenses = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).expect("源码该是 UTF-8");
+        for (ix, line) in text.lines().enumerate() {
+            // 注释里解释这条事故是允许的（本文件的文档注释就是），
+            // 被禁的是**代码**里再出现那个文件名。
+            let code = line.split("//").next().unwrap_or("");
+            if code.contains("folio-sample") {
+                offenses.push(format!("{}:{}  {}", file.display(), ix + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenses.is_empty(),
+        "阅读器又在从硬编码路径抓书了（这会让「全盘扫描」把同一个文件当书收进库）：\n{}",
+        offenses.join("\n")
+    );
+}
