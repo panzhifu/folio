@@ -256,7 +256,15 @@ impl ShelfView {
         match queried {
             Some(Ok(items)) => {
                 self.query = query.into();
-                self.items = items.into_iter().map(|item| self.card(item)).collect();
+                // 先把封面解析出来再收集：`map(|item| self.card(item))` 那种写法同时借
+                // `self` 的不可变与可变两半，编译器不让过。
+                self.items = items
+                    .into_iter()
+                    .map(|item| {
+                        let cover = self.resolve_cover(&item);
+                        self.card(item, cover)
+                    })
+                    .collect();
             }
             Some(Err(err)) => tracing::error!("ShelfView: 查书架失败 {err}"),
             None => {

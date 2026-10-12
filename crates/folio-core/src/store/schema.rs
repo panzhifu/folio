@@ -300,4 +300,26 @@ ALTER TABLE chapters ADD COLUMN char_len INTEGER;
 ALTER TABLE books ADD COLUMN cover_hash TEXT;
 ALTER TABLE books ADD COLUMN cover_mime TEXT;
 "#,
+    // v16：**封面字节彻底出库**。`books.cover` 这个 BLOB 连同 `cover_spec` 一起删掉，
+    // 封面只活在 `<书库>/covers/<哈希>.<扩展名>` 那个文件里，缩略图只活在
+    // `<书库>/.thumbs/<尺寸>/` 那个缓存里。
+    //
+    // 为什么现在能删（v15 时还不能）：那时读那一侧靠 BLOB 兜底，而**封面字节不可再生**
+    // —— 它是从容器里抽出来的（EPUB 依次试三条规则、FB2 从 `<binary>` 解 base64），
+    // 而 `covers/` 被设计成「可整目录删掉」。两件事凑在一起就矛盾：没有输入，
+    // 重跑生成无从谈起。所以当时留着 BLOB 当唯一能重建的源。
+    //
+    // 这一版换了取舍：**文件不在就当没有封面**，界面画占位。理由是这一列是 MB 级的
+    // 字节，而 `SHELF_COLUMNS` 每次列书目都要读它（`length(cover)` 那种只问长度的
+    // 写法只能省一半）—— 几百本书的封面就是几百 MB 的库，而读者要的只是「架上那一格
+    // 画什么」。丢掉能重建的装饰，换回一个不再随书数线性膨胀的库，是划算的。
+    //
+    // 代价写明白：`covers/` 被清掉之后封面**不会自己回来**，要重新导入那一本。
+    // 这是有意的 —— 封面是装饰，不是内容的入口。
+    //
+    // 只删列，不动任何读者数据（进度、批注、集合、统计都不在 books 这两列上）。
+    r#"
+ALTER TABLE books DROP COLUMN cover;
+ALTER TABLE books DROP COLUMN cover_spec;
+"#,
 ];

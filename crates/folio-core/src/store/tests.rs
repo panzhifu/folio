@@ -209,116 +209,8 @@ fn the_v8_migration_drops_the_text_and_keeps_a_locator() {
     Store::open_at(&db).unwrap();
 }
 
-/// v11 迁移：旧库（v10）升上来时要有 `cover_spec` 列，缺省 `0` = 迁移之前生成的封面，
-/// 一律当旧规格 —— 开书时由 `stale_reason` 认出来重扫重生成（`plans/基础设施.md` §5.1）。
-#[test]
-fn the_v11_migration_adds_the_cover_spec_column() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("folio.db");
-    {
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        for sql in &MIGRATIONS[..10] {
-            conn.execute_batch(sql).unwrap();
-        }
-        conn.pragma_update(None, "user_version", 10).unwrap();
-        conn.execute(
-            "INSERT INTO books (path, title, authors, format, size, added_at, cover)
-             VALUES ('a.epub', 'A', '', 'epub', 0, 0, x'89504E47')",
-            [],
-        )
-        .unwrap();
-    }
 
-    let store = Store::open_at(&db).unwrap();
-    assert_eq!(store.user_version().unwrap(), MIGRATIONS.len() as i64);
-    drop(store);
 
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    let spec: i64 = conn
-        .query_row("SELECT cover_spec FROM books WHERE id = 1", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(spec, 0, "迁移之前生成的封面一律当旧规格");
-}
-
-/// §5.1：有封面、但记的是旧规格 → 认成 `OldCover`，好让开书路径重扫重生成；
-/// 没有封面的书不受这条影响。
-#[test]
-fn an_old_cover_spec_is_reported_as_stale() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("folio.db");
-    let path = dir.path().join("a.md");
-    std::fs::write(&path, "# 一\n\n正文\n").unwrap();
-    let store = Store::open_at(&db).unwrap();
-    let id = store.add_book(&path, &meta("A")).unwrap();
-    store
-        .save_flow(id, &flow(&[("一", "正文")]), Format::Markdown)
-        .unwrap();
-    assert_eq!(store.stale_reason(id).unwrap(), None, "刚存完规格是当前的");
-
-    // 手工把规格退回迁移前的 0（模拟老库升上来）。
-    {
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute("UPDATE books SET cover_spec = 0 WHERE id = ?1", [id])
-            .unwrap();
-    }
-    assert_eq!(
-        store.stale_reason(id).unwrap(),
-        Some(StaleReason::OldCover),
-        "有封面且规格落后，该认出来"
-    );
-
-    // 没有封面就没什么可重生成 —— 同一条规则不该再触发。
-    {
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute("UPDATE books SET cover = NULL WHERE id = ?1", [id])
-            .unwrap();
-    }
-    assert_eq!(store.stale_reason(id).unwrap(), None, "没有封面就不管规格");
-}
-
-/// **「有封面」有两档，`stale_reason` 必须两档都认。**
-///
-/// v15 之后封面的正主是 `covers/<哈希>.<扩展名>` 那个文件，库里那一列只留描述；
-/// 而老行（v15 之前入库、还没被重扫过）的字节还只在 `books.cover` 这个 BLOB 里。
-/// 判据只认 BLOB 的话，**新导入的那一批会被判成「没有封面」**，于是
-/// `COVER_SPEC_VERSION` 换代时它们永远等不到重扫 —— 症状是「换了封面规格、
-/// 架上还是旧图」，而这条链上没有任何报错。
-///
-/// 这条钉的是那个「只认一档」的写法，所以先把 BLOB 清掉、只留描述，
-/// 再验它照样被认出来。
-#[test]
-fn a_cover_stored_as_a_file_is_still_seen_as_a_cover() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("folio.db");
-    let path = dir.path().join("a.md");
-    std::fs::write(&path, "# 一\n\n正文\n").unwrap();
-    let store = Store::open_at(&db).unwrap();
-    let id = store.add_book(&path, &meta("A")).unwrap();
-    let mut doc = flow(&[("一", "正文")]);
-    doc.cover_ref = Some(crate::format::cover::CoverRef {
-        hash: "abcdef0123456789abcdef".into(),
-        mime: "image/jpeg".into(),
-    });
-    store.save_flow(id, &doc, Format::Markdown).unwrap();
-    assert_eq!(store.stale_reason(id).unwrap(), None, "规格是当前的");
-
-    // 只留描述、把 BLOB 清掉 —— 这正是 v15 之后新导入那一批的形状。
-    {
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute(
-            "UPDATE books SET cover = NULL, cover_spec = 0 WHERE id = ?1",
-            [id],
-        )
-        .unwrap();
-    }
-    assert_eq!(
-        store.stale_reason(id).unwrap(),
-        Some(StaleReason::OldCover),
-        "封面在文件里也算「有封面」，规格落后照样要重扫"
-    );
-}
 
 /// 定版式文档（CBZ 等）落库时也要盖 `index_version` —— 不然 `stale_reason` 永远说它旧，
 /// 每次开书都白重扫一遍。这是那个既存 bug 的回归门。
@@ -406,10 +298,19 @@ fn deleting_a_book_gives_its_pages_back() {
 
     let store = Store::open_at(&db).unwrap();
     let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
-    // 正文出库之后，能撑大文件的只剩封面与图片元数据 —— 拿一张 1 MB 的封面来撑。
-    let mut doc = flow(&[("一", "正文")]);
-    doc.cover = Some(vec![0u8; 1 << 20]);
-    store.save_flow(id, &doc, Format::Markdown).unwrap();
+    // 正文与封面字节都不进库（v16）之后，能撑大文件的只剩章表、目录、图片元数据 ——
+    // 量小得多，所以这里拿**很多章**来撑：`DELETE FROM chapters` 是整批删，
+    // 正是 `reclaim` 要还页的那种。
+    let chapters: Vec<(String, String)> = (0..400)
+        .map(|i| (format!("第{i}章"), format!("<p>正文{i}</p>")))
+        .collect();
+    let parts: Vec<(&str, &str)> = chapters
+        .iter()
+        .map(|(t, b)| (t.as_str(), b.as_str()))
+        .collect();
+    store
+        .save_flow(id, &flow(&parts), Format::Markdown)
+        .unwrap();
     let peak = pages(&db);
     store.remove_book(id).unwrap();
     drop(store);
@@ -452,7 +353,11 @@ fn the_index_roundtrips_through_the_store() {
     assert_eq!(back.chapters[1].title, "第一章");
     assert_eq!(back.css, doc.css);
     assert_eq!(back.toc, doc.toc);
-    assert_eq!(back.cover, doc.cover);
+    // 封面字节**不回来**（v16）：库里只有 `cover_ref` 那两格描述，
+    // 字节在 `covers/` 那个文件里。这一格是 `flow()` 造的假封面，它没有对应的
+    // 文件，所以读回来是 `None` —— 这正是「字节不能进库」的形状。
+    assert_eq!(back.cover, None, "封面字节不该跟着库回来");
+    assert_eq!(back.cover_ref, None, "没有文件就没有描述");
     assert_eq!(back.images, doc.images);
     // 正文没跟着回来，位置回来了 —— 单文件格式按序号认。
     assert!(back.chapters.iter().all(|c| c.source().is_empty()));
@@ -836,7 +741,10 @@ fn shelf_carries_the_cover_and_the_opened_stamp() {
         vec!["作者甲".to_string(), "作者乙".to_string()]
     );
     assert_eq!(item.format, "markdown");
-    assert_eq!(item.cover.as_deref(), Some(png_header().as_slice()));
+    // 书架项**不带封面字节**（v16）：字节在 `covers/` 那个文件里，
+    // 由 `book_card` 按 `cover_ref` 去取。所以 `cover` 恒为 `None`，
+    // 而「这一本有没有封面」看的是 `cover_ref`。
+    assert_eq!(item.cover, None, "封面字节不再跟着书架项走");
     assert_eq!(item.last_opened_at, None, "没打开过就是 NULL，不是 0");
 }
 
@@ -911,9 +819,10 @@ fn editing_the_title_and_authors_roundtrips_and_refilters() {
     assert_eq!(row.format, "markdown", "文件的事实不该被碰到");
     assert_eq!(row.size, 1234, "同上");
     // 那一屏的封面走单独一条取字节：`BookRow` 不带图（整库握在手里时不需要）。
+    // 这一本没有封面（`flow()` 那份假封面没有对应文件，v16 起字节不进库），所以回 `None`。
     assert!(
-        store.book_cover(id).unwrap().is_some(),
-        "点开信息那一屏要能单独拿到这一本的封面字节"
+        store.book_cover(id).unwrap().is_none(),
+        "没有封面文件就回 None，不退回任何库里的副本"
     );
     assert!(
         store.book_cover(4242).unwrap().is_none(),
@@ -1354,7 +1263,7 @@ fn every_shelf_query_can_report_progress() {
 /// 3. **共用的那张不能删**：封面是**它自己字节**的身份，不是这本书的。两本书共用
 ///    一张封面时磁盘上只有一个文件，删掉一本不能把它带走。
 #[test]
-fn covers_prefer_the_file_and_never_take_a_shared_one() {
+fn a_cover_lives_in_a_file_and_never_in_the_database() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("folio.db");
     let root = dir.path(); // 书库根：副本直接躺在它上面
@@ -1365,76 +1274,57 @@ fn covers_prefer_the_file_and_never_take_a_shared_one() {
     let hash = crate::format::cover::write(root, cover, "image/jpeg").unwrap();
     let hash_hex = hash.to_hex();
 
-    let mut flow_with_cover = flow(&[("一", "正文")]);
-    flow_with_cover.cover = Some(cover.to_vec());
-    flow_with_cover.cover_ref = Some(crate::format::cover::CoverRef {
+    let mut with_cover = flow(&[("一", "正文")]);
+    with_cover.cover = Some(cover.to_vec());
+    with_cover.cover_ref = Some(crate::format::cover::CoverRef {
         hash: hash_hex.clone(),
         mime: "image/jpeg".into(),
     });
 
-    let a = store
-        .add_book(&root.join("a.md"), &meta("甲"))
-        .unwrap();
-    let b = store
-        .add_book(&root.join("b.md"), &meta("乙"))
-        .unwrap();
-    store
-        .save_flow(a, &flow_with_cover, Format::Markdown)
-        .unwrap();
-    store
-        .save_flow(b, &flow_with_cover, Format::Markdown)
-        .unwrap();
+    let a = store.add_book(&root.join("a.md"), &meta("甲")).unwrap();
+    let b = store.add_book(&root.join("b.md"), &meta("乙")).unwrap();
+    store.save_flow(a, &with_cover, Format::Markdown).unwrap();
+    store.save_flow(b, &with_cover, Format::Markdown).unwrap();
 
-    // 1) 磁盘优先：两本都读得到，而且拿到的是同一份字节。
+    // 1) 字节从文件来：两本都读得到，而且拿到的是同一份。
     assert_eq!(store.book_cover(a).unwrap().as_deref(), Some(&cover[..]));
     assert_eq!(store.book_cover(b).unwrap().as_deref(), Some(&cover[..]));
 
-    // 两本指向**同一个**文件 —— 这是「按封面自己的哈希命名」的全部收益。
-    // 而 `orphan_cover_file` 在「还有别人指着」时回 `None`（见下面那条断言）。
+    // 两本指向**同一个**文件 —— 这是「按封面自己的字节哈希命名」的全部收益。
     let file_a = crate::format::cover::cover_path(root, &hash_hex, "image/jpeg");
     assert!(file_a.is_file(), "封面该真的落盘了");
+
+    // 2) 两本共用一张时删掉一本不能把文件带走（封面是**它自己字节**的身份，
+    //    不是这本书的）。
     assert!(
         store.orphan_cover_file(a).unwrap().is_none(),
         "b 还指着同一张，所以它不是孤儿"
     );
-
-    // 共用计数：b 还指着它，所以删 a 时那个文件不能被删。
-    assert_eq!(
-        store.rows_sharing_cover(&hash_hex, a).unwrap(),
-        1,
-        "b 还指着这张封面"
-    );
-
-    // 2) BLOB 兜底：把文件删掉，两本仍读得到（v15 之前那批只有 BLOB 就是这个形状）。
-    std::fs::remove_file(&file_a).unwrap();
-    assert_eq!(
-        store.book_cover(a).unwrap().as_deref(),
-        Some(&cover[..]),
-        "文件没了要退回库里那份字节，不许让封面凭空消失"
-    );
-
-    // 3) 老库那一档：`cover_hash` 是空的，只有 BLOB。
-    let legacy = flow(&[("一", "旧库正文")]);
-    let mut legacy = legacy;
-    legacy.cover = Some(b"legacy-blob".to_vec());
-    legacy.cover_ref = None;
-    let c = store.add_book(&root.join("c.md"), &meta("丙")).unwrap();
-    store.save_flow(c, &legacy, Format::Markdown).unwrap();
-    assert!(
-        store.orphan_cover_file(c).unwrap().is_none(),
-        "老库那一档没有文件名可指"
-    );
-    assert_eq!(
-        store.book_cover(c).unwrap().as_deref(),
-        Some(&b"legacy-blob"[..]),
-        "只有 BLOB 的老行照样读得出封面"
-    );
-
-    // 删掉 a 之后，b 的封面仍然读得到（文件还在，或退回了 BLOB）。
     store.remove_book(a).unwrap();
     assert_eq!(
         store.book_cover(b).unwrap().as_deref(),
         Some(&cover[..]),
         "删一本不该让另一本的封面消失"
     );
+
+    // 3) **库里不存字节**：把文件删掉，封面就是没有了 —— 回 `None`，画占位。
+    //
+    // 这是 v16 有意选的一档，与 v15 正好相反。v15 靠 `books.cover` 那个 BLOB 兜底，
+    // 代价是库随书数线性膨胀（封面是 MB 级的东西，而 `SHELF_COLUMNS` 每次列书目
+    // 都要过一遍）。现在**不要这个兜底**：封面是装饰，不是内容的入口，
+    // 宁可画占位也不让库背几百 MB 的字节。
+    std::fs::remove_file(&file_a).unwrap();
+    assert_eq!(
+        store.book_cover(b).unwrap(),
+        None,
+        "文件不在就是没有封面，不退回任何库里的副本"
+    );
+
+    // 4) 没有 `cover_ref` 的行（Markdown / TXT，或落盘失败）就是没有封面。
+    let plain = store.add_book(&root.join("c.md"), &meta("丙")).unwrap();
+    store
+        .save_flow(plain, &flow(&[("一", "正文")]), Format::Markdown)
+        .unwrap();
+    assert_eq!(store.book_cover(plain).unwrap(), None);
+    assert!(store.orphan_cover_file(plain).unwrap().is_none());
 }

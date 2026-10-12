@@ -89,35 +89,23 @@ impl Store {
         } else {
             CssStored::At(doc.css_hrefs.clone())
         };
-        // 封面三件事一起写：
+        // 封面写两格描述（`plans/导入管线.md` §八 第 4 条）：`covers/<hash>.<ext>` 的
+        // 文件名由这两格拼出来。**字节不进库**（v16 删掉了 `books.cover`）：
+        // 那是 MB 级的东西，而书架每次列书目都要过一遍 books 表 —— 几百本书
+        // 就是几百 MB 的库，只为架上那一格画什么。
         //
-        // - `cover` 是**兜底的字节**，两档都要：老库（v15 之前入库、还没被重扫过）
-        //   只有它；而新导入的书**落盘之后也照样留着** —— 因为封面字节**不可再生**。
-        //
-        //   这一条是实测撞出来的（`covers_prefer_the_file_and_never_take_a_shared_one`）：
-        //   我一度改成「有了 `cover_ref` 就不再写 BLOB」，那条测试立刻红 ——
-        //   把 `covers/` 里的文件删掉之后封面就**真的没了**。封面是从容器里抽出来的，
-        //   正文分片或换 provider 之后未必还能抽出同一张；而 `covers/` 是被设计成
-        //   「可整目录删掉」的。两件事凑在一起，BLOB 就不是冗余而是**唯一能重建的源**。
-        //   真要删这一列，得先把老行的字节导出成文件（读全库的活，见 §5.2 那条
-        //   「删数据不是迁移该顺手做的」），或者明确接受「`covers/` 一删封面就永久没了」。
-        // - `cover_spec` 是**规格版本**：换尺寸/编码后 `stale_reason` 才能认出老封面
-        //   该重生成（`plans/基础设施.md` §5.1）。
-        // - `cover_hash` / `cover_mime` 是**文件名**：`covers/<hash>.<ext>`。
-        //   哈希是那一份**字节**的身份而不是这本书的，所以两本书共用一张封面时
-        //   磁盘上只有一个文件。
+        // 哈希是那一份**字节**的身份而不是这本书的，所以两本书共用一张封面时
+        // 磁盘上只有一个文件（`format::cover::write` 那边保证）。
         tx.execute(
             "UPDATE books
-                SET css = ?2, toc_json = ?3, cover = ?4, index_version = ?5, cover_spec = ?6,
-                    cover_hash = ?7, cover_mime = ?8
+                SET css = ?2, toc_json = ?3, index_version = ?4,
+                    cover_hash = ?5, cover_mime = ?6
               WHERE id = ?1",
             params![
                 book_id,
                 serde_json::to_string(&css)?,
                 serde_json::to_string(&doc.toc)?,
-                doc.cover,
                 crate::format::INDEX_VERSION,
-                crate::format::COVER_SPEC_VERSION,
                 doc.cover_ref.as_ref().map(|c| c.hash.clone()),
                 doc.cover_ref.as_ref().map(|c| c.mime.clone()),
             ],
@@ -189,16 +177,15 @@ impl Store {
             tracing::debug!("store: 第 {book_id} 本没有入库的章节，回 None");
             return Ok(None);
         }
-        let (css, toc_json, cover, cover_hash, cover_mime) = conn.query_row(
-            "SELECT css, toc_json, cover, cover_hash, cover_mime FROM books WHERE id = ?1",
+        let (css, toc_json, cover_hash, cover_mime) = conn.query_row(
+            "SELECT css, toc_json, cover_hash, cover_mime FROM books WHERE id = ?1",
             params![book_id],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, Option<Vec<u8>>>(2)?,
+                    r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
                 ))
             },
         )?;
@@ -248,7 +235,8 @@ impl Store {
             css,
             css_hrefs,
             toc,
-            cover,
+            // 字节不在库里（v16）：封面只留描述，读那一侧按它去 `covers/` 取文件。
+            cover: None,
             images,
             cover_ref,
         }))
@@ -307,21 +295,21 @@ impl Store {
     /// [`Store::save_fixed`] 的不上锁版本；只由已经持了锁的一方调用。
     fn save_fixed_in(conn: &Connection, book_id: i64, doc: &FixedDoc) -> Result<()> {
         let pages = serde_json::to_string(&doc.pages)?;
-        // `index_version` 与 `cover_spec` 都要盖：
-        // - `index_version` 不盖的话，`stale_reason` 永远说这份定版式索引是旧的
-        //   （定版式的页表同样由「当前这套算法」产出），于是**每次开书都白重扫一遍**；
-        // - `cover_spec` 与 `save_flow_in` 同一条口径（§5.1）。
+        // `index_version` 必须盖：不盖的话 `stale_reason` 永远说这份定版式索引是旧的
+        // （定版式的页表同样由「当前这套算法」产出），于是**每次开书都白重扫一遍**。
+        //
+        // 封面字节不进库（v16）。定版式的封面是首页那张图，与可重排那一路
+        // 「从容器里抽出来的封面」不是同一件事，所以它没有 `cover_ref` ——
+        // 界面为它画占位（`book_cover` 回 `None`）。
         conn.execute(
             "UPDATE books
-                SET fixed_json = ?2, toc_json = ?3, cover = ?4, index_version = ?5, cover_spec = ?6
+                SET fixed_json = ?2, toc_json = ?3, index_version = ?4
               WHERE id = ?1",
             params![
                 book_id,
                 pages,
                 serde_json::to_string(&doc.toc)?,
-                doc.cover,
                 crate::format::INDEX_VERSION,
-                crate::format::COVER_SPEC_VERSION
             ],
         )?;
         tracing::debug!(
@@ -333,14 +321,14 @@ impl Store {
 
     /// [`Store::load_fixed`] 的不上锁版本；只由已经持了锁的一方调用。
     fn load_fixed_in(conn: &Connection, book_id: i64) -> Result<Option<FixedDoc>> {
-        let row: Option<(String, String, Option<Vec<u8>>)> = conn
+        let row: Option<(String, String)> = conn
             .query_row(
-                "SELECT fixed_json, toc_json, cover FROM books WHERE id = ?1",
+                "SELECT fixed_json, toc_json FROM books WHERE id = ?1",
                 params![book_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some((pages_json, toc_json, cover)) = row else {
+        let Some((pages_json, toc_json)) = row else {
             return Ok(None);
         };
         if pages_json.trim().is_empty() {
@@ -359,7 +347,8 @@ impl Store {
         Ok(Some(FixedDoc {
             pages,
             toc,
-            cover,
+            // 字节不在库里（v16）：定版式那份封面是首页图，界面为它画占位。
+            cover: None,
             images,
             width,
             height,
@@ -475,7 +464,9 @@ mod tests {
 
         let got = store.load_fixed(book).unwrap().expect("刚存的该读得回来");
         assert_eq!(got.pages, doc.pages);
-        assert_eq!(got.cover, doc.cover);
+        // 封面字节不进库（v16）：定版式那份封面是首页图，读回来是 `None`，
+        // 界面为它画占位。
+        assert_eq!(got.cover, None, "封面字节不该跟着库回来");
         assert_eq!((got.width, got.height), (800, 1200));
         assert_eq!(got.images.len(), 2, "图片表由页表重建");
         assert_eq!(got.images[0].href, "1.png");

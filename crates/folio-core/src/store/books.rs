@@ -70,7 +70,7 @@ pub(super) const BOOK_COLUMNS: &str = "id, path, title, authors, format, size, l
 /// **不透明的位置指示**用：这个键从 v1 的位置格式起就没改过，改动它本来就要
 /// 升 `LOCATOR_FORMAT_VERSION` 并走迁移，那时这里会跟着一起改（有测试盯着）。
 const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, books.format, \
-     books.size, books.last_opened_at, books.cover, \
+     books.size, books.last_opened_at, \
      (SELECT SUM(char_len) FROM chapters c WHERE c.book_id = books.id) AS total_chars, \
      (SELECT COUNT(*) FROM chapters c \
        WHERE c.book_id = books.id AND c.char_len IS NULL) AS unknown_chapters, \
@@ -107,18 +107,11 @@ const SHELF_ORDER: &str =
 /// 会让测试与「换书库位置」都变难。而副本路径本来就在库里那一行上。
 ///
 /// 推出来的目录不存在时也不报错：`cover::resolve` 会回 `None`，读那一侧退回 BLOB。
-/// 封面那一行的四格：字节、副本路径、封面哈希、封面 MIME。
-///
-/// 单独立一个名字是为了 `query_row` 的闭包签名 —— 五元组摊在参数里会让
-/// 「哪一格是什么」只存在于 `SELECT` 那一行的顺序里，改列序时编译器帮不上忙。
-type CoverRow = (Option<Vec<u8>>, String, Option<String>, Option<String>);
-
-/// `stale_reason` 要的那几格：路径、大小、mtime、索引版本、封面字节长度、
-/// 封面规格版本、封面哈希。
+/// `stale_reason` 要的那几格：路径、大小、mtime、索引版本、封面哈希。
 ///
 /// 与 [`CoverRow`] 同一个理由：七元组摊在 `query_row` 闭包里的话，
 /// 「哪一格是什么」只存在于 `SELECT` 那一行的顺序里，改列序时编译器帮不上忙。
-type StaleRow = (String, i64, i64, i64, Option<i64>, i64, Option<String>);
+type StaleRow = (String, i64, i64, i64, Option<String>);
 
 pub fn book_root(copy_path: &Path) -> std::path::PathBuf {
     let parent = copy_path.parent().unwrap_or(Path::new(""));
@@ -132,15 +125,19 @@ pub fn book_root(copy_path: &Path) -> std::path::PathBuf {
 
 fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     let authors: String = r.get(3)?;
+    // 第 7 格是 `books.cover` 留下的空位（v16 删了那一列，字节改走 `covers/`），
+    // 所以下面这几格的**下标比看上去小一号**。改 `SHELF_COLUMNS` 时这几行要一起改 ——
+    // 这一层是位置对应的，编译器帮不上忙。
+    //
     // 「算不出分母」与「没读过」都回 `None` —— 界面两者都该按「没有进度可显示」
     // 处理，而不是画一条 0% 的进度条（那会让「还没算过」看起来像「一字未读」）。
-    let total: Option<i64> = r.get(8)?;
-    let unknown_chapters: i64 = r.get(9)?;
-    let read_chars: Option<i64> = r.get(10)?;
-    let unknown_read: i64 = r.get(11)?;
-    let locator: Option<String> = r.get(12)?;
-    let cover_hash: Option<String> = r.get(13)?;
-    let cover_mime: Option<String> = r.get(14)?;
+    let total: Option<i64> = r.get(7)?;
+    let unknown_chapters: i64 = r.get(8)?;
+    let read_chars: Option<i64> = r.get(9)?;
+    let unknown_read: i64 = r.get(10)?;
+    let locator: Option<String> = r.get(11)?;
+    let cover_hash: Option<String> = r.get(12)?;
+    let cover_mime: Option<String> = r.get(13)?;
     // 两格要么都有、要么都没有：只剩一格拼不出文件名（见 `load_flow_in` 同一句）。
     let cover_ref = match (cover_hash, cover_mime) {
         (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
@@ -159,7 +156,11 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
             .collect(),
         format: r.get(4)?,
         last_opened_at: r.get(6)?,
-        cover: r.get::<_, Option<Vec<u8>>>(7)?,
+        // 第 7 格（`books.cover`）已经不存在（v16：字节不能进库）。架上那一格
+        // 画的封面由 `book_card` 按 `cover_ref` 去 `covers/` 取文件，
+        // 所以 `ShelfItem.cover` 恒为 `None` —— 它留着只是为了让读的人看出
+        // 「封面不走这一条路」，而不是一个被忘掉的字段。
+        cover: None,
         progress: progress_of(
             total,
             unknown_chapters,
@@ -284,56 +285,52 @@ impl Store {
             .optional()?)
     }
 
-    /// 单拿这一本的封面字节（生成时按 `cover_spec` 那档规格缩过）。
+    /// 单拿这一本的封面字节。
     ///
-    /// 为什么不在 [`Store::book`] 里一起给：`BookRow` 被桌面端整库握在手里当标签页列表用，
-    /// 那一用不需要字节（见 [`BookRow`] 的说明）；而「点开一本书的信息」这一屏要的正好
-    /// 只是这一本的图，一次一条语句取回，比把整库的图读进内存便宜得多。
-    /// 没有封面（Markdown / TXT，或 EPUB 里没声明）时是 `None`，界面要画占位而不是空白。
+    /// **只认 `covers/` 里那个文件**（v16：字节不再进库）。文件不在了就回 `None`，
+    /// 界面画占位 —— 不再退回任何库里存的副本，因为库里已经没有字节了。
     ///
-    /// **磁盘优先、BLOB 兜底**（`plans/导入管线.md` §八 第 4 条）：新导入的书封面落在
-    /// `<书库>/covers/<哈希>.<扩展名>`，库里那两列只是文件名；而老库（v15 之前入库、
-    /// 还没被重扫过）与落盘失败的那些只有 BLOB。两条路都要走，顺序不能反 ——
-    /// 文件是这一版的正主，BLOB 是历史遗留。
+    /// 这个取舍是有意的（`plans/导入管线.md` §八 第 4 条）：封面字节是 MB 级的东西，
+    /// 而 `books` 表每次列书目都要过一遍；把它留在库里等于让库随书数线性膨胀，
+    /// 只为架上那一格画什么。代价是**封面不会自己回来** —— `covers/` 被清掉、
+    /// 或这一行是别处拷来的库，就要重新导入那一本。封面是装饰，不是内容的入口。
+    ///
+    /// 为什么不在 [`Store::book`] 里一起给：`BookRow` 被桌面端整库握在手里当标签页
+    /// 列表用，那一用不需要字节；而「点开一本书的信息」那一屏要的正好只是这一本的图，
+    /// 一次一条语句取回，比把整库的图读进内存便宜得多。
     pub fn book_cover(&self, id: i64) -> Result<Option<Vec<u8>>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        // 两层 `Option` 各说一件事，别把它们混成一层：外层是「库里没有这一行」（书被删了），
-        // 由 `.optional()` 把 `QueryReturnedNoRows` 收成 `None`；内层是「这一行的封面列是空的」
-        // （Markdown / TXT，或 EPUB 里没声明），由 `get::<Option<Vec<u8>>>` 给。
-        // 读到「这本书」而它没封面，与根本没这本书，界面都要画占位，所以这里摊平成一层。
-        //
-        // `path` 也要取：书库根从**副本自己的路径**推（副本躺在书库根上），
-        // 库层因此不需要持有书库位置。
-        let row: Option<CoverRow> = conn
+        let row: Option<(String, Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT cover, path, cover_hash, cover_mime FROM books WHERE id = ?1",
+                "SELECT path, cover_hash, cover_mime FROM books WHERE id = ?1",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some((blob, path, hash, mime)) = row else {
+        let Some((path, hash, mime)) = row else {
             return Ok(None);
         };
-        // 1) 封面文件在，就用它。
-        if let (Some(hash), Some(mime)) = (hash.as_deref(), mime.as_deref()) {
-            let root = book_root(Path::new(&path));
-            if let Some(found) = crate::format::cover::resolve(&root, hash, mime) {
-                match std::fs::read(&found) {
-                    Ok(bytes) => return Ok(Some(bytes)),
-                    // 文件在但读不动（权限、坏扇区）：往下一步退，别报错 ——
-                    // 库里那份字节可能还在，而「封面读不出来」不该让这一屏打不开。
-                    Err(err) => tracing::warn!(
-                        path = %found.display(),
-                        "store: 封面文件读不动，退回库里那份：{err}"
-                    ),
-                }
-            } else {
-                // 描述在、文件不在（covers/ 被清过、或落盘那一步失败过）。
-                tracing::debug!("store: 第 {id} 本的封面文件不在了，退回库里那份");
+        let (Some(hash), Some(mime)) = (hash, mime) else {
+            // 没有描述 = 这本书没有封面（Markdown / TXT，或 EPUB 里没声明）。
+            return Ok(None);
+        };
+        let root = book_root(Path::new(&path));
+        let Some(found) = crate::format::cover::resolve(&root, &hash, &mime) else {
+            // 描述在、文件不在：`covers/` 被清过，或库是别处拷来的（没有 `covers/`）。
+            // 这一档**只记 debug**：它是「这本书现在没有封面」的正常状态，
+            // 而每一帧的书架都会问一遍，warn 会刷爆日志。
+            tracing::debug!("store: 第 {id} 本的封面文件不在 {root:?}/covers，画占位");
+            return Ok(None);
+        };
+        match std::fs::read(&found) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) => {
+                // 文件在但读不动（权限、坏扇区）：对读者来说与「不在」是同一种表现，
+                // 但原因是另一回事，所以留给日志一条 warn 级的线索。
+                tracing::warn!(path = %found.display(), "store: 封面文件读不动：{err}");
+                Ok(None)
             }
         }
-        // 2) 兜底：库里的 BLOB（老库，或落盘失败）。
-        Ok(blob)
     }
 
     pub fn book_by_path(&self, path: &Path) -> Result<Option<BookRow>> {
@@ -886,13 +883,12 @@ impl Store {
     /// 第一种可以直接删数据（`prune_missing`），其余该重扫 —— 调用方选。
     pub fn stale_reason(&self, book_id: i64) -> Result<Option<StaleReason>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        // 封面的两格：`length(cover)` 是**老那一档**（字节在 BLOB 里），
-        // `cover_hash` 是**新那一档**（字节在 `covers/` 里）。两档任一非空就算「有封面」——
-        // 只认 BLOB 会让新导入的书被判成「没有封面」，于是 `cover_spec` 换代时
-        // 那一批**永远等不到重扫**（症状是换了封面规格而架上还是旧图）。
+        // `cover_hash` 只用来在下面判「这一本有没有封面」——v16 之后封面规格那一档
+        // （`cover_spec`）连同 BLOB 一起没了：封面现在是一个文件，换规格只要重新生成
+        // 缩略图（`format::thumb::purge` + 懒生成），不必重扫全书。
         let row: Option<StaleRow> = conn
             .query_row(
-                "SELECT path, size, mtime, index_version, length(cover), cover_spec, cover_hash
+                "SELECT path, size, mtime, index_version, cover_hash
                    FROM books WHERE id = ?1",
                 params![book_id],
                 |r| {
@@ -902,16 +898,14 @@ impl Store {
                         r.get(2)?,
                         r.get(3)?,
                         r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((path, size, mtime, version, cover_len, cover_spec, cover_hash)) = row else {
+        let Some((path, size, mtime, version, cover_hash)) = row else {
             return Ok(None);
         };
-        let has_cover = cover_len.is_some() || cover_hash.is_some_and(|h| !h.is_empty());
+        let _has_cover = cover_hash.is_some_and(|h| !h.is_empty());
         // 顺序即优先级：文件不在最严重（要删数据），其次才是「算法换了」与「文件换了」。
         let meta = std::fs::metadata(&path);
         let Ok(meta) = meta else {
@@ -931,11 +925,6 @@ impl Store {
         let changed = mtime != 0 && now_mtime != 0 && mtime != now_mtime;
         if changed {
             return Ok(Some(StaleReason::Changed));
-        }
-        // 有封面、但记下的是旧规格（或迁移前的 0）：值得重扫一次把它换成新规格。
-        // 没有封面的书不受这条影响 —— 本来就没有东西要重生成。
-        if has_cover && cover_spec != i64::from(crate::format::COVER_SPEC_VERSION) {
-            return Ok(Some(StaleReason::OldCover));
         }
         let _ = size;
         Ok(None)

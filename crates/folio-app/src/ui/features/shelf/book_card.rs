@@ -48,41 +48,6 @@ pub(super) const COVER_RATIO: f32 = 2.0 / 3.0;
 /// （拆回去见 [`super::book_info::split_authors`]，库里存的仍是换行拼接）。
 pub(super) const AUTHOR_SEP: &str = " · ";
 
-/// 架上那一格要画的封面：**优先用卡片档缩略图**，做不出来就退回原图。
-///
-/// 三件事按顺序：
-///
-/// 1. **有 `cover_ref` 才有缩略图可谈**。老库（v15 之前入库、还没被重扫过）那一档
-///    封面只在 BLOB 里，没有哈希也就没有缓存文件名 —— 直接退回原图。
-/// 2. `thumb::ensure` 懒生成一次并落盘。它失败（坏字节、目录没权限）不是错误。
-/// 3. 解出来的字节交给 `cover_image`。**缩略图与原图走同一个解码函数**：
-///    两者都是「一张图的编码字节」，编码格式由字节头认，不需要两套判据。
-///
-/// 尺寸用 `THUMB_CARD_PX`：架上是网格，一格几百像素；列表那种一行一本的形状
-/// 在移动端的底栏里，走的也是同一个 `Card`（`shelf` 只有这一处取封面），
-/// 所以这里**不为列表档再分一次支** —— 两档差别在磁盘缓存的大小上，
-/// 而 400 与 96 一起解码一次的代价比多一条分支路径小。
-fn shelf_cover(
-    root: Option<&std::path::Path>,
-    cover: Option<&folio_core::format::cover::CoverRef>,
-    bytes: &[u8],
-) -> Option<Arc<Image>> {
-    if let (Some(root), Some(cover)) = (root, cover) {
-        let generated = folio_core::format::thumb::ensure(
-            root,
-            folio_core::paths::THUMB_CARD_PX,
-            cover,
-            bytes,
-        );
-        // 读得出来就用缩略图；读不出来（刚被 `purge` 掉、权限变了）继续往下走原图
-        // —— 这里不该 `return None`，否则会画成空白格。
-        let small = generated.and_then(|path| std::fs::read(path).ok());
-        if let Some(image) = small.as_deref().and_then(cover_image) {
-            return Some(image);
-        }
-    }
-    cover_image(bytes)
-}
 
 /// 一张卡片：库行摊平到界面直接用的样子 —— 封面已解码，作者已并成一行。
 pub(super) struct Card {
@@ -112,21 +77,7 @@ impl ShelfView {
     ///
     /// 只有「信息」那一屏用原图（`book_info` 走 `store.book_cover`）：那里封面是主视觉，
     /// 要大。
-    pub(super) fn card(&mut self, item: ShelfItem) -> Card {
-        let cover = match self.covers.get(&item.id) {
-            Some(cached) => cached.clone(),
-            None => {
-                let decoded = item.cover.as_deref().and_then(|bytes| {
-                    shelf_cover(
-                        item.cover_root.as_deref(),
-                        item.cover_ref.as_ref(),
-                        bytes,
-                    )
-                });
-                self.covers.insert(item.id, decoded.clone());
-                decoded
-            }
-        };
+    pub(super) fn card(&mut self, item: ShelfItem, cover: Option<Arc<Image>>) -> Card {
         Card {
             id: item.id,
             title: item.title.into(),
@@ -134,6 +85,47 @@ impl ShelfView {
             cover,
             progress: item.progress,
         }
+    }
+
+    /// 一格封面：会话内解过就直接用，没解过才去磁盘。
+    ///
+    /// **字节从文件来**（v16：库里不存封面字节），走 `Store::book_cover` 那一条
+    /// 「按 `cover_ref` 去 `covers/` 取」。文件不在就是 `None` —— 界面画占位，
+    /// 这是有意的（封面是装饰，不是内容的入口）。
+    ///
+    /// 解码结果记在架面那份 [`ShelfView::covers`] 里：改一个搜索词会把同一本书再查
+    /// 出来一遍，没缓存的话每敲一个字都要把整个架面的 JPEG 重解一遍；`None` 也要存 ——
+    /// 不记住这次失败，每查一次都会再试一遍同样的失败。
+    pub(super) fn resolve_cover(&mut self, item: &ShelfItem) -> Option<Arc<Image>> {
+        if let Some(cached) = self.covers.get(&item.id) {
+            return cached.clone();
+        }
+        let decoded = self
+            .store
+            .as_ref()
+            .and_then(|store| store.book_cover(item.id).ok().flatten())
+            .and_then(|bytes| {
+                // 先试磁盘上那份缩略图（导入时已生成，见 `land_cover`）；
+                // 没有或读不动就退回原图 —— 缩略图是可丢弃的加速品。
+                let small = item
+                    .cover_root
+                    .as_deref()
+                    .zip(item.cover_ref.as_ref())
+                    .and_then(|(root, cover)| {
+                        let path = folio_core::format::thumb::thumb_path(
+                            root,
+                            folio_core::paths::THUMB_CARD_PX,
+                            cover,
+                        );
+                        std::fs::read(path).ok()
+                    });
+                small
+                    .as_deref()
+                    .and_then(cover_image)
+                    .or_else(|| cover_image(&bytes))
+            });
+        self.covers.insert(item.id, decoded.clone());
+        decoded
     }
 
     /// 一张卡 → 一格元素。

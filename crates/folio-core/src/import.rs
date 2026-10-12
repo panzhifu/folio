@@ -469,17 +469,33 @@ fn land_cover(root: &Path, doc: &mut dyn crate::document::Document) {
     let written = match crate::format::cover::write(root, &bytes, &mime) {
         Ok(hash) => hash.to_hex(),
         Err(err) => {
+            // 字节不进库（v16），所以这一次失败就是「这本书没有封面」——
+            // 留着 `cover_ref` 为 `None`，界面画占位。不阻断导入：封面是装饰。
             tracing::warn!(
                 path = %root.display(),
-                "import: 封面没写进 covers/，退回库里那份字节：{err}"
+                "import: 封面没写进 covers/，这本书将没有封面：{err}"
             );
             return;
         }
     };
-    doc.set_cover_ref(Some(crate::format::cover::CoverRef {
+    let cover = crate::format::cover::CoverRef {
         hash: written,
         mime,
-    }));
+    };
+    // **缩略图在导入时一起生成**（`plans/导入管线.md` §八「缩略图」那一段推荐的正是
+    // 这一档）。这一版能这么选，是因为字节不再进库：封面只有一个来源（`covers/` 那个
+    // 文件），所以「导入时生成」不会与「懒生成」抢同一份输入。
+    //
+    // 为什么放导入：导入是读者**唯一愿意等待**的时刻，而缩略图是「每本一次」的活。
+    // 懒生成的代价文档写得很清楚 —— 第一次进一个空书架时几十张图同时开工，
+    // 而那正是最要 CPU 的时刻（书架滚动）。
+    //
+    // 失败不阻断，也不记 warn：`ensure` 自己已经判过「做不出来就回 None」，
+    // 而它失败的原因（原图是坏字节）对读者来说与「这本书本来就没有封面」同一种表现。
+    for size in crate::format::thumb::SIZES {
+        crate::format::thumb::ensure(root, size, &cover, &bytes);
+    }
+    doc.set_cover_ref(Some(cover));
 }
 
 /// 封面的 MIME：manifest 声明优先，没有就看字节头。
