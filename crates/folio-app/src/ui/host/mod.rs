@@ -135,7 +135,7 @@ pub fn back_exits_app(cx: &App) -> bool {
 }
 
 /// 这台设备此刻的本地时区偏移（秒，东为正）。统计那几屏按本地日分桶要用它当参数
-/// 交给 `folio_core`（core 自己不读环境，见 `folio_core::time` 的模块文档）。
+/// 交给 `folio_core`（core 自己不读环境，见 `folio_core::infra::time` 的模块文档）。
 ///
 /// 它站在 `host` 这一侧，但**不是** `Host` trait 的一项：桌面与移动走的是同一次调用，
 /// 没有需要分叉的实现。trait 上只该挂「两端答案不同」的服务，否则边界上长出来的

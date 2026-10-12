@@ -4,8 +4,8 @@
 //! `float`/`height:50%` 的章节 CSS）造一个迷你 EPUB，在核心层走完
 //! `open → images() → image_bytes → layout → fragments` 全链，看 `ImageRun`
 //! 在整章排版与分片两个阶段是否存活。
-use folio_core::document::{BookDocument, Document as _};
-use folio_core::format::{ContentKind, resolve_href, dir_of};
+use folio_core::content::document::{BookDocument, Document as _};
+use folio_core::content::format::{ContentKind, resolve_href, dir_of};
 use folio_core::layout::fragment::{FragmentOptions, fragments};
 use folio_core::layout::{FontKey, ImageProvider, LayoutOptions, LineFragment, LineMetrics, Measure, ResolvedImage, layout};
 use std::collections::HashMap;
@@ -166,9 +166,9 @@ fn main() {
     println!("③ spine_href = {:?}  base_dir = {:?}", chapter.spine_href, provider.base_dir);
 
     // ④ 层叠 + 完整排版（StdMeasure 假度量）
-    let css = folio_core::css::RuleSet::parse(&flow.css, folio_core::css::Origin::Author);
-    let dom = folio_core::dom::Dom::parse(chapter.source().as_bytes());
-    let styles = folio_core::css::computed::cascade(&dom, &css, &Default::default());
+    let css = folio_core::content::format::css::RuleSet::parse(&flow.css, folio_core::content::format::css::Origin::Author);
+    let dom = folio_core::content::dom::Dom::parse(chapter.source().as_bytes());
+    let styles = folio_core::content::format::css::computed::cascade(&dom, &css, &Default::default());
     let root = dom
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))

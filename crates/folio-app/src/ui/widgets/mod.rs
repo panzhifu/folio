@@ -12,7 +12,7 @@ mod search_box;
 
 pub use search_box::{SearchBox, SearchBoxEvent};
 
-use folio_core::css::computed::Color;
+use folio_core::content::format::css::computed::Color;
 use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::{App, Hsla, IntoElement, ParentElement, SharedString, Styled, div, px};
 

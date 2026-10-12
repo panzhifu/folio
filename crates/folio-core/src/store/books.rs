@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::types::{BookRow, ShelfItem};
 use super::{Store, now};
 use crate::Result;
-use crate::format::DocMeta;
+use crate::content::format::DocMeta;
 use crate::group::{GroupBy, ShelfGroup, UNGROUPED, group_shelf};
 use crate::position::Locator;
 
@@ -141,7 +141,7 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     // 两格要么都有、要么都没有：只剩一格拼不出文件名（见 `load_flow_in` 同一句）。
     let cover_ref = match (cover_hash, cover_mime) {
         (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
-            Some(crate::format::cover::CoverRef { hash, mime })
+            Some(crate::content::format::cover::CoverRef { hash, mime })
         }
         _ => None,
     };
@@ -315,7 +315,7 @@ impl Store {
             return Ok(None);
         };
         let root = book_root(Path::new(&path));
-        let Some(found) = crate::format::cover::resolve(&root, &hash, &mime) else {
+        let Some(found) = crate::content::format::cover::resolve(&root, &hash, &mime) else {
             // 描述在、文件不在：`covers/` 被清过，或库是别处拷来的（没有 `covers/`）。
             // 这一档**只记 debug**：它是「这本书现在没有封面」的正常状态，
             // 而每一帧的书架都会问一遍，warn 会刷爆日志。
@@ -422,7 +422,7 @@ impl Store {
     /// 还没算过内容身份的行（`content_hash IS NULL`），整行交出去。
     ///
     /// 这是懒补的那半张清单：补齐作业按它逐本算哈希、把旧名字的副本改成哈希名、回写
-    /// 位置（`Cleanup` 档，见 `crate::task::Priority` 与 `crate::import::backfill_copies`）。
+    /// 位置（`Cleanup` 档，见 `crate::infra::task::Priority` 与 `crate::ingest::import::backfill_copies`）。
     /// 空表 = 全库都已认得自己的书。
     /// 按 `id` 排是为了断言可复现，也让一次中断之后剩下的那批是确定的。
     pub fn rows_missing_hash(&self) -> Result<Vec<BookRow>> {
@@ -510,7 +510,7 @@ impl Store {
         if others > 0 {
             return Ok(None);
         }
-        Ok(Some(crate::format::cover::cover_path(
+        Ok(Some(crate::content::format::cover::cover_path(
             &book_root(Path::new(&path)),
             &hash,
             &mime,
@@ -726,7 +726,7 @@ mod grouping {
     use std::path::{Path, PathBuf};
 
     use crate::Store;
-    use crate::format::{DocMeta, Format};
+    use crate::content::format::{DocMeta, Format};
     use crate::group::{GroupBy, UNGROUPED};
     use crate::store::ShelfItem;
 
@@ -912,7 +912,7 @@ impl Store {
         let Ok(meta) = meta else {
             return Ok(Some(StaleReason::Missing));
         };
-        if version != crate::format::INDEX_VERSION {
+        if version != crate::content::format::INDEX_VERSION {
             return Ok(Some(StaleReason::OldIndex));
         }
         let now_mtime = meta

@@ -12,7 +12,7 @@ pub mod navigation;
 use std::time::Duration;
 
 use folio_core::Library;
-use folio_core::config::Appearance;
+use folio_core::infra::config::Appearance;
 use gpui_kit::base::motion::Transition;
 use gpui_kit::base::{NavMotion, NavStack, NavStackEvent, NavStackState};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};

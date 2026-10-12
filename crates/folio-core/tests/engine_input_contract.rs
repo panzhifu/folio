@@ -12,9 +12,18 @@
 
 use std::path::{Path, PathBuf};
 
-/// 引擎的三层。`format/` 与 `document/` 不在其列：前者正是干「认格式」这件事的地方，
-/// 后者是格式差异的出口。
-const ENGINE_DIRS: &[&str] = &["src/layout", "src/css", "src/dom"];
+/// 引擎的三层。`content/format/` 与 `content/document/` 不在其列：前者正是干
+/// 「认格式」这件事的地方，后者是格式差异的出口。
+///
+/// 路径跟着 `content/` 那次分区走（`css/` 与 `dom/` 现在都在 `src/content/` 底下，
+/// 而 `css/` 进一步收在 `content/format/` 里 —— 它是**排版用的样式层**，
+/// 与格式无关，但和 `format` 一起被搬了）。这条断言本身就是「路径写错了会红」，
+/// 所以它在分区之后立刻红了一次，是它该做的事。
+const ENGINE_DIRS: &[&str] = &[
+    "src/layout",
+    "src/content/format/css",
+    "src/content/dom",
+];
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {

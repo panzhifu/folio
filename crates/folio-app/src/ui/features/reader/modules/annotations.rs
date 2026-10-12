@@ -3,7 +3,7 @@
 //! 两头各有一套坐标，中间只隔一次解锚：
 //!
 //! - **写出去**的是 [`TextAnchor`]：章下标 + 章内可见文本偏移 + 一份原文指纹
-//!   （`folio_core::anchor`）。它进库，排版、改字号、换设备都不该动它。
+//!   （`folio_core::content::anchor`）。它进库，排版、改字号、换设备都不该动它。
 //! - **画出来**的是「这一章现在第几个字摆在哪一像素」：那是**当代排版**才答得出的问题，
 //!   所以每次画之前都要拿本章的 `TextMap` 把锚点重解一遍（`resolve_annotations`
 //!   的四级降级：原偏移 → 同 DOM 节点 → ±400 字窗口 → 全章）。
@@ -20,8 +20,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use folio_core::anchor::TextMap;
-use folio_core::annotation::{ResolvedAnnotation, resolve_annotations};
+use folio_core::content::anchor::TextMap;
+use folio_core::content::annotation::{ResolvedAnnotation, resolve_annotations};
 use folio_core::store::{ANNOTATION_COLORS, Annotation};
 use gpui_kit::component::Theme;
 use gpui_kit::{Context, Hsla};
@@ -128,13 +128,13 @@ impl ReaderSession {
     }
 
     /// 选区 → 锚点。章下标与偏移都照选区自己那份，锚点里存的原文指纹由 `TextMap` 给。
-    fn anchor_for(&self, selected: &Selection) -> Option<folio_core::anchor::TextAnchor> {
+    fn anchor_for(&self, selected: &Selection) -> Option<folio_core::content::anchor::TextAnchor> {
         let doc = self.book()?.span_doc(selected.chapter)?;
         // 排版没跟上的那一帧，`TextMap` 还是上一章的：这时落库会把批注钉错字。
         if !doc.is_current() {
             return None;
         }
-        Some(folio_core::anchor::TextAnchor::new(
+        Some(folio_core::content::anchor::TextAnchor::new(
             doc.text_map(),
             selected.chapter as u32,
             selected.range.start,

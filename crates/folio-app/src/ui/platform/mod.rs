@@ -164,9 +164,9 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
     // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
     crate::ui::shared::services::install(cx);
     // 诊断 dump（§5.8）：`FOLIO_DUMP=1` 时把生效配置 + 库版本 + 队列长度打一份。
-    if folio_core::diagnostics::enabled() {
+    if folio_core::infra::diagnostics::enabled() {
         let provenance = ConfigHolder::provenance(cx);
-        folio_core::diagnostics::dump(
+        folio_core::infra::diagnostics::dump(
             &ConfigHolder::snapshot(cx),
             Some(&provenance),
             db_version,

@@ -21,7 +21,7 @@ fn key_for(source: &str, width: f32) -> LayoutKey {
     LayoutKey::compose(
         source,
         "",
-        &crate::config::Reader::default(),
+        &crate::infra::config::Reader::default(),
         width,
         1,
         0,
@@ -35,7 +35,7 @@ fn key_for(source: &str, width: f32) -> LayoutKey {
 /// 两处就会算出两把不同的键，而现象是「某一格缓存永远不命中」。
 #[test]
 fn layout_key_is_a_pure_function_of_its_inputs() {
-    let prefs = crate::config::Reader::default();
+    let prefs = crate::infra::config::Reader::default();
     let make = |size: f32| {
         let mut p = prefs.clone();
         p.font_size = size;
@@ -58,7 +58,7 @@ fn layout_key_is_a_pure_function_of_its_inputs() {
 ///
 /// 起个名字而不是把类型写在常量上：那个元组 + 函数指针的类型复杂到 clippy 会拦，
 /// 而这张清单读起来比类型重要。
-type PrefTweak = (&'static str, fn(&mut crate::config::Reader));
+type PrefTweak = (&'static str, fn(&mut crate::infra::config::Reader));
 
 /// 每项读者偏好的「动一下它」写法。清单与 `Reader` 的字段表一一对应
 /// （下面那条断言守着），加字段时照着补一行。
@@ -73,7 +73,7 @@ const PREF_TWEAKS: [PrefTweak; 12] = [
     ("font_family", |p| p.font_family = "serif".into()),
     ("mono_font_family", |p| p.mono_font_family = "mono2".into()),
     ("toc_density", |p| {
-        p.toc_density = crate::config::TocDensity::Compact
+        p.toc_density = crate::infra::config::TocDensity::Compact
     }),
     ("toc_max_title_lines", |p| p.toc_max_title_lines += 1),
     ("toc_dim_read", |p| p.toc_dim_read = !p.toc_dim_read),
@@ -87,7 +87,7 @@ const PREF_TWEAKS: [PrefTweak; 12] = [
 /// 给 `Reader` 加了新字段而没在这儿列出来，最后那条断言会红。
 #[test]
 fn every_reader_preference_changes_the_key() {
-    use crate::config::Reader;
+    use crate::infra::config::Reader;
     let base = key_for("<p>偏好</p>", 600.0);
     for (name, tweak) in PREF_TWEAKS {
         let mut changed = Reader::default();
@@ -111,7 +111,7 @@ fn every_reader_preference_changes_the_key() {
 /// 栏宽按 1 px 量化：亚像素的窗口抖动不该重排整章，但真变了 1 px 要立刻跟上。
 #[test]
 fn width_is_quantized_to_one_pixel() {
-    let prefs = crate::config::Reader::default();
+    let prefs = crate::infra::config::Reader::default();
     let at = |w: f32| LayoutKey::compose("<p>宽</p>", "", &prefs, w, 1, 0, 0);
     assert_eq!(at(600.2), at(600.4), "不到半像素的抖动不算换宽");
     assert_ne!(at(600.2), at(601.0), "整 1 px 必须换宽");
@@ -244,7 +244,7 @@ fn layout_cache_misses_when_metrics_revision_differs() {
     let dom = Dom::parse(source.as_bytes());
     let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
     let body = body_of(&dom);
-    let prefs = crate::config::Reader::default();
+    let prefs = crate::infra::config::Reader::default();
     let mut cache = LayoutCache::new();
     let key = LayoutKey::compose(source, "", &prefs, 600.0, 1, 0, 0);
     assert_eq!(key.metrics_rev, METRICS_REV, "键必须带上当前口径版本");
@@ -443,7 +443,7 @@ fn block_cache_survives_a_preference_change() {
         width: 300.0,
         light: false,
     };
-    let plain_prefs = crate::config::Reader::default();
+    let plain_prefs = crate::infra::config::Reader::default();
     let plain = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
     let key0 = LayoutKey::compose(FLAT_SOURCE, "", &plain_prefs, 300.0, 1, 0, 0);
 

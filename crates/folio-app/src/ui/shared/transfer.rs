@@ -1,5 +1,5 @@
 //! Wi-Fi 传书在 app 侧的编排：设置页的开关 → 起 / 停
-//! [`folio_core::transfer::TransferServer`]。
+//! [`folio_core::net::transfer::TransferServer`]。
 //!
 //! 服务句柄挂在 [`super::services`] 的进程级常驻资源里，只活到读者关掉或进程退出 ——
 //! **不写进配置**：开着的传书服务是一个「我在局域网里裸着」的状态，读者离开设置页它还在
@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use folio_core::transfer::{TransferConfig, TransferServer};
+use folio_core::net::transfer::{TransferConfig, TransferServer};
 use folio_core::{ImportKind, ImportOutcome, Imported, PathsSource, TaskEvent};
 use gpui_kit::App;
 
@@ -55,7 +55,7 @@ pub fn set_enabled(on: bool, cx: &App) {
         services::services().set_transfer(None);
         return;
     };
-    let inbox_dir: PathBuf = folio_core::paths::data_dir().join("inbox");
+    let inbox_dir: PathBuf = folio_core::infra::paths::data_dir().join("inbox");
     let on_file = {
         let store = Arc::clone(&store);
         let dest_dir = dest_dir.clone();
@@ -92,13 +92,13 @@ pub fn set_enabled(on: bool, cx: &App) {
 /// 转发一条导入作业的事件进自动导入通道；成功的批次顺手清掉收件箱里的原件
 /// —— 收进来的书已经在书库目录里有副本，收件箱只该是中转站。
 ///
-/// 事件的收干交给 [`folio_core::import::forward`]（它管线程创建）。
+/// 事件的收干交给 [`folio_core::ingest::import::forward`]（它管线程创建）。
 fn forward_and_cleanup(
-    handle: folio_core::task::TaskHandle<Vec<ImportOutcome>>,
+    handle: folio_core::infra::task::TaskHandle<Vec<ImportOutcome>>,
     inbox_path: PathBuf,
 ) {
     let sender = auto_import_sender();
-    folio_core::import::forward(handle, move |event| {
+    folio_core::ingest::import::forward(handle, move |event| {
         if let TaskEvent::Finished(Ok(outcomes)) = &event
             && outcomes
                 .iter()

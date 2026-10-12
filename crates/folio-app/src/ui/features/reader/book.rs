@@ -1,6 +1,6 @@
 //! 一本打开着的书：章节表、锚章、以及**锚章 ± 窗口**拼出来的一条全局坐标。
 //!
-//! 与 `folio_core::document::Document`（统一文档接口）的分工：那一边是「这本书里
+//! 与 `folio_core::content::document::Document`（统一文档接口）的分工：那一边是「这本书里
 //! 有什么」（章、目录、图片元数据、按 href 现取字节），这一边是「界面读到哪、
 //! 排版成什么样」。一本书换章只是换这一层持有的排版状态，容器不重开。
 //!
@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use folio_core::document::Document as OpenedDocument;
-use folio_core::format::TocEntry;
+use folio_core::content::document::Document as OpenedDocument;
+use folio_core::content::format::TocEntry;
 use folio_core::{Chapter, Locator, Reader};
 use gpui_kit::{App, SharedString};
 

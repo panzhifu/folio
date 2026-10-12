@@ -40,7 +40,7 @@ impl ReaderSession {
     /// 开始为当前这本书计时。换书时**先** [`Self::settle_reading`] 再调这里，
     /// 否则上一本那一段会被算到新头上。
     pub(in crate::ui::features::reader) fn begin_reading(&mut self, cx: &mut Context<Self>) {
-        let at = folio_core::time::now();
+        let at = folio_core::infra::time::now();
         self.reading_segment_start = at;
         self.reading_last_activity = at;
         self.start_reading_clock(cx);
@@ -52,7 +52,7 @@ impl ReaderSession {
     /// 那些入口最终都要落这两条，而漏插一个输入口的后果由 [`IDLE_GRACE`] 那五分钟吸收。
     pub(super) fn note_reading_activity(&mut self) {
         if self.reading_segment_start != 0 {
-            self.reading_last_activity = folio_core::time::now();
+            self.reading_last_activity = folio_core::infra::time::now();
         }
     }
 
@@ -70,7 +70,7 @@ impl ReaderSession {
         if start == 0 {
             return;
         }
-        let now = folio_core::time::now();
+        let now = folio_core::infra::time::now();
         // 段首推到 `now` 而不是结账点：宽限线到 `now` 之间那段是「没人在」的证据，
         // 留着它下一段就会把这段空白再算一遍。
         self.reading_segment_start = now;
@@ -107,7 +107,7 @@ impl ReaderSession {
                     if session.reading_segment_start == 0 {
                         return;
                     }
-                    if folio_core::time::now() - session.reading_segment_start < SEGMENT_SECS {
+                    if folio_core::infra::time::now() - session.reading_segment_start < SEGMENT_SECS {
                         return;
                     }
                     session.settle_reading();

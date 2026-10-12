@@ -132,7 +132,7 @@ ALTER TABLE images DROP COLUMN bytes;
 "#,
     // v6：阅读统计。存**原始会话**而不是按天汇总 —— 「今天读了多久」依赖读者所在
     // 时区，而时区只有界面侧知道。core 只留事实（何时开始、多久、前进多少字），
-    // 汇总时把偏移当参数收进来（见 [`crate::time`]），不把某个时区的日界线写死进表。
+    // 汇总时把偏移当参数收进来（见 [`crate::infra::time`]），不把某个时区的日界线写死进表。
     r#"
 CREATE TABLE reading_sessions (
     id         INTEGER PRIMARY KEY,

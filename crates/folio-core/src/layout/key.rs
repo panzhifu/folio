@@ -22,7 +22,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::config::Reader;
+use crate::infra::config::Reader;
 
 /// 度量口径的版本。**改动 `Measure` 的实现口径时 +1**：断行规则、基线与行高的算法、
 /// shaping 的规则换了，一切已缓存的几何都不再可信，必须整清 —— 而这些变化不会改章文本、

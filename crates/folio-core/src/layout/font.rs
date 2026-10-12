@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use super::ports::Measure;
-use crate::css::computed::{Color, ComputedStyle};
+use crate::content::format::css::computed::{Color, ComputedStyle};
 
 /// 一次度量需要的最小字体描述。`family == "monospace"` 是泛族名，
 /// 由 `Measure` 的实现决定它对应哪个真实 family。

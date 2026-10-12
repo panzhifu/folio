@@ -128,7 +128,7 @@ fn theme_item(cx: &App, mode: ThemeMode, title: &str, hint: &str) -> Row {
 /// 摆一颗点了没反应的按钮比少一颗更糟。也不会当场重扫 —— 那一份是启动时读的
 /// （`theme::register_user_themes`），所以说明写的是「下次启动」。
 fn custom_group(cx: &App) -> Group {
-    let dir = folio_core::paths::themes_dir().display().to_string();
+    let dir = folio_core::infra::paths::themes_dir().display().to_string();
     group(
         tr(cx, "group.custom_themes"),
         vec![Row::custom_titled(

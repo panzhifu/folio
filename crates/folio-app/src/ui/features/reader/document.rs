@@ -6,7 +6,7 @@
 //! 「两端各实现了一遍层叠与断行」而不同。
 //!
 //! 入口的 `Chapter::source` **一定是引擎就绪的 XHTML**（契约见 `format::Chapter`）。
-//! 纯文本的包装已经在 provider 里做完（`folio_core::format::xhtml`），所以这里
+//! 纯文本的包装已经在 provider 里做完（`folio_core::content::format::xhtml`），所以这里
 //! 没有「这个格式要不要先包一下」的分支 —— `Format` 不参与排版链。
 
 use std::collections::HashMap;
@@ -16,17 +16,17 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use folio_core::Reader;
-use folio_core::anchor::TextMap;
-use folio_core::css::computed::{ComputedStyle, StyledDom, TextAlign, cascade};
-use folio_core::css::{Origin, RuleSet};
-use folio_core::dom::{Dom, NodeId};
-use folio_core::hit::Hit;
+use folio_core::content::anchor::TextMap;
+use folio_core::content::format::css::computed::{ComputedStyle, StyledDom, TextAlign, cascade};
+use folio_core::content::format::css::{Origin, RuleSet};
+use folio_core::content::dom::{Dom, NodeId};
+use folio_core::content::hit::Hit;
 use folio_core::layout::fragment::{Fragment, FragmentOptions, column_width, fragments};
 use folio_core::layout::{
     BlockCache, Layout, LayoutKey, LayoutOptions, LineBox, content_hash, layout_with_blocks,
     quantize_px,
 };
-use folio_core::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
+use folio_core::infra::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
 use gpui_kit::{App, TextSystem, Window, WindowTextSystem};
 
 use super::measure::GpuiMeasure;
@@ -35,13 +35,13 @@ use crate::ui::shared::images::ChapterImages;
 
 /// 打开一个文档，返回统一接口。
 ///
-/// 走 `folio_core::document::open`：`Content` 的两个家族都从那里出去，界面这一层只按
+/// 走 `folio_core::content::document::open`：`Content` 的两个家族都从那里出去，界面这一层只按
 /// `kind()` 分流，不看扩展名，也不再有第二个「按格式查 provider」的入口。
 ///
 /// 返回 `Arc` 而不是 `Box`：`Book` / `FixedBook` 与绘制那条链（图片字节来源）要共用
 /// 同一份文档，而字节按需取用的是它手里那个 provider。
-pub fn open(path: &Path) -> folio_core::Result<Arc<dyn folio_core::document::Document>> {
-    Ok(Arc::from(folio_core::document::open(path)?))
+pub fn open(path: &Path) -> folio_core::Result<Arc<dyn folio_core::content::document::Document>> {
+    Ok(Arc::from(folio_core::content::document::open(path)?))
 }
 
 /// 章节源文本 → 交给排版层的 XHTML 片段。
@@ -187,7 +187,7 @@ struct TypesetInput {
     key: LayoutKey,
     source: String,
     /// 界面手上那份解析产物。键的 `chapter_hash` 对得上就直接用，对不上才重新解析 ——
-    /// 「改一次字号不许重解析」那条计数断言（`folio_core::metrics::Metric::DomParses`）
+    /// 「改一次字号不许重解析」那条计数断言（`folio_core::infra::metrics::Metric::DomParses`）
     /// 钉的就是这一格。
     artifacts: Arc<ChapterArtifacts>,
     /// 书自己的样式（作者层）。章里的 `<style>` 不在这里 —— 它随 DOM 解析就地收。
@@ -202,7 +202,7 @@ struct TypesetInput {
 }
 
 /// 后台排版队列：整个进程一份、一条线程，与导入池同款
-/// （[`folio_core::task::TaskManager`]，`std` 实现、不依赖 gpui）。排版作业是
+/// （[`folio_core::infra::task::TaskManager`]，`std` 实现、不依赖 gpui）。排版作业是
 /// 毫秒级的活，FIFO 单线程就够；「只有还想要的那把键才上屏」由 [`Typeset::key`] 把关。
 fn typeset_queue() -> &'static Arc<TaskManager> {
     static QUEUE: OnceLock<Arc<TaskManager>> = OnceLock::new();
@@ -296,7 +296,7 @@ impl Document {
 
     /// 章节自己的 `<style>` 块 → 作者层规则。
     ///
-    /// 样式表**文件**按位置清单回容器取（见 `folio_core::document::Document::stylesheet`），
+    /// 样式表**文件**按位置清单回容器取（见 `folio_core::content::document::Document::stylesheet`），
     /// 而**写在章里的** `<style>` 随正文一起到达 —— 解析 DOM 时就地收进来，作者把
     /// 样式写在哪一份里，层叠结果都不该有差别（EasyPub 之类工具的封面页就是这么写的）。
     fn chapter_style_rules(dom: &Dom) -> RuleSet {
@@ -700,7 +700,7 @@ impl Document {
     //
     // 两端各自换算过一次就会各错一次：桌面读虚拟列表的像素偏移、移动读自己的
     // `scroll_y`，但「哪一行覆盖这个像素、这行的第一个字是第几个字」必须是同一个答案。
-    // 所以这三个方法放在共用层，实现全在 `folio_core::anchor`。
+    // 所以这三个方法放在共用层，实现全在 `folio_core::content::anchor`。
 
     /// 本章的可见文本坐标表（批注与书签在上面建锚点）。
     ///
@@ -764,7 +764,7 @@ impl Document {
     /// 排版还没做过（窗口第一帧之前）时 `lines` 是空的，命中给 `None`。
     #[allow(dead_code)] // M6 选中接线的入口，先立契约（见 plans/M6-selection.md）
     pub fn hit_test(&self, window: &Window, cx: &App, x: f32, y: f32) -> Option<Hit> {
-        folio_core::hit::hit_test(
+        folio_core::content::hit::hit_test(
             self.layout(),
             self.dom(),
             self.text_map(),
@@ -781,8 +781,8 @@ impl Document {
         window: &Window,
         cx: &App,
         range: std::ops::Range<usize>,
-    ) -> Vec<folio_core::hit::SelectionRect> {
-        folio_core::hit::rects_for_range(
+    ) -> Vec<folio_core::content::hit::SelectionRect> {
+        folio_core::content::hit::rects_for_range(
             self.layout(),
             self.dom(),
             self.text_map(),
@@ -794,7 +794,7 @@ impl Document {
     /// 长按落点吸到一个词上（纯坐标表运算，不碰度量）。
     #[allow(dead_code)] // M6 长按选词的入口（见 plans/M6-selection.md）
     pub fn snap_word(&self, offset: usize) -> std::ops::Range<usize> {
-        folio_core::hit::snap_word(self.text_map(), offset)
+        folio_core::content::hit::snap_word(self.text_map(), offset)
     }
 
     /// 长按所在段落的字符区间（「全选本段」）。
@@ -805,7 +805,7 @@ impl Document {
         offset: usize,
     ) -> Option<std::ops::Range<usize>> {
         let _ = (window, cx);
-        folio_core::hit::paragraph_range(self.layout(), self.dom(), self.text_map(), offset)
+        folio_core::content::hit::paragraph_range(self.layout(), self.dom(), self.text_map(), offset)
     }
 
     #[allow(dead_code)] // 上面三个 M6 入口共用
@@ -824,8 +824,8 @@ impl Document {
     /// `y` 超过内容末尾时给末尾那一行的偏移，不是总字数 —— 读者停在最后一屏，
     /// 下次该回到最后一屏，而不是回到「章尾但看不见任何字」的地方。
     pub fn offset_at_y(&self, y: f32) -> usize {
-        let line = folio_core::anchor::line_at_y(self.layout(), y);
-        folio_core::anchor::line_offset(self.layout(), self.dom(), self.text_map(), line)
+        let line = folio_core::content::anchor::line_at_y(self.layout(), y);
+        folio_core::content::anchor::line_offset(self.layout(), self.dom(), self.text_map(), line)
             .unwrap_or(0)
     }
 
@@ -834,13 +834,13 @@ impl Document {
     /// 桌面端用它做「列表滚过多少像素 → 第几行 → 第几个字」的最后一跳：
     /// 行号是从虚拟列表自己的坐标空间反解出来的，不能再拿布局绝对 `y` 去换算。
     pub fn coordinate_of_line(&self, line: usize) -> usize {
-        folio_core::anchor::line_offset(self.layout(), self.dom(), self.text_map(), line)
+        folio_core::content::anchor::line_offset(self.layout(), self.dom(), self.text_map(), line)
             .unwrap_or(0)
     }
 
     /// 可见文本偏移落在第几行（行盒下标）。
     pub fn line_at_offset(&self, offset: usize) -> usize {
-        folio_core::anchor::line_at_offset(self.layout(), self.dom(), self.text_map(), offset)
+        folio_core::content::anchor::line_at_offset(self.layout(), self.dom(), self.text_map(), offset)
     }
 
     /// 要把 `offset` 那一行摆上屏，滚动位置该是多少（行顶的绝对 y）。
@@ -848,7 +848,7 @@ impl Document {
     /// 排版还没做过（`layout` 是空的）时给 0，等于回到章首 —— 这是唯一不骗人的兜底。
     pub fn y_at_offset(&self, offset: usize) -> f32 {
         let layout = self.layout();
-        let line = folio_core::anchor::line_at_offset(layout, self.dom(), self.text_map(), offset);
+        let line = folio_core::content::anchor::line_at_offset(layout, self.dom(), self.text_map(), offset);
         layout
             .lines
             .get(line)

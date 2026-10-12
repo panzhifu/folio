@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use folio_core::document::Document;
-use folio_core::format::{ImageRes, dir_of, guess_media_type, resolve_href, shrink_image};
+use folio_core::content::document::Document;
+use folio_core::content::format::{ImageRes, dir_of, guess_media_type, resolve_href, shrink_image};
 use folio_core::layout::{ImageProvider, ResolvedImage};
 use gpui_kit::{Image, ImageFormat};
 
@@ -170,7 +170,7 @@ fn format_of(media_type: &str) -> ImageFormat {
 /// 给错格式的结果是**静默画空**：书架上是一块和「没有封面」长得一样的空白，
 /// 而界面已经分不清这两件事了。认不出时调用方要画显式的占位块。
 pub fn cover_image(bytes: &[u8]) -> Option<Arc<Image>> {
-    let media_type = folio_core::format::guess_media_type(bytes)?;
+    let media_type = folio_core::content::format::guess_media_type(bytes)?;
     Some(Arc::new(Image::from_bytes(
         format_of(media_type),
         bytes.to_vec(),
@@ -270,7 +270,7 @@ mod tests {
     /// 结果是静默画空 —— 与「这本没有图」在屏幕上长得一样。
     #[test]
     fn a_book_image_takes_its_format_from_the_bytes_not_the_declared_mime() {
-        use folio_core::format::ImageRes;
+        use folio_core::content::format::ImageRes;
         use gpui_kit::ImageFormat;
 
         use crate::ui::shared::images::{BookImages, ChapterImages};
@@ -305,7 +305,7 @@ mod tests {
     /// 「这本书没这张图」与「容器坏了」拆成两种表现。
     #[test]
     fn a_missing_container_yields_no_image_instead_of_a_panic() {
-        use folio_core::format::ImageRes;
+        use folio_core::content::format::ImageRes;
 
         use crate::ui::shared::images::{BookImages, ChapterImages, no_images};
 

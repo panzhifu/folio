@@ -8,7 +8,7 @@ use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer};
 
-use folio_core::logging::BoxedLayer;
+use folio_core::infra::logging::BoxedLayer;
 
 /// 由 `android-activity` 在专用原生线程调用。
 #[unsafe(no_mangle)]
@@ -39,7 +39,7 @@ fn android_main(app: android_activity::AndroidApp) {
         Some(root) => {
             let files = root.join("files");
             log::info!("android_main: 应用目录 {files:?}");
-            folio_core::paths::set_app_dirs(files.join("folio/config"), files.join("folio/data"));
+            folio_core::infra::paths::set_app_dirs(files.join("folio/config"), files.join("folio/data"));
         }
         None => {
             log::error!("android_main: internal_data_path() 给了 None，偏好与进度无法落盘");
@@ -52,7 +52,7 @@ fn android_main(app: android_activity::AndroidApp) {
     // 这是预期的：一个进程只有一个 subscriber。
     // 读配置 + 装日志一步到位（§5.6 配置 → 日志），配置留着传给 `boot` ——
     // **只读一次**（§2.3）：以前这里读一次、`boot` 里又读一次。
-    let (resolved, log_err) = folio_core::logging::init_from_config(logcat_layer());
+    let (resolved, log_err) = folio_core::infra::logging::init_from_config(logcat_layer());
     if let Err(err) = log_err {
         log::error!("android_main: 日志装不上，只有 logcat：{err}");
     }

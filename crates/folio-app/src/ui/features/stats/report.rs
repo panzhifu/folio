@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use folio_core::store::{ReadingRank, ReadingSummary, ReadingTotals, Store};
-use folio_core::{DailyReading, civil_date, duration_parts, local_day, time};
+use folio_core::{DailyReading, civil_date, duration_parts, local_day, infra::time};
 use gpui_kit::{App, SharedString};
 
 use crate::ui::shared::l10n::{tf, tr};
@@ -109,7 +109,7 @@ pub struct Report {
 }
 
 impl Report {
-    /// 取一次快照。`tz_offset_secs` 由界面侧给（core 不读系统时区，见 `folio_core::time`）。
+    /// 取一次快照。`tz_offset_secs` 由界面侧给（core 不读系统时区，见 `folio_core::infra::time`）。
     ///
     /// 每一条都是「读不出来就别拦这一屏」：统计页上任何一块都不该因为一条查询失败而
     /// 变成空白或一次 panic，所以各块各自 `or_log` 交出默认值，声音留在日志里。
@@ -159,7 +159,7 @@ impl Report {
 
     /// 时段那条热力图画不画。见 [`HOURS_MIN_SESSIONS`]。
     pub fn shows_hours(&self) -> bool {
-        self.hours.len() == folio_core::time::HOURS_PER_DAY
+        self.hours.len() == folio_core::infra::time::HOURS_PER_DAY
             && self.window.sessions >= HOURS_MIN_SESSIONS
     }
 }
@@ -244,7 +244,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use folio_core::{Config, DocMeta, Format, Language, Locale, Store, time};
+    use folio_core::{Config, DocMeta, Format, Language, Locale, Store, infra::time};
     use gpui_kit::{App, AppContext as _, Entity, SharedString, TestAppContext};
 
     use super::{Bar, HOURS_MIN_SESSIONS, Range, Report, duration};

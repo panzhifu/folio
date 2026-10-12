@@ -22,6 +22,27 @@
 
 ## 架构
 
+**分区（2026-10-12）**：`folio-core/src/` 从 22 个平铺模块收成六个区，
+判据是「谁依赖谁」——`content` 可依赖 `infra`，但不依赖 `store` / `ingest`；
+`infra` 谁都不依赖。这条方向是「引擎能在没有数据库的情况下跑」与
+「core 能被 `cargo test` 全量覆盖」的前提，所以每个区的 `mod.rs` 里都写了一遍。
+
+```
+crates/folio-core/src/
+  content/                 内容与文档：DOM / CSS / 文档接口 / 锚点 / 命中 / 批注
+    document/  format/     （format 里含容器层：zip / container / cover / thumb，与 css/）
+    dom/  anchor.rs  hit/  annotation.rs
+  layout/                  排版引擎：行盒、分片、失效键与两级缓存
+  store/                   SQLite：书目、进度、批注、集合、统计
+  ingest/                  书怎么进来：导入管线、扫描、监听、身份、校验
+  net/                     出网与入网：WebDAV、Wi-Fi 传书（tokio 只许在 transfer/）
+  infra/                   横切：配置、日志、路径、错误、作业、服务、量具、时间
+  group.rs  position.rs    两个还没找到邻居的小模块（书架分组、阅读位置）
+```
+
+文案表仍在 **crate 根**的 `locales/`，不在 `infra/` 里：`rust_i18n!` 的路径是相对
+`CARGO_MANIFEST_DIR` 解，不是相对源文件 —— 搬模块时它不该跟着动。
+
 ```
 crates/folio-core/          纯 Rust，无 gpui
   src/document/             统一文档接口：Document trait（可重排 / 定版式）+ BookDocument 门面

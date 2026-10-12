@@ -7,8 +7,8 @@ use std::ops::Range;
 
 use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
-use crate::css::computed::TextAlign;
-use crate::dom::NodeId;
+use crate::content::format::css::computed::TextAlign;
+use crate::content::dom::NodeId;
 
 /// 行盒里的一段连续同样式文本，同时带着两套坐标。
 #[derive(Debug, Clone, PartialEq)]

@@ -2,7 +2,7 @@
 //! 书库目录从哪儿来。
 //!
 //! 判据只有一条：**库里的行一定删，文件只删我们自己拷进来的那份**。两端导入时都会
-//! 先复制一份进书库（拷贝、解析、落库都在后端管线里，见 `folio_core::import`），
+//! 先复制一份进书库（拷贝、解析、落库都在后端管线里，见 `folio_core::ingest::import`），
 //! 所以删掉一本书不该牵连到读者自己手里那个原件 —— 原件在别的目录里，从书库里
 //! 移掉一本书不等于把人家硬盘上的文件删了。
 
@@ -27,7 +27,7 @@ pub fn target_dir(library: &Library) -> Option<PathBuf> {
 
 /// 建议位置：`<数据根>/books`。确认面板里默认填的就是它。
 pub fn suggested_dir() -> PathBuf {
-    folio_core::paths::books_dir()
+    folio_core::infra::paths::books_dir()
 }
 
 /// 启动时清掉书库目录里上次崩溃留下的 `.part` 半成品（`plans/基础设施.md` §1.3 末条）。
@@ -49,7 +49,7 @@ pub fn sweep_partials(cx: &App) {
 /// 整机扫描的起点。判据与 [`candidate_dirs`] 同一条：只扫读者放得进东西的地方 ——
 /// 桌面扫**家目录**（`/` 全盘会把 `/proc`、`/sys` 也卷进来，那里没有书），
 /// Android 扫共享存储根（本应用自己的外部目录在 `Android/data` 底下，要作为噪音
-/// 规则的豁免区传给 [`folio_core::scan::find`]），iOS / 鸿蒙的沙盒就那么大，扫数据根。
+/// 规则的豁免区传给 [`folio_core::ingest::scan::find`]），iOS / 鸿蒙的沙盒就那么大，扫数据根。
 ///
 /// Android 上 `all_files` 说的是「所有文件访问」拿到了没有（[`crate::ui::platform`]::
 /// request_storage_access 的结果）：拿到了才扫共享存储根；没拿到时能扫的只有应用
@@ -66,7 +66,7 @@ pub fn scan_roots(all_files: bool) -> Vec<PathBuf> {
     // iOS 的沙盒就那么大；鸿蒙的 `cfg!` 不认识 `target_os = "ohos"`（编译目标名
     // 不在标准清单里），桌面分支拿不到 HOME 时也落回数据根 —— 三者共用这条。
     if !cfg!(target_os = "android") && std::env::var_os("HOME").is_none_or(|h| h.is_empty()) {
-        return vec![folio_core::paths::data_dir()];
+        return vec![folio_core::infra::paths::data_dir()];
     }
     match std::env::var_os("HOME") {
         Some(home) if !home.is_empty() => vec![PathBuf::from(home)],
@@ -151,7 +151,7 @@ pub fn choose_dir(
 /// 监听的默认去处：`<数据根>/inbox`。开关打开时没选过目录就落在这里 ——
 /// 一个独立于书库的「收件箱」，往里丢书就自动入库。
 pub fn suggested_watch_dir() -> PathBuf {
-    folio_core::paths::data_dir().join("inbox")
+    folio_core::infra::paths::data_dir().join("inbox")
 }
 
 /// 启动时投一趟「补齐」的后台作业：给没有内容身份的行算哈希，并把书库里的旧名字
@@ -278,7 +278,7 @@ mod tests {
     use std::path::Path;
 
     use crate::ui::shared::library::{delete_book, owned_copy, target_dir};
-    use folio_core::format::{Chapter, DocMeta, FlowDoc, Format};
+    use folio_core::content::format::{Chapter, DocMeta, FlowDoc, Format};
     use folio_core::{Library, Store};
 
     fn meta(title: &str) -> DocMeta {

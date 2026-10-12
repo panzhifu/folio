@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use folio_core::document::Document;
+use folio_core::content::document::Document;
 use folio_core::store::Store;
 use folio_core::{Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, Reader};
 use gpui_kit::component::Root;
@@ -107,7 +107,7 @@ fn open_with_store(
     let meta = meta(format);
     // 不开文件地造一本书：`from_content` 把章节收进统一文档接口，没有容器
     // （图片与内嵌字体都不来，与「容器丢了」同一个表现）。
-    let doc: Arc<dyn Document> = Arc::from(folio_core::document::from_content(
+    let doc: Arc<dyn Document> = Arc::from(folio_core::content::document::from_content(
         meta,
         Content::Reflow(flow.clone()),
     ));
@@ -235,7 +235,7 @@ fn a_book_whose_text_is_not_in_the_db_loads_it_from_the_container(cx: &mut TestA
         flow.chapters.iter().all(|c| c.source().is_empty()),
         "库里不该存正文"
     );
-    let doc: Arc<dyn Document> = Arc::from(folio_core::document::with_container(
+    let doc: Arc<dyn Document> = Arc::from(folio_core::content::document::with_container(
         DocMeta {
             title: row.title,
             authors: row.authors,
@@ -452,7 +452,7 @@ fn the_engine_indents_centers_and_spaces_lines(cx: &mut TestAppContext) {
 /// 这一条测的是**真实字体栈**上的多 run 度量与摆放，mock 测不到。
 #[gpui_kit::test]
 fn inline_styles_survive_into_runs(cx: &mut TestAppContext) {
-    use folio_core::css::computed::Color;
+    use folio_core::content::format::css::computed::Color;
 
     cx.update(gpui_kit::init);
     let flow = epub_flow();
@@ -497,7 +497,7 @@ fn inline_styles_survive_into_runs(cx: &mut TestAppContext) {
 /// 这里钉的是排版侧：解析成容器路径、带出固有尺寸。
 #[gpui_kit::test]
 fn images_flow_through_the_engine_as_fragments(cx: &mut TestAppContext) {
-    use folio_core::format::ImageRes;
+    use folio_core::content::format::ImageRes;
 
     cx.update(gpui_kit::init);
     let flow = FlowDoc {

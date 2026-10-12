@@ -40,7 +40,7 @@ const GENERIC_FAMILIES: &[&str] = &[
 ];
 
 /// 等宽那一种泛族名。它们换成读者的 `mono_font_family`，而不是正文字体 ——
-/// UA 表给 `code` / `pre` 的就是 `monospace`（`folio_core::css::ua`），
+/// UA 表给 `code` / `pre` 的就是 `monospace`（`folio_core::content::format::css::ua`），
 /// 以前它和 `serif` 走同一条回落，结果代码块用的是正文那一份，等宽整个丢掉。
 const MONO_FAMILIES: &[&str] = &["monospace", "ui-monospace"];
 

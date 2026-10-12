@@ -7,8 +7,8 @@
 //! 为了对齐样式先摆一颗点了没用的控件是错的。依赖版本那几行是构建时从 `Cargo.lock` 抄来的
 //! （见 `folio-app/build.rs`）—— 这一页的全部价值就是它不会另说一套。
 
-use folio_core::i18n::Locale;
-use folio_core::paths::config_path;
+use folio_core::infra::i18n::Locale;
+use folio_core::infra::paths::config_path;
 use gpui_kit::{IntoElement as _, ParentElement, SharedString, Styled, div};
 
 use super::*;

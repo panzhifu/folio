@@ -18,7 +18,7 @@
 
 use std::rc::Rc;
 
-use folio_core::config::Mode;
+use folio_core::infra::config::Mode;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{NavMotion, NavStackState, v_virtual_list};
 use gpui_kit::component::button::{Button, ButtonVariants};

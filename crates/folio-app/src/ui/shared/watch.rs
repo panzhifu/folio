@@ -1,4 +1,4 @@
-//! 文件夹监听在 app 侧的编排：读配置 → 起 / 重启 / 停 [`folio_core::watch::WatchService`]。
+//! 文件夹监听在 app 侧的编排：读配置 → 起 / 重启 / 停 [`folio_core::ingest::watch::WatchService`]。
 //!
 //! 服务句柄挂在 [`super::services`] 的进程级常驻资源里，活过任何一屏，收尾跟着它走 ——
 //! 它不是界面的附件，是后台能力，所以**不再**自己拿一个 `static`（`plans/基础设施.md` §1.3）。
@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use folio_core::watch::{WatchConfig, WatchService};
+use folio_core::ingest::watch::{WatchConfig, WatchService};
 use gpui_kit::App;
 
 use super::config_model::ConfigHolder;

@@ -40,8 +40,8 @@
 
 use std::ops::Range;
 
-use crate::css::computed::{BreakWhen, ComputedStyle, StyledDom};
-use crate::dom::NodeId;
+use crate::content::format::css::computed::{BreakWhen, ComputedStyle, StyledDom};
+use crate::content::dom::NodeId;
 
 use super::Layout;
 

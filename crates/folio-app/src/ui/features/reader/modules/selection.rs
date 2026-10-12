@@ -2,10 +2,10 @@
 //!
 //! 状态字段住在 [`ReaderSession`](super::super::session::ReaderSession) 上（与
 //! `LaidOut` / `Source` 同一批），这一文件只有方法。选区存的是**章内可见文本坐标**
-//! （`folio_core::anchor::TextMap` 那套「第几个字」），与进度、批注锚点同源：
+//! （`folio_core::content::anchor::TextMap` 那套「第几个字」），与进度、批注锚点同源：
 //! 滚动不动它，重排不丢它，换章必须丢（坐标系换了）。
 //!
-//! 几何知识全部在引擎（`folio_core::hit`：命中、吸词、选区矩形），这里只做三件事：
+//! 几何知识全部在引擎（`folio_core::content::hit`：命中、吸词、选区矩形），这里只做三件事：
 //! 把屏幕点换算成排版点、把交互事件翻译成状态迁移、把「复制」落进剪贴板。
 //! 交互规矩照搬 gpui-kit 的 `TextSelectionLayer` / `touch_selection`：
 //!
@@ -431,7 +431,7 @@ impl ReaderSession {
     }
 
     /// 窗口坐标 → `(哪一章, 排版坐标)`。绘制（`view.rs` 摆行）与命中
-    /// （`folio_core::hit`）的换算互为逆运算，两头的偏移必须同源：连续滚动是
+    /// （`folio_core::content::hit`）的换算互为逆运算，两头的偏移必须同源：连续滚动是
     /// 「全局 y − 章基线」，分页/双页是片的 `origin_y` 与栏位 `x`，两条带子的高度
     /// 都扣在同一个地方。
     fn to_layout(&self, window: &Window, at: Point<Pixels>) -> Option<(usize, f32, f32)> {

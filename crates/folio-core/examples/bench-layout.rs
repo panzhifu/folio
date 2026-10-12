@@ -14,10 +14,10 @@
 
 use std::time::{Duration, Instant};
 
-use folio_core::config::Reader;
-use folio_core::css::computed::{ComputedStyle, StyledDom, cascade};
-use folio_core::css::{Origin, RuleSet};
-use folio_core::dom::{Dom, NodeId};
+use folio_core::infra::config::Reader;
+use folio_core::content::format::css::computed::{ComputedStyle, StyledDom, cascade};
+use folio_core::content::format::css::{Origin, RuleSet};
+use folio_core::content::dom::{Dom, NodeId};
 use folio_core::layout::{
     BlockCache, FontKey, LayoutCache, LayoutKey, LayoutOptions, LineMetrics, Measure, NoImages,
     layout, layout_cached, layout_with_blocks, measure_chapter, render_window,

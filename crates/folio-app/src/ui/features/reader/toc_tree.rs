@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use folio_core::format::TocEntry;
+use folio_core::content::format::TocEntry;
 
 /// 树里的一条，摊平成一行用的投影。
 #[derive(Clone, Debug, PartialEq, Eq)]

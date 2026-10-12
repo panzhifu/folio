@@ -3,7 +3,7 @@
 //!
 //! 锁纪律：**一次调用只上锁一次**。公开方法只负责「拿守卫 + 调对应的 `*_in(&conn, ..)`
 //! 私有助手」，助手内部绝不再碰 `conn` —— `Mutex` 不可重入，方法套方法就是自锁。
-//! 调用方那头还有一条配套纪律（见 `crate::import` 的模块文档）：拷贝与解析**不持锁**，
+//! 调用方那头还有一条配套纪律（见 `crate::ingest::import` 的模块文档）：拷贝与解析**不持锁**，
 //! 只有 register 那一小段持 —— 后台导一本书时，界面最多等几十毫秒。
 //!
 //! 这一层按主题拆开，一个主题一个文件，`impl Store` 分散在各自那一份里：
@@ -58,12 +58,12 @@ const _: () = {
 
 /// 当前 Unix 秒。全库只走这一个时钟,测试要改也只改一处。
 ///
-/// 实现搬到 [`crate::time::now`]：界面侧记阅读会话的起止要读**同一个**钟,否则
+/// 实现搬到 [`crate::infra::time::now`]：界面侧记阅读会话的起止要读**同一个**钟,否则
 /// 「库里那一段的时长」和「屏幕上算出来的」会差出几十秒,而那没有任何报错。
-pub(super) use crate::time::now;
+pub(super) use crate::infra::time::now;
 
 pub fn default_db_path() -> PathBuf {
-    crate::paths::db_path()
+    crate::infra::paths::db_path()
 }
 
 impl Store {
@@ -160,11 +160,11 @@ impl Store {
             };
             tracing::info!("store: 给 {} 章补上容器里的位置", rows.len());
             for (chapter_id, format, spine_href, idx) in &rows {
-                let at = crate::format::Format::parse(format).map(|format| {
+                let at = crate::content::format::Format::parse(format).map(|format| {
                     let chapter =
-                        crate::format::Chapter::inline(String::new(), String::new())
+                        crate::content::format::Chapter::inline(String::new(), String::new())
                             .with_spine_href(spine_href.clone());
-                    crate::format::locator_for(format, &chapter, *idx as usize)
+                    crate::content::format::locator_for(format, &chapter, *idx as usize)
                 });
                 // 认不出格式就留空：打开时走「回容器重读」那条降级路。
                 let Some(at) = at else { continue };

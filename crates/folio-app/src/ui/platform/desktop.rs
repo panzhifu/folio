@@ -22,7 +22,7 @@ pub fn run_desktop() {
     // 第一件事是**读配置并装日志**（§5.6：配置 → 日志）：`logging` 那一节就在配置里，
     // 而它得在第一条日志之前生效。`Config::load` 只要文件系统，不需要 App 上下文，所以放在
     // 这里而不是 `run` 里。装不上（比如别处已经占了这个槽）只影响诊断输出，程序照起。
-    let (resolved, log_err) = folio_core::logging::init_from_config(None);
+    let (resolved, log_err) = folio_core::infra::logging::init_from_config(None);
     if let Err(err) = log_err {
         eprintln!("日志装不上，这一轮只有 stderr 上的这一句：{err}");
     }
@@ -53,7 +53,7 @@ pub fn run_desktop() {
                     tracing::error!("desktop: 书库打不开：{e:?}");
                     eprintln!(
                         "{}",
-                        folio_core::i18n::t_with("error.database_unopenable", &[("reason", &e)])
+                        folio_core::infra::i18n::t_with("error.database_unopenable", &[("reason", &e)])
                     );
                     std::process::exit(1);
                 }
@@ -91,9 +91,9 @@ pub fn run_desktop() {
             // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
             crate::ui::shared::services::install(cx);
             // 诊断 dump（§5.8）：`FOLIO_DUMP=1` 时把生效配置 + 库版本 + 队列长度打一份。
-            if folio_core::diagnostics::enabled() {
+            if folio_core::infra::diagnostics::enabled() {
                 let provenance = ConfigHolder::provenance(cx);
-                folio_core::diagnostics::dump(
+                folio_core::infra::diagnostics::dump(
                     &ConfigHolder::snapshot(cx),
                     Some(&provenance),
                     db_version,

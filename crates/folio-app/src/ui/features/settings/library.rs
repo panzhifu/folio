@@ -57,7 +57,7 @@ pub(super) fn library_page(cx: &App) -> Page {
         |cx: &App| ConfigHolder::library(cx).watch.is_some(),
         |on: bool, cx| {
             ConfigHolder::edit_library(cx, |library| {
-                library.watch = on.then(|| folio_core::config::WatchDir {
+                library.watch = on.then(|| folio_core::infra::config::WatchDir {
                     dir: suggested_watch_dir().display().to_string(),
                     ..Default::default()
                 });
@@ -87,7 +87,7 @@ pub(super) fn library_page(cx: &App) -> Page {
                     tracing::info!("watch: 监听目录选为 {path}");
                     ConfigHolder::edit_library(cx, |library| {
                         let watch = library.watch.get_or_insert_with(|| {
-                            folio_core::config::WatchDir {
+                            folio_core::infra::config::WatchDir {
                                 dir: String::new(),
                                 ..Default::default()
                             }

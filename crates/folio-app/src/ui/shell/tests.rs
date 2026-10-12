@@ -128,8 +128,8 @@
         use crate::ui::shared::config_model::ConfigHolder;
         use crate::ui::shell::AppShell;
         use crate::ui::shell::navigation::Destination;
-        use folio_core::i18n::{Locale, t_in};
-        use folio_core::task::ProgressEvent;
+        use folio_core::infra::i18n::{Locale, t_in};
+        use folio_core::infra::task::ProgressEvent;
         use folio_core::{
             Candidate, Config, Language, Library, PathsSource, ScanReport, Store, TaskEvent,
             TaskManager, submit_import,
@@ -353,7 +353,7 @@
 
         /// 回归门：后端导入管线交回的东西要真的变成架上一格，那一行导入读数要跟着收掉。
         ///
-        /// 两头都是真的：结果来自跑过一遍的 `folio_core::import`（真的把文件拷进书库、真的
+        /// 两头都是真的：结果来自跑过一遍的 `folio_core::ingest::import`（真的把文件拷进书库、真的
         /// 解析），架面是外壳里挂着的那一个（内存书库）。钉住的是接线之后的三个方向 ——
         /// 事件进模型、架上多一格、读数不再挂着。少任何一环，真机上都是「点了导入，过了几秒
         /// 什么也没发生」，而这正是这条链从界面线程挪去后台之后新引入的风险：以前那一份是
@@ -759,7 +759,7 @@
                     },
                 )
                 .unwrap();
-            let now = folio_core::time::now();
+            let now = folio_core::infra::time::now();
             shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
             store.record_session(book, now - 600, now, 0).unwrap();
             shell.update(cx, |this, cx| {
@@ -785,7 +785,7 @@
         #[gpui_kit::test]
         fn renaming_in_the_info_page_redraws_the_card(cx: &mut TestAppContext) {
             use crate::ui::features::shelf::{BookInfoView, ShelfView};
-            use folio_core::format::{DocMeta, Format};
+            use folio_core::content::format::{DocMeta, Format};
 
             let (handle, shell) = boot(cx, false);
             let stack = shell.read_with(cx, |this, _| {

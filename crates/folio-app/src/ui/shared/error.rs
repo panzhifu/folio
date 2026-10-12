@@ -25,7 +25,7 @@ pub use anyhow::bail;
 ///
 /// 用 `{:#}` 而不是 `{}`：anyhow 的 `:#` 是「外层那句：中层那句：最底层那句」，
 /// 而 `{}` 只有最外面一句。界面出错时缺的从来不是「失败了」，是「卡在哪一层」——
-/// 日志文件（见 `folio_core::logging`）就是拿来看这一行的。
+/// 日志文件（见 `folio_core::infra::logging`）就是拿来看这一行的。
 pub fn report(what: &str, err: &anyhow::Error) {
     tracing::error!("{what}：{err:#}");
 }

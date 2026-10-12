@@ -4,7 +4,7 @@
 //! `pub(super)`，即**只对 `layout` 内部开放**，不属于对外公开面。
 
 use super::font::FontKey;
-use crate::css::computed::{ComputedStyle, Length};
+use crate::content::format::css::computed::{ComputedStyle, Length};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LineMetrics {

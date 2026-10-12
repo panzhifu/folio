@@ -9,7 +9,7 @@
 //! fallbacks**，从不抢 primary —— 读者的字体照常是正文，只有它画不出来的那一格
 //! 才轮到书里的字体（ASCII 永远留在 primary，那是 gpui 的规则）。
 //!
-//! 字节不进这里，也不进书库（见 `folio_core::format::FontBytes`）：每次开书按
+//! 字节不进这里，也不进书库（见 `folio_core::content::format::FontBytes`）：每次开书按
 //! `@font-face` 的 `src` 去容器现读一次，注册进进程级文本系统。任何一步失败都
 //! 降级成「这本书没有内嵌字体」—— 与没有这个功能时逐字节同一条路径，只是少补几个
 //! 生僻字，正文照排。
@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use folio_core::css::{FontSrc, Origin, RuleSet};
-use folio_core::document::Document;
+use folio_core::content::format::css::{FontSrc, Origin, RuleSet};
+use folio_core::content::document::Document;
 use gpui_kit::App;
 
 /// 进程级「字体注册事件」计数：每成功往文本系统里注册一批字体就 +1。

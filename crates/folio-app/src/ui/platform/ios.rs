@@ -12,7 +12,7 @@ pub extern "C" fn gpui_ios_register_app() {
     gpui_mobile::ios::ffi::set_app_callback(Box::new(|cx: &mut App| {
         // iOS 没有单独的原生入口能提前装日志，就在这次注册回调里读配置 + 装日志，
         // 再把配置交给 `boot`（§5.6 配置→日志、§2.3 只读一次）。
-        let (resolved, _) = folio_core::logging::init_from_config(None);
+        let (resolved, _) = folio_core::infra::logging::init_from_config(None);
         super::boot(cx, resolved);
     }));
 }

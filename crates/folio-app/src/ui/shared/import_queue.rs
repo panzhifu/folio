@@ -32,11 +32,11 @@ pub(crate) fn auto_import_sender() -> async_channel::Sender<TaskEvent<Vec<Import
 }
 
 /// 把一条后台作业的事件转发进自动导入通道。给监听 / 传书这类「没有界面可接」
-/// 的提交方用：事件的收干交给 [`folio_core::import::forward`]（它管线程创建），
+/// 的提交方用：事件的收干交给 [`folio_core::ingest::import::forward`]（它管线程创建），
 /// 这里只管逐条往桥上送。
-pub fn forward_to_auto_imports(handle: folio_core::task::TaskHandle<Vec<ImportOutcome>>) {
+pub fn forward_to_auto_imports(handle: folio_core::infra::task::TaskHandle<Vec<ImportOutcome>>) {
     let sender = channel().0.clone();
-    folio_core::import::forward(handle, move |event| {
+    folio_core::ingest::import::forward(handle, move |event| {
         // 接收端没了：没有要的人，收手（后面的事件也跟着没有意义）。
         let _ = sender.send_blocking(event);
     });

@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::Store;
-use crate::format::{
+use crate::content::format::{
     Chapter, ChapterLocator, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
     PageSource, TocEntry, guess_media_type,
 };
@@ -247,7 +247,7 @@ fn a_fixed_document_is_not_perpetually_stale() {
         })
         .unwrap()
     };
-    assert_eq!(version, crate::format::INDEX_VERSION);
+    assert_eq!(version, crate::content::format::INDEX_VERSION);
     assert_eq!(
         store.stale_reason(id).unwrap(),
         None,
@@ -336,7 +336,7 @@ fn adding_the_same_path_twice_updates_in_place() {
 ///
 /// 注意这里**没有正文**：正文不在库里（`the_text_never_reaches_the_database` 钉这一条），
 /// 所以「往返」这个词覆盖的只有索引 —— 正文的往返在
-/// `crate::document::book::tests` 里对容器测。
+/// `crate::content::document::book::tests` 里对容器测。
 #[test]
 fn the_index_roundtrips_through_the_store() {
     let store = Store::in_memory().unwrap();
@@ -649,7 +649,7 @@ fn reindexing_keeps_the_reader_data_and_touches_no_new_record() {
     let before_rows = store.list_books().unwrap().len();
 
     // 读者在这一章划了一条批注：章 0 的第 1 个字之后（插入点，避开长度边界）。
-    let anchor = crate::anchor::TextAnchor {
+    let anchor = crate::content::anchor::TextAnchor {
         chapter: 0,
         start: 1,
         end: 1,
@@ -983,7 +983,7 @@ fn the_v12_migration_adds_identity_columns_without_backfilling_them() {
     // 补上之后：从「缺身份」那张清单里消失，而按哈希能找回来。
     let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     store
-        .set_content_hash(rows[0].id, hash, crate::identity::HASH_ALGO)
+        .set_content_hash(rows[0].id, hash, crate::ingest::identity::HASH_ALGO)
         .unwrap();
     assert!(store.rows_missing_hash().unwrap().is_empty());
     assert_eq!(
@@ -997,7 +997,7 @@ fn the_v12_migration_adds_identity_columns_without_backfilling_them() {
         .unwrap()
         .query_row("SELECT hash_algo FROM books WHERE id = 1", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(algo, crate::identity::HASH_ALGO);
+    assert_eq!(algo, crate::ingest::identity::HASH_ALGO);
 
     // 索引只建在非空那一段上：老库此刻绝大多数行是 NULL，全表索引是给空值建 B 树。
     let indexed: i64 = rusqlite::Connection::open(&db)
@@ -1076,10 +1076,10 @@ fn the_v14_migration_brings_back_char_len_as_nullable() {
     assert_eq!((known, unknown), (0, 2), "降级读数要能说清几章不知道");
 
     // 新写的一份：正文在手，字数建的时候就数出来，落库读回一致。
-    let fresh = crate::format::FlowDoc {
+    let fresh = crate::content::format::FlowDoc {
         chapters: vec![
-            crate::format::Chapter::inline("一", "<p>正文四个字</p>"),
-            crate::format::Chapter::inline("二", "<p>短</p>"),
+            crate::content::format::Chapter::inline("一", "<p>正文四个字</p>"),
+            crate::content::format::Chapter::inline("二", "<p>短</p>"),
         ],
         ..Default::default()
     };
@@ -1271,12 +1271,12 @@ fn a_cover_lives_in_a_file_and_never_in_the_database() {
 
     // 两本共用同一份封面字节。
     let cover = b"pretend-jpeg-cover-bytes";
-    let hash = crate::format::cover::write(root, cover, "image/jpeg").unwrap();
+    let hash = crate::content::format::cover::write(root, cover, "image/jpeg").unwrap();
     let hash_hex = hash.to_hex();
 
     let mut with_cover = flow(&[("一", "正文")]);
     with_cover.cover = Some(cover.to_vec());
-    with_cover.cover_ref = Some(crate::format::cover::CoverRef {
+    with_cover.cover_ref = Some(crate::content::format::cover::CoverRef {
         hash: hash_hex.clone(),
         mime: "image/jpeg".into(),
     });
@@ -1291,7 +1291,7 @@ fn a_cover_lives_in_a_file_and_never_in_the_database() {
     assert_eq!(store.book_cover(b).unwrap().as_deref(), Some(&cover[..]));
 
     // 两本指向**同一个**文件 —— 这是「按封面自己的字节哈希命名」的全部收益。
-    let file_a = crate::format::cover::cover_path(root, &hash_hex, "image/jpeg");
+    let file_a = crate::content::format::cover::cover_path(root, &hash_hex, "image/jpeg");
     assert!(file_a.is_file(), "封面该真的落盘了");
 
     // 2) 两本共用一张时删掉一本不能把文件带走（封面是**它自己字节**的身份，

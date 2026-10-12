@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::anchor::TextAnchor;
+use crate::content::anchor::TextAnchor;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookRow {
@@ -49,7 +49,7 @@ pub struct ShelfItem {
     pub progress: Option<f32>,
     /// 封面在 `covers/` 里的描述（哈希 + MIME）。`None` = 老库那一档，封面只在
     /// [`ShelfItem::cover`] 那个 BLOB 里。
-    pub cover_ref: Option<crate::format::cover::CoverRef>,
+    pub cover_ref: Option<crate::content::format::cover::CoverRef>,
     /// **书库根**（副本所在的那一层）。缩略图缓存目录挂在它底下
     /// （`<书库>/.thumbs/<尺寸>/`），而界面手上只有副本路径，所以这一格由库里
     /// 那一列 `books.path` 反推出来（`store::book_root`）一起带出来 ——

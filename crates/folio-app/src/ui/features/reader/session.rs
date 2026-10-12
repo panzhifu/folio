@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use folio_core::annotation::ResolvedAnnotation;
-use folio_core::document::Document as OpenedDocument;
+use folio_core::content::annotation::ResolvedAnnotation;
+use folio_core::content::document::Document as OpenedDocument;
 use folio_core::store::{Annotation, Store};
 use folio_core::{DocMeta, Format, Locator, Reader, StaleReason};
 use gpui_kit::{App, Bounds, Context, Pixels, Point, SharedString, Task};
@@ -499,7 +499,7 @@ impl ReaderSession {
         };
         // 库里只有章节位置，正文按位置回容器取；图片与内嵌字体同样不入库，也现取。
         let doc: std::sync::Arc<dyn OpenedDocument> = std::sync::Arc::from(
-            folio_core::document::with_container(meta, content, Path::new(&path)),
+            folio_core::content::document::with_container(meta, content, Path::new(&path)),
         );
         // `self.prefs` 里的家族已经是这台设备解析得出来的那个，不再挑一遍。
         let book = Book::new(doc, self.prefs.clone(), locator, cx);

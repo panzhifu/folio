@@ -5,7 +5,7 @@
 //! - **主题集**是别人的东西：框架自带的那几套（构建时从依赖源码嵌进来，见 `build.rs`）
 //!   加上用户自己放进 `~/.config/folio/themes/*.json` 的，全部由 `ThemeRegistry` 按名字管；
 //! - **外观**是我们自己的偏好：浅深怎么选、解析到浅和深时各用哪一套主题名，存在
-//!   [`folio_core::config::Appearance`] 里。
+//!   [`folio_core::infra::config::Appearance`] 里。
 //!
 //! 所以换肤就是把 `Theme` 这个 Global 的 `light_theme` / `dark_theme` 两个槽换成选中的
 //! 配置，再切 `mode`；框架的每个组件都读 `cx.theme()`，不需要谁去通知它们。
@@ -13,7 +13,7 @@
 //! 主题名认不出时回落到框架自带的 `Default Light` / `Default Dark`：主题可能被改名、
 //! 被从目录里删掉，那时下拉框选不中但不该整界面变白。
 
-use folio_core::config::{Appearance, Mode};
+use folio_core::infra::config::{Appearance, Mode};
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::{App, SharedString, Window, WindowAppearance};
 
@@ -41,7 +41,7 @@ pub fn register_builtin_themes(cx: &mut App) {
 /// 目录不存在返回 0，不是错误：里面的东西全是可选的。顺序按文件名排过，所以
 /// 一个文件重定义已有名字时结果稳定，不依赖目录遍历顺序。
 pub fn register_user_themes(cx: &mut App) -> usize {
-    let dir = folio_core::paths::themes_dir();
+    let dir = folio_core::infra::paths::themes_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return 0;
     };
@@ -163,7 +163,7 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_DARK, DEFAULT_LIGHT, register_builtin_themes, resolve_mode, theme_names};
-    use folio_core::config::Mode;
+    use folio_core::infra::config::Mode;
     use gpui_kit::component::ThemeMode;
     use gpui_kit::{TestAppContext, WindowAppearance};
 

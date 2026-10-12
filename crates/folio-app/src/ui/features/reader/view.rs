@@ -23,7 +23,7 @@
 use std::cell::RefCell;
 use std::ops::Range;
 
-use folio_core::anchor::line_at_y;
+use folio_core::content::anchor::line_at_y;
 use folio_core::layout::FontKey;
 use folio_core::layout::fragment::column_offset;
 use folio_core::store::Annotation;

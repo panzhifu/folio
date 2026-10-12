@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use folio_core::remote::Transport;
+use folio_core::net::remote::Transport;
 use folio_core::{
     Cancel, ImportOutcome, ImportReport, Imported, PathsSource, Store, TaskEvent, UrlSource,
     submit_import,
@@ -50,7 +50,7 @@ use crate::ui::widgets::{SearchBox, SearchBoxEvent, empty_state, muted_label};
 fn url_transport() -> Arc<dyn Transport> {
     static TRANSPORT: OnceLock<Arc<dyn Transport>> = OnceLock::new();
     TRANSPORT
-        .get_or_init(folio_core::remote::ureq::shared)
+        .get_or_init(folio_core::net::remote::ureq::shared)
         .clone()
 }
 
@@ -158,7 +158,7 @@ pub struct ShelfView {
     /// 刚提交、管线第一条读数还没上来时就是这个样子；`None` 表示没在导入。
     /// 读数来自后端报的 `Progress` 事件，画在哪一处见 `Render` 那一段。
     pub(super) importing: Option<(u64, u64)>,
-    /// 正在进行的这批导入的取消旗标，来自 [`TaskHandle`](folio_core::task::TaskHandle)。
+    /// 正在进行的这批导入的取消旗标，来自 [`TaskHandle`](folio_core::infra::task::TaskHandle)。
     /// 读数行旁那颗「取消」按钮置位它；管线在两本书之间看见，已落库的那些是真的
     /// （`Cancelled` 事件来了重查一次架面就有）。
     import_cancel: Option<Cancel>,
@@ -340,12 +340,12 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 打开系统文件选择器选书，把选中的文件交给**后端导入管线**（`folio_core::import`）。
+    /// 打开系统文件选择器选书，把选中的文件交给**后端导入管线**（`folio_core::ingest::import`）。
     ///
     /// **先复制**不是多余的一步：选择器给的是它自己临时目录里的路径，系统随时会清，
     /// 而 `books.path` 那一列是书的身份（同路径重复导入算更新，不算第二本书）。
     ///
-    /// 拷贝、解析、落库都发生在 `folio_core::task` 的工作线程上：解析一本 EPUB 是几十
+    /// 拷贝、解析、落库都发生在 `folio_core::infra::task` 的工作线程上：解析一本 EPUB 是几十
     /// 到几百毫秒，一次选十本串在界面线程上跑就是几秒的卡顿。界面线程只留两件本来
     /// 就该它做的事 —— 读配置里的书库位置，以及按管线交回的结果刷新架面
     /// （见 [`Self::finish_import`]）。
@@ -384,7 +384,7 @@ impl ShelfView {
     /// 扫描清单勾选「导入所选」走的是同一条路。
     ///
     /// 架面已经不在了（`update` 报错的那些时刻）就直接返回：后面没有界面可画了。
-    pub(super) fn dispatch_import(&mut self, source: Box<dyn folio_core::import::Source>, cx: &mut Context<Self>) {
+    pub(super) fn dispatch_import(&mut self, source: Box<dyn folio_core::ingest::import::Source>, cx: &mut Context<Self>) {
         // 书库位置到这一刻再问一次：选择器开着的那段时间里读者可能改过它。
         let Some(dir) = target_dir(&ConfigHolder::library(cx)) else {
             tracing::error!("ShelfView: 书库位置没确认过，这一批没有导入");
@@ -395,7 +395,7 @@ impl ShelfView {
             tracing::error!("ShelfView: 书库没装上，这一批没有导入");
             return;
         };
-        // 拷贝、解析、落库都在后端管线里逐本完成（`folio_core::import`）。
+        // 拷贝、解析、落库都在后端管线里逐本完成（`folio_core::ingest::import`）。
         let handle = submit_import(&services::pool(), source, dir, store);
         let cancel = handle.cancel.clone();
         self.importing = Some((0, 0));
@@ -491,14 +491,14 @@ impl ShelfView {
             TaskEvent::Finished(Ok(outcomes)) => self.finish_import(outcomes, cx),
             TaskEvent::Finished(Err(err)) => {
                 // 管线不会整体失败：一个源解不开只影响它自己，其余的照常交回（见
-                // `folio_core::import`）。走到这一条只有一种可能 —— 后台那件事根本没跑成。
+                // `folio_core::ingest::import`）。走到这一条只有一种可能 —— 后台那件事根本没跑成。
                 tracing::error!("ShelfView: 导入作业失败 {err}");
                 self.importing = None;
                 self.import_cancel = None;
                 cx.notify();
             }
             TaskEvent::Cancelled => {
-                // 取消的语义（`folio_core::import`）：**已经落库的那些是真的**。
+                // 取消的语义（`folio_core::ingest::import`）：**已经落库的那些是真的**。
                 // 重查一次架面，读者就能看见取消那一刻已经进去的书。
                 tracing::info!("ShelfView: 导入被取消，已登记的那些保留");
                 self.importing = None;

@@ -2,9 +2,9 @@
 //! 几何用一份「汉字 1 em、拉丁 0.5 em」的 mock `Measure` 来断言，
 //! 真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
 
-use crate::css::computed::{Color, ComputedStyle, Display, cascade};
-use crate::css::{Origin, RuleSet};
-use crate::dom::{Dom, NodeId};
+use crate::content::format::css::computed::{Color, ComputedStyle, Display, cascade};
+use crate::content::format::css::{Origin, RuleSet};
+use crate::content::dom::{Dom, NodeId};
 use crate::layout::wrap::collect;
 use crate::layout::{
     BlockBox, BlockCache, FontKey, ImageProvider, Layout, LayoutCache, LayoutKey, LayoutOptions,

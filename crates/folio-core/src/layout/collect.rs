@@ -16,8 +16,8 @@ use super::wrap::{
     DropCap, LineAcc, LinePlace, LinePlan, collect, hard_lines, hyphen_break_banned, orig_of,
     scan_by_char, scan_by_word, trim_end_spaces,
 };
-use crate::css::computed::{ComputedStyle, Display, StyledDom, TextAlign};
-use crate::dom::{Dom, NodeId, NodeKind};
+use crate::content::format::css::computed::{ComputedStyle, Display, StyledDom, TextAlign};
+use crate::content::dom::{Dom, NodeId, NodeKind};
 
 /// `style_of` 查不到时给的兵底样式。正常不会用到 —— `StyledDom` 为每个节点都算了一条。
 pub(super) static DEFAULT_STYLE: LazyLock<ComputedStyle> = LazyLock::new(ComputedStyle::default);

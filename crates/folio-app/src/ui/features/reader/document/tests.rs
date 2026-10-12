@@ -43,17 +43,17 @@ fn window(cx: &mut TestAppContext, width: f32, height: f32) -> AnyWindowHandle {
 /// 那一份随正文到达 —— 作者把样式写在哪一份里，层叠结果都不该有差别。
 #[test]
 fn a_chapters_own_style_block_reaches_the_cascade() {
-    use folio_core::css::computed::{Color, cascade};
+    use folio_core::content::format::css::computed::{Color, cascade};
     let source = "<html><head><style>p { color: #C0392B }</style></head>\
                       <body><p>字</p></body></html>";
-    let dom = folio_core::dom::Dom::parse(source.as_bytes());
+    let dom = folio_core::content::dom::Dom::parse(source.as_bytes());
     let rules = Document::chapter_style_rules(&dom);
     assert_eq!(rules.rules.len(), 1, "章里就一条规则：{:?}", rules.rules);
 
     let styles = cascade(
         &dom,
         &rules,
-        &folio_core::css::computed::ComputedStyle::default(),
+        &folio_core::content::format::css::computed::ComputedStyle::default(),
     );
     let p = dom
         .elements()
@@ -224,7 +224,7 @@ fn body_of_picks_the_body_element() {
         "<p>只有正文</p>",
         "",
     ] {
-        let dom = folio_core::dom::Dom::parse(source.as_bytes());
+        let dom = folio_core::content::dom::Dom::parse(source.as_bytes());
         let body = body_of(&dom);
         assert_eq!(
             dom.tag_name(body),
@@ -426,7 +426,7 @@ fn setting_the_same_preferences_relayouts_nothing(cx: &mut TestAppContext) {
 /// 最后那条断言立刻翻红。
 #[gpui_kit::test]
 fn a_preference_change_reparses_nothing(cx: &mut TestAppContext) {
-    use folio_core::metrics::{Metric, take_local};
+    use folio_core::infra::metrics::{Metric, take_local};
     cx.update(gpui_kit::init);
     let handle = window(cx, 600.0, 900.0);
     let plain = bare_prefs();
@@ -656,7 +656,7 @@ const PREFS: [PrefTweak; 12] = [
     ("justify", |p| p.justify = !p.justify, PrefClass::NotWired),
     (
         "toc_density",
-        |p| p.toc_density = folio_core::config::TocDensity::Compact,
+        |p| p.toc_density = folio_core::infra::config::TocDensity::Compact,
         PrefClass::Toc,
     ),
     (

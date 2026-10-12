@@ -176,7 +176,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::Store;
-    use crate::format::{DocMeta, Format};
+    use crate::content::format::{DocMeta, Format};
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {

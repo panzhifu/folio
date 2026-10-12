@@ -11,7 +11,7 @@
 
 use std::fmt::Display;
 
-use folio_core::i18n::{self, Locale};
+use folio_core::infra::i18n::{self, Locale};
 use gpui_kit::{App, SharedString};
 
 use super::config_model::ConfigHolder;
@@ -60,7 +60,7 @@ mod tests {
     use std::fmt::Write as _;
     use std::path::{Path, PathBuf};
 
-    use folio_core::i18n::{Locale, t_in};
+    use folio_core::infra::i18n::{Locale, t_in};
 
     /// 收集 `src/` 下所有 `.rs` 里以字面量出现的文案键。
     fn keys_in_source() -> BTreeSet<String> {

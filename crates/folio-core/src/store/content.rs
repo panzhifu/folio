@@ -4,7 +4,7 @@
 //! 回滚成上一版，而不是留下一本半个章节的书。
 //!
 //! **正文根本不在这里**：这一层存的是它在容器里的位置（`chapters.locator`），
-//! 打开时按位置回容器取，见 `crate::document::Document::chapter_source`。
+//! 打开时按位置回容器取，见 `crate::content::document::Document::chapter_source`。
 
 use std::path::Path;
 
@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::Store;
 use crate::Result;
-use crate::format::{
+use crate::content::format::{
     Chapter, ChapterLocator, ChapterText, Content, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
     locator_for,
 };
@@ -105,7 +105,7 @@ impl Store {
                 book_id,
                 serde_json::to_string(&css)?,
                 serde_json::to_string(&doc.toc)?,
-                crate::format::INDEX_VERSION,
+                crate::content::format::INDEX_VERSION,
                 doc.cover_ref.as_ref().map(|c| c.hash.clone()),
                 doc.cover_ref.as_ref().map(|c| c.mime.clone()),
             ],
@@ -193,7 +193,7 @@ impl Store {
         // 拼不出路径 —— 当没有处理，退回 BLOB，别拿半个描述去猜路径。
         let cover_ref = match (cover_hash, cover_mime) {
             (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
-                Some(crate::format::cover::CoverRef { hash, mime })
+                Some(crate::content::format::cover::CoverRef { hash, mime })
             }
             _ => None,
         };
@@ -272,13 +272,13 @@ impl Store {
     /// 与 [`Self::save_content`] 同一件事，只是入口收在「文档」而不是「内容」：
     /// 导入那一步手上只有一份 `dyn Document`（`document::open` 的产物），
     /// 让它自己 match 家族等于把 `Content` 的形状又散给调用方一次。
-    pub fn save_document(&self, book_id: i64, doc: &dyn crate::document::Document) -> Result<()> {
+    pub fn save_document(&self, book_id: i64, doc: &dyn crate::content::document::Document) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         match doc.content() {
-            crate::document::ContentRef::Reflow(flow) => {
+            crate::content::document::ContentRef::Reflow(flow) => {
                 Self::save_flow_in(&conn, book_id, flow, doc.format())
             }
-            crate::document::ContentRef::Fixed(fixed) => Self::save_fixed_in(&conn, book_id, fixed),
+            crate::content::document::ContentRef::Fixed(fixed) => Self::save_fixed_in(&conn, book_id, fixed),
         }
     }
 
@@ -309,7 +309,7 @@ impl Store {
                 book_id,
                 pages,
                 serde_json::to_string(&doc.toc)?,
-                crate::format::INDEX_VERSION,
+                crate::content::format::INDEX_VERSION,
             ],
         )?;
         tracing::debug!(
@@ -366,7 +366,7 @@ fn page_image(page: &FixedPage) -> Option<ImageRes> {
         .unwrap_or_default();
     Some(ImageRes {
         href,
-        media_type: crate::format::media_type_of(&ext).to_string(),
+        media_type: crate::content::format::media_type_of(&ext).to_string(),
         width: page.width,
         height: page.height,
     })
@@ -379,7 +379,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::Store;
-    use crate::format::{
+    use crate::content::format::{
         Chapter, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, PageSource,
     };
     use crate::store::schema::MIGRATIONS;

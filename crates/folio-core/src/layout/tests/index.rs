@@ -10,7 +10,7 @@
 //! `cfg(test)` 里编译。
 
 use super::typeset;
-use crate::css::computed::TextAlign;
+use crate::content::format::css::computed::TextAlign;
 use crate::layout::geometry::scan_reference;
 use crate::layout::{BlockBox, Layout, LineBox};
 

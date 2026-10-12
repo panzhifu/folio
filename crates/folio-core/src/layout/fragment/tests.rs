@@ -10,10 +10,10 @@
 //! 页高是从这一片的**行顶**起算的绝对额度，所以跨段的那一页会比纯段内少装一行 ——
 //! 按「两行 = 56px」去推多段用例的页高会推错。
 
-use crate::css::Origin;
-use crate::css::RuleSet;
-use crate::css::computed::{BreakWhen, ComputedStyle, StyledDom, cascade};
-use crate::dom::{Dom, NodeId};
+use crate::content::format::css::Origin;
+use crate::content::format::css::RuleSet;
+use crate::content::format::css::computed::{BreakWhen, ComputedStyle, StyledDom, cascade};
+use crate::content::dom::{Dom, NodeId};
 use crate::layout::LayoutOptions;
 use crate::layout::fragment::{
     Fragment, FragmentOptions, Fragmentainer, column_offset, column_width, fragments,

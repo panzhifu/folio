@@ -1,16 +1,16 @@
 //! 批注：锚点 JSON 的往返、笔记与颜色、找不回来的标记。
 //!
-//! 存储层只存**已经算好的锚点**，不参与坐标换算（那要有排版，见 `crate::anchor`）。
+//! 存储层只存**已经算好的锚点**，不参与坐标换算（那要有排版，见 `crate::content::anchor`）。
 
 use rusqlite::{OptionalExtension, params};
 
 use super::types::{ANNOTATION_COLORS, Annotation};
 use super::{Store, now};
 use crate::Result;
-use crate::anchor::TextAnchor;
+use crate::content::anchor::TextAnchor;
 
 impl Store {
-    /// 记一条标注。`anchor` 是调用方从可见文本坐标建好的（见 `crate::anchor`），
+    /// 记一条标注。`anchor` 是调用方从可见文本坐标建好的（见 `crate::content::anchor`），
     /// 存储层不参与坐标换算 —— 它不知道排版，也不该知道。
     ///
     /// 颜色不认识时回落到默认那条，而不是拒写：写失败会让读者刚划的批注直接丢掉，
@@ -175,8 +175,8 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
-    use crate::anchor::TextAnchor;
-    use crate::format::{DocMeta, Format};
+    use crate::content::anchor::TextAnchor;
+    use crate::content::format::{DocMeta, Format};
     use crate::{ANNOTATION_COLORS, Store};
 
     fn meta(title: &str) -> DocMeta {

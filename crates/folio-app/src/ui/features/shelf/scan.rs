@@ -1,6 +1,6 @@
 //! 整机扫描的候选清单那一屏。
 //!
-//! 扫描**只找不导**（`folio_core::scan`）：找到的候选摆成一张按目录分组的清单，
+//! 扫描**只找不导**（`folio_core::ingest::scan`）：找到的候选摆成一张按目录分组的清单，
 //! 读者勾选之后走与「选文件导入」同一条 [`ShelfView::dispatch_import`] —— 勾选是
 //! 读者亲手挑的，所以是 Picked 语义（重名算更新）。已在上架的那几条**默认不勾**
 //! 并标出来：再导一遍等于用同一份文件更新，多半不是读者点扫描想干的事。
@@ -74,7 +74,7 @@ fn submit_scan(
     roots: Vec<PathBuf>,
     exclude: Vec<PathBuf>,
     noise_exempt: Vec<PathBuf>,
-) -> folio_core::task::TaskHandle<ScanReport> {
+) -> folio_core::infra::task::TaskHandle<ScanReport> {
     manager.submit_with(Priority::Prewarm, move |ctx| {
         Ok(find(&roots, &exclude, &noise_exempt, ctx))
     })

@@ -10,8 +10,8 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use folio_core::css::computed::{BorderEdge, ComputedStyle};
-use folio_core::dom::NodeId;
+use folio_core::content::format::css::computed::{BorderEdge, ComputedStyle};
+use folio_core::content::dom::NodeId;
 use folio_core::layout::{Layout, LineFragment};
 use gpui_kit::{Hsla, SharedString};
 
@@ -222,7 +222,7 @@ mod tests {
 
     use super::collect_decorations;
     use crate::ui::widgets::run_color;
-    use folio_core::css::computed::{BorderStyle, Color, ComputedStyle};
+    use folio_core::content::format::css::computed::{BorderStyle, Color, ComputedStyle};
     use folio_core::layout::{BlockBox, Layout};
     use gpui_kit::black;
 
@@ -260,7 +260,7 @@ mod tests {
     fn a_styled_block_in_view_becomes_a_decoration() {
         let mut style = ComputedStyle::default();
         style.background_color = Some(Color(193, 204, 192));
-        style.border[2] = folio_core::css::computed::BorderEdge {
+        style.border[2] = folio_core::content::format::css::computed::BorderEdge {
             width: 2.0,
             style: BorderStyle::Solid,
             color: None,

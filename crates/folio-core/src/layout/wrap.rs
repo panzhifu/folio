@@ -10,8 +10,8 @@ use super::collect::{Collected, DEFAULT_STYLE, IMAGE_GLYPH, ImageAtom, Piece};
 use super::font::{RunStyle, StyleArena, StyleRef};
 use super::geometry::{ImageRun, LineFragment, LineRun};
 use super::ports::{ImageProvider, Measure, image_size};
-use crate::css::computed::{Hyphens, StyledDom};
-use crate::dom::{Dom, NodeId, NodeKind};
+use crate::content::format::css::computed::{Hyphens, StyledDom};
+use crate::content::dom::{Dom, NodeId, NodeKind};
 
 /// 一行在版心里的落位。
 ///
