@@ -137,6 +137,15 @@ pub struct Document {
     fragmented: Option<(LayoutKey, u32)>,
     /// 本章切出来的片。`Rc` 是因为渲染每帧都要拿一份而不必搬动整张表。
     slices: Rc<Vec<Fragment>>,
+    /// **会话级复用的度量器**（`plans/阅读管线.md` §十一 差额表第 7 条）。
+    ///
+    /// 命中测试与选区矩形原来每次都现造一个 `GpuiMeasure`，而它的构造里有
+    /// `texts.all_font_names()` —— 整张字体表枚举 + 排序 + 去重。拖选一段文字要
+    /// 逐行求矩形，那一趟就是每次全字体表一遍。
+    ///
+    /// 构造参数（`prefs` 的两个字族、`faces`、两个文本系统）在一章之内都不变，
+    /// 所以缓存一格就够；换章时整个 `Document` 会重造，缓存跟着走。
+    measure: OnceLock<GpuiMeasure>,
 }
 
 /// 界面交给排版与分片的两个轴。**三种模式只差这里的三个数**：
@@ -286,6 +295,8 @@ impl Document {
             styles: None,
             fragmented: None,
             slices: Rc::new(Vec::new()),
+            // 第一次真要命中/求矩形时才造（那也是唯一需要它的时刻）。
+            measure: OnceLock::new(),
         }
     }
 
@@ -808,15 +819,23 @@ impl Document {
         folio_core::content::hit::paragraph_range(self.layout(), self.dom(), self.text_map(), offset)
     }
 
+    /// 那个**会话级复用**的度量器（见 [`Document::measure`] 字段的说明）。
+    ///
+    /// 与排版作业里那个 `GpuiMeasure` 用同一组构造参数 —— 这一点是硬要求：
+    /// 「按 A 算宽、按 B 画字」是同源性防线的反面，命中与绘制必须走同一个度量口径。
     #[allow(dead_code)] // 上面三个 M6 入口共用
     fn measure(&self, window: &Window, cx: &App) -> GpuiMeasure {
-        GpuiMeasure::new(
-            cx.text_system().clone(),
-            window.text_system().clone(),
-            self.prefs.font_family.clone(),
-            self.prefs.mono_font_family.clone(),
-            self.faces.clone(),
-        )
+        self.measure
+            .get_or_init(|| {
+                GpuiMeasure::new(
+                    cx.text_system().clone(),
+                    window.text_system().clone(),
+                    self.prefs.font_family.clone(),
+                    self.prefs.mono_font_family.clone(),
+                    self.faces.clone(),
+                )
+            })
+            .clone()
     }
 
     /// 章内第 `y` 个像素那一行的行首字符偏移。滚动位置换成进度用这个。

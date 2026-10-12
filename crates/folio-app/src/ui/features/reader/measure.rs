@@ -168,6 +168,13 @@ impl FontCache {
     }
 }
 
+/// `(字体, 字号) → (ascent, descent)` 的共享缓存。
+///
+/// 单独立一个名字：它套了三层（`Arc` 为了克隆共享、`Mutex` 为了内部可变、
+/// `HashMap` 为了查），摊在字段签名里读不出「这是一张共享的表」这件事。
+type FontExtentsCache = Arc<Mutex<HashMap<(FontKey, u32), (f32, f32)>>>;
+
+#[derive(Clone)]
 pub struct GpuiMeasure {
     /// 断行用的单字 advance：挂在 App 级 `TextSystem` 上。
     texts: Arc<TextSystem>,
@@ -180,10 +187,18 @@ pub struct GpuiMeasure {
     /// 这本书的内嵌字体，只用来补缺字形。见 [`gpui_font`]。
     faces: Arc<BookFonts>,
     /// 这台设备注册的字族名，供 [`gpui_font`] 判一个 CSS 家族能不能用。
-    known: Vec<String>,
+    ///
+    /// `Arc` 是为了让 [`GpuiMeasure`] 可 `Clone`：它由 `texts.all_font_names()` 现算
+    /// （整张字体表枚举 + 排序 + 去重），而度量器要被缓存起来反复用
+    /// （见 `reader::Document::measure`），所以克隆一个指针而不是复制一份表。
+    known: Arc<Vec<String>>,
     /// `(字体, 字号) → (ascent, descent)` 缓存。字体度量与文本无关，所以正文可
     /// 绕过逐行 shaping 取它（[`Measure::font_extents`]）；一章 distinct 的样式很少。
-    extents: Mutex<HashMap<(FontKey, u32), (f32, f32)>>,
+    ///
+    /// `Arc<Mutex<..>>` 而不是裸 `Mutex`：度量器本身要可 `Clone`（它被缓存起来反复用，
+    /// 见 `reader::Document::measure`），而克隆必须**共享**这张缓存 —— 每个克隆各带
+    /// 一份就等于每帧从零开始量字体的 ascent/descent，那正是这张表要省的。
+    extents: FontExtentsCache,
 }
 
 impl GpuiMeasure {
@@ -194,7 +209,7 @@ impl GpuiMeasure {
         mono: impl Into<SharedString>,
         faces: Arc<BookFonts>,
     ) -> Self {
-        let known = texts.all_font_names();
+        let known = Arc::new(texts.all_font_names());
         Self {
             texts,
             window_texts,
@@ -202,7 +217,7 @@ impl GpuiMeasure {
             mono: mono.into(),
             faces,
             known,
-            extents: Mutex::new(HashMap::new()),
+            extents: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
