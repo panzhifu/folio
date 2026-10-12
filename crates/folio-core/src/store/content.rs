@@ -89,11 +89,21 @@ impl Store {
         } else {
             CssStored::At(doc.css_hrefs.clone())
         };
-        // 封面与它的**规格版本**一起写：`cover` 是字节，`cover_spec` 记下它是按哪一版
-        // 规格生成的，换规格后 `stale_reason` 才能认出老封面该重生成（§5.1）。
+        // 封面三件事一起写：
+        //
+        // - `cover` 是**兜底的字节**。新导入的书封面已经落在 `covers/` 文件里了
+        //   （`format::cover::write`，按封面自己的哈希命名），这一列对它们是冗余的；
+        //   留着是为了两条路：老库还没被重扫过、以及落盘失败时（磁盘满、没权限）
+        //   仍有字节可画。删列要等老行都被 reindex 过，见 v15 那段。
+        // - `cover_spec` 是**规格版本**：换尺寸/编码后 `stale_reason` 才能认出老封面
+        //   该重生成（`plans/基础设施.md` §5.1）。
+        // - `cover_hash` / `cover_mime` 是**文件名**：`covers/<hash>.<ext>`。
+        //   哈希是那一份**字节**的身份而不是这本书的，所以两本书共用一张封面时
+        //   磁盘上只有一个文件。
         tx.execute(
             "UPDATE books
-                SET css = ?2, toc_json = ?3, cover = ?4, index_version = ?5, cover_spec = ?6
+                SET css = ?2, toc_json = ?3, cover = ?4, index_version = ?5, cover_spec = ?6,
+                    cover_hash = ?7, cover_mime = ?8
               WHERE id = ?1",
             params![
                 book_id,
@@ -101,7 +111,9 @@ impl Store {
                 serde_json::to_string(&doc.toc)?,
                 doc.cover,
                 crate::format::INDEX_VERSION,
-                crate::format::COVER_SPEC_VERSION
+                crate::format::COVER_SPEC_VERSION,
+                doc.cover_ref.as_ref().map(|c| c.hash.clone()),
+                doc.cover_ref.as_ref().map(|c| c.mime.clone()),
             ],
         )?;
         tx.commit()?;
@@ -171,17 +183,27 @@ impl Store {
             tracing::debug!("store: 第 {book_id} 本没有入库的章节，回 None");
             return Ok(None);
         }
-        let (css, toc_json, cover) = conn.query_row(
-            "SELECT css, toc_json, cover FROM books WHERE id = ?1",
+        let (css, toc_json, cover, cover_hash, cover_mime) = conn.query_row(
+            "SELECT css, toc_json, cover, cover_hash, cover_mime FROM books WHERE id = ?1",
             params![book_id],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<Vec<u8>>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
                 ))
             },
         )?;
+        // 两格要么都有（拼得出文件名），要么都没有。只剩一格说明那一列是手工改过的，
+        // 拼不出路径 —— 当没有处理，退回 BLOB，别拿半个描述去猜路径。
+        let cover_ref = match (cover_hash, cover_mime) {
+            (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
+                Some(crate::format::cover::CoverRef { hash, mime })
+            }
+            _ => None,
+        };
         let (css, css_hrefs) = match serde_json::from_str::<CssStored>(&css) {
             Ok(CssStored::Inline(css)) => (css, Vec::new()),
             Ok(CssStored::At(hrefs)) => (String::new(), hrefs),
@@ -222,6 +244,7 @@ impl Store {
             toc,
             cover,
             images,
+            cover_ref,
         }))
     }
 

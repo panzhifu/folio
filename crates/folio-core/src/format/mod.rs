@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub mod cbz;
 pub mod container;
 pub mod content;
+pub mod cover;
 pub mod epub;
 pub mod fb2;
 pub mod html;

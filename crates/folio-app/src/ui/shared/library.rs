@@ -202,6 +202,9 @@ pub fn delete_book(store: &Store, id: i64, staged_dir: Option<&Path>) -> Result<
             None
         }
     };
+    // 封面文件必须在删行**之前**问出来：`cover_hash` 跟着那一行走，删完就问不到了。
+    // 它内部会看一眼「还有没有别人指着同一份字节」，所以共用封面不会被带走。
+    delete_cover_file(store, id);
     store
         .remove_book(id)
         .with_context(|| format!("删掉第 {id} 本的库内记录"))?;
@@ -226,6 +229,32 @@ pub fn delete_book(store: &Store, id: i64, staged_dir: Option<&Path>) -> Result<
         tracing::warn!("delete_book: 副本 {copy:?} 没删掉：{err}");
     }
     Ok(())
+}
+
+/// 删掉这本书的封面文件 —— **只在没有别人指着同一张的时候**。
+///
+/// 与副本那条规矩同出一源（`plans/导入管线.md` §八 第 4 条末段）：封面是**它自己
+/// 字节**的身份，两本书共用一张封面时磁盘上只有一个文件。删掉一本而把文件带走，
+/// 会让另一本的封面凭空消失，且没有任何报错。
+///
+/// 判据全在 [`Store::orphan_cover_file`] 里（共用计数、老库那一档、文件名怎么拼），
+/// 这一层只负责删。**必须在 `remove_book` 之前调**：行删掉之后就问不出 `cover_hash`。
+///
+/// 失败只记日志：多留一个封面文件没有任何可见后果，而「删书失败」不该由封面引起 ——
+/// 所以这里不回 `Result`，调用方也没有要处理的分支。
+pub fn delete_cover_file(store: &Store, id: i64) {
+    let orphan = match store.orphan_cover_file(id) {
+        Ok(found) => found,
+        Err(err) => {
+            // 问不出来按「有人指着」处理：偏向少删一次。
+            tracing::warn!("delete_cover_file: 问第 {id} 本的封面失败，留着不删：{err:#}");
+            return;
+        }
+    };
+    let Some(file) = orphan else { return };
+    if let Err(err) = std::fs::remove_file(&file) {
+        tracing::warn!("delete_cover_file: 封面 {file:?} 没删掉：{err}");
+    }
 }
 
 /// 这条 `books.path` 是不是应用自己拷进书库的那份。

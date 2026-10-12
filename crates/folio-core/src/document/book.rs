@@ -131,6 +131,21 @@ impl Document for BookDocument {
         }
     }
 
+    fn cover_ref(&self) -> Option<&crate::format::cover::CoverRef> {
+        match &self.content {
+            Content::Reflow(flow) => flow.cover_ref.as_ref(),
+            // 定版式的封面是首页缩略图，存在 `save_fixed` 那条路上，没有文件描述。
+            Content::Fixed(_) => None,
+        }
+    }
+
+    fn set_cover_ref(&mut self, cover: Option<crate::format::cover::CoverRef>) {
+        // 只对可重排生效：定版式没有「从容器里抽出来的封面」这个概念。
+        if let Content::Reflow(flow) = &mut self.content {
+            flow.cover_ref = cover;
+        }
+    }
+
     fn image_bytes(&self, href: &str) -> Option<Vec<u8>> {
         // 容器先试：`href` 就是归一化条目名（资源表里存的那一形），命中就免掉
         // 「重新打开 + 重扫中央目录」那两笔 —— 这是滚动取图的热路径。

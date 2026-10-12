@@ -52,6 +52,9 @@ fn flow(parts: &[(&str, &str)]) -> FlowDoc {
             width: 640,
             height: 480,
         }],
+        // 封面**落盘之后**才有描述，而这一份是直接构造的（没有文件）——
+        // 所以留 `None`，读那一侧退回 `cover` 那个 BLOB。这正是老库的形状。
+        cover_ref: None,
     }
 }
 
@@ -1297,4 +1300,99 @@ fn every_shelf_query_can_report_progress() {
     assert!(want.is_some(), "开了就该有进度");
     let in_collection = store.shelf_in_collection(group).unwrap()[0].progress;
     assert_eq!(in_collection, want, "集合内那条给同一个数");
+}
+
+/// **封面落盘**：磁盘优先、BLOB 兜底，而且删一本书不许动别人共用的那张。
+///
+/// 这条门护的是三件事，每一件错了都只表现为「封面对了/没了」，没有报错：
+///
+/// 1. **磁盘优先**：新导入的书封面在 `covers/` 里，库里那两列只是文件名。
+/// 2. **BLOB 兜底**：老库（v15 之前入库、还没被重扫过）与落盘失败的行只有 BLOB；
+///    文件被清掉时也要能退回它 —— 否则读者的封面会凭空消失。
+/// 3. **共用的那张不能删**：封面是**它自己字节**的身份，不是这本书的。两本书共用
+///    一张封面时磁盘上只有一个文件，删掉一本不能把它带走。
+#[test]
+fn covers_prefer_the_file_and_never_take_a_shared_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let root = dir.path(); // 书库根：副本直接躺在它上面
+    let store = Store::open_at(&db).unwrap();
+
+    // 两本共用同一份封面字节。
+    let cover = b"pretend-jpeg-cover-bytes";
+    let hash = crate::format::cover::write(root, cover, "image/jpeg").unwrap();
+    let hash_hex = hash.to_hex();
+
+    let mut flow_with_cover = flow(&[("一", "正文")]);
+    flow_with_cover.cover = Some(cover.to_vec());
+    flow_with_cover.cover_ref = Some(crate::format::cover::CoverRef {
+        hash: hash_hex.clone(),
+        mime: "image/jpeg".into(),
+    });
+
+    let a = store
+        .add_book(&root.join("a.md"), &meta("甲"))
+        .unwrap();
+    let b = store
+        .add_book(&root.join("b.md"), &meta("乙"))
+        .unwrap();
+    store
+        .save_flow(a, &flow_with_cover, Format::Markdown)
+        .unwrap();
+    store
+        .save_flow(b, &flow_with_cover, Format::Markdown)
+        .unwrap();
+
+    // 1) 磁盘优先：两本都读得到，而且拿到的是同一份字节。
+    assert_eq!(store.book_cover(a).unwrap().as_deref(), Some(&cover[..]));
+    assert_eq!(store.book_cover(b).unwrap().as_deref(), Some(&cover[..]));
+
+    // 两本指向**同一个**文件 —— 这是「按封面自己的哈希命名」的全部收益。
+    // 而 `orphan_cover_file` 在「还有别人指着」时回 `None`（见下面那条断言）。
+    let file_a = crate::format::cover::cover_path(root, &hash_hex, "image/jpeg");
+    assert!(file_a.is_file(), "封面该真的落盘了");
+    assert!(
+        store.orphan_cover_file(a).unwrap().is_none(),
+        "b 还指着同一张，所以它不是孤儿"
+    );
+
+    // 共用计数：b 还指着它，所以删 a 时那个文件不能被删。
+    assert_eq!(
+        store.rows_sharing_cover(&hash_hex, a).unwrap(),
+        1,
+        "b 还指着这张封面"
+    );
+
+    // 2) BLOB 兜底：把文件删掉，两本仍读得到（v15 之前那批只有 BLOB 就是这个形状）。
+    std::fs::remove_file(&file_a).unwrap();
+    assert_eq!(
+        store.book_cover(a).unwrap().as_deref(),
+        Some(&cover[..]),
+        "文件没了要退回库里那份字节，不许让封面凭空消失"
+    );
+
+    // 3) 老库那一档：`cover_hash` 是空的，只有 BLOB。
+    let legacy = flow(&[("一", "旧库正文")]);
+    let mut legacy = legacy;
+    legacy.cover = Some(b"legacy-blob".to_vec());
+    legacy.cover_ref = None;
+    let c = store.add_book(&root.join("c.md"), &meta("丙")).unwrap();
+    store.save_flow(c, &legacy, Format::Markdown).unwrap();
+    assert!(
+        store.orphan_cover_file(c).unwrap().is_none(),
+        "老库那一档没有文件名可指"
+    );
+    assert_eq!(
+        store.book_cover(c).unwrap().as_deref(),
+        Some(&b"legacy-blob"[..]),
+        "只有 BLOB 的老行照样读得出封面"
+    );
+
+    // 删掉 a 之后，b 的封面仍然读得到（文件还在，或退回了 BLOB）。
+    store.remove_book(a).unwrap();
+    assert_eq!(
+        store.book_cover(b).unwrap().as_deref(),
+        Some(&cover[..]),
+        "删一本不该让另一本的封面消失"
+    );
 }

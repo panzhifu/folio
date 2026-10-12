@@ -97,6 +97,8 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
         toc: Vec::new(),
         cover,
         images,
+        // 同上：落盘之后由管线填。
+        cover_ref: None,
     };
     tracing::debug!(
         "fb2: {} 读到 {} 章、{} 张内嵌图、封面 {}",

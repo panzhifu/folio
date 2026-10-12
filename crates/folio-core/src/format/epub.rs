@@ -710,6 +710,8 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
         toc,
         cover: cover_bytes,
         images,
+        // 封面落盘是导入管线的事：provider 只交字节，不知道书库在哪儿。
+        cover_ref: None,
     };
     // 一本「读出来不对」的书，第一件要知道的事是哪一节空了：正文、样式、目录还是插图。
     tracing::debug!(

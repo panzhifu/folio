@@ -87,6 +87,18 @@ pub trait Document: Send + Sync {
         }
     }
 
+    /// 封面落盘之后的描述（`covers/<hash>.<ext>` 那两格）。
+    ///
+    /// **由导入管线填，不是 provider 填**：provider 只交字节，它不知道书库在哪儿。
+    /// 默认 `None` = 没有封面文件，读那一侧退回 `books.cover` 那个 BLOB。
+    fn cover_ref(&self) -> Option<&crate::format::cover::CoverRef> {
+        None
+    }
+
+    /// 填上封面描述。只有可重排那一支实现它 —— 定版式的封面是首页缩略图，
+    /// 走另一条路（`save_fixed`）。
+    fn set_cover_ref(&mut self, _cover: Option<crate::format::cover::CoverRef>) {}
+
     fn cover(&self) -> Option<&[u8]> {
         match self.content() {
             ContentRef::Reflow(flow) => flow.cover.as_deref(),

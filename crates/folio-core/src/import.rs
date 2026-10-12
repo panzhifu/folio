@@ -386,6 +386,19 @@ fn import_candidate(
         }
     };
 
+    // 封面落盘（`plans/导入管线.md` §八 第 4 条）。排在这里的两个理由：
+    //
+    // 1. **必须在 `save_document` 之前**：`save_flow_in` 要把 `cover_hash` /
+    //    `cover_mime` 两列写进库，而那两个数是这一步算出来的。
+    // 2. **失败不阻断**：封面是装饰，不是内容的入口。写不成（磁盘满、没权限、
+    //    路径太长）就只是「这次没有封面文件」，库里那两列留空，读的时候退回
+    //    `books.cover` 那个 BLOB —— 老库与新失败走的是同一条兜底。
+    //
+    // 书库根从**这本副本自己的路径**推（它就是 `dest_dir`，而副本躺在书库根上），
+    // 所以库层不需要持有书库位置 —— 那是读者确认过的目录，core 不知道也不该知道。
+    let mut document = document;
+    land_cover(dest_dir, document.as_mut());
+
     // 步 5 的后半：定名落地。`.staging` 就在书库底下 → 同分区，rename 原子且 O(1)。
     // 扩展名来自**判定**（不是来源那个名字），而且要问注册表要它认得的那一个：
     // 副本的再一次识别走的就是那张表（`Format::copy_extension`）。
@@ -426,6 +439,61 @@ fn import_candidate(
         dest,
         title,
     }))
+}
+
+/// 把一份文档的封面写进 `<书库>/covers/`，并把描述填回 `doc.cover_ref`。
+///
+/// 三条规矩（`plans/导入管线.md` §八 第 4 条）：
+///
+/// - **按封面自己的字节哈希命名**，不是书的哈希：两本书共用一张封面时磁盘上
+///   只有一个文件；重新解析或换 provider 也不该让封面改名。
+/// - **已存在就不写**：重导同一本书是常见事（系列书、重扫整库），
+///   哈希相同 = 字节相同，重写一遍只是白付一次 IO。这条让「重扫整库」安全。
+/// - **失败只记日志，不回 Err**：封面是装饰。写不成时 `cover_ref` 留 `None`，
+///   读那一侧退回 `books.cover` 那个 BLOB，读者照旧看得见封面。
+///
+/// 只处理可重排那一支：定版式（CBZ）的封面是它第一页的缩略图，走 `save_fixed`，
+/// 与这里这条「容器里抽出来的字节」不是同一件事。
+fn land_cover(root: &Path, doc: &mut dyn crate::document::Document) {
+    let crate::document::ContentRef::Reflow(_) = doc.content() else {
+        return;
+    };
+    // 字节与 MIME 都要：前者定哈希，后者定扩展名。
+    let Some(bytes) = doc.cover().map(<[u8]>::to_vec) else {
+        return;
+    };
+    if bytes.is_empty() {
+        return;
+    }
+    let mime = cover_mime(&bytes, doc);
+    let written = match crate::format::cover::write(root, &bytes, &mime) {
+        Ok(hash) => hash.to_hex(),
+        Err(err) => {
+            tracing::warn!(
+                path = %root.display(),
+                "import: 封面没写进 covers/，退回库里那份字节：{err}"
+            );
+            return;
+        }
+    };
+    doc.set_cover_ref(Some(crate::format::cover::CoverRef {
+        hash: written,
+        mime,
+    }));
+}
+
+/// 封面的 MIME：manifest 声明优先，没有就看字节头。
+///
+/// 与 `ui/shared/images.rs` 认图片格式同一条口径（真书里 `image/jpg`、
+/// `IMAGE/PNG` 这类写错比字节头写错常见得多，所以**字节头优先**在那里；
+/// 而封面这一格只影响文件扩展名与 `image/*` 这种粗判，两者都试一遍即可）。
+fn cover_mime(bytes: &[u8], _doc: &dyn crate::document::Document) -> String {
+    // 复用既有的那份判据（`format::guess_media_type`，与 `ui/shared/images.rs`
+    // 认图片格式同源）：封面这一格只影响文件扩展名，认不出就按 JPEG ——
+    // 它是封面最常见的编码，而认错扩展名最坏的后果是文件管理器双击用错程序打开。
+    crate::format::guess_media_type(bytes)
+        .unwrap_or("image/jpeg")
+        .to_string()
 }
 
 /// 暂存区里那份「给人看的路径」的主名：来源建议名去掉扩展名、剥掉文件系统不认的字符。
@@ -477,7 +545,11 @@ fn abandon(path: &Path) {
 pub fn reindex(store: &Store, book_id: i64) -> Result<()> {
     let row = store.book(book_id)?.ok_or(Error::NoSuchBook(book_id))?;
     let path = PathBuf::from(&row.path);
-    let document = document::open(&path)?;
+    let mut document = document::open(&path)?;
+    // 封面也补一次（与导入那条路同一步）：v15 之前入库的行只有 BLOB、没有
+    // `covers/` 那个文件，而重扫正是把它们补上的时机。已存在就不写，
+    // 所以对已经补过的书这一步是白跑一次 `exists`。
+    land_cover(&crate::store::book_root(&path), document.as_mut());
     // 顺手刷新 `size` / `mtime`：判定「文件换没换」靠的就是这两个数。
     store.add_book(&path, document.meta())?;
     store.save_document(book_id, document.as_ref())?;

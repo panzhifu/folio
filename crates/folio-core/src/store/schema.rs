@@ -277,4 +277,27 @@ CREATE INDEX idx_annotations_book ON annotations(book_id);
     r#"
 ALTER TABLE chapters ADD COLUMN char_len INTEGER;
 "#,
+    // v15：**封面落盘**。封面按它自己的字节哈希写一份文件到 `<书库>/covers/`，
+    // 库里只留这两格描述（`plans/导入管线.md` §八 第 4 条）。
+    //
+    // 为什么封面要单独落文件而不是继续塞 BLOB：`books.cover` 是 MB 级的字节，
+    // 而书架每次列书目都要读它（`SHELF_COLUMNS` 里就有 `cover`）。落到文件之后
+    // 那一列可以只读描述，图片本身由 fp 在绘制前解码一次、按 book_id 缓存
+    // （`ui/shared/images.rs` 已经是这个形状）。
+    //
+    // **按封面自己的哈希命名，不是书的哈希**，三个理由：两本书共用一张封面
+    // （同一套系列设计）时自然去重；重新解析或换 provider 不该让封面改名；
+    // 封面目录因此可以独立做垃圾回收。
+    //
+    // `cover_mime` 决定扩展名（`covers/<hash>.<ext>`），所以它与 `cover_hash`
+    // 是一对 —— 少一个就拼不出路径，于是退回 BLOB。
+    //
+    // **不动 `books.cover` 与 `cover_spec`**：读的时候磁盘优先、BLOB 兜底，
+    // 老库（v15 之前入库的行）与新写入失败的行都靠那条兜底。删列要等老行都被
+    // reindex 过 —— 那不可能是这个迁移的事（`plans/基础设施.md` §5.2：
+    // 删数据不是迁移该顺手做的）。
+    r#"
+ALTER TABLE books ADD COLUMN cover_hash TEXT;
+ALTER TABLE books ADD COLUMN cover_mime TEXT;
+"#,
 ];

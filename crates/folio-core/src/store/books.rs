@@ -95,6 +95,34 @@ const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, b
 const SHELF_ORDER: &str =
     "ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC, books.id DESC";
 
+/// 一本副本所在的书库根 —— 用于拼 `covers/` 的位置。
+///
+/// 副本直接躺在书库根上（`plans/导入管线.md` 的施工标注里那条偏离：
+/// 文档写 `<书库>/books/<哈希名>`，实现是「根就是那一层 `books/`」），所以
+/// **父目录就是书库根**。唯一的例外是导入途中的那份：它在 `<书库>/.staging/` 底下，
+/// 父目录是 `.staging` —— 退回一层。
+///
+/// 为什么从路径推而不是让 `Store` 记住书库位置：书库位置是**读者确认过的目录**，
+/// 属于界面/配置那一层；`Store` 只是「这些行存在哪儿」，把它绑到一个绝对路径上
+/// 会让测试与「换书库位置」都变难。而副本路径本来就在库里那一行上。
+///
+/// 推出来的目录不存在时也不报错：`cover::resolve` 会回 `None`，读那一侧退回 BLOB。
+/// 封面那一行的四格：字节、副本路径、封面哈希、封面 MIME。
+///
+/// 单独立一个名字是为了 `query_row` 的闭包签名 —— 五元组摊在参数里会让
+/// 「哪一格是什么」只存在于 `SELECT` 那一行的顺序里，改列序时编译器帮不上忙。
+type CoverRow = (Option<Vec<u8>>, String, Option<String>, Option<String>);
+
+pub(crate) fn book_root(copy_path: &Path) -> std::path::PathBuf {
+    let parent = copy_path.parent().unwrap_or(Path::new(""));
+    if parent.file_name().and_then(|n| n.to_str()) == Some(".staging") {
+        return parent
+            .parent()
+            .map_or_else(|| parent.to_path_buf(), Path::to_path_buf);
+    }
+    parent.to_path_buf()
+}
+
 fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     let authors: String = r.get(3)?;
     // 「算不出分母」与「没读过」都回 `None` —— 界面两者都该按「没有进度可显示」
@@ -241,18 +269,50 @@ impl Store {
     /// 那一用不需要字节（见 [`BookRow`] 的说明）；而「点开一本书的信息」这一屏要的正好
     /// 只是这一本的图，一次一条语句取回，比把整库的图读进内存便宜得多。
     /// 没有封面（Markdown / TXT，或 EPUB 里没声明）时是 `None`，界面要画占位而不是空白。
+    ///
+    /// **磁盘优先、BLOB 兜底**（`plans/导入管线.md` §八 第 4 条）：新导入的书封面落在
+    /// `<书库>/covers/<哈希>.<扩展名>`，库里那两列只是文件名；而老库（v15 之前入库、
+    /// 还没被重扫过）与落盘失败的那些只有 BLOB。两条路都要走，顺序不能反 ——
+    /// 文件是这一版的正主，BLOB 是历史遗留。
     pub fn book_cover(&self, id: i64) -> Result<Option<Vec<u8>>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // 两层 `Option` 各说一件事，别把它们混成一层：外层是「库里没有这一行」（书被删了），
         // 由 `.optional()` 把 `QueryReturnedNoRows` 收成 `None`；内层是「这一行的封面列是空的」
         // （Markdown / TXT，或 EPUB 里没声明），由 `get::<Option<Vec<u8>>>` 给。
         // 读到「这本书」而它没封面，与根本没这本书，界面都要画占位，所以这里摊平成一层。
-        Ok(conn
-            .query_row("SELECT cover FROM books WHERE id = ?1", params![id], |r| {
-                r.get::<_, Option<Vec<u8>>>(0)
-            })
-            .optional()?
-            .flatten())
+        //
+        // `path` 也要取：书库根从**副本自己的路径**推（副本躺在书库根上），
+        // 库层因此不需要持有书库位置。
+        let row: Option<CoverRow> = conn
+            .query_row(
+                "SELECT cover, path, cover_hash, cover_mime FROM books WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((blob, path, hash, mime)) = row else {
+            return Ok(None);
+        };
+        // 1) 封面文件在，就用它。
+        if let (Some(hash), Some(mime)) = (hash.as_deref(), mime.as_deref()) {
+            let root = book_root(Path::new(&path));
+            if let Some(found) = crate::format::cover::resolve(&root, hash, mime) {
+                match std::fs::read(&found) {
+                    Ok(bytes) => return Ok(Some(bytes)),
+                    // 文件在但读不动（权限、坏扇区）：往下一步退，别报错 ——
+                    // 库里那份字节可能还在，而「封面读不出来」不该让这一屏打不开。
+                    Err(err) => tracing::warn!(
+                        path = %found.display(),
+                        "store: 封面文件读不动，退回库里那份：{err}"
+                    ),
+                }
+            } else {
+                // 描述在、文件不在（covers/ 被清过、或落盘那一步失败过）。
+                tracing::debug!("store: 第 {id} 本的封面文件不在了，退回库里那份");
+            }
+        }
+        // 2) 兜底：库里的 BLOB（老库，或落盘失败）。
+        Ok(blob)
     }
 
     pub fn book_by_path(&self, path: &Path) -> Result<Option<BookRow>> {
@@ -372,6 +432,71 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(n as usize)
+    }
+
+    /// 还有几条**别的**记录指着同一张封面 —— 删书时决定那个封面文件能不能删。
+    ///
+    /// 与 [`Store::rows_sharing_path`] 同一条规矩（`plans/导入管线.md` §八 第 4 条
+    /// 末段）：**封面是它自己字节的身份，不是这本书的**。两本书共用一张封面
+    /// （同一套系列设计）时磁盘上只有一个文件，所以删掉其中一本不能连带删掉它 ——
+    /// 那会让另一本的封面凭空消失，而且没有任何报错。
+    ///
+    /// 计数从库里查，不另设计数表：一张表要与 `books.cover_hash` 保持一致，
+    /// 而它本来就是派生量。
+    pub fn rows_sharing_cover(&self, hash: &str, except_id: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM books WHERE cover_hash = ?1 AND id != ?2",
+            params![hash, except_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// 这一本的封面文件路径（**在库里那一行还活着的时候问**）。
+    ///
+    /// 删书那一步要用它：先问出文件名，删完行之后才发现「还有别人指着」就晚了。
+    /// 行删掉之后 `cover_hash` 就问不出来，所以顺序不能反。
+    ///
+    /// `None` 有两种来路，删书那一侧都该当「没有文件可删」：
+    ///
+    /// - **老库那一档**：封面还只在 `books.cover` 那个 BLOB 里，磁盘上没有文件。
+    /// - **还有别人指着同一份字节**：两本书共用一张封面时磁盘上只有一个文件
+    ///   （`plans/导入管线.md` §八 第 4 条），删掉其中一本不能把它带走 ——
+    ///   那会让另一本的封面凭空消失，而且没有任何报错。
+    ///
+    /// 把「共用」这一问收在这里，是因为它要读 `payload` 之外的列（`cover_hash` 的
+    /// 完整十六进制），而调用方手上只有文件名那一格（它是哈希的前 20 字）。
+    /// 让调用方自己去比完整哈希，就是两处各答一遍「谁跟谁共用」。
+    pub fn orphan_cover_file(&self, id: i64) -> Result<Option<std::path::PathBuf>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let row: Option<(String, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT path, cover_hash, cover_mime FROM books WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((path, hash, mime)) = row else {
+            return Ok(None);
+        };
+        let (Some(hash), Some(mime)) = (hash, mime) else {
+            return Ok(None);
+        };
+        // 别人还指着同一份字节 → 这个文件不是孤儿。
+        let others: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM books WHERE cover_hash = ?1 AND id != ?2",
+            params![hash, id],
+            |r| r.get(0),
+        )?;
+        if others > 0 {
+            return Ok(None);
+        }
+        Ok(Some(crate::format::cover::cover_path(
+            &book_root(Path::new(&path)),
+            &hash,
+            &mime,
+        )))
     }
 
     pub fn remove_book(&self, id: i64) -> Result<()> {

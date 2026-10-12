@@ -27,6 +27,13 @@ pub struct FlowDoc {
     pub cover: Option<Vec<u8>>,
     /// 全书图片，按容器路径索引。封面若也在 manifest 里会一并收录。
     pub images: Vec<ImageRes>,
+    /// 封面**落盘之后**的描述：`covers/<hash>.<ext>` 那两个格。
+    ///
+    /// `None` 有两种来路，读那一侧都该退回 `cover` 那个 BLOB：
+    /// 这本没有封面，或者有封面但没写进 `covers/`（磁盘满、没权限、还没接线）。
+    /// 由导入管线在落盘成功之后填上 —— provider 只交字节，不知道书库在哪儿。
+    /// （`FlowDoc` 不是 serde 类型：它一格一格映射到 SQL 列，见 `save_flow_in`。）
+    pub cover_ref: Option<crate::format::cover::CoverRef>,
 }
 
 impl FlowDoc {
