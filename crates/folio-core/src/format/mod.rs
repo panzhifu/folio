@@ -12,6 +12,7 @@ pub mod html;
 pub mod markdown;
 pub mod provider;
 pub(crate) mod sniff;
+pub mod thumb;
 pub mod woff;
 pub mod xhtml;
 pub(crate) mod zip;
