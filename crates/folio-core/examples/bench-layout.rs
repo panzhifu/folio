@@ -259,6 +259,23 @@ fn main() {
             t = t.min(started.elapsed());
         }
         report("两阶段 · 首屏渲染", t, "首屏 ~800px");
+
+        // **滚动一格**：这是两阶段相对「全量排版一次、之后靠二分窗口滚动」唯一
+        // 可能更贵的那条路 —— 每滚一屏都要重排那一条带。整章 379200px 高、
+        // 一次滚 800px（约 1/474），所以这里的数乘以屏数才是「滚完整章的总开销」。
+        //
+        // 量它的理由：决定「要不要把生产路径换成两阶段」的那个人需要这个数，
+        // 而不是需要一句「两阶段更快」（两阶段的 6.3+0.4 是**开章**的钱，
+        // 滚动是另一笔账）。
+        let mut t = Duration::MAX;
+        for i in 0..200 {
+            let from = (i as f32 * 800.0) % 300_000.0;
+            let started = Instant::now();
+            let win = render_window(&map, &dom, &styles, &Mock, &NoImages, from, from + 800.0);
+            std::hint::black_box(win.lines.len());
+            t = t.min(started.elapsed());
+        }
+        report("两阶段 · 滚动一条带", t, "每条带 ~800px");
     }
 
     // ---- 拉丁：断点稀疏，走「回退到词边界」那一支 ----
