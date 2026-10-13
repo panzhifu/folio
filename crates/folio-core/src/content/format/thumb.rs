@@ -47,6 +47,9 @@ pub fn thumb_path(root: &Path, size: u32, cover: &CoverRef) -> std::path::PathBu
 ///
 /// 回 `None` 覆盖：尺寸不认识、原图解不出来、写不进去。都是「没有缩略图可用」，
 /// 调用方退回原图。
+///
+/// 只要**同一份输入要做两档**，用 [`ensure_all`]：这一条每次调用都解一遍图，
+/// 两档就是两次解码。
 pub fn ensure(root: &Path, size: u32, cover: &CoverRef, bytes: &[u8]) -> Option<std::path::PathBuf> {
     if !SIZES.contains(&size) {
         return None;
@@ -55,38 +58,108 @@ pub fn ensure(root: &Path, size: u32, cover: &CoverRef, bytes: &[u8]) -> Option<
     if dest.is_file() {
         return Some(dest);
     }
-    let encoded = encode(size, bytes)?;
+    let image = decode(bytes)?;
+    let encoded = encode_from(&image, size)?;
+    write_thumb(root, size, cover, &encoded)
+}
+
+/// 一次解码产出**所有缺的档**。
+///
+/// 与逐个 `ensure` 的唯一区别是解码次数：像素只解一遍，两档都从同一份 `DynamicImage`
+/// 缩。缩放与编码一次都省不掉（那两档是两个不同的文件），所以这一条的收益就是
+/// 少掉的那次解码 —— 实测封面那一档尺寸上约 3-7 ms，缩略图的产出**逐字节不变**。
+///
+/// 已经在磁盘上的档不重做，也不为它解码；两档都在时整条不碰图像。
+/// 回数组与 [`SIZES`] 同序，取不到的那格是 `None`。
+pub fn ensure_all(root: &Path, cover: &CoverRef, bytes: &[u8]) -> [Option<std::path::PathBuf>; SIZES.len()] {
+    let missing = SIZES
+        .iter()
+        .filter(|size| !dest_exists(root, **size, cover))
+        .count();
+    // 一幅都不缺就一趟图像都不做 —— 重导同一本书是常见事。
+    let image = match missing {
+        0 => {
+            return std::array::from_fn(|i| Some(thumb_path(root, SIZES[i], cover)));
+        }
+        _ => match decode(bytes) {
+            Some(image) => image,
+            // 解不出来：缺的那些格回 `None`，在位的那些照旧交回路径。
+            None => {
+                return std::array::from_fn(|i| {
+                    dest_exists(root, SIZES[i], cover).then(|| thumb_path(root, SIZES[i], cover))
+                });
+            }
+        },
+    };
+    std::array::from_fn(|i| {
+        let size = SIZES[i];
+        if dest_exists(root, size, cover) {
+            return Some(thumb_path(root, size, cover));
+        }
+        let encoded = encode_from(&image, size)?;
+        write_thumb(root, size, cover, &encoded)
+    })
+}
+
+/// 某一档是否已经在磁盘上。
+fn dest_exists(root: &Path, size: u32, cover: &CoverRef) -> bool {
+    SIZES.contains(&size) && thumb_path(root, size, cover).is_file()
+}
+
+/// 写一档缩略图：先写临时名再 rename（[`ensure`] 那边说了为什么）。
+fn write_thumb(root: &Path, size: u32, cover: &CoverRef, encoded: &[u8]) -> Option<std::path::PathBuf> {
+    let dest = thumb_path(root, size, cover);
     let dir = crate::infra::paths::thumb_dir(root, size);
     std::fs::create_dir_all(&dir).ok()?;
-    // 与封面同一条：先写临时名再 rename。半写完的缩略图会被当成一张完好的图
-    // 画出来，而内容是截断的 —— 那种「图是花的」比「没有缩略图」难查得多。
+    // 半写完的缩略图会被当成一张完好的图画出来，而内容是截断的 ——
+    // 那种「图是花的」比「没有缩略图」难查得多。
     let tmp = dir.join(format!(".{}.part", stem(&cover.hash)));
-    std::fs::write(&tmp, &encoded).ok()?;
+    std::fs::write(&tmp, encoded).ok()?;
     std::fs::rename(&tmp, &dest).ok()?;
     Some(dest)
 }
 
-/// 把原图缩到 `size` 以内并编码成 JPEG。
-///
-/// `size` 是**长边上限**，不是目标宽度：封面有横有竖，按长边缩才能保证
-/// 「两档的高度差别」在横竖两种封面上都成立。
-fn encode(size: u32, bytes: &[u8]) -> Option<Vec<u8>> {
-    let image = image::ImageReader::new(std::io::Cursor::new(bytes))
+// 解码次数。只随测试编进来：这一层「一份输入解一次图」的承诺该由一个整数来守，
+// 而不是计时（计时在 CI 里被调度噪声牵着走，见 `infra::metrics` 那段）。
+#[cfg(test)]
+thread_local! {
+    static DECODES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// 解一遍封面字节。整层里只有这一步是「同一份输入做多次没意义」的那种贵操作，
+/// 所以它带一个只在测试下存在的计数器（见测试里的 `decodes`）。
+fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
+    #[cfg(test)]
+    DECODES.with(|c| c.set(c.get() + 1));
+    image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?
         .decode()
-        .ok()?;
+        .ok()
+}
+
+/// 把**已解开的**图缩到 `size` 以内并编码成 JPEG。
+///
+/// `size` 是**长边上限**，不是目标宽度：封面有横有竖，按长边缩才能保证
+/// 「两档的高度差别」在横竖两种封面上都成立。
+fn encode_from(image: &image::DynamicImage, size: u32) -> Option<Vec<u8>> {
     // `thumbnail` 而不是 `resize`：前者是按比例缩并保留长宽比的那一个，
     // 后者要自己算目标尺寸（算错就是把封面拉变形）。
     let scaled = image.thumbnail(size, size);
     let mut out = Vec::new();
     // 质量 80：缩略图放在网格里看，这个档位在「几 KB」与「看得出糊」之间。
-    let mut encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
     // JPEG 不吃带 alpha 的像素，转成 RGB8 再编 —— 不转的话 PNG 封面（很常见）
     // 会在这一步直接失败。
     let rgb = scaled.to_rgb8();
-    encoder.encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8).ok()?;
+    encoder
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .ok()?;
     Some(out)
 }
 
@@ -130,8 +203,14 @@ pub fn purge(root: &Path) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SIZES, ensure, thumb_path, purge};
+    use super::{DECODES, SIZES, ensure, ensure_all, thumb_path, purge};
     use crate::content::format::cover::CoverRef;
+
+    /// 读并清零解码计数。每条测试开头先清一次：cargo 让同一条线程跑过多条测试，
+    /// 不清就会读到上一条的账。
+    fn decodes() -> u32 {
+        DECODES.with(|c| c.replace(0))
+    }
 
     /// 一张真的 PNG（`image` 造得出来），交回它的字节。
     fn png(width: u32, height: u32) -> Vec<u8> {
@@ -196,6 +275,64 @@ mod tests {
             thumb_path(root, SIZES[0], &cover),
             thumb_path(root, SIZES[1], &cover)
         );
+    }
+
+    /// **这一层的承诺：一份封面只解一次图。**
+    ///
+    /// 数的是解码次数而不是毫秒 —— 计时在 CI 里被调度噪声牵着走，而「做两档该解几次图」
+    /// 有确定的整数答案。退回逐档 `ensure` 时这一条立刻翻红。
+    #[test]
+    fn both_sizes_share_a_single_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bytes = png(1200, 1800);
+        let cover = cover_ref();
+        decodes();
+
+        let made = ensure_all(root, &cover, &bytes);
+        for (size, path) in SIZES.iter().zip(made.iter()) {
+            let path = path.as_ref().unwrap_or_else(|| panic!("{size} 档该做得出来"));
+            assert!(path.is_file(), "{size} 档该落盘");
+        }
+        assert_eq!(decodes(), 1, "两档合起来只该解一次图");
+    }
+
+    /// 复用解码**不许改变产出**：两档的字节与逐个 `ensure` 做出来的逐字节相同。
+    ///
+    /// 这条是那次改动的护栏 —— 少解一次图不该让任何一档的像素变一个点，
+    /// 而「看着一样」不是判据，字节相等才是。
+    #[test]
+    fn reusing_the_decode_leaves_the_files_byte_identical() {
+        let one_by_one = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let bytes = png(900, 1400);
+        let cover = cover_ref();
+
+        for size in SIZES {
+            ensure(one_by_one.path(), size, &cover, &bytes).unwrap();
+        }
+        ensure_all(shared.path(), &cover, &bytes);
+
+        for size in SIZES {
+            let a = std::fs::read(thumb_path(one_by_one.path(), size, &cover)).unwrap();
+            let b = std::fs::read(thumb_path(shared.path(), size, &cover)).unwrap();
+            assert_eq!(a.len(), b.len(), "{size} 档的产出字节数变了");
+            assert_eq!(a, b, "{size} 档的产出字节变了");
+        }
+    }
+
+    /// 两档都在位时一趟图像都不做：重导同一本书、重扫整库都走这一支。
+    #[test]
+    fn ensure_all_skips_the_image_work_when_both_sizes_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bytes = png(400, 600);
+        let cover = cover_ref();
+        ensure_all(root, &cover, &bytes);
+        decodes();
+
+        ensure_all(root, &cover, &bytes);
+        assert_eq!(decodes(), 0, "都在位时不该碰图像");
     }
 
     /// 已经在了就不重做：这条是「第一次滚动书架时才付一次」的前提。

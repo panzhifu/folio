@@ -490,11 +490,12 @@ fn land_cover(root: &Path, doc: &mut dyn crate::content::document::Document) {
     // 懒生成的代价文档写得很清楚 —— 第一次进一个空书架时几十张图同时开工，
     // 而那正是最要 CPU 的时刻（书架滚动）。
     //
-    // 失败不阻断，也不记 warn：`ensure` 自己已经判过「做不出来就回 None」，
+    // 失败不阻断，也不记 warn：做不出来的那些格自己回 `None`，
     // 而它失败的原因（原图是坏字节）对读者来说与「这本书本来就没有封面」同一种表现。
-    for size in crate::content::format::thumb::SIZES {
-        crate::content::format::thumb::ensure(root, size, &cover, &bytes);
-    }
+    //
+    // 用 `ensure_all` 而不是逐档 `ensure`：同一份封面字节只该解一次图（实测省下的
+    // 那一次解码约 3-7 ms/本，而两档的产出逐字节不变）。
+    crate::content::format::thumb::ensure_all(root, &cover, &bytes);
     doc.set_cover_ref(Some(cover));
 }
 
