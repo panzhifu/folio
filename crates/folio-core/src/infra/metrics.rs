@@ -13,11 +13,15 @@
 //!   所以读局部值天然不受别的测试干扰。
 //! - 进程全局（[`global`]）给诊断输出用：读者报障时要看的是一整轮运行的总量。
 //!
-//! ## 一条纪律：别给热路径加计数
+//! ## 一条纪律：别给热路径逐项加计数
 //!
 //! 这里只允许统计**本身就贵**的事件（打开容器、建条目名索引、重排一个块）。每行、每字形
-//! 那种量级一旦插进计数器，量具本身就成了被测量的开销——与「每张图每帧一条 `info!`」
-//! 是同一种错误，只是换了个出口。
+//! 那种量级一旦**逐项**插进计数器，量具本身就成了被测量的开销——与「每张图每帧一条
+//! `info!`」是同一种错误，只是换了个出口。
+//!
+//! 要数那种量级的东西，走 [`Metric::add`]：**一段事做完记一次、把数量当值加进去**。
+//! 一次 Cell + 一次原子加，与被它记下的那次堆拷贝相比可以忽略，而断言照样是确定的整数。
+//! `Scene::build` 就这么记它物化了几个 run。
 //!
 //! [`count`]: Metric::count
 //! [`local`]: local
@@ -51,22 +55,47 @@ pub enum Metric {
     /// 注意这一格在**读库/取章那一路也会被加**（`format::` 里校验 XHTML 的那几处），
     /// 所以断言要用 `take_local` 圈出自己的那段，而不是读进程总量。
     DomParses,
+    /// 场景被构造了几次（`Scene::build` 一次算一次；连续滚动一帧里每个进链的章各一次）。
+    ///
+    /// 这一格问的是**呈现层有没有跨帧复用**：现在每帧整份重建，所以每一帧都在涨。
+    SceneRebuilds,
+    /// 场景构造**物化**出来的 run 数（`SharedString` 从 `BlockBox::text` 拷出来那几个）。
+    /// 一次 `Scene::build` 记一笔、值 = `runs.len()`（见模块头那条纪律）。
+    ///
+    /// 目标值：**滚下去再滚回同一屏，第二趟这一格增量 0**。单元表按行**懒物化**，某一行
+    /// 第一次进带必须物化它，所以「往前滚为 0」是个错的口径（2026-10-13 立门时就这么错过一次，
+    /// 见 `plans/阅读管线.md` §九 第四条纪律）；回到走过的地方才是那个确定的零。
+    ///
+    /// 根子在 `GlyphRun.x/baseline` 存的是**相对元素原点的屏幕值**：滚动一动每条 run 都变，
+    /// 场景只能整份重造。修法是「按行号索引的行单元表（章内局部量）+ 每帧一个平移量」。
+    SceneRuns,
+    /// `TextSystem::shape_line` 被调了几次（`paint_run` 每 run 一次）。
+    ///
+    /// gpui 自己有 `LineLayoutCache`，命中时不重 shaping，但**键含整段文本**——命中也要
+    /// 把文本哈希一遍，而那个哈希是 O(文本长度)。所以这一格测的不是「有没有重新 shaping」，
+    /// 是「绘制回调每帧替读者算了多少趟查表」。**它不进上面那条往返门**：把 `ShapedLine`
+    /// 存进行单元表是已记为「可省」的下一步（省的是那趟哈希，不是那 62 次拷贝），
+    /// 拿它当验收会把一件正确的事钉成错的。
+    ShapeLineCalls,
 }
 
 /// 计数器条目的存储顺序。新增 [`Metric`] 变体时必须同步扩这两个数组，否则下面的
 /// `ALL` 数组长度对不上，编译期就会报错——这是刻意的：让"漏加一个计数器"成为
 /// 编译错误而不是运行时的零。
-const ALL: [Metric; 3] = [
+const ALL: [Metric; 6] = [
     Metric::ContainerOpens,
     Metric::EntryNameTablePasses,
     Metric::DomParses,
+    Metric::SceneRebuilds,
+    Metric::SceneRuns,
+    Metric::ShapeLineCalls,
 ];
 
 thread_local! {
-    static LOCAL: [Cell<u64>; 3] = const { [const { Cell::new(0) }; 3] };
+    static LOCAL: [Cell<u64>; 6] = const { [const { Cell::new(0) }; 6] };
 }
 
-static GLOBAL: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static GLOBAL: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 
 impl Metric {
     fn slot(self) -> usize {
@@ -74,6 +103,9 @@ impl Metric {
             Metric::ContainerOpens => 0,
             Metric::EntryNameTablePasses => 1,
             Metric::DomParses => 2,
+            Metric::SceneRebuilds => 3,
+            Metric::SceneRuns => 4,
+            Metric::ShapeLineCalls => 5,
         }
     }
 
@@ -82,6 +114,20 @@ impl Metric {
         let i = self.slot();
         LOCAL.with(|c| c[i].set(c[i].get() + 1));
         GLOBAL[i].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 一次记 `n` 个。给**量级大过自身开销**的那类计数用（模块头那条纪律的另一半）：
+    /// 一段事做完再记一笔，而不是逐项各记一次。
+    ///
+    /// 用在「这一趟场景构造一共物化了几个 run」这种**结果本身是个数**的地方——逐项计数
+    /// 会让量具变成被测量的开销，而 `add(runs.len())` 只多两条加法。
+    pub fn add(self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let i = self.slot();
+        LOCAL.with(|c| c[i].set(c[i].get() + n));
+        GLOBAL[i].fetch_add(n, Ordering::Relaxed);
     }
 }
 
@@ -115,6 +161,9 @@ pub fn label(metric: Metric) -> &'static str {
         Metric::ContainerOpens => "container_opens",
         Metric::EntryNameTablePasses => "entry_name_table_passes",
         Metric::DomParses => "dom_parses",
+        Metric::SceneRebuilds => "scene_rebuilds",
+        Metric::SceneRuns => "scene_runs",
+        Metric::ShapeLineCalls => "shape_line_calls",
     }
 }
 
@@ -152,6 +201,33 @@ mod tests {
         metric.count();
         assert_eq!(crate::infra::metrics::take_local(metric), 2);
         assert_eq!(crate::infra::metrics::local(metric), 0, "读过就该归零");
+    }
+
+    /// [`Metric::add`] 与逐项 [`Metric::count`] 必须落进**同一个格子**：量具读的是那一个
+    /// 槽位，走岔了就是一条永远为零的假绿。零不许占一次（`Scene::build` 交出空场景时
+    /// 不该在 `scene_runs` 上留一笔），也不许动全局量。
+    #[test]
+    fn add_accumulates_into_the_same_slot_as_count() {
+        let metric = Metric::SceneRuns;
+        let before = crate::infra::metrics::global(metric);
+        metric.add(0);
+        assert_eq!(
+            crate::infra::metrics::take_local(metric),
+            0,
+            "记零次不该留下任何东西"
+        );
+        assert_eq!(
+            crate::infra::metrics::global(metric),
+            before,
+            "记零次也不该动全局量"
+        );
+        metric.add(3);
+        metric.count();
+        assert_eq!(
+            crate::infra::metrics::take_local(metric),
+            4,
+            "一次记 3 加一次记 1，读出来是 4"
+        );
     }
 
     #[test]

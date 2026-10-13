@@ -36,13 +36,29 @@ clippy `-D warnings` 干净，Android 交叉编译通过。
 
 - `GlyphsElement` 的全套 `Element` impl（≈110 行）换成 `gpui::canvas(prepaint, paint)`，
   闭包按帧捕获 runs/fills/background，布局样式沿用 `relative(1.)` 铺满。
-- `paint_run` 的逐字形循环（照抄内部 paint_line 的那 35 行）替换为公开 API
-  `ShapedLine::paint(origin, line_height, align, None, window, cx)`。
+- ~~`paint_run` 的逐字形循环（照抄内部 paint_line 的那 35 行）替换为公开 API
+  `ShapedLine::paint(origin, line_height, align, None, window, cx)`。~~
+  **2026-10-13 作废，且当年也没落地**。三条理由：
+  ① **已决**：翻页卷曲要「每个字形可重定位」，而 gpui 没有通用变换，卷曲只能落在 `paint_glyph`
+  （`window.rs:4687`）上——换成 `ShapedLine::paint` 就是把落点交出去，动画那一轮还得改回来。
+  ② **换过去并不省活**：gpui 自己的 `paint_line`（`text_system/line.rs:521`）也是逐字形循环
+  （字形调用在 `:742`），公开 API 里面就是这同一段。
+  ③ 而且**这条根本没做过**：`paint_run` 今天仍是手写循环（`paint.rs:286` 起），
+  `decoration_runs` 在整个 `folio-app` 里**一次都没被读过**（全仓 grep 为空）。
 - 基线 → 行框原点换算：origin.y = baseline − (line_height + ascent − descent)/2；
   line_height 取自然行高（ascent+descent）时即 baseline − ascent。
   ascent/descent 来自 `Measure::run_metrics`。
-- **顺带修 bug**：现代码构造了 `UnderlineStyle`/`StrikethroughStyle` 却从未画装饰线；
-  `ShapedLine::paint` 走 decoration_runs，会画。用测试钉住。
+- ~~**顺带修 bug**：现代码构造了 `UnderlineStyle`/`StrikethroughStyle` 却从未画装饰线；
+  `ShapedLine::paint` 走 decoration_runs，会画。用测试钉住。~~
+  **这条当年没落地，2026-10-13 才真的修上——但走的不是 `ShapedLine::paint`。**
+  事实是：`text-decoration` 一路走到 `RunStyle.underline`（`layout/font.rs:159`）→ `GlyphRun`
+  → `paint_run` 塞进 `TextRun.underline`，gpui 于是算出 `ShapedLine.decoration_runs`，
+  而**我们的循环只画 glyphs，那个字段从没被读过**（全仓 grep 为空）。也就是说这条被记成
+  「已修」的 bug 一直在：书里的 `<u>` 与删除线一片空白，而 CSS 清单说支持。
+  现在 `paint_run` 自己画那两条线（`Window::paint_underline` / `paint_strikethrough`，
+  都是公开原语），式子与公开的 `underline_y_offset` 对拍（`paint::tests`）。
+  **换成 `ShapedLine::paint` 不是选项**——见上面那条作废理由（卷曲要逐字形）。
+  **仍未验的是「线上屏」**：`TestWindow` 不暴露绘制场景，这条当年就因此退成真机冒烟，现在同样。
 
 ## M5.3 ReaderView 模块化拆分
 

@@ -11,6 +11,7 @@
 //! 于是偏移量与 `MobileMeasure::run_metrics` 量到的 ascent/descent 同源，
 //! 不会出现「按 A 算的行高、按 B 画的字形」。
 
+use folio_core::infra::metrics::Metric;
 use gpui_kit::{
     App, Bounds, Element, ElementId, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
     LayoutId, Length, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -34,6 +35,12 @@ pub struct GlyphRun {
     /// 那条样式方法的默认值一致 —— 两端各定一个数的话，同一本书在两处会画得不一样。
     pub underline: bool,
     pub line_through: bool,
+    /// 这个 run 的 inline box 高（`font_size × line-height`），只用来定装饰线的纵向落点。
+    ///
+    /// 为什么要单独带一份：gpui 的 `paint_line` 算基线在盒里的位置、算删除线的高度都要
+    /// 这个数（见 [`decoration_y`]），而 `ShapedLine` 里没有它 —— 它是**读者与样式**给的，
+    /// 不是 shaping 的结果。缺了它就只能自己猜一个比例，那正是「按 A 量、按 B 画」的起手式。
+    pub box_height: f32,
 }
 
 impl GlyphRun {
@@ -50,7 +57,16 @@ impl GlyphRun {
             baseline: font_size,
             underline: false,
             line_through: false,
+            // 默认按字号一档（UA 的 `line-height: normal` 近似）。真排版会用
+            // `RunStyle::box_height()` 覆盖它，见 [`GlyphRun::in_box`]。
+            box_height: font_size,
         }
+    }
+
+    /// 这个 run 的 inline box 高。场景层从 `RunStyle::box_height()` 递过来。
+    pub fn in_box(mut self, box_height: f32) -> Self {
+        self.box_height = box_height;
+        self
     }
 
     pub fn at(mut self, x: f32, baseline: f32) -> Self {
@@ -282,6 +298,29 @@ impl Default for GlyphsElement {
     }
 }
 
+/// 两条装饰线的 y，全按 gpui `paint_line` 的式子来，不自定比例。
+///
+/// 输入是「这一 run 的基线 y、inline box 高、shaping 报的 ascent/descent」。gpui 里
+/// 盒顶在 `origin.y`、基线落在 `盒顶 + padding_top + ascent`，其中
+/// `padding_top = (line_height − ascent − descent) / 2`；下划线再往下一条
+/// `descent × 0.618`（gpui 的 `UNDERLINE_DESCENT_OFFSET_FACTOR`，它把那个数包在公开函数
+/// [`gpui::underline_y_offset`] 里），删除线落在 `盒顶 + (ascent/2 + padding_top + ascent) / 2`。
+/// 自己猜一个「基线下 2px」那种数，换字号就会露出：线与字之间的缝会跟着字号涨缩，
+/// 而 gpui 自己画的那条不会 —— 两条线就会在不同字号的段落里对不齐。
+fn decoration_y(
+    baseline: Pixels,
+    box_height: Pixels,
+    ascent: Pixels,
+    descent: Pixels,
+) -> (Pixels, Pixels) {
+    let padding_top = (box_height - ascent - descent) / 2.;
+    let baseline_offset = padding_top + ascent;
+    let top = baseline - baseline_offset;
+    let underline = top + baseline_offset + descent * 0.618;
+    let strikethrough = top + (ascent * 0.5 + baseline_offset) * 0.5;
+    (underline, strikethrough)
+}
+
 /// 把一条 run 画出来：先让窗口级文本系统 shaping，再逐字形 `paint_glyph`。
 fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) {
     if run.text.is_empty() {
@@ -304,6 +343,10 @@ fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) {
             color: Some(run.color),
         }),
     };
+    // 这一格数的是「绘制回调每帧替读者算了多少趟 shaping 查表」。gpui 的 `LineLayoutCache`
+    // 命中时确实不重 shaping，但它的键含整段文本 —— **命中也要把文本哈希一遍**。
+    // 目标值：只滚动一帧增量 0（行单元把 `ShapedLine` 存下来，绘制只搬运字形）。
+    Metric::ShapeLineCalls.count();
     let shaped = window
         .text_system()
         .shape_line(run.text.clone(), font_size, &[text_run], None);
@@ -316,6 +359,43 @@ fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) {
             // 单个字形画不出去（缺字形、图集满）不该让整帧失败：与 gpui 自己的
             // `paint_line` 一致，忽略即可。
             let _ = window.paint_glyph(at, shaped_run.font_id, glyph.id, font_size, run.color);
+        }
+    }
+    // 装饰线。字形是我们自己一个个画的，gpui 的 `ShapedLine::paint` 里没有那一段，
+    // 所以线也得自己画 —— 少这一段就是「`text-decoration` 解析了、传进 shaping 了、
+    // 然后没人画」：`UnderlineStyle` 造出来只为了进 `TextRun`，画面的循环只读 glyphs。
+    //
+    // 一条 run 一种样式（样式来自 `RunStyle`，整段一致），所以整条 run 就是一个装饰段，
+    // 不必照 gpui 那样按 `decoration_runs` 切字符区间。宽度用 `shaped.width`（**画出来的**
+    // 那份宽），不用布局给的 run 宽：后者含 `word-spacing` 一类的富余，线会伸到字后面去。
+    if run.underline || run.line_through {
+        let (underline_y, strikethrough_y) = decoration_y(
+            baseline_y,
+            px(run.box_height),
+            shaped.ascent,
+            shaped.descent,
+        );
+        let width = shaped.width;
+        if run.underline {
+            window.paint_underline(
+                point(baseline_x, underline_y),
+                width,
+                &UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(run.color),
+                    wavy: false,
+                },
+            );
+        }
+        if run.line_through {
+            window.paint_strikethrough(
+                point(baseline_x, strikethrough_y),
+                width,
+                &StrikethroughStyle {
+                    thickness: px(1.),
+                    color: Some(run.color),
+                },
+            );
         }
     }
 }
@@ -461,4 +541,61 @@ fn register_selection(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    //! 装饰线的纵向落点。gpui 的 `TestWindow` 不暴露绘制场景（`plans/M5-refactor.md` 当年就
+    //! 因此把「下划线该画出来」退成真机冒烟），所以这里钉的是**那条式子**；
+    //! 「`paint_run` 真的调了它」仍然只有真机能证。
+    //!
+    //! 点名导入而不是 `use super::*`：`gpui_kit` 转出整个 `gpui`，里面有个叫 `test` 的属性宏，
+    //! glob 会让 `#[test]` 递归展开成它。
+    use super::decoration_y;
+    use gpui_kit::{Pixels, px};
+
+    fn y(box_height: f32, ascent: f32, descent: f32) -> (Pixels, Pixels) {
+        // 基线摆在 100 处即可：两条线都是相对它算的，绝对值不影响比对。
+        decoration_y(px(100.), px(box_height), px(ascent), px(descent))
+    }
+
+    /// 下划线用 gpui **自己那个公开函数**比一遍，而不是抄一个「基线下 2px」。
+    /// 系数（`UNDERLINE_DESCENT_OFFSET_FACTOR`）哪天变了，这条会红——真机上它的症状是
+    /// 「线与字之间的缝跟着字号涨缩」，而那要跑很久才看得出来。
+    ///
+    /// 比的是**差**而不是 `==`：两边都是 f32 的加减乘，只是次序不同（实测同一组数差
+    /// `0.000004px`），而 1/100 px 远在任何设备的像素网格之下——拿精确相等当门，
+    /// 钉住的会是编译器的折叠顺序，不是几何。
+    #[test]
+    fn the_underline_follows_gpui_own_offset() {
+        for (height, ascent, descent) in [
+            (24.0f32, 16.0f32, 4.0f32),
+            (40.0, 16.0, 4.0),
+            (17.0, 14.0, 3.0),
+        ] {
+            let padding_top = (height - ascent - descent) / 2.;
+            let top = px(100.) - (px(padding_top) + px(ascent));
+            let expected = top + gpui_kit::underline_y_offset(px(height), px(ascent), px(descent));
+            let got = y(height, ascent, descent).0;
+            assert!(
+                (f32::from(got) - f32::from(expected)).abs() < 0.01,
+                "盒高 {height} / ascent {ascent} / descent {descent}：{got:?} vs {expected:?}"
+            );
+        }
+    }
+
+    /// 删除线落在**字形身体里**：基线之上、盒顶之下。两条都从 gpui 的式子抄，
+    /// 所以这个区间是无条件的 —— 一旦哪天自己改了数，它就先出界。
+    #[test]
+    fn the_strikethrough_sits_inside_the_glyph_body() {
+        let (underline, strikethrough) = y(24.0, 16.0, 4.0);
+        assert!(
+            strikethrough < px(100.) && strikethrough > px(100.) - px(16.0),
+            "删除线该压在基线之上、字形上半身里，实际 {strikethrough:?}"
+        );
+        assert!(
+            underline > px(100.),
+            "下划线该在基线之下，实际 {underline:?}"
+        );
+    }
 }

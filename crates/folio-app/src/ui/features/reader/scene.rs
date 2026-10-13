@@ -10,8 +10,9 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use folio_core::content::format::css::computed::{BorderEdge, ComputedStyle};
 use folio_core::content::dom::NodeId;
+use folio_core::content::format::css::computed::{BorderEdge, ComputedStyle};
+use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Layout, LineFragment};
 use gpui_kit::{Hsla, SharedString};
 
@@ -122,6 +123,9 @@ impl Scene {
                             // 这里只搬运那一个数。
                             .at(x, baseline - run.style.baseline_shift)
                             .color(run_color(run.style.color, foreground))
+                            // 装饰线要这个 run 的 inline box 高才能定纵向落点
+                            // （见 `paint::decoration_y`），它是样式给的数，shaping 里没有。
+                            .in_box(run.style.box_height())
                             .decorate(run.style.underline, run.style.line_through),
                         );
                         x += run.width;
@@ -153,6 +157,13 @@ impl Scene {
                 }
             }
         }
+        // 量具：一次构造记一笔，值 = 这一趟物化出的 run 数。**逐 run 计数会把量具自己
+        // 变成被测量的开销**（`folio_core::infra::metrics` 模块头那条纪律），而这两个数要
+        // 回答的问题本来就是一趟一次的：这一帧重建了几次场景、一共拷出几段文本。
+        // 目标值见 `Metric::SceneRuns`：**滚回走过的地方**时增量应当是 0（往前滚那一趟
+        // 该付——单元表按行懒物化，新进入带的行第一次画就要建它）。
+        Metric::SceneRebuilds.count();
+        Metric::SceneRuns.add(runs.len() as u64);
         Self {
             runs,
             images,

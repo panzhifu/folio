@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use folio_core::content::document::Document;
+use folio_core::infra::metrics::{Metric, take_local};
 use folio_core::store::Store;
 use folio_core::{Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, Reader};
 use gpui_kit::component::Root;
@@ -294,9 +295,7 @@ fn locator_matches_the_scrolled_ratio(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let flow = flow();
     // 语料是 `Chapter::inline` 建的，正文就在手上，所以字数一定算得出来。
-    let total = flow.chapters[0]
-        .char_len()
-        .expect("正文在手上的章该有字数");
+    let total = flow.chapters[0].char_len().expect("正文在手上的章该有字数");
     assert!(total > 1000, "语料要够长才滚得动，实际 {total} 字");
 
     let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
@@ -1386,5 +1385,87 @@ fn a_pref_change_reflows_the_whole_spine_without_losing_the_chapter(cx: &mut Tes
     assert!(
         after_offset > 0 && after_offset != offset,
         "字号变了行数变了，章内偏移落在别处才是重排过的证据：{offset} → {after_offset}"
+    );
+}
+
+/// 量具在记，而且记下的是**今天真实付的那笔**：只滚动一屏，满屏的 run 就被重新物化一遍、
+/// `shape_line` 就被重新调一遍。
+///
+/// 这条与下面那条 `#[ignore]` 的目标断言**配成一对**读：这条钉的是「计数器真的会动」——
+/// 把 `Scene::build` 或 `paint_run` 里那两句计数删掉，它当场红（三格读出来全是零），于是
+/// 那条目标门不会变成一盏永远绿的假灯。行单元表接上之后这一条要删掉（那时它反过来才该红）。
+#[gpui_kit::test]
+fn a_scrolled_frame_currently_rematerializes_the_visible_runs(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (_view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    // 先滚一段把上一帧的账结掉，再把三格清零：断言的是「只滚动」这一步的增量，
+    // 而不是进程总量（`take_local` 的读法，见 `infra::metrics`）。
+    scroll_down(cx, handle, 240.0);
+    settle(cx, handle);
+    take_local(Metric::SceneRebuilds);
+    take_local(Metric::SceneRuns);
+    take_local(Metric::ShapeLineCalls);
+
+    scroll_down(cx, handle, 240.0);
+    settle(cx, handle);
+    let rebuilds = take_local(Metric::SceneRebuilds);
+    let runs = take_local(Metric::SceneRuns);
+    let shapes = take_local(Metric::ShapeLineCalls);
+    // 实测基线（2026-10-13，debug 构建，`flow()` 那份语料、窗宽 460、字号 16）：
+    // 一次 240px 滚动走完两帧 = 5 次场景重建、62 个 run 物化、62 次 `shape_line`。
+    // 5 次重建对应连续模式**每个进链的章各一份场景**（锚章 ±2）；`runs` 与 `shapes`
+    // 相等，说明这一屏里每一个被拷出来的 run 同时都付了一次查表。
+    // 记在这里是为了下一轮能拿同一组数比，而不是只看到「红/绿」。
+    assert!(
+        rebuilds > 0 && runs > 0 && shapes > 0,
+        "滚动这一步应当数得出场景重建、run 物化与 shape_line 调用，实际 {rebuilds} / {runs} / {shapes}"
+    );
+}
+
+/// 目标断言（`plans/阅读管线.md` §九 + §十一 第 6 条）：**滚下去再滚回同一屏，第二趟一个
+/// 新 run 都不该物化**。
+///
+/// 口径为什么是**往返**而不是「往前滚增量为 0」：行单元表是**懒物化**的（§九 已决：整章一份、
+/// 某一行的单元只在它第一次进带时才建）。往前滚必然有新行进来，那些行第一次被画就是要拷一次
+/// 文本——拿「往前滚为 0」当验收钉的是一件本来就不该发生的事。回到走过的地方才是那个确定的零。
+///
+/// 根子在 `GlyphRun` 的 `x` / `baseline` 存的是**相对元素原点的屏幕值**（`paint.rs:26-38`）：
+/// 滚动一动，每条 run 的 `baseline` 都跟着变，场景就只能整份重造。这是「叶子只存局部值、
+/// 全局值靠现算」那条规则在呈现层欠着的一笔——排版层已经照它做了（`BlockBox.y` 相对章顶、
+/// 全局 y 由 ±2 章的拼接链现算），绘制层还没。
+///
+/// 修法的形状：「按行号索引的行单元表（值全是章内局部量）+ 每帧一个平移量」，整章一份挂在
+/// `Document` 上随它进出窗口；主题色与解析好的 `Font` **都不许烘进表**（前者因为 `LayoutKey`
+/// 里没有主题，后者因为 `FontCache` 已有自己的失效纪律，见 §九 那四条硬约束）。
+///
+/// **这一条故意不断 `ShapeLineCalls`**：`paint_run` 仍每 run 调一次 `shape_line`，而 gpui 那个
+/// `LineLayoutCache` 只保两帧（`previous_frame` 与 `current_frame` 在 `finish_frame` 里互换）。
+/// 把 `ShapedLine` 存进行单元表是**已记为「可省」的下一步**——它省的是那趟整段文本的哈希，
+/// 不是这 62 次拷贝，等这条门绿了再按数决定。
+///
+/// 今天跑它是红的（红在哪个数见上一条门），所以挂 `#[ignore]`：接线之后去掉这一句就成了
+/// 守门员（同 `epub::tests` 那条「一百次取图只开一次容器」走过的路）。
+#[gpui_kit::test]
+#[ignore = "行单元表还没接：滚回走过的地方也要把满屏的 run 重新物化一遍"]
+fn scrolling_back_to_the_same_band_materializes_no_new_runs(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (_view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+
+    // 往前一屏：这一趟**该**付钱（新行第一次进带），所以先把账结掉。
+    scroll_down(cx, handle, 240.0);
+    settle(cx, handle);
+    take_local(Metric::SceneRuns);
+
+    // 回原处：`scroll_down` 的约定是「向下滚为负」，给它一个负数就是向上滚。往返只用一屏的量，
+    // 是为了待在同一个锚章的 ±2 窗口里——走远了整个 `Document` 被裁掉，那一次的重新物化是对的，
+    // 不该记在「还没接」这笔账上。
+    scroll_down(cx, handle, -240.0);
+    settle(cx, handle);
+    assert_eq!(
+        take_local(Metric::SceneRuns),
+        0,
+        "走过的地方再走回来，只该改帧内那个平移量，不该物化任何一段新文本"
     );
 }
