@@ -137,87 +137,15 @@ CARGO_TARGET_DIR=~/.cache/folio-mobile-android \
 
 ## 提交：用 jj
 
-本仓库的提交走 [Jujutsu](https://docs.jj-vcs.dev)（`jj`），仓库是 **colocated** 的：`.jj/` 与
-`.git/` 并存，所以 `git clone` / `git log` / `git push`、GitHub Actions、Android 那条
-`cargo ndk` 全都不受影响 —— 换的只是提交这一侧的心智模型：没有 index、没有 staged/unstaged，
-每个改动本身就是一个提交，随时能改、能拆、能落到历史上任意一处再回来。
+提交与推送走 [Jujutsu](https://docs.jj-vcs.dev)（`jj`），仓库是 **colocated** 的：`.jj/` 与
+`.git/` 并存，所以 `git clone`、GitHub Actions、Android 那条 `cargo ndk` 都不受影响。
 
-### 新机器上的初始化
-
-```bash
-sudo pacman -S extra/jujutsu       # 装 jj（本机验证的是 0.46.0）
-jj git init                        # 在仓库根跑：已有 .git 时默认就是 colocated
-jj bookmark track main@origin      # 让 main 跟着 fetch 前进
-jj config set --user user.name "你的名字"
-jj config set --user user.email "你的邮箱"
-```
-
-`jj` 不读 `git config`，身份那两行不给就写不进提交。装之前注意一件事：**Arch 官方源里
-`jj` 这个包名属于另一个程序**（`jj 2-1`，一个基于 FIFO 的 Jabber/XMPP 客户端），它的可执行
-文件同样叫 `/usr/bin/jj`，会挡在 jujutsu 前面。本机用 `pacman -Rns jj` 先卸掉再装
-`extra/jujutsu`，所以现在 `/usr/bin/jj` 是 jujutsu。撞名的机器上先
-`pacman -Qo /usr/bin/jj` 看清归属再决定，别用 `--overwrite` 压过去 —— 那会把另一个包的文件
-记成被人为改过，以后每次升级都报冲突。
-
-### jj 会把没被 ignore 的文件收进提交
-
-初始化时踩到的，值得单独写一条：`jj git init` 的**第一次快照**会把工作区里所有**未被 ignore**
-的文件当成你正要提交的改动收进 `@`。git 那边「untracked 就看不见」这个保证在 jj 这里不成立 ——
-本机的量屏 scratch `.debug/` 当场以十几条 `A` 出现在 `jj status` 里（PNG 与 `probe.sh`、
-`sweep.py` 混在一起），这时候落提交就把它们一起公开了。处置是两步，**缺一不可**：
-
-```bash
-printf '/.debug/\n' >> .git/info/exclude   # 1. 先让 ignore 规则存在
-jj file untrack '.debug/**'                # 2. 再把已经收进来的那批请出去（文件留在盘上）
-```
-
-只加规则不够：已经进 `@` 的文件不会自己退出去；只 `untrack` 也不够：下一次快照又收回来。
-所以本机 scratch 先进 ignore 名单再谈提交。`.git/info/exclude` 只对本机生效；要每台机器都免掉
-这一步，把同样的行写进 `.gitignore`（那里已经有 `/screenshots/`、`/.zcode/`、`/reference/`
-三份同样性质的条目）。
-
-### 日常这几条
-
-```bash
-jj status                  # 我在哪个 change 上、改了什么
-jj log -r 'main | @ | mine()'
-jj diff --stat
-jj describe -m "说明"      # 给当前 change 写说明，写完它就是一个提交
-jj new                     # 结掉当前 change 并起下一个（不用先 git add）
-jj new <change_id>         # 回到历史上任意一处改，不用 stash、不用切分支
-jj split                   # 一个 change 里的两件事拆成两个提交
-jj squash                  # 反过来：合进父提交
-jj git push                # 推 bookmark（见下）
-```
-
-推之前要把 `main` 这个 bookmark 挪到要推的那个 change 上，`jj new` 之后的 `@` 不会自动带着它走：
-
-```bash
-jj describe -m "说明"
-jj bookmark set main -r @      # 写完说明的 @ 就是要推的那个 change
-jj git push --dry-run          # 先看一遍要推什么
-jj git push
-jj new                         # 起下一个 change：不写这句的话，下一次编辑改进的就是刚推上去那个提交
-```
-
-换 `jj commit -m "说明"` 的话（它等于 `describe` 再 `new`，会另起一个空的 `@`），上一行写成
-`jj bookmark set main -r @-`。`main` 不会自己前进 —— jj 只在显式 `bookmark set` /
-`bookmark move` 时挪 bookmark，`@` 走到哪都不代表 `main` 跟着走。
-
-### git 那一侧还剩什么能用
-
-colocated 之后 **git 的 HEAD 是分离的**（`.git/HEAD` 里直接写 sha，不指向分支），而且它可能落后于
-分支本身。本机实测：README 那一笔用 `jj describe` 落下之后，`refs/heads/main` 已经是新提交，
-`git log` 不带参数看到的却还是旧的 HEAD，`git status` 于是报出一条根本不存在的 `M README.md`。
-所以这三件事分开记：
-
-- 看历史用 `jj log`，或者 `git log main`（显式给分支名）。裸 `git log` 读的是那个分离的 HEAD，
-  会漏掉刚提交的。
-- `git push origin main` 照旧可用 —— 它推的就是 `refs/heads/main`。但日常用 `jj git push`：
-  它会先报「哪个 bookmark 要前进、有没有和远端分叉」，`--dry-run` 先看一眼。
-- **别在 shell 里用 `git commit` / `git checkout` / `git stash`**：它们改的是那个分离的 HEAD，
-  jj 看不见，两边就此分叉。撤销用 `jj undo`，回到旧提交改用 `jj new <change_id>`，临时挪开改动
-  就再起一个 change —— jj 里没有 index，也就没有 stash 要解决的那件事。
+命令配方与两处实测的坑都写在 agent 技能文档
+[`.qoder/skills/commit-and-search/SKILL.md`](.qoder/skills/commit-and-search/SKILL.md) 里 ——
+那份同时写了搜索代码用 `rg` / `rga` 的口径。要点只有三条：**别在 shell 里用 `git commit` /
+`git checkout` / `git stash`**（colocated 之后 git 的 HEAD 是分离的，那些改动 jj 看不见）；
+推之前要显式把 `main` 挪到要推的 change 上（`@` 前进不带 bookmark 一起走）；jj 会把**未被 ignore**
+的文件当成待提交改动收进工作副本，本机 scratch 先进 ignore 名单再落提交。
 
 ## 日志
 
