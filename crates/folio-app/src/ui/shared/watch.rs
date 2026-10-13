@@ -5,14 +5,17 @@
 //! 配置里监听相关的那几项一变（[`sync_from_config`]）就**停旧的再按新配置起**：监听目录、
 //! 轮询节奏都可能变，与其做差量不如整只换。书库没装、位置没确认过、监听没开，三种情形都停。
 //!
-//! 监听的批次在 core 内部提交（`submit_import`），成败只进日志 —— 自动导入
-//! 不打扰读者，架上多出一本他自己看得见。要给自动导入接界面读数时，把
-//! `submit_import` 的句柄交 [`forward_to_auto_imports`](super::import_queue)
-//! 转发即可（传书那一步就是这么接的）。
+//! 监听的批次在 core 内部提交（`submit_import`），成败先进日志；**界面读数走另一条**：
+//! 起服务时挂一条 [`WatchEvents`](folio_core::ingest::watch::WatchEvents) 口，事件在
+//! core 记完日志后交回来，转进 [`import_queue`] 那条自动导入通道 —— 与传书同一条桥、
+//! 与手工导入同一套 [`import_event`](crate::ui::features::shelf::ShelfView) 处理。
+//! 少了这一条会怎样：书确实进了库，架子却仍说「书架还是空的」，要重启才看得见
+//! （实测过，PC 与平板都是）。
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use folio_core::ingest::watch::{WatchConfig, WatchService};
+use folio_core::ingest::watch::{WatchConfig, WatchEvents, WatchService};
 use gpui_kit::App;
 
 use super::config_model::ConfigHolder;
@@ -53,6 +56,19 @@ pub fn sync_from_config(cx: &App) {
     };
     // `set_watch` 会先停旧的那只再存新的，所以这里不必单独停。
     let queue = services::pool();
-    services::services().set_watch(Some(WatchService::start(config, store, queue, dest_dir)));
+    // 事件桥：core 记完日志后把这一条交回来，转进自动导入通道。架子没开时接收端
+    // 已经没了 —— 送不出去就丢掉，不是错误（日志那边照记）。
+    let sender = super::import_queue::auto_import_sender();
+    let on_event: Arc<WatchEvents> =
+        Arc::new(move |event| {
+            let _ = sender.send_blocking(event);
+        });
+    services::services().set_watch(Some(WatchService::start(
+        config,
+        store,
+        queue,
+        dest_dir,
+        Some(on_event),
+    )));
     tracing::info!("watch: 监听已起（{}）", watch.dir);
 }
