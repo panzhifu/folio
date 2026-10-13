@@ -47,19 +47,21 @@ pub use content::format::{
 pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
-    Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, Language, Layer, Library, LOG_OFF_ENV,
-    Logging, Mode, Provenance, Reader, Resolved, TocDensity,
+    Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, LOG_OFF_ENV, Language, Layer,
+    Library, Logging, Mode, Provenance, Reader, Resolved, TocDensity,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
 pub use infra::paths::{config_dir, config_path, data_dir, db_path, log_dir, themes_dir};
 pub use infra::services::Services;
 pub use infra::task::{ByteProgress, Cancel, Priority, StageCtx, TaskEvent, TaskId, TaskManager};
-pub use infra::time::{DurationParts, civil_date, day_start, duration_parts, local_day, local_hour};
+pub use infra::time::{
+    DurationParts, civil_date, day_start, duration_parts, local_day, local_hour,
+};
 pub use ingest::import::{
     BackfillReport, Candidate, ImportKind, ImportOutcome, ImportReport, Imported, Origin,
     PathsSource, Registered, Source, UrlSource, backfill_copies, forward, import_from, reindex,
-    submit_import, sweep_partials,
+    schedule_reindex, submit_import, sweep_partials,
 };
 pub use ingest::scan::{ScanReport, ScanSource, find};
 pub use position::{LOCATOR_FORMAT_VERSION, Locator};

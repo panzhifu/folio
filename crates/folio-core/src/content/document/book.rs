@@ -40,13 +40,23 @@ impl BookDocument {
     /// （见 `plans/text-out-of-db.md`），导入时解出来再丢掉等于白付一次全量解压 ——
     /// 一本 1000 多章的 EPUB 就是白解 1000 多个 zip 条目。
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with(path, format::ParseBudget::Auto)
+    }
+
+    /// 同 [`open`](Self::open)，但把这一本**内部**的解析并行度交给调用方分。
+    ///
+    /// 谁需要它：导入一批书的那一路。一批同时导 M 本、每本内部 I 路，真正抢核的是
+    /// M × I，而只有外层知道 M —— 于是它把 I 算好传下来（`ingest::import::split_budget`），
+    /// 而不是让两层各自按整机核数猜。读者打开一本书用的是 [`open`]（那时 `Auto` 就是
+    /// 整机那一档：它是唯一在跑的那本）。
+    pub fn open_with(path: &Path, budget: format::ParseBudget) -> Result<Self> {
         let provider = format::provider_for(path).ok_or_else(|| unsupported(path))?;
         tracing::debug!(
             "document: {} 交给 {} provider（只读索引）",
             path.display(),
             provider.format().as_str()
         );
-        let (meta, content) = provider.index(path)?;
+        let (meta, content) = provider.index_with(path, budget)?;
         // 校验只写日志，不阻塞阅读。
         crate::ingest::validate::check(&content, path);
         Ok(Self {
@@ -244,11 +254,13 @@ impl Document for BookDocument {
                 {
                     return Ok(text);
                 }
-                provider.entry_text(path, entry).ok_or_else(|| crate::Error::ChapterUnavailable {
-                    path: path.to_path_buf(),
-                    index,
-                    at: entry.clone(),
-                })
+                provider
+                    .entry_text(path, entry)
+                    .ok_or_else(|| crate::Error::ChapterUnavailable {
+                        path: path.to_path_buf(),
+                        index,
+                        at: entry.clone(),
+                    })
             }
             // 单文件容器：provider 重读一遍再取第 N 章 —— 只有它知道怎么分章。
             ChapterLocator::Section(_) => provider.chapter_source(path, &at).map_err(|err| {
@@ -279,7 +291,10 @@ mod tests {
     ///
     /// 落库走的是 `Store::save_flow_in`，这里只复现它的那一句 `locator_for`
     /// —— 测试不想为了一个形状去拉一份 SQLite。
-    fn at_locators(flow: &crate::content::format::FlowDoc, format: crate::content::format::Format) -> crate::content::format::FlowDoc {
+    fn at_locators(
+        flow: &crate::content::format::FlowDoc,
+        format: crate::content::format::Format,
+    ) -> crate::content::format::FlowDoc {
         let chapters = flow
             .chapters
             .iter()
@@ -289,7 +304,9 @@ mod tests {
                 spine_href: ch.spine_href.clone(),
                 // 字数不跟着位置走掉：它是索引那一趟的产物，落库之后仍要读得回来。
                 char_len: ch.char_len(),
-                text: crate::content::format::ChapterText::At(crate::content::format::locator_for(format, ch, ix)),
+                text: crate::content::format::ChapterText::At(crate::content::format::locator_for(
+                    format, ch, ix,
+                )),
             })
             .collect();
         crate::content::format::FlowDoc {
@@ -496,7 +513,11 @@ mod tests {
                 ContentRef::Fixed(_) => panic!("该读成可重排"),
             },
         );
-        let book = BookDocument::with_container(meta, Content::Reflow(content), Path::new("/gone/missing.epub"));
+        let book = BookDocument::with_container(
+            meta,
+            Content::Reflow(content),
+            Path::new("/gone/missing.epub"),
+        );
         assert_eq!(book.stylesheet(), "", "容器丢了就是没有作者样式，正文照排");
     }
 

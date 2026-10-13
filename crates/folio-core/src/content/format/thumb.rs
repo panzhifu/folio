@@ -50,7 +50,12 @@ pub fn thumb_path(root: &Path, size: u32, cover: &CoverRef) -> std::path::PathBu
 ///
 /// 只要**同一份输入要做两档**，用 [`ensure_all`]：这一条每次调用都解一遍图，
 /// 两档就是两次解码。
-pub fn ensure(root: &Path, size: u32, cover: &CoverRef, bytes: &[u8]) -> Option<std::path::PathBuf> {
+pub fn ensure(
+    root: &Path,
+    size: u32,
+    cover: &CoverRef,
+    bytes: &[u8],
+) -> Option<std::path::PathBuf> {
     if !SIZES.contains(&size) {
         return None;
     }
@@ -71,7 +76,11 @@ pub fn ensure(root: &Path, size: u32, cover: &CoverRef, bytes: &[u8]) -> Option<
 ///
 /// 已经在磁盘上的档不重做，也不为它解码；两档都在时整条不碰图像。
 /// 回数组与 [`SIZES`] 同序，取不到的那格是 `None`。
-pub fn ensure_all(root: &Path, cover: &CoverRef, bytes: &[u8]) -> [Option<std::path::PathBuf>; SIZES.len()] {
+pub fn ensure_all(
+    root: &Path,
+    cover: &CoverRef,
+    bytes: &[u8],
+) -> [Option<std::path::PathBuf>; SIZES.len()] {
     let missing = SIZES
         .iter()
         .filter(|size| !dest_exists(root, **size, cover))
@@ -107,7 +116,12 @@ fn dest_exists(root: &Path, size: u32, cover: &CoverRef) -> bool {
 }
 
 /// 写一档缩略图：先写临时名再 rename（[`ensure`] 那边说了为什么）。
-fn write_thumb(root: &Path, size: u32, cover: &CoverRef, encoded: &[u8]) -> Option<std::path::PathBuf> {
+fn write_thumb(
+    root: &Path,
+    size: u32,
+    cover: &CoverRef,
+    encoded: &[u8],
+) -> Option<std::path::PathBuf> {
     let dest = thumb_path(root, size, cover);
     let dir = crate::infra::paths::thumb_dir(root, size);
     std::fs::create_dir_all(&dir).ok()?;
@@ -143,8 +157,10 @@ fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
 /// `size` 是**长边上限**，不是目标宽度：封面有横有竖，按长边缩才能保证
 /// 「两档的高度差别」在横竖两种封面上都成立。
 fn encode_from(image: &image::DynamicImage, size: u32) -> Option<Vec<u8>> {
-    // `thumbnail` 而不是 `resize`：前者是按比例缩并保留长宽比的那一个，
-    // 后者要自己算目标尺寸（算错就是把封面拉变形）。
+    // `thumbnail` 而不是 `resize_exact`：前者按长边缩进 `size` 的方框、自己保住长宽比，
+    // 后者要把目标宽高算一遍（算错就是把封面拉变形）。几何上等价的另一条是
+    // `resize(size, size, filter)` —— 它同样保比例（两者都走 `resize_dimensions` 的
+    // `fill = false` 那一支），区别只在采样：`thumbnail` 是整数块平均，`resize` 是卷积滤波。
     let scaled = image.thumbnail(size, size);
     let mut out = Vec::new();
     // 质量 80：缩略图放在网格里看，这个档位在「几 KB」与「看得出糊」之间。
@@ -203,7 +219,7 @@ pub fn purge(root: &Path) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DECODES, SIZES, ensure, ensure_all, thumb_path, purge};
+    use super::{DECODES, SIZES, ensure, ensure_all, purge, thumb_path};
     use crate::content::format::cover::CoverRef;
 
     /// 读并清零解码计数。每条测试开头先清一次：cargo 让同一条线程跑过多条测试，
@@ -219,10 +235,7 @@ mod tests {
             image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
         });
         image::DynamicImage::ImageRgb8(img)
-            .write_to(
-                &mut std::io::Cursor::new(&mut buf),
-                image::ImageFormat::Png,
-            )
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .unwrap();
         buf
     }
@@ -291,7 +304,9 @@ mod tests {
 
         let made = ensure_all(root, &cover, &bytes);
         for (size, path) in SIZES.iter().zip(made.iter()) {
-            let path = path.as_ref().unwrap_or_else(|| panic!("{size} 档该做得出来"));
+            let path = path
+                .as_ref()
+                .unwrap_or_else(|| panic!("{size} 档该做得出来"));
             assert!(path.is_file(), "{size} 档该落盘");
         }
         assert_eq!(decodes(), 1, "两档合起来只该解一次图");
@@ -401,7 +416,11 @@ mod tests {
         }
         let removed = purge(root).unwrap();
         assert_eq!(removed, SIZES.len(), "两档都该被清掉，实际 {removed}");
-        assert!(!crate::infra::paths::thumb_dir(root, SIZES[0]).join("x.jpg").exists());
+        assert!(
+            !crate::infra::paths::thumb_dir(root, SIZES[0])
+                .join("x.jpg")
+                .exists()
+        );
         // 重跑生成照旧成功。
         assert!(ensure(root, SIZES[0], &cover, &bytes).is_some());
         // 没有缓存目录时 purge 不报错（幂等）。

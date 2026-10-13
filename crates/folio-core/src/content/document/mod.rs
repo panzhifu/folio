@@ -16,7 +16,8 @@ use std::path::Path;
 
 use crate::Result;
 use crate::content::format::{
-    Content, ContentKind, DocMeta, FixedDoc, FlowDoc, FontBytes, Format, ImageRes, TocEntry,
+    Content, ContentKind, DocMeta, FixedDoc, FlowDoc, FontBytes, Format, ImageRes, ParseBudget,
+    TocEntry,
 };
 
 /// 阅读位置的坐标系。可重排是「章 + 字符偏移」，定版式是「页码」。
@@ -157,6 +158,14 @@ pub trait Document: Send + Sync {
 /// 场合（书库读回、测试替身），见 [`from_content`] / [`with_container`]。
 pub fn open(path: &Path) -> Result<Box<dyn Document>> {
     Ok(Box::new(BookDocument::open(path)?))
+}
+
+/// 同 [`open`]，但把这一本内部的解析并行度交给调用方分（[`ParseBudget`]）。
+///
+/// 只有导入一批书时该用它：那时「同时有几本在飞」是外层知道的数，每本内部几路必须由它
+/// 一并算出，两层相乘才不超过这台机器。单本打开（读者点开了一个文件）用 [`open`] 就对。
+pub fn open_with(path: &Path, budget: ParseBudget) -> Result<Box<dyn Document>> {
+    Ok(Box::new(BookDocument::open_with(path, budget)?))
 }
 
 /// 从已经解析好的内容建一份文档，**没有容器**。

@@ -20,6 +20,8 @@ image.workspace = true
 zip.workspace = true
 # WOFF1 的表是逐表 zlib 压的，解回 sfnt 要用它（见 `format::woff`）。
 flate2.workspace = true
+# 见根 Cargo.toml：区间读要自己校 CRC32。
+crc32fast.workspace = true
 # Basic 认证头（`remote::dav`）。锁里已有这份，不新增依赖树。
 base64.workspace = true
 # 内容哈希（`identity`）：书的身份是它的内容，不是文件路径。

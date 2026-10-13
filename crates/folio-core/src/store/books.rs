@@ -883,26 +883,22 @@ impl Store {
     ///
     /// 第一种可以直接删数据（`prune_missing`），其余该重扫 —— 调用方选。
     pub fn stale_reason(&self, book_id: i64) -> Result<Option<StaleReason>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        // `cover_hash` 只用来在下面判「这一本有没有封面」——v16 之后封面规格那一档
-        // （`cover_spec`）连同 BLOB 一起没了：封面现在是一个文件，换规格只要重新生成
-        // 缩略图（`format::thumb::purge` + 懒生成），不必重扫全书。
-        let row: Option<StaleRow> = conn
-            .query_row(
+        // 锁内只问一句 SELECT，出锁再碰文件系统。`fs::metadata` 留在锁里时，界面线程为了
+        // 判「这本还可信吗」既要排在一次后台写库之后，还要替它等一次磁盘 ——
+        // `plans/阅读管线.md` §十.4 第 1 条点名的「锁内做了文件系统操作」就是这一处。
+        let row: Option<StaleRow> = {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            // `cover_hash` 只用来在下面判「这一本有没有封面」——v16 之后封面规格那一档
+            // （`cover_spec`）连同 BLOB 一起没了：封面现在是一个文件，换规格只要重新生成
+            // 缩略图（`format::thumb::purge` + 懒生成），不必重扫全书。
+            conn.query_row(
                 "SELECT path, size, mtime, index_version, cover_hash
                    FROM books WHERE id = ?1",
                 params![book_id],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                    ))
-                },
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
-            .optional()?;
+            .optional()?
+        };
         let Some((path, size, mtime, version, cover_hash)) = row else {
             return Ok(None);
         };
@@ -929,6 +925,49 @@ impl Store {
         }
         let _ = size;
         Ok(None)
+    }
+
+    /// 领一张重扫的号：这一本此刻既没在飞、也没在今天这个进程里失败过时返回 `true`，
+    /// 并把它记成在飞。返回 `false` 时调用方**不该**提交作业。
+    ///
+    /// 「同一本只允许一趟」与「失败过就别再自动试」两道门都收在这里，不留在调用方：
+    /// 两处各答一遍「这本该不该重扫」必然漂，同 `layout::key` 只留一把键的理由。
+    /// 号由作业那头 [`Store::note_reindex`] 释放，所以领到号就必须真的把作业投出去。
+    pub fn claim_reindex(&self, book_id: i64) -> bool {
+        // 两道门各自一个作用域，**不同时持有两把锁**：`note_reindex` 取它们的次序是反的，
+        // 嵌套持有就是死锁的素材（作业在池线程上，与界面线程真的会撞上）。
+        if self
+            .reindex_failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&book_id)
+        {
+            return false;
+        }
+        self.reindex_queued
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(book_id)
+    }
+
+    /// 重扫作业收尾：退号；失败的那本另记一档，本进程内不再自动重投。
+    ///
+    /// 成功要**从在飞里摘掉**而不是留着 —— `index_version` 下次被 bump 时那一本还得能再投
+    /// 一趟，留着号等于把「扫过」变成「永不重扫」。失败留着，因为重扫必然读完整本书
+    /// （`plans/导入管线.md` §八 第 3 条：要读完全书才知道的数全在导入这一趟算），没有这一格
+    /// 的话一本注定失败的书会让每次点开都白付一次全量重读。只在本进程内记：下次启动
+    /// 该再给它一次机会，而「坏在磁盘上」那种状态库里没有地方放。
+    pub fn note_reindex(&self, book_id: i64, ok: bool) {
+        self.reindex_queued
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&book_id);
+        if !ok {
+            self.reindex_failed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(book_id);
+        }
     }
 
     /// 源文件已经不在的那些书：**连数据一起删掉**。

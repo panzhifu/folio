@@ -46,6 +46,15 @@ pub fn is_skipped_tag(tag: &str) -> bool {
     SKIPPED_TAGS.contains(&tag)
 }
 
+/// [`is_skipped_tag`] 的另一头：命中时给出名单里那份 `'static` 的名字。
+///
+/// 单开一条是为了让「要记这个名字」的调用方一次分配都不花 —— [`crate::content::scan`]
+/// 的跳过栈要一路存标签名，用 `String` 就是每个跳过元素一次堆分配，
+/// 而它必须和这张表是同一份，抄一份名单迟早分叉。
+pub fn skipped_tag(tag: &str) -> Option<&'static str> {
+    SKIPPED_TAGS.iter().copied().find(|known| *known == tag)
+}
+
 /// 替换元素：自己没有文本，尺寸由内容决定，只能作为行内对象出现。
 pub fn is_replaced_inline(tag: &str) -> bool {
     matches!(tag, "img" | "svg" | "canvas" | "video" | "audio" | "iframe")
@@ -148,9 +157,9 @@ mod tests {
     //! UA 层给的值：显示类型、标题的字号与边距，以及「哪些继承值到这一层为止」。
 
     use super::seed;
+    use crate::content::dom::Dom;
     use crate::content::format::css::computed::{ComputedStyle, cascade};
     use crate::content::format::css::{Origin, RuleSet};
-    use crate::content::dom::Dom;
 
     fn node_id(dom: &Dom, tag: &str) -> crate::content::dom::NodeId {
         dom.elements()

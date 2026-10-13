@@ -44,6 +44,9 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # EPUB 里的 WOFF1 是「sfnt 逐表 zlib 压缩」。`zip` 已经带进 flate2（锁里 1.1.10），
 # 这里只是把它转成 folio-core 的直接依赖，不新增依赖树。
 flate2 = "1"
+# 自己按偏移读压缩块就要自己校 CRC32（zip-rs 原本替我们做这件事）。
+# 锁里本来就有这一份（flate2 与 png 都依赖它），转成直接依赖，不新增依赖树。
+crc32fast = "1"
 # Basic 认证头要 base64。锁里已经有 0.22.1（reqwest 那条链带进来的），
 # 这里把既有的一份转成直接依赖，不新增依赖树 —— 和上面 flate2 同样的理由。
 base64 = "0.22"

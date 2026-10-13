@@ -15,6 +15,50 @@
 //!   与机器无关，一本 N 章的书该解析几次有确定答案；计时会被调度噪声牵着走（±20%）。
 //! - 计时用中位数 + 热页缓存，只用来回答「这一步占整体几成」，不用来比较两台的快慢。
 
+/// 计数用的全局分配器：把「省掉大量分配」这种说法变成一个可断言的整数。
+///
+/// 只活在这个基准里（example 是自己的二进制，换 global allocator 不影响库与产物）。
+/// 用原子计数而不是计时：分配次数与字节数与机器无关，峰值 RSS 却会被别的阶段盖住。
+static ALLOC_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ALLOC_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct Counting;
+
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        ALLOC_BYTES.fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
+        ALLOC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, next: usize) -> *mut u8 {
+        ALLOC_BYTES.fetch_add(
+            next.saturating_sub(layout.size()) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        ALLOC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.realloc(ptr, layout, next) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        ALLOC_BYTES.fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
+        ALLOC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// 当前的 (累计分配字节, 分配次数)。
+fn alloc_shot() -> (u64, u64) {
+    (
+        ALLOC_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+        ALLOC_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,10 +66,92 @@ use std::time::{Duration, Instant};
 use folio_core::content::document::{self, ContentRef};
 use folio_core::content::dom::Dom;
 use folio_core::content::format::cover::{self, CoverRef};
-use folio_core::content::format::{shrink_image, thumb, visible_chars};
+use folio_core::content::format::{shrink_image, thumb};
 use folio_core::infra::metrics::{Metric, global};
 use folio_core::ingest::identity;
 use folio_core::{ImportKind, PathsSource, Source, Store, TaskEvent, TaskManager, submit_import};
+
+/// 把文件读进页缓存，但**不把它整个抱在手里**。
+///
+/// 原来用的是 `fs::read`，那会真分配一份与文件等长的缓冲：量时间没影响（首轮的磁盘
+/// 延迟照样被摊掉），但一本 29 MB 的书会把峰值 RSS 读脏 —— 那一格要读的是导入自己占
+/// 多少，不是预热占多少。
+fn warm(page: &Path) {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(page).expect("开书预热");
+    let mut buf = vec![0u8; 256 * 1024];
+    while file.read(&mut buf).expect("读书") > 0 {}
+}
+
+/// 这一台机器的两个读数：**喂给并行公式的那个核数**，与整趟跑完的**峰值 RSS（MB）**。
+///
+/// 核数不是背景信息：`ingest::import::split_budget` 的输入就是它，而它不是「说明书上有
+/// 几个核」—— 按本进程能用的亲和性掩码报（Meizu 20 在册 8 核，`nproc` 只报 6，于是
+/// 同一份代码在两边切出来的层数不一样）。RSS 读 `/proc/self/status` 的 `VmHWM`：
+/// 并行那一档多花的正是这一格，光看时间看不出来。
+fn machine_probe() -> (usize, u64) {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let rss_kb = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find(|line| line.starts_with("VmHWM:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|kb| kb.parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+    (cores, rss_kb / 1024)
+}
+
+/// 一批书走真管线的墙钟：同时导几本 × 每本几路，是唯一变量。
+///
+/// 每轮换一个全新的书库目录与库文件 —— 同一批第二次导会在判重那步短路，量到的就不是
+/// 解析而是 `stat`。比较的办法是把 `ingest::import::process_budget` 依次钉成几组
+/// `(books, per_book)` 各编一个二进制，然后**交替跑**：固定顺序下每轮先跑的那一支总在
+/// DVFS 还没爬起来的频率上（本文件 `shrink_probe` 那段记着这个坑）。
+fn batch_probe(books: &[PathBuf], rounds: usize) -> Vec<Duration> {
+    let manager = TaskManager::new(1);
+    let mut runs = Vec::with_capacity(rounds);
+    let mut summary = String::new();
+    for _ in 0..rounds {
+        let root = tempfile::tempdir().expect("建临时书库");
+        let lib = root.path().join("library");
+        std::fs::create_dir_all(&lib).expect("书库目录");
+        let store = Arc::new(Store::open_at(&lib.join("folio.db")).expect("开库"));
+        // 先把每一本读进页缓存，别让首轮的磁盘延迟混进 CPU 账。
+        for book in books {
+            warm(book);
+        }
+        let source: Box<dyn Source> =
+            Box::new(PathsSource::new(books.to_vec(), ImportKind::Picked));
+        let handle = submit_import(&manager, source, lib, Arc::clone(&store));
+        let t = Instant::now();
+        let mut done = None;
+        while let Ok(event) = handle.events.recv() {
+            if let TaskEvent::Finished(result) = event {
+                done = Some(result);
+            }
+        }
+        let elapsed = t.elapsed();
+        match done {
+            Some(Ok(outcomes)) => {
+                assert_eq!(outcomes.len(), books.len(), "报表条数必须等于候选数");
+                let added = outcomes.iter().filter(|o| o.result.is_ok()).count();
+                if added == 0 {
+                    panic!("一本都没进库：{:?}", outcomes[0].result.as_ref().err());
+                }
+                summary = format!("成功 {added} / 共 {}", outcomes.len());
+            }
+            Some(Err(err)) => panic!("批次作业失败：{err}"),
+            None => panic!("没有终局事件"),
+        }
+        runs.push(elapsed);
+    }
+    println!("  一批结清：{summary}");
+    runs
+}
 
 /// 一本书的分阶段读数。
 #[derive(Default)]
@@ -84,7 +210,7 @@ fn end_to_end(book: &Path, rounds: usize) -> Vec<Duration> {
         std::fs::create_dir_all(&lib).expect("书库目录");
         let store = Arc::new(Store::open_at(&lib.join("folio.db")).expect("开库"));
         // 先把文件读进页缓存，别让首轮的磁盘延迟混进 CPU 账。
-        let _ = std::fs::read(book).expect("读书");
+        warm(book);
 
         let source: Box<dyn Source> = Box::new(PathsSource::new(
             vec![book.to_path_buf()],
@@ -161,9 +287,16 @@ fn stage_breakdown(book: &Path, rounds: usize) -> (Stages, CounterDelta, Shape) 
             global(Metric::EntryNameTablePasses),
             global(Metric::DomParses),
         ];
+        let alloc_before = alloc_shot();
         let t = Instant::now();
         let doc = document::open(&readable).expect("解析");
         let open = t.elapsed();
+        let alloc_after = alloc_shot();
+        println!(
+            "  （这一趟 open 的分配：{:.1} MB / {} 次）",
+            (alloc_after.0 - alloc_before.0) as f64 / 1048576.0,
+            alloc_after.1 - alloc_before.1
+        );
         let delta = CounterDelta {
             container_opens: global(Metric::ContainerOpens) - before[0],
             name_table_passes: global(Metric::EntryNameTablePasses) - before[1],
@@ -397,119 +530,72 @@ impl EntryReport {
     }
 }
 
-/// 试探:数字数到底需不需要整棵树。
+/// 章节摘要两条路对拍 + 计时：`content::scan`（一遍标记扫描）对比 `visible_chars`（DOM）。
 ///
-/// `visible_chars` 现在为了一章的字数建出完整 DOM(节点 + 子表 + 路径),再走一遍
-/// `TextMap` 把所有文本复制进一个新 String。可这个数字只有一格 `usize`。
-/// 这里只喂 html5ever 的**分词器**,对同一批正文数一遍可见字,量两件事:
-/// 快多少、数出来的字数是否一模一样(一模一样才谈得上替换)。
-fn tokenizer_probe(book: &Path) -> Option<(Duration, Duration, usize, usize, usize)> {
-    use html5ever::tendril::StrTendril;
-    use html5ever::tokenizer::{
-        BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
-    };
-    use std::cell::Cell;
-    use std::sync::Arc;
-
-    #[derive(Default)]
-    struct Counts {
-        chars: Cell<usize>,
-        skip: Cell<i32>,
-        in_body: Cell<bool>,
-        saw_body: Cell<bool>,
+/// 这条取代了早先那个自己写分词器 sink 的探针 —— 那个探针数出来的字数与 DOM **不一致**
+/// （它没有照抄树构造那几条规则），所以它给的是「另一件事快多少」。这里比的是生产的
+/// 两趟真实现：不一致就直接报出来，那条一致性由 `content::scan::tests` 的逐章对拍守门。
+///
+/// 逐章**换着先后跑**（奇偶交替）：固定顺序下每轮先跑的那一支总在 DVFS 还没爬起来的
+/// 频率上，两趟的差会被放大或缩小（`thumb_probe` 那条实测过这种假象）。
+/// 回 `(DOM 总时, 扫描总时, 章数, 字数一致的章数, DOM 总字数, 扫描总字数)`。
+fn scan_probe(book: &Path) -> Option<(Duration, Duration, usize, usize, usize, usize)> {
+    let doc = folio_core::content::document::open(book).ok()?;
+    let count = doc.flow().map(|flow| flow.chapters.len()).unwrap_or(0);
+    if count == 0 {
+        return None;
     }
-
-    struct Sink(Arc<Counts>);
-
-    impl Sink {
-        fn bump(&self, delta: i32) {
-            self.0.skip.set((self.0.skip.get() + delta).max(0));
+    let mut texts = Vec::with_capacity(count);
+    for ix in 0..count {
+        if let Ok(text) = doc.chapter_source(ix) {
+            texts.push(text);
         }
     }
-
-    impl TokenSink for Sink {
-        type Handle = ();
-        fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
-            let hidden = |n: &str| matches!(n, "script" | "style" | "head" | "title" | "template");
-            match token {
-                Token::TagToken(tag) => {
-                    let name = &*tag.name;
-                    if name == "body" && tag.kind == TagKind::StartTag {
-                        self.0.in_body.set(true);
-                        self.0.saw_body.set(true);
-                    }
-                    if hidden(name) {
-                        self.bump(if tag.kind == TagKind::StartTag { 1 } else { -1 });
-                    }
-                }
-                Token::CharacterTokens(text) => {
-                    let visible =
-                        self.0.skip.get() == 0 && (!self.0.saw_body.get() || self.0.in_body.get());
-                    if visible {
-                        self.0.chars.set(self.0.chars.get() + text.chars().count());
-                    }
-                }
-                _ => {}
-            }
-            TokenSinkResult::Continue
-        }
-    }
-
-    let texts: Vec<String> = {
-        let Ok(file) = std::fs::File::open(book) else {
-            return None;
-        };
-        let Ok(mut zip) = zip::ZipArchive::new(file) else {
-            return None;
-        };
-        let mut out = Vec::new();
-        for i in 0..zip.len() {
-            let name = zip.by_index(i).ok()?.name().to_ascii_lowercase();
-            let hit = (name.ends_with(".xhtml")
-                || name.ends_with(".html")
-                || name.ends_with(".htm")
-                || name.ends_with(".xml"))
-                && !name.contains(".ncx")
-                && !name.ends_with(".opf")
-                && !name.contains("container.xml");
-            if !hit {
-                continue;
-            }
-            if let Ok(mut e) = zip.by_index(i) {
-                let mut buf = String::new();
-                if std::io::Read::read_to_string(&mut e, &mut buf).is_ok() {
-                    out.push(buf);
-                }
-            }
-        }
-        out
-    };
     if texts.is_empty() {
         return None;
     }
 
     let mut via_dom = Duration::ZERO;
-    let mut via_tok = Duration::ZERO;
+    let mut via_scan = Duration::ZERO;
     let mut dom_chars = 0usize;
-    let mut tok_chars = 0usize;
-    for text in &texts {
-        let t = Instant::now();
-        if let Some(n) = visible_chars(text) {
+    let mut scan_chars = 0usize;
+    let mut agreed = 0usize;
+    for (ix, text) in texts.iter().enumerate() {
+        // 交替：一半的章先跑 DOM，一半先跑扫描。
+        if ix % 2 == 0 {
+            let t = Instant::now();
+            let n = folio_core::content::format::visible_chars(text).unwrap_or(0);
+            via_dom += t.elapsed();
             dom_chars += n;
+            let t = Instant::now();
+            let sum = folio_core::content::scan::chapter_summary(text);
+            via_scan += t.elapsed();
+            scan_chars += sum.visible_chars;
+            if sum.visible_chars == n {
+                agreed += 1;
+            }
+        } else {
+            let t = Instant::now();
+            let sum = folio_core::content::scan::chapter_summary(text);
+            via_scan += t.elapsed();
+            scan_chars += sum.visible_chars;
+            let t = Instant::now();
+            let n = folio_core::content::format::visible_chars(text).unwrap_or(0);
+            via_dom += t.elapsed();
+            dom_chars += n;
+            if sum.visible_chars == n {
+                agreed += 1;
+            }
         }
-        via_dom += t.elapsed();
-
-        let counts = Arc::new(Counts::default());
-        let t = Instant::now();
-        let tokenizer = Tokenizer::new(Sink(Arc::clone(&counts)), TokenizerOpts::default());
-        let queue = BufferQueue::default();
-        queue.push_back(StrTendril::from(text.as_str()));
-        let _ = tokenizer.feed(&queue);
-        tokenizer.end();
-        via_tok += t.elapsed();
-        tok_chars += counts.chars.get();
     }
-    Some((via_dom, via_tok, texts.len(), dom_chars, tok_chars))
+    Some((
+        via_dom,
+        via_scan,
+        texts.len(),
+        agreed,
+        dom_chars,
+        scan_chars,
+    ))
 }
 
 /// 拆开看两档缩略图那 20 ms 花在哪：解码、缩、还是编。
@@ -541,7 +627,7 @@ fn thumb_probe(book: &Path) {
 
     let t = Instant::now();
     for size in thumb::SIZES {
-        let scaled = img.thumbnail(size as u32, size as u32);
+        let scaled = img.thumbnail(size, size);
         let rgb = scaled.to_rgb8();
         let mut out = Vec::new();
         let _ = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80).encode(
@@ -552,7 +638,7 @@ fn thumb_probe(book: &Path) {
         );
         std::hint::black_box(out);
     }
-    let lanczos = t.elapsed();
+    let block_avg = t.elapsed();
 
     let t = Instant::now();
     for size in thumb::SIZES {
@@ -579,8 +665,8 @@ fn thumb_probe(book: &Path) {
         ms(two_decode)
     );
     println!(
-        "    缩+编两档 Lanczos3 {:>7.1} ms · Triangle {:>7.1} ms",
-        ms(lanczos),
+        "    缩+编两档 thumbnail（块平均）{:>7.1} ms · Triangle（卷积）{:>7.1} ms",
+        ms(block_avg),
         ms(triangle)
     );
 
@@ -629,9 +715,174 @@ fn thumb_probe(book: &Path) {
     );
 }
 
-/// 拆 `shrink_image` 那 187 ms：解码、缩放、转 RGB、编码各占多少。
+/// 要比的缩放档。`filter = None` 是 `DynamicImage::thumbnail` 那个**整数块平均**采样器
+/// （`imageops::thumbnail`，每个源像素恰好贡献给一个目标像素）；给了 `filter` 就走
+/// `resize(cap, cap, filter)` —— 同一套几何（都是 `resize_dimensions` 的 `fill = false`
+/// 那一支、都保比例），换的只是卷积滤波的种类。
+///
+/// `blur > 0.0` 的那两档是**先做一道高斯前滤波再缩**：理论上这才是抑制混叠的正经做法，
+/// 代价是全图像素多算一遍卷积，所以它进的是耗时那一栏，不是免费选项。
+///
+/// `two_step` 那一档是块平均**缩两次**（先到 2× 目标再到位）：教科书里的廉价路子，
+/// 两次盒子摺起来近似一个帐篷核。**实测是反的**：棋盘混叠 σ 从 12.69 涨到 28.00 ——
+/// 第一步的比例只有 1.56×，等于几乎没低通就先把混叠折进了通带，第二步再缩也分不出来。
+/// 留着这一档是为了别再有人试同一条路。它的**耗时那一栏不作数**：源比 2× 目标还小时
+/// 第一步走的是放大（538×720 那本 +432% 就是这么来的），不是同一次活的两种做法。
+type ResizeArm = (&'static str, Option<image::imageops::FilterType>, f32, bool);
+
+const RESIZE_ARMS: [ResizeArm; 9] = [
+    ("thumbnail（块平均·产线）", None, 0.0, false),
+    (
+        "Nearest",
+        Some(image::imageops::FilterType::Nearest),
+        0.0,
+        false,
+    ),
+    (
+        "Triangle",
+        Some(image::imageops::FilterType::Triangle),
+        0.0,
+        false,
+    ),
+    (
+        "CatmullRom",
+        Some(image::imageops::FilterType::CatmullRom),
+        0.0,
+        false,
+    ),
+    (
+        "Gaussian",
+        Some(image::imageops::FilterType::Gaussian),
+        0.0,
+        false,
+    ),
+    (
+        "Lanczos3",
+        Some(image::imageops::FilterType::Lanczos3),
+        0.0,
+        false,
+    ),
+    ("blur 1.6 → thumbnail", None, 1.6, false),
+    (
+        "blur 1.6 → Lanczos3",
+        Some(image::imageops::FilterType::Lanczos3),
+        1.6,
+        false,
+    ),
+    ("thumbnail ×2（两步块平均）", None, 0.0, true),
+];
+
+fn scale_arm(
+    img: &image::DynamicImage,
+    cap: u32,
+    filter: Option<image::imageops::FilterType>,
+    blur: f32,
+    two_step: bool,
+) -> image::DynamicImage {
+    let prepared = if blur > 0.0 {
+        img.blur(blur)
+    } else {
+        img.clone()
+    };
+    // 第一步先退到 2× 目标，第二步才到位：两次块平均摺起来近似一个帐篷核。
+    let step = if two_step { cap * 2 } else { cap };
+    let once = match filter {
+        Some(f) => prepared.resize(step, step, f),
+        None => prepared.thumbnail(step, step),
+    };
+    if step == cap {
+        return once;
+    }
+    match filter {
+        Some(f) => once.resize(cap, cap, f),
+        None => once.thumbnail(cap, cap),
+    }
+}
+
+/// 一帧灰度图的标准差（0-255 刻度）。
+fn std_dev(img: &image::GrayImage) -> f64 {
+    let n = img.as_raw().len() as f64;
+    let mean = img.as_raw().iter().map(|p| u64::from(*p)).sum::<u64>() as f64 / n;
+    img.as_raw()
+        .iter()
+        .map(|p| {
+            let d = f64::from(*p) - mean;
+            d * d
+        })
+        .sum::<f64>()
+        .sqrt()
+        / n.sqrt()
+}
+
+/// 单像素亮线缩完的**等效宽度**（像素）与**峰值亮度**：各列均值之和除以峰值列。
+/// 宽度 1.0 = 一点没摊开；越大就是滤波把边缘抹掉的程度。
+///
+/// 峰值必须一起报：`Nearest` 这类采样可能把一条 1 像素的线整个**跳过**，那样宽度看着
+/// 最漂亮，实际是线没了 —— 只报宽度会把这种失败读成最优。
+fn edge_width(img: &image::GrayImage) -> (f64, f64) {
+    let (w, h) = (img.width(), img.height());
+    let mut peak = 0.0f64;
+    let mut total = 0.0f64;
+    for x in 0..w {
+        let mut sum = 0u64;
+        for y in 0..h {
+            sum += u64::from(img.get_pixel(x, y)[0]);
+        }
+        let col = sum as f64 / h as f64;
+        total += col;
+        peak = peak.max(col);
+    }
+    if peak <= 0.0 {
+        (0.0, 0.0)
+    } else {
+        (total / peak, peak)
+    }
+}
+
+/// 缩放档位的**质量**对照：抗混叠与保锐度，两个方向互相拆台，所以一起报。
+///
+/// 真书封面量不出质量（没有已知答案），这里喂两张合成图：
+///
+/// - **棋盘**（周期 2 像素的 0/255 交替，1200×1600 缩到长边 512）：这份内容高于缩小后的
+///   奈奎斯特频率，理想低通之后应当变成一片平灰 → 输出的标准差就是**混叠残留**，越小越好。
+///   棋盘是混叠的最坏情况，真实封面里细发丝、书名字、网点都属同一类。
+/// - **一条单像素亮线**：缩完摊成多宽就是**锐度代价**，越小越利。
+///
+/// 耗时不在这里量（`shrink_probe` 用真封面逐档轮转量），也不与质量换算成「值不值」——
+/// 那一步留给看的人。
+fn resize_probe() {
+    const CAP: u32 = 512;
+    let board = image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(1200, 1600, |x, y| {
+        image::Luma([if (x + y) % 2 == 0 { 0 } else { 255 }])
+    }));
+    let line = image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(1200, 1600, |x, _y| {
+        image::Luma([if x == 600 { 255 } else { 0 }])
+    }));
+
+    println!("\n  == 缩放档位的质量对照（棋盘 1200×1600→512；亮线同尺寸）==");
+    println!(
+        "    {:<24} {:>10} {:>10} {:>10}",
+        "算法", "混叠 σ", "线宽 px", "线峰值"
+    );
+    for (label, filter, blur, two_step) in RESIZE_ARMS {
+        let scaled = scale_arm(&board, CAP, filter, blur, two_step).to_luma8();
+        let moire = std_dev(&scaled);
+        let (sharp, peak) = edge_width(&scale_arm(&line, CAP, filter, blur, two_step).to_luma8());
+        println!("    {label:<24} {moire:>10.2} {sharp:>10.2} {peak:>10.1}");
+    }
+    println!(
+        "    （棋盘理想答案是纯平灰 σ≈0；亮线理想答案是 1.0 px 宽、峰值不丢。两栏不可能同时最优。）"
+    );
+}
+
+/// 拆 `shrink_image`：解码、缩放、转 RGB、编码各占多少，缩放八档一起量耗时。
 ///
 /// 拆开才知道该动哪一刀，也才知道纯 Rust 还能省多少、什么时候非改结构不可。
+///
+/// 八档**必须同一个目标口径**才谈得上比较：都按长边缩到 512、保住比例（旧版把 Triangle
+/// 那条硬编码成 357×512，那是某一本书的封面尺寸，换一本书就在比两件事）。而且每轮换起点
+/// —— 固定顺序下每轮先跑的那一支总在 DVFS 还没爬起来的 CPU 上，几毫秒的差会被报成
+/// 几十毫秒（`thumb_probe` 那条实测过这种假象）。质量那一侧的对照见 [`resize_probe`]。
 fn shrink_probe(book: &Path) {
     use image::ImageDecoder as _;
     let Ok(mut zip) = zip::ZipArchive::new(std::fs::File::open(book).unwrap()) else {
@@ -661,20 +912,35 @@ fn shrink_probe(book: &Path) {
     let decode = t.elapsed();
     let (w, h) = (img.width(), img.height());
 
-    let t = Instant::now();
-    let exact = img
-        .clone()
-        .resize_exact(357, 512, image::imageops::FilterType::Triangle);
-    let exact_d = t.elapsed();
-    let t = Instant::now();
-    let thumb = img.clone().thumbnail(512, 512);
-    let thumb_d = t.elapsed();
+    // 与 `shrink_image` 同一个目标口径：长边缩到 512、比例不动。
+    // `resize(cap, cap, f)` 与旧产线那条「自己算宽高再 resize_exact」是同一件活
+    // （前者内部就走 `resize_dimensions(fill=false)` → `resize_exact`），所以可以直接比。
+    let cap = 512u32;
+    let mut costs: Vec<Vec<Duration>> = RESIZE_ARMS.iter().map(|_| Vec::new()).collect();
+    for round in 0..PROBES {
+        // 每轮换起点：八档各自轮到我做「冷频上第一个跑」那一次，
+        // 固定顺序会把几毫秒的差报成几十毫秒（`thumb_probe` 实测过这种假象）。
+        for k in 0..RESIZE_ARMS.len() {
+            let at = (k + round) % RESIZE_ARMS.len();
+            let (_, filter, blur, two_step) = RESIZE_ARMS[at];
+            let t = Instant::now();
+            let out = scale_arm(&img, cap, filter, blur, two_step);
+            costs[at].push(t.elapsed());
+            std::hint::black_box(out);
+        }
+    }
+    for v in costs.iter_mut() {
+        v.sort();
+    }
+    let produced = img.clone().thumbnail(cap, cap);
+    let baseline = ms(costs[0][costs[0].len() / 2]);
+
     let t = Instant::now();
     let copy = img.to_rgb8();
     let copy_d = t.elapsed();
     let t = Instant::now();
     let mut out = Vec::new();
-    let rgb = exact.to_rgb8();
+    let rgb = produced.to_rgb8();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82)
         .encode(
             rgb.as_raw(),
@@ -686,32 +952,33 @@ fn shrink_probe(book: &Path) {
     let enc = t.elapsed();
 
     println!(
-        "\n  `shrink_image` 拆开（原图 {}×{}，{} KB，{} MB 像素）:",
+        "\n  `shrink_image` 拆开（原图 {}×{}，{} KB，{} MB 像素，缩到 {}）:",
         w,
         h,
         raw.len() / 1024,
-        w as usize * h as usize * 3 / 1048576
-    );
-    println!("    完整解码                  {:>8.1} ms", ms(decode));
-    println!(
-        "    缩到 512：现在这条 resize_exact(Triangle) {:>7.1} ms",
-        ms(exact_d)
-    );
-    println!(
-        "    缩到 512：换成 thumbnail(Lanczos3 带快路径) {:>7.1} ms  → {} 尺寸",
-        ms(thumb_d),
+        w as usize * h as usize * 3 / 1048576,
         {
-            let (tw, th) = (thumb.width(), thumb.height());
-            format!("{tw}×{th}")
+            let (pw, ph) = (produced.width(), produced.height());
+            format!("{pw}×{ph}")
         }
     );
+    println!("    完整解码                  {:>8.1} ms", ms(decode));
+    println!("    缩放各档（{PROBES} 轮轮转取中位，产线那一档为基准）:");
+    for (i, (label, _, _, _)) in RESIZE_ARMS.iter().enumerate() {
+        let at = ms(costs[i][costs[i].len() / 2]);
+        println!(
+            "      {label:<24} {at:>8.1} ms   {:+7.1} ms（{:+4.0}%）",
+            at - baseline,
+            (at - baseline) / baseline.max(0.001) * 100.0
+        );
+    }
     println!("    to_rgb8（整份拷一遍像素）  {:>8.1} ms", ms(copy_d));
     println!(
         "    编 512 档 JPEG             {:>8.1} ms → {} KB",
         ms(enc),
         out.len() / 1024
     );
-    std::hint::black_box((copy, thumb));
+    std::hint::black_box(copy);
 }
 
 fn pick_books(args: &[String]) -> Vec<PathBuf> {
@@ -741,6 +1008,30 @@ fn main() {
     }
 
     println!("== 导入基准（{rounds} 轮，release，热页缓存）==\n");
+    // 给了一批（合成语料那种）就只算批次的账：单本那些探针与并行度无关，
+    // 而 `resize_probe` 一次要跑九个缩放档位，交替比较时纯属拖累。
+    if books.len() > 1 {
+        let (cores, _) = machine_probe();
+        println!("  这台机器给并行公式的核数：{cores}");
+        let runs = batch_probe(&books, rounds);
+        let mut sorted = runs.clone();
+        sorted.sort();
+        let median = sorted[sorted.len() / 2];
+        println!(
+            "  一批 {} 本          {:>9.1} ms   中位 / 全轮 {:?}   每本均 {:>7.1} ms",
+            books.len(),
+            ms(median),
+            runs.iter()
+                .map(|d| format!("{:.0}", ms(*d)))
+                .collect::<Vec<_>>(),
+            ms(median) / books.len() as f64,
+        );
+        let (_, rss) = machine_probe();
+        println!("  峰值 RSS            {rss:>9.1} MB");
+        return;
+    }
+    // 缩放档位的质量对照与具体的书无关（输入是合成图），整轮跑一次就够。
+    resize_probe();
     for book in &books {
         let bytes = std::fs::metadata(book).map(|m| m.len()).unwrap_or(0);
         println!("── {book:?}  {}", mb(bytes as f64));
@@ -843,26 +1134,17 @@ fn main() {
         if gap > 1.0 {
             println!("  对不上账的剩余: {gap:.1} ms（OPF/目录解析、分配、落盘准备）");
         }
-        shrink_probe(book);
+        open_split_probe(book, 5);
         shrink_probe(book);
         thumb_probe(book);
-        if let Some((via_dom, via_tok, n, dc, tc)) = tokenizer_probe(book) {
+        if let Some((via_dom, via_scan, chapters, agreed, dc, sc)) = scan_probe(book) {
             println!(
-                "\n  数字数两条路({n} 章):整树解析 {:>7.1} ms  vs  只走分词器 {:>7.1} ms   → {:.1}×",
+                "\n  章节摘要两条路（{chapters} 章，逐章交替）:整树 DOM {:>7.1} ms  vs  一遍扫描 {:>7.1} ms   → {:.1}×",
                 ms(via_dom),
-                ms(via_tok),
-                ms(via_dom) / ms(via_tok).max(0.001)
+                ms(via_scan),
+                ms(via_dom) / ms(via_scan).max(0.001)
             );
-            println!(
-                "  字数是否一致: {} ({} vs {})",
-                if dc == tc {
-                    "一致 ✓"
-                } else {
-                    "不一致 ✗"
-                },
-                dc,
-                tc
-            );
+            println!("  字数逐章一致:{agreed}/{chapters} 章   总量 DOM {dc} 字 vs 扫描 {sc} 字");
         }
         println!();
     }
@@ -870,5 +1152,55 @@ fn main() {
     println!(
         "口径提醒：计时只回答「哪一段占大头」，跨机器的比较看计数器。\n\
          手机类的 CPU 单线程大约是台式机的 1/2 ~ 1/3，而这条管线一本书内部没有并行。"
+    );
+}
+
+/// `Zip::open` 拆开：zip-rs 自己读中央目录，与我们在其之上再建两张表，各占多少。
+///
+/// 这条是给「共享中央目录索引」那个提案量上限的：worker 每开一次容器要付两份账，
+/// 换成「主线程解一次 + worker 各拿句柄按偏移 pread」只能省掉**这两份的全部**，
+/// 所以先看这两份各多大、乘上 worker 数还剩多少。
+fn open_split_probe(book: &Path, rounds: usize) {
+    use std::io::BufReader;
+    let mut entries = 0usize;
+    let mut zip_rs = Vec::new();
+    let mut ours = Vec::new();
+    for _ in 0..rounds {
+        let t = Instant::now();
+        let archive =
+            zip::ZipArchive::new(BufReader::new(std::fs::File::open(book).unwrap())).expect("开档");
+        let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+        let index: std::collections::HashMap<String, usize> = names
+            .iter()
+            .enumerate()
+            .map(|(at, name)| (name.replace('\\', "/"), at))
+            .collect();
+        entries = names.len();
+        ours.push(t.elapsed());
+        std::hint::black_box(&index);
+        let t2 = Instant::now();
+        drop(index);
+        drop(names);
+        drop(archive);
+        let _ = t2;
+        zip_rs.push(ours[ours.len() - 1]);
+    }
+    // 上面那份是「zip-rs + 我们的表」合起来的计时，再单独量一次只到 `ZipArchive::new`。
+    let mut only_new = Vec::new();
+    for _ in 0..rounds {
+        let t = Instant::now();
+        let archive =
+            zip::ZipArchive::new(BufReader::new(std::fs::File::open(book).unwrap())).expect("开档");
+        std::hint::black_box(archive.len());
+        only_new.push(t.elapsed());
+    }
+    zip_rs.sort();
+    only_new.sort();
+    let all = ms(zip_rs[zip_rs.len() / 2]);
+    let just_new = ms(only_new[only_new.len() / 2]);
+    println!(
+        "  开容器拆开（{} 个条目，一个 worker 一次）:`ZipArchive::new` 读中央目录 {just_new:.3} ms   再加我们两张表 {all:.3} ms   → 我们那部分 {:+.3} ms",
+        entries,
+        all - just_new
     );
 }

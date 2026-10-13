@@ -21,6 +21,30 @@ use std::path::Path;
 use super::{Chapter, ChapterLocator, ChapterText, Content, DocMeta, FlowDoc, FontBytes, Format};
 use crate::Result;
 
+/// 一本书内部**最多起几路**解析 worker —— 两层并行共用一份预算时，由上面那一层分给它。
+///
+/// 存在的理由是那个乘积：一批同时导 M 本、每本内部 I 路，真正抢核的是 **M × I**。
+/// 以前这两层各猜各的 —— 内层只看得见整机核数
+/// （`content::format::epub::parse_worker_count`），外层每多一本就把总量再乘一份，
+/// 于是「桌面 20 核」与「手机 6 核」上都不是一个被定住的数。这一格把 I 的定夺权
+/// 交给**知道有几个兄弟在飞**的那一层（`ingest::import::split_budget`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseBudget {
+    /// 按这台机器的核数与条目数自己定（读者打开一本书走这一档：那时它是唯一在跑的）。
+    Auto,
+    /// 上层算好了：这一本最多起这么多路。`0` 与 `1` 同档（顺序）。
+    ///
+    /// 这是**上限而不是配额**：条目少到不值得起线程时照样走顺序
+    /// （判据留在 provider 那一层，因为它才知道有几个条目）。
+    AtMost(usize),
+    /// 不管条目数多少，就起 `n` 路。**只给测试与基准**：它们要一个与机器核数无关的
+    /// 确定输入，而"给它凑够 16 个条目"那种做法会让测试的样本被条目数那条门牵着走。
+    ///
+    /// 生产路径不该用它 —— 一本 5 个条目的书起 4 条线程，付的是线程创建与每路一份
+    /// 读缓冲，换不到任何东西。
+    Exactly(usize),
+}
+
 pub trait DocumentProvider: Send + Sync {
     fn format(&self) -> Format;
 
@@ -38,6 +62,19 @@ pub trait DocumentProvider: Send + Sync {
     /// **不产出正文**：章表里的每一章是 [`ChapterText::At`]，正文得叫
     /// [`DocumentProvider::chapter_source`]。这是导入那一步唯一该调的入口。
     fn index(&self, path: &Path) -> Result<(DocMeta, Content)>;
+
+    /// 同 [`index`](DocumentProvider::index)，但把「这一本内部最多起几路」交给调用方。
+    ///
+    /// 默认**忽略这个提示**（原样退回 [`index`](DocumentProvider::index)）：一本书真的
+    /// 起多路 worker 的只有名单式容器那一族，而少条目本来就不起线程 —— 让每个格式都
+    /// 接这个参数只是把签名变长。**认得它的格式**（`format::epub`）覆盖这一条。
+    ///
+    /// 覆盖时不许把它当成「必须起够这么多路」：那是上限，条目数不够就走顺序，
+    /// 结果必须与 `Auto` 一模一样 —— 并行在这层只是换个取字节的排程，不是换一种读法。
+    fn index_with(&self, path: &Path, budget: ParseBudget) -> Result<(DocMeta, Content)> {
+        let _ = budget;
+        self.index(path)
+    }
 
     /// 一章的引擎就绪 XHTML，按位置取。
     ///

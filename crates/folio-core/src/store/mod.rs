@@ -18,6 +18,7 @@
 //! （子模块看得见父模块的私有字段），但那条锁纪律在拆开之后更要紧 ——
 //! 一个公开方法只该上锁一次，`*_in` 助手只接 `&Connection`。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -47,6 +48,18 @@ use schema::MIGRATIONS;
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// 这一本的重扫作业**已在飞**的 `book_id`（[`crate::ingest::import::schedule_reindex`] 的记账）。
+    ///
+    /// 挂在 `Store` 上而不是进程级的 `static`：判据说的是「这个库里的那一本」，而测试各开
+    /// 各的内存库、`book_id` 都从 1 起 —— 放进进程级集合里，两条并发用例的同名 id 会互相
+    /// 挡掉对方的提交，那是一条绿不了也红不明的假门。
+    reindex_queued: Mutex<HashSet<i64>>,
+    /// 试过且**失败**的那些 `book_id`：不再自动重投。
+    ///
+    /// 判据只看库里的 `index_version`，所以一本注定重扫失败的书，没有这一格就要每次点开
+    /// 都重付一次全量重读（重扫必然读完整本，见 `plans/导入管线.md` §八 第 3 条）。
+    /// 只在这一进程内记，不落库：下次启动该再给它一次机会。
+    reindex_failed: Mutex<HashSet<i64>>,
 }
 
 // 这条断言是「Store 可跨线程」的承诺本身：后台线程（导入管线）能拿着 `&Store`
@@ -131,6 +144,8 @@ impl Store {
         }
         Ok(Self {
             conn: Mutex::new(conn),
+            reindex_queued: Mutex::new(HashSet::new()),
+            reindex_failed: Mutex::new(HashSet::new()),
         })
     }
 
@@ -203,8 +218,6 @@ impl Store {
 
     pub fn user_version(&self) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
+        Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 }
-

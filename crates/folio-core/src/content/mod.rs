@@ -21,3 +21,4 @@ pub mod document;
 pub mod dom;
 pub mod format;
 pub mod hit;
+pub mod scan;

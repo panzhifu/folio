@@ -45,20 +45,24 @@
 //! 监听、传书、WebDAV 同步自己都不是管线的一部分 —— 它们是往队列塞活的**驱动者**
 //! （见 `crate::ingest::watch`），把 [`Source`] 交给 [`submit_import`] 就行。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
 use crate::content::document;
 use crate::content::format::Format;
-use crate::store::BookRow;
-use crate::infra::error::{Error, IoResultExt as _, Result};
-use crate::infra::error::ImportReject;
-use crate::ingest::identity;
-use crate::infra::paths;
+use crate::content::format::ParseBudget;
+use crate::content::format::epub::MAX_PARSE_WORKERS;
 use crate::content::format::sniff;
+use crate::infra::error::ImportReject;
+use crate::infra::error::{Error, IoResultExt as _, Result};
+use crate::infra::paths;
+use crate::infra::task::{Priority, StageCtx, TaskError, TaskEvent, TaskHandle, TaskManager};
+use crate::ingest::identity;
 use crate::net::remote::{Method, Request, Sink, Transport};
+use crate::store::BookRow;
 use crate::store::Store;
-use crate::infra::task::{Priority, StageCtx, TaskEvent, TaskHandle, TaskManager};
 
 /// 这次导入属于哪一类来源。日志与「这批是谁交的」用，不参与任何分支逻辑。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,20 +220,25 @@ impl ImportReport {
 }
 
 /// 管线本体：候选 → 暂存 → 算哈希 → 判格式 → 判重 → 落地 → 解析 → 落库，
-/// **逐本进行，逐本报数**。
+/// **一本一条完整旅程，逐本报数**。
 ///
 /// - **顺序是硬的**：`stage → hash → sniff → dedup → rename → parse → register`；
 ///   中间任何一本坏了只让它自己那条 `Err`，其余的照走。
-/// - **取消**在书与书之间检查；置位就停下，**已经落库的那些是真的** —— 界面收到
-///   `Cancelled` 重查一次架面就能看见它们。**落地之后、落库之前不设检查点**：那一段
-///   里停一次就会留下「副本在、库里没有行」的状态，而 §九 要的正是挡住它。
+/// - **取消**在书与书之间检查（准确说在「领下一本的号」之前，见 [`Batch::run`]）；置位就
+///   停下，**已经落库的那些是真的** —— 界面收到 `Cancelled` 重查一次架面就能看见它们。
+///   同时在飞几本由 [`split_budget`] 定，所以这条承诺的延迟上限是「每路各一本」而不是
+///   「一本」：只有一个候选、或 ≤3 核的机器（那儿预算切成 1 本）才退回「恰好停在两本
+///   之间」那条最严的形状。
+///   **落地之后、落库之前不设检查点**：那一段里停一次就会留下「副本在、库里没有行」的
+///   状态，而 §九 要的正是挡住它。
 /// - `candidates` 交不出（整个来源坏了，比如根目录读不了）返回空批 —— 逐本各自成败的
 ///   立场在这里够不着，一条 `Err` 没有候选可挂，只能进日志。
 /// - 暂存区建不起来时也返回空批：宁可一本都不导，也不悄悄退回「直接写进书库目录」那条
 ///   老路 —— 判定排在落地之前要挡住的正是那个形状。
 ///
 /// 整个批次一个 span（`plans/基础设施.md` §4.1 第 4 条）：导入慢在哪一步（列目录 /
-/// 拷贝 / 哈希 / 解析 / 落库）看 `close time.busy` 这一段最直接。
+/// 拷贝 / 哈希 / 解析 / 落库）看 `close time.busy` 这一段最直接。并行时 worker 不会
+/// 自动带上这一格 span，[`import_batch`] 里那句 `in_scope` 就是补这一笔的。
 #[tracing::instrument(
     level = "debug",
     name = "import",
@@ -257,22 +266,326 @@ pub fn import_from(
     }
     let total = candidates.len() as u64;
     tracing::info!("import: {kind:?} 一批 {total} 本 → {dest_dir:?}");
-    let mut outcomes = Vec::with_capacity(candidates.len());
-    for (done, candidate) in candidates.iter().enumerate() {
-        if ctx.cancel().triggered() {
-            break;
-        }
-        ctx.item(done as u64, total);
-        let result = import_candidate(source, candidate, dest_dir, &staging, store, ctx);
-        outcomes.push(ImportOutcome {
-            candidate: candidate.clone(),
-            result,
-        });
-    }
+    let outcomes = import_batch(
+        source,
+        dest_dir,
+        store,
+        ctx,
+        &staging,
+        &candidates,
+        process_budget(),
+    );
     ctx.item(total, total);
     let report = ImportReport::tally(&outcomes);
     tracing::info!("import: {kind:?} 一批结清 —— {}", report.summary());
     outcomes
+}
+
+/// 一批的线程预算怎么分：**同时几本**与**每本几路**一次算完，共用一份预算。
+///
+/// 要同时定这两个数的理由是那个乘积 —— 真正抢核的是 `books × per_book`。以前两层各猜
+/// 各的：内层只看得见整机核数（`content::format::epub::parse_worker_count`），外层每多
+/// 一本就把总量再乘一份，于是「一本书内部几路」这件事实际上由**两台机器各自的核数**决定，
+/// 而导入那边不知道。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Budget {
+    /// 一批里同时在导几本。
+    books: usize,
+    /// 每一本内部**最多**起几路解析 worker。是上限不是配额：条目少到不值得起线程时
+    /// 照样走顺序，判据留在 provider 那一层（只有它知道有几个条目）。
+    per_book: usize,
+}
+
+/// 一批最多同时导几本。再往上量不到东西：8 本合成书（共 4.7 MB）那一批量到的是
+/// 1 本 ≈ 55 ms、4 本 ≈ 25 ms、5 本 ≈ 23 ms —— 第 5 本只换来 2 ms，却多一份解析内存，
+/// 所以封顶在 4。
+const MAX_IMPORT_BOOKS: usize = 4;
+/// 每本至少要几路才算「值得再开一本」：低于这个数就把核留给同批的别的本。
+const MIN_WORKERS_PER_BOOK: usize = 2;
+
+/// 把 `cores` 切成一个 [`Budget`]。`cores` 是这台机器给**本进程**用的核数
+/// （`available_parallelism` —— 手机上受亲和性掩码影响，在册 8 核可能只报 6）。
+///
+/// 「同时几本」= 核数 ÷ [`MIN_WORKERS_PER_BOOK`]，封顶 [`MAX_IMPORT_BOOKS`]；每本拿
+/// **剩下的**那份，封顶在内层的 `MAX_PARSE_WORKERS`。`books × per_book ≤ cores` 是
+/// 构造出来的：两处都只封顶、不放大。
+///
+/// | 核数 | 同时几本 | 每本几路 | 总线程 |
+/// | --- | --- | --- | --- |
+/// | 1 | 1 | 1 | 1 |
+/// | 2 | 1 | 2 | 2 |
+/// | 4 | 2 | 2 | 4 |
+/// | 6 | 3 | 2 | 6 |
+/// | 8 | 4 | 2 | 8 |
+/// | 12 | 4 | 3 | 12 |
+/// | 20 | 4 | 4（封顶） | 16 |
+///
+/// **实测**（同一批 4 本真书共 37 MB；每档都是「钉死 `(books, per_book)` 的二进制」交替跑、
+/// 取 6 个中位样本；RSS 那格读的是 `VmHWM`，预热已改成不抱整本书 —— 早先那版用
+/// `fs::read` 预热，把 29 MB 的缓冲算进了并行那一档的成本里，数因此虚高约 25 MB）：
+///
+/// | 机器 | 切法 | 批次墙钟 | 峰值 RSS |
+/// | --- | --- | --- | --- |
+/// | 20 核桌面 | 1 本 × 4 路（接并行之前这台机器的实际形状） | ≈ 483 ms | ≈ 34 MB |
+/// | 20 核桌面 | **4 本 × 4 路（这一格给出的切法）** | ≈ 202 ms（**2.4×**） | ≈ 54 MB（+59%） |
+/// | Meizu 20（`available_parallelism` 报 **6**） | 1 本 × 4 路 | ≈ 1080 ms | 19 MB |
+/// | Meizu 20 | 2 本 × 3 路 | ≈ 744 ms（1.45×） | 23 MB |
+/// | Meizu 20 | 4 本 × 1 路 | ≈ 645 ms（1.67×） | 27 MB |
+/// | Meizu 20 | **3 本 × 2 路（这一格给出的切法）** | ≈ 520 ms（**2.07×**） | 25 MB（+32%） |
+///
+/// 手机上那五行是这次量出来的重点两件事：**以前那一版（`核数 ÷ 内层自己那 4 路`）在 6 核上
+/// 整除成「1 本」，接了并行却仍然逐本串行**，就是表里第一行；而「并行只在一层」那条路
+/// （4 本 × 1 路）比「3 本 × 2 路」慢 24% —— 内层那两路没有白花，所以预算要在两层之间分，
+/// 而不是全给一层。顺带一条：并行那一档的**摆动也小了**（1 本 × 4 路是 945–1275 ms，
+/// 3 本 × 2 路是 477–658 ms）—— 一本特别长的书不再能决定整批的时间。
+///
+/// 一条没覆盖的：读者正打开一本书时读那一本用的是 `ParseBudget::Auto`（整机那一档），
+/// 不在这笔乘法里。所以**导一批的同时点开一本**，总线程数会超过 `cores`。要把那一格也
+/// 锁住，得让两条路共用一个进程内的令牌池而不是各自算 —— 那是另一件事，没在这里做。
+fn split_budget(cores: usize) -> Budget {
+    let books = (cores / MIN_WORKERS_PER_BOOK).clamp(1, MAX_IMPORT_BOOKS);
+    let per_book = (cores / books).clamp(1, MAX_PARSE_WORKERS);
+    Budget { books, per_book }
+}
+
+/// 这一趟的预算：把这台机器的核数一次切成两个数（[`split_budget`]）。
+fn process_budget() -> Budget {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    split_budget(cores)
+}
+
+/// 一趟批次共享的东西。合成一个结构不是为了整齐，是因为「领编号 → 导一本 → 记账」
+/// 这一小段要同时被调用线程和每条 worker 用（9 个参数的手写函数会被 clippy 挡下，
+/// 而把引用与三个计数器放一处，两边就都只拿 `&Batch`）。
+struct Batch<'a> {
+    source: &'a dyn Source,
+    dest_dir: &'a Path,
+    staging: &'a Path,
+    store: &'a Store,
+    ctx: &'a StageCtx,
+    candidates: &'a [Candidate],
+    /// 每一本内部最多起几路解析 worker（[`Budget::per_book`]）。
+    per_book: usize,
+    /// 下一个待领的候选下标。
+    next: AtomicUsize,
+    /// 已经结清的本数，只为那句整批读数。
+    done: AtomicUsize,
+    /// `(候选下标, 结果)`。谁导完一本就当场记进来：worker 崩了也**不丢已经落好的那些**。
+    landed: Mutex<Vec<(usize, ImportOutcome)>>,
+}
+
+impl Batch<'_> {
+    /// 领一本导一本，到队列见底或取消置位。
+    ///
+    /// 取消的检查点落在**领号之前**：已经领走的那本跑完（与逐本串行那一路同一条纪律 ——
+    /// `plans/基础设施.md` §1.2 第 5 条要的就是「单元之间」而不是单元中间）。
+    /// 并行之后「置位后不再导新的」这条承诺的**延迟上限**从「一本」变成「每路各一本」，
+    /// 这是并行的全部代价，界面那句「已取消」因此仍指「架面上看得见的那些是真的」。
+    fn run(&self) {
+        let total = self.candidates.len() as u64;
+        loop {
+            if self.ctx.cancel().triggered() {
+                return;
+            }
+            let at = self.next.fetch_add(1, Ordering::Relaxed);
+            if at >= self.candidates.len() {
+                return;
+            }
+            let candidate = &self.candidates[at];
+            let result = import_candidate(
+                self.source,
+                candidate,
+                self.dest_dir,
+                self.staging,
+                self.store,
+                self.ctx,
+                self.per_book,
+            );
+            // 读数按**结清**的数报，不按领号报：并行时领号在前、结清在后，
+            // 用领号数会画出一条会后退的进度。
+            let done = self.done.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+            self.ctx.item(done, total);
+            self.landed.lock().unwrap_or_else(|e| e.into_inner()).push((
+                at,
+                ImportOutcome {
+                    candidate: candidate.clone(),
+                    result,
+                },
+            ));
+        }
+    }
+
+    /// 收干结果并按候选原序交回。`workers > 1` 时顺手把**没有结果的那些**在调用线程上
+    /// 补跑一遍：崩掉的 worker 手上那一本不许从报表里静默消失。
+    fn finish(self) -> Vec<ImportOutcome> {
+        let total = self.candidates.len();
+        let mut rows = self.landed.into_inner().unwrap_or_else(|e| e.into_inner());
+        rows.sort_by_key(|(at, _)| *at);
+        if rows.len() < total && !self.ctx.cancel().triggered() {
+            // 缺下标的就是某条 worker 手上正拿着的那本（它崩在了记进表之前）。
+            let present: HashSet<usize> = rows.iter().map(|(at, _)| *at).collect();
+            for at in 0..total {
+                // 与 [`Batch::run`] 同一个检查点：取消之后不再补新的。
+                if self.ctx.cancel().triggered() {
+                    break;
+                }
+                if present.contains(&at) {
+                    continue;
+                }
+                let candidate = &self.candidates[at];
+                let result = import_candidate(
+                    self.source,
+                    candidate,
+                    self.dest_dir,
+                    self.staging,
+                    self.store,
+                    self.ctx,
+                    self.per_book,
+                );
+                let done = self.done.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+                self.ctx.item(done, total as u64);
+                rows.push((
+                    at,
+                    ImportOutcome {
+                        candidate: candidate.clone(),
+                        result,
+                    },
+                ));
+            }
+            // 补跑的那几本下标可能比表里已有的小，所以要再排一次才谈得上「候选原序」。
+            rows.sort_by_key(|(at, _)| *at);
+        }
+        rows.into_iter().map(|(_, outcome)| outcome).collect()
+    }
+}
+
+/// 一批候选 → 书库，按 `budget` 分：**同时导几本**与**每本内部几路**一起给进来。
+///
+/// 并行切在「一本书的完整旅程」这一整块上（[`import_candidate`] 从 stage 到落库），
+/// 里面不再切细：那一段里 CPU（解析、缩图）与 IO（拷贝、哈希、落库）本来就交错着，
+/// 切细了只是多几处要对齐的计数器。
+///
+/// `Store` 的连接锁仍然把落库那一小段串行着（`add_book` + `save_document`）：在
+/// 《斗战狂潮》那一本上实测是端到端的 4.4%（6.2 / 140.3 ms），并行省的就是剩下那一大块。
+/// 书越小这一格占比越大 —— 一批小书的并行收益会比一批大书低，别按大书那条外推。
+///
+/// `budget.books == 1` 时**不起线程**，整批就在调用线程上走（一个候选的批就是这一档，
+/// 而 `per_book` 照样传下去 —— 那时它就是整机那一档，与并行之前的形状一致）。这一路留着
+/// 的理由不是省几次线程创建，而是「恰好停在两本之间的取消语义」只有这一路能给，测试把它
+/// 单独钉着（`cancelling_between_books_keeps_what_already_landed` 把并行度钉成 1）。
+fn import_batch(
+    source: &dyn Source,
+    dest_dir: &Path,
+    store: &Store,
+    ctx: &StageCtx,
+    staging: &Path,
+    candidates: &[Candidate],
+    budget: Budget,
+) -> Vec<ImportOutcome> {
+    let batch = Batch {
+        source,
+        dest_dir,
+        staging,
+        store,
+        ctx,
+        candidates,
+        per_book: budget.per_book,
+        next: AtomicUsize::new(0),
+        done: AtomicUsize::new(0),
+        landed: Mutex::new(Vec::with_capacity(candidates.len())),
+    };
+    let workers = budget.books.clamp(1, candidates.len().max(1));
+    if workers > 1 {
+        // 批次的 span 要跟着进 worker：`thread::scope` 起的线程**不**继承调用线程的当前
+        // span，不接一句的话「整个批次一个 span」那条诊断（§4.1 第 4 条）就只看得到调用
+        // 线程上那一小部分，慢在哪一步的账目会散掉。
+        let span = tracing::Span::current();
+        std::thread::scope(|scope| {
+            // 两个都是借出去引用：`Span` 不是 `Copy`，按值捕获的话 `map` 那个 `FnMut`
+            // 闭包只能把它的 span 给一路 worker。
+            let batch = &batch;
+            let span = &span;
+            let handles: Vec<_> = (0..workers)
+                .map(|_| scope.spawn(move || span.in_scope(|| batch.run())))
+                .collect();
+            for handle in handles {
+                if handle.join().is_err() {
+                    tracing::error!("import: 一条导入线程崩了，缺的那几本在调用线程上补跑");
+                }
+            }
+        });
+    } else {
+        batch.run();
+    }
+    batch.finish()
+}
+
+/// 「这一份内容正在被哪一本落地」那张表：一张 `Mutex<HashSet>` 加一条 `Condvar`。
+///
+/// 为什么非要它：判重那条「库里已有同一内容就只挂来源、不再落副本」的门（§九）在串行时
+/// 由**顺序本身**保证 —— 同内容的第二本必然看见第一本刚落好的那一行。按书并行把这条隐含
+/// 顺序拿走了：两本同时 `book_by_hash`、同时查到「没有」，就各落一行、各存一份副本。
+/// 数据库挡不住这件事，`content_hash` 上建的是**普通索引**而不是 UNIQUE
+/// （`store/schema.rs` 的 `CREATE INDEX idx_books_content_hash`），而两行同内容就是两套
+/// 进度、两套批注。
+///
+/// 号从「查库」一直握到「哈希写进那一行」：于是第二次查与第一次查之间插不进来第二本。
+/// 占不到号的**等**持有者收手 —— 不能直接判「已存在」：持有者可能失败（坏包、落库挂），
+/// 那样号空出来，等的这本要自己走一遍，而串行时它本来就是会正常落地的。
+///
+/// 与 [`Store::claim_reindex`] 是同一类门（一个号只被占走一次），但两张表各管自己的寿命：
+/// 那张挂在 `Arc<Store>` 上跟着书库活，这张跟着进程活 —— 号只在「正在落」这一段里有意义，
+/// 落完之后「这本书已存在」由库里那一行自己说，不需要这里记着。
+#[derive(Default)]
+struct Claims {
+    /// 正在被落地的内容哈希。
+    taken: Mutex<HashSet<String>>,
+    /// 等在某一个号上的那些本。退号时叫醒全部，理由见 [`Hold`]。
+    ready: Condvar,
+}
+
+static CLAIMS: LazyLock<Claims> = LazyLock::new(Claims::default);
+
+impl Claims {
+    /// 占到 `hash` 这一格，回一枚把它守到作用域结束的令牌。
+    ///
+    /// 已被占就在 `ready` 上等，等它空出来再占 —— 占号与「已空出来」这两件事在同一把锁里
+    /// 完成，所以醒来之后不会有第三本插到前面去。
+    fn hold(&'static self, hash: &str) -> Hold {
+        let mut taken = self.taken.lock().unwrap_or_else(|e| e.into_inner());
+        while taken.contains(hash) {
+            taken = self.ready.wait(taken).unwrap_or_else(|e| e.into_inner());
+        }
+        taken.insert(hash.to_string());
+        Hold {
+            hash: hash.to_string(),
+        }
+    }
+}
+
+/// 占着的一个号。离开作用域时退号 —— 含提前 `return Err` 与 panic。
+///
+/// 用它而不是在 [`import_candidate`] 里手写退号，理由是那函数有十来条退出路径：漏掉任何一条
+/// 就是「这一格被永远占着」，而后面每一本同内容的书都会等在一个没人会放的号上。
+struct Hold {
+    hash: String,
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        CLAIMS
+            .taken
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.hash);
+        // **`notify_all` 是必需的，不是保守**：等在一条 `Condvar` 上的是**好几个不同的哈希**，
+        // `notify_one` 叫醒的那条如果等的是别的号，它就又回去睡，而本号上真正该醒的那条
+        // 一次都没被叫醒 —— 于是它等在一个已经空出来的号上。
+        // 这一条与 `infra::task::Queue::enqueue` 那次丢唤醒是同一个形状。
+        CLAIMS.ready.notify_all();
+    }
 }
 
 /// 一本书的完整旅程，就是 §一 那张图。
@@ -290,6 +603,7 @@ fn import_candidate(
     staging: &Path,
     store: &Store,
     ctx: &StageCtx,
+    per_book: usize,
 ) -> Result<Imported> {
     let name = candidate.name.as_str();
 
@@ -334,7 +648,11 @@ fn import_candidate(
     // 步 4：判重按完整哈希。**命中之后还要 stat 那条已有记录的副本**：不验证就命中，
     // 等于把一条指向不存在文件的记录再确认一次（读者手工删过文件、或一次只同步了库
     // 没同步文件，都会造成这种状态）。
+    //
+    // 查之前先把这一格的号占到，握到函数结束（见 [`Claims`]）：并行导同一份内容的两本
+    // 就是靠它变回「一本先导、一本等完再看结果」。
     let hash_hex = hash.to_hex();
+    let _claim = CLAIMS.hold(&hash_hex);
     let heal = match store.book_by_hash(&hash_hex)? {
         Some(row) if Path::new(&row.path).exists() => {
             abandon(&staged);
@@ -372,7 +690,9 @@ fn import_candidate(
     }
 
     // 步 6：解析。失败只退掉暂存区里那一份，书库根从来没被碰过。
-    let document = match document::open(&readable) {
+    // 这一本内部起几路是外面分好的（`Budget::per_book`）：一本自己按整机核数猜的话，
+    // 一批同时飞 M 本就是 M 份整机预算。
+    let document = match document::open_with(&readable, ParseBudget::AtMost(per_book)) {
         Ok(document) => document,
         Err(err) => {
             abandon(&readable);
@@ -525,7 +845,9 @@ fn readable_stem(display_name: &str, hash: &identity::ContentHash) -> String {
         .unwrap_or_default();
     let cleaned: String = stem
         .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
         .take(60)
         .collect();
     let cleaned = cleaned.trim();
@@ -578,6 +900,37 @@ pub fn reindex(store: &Store, book_id: i64) -> Result<()> {
     }
     tracing::info!("import: 重扫第 {book_id} 本《{}》", row.title);
     Ok(())
+}
+
+/// 把 [`reindex`] 投进作业池的 [`Cleanup`](Priority::Cleanup) 档 —— 那一档的说明里
+/// 本来就写着「重索引」（`plans/基础设施.md` §1.1），封顶 1，界面空闲才轮到它。
+///
+/// 存在的理由是一条已决：**开书那一屏不等重扫**（`plans/阅读管线.md` §七）。旧索引是能读的，
+/// 三处兜底早写好了 —— `INDEX_VERSION` 那条注释自己记着「重扫前旧文本当内联样式兜底」
+/// （`content::format::INDEX_VERSION`），`char_len` 为 NULL 时全书进度那条 SQL 走 unknown
+/// 计数（`store::Store::progress_of`），位置认不出来当作「回容器重读一遍」而不是空章
+/// （`store::content::load_flow_in`）。所以判据说「这份索引是旧的」之后的正确处置是
+/// 照旧打开 + 投一趟后台，而不是原地把整本书重读一遍 —— 重扫必然全量重读，
+/// 见 `plans/导入管线.md` §八 第 3 条。
+///
+/// 返回的句柄给测试等完成用；生产调用方直接丢（同界面那句「补齐这一趟没有界面读数」）：
+/// **新索引下次开书才生效**，正看着的这一屏不重建，读者的位置不会因为一次后台维护而跳。
+/// 领不到号也返回 `None`：同一本只允许一趟在飞，试过且失败的在本进程内不再自动重投
+/// （两道门都在 [`Store::claim_reindex`]）。号由作业自己退，所以投出去的那一趟无论成败
+/// 都不会把号漏在飞。
+pub fn schedule_reindex(
+    manager: &TaskManager,
+    store: Arc<Store>,
+    book_id: i64,
+) -> Option<TaskHandle<()>> {
+    if !store.claim_reindex(book_id) {
+        return None;
+    }
+    Some(manager.submit_with(Priority::Cleanup, move |_| {
+        let outcome = reindex(&store, book_id);
+        store.note_reindex(book_id, outcome.is_ok());
+        outcome.map_err(|err| -> TaskError { Box::new(err) })
+    }))
 }
 
 /// 一趟补齐：给「还没有内容身份」的行算哈希，并把旧名字的副本改成哈希名。
@@ -687,7 +1040,10 @@ fn backfill_one(store: &Store, dest_dir: &Path, row: &BookRow) -> Option<(bool, 
         let occupied = match store.rows_sharing_path(&dest.to_string_lossy(), row.id) {
             Ok(n) => n > 0,
             Err(err) => {
-                tracing::warn!("import: 第 {} 本问不出 {dest:?} 被谁占着，先不改名：{err:#}", row.id);
+                tracing::warn!(
+                    "import: 第 {} 本问不出 {dest:?} 被谁占着，先不改名：{err:#}",
+                    row.id
+                );
                 true
             }
         };
@@ -706,13 +1062,19 @@ fn backfill_one(store: &Store, dest_dir: &Path, row: &BookRow) -> Option<(bool, 
         return Some((false, true));
     }
     if let Err(err) = std::fs::rename(path, &dest).io_path(&dest) {
-        tracing::warn!("import: 第 {} 本的副本 {path:?} 没改成 {dest:?}：{err:#}", row.id);
+        tracing::warn!(
+            "import: 第 {} 本的副本 {path:?} 没改成 {dest:?}：{err:#}",
+            row.id
+        );
         return None;
     }
     if let Err(err) = store.retarget_book_path(row.id, &dest) {
         // 名字已经改了而位置没写回：这条记录指向不存在的旧名。当场说清并把文件放回去，
         // 比留下一本「点不开」的书好。
-        tracing::warn!("import: 第 {} 本改了名却写不回位置：{err:#}，把副本放回 {path:?}", row.id);
+        tracing::warn!(
+            "import: 第 {} 本改了名却写不回位置：{err:#}，把副本放回 {path:?}",
+            row.id
+        );
         let _ = std::fs::rename(&dest, path);
         return None;
     }
@@ -741,7 +1103,9 @@ pub fn submit_import(
     dest_dir: PathBuf,
     store: Arc<Store>,
 ) -> TaskHandle<Vec<ImportOutcome>> {
-    // 导入会写库（落库那一类）：封顶 1 —— 避免多本同时解析/落库把磁盘打满（§1.1）。
+    // 导入归落库那一档：封顶 1 挡的是「**多批**同时在飞」（§1.1），一批之内同时导几本由
+    // [`process_budget`] 定。磁盘那一侧的账要连着看：一批里同时有几本在拷贝 + 算哈希 + 落库，
+    // 那个数就是并行度，而跨批仍然只有一批在走。
     manager.submit_with(Priority::Persist, move |ctx| {
         Ok(import_from(source.as_ref(), &dest_dir, &store, ctx))
     })
@@ -854,13 +1218,7 @@ pub(crate) fn stage_local(
 }
 
 /// 分块拷贝并报字节数。交回的是暂存区里那份 `.part` 的路径；改成哈希名是管线第 5 步的事。
-fn copy_into(
-    from: &Path,
-    to: &Path,
-    display: &str,
-    total: u64,
-    ctx: &StageCtx,
-) -> Result<PathBuf> {
+fn copy_into(from: &Path, to: &Path, display: &str, total: u64, ctx: &StageCtx) -> Result<PathBuf> {
     use std::io::{Read as _, Write as _};
     let mut reader = std::fs::File::open(from).io_path(from)?;
     let mut file = std::fs::File::create(to).io_path(to)?;
@@ -913,7 +1271,10 @@ pub struct PathsSource {
 impl PathsSource {
     /// 选择器选的文件。
     pub fn picked(paths: Vec<PathBuf>) -> Self {
-        Self { paths, kind: ImportKind::Picked }
+        Self {
+            paths,
+            kind: ImportKind::Picked,
+        }
     }
 
     /// 调用方直接给的一批路径，`kind` 说清这是谁交的（扫描 / 监听 / 传书各报各自的名）。

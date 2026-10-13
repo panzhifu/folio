@@ -1,6 +1,6 @@
 //! href 的 fragment 拆分，以及目录条目在 SQLite 那一列上的往返。
 
-use super::{TocEntry, fragment_of, shrink_image};
+use super::{HeadDims, TocEntry, fragment_of, image_dims_from_head, shrink_image};
 
 /// 造一张真位图 —— `shrink_image` 要真的解码+重编，够 header 的假字节过不了。
 fn png(width: u32, height: u32) -> Vec<u8> {
@@ -38,6 +38,85 @@ fn covers_are_bounded_and_re_encoded_as_jpeg() {
     // 一张 800×1200 的 PNG 原样进库就是 400 KB。
     let (_, mime) = shrink_image(&png(400, 600), 512).expect("没过上限也要重编");
     assert_eq!(mime, "image/jpeg");
+}
+
+/// 竖版与不成整除的比例都要守住：**长边正好到上限、宽高比不变**。
+///
+/// 这条不是给「Triangle 换成 `thumbnail`」准备的回归断言 —— 两种滤波在这几种形状上
+/// 出来的像素尺寸本来就一样（实测 1535×2200 都是 357×512），换的是清晰度与耗时。
+/// 它守的是这一层对封面形状的真正承诺：横的竖的都不许被拉变形。
+#[test]
+fn the_shrunk_cover_hits_the_cap_on_its_long_edge_and_keeps_the_ratio() {
+    for (src, cap) in [
+        ((1024u32, 512u32), 256u32),
+        ((512, 1024), 256),
+        ((333, 777), 512),
+        ((400, 600), 200),
+    ] {
+        let (small, mime) = shrink_image(&noise_png(src.0, src.1), cap)
+            .unwrap_or_else(|| panic!("{src:?} 缩到长边 {cap} 该有产出"));
+        let decoded = image::load_from_memory(&small).expect("缩过的字节要还能解");
+        let (w, h) = (decoded.width(), decoded.height());
+        assert_eq!(w.max(h), cap, "{src:?} 的长边该正好是 {cap}，实际 {w}×{h}");
+        let want = src.0 as f64 / src.1 as f64;
+        let got = w as f64 / h as f64;
+        assert!(
+            (got - want).abs() / want < 0.02,
+            "{src:?} 缩完比例该仍是 {want:.3}，实际 {got:.3}"
+        );
+        assert_eq!(mime, "image/jpeg");
+    }
+}
+
+/// 一张压不出多少的图：纯色 PNG 缩完可能比原字节还小得离谱，那条「重编反而更大就退回
+/// 原图」的分支会抢先命中，量的就不是缩放本身了。
+fn noise_png(width: u32, height: u32) -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let img = image::RgbaImage::from_fn(width, height, |x, y| {
+        image::Rgba([
+            ((x * 7 + y * 13) % 256) as u8,
+            (((x * 37) ^ (y * 91)) % 256) as u8,
+            (((x + y) * 3) % 256) as u8,
+            255,
+        ])
+    });
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgba8)
+        .expect("合成 PNG 应能编码");
+    out
+}
+
+/// 只喂前缀时，「没读出尺寸」必须分得清是**哪一种**：这两种的下一步完全相反。
+///
+/// 这条断的是 [`HeadDims`] 的三档分类本身。EPUB 的插图清单按它决定要不要多读一整条
+/// （见 `epub::parse_image`），分错一档就是白花一次解压，或者把能定尺寸的图记成 0×0。
+#[test]
+fn a_short_buffer_tells_whether_reading_more_would_buy_anything() {
+    let whole = png(64, 32);
+    // IHDR 本身在第 8-33 字节，但解码器要多读一点才肯认这段头（实测 48 字节起才行）：
+    // 只有头、不够解码器起步的字节，仍然是「再读才有意义」。
+    match image_dims_from_head(&whole[..33]) {
+        HeadDims::NeedsMore => {}
+        other => panic!("只有 IHDR 的前缀该是 NeedsMore，实际 {other:?}"),
+    }
+    match image_dims_from_head(&whole[..48]) {
+        HeadDims::Sized(dims) => assert_eq!(dims, (64, 32), "头齐的前缀就该定出尺寸"),
+        other => panic!("48 字节的前缀该是 Sized，实际 {other:?}"),
+    }
+    // 整条在手也是同一个答案。
+    match image_dims_from_head(&whole) {
+        HeadDims::Sized(dims) => assert_eq!(dims, (64, 32)),
+        other => panic!("完整字节该是 Sized，实际 {other:?}"),
+    }
+    // 不是位图：SVG 与非图像字节，读完整条也拿不到尺寸，别再为它解压。
+    let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>"#;
+    for not_a_bitmap in [&svg[..], b"not an image"] {
+        match image_dims_from_head(not_a_bitmap) {
+            HeadDims::NotABitmap => {}
+            other => panic!("{not_a_bitmap:?} 该是 NotABitmap，实际 {other:?}"),
+        }
+    }
 }
 
 #[test]

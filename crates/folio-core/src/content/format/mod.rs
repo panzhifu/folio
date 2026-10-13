@@ -20,7 +20,8 @@ pub(crate) mod zip;
 
 pub use content::{Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageSource};
 pub use provider::{
-    DocumentProvider, provider_for, providers, supported_extensions, supports_extension,
+    DocumentProvider, ParseBudget, provider_for, providers, supported_extensions,
+    supports_extension,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -65,7 +66,8 @@ impl Format {
             .copied()
             .find(|ext| {
                 let probe = std::path::Path::new("probe").with_extension(ext);
-                crate::content::format::provider::provider_for(&probe).is_some_and(|p| p.format() == self)
+                crate::content::format::provider::provider_for(&probe)
+                    .is_some_and(|p| p.format() == self)
             })
             .unwrap_or_else(|| self.as_str())
     }
@@ -159,9 +161,10 @@ impl Chapter {
     /// 正文就在手上的那一章。
     pub fn inline(title: impl Into<String>, source: impl Into<String>) -> Self {
         let source = source.into();
-        // 正文在手就顺手把字数定下来：所有调用方要的都是同一个数，而
-        // `visible_chars` 要解析一遍 DOM —— 在这里算一次，比让每个读的地方
-        // 各算一次便宜，也让 `char_len` 一建出来就是确定的。
+        // 正文在手就顺手把字数定下来：所有调用方要的都是同一个数，而在这里算一次，
+        // 比让每个读的地方各算一次便宜，也让 `char_len` 一建出来就是确定的。
+        // 走 `content::scan` 而不是 `visible_chars`：同一个数（逐章对拍守着），
+        // 但它一遍扫完不建 DOM —— 导入里 `with_text` 那一档本来就已经算过一遍。
         //
         // **空串不算**，它是「正文不在手上」在这套类型里的哨兵：`locator_for`
         // 在「没有可寻址位置」那一档写的正是 `Inline(chapter.source())`，而正文不在
@@ -170,7 +173,8 @@ impl Chapter {
         // `Some(0)`，于是「库里没记字数」被读成「这一章是空的」—— 分母偏小、
         // 百分比偏大，而且没有任何报错。真正的空章走 `Some(0)`，
         // 它的标记（`<p></p>` 之类）不会退化成空串。
-        let char_len = (!source.is_empty()).then(|| visible_chars(&source)).flatten();
+        let char_len = (!source.is_empty())
+            .then(|| crate::content::scan::chapter_summary(&source).visible_chars);
         Self {
             title: title.into(),
             spine_href: String::new(),
@@ -413,14 +417,7 @@ pub fn guess_media_type(bytes: &[u8]) -> Option<&'static str> {
         .with_guessed_format()
         .ok()?
         .format()?;
-    match guessed {
-        image::ImageFormat::Png => Some("image/png"),
-        image::ImageFormat::Jpeg => Some("image/jpeg"),
-        image::ImageFormat::WebP => Some("image/webp"),
-        image::ImageFormat::Gif => Some("image/gif"),
-        image::ImageFormat::Bmp => Some("image/bmp"),
-        _ => None,
-    }
+    decodable_bitmap_mime(guessed)
 }
 
 // `COVER_SPEC_VERSION` 在 v16 作废：它记的是「这份封面字节是按哪一版规格生成的」，
@@ -471,11 +468,18 @@ pub fn shrink_image(bytes: &[u8], max_edge: u32) -> Option<(Vec<u8>, &'static st
     // 一张 800×1200 的 PNG 封面就有 400 KB，而书架上显示几十像素宽 —— 它过不了
     // 「超过 max_edge 才缩」那道门，于是原样进了库。缩到显示尺寸 + 一律 JPEG，
     // 才是这一列真正该占的地方。
+    // `thumbnail` 而不是自己算目标尺寸再 `resize_exact`：它按长宽比缩进 `max_edge` 的方框，
+    // 取整口径与手算那一条一致（1535×2200 → 357×512，538×720 → 383×512），少了一段会算错
+    // 的算术 —— 手算算错就是把封面拉变形。
+    //
+    // 换掉的不只是那段算术，还有滤波：`resize_exact(Triangle)` 是**卷积滤波**，而
+    // `thumbnail` 走 `imageops::thumbnail` 那个**整数块平均**采样器（每个源像素恰好贡献给
+    // 一个目标像素，边缘用线性补），官方文档自己标了「新尺寸接近旧尺寸时可能有锯齿」。
+    // 快是真快：实测 1535×2200 那一张 127.8 ms → 44.3 ms，538×720 那一张 26.5 ms → 7.7 ms
+    // （两条臂交替跑 7 轮取中位）。代价是缩放质量换了档：小比例缩放（1.4×）那一头最容易看出。
+    // 与 `thumb::encode_from` 同一道滤波也算一条理由：库里那份和磁盘那两档不该长得不一样。
     let image = if longest > max_edge {
-        let scale = max_edge as f32 / longest as f32;
-        let width = ((width as f32 * scale).round() as u32).max(1);
-        let height = ((height as f32 * scale).round() as u32).max(1);
-        image.resize_exact(width, height, image::imageops::FilterType::Triangle)
+        image.thumbnail(max_edge, max_edge)
     } else {
         image
     };
@@ -516,11 +520,70 @@ pub(crate) fn stem_of(path: &Path) -> String {
 /// 位图的固有像素尺寸。只读 header，不解像素；取不到尺寸（SVG / 未知格式）时返回
 /// `(0, 0)`，由排版的降级规则兜底。
 pub(crate) fn image_dims(bytes: &[u8]) -> (u32, u32) {
-    image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()
-        .and_then(|r| r.into_dimensions().ok())
-        .unwrap_or((0, 0))
+    match image_dims_from_head(bytes) {
+        HeadDims::Sized(dims) => dims,
+        // 整条字节都在手上了，两种「拿不到」都是拿不到。
+        _ => (0, 0),
+    }
+}
+
+/// 按**一段字节**（可以只是解压流的前缀）读尺寸的结果。
+///
+/// 分三档而不是 `Option`，因为「没读出尺寸」有两种相反的下一步：认不出这是位图
+/// （SVG、非图像、没编解码器的格式）再读整条也拿不到，别白花一趟解压；而认得出是
+/// 位图、只是尺寸头排在更后面（带大 EXIF 缩略图的 JPEG）才值得多读一趟。
+/// 唯一按这三档决定下一步的是 [`epub::parse_image`]（见那里）。
+#[derive(Debug)]
+pub(crate) enum HeadDims {
+    /// 尺寸定出来了。
+    Sized((u32, u32)),
+    /// 这不是（我们解得动的）位图：不要再为它读更多字节。
+    NotABitmap,
+    /// 是位图，但这段字节不够长，尺寸头在更后面。
+    NeedsMore,
+}
+
+/// 工作区给 `image` 真开了解码器的那几种位图，以及各自的 mime。
+///
+/// 一张表两处用：猜 mime（[`guess_media_type`]）与判断「这格式值不值得为尺寸多读一趟」
+/// （[`image_dims_from_head`]）。加一种格式只改这里，两处不会分叉。
+const DECODABLE_BITMAPS: [(image::ImageFormat, &str); 5] = [
+    (image::ImageFormat::Png, "image/png"),
+    (image::ImageFormat::Jpeg, "image/jpeg"),
+    (image::ImageFormat::WebP, "image/webp"),
+    (image::ImageFormat::Gif, "image/gif"),
+    (image::ImageFormat::Bmp, "image/bmp"),
+];
+
+/// 认得出的格式 → 它的 mime；`image` 里没编解码器的（TIFF、AVIF 那类）回 `None`，
+/// 因为对着 magic bytes 猜得出格式却没有解码器，等于拿不到尺寸。
+fn decodable_bitmap_mime(format: image::ImageFormat) -> Option<&'static str> {
+    DECODABLE_BITMAPS
+        .iter()
+        .find(|(known, _)| *known == format)
+        .map(|(_, mime)| *mime)
+}
+
+/// 只按这段字节读尺寸，并按 [`HeadDims`] 说明「读不出来」是哪一种。
+///
+/// 只喂前缀时 `into_dimensions()` 会在字节用完处失败 —— 那正是 `NeedsMore` 的来路，
+/// 所以调用方给的字节越短，越要把这三档当回事。
+pub(crate) fn image_dims_from_head(bytes: &[u8]) -> HeadDims {
+    let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+    else {
+        return HeadDims::NotABitmap;
+    };
+    // 认不出 magic（None）或认得出但没解码器：都归到「不是解得动的位图」。
+    let recognizable = reader
+        .format()
+        .is_some_and(|format| decodable_bitmap_mime(format).is_some());
+    if !recognizable {
+        return HeadDims::NotABitmap;
+    }
+    match reader.into_dimensions() {
+        Ok((width, height)) => HeadDims::Sized((width, height)),
+        Err(_) => HeadDims::NeedsMore,
+    }
 }
 
 /// 扩展名 → 图片 mime。用在「容器没声明 media-type」的场合（HTML 的 `<img>`、FB2 的

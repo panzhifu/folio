@@ -7,18 +7,21 @@
 //! 正文图片只存元数据（`href` + 固有尺寸），字节按容器路径现取，见
 //! `Document::image_bytes` 那条路；封面例外，缩成缩略图后入库，见 [`COVER_MAX_EDGE`]。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
-use super::zip::Zip;
+use super::zip::{EntryRange, EntryReader, Zip};
 use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, FontBytes, Format,
-    ImageRes, TocEntry,
+    ImageRes, ParseBudget, TocEntry,
 };
-use super::{dir_of, fragment_of, image_dims, resolve_href, shrink_image};
+use super::{
+    HeadDims, dir_of, fragment_of, image_dims, image_dims_from_head, resolve_href, shrink_image,
+};
 use crate::infra::error::Result;
 
 pub struct EpubAdapter;
@@ -37,6 +40,15 @@ impl DocumentProvider for EpubAdapter {
     /// 那几样本来就要进库，见 `save_document`）。
     fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
         read_with(path, false)
+    }
+
+    /// 同上，但这一本内部起几路**由调用方分**（[`ParseBudget`]）。
+    ///
+    /// 为什么单开一条：一批同时导 M 本、每本内部 I 路，真正抢核的是 M × I，而 `index`
+    /// 那一路的 I 只能按整机核数猜（[`parse_worker_count`]）—— 外层每多一本就把总量再乘
+    /// 一份。分这个数的是 `ingest::import::split_budget`，因为只有它知道有几个兄弟在飞。
+    fn index_with(&self, path: &Path, budget: ParseBudget) -> Result<(DocMeta, Content)> {
+        read_with_impl(path, false, budget)
     }
 
     /// 一章的正文：解它自己那一个条目。这是打开一本书时主要付的那一笔钱。
@@ -100,6 +112,17 @@ const MAX_TOTAL: usize = 32 << 20;
 /// 实测一本《蛇结》封面 404 KB，占掉整个库的 8 成。正文出库之后封面就是库里最大的一项，
 /// 这里按显示尺寸重编（见 [`shrink_image`]）。
 const COVER_MAX_EDGE: u32 = 512;
+
+/// 一张插图为了定尺寸最多解出多少字节。
+///
+/// 尺寸头都在解压流最前面，而且要的不多：PNG 从第 48 字节起就定得出尺寸（IHDR 在
+/// 第 8-33 字节，解码器要多读几字节才肯起步），GIF/BMP/WebP 在第一个块里，JPEG 要走过
+/// APPn/COM 那些段才到 SOFn。实测 259 张（两本真书 + 三本合成漫画）里 32 KiB 全部够，
+/// 一张都没掉进整条兜底那一路。
+///
+/// 为什么不干脆不兜底：带大 EXIF 缩略图或长注释段的 JPEG 会把 SOFn 推到更后面，
+/// 那种图给个 0×0 就是版面按容器宽度硬拉。宁可多读一张，不多错一张。
+const IMAGE_HEAD_BYTES: u64 = 32 * 1024;
 
 /// 认得哪些 media-type 是字体，以及要不要先过一道 WOFF。
 ///
@@ -516,17 +539,37 @@ struct ChapterJob {
     spine: usize,
     /// 解析后的容器绝对路径，进 `Chapter::spine_href`，也是目录比对键。
     href: String,
-    /// `locate` 返回的 zip 真实条目名（大小写与分隔符可能和 OPF 写的不一样）。
-    entry: String,
+    /// 该章正文在容器里的压缩区间（主线程已经按名字定位过）。
+    range: EntryRange,
 }
 
 #[derive(Debug, Clone)]
 struct ImageJob {
     /// 解析后的容器绝对路径，进 `ImageRes::href`。
     href: String,
-    /// zip 里的真实条目名，取字节直接用它。
-    entry: String,
+    /// 这张图在容器里的压缩区间（主线程已经按名字定位过）。
+    range: EntryRange,
     media_type: String,
+}
+
+/// 封面那件活：读要用区间，记要用名字。
+///
+/// `href` 不参与取字节，只给日志与那条「封面在哪个线程上做的」守卫用 —— 守卫要能认出
+/// 这条记录出自哪张封面，不然并行跑测试时别的书的封面会把它搅浑。
+#[derive(Debug, Clone, Copy)]
+struct Cover<'a> {
+    href: &'a str,
+    range: EntryRange,
+}
+
+/// 队列里的一件活。**封面排在最前**：它是单本书里最长的一件（实测缩一张 1535×2200
+/// 的封面要 44-90 ms，比那本书其余条目加起来还长），排第一个被认领，才谈得上被其余
+/// 条目的时间盖住。章排在图前面只是因为 chapter 条目普遍更长（同一条动态队列的道理）。
+#[derive(Debug, Clone, Copy)]
+enum Job {
+    Cover,
+    Chapter(usize),
+    Image(usize),
 }
 
 #[derive(Default)]
@@ -534,6 +577,9 @@ struct ParsedEntries {
     /// `(job 下标, 产物)`：worker 按动态队列领活，完成顺序是乱的，收齐后再排回去。
     chapters: Vec<(usize, Chapter)>,
     images: Vec<(usize, ImageRes)>,
+    /// 封面那一件的产物。队列里最多一个 `Job::Cover`，且每个下标只会被一个 worker 领走，
+    /// 所以这里不会有两个 worker 各写一份。
+    cover: Option<Vec<u8>>,
 }
 
 /// 一本书索引里最多并行几路。
@@ -541,57 +587,184 @@ struct ParsedEntries {
 /// 上限取 4：手机端真正可用的大核通常就 2–4 个，桌面几十核也没有必要把一本书铺满；
 /// 再高只会和绘制、其它后台作业抢核。条目少时不起线程 —— 线程创建/收拢与每个
 /// worker 多开一次容器的成本会盖过并行收益。
-const MAX_PARSE_WORKERS: usize = 4;
+///
+/// `pub(crate)` 是给 `ingest::import::split_budget` 看的：一批同时导几本 × 每本几路
+/// 要**一次算完**，那个上限必须只有一份，不然两层又各猜各的。
+pub(crate) const MAX_PARSE_WORKERS: usize = 4;
 const MIN_PARALLEL_ITEMS: usize = 16;
 
-fn parse_worker_count(items: usize) -> usize {
-    if items < MIN_PARALLEL_ITEMS {
+/// 这一本起几路：**条目数、这台机器的并行度、外层分下来的上限**三者取最小。
+///
+/// `budget` 是**上限不是配额**：少条目那条守卫（[`MIN_PARALLEL_ITEMS`]）照旧生效 —— 否则
+/// 一本 5 章的小书在批量导入时会为 5 件活开 4 条线程，而那正是这条守卫当初存在的理由
+/// （线程创建/收拢与每路一份读缓冲，都比省下的时间贵）。
+fn parse_worker_count(items: usize, budget: ParseBudget) -> usize {
+    // `Exactly` 是测试与基准的口，绕过条目数那道门；`AtMost` 与 `Auto` 都不绕。
+    if !matches!(budget, ParseBudget::Exactly(_)) && items < MIN_PARALLEL_ITEMS {
         return 1;
     }
-    std::thread::available_parallelism()
+    let auto = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
-        .clamp(1, MAX_PARSE_WORKERS)
+        .clamp(1, MAX_PARSE_WORKERS);
+    match budget {
+        ParseBudget::Auto => auto,
+        // 上限只往下压，且至少留 1 路。
+        ParseBudget::AtMost(n) => auto.min(n.max(1)),
+        ParseBudget::Exactly(n) => n.clamp(1, MAX_PARSE_WORKERS),
+    }
+    .min(items.max(1))
+}
+
+/// 目录按 `href` 建的查找表。每解一章都要拿这一章的容器路径回目录取一次标题，
+/// 逐条 `iter().find` 在 1225 项目录的书上是每章一遍全表。
+///
+/// 只收**顶层**条目 —— 与换表之前那次 `find` 同一套语义（子条目不参与标题回落），
+/// 换的是查找方式，不是内容。重复 href 保留第一个，也是 `find` 的语义。
+type TocIndex<'a> = HashMap<&'a str, &'a TocEntry>;
+
+fn toc_index(toc: &[TocEntry]) -> TocIndex<'_> {
+    let mut index: TocIndex = HashMap::with_capacity(toc.len());
+    for entry in toc {
+        index.entry(entry.href.as_str()).or_insert(entry);
+    }
+    index
+}
+
+/// 一批作业共享的只读输入。
+///
+/// 收成一份不是为了少打几个字：加一类活（封面就是这次加的）不该再动三处函数签名，
+/// 而 worker 拿到它就齐了。参数堆到第八个，读的人也得跟着数。
+struct ParseCtx<'a> {
+    /// 队列：下标就是认领顺序，产物按它排回原序。
+    jobs: &'a [Job],
+    chapters: &'a [ChapterJob],
+    images: &'a [ImageJob],
+    /// 封面那件活。`None` = 这本书没有可定位的封面，队列里也就没有 `Job::Cover`。
+    cover: Option<Cover<'a>>,
+    toc: &'a TocIndex<'a>,
 }
 
 /// 一个 worker 处理条目直到队列见底。
 ///
-/// 每个 worker 自己开一份 zip：`ZipArchive` 不是 `Sync`，共享它只能串行。重复建
-/// 条目名表的成本远小于各章 DOM 解析与 inflate —— 用这一笔小钱换真正的多核。
+/// worker 拿的是 [`EntryReader`] —— 自己的文件句柄，但**不**再各自解析中央目录：
+/// 「名字 → 区间」由主线程做一次，交下来的 [`EntryRange`] 只有偏移和长度。一份中央目录
+/// 在 1233 条目的书上是 1.35 ms，四路并行就是四份这样的钱，而 worker 从来不需要名字。
 fn parse_entries(
-    zip: &mut Zip,
-    chapters: &[ChapterJob],
-    images: &[ImageJob],
-    toc: &[TocEntry],
+    reader: &mut EntryReader,
+    ctx: &ParseCtx<'_>,
     with_text: bool,
     next: &AtomicUsize,
 ) -> ParsedEntries {
-    let total = chapters.len() + images.len();
     let mut out = ParsedEntries {
-        chapters: Vec::with_capacity(chapters.len()),
-        images: Vec::with_capacity(images.len()),
+        chapters: Vec::with_capacity(ctx.chapters.len()),
+        images: Vec::with_capacity(ctx.images.len()),
+        cover: None,
     };
-    loop {
-        let at = next.fetch_add(1, Ordering::Relaxed);
-        if at >= total {
-            break;
-        }
-        if at < chapters.len() {
-            out.chapters
-                .push((at, parse_chapter(zip, &chapters[at], toc, with_text)));
-        } else {
-            let image_index = at - chapters.len();
-            if let Some(image) = parse_image(zip, &images[image_index]) {
-                out.images.push((image_index, image));
+    while let Some(at) = ctx.jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+        match *at {
+            // `Job::Cover` 只在定位得到封面时才进队列，所以这里给得出区间。
+            Job::Cover => {
+                out.cover = parse_cover(reader, ctx.cover.expect("队列里有 Cover 就该有活"))
+            }
+            Job::Chapter(n) => {
+                out.chapters.push((
+                    n,
+                    parse_chapter(reader, &ctx.chapters[n], ctx.toc, with_text),
+                ));
+            }
+            Job::Image(n) => {
+                if let Some(image) = parse_image(reader, &ctx.images[n]) {
+                    out.images.push((n, image));
+                }
             }
         }
     }
     out
 }
 
-fn parse_image(zip: &mut Zip, job: &ImageJob) -> Option<ImageRes> {
-    let bytes = zip.read(&job.entry)?;
-    let (width, height) = image_dims(&bytes);
+// 本线程最近一次定下的解析路数。**只在测试下存在**。
+//
+// 要守的是一条**接线**：[`ParseBudget::AtMost`] 从导入那边传下来，要是半路被丢掉（退回
+// `Auto`），读出来的书一个字都不差、时间也差不多 —— 没有任何产物会不对劲。只有这个数
+// 能揭穿「预算没生效」，而它正是「两层共用一份预算」那件事的全部落点。
+//
+// 线程局部而不是全局表：`cargo test` 并行跑，全局那一份会把**别的测试**开的书混进来
+// （`COVER_WORK` 那条为这件事踩过一次，只能靠一个本测试独有的条目名筛）。这个数是在
+// 调 `read_with_impl` 的那条线程上定的，所以线程局部刚好圈得住。
+#[cfg(test)]
+
+thread_local! {
+    static LAST_WORKERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 读走本线程最近一次定的路数（没定过是 0）。
+#[cfg(test)]
+pub(crate) fn last_workers() -> usize {
+    LAST_WORKERS.with(|c| c.get())
+}
+
+/// 封面被缩了几次、各在哪个线程上，按**条目名**记。**只在测试下存在**。
+///
+/// 这一层对封面的承诺是「一本书一次，而且在 worker 上做」，那就用线程号加次数来守，
+/// 不用计时（并行段的计时被调度噪声牵着走，见 `infra::metrics` 那段）。
+///
+/// 为什么是全局加条目名而不是线程局部：要看的恰恰是**别的线程**上发生过什么，线程局部
+/// 读不到 worker；而 cargo 并行跑测试，全局量必须按一个本测试独有的条目名筛出来，
+/// 否则别的书（都有封面）会把计数混进来 —— 这条一开始就是这么红的。
+#[cfg(test)]
+static COVER_WORK: std::sync::Mutex<Vec<(String, std::thread::ThreadId)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// 封面那一件：**整条读出来再按显示尺寸缩过重编**，跟插图不一样 —— 插图只要尺寸头，
+/// 封面要的恰恰是那堆像素本身。
+///
+/// 它排在队列最前面而不是留在主线程：一张 1535×2200 的封面从读到缩要 44-90 ms，
+/// 实测比一本书其余条目加起来还长，留在调用线程上就是把这一段整个摊进墙钟，
+/// 而后面的 worker 们正闲着。
+///
+/// 存的是缩略图不是原图 —— 对应 KOReader 的 `bookinfo_cache.sqlite3` 里那份按显示尺寸
+/// 缩完再 zstd 压的 blitbuffer。书架不打开容器就要画出那张卡片，所以它进 `books.cover`，
+/// 而一张原图 400 KB 的封面在书架上只显示几十像素宽。
+fn parse_cover(reader: &mut EntryReader, cover: Cover<'_>) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    COVER_WORK
+        .lock()
+        .unwrap()
+        .push((cover.href.to_string(), std::thread::current().id()));
+    let Some(bytes) = reader.read(&cover.range) else {
+        tracing::warn!(
+            "epub: 封面条目 {} 读不出来，这本书按没有封面入库",
+            cover.href
+        );
+        return None;
+    };
+    Some(match shrink_image(&bytes, COVER_MAX_EDGE) {
+        Some((small, _mime)) => small,
+        None => bytes,
+    })
+}
+
+/// 一张插图进清单：只要固有像素尺寸，所以**只解前缀**，不整条解压。
+///
+/// 三档结局各自的去向（见 [`super::HeadDims`]）：前缀里就定出尺寸 → 完事；认不出是
+/// 解得动的位图（SVG 那一类，读完整条也是 `(0, 0)`）→ 到此为止，不再花一趟解压；
+/// 认得出是位图但尺寸头在更后面 → 才补一次整条读。
+///
+/// 一条与旧写法的差别是**好的**那种：整条读会因为尾部坏掉而整条失败（zip 在流末尾校
+/// CRC），于是这张图从清单里消失、版面不知道它占多大；前缀读只要头部完好就定得出尺寸。
+fn parse_image(reader: &mut EntryReader, job: &ImageJob) -> Option<ImageRes> {
+    let head = reader.read_head(&job.range, IMAGE_HEAD_BYTES)?;
+    let (width, height) = match image_dims_from_head(&head) {
+        HeadDims::Sized(dims) => dims,
+        HeadDims::NotABitmap => (0, 0),
+        HeadDims::NeedsMore => match reader.read(&job.range) {
+            Some(bytes) => image_dims(&bytes),
+            // 整条读不出来（尾部损坏、容器被改过）：留住前缀那段已经读到的判断，
+            // 也就是「这张图存在，但尺寸不知道」，比整张从清单里消失好。
+            None => (0, 0),
+        },
+    };
     Some(ImageRes {
         href: job.href.clone(),
         media_type: job.media_type.clone(),
@@ -600,18 +773,38 @@ fn parse_image(zip: &mut Zip, job: &ImageJob) -> Option<ImageRes> {
     })
 }
 
-fn parse_chapter(zip: &mut Zip, job: &ChapterJob, toc: &[TocEntry], with_text: bool) -> Chapter {
+fn parse_chapter(
+    reader: &mut EntryReader,
+    job: &ChapterJob,
+    toc: &TocIndex<'_>,
+    with_text: bool,
+) -> Chapter {
     // 正文这一趟一定要解出来一次：`char_len` 是全局字符进度的分母，必须在导入时
     // 算准（`plans/导入管线.md` §八第 3 条）。留下来与否只看 `with_text`。
-    let text = zip.read_text(&job.entry);
-    let char_len = text.as_deref().and_then(super::visible_chars);
+    // 两条读法按「正文本身是不是产物」分开：
+    // - `with_text`：整条读出来，正文与两样数都在那份字符串上拿。
+    // - 只做索引（导入走这一档）：正文不是产物，边解压边扫，整章字符串不进内存
+    //   （实测少 11.4% 的累计分配，见 [`EntryReader::stream`]）。读挂了当作整条失败 ——
+    //   已经喂进去那半截不许充作一章的分母。
+    let (text, summary) = if with_text {
+        let text = reader.read_text(&job.range);
+        let summary = text.as_deref().map(crate::content::scan::chapter_summary);
+        (text, summary)
+    } else {
+        let mut scan = crate::content::scan::ChapterScan::new();
+        let read = reader.stream(&job.range, &mut |bytes| {
+            scan.push(bytes);
+            true
+        });
+        (None, read.map(|()| scan.finish()))
+    };
+    let char_len = summary.as_ref().map(|s| s.visible_chars);
     let title = toc
-        .iter()
-        .find(|e| e.href == job.href)
+        .get(job.href.as_str())
         .map(|e| e.title.clone())
         .filter(|t| !t.is_empty())
-        // `heading_of` 要读正文才拿得到；正文已经在手上，这条回落是白拿的。
-        .or_else(|| text.as_deref().and_then(heading_of))
+        // 标题回落要读了正文才拿得到；正文已经在手上，这条回落是白拿的。
+        .or_else(|| summary.and_then(|s| s.heading))
         .unwrap_or_else(|| format!("第 {} 节", job.spine + 1));
     let source = if with_text { text } else { None };
     match source {
@@ -623,37 +816,40 @@ fn parse_chapter(zip: &mut Zip, job: &ChapterJob, toc: &[TocEntry], with_text: b
     }
 }
 
+/// 一批作业跑完的产物，已经按队列下标排回原序。
+struct ParsedDoc {
+    chapters: Vec<Chapter>,
+    images: Vec<ImageRes>,
+    cover: Option<Vec<u8>>,
+}
+
 /// 并行跑一批解析作业；任何一个 worker 连容器都开不出来时回 `None`，
 /// 由调用方退回顺序路径 —— 解析产物不许因为线程开不起来就静默少章。
 fn parse_entries_parallel(
     path: &Path,
-    chapters: &[ChapterJob],
-    images: &[ImageJob],
-    toc: &[TocEntry],
+    ctx: &ParseCtx<'_>,
     with_text: bool,
     workers: usize,
-) -> Option<(Vec<Chapter>, Vec<ImageRes>)> {
+) -> Option<ParsedDoc> {
     let next = AtomicUsize::new(0);
-    let mut chapters_out = Vec::with_capacity(chapters.len());
-    let mut images_out = Vec::with_capacity(images.len());
+    let mut chapters_out = Vec::with_capacity(ctx.chapters.len());
+    let mut images_out = Vec::with_capacity(ctx.images.len());
+    let mut cover_out = None;
     let mut opened_all = true;
 
     std::thread::scope(|scope| {
+        // 计数器先借出去再交给各路：`AtomicUsize` 不是 Copy，闭包按值捕获它就只能给一路。
+        // 其余参数（`path`、`ctx`）本来就是引用，`move` 带走引用即可，不必再 `let x = x;` 绑一遍。
+        let next = &next;
         let mut handles = Vec::with_capacity(workers);
         for _ in 0..workers {
-            let path = path;
-            let chapters = chapters;
-            let images = images;
-            let toc = toc;
-            let next = &next;
             handles.push(scope.spawn(move || {
-                let Ok(mut zip) = Zip::open(path) else {
+                // 区间表是主线程解好的，worker 只要一个句柄：开一次 `File` 是几微秒，
+                // 而 `Zip::open` 那 1.5 ms（1233 条目的书，实测）要乘上 worker 数。
+                let Some(mut reader) = EntryReader::open(path) else {
                     return (false, ParsedEntries::default());
                 };
-                (
-                    true,
-                    parse_entries(&mut zip, chapters, images, toc, with_text, next),
-                )
+                (true, parse_entries(&mut reader, ctx, with_text, next))
             }));
         }
         for handle in handles {
@@ -662,6 +858,10 @@ fn parse_entries_parallel(
                     opened_all &= opened;
                     chapters_out.extend(parsed.chapters);
                     images_out.extend(parsed.images);
+                    // 封面只有一个下标、只会被一个 worker 领走，所以这里是「填上」而不是「合并」。
+                    if parsed.cover.is_some() {
+                        cover_out = parsed.cover;
+                    }
                 }
                 // 工作线程 panic 当作这一路不可用：回退到顺序解析，
                 // 而不是让一部分章凭空消失。
@@ -673,20 +873,26 @@ fn parse_entries_parallel(
     if !opened_all {
         return None;
     }
-    Some((ordered(chapters_out), ordered(images_out)))
+    Some(ParsedDoc {
+        chapters: ordered(chapters_out),
+        images: ordered(images_out),
+        cover: cover_out,
+    })
 }
 
 /// 顺序跑完同一批作业。少条目、单核、并行起不来时走这一条。
 fn parse_entries_sequential(
-    zip: &mut Zip,
-    chapters: &[ChapterJob],
-    images: &[ImageJob],
-    toc: &[TocEntry],
+    reader: &mut EntryReader,
+    ctx: &ParseCtx<'_>,
     with_text: bool,
-) -> (Vec<Chapter>, Vec<ImageRes>) {
+) -> ParsedDoc {
     let next = AtomicUsize::new(0);
-    let parsed = parse_entries(zip, chapters, images, toc, with_text, &next);
-    (ordered(parsed.chapters), ordered(parsed.images))
+    let parsed = parse_entries(reader, ctx, with_text, &next);
+    ParsedDoc {
+        chapters: ordered(parsed.chapters),
+        images: ordered(parsed.images),
+        cover: parsed.cover,
+    }
 }
 
 fn ordered<T>(mut entries: Vec<(usize, T)>) -> Vec<T> {
@@ -695,16 +901,13 @@ fn ordered<T>(mut entries: Vec<(usize, T)>) -> Vec<T> {
 }
 
 fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
-    read_with_impl(path, with_text, None)
+    read_with_impl(path, with_text, ParseBudget::Auto)
 }
 
-/// `read_with` 的实现。`forced_workers = Some(1)` 强制顺序、`Some(n)` 强制 n 路
-/// （测试与基准要一个和机器核数无关的确定输入）；`None` 按条目数与可用并行度自动定。
-fn read_with_impl(
-    path: &Path,
-    with_text: bool,
-    forced_workers: Option<usize>,
-) -> Result<(DocMeta, Content)> {
+/// `read_with` 的实现，多收一份 [`ParseBudget`]：测试与基准要一个与机器核数无关的
+/// 确定输入（`AtMost(1)` 强制顺序、`AtMost(4)` 压到 4 路），而导入一批书时那个数是
+/// 外层分好的（`ingest::import::split_budget`）。
+fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(DocMeta, Content)> {
     let mut zip = Zip::open(path)?;
     let container = zip
         .locate("META-INF/container.xml")
@@ -722,7 +925,14 @@ fn read_with_impl(
         None => String::new(),
     };
 
-    let by_id = |id: &str| opf.items.iter().find(|i| i.id == id);
+    // manifest 按 id 建一次表。spine 每一项都要回表取一次自己的条目，逐条 `iter().find`
+    // 在按节分包的书上是 O(节数 × 条目数) 次字符串比较 —— 实测《斗战狂潮》1225 节 ×
+    // 1233 条目 ≈ 150 万次比较，全花在「这个 id 对应哪一项」上。
+    // 重复 id 保留**第一个**，与 `iter().find` 同语义：畸形书不该因为换了查找结构就变内容。
+    let mut by_id: HashMap<&str, &Item> = HashMap::new();
+    for item in &opf.items {
+        by_id.entry(item.id.as_str()).or_insert(item);
+    }
 
     // CSS 按 manifest 里的声明顺序记下**位置清单**：正文出库之后样式表同样不入库，
     // 打开时按这份清单回容器现取（见 `Document::stylesheet`）。顺序 = manifest 顺序
@@ -791,7 +1001,7 @@ fn read_with_impl(
     let mut cover = opf
         .cover_id
         .as_deref()
-        .and_then(by_id)
+        .and_then(|id| by_id.get(id))
         .map(|i| resolve(&base_dir, &i.href));
     if cover.is_none() {
         cover = opf
@@ -800,18 +1010,11 @@ fn read_with_impl(
             .find(|i| i.properties.iter().any(|p| p == "cover-image"))
             .map(|i| resolve(&base_dir, &i.href));
     }
-    let cover_bytes = cover
+    // 封面在这里**只定位**：定位要读 OPF（主线程本来就在读），而读字节 + 解码 + 缩图
+    // 是队列里的一件活（见 `parse_cover` 与 `Job::Cover`），排第一被认领。
+    let cover_job = cover
         .as_deref()
-        .and_then(|n| zip.locate(n))
-        .and_then(|n| zip.read(&n))
-        // 封面是**故意**存下来的那一份：书架不打开容器就要画出那张卡片，所以它进
-        // `books.cover`。但存的是缩略图不是原图 —— 对应 KOReader
-        // 的 `bookinfo_cache.sqlite3` 里那份按显示尺寸缩完再 zstd 压的 blitbuffer。
-        // 一张 1500×2200 的封面原图就有 400 KB，而书架上它只显示几十像素宽。
-        .map(|bytes| match shrink_image(&bytes, COVER_MAX_EDGE) {
-            Some((small, _mime)) => small,
-            None => bytes,
-        });
+        .and_then(|n| zip.range_at(n).map(|range| Cover { href: n, range }));
 
     // 全文图片：manifest 里所有 image/* 的 item。封面若在 manifest 里会一并被收录，
     // 排版层按解析后的容器路径查表，所以这里存的 href 必须是 `resolve` 过的。
@@ -825,14 +1028,14 @@ fn read_with_impl(
         .filter(|i| i.media_type.starts_with("image/"))
     {
         let href = resolve(&base_dir, &item.href);
-        let Some(entry) = zip.locate(&href) else {
+        let Some(range) = zip.range_at(&href) else {
             // 插图缺失是按页降级的一种（排版会留一块占位），一条一张，所以放到 trace。
             tracing::trace!("epub: 插图 {href} 不在容器里");
             continue;
         };
         image_jobs.push(ImageJob {
             href,
-            entry,
+            range,
             media_type: item.media_type.clone(),
         });
     }
@@ -842,7 +1045,7 @@ fn read_with_impl(
     // 字符进度的分母，必须在导入时算准（`plans/导入管线.md` §八第 3 条）。
     let mut chapter_jobs = Vec::new();
     for (spine, id) in opf.spine.iter().enumerate() {
-        let Some(item) = by_id(id) else {
+        let Some(item) = by_id.get(id.as_str()) else {
             // spine 指着一个 manifest 里没有的 id：这一节整个没了，而且界面上看不出来。
             tracing::warn!(
                 "epub: spine 第 {} 项指向的 id {id:?} 不在 manifest 里",
@@ -854,7 +1057,7 @@ fn read_with_impl(
             continue;
         }
         let href = resolve(&base_dir, &item.href);
-        let Some(entry) = zip.locate(&href) else {
+        let Some(range) = zip.range_at(&href) else {
             // 正文少一章在界面上的表现是「翻到那里是空的」，说不清原因。
             tracing::warn!(
                 "epub: 容器里没有 {href}（spine 第 {} 项），这一章读不到",
@@ -862,23 +1065,54 @@ fn read_with_impl(
             );
             continue;
         };
-        chapter_jobs.push(ChapterJob { spine, href, entry });
+        chapter_jobs.push(ChapterJob { spine, href, range });
     }
 
-    let total = chapter_jobs.len() + image_jobs.len();
-    let workers = match forced_workers {
-        Some(n) => n.clamp(1, MAX_PARSE_WORKERS).min(total.max(1)),
-        None => parse_worker_count(total).min(total.max(1)),
+    // 队列的次序就是认领的次序：封面排最前（单本里最长的一件），再章、再图。
+    // 下标只用来把产物排回原序，谁领走哪一件由 `next` 抢。
+    let mut jobs = Vec::with_capacity(chapter_jobs.len() + image_jobs.len() + 1);
+    if cover_job.is_some() {
+        jobs.push(Job::Cover);
+    }
+    jobs.extend((0..chapter_jobs.len()).map(Job::Chapter));
+    jobs.extend((0..image_jobs.len()).map(Job::Image));
+
+    let total = jobs.len();
+    // 目录查标题的表建一次，交给每个 worker 查（建表在 `toc` 还活着的时候，
+    // `toc` 之后要 move 进 `FlowDoc`）。
+    let toc_by_href = toc_index(&toc);
+    let workers = parse_worker_count(total, budget).min(total.max(1));
+    #[cfg(test)]
+    LAST_WORKERS.with(|c| c.set(workers));
+    let ctx = ParseCtx {
+        jobs: &jobs,
+        chapters: &chapter_jobs,
+        images: &image_jobs,
+        cover: cover_job,
+        toc: &toc_by_href,
     };
-    let (chapters, images) = if workers <= 1 {
-        parse_entries_sequential(&mut zip, &chapter_jobs, &image_jobs, &toc, with_text)
+    // 顺序那一路也用同一个读法：一个句柄 + 区间表，与并行只差在不开线程。
+    let parsed = if workers <= 1 {
+        match EntryReader::open(path) {
+            Some(mut reader) => parse_entries_sequential(&mut reader, &ctx, with_text),
+            // 句柄都开不出来：容器读不出来，整本书本来也打不开，回一条错而不是静默少章。
+            None => return Err(unsupported(path, "连容器句柄都开不出来")),
+        }
     } else {
-        match parse_entries_parallel(path, &chapter_jobs, &image_jobs, &toc, with_text, workers) {
+        match parse_entries_parallel(path, &ctx, with_text, workers) {
             Some(parsed) => parsed,
             // 并行起不来或某个 worker 打不开容器：退回顺序路径，结果不许静默变少。
-            None => parse_entries_sequential(&mut zip, &chapter_jobs, &image_jobs, &toc, with_text),
+            None => match EntryReader::open(path) {
+                Some(mut reader) => parse_entries_sequential(&mut reader, &ctx, with_text),
+                None => return Err(unsupported(path, "连容器句柄都开不出来")),
+            },
         }
     };
+    let ParsedDoc {
+        chapters,
+        images,
+        cover: cover_bytes,
+    } = parsed;
 
     let meta = DocMeta {
         title: if opf.title.is_empty() {
@@ -933,23 +1167,6 @@ fn rebase(entry: TocEntry, base: &str) -> TocEntry {
             .map(|c| rebase(c, base))
             .collect(),
     }
-}
-
-/// 章内第一个 h1/h2/h3 的纯文本，用现成的 DOM 取。
-fn heading_of(source: &str) -> Option<String> {
-    let dom = crate::content::dom::Dom::parse(source.as_bytes());
-    let id = dom.elements().find(|(_, n)| {
-        matches!(
-            n.tag.as_ref().map(|t| t.local.to_string()).as_deref(),
-            Some("h1") | Some("h2") | Some("h3")
-        )
-    })?;
-    let text = dom
-        .text_of_subtree(id.0)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    (!text.is_empty()).then_some(text)
 }
 
 /// 容器读不出来的那几条路，收成一条错。

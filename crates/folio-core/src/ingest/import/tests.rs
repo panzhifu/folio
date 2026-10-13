@@ -1,13 +1,16 @@
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use super::{
-    BackfillReport, Candidate, ImportKind, ImportOutcome, ImportReport, Imported, PathsSource,
-    Source, backfill_copies, import_from, stage_local, submit_import, sweep_partials,
+    BackfillReport, Budget, Candidate, ImportKind, ImportOutcome, ImportReport, Imported,
+    MAX_IMPORT_BOOKS, PathsSource, Source, backfill_copies, import_batch, import_from,
+    schedule_reindex, split_budget, stage_local, submit_import, sweep_partials,
 };
-use crate::store::Store;
+use crate::infra::metrics::{Metric, take_local};
 use crate::infra::task::{StageCtx, TaskEvent, TaskManager};
+use crate::store::{StaleReason, Store};
 
 /// 从一批事件的 `Finished` 里捞出结果。
 fn outcomes_of(events: Vec<TaskEvent<Vec<ImportOutcome>>>) -> Vec<ImportOutcome> {
@@ -106,7 +109,10 @@ fn url_import_streams_into_a_hash_named_copy_and_registers() {
         cancel_after: Option<usize>,
     }
     impl Transport for Fixed {
-        fn request(&self, _req: crate::net::remote::Request) -> crate::net::remote::Result<Response> {
+        fn request(
+            &self,
+            _req: crate::net::remote::Request,
+        ) -> crate::net::remote::Result<Response> {
             Ok(Response::new(200, self.data.clone()))
         }
         fn download(
@@ -460,8 +466,51 @@ fn cancelling_before_the_first_book_touches_nothing() {
     assert!(copies(&lib).is_empty(), "副本也不该落");
 }
 
+/// 一个「**第一本** stage 完就置位取消」的假来源：取消落在什么时候由并行度决定 ——
+/// 顺序那一路停在两本之间，并行那一路只剩每路各一本在飞。两条测试共用它。
+struct CancelAfterFirst {
+    paths: Vec<PathBuf>,
+    staged: AtomicUsize,
+}
+
+impl CancelAfterFirst {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            staged: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Source for CancelAfterFirst {
+    fn kind(&self) -> ImportKind {
+        ImportKind::Paths
+    }
+
+    fn candidates(&self, _dest: &Path, _ctx: &StageCtx) -> crate::Result<Vec<Candidate>> {
+        Ok(PathsSource::candidates_from(&self.paths))
+    }
+
+    fn stage(
+        &self,
+        candidate: &Candidate,
+        staging_dir: &Path,
+        ctx: &StageCtx,
+    ) -> crate::Result<PathBuf> {
+        let staged = stage_local(candidate, staging_dir, ctx)?;
+        if self.staged.fetch_add(1, Ordering::SeqCst) == 0 {
+            ctx.cancel().trigger();
+        }
+        Ok(staged)
+    }
+}
+
 /// 取消落在两本**之间**：已经进去的那本是真的，后面的不再来 ——
 /// 这是「架面上的取消按钮」能做的前提。
+///
+/// 这一条把并行度**钉成 1**：「恰好停在两本之间」只有顺序那一路给得出，而默认那档现在是
+/// 按核数并行（`split_budget`），两本会在两路上一起飞。并行那一档的取消上界另有一条
+/// （[`a_cancelled_parallel_batch_lands_only_what_was_already_in_flight`]）。
 #[test]
 fn cancelling_between_books_keeps_what_already_landed() {
     let tmp = tempfile::tempdir().unwrap();
@@ -471,41 +520,60 @@ fn cancelling_between_books_keeps_what_already_landed() {
     let lib = tmp.path().join("books");
     let store = Store::in_memory().unwrap();
 
-    /// 两本的假来源：第一本 stage 完就置位取消，让循环停在第二本之前。
-    struct CancelAfterFirst {
-        paths: Vec<std::path::PathBuf>,
-        staged: AtomicUsize,
-    }
-    impl Source for CancelAfterFirst {
-        fn kind(&self) -> ImportKind {
-            ImportKind::Paths
-        }
-        fn candidates(&self, _dest: &Path, _ctx: &StageCtx) -> crate::Result<Vec<Candidate>> {
-            Ok(PathsSource::candidates_from(&self.paths))
-        }
-        fn stage(
-            &self,
-            candidate: &Candidate,
-            staging_dir: &Path,
-            ctx: &StageCtx,
-        ) -> crate::Result<std::path::PathBuf> {
-            let staged = stage_local(candidate, staging_dir, ctx)?;
-            if self.staged.fetch_add(1, Ordering::SeqCst) == 0 {
-                ctx.cancel().trigger();
-            }
-            Ok(staged)
-        }
-    }
-
     let ctx = StageCtx::detached();
-    let source = CancelAfterFirst {
-        paths: vec![a, b],
-        staged: AtomicUsize::new(0),
-    };
-    let outcomes = import_from(&source, &lib, &store, &ctx);
+    let source = CancelAfterFirst::new(vec![a, b]);
+    let outcomes = import_parallel(&source, &lib, &store, &ctx, 1);
     assert_eq!(outcomes.len(), 1, "第二本不该再被处理");
     assert!(matches!(outcomes[0].result, Ok(Imported::Added(_))));
     assert_eq!(store.shelf("").unwrap().len(), 1, "已进去的那本在库里");
+}
+
+/// 并行那一档的取消上界：置位之后**不再领新的号**，所以最多只剩「每路各一本」在飞，
+/// 而已经落的那些都是真的 —— 界面那句「已取消」指的正是这个集合。
+///
+/// 与上面那条的分别是真的、不是措辞：顺序那一路能承诺「恰好停在两本之间」，并行那一路
+/// 只能承诺「每路各一本以内」。这条钉的是上界（`workers`），钉不成具体的本数 —— 具体几本
+/// 落在置位之前跑完，由调度决定，那种断言换台机器就红。
+#[test]
+fn a_cancelled_parallel_batch_lands_only_what_was_already_in_flight() {
+    let workers = 3;
+    let tmp = tempfile::tempdir().unwrap();
+    let picked = tmp.path().join("原处");
+    let paths: Vec<_> = (0..8)
+        .map(|i| write(&picked, &format!("{i}.txt"), &format!("第 {i} 本\n")))
+        .collect();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let ctx = StageCtx::detached();
+    let source = CancelAfterFirst::new(paths);
+    let outcomes = import_parallel(&source, &lib, &store, &ctx, workers);
+
+    assert!(!outcomes.is_empty(), "第一本已经领走了，该跑完而不是作废");
+    assert!(
+        outcomes.len() <= workers,
+        "置位之后不许再领新的号：最多只剩每路各一本在飞，实际结了 {} 本",
+        outcomes.len()
+    );
+    // 每一条 `Added` 都必须既在架上又在盘上 —— 「取消不收回已经落库的那些」。
+    let shelf = store.shelf("").unwrap();
+    for outcome in &outcomes {
+        let Ok(Imported::Added(registered)) = &outcome.result else {
+            continue;
+        };
+        assert!(
+            shelf.iter().any(|row| row.id == registered.book_id),
+            "报了 Added 的第 {} 本得在架上看得见",
+            registered.book_id
+        );
+        assert!(registered.dest.exists(), "报了 Added 的副本得在盘上躺着");
+    }
+    assert_eq!(
+        shelf.len(),
+        outcomes.iter().filter(|o| o.result.is_ok()).count(),
+        "架上的行数要正好等于结清的本数"
+    );
+    assert!(staged(&lib).is_empty(), "没领过的候选连暂存区都不该碰");
 }
 
 /// §九：**判重命中，但那条记录指的副本文件已经不在了** —— 不能报「已存在」把读者挡回去，
@@ -892,4 +960,432 @@ fn a_batch_tallies_into_a_report_with_rejects() {
         "那句总结要说得出数：{}",
         report.summary()
     );
+}
+
+// ---- 重扫的线程归属（`plans/阅读管线.md` §七：开书那一屏不等重扫）----
+
+/// 一张纯色 PNG，用来当 CBZ 的一页。
+fn png(w: u32, h: u32) -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let img = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    out
+}
+
+/// 两页的 CBZ。**为什么不用那份 EPUB 样本**：EPUB 的索引会把封面那一件记进一份
+/// 进程全局的量具（`epub::COVER_WORK`，`#[cfg(test)]` 的 `Vec<ThreadId>`），而 `cargo test`
+/// 默认并行 —— 拿它当重扫的对象，会叫 `epub::tests` 里那条按长度断言的门漂
+/// （实测一加就 3/3 红）。CBZ 同样要开 ZIP（所以 `ContainerOpens` 照样数得出来），
+/// 而它的封面是「首页」，走不到 EPUB 那份量具里。
+fn cbz_book(dir: &Path) -> std::path::PathBuf {
+    use std::io::Write as _;
+    let path = dir.join("two-pages.cbz");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    for (name, bytes) in [("01.png", png(8, 8)), ("02.png", png(8, 8))] {
+        zip.start_file(name, opts).unwrap();
+        zip.write_all(&bytes).unwrap();
+    }
+    zip.finish().unwrap();
+    path
+}
+
+/// 把库里那一行的索引版本退回「旧算法算的」。`Store` 的连接是私有的，所以走第二条连接
+/// （同 `store::tests` 里那句）。
+fn make_index_stale(db: &Path, book_id: i64) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute(
+        "UPDATE books SET index_version = 0 WHERE id = ?1",
+        [book_id],
+    )
+    .unwrap();
+}
+
+/// 投出去的那一趟**不占用调用线程**。`ContainerOpens` 是线程局部计数（`infra::metrics`
+/// 那条纪律），所以界面线程那份在提交之后必须还是 0 —— 重扫真的解了容器，但那笔钱记在
+/// 池线程上。**在旧写法下这条是红的**：那时 `reindex` 就在调用线程上原地跑完整本书
+/// （临时把提交换成原地调用，它给的是 `left: 1, right: 0`）。
+///
+/// 另一半钉的是「它确实把活做了」：等句柄收尾之后 `stale_reason` 从 `OldIndex` 变回
+/// `None`、页表也回来了。**把提交整句换成一个只退号的空作业**，第二条断言立刻红
+/// （`left: Some(OldIndex)`）—— 前一半单看会在「重扫根本没人做」时也绿，两条要成对读。
+#[test]
+fn scheduled_reindex_does_not_run_on_the_calling_thread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("lib.db");
+    let book = cbz_book(tmp.path());
+    let store = Arc::new(Store::open_at(&db).unwrap());
+    let meta = crate::content::format::DocMeta {
+        title: "两页".into(),
+        authors: vec![],
+        format: crate::content::format::Format::Cbz,
+        size: 0,
+    };
+    let id = store.add_book(&book, &meta).unwrap();
+    make_index_stale(&db, id);
+    assert_eq!(
+        store.stale_reason(id).unwrap(),
+        Some(StaleReason::OldIndex),
+        "起点是「索引旧了」"
+    );
+
+    take_local(Metric::ContainerOpens); // 归零：断言的是提交这一段里的增量
+    let manager = TaskManager::new(2);
+    let handle = schedule_reindex(&manager, store.clone(), id).expect("旧索引该投出去");
+    assert_eq!(
+        take_local(Metric::ContainerOpens),
+        0,
+        "调用线程一趟容器都不该开"
+    );
+
+    handle
+        .events
+        .into_iter()
+        .find_map(|event| match event {
+            TaskEvent::Finished(Ok(())) => Some(()),
+            TaskEvent::Finished(Err(err)) => panic!("重扫该成功：{err}"),
+            TaskEvent::Cancelled => panic!("没人取消过这一趟"),
+            _ => None,
+        })
+        .expect("作业要以 Finished(Ok(..)) 收尾");
+    assert_eq!(
+        store.stale_reason(id).unwrap(),
+        None,
+        "重扫做完了，索引又可信"
+    );
+    let content = store.load_content(id).unwrap().expect("页表该回来了");
+    assert!(
+        content
+            .as_fixed()
+            .is_some_and(|fixed| fixed.pages.len() == 2),
+        "而且是带着两页回来的"
+    );
+}
+
+/// 两道门的语义。号记在 `Store` 上而不是进程级 `static`：`book_id` 每份内存库都从 1 起，
+/// 挂在进程级集合上会叫并发跑的别的用例互相挡掉对方的提交 —— 那是一条红不了的假门。
+#[test]
+fn reindex_claims_are_one_per_book_and_failed_ones_stay_out() {
+    let store = Store::in_memory().unwrap();
+    assert!(store.claim_reindex(7), "第一次该领到号");
+    assert!(!store.claim_reindex(7), "同一本在飞时不该有第二趟");
+    store.note_reindex(7, true);
+    assert!(
+        store.claim_reindex(7),
+        "成功要退号：`index_version` 下次被 bump 时那一本还得能再投"
+    );
+
+    assert!(store.claim_reindex(9), "另一本领自己的号");
+    store.note_reindex(9, false);
+    assert!(
+        !store.claim_reindex(9),
+        "试过且失败的，本进程内不再自动重投"
+    );
+    assert!(store.claim_reindex(10), "抑制只针对那一本，不牵连别本");
+}
+
+/// 提交那一侧真的尊重两道门：领不到号就返回 `None` 且不投作业 —— 不会有第二趟全量重读，
+/// 也不会把号漏在飞（号只在作业里退）。
+#[test]
+fn schedule_reindex_respects_the_two_gates() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let manager = TaskManager::new(2);
+
+    assert!(store.claim_reindex(3), "先占住「在飞」");
+    assert!(
+        schedule_reindex(&manager, store.clone(), 3).is_none(),
+        "在飞时不再投"
+    );
+
+    store.note_reindex(3, false);
+    assert!(
+        schedule_reindex(&manager, store.clone(), 3).is_none(),
+        "失败过的那本也不再自动投"
+    );
+}
+
+// ── 按书并行 ───────────────────────────────────────────────────────────────────
+//
+// 下面这几条都把「同时几本」**钉住**（`import_parallel` 直接走批次引擎），而不是跟着
+// `import_from` 的默认那一档走：默认按这台机器的核数切（`split_budget`），CI 上是 1、
+// 开发机上是 4 —— 拿它当输入的话，同一测试在两台机器上测的是两件不同的事。
+// 钉住之后这些条测的是「几路同时在导」那个形状本身。
+
+/// 走批次引擎并把并行度钉成 `books_at_once`。
+fn import_parallel(
+    source: &dyn Source,
+    lib: &Path,
+    store: &Store,
+    ctx: &StageCtx,
+    books: usize,
+) -> Vec<ImportOutcome> {
+    let candidates = source.candidates(lib, ctx).expect("候选该交得出来");
+    let staging = crate::infra::paths::staging_dir(lib);
+    crate::infra::paths::prepare_dir(&staging).expect("暂存区该建得起来");
+    // `per_book` 一律给到内层上限：这几条要比的只有「同时几本」这一个变量。
+    // （预算怎么切成两层由 [`split_budget`] 那条单独钉。）
+    import_batch(
+        source,
+        lib,
+        store,
+        ctx,
+        &staging,
+        &candidates,
+        Budget {
+            books,
+            per_book: crate::content::format::epub::MAX_PARSE_WORKERS,
+        },
+    )
+}
+
+/// 一份核数怎么切成「同时几本 × 每本几路」。这三条恒等式都与机器无关，因为它们是从
+/// 构造来的：总数不超核数（两处都只封顶、不放大）、至少一本一路、本数随核数不减。
+///
+/// 最后一条钉的是以前那一版的整除：`核数 ÷ 内层自己那 4 路` 在 6 核（Meizu 20 报的
+/// 可用核数）上给的是「1 本」—— 接了并行却仍然逐本串行，而桌面 20 核上看不出这件事。
+#[test]
+fn one_budget_splits_into_two_layers_without_oversubscribing() {
+    for cores in 1..=64 {
+        let b = split_budget(cores);
+        assert!(b.books >= 1 && b.per_book >= 1, "{cores} 核不能退化成零");
+        assert!(
+            b.books <= MAX_IMPORT_BOOKS,
+            "{cores} 核算出 {b:?}：同时几本越过了封顶"
+        );
+        assert!(
+            b.per_book <= crate::content::format::epub::MAX_PARSE_WORKERS,
+            "{cores} 核算出 {b:?}：每本几路越过了内层上限"
+        );
+        assert!(
+            b.books * b.per_book <= cores,
+            "{cores} 核算出 {b:?}：乘积超过了这台机器的核数"
+        );
+    }
+    let mut last_books = 0;
+    for cores in 1..=64 {
+        let b = split_budget(cores);
+        assert!(b.books >= last_books, "{cores} 核上同时几本反而少了");
+        last_books = b.books;
+    }
+    assert_eq!(
+        split_budget(6).books,
+        3,
+        "6 核该同时导 3 本，不是退化成串行"
+    );
+    assert_eq!(
+        (split_budget(1).books, split_budget(1).per_book),
+        (1, 1),
+        "单核就一路，别开线程"
+    );
+}
+
+/// 凑齐 `n` 路才一起放行；凑不齐两秒后也放行，回「齐过没有」。
+///
+/// 不用 `std::sync::Barrier::wait`：凑不齐时它**永远挂**，而这里要的失败形状是
+/// 「并行没跑起来」（红），不是「CI 卡到 job 超时」。
+#[derive(Debug)]
+struct Meet {
+    n: usize,
+    arrived: Mutex<usize>,
+    ready: Condvar,
+}
+
+impl Meet {
+    fn new(n: usize) -> Self {
+        Self {
+            n,
+            arrived: Mutex::new(0),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn arrive(&self) -> bool {
+        let mut got = self.arrived.lock().unwrap_or_else(|e| e.into_inner());
+        *got += 1;
+        self.ready.notify_all();
+        if *got >= self.n {
+            return true;
+        }
+        let (got, _) = self
+            .ready
+            .wait_timeout_while(got, Duration::from_secs(2), |count| *count < self.n)
+            .unwrap_or_else(|e| e.into_inner());
+        *got >= self.n
+    }
+}
+
+/// 每一本在 `stage` 里先等其余各路到齐 —— 把「并行」从「可能同时」变成「一定同时」。
+///
+/// 不等这一步，两本小书完全可能一前一后跑完，那条竞态根本没被试过：测试会绿，而它绿的是
+/// 「串行也没坏」。`met` 记的是真的等到过「齐」的有几路。
+struct Synchronized {
+    paths: Vec<PathBuf>,
+    gate: Meet,
+    met: AtomicUsize,
+}
+
+impl Synchronized {
+    fn new(paths: Vec<PathBuf>, n: usize) -> Self {
+        Self {
+            paths,
+            gate: Meet::new(n),
+            met: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Source for Synchronized {
+    fn kind(&self) -> ImportKind {
+        ImportKind::Paths
+    }
+
+    fn candidates(&self, _dest: &Path, _ctx: &StageCtx) -> crate::Result<Vec<Candidate>> {
+        Ok(PathsSource::candidates_from(&self.paths))
+    }
+
+    fn stage(
+        &self,
+        candidate: &Candidate,
+        staging_dir: &Path,
+        ctx: &StageCtx,
+    ) -> crate::Result<PathBuf> {
+        if self.gate.arrive() {
+            self.met.fetch_add(1, Ordering::SeqCst);
+        }
+        stage_local(candidate, staging_dir, ctx)
+    }
+}
+
+/// 四路并行导四本：四路**确实同时在飞**，且一个都不少。
+///
+/// 这条钉的是引擎本身。没有 `met == 4` 那一句的话，「并行」可以退化成一路跑完全部而测试
+/// 照绿 —— 那正是这类测试最容易买到的假绿。
+#[test]
+fn four_books_land_with_four_threads_actually_in_flight() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("原处");
+    let paths: Vec<_> = (0..4)
+        .map(|i| write(&dir, &format!("{i}.txt"), &format!("第 {i} 本\n")))
+        .collect();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let source = Synchronized::new(paths, 4);
+    let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 4);
+
+    assert_eq!(
+        source.met.load(Ordering::SeqCst),
+        4,
+        "四路该在 stage 那里真的碰到过彼此：没碰到就等于这条没试过并行"
+    );
+    assert_eq!(outcomes.len(), 4, "四本都要有结果");
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o.result, Ok(Imported::Added(_)))),
+        "四本都该落地，实际 {:?}",
+        outcomes.iter().map(|o| &o.result).collect::<Vec<_>>()
+    );
+    assert_eq!(store.shelf("").unwrap().len(), 4, "架上要看得见四本");
+    assert_eq!(copies(&lib).len(), 4, "书库根上要躺着四份副本");
+    assert!(staged(&lib).is_empty(), "结清之后暂存区该是空的");
+}
+
+/// 报表按**候选原序**交回，不按谁先跑完。
+///
+/// 界面那句「成功 N / 已存在 M」是聚合的，看不出顺序；但 `ImportOutcome` 是逐本一条，
+/// 测试与日志都按候选那一批的位置读它。乱序的那一条要能对上号，否则「第 3 本被拒了」
+/// 这种话就没法说。
+#[test]
+fn a_parallel_batch_reports_the_candidates_in_their_original_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("原处");
+    let paths: Vec<_> = (0..8)
+        .map(|i| write(&dir, &format!("{i}.txt"), &format!("第 {i} 本的字节\n")))
+        .collect();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let source = Synchronized::new(paths, 4);
+    let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 4);
+
+    assert_eq!(outcomes.len(), 8);
+    for (at, outcome) in outcomes.iter().enumerate() {
+        assert_eq!(
+            outcome.candidate.name,
+            format!("{at}.txt"),
+            "第 {at} 条结果对应的必须是第 {at} 个候选"
+        );
+    }
+}
+
+/// §九 那条门在并行下要**照样成立**：一批里两份内容相同的书，库里只能有一行、
+/// 书库里只能有一份副本，另一条报「已存在」。
+///
+/// 串行时这条是顺序白给的（第二本必然看见第一本刚落好的那一行），并行就没有了：两本同时
+/// `book_by_hash`、同时查到「没有」，就各落一行。数据库挡不住 —— `content_hash` 上建的是
+/// 普通索引而不是 UNIQUE（`store/schema.rs`）。
+///
+/// **把 `import_candidate` 里那句 `CLAIMS.hold` 拿掉，这条会变红**（两行、两份副本）。
+/// 两本都在 `stage` 那一步等到过彼此，所以这不是「碰巧一前一后」的绿。
+#[test]
+fn two_identical_books_in_one_parallel_batch_still_land_one_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 不同的原路径、不同的建议名、同样的字节 —— 与那条串行的判重测试同一套设置。
+    let a = write(&tmp.path().join("原处"), "甲.txt", "同一本书的字节\n");
+    let b = write(&tmp.path().join("另一个地方"), "乙.txt", "同一本书的字节\n");
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let source = Synchronized::new(vec![a, b], 2);
+    let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 2);
+
+    assert_eq!(source.met.load(Ordering::SeqCst), 2, "两本该同时在飞");
+    let report = ImportReport::tally(&outcomes);
+    assert_eq!(
+        (report.added, report.duplicate, report.rejected()),
+        (1, 1, 0),
+        "一本落地、一本报已存在，实际 {:?}",
+        outcomes.iter().map(|o| &o.result).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        store.shelf("").unwrap().len(),
+        1,
+        "同内容不许有两行 = 两套进度"
+    );
+    assert_eq!(copies(&lib).len(), 1, "书库根上只该有一份副本");
+    assert!(
+        staged(&lib).is_empty(),
+        "等过号的那本也要把自己那份 .part 退掉，实际剩 {:?}",
+        staged(&lib)
+    );
+}
+
+/// 取消旗已经置位的一批，并行一路也不该碰任何候选。
+///
+/// 检查点落在**领号之前**（`Batch::run`），所以「一上来就取消」在任何一路都还是
+/// 「一个候选都不处理」。并行让「置位后不再导新的」这条的延迟上限从一本变成每路各一本，
+/// 但没领过的号绝不许被领。
+#[test]
+fn a_parallel_batch_that_is_already_cancelled_touches_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("原处");
+    let paths: Vec<_> = (0..6)
+        .map(|i| write(&dir, &format!("{i}.txt"), &format!("第 {i} 本\n")))
+        .collect();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let ctx = StageCtx::detached();
+    ctx.cancel().trigger();
+    let source = PathsSource::picked(paths);
+    let outcomes = import_parallel(&source, &lib, &store, &ctx, 4);
+
+    assert!(outcomes.is_empty(), "取消了就不该处理任何候选");
+    assert!(copies(&lib).is_empty(), "副本也不该落");
+    assert!(staged(&lib).is_empty(), "暂存区也不该留下东西");
 }

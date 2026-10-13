@@ -9,7 +9,9 @@ use crate::content::dom::Dom;
 use crate::content::format::css::computed::{ComputedStyle, TextAlign, cascade};
 use crate::content::format::css::{Origin, RuleSet};
 use crate::content::format::detect;
-use crate::content::format::{Chapter, Content, DocMeta, FlowDoc, Format, dir_of, resolve_href};
+use crate::content::format::{
+    Chapter, Content, DocMeta, FlowDoc, Format, ParseBudget, dir_of, resolve_href,
+};
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/minimal-zh.epub")
@@ -795,15 +797,15 @@ fn forced_parallel_indexing_matches_the_sequential_result() {
     write_epub(&path, &refs);
 
     for with_text in [false, true] {
-        let sequential = super::read_with_impl(&path, with_text, Some(1)).unwrap();
-        let parallel = super::read_with_impl(&path, with_text, Some(4)).unwrap();
+        let sequential = super::read_with_impl(&path, with_text, ParseBudget::Exactly(1)).unwrap();
+        let parallel = super::read_with_impl(&path, with_text, ParseBudget::Exactly(4)).unwrap();
         assert_eq!(
             sequential, parallel,
             "with_text={with_text} 时顺序与并行产出不一致"
         );
     }
 
-    let (_, content) = super::read_with_impl(&path, false, Some(4)).unwrap();
+    let (_, content) = super::read_with_impl(&path, false, ParseBudget::Exactly(4)).unwrap();
     let Content::Reflow(flow) = content else {
         panic!("该读成可重排");
     };
@@ -868,4 +870,421 @@ fn a_hundred_image_fetches_should_open_the_container_once() {
         1,
         "整本书读图只该开一次容器；每取一张开一次就是每次读一遍中央目录"
     );
+}
+
+// ── 插图清单只解前缀（见 `super::parse_image` 与 `super::IMAGE_HEAD_BYTES`）──────
+//
+// 三条测试各守一条分支，都能在该分支被拆掉时变红：
+// 1. 前缀读 + 不整条读 → 尾部坏掉的图仍定得出尺寸；
+// 2. 「认不出是位图就不再读」→ SVG 不配占一次整条解压；
+// 3. 「认得出但头在更后面 → 补整条」→ 长注释段的 JPEG 不许记成 0×0。
+
+/// 一本 1 章 + 1 张插图的合成容器，**插图是最后写进去的那个条目**（尾部损坏那两条测试
+/// 要把动手的位置落在它的压缩数据里）。回 `(路径, 图片的容器条目名)`。
+fn one_image_epub(
+    dir: &tempfile::TempDir,
+    name: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> (PathBuf, String) {
+    let path = dir.path().join(name);
+    let ext = match mime {
+        "image/svg+xml" => "svg",
+        "image/jpeg" => "jpg",
+        _ => "png",
+    };
+    let entry = format!("Images/pic.{ext}");
+    let opf = format!(
+        r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>一张图</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="img1" href="{entry}" media-type="{mime}"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#
+    );
+    let chap = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>文字</p></body></html>"#;
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            ("OEBPS/Text/chap1.xhtml", chap.as_bytes()),
+            (&format!("OEBPS/{entry}"), bytes),
+        ],
+    );
+    (path, format!("OEBPS/{entry}"))
+}
+
+/// 把容器里**最后一个条目**压缩数据的尾部若干字节翻掉：模拟一本下载不全、
+/// 或者被人动过一角的书。
+///
+/// 动手的位置由中央目录的起点定（EOCD 记录 +16 处那个 4 字节小端偏移），
+/// 它前面那段一定属于最后写进去的条目。两条长度断言是给测试自己的：条目短到
+/// 前缀就读得完、或压缩后本来就比要坏掉的那段还短时，这条就没在测它声称的东西。
+fn damage_tail_of_last_entry(file: &Path, name: &str, count: usize) {
+    let mut data = std::fs::read(file).unwrap();
+    let eocd = data.len() - 22;
+    assert_eq!(
+        &data[eocd..eocd + 4],
+        b"PK\x05\x06",
+        "合成容器的 EOCD 该在末尾"
+    );
+    let cdir = u32::from_le_bytes(data[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+    assert!(cdir < eocd, "中央目录的偏移该在 EOCD 之前");
+
+    let head = super::IMAGE_HEAD_BYTES as usize;
+    let (size, compressed) = {
+        let mut arch = zip::ZipArchive::new(std::fs::File::open(file).unwrap()).unwrap();
+        let entry = arch.by_name(name).unwrap();
+        (entry.size() as usize, entry.compressed_size() as usize)
+    };
+    assert!(
+        size > 4 * head,
+        "条目解压后 {size} 字节，前缀窗口 {head} 都盖不住它，测不出前缀读"
+    );
+    assert!(
+        compressed > 2 * head,
+        "条目压缩后 {compressed} 字节：压得太狠，坏掉的尾部会落进前缀读到的那段里"
+    );
+    assert!(cdir > count, "要坏掉的 {count} 字节比整个数据区还长");
+    for byte in &mut data[cdir - count..cdir] {
+        *byte = !*byte;
+    }
+    std::fs::write(file, &data).unwrap();
+}
+
+/// 压不动的字节：deflate 对它们几乎不缩，所以条目解压后与压缩后都远超前缀那 32 KiB。
+/// 用哈希而不是真随机，测试才可重复。
+fn incompressible(count: usize) -> Vec<u8> {
+    (0..count)
+        .map(|i| {
+            let mut v = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xDEAD_BEEF;
+            v ^= v >> 29;
+            v = v.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            b'!' + (v % 90) as u8
+        })
+        .collect()
+}
+
+/// 噪声 PNG：同样的理由（压不动）用它当「一张真的大位图」。
+/// 纯色图会被压成几百字节，那样「坏在尾部」就落进前缀窗口里了。
+fn noisy_png_bytes(w: u32, h: u32) -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let img = image::RgbaImage::from_fn(w, h, |x, y| {
+        let mix = |k: u32| {
+            let mut v = ((x + 1) as u64).wrapping_mul(2654435761)
+                ^ ((y + 3) as u64).wrapping_mul(1597334677)
+                ^ (k as u64).wrapping_mul(40503);
+            v ^= v >> 15;
+            (v.wrapping_mul(2246822519) >> 24) as u8
+        };
+        image::Rgba([mix(1), mix(2), mix(3), 255])
+    });
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+        .expect("合成噪声 PNG 该编得出来");
+    out
+}
+
+/// 把一张真 JPEG 的**尺寸头推到前缀之外**：在 SOI 之后插一段超长 COM 注释段，
+/// SOFn 就被顶到 `IMAGE_HEAD_BYTES` 之后。其余字节一个没动，整条读仍然解得开。
+fn jpeg_with_late_header(w: u32, h: u32) -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        image::Rgb([
+            ((x * 7 + y * 11) % 256) as u8,
+            (((x * 41) ^ (y * 17)) % 256) as u8,
+            (((x + y) * 5) % 256) as u8,
+        ])
+    });
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 70)
+        .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+        .expect("合成 JPEG 该编得出来");
+    assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "JPEG 该以 SOI 开头");
+
+    // COM 段 = FFFE + 2 字节长度（含长度字段自己）+ 负载；解码器按长度跳过它。
+    // 长度字段是 u16，所以一次最多垫 65533 字节；不够就多插几段。
+    let target = super::IMAGE_HEAD_BYTES as usize + 8192;
+    let mut out = Vec::with_capacity(jpeg.len() + target);
+    out.extend_from_slice(&jpeg[..2]);
+    let mut padded = 0usize;
+    while padded < target {
+        let payload = (target - padded).min(u16::MAX as usize - 2);
+        out.extend_from_slice(&[0xFF, 0xFE, ((payload + 2) >> 8) as u8, (payload + 2) as u8]);
+        out.resize(out.len() + payload, b' ');
+        padded += payload + 2;
+    }
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// **前缀读的直接后果**：一张尾部坏掉的插图仍然进得了清单、仍然有正确尺寸。
+///
+/// 整条解压那套旧写法在这里会失败（zip 在流末尾校 CRC，解到坏字节也会错），
+/// 于是 `parse_image` 回 `None` —— 这张图从清单里**整个消失**，版面于是不知道它占多大，
+/// 读者看到的是文字被一张不存在的图挤开，或者图压在文字上。
+/// 尺寸头在最前面，前缀读只要头部完好就定得出来。
+#[test]
+fn an_image_with_a_damaged_tail_still_reports_its_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let (epub, entry) = one_image_epub(
+        &dir,
+        "damaged.epub",
+        "image/png",
+        &noisy_png_bytes(300, 400),
+    );
+    damage_tail_of_last_entry(&epub, &entry, 4096);
+
+    let (_, content) =
+        super::read_with_impl(&epub, false, ParseBudget::Exactly(1)).expect("书该照样打得开");
+    let Content::Reflow(flow) = content else {
+        panic!("该读成可重排");
+    };
+    assert_eq!(flow.chapters.len(), 1, "正文不受插图损坏的影响");
+    assert_eq!(flow.images.len(), 1, "尾部坏掉的图不该从清单里消失");
+    assert_eq!(
+        (flow.images[0].width, flow.images[0].height),
+        (300, 400),
+        "尺寸头在前缀里，该照样定得出来"
+    );
+}
+
+/// SVG 那一类「读完整条也拿不到尺寸」的条目，一次整条解压都不该花。
+///
+/// 与前一条同一个观察手段：把条目尾部弄坏。如果代码真的读了整条，读会失败、
+/// 这一项就从清单里消失；只读前缀则走到「认不出是位图 → 不再读」那一档，
+/// 于是它**带着 0×0 出现在清单里** —— 那正是排版留占位要的键。
+#[test]
+fn an_svg_item_does_not_cost_a_whole_entry_inflate() {
+    let dir = tempfile::tempdir().unwrap();
+    // 一份 160 KiB 的 SVG，注释段用压不动的字节：条目压缩后仍远超前缀窗口，
+    // 「坏在尾部」才落在前缀读不到的地方。SVG 的内容没人解析，字符随便是什么都行。
+    let body = String::from_utf8(incompressible(160 * 1024)).expect("填充字节该是合法 ASCII");
+    let svg = format!(
+        "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"><!--{body}--></svg>"
+    );
+    let (epub, entry) = one_image_epub(&dir, "svg.epub", "image/svg+xml", svg.as_bytes());
+    damage_tail_of_last_entry(&epub, &entry, 4096);
+
+    let (_, content) =
+        super::read_with_impl(&epub, false, ParseBudget::Exactly(1)).expect("SVG 书该打得开");
+    let Content::Reflow(flow) = content else {
+        panic!("该读成可重排");
+    };
+    assert_eq!(flow.images.len(), 1, "SVG 也要进清单（排版按 href 查它）");
+    assert_eq!(
+        (flow.images[0].width, flow.images[0].height),
+        (0, 0),
+        "SVG 定不出固有尺寸，由排版的降级规则兜底"
+    );
+}
+
+/// 尺寸头排在更后面的 JPEG 必须补一次整条读，而不是记成 0×0。
+///
+/// 带大 EXIF 缩略图或长注释段的真实出版物 JPEG 就是这个形状。前缀读不出来时
+/// `HeadDims::NeedsMore` 那条分支的存在，就是为了不让这一类书的插图没有尺寸。
+#[test]
+fn a_jpeg_whose_header_sits_past_the_prefix_falls_back_to_the_whole_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let late = jpeg_with_late_header(64, 32);
+    let (epub, _entry) = one_image_epub(&dir, "late-header.epub", "image/jpeg", &late);
+
+    let (_, content) = super::read_with_impl(&epub, false, ParseBudget::Exactly(1))
+        .expect("带长注释的 JPEG 书该打得开");
+    let Content::Reflow(flow) = content else {
+        panic!("该读成可重排");
+    };
+    assert_eq!(flow.images.len(), 1);
+    assert_eq!(
+        (flow.images[0].width, flow.images[0].height),
+        (64, 32),
+        "尺寸头在前缀之外时该补整条读，而不是降级成 0×0"
+    );
+}
+
+/// 封面那一件该由 **worker** 领走，而且一本书只做一次。
+///
+/// 数的是「在哪个线程上做的 + 做了几次」而不是毫秒：并行段的计时被调度噪声牵着走，
+/// 而这两格有确定的整数与确定的不等式答案。
+///
+/// - 并行（4 路）：记到一次，且那个线程号**不是**调用线程 → 封面确实在队列里。
+///   把它退回主线程串行做，这里记不到号，`len() == 1` 立刻红。
+/// - 顺序（1 路）：也做一次，而且就在调用线程上 → 证明是「进了队列」而不是「换了个地方做」。
+/// - 两次跑完总共两次：并行失败退回顺序时不该把封面**再做一遍**。
+#[test]
+fn the_cover_is_a_queue_job_not_main_thread_work() {
+    // 计数是全局的（worker 上做这件事只有全局量看得见），所以这张封面用**本测试独有的
+    // 条目名**，读出来再按它筛：cargo 并行跑测试，别的书也都有封面，不筛就是随机翻红。
+    const COVER_ENTRY: &str = "OEBPS/Images/queue-job-only-cover.png";
+    let dir = tempfile::tempdir().unwrap();
+    let epub = dir.path().join("cover-job.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>有封面的书</dc:title>
+    <meta name="cover" content="img1"/>
+  </metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="img1" href="Images/queue-job-only-cover.png" media-type="image/png"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+    let chap = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>文字</p></body></html>"#;
+    write_epub(
+        &epub,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            ("OEBPS/Text/chap1.xhtml", chap.as_bytes()),
+            (COVER_ENTRY, &png_bytes(600, 800)),
+        ],
+    );
+
+    let mine = || -> Vec<std::thread::ThreadId> {
+        super::COVER_WORK
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(entry, _)| entry == COVER_ENTRY)
+            .map(|(_, id)| *id)
+            .collect()
+    };
+    let me = std::thread::current().id();
+
+    // 封面 + 一章 = 两件活，4 路上限被条目数压到 2 路：仍然是并行路径。
+    let (_, content) =
+        super::read_with_impl(&epub, false, ParseBudget::Exactly(4)).expect("并行该打得开");
+    let Content::Reflow(flow) = content else {
+        panic!("该读成可重排");
+    };
+    assert!(flow.cover.is_some(), "封面字节该照样产得出来");
+    let done = mine();
+    assert_eq!(done.len(), 1, "并行这一趟封面该做一次");
+    assert_ne!(done[0], me, "并行时封面该在 worker 上做，不是调用线程");
+
+    let (_, _) =
+        super::read_with_impl(&epub, false, ParseBudget::Exactly(1)).expect("顺序也该打得开");
+    let done = mine();
+    assert_eq!(done.len(), 2, "顺序那一趟再做一次，不该和并行那趟重复");
+    assert_eq!(done[1], me, "顺序路径的封面就在调用线程上做");
+}
+
+/// **这一改动的主信号**：索引一趟一次 DOM 都不解析。
+///
+/// 数的是次数而不是毫秒：`char_len` 与标题回落只要「可见字符数」和「第一个标题的文本」，
+/// 走 DOM 就得给每个节点拼一条路径字符串，而导入时一次都不读它。退回 `Dom::parse`
+/// 那一趟会立刻把这一格从 0 变成章数，计时噪声再大也骗不了这条。
+///
+/// 用 `Some(1)` 强制顺序：`DomParses` 是线程局部计数，并行时解析发生在 worker 线程上，
+/// 主线程读到的局部值会漏算（基准里读全局量就是为了这个）。顺序那一趟与并行走的是
+/// 同一段代码，所以断这一条就够。
+#[test]
+fn indexing_a_book_parses_no_dom_at_all() {
+    use crate::infra::metrics::{Metric, take_local};
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/local/shejie-mauriac.epub");
+    for with_text in [false, true] {
+        take_local(Metric::DomParses);
+        let (_, content) =
+            super::read_with_impl(&path, with_text, ParseBudget::Exactly(1)).expect("该打得开");
+        let parses = take_local(Metric::DomParses);
+        let Content::Reflow(flow) = content else {
+            panic!("该读成可重排");
+        };
+        assert!(flow.chapters.len() >= 20, "样本太小，这条会假绿");
+        assert_eq!(
+            parses,
+            0,
+            "with_text={with_text}：索引 {} 章该一次 DOM 都不解析",
+            flow.chapters.len()
+        );
+    }
+}
+
+/// **这一改动的主信号**：索引一趟只解一次中央目录。
+///
+/// worker 现在拿的是「条目区间 + 自己的句柄」（`EntryReader`），不再各自 `Zip::open`
+/// 把中央目录读一遍、两张表再建一遍（实测 1233 条目的书那一次是 1.5 ms，四个 worker
+/// 就是四份）。退回每 worker 开一次容器，这一格就从 1 变成 1 + worker 数。
+#[test]
+fn an_indexing_pass_opens_the_container_once() {
+    use crate::infra::metrics::{Metric, take_local};
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/local/shejie-mauriac.epub");
+    take_local(Metric::ContainerOpens);
+    let (_, content) =
+        super::read_with_impl(&path, false, ParseBudget::Exactly(4)).expect("并行索引该打得开");
+    let opens = take_local(Metric::ContainerOpens);
+    let Content::Reflow(flow) = content else {
+        panic!("该读成可重排");
+    };
+    assert!(flow.chapters.len() >= 20, "样本太小，这条会假绿");
+    assert_eq!(
+        opens, 1,
+        "一本书的索引只该解一次中央目录；其余四份是 worker 各自开容器的钱"
+    );
+}
+
+/// 外层分下来的预算**真的**落到内层，而且只是**上限**。
+///
+/// 三条断言一起才有意义：
+/// * `AtMost(1)` 必须 1 路 —— 这一条在任何机器上都成立，是「预算被丢掉」的靶子
+///   （丢掉之后单核机上是 1、多核机上是 4，前者由下面那条兜住）。
+/// * 压到比这台机器自己能定的还低（`auto - 1`），就必须正好是那个数 —— 这是「外层的数
+///   说了算」的本体。
+/// * 给一个比 `auto` 还高的上限，结果不许超过 `auto`：预算是往下压，不是往上抬。
+///
+/// 用的是条目过了「少条目不起线程」那道门的书（`shejie-mauriac.epub`，53 个条目），
+/// 否则三条都会退化成 1 而假绿。拿掉 `EpubAdapter::index_with` 里把 `budget` 传下去那一步，
+/// 第二条立刻变红。
+#[test]
+fn the_budget_handed_down_from_the_batch_caps_the_parser() {
+    use crate::content::document;
+
+    let book = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/local/shejie-mauriac.epub");
+    // 这台机器上不被外层压限时自己会定几路。
+    let auto = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, super::MAX_PARSE_WORKERS);
+
+    let picked = |n| {
+        let doc = document::open_with(&book, ParseBudget::AtMost(n)).expect("该打得开");
+        (super::last_workers(), doc)
+    };
+
+    let (one, doc_one) = picked(1);
+    assert_eq!(one, 1, "给了 1 路就必须只起 1 路");
+
+    let below = auto - 1;
+    let (capped, doc_capped) = picked(below);
+    assert_eq!(
+        capped, below,
+        "外层压到 {below} 路，内层就得是 {below} 路（这台机器的 auto 是 {auto}）"
+    );
+
+    let (loose, _) = picked(super::MAX_PARSE_WORKERS + 4);
+    assert_eq!(loose, auto, "上限比这台机器自己能定还高时，不许越过 auto");
+
+    // 路数不同不许改读出来的内容：并行只换取字节的排程，不换读法。
+    let a = doc_one.flow().expect("可重排");
+    let b = doc_capped.flow().expect("可重排");
+    assert_eq!(a.chapters.len(), b.chapters.len(), "两趟的章数不许有差别");
+    for (x, y) in a.chapters.iter().zip(&b.chapters) {
+        assert_eq!(
+            (x.title.as_str(), x.char_len),
+            (y.title.as_str(), y.char_len)
+        );
+    }
 }

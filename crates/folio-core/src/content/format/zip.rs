@@ -42,10 +42,24 @@ pub(crate) struct Zip {
     folded: OnceCell<HashMap<String, usize>>,
 }
 
+/// 容器读的缓冲大小。
+///
+/// 取一个条目是「seek 到它的偏移，然后一路顺序读」，而解压层每次向这个缓冲要一块
+/// （flate2 的 bufread 走 `fill_buf`，一次 fill 就是一个 `read(2)`）：默认 8 KiB 意味着
+/// 《斗战狂潮》那 6.9 MB 压缩正文要八百多次进内核。取 128 KiB 就是把同样的字节数摊到
+/// 约十六分之一那么多次调用上；代价是每个 worker 各持一份缓冲（并行上限 4 路，几百 KB），
+/// 插图那一趟的 32 KiB 前缀也顺带一次填完而不是四次。
+///
+/// **时间上本机没量到差别**：8 / 64 / 128 KiB 三档交替各跑三轮，`document::open` 的差
+/// 全在 ±8% 的摆动以内（64 KiB 那档还全线略慢 —— 没有单调关系，说明是噪声不是趋势）。
+/// 所以这一条的依据是**系统调用次数**那个确定量，不是计时；真正指望得上的是冷读闪存
+/// 那一侧（手机），那台机器上没测过，别把它当成已证的提速。
+const READ_BUFFER: usize = 128 * 1024;
+
 impl Zip {
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path).io_path(path)?;
-        let archive = ZipArchive::new(BufReader::new(file)).io_path(path)?;
+        let archive = ZipArchive::new(BufReader::with_capacity(READ_BUFFER, file)).io_path(path)?;
         // 容器打开一次记一次：「读一本书该只开一次容器」那条断言数的是这个。
         Metric::ContainerOpens.count();
         // 下面这三处是全表扫描的唯一入口。一处一次计数，所以一个容器开一次 = 1 遍。
@@ -113,8 +127,16 @@ impl Zip {
     /// 容器里的路径大小写与分隔符都可能和清单写的不一致，做一次宽松匹配。
     /// 返回 zip 里的**原始条目名**，可直接交给 [`Zip::read`]。
     pub(crate) fn locate(&self, want: &str) -> Option<String> {
+        self.index_of(want).map(|at| self.entries[at].clone())
+    }
+
+    /// [`locate`] 的另一头：只要条目下标、不要名字。
+    ///
+    /// 主线程把「名字 → 区间」这一步做掉之后，worker 拿的是 [`EntryRange`]，一次字符串
+    /// 都不用复制；这一格就是那条路的第一步。
+    pub(crate) fn index_of(&self, want: &str) -> Option<usize> {
         if let Some(at) = self.index.get(want) {
-            return Some(self.entries[*at].clone());
+            return Some(*at);
         }
         let folded = self.folded.get_or_init(|| {
             Metric::EntryNameTablePasses.count();
@@ -125,7 +147,32 @@ impl Zip {
                 .collect()
         });
         let key = want.to_ascii_lowercase();
-        folded.get(&key).map(|at| self.entries[*at].clone())
+        folded.get(&key).copied()
+    }
+
+    /// 解出第 `at` 个条目的压缩区间。
+    ///
+    /// 这一步 zip-rs 会读该条目的**本地头**（载荷起点要在本地头之后算，zip64 的 extra
+    /// 字段还会改它），所以它不是纯查表 —— 但一次一本书每条目只读一次，而不是每个 worker
+    /// 每次读都重读一遍。
+    pub(crate) fn range_of(&mut self, at: usize) -> Option<EntryRange> {
+        let file = self.archive.by_index(at).ok()?;
+        if file.is_dir() {
+            return None;
+        }
+        Some(EntryRange {
+            at: file.data_start()?,
+            comp_len: file.compressed_size(),
+            raw_len: file.size(),
+            stored: file.compression() == zip::CompressionMethod::Stored,
+            crc: file.crc32(),
+        })
+    }
+
+    /// 归一化名 → 区间：[`index_of`] 与 [`range_of`] 合成一步，给「清单里的一项」。
+    pub(crate) fn range_at(&mut self, want: &str) -> Option<EntryRange> {
+        let at = self.index_of(want)?;
+        self.range_of(at)
     }
 
     /// 容器里全部条目的规范路径（分隔符统一成 `/`）。CBZ 按它列页。
@@ -149,6 +196,290 @@ impl Zip {
     }
 }
 
+/// 一条压缩数据的区间与算法：主线程从中央目录 + 本地头解一次，worker 按它定位读。
+///
+/// 存在的理由：`ZipArchive::new` 要读中央目录并建它自己的名字表（实测 1233 条目的书
+/// 1.35 ms，我们那两张表再 +0.18 ms），而并行索引现在开四份容器 = 四份这样的钱。
+/// 名字只有主线程要（清单里写的是路径），worker 要的从来就是「在哪儿、多长、怎么压的」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EntryRange {
+    /// 压缩载荷在容器文件里的起点。
+    at: u64,
+    /// 压缩后的长度。
+    comp_len: u64,
+    /// 解压后的长度：整条读的预分配、流式读的「读完了没」都看它。
+    raw_len: u64,
+    /// 「存而不压缩」：没有 inflate，也就没有那趟 Huffman 解码。
+    stored: bool,
+    /// 中央目录记的 CRC32。整条读要在末尾校它；前缀读不校（读不到流末尾，也没得校）。
+    crc: u32,
+}
+
+/// 一块解压产物的交付大小。
+///
+/// inflate 每吃一块输入就往这里写一块，`with` 拿到的永远是它的前缀。取 32 KiB 是照
+/// flate2 自己的中间缓冲来的（`deflate/read.rs` 那句 `vec![0; 32 * 1024]`），而它是
+/// **每个条目拨一次**、这里是**每个 worker 拨一次** —— 那正是累积分配回头的那条。
+const CHUNK: usize = 32 * 1024;
+
+/// 一个 worker 的取字节通道：自己的 `File` + 主线程给的 [`EntryRange`]。
+///
+/// 与 [`Zip`] 的分工是「有没有名字」：`Zip` 读中央目录、建两张表、按名字取；这一层
+/// 只知道偏移，于是开一次只是一个 `File::open`（几微秒）。CRC 也跟着自己校 ——
+/// 那原本是 zip-rs 在流末尾替我们做的事，接管数据读取就等于接手它。
+///
+/// 三块状态**全部跨条目复用**（句柄、压缩侧缓冲、解压会话），因为「每条目新建一次」是
+/// 实测付过的钱：`flate2::read::DeflateDecoder::new` 每次调用都要新拨一块 32 KiB 中间
+/// 缓冲，一千多章的书因此多分配 90 MB。而 `Decompress::reset` 的文档写明它
+/// 「may not allocate memory, though, and attempts to reuse any previously existing
+/// resources」，所以逐条目重置会话、不新建会话。
+pub(crate) struct EntryReader {
+    file: std::fs::File,
+    /// 压缩侧缓冲：一次 `read_at` 灌满，逐块喂给 inflate。
+    src: Vec<u8>,
+    /// 解压产物缓冲。
+    chunk: Vec<u8>,
+    decompress: flate2::Decompress,
+}
+
+/// 从 `at` 起、最多 `left` 字节的位置读适配器。
+///
+/// unix 走 `read_at`：不动文件游标，也不为每次读多发一个 seek；Android 与桌面都是 unix。
+/// 别的平台退回 `seek + read` —— 一个 `EntryReader` 只归一个线程，游标没有被抢的风险。
+/// 读到 `left` 就回 `Ok(0)`，所以「压缩块喂完了」这个判断不需要额外一次系统调用。
+struct At<'a> {
+    file: &'a mut std::fs::File,
+    at: u64,
+    left: u64,
+}
+
+impl Read for At<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.left == 0 {
+            return Ok(0);
+        }
+        let want = buf.len().min(self.left as usize);
+        #[cfg(unix)]
+        let got = {
+            use std::os::unix::fs::FileExt as _;
+            (*self.file).read_at(&mut buf[..want], self.at)?
+        };
+        #[cfg(not(unix))]
+        let got = {
+            use std::io::Seek as _;
+            self.file.seek(std::io::SeekFrom::Start(self.at))?;
+            self.file.read(&mut buf[..want])?
+        };
+        self.at += got as u64;
+        self.left -= got as u64;
+        Ok(got)
+    }
+}
+
+impl EntryReader {
+    /// 只要一个句柄：不读中央目录、不建表。两块缓冲与会话各拨一次，之后逐条复用。
+    pub(crate) fn open(path: &Path) -> Option<Self> {
+        Some(Self {
+            file: std::fs::File::open(path).ok()?,
+            src: vec![0u8; READ_BUFFER],
+            chunk: vec![0u8; CHUNK],
+            decompress: flate2::Decompress::new(false),
+        })
+    }
+
+    /// 把 `range` 那条的解压产物一块一块交给 `with`，回 `(产出的字节数, 走到流末尾没)`。
+    ///
+    /// `limit` 是**解压后**的产出上限，到数就停。停在那里意味着没读到流末尾，而 zip 的
+    /// CRC 只在末尾校，所以前缀读不校 —— 尾部坏掉、头部完好的插图仍然给得出尺寸，
+    /// 而不是整张从清单里消失（与 zip-rs 同口径）。
+    /// `with` 回 `false` 也提前停，那种停在 [`EntryReader::stream`] 里要和「流断了」分得开，
+    /// 所以由调用方自己记着是不是主动停的。
+    ///
+    /// 驱动方式照 `flate2::zio::read`：输入喂空且源到末尾才用 `Finish`，否则 `None`。
+    /// 一处不同：那边「没产出但还没到 EOF」是继续要输入，而我们已经在循环开头灌过一次了，
+    /// 手里既还有输入、又还有产出位置却推不动，就是真推不动 —— 直接判读不出来，
+    /// 而不是把这里转成死循环。
+    fn pump(
+        &mut self,
+        range: &EntryRange,
+        limit: Option<usize>,
+        with: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Option<(u64, bool)> {
+        // 四个字段分开借出：`pump` 要同时用句柄、缓冲和会话，整体 `&mut self` 传不进去。
+        let Self {
+            file,
+            src,
+            chunk,
+            decompress,
+        } = self;
+        let mut input = At {
+            file,
+            at: range.at,
+            left: range.comp_len,
+        };
+        // 原始 deflate（zip 的 deflate 载荷不带 zlib 头）。
+        decompress.reset(false);
+        // `src[..filled]` 是缓冲里有效的字节，`src[..held]` 是已经喂给 inflate 的那段。
+        let mut held = 0usize;
+        let mut filled = 0usize;
+        let mut eof = false;
+        let mut produced = 0u64;
+        let mut ended = false;
+        while !ended {
+            let room = match limit {
+                Some(max) if produced >= max as u64 => break,
+                Some(max) => chunk
+                    .len()
+                    .min((max as u64).saturating_sub(produced) as usize),
+                None => chunk.len(),
+            };
+            if held == filled && !eof {
+                match input.read(src) {
+                    Ok(0) => eof = true,
+                    Ok(got) => {
+                        held = 0;
+                        filled = got;
+                    }
+                    Err(_) => return None,
+                }
+            }
+            let out = &mut chunk[..room];
+            let (done, wrote, ate) = if range.stored {
+                // 存而不压缩：没有 inflate，也就没有流末尾，压缩块喂完就算走完。
+                let got = room.min(filled - held);
+                out[..got].copy_from_slice(&src[held..held + got]);
+                held += got;
+                (got == 0, got, got)
+            } else {
+                let before_in = decompress.total_in();
+                let before_out = decompress.total_out();
+                let flush = if eof && held == filled {
+                    flate2::FlushDecompress::Finish
+                } else {
+                    flate2::FlushDecompress::None
+                };
+                let status = decompress.decompress(&src[held..filled], out, flush).ok()?;
+                let ate = (decompress.total_in() - before_in) as usize;
+                let got = (decompress.total_out() - before_out) as usize;
+                held += ate;
+                (status == flate2::Status::StreamEnd, got, ate)
+            };
+            if !done && wrote == 0 && ate == 0 {
+                // 到这里输入已经灌过（或在末尾），仍然一字节没吃掉、一字节没产出 ——
+                // 再转下去没有任何东西会变。flate2 在这一步给的是 `UnexpectedEof
+                // "incomplete deflate stream"`，这里同口径：整条当读不出来，
+                // 而不是把循环转成死循环。
+                return None;
+            }
+            if wrote > 0 {
+                produced += wrote as u64;
+                if !with(&chunk[..wrote]) {
+                    return Some((produced, false));
+                }
+            }
+            ended = done;
+        }
+        Some((produced, ended))
+    }
+
+    /// 整条读出来，末尾校 CRC。长度对不上、CRC 不对、读挂 —— 都回 `None`，
+    /// 与 `Zip::read` 在同一种坏书上给不出字节这件事一致。
+    pub(crate) fn read(&mut self, range: &EntryRange) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(range.raw_len.min(1 << 24) as usize);
+        let (produced, ended) = {
+            let out = &mut out;
+            self.pump(range, None, &mut |chunk| {
+                out.extend_from_slice(chunk);
+                true
+            })?
+        };
+        if !ended || produced != range.raw_len || !crc_ok(range.crc, &out) {
+            return None;
+        }
+        Some(out)
+    }
+
+    /// 整条读成文本。非法字节按 lossy 换（与 `Zip::read_text` 同口径 ——
+    /// 章节摘要那条对拍吃的就是这种串）。
+    pub(crate) fn read_text(&mut self, range: &EntryRange) -> Option<String> {
+        let bytes = self.read(range)?;
+        Some(match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned(),
+        })
+    }
+
+    /// 只取前 `max` 个**解压后**字节，不校 CRC（没读到流末尾）。
+    ///
+    /// 存在的理由：只要一张图的固有像素尺寸，需要的是解压流最前面那几个字节的头，
+    /// 整条读等于把 400 KB 全解出来只为拿 4 个数。
+    ///
+    /// 回 `Some` 不保证读到了 `max` 字节：条目本来就更短、或头部那段就解不动了。
+    /// 尺寸能不能定出来交回调用方判（见 `format::image_dims_from_head` 那三档结局）。
+    pub(crate) fn read_head(&mut self, range: &EntryRange, max: u64) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(max as usize);
+        let (produced, _) = {
+            let out = &mut out;
+            self.pump(range, Some(max as usize), &mut |chunk| {
+                out.extend_from_slice(chunk);
+                true
+            })?
+        };
+        debug_assert!(produced <= max);
+        Some(out)
+    }
+
+    /// 边解边交出去，不物化整条。
+    ///
+    /// 索引一章只要「可见字数 + 第一个标题」，把整章字符串留在手上等于一次 inflate
+    /// 的产物再多挂一份（《斗战狂潮》最大那章 103 KB，四个 worker 就是几百 KB 常驻，
+    /// 而《蛇结》那种一本 0.9 MB 的书里它是逐章分配逐章释放的碎片）。
+    ///
+    /// `with` 回 `false` 提前停，那一趟不校 CRC（没读到流末尾，也没得校）。
+    /// 读挂、流断了、长度或 CRC 对不上都回 `None`：调用方按「这条整条读不出来」处理
+    /// （与 [`EntryReader::read`] 失败同档），不许把已经喂进去的那半截当成一章的字数。
+    pub(crate) fn stream(
+        &mut self,
+        range: &EntryRange,
+        with: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Option<()> {
+        let mut hasher = crc32fast::Hasher::new();
+        let mut stopped = false;
+        let (produced, ended) = {
+            let (hasher, stopped) = (&mut hasher, &mut stopped);
+            self.pump(range, None, &mut |chunk| {
+                hasher.update(chunk);
+                let keep = with(chunk);
+                *stopped |= !keep;
+                keep
+            })?
+        };
+        if stopped {
+            return Some(());
+        }
+        let got = hasher.finalize();
+        if !ended || produced != range.raw_len || got != range.crc {
+            tracing::warn!(
+                "zip: 条目 CRC/长度对不上（中央目录 {:x}），整条当读不出来",
+                range.crc
+            );
+            return None;
+        }
+        Some(())
+    }
+}
+
+/// CRC32 对得上吗。坏书在这里被挡下来，而不是把半截内容当成一章。
+fn crc_ok(want: u32, bytes: &[u8]) -> bool {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(bytes);
+    if hasher.finalize() == want {
+        return true;
+    }
+    tracing::warn!("zip: 条目 CRC 对不上（中央目录 {want:#x}），当作读不出来");
+    false
+}
+
 fn normalize(name: &str) -> String {
     name.replace('\\', "/")
 }
@@ -157,7 +488,7 @@ fn normalize(name: &str) -> String {
 mod tests {
     use std::io::Write as _;
 
-    use crate::content::format::zip::Zip;
+    use crate::content::format::zip::{EntryReader, Zip};
     use crate::infra::metrics::{Metric, take_local};
 
     /// 合成一个 zip 并交回它的临时目录（目录活得比测试久，所以并行测试不会互相覆盖
@@ -273,6 +604,108 @@ mod tests {
         assert!(
             lossy.starts_with('\u{fffd}'),
             "替换字符应当出现在非法字节的位置"
+        );
+    }
+
+    /// 合成一个 zip，逐条决定「存而不压缩」还是 deflate。
+    fn archive_with_methods(entries: &[(&str, &[u8], bool)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::File::create(dir.path().join("case.zip")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, data, stored) in entries {
+            let options = zip::write::SimpleFileOptions::default().compression_method(if *stored {
+                zip::CompressionMethod::Stored
+            } else {
+                zip::CompressionMethod::Deflated
+            });
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+        dir
+    }
+
+    /// 「存而不压缩」那条支路要和 deflate 走同一套承诺：整条读、流式读、前缀读三样
+    /// 都取到同样的字节，且两样走到末尾的都在末尾校 CRC。
+    ///
+    /// 这一条以前不需要测 —— 那三样都住在 zip-rs 里，它对两种方法给的是同一个 `Read`。
+    /// 接管数据读取之后末尾的 CRC 是我们自己校的、支路也是自己写的，所以断言得自己立。
+    /// 漫画（CBZ）的页普遍就是 stored，这里红了等于那一整本书的页取不出来。
+    #[test]
+    fn stored_entries_take_the_same_three_paths_as_deflated_ones() {
+        // 一段压得动的文本，好让 deflate 那条确实在跑（stored 那本给它同样的字节）。
+        let text = "<h1>章</h1><p>正文</p>".repeat(4000).into_bytes();
+        let dir = archive_with_methods(&[
+            ("deflated.xhtml", &text, false),
+            ("stored.xhtml", &text, true),
+        ]);
+        let path = dir.path().join("case.zip");
+        let mut zip = Zip::open(&path).unwrap();
+        let mut reader = EntryReader::open(&path).expect("连句柄都开不出来");
+
+        for name in ["deflated.xhtml", "stored.xhtml"] {
+            let range = zip.range_at(name).expect("区间");
+            let want = zip.read(name).expect("zip-rs 那一路该给出同样的字节");
+            assert!(!want.is_empty());
+
+            assert_eq!(
+                reader.read(&range).as_deref(),
+                Some(want.as_slice()),
+                "{name} 整条读"
+            );
+
+            let mut got: Vec<u8> = Vec::new();
+            let streamed = reader.stream(&range, &mut |chunk| {
+                got.extend_from_slice(chunk);
+                true
+            });
+            assert_eq!(streamed, Some(()), "{name} 流式读到末尾并校 CRC");
+            assert_eq!(got, want, "{name} 流式的字节必须与整条读逐字节相同");
+
+            assert_eq!(
+                reader.read_head(&range, 3).as_deref(),
+                Some(&want[..3]),
+                "{name} 前缀读"
+            );
+        }
+    }
+
+    /// stored 条目被打坏载荷中间一个字节：整条读与流式读都要挡下来（长度没变，
+    /// 认得出这件事的只有末尾的 CRC），而前缀读照给 —— 它本来就不校，那是插图那一支
+    /// 「尾部坏掉仍给得出尺寸」的同一条口径。
+    #[test]
+    fn a_damaged_stored_entry_is_refused_by_the_paths_that_verify() {
+        let dir = archive_with_methods(&[("page.png", &[7u8; 4096], true)]);
+        let path = dir.path().join("case.zip");
+        let mut zip = Zip::open(&path).unwrap();
+        let range = zip.range_at("page.png").expect("区间");
+        assert_eq!(zip.read("page.png").as_deref(), Some(&[7u8; 4096][..]));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt as _;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("可写句柄");
+            file.write_at(&[0u8], range.at + 10).expect("改一个字节");
+        }
+        let mut reader = EntryReader::open(&path).expect("连句柄都开不出来");
+
+        assert_eq!(reader.read(&range), None, "CRC 不对就不该交出整条字节");
+        let mut counted = 0usize;
+        assert_eq!(
+            reader.stream(&range, &mut |chunk| {
+                counted += chunk.len();
+                true
+            }),
+            None
+        );
+        assert_eq!(counted, 4096, "流式是走到末尾才发现 CRC 不对的");
+        assert_eq!(
+            reader.read_head(&range, 8).as_deref(),
+            Some(&[7u8; 8][..]),
+            "前缀读不校 CRC，头部完好就该给"
         );
     }
 }
