@@ -2,9 +2,9 @@
 //! 几何用一份「汉字 1 em、拉丁 0.5 em」的 mock `Measure` 来断言，
 //! 真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
 
+use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{Color, ComputedStyle, Display, cascade};
 use crate::content::format::css::{Origin, RuleSet};
-use crate::content::dom::{Dom, NodeId};
 use crate::layout::wrap::collect;
 use crate::layout::{
     BlockBox, BlockCache, FontKey, ImageProvider, Layout, LayoutCache, LayoutKey, LayoutOptions,
@@ -58,6 +58,10 @@ fn find(dom: &Dom, want: &str) -> NodeId {
 }
 
 fn typeset(html: &str, css: &str, width: f32) -> (Dom, Layout) {
+    typeset_with(&Mono, html, css, width)
+}
+
+fn typeset_with(measure: &dyn Measure, html: &str, css: &str, width: f32) -> (Dom, Layout) {
     let dom = Dom::parse(html.as_bytes());
     let styles = cascade(
         &dom,
@@ -72,7 +76,7 @@ fn typeset(html: &str, css: &str, width: f32) -> (Dom, Layout) {
             width,
             light: false,
         },
-        &Mono,
+        measure,
         &NoImages,
     );
     (dom, laid)
@@ -606,6 +610,77 @@ fn the_line_box_is_the_authors_line_height_even_when_glyphs_overflow() {
     }
 }
 
+/// 按**这段字会落到哪张脸**报上下 extent 的假度量：拉丁档 0.8/0.2 em（约 1em 自然盒），
+/// 汉字档 1.1/0.3 em（Noto Sans CJK 那种约 1.4em）。这正是真机上「样式声明的是拉丁字族、
+/// 汉字按字符回退到另一张脸」的形状。
+struct Fallback;
+
+/// 这一档的上下 extent。**判据是码位区间**，与 `foliage` 那边 `char_width` 同一道分界
+/// （`0x2e80` 起是 CJK 与假名那一坨），两处认的是同一件事。
+fn fallback_extents(text: &str, size: f32) -> (f32, f32) {
+    if text.chars().any(|c| (c as u32) >= 0x2e80) {
+        (size * 1.1, size * 0.3)
+    } else {
+        (size * 0.8, size * 0.2)
+    }
+}
+
+impl Measure for Fallback {
+    fn char_width(&self, ch: char, _font: &FontKey, font_size: f32) -> f32 {
+        char_width(ch, font_size)
+    }
+
+    fn run_metrics(&self, text: &str, _font: &FontKey, font_size: f32) -> LineMetrics {
+        let (ascent, descent) = fallback_extents(text, font_size);
+        LineMetrics {
+            width: slice_width(text, font_size),
+            ascent,
+            descent,
+        }
+    }
+
+    fn font_extents(&self, text: &str, _font: &FontKey, font_size: f32) -> (f32, f32) {
+        fallback_extents(text, font_size)
+    }
+}
+
+/// 回归门：**样式声明的字体不是这段字实际用的字体**。
+///
+/// 中英混排里汉字走的是回退链上另一张脸，那张脸比拉丁脸高一大截；行盒的 extent 只有按
+/// **这段文字**去量才拿得到。`Measure::font_extents` 以前不收文本、实现方拿一个 `'x'`
+/// 量一次按 `(字体, 字号)` 缓存，于是中文行永远按拉丁高度折 —— 行盒矮过字形、上下沿切字，
+/// 而 `LineRun.ascent` 同时是绘制基线与选中矩形的高，错就三处一起错。
+///
+/// 关掉修复的对照（都验过是红的）：把 `wrap.rs` 那句改成递一个固定串、或干脆不递 `text`，
+/// 汉字行就会拿到拉丁档，`baseline` 从 20.0 掉回 18.0、`ascent` 从 22.0 掉回 16.0。
+#[test]
+fn the_line_box_measures_the_font_the_text_actually_uses() {
+    let css = "p { font-size: 20px; line-height: 1.2 }";
+    let (_, latin) = typeset_with(&Fallback, "<p>abcdefghij</p>", css, 300.0);
+    let (_, han) = typeset_with(&Fallback, "<p>于是我们奋力向前</p>", css, 300.0);
+
+    // 拉丁档：ascent 16 descent 4 → 内容高 20，行盒 24 → 半 leading +2 → 基线 18。
+    assert_eq!(latin.lines[0].baseline, 18.0, "拉丁行按拉丁脸的量");
+    // 汉字档：ascent 22 descent 6 → 内容高 28 比行盒 24 还高 → 半 leading −2 → 基线 20。
+    assert_eq!(
+        han.lines[0].baseline, 20.0,
+        "汉字行必须按回退脸的量，不是按声明的那张拉丁脸"
+    );
+    assert_ne!(
+        han.lines[0].baseline, latin.lines[0].baseline,
+        "两档量出同一个数就是没按文本量"
+    );
+    // 行盒高仍然是作者给的 24：改的只是基线在盒里的位置（`the_line_box_is_the_authors_line_height…`
+    // 那条门不该被这次改动动到，它现在也照样绿）。
+    assert_eq!(han.lines[0].height, 24.0);
+
+    // run 自己带的那份 extent 是绘制与选区用的，必须同样是汉字档的那一份。
+    let LineFragment::Text(run) = &han.lines[0].fragments[0] else {
+        panic!("这一行该是文本 run");
+    };
+    assert_eq!(run.ascent, 22.0, "run 的 ascent 要拿回退脸的那一份");
+    assert_eq!(run.descent, 6.0);
+}
 // ---------------------------------------------------------------------------
 // E3：图片（替换元素）
 // ---------------------------------------------------------------------------

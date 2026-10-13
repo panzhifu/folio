@@ -39,13 +39,22 @@ pub trait Measure: Send + Sync {
     /// [`font_extents`](Self::font_extents)，不再每行 shaping（见 §7.5）。
     fn run_metrics(&self, text: &str, font: &FontKey, font_size: f32) -> LineMetrics;
 
-    /// 一个 run 的基线上下 extent `(ascent, descent)`：**只跟字体与字号有关，与具体文本无关**
-    /// （特殊情况下才因字体回退略有出入）。
+    /// 一段文本的基线上下 extent `(ascent, descent)`。
     ///
-    /// 行盒的上下 extent 用它算（正文的绘制宽度已由宽度表给出）；实现方应当覆盖它，
-    /// 并且可以按 `(font, font_size)` 缓存 —— 一章里 distinct 的样式很少，量几次就够。
-    /// 默认给「0.8 / 0.2 em」这一档常见比例，与空行 strut 同一档。
-    fn font_extents(&self, _font: &FontKey, font_size: f32) -> (f32, f32) {
+    /// **`text` 是这个签名存在的全部理由**：一份样式声明的字体**不等于**这段字实际用的字体。
+    /// 中文书里 `<p>` 声明了拉丁正文字族，汉字与假名走的是回退链里另一张脸，而那张脸的
+    /// ascent/descent 才是行盒该用的数——**只有按这段文字去量才拿得到**。曾经这里不收 `text`、
+    /// 实现方拿一个固定代表字符（拉丁的 `x`）量一次按 `(字体, 字号)` 缓存，于是中英混排的行
+    /// 盒高、基线、`line-height` 折出来的半 leading 全都按拉丁字体的度量算，汉字行被压低、
+    /// 上下沿切字（2026-10-13 修，`METRICS_REV` 同批 +1）。
+    ///
+    /// 代价要说清：正文**不许**因此退回逐行 shaping。行盒的宽已经出自宽度表（与断行同源），
+    /// 这一格只在**新的（字体, 字号, 这段里出现的文字类别）组合**上量一次并缓存——一章里
+    /// 那种组合是个位数到十位数，不是行数。实现方可以按 `(字体, 字号)` 退化到只量一个代表字符，
+    /// 但那是**明知会错**的取巧，不是等价实现。
+    ///
+    /// 默认实现给「0.8 / 0.2 em」这一档常见比例（与空行 strut 同一档），忽略 `text`。
+    fn font_extents(&self, _text: &str, _font: &FontKey, font_size: f32) -> (f32, f32) {
         (font_size * 0.8, font_size * 0.2)
     }
 

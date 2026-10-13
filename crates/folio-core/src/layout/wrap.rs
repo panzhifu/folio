@@ -10,8 +10,8 @@ use super::collect::{Collected, DEFAULT_STYLE, IMAGE_GLYPH, ImageAtom, Piece};
 use super::font::{RunStyle, StyleArena, StyleRef};
 use super::geometry::{ImageRun, LineFragment, LineRun};
 use super::ports::{ImageProvider, Measure, image_size};
-use crate::content::format::css::computed::{Hyphens, StyledDom};
 use crate::content::dom::{Dom, NodeId, NodeKind};
+use crate::content::format::css::computed::{Hyphens, StyledDom};
 
 /// 一行在版心里的落位。
 ///
@@ -125,8 +125,12 @@ impl LineAcc {
             // 绘制宽度直接取宽度表（与断行同源，且已含 `word-spacing`），不再每行重新 shaping。
             // 这是 §7.5：一行一个 run 就省一次 `run_metrics`，一章上万行。
             let width = sum_widths(collected, norm.clone());
-            // 上下 extent 只跟字体/字号有关（`font_extents` 内部可按样式缓存），也不再 shaping。
-            let (ascent, descent) = measure.font_extents(&style.font, style.font_size);
+            // 上下 extent 按**这段字**量：样式声明的字体不等于这段字实际用的字体（汉字与
+            // 假名走回退链里另一张脸），所以这里必须把 `text` 递下去 —— 只按 `(字体, 字号)`
+            // 缓存会让混排行盒按拉丁字体的度量折，见 [`Measure::font_extents`]。
+            // 一次 shaping 都不额外付：实现方按（字体, 字号, 文字类别）缓存，正文仍不走逐行 shaping。
+            let (ascent, descent) =
+                measure.font_extents(&collected.text[norm.clone()], &style.font, style.font_size);
             // 半 leading 按**这个 piece 自己**的字号与 line-height 算：`(盒高 − 字形上下 extent) / 2`，
             // 可正可负。它同时决定这一行里基线离行顶/行底多远，所以松行距的字在行盒里居中、
             // 紧行距（作者写 125% 而字体自然盒 144% 那种）行盒就照作者缩，字形溢出到相邻行。

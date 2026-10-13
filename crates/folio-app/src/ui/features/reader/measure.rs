@@ -168,11 +168,118 @@ impl FontCache {
     }
 }
 
-/// `(字体, 字号) → (ascent, descent)` 的共享缓存。
+/// 一段文字里出现了哪几类文字。按位存进缓存键。
+///
+/// 存在的理由只有一句话：**样式声明的字体不是这段字实际用的字体**。中文书里 `<p>` 的字族
+/// 解析到一张拉丁脸，汉字与假名是 shaping 时按字符回退到另一张脸上的，而行盒的
+/// ascent/descent 恰恰由那张脸给。`font_extents` 不收文本时（2026-10-13 之前）只能拿一个
+/// 拉丁代表字符量一次再按 `(字体, 字号)` 缓存，于是混排的行盒永远按拉丁高度折 ——
+/// 那不只是行高：`LineRun.ascent` 同时是绘制的基线和选中矩形的高。
+///
+/// 分档**不要求精确**：判据只是「同类的字大致落在同一张回退脸上」。多一档只多量一次，
+/// 漏一档则退回拉丁档的代表字符，那与改动前的行为一致，不是新增的错。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Script {
+    Latin,
+    Han,
+    Kana,
+    Hangul,
+    Arabic,
+    Hebrew,
+    Indic,
+    Thai,
+}
+
+use Script::*;
+
+/// 这一档的代表字符。**取该档里几乎一定有的字**：`一`（CJK 基本区第一个码位）、
+/// `あ`/`한` 等，都是任何覆盖该文字的字库里必然存在的字形 —— 量到一个 `.notdef` 方框
+/// 的度量就等于什么也没修。
+fn representative(script: Script) -> char {
+    match script {
+        Latin => 'x',
+        Han => '一',
+        Kana => 'あ',
+        Hangul => '한',
+        Arabic => 'ع',
+        Hebrew => 'א',
+        Indic => 'अ',
+        Thai => 'ก',
+    }
+}
+
+/// 这个码位属于哪一档。**只做区间比较**：逐字符调 `char::script()` 要把 unicode 表引进来，
+/// 而这段文字每个 run 都要扫一遍。
+///
+/// **具体档必须排在拉丁那条兜底之前**——顺序写反过一次：`if at < 0x2E80 { Latin }` 打头，
+/// 于是阿拉伯文（U+0600 段）、希伯来文、天城文、泰文全被吞进拉丁档，代表字符测试当场
+/// 抓到（`ع` 报成 Latin）。拉丁是**兜底档**，不是区间档。
+fn script_of(ch: char) -> Script {
+    let at = ch as u32;
+    if (0x3040..0x3100).contains(&at) {
+        Kana // 平假名与片假名。先于 Han 判：它就嵌在 CJK 那一大段里
+    } else if (0xAC00..0xD800).contains(&at) || (0x1100..0x1200).contains(&at) {
+        Hangul // 音节表谚文 + 字母（jamo）
+    } else if (0x0600..0x0700).contains(&at) || (0x0750..0x0780).contains(&at) {
+        Arabic
+    } else if (0x0590..0x0600).contains(&at) {
+        Hebrew
+    } else if (0x0900..0x0E00).contains(&at) {
+        Indic // 天城文起，一路到泰文之前的那几张印度系字库（同一次回退大多落在同一张脸）
+    } else if (0x0E00..0x1000).contains(&at) {
+        Thai // 泰文与老挝文
+    } else if (0x2E80..0x3100).contains(&at)
+        || (0x3200..0x4400).contains(&at)
+        || (0x4E00..0xA000).contains(&at)
+        || (0xF900..0xFB00).contains(&at)
+        || (0xFE30..0xFE50).contains(&at)
+        || (0xFF00..0xFF61).contains(&at)
+        || at >= 0x20000
+    {
+        // CJK 部首/标点/兼容/基本区/扩展 A 与 B/全角形态/增补平面：汉字那一坨。
+        // 中间 0x3100..0x3200 那一小段是注音与方言字，归进这一档（同一次回退同一张脸）。
+        Han
+    } else {
+        // ASCII、拉丁扩展、希腊、西里尔、亚美尼亚、通用标点都归这一档：它们与正文字族
+        // 同脸或同族，回退出去的那张脸高度差不到会切字的程度。
+        Latin
+    }
+}
+
+const ALL_SCRIPTS: [Script; 8] = [Latin, Han, Kana, Hangul, Arabic, Hebrew, Indic, Thai];
+
+/// 一段文本的类别位掩码。`u8` 装得下这八档，越界的类别不存在（`script_of` 是全函数）。
+/// 空文本给零掩码，由 [`font_extents`](Measure::font_extents) 那头的兜底档接住。
+fn script_mask(text: &str) -> u8 {
+    let mut mask = 0u8;
+    for ch in text.chars() {
+        mask |= 1 << (script_of(ch) as u8);
+    }
+    mask
+}
+
+/// 把一档量到的 extent 并进来。
+///
+/// **`acc` 是 `Option` 而不是从 `(0.0, 0.0)` 起步**：gpui 报的 `descent` 可以是负的
+/// —— 本机正文族 LXGW WenKai 在 20px 下报 `ascent 20.5 / descent −5.5`（字形盒比 em 矮，
+/// 差的那截算进了 ascent）。从 0.0 起 `max` 会把那个负数**静默吞成 0**：内容高从 15 变 20.5，
+/// 半 leading 跟着算错，行盒整体下移。这条是这次改动自己引入过的回归，被实测逮到（2026-10-13），
+/// 所以初值必须由**第一档的实测**定，不能由零定。
+fn merge_extents(acc: Option<(f32, f32)>, next: (f32, f32)) -> (f32, f32) {
+    match acc {
+        None => next,
+        Some((a, d)) => (a.max(next.0), d.max(next.1)),
+    }
+}
+
+/// `(字体, 字号, 文字类别) → (ascent, descent)` 的共享缓存。
+///
+/// 键里那格 `u8` 就是上面那个掩码：**章里 distinct 的组合是个位数到十位数**（纯拉丁、
+/// 拉丁+汉字、拉丁+汉字+假名那种），不是行数 —— 所以按文本分类不会把这段拉回逐行 shaping。
 ///
 /// 单独立一个名字：它套了三层（`Arc` 为了克隆共享、`Mutex` 为了内部可变、
 /// `HashMap` 为了查），摊在字段签名里读不出「这是一张共享的表」这件事。
-type FontExtentsCache = Arc<Mutex<HashMap<(FontKey, u32), (f32, f32)>>>;
+type FontExtentsCache = Arc<Mutex<HashMap<(FontKey, u32, u8), (f32, f32)>>>;
 
 #[derive(Clone)]
 pub struct GpuiMeasure {
@@ -192,8 +299,10 @@ pub struct GpuiMeasure {
     /// （整张字体表枚举 + 排序 + 去重），而度量器要被缓存起来反复用
     /// （见 `reader::Document::measure`），所以克隆一个指针而不是复制一份表。
     known: Arc<Vec<String>>,
-    /// `(字体, 字号) → (ascent, descent)` 缓存。字体度量与文本无关，所以正文可
-    /// 绕过逐行 shaping 取它（[`Measure::font_extents`]）；一章 distinct 的样式很少。
+    /// `(字体, 字号, 文字类别) → (ascent, descent)` 缓存。正文因此**不必逐行 shaping**
+    /// （[`Measure::font_extents`]），但键里必须有那一格文字类别：汉字走的是回退链上另一张脸，
+    /// 只按 `(字体, 字号)` 缓存会把混排的行盒折成拉丁高度。一章里 distinct 的组合是十位数，
+    /// 不是行数。
     ///
     /// `Arc<Mutex<..>>` 而不是裸 `Mutex`：度量器本身要可 `Clone`（它被缓存起来反复用，
     /// 见 `reader::Document::measure`），而克隆必须**共享**这张缓存 —— 每个克隆各带
@@ -280,17 +389,40 @@ impl Measure for GpuiMeasure {
         }
     }
 
-    /// 字体上下 extent，按 `(字体, 字号)` 缓存 —— 正文行盒几何不再逐行 shaping。
-    /// 量一个代表字符即可：`run_metrics` 报的是字体度量，与具体文本基本无关。
-    fn font_extents(&self, font: &FontKey, font_size: f32) -> (f32, f32) {
-        let key = (font.clone(), font_size.to_bits());
+    /// 上下 extent：按 `(字体, 字号, 这段里出现的文字类别)` 缓存。
+    ///
+    /// **为什么必须收 `text`**：样式声明的字族解析到的是拉丁脸，汉字与假名在 shaping 时
+    /// 回退到另一张脸上，而行盒的高度是那张脸给的。用固定代表字符（以前就是一个 `'x'`）
+    /// 量一次再按 `(字体, 字号)` 缓存，等于宣布「中文行按拉丁字体的高度折」——
+    /// `line-height: 1.2` 配 Noto Sans CJK（自然盒约 1.4em）时，行盒比字形矮，
+    /// 上下沿各切掉一截，基线也跟着歪（`LineRun.ascent` 同时是绘制基线与选中矩形的高）。
+    ///
+    /// 代价没有回到「逐行 shaping」：掩码是纯区间比较，而一次量算只发生在**新的组合**上 ——
+    /// 一章里那是十位数（纯拉丁 / 拉丁+汉字 / 拉丁+汉字+假名…），不是行数。
+    /// 每一档只量它自己的代表字符，行盒取各档的最大值；这与 CSS 的画法一致
+    /// （一行的高度是各行内盒 extent 的并集，`wrap.rs` 那边也按 `max` 合）。
+    fn font_extents(&self, text: &str, font: &FontKey, font_size: f32) -> (f32, f32) {
+        let mut mask = script_mask(text);
+        if mask == 0 {
+            // 没有字的一段（空 run）仍要占一行：落到拉丁档，别返回一对零。
+            mask = 1 << (Latin as u8);
+        }
+        let key = (font.clone(), font_size.to_bits(), mask);
         if let Ok(cache) = self.extents.lock()
             && let Some(ext) = cache.get(&key)
         {
             return *ext;
         }
-        let m = self.run_metrics("x", font, font_size);
-        let ext = (m.ascent, m.descent);
+        let mut acc: Option<(f32, f32)> = None;
+        for script in ALL_SCRIPTS {
+            if mask & (1 << (script as u8)) == 0 {
+                continue;
+            }
+            // 每一档只量它自己的**一个代表字符**：一次 `layout_line`，不是整段 shaping。
+            let m = self.run_metrics(&String::from(representative(script)), font, font_size);
+            acc = Some(merge_extents(acc, (m.ascent, m.descent)));
+        }
+        let ext = acc.unwrap_or((font_size * 0.8, font_size * 0.2));
         if let Ok(mut cache) = self.extents.lock() {
             cache.insert(key, ext);
         }
@@ -375,7 +507,10 @@ mod tests {
     // 这里不用 `use super::*`：那会把 `gpui_kit` 顶层的 `test` 宏一起带进这个模块，
     // 于是 `#[test]` 解析到它而不是内建的测试属性 —— 展开自己套自己，
     // 整个 app 的测试目标都编不过（`recursion limit reached while expanding #[test]`）。
-    use super::{BookFonts, Font, FontKey, SharedString, gpui_font, widths_from_edges};
+    use super::{
+        ALL_SCRIPTS, BookFonts, Font, FontKey, Script, SharedString, gpui_font, merge_extents,
+        representative, script_mask, script_of, widths_from_edges,
+    };
 
     fn key(family: &str) -> FontKey {
         FontKey {
@@ -590,5 +725,72 @@ mod tests {
         // 少于两个边界时没有前进量可言。
         assert!(widths_from_edges(&[0.0]).is_empty());
         assert!(widths_from_edges(&[]).is_empty());
+    }
+
+    /// 分类这一半是纯函数，能在宿主上直接测——它正是「混排到底分不分得开」的那道门。
+    ///
+    /// 关掉修复的对照：把 `font_extents` 退回成不读 `text`（或 `wrap.rs` 那边递一个固定
+    /// 串下去），下面三条里至少「混排同时出现两档」与「每一档的代表字符落在自己那一档」
+    /// 就会红。
+    #[test]
+    fn a_mixed_run_carries_both_scripts_in_the_cache_key() {
+        let latin = script_mask("plain english only");
+        let han = script_mask("于是我们奋力向前");
+        let mixed = script_mask("于是我们 forward，逆水行舟");
+        assert_eq!(latin, 1 << (Script::Latin as u8), "纯拉丁只该有一档");
+        assert_ne!(han, latin, "汉字必须分出另一档，否则混排行按拉丁高度折");
+        assert_eq!(
+            mixed,
+            latin | han,
+            "中英混排必须同时带两档：行盒取的是各档的最大值"
+        );
+        // 汉字档的量算必须比拉丁档高：这是这次改动存在的全部理由（真机上 Noto Sans CJK
+        // 的自然盒约 1.4em，拉丁脸约 1em）。
+        assert!(
+            super::representative(Script::Han) != super::representative(Script::Latin),
+            "两档要用不同的代表字符，否则量出来是同一个数"
+        );
+    }
+
+    /// 每一档的代表字符必须**真的属于那一档**：拿错字符就是去量另一张脸的高度，
+    /// 等于把 bug 从「一律按拉丁量」换成「一律按某个别的字量」。
+    #[test]
+    fn each_representative_char_falls_in_its_own_bucket() {
+        for script in ALL_SCRIPTS {
+            let rep = representative(script);
+            assert_eq!(
+                script_of(rep),
+                script,
+                "{rep}（U+{:04X}）应当被分到 {script:?}，实际落在别档",
+                rep as u32
+            );
+        }
+    }
+
+    /// 空文本的掩码是零，而 `font_extents` 那头把它当拉丁档量（不返回一对零）。
+    /// 这里能纯测的是前半：分档函数对空输入**不许**造出某个具体的字来。
+    #[test]
+    fn an_empty_run_has_no_script_of_its_own() {
+        assert_eq!(script_mask(""), 0, "没有字的一段不该凭空分出某一档");
+        // 后半（零掩码 → 拉丁档）在 `font_extents` 里，要真文本系统才测得到。
+    }
+
+    /// 多档合并的初值必须由**第一档的实测**定，不能从 `(0, 0)` 起 `max`。
+    ///
+    /// 这不是假想的谨慎：gpui 报的 `descent` 在本机正文族（LXGW WenKai, 20px）上是
+    /// **−5.5**，而这次改动的第一版就是从 0.0 起步取 max，把那个负数静默吞成 0 ——
+    /// 内容高从 15 变 20.5，半 leading 与基线一起错。实测把它逮住了，这条门钉住它不再回来。
+    #[test]
+    fn merging_keeps_a_negative_descent_from_the_first_bucket() {
+        assert_eq!(
+            merge_extents(None, (20.5, -5.5)),
+            (20.5, -5.5),
+            "第一档报多少就是多少，负 descent 不许被零盖掉"
+        );
+        assert_eq!(
+            merge_extents(Some((16.0, -4.0)), (20.5, -5.5)),
+            (20.5, -4.0),
+            "两档各取自己的最大：ascent 取高的，descent 取不那么负的"
+        );
     }
 }
