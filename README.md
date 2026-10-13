@@ -55,9 +55,8 @@ crates/folio-app/src/ui/
 ## 构建
 
 ```bash
-cargo run                      # 起窗口（目前只有 spike 视图）
-cargo test --workspace --lib   # 日常这一条：全部 272 条测试
-cargo run --example spike      # M0 排版验证：stdout 出结论，窗口出自绘文本
+cargo run                      # 起桌面窗口（AppShell）
+cargo test --workspace --lib   # 日常这一条
 ```
 
 ### 测试为什么内联在 `src/`，以及这两条命令差在哪
@@ -66,7 +65,8 @@ cargo run --example spike      # M0 排版验证：stdout 出结论，窗口出�
 每个都要重新类型检查一遍、单独链接一次，而且拿不到 `src/` 的 incremental 缓存；
 更贵的是裸 `cargo test` 会把测试根本不需要的 target 一起编出来 —— `folio-app` 的
 `crate-type` 含 `cdylib`/`staticlib`，于是每次都要归档 1.96 GB 的 `libfolio_app.a`、
-610 MB 的 `.so`、775 MB 的 `folio`，外加 `spike` example。实测改一个叶子文件
+610 MB 的 `.so`、775 MB 的 `folio`（量这些的时候还带着 M0 那个 `spike` example，它每次多链
+一份 717 MB，已随本文件一起删）。实测改一个叶子文件
 （`folio-core/src/format/epub.rs`）：
 
 | 命令 | 重构前 | 重构后 |
