@@ -14,13 +14,18 @@
 //! 每一节都直接收 [`Report`] 而不是自己去 `self.report` 里取：取不到书库时整屏换成的
 //! 那一句话由 `render` 一处决定，各节里不必各写一条永远走不到的 `None` 分支。
 //! 取数不在 `render` 里，见 [`report`] 那一份的模块说明。
+//!
+//! 三张图（趋势的柱、时段的柱、星期几的雷达）共用同一条规矩：**图的下面永远跟一句
+//! muted 的结论**。图说的是形状，那句说的是形状里唯一要记住的那个数 —— 移动端的浮层
+//! 点不住（`shelf` 里记过的那条事实），读数通路不能只剩 tooltip 一条。
 
 mod report;
 
 pub use report::Range;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::chart::BarChart;
+use gpui_kit::component::chart::{BarChart, RadarChart};
+use gpui_kit::component::plot::AxisLabelPlacement;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme, Sizable as _, Selectable, h_flex, v_flex};
@@ -35,7 +40,7 @@ use crate::ui::shared::app_store;
 use crate::ui::shared::l10n::{tf, tr};
 use crate::ui::shell::navigation::SizeClass;
 use crate::ui::widgets::{hairline, muted_label};
-use report::{Bar, Report};
+use report::{Bar, HourCell, Report, WeekdayPattern, WeekdaySpoke};
 
 /// 内容列的最大宽度（逻辑像素）。
 ///
@@ -44,18 +49,24 @@ use report::{Bar, Report};
 const COLUMN_MAX: f32 = 720.0;
 /// 左右留白，与书架共用同一个数：切目的地时那条对齐脊线不该跳。
 const GUTTER: f32 = 12.0;
-/// 图表盒的高。
+/// 趋势图盒的高。
 ///
 /// 必须显式给：图表不自己量高，而它在滚动层里拿不到能被 `flex_1` 解析的高 ——
 /// 不给就是零高，症状是「趋势那一节只剩标题，图不见了」。与阅读页目录层同一条坑
 /// （`reader::page::toc_layer` 那处注释）。
 const TREND_HEIGHT: f32 = 168.0;
+/// 时段图盒的高：比趋势矮一档。它是「一天里哪几个钟点在读」的次要读数，
+/// 而且 24 根柱子本来就比 30 根矮胖，不需要那么多垂直空间。
+const HOURS_HEIGHT: f32 = 112.0;
+/// 星期几那张雷达盒的高。
+///
+/// 半径取盒高的 40%（组件那条默认），所以 208 一圈是 83 像素：七条辐条加外面
+/// 那一圈星期名刚好放得进 336 宽的窄屏，不会顶到边。
+const WEEKDAY_HEIGHT: f32 = 208.0;
 /// 榜单行里那条占比栏的固定车道宽。
 const SHARE_LANE: f32 = 96.0;
 /// 榜单行里读数那一列的车道宽（右对齐，让竖着比的数是齐的）。
 const READOUT_LANE: f32 = 96.0;
-/// 时段热力条一格的高。
-const HOUR_CELL_HEIGHT: f32 = 14.0;
 
 /// 读者此刻在这块屏上要回答的问题，按阅读顺序排下来。
 #[derive(Clone, Debug)]
@@ -148,10 +159,11 @@ impl StatsView {
 
     /// 趋势：一根柱子一天，今天那根更实。
     ///
-    /// 「哪根是今天」有两处说明而不是只有颜色（Guides：不许只靠颜色传义）：tooltip 里
-    /// 写着完整日期，而图下面那一行 muted 直接把窗口结论念出来。后一条尤其要紧 ——
-    /// 移动端的浮层点不住（`shelf` 里记过的那条事实），tooltip 不能是唯一那条读数通路。
-    fn trend(&self, report: &Report, cx: &mut Context<Self>) -> AnyElement {
+    /// 「哪根是今天」有三处说明而不是只有颜色（Guides：不许只靠颜色传义）：轴上永远标着
+    /// 最后一格那个日期、tooltip 里写着完整日期，而图下面那一行 muted 直接把窗口结论念出来。
+    /// 后两条尤其要紧 —— 移动端的浮层点不住（`shelf` 里记过的那条事实），
+    /// tooltip 不能是唯一那条读数通路。
+    fn trend(&self, report: &Report, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let bars: Vec<Bar> = report.bars.clone();
         let solid = cx.theme().chart_3;
         let faded = solid.opacity(0.45);
@@ -203,8 +215,8 @@ impl StatsView {
                                 .value_axis(true)
                                 .value_tick_count(3)
                                 .value_tick_format(|v| format!("{}", v.round() as i64))
-                                // 窗口越宽标得越稀：30 天每根都标，日期会叠成一团。
-                                .tick_margin(if days >= 30 { 3 } else { 1 })
+                                .band_tick_count(day_labels(compact))
+                                .value_axis_label_placement(value_axis_placement(compact))
                                 .tooltip_title(|bar| bar.day.clone())
                                 .tooltip_value(|bar: &Bar, _| bar.readout.clone())
                                 .appear_key(days),
@@ -321,48 +333,112 @@ impl StatsView {
         .into_any_element()
     }
 
-    /// 一般几点读。24 格深浅 + 一句结论（结论是那两格颜色说不出来的话）。
-    fn hours(&self, report: &Report, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        // 四档深浅全取主题的图表色板：`chart_1` 最浅、`chart_4` 最深，本身就是同一支
-        // 蓝色的四个台阶，而空的那格退回中性 `muted` —— 不引入任何新颜色，浅深两套主题
-        // 都跟着主题走。
-        let (empty, low, mid, high) = (theme.muted, theme.chart_1, theme.chart_3, theme.chart_4);
-        let peak = (report.hours_peak).max(1) as f64;
-        let cells = report
-            .hours
-            .iter()
-            .map(|seconds| {
-                let share = *seconds as f64 / peak;
-                let bg = if share <= 0.0 {
-                    empty
-                } else if share < 0.34 {
-                    low
-                } else if share < 0.67 {
-                    mid
-                } else {
-                    high
-                };
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h(px(HOUR_CELL_HEIGHT))
-                    .bg(bg)
-            })
-            .collect::<Vec<_>>();
-        let busiest = report
-            .hours
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.cmp(b.1))
-            .map_or(0, |(hour, _)| hour);
+    /// 一般几点读。24 根柱子，读得最多的那一个钟点更实，下面跟一句结论。
+    ///
+    /// 这一节原来是 24 格手画的深浅块，那时有两条说不通：深浅是唯一的读数通路（Guides
+    /// 不许只靠颜色传义），而四档深浅把「读了 40 分钟」和「读了 55 分钟」压成同一格。
+    /// 换成柱子之后高低自己会说话，轴上有钟点可数，悬停还能读出本地化过的那一句。
+    /// 结论那一行照旧留着 —— 移动端的浮层点不住。
+    fn hours(&self, report: &Report, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+        let cells: Vec<HourCell> = report.hours.clone();
+        let fill = cx.theme().chart_3;
+        let peak = cx.theme().chart_4;
+        let radius = cx.theme().radius;
+        // 峰值那一格由快照钉好（并列时取最早的钟点，见 `report::hours_for`）。
+        // 画到这一节的前提是窗口有 20 段以上的读数，所以那个 `None` 走不到；
+        // 留着兜底只是因为类型上是 `Option`，与改造成图之前那一句同形。
+        let busiest = report.peak_hour().unwrap_or(0);
         let note = SharedString::from(tf(cx, "stats.hours_peak", &[("hour", &busiest)]));
         section(
             tr(cx, "stats.hours"),
             v_flex()
                 .w_full()
                 .gap_2()
-                .child(h_flex().w_full().gap_1().children(cells))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(HOURS_HEIGHT))
+                        .child(
+                            BarChart::new(cells)
+                                .band(|cell: &HourCell| cell.band.clone())
+                                .value(|cell| cell.minutes)
+                                .name(tr(cx, "stats.minutes_unit"))
+                                // 与趋势图同一套说法：全图只有一格是焦点。
+                                .fill(move |cell: &HourCell, _, _, _| {
+                                    if cell.peak { peak } else { fill }
+                                })
+                                .corner_radii(Corners {
+                                    top_left: radius,
+                                    top_right: radius,
+                                    bottom_left: px(0.),
+                                    bottom_right: px(0.),
+                                })
+                                .min_length(2.)
+                                .value_axis(true)
+                                .value_tick_count(3)
+                                .value_tick_format(|v| format!("{}", v.round() as i64))
+                                .band_tick_count(hour_labels(compact))
+                                .value_axis_label_placement(value_axis_placement(compact))
+                                // 轴上是裸钟点，tooltip 的标题才是「21 点」那一句：
+                                // 24 个带单位的名字排在一行上会叠。
+                                .tooltip_title(|cell: &HourCell| cell.title.clone())
+                                .tooltip_value(|cell: &HourCell, _| cell.readout.clone())
+                                .appear_key(self.range.days()),
+                        ),
+                )
+                .child(muted_label(note, cx)),
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// 一周里哪天读得多。七根辐条的一张雷达图，下面跟一句结论。
+    ///
+    /// 用雷达而不是再来一排柱子：星期几是**会绕回去**的一圈（周日之后接周一），
+    /// 拉成一条线就把那个绕口摆在了读数路径正中；而这一节要的是**形状** ——
+    /// 周末鼓起来、工作日塌下去 —— 那正是多边形一眼说得出、一排柱子得逐根比的东西。
+    ///
+    /// 雷达没有数值轴，图自己也说不出「平均多少分钟」，所以下面那一行 muted 是这一节
+    /// 唯一的读数通路（与趋势、时段两节同一条规矩：移动端浮层点不住）。
+    fn weekday(&self, pattern: &WeekdayPattern, cx: &mut Context<Self>) -> AnyElement {
+        let spokes: Vec<WeekdaySpoke> = pattern.spokes.clone();
+        let line = cx.theme().chart_3;
+        let note = SharedString::from(tf(
+            cx,
+            "stats.weekday_note",
+            &[
+                ("day", &pattern.busiest.name),
+                ("avg", &pattern.busiest.readout),
+            ],
+        ));
+        section(
+            tr(cx, "stats.weekday"),
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(WEEKDAY_HEIGHT))
+                        .child(
+                            RadarChart::new(spokes)
+                                .label(|spoke: &WeekdaySpoke| spoke.name.clone())
+                                .value(|spoke: &WeekdaySpoke| spoke.minutes)
+                                .stroke(line)
+                                .fill(line.opacity(0.2))
+                                .dot()
+                                // 四环：半径是盒高的 40%，每环就是一档「平均多少分钟」，
+                                // 读者不必知道那一圈是几分钟也知道鼓起来的那面高了几档。
+                                .grid_levels(4)
+                                .name(tr(cx, "stats.minutes_unit"))
+                                // 标题由辐条那串星期名供给（字符串标签自带标题），
+                                // 这里只把那一行的读数换成本地化过的句子。
+                                .tooltip_value(|spoke: &WeekdaySpoke, _, _| {
+                                    spoke.readout.clone()
+                                })
+                                .appear_key(self.range.days()),
+                        ),
+                )
                 .child(muted_label(note, cx)),
             cx,
         )
@@ -421,10 +497,13 @@ impl EventEmitter<StatsEvent> for StatsView {}
 impl Render for StatsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let wide = matches!(SizeClass::of(window), SizeClass::Expanded);
+        // 轴上标几个刻度按**屏宽**决定，与 `wide` 不是一件事：那条 720 版心管的是
+        // 「一行多长还读得下去」，这一条管的是「一排标签排得下几个」。
+        let compact = matches!(SizeClass::of(window), SizeClass::Compact);
         let blocks: Vec<AnyElement> = match &self.report {
             None => vec![self.unavailable(cx)],
             Some(report) => {
-                let mut blocks = vec![self.today(report, cx), self.trend(report, cx)];
+                let mut blocks = vec![self.today(report, cx), self.trend(report, compact, cx)];
                 // 累计不跟着档位变，但它是「读了多少」这个总账，仍排在趋势之后。
                 blocks.push(self.totals(report, cx));
                 // 两节按数据有没有说话决定画不画：一本的书名在「今天」附近已经出现过，
@@ -433,7 +512,12 @@ impl Render for StatsView {
                     blocks.push(self.ranks(report, cx));
                 }
                 if report.shows_hours() {
-                    blocks.push(self.hours(report, cx));
+                    blocks.push(self.hours(report, compact, cx));
+                }
+                // 星期几排在时段之后：两节说的都是「什么时候读」，一个看一天里、
+                // 一个看一周里，连着读才是节律。门槛见 `report::weekdays_for`。
+                if let Some(pattern) = &report.weekdays {
+                    blocks.push(self.weekday(pattern, cx));
                 }
                 blocks
             }
@@ -509,4 +593,33 @@ fn section(title: SharedString, content: impl IntoElement, cx: &App) -> impl Int
         .gap_2()
         .child(section_label(title, cx))
         .child(content)
+}
+
+/// 趋势轴上标几个日期，按屏宽给。
+///
+/// 这里原来是一条**步长**（`tick_margin`），而步长有两笔亏：14 天档等于把 14 个
+/// `MM-DD` 全排上，窄屏那一排必然叠字；而最后一格（今天）标不标得上，取决于窗口
+/// 天数是不是那一步长的整数倍 —— 30 配 3 刚好压中，换个档位就漏。全图唯一的焦点
+/// 不该靠一次除法侥幸才有名字。`band_tick_count` 是从第一格匀到最后一格，
+/// 最后一格永远标得到。
+fn day_labels(compact: bool) -> usize {
+    if compact { 4 } else { 7 }
+}
+
+/// 时段轴上标几个钟点：宽屏一天切五段，窄屏三段（0 / 12 / 23 前后）。
+fn hour_labels(compact: bool) -> usize {
+    if compact { 3 } else { 5 }
+}
+
+/// 值轴的刻度写在图外那条车道里，还是写在图里侧紧贴网格线。
+///
+/// 写在外面要占一条车道，而组件是按最宽的那个标签把车道撑开的：窄屏那一条是从柱子
+/// 身上扣的，14 根柱子本来就挤，再扣二十来像素就成了一片缝。宽屏不缺那点地方，
+/// 就把刻度留在图外，别让它压在柱子上。
+fn value_axis_placement(compact: bool) -> AxisLabelPlacement {
+    if compact {
+        AxisLabelPlacement::Inside
+    } else {
+        AxisLabelPlacement::Outside
+    }
 }

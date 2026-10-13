@@ -202,6 +202,18 @@ total_notes = "批注条数"
 top = "时间花在哪些书上"
 hours = "一般几点读"
 hours_peak = "最常在读 %{hour} 点前后"
+# 轴上只有那个裸钟点（24 格排 24 个「21 点」会叠成一团），tooltip 的标题才是这一句。
+hour_cell = "%{hour} 点"
+# 星期几名只有七个、且是界面自己排的一圈轴，所以留在这里而不是 core 的日期层。
+weekday = "一周里哪天读得多"
+weekday_note = "%{day} 读得最多，平均 %{avg}"
+weekday_mon = "周一"
+weekday_tue = "周二"
+weekday_wed = "周三"
+weekday_thu = "周四"
+weekday_fri = "周五"
+weekday_sat = "周六"
+weekday_sun = "周日"
 no_store = "读不到书库"
 no_store_hint = "统计读的是本地书库，请确认书库目录能打开。"
 

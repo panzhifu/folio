@@ -4,6 +4,11 @@
 //! `mod.rs` 那一侧只画。切开的那条线是**取数时机** —— 快照在「切进这一屏 / 换了时间
 //! 范围 / 关掉一本书」这三处重取一次，`render` 一律不碰库。每帧查一遍 sqlite 不会
 //! 慢在哪条语句上，它慢在把「画一屏」变成「做一轮 IO」，而那正是渲染帧不该干的事。
+//!
+//! 换算产物是三种图的格子：[`Bar`]（趋势那串柱）、[`HourCell`]（时段那 24 格）、
+//! [`WeekdaySpoke`]（星期几那 7 根辐条）。后两种是**在这份快照里归并出来的**，库里没有
+//! 对应的查询：时段把已经查来的 24 格秒数换成图要的形状，星期几把窗口那串补过零的
+//! 日桶按周摊平。归并都只是纯算术，所以「图上有那一格、数却没算它」这类错不会出现。
 
 use std::sync::Arc;
 
@@ -89,6 +94,47 @@ pub struct Bar {
     pub today: bool,
 }
 
+/// 时段图上的一格（窗口内某个本地小时的合计）。
+///
+/// 与 [`Bar`] 同一条理由：`readout` 在这里就说成本地化的句子，图表那些闭包要 `'static`。
+#[derive(Clone)]
+pub struct HourCell {
+    /// 轴上的那一格，只有小时数（`0`…`23`）：轴上排 24 个「14 点」会叠成一团，
+    /// 而小节标题已经说了这一图读的是「几点」。
+    pub band: SharedString,
+    /// tooltip 的标题，本地化过的那一句（中文「14 点」、英文「14:00」）。
+    pub title: SharedString,
+    /// 分钟，与趋势图同一个单位：两张贴在一起时读者才不用换算。
+    pub minutes: f64,
+    /// 窗口里最高的那一格。全零时没有。
+    pub peak: bool,
+    pub readout: SharedString,
+}
+
+/// 星期几那一节轴上的一格（雷达图的一根辐条）。
+#[derive(Clone)]
+pub struct WeekdaySpoke {
+    /// 本地化的星期名，同时是 tooltip 的标题。
+    pub name: SharedString,
+    /// 那一个星期几的**平均**日读数（分钟），按窗口里它出现的天数摊平 ——
+    /// 没读的那几个周六也摊进去。不摊就成了只看峰值的错觉，而这一节要回答的是
+    /// 「哪一天通常在读」。
+    pub minutes: f64,
+    /// 平均读数的本地化句子，给 tooltip 念。
+    pub readout: SharedString,
+}
+
+/// 星期几那一节的整份内容：七根辐条，加上那一句结论要说的那一格。
+///
+/// `busiest` 单列一份是因为「哪一天读得最多」这个结论**必须**有，而它存在的那一刻就
+/// 有（这一节只在窗口有读数时才造）。把它做成辐条上的一个 `top: bool` 或者
+/// `Option<WeekdaySpoke>`，界面那边就得写一条永远走不到的分支。
+#[derive(Clone)]
+pub struct WeekdayPattern {
+    pub spokes: Vec<WeekdaySpoke>,
+    pub busiest: WeekdaySpoke,
+}
+
 /// 一屏要画的全部数。取一次，画到下一次重取为止。
 pub struct Report {
     /// 窗口内的汇总（含补零的每日桶、连续天数、活跃天数）。
@@ -102,10 +148,11 @@ pub struct Report {
     pub bars: Vec<Bar>,
     /// 窗口内时间最多的几本书。
     pub ranks: Vec<ReadingRank>,
-    /// 24 格的本地小时分布（秒）。
-    pub hours: Vec<i64>,
-    /// `hours` 里最高的那一格，热力条按它算深浅。
-    pub hours_peak: i64,
+    /// 24 格的本地小时分布，已经换成图直接画的形状。
+    pub hours: Vec<HourCell>,
+    /// 星期几那一节；`None` = 窗口太窄或活跃天数太少，画出来是噪声。
+    /// 见 [`WEEKDAY_MIN_DAYS`] 与 [`WEEKDAY_MIN_ACTIVE_DAYS`]。
+    pub weekdays: Option<WeekdayPattern>,
 }
 
 impl Report {
@@ -122,29 +169,23 @@ impl Report {
                 log_failed("统计：读窗口汇总", err);
                 empty_summary(days, tz_offset_secs)
             });
+        let hours = read_or(
+            "统计：读时段分布",
+            store.hour_distribution(days, tz_offset_secs),
+        );
         Report {
+            hours: hours_for(&hours, cx),
+            weekdays: weekdays_for(&window, tz_offset_secs, cx),
             bars: bars_for(&window, tz_offset_secs, cx),
-            hours_peak: 0,
             window,
             ranks: read_or(
                 "统计：读书目排行",
                 store.top_books(days, tz_offset_secs, RANK_LIMIT),
             ),
-            hours: read_or(
-                "统计：读时段分布",
-                store.hour_distribution(days, tz_offset_secs),
-            ),
             totals: read_or("统计：读全时段合计", store.reading_totals()),
             days_read: read_or("统计：读天数", store.reading_days(tz_offset_secs)),
             notes: read_or("统计：读批注条数", store.annotation_count()),
         }
-        .with_peak()
-    }
-
-    /// 热力条的深浅基准。单独一步是因为 `hours` 那一条在结构体字面量里，取不到自己。
-    fn with_peak(mut self) -> Self {
-        self.hours_peak = self.hours.iter().copied().max().unwrap_or(0);
-        self
     }
 
     /// 窗口里有没有任何东西。全零不是错误，但它决定这一屏画报告还是画引导。
@@ -157,18 +198,37 @@ impl Report {
         self.ranks.len() > 1
     }
 
-    /// 时段那条热力图画不画。见 [`HOURS_MIN_SESSIONS`]。
+    /// 时段图画不画。见 [`HOURS_MIN_SESSIONS`]。
     pub fn shows_hours(&self) -> bool {
         self.hours.len() == folio_core::infra::time::HOURS_PER_DAY
             && self.window.sessions >= HOURS_MIN_SESSIONS
+    }
+
+    /// 时段图里最高的那一格是几点；全零时 `None`。
+    ///
+    /// 深浅与高低都由图自己画了，这个数只剩一件事要说：那句「最常在读 X 点前后」。
+    /// 那一格只在全表有读数时才会被点亮，见 [`hours_for`]。
+    pub fn peak_hour(&self) -> Option<usize> {
+        self.hours.iter().position(|cell| cell.peak)
     }
 }
 
 /// 榜单取几本。五本是「一屏看完不用滚」与「看得出错峰」之间的那个点。
 const RANK_LIMIT: usize = 5;
 
-/// 热力条画出来的门槛（窗口内的会话段数），理由见 [`Report::shows_hours`]。
+/// 时段图画出来的门槛（窗口内的会话段数），理由见 [`Report::shows_hours`]。
 pub const HOURS_MIN_SESSIONS: i64 = 20;
+
+/// 星期几那一节要的最小窗口（天）。少于这个数，七根辐条各摊不到 4 个样本，
+/// 那张多边形读出来是噪声而不是节律 —— 与 [`HOURS_MIN_SESSIONS`] 同一个判据。
+const WEEKDAY_MIN_DAYS: usize = 28;
+
+/// 星期几那一节要的窗口内活跃天数。整窗口只读了两三天时，七个星期几里有五六个
+/// 摊不到一次，画出来的形状说的是「几乎没读」，而那已经是「今天」那一块的话了。
+const WEEKDAY_MIN_ACTIVE_DAYS: usize = 10;
+
+/// 一周几天。core 只给了 `HOURS_PER_DAY`，星期这一头是界面自己的划分。
+const WEEKDAYS_PER_WEEK: usize = 7;
 
 /// 一条读不出来的统计查询：写一句日志，交出默认值。
 ///
@@ -232,6 +292,106 @@ fn bars_for(sum: &ReadingSummary, tz_offset_secs: i64, cx: &App) -> Vec<Bar> {
         .collect()
 }
 
+/// 把 24 格的秒数换成时段图要画的那串格子。
+///
+/// 单位是分钟而不是秒，与 [`bars_for`] 那根趋势柱同一条刻度：两张贴着摆时读者不必
+/// 先换算一遍才看得出「晚上读得比早上多」。
+///
+/// 峰值只点亮一格，并列时取最早那一个钟点：「最常在读几点」这句结论只能说一个数，
+/// 说两个就得在文案里加一个「或」。全零时一格都不亮 —— 那是「还没有读数」，
+/// 不是「凌晨零点最常被读」。
+fn hours_for(seconds: &[i64], cx: &App) -> Vec<HourCell> {
+    let peak = seconds
+        .iter()
+        .copied()
+        .max()
+        .filter(|top| *top > 0)
+        .and_then(|top| seconds.iter().position(|secs| *secs == top));
+    seconds
+        .iter()
+        .enumerate()
+        .map(|(hour, secs)| HourCell {
+            band: SharedString::from(hour.to_string()),
+            title: SharedString::from(tf(cx, "stats.hour_cell", &[("hour", &hour)])),
+            minutes: *secs as f64 / 60.0,
+            peak: peak == Some(hour),
+            readout: duration(cx, *secs),
+        })
+        .collect()
+}
+
+/// 把窗口的每日桶按星期几归并成雷达图的那七格。
+///
+/// 星期既不查库也不排日历：[`ReadingSummary::days`] 那条约定是**补过零的连续桶、
+/// 最后一条是今天**（`store::types` 里钉着的），于是第 `ix` 格就是「今天减 `n-1-ix` 天」，
+/// 而历元日号模 7 就是星期几。归并因此只是那条约定上的一段纯算术，与 core 里
+/// 连续天数、活跃天数那几个派生数同一种算法。约定哪天变了，
+/// `the_weekday_spokes_agree_with_a_calendar` 那条用 chrono 独立核一遍的测试会先红。
+///
+/// 每格交出去的是**平均**日读数（含没读的那几天），不是总量：30 天窗口里周六出现
+/// 5 次、周三出现 4 次，比总量就等于偷偷把「多出来的那一天」算成了读得多。
+fn weekdays_for(
+    sum: &ReadingSummary,
+    tz_offset_secs: i64,
+    cx: &App,
+) -> Option<WeekdayPattern> {
+    let n = sum.days.len();
+    if n < WEEKDAY_MIN_DAYS || sum.active_days < WEEKDAY_MIN_ACTIVE_DAYS {
+        return None;
+    }
+    let today = local_day(time::now(), tz_offset_secs);
+    let mut seconds = [0i64; WEEKDAYS_PER_WEEK];
+    let mut samples = [0usize; WEEKDAYS_PER_WEEK];
+    for (ix, day) in sum.days.iter().enumerate() {
+        let spoke = weekday_of_epoch_day(today - (n - 1 - ix) as i64);
+        seconds[spoke] += day.seconds;
+        samples[spoke] += 1;
+    }
+    // 窗口至少 28 天 ⇒ 每个星期几都摊得到 4 次，所以下面这个分母不会是零。
+    // 摊几次不进那份格子：图只画平均值，而「摊了几次」这件事测试直接从日历数。
+    let average: Vec<i64> = (0..WEEKDAYS_PER_WEEK)
+        .map(|spoke| seconds[spoke] / samples[spoke] as i64)
+        .collect();
+    let spokes: Vec<WeekdaySpoke> = (0..WEEKDAYS_PER_WEEK)
+        .map(|spoke| WeekdaySpoke {
+            name: weekday_name(spoke, cx),
+            minutes: average[spoke] as f64 / 60.0,
+            readout: duration(cx, average[spoke]),
+        })
+        .collect();
+    // 活跃天数已过门槛 ⇒ 至少有一格平均大于零 ⇒ `max_by` 一定给出东西。
+    let busiest = spokes
+        .iter()
+        .max_by(|a, b| a.minutes.total_cmp(&b.minutes))
+        .cloned()
+        .expect("七根辐条总有一根");
+    Some(WeekdayPattern { spokes, busiest })
+}
+
+/// 历元日号 → 星期几，Monday = 0 … Sunday = 6。
+///
+/// 历元第 0 天（1970-01-01）是星期四，所以先偏 3 天再取模。用 `rem_euclid` 而不是 `%`：
+/// 1970 年以前的日号取模会是负数，而它要当索引。
+fn weekday_of_epoch_day(epoch_day: i64) -> usize {
+    (epoch_day + 3).rem_euclid(WEEKDAYS_PER_WEEK as i64) as usize
+}
+
+/// 星期几那一格的轴标签。
+///
+/// 与 [`Range::label`] 同一条理由写成逐个字面量的 `tr` 调用（不返回键名）：
+/// `ui/shared/l10n.rs` 那条扫描测试只认字面量，而键解不出来时界面会把键本身画出来。
+fn weekday_name(spoke: usize, cx: &App) -> SharedString {
+    match spoke {
+        0 => tr(cx, "stats.weekday_mon"),
+        1 => tr(cx, "stats.weekday_tue"),
+        2 => tr(cx, "stats.weekday_wed"),
+        3 => tr(cx, "stats.weekday_thu"),
+        4 => tr(cx, "stats.weekday_fri"),
+        5 => tr(cx, "stats.weekday_sat"),
+        _ => tr(cx, "stats.weekday_sun"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! 快照那一步：读数按语言换形状，库里那几条查询到界面手上是什么形状。
@@ -247,7 +407,7 @@ mod tests {
     use folio_core::{Config, DocMeta, Format, Language, Locale, Store, infra::time};
     use gpui_kit::{App, AppContext as _, Entity, SharedString, TestAppContext};
 
-    use super::{Bar, HOURS_MIN_SESSIONS, Range, Report, duration};
+    use super::{Bar, HOURS_MIN_SESSIONS, Range, Report, WEEKDAYS_PER_WEEK, duration};
     use crate::ui::features::stats::StatsView;
     use crate::ui::shared::config_model::ConfigHolder;
 
@@ -270,6 +430,26 @@ mod tests {
     fn noon(day_offset: i64) -> i64 {
         let today = time::local_day(time::now(), TZ);
         time::day_start(today + day_offset, TZ) + 12 * 3600
+    }
+
+    /// 某一天某个小时起点的 Unix 秒（给时段图按小时分桶用）。
+    fn at_hour(hour: i64, day_offset: i64) -> i64 {
+        let today = time::local_day(time::now(), TZ);
+        time::day_start(today + day_offset, TZ) + hour * 3600
+    }
+
+    /// 某个历元日号是周几，Monday = 0 … Sunday = 6 —— **由 chrono 的日历算**，
+    /// 与被测的那段 `weekday_of_epoch_day` 完全无关。取正午那一刻是为了让日界线
+    /// 落在测试用的那个固定时区里，不与 UTC 那天混掉。
+    fn calendar_weekday(epoch_day: i64) -> usize {
+        use chrono::{Datelike, FixedOffset};
+        let at = time::day_start(epoch_day, TZ) + 12 * 3600;
+        let offset = FixedOffset::east_opt(TZ as i32).expect("东八区是个合法的固定偏移");
+        chrono::DateTime::from_timestamp(at, 0)
+            .expect("这些秒数在 chrono 的日期范围内")
+            .with_timezone(&offset)
+            .weekday()
+            .num_days_from_monday() as usize
     }
 
     /// 把界面语言装进这个上下文。`duration` 要说哪门语言的句子由配置实体决定
@@ -315,6 +495,11 @@ mod tests {
         assert!(report.ranks.is_empty(), "没有读数就没有排行");
         assert!(!report.shows_ranks());
         assert!(!report.shows_hours(), "零段记录不该画时段图");
+        assert_eq!(report.peak_hour(), None, "全零时没有『最高那一格』");
+        assert!(
+            report.weekdays.is_none(),
+            "空库不该画一张全塌在圆心的多边形"
+        );
     }
 
     /// 读数到手上的样子：哪根是今天、排行谁在前、时段表满 24 格。
@@ -351,9 +536,17 @@ mod tests {
         assert!(report.shows_ranks(), "两本才排得出榜");
 
         assert_eq!(report.hours.len(), time::HOURS_PER_DAY);
-        assert_eq!(report.hours[12], 4_500, "两段都从正午开始");
-        assert_eq!(report.hours_peak, 4_500);
+        assert_eq!(
+            report.hours[12].minutes,
+            75.0,
+            "两段都从正午开始：4 500 秒摊到第 12 格"
+        );
+        assert_eq!(report.peak_hour(), Some(12), "峰值那格点在第 12 格");
         assert!(!report.shows_hours(), "两段记录还没到画时段图的门槛");
+        assert!(
+            report.weekdays.is_none(),
+            "14 天档每个星期几摊不到两次，画出来是噪声"
+        );
     }
 
     /// 时段图的门槛（[`super::HOURS_MIN_SESSIONS`]）越过之后那一节才该出现。
@@ -368,6 +561,160 @@ mod tests {
         }
         let report = cx.update(|cx| Report::load(&store, Range::Fourteen, TZ, cx));
         assert!(report.shows_hours(), "够多的段就该画出规律");
+    }
+
+    /// 时段图上那一格的三个说法：轴上的裸钟点、tooltip 的本地化标题、本地化的读数。
+    ///
+    /// 轴与标题刻意不同：24 格轴上排 24 个「21 点」会叠成一团，而小节标题已经说了
+    /// 这一图读的是几点，轴只需要那一个数。
+    #[gpui_kit::test]
+    fn an_hour_cell_carries_its_own_label_and_reading(cx: &mut TestAppContext) {
+        set_locale(cx, Locale::ZhHans);
+        let store = Arc::new(Store::in_memory().unwrap());
+        let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        // 午后 13 点读 20 段各 60 秒，晚上 21 点读 3 段各 900 秒：后者高，且段数少。
+        for _ in 0..HOURS_MIN_SESSIONS {
+            let at = at_hour(13, 0);
+            store.record_session(book, at, at + 60, 0).unwrap();
+        }
+        for _ in 0..3 {
+            let at = at_hour(21, 0);
+            store.record_session(book, at, at + 900, 0).unwrap();
+        }
+        let report = cx.update(|cx| Report::load(&store, Range::Fourteen, TZ, cx));
+
+        let evening = &report.hours[21];
+        assert_eq!(evening.band.as_str(), "21", "轴上是裸钟点");
+        assert_eq!(evening.title.as_str(), "21 点", "tooltip 说的是本地化的那一句");
+        assert_eq!(evening.minutes, 45.0, "分钟，与趋势柱同一单位");
+        assert_eq!(evening.readout.as_str(), "45 分钟");
+        assert!(evening.peak, "晚上那格最高");
+        assert!(!report.hours[13].peak, "段数多不等于读得久");
+        assert_eq!(report.hours[0].minutes, 0.0);
+        assert!(!report.hours[0].peak, "空的格不亮");
+        assert_eq!(report.peak_hour(), Some(21));
+        assert_eq!(
+            report.hours.iter().filter(|cell| cell.peak).count(),
+            1,
+            "「最常在读几点」只能说一个数"
+        );
+    }
+
+    /// 星期几那一节的归并要跟一份独立日历对得上。
+    ///
+    /// 刻意不用 [`super::weekday_of_epoch_day`] 自己验自己：那一串格子落在周几由 chrono
+    /// 的日历另算一遍，两条路子对不上就是这段算术偏了。偏一天最容易藏在「今天」那格，
+    /// 而那格正是这一节要说的那个周末。分母也一样：摊几次由日历数出来，不问快照自己
+    /// 说了什么 —— 快照把「哪几天」记错时，它报出来的次数会跟着一起错。
+    #[gpui_kit::test]
+    fn the_weekday_spokes_agree_with_a_calendar(cx: &mut TestAppContext) {
+        set_locale(cx, Locale::ZhHans);
+        let store = Arc::new(Store::in_memory().unwrap());
+        let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        // 连着 11 天，越靠近今天读得越久（今天那段 6_600 秒）。
+        for k in 0..11i64 {
+            let secs = (11 - k) * 600;
+            store.record_session(book, noon(-k), noon(-k) + secs, 0).unwrap();
+        }
+        let report = cx.update(|cx| Report::load(&store, Range::Thirty, TZ, cx));
+        let pattern = report.weekdays.expect("30 天窗口与 11 个活跃天就该画这一节");
+        let spokes = &pattern.spokes;
+        assert_eq!(spokes.len(), WEEKDAYS_PER_WEEK);
+        assert_eq!(
+            spokes
+                .iter()
+                .map(|spoke| spoke.name.to_string())
+                .collect::<Vec<String>>(),
+            vec!["周一", "周二", "周三", "周四", "周五", "周六", "周日"],
+            "轴从周一排到周日，顺序由文案表说了算"
+        );
+
+        let today = time::local_day(time::now(), TZ);
+        // 窗口那 30 天里每个星期几各摊几次：七者之和是 30，每一根 4 或 5。
+        let occurrences: Vec<usize> = (0..WEEKDAYS_PER_WEEK)
+            .map(|ix| (0..30i64).filter(|k| calendar_weekday(today - k) == ix).count())
+            .collect();
+        assert_eq!(occurrences.iter().sum::<usize>(), 30);
+        assert!(
+            occurrences.iter().all(|times| (4..=5).contains(times)),
+            "30 天里每个星期几该摊 4 或 5 次，实得{occurrences:?}"
+        );
+
+        for (ix, spoke) in spokes.iter().enumerate() {
+            let seeded: Vec<i64> = (0..11i64)
+                .filter(|k| calendar_weekday(today - k) == ix)
+                .map(|k| (11 - k) * 600)
+                .collect();
+            assert_eq!(
+                spoke.minutes > 0.0,
+                !seeded.is_empty(),
+                "第 {ix} 根辐条有没有读数与日历不符"
+            );
+            // 摊的是**整个窗口**里那几天的平均（没读的那几天也算进分母）：
+            // 只摊有读的那些天就成了「哪天真读了」，而不是「哪一天通常在读」。
+            let total: i64 = seeded.iter().sum();
+            let expect = total as f64 / occurrences[ix] as f64 / 60.0;
+            assert!(
+                (spoke.minutes - expect).abs() < 1e-9,
+                "第 {ix} 根辐条的平均读数：{} vs {expect}",
+                spoke.minutes
+            );
+        }
+
+        // 结论那一格：它就是平均最高的那根辐条，并且话说成了本地化的那一句。
+        let best = spokes
+            .iter()
+            .map(|spoke| spoke.minutes)
+            .fold(f64::MIN, f64::max);
+        assert_eq!(pattern.busiest.minutes, best, "结论要说的就是最高的那根辐条");
+        assert!(
+            !pattern.busiest.readout.is_empty(),
+            "那一格得能念出一句人话"
+        );
+    }
+
+    /// 两个门槛各拦一样：窗口太窄摊不出平均，活跃天数太少画出来是一片空。
+    #[gpui_kit::test]
+    fn the_weekday_section_stays_out_until_the_window_can_average(cx: &mut TestAppContext) {
+        set_locale(cx, Locale::ZhHans);
+        let busy = Arc::new(Store::in_memory().unwrap());
+        let book = busy.add_book(&path("a.epub"), &meta("A")).unwrap();
+        // 连着 11 天、每天两段：段数过了时段图那道门槛（20 段），活跃天数也过了
+        // 星期几那道（10 天），差的只剩窗口宽度。
+        for k in 0..11i64 {
+            for shift in 0..2i64 {
+                let at = noon(-k) + shift * 30 * 60;
+                busy.record_session(book, at, at + 600, 0).unwrap();
+            }
+        }
+        let narrow = cx.update(|cx| Report::load(&busy, Range::Fourteen, TZ, cx));
+        assert!(
+            narrow.weekdays.is_none(),
+            "14 天档每根辐条摊不到两次，画出来是噪声"
+        );
+        assert!(
+            narrow.shows_hours(),
+            "同一批读数够画时段图：两节的门槛各管各的"
+        );
+
+        // 同一个库，只把窗口拉宽到 30 天，那一节就该出现。
+        let wide = cx.update(|cx| Report::load(&busy, Range::Thirty, TZ, cx));
+        assert!(
+            wide.weekdays.is_some(),
+            "窗口一宽，每个星期几摊得到 4 次以上，节律就读得出来了"
+        );
+
+        let sparse = Arc::new(Store::in_memory().unwrap());
+        let book = sparse.add_book(&path("b.epub"), &meta("B")).unwrap();
+        for k in 0..3i64 {
+            sparse.record_session(book, noon(-k), noon(-k) + 600, 0)
+                .unwrap();
+        }
+        let wide_but_thin = cx.update(|cx| Report::load(&sparse, Range::Thirty, TZ, cx));
+        assert!(
+            wide_but_thin.weekdays.is_none(),
+            "30 天只读了 3 天：七格里四格是空的，那张形状说的是「几乎没读」"
+        );
     }
 
     /// 排行只有一本时那一节整块不画：书名在「今天」附近已经说过一遍，再摆一行
