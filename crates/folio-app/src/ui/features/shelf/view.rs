@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use folio_core::net::remote::Transport;
 use folio_core::{
@@ -39,7 +40,7 @@ use crate::ui::shared::error::{Context as _, report};
 use crate::ui::shared::l10n::{tf, tr};
 use crate::ui::shared::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::shared::services;
-use super::book_card::Card;
+use super::book_card::{COVER_RATIO, Card};
 use super::book_menu;
 use super::scan::ScanPhase;
 use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
@@ -76,6 +77,44 @@ const MIN_CARD: f32 = 168.0;
 /// 因为这里是整片卡片的边，视觉上要比一条文字栏松。
 pub(super) const GUTTER: f32 = 12.0;
 
+/// 一横排的量：几列，以及一格封面该多高。
+///
+/// 封面高必须由格宽**在这里算出来**，不能留给 `aspect_ratio` 在排版时按宽度推：
+/// `uniform_list` 量行高时给的是 **min-content 宽度**（`measure_item(None, ..)`），
+/// 而书名那一行是 `whitespace_nowrap` —— 它的 min-content 宽就是整条不折行的标题宽。
+/// 于是量出来的那一格有 300 多逻辑像素宽，封面按 2:3 推出 500 多的高，行高比真实的
+/// 两还多，第二排直接被推到屏幕外（真机 1080×2400 实测：量出 544，实际 236）。
+/// 写死高度让行高与测量时给的宽度无关，这个坑就填上了。
+#[derive(Clone, Copy)]
+pub(super) struct GridSpec {
+    pub(super) columns: u16,
+    pub(super) cover_height: f32,
+}
+
+/// 网格真正能用到的宽度：扣掉导航栏与两侧留白。
+///
+/// `columns_for` 与 [`grid_spec`] 都从这一个式子取数：两处各算一份的话，改一侧忘另一侧
+/// 会表现为「列数对了但每格宽得莫名其妙」。
+fn available_width(width: f32, size: SizeClass) -> f32 {
+    let nav = match size {
+        SizeClass::Compact => 0.0,
+        SizeClass::Medium => RAIL_WIDTH,
+        SizeClass::Expanded => SIDEBAR_WIDTH,
+    };
+    (width - nav - GUTTER * 2.0).max(0.0)
+}
+
+/// 一横排该排成什么样：列数按 [`columns_for`]，封面高按那个列数均出来的格宽。
+fn grid_spec(width: f32, size: SizeClass) -> GridSpec {
+    let columns = columns_for(width, size);
+    // n 格之间只有 n−1 条间距，所以只扣一条 `GAP * (n−1)`。
+    let card = (available_width(width, size) - GAP * f32::from(columns - 1)) / f32::from(columns);
+    GridSpec {
+        columns,
+        cover_height: card / COVER_RATIO,
+    }
+}
+
 /// 一行放几本：手机固定 [`COLUMNS`]，桌面与平板按**内容区实际宽度**排到每格
 /// 不低于 [`MIN_CARD`]。
 ///
@@ -91,14 +130,8 @@ pub fn columns_for(width: f32, size: SizeClass) -> u16 {
     if size.is_compact() {
         return COLUMNS;
     }
-    let nav = match size {
-        SizeClass::Compact => 0.0,
-        SizeClass::Medium => RAIL_WIDTH,
-        SizeClass::Expanded => SIDEBAR_WIDTH,
-    };
     // 第 n 格要占 n 个格宽加 n−1 条间距，所以分子补回一条 GAP。
-    let available = (width - nav - GUTTER * 2.0).max(0.0);
-    let fitted = ((available + GAP) / (MIN_CARD + GAP)).floor() as u16;
+    let fitted = ((available_width(width, size) + GAP) / (MIN_CARD + GAP)).floor() as u16;
     fitted.max(1)
 }
 
@@ -183,6 +216,15 @@ pub struct ShelfView {
     /// 后台期间发的 notify 可能丢（真机实测：导入后卡片要重新进书架才出现），
     /// render 里见到这面旗就强制重查一次 —— 代价只是多查一遍库。
     pending_reload: bool,
+    /// 格子「落定」那段动画的起算时刻，第一次真画出格子时才记。
+    ///
+    /// 只为**第一次**上屏留的，之后不再重放（理由见 [`super::book_card::Enter`]）。
+    /// 记在架面而不是元素状态里：`uniform_list` 量行高时也在 `request_layout` 阶段
+    /// 跑一遍 item 闭包，那里碰不得 gpui 的元素状态。
+    ///
+    /// `pub(super)` 只为 [`super::book_card::ShelfView::enter_clock`] 那一处：动效的
+    /// 那几条规矩都收在卡片文件里，时钟也得由它自己拨。
+    pub(super) enter_at: Option<Instant>,
 }
 
 impl ShelfView {
@@ -241,6 +283,7 @@ impl ShelfView {
             _info_watch: None,
             _pick: None,
             pending_reload: false,
+            enter_at: None,
         };
         this.reload(&SharedString::default(), cx);
         this
@@ -861,7 +904,7 @@ impl ShelfView {
     }
 
     /// 网格本体，或者两种「这里没有东西」—— 它们必须说得不一样。
-    fn body(&self, cx: &mut Context<Self>, columns: u16) -> AnyElement {
+    fn body(&self, cx: &mut Context<Self>, spec: GridSpec) -> AnyElement {
         if self.confirming {
             return self.confirm_panel(cx);
         }
@@ -875,7 +918,7 @@ impl ShelfView {
             return self.url_panel(entry.clone(), cx);
         }
         if !self.items.is_empty() {
-            return self.grid(cx, columns).into_any_element();
+            return self.grid(cx, spec).into_any_element();
         }
         // 空架要说「导一本书进来」，有书但都不匹配要说「换个词」：
         // 写成一句会让读者以为自己把书弄丢了。
@@ -902,26 +945,30 @@ impl ShelfView {
     ///
     /// 排间距烘进每一项（`.py_1()`）而不是靠容器的 `gap`：虚拟列表不在项之间插空隙，
     /// 上下各 4 就是原来 `gap_2` 那 8 的节律，头一排与尾一排也各留一点边。
-    fn grid(&self, cx: &mut Context<Self>, columns: u16) -> impl IntoElement {
+    fn grid(&self, cx: &mut Context<Self>, spec: GridSpec) -> impl IntoElement {
         // 卡片管理菜单的两条文案：整个架面取一次，逐卡 clone 进菜单。条目本身
         // （哪几条、什么图标、点了派给谁）在 [`book_menu`]。
         let labels = book_menu::Labels::resolve(cx);
-        let columns = columns as usize;
+        let columns = spec.columns as usize;
         // 一横排算一项；不满一排的尾巴也算一排，不然最后那几本会画不出来。
         let rows = self.items.len().div_ceil(columns);
         let shelf = cx.entity().clone();
         let scroll = self.grid_scroll.clone();
-        let list = uniform_list("shelf-grid", rows, move |range, _window, cx| {
+        let cover_height = spec.cover_height;
+        let list = uniform_list("shelf-grid", rows, move |range, window, cx| {
             range
                 .map(|row| {
                     let from = row * columns;
                     // 句柄只在这一排真要画的时候读那几行数据：整片 `items` 不 clone。
                     shelf.update(cx, |this, cx| {
                         let to = (from + columns).min(this.items.len());
+                        // 落定的时钟先取，再借 `items`：进度是这一片格子共用的一个
+                        // 数，逐格只是起步早晚不同。
+                        let enter = this.enter_clock(this.items.len(), window, cx);
                         div()
                             .w_full()
                             .grid()
-                            .grid_cols(columns as u16)
+                            .grid_cols(spec.columns)
                             .gap_2()
                             // 左右留白仍归每一排自己：滚轴贴的是这块区域真正的边。
                             .px(px(GUTTER))
@@ -929,7 +976,17 @@ impl ShelfView {
                             .children(
                                 this.items[from..to]
                                     .iter()
-                                    .map(|card| this.card_element(card, &labels, cx)),
+                                    .enumerate()
+                                    .map(|(col, card)| {
+                                        this.card_element(
+                                            card,
+                                            &labels,
+                                            cover_height,
+                                            &enter,
+                                            from + col,
+                                            cx,
+                                        )
+                                    }),
                             )
                             .into_any_element()
                     })
@@ -968,7 +1025,7 @@ impl Render for ShelfView {
         } else {
             self.toolbar(cx).into_any_element()
         };
-        let columns = columns_for(f32::from(window.viewport_size().width), size);
+        let spec = grid_spec(f32::from(window.viewport_size().width), size);
         // 导入进行中的那一句读数摆在命令行与架面之间：这几秒里架面是不动的，读者要确认
         // 的是「它还在干活」，而不是又看见一片和点导入之前一模一样的格子。
         // `total == 0` 是不定进度（刚提交、第一条读数还没上来），那句不带数字。
@@ -1012,7 +1069,7 @@ impl Render for ShelfView {
             .size_full()
             .child(top)
             .children(status)
-            .child(self.body(cx, columns))
+            .child(self.body(cx, spec))
     }
 }
 
@@ -1020,7 +1077,7 @@ impl Render for ShelfView {
 mod tests {
     //! 列数这件事是架面最容易在改宽度时悄悄坏掉的一处，所以纯函数直接钉。
 
-    use super::columns_for;
+    use super::{COVER_RATIO, GAP, GUTTER, columns_for, grid_spec};
     use crate::ui::shell::navigation::SizeClass;
 
     /// 架面一行放几本：手机钉在 3，桌面与平板随窗口宽往上加，任何宽度都不许塌成 0 列。
@@ -1056,5 +1113,36 @@ mod tests {
                 columns_for(width + 1.0, size)
             );
         }
+    }
+
+    /// 一横排的排距只能由几何算出来，不许被格子的内容（书名有多长）带着走。
+    ///
+    /// `uniform_list` 量行高时给的是 **min-content 宽度**，而书名那一行是不折行的 ——
+    /// 它的 min-content 宽就是整条标题。封面高一旦留给排版按宽度自己推（`aspect_ratio`），
+    /// 量出来的排距就跟着书名长度涨：真机上那版架面量出 544 逻辑像素（一格实际 236），
+    /// 第二排被整个推到屏幕外。这里钉的是「排距只认窗口宽与列数」这一条。
+    #[test]
+    fn the_row_pitch_ignores_the_book_titles() {
+        // 手机三列：格宽 = (390 − 两侧 12 − 两条 8) / 3，封面高 = 格宽 ÷ 2:3。
+        let phone = grid_spec(390.0, SizeClass::Compact);
+        let card = (390.0 - GUTTER * 2.0 - GAP * 2.0) / 3.0;
+        assert_eq!(phone.columns, 3);
+        assert!(
+            (phone.cover_height - card / COVER_RATIO).abs() < 0.01,
+            "封面高该是格宽的 3/2：{} ≠ {}",
+            phone.cover_height,
+            card / COVER_RATIO
+        );
+        // 排距要留在「一屏看得见好几排」那一档；544 就是那次真机坏掉的数。
+        assert!(
+            phone.cover_height < 260.0,
+            "手机上一格封面高到 {}, 排距已经不是几何说的算了",
+            phone.cover_height
+        );
+
+        // 桌面：列数与格宽都跟着窗口走，排距不会停在手机那一档。
+        let desk = grid_spec(1600.0, SizeClass::Expanded);
+        assert!(desk.columns > phone.columns, "1600 宽还只排 {} 列", desk.columns);
+        assert!(desk.cover_height > phone.cover_height);
     }
 }
