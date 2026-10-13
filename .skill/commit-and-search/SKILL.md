@@ -1,6 +1,6 @@
 ---
 name: commit-and-search
-description: This repo commits and pushes through jj (Jujutsu, colocated with .git) and searches code with rg / rga. Use when describing, splitting, squashing, undoing or pushing changes here, when reading jj status/log or moving the main bookmark, when tempted to use git add/commit/checkout/stash in this repo, and when looking for a symbol, signature, or text across the Rust sources, plans docs, EPUB fixtures, or the reference/ clones.
+description: This repo commits and pushes through jj (Jujutsu, colocated with .git) and searches code with rg / rga / ast-grep. Use when describing, splitting, squashing, undoing or pushing changes here, when reading jj status/log or moving the main bookmark, when tempted to use git add/commit/checkout/stash in this repo, when looking for a symbol, signature, or text across the Rust sources, plans docs, or EPUB fixtures, and when using this machine's CLI setup (mold wired for the host triple, just without a justfile, scrcpy for on-device measurement).
 ---
 
 ## 概述
@@ -102,13 +102,57 @@ git worktree remove --force /home/noke/Code/folio-commitcheck
 - 本机 PATH 里的 `rg` 是 Qoder 插件自带的 **15.0.0**；系统那份是 `/usr/bin/rg`（**15.2.0**）。
   需要系统那份的行为时写全路径。
 
-## 本机工具现状
+## 工具
 
-已装：`jj 0.46.0` `fd` `bat` `eza` `jq` `grim` + `slurp`（Wayland 量屏：截图 + 取几何）
-`imagemagick`（`magick`/`convert`/`identify`，像素与尺寸）`sqlite3` `zoxide` `ripgrep` `rga` `lld`。
+### 链接器：mold 3.0.0，只接在主机 triple 上
 
-没装、需要就先问用户（都在 Arch `extra` 源里）：`pandoc`（`extra/pandoc-cli`；补上 `rga` 就能吃
-EPUB）`mold`（比现在的 `ld.bfd` 快一个量级的链接器，本机链接是瓶颈）`ast-grep`（Rust 结构级搜索/
-改写）`hyperfine`（带 stddev 与 warmup 的基准外壳）`just`（把 README 里那串 NDK / gradle / adb
-配方变成命令）`scrcpy`（真机镜像与录制）`bacon` `cargo-watch` `sccache` `tokei` `fzf` `git-delta`
-`taplo` `cargo-machete`。
+`~/.cargo/config.toml` 里加的是
+
+```toml
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+```
+
+**只给这一个 triple**：`[build] rustflags` 会连 build script 与 proc-macro 一起污染，而 Android 那条
+交叉编译用的是 NDK 自己的 lld，不该看见 `-fuse-ld=mold`。实测 `cargo build -v` 确实把这条 flag 传给了
+rustc，链出来的二进制能跑；`/usr/bin/ld.mold` 在，`gcc -fuse-ld=mold` 直接可用。要治的是那笔老账：
+`touch crates/folio-app/src/lib.rs` 之后 `cargo test -p folio-app --no-run` 曾 >12 分钟，慢的全是
+6 个 598–755 MB 的二进制各链接一次。**改 flag 会让整个 `target/` 失效，第一次要全量重编。**
+
+### 结构级搜索：ast-grep 0.44.1（本机只有 `ast-grep` 这个命令名，没有 `sg`）
+
+`rg` 只认文本；「给一个方法加了参数，找出所有少传一位的调用」这类活得按语法找。在 folio 上实测：
+
+```bash
+ast-grep run -p '$M.font_extents($$$)' -l rust crates           # 调用点 → layout/wrap.rs:133
+ast-grep run -p 'fn font_extents($$$) -> $T $B' -l rust crates  # 实现体 → reader/measure.rs:404
+```
+
+批量带修补的改写走 `ast-grep scan -r <规则.yml>`，那要先写规则文件 —— 一次性的改动别建。
+
+### 任务配方：just 1.58.0（仓库里**还没有** `justfile`）
+
+README 里那几条环境变量配方（NDK 的 `CC/CXX/AR` + `CARGO_TARGET_DIR`、`gradle assembleDebug --offline`、
+adb 三连）正适合收成 `just mobile-check` 这样的命令。**建 `justfile` 之前先问用户。**
+
+### 真机：scrcpy 5.0.1，adb 上连着设备（`adb devices` 查当前序列号）
+
+`.debug/` 那套 `adb screencap → magick/identify 量像素` 适合静态尺寸；翻页卷曲这种逐帧的东西该录：
+
+```bash
+scrcpy -n -r 卷曲.mp4 --time-limit=10   # -n 只镜像不接管输入，10 秒自动停
+ffmpeg -i 卷曲.mp4 帧-%03d.png          # 抽帧，再交给 magick 量
+```
+
+`-m/--max-size` 降分辨率，`--window-title` 给窗口起名（配合 `slurp` 取几何）。别在用户不知情的情况下
+启动镜像窗口或接管设备输入。
+
+### 已装 / 没装
+
+已装：`jj 0.46.0` `ast-grep` `mold` `just` `scrcpy` `ffmpeg` `rg 15.2`（PATH 里那份是 Qoder 插件自带
+的 15.0.0，系统那份写全路径 `/usr/bin/rg`）`rga` `fd` `bat` `eza` `jq` `grim` + `slurp`（Wayland
+截图 + 取几何）`imagemagick`（`magick`/`convert`/`identify`）`sqlite3` `zoxide` `lld`。
+
+没装、要用先问用户（都在 Arch `extra` 源里）：`pandoc-cli`（补上它 `rga` 才吃得动 EPUB）`hyperfine`
+`cargo-machete` `bacon` `cargo-watch` `sccache` `tokei` `fzf` `git-delta` `taplo`。
+

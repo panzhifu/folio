@@ -140,9 +140,9 @@ CARGO_TARGET_DIR=~/.cache/folio-mobile-android \
 提交与推送走 [Jujutsu](https://docs.jj-vcs.dev)（`jj`），仓库是 **colocated** 的：`.jj/` 与
 `.git/` 并存，所以 `git clone`、GitHub Actions、Android 那条 `cargo ndk` 都不受影响。
 
-命令配方与两处实测的坑都写在 agent 技能文档
-[`.qoder/skills/commit-and-search/SKILL.md`](.qoder/skills/commit-and-search/SKILL.md) 里 ——
-那份同时写了搜索代码用 `rg` / `rga` 的口径。要点只有三条：**别在 shell 里用 `git commit` /
+命令配方与两处实测的坑都写在 [`.skill/commit-and-search/SKILL.md`](.skill/commit-and-search/SKILL.md)
+（放仓库根的 `.skill/` 是为了让各种 agent 都能按同一个路径读到；`rg` / `rga` / `ast-grep` 的搜索口径、
+以及 mold / just / scrcpy 在本机怎么接的，也在同一份）。要点只有三条：**别在 shell 里用 `git commit` /
 `git checkout` / `git stash`**（colocated 之后 git 的 HEAD 是分离的，那些改动 jj 看不见）；
 推之前要显式把 `main` 挪到要推的 change 上（`@` 前进不带 bookmark 一起走）；jj 会把**未被 ignore**
 的文件当成待提交改动收进工作副本，本机 scratch 先进 ignore 名单再落提交。
