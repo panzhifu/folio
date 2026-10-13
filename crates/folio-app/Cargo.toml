@@ -16,6 +16,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "folio"
 path = "src/main.rs"
+# `cargo test` 的默认 target 选择里有「bins as unit tests」这一条：它还给每个 bin 再链一份
+# 带 test 跑器的可执行文件。`src/main.rs` 里只有三个按 cfg 分开的 `fn main`，`#[test]` 与
+# `#[cfg(test)]` 各 0 个，那一份就是白写一次 820 MB（其中 656 MB 是 DWARF）。测试本来就住在
+# lib 里，日常那条 `cargo test -p folio-app --lib` 不受影响。
+test = false
 
 [dependencies]
 folio-core.workspace = true

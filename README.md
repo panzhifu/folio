@@ -65,9 +65,10 @@ cargo test --workspace --lib   # 日常这一条
 每个都要重新类型检查一遍、单独链接一次，而且拿不到 `src/` 的 incremental 缓存；
 更贵的是裸 `cargo test` 会把测试根本不需要的 target 一起编出来 —— `folio-app` 的
 `crate-type` 含 `cdylib`/`staticlib`，于是每次都要归档 1.96 GB 的 `libfolio_app.a`、
-610 MB 的 `.so`、775 MB 的 `folio`（量这些的时候还带着 M0 那个 `spike` example，它每次多链
-一份 717 MB，已随本文件一起删）。实测改一个叶子文件
-（`folio-core/src/format/epub.rs`）：
+610 MB 的 `.so`、775 MB 的 `folio`（量这些的时候还带着 M0 那个 `spike` example，每次多链一份
+717 MB，已删；`cargo test` 给 bin 生成的那份 test 跑器同理 —— `src/main.rs` 里 0 个测试，
+已于 2026-10-13 用 `[[bin]] test = false` 关掉。`cargo metadata` 里现在报 `test=false`）。
+实测改一个叶子文件（`folio-core/src/format/epub.rs`）：
 
 | 命令 | 重构前 | 重构后 |
 |---|---|---|
