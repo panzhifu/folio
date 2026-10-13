@@ -440,8 +440,8 @@ impl ReaderSession {
     pub fn open_book(&mut self, book_id: i64, cx: &mut Context<Self>) {
         // 正文只在源文件里，所以「文件还是那份文件吗」是能不能读的前提。
         // 三种不可信各自处置：文件不在 → 连数据一起删（读者看见的是这本书从架上消失，
-        // 而不是点开一片空白）；文件换了 / 索引是旧算法算的 → 重扫一遍，位置与批注
-        // 都还在（`book_id` 没变）。
+        // 而不是点开一片空白）；文件换了 / 索引是旧算法算的 → **投一趟后台重扫**，
+        // 这一屏照旧用现有索引开，位置与批注都还在（`book_id` 没变）。
         if let Some(store) = self.store.clone() {
             match store.stale_reason(book_id) {
                 Ok(Some(StaleReason::Missing)) => {
@@ -452,9 +452,14 @@ impl ReaderSession {
                     return;
                 }
                 Ok(Some(reason)) => {
-                    tracing::info!(book_id, reason = ?reason, "ReaderSession: 索引要重扫");
-                    if let Err(err) = folio_core::reindex(&store, book_id) {
-                        tracing::error!(book_id, error = %err, "ReaderSession: 重扫失败，照旧打开");
+                    tracing::info!(book_id, reason = ?reason, "ReaderSession: 索引要重扫，已交后台");
+                    let pool = crate::ui::shared::services::pool();
+                    // 不等：重扫必然把整本书重读一遍（要读完全书才知道的数全在导入那趟算），
+                    // 而旧索引只是粗一点、不是打不开 —— 三处兜底见 `folio_core::schedule_reindex`
+                    // 的文档。新索引下次开书才生效，正看着的这一屏不重建。
+                    if folio_core::schedule_reindex(&pool, store, book_id).is_none() {
+                        // 号没领到：这本的重扫正在飞，或今天这个进程里试过且失败了。
+                        tracing::debug!(book_id, "ReaderSession: 重扫已在飞或已抑制，这一趟不再投");
                     }
                 }
                 Ok(None) => {}
@@ -526,9 +531,7 @@ impl ReaderSession {
         self.saved_offset = locator.offset;
         // 章内偏移还是要等第一帧排版做完才能落地。连续模式哪怕偏移是 0 也挂请求：
         // 落点是全局 y，章首未必拼在 0 的位置。
-        self.pend_restore(
-            (self.mode.is_continuous() || locator.offset > 0).then_some(locator),
-        );
+        self.pend_restore((self.mode.is_continuous() || locator.offset > 0).then_some(locator));
         cx.notify();
     }
 
@@ -755,11 +758,7 @@ fn read_at_open(book_id: Option<i64>, store: Option<&Arc<Store>>) -> HashSet<usi
 ///
 /// 做成自由函数而不是方法：调用点在 `match &mut self.source` 的分支里，那时 `self.source`
 /// 已被可变借用，任何 `&mut self` 的方法都过不去；而这里的锚点与请求是两个独立字段。
-pub(super) fn land_at_anchor(
-    anchor: Option<String>,
-    locator: Locator,
-    book: &Book,
-) -> Locator {
+pub(super) fn land_at_anchor(anchor: Option<String>, locator: Locator, book: &Book) -> Locator {
     let Some(fragment) = anchor else {
         return locator;
     };
@@ -768,4 +767,3 @@ pub(super) fn land_at_anchor(
         None => locator,
     }
 }
-
