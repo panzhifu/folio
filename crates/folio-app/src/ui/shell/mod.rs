@@ -148,6 +148,14 @@ pub struct AppShell {
     /// 要存这一份而不是每帧比 `window.is_fullscreen()`：桌面上那一档是异步生效的
     /// （合成器 configure 回来才算数），比实际值会在等回执的那几帧里反复翻转窗口。
     fullscreen_asked: Option<bool>,
+    /// 上一帧窗口活不活跃（在前台）。只为**回到前台的那一帧**留的：那一帧要把手上的
+    /// 意愿重递一次。
+    ///
+    /// 原因是 `fullscreen_asked` 记的是「我要过什么」，不是「系统现在是什么」——
+    /// 而这两件事会分家：Android 上退后台会把 surface 拆掉重建（`term_window` →
+    /// `InitWindow`，真机实测每次前后台都走一遍），系统也可能顺手把栏还原。不重递的
+    /// 话，读者带着阅读页回来会看见栏又露出来，而应用还以为藏着。
+    was_active: bool,
 }
 
 impl AppShell {
@@ -299,6 +307,9 @@ impl AppShell {
             watched_library: ConfigHolder::library(cx),
             _save_debounce: None,
             fullscreen_asked: None,
+            // 建起来就算「在前台」：启动那一帧不是「回到前台」，意愿由上面那条
+            // `fullscreen_asked != Some(..)` 第一次递出去，不必这里再递一遍。
+            was_active: true,
         }
     }
 
@@ -452,12 +463,21 @@ impl Render for AppShell {
         }
 
         // 系统级那一层也跟着沉浸：桌面上窗口真全屏、Android 上藏掉状态栏与导航栏，
-        // 应用内那层（侧栏 / 自绘标题栏）在 `body` 里收。只在**期望变了**的那一帧动手，
-        // 理由见 [`AppShell::fullscreen_asked`]。
-        if self.fullscreen_asked != Some(immersive) {
+        // 应用内那层（侧栏 / 自绘标题栏）在 `body` 里收。只在**期望变了**或**回到前台**
+        // 的那一帧动手，两条理由分别见 [`AppShell::fullscreen_asked`] 与
+        // [`AppShell::was_active`]。
+        let active = window.is_window_active();
+        if self.fullscreen_asked != Some(immersive) || (active && !self.was_active) {
             self.fullscreen_asked = Some(immersive);
-            crate::ui::platform::set_reader_fullscreen(immersive, window);
+            // 不就地递：`render` 按约定只算画面，而这一条是发给系统的作用。挪到
+            // `defer` 里，它跑在**本帧效果循环的末尾** —— 那时第一帧已经画完、窗口挂好，
+            // 而视图的借用也都还回去了。（不是「`open_main_window` 返回之后」：实测它仍在那
+            // 句日志前几十微秒，只是不再夹在渲染中间。）
+            window.defer(cx, move |window, _cx| {
+                crate::ui::platform::set_reader_fullscreen(immersive, window);
+            });
         }
+        self.was_active = active;
 
         // 欢迎页先于主界面：书库位置没确认前，导航与内容都不画，整屏让给欢迎页。
         // 安全区照样扣（顶/底都 pad）：移动端手势条与状态栏是系统的地盘，不是应用 chrome。

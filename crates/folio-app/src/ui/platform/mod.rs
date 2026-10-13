@@ -95,6 +95,36 @@ pub(crate) fn set_reader_fullscreen(on: bool, _window: &mut Window) {
 #[cfg(all(mobile, not(target_os = "android")))]
 pub(crate) fn set_reader_fullscreen(_on: bool, _window: &mut Window) {}
 
+/// 状态栏图标那一档，跟着界面的浅深走：浅色界面要**深色**图标。
+///
+/// 不跟着翻会白图标画在白底上，整条状态栏看着像消失了 —— Android 15 起系统强制
+/// edge-to-edge，状态栏底色是透明的，读者的界面直接画在它下面，图标色就成了唯一
+/// 让它可见的东西。真机（Meizu 20 / Android 16）实测：顶上那条 116 物理像素纯白，
+/// 而 `dumpsys window` 里 `StatusBar` 窗口 `isVisible=true`、`HAS_DRAWN`，应用也
+/// 收到了 `content_rect_insets top=116`（位置留了，只是没东西看得见）。
+///
+/// 口子是 fork 现成的 `set_system_chrome`：`status_bar_color` / `navigation_bar_color`
+/// 留 `None`（那两个 setter 在新系统上已被忽略，且这里要改的只有图标色），只把
+/// `status_bar_style` 递过去。它自己带一份「上次应用过什么」的缓存，重复调不会
+/// 再发 JNI，所以挂在换肤那条路上是安全的。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn set_status_bar_icons(dark_icons: bool) {
+    use gpui_mobile::{StatusBarContentStyle, SystemChromeStyle, set_system_chrome};
+    set_system_chrome(&SystemChromeStyle {
+        status_bar_style: if dark_icons {
+            StatusBarContentStyle::Dark
+        } else {
+            StatusBarContentStyle::Light
+        },
+        ..SystemChromeStyle::default()
+    });
+}
+
+/// 桌面与 HarmonyOS 没有这一档：桌面上窗口 chrome 由应用自绘（`TitleBar`），
+/// 状态栏是操作系统的地盘，不归应用管。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn set_status_bar_icons(_dark_icons: bool) {}
+
 #[cfg(mobile)]
 use crate::ui::shared::error::{Context as _, report};
 #[cfg(mobile)]

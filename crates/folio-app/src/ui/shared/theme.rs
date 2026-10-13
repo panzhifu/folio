@@ -157,6 +157,9 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
     }
 
     Theme::change(mode, window, cx);
+    // 状态栏图标跟着刚定下的这一档翻。挂在换肤这里而不是某个屏幕上：浅深是应用级的，
+    // 而图标色只有**一处**真相，跟着 `mode` 走就不会出现「界面切了、图标没切」。
+    crate::ui::platform::set_status_bar_icons(matches!(mode, ThemeMode::Light));
     mode
 }
 
