@@ -8,6 +8,7 @@
 //! `Document::image_bytes` 那条路；封面例外，缩成缩略图后入库，见 [`COVER_MAX_EDGE`]。
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -504,7 +505,206 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
     out
 }
 
+/// 一份书内索引解析作业的坐标。
+///
+/// 章节与图片共用一条工作队列，worker 动态认领：章长和图片大小分布不均，
+/// 静态分片会让最长的那个章节决定整本书的墙钟。
+#[derive(Debug, Clone)]
+struct ChapterJob {
+    /// 这一章在 spine 里的**原始**下标：标题回落的「第 N 节」与结果排序都用它。
+    /// 不能拿过滤后的下标 —— spine 里被跳过的 nav 不该改变后面章节的编号。
+    spine: usize,
+    /// 解析后的容器绝对路径，进 `Chapter::spine_href`，也是目录比对键。
+    href: String,
+    /// `locate` 返回的 zip 真实条目名（大小写与分隔符可能和 OPF 写的不一样）。
+    entry: String,
+}
+
+#[derive(Debug, Clone)]
+struct ImageJob {
+    /// 解析后的容器绝对路径，进 `ImageRes::href`。
+    href: String,
+    /// zip 里的真实条目名，取字节直接用它。
+    entry: String,
+    media_type: String,
+}
+
+#[derive(Default)]
+struct ParsedEntries {
+    /// `(job 下标, 产物)`：worker 按动态队列领活，完成顺序是乱的，收齐后再排回去。
+    chapters: Vec<(usize, Chapter)>,
+    images: Vec<(usize, ImageRes)>,
+}
+
+/// 一本书索引里最多并行几路。
+///
+/// 上限取 4：手机端真正可用的大核通常就 2–4 个，桌面几十核也没有必要把一本书铺满；
+/// 再高只会和绘制、其它后台作业抢核。条目少时不起线程 —— 线程创建/收拢与每个
+/// worker 多开一次容器的成本会盖过并行收益。
+const MAX_PARSE_WORKERS: usize = 4;
+const MIN_PARALLEL_ITEMS: usize = 16;
+
+fn parse_worker_count(items: usize) -> usize {
+    if items < MIN_PARALLEL_ITEMS {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_PARSE_WORKERS)
+}
+
+/// 一个 worker 处理条目直到队列见底。
+///
+/// 每个 worker 自己开一份 zip：`ZipArchive` 不是 `Sync`，共享它只能串行。重复建
+/// 条目名表的成本远小于各章 DOM 解析与 inflate —— 用这一笔小钱换真正的多核。
+fn parse_entries(
+    zip: &mut Zip,
+    chapters: &[ChapterJob],
+    images: &[ImageJob],
+    toc: &[TocEntry],
+    with_text: bool,
+    next: &AtomicUsize,
+) -> ParsedEntries {
+    let total = chapters.len() + images.len();
+    let mut out = ParsedEntries {
+        chapters: Vec::with_capacity(chapters.len()),
+        images: Vec::with_capacity(images.len()),
+    };
+    loop {
+        let at = next.fetch_add(1, Ordering::Relaxed);
+        if at >= total {
+            break;
+        }
+        if at < chapters.len() {
+            out.chapters
+                .push((at, parse_chapter(zip, &chapters[at], toc, with_text)));
+        } else {
+            let image_index = at - chapters.len();
+            if let Some(image) = parse_image(zip, &images[image_index]) {
+                out.images.push((image_index, image));
+            }
+        }
+    }
+    out
+}
+
+fn parse_image(zip: &mut Zip, job: &ImageJob) -> Option<ImageRes> {
+    let bytes = zip.read(&job.entry)?;
+    let (width, height) = image_dims(&bytes);
+    Some(ImageRes {
+        href: job.href.clone(),
+        media_type: job.media_type.clone(),
+        width,
+        height,
+    })
+}
+
+fn parse_chapter(zip: &mut Zip, job: &ChapterJob, toc: &[TocEntry], with_text: bool) -> Chapter {
+    // 正文这一趟一定要解出来一次：`char_len` 是全局字符进度的分母，必须在导入时
+    // 算准（`plans/导入管线.md` §八第 3 条）。留下来与否只看 `with_text`。
+    let text = zip.read_text(&job.entry);
+    let char_len = text.as_deref().and_then(super::visible_chars);
+    let title = toc
+        .iter()
+        .find(|e| e.href == job.href)
+        .map(|e| e.title.clone())
+        .filter(|t| !t.is_empty())
+        // `heading_of` 要读正文才拿得到；正文已经在手上，这条回落是白拿的。
+        .or_else(|| text.as_deref().and_then(heading_of))
+        .unwrap_or_else(|| format!("第 {} 节", job.spine + 1));
+    let source = if with_text { text } else { None };
+    match source {
+        Some(text) => Chapter::inline(title, text)
+            .with_spine_href(job.href.clone())
+            .with_char_len(char_len),
+        // 位置就是条目名，正是打开时 `Entry` 那一路要的东西。
+        None => Chapter::entry(title, job.href.clone()).with_char_len(char_len),
+    }
+}
+
+/// 并行跑一批解析作业；任何一个 worker 连容器都开不出来时回 `None`，
+/// 由调用方退回顺序路径 —— 解析产物不许因为线程开不起来就静默少章。
+fn parse_entries_parallel(
+    path: &Path,
+    chapters: &[ChapterJob],
+    images: &[ImageJob],
+    toc: &[TocEntry],
+    with_text: bool,
+    workers: usize,
+) -> Option<(Vec<Chapter>, Vec<ImageRes>)> {
+    let next = AtomicUsize::new(0);
+    let mut chapters_out = Vec::with_capacity(chapters.len());
+    let mut images_out = Vec::with_capacity(images.len());
+    let mut opened_all = true;
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let path = path;
+            let chapters = chapters;
+            let images = images;
+            let toc = toc;
+            let next = &next;
+            handles.push(scope.spawn(move || {
+                let Ok(mut zip) = Zip::open(path) else {
+                    return (false, ParsedEntries::default());
+                };
+                (
+                    true,
+                    parse_entries(&mut zip, chapters, images, toc, with_text, next),
+                )
+            }));
+        }
+        for handle in handles {
+            match handle.join() {
+                Ok((opened, parsed)) => {
+                    opened_all &= opened;
+                    chapters_out.extend(parsed.chapters);
+                    images_out.extend(parsed.images);
+                }
+                // 工作线程 panic 当作这一路不可用：回退到顺序解析，
+                // 而不是让一部分章凭空消失。
+                Err(_) => opened_all = false,
+            }
+        }
+    });
+
+    if !opened_all {
+        return None;
+    }
+    Some((ordered(chapters_out), ordered(images_out)))
+}
+
+/// 顺序跑完同一批作业。少条目、单核、并行起不来时走这一条。
+fn parse_entries_sequential(
+    zip: &mut Zip,
+    chapters: &[ChapterJob],
+    images: &[ImageJob],
+    toc: &[TocEntry],
+    with_text: bool,
+) -> (Vec<Chapter>, Vec<ImageRes>) {
+    let next = AtomicUsize::new(0);
+    let parsed = parse_entries(zip, chapters, images, toc, with_text, &next);
+    (ordered(parsed.chapters), ordered(parsed.images))
+}
+
+fn ordered<T>(mut entries: Vec<(usize, T)>) -> Vec<T> {
+    entries.sort_unstable_by_key(|(order, _)| *order);
+    entries.into_iter().map(|(_, item)| item).collect()
+}
+
 fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
+    read_with_impl(path, with_text, None)
+}
+
+/// `read_with` 的实现。`forced_workers = Some(1)` 强制顺序、`Some(n)` 强制 n 路
+/// （测试与基准要一个和机器核数无关的确定输入）；`None` 按条目数与可用并行度自动定。
+fn read_with_impl(
+    path: &Path,
+    with_text: bool,
+    forced_workers: Option<usize>,
+) -> Result<(DocMeta, Content)> {
     let mut zip = Zip::open(path)?;
     let container = zip
         .locate("META-INF/container.xml")
@@ -613,84 +813,72 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
             None => bytes,
         });
 
-    // 全书图片：manifest 里所有 image/* 的 item。封面若在 manifest 里会一并被收录，
+    // 全文图片：manifest 里所有 image/* 的 item。封面若在 manifest 里会一并被收录，
     // 排版层按解析后的容器路径查表，所以这里存的 href 必须是 `resolve` 过的。
-    let mut images = Vec::new();
+    //
+    // 这里只做清单和容器定位；解压与读尺寸交给 `parse_entries` 的 worker。图片与
+    // 章节混在同一队列里，是因为一本 30 MB 的书里这两类开销同量级。
+    let mut image_jobs = Vec::new();
     for item in opf
         .items
         .iter()
         .filter(|i| i.media_type.starts_with("image/"))
     {
-        let name = resolve(&base_dir, &item.href);
-        let Some(bytes) = zip.locate(&name).and_then(|n| zip.read(&n)) else {
+        let href = resolve(&base_dir, &item.href);
+        let Some(entry) = zip.locate(&href) else {
             // 插图缺失是按页降级的一种（排版会留一块占位），一条一张，所以放到 trace。
-            tracing::trace!("epub: 插图 {name} 不在容器里");
+            tracing::trace!("epub: 插图 {href} 不在容器里");
             continue;
         };
-        let (width, height) = image_dims(&bytes);
-        images.push(ImageRes {
-            href: name,
+        image_jobs.push(ImageJob {
+            href,
+            entry,
             media_type: item.media_type.clone(),
-            width,
-            height,
         });
     }
 
-    let mut chapters = Vec::new();
-    for (idx, id) in opf.spine.iter().enumerate() {
+    // 章节：spine 顺序就是阅读顺序；`locate` 只定位条目，真正的解压与 DOM 解析
+    // 交给 worker。每个 spine 条目都要解一次正文，因为 `chapters.char_len` 是全局
+    // 字符进度的分母，必须在导入时算准（`plans/导入管线.md` §八第 3 条）。
+    let mut chapter_jobs = Vec::new();
+    for (spine, id) in opf.spine.iter().enumerate() {
         let Some(item) = by_id(id) else {
             // spine 指着一个 manifest 里没有的 id：这一节整个没了，而且界面上看不出来。
             tracing::warn!(
                 "epub: spine 第 {} 项指向的 id {id:?} 不在 manifest 里",
-                idx + 1
+                spine + 1
             );
             continue;
         };
         if !item.media_type.contains("html") || item.properties.iter().any(|p| p == "nav") {
             continue;
         }
-        let name = resolve(&base_dir, &item.href);
-        // 索引那一趟**只核一下条目在不在**（`locate` 走中央目录，不解压），
-        // 正文等打开这一章时再取 —— 这就是「导入不再解压全本」的全部。
-        if zip.locate(&name).is_none() {
+        let href = resolve(&base_dir, &item.href);
+        let Some(entry) = zip.locate(&href) else {
             // 正文少一章在界面上的表现是「翻到那里是空的」，说不清原因。
             tracing::warn!(
-                "epub: 容器里没有 {name}（spine 第 {} 项），这一章读不到",
-                idx + 1
+                "epub: 容器里没有 {href}（spine 第 {} 项），这一章读不到",
+                spine + 1
             );
             continue;
-        }
-        // 正文这一趟**一定要解出来一次**，但只有「全文那一趟」才留下来。
-        //
-        // 留下来的是正文，丢掉的只是那份 `String`：字数（`chapters.char_len`）必须
-        // 在索引这一趟算准 —— 它是全局字符进度的分母，而「算不出来就不要估」是硬要求
-        // （`plans/导入管线.md` §八 第 3 条）。所以这里付的是**解压**的钱，
-        // 省下的是「把正文搬进库里再丢掉」的钱。
-        //
-        // 注意别为了这一格改成按章回调 `chapter_source`：那会每章重开一次容器
-        // （EPUB 无随机读，只能整本 inflate），于是导入从 O(章数) 掉成 O(章数²)。
-        let text = zip.read_text(&name);
-        let source = if with_text { text.clone() } else { None };
-        let char_len = text.as_deref().and_then(super::visible_chars);
-        let title = toc
-            .iter()
-            .find(|e| e.href == name)
-            .map(|e| e.title.clone())
-            .filter(|t| !t.is_empty())
-            // `heading_of` 要读正文才拿得到。以前只有「全文那一趟」有正文，
-            // 现在索引这一趟也解出来了，所以两种路径拿到的标题**一致**了 ——
-            // 顺手修掉一处「同一本书索引说「第 3 节」、全文说真标题」的漂移。
-            .or_else(|| text.as_deref().and_then(heading_of))
-            .unwrap_or_else(|| format!("第 {} 节", idx + 1));
-        chapters.push(
-            match source {
-                Some(text) => Chapter::inline(title, text).with_spine_href(name),
-                // 位置就是条目名，正是打开时 `Entry` 那一路要的东西。
-                None => Chapter::entry(title, name),
-            }
-            .with_char_len(char_len),
-        );
+        };
+        chapter_jobs.push(ChapterJob { spine, href, entry });
     }
+
+    let total = chapter_jobs.len() + image_jobs.len();
+    let workers = match forced_workers {
+        Some(n) => n.clamp(1, MAX_PARSE_WORKERS).min(total.max(1)),
+        None => parse_worker_count(total).min(total.max(1)),
+    };
+    let (chapters, images) = if workers <= 1 {
+        parse_entries_sequential(&mut zip, &chapter_jobs, &image_jobs, &toc, with_text)
+    } else {
+        match parse_entries_parallel(path, &chapter_jobs, &image_jobs, &toc, with_text, workers) {
+            Some(parsed) => parsed,
+            // 并行起不来或某个 worker 打不开容器：退回顺序路径，结果不许静默变少。
+            None => parse_entries_sequential(&mut zip, &chapter_jobs, &image_jobs, &toc, with_text),
+        }
+    };
 
     let meta = DocMeta {
         title: if opf.title.is_empty() {

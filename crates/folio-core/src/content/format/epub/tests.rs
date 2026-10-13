@@ -5,9 +5,9 @@
 use std::path::{Path, PathBuf};
 
 use super::read_with;
+use crate::content::dom::Dom;
 use crate::content::format::css::computed::{ComputedStyle, TextAlign, cascade};
 use crate::content::format::css::{Origin, RuleSet};
-use crate::content::dom::Dom;
 use crate::content::format::detect;
 use crate::content::format::{Chapter, Content, DocMeta, FlowDoc, Format, dir_of, resolve_href};
 
@@ -440,10 +440,10 @@ fn the_index_pass_produces_no_chapter_text() {
         "索引那一趟不该有正文"
     );
     assert!(
-        indexed
-            .chapters
-            .iter()
-            .all(|c| matches!(c.locator(), Some(crate::content::format::ChapterLocator::Entry(_)))),
+        indexed.chapters.iter().all(|c| matches!(
+            c.locator(),
+            Some(crate::content::format::ChapterLocator::Entry(_))
+        )),
         "每一章都该只带一个容器条目"
     );
 
@@ -726,6 +726,97 @@ fn a_whole_published_shaped_book_reads_back_chapters_css_and_toc() {
         panic!("该读成可重排");
     };
     assert_eq!(full.chapters[27].title, "第28章", "全文那一趟同答案");
+}
+
+/// 强制顺序与强制并行必须逐字段等价。
+///
+/// 并行路径把「读章节正文」和「读图片尺寸」放进同一条动态队列，worker 各自开
+/// 一份 zip；完成顺序是乱的。这一条用一本 20 章 + 20 图的合成书把 `Some(1)` 与
+/// `Some(4)` 各跑一遍，钉住三件事：章序仍按 spine、图片表仍按 manifest、每个条目
+/// 的解压/字数/DOM 解析一个都不少。最后再单独核一遍 20 张图的宽高与顺序 ——
+/// 少了某几张时 `assert_eq!` 的全量比较在条目数相等的情况下也可能漏掉。
+#[test]
+fn forced_parallel_indexing_matches_the_sequential_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("parallel.epub");
+    const CHAPTERS: usize = 20;
+
+    let mut manifest = String::new();
+    for n in 1..=CHAPTERS {
+        manifest.push_str(&format!(
+            "    <item id=\"c{n}\" href=\"Text/chap{n}.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+        ));
+    }
+    for n in 1..=CHAPTERS {
+        manifest.push_str(&format!(
+            "    <item id=\"img{n}\" href=\"Images/pic{n}.png\" media-type=\"image/png\"/>\n"
+        ));
+    }
+    let mut spine = String::new();
+    for n in 1..=CHAPTERS {
+        spine.push_str(&format!("      <itemref idref=\"c{n}\"/>\n"));
+    }
+    let opf = format!(
+        r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>并行合成书</dc:title></metadata>
+  <manifest>
+{manifest}  </manifest>
+  <spine>
+{spine}  </spine>
+</package>"#
+    );
+
+    let mut entries: Vec<(String, Vec<u8>)> = vec![
+        ("mimetype".to_string(), b"application/epub+zip".to_vec()),
+        (
+            "META-INF/container.xml".to_string(),
+            CONTAINER.as_bytes().to_vec(),
+        ),
+        ("OEBPS/content.opf".to_string(), opf.into_bytes()),
+    ];
+    for n in 1..=CHAPTERS {
+        entries.push((
+            format!("OEBPS/Text/chap{n}.xhtml"),
+            format!("<html><body><h1>第{n}章</h1><p>第{n}章正文。</p></body></html>").into_bytes(),
+        ));
+    }
+    for n in 1..=CHAPTERS {
+        // 宽 = n + 1，高固定 2：结果里第几张图对应哪个尺寸一眼能验。
+        entries.push((
+            format!("OEBPS/Images/pic{n}.png"),
+            png_bytes(n as u32 + 1, 2),
+        ));
+    }
+    let refs: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    write_epub(&path, &refs);
+
+    for with_text in [false, true] {
+        let sequential = super::read_with_impl(&path, with_text, Some(1)).unwrap();
+        let parallel = super::read_with_impl(&path, with_text, Some(4)).unwrap();
+        assert_eq!(
+            sequential, parallel,
+            "with_text={with_text} 时顺序与并行产出不一致"
+        );
+    }
+
+    let (_, content) = super::read_with_impl(&path, false, Some(4)).unwrap();
+    let Content::Reflow(flow) = content else {
+        panic!("该读成可重排");
+    };
+    assert_eq!(flow.images.len(), CHAPTERS, "并行解析不许丢图");
+    for (i, image) in flow.images.iter().enumerate() {
+        assert_eq!(image.href, format!("OEBPS/Images/pic{}.png", i + 1));
+        assert_eq!(
+            (image.width, image.height),
+            (i as u32 + 2, 2),
+            "第 {} 张图的尺寸与顺序对不上",
+            i + 1
+        );
+    }
 }
 
 /// **接线那一步的验收线**：读同一本书的一百张图，容器只该被打开一次。
