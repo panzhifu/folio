@@ -4,6 +4,8 @@
 use gpui_kit::{App, Application};
 use gpui_mobile::android::jni;
 use std::fmt::Write as _;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer};
@@ -17,12 +19,7 @@ fn android_main(app: android_activity::AndroidApp) {
     // 就能看见的输出口。必须抢在 `logging::init` 之前：`tracing-subscriber` 装的时候会把
     // `log` 的全局位置让给 LogTracer，而我们的 logcat 那层正是通过这个 facade 落地的，
     // 两者反过来接就成了自己转发给自己。
-    android_logger::init_once(
-        android_logger::Config::default()
-            // 下限开到 Trace：真正的筛选由 `Config::logging` 那一节做，别让这里再卡一道。
-            .with_max_level(log::LevelFilter::Trace)
-            .with_tag("folio-mobile"),
-    );
+    install_logcat_logger();
 
     // panic 也进 logcat，而不是默默 abort。
     jni::install_panic_hook();
@@ -39,7 +36,10 @@ fn android_main(app: android_activity::AndroidApp) {
         Some(root) => {
             let files = root.join("files");
             log::info!("android_main: 应用目录 {files:?}");
-            folio_core::infra::paths::set_app_dirs(files.join("folio/config"), files.join("folio/data"));
+            folio_core::infra::paths::set_app_dirs(
+                files.join("folio/config"),
+                files.join("folio/data"),
+            );
         }
         None => {
             log::error!("android_main: internal_data_path() 给了 None，偏好与进度无法落盘");
@@ -53,6 +53,15 @@ fn android_main(app: android_activity::AndroidApp) {
     // 读配置 + 装日志一步到位（§5.6 配置 → 日志），配置留着传给 `boot` ——
     // **只读一次**（§2.3）：以前这里读一次、`boot` 里又读一次。
     let (resolved, log_err) = folio_core::infra::logging::init_from_config(logcat_layer());
+    // 配置到手，logcat 那层的 target 过滤也就有了它要的那一档：folio 自己的按
+    // `logging.level` 放行，依赖库固定 WARN 以上（判据收在 core 的 `is_own_target` /
+    // `DEPS_LEVEL`，与 tracing 那层同一份口径）。装之前是默认的 Info，够启动那几行用。
+    OWN_LEVEL.store(
+        own_level_raw(folio_core::infra::logging::own_level(
+            &resolved.effective.logging,
+        )),
+        Ordering::Relaxed,
+    );
     if let Err(err) = log_err {
         log::error!("android_main: 日志装不上，只有 logcat：{err}");
     }
@@ -108,7 +117,84 @@ pub(crate) fn set_immersive(on: bool) {
     }
 }
 
-/// logcat 那一层：把 `tracing` 的事件转给 `log` facade（它的后端是 `android_logger`）。
+/// folio 自己的日志在 logcat 里放到哪一档（整数档位，Error=1 … Trace=5，见 [`own_level_raw`]）。
+/// 由 `Config::logging.level` 定，装 subscriber 之前是默认的 `Info`（3，够启动那几行用）。
+/// 依赖库不看它，见 [`FilteredLogcat`]。
+static OWN_LEVEL: AtomicUsize = AtomicUsize::new(3);
+
+/// logcat 那个 `log` 后端。只建一次（`log` 全局位置只让占一次）。
+static LOGCAT: OnceLock<FilteredLogcat> = OnceLock::new();
+
+/// 包 `android_logger` 一层，**按 target 挡**依赖库的噪音。
+///
+/// 为什么非要这一层：依赖库（html5ever / tendril / cssparser / selectors / wgpu …）用 `log`
+/// facade，记录**直接落在这一层**，不经过 `Config::logging` 那套 tracing 过滤。不挡的话
+/// html5ever 每个 token 都写一次 logcat —— 实测把导入一本书的解析从 ~0.3 s 拖到 21 s。
+///
+/// 挡法沿用同一份口径（[`folio_core::infra::logging::is_own_target`] +
+/// [`DEPS_LEVEL`](folio_core::infra::logging::DEPS_LEVEL)）：folio 自己的按配置级别放行，
+/// 其余固定 WARN 以上。这样 logcat 里也能看到 folio 的 debug，而不引来看库的刷屏。
+///
+/// 内部那个 `AndroidLogger` 的 `max_level` 设成 `Trace`：真正的筛选在这里做完，别让底下
+/// 再卡一道（`AndroidLogger::log` 会自己再过一遍 `enabled`）。
+struct FilteredLogcat {
+    inner: android_logger::AndroidLogger,
+}
+
+impl log::Log for FilteredLogcat {
+    fn enabled(&self, meta: &log::Metadata<'_>) -> bool {
+        let cap = if folio_core::infra::logging::is_own_target(meta.target()) {
+            OWN_LEVEL.load(Ordering::Relaxed)
+        } else {
+            own_level_raw(folio_core::infra::logging::DEPS_LEVEL)
+        };
+        // `log::Level`（Error=1 … Trace=5）与 `OWN_LEVEL` 里记的编号同序，直接比整数。
+        meta.level() as usize <= cap
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            self.inner.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+}
+
+/// 装 logcat 后端。位置被别的东西占了（重复初始化）就作罢，与 `android_logger::init_once`
+/// 同一条纪律：日志装不上不影响程序起来。
+///
+/// 全局 `max_level` 压到 `Info`：依赖库的 trace/debug 在这一道就被 `log` 宏挡下，**连格式化
+/// 都省了** —— 这是把导入从 21 s 拉回 0.3 s 的那一步。folio 自己走 `tracing`，由
+/// [`Logcat`] 那层绕过这道直接落进 logcat，所以 debug 不受影响。
+fn install_logcat_logger() {
+    let logger = LOGCAT.get_or_init(|| FilteredLogcat {
+        inner: android_logger::AndroidLogger::new(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Trace)
+                .with_tag("folio-mobile"),
+        ),
+    });
+    let _ = log::set_logger(logger);
+    log::set_max_level(log::LevelFilter::Info);
+}
+
+/// tracing 那套 `LevelFilter`（`OFF`…`TRACE`）转成整数档位，好与 `log::Level` 的编号比。
+/// 两套编号同序（Error=1 … Trace=5），所以只做一次映射就够。
+fn own_level_raw(level: tracing_subscriber::filter::LevelFilter) -> usize {
+    match level {
+        tracing_subscriber::filter::LevelFilter::OFF => 0,
+        tracing_subscriber::filter::LevelFilter::ERROR => 1,
+        tracing_subscriber::filter::LevelFilter::WARN => 2,
+        tracing_subscriber::filter::LevelFilter::INFO => 3,
+        tracing_subscriber::filter::LevelFilter::DEBUG => 4,
+        tracing_subscriber::filter::LevelFilter::TRACE => 5,
+    }
+}
+
+/// logcat 那一层：把 `tracing` 的事件转给 `log` facade（它的后端是 [`FilteredLogcat`]）。
 ///
 /// 只带正文与字段，不带时间戳与级别前缀 —— logcat 每行自己会打时间、优先级与 tag，
 /// 文件里那份才是完整的。
@@ -123,12 +209,21 @@ impl<S: Subscriber> Layer<S> for Logcat {
         let meta = event.metadata();
         let mut text = String::new();
         event.record(&mut IntoText(&mut text));
-        // 级别是运行时才知道的，所以用 `log::log!`（它专门为这一种情况留了级别参数）。
-        log::log!(
-            target: meta.target(),
-            log_level(meta.level()),
-            "{text}"
-        );
+        // **不走 `log::log!`**：那个宏先按全局 `max_level` 拦一道，而全局那一档被压到
+        // `Info`（好让依赖库的 trace/debug 连格式化都省掉）。folio 自己的 debug 要照进
+        // logcat，所以这里直接造一条 record 交给 `log::logger()` —— 绕过全局那一道，
+        // 但仍经过 [`FilteredLogcat`] 的 target 过滤（folio 那支按 `OWN_LEVEL` 放行）。
+        // `format_args!` 先绑到 `let` 上：它的临时值要活到那一条 record 用完为止。
+        let args = format_args!("{text}");
+        let record = log::Record::builder()
+            .level(log_level(meta.level()))
+            .target(meta.target())
+            .module_path(meta.module_path())
+            .file(meta.file())
+            .line(meta.line())
+            .args(args)
+            .build();
+        log::logger().log(&record);
     }
 }
 

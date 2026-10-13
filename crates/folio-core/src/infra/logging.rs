@@ -54,10 +54,14 @@ use crate::infra::paths;
 pub const LEVEL_ENV: &str = "FOLIO_LOG";
 
 /// folio 自己那两节的 target 前缀：`logging.level` 这一档只管它们。
-const OWN_TARGETS: [&str; 2] = ["folio_core", "folio_app"];
+///
+/// 公开出去，是因为 Android 那层 logcat 也得按同一份口径挡一遍 —— 依赖库走 `log` facade
+/// 直接落到 `android_logger`，**不经过**这里的 tracing 过滤，不挡的话 html5ever 会逐 token
+/// 写 logcat（实测把一次导入从 0.3 s 拖到 21 s）。见 `ui::platform::android`。
+pub const OWN_TARGETS: [&str; 2] = ["folio_core", "folio_app"];
 
 /// 不是 folio 写的东西，只在 warn 以上说话。
-const DEPS_LEVEL: LevelFilter = LevelFilter::WARN;
+pub const DEPS_LEVEL: LevelFilter = LevelFilter::WARN;
 
 /// `logging.level` 认不出时的回落值。写坏一个词的代价是回到常见的这一档，不是没有日志。
 const FALLBACK_LEVEL: LevelFilter = LevelFilter::INFO;
@@ -109,13 +113,26 @@ pub fn filter(logging: &Logging) -> Targets {
 ///
 /// 空与认不出都按回落值算，所以启动现场报的是这个数，而不是原始字符串：
 /// 读者手改坏一个词时，日志里要看到的是「现在是什么」，不是「你以为是什么」。
-fn own_level(logging: &Logging) -> LevelFilter {
+pub fn own_level(logging: &Logging) -> LevelFilter {
     // 空的那一格要自己判掉再交给 `LevelFilter`：它把**空串读成 `error`**（`RUST_LOG=` 的
     // 历史包袱），而配置里空着的 `level` 意思是「没说」，不是「只留 error」。
     match logging.level.trim() {
         "" => FALLBACK_LEVEL,
         text => text.parse::<LevelFilter>().unwrap_or(FALLBACK_LEVEL),
     }
+}
+
+/// `target` 是不是 folio 自己的那两支（[`OWN_TARGETS`] 本身，或它们的子模块）。
+///
+/// 判据与 `Targets::with_target` 一致：前缀要么正好相等，要么后面紧跟 `::` —— 否则
+/// `folio_core_foo` 这种别的 crate 会被误认成自己的。Android 的 logcat 那层按它决定
+/// 「按配置级别放行」还是「只放 WARN 以上」，见 `ui::platform::android`。
+pub fn is_own_target(target: &str) -> bool {
+    OWN_TARGETS.iter().any(|prefix| {
+        target
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+    })
 }
 
 /// [`filter`] 的「环境变量由外面给」那一份。拆开是因为测试不动全局环境：
@@ -436,7 +453,6 @@ impl<'a> MakeWriter<'a> for LogFile {
         self.clone()
     }
 }
-
 
 #[cfg(test)]
 mod tests;
