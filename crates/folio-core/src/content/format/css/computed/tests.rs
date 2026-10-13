@@ -3,12 +3,12 @@
 //! 只依赖公开 API。选择器命中和 specificity / `!important` 的排序在 `css::tests` 已覆盖，
 //! 这里验的是「拿到有序声明之后算得对不对」。
 
+use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{
     BorderEdge, BorderStyle, Color, ComputedStyle, Display, Hyphens, Length, StyledDom, TextAlign,
     cascade,
 };
 use crate::content::format::css::{Origin, RuleSet};
-use crate::content::dom::{Dom, NodeId};
 
 struct Page {
     dom: Dom,
@@ -142,14 +142,14 @@ fn only_inheritable_properties_flow_down() {
     let page = author(
         "<div><p>文</p></div>",
         "div { color: red; text-align: center; font-weight: 700; font-style: italic; \
-         letter-spacing: 2px; margin-bottom: 12px; padding-top: 8px; display: inline }",
+         word-spacing: 2px; margin-bottom: 12px; padding-top: 8px; display: inline }",
     );
     let p = style(&page, tag(&page, "p"));
     assert_eq!(p.color, Some(Color(255, 0, 0)));
     assert_eq!(p.text_align, TextAlign::Center);
     assert_eq!(p.font_weight, 700);
     assert!(p.font_italic);
-    assert_eq!(p.letter_spacing, 2.0);
+    assert_eq!(p.word_spacing, 2.0);
     assert_eq!(
         p.margin_bottom, 16.0,
         "p 的 1em 下边距来自 UA 表，不是继承父元素的 12px"
@@ -600,6 +600,44 @@ fn relative_weight_buckets_a_non_round_parent() {
         style(&page, class(&page, "b")).font_weight,
         800,
         "550 归到 600 档"
+    );
+}
+
+/// 字距记 `Inert`，不算「已支持」。**它以前是第三种状态**：解析进 `ComputedStyle` 的
+/// `letter_spacing` 就没人读了 —— 布局、绘制、命中三处都不认它，而 `examples/css-gap`
+/// 会把它算成已生效。现在字段一并摘掉，只剩这条诚实的分类。
+/// 接上它要同批改四处（`TextRun` 没有这一格，得自己按字符序号推字形与边界），
+/// 理由与代价记在 `KNOWN_UNIMPLEMENTED` 那份名单的注释里。
+#[test]
+fn letter_spacing_reports_inert_not_applied() {
+    use crate::content::format::css::Declaration;
+    use crate::content::format::css::computed::{DeclStatus, declaration_status};
+
+    let status = |value: &str| {
+        declaration_status(
+            &Declaration {
+                property: "letter-spacing".into(),
+                value: value.into(),
+                important: false,
+            },
+            &ComputedStyle::default(),
+            16.0,
+        )
+    };
+    assert_eq!(status("2px"), DeclStatus::Inert);
+    assert_eq!(status("normal"), DeclStatus::Inert);
+    // 对照：词距是真生效的（叠在每个空格之后，折行与行宽都算它）。
+    assert_eq!(
+        declaration_status(
+            &Declaration {
+                property: "word-spacing".into(),
+                value: "2px".into(),
+                important: false,
+            },
+            &ComputedStyle::default(),
+            16.0,
+        ),
+        DeclStatus::Applied
     );
 }
 

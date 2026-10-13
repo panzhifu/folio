@@ -188,7 +188,6 @@ pub struct ComputedStyle {
     /// 四边边框，顺序 `[上, 右, 下, 左]`（与 `box_sides` 同一套展开规则）。
     /// 布局拿它算盒宽与盒高，绘制拿它画线；不继承。
     pub border: [BorderEdge; 4],
-    pub letter_spacing: f32,
     /// 词间额外宽度（px）。CSS 初值 `normal` 折成 0；它叠在**每个空格之后**，
     /// 所以折行与行宽都要算它（见 `layout::run_width`）。
     pub word_spacing: f32,
@@ -253,7 +252,6 @@ impl Default for ComputedStyle {
             color: None,
             background_color: None,
             border: [BorderEdge::default(); 4],
-            letter_spacing: 0.0,
             word_spacing: 0.0,
             baseline_shift: 0.0,
             underline: false,
@@ -323,7 +321,6 @@ impl std::hash::Hash for ComputedStyle {
             (edge.style as u8).hash(h);
             edge.color.hash(h);
         }
-        f(self.letter_spacing, h);
         f(self.word_spacing, h);
         f(self.baseline_shift, h);
         self.underline.hash(h);
@@ -393,6 +390,18 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "font-stretch",
     "font-kerning",
     "font-feature-settings",
+    // 字距。**它以前不在名单里，而是「解析进 `ComputedStyle` 然后就没人读」**——那是最坏的
+    // 一种状态：`examples/css-gap` 会把它算成已支持，而布局、绘制、命中三处都不认它。
+    // 现在把那个空转的字段一起摘了，让它诚实地记 Inert。
+    // 真要接不是加一行：gpui 的 `TextRun`（`text_system.rs:1228`）**没有 `letter_spacing`**，
+    // cosmic 后端也不做字距，所以 shaping 给的 `glyph.position.x` 里没有它。于是必须同一批
+    // 改四处才同源：① `RunStyle` 带这个值并进 `Hash`（否则块缓存认不出字距变了）② 宽度表
+    // 每字符加一次（折行与行宽）③ 绘制按「该字形之前排了几个字符」右推 ④ `Measure` 的
+    // `char_edges` / `byte_at_x` 加同一份偏移（选区矩形与命中）。只改②会出现「断行提前了、
+    // 字却还挤在一起」，比现在更糟。
+    // 优先级：本机四本书的 css/xhtml 里 `letter-spacing` **出现 0 次**（同口径 `font-size`
+    // 命中 10–50 次，所以不是扫描没跑到），排在装饰线那条真 bug 与块扫描那笔之后。
+    "letter-spacing",
 ];
 
 #[derive(Debug, Default)]
@@ -482,7 +491,8 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle) -> StyledD
             continue;
         }
         // 空标签名命中不到任何 UA 规则，等价于「只继承」。
-        let mut style = crate::content::format::css::ua::seed(&parent, dom.tag_name(id).unwrap_or_default());
+        let mut style =
+            crate::content::format::css::ua::seed(&parent, dom.tag_name(id).unwrap_or_default());
         let decls = rules.matching_declarations(dom, id);
         // 元素的 `style="…"`。CSS 把它排在「作者普通声明」之上、`!important` 那两档之下：
         // 整份追加到最后会让行内普通声明盖掉书里的 `color: red !important`，

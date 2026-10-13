@@ -71,7 +71,6 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         font_families: parent.font_families.clone(),
         text_align: parent.text_align,
         color: parent.color,
-        letter_spacing: parent.letter_spacing,
         text_indent: parent.text_indent,
         word_spacing: parent.word_spacing,
         // `hyphens` 在 CSS 里可继承，写法与 `word_spacing` 同一档：书里通常在
@@ -419,13 +418,6 @@ pub(super) fn apply(
             }
             None => false,
         },
-        "letter-spacing" => {
-            if value.eq_ignore_ascii_case("normal") {
-                style.letter_spacing = 0.0;
-                return true;
-            }
-            set_px(value, own, root_px, &mut style.letter_spacing)
-        }
         "white-space" => match value.to_ascii_lowercase().as_str() {
             "normal" => {
                 style.white_space_pre = false;
