@@ -43,10 +43,7 @@ impl Transport for UreqTransport {
     fn request(&self, req: Request) -> Result<Response> {
         let call = self.call(&req)?;
         if !(200..300).contains(&call.status()) {
-            return Err(status_error(
-                call.status(),
-                call.header("WWW-Authenticate"),
-            ));
+            return Err(status_error(call.status(), call.header("WWW-Authenticate")));
         }
         let status = call.status();
         let headers = collect_headers(&call);
@@ -66,10 +63,7 @@ impl Transport for UreqTransport {
         if !(200..300).contains(&call.status()) {
             // 状态错了就一块都不写：sink 的 finish/abort 契约在这里结清。
             sink.abort();
-            return Err(status_error(
-                call.status(),
-                call.header("WWW-Authenticate"),
-            ));
+            return Err(status_error(call.status(), call.header("WWW-Authenticate")));
         }
         let mut reader = call.into_reader();
         let mut buf = vec![0u8; 64 * 1024];

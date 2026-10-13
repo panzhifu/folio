@@ -29,8 +29,8 @@ use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, Context, Image, InteractiveElement, IntoElement, ObjectFit,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div, hsla,
-    img, px,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div,
+    hsla, img, px,
 };
 
 use crate::ui::shared::images::cover_image;
@@ -105,9 +105,7 @@ impl Enter {
         let Some(elapsed) = self.elapsed else {
             return 1.0;
         };
-        let delay = ENTER_STAGGER
-            .delay(index, self.count)
-            .min(ENTER_DELAY_CAP);
+        let delay = ENTER_STAGGER.delay(index, self.count).min(ENTER_DELAY_CAP);
         Timing::new(self.duration)
             .delay(delay.into())
             .ease(Easing::EaseOut)

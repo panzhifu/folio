@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use folio_core::content::format::css::{FontSrc, Origin, RuleSet};
 use folio_core::content::document::Document;
+use folio_core::content::format::css::{FontSrc, Origin, RuleSet};
 use gpui_kit::App;
 
 /// 进程级「字体注册事件」计数：每成功往文本系统里注册一批字体就 +1。

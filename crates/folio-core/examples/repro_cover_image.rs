@@ -5,9 +5,12 @@
 //! `open → images() → image_bytes → layout → fragments` 全链，看 `ImageRun`
 //! 在整章排版与分片两个阶段是否存活。
 use folio_core::content::document::{BookDocument, Document as _};
-use folio_core::content::format::{ContentKind, resolve_href, dir_of};
+use folio_core::content::format::{ContentKind, dir_of, resolve_href};
 use folio_core::layout::fragment::{FragmentOptions, fragments};
-use folio_core::layout::{FontKey, ImageProvider, LayoutOptions, LineFragment, LineMetrics, Measure, ResolvedImage, layout};
+use folio_core::layout::{
+    FontKey, ImageProvider, LayoutOptions, LineFragment, LineMetrics, Measure, ResolvedImage,
+    layout,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -147,11 +150,17 @@ fn main() {
     // ① 打开 → 图片元数据
     let doc = BookDocument::open(&epub).unwrap();
     let images = doc.images();
-    println!("① images() = {:?}", images.iter().map(|i| &i.href).collect::<Vec<_>>());
+    println!(
+        "① images() = {:?}",
+        images.iter().map(|i| &i.href).collect::<Vec<_>>()
+    );
 
     // ② 字节按需现取
     let bytes = doc.image_bytes("OEBPS/cover.jpg");
-    println!("② image_bytes(OEBPS/cover.jpg) = {} 字节", bytes.as_ref().map_or(0, Vec::len));
+    println!(
+        "② image_bytes(OEBPS/cover.jpg) = {} 字节",
+        bytes.as_ref().map_or(0, Vec::len)
+    );
 
     // ③ 与 Book::new 相同的拆法：flow + provider + 章目录基准
     let flow = doc.flow().expect("EPUB 应是可重排");
@@ -163,12 +172,19 @@ fn main() {
             .collect(),
         base_dir: dir_of(&chapter.spine_href),
     };
-    println!("③ spine_href = {:?}  base_dir = {:?}", chapter.spine_href, provider.base_dir);
+    println!(
+        "③ spine_href = {:?}  base_dir = {:?}",
+        chapter.spine_href, provider.base_dir
+    );
 
     // ④ 层叠 + 完整排版（StdMeasure 假度量）
-    let css = folio_core::content::format::css::RuleSet::parse(&flow.css, folio_core::content::format::css::Origin::Author);
+    let css = folio_core::content::format::css::RuleSet::parse(
+        &flow.css,
+        folio_core::content::format::css::Origin::Author,
+    );
     let dom = folio_core::content::dom::Dom::parse(chapter.source().as_bytes());
-    let styles = folio_core::content::format::css::computed::cascade(&dom, &css, &Default::default());
+    let styles =
+        folio_core::content::format::css::computed::cascade(&dom, &css, &Default::default());
     let root = dom
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))
@@ -178,7 +194,10 @@ fn main() {
         &dom,
         &styles,
         root,
-        LayoutOptions { width: 370.0, light: false },
+        LayoutOptions {
+            width: 370.0,
+            light: false,
+        },
         &StdMeasure,
         &provider,
     );
@@ -187,7 +206,10 @@ fn main() {
         for frag in &line.fragments {
             if let LineFragment::Image(img) = frag {
                 image_runs += 1;
-                println!("④ 行 {ix}: Image href={} {}×{} @y={}", img.href, img.width, img.height, line.y);
+                println!(
+                    "④ 行 {ix}: Image href={} {}×{} @y={}",
+                    img.href, img.width, img.height, line.y
+                );
             }
         }
     }
@@ -199,13 +221,30 @@ fn main() {
     let all = fragments(
         &laid,
         &styles,
-        FragmentOptions { height: 640.0, ..Default::default() },
+        FragmentOptions {
+            height: 640.0,
+            ..Default::default()
+        },
     );
     let in_slices: usize = all
         .iter()
-        .map(|f| f.lines.clone().filter(|ix| laid.lines[*ix].fragments.iter().any(|fr| matches!(fr, LineFragment::Image(_)))).count())
+        .map(|f| {
+            f.lines
+                .clone()
+                .filter(|ix| {
+                    laid.lines[*ix]
+                        .fragments
+                        .iter()
+                        .any(|fr| matches!(fr, LineFragment::Image(_)))
+                })
+                .count()
+        })
         .sum();
-    println!("⑤ 分片 {} 片，带图片的行 {} 行（排版层 image_runs = {image_runs}）", all.len(), in_slices);
+    println!(
+        "⑤ 分片 {} 片，带图片的行 {} 行（排版层 image_runs = {image_runs}）",
+        all.len(),
+        in_slices
+    );
     let _ = Arc::new(&doc);
     let _ = ContentKind::Reflow;
 }

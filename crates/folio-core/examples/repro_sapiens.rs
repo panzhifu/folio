@@ -1,9 +1,9 @@
 //! 临时复现：《人类简史》图文版在宿主上走完整排版 + 分片 + 锚点映射，
 //! 找真机上「往前翻页」的那个 char boundary panic。用假度量（每字 1em）。
 use folio_core::content::anchor::TextMap;
+use folio_core::content::dom::Dom;
 use folio_core::content::format::css::computed::{ComputedStyle, cascade};
 use folio_core::content::format::css::{Origin, RuleSet};
-use folio_core::content::dom::Dom;
 use folio_core::layout::fragment::{FragmentOptions, fragments};
 use folio_core::layout::{FontKey, LayoutOptions, LineMetrics, Measure, NoImages, layout};
 

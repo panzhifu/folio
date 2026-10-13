@@ -1,7 +1,7 @@
 //! 选择器：子集范围、匹配、组合器与 specificity。只依赖公开 API。
 
-use crate::content::format::css::selector::{PseudoElement, Selector};
 use crate::content::dom::{Dom, Node, NodeId};
+use crate::content::format::css::selector::{PseudoElement, Selector};
 
 fn parse_dom(html: &str) -> Dom {
     let wrapped = if html.contains("<html") || html.contains("<body") {

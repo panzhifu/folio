@@ -51,9 +51,7 @@ pub(super) fn toc_page(cx: &App) -> Page {
                 Row::toggle(
                     tr(cx, "field.toc_dim_read"),
                     |cx: &App| ConfigHolder::reader(cx).toc_dim_read,
-                    |val: bool, cx| {
-                        ConfigHolder::edit_reader(cx, |prefs| prefs.toc_dim_read = val)
-                    },
+                    |val: bool, cx| ConfigHolder::edit_reader(cx, |prefs| prefs.toc_dim_read = val),
                 )
                 .description(tr(cx, "field.toc_dim_read.desc"))
                 .keywords(&["read", "visited", "已读", "浅色", "进度"]),

@@ -59,9 +59,7 @@ impl DocumentProvider for HtmlAdapter {
             // 字数在索引这一趟数出来（`chapters.char_len`）：文件已经整份读过一遍，
             // 而 `chapter_source` 交回来的正文与这里数的是同一份原始内容 ——
             // `visible_chars` 走 DOM，标记不计入，只有可见文本进那根尺。
-            chapters: vec![
-                Chapter::section(title, 0).with_char_len(super::visible_chars(&raw)),
-            ],
+            chapters: vec![Chapter::section(title, 0).with_char_len(super::visible_chars(&raw))],
             css,
             images,
             ..Default::default()
@@ -206,7 +204,12 @@ mod tests {
         path
     }
 
-    fn flow_of(path: &Path) -> (crate::content::format::DocMeta, crate::content::format::FlowDoc) {
+    fn flow_of(
+        path: &Path,
+    ) -> (
+        crate::content::format::DocMeta,
+        crate::content::format::FlowDoc,
+    ) {
         let (meta, content) = HtmlAdapter.read(path).unwrap();
         let Content::Reflow(flow) = content else {
             panic!("这个容器该读成可重排");

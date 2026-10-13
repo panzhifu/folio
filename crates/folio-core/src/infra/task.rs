@@ -366,8 +366,7 @@ fn worker(queue: Arc<Queue>) {
                 let picked = jobs.iter_mut().enumerate().find_map(|(class, deque)| {
                     deque.front()?; // 这一档空 → 看下一档
                     if !draining
-                        && queue.running[class].load(Ordering::SeqCst)
-                            >= Priority::ALL[class].cap()
+                        && queue.running[class].load(Ordering::SeqCst) >= Priority::ALL[class].cap()
                     {
                         return None; // 这一档跑满了 → 看下一档
                     }

@@ -122,10 +122,7 @@ pub fn pick_dir(cx: &mut App) -> Task<()> {
 
 /// 打开系统文件夹选择器，选中把目录交给 `picked`（在界面线程上执行）。
 /// 取消与出错只记日志 —— 读者点「取消」不该清掉任何东西。
-pub fn choose_dir(
-    cx: &mut App,
-    picked: impl Fn(&mut App, &std::path::Path) + 'static,
-) -> Task<()> {
+pub fn choose_dir(cx: &mut App, picked: impl Fn(&mut App, &std::path::Path) + 'static) -> Task<()> {
     let receiver = cx.prompt_for_paths(PathPromptOptions {
         files: false,
         directories: true,
@@ -292,13 +289,15 @@ mod tests {
 
     fn flow() -> FlowDoc {
         FlowDoc {
-            chapters: vec![Chapter::inline(
-                "第一章",
-                // 契约：`Chapter::source` 是引擎就绪的 XHTML。这里不进排版，
-                // 但造数据也照契约来，免得下次有人拿它当「纯文本也能塞」的例子。
-                "<p>正文</p>",
-            )
-            .with_spine_href("c1.xhtml")],
+            chapters: vec![
+                Chapter::inline(
+                    "第一章",
+                    // 契约：`Chapter::source` 是引擎就绪的 XHTML。这里不进排版，
+                    // 但造数据也照契约来，免得下次有人拿它当「纯文本也能塞」的例子。
+                    "<p>正文</p>",
+                )
+                .with_spine_href("c1.xhtml"),
+            ],
             ..Default::default()
         }
     }
@@ -324,7 +323,13 @@ mod tests {
     #[test]
     fn an_unconfirmed_library_blocks_the_import_rather_than_picking_for_the_reader() {
         assert_eq!(target_dir(&Library::default()), None);
-        assert_eq!(target_dir(&Library { dir: "   ".into(), watch: None }), None);
+        assert_eq!(
+            target_dir(&Library {
+                dir: "   ".into(),
+                watch: None
+            }),
+            None
+        );
         assert_eq!(
             target_dir(&Library {
                 dir: " /x/books ".into(),

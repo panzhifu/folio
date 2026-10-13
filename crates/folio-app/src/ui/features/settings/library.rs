@@ -126,11 +126,11 @@ pub(super) fn library_page(cx: &App) -> Page {
         None => muted_label(tr(cx, "field.transfer.off"), cx).into_any_element(),
         Some(status) => {
             let mut col = div().flex().flex_col().gap_1();
-            col = col.child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tf(cx, "field.transfer.pin", &[("pin", &status.pin)])),
-            );
+            col = col.child(div().font_weight(FontWeight::SEMIBOLD).child(tf(
+                cx,
+                "field.transfer.pin",
+                &[("pin", &status.pin)],
+            )));
             if status.urls.is_empty() {
                 col = col.child(muted_label(tr(cx, "field.transfer.no_url"), cx));
             } else {
@@ -148,7 +148,10 @@ pub(super) fn library_page(cx: &App) -> Page {
         IconName::FolderOpen,
         vec![
             group(tr(cx, "group.location"), vec![dir, pick, suggested]),
-            group(tr(cx, "group.watch"), vec![watch, watch_pick, watch_suggested]),
+            group(
+                tr(cx, "group.watch"),
+                vec![watch, watch_pick, watch_suggested],
+            ),
             group(tr(cx, "group.transfer"), vec![wifi_switch, wifi_status]),
         ],
     )

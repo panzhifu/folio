@@ -92,12 +92,7 @@ impl CompactSettings {
                             .items_center()
                             .gap_2()
                             .child(Icon::new(page.icon).small())
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(page.title.clone()),
-                            )
+                            .child(div().min_w_0().flex_1().child(page.title.clone()))
                             .child(
                                 Icon::new(gpui_kit::assets::IconName::ChevronRight)
                                     .small()
@@ -287,24 +282,23 @@ impl CompactSettings {
                     .gap_2()
                     .child(Self::label_block(row, cx).flex_1().min_w_0())
                     .child(
-                        Button::new(id("number-minus")).ghost().small().icon(
-                            gpui_kit::assets::IconName::Minus,
-                        ).on_click(move |_, _, cx| {
-                            set_minus((get_minus(cx) - spec.step).max(spec.min), cx)
-                        }),
+                        Button::new(id("number-minus"))
+                            .ghost()
+                            .small()
+                            .icon(gpui_kit::assets::IconName::Minus)
+                            .on_click(move |_, _, cx| {
+                                set_minus((get_minus(cx) - spec.step).max(spec.min), cx)
+                            }),
                     )
+                    .child(div().min_w(px(40.0)).text_sm().child(shown))
                     .child(
-                        div()
-                            .min_w(px(40.0))
-                            .text_sm()
-                            .child(shown),
-                    )
-                    .child(
-                        Button::new(id("number-plus")).ghost().small().icon(
-                            gpui_kit::assets::IconName::Plus,
-                        ).on_click(move |_, _, cx| {
-                            set_plus((get_plus(cx) + spec.step).min(spec.max), cx)
-                        }),
+                        Button::new(id("number-plus"))
+                            .ghost()
+                            .small()
+                            .icon(gpui_kit::assets::IconName::Plus)
+                            .on_click(move |_, _, cx| {
+                                set_plus((get_plus(cx) + spec.step).min(spec.max), cx)
+                            }),
                     )
                     .into_any_element()
             }
@@ -320,12 +314,13 @@ impl CompactSettings {
                         // 订阅回调要 `'static`，所以给它一份自己的克隆，而不是从
                         // 建状态的那层闭包里把 `set` 挪走。
                         let set = set.clone();
-                        let watch = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
-                            if let InputEvent::Change = event {
-                                let value = input.read(cx).value();
-                                set(value, cx);
-                            }
-                        });
+                        let watch =
+                            cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                                if let InputEvent::Change = event {
+                                    let value = input.read(cx).value();
+                                    set(value, cx);
+                                }
+                            });
                         (input, watch)
                     }
                 });
@@ -390,10 +385,7 @@ impl CompactSettings {
 impl Render for CompactSettings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 宿主测试按这一格确认「我的」那一个目的地画的是钻入式列表（同 `SettingsView`）。
-        let mut root = v_flex()
-            .id("settings-compact")
-            .size_full()
-            .test_support();
+        let mut root = v_flex().id("settings-compact").size_full().test_support();
         match self.screen {
             Screen::Root => root = root.child(self.root_screen(cx)),
             Screen::Page(page_ix) => {

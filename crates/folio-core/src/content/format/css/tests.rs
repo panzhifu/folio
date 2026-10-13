@@ -1,8 +1,7 @@
-
 //! CSS 子集：规则装配、层叠与 specificity。只依赖公开 API。
 
-use crate::content::format::css::{Origin, RuleSet};
 use crate::content::dom::{Dom, NodeId};
+use crate::content::format::css::{Origin, RuleSet};
 
 fn rules(text: &str) -> RuleSet {
     RuleSet::parse(text, Origin::Author)
@@ -179,9 +178,18 @@ fn font_faces_from_both_stylesheets_are_kept_in_order() {
 /// 也认成书的字体，而那正是要落回读者偏好字体的那一种。
 #[test]
 fn font_face_matches_are_whole_string_and_case_insensitive() {
-    assert!(crate::content::format::css::font_face_matches("Book Serif", "book serif"));
-    assert!(!crate::content::format::css::font_face_matches("serif", "Book Serif"));
-    assert!(!crate::content::format::css::font_face_matches("", "Book Serif"));
+    assert!(crate::content::format::css::font_face_matches(
+        "Book Serif",
+        "book serif"
+    ));
+    assert!(!crate::content::format::css::font_face_matches(
+        "serif",
+        "Book Serif"
+    ));
+    assert!(!crate::content::format::css::font_face_matches(
+        "",
+        "Book Serif"
+    ));
 }
 
 #[test]

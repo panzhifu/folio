@@ -43,8 +43,8 @@ use self::cache::subtree_style_hash;
 // `collect` 与子模块同名但分属值/类型两个命名空间：模块名不会把函数名带进本作用域，
 // 而 `tests.rs` 用 `use super::*` 拿符号，所以这里显式把函数名也导入进来。
 use self::collect::Ctx;
-use crate::content::format::css::computed::{Display, StyledDom};
 use crate::content::dom::{Dom, NodeId};
+use crate::content::format::css::computed::{Display, StyledDom};
 
 pub use cache::{BlockCache, LayoutCache, layout_cached};
 pub use font::{FontKey, RunStyle, StyleArena, StyleRef};

@@ -13,8 +13,8 @@ use super::geometry::{BlockBox, Layout, LayoutOptions, LineBox};
 use super::key::LayoutKey;
 use super::layout;
 use super::ports::{ImageProvider, Measure};
-use crate::content::format::css::computed::StyledDom;
 use crate::content::dom::{Dom, NodeId};
+use crate::content::format::css::computed::StyledDom;
 
 /// 排版结果缓存 —— 「输入一模一样就什么都不用算」那一层，对应 KOReader 的
 /// `checkRenderContext()`。

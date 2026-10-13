@@ -120,7 +120,9 @@ pub(crate) fn is_container_noise(name: &str) -> bool {
     if name.ends_with('/') || name.starts_with('.') || name.contains("__MACOSX/") {
         return true;
     }
-    name.rsplit('/').next().is_some_and(|file| file.starts_with('.'))
+    name.rsplit('/')
+        .next()
+        .is_some_and(|file| file.starts_with('.'))
 }
 
 /// 这一层里算不算一页。漫画包里常混着 `__MACOSX/`、`.DS_Store`、`thumbs/` 这些噪音。
@@ -215,7 +217,12 @@ mod tests {
         path
     }
 
-    fn fixed(path: &Path) -> (crate::content::format::DocMeta, crate::content::format::FixedDoc) {
+    fn fixed(
+        path: &Path,
+    ) -> (
+        crate::content::format::DocMeta,
+        crate::content::format::FixedDoc,
+    ) {
         let (meta, content) = CbzAdapter.read(path).unwrap();
         let Content::Fixed(fixed) = content else {
             panic!("CBZ 该读成定版式");

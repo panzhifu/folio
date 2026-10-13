@@ -33,7 +33,7 @@ pub fn run_desktop() {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             // 替换gpui 默认的「不发请求」的 client，方便后续进行同步
-        
+
             // 主题集要在 `init` 之后装：那一步才把 `ThemeRegistry` 这个 Global 建出来。
             // 先装内置的（构建时从依赖源码嵌进来），再装读者自己放进 `themes/` 的。
             theme::register_builtin_themes(cx);
@@ -53,7 +53,10 @@ pub fn run_desktop() {
                     tracing::error!("desktop: 书库打不开：{e:?}");
                     eprintln!(
                         "{}",
-                        folio_core::infra::i18n::t_with("error.database_unopenable", &[("reason", &e)])
+                        folio_core::infra::i18n::t_with(
+                            "error.database_unopenable",
+                            &[("reason", &e)]
+                        )
                     );
                     std::process::exit(1);
                 }
@@ -75,7 +78,10 @@ pub fn run_desktop() {
             // 让读者点开一片空白。删的是数据与副本，**不动读者自己的原件**。
             match store.prune_missing() {
                 Ok(gone) if !gone.is_empty() => {
-                    tracing::warn!("desktop: 清理了 {} 本源文件已不在的书：{gone:?}", gone.len());
+                    tracing::warn!(
+                        "desktop: 清理了 {} 本源文件已不在的书：{gone:?}",
+                        gone.len()
+                    );
                 }
                 Ok(_) => {}
                 Err(err) => tracing::warn!("desktop: 清理失效的书失败：{err:#}"),

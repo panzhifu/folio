@@ -149,8 +149,7 @@ impl Store {
 
     pub fn delete_annotation(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn
-            .execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
+        conn.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
         Ok(())
     }
 }
@@ -164,7 +163,6 @@ fn color_of(input: &str) -> String {
         ANNOTATION_COLORS[0].to_string()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

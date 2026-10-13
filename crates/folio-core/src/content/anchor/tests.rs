@@ -8,9 +8,9 @@ use crate::content::anchor::{
     CONTEXT_CHARS, Confidence, Relocated, TextAnchor, TextMap, line_at_offset, line_at_y,
     line_chars, line_offset, relocate,
 };
+use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{ComputedStyle, cascade};
 use crate::content::format::css::{Origin, RuleSet};
-use crate::content::dom::{Dom, NodeId};
 use crate::layout::{Layout, LayoutOptions, LineMetrics, Measure, NoImages, layout};
 
 struct Mono;

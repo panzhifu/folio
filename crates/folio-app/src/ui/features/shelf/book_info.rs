@@ -96,12 +96,7 @@ impl ShelfView {
     ///
     /// 只查不拦 —— 书查不到（已删、库坏了）就不开这一页，留一条日志：菜单是瞬间的事，
     /// 这里没有要保的旧状态。封面读不出来不拦 —— 那一格画占位，右边那两格才是正事。
-    pub(super) fn show_info(
-        &mut self,
-        book_id: i64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn show_info(&mut self, book_id: i64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(store) = self.store.clone() else {
             tracing::error!("ShelfView: 没有书库，查不了第 {book_id} 本的信息");
             return;
@@ -128,9 +123,8 @@ impl ShelfView {
                 None
             }
         };
-        let page = cx.new(|cx| {
-            BookInfoView::new(self.stack.clone(), store, row, cover, window, cx)
-        });
+        let page =
+            cx.new(|cx| BookInfoView::new(self.stack.clone(), store, row, cover, window, cx));
         // 那一页写回书名作者之后报一声：架上那张卡上的一行字要跟着变。
         self._info_watch = Some(cx.subscribe(&page, |this, _, event, cx| {
             match event {
@@ -182,9 +176,7 @@ impl BookInfoView {
                 .default_value(authors_line.clone())
         });
         let _watch = (
-            cx.subscribe(&title_entry, |this, _, event, cx| {
-                this.on_input(event, cx)
-            }),
+            cx.subscribe(&title_entry, |this, _, event, cx| this.on_input(event, cx)),
             cx.subscribe(&authors_entry, |this, _, event, cx| {
                 this.on_input(event, cx)
             }),
@@ -316,9 +308,7 @@ impl Render for BookInfoView {
                             .icon(IconName::ArrowLeft)
                             .label(back_label.clone().to_string())
                             .accessibility_label(back_label)
-                            .on_click(move |_, _, cx| {
-                                back.update(cx, |this, cx| this.pop(cx))
-                            }),
+                            .on_click(move |_, _, cx| back.update(cx, |this, cx| this.pop(cx))),
                     )
                     .child(
                         div()
@@ -461,9 +451,7 @@ impl Render for BookInfoView {
                             .label(tr(cx, "shelf.info_save").to_string())
                             .accessibility_label(tr(cx, "shelf.info_save"))
                             .disabled(!(changed && !title_missing))
-                            .on_click(move |_, _, cx| {
-                                save.update(cx, |this, cx| this.save(cx))
-                            }),
+                            .on_click(move |_, _, cx| save.update(cx, |this, cx| this.save(cx))),
                     ),
             )
     }

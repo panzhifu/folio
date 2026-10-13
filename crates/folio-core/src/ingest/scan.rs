@@ -12,10 +12,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::content::format::supports_extension;
-use crate::ingest::import::{Candidate, ImportKind, Origin, Source, stage_local};
-use crate::infra::task::StageCtx;
 use crate::Result;
+use crate::content::format::supports_extension;
+use crate::infra::task::StageCtx;
+use crate::ingest::import::{Candidate, ImportKind, Origin, Source, stage_local};
 
 /// 递归深度上限。8 层在真实设备上已经深过任何「人放书的地方」，
 /// 再深的目录多半是程序自己的数据。
@@ -65,7 +65,12 @@ impl Default for Limits {
 ///
 /// 进度是不定进度（`item(已找到, 0)`）—— 扫描前不知道有多少书，知道的只有
 /// 「已经找到几本」。取消随时生效，已找到的部分照常交回。
-pub fn find(roots: &[PathBuf], exclude: &[PathBuf], noise_exempt: &[PathBuf], ctx: &StageCtx) -> ScanReport {
+pub fn find(
+    roots: &[PathBuf],
+    exclude: &[PathBuf],
+    noise_exempt: &[PathBuf],
+    ctx: &StageCtx,
+) -> ScanReport {
     find_with(roots, exclude, noise_exempt, Limits::default(), ctx)
 }
 
@@ -266,8 +271,8 @@ mod tests {
     use std::path::Path;
 
     use super::{Limits, ScanSource, find_with};
-    use crate::ingest::import::{ImportKind, Source as _};
     use crate::infra::task::StageCtx;
+    use crate::ingest::import::{ImportKind, Source as _};
 
     fn touch(dir: &Path, rel: &str, body: &str) {
         let path = dir.join(rel);
@@ -276,11 +281,7 @@ mod tests {
     }
 
     fn names(report: &super::ScanReport) -> Vec<String> {
-        report
-            .candidates
-            .iter()
-            .map(|c| c.name.clone())
-            .collect()
+        report.candidates.iter().map(|c| c.name.clone()).collect()
     }
 
     /// 找得到深处的书；隐藏、噪音、`Android/{data,obb}`、书库目录自己都不进候选。
@@ -400,7 +401,13 @@ mod tests {
         touch(tmp.path(), "a.epub", "x");
         let ctx = StageCtx::detached();
         ctx.cancel().trigger();
-        let report = find_with(&[tmp.path().to_path_buf()], &[], &[], Limits::default(), &ctx);
+        let report = find_with(
+            &[tmp.path().to_path_buf()],
+            &[],
+            &[],
+            Limits::default(),
+            &ctx,
+        );
         assert!(report.candidates.is_empty());
     }
 

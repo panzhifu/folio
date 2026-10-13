@@ -165,7 +165,8 @@ fn check_flow(flow: &FlowDoc, issues: &mut Issues) {
     for (ix, chapter) in flow.chapters.iter().enumerate() {
         // 正文可能还没取（索引那一趟只有位置，见 `ChapterText::At`）——
         // 那种情况说不了「这一章是空的」，只有正文真在手上且真为空才算。
-        if matches!(&chapter.text, crate::content::format::ChapterText::Inline(text) if text.trim().is_empty()) {
+        if matches!(&chapter.text, crate::content::format::ChapterText::Inline(text) if text.trim().is_empty())
+        {
             issues.push(
                 IssueKind::Warn,
                 &chapter.spine_href,

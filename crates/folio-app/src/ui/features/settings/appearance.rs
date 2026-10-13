@@ -30,25 +30,27 @@ fn mode_group(cx: &App) -> Group {
 
     group(
         tr(cx, "field.appearance_mode"),
-        vec![Row::dropdown(
-            tr(cx, "field.appearance_mode"),
-            options,
-            false,
-            |cx: &App| SharedString::from(ConfigHolder::appearance(cx).mode.as_str()),
-            |val: SharedString, cx| {
-                ConfigHolder::edit_appearance(cx, |a| a.mode = Mode::parse(&val))
-            },
-        )
-        .description(tr(cx, "field.appearance_mode.desc"))
-        .keywords(&[
-            "appearance",
-            "mode",
-            "dark",
-            "light",
-            "外观",
-            "浅深",
-            "深色",
-        ])],
+        vec![
+            Row::dropdown(
+                tr(cx, "field.appearance_mode"),
+                options,
+                false,
+                |cx: &App| SharedString::from(ConfigHolder::appearance(cx).mode.as_str()),
+                |val: SharedString, cx| {
+                    ConfigHolder::edit_appearance(cx, |a| a.mode = Mode::parse(&val))
+                },
+            )
+            .description(tr(cx, "field.appearance_mode.desc"))
+            .keywords(&[
+                "appearance",
+                "mode",
+                "dark",
+                "light",
+                "外观",
+                "浅深",
+                "深色",
+            ]),
+        ],
     )
 }
 
@@ -131,17 +133,16 @@ fn custom_group(cx: &App) -> Group {
     let dir = folio_core::infra::paths::themes_dir().display().to_string();
     group(
         tr(cx, "group.custom_themes"),
-        vec![Row::custom_titled(
-            tr(cx, "field.theme_dir"),
-            move |cx| {
+        vec![
+            Row::custom_titled(tr(cx, "field.theme_dir"), move |cx| {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(dir.clone())
                     .into_any_element()
-            },
-        )
-        .description(tr(cx, "field.theme_dir.desc"))
-        .keywords(&["theme", "folder", "目录", "配色"])],
+            })
+            .description(tr(cx, "field.theme_dir.desc"))
+            .keywords(&["theme", "folder", "目录", "配色"]),
+        ],
     )
 }

@@ -59,10 +59,9 @@ pub fn sync_from_config(cx: &App) {
     // 事件桥：core 记完日志后把这一条交回来，转进自动导入通道。架子没开时接收端
     // 已经没了 —— 送不出去就丢掉，不是错误（日志那边照记）。
     let sender = super::import_queue::auto_import_sender();
-    let on_event: Arc<WatchEvents> =
-        Arc::new(move |event| {
-            let _ = sender.send_blocking(event);
-        });
+    let on_event: Arc<WatchEvents> = Arc::new(move |event| {
+        let _ = sender.send_blocking(event);
+    });
     services::services().set_watch(Some(WatchService::start(
         config,
         store,

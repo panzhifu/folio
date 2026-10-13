@@ -28,7 +28,7 @@ use gpui_kit::component::chart::{BarChart, RadarChart};
 use gpui_kit::component::plot::AxisLabelPlacement;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, Sizable as _, Selectable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Selectable, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, Corners, ElementId, EventEmitter, FontWeight, InteractiveElement,
@@ -190,37 +190,36 @@ impl StatsView {
                 .w_full()
                 .gap_2()
                 .child(
-                    div()
-                        .w_full()
-                        .h(px(TREND_HEIGHT))
-                        .child(
-                            BarChart::new(bars)
-                                .band(|bar| bar.band.clone())
-                                .value(|bar| bar.minutes)
-                                .name(tr(cx, "stats.minutes_unit"))
-                                .fill(move |bar: &Bar, _, _, _| {
+                    div().w_full().h(px(TREND_HEIGHT)).child(
+                        BarChart::new(bars)
+                            .band(|bar| bar.band.clone())
+                            .value(|bar| bar.minutes)
+                            .name(tr(cx, "stats.minutes_unit"))
+                            .fill(
+                                move |bar: &Bar, _, _, _| {
                                     if bar.today { solid } else { faded }
-                                })
-                                // 柱子从轴线上长出来，底角不该是圆的 —— 与阅读页顶栏
-                                // 「只圆下面两个角」是同一条判断。
-                                .corner_radii(Corners {
-                                    top_left: radius,
-                                    top_right: radius,
-                                    bottom_left: px(0.),
-                                    bottom_right: px(0.),
-                                })
-                                // 没读的那几天留一小截：`reading_summary` 会把它们补零，
-                                // 而零高的柱子与「轴上根本没有这一格」看起来一模一样。
-                                .min_length(2.)
-                                .value_axis(true)
-                                .value_tick_count(3)
-                                .value_tick_format(|v| format!("{}", v.round() as i64))
-                                .band_tick_count(day_labels(compact))
-                                .value_axis_label_placement(value_axis_placement(compact))
-                                .tooltip_title(|bar| bar.day.clone())
-                                .tooltip_value(|bar: &Bar, _| bar.readout.clone())
-                                .appear_key(days),
-                        ),
+                                },
+                            )
+                            // 柱子从轴线上长出来，底角不该是圆的 —— 与阅读页顶栏
+                            // 「只圆下面两个角」是同一条判断。
+                            .corner_radii(Corners {
+                                top_left: radius,
+                                top_right: radius,
+                                bottom_left: px(0.),
+                                bottom_right: px(0.),
+                            })
+                            // 没读的那几天留一小截：`reading_summary` 会把它们补零，
+                            // 而零高的柱子与「轴上根本没有这一格」看起来一模一样。
+                            .min_length(2.)
+                            .value_axis(true)
+                            .value_tick_count(3)
+                            .value_tick_format(|v| format!("{}", v.round() as i64))
+                            .band_tick_count(day_labels(compact))
+                            .value_axis_label_placement(value_axis_placement(compact))
+                            .tooltip_title(|bar| bar.day.clone())
+                            .tooltip_value(|bar: &Bar, _| bar.readout.clone())
+                            .appear_key(days),
+                    ),
                 )
                 .child(muted_label(note, cx)),
             cx,
@@ -303,14 +302,11 @@ impl StatsView {
                             .child(rank.title.clone()),
                     )
                     .child(
-                        div()
-                            .w(px(SHARE_LANE))
-                            .flex_none()
-                            .child(
-                                Progress::new(ElementId::named_usize("stats-share", ix))
-                                    .value(ratio)
-                                    .color(fill),
-                            ),
+                        div().w(px(SHARE_LANE)).flex_none().child(
+                            Progress::new(ElementId::named_usize("stats-share", ix))
+                                .value(ratio)
+                                .color(fill),
+                        ),
                     )
                     .child(
                         // 可比的数字右对齐：读者是竖着比这几本书的。
@@ -325,12 +321,7 @@ impl StatsView {
                     .into_any_element()
             })
             .collect::<Vec<AnyElement>>();
-        section(
-            tr(cx, "stats.top"),
-            v_flex().w_full().children(rows),
-            cx,
-        )
-        .into_any_element()
+        section(tr(cx, "stats.top"), v_flex().w_full().children(rows), cx).into_any_element()
     }
 
     /// 一般几点读。24 根柱子，读得最多的那一个钟点更实，下面跟一句结论。
@@ -355,36 +346,35 @@ impl StatsView {
                 .w_full()
                 .gap_2()
                 .child(
-                    div()
-                        .w_full()
-                        .h(px(HOURS_HEIGHT))
-                        .child(
-                            BarChart::new(cells)
-                                .band(|cell: &HourCell| cell.band.clone())
-                                .value(|cell| cell.minutes)
-                                .name(tr(cx, "stats.minutes_unit"))
-                                // 与趋势图同一套说法：全图只有一格是焦点。
-                                .fill(move |cell: &HourCell, _, _, _| {
+                    div().w_full().h(px(HOURS_HEIGHT)).child(
+                        BarChart::new(cells)
+                            .band(|cell: &HourCell| cell.band.clone())
+                            .value(|cell| cell.minutes)
+                            .name(tr(cx, "stats.minutes_unit"))
+                            // 与趋势图同一套说法：全图只有一格是焦点。
+                            .fill(
+                                move |cell: &HourCell, _, _, _| {
                                     if cell.peak { peak } else { fill }
-                                })
-                                .corner_radii(Corners {
-                                    top_left: radius,
-                                    top_right: radius,
-                                    bottom_left: px(0.),
-                                    bottom_right: px(0.),
-                                })
-                                .min_length(2.)
-                                .value_axis(true)
-                                .value_tick_count(3)
-                                .value_tick_format(|v| format!("{}", v.round() as i64))
-                                .band_tick_count(hour_labels(compact))
-                                .value_axis_label_placement(value_axis_placement(compact))
-                                // 轴上是裸钟点，tooltip 的标题才是「21 点」那一句：
-                                // 24 个带单位的名字排在一行上会叠。
-                                .tooltip_title(|cell: &HourCell| cell.title.clone())
-                                .tooltip_value(|cell: &HourCell, _| cell.readout.clone())
-                                .appear_key(self.range.days()),
-                        ),
+                                },
+                            )
+                            .corner_radii(Corners {
+                                top_left: radius,
+                                top_right: radius,
+                                bottom_left: px(0.),
+                                bottom_right: px(0.),
+                            })
+                            .min_length(2.)
+                            .value_axis(true)
+                            .value_tick_count(3)
+                            .value_tick_format(|v| format!("{}", v.round() as i64))
+                            .band_tick_count(hour_labels(compact))
+                            .value_axis_label_placement(value_axis_placement(compact))
+                            // 轴上是裸钟点，tooltip 的标题才是「21 点」那一句：
+                            // 24 个带单位的名字排在一行上会叠。
+                            .tooltip_title(|cell: &HourCell| cell.title.clone())
+                            .tooltip_value(|cell: &HourCell, _| cell.readout.clone())
+                            .appear_key(self.range.days()),
+                    ),
                 )
                 .child(muted_label(note, cx)),
             cx,
@@ -417,27 +407,22 @@ impl StatsView {
                 .w_full()
                 .gap_2()
                 .child(
-                    div()
-                        .w_full()
-                        .h(px(WEEKDAY_HEIGHT))
-                        .child(
-                            RadarChart::new(spokes)
-                                .label(|spoke: &WeekdaySpoke| spoke.name.clone())
-                                .value(|spoke: &WeekdaySpoke| spoke.minutes)
-                                .stroke(line)
-                                .fill(line.opacity(0.2))
-                                .dot()
-                                // 四环：半径是盒高的 40%，每环就是一档「平均多少分钟」，
-                                // 读者不必知道那一圈是几分钟也知道鼓起来的那面高了几档。
-                                .grid_levels(4)
-                                .name(tr(cx, "stats.minutes_unit"))
-                                // 标题由辐条那串星期名供给（字符串标签自带标题），
-                                // 这里只把那一行的读数换成本地化过的句子。
-                                .tooltip_value(|spoke: &WeekdaySpoke, _, _| {
-                                    spoke.readout.clone()
-                                })
-                                .appear_key(self.range.days()),
-                        ),
+                    div().w_full().h(px(WEEKDAY_HEIGHT)).child(
+                        RadarChart::new(spokes)
+                            .label(|spoke: &WeekdaySpoke| spoke.name.clone())
+                            .value(|spoke: &WeekdaySpoke| spoke.minutes)
+                            .stroke(line)
+                            .fill(line.opacity(0.2))
+                            .dot()
+                            // 四环：半径是盒高的 40%，每环就是一档「平均多少分钟」，
+                            // 读者不必知道那一圈是几分钟也知道鼓起来的那面高了几档。
+                            .grid_levels(4)
+                            .name(tr(cx, "stats.minutes_unit"))
+                            // 标题由辐条那串星期名供给（字符串标签自带标题），
+                            // 这里只把那一行的读数换成本地化过的句子。
+                            .tooltip_value(|spoke: &WeekdaySpoke, _, _| spoke.readout.clone())
+                            .appear_key(self.range.days()),
+                    ),
                 )
                 .child(muted_label(note, cx)),
             cx,
@@ -483,9 +468,7 @@ impl StatsView {
                         .selected(current == range)
                         .label(label.to_string())
                         .accessibility_label(label)
-                        .on_click(move |_, _, cx| {
-                            page.update(cx, |this, cx| this.pick(range, cx))
-                        })
+                        .on_click(move |_, _, cx| page.update(cx, |this, cx| this.pick(range, cx)))
                 }))
                 .into_any_element(),
         )

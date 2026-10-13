@@ -21,10 +21,10 @@
 use std::sync::Arc;
 use std::sync::{Mutex, PoisonError};
 
-use crate::store::Store;
 use crate::infra::task::TaskManager;
-use crate::net::transfer::TransferServer;
 use crate::ingest::watch::WatchService;
+use crate::net::transfer::TransferServer;
+use crate::store::Store;
 
 /// 一个进程的常驻资源：一条导入作业池、两个长驻服务、一个书库句柄。
 pub struct Services {
@@ -112,8 +112,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::Services;
-    use crate::ingest::import::ImportOutcome;
     use crate::infra::task::TaskManager;
+    use crate::ingest::import::ImportOutcome;
 
     fn pool(workers: usize) -> Arc<TaskManager> {
         Arc::new(TaskManager::new(workers))

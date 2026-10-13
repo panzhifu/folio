@@ -76,8 +76,7 @@ impl Store {
     /// 删集合。只断链接，里头的书一本都不动（`collection_books` 上那条级联）。
     pub fn delete_collection(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let rows = conn
-            .execute("DELETE FROM collections WHERE id = ?1", params![id])?;
+        let rows = conn.execute("DELETE FROM collections WHERE id = ?1", params![id])?;
         if rows == 0 {
             tracing::warn!("store: 删集合 {id}，但没有这一行");
         } else {
@@ -156,7 +155,6 @@ impl Store {
     }
 }
 
-
 fn collection_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
     Ok(Collection {
         id: r.get(0)?,
@@ -164,7 +162,6 @@ fn collection_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
         book_count: r.get::<_, i64>(2)? as usize,
     })
 }
-
 
 #[cfg(test)]
 mod tests {

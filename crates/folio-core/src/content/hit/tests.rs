@@ -2,9 +2,9 @@
 //! 断点与坐标都是推出来的。round-trip 是核心：命中 → 矩形 → 命中，必须回到同一个字。
 
 use crate::content::anchor::{TextMap, line_offset};
+use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{ComputedStyle, cascade};
 use crate::content::format::css::{Origin, RuleSet};
-use crate::content::dom::{Dom, NodeId};
 use crate::content::hit::{Hit, hit_test, paragraph_range, rects_for_range, snap_word};
 use crate::layout::{Layout, LayoutOptions, LineMetrics, Measure, NoImages, layout};
 

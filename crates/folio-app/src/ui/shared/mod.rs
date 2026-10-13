@@ -15,11 +15,11 @@
 pub mod app_store;
 pub mod config_model;
 pub mod error;
-pub mod import_queue;
-pub mod services;
-pub mod transfer;
-pub mod watch;
 pub mod images;
+pub mod import_queue;
 pub mod l10n;
 pub mod library;
+pub mod services;
 pub mod theme;
+pub mod transfer;
+pub mod watch;

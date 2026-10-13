@@ -17,16 +17,16 @@ use std::sync::{Arc, OnceLock};
 
 use folio_core::Reader;
 use folio_core::content::anchor::TextMap;
+use folio_core::content::dom::{Dom, NodeId};
 use folio_core::content::format::css::computed::{ComputedStyle, StyledDom, TextAlign, cascade};
 use folio_core::content::format::css::{Origin, RuleSet};
-use folio_core::content::dom::{Dom, NodeId};
 use folio_core::content::hit::Hit;
+use folio_core::infra::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
 use folio_core::layout::fragment::{Fragment, FragmentOptions, column_width, fragments};
 use folio_core::layout::{
     BlockCache, Layout, LayoutKey, LayoutOptions, LineBox, content_hash, layout_with_blocks,
     quantize_px,
 };
-use folio_core::infra::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
 use gpui_kit::{App, TextSystem, Window, WindowTextSystem};
 
 use super::measure::GpuiMeasure;
@@ -816,7 +816,12 @@ impl Document {
         offset: usize,
     ) -> Option<std::ops::Range<usize>> {
         let _ = (window, cx);
-        folio_core::content::hit::paragraph_range(self.layout(), self.dom(), self.text_map(), offset)
+        folio_core::content::hit::paragraph_range(
+            self.layout(),
+            self.dom(),
+            self.text_map(),
+            offset,
+        )
     }
 
     /// 那个**会话级复用**的度量器（见 [`Document::measure`] 字段的说明）。
@@ -859,7 +864,12 @@ impl Document {
 
     /// 可见文本偏移落在第几行（行盒下标）。
     pub fn line_at_offset(&self, offset: usize) -> usize {
-        folio_core::content::anchor::line_at_offset(self.layout(), self.dom(), self.text_map(), offset)
+        folio_core::content::anchor::line_at_offset(
+            self.layout(),
+            self.dom(),
+            self.text_map(),
+            offset,
+        )
     }
 
     /// 要把 `offset` 那一行摆上屏，滚动位置该是多少（行顶的绝对 y）。
@@ -867,7 +877,12 @@ impl Document {
     /// 排版还没做过（`layout` 是空的）时给 0，等于回到章首 —— 这是唯一不骗人的兜底。
     pub fn y_at_offset(&self, offset: usize) -> f32 {
         let layout = self.layout();
-        let line = folio_core::content::anchor::line_at_offset(layout, self.dom(), self.text_map(), offset);
+        let line = folio_core::content::anchor::line_at_offset(
+            layout,
+            self.dom(),
+            self.text_map(),
+            offset,
+        );
         layout
             .lines
             .get(line)

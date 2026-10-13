@@ -98,8 +98,8 @@ impl ShelfView {
         }
         if cfg!(target_os = "android") {
             // 阻塞的授权请求丢给后台线程；回来后 `begin_scan` 接手。
-            let requested = cx
-                .background_spawn(async move { crate::ui::platform::request_storage_access() });
+            let requested =
+                cx.background_spawn(async move { crate::ui::platform::request_storage_access() });
             self._scan = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
                 let all_files = requested.await;
                 let _ = this.update(cx, |this, cx| this.begin_scan(all_files, cx));
@@ -120,7 +120,12 @@ impl ShelfView {
         let exclude = vec![target_dir(&ConfigHolder::library(cx)).expect("start_scan 刚确认过")];
         let noise_exempt = scan_noise_exempt();
         // 与导入共用同一个池（§1.1）：扫描走预热档，导入走落库档。
-        let handle = submit_scan(&crate::ui::shared::services::pool(), roots, exclude, noise_exempt);
+        let handle = submit_scan(
+            &crate::ui::shared::services::pool(),
+            roots,
+            exclude,
+            noise_exempt,
+        );
         let cancel = handle.cancel.clone();
         self.scan = Some(ScanPhase::Scanning { found: 0, cancel });
         self._scan = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
@@ -238,12 +243,7 @@ impl ShelfView {
 
     /// 全选 / 清除（已在架上的不参与 —— 见模块注释）。
     fn toggle_select_all(&mut self, cx: &mut Context<Self>) {
-        let Some(ScanPhase::Results {
-            rows,
-            checked,
-            ..
-        }) = &mut self.scan
-        else {
+        let Some(ScanPhase::Results { rows, checked, .. }) = &mut self.scan else {
             return;
         };
         let eligible: Vec<PathBuf> = rows
@@ -280,10 +280,7 @@ impl ShelfView {
             return;
         }
         tracing::info!("ShelfView: 从扫描清单导入 {} 本", paths.len());
-        self.dispatch_import(
-            Box::new(folio_core::PathsSource::picked(paths)),
-            cx,
-        );
+        self.dispatch_import(Box::new(folio_core::PathsSource::picked(paths)), cx);
     }
 
     /// 收掉面板回架面。
@@ -295,11 +292,7 @@ impl ShelfView {
     /// 喂一条扫描事件。只在跑回归门的那一端编译（与 `feed_import_event` 同理：
     /// 这条链的起点是后台线程，测试只能从「事件已经上了界面线程」这一处进）。
     #[cfg(all(test, not(mobile)))]
-    pub(crate) fn feed_scan_event(
-        &mut self,
-        event: TaskEvent<ScanReport>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn feed_scan_event(&mut self, event: TaskEvent<ScanReport>, cx: &mut Context<Self>) {
         self.scan_event(event, cx);
     }
 
@@ -410,24 +403,17 @@ impl ShelfView {
                     .flex_1()
                     .min_h_0()
                     .child(head)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .when(!rows.is_empty(), |list| {
-                                list.child(
-                                    v_virtual_list(
-                                        list_entity,
-                                        "shelf-scan-rows",
-                                        sizes.clone(),
-                                        move |this, range, _window, cx| {
-                                            scan_rows(this, range, cx)
-                                        },
-                                    )
-                                    .flex_1(),
-                                )
-                            }),
-                    )
+                    .child(div().flex_1().min_h_0().when(!rows.is_empty(), |list| {
+                        list.child(
+                            v_virtual_list(
+                                list_entity,
+                                "shelf-scan-rows",
+                                sizes.clone(),
+                                move |this, range, _window, cx| scan_rows(this, range, cx),
+                            )
+                            .flex_1(),
+                        )
+                    }))
                     .child(
                         h_flex()
                             .w_full()
@@ -452,9 +438,8 @@ impl ShelfView {
                                         .label(select_label.to_string())
                                         .accessibility_label(select_label)
                                         .on_click(move |_, _, cx| {
-                                            select_entity.update(cx, |this, cx| {
-                                                this.toggle_select_all(cx)
-                                            })
+                                            select_entity
+                                                .update(cx, |this, cx| this.toggle_select_all(cx))
                                         }),
                                 )
                                 .child(
@@ -463,9 +448,8 @@ impl ShelfView {
                                         .label(import_label.to_string())
                                         .accessibility_label(import_label)
                                         .on_click(move |_, _, cx| {
-                                            import_entity.update(cx, |this, cx| {
-                                                this.import_checked(cx)
-                                            })
+                                            import_entity
+                                                .update(cx, |this, cx| this.import_checked(cx))
                                         }),
                                 )
                             }),

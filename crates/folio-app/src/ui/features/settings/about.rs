@@ -32,7 +32,12 @@ fn version_group(cx: &App) -> Group {
                 Some(tr(cx, "about.version_desc")),
                 &["version", "build", "版本"],
             ),
-            value_item(tr(cx, "about.gpui_pre"), gpui_pre(), None, &["gpui", "engine"]),
+            value_item(
+                tr(cx, "about.gpui_pre"),
+                gpui_pre(),
+                None,
+                &["gpui", "engine"],
+            ),
             value_item(tr(cx, "about.kit"), kit(), None, &["gpui-kit", "component"]),
             value_item(
                 tr(cx, "about.mobile"),
@@ -86,29 +91,31 @@ fn value_item(
 fn language_group(cx: &App) -> Group {
     group(
         tr(cx, "field.language"),
-        vec![Row::dropdown(
-            tr(cx, "field.language"),
-            language_options(),
-            false,
-            |cx: &App| SharedString::from(ConfigHolder::language(cx).locale.code()),
-            |val: SharedString, cx| {
-                // 认不出的值不改：下拉框给不出认不出的值，
-                // 真出现时保留当前语言比切成未知语言好。
-                if let Some(locale) = Locale::from_label(&val) {
-                    ConfigHolder::edit_language(cx, |l| l.locale = locale);
-                }
-            },
-        )
-        .description(tr(cx, "field.language.desc"))
-        .keywords(&[
-            "language",
-            "locale",
-            "语言",
-            "中文",
-            "简体",
-            "English",
-            "日本語",
-        ])],
+        vec![
+            Row::dropdown(
+                tr(cx, "field.language"),
+                language_options(),
+                false,
+                |cx: &App| SharedString::from(ConfigHolder::language(cx).locale.code()),
+                |val: SharedString, cx| {
+                    // 认不出的值不改：下拉框给不出认不出的值，
+                    // 真出现时保留当前语言比切成未知语言好。
+                    if let Some(locale) = Locale::from_label(&val) {
+                        ConfigHolder::edit_language(cx, |l| l.locale = locale);
+                    }
+                },
+            )
+            .description(tr(cx, "field.language.desc"))
+            .keywords(&[
+                "language",
+                "locale",
+                "语言",
+                "中文",
+                "简体",
+                "English",
+                "日本語",
+            ]),
+        ],
     )
 }
 
@@ -140,18 +147,17 @@ fn config_group(cx: &App) -> Group {
     let path = config_path().display().to_string();
     group(
         tr(cx, "field.config_path"),
-        vec![Row::custom_titled(
-            tr(cx, "field.config_path"),
-            move |cx| {
+        vec![
+            Row::custom_titled(tr(cx, "field.config_path"), move |cx| {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(path.clone())
                     .into_any_element()
-            },
-        )
-        .description(tr(cx, "field.config_path.desc"))
-        .keywords(&["config", "path", "配置", "文件"])],
+            })
+            .description(tr(cx, "field.config_path.desc"))
+            .keywords(&["config", "path", "配置", "文件"]),
+        ],
     )
 }
 

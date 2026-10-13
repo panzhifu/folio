@@ -41,12 +41,7 @@ impl Store {
     ///
     /// 输入那份 `doc.chapter_locators` 在写的时候**不看**：位置由格式现算，
     /// 免得「provider 交上来的空表」和「读回来的表」两种来源各写一遍。
-    fn save_flow_in(
-        conn: &Connection,
-        book_id: i64,
-        doc: &FlowDoc,
-        format: Format,
-    ) -> Result<()> {
+    fn save_flow_in(conn: &Connection, book_id: i64, doc: &FlowDoc, format: Format) -> Result<()> {
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM chapters WHERE book_id = ?1", params![book_id])?;
         tx.execute("DELETE FROM images WHERE book_id = ?1", params![book_id])?;
@@ -242,7 +237,6 @@ impl Store {
         }))
     }
 
-
     /// 存一本定版式文档。与 [`Store::save_flow`] 对称：封面与目录跟着一起写。
     pub fn save_fixed(&self, book_id: i64, doc: &FixedDoc) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -272,13 +266,19 @@ impl Store {
     /// 与 [`Self::save_content`] 同一件事，只是入口收在「文档」而不是「内容」：
     /// 导入那一步手上只有一份 `dyn Document`（`document::open` 的产物），
     /// 让它自己 match 家族等于把 `Content` 的形状又散给调用方一次。
-    pub fn save_document(&self, book_id: i64, doc: &dyn crate::content::document::Document) -> Result<()> {
+    pub fn save_document(
+        &self,
+        book_id: i64,
+        doc: &dyn crate::content::document::Document,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         match doc.content() {
             crate::content::document::ContentRef::Reflow(flow) => {
                 Self::save_flow_in(&conn, book_id, flow, doc.format())
             }
-            crate::content::document::ContentRef::Fixed(fixed) => Self::save_fixed_in(&conn, book_id, fixed),
+            crate::content::document::ContentRef::Fixed(fixed) => {
+                Self::save_fixed_in(&conn, book_id, fixed)
+            }
         }
     }
 

@@ -24,10 +24,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use folio_core::content::format::css::computed::{ComputedStyle, DeclStatus, cascade, declaration_status};
-use folio_core::content::format::css::{Origin, RuleSet};
 use folio_core::content::dom::Dom;
 use folio_core::content::format::FlowDoc;
+use folio_core::content::format::css::computed::{
+    ComputedStyle, DeclStatus, cascade, declaration_status,
+};
+use folio_core::content::format::css::{Origin, RuleSet};
 
 /// 一个属性的落地面。`elements` 是**这个属性上有任何一条胜出且没接住的声明**的元素数。
 #[derive(Debug, Default)]
@@ -179,7 +181,8 @@ fn measure(flow: &FlowDoc, rules: &RuleSet) -> Totals {
             };
             // `matching_declarations` 已经按层叠优先级从低到高排好，
             // 所以同一属性留最后一条就是胜出的那条。
-            let mut winner: BTreeMap<&str, &folio_core::content::format::css::Declaration> = BTreeMap::new();
+            let mut winner: BTreeMap<&str, &folio_core::content::format::css::Declaration> =
+                BTreeMap::new();
             for decl in rules.matching_declarations(&dom, id) {
                 winner.insert(decl.property.as_str(), decl);
             }
@@ -301,8 +304,8 @@ fn without_unsupported(rules: &RuleSet) -> RuleSet {
 /// 为什么累加而不是只取第一章：EPUB 的第一章常常是封面页或扉页（只有图，甚至没有文本），
 /// 那种页量出来的「差」是 0，看不出任何事。全书累加才是这本书的排版差。
 fn geometry(flow: &FlowDoc, rules: &RuleSet) -> (usize, f32, f32) {
-    use folio_core::content::format::css::computed::ComputedStyle;
     use folio_core::content::dom::Dom;
+    use folio_core::content::format::css::computed::ComputedStyle;
     use folio_core::layout::{LayoutOptions, layout};
     let mut lines = 0usize;
     let mut height = 0.0f32;

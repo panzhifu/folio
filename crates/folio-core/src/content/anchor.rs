@@ -27,8 +27,8 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::content::format::css::ua;
 use crate::content::dom::{Dom, NodeId, NodeKind};
+use crate::content::format::css::ua;
 use crate::layout::{Layout, LineFragment};
 
 /// `prefix` / `suffix` 各取多少字。24 个汉字在一章里几乎唯一，

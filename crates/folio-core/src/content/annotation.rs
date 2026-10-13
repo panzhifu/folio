@@ -155,7 +155,9 @@ mod tests {
     //! 排版一律用真 `Dom` + `TextMap` 建，不假造坐标表。
 
     use crate::content::anchor::{Confidence, TextAnchor, TextMap};
-    use crate::content::annotation::{annotations_by_chapter, annotations_markdown, resolve_annotations};
+    use crate::content::annotation::{
+        annotations_by_chapter, annotations_markdown, resolve_annotations,
+    };
     use crate::content::dom::Dom;
     use crate::content::format::{Chapter, DocMeta, Format};
     use crate::store::Annotation;

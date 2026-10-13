@@ -85,9 +85,7 @@ impl Store {
     /// 才知道的事（文件头的理由）。行数就是会话数，全库读一遍也就是几万行定点算术。
     pub fn reading_days(&self, tz_offset_secs: i64) -> Result<usize> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = conn.prepare(
-            "SELECT started_at FROM reading_sessions WHERE seconds > 0",
-        )?;
+        let mut stmt = conn.prepare("SELECT started_at FROM reading_sessions WHERE seconds > 0")?;
         let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
         let mut days: HashSet<i64> = HashSet::new();
         for row in rows {
@@ -199,9 +197,8 @@ impl Store {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let today = local_day(now(), tz_offset_secs);
         let since = day_start(today - days as i64 + 1, tz_offset_secs);
-        let mut stmt = conn.prepare(
-            "SELECT started_at, seconds FROM reading_sessions WHERE started_at >= ?1",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT started_at, seconds FROM reading_sessions WHERE started_at >= ?1")?;
         let rows = stmt.query_map(params![since], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
         })?;
@@ -272,7 +269,6 @@ fn streaks(days: &[DailyReading]) -> (usize, usize) {
     (current, longest)
 }
 
-
 fn session_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReadingSession> {
     Ok(ReadingSession {
         id: r.get(0)?,
@@ -283,7 +279,6 @@ fn session_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReadingSession> {
         chars: r.get(5)?,
     })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -298,8 +293,8 @@ mod tests {
 
     use crate::Store;
     use crate::content::format::{DocMeta, Format};
-    use crate::store::DailyReading;
     use crate::infra::time::{civil_date, day_start, local_day};
+    use crate::store::DailyReading;
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {
@@ -470,9 +465,15 @@ mod tests {
         let noon = |day: i64| day_start(day, tz) + 12 * 3600;
 
         // 今天两本各一段，昨天一段，前天没有。
-        store.record_session(a, noon(today), noon(today) + 600, 0).unwrap();
-        store.record_session(b, noon(today) + 60, noon(today) + 260, 0).unwrap();
-        store.record_session(a, noon(today - 1), noon(today - 1) + 300, 0).unwrap();
+        store
+            .record_session(a, noon(today), noon(today) + 600, 0)
+            .unwrap();
+        store
+            .record_session(b, noon(today) + 60, noon(today) + 260, 0)
+            .unwrap();
+        store
+            .record_session(a, noon(today - 1), noon(today - 1) + 300, 0)
+            .unwrap();
 
         let s = store.reading_summary(3, tz).unwrap();
         assert_eq!(s.seconds, 1100, "600 + 200 + 300");
@@ -492,8 +493,12 @@ mod tests {
         let tz = 8 * 3600;
         let today = local_day(now_secs(), tz);
         let noon = |day: i64| day_start(day, tz) + 12 * 3600;
-        store.record_session(book, noon(today - 1), noon(today - 1) + 300, 0).unwrap();
-        store.record_session(book, noon(today - 2), noon(today - 2) + 300, 0).unwrap();
+        store
+            .record_session(book, noon(today - 1), noon(today - 1) + 300, 0)
+            .unwrap();
+        store
+            .record_session(book, noon(today - 2), noon(today - 2) + 300, 0)
+            .unwrap();
 
         let s = store.reading_summary(5, tz).unwrap();
         assert_eq!(s.seconds_at_today(), 0, "今天那一格确实是 0");
@@ -509,10 +514,16 @@ mod tests {
         let tz = 8 * 3600;
         let today = local_day(now_secs(), tz);
         let noon = |day: i64| day_start(day, tz) + 12 * 3600;
-        store.record_session(book, noon(today), noon(today) + 60, 0).unwrap();
+        store
+            .record_session(book, noon(today), noon(today) + 60, 0)
+            .unwrap();
         // 昨天空着，前天与大前天连着读过。
-        store.record_session(book, noon(today - 2), noon(today - 2) + 60, 0).unwrap();
-        store.record_session(book, noon(today - 3), noon(today - 3) + 60, 0).unwrap();
+        store
+            .record_session(book, noon(today - 2), noon(today - 2) + 60, 0)
+            .unwrap();
+        store
+            .record_session(book, noon(today - 3), noon(today - 3) + 60, 0)
+            .unwrap();
 
         let s = store.reading_summary(6, tz).unwrap();
         assert_eq!(s.streak, 1, "今天读完就断在昨天那个空档上");
@@ -528,10 +539,16 @@ mod tests {
         let today = local_day(now_secs(), tz);
         // 本地 08:00 读了一刻钟。
         let morning = day_start(today, tz) + 8 * 3600;
-        store.record_session(book, morning, morning + 900, 0).unwrap();
+        store
+            .record_session(book, morning, morning + 900, 0)
+            .unwrap();
 
         let hours = store.hour_distribution(3, tz).unwrap();
-        assert_eq!(hours.len(), crate::infra::time::HOURS_PER_DAY, "表宽永远是 24");
+        assert_eq!(
+            hours.len(),
+            crate::infra::time::HOURS_PER_DAY,
+            "表宽永远是 24"
+        );
         assert_eq!(hours[8], 900);
         assert_eq!(hours.iter().sum::<i64>(), 900, "一段只进一格");
         // 同一个瞬间换到 UTC 看是凌晨 0 点 —— 格子跟着日界线一起挪。
@@ -546,9 +563,15 @@ mod tests {
         let tz = 8 * 3600;
         let today = local_day(now_secs(), tz);
         let noon = |day: i64| day_start(day, tz) + 12 * 3600;
-        store.record_session(b, noon(today), noon(today) + 60, 0).unwrap();
-        store.record_session(a, noon(today), noon(today) + 600, 0).unwrap();
-        store.record_session(a, noon(today) + 700, noon(today) + 1000, 0).unwrap();
+        store
+            .record_session(b, noon(today), noon(today) + 60, 0)
+            .unwrap();
+        store
+            .record_session(a, noon(today), noon(today) + 600, 0)
+            .unwrap();
+        store
+            .record_session(a, noon(today) + 700, noon(today) + 1000, 0)
+            .unwrap();
         // 窗口之外（30 天前）的一段不该参与排行。
         store
             .record_session(b, noon(today - 30), noon(today - 30) + 9000, 0)

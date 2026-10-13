@@ -107,7 +107,8 @@ impl ReaderSession {
                     if session.reading_segment_start == 0 {
                         return;
                     }
-                    if folio_core::infra::time::now() - session.reading_segment_start < SEGMENT_SECS {
+                    if folio_core::infra::time::now() - session.reading_segment_start < SEGMENT_SECS
+                    {
                         return;
                     }
                     session.settle_reading();

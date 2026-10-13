@@ -21,10 +21,10 @@ use folio_core::{
     Cancel, ImportOutcome, ImportReport, Imported, PathsSource, Store, TaskEvent, UrlSource,
     submit_import,
 };
-use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::NavStackState;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
@@ -35,14 +35,14 @@ use gpui_kit::{
     UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 
+use super::book_card::{COVER_RATIO, Card};
+use super::book_menu;
+use super::scan::ScanPhase;
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::error::{Context as _, report};
 use crate::ui::shared::l10n::{tf, tr};
 use crate::ui::shared::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::shared::services;
-use super::book_card::{COVER_RATIO, Card};
-use super::book_menu;
-use super::scan::ScanPhase;
 use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
 use crate::ui::widgets::{SearchBox, SearchBoxEvent, empty_state, muted_label};
 
@@ -415,10 +415,9 @@ impl ShelfView {
                 // 一个都没选上：不去敲后端，也别让架面闪一下「导入中」。
                 return;
             }
-            let _ = this
-                .update(cx, |this, cx| {
-                    this.dispatch_import(Box::new(PathsSource::picked(paths)), cx)
-                });
+            let _ = this.update(cx, |this, cx| {
+                this.dispatch_import(Box::new(PathsSource::picked(paths)), cx)
+            });
         })
         .detach();
     }
@@ -427,7 +426,11 @@ impl ShelfView {
     /// 扫描清单勾选「导入所选」走的是同一条路。
     ///
     /// 架面已经不在了（`update` 报错的那些时刻）就直接返回：后面没有界面可画了。
-    pub(super) fn dispatch_import(&mut self, source: Box<dyn folio_core::ingest::import::Source>, cx: &mut Context<Self>) {
+    pub(super) fn dispatch_import(
+        &mut self,
+        source: Box<dyn folio_core::ingest::import::Source>,
+        cx: &mut Context<Self>,
+    ) {
         // 书库位置到这一刻再问一次：选择器开着的那段时间里读者可能改过它。
         let Some(dir) = target_dir(&ConfigHolder::library(cx)) else {
             tracing::error!("ShelfView: 书库位置没确认过，这一批没有导入");
@@ -575,10 +578,9 @@ impl ShelfView {
                     outcome.candidate.name
                 ),
                 // 坏的那本指名道姓进日志：读者只知道少了几本，得有人能查为什么。
-                Err(err) => tracing::error!(
-                    "ShelfView: 导入《{}》失败 {err:#}",
-                    outcome.candidate.name
-                ),
+                Err(err) => {
+                    tracing::error!("ShelfView: 导入《{}》失败 {err:#}", outcome.candidate.name)
+                }
             }
         }
         // 一句分类总结（`plans/基础设施.md` §3.2：批量作业要能聚合报表）。界面上那张
@@ -613,9 +615,10 @@ impl ShelfView {
             cx.notify();
             return;
         }
-        self.url_entry = Some(cx.new(|cx| {
-            InputState::new(window, cx).placeholder(tr(cx, "shelf.url_placeholder"))
-        }));
+        self.url_entry =
+            Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder(tr(cx, "shelf.url_placeholder"))
+            }));
         cx.notify();
     }
 
@@ -632,14 +635,14 @@ impl ShelfView {
         };
         let url = entry.read(cx).value().trim().to_string();
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            tracing::info!("ShelfView: 不是 http(s) 链接，不导入：{}", &url[..url.len().min(80)]);
+            tracing::info!(
+                "ShelfView: 不是 http(s) 链接，不导入：{}",
+                &url[..url.len().min(80)]
+            );
             return;
         }
         self.url_entry = None;
-        self.dispatch_import(
-            Box::new(UrlSource::new(url, url_transport())),
-            cx,
-        );
+        self.dispatch_import(Box::new(UrlSource::new(url, url_transport())), cx);
     }
 
     /// 「从链接导入」面板。
@@ -663,11 +666,7 @@ impl ShelfView {
                     .child(tr(cx, "shelf.url_title")),
             )
             .child(muted_label(tr(cx, "shelf.url_hint"), cx))
-            .child(
-                div()
-                    .w_full()
-                    .child(Input::new(&entry).cleanable(true)),
-            )
+            .child(div().w_full().child(Input::new(&entry).cleanable(true)))
             .child(
                 h_flex()
                     .w_full()
@@ -973,21 +972,16 @@ impl ShelfView {
                             // 左右留白仍归每一排自己：滚轴贴的是这块区域真正的边。
                             .px(px(GUTTER))
                             .py_1()
-                            .children(
-                                this.items[from..to]
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(col, card)| {
-                                        this.card_element(
-                                            card,
-                                            &labels,
-                                            cover_height,
-                                            &enter,
-                                            from + col,
-                                            cx,
-                                        )
-                                    }),
-                            )
+                            .children(this.items[from..to].iter().enumerate().map(|(col, card)| {
+                                this.card_element(
+                                    card,
+                                    &labels,
+                                    cover_height,
+                                    &enter,
+                                    from + col,
+                                    cx,
+                                )
+                            }))
                             .into_any_element()
                     })
                 })
@@ -1142,7 +1136,11 @@ mod tests {
 
         // 桌面：列数与格宽都跟着窗口走，排距不会停在手机那一档。
         let desk = grid_spec(1600.0, SizeClass::Expanded);
-        assert!(desk.columns > phone.columns, "1600 宽还只排 {} 列", desk.columns);
+        assert!(
+            desk.columns > phone.columns,
+            "1600 宽还只排 {} 列",
+            desk.columns
+        );
         assert!(desk.cover_height > phone.cover_height);
     }
 }

@@ -514,9 +514,9 @@ impl ReadingPage {
     /// 就少一处「这功能那端没有」。
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         let settings = cx.new(|_| CompactSettings::new());
-        let _ = self
-            .stack
-            .update(cx, |state, cx| state.push(settings, NavMotion::Animated, cx));
+        let _ = self.stack.update(cx, |state, cx| {
+            state.push(settings, NavMotion::Animated, cx)
+        });
     }
 
     fn advance(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -697,9 +697,12 @@ impl ReadingPage {
                 .into_any_element();
         }
         let view = cx.entity().clone();
-        v_virtual_list(view, "reader-toc", self.toc_sizes.clone(), |page, range, _, cx| {
-            page.toc_rows(range, cx)
-        })
+        v_virtual_list(
+            view,
+            "reader-toc",
+            self.toc_sizes.clone(),
+            |page, range, _, cx| page.toc_rows(range, cx),
+        )
         .into_any_element()
     }
 
@@ -707,7 +710,11 @@ impl ReadingPage {
     ///
     /// 三个信号各管各的，不互相顶：当前行 = 底色 + 左边那条标记；来过 = 文字变灰
     /// （设置里可以关掉）；对不上正文的条目 = 灰到底且**没有**点击回调。
-    fn toc_rows(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn toc_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let Some(toc) = &self.toc else {
             return Vec::new();
         };
@@ -733,11 +740,15 @@ impl ReadingPage {
             .map(|row| {
                 let ix = row.ix;
                 let active = row.chapter == Some(current);
-                let visited =
-                    prefs.toc_dim_read && row.chapter.is_some_and(|chapter| read.contains(&chapter));
+                let visited = prefs.toc_dim_read
+                    && row.chapter.is_some_and(|chapter| read.contains(&chapter));
                 // 当前行不跟着「来过」变灰：它已经吃了底色与标记条，再灰一层就变成
                 // 「看不出现在在哪」，而那正是这一屏唯一必须答对的问题。
-                let color = if active || !visited { foreground } else { muted };
+                let color = if active || !visited {
+                    foreground
+                } else {
+                    muted
+                };
                 let chevron = if row.branch {
                     let page_toggle = page.clone();
                     Button::new(ElementId::named_usize("reader-toc-toggle", ix))
@@ -774,7 +785,9 @@ impl ReadingPage {
                     .flex()
                     .items_center()
                     .overflow_hidden()
-                    .pl(px(TOC_GUTTER + TOC_MARKER + (row.depth as f32) * TOC_INDENT))
+                    .pl(px(TOC_GUTTER
+                        + TOC_MARKER
+                        + (row.depth as f32) * TOC_INDENT))
                     .pr(px(TOC_GUTTER))
                     .border_l(px(TOC_MARKER))
                     .border_color(if active { foreground } else { transparent })
@@ -901,9 +914,7 @@ impl Render for ReadingPage {
             );
         // 干净态那两行与浮层是同一片地方的两种样子，永远只画一套。
         root = if self.chrome.is_open() {
-            let root = root
-                .child(self.top_bar(cx))
-                .child(self.bottom_bar(cx));
+            let root = root.child(self.top_bar(cx)).child(self.bottom_bar(cx));
             // 目录是第三档：顶栏底栏都留着，中间那块正文整块换成树。
             if self.chrome.panel() == Panel::Toc {
                 root.child(self.toc_layer(window, cx))

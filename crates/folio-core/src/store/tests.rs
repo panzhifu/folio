@@ -209,9 +209,6 @@ fn the_v8_migration_drops_the_text_and_keeps_a_locator() {
     Store::open_at(&db).unwrap();
 }
 
-
-
-
 /// 定版式文档（CBZ 等）落库时也要盖 `index_version` —— 不然 `stale_reason` 永远说它旧，
 /// 每次开书都白重扫一遍。这是那个既存 bug 的回归门。
 #[test]
@@ -292,8 +289,10 @@ fn deleting_a_book_gives_its_pages_back() {
     let db = dir.path().join("folio.db");
     let pages = |db: &Path| -> i64 {
         let conn = rusqlite::Connection::open(db).unwrap();
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
-        conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap()
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        conn.query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap()
     };
 
     let store = Store::open_at(&db).unwrap();
@@ -402,7 +401,9 @@ fn saving_a_flow_twice_replaces_rather_than_appends() {
     store
         .save_flow(id, &flow(&[("一", "a"), ("二", "b")]), Format::Markdown)
         .unwrap();
-    store.save_flow(id, &flow(&[("新", "c")]), Format::Markdown).unwrap();
+    store
+        .save_flow(id, &flow(&[("新", "c")]), Format::Markdown)
+        .unwrap();
     let got = store.load_flow(id).unwrap().unwrap();
     assert_eq!(got.chapters.len(), 1);
     assert_eq!(got.chapters[0].title, "新");
@@ -554,7 +555,9 @@ fn a_book_whose_source_is_gone_is_pruned_with_its_data() {
     store
         .save_flow(gone_id, &flow(&[("二", "正文")]), Format::Markdown)
         .unwrap();
-    store.set_position(gone_id, "page", &Locator::start()).unwrap();
+    store
+        .set_position(gone_id, "page", &Locator::start())
+        .unwrap();
     std::fs::remove_file(&gone).unwrap();
 
     let pruned = store.prune_missing().unwrap();
@@ -562,7 +565,10 @@ fn a_book_whose_source_is_gone_is_pruned_with_its_data() {
     assert!(store.book(gone_id).unwrap().is_none(), "书要没");
     assert!(store.load_flow(gone_id).unwrap().is_none(), "章节要跟着没");
     assert!(store.position(gone_id).unwrap().is_none(), "进度要跟着没");
-    assert!(store.book(kept_id).unwrap().is_some(), "文件还在的那本不能动");
+    assert!(
+        store.book(kept_id).unwrap().is_some(),
+        "文件还在的那本不能动"
+    );
 
     // 盘点不出来（把上一层目录也删了）时**不删**：那是「现在看不见」，不是「没了」。
     let detached = dir.path().join("外接盘/book.md");
@@ -570,7 +576,10 @@ fn a_book_whose_source_is_gone_is_pruned_with_its_data() {
     std::fs::write(&detached, "# 三\n\n正文\n").unwrap();
     let detached_id = store.add_book(&detached, &meta("外接盘")).unwrap();
     std::fs::remove_dir_all(dir.path().join("外接盘")).unwrap();
-    assert!(store.prune_missing().unwrap().is_empty(), "目录都读不到就别动");
+    assert!(
+        store.prune_missing().unwrap().is_empty(),
+        "目录都读不到就别动"
+    );
     assert!(store.book(detached_id).unwrap().is_some());
 }
 
@@ -608,10 +617,7 @@ fn a_changed_file_or_an_old_index_is_reported_as_stale() {
         conn.execute("UPDATE books SET index_version = 0 WHERE id = ?1", [id])
             .unwrap();
     }
-    assert_eq!(
-        store.stale_reason(id).unwrap(),
-        Some(StaleReason::OldIndex)
-    );
+    assert_eq!(store.stale_reason(id).unwrap(), Some(StaleReason::OldIndex));
 
     // 文件删了：这是「读不了」，比另外两种严重。
     std::fs::remove_file(&path).unwrap();
@@ -1091,11 +1097,7 @@ fn the_v14_migration_brings_back_char_len_as_nullable() {
     let book = store.add_book(&path("新.md"), &meta("新书")).unwrap();
     store.save_flow(book, &fresh, Format::Markdown).unwrap();
     let back = store.load_flow(book).unwrap().unwrap();
-    assert_eq!(
-        back.chapters[0].char_len(),
-        Some(5),
-        "字数要能原样落库读回"
-    );
+    assert_eq!(back.chapters[0].char_len(), Some(5), "字数要能原样落库读回");
     assert_eq!(
         back.char_len(),
         Some(6),
@@ -1130,7 +1132,9 @@ fn shelf_reports_progress_from_character_counts() {
         .iter()
         .map(|(t, s)| (t.as_str(), s.as_str()))
         .collect();
-    store.save_flow(book, &flow(&parts), Format::Markdown).unwrap();
+    store
+        .save_flow(book, &flow(&parts), Format::Markdown)
+        .unwrap();
     // 三章一共 60 字，是下面每个分母。
 
     // 从没打开过：没有进度，**不是** 0%。
@@ -1143,7 +1147,14 @@ fn shelf_reports_progress_from_character_counts() {
 
     // 正中间：第 1 章（0 起）第 10 字 → (10 + 10) / 60。
     store
-        .set_position(book, "scroll", &Locator { chapter: 1, offset: 10 })
+        .set_position(
+            book,
+            "scroll",
+            &Locator {
+                chapter: 1,
+                offset: 10,
+            },
+        )
         .unwrap();
     let got = item(&store).progress.expect("位置在、字数全，该有进度");
     assert!(
@@ -1153,7 +1164,14 @@ fn shelf_reports_progress_from_character_counts() {
 
     // 章首是 10/60，章尾是 30/60 —— 「章内偏移」那一格真的进了式子。
     store
-        .set_position(book, "scroll", &Locator { chapter: 1, offset: 0 })
+        .set_position(
+            book,
+            "scroll",
+            &Locator {
+                chapter: 1,
+                offset: 0,
+            },
+        )
         .unwrap();
     let at_head = item(&store).progress.unwrap();
     assert!(
@@ -1163,7 +1181,14 @@ fn shelf_reports_progress_from_character_counts() {
 
     // 越界偏移夹到 100%，不冲出进度条。
     store
-        .set_position(book, "scroll", &Locator { chapter: 2, offset: 99_999 })
+        .set_position(
+            book,
+            "scroll",
+            &Locator {
+                chapter: 2,
+                offset: 99_999,
+            },
+        )
         .unwrap();
     assert_eq!(item(&store).progress, Some(1.0), "越界偏移夹在 100%");
 
@@ -1174,9 +1199,18 @@ fn shelf_reports_progress_from_character_counts() {
     let db = dir.path().join("folio.db");
     let store = Store::open_at(&db).unwrap();
     let book = store.add_book(&path("b.md"), &meta("B")).unwrap();
-    store.save_flow(book, &flow(&parts), Format::Markdown).unwrap();
     store
-        .set_position(book, "scroll", &Locator { chapter: 1, offset: 10 })
+        .save_flow(book, &flow(&parts), Format::Markdown)
+        .unwrap();
+    store
+        .set_position(
+            book,
+            "scroll",
+            &Locator {
+                chapter: 1,
+                offset: 10,
+            },
+        )
         .unwrap();
     assert!(
         store.shelf("").unwrap()[0].progress.is_some(),
@@ -1213,7 +1247,11 @@ fn every_shelf_query_can_report_progress() {
     store.save_flow(b, &flow(&parts), Format::Markdown).unwrap();
 
     // 一本都没打开过：三条路都必须把书查出来（LEFT JOIN 的意义）。
-    assert_eq!(store.shelf("").unwrap().len(), 2, "整架不该因为没进度就少书");
+    assert_eq!(
+        store.shelf("").unwrap().len(),
+        2,
+        "整架不该因为没进度就少书"
+    );
     assert_eq!(
         store.shelf("").unwrap()[0].progress,
         None,
@@ -1239,7 +1277,14 @@ fn every_shelf_query_can_report_progress() {
 
     // 打开其中一本，三条路都要给出同一个比例。
     store
-        .set_position(a, "scroll", &Locator { chapter: 0, offset: 1 })
+        .set_position(
+            a,
+            "scroll",
+            &Locator {
+                chapter: 0,
+                offset: 1,
+            },
+        )
         .unwrap();
     let want = store
         .shelf("")

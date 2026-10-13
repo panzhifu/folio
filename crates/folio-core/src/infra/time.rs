@@ -144,7 +144,11 @@ mod tests {
         // 2024-01-01 00:30 UTC。
         let at = day_start(19_723, 0) + 30 * 60;
         assert_eq!(local_hour(at, 0), 0);
-        assert_eq!(local_hour(at + 8 * 3600 - 30 * 60, 0), 8, "同一天的第 8 小时");
+        assert_eq!(
+            local_hour(at + 8 * 3600 - 30 * 60, 0),
+            8,
+            "同一天的第 8 小时"
+        );
         // 东八区看那一刻是 08:30 ⇒ 8 点。
         assert_eq!(local_hour(at, 8 * 3600), 8);
         // 西五区看那一刻是前一天 19:30 ⇒ 19 点，且不能是负数。

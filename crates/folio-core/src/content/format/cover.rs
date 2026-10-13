@@ -97,7 +97,8 @@ pub fn write(root: &Path, bytes: &[u8], mime: &str) -> Result<ContentHash> {
 /// 一份封面文件还在不在。读那一侧的第一步：在就交回路径，不在就退回 BLOB。
 pub fn resolve(root: &Path, hash: &str, mime: &str) -> Option<PathBuf> {
     // 与写入侧同一个 `stem`：截断口径必须一致，否则「文件明明在却读不出来」。
-    let path = crate::infra::paths::covers_dir(root).join(format!("{}.{}", stem(hash), extension(mime)));
+    let path =
+        crate::infra::paths::covers_dir(root).join(format!("{}.{}", stem(hash), extension(mime)));
     path.is_file().then_some(path)
 }
 

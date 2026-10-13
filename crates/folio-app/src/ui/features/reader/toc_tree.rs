@@ -309,10 +309,7 @@ mod tests {
         assert!(rows[1].branch, "第1章有下级，才画 chevron");
         assert!(!rows[0].branch, "扉页是叶子");
         assert_eq!(rows[3].fragment.as_deref(), Some("sec2"));
-        assert_eq!(
-            rows[4].chapter, None,
-            "指不到章节表的那条要留着，但不可点"
-        );
+        assert_eq!(rows[4].chapter, None, "指不到章节表的那条要留着，但不可点");
     }
 
     /// 前序编号必须与折没折无关：折叠集记的就是这些号，号一动读者手动展开的那几格
@@ -348,7 +345,15 @@ mod tests {
             .collect();
         assert_eq!(
             shown,
-            vec!["扉页", "第1章", "第一节", "第二节", "丢的那节", "第2章", "版权页"]
+            vec![
+                "扉页",
+                "第1章",
+                "第一节",
+                "第二节",
+                "丢的那节",
+                "第2章",
+                "版权页"
+            ]
         );
 
         // 在第 2 章：第1章 该折起来，它的三条小节一行都不许出现。
@@ -421,11 +426,7 @@ mod tests {
         let current = row_of_chapter(&rows, 2);
         let mut view = TocView::open(rows, current);
         // 拿到 owned 的标题而不是 `&str`：`visible()` 借的是 `view`，而下面还要改它。
-        let folded: Vec<String> = view
-            .visible()
-            .iter()
-            .map(|row| row.title.clone())
-            .collect();
+        let folded: Vec<String> = view.visible().iter().map(|row| row.title.clone()).collect();
         assert_eq!(
             folded,
             vec!["扉页", "第1章", "第2章", "版权页"],
@@ -458,7 +459,11 @@ mod tests {
         assert!(!view.visible().iter().any(|row| row.title == "第二节"));
 
         view.set_query("第二节".into());
-        let hits: Vec<_> = view.visible().iter().map(|row| row.title.as_str()).collect();
+        let hits: Vec<_> = view
+            .visible()
+            .iter()
+            .map(|row| row.title.as_str())
+            .collect();
         assert_eq!(
             hits,
             vec!["第1章", "第二节"],

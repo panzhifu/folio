@@ -21,15 +21,28 @@ fn main() {
     let _store = folio_core::Store::open_at(Path::new(&path)).expect("库应该能打开");
 
     let conn = rusqlite::Connection::open(&path).expect("裸连接");
-    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
-    let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
-    let free: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0)).unwrap();
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    let auto: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).unwrap();
+    let page_size: i64 = conn
+        .query_row("PRAGMA page_size", [], |r| r.get(0))
+        .unwrap();
+    let pages: i64 = conn
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .unwrap();
+    let free: i64 = conn
+        .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+        .unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    let auto: i64 = conn
+        .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+        .unwrap();
 
     println!("库文件      {} 字节（打开前 {before}）", page_size * pages);
     println!("user_version {version}   auto_vacuum {auto}（0=off 1=full 2=incremental）");
-    println!("空页        {free} × {page_size} = {} 字节", free * page_size);
+    println!(
+        "空页        {free} × {page_size} = {} 字节",
+        free * page_size
+    );
     println!();
 
     let mut stmt = conn

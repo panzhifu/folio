@@ -15,18 +15,18 @@
 //! 安全：四位配对码，URL 不带对一律 403 —— 局域网里的陌生设备最多能看见一个
 //! 上传页，放不进一个字节。
 
-use tokio::io::AsyncWriteExt as _;
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncWriteExt as _;
 
+use axum::Router;
 use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
 use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Deserialize;
 
 use crate::infra::error::{Error, IoResultExt as _, Result};
@@ -59,7 +59,10 @@ pub struct TransferServer {
 impl TransferServer {
     /// 起服务。占着调用线程的只有「绑定端口」这一次系统调用；之后整个服务器
     /// 活在返回值背后自己那条线程上。
-    pub fn start(config: TransferConfig, on_file: Arc<dyn Fn(PathBuf) + Send + Sync>) -> Result<Self> {
+    pub fn start(
+        config: TransferConfig,
+        on_file: Arc<dyn Fn(PathBuf) + Send + Sync>,
+    ) -> Result<Self> {
         let pin = if config.pin.trim().is_empty() {
             generate_pin()
         } else {
@@ -352,7 +355,10 @@ mod tests {
         );
         let dots = sanitize_file_name("..").unwrap();
         assert!(!dots.contains(".."), "「..」到不了任何地方，实际 {dots:?}");
-        assert_eq!(sanitize_file_name("三体.epub").as_deref(), Some("三体.epub"));
+        assert_eq!(
+            sanitize_file_name("三体.epub").as_deref(),
+            Some("三体.epub")
+        );
     }
 
     /// 端到端：`port 0` 起服务，ureq 手拼 multipart 上传 —— 收件箱落盘、
@@ -392,7 +398,10 @@ mod tests {
         let post = |pin: &str| {
             client
                 .post(&format!("{base}/upload?pin={pin}"))
-                .set("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
+                .set(
+                    "Content-Type",
+                    &format!("multipart/form-data; boundary={boundary}"),
+                )
                 .send(body.as_bytes())
         };
         // 错配对码 403，一个字节都不落。
@@ -406,7 +415,11 @@ mod tests {
             "这是假装的 epub 内容".as_bytes(),
             "上传的内容要原样落进收件箱"
         );
-        assert_eq!(received.lock().unwrap().len(), 1, "on_file 每个文件回调一次");
+        assert_eq!(
+            received.lock().unwrap().len(),
+            1,
+            "on_file 每个文件回调一次"
+        );
 
         // 页面在对的配对码下能打开。
         assert!(
@@ -425,4 +438,3 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 }
-

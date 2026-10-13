@@ -77,12 +77,7 @@ impl ReaderSession {
     ///
     /// 锚点不在这里换算成章内偏移 —— 目标章往往还没排版，偏移表还不存在。带着 `id`
     /// 挂进恢复请求，排版做完那一帧再落地（见 [`super::super::session::land_at_anchor`]）。
-    pub fn goto_entry(
-        &mut self,
-        chapter: usize,
-        fragment: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn goto_entry(&mut self, chapter: usize, fragment: Option<String>, cx: &mut Context<Self>) {
         let prefs = self.prefs.clone();
         let moved = match &mut self.source {
             Source::Book(book) => book.goto(chapter, &prefs),

@@ -418,10 +418,7 @@ impl AppShell {
     /// 要的都是整屏，而它们各自到外壳报一次「我开着呢」迟早会漏报一个。
     /// 问的是**当前目的地**那一条栈：切去别的目的地时，那边的导航栏不该跟着消失。
     fn page_pushed(&self, cx: &App) -> bool {
-        self.stacks[self.destination.index()]
-            .read(cx)
-            .depth()
-            > 1
+        self.stacks[self.destination.index()].read(cx).depth() > 1
     }
 
     /// 当前档位的导航栏：点击即切目的地。
@@ -585,7 +582,6 @@ impl Render for AppShell {
             .into_any_element()
     }
 }
-
 
 #[cfg(test)]
 mod tests;

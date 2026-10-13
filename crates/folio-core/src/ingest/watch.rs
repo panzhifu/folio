@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use crate::infra::task::{StageCtx, TaskEvent, TaskManager};
 use crate::ingest::import::{
     ImportKind, ImportOutcome, ImportReport, Imported, PathsSource, forward, submit_import,
 };
 use crate::ingest::scan;
 use crate::store::Store;
-use crate::infra::task::{StageCtx, TaskEvent, TaskManager};
 
 /// 相邻两轮 tick 的间隔，也是「尺寸稳定」的判据窗口。1 秒：本地拷贝早已结束，
 /// 网络盘的大文件拖过几轮也只会晚几秒入库。
@@ -144,7 +144,10 @@ fn run(
         }
     };
     if let Err(err) = watcher.watch(&config.dir, notify::RecursiveMode::Recursive) {
-        tracing::error!("watch: 挂不上 {}：{err:#} —— 本轮只靠初扫", config.dir.display());
+        tracing::error!(
+            "watch: 挂不上 {}：{err:#} —— 本轮只靠初扫",
+            config.dir.display()
+        );
     }
 
     let mut collector = Collector::new(config.dir.clone(), config.max_depth);
@@ -191,7 +194,12 @@ fn submit_batch(
     // 只报「这是监听交的」：重扫同一本由管线的哈希判重认出来（`Imported::Duplicate`），
     // 副本名由内容决定，所以旧形状那份 `Policy`（skip_existing / 后缀改名）在这里没用了。
     let source = PathsSource::new(paths.to_vec(), ImportKind::Watch);
-    let handle = submit_import(queue, Box::new(source), dest_dir.to_path_buf(), store.clone());
+    let handle = submit_import(
+        queue,
+        Box::new(source),
+        dest_dir.to_path_buf(),
+        store.clone(),
+    );
     let sink = on_event.cloned();
     forward(handle, move |event| {
         log_event(&event);
@@ -364,9 +372,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{Collector, WatchConfig, WatchEvents, WatchService};
+    use crate::infra::task::{TaskEvent, TaskManager};
     use crate::ingest::import::Imported;
     use crate::store::Store;
-    use crate::infra::task::{TaskEvent, TaskManager};
 
     fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
@@ -400,7 +408,10 @@ mod tests {
         // 交过之后事件再来（真 watcher 就是会反复报同一本）：不许再交。
         collector.observe([fresh.clone()]);
         assert!(collector.tick().is_empty(), "重新见到：先记一轮尺寸");
-        assert!(collector.tick().is_empty(), "尺寸没变、又已经交过 —— 不该再喂回管线");
+        assert!(
+            collector.tick().is_empty(),
+            "尺寸没变、又已经交过 —— 不该再喂回管线"
+        );
 
         // 读者改了那一本：尺寸变了，重新武装、再交一次。
         std::fs::write(&fresh, "正文加了一节").unwrap();
@@ -441,7 +452,11 @@ mod tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(later))
             .unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 21, "尺寸得一样才考得出 mtime");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            21,
+            "尺寸得一样才考得出 mtime"
+        );
 
         collector.observe([path.clone()]);
         assert!(collector.tick().is_empty(), "先记一轮新身份");
@@ -474,7 +489,10 @@ mod tests {
             .unwrap();
         collector.observe([path.clone()]);
         assert!(collector.tick().is_empty(), "先记一轮新读数");
-        assert!(collector.tick().is_empty(), "读数退回而 mtime 没变 —— 不该再交");
+        assert!(
+            collector.tick().is_empty(),
+            "读数退回而 mtime 没变 —— 不该再交"
+        );
 
         // 而它要是又长回去（甚至更长），上次那个半个文件就该重试。
         std::fs::write(&path, "一整本正文内容补了一节").unwrap();

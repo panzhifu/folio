@@ -27,16 +27,16 @@ mod view;
 // 「我的」目的地的两端视图。桌面画一整页字段（[`SettingsView`]），
 // 手机画钻入式的紧凑列表（[`CompactSettings`]）—— 数据是同一份规格，
 // 两份界面只是同一个配置的两个面子。
-pub use view::SettingsView;
 pub(crate) use compact::CompactSettings;
+pub use view::SettingsView;
 
 // 页面文件之间共用的前言：规格构造器、主题、配置入口与文案函数。
-pub(super) use spec::{Group, NumberSpec, Page, Row, group, number, page};
 pub(super) use folio_core::Mode;
 pub(super) use gpui_kit::assets::IconName;
 pub(super) use gpui_kit::component::ActiveTheme;
 pub(super) use gpui_kit::component::ThemeMode;
 pub(super) use gpui_kit::{App, SharedString};
+pub(super) use spec::{Group, NumberSpec, Page, Row, group, number, page};
 
 pub(super) use crate::ui::shared::config_model::ConfigHolder;
 pub(super) use crate::ui::shared::l10n::{tf, tr};
@@ -104,10 +104,10 @@ pub(super) fn pages(cx: &App) -> Vec<SettingPage> {
         .collect()
 }
 
+use gpui_kit::component::h_flex;
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_kit::component::h_flex;
 use gpui_kit::{ParentElement, Styled, div};
 
 /// 一页规格 → 组件的一页。**分组必须带标题**：一页只有一组时侧栏不列子项，
@@ -205,7 +205,10 @@ fn setting_item(row: &spec::Row) -> SettingItem {
         RowKind::Custom { title, render } => match title {
             Some(title) => {
                 let render = render.clone();
-                SettingItem::new(title.clone(), SettingField::render(move |_, _, cx| render(cx)))
+                SettingItem::new(
+                    title.clone(),
+                    SettingField::render(move |_, _, cx| render(cx)),
+                )
             }
             None => {
                 let render = render.clone();

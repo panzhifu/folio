@@ -600,7 +600,12 @@ mod tests {
         path
     }
 
-    fn flow(path: &Path) -> (crate::content::format::DocMeta, crate::content::format::FlowDoc) {
+    fn flow(
+        path: &Path,
+    ) -> (
+        crate::content::format::DocMeta,
+        crate::content::format::FlowDoc,
+    ) {
         let (meta, content) = Fb2Adapter.read(path).unwrap();
         let Content::Reflow(flow) = content else {
             panic!("这个容器该读成可重排");

@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use folio_core::store::{ReadingRank, ReadingSummary, ReadingTotals, Store};
-use folio_core::{DailyReading, civil_date, duration_parts, local_day, infra::time};
+use folio_core::{DailyReading, civil_date, duration_parts, infra::time, local_day};
 use gpui_kit::{App, SharedString};
 
 use crate::ui::shared::l10n::{tf, tr};
@@ -330,11 +330,7 @@ fn hours_for(seconds: &[i64], cx: &App) -> Vec<HourCell> {
 ///
 /// 每格交出去的是**平均**日读数（含没读的那几天），不是总量：30 天窗口里周六出现
 /// 5 次、周三出现 4 次，比总量就等于偷偷把「多出来的那一天」算成了读得多。
-fn weekdays_for(
-    sum: &ReadingSummary,
-    tz_offset_secs: i64,
-    cx: &App,
-) -> Option<WeekdayPattern> {
+fn weekdays_for(sum: &ReadingSummary, tz_offset_secs: i64, cx: &App) -> Option<WeekdayPattern> {
     let n = sum.days.len();
     if n < WEEKDAY_MIN_DAYS || sum.active_days < WEEKDAY_MIN_ACTIVE_DAYS {
         return None;
@@ -513,8 +509,12 @@ mod tests {
         let short = store
             .add_book(&path("short.epub"), &meta("短的书"))
             .unwrap();
-        store.record_session(long, noon(0), noon(0) + 3_600, 0).unwrap();
-        store.record_session(short, noon(-1), noon(-1) + 900, 0).unwrap();
+        store
+            .record_session(long, noon(0), noon(0) + 3_600, 0)
+            .unwrap();
+        store
+            .record_session(short, noon(-1), noon(-1) + 900, 0)
+            .unwrap();
 
         let report = cx.update(|cx| Report::load(&store, Range::Fourteen, TZ, cx));
         assert!(!report.is_empty());
@@ -527,9 +527,20 @@ mod tests {
         assert!(today.today, "最后一根要认得出是今天，否则全图没有焦点");
         assert_eq!(today.minutes, 60.0);
         assert_eq!(today.band.len(), 5, "轴上是 MM-DD 那五个字符");
-        assert_eq!(today.readout.as_str(), "1 小时", "tooltip 念的是本地化过的句子");
-        assert_eq!(report.bars.iter().filter(|bar| bar.today).count(), 1, "只亮一根");
-        assert_eq!(report.bars.iter().filter(|bar| bar.minutes == 0.0).count(), 12);
+        assert_eq!(
+            today.readout.as_str(),
+            "1 小时",
+            "tooltip 念的是本地化过的句子"
+        );
+        assert_eq!(
+            report.bars.iter().filter(|bar| bar.today).count(),
+            1,
+            "只亮一根"
+        );
+        assert_eq!(
+            report.bars.iter().filter(|bar| bar.minutes == 0.0).count(),
+            12
+        );
 
         assert_eq!(report.ranks.len(), 2);
         assert_eq!(report.ranks[0].title, "漫长的书", "花时间多的在前");
@@ -537,8 +548,7 @@ mod tests {
 
         assert_eq!(report.hours.len(), time::HOURS_PER_DAY);
         assert_eq!(
-            report.hours[12].minutes,
-            75.0,
+            report.hours[12].minutes, 75.0,
             "两段都从正午开始：4 500 秒摊到第 12 格"
         );
         assert_eq!(report.peak_hour(), Some(12), "峰值那格点在第 12 格");
@@ -585,7 +595,11 @@ mod tests {
 
         let evening = &report.hours[21];
         assert_eq!(evening.band.as_str(), "21", "轴上是裸钟点");
-        assert_eq!(evening.title.as_str(), "21 点", "tooltip 说的是本地化的那一句");
+        assert_eq!(
+            evening.title.as_str(),
+            "21 点",
+            "tooltip 说的是本地化的那一句"
+        );
         assert_eq!(evening.minutes, 45.0, "分钟，与趋势柱同一单位");
         assert_eq!(evening.readout.as_str(), "45 分钟");
         assert!(evening.peak, "晚上那格最高");
@@ -614,10 +628,14 @@ mod tests {
         // 连着 11 天，越靠近今天读得越久（今天那段 6_600 秒）。
         for k in 0..11i64 {
             let secs = (11 - k) * 600;
-            store.record_session(book, noon(-k), noon(-k) + secs, 0).unwrap();
+            store
+                .record_session(book, noon(-k), noon(-k) + secs, 0)
+                .unwrap();
         }
         let report = cx.update(|cx| Report::load(&store, Range::Thirty, TZ, cx));
-        let pattern = report.weekdays.expect("30 天窗口与 11 个活跃天就该画这一节");
+        let pattern = report
+            .weekdays
+            .expect("30 天窗口与 11 个活跃天就该画这一节");
         let spokes = &pattern.spokes;
         assert_eq!(spokes.len(), WEEKDAYS_PER_WEEK);
         assert_eq!(
@@ -632,7 +650,11 @@ mod tests {
         let today = time::local_day(time::now(), TZ);
         // 窗口那 30 天里每个星期几各摊几次：七者之和是 30，每一根 4 或 5。
         let occurrences: Vec<usize> = (0..WEEKDAYS_PER_WEEK)
-            .map(|ix| (0..30i64).filter(|k| calendar_weekday(today - k) == ix).count())
+            .map(|ix| {
+                (0..30i64)
+                    .filter(|k| calendar_weekday(today - k) == ix)
+                    .count()
+            })
             .collect();
         assert_eq!(occurrences.iter().sum::<usize>(), 30);
         assert!(
@@ -666,7 +688,10 @@ mod tests {
             .iter()
             .map(|spoke| spoke.minutes)
             .fold(f64::MIN, f64::max);
-        assert_eq!(pattern.busiest.minutes, best, "结论要说的就是最高的那根辐条");
+        assert_eq!(
+            pattern.busiest.minutes, best,
+            "结论要说的就是最高的那根辐条"
+        );
         assert!(
             !pattern.busiest.readout.is_empty(),
             "那一格得能念出一句人话"
@@ -707,7 +732,8 @@ mod tests {
         let sparse = Arc::new(Store::in_memory().unwrap());
         let book = sparse.add_book(&path("b.epub"), &meta("B")).unwrap();
         for k in 0..3i64 {
-            sparse.record_session(book, noon(-k), noon(-k) + 600, 0)
+            sparse
+                .record_session(book, noon(-k), noon(-k) + 600, 0)
                 .unwrap();
         }
         let wide_but_thin = cx.update(|cx| Report::load(&sparse, Range::Thirty, TZ, cx));
@@ -724,7 +750,9 @@ mod tests {
         set_locale(cx, Locale::ZhHans);
         let store = Arc::new(Store::in_memory().unwrap());
         let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
-        store.record_session(book, noon(0), noon(0) + 600, 0).unwrap();
+        store
+            .record_session(book, noon(0), noon(0) + 600, 0)
+            .unwrap();
         let report = cx.update(|cx| Report::load(&store, Range::Fourteen, TZ, cx));
         assert_eq!(report.ranks.len(), 1);
         assert!(!report.shows_ranks());
@@ -736,8 +764,12 @@ mod tests {
         set_locale(cx, Locale::ZhHans);
         let store = Arc::new(Store::in_memory().unwrap());
         let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
-        store.record_session(book, noon(0), noon(0) + 600, 0).unwrap();
-        store.record_session(book, noon(-20), noon(-20) + 600, 0).unwrap();
+        store
+            .record_session(book, noon(0), noon(0) + 600, 0)
+            .unwrap();
+        store
+            .record_session(book, noon(-20), noon(-20) + 600, 0)
+            .unwrap();
 
         let narrow = cx.update(|cx| Report::load(&store, Range::Seven, TZ, cx));
         let wide = cx.update(|cx| Report::load(&store, Range::Thirty, TZ, cx));
@@ -800,7 +832,9 @@ mod tests {
         });
         let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
         let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
-        store.record_session(book, noon(0), noon(0) + 600, 0).unwrap();
+        store
+            .record_session(book, noon(0), noon(0) + 600, 0)
+            .unwrap();
 
         let view: Entity<StatsView> = cx.update(|cx| cx.new(|_| StatsView::new()));
         cx.update(|cx| view.update(cx, |stats, cx| stats.refresh(cx)));
@@ -813,7 +847,9 @@ mod tests {
         assert_eq!(first, Some(600), "进来就该拿到库里的读数");
 
         // 又读了一段：不重取就不该看见它（快照是快照），重取了才看见。
-        store.record_session(book, noon(0) + 700, noon(0) + 1_000, 0).unwrap();
+        store
+            .record_session(book, noon(0) + 700, noon(0) + 1_000, 0)
+            .unwrap();
         assert_eq!(
             cx.read(|cx| view.read(cx).report.as_ref().unwrap().window.seconds),
             600,
@@ -827,14 +863,13 @@ mod tests {
         );
 
         // 换档位走的是同一条重取路（30 天档把 20 天前那段也收进来）。
-        store.record_session(book, noon(-20), noon(-20) + 300, 0).unwrap();
+        store
+            .record_session(book, noon(-20), noon(-20) + 300, 0)
+            .unwrap();
         cx.update(|cx| view.update(cx, |stats, cx| stats.pick(Range::Thirty, cx)));
         let picked = cx.read(|cx| {
             let view = view.read(cx);
-            (
-                view.range,
-                view.report.as_ref().map(|r| r.window.seconds),
-            )
+            (view.range, view.report.as_ref().map(|r| r.window.seconds))
         });
         assert_eq!(picked.0, Range::Thirty, "档位要真的切过去");
         assert_eq!(picked.1, Some(1_200), "切档立刻重取，不留一张过期的图");
@@ -847,11 +882,15 @@ mod tests {
         set_locale(cx, Locale::ZhHans);
         let store = Arc::new(Store::in_memory().unwrap());
         let wanted = store
-            .add_book(&path("b.epub"), &meta("要点开的那本")).unwrap();
-        let other = store
-            .add_book(&path("a.epub"), &meta("另一本")).unwrap();
-        store.record_session(wanted, noon(0), noon(0) + 900, 0).unwrap();
-        store.record_session(other, noon(0), noon(0) + 300, 0).unwrap();
+            .add_book(&path("b.epub"), &meta("要点开的那本"))
+            .unwrap();
+        let other = store.add_book(&path("a.epub"), &meta("另一本")).unwrap();
+        store
+            .record_session(wanted, noon(0), noon(0) + 900, 0)
+            .unwrap();
+        store
+            .record_session(other, noon(0), noon(0) + 300, 0)
+            .unwrap();
 
         let report = cx.update(|cx| Report::load(&store, Range::Fourteen, TZ, cx));
         assert_eq!(report.ranks[0].book_id, wanted, "榜首该是花时间多的那本");
