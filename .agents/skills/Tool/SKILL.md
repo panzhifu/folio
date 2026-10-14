@@ -1,5 +1,5 @@
 ---
-name: commit-and-search
+name: codeing tool
 description: This repo commits and pushes through jj (Jujutsu, colocated with .git) and searches code with rg / rga / ast-grep. Use when describing, splitting, squashing, undoing or pushing changes here, when reading jj status/log or moving the main bookmark, when tempted to use git add/commit/checkout/stash in this repo, when looking for a symbol, signature, or text across the Rust sources, plans docs, or EPUB fixtures, and when using this machine's CLI setup (mold wired for the host triple, just without a justfile, scrcpy for on-device measurement).
 ---
 
@@ -155,4 +155,3 @@ ffmpeg -i 卷曲.mp4 帧-%03d.png          # 抽帧，再交给 magick 量
 
 没装、要用先问用户（都在 Arch `extra` 源里）：`pandoc-cli`（补上它 `rga` 才吃得动 EPUB）`hyperfine`
 `cargo-machete` `bacon` `cargo-watch` `sccache` `tokei` `fzf` `git-delta` `taplo`。
-
