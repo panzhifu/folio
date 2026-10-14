@@ -65,11 +65,12 @@ impl Direction {
 /// 表用 `unicode-bidi`（锁里本来就有那一份，理由写在根 `Cargo.toml`），自己不抄那七千行区间。
 fn first_strong_direction(text: &str) -> Option<Direction> {
     use unicode_bidi::BidiClass::{AL, L, R};
-    text.chars().find_map(|ch| match unicode_bidi::bidi_class(ch) {
-        L => Some(Direction::Ltr),
-        R | AL => Some(Direction::Rtl),
-        _ => None,
-    })
+    text.chars()
+        .find_map(|ch| match unicode_bidi::bidi_class(ch) {
+            L => Some(Direction::Ltr),
+            R | AL => Some(Direction::Rtl),
+            _ => None,
+        })
 }
 
 impl TextAlign {

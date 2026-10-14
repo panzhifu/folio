@@ -908,6 +908,10 @@ mod tests {
         let visual = [(0, 0.0), (0, 18.0)];
         let edges = edges_from_glyphs("ab", &visual, 30.0);
         assert_eq!(edges.len(), 3, "{edges:?}");
-        assert_eq!(edges[1], edges[2].min(edges[1]), "撞不上就沿用前一个：{edges:?}");
+        assert_eq!(
+            edges[1],
+            edges[2].min(edges[1]),
+            "撞不上就沿用前一个：{edges:?}"
+        );
     }
 }

@@ -425,7 +425,13 @@ impl Batch<'_> {
                 // 书名换成这一本自己那一个（包里的条目名）：报表与日志上「哪一本没进来」
                 // 要说得出是哪一条，而不是全都顶着那个包名。
                 from.name = name;
-                landed.push((at, ImportOutcome { candidate: from, result }));
+                landed.push((
+                    at,
+                    ImportOutcome {
+                        candidate: from,
+                        result,
+                    },
+                ));
             }
         }
     }
@@ -464,7 +470,13 @@ impl Batch<'_> {
                 for (name, result) in books {
                     let mut from = candidate.clone();
                     from.name = name;
-                    rows.push((at, ImportOutcome { candidate: from, result }));
+                    rows.push((
+                        at,
+                        ImportOutcome {
+                            candidate: from,
+                            result,
+                        },
+                    ));
                 }
                 present.insert(at);
             }

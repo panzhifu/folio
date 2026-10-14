@@ -1196,7 +1196,11 @@ fn direction_applies_and_inherits() {
     let div = tag(&page, "div");
     let p = tag(&page, "p");
     assert_eq!(style(&page, div).direction, Direction::Rtl, "写了就该生效");
-    assert_eq!(style(&page, p).direction, Direction::Rtl, "子孙靠继承拿到方向");
+    assert_eq!(
+        style(&page, p).direction,
+        Direction::Rtl,
+        "子孙靠继承拿到方向"
+    );
     // 反过来也要能翻回来：作者明确写 ltr 的一小节不该被整本书的方向带走。
     let back = author("<div dir=\"rtl\"><p>文字</p></div>", "p { direction: ltr }");
     assert_eq!(style(&back, tag(&back, "p")).direction, Direction::Ltr);
@@ -1235,7 +1239,11 @@ fn dir_auto_resolves_from_the_first_strong_character() {
         ("مرحبا 1234", Direction::Rtl, "首强在开头就已经定了"),
         ("中文正文", Direction::Ltr, "汉字的 Bidi_Class 是 L"),
         ("Hello", Direction::Ltr, "拉丁字母是 L"),
-        ("1234 56,78", Direction::Ltr, "全是数字与标点：没有强方向字符，落回默认的 ltr"),
+        (
+            "1234 56,78",
+            Direction::Ltr,
+            "全是数字与标点：没有强方向字符，落回默认的 ltr",
+        ),
     ] {
         let page = author(&format!("<p dir=\"auto\">{body}</p>"), "");
         assert_eq!(
@@ -1293,7 +1301,11 @@ fn logical_alignment_resolves_against_direction() {
     assert_eq!(off(TextAlign::Left, D::Rtl), 0.0, "作者钉死的左不许跟着翻");
     assert_eq!(off(TextAlign::Right, D::Ltr), 152.0);
     assert_eq!(off(TextAlign::Center, D::Rtl), 76.0);
-    assert_eq!(off(TextAlign::Justify, D::Rtl), 0.0, "两端对齐本身不产生偏移");
+    assert_eq!(
+        off(TextAlign::Justify, D::Rtl),
+        0.0,
+        "两端对齐本身不产生偏移"
+    );
     // 内容比版心还宽时不许给负偏移（旧的写法里有 `.max(0.0)`，这条不能悄悄丢）。
     assert_eq!(off(TextAlign::Start, D::Rtl), 152.0);
     assert_eq!(TextAlign::Right.offset_in(D::Ltr, 40.0, 48.0), 0.0);
@@ -1319,7 +1331,11 @@ fn direction_is_applied_now_not_inert() {
     };
     assert_eq!(status("rtl"), DeclStatus::Applied);
     assert_eq!(status("LTR"), DeclStatus::Applied, "值大小写不敏感");
-    assert_eq!(status("sideways"), DeclStatus::Unparsed, "认不出的值要进 ignored 计数");
+    assert_eq!(
+        status("sideways"),
+        DeclStatus::Unparsed,
+        "认不出的值要进 ignored 计数"
+    );
     // 同一段名单里的 `writing-mode` 仍然没接 —— 它是竖排那一根轴，动的是行轴不是行序。
     assert_eq!(
         declaration_status(

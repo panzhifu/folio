@@ -423,10 +423,7 @@ impl ParaBuf {
             //
             // 只跳 ASCII 的空格与制表：中文书用全角空格（U+3000）与 `\~`（U+00A0）写的
             // **首行缩进是作者的意思**，跟着一起跳掉就把读者的段落缩进抹平了。
-            if self.text.is_empty()
-                && self.inner.is_empty()
-                && matches!(ch, ' ' | '\t' | '\u{b}')
-            {
+            if self.text.is_empty() && self.inner.is_empty() && matches!(ch, ' ' | '\t' | '\u{b}') {
                 continue;
             }
             escape_into(&mut self.run, ch);
@@ -643,9 +640,7 @@ impl<'a> Parser<'a> {
             if !c.is_ascii_digit() {
                 break;
             }
-            param = param
-                .saturating_mul(10)
-                .saturating_add(i64::from(c - b'0'));
+            param = param.saturating_mul(10).saturating_add(i64::from(c - b'0'));
             has_param = true;
             self.pos += 1;
         }
@@ -811,10 +806,10 @@ impl<'a> Parser<'a> {
             "wmetafile" | "pichmsg" | "emfblip" | "pmmetafile" | "macpict" | "dibitmap"
             | "bitmap" => self.pict_unsupported(name),
             // 注文史、页眉页脚、表那一族：整组丢掉（模块头列了理由）。
-            "footnote" | "endnote" | "ftnsep" | "ftnsepc" | "ftncont" | "ftnaddr"
-            | "ftnblk" | "header" | "headerl" | "headerr" | "headerf" | "footer"
-            | "footerl" | "footerr" | "footerf" | "fonttbl" | "colortbl" | "generator"
-            | "template" | "listtable" | "listoverridetable" | "themedata" => {
+            "footnote" | "endnote" | "ftnsep" | "ftnsepc" | "ftncont" | "ftnaddr" | "ftnblk"
+            | "header" | "headerl" | "headerr" | "headerf" | "footer" | "footerl" | "footerr"
+            | "footerf" | "fonttbl" | "colortbl" | "generator" | "template" | "listtable"
+            | "listoverridetable" | "themedata" => {
                 if !matches!(self.dest(), Dest::StyleName | Dest::InfoValue) {
                     self.frame_mut().dest = Dest::Skip;
                 }
@@ -1456,7 +1451,11 @@ mod tests {
     fn a_surrogate_pair_becomes_one_character() {
         // U+20BB7「𠮷」：高位 0xD842 写作 -10174，低位 0xDFB7 写作 -8265。
         let parsed = parse(r"{\rtf1\ansi\uc0 \pard \u-10174\u-8265\par}".as_bytes());
-        assert_eq!(parsed.paras[0].text, "\u{20bb7}", "{:?}", parsed.paras[0].text);
+        assert_eq!(
+            parsed.paras[0].text, "\u{20bb7}",
+            "{:?}",
+            parsed.paras[0].text
+        );
     }
 
     /// 不认识的目标一律跳过，**包括那些不带 `*` 的**：`{\colortbl ;…;}` 里的分号是裸文本。
@@ -1547,10 +1546,7 @@ mod tests {
     /// `{\pard\par}` 那种空段（真文件里每段后面都拖一个）不许变成章。
     #[test]
     fn empty_paragraphs_are_dropped() {
-        assert_eq!(
-            texts(r"\pard 正文\par{\pard\par}{\pard\par}"),
-            vec!["正文"]
-        );
+        assert_eq!(texts(r"\pard 正文\par{\pard\par}{\pard\par}"), vec!["正文"]);
     }
 
     #[test]
@@ -1589,7 +1585,8 @@ mod tests {
 
     #[test]
     fn the_body_font_size_is_the_char_weighted_mode() {
-        let parsed = doc(r"\pard\fs28 大标题\par\pard\fs21 正文很长的一段\par\pard\fs21 又一段\par");
+        let parsed =
+            doc(r"\pard\fs28 大标题\par\pard\fs21 正文很长的一段\par\pard\fs21 又一段\par");
         assert_eq!(body_font_size(&parsed.paras), 21);
         // 全书没写过 `\fs`：回 0，字号那条判据随之不生效。
         assert_eq!(body_font_size(&doc(r"\pard 正文\par").paras), 0);
@@ -1889,7 +1886,11 @@ mod tests {
     #[test]
     fn a_list_marker_stays_in_the_text() {
         let parsed = doc(r"\uc0 \pard\fs21 {\pntext\u183\tab}第一项\par");
-        assert_eq!(parsed.paras[0].text, "·\t第一项", "{:?}", parsed.paras[0].text);
+        assert_eq!(
+            parsed.paras[0].text, "·\t第一项",
+            "{:?}",
+            parsed.paras[0].text
+        );
     }
 
     /// `\uN` 写给 `\info` 里的书名也要能收（书名那一串常常正是 `\u` 形态）。

@@ -155,7 +155,10 @@ pub(crate) fn read_ncx(
             if record.len() - next < len as usize {
                 break;
             }
-            pool.push((base + pos as u32, decode_text(&record[next..next + len as usize], codepage)));
+            pool.push((
+                base + pos as u32,
+                decode_text(&record[next..next + len as usize], codepage),
+            ));
             pos = next + len as usize;
         }
     }
@@ -168,9 +171,13 @@ pub(crate) fn read_ncx(
         if record.len() < 12 || record[..4] != *b"INDX" {
             break;
         }
-        let Some(idxt) = word(&record, 4) else { continue };
+        let Some(idxt) = word(&record, 4) else {
+            continue;
+        };
         let idxt = idxt as usize;
-        let Some(entry_count) = word(&record, 5) else { continue };
+        let Some(entry_count) = word(&record, 5) else {
+            continue;
+        };
         let entry_count = entry_count as usize;
         if entry_count > 0xFFFF || idxt + 4 + entry_count * 2 > record.len() {
             continue;
@@ -185,7 +192,9 @@ pub(crate) fn read_ncx(
             } else {
                 Some(idxt)
             };
-            let (Some(start), Some(end)) = (start, end) else { continue };
+            let (Some(start), Some(end)) = (start, end) else {
+                continue;
+            };
             if end <= start || end > record.len() {
                 continue;
             }
@@ -279,7 +288,11 @@ fn entry(
 
     let filepos = filepos?;
     let title = title_at
-        .and_then(|at| pool.iter().find(|(key, _)| *key == at).map(|(_, s)| s.clone()))
+        .and_then(|at| {
+            pool.iter()
+                .find(|(key, _)| *key == at)
+                .map(|(_, s)| s.clone())
+        })
         .unwrap_or_default();
     Some(TocItem {
         filepos,
@@ -378,13 +391,10 @@ mod tests {
         header[tagx..tagx + 4].copy_from_slice(b"TAGX");
         header[tagx + 4..tagx + 8].copy_from_slice(&24u32.to_be_bytes()); // 条目区起点
         header[tagx + 8..tagx + 12].copy_from_slice(&2u32.to_be_bytes()); // 控制字节数
-        for (i, (tag, values, mask, eof)) in [
-            (1u8, 1u8, 0x01u8, 0u8),
-            (3, 1, 0x02, 0),
-            (4, 1, 0x00, 1),
-        ]
-        .iter()
-        .enumerate()
+        for (i, (tag, values, mask, eof)) in
+            [(1u8, 1u8, 0x01u8, 0u8), (3, 1, 0x02, 0), (4, 1, 0x00, 1)]
+                .iter()
+                .enumerate()
         {
             let at = tagx + 12 + i * 4;
             header[at] = *tag;
@@ -413,7 +423,8 @@ mod tests {
         let start_at = 8 + 5 * 4;
         record[start_at..start_at + body.len()].copy_from_slice(&body);
         record[idxt + 4..idxt + 6].copy_from_slice(&(start_at as u16).to_be_bytes());
-        record[idxt + 6..idxt + 8].copy_from_slice(&((start_at + body.len() / 2) as u16).to_be_bytes());
+        record[idxt + 6..idxt + 8]
+            .copy_from_slice(&((start_at + body.len() / 2) as u16).to_be_bytes());
         // 第三条起点表项读不到（最后一项的终点按 IDXT 本身算），留着只为摆满表。
 
         // CNCX 池：两条标题。池里的键是「长度字节所在的那个偏移」，
@@ -426,11 +437,7 @@ mod tests {
         }
 
         let records: Vec<Vec<u8>> = vec![header, record, cncx];
-        let items = read_ncx(
-            |at| records.get(at).cloned(),
-            0,
-            65001,
-        );
+        let items = read_ncx(|at| records.get(at).cloned(), 0, 65001);
         assert_eq!(
             items,
             vec![

@@ -1251,7 +1251,10 @@ fn an_rtl_line_hangs_from_the_start_edge() {
     let (_, ltr) = typeset(html, "", 200.0);
     let (_, rtl) = typeset(html, "p { direction: rtl }", 200.0);
     assert_eq!(ltr.lines.len(), rtl.lines.len(), "方向不许改变折行结果");
-    assert_eq!(ltr.lines[0].width, rtl.lines[0].width, "同一行的宽不该随方向变");
+    assert_eq!(
+        ltr.lines[0].width, rtl.lines[0].width,
+        "同一行的宽不该随方向变"
+    );
     assert_eq!(ltr.lines[0].x, 0.0, "LTR 的起始边就是左");
     assert_eq!(
         rtl.lines[0].x + rtl.lines[0].width,
@@ -1311,8 +1314,7 @@ fn a_physical_alignment_stays_physical_under_rtl() {
     assert!(start.lines[0].x > 0.0, "不写就该贴起始边（右）");
     let (_, right) = typeset(html, "p { direction: rtl; text-align: right }", 200.0);
     assert_eq!(
-        right.lines[0].x,
-        start.lines[0].x,
+        right.lines[0].x, start.lines[0].x,
         "物理 right 与 RTL 的 start 撞在同一处，这是巧合而不是合并成一档的理由"
     );
     // LTR 那边一克都不许变：这一批改动若动了 LTR 的落位，红的是全部现有排版测试。

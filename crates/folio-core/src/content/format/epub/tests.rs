@@ -1314,7 +1314,10 @@ fn epub_nav_only(dir: &tempfile::TempDir, nav: &str) -> PathBuf {
             ("META-INF/container.xml", CONTAINER.as_bytes()),
             ("OEBPS/content.opf", opf.as_bytes()),
             ("OEBPS/Nav/nav.xhtml", nav.as_bytes()),
-            ("OEBPS/Text/chap1.xhtml", "<html><body><p>正文</p></body></html>".as_bytes()),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>正文</p></body></html>".as_bytes(),
+            ),
         ],
     );
     path
@@ -1581,10 +1584,7 @@ fn an_encrypted_epub_is_refused_and_says_which_method() {
     // 字体去混淆不是 DRM：EPUB 规范允许，任何读者都解得开，正文照读。
     for (name, algorithm) in [
         ("font-idpf.epub", "http://www.idpf.org/2008/embedding"),
-        (
-            "font-adobe.epub",
-            "http://ns.adobe.com/pdf/enc#RC",
-        ),
+        ("font-adobe.epub", "http://ns.adobe.com/pdf/enc#RC"),
     ] {
         let book = encrypted(name, algorithm);
         let flow = flow_of(&book);
@@ -1668,7 +1668,11 @@ fn epub_chart(dir: &tempfile::TempDir, items: &str, entries: &[(&str, &[u8])]) -
 }
 
 /// 表里按正文那串 `src` 解出来的键去找那一条，找不到就把这一档的名字打出来。
-fn row_for<'a>(images: &'a [crate::content::format::ImageRes], tail: &str, kind: &str) -> &'a crate::content::format::ImageRes {
+fn row_for<'a>(
+    images: &'a [crate::content::format::ImageRes],
+    tail: &str,
+    kind: &str,
+) -> &'a crate::content::format::ImageRes {
     images
         .iter()
         .find(|i| i.href.ends_with(tail))
@@ -1700,7 +1704,11 @@ fn an_svg_image_reads_the_png_it_falls_back_to() {
         "去处是降级链上那份位图：{row:?}"
     );
     assert_eq!(row.media_type, "image/png", "{row:?}");
-    assert_eq!((row.width, row.height), (40, 20), "尺寸从那份位图读：{row:?}");
+    assert_eq!(
+        (row.width, row.height),
+        (40, 20),
+        "尺寸从那份位图读：{row:?}"
+    );
     // 界面只有这一条问法：按正文那串 `src` 解出来的键要字节（`ui/shared/images.rs`）。
     assert_eq!(
         doc.image_bytes("OEBPS/Images/chart.svg").as_deref(),
@@ -1768,7 +1776,10 @@ fn an_unusable_fallback_leaves_the_declared_item_alone() {
         let doc = doc_of(&path);
         let row = row_for(doc.images(), "chart.svg", name);
         assert_eq!(row.source, row.href, "{name}：没有可用的降级路就照原条目");
-        assert_eq!(row.media_type, "image/svg+xml", "{name}：声明的类型不许被改写");
+        assert_eq!(
+            row.media_type, "image/svg+xml",
+            "{name}：声明的类型不许被改写"
+        );
         assert_eq!(
             (row.width, row.height),
             (0, 0),
@@ -1792,10 +1803,22 @@ fn an_unusable_fallback_leaves_the_declared_item_alone() {
 fn the_spine_page_progression_direction_lands_on_the_flow_doc() {
     for (spine_attrs, want, why) in [
         (r#"page-progression-direction="rtl""#, true, "显式写了 rtl"),
-        (r#"page-progression-direction="RTL""#, true, "值大小写不敏感"),
-        ("page-progression-direction=\" rtl \"", true, "首尾空格不算第二个门槛"),
+        (
+            r#"page-progression-direction="RTL""#,
+            true,
+            "值大小写不敏感",
+        ),
+        (
+            "page-progression-direction=\" rtl \"",
+            true,
+            "首尾空格不算第二个门槛",
+        ),
         (r#"page-progression-direction="ltr""#, false, "显式左翻"),
-        (r#"page-progression-direction="default""#, false, "default 折成左翻（已知不完整）"),
+        (
+            r#"page-progression-direction="default""#,
+            false,
+            "default 折成左翻（已知不完整）",
+        ),
         ("", false, "属性缺席"),
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -1821,7 +1844,9 @@ fn the_spine_page_progression_direction_lands_on_the_flow_doc() {
             ],
         );
         let flow = flow_of(&path);
-        assert_eq!(flow.progression_rtl, want, "{why}（spine 写的是 {spine_attrs:?}）");
+        assert_eq!(
+            flow.progression_rtl, want,
+            "{why}（spine 写的是 {spine_attrs:?}）"
+        );
     }
 }
-

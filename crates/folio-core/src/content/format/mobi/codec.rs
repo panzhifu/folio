@@ -446,7 +446,11 @@ mod tests {
             let pair = ((distance << 3) | (length - 3)) as u32;
             input.push(0x80 | (pair >> 8) as u8);
             input.push((pair & 0xff) as u8);
-            assert_eq!(out(&input), want.as_bytes(), "距离 {distance} 长度 {length}");
+            assert_eq!(
+                out(&input),
+                want.as_bytes(),
+                "距离 {distance} 长度 {length}"
+            );
         }
     }
 

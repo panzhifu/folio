@@ -345,8 +345,7 @@ impl<'a> Ctx<'a> {
         );
     }
 
-    
-/// 摆放一个块级元素（不做块级缓存），返回边框盒高度。
+    /// 摆放一个块级元素（不做块级缓存），返回边框盒高度。
     fn block_uncached(&mut self, node: NodeId, x: f32, y: f32, width: f32) -> f32 {
         let style = self.style_of(node);
         // 盒模型从外到内一次算清：边框与内边距一起从可用宽里扣掉，正文与折行都在内容盒里
@@ -367,7 +366,9 @@ impl<'a> Ctx<'a> {
             let index = self.push_block(node, x, y, width, String::new(), true);
             // 块级图片的对齐：`start`/`end` 先按这一块的 `direction` 折成物理左右，
             // 再算让出多少（`TextAlign::offset_in` 是全仓唯一一处这份算术）。
-            let offset = style.text_align.offset_in(style.direction, content_width, w);
+            let offset = style
+                .text_align
+                .offset_in(style.direction, content_width, w);
             self.lines.push(LineBox {
                 owner: node,
                 fragments: vec![LineFragment::Image(ImageRun {
@@ -739,7 +740,9 @@ impl<'a> Ctx<'a> {
         // 可用宽要扣掉这一行让出去的左边距（首行的 `text-indent`、被首字符压着的
         // 那几行让开的一格），否则居中的标题会按整幅宽算偏移，把字推出版心。
         let avail = (place.width - indent - reserved).max(1.0);
-        let offset = style.text_align.offset_in(style.direction, avail, acc.width);
+        let offset = style
+            .text_align
+            .offset_in(style.direction, avail, acc.width);
         // 起始边让出的那一段落在哪一侧：LTR 在左，RTL 在右。行盒的 `x` 记的**一直是内容
         // 左缘**，所以 RTL 时这笔让位不加在 `x` 上，而是由上面那份 `offset` 从右缘往回算
         // —— 两条式子对「贴起始边」给出同一个结果，而作者钉死的物理 `left` 在 RTL 里

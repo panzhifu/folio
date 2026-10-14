@@ -105,9 +105,7 @@ impl PalmDb {
             .checked_mul(ENTRY)
             .and_then(|n| u64::try_from(n).ok())
             .filter(|n| HEADER + n <= file_len)
-            .ok_or_else(|| {
-                crate::Error::UnsupportedFormat("PalmDB 记录表被截断".to_string())
-            })?;
+            .ok_or_else(|| crate::Error::UnsupportedFormat("PalmDB 记录表被截断".to_string()))?;
         let mut table = vec![0u8; table_len as usize];
         file.seek(SeekFrom::Start(HEADER)).io_path(path)?;
         file.read_exact(&mut table).io_path(path)?;
@@ -233,7 +231,7 @@ mod tests {
     use std::io::Write as _;
     use std::path::Path;
 
-    use super::{PalmDb, HEADER};
+    use super::{HEADER, PalmDb};
 
     /// 摆一个最小 PalmDB：头 78 字节 + `entries` 那张表 + 依表放好的记录内容。
     ///

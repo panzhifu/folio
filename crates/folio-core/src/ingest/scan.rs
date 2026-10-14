@@ -325,7 +325,13 @@ mod tests {
         got.sort();
         assert_eq!(
             got,
-            vec!["深处.fb2", "深处.fb2.zip", "随手.md", "随手.txt", "顶层.epub"],
+            vec![
+                "深处.fb2",
+                "深处.fb2.zip",
+                "随手.md",
+                "随手.txt",
+                "顶层.epub"
+            ],
             "隐藏 / 噪音 / Android 私有目录 / 书库自己都不该进候选，实际 {got:?}"
         );
         assert!(

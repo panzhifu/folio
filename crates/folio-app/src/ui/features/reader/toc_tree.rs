@@ -546,8 +546,16 @@ mod tests {
         assert!(view.all_open());
         view.collapse_all();
         assert!(!view.all_open());
-        let top: Vec<&str> = view.visible().iter().map(|row| row.title.as_str()).collect();
-        assert_eq!(top, vec!["扉页", "第1章", "第2章", "版权页"], "全折上只剩顶层");
+        let top: Vec<&str> = view
+            .visible()
+            .iter()
+            .map(|row| row.title.as_str())
+            .collect();
+        assert_eq!(
+            top,
+            vec!["扉页", "第1章", "第2章", "版权页"],
+            "全折上只剩顶层"
+        );
         view.expand_all();
         assert!(view.all_open());
         assert_eq!(view.visible().len(), 7, "全展开是整棵树");

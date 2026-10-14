@@ -171,7 +171,7 @@ mod tests {
     //! 每一档都要有一条**关掉它就变红**的断言。第一组尤其重要：GBK 字节按 UTF-8
     //! 收会得到一排问号，而那一趟不报错，所以必须有一处钉住「解出来是那串汉字」。
 
-    use super::{decode, declared, from_lcid};
+    use super::{declared, decode, from_lcid};
 
     const CN: &str = "中文测试";
 
@@ -267,7 +267,10 @@ mod tests {
     /// LCID 那半截另有一组断言：**繁简分家在方言那一档**，只看语言会全错。
     #[test]
     fn silence_is_reported_as_silence() {
-        assert_eq!(declared(b"<html><body>\xe4\xb8\xad\xe6\x96\x87</body></html>"), None);
+        assert_eq!(
+            declared(b"<html><body>\xe4\xb8\xad\xe6\x96\x87</body></html>"),
+            None
+        );
         assert_eq!(from_lcid(0x0410), None, "意大利语不在表里，如实说不知道");
         assert_eq!(from_lcid(0x0804), Some(encoding_rs::GBK), "zh-CN 简体");
         assert_eq!(from_lcid(0x0404), Some(encoding_rs::BIG5), "zh-TW 繁体");

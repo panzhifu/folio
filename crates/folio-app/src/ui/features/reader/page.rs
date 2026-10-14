@@ -413,7 +413,11 @@ impl ReadingPage {
         // 按下去是**下一章**（图标不用换 —— 它指左，而左就是阅读的前方），要换的是
         // 动作、标签和可不可用三样。
         let rtl = reader.progression_rtl();
-        let (left_delta, right_delta) = if rtl { (1isize, -1isize) } else { (-1isize, 1isize) };
+        let (left_delta, right_delta) = if rtl {
+            (1isize, -1isize)
+        } else {
+            (-1isize, 1isize)
+        };
         let can_left = reader.can_advance(left_delta);
         let can_right = reader.can_advance(right_delta);
         // 两个闭包各自要一份句柄（`Entity` 不 `Copy`），所以左边右边各克隆一次。
@@ -698,7 +702,9 @@ impl ReadingPage {
         // 菜单画在列表之上，所以先垫一张吃掉点击的底：点卡片外面只收菜单，不该顺带
         // 把底下那一行也跳了。卡片自己 `occlude`，落在卡片上的一击到不了这张底。
         if self.toc_menu {
-            layer = layer.child(self.toc_menu_scrim(cx)).child(self.toc_menu_card(cx));
+            layer = layer
+                .child(self.toc_menu_scrim(cx))
+                .child(self.toc_menu_card(cx));
         }
         layer.into_any_element()
     }
@@ -831,13 +837,7 @@ impl ReadingPage {
                             .child(row.title.clone()),
                     )
                     .when(!authors.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .truncate()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(authors),
-                        )
+                        this.child(div().truncate().text_sm().text_color(muted).child(authors))
                     })
                     .child(div().truncate().text_sm().text_color(muted).child(meta)),
             )
@@ -885,18 +885,14 @@ impl ReadingPage {
                 },
                 expand_label,
                 false,
-                move |_, _, cx| {
-                    page_expand.update(cx, |this, cx| this.toggle_expand_all(cx))
-                },
+                move |_, _, cx| page_expand.update(cx, |this, cx| this.toggle_expand_all(cx)),
             ))
             .child(self.menu_item(
                 "toc-menu-reverse",
                 IconName::ArrowDownUp,
                 reverse_label,
                 reversed,
-                move |_, _, cx| {
-                    page_reverse.update(cx, |this, cx| this.toggle_reversed(cx))
-                },
+                move |_, _, cx| page_reverse.update(cx, |this, cx| this.toggle_reversed(cx)),
             ))
             .child(self.menu_item(
                 "toc-menu-style",
@@ -915,9 +911,7 @@ impl ReadingPage {
                 IconName::Eraser,
                 clear_label,
                 false,
-                move |_, _, cx| {
-                    page_clear.update(cx, |this, cx| this.clear_read_marks(cx))
-                },
+                move |_, _, cx| page_clear.update(cx, |this, cx| this.clear_read_marks(cx)),
             ))
             .into_any_element()
     }
@@ -1000,7 +994,8 @@ impl ReadingPage {
     /// 抹掉「来过」的那份痕迹：灰字是读者自己翻出来的，他要一次清干净。
     fn clear_read_marks(&mut self, cx: &mut Context<Self>) {
         self.toc_menu = false;
-        self.reader.update(cx, |reader, cx| reader.clear_read_marks(cx));
+        self.reader
+            .update(cx, |reader, cx| reader.clear_read_marks(cx));
         cx.notify();
     }
 
@@ -1147,9 +1142,7 @@ impl ReadingPage {
                             .flex()
                             .items_center()
                             .overflow_hidden()
-                            .pl(px(TOC_TEXT_LEFT
-                                - TOC_BAND_LEFT
-                                - TOC_CHEVRON
+                            .pl(px(TOC_TEXT_LEFT - TOC_BAND_LEFT - TOC_CHEVRON
                                 + (row.depth as f32) * TOC_INDENT))
                             .pr(px(TOC_GUTTER))
                             .when(active, |el| el.bg(surface))

@@ -87,8 +87,10 @@ impl DocumentProvider for ChmAdapter {
             };
             if is_html(&href) {
                 let text = chm.decode(&href, bytes);
-                char_lens
-                    .insert(href, Some(crate::content::scan::chapter_summary(&text).visible_chars));
+                char_lens.insert(
+                    href,
+                    Some(crate::content::scan::chapter_summary(&text).visible_chars),
+                );
                 html_seen += 1;
             } else if let Some(media_type) = bitmap_media_type(&href) {
                 let (width, height) = image_dims(&bytes);
@@ -142,7 +144,7 @@ impl DocumentProvider for ChmAdapter {
             css: String::new(),
             css_hrefs: Vec::new(),
             toc,
- // 翻页方向只有 EPUB 的 spine 那一格读得出来，其余格式按左翻。
+            // 翻页方向只有 EPUB 的 spine 那一格读得出来，其余格式按左翻。
             progression_rtl: false,
             cover: None,
             images,
@@ -316,9 +318,7 @@ pub(crate) fn lookup_names(name: &str) -> [String; 4] {
 /// 剥那一个斜杠不是省事：`resolve_href` 的产物就不带前导斜杠（它有测试钉住），
 /// 两边形状不一致的话，`<img src>` 的解析结果查不到图片表里那一格。
 fn ours(directory_name: &str) -> String {
-    directory_name
-        .trim_start_matches('/')
-        .replace('\\', "/")
+    directory_name.trim_start_matches('/').replace('\\', "/")
 }
 
 /// 章表：`.hhc` 清单优先，退化成「容器里的 html 按自然序」。
@@ -509,9 +509,7 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
-    use super::{
-        Chm, ChmAdapter, is_html, lookup_names, ours, system_entries, unsupported,
-    };
+    use super::{Chm, ChmAdapter, is_html, lookup_names, ours, system_entries, unsupported};
     use crate::content::format::{Content, DocumentProvider, Format, provider_for};
 
     fn fixture(name: &str) -> PathBuf {
@@ -520,7 +518,12 @@ mod tests {
             .join(name)
     }
 
-    fn flow_of(path: &Path) -> (crate::content::format::DocMeta, crate::content::format::FlowDoc) {
+    fn flow_of(
+        path: &Path,
+    ) -> (
+        crate::content::format::DocMeta,
+        crate::content::format::FlowDoc,
+    ) {
         let (meta, content) = ChmAdapter.index(path).unwrap();
         let Content::Reflow(flow) = content else {
             panic!("CHM 该读成可重排");
@@ -573,14 +576,21 @@ mod tests {
         let gbk = fixture("minimal-zh-gbk.chm");
         let (meta8, flow8) = flow_of(&utf8);
         let (metag, flowg) = flow_of(&gbk);
-        assert_eq!(metag.title, meta8.title, "书名（#SYSTEM 里的字节）也要过码页");
+        assert_eq!(
+            metag.title, meta8.title,
+            "书名（#SYSTEM 里的字节）也要过码页"
+        );
         let titles8: Vec<&str> = flow8.chapters.iter().map(|c| c.title.as_str()).collect();
         let titlesg: Vec<&str> = flowg.chapters.iter().map(|c| c.title.as_str()).collect();
         assert_eq!(titlesg, titles8, "章标题来自 hhc，两本该一字不差");
         for (a, b) in flow8.chapters.iter().zip(&flowg.chapters) {
             let text_a = ChmAdapter.entry_text(&utf8, &a.spine_href).unwrap();
             let text_b = ChmAdapter.entry_text(&gbk, &b.spine_href).unwrap();
-            assert!(!text_b.contains('\u{fffd}'), "{} 里出现了替换字符", b.spine_href);
+            assert!(
+                !text_b.contains('\u{fffd}'),
+                "{} 里出现了替换字符",
+                b.spine_href
+            );
             assert_eq!(a.char_len, b.char_len, "字数是分母，两本必须同一个数");
             // 正文里那句中文也逐字相同（把解码退回 lossy UTF-8 时这一条先红）。
             assert_eq!(
@@ -620,7 +630,10 @@ mod tests {
         let path = fixture("minimal-zh-utf8.chm");
         let bytes = ChmAdapter.image_bytes(&path, "img/fig.png").unwrap();
         assert_eq!(&bytes[1..4], b"PNG");
-        assert!(ChmAdapter.image_bytes(&path, "IMG/FIG.PNG").is_some(), "大小写不敏感");
+        assert!(
+            ChmAdapter.image_bytes(&path, "IMG/FIG.PNG").is_some(),
+            "大小写不敏感"
+        );
         assert!(ChmAdapter.image_bytes(&path, "没有这个文件.png").is_none());
         let text = ChmAdapter.entry_text(&path, "index.htm").unwrap();
         assert!(text.contains("序言"), "{text}");
@@ -655,7 +668,11 @@ mod tests {
         let err = unsupported(Path::new("x.chm"), "CHM 里没有 html 正文");
         assert!(format!("{err}").contains("x.chm"));
         assert!(ChmAdapter.index(Path::new("/does/not/exist.chm")).is_err());
-        assert!(ChmAdapter.entry_text(Path::new("/does/not/exist.chm"), "a.htm").is_none());
+        assert!(
+            ChmAdapter
+                .entry_text(Path::new("/does/not/exist.chm"), "a.htm")
+                .is_none()
+        );
     }
 
     #[test]
@@ -666,4 +683,3 @@ mod tests {
         assert!(!is_html("toc.hhc"));
     }
 }
-

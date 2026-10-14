@@ -1240,8 +1240,16 @@ fn an_encrypted_epub_is_refused_and_leaves_no_library_record() {
     // 书库根与暂存区都从没见过它：拒绝发生在暂存区，那份字节已经跟着 `abandon` 走了。
     // 问的是「根上有没有**文件**」而不是「根目录空不空」：`.staging` 那一个目录从第 2 步
     // 起就立在根下，按「非空」判会把每一个被拒的候选都算成落过地（helper 在本文件上面）。
-    assert!(copies(&lib).is_empty(), "书库根里不许有这一本的副本：{:?}", copies(&lib));
-    assert!(staged(&lib).is_empty(), "暂存区那份也该跟着 abandon 走：{:?}", staged(&lib));
+    assert!(
+        copies(&lib).is_empty(),
+        "书库根里不许有这一本的副本：{:?}",
+        copies(&lib)
+    );
+    assert!(
+        staged(&lib).is_empty(),
+        "暂存区那份也该跟着 abandon 走：{:?}",
+        staged(&lib)
+    );
 }
 
 // ---- 重扫的线程归属（`plans/阅读管线.md` §七：开书那一屏不等重扫）----

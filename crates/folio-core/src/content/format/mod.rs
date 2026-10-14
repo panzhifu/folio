@@ -3,10 +3,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub mod cbz;
-/// CHM（Microsoft Compiled HTML Help）：一个 ITSF 容器里的一组 HTML topic。
-pub mod chm;
 /// 字节 → 文本的那一层（BOM / 声明 / 容器报的码页）。见模块头那四档顺序。
 pub(crate) mod charset;
+/// CHM（Microsoft Compiled HTML Help）：一个 ITSF 容器里的一组 HTML topic。
+pub mod chm;
 pub mod container;
 pub mod content;
 pub mod cover;

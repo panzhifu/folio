@@ -435,8 +435,8 @@ fn parse_opf(xml: &str) -> Opf {
                     }
                     ("spine", "itemref") => {
                         if let Some(id) = attr(&e, "idref") {
-                            let linear = attr(&e, "linear")
-                                .is_none_or(|v| !v.eq_ignore_ascii_case("no"));
+                            let linear =
+                                attr(&e, "linear").is_none_or(|v| !v.eq_ignore_ascii_case("no"));
                             out.spine.push(SpineRef { id, linear });
                         }
                     }
@@ -1236,10 +1236,7 @@ fn is_resource(media_type: &str) -> bool {
 ///   不该在导入那一趟里绕不完。
 const FALLBACK_HOPS: usize = 8;
 
-fn decodable_fallback<'a>(
-    start: &'a Item,
-    by_id: &HashMap<&'a str, &'a Item>,
-) -> Option<&'a Item> {
+fn decodable_fallback<'a>(start: &'a Item, by_id: &HashMap<&'a str, &'a Item>) -> Option<&'a Item> {
     if is_decodable_bitmap(&start.media_type) {
         return None;
     }
@@ -1484,7 +1481,11 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
     for (spine, node) in opf.spine.iter().enumerate() {
         let Some(item) = by_id.get(node.id.as_str()) else {
             // spine 指着一个 manifest 里没有的 id：这一节整个没了，而且界面上看不出来。
-            tracing::warn!("epub: spine 第 {} 项指向的 id {:?} 不在 manifest 里", spine + 1, node.id);
+            tracing::warn!(
+                "epub: spine 第 {} 项指向的 id {:?} 不在 manifest 里",
+                spine + 1,
+                node.id
+            );
             continue;
         };
         if item.properties.iter().any(|p| p == "nav") || is_resource(&item.media_type) {

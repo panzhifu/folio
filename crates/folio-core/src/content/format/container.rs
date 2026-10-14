@@ -238,7 +238,10 @@ mod tests {
         let names = ["img/fig.png", "index.htm", "c1.htm"];
         for i in 0..100 {
             let href = names[i % names.len()];
-            assert!(container.read(href).is_some(), "第 {i} 次取 {href} 该有字节");
+            assert!(
+                container.read(href).is_some(),
+                "第 {i} 次取 {href} 该有字节"
+            );
         }
         assert_eq!(
             take_local(Metric::ContainerOpens),

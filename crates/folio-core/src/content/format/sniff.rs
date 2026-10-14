@@ -189,7 +189,10 @@ fn starts_with_rtf(head: &[u8]) -> bool {
     }
     // `%RTF1` 那一行之后才是真正的文档。
     text.starts_with('%')
-        .then(|| text.split_once('\n').map_or("", |(_, rest)| rest.trim_start()))
+        .then(|| {
+            text.split_once('\n')
+                .map_or("", |(_, rest)| rest.trim_start())
+        })
         .is_some_and(|rest| rest.starts_with(r"{\rtf"))
 }
 
@@ -656,7 +659,10 @@ mod tests {
         let cbz = zip_at(
             tmp.path(),
             "b.cbz",
-            &[("001.jpg", b"\xff\xd8\xff", true), ("002.png", b"\x89PNG", true)],
+            &[
+                ("001.jpg", b"\xff\xd8\xff", true),
+                ("002.png", b"\x89PNG", true),
+            ],
         );
         assert_eq!(zip_shape(&cbz), ZipShape::Book(Format::Cbz));
     }

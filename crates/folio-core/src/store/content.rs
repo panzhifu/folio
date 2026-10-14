@@ -227,7 +227,11 @@ impl Store {
                 Ok(ImageRes {
                     // 空串 = 与 `href` 同一条：EPUB 以外的那些格式写空，v17 之前入库的老行
                     // 也读成这一档。这一格记的是「去哪儿读」，不是多一份事实。
-                    source: if source.is_empty() { href.clone() } else { source },
+                    source: if source.is_empty() {
+                        href.clone()
+                    } else {
+                        source
+                    },
                     href,
                     media_type: r.get(2)?,
                     width: r.get::<_, i64>(3)? as u32,
