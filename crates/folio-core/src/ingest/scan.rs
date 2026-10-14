@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::Result;
-use crate::content::format::supports_extension;
+use crate::content::format::looks_like_a_book;
 use crate::infra::task::StageCtx;
 use crate::ingest::import::{Candidate, ImportKind, Origin, Source, stage_local};
 
@@ -189,11 +189,7 @@ impl Walker<'_> {
                     self.walk_dir(&path, depth + 1, ctx);
                 }
             } else {
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or_default();
-                if !supports_extension(ext) {
+                if !looks_like_a_book(&path) {
                     continue;
                 }
                 if self.report.candidates.len() >= self.limits.max_candidates {
@@ -280,6 +276,20 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    /// 一个真 zip。粗筛对 `.zip` 那一族是**开容器看里面有什么**，所以夹具不能是
+    /// 「一个叫 `书.fb2.zip` 的文本文件」—— 那现在过不了那道门，而且过不了是有意的。
+    fn pack(dir: &Path, rel: &str, entry: &str, body: &[u8]) {
+        use std::io::Write as _;
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file(entry, opts).unwrap();
+        zip.write_all(body).unwrap();
+        zip.finish().unwrap();
+    }
+
     fn names(report: &super::ScanReport) -> Vec<String> {
         report.candidates.iter().map(|c| c.name.clone()).collect()
     }
@@ -291,6 +301,14 @@ mod tests {
         let root = tmp.path().join("存储");
         touch(&root, "顶层.epub", "x");
         touch(&root, "深/一点/的/地方/深处.fb2", "x");
+        pack(
+            &root,
+            "深/一点/的/地方/深处.fb2.zip",
+            "深处.fb2",
+            b"<FictionBook/>",
+        );
+        // 一个真包，而里面没有书：开过容器才说它不是候选。
+        pack(&root, "杂物.zip", "data.json", b"{}");
         touch(&root, ".隐藏目录/藏起来的.epub", "x");
         touch(&root, "node_modules/不是书.epub", "x");
         touch(&root, "Android/data/别人家/不是书.epub", "x");
@@ -307,8 +325,12 @@ mod tests {
         got.sort();
         assert_eq!(
             got,
-            vec!["深处.fb2", "随手.md", "随手.txt", "顶层.epub"],
+            vec!["深处.fb2", "深处.fb2.zip", "随手.md", "随手.txt", "顶层.epub"],
             "隐藏 / 噪音 / Android 私有目录 / 书库自己都不该进候选，实际 {got:?}"
+        );
+        assert!(
+            !got.iter().any(|name| name == "杂物.zip"),
+            "普通压缩包不进候选：粗筛省的就是它那一趟哈希，实际 {got:?}"
         );
         assert_eq!(report.skipped, 0, "规则性跳过不算「读不了」");
         assert!(!report.truncated);

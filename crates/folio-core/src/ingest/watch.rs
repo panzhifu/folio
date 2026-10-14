@@ -359,10 +359,7 @@ impl Collector {
         if depth == 0 || depth > self.max_depth {
             return false;
         }
-        match path.extension().and_then(|e| e.to_str()) {
-            Some(ext) => crate::content::format::supports_extension(ext),
-            None => false,
-        }
+        crate::content::format::looks_like_a_book(path)
     }
 }
 

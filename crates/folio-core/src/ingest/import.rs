@@ -306,6 +306,14 @@ const MAX_IMPORT_BOOKS: usize = 4;
 /// 每本至少要几路才算「值得再开一本」：低于这个数就把核留给同批的别的本。
 const MIN_WORKERS_PER_BOOK: usize = 2;
 
+/// 从包里抽出一本时允许写下的最大字节数（解压**后**）。
+///
+/// 必须有这么一个数，因为来路是读者机器上任意一个 zip（整机扫描、传书、监听都交得出），
+/// 而中央目录里声明的解压长度会说谎。取 512 MiB 是拍的：真书里最宽的那一族（一个包里
+/// 装着整本漫画 CBZ）量不到更高，而它同时是磁盘与内存的上限。超过就当场拒那一条，
+/// 不猜它是炸弹还是大书 —— 两者对读者的动作是同一件事（把这个包自己解开再导）。
+const MAX_UNWRAP_BYTES: u64 = 512 << 20;
+
 /// 把 `cores` 切成一个 [`Budget`]。`cores` 是这台机器给**本进程**用的核数
 /// （`available_parallelism` —— 手机上受亲和性掩码影响，在册 8 核可能只报 6）。
 ///
@@ -397,7 +405,7 @@ impl Batch<'_> {
                 return;
             }
             let candidate = &self.candidates[at];
-            let result = import_candidate(
+            let books = import_candidate(
                 self.source,
                 candidate,
                 self.dest_dir,
@@ -407,28 +415,32 @@ impl Batch<'_> {
                 self.per_book,
             );
             // 读数按**结清**的数报，不按领号报：并行时领号在前、结清在后，
-            // 用领号数会画出一条会后退的进度。
+            // 用领号数会画出一条会后退的进度。一个包算一格 —— `total` 数的是候选，
+            // 不是抽出来的本数，否则一个 900 条目的合集包会把进度条顶过 100%。
             let done = self.done.fetch_add(1, Ordering::Relaxed) as u64 + 1;
             self.ctx.item(done, total);
-            self.landed.lock().unwrap_or_else(|e| e.into_inner()).push((
-                at,
-                ImportOutcome {
-                    candidate: candidate.clone(),
-                    result,
-                },
-            ));
+            let mut landed = self.landed.lock().unwrap_or_else(|e| e.into_inner());
+            for (name, result) in books {
+                let mut from = candidate.clone();
+                // 书名换成这一本自己那一个（包里的条目名）：报表与日志上「哪一本没进来」
+                // 要说得出是哪一条，而不是全都顶着那个包名。
+                from.name = name;
+                landed.push((at, ImportOutcome { candidate: from, result }));
+            }
         }
     }
 
     /// 收干结果并按候选原序交回。`workers > 1` 时顺手把**没有结果的那些**在调用线程上
     /// 补跑一遍：崩掉的 worker 手上那一本不许从报表里静默消失。
+    ///
+    /// 「有没有结果」按**候选下标**问，不按条数比大小 —— 一个包会交回好几条，
+    /// `rows.len() == candidates.len()` 那种算法在合集包面前既会少补也会多补。
     fn finish(self) -> Vec<ImportOutcome> {
         let total = self.candidates.len();
         let mut rows = self.landed.into_inner().unwrap_or_else(|e| e.into_inner());
-        rows.sort_by_key(|(at, _)| *at);
-        if rows.len() < total && !self.ctx.cancel().triggered() {
+        let mut present: HashSet<usize> = rows.iter().map(|(at, _)| *at).collect();
+        if present.len() < total && !self.ctx.cancel().triggered() {
             // 缺下标的就是某条 worker 手上正拿着的那本（它崩在了记进表之前）。
-            let present: HashSet<usize> = rows.iter().map(|(at, _)| *at).collect();
             for at in 0..total {
                 // 与 [`Batch::run`] 同一个检查点：取消之后不再补新的。
                 if self.ctx.cancel().triggered() {
@@ -438,7 +450,7 @@ impl Batch<'_> {
                     continue;
                 }
                 let candidate = &self.candidates[at];
-                let result = import_candidate(
+                let books = import_candidate(
                     self.source,
                     candidate,
                     self.dest_dir,
@@ -449,17 +461,20 @@ impl Batch<'_> {
                 );
                 let done = self.done.fetch_add(1, Ordering::Relaxed) as u64 + 1;
                 self.ctx.item(done, total as u64);
-                rows.push((
-                    at,
-                    ImportOutcome {
-                        candidate: candidate.clone(),
-                        result,
-                    },
-                ));
+                for (name, result) in books {
+                    let mut from = candidate.clone();
+                    from.name = name;
+                    rows.push((at, ImportOutcome { candidate: from, result }));
+                }
+                present.insert(at);
             }
             // 补跑的那几本下标可能比表里已有的小，所以要再排一次才谈得上「候选原序」。
             rows.sort_by_key(|(at, _)| *at);
         }
+        // 无条件再排一次：并行时 `run()` 记进来的是**结清顺序**，而报表要的是候选原序。
+        // 稳定排序，所以同一个下标的那几本（一个包里抽出来的）保持它们自己进来的顺序 ——
+        // 那一句「900 章的合集按章节顺序摆」就是靠它。
+        rows.sort_by_key(|(at, _)| *at);
         rows.into_iter().map(|(_, outcome)| outcome).collect()
     }
 }
@@ -570,7 +585,7 @@ impl Claims {
 
 /// 占着的一个号。离开作用域时退号 —— 含提前 `return Err` 与 panic。
 ///
-/// 用它而不是在 [`import_candidate`] 里手写退号，理由是那函数有十来条退出路径：漏掉任何一条
+/// 用它而不是在 [`import_one`] 里手写退号，理由是那函数有十来条退出路径：漏掉任何一条
 /// 就是「这一格被永远占着」，而后面每一本同内容的书都会等在一个没人会放的号上。
 struct Hold {
     hash: String,
@@ -591,14 +606,18 @@ impl Drop for Hold {
     }
 }
 
-/// 一本书的完整旅程，就是 §一 那张图。
+/// 一个候选的完整旅程。**一个 ZIP 候选可能是几本**：里面每一条像书的条目各走一遍
+/// [`import_one`]，各得一条结论。交回的是 `(书名, 结果)` 的清单，非包的那一族就是一条。
 ///
-/// 失败路径上的三个去处要说清，因为它们是「库里有这一行就等于能打开」那句话的全部内容：
+/// 为什么要退那一层，而且退在**算身份之前**：身份、判定、落地全都算在解出来的那一份字节上，
+/// 于是同一本书裸着送来与打包着送来是同一本（判重命中），而书库里躺着的那一份**永远能直接
+/// 打开** —— provider 那一边不需要认识容器，`Format` 也不用为「躺在 zip 里」多立一档。
+/// EPUB 与 CBZ 自己就是书，[`sniff::zip_shape`] 给的是 `Book`，不退（把 EPUB 的条目挨个
+/// 抽出来，那本书就散了）。
 ///
-/// - 判定或哈希这一步失败 → 删掉**暂存区里**那份 `.part`，书库目录里什么都没发生过。
-/// - 落地之后失败（解析、落库）→ 删掉刚 rename 出去的那份副本；如果这一支是自愈
-///   （改已有那一行的位置），位置也退回原来那个不存在的文件，等于回到动手之前。
-/// - 成功 → 库里一行、书库里一份按内容命名的副本，两者同时存在。
+/// **只退一层**，且只按内容退：解出来的那一份不再退一次 —— 里面是 EPUB 的话它自己就是
+/// 容器（上面那条），里面再套一个 `合集.zip` 的话就当不是书拒掉，不替读者猜他想要的
+/// 是哪一本。名字在这整步里没有任何作用：`x.zip` 与 `书.fb2.zip` 走的是同一条路。
 fn import_candidate(
     source: &dyn Source,
     candidate: &Candidate,
@@ -607,21 +626,110 @@ fn import_candidate(
     store: &Store,
     ctx: &StageCtx,
     per_book: usize,
-) -> Result<Imported> {
-    let name = candidate.name.as_str();
+) -> Vec<(String, Result<Imported>)> {
+    let name = candidate.name.clone();
 
     // 步 2：来源把字节写进暂存区，交回那份 `.part`。
-    let staged = source.stage(candidate, staging, ctx)?;
+    let staged = match source.stage(candidate, staging, ctx) {
+        Ok(staged) => staged,
+        Err(err) => return vec![(name, Err(err))],
+    };
     // 契约守一句：写出了暂存区就不收下。也**不删**它 —— 那可能是读者自己的文件，
     // 我们只是没收下这本书而已。
     if staged.parent() != Some(staging) {
         tracing::error!("import: 《{name}》被写到了暂存区之外（{staged:?}），拒绝收下");
-        return Err(Error::Io {
-            path: staged,
-            source: "stage 写出了暂存区之外".to_string().into(),
-        });
+        return vec![(
+            name,
+            Err(Error::Io {
+                path: staged,
+                source: "stage 写出了暂存区之外".to_string().into(),
+            }),
+        )];
     }
 
+    // 步 2 后半：是包就退一层，逐条各算一本。不是包（或开不出中央目录、或里面没有像书的
+    // 条目）就原样走下去 —— 「坏包」与「这不是书」那两句话由判定层说，不在这里编第三套。
+    let sniff::ZipShape::Holds(books) = sniff::zip_shape(&staged) else {
+        let one = import_one(&name, staged, dest_dir, staging, store, per_book);
+        return vec![(name, one)];
+    };
+    tracing::info!(
+        "import: 《{name}》是一个包，逐条抽出 {} 本（其余条目不算书，留在外面那一层）",
+        books.len()
+    );
+    let mut outcomes = Vec::with_capacity(books.len());
+    for book in books {
+        // 取消检查点落在**本与本之间**：一个包里的每一条就是一本，与逐本串行那一路同一条
+        // 纪律（`plans/基础设施.md` §1.2 第 5 条要的是单元之间，不是单元中间）。已经落下
+        // 的那些是真的，界面那句「已取消」重查一次架面就看得见。
+        if ctx.cancel().triggered() {
+            break;
+        }
+        let shown = book.name;
+        let part = staging.join(staged_name(&shown));
+        match extract_entry(&staged, &book.entry, &part) {
+            Ok(written) => {
+                // 局部变量别叫 `display`：tracing 的消息模板里那会把宏自己的辅助函数
+                // 遮掉，报出来是一条看不懂的 `doesn't implement std::fmt::Display`。
+                tracing::debug!("import: 抽出《{}》{} 字节 → 走一遍管线", shown, written);
+                let one = import_one(&shown, part, dest_dir, staging, store, per_book);
+                outcomes.push((shown, one));
+            }
+            Err(why) => {
+                // 抽不出来的那一条只让它自己失败。剩下的条目照走，而外面那一层仍然退掉 ——
+                // 「判定或解析失败的候选不能在库里留下记录」这一条靠 [`import_one`] 自己的
+                // 回滚保证，不靠这里少抽一条。
+                abandon(&part);
+                outcomes.push((
+                    shown.clone(),
+                    Err(Error::Rejected {
+                        name: shown,
+                        why,
+                        reject: ImportReject::CorruptContainer,
+                        source: None,
+                    }),
+                ));
+            }
+        }
+    }
+    // 外面那一层用完了：库里没有它，暂存区也不该留着它。
+    abandon(&staged);
+    outcomes
+}
+
+/// 从包里抽出一本：写进暂存区，交回写了几个字节。失败是 `(String)` —— 那句给人看的话,
+/// 由调用方包成一次带类别的拒绝，而不是在这里猜该算哪一类。
+///
+/// 上限封的是**实际写出的字节数**，不是中央目录声明的那一个：声明值正是会说谎的那一格
+/// （zip 炸弹写 0、解出几个 GB），而整机扫描会把读者机器上任意一个 zip 交给我们。
+/// 走的是流式（`io::copy` 一块一块写），所以这个数同时是磁盘与内存的上限 —— 一批最多四本
+/// 在飞，每本各有一份这样的缓冲。
+fn extract_entry(pack: &Path, entry: &str, dest: &Path) -> std::result::Result<u64, String> {
+    let mut zip = crate::content::format::zip::Zip::open(pack)
+        .map_err(|err| format!("包读不出来：{err:#}"))?;
+    zip.extract_to(entry, dest, MAX_UNWRAP_BYTES)
+        .ok_or_else(|| format!("那一条读不出来，或解压后超过 {} MB", MAX_UNWRAP_BYTES >> 20))
+}
+
+/// 一本书的完整旅程，就是 §一 那张图。
+///
+/// 失败路径上的三个去处要说清，因为它们是「库里有这一行就等于能打开」那句话的全部内容：
+///
+/// - 判定或哈希这一步失败 → 删掉**暂存区里**那份 `.part`，书库目录里什么都没发生过。
+/// - 落地之后失败（解析、落库）→ 删掉刚 rename 出去的那份副本；如果这一支是自愈
+///   （改已有那一行的位置），位置也退回原来那个不存在的文件，等于回到动手之前。
+/// - 成功 → 库里一行、书库里一份按内容命名的副本，两者同时存在。
+///
+/// `name` 是这一本对读者显示的名字（包里的条目就用它自己那个文件名），`staged` 是
+/// 管线刚写下的一份**可以直接读**的字节 —— 是包的话上面那一步已经退开了。
+fn import_one(
+    name: &str,
+    staged: PathBuf,
+    dest_dir: &Path,
+    staging: &Path,
+    store: &Store,
+    per_book: usize,
+) -> Result<Imported> {
     // 步 3 前半：身份算在**管线自己刚写下的字节**上。来源那份文件在读与写之间被改过
     // （同步盘正在写、下载器重传）都不影响这里的结论 —— 这就是把写盘收在一处的全部理由。
     let hash = match identity::sha256_of_path(&staged) {

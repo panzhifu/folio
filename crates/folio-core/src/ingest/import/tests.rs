@@ -857,6 +857,194 @@ fn a_landed_copy_is_still_recognisable_as_that_book() {
     }
 }
 
+/// 一本 `.fb2.zip` 走完整条管线：收进库、副本改名成 `<哈希>.fb2`，而**那份副本还认得自己**。
+///
+/// 这一条盯的是判定层与 provider 之间那条缝：判定按内容认出压缩过的 FB2，落地却按
+/// `Format::Fb2` 问注册表要扩展名 —— 于是副本是一个躺在 `.fb2` 这个名字里的 ZIP。
+/// 「名字仍被 Fb2 认领」与「按头部字节真的读得出正文」两件事必须同时成立，
+/// 否则就是上一那条门点名的那具空壳：导进去过，再也打不开。
+#[test]
+fn a_zipped_fb2_lands_and_still_opens() {
+    use std::io::Write as _;
+
+    use crate::content::format::{Content, Format, provider_for, sniff};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let picked = tmp.path().join("原处");
+    std::fs::create_dir_all(&picked).unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+<description><title-info><book-title>压缩过的一本</book-title></title-info></description>
+<body><section><title><p>第一章</p></title><p>正文</p></section></body>
+</FictionBook>"#;
+    let path = picked.join("一本.fb2.zip");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("一本.fb2", opts).unwrap();
+    zip.write_all(xml.as_bytes()).unwrap();
+    zip.finish().unwrap();
+
+    let outcomes = import_from(
+        &PathsSource::picked(vec![path]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    );
+    let report = ImportReport::tally(&outcomes);
+    assert_eq!(
+        report.added,
+        1,
+        "压缩过的 FB2 要收下：{:?}",
+        outcomes.iter().map(|o| &o.result).collect::<Vec<_>>()
+    );
+    assert_eq!(staged(&lib), Vec::<String>::new(), "暂存区要结清");
+
+    let names = copies(&lib);
+    assert_eq!(names.len(), 1, "书库根上只该有一份副本：{names:?}");
+    let copy_name = &names[0];
+    assert!(
+        copy_name.ends_with(".fb2"),
+        "副本的扩展名来自判定，不是来源那个 `.zip`：{copy_name}"
+    );
+    let copy = lib.join(copy_name);
+
+    // **库里躺的是解出来的那一份，不是外面那个包**：这一条是「先退一层再判」的全部意义 ——
+    // provider 那一边不需要认识容器，`Format` 也不用为「躺在 zip 里」多立一档。
+    assert!(
+        !std::fs::read(&copy).unwrap().starts_with(b"PK\x03\x04"),
+        "副本 {copy_name} 还是一个包，那 provider 就读不动它"
+    );
+
+    assert_eq!(
+        sniff::identify(copy_name, &copy).format(),
+        Some(Format::Fb2),
+        "副本 {copy_name} 过不了自己那道判定"
+    );
+    let provider = provider_for(&copy).expect("副本该有 provider 认领");
+    let (meta, content) = provider.read(&copy).expect("副本要读得开");
+    assert_eq!(meta.title, "压缩过的一本", "书名取自那串 XML，不是哈希名");
+    let Content::Reflow(flow) = content else {
+        panic!("FB2 该读成可重排")
+    };
+    assert_eq!(flow.chapters.len(), 1);
+    assert!(
+        flow.chapters[0].source().contains("正文"),
+        "{}",
+        flow.chapters[0].source()
+    );
+}
+
+/// 一条 FB2 的 XML，书名由参数定 —— 下面那两条门都要在同一个包里放两本**不同**的书。
+fn fb2_xml(title: &str) -> String {
+    format!(
+        r#"<FictionBook><description><title-info><book-title>{title}</book-title></title-info></description><body><section><p>正文</p></section></body></FictionBook>"#
+    )
+}
+
+/// 一个真 zip：`(条目名, 内容)`。
+fn pack(dir: &Path, name: &str, entries: &[(&str, &str)]) -> PathBuf {
+    use std::io::Write as _;
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    for (entry, body) in entries {
+        zip.start_file(*entry, opts).unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    path
+}
+
+/// 一个装着两条正文的包：**一个候选交回两本书**，各带自己那一个名字。
+///
+/// 这是「逐条各判一次」那条规则的门 —— 报表与架面都要按本数说话，而不是按候选数。
+#[test]
+fn one_pack_lands_every_book_it_holds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let picked = tmp.path().join("原处");
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+    let pack = pack(
+        &picked,
+        "合集.zip",
+        &[
+            ("上卷.fb2", &fb2_xml("上卷")),
+            ("下卷.fb2", &fb2_xml("下卷")),
+        ],
+    );
+
+    let outcomes = import_from(
+        &PathsSource::picked(vec![pack]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    );
+    let report = ImportReport::tally(&outcomes);
+    assert_eq!(
+        report.added,
+        2,
+        "一个包里两本就进两本：{:?}",
+        outcomes.iter().map(|o| &o.result).collect::<Vec<_>>()
+    );
+    assert_eq!(copies(&lib).len(), 2, "两本各一份副本");
+    assert_eq!(
+        staged(&lib),
+        Vec::<String>::new(),
+        "外面那一层与半成品都要结清"
+    );
+    // 每一条顶的是**条目自己**那个名字，不是那个包名：哪一本没进来要说得出是哪一条。
+    let given: Vec<String> = outcomes.iter().map(|o| o.candidate.name.clone()).collect();
+    assert_eq!(given, vec!["上卷.fb2", "下卷.fb2"], "{given:?}");
+    // 架面上两本都在。这里比的是集合而不是顺序 —— `shelf` 那一头的排序由它自己定，
+    // 这一条要钉的是「一个包进了两本书」，不是架面怎么摆。
+    let mut titles: Vec<String> = store
+        .shelf("")
+        .unwrap()
+        .into_iter()
+        .map(|item| item.title)
+        .collect();
+    titles.sort();
+    assert_eq!(titles, vec!["上卷", "下卷"], "{titles:?}");
+}
+
+/// 同一本书裸着送来与打包着送来是**同一本**：退那一层排在算身份之前，
+/// 所以哈希算的是解出来的那一份字节。
+///
+/// 这一条钉的是一个顺序，不是一句愿望：先哈希后退层，同一份内容就会因为外面裹没裹
+/// 一层 zip 而得两个哈希，架面上就是两本一模一样的书、两套进度。
+#[test]
+fn the_same_book_bare_and_packed_is_one_book() {
+    let tmp = tempfile::tempdir().unwrap();
+    let picked = tmp.path().join("原处");
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+    let xml = fb2_xml("同一本");
+    let bare = write(&picked, "裸的.fb2", &xml);
+    let packed = pack(&picked, "包的.fb2.zip", &[("里面.fb2", &xml)]);
+
+    let outcomes = import_from(
+        &PathsSource::picked(vec![bare, packed]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    );
+    let report = ImportReport::tally(&outcomes);
+    assert_eq!(report.added, 1, "先到的那一本进库：{report:?}");
+    assert_eq!(
+        report.duplicate,
+        1,
+        "同一份字节第二次到来算已存在：{:?}",
+        outcomes.iter().map(|o| &o.result).collect::<Vec<_>>()
+    );
+    assert_eq!(copies(&lib).len(), 1, "书库根上只该有一份字节");
+}
+
 /// 架子上不许出现哈希串：**书名与章名要跟着来源给的那个名字走**。
 ///
 /// 单文件格式（TXT、无标题行的 Markdown）的标题是 `stem(path)` 回落出来的
@@ -954,12 +1142,106 @@ fn a_batch_tallies_into_a_report_with_rejects() {
         "PDF 认得出但不支持、二进制不是书，同属「不支持」这一栏"
     );
     assert_eq!(report.duplicate, 0);
-    assert_eq!(report.corrupt + report.unreadable, 0, "这一批里没有另两档");
+    assert_eq!(
+        report.corrupt + report.unreadable + report.encrypted,
+        0,
+        "这一批里没有另两档"
+    );
     assert!(
         report.summary().contains("成功 1"),
         "那句总结要说得出数：{}",
         report.summary()
     );
+}
+
+/// 一本 DRM 加密的 EPUB：容器与判定都放行，读到 `META-INF/encryption.xml` 才知道解不开。
+///
+/// 这一条钉的是三件事，缺一件就算没接上：
+///
+/// 1. **拒**，不是收下来画一整章乱码（那就是加这一条之前实际在发生的事）；
+/// 2. 报表里算**加密**那一栏，不是「读不动」—— 后者叫读者重新导入一次，前者要他换一本
+///    无加密的书，是三个动作里唯一现在就该说清的那一个；
+/// 3. 库里**一行都不留**（`plans/导入管线.md` §五那条硬规则：判定或解析失败的候选
+///    最终不能在库里留下记录），书库根也没见过它。
+#[test]
+fn an_encrypted_epub_is_refused_and_leaves_no_library_record() {
+    use std::io::Write as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let picked = tmp.path().join("原处");
+    std::fs::create_dir_all(&picked).unwrap();
+    let path = picked.join("借来的书.epub");
+    {
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        let mut entry = |name: &str, body: &str| {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        };
+        entry("mimetype", "application/epub+zip");
+        entry(
+            "META-INF/container.xml",
+            r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#,
+        );
+        entry(
+            "META-INF/encryption.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <EncryptedData><EncryptionMethod Algorithm="http://www.adobe.com/DRM/method/2008.09.adbe.xmldsig-hmac#sha256"/></EncryptedData>
+</encryption>"#,
+        );
+        entry(
+            "OEBPS/content.opf",
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>借来的书</dc:title></metadata>
+  <manifest><item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#,
+        );
+        entry(
+            "OEBPS/Text/chap1.xhtml",
+            "<html><body><p>这一段其实是密文</p></body></html>",
+        );
+        zip.finish().unwrap();
+    }
+
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+    let outcomes = import_from(
+        &PathsSource::picked(vec![path]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    );
+    let report = ImportReport::tally(&outcomes);
+    assert_eq!(report.added, 0, "加密书不该变成架上的一格");
+    assert_eq!(
+        report.encrypted, 1,
+        "报表要说得出「这是加密的」：{report:?}"
+    );
+    assert_eq!(
+        report.unreadable, 0,
+        "不许压成「读不动」那一栏（那一句是叫读者重新导入）：{report:?}"
+    );
+    assert!(
+        report.summary().contains("加密 1"),
+        "那句总结要点出加密：{}",
+        report.summary()
+    );
+    assert!(
+        store.shelf("").unwrap().is_empty(),
+        "§五：判定或解析失败的候选不能在库里留下记录"
+    );
+    // 书库根与暂存区都从没见过它：拒绝发生在暂存区，那份字节已经跟着 `abandon` 走了。
+    // 问的是「根上有没有**文件**」而不是「根目录空不空」：`.staging` 那一个目录从第 2 步
+    // 起就立在根下，按「非空」判会把每一个被拒的候选都算成落过地（helper 在本文件上面）。
+    assert!(copies(&lib).is_empty(), "书库根里不许有这一本的副本：{:?}", copies(&lib));
+    assert!(staged(&lib).is_empty(), "暂存区那份也该跟着 abandon 走：{:?}", staged(&lib));
 }
 
 // ---- 重扫的线程归属（`plans/阅读管线.md` §七：开书那一屏不等重扫）----
@@ -1388,4 +1670,60 @@ fn a_parallel_batch_that_is_already_cancelled_touches_nothing() {
     assert!(outcomes.is_empty(), "取消了就不该处理任何候选");
     assert!(copies(&lib).is_empty(), "副本也不该落");
     assert!(staged(&lib).is_empty(), "暂存区也不该留下东西");
+}
+
+/// CHM 走**完整条**导入：判成书 → 落一份 `<哈希>.chm` → 从库里那一串字认回格式 →
+/// 按位置回容器取回正文与图。
+///
+/// 这一段的价值在于它把四层串起来：`Format::copy_extension`（副本的扩展名来自**判定**，
+/// 不是来源那个 `.CHM`）、`Format::parse`（下一次开这本书靠库里那一列认格式）、
+/// `locator_for`（CHM 按条目名存位置，漏接就退化成 `Inline("")` = 每章空白）、
+/// 以及 `Container` 对 ITSF 故意不接文本、由 provider 带码页去解。
+/// 任何一处漏接，单层测试都是绿的，症状却是「书在架上而打开是空的」—— 最难查的那一种。
+#[test]
+fn a_chm_imports_lands_and_reads_back() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/oss/chm/minimal-zh-gbk.chm");
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("原处");
+    std::fs::create_dir_all(&source).unwrap();
+    // 名字故意换成中文 + 大写扩展名：副本的定名不许跟着它走。
+    let from = source.join("一本旧书.CHM");
+    std::fs::copy(&fixture, &from).unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let outcomes = import_from(
+        &PathsSource::picked(vec![from]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    );
+    added(&outcomes);
+    let landed = copies(&lib);
+    assert_eq!(landed.len(), 1, "只该落一份副本：{landed:?}");
+    assert!(
+        landed[0].ends_with(".chm"),
+        "副本的扩展名来自判定（小写），不是来源那个 `.CHM`：{landed:?}"
+    );
+    assert!(staged(&lib).is_empty(), "结清之后暂存区要空");
+
+    let path = lib.join(&landed[0]);
+    let doc = crate::content::document::open(&path).unwrap();
+    assert_eq!(doc.meta().format, crate::content::format::Format::Chm);
+    assert_eq!(
+        doc.meta().title,
+        "最小中文书",
+        "书名来自 #SYSTEM，一路要活到界面"
+    );
+    let text = doc.chapter_source(0).unwrap();
+    assert!(
+        !text.contains('\u{fffd}'),
+        "GBK 那本的正文不许有替换字符：{text}"
+    );
+    assert!(text.contains("序言"), "第 0 章的正文该是那串汉字：{text}");
+    assert!(
+        doc.image_bytes("img/fig.png").is_some(),
+        "图按 href 现取要拿得到"
+    );
 }

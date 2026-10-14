@@ -60,7 +60,7 @@ crates/folio-core/          纯 Rust，无 gpui
     content.rs              Content：可重排 FlowDoc / 定版式 FixedDoc（KOReader 的 has_pages 那一刀）
     provider.rs             DocumentProvider trait + 注册表（认领 / 权重）
     zip.rs / cbz.rs         zip 容器共用层；CBZ（定版式，自然序页表）
-    epub.rs / fb2.rs / html.rs / markdown.rs  可重排容器
+    epub.rs / fb2.rs / html.rs / markdown.rs / rtf.rs  可重排容器
   src/remote/               WebDAV + 传输 trait（同步签名）：dav 协议规则离线可测，ureq 是同步实现
   src/task.rs               后台任务管线：可取消、可报进度的后台作业（thread + mpsc）
   src/import.rs             导入管线：Source trait + 逐本「拷 → 解析 → 落库」（后台完成）

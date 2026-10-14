@@ -89,6 +89,26 @@ impl Zip {
         entry.read_to_end(&mut buf).ok().map(|_| buf)
     }
 
+    /// 把一条**流式**写进 `dest`，最多 `max` 个解压后字节；多一个都不写。
+    ///
+    /// 存在的理由是压缩包那一族的经典坑：中央目录声明的解压长度会说谎（写 0、解出
+    /// 4 GB 的 zip 炸弹），而整机扫描会把读者机器上**任意**一个 zip 交给我们。所以
+    /// 两件事都在这里钉死：**不物化整条**（`io::copy` 走 8 KB 一块，不抱几个 GB 的
+    /// `Vec`），**上限按实际写出的字节数判**（声明值那一格正是会撒谎的那一个）。
+    ///
+    /// `None` = 条目读不到、是目录、超出上限、或写盘挂了。`None` 时 `dest` 可能已经
+    /// 留下半份文件，**删它是调用方的事**（它才知道那份半成品在暂存区的哪一个名字上）。
+    /// 多取一位（`max + 1`）就够分辨「正好 `max`」与「超过 `max`」。
+    pub(crate) fn extract_to(&mut self, name: &str, dest: &Path, max: u64) -> Option<u64> {
+        let mut entry = self.archive.by_name(name).ok()?;
+        if entry.is_dir() {
+            return None;
+        }
+        let mut file = std::fs::File::create(dest).ok()?;
+        let written = std::io::copy(&mut entry.by_ref().take(max + 1), &mut file).ok()?;
+        (written <= max).then_some(written)
+    }
+
     /// **按归一化名取字节**：`locate` 与 `read` 合成一步。
     ///
     /// 给 [`Container`](super::container::Container) 用 —— 它拿到的是调用方给的
