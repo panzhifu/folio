@@ -3,6 +3,7 @@
 //! 只有这一个实现：格式差异已经被 provider 抹平成 [`Content`]，这里不再分格式。
 //! 将来若要造一份「不是从文件来的」文档（测试替身、内置示例），也实现同一个 trait。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::{ContentRef, Document, unsupported};
@@ -29,6 +30,15 @@ pub struct BookDocument {
     /// 懒开：绝大多数书在这次会话里根本不会被取字节，所以 `OnceLock` 里的
     /// `Container` 要等第一次取字节才真的 `Zip::open`（见那个模块的头）。
     container: std::sync::OnceLock<crate::content::format::container::Container>,
+    /// `href` → 字节真实所在的那条目，**只收降级过的那几张**。
+    ///
+    /// 存在理由是 EPUB3 的 `<item fallback="…">`：正文里那串 `<img src>` 指的是这一版解不动
+    /// 的那一份（逐页 SVG 是主流那个），而字节躺在同一个容器的另一条目里 —— 那一格就是
+    /// [`ImageRes::source`](crate::content::format::ImageRes::source)。键仍是
+    /// `<img src>` 解出来的那一条，因为正文一个字都不许改（锚点坐标建在源文本上）。
+    ///
+    /// 第一次取字节时才从图片元数据里筛：绝大多数书一张降级路都没挂，那时它就是一张空表。
+    image_sources: std::sync::OnceLock<HashMap<String, String>>,
     meta: DocMeta,
     content: Content,
 }
@@ -63,6 +73,7 @@ impl BookDocument {
             provider: Some(provider),
             path: Some(path.to_path_buf()),
             container: std::sync::OnceLock::new(),
+            image_sources: std::sync::OnceLock::new(),
             meta,
             content,
         })
@@ -77,6 +88,7 @@ impl BookDocument {
             provider: None,
             path: None,
             container: std::sync::OnceLock::new(),
+            image_sources: std::sync::OnceLock::new(),
             meta,
             content,
         }
@@ -95,6 +107,7 @@ impl BookDocument {
             provider: format::provider_for(path),
             path: Some(path.to_path_buf()),
             container: std::sync::OnceLock::new(),
+            image_sources: std::sync::OnceLock::new(),
             meta,
             content,
         }
@@ -122,6 +135,23 @@ impl BookDocument {
             self.container
                 .get_or_init(|| crate::content::format::container::Container::new(path)),
         )
+    }
+
+    /// 这条 `href` 的字节该**去哪儿读**。
+    ///
+    /// 绝大多数时候答案就是它自己；只有作者挂了降级路（EPUB3 的 `<item fallback="…">`，
+    /// 见 [`ImageRes`](crate::content::format::ImageRes)）的那几张换了去处。换的地方收在
+    /// 这一处，于是下面取字节那两条路（容器先试、退回 provider）都不必各自再知道
+    /// 「格式可以声明一份读不动的东西」这件事 —— 那是 provider 层的知识，不是这一层的。
+    fn image_at<'a>(&'a self, href: &'a str) -> &'a str {
+        let map = self.image_sources.get_or_init(|| {
+            self.images()
+                .iter()
+                .filter(|img| img.source != img.href)
+                .map(|img| (img.href.clone(), img.source.clone()))
+                .collect()
+        });
+        map.get(href).map(String::as_str).unwrap_or(href)
     }
 }
 
@@ -157,15 +187,18 @@ impl Document for BookDocument {
     }
 
     fn image_bytes(&self, href: &str) -> Option<Vec<u8>> {
-        // 容器先试：`href` 就是归一化条目名（资源表里存的那一形），命中就免掉
+        // 先问「去哪儿读」：只有挂了降级路的那几张与 `href` 不同（见 [`Self::image_at`]）。
+        // 界面上那串 `<img src>` 解出来的仍是 `href`，它当查询键用着才对。
+        let at = self.image_at(href);
+        // 容器先试：`at` 就是归一化条目名（资源表里存的那一形），命中就免掉
         // 「重新打开 + 重扫中央目录」那两笔 —— 这是滚动取图的热路径。
-        if let Some(bytes) = self.shared().and_then(|container| container.read(href)) {
+        if let Some(bytes) = self.shared().and_then(|container| container.read(at)) {
             return Some(bytes);
         }
         // 退回 provider：单文件格式（HTML 的图是磁盘上挨着它的另一个文件）、
-        // 或者 `href` 不是条目名（FB2 用 `#id` 指 `<binary>`）。
+        // 或者 `at` 不是条目名（FB2 用 `#id` 指 `<binary>`）。
         let (provider, path) = self.container()?;
-        provider.image_bytes(path, href)
+        provider.image_bytes(path, at)
     }
 
     fn stylesheet(&self) -> String {

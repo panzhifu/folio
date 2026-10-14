@@ -36,6 +36,16 @@ pub enum Error {
     #[error("不支持的书籍格式：{0}")]
     UnsupportedFormat(String),
 
+    /// 容器完好、判定也放行了，但 `META-INF/encryption.xml` 里写的是 DRM 而不是字体
+    /// 去混淆 —— 正文那些字节**永远**解不开。
+    ///
+    /// 单独立一条而不是混进 [`Error::UnsupportedFormat`]：后者的意思是「这一版还没写
+    /// 这个格式的 provider」，写完了就能读；DRM 不会因为我们多写代码就变得能读，
+    /// 读者的动作也不是等版本，是换一本无加密的文件。`method` 是那个算法 URI，
+    /// 它决定的是开发者能不能一眼认出是哪一家 DRM。
+    #[error("这本书带 DRM 加密（{method}），读不了：{name}")]
+    Encrypted { name: String, method: String },
+
     #[error("没有这本书：{0}")]
     NoSuchBook(i64),
 
@@ -99,6 +109,9 @@ pub enum ImportReject {
     CorruptContainer,
     /// 收得下、也认得出，但打开 / 解析失败。副本是那份刚拷进来的字节，问题在字节里。
     Unreadable,
+    /// 容器读得动，内容被 DRM 锁着。与上面三档的区别是**重扫一万次也不会变好**：
+    /// 「这一版读不动」是我们将来的事，「有 DRM」是这本书永远的事。
+    Encrypted,
 }
 
 impl Error {
@@ -110,6 +123,7 @@ impl Error {
         match self {
             Error::Rejected { reject, .. } => Some(*reject),
             Error::UnsupportedFormat(_) => Some(ImportReject::UnsupportedFormat),
+            Error::Encrypted { .. } => Some(ImportReject::Encrypted),
             _ => None,
         }
     }

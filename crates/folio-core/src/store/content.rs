@@ -67,11 +67,12 @@ impl Store {
         }
         for img in &doc.images {
             tx.execute(
-                "INSERT INTO images (book_id, href, media_type, width, height)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO images (book_id, href, source, media_type, width, height)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     book_id,
                     img.href,
+                    img.source,
                     img.media_type,
                     img.width as i64,
                     img.height as i64
@@ -212,16 +213,21 @@ impl Store {
             }
         };
         let mut img_stmt = conn.prepare(
-            "SELECT href, media_type, width, height FROM images
+            "SELECT href, source, media_type, width, height FROM images
              WHERE book_id = ?1 ORDER BY id",
         )?;
         let images = img_stmt
             .query_map(params![book_id], |r| {
+                let href: String = r.get(0)?;
+                let source: String = r.get(1)?;
                 Ok(ImageRes {
-                    href: r.get(0)?,
-                    media_type: r.get(1)?,
-                    width: r.get::<_, i64>(2)? as u32,
-                    height: r.get::<_, i64>(3)? as u32,
+                    // 空串 = 与 `href` 同一条：EPUB 以外的那些格式写空，v17 之前入库的老行
+                    // 也读成这一档。这一格记的是「去哪儿读」，不是多一份事实。
+                    source: if source.is_empty() { href.clone() } else { source },
+                    href,
+                    media_type: r.get(2)?,
+                    width: r.get::<_, i64>(3)? as u32,
+                    height: r.get::<_, i64>(4)? as u32,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -365,7 +371,9 @@ fn page_image(page: &FixedPage) -> Option<ImageRes> {
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
     Some(ImageRes {
-        href,
+        href: href.clone(),
+        // 定版式的页没有「声明了但解不动」这一档：条目名就是字节所在。
+        source: href,
         media_type: crate::content::format::media_type_of(&ext).to_string(),
         width: page.width,
         height: page.height,

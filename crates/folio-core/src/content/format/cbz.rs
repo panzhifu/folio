@@ -57,6 +57,8 @@ impl DocumentProvider for CbzAdapter {
             let ext = extension_of(Path::new(name)).unwrap_or_default();
             images.push(ImageRes {
                 href: name.clone(),
+                // 漫画包没有「声明了但解不动」这一档：条目名就是字节所在，键与去处同一条。
+                source: name.clone(),
                 media_type: media_type_of(&ext).to_string(),
                 width,
                 height,

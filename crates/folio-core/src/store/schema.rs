@@ -322,4 +322,17 @@ ALTER TABLE books ADD COLUMN cover_mime TEXT;
 ALTER TABLE books DROP COLUMN cover;
 ALTER TABLE books DROP COLUMN cover_spec;
 "#,
+    // v17：`images` 多一列 `source` —— **字节在容器里真实的那一条**。
+    //
+    // 为什么 `href` 一列不够用了：EPUB3 的 `<item fallback="…">` 让作者把「这一版解不动的
+    // 那一份」（逐页 SVG 与 `image/svg+xml` 的封面是主流那两个）和同一张图的位图版本挂在
+    // 一起。这时**键与去处是两件事**：`href` 必须仍是正文 `<img src>` 解出来的那一条，
+    // 因为排版与绘制都拿它查表，而正文一个字都不许改（锚点坐标建在源文本上，
+    // `plans/Locator.md`）；要读的字节却在另一条目里。以前只有后一件事，于是这类书画不出来。
+    //
+    // 空串读回时算「与 `href` 同一条」（`load_flow` 那一趟），所以 EPUB 以外的格式写空、
+    // 这一版之前入库的老行也不必回填 —— 它们本来就没有降级路可谈。
+    r#"
+ALTER TABLE images ADD COLUMN source TEXT NOT NULL DEFAULT '';
+"#,
 ];

@@ -45,13 +45,25 @@ fn flow(parts: &[(&str, &str)]) -> FlowDoc {
             children: Vec::new(),
         }],
         cover: Some(vec![0x89, b'P', b'N', b'G', 13, 10]),
-        // 一张图片一起进往返：EPUB 的内嵌图走 images 表。
-        images: vec![ImageRes {
-            href: "OEBPS/Images/fig1.png".into(),
-            media_type: "image/png".into(),
-            width: 640,
-            height: 480,
-        }],
+        // 两张图一起进往返：EPUB 的内嵌图走 images 表。第二张是 EPUB3 挂降级路那种
+        // （正文的 `src` 指 SVG，字节在 PNG），它钉的是 `source` 这一列也得原样回来 ——
+        // 键与去处只要有一格落错，那张图就既画不出也查不到尺寸。
+        images: vec![
+            ImageRes {
+                href: "OEBPS/Images/fig1.png".into(),
+                source: "OEBPS/Images/fig1.png".into(),
+                media_type: "image/png".into(),
+                width: 640,
+                height: 480,
+            },
+            ImageRes {
+                href: "OEBPS/Images/chart.svg".into(),
+                source: "OEBPS/Images/chart.png".into(),
+                media_type: "image/png".into(),
+                width: 40,
+                height: 20,
+            },
+        ],
         // 封面**落盘之后**才有描述，而这一份是直接构造的（没有文件）——
         // 所以留 `None`，读那一侧退回 `cover` 那个 BLOB。这正是老库的形状。
         cover_ref: None,
@@ -112,10 +124,28 @@ fn the_v5_migration_drops_image_bytes_from_an_old_database() {
             [],
         )
         .unwrap();
+        // 一章：`load_flow` 对没有章节行的库回 `None`（那是「还没扫过」而不是「扫出个空的
+        // 库」），而下面要从 `load_flow` 那一边读这一张图。
+        conn.execute(
+            "INSERT INTO chapters (book_id, idx, title, spine_href, char_len)
+             VALUES (1, 0, '第一章', 'OEBPS/c1.xhtml', 0)",
+            [],
+        )
+        .unwrap();
     }
 
     let store = Store::open_at(&db).unwrap();
     assert_eq!(store.user_version().unwrap(), MIGRATIONS.len() as i64);
+    // v17 给 `images` 加的那一列在老行上是空的，而空串按「与 `href` 同一条」读回 ——
+    // 老库本来就没有降级路可谈。这一句同时是那条读法的反证：把它改成原样交回空串，
+    // 取字节那一路就拿着一个空条目名去问容器，症状是老书里的图全都不见了。
+    let old = store.load_flow(1).unwrap().expect("图片表要跟着迁过来");
+    assert_eq!(old.images.len(), 1);
+    assert_eq!(
+        old.images[0].source, "OEBPS/i.png",
+        "老行的空 source 该读成它自己：{:?}",
+        old.images[0]
+    );
     drop(store);
 
     let conn = rusqlite::Connection::open(&db).unwrap();
@@ -381,10 +411,11 @@ fn images_roundtrip_and_replace() {
     store.save_flow(id, &doc, Format::Markdown).unwrap();
 
     let got = store.load_flow(id).unwrap().unwrap();
-    assert_eq!(got.images.len(), 1);
-    assert_eq!(got.images[0].href, "OEBPS/Images/fig1.png");
-    assert_eq!(got.images[0].media_type, "image/png");
-    assert_eq!((got.images[0].width, got.images[0].height), (640, 480));
+    assert_eq!(got.images, doc.images, "两张图的每一格都得原样回来");
+    // 第二张是挂降级路那一种：正文的 `src` 与字节所在不是同一条目。这一格落错的话
+    // 症状是「图上画的是解不动的那份字节」，而清单里看着一切正常。
+    assert_eq!(got.images[1].href, "OEBPS/Images/chart.svg", "键不许被换掉");
+    assert_eq!(got.images[1].source, "OEBPS/Images/chart.png");
 
     doc.images.clear();
     store.save_flow(id, &doc, Format::Markdown).unwrap();

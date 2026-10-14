@@ -278,6 +278,7 @@ mod tests {
         let book = BookImages::new(
             &[ImageRes {
                 href: "OEBPS/Images/pic.png".into(),
+                source: "OEBPS/Images/pic.png".into(),
                 // 故意写错：这正是真书里会出现的几种。
                 media_type: "image/jpg".into(),
                 width: 1,
@@ -312,6 +313,7 @@ mod tests {
         let book = BookImages::new(
             &[ImageRes {
                 href: "OEBPS/Images/pic.png".into(),
+                source: "OEBPS/Images/pic.png".into(),
                 media_type: "image/png".into(),
                 width: 1,
                 height: 1,

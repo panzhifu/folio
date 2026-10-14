@@ -176,6 +176,7 @@ pub struct ImportReport {
     pub added: usize,
     pub duplicate: usize,
     pub unsupported: usize,
+    pub encrypted: usize,
     pub corrupt: usize,
     pub unreadable: usize,
 }
@@ -190,6 +191,7 @@ impl ImportReport {
                 Ok(Imported::Duplicate { .. }) => report.duplicate += 1,
                 Err(err) => match err.import_reject() {
                     Some(ImportReject::UnsupportedFormat) => report.unsupported += 1,
+                    Some(ImportReject::Encrypted) => report.encrypted += 1,
                     Some(ImportReject::CorruptContainer) => report.corrupt += 1,
                     // 认不出类别的也算「读不动」：它确实没能变成一行记录，而报表不许
                     // 悄悄少算一本 —— 少算的那本读者只会看见「少了几本」。
@@ -202,17 +204,18 @@ impl ImportReport {
 
     /// 被拒的总数，报表那句「拒绝 K」。
     pub fn rejected(&self) -> usize {
-        self.unsupported + self.corrupt + self.unreadable
+        self.unsupported + self.encrypted + self.corrupt + self.unreadable
     }
 
     /// 一句给人看的话（进日志；屏幕上那句要按 locale 组，core 的字符串只进日志）。
     pub fn summary(&self) -> String {
         format!(
-            "成功 {} / 已存在 {} / 拒绝 {}（不支持 {}、坏包 {}、读不动 {}）",
+            "成功 {} / 已存在 {} / 拒绝 {}（不支持 {}、加密 {}、坏包 {}、读不动 {}）",
             self.added,
             self.duplicate,
             self.rejected(),
             self.unsupported,
+            self.encrypted,
             self.corrupt,
             self.unreadable
         )
@@ -700,7 +703,14 @@ fn import_candidate(
             return Err(Error::Rejected {
                 name: name.to_string(),
                 why,
-                reject: ImportReject::Unreadable,
+                // 加密那一档由 provider 判得出来（它读到了 `encryption.xml`），别把它压成
+                // 「读不动」：前者读者的动作是换一本无 DRM 的书，后者是「重新导入一次试试」。
+                // 其余仍算「读不动」—— `UnsupportedFormat` 那一路走的是**容器结构**读不出，
+                // 到这里书已经被判成 EPUB 了，说「格式不支持」会把人引去换格式。
+                reject: match &err {
+                    crate::Error::Encrypted { .. } => ImportReject::Encrypted,
+                    _ => ImportReject::Unreadable,
+                },
                 source: Some(Box::new(err)),
             });
         }

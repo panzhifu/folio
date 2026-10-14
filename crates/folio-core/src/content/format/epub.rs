@@ -20,7 +20,8 @@ use super::{
     ImageRes, ParseBudget, TocEntry,
 };
 use super::{
-    HeadDims, dir_of, fragment_of, image_dims, image_dims_from_head, resolve_href, shrink_image,
+    HeadDims, dir_of, fragment_of, image_dims, image_dims_from_head, is_decodable_bitmap,
+    resolve_href, shrink_image,
 };
 use crate::infra::error::Result;
 
@@ -241,6 +242,19 @@ struct Item {
     href: String,
     media_type: String,
     properties: Vec<String>,
+    /// `<item fallback="<另一个 item 的 id>">`：这一份解不动时该读哪一份。
+    ///
+    /// EPUB3 的降级声明，用在作者知道读者不一定解得动的场合（SVG 是主流那一个）。
+    /// 规范上链子每跳都指向 manifest 里的另一个 id，末端那个不再挂 fallback。
+    fallback: Option<String>,
+}
+
+/// spine 里的一项：`<itemref idref="…" linear="no">`。
+#[derive(Debug)]
+struct SpineRef {
+    id: String,
+    /// `linear="no"` 之外都算线性。规范里默认是 yes，所以属性缺席就是 true。
+    linear: bool,
 }
 
 #[derive(Debug, Default)]
@@ -248,10 +262,19 @@ struct Opf {
     title: String,
     authors: Vec<String>,
     items: Vec<Item>,
-    spine: Vec<String>,
+    spine: Vec<SpineRef>,
     /// `<meta name="cover" content="<item id>">`
     cover_id: Option<String>,
 }
+
+/// spine 上 `linear="no"` 的那几节默认**不**当一章。
+///
+/// 它们是封面那版隐藏 alt 文本、脚注弹层、nav 文档自己 —— 收进来就是在正文里插一页
+/// 读者从没打算读的东西，还会把后面每一章的序号往后顶一格。留这一颗开关而不是写死在
+/// 循环里，是因为读者侧确实有「显示非线性内容」这一档（KOReader 把它做成了界面开关
+/// `hide_nonlinear_flows`，`frontend/apps/reader/modules/readerrolling.lua:248`）；
+/// **改了它要连 [`super::INDEX_VERSION`] 一起改** —— 章数与章号都变了，老库的位置会错位。
+const KEEP_NONLINEAR: bool = false;
 
 /// 取命名空间前缀之后的部分：`dc:title` → `title`，`epub:type` → `type`。
 fn local_name(name: &str) -> &str {
@@ -300,6 +323,44 @@ fn container_path(xml: &str) -> Option<String> {
     }
 }
 
+/// EPUB 规范允许、且**不是一道授权门**的那两种算法：内嵌字节的 XOR 扰动。
+///
+/// 抄参考实现那张表 —— `reference/koreader/base/thirdparty/kpvcrlib/crengine/crengine/src/epubfmt.cpp:862`
+/// 往后只有这两条走「自己解掉」分支，第三条起一律记成 DRM。表里这两条之外的东西
+/// 每家都不一样（Adobe、Readium LCP、Kindle），我们不去认它们的名字。
+const FONT_OBFUSCATION: [&str; 2] = [
+    "http://ns.adobe.com/pdf/enc#RC",
+    "http://www.idpf.org/2008/embedding",
+];
+
+/// 这本书里第一条**不是**字体去混淆的加密方法，也就是 DRM。`None` = 那些字节读得动。
+///
+/// 认不出来的一律算 DRM，而不是算「不认识所以不管」：放一本加密书进来的下场是架上
+/// 多一本能翻页、每页都是乱码的书，而它永远重扫不好 —— 少收一本的代价只是读者换本书。
+fn drm_method(zip: &mut Zip) -> Option<String> {
+    let text = zip
+        .locate("META-INF/encryption.xml")
+        .and_then(|name| zip.read_text(&name))?;
+    let mut reader = Reader::from_str(&text);
+    // 读不出下一个事件就到此为止（畸形 XML 与读完是同一档）：已经采到的方法照样算。
+    while let Ok(ev) = reader.read_event() {
+        match ev {
+            Event::Start(e) | Event::Empty(e)
+                if local_name(e.name().as_ref()) == "EncryptionMethod" =>
+            {
+                if let Some(method) = attr(&e, "Algorithm")
+                    && !FONT_OBFUSCATION.contains(&method.as_str())
+                {
+                    return Some(method);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_opf(xml: &str) -> Opf {
     let mut out = Opf::default();
     let mut reader = Reader::from_str(xml);
@@ -314,7 +375,10 @@ fn parse_opf(xml: &str) -> Opf {
                 let n = e.name();
                 let name = local_name(n.as_ref());
                 match name {
-                    "metadata" | "manifest" | "spine" => section = name.to_string(),
+                    "metadata" | "manifest" => section = name.to_string(),
+                    "spine" => {
+                        section = name.to_string();
+                    }
                     "title" | "creator" => {
                         pending = Some((name.to_string(), String::new()));
                     }
@@ -358,7 +422,9 @@ fn parse_opf(xml: &str) -> Opf {
                     }
                     ("spine", "itemref") => {
                         if let Some(id) = attr(&e, "idref") {
-                            out.spine.push(id);
+                            let linear = attr(&e, "linear")
+                                .is_none_or(|v| !v.eq_ignore_ascii_case("no"));
+                            out.spine.push(SpineRef { id, linear });
                         }
                     }
                     ("metadata", "meta") if attr(&e, "name").as_deref() == Some("cover") => {
@@ -382,91 +448,294 @@ fn read_item(e: &quick_xml::events::BytesStart<'_>) -> Option<Item> {
         properties: attr(e, "properties")
             .map(|p| p.split_whitespace().map(str::to_string).collect())
             .unwrap_or_default(),
+        // 写成空串的 fallback 按「没有」算：拿它去查 manifest 只会得到一条「指着一个
+        // 不在表里的 id」的误导日志，而那一格本来就不该有下一步。
+        fallback: attr(e, "fallback").filter(|id| !id.is_empty()),
     })
 }
 
-/// nav 文档里 `epub:type="toc"` 那个 `<nav>` 的树。
+/// nav 文档里那个 `<nav>` 归哪一档。规范用 `epub:type` 标，实际出版书也常写在 `class`
+/// 上，两个都认（沿用的是这一层一直以来的判法）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavKind {
+    Toc,
+    Landmarks,
+    PageList,
+    /// 其余（`toc-figures`、`toc-illu`、`cover`…）：整词比不中这三档，解出来也不参与目录。
+    Other,
+}
+
+/// 一个 `<nav>` 的归类。规范允许一个 nav 挂多个 type（`toc bibref` 很常见），所以
+/// 三档按优先级判而不是取第一个 token。
+fn nav_kind(type_attr: Option<String>, class_attr: Option<String>) -> NavKind {
+    // 两个都要先落成变量再借：`unwrap_or_default()` 造的是临时串，挂在迭代器上活不过一句。
+    let types = type_attr.unwrap_or_default();
+    let classes = class_attr.unwrap_or_default();
+    let tokens = types.split_whitespace().chain(classes.split_whitespace());
+    let (mut toc, mut landmarks, mut page_list) = (false, false, false);
+    for token in tokens {
+        match token {
+            "toc" => toc = true,
+            "landmarks" => landmarks = true,
+            "page-list" => page_list = true,
+            _ => {}
+        }
+    }
+    if toc {
+        NavKind::Toc
+    } else if landmarks {
+        NavKind::Landmarks
+    } else if page_list {
+        NavKind::PageList
+    } else {
+        NavKind::Other
+    }
+}
+
+/// 一份 nav 文档解出的三棵树。
+#[derive(Debug, Default)]
+struct NavTrees {
+    toc: Vec<TocEntry>,
+    landmarks: Vec<TocEntry>,
+    page_list: Vec<TocEntry>,
+}
+
+impl NavTrees {
+    /// 拿得出目录的那一棵：**toc → landmarks → page-list**。
+    ///
+    /// 这个次序抄参考实现（`reference/koreader/base/thirdparty/kpvcrlib/crengine/crengine/src/epubfmt.cpp:1760`）。
+    /// 后两档不是凑数，它们各自救一类真书：只写了 landmarks 的（cover / start / toc 那三跳
+    /// 至少是入口），和只有 page-list 的教科书 —— 共同点是**没有 toc**，而读者那一边界面上
+    /// 不该是一栏空白。
+    fn picked(&self) -> &[TocEntry] {
+        if !self.toc.is_empty() {
+            return &self.toc;
+        }
+        if !self.landmarks.is_empty() {
+            return &self.landmarks;
+        }
+        &self.page_list
+    }
+
+    /// 收一棵树。**同一档有两份 nav 时留第一个**：nav 文档里重复的 type 后面那份多半是
+    /// 嵌套的页码表，覆盖了会把目录换成页码。
+    fn insert(&mut self, kind: NavKind, mut roots: Vec<TocEntry>) {
+        if roots.is_empty() {
+            return;
+        }
+        let slot = match kind {
+            NavKind::Toc if self.toc.is_empty() => Some(&mut self.toc),
+            NavKind::Landmarks if self.landmarks.is_empty() => Some(&mut self.landmarks),
+            NavKind::PageList if self.page_list.is_empty() => Some(&mut self.page_list),
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            fill_hrefs(&mut roots);
+            *slot = roots;
+        }
+    }
+}
+
+/// 一个还没收尾的 `<li>`。
+#[derive(Default)]
+struct LiFrame {
+    /// 它自己那一条目（`</a>` 收尾时填）。`None` = 纯容器，只有 `<span>` 那一档。
+    entry: Option<TocEntry>,
+    /// 没有 `<a>` 时的标题来源：直接挂在这个 `<li>` 上的 `<span>` 文本。
+    label: String,
+    /// 在这一层已经收尾的子孙，`</li>` 时整体挂到自己名下。
+    done: Vec<TocEntry>,
+}
+
+/// 一个还没收尾的 `<nav>`。nav 在畸形书里会互相套着写，所以外层是一个栈。
+struct NavFrame {
+    kind: NavKind,
+    lis: Vec<LiFrame>,
+    roots: Vec<TocEntry>,
+}
+
+/// nav 文档（EPUB3 的 `nav.xhtml`）解出的树。
 ///
-/// 嵌套靠 `<li>` 栈算：`<a>` 结束时开一个条目，它所在 `<li>` 结束时条目才归位，
-/// 期间关闭的子条目挂到它下面。没有 `<a>` 的纯容器 `<li>` 不会偷走子条目。
-fn parse_nav(xml: &str) -> Vec<TocEntry> {
+/// 嵌套靠 `<li>` 栈算：`</a>` 把条目交给当前那个 `<li>`，`</li>` 收尾时这条目连同它攒下的
+/// 子孙才归位。
+///
+/// **只有 `<span>` 没有 `<a>` 的那个 `<li>` 是一个标题，不是一章**（「上卷 / 下卷」「第一部分」
+/// 就是这么写的，出版书里非常常见）。这一层以前把它**丢掉**、子条目整体上一格 —— 层级就在
+/// 那一卷那里断掉，目录上看不出「上卷」下面管着哪几章。现在它留成一个没有自己位置的条目，
+/// 位置从第一个解得开的子孙回填（点它会跳到那一卷的第一节，与参考实现同一处理，
+/// `epubfmt.cpp:254-284`）。
+fn parse_nav(xml: &str) -> NavTrees {
+    let mut out = NavTrees::default();
     let mut reader = Reader::from_str(xml);
-    let mut roots: Vec<TocEntry> = Vec::new();
-    // 等待归位的条目栈，栈顶是最近的祖先。
-    let mut open: Vec<TocEntry> = Vec::new();
-    // 每个未闭合 `<li>` 是否自己开过条目。
-    let mut li_has_entry: Vec<bool> = Vec::new();
-    let mut in_toc = 0usize;
-    let mut link: Option<(String, String)> = None;
+    let mut navs: Vec<NavFrame> = Vec::new();
+    // 正在采文本的那条 `<a>`：href、采到的标签、`title` 属性（图当条目用的书只有它）。
+    let mut link: Option<(String, String, String)> = None;
+    // 开着几个 `<span>`。只在没有 `<a>` 开着时才往容器标签上累加，否则
+    // `<a href><span>第一章</span></a>` 的文本会被 span 抢走、条目反而没了标题。
+    let mut span = 0usize;
     // 读不出下一个事件就到此为止（畸形 XML 与读完是同一档）：
     // 已经采到的部分照样有用，一本书因为某处编码坏了就整本打不开是不可接受的。
     while let Ok(ev) = reader.read_event() {
         match ev {
-            Event::Start(e) => {
-                let n = e.name();
-                let name = local_name(n.as_ref());
-                if name == "nav" {
-                    let ty = attr(&e, "type").unwrap_or_default();
-                    let class = attr(&e, "class").unwrap_or_default();
-                    let toc = ty
-                        .split_whitespace()
-                        .chain(class.split_whitespace())
-                        .any(|t| t == "toc");
-                    if toc {
-                        in_toc += 1;
-                    }
-                } else if in_toc > 0 && name == "a" {
-                    link = Some((attr(&e, "href").unwrap_or_default(), String::new()));
-                } else if in_toc > 0 && name == "li" {
-                    li_has_entry.push(false);
+            Event::Start(e) => match local_name(e.name().as_ref()) {
+                "nav" => navs.push(NavFrame {
+                    kind: nav_kind(attr(&e, "type"), attr(&e, "class")),
+                    lis: Vec::new(),
+                    roots: Vec::new(),
+                }),
+                // 一个 `<a>` 里套 `<a>` 是畸形；后开的当它不存在，标签不许被吞两次。
+                "a" if !navs.is_empty() && link.is_none() => {
+                    link = Some((
+                        attr(&e, "href").unwrap_or_default(),
+                        String::new(),
+                        attr(&e, "title").unwrap_or_default(),
+                    ));
                 }
-            }
+                "li" if !navs.is_empty() => {
+                    if let Some(nav) = navs.last_mut() {
+                        nav.lis.push(LiFrame::default());
+                    }
+                }
+                "span" => span += 1,
+                _ => {}
+            },
             Event::Text(e) => {
-                if let Some((_, buf)) = link.as_mut() {
-                    buf.push_str(&text_of(e.as_ref()));
+                let text = text_of(e.as_ref());
+                if let Some((_, label, _)) = link.as_mut() {
+                    label.push_str(&text);
+                } else if span > 0 {
+                    if let Some(nav) = navs.last_mut()
+                        && let Some(li) = nav.lis.last_mut()
+                    {
+                        li.label.push_str(&text);
+                    }
                 }
             }
             Event::End(e) => {
                 let n = e.name();
                 let name = local_name(n.as_ref());
-                if name == "nav" {
-                    in_toc = in_toc.saturating_sub(1);
-                } else if name == "a" && in_toc > 0 {
-                    if let Some((href, label)) = link.take() {
-                        let title = label.split_whitespace().collect::<Vec<_>>().join(" ");
-                        if !title.is_empty() {
-                            if let Some(top) = li_has_entry.last_mut() {
-                                *top = true;
-                            }
-                            open.push(TocEntry {
-                                title,
-                                href,
-                                // 采下来的是原始 href；换成绝对路径时（`rebase`）才拆出 fragment。
-                                fragment: None,
-                                children: Vec::new(),
-                            });
+                if name == "span" {
+                    span = span.saturating_sub(1);
+                    continue;
+                }
+                // `<a>` 与 `<li>` 都要落到「最内层那个还没收尾的 nav」上，取不到就整段跳过。
+                match name {
+                    "nav" => {
+                        if let Some(nav) = navs.pop() {
+                            out.insert(nav.kind, nav.roots);
                         }
                     }
-                } else if name == "li"
-                    && in_toc > 0
-                    && li_has_entry.pop().unwrap_or(false)
-                    && let Some(entry) = open.pop()
-                {
-                    match open.last_mut() {
-                        Some(parent) => parent.children.push(entry),
-                        None => roots.push(entry),
+                    "a" => {
+                        if let (Some((href, label, title_attr)), Some(nav)) =
+                            (link.take(), navs.last_mut())
+                        {
+                            let title = tidy(&label).or_else(|| tidy(&title_attr));
+                            // 没有标签的链接不成条目（与这一层一直以来的口径一致）：
+                            // 目录里一行空白比一行缺的字更难解释。
+                            if let Some(title) = title {
+                                let entry = TocEntry {
+                                    title,
+                                    href,
+                                    // 采下来的是原始 href；换成绝对路径时（`rebase`）才拆出 fragment。
+                                    fragment: None,
+                                    children: Vec::new(),
+                                };
+                                match nav.lis.last_mut() {
+                                    Some(li) if li.entry.is_none() => li.entry = Some(entry),
+                                    // `<a>` 没被任何 `<li>` 包住（不规范但真有这么写的）：
+                                    // 至少条目本身别丢。
+                                    _ => nav.roots.push(entry),
+                                }
+                            }
+                        }
                     }
+                    "li" => {
+                        if let Some(nav) = navs.last_mut()
+                            && let Some(frame) = nav.lis.pop()
+                        {
+                            let LiFrame { entry, label, done } = frame;
+                            // 三种结局，`done` 在每一支里只交出去一次（写进 `children`、
+                            // 或作为要上提的那一批）：编译器证不出 match 各支互斥，
+                            // 所以不能两支都直接 move 同一个 `done` 再在外面用一次。
+                            let (item, promoted): (Option<TocEntry>, Vec<TocEntry>) = match entry {
+                                Some(mut e) => {
+                                    e.children = done;
+                                    (Some(e), Vec::new())
+                                }
+                                None if !done.is_empty() => match tidy(&label) {
+                                    Some(title) => (
+                                        Some(TocEntry {
+                                            title,
+                                            // 纯容器没有自己的位置：下面 `fill_hrefs` 会从
+                                            // 第一个解得开的子孙回填一个。
+                                            href: String::new(),
+                                            fragment: None,
+                                            children: done,
+                                        }),
+                                        Vec::new(),
+                                    ),
+                                    None => (None, done),
+                                },
+                                None => (None, done),
+                            };
+                            match item {
+                                Some(item) => match nav.lis.last_mut() {
+                                    Some(parent) => parent.done.push(item),
+                                    None => nav.roots.push(item),
+                                },
+                                // 这一层既没标题也没条目（一个光包住 `<ol>` 的 `<li>`）：
+                                // 子条目整体上一格，目录宁可少一层也不要丢条目。
+                                None => match nav.lis.last_mut() {
+                                    Some(parent) => parent.done.extend(promoted),
+                                    None => nav.roots.extend(promoted),
+                                },
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             Event::Eof => break,
             _ => {}
         }
     }
-    if roots.is_empty() {
-        // li 结构不合常规时退化成平铺：目录宁可少层级也不要丢条目。
-        return open;
+    // 文档在 nav 还没收尾时就断了：把已经采到的收进树，而不是整栏目录作废。
+    while let Some(nav) = navs.pop() {
+        let mut roots = nav.roots;
+        for frame in nav.lis {
+            roots.extend(frame.done);
+            roots.extend(frame.entry);
+        }
+        out.insert(nav.kind, roots);
     }
-    roots
+    out
+}
+
+/// 首尾空白去掉、中间连续的空白压成一个空格。全空回 `None` —— 「能不能成一个条目」
+/// 这一层就是用它判的。
+fn tidy(text: &str) -> Option<String> {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!collapsed.is_empty()).then_some(collapsed)
+}
+
+/// 纯容器条目（只有标题、没有位置）从自己的子孙回填一个位置。
+///
+/// 回的是**第一个解得开的子孙**而不是留空：界面上点「上卷」这一行该跳到这一卷的第一节，
+/// 而不是什么都不发生。返回这棵树里第一个非空 href，供上一层继续回填。
+fn fill_hrefs(entries: &mut [TocEntry]) -> Option<String> {
+    let mut first: Option<String> = None;
+    for entry in entries.iter_mut() {
+        if !entry.children.is_empty() {
+            let inner = fill_hrefs(&mut entry.children);
+            if entry.href.is_empty() {
+                entry.href = inner.clone().unwrap_or_default();
+            }
+        }
+        if first.is_none() && !entry.href.is_empty() {
+            first = Some(entry.href.clone());
+        }
+    }
+    first
 }
 
 /// EPUB2 的 NCX。navMap 本身是树，但阅读器只用来跳章，这里拍平成一层。
@@ -545,10 +814,17 @@ struct ChapterJob {
 
 #[derive(Debug, Clone)]
 struct ImageJob {
-    /// 解析后的容器绝对路径，进 `ImageRes::href`。
+    /// 解析后的容器绝对路径，进 `ImageRes::href` —— 排版与绘制查表用的那个键，
+    /// 它必须等于正文 `<img src>` 按本章目录解出来的那一条。
     href: String,
-    /// 这张图在容器里的压缩区间（主线程已经按名字定位过）。
+    /// 字节真实所在的那条目，进 `ImageRes::source`。
+    ///
+    /// 没有降级路时它就是 `href` 的副本：worker 只认这一格去哪儿读，不在两处各判一次
+    /// 「这张要不要换」。换的时候两处不同（`decodable_fallback`）。
+    source: String,
+    /// 这张图在容器里的压缩区间（主线程已经按 `source` 定位过）。
     range: EntryRange,
+    /// 与 `source` 同源的那一份声明的类型：解得动的位图那一串。
     media_type: String,
 }
 
@@ -767,6 +1043,7 @@ fn parse_image(reader: &mut EntryReader, job: &ImageJob) -> Option<ImageRes> {
     };
     Some(ImageRes {
         href: job.href.clone(),
+        source: job.source.clone(),
         media_type: job.media_type.clone(),
         width,
         height,
@@ -900,6 +1177,107 @@ fn ordered<T>(mut entries: Vec<(usize, T)>) -> Vec<T> {
     entries.into_iter().map(|(_, item)| item).collect()
 }
 
+/// spine 上出现这些 media-type 时它**不是读物**：样式、字体、以及导航文档自己
+/// （NCX、OPF）常常被写在 spine 里，收进来就是往正文里插一章读者从没打算读的东西。
+///
+/// 与「是内容但这一版解不动」分开处理（见 [`unreadable_chapter`]）：那一档留一章说明，
+/// 这一档安静跳过 —— 一章「这一节是 text/css」的目录条目是噪声，不是信息。
+///
+/// 插图（`image/*`）**不在这一档**：它按规范只该出现在 manifest 里被正文引用，
+/// 而写在 spine 上的那一张是一页内容 —— 逐页 SVG 的漫画书就是这么写的，
+/// 那种书按这一档丢掉就是「凭空少几页」，所以让它走 [`unreadable_chapter`]。
+fn is_resource(media_type: &str) -> bool {
+    let mime = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    mime == "text/css"
+        || mime.starts_with("font/")
+        || mime.starts_with("application/font-")
+        || mime.starts_with("application/x-font-")
+        || mime == "application/vnd.ms-opentype"
+        // NCX（EPUB2 目录）与两种 legacy 清单。
+        || mime.ends_with("ncx+xml")
+        || mime == "application/x-dtbentity-manager.xml"
+        || mime == "application/oebps-package+xml"
+        // 脚本不是读物（`dom` 那一层也把它整段跳过）。
+        || mime.contains("javascript")
+}
+
+/// 沿 `<item fallback="…">` 那条链，找**第一份这一版解得动的位图**。
+///
+/// EPUB3 让作者给「读者不一定解得动的那一份」挂一条降级路，主流那一个用法就是 SVG：
+/// 正文里 `<img src="chart.svg">`，manifest 上 `href="chart.svg" media-type="image/svg+xml"
+/// fallback="chart_png"`，而 `chart_png` 是同一张图的 PNG。我们这一版没有 SVG 栅格化器，
+/// 所以这条链是那些图**唯一**画得出来的路 —— 不走它，读者看到的是一块空白，而字节明明
+/// 就躺在同一个容器里。
+///
+/// 原条目自己就解得动时回 `None`（= 照原条目读），调用方因此不必区分「没有挂链」与
+/// 「链上什么都没有」，那两种是同一件事。三档畸形各给一条说法：
+///
+/// - **环**：`a` 挂 `b`、`b` 挂 `a` 的真书是存在的，所以每个 id 只许经过一次；
+/// - **指着 manifest 里没有的 id**：与没挂链同一档，但那本降级路是作者写错的，值得留一行；
+/// - **长过 [`FALLBACK_HOPS`] 跳**：规范上不该有这么长的链，走满就按没有处理 —— 一本书
+///   不该在导入那一趟里绕不完。
+const FALLBACK_HOPS: usize = 8;
+
+fn decodable_fallback<'a>(
+    start: &'a Item,
+    by_id: &HashMap<&'a str, &'a Item>,
+) -> Option<&'a Item> {
+    if is_decodable_bitmap(&start.media_type) {
+        return None;
+    }
+    let mut current = start;
+    let mut seen: Vec<&str> = vec![current.id.as_str()];
+    for _ in 0..FALLBACK_HOPS {
+        let Some(next_id) = current.fallback.as_deref() else {
+            return None;
+        };
+        if seen.contains(&next_id) {
+            tracing::debug!(
+                "epub: item {:?} 的降级链绕回 {:?}，按没有降级路处理",
+                current.id,
+                next_id
+            );
+            return None;
+        }
+        seen.push(next_id);
+        let Some(&next) = by_id.get(next_id) else {
+            tracing::debug!(
+                "epub: item {:?} 声明降级到 {:?}，manifest 里没有这一条",
+                current.id,
+                next_id
+            );
+            return None;
+        };
+        if is_decodable_bitmap(&next.media_type) {
+            return Some(next);
+        }
+        current = next;
+    }
+    tracing::debug!(
+        "epub: item {:?} 的降级链长过 {FALLBACK_HOPS} 跳，按没有降级路处理",
+        start.id
+    );
+    None
+}
+
+/// 是内容、但这一版解不动的那一节：留一章写明读不了。
+///
+/// 走 [`Chapter::inline`] 是刻意的 —— 它没有能回容器取字节的位置（取回来也是解不动的那堆
+/// 字节），所以正文就在手上，`chapters.char_len` 也照样数得出这段说明的字数。
+/// media-type 经过 `from_plain_text` 全量 XML 转义：畸形 OPF 里那串是别人写的数据，
+/// 不该变成读者屏幕上的一段真标记。
+fn unreadable_chapter(title: String, media_type: &str) -> Chapter {
+    Chapter::inline(
+        title,
+        super::xhtml::from_plain_text(&format!("这一节是 {media_type}，这一版还读不了它。")),
+    )
+}
+
 fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
     read_with_impl(path, with_text, ParseBudget::Auto)
 }
@@ -909,6 +1287,16 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
 /// 外层分好的（`ingest::import::split_budget`）。
 fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(DocMeta, Content)> {
     let mut zip = Zip::open(path)?;
+    // 加密书在门口就该拒。三层判定看的是容器本身（zip 完好、`mimetype` 也对），只有读到
+    // `META-INF/encryption.xml` 才知道那些正文**永远**解不开。放它进来的下场是实打实的：
+    // 架上多一本能翻页、每一页都是乱码的书，而它重扫一万次也不会变好。
+    if let Some(method) = drm_method(&mut zip) {
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        tracing::warn!("epub: {name} 带 DRM 加密（{method}），拒掉");
+        return Err(crate::Error::Encrypted { name, method });
+    }
     let container = zip
         .locate("META-INF/container.xml")
         .and_then(|n| zip.read_text(&n))
@@ -960,7 +1348,8 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
     }
 
     // 目录：EPUB3 靠 manifest 的 `properties="nav"` 认（nav 文档常常不在 spine 里），
-    // 没有 nav 就回落到 EPUB2 的 NCX。
+    // 没有 nav 就回落到 EPUB2 的 NCX。nav 文档内部还有一层回落：`toc` → `landmarks` →
+    // `page-list`（见 [`NavTrees::picked`]）。
     let nav_item = opf
         .items
         .iter()
@@ -984,11 +1373,14 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         };
         let dir = dir_of(&found);
         let entries = if is_nav {
-            parse_nav(&text)
+            parse_nav(&text).picked().to_vec()
         } else {
             parse_ncx(&text)
         };
-        toc = entries.into_iter().map(|e| rebase(e, &dir)).collect();
+        toc = entries
+            .into_iter()
+            .map(|e| rebase(e, &dir, &base_dir, &zip))
+            .collect();
         if !toc.is_empty() {
             break;
         }
@@ -998,21 +1390,34 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         tracing::debug!("epub: nav 与 NCX 都没解出目录条目，这本书没有目录");
     }
 
-    let mut cover = opf
+    // 封面：先认 `<meta name="cover">` 指的那一条，没有就认 EPUB3 的 `properties="cover-image"`。
+    let cover_item: Option<&Item> = opf
         .cover_id
         .as_deref()
-        .and_then(|id| by_id.get(id))
-        .map(|i| resolve(&base_dir, &i.href));
-    if cover.is_none() {
-        cover = opf
-            .items
-            .iter()
-            .find(|i| i.properties.iter().any(|p| p == "cover-image"))
-            .map(|i| resolve(&base_dir, &i.href));
-    }
+        .and_then(|id| by_id.get(id).copied())
+        .or_else(|| {
+            opf.items
+                .iter()
+                .find(|i| i.properties.iter().any(|p| p == "cover-image"))
+        });
+    // 声明的那一条与**实际读**的那一条可以不同：SVG 封面在架子上就是一块空白，而作者常常
+    // 已经把位图那一份挂在 `fallback=` 上了。封面落盘按它自己字节的哈希命名
+    // （`plans/导入管线.md` §八第 4 条），所以这里换的只是「去哪儿读」，没有第二处键要跟着改
+    // —— 这一点和图片那条路正相反，那条的键来自正文 `<img src>`，动不得。
+    let cover_at = cover_item.map(|item| {
+        let declared = resolve(&base_dir, &item.href);
+        match decodable_fallback(item, &by_id) {
+            Some(alt) => {
+                let at = resolve(&base_dir, &alt.href);
+                tracing::debug!("epub: 封面声明的是 {declared}，按降级链读 {at}");
+                at
+            }
+            None => declared,
+        }
+    });
     // 封面在这里**只定位**：定位要读 OPF（主线程本来就在读），而读字节 + 解码 + 缩图
     // 是队列里的一件活（见 `parse_cover` 与 `Job::Cover`），排第一被认领。
-    let cover_job = cover
+    let cover_job = cover_at
         .as_deref()
         .and_then(|n| zip.range_at(n).map(|range| Cover { href: n, range }));
 
@@ -1028,35 +1433,70 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         .filter(|i| i.media_type.starts_with("image/"))
     {
         let href = resolve(&base_dir, &item.href);
-        let Some(range) = zip.range_at(&href) else {
+        // 声明的那一份这一版解不动（`image/svg+xml` 是主流那一个）就沿 `fallback=` 换一份。
+        // **换的只是去哪儿读**：`href` 那格仍是正文 `<img src>` 解出来的那一条，因为排版与
+        // 绘制都按它查表，而正文一个字都不许改（锚点坐标建在源文本上，`plans/Locator.md`）。
+        // 尺寸也跟着换成从位图那份的头部读，所以这类书第一次知道这张图占多大 ——
+        // 不换的话拿到的是 `(0, 0)`，排版按 1:1 兜底，字节也画不出来。
+        let (source, media_type) = match decodable_fallback(item, &by_id) {
+            Some(alt) => (resolve(&base_dir, &alt.href), alt.media_type.clone()),
+            None => (href.clone(), item.media_type.clone()),
+        };
+        let Some(range) = zip.range_at(&source) else {
             // 插图缺失是按页降级的一种（排版会留一块占位），一条一张，所以放到 trace。
-            tracing::trace!("epub: 插图 {href} 不在容器里");
+            tracing::trace!("epub: 插图 {source} 不在容器里");
             continue;
         };
         image_jobs.push(ImageJob {
             href,
+            source,
             range,
-            media_type: item.media_type.clone(),
+            media_type,
         });
     }
 
     // 章节：spine 顺序就是阅读顺序；`locate` 只定位条目，真正的解压与 DOM 解析
     // 交给 worker。每个 spine 条目都要解一次正文，因为 `chapters.char_len` 是全局
     // 字符进度的分母，必须在导入时算准（`plans/导入管线.md` §八第 3 条）。
+    //
+    // 目录查标题的表在这里建一次（真章的空壳回落与 worker 用的是同一份），
+    // 交给每个 worker 查；`toc` 之后要 move 进 `FlowDoc`。
+    let toc_by_href = toc_index(&toc);
     let mut chapter_jobs = Vec::new();
-    for (spine, id) in opf.spine.iter().enumerate() {
-        let Some(item) = by_id.get(id.as_str()) else {
+    // 读不动但是**内容**的那几节留下的那一章：`(spine 下标, 章)`。它们不进并行队列 ——
+    // 没有条目要解压，塞进去只是让 worker 多跑一趟空。
+    let mut notices: Vec<(usize, Chapter)> = Vec::new();
+    // 标题回落要按 spine 下标算「第 N 节」，而下标得是**过滤之前**的那一个：
+    // spine 里被跳过的 nav 与资源不该改变后面章节的编号（与 `ChapterJob::spine` 同一条理由）。
+    for (spine, node) in opf.spine.iter().enumerate() {
+        let Some(item) = by_id.get(node.id.as_str()) else {
             // spine 指着一个 manifest 里没有的 id：这一节整个没了，而且界面上看不出来。
-            tracing::warn!(
-                "epub: spine 第 {} 项指向的 id {id:?} 不在 manifest 里",
-                spine + 1
-            );
+            tracing::warn!("epub: spine 第 {} 项指向的 id {:?} 不在 manifest 里", spine + 1, node.id);
             continue;
         };
-        if !item.media_type.contains("html") || item.properties.iter().any(|p| p == "nav") {
+        if item.properties.iter().any(|p| p == "nav") || is_resource(&item.media_type) {
+            continue;
+        }
+        // 非线性那一档的口径与那颗开关都收在 [`KEEP_NONLINEAR`]。
+        if !node.linear && !KEEP_NONLINEAR {
+            tracing::debug!("epub: spine 第 {} 项写的非线性内容，不当成一章", spine + 1);
             continue;
         }
         let href = resolve(&base_dir, &item.href);
+        let titled = || {
+            toc_by_href
+                .get(href.as_str())
+                .map(|e| e.title.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| format!("第 {} 节", spine + 1))
+        };
+        if !item.media_type.contains("html") {
+            // 是内容、但这一版解不动（spine 上逐页的 SVG、smil 时序、pdf、音视频）。
+            // 留一章写明读不了，而不是让它从章数与目录里凭空消失 —— 读者的下场本来是
+            // 「这本书少了一章」，而那件事故意查不出原因。
+            notices.push((spine, unreadable_chapter(titled(), &item.media_type)));
+            continue;
+        }
         let Some(range) = zip.range_at(&href) else {
             // 正文少一章在界面上的表现是「翻到那里是空的」，说不清原因。
             tracing::warn!(
@@ -1078,9 +1518,6 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
     jobs.extend((0..image_jobs.len()).map(Job::Image));
 
     let total = jobs.len();
-    // 目录查标题的表建一次，交给每个 worker 查（建表在 `toc` 还活着的时候，
-    // `toc` 之后要 move 进 `FlowDoc`）。
-    let toc_by_href = toc_index(&toc);
     let workers = parse_worker_count(total, budget).min(total.max(1));
     #[cfg(test)]
     LAST_WORKERS.with(|c| c.set(workers));
@@ -1109,10 +1546,21 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         }
     };
     let ParsedDoc {
-        chapters,
+        chapters: parsed_chapters,
         images,
         cover: cover_bytes,
     } = parsed;
+    // 真空壳与真章合成一条阅读顺序，按 **spine 下标**排。分两处算会让「第几章」这一格漂：
+    // `ordered` 排的是队列下标，而队列里没有那些空壳。
+    // `chapter_jobs[i]` 与 `parsed_chapters[i]` 一一对应（`ordered` 就是按它排的）。
+    let mut chapters: Vec<(usize, Chapter)> = chapter_jobs
+        .iter()
+        .zip(parsed_chapters)
+        .map(|(job, chapter)| (job.spine, chapter))
+        .chain(notices)
+        .collect();
+    chapters.sort_unstable_by_key(|(spine, _)| *spine);
+    let chapters: Vec<Chapter> = chapters.into_iter().map(|(_, chapter)| chapter).collect();
 
     let meta = DocMeta {
         title: if opf.title.is_empty() {
@@ -1150,13 +1598,31 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
     Ok((meta, Content::Reflow(flow)))
 }
 
-/// nav 里的 href 相对 nav 文档自己，统一换成容器绝对路径。
+/// 目录文档（nav 或 NCX）里的 href 相对**它自己**，统一换成容器绝对路径。
 ///
 /// `#` 后面那一截要在 `resolve_href` 剥掉它之前先取下来存进 `fragment`：剥掉之后只剩
 /// 「哪一章」，而 nav 里最常见的形态恰恰是同一个章文件挂着一串不同小节的锚点。
-fn rebase(entry: TocEntry, base: &str) -> TocEntry {
-    let fragment = fragment_of(&entry.href);
-    let href = resolve(base, &entry.href);
+///
+/// **按目录文档解出来那条不在容器里时，再按 OPF 的基准目录解一次。** 规范说链接相对目录
+/// 文档自己，出版工具却常常按 OPF 那一层写 —— nav 放进 `Nav/` 子目录，href 仍写
+/// `Text/chap1.xhtml`。按规范解出来的结果是容器里根本没有的一个名字，症状是目录那一栏
+/// 每一行都点不动，而 `toc_by_href` 也配不上标题，于是章节标题回落成「第 N 节」。
+/// 回落到 OPF 目录解一次就命中。**只在头一次解不出时才回落**：`../Text/chap1.xhtml`
+/// 那种规范写法两条路都解得出，留下的仍是规范那一条。
+fn rebase(entry: TocEntry, doc_dir: &str, opf_dir: &str, zip: &Zip) -> TocEntry {
+    // 纯容器条目（只有标题、位置是从子孙回填来的）在回填失败时留空：空的就该一直空，
+    // 拿它去 `resolve` 会得到基准目录本身，于是一行「跳不到任何地方」的目录项被当成位置。
+    let (href, fragment) = if entry.href.is_empty() {
+        (String::new(), None)
+    } else {
+        let at = resolve(doc_dir, &entry.href);
+        let href = if zip.locate(&at).is_some() {
+            at
+        } else {
+            resolve(opf_dir, &entry.href)
+        };
+        (href, fragment_of(&entry.href))
+    };
     TocEntry {
         title: entry.title,
         href,
@@ -1164,7 +1630,7 @@ fn rebase(entry: TocEntry, base: &str) -> TocEntry {
         children: entry
             .children
             .into_iter()
-            .map(|c| rebase(c, base))
+            .map(|c| rebase(c, doc_dir, opf_dir, zip))
             .collect(),
     }
 }

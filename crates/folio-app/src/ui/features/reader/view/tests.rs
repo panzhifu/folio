@@ -509,6 +509,7 @@ fn images_flow_through_the_engine_as_fragments(cx: &mut TestAppContext) {
         ],
         images: vec![ImageRes {
             href: "OEBPS/Images/pic.png".into(),
+            source: "OEBPS/Images/pic.png".into(),
             media_type: "image/png".into(),
             width: 40,
             height: 20,

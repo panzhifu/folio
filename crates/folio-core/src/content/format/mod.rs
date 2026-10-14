@@ -98,7 +98,13 @@ impl Format {
 ///
 /// v2：CSS 出库 —— `books.css` 列从拼接文本改成位置清单（`CssStored` 信封），
 /// 老库靠重扫改写成新格式；重扫前旧文本当内联样式兜底。
-pub const INDEX_VERSION: i64 = 2;
+///
+/// v3：EPUB 的 spine 过滤改了两处（见 `format::epub::KEEP_NONLINEAR` 与
+/// `format::epub::unreadable_chapter`）：`linear="no"` 的那几节不再是章，读不动但是
+/// 内容的那几节改成留一章说明。**两边的章数与章号都会动**，而库里的位置记的就是章号 ——
+/// 不 bump 的话老库的进度会安静地指到隔壁那一章。代价是整库每本重扫一次，由
+/// `stale_reason` 认成 `OldIndex`、开书时投递，不在升级那一刻付。
+pub const INDEX_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocMeta {
@@ -376,11 +382,23 @@ pub struct TocEntry {
 /// 固有像素尺寸，读取时算好，布局期只查表。SVG 等取不到尺寸的格式为 0，由排版层降级。
 ///
 /// **字节不在这里，也不进数据库**（学 KOReader 的 `NodeImageProxy`）：真要画时按
-/// `href` 去容器里现取，见 [`image_bytes`]。原图随时能从书里再拿一次，就不该在库里
+/// [`Self::source`] 去容器里现取，见 [`image_bytes`]。原图随时能从书里再拿一次，就不该在库里
 /// 留第二份 —— 一本 200 MB 的漫画，图片一入库就等于把书抄了一遍。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRes {
+    /// **查询键**：正文 `<img src>` 按本章目录解出来的那一条。排版与绘制都拿它问表。
     pub href: String,
+    /// 字节在容器里**真实**的那一条目名。
+    ///
+    /// 与 `href` 只在一种情况下不同：作者把这张图声明成我们解不动的格式（EPUB3 里最常
+    /// 见的是逐页 SVG 与带 `image/svg+xml` 的封面），并在 manifest 上挂了 `fallback=`
+    /// 指着同一张图的位图版本（`format::epub::decodable_fallback`）。那时**键不能换** ——
+    /// 它是正文里那串 `src` 解出来的，而正文一个字都不许改（`plans/Locator.md`：锚点坐标
+    /// 就建在源文本上）—— 要换的只是「去哪儿读字节」，那一格就是这里。
+    ///
+    /// 其余格式与没有降级路的条目都填 `href.clone()`。库里空串读回时同样算「与 `href`
+    /// 同一条」（`store::content` 那一趟），所以这一格不是一份新的事实，是旧事实的显式化。
+    pub source: String,
     pub media_type: String,
     pub width: u32,
     pub height: u32,
@@ -545,8 +563,9 @@ pub(crate) enum HeadDims {
 
 /// 工作区给 `image` 真开了解码器的那几种位图，以及各自的 mime。
 ///
-/// 一张表两处用：猜 mime（[`guess_media_type`]）与判断「这格式值不值得为尺寸多读一趟」
-/// （[`image_dims_from_head`]）。加一种格式只改这里，两处不会分叉。
+/// 一张表三处用：猜 mime（[`guess_media_type`]）、判断「这格式值不值得为尺寸多读一趟」
+/// （[`image_dims_from_head`]）、以及按**作者声明的 media-type** 判这张图要不要找降级路
+/// （[`is_decodable_bitmap`]）。加一种格式只改这里，三处不会分叉。
 const DECODABLE_BITMAPS: [(image::ImageFormat, &str); 5] = [
     (image::ImageFormat::Png, "image/png"),
     (image::ImageFormat::Jpeg, "image/jpeg"),
@@ -554,6 +573,25 @@ const DECODABLE_BITMAPS: [(image::ImageFormat, &str); 5] = [
     (image::ImageFormat::Gif, "image/gif"),
     (image::ImageFormat::Bmp, "image/bmp"),
 ];
+
+/// 容器 / manifest **声明**的 media-type 是不是我们解得动的位图。
+///
+/// 与 [`image_dims_from_head`] 那条按字节头判的是同一张表，差别只在问的是作者写下的那一
+/// 串：字节还没解压（甚至不值得解压）就先决定「这一份要不要换成降级的那一份」，问的正是
+/// 声明。参数串（`image/jpeg;charset=`）与大小写都归到表那一边 —— 出版书里 `IMAGE/PNG`
+/// 与带参数的写法都真的存在。
+///
+/// **`false` 不等于「这本书坏了」**：SVG 是完全合法的图，只是我们这一版没有栅格化器，
+/// 所以调用方拿它去找作者备好的那一份，找不到就照旧留一块空。
+pub(crate) fn is_decodable_bitmap(media_type: &str) -> bool {
+    let mime = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    DECODABLE_BITMAPS.iter().any(|(_, known)| *known == mime)
+}
 
 /// 认得出的格式 → 它的 mime；`image` 里没编解码器的（TIFF、AVIF 那类）回 `None`，
 /// 因为对着 magic bytes 猜得出格式却没有解码器，等于拿不到尺寸。

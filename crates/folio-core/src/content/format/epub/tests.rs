@@ -1288,3 +1288,497 @@ fn the_budget_handed_down_from_the_batch_caps_the_parser() {
         );
     }
 }
+
+// ——————————————————————————————————————————————————————————————
+// EPUB3 的这一批：nav 的三个档与纯容器、spine 的 linear、读不动的那一档、加密容器。
+// 夹具全部当场合成（`tests/fixtures/README.md`：输入只在本机存在的测试要么永远
+// `#[ignore]`，要么是一盏永远绿的假灯）。
+// ——————————————————————————————————————————————————————————————
+
+/// 一份只有一章正文的 EPUB3，nav 文档由参数给。
+fn epub_nav_only(dir: &tempfile::TempDir, nav: &str) -> PathBuf {
+    let path = dir.path().join("nav.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>带 nav 的书</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="nav" href="Nav/nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            ("OEBPS/Nav/nav.xhtml", nav.as_bytes()),
+            ("OEBPS/Text/chap1.xhtml", "<html><body><p>正文</p></body></html>".as_bytes()),
+        ],
+    );
+    path
+}
+
+/// 「上卷 / 下卷」这种只有 `<span>` 没有 `<a>` 的卷级标题，出版书里非常常见。
+///
+/// 这一条钉的是它**别从目录里消失**：以前它被丢掉、子条目整体上一格，于是目录看不出
+/// 「上卷」管着哪两章；现在它留成一个标题，位置从第一个解得开的子孙回填（点它该跳到
+/// 那一卷的第一节，不是一行按了没反应的死字）。
+#[test]
+fn a_span_only_nav_heading_stays_in_the_toc() {
+    let nav = r#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body><nav epub:type="toc"><ol>
+  <li><span>上卷</span><ol>
+    <li><a href="Text/chap1.xhtml">第一章</a></li>
+  </ol></li>
+</ol></nav></body></html>"#;
+    let dir = tempfile::tempdir().unwrap();
+    let flow = flow_of(&epub_nav_only(&dir, nav));
+    let toc = &flow.toc;
+    assert_eq!(toc.len(), 1, "顶层就是那一卷，不该被展平");
+    assert_eq!(toc[0].title, "上卷");
+    assert_eq!(toc[0].children.len(), 1, "第一章挂在卷下面");
+    assert_eq!(
+        toc[0].children[0].href, "OEBPS/Text/chap1.xhtml",
+        "子条目该解成容器绝对路径"
+    );
+    assert_eq!(
+        toc[0].href, "OEBPS/Text/chap1.xhtml",
+        "纯容器的位置从第一个子孙回填：{:?}",
+        toc[0]
+    );
+}
+
+/// 上一条那个回落**只在按 nav 自己解不出时**才发生：两个地方都有同名条目时，
+/// 留下的仍是按 nav 文档解出来的那一个（规范那一读法优先）。
+///
+/// 这一条是回落那一步的反证：把它改成「永远按 OPF 目录解」，只有 `OEBPS/Text/` 一棵的
+/// 书（包括上一条）看不出差别，两棵都在的书才分得开 —— 而那才是会把读者指错地方的
+/// 那种书：nav 目录里真放着一份和正文同名的 alt 版本。
+#[test]
+fn the_nav_resolves_against_itself_when_both_places_have_the_file() {
+    let nav = r#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body><nav epub:type="toc"><ol>
+  <li><a href="Text/chap1.xhtml">第一章</a></li>
+</ol></nav></body></html>"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("both-shapes.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>两棵都有</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="nav" href="Nav/nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            ("OEBPS/Nav/nav.xhtml", nav.as_bytes()),
+            (
+                "OEBPS/Nav/Text/chap1.xhtml",
+                "<html><body><p>nav 旁边那一份</p></body></html>".as_bytes(),
+            ),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>OPF 那一棵</p></body></html>".as_bytes(),
+            ),
+        ],
+    );
+    let flow = flow_of(&path);
+    assert_eq!(
+        flow.toc[0].href, "OEBPS/Nav/Text/chap1.xhtml",
+        "两条路都解得出时不许换成 OPF 那一棵"
+    );
+}
+
+/// nav 里三档各是什么用途时，目录取哪一棵：**toc → landmarks → page-list**。
+///
+/// 只有 landmarks 或只有 page-list 的书（教科书尤其常见后者）不该是一栏空白。
+/// 反过来，toc 在场时后面两档不许抢 —— 页码表当目录用会把读者淹死。
+#[test]
+fn the_nav_falls_back_to_landmarks_then_page_list() {
+    let landmarks = r#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+  <nav epub:type="landmarks"><ol><li><a href="Text/chap1.xhtml">正文起点</a></li></ol></nav>
+</body></html>"#;
+    let dir = tempfile::tempdir().unwrap();
+    let flow = flow_of(&epub_nav_only(&dir, landmarks));
+    assert_eq!(flow.toc.len(), 1, "只有 landmarks 时它顶上");
+    assert_eq!(flow.toc[0].title, "正文起点");
+
+    let page_list = r#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+  <nav epub:type="page-list"><ol><li><a href="Text/chap1.xhtml">1</a></li></ol></nav>
+</body></html>"#;
+    let flow = flow_of(&epub_nav_only(&dir, page_list));
+    assert_eq!(flow.toc.len(), 1, "连 landmarks 都没有时 page-list 兜住");
+
+    // toc 在场时，后面两档不许盖过它。
+    let all_three = r#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+  <nav epub:type="landmarks"><ol><li><a href="Text/chap1.xhtml">正文起点</a></li></ol></nav>
+  <nav epub:type="toc"><ol><li><a href="Text/chap1.xhtml">第一章</a></li></ol></nav>
+  <nav epub:type="page-list"><ol><li><a href="Text/chap1.xhtml">1</a></li></ol></nav>
+</body></html>"#;
+    let flow = flow_of(&epub_nav_only(&dir, all_three));
+    assert_eq!(flow.toc.len(), 1);
+    assert_eq!(flow.toc[0].title, "第一章", "toc 优先于另两档");
+}
+
+/// spine 上 `linear="no"` 的那几节不是读物：封面的隐藏 alt 文本、脚注弹层都写在里面。
+///
+/// 收进来会往正文里插一页读者从没打算读的东西，还会把后面每一章的序号顶后一格。
+#[test]
+fn a_non_linear_spine_item_is_not_a_chapter() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nonlinear.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>有非线性项的书</dc:title></metadata>
+  <manifest>
+    <item id="alt" href="Text/alt.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="alt" linear="no"/>
+    <itemref idref="c1"/>
+  </spine>
+</package>"#;
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            (
+                "OEBPS/Text/alt.xhtml",
+                "<html><body><p>这段是封面的替代文本</p></body></html>".as_bytes(),
+            ),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>正文</p></body></html>".as_bytes(),
+            ),
+        ],
+    );
+    let flow = flow_of(&path);
+    assert_eq!(flow.chapters.len(), 1, "非线性那项不该成为一章");
+    assert_eq!(flow.chapters[0].spine_href, "OEBPS/Text/chap1.xhtml");
+    // 标题回落数的是**spine 上的位置**而不是过滤后的序号，这是这一层一直以来的口径
+    // （见 `ChapterJob::spine` 的说明：被跳过的 nav 不该改变后面章节的编号）。
+    // 非线性项按同一条走，于是这一章就叫「第 2 节」。看着别扭，但换成过滤后的序号
+    // 会要每次改动都重算全书编号 —— 那条更贵，而读者真读到的是标题而不是这个回落。
+    assert_eq!(flow.chapters[0].title, "第 2 节", "{:?}", flow.chapters[0]);
+}
+
+/// spine 上写着读不动的内容（逐页 SVG 那一类）时，留一章说明而不是让章凭空少一页。
+///
+/// 读者的下场本来是「这本书少了一章」，而那一件查不出原因。
+#[test]
+fn an_unreadable_spine_item_leaves_a_chapter_that_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("svgspine.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>逐页 SVG 的书</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="p1" href="Images/page1.svg" media-type="image/svg+xml"/>
+    <item id="css" href="Styles/style.css" media-type="text/css"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+    <itemref idref="p1"/>
+    <itemref idref="css"/>
+  </spine>
+</package>"#;
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>正文</p></body></html>".as_bytes(),
+            ),
+            ("OEBPS/Images/page1.svg", b"<svg/>".as_slice()),
+            ("OEBPS/Styles/style.css", b"p{margin:0}".as_slice()),
+        ],
+    );
+    let flow = flow_of(&path);
+    // 样式是纯资源（不该成为一章），SVG 在 spine 上就是一页内容（该留一章说明）。
+    assert_eq!(flow.chapters.len(), 2, "正文一章 + 读不了的一页");
+    let notice = &flow.chapters[1];
+    assert!(
+        notice.source().contains("image/svg+xml"),
+        "那一章要说出它是什么：{}",
+        notice.source()
+    );
+    assert!(
+        notice.spine_href.is_empty(),
+        "说明文字在手上，不该有一个回容器取字节的位置"
+    );
+    assert!(notice.char_len().is_some(), "说明那一段的字数照样数得出");
+}
+
+/// 加密书在门口拒，并说出是哪一家 DRM。
+///
+/// 三层判定看的是容器本身（zip 完好、`mimetype` 也对），只有读到
+/// `META-INF/encryption.xml` 才知道那些字节永远解不开 —— 放它进来的下场是架上多一本
+/// 能翻页、每页都是乱码的书，而它重扫一万次也不会变好。
+#[test]
+fn an_encrypted_epub_is_refused_and_says_which_method() {
+    let dir = tempfile::tempdir().unwrap();
+    let encrypted = |file: &str, algorithm: &str| {
+        let path = dir.path().join(file);
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>加密书</dc:title></metadata>
+  <manifest><item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <EncryptedData><EncryptionMethod Algorithm="{algorithm}"/></EncryptedData>
+</encryption>"#
+        );
+        write_epub(
+            &path,
+            &[
+                ("mimetype", b"application/epub+zip"),
+                ("META-INF/container.xml", CONTAINER.as_bytes()),
+                ("OEBPS/content.opf", opf.as_bytes()),
+                ("META-INF/encryption.xml", xml.as_bytes()),
+                (
+                    "OEBPS/Text/chap1.xhtml",
+                    "<html><body><p>正文</p></body></html>".as_bytes(),
+                ),
+            ],
+        );
+        path
+    };
+
+    let drm = encrypted(
+        "drm.epub",
+        "http://www.adobe.com/DRM/method/2008.09.adbe.xmldsig-hmac#sha256",
+    );
+    let err = read_with(&drm, false).expect_err("DRM 的书要拒掉");
+    let crate::Error::Encrypted { method, .. } = &err else {
+        panic!("该是 Encrypted，实际 {err:?}");
+    };
+    assert!(method.contains("adobe.com/DRM"), "要说出是哪一家：{method}");
+    // 报表按类别分组靠的是这个（`ImportReject`），不是文案匹配。
+    use crate::infra::error::ImportReject;
+    assert_eq!(err.import_reject(), Some(ImportReject::Encrypted));
+
+    // 字体去混淆不是 DRM：EPUB 规范允许，任何读者都解得开，正文照读。
+    for (name, algorithm) in [
+        ("font-idpf.epub", "http://www.idpf.org/2008/embedding"),
+        (
+            "font-adobe.epub",
+            "http://ns.adobe.com/pdf/enc#RC",
+        ),
+    ] {
+        let book = encrypted(name, algorithm);
+        let flow = flow_of(&book);
+        assert_eq!(
+            flow.chapters.len(),
+            1,
+            "{name}：只是字体扰动，不该拒掉整本书"
+        );
+    }
+
+    // 写了 encryption.xml 但一条方法都没有：没有要解的东西，照读。
+    let empty = {
+        let path = dir.path().join("empty-enc.epub");
+        write_epub(
+            &path,
+            &[
+                ("mimetype", b"application/epub+zip"),
+                ("META-INF/container.xml", CONTAINER.as_bytes()),
+                (
+                    "OEBPS/content.opf",
+                    r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>空加密表</dc:title></metadata>
+  <manifest><item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#
+                        .as_bytes(),
+                ),
+                (
+                    "META-INF/encryption.xml",
+                    r#"<?xml version="1.0"?><encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"/>"#
+                        .as_bytes(),
+                ),
+                (
+                    "OEBPS/Text/chap1.xhtml",
+                    "<html><body><p>正文</p></body></html>".as_bytes(),
+                ),
+            ],
+        );
+        path
+    };
+    assert_eq!(flow_of(&empty).chapters.len(), 1);
+}
+
+// ——————————————————————————————————————————————————————————————
+// EPUB3 的 `<item fallback="…">`：作者把「这一版解不动的那一份」和同一张图的位图版本
+// 一起放进容器，读者就该看到位图那一份。
+// ——————————————————————————————————————————————————————————————
+
+/// 一份最小 SVG：合法图片，但工作区没给 `image` 开 SVG 解码器，所以它是「解不动」那一档。
+const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 2"><rect/></svg>"#;
+
+/// 正文里挂着 `<img src="../Images/chart.svg">` 的一章书，manifest 的图片那几条由参数给。
+///
+/// 键（`ImageRes::href`）来自正文那串 `src`，去处（`source`）由 manifest 的降级链决定 ——
+/// 夹具把两侧分开给，才测得出「换了去处而键没换」这一件真正要钉的事：正文一个字都不许改
+/// （锚点坐标建在源文本上，`plans/Locator.md`）。
+fn epub_chart(dir: &tempfile::TempDir, items: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+    let path = dir.path().join("chart.epub");
+    let opf = format!(
+        r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>带图的书</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+{items}
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#
+    );
+    let chapter = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>前<img src="../Images/chart.svg" alt="图"/>后</p></body></html>"#;
+    let mut all: Vec<(&str, &[u8])> = vec![
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", CONTAINER.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/Text/chap1.xhtml", chapter.as_bytes()),
+    ];
+    all.extend_from_slice(entries);
+    write_epub(&path, &all);
+    path
+}
+
+/// 表里按正文那串 `src` 解出来的键去找那一条，找不到就把这一档的名字打出来。
+fn row_for<'a>(images: &'a [crate::content::format::ImageRes], tail: &str, kind: &str) -> &'a crate::content::format::ImageRes {
+    images
+        .iter()
+        .find(|i| i.href.ends_with(tail))
+        .unwrap_or_else(|| panic!("{kind}：{tail} 不许从图片清单里消失"))
+}
+
+/// SVG 那份解不动、PNG 那份就在同一个容器里 —— 读者看到的就该是 PNG，而查表的键不许变。
+///
+/// 四处各钉一件事：键仍是正文的 `src`（排版与绘制都按它问表）、去处换成 PNG、
+/// 声明的类型跟着换成 PNG（绘制那边拿它当字节头之外的第二判据）、尺寸从 PNG 的头部读
+/// （不换的话拿到 `(0, 0)`，排版按 1:1 兜底，而字节根本解不出来 —— 那块地方全看不见）。
+#[test]
+fn an_svg_image_reads_the_png_it_falls_back_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = png_bytes(40, 20);
+    let path = epub_chart(
+        &dir,
+        r#"<item id="svg1" href="Images/chart.svg" media-type="image/svg+xml" fallback="png1"/>
+    <item id="png1" href="Images/chart.png" media-type="image/png"/>"#,
+        &[
+            ("OEBPS/Images/chart.svg", SVG),
+            ("OEBPS/Images/chart.png", &png),
+        ],
+    );
+    let doc = doc_of(&path);
+    let row = row_for(doc.images(), "chart.svg", "挂了两份的");
+    assert_eq!(
+        row.source, "OEBPS/Images/chart.png",
+        "去处是降级链上那份位图：{row:?}"
+    );
+    assert_eq!(row.media_type, "image/png", "{row:?}");
+    assert_eq!((row.width, row.height), (40, 20), "尺寸从那份位图读：{row:?}");
+    // 界面只有这一条问法：按正文那串 `src` 解出来的键要字节（`ui/shared/images.rs`）。
+    assert_eq!(
+        doc.image_bytes("OEBPS/Images/chart.svg").as_deref(),
+        Some(png.as_slice()),
+        "按 svg 那条名字要到的就该是 PNG 的字节"
+    );
+}
+
+/// 链可以经过一份同样解不动的：SVG → TIFF（工作区没开解码器）→ PNG。
+///
+/// 钉的是「找的是链上**第一份解得动的**」而不是「只看一跳」。真书里这条两跳的链常来自
+/// 出版流水线：先给 SVG 挂一份 TIFF 当印刷源，再往下才是网页用的 PNG。
+#[test]
+fn the_fallback_chain_walks_past_another_undecodable_item() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = png_bytes(8, 6);
+    let path = epub_chart(
+        &dir,
+        r#"<item id="svg1" href="Images/chart.svg" media-type="image/svg+xml" fallback="tiff1"/>
+    <item id="tiff1" href="Images/chart.tiff" media-type="image/tiff" fallback="png1"/>
+    <item id="png1" href="Images/chart.png" media-type="image/png"/>"#,
+        &[
+            ("OEBPS/Images/chart.svg", SVG),
+            ("OEBPS/Images/chart.tiff", b"II\x2a\x00 whatever"),
+            ("OEBPS/Images/chart.png", &png),
+        ],
+    );
+    let doc = doc_of(&path);
+    let row = row_for(doc.images(), "chart.svg", "两跳链的");
+    assert_eq!(row.source, "OEBPS/Images/chart.png", "{row:?}");
+    assert_eq!((row.width, row.height), (8, 6), "{row:?}");
+}
+
+/// 三条「没有可用的降级路」各按原条目读，一条都不许把这张图从清单里丢掉。
+///
+/// 丢掉的症状比留一块空白更糟：版面不知道它占多大，于是那行字会在图到位时跳一下，
+/// 而读者正读到那一行。
+#[test]
+fn an_unusable_fallback_leaves_the_declared_item_alone() {
+    let cases = [
+        (
+            "环",
+            r#"<item id="svg1" href="Images/chart.svg" media-type="image/svg+xml" fallback="svg2"/>
+    <item id="svg2" href="Images/other.svg" media-type="image/svg+xml" fallback="svg1"/>"#,
+        ),
+        (
+            "指着 manifest 里没有的 id",
+            r#"<item id="svg1" href="Images/chart.svg" media-type="image/svg+xml" fallback="ghost"/>"#,
+        ),
+        (
+            "根本没挂链",
+            r#"<item id="svg1" href="Images/chart.svg" media-type="image/svg+xml"/>"#,
+        ),
+    ];
+    for (name, items) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = epub_chart(
+            &dir,
+            items,
+            &[
+                ("OEBPS/Images/chart.svg", SVG),
+                ("OEBPS/Images/other.svg", SVG),
+            ],
+        );
+        let doc = doc_of(&path);
+        let row = row_for(doc.images(), "chart.svg", name);
+        assert_eq!(row.source, row.href, "{name}：没有可用的降级路就照原条目");
+        assert_eq!(row.media_type, "image/svg+xml", "{name}：声明的类型不许被改写");
+        assert_eq!(
+            (row.width, row.height),
+            (0, 0),
+            "{name}：SVG 拿不到固有尺寸，交给排版那条降级"
+        );
+        assert!(
+            doc.image_bytes("OEBPS/Images/chart.svg").is_some(),
+            "{name}：原条目那份字节照样取得到"
+        );
+    }
+}
+
+

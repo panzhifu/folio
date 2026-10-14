@@ -139,7 +139,8 @@ fn styles_and_images(raw: &str, path: &Path) -> (String, Vec<ImageRes>) {
                 let (width, height) = image_dims(&bytes);
                 let ext = extension_of(Path::new(&href)).unwrap_or_default();
                 images.push(ImageRes {
-                    href,
+                    href: href.clone(),
+                    source: href,
                     media_type: media_type_of(&ext).to_string(),
                     width,
                     height,

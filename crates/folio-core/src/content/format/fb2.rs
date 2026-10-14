@@ -1,5 +1,4 @@
 //! FictionBook 2（`.fb2`）：一个 XML 文件装下元数据、正文与内嵌图片。
-//!
 //! 适配器做两件事：把 `<section>` 树转成排版层认的 XHTML 片段，以及把 `<binary>` 里的
 //! base64 图片登记成**元数据**（字节按需再解一次，与 EPUB 同一套「不入库」的规矩）。
 //!
@@ -40,6 +39,8 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
             let (width, height) = image_dims(&b.bytes);
             ImageRes {
                 href: b.id.clone(),
+                // FB2 的图是 `<binary>` 按 id 取，没有「换一个条目读」这一档。
+                source: b.id.clone(),
                 media_type: b.media_type.clone(),
                 width,
                 height,
