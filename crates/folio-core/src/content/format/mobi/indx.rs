@@ -112,7 +112,7 @@ pub(crate) fn read_ncx(
         return Vec::new();
     };
     let cncx_records = word(&header, 12).unwrap_or(0);
-    if index_records < 1 || index_records > 0xFFFF || cncx_records > 0xFFFF {
+    if !(1..=0xFFFF).contains(&index_records) || cncx_records > 0xFFFF {
         return Vec::new();
     }
     let Some(tagx) = tagx_offset(&header) else {
@@ -182,7 +182,7 @@ pub(crate) fn read_ncx(
         if entry_count > 0xFFFF || idxt + 4 + entry_count * 2 > record.len() {
             continue;
         }
-        if record.get(idxt..idxt + 4) != Some(&*b"IDXT") {
+        if record.get(idxt..idxt + 4) != Some(b"IDXT".as_slice()) {
             continue;
         }
         for j in 0..entry_count {
@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(tagx_offset(&fallback), Some(16));
 
         // 两处都不站着 TAGX：这棵树没有目录。
-        assert_eq!(tagx_offset(&vec![0u8; 4 + 44 * 4 + 4]), None);
+        assert_eq!(tagx_offset(&[0u8; 4 + 44 * 4 + 4]), None);
     }
 
     /// 最小的三棵记录：INDX 头 + 一条索引记录 + 一张 CNCX 池，两个层级。

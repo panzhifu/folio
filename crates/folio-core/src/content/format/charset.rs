@@ -125,13 +125,17 @@ fn decode_utf16_bom(bytes: &[u8]) -> Option<String> {
     };
     let units: Vec<u16> = if little {
         bytes[2..]
-            .chunks_exact(2)
-            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| u16::from_le_bytes(*p))
             .collect()
     } else {
         bytes[2..]
-            .chunks_exact(2)
-            .map(|p| u16::from_be_bytes([p[0], p[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| u16::from_be_bytes(*p))
             .collect()
     };
     Some(String::from_utf16_lossy(&units))

@@ -289,7 +289,7 @@ impl HuffCdic {
             if index >= self.index_count {
                 return None;
             }
-            let dictionary = (index >> self.code_length) as usize;
+            let dictionary = index >> self.code_length;
             let dict = self.dictionaries.get(dictionary)?;
             let offset = self.symbol_offsets[index] as usize;
             if offset + 2 > dict.len() {

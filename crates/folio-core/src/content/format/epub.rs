@@ -616,12 +616,11 @@ fn parse_nav(xml: &str) -> NavTrees {
                 let text = text_of(e.as_ref());
                 if let Some((_, label, _)) = link.as_mut() {
                     label.push_str(&text);
-                } else if span > 0 {
-                    if let Some(nav) = navs.last_mut()
-                        && let Some(li) = nav.lis.last_mut()
-                    {
-                        li.label.push_str(&text);
-                    }
+                } else if span > 0
+                    && let Some(nav) = navs.last_mut()
+                    && let Some(li) = nav.lis.last_mut()
+                {
+                    li.label.push_str(&text);
                 }
             }
             Event::End(e) => {
@@ -1243,9 +1242,7 @@ fn decodable_fallback<'a>(start: &'a Item, by_id: &HashMap<&'a str, &'a Item>) -
     let mut current = start;
     let mut seen: Vec<&str> = vec![current.id.as_str()];
     for _ in 0..FALLBACK_HOPS {
-        let Some(next_id) = current.fallback.as_deref() else {
-            return None;
-        };
+        let next_id = current.fallback.as_deref()?;
         if seen.contains(&next_id) {
             tracing::debug!(
                 "epub: item {:?} 的降级链绕回 {:?}，按没有降级路处理",

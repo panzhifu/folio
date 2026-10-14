@@ -1362,7 +1362,9 @@ fn the_style_hash_covers_direction() {
         h.finish()
     };
     let ltr = ComputedStyle::default();
-    let mut rtl = ComputedStyle::default();
-    rtl.direction = Direction::Rtl;
+    let rtl = ComputedStyle {
+        direction: Direction::Rtl,
+        ..ComputedStyle::default()
+    };
     assert_ne!(hash(&ltr), hash(&rtl), "方向改了，块级缓存该失效");
 }

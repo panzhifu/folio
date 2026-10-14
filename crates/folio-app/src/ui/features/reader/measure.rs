@@ -481,7 +481,7 @@ impl Measure for GpuiMeasure {
             .runs
             .iter()
             .flat_map(|r| r.glyphs.iter())
-            .map(|g| (g.index as usize, f32::from(g.position.x)))
+            .map(|g| (g.index, f32::from(g.position.x)))
             .collect();
         Some(edges_from_glyphs(text, &visual, width))
     }

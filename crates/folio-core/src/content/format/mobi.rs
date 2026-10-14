@@ -43,9 +43,4 @@ mod encoding;
 #[allow(dead_code)]
 mod indx;
 
-#[allow(dead_code)]
-pub(crate) use codec::{HuffCdic, extras_len, palmdoc_decompress};
-#[allow(dead_code)]
-pub(crate) use encoding::{decode_text, is_supported as codepage_supported};
-#[allow(dead_code)]
-pub(crate) use indx::{TocItem, read_ncx};
+pub(crate) use encoding::decode_text;

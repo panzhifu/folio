@@ -49,12 +49,16 @@ pub(crate) fn decode_text(bytes: &[u8], codepage: u32) -> String {
                 other => (other, true),
             };
             let units: Vec<u16> = if little_endian {
-                body.chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                body.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes(*pair))
                     .collect()
             } else {
-                body.chunks_exact(2)
-                    .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                body.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_be_bytes(*pair))
                     .collect()
             };
             String::from_utf16_lossy(&units)
