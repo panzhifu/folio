@@ -6,8 +6,10 @@
 //!
 //! ```text
 //! 扩展名   粗筛（批量导入时排掉杂物，省掉无谓的哈希）—— 不当最终裁决
-//! 魔数     PDF、PalmDB（偏移 60 处 `BOOKMOBI`）在这里就定了；ZIP 只定到「是个容器」
-//! 容器     打开来读条目：EPUB 认第一个条目，CBZ 认「条目全是图」
+//! 魔数     PDF、PalmDB（偏移 60 处 `BOOKMOBI`）在这里就定了；ZIP 与 ITSF 只定到
+//!          「是个容器」
+//! 容器     打开来读条目：EPUB 认第一个条目，CBZ 认「条目全是图」，
+//!          否则认「里面躺着哪几条书」—— 那一个包是**几本书**，逐条各走一遍管线
 //! ```
 //!
 //! **裁决以内容为准，不以名字为准**：一个叫 `书.epub` 的纯文本不会被评为 EPUB
@@ -19,6 +21,8 @@
 
 use std::io::Read as _;
 use std::path::Path;
+
+use libchm::{ChmFile, EntrySel};
 
 use super::Format;
 use super::cbz::{is_container_noise, is_page_image};
@@ -38,14 +42,16 @@ const HEAD: usize = 1024;
 pub enum Verdict {
     /// 判成了，且这一版有 provider 读得动它。
     Readable(Format),
-    /// 认得出是什么，但这一版没有能读它的 provider。带上的是给人看的那一句。
+    /// 认得出是什么，但这一条路交不出一个能直接读的格式。带上的是给人看的那一句。
     ///
-    /// 三条已知的都在这一档：PDF（要栅格化引擎）、MOBI / AZW3（PalmDB 容器，
-    /// 还没写那一族）、`.fb2.zip`（认得出来，但要等容器层才能把里面的 `.fb2` 取出来）。
+    /// 三条空缺在这一档：PDF（要栅格化引擎）、MOBI / AZW3（PalmDB 容器，还没写那一族）、
+    /// UTF-16 文本（provider 那一条路只吃 UTF-8）。第四条「压缩包里装着书」**不是空缺**
+    /// 而是兜底：正常路径上管线已经逐条抽出来了，走到那一格说明抽取本身挂了。
     Known(&'static str),
     /// 三层都走完了：不是能当书收的东西。
     NotABook,
-    /// 头四字节说它是个 ZIP，但中央目录读不出来（截断、坏包）。
+    /// 壳说得出是个容器（ZIP 的头四字节、或 ITSF 那四个字节），但目录读不出来
+    /// （截断、坏包）。
     ///
     /// 与 [`Verdict::NotABook`] 分开：后者是「这不是书」，前者是「这是一本坏书」，
     /// 后者建议读者换个文件，前者值得把文件留下来查。
@@ -106,16 +112,49 @@ pub(crate) fn identify(display_name: &str, path: &Path) -> Verdict {
     if let Some(verdict) = magic(&head) {
         return verdict;
     }
+    // CHM 与 ZIP 同一档：`ITSF` 那四个字节只说得出「这是个 ITS 容器」，说不出它是不是
+    // 一本读得动的书，所以要开进去看（下面 `chm` 那一层）。
+    if head.starts_with(b"ITSF") {
+        return chm(path);
+    }
     if head.starts_with(b"PK\x03\x04") {
         return container(path);
     }
     bare_file(display_name, &head)
 }
 
+/// 第三层（ITSF 那一支）：**真把容器开一次**。
+///
+/// 判据用 [`ChmFile::open`] 的成败，而不是自己再解析一遍 ITSF 头 —— 同一件事写两份
+/// 迟早会漂，而漂的症狀正是「判定收下了、provider 打不开」这种说错的话。开一次实测
+/// 55 µs，比后面那趟 SHA-256 便宜三个数量级。
+///
+/// 开得出还要**目录里有可读的条目**：只装了索引与图的 ITS 容器不是书，
+/// 与 CBZ 那一条「至少有一页」同立场。
+fn chm(path: &Path) -> Verdict {
+    let mut file = match ChmFile::open(path) {
+        Ok(file) => file,
+        // 头是 ITSF 而容器开不动：截断或坏了，与「这不是书」分开。
+        Err(_) => return Verdict::CorruptContainer,
+    };
+    match file.entries(EntrySel::NORMAL | EntrySel::FILES) {
+        Ok(entries) if !entries.is_empty() => Verdict::Readable(Format::Chm),
+        Ok(_) => Verdict::NotABook,
+        Err(_) => Verdict::CorruptContainer,
+    }
+}
+
 /// 第二层：头部字节。只有这里能一锤定音的才在这一层返回。
 fn magic(head: &[u8]) -> Option<Verdict> {
     if head.starts_with(b"%PDF") {
         return Some(Verdict::Known("PDF"));
+    }
+    // RTF 的魔数必须在**这一层**，不能在裸文件那一层：合法的 RTF 里可以有 NUL
+    // （`\binN` 后面就是裸字节，WMF 插图与嵌入字体都这么写），而裸文件那一支的第一道门
+    // 是「头部有 NUL 就不是书」。真书里 `\bin` 常常就落在开头几百字节内，那道门会把
+    // 一整本带插图的 RTF 挡在门外，而拒绝的说法是「这不是书」——完全说不清。
+    if starts_with_rtf(head) {
+        return Some(Verdict::Readable(Format::Rtf));
     }
     // PalmDB 的数据库类型在偏移 60..68。MOBI / AZW / AZW3 都是这一个容器。
     if head.len() >= 68 && head[60..68] == *b"BOOKMOBI" {
@@ -129,11 +168,72 @@ fn magic(head: &[u8]) -> Option<Verdict> {
     None
 }
 
-/// 第三层：ZIP 家族。三种书共用一个容器，所以它们在这里分家。
-fn container(path: &Path) -> Verdict {
+/// 头部是不是 RTF 文档。
+///
+/// 两种写法都认：正解是 `{\rtf` 开头，规范还允许第一行是 `%RTF…` 注释行
+/// （真见过，来自某些版本的 WordPerfect）。前面留不留空白也认 —— 有生产者会在
+/// 文件最前面写一个空行，而那一形态在 Windows 的记事本里改过一次就出来了。
+///
+/// 只嗅头部这一小段，不做「整本里含有 `{\rtf` 就算」—— 一个讨论 RTF 的 `.txt`
+/// 会含这几个字符，而它是一篇文档不是一本书。
+///
+/// 反方向也一样成立：**给 RTF 加一条扩展名判据是多余的**。规范写着 RTF 文件必须以
+/// `{\rtf` 开头，所以这一层就是它的全部判据；一个叫 `书.rtf` 却没有这个开头的文件
+/// 确实不是 RTF，它落到裸文件那一支的「有扩展名但不认」被拒掉 —— 那正是一次说得清的拒绝。
+fn starts_with_rtf(head: &[u8]) -> bool {
+    // 注释行 + `{\rtf` 最长也就几十字节，读这么多足够定夺。
+    let text = String::from_utf8_lossy(&head[..head.len().min(120)]);
+    let text = text.trim_start();
+    if text.starts_with(r"{\rtf") {
+        return true;
+    }
+    // `%RTF1` 那一行之后才是真正的文档。
+    text.starts_with('%')
+        .then(|| text.split_once('\n').map_or("", |(_, rest)| rest.trim_start()))
+        .is_some_and(|rest| rest.starts_with(r"{\rtf"))
+}
+
+/// 一个包里躺着的那一本书。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Inner {
+    /// **容器里的原始条目名**：取字节要的就是这一串（归一化名回不去反斜杠那一族）。
+    pub(crate) entry: String,
+    /// 它的文件名。判定与书名要用的是这一个扩展名线索 —— 外层那一个 `.zip`
+    /// 在退开之后已经说不清任何事了。
+    pub(crate) name: String,
+}
+
+/// 一个 ZIP 在「该不该退那一层」这一问上的样子。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ZipShape {
+    /// 头四字节不是 `PK\x03\x04`：谈不上容器。
+    NotAZip,
+    /// 是 ZIP 而中央目录读不出来（截断、坏包）。
+    Corrupt,
+    /// 容器自己**就是**一本书（EPUB：第一个条目是 `mimetype`；CBZ：条目全是图）。
+    /// **不许退**：把 EPUB 的条目一个个抽出来，那本书就散了。
+    Book(Format),
+    /// 里面装着书，一条或多条。多条就是合集包 —— 逐条各算一本书。
+    Holds(Vec<Inner>),
+    /// 一个包，但里面没有我们认得的书：DOCX、JAR、普通压缩包、坏掉的漫画包。
+    Nothing,
+}
+
+/// 认一个 ZIP。**判定层、导入管线退那一层、扫描粗筛三处共用这一份答案**：
+/// 各数一遍条目的结果迟早会在同一个包上分叉（同一本书一会儿算候选、一会儿算「不是书」，
+/// 而两边都看起来是对的）。
+pub(crate) fn zip_shape(path: &Path) -> ZipShape {
+    let head = match read_head(path) {
+        Some(head) => head,
+        // 连头都读不到：谈不上「是个包」，也谈不上不是 —— 按坏文件说。
+        None => return ZipShape::Corrupt,
+    };
+    if !head.starts_with(b"PK\x03\x04") {
+        return ZipShape::NotAZip;
+    }
     let mut zip = match Zip::open(path) {
         Ok(zip) => zip,
-        Err(_) => return Verdict::CorruptContainer,
+        Err(_) => return ZipShape::Corrupt,
     };
     // EPUB 的正解：第一个条目必须是 `mimetype`，内容是 `application/epub+zip`。
     // 规范还要求它「存而不压缩」（所以硬读偏移 38 那 20 个字节就能判）；这里走的是
@@ -146,7 +246,7 @@ fn container(path: &Path) -> Verdict {
             .map(str::trim)
             .is_ok_and(|text| text == "application/epub+zip")
         {
-            return Verdict::Readable(Format::Epub);
+            return ZipShape::Book(Format::Epub);
         }
     }
     let names = zip.names();
@@ -157,21 +257,61 @@ fn container(path: &Path) -> Verdict {
         .map(String::as_str)
         .filter(|name| !is_container_noise(name))
         .collect();
-    // `.fb2.zip`：条目里有一个 `.fb2` 就是它。认得出来，但把那个条目取出来要等
-    // 容器层（`plans/导入管线.md` 第十节的 `Package`），现在还没有能读它的 provider。
-    if entries
-        .iter()
-        .any(|name| extension_of(name).is_some_and(|ext| ext == "fb2"))
-    {
-        return Verdict::Known("压缩过的 FB2（.fb2.zip）");
-    }
     // CBZ：剩下的条目**全部**是图片，而且至少有一张。判据用的是
     // `cbz::is_page_image` 那一份，不再写第二份。
     if !entries.is_empty() && entries.iter().all(|name| is_page_image(name)) {
-        return Verdict::Readable(Format::Cbz);
+        return ZipShape::Book(Format::Cbz);
     }
-    // 是个 zip，但不是上面三种：DOCX、JAR、普通压缩包，或者一个坏掉的漫画包。
-    Verdict::NotABook
+    // 剩下的那一族：把**每一条像书的条目**都交出去，一条算一本书。
+    //
+    // 「像书」只看扩展名有没有 provider 认领，所以图片不算 —— 一个 `书.fb2.zip`
+    // 里那十几张图是**正文的外链资源**，退一层只带走正文那一份，图跟着丢
+    // （管线那一格记一条 warn）。反过来，一个「几十张图 + 一个 `info.txt`」的包
+    // 会得出一本 `info.txt` 那样的小书：这是「逐条各判一次」这条规则的正面代价，
+    // 而它出现在扫描的候选清单上时读者一眼看得见。
+    let mut held: Vec<Inner> = Vec::new();
+    for name in entries {
+        let Some(ext) = extension_of(name) else {
+            continue;
+        };
+        if !super::supported_extensions()
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&ext))
+        {
+            continue;
+        }
+        let Some(entry) = zip.locate(name) else {
+            continue;
+        };
+        held.push(Inner {
+            entry,
+            name: file_name(name).to_string(),
+        });
+    }
+    if held.is_empty() {
+        return ZipShape::Nothing;
+    }
+    ZipShape::Holds(held)
+}
+
+/// 条目名里的文件部分（容器里的路径分隔符两种都认）。
+fn file_name(name: &str) -> &str {
+    name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+/// 第三层：ZIP 家族。判据全在 [`zip_shape`]，这一格只把那份答案换成判定面那四种说法。
+fn container(path: &Path) -> Verdict {
+    match zip_shape(path) {
+        ZipShape::Book(format) => Verdict::Readable(format),
+        // 走到这一格意味着管线没能替它退开（抽那一条时读挂了，或有人直接拿一个
+        // 没解开的包来问判定）。**不许报成「这不是书」**：里面确实有一本书。
+        ZipShape::Holds(_) => Verdict::Known("压缩包里装着书（要先逐条抽出来）"),
+        ZipShape::Corrupt => Verdict::CorruptContainer,
+        // 头四字节不是 ZIP 却走到了这一层 = 调用方那道 `PK` 检查与这里读的不是同一份
+        // 字节（文件在两次读之间被换掉或删掉了）。那一档与「坏包」是同一句话。
+        ZipShape::NotAZip => Verdict::CorruptContainer,
+        ZipShape::Nothing => Verdict::NotABook,
+    }
 }
 
 /// 裸文件那一支：扩展名优先，认不出再看壳。
@@ -247,7 +387,7 @@ mod tests {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
 
-    use super::{Verdict, extension_of, identify, utf8_prefix};
+    use super::{Verdict, ZipShape, extension_of, identify, utf8_prefix, zip_shape};
     use crate::content::format::Format;
 
     /// 一个临时目录。`tag` 只是让读的人知道这一格在测哪一层，不参与路径。
@@ -285,6 +425,19 @@ mod tests {
         ("mimetype", b"application/epub+zip", true),
         ("META-INF/container.xml", b"<container/>", true),
     ];
+
+    /// 一条 FB2 正文的字节。写成常量是因为 `zip_at` 那一串里塞转义引号，
+    /// 三个用例各写一遍会读不动。
+    const FB2_ENTRY: &str = "<FictionBook><body><p>x</p></body></FictionBook>";
+
+    /// 「这个包列出了哪几本」按名字读出来，比逐条 `match` 好看。
+    /// 不是 `Holds` 就直接红 —— 这几条门要问的都是「列出了什么」，形状不对没什么可比的。
+    fn names_of(shape: &ZipShape) -> Vec<&str> {
+        match shape {
+            ZipShape::Holds(inner) => inner.iter().map(|b| b.name.as_str()).collect(),
+            other => panic!("该是 Holds，实际 {other:?}"),
+        }
+    }
 
     /// 第一层就定的两种：PDF 与 PalmDB。名字都不许影响结果。
     #[test]
@@ -348,7 +501,14 @@ mod tests {
                 ("mimetype", b"application/epub+zip", true),
             ],
         );
-        assert_eq!(identify("a.epub", &wrong_head), Verdict::NotABook);
+        // `mimetype` 排在第二位就不是 EPUB（规范定死它是第一个条目）。而包里那一条
+        // `extra.txt` 按「逐条各判一次」算一本书 —— 这一格从 `NotABook` 改成了
+        // 「认得出来，要先抽」，因为「不是 EPUB」与「里面没书」是两句话。
+        assert_eq!(
+            identify("a.epub", &wrong_head),
+            Verdict::Known("压缩包里装着书（要先逐条抽出来）")
+        );
+        assert_eq!(names_of(&zip_shape(&wrong_head)), vec!["extra.txt"]);
         let wrong_body = zip_at(
             tmp.path(),
             "b.epub",
@@ -384,26 +544,155 @@ mod tests {
                 ("story.txt", "正文".as_bytes(), true),
             ],
         );
+        // 混进正文的包不是漫画包 —— 而按「逐条各判一次」这一族的新规矩，那一条
+        // `story.txt` 是一本书，只是还压在包里没解开。所以这一格从 `NotABook` 改成了
+        // 「认得出来，要先抽」：读者照样被拒，但话说得对（这不是杂物包）。
         assert_eq!(
             identify("b.cbz", &mixed),
-            Verdict::NotABook,
-            "混了正文的包不是漫画包"
+            Verdict::Known("压缩包里装着书（要先逐条抽出来）"),
+            "混了正文的包不是漫画包，而正文那一条算一本书"
+        );
+        assert_eq!(names_of(&zip_shape(&mixed)), vec!["story.txt"]);
+    }
+
+    /// 一个装着书的包：**逐条列出来**，每条算一本。`identify` 那一头说「认得出来，
+    /// 但要先抽出来」—— 抽出那一步在管线（`ingest::import::import_candidate`），
+    /// 走到判定层这一格说明它没能替读者退开那一层。
+    #[test]
+    fn a_pack_lists_every_book_it_holds() {
+        let tmp = dir("pack");
+        let one = zip_at(
+            tmp.path(),
+            "书.fb2.zip",
+            &[("书.fb2", FB2_ENTRY.as_bytes(), true)],
+        );
+        // 外层那个名字不参与：`x.zip` 与 `书.fb2.zip` 给出同一份答案。
+        assert_eq!(
+            identify("书.fb2.zip", &one),
+            Verdict::Known("压缩包里装着书（要先逐条抽出来）")
+        );
+        assert_eq!(names_of(&zip_shape(&one)), vec!["书.fb2"]);
+
+        let two = zip_at(
+            tmp.path(),
+            "合集.zip",
+            &[
+                ("上卷.fb2", FB2_ENTRY.as_bytes(), true),
+                ("下卷.fb2", FB2_ENTRY.as_bytes(), true),
+            ],
+        );
+        assert_eq!(
+            names_of(&zip_shape(&two)),
+            vec!["上卷.fb2", "下卷.fb2"],
+            "合集包按容器里的条目序列出 —— 章节序由此来"
         );
     }
 
-    /// 一个 `.fb2` 条目说得出是压缩过的 FB2，但这一版读不动它——要如实报成
-    /// 「认出来了」，不许报成「这不是书」。
+    /// 图片不算书：一个 `书.fb2.zip` 里那十几张图是**正文的外链资源**，
+    /// 列出来的只有那一条正文（抽出来之后图留在外面那一层，管线那句 info 说了）。
     #[test]
-    fn zipped_fb2_is_recognized_but_not_readable_yet() {
-        let tmp = dir("fb2z");
+    fn images_in_a_pack_are_resources_not_books() {
+        let tmp = dir("pack-img");
         let path = zip_at(
             tmp.path(),
             "book.zip",
-            &[("book.fb2", b"<?xml version=\"1.0\"?><FictionBook/>", true)],
+            &[
+                ("book.fb2", FB2_ENTRY.as_bytes(), true),
+                ("images/pic.png", b"\x89PNG", true),
+                ("images/two.jpg", b"\xff\xd8\xff", true),
+            ],
         );
         assert_eq!(
-            identify("book.zip", &path),
-            Verdict::Known("压缩过的 FB2（.fb2.zip）")
+            names_of(&zip_shape(&path)),
+            vec!["book.fb2"],
+            "三条目里只认出一条书"
+        );
+    }
+
+    /// `__MACOSX/._book.fb2` 那种 mac 打包留下的影子**不许当成第二本书**：
+    /// 噪音过滤用的是 CBZ 那一份判据，两处共用，不各写一遍。
+    #[test]
+    fn a_mac_shadow_entry_does_not_become_a_second_book() {
+        let tmp = dir("pack-mac");
+        let path = zip_at(
+            tmp.path(),
+            "book.zip",
+            &[
+                ("book.fb2", FB2_ENTRY.as_bytes(), true),
+                ("__MACOSX/._book.fb2", b"junk", true),
+                ("book/", b"", true),
+            ],
+        );
+        assert_eq!(
+            names_of(&zip_shape(&path)),
+            vec!["book.fb2"],
+            "影子条目与目录都不算一本"
+        );
+    }
+
+    /// 一条像书的都没有（DOCX、JAR、普通压缩包）才是 `Nothing`，判不成书也不报坏包。
+    #[test]
+    fn an_ordinary_archive_holds_no_book() {
+        let tmp = dir("pack-nothing");
+        let path = zip_at(
+            tmp.path(),
+            "备份.zip",
+            &[
+                ("data.json", b"{}", true),
+                ("bin/blob", b"\x00\x01", true),
+                ("notes/", b"", true),
+            ],
+        );
+        assert_eq!(zip_shape(&path), ZipShape::Nothing);
+        assert_eq!(identify("备份.zip", &path), Verdict::NotABook);
+    }
+
+    /// EPUB 与 CBZ 自己就是书：**不许退**。把 EPUB 的条目挨个抽出来，那本书就散了。
+    #[test]
+    fn a_container_that_is_itself_a_book_is_never_split() {
+        let tmp = dir("pack-keep");
+        let epub = zip_at(tmp.path(), "a.epub", EPUB_ENTRIES);
+        assert_eq!(zip_shape(&epub), ZipShape::Book(Format::Epub));
+        let cbz = zip_at(
+            tmp.path(),
+            "b.cbz",
+            &[("001.jpg", b"\xff\xd8\xff", true), ("002.png", b"\x89PNG", true)],
+        );
+        assert_eq!(zip_shape(&cbz), ZipShape::Book(Format::Cbz));
+    }
+
+    /// 不是 zip 的东西在这一问上就是「谈不上容器」，不占任何一趟容器读。
+    #[test]
+    fn a_bare_file_is_not_a_pack() {
+        let tmp = dir("pack-bare");
+        let path = file_at(tmp.path(), "a.fb2", FB2_ENTRY.as_bytes());
+        assert_eq!(zip_shape(&path), ZipShape::NotAZip);
+    }
+
+    /// 扫描粗筛的**包那一半**：判据是里面有什么，不是外面叫什么。
+    /// 这一条守的是最坏的一种漂 —— 一个叫 `x.zip` 的真 EPUB 或真 FB2 包在架面上凭空消失，
+    /// 而界面那句「扫到 N 本」听起来像是扫全了。
+    #[test]
+    fn the_prefilter_opens_a_pack_and_asks_what_is_inside() {
+        let tmp = dir("prefilter");
+        let pack = zip_at(
+            tmp.path(),
+            "书.fb2.zip",
+            &[("书.fb2", FB2_ENTRY.as_bytes(), true)],
+        );
+        assert!(
+            crate::content::format::looks_like_a_book(&pack),
+            "装着书的包要进候选"
+        );
+        let epub = zip_at(tmp.path(), "a.zip", EPUB_ENTRIES);
+        assert!(
+            crate::content::format::looks_like_a_book(&epub),
+            "叫 .zip 的真 EPUB 也要进候选"
+        );
+        let junk = zip_at(tmp.path(), "杂物.zip", &[("data.json", b"{}", true)]);
+        assert!(
+            !crate::content::format::looks_like_a_book(&junk),
+            "普通压缩包不进：粗筛省的就是它那一趟哈希"
         );
     }
 
@@ -418,6 +707,45 @@ mod tests {
             b"PK\x03\x04\x14\x00\x00\x00\x00\x00abc",
         );
         assert_eq!(identify("broken.zip", &path), Verdict::CorruptContainer);
+    }
+
+    /// CHM 那一支走的是**容器那一层**：`ITSF` 只说得出「这是个 ITS 容器」，判据是
+    /// 「开得出、而且目录里有条目」。名字不许参与裁决。
+    ///
+    /// 三条都拿真样本当底子（截断那一条尤其重要 —— 它就是「坏书」与「不是书」的分界）：
+    /// 判据一改这里就红，不会出现「判定收下了、provider 打不开」那种说错的话。
+    /// 样本怎么来的见 `tests/fixtures/oss/chm/README.md`。
+    #[test]
+    fn a_chm_is_decided_by_its_directory_not_by_the_signature_or_the_name() {
+        let tmp = dir("chm");
+        let real = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/oss/chm/minimal-zh-utf8.chm");
+        assert!(real.exists(), "缺样本：{}", real.display());
+        for name in ["x.bin", "书.chm", "没扩展名"] {
+            assert_eq!(
+                identify(name, &real),
+                Verdict::Readable(Format::Chm),
+                "{name}：目录开得动就是书，名字不参与"
+            );
+        }
+
+        // 只留头部那 200 个字节：`ITSF` 在，目录指针指向文件外面。
+        let head = std::fs::read(&real).unwrap();
+        let path = file_at(tmp.path(), "cut.chm", &head[..200]);
+        assert_eq!(
+            identify("cut.chm", &path),
+            Verdict::CorruptContainer,
+            "截断的容器要说「这本坏了」，不是「这不是书」"
+        );
+
+        // 一个穿着 `.chm` 扩展名的裸文本：容器那一层轮不到它，而裸文件那一支的扩展名
+        // 清单里**故意没有** chm —— CHM 按定义就是容器，裸文件不可能是它。
+        let fake = file_at(tmp.path(), "fake.chm", "正文而已\n".as_bytes());
+        assert_eq!(
+            identify("fake.chm", &fake),
+            Verdict::NotABook,
+            "没有容器的 `.chm` 不收：替它猜一个格式等于多一本坏书"
+        );
     }
 
     /// 裸文件按扩展名定，TXT 与 Markdown 分不出来是**格式本身没有魔数**，不是实现偷懒。
@@ -473,6 +801,46 @@ mod tests {
         assert_eq!(identify("a.bin", &nul), Verdict::NotABook);
         let utf16 = file_at(tmp.path(), "a.txt", b"\xff\xfe\x00\x4f\x00k");
         assert_eq!(identify("a.txt", &utf16), Verdict::Known("UTF-16 文本"));
+    }
+
+    /// RTF 由**魔数**定，而它必须在 `magic()` 那一层：合法 RTF 里的 `\binN` 后面是
+    /// 裸字节（可以含 NUL），而裸文件那一支第一道门就是「头部有 NUL 就不是书」——
+    /// 放在下面那一层，一整本带插图的 RTF 会被说成「这不是书」。
+    #[test]
+    fn rtf_lands_by_magic_even_when_it_contains_a_nul() {
+        let tmp = dir("rtf");
+        // `\bin4` 后面那四个字节是真的二进制数据，里面有一个 NUL 与一对花括号。
+        let mut with_bin = r"{\rtf1\ansi\uc0\pict\wmetafile8\bin4".as_bytes().to_vec();
+        with_bin.extend_from_slice(&[0x00, b'}', b'{', 0x00]);
+        with_bin.extend_from_slice(r"\par 正文}".as_bytes());
+        for name in ["a.rtf", "a.bin", "无扩展名"] {
+            let path = file_at(tmp.path(), name, &with_bin);
+            assert_eq!(
+                identify(name, &path),
+                Verdict::Readable(Format::Rtf),
+                "{name}：带 NUL 的合法 RTF 不能被判成不是书"
+            );
+        }
+        // 规范允许的第一行 `%RTF` 注释。
+        let commented = file_at(
+            tmp.path(),
+            "b.rtf",
+            "%RTF1 说明\r\n{\\rtf1\\ansi 正文}".as_bytes(),
+        );
+        assert_eq!(
+            identify("b.rtf", &commented),
+            Verdict::Readable(Format::Rtf)
+        );
+        // 反过来：一个叫 `书.rtf` 却没有这个开头的文件确实不是 RTF，拒掉而不猜。
+        let fake = file_at(tmp.path(), "书.rtf", "其实是一段纯文本\n".as_bytes());
+        assert_eq!(identify("书.rtf", &fake), Verdict::NotABook);
+        // 而头部含有这几个字符的一篇**讨论文档**不算 RTF：判据只看开头。
+        let essay = file_at(
+            tmp.path(),
+            "c.txt",
+            "RTF 文件的头是 {\\rtf1 这个串\n".as_bytes(),
+        );
+        assert_eq!(identify("c.txt", &essay), Verdict::Readable(Format::Text));
     }
 
     /// 扩展名的取法：不带点、转小写、路径成分先剥掉；扩展名**自己**含空格的不算

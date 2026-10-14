@@ -1,0 +1,17 @@
+[OPTIONS]
+Compatibility=1.1 or later
+Compiled file=minimal-zh-gbk.chm
+Contents file=toc.hhc
+Default topic=index.htm
+Display of Online Sources=No
+HTML Help Workshop version=4.53
+Language=0x804
+Plat=Win32
+Compression=yes
+Binary TOC=yes
+Title=最小中文书
+[FILES]
+index.htm
+c1.htm
+c2.htm
+img/fig.png

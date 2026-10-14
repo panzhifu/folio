@@ -22,7 +22,7 @@ gpui-kit 的富文本组件明确不做 CSS（其 Not Goals 原文：*As a HTML 
 crates/folio-core/   零 gpui 依赖：统一文档接口（Document trait：可重排 / 定版式）、
                      DOM、CSS、排版算法、锚点与批注（重定位/分组/导出）、书架分组、
                      SQLite（书目/进度/批注/集合/阅读统计/定版式页表）、
-                     格式 provider 注册表（EPUB / FB2 / HTML / Markdown / TXT / CBZ）、
+                     格式 provider 注册表（EPUB / FB2 / HTML / Markdown / TXT / RTF / CBZ / CHM）、
                      WebDAV、配置（含 `logging` 一节）、日志（`tracing` subscriber 装在这）
 
 crates/folio-app/src/ui/

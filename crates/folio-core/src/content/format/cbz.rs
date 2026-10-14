@@ -142,7 +142,11 @@ pub(crate) fn is_page_image(name: &str) -> bool {
 }
 
 /// 自然序比较：数字段按数值比，其余按小写字符比。
-fn natural_cmp(a: &str, b: &str) -> Ordering {
+///
+/// `pub(crate)` 是因为**这一族不只漫画包会用**：CHM 拿不到正文清单时也要按名字给
+/// 一组 topic 定阅读顺序（见 [`super::chm`]），而 `page2` 排在 `page10` 前面这件事
+/// 没有第二种正确答案 —— 各写一遍迟早会漂。
+pub(crate) fn natural_cmp(a: &str, b: &str) -> Ordering {
     let mut left = a.chars().peekable();
     let mut right = b.chars().peekable();
     loop {

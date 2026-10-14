@@ -26,6 +26,12 @@ crc32fast.workspace = true
 base64.workspace = true
 # 内容哈希（`identity`）：书的身份是它的内容，不是文件路径。
 sha2.workspace = true
+# RTF 正文的码页解码（`\ansicpg936` 的 GBK 双字节 / cp1252 / UTF-8），见 `format::rtf`；
+# CHM 的 topic 与 `#SYSTEM` 字符串也走同一族判据（BOM / `<meta charset>` / 容器报的 LCID），
+# 见 `format::charset`。锁里已有这份且本来在编译 —— 见根 Cargo.toml 那条，不新增依赖树。
+encoding_rs.workspace = true
+# CHM 的容器与 LZX 解压（`format::chm`）。见根 Cargo.toml 为什么钉死版本。
+libchm.workspace = true
 # 文件夹监听（`watch`）：事件驱动的新书自动入库。
 notify.workspace = true
 # 同步 HTTP（`remote::ureq`）。

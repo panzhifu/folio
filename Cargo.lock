@@ -2025,9 +2025,11 @@ dependencies = [
  "crc32fast",
  "cssparser",
  "dirs 6.0.0",
+ "encoding_rs",
  "flate2",
  "html5ever 0.40.1",
  "image",
+ "libchm",
  "notify",
  "quick-xml 0.42.0",
  "rusqlite",
@@ -4249,6 +4251,16 @@ name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+
+[[package]]
+name = "libchm"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4c8e206aaeeee4150ca5615c2ce3e023f5c5ae10f8d21f22dd4e2cce2f58100"
+dependencies = [
+ "bitflags 2.13.2",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "libfuzzer-sys"

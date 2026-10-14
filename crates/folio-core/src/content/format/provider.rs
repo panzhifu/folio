@@ -185,7 +185,9 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::html::HtmlAdapter),
         Box::new(super::markdown::MarkdownAdapter),
         Box::new(super::markdown::PlainTextAdapter),
+        Box::new(super::rtf::RtfAdapter),
         Box::new(super::cbz::CbzAdapter),
+        Box::new(super::chm::ChmAdapter),
     ]
 }
 
@@ -213,7 +215,7 @@ pub fn provider_for(path: &Path) -> Option<Box<dyn DocumentProvider>> {
 /// 往注册表加新格式时忘了这里，扫描会静默漏掉那一类书。
 pub fn supported_extensions() -> &'static [&'static str] {
     &[
-        "epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "cbz",
+        "epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "rtf", "cbz", "chm",
     ]
 }
 
@@ -224,6 +226,36 @@ pub fn supports_extension(ext: &str) -> bool {
         .any(|known| known.eq_ignore_ascii_case(ext))
 }
 
+/// 粗筛：这个文件值不值得哈希一趟、走一遍三层判定。
+///
+/// 两条判据：**扩展名有 provider 认领**，或者**它是一个装得下书的 ZIP**。
+/// 后一条是真的开容器看条目（[`super::sniff::zip_shape`]），不看文件名 ——
+/// `书.fb2.zip`、`书.txt.zip`、`书.epub.zip` 都算，`报告.docx`、`备份.zip` 都不算，
+/// 而且对名字完全不敏感：一个叫 `x.zip` 的真 EPUB 照样进候选。
+///
+/// 为什么开容器不算贵：ZIP 的中央目录在文件**末尾**，读它是一趟 seek 加条目表，
+/// 与「哈希整个文件」不是同一个量级 —— 而粗筛存在的全部理由正是省掉后者
+/// （`plans/导入管线.md` §五：5000 个文件里排掉 4000 个杂物）。反过来，按扩展名把每个
+/// zip 都收进来，会叫读者机器上的备份包、微信下载、docx 各排一趟 SHA-256，
+/// 还得逐条跟他解释「这不是书」。
+///
+/// 仍然**不是裁决**：这一问只决定要不要往下走，最终格式由内容那三层定
+/// （`format::sniff::identify`）。
+pub fn looks_like_a_book(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    if supports_extension(ext) {
+        return true;
+    }
+    // 只有扩展名不认的那一族才值得开容器，所以这一问排在后面。
+    matches!(
+        super::sniff::zip_shape(path),
+        super::sniff::ZipShape::Book(_) | super::sniff::ZipShape::Holds(_)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     //! 注册表：认领与权重。用一个只认 `.zzz` 的假 provider 钉住选择规则 ——
@@ -231,7 +263,9 @@ mod tests {
 
     use std::path::Path;
 
-    use super::{DocumentProvider, provider_for, providers, supported_extensions};
+    use super::{
+        DocumentProvider, looks_like_a_book, provider_for, providers, supported_extensions,
+    };
     use crate::content::format::{Content, DocMeta, Format};
 
     struct Fake {
@@ -317,7 +351,9 @@ mod tests {
             ("a.html", Format::Html),
             ("a.md", Format::Markdown),
             ("a.txt", Format::Text),
+            ("a.rtf", Format::Rtf),
             ("a.cbz", Format::Cbz),
+            ("a.chm", Format::Chm),
         ] {
             let provider =
                 provider_for(Path::new(name)).unwrap_or_else(|| panic!("{name} 该有 provider"));
@@ -327,6 +363,26 @@ mod tests {
             provider_for(Path::new("a.mobi")).is_none(),
             "没注册就是不认"
         );
-        assert_eq!(providers().len(), 6);
+        assert_eq!(providers().len(), 8);
+    }
+
+    /// 粗筛那一道门的**名字那一半**：注册表清单里的每一个仍然过，认不出的名字不过。
+    /// 「包那一半」（打开来看里面有没有书）住在 `format::sniff::tests` 那几条里 ——
+    /// 那要真的造得出 zip，夹具与判据同层放才不绕。
+    ///
+    /// 名字那一半为什么还要留着：一次扫描要过几千个文件，扩展名对得上的**不必开容器**，
+    /// 而开容器对非 zip 的文件也是白一趟（虽然便宜）。
+    #[test]
+    fn the_prefilter_takes_every_extension_the_registry_claims() {
+        for ext in supported_extensions() {
+            let probe = Path::new("/x/a").with_extension(ext);
+            assert!(looks_like_a_book(&probe), "清单里的 .{ext} 该继续过筛");
+        }
+        assert!(!looks_like_a_book(Path::new("/x/报告.docx")));
+        assert!(!looks_like_a_book(Path::new("/x/无扩展名")));
+        // 名字说了不算：这两个都是 `.zip`，一个开得出书一个开不出，
+        // 而这里给的都是**读不到**的路径 —— 谈不上容器就是不过筛，不报坏包。
+        assert!(!looks_like_a_book(Path::new("/x/书.fb2.zip")));
+        assert!(!looks_like_a_book(Path::new("/x/杂物.zip")));
     }
 }

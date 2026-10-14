@@ -6,8 +6,8 @@
 //! 这条契约成为 provider 的**唯一输出约定**，界面与引擎都不再问格式。
 //!
 //! 这里用真实 provider 跑（不是构造 `Chapter`），因为要钉住的正是「provider 有没有
-//! 真的守约」。三种源都覆盖：本来就是标记的（HTML / FB2 / EPUB）、纯文本的
-//! （Markdown / TXT）、以及不进引擎的定版式（CBZ）。
+//! 真的守约」。四类源都覆盖：本来就是标记的（HTML / FB2 / EPUB）、纯文本的
+//! （Markdown / TXT）、把格式指令**翻译成**标记的（RTF），以及不进引擎的定版式（CBZ）。
 
 use std::path::{Path, PathBuf};
 
@@ -53,6 +53,20 @@ fn fb2(dir: &Path) -> PathBuf {
     )
 }
 
+/// RTF 用真书里那一形态：`\ansicpg936` + GBK 双字节的 `\'hh`，标题走 `\stylesheet`，
+/// 外加一个不带 `*` 的 `{\colortbl …}`（里面是分号裸文本，漏出来就是正文前多一串分号）。
+fn rtf(dir: &Path) -> PathBuf {
+    write(
+        dir,
+        "a.rtf",
+        r"{\rtf1\ansi\ansicpg936\deff0
+           {\stylesheet{\s17\snext0 heading 1;}}
+           {\colortbl ;\red0\green0\blue0;}
+           {\pard\s17\fs28 \'b5\'da\'d2\'bb\'d5\'c2\par}
+           \pard\fs21\'d6\'d0\'ce\'c8\par}",
+    )
+}
+
 /// 可重排的每一种 provider：产物必须能直接进引擎。
 ///
 /// 断言是「能解析 + body 里有可见文本」，不是「标签在白名单里」—— 引擎对不认识的
@@ -80,6 +94,7 @@ fn every_reflow_provider_hands_the_engine_parseable_xhtml() {
             ),
         ),
         ("fb2", fb2(dir.path())),
+        ("rtf", rtf(dir.path())),
         ("epub", epub_fixture()),
     ];
 

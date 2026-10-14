@@ -1,6 +1,9 @@
-//! href 的 fragment 拆分，以及目录条目在 SQLite 那一列上的往返。
+//! href 的 fragment 拆分、目录条目在 SQLite 那一列上的往返，以及分章位置的存法。
 
-use super::{HeadDims, TocEntry, fragment_of, image_dims_from_head, shrink_image};
+use super::{
+    Chapter, ChapterLocator, ChapterText, Format, HeadDims, TocEntry, fragment_of,
+    image_dims_from_head, locator_for, shrink_image,
+};
 
 /// 造一张真位图 —— `shrink_image` 要真的解码+重编，够 header 的假字节过不了。
 fn png(width: u32, height: u32) -> Vec<u8> {
@@ -156,4 +159,44 @@ fn toc_entries_without_a_fragment_field_still_load() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].fragment, None);
     assert_eq!(entries[0].href, "OEBPS/Text/chap1.xhtml");
+}
+
+/// 名单式容器按**条目名**存位置：EPUB 的 spine 项与 CHM 的 topic 条目同一条规则。
+/// 写歪的那一档是 `Inline("")` —— 症状是「书在架上而每一章空白」，且一路不报错。
+///
+/// 这里用 `Chapter` 的手搓构造，因为 provider 的正常路径（`Chapter::entry`）已经把
+/// locator 填好了、`locator_for` 会原样保留它 —— 这一格测的是**规则本身**。
+#[test]
+fn list_style_containers_are_located_by_entry_name_including_chm() {
+    let with_href = Chapter {
+        title: "第一章".into(),
+        spine_href: "c1.htm".into(),
+        text: ChapterText::Inline(String::new()),
+        char_len: None,
+    };
+    for format in [Format::Epub, Format::Chm] {
+        assert_eq!(
+            locator_for(format, &with_href, 0),
+            ChapterLocator::Entry("c1.htm".into()),
+            "{format:?} 的章要按条目名存位置"
+        );
+    }
+    // 没有条目名的（单文件那一族）按序号存。
+    let bare = Chapter {
+        spine_href: String::new(),
+        ..with_href.clone()
+    };
+    assert_eq!(
+        locator_for(Format::Text, &bare, 2),
+        ChapterLocator::Section(2),
+        "单文件按第几章存"
+    );
+    // 带了条目名却撞上没有条目名那一档的格式：只能说正文在手上，不许凭空编一个序号。
+    assert!(
+        matches!(
+            locator_for(Format::Chm, &bare, 2),
+            ChapterLocator::Inline(_)
+        ),
+        "没有条目名时 CHM 退到 Inline —— 正常路径走不到这一档"
+    );
 }

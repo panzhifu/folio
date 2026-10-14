@@ -3,6 +3,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub mod cbz;
+/// CHM（Microsoft Compiled HTML Help）：一个 ITSF 容器里的一组 HTML topic。
+pub mod chm;
+/// 字节 → 文本的那一层（BOM / 声明 / 容器报的码页）。见模块头那四档顺序。
+pub(crate) mod charset;
 pub mod container;
 pub mod content;
 pub mod cover;
@@ -11,7 +15,11 @@ pub mod epub;
 pub mod fb2;
 pub mod html;
 pub mod markdown;
+pub(crate) mod mobi;
+#[allow(dead_code)] // 装配那一步（KF7/KF8 的 provider）由下一轮接上，这一层先被它用。
+pub(crate) mod palmdb;
 pub mod provider;
+pub mod rtf;
 pub(crate) mod sniff;
 pub mod thumb;
 pub mod woff;
@@ -20,8 +28,8 @@ pub(crate) mod zip;
 
 pub use content::{Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageSource};
 pub use provider::{
-    DocumentProvider, ParseBudget, provider_for, providers, supported_extensions,
-    supports_extension,
+    DocumentProvider, ParseBudget, looks_like_a_book, provider_for, providers,
+    supported_extensions, supports_extension,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,6 +43,14 @@ pub enum Format {
     Html,
     /// Comic Book Zip：一个 zip，里面按页排着图片。定版式。
     Cbz,
+    /// Rich Text Format：一个 ASCII 文件把正文与格式指令写在一起。可重排。
+    Rtf,
+    /// Microsoft Compiled HTML Help：一个 ITSF 容器，里面是一组 HTML topic。
+    ///
+    /// 「一组 HTML + 那份 hhc 的读法」是格式，「ITSF + LZX」是它用的容器 ——
+    /// 与 [`Format::Epub`] 躺在 ZIP 上是同一刀分法（`plans/导入管线.md` §十：
+    /// 容器家族比格式少）。
+    Chm,
 }
 
 impl Format {
@@ -46,6 +62,8 @@ impl Format {
             Format::Fb2 => "fb2",
             Format::Html => "html",
             Format::Cbz => "cbz",
+            Format::Rtf => "rtf",
+            Format::Chm => "chm",
         }
     }
 
@@ -80,6 +98,8 @@ impl Format {
             "fb2" => Some(Format::Fb2),
             "html" => Some(Format::Html),
             "cbz" => Some(Format::Cbz),
+            "rtf" => Some(Format::Rtf),
+            "chm" => Some(Format::Chm),
             _ => None,
         }
     }
@@ -338,8 +358,8 @@ impl ChapterLocator {
 
 /// 一章该按哪种位置存。
 ///
-/// 名单式容器（EPUB）按 [`Chapter::spine_href`] 认条目；其余是单文件，按序号认。
-/// CBZ 是定版式，没有章，走不到这里。
+/// 名单式容器（EPUB 的 spine 项、CHM 的 topic 条目）按 [`Chapter::spine_href`] 认条目；
+/// 其余是单文件，按序号认。CBZ 是定版式，没有章，走不到这里。
 ///
 /// 已经算过位置的（从库里读回来又存回去）原样保留 —— 重算一遍只会多一次分支，
 /// 而两种来源算出来的结果本来就该一致。
@@ -348,10 +368,10 @@ pub fn locator_for(format: Format, chapter: &Chapter, index: usize) -> ChapterLo
         return at.clone();
     }
     match format {
-        Format::Epub if !chapter.spine_href.is_empty() => {
+        Format::Epub | Format::Chm if !chapter.spine_href.is_empty() => {
             ChapterLocator::Entry(chapter.spine_href.clone())
         }
-        Format::Text | Format::Markdown | Format::Html | Format::Fb2 => {
+        Format::Text | Format::Markdown | Format::Html | Format::Fb2 | Format::Rtf => {
             ChapterLocator::Section(index)
         }
         // 没有可寻址的位置（EPUB 少了 href、将来的格式、测试替身）：只能说正文在手上。

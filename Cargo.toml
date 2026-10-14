@@ -60,6 +60,30 @@ base64 = "0.22"
 # 少一个工具链变量。`cpufeatures` 是运行时探测，x86 的 SHA-NI 与 aarch64 的 ARMv8
 # SHA 扩展都在覆盖范围内，所以不要预设「手机上只能软算」。
 sha2 = "0.11"
+# 只为 RTF 那一族：它的正文是 `\'hh` 那串**按码页编码的字节** —— `\ansicpg936` 的 GBK
+# 双字节、cp1252 的拉丁、少数写 65001 的 UTF-8。没有码页表就只有两种下场：丢正文，
+# 或者把一本中文书读成乱码。
+#
+# **`encoding_rs` 同样不是新依赖树**：锁里已有 0.8.42，由 gpui-pre-reqwest、multer 与
+# xim-ctext 带进来并且本来就在编译，这里只是把图上已有的这份转成 folio-core 的直接依赖 ——
+# 与上面 `flate2` / `crc32fast` / `base64` 同样的理由。构建脚本只依赖 `rustversion`，
+# **没有 `cc`**，与上面选 `sha2` 而不选 `ring` 那条交叉编译口径一致。
+#
+# 不引 `rtf-parser`（198k 下载、还在更新）那类现成解析器：它只给 AST 不给语义 ——
+# 码页、`\ucN` 回退字节、`*\目标` 跳过、分章仍然一处都得自己写，省下的恰是省事最少的
+# 那一截，而它的 default feature 挂着 wasm-bindgen，得为关掉它再写一段声明。
+# 词法自己写的理由写在 `content::format::rtf` 的模块头。
+encoding_rs = "0.8"
+# CHM（Microsoft Compiled HTML Help）的容器层：ITSF/ITSP 头 + PMGL/PMGI 目录 + LZX 解压。
+# 纯 Rust、MIT、`#![forbid(unsafe_code)]`，依赖只有 bitflags 与 thiserror（两个都已在图上），
+# 也**没有 `cc`** —— 与上面选 `sha2` 而不选 `ring` 那条交叉编译口径一致。
+#
+# **钉死 `=0.3.0`**：它 2025-12 才有第一个版本，上游仓库里没有真实世界编出的 CHM 样本
+# （只有单元测试）。版本一跳就把「我们对拍过的那份解码器」换成另一个东西，而症状是
+# 某本书突然读不出 —— 钉法与上面 `reqwest_client` 那条 `=0.3.8` 同理。
+# 换掉它的成本有出口：容器寻址住在一层之后（`format::container` 的 ITSF 那一支），
+# 自己写一份只动那一处。
+libchm = "=0.3.0"
 quick-xml = "0.42"
 cssparser = "0.38"
 selectors = "0.41"

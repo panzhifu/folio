@@ -27,17 +27,30 @@
 //! 「这本书打不开」，而是「这张图没有」。降级在取字节这一层完成，正文照排。
 //! 打开失败**不缓存成永久失败**：文件可能在这次会话中途被同步回来。
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use super::zip::Zip;
+use libchm::ChmFile;
 
-/// 一种容器家族的字节寻址。目前只有 ZIP 一族（EPUB / CBZ），
-/// 将来 PalmDB（MOBI / AZW3）与裸文件的 `FileRange` 各加一条分支。
+use super::chm::lookup_names;
+use super::zip::Zip;
+use crate::infra::metrics::Metric;
+
+/// 一种容器家族的字节寻址。键一律是**归一化条目名**（清单里怎么写就怎么给）。
+enum Family {
+    /// ZIP 一族（EPUB / CBZ / `.fb2.zip`）：名字来自中央目录。
+    Zip(Zip),
+    /// ITSF 一族（CHM）：名字来自 PMGL 目录，那里**恒带前导斜杠**，所以取的时候要
+    /// 过 [`lookup_names`] 那几种写法（我们的 href 不带，见 `chm::ours`）。
+    Itsf(ChmFile),
+}
+
+/// 一个开一次的容器句柄。
 pub struct Container {
     path: PathBuf,
     /// 第一次要字节时才真的开。开失败**不留痕** —— 下次调用会再试一次。
-    open: OnceLock<Mutex<Zip>>,
+    open: OnceLock<Mutex<Family>>,
 }
 
 impl std::fmt::Debug for Container {
@@ -73,14 +86,14 @@ impl Container {
     /// 锁中毒（另一个线程在持有它时 panic）时**继续用**而不是往外抛：
     /// 里面的 `Zip` 是个只读索引，半途 panic 不会让它变成半个状态，
     /// 而在这里拒绝服务等于把一次后台线程的 panic 升级成「图全都不显示」。
-    fn get(&self) -> Option<&Mutex<Zip>> {
+    fn get(&self) -> Option<&Mutex<Family>> {
         if let Some(open) = self.open.get() {
             return Some(open);
         }
-        // 竞态：两个线程同时第一次取字节。`Zip::open` 会跑两遍，而
+        // 竞态：两个线程同时第一次取字节。家族探测会跑两遍，而
         // `set` 只有一个能成功 —— 输的那个用赢家那份，两遍的代价是白付一次，
         // 比在热路径上加锁便宜，也不会给出两个不同的索引。
-        let opened = Zip::open(&self.path).ok()?;
+        let opened = family_for(&self.path)?;
         let _ = self.open.set(Mutex::new(opened));
         self.open.get()
     }
@@ -90,20 +103,66 @@ impl Container {
     /// `None` 覆盖：容器开不出来、名字查不到（精确与大小写不敏感都不中）、
     /// 条目是目录、解压失败。调用方一律当「这块地方空着」处理。
     pub fn read(&self, href: &str) -> Option<Vec<u8>> {
-        let mut zip = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
-        zip.read_at(href)
+        let mut family = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
+        match &mut *family {
+            Family::Zip(zip) => zip.read_at(href),
+            Family::Itsf(file) => {
+                for name in lookup_names(href) {
+                    if let Ok(bytes) = file.read_path(&name) {
+                        return Some(bytes);
+                    }
+                }
+                None
+            }
+        }
     }
 
     /// [`Container::read`] 的文本版。
+    ///
+    /// **ITSF 那一族在这里回 `None`**，不是漏了一半：把字节解成文本要问码页，而码页
+    /// 是格式知识（CHM 的那个 LCID 在 `#SYSTEM` 里），这一层的立场是「一个格式知识都不
+    /// 知道」。回 `None` 让调用方落到 provider —— 那条路带得上码页
+    /// （见 [`crate::content::format::chm`]）。代价是每章多一次打开，实测 55 µs，
+    /// 比一次 LZX 解压便宜三个数量级。
+    ///
+    /// 这一条有测试钉住：拿 CHM 走 `read_text` 必须得到 `None`。要是哪天有人为了
+    /// 「省一次打开」在这里加一个 lossy UTF-8，那本 GBK 的书会整本变成问号**且不报错** ——
+    /// 那是这一族最难查的一种坏法。
     pub fn read_text(&self, href: &str) -> Option<String> {
-        let mut zip = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
-        zip.read_text_at(href)
+        let mut family = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
+        match &mut *family {
+            Family::Zip(zip) => zip.read_text_at(href),
+            Family::Itsf(_) => None,
+        }
     }
+}
+
+/// 按**头部字节**认容器家族 —— 名字不参与，与判定层（`format::sniff`）同一口径。
+///
+/// 家族比格式少：`PK\x03\x04` 那一族里 EPUB / CBZ / `.fb2.zip` 用的是同一份寻址；
+/// `ITSF` 那一族就是 CHM。认不出家族的（裸文件、PalmDB 那种键不是名字的容器）
+/// 回 `None`：这一层只服务「按条目名取字节」这件事，谈不上家族。
+fn family_for(path: &Path) -> Option<Family> {
+    let mut head = [0u8; 4];
+    let mut file = std::fs::File::open(path).ok()?;
+    file.read_exact(&mut head).ok()?;
+    if head == *b"PK\x03\x04" {
+        // `Zip::open` 自己记 `ContainerOpens`（一次打开 = 一次计数）。
+        return Some(Family::Zip(Zip::open(path).ok()?));
+    }
+    if head == *b"ITSF" {
+        let opened = ChmFile::open(path).ok()?;
+        // libchm 不替我们记这一笔，而「读一本书该只开一次容器」那条断言数的是它。
+        Metric::ContainerOpens.count();
+        return Some(Family::Itsf(opened));
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::path::Path;
 
     use super::Container;
     use crate::infra::metrics::{Metric, take_local};
@@ -160,6 +219,53 @@ mod tests {
             1,
             "条目名索引也只该建一遍"
         );
+    }
+
+    /// ITSF 那一族（CHM）也一样：**一百次取字节只开一次容器**。这一条就是把 CHM 接进
+    /// 这一层的全部理由 —— 不接的话翻一章、滚过一张图都要重开一次、重解析一遍目录。
+    ///
+    /// 同时钉住另一条：`read_text` 对 CHM **必须是 `None`**。文本解码要问码页，而码页是
+    /// 格式知识，这一层一个都不该知道。哪天有人为了省一次打开在这里塞一个 lossy
+    /// UTF-8，那本 GBK 的书会整本变成问号且不报错 —— 这条断言会先红。
+    #[test]
+    fn a_chm_opens_once_and_leaves_text_to_the_provider() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/oss/chm/minimal-zh-utf8.chm");
+        let container = Container::new(&path);
+        assert!(!container.is_open(), "构造时不该开容器");
+        take_local(Metric::ContainerOpens);
+
+        let names = ["img/fig.png", "index.htm", "c1.htm"];
+        for i in 0..100 {
+            let href = names[i % names.len()];
+            assert!(container.read(href).is_some(), "第 {i} 次取 {href} 该有字节");
+        }
+        assert_eq!(
+            take_local(Metric::ContainerOpens),
+            1,
+            "一百次取字节只该开一次容器"
+        );
+        assert!(
+            container.read("IMG/FIG.PNG").is_some(),
+            "清单里的大小写与引用不一致也要取到"
+        );
+        assert!(container.read("没有这一条").is_none());
+        assert!(
+            container.read_text("index.htm").is_none(),
+            "CHM 的文本解码不归这一层，要落到 provider"
+        );
+    }
+
+    /// 家族认不出时**安静地没有**：裸文件（TXT / MD / 单文件 HTML）与 PalmDB 那种
+    /// 「键不是名字」的容器都走不到这一层，调用方按「这块地方空着」处理。
+    #[test]
+    fn a_file_that_is_not_a_container_family_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "正文\n").unwrap();
+        let container = Container::new(&path);
+        assert!(container.read("whatever").is_none());
+        assert!(!container.is_open(), "认不出家族就不该留下一个开着的句柄");
     }
 
     /// 名字大小写与清单写的不一致时要查得到 —— 宽松匹配在 `Zip` 那一层，
