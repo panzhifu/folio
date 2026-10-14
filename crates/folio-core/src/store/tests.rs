@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::Store;
 use crate::content::format::{
     Chapter, ChapterLocator, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
-    PageSource, TocEntry, guess_media_type,
+    PageSource, Series, TocEntry, guess_media_type,
 };
 use crate::position::Locator;
 use crate::store::{MIGRATIONS, StaleReason};
@@ -19,7 +19,8 @@ fn meta(title: &str) -> DocMeta {
         authors: vec!["作者甲".into(), "作者乙".into()],
         format: Format::Markdown,
         size: 1234,
-    }
+        ..DocMeta::default()
+        }
 }
 
 fn path(name: &str) -> PathBuf {
@@ -260,6 +261,7 @@ fn a_fixed_document_is_not_perpetually_stale() {
             },
             width: 800,
             height: 1200,
+            extra_images: Vec::new(),
         }],
         toc: Vec::new(),
         cover: Some(vec![0x89, b'P', b'N', b'G']),
@@ -834,6 +836,57 @@ fn shelf_filters_by_title_or_author() {
     assert_eq!(store.shelf("  蛇结  ").unwrap().len(), 1, "首尾空白先去掉");
 }
 
+/// 分组筛选那两头（某个组 / 未分组）都认同一个搜索词，且与整架那条是同一套 LIKE 语义。
+///
+/// 三条查询共用一段 `WHERE`（见 `query_clause`）：少带一处 `ESCAPE '\\'` 或漏掉作者那一列
+/// 都不会报错，只会让读者在组里搜「100%」时把整组都列出来，而搜「纪德」时又少一本。
+#[test]
+fn collection_filters_honor_the_search_term() {
+    let store = Store::in_memory().unwrap();
+    let mut ids = Vec::new();
+    for (name, title, author) in [
+        ("a.epub", "蛇结", "弗朗索瓦·莫里亚克"),
+        ("b.epub", "窄门", "安德烈·纪德"),
+        ("c.md", "纪德的日记", "安德烈·纪德"),
+    ] {
+        let id = store
+            .add_book(&path(name), &meta_by(title, &[author]))
+            .unwrap();
+        store
+            .save_flow(id, &flow(&[("一", "正文")]), Format::Markdown)
+            .unwrap();
+        ids.push(id);
+    }
+    let group = store.create_collection("想读").unwrap();
+    store.add_to_collection(group, ids[0]).unwrap();
+    store.add_to_collection(group, ids[1]).unwrap();
+
+    assert_eq!(
+        store.shelf_in_collection(group, "").unwrap().len(),
+        2,
+        "空词就是整组"
+    );
+    assert_eq!(store.shelf_in_collection(group, "蛇结").unwrap().len(), 1);
+    assert_eq!(
+        store.shelf_in_collection(group, "纪德").unwrap().len(),
+        1,
+        "作者那一列在组里同样命中（组里只有「窄门」是他）"
+    );
+    assert!(
+        store.shelf_in_collection(group, "日记").unwrap().is_empty(),
+        "组外那本不该混进来"
+    );
+
+    let loose = store.shelf_ungrouped("").unwrap();
+    assert_eq!(loose.len(), 1, "没进组的只剩一本");
+    assert_eq!(loose[0].title, "纪德的日记");
+    assert!(
+        store.shelf_ungrouped("蛇结").unwrap().is_empty(),
+        "未分组那一头也认这个词"
+    );
+    assert_eq!(store.shelf_ungrouped("纪德").unwrap().len(), 1);
+}
+
 /// 读者改掉自己认的书名与作者：写回的只有那两列，而且**立刻**参与书架搜索。
 ///
 /// 钉四件编译看不出来的事：多个人名按 `\n` 存、读回还是原来那几个人（界面那侧串成
@@ -950,7 +1003,8 @@ fn meta_by(title: &str, authors: &[&str]) -> DocMeta {
         authors: authors.iter().map(|a| (*a).to_string()).collect(),
         format: Format::Markdown,
         size: 1234,
-    }
+        ..DocMeta::default()
+        }
 }
 
 /// v12 迁移：老库升上来要拿到 `content_hash` / `hash_algo` 两列，而**老行留空**（懒补）。
@@ -1299,7 +1353,7 @@ fn every_shelf_query_can_report_progress() {
     let group = store.create_collection("合集").unwrap();
     store.add_to_collection(group, a).unwrap();
     assert_eq!(
-        store.shelf_in_collection(group).unwrap().len(),
+        store.shelf_in_collection(group, "").unwrap().len(),
         1,
         "集合内那条要查得出来"
     );
@@ -1332,7 +1386,7 @@ fn every_shelf_query_can_report_progress() {
         .unwrap()
         .progress;
     assert!(want.is_some(), "开了就该有进度");
-    let in_collection = store.shelf_in_collection(group).unwrap()[0].progress;
+    let in_collection = store.shelf_in_collection(group, "").unwrap()[0].progress;
     assert_eq!(in_collection, want, "集合内那条给同一个数");
 }
 
@@ -1410,4 +1464,108 @@ fn a_cover_lives_in_a_file_and_never_in_the_database() {
         .unwrap();
     assert_eq!(store.book_cover(plain).unwrap(), None);
     assert!(store.orphan_cover_file(plain).unwrap().is_none());
+}
+
+/// 都柏林那几项写进去再读出来，一格都不该变样。
+///
+/// 单开一条而不是并进 `the_index_roundtrips_through_the_store`：多值的两格走换行拼接，
+/// 系列的两格必须成对（空名字带一个孤立序号是脏数据），这两条规则各要一个断言才说清。
+#[test]
+fn the_dublin_core_fields_roundtrip_through_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_at(&dir.path().join("folio.db")).unwrap();
+    let want = DocMeta {
+        title: "车刀集".into(),
+        authors: vec!["果戈理".into()],
+        contributors: vec!["译者甲".into(), "绘者乙".into()],
+        subjects: vec!["俄国小说".into(), "讽刺".into()],
+        description: "一段长简介\n第二行也在".into(),
+        publisher: "某某社".into(),
+        published: "2023-05-01T00:00:00Z".into(),
+        language: "zh-CN".into(),
+        isbn: "978-7-02-000000-0".into(),
+        dctype: "text".into(),
+        rights: "版权由出版社持有".into(),
+        series: Some(Series { name: "世界文学".into(), position: "12".into() }),
+        format: Format::Epub,
+        size: 4096,
+    };
+    let id = store.add_book(&path("a.epub"), &want).unwrap();
+    let got = store.book_meta(id).unwrap().expect("刚入库该行还在");
+
+    assert_eq!(got.id, id);
+    assert_eq!(got.title, "车刀集");
+    assert_eq!(got.authors, want.authors);
+    assert_eq!(got.contributors, want.contributors, "多值的贡献者要拆回两条");
+    assert_eq!(got.subjects, want.subjects);
+    assert_eq!(got.description, want.description, "简介里的换行是内容，不是分隔符");
+    assert_eq!(got.publisher, "某某社");
+    assert_eq!(got.published, want.published, "日期原样存，不折成日期类型");
+    assert_eq!(got.language, "zh-CN");
+    assert_eq!(got.isbn, "978-7-02-000000-0");
+    assert_eq!(got.dctype, "text");
+    assert_eq!(got.rights, "版权由出版社持有");
+    assert_eq!(got.series, want.series);
+    assert_eq!(got.format, "epub");
+    assert_eq!(got.size, 4096);
+
+    // 没写的那些不许凭空长出值来。
+    let bare = store
+        .book_meta(store.add_book(&path("b.epub"), &meta("只有名字")).unwrap())
+        .unwrap()
+        .expect("入库了就读得到");
+    assert_eq!(bare.description, "");
+    assert_eq!(bare.series, None, "没有系列名字时不造一个系列");
+    assert!(bare.contributors.is_empty() && bare.subjects.is_empty());
+    assert_eq!(bare.authors, meta("只有名字").authors, "作者那一格照旧");
+
+    // 同一本书重扫一次（`add_book` 走 upsert），书目要跟着更新而不是留下一半旧的。
+    let mut again = want.clone();
+    again.description = "改过的简介".into();
+    again.series = None;
+    store.add_book(&path("a.epub"), &again).unwrap();
+    let got = store.book_meta(id).unwrap().unwrap();
+    assert_eq!(got.description, "改过的简介");
+    assert_eq!(got.series, None, "系列被作者删掉之后不能留在库里那半对");
+}
+
+/// v19 迁移：旧库升上来多出都柏林那 11 列，**老行全部取默认值（空）**。
+///
+/// 不回填是有意的一条：回填要把每本的容器再开一次，而这个库的规矩是「书目是导入
+/// 那一趟顺手写的」。老行读出来是空的，界面按「这本书没说」处理；`INDEX_VERSION`
+/// 那一版的 bump 让重扫在开书时发生，才是把值补回来的那一步。
+#[test]
+fn the_v19_migration_adds_the_dublin_core_columns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    {
+        // 手工造一个 v18 库：跑前 18 条迁移，塞一行只带四格书目的老书。
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for sql in &MIGRATIONS[..18] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 18).unwrap();
+        conn.execute(
+            "INSERT INTO books (path, title, authors, format, size, added_at)
+             VALUES ('/books/老库.epub', '老库', '作者甲', 'epub', 10, 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let store = Store::open_at(&db).unwrap();
+    assert_eq!(
+        store.user_version().unwrap(),
+        MIGRATIONS.len() as i64,
+        "v19 要跑到位"
+    );
+    let rows = store.list_books().unwrap();
+    assert_eq!(rows.len(), 1, "旧行照旧读得出来");
+    assert_eq!(rows[0].title, "老库");
+
+    let got = store.book_meta(rows[0].id).unwrap().expect("旧行也读得到");
+    assert_eq!(got.contributors, Vec::<String>::new());
+    assert_eq!(got.description, "", "老行没有简介可读，是「没说」不是「读错了」");
+    assert_eq!(got.series, None);
+    assert_eq!(got.language, "");
 }

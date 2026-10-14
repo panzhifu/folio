@@ -141,7 +141,8 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
         authors: doc.authors.clone(),
         format: Format::Rtf,
         size: raw.len() as u64,
-    };
+        ..DocMeta::default()
+        };
     // 索引那一趟：章表只留标题与序号，**但字数要留下来**（与 [`super::fb2`] 同一条口径 ——
     // 这一趟正文已经在手上，数一遍是白拿的）。
     let chapters = if with_text {

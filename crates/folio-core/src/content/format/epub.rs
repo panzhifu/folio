@@ -16,12 +16,12 @@ use quick_xml::events::Event;
 
 use super::zip::{EntryRange, EntryReader, Zip};
 use super::{
-    Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, FontBytes, Format,
-    ImageRes, ParseBudget, TocEntry,
+    Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FixedDoc, FixedPage, FlowDoc,
+    FontBytes, Format, ImageRes, PageImage, PageSource, ParseBudget, Series, TocEntry,
 };
 use super::{
-    HeadDims, dir_of, fragment_of, image_dims, image_dims_from_head, is_decodable_bitmap,
-    resolve_href, shrink_image,
+    HeadDims, dir_of, extension_of, fragment_of, image_dims, image_dims_from_head,
+    is_decodable_bitmap, resolve_href, shrink_image, stem_of,
 };
 use crate::infra::error::Result;
 
@@ -265,6 +265,22 @@ struct Opf {
     spine: Vec<SpineRef>,
     /// `<meta name="cover" content="<item id>">`
     cover_id: Option<String>,
+    /// Dublin Core 的其余各项。采集在 `parse_opf`，归置在 [`place_metadata`]。
+    ///
+    /// 为什么先攒成一串再归置而不是边采边填：有三条规则**要看完全部条目才定得下来** ——
+    /// 一串 `dc:identifier` 里挑哪条是 ISBN、系列的三种载体（`belongs-to-collection`、
+    /// `calibre:series`、`dc:relation`）谁先赢、以及 EPUB3 挂在 `refines` 上的
+    /// `group-position`（它写在主项之后，甚至写在下一项之后）。
+    contributors: Vec<String>,
+    subjects: Vec<String>,
+    description: String,
+    publisher: String,
+    published: String,
+    language: String,
+    isbn: String,
+    dctype: String,
+    rights: String,
+    series: Option<Series>,
     /// `<spine page-progression-direction="rtl">`：整本往哪边翻。
     ///
     /// 与 `dir="rtl"`（正文往哪边流）是两件事，各读各的，别从一个推另一个。
@@ -272,6 +288,11 @@ struct Opf {
     /// 而开书那一趟只读索引、不回头嗅第一章的首强字符。后果与理由写在
     /// [`crate::content::format::FlowDoc::progression_rtl`] 上。
     progression_rtl: bool,
+    /// `<meta property="rendition:layout">pre-paginated</meta>`：EPUB3 定版式。
+    ///
+    /// 有它时这本书**不是**可重排的 —— 页是既定的（漫画、绘本、逐页 SVG 那一类），
+    /// 正文走 `Content::Fixed` 而不是 `FlowDoc`（见 `read_fixed`）。
+    pre_paginated: bool,
 }
 
 /// spine 上 `linear="no"` 的那几节默认**不**当一章。
@@ -368,12 +389,184 @@ fn drm_method(zip: &mut Zip) -> Option<String> {
     None
 }
 
+/// `metadata` 段里采到的一条原始条目。归置在 [`place_metadata`]。
+#[derive(Debug)]
+struct RawMeta {
+    /// 元素的本地名：`title` / `creator` / … 或 `meta`。收尾时靠它配对栈顶，
+    /// 属性写坏或嵌套反常时宁可让那一层留在栈里，也不错位地把文本记到别的名下。
+    elem: String,
+    /// `dc:` 元素就是它的本地名；`<meta>` 是它的 `property`（EPUB3）或 `name`（EPUB2），
+    /// 一律小写。
+    key: String,
+    /// 元素的 `id`：EPUB3 用 `refines="#这个 id"` 把修饰项挂回主项（系列序号就是这么来的）。
+    id: String,
+    /// `opf:scheme="ISBN"` 与 `scheme="ISBN"` 两种拼法（`attr` 已去前缀，所以一处认两个）。
+    scheme: String,
+    refines: String,
+    text: String,
+}
+
+/// `metadata` 段里要采的 `dc:` 元素本地名。清单外的（`<reference>` 那类）不采。
+///
+/// 按本地名匹配与 `title` / `creator` 一直是同一口径：OPF 的 metadata 段里这些名字不会
+/// 与别的命名空间撞车，`section` 那道闸已经把范围收到 `<metadata>` 之内。
+const DC_KEYS: &[&str] = &[
+    "title",
+    "creator",
+    "contributor",
+    "subject",
+    "description",
+    "publisher",
+    "date",
+    "language",
+    "identifier",
+    "type",
+    "rights",
+    "relation",
+];
+
+/// `<meta>` 这一条记在哪个键下：EPUB3 的 `property`、EPUB2 的 `name`。两个都没有就不采
+/// （那种 `<meta>` 是 `dcterms:modified` 之类的时间戳声明，书目里没有它的位置）。
+fn meta_key(start: &quick_xml::events::BytesStart<'_>) -> Option<String> {
+    attr(start, "property")
+        .or_else(|| attr(start, "name"))
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+}
+
+/// 把采下来的一串条目归置成 `Opf` 的那几格。
+///
+/// 三条规则**必须看完全部条目才定得下来**，所以采集与归置分两趟：一串 identifier 里
+/// 挑哪条是 ISBN；系列的三种载体谁先赢；挂在 `refines` 上的 `group-position` 写在主项
+/// 之后（甚至隔了一条别的条目之后）。
+fn place_metadata(out: &mut Opf, metas: &[RawMeta]) {
+    let one = |key: &str| -> String {
+        metas
+            .iter()
+            .find(|m| m.key == key)
+            .map(|m| m.text.trim().to_string())
+            .unwrap_or_default()
+    };
+    let many = |key: &str| -> Vec<String> {
+        metas
+            .iter()
+            .filter(|m| m.key == key)
+            .map(|m| m.text.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    };
+    // 同名多条时「第一条赢」是 CSS/OPF 里 `dc:title` 的既有行为（原来那份实现就是这样），
+    // 多值的那几项（creator / contributor / subject）才全收。
+    if out.title.is_empty() {
+        out.title = one("title");
+    }
+    if out.authors.is_empty() {
+        out.authors = many("creator");
+    }
+    out.contributors = many("contributor");
+    out.subjects = many("subject");
+    out.description = one("description");
+    out.publisher = one("publisher");
+    out.published = one("date");
+    out.language = one("language");
+    out.dctype = one("type");
+    out.rights = one("rights");
+    out.isbn = pick_isbn(metas);
+    out.series = pick_series(metas);
+    // `<meta property="rendition:layout">pre-paginated</meta>`：定版式声明。
+    out.pre_paginated = metas.iter().any(|m| {
+        m.key == "rendition:layout" && m.text.trim().eq_ignore_ascii_case("pre-paginated")
+    });
+}
+
+/// 一串 identifier 里挑 ISBN。**只认明确标着的**四种写法：`urn:isbn:` 前缀、
+/// `ISBN:` 前缀、`opf:scheme="ISBN"` / `scheme="ISBN"` 标着的、以及 Calibre 的
+/// `meta name="calibre:isbn"`。
+///
+/// 不认「长得像 13 位数字」的那一条：同一本书的 `dc:identifier` 里通常还躺着一条 uuid，
+/// 而 uuid 也是数字与字母混着的一串 —— 猜错的代价是把书目里那条 ISBN 永远认错。
+fn pick_isbn(metas: &[RawMeta]) -> String {
+    for m in metas
+        .iter()
+        .filter(|m| m.key.ends_with("identifier") || m.key == "calibre:isbn")
+    {
+        let text = m.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        // Calibre 那一格的名字本身就说它是 ISBN。
+        if m.key == "calibre:isbn" {
+            return text.to_string();
+        }
+        for prefix in ["urn:isbn:", "urn:ISBN:", "ISBN:", "isbn:", "ISBN "] {
+            if let Some(rest) = text.strip_prefix(prefix) {
+                let rest = rest.trim();
+                if !rest.is_empty() {
+                    return rest.to_string();
+                }
+            }
+        }
+        if m.scheme == "isbn" {
+            return text.to_string();
+        }
+    }
+    String::new()
+}
+
+/// 系列的三种载体，**先碰到的赢**：EPUB3 的 `belongs-to-collection`（配 `refines` 上来的
+/// `group-position`）→ Calibre 私有的 `calibre:series`（配 `calibre:series_index`）→
+/// 裸的 `dc:relation`。
+///
+/// `relation` 排最后是因为它字面意思更宽（「与另一资源有关」），认错了比认不出更难查；
+/// 但把它当系列仍是 EPUB3 之前的规范读法，所以不收掉。
+fn pick_series(metas: &[RawMeta]) -> Option<Series> {
+    for (host_key, position_key) in [
+        ("belongs-to-collection", "group-position"),
+        ("calibre:series", "calibre:series_index"),
+        ("relation", ""),
+    ] {
+        let Some(host) = metas.iter().find(|m| m.key == host_key && !m.text.trim().is_empty())
+        else {
+            continue;
+        };
+        let position = if position_key.is_empty() {
+            String::new()
+        } else {
+            refine(host, metas, position_key)
+        };
+        return Some(Series { name: host.text.trim().to_string(), position });
+    }
+    None
+}
+
+/// 挂在主项上的那一格：先找 `refines="#主项 id"` 的那条；没有 `refines`（老写法把它省了）
+/// 就退而取第一条同键的。两头都找不到给空串。
+fn refine(host: &RawMeta, metas: &[RawMeta], key: &str) -> String {
+    let wanted = format!("#{}", host.id);
+    if !host.id.is_empty()
+        && let Some(m) = metas.iter().find(|m| m.key == key && m.refines == wanted)
+    {
+        return m.text.trim().to_string();
+    }
+    metas
+        .iter()
+        .find(|m| m.key == key && m.refines.is_empty())
+        .map(|m| m.text.trim().to_string())
+        .unwrap_or_default()
+}
+
 fn parse_opf(xml: &str) -> Opf {
     let mut out = Opf::default();
     let mut reader = Reader::from_str(xml);
     let mut section = String::new();
-    // 正在采集文本的元素（dc:title / dc:creator）。
-    let mut pending: Option<(String, String)> = None;
+    // 正在采文本的元素栈。为什么要一层栈而不是一个 `Option`：EPUB3 的系列写法是
+    // `<meta property="belongs-to-collection" id="c1">系列名
+    //    <meta refines="#c1" property="group-position">3</meta>
+    //  </meta>` —— 主项里套修饰项。文本只归到**最里面那一层**，所以主项的 text 不会
+    // 把序号一起吃进去。
+    let mut open: Vec<RawMeta> = Vec::new();
+    // 采完的条目，文档序。归置在 [`place_metadata`]。
+    let mut metas: Vec<RawMeta> = Vec::new();
     // 读不出下一个事件就到此为止（畸形 XML 与读完是同一档）：
     // 已经采到的部分照样有用，一本书因为某处编码坏了就整本打不开是不可接受的。
     while let Ok(ev) = reader.read_event() {
@@ -392,41 +585,79 @@ fn parse_opf(xml: &str) -> Opf {
                         out.progression_rtl = attr(&e, "page-progression-direction")
                             .is_some_and(|v| v.trim().eq_ignore_ascii_case("rtl"));
                     }
-                    "title" | "creator" => {
-                        pending = Some((name.to_string(), String::new()));
+                    "meta" if section == "metadata" => {
+                        // `<meta>` 的两种拼法：EPUB3 写 `property`，EPUB2 写 `name`。
+                        // `rendition:layout` 那一定版式声明也走这一条路（归置在下面）。
+                        if let Some(key) = meta_key(&e) {
+                            open.push(RawMeta {
+                                elem: name.to_string(),
+                                key,
+                                id: attr(&e, "id").unwrap_or_default(),
+                                scheme: attr(&e, "scheme")
+                                    .unwrap_or_default()
+                                    .to_ascii_lowercase(),
+                                refines: attr(&e, "refines").unwrap_or_default(),
+                                text: String::new(),
+                            });
+                        }
+                    }
+                    name if section == "metadata" && DC_KEYS.contains(&name) => {
+                        open.push(RawMeta {
+                            elem: name.to_string(),
+                            key: name.to_string(),
+                            id: attr(&e, "id").unwrap_or_default(),
+                            scheme: attr(&e, "scheme")
+                                .unwrap_or_default()
+                                .to_ascii_lowercase(),
+                            refines: attr(&e, "refines").unwrap_or_default(),
+                            text: String::new(),
+                        });
                     }
                     _ => {}
                 }
             }
             Event::Text(e) => {
-                if let Some((_, buf)) = pending.as_mut() {
-                    buf.push_str(&text_of(e.as_ref()));
+                if let Some(top) = open.last_mut() {
+                    top.text.push_str(&text_of(e.as_ref()));
                 }
             }
             Event::End(e) => {
                 let n = e.name();
                 let name = local_name(n.as_ref());
-                match name {
-                    "title" | "creator" => {
-                        if let Some((kind, buf)) = pending.take() {
-                            let text = buf.trim().to_string();
-                            if text.is_empty() {
-                                continue;
-                            }
-                            if kind == "title" && out.title.is_empty() {
-                                out.title = text;
-                            } else {
-                                out.authors.push(text);
-                            }
-                        }
-                    }
-                    "metadata" | "manifest" | "spine" => section = String::new(),
-                    _ => {}
+                if name == "metadata" {
+                    section = String::new();
+                    // 走到这里还没闭合的条目属于 XML 本身坏了那一档：丢掉，已采到的照用。
+                    open.clear();
+                    continue;
+                }
+                if section == "metadata"
+                    && open.last().is_some_and(|top| top.elem == name)
+                    && let Some(done) = open.pop()
+                {
+                    metas.push(done);
+                }
+                if matches!(name, "manifest" | "spine") {
+                    section = String::new();
                 }
             }
             Event::Empty(e) => {
                 let n = e.name();
                 let name = local_name(n.as_ref());
+                // 自闭的 `<meta name="calibre:series" content="…"/>`：EPUB2 那一路的
+                // Calibre 导出就是这么写的（EPUB3 用带文本的 `property` 形式）。
+                // 值在 `content` 属性里，所以这一条不走文本采集那一套。
+                if section == "metadata" && name == "meta" {
+                    if let Some(key) = meta_key(&e) {
+                        metas.push(RawMeta {
+                            elem: name.to_string(),
+                            key,
+                            id: attr(&e, "id").unwrap_or_default(),
+                            scheme: attr(&e, "scheme").unwrap_or_default().to_ascii_lowercase(),
+                            refines: attr(&e, "refines").unwrap_or_default(),
+                            text: attr(&e, "content").unwrap_or_default(),
+                        });
+                    }
+                }
                 match (section.as_str(), name) {
                     ("manifest", "item") => {
                         if let Some(item) = read_item(&e) {
@@ -450,6 +681,7 @@ fn parse_opf(xml: &str) -> Opf {
             _ => {}
         }
     }
+    place_metadata(&mut out, &metas);
     out
 }
 
@@ -1216,6 +1448,8 @@ fn is_resource(media_type: &str) -> bool {
         || mime == "application/oebps-package+xml"
         // 脚本不是读物（`dom` 那一层也把它整段跳过）。
         || mime.contains("javascript")
+        // SMIL 媒体叠加（音频+文本同步）是 sidecar，不是一章内容。
+        || mime.contains("smil")
 }
 
 /// 沿 `<item fallback="…">` 那条链，找**第一份这一版解得动的位图**。
@@ -1327,6 +1561,12 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
     let mut by_id: HashMap<&str, &Item> = HashMap::new();
     for item in &opf.items {
         by_id.entry(item.id.as_str()).or_insert(item);
+    }
+
+    // 定版式（EPUB3 `rendition:layout=pre-paginated`）：页是既定的，走 `FixedDoc` 那一族
+    // —— 逐页 SVG 的漫画、绘本都是这一档。页表在别处建，这里分流。
+    if opf.pre_paginated {
+        return read_fixed(path, &mut zip, &opf, &by_id, &base_dir);
     }
 
     // CSS 按 manifest 里的声明顺序记下**位置清单**：正文出库之后样式表同样不入库，
@@ -1581,9 +1821,20 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
             opf.title
         },
         authors: opf.authors,
+        contributors: opf.contributors,
+        subjects: opf.subjects,
+        description: opf.description,
+        publisher: opf.publisher,
+        published: opf.published,
+        language: opf.language,
+        isbn: opf.isbn,
+        dctype: opf.dctype,
+        rights: opf.rights,
+        series: opf.series,
         format: Format::Epub,
         size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
-    };
+        ..DocMeta::default()
+        };
     let flow = FlowDoc {
         chapters,
         css,
@@ -1608,6 +1859,207 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         flow.cover.as_ref().map_or("无", |_| "有"),
     );
     Ok((meta, Content::Reflow(flow)))
+}
+
+/// 定版式 EPUB：把 spine 的每一项变成页表里的一页。
+///
+/// 两种页都认（真实漫画与绘本两种写法都有）：
+/// - **spine 项本身就是一张图**（`media-type` 是 `image/*`，常见的是逐页 SVG）；
+/// - **spine 项是一页 XHTML，里面包一张图**（`<svg><image xlink:href="…"/></svg>` 或
+///   `<img src="…"/>`）—— 取第一个图片引用当这一页。
+///
+/// 这一支不做排版、不建章：`Content::Fixed` 的页表就是它的全部（与 CBZ 同族）。
+fn read_fixed(
+    path: &Path,
+    zip: &mut Zip,
+    opf: &Opf,
+    by_id: &HashMap<&str, &Item>,
+    base_dir: &str,
+) -> Result<(DocMeta, Content)> {
+    let mut pages: Vec<FixedPage> = Vec::new();
+    let mut images: Vec<ImageRes> = Vec::new();
+    let mut cover: Option<Vec<u8>> = None;
+
+    for node in &opf.spine {
+        // `linear="no"` 与可重排同一条：非线性内容不当一页。
+        if !node.linear {
+            continue;
+        }
+        let Some(item) = by_id.get(node.id.as_str()) else {
+            continue;
+        };
+        // SMIL 媒体叠加文档（音频+文本同步）不是内容页：跳过，不当一页、也不留空页。
+        if item.media_type.contains("smil") {
+            continue;
+        }
+        // 这一页的全部图（多图页 / 对开跨页）：第一张当主图，其余进 `extra_images`。
+        let mut page_images: Vec<PageImage> = Vec::new();
+        for (target, media_type) in fixed_page_refs(zip, base_dir, item) {
+            let Some(bytes) = zip.read(&target) else {
+                continue;
+            };
+            let (width, height) = if media_type.contains("svg") {
+                super::svg::intrinsic_size(&bytes).unwrap_or((0, 0))
+            } else {
+                image_dims(&bytes)
+            };
+            if cover.is_none() {
+                cover = Some(match shrink_image(&bytes, COVER_MAX_EDGE) {
+                    Some((small, _)) => small,
+                    None => bytes.clone(),
+                });
+            }
+            images.push(ImageRes {
+                href: target.clone(),
+                source: target.clone(),
+                media_type,
+                width,
+                height,
+            });
+            page_images.push(PageImage {
+                href: target,
+                width,
+                height,
+            });
+        }
+        let Some(main) = page_images.first().cloned() else {
+            continue;
+        };
+        let (width, height) = (main.width, main.height);
+        pages.push(FixedPage {
+            source: PageSource::Image { href: main.href },
+            width,
+            height,
+            // 主图之外的图；单图页时为空。
+            extra_images: page_images.split_off(1),
+        });
+    }
+
+    if pages.is_empty() {
+        return Err(unsupported(path, "定版式 EPUB 一页都取不出来"));
+    }
+    let (width, height) = (pages[0].width, pages[0].height);
+    let meta = DocMeta {
+        title: if opf.title.is_empty() {
+            stem_of(path)
+        } else {
+            opf.title.clone()
+        },
+        authors: opf.authors.clone(),
+        contributors: opf.contributors.clone(),
+        subjects: opf.subjects.clone(),
+        description: opf.description.clone(),
+        publisher: opf.publisher.clone(),
+        published: opf.published.clone(),
+        language: opf.language.clone(),
+        isbn: opf.isbn.clone(),
+        dctype: opf.dctype.clone(),
+        rights: opf.rights.clone(),
+        series: opf.series.clone(),
+        format: Format::Epub,
+        size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+        ..DocMeta::default()
+        };
+    let fixed = FixedDoc {
+        pages,
+        toc: Vec::new(),
+        cover,
+        images,
+        width,
+        height,
+    };
+    tracing::debug!(
+        "epub: {} 是定版式，读到 {} 页",
+        path.display(),
+        fixed.page_count()
+    );
+    Ok((meta, Content::Fixed(fixed)))
+}
+
+/// 一个 spine 项对应这一页的**全部**图（容器绝对路径 + media-type，按出现顺序）。
+///
+/// - `media-type` 是 `image/*`：这一项本身就是图（常见的是逐页 SVG），一张。
+/// - 是一页 XHTML：取里面**所有**图片引用（单图漫画一张，对开跨页两张）。
+/// - 其余（SMIL、音频等）：空 —— 调用方跳过这一项。
+fn fixed_page_refs(zip: &mut Zip, base_dir: &str, item: &Item) -> Vec<(String, String)> {
+    let name = resolve(base_dir, &item.href);
+    if item.media_type.starts_with("image/") {
+        return match zip.locate(&name) {
+            Some(found) => vec![(found, item.media_type.clone())],
+            None => Vec::new(),
+        };
+    }
+    if item.media_type.contains("html") {
+        let Some(found) = zip.locate(&name) else {
+            return Vec::new();
+        };
+        let Some(text) = zip.read_text(&found) else {
+            return Vec::new();
+        };
+        let dir = dir_of(&found);
+        return all_image_refs(&text)
+            .into_iter()
+            .filter_map(|reference| {
+                let target = resolve(&dir, &reference);
+                let located = zip.locate(&target)?;
+                let ext = extension_of(Path::new(&located)).unwrap_or_default();
+                Some((located, super::media_type_of(&ext).to_string()))
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// 一页 XHTML 里**所有**图片引用的 href（`<image xlink:href="…">` 与 `<img src="…">`）。
+///
+/// 轻扫描，不解析 DOM：定版式的页 XHTML 就是「若干张图」，解析一棵完整 DOM 不值。
+/// 认不出就空（那一页跳过）。
+fn all_image_refs(xhtml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for marker in ["<image", "<img"] {
+        let mut haystack = xhtml;
+        while let Some(at) = haystack.find(marker) {
+            let rest = &haystack[at..];
+            let Some(end) = rest.find('>') else {
+                break;
+            };
+            let tag = &rest[..end];
+            for key in ["xlink:href", "href", "src"] {
+                if let Some(value) = attr_in_tag(tag, key) {
+                    if !value.is_empty() && !value.starts_with("http") {
+                        let owned = value.to_string();
+                        if !out.contains(&owned) {
+                            out.push(owned);
+                        }
+                        break;
+                    }
+                }
+            }
+            haystack = &haystack[at + marker.len()..];
+        }
+    }
+    out
+}
+
+/// 从一个标签串里取属性值（双/单引号，属性名大小写不敏感）。
+fn attr_in_tag<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let at = lower.find(&name.to_ascii_lowercase())?;
+    // 属性名后要紧跟 `=`（跳过空白）；避免 `href` 命中 `xlink:href` 之外的词。
+    let after = &tag[at + name.len()..];
+    let after = after.trim_start();
+    let after = after.strip_prefix('=')?.trim_start();
+    let quote = after.chars().next()?;
+    if quote == '"' || quote == '\'' {
+        let rest = &after[1..];
+        let end = rest.find(quote)?;
+        Some(&rest[..end])
+    } else {
+        let end = after
+            .find(|c: char| c.is_whitespace() || c == '>')
+            .unwrap_or(after.len());
+        Some(&after[..end])
+    }
 }
 
 /// 目录文档（nav 或 NCX）里的 href 相对**它自己**，统一换成容器绝对路径。

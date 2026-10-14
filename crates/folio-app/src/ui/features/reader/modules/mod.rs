@@ -13,6 +13,8 @@
 // 只有这一个模块有自由函数（`resolved_for` / `Palette`）要被 `view.rs` 直接调，
 // 所以它是 `pub(super)`；其余几个只往 `ReaderSession` 上挂方法，模块本身不必对外。
 pub(super) mod annotations;
+mod footnotes;
+mod links;
 mod navigation;
 mod position;
 mod reading_time;

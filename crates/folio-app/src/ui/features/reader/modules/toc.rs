@@ -90,7 +90,8 @@ impl ReaderSession {
         let prefs = self.prefs.clone();
         let moved = match &mut self.source {
             Source::Book(book) => book.goto(chapter, &prefs),
-            Source::Sample(_) => false,
+            // 定版式没有目录条（那一屏回退成页表），跳目录不适用。
+            Source::Sample(_) | Source::Fixed(_) => false,
         };
         // 一个 spine 文件挂着好几条目录（一章对十个小节）时，跳到同一章的另一条不算
         // 「换章」，`goto` 会说不 —— 可落点照样要动。只有既没换章、又没锚点，才是
@@ -129,7 +130,8 @@ impl ReaderSession {
         let prefs = self.prefs.clone();
         let moved = match &mut self.source {
             Source::Book(book) => book.advance(delta, &prefs),
-            Source::Sample(_) => false,
+            // 定版式的翻页走 `scroll_page`（按页号），这里不适用。
+            Source::Sample(_) | Source::Fixed(_) => false,
         };
         if !moved {
             return;

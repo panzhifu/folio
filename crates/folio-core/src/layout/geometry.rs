@@ -8,7 +8,8 @@ use std::ops::Range;
 use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
 use crate::content::dom::NodeId;
-use crate::content::format::css::computed::TextAlign;
+use crate::content::format::css::computed::{Color, StyledDom, TextAlign};
+use crate::infra::metrics::Metric;
 
 /// 行盒里的一段连续同样式文本，同时带着两套坐标。
 #[derive(Debug, Clone, PartialEq)]
@@ -36,11 +37,75 @@ pub struct ImageRun {
     pub height: f32,
 }
 
-/// 行盒里的一段内容：文本或替换元素（图片）。M6 的 ruby 会加第三个分支。
+/// 行盒里的一个列表标记（CSS 的 `::marker`）。
+///
+/// 它与 [`LineRun`] 的区别是**坐标系**：标记的文字是生成的，DOM 里没有对应的字节，
+/// 所以它不进 `text_runs()` —— 选区、命中、锚点换算三条路都只认 `Text` 那一个分支，
+/// 于是「点在一个标记上」不会把光标放到段首，选一段文字也不会把 `1.` 圈进去。
+/// 全书的进度与批注锚点建立在可见文本偏移上，标记一旦混进那一套坐标就是整体漂移。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkerRun {
+    /// 挂着这个标记的块级节点（`display: list-item`，通常是 `<li>`）。
+    pub node: NodeId,
+    /// 标记自己的文字（`"1."` / `"•"` / `"三、"`），**不是**块文本的区间。
+    pub text: String,
+    /// 字体取 `<li>` 自己的计算样式：CSS 的 `::marker`  inherits from the list item。
+    pub style: RunStyle,
+    pub width: f32,
+    pub ascent: f32,
+    pub descent: f32,
+    /// 相对**行首**的横向偏移。`outside`（我们唯一的摆法）把它挂在起始边之外：
+    /// 横排是负数，RTL 是「行宽 + 间距」那样落到右边缘之外。
+    pub offset: f32,
+}
+
+/// 行盒里的一段内容：文本、替换元素（图片），或列表标记。
 #[derive(Debug, Clone, PartialEq)]
 pub enum LineFragment {
     Text(LineRun),
     Image(ImageRun),
+    Marker(MarkerRun),
+}
+
+/// 两端对齐时余量往**哪种隙**摊。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JustifyMode {
+    /// 拉空格（词间）。中文行没有空格时这一档不产生任何隙。
+    Spaces,
+    /// 拉字间。
+    Chars,
+}
+
+/// 一个行盒的两端对齐方案：每一处隙多摊多少 px，摊在哪种隙上，一共几处隙。
+///
+/// 绘制、命中、选区**三处必须按同一规则**把 `extra` 一笔笔加上去：某字符的 x 偏移 =
+/// `extra × 它之前的隙数`（`Spaces` 数空格，`Chars` 数字符）。规则只有这一句
+/// （[`Justify::shift`] 与 [`Justify::advance_cursor`]），三处各实现一遍只是各自走一遍
+/// 片段，走的顺序与这一份规则保证一致。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Justify {
+    /// 每一处隙多摊的宽度（px）。
+    pub extra: f32,
+    pub mode: JustifyMode,
+    /// 这一行一共几处隙。撑开后的墨迹宽 = `LineBox::width + extra * gaps`，
+    /// 它就是 `ink_width` 的来源，也让命中夹取知道这一行铺得到哪。
+    pub gaps: u32,
+}
+
+impl Justify {
+    /// 游标在 `cursor`（它之前的隙数）处的横向偏移（px，相对未对齐时的位置）。
+    pub fn shift(&self, cursor: u32) -> f32 {
+        self.extra * cursor as f32
+    }
+
+    /// 处理完一个字符之后游标要加几。`Spaces` 档只在空格后加，`Chars` 档每个字符后都加。
+    /// 调用方**先取 [`shift`](Self::shift) 再按这一笔推进游标**，与绘制、命中逐字一致。
+    pub fn advance_cursor(&self, ch: char) -> u32 {
+        match self.mode {
+            JustifyMode::Spaces => u32::from(ch == ' '),
+            JustifyMode::Chars => 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,14 +123,17 @@ pub struct LineBox {
     /// 相对 `y` 的基线下沉量：各片段最大的 ascent。
     pub baseline: f32,
     pub align: TextAlign,
+    /// 两端对齐的摊法；`None` = 这一行不两端对齐（左/右/中/起边，或段末行、`<br>` 行、
+    /// RTL 行）。见 [`Justify`]。
+    pub justify: Option<Justify>,
 }
 
 impl LineBox {
-    /// 文本片段，按绘制顺序。
+    /// 文本片段，按绘制顺序。**标记不在这一列**，见 [`MarkerRun`]。
     pub fn text_runs(&self) -> impl Iterator<Item = &LineRun> {
         self.fragments.iter().filter_map(|f| match f {
             LineFragment::Text(r) => Some(r),
-            LineFragment::Image(_) => None,
+            LineFragment::Image(_) | LineFragment::Marker(_) => None,
         })
     }
 
@@ -73,8 +141,19 @@ impl LineBox {
     pub fn images(&self) -> impl Iterator<Item = &ImageRun> {
         self.fragments.iter().filter_map(|f| match f {
             LineFragment::Image(r) => Some(r),
-            LineFragment::Text(_) => None,
+            LineFragment::Text(_) | LineFragment::Marker(_) => None,
         })
+    }
+
+    /// 这一行的**墨迹宽度**：两端对齐把它撑满可用宽，否则就是各片段宽度之和。
+    ///
+    /// 命中夹取与「整行兜底矩形」用这一格，因为对齐后字真铺到了右边；而 `LineBox::width`
+    /// 仍是**未撑开**的片段宽之和（列表标记的 RTL 偏移等仍按它算，不受对齐影响）。
+    pub fn ink_width(&self) -> f32 {
+        match self.justify {
+            Some(j) => self.width + j.extra * j.gaps as f32,
+            None => self.width,
+        }
     }
 
     /// 这一行里最大的字号。状态栏与「这行是不是标题」一类判断用；
@@ -106,6 +185,35 @@ pub struct BlockBox {
     /// 边框与 padding，只承载归一化文本）。装饰只画边框盒：内容盒副本要是也画，
     /// 它的边框条会不偏不倚落在文字起点上（真书《斗战狂潮》目录页踩过）。
     pub border_box: bool,
+}
+
+/// 一块要画的装饰的**输入**：几何 + CSS 侧的颜色，主题色一格都没落地。
+///
+/// 为什么要单独有这张表：「哪些块带底色或可见边框」只随层叠结果变，而层叠结果随排版
+/// 一起换 —— 它**不随帧变**。从前绘制侧每帧、每个进链的章各把整章的块表走一遍来筛
+/// 这几条（`plans/阅读管线.md` §十一 第 12 条，一份语料一章 160 块、长章 600+）。
+/// 现在整章走一次、折成这张短表存着，每帧扫的是短表。
+///
+/// **这张表为什么不能像 `lines_in_band` 那样按 y 二分**：块是**嵌套**的，父盒的
+/// `y + height` 远大于紧随其后的子盒（父 5000、子 120），所以「与一条带相交的那些块
+/// 是连续下标区间」这个前提在块表上根本不成立 —— `Layout::stacked` 那一格是为行盒
+/// 量的（行不嵌套），搬到块上就会悄悄漏画。于是这张表的正确用法就是整表扫：
+/// 它短（只有真带装饰的块），而且扫得对。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecorSeed {
+    /// 边框盒左上角（章内坐标，与 `BlockBox::x`/`y` 同一套）。
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// `background-color`。`None` = 书里没写这一条 —— 绘制侧别拿不透明色去盖主题底色。
+    pub background: Option<Color>,
+    /// `[上, 右, 下, 左]` 的（要画的宽, 色）。宽 0 不画。
+    ///
+    /// 色在这里**已经把 `currentColor` 折完了**：没写 border-color 就取本块自己的
+    /// `color`（`color` 可继承，所以那一色在层叠期不一定写在本元素上）。
+    /// 剩下的只有「`None` 落主题前景」那一步 —— 那是主题，必须每帧现落，不许烘进这张表。
+    pub border: [(f32, Option<Color>); 4],
 }
 
 /// 排版结果：两张扁平表 + 两张**排完就折好**的查询索引。
@@ -234,6 +342,54 @@ impl Layout {
     ///
     /// 行盒不叠放（`stacked` 为假）或带是空的时给全区间：调用方自己的 y 裁剔照旧兜住
     /// 正确性，这里只是没省下来。
+    /// 把整章块表走一遍，折出「哪些块要画装饰」那张短表（见 [`DecorSeed`]）。
+    ///
+    /// **每次重排一次，不是每帧一次** —— 折一次是 O(全部块)，而它的答案只跟层叠结果
+    /// 有关。调用点是 `reader::document::Document::apply_typeset`，门是
+    /// `Metric::DecorRebuilds`（滚动过程中那一格必须不涨）。
+    ///
+    /// 三条筛掉的理由与绘制侧原本逐条一致，一条都没松：
+    /// - **内容盒副本不画**：`wrap_paragraph` 为正文映射补注册的那条几何内缩了边框与
+    ///   padding，它的边框条会不偏不倚落在文字起点上（真书《斗战狂潮》目录页踩过）；
+    /// - 没有底色、四条边又都不可见的块，进表只是让每帧多扫一条空记录；
+    /// - 零宽零高的块画不出任何东西，进表同样只是白扫。
+    pub fn decor_seeds(&self, styles: &StyledDom) -> Vec<DecorSeed> {
+        Metric::DecorRebuilds.count();
+        let mut out = Vec::new();
+        for block in &self.blocks {
+            if !block.border_box || block.width <= 0.0 || block.height <= 0.0 {
+                continue;
+            }
+            let Some(style) = styles.get(block.node) else {
+                continue;
+            };
+            // `drawn()` 已经把「有 width 但 style 是 none」那种不存在的边折成 0。
+            let drawn = [
+                style.border[0].drawn(),
+                style.border[1].drawn(),
+                style.border[2].drawn(),
+                style.border[3].drawn(),
+            ];
+            if style.background_color.is_none() && drawn.iter().all(|w| *w <= 0.0) {
+                continue;
+            }
+            out.push(DecorSeed {
+                x: block.x,
+                y: block.y,
+                width: block.width,
+                height: block.height,
+                background: style.background_color,
+                border: [
+                    (drawn[0], style.border[0].color.or(style.color)),
+                    (drawn[1], style.border[1].color.or(style.color)),
+                    (drawn[2], style.border[2].color.or(style.color)),
+                    (drawn[3], style.border[3].color.or(style.color)),
+                ],
+            });
+        }
+        out
+    }
+
     pub fn lines_in_band(&self, from_y: f32, to_y: f32) -> Range<usize> {
         let all = 0..self.lines.len();
         if !self.stacked || to_y <= from_y {

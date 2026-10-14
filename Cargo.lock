@@ -2009,6 +2009,7 @@ dependencies = [
  "folio-core",
  "gpui-kit",
  "gpui-pre-mobile",
+ "image",
  "jni",
  "log",
  "tempfile",
@@ -2032,6 +2033,7 @@ dependencies = [
  "libchm",
  "notify",
  "quick-xml 0.42.0",
+ "resvg 0.46.0",
  "rusqlite",
  "rust-i18n",
  "selectors",
@@ -2456,7 +2458,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.7.1"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#288767cc730ca4977852a7860f52a8465a61876f"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#02daace3522954eb8b3a8db77d59c3bbaa5a839d"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2497,7 +2499,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.7.1"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#288767cc730ca4977852a7860f52a8465a61876f"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#02daace3522954eb8b3a8db77d59c3bbaa5a839d"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2544,7 +2546,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.7.1"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#288767cc730ca4977852a7860f52a8465a61876f"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#02daace3522954eb8b3a8db77d59c3bbaa5a839d"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2857,7 +2859,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.7.1"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#288767cc730ca4977852a7860f52a8465a61876f"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#02daace3522954eb8b3a8db77d59c3bbaa5a839d"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -2873,7 +2875,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.7.1"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#288767cc730ca4977852a7860f52a8465a61876f"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#02daace3522954eb8b3a8db77d59c3bbaa5a839d"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -3898,6 +3900,7 @@ dependencies = [
  "qoi",
  "ravif",
  "rayon",
+ "rgb",
  "tiff",
  "zune-core 0.5.3",
  "zune-jpeg 0.5.15",

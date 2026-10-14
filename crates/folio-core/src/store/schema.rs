@@ -347,4 +347,32 @@ ALTER TABLE images ADD COLUMN source TEXT NOT NULL DEFAULT '';
     r#"
 ALTER TABLE books ADD COLUMN progression_rtl INTEGER NOT NULL DEFAULT 0;
 "#,
+    // v19：**书目按 Dublin Core 补齐**。`DocMeta` 以前只有书名 / 作者 / 格式 / 大小四格，
+    // 而 OPF、EXTH、FB2 的 `<book-info>` 里写的就是都柏林那套术语 —— 白拿的简介、出版社、
+    // 出版日期、ISBN、语言、主题词、系列都没有地方存。
+    //
+    // 三条口径跟着这次一起定死：
+    // - **多值的两格（贡献者、主题词）用换行拼接**，与 `authors` 同一套编码，
+    //   读侧同一个 `split('\n')`；不再引一种 JSON 列，免得同一件事两种写法。
+    // - **日期与系列序号原样存字符串**：书里给的精度不一（「1962」与
+    //   「2023-05-01T00:00:00Z」都是合法值），折成日期类型就是替作者决定了他没说的位数。
+    // - **空串就是「这本书没说」**，与「这一版还没读过」分开：后者由
+    //   [`crate::content::format::INDEX_VERSION`] 的 bump 触发重扫来消除，
+    //   所以那一版号这一轮跟着动了。
+    //
+    // 老库里的旧行全部取默认值（空），不回填 —— 回填要开容器，而这条库的规矩是
+    // 「书目是导入那一趟顺手写的」。
+    r#"
+ALTER TABLE books ADD COLUMN contributors TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN subjects TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN description TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN publisher TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN published TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN language TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN isbn TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN dctype TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN rights TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN series TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN series_position TEXT NOT NULL DEFAULT '';
+"#,
 ];

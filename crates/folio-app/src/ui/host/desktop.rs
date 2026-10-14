@@ -29,6 +29,16 @@ impl Host for DesktopHost {
         false
     }
 
+    fn long_press(&self) -> bool {
+        // 鼠标不产生 `TouchEvent`，gpui 那份长按状态机因此永远不会进 `LongPressing`。
+        false
+    }
+
+    fn picked_files_are_temporary(&self) -> bool {
+        // 桌面文件选择器交回的就是读者自己的文件路径，导入只拷不删。
+        false
+    }
+
     fn body_family(&self, wanted: &str, cx: &App) -> String {
         match find_family(wanted, cx) {
             Some(hit) => hit,

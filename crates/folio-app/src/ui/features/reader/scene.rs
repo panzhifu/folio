@@ -8,15 +8,13 @@
 //! 能在宿主上被 `cargo test` 跑、也能被别的摆法复用（连续滚动整章一条，分页/双页逐片）。
 
 use std::ops::Range;
-use std::sync::Arc;
 
-use folio_core::content::dom::NodeId;
-use folio_core::content::format::css::computed::{BorderEdge, ComputedStyle};
+use folio_core::content::format::css::computed::Color;
 use folio_core::infra::metrics::Metric;
-use folio_core::layout::{Layout, LineFragment};
+use folio_core::layout::DecorSeed;
 use gpui_kit::{Hsla, SharedString};
 
-use super::document::Document;
+use super::document::{Document, RowFragment};
 use super::measure::FontCache;
 use super::paint::GlyphRun;
 use crate::ui::widgets::run_color;
@@ -45,7 +43,24 @@ pub struct VisibleImage {
     pub top: f32,
     pub width: f32,
     pub height: f32,
-    pub image: Arc<gpui_kit::Image>,
+    /// 这张图的活儿：怎么取字节、按什么格式解、进图集占多少。
+    ///
+    /// **像素不在这里** —— 场景只负责「这一帧该摆哪张图」，解没解好由
+    /// [`super::image_atlas::ImageAtlas`] 答（`view.rs` 在搭元素那一趟问它）。
+    /// 摆位用的是排版给的框，与字节无关，所以这一格给得起。
+    pub image: crate::ui::shared::images::DecodeRequest,
+    /// **固有**像素尺寸（`(0, 0)` = 表里查不到，SVG 与 manifest 没写宽高的那些）。
+    ///
+    /// 画的时候用不着它 —— 排版给的 `width`/`height` 已经是最终摆位。带出来是给
+    /// [`super::image_viewer`] 算放大上限用的：那里要的是「一个源像素对一个 CSS 像素」
+    /// 落在哪一刻，而那是字节的事，不是这一屏的事。
+    pub natural: (f32, f32),
+    /// 这张图是不是一条**脚注引用**的标记；是的话带上注文。
+    ///
+    /// 老书把脚注标记做成一张 10px 的「注」图（`蛇结` 就是），图外面套一条
+    /// `<a epub:type="noteref">`。文字命中碰不到这种标记（`<a>` 里没有一个可命中的
+    /// 字符），所以注文在这里解好带出来，绘制层点它时直接抬弹层，不再去开图片查看器。
+    pub footnote: Option<String>,
 }
 
 /// 一屏（或一栏）要画的全部单元。
@@ -82,15 +97,19 @@ impl Scene {
         let mut runs = Vec::new();
         let mut images = Vec::new();
         // 块级装饰与行一样按可见区间裁：只在 cull 覆盖到的盒子上花钱。
-        let decorations = collect_decorations(
-            layout,
+        let __t = super::perf::Timer::start();
+        // 「哪些块带装饰」已经在排版结果换代的同一批里折好了（`Layout::decor_seeds`），
+        // 每帧在这里只做三件**必须**每帧做的事：按可见带裁、加两个平移、落主题前景。
+        let decorations = place_decorations(
+            document.decor_seeds(),
             cull.clone(),
             origin_y,
             x,
             top,
             foreground,
-            &|node| document.style_of(node).cloned(),
         );
+        let __decor = __t.ns();
+        super::perf::add(|frame| frame.decor_ns += __decor);
         for ix in lines {
             let Some(line) = layout.lines.get(ix) else {
                 continue;
@@ -98,72 +117,85 @@ impl Scene {
             if line.y + line.height < cull.start || line.y > cull.end {
                 continue;
             }
-            // 行文本住在所属块的那个归一化串里（`LineRun::norm` 是它的字节区间）。
-            let Some(block) = layout.block_of_line(ix) else {
-                continue;
-            };
-            let mut x = x + line.x;
+            // 章内那一份「这一行摆什么」一章只物化一次（`Document::row_units`）：文本句柄、
+            // 字体描述、行内 x、基线偏移、盒高、装饰布尔、CSS 色全在那里。每帧只往上加
+            // 三个平移数，以及把两个每帧才有的东西现落一次（主题色、解析好的 `Font`）。
+            let row = document.row_units(ix);
+            let column_x = x + line.x;
             let baseline = line.y + line.baseline - origin_y + top;
-            for fragment in &line.fragments {
+            for fragment in row.iter() {
                 match fragment {
-                    LineFragment::Text(run) => {
-                        let text = block.text.get(run.norm.clone()).unwrap_or("");
-                        if text.is_empty() {
-                            x += run.width;
-                            continue;
-                        }
+                    RowFragment::Text(unit) => {
                         runs.push(
                             GlyphRun::new(
-                                SharedString::new(text),
-                                cache.resolve(&run.style.font, family, &mono, faces),
-                                run.style.font_size,
+                                unit.text.clone(),
+                                cache.resolve(&unit.font, family, &mono, faces),
+                                unit.font_size,
                             )
+                            // 章内身份：shaping 表按它查（`Document::shaped_line`）。
+                            // 行号与槽位都只在**这一份排版**里作数，而排版一换
+                            // `Document::drop_fragments` 就把两张表一起清掉。
+                            .keyed((ix as u32, unit.slot))
                             // 每条 run 自己的基线：`vertical-align` 折出来的偏移在这里减掉，
-                            // 正数（往上抬）就是基线 y 变小。行盒高与行基线已由排版层算过，
-                            // 这里只搬运那一个数。
-                            .at(x, baseline - run.style.baseline_shift)
-                            .color(run_color(run.style.color, foreground))
+                            // 正数（往上抬）就是基线 y 变小。行盒高与行基线已由排版层算过。
+                            .at(column_x + unit.x, baseline - unit.baseline_shift)
+                            .color(run_color(unit.color, foreground))
                             // 装饰线要这个 run 的 inline box 高才能定纵向落点
                             // （见 `paint::decoration_y`），它是样式给的数，shaping 里没有。
-                            .in_box(run.style.box_height())
-                            .decorate(run.style.underline, run.style.line_through),
+                            .in_box(unit.box_height)
+                            .decorate(unit.underline, unit.line_through)
+                            // 字距与两端对齐：绘制在 run 内按字符序号 / 隙序号逐字右推，
+                            // 与 `hit`/选区同一句规则。
+                            .spacing(
+                                unit.letter_spacing,
+                                unit.justify,
+                                unit.justify_shift,
+                            ),
                         );
-                        x += run.width;
                     }
-                    LineFragment::Image(placed) => {
+                    RowFragment::Image(placed) => {
                         // 图片交给 gpui 自己的 `img` 元素画（纹理上传由它负责），
                         // 底贴基线：盒顶 = 基线 − 图高。解不出资源的 `<img>` 留位不画。
-                        let rendered = document.images().render_source(&placed.href);
+                        //
+                        // 这一格现在只**登记**这张图（一条 `DecodeRequest`），不去容器取字节：
+                        // 那一趟连同解码整份搬到了后台（`super::image_atlas`），绘制帧里
+                        // 一次解压都不该有。
+                        let __t = super::perf::Timer::start();
+                        let request = document.images().decode_request(&placed.href);
+                        let __image = __t.ns();
+                        super::perf::add(|frame| frame.image_ns += __image);
                         // 每张图片每帧一条 `info!` 会把日志刷爆，而格式化本身就是要省的开销
                         // （`plans/阅读管线.md` §十一 第 11 条）：这一句降到 `trace!`。
                         tracing::trace!(
-                            "Scene: 图片 {} {}×{}，可绘制 = {}",
+                            "Scene: 图片 {} {}×{}，索引里有 = {}",
                             placed.href,
                             placed.width,
                             placed.height,
-                            rendered.is_some()
+                            request.is_some()
                         );
-                        if let Some(image) = rendered {
+                        if let Some(image) = request {
                             images.push(VisibleImage {
-                                x,
+                                x: column_x + placed.x,
                                 top: baseline - placed.height,
                                 width: placed.width,
                                 height: placed.height,
+                                natural: document.images().natural_size(&placed.href),
+                                footnote: document.footnote_note_for_node(placed.node),
                                 image,
                             });
                         }
-                        x += placed.width;
                     }
                 }
             }
         }
-        // 量具：一次构造记一笔，值 = 这一趟物化出的 run 数。**逐 run 计数会把量具自己
-        // 变成被测量的开销**（`folio_core::infra::metrics` 模块头那条纪律），而这两个数要
-        // 回答的问题本来就是一趟一次的：这一帧重建了几次场景、一共拷出几段文本。
-        // 目标值见 `Metric::SceneRuns`：**滚回走过的地方**时增量应当是 0（往前滚那一趟
-        // 该付——单元表按行懒物化，新进入带的行第一次画就要建它）。
+        // 量具：一次构造记一笔。**逐 run 计数会把量具自己变成被测量的开销**
+        // （`folio_core::infra::metrics` 模块头那条纪律），而这一趟要回答的问题是一次的：
+        // 这一帧重建了几次场景。
+        //
+        // `Metric::SceneRuns` 不在这里数了——它的口径 2026-10-15 起是「这一帧新建了几条
+        // 行单元」，那笔钱在 `Document::row_units` 里付，计数也就跟着挪到那一处。
+        // 滚回走过的地方应当增量 0，往前滚那一趟该付（单元表按行懒物化）。
         Metric::SceneRebuilds.count();
-        Metric::SceneRuns.add(runs.len() as u64);
         Self {
             runs,
             images,
@@ -172,54 +204,49 @@ impl Scene {
     }
 }
 
-/// 从排版结果里挑出**可见范围**内带块级装饰（`background-color` / 边框）的盒子。
+/// 把装饰短表按可见带裁一刀，再落三个平移数与主题前景。
 ///
-/// 几何直接用 [`folio_core::layout::BlockBox`] 的边框盒；颜色取层叠结果，边框色
-/// 缺省跟块的文字色（CSS 的 `currentColor`），再落到主题前景。样式查询走闭包，
-/// 是为了测试不用真排一章版。
-fn collect_decorations(
-    layout: &Layout,
+/// 表是 `Layout::decor_seeds` 在每次拿到新一代排版结果时折一次的（`Document::apply_typeset`），
+/// 所以这里**不再走整章的块表** —— 那一趟从前是每帧、链上每个进链的章各一次
+/// （`plans/阅读管线.md` §十一 第 12 条，一份语料一章 160 块、长章 600+）。
+/// 剩下来的这三件事确实必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、
+/// 主题色（主题不许烘进表 —— `plans/阅读管线.md` §九 那四条硬约束的第 2 条）。
+///
+/// 相交判据与原式逐字一致（`y + height < start || y > end`），而且**只能整表扫**：
+/// 块是嵌套的，父盒的 `y + height` 远大于紧随其后的子盒，所以「与一条带相交的那些块
+/// 是连续下标区间」这个前提在块上不成立 —— `Layout::stacked` 那一格是为行盒量的，
+/// 搬过来会悄悄漏画底色。这张表短（只有真带装饰的块），短是它的代价低，不是它被二分了。
+fn place_decorations(
+    seeds: &[DecorSeed],
     cull: Range<f32>,
     origin_y: f32,
     x: f32,
     top: f32,
     foreground: Hsla,
-    style_of: &dyn Fn(NodeId) -> Option<ComputedStyle>,
 ) -> Vec<BlockDecor> {
     let mut out = Vec::new();
-    for block in &layout.blocks {
-        // 内容盒副本（`wrap_paragraph` 为正文映射补注册的那条）不画：几何内缩了
-        // 边框与 padding，它的边框条会落在文字上。只画边框盒。
-        if !block.border_box {
+    for seed in seeds {
+        if seed.y + seed.height < cull.start || seed.y > cull.end {
             continue;
         }
-        if block.y + block.height < cull.start || block.y > cull.end {
-            continue;
-        }
-        let Some(style) = style_of(block.node) else {
-            continue;
-        };
-        if style.background_color.is_none() && style.border.iter().all(|edge| edge.drawn() <= 0.0) {
-            continue;
-        }
-        if block.width <= 0.0 || block.height <= 0.0 {
-            continue;
-        }
-        // 边框色没写就是 currentColor：先落块自己的文字色，再落主题前景。
-        let edge = |edge: &BorderEdge| run_color(edge.color.or(style.color), foreground);
+        // 边框色在表里已经把 `currentColor`（本块自己的 `color`）折完了，
+        // 这里只剩「没色就落主题前景」那一步。
+        // 表里的宽已经是 `BorderEdge::drawn()` 的结果（「有 width 但 style 是 none」
+        // 那种不存在的边在折表时就折成 0 了），这里只落色。
+        let edge = |(width, color): (f32, Option<Color>)| (width, run_color(color, foreground));
         out.push(BlockDecor {
-            x: x + block.x,
-            top: block.y - origin_y + top,
-            width: block.width,
-            height: block.height,
-            background: style
-                .background_color
+            x: x + seed.x,
+            top: seed.y - origin_y + top,
+            width: seed.width,
+            height: seed.height,
+            background: seed
+                .background
                 .map(|color| run_color(Some(color), foreground)),
             border: [
-                (style.border[0].drawn(), edge(&style.border[0])),
-                (style.border[1].drawn(), edge(&style.border[1])),
-                (style.border[2].drawn(), edge(&style.border[2])),
-                (style.border[3].drawn(), edge(&style.border[3])),
+                edge(seed.border[0]),
+                edge(seed.border[1]),
+                edge(seed.border[2]),
+                edge(seed.border[3]),
             ],
         });
     }
@@ -228,64 +255,41 @@ fn collect_decorations(
 
 #[cfg(test)]
 mod tests {
-    //! 块级装饰的挑拣：只挑带 `background-color` / 边框的盒子、按可见区间裁、
-    //! 边框色缺省跟块自己的文字色（CSS 的 `currentColor`）。
+    //! 装饰短表的**每帧那一半**：按可见带裁、加三个平移数、落主题前景。
+    //!
+    //! 「哪些块带装饰、色走 currentColor 折成什么」不在这里测了 —— 那是
+    //! `Layout::decor_seeds` 的职责，2026-10-15 从这一层挪进引擎层，
+    //! 对应用例在 `layout::tests::index`（拿接线前那趟每帧全表扫描当参照实现比的）。
+    //! 这一层剩下的三件事必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、主题色。
 
-    use super::collect_decorations;
+    use super::DecorSeed;
+    use super::place_decorations;
     use crate::ui::widgets::run_color;
-    use folio_core::content::format::css::computed::{BorderStyle, Color, ComputedStyle};
-    use folio_core::layout::{BlockBox, Layout};
+    use folio_core::content::format::css::computed::Color;
     use gpui_kit::black;
 
-    /// 挑拣只关心块的几何与样式，行盒给空表就够。
-    fn layout_of(blocks: Vec<BlockBox>) -> Layout {
-        // 只能走 `assemble`：索引是私有的，拼结构体字面量会造出「有块盒但没有归属表」的
-        // 排版结果，那种东西在生产里就是「底色一片空白」那种查不出根因的症状。
-        Layout::assemble(blocks, Vec::new(), 336.0, 500.0)
-    }
-
-    fn block(node: u32, y: f32) -> BlockBox {
-        BlockBox {
-            node,
+    /// 一条 300×60 的底色种子，`None` 的那条边框走主题前景。
+    fn seed(y: f32, height: f32) -> DecorSeed {
+        DecorSeed {
             x: 12.0,
             y,
             width: 300.0,
-            height: 60.0,
-            text: String::new(),
-            lines: 0..0,
-            border_box: true,
+            height,
+            background: Some(Color(193, 204, 192)),
+            border: [
+                (0.0, None),
+                (0.0, None),
+                (2.0, None),
+                (0.0, Some(Color(12, 34, 56))),
+            ],
         }
     }
 
-    fn styles_of(by_node: &[(u32, ComputedStyle)]) -> impl Fn(u32) -> Option<ComputedStyle> + '_ {
-        move |node| {
-            by_node
-                .iter()
-                .find(|(id, _)| *id == node)
-                .map(|(_, style)| style.clone())
-        }
-    }
-
-    /// 底色 + 边框的盒子被挑出来，几何按 `x` 与「origin_y / top 两个偏移」落位。
+    /// 几何按 `x` 与「origin_y / top 两个偏移」落位；色按主题前景落；
+    /// 已经折好的 `currentColor`（那条有色边框）不许被主题覆盖。
     #[test]
-    fn a_styled_block_in_view_becomes_a_decoration() {
-        let mut style = ComputedStyle::default();
-        style.background_color = Some(Color(193, 204, 192));
-        style.border[2] = folio_core::content::format::css::computed::BorderEdge {
-            width: 2.0,
-            style: BorderStyle::Solid,
-            color: None,
-        };
-        let layout = layout_of(vec![block(7, 40.0)]);
-        let decor = collect_decorations(
-            &layout,
-            0.0..700.0,
-            100.0,
-            20.0,
-            60.0,
-            black(),
-            &styles_of(&[(7, style)]),
-        );
+    fn a_seed_is_placed_with_the_translations_and_the_theme() {
+        let decor = place_decorations(&[seed(40.0, 60.0)], 0.0..700.0, 100.0, 20.0, 60.0, black());
         assert_eq!(decor.len(), 1);
         let decor = &decor[0];
         assert_eq!(
@@ -299,54 +303,44 @@ mod tests {
             Some(run_color(Some(Color(193, 204, 192)), black())),
             "背景色按字节转主题色"
         );
-        assert_eq!(decor.border[2].0, 2.0, "下边框要画");
+        assert_eq!(decor.border[2], (2.0, black()), "没写色的边框落主题前景");
         assert_eq!(
-            decor.border[2].1,
-            black(),
-            "边框色缺省 currentColor，块没写文字色就落主题前景"
+            decor.border[3].1,
+            run_color(Some(Color(12, 34, 56)), black()),
+            "表里已经折好 currentColor 的那一条，色必须是块自己的，不是主题的"
         );
+        assert_eq!(decor.border[0].0, 0.0, "宽 0 的边不画");
     }
 
-    /// 没写装饰的盒子与可见范围外的盒子都不产生绘制单元；完全没样式的节点
-    /// （层叠表里查不到）也一样。
+    /// 窗外的一条不产生绘制单元。
     #[test]
-    fn unstyled_blocks_and_blocks_out_of_view_are_skipped() {
-        let layout = layout_of(vec![block(1, 40.0), block(2, 900.0), block(3, 100.0)]);
-        let decor = collect_decorations(
-            &layout,
+    fn a_seed_outside_the_visible_band_is_dropped() {
+        let decor = place_decorations(
+            &[seed(40.0, 60.0), seed(900.0, 60.0)],
             0.0..700.0,
             0.0,
             0.0,
             0.0,
             black(),
-            // 节点 1 有样式但没写背景与边框；节点 2 有样式但在窗外；节点 3 无样式。
-            &styles_of(&[(1, ComputedStyle::default()), (2, ComputedStyle::default())]),
         );
-        assert!(decor.is_empty(), "实际 {decor:?}");
+        assert_eq!(decor.len(), 1, "900 那条在窗外：{decor:?}");
     }
 
-    /// 内容盒副本（`border_box = false`）即使带着样式与装饰也不画 ——
-    /// 真书目录页上，它的边框条会不偏不倚压在文字起点上。
+    /// **这条就是「块表不能按 y 二分」的活证据**：一条从很上面就开始的高盒（父盒
+    /// 的 `y + height` 远大于其后任何一条）必须照样画出来 —— 它与可见带相交，
+    /// 但它的 `y` 在带下方很远。整表扫给的是这个正确答案；
+    /// 谁将来想给这张表加二分，这条会拦住他。
     #[test]
-    fn a_content_box_copy_is_never_decorated() {
-        let mut style = ComputedStyle::default();
-        style.background_color = Some(Color(193, 204, 192));
-        let mut phantom = block(7, 40.0);
-        phantom.border_box = false;
-        let layout = layout_of(vec![block(7, 40.0), phantom]);
-        let decor = collect_decorations(
-            &layout,
-            0.0..700.0,
-            0.0,
-            0.0,
-            0.0,
-            black(),
-            &styles_of(&[(7, style)]),
-        );
-        assert_eq!(
-            decor.len(),
-            1,
-            "同节点两条注册只该画出边框盒那条：{decor:?}"
-        );
+    fn a_tall_box_starting_far_above_the_band_is_still_painted() {
+        let parent = seed(0.0, 5000.0);
+        let decor = place_decorations(&[parent], 4000.0..4700.0, 0.0, 0.0, 0.0, black());
+        assert_eq!(decor.len(), 1, "父盒跨着整条带，必须画：{decor:?}");
+        assert_eq!(decor[0].height, 5000.0);
+    }
+
+    /// 空表（这一章没有一处带装饰）必须给空，而不是给出一条零尺寸的东西。
+    #[test]
+    fn an_empty_table_paints_nothing() {
+        assert!(place_decorations(&[], 0.0..700.0, 0.0, 0.0, 0.0, black()).is_empty());
     }
 }

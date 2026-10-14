@@ -20,6 +20,36 @@ pub struct BookRow {
     pub last_opened_at: Option<i64>,
 }
 
+/// 一本书的完整书目（Dublin Core 那一组 + 我们自己的格式与大小）。
+///
+/// 与 [`BookRow`] 分开是因为用途不同：架面一次要读几百行，只要标题、作者与进度；
+/// 这一份是「信息屏」按 id 单查一条，里面有简介与主题词那种长文本。把长文本塞进
+/// `BookRow` 等于每次上架都把全库的简介读进内存 —— 与封面字节出库（`books.cover`
+/// 在 v16 删掉）是同一条理由，也是同一个方向。
+///
+/// 空串与空 `Vec` 都是「这本书没说」。界面**有值才显示那一行**，所以空值不该占一格。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BookMeta {
+    pub id: i64,
+    pub title: String,
+    pub authors: Vec<String>,
+    /// `dc:contributor`。
+    pub contributors: Vec<String>,
+    /// `dc:subject`。
+    pub subjects: Vec<String>,
+    pub description: String,
+    pub publisher: String,
+    /// `dc:date`，原样字符串（书里给的精度不一）。
+    pub published: String,
+    pub language: String,
+    pub isbn: String,
+    pub dctype: String,
+    pub rights: String,
+    pub series: Option<crate::content::format::Series>,
+    pub format: String,
+    pub size: u64,
+}
+
 /// 书架上的一张卡片：`BookRow` 那些项再加封面字节。
 ///
 /// 单开一个类型而不是往 `BookRow` 上加 `cover`，是因为封面是这排里唯一大的东西

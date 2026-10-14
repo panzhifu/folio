@@ -4,9 +4,10 @@
 //! 有什么」（章、目录、图片元数据、按 href 现取字节），这一边是「界面读到哪、
 //! 排版成什么样」。一本书换章只是换这一层持有的排版状态，容器不重开。
 //!
-//! 连续滚动把**锚章 ± [`SPAN_WINDOW`]** 的章拼成一条全局 y 坐标（见
-//! [`Self::placements`]，全书唯一的拼接公式）：滚过章尾自然接下一章，锚章跟随
-//! 视口顶迁移，窗外章节裁掉、邻章提前排版入库。分页 / 双页不拼坐标，仍然只用
+//! 连续滚动把锚章周围**一屏多**的章拼成一条全局 y 坐标（见 [`Book::window_range`]：
+//! 至少锚章 ± [`SPAN_WINDOW`]，再按视口顶往前铺够一屏多；拼接公式只有
+//! [`Self::placements`] 一处）：滚过章尾自然接下一章，锚章跟随视口顶迁移，
+//! 窗外章节裁掉、邻章提前排版入库。分页 / 双页不拼坐标，仍然只用
 //! 锚章那一份（[`Self::document`]，所有既有调用点都只认它）。
 //!
 //! 拼接的正确性压在一条不变式上：**任何结构变动（迁移、裁剪、新章进链）之后，
@@ -22,28 +23,33 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use folio_core::content::document::Document as OpenedDocument;
-use folio_core::content::format::TocEntry;
+use folio_core::content::format::css::RuleSet;
+use folio_core::content::format::{TocEntry, dir_of, fragment_of, resolve_href};
 use folio_core::{Chapter, Locator, Reader};
 use gpui_kit::{App, SharedString};
 
 use super::book_fonts::BookFonts;
-use super::document::Document;
+use super::document::{ChapterSource, Document, author_rules};
 use super::toc_tree::{self, TocRow};
 use crate::ui::shared::images::{BookImages, ChapterImages, document_source};
 
-/// 章文本缓存的半窗宽：手里留「当前章 ± 3」章的正文。
-///
-/// 翻章是局部行为，相邻章来回翻要免费 —— 这正是缓存的来历；从目录跳到远处则旧
-/// 窗口整块让出去。3 章的余量盖住了「下一章 / 上一章」的来回折腾，千章书的正文
-/// 驻留也从「整本」变成常数量级（至多 7 章）。
-const TEXT_WINDOW: usize = 3;
-
-/// 拼进连续坐标的邻章半窗宽：锚章上下各预排这么多章。
+/// 拼进连续坐标的邻章半窗宽：锚章上下**至少**预排这么多章。
 ///
 /// 读者会狂飙滚动：窗口给到 ±2，配合后台单线程排版队列（毫秒级一章），正常速度
 /// 下接缝永远提前排好；狂飙时也至少还有一章的余量，滚到未就绪的边界只会停一拍，
-/// 不会白屏。驻留上界 5 份排版，仍是常数量级。
+/// 不会白屏。这是条**下限**：真正的边界由 [`Book::window_range`] 按像素预算再往外铺，
+/// 上界是单侧 [`SPAN_MAX_AHEAD`] 章 —— 常数量级，不随书的长度长。
 const SPAN_WINDOW: usize = 2;
+
+/// 拼接窗口**前向**的像素预算，按屏给：**视口底**再往下还要铺这么多，读者才滚得动、
+/// 锚章才迁移。它必须不止一屏：迁移的判据是「视口顶进了下一章」，而视口顶最远只走得到
+/// 链尾减一屏 —— 链尾不伸出下一章一屏，那个判据就永远够不着，读者钉在链尾那一屏上
+/// （见 [`Book::window_range`]）。
+const SPAN_AHEAD_SCREENS: f32 = 1.5;
+/// 拼接窗口**后向**的像素预算，按屏给。视口顶往上铺够这么多，往回滚不至于两下就到链头。
+const SPAN_BEHIND_SCREENS: f32 = 0.5;
+/// 前向窗口的**章数**上限：像素预算之外再兜一道，防一屏能放下几十个一行章时铺太多。
+const SPAN_MAX_AHEAD: usize = 16;
 
 /// 拼接坐标里的一个邻章：哪一章 + 它自己的排版状态。
 ///
@@ -60,6 +66,31 @@ pub(super) struct Placement {
     pub(super) height: f32,
 }
 
+/// 正文里一条 `<a href>` 的去向（[`Book::resolve_link`] 的结果）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Link {
+    /// 书内位置：某一章，加上可选的章内锚点（`#id`）。
+    Internal {
+        chapter: usize,
+        fragment: Option<String>,
+    },
+    /// 书外地址（`http:` / `mailto:` / `tel:` 等）。一期只解出来，收不收由调用方定。
+    External { url: String },
+}
+
+/// `before` 里 `:` 前若是一个 URL scheme 就返回它，否则 `None`。
+///
+/// 判定照 RFC 3986：首字符字母，其余是字母数字或 `+` `-` `.`。文件名里出现 `:`
+/// 极少见，而真正要拦的是 `http://…` 这种 —— 不拦就会被当相对路径去解、解不出。
+fn external_scheme(before: &str) -> Option<&str> {
+    let (scheme, _) = before.split_once(':')?;
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    (first.is_ascii_alphabetic()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+    .then_some(scheme)
+}
+
 /// 一台设备上打开着的一本书：章节表、锚章、以及锚章 ± 窗口的排版状态。
 pub struct Book {
     title: SharedString,
@@ -73,23 +104,31 @@ pub struct Book {
     book_images: Arc<BookImages>,
     /// 锚章自己的排版状态。**永在** —— 分页 / 双页与全部既有调用点都只认它。
     document: Document,
-    /// 邻章 Span（不含锚章），按章号升序，至多 `2 × [`SPAN_WINDOW`]` 个。
+    /// 邻章 Span（不含锚章），按章号升序。条数不是一个固定值：至少锚章 ±
+    /// [`SPAN_WINDOW`]，再多铺到「前后各盖过一两屏」为止，见 [`Self::window_range`]。
     spans: Vec<Span>,
-    /// 书自己的样式表。新开 Span 要灌同一份作者层规则。
+    /// 上一帧量到的视口高（逻辑像素）。拼接窗口按它折成「前后各铺几章」——
+    /// 见 [`Self::window_range`]。默认给一屏常用值，第一帧之前也有个像样的窗口。
+    window_px: f32,
+    /// 书自己的样式表。`LayoutInputs` 要按它算一次哈希，而规则表用的是下面那一格。
     css: String,
+    /// 作者层规则：**整本书解析一次**，每一章的 `Document` 分同一个 `Arc`。
+    ///
+    /// 为什么由 `Book` 拿着：从前是每建一章在 UI 线程重解析一遍整本 CSS（真机拆开
+    /// 量到 1.5–1.9 ms / 章，跳一次章一次铺四章就是 7 ms）。见 `document::author_rules`。
+    rules: Arc<RuleSet>,
     /// 整本书的内嵌字体（别名表 + 已经注册进设备的家族名）。各章共用一份，
     /// 注册进设备只有一次，所以由 `Book` 持有，而不是每章自己注册一遍。
     faces: Arc<BookFonts>,
     /// 打开着的这份文档。正文不在库里，只存位置（`ChapterLocator`），所以要留着它
     /// 才能按位置回容器取。
-    doc: Arc<dyn OpenedDocument>,
-    /// 已经取过的章正文，只留「当前章 ± [`TEXT_WINDOW`]」。
     ///
-    /// 单文件格式（TXT / MD / FB2）取一章 = 重读整本再分一次章，来回翻同一章不该付
-    /// 第二次；EPUB 虽然只解一个条目，缓存一下也省一对 zip 中央目录。窗口随换章
-    /// 裁剪（见 [`Self::set_anchor`]），窗外的章让出去 —— 驻留上界是常数量级，
-    /// 不再随阅读进度吃下整本。
-    texts: HashMap<usize, String>,
+    /// 它还随每一个排版作业搬进后台线程（`ChapterSource::Fetch`）：取正文那一趟现在
+    /// 在作业里做，而 `content::document::Document: Send + Sync` 正是那一趟能出渲染帧的
+    /// 前提。从前这里只服务界面线程上那句现取（`chapter_text_at`），连带一份
+    /// 「当前章 ± 3 章」的正文缓存 —— 那一格 2026-10-15 起没有存在理由了，
+    /// 上游 crengine 连解压后的条目都不缓存（每次读重走一遍 inflate）。
+    doc: Arc<dyn OpenedDocument>,
 }
 
 impl Book {
@@ -116,9 +155,15 @@ impl Book {
         );
         let book_images = Arc::new(BookImages::new(doc.images(), document_source(doc.clone())));
         let fonts = BookFonts::for_document(doc.as_ref(), &css, cx);
-        let document = Document::new(
-            String::new(),
+        // 整本书的作者层规则只解析这一次，之后每一章的 `Document` 分同一份 `Arc`。
+        let rules = author_rules(&css);
+        // 锚章的排版状态按**位置**建，正文由排版作业自己去取。图片索引这里先给空的：
+        // 紧跟着的 `set_anchor` 会按本章目录重建它。
+        let document = Document::fetching_with_rules(
+            doc.clone(),
+            chapter,
             &css,
+            rules.clone(),
             prefs.clone(),
             Arc::new(ChapterImages::empty()),
             fonts.clone(),
@@ -131,10 +176,12 @@ impl Book {
             book_images,
             document,
             spans: Vec::new(),
+            // 第一帧 `ensure_window_spans` 就会用真实视口高盖掉它。
+            window_px: 800.0,
             css,
+            rules,
             faces: fonts,
             doc,
-            texts: HashMap::new(),
         };
         this.set_anchor(chapter, &prefs);
         this
@@ -163,9 +210,10 @@ impl Book {
         // 顺序反了会把正要复用的那份排版当垃圾扔掉，锚章也会跟着来回打转。
         let reused = self.take_span(index);
         if old_index != index {
-            let vacant = Document::new(
+            let vacant = Document::new_with_rules(
                 String::new(),
                 &self.css,
+                self.rules.clone(),
                 prefs.clone(),
                 Arc::new(ChapterImages::empty()),
                 self.faces.clone(),
@@ -176,11 +224,14 @@ impl Book {
                 doc: previous,
             });
         }
-        self.prune_spans();
+        // 先把新锚章的排版装回去，**再**裁窗外：`window_range` 要读锚章的高度，
+        // 而那一刻它若还是空的（占位 Document），窗口会被按「一整屏」估出来、
+        // 一刀裁短 —— 下一帧内容高缩水、滚动被夹回去，锚章又迁回原处，
+        // 短章书就在两个锚章之间来回抖（`advance`/`migrate` 都走这条）。
         match reused {
             Some(span) => self.document = span.doc,
             None => {
-                let text = self.chapter_text_at(index);
+                let source = self.chapter_source(index);
                 // 图片索引必须跟着换章重建：`<img src>` 是相对本章目录的，
                 // 上一章的基准目录解不出下一章的路径。
                 let images = self
@@ -193,21 +244,34 @@ impl Book {
                         ))
                     })
                     .unwrap_or_else(|| Arc::new(ChapterImages::empty()));
-                self.document.set_chapter(text);
+                self.document.set_chapter(source);
                 self.document.set_images(images);
             }
         }
-        prune_texts(&mut self.texts, index);
+        self.prune_spans(Self::chapter_gap(prefs));
     }
 
-    /// 把锚章 ± 窗口的邻居补齐入库（0 高占位，排完自动进坐标链）。
+    /// 把锚章附近的邻居补齐入库（0 高占位，排完自动进坐标链），窗外的整块让出去。
     ///
-    /// 只创建、不裁剪、不算坐标：0 高的章不进 [`Self::placements`]，已进链章的
-    /// base 一个都不动，所以**不需要滚动补偿**。渲染帧开头调它，排版作业这就能
-    /// 排进后台队列 —— 接缝因此总是提前铺好。
-    pub(super) fn ensure_window_spans(&mut self, prefs: &Reader) {
-        let lo = self.chapter.saturating_sub(SPAN_WINDOW);
-        let hi = (self.chapter + SPAN_WINDOW).min(self.chapters.len().saturating_sub(1));
+    /// 新章以 0 高占位进库、**不动已进链章的 base**，所以这一步本身不需要滚动补偿；
+    /// 窗外那几章按算出来的同一个 `[lo, hi]` 一并让出去。渲染帧开头调它，排版作业
+    /// 这就能排进后台队列 —— 接缝因此总是提前铺好。
+    ///
+    /// `viewport_height` 与 `viewport_top` 一起决定窗口铺多远（见 [`Self::window_range`]）：
+    /// 短章要多铺几章才盖得过一屏，而读者停在长章中后段时，锚章自己已经吃掉了好几屏，
+    /// 前方那几章照样得够 —— 两件事都要这两个数才答得出来。
+    ///
+    /// 这是**每帧按当帧读数**量窗口的那一处：读者停在哪里，窗口就该从哪里往前铺。
+    /// 换锚章那一处（`set_anchor`）只做一次保守的窗外清理，判据见 [`Self::prune_spans`]。
+    pub(super) fn ensure_window_spans(
+        &mut self,
+        prefs: &Reader,
+        viewport_height: f32,
+        viewport_top: f32,
+    ) {
+        self.window_px = viewport_height.max(1.0);
+        let gap = Self::chapter_gap(prefs);
+        let (lo, hi) = self.window_range(gap, viewport_top);
         for index in lo..=hi {
             if index == self.chapter || self.spans.iter().any(|span| span.index == index) {
                 continue;
@@ -216,14 +280,78 @@ impl Book {
             self.spans.push(span);
         }
         self.spans.sort_by_key(|span| span.index);
+        self.retain_window(lo, hi);
     }
 
-    /// 窗口之外的邻居整块让出去。锚章自己不会住在 `spans` 里。
-    fn prune_spans(&mut self) {
-        let lo = self.chapter.saturating_sub(SPAN_WINDOW);
-        let hi = self.chapter + SPAN_WINDOW;
+    /// 拼接窗口的边界 `[lo, hi]`（含锚章）。两条规则一起用：**至少** `锚章 ± SPAN_WINDOW`
+    /// （长章书的驻留上界还是它），再多铺到「视口顶往前盖过一屏多、往回盖过半屏」为止。
+    ///
+    /// 前向预算是**从视口顶算起**的，不是从锚章章首：读者停在长章中后段时，章首到视口
+    /// 那段已经滚过去了，若还从章首起算，「一屏半」全花在了视口**上方**，前方就只剩
+    /// [`SPAN_WINDOW`] 那两章的兜底。那两章若都是短页（献词页、整页图），加起来不够一屏，
+    /// 于是 `content_height` 到它们末尾就没了：视口顶最远只走得到链尾减一屏，永远进不了
+    /// 下一章 —— 锚章不迁移、窗口不往前长、`max_scroll` 也不再变大，读者就卡在那一屏上
+    /// （实测：《未来简史》第 3 节那个目录章比手机视口略高，后面接着献词页与整页图，
+    /// 两页连缝一共 442px，而视口有 750px —— 屏幕停在图与图说上，页脚念 100%）。
+    ///
+    /// 后向同一条道理：视口顶之上那几屏多半还在锚章肚子里，锚章自己就盖住了，
+    /// 只有视口顶贴近锚章章首时才需要往上够一够。
+    ///
+    /// 没排完的章按一屏估：宁可多铺一章，也不要少铺。
+    fn window_range(&self, gap: f32, viewport_top: f32) -> (usize, usize) {
+        let last = self.chapters.len().saturating_sub(1);
+        let height = |index: usize| -> f32 {
+            self.span_doc(index)
+                .map(|doc| doc.height())
+                .filter(|h| *h > 0.0)
+                .unwrap_or(self.window_px)
+        };
+        // 视口顶在锚章里的位置。锚章还没排完（base 问不出来）时按章首算：两条夹取
+        // 都往「少要一点」那一侧靠，多铺的那几章下一帧自己会补齐。
+        let top = self
+            .base_of(self.chapter, gap)
+            .map(|base| (viewport_top - base).clamp(0.0, height(self.chapter)))
+            .unwrap_or(0.0);
+        // 前向：一屏（视口自己）+ `SPAN_AHEAD_SCREENS` 屏的余量，都从视口顶往下量。
+        let ahead = top + (self.window_px * (1.0 + SPAN_AHEAD_SCREENS)).max(1.0);
+        let behind = (self.window_px * SPAN_BEHIND_SCREENS).max(1.0);
+
+        let mut hi = self.chapter;
+        let mut covered = height(self.chapter);
+        while hi < last && (hi - self.chapter) < SPAN_MAX_AHEAD && covered < ahead {
+            hi += 1;
+            covered += height(hi) + gap;
+        }
+        hi = hi.max((self.chapter + SPAN_WINDOW).min(last));
+
+        // 后向：视口顶之上已经铺了 `above` 像素（锚章露在视口上方的那一截先算进去）。
+        let mut lo = self.chapter;
+        let mut above = top;
+        while lo > 0 && (self.chapter - lo) < SPAN_MAX_AHEAD && above < behind {
+            lo -= 1;
+            above += height(lo) + gap;
+        }
+        lo = lo.min(self.chapter.saturating_sub(SPAN_WINDOW));
+
+        (lo, hi)
+    }
+
+    /// 只留 `[lo, hi]` 里的邻居（锚章自己不会住在 `spans` 里）。
+    fn retain_window(&mut self, lo: usize, hi: usize) {
         self.spans
             .retain(|span| span.index != self.chapter && lo <= span.index && span.index <= hi);
+    }
+
+    /// 窗口之外的邻居整块让出去（换锚章时随手做一次）。
+    ///
+    /// `viewport_top` 这里传 0：换锚章那一刻手上没有当帧的视口顶 —— 迁移发生在渲染帧
+    /// 中段、跳章更要等下一帧的恢复请求落地才准。按「视口顶就在锚章章首」算，落在
+    /// **保守**的那一侧（前向预算从章首起算满一屏多，只会多留、不会少留），而窗外那几章
+    /// 也真的当场就让出去了，不必多留一帧。每帧开头的 [`Self::ensure_window_spans`]
+    /// 随后会用当帧读数再量一遍，那才是说了算的那一次。
+    fn prune_spans(&mut self, gap: f32) {
+        let (lo, hi) = self.window_range(gap, 0.0);
+        self.retain_window(lo, hi);
     }
 
     fn take_span(&mut self, index: usize) -> Option<Span> {
@@ -231,8 +359,7 @@ impl Book {
         Some(self.spans.remove(position))
     }
 
-    fn make_span(&mut self, index: usize, prefs: &Reader) -> Span {
-        let text = self.chapter_text_at(index);
+    fn make_span(&self, index: usize, prefs: &Reader) -> Span {
         let images = self
             .chapters
             .get(index)
@@ -243,35 +370,27 @@ impl Book {
                 ))
             })
             .unwrap_or_else(|| Arc::new(ChapterImages::empty()));
-        let mut doc = Document::new(
-            String::new(),
+        // 正文按位置交给排版作业去取：这一趟连一次解压都不做，更不克隆一整章。
+        let doc = Document::fetching_with_rules(
+            self.doc.clone(),
+            index,
             &self.css,
+            self.rules.clone(),
             prefs.clone(),
             images,
             self.faces.clone(),
         );
-        doc.set_chapter(text);
         Span { index, doc }
     }
 
-    /// 第 `index` 章的正文，按位置回容器取（取过就记住）。
+    /// 第 `index` 章正文的**来路**：按位置回容器取，而那一趟取在排版作业里做。
     ///
-    /// 取不到时给空串并写一条错误日志：界面能把这一屏画出来（其它章还能读），
-    /// 而「源文件不在了」这条消息在日志与 `chapter_unavailable` 上看得见。
-    fn chapter_text_at(&mut self, index: usize) -> String {
-        if let Some(text) = self.texts.get(&index) {
-            return text.clone();
-        }
-        match self.doc.chapter_source(index) {
-            Ok(text) => {
-                self.texts.insert(index, text.clone());
-                text
-            }
-            Err(err) => {
-                tracing::error!(chapter = index + 1, error = %err, "Book: 取不到正文");
-                String::new()
-            }
-        }
+    /// 从前这一格是 `chapter_text_at` —— 当场 `doc.chapter_source(index)` 取回一整章
+    /// （一次解压 + 一次解码，实测 7–9.5 ms），在 UI 线程的渲染帧里付，还要再存进
+    /// 一份「当前章 ± 3」的正文缓存。现在 `Book` 只递「去哪儿取」，取正文与
+    /// 取不到的降级都在 `document::typeset_job` 里。
+    fn chapter_source(&self, index: usize) -> Arc<ChapterSource> {
+        ChapterSource::fetch(self.doc.clone(), index)
     }
 
     /// 参与拼接的章，按章号升序摆上全局坐标。**这是拼接坐标的唯一公式**：
@@ -410,7 +529,8 @@ impl Book {
         self.compensate_spine(snapshot, scroll_y, gap);
     }
 
-    /// 拼进坐标窗口的章（含锚章）。测试读：窗口必须钉在锚章 ± [`SPAN_WINDOW`]。
+    /// 拼进坐标窗口的章（含锚章）。测试读：窗口**至少**钉在锚章 ± [`SPAN_WINDOW`]，
+    /// 短章处会铺得更远（见 [`Self::window_range`]）。
     #[cfg(test)]
     pub(in crate::ui::features::reader) fn span_indices(&self) -> Vec<usize> {
         let mut out: Vec<usize> = self.spans.iter().map(|span| span.index).collect();
@@ -501,6 +621,45 @@ impl Book {
         map
     }
 
+    /// 正文里一条 `<a href>` 的去向。
+    ///
+    /// 只分「书内」与「书外」两类。书内落成 `(章号, 可选锚点)` —— 与目录条目走的是
+    /// 同一套坐标（`goto_entry` / `pending_anchor`），所以正文链接与目录链接跳得一样。
+    pub fn resolve_link(&self, chapter: usize, href: &str) -> Option<Link> {
+        let href = href.trim();
+        if href.is_empty() {
+            return None;
+        }
+        let fragment = fragment_of(href);
+        // `#` 之前那一截：空 = 纯章内锚点（`#m1`），否则是路径或外部地址。
+        // 纯锚点是**先**判的：`resolve_href` 把 `#…` 整条剥掉之后会拿 base 目录
+        // 当结果，对纯锚点给出一个指不到任何章的假路径。
+        let before = href.split('#').next().unwrap_or("").trim();
+        if before.is_empty() {
+            return Some(Link::Internal { chapter, fragment });
+        }
+        if external_scheme(before).is_some() {
+            return Some(Link::External {
+                url: href.to_string(),
+            });
+        }
+        // 相对路径按**这一章**所在目录解析（书内目录页写的是 `part0004.xhtml`，
+        // 不是容器全路径），再回章节表查目标章。
+        let base = self
+            .chapters
+            .get(chapter)
+            .map(|c| dir_of(&c.spine_href))
+            .unwrap_or_default();
+        let path = resolve_href(&base, href);
+        self.toc_hrefs()
+            .get(&path)
+            .copied()
+            .map(|target| Link::Internal {
+                chapter: target,
+                fragment,
+            })
+    }
+
     /// 目录那一屏要的行，带层级。**每次问都重算**：树只有几十到几百条，
     /// 而缓存它要处理的失效情形（换书、重排、导入后重新解析）比这点开销贵得多。
     ///
@@ -539,63 +698,5 @@ impl Book {
 
     pub fn document_mut(&mut self) -> &mut Document {
         &mut self.document
-    }
-}
-
-/// 把章文本缓存裁到「`current ± [`TEXT_WINDOW`]`」。
-///
-/// 独立的纯函数是为了测试：[`Book`] 要 `App` 才能造出来，窗口数学不必陪它。
-/// 当前章按构造就在窗口里，当前章的正文永远不会被裁掉。
-fn prune_texts(texts: &mut HashMap<usize, String>, current: usize) {
-    let lo = current.saturating_sub(TEXT_WINDOW);
-    let hi = current.saturating_add(TEXT_WINDOW);
-    texts.retain(|index, _| lo <= *index && *index <= hi);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::prune_texts;
-    use std::collections::HashMap;
-
-    fn cache(chapters: &[usize]) -> HashMap<usize, String> {
-        chapters
-            .iter()
-            .map(|ix| (*ix, format!("第 {ix} 章")))
-            .collect()
-    }
-
-    fn sorted_keys(texts: &HashMap<usize, String>) -> Vec<usize> {
-        let mut keys: Vec<usize> = texts.keys().copied().collect();
-        keys.sort_unstable();
-        keys
-    }
-
-    /// 窗口的三个边：中间、贴着第 0 章的下边、隔着空洞跳过的章。
-    /// 千章书通读一遍，手上最多只有 2×窗口 + 1 章的正文。
-    #[test]
-    fn texts_outside_the_window_around_the_current_chapter_are_evicted() {
-        let mut texts = cache(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        prune_texts(&mut texts, 5);
-        assert_eq!(
-            sorted_keys(&texts),
-            vec![2, 3, 4, 5, 6, 7, 8],
-            "窗外整块让出去"
-        );
-
-        let mut texts = cache(&[0, 1, 2, 3]);
-        prune_texts(&mut texts, 0);
-        assert_eq!(
-            sorted_keys(&texts),
-            vec![0, 1, 2, 3],
-            "第 0 章时下半窗为空，一个不多裁"
-        );
-
-        let mut texts = cache(&[0, 3, 5, 7, 9]);
-        prune_texts(&mut texts, 7);
-        assert_eq!(
-            sorted_keys(&texts),
-            vec![5, 7, 9],
-            "窗口只看下标，不看连续性"
-        );
     }
 }

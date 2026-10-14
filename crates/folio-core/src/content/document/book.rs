@@ -39,6 +39,20 @@ pub struct BookDocument {
     ///
     /// 第一次取字节时才从图片元数据里筛：绝大多数书一张降级路都没挂，那时它就是一张空表。
     image_sources: std::sync::OnceLock<HashMap<String, String>>,
+    /// [`ChapterLocator::Section`] 那一族的**整本正文 memo**（会话级，关书即走）。
+    ///
+    /// 为什么要它：单文件容器取一章 = provider 重解**整本**。合成 KF8/KF7 实测（release、
+    /// 正文不压缩那一档，所以是**下界**）：600 章一本，全文那一趟 109 ms，而**翻一章 107 ms**
+    /// —— 单步与整本同价，顺着读完整本就是 600 × 107 ms。留下第一次的结果，后面每次
+    /// 都是一次下标取值。
+    ///
+    /// 驻留实测：600 章（约 13 万字）改写后的 XHTML 是 405 KB，一千二百万字级别的书约 4 MB。
+    /// 这一条**取代**了 `reader::Book::texts` 那个 ±3 章窗口在同一条路上吃的亏：窗口还在，
+    /// 只是它后面的重解没了（口径见 `plans/text-out-of-db.md`「缓存的上界就是这一本书」）。
+    ///
+    /// `None` = 这一本的整本重读**没把正文带回来**（provider 没覆盖 `read`，给出的还是位置）
+    /// 或那一趟失败了 —— 那就照旧每章回容器取一次，不拿空字符串糊弄读者。
+    section_texts: std::sync::OnceLock<Option<std::sync::Arc<Vec<String>>>>,
     meta: DocMeta,
     content: Content,
 }
@@ -74,6 +88,7 @@ impl BookDocument {
             path: Some(path.to_path_buf()),
             container: std::sync::OnceLock::new(),
             image_sources: std::sync::OnceLock::new(),
+            section_texts: std::sync::OnceLock::new(),
             meta,
             content,
         })
@@ -89,6 +104,7 @@ impl BookDocument {
             path: None,
             container: std::sync::OnceLock::new(),
             image_sources: std::sync::OnceLock::new(),
+            section_texts: std::sync::OnceLock::new(),
             meta,
             content,
         }
@@ -108,6 +124,7 @@ impl BookDocument {
             path: Some(path.to_path_buf()),
             container: std::sync::OnceLock::new(),
             image_sources: std::sync::OnceLock::new(),
+            section_texts: std::sync::OnceLock::new(),
             meta,
             content,
         }
@@ -296,16 +313,72 @@ impl Document for BookDocument {
                     })
             }
             // 单文件容器：provider 重读一遍再取第 N 章 —— 只有它知道怎么分章。
-            ChapterLocator::Section(_) => provider.chapter_source(path, &at).map_err(|err| {
-                let _ = err;
-                crate::Error::ChapterUnavailable {
-                    path: path.to_path_buf(),
-                    index,
-                    at: format!("{at:?}"),
+            // 那一趟的价钱与「解完整本」同价（实测数字见 [`Self::section_texts`]），所以
+            // 第一次解完就把它留下，后面按章号取；memo 建不起来时照旧回容器重读。
+            ChapterLocator::Section(section) => {
+                if let Some(texts) = self.full_sections(provider, path)
+                    && let Some(text) = texts.get(*section)
+                {
+                    return Ok(text.clone());
                 }
-            }),
+                provider.chapter_source(path, &at).map_err(|err| {
+                    let _ = err;
+                    crate::Error::ChapterUnavailable {
+                        path: path.to_path_buf(),
+                        index,
+                        at: format!("{at:?}"),
+                    }
+                })
+            }
             ChapterLocator::Inline(text) => Ok(text.clone()),
         }
+    }
+}
+
+/// 「取一章 = 重解整本」那一族的补救，挂在这个实现上而不是 `Document` 接口上：
+/// 位置是不是 `Section` 只有这里知道。
+impl BookDocument {
+    /// 整本正文的 memo（用途见 [`Self::section_texts`]）：第一次解一遍全存，之后给回同一份。
+    ///
+    /// 只收「那一趟真的把正文带回来了」的：每一章都得正文在手（`locator()` 是 `None`）。
+    /// 否则 memo 里装的是一串空字符串，读者翻到那一章就是白屏 —— 那种 provider 宁可不建，
+    /// 让它照旧走「每章重读一次」那条慢但诚实的路。
+    fn full_sections(
+        &self,
+        provider: &dyn DocumentProvider,
+        path: &Path,
+    ) -> Option<std::sync::Arc<Vec<String>>> {
+        self.section_texts
+            .get_or_init(|| {
+                // 这一趟是「为取一章而重解整本」，量具挂在它身上：memo 生效时一本书只涨 1。
+                crate::infra::metrics::Metric::WholeBookRereads.count();
+                match provider.read(path) {
+                    // 每一章都正文在手（`locator()` 是 `None`）才收下这一趟。
+                    Ok((_, Content::Reflow(flow)))
+                        if flow
+                            .chapters
+                            .iter()
+                            .all(|chapter| chapter.locator().is_none()) =>
+                    {
+                        Some(std::sync::Arc::new(
+                            flow.chapters
+                                .iter()
+                                .map(|chapter| chapter.source().to_string())
+                                .collect(),
+                        ))
+                    }
+                    // 那一趟只给位置（provider 没覆盖 `read`，走的是 `provider.rs` 的默认路），
+                    // 或者干脆读失败了。都不判死这一本：下一次取章照原路再回容器试一遍。
+                    _ => {
+                        tracing::debug!(
+                            "document: {} 的整本重读没带回正文，这一本不建 memo",
+                            path.display()
+                        );
+                        None
+                    }
+                }
+            })
+            .clone()
     }
 }
 
@@ -587,9 +660,164 @@ mod tests {
 
     #[test]
     fn an_unknown_container_is_reported_not_opened() {
-        let Err(err) = BookDocument::open(Path::new("/x/y.mobi")) else {
+        let Err(err) = BookDocument::open(Path::new("/x/y.pdf")) else {
             panic!("没注册的容器不该打开");
         };
         assert!(matches!(err, crate::Error::UnsupportedFormat(_)), "{err}");
+    }
+
+    /// 单文件容器（`ChapterLocator::Section` 那一族）翻章不许每章重解一遍整本：
+    /// 第一趟解完就 memo 住，之后取章是一次下标取值。
+    ///
+    /// 判据只能取 `WholeBookRereads` 那个量具：两条路给读者的文字**一模一样**，
+    /// 内容断言永远看不出省下的那几趟。而省下的是实测数量级 —— 合成 600 章 KF7
+    /// （release、正文不压缩那一档，所以是下界）整本 109 ms、**翻一章 107 ms**，
+    /// 顺着读完整本就是 600 个 107 ms。
+    #[test]
+    fn paging_through_a_single_file_book_reparses_it_only_once() {
+        use crate::infra::metrics::{Metric, take_local};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut md = String::new();
+        for i in 0..12 {
+            md.push_str(&format!("# 第{i}章\n\n第{i}章的正文在这里。\n\n"));
+        }
+        let path = write(dir.path(), "many.md", md.as_bytes());
+        let book = BookDocument::open(&path).unwrap();
+        let ContentRef::Reflow(flow) = book.content() else {
+            panic!("该读成可重排");
+        };
+        let chapters = flow.chapters.len();
+        assert!(chapters >= 12, "夹具章数不对：{chapters}");
+        // 开书那一趟（索引）也可能碰这一格，先清零，只量「翻章」这一段。
+        let _ = take_local(Metric::WholeBookRereads);
+
+        let mut texts: Vec<String> = Vec::new();
+        for i in 0..chapters {
+            texts.push(book.chapter_source(i).unwrap());
+        }
+        // 回头翻已读过的章 —— 读者最常干的事，在旧实现里每次都是一趟整本重解。
+        for i in [0, 1, chapters - 1] {
+            assert!(!book.chapter_source(i).unwrap().is_empty());
+        }
+
+        assert_eq!(
+            take_local(Metric::WholeBookRereads),
+            1,
+            "{chapters} 章来回翻，整本只该解一遍"
+        );
+        // memo 的**下标**也得钉住：章没串位、没全变成第一章。
+        for (i, text) in texts.iter().enumerate() {
+            assert!(
+                text.contains(&format!("第{i}章的正文在这里")),
+                "第 {i} 章取回来的是别处的正文：{text}"
+            );
+        }
+    }
+
+    /// memo 只收「那一趟真的把正文带回来了」的那一种。`read` 的契约是「索引 + 每一章正文」，
+    /// 一个把它写成「照抄索引」的 provider（下面这个替身）给出的仍是位置 —— 收下这一趟
+    /// memo 里就装满空字符串，读者翻到每一章都是白屏。
+    ///
+    /// 这一条同时钉住降级路：不 memo 时**照旧**逐章回容器取，正文不许变成空。
+    #[test]
+    fn a_read_that_returns_positions_is_not_memoized() {
+        use std::cell::Cell;
+        use std::path::PathBuf;
+
+        use crate::content::format::{
+            Chapter, ChapterText, Content as FormatContent, DocMeta, DocumentProvider, FlowDoc,
+        };
+        use crate::infra::metrics::{Metric, take_local};
+
+        thread_local! {
+            /// 替身自己数「回容器取了一趟」——memo 断了只有这里看得见。
+            static PROBE_READS: Cell<u32> = const { Cell::new(0) };
+        }
+
+        fn meta() -> DocMeta {
+            DocMeta {
+                title: "替身".into(),
+                authors: Vec::new(),
+                format: Format::Text,
+                size: 0,
+                ..DocMeta::default()
+                }
+        }
+
+        /// 三章，每章只有位置。
+        fn positions() -> FormatContent {
+            FormatContent::Reflow(FlowDoc {
+                chapters: (0..3)
+                    .map(|ix| Chapter {
+                        title: format!("第{}章", ix + 1),
+                        spine_href: String::new(),
+                        char_len: None,
+                        text: ChapterText::At(ChapterLocator::Section(ix)),
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+        }
+
+        /// 索引给位置，`chapter_source` 按位置给正文 —— 但 `read` **照抄索引**，
+        /// 违反「全文那一趟要带正文」那条契约。这一档正是 memo 那道判据要挡住的。
+        struct PositionsOnly;
+
+        impl DocumentProvider for PositionsOnly {
+            fn format(&self) -> Format {
+                Format::Text
+            }
+            fn supports(&self, _path: &Path) -> bool {
+                true
+            }
+            fn index(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
+                Ok((meta(), positions()))
+            }
+            fn read(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
+                Ok((meta(), positions()))
+            }
+            fn chapter_source(&self, _path: &Path, at: &ChapterLocator) -> crate::Result<String> {
+                PROBE_READS.with(|n| n.set(n.get() + 1));
+                let ChapterLocator::Section(ix) = at else {
+                    return Err(crate::Error::ChapterUnavailable {
+                        path: PathBuf::from("/x.txt"),
+                        index: 0,
+                        at: format!("{at:?}"),
+                    });
+                };
+                Ok(format!("第{ix}章的正文"))
+            }
+        }
+
+        let book = BookDocument {
+            provider: Some(Box::new(PositionsOnly)),
+            path: Some(PathBuf::from("/x.txt")),
+            container: std::sync::OnceLock::new(),
+            image_sources: std::sync::OnceLock::new(),
+            section_texts: std::sync::OnceLock::new(),
+            meta: meta(),
+            content: positions(),
+        };
+        let _ = take_local(Metric::WholeBookRereads);
+
+        assert_eq!(book.chapter_source(1).unwrap(), "第1章的正文");
+        assert_eq!(book.chapter_source(2).unwrap(), "第2章的正文");
+
+        // memo 那一格被写过，写的是「不收」。
+        assert!(
+            book.section_texts.get().map(|memo| memo.is_none()) == Some(true),
+            "这种一趟的结果不许进 memo"
+        );
+        assert_eq!(
+            take_local(Metric::WholeBookRereads),
+            1,
+            "整本重读确实跑过一次，只是没被收下"
+        );
+        assert_eq!(
+            PROBE_READS.with(|n| n.get()),
+            2,
+            "没 memo 就照旧每章回容器取，正文不许变成空"
+        );
     }
 }

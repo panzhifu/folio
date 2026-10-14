@@ -53,7 +53,7 @@ const GUTTER: f32 = 12.0;
 ///
 /// 必须显式给：图表不自己量高，而它在滚动层里拿不到能被 `flex_1` 解析的高 ——
 /// 不给就是零高，症状是「趋势那一节只剩标题，图不见了」。与阅读页目录层同一条坑
-/// （`reader::page::toc_layer` 那处注释）。
+/// （`reader::page::toc_sheet_element` 那处注释）。
 const TREND_HEIGHT: f32 = 168.0;
 /// 时段图盒的高：比趋势矮一档。它是「一天里哪几个钟点在读」的次要读数，
 /// 而且 24 根柱子本来就比 30 根矮胖，不需要那么多垂直空间。
@@ -449,7 +449,7 @@ impl StatsView {
     /// （Guides：每个动作都要说得出它的对象、范围，以及点下去之后哪一屏会变）。
     ///
     /// 交回 `AnyElement` 而不是 `impl IntoElement`：那个不透明类型会把 `cx` 的可变借用
-    /// 一直带在类型里，后面每一处 `cx.theme()` 都撞在它上面（与 `reader::page::toc_layer`
+    /// 一直带在类型里，后面每一处 `cx.theme()` 都撞在它上面（与 `reader::page::toc_sheet_element`
     /// 那处是同一个坑）。
     fn range_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.report.as_ref()?;

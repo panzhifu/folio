@@ -181,7 +181,8 @@ mod tests {
             authors: vec!["作者甲".into()],
             format: Format::Epub,
             size: 1,
-        }
+            ..DocMeta::default()
+            }
     }
 
     fn path(name: &str) -> PathBuf {

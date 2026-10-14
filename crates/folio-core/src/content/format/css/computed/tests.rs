@@ -5,8 +5,8 @@
 
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{
-    BorderEdge, BorderStyle, Color, ComputedStyle, Direction, Display, Hyphens, Length, StyledDom,
-    TextAlign, cascade,
+    BorderEdge, BorderStyle, Color, ComputedStyle, Direction, Display, Float, Hyphens, Length,
+    ListStyle, StyledDom, TextAlign, TextJustify, cascade,
 };
 use crate::content::format::css::{Origin, RuleSet};
 
@@ -31,6 +31,16 @@ fn author(html: &str, css: &str) -> Page {
 
 fn style(page: &Page, id: NodeId) -> &ComputedStyle {
     page.styled.get(id).expect("样式表应覆盖每个节点")
+}
+
+/// 断言按 px 读那一条边距 / 缩进。折出 `Percent` 会被这条直接判失败 —— 层叠期
+/// 不该折算百分比（那是排版期拿到包含块宽之后的事），所以这些用例里出现
+/// `Percent` 意味着取值层走错了路。要验百分比本身就用 `Length::Percent(..)` 直接对。
+fn px(l: Length) -> f32 {
+    match l {
+        Length::Px(v) => v,
+        Length::Percent(p) => panic!("层叠期把百分比折掉了（{p}），折算点在排版期"),
+    }
 }
 
 fn tag(page: &Page, tag: &str) -> NodeId {
@@ -69,9 +79,9 @@ fn no_rules_yields_the_root_base_everywhere() {
 fn em_resolves_against_the_elements_own_font_size() {
     let first = author("<p>甲</p>", "p { font-size: 20px; text-indent: 2em }");
     let second = author("<p>乙</p>", "p { text-indent: 2em; font-size: 20px }");
-    assert_eq!(style(&first, tag(&first, "p")).text_indent, 40.0);
+    assert_eq!(px(style(&first, tag(&first, "p")).text_indent), 40.0);
     assert_eq!(
-        style(&second, tag(&second, "p")).text_indent,
+        px(style(&second, tag(&second, "p")).text_indent),
         40.0,
         "font-size 写在后面也要先算"
     );
@@ -84,7 +94,7 @@ fn rem_uses_the_root_font_size_not_the_parent() {
         "div { font-size: 30px } p { margin-top: 2rem }",
     );
     // root_base 字号是 16，rem 与父元素的 30px 无关。
-    assert_eq!(style(&page, tag(&page, "p")).margin_top, 32.0);
+    assert_eq!(px(style(&page, tag(&page, "p")).margin_top), 32.0);
 }
 
 #[test]
@@ -96,7 +106,7 @@ fn pt_converts_at_the_css_ratio() {
 #[test]
 fn bare_number_is_treated_as_px() {
     let page = author("<p>字</p>", "p { text-indent: 3 }");
-    assert_eq!(style(&page, tag(&page, "p")).text_indent, 3.0);
+    assert_eq!(px(style(&page, tag(&page, "p")).text_indent), 3.0);
 }
 
 #[test]
@@ -151,10 +161,11 @@ fn only_inheritable_properties_flow_down() {
     assert!(p.font_italic);
     assert_eq!(p.word_spacing, 2.0);
     assert_eq!(
-        p.margin_bottom, 16.0,
+        px(p.margin_bottom),
+        16.0,
         "p 的 1em 下边距来自 UA 表，不是继承父元素的 12px"
     );
-    assert_eq!(p.padding_top, 0.0, "padding 不该继承");
+    assert_eq!(px(p.padding_top), 0.0, "padding 不该继承");
     assert_eq!(p.display, Display::Block, "display 不该继承");
 }
 
@@ -166,7 +177,11 @@ fn text_align_and_indent_survive_several_levels() {
     );
     let p = style(&page, tag(&page, "p"));
     assert_eq!(p.text_align, TextAlign::Justify);
-    assert_eq!(p.text_indent, 32.0, "缩进继承下来但已在根元素折算成 px");
+    assert_eq!(
+        px(p.text_indent),
+        32.0,
+        "缩进继承下来但已在根元素折算成 px"
+    );
 }
 
 #[test]
@@ -217,13 +232,23 @@ fn unknown_values_count_as_ignored_but_known_lazily_supported_do_not() {
 
 /// 百分比外边距要按包含块宽度算，层叠期不知道那个数，所以宁可判不支持。
 /// 用 div 而不是 p：div 的 UA 外边距是 0，能看清「被拒的声明什么都没留下」。
+/// 百分比边距**存下来，不在层叠期折**。
+///
+/// 这一条以前是「宁可判不支持」：`margin-top: 10%` 整条丢掉、计进 ignored。改掉的理由
+/// 是账 —— 多看转换的《哈利·波特》有 86441 个元素挂着 `margin: 0% 1% 0% 1%`，全书
+/// 92698 条「不认识」里绝大多数就是这一族写法。判不支持等于把作者的边距静默抹掉，
+/// 而基准（包含块宽）只是**当时**不知道，排版期拿得到。
+/// 折算点在哪：`layout::collect` 的 `basis`，见 `the_percent_margin_folds_against_the_containing_block`。
 #[test]
-fn percentage_boxes_are_rejected_rather_than_guessed() {
+fn percentage_boxes_are_kept_for_the_layout_phase() {
     let page = author("<div>文</div>", "div { margin-top: 10%; text-indent: 5% }");
     let div = style(&page, tag(&page, "div"));
-    assert_eq!(div.margin_top, 0.0);
-    assert_eq!(div.text_indent, 0.0);
-    assert_eq!(page.styled.ignored, 2);
+    assert_eq!(div.margin_top, Length::Percent(0.1));
+    assert_eq!(div.text_indent, Length::Percent(0.05));
+    assert_eq!(
+        page.styled.ignored, 0,
+        "合法的百分比不该再计进 ignored —— 那一格是留给真落差的"
+    );
 }
 
 /// `auto` 边距折成 **0**，并且不再计进 `ignored`。
@@ -237,8 +262,8 @@ fn percentage_boxes_are_rejected_rather_than_guessed() {
 fn auto_margin_computes_to_zero() {
     let page = author("<p>文</p>", "p { margin-left: auto }");
     let p = style(&page, tag(&page, "p"));
-    assert_eq!(p.margin_left, 0.0);
-    assert_eq!(p.margin_top, 16.0, "UA 给 <p> 的 1em 不该被这条声明碰坏");
+    assert_eq!(px(p.margin_left), 0.0);
+    assert_eq!(px(p.margin_top), 16.0, "UA 给 <p> 的 1em 不该被这条声明碰坏");
     assert_eq!(page.styled.ignored, 0, "认得的合法值不该计进 ignored");
 }
 
@@ -258,25 +283,41 @@ fn the_margin_shorthand_expands_one_to_four_values() {
     );
     let a = style(&page, class(&page, "a"));
     assert_eq!(
-        (a.margin_top, a.margin_right, a.margin_bottom, a.margin_left),
+        (
+            px(a.margin_top),
+            px(a.margin_right),
+            px(a.margin_bottom),
+            px(a.margin_left)
+        ),
         (16.0, 0.0, 16.0, 0.0),
         "两值 = 「上下 左右」"
     );
     let b = style(&page, class(&page, "b"));
     assert_eq!(
-        (b.margin_top, b.margin_right, b.margin_bottom, b.margin_left),
+        (
+            px(b.margin_top),
+            px(b.margin_right),
+            px(b.margin_bottom),
+            px(b.margin_left)
+        ),
         (5.0, 0.0, 16.0, 0.0),
         "三值 = 「上 左右 下」"
     );
     let c = style(&page, class(&page, "c"));
     assert_eq!(
-        (c.margin_top, c.margin_right, c.margin_bottom, c.margin_left),
+        (
+            px(c.margin_top),
+            px(c.margin_right),
+            px(c.margin_bottom),
+            px(c.margin_left)
+        ),
         (1.0, 2.0, 3.0, 4.0),
         "四值顺时针"
     );
     let d = style(&page, class(&page, "d"));
     assert_eq!(
-        d.margin_top, 15.0,
+        px(d.margin_top),
+        15.0,
         "0.5em 按它自己的 30px 字号，不是根的 16px"
     );
     assert_eq!(page.styled.ignored, 0, "这四种写法都该被接住");
@@ -292,35 +333,91 @@ fn the_padding_shorthand_expands_without_auto() {
     let a = style(&page, class(&page, "a"));
     assert_eq!(
         (
-            a.padding_top,
-            a.padding_right,
-            a.padding_bottom,
-            a.padding_left
+            px(a.padding_top),
+            px(a.padding_right),
+            px(a.padding_bottom),
+            px(a.padding_left)
         ),
         (0.0, 16.0, 0.0, 16.0)
     );
     let b = style(&page, class(&page, "b"));
     assert_eq!(
-        (b.padding_top, b.padding_right),
+        (px(b.padding_top), px(b.padding_right)),
         (0.0, 0.0),
         "`padding: auto` 非法，整条作废而不是半信半疑"
     );
     assert_eq!(page.styled.ignored, 1, "只有那一条该计 ignored");
 }
 
+/// `float` / `clear`：认得的写法接住并生效，认不出的整条计进 `ignored`。
+#[test]
+fn float_and_clear_count_only_unrecognized_values_as_gap() {
+    let page = author("<p></p>", "p { float: left; clear: nope }");
+    assert_eq!(
+        style(&page, tag(&page, "p")).float,
+        Float::Left,
+        "`float: left` 是真生效的属性了，不再是「认得不生效」"
+    );
+    assert_eq!(page.styled.ignored, 1, "只有 `clear: nope` 那一条算落差");
+}
+
+/// `list-style-type` 收 EPUB 3 CSS Profile 点名的记数；表外的关键字整条判不认识。
+///
+/// `hebrew` 是 profile 收录而我们**故意**没接的那一个：它那套数值记数本机没有一本
+/// 希伯来书可验，画出一个看着像的号比承认没做更难发现。所以它进 `ignored`。
+#[test]
+fn list_style_types_parse_and_unknown_ones_are_counted() {
+    let page = author(
+        "<p class=a></p><p class=b></p>",
+        ".a { list-style-type: cjk-ideographic } .b { list-style-type: hebrew }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).list_style_type,
+        ListStyle::CjkIdeographic
+    );
+    assert_eq!(
+        style(&page, class(&page, "b")).list_style_type,
+        ListStyle::Disc,
+        "认不出的类型回到初值，不降级成别的记数"
+    );
+    assert_eq!(page.styled.ignored, 1, "只有 `hebrew` 那一条该计落差");
+}
+
+/// `list-style` 简写取**类型**那一项；`inside` 与 `url(…)` 听得出、这一轮不生效。
+/// 与 `background` 简写同一个口径：接住能接的那一项，不假装接住了整条。
+#[test]
+fn the_list_style_shorthand_takes_the_type_token() {
+    let page = author(
+        "<p class=a></p><p class=b></p>",
+        ".a { list-style: square inside } .b { list-style: url(dot.png) }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).list_style_type,
+        ListStyle::Square,
+        "简写里的 `square` 要落进类型"
+    );
+    assert_eq!(
+        page.styled.ignored, 0,
+        "两条都是认得的写法：一项生效、其余听得出"
+    );
+}
+
 /// 值数超出 1–4、或任一个值不认识，整条作废。静默只取前两个值是最难查的错法。
+///
+/// 第三条用的是 `calc()`：百分比已经不再是「不认识」的那一类了（见
+/// [`percentage_boxes_are_kept_for_the_layout_phase`]），所以这一格要换一个真折不出的写法。
 #[test]
 fn a_shorthand_with_too_many_or_bad_values_is_dropped_whole() {
     let page = author(
         "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>",
         ".a { margin: 1px 2px 3px 4px 5px } \
          .b { margin: 1px nonsense } \
-         .c { margin: 5% }",
+         .c { margin: calc(1px + 2px) }",
     );
     for name in ["a", "b", "c"] {
         let s = style(&page, class(&page, name));
         assert_eq!(
-            (s.margin_top, s.margin_left),
+            (px(s.margin_top), px(s.margin_left)),
             (0.0, 0.0),
             ".{name} 的写法都该整条不生效"
         );
@@ -328,6 +425,31 @@ fn a_shorthand_with_too_many_or_bad_values_is_dropped_whole() {
     assert_eq!(
         page.styled.ignored, 3,
         "三条都要计进 ignored，落差不然会被静默吞掉"
+    );
+}
+
+/// `orphans` / `widows` 的 `0` 夹到 1，不再计进 ignored；负数仍判不认识。
+///
+/// 这一条的账在《斗战狂潮》：`body` 与 `p` 上各写一次，全书 138336 条声明就是它。
+/// 判不认识等于把那本书推回引擎默认的 2 / 2，症状是页底比作者要的少留一行。
+#[test]
+fn a_zero_orphan_or_widow_count_clamps_to_one() {
+    let page = author(
+        "<div><p>文</p></div>",
+        "p { orphans: 0; widows: 0 } div { orphans: -2; widows: 3 }",
+    );
+    let p = style(&page, tag(&page, "p"));
+    assert_eq!(
+        (p.orphans, p.widows),
+        (1, 1),
+        "0 的意思是「不设约束」，折到合法域的下沿"
+    );
+    assert_eq!(page.styled.ignored, 1, "只有那条负数该计 ignored");
+    let div = style(&page, tag(&page, "div"));
+    assert_eq!(
+        (div.orphans, div.widows),
+        (2, 3),
+        "负数整条不生效，回到初值 2；同一条声明里的 widows 不受牵连"
     );
 }
 
@@ -432,7 +554,7 @@ fn inline_style_sits_between_reader_normal_and_reader_important() {
 #[test]
 fn inline_em_resolves_against_the_inline_font_size() {
     let page = author(r#"<p style="text-indent: 2em; font-size: 20px">文</p>"#, "");
-    assert_eq!(style(&page, tag(&page, "p")).text_indent, 40.0);
+    assert_eq!(px(style(&page, tag(&page, "p")).text_indent), 40.0);
 }
 
 /// 行内样式不进任何样式表，所以 `ignored` 是它唯一的痕迹 ——
@@ -603,13 +725,11 @@ fn relative_weight_buckets_a_non_round_parent() {
     );
 }
 
-/// 字距记 `Inert`，不算「已支持」。**它以前是第三种状态**：解析进 `ComputedStyle` 的
-/// `letter_spacing` 就没人读了 —— 布局、绘制、命中三处都不认它，而 `examples/css-gap`
-/// 会把它算成已生效。现在字段一并摘掉，只剩这条诚实的分类。
-/// 接上它要同批改四处（`TextRun` 没有这一格，得自己按字符序号推字形与边界），
-/// 理由与代价记在 `KNOWN_UNIMPLEMENTED` 那份名单的注释里。
+/// 字距 2026-10-16 起真的生效了：`letter-spacing` 落到 `ComputedStyle.letter_spacing`，
+/// 不再是「解析进去没人读」的空转字段。这一条钉的是「认得出」；四处同源（宽度表/绘制/
+/// 命中的兑现）由 `layout` 与 `content::hit` 的测试守。
 #[test]
-fn letter_spacing_reports_inert_not_applied() {
+fn letter_spacing_is_applied_and_inherited() {
     use crate::content::format::css::Declaration;
     use crate::content::format::css::computed::{DeclStatus, declaration_status};
 
@@ -624,20 +744,72 @@ fn letter_spacing_reports_inert_not_applied() {
             16.0,
         )
     };
-    assert_eq!(status("2px"), DeclStatus::Inert);
-    assert_eq!(status("normal"), DeclStatus::Inert);
-    // 对照：词距是真生效的（叠在每个空格之后，折行与行宽都算它）。
+    assert_eq!(status("2px"), DeclStatus::Applied);
+    assert_eq!(status("normal"), DeclStatus::Applied);
+
+    // 值真的写进去了，且可继承（CSS 里 `letter-spacing` 是继承属性）。
+    let page = author("<div><p>文</p></div>", "div { letter-spacing: 3px }");
+    let p = style(&page, tag(&page, "p"));
+    assert_eq!(p.letter_spacing, 3.0, "声明在 div 上，p 继承到同一份字距");
+}
+
+/// `text-justify` 认得并入库：`inter-ideograph` 折进 `InterCharacter`，且可继承
+/// （书里在 `<body>` 上写一次就管全书）。
+#[test]
+fn text_justify_is_recognized_and_inherited() {
+    let page = author(
+        "<div><p>文</p></div>",
+        "div { text-justify: inter-ideograph }",
+    );
+    let p = style(&page, tag(&page, "p"));
+    assert_eq!(p.text_justify, TextJustify::InterCharacter);
+}
+
+/// 定位一族记「认得，不生效」而不是「不认识」：不做绝对定位是明确的取舍，
+/// 但不该让 `css-gap` 把 `position` / `left` 报成「听都没听过」。
+#[test]
+fn the_position_family_reports_inert_not_unknown() {
+    use crate::content::format::css::Declaration;
+    use crate::content::format::css::computed::{DeclStatus, declaration_status};
+
+    for (property, value) in [
+        ("position", "absolute"),
+        ("left", "0%"),
+        ("bottom", "12%"),
+        ("z-index", "3"),
+    ] {
+        assert_eq!(
+            declaration_status(
+                &Declaration {
+                    property: property.into(),
+                    value: value.into(),
+                    important: false,
+                },
+                &ComputedStyle::default(),
+                16.0,
+            ),
+            DeclStatus::Inert,
+            "{property} 应记「认得，不生效」"
+        );
+    }
+}
+
+/// 属性选择器的五种算子：`~=` 与 `*=` 是出版书里的真写法。
+#[test]
+fn attribute_selectors_with_operators_match() {
+    let page = author(
+        "<p class=\"a solid b\">x</p><p class=\"biaoti-1\">y</p>",
+        "[class~=\"solid\"] { color: #010203 } [class*=\"biaoti\"] { color: #040506 }",
+    );
     assert_eq!(
-        declaration_status(
-            &Declaration {
-                property: "word-spacing".into(),
-                value: "2px".into(),
-                important: false,
-            },
-            &ComputedStyle::default(),
-            16.0,
-        ),
-        DeclStatus::Applied
+        style(&page, class(&page, "solid")).color,
+        Some(Color(1, 2, 3)),
+        "[class~=\"solid\"] 要命中 `a solid b`"
+    );
+    assert_eq!(
+        style(&page, class(&page, "biaoti-1")).color,
+        Some(Color(4, 5, 6)),
+        "[class*=\"biaoti\"] 要命中 `biaoti-1`"
     );
 }
 
@@ -708,7 +880,7 @@ fn later_stylesheet_wins_after_extend() {
             ("p { text-indent: 99px }", Origin::Author),
         ],
     );
-    assert_eq!(style(&page, tag(&page, "p")).text_indent, 99.0);
+    assert_eq!(px(style(&page, tag(&page, "p")).text_indent), 99.0);
 }
 
 #[test]
@@ -737,7 +909,7 @@ fn root_base_from_reader_prefs_is_the_inheritance_seed() {
     assert_eq!(s.font_size, 24.0, "读者字号要能穿到最深层");
     assert_eq!(s.line_height, 2.0);
     assert_eq!(s.font_family, "Noto Serif CJK SC");
-    assert_eq!(s.margin_top, 24.0, "1em 按偏好字号而不是 16px");
+    assert_eq!(px(s.margin_top), 24.0, "1em 按偏好字号而不是 16px");
 }
 
 /// 图片尺寸用的长度：px / em / rem 折成 px，% 留到排版期，auto 清空。
@@ -1068,6 +1240,29 @@ fn border_shorthand_fills_all_four_edges() {
     assert_eq!(style.border[0].style, BorderStyle::Solid);
     assert_eq!(style.border[0].color, Some(Color(88, 99, 87)));
     assert_eq!(style.background_color, Some(Color(193, 204, 192)));
+}
+
+/// `background` 简写里的颜色要接住：出版书用「深色底块 + 白字标题」，
+/// 只认 `background-color` 会让白字落在白纸上、整条标题消失（《罗生门》正是这么没的）。
+#[test]
+fn the_background_shorthand_yields_its_color() {
+    let page = author(
+        "<h1 class=t>标题</h1>",
+        ".t { background: #b71c1c; color: #ffffff }",
+    );
+    let styled = style(&page, class(&page, "t"));
+    assert_eq!(styled.background_color, Some(Color(0xb7, 0x1c, 0x1c)));
+    assert_eq!(styled.color, Some(Color(255, 255, 255)));
+
+    // 简写里带图时只取颜色；图（还没画）不影响这条声明被认下。
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background: url(x.png) no-repeat #fff }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "t")).background_color,
+        Some(Color(255, 255, 255))
+    );
 }
 
 /// `border: 20px` 没写样式 —— CSS 里这一条等于「这条边不存在」，宽度按 0 参与盒模型。

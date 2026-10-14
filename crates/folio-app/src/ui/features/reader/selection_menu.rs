@@ -6,24 +6,32 @@
 //!
 //! 一格「图标在上、文字在下」，整格可点 —— 图标必须配着文字：只有 Android 注册了
 //! asset source，iOS / HarmonyOS 上图标是静默空白的（`plans/facts.md`），只剩文字的格子
-//! 在那两端就是一颗按了不知道干什么的空白。
+//! 在那两端就是一颗按了不知道干什么的空白。唯一的例外是颜色那一行的实心圆：那不是
+//! 图标资源，是当场画出来的色块，两端都画得出来。
 //!
 //! 压在正文之上的真按钮而不是浮层：见 `page.rs` 模块注释与 `plans/facts.md`。
 //! 画出的位置经 `canvas` 回写进会话的 `menu_bounds`：压在它上面的一击属于菜单，
 //! 不算「点别处清除」（`modules/selection.rs` 的 `tap_with_selection`）。
 //!
-//! 摆位分两半：[`slot`] 是**纯函数**（首末高亮的上下边 + 视口高 → 摆在哪一边、顶边
-//! 在哪一像素），所以「上面放不下就翻到下面」这条规则能在宿主上直接钉死；渲染那一侧
+//! 第二格跟着选区自己是谁换：选区**正好等于**库里某一条划线时它是「取消划线」，下面
+//! 再多出四格颜色（[`ReaderSession::selection_annotation`]）；改过范围的选区就是普通
+//! 选区，那一格回到「划线」。
+//!
+//! 摆位分两半：[`slot`] 是**纯函数**（首末高亮的上下边 + 视口高 + 卡片高 → 摆在哪一边、
+//! 顶边在哪一像素），所以「上面放不下就翻到下面」这条规则能在宿主上直接钉死；渲染那一侧
 //! 只负责把 [`Slot`] 落成元素。
 
+use folio_core::store::ANNOTATION_COLORS;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme, Icon, ThemeStyled as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement,
     PathBuilder, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div, point,
     px,
 };
 
+use super::modules::annotations::Palette;
 use super::session::ReaderSession;
 use crate::ui::shared::l10n::tr;
 
@@ -34,10 +42,19 @@ const MENU_CELL: f32 = 56.0;
 const MENU_PAD: f32 = 6.0;
 /// 指向选区那条小尾巴的高。
 const MENU_TAIL: f32 = 8.0;
-/// 整块菜单占的高（含尾巴）：摆位与「放不下就翻面」都按这个数算。
-const MENU_HEIGHT: f32 = MENU_CELL + MENU_PAD * 2.0 + MENU_TAIL;
 /// 菜单与选区之间的缝，也是它与视口上下边的最小间距。
 const MENU_GAP: f32 = 6.0;
+/// 颜色那一行的高。四枚圆点 20 见方，上下各留 7 —— 这一行不需要文字，
+/// 颜色本身就是它的说明。
+const MENU_SWATCH: f32 = 34.0;
+/// 一枚颜色圆点的直径。
+const SWATCH_DOT: f32 = 20.0;
+
+/// 整块菜单占的高（含尾巴）：摆位与「放不下就翻面」都按这个数算。
+/// 多出来的那一行只在选区是库里某一条划线时装得上。
+pub(in crate::ui::features::reader) const fn card_height(with_colors: bool) -> f32 {
+    MENU_CELL + MENU_PAD * 2.0 + MENU_TAIL + if with_colors { MENU_SWATCH } else { 0.0 }
+}
 
 /// 这一帧菜单该摆在哪。
 #[derive(Debug, PartialEq)]
@@ -50,7 +67,7 @@ pub(in crate::ui::features::reader) enum Slot {
     Hidden,
 }
 
-/// 首末高亮的上下边 + 视口高 → 菜单摆位。
+/// 首末高亮的上下边 + 视口高 + 卡片高 → 菜单摆位。
 ///
 /// 优先摆在选区之上：读者刚选完，视线还在这一段上，菜单出现在它头顶不打断阅读。
 /// 顶部放不下才掉到末行之下 —— 而不是硬塞半个屏幕外。
@@ -58,15 +75,16 @@ pub(in crate::ui::features::reader) fn slot(
     first_top: Option<f32>,
     last_bottom: Option<f32>,
     viewport_height: f32,
+    height: f32,
 ) -> Slot {
     let (Some(first_top), Some(last_bottom)) = (first_top, last_bottom) else {
         return Slot::Hidden;
     };
     // 留 8 像素的余量：差一点点时宁可翻面，也不要贴住屏幕顶边长出半个卡片。
-    if first_top >= MENU_HEIGHT + 8.0 {
-        return Slot::Above(first_top - MENU_HEIGHT - MENU_GAP);
+    if first_top >= height + 8.0 {
+        return Slot::Above(first_top - height - MENU_GAP);
     }
-    let below = (last_bottom + MENU_GAP).min(viewport_height - MENU_HEIGHT);
+    let below = (last_bottom + MENU_GAP).min(viewport_height - height);
     // `.max(2.0)` 是给极矮的视口兜底：夹完可能是负数，负数意味着菜单自己跑出屏幕。
     Slot::Below(below.max(2.0))
 }
@@ -88,11 +106,35 @@ impl ReaderSession {
         let reader = cx.entity().clone();
         let bounds_cell = self.menu_bounds.clone();
         let surface = cx.theme().popover;
+        let palette = Palette::of(cx.theme());
+        let foreground = cx.theme().foreground;
         let copy = tr(cx, "reader.sel_copy");
         let highlight = tr(cx, "reader.sel_highlight");
+        let unhighlight = tr(cx, "reader.sel_unhighlight");
         let paragraph = tr(cx, "reader.sel_paragraph");
         let chapter = tr(cx, "reader.sel_chapter");
         let cancel = tr(cx, "reader.sel_cancel");
+        // 挑中的正是留在书上的那一条时，第二格改做「取消划线」，并多出下面那一行颜色。
+        let marked = self.selection_annotation();
+        let mark_cell = match marked {
+            Some(_) => menu_cell(
+                "selection-unhighlight",
+                IconName::Trash,
+                unhighlight,
+                reader.clone(),
+                |r, _, cx| r.delete_highlight(cx),
+            ),
+            None => menu_cell(
+                "selection-highlight",
+                IconName::Highlighter,
+                highlight,
+                reader.clone(),
+                |r, _, cx| r.add_highlight(cx),
+            ),
+        };
+        let colors = marked
+            .as_ref()
+            .map(|(_, color)| swatch_row(reader.clone(), &palette, foreground, color));
         Some(
             v_flex()
                 .absolute()
@@ -100,49 +142,50 @@ impl ReaderSession {
                 .top(px(top))
                 .children(tail_up.then(|| menu_tail(true, surface)))
                 .child(
-                    h_flex()
+                    v_flex()
                         .p(px(MENU_PAD))
+                        // 两行之间不留缝：`card_height` 算的就是「格子高 + 内缩 + 尾巴」，
+                        // 中间再插一段 gap 就成了第二个真相源，摆位按少算的那几像素翻面。
                         .gap_0()
                         .rounded(px(10.0))
                         .popover_style(cx)
-                        .child(menu_cell(
-                            "selection-copy",
-                            IconName::Copy,
-                            copy,
-                            reader.clone(),
-                            |r, _, cx| r.copy_selection(cx),
-                        ))
-                        .child(menu_cell(
-                            "selection-highlight",
-                            IconName::Highlighter,
-                            highlight,
-                            reader.clone(),
-                            |r, _, cx| r.add_highlight(cx),
-                        ))
-                        .child(menu_cell(
-                            "selection-paragraph",
-                            IconName::Pilcrow,
-                            paragraph,
-                            reader.clone(),
-                            |r, window, cx| r.select_paragraph(window, cx),
-                        ))
-                        .child(menu_cell(
-                            "selection-chapter",
-                            IconName::BookText,
-                            chapter,
-                            reader.clone(),
-                            |r, _, cx| r.select_chapter(cx),
-                        ))
-                        .child(menu_cell(
-                            "selection-cancel",
-                            IconName::X,
-                            cancel,
-                            reader,
-                            |r, _, cx| {
-                                r.clear_selection();
-                                cx.notify();
-                            },
-                        )),
+                        .child(
+                            h_flex()
+                                .gap_0()
+                                .child(menu_cell(
+                                    "selection-copy",
+                                    IconName::Copy,
+                                    copy,
+                                    reader.clone(),
+                                    |r, _, cx| r.copy_selection(cx),
+                                ))
+                                .child(mark_cell)
+                                .child(menu_cell(
+                                    "selection-paragraph",
+                                    IconName::Pilcrow,
+                                    paragraph,
+                                    reader.clone(),
+                                    |r, window, cx| r.select_paragraph(window, cx),
+                                ))
+                                .child(menu_cell(
+                                    "selection-chapter",
+                                    IconName::BookText,
+                                    chapter,
+                                    reader.clone(),
+                                    |r, _, cx| r.select_chapter(cx),
+                                ))
+                                .child(menu_cell(
+                                    "selection-cancel",
+                                    IconName::X,
+                                    cancel,
+                                    reader.clone(),
+                                    |r, _, cx| {
+                                        r.clear_selection();
+                                        cx.notify();
+                                    },
+                                )),
+                        )
+                        .children(colors),
                 )
                 .children((!tail_up).then(|| menu_tail(false, surface)))
                 // 记下这一帧菜单真实落地的位置（窗口坐标），点按判定要用。
@@ -187,6 +230,46 @@ fn menu_cell(
         .into_any_element()
 }
 
+/// 颜色那一行：`ANNOTATION_COLORS` 那四档按库里的顺序摆。
+///
+/// 格子与上面那行同宽（`MENU_CELL`），点哪一格就把库里那条改成哪个颜色；当下那一格描一圈
+/// 前景色的边 —— 只靠色块本身分不出「选中的是哪一个」，四档颜色都摆在屏上。
+fn swatch_row(
+    reader: Entity<ReaderSession>,
+    palette: &Palette,
+    ring: Hsla,
+    current: &str,
+) -> AnyElement {
+    h_flex()
+        .gap_0()
+        .children(ANNOTATION_COLORS.iter().enumerate().map(|(ix, name)| {
+            let name = *name;
+            let active = name == current;
+            let reader = reader.clone();
+            div()
+                .id(("selection-swatch", ix))
+                .w(px(MENU_CELL))
+                .h(px(MENU_SWATCH))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .child(
+                    div()
+                        .w(px(SWATCH_DOT))
+                        .h(px(SWATCH_DOT))
+                        .rounded(px(SWATCH_DOT / 2.0))
+                        .bg(palette.color(name))
+                        .when(active, |this| this.border_2().border_color(ring)),
+                )
+                .on_click(move |_, _, cx| {
+                    reader.update(cx, |reader, cx| reader.set_highlight_color(name, cx));
+                })
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
 /// 指向选区的那条小尾巴：一个实心三角形，填色与卡片同一份 `popover` 底色。
 fn menu_tail(up: bool, surface: Hsla) -> AnyElement {
     canvas(
@@ -223,55 +306,84 @@ fn menu_tail(up: bool, surface: Hsla) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    //! 只钉这一层唯一值得钉的判断：**摆位会不会翻面**。格子尺寸、图标、尾巴形状
+    //! 只钉这一层唯一值得钉的判断：**摆位会不会翻面、卡片多高**。格子尺寸、图标、尾巴形状
     //! 都是画出来的东西，测了只是把常数抄进断言里两遍。
     //!
     //! 点名导入而不 `use super::*`：`gpui_kit` 根把 `gpui` 整个转了出来，里面有一个
     //! 叫 `test` 的属性宏，glob 会让下面的 `#[test]` 递归展开成它。
 
-    use super::{MENU_HEIGHT, Slot, slot};
+    use super::{MENU_SWATCH, Slot, card_height, slot};
+
+    /// 一行格子（普通选区）与两行（挑中的是库里某一条划线）的卡片总高。
+    /// 摆位只认递进去的那个数，所以「多了一行颜色」这件事必须由高度本身带进来。
+    const ONE_ROW: f32 = card_height(false);
+    const TWO_ROWS: f32 = card_height(true);
 
     /// 顶部够用时摆在选区之上，尾巴朝下。
     #[test]
     fn the_menu_sits_above_the_selection_when_there_is_room() {
-        let first_top = MENU_HEIGHT + 8.0;
-        assert_eq!(slot(Some(first_top), Some(first_top + 30.0), 900.0), {
-            Slot::Above(first_top - MENU_HEIGHT - 6.0)
-        });
+        let first_top = ONE_ROW + 8.0;
+        assert_eq!(
+            slot(Some(first_top), Some(first_top + 30.0), 900.0, ONE_ROW),
+            Slot::Above(first_top - ONE_ROW - 6.0)
+        );
     }
 
     /// 上面放不下就翻到末行之下 —— 这条是「首行被页眉吃掉时菜单去哪」的全部答案。
     #[test]
     fn it_flips_below_when_the_top_is_taken() {
         let last_bottom = 400.0;
-        assert_eq!(slot(Some(20.0), Some(last_bottom), 900.0), {
+        assert_eq!(
+            slot(Some(20.0), Some(last_bottom), 900.0, ONE_ROW),
             Slot::Below(last_bottom + 6.0)
-        });
+        );
     }
 
     /// 临界点：刚好够就朝上，差一像素就翻面。留那 8 像素是为了不贴住屏幕顶边。
     #[test]
     fn the_flip_happens_at_the_height_plus_the_safety_margin() {
         assert!(matches!(
-            slot(Some(MENU_HEIGHT + 8.0), Some(600.0), 900.0),
+            slot(Some(ONE_ROW + 8.0), Some(600.0), 900.0, ONE_ROW),
             Slot::Above(_)
         ));
         assert!(matches!(
-            slot(Some(MENU_HEIGHT + 7.0), Some(600.0), 900.0),
+            slot(Some(ONE_ROW + 7.0), Some(600.0), 900.0, ONE_ROW),
             Slot::Below(_)
         ));
+    }
+
+    /// 颜色那一行是真空占地方的：同一处锚位，一行摆得下、两行就该翻面。
+    /// 卡片高若还是写死的那一个数，这一条会红在「菜单长出屏幕外」上。
+    #[test]
+    fn the_color_row_costs_its_own_height() {
+        assert_eq!(TWO_ROWS, ONE_ROW + MENU_SWATCH, "多出来的只有那一行");
+        let first_top = ONE_ROW + 8.0;
+        assert!(
+            matches!(
+                slot(Some(first_top), Some(600.0), 900.0, ONE_ROW),
+                Slot::Above(_)
+            ),
+            "一行时这里摆得下"
+        );
+        assert!(
+            matches!(
+                slot(Some(first_top), Some(600.0), 900.0, TWO_ROWS),
+                Slot::Below(_)
+            ),
+            "两行放不下就该翻面"
+        );
     }
 
     /// 下面也放不下（选区贴在视口底边）时夹在视口内，而不是掉出屏幕外。
     #[test]
     fn a_below_slot_never_leaves_the_viewport() {
         let viewport = 600.0;
-        let Slot::Below(top) = slot(Some(20.0), Some(viewport), viewport) else {
+        let Slot::Below(top) = slot(Some(20.0), Some(viewport), viewport, ONE_ROW) else {
             panic!("顶部放不下该翻到下面");
         };
-        assert!(top + MENU_HEIGHT <= viewport, "菜单底边越过了视口：{top}");
+        assert!(top + ONE_ROW <= viewport, "菜单底边越过了视口：{top}");
         // 视口矮到装不下整块菜单时也不给负数：负顶边意味着菜单自己跑出屏幕。
-        let Slot::Below(tiny) = slot(Some(20.0), Some(40.0), 100.0) else {
+        let Slot::Below(tiny) = slot(Some(20.0), Some(40.0), 100.0, ONE_ROW) else {
             panic!("同上");
         };
         assert!(tiny >= 2.0, "顶边不该是负数：{tiny}");
@@ -280,8 +392,8 @@ mod tests {
     /// 没有高亮可锚（排版还没跟上、选区滚出屏了）就不画，而不是拿 0 当锚位。
     #[test]
     fn no_anchor_means_no_menu() {
-        assert_eq!(slot(None, Some(300.0), 900.0), Slot::Hidden);
-        assert_eq!(slot(Some(300.0), None, 900.0), Slot::Hidden);
-        assert_eq!(slot(None, None, 900.0), Slot::Hidden);
+        assert_eq!(slot(None, Some(300.0), 900.0, ONE_ROW), Slot::Hidden);
+        assert_eq!(slot(Some(300.0), None, 900.0, ONE_ROW), Slot::Hidden);
+        assert_eq!(slot(None, None, 900.0, ONE_ROW), Slot::Hidden);
     }
 }

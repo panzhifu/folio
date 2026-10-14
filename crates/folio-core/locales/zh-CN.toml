@@ -40,6 +40,7 @@ toc = "目录"
 "toc.empty" = "这本书没有目录"
 "toc.head_meta" = "读到 %{percent} · %{format} · %{size}"
 "toc.more" = "目录选项"
+"toc.close" = "收起目录"
 "toc.expand_all" = "展开目录"
 "toc.collapse_all" = "折叠目录"
 "toc.reverse" = "逆向排序"
@@ -54,6 +55,8 @@ mode_spread = "双页"
 # 选中菜单条（M6）：三个动作就地展开，不开浮层。
 sel_copy = "复制"
 sel_highlight = "划线"
+# 挑中的正是留在书上的那一条时，同一格换成「取消划线」（另有一行四色可换）。
+sel_unhighlight = "取消划线"
 sel_chapter = "全选本章"
 sel_paragraph = "全选本段"
 sel_cancel = "取消"
@@ -279,6 +282,14 @@ no_results_hint = "换个词试试 —— 这里搜的是书名和作者，不�
 # 是同一套组件。两条都是图标 + 短标签；信息在前，删除垫底并用分隔线隔开 ——
 # 破坏性的动作不排在顺手的位置。「打开」不在菜单里：点卡片本身就是打开。
 book_delete = "删除"
+# 分组（集合）：卡片菜单里那一节 + 架面顶部那颗筛选。
+group = "分组"
+group_all = "全部分组"
+ungrouped = "未分组"
+group_new = "新建分组"
+group_create = "建组"
+group_placeholder = "组名"
+group_hint = "这本书进哪个组。名字已经有了就直接用那一组，不会建出第二条同名的。"
 # 「信息」：菜单里那一条与面板标题共用这一条文案 —— 都叫「信息」，不叫「书籍信息」。
 # 面板摆这一本的事实，点菜单那一刻查库取一次。
 info_title = "信息"
@@ -293,6 +304,22 @@ info_title_required = "书名不能为空"
 info_save = "保存"
 info_format = "格式"
 info_size = "大小"
+# 底下那一组是这本书自带的书目（都柏林核心那一组）。**有值才摆那一行** —— 一本电子书
+# 通常只说其中几项，把空项摆出来读到的就成了「这本书什么都没写」。
+# `dc:type` 库里存着但界面不摆：电子书几乎全是 text，那一行答不出任何问题。
+info_field_series = "系列"
+info_field_contributors = "贡献者"
+info_field_subjects = "主题"
+info_field_description = "简介"
+info_field_publisher = "出版者"
+info_field_published = "出版日期"
+info_field_language = "语言"
+info_field_isbn = "ISBN"
+info_field_rights = "版权"
+# 多值那几项（贡献者、主题词）并成一行用的分隔符。
+info_sep = "、"
+# 系列带序号时整句怎么读：各语言按自己的语序写这一条，不拿中文的形状去拼。
+info_series_ordinal = "%{name} · 第 %{position} 本"
 
 # 书库管理。`library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置
 # 确认：移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。

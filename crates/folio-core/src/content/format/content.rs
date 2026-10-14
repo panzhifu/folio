@@ -109,6 +109,20 @@ pub struct FixedPage {
     /// 这一页的原始像素尺寸；`0` 表示不知道，绘制侧按容器宽度兜底。
     pub width: u32,
     pub height: u32,
+    /// 这一页**其余**的图（多图页 / 对开跨页）。主图在 [`PageSource`] 里，这里是附加的。
+    ///
+    /// `#[serde(default)]`：老库的 `fixed_json` 没有这一项，解出来是空 —— 表现就是
+    /// 「单图页」，与它被加进来之前逐字节一致，不需要整库重扫。
+    #[serde(default)]
+    pub extra_images: Vec<PageImage>,
+}
+
+/// 定版式一页上的一张图（非主图）。尺寸为原始像素；`0` 表示不知道。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageImage {
+    pub href: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl FixedPage {
@@ -118,6 +132,16 @@ impl FixedPage {
             PageSource::Image { href } => Some(href),
             PageSource::Render { .. } => None,
         }
+    }
+
+    /// 这一页的**全部**图（主图在前、附加图在后）。多图页 / 跨页用它。
+    pub fn image_hrefs(&self) -> Vec<&str> {
+        let mut out = Vec::with_capacity(1 + self.extra_images.len());
+        if let PageSource::Image { href } = &self.source {
+            out.push(href.as_str());
+        }
+        out.extend(self.extra_images.iter().map(|image| image.href.as_str()));
+        out
     }
 }
 
@@ -175,7 +199,9 @@ impl Content {
 mod tests {
     //! 内容家族的判据与页表取值，以及 `FixedPage` 落 JSON 的往返。
 
-    use crate::content::format::content::{Content, ContentKind, FixedDoc, FixedPage, PageSource};
+    use crate::content::format::content::{
+        Content, ContentKind, FixedDoc, FixedPage, PageImage, PageSource,
+    };
 
     fn page(href: &str) -> FixedPage {
         FixedPage {
@@ -184,6 +210,7 @@ mod tests {
             },
             width: 800,
             height: 1200,
+            extra_images: Vec::new(),
         }
     }
 
@@ -210,6 +237,7 @@ mod tests {
             source: PageSource::Render { index: 7 },
             width: 0,
             height: 0,
+            extra_images: Vec::new(),
         };
         assert_eq!(render.image_href(), None);
     }
@@ -223,6 +251,11 @@ mod tests {
                 source: PageSource::Render { index: 3 },
                 width: 1024,
                 height: 768,
+                extra_images: vec![PageImage {
+                    href: "b.jpg".into(),
+                    width: 512,
+                    height: 768,
+                }],
             },
         ];
         let json = serde_json::to_string(&pages).unwrap();
@@ -230,5 +263,42 @@ mod tests {
         assert_eq!(back, pages);
         assert!(json.contains("\"kind\":\"image\""), "{json}");
         assert!(json.contains("\"kind\":\"render\""), "{json}");
+    }
+
+    /// 附加图那一列要能原样回来，并且**主图在前**（`image_hrefs` 的顺序就是绘制的顺序）。
+    #[test]
+    fn a_multi_image_page_keeps_every_image_in_order() {
+        let page = FixedPage {
+            source: PageSource::Image {
+                href: "left.jpg".into(),
+            },
+            width: 1600,
+            height: 1200,
+            extra_images: vec![PageImage {
+                href: "right.jpg".into(),
+                width: 800,
+                height: 1200,
+            }],
+        };
+        assert_eq!(page.image_href(), Some("left.jpg"));
+        assert_eq!(page.image_hrefs(), vec!["left.jpg", "right.jpg"]);
+
+        let json = serde_json::to_string(&[page.clone()]).unwrap();
+        let back: Vec<FixedPage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back[0].image_hrefs(), vec!["left.jpg", "right.jpg"]);
+    }
+
+    /// `extra_images` 靠 `#[serde(default)]` 兼容老库：`fixed_json` 里没有这一项的那一版
+    /// 写下的行，读回来必须是一页「单图」，而不是解不开整本 —— 这一条不成立就得整库重扫。
+    #[test]
+    fn a_page_written_before_the_extra_column_reads_back_as_single_image() {
+        let legacy = r#"[{"source":{"kind":"image","href":"a.jpg"},"width":800,"height":1200}]"#;
+        let back: Vec<FixedPage> = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.len(), 1);
+        assert!(
+            back[0].extra_images.is_empty(),
+            "老库那一版没有附加图，读回来就是单图"
+        );
+        assert_eq!(back[0].image_hrefs(), vec!["a.jpg"]);
     }
 }

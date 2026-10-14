@@ -358,7 +358,7 @@ impl Store {
         };
         let toc = serde_json::from_str(&toc_json).unwrap_or_default();
         let (width, height) = pages.first().map_or((0, 0), |p| (p.width, p.height));
-        let images = pages.iter().filter_map(page_image).collect();
+        let images = pages.iter().flat_map(page_images).collect();
         Ok(Some(FixedDoc {
             pages,
             toc,
@@ -371,9 +371,22 @@ impl Store {
     }
 }
 
-/// 定版式的一页 → 图片元数据。渲染型（PDF）没有 href，不进图片表。
-fn page_image(page: &FixedPage) -> Option<ImageRes> {
-    let href = page.image_href()?.to_string();
+/// 定版式的一页 → 图片元数据（主图 + 附加图）。渲染型（PDF）没有 href，不进图片表。
+fn page_images(page: &FixedPage) -> Vec<ImageRes> {
+    let mut out = Vec::with_capacity(1 + page.extra_images.len());
+    if let Some(res) = image_res(page.image_href(), page.width, page.height) {
+        out.push(res);
+    }
+    for extra in &page.extra_images {
+        if let Some(res) = image_res(Some(&extra.href), extra.width, extra.height) {
+            out.push(res);
+        }
+    }
+    out
+}
+
+fn image_res(href: Option<&str>, width: u32, height: u32) -> Option<ImageRes> {
+    let href = href?.to_string();
     let ext = Path::new(&href)
         .extension()
         .and_then(|e| e.to_str())
@@ -384,8 +397,8 @@ fn page_image(page: &FixedPage) -> Option<ImageRes> {
         // 定版式的页没有「声明了但解不动」这一档：条目名就是字节所在。
         source: href,
         media_type: crate::content::format::media_type_of(&ext).to_string(),
-        width: page.width,
-        height: page.height,
+        width,
+        height,
     })
 }
 
@@ -397,7 +410,7 @@ mod tests {
 
     use crate::Store;
     use crate::content::format::{
-        Chapter, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, PageSource,
+        Chapter, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, PageImage, PageSource,
     };
     use crate::store::schema::MIGRATIONS;
 
@@ -407,7 +420,8 @@ mod tests {
             authors: vec!["作者".into()],
             format: Format::Epub,
             size: 1,
-        }
+            ..DocMeta::default()
+            }
     }
 
     fn path(name: &str) -> PathBuf {
@@ -421,6 +435,7 @@ mod tests {
             },
             width: 800,
             height: 1200,
+            extra_images: Vec::new(),
         }
     }
 
@@ -514,6 +529,44 @@ mod tests {
         assert!(store.load_content(9999).unwrap().is_none(), "没这本书");
     }
 
+    /// 多图页的两张图都要从页表重建进图片表 —— 库里没有独立的图片列，页表就是唯一来源。
+    ///
+    /// 只收主图的话，第二张在界面上取不到字节（画出来那块是空的），而页表明明记着它。
+    #[test]
+    fn a_multi_image_page_rebuilds_both_image_rows() {
+        let store = Store::in_memory().unwrap();
+        let book = store.add_book(&path("spread.epub"), &meta("跨页")).unwrap();
+        let doc = FixedDoc {
+            pages: vec![FixedPage {
+                source: PageSource::Image {
+                    href: "Images/left.png".into(),
+                },
+                width: 800,
+                height: 1200,
+                extra_images: vec![PageImage {
+                    href: "Images/right.png".into(),
+                    width: 600,
+                    height: 1200,
+                }],
+            }],
+            ..Default::default()
+        };
+        store.save_fixed(book, &doc).unwrap();
+        let got = store.load_fixed(book).unwrap().unwrap();
+        assert_eq!(got.pages[0].extra_images.len(), 1, "附加图要原样读回来");
+        let hrefs: Vec<&str> = got.images.iter().map(|i| i.href.as_str()).collect();
+        assert_eq!(
+            hrefs,
+            vec!["Images/left.png", "Images/right.png"],
+            "两张都得建表，主图在前"
+        );
+        assert_eq!(
+            (got.images[1].width, got.images[1].height),
+            (600, 1200),
+            "附加图带它自己的尺寸，不是主图的"
+        );
+    }
+
     /// 渲染型（PDF）没有 href，不该被塞进图片表。
     #[test]
     fn a_render_page_does_not_become_an_image_row() {
@@ -524,6 +577,7 @@ mod tests {
                 source: PageSource::Render { index: 0 },
                 width: 595,
                 height: 842,
+                extra_images: Vec::new(),
             }],
             ..Default::default()
         };

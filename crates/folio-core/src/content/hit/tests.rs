@@ -1,11 +1,15 @@
 //! 几何用与 `anchor::tests` 同一套假度量（汉字 1 em、拉丁 0.5 em、空格 0.25 em），
 //! 断点与坐标都是推出来的。round-trip 是核心：命中 → 矩形 → 命中，必须回到同一个字。
 
-use crate::content::anchor::{TextMap, line_offset};
+use std::ops::Range;
+
+use crate::content::anchor::{CharLines, TextMap, line_offset};
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{ComputedStyle, cascade};
 use crate::content::format::css::{Origin, RuleSet};
-use crate::content::hit::{Hit, hit_test, paragraph_range, rects_for_range, snap_word};
+use crate::content::hit::{
+    Hit, hit_test, paragraph_range, rects_for_range, rects_for_range_in, snap_word,
+};
 use crate::layout::{Layout, LayoutOptions, LineMetrics, Measure, NoImages, layout};
 
 struct Mono;
@@ -464,4 +468,154 @@ fn paragraph_range_covers_the_whole_block_and_nothing_else() {
         paragraph_range(&chapter.layout, &chapter.dom, &chapter.map, 125).expect("第二段应可解");
     assert_eq!(chapter.map.slice(second_start.clone()), "乙段只在第二段。");
     assert!(second_start.start >= 120, "不该吃进第一段的字");
+}
+
+/// 批注回显与选区的那条快路：**结果与整章扫逐条相同**。
+///
+/// 基准是 `rects_for_range`（参考实现，永远走全部行），被测的是
+/// `rects_for_range_in` + 索引二分出来的行号段。区间把边界都覆盖一遍：单字、跨行、
+/// 整章、空、反向、越界、每一个偏移上的短选区，两种文字方向各跑一遍。
+/// 少一行就是屏上少一块底色，而那种错只在某本书的某一条批注上出现。
+#[test]
+fn narrowed_rects_are_line_for_line_the_full_scan() {
+    for css in ["", "p { direction: rtl }"] {
+        let chapter = typeset(
+            &format!(
+                "<body><p>{}</p><p>短段落</p><p>{}</p></body>",
+                cjk(90),
+                cjk(80)
+            ),
+            css,
+            200.0,
+        );
+        let index = CharLines::build(&chapter.layout, &chapter.dom, &chapter.map);
+        assert!(
+            index.is_ordered(),
+            "样式 {css:?}：索引不可用，这条门就退化成自己跟自己比"
+        );
+        let total = chapter.map.chars();
+        let mut ranges: Vec<Range<usize>> = vec![
+            0..1,
+            5..5,
+            22..38,
+            0..total,
+            total..total + 50,
+            Range { start: 30, end: 12 },
+        ];
+        for at in 0..total {
+            ranges.push(at..at + 1);
+            ranges.push(at..at + 5);
+        }
+        for range in ranges {
+            let wide = rects_for_range(
+                &chapter.layout,
+                &chapter.dom,
+                &chapter.map,
+                &Mono,
+                range.clone(),
+            );
+            let lines = index
+                .lines_for(range.clone())
+                .unwrap_or(0..chapter.layout.lines.len());
+            let tight = rects_for_range_in(
+                &chapter.layout,
+                &chapter.dom,
+                &chapter.map,
+                &Mono,
+                range.clone(),
+                lines.clone(),
+            );
+            assert_eq!(
+                tight, wide,
+                "样式 {css:?}、区间 {range:?}、行号段 {lines:?}：窄化改了答案"
+            );
+            assert!(
+                lines.end <= chapter.layout.lines.len(),
+                "行号段 {lines:?} 越过了行数 {}",
+                chapter.layout.lines.len()
+            );
+        }
+    }
+}
+
+/// 跨多行的长选区：窄化给的行号段要**严格短于**整章，否则这条优化在最常见的批注
+/// 形状上根本没生效（把 `CharLines::lines_for` 的两头夹取去掉就是这条红）。
+#[test]
+fn a_selection_spanning_lines_scans_fewer_lines_than_the_chapter() {
+    let chapter = typeset(
+        &format!("<body><p>{}</p><p>{}</p></body>", cjk(240), cjk(240)),
+        "",
+        200.0,
+    );
+    let index = CharLines::build(&chapter.layout, &chapter.dom, &chapter.map);
+    let total_lines = chapter.layout.lines.len();
+    // 中间那 40 个字（跨三四行），两侧各留一百多字。
+    let range = 250..290;
+    let lines = index.lines_for(range.clone()).expect("单调的章");
+    assert!(
+        lines.len() * 2 < total_lines,
+        "半本都不到的选区给了 {lines:?}／整章 {total_lines} 行"
+    );
+    let rects = rects_for_range_in(
+        &chapter.layout,
+        &chapter.dom,
+        &chapter.map,
+        &Mono,
+        range.clone(),
+        lines.clone(),
+    );
+    assert_eq!(
+        rects,
+        rects_for_range(&chapter.layout, &chapter.dom, &chapter.map, &Mono, range),
+        "省了行却换了答案"
+    );
+    assert!(!rects.is_empty(), "这段选区本该有底色");
+}
+
+/// 两端对齐后字被摊开：**命中与选区都要跟着摊开走**。最后一个字的选中矩形右缘要贴住
+/// 撑开后的行右缘（`line.x + ink_width`），而不是停在未撑开的 `width` 上 —— 这正是
+/// 「接住一半」会露馅的地方：排版摊开了、命中/选区不摊，划词就短一截。
+#[test]
+fn justification_moves_the_selection_rect_to_the_stretched_edge() {
+    // 一行 10 个汉字（16px/字），版心 170px → 余 10px 摊到 9 处字间。
+    let chapter = typeset(
+        &format!("<p>{}</p>", cjk(20)),
+        "p { text-align: justify; text-indent: 0; margin: 0 }",
+        170.0,
+    );
+    let line = &chapter.layout.lines[0];
+    assert!(line.justify.is_some(), "首行该两端对齐");
+    // 首行第 10 个字（偏移 9）的矩形。
+    let rects = rects_for_range(&chapter.layout, &chapter.dom, &chapter.map, &Mono, 9..10);
+    assert_eq!(rects.len(), 1, "单字一行一条");
+    let rect = &rects[0];
+    let stretched_right = line.x + line.ink_width();
+    assert!(
+        (rect.x + rect.width - stretched_right).abs() < 1.0,
+        "最后一个字该贴住撑开的右缘 {stretched_right}，实际 {}",
+        rect.x + rect.width
+    );
+    assert!(
+        rect.x + rect.width > line.x + line.width,
+        "没有两端对齐时右缘会停在 {}，对齐后才到 {}",
+        line.x + line.width,
+        rect.x + rect.width
+    );
+    // 命中也要跟着摊开走：最后一个字（第 10 个字）被推到 [154, 170]，它的中点在 162。
+    // 点 158（左半边）落在它上面；没有两端对齐时它的框是 [144, 160]，158 会落到右半边、
+    // 命中「它之后」的插入点（偏移 10）—— 这一对坐标正是「摊开与不摊开」的分界。
+    let y = line.y + line.height * 0.5;
+    let hit = hit_test(&chapter.layout, &chapter.dom, &chapter.map, &Mono, 158.0, y)
+        .expect("正文行应命中");
+    assert_eq!(hit.offset, 9, "158 在最后一个字的左半边，命中它自己");
+    let past_edge = hit_test(
+        &chapter.layout,
+        &chapter.dom,
+        &chapter.map,
+        &Mono,
+        stretched_right - 1.0,
+        y,
+    )
+    .expect("正文行应命中");
+    assert_eq!(past_edge.offset, 10, "贴右缘是「最后一个字之后」的插入点");
 }

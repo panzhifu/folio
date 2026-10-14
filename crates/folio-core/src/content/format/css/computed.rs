@@ -101,6 +101,29 @@ impl TextAlign {
     }
 }
 
+/// `text-justify` 的取值 —— 两端对齐时余量往**哪种隙**上摊。它是 `text-align: justify`
+/// 的修饰，本身不改变对齐与否（`None` 除外，那是「这个元素不要两端对齐」）。
+///
+/// `inter-ideograph`（中日韩出版物的标准写法）与 `distribute` 都折进
+/// [`TextJustify::InterCharacter`]：它们要的都是「没有空格也要在字间摊开」，而
+/// ideograph 与 character 在这一层的差别（一个字 vs 一个字位）我们拿不到。
+///
+/// **一期只让 `InterWord` 与 `None` 改变行为**（`InterWord` 只拉空格、`None` 关掉），
+/// 其余一律走默认口径「有空格拉空格，否则拉字间」—— 对纯中文段落，默认口径本就在字间摊，
+/// 与 `inter-ideograph` 同解。认得并入库的价值是让 `css-gap` 不再把它算成「不认识」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextJustify {
+    /// 初值：由排版层按内容定（有空格拉空格，否则拉字间）。
+    #[default]
+    Auto,
+    /// 只在词（空格）间摊开。
+    InterWord,
+    /// 在字间摊开（`inter-character` / `inter-ideograph` / `distribute`）。
+    InterCharacter,
+    /// 这个元素不做两端对齐。
+    None,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Display {
     #[default]
@@ -109,6 +132,40 @@ pub enum Display {
     InlineBlock,
     ListItem,
     /// `display: none`：排版层负责整块跳过。
+    None,
+}
+
+/// `list-style-type` 的取值 —— 列表标记的内容，不是它的画法。
+///
+/// 名单以 **EPUB 3 CSS Profile** 为准：除了 CSS 2.1 那一套（`disc` / `circle` /
+/// `square` / `decimal` / `lower-alpha` / `lower-roman` …），profile 还点名收录了
+/// CSS 2.0 的记数（`cjk-ideographic` / `hebrew` / `hiragana` / `hiragana-iroha` /
+/// `katakana` / `katakana-iroha`）。这一版收到汉字与假名，**`hebrew` 还没收**：
+/// 它那套数值记数（1–10 单字、20/100 另字、组合规则）本机没有一本希伯来书可验，
+/// 而猜错了是把整本目录的编号排错 —— 所以让它落在 `parse_list_style` 的表外，
+/// 由 `css-gap` 报成「不认识」，比画出一个看着像的号诚实。
+/// `armenian` / `georgian` / `devanagari` 同一处置。
+///
+/// 标记字符串由 `layout::marker` 折，序号由排版层按同层的 `list-item` 兄弟数出来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ListStyle {
+    /// 初值。UA 表不给 `<li>` 写类型，靠这一格兜住 `<ul>`。
+    #[default]
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+    LowerAlpha,
+    UpperAlpha,
+    LowerRoman,
+    UpperRoman,
+    CjkIdeographic,
+    Hiragana,
+    HiraganaIroha,
+    Katakana,
+    KatakanaIroha,
+    /// `list-style-type: none` —— 作者明确不要标记。这一本要的是「一条都不画」，
+    /// 不是「画不出来」，所以它单独一档而不是 `Option`：《蛇结》的 51 个 `li` 就靠它。
     None,
 }
 
@@ -145,6 +202,33 @@ impl BorderEdge {
             _ => 0.0,
         }
     }
+}
+
+/// `float`：盒子贴到所在块的哪一侧，后面的行带在它旁边让出宽度。
+///
+/// CSS 3 的 `inline-start` / `inline-end` / `float-inherit` 不接（判不认识）：那三个
+/// 要的是「方向敏感的左右」，而我们这一族里唯一真实的写法（出版书的插图与章首下沉）
+/// 都写死 `left` / `right`。`display` 与 `float` 的相互调整（行内盒被浮动改成块）在
+/// 排版层做，不在这里 —— 层叠期只记作者要什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Float {
+    #[default]
+    None,
+    Left,
+    Right,
+}
+
+/// `clear`：这一块（的行盒）不许与哪一侧的浮动盒并排，于是往下挪到它们的下缘。
+///
+/// `left` / `right` 是真的按那一侧算的，不是都折成 `both`：那会让「右边还空着」
+/// 的写法白白多挪一段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Clear {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
 }
 
 impl ComputedStyle {
@@ -213,7 +297,11 @@ pub struct Color(pub u8, pub u8, pub u8);
 
 /// 一个尺寸值。`auto` / `none` 用 `Option::None` 表示，两种「没有显式值」在这里
 /// 是一回事（都用内在尺寸或默认值兜底）。百分比不在此刻折算 —— 它要按**包含块
-/// 的宽度**来算，那是排版期才知道的数，见 `Length::resolve`。
+/// 的宽度**来算，那是排版期才知道的数，见 [`Length::resolve`]。
+///
+/// 带百分比的字段都存这个类型，不是只有替换元素的 `width`：外边距、内边距与
+/// `text-indent` 的百分比在 CSS 里同样折算自包含块宽，而那一族写法在真书上是大头
+/// （多看转换的本每段都带 `margin: 0 1%`）。层叠期把它折成 px 等于拿窗口宽猜。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Length {
     Px(f32),
@@ -222,6 +310,10 @@ pub enum Length {
 }
 
 impl Length {
+    /// 每个长度字段的初值。`Px(0.0)` 而不是 `None`：`None` 在这一族里表示
+    /// 「作者写了 `auto` / `none`」，与「没写过」是两件事。
+    pub const ZERO: Length = Length::Px(0.0);
+
     /// 按包含块基准长度折算成 px。
     pub fn resolve(self, basis: f32) -> f32 {
         match self {
@@ -231,7 +323,9 @@ impl Length {
     }
 }
 
-/// 排版层需要的计算后样式。长度一律已折算成 px，`line_height` 是倍数。
+/// 排版层需要的计算后样式。除 `margin` / `padding` / `text-indent` / 替换元素的
+/// 尺寸这一族（它们可能带百分比，要等排版期拿到包含块宽才折得动，见 [`Length`]），
+/// 长度一律已折算成 px，`line_height` 是倍数。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     pub font_size: f32,
@@ -250,16 +344,36 @@ pub struct ComputedStyle {
     /// 见 [`Direction`] 那一段「做到哪一层」的说明。
     pub direction: Direction,
     pub text_align: TextAlign,
-    pub text_indent: f32,
-    pub margin_top: f32,
-    pub margin_bottom: f32,
-    pub margin_left: f32,
-    pub margin_right: f32,
-    pub padding_top: f32,
-    pub padding_bottom: f32,
-    pub padding_left: f32,
-    pub padding_right: f32,
+    /// `text-justify`：两端对齐时余量往哪种隙摊。见 [`TextJustify`]；CSS 里**可继承**。
+    pub text_justify: TextJustify,
+    /// 首行缩进。百分比折算自**这一块的包含块宽**（父块的内容宽），与 `margin` 同一条
+    /// 口径。读者那条「首行缩进（em）」从 `ui::features::reader::document` 注入时已是 px。
+    pub text_indent: Length,
+    /// 四边外边距。百分比折算自包含块宽 —— 就是 `layout` 逐层递下来的那一个 `basis`。
+    /// `auto` 折成 `Px(0)`，理由见 `value::edge_length`。
+    pub margin_top: Length,
+    pub margin_bottom: Length,
+    pub margin_left: Length,
+    pub margin_right: Length,
+    /// 四边内边距。百分比与外边距同一个基准（CSS 规定 `padding` 的百分比也按包含块宽
+    /// 折算，不是按自己的宽）；`padding: auto` 是非法值，所以这一族不吃 `auto`。
+    pub padding_top: Length,
+    pub padding_bottom: Length,
+    pub padding_left: Length,
+    pub padding_right: Length,
     pub display: Display,
+    /// `list-style-type`。只有 `display: list-item`（UA 给 `<li>`）的块会读它。
+    ///
+    /// CSS 2.1 里它**是可继承**的，而这正是 `<ol>` 的十进制落到每一个 `<li>` 的唯一
+    /// 通路：浏览器 UA 表写的是 `ol { list-style-type: decimal }`，而不是往每个 li 上
+    /// 撒一条规则。所以 `inherit_from` 必须带它 —— 不带的话 `<ol><li>` 会全线画成圆点。
+    pub list_style_type: ListStyle,
+    /// `float`。非 `None` 时这一块离开常规流：排版层给它算收缩宽度、摆在侧边，
+    /// 并把它记进当前块格式上下文的浮动表（见 `layout::collect::PlacedFloat`）。
+    /// 行内盒写了 `float` 会被排版层按块处理 —— CSS 的 used-value 规则就是如此。
+    pub float: Float,
+    /// `clear`。不继承（CSS 规定），只在**这一块**的顶边上生效。
+    pub clear: Clear,
     pub color: Option<Color>,
     /// `background-color`。`None` = 书里没写过这一条（CSS 的初值是 `transparent`，
     /// 与「写了一个颜色」在绘制上是两件事：前者什么都不画，后者要盖住读者的主题底色）。
@@ -271,6 +385,13 @@ pub struct ComputedStyle {
     /// 词间额外宽度（px）。CSS 初值 `normal` 折成 0；它叠在**每个空格之后**，
     /// 所以折行与行宽都要算它（见 `layout::run_width`）。
     pub word_spacing: f32,
+    /// 字间额外宽度（px）。CSS 初值 `normal` 折成 0；它叠在**每个字符之后**（含最后一个），
+    /// 所以折行、行宽、绘制与命中四处都要算它。
+    ///
+    /// 这四处**必须同批改**（见 `plans/阅读管线.md` §11 第 15 条）：只改宽度表会出现
+    /// 「断行提前了、字却还挤在一起」，比不做更糟。绘制按字形所在字符序号右推，
+    /// 命中/选区按同一偏移推 `char_edges`。
+    pub letter_spacing: f32,
     /// 基线偏移，px，**正数往上**。`vertical-align: super` 折出来的就是它。
     ///
     /// 0 意味着「贴基线」（CSS 的 `baseline`）。`top` / `bottom` / `middle` 要的是
@@ -320,20 +441,25 @@ impl Default for ComputedStyle {
             font_families: Vec::new(),
             direction: Direction::Ltr,
             text_align: TextAlign::Start,
-            text_indent: 0.0,
-            margin_top: 0.0,
-            margin_bottom: 0.0,
-            margin_left: 0.0,
-            margin_right: 0.0,
-            padding_top: 0.0,
-            padding_bottom: 0.0,
-            padding_left: 0.0,
-            padding_right: 0.0,
+            text_justify: TextJustify::Auto,
+            text_indent: Length::ZERO,
+            margin_top: Length::ZERO,
+            margin_bottom: Length::ZERO,
+            margin_left: Length::ZERO,
+            margin_right: Length::ZERO,
+            padding_top: Length::ZERO,
+            padding_bottom: Length::ZERO,
+            padding_left: Length::ZERO,
+            padding_right: Length::ZERO,
             display: Display::Block,
+            list_style_type: ListStyle::default(),
+            float: Float::default(),
+            clear: Clear::default(),
             color: None,
             background_color: None,
             border: [BorderEdge::default(); 4],
             word_spacing: 0.0,
+            letter_spacing: 0.0,
             baseline_shift: 0.0,
             underline: false,
             line_through: false,
@@ -365,17 +491,22 @@ impl std::hash::Hash for ComputedStyle {
         fn f<H: std::hash::Hasher>(x: f32, h: &mut H) {
             x.to_bits().hash(h);
         }
-        fn opt_len<H: std::hash::Hasher>(l: &Option<Length>, h: &mut H) {
+        fn len<H: std::hash::Hasher>(l: &Length, h: &mut H) {
             match l {
-                None => 0u8.hash(h),
-                Some(Length::Px(v)) => {
+                Length::Px(v) => {
                     1u8.hash(h);
                     f(*v, h);
                 }
-                Some(Length::Percent(p)) => {
+                Length::Percent(p) => {
                     2u8.hash(h);
                     f(*p, h);
                 }
+            }
+        }
+        fn opt_len<H: std::hash::Hasher>(l: &Option<Length>, h: &mut H) {
+            match l {
+                None => 0u8.hash(h),
+                Some(inner) => len(inner, h),
             }
         }
         f(self.font_size, h);
@@ -386,16 +517,20 @@ impl std::hash::Hash for ComputedStyle {
         self.font_families.hash(h);
         (self.direction as u8).hash(h);
         (self.text_align as u8).hash(h);
-        f(self.text_indent, h);
-        f(self.margin_top, h);
-        f(self.margin_bottom, h);
-        f(self.margin_left, h);
-        f(self.margin_right, h);
-        f(self.padding_top, h);
-        f(self.padding_bottom, h);
-        f(self.padding_left, h);
-        f(self.padding_right, h);
+        (self.text_justify as u8).hash(h);
+        len(&self.text_indent, h);
+        len(&self.margin_top, h);
+        len(&self.margin_bottom, h);
+        len(&self.margin_left, h);
+        len(&self.margin_right, h);
+        len(&self.padding_top, h);
+        len(&self.padding_bottom, h);
+        len(&self.padding_left, h);
+        len(&self.padding_right, h);
         (self.display as u8).hash(h);
+        (self.list_style_type as u8).hash(h);
+        (self.float as u8).hash(h);
+        (self.clear as u8).hash(h);
         self.color.hash(h);
         self.background_color.hash(h);
         for edge in &self.border {
@@ -404,6 +539,7 @@ impl std::hash::Hash for ComputedStyle {
             edge.color.hash(h);
         }
         f(self.word_spacing, h);
+        f(self.letter_spacing, h);
         f(self.baseline_shift, h);
         self.underline.hash(h);
         self.line_through.hash(h);
@@ -434,9 +570,9 @@ impl std::hash::Hash for ComputedStyle {
 /// （`width`、`text-decoration`、`float`），若按不支持计数，ignored 会被刷到
 /// 几百条，真正需要关注的「我们没预料到的写法」就淹没了。
 pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
-    // `background` 简写还能带图（`background: #fff url(x.png)`），图那条一期不接；
-    // 单条 `background-color` 已经生效，不再在这份名单里。
-    "background",
+    // `background` 简写 2026-10-14 起**接住了它里面的颜色**（见 `apply` 的 `background`
+    // 那一臂）：出版书里「深色底块 + 白字标题」满地都是，只认 `background-color`
+    // 会让这种标题变成白纸上的白字、整条标题消失。简写里的图（`url(...)`）仍不接。
     "min-height",
     "text-shadow",
     // `direction` 以前在这份名单里（「认得、接受、不生效」），2026-10-14 那一轮把它
@@ -445,19 +581,18 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "writing-mode",
     // `orphans` / `widows` / `break-inside` / `page-break-*` 以前在这份名单里
     // （「接受、不生效」），M4 的分片器把它们变成真生效的属性，所以移出去了。
+    // `float` / `clear` 同一条路，2026-10-16 那一轮移出去的 —— 现在真会摆浮动盒、
+    // 真会把后面的行带折窄，见 `layout::collect` 的 `PlacedFloat`。
     // `columns` / `column-gap` 留下：分片器认的是**视口**栏数（`FragmentOptions::columns`，
     // 由界面或读者给），作者写的块级 `column-count` 要改排版期的折行宽度，还没接。
     // 详见 `plans/facts.md` 与 `css/computed.rs` 的忽略清单。
-    "float",
-    "clear",
     "columns",
     "column-gap",
-    // 列表标记一期根本不画，所以 `list-style-type: none` 恰好与我们的输出一致，而
-    // `disc` / `decimal` 是真落差。`list-style-image` / `list-style-position` 以前
-    // **不在这份名单里**，于是被当成不认识的属性计进 `ignored` —— 那会让统计说
-    // 「这些属性我们听都没听过」，而事实是听得出、只是没有标记可画。
-    "list-style",
-    "list-style-type",
+    // 列表标记 2026-10-15 起真的画了，所以 `list-style` 与 `list-style-type` 从这份
+    // 名单里移了出去 —— 它们现在会改屏上的东西（`layout::marker`）。
+    // 留下的两条：`list-style-image` 没有图源可画（标记只有文字那一条路），
+    // `list-style-position` 则是 `inside` / `outside` 一律按 `outside` 摆 ——
+    // 听得出、也画得出标记，但作者要的那一处差别给不了。
     "list-style-image",
     "list-style-position",
     // 它会改变字符本身，而锚点与进度都建立在**源文本字节偏移**上（`Locator` 的坐标系）：
@@ -474,18 +609,19 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "font-stretch",
     "font-kerning",
     "font-feature-settings",
-    // 字距。**它以前不在名单里，而是「解析进 `ComputedStyle` 然后就没人读」**——那是最坏的
-    // 一种状态：`examples/css-gap` 会把它算成已支持，而布局、绘制、命中三处都不认它。
-    // 现在把那个空转的字段一起摘了，让它诚实地记 Inert。
-    // 真要接不是加一行：gpui 的 `TextRun`（`text_system.rs:1228`）**没有 `letter_spacing`**，
-    // cosmic 后端也不做字距，所以 shaping 给的 `glyph.position.x` 里没有它。于是必须同一批
-    // 改四处才同源：① `RunStyle` 带这个值并进 `Hash`（否则块缓存认不出字距变了）② 宽度表
-    // 每字符加一次（折行与行宽）③ 绘制按「该字形之前排了几个字符」右推 ④ `Measure` 的
-    // `char_edges` / `byte_at_x` 加同一份偏移（选区矩形与命中）。只改②会出现「断行提前了、
-    // 字却还挤在一起」，比现在更糟。
-    // 优先级：本机四本书的 css/xhtml 里 `letter-spacing` **出现 0 次**（同口径 `font-size`
-    // 命中 10–50 次，所以不是扫描没跑到），排在装饰线那条真 bug 与块扫描那笔之后。
-    "letter-spacing",
+    // 字距 2026-10-16 起真的生效了（`letter-spacing` 已从这份名单移除），所以这里不再列。
+    //
+    // 定位一族。**不做绝对定位**：`position: absolute|fixed` 要的是「脱离常规流、按包含块
+    // 换算偏移」那一整套，而我们的排版从头到尾假定块沿游标自上而下摆（`Layout::stacked`
+    // 那格成立的前提）。真接得上先动 `layout::collect` 的整条流动，代价远大于它在真书里的
+    // 收益 —— 本机四本书里带非 static 定位的元素是个位数。所以四个偏移属性与 `z-index`
+    // 一并记「认得，不生效」：书里那处写法不再被报成「我们听都没听过」。
+    "position",
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "z-index",
 ];
 
 #[derive(Debug, Default)]

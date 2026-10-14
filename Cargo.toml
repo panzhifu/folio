@@ -40,6 +40,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util"] 
 axum = { version = "0.8", features = ["multipart"] }
 html5ever = "0.40"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+# SVG 栅格化：SVG 封面 / 逐页 SVG 漫画 / 正文内联 `<img src="x.svg">` 都要先画成位图。
+# **`resvg` 同样不是新依赖树**：它已经在图上且本来就在编译 —— `gpui-pre → gpui-base`
+# 用它画图标（`cargo tree -i resvg@0.46.0` 可验），这里只是把图上已有的一份转成
+# folio-core 的直接依赖 —— 与上面 `flate2` / `sha2` / `libchm` 同一条口径。
+#
+# **钉死 `=0.46.0`**：锁里另有 `0.45.1`（别的 target 用），写一个两边都不沾的版本号
+# 会像 `sha2` 那条坑一样把**第三条**拉进来。默认 feature（含 `system-fonts`）跟着
+# gpui 那一份走；`usvg::Options::default()` 的 fontdb 本就是空的，不会去扫系统字体。
+resvg = { version = "=0.46.0" }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # EPUB 里的 WOFF1 是「sfnt 逐表 zlib 压缩」。`zip` 已经带进 flate2（锁里 1.1.10），
 # 这里只是把它转成 folio-core 的直接依赖，不新增依赖树。

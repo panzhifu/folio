@@ -21,6 +21,10 @@ impl ReaderSession {
     /// 这一页第一栏的首行 —— 空片（作者强制断点补出来的）跳过，全空才给章首。
     /// 三种模式收敛到同一套坐标，进度与批注才对得上。
     pub(in crate::ui::features::reader) fn resolve_position(&self) -> Option<(usize, usize)> {
+        // 定版式：`chapter` 就是页号、`offset` 恒为 0（`LocatorKind::Page` 那条口径）。
+        if let Some(fixed) = self.fixed() {
+            return Some((fixed.page(), 0));
+        }
         let Source::Book(book) = &self.source else {
             return None;
         };
@@ -121,6 +125,10 @@ impl ReaderSession {
 
     /// 跳到**锚章**内第 `offset` 个字所在的那一屏。目录跳转、书签、恢复进度共用这一个入口。
     pub fn jump_to_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        // 定版式没有「章内第几个字」这个坐标：位置按页号走，恢复在渲染帧里直接落页。
+        if self.is_fixed() {
+            return;
+        }
         let gap = Book::chapter_gap(&self.prefs);
         let Source::Book(book) = &mut self.source else {
             return;

@@ -14,8 +14,6 @@ pub const TOP_BAR_HEIGHT: f32 = 44.0;
 pub const HEADER_HEIGHT: f32 = 28.0;
 /// 干净态页脚那一行小字的高度。
 pub const FOOTER_HEIGHT: f32 = 28.0;
-/// 底栏高：状态行 + 进度条 + 一排入口。
-pub const BOTTOM_BAR_HEIGHT: f32 = 128.0;
 
 /// 排版面板里字号滑条的范围。
 ///
@@ -198,13 +196,14 @@ pub enum Effect {
 }
 
 /// 底栏那排入口展开的是哪块面板。
+///
+/// 目录不在这里了：它盖的是整块窗口，换成了一块底部弹层（见 `page::toc_sheet_element`），
+/// 开合与停在哪一档归 `BottomSheetState` 管。这一档只管**长在底栏卡片里**的那点东西。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Panel {
     /// 只有底栏本身（状态行 + 进度条 + 入口）。
     #[default]
     None,
-    /// 章节表。
-    Toc,
     /// 字号与行距。
     Typography,
 }
@@ -327,7 +326,7 @@ mod tests {
         assert!(chrome.is_open());
         // 浮层开着（还带着面板）时点哪一区都只收，不翻屏：字不该在读者眼皮底下跑走。
         // 两层（面板 + 整层）要两下才收干净，收的过程中一区都不产生翻页。
-        chrome.select(Panel::Toc);
+        chrome.select(Panel::Typography);
         for zone in [Zone::PrevPage, Zone::NextPage] {
             assert_eq!(chrome.handle_body_tap(zone), Effect::DismissChrome);
         }
@@ -352,15 +351,11 @@ mod tests {
     #[test]
     fn picking_the_same_panel_twice_closes_it_without_hiding_the_bar() {
         let mut chrome = Chrome::default();
-        chrome.select(Panel::Toc);
-        assert_eq!(chrome.panel(), Panel::Toc);
-        chrome.select(Panel::Toc);
-        assert_eq!(chrome.panel(), Panel::None, "再点同一格是「不要了」");
-        assert!(chrome.is_open(), "但顶栏底栏不该跟着闪一下");
-        // 换面板不经过「全关」这一态。
-        chrome.select(Panel::Toc);
         chrome.select(Panel::Typography);
         assert_eq!(chrome.panel(), Panel::Typography);
+        chrome.select(Panel::Typography);
+        assert_eq!(chrome.panel(), Panel::None, "再点同一格是「不要了」");
+        assert!(chrome.is_open(), "但顶栏底栏不该跟着闪一下");
     }
 
     #[test]

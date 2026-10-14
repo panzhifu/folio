@@ -15,6 +15,7 @@ use std::ops::Range;
 
 use crate::content::anchor::{TextMap, line_at_y, line_chars, line_offset};
 use crate::content::dom::{Dom, NodeId};
+use crate::infra::metrics::Metric;
 use crate::layout::{Layout, LineFragment, Measure};
 
 /// 命中结果：行盒下标 + 覆盖该位置的字符偏移。
@@ -61,16 +62,21 @@ pub fn hit_test(
     let line_range = line_chars(layout, dom, map, line_index)?;
     let block = layout.block_of_line(line_index)?;
 
-    // 横向夹进这一行的墨迹范围内再逐段走。
-    let x = x.clamp(line.x, line.x + line.width);
+    // 横向夹进这一行的墨迹范围内再逐段走。用 `ink_width`（两端对齐把行撑满，
+    // 字真铺到了右边）而不是 `width`（未撑开的片段宽之和）。
+    let x = x.clamp(line.x, line.x + line.ink_width());
     let mut cursor = line.x;
+    // 行内「隙游标」：两端对齐按它算每个字的右推量（见 `Justify`）。不两端对齐时恒 0。
+    let justify = line.justify;
+    let mut gap_cursor = 0u32;
     // 「最后一个字之后」的落点：走到行尾也没命中时就停在这里。
     let mut end_offset = line_range.end;
 
     // run 的**起点**按排版的 run.width 累加 —— 绘制（`place_lines` → `paint_run`）
     // 就是这么摆的；run **内部**的字位优先问 shaping（`byte_at_x`，kerning / 字体
     // 回退都在里面），做不了 shaping 才退回 char_width 累加。三层同源，命中
-    // 才贴得住画出来的字。
+    // 才贴得住画出来的字。**字距与两端对齐都会把字推开，而 shaping 的位置里没有它们** ——
+    // 有任一时就不走 shaping 那条，落回逐字累加（advance 已含字距，间隙按同一句摊）。
     for fragment in &line.fragments {
         let LineFragment::Text(run) = fragment else {
             // 图片不产出字符，但**占横向位置**：游标必须推进它，后面的字才量得准。
@@ -81,9 +87,11 @@ pub fn hit_test(
         };
         let text = block.text.get(run.norm.clone()).unwrap_or("");
         let run_x = cursor;
-        // shaping 同源的 run 内定位。
-        if let Some(bytes) =
-            measure.byte_at_x(text, &run.style.font, run.style.font_size, x - run_x)
+        // shaping 同源的 run 内定位（没有字距、也没有两端对齐时才成立）。
+        if run.style.letter_spacing == 0.0
+            && justify.is_none()
+            && let Some(bytes) =
+                measure.byte_at_x(text, &run.style.font, run.style.font_size, x - run_x)
         {
             let offset = map
                 .chars_of_bytes(dom, run.node, orig_at(run.orig.start, bytes))
@@ -99,9 +107,11 @@ pub fn hit_test(
         // 触点极少精确落在中点上，而测试要这个边界是确定的。
         // 像素按 advance 累加，字节单独记 —— 两个计数器用途不同，混用就全错位。
         let (mut pixel, mut bytes_before) = (0.0f32, 0usize);
+        let mut gap = gap_cursor;
         for ch in text.chars() {
             let advance = run.style.advance(measure, ch);
-            let char_x = run_x + pixel;
+            let shift = justify.map_or(0.0, |j| j.shift(gap));
+            let char_x = run_x + pixel + shift;
             if x < char_x + advance {
                 let after = x > char_x + advance * 0.5;
                 let bytes = bytes_before + if after { ch.len_utf8() } else { 0 };
@@ -116,7 +126,9 @@ pub fn hit_test(
             }
             pixel += advance;
             bytes_before += ch.len_utf8();
+            gap += justify.map_or(0, |j| j.advance_cursor(ch));
         }
+        gap_cursor = gap;
         // 这一整段都走完了还没命中：末落点推进到这段文本之后，游标推进整段宽。
         if let Some(range) = map.chars_of_bytes(dom, run.node, run.orig.clone()) {
             end_offset = range.end;
@@ -154,16 +166,39 @@ fn orig_at(orig_start: usize, bytes: usize) -> Range<usize> {
     at..at
 }
 
-/// 一段字符区间在排版里的矩形（排版坐标，每行一条）。
+/// 一段字符区间在排版里的矩形（排版坐标，每行一条），**整章的行都扫**的那一条。
 ///
 /// 区间是**含头不含尾**（`TextAnchor` 的语义）。图片片段没有字符坐标，
 /// 不产出矩形，与 `line_chars` 的口径一致。
+///
+/// 绘制侧走的是 [`rects_for_range_in`]（行号段由索引二分出来）；这一条留着是
+/// **参考实现** —— 等价性门 [`crate::content::anchor::CharLines`] 就是拿它当基准比的，
+/// 基准自己不该被优化掉。
 pub fn rects_for_range(
     layout: &Layout,
     dom: &Dom,
     map: &TextMap,
     measure: &dyn Measure,
     range: Range<usize>,
+) -> Vec<SelectionRect> {
+    rects_for_range_in(layout, dom, map, measure, range, 0..layout.lines.len())
+}
+
+/// 只走 `lines` 那一段行号。批注回显与选区用它把「整章的行」换成「与选区**可能**相交的
+/// 那几行」（`CharLines::lines_for` 二分出来，是一张索引折一次的成果）。
+///
+/// 为什么安全：下面那道「这一行与选区的交集为空就跳过」原样保留，所以窄化给的行号区间
+/// 即使是超集也只多扫、不漏算；而它给的是**左闭右开的连续行号**，`CharLines` 只在
+/// 「字符区间随行号不减」成立时才给（否则返回 `None`，调用方退回整表扫）。
+/// 2026-10-15 之前这里是无条件 `0..layout.lines.len()`：一章 25 条批注实测每帧
+/// +1.7–2.2 ms（`plans/阅读管线.md` §十一 第 9 条）。
+pub fn rects_for_range_in(
+    layout: &Layout,
+    dom: &Dom,
+    map: &TextMap,
+    measure: &dyn Measure,
+    range: Range<usize>,
+    lines: Range<usize>,
 ) -> Vec<SelectionRect> {
     let total = map.chars();
     let start = range.start.min(total);
@@ -173,7 +208,12 @@ pub fn rects_for_range(
     }
 
     let mut out = Vec::new();
-    for line_index in 0..layout.lines.len() {
+    // 数的是**实际走了几行**，不是递进来的区间长度：越界或没字的行由 `line_chars` 的
+    // `get` 丢掉，那一行没走过，不该记进账。这一格的代价就是「行数 × 每行的度量」，
+    // 窄化生效时它是个位数，退回整章扫时它是「章行数 × 每条批注」。
+    let mut walked = 0u64;
+    for line_index in lines {
+        walked += 1;
         let Some(line_range) = line_chars(layout, dom, map, line_index) else {
             continue;
         };
@@ -188,6 +228,9 @@ pub fn rects_for_range(
         };
         let line = &layout.lines[line_index];
         let mut cursor = line.x;
+        // 与 `hit_test` 同一份「隙游标」：两端对齐按它算每个字的右推量。
+        let justify = line.justify;
+        let mut gap_cursor = 0u32;
         let mut rect: Option<(f32, f32)> = None; // (x0, x1)
 
         for fragment in &line.fragments {
@@ -209,28 +252,44 @@ pub fn rects_for_range(
                 .char_edges(text, &run.style.font, run.style.font_size)
                 .filter(|edges| edges.len() == text.chars().count() + 1);
             if let (Some(base), Some(edges)) = (run_start, edges) {
-                for (k, _) in text.chars().enumerate() {
+                // `character_spacing`（字距）与两端对齐都不在 shaping 的结果里，得自己加：
+                // 边界 k 的字距偏移是 `ls × k`（RTL 反向，按边表升/降判，与
+                // `edges_from_glyphs` 同一判据）；两端对齐的偏移按隙游标逐字摊。
+                let sign = if edges.len() >= 2 && edges[1] < edges[0] {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let ls = run.style.letter_spacing;
+                let mut gap = gap_cursor;
+                for (k, ch) in text.chars().enumerate() {
                     let at = base + k;
                     if at >= from && at < to {
                         // 一条边界表在 RTL 那一段上是**递减**的（`edges[k]` 的含义是
                         // 「这个字符在阅读方向上的起点」，见 `Measure::char_edges`），
                         // 所以取矩形要 min/max 两个都要 —— 只 `max` 那一头是以前默认
                         // 表递增留下的写法，方向一反就塌成零宽的一条。
-                        let a = run_x + edges[k];
-                        let b = run_x + edges[k + 1];
+                        let shift = justify.map_or(0.0, |j| j.shift(gap));
+                        let a = run_x + edges[k] + sign * ls * k as f32 + shift;
+                        let b = run_x + edges[k + 1] + sign * ls * (k + 1) as f32 + shift;
                         let (cx0, cx1) = (a.min(b), a.max(b));
                         let (x0, x1) = rect.unwrap_or((cx0, cx0));
                         rect = Some((x0.min(cx0), x1.max(cx1)));
                     }
+                    gap += justify.map_or(0, |j| j.advance_cursor(ch));
                 }
+                gap_cursor = gap;
             } else {
                 let (mut pixel, mut chars_before) = (0.0f32, 0usize);
+                let mut gap = gap_cursor;
                 for ch in text.chars() {
+                    // `advance` 已含字距；两端对齐再按隙游标推一笔。
                     let advance = run.style.advance(measure, ch);
                     if let Some(base) = run_start {
                         let at = base + chars_before;
                         if at >= from && at < to {
-                            let cx0 = run_x + pixel;
+                            let shift = justify.map_or(0.0, |j| j.shift(gap));
+                            let cx0 = run_x + pixel + shift;
                             let cx1 = cx0 + advance;
                             let (x0, x1) = rect.unwrap_or((cx0, cx0));
                             rect = Some((x0.min(cx0), x1.max(cx1)));
@@ -238,7 +297,9 @@ pub fn rects_for_range(
                         chars_before += 1;
                     }
                     pixel += advance;
+                    gap += justify.map_or(0, |j| j.advance_cursor(ch));
                 }
+                gap_cursor = gap;
             }
             cursor += run.width;
         }
@@ -246,7 +307,7 @@ pub fn rects_for_range(
         // 时退回整行宽，宁宽勿丢。
         let (x0, x1) = match rect {
             Some(span) if span.1 > span.0 => span,
-            _ => (line.x, line.x + line.width),
+            _ => (line.x, line.x + line.ink_width()),
         };
         out.push(SelectionRect {
             x: x0,
@@ -255,6 +316,7 @@ pub fn rects_for_range(
             height: line.height,
         });
     }
+    Metric::RectLines.add(walked);
     out
 }
 

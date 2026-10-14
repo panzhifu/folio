@@ -40,6 +40,7 @@ toc = "目次"
 "toc.empty" = "この本には目次がありません"
 "toc.head_meta" = "進捗 %{percent} · %{format} · %{size}"
 "toc.more" = "目次のオプション"
+"toc.close" = "目次を閉じる"
 "toc.expand_all" = "すべて展開"
 "toc.collapse_all" = "すべて折りたたむ"
 "toc.reverse" = "逆順に表示"
@@ -54,6 +55,8 @@ mode_spread = "見開き"
 # 選択メニューバー（M6）：アクションはその場で展開し、ポップオーバーは使わない。
 sel_copy = "コピー"
 sel_highlight = "線引き"
+# 引いた線そのものを選び返したとき、同じマスが「線消し」に替わる（他に四色の行が出る）。
+sel_unhighlight = "線消し"
 sel_chapter = "章全体を選択"
 sel_paragraph = "段落を選択"
 sel_cancel = "キャンセル"
@@ -273,6 +276,14 @@ no_results_hint = "別の語でお試しください。検索対象は本文で�
 # 削除は最後に区切り線を挟んで置く —— 破壊的な操作を指の届きやすい位置に置かない。
 # 「開く」行はない —— カードをタップすることが本を開くこと。
 book_delete = "削除"
+# グループ（コレクション）：カードメニューの那一節 + 棚の上の絞り込み。
+group = "グループ"
+group_all = "すべてのグループ"
+ungrouped = "未分類"
+group_new = "新しいグループ"
+group_create = "作成"
+group_placeholder = "グループ名"
+group_hint = "この本を入れるグループ。同じ名前が既にあればそれが使われます。"
 # 「情報」パネル：この一冊の事実。メニューをタップした時点で一度だけ照会する。
 # メニューの行もパネルの見出しもこの一本の文言 —— 「書籍情報」と「情報」を分けない。
 info_title = "情報"
@@ -288,6 +299,23 @@ info_title_required = "タイトルは空にできません"
 info_save = "保存"
 info_format = "形式"
 info_size = "サイズ"
+# 下は本そのものの書誌事項（ダブリン・コア）。「値のある行だけ」並べる —— 空の項を並べると
+# 「この本は何も書いていない」という読み方になる。
+# `dc:type` は保存しているが画面には出さない：電子書籍はほぼすべて text で、その一行は
+# 問いに答えない。
+info_field_series = "シリーズ"
+info_field_contributors = "貢献者"
+info_field_subjects = "主題"
+info_field_description = "内容紹介"
+info_field_publisher = "出版社"
+info_field_published = "出版日"
+info_field_language = "言語"
+info_field_isbn = "ISBN"
+info_field_rights = "著作権"
+# 複数の値（貢献者・主題）を一行に並べるときの区切り。
+info_sep = "、"
+# シリーズに巻番号があるときの言い方 —— 断片をつなぐのではなくこの言語の語順で一本にする。
+info_series_ordinal = "%{name} · %{position} 冊"
 
 # 书库管理。`library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置确认：
 # 移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。

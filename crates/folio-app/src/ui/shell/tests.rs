@@ -770,7 +770,8 @@ mod booted {
                     authors: vec![],
                     format: folio_core::Format::Epub,
                     size: 1,
-                },
+                    ..folio_core::content::format::DocMeta::default()
+                    }
             )
             .unwrap();
         let now = folio_core::infra::time::now();
@@ -817,7 +818,8 @@ mod booted {
                     authors: vec!["出版社".into()],
                     format: Format::Epub,
                     size: 4096,
-                },
+                    ..folio_core::content::format::DocMeta::default()
+                    }
             )
             .unwrap();
 
@@ -871,5 +873,137 @@ mod booted {
         let row = store.book(id).unwrap().expect("那一本还在");
         assert_eq!(row.title, "窄门");
         assert_eq!(row.authors, ["安德烈·纪德", "译者甲"]);
+    }
+
+    /// 回归门：信息那一屏摆的是这本书**说了的那些**书目项，没说的整行不占位。
+    ///
+    /// 钉的是从 provider 到界面这一整条接线：`DocMeta` 的那几项 → `books` 的那些列
+    /// （`Store::add_book`）→ `Store::book_meta` 的投影 → 那一屏的筛选。中间接错的两种
+    /// 表现编译与纯函数测试都看不见：书里明明有简介而屏上没有，或反过来把一本什么都没说的
+    /// 书摆成十来行空格。
+    ///
+    /// 两端共用这一屏（`cfg(mobile)` 只剩宿主与平台），桌面这一趟画的就是手机上那一趟。
+    #[gpui_kit::test]
+    fn the_info_page_shows_only_the_bibliographic_fields_that_have_a_value(
+        cx: &mut TestAppContext,
+    ) {
+        use folio_core::content::format::{DocMeta, Format, Series};
+
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        let store = cx
+            .update(|cx| crate::ui::shared::app_store::handle(cx))
+            .expect("书库应已装上");
+        let full = store
+            .add_book(
+                std::path::Path::new("/books/full.epub"),
+                &DocMeta {
+                    title: "窄门".into(),
+                    authors: vec!["安德烈·纪德".into()],
+                    contributors: vec!["译者甲".into()],
+                    subjects: vec!["法国小说".into(), "诺贝尔文学奖".into()],
+                    description: "一段简介。".into(),
+                    publisher: "上海译文出版社".into(),
+                    published: "1909".into(),
+                    language: "fr".into(),
+                    isbn: "978-7-5327-0000-0".into(),
+                    // 库里存着、界面上按设计不摆的那一项。
+                    dctype: "text".into(),
+                    rights: "© 出版社".into(),
+                    series: Some(Series {
+                        name: "译文经典".into(),
+                        position: "3".into(),
+                    }),
+                    format: Format::Epub,
+                    size: 4096,
+                },
+            )
+            .unwrap();
+        // 同一屏的第二本：书目区里什么都没写，只有文件名与格式大小。
+        let bare = store
+            .add_book(
+                std::path::Path::new("/books/bare.txt"),
+                &DocMeta {
+                    title: "一段笔记".into(),
+                    format: Format::Text,
+                    size: 128,
+                    ..DocMeta::default()
+                },
+            )
+            .unwrap();
+        let shelf = cx
+            .update(|cx| {
+                stack
+                    .read(cx)
+                    .current()
+                    .cloned()
+                    .and_then(|top| top.downcast::<ShelfView>().ok())
+            })
+            .expect("书架栈底就是架面本身");
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            shelf.update(cx, |shelf, cx| shelf.show_info_for_test(full, window, cx));
+            window.render_frame(cx);
+            for field in [
+                "series",
+                "contributors",
+                "subjects",
+                "description",
+                "publisher",
+                "published",
+                "language",
+                "isbn",
+                "rights",
+                "format",
+                "size",
+            ] {
+                let id = format!("book-info-{field}");
+                assert!(
+                    window.try_find(id.clone()).is_some(),
+                    "说了的那一项该摆出来：{id}"
+                );
+            }
+            assert!(
+                window.try_find("book-info-dctype").is_none(),
+                "dc:type 存进库，但不摆进界面"
+            );
+
+            // 换一本书目区全空的重画一遍。格式与大小是文件自己的两行，永远在 ——
+            // 它们同时是这条门的对照组：`try_find` 只认标了 `test_support` 的元素，
+            // 没有正例时「全都不在」也能一路绿到底。
+            stack.update(cx, |state, cx| {
+                state.pop(gpui_kit::base::NavMotion::Immediate, cx)
+            });
+            shelf.update(cx, |shelf, cx| shelf.show_info_for_test(bare, window, cx));
+            window.render_frame(cx);
+            for field in [
+                "series",
+                "contributors",
+                "subjects",
+                "description",
+                "publisher",
+                "published",
+                "language",
+                "isbn",
+                "rights",
+            ] {
+                let id = format!("book-info-{field}");
+                assert!(
+                    window.try_find(id.clone()).is_none(),
+                    "没说的那一项不该占一行：{id}"
+                );
+            }
+            for field in ["format", "size"] {
+                let id = format!("book-info-{field}");
+                assert!(
+                    window.try_find(id.clone()).is_some(),
+                    "文件自己的那两行该在：{id}"
+                );
+            }
+        })
+        .expect("窗口应能渲染");
     }
 }

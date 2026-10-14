@@ -90,3 +90,7 @@ jni = "0.22"
 gpui-kit = { workspace = true, features = ["test-support"] }
 # 删书那条测试要真的建文件、真的看它有没有被 unlink，所以需要临时目录。
 tempfile = "3"
+# 图集那一格的生命周期测试要自己造一份 `RenderImage`，而它的构造参数类型
+# `image::Frame` 没有被 gpui 重导出（`src/gpui.rs` 的 `pub use` 里没有 `image`）。
+# 版本与锁里那份一致（folio-core 已在用），不引入新 crate、不产生双版本。
+image = "0.25.10"

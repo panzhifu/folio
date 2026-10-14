@@ -428,6 +428,128 @@ pub fn line_chars(layout: &Layout, dom: &Dom, map: &TextMap, line: usize) -> Opt
     out
 }
 
+/// 「第几行覆盖哪些字」这张索引。折一次 O(行数)，之后两条查询只碰与查询相交的那几行。
+///
+/// 存在的理由：`hit::rects_for_range` 与 `line_at_offset` 从前每问一次就把**整章的行**走一遍，
+/// 而每一行的判断都要过一次 [`line_chars`]（逐 run 问一次 `TextMap`）。批注回显是
+/// 「每条批注 × 每帧 × 每个进链的章」问一次 —— 2026-10-15 实测：一章 25 条批注就是
+/// **每帧 +1.7–2.2 ms**（`plans/阅读管线.md` §十一 第 9 条有数）。
+///
+/// **单调性是量出来的，不是假设的**：[`CharLines::ordered`] 记「字符区间随行号不减」。
+/// 二分只在它成立时用；不成立时两条查询都退回整表扫，与接线前**逐字同一条口径**。
+/// 这跟 `Layout::stacked`（行盒是否叠放才敢二分 y）是同一族防线 —— 这一带已经踩过一次
+/// 「默认边界表递增、方向一反就塌成零宽」（`hit::rects_for_range` 里那段 RTL 注释），
+/// 所以不再对顺序做任何未经测量的假设。
+#[derive(Debug, Default)]
+pub struct CharLines {
+    /// 有字的行，按行号升序：`(行号, 字符起, 字符止)`。空白行与纯图片行不在表里
+    /// （它们本来就没有字符，`line_chars` 给 `None`）。
+    entries: Vec<(u32, u32, u32)>,
+    /// `entries` 的 `字符起` 与 `字符止` **两样都不减**。二分要的是这个：
+    /// 只 `起` 不减时，「相交的那些」未必是一段连续下标 —— 一条长行可以越过后面某行。
+    ordered: bool,
+}
+
+impl CharLines {
+    /// 走一遍整章的行折出索引。**每次排版换代一次，不是每帧一次**；调用方按需要懒建
+    /// （没人选字、没人划线时这一趟根本不该付）。
+    pub fn build(layout: &Layout, dom: &Dom, map: &TextMap) -> Self {
+        let mut entries: Vec<(u32, u32, u32)> = Vec::new();
+        let mut ordered = true;
+        for line in 0..layout.lines.len() {
+            let Some(range) = line_chars(layout, dom, map, line) else {
+                continue;
+            };
+            // 折成 u32 是为了驻留量（一章两千行：12 KB 而不是 24 KB）。装不下就整表扫 ——
+            // 饱和截断会让「这行覆盖哪些字」比真值短，那是**少画一块底色**级别的错，
+            // 比退回整表慢一点贵得多。
+            if range.end > u32::MAX as usize {
+                ordered = false;
+                continue;
+            }
+            let (start, end) = (range.start as u32, range.end as u32);
+            // 单调性是**量出来的**：起点或终点倒退一次，二分的前提就不在了。
+            if let Some((_, last_start, last_end)) = entries.last()
+                && (start < *last_start || end < *last_end)
+            {
+                ordered = false;
+            }
+            entries.push((line as u32, start, end));
+        }
+        Self { entries, ordered }
+    }
+
+    /// 有没有可用二分的那条前提。`false` 时下面两个查询都给 `None`，调用方退回整表扫。
+    pub fn is_ordered(&self) -> bool {
+        self.ordered
+    }
+
+    /// 与 `range` **可能**相交的行号区间（左闭右开，是 `layout.lines` 的下标）。
+    ///
+    /// 给的是**超集**：中间夹着的空白行、以及区间上不重叠的行都还在，由调用方那道
+    /// 「这一行与选区交集为空就跳过」继续滤 —— 所以窄化只可能少算，不可能漏算。
+    /// 不单调时返回 `None`。
+    pub fn lines_for(&self, range: Range<usize>) -> Option<Range<usize>> {
+        if !self.ordered {
+            return None;
+        }
+        if self.entries.is_empty() {
+            // 整章一行字都没有（纯图片章）：谁都相交不了，空区间就是答案。
+            return Some(0..0);
+        }
+        let (from, to) = (range.start, range.end.max(range.start));
+        // 空区间与反向区间夹平后没有字符：谁都不相交，空行号段就是答案。
+        if from >= to {
+            return Some(0..0);
+        }
+        // 第一条「结束位置还在 from 之前」的行越过去就是第一个可能相交的行。
+        let first = self
+            .entries
+            .partition_point(|&(_, _, end)| (end as usize) <= from);
+        // 最后一条「起点还在 to 之前」的行，取到它的行号（含）为止。
+        let last = self
+            .entries
+            .partition_point(|&(_, start, _)| (start as usize) < to);
+        // 两段不可能有重叠（一行的 `起 <= 止`），所以 `first <= last`；相等就是
+        // 查询落在两行文字之间（或整章之外），一行都不用扫。
+        if first == last {
+            return Some(0..0);
+        }
+        let start_line = self.entries[first].0 as usize;
+        let end_line = self.entries[last - 1].0 as usize + 1;
+        Some(start_line..end_line)
+    }
+
+    /// 覆盖 `offset` 的那一行；落在两行之间给前面最近的一行。
+    ///
+    /// 口径与 `line_at_offset` 逐字相同，包括两处反直觉：`before` 初值是 0，所以
+    /// 「offset 在全部文字之前」也给第 0 行（哪怕第 0 行没字）；多个行都覆盖它时给
+    /// **行号最小的那一个**（整表扫是从上往下第一个 `contains` 就返回）。
+    /// 不单调时返回 `None`。
+    pub fn line_at(&self, offset: usize) -> Option<usize> {
+        if !self.ordered {
+            return None;
+        }
+        // 覆盖者 = 「止 > offset」那一段 与 「起 <= offset」那一段 的交。前者的下界
+        // 就是第一个可能覆盖的行，而按行号升序排着，它就是整表扫会返回的那一条。
+        let covering = self
+            .entries
+            .partition_point(|&(_, _, end)| (end as usize) <= offset);
+        if let Some(&(line, start, _)) = self.entries.get(covering) {
+            // 后面的行起点只增不减：这一行没盖住（`start > offset`）就再没有能盖住的。
+            if (start as usize) <= offset {
+                return Some(line as usize);
+            }
+        }
+        // 没有覆盖者：与整表扫那条 `before` 同一口径 —— 起点 <= offset 的最后一行。
+        let before = self
+            .entries
+            .partition_point(|&(_, start, _)| (start as usize) <= offset)
+            .checked_sub(1)?;
+        Some(self.entries[before].0 as usize)
+    }
+}
+
 /// 行首字符的可见偏移。**进度存这一个数**：字号、行距、宽度、分页模式都不动它。
 pub fn line_offset(layout: &Layout, dom: &Dom, map: &TextMap, line: usize) -> Option<usize> {
     line_chars(layout, dom, map, line).map(|range| range.start)
@@ -436,7 +558,27 @@ pub fn line_offset(layout: &Layout, dom: &Dom, map: &TextMap, line: usize) -> Op
 /// 覆盖 `offset` 的那一行；落在两行之间（图片或空白行）时给它前面最近的一行。
 ///
 /// 恢复进度用的就是这个：把界面滚到这一行的行顶，读者看到的正是他上次看的那句。
+///
+/// 整表扫的那一条。有 [`CharLines`] 的调用方走 [`line_at_offset_indexed`] —— 两者口径
+/// 由同一个函数保证，不是一套规则写两遍（写两遍必然漂，漂出来是「进度与滚动不一致」）。
 pub fn line_at_offset(layout: &Layout, dom: &Dom, map: &TextMap, offset: usize) -> usize {
+    line_at_offset_indexed(layout, dom, map, offset, None)
+}
+
+/// [`line_at_offset`] 的窄化版：`index` 给了就用二分，没给或它说「不单调」就走整表。
+pub fn line_at_offset_indexed(
+    layout: &Layout,
+    dom: &Dom,
+    map: &TextMap,
+    offset: usize,
+    index: Option<&CharLines>,
+) -> usize {
+    if let Some(line) = index.and_then(|index| index.line_at(offset)) {
+        // 索引里只有「有字的行」，而调用方按行号取行盒：那一行可能根本没字
+        // （纯图片行被整表扫那条 `continue` 掉，索引也照样没有它）—— 二分给的
+        // 是最近的一条，语义与 `before` 相同。
+        return line.min(layout.lines.len().saturating_sub(1));
+    }
     let mut before = 0usize;
     for line in 0..layout.lines.len() {
         match line_chars(layout, dom, map, line) {

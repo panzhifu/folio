@@ -21,20 +21,26 @@ pub(crate) mod palmdb;
 pub mod provider;
 pub mod rtf;
 pub(crate) mod sniff;
+/// SVG 栅格化：把矢量资源（SVG 封面、逐页漫画、正文内联 SVG）画成位图。
+pub mod svg;
 pub mod thumb;
 pub mod woff;
 pub mod xhtml;
 pub(crate) mod zip;
 
-pub use content::{Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageSource};
+pub use content::{Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageImage, PageSource};
 pub use provider::{
     DocumentProvider, ParseBudget, looks_like_a_book, provider_for, providers,
     supported_extensions, supports_extension,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Format {
     Markdown,
+    /// `Default` 走这一档：它只服务 `DocMeta { ..Default::default() }` 那种填法，
+    /// 真读到一本书的 provider 一定会显式写自己的格式。挑纯文本是因为它最保守 ——
+    /// 谁忘了写，症状是「按 TXT 打开」，不是把一本没读出来的书当 EPUB 去解析容器。
+    #[default]
     Text,
     Epub,
     /// FictionBook 2：一种 XML 单文件的电子书格式。
@@ -51,6 +57,9 @@ pub enum Format {
     /// 与 [`Format::Epub`] 躺在 ZIP 上是同一刀分法（`plans/导入管线.md` §十：
     /// 容器家族比格式少）。
     Chm,
+    /// Mobipocket / Kindle：PalmDB 容器里的一条正文流（KF7），或 SKEL/FRAG 拼出的多个
+    /// 文件（KF8）。`.mobi` / `.azw` / `.azw3` / `.prc` 都归这一族。可重排。
+    Mobi,
 }
 
 impl Format {
@@ -64,6 +73,7 @@ impl Format {
             Format::Cbz => "cbz",
             Format::Rtf => "rtf",
             Format::Chm => "chm",
+            Format::Mobi => "mobi",
         }
     }
 
@@ -100,6 +110,7 @@ impl Format {
             "cbz" => Some(Format::Cbz),
             "rtf" => Some(Format::Rtf),
             "chm" => Some(Format::Chm),
+            "mobi" => Some(Format::Mobi),
             _ => None,
         }
     }
@@ -124,14 +135,67 @@ impl Format {
 /// 内容的那几节改成留一章说明。**两边的章数与章号都会动**，而库里的位置记的就是章号 ——
 /// 不 bump 的话老库的进度会安静地指到隔壁那一章。代价是整库每本重扫一次，由
 /// `stale_reason` 认成 `OldIndex`、开书时投递，不在升级那一刻付。
-pub const INDEX_VERSION: i64 = 3;
+/// v4：书目按 Dublin Core 补齐（`store` 的 v19 迁移那 11 列）。老行取默认值 = 全空，
+/// 而「全空」在信息屏上与「这本书没有简介」长得一样 —— 所以要重扫一次把它们填上。
+/// 开书时由 `stale_reason` 认成 `OldIndex` 投递，不在升级那一刻整库付。
+pub const INDEX_VERSION: i64 = 4;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 一本书的书目信息。**字段按 Dublin Core 的术语集命名与取舍**（DCMI Terms / ISO 15839），
+/// 因为各家电子书格式的书目区就是它：EPUB 的 OPF 直接写 `dc:*`，MOBI 的 EXTH 标签在
+/// libmobi 的表里逐条注着对应哪一条 `dc:*`，FB2 的 `<book-info>` 也是同一套语义。
+///
+/// 空串与空表都表示「这本书没说」，不表示「说不清」—— 界面上是**有值才显示那一行**，
+/// 所以空值不该长成一行空白。哪些 DC 项没收，写在下面各自的注释上。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DocMeta {
+    /// `dc:title`。缺了就用文件名兜底，所以这一条不会是空串。
     pub title: String,
+    /// `dc:creator`。
     pub authors: Vec<String>,
+    /// `dc:contributor`：译者、编者、绘者。没有按 `opf:role` 筛 —— 书里写 role 的比例
+    /// 很低，筛了等于把「有个人但没说他是谁」那一批整个丢掉。
+    pub contributors: Vec<String>,
+    /// `dc:subject`：关键词 / 主题词。
+    pub subjects: Vec<String>,
+    /// `dc:description`：内容简介。EPUB 允许这一格带标签，provider 剥成纯文本再递出来
+    /// （界面这一行是标签行，不是正文区）。
+    pub description: String,
+    /// `dc:publisher`。
+    pub publisher: String,
+    /// `dc:date`：出版日期。**原样存字符串** —— 书里写的粒度从「2023」到
+    /// 「2023-05-01T00:00:00Z」都有，折成日期类型会把作者给的那一档精度抹掉。
+    pub published: String,
+    /// `dc:language`：BCP 47 原样（`zh-CN` / `en` / `ja`）。
+    pub language: String,
+    /// `dc:identifier` 里那条 ISBN。认三种写法：`urn:isbn:…`、
+    /// `opf:scheme="ISBN"` 那一族、以及 `<meta property="dcterms:identifier" scheme="ISBN">`。
+    /// 其余 identifier（uuid / DOI / Goodreads id）不进这一格：读者要认的是封底那条码。
+    pub isbn: String,
+    /// `dc:type`（`text` / `dcbook:poetry` 那一类）。
+    pub dctype: String,
+    /// `dc:rights`。
+    pub rights: String,
+    /// 系列。DC 十五项里没有「系列」这一项，规范载体是 `dc:relation` 配
+    /// `<meta property="belongs-to-collection">`（序号在 `refines` 上来的 `group-position`），
+    /// Calibre 导出则另写一对 `calibre:series` / `calibre:series_index`。两条都认，
+    /// 先碰到的那条赢。
+    pub series: Option<Series>,
+    /// 我们自己的格式枚举。**不是** `dc:format`：那一格书里写的是 MIME（`text/html` 之类），
+    /// 而界面这一行要的是「EPUB / MOBI」那一档。两个语义不共用一个字段。
+    ///
+    /// `dc:source` 与 `dc:coverage` 没收：电子书里几乎不出现，出现了也没有对应的界面去处。
     pub format: Format,
+    /// 文件字节数（`dc:format` 的 `extent` 语义落在这一格）。
     pub size: u64,
+}
+
+/// 一本书属于哪个系列的第几本。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Series {
+    pub name: String,
+    /// `group-position` / `calibre:series_index`。**存字符串**：Calibre 允许 1.5 这种
+    /// 插在中间的位置，折成数字就得在显示时决定「1.5」还是「1.50」，原样递出去最诚实。
+    pub position: String,
 }
 
 /// 可重排文档的一章。
@@ -371,9 +435,12 @@ pub fn locator_for(format: Format, chapter: &Chapter, index: usize) -> ChapterLo
         Format::Epub | Format::Chm if !chapter.spine_href.is_empty() => {
             ChapterLocator::Entry(chapter.spine_href.clone())
         }
-        Format::Text | Format::Markdown | Format::Html | Format::Fb2 | Format::Rtf => {
-            ChapterLocator::Section(index)
-        }
+        Format::Text
+        | Format::Markdown
+        | Format::Html
+        | Format::Fb2
+        | Format::Rtf
+        | Format::Mobi => ChapterLocator::Section(index),
         // 没有可寻址的位置（EPUB 少了 href、将来的格式、测试替身）：只能说正文在手上。
         _ => ChapterLocator::Inline(chapter.source().to_string()),
     }
@@ -480,6 +547,10 @@ pub fn guess_media_type(bytes: &[u8]) -> Option<&'static str> {
 /// 仍然小一个量级）。两者都在 workspace 已开的 `image` feature 里。
 pub fn shrink_image(bytes: &[u8], max_edge: u32) -> Option<(Vec<u8>, &'static str)> {
     use image::ImageDecoder as _;
+
+    // 这是一笔**贵**事（整份解码 + 重编码），所以数它一次：模块头那条纪律允许
+    // 「本身就贵的事件」进计数器，而这一格的口径是「阅读时不该发生」。
+    crate::infra::metrics::Metric::ImageShrinks.count();
 
     if max_edge == 0 {
         return None;

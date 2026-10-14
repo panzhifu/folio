@@ -8,9 +8,13 @@
 //! 这里的一切颜色都从 `cx.theme()` 取，不留裸色值：设计规范要求应用层不出现
 //! hex / `rgb(...)`，缺哪个语义角色就在主题层补，而不是在调用点嵌一个调色板值。
 
+mod bottom_sheet;
 mod search_box;
+mod top_bar;
 
+pub use bottom_sheet::{BottomSheet, BottomSheetEvent, BottomSheetState};
 pub use search_box::{SearchBox, SearchBoxEvent};
+pub use top_bar::TopBar;
 
 use folio_core::content::format::css::computed::Color;
 use gpui_kit::component::{ActiveTheme, v_flex};

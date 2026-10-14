@@ -59,43 +59,140 @@ pub enum Metric {
     ///
     /// 这一格问的是**呈现层有没有跨帧复用**：现在每帧整份重建，所以每一帧都在涨。
     SceneRebuilds,
-    /// 场景构造**物化**出来的 run 数（`SharedString` 从 `BlockBox::text` 拷出来那几个）。
-    /// 一次 `Scene::build` 记一笔、值 = `runs.len()`（见模块头那条纪律）。
+    /// 行单元**新建**了几条（`reader::document::Document::row_units` 未命中时记一笔，
+    /// 值 = 那一行的单元条数）。一条单元的主体是那段从 `BlockBox::text` 切出来的
+    /// `SharedString` —— 那才是被缓存的这笔钱。
+    ///
+    /// **口径 2026-10-15 从「每帧摆了几条 run」改成「这一帧新建了几条单元」**，计数点也跟着
+    /// 从 `Scene::build` 挪进 `row_units`：前者数的是这一帧搬运了多少条（缓存生效时照样涨），
+    /// 后者数的才是真正付过的物化次数。不改这一格口径，那条往返目标门永远绿不了。
     ///
     /// 目标值：**滚下去再滚回同一屏，第二趟这一格增量 0**。单元表按行**懒物化**，某一行
     /// 第一次进带必须物化它，所以「往前滚为 0」是个错的口径（2026-10-13 立门时就这么错过一次，
     /// 见 `plans/阅读管线.md` §九 第四条纪律）；回到走过的地方才是那个确定的零。
     ///
     /// 根子在 `GlyphRun.x/baseline` 存的是**相对元素原点的屏幕值**：滚动一动每条 run 都变，
-    /// 场景只能整份重造。修法是「按行号索引的行单元表（章内局部量）+ 每帧一个平移量」。
+    /// 场景只能整份重造。修法是「按行号索引的行单元表（章内局部量）+ 每帧一个平移量」——
+    /// 已接（2026-10-15）。
     SceneRuns,
-    /// `TextSystem::shape_line` 被调了几次（`paint_run` 每 run 一次）。
+    /// 落到 gpui 那层 shaping 的次数（`reader::paint::shape` 一趟记一次）。
     ///
-    /// gpui 自己有 `LineLayoutCache`，命中时不重 shaping，但**键含整段文本**——命中也要
-    /// 把文本哈希一遍，而那个哈希是 O(文本长度)。所以这一格测的不是「有没有重新 shaping」，
-    /// 是「绘制回调每帧替读者算了多少趟查表」。**它不进上面那条往返门**：把 `ShapedLine`
-    /// 存进行单元表是已记为「可省」的下一步（省的是那趟哈希，不是那 62 次拷贝），
-    /// 拿它当验收会把一件正确的事钉成错的。
+    /// **口径是「章的 shaping 表未命中一次」**，不是「每条 run 一次」：表命中时绘制只抬
+    /// 一次引用计数，一趟 gpui 都不走（`reader::document::Document::shaped_line`）。
+    ///
+    /// gpui 自己有 `LineLayoutCache`，命中时不重 shaping，但它只保两帧、而且**键含整段
+    /// 文本**——命中也要把文本哈希一遍，那是 O(文本长度)。所以这一格测的是「有多少趟
+    /// 掉到了 gpui 那层」，两帧之外的那些（邻章排完到进屏、滚回走过的地方）从前全算钱。
+    ///
+    /// 门是 `reader::view::tests::scrolling_back_to_the_same_band_does_not_reshape`
+    /// （往返增量 0），探测器是它上面那条 `..._currently_rematerializes_the_visible_runs`
+    /// （往前滚增量 > 0，把计数删掉它当场红）。**它仍然不进 `SceneRuns` 那条往返门**：
+    /// run 物化是行单元表（`plans/阅读管线.md` §九）的事，两笔分开钉。
     ShapeLineCalls,
+    /// 为「取一章」而**重解整本**那一趟，一次算一次（`BookDocument::full_sections`）。
+    ///
+    /// 单文件容器（MOBI / FB2 / RTF / Markdown）的 `Section` 位置就是这个形状：provider 不知道
+    /// 怎么只解第 N 章，只能整本重来。实测（合成 600 章 KF7，release）：整本 109 ms，
+    /// **翻一章 107 ms** —— 顺着读完整本就是几百个 107 ms。
+    ///
+    /// 目标值：**一本书整个阅读过程是 1**（第一次翻章解完就 memo 住，后面是下标取值）。
+    /// 它涨到「章数」那一档，就是 `section_texts` 那条 memo 断了。
+    WholeBookRereads,
+    /// `format::shrink_image` 被调了几次 —— 那是**解码 + 重编码**，真机实测一张
+    /// 1000×1386 的插图 8–38 ms，而且跑在 UI 线程上（绘制侧按需取图那一步）。
+    ///
+    /// 目标值：**阅读一本插图尺寸正常的书，这一格是 0**。索引里记着固有尺寸
+    /// （`chapters`/`images` 那两张表），没超 atlas 上限的图根本不必解码
+    /// （见 `ui::shared::images::ImageEntry::fits_the_device_limits`）；
+    /// 它一旦涨起来，就是「每滚进一张图就顿一下」那条老路又回来了。
+    ImageShrinks,
+    /// 排版键的两格输入哈希算了几次（`layout::LayoutInputs::compute`）。
+    ///
+    /// 那两格是「整本书的 CSS 走一遍 SipHash」与「整份 `Reader` 用 `serde_json`
+    /// 序列化一遍再哈希」。它们**只该在输入真的变了时算**：样式表开书时读一次，
+    /// 偏好只在 `set_prefs` 变。
+    ///
+    /// 目标值：**滚动与重排过程中这一格完全不涨**。它的反面就是这次改动之前的形状 ——
+    /// `Document::layout_key()` 每帧为链上每个章各调一次，而每次都把这两趟重走一遍。
+    /// 门是 `layout::tests::cache::the_layout_inputs_hash_once`。
+    LayoutInputHashes,
+    /// 「哪些块要画装饰」那张表被**重折**了几次（`Layout::decor_seeds`）。
+    ///
+    /// 那张表只随排版结果变（底色与边框来自层叠结果），所以合法的重折时机只有
+    /// 「排完一章拿到新一代结果」那一次。折一次要走**整章的块表**，而从前它是
+    /// 每帧、链上每个章各走一次 —— `plans/阅读管线.md` §十一 第 12 条。
+    ///
+    /// 目标值：**滚动过程中这一格完全不涨**；改一次字号 / 换一次章才 +1。
+    /// 门是 `reader::document::tests::scrolling_never_rebuilds_the_decor_table`。
+    DecorRebuilds,
+    /// 选中/批注矩形那一趟**走了几行**（`content::hit::rects_for_range_in` 的外层循环）。
+    ///
+    /// 为什么这一格要数：批注回显是「每条批注 × 每帧」各问一次，而每一条从前都把
+    /// **整章的行**走一遍再让调用方按 y 丢掉 —— 一章 25 条批注实测每帧 2.0 ms
+    /// （`plans/阅读管线.md` §十一 第 9 条）。窄化生效时这一格应该是「与选区相交的
+    /// 那几行 ∩ 可见带那几行」，量级是个位数；它涨到「章行数 × 批注条数」那一档，
+    /// 就是索引或可见带回退到了整章扫。
+    ///
+    /// 门是 `reader::document::tests::a_banded_query_walks_only_the_visible_lines`。
+    RectLines,
+    /// 书的**作者样式表**被解析了几次（`RuleSet::parse`，`reader::document::author_rules`）。
+    ///
+    /// 那一整本 CSS 与每一章都配同一份规则，所以它只该在开书时解析一次。从前
+    /// `Document::with_source` 每建一章就重解析一遍：2026-10-15 真机拆开量到
+    /// **每进一章 1.5–1.9 ms**（《未来简史》23.6 KB / 323 条规则，`RuleSet::parse`
+    /// 单独 1.16 ms），跳章一次铺 4 章就是 7 ms 落在 UI 线程的一帧里。
+    ///
+    /// 目标值：**打开一本书是 1**，滚动、跳章、改偏好都不涨。
+    /// 门是 `reader::document::tests::the_author_stylesheet_is_parsed_once_per_book`。
+    RuleSetParses,
+    /// 正文插图在后台起了几趟「现取字节 → 必要时缩小 → 交 gpui 解码」。
+    ///
+    /// 为什么要数：一张图进图集要占的是**它自己的原始像素**（`width × height × 4`），
+    /// 实测《未来简史》55 张全部进过一次就是 **126.8 MB**，而 gpui 那条
+    /// `ImageSource::Image` 的路没有任何回收口 —— 于是那一百多兆永久压在显存里
+    /// （`plans/阅读管线.md` §十四）。现在改成界面自己持有解好的 `RenderImage`，
+    /// 图离开可见带就把 atlas 那一格放掉，代价是**回屏要重解一次**。
+    /// 这一格数的就是那笔代价：它等于「进过可见带的次数」而不是「书的图数」，
+    /// 反复读同一屏应当一次都不涨。
+    ///
+    /// 门是 `reader::image_atlas::tests`：在场期间不涨（每帧重解就是红的），
+    /// 回收后回屏只 +1。
+    AtlasDecodes,
+    /// 回收掉的图集字节累计量（按每格的真像素数记）。
+    ///
+    /// 这一格是「回收这件事到底有没有发生」的唯一直接证据：它为零就是**一件都没放掉**，
+    /// 而屏幕上看不出任何区别 —— 图照样画得出来，只是显存一路涨。
+    /// 关掉 `ImageAtlas::end_frame` 那一步，`a_tile_leaves_the_atlas_...` 当场红。
+    ///
+    /// 口径与 `AtlasDecodes` 一对：一个记放掉了多少，一个记为此重解了几趟。
+    AtlasFreed,
 }
 
 /// 计数器条目的存储顺序。新增 [`Metric`] 变体时必须同步扩这两个数组，否则下面的
 /// `ALL` 数组长度对不上，编译期就会报错——这是刻意的：让"漏加一个计数器"成为
 /// 编译错误而不是运行时的零。
-const ALL: [Metric; 6] = [
+const ALL: [Metric; 14] = [
     Metric::ContainerOpens,
     Metric::EntryNameTablePasses,
     Metric::DomParses,
     Metric::SceneRebuilds,
     Metric::SceneRuns,
     Metric::ShapeLineCalls,
+    Metric::WholeBookRereads,
+    Metric::ImageShrinks,
+    Metric::LayoutInputHashes,
+    Metric::DecorRebuilds,
+    Metric::RectLines,
+    Metric::RuleSetParses,
+    Metric::AtlasDecodes,
+    Metric::AtlasFreed,
 ];
 
 thread_local! {
-    static LOCAL: [Cell<u64>; 6] = const { [const { Cell::new(0) }; 6] };
+    static LOCAL: [Cell<u64>; 14] = const { [const { Cell::new(0) }; 14] };
 }
 
-static GLOBAL: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+static GLOBAL: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
 
 impl Metric {
     fn slot(self) -> usize {
@@ -106,6 +203,14 @@ impl Metric {
             Metric::SceneRebuilds => 3,
             Metric::SceneRuns => 4,
             Metric::ShapeLineCalls => 5,
+            Metric::WholeBookRereads => 6,
+            Metric::ImageShrinks => 7,
+            Metric::LayoutInputHashes => 8,
+            Metric::DecorRebuilds => 9,
+            Metric::RectLines => 10,
+            Metric::RuleSetParses => 11,
+            Metric::AtlasDecodes => 12,
+            Metric::AtlasFreed => 13,
         }
     }
 
@@ -164,6 +269,14 @@ pub fn label(metric: Metric) -> &'static str {
         Metric::SceneRebuilds => "scene_rebuilds",
         Metric::SceneRuns => "scene_runs",
         Metric::ShapeLineCalls => "shape_line_calls",
+        Metric::WholeBookRereads => "whole_book_rereads",
+        Metric::ImageShrinks => "image_shrinks",
+        Metric::LayoutInputHashes => "layout_input_hashes",
+        Metric::DecorRebuilds => "decor_rebuilds",
+        Metric::RectLines => "rect_lines",
+        Metric::RuleSetParses => "rule_set_parses",
+        Metric::AtlasDecodes => "atlas_decodes",
+        Metric::AtlasFreed => "atlas_freed",
     }
 }
 

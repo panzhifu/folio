@@ -13,28 +13,102 @@ use super::ports::{ImageProvider, Measure, image_size};
 use crate::content::dom::{Dom, NodeId, NodeKind};
 use crate::content::format::css::computed::{Hyphens, StyledDom};
 
-/// 一行在版心里的落位。
+/// 一行在版心里的落位：行带左缘 `x`、行顶 `y`、整幅宽 `width`，加上这一行让出去的
+/// 四段宽（[`RowInsets`]，四段各是什么、为什么要分成四段写在那一条上）。
 ///
-/// 四个数各自的意义：`x` 是版心左缘，`y` 是这一行行顶（逐行推进的游标），
-/// `width` 是版心宽，`indent` 是这一行让出去的左边距 —— 首行是 `text-indent`，
-/// 被下沉首字符压着的行还要再加上首字符的宽。左缘与对齐偏移都按 `x + indent` 起算，
-/// 可用宽度另外再扣一次 `reserved`：那一格不是空白，是首字符**自己站在那儿**，
-/// 所以它推不开这一行的正文（正文排在它右边），却实实在在写不了字。
+/// 折行那一趟只决定「这一行从哪起、占多高的一档」与这四段，剩下的宽度与对齐都在
+/// [`crate::layout::collect::Ctx::emit_line`] 里按它算 —— 两趟吃的是同一份 `RowInsets`，
+/// 所以「按多少宽断的行」与「按多少宽摆的字」不可能对不上。
 #[derive(Clone, Copy)]
 pub(super) struct LinePlace {
     pub(super) x: f32,
     pub(super) y: f32,
     pub(super) width: f32,
-    pub(super) indent: f32,
-    pub(super) reserved: f32,
+    pub(super) insets: RowInsets,
+    /// 就是 [`LinePlan::hard_end`]：这一行以硬换行收尾（`<br>` 或段末），**不做**两端对齐。
+    pub(super) hard_end: bool,
 }
 
-/// 一个行盒的方案：正文的字节区间（首字符那一段已摘出去），加上落位要让开的两个数。
+/// 一个行盒的方案：正文的字节区间（首字符那一段已摘出去），加上落位要让开的那几段。
 #[derive(Clone)]
 pub(super) struct LinePlan {
     pub(super) range: Range<usize>,
-    pub(super) indent: f32,
+    /// 让宽的四段，摆位与折行共用同一份。
+    pub(super) insets: RowInsets,
+    /// 这一行以**硬换行**收尾（`<br>`，或它就是本段的最后一行）。CSS 规定这类行
+    /// **不做**两端对齐 —— 段末行与强制断行处让余量留在右边，是排版惯例也是规范。
+    pub(super) hard_end: bool,
+}
+
+/// 这一行让出去的四段宽。分四段是因为它们的**几何作用不同**，混成一个数就会在 RTL 里错：
+///
+/// - `start` 是逻辑起始边的位移（首行 `text-indent`、被下沉首字符压着的那几行让开的宽）。
+///   RTL 时它落在右边，由对齐那一路从右缘往回算。
+/// - `left` / `right` 是两侧浮动盒吃掉的宽，是**物理边**：左边的图在 RTL 里也站在左边，
+///   所以它只能从行带的左缘扣，不能跟 `start` 加在一起。
+/// - `reserved` 是首字符自己站的那一格：推不开正文（正文排在它右边），但写不了字。
+#[derive(Clone, Copy, Default)]
+pub(super) struct RowInsets {
+    pub(super) start: f32,
+    pub(super) left: f32,
+    pub(super) right: f32,
     pub(super) reserved: f32,
+}
+
+impl RowInsets {
+    /// 整幅宽 `width` 上这一行还剩多少可写。四个数都要扣，一个都不能忘：
+    /// 忘了 `left` / `right` 就会把字写进图里，忘了 `reserved` 会把首字符盖住。
+    pub(super) fn avail(&self, width: f32) -> f32 {
+        (width - self.start - self.left - self.right - self.reserved).max(1.0)
+    }
+}
+
+/// 第 `index` 行让出去的四段。浮动那两段查 [`Insets`]，另外两段来自下沉盒与缩进。
+fn line_inset(
+    cap: &Option<DropCap>,
+    insets: &Insets<'_>,
+    index: usize,
+    first_of_hard: bool,
+    indent: f32,
+) -> RowInsets {
+    let mut out = RowInsets {
+        start: if first_of_hard { indent } else { 0.0 },
+        ..RowInsets::default()
+    };
+    if let Some(dc) = cap {
+        if index == 0 {
+            out.reserved = dc.width;
+        } else if index < dc.lines {
+            out.start += dc.width;
+        }
+    }
+    let (left, right) = insets.at(index);
+    out.left = left;
+    out.right = right;
+    out
+}
+
+fn plan_for(
+    range: Range<usize>,
+    cap: &Option<DropCap>,
+    insets: &Insets<'_>,
+    index: usize,
+    first_of_hard: bool,
+    indent: f32,
+) -> LinePlan {
+    let row = line_inset(cap, insets, index, first_of_hard, indent);
+    // 首字符盒只属于第一行；正文从它之后开始。
+    let range = match cap {
+        Some(dc) if index == 0 && range.start < dc.norm.end => {
+            dc.norm.end.min(range.end)..range.end
+        }
+        _ => range,
+    };
+    LinePlan {
+        range,
+        insets: row,
+        hard_end: false,
+    }
 }
 
 /// 下沉的首字符。`norm` 从段首起，含紧贴首字母的那些标点 —— CSS 的
@@ -51,40 +125,18 @@ pub(super) struct DropCap {
     pub(super) lines: usize,
 }
 
-/// 第 `index` 行要让开的左边距，和「首字符站着、正文写不进去」的那一段宽。
-/// 两个数都要从可用宽里扣，但落位不同：前者把整行推开，后者那一格站着首字符本身。
-fn line_inset(cap: &Option<DropCap>, index: usize, first_of_hard: bool, indent: f32) -> (f32, f32) {
-    let mut left = if first_of_hard { indent } else { 0.0 };
-    let mut reserved = 0.0f32;
-    if let Some(dc) = cap {
-        if index == 0 {
-            reserved = dc.width;
-        } else if index < dc.lines {
-            left += dc.width;
-        }
-    }
-    (left, reserved)
-}
+/// 每一行要让开的 (左, 右) 两段宽，按**行号**索引。
+///
+/// `None` = 这一段旁边没有浮动盒，那是正文的常态：每一行都吃整幅宽，一次查表都不付。
+/// 表的长度由浮动盒的下缘定，表外的行取 `(0, 0)` —— 浮动盒都在它上面结束了。
+#[derive(Clone, Copy, Default)]
+pub(super) struct Insets<'a>(pub(super) Option<&'a [(f32, f32)]>);
 
-fn plan_for(
-    range: Range<usize>,
-    cap: &Option<DropCap>,
-    index: usize,
-    first_of_hard: bool,
-    indent: f32,
-) -> LinePlan {
-    let (left, reserved) = line_inset(cap, index, first_of_hard, indent);
-    // 首字符盒只属于第一行；正文从它之后开始。
-    let range = match cap {
-        Some(dc) if index == 0 && range.start < dc.norm.end => {
-            dc.norm.end.min(range.end)..range.end
-        }
-        _ => range,
-    };
-    LinePlan {
-        range,
-        indent: left,
-        reserved,
+impl Insets<'_> {
+    fn at(&self, index: usize) -> (f32, f32) {
+        self.0
+            .and_then(|bands| bands.get(index).copied())
+            .unwrap_or((0.0, 0.0))
     }
 }
 
@@ -173,8 +225,10 @@ fn sum_widths(collected: &Collected, range: Range<usize>) -> f32 {
 
 /// 硬行扫描收尾：把最后一段收成一行。空硬行（`<br><br>`）也要占一行高，否则会塌掉。
 /// `from` 是这次扫描的起点（整行扫描时是硬行首，逐字符兜底时是被交回的断点）。
+#[allow(clippy::too_many_arguments)] // 与上面两个扫描函数同一批输入，拆开反而要多传一层
 fn finish_hard_line(
     cap: &Option<DropCap>,
+    insets: &Insets<'_>,
     from: usize,
     hard_end: usize,
     line_start: usize,
@@ -182,18 +236,33 @@ fn finish_hard_line(
     indent: f32,
     plans: &mut Vec<LinePlan>,
 ) {
+    let before = plans.len();
     if line_start < hard_end {
         plans.push(plan_for(
             line_start..hard_end,
             cap,
+            insets,
             plans.len(),
             *first,
             indent,
         ));
         *first = false;
     } else if from == hard_end {
-        plans.push(plan_for(from..hard_end, cap, plans.len(), *first, indent));
+        plans.push(plan_for(
+            from..hard_end,
+            cap,
+            insets,
+            plans.len(),
+            *first,
+            indent,
+        ));
         *first = false;
+    }
+    // 这一趟收尾的这一行就是本硬行的最后一行（段末 / `<br>` 前）→ 记成不对齐。
+    if plans.len() > before
+        && let Some(last) = plans.last_mut()
+    {
+        last.hard_end = true;
     }
 }
 
@@ -206,6 +275,7 @@ fn finish_hard_line(
 pub(super) fn scan_by_char(
     collected: &Collected,
     cap: &Option<DropCap>,
+    insets: &Insets<'_>,
     cap_norm: &Option<Range<usize>>,
     breaks: &[usize],
     from: usize,
@@ -220,8 +290,8 @@ pub(super) fn scan_by_char(
     // `line_inset` 只跟「第几行」有关，一行之内不变。提到循环外，不然每个字符都要
     // 重算一次缩进与保留宽 —— 那是热路上最贵的一个函数调用。首行让出去的宽度由
     // `avail` 扣，不再在 `used` 里加一遍（两处都算会让首行少容两个字）。
-    let mut inset = line_inset(cap, plans.len(), *first, indent);
-    let mut avail = (width - inset.0 - inset.1).max(1.0);
+    let mut inset = line_inset(cap, insets, plans.len(), *first, indent);
+    let mut avail = inset.avail(width);
     let slice = collected.text.get(from..hard_end).unwrap_or("");
     for (i, _ch) in slice.char_indices() {
         let at = from + i;
@@ -233,18 +303,34 @@ pub(super) fn scan_by_char(
         let w = collected.width_at(at);
         if at > line_start && used + w > avail {
             let cut = last_break_before(breaks, at, line_start).unwrap_or(at);
-            plans.push(plan_for(line_start..cut, cap, plans.len(), *first, indent));
+            plans.push(plan_for(
+                line_start..cut,
+                cap,
+                insets,
+                plans.len(),
+                *first,
+                indent,
+            ));
             line_start = cut;
             used = sum_widths(collected, cut..at) + w;
             *first = false;
             // 换了行 → 重算这一行让出去的宽。
-            inset = line_inset(cap, plans.len(), *first, indent);
-            avail = (width - inset.0 - inset.1).max(1.0);
+            inset = line_inset(cap, insets, plans.len(), *first, indent);
+            avail = inset.avail(width);
         } else {
             used += w;
         }
     }
-    finish_hard_line(cap, from, hard_end, line_start, first, indent, plans);
+    finish_hard_line(
+        cap,
+        insets,
+        from,
+        hard_end,
+        line_start,
+        first,
+        indent,
+        plans,
+    );
 }
 
 /// 按「词」扫描一个硬行，把行方案追加进 `plans`。
@@ -260,6 +346,7 @@ pub(super) fn scan_by_char(
 pub(super) fn scan_by_word(
     collected: &Collected,
     cap: &Option<DropCap>,
+    insets: &Insets<'_>,
     breaks: &[usize],
     hard: Range<usize>,
     width: f32,
@@ -280,8 +367,8 @@ pub(super) fn scan_by_word(
     let atoms = breaks.len() + 1;
     let mut line_start = hard.start;
     let mut used = 0.0f32;
-    let mut inset = line_inset(cap, plans.len(), *first, indent);
-    let mut avail = (width - inset.0 - inset.1).max(1.0);
+    let mut inset = line_inset(cap, insets, plans.len(), *first, indent);
+    let mut avail = inset.avail(width);
     let mut j = 0;
     while j < atoms {
         let s = boundary(j);
@@ -289,12 +376,19 @@ pub(super) fn scan_by_word(
         let w = sum_widths(collected, s..e);
         if s > line_start && used + w > avail {
             // 整个词放不下且本行已有内容 → 在词首断行。
-            plans.push(plan_for(line_start..s, cap, plans.len(), *first, indent));
+            plans.push(plan_for(
+                line_start..s,
+                cap,
+                insets,
+                plans.len(),
+                *first,
+                indent,
+            ));
             line_start = s;
             used = 0.0;
             *first = false;
-            inset = line_inset(cap, plans.len(), *first, indent);
-            avail = (width - inset.0 - inset.1).max(1.0);
+            inset = line_inset(cap, insets, plans.len(), *first, indent);
+            avail = inset.avail(width);
             // 不推进 `j`：让同一个词在新行上重新评估。
             continue;
         }
@@ -305,7 +399,16 @@ pub(super) fn scan_by_word(
         used += w;
         j += 1;
     }
-    finish_hard_line(cap, hard.start, hard.end, line_start, first, indent, plans);
+    finish_hard_line(
+        cap,
+        insets,
+        hard.start,
+        hard.end,
+        line_start,
+        first,
+        indent,
+        plans,
+    );
     None
 }
 
@@ -459,7 +562,8 @@ impl<'a> Collector<'a> {
         };
         let font = Arc::clone(&run.font);
         let font_size = run.font_size;
-        let spacing = run.word_spacing;
+        let word_spacing = run.word_spacing;
+        let letter_spacing = run.letter_spacing;
         // 借用到此结束，下面才能可变借 `self.widths`。
         let base = self.widths.len();
         let adv = self
@@ -470,9 +574,11 @@ impl<'a> Collector<'a> {
         // push 三次（其中两次是 0）比一次 memset 填满慢得多（实测 +12%）。
         self.widths.resize(base + (self.text.len() - start), 0.0);
         for (i, (offset, ch)) in self.text[start..].char_indices().enumerate() {
-            let mut w = adv.get(i).copied().unwrap_or(0.0);
+            // 字距叠在**每个**字符上，词距再叠在空格上 —— 与 `RunStyle::advance` 逐字一致，
+            // 否则会出现「按宽度表断行、按 advance 命中」两处漂。
+            let mut w = adv.get(i).copied().unwrap_or(0.0) + letter_spacing;
             if ch == ' ' {
-                w += spacing;
+                w += word_spacing;
             }
             self.widths[base + offset] = w;
         }

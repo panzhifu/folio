@@ -19,10 +19,25 @@
 //! 反过来，只影响目录的偏好（`toc_density` 那三格）会被算进来，代价是多一次空转的重排 ——
 //! 而那次重排里 [`BlockCache`](super::BlockCache) 的块级命中**照样命中**（块键含的是计算后
 //! 样式的哈希，目录档位进不了正文的计算样式），所以这个取舍是「宁多一次空转，不少一次重排」。
+//!
+//! ## 键不每帧重算：那两格哈希活在 [`LayoutInputs`] 里
+//!
+//! `author_css` 与 `prefs` 进键之前各要过一次哈希，而 `prefs_hash` 那一趟是
+//! **`serde_json::to_vec` 把整份 `Reader` 序列化一遍**、`author_css_hash` 那一趟是
+//! SipHash over **整本书的样式表**。界面的 `layout_key()` 是**每帧、每个进链的章各一次**，
+//! 所以这两笔过去每帧要付好几遍 —— 这与 §九 那条「`shape_line` 命中也要把整段文本哈希一遍」
+//! 是同一个错误，只是在上一层：书越厚、CSS 越大，白付得越多。
+//!
+//! 现在这两格算一次就存在 [`LayoutInputs`] 上，`compose` 只搬那两个数。纪律**没破**：
+//! 样式与偏好的哈希仍然**只由本文件**的 `content_hash` / `prefs_hash` 产出（在
+//! [`LayoutInputs::compute`] 一处），调用方拿到的是算好的值，自己算不出第二个来源。
+//! 门是 `layout::tests::cache::the_layout_inputs_hash_once` —— 建一份输入、连问两百次键，
+//! `Metric::LayoutInputHashes` 必须一次都不涨。
 
 use std::hash::{Hash, Hasher};
 
 use crate::infra::config::Reader;
+use crate::infra::metrics::Metric;
 
 /// 度量口径的版本。**改动 `Measure` 的实现口径时 +1**：断行规则、基线与行高的算法、
 /// shaping 的规则换了，一切已缓存的几何都不再可信，必须整清 —— 而这些变化不会改章文本、
@@ -51,9 +66,24 @@ pub fn quantize_px(value: f32) -> u32 {
 /// 与作业带回来的那份比对，也可以在几级缓存之间来回比较，谁拿到它都不能改动别人的。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LayoutKey {
-    /// 章文本的哈希（管线第 3 级的输入）。同一格里还兜着**写在章里的 `<style>`**：
-    /// 它就长在章文本里，所以作者把样式表挂在文件还是挂在章里，键都一致。
-    pub chapter_hash: u64,
+    /// **这一章的身份**（管线第 3 级的输入）。注意它**不是**章文本的内容哈希 ——
+    /// 内容哈希活在 `ChapterArtifacts.key` 上，由排版作业自己算（作业手上才有文本）。
+    ///
+    /// 为什么键里不能放内容哈希：那一趟取文本 2026-10-15 起挪进了排版作业（见
+    /// `reader::document::ChapterSource`），界面线程不再持有正文，于是算不出内容哈希。
+    /// 而界面**必须**能算出这把键，它同时管着两件事：「键没变就不重投作业」与
+    /// [`context_rev`](LayoutKey::context_rev)（块缓存的复用范围）。
+    ///
+    /// 身份的取法由来路决定，一处算完（`ChapterSource::identity`）：按位置取的书用
+    /// **章号**（一个开着的容器里第 N 章不会变），正文已经在手上的（内联正文、测试替身）
+    /// 用**内容哈希**——那种章没有章号可指。
+    ///
+    /// **这一格换掉的保证，写下来**：从前章文本内容一变，键就变、就重排；现在按位置取的
+    /// 那一路只认章号，所以**阅读会话中途把书文件换掉**不会被发现，旧几何会静默留着。
+    /// 这不是待修的缺口而是有接受的取舍：重扫出来的新索引本来就是「下次开书才生效」，
+    /// 而文件真被换过的那一本，内容指纹（`sha2`）也不同、在库里是另一条记录。
+    /// 要推翻这条判断，先看的是「同一会话里正文变过」能不能发生。
+    pub chapter: u64,
     /// 书自己的样式表的哈希（第 4 级的输入之一，与读者偏好无关）。
     pub author_css_hash: u64,
     /// 读者偏好的哈希 —— **整份** `Reader`，不是其中几格（见模块头的取舍）。
@@ -77,25 +107,76 @@ pub struct LayoutKey {
     pub metrics_rev: u32,
 }
 
-impl LayoutKey {
-    /// 唯一的构造点。输入是**原始值**（章文本、CSS 文本、偏好、栏宽、栏数、两个运行时版本），
-    /// 哈希与量化都在这里做完 —— 调用方不许自己拼键，也不许只拼其中几格。
+/// 键的输入里**与帧无关**的那两格，各自算好一次。
+///
+/// 存在的理由只有性能，但它牵住的东西不只是性能：`LayoutKey::compose` 过去收的是
+/// `author_css: &str` 与 `prefs: &Reader`，于是**每帧、每个进链的章**都要把整本书的
+/// 样式表 SipHash 一遍、再把整份 `Reader` 用 `serde_json` 序列化一遍再哈希
+/// （`prefs_hash` 那一趟还带一次堆分配）。而这两样输入根本不随帧变 —— 样式表开书时读
+/// 一次，偏好只在 `set_prefs` 变。
+///
+/// **改成传算好的值，纪律没有变成两个来源**：样式与偏好的哈希仍然只由本文件的
+/// `content_hash` 与 `prefs_hash` 产出，而且只从 [`LayoutInputs::compute`] 一个入口出去。
+/// 调用方拿到的是算好的数，既不必自己算（自己算就等于把每帧那一趟请回来），
+/// 也造不出第二份。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LayoutInputs {
+    /// 作者层样式表的哈希。
+    pub author_css_hash: u64,
+    /// 整份读者偏好的哈希 —— 覆盖范围由 `serde` 的 derive 保证，不是一张手挑清单。
+    pub prefs_hash: u64,
+}
+
+impl LayoutInputs {
+    /// 两份输入的原始值 → 算好的两格哈希。**这两格哈希唯一的产出点。**
     ///
-    /// 传文本而不是哈希：谁传哈希进来谁就得自己保证哈希覆盖同样的内容，那又是第二个来源。
-    #[allow(clippy::too_many_arguments)]
+    /// 合法的调用时机只有两处：建 `Document` 时、`set_prefs` 时。每次调用记一笔
+    /// `Metric::LayoutInputHashes` —— 那一格就是「输入变了才算」这条门的眼：
+    /// 稳态滚动里它必须一次都不涨
+    /// （`layout::tests::cache::the_layout_inputs_hash_once`）。
+    pub fn compute(author_css: &str, prefs: &Reader) -> Self {
+        Metric::LayoutInputHashes.count();
+        Self {
+            author_css_hash: content_hash(author_css),
+            prefs_hash: prefs_hash(prefs),
+        }
+    }
+
+    /// 只换读者偏好那一格。
+    ///
+    /// 为什么不重建整份：样式表**没变**，而它的原文在这一刻根本不必在场 ——
+    /// 少算一趟 SipHash over 整本 CSS 正是这次改动的目的之一。
+    ///
+    /// 也不许调用方自己写 `inputs.prefs_hash = 自己算的数`：那才是第二个来源。
+    /// 走这一格，`prefs_hash` 的产出点就仍然只有本文件的 `prefs_hash` 函数。
+    pub fn set_prefs(&mut self, prefs: &Reader) {
+        Metric::LayoutInputHashes.count();
+        self.prefs_hash = prefs_hash(prefs);
+    }
+}
+
+impl LayoutKey {
+    /// 唯一的构造点：两格算好的输入（[`LayoutInputs`]）+ 章身份 + 栏宽 + 栏数 +
+    /// 两个运行时版本。量化在这里做完 —— 调用方不许自己拼键，也不许只拼其中几格。
+    ///
+    /// 为什么这里收算好的哈希而不是原文：那两趟哈希的输入不随帧变，而 `compose` 是
+    /// **每帧每个进链的章各调一次**的地方（见 [`LayoutInputs`]）。
+    ///
+    /// 为什么章那一格收**身份**而不是内容指纹：正文在这一刻不在界面线程手上
+    /// （见 [`LayoutKey::chapter`]），身份由 `reader::document::ChapterSource::identity`
+    /// 一处算完。两处例外守的是同一条规矩：**每一种值只有一个算它的地方。**
     pub fn compose(
-        chapter_source: &str,
-        author_css: &str,
-        prefs: &Reader,
+        inputs: LayoutInputs,
+        chapter: u64,
         width: f32,
         columns: usize,
         images_rev: u32,
         fonts_rev: u32,
     ) -> Self {
         Self {
-            chapter_hash: content_hash(chapter_source),
-            author_css_hash: content_hash(author_css),
-            prefs_hash: prefs_hash(prefs),
+            chapter,
+            author_css_hash: inputs.author_css_hash,
+            prefs_hash: inputs.prefs_hash,
             width: quantize_px(width),
             columns: u8::try_from(columns).unwrap_or(u8::MAX),
             images_rev,
@@ -107,11 +188,11 @@ impl LayoutKey {
     /// **缓存复用范围**的那几格：以 `NodeId` 或字体表为凭的产物，能不能跨次使用。
     ///
     /// 块级缓存的键是「块节点 + 子树样式哈希 + 宽」，而 `NodeId` 只在同一份 DOM 里
-    /// 才有意义、算出的宽度只在同一张字体表里才成立。这三格（章文本、图片索引、字体集）
+    /// 才有意义、算出的宽度只在同一张字体表里才成立。这三格（章、图片索引、字体集）
     /// 加度量版本任一变了，整张块缓存必须清空 —— 样式哈希没变**不是**留下的理由。
     pub fn context_rev(&self) -> u64 {
         let mut hasher = std::hash::DefaultHasher::new();
-        self.chapter_hash.hash(&mut hasher);
+        self.chapter.hash(&mut hasher);
         self.images_rev.hash(&mut hasher);
         self.fonts_rev.hash(&mut hasher);
         self.metrics_rev.hash(&mut hasher);
@@ -125,8 +206,8 @@ impl LayoutKey {
 /// 是另一回事，那些必须跨进程稳定。
 ///
 /// 公开这一格是为了**章的解析产物**：缓存产物时要问「这份 DOM 是从哪段文本来的」，
-/// 而那个哈希必须与 [`LayoutKey::chapter_hash`] 同源。自己另写一个 `hash_bytes` 就是
-/// 第二个来源，两处一旦漂，「产物复用」和「排版失效」说的就不是同一章了。
+/// 而那一趟取文本在排版作业里做，所以这个哈希也由作业算。自己另写一个 `hash_bytes`
+/// 就是第二个来源，两处一旦漂，「产物复用」和「排版失效」说的就不是同一章了。
 pub fn content_hash(text: &str) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     // 长度先进去：否则「一段文本」与「同一文本加了个尾部空白」在某些切法下难分辨。

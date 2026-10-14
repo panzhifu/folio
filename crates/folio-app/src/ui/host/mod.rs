@@ -1,7 +1,7 @@
 //! 平台服务边界：视图通过它拿平台相关的东西，自己不写 `cfg(mobile)`。
 //!
 //! 平台差异只允许出现在这里（服务）与 `super::platform`（入口与原生桥）。
-//! 其余页面/部件一律走这个边界。目前边界上是六件事：
+//! 其余页面/部件一律走这个边界。目前边界上挂这些事：
 //!
 //! - **安全区**（系统栏 / 手势条 / 挖孔），用来给自绘外壳留出上下两条。
 //! - **输入法 inset**，键盘盖住多少。**刻意与安全区分开**：弹键盘不该移动外壳，
@@ -15,6 +15,12 @@
 //! - **这台设备此刻的本地时区偏移**（[`local_offset_secs`]），统计按本地日分桶要把它
 //!   当参数交给 core。这一项两端同一个实现，所以它是这个模块上的一个自由函数，
 //!   不在 [`Host`] trait 上。
+//! - **这一端的指针长按不长按得住**（[`supports_long_press`]），决定读书时「把图放大」
+//!   是按住图片还是点一下图片。
+//! - **选择器交回的路径是不是应用自己的临时副本**（[`picked_files_are_temporary`]），
+//!   决定导入读完后要不要把 `cache/gpui-import-*` 那份拷贝连同目录清掉。桌面选择器
+//!   给的是读者原文件，一动都不能动；Android / iOS 的桥会先落一份 sandbox / cache 拷贝，
+//!   那一路必须清。
 //!
 //! 桌面端前两者都是 0；Android 端读 fork 报上来的值（`gpui-pre-mobile` 的
 //! `AndroidWindow::safe_area_insets_logical()` / `ime_insets_logical()`）。
@@ -54,6 +60,19 @@ pub trait Host: 'static {
     /// 手机要：那一端没有别的退出入口，宿主也不该留着前台空转。桌面不要：窗口归窗口
     /// 管理器管，一次返回键把进程关掉是错的。
     fn back_exits_app(&self) -> bool;
+    /// 这一端的指针**按得住长按**吗。
+    ///
+    /// gpui 只在触摸手势里合成 `LongPressEvent`：那份状态机是
+    /// `gpui-pre-0.3.8/src/gestures.rs` 的 `TouchGestureState::LongPressing`，吃的是
+    /// `TouchEvent`。桌面的鼠标不产生 `TouchEvent`，按住不放也不会来一条长按 ——
+    /// 所以「按住某物」在桌面上根本不存在，凡是把长按当入口的功能都要在这一格上分叉。
+    fn long_press(&self) -> bool;
+    /// 系统选择器交回的路径是不是应用自己拷出来、用完即可删的临时副本。
+    ///
+    /// 桌面文件选择器给的是读者原文件，不能动；Android 的 `GpuiPathPicker` 与 iOS 的
+    /// sandbox copy 会先拷进应用 cache / 沙盒再把路径交出来，导入读完必须清 ——
+    /// 不然 `cache/gpui-import-<uuid>/` 会一轮轮堆上去。
+    fn picked_files_are_temporary(&self) -> bool;
 }
 
 #[cfg(not(mobile))]
@@ -132,6 +151,21 @@ pub fn supports_overlay_controls(cx: &App) -> bool {
 pub fn back_exits_app(cx: &App) -> bool {
     cx.try_global::<HostServices>()
         .is_some_and(|services| services.0.back_exits_app())
+}
+
+/// 这一端的指针按得住长按吗。没装平台服务（宿主测试里）当**按不住**：
+/// 与 [`supports_overlay_controls`] 同一条理由 —— 测试要钉的是界面与状态，而
+/// `simulate_click` 投不出长按，把桌面那一档（单击）当默认才测得到入口。
+pub fn supports_long_press(cx: &App) -> bool {
+    cx.try_global::<HostServices>()
+        .is_some_and(|services| services.0.long_press())
+}
+
+/// 系统选择器交回的路径是不是应用自己拷出来的临时副本。没装平台服务（宿主测试里）
+/// 当**不是**：测试造的是真实文件路径，导入只该读、不该删。
+pub fn picked_files_are_temporary(cx: &App) -> bool {
+    cx.try_global::<HostServices>()
+        .is_some_and(|services| services.0.picked_files_are_temporary())
 }
 
 /// 这台设备此刻的本地时区偏移（秒，东为正）。统计那几屏按本地日分桶要用它当参数

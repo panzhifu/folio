@@ -36,6 +36,7 @@ mod collect;
 mod font;
 mod geometry;
 mod key;
+mod marker;
 mod ports;
 mod wrap;
 
@@ -48,8 +49,11 @@ use crate::content::format::css::computed::{Display, StyledDom};
 
 pub use cache::{BlockCache, LayoutCache, layout_cached};
 pub use font::{FontKey, RunStyle, StyleArena, StyleRef};
-pub use geometry::{BlockBox, ImageRun, Layout, LayoutOptions, LineBox, LineFragment, LineRun};
-pub use key::{LayoutKey, METRICS_REV, content_hash, quantize_px};
+pub use geometry::{
+    BlockBox, DecorSeed, ImageRun, Justify, JustifyMode, Layout, LayoutOptions, LineBox,
+    LineFragment, LineRun, MarkerRun,
+};
+pub use key::{LayoutInputs, LayoutKey, METRICS_REV, content_hash, quantize_px};
 pub use ports::{ImageProvider, LineMetrics, Measure, NoImages, ResolvedImage};
 
 /// 排版 `root` 的全部内容。`root` 通常是 `<body>`：它的 padding 生效，
@@ -117,11 +121,15 @@ fn layout_inner(
         lines: Vec::new(),
         cache,
         style_hash: hashes.as_deref(),
+        floats: Vec::new(),
     };
     let style = ctx.style_of(root);
-    let pl = style.padding_left.max(0.0);
-    let pt = style.padding_top.max(0.0);
-    let content_width = (options.width - pl - style.padding_right.max(0.0)).max(1.0);
+    // 根的包含块就是视口（`options.width`）：根上那族百分比按它折，再往里每一层
+    // 按父块的内容宽折，这条基准一路由 `collect` 的 `basis` 参数带着走。
+    let pl = style.padding_left.resolve(options.width).max(0.0);
+    let pt = style.padding_top.resolve(options.width).max(0.0);
+    let content_width = (options.width - pl - style.padding_right.resolve(options.width).max(0.0))
+        .max(1.0);
     let height = ctx.children(root, pl, pt, content_width);
     let out = Layout::assemble(ctx.blocks, ctx.lines, content_width, pt + height);
     // 块数与行数是一章排版结果的体检指标：0 行意味着 DOM 或样式空了，而不是「这一章短」。
@@ -195,12 +203,14 @@ pub fn measure_chapter(
         lines: Vec::new(),
         cache: None,
         style_hash: None,
+        floats: Vec::new(),
     };
     let style = ctx.style_of(root);
-    let pl = style.padding_left.max(0.0);
-    let pt = style.padding_top.max(0.0);
-    let pb = style.padding_bottom.max(0.0);
-    let content_width = (options.width - pl - style.padding_right.max(0.0)).max(1.0);
+    let pl = style.padding_left.resolve(options.width).max(0.0);
+    let pt = style.padding_top.resolve(options.width).max(0.0);
+    let pb = style.padding_bottom.resolve(options.width).max(0.0);
+    let content_width = (options.width - pl - style.padding_right.resolve(options.width).max(0.0))
+        .max(1.0);
 
     let mut units = Vec::new();
     let mut cursor = pt;
@@ -216,9 +226,9 @@ pub fn measure_chapter(
             simple = false;
             break;
         }
-        let ml = s.margin_left.max(0.0);
-        let mr = s.margin_right.max(0.0);
-        let mt = s.margin_top.max(0.0);
+        let ml = s.margin_left.resolve(content_width).max(0.0);
+        let mr = s.margin_right.resolve(content_width).max(0.0);
+        let mt = s.margin_top.resolve(content_width).max(0.0);
         // 与 `children_light` 同一条外边距折叠：兄弟间取较大值，不叠加。
         cursor += if prev_bottom > 0.0 {
             mt.max(prev_bottom)
@@ -226,7 +236,7 @@ pub fn measure_chapter(
             mt
         };
         let cw = (content_width - ml - mr).max(1.0);
-        let height = ctx.block_light(child, cw);
+        let height = ctx.block_light(child, cw, content_width);
         units.push(RenderUnit {
             node: child,
             x: pl + ml,
@@ -235,7 +245,7 @@ pub fn measure_chapter(
             height,
         });
         cursor += height;
-        prev_bottom = s.margin_bottom.max(0.0);
+        prev_bottom = s.margin_bottom.resolve(content_width).max(0.0);
     }
     if !simple {
         units.clear();
@@ -290,6 +300,7 @@ pub fn render_window(
         lines: Vec::new(),
         cache: None,
         style_hash: None,
+        floats: Vec::new(),
     };
     let mut bottom = 0.0f32;
     let mut prev: Option<&RenderUnit> = None;
@@ -305,7 +316,9 @@ pub fn render_window(
             // 上一个实际底边 + 章内间距（map 里这个间距就是外边距折叠的结果）
             Some(p) => bottom + (unit.y - (p.y + p.height)),
         };
-        let h = ctx.block(unit.node, unit.x, top, unit.width);
+        // `basis` 用章的版心宽：这些单元是顶层块，它们的包含块就是根的内容盒，
+        // 与 `measure_chapter` 里算 `unit.width` 时折边距用的同一个数。
+        let h = ctx.block(unit.node, unit.x, top, unit.width, chapter.width);
         bottom = top + h;
         prev = Some(unit);
     }

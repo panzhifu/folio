@@ -276,6 +276,71 @@ fn picked_files_are_registered_into_the_store() {
     );
 }
 
+/// 临时副本用完即弃：source Drop 时文件和那个 `gpui-import-<uuid>` 空目录一起清掉。
+/// 这条守的是 Android / iOS 选择器 cache 不再一轮轮涨。
+#[test]
+fn temporary_picked_files_are_removed_when_source_drops() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("gpui-import-测试");
+    let file = write(&dir, "书.txt", "正文\n");
+    assert!(file.exists());
+
+    drop(PathsSource::picked_temporary(vec![file.clone()]));
+
+    assert!(!file.exists(), "临时副本应在 source 消失时清掉");
+    assert!(!dir.exists(), "只装这一份的空临时目录也该一起清掉");
+}
+
+/// 临时目录里要是有别人的东西，`remove_dir` 只该失败，不许递归带走。
+#[test]
+fn temporary_cleanup_keeps_siblings_and_their_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("gpui-import-测试");
+    let file = write(&dir, "书.txt", "正文\n");
+    let sibling = write(&dir, "别人的.txt", "别动\n");
+
+    drop(PathsSource::picked_temporary(vec![file.clone()]));
+
+    assert!(!file.exists(), "这一份该删");
+    assert!(sibling.exists(), "同目录里别的文件不许被带走");
+    assert!(dir.exists(), "目录非空时 remove_dir 失败，该留着");
+}
+
+/// 普通 `picked` 是读者原文件：Drop 之后一个字节都不许少。
+#[test]
+fn ordinary_picked_files_are_never_deleted_on_drop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write(tmp.path(), "读者的书.txt", "正文\n");
+
+    drop(PathsSource::picked(vec![file.clone()]));
+
+    assert!(file.exists(), "桌面选择器给的是原件，Drop 不许动它");
+}
+
+/// 走一次真实作业：`submit_import` 结清之后，临时副本和目录也要已经没了 ——
+/// Drop 不能只活在 direct 构造的单测里。
+#[test]
+fn submitted_temporary_source_cleans_up_after_the_job_finishes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("gpui-import-测试");
+    let file = write(&dir, "书.txt", "第一本\n");
+    let lib = tmp.path().join("books");
+    let manager = TaskManager::new(1);
+    let store = Arc::new(Store::in_memory().unwrap());
+
+    let handle = submit_import(
+        &manager,
+        Box::new(PathsSource::picked_temporary(vec![file.clone()])),
+        lib,
+        store,
+    );
+    let outcomes = outcomes_of(handle.events.into_iter().collect());
+
+    assert!(matches!(outcomes[0].result, Ok(Imported::Added(_))));
+    assert!(!file.exists(), "作业结清后临时副本该没了");
+    assert!(!dir.exists(), "作业结清后临时目录也该没了");
+}
+
 /// §九 第一条门：**同内容的第二个来源** —— 不落地新文件、不新增记录，
 /// 报 `Duplicate` 而不是「成功」。
 ///
@@ -677,7 +742,8 @@ fn backfill_gives_legacy_copies_an_identity_and_a_hash_name() {
         authors: vec![],
         format: crate::content::format::Format::Text,
         size: 0,
-    };
+        ..crate::content::format::DocMeta::default()
+        };
     let id = store.add_book(&legacy, &meta).unwrap();
     assert_eq!(store.rows_missing_hash().unwrap().len(), 1, "起点是没身份");
 
@@ -742,7 +808,8 @@ fn backfill_fills_the_hash_without_moving_a_file_we_do_not_own() {
         authors: vec![],
         format: crate::content::format::Format::Text,
         size: 0,
-    };
+        ..crate::content::format::DocMeta::default()
+        };
     let id = store.add_book(&outside, &meta).unwrap();
 
     let report = backfill_copies(&store, &lib, &StageCtx::detached());
@@ -779,7 +846,8 @@ fn a_copy_in_use_by_another_row_is_counted_and_never_overwritten() {
         authors: vec![],
         format: crate::content::format::Format::Text,
         size: 0,
-    };
+        ..crate::content::format::DocMeta::default()
+        };
     let a = store.add_book(&one, &meta).unwrap();
     assert_eq!(
         store.rows_sharing_path(&one.to_string_lossy(), a).unwrap(),
@@ -1314,7 +1382,8 @@ fn scheduled_reindex_does_not_run_on_the_calling_thread() {
         authors: vec![],
         format: crate::content::format::Format::Cbz,
         size: 0,
-    };
+        ..crate::content::format::DocMeta::default()
+        };
     let id = store.add_book(&book, &meta).unwrap();
     make_index_stale(&db, id);
     assert_eq!(

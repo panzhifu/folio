@@ -22,6 +22,7 @@
 
 use std::cell::RefCell;
 use std::ops::Range;
+use std::sync::Arc;
 
 use folio_core::content::anchor::line_at_y;
 use folio_core::layout::FontKey;
@@ -29,25 +30,47 @@ use folio_core::layout::fragment::column_offset;
 use folio_core::store::Annotation;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    AnyElement, App, Bounds, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement,
-    Pixels, Render, ScrollWheelEvent, SharedString, Styled, TestSupportExt as _, Window, div, img,
-    point, px, size,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, Hsla,
+    InteractiveElement as _, IntoElement, LongPressEvent, ParentElement, Pixels, Render,
+    RenderImage, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled,
+    TestSupportExt as _, TouchPhase, WeakEntity, Window, canvas, div, img, point, px, size,
 };
 
 use super::book::Book;
 use super::book_fonts::BookFonts;
 use super::chrome;
 use super::document::{Document, Viewport};
+use super::image_atlas::ImageAtlas;
+use super::image_viewer::ImageViewer;
 use super::modules::annotations::{self, Palette};
-use super::paint::{GlyphRun, GlyphsElement, SelectionVisual};
+use super::paint::{GlyphRun, GlyphsElement, SelectionVisual, shape};
 use super::scene::{BlockDecor, Scene, VisibleImage};
 use super::selection_menu;
 use super::session::{AnnotationSpans, ReaderSession, Source, land_at_anchor};
+use crate::ui::shared::images::DecodeRequest;
 use crate::ui::shell::navigation::SizeClass;
 
 impl Render for ReaderSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        super::perf::reset();
+        // 「会话出了元素树」与「正文那一层真画了」是两件事，分开数才分得清帧间隔归谁。
+        super::perf::note_render();
+        let __render = super::perf::Timer::start();
+        // 配置同步：比对一次 `ConfigHolder`，不一致就 `set_prefs_on_all`（逐章作废行单元、
+        // shaping 表与排版输入）。改字号那一帧的钱全在这一格里，而它从前没人看。
+        let __t = super::perf::Timer::start();
         self.sync_prefs(cx);
+        let __sync = __t.ns();
+        super::perf::add(|frame| frame.sync_ns += __sync);
+        // 正文里的「注」图（脚注标记）那一击要写回会话（把注文抬成弹层），而图片元素是
+        // 在本帧的元素树里挂的 —— 给绘制那条链一个句柄，图像元素自己就能调回去。
+        let reader_weak = cx.entity().downgrade();
+        // 图集那张图解完之后要喊谁重画：就是这个实体（`render` 正跑在它上面）。
+        // 用 `EntityId` 而不是句柄，是为了让那条通知在会话已经关掉时也只是打空。
+        let view = cx.entity().entity_id();
+        // 图片的像素由会话那一层的图集管着（`image_atlas`）：这里每帧问一次「这张
+        // 画得出来吗」，帧末再让它把离场够久的格子放掉。
+        let atlas = self.atlas.clone();
         let viewport_size = window.viewport_size();
         // 有效视口 = 窗口高 − 外壳占的高 − 页眉 − 页脚。可见行筛选、滚动上限、
         // `on_scroll` 的夹范围全都从这里取，所以底部那一截内容仍然滚得进来，
@@ -91,6 +114,12 @@ impl Render for ReaderSession {
         let mut column = div().size_full().relative().bg(cx.theme().background);
         // 图片永远压在字形之上：收集起来，等 `element` 入树之后再挂。
         let mut overlays: Vec<AnyElement> = Vec::new();
+        // 「点这张图」要写出去的那个状态，由阅读页持有（见 `image_viewer`）。没挂上的
+        // 会话（单独的渲染测试）图片就不可点。
+        let viewer = self.image_viewer.clone();
+        // 定版式那一页用什么手势放大：按得住长按的那一端用长按（单击留给翻页），
+        // 按不住的那一端（桌面鼠标）用单击图内，翻页让给页外的留白。
+        let long_press = crate::ui::host::supports_long_press(cx);
         // `&mut self.source` 只借用这一个字段，所以臂里写 `self.content_height`、
         // 读 `self.scroll_y` 都不冲突（前提是别把 `self` 整个传进函数）。
         match &mut self.source {
@@ -119,16 +148,86 @@ impl Render for ReaderSession {
                 self.content_height = 0.0;
                 self.laid_out.viewport = viewport_height;
             }
+            Source::Fixed(book) => {
+                // 定版式：页是既定的，没有排版链。摆当前页，等比缩进视口、居中。
+                let pages = book.page_count();
+                self.laid_out = super::session::LaidOut {
+                    mode: chrome::PageMode::Paged,
+                    columns: 1,
+                    pages,
+                    viewport: viewport_height,
+                };
+                // 恢复落点：定版式的 `locator.chapter` 就是页号。
+                if let Some(locator) = self.pending_restore.take() {
+                    book.set_page(locator.chapter as usize);
+                }
+                self.page = book.page();
+                self.content_height = 0.0;
+                let current = book.page();
+                // 一页可能引好几张图（多图页 / 对开跨页）：按**共享高度**横成一行，整体居中。
+                // 一张图时这条式子退化成「等比缩进视口」，与普通漫画的旧表现逐像素相同。
+                let images = book.page_images(current);
+                // 尺寸未知（0）时按视口那一格的宽高比补：一格时等于「铺满」，正是
+                // 原来那条兜底；多格共享高度则必须有个比例，视口比例是最不失真的猜。
+                let box_aspect = usable / viewport_height;
+                let aspect = |w: u32, h: u32| {
+                    if w == 0 || h == 0 {
+                        box_aspect
+                    } else {
+                        w as f32 / h as f32
+                    }
+                };
+                let row_aspect: f32 = images.iter().map(|(_, w, h)| aspect(*w, *h)).sum();
+                if row_aspect > 0.0 {
+                    let height = viewport_height.min(usable / row_aspect);
+                    let y = self.header_reserve + (viewport_height - height).max(0.0) / 2.0;
+                    // 整行居中：先从左边把行宽的余量让出一半，再逐张往右推进。
+                    let mut x = (usable - row_aspect * height) / 2.0;
+                    for &(href, w, h) in &images {
+                        let width = aspect(w, h) * height;
+                        // 解不出字节的那一张空着，但仍然占位：多图页的排版不该因为
+                        // 少一张图就把剩下的往左挤。
+                        if let Some(request) = book.image_request(href) {
+                            let Some(image) = painted(&atlas, request, view, cx) else {
+                                continue;
+                            };
+                            let index = overlays.len();
+                            overlays.push(page_image(
+                                x,
+                                y,
+                                width,
+                                height,
+                                image,
+                                (w as f32, h as f32),
+                                &viewer,
+                                long_press,
+                                index,
+                            ));
+                        }
+                        x += width;
+                    }
+                }
+            }
             Source::Book(book) => {
                 if mode.is_continuous() {
                     // —— 连续滚动：锚章 ± 窗口拼成一条全局坐标 ——
                     // 1. 邻章补齐入库（0 高占位）：排版作业这就能排进后台队列，
-                    //    狂飙滚动时接缝提前两章就铺好了。
-                    book.ensure_window_spans(&self.prefs);
+                    //    狂飙滚动时接缝提前两章就铺好了。窗口铺多远要看**视口顶**
+                    //    （读者停在长章中后段时，前方那几章也得够一屏多才滚得动）。
+                    let __t = super::perf::Timer::start();
+                    let __before = book.docs_mut().count();
+                    book.ensure_window_spans(&self.prefs, viewport_height, self.scroll_y);
+                    let __new = book.docs_mut().count().saturating_sub(__before) as u32;
+                    let __spans = __t.ns();
+                    super::perf::add(|frame| {
+                        frame.spans_ns += __spans;
+                        frame.spans_new += __new;
+                    });
                     // 2. 按当前（上一帧的）坐标链记下视口顶：排版收完结果好补偿。
                     let snapshot = book.spine_snapshot(self.scroll_y, chapter_gap);
                     // 3. 排版：锚章先提交（恢复落点等它），邻居随后。连续模式只排版
                     //    不切片（一片高 0 是「不分片」的哨兵值）。
+                    let __t = super::perf::Timer::start();
                     for doc in book.docs_mut() {
                         doc.ensure_viewport(
                             window,
@@ -141,7 +240,10 @@ impl Render for ReaderSession {
                             },
                         );
                     }
-                    // 4. 高度变了就补偿：视口顶那一行字在屏幕上纹丝不动。
+                    let __layout = __t.ns();
+                    super::perf::add(|frame| frame.layout_ns += __layout);
+                    // 4–7. 坐标链那一段：补偿、恢复落点、锚章迁移、总高与夹取。
+                    let __spine = super::perf::Timer::start();
                     book.compensate_spine(snapshot, &mut self.scroll_y, chapter_gap);
                     self.laid_out = super::session::LaidOut {
                         mode,
@@ -175,6 +277,8 @@ impl Render for ReaderSession {
                     self.content_height = book.content_height(chapter_gap);
                     let max_scroll = (self.content_height - viewport_height).max(0.0);
                     self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
+                    let __spine = __spine.ns();
+                    super::perf::add(|frame| frame.spine_ns += __spine);
                     // 8. 可见带 → 逐章切场景：每章用自己的排版与图片索引，
                     //    换算只差一个章基线。没排完的章不进链，自然一帧都不画。
                     let band = self.scroll_y..(self.scroll_y + viewport_height);
@@ -189,7 +293,8 @@ impl Render for ReaderSession {
                         // 「哪些行与这条带有关」是行盒的知识，不是界面的（`plans/阅读管线.md`
                         // §十一 第 4、10 条）——以前这里递的是 `0..行数`，每帧扫一遍整章。
                         let local = (band.start - placed.base_y)..(band.end - placed.base_y);
-                        let scene = Scene::build(
+                        let __t = super::perf::Timer::start();
+                        let mut scene = Scene::build(
                             doc,
                             font_cache,
                             &family,
@@ -200,11 +305,40 @@ impl Render for ReaderSession {
                             self.header_reserve,
                             foreground,
                         );
+                        let __scene = __t.ns();
+                        let __sh = super::perf::Timer::start();
+                        shape_runs(&mut scene, doc, window);
+                        let __sh = __sh.ns();
+                        super::perf::add(|frame| frame.shape_runs_ns += __sh);
+                        let (__runs, __images) =
+                            (scene.runs.len() as u32, scene.images.len() as u32);
+                        super::perf::add(|frame| {
+                            frame.scene_ns += __scene;
+                            frame.scenes += 1;
+                            frame.scene_runs += __runs;
+                            frame.images += __images;
+                        });
                         element.extend(scene.runs);
                         for decor in scene.decorations {
                             column.extend(decoration_child(decor));
                         }
-                        overlays.extend(scene.images.into_iter().map(image_child));
+                        for image in scene.images {
+                            let Some(rendered) = painted(&atlas, image.image.clone(), view, cx)
+                            else {
+                                continue;
+                            };
+                            // 序号按「这一帧已经摆了几张」取：连续滚动时一屏可能跨两章，
+                            // 各自从 0 数会撞同名。
+                            let index = overlays.len();
+                            overlays.push(image_child(
+                                image,
+                                rendered,
+                                &viewer,
+                                index,
+                                &reader_weak,
+                            ));
+                        }
+                        let __fills = super::perf::Timer::start();
                         annotation_fills(
                             &mut element,
                             doc,
@@ -219,6 +353,8 @@ impl Render for ReaderSession {
                             self.header_reserve,
                             (band.start - placed.base_y)..(band.end - placed.base_y),
                         );
+                        let __fills = __fills.ns();
+                        super::perf::add(|frame| frame.fills_ns += __fills);
                     }
                 } else {
                     // —— 分页 / 双页：只用锚章那份排版，一页取几片、每片一栏 ——
@@ -271,7 +407,7 @@ impl Render for ReaderSession {
                         }
                         let x =
                             self.prefs.margin_x + column_offset(column_width, gap, slice.column);
-                        let scene = Scene::build(
+                        let mut scene = Scene::build(
                             book.document(),
                             font_cache,
                             &family,
@@ -282,11 +418,34 @@ impl Render for ReaderSession {
                             self.header_reserve,
                             foreground,
                         );
+                        let __sh = super::perf::Timer::start();
+                        shape_runs(&mut scene, book.document(), window);
+                        let __sh = __sh.ns();
+                        super::perf::add(|frame| frame.shape_runs_ns += __sh);
                         element.extend(scene.runs);
                         for decor in scene.decorations {
                             column.extend(decoration_child(decor));
                         }
-                        overlays = scene.images.into_iter().map(image_child).collect();
+                        // 两张栏的图都要摆进同一份 `overlays`。从前这里是
+                        // `overlays = scene.images...collect()`，后一栏把前一栏那几张
+                        // **整份覆盖掉** —— 双页对开时只有右边那栏的图画得出来。
+                        // 除了少画，它还让图集的账算错：被覆盖掉的那几张已经按「这一帧
+                        // 在场」记过一笔，却没有元素去画它（回收看的就是这个数）。
+                        for image in scene.images {
+                            let Some(rendered) = painted(&atlas, image.image.clone(), view, cx)
+                            else {
+                                continue;
+                            };
+                            let index = overlays.len();
+                            overlays.push(image_child(
+                                image,
+                                rendered,
+                                &viewer,
+                                index,
+                                &reader_weak,
+                            ));
+                        }
+                        let __fills = super::perf::Timer::start();
                         annotation_fills(
                             &mut element,
                             book.document(),
@@ -301,6 +460,8 @@ impl Render for ReaderSession {
                             self.header_reserve,
                             slice.origin_y..(slice.origin_y + slice.height + 1.0),
                         );
+                        let __fills = __fills.ns();
+                        super::perf::add(|frame| frame.fills_ns += __fills);
                     }
                 }
             }
@@ -423,14 +584,21 @@ impl Render for ReaderSession {
         for image in overlays {
             column = column.child(image);
         }
+        // 帧末回收图集。**必须**在这一帧的元素树全部搭完之后：中途放掉的格子会被同一帧
+        // 里的 `img` 重新传回去，白花一趟上传（`image_atlas::end_frame` 那两条不动的规矩）。
+        self.atlas
+            .update(cx, |atlas, cx| atlas.end_frame(window, cx));
         // 选中菜单（M6）：摆位是 `selection_menu::slot` 那条纯判断，元素本体在
         // `selection_menu.rs` 里。浮层点不住的教训见 page.rs 模块注释，所以它是压在正文
         // 之上的真按钮；拖动期间收起，松手即回。
+        // 卡片高按「这一帧要不要摆颜色那一行」算 —— 挑中的正是库里某一条划线时多一行格子。
+        let with_colors = self.selection_annotation().is_some();
         let slot = if self.selection_menu_open() {
             selection_menu::slot(
                 menu_anchor.0,
                 menu_anchor.1,
                 f32::from(viewport_size.height),
+                selection_menu::card_height(with_colors),
             )
         } else {
             selection_menu::Slot::Hidden
@@ -442,9 +610,18 @@ impl Render for ReaderSession {
             None => self.menu_bounds.set(None),
         }
 
+        // `render` 这一段结账。收在**整条元素树搭完**之后：从前它收在连续滚动那一臂的
+        // 中途，于是选区矩形、菜单条、overlay 装配那一段两头都不算（`total = render + paint`
+        // 是恒等式，那段时间就凭空消失了）。gpui 拿这棵树去做 taffy 布局与合成仍然在
+        // 这一格**之外** —— 那部分落在 `gap_us` 里，这一层量不到。
+        let __total = __render.ns();
+        super::perf::add(|frame| frame.render_ns = __total);
         let listener = cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _window, cx| {
-            this.on_scroll(event);
-            cx.notify();
+            // 挪动了才重画：滚到章尾夹住、分页没攒够半屏时一整帧的重建可以整份省掉
+            // （判据与 gpui 的 `div` 滚动容器、zed editor 的 `scroll` 一致）。
+            if this.on_scroll(event) {
+                cx.notify();
+            }
         });
         div()
             .id("folio-reader")
@@ -458,16 +635,198 @@ impl Render for ReaderSession {
     }
 }
 
-/// 一片里的一张图：绝对摆位交给 gpui 的 `img`。
-fn image_child(image: VisibleImage) -> AnyElement {
-    div()
+/// 这一帧这张图画得出来吗 —— 顺手把「这一帧在场」记进图集（帧末的回收按这个数放人）。
+///
+/// 还在解 / 解不出来的给 `None`：那一块空着，正文照排（与从前容器丢失时同一个表现），
+/// 解完那一趟会 `notify(view)` 自己逼出一帧，不需要这里去轮询。
+fn painted(
+    atlas: &Entity<ImageAtlas>,
+    request: DecodeRequest,
+    view: EntityId,
+    cx: &mut App,
+) -> Option<Arc<RenderImage>> {
+    let __t = super::perf::Timer::start();
+    let image = atlas.update(cx, |atlas, cx| atlas.painted(&request, view, cx));
+    let __image = __t.ns();
+    super::perf::add(|frame| frame.image_ns += __image);
+    image
+}
+
+/// 一片里的一张图：绝对摆位交给 gpui 的 `img`，外加「点一下摊开看」。
+///
+/// 一张图若是**脚注标记**（老书把标记做成一张小「注」图），那一击归脚注 —— 抬起注文，
+/// 不进图片查看器。判据是排版期就解好的 `image.footnote`（见 [`VisibleImage::footnote`]），
+/// 这一层只按结果分流。
+///
+/// `rendered` 是图集那一层交回来的像素：`image` 里只有摆位与那条活儿（`DecodeRequest`），
+/// 像素不随场景走（见 [`super::image_atlas`]）。
+fn image_child(
+    image: VisibleImage,
+    rendered: Arc<RenderImage>,
+    viewer: &Option<Entity<ImageViewer>>,
+    index: usize,
+    reader: &WeakEntity<ReaderSession>,
+) -> AnyElement {
+    let natural = image.natural;
+    let drawable = rendered.clone();
+    let frame = div()
         .absolute()
         .left(px(image.x))
         .top(px(image.top))
         .w(px(image.width))
         .h(px(image.height))
-        .child(img(image.image).size_full())
+        .child(img(rendered).size_full());
+    // 脚注标记优先：它是「注」图，不是插图，点它要的是注文而不是放大。
+    if let Some(note) = image.footnote {
+        return footnote_marker(frame, note, reader.clone(), index);
+    }
+    match viewer {
+        Some(viewer) => {
+            open_on_tap(frame, viewer.clone(), drawable, natural, index).into_any_element()
+        }
+        None => frame.into_any_element(),
+    }
+}
+
+/// 给一张脚注标记图挂上「点开看注」。
+///
+/// 与 `open_on_tap` 同一条取舍（`block_mouse_except_scroll` 把这一击从整屏正文的
+/// 分区里拿回来），只是去向换成会话的脚注状态：注文 + 点击位置一起交出去，弹层由
+/// 阅读页画（见 `page::ReadingPage::footnote_popover`）。
+fn footnote_marker(
+    frame: Div,
+    note: String,
+    reader: WeakEntity<ReaderSession>,
+    index: usize,
+) -> AnyElement {
+    frame
+        .id(("reader-footnote-image", index))
+        .block_mouse_except_scroll()
+        .on_click(move |event: &ClickEvent, _window, cx| {
+            let at = event.position();
+            let note = note.clone();
+            let _ = reader.update(cx, |session, cx| session.show_footnote(note, at, cx));
+        })
+        .test_support()
         .into_any_element()
+}
+
+/// 定版式一页的元素：绝对定位到 `(x, y)`、撑满 `w × h`，外加「看大图」那一条入口。
+///
+/// 这一臂的入口与正文插图不同，而且是**按端不同**：定版式的页几乎占满整屏，单击就是
+/// 翻页本身。按得住长按的那一端把入口挂在长按上（单击一个字都不动，翻页照常）；
+/// 按不住的那一端（桌面鼠标根本没有长按）挂单击，翻页让给页外的留白与音量键。
+/// 判据在 [`crate::ui::host::supports_long_press`]，这一层不写 `cfg`。
+///
+/// 九个参数摆平一页：前四个是排版给好的摆位，第五六个是那张图与它的固有尺寸，
+/// 后三个是「怎么开」——拆开传反而要多造一个只活一帧的结构体。
+#[allow(clippy::too_many_arguments)]
+fn page_image(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    image: Arc<RenderImage>,
+    natural: (f32, f32),
+    viewer: &Option<Entity<ImageViewer>>,
+    long_press: bool,
+    index: usize,
+) -> AnyElement {
+    let frame = div()
+        .absolute()
+        .left(px(x))
+        .top(px(y))
+        .w(px(w))
+        .h(px(h))
+        .child(img(image.clone()).size_full());
+    let Some(viewer) = viewer.clone() else {
+        return frame.into_any_element();
+    };
+    if long_press {
+        frame
+            .child(long_press_to_open(image, natural, viewer))
+            .into_any_element()
+    } else {
+        open_on_tap(frame, viewer, image, natural, index).into_any_element()
+    }
+}
+
+/// 给一张图挂上「点开放大」。
+///
+/// `block_mouse_except_scroll` 而不是 `occlude`：这一击要从正文那三层分区里拿回来
+/// （gpui 的一击会发给每一个 hitbox 含按下点的 handler，而正文那层是整屏的 —— 见
+/// `page.rs` 里顶栏那条同一取舍），但读者**从图上起手**也要能把正文滚走，所以只挡鼠标
+/// 不挡滚动。
+///
+/// 带 id 才挂得住点击，`index` 就是这一帧里它是第几张被摆上屏的图（按 `overlays` 当时的
+/// 长度取，跨章连续滚动时也不会撞名）。名字化的 id 还留了个口子：宿主的测试可以按
+/// `("reader-image", 0)` 直接点在那张图上。
+fn open_on_tap(
+    frame: Div,
+    viewer: Entity<ImageViewer>,
+    image: Arc<RenderImage>,
+    natural: (f32, f32),
+    index: usize,
+) -> impl IntoElement {
+    frame
+        .id(("reader-image", index))
+        .block_mouse_except_scroll()
+        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let viewport = viewport_size(window);
+            let image = image.clone();
+            viewer.update(cx, |viewer, cx| {
+                viewer.open(image, natural, viewport);
+                cx.notify();
+            });
+        })
+        // 挂在最外层：宿主的测试要按 `("reader-image", 序)` 点在这张图上。
+        .test_support()
+}
+
+/// 「按住这一页」的监听，挂在 `canvas` 的绘制回调里：`window.on_mouse_event` 只活到本帧
+/// 事件分发结束，每个绘制帧都要重挂一遍（与 [`super::paint`] 里选中那几条同一规矩）。
+///
+/// `prevent_default` 就是**认领**这一手势：gpui 拿 `default_prevented` 当「这一手势被
+/// 接走了」的依据（`window.rs` 里 `resolve_long_press(claimed)`）。不认领的话手指抬起时
+/// 会补出一个合成点击，而那一击的意思正是翻页 —— 按住看大图会变成「翻一页再看大图」。
+fn long_press_to_open(
+    image: Arc<RenderImage>,
+    natural: (f32, f32),
+    viewer: Entity<ImageViewer>,
+) -> AnyElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window: &mut Window, _cx: &mut App| {
+            let viewer = viewer.clone();
+            window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
+                if !phase.bubble() || event.phase != TouchPhase::Started {
+                    return;
+                }
+                // 这一格只负责自己那一页：抬起之前手指挪出图外就不算「按住这张图」。
+                if !bounds.contains(&event.start_position) {
+                    return;
+                }
+                let viewport = viewport_size(window);
+                let image = image.clone();
+                viewer.update(cx, |viewer, cx| {
+                    viewer.open(image, natural, viewport);
+                    cx.notify();
+                });
+                window.prevent_default();
+                cx.stop_propagation();
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
+}
+
+/// 窗口视口，两个轴都是 CSS 像素。查看器第一帧拿它当摆位的格子，之后由那一层自己
+/// 量出来的宽高校正（见 `image_viewer::overlay` 里那块 `canvas`）。
+fn viewport_size(window: &Window) -> (f32, f32) {
+    let size = window.viewport_size();
+    (f32::from(size.width), f32::from(size.height))
 }
 
 /// 把「选区 ∩ 一个可见带」换成元素局部的矩形，追加进 `out`。
@@ -475,6 +834,10 @@ fn image_child(image: VisibleImage) -> AnyElement {
 /// `x` / `origin_y` 是这一栏（片）的摆位，与 `Scene::build` 同一套换算；
 /// `band` 是排版坐标里的可见 y 区间——夹进 `sub` 的字符区间在带与带的接缝处
 /// 可能越进下一带（`coordinate_of_line` 给的是下一带首字符），矩形再按 y 滤一遍。
+///
+/// 行号在进 `rects_for_range_in` **之前**就按这两条夹好（字符索引 ∩ 可见带，
+/// `Document::selection_rects_in_band`），所以下面那道 y 滤是重复的一道：留着，
+/// 因为「窄化算错就少一块底色」这种账只能靠两道独立的不等式互相兜。
 #[allow(clippy::too_many_arguments)]
 fn highlight_rects(
     doc: &Document,
@@ -490,7 +853,7 @@ fn highlight_rects(
     if sub.start >= sub.end {
         return;
     }
-    for rect in doc.selection_rects(window, cx, sub) {
+    for rect in doc.selection_rects_in_band(window, cx, sub, band.clone()) {
         if rect.y + rect.height <= band.start || rect.y >= band.end {
             continue;
         }
@@ -549,6 +912,21 @@ fn annotation_fills(
         for rect in rects {
             element.fill(rect, color);
         }
+    }
+}
+
+/// 把这一屏的 run 逐条过一遍章的 shaping 表：命中的抬一次引用计数，未命中的当场 shape
+/// 一次并存进去（[`Document::shaped_line`]）。
+///
+/// 为什么在这一层而不是绘制层：查表要同时拿到 `Document`（表挂在它身上）与 `Window`
+/// （shape 要走窗口级文本系统），而 `GlyphsElement::paint` 只有后者。
+///
+/// 没有身份的那条 run（`key` 是 `None`：兜底行、测试里手搓的）跳过，绘制时它自己会 shape。
+fn shape_runs(scene: &mut Scene, doc: &Document, window: &Window) {
+    for run in &mut scene.runs {
+        let Some(key) = run.key else { continue };
+        let shaped = doc.shaped_line(key, || shape(window, run));
+        run.shaped = Some(shaped);
     }
 }
 

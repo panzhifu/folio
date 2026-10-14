@@ -42,7 +42,7 @@ pub use content::annotation::{
 pub use content::document::{BookDocument, ContentRef, Document, LocatorKind};
 pub use content::format::{
     Chapter, ChapterLocator, ChapterText, Content, ContentKind, DocMeta, DocumentProvider,
-    FixedDoc, FixedPage, FlowDoc, Format, PageSource,
+    FixedDoc, FixedPage, FlowDoc, Format, PageSource, Series,
 };
 pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};

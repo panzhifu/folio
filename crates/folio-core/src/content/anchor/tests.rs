@@ -4,9 +4,11 @@
 //! 几何用与 `layout::tests` 同一套假度量（汉字 1 em、拉丁 0.5 em、空格 0.25 em），
 //! 所以行盒数量与断点都是推出来的，不是照实现回填的。
 
+use std::ops::Range;
+
 use crate::content::anchor::{
-    CONTEXT_CHARS, Confidence, Relocated, TextAnchor, TextMap, line_at_offset, line_at_y,
-    line_chars, line_offset, relocate,
+    CONTEXT_CHARS, CharLines, Confidence, Relocated, TextAnchor, TextMap, line_at_offset,
+    line_at_offset_indexed, line_at_y, line_chars, line_offset, relocate,
 };
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{ComputedStyle, cascade};
@@ -381,5 +383,196 @@ fn whitespace_between_tags_is_part_of_the_coordinate_space() {
     assert_eq!(
         line_offset(&tight.layout, &tight.dom, &tight.map, 0).unwrap_or(999),
         0
+    );
+}
+
+/// 三段书 + 两种方向：索引可用（单调性是真量出来的）的那份 fixture。
+fn indexed(css: &str) -> (Chapter, CharLines) {
+    let chapter = typeset(
+        &format!(
+            "<body><p>{}</p><p>短段落</p><p>{}</p></body>",
+            cjk(50),
+            cjk(37)
+        ),
+        css,
+        200.0,
+    );
+    let index = CharLines::build(&chapter.layout, &chapter.dom, &chapter.map);
+    (chapter, index)
+}
+
+/// 「这一章的行按不按字符序排」是 build 当场量出来的。这里三种形状都该是有序 ——
+/// 一旦哪天变成 false，二分就整片退回整表扫，那条路的正确性由下面两条钉着，
+/// 但**收益也没了**，所以这一格要有人喊。
+#[test]
+fn the_index_measures_its_own_monotonicity() {
+    for css in ["", "p { direction: rtl }", "p { font-size: 13px }"] {
+        let (chapter, index) = indexed(css);
+        assert!(
+            index.is_ordered(),
+            "样式 {css:?}：{} 行的字符区间不单调，二分已不可用 —— 各行区间 {:?}",
+            chapter.layout.lines.len(),
+            (0..chapter.layout.lines.len())
+                .map(|line| line_chars(&chapter.layout, &chapter.dom, &chapter.map, line))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// 索引与整表扫在**每一个**偏移上给出同一行。窄化不改答案，这是其中一半证明。
+#[test]
+fn the_index_lands_on_the_same_line_as_the_full_scan_for_every_offset() {
+    for css in ["", "p { direction: rtl }"] {
+        let (chapter, index) = indexed(css);
+        for offset in 0..=chapter.map.chars() {
+            let scanned = line_at_offset(&chapter.layout, &chapter.dom, &chapter.map, offset);
+            let bisected = line_at_offset_indexed(
+                &chapter.layout,
+                &chapter.dom,
+                &chapter.map,
+                offset,
+                Some(&index),
+            );
+            assert_eq!(
+                bisected, scanned,
+                "样式 {css:?}、偏移 {offset} 上两条口径分叉"
+            );
+        }
+    }
+}
+
+/// 行号段是**超集**：与区间相交的每一行都落在段内。这是另一半证明 —— 少一行就是
+/// 屏上少一块底色，而这块底色本来就不该在别的行上。
+#[test]
+fn the_line_range_covers_every_line_that_intersects_the_query() {
+    let (chapter, index) = indexed("");
+    let total = chapter.map.chars();
+    let mut ranges: Vec<Range<usize>> = vec![0..1, 5..5, 22..38, 0..total, total..total + 50];
+    for at in 0..total {
+        ranges.push(at..at + 1);
+        ranges.push(at..at + 4);
+    }
+    // 反向拖出来的区间（`end < start`）也要有答案，夹平由查询侧负责。
+    ranges.push(Range { start: 30, end: 12 });
+    for range in ranges {
+        let Some(lines) = index.lines_for(range.clone()) else {
+            panic!("区间 {range:?}：索引说可用，却没给出行号段");
+        };
+        let (from, to) = (
+            range.start.min(total),
+            range.end.max(range.start).min(total),
+        );
+        for line in 0..chapter.layout.lines.len() {
+            let Some(here) = line_chars(&chapter.layout, &chapter.dom, &chapter.map, line) else {
+                continue;
+            };
+            if here.start < to && here.end > from && from < to {
+                assert!(
+                    lines.contains(&line),
+                    "区间 {range:?}：第 {line} 行覆盖 {here:?}，行号段 {lines:?} 却没有它"
+                );
+            }
+        }
+    }
+}
+
+/// 一小段选区只该带来邻近的几行 —— 「窄化真的窄了」那一半。把 `lines_for` 的两头
+/// 夹取删掉（或让它整表返回）就是这条当场红。
+#[test]
+fn a_short_selection_narrows_to_a_short_slice() {
+    let (chapter, index) = indexed("");
+    let total_lines = chapter.layout.lines.len();
+    let lines = index.lines_for(26..28).expect("单调的章该给出行号段");
+    assert!(
+        lines.len() < total_lines,
+        "两字选区给了 {lines:?}／整章 {total_lines} 行，窄化没发生"
+    );
+    assert!(
+        lines.end <= total_lines,
+        "行号段 {lines:?} 越过了行数 {total_lines}"
+    );
+    // 落在两行文字之间的插入点、以及反向拖出来的区间：一行都不必扫。
+    for degenerate in [Range { start: 9, end: 9 }, Range { start: 30, end: 12 }] {
+        let slice = index.lines_for(degenerate.clone());
+        assert!(
+            slice.as_ref().is_some_and(|lines| lines.len() <= 1),
+            "夹平后没有字符的区间 {degenerate:?} 却给了 {slice:?}：至少不该超过一行"
+        );
+    }
+    // 整章区间就是整章，不多不少（这是「超集」的另一头）。
+    let whole = index.lines_for(0..chapter.map.chars()).unwrap();
+    assert_eq!(
+        (whole.start, whole.end),
+        (0, total_lines),
+        "整章区间该覆盖全部行"
+    );
+}
+
+/// 那道「不单调就退回整表扫」的防线要**真的能退**：把 `ordered` 抹平，两条查询都得
+/// 给出与整表扫一样的答案，而索引本身只给 `None`。
+///
+/// 这一条不是形式主义 —— 现实中「一行的字符区间夹住别行的字符」（`line_chars` 取的是
+/// 包住该行所有 run 的并集）是可能出现的，那时二分的前提根本不在。
+#[test]
+fn an_index_that_does_not_trust_its_order_falls_back_to_the_whole_chapter() {
+    let (chapter, built) = indexed("");
+    let scrambled = CharLines {
+        entries: built.entries.clone(),
+        ordered: false,
+    };
+    assert!(!scrambled.is_ordered());
+    assert_eq!(scrambled.lines_for(20..24), None, "不可用时不给行号段");
+    assert_eq!(scrambled.line_at(21), None, "不可用时不给行号");
+    for offset in 0..=chapter.map.chars() {
+        assert_eq!(
+            line_at_offset_indexed(
+                &chapter.layout,
+                &chapter.dom,
+                &chapter.map,
+                offset,
+                Some(&scrambled)
+            ),
+            line_at_offset(&chapter.layout, &chapter.dom, &chapter.map, offset),
+            "带着不可用的索引，偏移 {offset} 上反而与整表扫分了家"
+        );
+    }
+}
+
+/// 两行都盖住同一个偏移时给**行号小的**那一个：整表扫是从上往下第一个 `contains`
+/// 就返回。行盒叠放是真会出现的（`Layout::stacked` 就是为它设的），所以「起点与终点
+/// 都不减、两行区间却重叠」是一张合法的表 —— 只按「起点 <= offset 的最后一条」取
+/// 就会落到更靠下的那一行，而那是能看出来的错（恢复落点跳下半行）。
+#[test]
+fn overlapping_entries_return_the_higher_line_like_the_scan_does() {
+    let index = CharLines {
+        entries: vec![(0, 0, 5), (3, 2, 9), (6, 8, 12)],
+        ordered: true,
+    };
+    assert_eq!(index.line_at(0), Some(0));
+    assert_eq!(
+        index.line_at(1),
+        Some(0),
+        "起点都不大于 1，最后一条不算 —— 第 0 行盖住它"
+    );
+    assert_eq!(
+        index.line_at(3),
+        Some(0),
+        "第 0 与第 3 行都盖住 3，要落在更靠上的第 0 行"
+    );
+    assert_eq!(
+        index.line_at(8),
+        Some(3),
+        "8 离开了第 0 行，第一个覆盖它的是第 3 行"
+    );
+    assert_eq!(index.line_at(10), Some(6));
+    assert_eq!(
+        index.line_at(12),
+        Some(6),
+        "谁都不盖住时给起点在其前的最后一行"
+    );
+    assert_eq!(
+        index.lines_for(3..9),
+        Some(0..7),
+        "并集行段要含第 0 到第 6 行：中间那行的行号在两端之间"
     );
 }

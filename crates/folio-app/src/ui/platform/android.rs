@@ -82,6 +82,23 @@ fn android_main(app: android_activity::AndroidApp) {
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx: &mut App| {
             tracing::info!("android_main: run callback — booting the app shell");
+            // 灰度 AA 而不是平台建议的次像素 AA（wgpu 后端 `recommended_rendering_mode`
+            // 恒回 `Subpixel`，见 `gpui-pre-wgpu` 的 `cosmic_text_system.rs`）。
+            //
+            // 这不是随手设的：这一笔落在**整屏一次进来**的那几个帧上（开书第一屏、跳章、
+            // 被合帧的快 fling），次像素那条路要 44–52 ms —— 差在 swash 对 CJK 轮廓做 LCD
+            // 渲染的代价与图集里每格三通道的字节数上。3 倍屏上肉眼差别很小（灰度也是
+            // Android 上多数应用的正文口径）。
+            //
+            // 两个旧说法 2026-10-15 用同一个探针字段 `glyph_only_us` 重量过，都不准：
+            // 灰度**没**降到当年记的「6–10 ms」（冷一屏读到 26.9–44.2 ms / 314–384 字，
+            // 暖一屏 15.2 ms）；而它也**不是**「每翻一屏都要付一次」—— 慢滚时新行逐行进屏，
+            // 每帧只 0.4–0.5 ms，4080 帧连续滚动里 ≥8 ms 的一共两条。设这一句的理由仍然
+            // 成立（省的就是那两条），但别拿它当「滚动卡顿的主因」。数、三个新计数与
+            // 帧间隔的归因都在 `ui/features/reader/perf.rs` 的模块头。
+            //
+            // 想换回去就删掉这一句：观感优先于这点帧预算时，它不该拦着。
+            cx.set_text_rendering_mode(gpui_kit::TextRenderingMode::Grayscale);
             super::boot(cx, resolved);
         });
 

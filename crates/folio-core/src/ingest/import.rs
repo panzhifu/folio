@@ -1396,20 +1396,48 @@ fn staged_name(display_name: &str) -> String {
 pub struct PathsSource {
     paths: Vec<PathBuf>,
     kind: ImportKind,
+    /// 这些路径是不是**用完即弃的临时副本**。
+    ///
+    /// 只有系统选择器会先把选中的文件拷进应用自己的 cache（Android 的
+    /// `GpuiPathPicker`：`cache/gpui-import-<uuid>/<原名>`；iOS 的 sandbox copy 同理），
+    /// 再把拷贝的路径交出来。导入读完之后这些路径就没人要了，Drop 时连那个只装它
+    /// 一个文件的临时目录一起清掉。
+    ///
+    /// 扫描 / 传书 / 监听交的都是读者自己的文件；桌面选择器给的也是原文件 ——
+    /// 那几路绝不能打开这个开关，删了就是数据事故。
+    remove_on_drop: bool,
 }
 
 impl PathsSource {
-    /// 选择器选的文件。
+    /// 选择器选的文件。路径指向读者自己的原件 —— 导入只拷贝，Drop 时不许删。
     pub fn picked(paths: Vec<PathBuf>) -> Self {
         Self {
             paths,
             kind: ImportKind::Picked,
+            remove_on_drop: false,
+        }
+    }
+
+    /// 选择器交回的是应用自己先拷好的临时副本：读完即弃，Drop 时把文件和那个
+    /// `gpui-import-<uuid>` 空目录一起清掉。
+    ///
+    /// 判据由平台侧给（app 的 `ui::host::picked_files_are_temporary`），这里只记住结果；
+    /// 扫描 / 传书 / 监听那几路仍走 [`Self::picked`] / [`Self::new`]。
+    pub fn picked_temporary(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            kind: ImportKind::Picked,
+            remove_on_drop: true,
         }
     }
 
     /// 调用方直接给的一批路径，`kind` 说清这是谁交的（扫描 / 监听 / 传书各报各自的名）。
     pub fn new(paths: Vec<PathBuf>, kind: ImportKind) -> Self {
-        Self { paths, kind }
+        Self {
+            paths,
+            kind,
+            remove_on_drop: false,
+        }
     }
 
     pub(crate) fn candidates_from(paths: &[PathBuf]) -> Vec<Candidate> {
@@ -1439,6 +1467,42 @@ impl Source for PathsSource {
 
     fn stage(&self, candidate: &Candidate, staging_dir: &Path, ctx: &StageCtx) -> Result<PathBuf> {
         stage_local(candidate, staging_dir, ctx)
+    }
+}
+
+impl Drop for PathsSource {
+    fn drop(&mut self) {
+        if !self.remove_on_drop {
+            return;
+        }
+        for path in &self.paths {
+            remove_temporary(path);
+        }
+    }
+}
+
+/// 删掉一份选择器临时副本，再尽力删掉它那个只装这一份的空目录。
+///
+/// 父目录用 `remove_dir` 而不是 `remove_dir_all`：正常形状下它是 `gpui-import-<uuid>`，
+/// 删完文件就空了；万一哪天路径形状变了，这也不会递归带走别的文件。删除只记
+/// debug：释放缓存是自愈动作，不值得为它刷警告，而 `NotFound` 更是预期内的重复清理。
+fn remove_temporary(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            tracing::debug!("import: 临时副本 {} 没清掉：{err}", path.display());
+            return;
+        }
+    }
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::remove_dir(parent)
+        && !matches!(
+            err.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+        )
+    {
+        tracing::debug!("import: 临时目录 {} 没清掉：{err}", parent.display());
     }
 }
 

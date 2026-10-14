@@ -14,12 +14,28 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::types::{BookRow, ShelfItem};
+use super::types::{BookMeta, BookRow, ShelfItem};
 use super::{Store, now};
 use crate::Result;
-use crate::content::format::DocMeta;
+use crate::content::format::{DocMeta, Series};
 use crate::group::{GroupBy, ShelfGroup, UNGROUPED, group_shelf};
 use crate::position::Locator;
+
+/// 多值的那几格（作者、贡献者、主题词）在库里是**换行拼接**的一列。
+///
+/// 不另引一种 JSON 编码：同一件事两种写法，早晚长出两种读法。`join("\n")` 与
+/// `lines()` 就是这一列的全部规则，写侧与读侧各一处。
+pub(super) fn join_list(items: &[String]) -> String {
+    items.join("\n")
+}
+
+/// [`join_list`] 的反向。空行丢掉 —— 作者名里不该有空行，而老库那一列可能就是空串。
+pub(super) fn split_list(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
 
 pub(super) fn book_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
     let authors: String = r.get(3)?;
@@ -27,14 +43,46 @@ pub(super) fn book_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> 
         id: r.get(0)?,
         path: r.get(1)?,
         title: r.get(2)?,
-        authors: authors
-            .lines()
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect(),
+        authors: split_list(&authors),
         format: r.get(4)?,
         size: r.get::<_, i64>(5)? as u64,
         last_opened_at: r.get(6)?,
+    })
+}
+
+/// [`Store::book_meta`] 的列清单。它**不进** `BOOK_COLUMNS` 那套架面投影，
+/// 理由见 [`BookMeta`]：简介与主题词是长文本，架面一次读几百行时用不上。
+const META_COLUMNS: &str = "id, title, authors, contributors, subjects, description, publisher, \
+                            published, language, isbn, dctype, rights, series, series_position, \
+                            format, size";
+
+/// 信息屏那一屏要的一行。列序与 [`META_COLUMNS`] 一致。
+fn meta_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookMeta> {
+    let list = |i: usize| -> rusqlite::Result<Vec<String>> {
+        Ok(split_list(&r.get::<_, String>(i)?))
+    };
+    // 系列两格：名字为空 = 不属于任何系列；序号只有在名字在的时候才取（空名字配
+    // 一个孤立序号是脏数据，不该画成「第 3 本」）。
+    let series = match r.get::<_, String>(12)? {
+        name if name.is_empty() => None,
+        name => Some(Series { name, position: r.get(13)? }),
+    };
+    Ok(BookMeta {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        authors: list(2)?,
+        contributors: list(3)?,
+        subjects: list(4)?,
+        description: r.get(5)?,
+        publisher: r.get(6)?,
+        published: r.get(7)?,
+        language: r.get(8)?,
+        isbn: r.get(9)?,
+        dctype: r.get(10)?,
+        rights: r.get(11)?,
+        series,
+        format: r.get(14)?,
+        size: r.get::<_, i64>(15)? as u64,
     })
 }
 
@@ -221,20 +269,41 @@ impl Store {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let path_s = path.to_string_lossy().into_owned();
         conn.execute(
-            "INSERT INTO books (path, title, authors, format, size, added_at, mtime)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO books (path, title, authors, format, size, added_at, mtime,
+                                contributors, subjects, description, publisher, published,
+                                language, isbn, dctype, rights, series, series_position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(path) DO UPDATE SET
                title = excluded.title, authors = excluded.authors,
                format = excluded.format, size = excluded.size,
-               mtime = excluded.mtime",
+               mtime = excluded.mtime,
+               contributors = excluded.contributors, subjects = excluded.subjects,
+               description = excluded.description, publisher = excluded.publisher,
+               published = excluded.published, language = excluded.language,
+               isbn = excluded.isbn, dctype = excluded.dctype, rights = excluded.rights,
+               series = excluded.series, series_position = excluded.series_position",
             params![
                 path_s,
                 meta.title,
-                meta.authors.join("\n"),
+                join_list(&meta.authors),
                 meta.format.as_str(),
                 meta.size as i64,
                 now(),
-                mtime_of(path)
+                mtime_of(path),
+                join_list(&meta.contributors),
+                join_list(&meta.subjects),
+                meta.description,
+                meta.publisher,
+                meta.published,
+                meta.language,
+                meta.isbn,
+                meta.dctype,
+                meta.rights,
+                meta.series.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
+                meta.series
+                    .as_ref()
+                    .map(|s| s.position.clone())
+                    .unwrap_or_default(),
             ],
         )?;
         let id: i64 = conn.query_row(
@@ -283,6 +352,17 @@ impl Store {
         Ok(conn
             .query_row(&sql, params![id], book_from_row)
             .optional()?)
+    }
+
+    /// 一本**书**的全部书目（Dublin Core 那一组）。
+    ///
+    /// 按 id 单查一条，而不是给 `BookRow` 加几列：架面一次要过几百行，而简介是长文本。
+    /// 同一条理由当年把封面字节挪出了库（v16），也同一条理由不让 `shelf()` 顺手带上它们。
+    /// 值全部来自导入那一趟 —— 这一格为空就是「这本书的书目区里没写」，不是「没读」。
+    pub fn book_meta(&self, id: i64) -> Result<Option<BookMeta>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let sql = format!("SELECT {META_COLUMNS} FROM books WHERE id = ?1");
+        Ok(conn.query_row(&sql, params![id], meta_from_row).optional()?)
     }
 
     /// 单拿这一本的封面字节。
@@ -624,10 +704,10 @@ impl Store {
         for c in Self::collections_in(&conn)? {
             groups.push(ShelfGroup {
                 name: c.name,
-                items: Self::shelf_in_collection_in(&conn, c.id)?,
+                items: Self::shelf_in_collection_in(&conn, c.id, "")?,
             });
         }
-        let loose = Self::shelf_in_no_collection_in(&conn)?;
+        let loose = Self::shelf_in_no_collection_in(&conn, "")?;
         if !loose.is_empty() {
             groups.push(ShelfGroup {
                 name: UNGROUPED.to_string(),
@@ -637,11 +717,22 @@ impl Store {
         Ok(groups)
     }
 
-    /// 一个集合里的书，最近放进去的在先 —— 与 [`Store::books_in_collection`] 同一条排序，
-    /// 只是这里带着封面字节，给分组视图直接画卡片用。
-    pub fn shelf_in_collection(&self, collection_id: i64) -> Result<Vec<ShelfItem>> {
+    /// 一个集合里的书，可再按书名 / 作者筛一道。架面顶部那颗分组筛选走这一条。
+    ///
+    /// 排序仍是「最近放进去的在先」（`added_at`），与整架那条「最近在读在先」不同：
+    /// 这里的主语是组，读者刚丢进来的那本应当先看见，与 [`Store::books_in_collection`] 同源。
+    pub fn shelf_in_collection(&self, collection_id: i64, query: &str) -> Result<Vec<ShelfItem>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        Self::shelf_in_collection_in(&conn, collection_id)
+        Self::shelf_in_collection_in(&conn, collection_id, query)
+    }
+
+    /// 还没进任何集合的书，同一套书名 / 作者过滤。架面筛「未分组」走这一条。
+    ///
+    /// 「未分组」是筛出来的、不是存出来的：库里没有一个叫这个名字的组，它是
+    /// [`Store::collection_groups`] 末尾追加的那一格（名字用 [`crate::group::UNGROUPED`]）。
+    pub fn shelf_ungrouped(&self, query: &str) -> Result<Vec<ShelfItem>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Self::shelf_in_no_collection_in(&conn, query)
     }
 
     /// [`Store::shelf`] 的不上锁版本；只由已经持了锁的一方调用。
@@ -650,10 +741,9 @@ impl Store {
         let sql = format!(
             r#"SELECT {SHELF_COLUMNS} FROM books
              LEFT JOIN positions ON positions.book_id = books.id
-             WHERE (?1 = ''
-                    OR books.title LIKE ?2 ESCAPE '\'
-                    OR books.authors LIKE ?2 ESCAPE '\')
-             {SHELF_ORDER}"#
+             WHERE {}
+             {SHELF_ORDER}"#,
+            query_clause("?1", "?2")
         );
         let mut stmt = conn.prepare(&sql)?;
         let pattern = like_pattern(trimmed);
@@ -663,34 +753,58 @@ impl Store {
     }
 
     /// [`Store::shelf_in_collection`] 的不上锁版本；只由已经持了锁的一方调用。
-    fn shelf_in_collection_in(conn: &Connection, collection_id: i64) -> Result<Vec<ShelfItem>> {
+    fn shelf_in_collection_in(
+        conn: &Connection,
+        collection_id: i64,
+        query: &str,
+    ) -> Result<Vec<ShelfItem>> {
+        let trimmed = query.trim();
         let sql = format!(
-            "SELECT {SHELF_COLUMNS} FROM books
+            r#"SELECT {SHELF_COLUMNS} FROM books
              LEFT JOIN positions ON positions.book_id = books.id
              JOIN collection_books cb ON cb.book_id = books.id
-             WHERE cb.collection_id = ?1
-             ORDER BY cb.added_at DESC, books.id DESC"
+             WHERE cb.collection_id = ?1 AND {}
+             ORDER BY cb.added_at DESC, books.id DESC"#,
+            query_clause("?2", "?3")
         );
         let mut stmt = conn.prepare(&sql)?;
+        let pattern = like_pattern(trimmed);
         Ok(stmt
-            .query_map(params![collection_id], shelf_from_row)?
+            .query_map(params![collection_id, trimmed, pattern], shelf_from_row)?
             .collect::<std::result::Result<_, _>>()?)
     }
 
     /// 还没进任何集合的书，排序与 [`Store::shelf`] 同一条（同一个 `SHELF_ORDER` 常量）。
-    /// [`Store::collection_groups`] 专属，不上锁。
-    fn shelf_in_no_collection_in(conn: &Connection) -> Result<Vec<ShelfItem>> {
+    /// [`Store::collection_groups`] 与架面那颗「未分组」筛选都走这里，不上锁。
+    fn shelf_in_no_collection_in(conn: &Connection, query: &str) -> Result<Vec<ShelfItem>> {
+        let trimmed = query.trim();
         let sql = format!(
-            "SELECT {SHELF_COLUMNS} FROM books
+            r#"SELECT {SHELF_COLUMNS} FROM books
              LEFT JOIN positions ON positions.book_id = books.id
              WHERE books.id NOT IN (SELECT book_id FROM collection_books)
-             {SHELF_ORDER}"
+               AND {}
+             {SHELF_ORDER}"#,
+            query_clause("?1", "?2")
         );
         let mut stmt = conn.prepare(&sql)?;
+        let pattern = like_pattern(trimmed);
         Ok(stmt
-            .query_map([], shelf_from_row)?
+            .query_map(params![trimmed, pattern], shelf_from_row)?
             .collect::<std::result::Result<_, _>>()?)
     }
+}
+
+/// 「词为空就全放，否则书名或作者命中」那一段 WHERE。整架、某组、未分组三条查询共用
+/// 同一份措辞 —— 少一处 `ESCAPE '\\'` 或把列名写歪，不会报错，只会让三处搜出三套结果。
+///
+/// 占位符序号由调用方给：整架那条词是 `?1`、模式串是 `?2`；按组筛的那条前面还占了一个
+/// 集合 id，序号就往后挪一位。
+fn query_clause(word: &str, pattern: &str) -> String {
+    format!(
+        r#"({word} = ''
+                    OR books.title LIKE {pattern} ESCAPE '\'
+                    OR books.authors LIKE {pattern} ESCAPE '\')"#
+    )
 }
 
 /// 用户输入 → `LIKE` 的匹配串。
@@ -736,7 +850,8 @@ mod grouping {
             authors: vec![author.into()],
             format: Format::Epub,
             size: 1,
-        }
+            ..DocMeta::default()
+            }
     }
 
     fn path(name: &str) -> PathBuf {

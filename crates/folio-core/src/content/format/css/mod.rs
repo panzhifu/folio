@@ -173,6 +173,10 @@ impl RuleSet {
             for decl in split_top_level(body, ';') {
                 match parse_declaration(&decl) {
                     Some(d) => declarations.push(d),
+                    // 空值声明（`font-family:;`、`padding-left:;`）是作者导出时的残渣，
+                    // 连声明都算不上 —— 静默丢掉，**不计入 `ignored`**，否则
+                    // 「拼不出来的块」那一格会被这种残渣灌水。
+                    None if is_blank_declaration(&decl) => {}
                     None => self.ignored += 1,
                 }
             }
@@ -443,6 +447,15 @@ pub(crate) fn parse_declaration(text: &str) -> Option<Declaration> {
 
 fn count_declarations(body: &str) -> usize {
     split_top_level(body, ';').len()
+}
+
+/// 一条「有属性名、值为空」的声明（`padding-left:;`）。`padding-left` 也自成一条，
+/// 所以判据是「冒号右侧 trim 后为空」。这类残渣该静默丢掉，不该计入「我们不支持的声明」。
+fn is_blank_declaration(text: &str) -> bool {
+    match text.split_once(':') {
+        Some((property, value)) => !property.trim().is_empty() && value.trim().is_empty(),
+        None => false,
+    }
 }
 
 /// 把 `/* … */` 换成等长空格。必须在上层做：注释常夹在选择器前面，

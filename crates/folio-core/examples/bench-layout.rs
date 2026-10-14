@@ -19,8 +19,9 @@ use folio_core::content::format::css::computed::{ComputedStyle, StyledDom, casca
 use folio_core::content::format::css::{Origin, RuleSet};
 use folio_core::infra::config::Reader;
 use folio_core::layout::{
-    BlockCache, FontKey, LayoutCache, LayoutKey, LayoutOptions, LineMetrics, Measure, NoImages,
-    layout, layout_cached, layout_with_blocks, measure_chapter, render_window,
+    BlockCache, FontKey, LayoutCache, LayoutInputs, LayoutKey, LayoutOptions, LineMetrics, Measure,
+    NoImages, content_hash, layout, layout_cached, layout_with_blocks, measure_chapter,
+    render_window,
 };
 
 /// 每批跑多少次。批内取平均，摊平单次中断。
@@ -310,7 +311,14 @@ fn main() {
     // ---- 缓存命中 ----
     let reader = Reader::default();
     // 键按公开构造点来 —— 与生产路径（`folio-app` 的排版作业）同一把键的形状。
-    let key = LayoutKey::compose(&src, "", &reader, WIDTH, 1, 0, 0);
+    let key = LayoutKey::compose(
+        LayoutInputs::compute("", &reader),
+        content_hash(&src),
+        WIDTH,
+        1,
+        0,
+        0,
+    );
     let mut cache = LayoutCache::new();
     println!();
     let hit = {
@@ -375,7 +383,14 @@ fn main() {
             width: WIDTH,
             light: false,
         };
-        let key_b = LayoutKey::compose(&src_b, "", &Reader::default(), WIDTH, 1, 0, 0);
+        let key_b = LayoutKey::compose(
+            LayoutInputs::compute("", &Reader::default()),
+            content_hash(&src_b),
+            WIDTH,
+            1,
+            0,
+            0,
+        );
 
         let (full_hot, _) = time_layout(&dom_b, &hot, root_b, opts);
         report("改一段后整章重排（无缓存）", full_hot, "");

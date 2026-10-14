@@ -8,12 +8,60 @@
 //! 单位口径集中记在这儿，因为它们是几处共用一套式子的原因：
 //! - `rem` 一律按**读者偏好字号**（`root_px`），不让书自己的 `html { font-size }` 改全局。
 //! - `em` 只在 `font-size` 里按**父**字号，其余长度按**自己**的字号 —— CSS 的规定。
-//! - `%` 在 `font-size` / `line-height` / `vertical-align` 里能算（基准已知）；外边距与
-//!   `text-indent` 的百分比判为不支持，那要按包含块宽度折算，是排版期才有的数。
+//! - `%` 在 `font-size` / `line-height` / `vertical-align` 里当场能算（基准已知）；
+//!   外边距、内边距与 `text-indent` 的百分比折算自**包含块宽度**，那是排版期才有的数，
+//!   所以折不成 px 就存成 `Length::Percent`，由 `layout` 拿基准宽折算（见 [`edge_length`]）。
 //! - 带单位的 `line-height` 折成倍数（除以**自己的**字号），代价是改字号时不重算。
 //! - `pt` 按 96/72 折算，裸数字按 `px`。
 
-use super::computed::{BorderStyle, BreakWhen, Color, Length};
+use super::computed::{BorderStyle, BreakWhen, Clear, Color, Float, Length, ListStyle};
+
+/// `list-style-type` 的关键字表。认不出的关键字返回 `None`（计进 ignored），
+/// **不降级成 `disc`** —— 把作者要的 `hebrew` 画成一个黑点，比承认没做更难被发现。
+///
+/// `lower-latin` / `upper-latin` 是 CSS3 的别名，书里两种都见得到，一起收。
+pub(super) fn parse_list_style(value: &str) -> Option<ListStyle> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "disc" => ListStyle::Disc,
+        "circle" => ListStyle::Circle,
+        "square" => ListStyle::Square,
+        "decimal" => ListStyle::Decimal,
+        "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
+        "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
+        "lower-roman" => ListStyle::LowerRoman,
+        "upper-roman" => ListStyle::UpperRoman,
+        "cjk-ideographic" => ListStyle::CjkIdeographic,
+        "hiragana" => ListStyle::Hiragana,
+        "hiragana-iroha" => ListStyle::HiraganaIroha,
+        "katakana" => ListStyle::Katakana,
+        "katakana-iroha" => ListStyle::KatakanaIroha,
+        "none" => ListStyle::None,
+        _ => return None,
+    })
+}
+
+/// `float` 的取值。CSS 3 的 `inline-start` / `inline-end` / `float-inherit` 不接：
+/// 那一族要的是方向敏感的左右，而出版书里真正出现的写法（插图、章首下沉）都写死
+/// `left` / `right`。认不出就整条判不认识，不悄悄当 `none`。
+pub(super) fn parse_float(value: &str) -> Option<Float> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Float::None,
+        "left" => Float::Left,
+        "right" => Float::Right,
+        _ => return None,
+    })
+}
+
+/// `clear` 的取值。`left` / `right` 真的按那一侧算，不都折成 `both`。
+pub(super) fn parse_clear(value: &str) -> Option<Clear> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Clear::None,
+        "left" => Clear::Left,
+        "right" => Clear::Right,
+        "both" => Clear::Both,
+        _ => return None,
+    })
+}
 
 /// `break-before` / `break-after` 的取值。
 ///
@@ -31,11 +79,17 @@ pub(super) fn parse_break_when(value: &str) -> Option<BreakWhen> {
     }
 }
 
-/// `orphans` / `widows` 的取值：正整数。`0` 按不支持处理 —— 它意味着「一段可以被切成
-/// 剩下零行」，那不是排版参数，是写错了。
+/// `orphans` / `widows` 的取值：整数，`0` **夹到 1** 而不是判不认识。
+///
+/// CSS Fragmentation 的合法域是 `[1,∞)`，浏览器把 `0` 当无效；但《斗战狂潮》这类
+/// 转换本会在 `body` 与 `p` 上写 `orphans: 0; widows: 0`，全书 138336 条 —— 作者的
+/// 意思很清楚：「别管孤行寡行，随便切」。判不认识等于把它推回引擎默认的 2/2，
+/// 症状是这一本的段落比我们自己的设置在页底多切两行。夹到 1 就是「不设约束」，
+/// 与作者意图同向，也和 `hyphens: all` 那种「超出合法域就往最近的合法值夹」一致。
+/// 负数与折不出整数的仍然判不认识：那不是约束松紧，是写坏了。
 pub(super) fn parse_count(value: &str) -> Option<u16> {
-    let n: u16 = value.trim().parse().ok()?;
-    (n >= 1).then_some(n)
+    let n: i64 = value.trim().parse().ok()?;
+    (n >= 0).then(|| n.clamp(1, u16::MAX as i64) as u16)
 }
 
 /// 上标抬多高、下标压多低。这两个数**是我们定的**，不是浏览器的实现值：
@@ -197,10 +251,31 @@ pub(super) fn edge_px(
     length_px(value, font_size, root_font_size)
 }
 
-/// 单边 `margin`：与 [`set_px`] 同形，只是 `auto` 折成 0（`margin` 认 `auto`，
-/// `padding` 不认 —— 所以 padding 那四条继续用 `set_px`）。
-pub(super) fn set_margin(value: &str, font_size: f32, root_font_size: f32, out: &mut f32) -> bool {
-    match edge_px(value, font_size, root_font_size, true) {
+/// 一条边的**长度值**：与 [`edge_px`] 同一套单位口径，多收一种写法 —— 百分比。
+///
+/// 外边距、内边距与 `text-indent` 的百分比折算自包含块宽，那是排版期才有的数，
+/// 所以这里存 `Length::Percent` 而不是当场折。这一族在真书上不是边角料：多看转换的
+/// 《哈利·波特》每一段都写着 `margin: 0% 1% 0% 1%`，全书 86441 个元素身上挂着它。
+pub(super) fn edge_length(
+    value: &str,
+    font_size: f32,
+    root_font_size: f32,
+    auto_is_zero: bool,
+) -> Option<Length> {
+    let v = value.trim().to_ascii_lowercase();
+    if auto_is_zero && v == "auto" {
+        return Some(Length::Px(0.0));
+    }
+    if let Some(percent) = v.strip_suffix('%') {
+        let n: f32 = percent.trim().parse().ok()?;
+        return Some(Length::Percent(n / 100.0));
+    }
+    length_px(&v, font_size, root_font_size).map(Length::Px)
+}
+
+/// 单边 `margin`：折成长度值，`auto` 当 0（`margin` 认 `auto`）。
+pub(super) fn set_margin(value: &str, font_size: f32, root_font_size: f32, out: &mut Length) -> bool {
+    match edge_length(value, font_size, root_font_size, true) {
         Some(px) => {
             *out = px;
             true
@@ -209,7 +284,18 @@ pub(super) fn set_margin(value: &str, font_size: f32, root_font_size: f32, out: 
     }
 }
 
-/// `margin` / `padding` 简写的四边展开，返回 `[上, 右, 下, 左]`。
+/// 单边 `padding` / `text-indent`：折成长度值，`auto` 不算接住（CSS 里这两个都不吃）。
+pub(super) fn set_edge(value: &str, font_size: f32, root_font_size: f32, out: &mut Length) -> bool {
+    match edge_length(value, font_size, root_font_size, false) {
+        Some(px) => {
+            *out = px;
+            true
+        }
+        None => false,
+    }
+}
+
+/// `margin` / `padding` 简写的四边展开，返回 `[上, 右, 下, 左]` 的**长度值**。
 ///
 /// 分配的规则是 CSS 的：1 值四边相同；2 值「上下 左右」；3 值「上 左右 下」；
 /// 4 值顺时针。值数不对（0 个或 5 个以上）或任一个解析失败，**整条作废** ——
@@ -220,6 +306,24 @@ pub(super) fn box_sides(
     font_size: f32,
     root_font_size: f32,
     auto_is_zero: bool,
+) -> Option<[Length; 4]> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut parsed = Vec::with_capacity(parts.len());
+    for part in parts {
+        parsed.push(edge_length(part, font_size, root_font_size, auto_is_zero)?);
+    }
+    four_of(&parsed)
+}
+
+/// [`box_sides`] 的 px 版，给 `border-width`：CSS 的 `<border-width>` 不接受百分比，
+/// 所以这一族继续走 [`edge_px`]，折不出就整条作废。
+pub(super) fn box_side_px(
+    value: &str,
+    font_size: f32,
+    root_font_size: f32,
 ) -> Option<[f32; 4]> {
     let parts: Vec<&str> = value.split_whitespace().collect();
     if parts.is_empty() || parts.len() > 4 {
@@ -227,13 +331,9 @@ pub(super) fn box_sides(
     }
     let mut parsed = Vec::with_capacity(parts.len());
     for part in parts {
-        parsed.push(edge_px(part, font_size, root_font_size, auto_is_zero)?);
+        parsed.push(edge_px(part, font_size, root_font_size, false)?);
     }
-    let top = parsed[0];
-    let right = parsed.get(1).copied().unwrap_or(top);
-    let bottom = parsed.get(2).copied().unwrap_or(top);
-    let left = parsed.get(3).copied().unwrap_or(right);
-    Some([top, right, bottom, left])
+    four_of(&parsed)
 }
 
 /// 1/2/3/4 值的四边展开，顺序 `[上, 右, 下, 左]` —— 分配规则与 `box_sides` 相同，
@@ -387,9 +487,10 @@ pub(super) fn relative_weight(parent: u16, bolder: bool) -> u16 {
     }
 }
 
-/// 支持 px / em / rem / pt / 裸数字。`%` 不在这里：外边距和缩进的百分比
-/// 要按**包含块的宽度**折算，那是排版期才知道的数，层叠期猜不出来，
-/// 所以 `auto` / `calc()` / `%` 一律判为不支持（计入 ignored，值保持默认）。
+/// 支持 px / em / rem / pt / 裸数字。`%` 不在这一条里：要留百分比的族走
+/// [`edge_length`] 与 [`parse_length`]，它们把 `%` 存成 `Length::Percent` 等排版期按
+/// **包含块宽**折算，层叠期猜不出那个数。`auto` / `calc()` 在这里一律判为不支持
+/// （计入 ignored，值保持默认）。
 pub(super) fn length_px(value: &str, font_size: f32, root_font_size: f32) -> Option<f32> {
     let v = value.trim().to_ascii_lowercase();
     if v.is_empty() || v == "auto" || v.starts_with("calc(") || v.ends_with('%') {

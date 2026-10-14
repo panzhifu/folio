@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 
 use super::read_with;
 use crate::content::dom::Dom;
-use crate::content::format::css::computed::{ComputedStyle, TextAlign, cascade};
+use crate::content::format::css::computed::{ComputedStyle, Length, TextAlign, cascade};
 use crate::content::format::css::{Origin, RuleSet};
 use crate::content::format::detect;
 use crate::content::format::{
-    Chapter, Content, DocMeta, FlowDoc, Format, ParseBudget, dir_of, resolve_href,
+    Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format, ParseBudget, dir_of, resolve_href,
 };
 
 fn fixture() -> PathBuf {
@@ -192,7 +192,7 @@ fn the_books_own_css_reaches_the_elements() {
         .unwrap();
     assert_eq!(
         styles.get(p).unwrap().text_indent,
-        36.0,
+        Length::Px(36.0),
         "2em 按 18px 偏好字号"
     );
     let h1 = dom
@@ -1849,4 +1849,399 @@ fn the_spine_page_progression_direction_lands_on_the_flow_doc() {
             "{why}（spine 写的是 {spine_attrs:?}）"
         );
     }
+}
+
+/// EPUB3 定版式（`rendition:layout=pre-paginated`）：正文读成 `FixedDoc` 页表，
+/// 不是可重排的 `FlowDoc`。逐页 SVG 漫画就是这一档 —— spine 项是一页 XHTML，
+/// 里面各包一张 SVG。
+#[test]
+fn a_pre_paginated_epub_reads_as_fixed_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("comic.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>漫画一册</dc:title>
+    <meta property="rendition:layout">pre-paginated</meta>
+  </metadata>
+  <manifest>
+    <item id="p1" href="Text/p1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="p2" href="Text/p2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="s1" href="Images/p1.svg" media-type="image/svg+xml"/>
+    <item id="s2" href="Images/p2.svg" media-type="image/svg+xml"/>
+  </manifest>
+  <spine><itemref idref="p1"/><itemref idref="p2"/></spine>
+</package>"#;
+    let page = |n: &str| {
+        format!(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:xlink="http://www.w3.org/1999/xlink"><body><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 200"><image xlink:href="../Images/{n}.svg" width="100" height="200"/></svg></body></html>"#
+        )
+    };
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            ("OEBPS/Text/p1.xhtml", page("p1").as_bytes()),
+            ("OEBPS/Text/p2.xhtml", page("p2").as_bytes()),
+            (
+                "OEBPS/Images/p1.svg",
+                &crate::content::format::svg::sample_svg(100, 200),
+            ),
+            (
+                "OEBPS/Images/p2.svg",
+                &crate::content::format::svg::sample_svg(100, 200),
+            ),
+        ],
+    );
+    let (meta, content) = super::EpubAdapter.read(&path).unwrap();
+    assert_eq!(meta.title, "漫画一册");
+    let Content::Fixed(fixed) = content else {
+        panic!("定版式该读成 Fixed，而不是可重排");
+    };
+    assert_eq!(fixed.page_count(), 2, "两个 spine 项 = 两页");
+    assert_eq!(fixed.pages[0].image_href(), Some("OEBPS/Images/p1.svg"));
+    assert_eq!(fixed.pages[1].image_href(), Some("OEBPS/Images/p2.svg"));
+    assert_eq!(
+        (fixed.width, fixed.height),
+        (100, 200),
+        "页尺寸来自 SVG 声明"
+    );
+    assert!(fixed.cover.is_some(), "首屏就是封面");
+    assert_eq!(fixed.images.len(), 2);
+}
+
+/// 定版式夹具：两页 XHTML 各引一张 PNG。`extra_items` / `spine` 由调用方给，
+/// 用来在同一本书上挂与不挂某个 spine 项 —— 成对比较才看得出「多一项不许多一页」。
+fn fxl_book(dir: &tempfile::TempDir, name: &str, extra_items: &str, spine: &str) -> PathBuf {
+    let path = dir.path().join(name);
+    let opf = format!(
+        r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>定版式一册</dc:title>
+    <meta property="rendition:layout">pre-paginated</meta>
+  </metadata>
+  <manifest>
+    <item id="p1" href="Text/p1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="p2" href="Text/p2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="i1" href="Images/p1.png" media-type="image/png"/>
+    <item id="i2" href="Images/p2.png" media-type="image/png"/>
+{extra_items}
+  </manifest>
+  <spine>{spine}</spine>
+</package>"#
+    );
+    let png1 = png_bytes(80, 120);
+    let png2 = png_bytes(80, 120);
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            (
+                "OEBPS/Text/p1.xhtml",
+                r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="../Images/p1.png"/></body></html"#
+                    .as_bytes(),
+            ),
+            (
+                "OEBPS/Text/p2.xhtml",
+                r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="../Images/p2.png"/></body></html"#
+                    .as_bytes(),
+            ),
+            ("OEBPS/Images/p1.png", &png1),
+            ("OEBPS/Images/p2.png", &png2),
+        ],
+    );
+    path
+}
+
+/// 一页引**两张**图（对开跨页 / 多图页）：主图进 `source`，其余进 `extra_images`，
+/// 两张都要落进图片清单。
+///
+/// 只留主图是这一版之前的行为 —— 界面上第二张根本没地方画，而字节明明就在同一个容器里。
+/// 附加图的尺寸也得带上，否则共享高度那一步只能按 1:1 猜（绘制侧按 `(w, h)` 等比排）。
+#[test]
+fn a_fixed_page_with_two_images_keeps_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spread.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>跨页一册</dc:title>
+    <meta property="rendition:layout">pre-paginated</meta>
+  </metadata>
+  <manifest>
+    <item id="p1" href="Text/spread.xhtml" media-type="application/xhtml+xml"/>
+    <item id="i1" href="Images/left.png" media-type="image/png"/>
+    <item id="i2" href="Images/right.png" media-type="image/png"/>
+  </manifest>
+  <spine><itemref idref="p1"/></spine>
+</package>"#;
+    // 左右两半各是一张独立位图，这是 FXL 漫画跨页最常见的出版形状。
+    let spread = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="../Images/left.png"/><img src="../Images/right.png"/></body></html"#;
+    let left = png_bytes(80, 120);
+    let right = png_bytes(60, 120);
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            ("OEBPS/Text/spread.xhtml", spread.as_bytes()),
+            ("OEBPS/Images/left.png", &left),
+            ("OEBPS/Images/right.png", &right),
+        ],
+    );
+    let Content::Fixed(fixed) = super::EpubAdapter.read(&path).unwrap().1 else {
+        panic!("pre-paginated 该读成定版式");
+    };
+    assert_eq!(fixed.page_count(), 1, "两张图是一页，不是两页");
+    let page = &fixed.pages[0];
+    assert_eq!(page.image_href(), Some("OEBPS/Images/left.png"));
+    assert_eq!(page.extra_images.len(), 1, "第二张要留在附加图那一列");
+    assert_eq!(page.extra_images[0].href, "OEBPS/Images/right.png");
+    assert_eq!(
+        (page.extra_images[0].width, page.extra_images[0].height),
+        (60, 120),
+        "附加图的尺寸从它自己的位图头读，不许拿主图的"
+    );
+    assert_eq!(
+        page.image_hrefs(),
+        vec!["OEBPS/Images/left.png", "OEBPS/Images/right.png"],
+        "主图在前 —— 那就是绘制的左右顺序"
+    );
+    assert_eq!(
+        fixed.images.len(),
+        2,
+        "两张都要进图片清单，否则第二张取不到字节"
+    );
+}
+
+/// SMIL 媒体叠加（音频+文本同步的 sidecar）**不占一页**。
+///
+/// 成对比较：同一本书挂与不挂这一个 spine 项，页数必须相同。只断言「等于 2」也行，
+/// 但那条会把「本来一页都没有」也测成过。
+#[test]
+fn a_smil_spine_item_costs_no_fixed_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = fxl_book(
+        &dir,
+        "plain.epub",
+        "",
+        r#"<itemref idref="p1"/><itemref idref="p2"/>"#,
+    );
+    let with_smil = fxl_book(
+        &dir,
+        "smil.epub",
+        r#"    <item id="s1" href="Text/p1.smil" media-type="application/smil+xml"/>
+    <item id="a1" href="Media/p1.mp3" media-type="audio/mpeg"/>"#,
+        r#"<itemref idref="p1"/><itemref idref="s1" properties="media-overlay"/><itemref idref="p2"/>"#,
+    );
+    let Content::Fixed(baseline) = super::EpubAdapter.read(&plain).unwrap().1 else {
+        panic!("夹具该读成定版式");
+    };
+    let Content::Fixed(got) = super::EpubAdapter.read(&with_smil).unwrap().1 else {
+        panic!("夹具该读成定版式");
+    };
+    assert_eq!(baseline.page_count(), 2);
+    assert_eq!(
+        got.page_count(),
+        baseline.page_count(),
+        "SMIL 项与它挂着的 media-overlay 分页项：只有分页项该成为页"
+    );
+    assert_eq!(
+        got.pages[1].image_href(),
+        Some("OEBPS/Images/p2.png"),
+        "SMIL 夹在两页之间也不许把后面的页挤走"
+    );
+}
+
+/// 可重排那一侧同一件事：spine 上的 SMIL 项既不成一章，也不留一章「读不动」的说明。
+///
+/// 它与逐页 SVG 那一类不同 —— 那些是内容却解不动（所以要留一章说明），而 SMIL 从来
+/// 就不是读物，是 sidecar。少这一条，有声书在目录里就凭空多出一行打不开的空章。
+#[test]
+fn a_smil_spine_item_is_not_a_chapter() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("smilflow.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>有声书</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="Text/chap2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="s1" href="Text/chap1.smil" media-type="application/smil+xml"/>
+    <item id="a1" href="Media/chap1.mp3" media-type="audio/mpeg"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+    <itemref idref="s1" properties="media-overlay"/>
+    <itemref idref="c2"/>
+  </spine>
+</package>"#;
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>第一章</p></body></html>".as_bytes(),
+            ),
+            (
+                "OEBPS/Text/chap2.xhtml",
+                "<html><body><p>第二章</p></body></html>".as_bytes(),
+            ),
+            (
+                "OEBPS/Text/chap1.smil",
+                b"<smil><par><audio src=\"../Media/chap1.mp3\"/></par></smil>",
+            ),
+            ("OEBPS/Media/chap1.mp3", b"ID3\x03\x00fake"),
+        ],
+    );
+    let flow = flow_of(&path);
+    assert_eq!(flow.chapters.len(), 2, "SMIL 与音频都不该成为一章");
+    assert_eq!(flow.chapters[0].spine_href, "OEBPS/Text/chap1.xhtml");
+    assert_eq!(flow.chapters[1].spine_href, "OEBPS/Text/chap2.xhtml");
+    assert!(
+        !flow
+            .chapters
+            .iter()
+            .any(|c| c.title.contains("读不动") || c.title.contains("解不开")),
+        "不许留一章「读不动」的说明：{:?}",
+        flow.chapters
+            .iter()
+            .map(|c| c.title.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ---- 书目元数据（Dublin Core）----
+//
+// 直接喂 `parse_opf`，不走 zip：这几条钉的是「OPF 里那串元素怎么归置到 DocMeta 的格子里」，
+// 与容器无关。合成一份带全字段的 OPF 比找一本这样的真书可控，而真书那一路的端到端
+// 已经由上面 `metadata_comes_from_the_opf` 那条盖住（它读的是仓库里的合成 fixture）。
+
+use super::parse_opf;
+use crate::content::format::Series;
+
+/// 一封全字段的 OPF：都柏林那几项各归各格。
+#[test]
+fn the_opf_metadata_fills_every_dublin_core_field() {
+    let opf = parse_opf(
+        r##"<?xml version="1.0" encoding="UTF-8"?>
+<package version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:identifier id="id">urn:uuid:8f2a</dc:identifier>
+  <dc:identifier id="isbn_id" opf:scheme="ISBN">978-7-02-000000-0</dc:identifier>
+  <dc:title>蛇结</dc:title>
+  <dc:creator>莫里亚克</dc:creator>
+  <dc:contributor>顾琪静</dc:contributor>
+  <dc:subject>法国小说</dc:subject>
+  <dc:subject>日记体</dc:subject>
+  <dc:description>   一位老人的自白。   </dc:description>
+  <dc:publisher>人民文学</dc:publisher>
+  <dc:date>2023-05-01T00:00:00Z</dc:date>
+  <dc:language>zh-CN</dc:language>
+  <dc:type>text</dc:type>
+  <dc:rights>版权由译者持有</dc:rights>
+  <meta property="belongs-to-collection" id="c1">译文名著系列
+    <meta refines="#c1" property="collection-type">set</meta>
+    <meta refines="#c1" property="group-position">7</meta>
+  </meta>
+</metadata><manifest/><spine/></package>"##,
+    );
+    assert_eq!(opf.title, "蛇结");
+    assert_eq!(opf.authors, vec!["莫里亚克"]);
+    assert_eq!(opf.contributors, vec!["顾琪静"]);
+    assert_eq!(opf.subjects, vec!["法国小说", "日记体"]);
+    assert_eq!(opf.description, "一位老人的自白。", "首尾空白要剪掉，中间的不动");
+    assert_eq!(opf.publisher, "人民文学");
+    assert_eq!(opf.published, "2023-05-01T00:00:00Z", "日期原样存，不折成日期类型");
+    assert_eq!(opf.language, "zh-CN");
+    assert_eq!(opf.dctype, "text");
+    assert_eq!(opf.rights, "版权由译者持有");
+    assert_eq!(opf.isbn, "978-7-02-000000-0", "一串 identifier 里挑有标记的那条");
+    assert_eq!(
+        opf.series,
+        Some(Series { name: "译文名著系列".into(), position: "7".into() }),
+        "系列名与挂在 refines 上的序号"
+    );
+}
+
+/// 系列的三种载体谁先赢，以及 EPUB2 的自闭写法也要采到。
+#[test]
+fn the_three_series_carriers_have_a_stated_precedence() {
+    let calibre = parse_opf(
+        r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>书</dc:title>
+  <dc:relation>不该赢的那一种</dc:relation>
+  <meta name="calibre:series" content="哈利·波特"/>
+  <meta name="calibre:series_index" content="1.5"/>
+</metadata><manifest/><spine/></package>"#,
+    );
+    assert_eq!(
+        calibre.series,
+        Some(Series { name: "哈利·波特".into(), position: "1.5".into() }),
+        "EPUB2 自闭写法 + Calibre 那一对照采，且优先于 dc:relation"
+    );
+
+    let relation = parse_opf(
+        r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>书</dc:title><dc:relation>世界名著</dc:relation>
+</metadata><manifest/><spine/></package>"#,
+    );
+    assert_eq!(
+        relation.series,
+        Some(Series { name: "世界名著".into(), position: String::new() }),
+        "只有 dc:relation 时也认下来当系列（EPUB3 之前的规范读法）"
+    );
+
+    let plain = parse_opf(
+        r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>书</dc:title>
+</metadata><manifest/><spine/></package>"#,
+    );
+    assert_eq!(plain.series, None, "没有系列就别造一个");
+}
+
+/// ISBN 只认**明确标着的**写法：一条裸 uuid 不许被猜成 ISBN。
+#[test]
+fn an_isbn_needs_an_explicit_mark() {
+    let uuid_only = parse_opf(
+        r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:identifier id="id">urn:uuid:8f2a5c</dc:identifier><dc:title>书</dc:title>
+</metadata><manifest/><spine/></package>"#,
+    );
+    assert_eq!(uuid_only.isbn, "", "uuid 也是数字字母混着的一串，猜不得");
+
+    let urn = parse_opf(
+        r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:identifier>urn:isbn:9787020000000</dc:identifier><dc:title>书</dc:title>
+</metadata><manifest/><spine/></package>"#,
+    );
+    assert_eq!(urn.isbn, "9787020000000", "`urn:isbn:` 前缀本身就够");
+
+    let marked = parse_opf(
+        r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <meta name="calibre:isbn" content="978-1"/>
+</metadata><manifest/><spine/></package>"#,
+    );
+    assert_eq!(marked.isbn, "978-1", "Calibre 的 calibre:isbn 也算明确标着");
+}
+
+/// `rendition:layout` 那一档定版式声明从同一个采集器过，改到归置那一趟也不能漏。
+#[test]
+fn fixed_layout_still_comes_out_of_the_same_collector() {
+    let fxl = parse_opf(
+        r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>画书</dc:title>
+  <meta property="rendition:layout">pre-paginated</meta>
+</metadata><manifest/><spine/></package>"#,
+    );
+    assert!(fxl.pre_paginated, "定版式声明从 `property` 那条路采到");
+    assert_eq!(fxl.title, "画书", "同一段里既采声明又采书目，两边都不该受影响");
 }

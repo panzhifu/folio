@@ -53,8 +53,13 @@ impl DocumentProvider for CbzAdapter {
                 tracing::warn!("cbz: {} 里的 {name} 读不出来，跳过这一页", path.display());
                 continue;
             };
-            let (width, height) = image_dims(&bytes);
             let ext = extension_of(Path::new(name)).unwrap_or_default();
+            // SVG 页没有位图头，尺寸从矢量声明里读；其余读位图头。
+            let (width, height) = if ext == "svg" {
+                super::svg::intrinsic_size(&bytes).unwrap_or((0, 0))
+            } else {
+                image_dims(&bytes)
+            };
             images.push(ImageRes {
                 href: name.clone(),
                 // 漫画包没有「声明了但解不动」这一档：条目名就是字节所在，键与去处同一条。
@@ -67,6 +72,8 @@ impl DocumentProvider for CbzAdapter {
                 source: PageSource::Image { href: name.clone() },
                 width,
                 height,
+                // 漫画包一页一张图（多图页只出现在 EPUB 定版式里）。
+                extra_images: Vec::new(),
             });
             if index == 0 {
                 cover = Some(match shrink_image(&bytes, COVER_MAX_EDGE) {
@@ -85,7 +92,8 @@ impl DocumentProvider for CbzAdapter {
             authors: Vec::new(),
             format: Format::Cbz,
             size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
-        };
+            ..DocMeta::default()
+            };
         let fixed = FixedDoc {
             pages,
             toc: Vec::new(),
@@ -131,13 +139,16 @@ pub(crate) fn is_container_noise(name: &str) -> bool {
 ///
 /// `pub(crate)` 的理由是**只有一份**：判定层（`format::sniff`）要按同一条规则回答
 /// 「这个 zip 里全是图吗」，两处各写一份就会在同一本漫画上分叉。
+///
+/// SVG 也算一页：逐页 SVG 的漫画包真实存在（矢量页面，缩放到任何屏幕都清晰），
+/// 栅格化由 `format::svg` 在绘制时做。
 pub(crate) fn is_page_image(name: &str) -> bool {
     if is_container_noise(name) {
         return false;
     }
     matches!(
         extension_of(Path::new(name)).as_deref(),
-        Some("jpg" | "jpeg" | "jpe" | "png" | "gif" | "webp" | "bmp")
+        Some("jpg" | "jpeg" | "jpe" | "png" | "gif" | "webp" | "bmp" | "svg")
     )
 }
 

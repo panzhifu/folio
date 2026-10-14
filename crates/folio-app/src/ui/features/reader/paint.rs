@@ -11,12 +11,15 @@
 //! 于是偏移量与 `MobileMeasure::run_metrics` 量到的 ascent/descent 同源，
 //! 不会出现「按 A 算的行高、按 B 画的字形」。
 
+use std::sync::Arc;
+
 use folio_core::infra::metrics::Metric;
+use folio_core::layout::{Justify, JustifyMode};
 use gpui_kit::{
     App, Bounds, Element, ElementId, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    LayoutId, Length, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, SharedString, StrikethroughStyle, Style, TextRun, TouchDragEvent, TouchPhase,
-    UnderlineStyle, WeakEntity, Window, black, fill, point, px, relative, size,
+    LayoutId, Length, LineLayout, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, SharedString, StrikethroughStyle, Style, TextRun, TouchDragEvent,
+    TouchPhase, UnderlineStyle, WeakEntity, Window, black, fill, point, px, relative, size,
 };
 
 use super::session::{ReaderSession, SelectionEdge};
@@ -41,6 +44,23 @@ pub struct GlyphRun {
     /// 这个数（见 [`decoration_y`]），而 `ShapedLine` 里没有它 —— 它是**读者与样式**给的，
     /// 不是 shaping 的结果。缺了它就只能自己猜一个比例，那正是「按 A 量、按 B 画」的起手式。
     pub box_height: f32,
+    /// 这一条 run 在**章内**的身份：`(行号, 行内片段槽位)`，由 `scene::Scene::build` 摊
+    /// run 时按 enumerate 盖上。`None` = 兜底那一行或测试里手搓的 run，不参与 shaping 表。
+    pub key: Option<(u32, u32)>,
+    /// 已经 shape 好的那一份几何。视图层在 `Scene::build` 之后按 [`Self::key`] 查
+    /// [`Document::shaped_line`](super::document::Document::shaped_line) 填进来；
+    /// `None` 时 [`paint_run`] 当场 shape（走 gpui 那两帧缓存）。
+    ///
+    /// 存 `Arc<LineLayout>` 而不是 `ShapedLine`：后者的 `decoration_runs` 里带主题色，
+    /// 而我们从不读它（装饰线是这一层自己画的）。`LineLayout` 里只有 `font_id`、字形与
+    /// 落点，**结构上就不可能把颜色烘进表**。
+    pub shaped: Option<Arc<LineLayout>>,
+    /// 字距（px）。绘制按字形所在字符序号右推 `letter_spacing × 序号`。
+    pub letter_spacing: f32,
+    /// 两端对齐的摊法 + 这一段起点已累计的右推量（px）。绘制在 run 内按局部隙序号再推一笔。
+    /// 与 `hit`/选区同一句规则（见 `folio_core::layout::Justify`）。
+    pub justify: Option<Justify>,
+    pub justify_shift: f32,
 }
 
 impl GlyphRun {
@@ -60,7 +80,25 @@ impl GlyphRun {
             // 默认按字号一档（UA 的 `line-height: normal` 近似）。真排版会用
             // `RunStyle::box_height()` 覆盖它，见 [`GlyphRun::in_box`]。
             box_height: font_size,
+            key: None,
+            shaped: None,
+            letter_spacing: 0.0,
+            justify: None,
+            justify_shift: 0.0,
         }
+    }
+
+    /// 字距 + 两端对齐：`paint_run` 摊字形时要的那两笔偏移。场景层从 `RowUnit` 递过来。
+    pub fn spacing(
+        mut self,
+        letter_spacing: f32,
+        justify: Option<Justify>,
+        justify_shift: f32,
+    ) -> Self {
+        self.letter_spacing = letter_spacing;
+        self.justify = justify;
+        self.justify_shift = justify_shift;
+        self
     }
 
     /// 这个 run 的 inline box 高。场景层从 `RunStyle::box_height()` 递过来。
@@ -85,6 +123,28 @@ impl GlyphRun {
         self.underline = underline;
         self.line_through = line_through;
         self
+    }
+
+    /// 盖上章内身份，让 shaping 表认得它（见 [`GlyphRun::key`]）。
+    pub fn keyed(mut self, key: (u32, u32)) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// 一个字形该右推多少（px）。`char_index` 是它在**阅读序**里之前有几个字符，
+    /// `spaces_before` 是之前的空格数 —— 字距按前者，两端对齐按摊法取前者或后者。
+    /// 这一句与 `folio_core` 的 `Justify`、以及 `hit`/选区逐字一致。
+    fn glyph_shift(&self, char_index: u32, spaces_before: u32) -> f32 {
+        let gap = match self.justify {
+            Some(j) => match j.mode {
+                JustifyMode::Chars => char_index,
+                JustifyMode::Spaces => spaces_before,
+            },
+            None => 0,
+        };
+        self.justify_shift
+            + self.justify.map_or(0.0, |j| j.extra * gap as f32)
+            + self.letter_spacing * char_index as f32
     }
 }
 
@@ -212,6 +272,7 @@ impl Element for GlyphsElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let __paint = super::perf::Timer::start();
         // 绘制层级（自下而上）：块级装饰（更早入树的兄弟）→ 选中高亮 → 字形 → 把手。
         // 高亮必须在字形之前画，否则选中的字会被自己的底色盖住。
         // 传进来的高亮是元素局部坐标，跟字形与把手一样要加上元素在窗口里的原点：
@@ -226,9 +287,24 @@ impl Element for GlyphsElement {
         if let Some(reader) = self.reader.clone() {
             register_selection(&self.selection, &reader, bounds, window, cx);
         }
-        for run in &self.runs {
-            paint_run(window, bounds.origin, run);
-        }
+        // 字形整屏共用**一个 layer**：gpui 的 `Scene::insert_primitive` 在没有活动 layer 时，
+        // 每个 primitive 都要往 BoundsTree 里插一次（`scene.rs` 的 `push_layer` 分支），
+        // 一屏上千字形就是上千次 R 树插入 —— 这一笔与「画了多少字」同量级，是滚动帧里
+        // 最容易被忽略的固定开销。zed 自己的 `paint_line` 同样把整行字形包进一个 layer
+        // （`text_system/line.rs:547` 的 `window.paint_layer(line_bounds, …)`）。
+        //
+        // 层级不变：layer 只吃 order（入 scene 的顺序仍在），所以高亮仍压在字下、把手仍
+        // 压在字上 —— 它们是在这个 layer 之外画的。
+        let __shape_ns = std::cell::Cell::new(0u64);
+        let mut __glyphs = 0u32;
+        window.paint_layer(bounds, |window| {
+            for run in &self.runs {
+                let __t = super::perf::Timer::start();
+                __glyphs += paint_run(window, bounds.origin, run);
+                __shape_ns.set(__shape_ns.get() + __t.ns());
+            }
+        });
+        super::perf::log_paint(__paint.ns(), __shape_ns.get(), __glyphs);
         if let Some(caret) = self.selection.start_caret {
             paint_handle(
                 SelectionEdge::Start,
@@ -321,18 +397,28 @@ fn decoration_y(
     (underline, strikethrough)
 }
 
-/// 把一条 run 画出来：先让窗口级文本系统 shaping，再逐字形 `paint_glyph`。
-fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) {
-    if run.text.is_empty() {
-        return;
-    }
-    let font_size = px(run.font_size);
+/// shaping 的**唯一入口**：一条 run → 一份几何。
+///
+/// 走 `layout_line` 而不是 `shape_line`：后者要多造一份 `decoration_runs`（颜色、下划线、
+/// 删除线各一格），而我们从不读它 —— 装饰线是 [`paint_run`] 自己画的（`plans/阅读管线.md`
+/// §十四 记的就是这件事）。`layout_line` 直接给回 `Arc<LineLayout>`，也正是
+/// [`Document::shaped_line`](super::document::Document::shaped_line) 那张表要存的值。
+///
+/// `Metric::ShapeLineCalls` 数的是**这一趟**，所以它的口径是「shaping 表未命中一次」，
+/// 不再是「每条 run 一次」—— 表接上之后，滚回走过的地方这一格增量应当是 0。
+pub(super) fn shape(window: &Window, run: &GlyphRun) -> Arc<LineLayout> {
+    // gpui 的 `LineLayoutCache` 命中时确实不重 shaping，但它的键含整段文本 ——
+    // **命中也要把文本哈希一遍**，而且只保两帧。这一格数的是走到 gpui 那层的次数。
+    Metric::ShapeLineCalls.count();
+    let __t_shape = super::perf::Timer::start();
     let text_run = TextRun {
         len: run.text.len(),
         font: run.font.clone(),
         color: run.color,
         background_color: None,
         // 1px、按字色，与桌面端 gpui 的 `.underline()` / `.line_through()` 默认值同源。
+        // 单条 run 进 `layout_line` 时这两格只参与「要不要切 font run」的判断，而只有一条
+        // 就无从切起 —— 它们不影响回来的几何，留着是为了哪天传多条 run 时口径不漂。
         underline: run.underline.then_some(UnderlineStyle {
             thickness: px(1.),
             color: Some(run.color),
@@ -343,24 +429,72 @@ fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) {
             color: Some(run.color),
         }),
     };
-    // 这一格数的是「绘制回调每帧替读者算了多少趟 shaping 查表」。gpui 的 `LineLayoutCache`
-    // 命中时确实不重 shaping，但它的键含整段文本 —— **命中也要把文本哈希一遍**。
-    // 目标值：只滚动一帧增量 0（行单元把 `ShapedLine` 存下来，绘制只搬运字形）。
-    Metric::ShapeLineCalls.count();
-    let shaped = window
-        .text_system()
-        .shape_line(run.text.clone(), font_size, &[text_run], None);
+    let layout =
+        window
+            .text_system()
+            .layout_line(run.text.as_ref(), px(run.font_size), &[text_run], None);
+    super::perf::add(|frame| frame.shape_only_ns += __t_shape.ns());
+    layout
+}
+
+/// 把一条 run 画出来：几何取自 shaping 表（没有就当场 shape 一次），再逐字形 `paint_glyph`。
+fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) -> u32 {
+    if run.text.is_empty() {
+        return 0;
+    }
+    let font_size = px(run.font_size);
+    let shaped = match &run.shaped {
+        Some(layout) => layout.clone(),
+        None => shape(window, run),
+    };
 
     let baseline_x = origin.x + px(run.x);
     let baseline_y = origin.y + px(run.baseline);
+    let mut glyphs = 0u32;
+    // 字距 / 两端对齐的右推：按字形在**阅读序**里的字符序号逐字累加。LTR 下字形的
+    // `index` 在视觉序里递增，走一遍即可；RTL 下它在视觉序里递减（一期不做字距/对齐的
+    // RTL 精确分布），跳过右推即可 —— 与 `hit`/选区的口径一致。
+    let first_two: Vec<usize> = shaped
+        .runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter())
+        .take(2)
+        .map(|g| g.index)
+        .collect();
+    let rtl = first_two.len() == 2 && first_two[1] < first_two[0];
+    let mut char_index = 0u32;
+    let mut spaces_before = 0u32;
+    let mut prev_index = 0usize;
+    let __t_glyph = super::perf::Timer::start();
     for shaped_run in &shaped.runs {
         for glyph in &shaped_run.glyphs {
-            let at = point(baseline_x + glyph.position.x, baseline_y + glyph.position.y);
+            glyphs += 1;
+            let shift = if rtl {
+                0.0
+            } else {
+                if glyph.index >= prev_index
+                    && let Some(between) = run.text.get(prev_index..glyph.index)
+                {
+                    for ch in between.chars() {
+                        char_index += 1;
+                        if ch == ' ' {
+                            spaces_before += 1;
+                        }
+                    }
+                    prev_index = glyph.index;
+                }
+                run.glyph_shift(char_index, spaces_before)
+            };
+            let at = point(
+                baseline_x + glyph.position.x + px(shift),
+                baseline_y + glyph.position.y,
+            );
             // 单个字形画不出去（缺字形、图集满）不该让整帧失败：与 gpui 自己的
             // `paint_line` 一致，忽略即可。
             let _ = window.paint_glyph(at, shaped_run.font_id, glyph.id, font_size, run.color);
         }
     }
+    super::perf::add(|frame| frame.glyph_ns += __t_glyph.ns());
     // 装饰线。字形是我们自己一个个画的，gpui 的 `ShapedLine::paint` 里没有那一段，
     // 所以线也得自己画 —— 少这一段就是「`text-decoration` 解析了、传进 shaping 了、
     // 然后没人画」：`UnderlineStyle` 造出来只为了进 `TextRun`，画面的循环只读 glyphs。
@@ -398,6 +532,7 @@ fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) {
             );
         }
     }
+    glyphs
 }
 
 /// 把这一帧的选中几何交给会话（内容边界、把手命中区），并注册手势监听。

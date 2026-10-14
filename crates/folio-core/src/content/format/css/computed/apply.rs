@@ -5,14 +5,15 @@
 
 use super::{
     BorderEdge, BorderStyle, ComputedStyle, Direction, Display, Hyphens, KNOWN_UNIMPLEMENTED,
-    TextAlign,
+    TextAlign, TextJustify,
 };
 use crate::content::format::css::Declaration;
 use crate::content::format::css::value::{
-    BorderElement, border_target, border_width_px, box_sides, four_of, parse_baseline_shift,
-    parse_border_style, parse_break_when, parse_color, parse_count, parse_decoration,
-    parse_font_family_list, parse_font_size, parse_font_weight, parse_line_height, relative_weight,
-    set_length, set_margin, set_px,
+    BorderElement, border_target, border_width_px, box_side_px, box_sides, four_of,
+    parse_baseline_shift, parse_border_style, parse_break_when, parse_clear, parse_color,
+    parse_count, parse_decoration, parse_float, parse_font_family_list, parse_font_size,
+    parse_font_weight, parse_line_height, parse_list_style, relative_weight, set_edge, set_length,
+    set_margin, set_px,
 };
 
 /// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
@@ -71,6 +72,9 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         font_family: parent.font_family.clone(),
         font_families: parent.font_families.clone(),
         text_align: parent.text_align,
+        // `text-justify` 在 CSS 里可继承：书里在 `<body>` 上写一次 `inter-ideograph`
+        // 就管全书，靠的正是这一行。
+        text_justify: parent.text_justify,
         // `direction` 在 CSS 里可继承，而且它是 `start`/`end` 折边的唯一依据，
         // 所以继承断了就等于整棵子树回到左起 —— RTL 书通常在 `<html>` 或 `<body>`
         // 上写一次，靠的就是这一行。
@@ -78,6 +82,11 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         color: parent.color,
         text_indent: parent.text_indent,
         word_spacing: parent.word_spacing,
+        // 字距在 CSS 里可继承（`letter-spacing` 是 inheritable），书里常在 `<body>` 上写一次。
+        letter_spacing: parent.letter_spacing,
+        // `list-style-type` 在 CSS 2.1 里可继承，`<ol>` 的十进制就是靠这一行才落到
+        // 每一个 `<li>` 上的（浏览器 UA 表写的是 `ol { list-style-type: decimal }`）。
+        list_style_type: parent.list_style_type,
         // `hyphens` 在 CSS 里可继承，写法与 `word_spacing` 同一档：书里通常在
         // `<body>` 或 `html` 上声明一次「这本书不许在连字符处断行」。
         hyphens: parent.hyphens,
@@ -282,7 +291,32 @@ pub(super) fn apply(
             }
             _ => false,
         },
-        "text-indent" => set_px(value, own, root_px, &mut style.text_indent),
+        // `text-justify`：两端对齐时余量往哪种隙摊。它的行为影响在排版层兑现（见
+        // `layout::collect::emit_line`）；这一层只记作者要什么。`-epub-` 前缀是 EPUB
+        // 风格规范点名的旧写法，一起认，别把认得的写成「不认识」。
+        "text-justify" | "-epub-text-justify" => match value.to_ascii_lowercase().as_str() {
+            "auto" => {
+                style.text_justify = TextJustify::Auto;
+                true
+            }
+            // `inter-word` 只拉空格；`inter-character` / `inter-ideograph` / `distribute`
+            // 都是「在字间摊」，折进同一档（见 [`TextJustify`]）。
+            "inter-word" => {
+                style.text_justify = TextJustify::InterWord;
+                true
+            }
+            "inter-character" | "inter-ideograph" | "distribute" => {
+                style.text_justify = TextJustify::InterCharacter;
+                true
+            }
+            // `none` 在这一层不取消 `text-align`（那是另一条声明的事），只关掉摊余量。
+            "none" => {
+                style.text_justify = TextJustify::None;
+                true
+            }
+            _ => false,
+        },
+        "text-indent" => set_edge(value, own, root_px, &mut style.text_indent),
         // 词距：CSS 初值 `normal` 折成 0，其余按长度。它可继承（`inherit_from` 里带着）。
         "word-spacing" => {
             if value.eq_ignore_ascii_case("normal") {
@@ -290,6 +324,15 @@ pub(super) fn apply(
                 return true;
             }
             set_px(value, own, root_px, &mut style.word_spacing)
+        }
+        // 字距：与词距同一档解析（`normal` → 0，其余按长度），可继承。负值合法（收紧），
+        // 所以不夹下限 —— `set_px` 允许负数，而排版与绘制对负字距同样成立。
+        "letter-spacing" => {
+            if value.eq_ignore_ascii_case("normal") {
+                style.letter_spacing = 0.0;
+                return true;
+            }
+            set_px(value, own, root_px, &mut style.letter_spacing)
         }
         // 连字符。EPUB3 的样式表里三条拼法都见得到（`-webkit-` 是历史包袱，
         // `-epub-` 是 EPUB 风格规范点名的那条），所以一起认，别把认得的写法
@@ -368,15 +411,16 @@ pub(super) fn apply(
             }
             None => false,
         },
+        // 四条边都收百分比（含 `auto` 折 0 那两条），折算点见 `edge_length`；
+        // 左右边 `auto` 折成 0 的理由在那条函数上头。
         "margin-top" => set_margin(value, own, root_px, &mut style.margin_top),
         "margin-bottom" => set_margin(value, own, root_px, &mut style.margin_bottom),
-        // 左右边的 `auto` 折成 0，理由见 `edge_px`：当前盒模型里这就是 CSS 的结果。
         "margin-left" => set_margin(value, own, root_px, &mut style.margin_left),
         "margin-right" => set_margin(value, own, root_px, &mut style.margin_right),
-        "padding-top" => set_px(value, own, root_px, &mut style.padding_top),
-        "padding-bottom" => set_px(value, own, root_px, &mut style.padding_bottom),
-        "padding-left" => set_px(value, own, root_px, &mut style.padding_left),
-        "padding-right" => set_px(value, own, root_px, &mut style.padding_right),
+        "padding-top" => set_edge(value, own, root_px, &mut style.padding_top),
+        "padding-bottom" => set_edge(value, own, root_px, &mut style.padding_bottom),
+        "padding-left" => set_edge(value, own, root_px, &mut style.padding_left),
+        "padding-right" => set_edge(value, own, root_px, &mut style.padding_right),
         // 两个四边简写。`padding` 不吃 `auto`（CSS 里 `padding: auto` 是非法值），
         // `margin` 吃 —— 差别只在 `box_sides` 的那一个参数上，展开逻辑共用一份。
         "padding" => match box_sides(value, own, root_px, false) {
@@ -401,6 +445,30 @@ pub(super) fn apply(
         },
         // 背景色。`transparent` 是「有这条声明、但不画」，与「书里没写过」在层叠上
         // 是两件事（后者可能被更高 specificity 的一条颜色盖住），所以两条都要认。
+        // `background` 简写：只接它里面的**颜色**那一项。
+        //
+        // 这一条不是锦上添花：出版书里「深色底块 + 白字标题」用的是
+        // `background: #b71c1c; color: #ffffff`，只认 `background-color` 的话，
+        // 底色不画、白字照画 —— 标题变成白纸上的白字，整条消失（《罗生门》每一章的
+        // 标题正是这么没的）。简写里的图（`url(...)`）、重复方式、定位一律忽略：
+        // 图的绘制还没做，认下来只会把「没做」记成「做了」。
+        "background" => {
+            let mut recognized = false;
+            for part in crate::content::format::css::selector::split_top_level(value, ' ') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                if part.eq_ignore_ascii_case("transparent") {
+                    style.background_color = None;
+                    recognized = true;
+                } else if let Some(color) = parse_color(part) {
+                    style.background_color = Some(color);
+                    recognized = true;
+                }
+            }
+            recognized
+        }
         "background-color" => {
             if value.eq_ignore_ascii_case("transparent") {
                 style.background_color = None;
@@ -463,6 +531,49 @@ pub(super) fn apply(
         "height" => set_length(value, own, root_px, &mut style.height),
         "max-width" => set_length(value, own, root_px, &mut style.max_width),
         "max-height" => set_length(value, own, root_px, &mut style.max_height),
+        "list-style-type" => match parse_list_style(value) {
+            Some(kind) => {
+                style.list_style_type = kind;
+                true
+            }
+            None => false,
+        },
+        // `list-style` 简写：`<position> || <image> || <type>` 三项，顺序随意。
+        // 这一条只取其中的**类型**（书里写它九成就是 `list-style: none`），位置与图
+        // 两项听得出、这一轮不生效；其余认不出的词整条判不认识。
+        // 与 `background` 简写同一个口径：接住能接的那一项，不假装接住了整条。
+        "list-style" => {
+            let mut recognized = false;
+            for part in value.split_whitespace() {
+                if let Some(kind) = parse_list_style(part) {
+                    style.list_style_type = kind;
+                    recognized = true;
+                    continue;
+                }
+                let word = part.to_ascii_lowercase();
+                if word == "inside" || word == "outside" || word.starts_with("url(") {
+                    recognized = true;
+                } else {
+                    return false;
+                }
+            }
+            recognized
+        }
+        // 浮动与净空。两者都**不继承**，所以 `inherit_from` 里没有它们。
+        "float" => match parse_float(value) {
+            Some(side) => {
+                style.float = side;
+                true
+            }
+            None => false,
+        },
+        "clear" => match parse_clear(value) {
+            Some(which) => {
+                style.clear = which;
+                true
+            }
+            None => false,
+        },
         _ => false,
     }
 }
@@ -522,7 +633,9 @@ fn apply_border(
             }
             true
         }
-        BorderElement::Width => match box_sides(value, own, root_px, false) {
+        // 边框宽度走 px 版：CSS 的 `<border-width>` 不接受百分比，`box_side_px` 里
+        // 百分比折不出就整条作废，与另外三条边的 `<line-width>` 关键字一起判。
+        BorderElement::Width => match box_side_px(value, own, root_px) {
             Some(each) => {
                 for ix in targets {
                     style.border[ix].width = each[ix];

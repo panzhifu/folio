@@ -286,6 +286,22 @@ fn widows_and_orphans_can_be_loosened_to_one() {
 }
 
 #[test]
+fn zero_orphans_and_widows_loosen_like_one() {
+    // 转换本爱写 `orphans: 0; widows: 0`（《斗战狂潮》全书 138336 条就是这一族），
+    // 意思是「别管孤行寡行」。CSS 的合法域从 1 起，所以取值层把它夹到 1；
+    // 判它「不认识」会把整本推回引擎默认的 2 / 2，症状是页底比作者要的少留一行。
+    let html = format!("<p>{}</p>", cjk(40));
+    let (_, zero) = paginated(&html, "p { orphans: 0; widows: 0; }", 200.0, 84.0);
+    let (_, loose) = paginated(&html, "p { orphans: 1; widows: 1; }", 200.0, 84.0);
+    assert_eq!(
+        ranges(&zero),
+        ranges(&loose),
+        "0 该夹到 1，与写 1 逐行同形"
+    );
+    assert_eq!(ranges(&zero), vec![(0, 3), (3, 4)]);
+}
+
+#[test]
 fn break_before_right_inserts_a_blank_page_for_parity() {
     let html = format!("<p>{}</p><p class=r>{}</p>", cjk(10), cjk(10));
     let css = ".r { break-before: right; }";
@@ -375,6 +391,10 @@ fn break_properties_follow_css_inheritance_rules() {
 }
 
 /// 认不出的值改状态也计 `ignored`，而不是猜一个作者没写的意思。
+///
+/// `orphans: 0` 已经不在这条名单里了（2026-10-15）：它不是「写错了」，是转换本表达
+/// 「不设孤行约束」的写法，全书十几万条，所以取值层把它夹到合法域下沿 1。
+/// 剩下的 `break-inside: avoid-column` 才是真不认识的那一类 —— 多栏还没接。
 #[test]
 fn a_broken_value_is_counted_rather_than_guessed() {
     let dom = Dom::parse(b"<p>x</p>");
@@ -388,16 +408,16 @@ fn a_broken_value_is_counted_rather_than_guessed() {
     );
     let p = styles.get(find(&dom, "p")).expect("p 的样式");
     assert_eq!(
-        p.orphans, 2,
-        "`orphans: 0` 意味着一段可以被切成剩下零行，是写错了，不该当成 1"
+        p.orphans, 1,
+        "`orphans: 0` 夹到 1（见 zero_orphans_and_widows_loosen_like_one），不是退回初值"
     );
     assert!(
         !p.break_inside_avoid,
         "`avoid-column` 是多栏的取值，本引擎还没接，不该被当成 `avoid`"
     );
     assert_eq!(
-        styles.ignored, 2,
-        "两条都要计入 ignored，否则没预料到的写法会被静默吞掉"
+        styles.ignored, 1,
+        "只有真不认识的那条计 ignored，夹出来的合法值不算落差"
     );
 }
 

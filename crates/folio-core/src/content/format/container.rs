@@ -34,7 +34,7 @@ use std::sync::{Mutex, OnceLock};
 use libchm::ChmFile;
 
 use super::chm::lookup_names;
-use super::zip::Zip;
+use super::zip::{EntryRange, EntryReader, Zip};
 use crate::infra::metrics::Metric;
 
 /// 一种容器家族的字节寻址。键一律是**归一化条目名**（清单里怎么写就怎么给）。
@@ -102,11 +102,25 @@ impl Container {
     ///
     /// `None` 覆盖：容器开不出来、名字查不到（精确与大小写不敏感都不中）、
     /// 条目是目录、解压失败。调用方一律当「这块地方空着」处理。
+    ///
+    /// **ZIP 那一族的读不在锁里**：锁只盖「名字 → 压缩区间」那一步（一次查表 +
+    /// 一次本地头），解压产物由自己的句柄在锁外读。理由是一条实测：八条各 4 MiB 的
+    /// 条目，八线程一起读与一个一个读**比值 0.94**（20 核机器）—— 从前 `read` 把整把
+    /// 锁按在 inflate 上，于是「一屏同时进三张图」那三趟后台活儿其实是排队的。
+    /// 现在每趟各持一个 [`EntryReader`]（一次 `File::open` + 两块缓冲，几十微秒），
+    /// 同一台机器同一支仪表读到的是 **130 ms 串行 / 20 ms 八线程 = 比值 6.50**
+    /// （八线程的上界是 8，剩下的那一截是 inflate 之外的分配与调度）。
+    /// 仪表是 `eight_entries_read_one_by_one_versus_eight_at_once`（`#[ignore]`：
+    /// 它量墙钟，只在改并发形状时手动跑，不当回归门用）。
     pub fn read(&self, href: &str) -> Option<Vec<u8>> {
-        let mut family = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
-        match &mut *family {
-            Family::Zip(zip) => zip.read_at(href),
-            Family::Itsf(file) => {
+        match self.address(href) {
+            Found::Range(range) => EntryReader::open(&self.path)?.read(&range),
+            // ITSF 那一族拆不开：libchm 自己持有解码状态，只能在锁内读。
+            Found::Itsf => {
+                let mut family = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
+                let Family::Itsf(file) = &mut *family else {
+                    return None;
+                };
                 for name in lookup_names(href) {
                     if let Ok(bytes) = file.read_path(&name) {
                         return Some(bytes);
@@ -114,6 +128,7 @@ impl Container {
                 }
                 None
             }
+            Found::Absent => None,
         }
     }
 
@@ -129,12 +144,33 @@ impl Container {
     /// 「省一次打开」在这里加一个 lossy UTF-8，那本 GBK 的书会整本变成问号**且不报错** ——
     /// 那是这一族最难查的一种坏法。
     pub fn read_text(&self, href: &str) -> Option<String> {
-        let mut family = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
-        match &mut *family {
-            Family::Zip(zip) => zip.read_text_at(href),
-            Family::Itsf(_) => None,
+        match self.address(href) {
+            Found::Range(range) => EntryReader::open(&self.path)?.read_text(&range),
+            Found::Itsf | Found::Absent => None,
         }
     }
+
+    /// 「名字 → 压缩区间」。**锁只在这一段里持有**，所以它必须不做任何解压。
+    fn address(&self, href: &str) -> Found {
+        let Some(slot) = self.get() else {
+            return Found::Absent;
+        };
+        let mut family = slot.lock().unwrap_or_else(|e| e.into_inner());
+        match &mut *family {
+            Family::Zip(zip) => zip.range_at(href).map_or(Found::Absent, Found::Range),
+            Family::Itsf(_) => Found::Itsf,
+        }
+    }
+}
+
+/// [`Container::address`] 的结果：能不能把「读」搬到锁外，取决于哪一族。
+enum Found {
+    /// ZIP 一族：压缩区间拿到了，读在锁外用自己的句柄做。
+    Range(EntryRange),
+    /// ITSF 一族：libchm 自己持有解码状态，只能在锁内读。
+    Itsf,
+    /// 这一族里没有这个名字，或容器开不出来。
+    Absent,
 }
 
 /// 按**头部字节**认容器家族 —— 名字不参与，与判定层（`format::sniff`）同一口径。
@@ -327,6 +363,60 @@ mod tests {
                 .read_text("bad.xhtml")
                 .expect("非法字节也该读出东西")
                 .starts_with('\u{fffd}')
+        );
+    }
+
+    /// **并发仪表**（`#[ignore]`：它量墙钟，不当断言用）。
+    ///
+    /// 问的是：一屏同时进三张图，那三趟「取字节 + inflate」是真并行，还是被容器那把锁
+    /// 排成一队？跑法 `cargo test -p folio-core --lib -- --ignored --nocapture`。
+    /// 八条各 4 MiB 的合成条目，串行一遍与八线程各读一条对照；比值贴着 1 就是串行，
+    /// 贴着核数才是并行。
+    #[test]
+    #[ignore = "量的是墙钟，不是确定的数；只在改并发形状时手动跑"]
+    fn eight_entries_read_one_by_one_versus_eight_at_once() {
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        const SIZE: usize = 4 * 1024 * 1024;
+        // 可压缩的图案：文件本身很小，但解压出来的活是真的。
+        let block: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
+        let big: Vec<u8> = block.repeat(SIZE / block.len());
+        let names: Vec<String> = (0..8).map(|i| format!("pic-{i}.bin")).collect();
+        let entries: Vec<(&str, &[u8])> =
+            names.iter().map(|n| (n.as_str(), big.as_slice())).collect();
+        let dir = archive_with(&entries);
+        let container = Arc::new(Container::new(&dir.path().join("case.zip")));
+
+        let at = Instant::now();
+        for name in &names {
+            assert_eq!(
+                container.read(name).unwrap().len(),
+                SIZE,
+                "串行那一趟读错了"
+            );
+        }
+        let serial = at.elapsed();
+
+        let at = Instant::now();
+        let mut workers = Vec::new();
+        for name in &names {
+            let container = Arc::clone(&container);
+            let name = name.clone();
+            workers.push(std::thread::spawn(move || {
+                let got = container.read(&name).unwrap();
+                got.len()
+            }));
+        }
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), SIZE, "并行那一趟读错了");
+        }
+        let parallel = at.elapsed();
+
+        println!(
+            "串行 {serial:?}｜八线程 {parallel:?}｜比值 {:.2}（本机核数 {}）",
+            serial.as_secs_f64() / parallel.as_secs_f64(),
+            std::thread::available_parallelism().map_or(0, |n| n.get()),
         );
     }
 }

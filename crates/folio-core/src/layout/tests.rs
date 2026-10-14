@@ -3,7 +3,9 @@
 //! 真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
 
 use crate::content::dom::{Dom, NodeId};
-use crate::content::format::css::computed::{Color, ComputedStyle, Display, cascade};
+use crate::content::format::css::computed::{
+    Clear, Color, ComputedStyle, Display, Float, cascade,
+};
 use crate::content::format::css::{Origin, RuleSet};
 use crate::layout::wrap::collect;
 use crate::layout::{
@@ -360,6 +362,287 @@ fn nested_padding_offsets_and_narrows_the_child() {
     assert_eq!(p.width, 180.0);
     assert_eq!(layout.lines[0].x, 20.0, "行盒跟随内容盒");
     assert_eq!(texts(&layout)[0].chars().count(), 11, "180px 只容 11 字");
+}
+
+/// 百分比边距折自**包含块宽**。
+///
+/// 这一条是《哈利·波特全集》那 86441 条 `margin: 0% 1% 0% 1%` 的落点：以前取值层
+/// 判它「不认识」，整条边距静默消失（`css::value::length_px` 拒 `%` 的那一版口径）。
+#[test]
+fn a_percent_margin_folds_against_the_containing_block() {
+    let html = format!("<p>{}</p>", "字".repeat(40));
+    let (_, layout) = typeset(&html, "p { margin-left: 10% }", 200.0);
+    assert_eq!(layout.lines[0].x, 20.0, "200px 版心的 10% = 20px");
+    assert_eq!(
+        texts(&layout)[0].chars().count(),
+        11,
+        "扣掉 20px 只剩 180px，段落要跟着少一字"
+    );
+}
+
+/// 往上多套一层时，基准换成**父块的内容宽**，不是章的版心宽。
+///
+/// 这是 `basis` 逐层递下去的唯一证据：折错一层就会得 20px（10% × 200）而不是 18px
+/// （10% × 180）。`collect::children` 的 `width` 与 `block` 的 `basis` 只差这一个参数，
+/// 混用编译器不会拦，所以拦它的只能是这条。
+#[test]
+fn a_percent_margin_folds_against_the_parent_content_width() {
+    let html = format!("<div><p>{}</p></div>", "字".repeat(40));
+    let (_, layout) = typeset(
+        &html,
+        "div { padding-left: 20px } p { margin-left: 10% }",
+        200.0,
+    );
+    assert_eq!(
+        layout.lines[0].x,
+        38.0,
+        "20 + 10% × 180：段落折自 div 的内容宽"
+    );
+}
+
+/// 内边距的百分比折自包含块宽，不是盒子自己的宽（CSS 规定 `padding` 的百分比分母
+/// 是**行内轴**的包含块尺寸）。
+#[test]
+fn a_percent_padding_folds_against_the_containing_block() {
+    let html = format!("<div><p>{}</p></div>", "字".repeat(40));
+    let (_, layout) = typeset(&html, "div { padding-left: 10% }", 200.0);
+    assert_eq!(layout.lines[0].x, 20.0, "div 的 10% 内边距折自 200px");
+    assert_eq!(
+        texts(&layout)[0].chars().count(),
+        11,
+        "内边距真的把段落收窄了"
+    );
+}
+
+/// 首行缩进的百分比也按包含块宽：外层让掉 50px 之后，`10%` 是 15px 而不是 20px。
+#[test]
+fn a_percent_text_indent_folds_against_the_containing_block() {
+    let html = format!("<div><p>{}</p></div>", "字".repeat(40));
+    let (_, layout) = typeset(
+        &html,
+        "div { padding-left: 50px } p { text-indent: 10% }",
+        200.0,
+    );
+    assert_eq!(layout.lines[0].x, 65.0, "50 + 10% × 150");
+    assert_eq!(layout.lines[1].x, 50.0, "缩进只吃首行");
+}
+
+/// `<ul>` 的每一项在第一行之外挂一个圆点，而正文一个字都不挪。
+///
+/// 这一段是列表标记的整条口径：标记挂在**流动之外**（`offset` 是负的，不进 `x` 的累加），
+/// 占的是 UA 那句 `ul { padding-left: 2.5em }` 让出来的位置；而行文本与 `text_runs()`
+/// 都看不见它 —— 选区、命中、批注锚点那一套坐标是「第几个可见字」，标记的字是生成的，
+/// DOM 里没有对应的字节，进过一次就等于整本书的锚点漂移。
+#[test]
+fn a_list_item_gets_its_bullet_outside_the_text() {
+    let (_, layout) = typeset("<ul><li>甲</li><li>乙</li></ul>", "", 200.0);
+    assert_eq!(layout.lines.len(), 2);
+    for (ix, want) in [(0, "甲"), (1, "乙")] {
+        let line = &layout.lines[ix];
+        assert_eq!(line.x, 40.0, "2.5em 的左内边距把正文让到 40px");
+        let LineFragment::Marker(marker) = &line.fragments[0] else {
+            panic!("第 {ix} 行首应是标记片段，实际是 {:?}", line.fragments[0]);
+        };
+        assert_eq!(marker.text, "•");
+        // 度量桩给 `•` 半个字号（8px），间距 0.25 em（4px）→ 挂在行首左 12px。
+        assert_eq!(marker.offset, -12.0);
+        assert_eq!(layout.line_text(ix), want, "标记不进行文本");
+        assert_eq!(line.text_runs().count(), 1, "命中只看得见那一条正文 run");
+    }
+}
+
+/// 有序列表的计数：`<ol start>` 挪起点，`<li value>` 挪这一项并把续值接在它后面。
+#[test]
+fn an_ordered_list_counts_start_and_value() {
+    let (_, layout) = typeset(
+        "<ol start=\"3\"><li>甲</li><li value=\"10\">乙</li><li>丙</li></ol>",
+        "",
+        200.0,
+    );
+    let marks: Vec<String> = layout
+        .lines
+        .iter()
+        .filter_map(|line| match line.fragments.first() {
+            Some(LineFragment::Marker(marker)) => Some(marker.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks, vec!["3.", "10.", "11."]);
+}
+
+/// 嵌套列表把类型**改回去**：`ol` 里套 `ul`，子层必须回到圆点。
+///
+/// 这一条同时钉住两处：`list-style-type` 的可继承（CSS 2.1，`<ol>` 的十进制靠它才落到
+/// `<li>`），以及 UA 表给 `ul` 写的那一条 —— 少写后者，整个子树会跟着父层的十进制走。
+#[test]
+fn a_nested_list_resets_the_marker_type() {
+    let (_, layout) = typeset("<ol><li>甲<ul><li>乙</li></ul></li></ol>", "", 400.0);
+    let marks: Vec<String> = layout
+        .lines
+        .iter()
+        .filter_map(|line| match line.fragments.first() {
+            Some(LineFragment::Marker(marker)) => Some(marker.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks, vec!["1.", "•"], "实际 {marks:?}");
+    assert_eq!(layout.line_text(1), "乙", "内层那一项的文字没被标记污染");
+}
+
+/// `list-style-type: none` 是「一条都不画」，不是「画不出来」。
+///
+/// 《蛇结》那 51 个 `li` 写的就是这一条：以前我们根本不存在标记，所以输出恰好一致，
+/// 那是**假阴性**；标记做了之后，`none` 必须仍然什么都不画，落差表才不是说谎的。
+#[test]
+fn list_style_type_none_draws_no_marker_while_other_types_do() {
+    let (_, circle) = typeset("<ul><li>甲</li></ul>", "li { list-style-type: circle }", 200.0);
+    assert!(
+        matches!(circle.lines[0].fragments.first(), Some(LineFragment::Marker(_))),
+        "`circle` 该画出标记"
+    );
+    let (_, none) = typeset("<ul><li>甲</li></ul>", "li { list-style-type: none }", 200.0);
+    assert_eq!(none.lines[0].fragments.len(), 1, "只剩正文那一个片段");
+    assert_eq!(none.line_text(0), "甲");
+}
+
+/// 汉字记数 —— EPUB 3 CSS Profile 点名收录的那一族。
+#[test]
+fn cjk_ideographic_markers_use_chinese_numerals() {
+    let (_, layout) = typeset(
+        "<ol><li>甲</li><li>乙</li></ol>",
+        "li { list-style-type: cjk-ideographic }",
+        200.0,
+    );
+    let marks: Vec<&str> = layout
+        .lines
+        .iter()
+        .filter_map(|line| match line.fragments.first() {
+            Some(LineFragment::Marker(marker)) => Some(marker.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks, vec!["一、", "二、"]);
+    // 「一、」两个全角字 = 32px，加 4px 间距 → 挂在行首左 36px。
+    let LineFragment::Marker(marker) = &layout.lines[0].fragments[0] else {
+        panic!("应有标记");
+    };
+    assert_eq!(marker.offset, -36.0);
+}
+
+/// 跨段浮动插图：图**不吃垂直空间**（后面的段从同一处起排），但它旁边那几行要让开图宽。
+///
+/// 这是《哈利·波特》附录里 `<div class="img1"><img width="20%"></div>` 那一族的形状。
+#[test]
+fn a_floated_image_shortens_only_the_lines_beside_it() {
+    let html = format!(
+        "<div class=i><img src=a></div><p>{}</p><p>{}</p>",
+        "字".repeat(40),
+        "字".repeat(40)
+    );
+    let images = MockImages(vec![("a", 200.0, 100.0)]);
+    let (_, laid) = typeset_images(
+        &html,
+        ".i { float: left; margin-right: 20px } img { width: 100px }",
+        200.0,
+        &images,
+    );
+    let xs: Vec<f32> = laid.lines.iter().map(|l| l.x).collect();
+    let lens: Vec<usize> = texts(&laid).iter().map(|t| t.chars().count()).collect();
+    assert_eq!(
+        lens,
+        vec![0, 5, 5, 12, 12, 6, 12, 12, 12, 4],
+        "压在图旁边的两行只剩 80px（每行五字），出了那段就回到十二字：{lens:?}"
+    );
+    assert_eq!(
+        xs,
+        vec![0.0, 120.0, 120.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "让开的是图 + 它那 20px 右外边距；第一段没被图推下去，第二段也没有"
+    );
+}
+
+/// `clear: both` 是唯一一句「别绕了」：这一段整块挪到浮动盒下缘之下。
+#[test]
+fn clear_both_drops_the_block_below_the_float() {
+    let html = format!("<div class=i><img src=a></div><p>短句</p><p class=c>{}</p>", "字".repeat(12));
+    let css = ".i { float: left; margin-right: 20px } img { width: 100px } .c { clear: both }";
+    let wrapped = {
+        let images = MockImages(vec![("a", 100.0, 300.0)]);
+        let (_, laid) = typeset_images(
+            &html.replace(" class=c", ""),
+            &css.replace(".c { clear: both }", ""),
+            200.0,
+            &images,
+        );
+        laid
+    };
+    let images = MockImages(vec![("a", 100.0, 300.0)]);
+    let (_, cleared) = typeset_images(&html, css, 200.0, &images);
+    // 没 clear：第二段紧接着第一段排，仍然压在图旁边（图高 300，还没用完）。
+    assert_eq!(wrapped.lines[2].y, 60.0, "第一段 16 + 28 + 折叠的 16");
+    assert_eq!(wrapped.lines[2].x, 120.0, "没净空就照旧绕着排");
+    // 清了：整段被推到图的下缘（300）那一行才算起始边距。
+    assert_eq!(cleared.lines[2].y, 300.0, "`clear` 之后这一段从图底下开始");
+    assert_eq!(cleared.lines[2].x, 0.0, "图底下不再让宽");
+    assert_eq!(texts(&cleared)[2].chars().count(), 12, "整幅宽十二字");
+}
+
+/// 中文转换本的章首下沉写法：`<span class="first">这</span>` 上写的是 `float: left`，
+/// 不是 `::first-letter`。《哈利·波特》301 章里有 199 章是它，所以这一种必须认。
+///
+/// 下沉的字与 `::first-letter` 那一种有一个要紧的区别：它是 DOM 里**真有的字**，
+/// 所以它照常进文本流 —— 选中、命中、批注锚点都看得见它（列表标记正相反，
+/// 见 [`a_list_item_gets_its_bullet_outside_the_text`]）。
+#[test]
+fn a_floated_leading_span_becomes_a_drop_cap() {
+    let html = format!("<p><span class=f>这</span>{}</p>", "一年的秋天".repeat(6));
+    let (_, laid) = typeset(
+        &html,
+        ".f { font-size: 2em; float: left; line-height: 1 }",
+        200.0,
+    );
+    assert_eq!(laid.lines.len(), 3, "30 字 + 一个下沉字，三行");
+    assert_eq!(
+        laid.lines[0].fragments.len(),
+        2,
+        "首行是「下沉的字 + 正文」两个片段"
+    );
+    assert!(laid.line_text(0).starts_with('这'), "下沉的字仍在文本里");
+    let lens: Vec<usize> = texts(&laid).iter().map(|t| t.chars().count()).collect();
+    assert_eq!(lens, vec![11, 10, 10], "被压着的两行只剩 168px：{lens:?}");
+    assert_eq!(laid.lines[1].x, 32.0, "第二行让开 32px 的下沉字");
+    assert_eq!(laid.lines[2].x, 0.0, "第三行回到整幅宽（大字只跨两行）");
+}
+
+/// RTL 的列表把标记挂在**右**边：`outside` 说的是起始边之外，不是物理左边。
+#[test]
+fn a_rtl_list_hangs_its_marker_on_the_start_side() {
+    let (_, layout) = typeset("<ul><li>كلمة</li></ul>", "ul { direction: rtl }", 200.0);
+    let line = &layout.lines[0];
+    let LineFragment::Marker(marker) = &line.fragments[0] else {
+        panic!("RTL 的列表项也该有标记");
+    };
+    assert!(
+        marker.offset > 0.0,
+        "RTL 的标记要落在行盒之右，实测 {}",
+        marker.offset
+    );
+    assert_eq!(line.text_runs().count(), 1, "文本坐标那一侧不受方向影响");
+}
+
+/// `float` / `clear` 的取值表：CSS 3 的 `inline-start` 之类不接，也不降级成 `left`。
+#[test]
+fn float_and_clear_take_their_physical_keywords() {
+    let (dom, styles) = parse("<p></p>", "p { float: right; clear: both }");
+    let p = &styles[find(&dom, "p") as usize];
+    assert_eq!((p.float, p.clear), (Float::Right, Clear::Both));
+
+    let (dom, styles) = parse("<p></p>", "p { float: inline-start; clear: keep }");
+    let p = &styles[find(&dom, "p") as usize];
+    assert_eq!(
+        (p.float, p.clear),
+        (Float::None, Clear::None),
+        "认不出的值回到初值，不猜一个作者没写的方向"
+    );
 }
 
 #[test]
@@ -906,7 +1189,7 @@ fn vertical_align_lifts_the_baseline_and_grows_the_line_box() {
         .iter()
         .filter_map(|f| match f {
             crate::layout::LineFragment::Text(run) => Some(run.style.baseline_shift),
-            crate::layout::LineFragment::Image(_) => None,
+            crate::layout::LineFragment::Image(_) | crate::layout::LineFragment::Marker(_) => None,
         })
         .collect();
     assert_eq!(shifts.len(), 3);
@@ -947,7 +1230,9 @@ fn decorations_reach_the_run_without_changing_geometry() {
             .iter()
             .filter_map(|f| match f {
                 crate::layout::LineFragment::Text(run) => Some(run.style.underline),
-                crate::layout::LineFragment::Image(_) => None,
+                crate::layout::LineFragment::Image(_) | crate::layout::LineFragment::Marker(_) => {
+                    None
+                }
             })
             .collect()
     };
@@ -1278,7 +1563,7 @@ fn rtl_reverses_fragment_order_but_not_the_byte_ranges() {
             .iter()
             .filter_map(|f| match f {
                 LineFragment::Text(run) => Some(run.norm.clone()),
-                LineFragment::Image(_) => None,
+                LineFragment::Image(_) | LineFragment::Marker(_) => None,
             })
             .collect()
     };
@@ -1338,4 +1623,87 @@ fn text_indent_insets_the_start_side_in_both_directions() {
         (rtl.lines[0].x, rtl.lines[0].width)
     );
     assert_eq!(rtl.lines[0].width, ltr.lines[0].width, "让位不该改字宽");
+}
+
+// ---- 两端对齐（`text-align: justify`）与字距（`letter-spacing`）----
+//
+// 这两项都改**行内**的字位：对齐把余量摊到行内的隙上，字距把每个字推宽。它们与
+// `x` / `width` 无关（`x` 是行盒左缘、`width` 是未撑开的片段宽之和），所以断言要看
+// `ink_width()`（撑开后的墨迹宽）与逐字位置，不能只看 `x` / `width` —— 那正是接通前
+// 它们「落了 `_ => 0.0` 却测不出来」的原因。
+
+/// 两端对齐：除末行外每行都摊满版心；末行不对齐（CSS 规定段末行不 justify）。
+#[test]
+fn a_justified_paragraph_fills_the_measure_except_the_last_line() {
+    // 25 个汉字，16px/字、版心 170px → 每行 10 字（160px，余 10px 可摊），共 3 行。
+    // 版心特意不是 16 的整数倍：整数倍时每行正好顶满、余量为 0，就看不出「有没有摊开」。
+    let html = format!("<p>{}</p>", "汉".repeat(25));
+    let width = 170.0;
+    let (_, laid) = typeset(
+        &html,
+        "p { text-align: justify; text-indent: 0; margin: 0 }",
+        width,
+    );
+    assert!(
+        laid.lines.len() >= 3,
+        "该折成至少三行，实际 {} 行",
+        laid.lines.len()
+    );
+    let last = laid.lines.len() - 1;
+    for (i, line) in laid.lines.iter().enumerate() {
+        if i == last {
+            assert!(line.justify.is_none(), "末行不该对齐：余量留在右边是惯例");
+        } else {
+            assert!(line.justify.is_some(), "第 {i} 行该两端对齐");
+            assert!(
+                (line.ink_width() - width).abs() <= 0.5,
+                "第 {i} 行该摊满 {width}，实际墨迹宽 {}（未撑开的片段宽 {}）",
+                line.ink_width(),
+                line.width
+            );
+        }
+    }
+}
+
+/// `<br>` 收尾的行不对齐：强制断行的行与段末行同待遇。
+#[test]
+fn a_line_ended_by_a_br_is_not_justified() {
+    // 11 个汉字，版心 100px（16px/字）→ 第一硬行折成 6 + 5 两行，第 2 行是硬行尾；
+    // `<br>` 之后 "尾" 自成第三行。
+    let html = format!("<p>{}<br>尾</p>", "汉".repeat(11));
+    let (_, laid) = typeset(
+        &html,
+        "p { text-align: justify; text-indent: 0; margin: 0 }",
+        100.0,
+    );
+    assert_eq!(laid.lines.len(), 3, "该是 6 / 5 / 1 三行");
+    assert!(laid.lines[0].justify.is_some(), "第一行不是硬行尾，该对齐");
+    assert!(laid.lines[1].justify.is_none(), "`<br>` 前那一行不对齐");
+    assert!(laid.lines[2].justify.is_none(), "`<br>` 之后那一行不对齐");
+}
+
+/// 字距：每个字符都推宽，于是同样版心折得更早，run 宽也按字距加。
+#[test]
+fn letter_spacing_widens_each_character_and_breaks_earlier() {
+    let html = format!("<p>{}</p>", "汉".repeat(20));
+    let width = 240.0;
+    let (_, plain) = typeset(&html, "p { text-indent: 0; margin: 0 }", width);
+    let (_, spaced) = typeset(
+        &html,
+        "p { letter-spacing: 8px; text-indent: 0; margin: 0 }",
+        width,
+    );
+    // 无字距：16px/字 → 每行 15 字；有 8px 字距：24px/字 → 每行 10 字。
+    assert_eq!(plain.line_text(0).chars().count(), 15, "无字距每行 15 字");
+    assert_eq!(
+        spaced.line_text(0).chars().count(),
+        10,
+        "加 8px 字距每行 10 字（折行更早）"
+    );
+    // 行宽 = 10 × (16 + 8) = 240 —— 与宽度表同源，折行按它判的。
+    assert!(
+        (spaced.lines[0].width - 240.0).abs() < 0.01,
+        "首行宽该是 10 × 24 = 240，实际 {}",
+        spaced.lines[0].width
+    );
 }

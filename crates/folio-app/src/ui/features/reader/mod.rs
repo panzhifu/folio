@@ -9,11 +9,14 @@
 //! - [`book_fonts`] —— 这本书的内嵌字体别名表（声明名 → 设备家族名）。
 //! - [`modules`] —— 会话的三个功能模块：导航 / 位置 / 目录。
 //! - [`scene`] —— 排版结果 → 绘制单元（`GlyphRun` + 图片）。
+//! - [`image_atlas`] —— 书里的图与 GPU 图集之间那层**会回收**的缓存（谁持有像素、什么时候放掉）。
+//! - [`image_viewer`] —— 把一张图摊满整屏看：状态、纯几何与那一层浮层。
 //! - [`view`] —— `impl Render`：把会话状态摆成元素、接住滚轮。
 //! - [`selection_menu`] —— 选中的就地菜单（图标格子卡）与它的摆位判断。
 //! - [`page`] —— 被外壳 push 进书架栈的那一屏：干净态两条小字 + 浮出的顶栏与底栏。
 //! - [`chrome`] —— 纯判断（分区、面板档位、模式退档、进度念法），无 gpui，宿主测试直接跑。
 //! - [`toc_tree`] —— 目录树的纯判断（摊平、折叠、当前行、搜索），同上。
+//! - [`toc_panel`] —— 目录那一屏自己那个实体（弹层、书头、搜索、尺寸表都在它手里），阅读页只留句柄。
 //! - [`bands`] —— 干净态那两条读数带（顶上章名、底下位置与进度）。
 //! - [`paint`] —— 字形级绘制元素（`shape_line` / `paint_glyph`）。
 //!
@@ -28,13 +31,18 @@ mod book;
 mod book_fonts;
 mod chrome;
 pub mod document;
+mod fixed;
+mod image_atlas;
+mod image_viewer;
 mod measure;
 mod modules;
 mod page;
 mod paint;
+mod perf;
 mod scene;
 mod selection_menu;
 mod session;
+mod toc_panel;
 mod toc_tree;
 mod view;
 

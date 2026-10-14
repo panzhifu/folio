@@ -4,12 +4,14 @@
 //! 「哪几行该出现、第几行是现在这一行」，而不在画法。把它单独放出来，宿主
 //! `cargo test` 就能把整棵树的形状跑一遍，不必上真机数行。
 //!
-//! 形状照 Reeden 的目录量出来的三条规矩（见 `plans/facts.md` 那条「树跟着位置走」）：
+//! 三条规矩（前两条照 Reeden 的目录量出来，第三条是读者 2026-10-15 改的）：
 //!
-//! 1. **树的状态跟着阅读位置走**：打开时只把通往当前章的那条链展开，其余分支折起。
-//! 2. **折叠的是孩子，不是自己**：一个分支折起来之后它那一行还在，chevron 还指着
+//! 1. **折叠的是孩子，不是自己**：一个分支折起来之后它那一行还在，chevron 还指着
 //!    「点开有东西」。
-//! 3. **搜索命中要带祖先**：只留命中那一行的话，读者看不出它挂在第几章下面。
+//! 2. **搜索命中要带祖先**：只留命中那一行的话，读者看不出它挂在第几章下面。
+//! 3. **打开时整棵树全折**，只露顶层那一排：一进来先看「这本书分几大块」，而不是被
+//!    直接塞进当前章那一条链里。位置靠列表**滚到当前章那一行**（看不见的就往上看它
+//!    最近的那条祖先，见 [`landing_row`]）来交代，不靠展开来交代。
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -95,19 +97,36 @@ fn hidden_by_ancestor(rows: &[TocRow], row: &TocRow, collapsed: &BTreeSet<usize>
     false
 }
 
-/// 除了 `keep` 这一行通往根的那条链，其余**分支**都折上。
+/// 整棵树的分支都折上：只留顶层那几条。
 ///
-/// `keep` 是 `None`（这本书没有目录、或当前章对不上任何一条）时全折：与其给一堵
-/// 展开到第三层的墙，不如只露顶层。
-pub fn collapse_except(rows: &[TocRow], keep: Option<usize>) -> BTreeSet<usize> {
-    let open: BTreeSet<usize> = match keep {
-        Some(ix) => ancestors_including(rows, ix).collect(),
-        None => BTreeSet::new(),
-    };
+/// 与「跟着阅读位置留一条链」是两种做法，这里选前者（见模块注释第三条）—— 目录一进来要
+/// 答的是「这本书分几大块」，而一条展开到第三层的链答的是「你现在在这一节的哪一小节下面」。
+/// 位置由 [`landing_row`] 那一趟滚动交代，不必靠展开来交代。
+pub fn fold_all(rows: &[TocRow]) -> BTreeSet<usize> {
     rows.iter()
-        .filter(|row| row.branch && !open.contains(&row.ix))
+        .filter(|row| row.branch)
         .map(|row| row.ix)
         .collect()
+}
+
+/// 打开这一屏该把列表停在哪儿：`current` 那一行自己，或它往上**第一条看得见**的祖先。
+///
+/// 全折之后当前章常常正埋在一个折起来的分支下面 —— 看不见当前行不等于丢了位置，读者要的
+/// 是「我知道我在这块里面」，而那正好是最近的那条看得见的祖先（顶层那一排的某一条）。
+/// 当前行本来就看得见（它就挂在顶层、或它自己就是个折着的分支）时给的是它自己。
+pub fn landing_row(
+    rows: &[TocRow],
+    current: Option<usize>,
+    collapsed: &BTreeSet<usize>,
+) -> Option<usize> {
+    let mut ix = current?;
+    loop {
+        let row = rows.get(ix)?;
+        if !hidden_by_ancestor(rows, row, collapsed) {
+            return Some(ix);
+        }
+        ix = row.parent?;
+    }
 }
 
 /// `ix` 自己加上它通往根的每一级。
@@ -178,9 +197,9 @@ pub struct TocView {
 }
 
 impl TocView {
-    /// 打开面板：折叠集按「只留通往 `current` 的那条链」算，于是树跟着阅读位置走。
-    pub fn open(rows: Vec<TocRow>, current: Option<usize>) -> Self {
-        let collapsed = collapse_except(&rows, current);
+    /// 打开这一屏：整棵树的分支全折，只露顶层；搜索词与摆法回到默认。
+    pub fn open(rows: Vec<TocRow>) -> Self {
+        let collapsed = fold_all(&rows);
         Self {
             rows,
             collapsed,
@@ -192,6 +211,18 @@ impl TocView {
     /// 当前章对应的那一行的 `ix`（画标记条、算「已读 N」都要它）。
     pub fn current_ix(&self, chapter: usize) -> Option<usize> {
         row_of_chapter(&self.rows, chapter)
+    }
+
+    /// 打开这一屏时列表该停在哪一行的 `ix`：当前章那一行，或它往上第一条看得见的祖先。
+    /// 全折之后当前行多半藏在某个分支里，这一条给的就是那条看得见的分支。
+    pub fn landing_ix(&self, chapter: usize) -> Option<usize> {
+        landing_row(&self.rows, self.current_ix(chapter), &self.collapsed)
+    }
+
+    /// 那一行在**此刻看得见的那一串**里排第几 —— 虚拟列表按这个数滚。
+    /// 折着看不见的那一行给 `None`：递一个看不见的下标进去，列表会滚到不存在的位置。
+    pub fn visible_position(&self, ix: usize) -> Option<usize> {
+        self.visible().iter().position(|row| row.ix == ix)
     }
 
     /// 这一枝现在是折着的还是展开的 —— 箭头朝哪边由它决定。
@@ -246,17 +277,9 @@ impl TocView {
         self.collapsed.clear();
     }
 
-    /// 全折上：只留顶层那几条。
-    ///
-    /// 与 [`collapse_except`] 那条「打开时跟着阅读位置」不同 —— 那是读者一进来看到的样子，
-    /// 这一条是他明确要「把树收起来」，不该再给他留一条展开着的分支。
+    /// 全折上：只留顶层那几条。与 [`Self::open`] 时那一份折叠同一个形状。
     pub fn collapse_all(&mut self) {
-        self.collapsed = self
-            .rows
-            .iter()
-            .filter(|row| row.branch)
-            .map(|row| row.ix)
-            .collect();
+        self.collapsed = fold_all(&self.rows);
     }
 
     /// 要不要倒着摆。
@@ -353,13 +376,12 @@ mod tests {
     }
 
     /// 前序编号必须与折没折无关：折叠集记的就是这些号，号一动读者手动展开的那几格
-    /// 就会跑到别的行上去。当前章在顶层的「第2章」时，第1章 那三条小节全折，
-    /// 剩下的行仍带着它们原来的号而不是重新从 0 数。
+    /// 就会跑到别的行上去。全折之后剩下的行仍带着它们原来的号而不是重新从 0 数。
     #[test]
     fn the_numbering_does_not_shift_when_branches_collapse() {
         let (entries, hrefs) = book();
         let rows = build(&entries, &hrefs);
-        let collapsed = collapse_except(&rows, row_of_chapter(&rows, 2));
+        let collapsed = fold_all(&rows);
         let shown: Vec<_> = visible(&rows, &collapsed)
             .iter()
             .map(|row| row.ix)
@@ -370,51 +392,74 @@ mod tests {
         assert_ne!(shown, (0..shown.len()).collect::<Vec<_>>());
     }
 
-    /// 打开面板时的那一份折叠：只留通往当前章的那条链。
+    /// 打开这一屏：不管读到哪一章，看见的都是顶层那一排。
+    ///
+    /// 这是改掉的那条旧规矩 —— 从前打开会把通往当前章那条链展开，读者一进来就被塞进
+    /// 第三层里。现在位置靠滚动交代（见下面两条落点的门），不靠展开交代。
     #[test]
-    fn opening_follows_the_reading_position() {
+    fn the_tree_opens_folded_to_the_top_level() {
         let (entries, hrefs) = book();
-        let rows = build(&entries, &hrefs);
-        // 在第 1 章（chap1）里：第1章 展开，其它分支本来就没孩子。
-        let current = row_of_chapter(&rows, 1).expect("chap1 在树里");
-        assert_eq!(current, 1, "章首对应的是「第1章」那一条，不是它的小节");
-        let collapsed = collapse_except(&rows, Some(current));
-        let shown: Vec<_> = visible(&rows, &collapsed)
-            .iter()
-            .map(|row| row.title.as_str())
-            .collect();
-        assert_eq!(
-            shown,
-            vec![
-                "扉页",
-                "第1章",
-                "第一节",
-                "第二节",
-                "丢的那节",
-                "第2章",
-                "版权页"
-            ]
-        );
-
-        // 在第 2 章：第1章 该折起来，它的三条小节一行都不许出现。
-        let collapsed = collapse_except(&rows, row_of_chapter(&rows, 2));
-        let shown: Vec<_> = visible(&rows, &collapsed)
-            .iter()
-            .map(|row| row.title.as_str())
-            .collect();
-        assert_eq!(shown, vec!["扉页", "第1章", "第2章", "版权页"]);
+        for chapter in [0, 1, 2, 3] {
+            let view = TocView::open(build(&entries, &hrefs));
+            let shown: Vec<_> = view
+                .visible()
+                .iter()
+                .map(|row| row.title.as_str())
+                .collect();
+            assert_eq!(
+                shown,
+                vec!["扉页", "第1章", "第2章", "版权页"],
+                "当前在第 {chapter} 章时打开也该只露顶层"
+            );
+            assert_eq!(view.current_ix(chapter).is_some(), chapter < 4);
+        }
     }
 
-    /// 对不上任何一条时（定版式、或当前章没进目录）不猜，直接退到只看顶层。
+    /// 当前行看不见时，落点是它往上第一条看得见的祖先；本来就看得见时就是它自己。
     #[test]
-    fn a_position_with_no_row_collapses_everything() {
+    fn the_landing_row_is_the_nearest_visible_ancestor() {
+        // 三层：第一部分 → 第1章 → 第1节，只有顶层那条看得见。
+        let entries = vec![entry(
+            "第一部分",
+            "p1.xhtml",
+            vec![entry(
+                "第1章",
+                "c1.xhtml",
+                vec![entry_at("第1节", "c1.xhtml", "s1")],
+            )],
+        )];
+        let hrefs = HashMap::from([("p1.xhtml".to_string(), 0usize)]);
+        let rows = build(&entries, &hrefs);
+        let collapsed = fold_all(&rows);
+        assert_eq!(rows.len(), 3);
+
+        // 埋得最深的那一条（第1节）：往上走两级才碰到看得见的那一行。
+        assert_eq!(landing_row(&rows, Some(2), &collapsed), Some(0));
+        // 顶层那条自己看得见：落点就是它，不多走。
+        assert_eq!(landing_row(&rows, Some(0), &collapsed), Some(0));
+        // 对不上任何一条（定版式、或当前章没进目录）时没有落点可滚。
+        assert_eq!(landing_row(&rows, None, &collapsed), None);
+    }
+
+    /// 滚过去用的是「看得见的那一串里的第几行」，不是前序编号：全折时顶层某条的前序号
+    /// 可能是 5，而它在可见的那四条里只排第 2 —— 拿 5 去滚就滚到不存在的行上。
+    #[test]
+    fn the_landing_index_counts_only_visible_rows() {
         let (entries, hrefs) = book();
         let rows = build(&entries, &hrefs);
-        let collapsed = collapse_except(&rows, row_of_chapter(&rows, 99));
-        assert_eq!(collapsed.len(), 1, "只有第1章 一个分支");
-        assert!(collapsed.contains(&1));
-        let shown = visible(&rows, &collapsed);
-        assert_eq!(shown.len(), 4, "顶层四条");
+        let view = TocView::open(rows);
+        let ix = view.landing_ix(2).expect("第2章 在树里");
+        assert_eq!(ix, 5, "记的仍是前序号");
+        assert_eq!(
+            view.visible_position(ix),
+            Some(2),
+            "看得见的四条里它排第三（下标 2）"
+        );
+        assert_eq!(
+            view.visible_position(3),
+            None,
+            "折着看不见的那一行没有位置，不能拿去滚"
+        );
     }
 
     /// 折叠的是孩子不是自己：分支折上之后它那一行仍然在，读者才知道还能点开。
@@ -458,19 +503,18 @@ mod tests {
         assert_eq!(read_count(&rows, None), (0, 7), "没读过与读了一点是两件事");
     }
 
-    /// 面板那份状态：打开跟着位置走，折上再点开要回到原样。
+    /// 面板那份状态：打开就是全折的那一份，折上再点开要回到原样。
     #[test]
-    fn the_panel_opens_at_the_position_and_toggles_back_and_forth() {
+    fn the_panel_opens_folded_and_toggles_back_and_forth() {
         let (entries, hrefs) = book();
         let rows = build(&entries, &hrefs);
-        let current = row_of_chapter(&rows, 2);
-        let mut view = TocView::open(rows, current);
+        let mut view = TocView::open(rows);
         // 拿到 owned 的标题而不是 `&str`：`visible()` 借的是 `view`，而下面还要改它。
         let folded: Vec<String> = view.visible().iter().map(|row| row.title.clone()).collect();
         assert_eq!(
             folded,
             vec!["扉页", "第1章", "第2章", "版权页"],
-            "打开时只留通往当前章的那条链"
+            "打开时只露顶层"
         );
 
         // 点开设第1章：它的三条小节要真的出来 —— 只把 `ix` 摘出折叠集是不够的，
@@ -493,9 +537,7 @@ mod tests {
     fn a_search_shows_hits_that_are_currently_folded_away() {
         let (entries, hrefs) = book();
         let rows = build(&entries, &hrefs);
-        // 当前在第 2 章 → 第1章 打开时就是折起来的。
-        let current = row_of_chapter(&rows, 2);
-        let mut view = TocView::open(rows, current);
+        let mut view = TocView::open(rows);
         assert!(!view.visible().iter().any(|row| row.title == "第二节"));
 
         view.set_query("第二节".into());
@@ -521,13 +563,12 @@ mod tests {
     fn reversing_flips_only_the_display_order() {
         let (entries, hrefs) = book();
         let rows = build(&entries, &hrefs);
-        let current = row_of_chapter(&rows, 2);
-        let mut view = TocView::open(rows, current);
+        let mut view = TocView::open(rows);
         let forward: Vec<usize> = view.visible().iter().map(|row| row.ix).collect();
         view.set_reversed(true);
         let backward: Vec<usize> = view.visible().iter().map(|row| row.ix).collect();
         assert_eq!(backward, forward.into_iter().rev().collect::<Vec<_>>());
-        assert_eq!(view.current_ix(2), current, "当前行认的还是同一条");
+        assert_eq!(view.current_ix(2), Some(5), "当前行认的还是同一条");
         assert_eq!(
             view.read_count(view.current_ix(2)),
             (6, 7),
@@ -535,15 +576,17 @@ mod tests {
         );
     }
 
-    /// 「展开目录 / 折叠目录」那一颗的两端：折上只留顶层，展开回到整棵树。
+    /// 「展开目录 / 折叠目录」那一颗的两端来回摆得开，而打开时就在**折叠那一端** ——
+    /// 那颗按钮的文案按 `all_open()` 决定，起点若变了，它第一下就会写成反话。
     #[test]
     fn expanding_and_collapsing_all_reaches_both_ends() {
         let (entries, hrefs) = book();
         let rows = build(&entries, &hrefs);
-        // 当前章在「第1章」下面 → 打开时那条分支就是展开的。
-        let current = row_of_chapter(&rows, 1);
-        let mut view = TocView::open(rows, current);
+        let mut view = TocView::open(rows);
+        assert!(!view.all_open(), "打开时就是全折的那一端");
+        view.expand_all();
         assert!(view.all_open());
+        assert_eq!(view.visible().len(), 7, "全展开是整棵树");
         view.collapse_all();
         assert!(!view.all_open());
         let top: Vec<&str> = view
@@ -556,8 +599,5 @@ mod tests {
             vec!["扉页", "第1章", "第2章", "版权页"],
             "全折上只剩顶层"
         );
-        view.expand_all();
-        assert!(view.all_open());
-        assert_eq!(view.visible().len(), 7, "全展开是整棵树");
     }
 }

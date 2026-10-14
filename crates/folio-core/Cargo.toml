@@ -17,6 +17,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 html5ever.workspace = true
 image.workspace = true
+# SVG 栅格化（`format::svg`）：封面 / 正文内联 / 逐页漫画的 SVG 都要画成位图。
+# 锁里已有这份且本来在编译（gpui-pre 那条链），不新增依赖树 —— 见根 Cargo.toml。
+resvg.workspace = true
 zip.workspace = true
 # WOFF1 的表是逐表 zlib 压的，解回 sfnt 要用它（见 `format::woff`）。
 flate2.workspace = true

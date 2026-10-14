@@ -8,13 +8,15 @@
 //! 反过来讲也很清楚：这里**测不到**的是触摸滚动、章节按钮的点击、主题在 Android 上
 //! 解析到浅还是深 —— 那几件只有真开窗口、真上机器才算验证。
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::ui::features::reader::book_fonts::BookFonts;
-use crate::ui::features::reader::document::{Document, body_of};
+use crate::ui::features::reader::document::{ChapterSource, Document, body_of, narrowed_lines};
 use crate::ui::shared::images::ChapterImages;
-use folio_core::Reader;
+use folio_core::content::document::Document as OpenedDocument;
 use folio_core::layout::LineFragment;
+use folio_core::{Chapter, Content, DocMeta, FlowDoc, Format, Reader};
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Context, Render, Styled, TestAppContext, div, px, size,
 };
@@ -422,7 +424,7 @@ fn setting_the_same_preferences_relayouts_nothing(cx: &mut TestAppContext) {
 ///
 /// 用计数而不是计时：计时在这台机器上被调度噪声牵着走（`plans/layout-optimization.md` §5.3
 /// 实测 ±20%），而「解析了几次」是一个确定的整数。这条**能红**：把 `typeset_job` 里
-/// 「`chapter_hash` 对得上就复用产物」那一支退回成无条件 `ChapterArtifacts::build`，
+/// 「产物的内容哈希与这趟取到的正文对得上就复用」那一支退回成无条件 `ChapterArtifacts::build`，
 /// 最后那条断言立刻翻红。
 #[gpui_kit::test]
 fn a_preference_change_reparses_nothing(cx: &mut TestAppContext) {
@@ -473,11 +475,11 @@ fn a_preference_change_reparses_nothing(cx: &mut TestAppContext) {
     assert_eq!(
         take_local(Metric::DomParses),
         0,
-        "改一次字号重解析了一章：产物没按 `chapter_hash` 复用"
+        "改一次字号重解析了一章：产物没按内容哈希复用"
     );
 
     // 换章就必须重解析 —— 反面不成立说明复用条件写反了（拿上一章的 DOM 排这一章）。
-    document.set_chapter(format!("<p>{}</p>", LONG.repeat(4)));
+    document.set_chapter(ChapterSource::text(format!("<p>{}</p>", LONG.repeat(4))));
     cx.update_window(handle, |_, win, cx| document.ensure_layout(win, cx, 0.0))
         .expect("换章排版应当成功");
     assert_eq!(
@@ -553,11 +555,11 @@ fn the_layout_key_is_composed_in_one_place(cx: &mut TestAppContext) {
     );
 
     // 换章：章文本进了复用范围（`NodeId` 只在同一份 DOM 里作数）。
-    document.set_chapter("<p>下一章</p>".to_string());
+    document.set_chapter(ChapterSource::text("<p>下一章</p>"));
     assert_ne!(
-        before.chapter_hash,
-        document.layout_key(600.0, 1).chapter_hash,
-        "换章必须换章哈希"
+        before.chapter,
+        document.layout_key(600.0, 1).chapter,
+        "换章必须换章身份（块缓存的复用范围跟着清）"
     );
 
     // 作者 CSS：换键（层叠要重算），但不换复用范围（DOM 还是那份 DOM）。
@@ -624,9 +626,6 @@ enum PrefClass {
     PinnedElsewhere,
     /// 目录那一屏的字段：不许动正文版式。
     Toc,
-    /// **已知没接上**的那一格：断言它现在动不了版式。哪天接上了，这条测试会红，
-    /// 就把格子改成 `Layout` —— 挂着的口子至少是登记过的，而不是没人知道的。
-    NotWired,
 }
 
 /// 「动一下某项偏好」的写法 + 它的归属。名字必须与 `Reader` 的字段名一模一样。
@@ -653,7 +652,10 @@ const PREFS: [PrefTweak; 12] = [
         |p| p.mono_font_family = "mono2".into(),
         PrefClass::PinnedElsewhere,
     ),
-    ("justify", |p| p.justify = !p.justify, PrefClass::NotWired),
+    // 2026-10-16 起「两端对齐」真接上了：`Justify` 不再落 `_ => 0.0`，而是按行的剩余
+    // 宽度把余量摊到行内的隙上（`layout::collect::justify_plan`）。分类跟着从
+    // `NotWired` 提到 `Layout`。
+    ("justify", |p| p.justify = !p.justify, PrefClass::Layout),
     (
         "toc_density",
         |p| p.toc_density = folio_core::infra::config::TocDensity::Compact,
@@ -756,7 +758,10 @@ fn a_layout_preference_change_moves_the_geometry(cx: &mut TestAppContext) {
             document
                 .lines()
                 .iter()
-                .map(|line| (line.x, line.y, line.width))
+                // `ink_width` 必须在这份签名里：两端对齐**不改** `x` / `width`，只把余量
+                // 摊到行内（于是墨迹铺到 `ink_width`）。只看前三格，「两端对齐」这类改动
+                // 会假绿 —— 这正是接通前它明明落 `_ => 0.0` 却测不出来的原因。
+                .map(|line| (line.x, line.y, line.width, line.ink_width()))
                 .collect::<Vec<_>>(),
         )
     };
@@ -777,13 +782,6 @@ fn a_layout_preference_change_moves_the_geometry(cx: &mut TestAppContext) {
                 "偏好 {name} 改了版式没动：面板说有、后端没有，重排是白排的"
             ),
             PrefClass::Toc => assert!(!changed, "偏好 {name} 是目录那一屏的字段，不该动到正文版式"),
-            // 「两端对齐」现在动不了版式：`layout/collect.rs` 的对齐只有
-            // `Right` / `Center` 两个分支，`Justify` 落进 `_ => 0.0` 与左对齐同解。
-            // 接上那一天把这一格改成 `Layout`，这条会先红一次提醒。
-            PrefClass::NotWired => assert!(
-                !changed,
-                "偏好 {name} 登记的是「没接上」，它要是突然能动版式了，说明有人接上了却没改分类"
-            ),
             PrefClass::RootStyle => {
                 let (before, after) = (Document::root_base(&base), Document::root_base(&prefs));
                 assert_ne!(
@@ -796,4 +794,725 @@ fn a_layout_preference_change_moves_the_geometry(cx: &mut TestAppContext) {
             PrefClass::PinnedElsewhere => {}
         }
     }
+}
+
+// ---- 脚注：条引用 → 注文（`Document::footnote_note_for_node` 一族） ----
+
+/// `蛇结` 那种形状：标记是一张「注」图（外面套 `<a epub:type="noteref">`），
+/// 注文在同一个文件的 `<aside epub:type="footnote">` 里。目标元素的文本优先于 `alt`。
+#[test]
+fn a_noteref_marker_returns_the_bodys_text_before_the_marker_alt() {
+    let source = "<p>正文开头\
+        <a epub:type=\"noteref\" href=\"#fn1\">\
+        <img src=\"p.png\" alt=\"alt 里的兜底注文\" class=\"epub-footnote\"/></a>。</p>\
+        <aside epub:type=\"footnote\" id=\"fn1\"><ol class=\"duokan-footnote-content\">\
+        <li class=\"duokan-footnote-item\">真正的注文</li></ol></aside>";
+    let doc = Document::new(
+        source.to_string(),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    let dom = doc.dom();
+    let img = dom
+        .elements()
+        .find(|(id, _)| dom.tag_name(*id) == Some("img"))
+        .map(|(id, _)| id)
+        .expect("该有那张「注」图");
+    assert_eq!(
+        doc.footnote_note_for_node(img).as_deref(),
+        Some("真正的注文"),
+        "目标 <aside> 的子树文本该胜出（alt 只是兜底）"
+    );
+}
+
+/// 目标在**别的文件**里（本章解不出正文）时，退回标记图上的 `zy-footnote` / `alt`。
+#[test]
+fn a_cross_file_noteref_falls_back_to_the_marker_attributes() {
+    let source = "<p>正文开头\
+        <a epub:type=\"noteref\" href=\"notes.xhtml#fn1\">\
+        <img src=\"p.png\" zy-footnote=\"跨文件的注文\"/></a>。</p>";
+    let doc = Document::new(
+        source.to_string(),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    let dom = doc.dom();
+    let img = dom
+        .elements()
+        .find(|(id, _)| dom.tag_name(*id) == Some("img"))
+        .map(|(id, _)| id)
+        .expect("该有那张「注」图");
+    assert_eq!(
+        doc.footnote_note_for_node(img).as_deref(),
+        Some("跨文件的注文"),
+        "跨文件目标在本地取不到，该退回标记自己的属性"
+    );
+}
+
+/// 一张**不在** `<a>` 里的普通插图不该被当成脚注。
+#[test]
+fn a_plain_illustration_is_not_a_footnote() {
+    let source = "<p>正文</p><p><img src=\"p.png\" alt=\"插图说明\"/></p>";
+    let doc = Document::new(
+        source.to_string(),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    let dom = doc.dom();
+    let img = dom
+        .elements()
+        .find(|(id, _)| dom.tag_name(*id) == Some("img"))
+        .map(|(id, _)| id)
+        .expect("该有那张图");
+    assert_eq!(
+        doc.footnote_note_for_node(img),
+        None,
+        "没挂在 `<a>` 上就不是脚注标记"
+    );
+}
+
+/// 《罗生门》那种形状：标记是 `<a href="part0004.xhtml#m1"><sup>[1]</sup></a>`（带文件名
+/// 的**同章**链接），注文是章末尾的 `<p class="note">`，`id` 挂在里面一个空 `<a>` 上。
+/// 只认纯 `#id` 会把它的脚注全漏掉。
+#[test]
+fn a_relative_noteref_into_a_note_paragraph_yields_the_note() {
+    let source = "<p>正文<a href=\"part0004.xhtml#m1\"><sup>[1]</sup></a>继续。</p>\
+        <p class=\"note\"><a id=\"m1\"></a> 这是注文的内容。</p>";
+    let doc = Document::new(
+        source.to_string(),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    let dom = doc.dom();
+    let marker = dom
+        .elements()
+        .find(|(id, _)| dom.attr(*id, "href") == Some("part0004.xhtml#m1"))
+        .map(|(id, _)| id)
+        .expect("该有那条标记链接");
+    let note = doc
+        .footnote_note_for_node(marker)
+        .expect("同章 note 段落该被认成脚注");
+    assert!(
+        note.contains("这是注文的内容。"),
+        "注文该取到最近那个有字的祖先块：{note:?}"
+    );
+}
+
+/// 同一种 `文件.xhtml#id` 的写法，指向的却是标题（目录链接），**不能**当成脚注 ——
+/// 不然点正文目录里的每一条都会弹注文、跳不过去。
+#[test]
+fn a_relative_link_into_a_heading_is_not_a_footnote() {
+    let source = "<p>见<a href=\"c.xhtml#a005\">罗生门</a>。</p>\
+        <h1 id=\"a005\" class=\"zw-text1\">罗生门</h1>";
+    let doc = Document::new(
+        source.to_string(),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    let dom = doc.dom();
+    let link = dom
+        .elements()
+        .find(|(id, _)| dom.attr(*id, "href") == Some("c.xhtml#a005"))
+        .map(|(id, _)| id)
+        .expect("该有那条链接");
+    assert_eq!(
+        doc.footnote_note_for_node(link),
+        None,
+        "指向标题的链接是普通目录链接，不是脚注"
+    );
+}
+
+/// 正文**由作业按位置取**的那一路：键声称的章与作业取回的章必须是同一章。
+///
+/// 这一格是 2026-10-15 把取文本塞进排版作业时**新引入的唯一坏法**。
+/// `LayoutKey::chapter` 不再含正文，于是「换章」这件事在键这一侧只剩
+/// `Document::set_chapter` 里那一句 `self.chapter = source.identity()` 在管。
+/// 漏掉它：键不换 → `request_typeset` 在「已应用的这把键就是想要的」那一支直接返回 →
+/// 屏幕上继续是上一章的行盒，而界面以为自己已经在新章上 —— 页眉、进度、落库全跟着错，
+/// 并且没有任何一处会报错。把那一句删掉，这一条当场红。
+///
+/// 另一半钉的是「作业真的去取了」：`Document::fetching` 构造时界面没有正文，
+/// 第一趟排版必须带回**按章号取到的那一段**，而不是构造时那份空章。
+#[gpui_kit::test]
+fn the_key_and_the_fetched_chapter_are_the_same_chapter(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    // 两章正文各带一个标记，排回来认得出是哪一章。`Chapter::inline` 让这份文档
+    // 不需要容器也能回答 `chapter_source(index)` —— 被测的是「按位置取」这条来路，
+    // 不是解压。
+    let flow = FlowDoc {
+        chapters: vec![
+            Chapter::inline("第一章", format!("<p>{LONG}（甲）</p>")),
+            Chapter::inline("第二章", format!("<p>{LONG}（乙）</p>")),
+        ],
+        ..Default::default()
+    };
+    let doc: Arc<dyn OpenedDocument> = Arc::from(folio_core::content::document::from_content(
+        DocMeta {
+            title: "两章".into(),
+            authors: Vec::new(),
+            format: Format::Epub,
+            size: 0,
+            ..DocMeta::default()
+        },
+        Content::Reflow(flow),
+    ));
+
+    let handle = window(cx, 1000.0, 900.0);
+    let mut document = Document::fetching(
+        doc.clone(),
+        0,
+        "",
+        bare_prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    cx.update_window(handle, |_, win, cx| {
+        document.ensure_layout(win, cx, 0.0);
+    })
+    .expect("窗口应当可排版");
+    let first = document.line_texts().concat();
+    assert!(
+        first.contains('甲'),
+        "第 0 章的来路必须排回第 0 章的正文，实际是：{first}"
+    );
+    assert_eq!(
+        document.layout_key(600.0, 1).chapter,
+        0,
+        "按位置取的那一路，键里的身份就是章号（内容哈希活在产物上，不在键里）"
+    );
+
+    // 换到第 1 章：身份与来路必须一起换。
+    document.set_chapter(ChapterSource::fetch(doc.clone(), 1));
+    cx.update_window(handle, |_, win, cx| {
+        document.ensure_layout(win, cx, 0.0);
+    })
+    .expect("窗口应当可排版");
+    let second = document.line_texts().concat();
+    assert_eq!(
+        document.layout_key(600.0, 1).chapter,
+        1,
+        "换章之后键里的身份要跟着换成第 1 章"
+    );
+    assert!(
+        second.contains('乙') && !second.contains('甲'),
+        "换章之后排回来的必须是第 1 章的正文，实际是：{second}"
+    );
+}
+
+/// 界面问键**不许重算输入的哈希**。
+///
+/// 这是 `layout::tests::cache::the_layout_inputs_hash_once` 的**对面那半**：那条钉的是
+/// `LayoutKey::compose` 自己不算，这条钉的是调用方不许每次都现造一份 `LayoutInputs`。
+/// 真实的退化形状是后者 —— 有人把 `layout_key()` 写回成
+/// `compose(LayoutInputs::compute(...), ...)`，每帧、链上每个章各一趟
+/// 「整本书的 CSS 走 SipHash」+「整份 `Reader` 用 serde_json 序列化一遍」。
+/// 把 `Document::layout_key` 改成那样，这一条当场红（增量从 0 变成问键的次数）。
+#[gpui_kit::test]
+fn asking_for_the_key_never_rehashes_the_inputs(cx: &mut TestAppContext) {
+    use folio_core::infra::metrics::{Metric, take_local};
+    let _ = cx;
+
+    let mut document = Document::new(
+        "<p>问键</p>".to_string(),
+        "p { margin: 0 }",
+        bare_prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    // 构造那一趟算过一次的账先结掉：这条门问的是**之后**每帧还付不付。
+    take_local(Metric::LayoutInputHashes);
+
+    for _ in 0..300 {
+        let _ = document.layout_key(600.0, 1);
+    }
+    assert_eq!(
+        take_local(Metric::LayoutInputHashes),
+        0,
+        "问键是每帧每个进链的章各一次的动作，一次哈希都不许在这里发生"
+    );
+
+    // 而偏好真的换了，那一格必须刷新（省掉刷新与每帧重算一样糟，只是坏得看不出来）。
+    let before = document.layout_key(600.0, 1);
+    let mut bigger = bare_prefs();
+    bigger.font_size += 4.0;
+    document.set_prefs(bigger);
+    assert_eq!(
+        take_local(Metric::LayoutInputHashes),
+        1,
+        "`set_prefs` 要重算一次，且只此一次"
+    );
+    assert_ne!(
+        before.prefs_hash,
+        document.layout_key(600.0, 1).prefs_hash,
+        "换了字号键里的偏好那一格必须跟着变"
+    );
+}
+
+/// 装饰短表**只随排版换代重折**，每帧问键都不重折。
+///
+/// 这是 §十一 第 12 条的门。改之前 `collect_decorations` 每帧、链上每个进链的章各把
+/// **整章的块表**走一遍才筛出那几条装饰（一份语料一章 160 块，长章 600+）；现在整章
+/// 只在 `apply_typeset` 里走一次（`Document::decorated`），每帧扫的是那张短表。
+///
+/// 前后两半各钉一头：反复问键必须一次都不重折（**这一头是这次的收益**，把
+/// `Document::apply_typeset` 里那行改成每帧现折就当场红）；而换了字号必须重折
+/// （**这一头防的是缓存化本身**，删掉重折就会停在旧表上，画出的底色与新行盒不配套）。
+#[gpui_kit::test]
+fn scrolling_never_rebuilds_the_decor_table(cx: &mut TestAppContext) {
+    use folio_core::infra::metrics::{Metric, take_local};
+    cx.update(gpui_kit::init);
+    let handle = window(cx, 600.0, 900.0);
+    let mut document = Document::new(
+        format!("<div><p>{LONG}</p><p>{LONG}</p></div>"),
+        "div { background-color: #C1CCC0 }",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    let typeset = |document: &mut Document, cx: &mut TestAppContext| {
+        cx.update_window(handle, |_, win, cx| {
+            document.ensure_layout(win, cx, 0.0);
+        })
+        .expect("窗口应当可排版");
+    };
+    typeset(&mut document, cx);
+    assert!(
+        !document.decor_seeds().is_empty(),
+        "这一章的书自己写了底色，短表里该有条目"
+    );
+    // 第一代排完的那笔账结掉：重折发生在排版换代时，那是合法的。
+    take_local(Metric::DecorRebuilds);
+
+    for _ in 0..50 {
+        typeset(&mut document, cx);
+    }
+    assert_eq!(
+        take_local(Metric::DecorRebuilds),
+        0,
+        "排版没换代就不许重折整章块表 —— 那正是从前每帧付的那一趟"
+    );
+
+    let mut bigger = prefs();
+    bigger.font_size += 4.0;
+    document.set_prefs(bigger);
+    typeset(&mut document, cx);
+    assert!(
+        take_local(Metric::DecorRebuilds) > 0,
+        "改字号重排了新一代，装饰表必须跟着重折，否则底色还是按旧行盒算的"
+    );
+}
+
+/// 行索引**只在有人问时折、只在排版换代时重折**。
+///
+/// 折它要走一遍整章的行、每行逐片段问一次文本坐标，所以两头都要钉：没划过字、没开
+/// 选区、没恢复落点的那本书一分钱不许付（前半）；问过之后两条查询共用同一张表，
+/// 不是每帧重折（后半）。接线之前这里是另一个形状 —— **每条批注 × 每帧 × 每个进链的
+/// 章**各把整章的行走一遍（`plans/阅读管线.md` §十一 第 9 条，实测一章 25 条批注
+/// 每帧 +1.7–2.2 ms）。
+#[gpui_kit::test]
+fn the_line_index_waits_for_its_first_query(cx: &mut TestAppContext) {
+    use std::rc::Rc;
+    cx.update(gpui_kit::init);
+    let handle = window(cx, 600.0, 900.0);
+    let mut document = Document::new(
+        format!("<p>{}</p>", LONG.repeat(6)),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    cx.update_window(handle, |_, win, cx| {
+        document.ensure_layout(win, cx, 0.0);
+    })
+    .expect("窗口应当可排版");
+    assert!(
+        document.char_lines.borrow().is_none(),
+        "排完版但没人问过：整章的行一趟都不该折"
+    );
+
+    // 第一条查询：批注底色每帧走的那一条（带内矩形）。
+    cx.update_window(handle, |_, win, app| {
+        document.selection_rects_in_band(win, app, 4..16, 0.0..f32::MAX)
+    })
+    .expect("窗口应当可求矩形");
+    assert!(
+        document.char_lines.borrow().is_some(),
+        "求过矩形却没有折索引：`selection_rects` 没走窄化那条路，每帧还在扫整章"
+    );
+    let built = document.char_lines();
+    assert!(
+        Rc::ptr_eq(&built, &document.char_lines()),
+        "第二次问又折了一张新表：这就退回「每问一次走一遍整章」了"
+    );
+
+    // 换代：行号与字符区间这两个身份都不再作数，旧表必须掉。
+    let mut bigger = prefs();
+    bigger.font_size += 4.0;
+    document.set_prefs(bigger);
+    assert!(
+        document.char_lines.borrow().is_none(),
+        "排版换代后索引还留着：那是拿旧一代的坐标去答新问句"
+    );
+    cx.update_window(handle, |_, win, cx| {
+        document.ensure_layout(win, cx, 0.0);
+    })
+    .expect("第二次排版应当成功");
+    // 第二条查询：字符偏移 → 行（恢复落点那一跳）。
+    let _ = document.line_at_offset(8);
+    let rebuilt = document.char_lines();
+    assert!(
+        !Rc::ptr_eq(&built, &rebuilt),
+        "换代之后还在用旧那张表：行号在新排版里指向别处"
+    );
+}
+
+/// 接了索引的三条查询，答案必须与「整章扫」**逐条相同**。
+///
+/// 核心那一层已经按每个偏移、每条短区间比过（`content::anchor::tests` 与
+/// `content::hit::tests`），这里钉的是**接线**：`Document` 递出去的行号段确实是从
+/// 它自己这一代排版折出来的那一份。把 `selection_rects` 里的 `range.clone()` 写成
+/// `0..` 那种张冠李戴，只有这条能抓住。
+#[gpui_kit::test]
+fn the_wired_queries_answer_like_the_whole_chapter_scan(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let handle = window(cx, 600.0, 900.0);
+    let mut document = Document::new(
+        format!("<p>{}</p>", LONG.repeat(6)),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    cx.update_window(handle, |_, win, cx| {
+        document.ensure_layout(win, cx, 0.0);
+    })
+    .expect("窗口应当可排版");
+    let total = document.text_map().chars();
+    assert!(
+        document.lines().len() > 3 && total > 40,
+        "fixture 要能跨行才有得比：行数 {}、字数 {total}",
+        document.lines().len()
+    );
+
+    // 偏移 → 行、偏移 → 行顶：与整章扫逐偏移对齐。
+    for offset in [0, 1, 7, 19, 40, total - 1, total] {
+        let scanned = folio_core::content::anchor::line_at_offset(
+            document.layout(),
+            document.dom(),
+            document.text_map(),
+            offset,
+        );
+        assert_eq!(
+            document.line_at_offset(offset),
+            scanned,
+            "偏移 {offset} 上接了索引反而与整章扣分家"
+        );
+        assert_eq!(
+            document.y_at_offset(offset),
+            document.layout().lines[scanned].y,
+            "偏移 {offset} 的行顶与该行的 y 不符"
+        );
+    }
+
+    // 区间 → 矩形：逐条比，包括跨行、越界与空区间。
+    for range in [0..1, 5..40, total..total + 50, Range { start: 30, end: 4 }] {
+        let (tight, wide) = cx
+            .update_window(handle, |_, win, app| {
+                let measure = document.measure(win, app);
+                let wide = folio_core::content::hit::rects_for_range(
+                    document.layout(),
+                    document.dom(),
+                    document.text_map(),
+                    &measure,
+                    range.clone(),
+                );
+                let tight = document.selection_rects(win, app, range.clone());
+                (tight, wide)
+            })
+            .expect("窗口应当可求矩形");
+        assert_eq!(
+            tight,
+            wide,
+            "区间 {range:?}：走索引那条路换了答案（窄化后的条数 {}，整章扫 {}）",
+            tight.len(),
+            wide.len()
+        );
+    }
+}
+
+/// 交集的两条不等式要一条条钉住：哪一头夹错了都是「少一块底色」，而那种错在
+/// 屏上看不到任何线索（矩形只是不见了）。
+#[test]
+fn narrowed_lines_intersect_without_dropping_a_line() {
+    // 字符段整段在带内：不动。
+    assert_eq!(narrowed_lines(Some(2..7), 0..10), 2..7);
+    // 两头各伸出去一点：夹到带上，一行都不许丢。
+    assert_eq!(narrowed_lines(Some(2..7), 4..10), 4..7);
+    assert_eq!(narrowed_lines(Some(6..12), 0..9), 6..9);
+    // 索引不可用（那一章的行不按时序单调）：只剩可见带那一头。
+    assert_eq!(narrowed_lines(None, 4..9), 4..9);
+    // 两不相交（这一条批注根本不在这屏上）：给空区间，一行都不走。
+    // 空区间落在哪一头无所谓（它是拿来迭代的，不迭代就是不迭代），但取「起 = 两个起点的
+    // 较大者」这一头的写法要与 `lines_in_band` 那句 `start..start` 同一条口径。
+    assert_eq!(narrowed_lines(Some(0..3), 5..9), 5..5);
+    assert_eq!(narrowed_lines(Some(7..9), 0..5), 7..7);
+    // 空带与反向带：`lines_in_band` 那种情况给整区间，这里只验空的那种。
+    assert_eq!(narrowed_lines(Some(2..7), 3..3), 3..3);
+}
+
+/// 带内那条查询，与「整章算完再按 y 滤」**逐条相同**。
+///
+/// 这条是 `selection_rects_in_band` 唯一的正确性凭据 —— `TestWindow` 不暴露绘制场景，
+/// 「底色不见了」这种错在 headless 里没人看得见（同一件事在 §十四 那条 `#[ignore]`
+/// 记录里已经栽过一次），所以判据只能是「窄化后的结果 == 没窄化再滤一遍的结果」。
+#[gpui_kit::test]
+fn the_banded_query_agrees_with_filtering_afterwards(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let handle = window(cx, 600.0, 900.0);
+    let mut document = Document::new(
+        format!(
+            "<body>{}</body>",
+            (0..20)
+                .map(|_| format!("<p>{}</p>", LONG.repeat(3)))
+                .collect::<String>()
+        ),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    cx.update_window(handle, |_, win, cx| {
+        document.ensure_layout(win, cx, 0.0);
+    })
+    .expect("窗口应当可排版");
+    let total = document.text_map().chars();
+    let all_lines = document.layout().lines.len();
+    assert!(
+        all_lines > 10,
+        "fixture 要长到一屏装不下才有得比：{all_lines} 行"
+    );
+
+    // 带：整章、屏顶几行、跨两条批注的中间一段、正好卡在行边界上、空带。
+    let first_line = &document.layout().lines[0];
+    let bands = [
+        0.0f32..f32::MAX,
+        first_line.y..first_line.y + first_line.height * 3.0,
+        document.layout().lines[4].y..document.layout().lines[7].y + 0.5,
+        // 正好压在第一行的底沿：那道 y 滤用的是 `<=`，这里要同一条口径。
+        first_line.y + first_line.height..f32::MAX,
+        100.0..100.0,
+    ];
+    let ranges = [
+        0..total,
+        10..total - 10,
+        Range {
+            start: total / 2,
+            end: total / 2 + 8,
+        },
+        Range {
+            start: total - 4,
+            end: total + 40,
+        },
+    ];
+    for band in bands {
+        for range in ranges.clone() {
+            let (banded, wide) = cx
+                .update_window(handle, |_, win, app| {
+                    (
+                        document.selection_rects_in_band(win, app, range.clone(), band.clone()),
+                        document.selection_rects(win, app, range.clone()),
+                    )
+                })
+                .expect("窗口应当可求矩形");
+            // 调用方那道 y 滤（`view::highlight_rects` 里原样留着的那一条）。
+            let keeps = |rect: &folio_core::content::hit::SelectionRect| {
+                !(rect.y + rect.height <= band.start || rect.y >= band.end)
+            };
+            let mut expect = wide.clone();
+            expect.retain(keeps);
+            // ① 该画的都在：漏一条就是屏上少一块底色，而那件事在 headless 里没人看得见。
+            for rect in &expect {
+                assert!(
+                    banded.contains(rect),
+                    "带 {band:?}、区间 {range:?}：带内窄化把这条矩形弄丢了 {rect:?}"
+                );
+            }
+            // ② 没多画：窄化不许凭空造出整章扫里没有的矩形。
+            for rect in &banded {
+                assert!(
+                    wide.contains(rect),
+                    "带 {band:?}、区间 {range:?}：窄化凭空多出一条 {rect:?}"
+                );
+            }
+            // ③ 过了那道 y 滤之后，两边**逐条**相同 —— 窄化只是把丢弃提前到行走之前。
+            let mut got = banded.clone();
+            got.retain(keeps);
+            assert_eq!(
+                got, expect,
+                "带 {band:?}、区间 {range:?}：滤完之后与整章扫不同"
+            );
+        }
+    }
+}
+
+/// 一帧走几行是这条优化的**量**：`Metric::RectLines`。
+///
+/// 四条臂各钉一头：整章区间不带窄化必须**走满**（证明这一格数的是真被走过的行，
+/// 不是一句永远成立的「≤」）；同一条区间夹上可见带只许走带内那几行；带内一条八个字的
+/// 短批注还得被**字符**那一头再夹一次（只靠可见带不算窄化完成）；而一条根本不在这一屏上
+/// 的批注一行都不许走 —— 那正是「一章 25 条、屏上 3 条」这一帧的形状
+/// （`plans/阅读管线.md` §十一 第 9 条）。
+#[gpui_kit::test]
+fn a_banded_query_walks_only_the_visible_lines(cx: &mut TestAppContext) {
+    use folio_core::infra::metrics::{Metric, take_local};
+    cx.update(gpui_kit::init);
+    let handle = window(cx, 600.0, 900.0);
+    let mut document = Document::new(
+        format!("<p>{}</p>", LONG.repeat(120)),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    cx.update_window(handle, |_, win, cx| {
+        document.ensure_layout(win, cx, 0.0);
+    })
+    .expect("窗口应当可排版");
+    let total = document.text_map().chars();
+    let all_lines = document.layout().lines.len();
+
+    // 整条带（等效于不窄化 y）：满章都走。
+    take_local(Metric::RectLines);
+    cx.update_window(handle, |_, win, app| {
+        document.selection_rects_in_band(win, app, 0..total, 0.0..f32::MAX)
+    })
+    .expect("窗口应当可求矩形");
+    assert_eq!(
+        take_local(Metric::RectLines),
+        all_lines as u64,
+        "整章区间没走满：这一格数的可能不是被走过的行"
+    );
+
+    // 只留屏顶三行：走的就是那三行。
+    let band = 0.0..document.layout().lines[2].y + document.layout().lines[2].height;
+    let expected = document.visible_lines(band.clone()).len();
+    assert!(expected < all_lines, "带要真比整章短才有可比性");
+    take_local(Metric::RectLines);
+    cx.update_window(handle, |_, win, app| {
+        document.selection_rects_in_band(win, app, 0..total, band.clone())
+    })
+    .expect("窗口应当可求矩形");
+    assert_eq!(
+        take_local(Metric::RectLines) as usize,
+        expected,
+        "带内查询走的行数与可见带不符：窄化没接上，或夹错了区间"
+    );
+
+    // 带内的一条**短**批注：字符那一头也得真的夹上，只靠可见带不算窄化完成。
+    // 取第 1 行行首那八个字 —— 带是三行高，字符窄化该把它压到一两行。
+    let at = document.coordinate_of_line(1);
+    take_local(Metric::RectLines);
+    cx.update_window(handle, |_, win, app| {
+        document.selection_rects_in_band(win, app, at..at + 8, band.clone())
+    })
+    .expect("窗口应当可求矩形");
+    let walked = take_local(Metric::RectLines) as usize;
+    assert!(
+        walked < expected,
+        "带内八个字走了 {walked} 行，与整条带的 {expected} 行一样宽：字符那一头没接上"
+    );
+
+    // 一条完全不在这一屏上的批注：一行都不走。
+    let last = document.layout().lines.last().expect("有行");
+    let away = (last.y + last.height + 1.0)..(last.y + last.height + 2.0);
+    take_local(Metric::RectLines);
+    let got = cx
+        .update_window(handle, |_, win, app| {
+            document.selection_rects_in_band(win, app, 0..8, away)
+        })
+        .expect("窗口应当可求矩形");
+    assert!(got.is_empty(), "带外的一条批注还画出了矩形：{got:?}");
+    assert_eq!(
+        take_local(Metric::RectLines),
+        0,
+        "带外的一行都不该走，这一格是这条优化的本体"
+    );
+}
+
+/// 一本书的作者样式表只解析**一次**，之后每进一章分的都是同一份 `Arc`。
+///
+/// 数的是 `Metric::RuleSetParses`。改之前 `Document::with_source` 每建一章把整本 CSS
+/// 重解析一遍 —— 真机拆开量到 **1.5–1.9 ms / 章**（《未来简史》23.6 KB / 323 条规则，
+/// `RuleSet::parse` 自己占 1.16 ms，release），跳一次章一次铺四章就是 7 ms 落在
+/// UI 线程的同一帧里。
+///
+/// 变异验活：把 `Book::make_span` 与 `set_anchor` 那两处换回自己解析的
+/// `Document::fetching` / `Document::new`，下面那条「进了几章」的增量断言立刻红。
+#[gpui_kit::test]
+fn the_author_stylesheet_is_parsed_once_per_book(cx: &mut TestAppContext) {
+    use folio_core::Locator;
+    use folio_core::infra::metrics::{Metric, take_local};
+
+    use crate::ui::features::reader::book::Book;
+    cx.update(gpui_kit::init);
+    let flow = FlowDoc {
+        chapters: (0..6)
+            .map(|i| Chapter::inline(format!("第{i}章"), format!("<p>{LONG}（{i}）</p>")))
+            .collect(),
+        ..Default::default()
+    };
+    let doc: Arc<dyn OpenedDocument> = Arc::from(folio_core::content::document::from_content(
+        DocMeta {
+            title: "六章".into(),
+            authors: Vec::new(),
+            format: Format::Epub,
+            size: 0,
+            ..DocMeta::default()
+        },
+        Content::Reflow(flow),
+    ));
+    let prefs = bare_prefs();
+
+    take_local(Metric::RuleSetParses);
+    let mut book = cx.update(|app| Book::new(doc, prefs.clone(), Locator::start(), app));
+    assert_eq!(
+        take_local(Metric::RuleSetParses),
+        1,
+        "开一本书该解析一次作者样式表"
+    );
+
+    // 换锚章 + 窗口往前铺：新进来的每一章都只分那份 `Arc`，一次都不许多解析。
+    book.set_anchor(4, &prefs);
+    book.ensure_window_spans(&prefs, 900.0, 0.0);
+    let spans = book.span_indices();
+    assert!(
+        spans.len() > 1,
+        "fixture 得真的让几章进窗口，否则这条门是空跑的：{spans:?}"
+    );
+    assert_eq!(
+        take_local(Metric::RuleSetParses),
+        0,
+        "进了 {} 章却解析了样式表：那一整本 CSS 与每章配的都是同一份规则",
+        spans.len()
+    );
+
+    // 换字号也不该重解析（它只动偏好那一半哈希）。
+    let mut bigger = bare_prefs();
+    bigger.font_size += 4.0;
+    book.set_anchor(1, &bigger);
+    assert_eq!(
+        take_local(Metric::RuleSetParses),
+        0,
+        "改偏好把作者层重解析了一遍"
+    );
 }

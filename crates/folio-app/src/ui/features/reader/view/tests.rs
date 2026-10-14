@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use folio_core::content::document::Document;
+use folio_core::content::format::TocEntry;
 use folio_core::infra::metrics::{Metric, take_local};
 use folio_core::store::Store;
 use folio_core::{Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, Reader};
@@ -42,6 +43,17 @@ fn flow() -> FlowDoc {
     }
 }
 
+/// 一章只有一行字：那一行下面紧接着就是空白。
+///
+/// 「点在划线下方的空白里不该把那条挑中」这条判据只有在这样的形状上才测得到 ——
+/// 多行章里每一行都被邻行夹着，`hit_test` 那个「夹到最近的行」永远给你一行**里**的字。
+fn one_line_flow() -> FlowDoc {
+    FlowDoc {
+        chapters: vec![Chapter::inline("一行", "<p>于是我们奋力向前</p>")],
+        ..Default::default()
+    }
+}
+
 /// 多章语料：每章 30 段（16px 下一章约三个视口高，章内可滚区间远大于
 /// 测试的滚动步长，跨章之后认得出读到的是哪一章、进度也还在章首附近）。
 fn chapters_flow(count: usize) -> FlowDoc {
@@ -58,13 +70,88 @@ fn chapters_flow(count: usize) -> FlowDoc {
     }
 }
 
+/// 目录跳转用的语料：每章带着自己的 `spine_href`（目录条目靠它对上章号），正文第 6 段
+/// 写着 `id="mid{i}"`，目录里每章给两条 —— 一条指章首、一条指那个锚点。真书里「一个
+/// spine 文件挂着好几条小节」（一章对十条 nav 条目）就是这个形状。
+///
+/// 锚点放在第 6 段而不是第一段：锚点如果就落在章首第一个字上，「跳到锚点」与
+/// 「跳到章首」得到同一个偏移，锚点那条换算整个坏掉了测试也看不出来。
+fn anchored_flow(count: usize) -> FlowDoc {
+    FlowDoc {
+        chapters: (0..count)
+            .map(|i| {
+                let source = (0..30)
+                    .map(|k| {
+                        if k == 6 {
+                            format!("<p id=\"mid{i}\">锚点第{i}章{PARA}</p>")
+                        } else {
+                            format!("<p>{PARA}（第{i}章 第{k}段）</p>")
+                        }
+                    })
+                    .collect::<String>();
+                Chapter::inline(format!("第{i}章"), source).with_spine_href(format!("c{i}.xhtml"))
+            })
+            .collect(),
+        toc: (0..count)
+            .flat_map(|i| {
+                [
+                    TocEntry {
+                        title: format!("第{i}章"),
+                        href: format!("c{i}.xhtml"),
+                        ..Default::default()
+                    },
+                    TocEntry {
+                        title: format!("第{i}章第二节"),
+                        href: format!("c{i}.xhtml"),
+                        fragment: Some(format!("mid{i}")),
+                        ..Default::default()
+                    },
+                ]
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// 目录里某一条的锚点在这本书的章内偏移表里的位置。
+///
+/// 偏移表（`Document::id_offsets`）是排版产物，问的是**当前锚章**那一份，所以只能在
+/// 跳到那一章、并且那一章排完之后问。落点断言拿它当基准，而不是在测试里写死一个数 ——
+/// 写死的数换个字体就变了，变了会让测试红在几何上而不是红在跳转上。
+///
+/// 落点本身读视口顶那一行反解出来的章内偏移（[`offset_of`]）：章内偏移就是进度坐标系，
+/// 落点对了行自然对，而行序还夹着缩进与换行，多一层要解释的东西。
+fn anchor_offset(view: &Entity<ReaderSession>, id: &str, cx: &mut TestAppContext) -> usize {
+    view.read_with(cx, |v, _| {
+        v.book()
+            .and_then(|book| book.document().id_offsets().get(id).copied())
+            .unwrap_or_else(|| panic!("锚点 {id} 该在偏移表里"))
+    })
+}
+
 fn meta(format: &str) -> DocMeta {
     DocMeta {
         title: "测试书".into(),
         authors: Vec::new(),
         format: Format::parse(format).expect("格式名要认得"),
         size: 0,
-    }
+        ..DocMeta::default()
+        }
+}
+
+/// 把这份语料落进一个内存库并登记成一行书目，返回 `(库, book_id)`。
+///
+/// 划线的用例都得有**真的**库：写不进库是「划了个寂寞」，删不掉是「取消划线」那颗按钮
+/// 是坏的，这两件事只有对着存储层才测得出来。
+fn store_with_book(flow: &FlowDoc, format: &str) -> (Arc<Store>, i64) {
+    let store = Arc::new(Store::in_memory().expect("内存库"));
+    let id = store
+        .add_book(std::path::Path::new("memory://fixture"), &meta(format))
+        .expect("入库");
+    store
+        .save_flow(id, flow, Format::Markdown)
+        .expect("章节入库");
+    (store, id)
 }
 
 /// 这一组用例的偏好。
@@ -242,6 +329,7 @@ fn a_book_whose_text_is_not_in_the_db_loads_it_from_the_container(cx: &mut TestA
             authors: row.authors,
             format: Format::parse(&row.format).unwrap(),
             size: row.size,
+            ..DocMeta::default()
         },
         content,
         &path,
@@ -806,8 +894,11 @@ fn mouse_up(cx: &mut TestAppContext, handle: AnyWindowHandle, at: Point<Pixels>)
     );
 }
 
-/// 第 `line` 行第 `k` 个字的中心（窗口坐标）。阅读会话直开时页眉让位为 0、
-/// 滚动在章首，所以窗口坐标 = 排版坐标 + 版心左缘。字的横向位置按字号估：
+/// 第 `line` 行第 `k` 个字的中心（窗口坐标）。
+///
+/// 换算与 `ReaderSession::to_layout` 互逆：排版坐标加回页眉让位、再减掉当前的 `scroll_y`。
+/// 不这么办就等于假设正文从没动过 —— 恢复请求是在头几帧里落地的（`settle` 的那几帧正文
+/// 自己挪走一档），按「滚动为 0」取点，点到的就已经是别的一行。字的横向位置按字号估：
 /// 命中引擎会 snap 到落点最近的字，差小半个字不影响断言。
 fn char_point(
     view: &Entity<ReaderSession>,
@@ -820,15 +911,31 @@ fn char_point(
         let char_w = box_.dominant_font_size();
         point(
             px(v.prefs.margin_x + box_.x + char_w * (k as f32 + 0.5)),
-            px(box_.y + box_.height * 0.5),
+            px(box_.y + box_.height * 0.5 - v.scroll_y + v.header_reserve),
         )
     })
 }
 
 /// 按下 → 拖过阈值 → 松手，成立一个选区（共享给几条用例的前置步骤）。
+///
+/// 起点在第 1 行：那是这份语料里第一处「上面还有字」的位置，两端都测得着。
 fn drag_select(cx: &mut TestAppContext, view: &Entity<ReaderSession>, handle: AnyWindowHandle) {
     let start = char_point(view, cx, 1, 2);
     let end = char_point(view, cx, 1, 4);
+    drag_select_between(cx, handle, start, end);
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_some()),
+        "拖过阈值的松手应成立选中"
+    );
+}
+
+/// 同样的三连，起止点由调用方给 —— 只有一行字的语料里 `drag_select` 那个第 1 行不存在。
+fn drag_select_between(
+    cx: &mut TestAppContext,
+    handle: AnyWindowHandle,
+    start: Point<Pixels>,
+    end: Point<Pixels>,
+) {
     mouse_down(cx, handle, start);
     for step in 1..=4 {
         let t = step as f32 / 4.0;
@@ -842,10 +949,6 @@ fn drag_select(cx: &mut TestAppContext, view: &Entity<ReaderSession>, handle: An
         );
     }
     mouse_up(cx, handle, end);
-    assert!(
-        view.read_with(cx, |v, _| v.selection().is_some()),
-        "拖过阈值的松手应成立选中"
-    );
 }
 
 /// M6 验收：按下 → 拖过阈值 → 松手，选区成立；阈值内的普通点击不留高亮；
@@ -1038,6 +1141,239 @@ fn a_highlight_lands_in_the_store_and_comes_back(cx: &mut TestAppContext) {
         spans,
         Some(vec![(selected.range.start, selected.range.end, false)]),
         "重开这一章，批注要回显在原处且不是 stale"
+    );
+}
+
+/// 拖选 → 菜单里那颗「划线」→ 点在画出来的那片底色上。把「已经重选好」这一状态共享给
+/// 后面几条用例，返回那条划线的章内区间（含头不含尾）。
+fn highlight_then_tap_it_back(
+    cx: &mut TestAppContext,
+    view: &Entity<ReaderSession>,
+    handle: AnyWindowHandle,
+) -> (usize, usize) {
+    // 先把排版定下来：头一代行盒与最终那代对不上（第一代还没按真实版心宽重排过），
+    // 在它上面选中的字，落库之后画出来的底色并不在原地。
+    settle(cx, handle);
+    drag_select(cx, view, handle);
+    let (start, end) = view
+        .read_with(cx, |v, _| {
+            v.selection()
+                .map(|selected| (selected.range.start, selected.range.end))
+        })
+        .expect("已选中");
+    view.update(cx, |v, cx| v.add_highlight(cx));
+    // 拖选松手那一下攒下的「吃掉下一个 click」要先放掉 —— 真实时序里它被正文那层吃掉了
+    // （`tap_on_body` 第一条判据）。不吃掉，下面这一下会被它拦下来，测的就还是第一条。
+    assert!(
+        view.update(cx, |v, _| v.consume_tap_suppression()),
+        "拖选松手该攒下一次豁免"
+    );
+    // 画一帧：底色上屏、`content_bounds` 就位 —— 命中问的就是画出来的那几块矩形。
+    settle(cx, handle);
+    let at = char_point(view, cx, 1, 2);
+    let consumed = cx
+        .update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| v.tap_on_body(window, cx, at))
+        })
+        .expect("窗口应可更新");
+    assert!(
+        consumed,
+        "点在一条已有的划线上应被「选中」消费，不该再拿去翻页或开浮层"
+    );
+    (start, end)
+}
+
+/// M7 二期：留在书上的那片底色可以**再点回去**。点上去就是重新选中那一条，菜单跟着回来，
+/// 并且认出「这一条已经在库里」—— 第二格是「取消划线」，不是再划一次。
+///
+/// 拿掉 `tap_on_body` 里「没选区时试着重选」那一条判据，这一击返回 `false`、也不留选区：
+/// 读者划过的痕迹变成只读，正是这条要挡住的坏状态。
+#[gpui_kit::test]
+fn a_tap_on_a_highlight_selects_it_again(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store),
+        Some(id),
+    );
+    let (start, end) = highlight_then_tap_it_back(cx, &view, handle);
+    let (range, menu, marked) = view.read_with(cx, |v, _| {
+        (
+            v.selection()
+                .map(|selected| (selected.range.start, selected.range.end)),
+            v.selection_menu_open(),
+            v.selection_annotation().map(|(_, color)| color),
+        )
+    });
+    assert_eq!(range, Some((start, end)), "重选中的就是那一条原本那一段字");
+    assert!(menu, "菜单条该跟着回来");
+    assert_eq!(
+        marked.as_deref(),
+        Some("amber"),
+        "选区正好等于库里那一条，菜单该换上「取消划线」那一格"
+    );
+
+    // 浮层开着时让位：那一击的语义是收顶栏与底栏，不是顺手把那条划线挑中
+    // （`overlay_open` 由阅读页每帧报进来）。先清掉选区，走的才是「没有选区」那一路。
+    view.update(cx, |v, _| v.clear_selection());
+    view.update(cx, |v, cx| v.set_overlay_open(true, cx));
+    let on_mark = char_point(&view, cx, 1, 2);
+    let consumed = cx
+        .update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| v.tap_on_body(window, cx, on_mark))
+        })
+        .expect("窗口应可更新");
+    assert!(!consumed, "浮层开着的一击归收浮层，不该被重选中消费掉");
+    view.update(cx, |v, cx| v.set_overlay_open(false, cx));
+
+    // 没有选区时点在**没划过**的那一行：这一击不该被选中消费（仍归翻页与浮层）。
+    let elsewhere = char_point(&view, cx, 9, 2);
+    let consumed = cx
+        .update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| v.tap_on_body(window, cx, elsewhere))
+        })
+        .expect("窗口应可更新");
+    assert!(!consumed, "没划线的地方不该吃掉这一击");
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_none()),
+        "那一击也不该留下选区"
+    );
+}
+
+/// 点在划线**下面**的空白里：不算压住那一条。
+///
+/// `hit_test` 的纵向语义是「夹到最近的行」（那是拖选收边要的），只按「最近的字落在区间里」
+/// 判的话，读者在末行之下一击就把某条批注挑中。拿掉 `annotation_at` 里那道行盒检查这条会红。
+#[gpui_kit::test]
+fn a_tap_below_the_marked_line_selects_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = one_line_flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    // 同一条理由：先让排版定下来，那一行的行盒才是后面要量它的那个。
+    settle(cx, handle);
+    let start = char_point(&view, cx, 0, 1);
+    let end = char_point(&view, cx, 0, 3);
+    drag_select_between(cx, handle, start, end);
+    view.update(cx, |v, cx| v.add_highlight(cx));
+    assert!(
+        view.update(cx, |v, _| v.consume_tap_suppression()),
+        "拖选松手该攒下一次豁免"
+    );
+    settle(cx, handle);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.annotations.len()),
+        1,
+        "先真的落一条"
+    );
+
+    // 同一列、往下 6 像素：横向还在那几个字上，纵向已经出了那一行的行盒。
+    let below = view.read_with(cx, |v, _| {
+        let box_ = &v.lines()[0];
+        point(
+            px(v.prefs.margin_x + box_.x + box_.dominant_font_size() * 1.5),
+            px(box_.y + box_.height + 6.0 - v.scroll_y + v.header_reserve),
+        )
+    });
+    let consumed = cx
+        .update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| v.tap_on_body(window, cx, below))
+        })
+        .expect("窗口应可更新");
+    assert!(!consumed, "末行之下的空白不该把那条划线挑中");
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_none()),
+        "更不该留下选区"
+    );
+}
+
+/// 「取消划线」真的删得掉库里那一条，删完那片底色与选区一起收掉。
+#[gpui_kit::test]
+fn the_reselected_highlight_can_be_removed(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    highlight_then_tap_it_back(cx, &view, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.selection_annotation().is_some()),
+        "菜单认得出这一条在库里，那颗按钮才有得按"
+    );
+
+    view.update(cx, |v, cx| v.delete_highlight(cx));
+
+    assert!(
+        store.annotations(id).expect("读库").is_empty(),
+        "取消划线要真的删掉库里那一条"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_none()),
+        "那片底色已经没了，选区也该收掉"
+    );
+}
+
+/// 换颜色改的就是库里那一条自己：条目不多一条、锚点一个字没动、选区留着。
+#[gpui_kit::test]
+fn recoloring_a_highlight_moves_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    let (start, end) = highlight_then_tap_it_back(cx, &view, handle);
+
+    view.update(cx, |v, cx| v.set_highlight_color("sky", cx));
+
+    let rows = store.annotations(id).expect("读库");
+    assert_eq!(rows.len(), 1, "换颜色不该多落一条");
+    assert_eq!(rows[0].color, "sky", "库里那条的颜色要跟着改");
+    assert_eq!(
+        (rows[0].anchor.start, rows[0].anchor.end),
+        (start, end),
+        "改的只是颜色，锚点一个字都没动"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.selection_annotation().map(|(_, color)| color))
+            .as_deref(),
+        Some("sky"),
+        "菜单认得的还是那一条，读的也是新那一档"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_some()),
+        "选区留着：读者往往还要再比一档"
     );
 }
 
@@ -1341,6 +1677,226 @@ fn the_spine_window_stays_pinned_to_the_anchor(cx: &mut TestAppContext) {
     );
 }
 
+// ---- 目录跳转：读者点目录里的一条，屏上真的换成那一处 ----
+
+/// 目录每一行带着「跳去哪儿」的两个数：`chapter` 由 `spine_href` 查表得到，
+/// `fragment` 是那条目录自己的 `#` 后面一截。这两格错了，目录那一屏照样画得出来、
+/// 标题也对，点下去才发现送到别处 —— 那是最难从截图看出来的错。
+#[gpui_kit::test]
+fn each_toc_row_carries_where_clicking_it_goes(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _) = open(
+        cx,
+        &anchored_flow(4),
+        "epub",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    let rows = view.read_with(cx, |v, _| {
+        v.toc_rows()
+            .iter()
+            .map(|row| (row.title.clone(), row.chapter, row.fragment.clone()))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 8, "四章各两条目录");
+    assert_eq!(
+        rows[0],
+        ("第0章".to_string(), Some(0), None),
+        "指章首的那条：有章号、没有锚点"
+    );
+    assert_eq!(
+        rows[1],
+        ("第0章第二节".to_string(), Some(0), Some("mid0".to_string())),
+        "指小节的那条：同一个章号，加上它自己的锚点"
+    );
+    // 对不上正文的条目会带 `chapter == None`，界面按「画出来但点不动」处置。
+    // 这一本每一条都对得上；哪天查表坏了，这一条先红。
+    assert!(
+        rows.iter().all(|(_, chapter, _)| chapter.is_some()),
+        "有目录条目对不上章节：{rows:?}"
+    );
+}
+
+/// 点一条指向别的章的目录：锚章换过去、屏上摆那一章的开头、恢复请求在锚章排完那一帧
+/// 被取走、位置当场落库（杀掉进程回来还在这一章），「来过」集合也记上这一章。
+#[gpui_kit::test]
+fn a_toc_jump_moves_the_screen_to_that_chapter_and_saves_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = anchored_flow(5);
+    let store = Arc::new(Store::in_memory().expect("内存库"));
+    let id = store
+        .add_book(std::path::Path::new("memory://fixture"), &meta("epub"))
+        .expect("入库");
+    store.save_flow(id, &flow, Format::Epub).expect("章节入库");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "epub",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 0);
+
+    view.update(cx, |v, cx| v.goto_entry(3, None, cx));
+    settle(cx, handle);
+
+    assert_eq!(
+        view.read_with(cx, |v, _| v.chapter_index()),
+        3,
+        "锚章该挪到第 3 章"
+    );
+    assert_eq!(offset_of(&view, cx), 0, "指章首的那条目录，落点就是章首");
+    assert!(
+        !view.read_with(cx, |v, _| v.has_pending_restore()),
+        "恢复请求该在锚章排完那一帧被取走，而不是永远挂着"
+    );
+    let texts = view.read_with(cx, |v, _| v.line_texts());
+    assert!(
+        texts.iter().any(|text| text.contains("第3章 第0段")),
+        "屏上该是第 3 章的开头：{texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|text| text.contains("第0章")),
+        "第 0 章的行一份都不该在这份排版里：{texts:?}"
+    );
+
+    let (_, locator) = store.position(id).expect("读回进度").expect("进度应存在");
+    assert_eq!(
+        locator,
+        Locator {
+            chapter: 3,
+            offset: 0
+        },
+        "跳转当场就把位置写了盘：读者杀进程回来还在第 3 章"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.read_chapters().contains(&3)),
+        "到过第 3 章要记进「来过」集合，目录那一屏的浅色按它画"
+    );
+}
+
+/// 点一条带锚点的小节（跳到别的章里的某一处）：落点不是那一章的章首，而是那个 `id`
+/// 所在那一段的第一个字。锚点换算必须等排版做完才能做，所以这一条测的是「排完那一帧
+/// 落对了地方」。
+#[gpui_kit::test]
+fn a_toc_jump_with_an_anchor_lands_on_that_paragraph(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &anchored_flow(4),
+        "epub",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+
+    view.update(cx, |v, cx| v.goto_entry(2, Some("mid2".to_string()), cx));
+    settle(cx, handle);
+
+    assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 2);
+    let expected = anchor_offset(&view, "mid2", cx);
+    // 没有这一条，`assert_eq!(offset_of, expected)` 在「两边都是 0」上也成立 ——
+    // 那正是锚点整个没生效的样子。锚点写在第 6 段，它绝不等于章首。
+    assert!(
+        expected > 0,
+        "锚点在第 6 段上，它的章内偏移不该等于章首的 0：{expected}"
+    );
+    assert_eq!(
+        offset_of(&view, cx),
+        expected,
+        "视口顶那一行该正好从锚点那一段开始"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v
+            .line_texts()
+            .iter()
+            .any(|text| text.contains("锚点第2章"))),
+        "落点所在的那一段要在这一章的排版里"
+    );
+    assert!(
+        !view.read_with(cx, |v, _| v.has_pending_restore()),
+        "带着锚点的请求同样要在落地那一帧被取走"
+    );
+}
+
+/// 一个 spine 文件挂着好几条小节（一章对十条 nav）时，跳到**同一章**的另一条不算换章，
+/// `Book::goto` 会说「没动」—— 可落点照样得挪。这一段分支单独一条：
+/// 少了它，读者点同章的小节就是「按下去什么都不发生」。
+#[gpui_kit::test]
+fn an_anchor_in_the_chapter_you_are_in_still_moves_the_landing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    // 起点就在第 1 章的章首。
+    let (view, handle) = open(
+        cx,
+        &anchored_flow(4),
+        "epub",
+        prefs(16.0),
+        Locator {
+            chapter: 1,
+            offset: 0,
+        },
+        460.0,
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 1);
+    assert_eq!(offset_of(&view, cx), 0, "起点是第 1 章的章首");
+
+    view.update(cx, |v, cx| v.goto_entry(1, Some("mid1".to_string()), cx));
+    settle(cx, handle);
+
+    assert_eq!(
+        view.read_with(cx, |v, _| v.chapter_index()),
+        1,
+        "还在同一章，没白跳"
+    );
+    assert_eq!(
+        offset_of(&view, cx),
+        anchor_offset(&view, "mid1", cx),
+        "落点从章首挪到了那一条小节"
+    );
+}
+
+/// 目录指向一个书里不存在的 `id`（作者写错、或锚点挂在一个没有正文的元素上）：
+/// 章还是要照跳，落点留在章首 —— 宁可回到本章开头，也不要凭猜落在正文中间。
+#[gpui_kit::test]
+fn an_anchor_the_layout_cannot_find_falls_back_to_the_chapter_head(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &anchored_flow(4),
+        "epub",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+
+    view.update(cx, |v, cx| {
+        v.goto_entry(2, Some("这本书里没有这个id".to_string()), cx)
+    });
+    settle(cx, handle);
+
+    assert_eq!(
+        view.read_with(cx, |v, _| v.chapter_index()),
+        2,
+        "锚点解不出来，章还是要跳"
+    );
+    assert_eq!(
+        offset_of(&view, cx),
+        0,
+        "落点留在章首，不是某个猜出来的中间位置"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v
+            .line_texts()
+            .iter()
+            .any(|text| text.contains("第2章 第0段"))),
+        "屏上该从第 2 章第一段开始"
+    );
+}
+
 /// 改字号全链重排：进度的章号不换 —— 坐标是「第几个字」，跨重排存活。
 #[gpui_kit::test]
 fn a_pref_change_reflows_the_whole_spine_without_losing_the_chapter(cx: &mut TestAppContext) {
@@ -1389,12 +1945,17 @@ fn a_pref_change_reflows_the_whole_spine_without_losing_the_chapter(cx: &mut Tes
     );
 }
 
-/// 量具在记，而且记下的是**今天真实付的那笔**：只滚动一屏，满屏的 run 就被重新物化一遍、
-/// `shape_line` 就被重新调一遍。
+/// 量具在记：往前滚一屏，新进入带的行要物化单元、没 shape 过的行要落到 gpui 那层。
 ///
-/// 这条与下面那条 `#[ignore]` 的目标断言**配成一对**读：这条钉的是「计数器真的会动」——
-/// 把 `Scene::build` 或 `paint_run` 里那两句计数删掉，它当场红（三格读出来全是零），于是
-/// 那条目标门不会变成一盏永远绿的假灯。行单元表接上之后这一条要删掉（那时它反过来才该红）。
+/// 这条是下面两条目标门（`scrolling_back_to_the_same_band_materializes_no_new_runs` 与
+/// `scrolling_back_to_the_same_band_does_not_reshape`）的**配对探测器**：它钉的是
+/// 「计数器真的会动」—— 把 `Document::row_units` 或 `paint::shape` 里那句计数删掉，
+/// 它当场红（三格读出来全是零），于是那两条目标门不会变成永远绿的假灯。
+///
+/// **两张表接上之后这一条不删**（原稿写的是「接上之后要删掉」，2026-10-15 接线时更正）：
+/// 单元表是**按行懒物化**的，往前滚必然有新行第一次进带，那一趟该付；`SceneRuns` 的口径
+/// 也已同步改成「这一帧新建了几条单元」，所以它量的始终是真正付过的物化次数，
+/// 而不是一帧搬运了多少条。
 #[gpui_kit::test]
 fn a_scrolled_frame_currently_rematerializes_the_visible_runs(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
@@ -1424,6 +1985,63 @@ fn a_scrolled_frame_currently_rematerializes_the_visible_runs(cx: &mut TestAppCo
     );
 }
 
+/// 章那张 shaping 表接上之后的**目标断言**：滚回走过的地方，一次都不该重新 shape。
+///
+/// 与上面那条探测器配成一对读：它钉的是「`ShapeLineCalls` 真的会动」（往前滚一屏增量 > 0），
+/// 所以这一条不会是一盏永远绿的假灯。把 `Document::shaped` 那张表拿掉、或把
+/// `view::shape_runs` 那一步拿掉，这一条当场红。
+///
+/// 为什么「表没接上」就必然红：gpui 自己的 `LineLayoutCache` 只保两帧
+/// （`previous_frame` 与 `current_frame` 在 `finish_frame` 里互换），而这里往返隔了远不止
+/// 两帧 —— 邻章那些行从「排版作业 shape 完」到「进屏」也是同样的道理，所以进屏那一帧
+/// 从前总要重 shape 一次，并且命中也要把整段文本再哈希一遍。
+///
+/// **这一条与 `SceneRuns` 那条 `#[ignore]` 的目标门是两件事**：那条钉的是 run 物化
+/// （行单元表，§九），这一条钉的是 shaping。物化那一笔今天照付，所以那条门还红着。
+#[gpui_kit::test]
+fn scrolling_back_to_the_same_band_does_not_reshape(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (_view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    // 往前一屏：这一趟**该**付钱（新进入带的行第一次 shape），所以先把账结掉。
+    // 往返只用一屏的量，是为了待在同一个锚章的 ±2 窗口里 —— 走远了整个 `Document`
+    // 被裁掉，表跟着它一起没了，那一次的重新 shape 是对的，不该记在这笔账上。
+    scroll_down(cx, handle, 240.0);
+    settle(cx, handle);
+    take_local(Metric::ShapeLineCalls);
+
+    // 回原处（`scroll_down` 的约定是「向下滚为负」）。
+    scroll_down(cx, handle, -240.0);
+    settle(cx, handle);
+    assert_eq!(
+        take_local(Metric::ShapeLineCalls),
+        0,
+        "滚回走过的地方不该再 shape 一次：几何该由章那张 shaping 表原样给回"
+    );
+}
+
+/// 表的**失效**：改一次字号，同样的行必须重新 shape。
+///
+/// 钉的是「表不能比排版活得久」。失效信号只有一处 —— `Document::drop_fragments`
+/// （`set_chapter` / `set_prefs` / `set_images` / `apply_typeset` 四个都走它）；哪天有人
+/// 给 shaping 表另立一套失效判断、或者漏挂在某一条上，这一条就会红。
+/// 旧几何是按旧字号量的，留在表里就是「看着改了等于没改」那种看不出来的错。
+#[gpui_kit::test]
+fn changing_the_font_size_reshapes_the_same_lines(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (_view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    settle(cx, handle);
+    take_local(Metric::ShapeLineCalls);
+
+    cx.update(|cx| ConfigHolder::edit_reader(cx, |prefs| prefs.font_size = 24.0));
+    settle(cx, handle);
+    assert!(
+        take_local(Metric::ShapeLineCalls) > 0,
+        "改字号必须作废 shaping 表：那一屏的行要按新字号重新 shape"
+    );
+}
+
 /// 目标断言（`plans/阅读管线.md` §九 + §十一 第 6 条）：**滚下去再滚回同一屏，第二趟一个
 /// 新 run 都不该物化**。
 ///
@@ -1440,15 +2058,21 @@ fn a_scrolled_frame_currently_rematerializes_the_visible_runs(cx: &mut TestAppCo
 /// `Document` 上随它进出窗口；主题色与解析好的 `Font` **都不许烘进表**（前者因为 `LayoutKey`
 /// 里没有主题，后者因为 `FontCache` 已有自己的失效纪律，见 §九 那四条硬约束）。
 ///
-/// **这一条故意不断 `ShapeLineCalls`**：`paint_run` 仍每 run 调一次 `shape_line`，而 gpui 那个
-/// `LineLayoutCache` 只保两帧（`previous_frame` 与 `current_frame` 在 `finish_frame` 里互换）。
-/// 把 `ShapedLine` 存进行单元表是**已记为「可省」的下一步**——它省的是那趟整段文本的哈希，
-/// 不是这 62 次拷贝，等这条门绿了再按数决定。
+/// **这一条只断 `SceneRuns`，不断 `ShapeLineCalls`**：两笔钱分开钉。shaping 那一笔
+/// 2026-10-15 也接了，但接成了**另一张自己的表**（`Document::shaped`，键
+/// `(行号, 片段槽位)`，值是 `Arc<LineLayout>`），配自己的门
+/// [`scrolling_back_to_the_same_band_does_not_reshape`]，没有并进这张行单元表 ——
+/// 因为 gpui 的 `ShapedLine.layout` 是 `pub(crate)`（外面拿不出那份 `Arc`），
+/// 而它自带的 `decoration_runs` 里有主题色。
 ///
-/// 今天跑它是红的（红在哪个数见上一条门），所以挂 `#[ignore]`：接线之后去掉这一句就成了
-/// 守门员（同 `epub::tests` 那条「一百次取图只开一次容器」走过的路）。
+/// **2026-10-15 已接线，`#[ignore]` 摘掉了**（原来那句「接线之后去掉这一句就成了守门员」
+/// 走的就是 `epub::tests` 那条「一百次取图只开一次容器」走过的路）：行单元表在
+/// `Document::row_units`（挂在 `Document` 上随章进出窗口，失效只跟 `drop_fragments`
+/// 那一处信号），`Metric::SceneRuns` 的口径同步从「每帧摆几条 run」改成「这一帧新建几条
+/// 单元」——不改口径这一格就会在缓存生效时照样涨，那条确定的零就永远量不出来。
+/// 上面那条探测器（`a_scrolled_frame_currently_rematerializes_the_visible_runs`）现在
+/// 反过来才是它的对头：往前滚那一趟仍然该付，所以它照旧断三格都 > 0。
 #[gpui_kit::test]
-#[ignore = "行单元表还没接：滚回走过的地方也要把满屏的 run 重新物化一遍"]
 fn scrolling_back_to_the_same_band_materializes_no_new_runs(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let flow = flow();
@@ -1468,5 +2092,361 @@ fn scrolling_back_to_the_same_band_materializes_no_new_runs(cx: &mut TestAppCont
         take_local(Metric::SceneRuns),
         0,
         "走过的地方再走回来，只该改帧内那个平移量，不该物化任何一段新文本"
+    );
+}
+
+// ---- 插图的可点性：点一张图，要把它交给放大查看那一层 ----
+
+/// 一份「图片字节就在手里」的文档。
+///
+/// `from_content` 造出来的那本没有容器，`image_bytes` 永远给不出字节，于是插图一张
+/// 都不画 —— 而「点图上那一下」在测试里就没有目标可点。这一份按 `href` 直接交出字节，
+/// 排版、按需解码、绘制走的仍然是生产那几条路。
+struct Illustrated {
+    meta: DocMeta,
+    content: Content,
+}
+
+impl Document for Illustrated {
+    fn meta(&self) -> &DocMeta {
+        &self.meta
+    }
+
+    fn kind(&self) -> folio_core::content::format::ContentKind {
+        self.content.kind()
+    }
+
+    fn content(&self) -> folio_core::content::document::ContentRef<'_> {
+        match &self.content {
+            Content::Reflow(flow) => folio_core::content::document::ContentRef::Reflow(flow),
+            Content::Fixed(fixed) => folio_core::content::document::ContentRef::Fixed(fixed),
+        }
+    }
+
+    fn image_bytes(&self, href: &str) -> Option<Vec<u8>> {
+        (href == "p.png").then(|| crate::ui::shared::images::TINY_PNG.to_vec())
+    }
+
+    fn stylesheet(&self) -> String {
+        String::new()
+    }
+
+    /// 正文按章现取那一条：字节不在容器里，就在手上这份 `FlowDoc` 里。
+    fn chapter_source(&self, index: usize) -> folio_core::Result<String> {
+        let Content::Reflow(flow) = &self.content else {
+            return Err(folio_core::Error::NoSuchChapter(index as i64));
+        };
+        flow.chapters
+            .get(index)
+            .map(|chapter| chapter.source().to_string())
+            .ok_or(folio_core::Error::NoSuchChapter(index as i64))
+    }
+}
+
+/// 一章：两段话中间夹一张 200×100 的插图，第一屏就一定摆得上。
+fn image_flow() -> FlowDoc {
+    FlowDoc {
+        chapters: vec![Chapter::inline(
+            "第一章",
+            format!("<p>{PARA}</p><p><img src=\"p.png\" alt=\"\"></p><p>{PARA}</p>"),
+        )],
+        images: vec![folio_core::content::format::ImageRes {
+            href: "p.png".into(),
+            source: "p.png".into(),
+            media_type: "image/png".into(),
+            width: 200,
+            height: 100,
+        }],
+        ..Default::default()
+    }
+}
+
+/// 回归门：点正文里的一张插图，把这张图交给放大那一层。
+///
+/// 两条断言各钉一段路：
+/// - `is_open` 钉「图上真挂了点击，而且那个 handler 认得要看哪张」；
+/// - 固有尺寸钉「排版有没有把尺寸带到界面」。少了后一条没有任何可见症状 —— 查看器会
+///   静默退到经验上限，读者只看得见「放不大」，而线索指向的是排版。
+#[gpui_kit::test]
+fn tapping_an_illustration_hands_it_to_the_zoom_layer(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let doc: Arc<dyn Document> = Arc::new(Illustrated {
+        meta: meta("epub"),
+        content: Content::Reflow(image_flow()),
+    });
+    let viewer = cx
+        .update(|cx| cx.new(|_| crate::ui::features::reader::image_viewer::ImageViewer::default()));
+    let (view, handle) =
+        open_with_document(cx, doc, prefs(16.0), Locator::start(), 460.0, None, None);
+    // 生产上这一层由阅读页挂上（它画在那一屏的最上面）；这里只要那个句柄，
+    // 层本身不在本窗口的树里 —— 钉的是「点击有没有把图交出去」，不是层的摆位。
+    cx.update(|app| {
+        view.update(app, |session, _| {
+            session.set_image_viewer(viewer.clone());
+        })
+    });
+    settle(cx, handle);
+
+    let found = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(("reader-image", 0usize)).is_some()
+        })
+        .expect("渲染应成功");
+    assert!(found, "前置：那张插图要真被摆上屏，否则根本没有可点的东西");
+
+    cx.update_window(handle, |_, window, cx| {
+        window.click(("reader-image", 0usize), cx);
+    })
+    .expect("点击应送达");
+    cx.run_until_parked();
+
+    assert!(
+        viewer.read_with(cx, |viewer, _| viewer.is_open()),
+        "点插图该把这张图交给放大那一层"
+    );
+    assert_eq!(
+        viewer.read_with(cx, |viewer, _| viewer.seen_natural()),
+        Some((200.0, 100.0)),
+        "固有尺寸要从 manifest 一路带到查看器：丢了它只会静默退到经验上限"
+    );
+}
+
+// ---- 正文内的链接：点目录页正文里的 `<a href>` 跳到那一章 ----
+
+/// 一本书内目录页：第一章的正文本身就是一份 `<ul>` 链接表，指向后面两章。
+/// 这是真书里「内容里的目录」的形状（`罗生门` 的 `part0003.xhtml` 就是
+/// `<a href="part0004.xhtml#a005">罗生门</a>`）。`c2` 那条带章内锚点。
+fn link_flow() -> FlowDoc {
+    FlowDoc {
+        chapters: vec![
+            Chapter::inline(
+                "目录",
+                "<ul>\
+                 <li><a href=\"c1.xhtml\">第一章</a></li>\
+                 <li><a href=\"c2.xhtml#mid2\">第二章</a></li>\
+                 </ul>",
+            )
+            .with_spine_href("toc.xhtml"),
+            Chapter::inline("第一章", "<p>第一章正文</p>").with_spine_href("c1.xhtml"),
+            Chapter::inline("第二章", "<p>第二章正文</p><p id=\"mid2\">锚点段</p>")
+                .with_spine_href("c2.xhtml"),
+        ],
+        ..Default::default()
+    }
+}
+
+/// 点正文里的一条链接，锚章真的换到它指向的那一章。走的是 `on_body_tap` 里
+/// 链接优先那一支（`page.rs`）落到的那段逻辑。
+#[gpui_kit::test]
+fn tapping_a_link_in_the_body_text_jumps_to_its_target(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &link_flow(),
+        "epub",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    // 前置：目录页那一行真有字，否则根本没有可点的目标。
+    let first_line: String = view.read_with(cx, |v, _| v.line_texts().join(""));
+    assert!(
+        first_line.contains("第一章"),
+        "前置：目录页第一行该摆着链接文字：{first_line:.80}"
+    );
+    // 点第一个链接（第一行第一个字的中心）。
+    let at = char_point(&view, cx, 0, 0);
+    let consumed = cx
+        .update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| v.open_link_at(window, cx, at))
+        })
+        .expect("渲染应成功");
+    assert!(consumed, "点在链接上，这一击该被链接吃掉");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.chapter_index()),
+        1,
+        "该跳到链接指向的第一章"
+    );
+}
+
+// ---- 脚注：点中一条引用就把注文抬出来 ----
+
+/// 一本带脚注的书：正文里一个上标链接（`<a epub:type="noteref">`），章尾一个
+/// `<aside epub:type="footnote">`。
+fn footnote_flow() -> FlowDoc {
+    FlowDoc {
+        chapters: vec![Chapter::inline(
+            "第一章",
+            "<p>正文开头<a epub:type=\"noteref\" href=\"#fn1\">1</a>，正文结尾。</p>\
+             <aside epub:type=\"footnote\" id=\"fn1\"><p>这是一条脚注的全文。</p></aside>",
+        )],
+        ..Default::default()
+    }
+}
+
+/// 点中脚注引用（正文里的那个上标）就把注文抬出来，而不是去跳那一行。
+#[gpui_kit::test]
+fn tapping_a_footnote_ref_raises_the_note(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &footnote_flow(),
+        "epub",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    // 第一行是「正文开头1，正文结尾。」，第 5 个字（下标 4）就是那个上标「1」。
+    let at = char_point(&view, cx, 0, 4);
+    let consumed = cx
+        .update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| v.open_footnote_at(window, cx, at))
+        })
+        .expect("渲染应成功");
+    assert!(consumed, "点在脚注引用上，这一击该被脚注吃掉");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.footnote().map(|f| f.text.clone())),
+        Some("这是一条脚注的全文。".to_string()),
+        "弹层该拿到章尾 <aside> 里那句原文"
+    );
+}
+
+/// 短章语料：每章只有一小段（远不到一屏），用来钉连续滚动在「章比屏短」时也不卡死。
+fn short_chapters_flow(count: usize) -> FlowDoc {
+    FlowDoc {
+        chapters: (0..count)
+            .map(|i| {
+                let source = format!("<p>第{i}章 的正文只有这一小段字。</p>");
+                Chapter::inline(format!("第{i}章"), source)
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// 短章也要能一章一章往下滚：连续滚动在「锚章 ± 固定几章加起来不够一屏」时，
+/// 视口顶永远进不了下一章，锚章就不迁移、拼接窗口也不往前长 —— 读者卡在原地。
+/// 语料给 40 个一行章：老窗口（锚章 ±2）只有 3 章 ≈ 不到一屏，必然卡死。
+#[gpui_kit::test]
+fn scrolling_advances_through_short_chapters(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &short_chapters_flow(40),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 0);
+    for _ in 0..2000 {
+        scroll_down(cx, handle, 40.0);
+        settle(cx, handle);
+        if view.read_with(cx, |v, _| v.chapter_index()) >= 30 {
+            break;
+        }
+    }
+    let last = view.read_with(cx, |v, _| v.chapter_index());
+    assert!(
+        last >= 30,
+        "短章的连续滚动该能一直往下一章走，实际停在 {last}"
+    );
+}
+
+/// 「长章 + 两小章」语料：照《未来简史》第 3 节那一段的真实形状搭 ——
+/// 第 0 章比一屏高（读者停在它中后段），第 1 章两行字，第 2 章一张整页图加一行图说，
+/// 第 3 章又是正常正文。后两章连缝加起来比一屏还短，这就是会卡死的那个形状。
+fn long_chapter_then_a_short_tail() -> FlowDoc {
+    use folio_core::content::format::ImageRes;
+
+    // 33 行目录：16px × 1.75 行高 = 28px 一行，整章 924px（真机那本量出来正是 924）。
+    let toc = (0..33)
+        .map(|i| format!("<div>目录第{i}行</div>"))
+        .collect::<String>();
+    FlowDoc {
+        chapters: vec![
+            Chapter::inline("目录", toc),
+            Chapter::inline("献词", format!("<p>{PARA}</p>")),
+            Chapter::inline(
+                "图",
+                "<div class=\"chatu\"><img src=\"fig.jpg\" alt=\"\" />\
+                 <p class=\"tushuo\">图1 一行图说</p></div>",
+            ),
+            Chapter::inline(
+                "第一章",
+                (0..20)
+                    .map(|k| format!("<p>{PARA}（第{k}段）</p>"))
+                    .collect::<String>(),
+            ),
+        ],
+        images: vec![ImageRes {
+            href: "fig.jpg".into(),
+            source: "fig.jpg".into(),
+            media_type: "image/jpeg".into(),
+            width: 1000,
+            height: 700,
+        }],
+        ..Default::default()
+    }
+}
+
+/// 窗口里各章排出来的高度（`0` = 还没排）。
+fn chapter_heights(view: &Entity<ReaderSession>, cx: &mut TestAppContext) -> Vec<f32> {
+    view.read_with(cx, |v, _| {
+        let book = v.book().expect("这本书该开着");
+        (0..book.chapter_count())
+            .map(|i| book.span_doc(i).map(|doc| doc.height()).unwrap_or_default())
+            .collect()
+    })
+}
+
+/// 长章后面接着两小章：链尾不能停在「一屏装不满」的地方。
+///
+/// 读者停在长章中后段时，章首到视口那段已经滚过去了。前向预算若从**锚章章首**算起，
+/// 长章自己就把「一屏半」吃光，前方只剩 `SPAN_WINDOW` 那两章的兜底；那两章连缝若比一屏
+/// 还短，`content_height` 到它们末尾就没了 —— 视口顶最远只走得到链尾减一屏，永远进不了
+/// 下一章：锚章不迁移、窗口不往前长，屏幕就钉在图与图说上（页脚还念 100%）。实测真机
+/// 症状与这一条逐字对应。
+///
+/// 与 `scrolling_advances_through_short_chapters` 是一对：那一条钉「锚章自己就是短章」，
+/// 这一条钉「锚章很长、前方那两章很短」。
+#[gpui_kit::test]
+fn a_long_chapter_with_a_short_tail_still_scrolls_on(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let prefs = prefs(16.0);
+    let (view, handle) = open(
+        cx,
+        &long_chapter_then_a_short_tail(),
+        "epub",
+        prefs.clone(),
+        Locator::start(),
+        460.0,
+    );
+
+    // 语料的前提（也就是真机上卡死的那条几何）：尾巴两章连缝比一屏还短。
+    // 少了这一条，哪天语料被改高了，这条用例会绿着却什么都没测。
+    let viewport = view.read_with(cx, |v, _| v.laid_out.viewport);
+    let heights = chapter_heights(&view, cx);
+    let gap = crate::ui::features::reader::book::Book::chapter_gap(&prefs);
+    let tail = heights[1] + gap + heights[2];
+    assert!(
+        tail < viewport,
+        "尾巴要短于一屏才会卡死：两章连缝 {tail:.0}px，视口 {viewport:.0}px"
+    );
+
+    assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 0);
+    for _ in 0..200 {
+        scroll_down(cx, handle, 100.0);
+        settle(cx, handle);
+        if view.read_with(cx, |v, _| v.chapter_index()) >= 3 {
+            break;
+        }
+    }
+    let last = view.read_with(cx, |v, _| v.chapter_index());
+    assert!(
+        last >= 3,
+        "图说后面那一章该滚得到，实际停在 {last}（窗口 {:?}）",
+        view.read_with(cx, |v, _| v.span_window())
     );
 }

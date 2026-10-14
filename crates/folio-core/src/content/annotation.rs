@@ -199,7 +199,8 @@ mod tests {
             authors: vec!["作者甲".into(), "作者乙".into()],
             format: Format::Epub,
             size: 1,
-        }
+            ..DocMeta::default()
+            }
     }
 
     fn chapter(title: &str) -> Chapter {

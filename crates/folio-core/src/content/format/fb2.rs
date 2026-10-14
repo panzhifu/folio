@@ -70,6 +70,20 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
     let meta = DocMeta {
         title,
         authors: parsed.authors,
+        // FB2 没有 `dc:contributor` 的对应元素：它把译者写在 `<author>` 里而不带角色标记，
+        // 分不出是作者还是译者，所以这一格留空而不是把译者塞进 contributors。
+        contributors: Vec::new(),
+        subjects: parsed.subjects,
+        description: parsed.description,
+        publisher: parsed.publisher,
+        published: parsed.published,
+        language: parsed.language,
+        isbn: parsed.isbn,
+        // `dc:type` 与 `dc:rights` 在 FB2 里没有对应元素（版权信息是自由文本的
+        // `<annotation>` 或站点的边车数据），不硬造。
+        dctype: String::new(),
+        rights: String::new(),
+        series: parsed.series,
         format: Format::Fb2,
         size: raw.len() as u64,
     };
@@ -183,6 +197,17 @@ struct Parsed {
     authors: Vec<String>,
     binaries: Vec<Binary>,
     cover_id: Option<String>,
+    /// `<book-info>` 的其余书目项。哪格 FB2 没有对应元素，就写在下面的注释上，
+    /// 不留给读代码的人猜。
+    subjects: Vec<String>,
+    description: String,
+    publisher: String,
+    published: String,
+    language: String,
+    isbn: String,
+    /// `<sequence name="…" number="…">`。FB2 允许一本书挂在多个系列下，
+    /// `DocMeta` 只有一个位置，所以取第一条。
+    series: Option<crate::content::format::Series>,
 }
 
 struct Binary {
@@ -193,6 +218,25 @@ struct Binary {
 
 fn local_name(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
+}
+
+/// `<sequence name="…" number="…">`：这本书属于哪个系列的第几本。
+///
+/// FB2 允许一本书挂在多个 `<sequence>` 下，而 `DocMeta` 只有一个位置，所以**只认第一条**。
+/// 自闭与写成对标签的两种都有，Start 与 Empty 两条路都过这个函数。
+fn note_sequence(start: &quick_xml::events::BytesStart<'_>, out: &mut Parsed) {
+    if out.series.is_some() {
+        return;
+    }
+    let Some(name) = attr(start, "name") else { return };
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return;
+    }
+    out.series = Some(crate::content::format::Series {
+        name,
+        position: attr(start, "number").unwrap_or_default().trim().to_string(),
+    });
 }
 
 fn attr(start: &quick_xml::events::BytesStart<'_>, want: &str) -> Option<String> {
@@ -233,6 +277,14 @@ fn parse_metadata(xml: &str) -> Parsed {
     let mut buf = String::new();
     let mut author_parts: Vec<String> = Vec::new();
     let mut binary: Option<(String, String, String)> = None;
+    // 正在采文本的新书目元素（`lang` / `genre` / …）。同一时刻只有一个，所以 `buf`
+    // 与上面的书名共用一份；`None` = 现在采的东西不该归位到任何一格。
+    let mut want: Option<&str> = None;
+    // 这两格是为「同名元素出现在别处」准备的：`<lang>` 与 `<genre>` 只在
+    // `<title-info>` 里算这本书的，`<publisher>` / `<date>` / `<isbn>` 只在
+    // `<publish-info>` 里算。属性闸不严就会把原版信息当成这本书的。
+    let mut in_title_info = false;
+    let mut in_publish_info = false;
 
     while let Ok(ev) = reader.read_event() {
         match ev {
@@ -242,6 +294,31 @@ fn parse_metadata(xml: &str) -> Parsed {
                 match name {
                     "book-title" => {
                         want_title = true;
+                        buf.clear();
+                    }
+                    "title-info" => in_title_info = true,
+                    "publish-info" => in_publish_info = true,
+                    "sequence" if in_title_info => note_sequence(&e, &mut out),
+                    // `want` 里存的是**常量**而不是事件里的名字切片：那个借用活不过
+                    // 这一轮 match，而 `want` 要跨轮。
+                    "lang" if in_title_info => {
+                        want = Some("lang");
+                        buf.clear();
+                    }
+                    "genre" if in_title_info => {
+                        want = Some("genre");
+                        buf.clear();
+                    }
+                    "publisher" | "date" | "isbn" if in_publish_info => {
+                        want = Some(match name {
+                            "publisher" => "publisher",
+                            "date" => "date",
+                            _ => "isbn",
+                        });
+                        buf.clear();
+                    }
+                    "annotation" => {
+                        want = Some("annotation");
                         buf.clear();
                     }
                     "author" => {
@@ -265,6 +342,9 @@ fn parse_metadata(xml: &str) -> Parsed {
             }
             Event::Empty(e) => {
                 let n = e.name();
+                if local_name(n.as_ref()) == "sequence" && in_title_info {
+                    note_sequence(&e, &mut out);
+                }
                 if in_coverpage
                     && local_name(n.as_ref()) == "image"
                     && let Some(id) = image_id(&e)
@@ -276,7 +356,7 @@ fn parse_metadata(xml: &str) -> Parsed {
                 let text = text_of(e.as_ref());
                 if let Some((_, _, body)) = binary.as_mut() {
                     body.push_str(&text);
-                } else if want_title || want_author_part {
+                } else if want_title || want_author_part || want.is_some() {
                     buf.push_str(&text);
                 }
             }
@@ -309,6 +389,46 @@ fn parse_metadata(xml: &str) -> Parsed {
                         want_author_part = false;
                     }
                     "coverpage" => in_coverpage = false,
+                    "title-info" => in_title_info = false,
+                    "publish-info" => in_publish_info = false,
+                    // 段落之间补一个空格：`<annotation>` 里各段的文本节点之间本来没有
+                    // 任何分隔符（ reader 还开了 trim），不补就是把两段粘成一段。
+                    "p" if want == Some("annotation") => buf.push(' '),
+                    key @ ("lang" | "genre" | "publisher" | "date" | "isbn" | "annotation") => {
+                        // `want` 对得上才归位：Start 那几道属性闸没过的元素走到这里也不该写，
+                        // 而那些文本本来就被别处（书名、作者）采走了。
+                        if want == Some(key) {
+                            match key {
+                                "lang" => out.language = buf.trim().to_string(),
+                                "genre" => {
+                                    let text = buf.trim().to_string();
+                                    if !text.is_empty() {
+                                        out.subjects.push(text);
+                                    }
+                                }
+                                "publisher" => out.publisher = buf.trim().to_string(),
+                                "date" => out.published = buf.trim().to_string(),
+                                // 多条 ISBN 时留第一条（与 `dc:identifier` 那一处同一口径）。
+                                "isbn" => {
+                                    if out.isbn.is_empty() {
+                                        out.isbn = buf.trim().to_string();
+                                    }
+                                }
+                                // 简介里的段落是各自的文本节点，中间没有任何分隔符，
+                                // 直接拼会把两段粘成一段。折成一个空格：这一格在界面上
+                                // 是一行标签文本，不是正文区。
+                                "annotation" => {
+                                    if out.description.is_empty() {
+                                        out.description =
+                                            buf.split_whitespace().collect::<Vec<_>>().join(" ");
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        buf.clear();
+                        want = None;
+                    }
                     "binary" => {
                         if let Some((id, media_type, text)) = binary.take()
                             && let Some(bytes) = decode_base64(&text)
@@ -581,6 +701,53 @@ mod tests {
 
     use super::Fb2Adapter;
     use crate::content::format::{Content, DocumentProvider, Format};
+
+    /// FB2 的书目区：`<title-info>` / `<publish-info>` / `<annotation>` 三处各归各格，
+    /// 而 `<src-title-info>`（原版的书名信息，用的**是同一套子元素名**）不许混进来 ——
+    /// 不隔离的话「原版语言」会把这本书的语言盖掉。
+    ///
+    /// 断的是 provider 交出去的那一份 [`super::DocMeta`]，不是中间那份 `Parsed`：解析读到
+    /// 与装配带上是两件事，只断前者会留下「字段在 XML 里认出来了、`DocMeta` 却没带上去」
+    /// 这一格没人看的空档 —— 而那一格的表现是信息屏上少一行，库与解析都还是绿的。
+    #[test]
+    fn the_book_info_fills_the_dublin_core_fields() {
+        use crate::content::format::Series;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fb2(
+            dir.path(),
+            "a.fb2",
+            r#"<FictionBook><description>
+  <title-info>
+    <book-title>车刀集</book-title><lang>rus</lang>
+    <author><first-name>甲</first-name><last-name>乙</last-name></author>
+    <sequence name="世界文学" number="12"/><genre>prose</genre><genre>detektif</genre>
+  </title-info>
+  <publish-info><publisher>某社</publisher><date>1962</date><isbn>978-5</isbn></publish-info>
+  <src-title-info><lang>eng</lang><genre>short_story</genre></src-title-info>
+  <annotation><p>第一段</p><p>第二段</p></annotation>
+</description><body><section><p>正文</p></section></body></FictionBook>"#,
+        );
+        let (meta, _) = flow(&path);
+        assert_eq!(meta.title, "车刀集");
+        assert_eq!(meta.authors, vec!["甲 乙"]);
+        assert_eq!(meta.language, "rus", "src-title-info 里那条 eng 不许覆盖");
+        assert_eq!(meta.subjects, vec!["prose", "detektif"]);
+        assert_eq!(meta.publisher, "某社");
+        assert_eq!(meta.published, "1962", "出版日期原样存");
+        assert_eq!(meta.isbn, "978-5");
+        assert_eq!(meta.description, "第一段 第二段", "两段之间补一个空格，不粘成一段");
+        assert_eq!(
+            meta.series,
+            Some(Series {
+                name: "世界文学".into(),
+                position: "12".into()
+            })
+        );
+        // FB2 里这三格没有对应元素（见上面装配处那三条注释）：留空，不硬造。
+        assert!(meta.contributors.is_empty());
+        assert!(meta.dctype.is_empty());
+        assert!(meta.rights.is_empty());
+    }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         use image::ImageEncoder as _;

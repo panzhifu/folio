@@ -12,7 +12,7 @@
 use super::typeset;
 use crate::content::format::css::computed::TextAlign;
 use crate::layout::geometry::scan_reference;
-use crate::layout::{BlockBox, Layout, LineBox};
+use crate::layout::{BlockBox, DecorSeed, Layout, LineBox};
 
 /// 一条行盒（不带片段：这三条查询只看几何）。
 fn line(owner: u32, y: f32, height: f32) -> LineBox {
@@ -25,6 +25,7 @@ fn line(owner: u32, y: f32, height: f32) -> LineBox {
         height,
         baseline: height,
         align: TextAlign::Left,
+        justify: None,
     }
 }
 
@@ -283,4 +284,157 @@ fn a_layout_without_lines_still_answers_every_query() {
     assert!(empty.block_of_line(0).is_none());
     assert_eq!(empty.line_covering_or_above(0.0), 0);
     assert_eq!(empty.lines_in_band(0.0, 10.0).len(), 0);
+}
+
+// ---- 装饰短表：折一次，而不是每帧走整章（§十一 第 12 条）----
+
+use crate::content::format::css::computed::{BorderEdge, Color, ComputedStyle, StyledDom};
+
+/// 一条带几何的块盒（`block()` 那个助手全给 y=0，装饰要按 y/height 判，这里要能指定）。
+fn box_at(node: u32, y: f32, height: f32, border_box: bool) -> BlockBox {
+    BlockBox {
+        node,
+        x: 4.0,
+        y,
+        width: 300.0,
+        height,
+        text: String::new(),
+        lines: 0..0,
+        border_box,
+    }
+}
+
+/// 接线前那趟每帧扫描照抄的参照实现：走**全表**、逐条用同样三条筛子、同样的色折法。
+/// 拿参照实现比而不是挑几个手算的期望值，理由与本文件开头那条一样 —— 会漂的是边界口径。
+fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
+    let mut out = Vec::new();
+    for block in &layout.blocks {
+        if !block.border_box {
+            continue;
+        }
+        let Some(style) = styles.get(block.node) else {
+            continue;
+        };
+        let drawn = [
+            style.border[0].drawn(),
+            style.border[1].drawn(),
+            style.border[2].drawn(),
+            style.border[3].drawn(),
+        ];
+        if style.background_color.is_none() && drawn.iter().all(|w| *w <= 0.0) {
+            continue;
+        }
+        if block.width <= 0.0 || block.height <= 0.0 {
+            continue;
+        }
+        out.push(DecorSeed {
+            x: block.x,
+            y: block.y,
+            width: block.width,
+            height: block.height,
+            background: style.background_color,
+            border: [
+                (drawn[0], style.border[0].color.or(style.color)),
+                (drawn[1], style.border[1].color.or(style.color)),
+                (drawn[2], style.border[2].color.or(style.color)),
+                (drawn[3], style.border[3].color.or(style.color)),
+            ],
+        });
+    }
+    out
+}
+
+/// 一份按节点下标摆好的样式表（`StyledDom::get` 就是按 `NodeId` 当 `styles` 下标）。
+fn decorated(by_node: &[(u32, ComputedStyle)]) -> StyledDom {
+    let top = by_node.iter().map(|(id, _)| *id).max().unwrap_or(0) as usize + 1;
+    let mut styles = vec![ComputedStyle::default(); top];
+    for (id, style) in by_node {
+        styles[*id as usize] = style.clone();
+    }
+    StyledDom { styles, ignored: 0 }
+}
+
+/// 折出来的短表必须与那趟每帧全表扫描**逐条相同**，包括顺序。
+#[test]
+fn the_decor_table_matches_the_per_frame_full_scan() {
+    let bg = ComputedStyle {
+        background_color: Some(Color(193, 204, 192)),
+        ..ComputedStyle::default()
+    };
+    let mut bordered = ComputedStyle::default();
+    bordered.border[2] = BorderEdge {
+        width: 2.0,
+        style: crate::content::format::css::computed::BorderStyle::Solid,
+        color: None,
+    };
+    bordered.color = Some(Color(12, 34, 56));
+    // 节点 5 有样式但什么装饰都没写 —— 不该进表。
+    let plain = ComputedStyle::default();
+
+    let layout = Layout::assemble(
+        vec![
+            box_at(1, 0.0, 120.0, true),   // 底色
+            box_at(2, 120.0, 300.0, true), // 下边框，色走 currentColor
+            box_at(3, 420.0, 60.0, true),  // 无装饰
+            box_at(3, 420.0, 60.0, false), // 同一节点的内容盒副本
+            box_at(4, 480.0, 0.0, true),   // 零高
+            box_at(6, 480.0, 90.0, true),  // 层叠表里查不到的节点
+        ],
+        Vec::new(),
+        336.0,
+        600.0,
+    );
+    let sheet = decorated(&[(1, bg), (2, bordered), (3, plain.clone()), (5, plain)]);
+
+    let got = layout.decor_seeds(&sheet);
+    assert_eq!(
+        got,
+        reference_seeds(&layout, &sheet),
+        "短表必须与全表扫描逐条相同"
+    );
+    assert_eq!(got.len(), 2, "只该有底色与下边框那两条：{got:?}");
+    // currentColor 在折表时就折完了：那条下边框的色是块自己的文字色，不是 None。
+    assert_eq!(got[1].border[2], (2.0, Some(Color(12, 34, 56))));
+    // 主题色一格都没进表 —— 剩下的那步「None 落主题前景」是绘制侧每帧做的。
+    assert_eq!(got[0].border[2], (0.0, None));
+}
+
+/// 零宽/零高、内容盒副本、无装饰、层叠查不到这四条筛子单独钉一遍。
+/// 上面的参照对比已经涵盖，这几条是「谁将来手改筛子时最容易被顺手放宽」的那四条。
+#[test]
+fn each_decor_filter_still_fires_on_its_own() {
+    let bg = ComputedStyle {
+        background_color: Some(Color(1, 2, 3)),
+        ..ComputedStyle::default()
+    };
+    let one = |b: BlockBox| Layout::assemble(vec![b], Vec::new(), 336.0, 600.0);
+    let sheet = decorated(&[(1, bg.clone()), (2, bg)]);
+
+    assert_eq!(one(box_at(1, 0.0, 50.0, true)).decor_seeds(&sheet).len(), 1);
+    // 内容盒副本
+    assert!(
+        one(box_at(1, 0.0, 50.0, false))
+            .decor_seeds(&sheet)
+            .is_empty()
+    );
+    // 零高
+    let mut flat = box_at(1, 0.0, 0.0, true);
+    assert!(one(flat.clone()).decor_seeds(&sheet).is_empty());
+    // 零宽
+    flat.height = 50.0;
+    flat.width = 0.0;
+    assert!(one(flat).decor_seeds(&sheet).is_empty());
+    // 层叠表里查不到的节点
+    assert!(
+        one(box_at(9, 0.0, 50.0, true))
+            .decor_seeds(&sheet)
+            .is_empty()
+    );
+    // 有样式但没写任何装饰
+    let bare = decorated(&[]);
+    assert!(
+        one(box_at(1, 0.0, 50.0, true))
+            .decor_seeds(&bare)
+            .is_empty()
+    );
 }

@@ -9,6 +9,7 @@
 //! 纯文本的包装已经在 provider 里做完（`folio_core::content::format::xhtml`），所以这里
 //! 没有「这个格式要不要先包一下」的分支 —— `Format` 不参与排版链。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
@@ -16,18 +17,22 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use folio_core::Reader;
-use folio_core::content::anchor::TextMap;
+use folio_core::content::anchor::{CharLines, TextMap};
+use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::dom::{Dom, NodeId};
-use folio_core::content::format::css::computed::{ComputedStyle, StyledDom, TextAlign, cascade};
+use folio_core::content::format::css::computed::{
+    Color, ComputedStyle, Length, StyledDom, TextAlign, cascade,
+};
 use folio_core::content::format::css::{Origin, RuleSet};
 use folio_core::content::hit::Hit;
+use folio_core::infra::metrics::Metric;
 use folio_core::infra::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
 use folio_core::layout::fragment::{Fragment, FragmentOptions, column_width, fragments};
 use folio_core::layout::{
-    BlockCache, Layout, LayoutKey, LayoutOptions, LineBox, content_hash, layout_with_blocks,
-    quantize_px,
+    BlockCache, DecorSeed, FontKey, Justify, Layout, LayoutInputs, LayoutKey, LayoutOptions,
+    LineBox, LineFragment, content_hash, layout_with_blocks, quantize_px,
 };
-use gpui_kit::{App, TextSystem, Window, WindowTextSystem};
+use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window, WindowTextSystem};
 
 use super::measure::GpuiMeasure;
 use crate::ui::features::reader::book_fonts::BookFonts;
@@ -53,15 +58,75 @@ pub fn body_of(dom: &Dom) -> NodeId {
         .unwrap_or(dom.document)
 }
 
+/// 一章正文的**来路**。排版作业的第一步就是把它变成文本。
+///
+/// 两条来路都有真实用处，`Text` 那一支不是兼容垫：
+///
+/// - [`ChapterSource::Fetch`]：正文还躺在容器里，**由作业自己取**。这是这一格存在的全部
+///   理由：取一章 = 一次解压 + 一次解码（实测 7–9.5 ms），2026-10-15 之前那笔钱在 UI 线程
+///   的渲染帧里付（`Book::ensure_window_spans` → `make_span` → `chapter_text_at`）。
+///   塞进同一个作业就是一次往返；把它拆成独立的一趟预取会是**两次**往返（文本回到界面
+///   才能投排版作业），而排版队列本来就是单线程 FIFO、每个 `Document` 至多一个在飞作业。
+/// - [`ChapterSource::Text`]：文本已经在手上 —— 测试替身、`ChapterLocator::Inline`
+///   那种内联正文。这一支不走容器。
+pub enum ChapterSource {
+    Text(String),
+    Fetch {
+        /// 打开着的这份文档。`Document: Send + Sync`，所以能整份搬进后台线程 ——
+        /// 这一条是 §十「一个步骤能进后台」五条判据里的第 1、2 条（签名不要窗口、
+        /// 输入不可变），其余三条（取消检查点、结果整份搬回、失败只影响自己那一步）
+        /// 由「一章是一个单元、作业带回一整份排版、取不到就当空章」天然满足。
+        doc: Arc<dyn OpenedDocument>,
+        chapter: usize,
+    },
+}
+
+impl ChapterSource {
+    /// 测试与内联正文那一条来路。
+    pub fn text(source: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self::Text(source.into()))
+    }
+
+    /// 按位置回容器取的那一条来路。
+    pub fn fetch(doc: Arc<dyn OpenedDocument>, chapter: usize) -> Arc<Self> {
+        Arc::new(Self::Fetch { doc, chapter })
+    }
+
+    /// 这一章的身份 —— [`LayoutKey::chapter`](folio_core::layout::LayoutKey::chapter) 那一格。
+    ///
+    /// 两种来路给的是不同类型的值，而这正是各自唯一能给的：按位置取的那一路**界面手上
+    /// 没有文本**，算不出内容哈希，只能给章号（一个开着的容器里第 N 章的内容不会变）；
+    /// 正文已经在手上那一路没有章号可指，给内容哈希。
+    ///
+    /// 只在这里算一次，结果存在 `Document::chapter` 上 —— 键是每帧都要算的，
+    /// 而内容哈希是 O(整章长度)。
+    pub fn identity(&self) -> u64 {
+        match self {
+            Self::Text(source) => content_hash(source),
+            Self::Fetch { chapter, .. } => *chapter as u64,
+        }
+    }
+
+    /// 换章时判「还是不是同一章」。身份相同就当没换 —— 与从前那句
+    /// `if source == self.source { return; }` 同一条意思，只是不再逐字节比整章文本。
+    pub fn same_chapter(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+}
+
 /// 一章的**解析产物**：与读者偏好无关，所以改字号、拖窗口都不必重新解析。
 ///
 /// 缓存挂在产物而不是挂在「取回来的章文本」上，理由见 `plans/阅读管线.md` §五：
 /// 文本本来就存在库里，重复付的钱在解析与可见文本坐标表上。`Arc` 是因为它同时被界面
 /// （命中、锚点换算）与在飞的排版作业拿着，而这两份必须是同一章。
 struct ChapterArtifacts {
-    /// 建它时那段源文本的哈希（与 [`LayoutKey::chapter_hash`] 同源，见 `layout::content_hash`）。
+    /// 建它时那段源文本的内容哈希（`layout::content_hash`，**由排版作业算** ——
+    /// 界面线程在按位置取的那一路根本不持有正文）。
     ///
     /// 复用前对一遍：对不上就是换章了，`NodeId` 指的是上一章，绝不能拿去排版。
+    /// 这一格与 [`LayoutKey::chapter`](folio_core::layout::LayoutKey::chapter) 是**两个问题**：
+    /// 键那一格答「这是哪一章」（身份），这一格答「这份 DOM 是从哪段字节来的」（内容）。
+    /// 同一个内容哈希也被批注那级缓存用着（[`Document::chapter_hash`]）。
     key: u64,
     dom: Dom,
     /// 本章的可见文本坐标表。锚点与进度都存在这套坐标里，它不随行盒变化。
@@ -92,18 +157,30 @@ impl ChapterArtifacts {
 /// 只需再回答「我这把键配的那片高」—— 连续滚动 / 分页 / 双页对开三种模式在核心层
 /// 是同一套代码，差别只有片高与栏数两个数。
 pub struct Document {
-    source: String,
-    /// 作者层样式表的**原文**（书自己那份 CSS）。键里要有它的哈希，而 `RuleSet` 已经是
-    /// 解析后的结构 —— 哈希原文与哈希结构是两件事，「作者改了一个字」是原文那件事。
-    /// 章里挂的 `<style>` 不在这里：它长在 `source` 里，`chapter_hash` 已经盖住它。
-    author_css: String,
+    /// 这一章正文的来路。`Arc` 是因为它随作业搬进后台线程，而界面这一份还要留着
+    /// 下次重投时再搬一遍 —— 从前这里是一段 `String`，每次提交作业都要整章克隆一份。
+    source: Arc<ChapterSource>,
+    /// 这一章的身份（[`ChapterSource::identity`]），换章时算一次存下来。
+    ///
+    /// 存下来而不是现算：这一格每帧进 [`LayoutKey`](folio_core::layout::LayoutKey)，
+    /// 而内容哈希是 O(整章长度)。
+    chapter: u64,
+    /// 键里那两格**与帧无关**的输入哈希（作者样式表 + 读者偏好），建章时算一次。
+    ///
+    /// 从前这里存的是 `author_css: String`，而它存在的唯一理由就是每帧给它算一次哈希 ——
+    /// 现在存算好的那两个数，原文就不必留着了（解析出来的规则在 [`Self::rules`] 里，
+    /// 章内 `<style>` 由作业解析 DOM 时就地收，见 [`Document::chapter_style_rules`]）。
+    ///
+    /// `prefs` 那一格也在里面，所以 [`Self::set_prefs`] 是它唯一的重算时机。
+    inputs: LayoutInputs,
     /// 本章的解析产物（DOM + 可见文本坐标），按章内容跨代次复用。
     ///
     /// 为什么留着它有两层：① 锚点换算要用（`LineRun::orig` 是**节点内**的字节区间，
     /// 没有节点文本就换不成可见文本坐标）；② 解析只做一次 —— 排版可以每帧重做
     /// （宽度、字号变了），但 HTML 解析不该跟着重做，它比层叠贵。
     artifacts: Arc<ChapterArtifacts>,
-    rules: RuleSet,
+    /// 作者层规则。**整本书共用这一份**（`Arc`），由 `Book` 解析一次递进来。
+    rules: Arc<RuleSet>,
     prefs: Reader,
     /// 本章的图片索引：排版期查固有尺寸，绘制期取可渲染的 `Image`。
     images: Arc<ChapterImages>,
@@ -132,6 +209,13 @@ pub struct Document {
     /// 层叠结果。分片要读块级的 `break-*` 与 orphans/widows，而这些只在层叠之后存在，
     /// 所以它跟排版结果同批算、同批存，不在分片时重来一遍。
     styles: Option<StyledDom>,
+    /// 「哪些块要画装饰」那张短表，与排版结果**同一批换**（[`Self::apply_typeset`]）。
+    ///
+    /// 为什么在这里而不是每帧现折：折一次要走**整章的块表**，而它的答案只跟这一代的
+    /// 层叠结果有关 —— 从前那趟是每帧、链上每个章各一次（`plans/阅读管线.md` §十一
+    /// 第 12 条）。`set_prefs` / `set_chapter` / `set_images` 都不动它：那一代排版还没
+    /// 回来之前，屏上摆的仍是旧行盒与新表**相配**的那一份，清了反而会让这一帧没有底色。
+    decorated: Rc<Vec<DecorSeed>>,
     /// 上次分片时的 `(排版键, 一片高)`。排版键与切片之间唯一的差别就是那片高：
     /// 栏宽与栏数都已经在键里了，字号也在（换字号会改行数，行变了切点就变了）。
     fragmented: Option<(LayoutKey, u32)>,
@@ -146,6 +230,112 @@ pub struct Document {
     /// 构造参数（`prefs` 的两个字族、`faces`、两个文本系统）在一章之内都不变，
     /// 所以缓存一格就够；换章时整个 `Document` 会重造，缓存跟着走。
     measure: OnceLock<GpuiMeasure>,
+    /// 已经 shaping 过的行：`(行号, 行内片段槽位)` → 那份几何。
+    ///
+    /// gpui 自己的 `LineLayoutCache` 只保两帧（`previous_frame` 与 `current_frame` 在
+    /// `finish_frame` 里互换，`gpui-pre/text_system/line_layout.rs:586-600`），而邻章那些行
+    /// 从「排版作业 shape 完」到「首次进屏」隔了远不止两帧 —— 所以进屏那一帧总要重 shape
+    /// 一次，而且命中也要把整段文本哈希一遍。这一张表把它按章留住，绘制只搬运字形。
+    ///
+    /// **值里没有颜色**：存的是 `Arc<LineLayout>`（`font_id` + 字形 + 落点），不是
+    /// `ShapedLine` —— 后者带 `decoration_runs`，那里面有主题色，烘进表就是「换了夜间
+    /// 模式线还是旧色」那种看不出来的错。装饰线本来也是绘制层自己画的
+    /// （见 `paint::paint_run` 里 `decoration_y` 那一段），`decoration_runs` 从没人读过。
+    ///
+    /// `RefCell` 而不是 `&mut self`：填表发生在渲染帧里，而那一刻手上是
+    /// `Book::span_doc` 给的 `&Document`。`Document` 本来就因为 `slices: Rc<..>` 不是
+    /// `Send`，加一格内部可变性不改变任何约束。
+    shaped: RefCell<HashMap<(u32, u32), Arc<LineLayout>>>,
+    /// 已经物化过的行：行号 → 那一行的片段单元。懒建——某一行的单元只在它第一次
+    /// 进带时才建，所以驻留上界是「这一章进过屏的那些行」，随章进出 ±窗口一起释放。
+    ///
+    /// 失效只挂 [`Document::drop_fragments`]，与 shaping 表同一处、同一个信号。
+    rows: RefCell<HashMap<u32, Rc<Vec<RowFragment>>>>,
+    /// 「第几行覆盖哪些字符」那张索引，**第一次有人问时才折**（见 [`Document::char_lines`]）。
+    ///
+    /// 为什么懒建：折它要走一遍整章的行、每行逐片段问一次 `TextMap`，而用得到它的只有
+    /// 批注回显与「字符偏移 → 行/像素」那几条查询。一本没划过字的书一分钱不必付。
+    /// 为什么只折一次：那两条查询从前**每问一次走一遍整章**，一章 25 条批注实测
+    /// 每帧 +1.7–2.2 ms（`plans/阅读管线.md` §十一 第 9 条）。
+    ///
+    /// 失效只挂 [`Document::drop_fragments`]：行号与字符区间都只在同一份排版里作数。
+    char_lines: RefCell<Option<Rc<CharLines>>>,
+}
+
+/// [`Document::shaped`] 的条数上限。
+///
+/// 满了就**不再插**、退回 gpui 那两帧缓存，不做 LRU：一条 `Arc<LineLayout>` 连同它的
+/// 字形表大约 1 KB 量级，4096 条封顶在几 MB，而驻留量随章进出 ±窗口自然释放。LRU 要为
+/// 「千章书一路往下读」这种其实不会发生的场景付一套簿记 —— 表本身已经按章挂了。
+const SHAPED_TABLE_CAP: usize = 4096;
+
+/// 一行里的一个片段，值全是**章内局部量**——这是「行单元表」的一格。
+///
+/// 为什么要有这张表：`Scene::build` 从前每帧都从 `BlockBox::text` 现切一个 `SharedString`
+/// （一次堆拷贝）再逐片段累加 x，于是「滚回走过的地方」也要把满屏的片段重新物化一遍
+/// （实测一屏 62 个，`plans/阅读管线.md` §九）。物化一次就存一次，之后每帧只加三个平移数。
+///
+/// **文本与图片两种片段都在这里**，因为 x 只能有一个来源：要是图片还留在每帧的片段走里，
+/// 「表里算的 x」与「走里累加的 x」就是两个真相，漏改一侧就是断行与绘制错位。
+#[derive(Clone, Debug)]
+pub enum RowFragment {
+    /// 一段文本。`RowUnit::x` 是相对**行首**的偏移（不含行缩进、不含栏偏移）。
+    Text(RowUnit),
+    /// 一张图在行里的摆位（章内量）。
+    ///
+    /// **字节与固有尺寸不在这里**：那两样随图片索引变（`set_images` 会 bump `images_rev`
+    /// 并清整张表），每帧现问 `ChapterImages` 才是对的。这里只存排版算好的框。
+    Image(RowImage),
+}
+
+/// 一条文本片段物化一次之后的全部绘制输入。
+///
+/// 故意**不存**的两样，存了就是把失效问题从一处拆成两处：
+///
+/// - 解析好的 `gpui_kit::Font`：`FontCache` 已经有「换书 `reset`、改偏好 `clear`」那条
+///   纪律（`reader/measure.rs`），表里再存一份就是第二个真相。这里存 `FontKey`，
+///   每帧现解析——那是一次哈希查表加一次 `Arc` 克隆，不是这笔开销的主角。
+/// - 主题色：`LayoutKey` 里没有主题，把 `run_color` 的结果烘进表就是「换了夜间模式
+///   但线还是旧色」那种看不出来的错。这里存 CSS 那一格 `Option<Color>`，每帧现落回主题。
+#[derive(Clone, Debug)]
+pub struct RowUnit {
+    /// 在**本行片段数组**里的槽位。连同行号一起构成 shaping 表的键
+    /// （[`Document::shaped`]）。槽位连图片一起数，所以文本片段的槽位不会随图片增减漂移。
+    pub slot: u32,
+    /// 文本句柄。这一格就是这次缓存的主体：从前每帧从归一化串里切一个新的出来。
+    pub text: SharedString,
+    pub font: Arc<FontKey>,
+    pub font_size: f32,
+    /// 相对**行首**的 x（章内量）。
+    pub x: f32,
+    /// 基线偏移，px，正数往上。来自 `vertical-align`，绘制层把它从行的基线里减掉。
+    pub baseline_shift: f32,
+    /// 这一片的 inline box 高。绘制层用它定装饰线的纵向落点，而 shaping 里没有这个数。
+    pub box_height: f32,
+    pub underline: bool,
+    pub line_through: bool,
+    /// CSS 声明的文字色。`None` = 书里没写，每帧落到主题前景。
+    pub color: Option<Color>,
+    /// 字距（px），来自 `letter-spacing`。绘制时按字形所在字符序号右推 `ls × k`。
+    pub letter_spacing: f32,
+    /// 两端对齐：这一段起点已累计的右推量（px），以及这一行的摊法。绘制时字形再按
+    /// **运行内**的隙序号右推 `justify.extra × 局部隙序号`，与 `hit`/选区同一句规则。
+    /// `None` = 这一行不两端对齐。
+    pub justify: Option<Justify>,
+    pub justify_shift: f32,
+}
+
+/// 一行里一张图的摆位（章内量）。见 [`RowFragment::Image`] 为什么字节不进这一格。
+#[derive(Clone, Debug)]
+pub struct RowImage {
+    pub slot: u32,
+    pub x: f32,
+    pub width: f32,
+    pub height: f32,
+    /// 容器路径。图片索引（`ChapterImages`）按它查字节与固有尺寸。
+    pub href: String,
+    /// 所属 DOM 节点。脚注注文按它解（`Document::footnote_note_for_node`）。
+    pub node: NodeId,
 }
 
 /// 界面交给排版与分片的两个轴。**三种模式只差这里的三个数**：
@@ -194,13 +384,16 @@ struct TypesetInput {
     /// 这一趟要算的那把键；排版宽度取键里量化后的 `width`，别在传一个未量化的数进来，
     /// 那样「键相同而版心差半像素」的两次排版会互相复用缓存。
     key: LayoutKey,
-    source: String,
-    /// 界面手上那份解析产物。键的 `chapter_hash` 对得上就直接用，对不上才重新解析 ——
-    /// 「改一次字号不许重解析」那条计数断言（`folio_core::infra::metrics::Metric::DomParses`）
-    /// 钉的就是这一格。
+    /// 这一章正文的来路。`Arc` 克隆，不是整章文本克隆 —— 界面每投一次作业从前都要
+    /// `self.source.clone()` 搬一整章过去，现在搬的是一个引用计数。
+    source: Arc<ChapterSource>,
+    /// 界面手上那份解析产物。它的内容哈希与本趟取到的正文对得上就直接用，对不上才
+    /// 重新解析 ——「改一次字号不许重解析」那条计数断言
+    /// （`folio_core::infra::metrics::Metric::DomParses`）钉的就是这一格。
     artifacts: Arc<ChapterArtifacts>,
     /// 书自己的样式（作者层）。章里的 `<style>` 不在这里 —— 它随 DOM 解析就地收。
-    rules: RuleSet,
+    /// 交进来的是引用：深拷贝那一趟留在作业里跑（后台线程），不占 UI 线程。
+    rules: Arc<RuleSet>,
     prefs: Reader,
     images: Arc<ChapterImages>,
     texts: Arc<TextSystem>,
@@ -218,16 +411,36 @@ fn typeset_queue() -> &'static Arc<TaskManager> {
     QUEUE.get_or_init(|| Arc::new(TaskManager::new(1)))
 }
 
-/// 作业体：解析（按需）→ 层叠 → 排版。测试里被同步调用，线上在后台线程里跑 —— 同一份代码。
+/// 作业体：**取正文（按需）→ 解析（按需）→ 层叠 → 排版**。测试里被同步调用，
+/// 线上在后台线程里跑 —— 同一份代码。
 fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
-    // 第 3 级（解析）与可见文本坐标：按章内容复用。`chapter_hash` 对得上就说明手上这份
-    // DOM 正是从这段文本来的，里面每个 `NodeId` 都还作数 —— 换字号、拖窗口都不必重解析。
-    let artifacts = if input.artifacts.key == input.key.chapter_hash {
+    // 第 1 级（取正文）。`Fetch` 那一支到这一趟才回容器取：那一次解压 + 解码
+    // （实测 7–9.5 ms / 章）就是这次改动从 UI 线程的渲染帧里挪走的东西。
+    //
+    // **取不到就当空章，不让整趟作业失败**：与从前 `Book::chapter_text_at` 那句降级同口径
+    // （界面仍能把这一屏画出来，别的章还能读），而且返回错误会让 `Document::applied`
+    // 永远设不上 —— 下一帧又重投一趟，一本读不出来的书就变成每帧一趟作业。
+    let source = match input.source.as_ref() {
+        ChapterSource::Text(text) => text.clone(),
+        ChapterSource::Fetch { doc, chapter } => {
+            doc.chapter_source(*chapter).unwrap_or_else(|err| {
+                tracing::error!(chapter = chapter + 1, error = %err, "typeset: 取不到正文");
+                String::new()
+            })
+        }
+    };
+    // 第 3 级（解析）与可见文本坐标：按章**内容**复用。内容哈希对得上就说明手上这份 DOM
+    // 正是从这段文本来的，里面每个 `NodeId` 都还作数 —— 换字号、拖窗口都不必重解析。
+    // 哈希在这里算而不是在界面算：`Fetch` 那一路的界面根本不持有正文。
+    let content = content_hash(&source);
+    let artifacts = if input.artifacts.key == content {
         input.artifacts
     } else {
-        Arc::new(ChapterArtifacts::build(&input.source))
+        Arc::new(ChapterArtifacts::build(&source))
     };
-    let mut rules = input.rules;
+    // 深拷贝从 UI 线程挪到这里：作业跑在排版队列上，而章里的 `<style>` 与读者层
+    // 要往这份表里追加，所以只能在作业里改副本。
+    let mut rules = (*input.rules).clone();
     rules.extend(Document::chapter_style_rules(&artifacts.dom));
     // 读者层的段间距。放在这里而不是 `Document::new`：那一份 `rules` 跟着作者 CSS 存，
     // 偏好一改就会让「章的样式」看起来也变了。
@@ -264,7 +477,42 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
     })
 }
 
+/// 两条窄化取交：字符索引给的「这段字落在哪几行」∩ 可见带给的「屏上是哪几行」。
+///
+/// 两边给的都是**左闭右开的连续行号**，而且各自都是超集（漏算的防线在
+/// `rects_for_range_in` 里那道逐行交集判断，与 `Layout::lines_in_band` 在行盒叠放时
+/// 直接给整区间），所以交集也只可能多扫、不可能漏矩形。
+///
+/// `char_lines` 是 `None` 表示那一章的行不按时序单调（`CharLines` 自己量出来的），
+/// 这时只剩可见带那一头 —— 它总是可用。
+fn narrowed_lines(char_lines: Option<Range<usize>>, band: Range<usize>) -> Range<usize> {
+    let Some(char_lines) = char_lines else {
+        return band;
+    };
+    let start = char_lines.start.max(band.start);
+    let end = char_lines.end.min(band.end);
+    // 两条带不相交（这一条批注根本不在这屏上）：给一个空区间，一行都不走。
+    start..end.max(start)
+}
+
+/// 把一本书的作者样式表解析成一份**可以共享**的规则表。
+///
+/// 为什么要单独一个函数并数进计数器：那一整本 CSS 对每一章配的都是同一份规则，
+/// 而从前 `Document::with_source` 每建一章就重解析一遍 —— 2026-10-15 真机拆开量到
+/// **每进一章 1.5–1.9 ms**（《未来简史》23.6 KB / 323 条规则，`RuleSet::parse` 自己
+/// 占 1.16 ms，release），跳一次章一次铺 4 章就是 7 ms 落在 UI 线程的一帧里。
+/// `Book` 开书时调一次、把结果递给每一章；`Metric::RuleSetParses` 钉的就是
+/// 「一本书 1 次，滚动 / 跳章 / 改偏好都不涨」。
+pub fn author_rules(css: &str) -> Arc<RuleSet> {
+    Metric::RuleSetParses.count();
+    Arc::new(RuleSet::parse(css, Origin::Author))
+}
+
 impl Document {
+    /// 正文**已经在手上**的一章：测试替身、内联正文（`ChapterLocator::Inline`）。
+    ///
+    /// 这一条自己解析 `css`。一本书会建好几个 `Document`，所以那条路走
+    /// [`Document::new_with_rules`]（共用 [`author_rules`] 的那一份）。
     pub fn new(
         source: String,
         css: &str,
@@ -272,15 +520,90 @@ impl Document {
         images: Arc<ChapterImages>,
         faces: Arc<BookFonts>,
     ) -> Self {
-        let mut rules = RuleSet::default();
-        // 书自己的 CSS 是作者层；读者偏好通过根样式进来（`root_base`），
-        // 带 `!important` 的读者样式表留给 M5 的 reader.css。
-        rules.extend(RuleSet::parse(css, Origin::Author));
+        Self::new_with_rules(source, css, author_rules(css), prefs, images, faces)
+    }
+
+    /// 同 [`Document::new`]，但作者层规则由调用方给（一本书共用一份）。
+    pub fn new_with_rules(
+        source: String,
+        css: &str,
+        rules: Arc<RuleSet>,
+        prefs: Reader,
+        images: Arc<ChapterImages>,
+        faces: Arc<BookFonts>,
+    ) -> Self {
+        Self::with_source(
+            ChapterSource::text(source),
+            css,
+            rules,
+            prefs,
+            images,
+            faces,
+        )
+    }
+
+    /// 正文**还要回容器取**的一章。
+    ///
+    /// 取的那一趟发生在排版作业里（[`typeset_job`]），所以构造这一刻界面手上没有正文，
+    /// 解析产物先按空章建、等第一趟作业带回来。从前 `Book::make_span` 走的其实是同一条
+    /// 形状 —— 先 `Document::new(String::new())` 再 `set_chapter(现取的那一段)`，
+    /// 区别只在于那一趟取文本从 UI 线程挪进了后台。
+    pub fn fetching(
+        doc: Arc<dyn OpenedDocument>,
+        chapter: usize,
+        css: &str,
+        prefs: Reader,
+        images: Arc<ChapterImages>,
+        faces: Arc<BookFonts>,
+    ) -> Self {
+        Self::fetching_with_rules(doc, chapter, css, author_rules(css), prefs, images, faces)
+    }
+
+    /// 同 [`Document::fetching`]，但作者层规则由调用方给（一本书共用一份）。
+    /// 阅读链上每进一章走这一条。
+    pub fn fetching_with_rules(
+        doc: Arc<dyn OpenedDocument>,
+        chapter: usize,
+        css: &str,
+        rules: Arc<RuleSet>,
+        prefs: Reader,
+        images: Arc<ChapterImages>,
+        faces: Arc<BookFonts>,
+    ) -> Self {
+        Self::with_source(
+            ChapterSource::fetch(doc, chapter),
+            css,
+            rules,
+            prefs,
+            images,
+            faces,
+        )
+    }
+
+    fn with_source(
+        source: Arc<ChapterSource>,
+        css: &str,
+        rules: Arc<RuleSet>,
+        prefs: Reader,
+        images: Arc<ChapterImages>,
+        faces: Arc<BookFonts>,
+    ) -> Self {
         // 建好才交出去：`text_map()` 与锚点换算在第一次排版回来之前也要能用。
-        let artifacts = Arc::new(ChapterArtifacts::build(&source));
+        // `Fetch` 那一路只能按空章建（正文还没取），第一趟作业回来后换成真的。
+        let seed = match source.as_ref() {
+            ChapterSource::Text(text) => text.as_str(),
+            ChapterSource::Fetch { .. } => "",
+        };
+        // 身份在这里算一次存下来：它每帧进键，而内容哈希是 O(整章长度)。
+        let chapter = source.identity();
+        // 样式表与偏好这两格的哈希也在这里算一次：`layout_key()` 是每帧每个进链的章
+        // 各调一次的地方，而那两样输入整个一章之内都不变（偏好只有 `set_prefs` 会动）。
+        let inputs = LayoutInputs::compute(css, &prefs);
+        let artifacts = Arc::new(ChapterArtifacts::build(seed));
         Self {
             source,
-            author_css: css.to_string(),
+            chapter,
+            inputs,
             artifacts,
             rules,
             prefs,
@@ -294,9 +617,13 @@ impl Document {
             layout: Layout::default(),
             styles: None,
             fragmented: None,
+            decorated: Rc::new(Vec::new()),
             slices: Rc::new(Vec::new()),
             // 第一次真要命中/求矩形时才造（那也是唯一需要它的时刻）。
             measure: OnceLock::new(),
+            shaped: RefCell::new(HashMap::new()),
+            rows: RefCell::new(HashMap::new()),
+            char_lines: RefCell::new(None),
         }
     }
 
@@ -335,7 +662,7 @@ impl Document {
     /// 所以书自己写了 `p { margin-bottom: 2em }` 时仍按书的；没有作者声明时，
     /// `css/ua.rs` 给 `<p>` 的那一对 1em 才是兜底。
     ///
-    /// 它与章文本无关，所以**不进 `ChapterArtifacts`**（那一份按 `chapter_hash` 复用，
+    /// 它与章文本无关，所以**不进 `ChapterArtifacts`**（那一份按内容哈希复用，
     /// 掺进偏好就等于把偏好烘进了缓存），每次作业现拼一条。
     fn reader_rules(prefs: &Reader) -> RuleSet {
         let gap = prefs.paragraph_gap_em;
@@ -347,10 +674,12 @@ impl Document {
         )
     }
 
-    /// 换读者的偏好。**这里不推进任何代数**：排版键是从输入现算的，下一帧
-    /// [`Self::ensure_viewport`] 一算就发现 `prefs_hash` 那格变了，作业自然派出去。
+    /// 换读者的偏好。**这里不推进任何代数**：下一帧 [`Self::ensure_viewport`] 一算键就发现
+    /// `prefs_hash` 那格变了，作业自然派出去 —— 但那一格必须**在这里**重算：
+    /// 键不再每帧从原文现哈希了（见 [`LayoutInputs`]），不在这儿刷新就永远停在旧值。
     /// 只有切片必须当场作废 —— 字号改了行数就改，切点跟着改。
     pub fn set_prefs(&mut self, prefs: Reader) {
+        self.inputs.set_prefs(&prefs);
         self.prefs = prefs;
         // 「想要哪把键」只有 `ensure_viewport` 知道（键要含栏宽与栏数），所以这里只能把它
         // 清成「还不知道」。不清的话 `applied` 仍等于旧的 `desired`，`is_current()` 会答
@@ -359,15 +688,21 @@ impl Document {
         self.drop_fragments();
     }
 
-    /// 换章。源文本没变就保留上一次的排版结果，来回翻同一章不必重算。
+    /// 换章。同一章（身份对得上）就保留上一次的排版结果，来回翻同一章不必重算。
     ///
-    /// 解析与排版都搬进了后台作业（见 [`Self::request_typeset`]），这里只作废：
+    /// 比的是**身份**而不是整段正文：`Fetch` 那一路这里根本没有文本可比，而比身份也不再
+    /// 需要逐字节比一整章（从前那句 `source == self.source` 付的就是那一趟比较）。
+    ///
+    /// 解析与排版都在后台作业里（见 [`Self::request_typeset`]），这里只作废：
     /// 旧章的产物与行盒留着，新结果回来之前屏幕上还是上一章（一帧的功夫）——
     /// 锚点换算在这段时间里指着旧章，不会指到半个新章上。
-    pub fn set_chapter(&mut self, source: String) {
-        if source == self.source {
+    pub fn set_chapter(&mut self, source: Arc<ChapterSource>) {
+        if self.source.same_chapter(&source) {
             return;
         }
+        // 身份与来路**必须一起换**，否则键声称的章与作业取的章就不是同一章 ——
+        // 那正是 `tests::the_key_and_the_fetched_chapter_are_the_same_chapter` 钉的坏法。
+        self.chapter = source.identity();
         self.source = source;
         self.applied = None;
         self.desired = None;
@@ -390,11 +725,14 @@ impl Document {
     ///
     /// 界面不许自己拼键、也不许只比其中几格：`width` 是**栏宽**（折行发生在它上头），
     /// 整窗宽不进键 —— 窗口变宽而栏宽被 `max_measure` 卡住时，排版本来就不该重做。
+    ///
+    /// 这一格**每帧每个进链的章各调一次**，所以它不做任何哈希：样式与偏好的哈希在
+    /// [`LayoutInputs`] 里算好（建章与 `set_prefs` 时），章身份在 `self.chapter` 里算好
+    /// （换章时）。这里只搬那几个数与一次量化。
     pub fn layout_key(&self, width: f32, columns: usize) -> LayoutKey {
         LayoutKey::compose(
-            &self.source,
-            &self.author_css,
-            &self.prefs,
+            self.inputs,
+            self.chapter,
             width,
             columns,
             self.images_rev,
@@ -418,10 +756,164 @@ impl Document {
         self.artifacts.key
     }
 
-    /// 作废切片缓存。排版一作废就必须跟着作废它 —— 切点读的是行盒。
+    /// 作废切片缓存、shaping 表、行单元表与那份行索引。排版一作废就必须跟着作废它们 ——
+    /// 切点读的是行盒，而行号、片段槽位、字符区间这三个身份都只在同一份排版里作数。
+    ///
+    /// 这一处是**唯一的失效信号**：`set_chapter` / `set_prefs` / `set_images` /
+    /// `apply_typeset` 四个都走它，所以三张缓存表都不必自己再判一次键。
+    ///
+    /// 索引清了不等于下一帧就重折：它是懒建的，没人问（没批注、没选区、没恢复落点）
+    /// 就一直不折。而新一代排版落地前那一帧，屏上还是旧行盒 —— 那时重建的索引读的也是
+    /// 同一份旧 `layout`，与它配得上，不存在「新索引配旧行盒」那种错配。
     fn drop_fragments(&mut self) {
         self.fragmented = None;
         self.slices = Rc::new(Vec::new());
+        self.shaped.borrow_mut().clear();
+        self.rows.borrow_mut().clear();
+        *self.char_lines.borrow_mut() = None;
+    }
+
+    /// 那一代排版的「行 ↔ 字符区间」索引：第一次问时折，之后每次问都是同一份 `Rc`。
+    ///
+    /// 折一次 O(行数)，换来的是两条查询只碰与查询相交的那几行 —— 它们从前每问一次
+    /// 就把整章的行走一遍，而批注回显是「每条批注 × 每帧 × 每个进链的章」问一次。
+    /// 走 [`Document::drop_fragments`] 失效，所以只有换代那一回会真的重折。
+    fn char_lines(&self) -> Rc<CharLines> {
+        if let Some(built) = self.char_lines.borrow().as_ref() {
+            return built.clone();
+        }
+        let built = Rc::new(CharLines::build(self.layout(), self.dom(), self.text_map()));
+        *self.char_lines.borrow_mut() = Some(built.clone());
+        built
+    }
+
+    /// 取一条已经 shape 好的行；表里没有就调 `shape` 现 shape 一次并存进去。
+    ///
+    /// `key` 是**章内局部身份**（行号, 行内片段槽位），由 `scene::Scene::build` 在摊 run
+    /// 时按 enumerate 盖上；兜底那一行与测试里手搓的 run 不带身份（`None`），调用方跳过它。
+    /// 表满之后（[`SHAPED_TABLE_CAP`]）不再插，那一趟就退回 gpui 的两帧缓存。
+    ///
+    /// `shape` 里要数 `Metric::ShapeLineCalls` —— 那一格的口径是「表未命中一次」，
+    /// 不是「每条 run 一次」，所以计数必须留在闭包里而不是这里。
+    pub fn shaped_line(
+        &self,
+        key: (u32, u32),
+        shape: impl FnOnce() -> Arc<LineLayout>,
+    ) -> Arc<LineLayout> {
+        if let Some(hit) = self.shaped.borrow().get(&key) {
+            return hit.clone();
+        }
+        let layout = shape();
+        let mut table = self.shaped.borrow_mut();
+        if table.len() < SHAPED_TABLE_CAP {
+            table.insert(key, layout.clone());
+        }
+        layout
+    }
+
+    /// 第 `line` 行的片段单元；表里没有就现建一条，并把建出来的条数数进
+    /// `Metric::SceneRuns`。
+    ///
+    /// 口径（2026-10-15 起）：**这一帧新建了几条单元**，不是「这一帧摆了几条 run」。
+    /// 前者才是被缓存的那笔钱——一条单元的主体是那段从归一化串里切出来的 `SharedString`。
+    ///
+    /// 给回 `Rc` 而不是借用：调用方（`Scene::build`）此刻正借用着同一份 `Layout`，
+    /// 把 `RefCell` 的借用留在外面会让两侧打架；抬一次引用计数就把借用当场收回去。
+    pub fn row_units(&self, line: usize) -> Rc<Vec<RowFragment>> {
+        let key = line as u32;
+        if let Some(hit) = self.rows.borrow().get(&key) {
+            return hit.clone();
+        }
+        let row = Rc::new(self.build_row(line));
+        Metric::SceneRuns.add(row.len() as u64);
+        self.rows.borrow_mut().insert(key, row.clone());
+        row
+    }
+
+    /// 建一行的单元：把片段数组走一遍，文本在这里切出那个 `SharedString`（**一章一次**，
+    /// 之后每帧只搬运句柄），图片在这里记下排版算好的框。
+    ///
+    /// `x` 在这里逐片段累加，相对**行首**；行缩进（`LineBox::x`）与栏偏移留在每帧那一侧，
+    /// 因为它们里面含「这一片摆在窗口哪里」，不是章内量。
+    fn build_row(&self, line: usize) -> Vec<RowFragment> {
+        let Some(line_box) = self.layout.lines.get(line) else {
+            return Vec::new();
+        };
+        // 行文本住在所属块的那个归一化串里（`LineRun::norm` 是它的字节区间）。
+        let Some(block) = self.layout.block_of_line(line) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(line_box.fragments.len());
+        let mut x = 0.0;
+        // 两端对齐的隙游标：跨片段累计，给每个 run 记下它起点已摊到多少（`justify_shift`）。
+        // 绘制时 run 内再按 `justify.extra × 局部隙序号` 逐字推 —— 与 `hit`/选区同一句规则。
+        let justify = line_box.justify;
+        let mut gap_cursor = 0u32;
+        for (slot, fragment) in line_box.fragments.iter().enumerate() {
+            let slot = slot as u32;
+            match fragment {
+                LineFragment::Text(run) => {
+                    let text = block.text.get(run.norm.clone()).unwrap_or("");
+                    if !text.is_empty() {
+                        out.push(RowFragment::Text(RowUnit {
+                            slot,
+                            text: SharedString::new(text),
+                            font: run.style.font.clone(),
+                            font_size: run.style.font_size,
+                            x,
+                            baseline_shift: run.style.baseline_shift,
+                            box_height: run.style.box_height(),
+                            underline: run.style.underline,
+                            line_through: run.style.line_through,
+                            color: run.style.color,
+                            letter_spacing: run.style.letter_spacing,
+                            justify,
+                            justify_shift: justify.map_or(0.0, |j| j.shift(gap_cursor)),
+                        }));
+                    }
+                    // 这一段点过的隙数（空格或字符，看摊法）；空片段也照数，与排版同源。
+                    if let Some(j) = justify {
+                        gap_cursor += text.chars().map(|ch| j.advance_cursor(ch)).sum::<u32>();
+                    }
+                    // 空片段不画，但照样占宽，否则后面所有 x 一起偏。
+                    x += run.width;
+                }
+                LineFragment::Image(placed) => {
+                    out.push(RowFragment::Image(RowImage {
+                        slot,
+                        x,
+                        width: placed.width,
+                        height: placed.height,
+                        href: placed.href.clone(),
+                        node: placed.node,
+                    }));
+                    x += placed.width;
+                }
+                // 列表标记：文字是它自己的（不在块文本里），位置在行首之外。
+                // **不**把宽度加进 `x` —— 它挂在流动之外，正文一个字都不该挪。
+                LineFragment::Marker(marker) => {
+                    if !marker.text.is_empty() {
+                        out.push(RowFragment::Text(RowUnit {
+                            slot,
+                            text: SharedString::new(marker.text.clone()),
+                            font: marker.style.font.clone(),
+                            font_size: marker.style.font_size,
+                            x: x + marker.offset,
+                            baseline_shift: 0.0,
+                            box_height: marker.style.box_height(),
+                            underline: false,
+                            line_through: false,
+                            color: marker.style.color,
+                            letter_spacing: marker.style.letter_spacing,
+                            // 标记挂在流动之外，不参与两端对齐。
+                            justify: None,
+                            justify_shift: 0.0,
+                        }));
+                    }
+                }
+            }
+        }
+        out
     }
 
     #[allow(dead_code)] // 面板与测试读；渲染路径目前直接走字段
@@ -437,12 +929,9 @@ impl Document {
         &self.layout
     }
 
-    /// 某个 DOM 节点层叠完的计算样式。排版没做过（`styles` 还没建）时是 `None`。
-    ///
-    /// 绘制层用它取块级装饰（背景色、边框）—— 那些是「盒子长什么样」的信息，
-    /// 只有层叠完才知道。
-    pub fn style_of(&self, node: NodeId) -> Option<&ComputedStyle> {
-        self.styles.as_ref()?.get(node)
+    /// 这一代的装饰短表（[`Self::decorated`]）。绘制侧按可见带裁它，不再走整章块表。
+    pub fn decor_seeds(&self) -> &[DecorSeed] {
+        &self.decorated
     }
 
     pub fn lines(&self) -> &[LineBox] {
@@ -508,7 +997,7 @@ impl Document {
                 // 关掉两端对齐应该右对齐。CSS 的初值本来也是 `start`。
                 TextAlign::Start
             },
-            text_indent: prefs.font_size * prefs.indent_em.max(0.0),
+            text_indent: Length::Px(prefs.font_size * prefs.indent_em.max(0.0)),
             ..ComputedStyle::default()
         }
     }
@@ -537,7 +1026,7 @@ impl Document {
             key,
             source: self.source.clone(),
             artifacts: self.artifacts.clone(),
-            rules: self.rules.clone(),
+            rules: Arc::clone(&self.rules),
             prefs: self.prefs.clone(),
             images: self.images.clone(),
             texts,
@@ -550,7 +1039,7 @@ impl Document {
             match typeset_job(input) {
                 Ok(out) => self.apply_typeset(out),
                 Err(err) => tracing::error!(
-                    chapter_hash = key.chapter_hash,
+                    chapter_id = key.chapter,
                     width = key.width,
                     error = %err,
                     "typeset: 排版失败"
@@ -594,7 +1083,7 @@ impl Document {
                 }
             }
             Some(Err(err)) => tracing::error!(
-                chapter_hash = key.chapter_hash,
+                chapter_id = key.chapter,
                 width = key.width,
                 error = %err,
                 "typeset: 后台排版失败"
@@ -610,6 +1099,9 @@ impl Document {
         // 留着比扔掉省一次整章重排，而复用范围（章 / 字体 / 度量）变了它自己会清。
         self.blocks = out.blocks;
         self.artifacts = out.artifacts;
+        // 装饰表与这一代排版结果同批折：`layout` 与 `styles` 一到，表就是它们的函数，
+        // 之后每帧只裁短表（`Scene::build` 那条路）。
+        self.decorated = Rc::new(out.layout.decor_seeds(&out.styles));
         self.styles = Some(out.styles);
         self.layout = out.layout;
         self.applied = Some(out.key);
@@ -724,8 +1216,121 @@ impl Document {
     }
 
     /// 本章的 DOM。命中、锚点、目录落点都从它出发。
-    fn dom(&self) -> &Dom {
+    pub fn dom(&self) -> &Dom {
         &self.artifacts.dom
+    }
+
+    /// 某个章内字符偏移处所在的那个链接的 `href`（不在链接里就是 `None`）。
+    ///
+    /// 从命中到的**文本节点**沿 `ancestors_including_self` 往上找最近的一个
+    /// `<a>`：一个链接可能横跨若干嵌套的 inline（`<a><em>字</em></a>`），
+    /// 只认「这点文字挂在哪条链上」而不是「这一格等于哪个元素」。
+    /// 取最内层那一条 —— 嵌套链接（畸形，但真实书里有）取内层更贴近读者点的那个字。
+    pub fn link_href_at(&self, offset: usize) -> Option<String> {
+        let node = folio_core::content::hit::node_of(self.text_map(), offset)?;
+        let dom = self.dom();
+        for id in dom.ancestors_including_self(node) {
+            if dom.tag_name(id) == Some("a")
+                && let Some(href) = dom.attr(id, "href")
+            {
+                return Some(href.to_string());
+            }
+        }
+        None
+    }
+
+    // ---- 脚注：一条引用（`<a epub:type="noteref">`）→ 注文 ----
+    //
+    // 判定与取文分两层：先看这一处挂在不在一条**脚注引用**上（`<a>` 自己标了
+    // `noteref`，或它指向的元素是脚注正文），再看注文从哪儿取（目标元素的子树文本，
+    // 取不到就退回标记图上的 `alt` / `zy-footnote`）。KDoc 里两种真实写法都覆盖：
+    // 有的书 marker 里是一张 10px 的「注」图（`蛇结`），有的书是一串上标数字。
+
+    /// 屏幕命中到的那个字符若在一条脚注引用里，返回它的注文。
+    pub fn footnote_note_at(&self, offset: usize) -> Option<String> {
+        let node = folio_core::content::hit::node_of(self.text_map(), offset)?;
+        self.footnote_note_for_node(node)
+    }
+
+    /// 某个 DOM 节点（文字或图片）若在一条脚注引用里，返回它的注文。
+    ///
+    /// 标记是一张图时传的就是那张图的节点 —— 正文里的「注」图正是这么被点中的：
+    /// 它在 `<a>` 里，但 `<a>` 自己没有一个可见文本字符可命中。
+    pub fn footnote_note_for_node(&self, node: NodeId) -> Option<String> {
+        let href = self.footnote_href_at_node(node)?;
+        // 1) 目标元素就在本章：取它的子树文本。判它是不是脚注正文也在这一步做，
+        //    所以「标了 noteref 但目标不是脚注」时不会误当成脚注。
+        if let Some(text) = self.footnote_body_text_for_href(&href) {
+            return Some(text);
+        }
+        // 2) 跨文件目标不在本章：退回标记自己的 `alt` / `zy-footnote`（老书把注文
+        //    塞在标记图的这两个属性里，正文里另有 `<aside>`）。找不到就交给调用方
+        //    走「跳到那条链接」的常规路。
+        let dom = self.dom();
+        for id in dom.ancestors_including_self(node) {
+            for name in ["zy-footnote", "alt", "title"] {
+                if let Some(v) = dom.attr(id, name)
+                    && !v.trim().is_empty()
+                {
+                    return Some(v.trim().to_string());
+                }
+            }
+            if dom.tag_name(id) == Some("a") {
+                break;
+            }
+        }
+        None
+    }
+
+    /// 某个元素挂在脚注引用链上时，返回那条 `<a href>`（最内层优先）。
+    fn footnote_href_at_node(&self, node: NodeId) -> Option<String> {
+        let dom = self.dom();
+        for id in dom.ancestors_including_self(node) {
+            if dom.tag_name(id) == Some("a") {
+                let href = dom.attr(id, "href")?;
+                return footnote_anchor_is_ref(dom, id, self, href).then(|| href.to_string());
+            }
+        }
+        None
+    }
+
+    /// `href`（`#id` 或 `某文件.xhtml#id`）指向的那个元素若是**本章**的脚注正文，
+    /// 返回它的文本。
+    ///
+    /// 路径那一截**有意不查**：`Document` 只管一章，认不出「part0004.xhtml」是不是
+    /// 自己这个文件。判定改由「这段 `#id` 在本章解出来的东西像不像注文」兜底
+    /// （见 [`is_footnote_body`]）—— 《罗生门》的标记正是 `part0004.xhtml#m1`
+    /// 这种带文件名的同章链接，只认纯 `#id` 会把它的脚注全漏掉，而普通目录链接
+    /// （`part0004.xhtml#a005` 指向 `<h1>`）不会命中「注文」那一档。
+    fn footnote_body_text_for_href(&self, href: &str) -> Option<String> {
+        let fragment = folio_core::content::format::fragment_of(href)?;
+        self.footnote_body_text(&fragment)
+    }
+
+    /// 本章里某个 `id` 处的脚注正文（`<aside epub:type="footnote">` / `<p class="note">`
+    /// 一类）的文本。
+    ///
+    /// 文本优先取那个元素自己的子树；它只是个锚点、本身没字时（《罗生门》的
+    /// `<a id="m1"></a>`）往最近的、有字的祖先块取 —— 那一整段才是注文。
+    pub fn footnote_body_text(&self, id: &str) -> Option<String> {
+        let dom = self.dom();
+        for (node, _) in dom.elements() {
+            if dom.id_attr(node) != Some(id) {
+                continue;
+            }
+            if !is_footnote_body(dom, node) {
+                return None;
+            }
+            for anc in dom.ancestors_including_self(node) {
+                let text = dom.text_of_subtree(anc);
+                let text = text.trim();
+                if !text.is_empty() {
+                    return Some(text.to_string());
+                }
+            }
+            return None;
+        }
+        None
     }
 
     /// 本章所有带 `id` 的元素 → 它第一个可见字符的偏移。目录跳转与「现在读到哪一条」
@@ -787,20 +1392,63 @@ impl Document {
         )
     }
 
-    /// 一段字符区间在排版里的矩形（排版坐标，每行一条）。
-    #[allow(dead_code)] // M6 选中接线的入口（见 plans/M6-selection.md）
+    /// 一段字符区间在排版里的矩形（排版坐标，每行一条），**不按可见带窄化**。
+    ///
+    /// 只走与这段区间**可能**相交的那几行：行索引二分出左闭右开的行号段，交点筛选留在
+    /// `rects_for_range_in` 里那道「这一行与选区交集为空就跳过」，所以窄化只可能多扫、
+    /// 不可能漏矩形。索引说这一章的行不按时序单调（`lines_for` 给 `None`）时退回整章扫，
+    /// 与接线前逐字同一条口径。
+    ///
+    /// 每帧的批注回显与选区要的是带内那一条：[`Document::selection_rects_in_band`]。
+    #[allow(dead_code)] // 参考实现那一条，门都拿它当基准（见 document::tests）
     pub fn selection_rects(
         &self,
         window: &Window,
         cx: &App,
         range: std::ops::Range<usize>,
     ) -> Vec<folio_core::content::hit::SelectionRect> {
-        folio_core::content::hit::rects_for_range(
+        let lines = narrowed_lines(
+            self.char_lines().lines_for(range.clone()),
+            0..self.layout().lines.len(),
+        );
+        folio_core::content::hit::rects_for_range_in(
             self.layout(),
             self.dom(),
             self.text_map(),
             &self.measure(window, cx),
             range,
+            lines,
+        )
+    }
+
+    /// 一段字符区间在**可见带内**的矩形（排版坐标）。绘制侧的批注底色与选区走这一条。
+    ///
+    /// 两条窄化叠着用：字符索引给「这段字落在哪几行」，`Layout::lines_in_band` 给
+    /// 「屏上是哪几行」，取它们的交。**为什么可见带也少不了**：一章的批注绝大多数不在
+    /// 这一屏上，而那些条从前同样把整章的行走完、再由调用方按 y 丢掉 —— 「每条批注 ×
+    /// 每帧」各一次（`plans/阅读管线.md` §十一 第 9 条）。
+    ///
+    /// 与「算完再按 y 滤」必须逐条等价：一条矩形就是它那一行的行盒 `y` 与 `height`
+    /// （`rects_for_range_in` 末尾那条 `out.push`），而 `lines_in_band` 用的正是同一对
+    /// 不等式。调用方那道 y 过滤**照旧留着**：它现在是重复的一道，不是唯一的一道。
+    pub fn selection_rects_in_band(
+        &self,
+        window: &Window,
+        cx: &App,
+        range: std::ops::Range<usize>,
+        band: std::ops::Range<f32>,
+    ) -> Vec<folio_core::content::hit::SelectionRect> {
+        let lines = narrowed_lines(
+            self.char_lines().lines_for(range.clone()),
+            self.visible_lines(band),
+        );
+        folio_core::content::hit::rects_for_range_in(
+            self.layout(),
+            self.dom(),
+            self.text_map(),
+            &self.measure(window, cx),
+            range,
+            lines,
         )
     }
 
@@ -865,12 +1513,16 @@ impl Document {
     }
 
     /// 可见文本偏移落在第几行（行盒下标）。
+    ///
+    /// 走索引二分；索引不可用（那一章的行不按时序单调）时 `line_at_offset_indexed`
+    /// 自己退回整表扫，两条口径是同一个函数保证的。
     pub fn line_at_offset(&self, offset: usize) -> usize {
-        folio_core::content::anchor::line_at_offset(
+        folio_core::content::anchor::line_at_offset_indexed(
             self.layout(),
             self.dom(),
             self.text_map(),
             offset,
+            Some(&self.char_lines()),
         )
     }
 
@@ -879,11 +1531,12 @@ impl Document {
     /// 排版还没做过（`layout` 是空的）时给 0，等于回到章首 —— 这是唯一不骗人的兜底。
     pub fn y_at_offset(&self, offset: usize) -> f32 {
         let layout = self.layout();
-        let line = folio_core::content::anchor::line_at_offset(
+        let line = folio_core::content::anchor::line_at_offset_indexed(
             layout,
             self.dom(),
             self.text_map(),
             offset,
+            Some(&self.char_lines()),
         );
         layout
             .lines
@@ -891,6 +1544,45 @@ impl Document {
             .map(|box_| box_.y)
             .unwrap_or_default()
     }
+}
+
+/// `<a>` 是不是一条脚注引用：自己标了类型，或它指向的元素是**本章**的脚注正文。
+///
+/// 后一条是不可省的兜底：Z-Library / 多看这类工具转出来的书常常不写 `epub:type`，
+/// 只把注文塞进一个 `id` 命名的 `<aside>`/`<div>`，标记 `<a href="#id">` 什么都不带。
+fn footnote_anchor_is_ref(dom: &Dom, anchor: NodeId, doc: &Document, href: &str) -> bool {
+    attr_has_word(dom, anchor, "epub:type", "noteref")
+        || attr_has_word(dom, anchor, "role", "doc-noteref")
+        || doc.footnote_body_text_for_href(href).is_some()
+}
+
+/// 某个元素是不是脚注正文：EPUB3 的 `epub:type="footnote"` / `role="doc-footnote"`，
+/// 或它自己/最近一个祖先块的 `class` 像注文容器（`duokan-footnote-content`、
+/// `footnote`、`note` —— 《罗生门》整章末尾那些 `<p class="note">` 就是）。
+///
+/// 有意**不**把裸的 `epub-footnote` 这种标记图类名算进来：那是标记自己，不是正文。
+/// 也**不**按 id 命名猜（`m1` / `fn1` 这种没个准）。
+fn is_footnote_body(dom: &Dom, node: NodeId) -> bool {
+    for id in dom.ancestors_including_self(node) {
+        if attr_has_word(dom, id, "epub:type", "footnote")
+            || attr_has_word(dom, id, "role", "doc-footnote")
+        {
+            return true;
+        }
+        if dom
+            .classes(id)
+            .any(|c| c == "note" || c.contains("footnote"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// 属性值按空白分词后是否含 `want`（`epub:type` 可以写多个，空格分隔）。
+fn attr_has_word(dom: &Dom, node: NodeId, name: &str, want: &str) -> bool {
+    dom.attr(node, name)
+        .is_some_and(|v| v.split_ascii_whitespace().any(|w| w == want))
 }
 
 #[cfg(test)]

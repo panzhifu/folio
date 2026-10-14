@@ -5,6 +5,7 @@
 //! 共用符号（`Mono` 那份 mock 量器与上层的全部导入）都走 `use super::*`。
 
 use super::*;
+use crate::layout::{LayoutInputs, content_hash};
 
 // ---- LayoutKey ----
 
@@ -17,11 +18,14 @@ fn body_of(dom: &Dom) -> NodeId {
 }
 
 /// 测试用的键：只给章文本与栏宽，其余各格取「没有别的输入」那一档。
+///
+/// 章那一格递的是**内容哈希**而不是 `&str`：`LayoutKey::chapter` 存的是身份，而
+/// 「正文已经在手上」那一条来路（`reader::document::ChapterSource::Text`）的身份就是
+/// 内容哈希。这里按同一条来路取值，本文件那几条「换文本必须换键」的断言才仍然成立。
 fn key_for(source: &str, width: f32) -> LayoutKey {
     LayoutKey::compose(
-        source,
-        "",
-        &crate::infra::config::Reader::default(),
+        LayoutInputs::compute("", &crate::infra::config::Reader::default()),
+        content_hash(source),
         width,
         1,
         0,
@@ -39,7 +43,14 @@ fn layout_key_is_a_pure_function_of_its_inputs() {
     let make = |size: f32| {
         let mut p = prefs.clone();
         p.font_size = size;
-        LayoutKey::compose("<p>同一章</p>", "p { margin: 0 }", &p, 600.0, 1, 0, 0)
+        LayoutKey::compose(
+            LayoutInputs::compute("p { margin: 0 }", &p),
+            content_hash("<p>同一章</p>"),
+            600.0,
+            1,
+            0,
+            0,
+        )
     };
     assert_eq!(make(18.0), make(18.0), "同一代内问两次该拿到同一把键");
     assert_ne!(make(18.0), make(19.0), "改字号必须换键");
@@ -47,7 +58,7 @@ fn layout_key_is_a_pure_function_of_its_inputs() {
     // 改字号只换 `prefs_hash` 那一格：其余各格必须逐格相等，
     // 否则「只重排样式真的变了的那些块」这条增量路径无从判断是谁失效了。
     let (a, b) = (make(18.0), make(19.0));
-    assert_eq!(a.chapter_hash, b.chapter_hash);
+    assert_eq!(a.chapter, b.chapter);
     assert_eq!(a.author_css_hash, b.author_css_hash);
     assert_eq!(a.width, b.width);
     assert_eq!(a.context_rev(), b.context_rev(), "改字号不许扩大复用范围");
@@ -92,7 +103,14 @@ fn every_reader_preference_changes_the_key() {
     for (name, tweak) in PREF_TWEAKS {
         let mut changed = Reader::default();
         tweak(&mut changed);
-        let key = LayoutKey::compose("<p>偏好</p>", "", &changed, 600.0, 1, 0, 0);
+        let key = LayoutKey::compose(
+            LayoutInputs::compute("", &changed),
+            content_hash("<p>偏好</p>"),
+            600.0,
+            1,
+            0,
+            0,
+        );
         assert_ne!(base.prefs_hash, key.prefs_hash, "偏好 {name} 没进键");
     }
 
@@ -112,7 +130,16 @@ fn every_reader_preference_changes_the_key() {
 #[test]
 fn width_is_quantized_to_one_pixel() {
     let prefs = crate::infra::config::Reader::default();
-    let at = |w: f32| LayoutKey::compose("<p>宽</p>", "", &prefs, w, 1, 0, 0);
+    let at = |w: f32| {
+        LayoutKey::compose(
+            LayoutInputs::compute("", &prefs),
+            content_hash("<p>宽</p>"),
+            w,
+            1,
+            0,
+            0,
+        )
+    };
     assert_eq!(at(600.2), at(600.4), "不到半像素的抖动不算换宽");
     assert_ne!(at(600.2), at(601.0), "整 1 px 必须换宽");
 }
@@ -246,7 +273,14 @@ fn layout_cache_misses_when_metrics_revision_differs() {
     let body = body_of(&dom);
     let prefs = crate::infra::config::Reader::default();
     let mut cache = LayoutCache::new();
-    let key = LayoutKey::compose(source, "", &prefs, 600.0, 1, 0, 0);
+    let key = LayoutKey::compose(
+        LayoutInputs::compute("", &prefs),
+        content_hash(source),
+        600.0,
+        1,
+        0,
+        0,
+    );
     assert_eq!(key.metrics_rev, METRICS_REV, "键必须带上当前口径版本");
 
     let _ = layout_cached(
@@ -278,11 +312,61 @@ fn long_non_ascii_source_hashes_without_panics() {
     let long = "字".repeat(500);
     let source = format!("<p>{long}</p>");
     // 不 panic 即通过；顺便钉一下两次哈希一致。
-    let a = key_for(&source, 600.0).chapter_hash;
-    let b = key_for(&source, 600.0).chapter_hash;
+    let a = key_for(&source, 600.0).chapter;
+    let b = key_for(&source, 600.0).chapter;
     assert_eq!(a, b, "同一份文本两次 hash 必须一样");
     // 尾部多一个字符就得换键：哈希不能只看前若干字节。
-    assert_ne!(a, key_for(&format!("{source} "), 600.0).chapter_hash);
+    assert_ne!(a, key_for(&format!("{source} "), 600.0).chapter);
+}
+
+/// 键的输入哈希：**建一次，问两百次键，一次都不许重算**。
+///
+/// 这条钉的是「哈希算一次存下来」这件事本身。改之前 `LayoutKey::compose` 收的是
+/// `&str` 与 `&Reader`，于是界面的 `layout_key()` **每帧、每个进链的章**都要把
+/// 「整本书的 CSS 走一遍 SipHash」与「整份 `Reader` 用 `serde_json` 序列化一遍再哈希
+/// （带一次堆分配）」各重付一次 —— 而那两样输入根本不随帧变。
+/// 把 `compose` 退回成收原文、在里面现算哈希，下面那一格增量就从 0 变成 200。
+///
+/// 另一半钉的是**不能省掉重算**：`set_prefs` 必须真的刷新 `prefs_hash`。缓存化之后
+/// 新引入的唯一坏法就是「输入变了而缓存没跟着变」，那会表现成「改了字号而某一屏还是
+/// 旧行盒」—— 屏幕上看不出来，只在进度与锚点上飘。界面侧的对头是
+/// `reader::document::tests` 里那条「改字号必须换键」（它拿一个 `Document` 实例走
+/// `set_prefs`，正是这一格的下游）。
+#[test]
+fn the_layout_inputs_hash_once() {
+    use crate::infra::metrics::{Metric, take_local};
+
+    let prefs = crate::infra::config::Reader::default();
+    take_local(Metric::LayoutInputHashes);
+
+    let mut inputs = LayoutInputs::compute("p { margin: 0 }", &prefs);
+    assert_eq!(
+        take_local(Metric::LayoutInputHashes),
+        1,
+        "建一份输入正好算一次哈希"
+    );
+
+    // 连问两百次键：一次哈希都不许再发生。
+    for w in 0..200u32 {
+        let _ = LayoutKey::compose(inputs, 7, 600.0 + w as f32, 1, 0, 0);
+    }
+    assert_eq!(
+        take_local(Metric::LayoutInputHashes),
+        0,
+        "构图不许重算输入的哈希 —— 那两格算过一次就存下了"
+    );
+
+    // 输入真的变了就必须重算，而且要算得出来。
+    let before = inputs.prefs_hash;
+    let mut bigger = prefs.clone();
+    bigger.font_size += 4.0;
+    inputs.set_prefs(&bigger);
+    assert_eq!(
+        take_local(Metric::LayoutInputHashes),
+        1,
+        "`set_prefs` 是唯一的合法重算时机，且只重算偏好那一格"
+    );
+    assert_ne!(inputs.prefs_hash, before, "换了字号必须换出新的偏好哈希");
 }
 
 // ---- BlockCache ----
@@ -341,6 +425,48 @@ fn block_cache_reuses_and_matches_fresh_layout() {
     assert_eq!(cache.hits - hits0, 3, "第二次三块全命中");
 }
 
+/// 带浮动的块缓存必须把**浮动表一起搬回来**。
+///
+/// 命中那一趟不跑 `children()`，于是没人往浮动表里填 —— 症状是滚回去之后绕文消失，
+/// 图旁边那几行又写回整幅宽。这里的形状是「一个容器，里面只有一张浮动的图」，
+/// 容器本身被整块缓存，后面那段绕文就在容器之外：浮动表搬不回来，那段就直接重排。
+#[test]
+fn a_reused_block_replays_the_floats_it_placed() {
+    let html = format!(
+        "<div class=box><div class=i><img src=a></div></div><p>{}</p>",
+        "字".repeat(40)
+    );
+    let css = ".i { float: left; margin-right: 20px } img { width: 100px }";
+    let images = MockImages(vec![("a", 200.0, 100.0)]);
+    let dom = crate::content::dom::Dom::parse(html.as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(css, Origin::Author),
+        &ComputedStyle::default(),
+    );
+    let body = body_of(&dom);
+    let opts = LayoutOptions {
+        width: 200.0,
+        light: false,
+    };
+    let key = key_for(&html, 200.0);
+    let fresh = layout(&dom, &styles, body, opts, &Mono, &images);
+    // 绕文确实存在，否则这条测试是在空转：压在图旁边的行从 120px 起。
+    assert!(
+        fresh
+            .lines
+            .iter()
+            .any(|line| line.x == 120.0 && line.text_runs().next().is_some()),
+        "没有一行绕开浮动图，测的就不是搬运"
+    );
+
+    let mut cache = BlockCache::new();
+    let first = layout_with_blocks(&mut cache, &key, &dom, &styles, body, opts, &Mono, &images);
+    assert_same_lines(&first, &fresh);
+    let second = layout_with_blocks(&mut cache, &key, &dom, &styles, body, opts, &Mono, &images);
+    assert_same_lines(&second, &fresh);
+}
+
 /// 只改一个段落的样式：只有那一个块失效（平铺结构下未命中恰好 +1），其余命中 ——
 /// 这就是「改一处只重排一块」。第三段虽然因为第二段变高而整体下移，仍走命中路径
 /// （复用时会按新落点平移）。
@@ -392,7 +518,7 @@ fn block_cache_clears_when_the_context_changes() {
     for (what, changed) in [
         ("章文本", {
             let mut k = base;
-            k.chapter_hash ^= 1;
+            k.chapter ^= 1;
             k
         }),
         ("图片索引", {
@@ -445,7 +571,14 @@ fn block_cache_survives_a_preference_change() {
     };
     let plain_prefs = crate::infra::config::Reader::default();
     let plain = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
-    let key0 = LayoutKey::compose(FLAT_SOURCE, "", &plain_prefs, 300.0, 1, 0, 0);
+    let key0 = LayoutKey::compose(
+        LayoutInputs::compute("", &plain_prefs),
+        content_hash(FLAT_SOURCE),
+        300.0,
+        1,
+        0,
+        0,
+    );
 
     let mut cache = BlockCache::new();
     layout_with_blocks(
@@ -457,7 +590,14 @@ fn block_cache_survives_a_preference_change() {
     // 键的 `context_rev` 相同，块键是「节点 + 子树样式哈希 + 宽」，样式哈希变了自然未命中。
     let mut bigger = plain_prefs.clone();
     bigger.font_size += 4.0;
-    let key1 = LayoutKey::compose(FLAT_SOURCE, "", &bigger, 300.0, 1, 0, 0);
+    let key1 = LayoutKey::compose(
+        LayoutInputs::compute("", &bigger),
+        content_hash(FLAT_SOURCE),
+        300.0,
+        1,
+        0,
+        0,
+    );
     assert_eq!(
         key0.context_rev(),
         key1.context_rev(),

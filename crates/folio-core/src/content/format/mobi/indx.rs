@@ -1,20 +1,28 @@
-//! MOBI 的 INDX 索引：目录（NCX）那一族记录的解码。
+//! MOBI 的 INDX 索引：目录（NCX）与 KF8 的骨架/片段（SKEL / FRAG）都是这一族记录。
 //!
-//! MOBI 的书内目录**不是**一份 XML，而是 PalmDB 里的一组记录：
+//! MOBI 的索引**不是**一份 XML，而是 PalmDB 里的一组记录：
 //!
 //! ```text
-//! [ncx]            INDX 头记录：词数、CNCX 记录数、TAGX 段的偏移
-//! [ncx+1 .. +词数]  INDX 记录：每条末尾一张 IDXT 表，给出这一条里各条目的起点
-//! [.. +CNCX 数]     CNCX 记录：<长度><字符串> 串成的一个标题池
+//! [idx]             INDX 头记录：词数、CNCX 记录数、TAGX 段的偏移
+//! [idx+1 .. +词数]   INDX 记录：每条末尾一张 IDXT 表，给出这一条里各条目的起点
+//! [.. +CNCX 数]      CNCX 记录：<长度><字符串> 串成的一个字符串池
 //! ```
 //!
-//! 一条目录项 = `<1 字节长度><标识串><控制字节若干><各标签的 vwi 值>`，
-//! 而「哪几个控制位表示有 filepos / 有标题 / 有层级」写在 TAGX 段里 —— 所以
-//! **不读 TAGX 就没法解目录**，而各家打包工具写的 TAGX 不完全一样。
-//! 对 NCX 而言有意义的三个标签是 `1 = filepos`（未压缩正文里的字节偏移）、
-//! `3 = 标题在 CNCX 池里的偏移`、`4 = 层级`（0 是顶层）。
+//! 一条索引项 = `<1 字节长度><标识串><控制字节若干><各标签的 vwi 值>`，而「哪几个控制位
+//! 表示有某个标签、那个标签有几个值」写在 TAGX 段里 —— 所以**不读 TAGX 就没法解**，
+//! 而各家打包工具写的 TAGX 不完全一样。
 //!
-//! ## 三处不能凭感觉写的地方
+//! ## 三种用法共用一套解析
+//!
+//! - **NCX 目录**：`1 = filepos`、`3 = 标题在 CNCX 池里的偏移`、`4 = 层级`。
+//! - **KF8 SKEL**：`1 = 片段数`、`6.0 = 骨架起点`、`6.1 = 骨架长度`。
+//! - **KF8 FRAG**：`3 = 文件号`、`6.0 = 插入位置`、`6.1 = 片段长度`。
+//!
+//! 三者的 TAGX / IDXT / vwi 规则完全一样，差别只在「读哪几个标签」。所以这一层解出
+//! **通用条目**（标识串 + 每个标签的取值序列），由调用方按 tag 取 —— 见
+//! [`IndexEntry::tag`]。NCX 的映射收在 [`read_ncx`] 里当包装。
+//!
+//! ## 四处不能凭感觉写的地方
 //!
 //! **一、TAGX 的偏移字段（词 44）在真实文件里有时是垃圾。** 退路是按 KindleUnpack 与
 //! calibre 的口径，改用头长度那一格（词 0）—— 两处都验过的写法，[`tagx_offset`] 里
@@ -27,8 +35,213 @@
 //! **三、CNCX 池里的偏移是「记录号 × 0x10000 + 记录内偏移」。** 所以查标题时
 //! 必须带上那一段高位，否则多张 CNCX 的记录会互相指错标题（症状是目录里
 //! 前后两行的标题对调）。
+//!
+//! **四、标识串按 CP1252 解，不做 ORDT。** ORDT 是词典索引（ORTH/INFL）用的字符映射，
+//! 而 NCX / SKEL / FRAG 的标识串是 ASCII 的文件名与十进制插入位置（`parse_rawml.c` 里
+//! 直接 `strtoul(entry->label)`）。带 ORDT 的索引不在这一版的目标里，遇到了当普通字节解，
+//! 大不了那一本的目录空着。
 
 use super::decode_text;
+
+/// INDX 一族里能读到的标签号上限，防越界（真书远小于它）。
+const MAX_TAGS: usize = 64;
+
+/// 一条索引项。`tags` 是「标签号 → 该标签的取值序列」，值都是 vwi 解出来的 u32。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct IndexEntry {
+    /// 标识串（SKEL 是文件名、FRAG 是十进制插入位置、NCX 用不上）。按 CP1252 解。
+    pub label: String,
+    pub tags: Vec<(u8, Vec<u32>)>,
+}
+
+impl IndexEntry {
+    /// 某个标签的取值序列。同一标签可挂多个值（`6.0`/`6.1` 就是两值）。
+    pub(crate) fn tag(&self, id: u8) -> &[u32] {
+        self.tags
+            .iter()
+            .find(|(t, _)| *t == id)
+            .map(|(_, v)| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// 某个标签的第 `idx` 个值。
+    pub(crate) fn tag_value(&self, id: u8, idx: usize) -> Option<u32> {
+        self.tag(id).get(idx).copied()
+    }
+}
+
+/// 解出来的一棵索引：通用条目 + CNCX 池。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Index {
+    pub entries: Vec<IndexEntry>,
+    /// CNCX 池：键 = `记录号 × 0x10000 + 记录内偏移` → 串。
+    cncx: Vec<(u32, String)>,
+}
+
+impl Index {
+    /// 只用条目（CNCX 空）建一棵索引。测试与「只要标签、不要字符串池」的调用方用。
+    pub(crate) fn from_entries(entries: Vec<IndexEntry>) -> Self {
+        Self {
+            entries,
+            cncx: Vec::new(),
+        }
+    }
+}
+
+impl Index {
+    /// 按 CNCX 键取字符串（NCX 的标题就是按这个键找的）。
+    pub(crate) fn cncx_string(&self, at: u32) -> Option<&str> {
+        self.cncx
+            .iter()
+            .find(|(key, _)| *key == at)
+            .map(|(_, s)| s.as_str())
+    }
+}
+
+/// 解一棵 INDX 索引（NCX / SKEL / FRAG 通用）。
+///
+/// `read` 是「按 PalmDB 记录号取原始字节」的回调：INDX 一族跨好几条记录，
+/// 而这一层不该知道容器长什么样 —— 它只认 `Vec<u8>`。
+/// `first_record` 是头记录号；索引记录紧跟其后，CNCX 池再跟在索引记录之后。
+///
+/// 结构性失败一律回**空表**而不是 `Err`：目录读不出来的后果是「这本书没有目录」，
+/// 正文照读；SKEL/FRAG 读不出来则由 KF8 装配那一步降级。这与对图片、字节的同一条
+/// 降级口径一致。
+pub(crate) fn read_index(
+    mut read: impl FnMut(usize) -> Option<Vec<u8>>,
+    first_record: usize,
+    codepage: u32,
+) -> Index {
+    let Some(header) = read(first_record) else {
+        return Index::default();
+    };
+    if header.len() < 0xC0 || header[..4] != *b"INDX" {
+        return Index::default();
+    }
+    // 词 5 = 这一族索引记录有几条；词 12 = CNCX 记录有几条。
+    let Some(index_records) = word(&header, 5) else {
+        return Index::default();
+    };
+    let cncx_records = word(&header, 12).unwrap_or(0);
+    if !(1..=0xFFFF).contains(&index_records) || cncx_records > 0xFFFF {
+        return Index::default();
+    }
+    let Some(tagx) = tagx_offset(&header) else {
+        return Index::default();
+    };
+    // TAGX 头：+4 = 条目区起点（相对 TAGX 段），+8 = 控制字节数。
+    let first_entry = word_at(&header, tagx + 4).unwrap_or(0) as usize;
+    let control_bytes = word_at(&header, tagx + 8).unwrap_or(0) as usize;
+    if !(1..=32).contains(&control_bytes) {
+        return Index::default();
+    }
+    if first_entry <= 12 || tagx + first_entry > header.len() {
+        return Index::default();
+    }
+    // 标签表：每项 4 字节（标签号、值个数、位掩码、是否段尾标记）。
+    let mut tags: Vec<(u8, u8, u8, u8)> = Vec::new();
+    let mut at = 12usize;
+    while at + 4 <= first_entry && tags.len() < MAX_TAGS {
+        tags.push((
+            header[tagx + at],
+            header[tagx + at + 1],
+            header[tagx + at + 2],
+            header[tagx + at + 3],
+        ));
+        at += 4;
+    }
+
+    // 标题/字符串池：`记录号 × 0x10000 + 记录内偏移` → 串。
+    let mut cncx: Vec<(u32, String)> = Vec::new();
+    for k in 0..cncx_records as usize {
+        let Some(record) = read(first_record + 1 + index_records as usize + k) else {
+            break;
+        };
+        let base = (k as u32) << 16;
+        let mut pos = 0usize;
+        while pos < record.len() {
+            let Some((len, next)) = vwi(&record, pos) else {
+                break;
+            };
+            if record.len() - next < len as usize {
+                break;
+            }
+            cncx.push((
+                base + pos as u32,
+                decode_text(&record[next..next + len as usize], codepage),
+            ));
+            pos = next + len as usize;
+        }
+    }
+
+    let mut entries = Vec::new();
+    for ri in 0..index_records as usize {
+        let Some(record) = read(first_record + 1 + ri) else {
+            break;
+        };
+        if record.len() < 12 || record[..4] != *b"INDX" {
+            break;
+        }
+        let Some(idxt) = word(&record, 4) else {
+            continue;
+        };
+        let idxt = idxt as usize;
+        let Some(entry_count) = word(&record, 5) else {
+            continue;
+        };
+        let entry_count = entry_count as usize;
+        if entry_count > 0xFFFF || idxt + 4 + entry_count * 2 > record.len() {
+            continue;
+        }
+        if record.get(idxt..idxt + 4) != Some(b"IDXT".as_slice()) {
+            continue;
+        }
+        for j in 0..entry_count {
+            let start = half(&record, idxt + 4 + 2 * j).map(|v| v as usize);
+            let end = if j + 1 < entry_count {
+                half(&record, idxt + 4 + 2 * (j + 1)).map(|v| v as usize)
+            } else {
+                Some(idxt)
+            };
+            let (Some(start), Some(end)) = (start, end) else {
+                continue;
+            };
+            if end <= start || end > record.len() {
+                continue;
+            }
+            if let Some(item) = entry(&record[start..end], &tags, control_bytes) {
+                entries.push(item);
+            }
+        }
+    }
+    Index { entries, cncx }
+}
+
+/// 解 NCX 目录。`1 = filepos`、`3 = 标题在 CNCX 池里的偏移`、`4 = 层级`。
+pub(crate) fn read_ncx(
+    read: impl FnMut(usize) -> Option<Vec<u8>>,
+    ncx_record: usize,
+    codepage: u32,
+) -> Vec<TocItem> {
+    let index = read_index(read, ncx_record, codepage);
+    let mut out = Vec::new();
+    for entry in &index.entries {
+        let Some(filepos) = entry.tag_value(1, 0) else {
+            continue;
+        };
+        let title = entry
+            .tag_value(3, 0)
+            .and_then(|at| index.cncx_string(at))
+            .unwrap_or_default()
+            .to_string();
+        out.push(TocItem {
+            filepos,
+            level: entry.tag_value(4, 0).unwrap_or(0),
+            title,
+        });
+    }
+    out
+}
 
 /// 一条目录项。`filepos` 是**未压缩正文流**里的字节偏移，换算成章内位置由装配那一层
 /// 按每帧解出长度的累计表做（`filepos / 4096` 只能定位到帧，定位不到字节）。
@@ -89,143 +302,27 @@ fn tagx_offset(header: &[u8]) -> Option<usize> {
     (header.get(fallback..fallback + 4)? == *b"TAGX").then_some(fallback)
 }
 
-/// 解 NCX 目录。
-///
-/// `read` 是「按 PalmDB 记录号取原始字节」的回调：INDX 一族跨好几条记录，
-/// 而这一层不该知道容器长什么样 —— 它只认 `Vec<u8>`。
-///
-/// 结构性失败一律回**空表**而不是 `Err`：目录读不出来的后果是「这本书没有目录」，
-/// 正文照读。这与 [`super`] 那一层对图片、字节的同一条降级口径一致。
-pub(crate) fn read_ncx(
-    mut read: impl FnMut(usize) -> Option<Vec<u8>>,
-    ncx_record: usize,
-    codepage: u32,
-) -> Vec<TocItem> {
-    let Some(header) = read(ncx_record) else {
-        return Vec::new();
-    };
-    if header.len() < 0xC0 || header[..4] != *b"INDX" {
-        return Vec::new();
-    }
-    // 词 5 = 这一族索引记录有几条；词 12 = CNCX 记录有几条。
-    let Some(index_records) = word(&header, 5) else {
-        return Vec::new();
-    };
-    let cncx_records = word(&header, 12).unwrap_or(0);
-    if !(1..=0xFFFF).contains(&index_records) || cncx_records > 0xFFFF {
-        return Vec::new();
-    }
-    let Some(tagx) = tagx_offset(&header) else {
-        return Vec::new();
-    };
-    // TAGX 头：+4 = 条目区起点（相对 TAGX 段），+8 = 控制字节数。
-    let first_entry = word_at(&header, tagx + 4).unwrap_or(0) as usize;
-    let control_bytes = word_at(&header, tagx + 8).unwrap_or(0) as usize;
-    if !(1..=32).contains(&control_bytes) {
-        return Vec::new();
-    }
-    if first_entry <= 12 || tagx + first_entry > header.len() {
-        return Vec::new();
-    }
-    // 标签表：每项 4 字节（标签号、值个数、位掩码、是否段尾标记）。
-    let mut tags: Vec<(u8, u8, u8, u8)> = Vec::new();
-    let mut at = 12usize;
-    while at + 4 <= first_entry && tags.len() < 64 {
-        tags.push((
-            header[tagx + at],
-            header[tagx + at + 1],
-            header[tagx + at + 2],
-            header[tagx + at + 3],
-        ));
-        at += 4;
-    }
-
-    // 标题池：`记录号 × 0x10000 + 记录内偏移` → 串。
-    let mut pool: Vec<(u32, String)> = Vec::new();
-    for k in 0..cncx_records as usize {
-        let Some(record) = read(ncx_record + 1 + index_records as usize + k) else {
-            break;
-        };
-        let base = (k as u32) << 16;
-        let mut pos = 0usize;
-        while pos < record.len() {
-            let Some((len, next)) = vwi(&record, pos) else {
-                break;
-            };
-            if record.len() - next < len as usize {
-                break;
-            }
-            pool.push((
-                base + pos as u32,
-                decode_text(&record[next..next + len as usize], codepage),
-            ));
-            pos = next + len as usize;
-        }
-    }
-
-    let mut items = Vec::new();
-    for ri in 0..index_records as usize {
-        let Some(record) = read(ncx_record + 1 + ri) else {
-            break;
-        };
-        if record.len() < 12 || record[..4] != *b"INDX" {
-            break;
-        }
-        let Some(idxt) = word(&record, 4) else {
-            continue;
-        };
-        let idxt = idxt as usize;
-        let Some(entry_count) = word(&record, 5) else {
-            continue;
-        };
-        let entry_count = entry_count as usize;
-        if entry_count > 0xFFFF || idxt + 4 + entry_count * 2 > record.len() {
-            continue;
-        }
-        if record.get(idxt..idxt + 4) != Some(b"IDXT".as_slice()) {
-            continue;
-        }
-        for j in 0..entry_count {
-            let start = half(&record, idxt + 4 + 2 * j).map(|v| v as usize);
-            let end = if j + 1 < entry_count {
-                half(&record, idxt + 4 + 2 * (j + 1)).map(|v| v as usize)
-            } else {
-                Some(idxt)
-            };
-            let (Some(start), Some(end)) = (start, end) else {
-                continue;
-            };
-            if end <= start || end > record.len() {
-                continue;
-            }
-            if let Some(item) = entry(&record[start..end], &tags, control_bytes, &pool) {
-                items.push(item);
-            }
-        }
-    }
-    items
-}
-
-/// 一条 INDX 项 → 目录项。解不出 filepos 的不算目录项。
-fn entry(
-    raw: &[u8],
-    tags: &[(u8, u8, u8, u8)],
-    control_bytes: usize,
-    pool: &[(u32, String)],
-) -> Option<TocItem> {
+/// 一条 INDX 项 → 通用条目。解不出任何标签的也算一条（只是没有值）。
+fn entry(raw: &[u8], tags: &[(u8, u8, u8, u8)], control_bytes: usize) -> Option<IndexEntry> {
     let mut pos = 0usize;
-    // 项标识：`<1 字节长度><串>`。NCX 用不上它，但要跳过。
+    // 标识串：`<1 字节长度><串>`。按 CP1252 解（见模块头第四条）。
     let ident = *raw.get(pos)? as usize;
-    pos += 1 + ident;
+    pos += 1;
+    let label = raw
+        .get(pos..pos + ident)
+        .map(|bytes| decode_text(bytes, 1252).trim().to_string())
+        .unwrap_or_default();
+    pos += ident;
     if pos + control_bytes > raw.len() {
         return None;
     }
     let control = &raw[pos..pos + control_bytes];
     pos += control_bytes;
 
-    let mut filepos: Option<u32> = None;
-    let mut title_at: Option<u32> = None;
-    let mut level = 0u32;
+    let mut out = IndexEntry {
+        label,
+        tags: Vec::new(),
+    };
     let mut index = 0usize;
     for &(tag, values, mask, eof) in tags {
         if index >= control.len() {
@@ -262,43 +359,25 @@ fn entry(
             };
         }
 
-        let mut push = |value: u32| match tag {
-            // 1 = filepos，取第一个；3 = 标题在池里的偏移；4 = 层级。
-            1 if filepos.is_none() => filepos = Some(value),
-            3 if title_at.is_none() => title_at = Some(value),
-            4 => level = value,
-            _ => {}
-        };
+        let mut collected: Vec<u32> = Vec::new();
         if let Some(total) = byte_length {
             let mut consumed = 0usize;
             while consumed < total {
                 let (value, next) = vwi(raw, pos)?;
                 consumed += next - pos;
                 pos = next;
-                push(value);
+                collected.push(value);
             }
         } else {
             for _ in 0..count.saturating_mul(values.max(1) as usize) {
                 let (value, next) = vwi(raw, pos)?;
                 pos = next;
-                push(value);
+                collected.push(value);
             }
         }
+        out.tags.push((tag, collected));
     }
-
-    let filepos = filepos?;
-    let title = title_at
-        .and_then(|at| {
-            pool.iter()
-                .find(|(key, _)| *key == at)
-                .map(|(_, s)| s.clone())
-        })
-        .unwrap_or_default();
-    Some(TocItem {
-        filepos,
-        level,
-        title,
-    })
+    Some(out)
 }
 
 /// 直接按字节位置读一个词（不是按「词号」）。
@@ -319,7 +398,7 @@ mod tests {
     //! 目录这一层的夹具按「记录」摆：INDX 头、一条索引记录、一张 CNCX 池。
     //! 断言看的是**解出的 filepos 与层级**，因为读者看得见的错位就从这两格里来。
 
-    use super::{TocItem, count_bits, read_ncx, tagx_offset, vwi};
+    use super::{TocItem, count_bits, read_index, read_ncx, tagx_offset, vwi};
 
     /// 词 i 站在 `4 + i * 4`：这一条钉住 `word()` 的那个算术，因为它一旦错位，
     /// 整棵树读到的都是别的字段。
@@ -381,6 +460,44 @@ mod tests {
     /// 控制字节与池里的「记录号 × 0x10000 + 偏移」那条拼接。
     #[test]
     fn a_two_entry_ncx_reads_levels_titles_and_offsets() {
+        let records = ncx_records();
+        let items = read_ncx(|at| records.get(at).cloned(), 0, 65001);
+        assert_eq!(
+            items,
+            vec![
+                TocItem {
+                    filepos: 0x1000,
+                    level: 0,
+                    title: "第一章".to_string()
+                },
+                TocItem {
+                    filepos: 0x2000,
+                    level: 0,
+                    title: "第二章".to_string()
+                },
+            ]
+        );
+    }
+
+    /// 通用入口要能拿到**每个标签的取值序列**，而不只是 NCX 那三个 ——
+    /// KF8 的 SKEL/FRAG 就是靠这一层读它们的 tag 1/6 的。
+    #[test]
+    fn the_generic_index_exposes_raw_tags() {
+        let records = ncx_records();
+        let index = read_index(|at| records.get(at).cloned(), 0, 65001);
+        assert_eq!(index.entries.len(), 2);
+        let first = &index.entries[0];
+        assert_eq!(first.tag_value(1, 0), Some(0x1000), "tag 1 = filepos");
+        assert_eq!(first.tag_value(3, 0), Some(0), "tag 3 = 标题在 CNCX 池的键");
+        assert_eq!(
+            first.tag_value(3, 0).and_then(|at| index.cncx_string(at)),
+            Some("第一章")
+        );
+        assert_eq!(first.tag(99), &[] as &[u32], "没有的标签是空序列");
+    }
+
+    /// 三棵记录：INDX 头 + 一条索引记录（两条项）+ 一张 CNCX 池。
+    fn ncx_records() -> Vec<Vec<u8>> {
         let mut header = vec![0u8; 0xC0 + 200];
         header[..4].copy_from_slice(b"INDX");
         // 词 0 = 头长度（也是 TAGX 退路用的那一格），词 5 = 索引记录数，词 12 = CNCX 数。
@@ -436,23 +553,7 @@ mod tests {
             cncx.extend_from_slice(bytes);
         }
 
-        let records: Vec<Vec<u8>> = vec![header, record, cncx];
-        let items = read_ncx(|at| records.get(at).cloned(), 0, 65001);
-        assert_eq!(
-            items,
-            vec![
-                TocItem {
-                    filepos: 0x1000,
-                    level: 0,
-                    title: "第一章".to_string()
-                },
-                TocItem {
-                    filepos: 0x2000,
-                    level: 0,
-                    title: "第二章".to_string()
-                },
-            ]
-        );
+        vec![header, record, cncx]
     }
 
     fn vwi_encode(value: u32) -> Vec<u8> {

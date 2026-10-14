@@ -17,6 +17,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use folio_core::net::remote::Transport;
+use folio_core::store::Collection;
 use folio_core::{
     Cancel, ImportOutcome, ImportReport, Imported, PathsSource, Store, TaskEvent, UrlSource,
     submit_import,
@@ -27,7 +28,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Selectable, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight, Image,
     InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
@@ -137,6 +138,20 @@ pub fn columns_for(width: f32, size: SizeClass) -> u16 {
 
 /// 书架向外层报的两件事，都带书库主键而不是路径 —— 选择器给的那份路径是临时的，
 /// 书的内容早就在库里了。
+/// 架面顶部那颗分组筛选看的是哪一片。
+///
+/// `Ungrouped` 是**筛**出来的、不是存出来的：库里没有一个叫这名字的组，它是
+/// 「不在任何 `collection_books` 行里」那一批（`Store::shelf_ungrouped`）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum GroupFilter {
+    /// 整架：与「读者还没建过任何组」时看到的是同一片。
+    All,
+    /// 还没进任何组的那一批。
+    Ungrouped,
+    /// 某一个组里的书。
+    Collection(i64),
+}
+
 pub enum ShelfEvent {
     /// 点了一张卡片。
     Open(i64),
@@ -167,6 +182,15 @@ pub struct ShelfView {
     /// 顶上那颗搜索框。外观与「点外面退编辑态」都在 [`SearchBox`] 里，这里只
     /// 接它的 `Change` 事件重查库。
     search: Entity<SearchBox>,
+    /// 架面此刻筛的是哪一片。默认整架。
+    group: GroupFilter,
+    /// 库里的全部组（带书数）。顶部那颗筛选的条目读这一份，与架面同一次重查更新。
+    collections: Vec<Collection>,
+    /// 「新建分组」面板：`Some` = 开着，带的是**为哪本书**建的那个书 id + 输入框。
+    ///
+    /// 存成面板状态而不是立刻建：组名要读者打，而浮层里塞输入框在移动端是另一套
+    /// 焦点与键盘的事——架面已有「从链接导入」那块就地面板，照同一形状摆最省。
+    group_entry: Option<(i64, Entity<InputState>)>,
     /// 架面上是不是站着那块「书库位置」确认面板。
     ///
     /// 导入会把文件**拷一份**进硬盘，所以位置要先说定。没定过的时候点导入不开选择器，
@@ -270,6 +294,9 @@ impl ShelfView {
             grid_scroll: UniformListScrollHandle::new(),
             query: SharedString::default(),
             search,
+            group: GroupFilter::All,
+            collections: Vec::new(),
+            group_entry: None,
             confirming: false,
             covers: HashMap::new(),
             _search_watch,
@@ -295,7 +322,23 @@ impl ShelfView {
         if self.query == query && !self.items.is_empty() {
             return;
         }
-        let queried = self.store.as_ref().map(|store| store.shelf(query));
+        // 组清单与架面同一次重查：那颗筛选的条目与卡片菜单读的都是这一份。
+        self.collections = self
+            .store
+            .as_ref()
+            .and_then(|store| store.collections().ok())
+            .unwrap_or_default();
+        // 筛着的那个组已经没了（在别处删掉的）：退回整架，而不是给一屏看着像坏掉的空白。
+        if let GroupFilter::Collection(id) = self.group
+            && !self.collections.iter().any(|c| c.id == id)
+        {
+            self.group = GroupFilter::All;
+        }
+        let queried = self.store.as_ref().map(|store| match self.group {
+            GroupFilter::All => store.shelf(query),
+            GroupFilter::Ungrouped => store.shelf_ungrouped(query),
+            GroupFilter::Collection(id) => store.shelf_in_collection(id, query),
+        });
         match queried {
             Some(Ok(items)) => {
                 self.query = query.into();
@@ -387,6 +430,9 @@ impl ShelfView {
     ///
     /// **先复制**不是多余的一步：选择器给的是它自己临时目录里的路径，系统随时会清，
     /// 而 `books.path` 那一列是书的身份（同路径重复导入算更新，不算第二本书）。
+    /// 手机那两端的路径本来就是桥先拷出来的临时副本：导入读完由
+    /// [`PathsSource::picked_temporary`] 的 `Drop` 把 `gpui-import-<uuid>/` 连同文件清掉；
+    /// 桌面选择器给的是读者原文件，照旧不删。
     ///
     /// 拷贝、解析、落库都发生在 `folio_core::infra::task` 的工作线程上：解析一本 EPUB 是几十
     /// 到几百毫秒，一次选十本串在界面线程上跑就是几秒的卡顿。界面线程只留两件本来
@@ -416,7 +462,13 @@ impl ShelfView {
                 return;
             }
             let _ = this.update(cx, |this, cx| {
-                this.dispatch_import(Box::new(PathsSource::picked(paths)), cx)
+                let source: Box<dyn folio_core::ingest::import::Source> =
+                    if crate::ui::host::picked_files_are_temporary(cx) {
+                        Box::new(PathsSource::picked_temporary(paths))
+                    } else {
+                        Box::new(PathsSource::picked(paths))
+                    };
+                this.dispatch_import(source, cx)
             });
         })
         .detach();
@@ -703,6 +755,236 @@ impl ShelfView {
         cx.notify();
     }
 
+    /// 这本书在各分组里的名分：`(组 id, 组名, 在不在里面)`，供卡片菜单在**打开那一刻**现查。
+    ///
+    /// 现查而不是用架面那份 [`Self::collections`]：读者可能刚在另一本书的菜单里建了一个组，
+    /// 这一本紧接着就该看得见它，而那份清单只在重查架面时更新一次。库里的组是几十行的量，
+    /// 一次点击查两趟比缓存它便宜。
+    pub(super) fn group_items(&self, book_id: i64) -> Vec<book_menu::GroupRow> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        let (mine, all) = (
+            store.collections_of_book(book_id).ok(),
+            store.collections().ok(),
+        );
+        let (Some(mine), Some(all)) = (mine, all) else {
+            tracing::error!("ShelfView: 查分组失败，那张卡的菜单里这一节是空的");
+            return Vec::new();
+        };
+        all.into_iter()
+            .map(|c| {
+                let inside = mine.iter().any(|mine| mine.id == c.id);
+                (c.id, c.name.into(), inside)
+            })
+            .collect()
+    }
+
+    /// 把这本书在某个组里切进 / 切出，然后重查架面。
+    ///
+    /// 「在不在」问的是库里那份名分而不是界面状态：这一条既是加入也是移出，判错一次
+    /// 就是把读者刚加的组又删回去。存储层两头都幂等（重复加是 `false`、空移出也是 `false`），
+    /// 所以这里不需要额外的防抖。
+    pub(super) fn toggle_group(
+        &mut self,
+        book_id: i64,
+        collection_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = &self.store else {
+            tracing::error!("ShelfView: 没有书库，第 {book_id} 本的分组改不了");
+            return;
+        };
+        let inside = store
+            .collections_of_book(book_id)
+            .map(|mine| mine.iter().any(|c| c.id == collection_id))
+            .unwrap_or(false);
+        let got = if inside {
+            store
+                .remove_from_collection(collection_id, book_id)
+                .map(|_| ())
+        } else {
+            store.add_to_collection(collection_id, book_id).map(|_| ())
+        };
+        if let Err(err) = got.with_context(|| format!("改第 {book_id} 本的分组")) {
+            report("ShelfView", &err);
+            return;
+        }
+        // 词没变、筛的可能也不是同一批，所以走 `force_reload` 那一手。
+        self.force_reload(cx);
+    }
+
+    /// 「新建分组…」：开那块就地输入面板（与「从链接导入」同一形状 —— 架面上要读者
+    /// 打字的事不放进浮层），并记下是为哪一本书建的。
+    pub(super) fn new_group(&mut self, book_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.group_entry.is_some() {
+            return;
+        }
+        self.group_entry = Some((
+            book_id,
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr(cx, "shelf.group_placeholder"))),
+        ));
+        cx.notify();
+    }
+
+    pub(super) fn close_group_panel(&mut self, cx: &mut Context<Self>) {
+        self.group_entry = None;
+        cx.notify();
+    }
+
+    /// 面板上那颗「建组」：建好就把这本书丢进去，然后重查架面。
+    ///
+    /// 同名即复用是库里定的规矩（`ON CONFLICT(name) DO NOTHING` 再回查 id），所以这里
+    /// 不该拦「那个组已经有了」—— 读者要的是进那个组。空名由存储层回
+    /// `EmptyCollectionName`，报出来而**面板留着**：把人家打了一半的字清掉是错的方向。
+    fn create_group(&mut self, cx: &mut Context<Self>) {
+        let Some((book_id, entry)) = self.group_entry.clone() else {
+            return;
+        };
+        let name = entry.read(cx).value().trim().to_string();
+        let Some(store) = &self.store else {
+            tracing::error!("ShelfView: 没有书库，建不了组");
+            return;
+        };
+        let created = store
+            .create_collection(&name)
+            .and_then(|id| store.add_to_collection(id, book_id).map(|_| id))
+            .with_context(|| format!("建组「{name}」"));
+        match created {
+            Ok(id) => {
+                tracing::info!("ShelfView: 第 {book_id} 本进了组 {id}「{name}」");
+                self.group_entry = None;
+                self.force_reload(cx);
+            }
+            Err(err) => report("ShelfView", &err),
+        }
+    }
+
+    /// 换架面看的那一片。搜索词不动而架子动了，所以要先清空再查（同 [`Self::force_reload`]
+    /// 那一手）—— 否则 `reload` 的去重会认为「什么都没变」。
+    fn set_group(&mut self, group: GroupFilter, cx: &mut Context<Self>) {
+        self.group = group;
+        self.items.clear();
+        let query = self.query.clone();
+        self.reload(&query, cx);
+    }
+
+    /// 顶部那颗分组筛选：图标一颗，筛着某一组时吃选中态。
+    ///
+    /// 手机上那一行只剩「满幅框 + 两颗图标」的宽度，所以这里不带文字；点开那一条菜单里
+    /// 写着筛的是哪一组，组名后面缀着书数（「想读 · 12」），读者不必点进去才知道有几本。
+    fn group_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().clone();
+        let label = tr(cx, "shelf.group");
+        let all_label = tr(cx, "shelf.group_all");
+        let ungrouped_label = tr(cx, "shelf.ungrouped");
+        let collections = self.collections.clone();
+        let current = self.group;
+        Button::new("shelf-group-filter")
+            .ghost()
+            .small()
+            .icon(IconName::FolderTree)
+            .selected(current != GroupFilter::All)
+            .tooltip(label.clone().to_string())
+            .accessibility_label(label)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let menu = menu
+                    .min_w(px(book_menu::MIN_WIDTH))
+                    .item(
+                        PopupMenuItem::new(all_label.clone())
+                            .checked(current == GroupFilter::All)
+                            .on_click({
+                                let entity = entity.clone();
+                                move |_, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.set_group(GroupFilter::All, cx)
+                                    });
+                                }
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(ungrouped_label.clone())
+                            .checked(current == GroupFilter::Ungrouped)
+                            .on_click({
+                                let entity = entity.clone();
+                                move |_, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.set_group(GroupFilter::Ungrouped, cx)
+                                    });
+                                }
+                            }),
+                    );
+                // 一个组都还没建时这一节整块不出现：条目只有「全部分组 / 未分组」两条的
+                // 菜单，读起来像坏了。
+                if collections.is_empty() {
+                    return menu;
+                }
+                let menu = menu.separator();
+                // 菜单每开一遍重建一次（builder 是 `Fn`），所以这一份清单每次现摘一份。
+                collections.clone().into_iter().fold(menu, |menu, c| {
+                    let entity = entity.clone();
+                    let name = format!("{} · {}", c.name, c.book_count);
+                    menu.item(
+                        PopupMenuItem::new(name)
+                            .checked(current == GroupFilter::Collection(c.id))
+                            .on_click(move |_, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.set_group(GroupFilter::Collection(c.id), cx)
+                                });
+                            }),
+                    )
+                })
+            })
+    }
+
+    /// 「新建分组」那块就地面板：一行输入 + 两颗按钮，样式照「从链接导入」那一块。
+    fn group_panel(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity().clone();
+        let close_entity = entity.clone();
+        let create_entity = entity.clone();
+        let cancel_label = tr(cx, "shelf.cancel");
+        let create_label = tr(cx, "shelf.group_create");
+        v_flex()
+            .id("shelf-group-panel")
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .gap_3()
+            .px(px(GUTTER))
+            .py_4()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(tr(cx, "shelf.group_new")),
+            )
+            .child(muted_label(tr(cx, "shelf.group_hint"), cx))
+            .child(div().w_full().child(Input::new(&entry).cleanable(true)))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Button::new("shelf-group-cancel")
+                            .ghost()
+                            .label(cancel_label.to_string())
+                            .accessibility_label(cancel_label)
+                            .on_click(move |_, _, cx| {
+                                close_entity.update(cx, |this, cx| this.close_group_panel(cx))
+                            }),
+                    )
+                    .child(
+                        Button::new("shelf-group-create")
+                            .primary()
+                            .label(create_label.to_string())
+                            .accessibility_label(create_label)
+                            .on_click(move |_, _, cx| {
+                                create_entity.update(cx, |this, cx| this.create_group(cx))
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// 删掉一本：库里的行、属于我们自己的那份副本，然后重查一次架面。
     ///
     /// 「哪些文件算我们自己的」这条判据在 [`delete_book`] 里，不在这里：桌面端记的是
@@ -796,6 +1078,7 @@ impl ShelfView {
             .px(px(GUTTER))
             .py_2()
             .child(div().flex_1().min_w_0().child(self.search.clone()))
+            .child(self.group_button(cx))
             .child(self.more_button(cx))
     }
 
@@ -822,6 +1105,7 @@ impl ShelfView {
                 // 框的 small 档在 `boot` 建组件时就定下了。
                 div().w_64().child(self.search.clone()),
             )
+            .child(self.group_button(cx))
             .child(self.more_button(cx))
     }
 
@@ -915,6 +1199,10 @@ impl ShelfView {
         // 样式（浮层在 Android 上也能点住了，迁浮层是可选项）。
         if let Some(entry) = &self.url_entry {
             return self.url_panel(entry.clone(), cx);
+        }
+        // 「新建分组」面板同样盖过架面：要打字的那几步里，底下一片格子只会分散注意。
+        if let Some((_, entry)) = &self.group_entry {
+            return self.group_panel(entry.clone(), cx);
         }
         if !self.items.is_empty() {
             return self.grid(cx, spec).into_any_element();
@@ -1071,7 +1359,17 @@ impl Render for ShelfView {
 mod tests {
     //! 列数这件事是架面最容易在改宽度时悄悄坏掉的一处，所以纯函数直接钉。
 
-    use super::{COVER_RATIO, GAP, GUTTER, columns_for, grid_spec};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use folio_core::{Config, DocMeta, Format, Library, Store};
+    use gpui_kit::base::NavStackState;
+    use gpui_kit::component::Root;
+    use gpui_kit::component::input::InputState;
+    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
+
+    use super::{COVER_RATIO, GAP, GUTTER, GroupFilter, ShelfView, columns_for, grid_spec};
+    use crate::ui::shared::config_model::ConfigHolder;
     use crate::ui::shell::navigation::SizeClass;
 
     /// 架面一行放几本：手机钉在 3，桌面与平板随窗口宽往上加，任何宽度都不许塌成 0 列。
@@ -1142,5 +1440,163 @@ mod tests {
             desk.columns
         );
         assert!(desk.cover_height > phone.cover_height);
+    }
+
+    /// 一本测试书入库，返回它的主键。`Store::add_book` 不碰磁盘：路径只是那一行的身份。
+    fn add(store: &Store, title: &str) -> i64 {
+        store
+            .add_book(
+                &Path::new("/books").join(format!("{title}.epub")),
+                &DocMeta {
+                    title: title.into(),
+                    authors: vec!["作者丙".into()],
+                    format: Format::Epub,
+                    size: 1,
+                    ..DocMeta::default()
+                    }
+            )
+            .expect("入库")
+    }
+
+    /// 起一屏架面：装一个内存书库，加上**确认过位置**的配置（没确认过的时候架面画的是
+    /// 那块「书要拷到哪儿」的面板，不是格子）。返回（架面, 窗口, 书库）。
+    fn boot_shelf(cx: &mut TestAppContext) -> (Entity<ShelfView>, AnyWindowHandle, Arc<Store>) {
+        cx.update(gpui_kit::init);
+        let mut built = None;
+        let handle = cx
+            .open_window(size(px(900.), px(600.)), |window, cx| {
+                crate::ui::shared::app_store::install(Store::in_memory().expect("内存库"), cx);
+                ConfigHolder::install(
+                    Config {
+                        library: Library {
+                            dir: "/tmp/folio-books".into(),
+                            watch: None,
+                        },
+                        ..Config::default()
+                    },
+                    cx,
+                );
+                let stack = cx.new(|_| NavStackState::new());
+                let view = cx.new(|cx| ShelfView::boot(window, cx, stack.downgrade()));
+                built = Some(view.clone());
+                Root::new(view, window, cx)
+            })
+            .into();
+        let store = cx
+            .update(|cx| crate::ui::shared::app_store::handle(cx))
+            .expect("书库应已装上");
+        (built.expect("架面应已建起"), handle, store)
+    }
+
+    /// 分组那三处共用同一份库状态：卡片菜单里那颗是**开关**（切进 / 切出）、顶部那颗
+    /// 筛选跟着换看到的那一片、而「新建分组…」建完要把这本书顺手挂进去。
+    ///
+    /// 三条各自都能单独坏掉而编译照样绿：开关写成单向的「加入」→ 点第二下什么也不发生；
+    /// 筛选只改状态不重查 → 架面看着还是整架（`reload` 的去重按「词没变且架子非空」判，
+    /// 正会跳过这一趟，所以 `set_group` 必须先清空）；新建只建组不挂书 → 组有了、书还在外面；
+    /// 空名那一趟把面板清了 → 读者打了一半的字凭空消失。
+    #[gpui_kit::test]
+    fn the_group_switch_and_the_filter_agree(cx: &mut TestAppContext) {
+        let (shelf, handle, store) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        let b = add(&store, "乙");
+        let group = store.create_collection("想读").expect("建组");
+        store.add_to_collection(group, a).expect("挂进去");
+
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_count()),
+            2,
+            "整架那一片两本都在"
+        );
+
+        // 菜单里那一节的名分：一条组一行，甲打了勾。
+        let rows = shelf.read_with(cx, |this, _| this.group_items(a));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, group, "行的 id 就是库里那条组");
+        assert!(rows[0].2, "甲已经在「想读」里");
+        assert!(
+            !shelf.read_with(cx, |this, _| this.group_items(b))[0].2,
+            "乙不在"
+        );
+
+        // 那颗开关两头都要动。
+        shelf.update(cx, |this, cx| this.toggle_group(b, group, cx));
+        assert_eq!(
+            store.collections_of_book(b).expect("读库").len(),
+            1,
+            "不在里面时点一下是加入"
+        );
+        shelf.update(cx, |this, cx| this.toggle_group(b, group, cx));
+        assert!(
+            store.collections_of_book(b).expect("读库").is_empty(),
+            "已经在里面时同一下是移出"
+        );
+
+        // 顶部那颗筛选：某一组 / 未分组，两片是互补的。
+        shelf.update(cx, |this, cx| {
+            this.set_group(GroupFilter::Collection(group), cx)
+        });
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_count()),
+            1,
+            "组里只有甲那一本"
+        );
+        shelf.update(cx, |this, cx| this.set_group(GroupFilter::Ungrouped, cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_count()),
+            1,
+            "没进组的只剩乙"
+        );
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_title(0)),
+            Some("乙".into()),
+            "筛出来的那一本要认得"
+        );
+
+        // 搜索词与筛选项**叠加**：同一句「甲」，整架那一片命中、未分组那一片不该命中。
+        shelf.update(cx, |this, cx| this.set_group(GroupFilter::All, cx));
+        shelf.update(cx, |this, cx| this.reload("甲", cx));
+        assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 1);
+        shelf.update(cx, |this, cx| this.set_group(GroupFilter::Ungrouped, cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_count()),
+            0,
+            "未分组那一头不许绕开搜索词"
+        );
+
+        // 「新建分组…」：面板上那颗「建组」建完就把这本书挂进去，面板随后收掉。
+        cx.update_window(handle, |_, window, cx| {
+            let entry = cx.new(|cx| InputState::new(window, cx).default_value("杂项"));
+            shelf.update(cx, |this, cx| {
+                this.group_entry = Some((a, entry.clone()));
+                this.create_group(cx);
+            });
+        })
+        .expect("窗口应可更新");
+        let groups = store.collections().expect("读库");
+        assert!(
+            groups.iter().any(|c| c.name == "杂项" && c.book_count == 1),
+            "建的组要当场把这本书装进去：{}",
+            groups.len()
+        );
+        assert!(
+            shelf.read_with(cx, |this, _| this.group_entry.is_none()),
+            "建完了面板该收"
+        );
+
+        // 空名那一趟：存储层报 `EmptyCollectionName`，面板必须留着让读者接着改。
+        cx.update_window(handle, |_, window, cx| {
+            let blank = cx.new(|cx| InputState::new(window, cx));
+            shelf.update(cx, |this, cx| {
+                this.group_entry = Some((a, blank));
+                this.create_group(cx);
+            });
+        })
+        .expect("窗口应可更新");
+        assert!(
+            shelf.read_with(cx, |this, _| this.group_entry.is_some()),
+            "没建成不该把面板和他打了一半的字一起清掉"
+        );
     }
 }

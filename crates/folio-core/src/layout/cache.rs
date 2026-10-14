@@ -87,16 +87,37 @@ pub(super) struct BlockKey {
     pub(super) node: NodeId,
     pub(super) style_hash: u64,
     pub(super) width: u32,
+    /// 包含块宽（`layout::collect::block` 的那个 `basis`），按位存。
+    ///
+    /// 眼下 `(style_hash, width)` 其实**已经**唯一决定 `basis`：块的 `width` 就是
+    /// `basis − 自己的边距`，边距是百分比也好是 px 也好，都折自同一个 `basis`，反解
+    /// 只有一个正数解。留这一格是因为那条等式随时会断 —— 排版层一旦接块级 `width`
+    /// （`value::edge_px` 的注释里已经预告过），同一个 `width` 就能配着不同的父容器宽
+    /// 出现，而 `padding` / `text-indent` 的百分比恰恰折自后者。
+    pub(super) basis: u32,
+    /// 旁边站着哪些浮动盒 —— `layout::collect::Ctx::float_key` 按**相对这一块的偏移**
+    /// 折出来的一个数。
+    ///
+    /// 没有浮动盒时恒为 `0`：正文那几百万块照旧跨位置复用，一格都不多付。有浮动盒时
+    /// 必须把它们折进键 —— 一块让开多少宽取决于旁边站着多大的图，而这块缓存原本的
+    /// 成立条件是「同一块在任何容器旁边都长一样」。折相对偏移而不是绝对坐标，整块
+    /// 搬到别的 `(x, y)` 上仍是同一个键，两栏对开靠的就是这一点。
+    pub(super) floats: u64,
 }
 
 /// 一块排好后的产物，坐标**相对该块边框盒左上角**（复用时要平移到新位置）。
 ///
 /// `lines` 的区间在 `blocks` 里是相对上面这张 `lines` 表的（0 起）—— 复用时要整体
 /// 加上落点偏移，`blocks` 的 `lines` 区间再平移到 `Layout::lines` 里。
+///
+/// `floats` 是这一块**摆出去**的浮动盒（CSS 里它们会活着影响后面的兄弟行带）。
+/// 缓存命中时 `children()` 那一趟不跑，浮动表就没人填 —— 所以把它一起存、一起搬回，
+/// 不然一块浮动的插图在滚回来之后就消失了，后面的字不再绕它。
 pub(super) struct CachedBlock {
     pub(super) lines: Vec<LineBox>,
     pub(super) blocks: Vec<BlockBox>,
     pub(super) height: f32,
+    pub(super) floats: Vec<crate::layout::collect::PlacedFloat>,
 }
 
 /// 块级排版缓存。对应 KOReader 的 `_renderedBlockCache`。
@@ -188,6 +209,7 @@ impl BlockCache {
             lines: entry.lines.clone(),
             blocks: entry.blocks.clone(),
             height: entry.height,
+            floats: entry.floats.clone(),
         })?;
         if self.cap.is_some() {
             self.touch(key);

@@ -319,6 +319,7 @@ mod tests {
                 source: PageSource::Render { index: 0 },
                 width: 0,
                 height: 0,
+                extra_images: Vec::new(),
             }],
             ..Default::default()
         };

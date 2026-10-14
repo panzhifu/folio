@@ -13,6 +13,29 @@
 
 use crate::content::dom::{Dom, NodeId};
 
+/// 属性选择器的算子。CSS Selectors 4 的一整套：存在、全等、词包含（`~=`）、
+/// 破折号前缀（`|=`，给 `lang` 一类「`en-US` 命中 `en`」的值用）、前缀 / 后缀 / 子串。
+///
+/// 出版书里的真写法几乎只有 `~=` 与 `*=`（`[class~="solid"]`、`[class*="biaoti"]`），
+/// 但五条算子解析成本一样，缺哪条都是「选择器静默命中 0 个元素」那种查不出来的错。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttrOp {
+    /// `[attr]` —— 只要有这个属性（值不参与）。
+    Exists,
+    /// `[attr=v]`。
+    Equals,
+    /// `[attr~=v]` —— 属性值按 ASCII 空白切词，命中其一（`[class~=v]` 与 `.v` 同义）。
+    Includes,
+    /// `[attr|=v]` —— 全等，或以 `v-` 开头（`en` 命中 `en` 与 `en-US`）。
+    DashMatch,
+    /// `[attr^=v]`。
+    Prefix,
+    /// `[attr$=v]`。
+    Suffix,
+    /// `[attr*=v]`。
+    Substring,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Simple {
     Universal,
@@ -21,7 +44,11 @@ pub enum Simple {
     Id(String),
     Attr {
         name: String,
+        op: AttrOp,
+        /// `Exists` 时为 `None`；其余为已去引号的值。
         value: Option<String>,
+        /// `[attr=v i]` 的大小写不敏感标志。`s`（显式敏感）折成 `false`。
+        case_insensitive: bool,
     },
     FirstChild,
     LastChild,
@@ -111,9 +138,16 @@ impl Compound {
             }
             Simple::Class(c) => dom.classes(node).any(|k| k == c),
             Simple::Id(id) => dom.id_attr(node) == Some(id.as_str()),
-            Simple::Attr { name, value } => match dom.attr(node, name) {
-                None => false,
-                Some(actual) => value.as_ref().is_none_or(|want| *want == actual),
+            Simple::Attr {
+                name,
+                op,
+                value,
+                case_insensitive,
+            } => match (dom.attr(node, name), value.as_deref()) {
+                // `[attr]`：有属性即可。
+                (Some(_), None) => true,
+                (Some(actual), Some(want)) => attr_matches(*op, actual, want, *case_insensitive),
+                (None, _) => false,
             },
             Simple::FirstChild => dom
                 .get(node)
@@ -379,24 +413,96 @@ fn nth_matches(a: i32, b: i32, index: i32) -> bool {
     d % a == 0 && d / a >= 0
 }
 
+/// `[attr]` / `[attr op value]` / `[attr op value i]` 的**括号内**文本。
+///
+/// 算子是 `=` 前的那一个字符（`~` `|` `^` `$` `*`），所以先找 `=` 再回看一位 ——
+/// 这比按 `~=` `|=` … 逐条 `find` 更稳：不会把 `[title="a=b"]` 里的第二个 `=` 当成算子。
+/// 认不出写法（缺属性名、多余的尾令牌、未闭合引号）一律 `None`，让**整条选择器作废** ——
+/// 悄悄当成 `[attr=…]` 命中一批没预期的元素，比作废难查得多。
 fn parse_attr(text: &str) -> Option<Simple> {
     let text = text.trim();
-    match text.split_once('=') {
-        Some((name, value)) => Some(Simple::Attr {
-            name: name.trim().to_ascii_lowercase(),
-            value: Some(
-                value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            ),
-        }),
-        None if !text.is_empty() => Some(Simple::Attr {
+    if text.is_empty() {
+        return None;
+    }
+    let Some(eq) = text.find('=') else {
+        return Some(Simple::Attr {
             name: text.to_ascii_lowercase(),
+            op: AttrOp::Exists,
             value: None,
-        }),
-        None => None,
+            case_insensitive: false,
+        });
+    };
+    let (name, op) = match text[..eq].chars().last() {
+        Some('~') => (&text[..eq - 1], AttrOp::Includes),
+        Some('|') => (&text[..eq - 1], AttrOp::DashMatch),
+        Some('^') => (&text[..eq - 1], AttrOp::Prefix),
+        Some('$') => (&text[..eq - 1], AttrOp::Suffix),
+        Some('*') => (&text[..eq - 1], AttrOp::Substring),
+        _ => (&text[..eq], AttrOp::Equals),
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let (value, case_insensitive) = split_attr_value(text[eq + 1..].trim())?;
+    Some(Simple::Attr {
+        name: name.to_ascii_lowercase(),
+        op,
+        value: Some(value),
+        case_insensitive,
+    })
+}
+
+/// `=` 右侧：值（可带引号）+ 可选的大小写标志。返回 `None` 表示语法不认得。
+fn split_attr_value(rest: &str) -> Option<(String, bool)> {
+    let (value, trailing) = match rest.chars().next() {
+        Some(q @ ('"' | '\'')) => {
+            let after = &rest[1..];
+            let end = after.find(q)?;
+            (after[..end].to_string(), after[end + 1..].trim())
+        }
+        Some(_) => {
+            let token = rest.split_ascii_whitespace().next().unwrap_or("");
+            (token.to_string(), rest[token.len()..].trim())
+        }
+        // `[attr=]`：值就是空串（只有 `Equals` 可能命中一个空属性）。
+        None => (String::new(), ""),
+    };
+    let case_insensitive = match trailing.to_ascii_lowercase().as_str() {
+        "" | "s" => false,
+        "i" => true,
+        // 认不出的尾令牌（`[attr=v x]`）不是合法的属性选择器。
+        _ => return None,
+    };
+    Some((value, case_insensitive))
+}
+
+/// 一条属性值是否命中算子。`Includes` / `DashMatch` / 三种子串算子对**空值**一律不命中
+/// （CSS 规定）—— 否则 `[class^=""]` 会命中每一个带 `class` 的元素。
+fn attr_matches(op: AttrOp, actual: &str, want: &str, ci: bool) -> bool {
+    // 大小写不敏感时把两侧都折成 ASCII 小写再比；这条路上 `ci` 为假时**不做任何分配**。
+    let (actual, want) = if ci {
+        (actual.to_ascii_lowercase(), want.to_ascii_lowercase())
+    } else {
+        (actual.to_string(), want.to_string())
+    };
+    let (actual, want) = (actual.as_str(), want.as_str());
+    match op {
+        AttrOp::Exists => true,
+        AttrOp::Equals => actual == want,
+        AttrOp::Includes => {
+            !want.is_empty() && actual.split_ascii_whitespace().any(|word| word == want)
+        }
+        AttrOp::DashMatch => {
+            !want.is_empty()
+                && (actual == want
+                    || actual
+                        .strip_prefix(want)
+                        .is_some_and(|rest| rest.starts_with('-')))
+        }
+        AttrOp::Prefix => !want.is_empty() && actual.starts_with(want),
+        AttrOp::Suffix => !want.is_empty() && actual.ends_with(want),
+        AttrOp::Substring => !want.is_empty() && actual.contains(want),
     }
 }
 

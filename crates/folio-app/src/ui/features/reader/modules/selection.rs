@@ -19,7 +19,8 @@
 //!   拖到另一端正上停住不塌缩；拖过另一端两端互换、手指改握新的那头；拖动期间
 //!   菜单条让位、松手即回。
 //! - **点按**：选中态下点选区外清空、点选区内把菜单条请回来，两下都消费这一击
-//!   （不翻页）；浮层（顶栏/底栏）开着时指针让位——那一击的语义是收浮层。
+//!   （不翻页）；没有选区时点在一条**已有的划线**上就是把那一条重新选中（判断与命中
+//!   在 `modules/annotations.rs`）；浮层（顶栏/底栏）开着时指针让位——那一击的语义是收浮层。
 //!
 //! 绘制在 [`crate::ui::features::reader::paint`]（高亮矩形压在字下、把手压在字上，
 //! 事件监听也注册在那份元素的 paint 里——gpui 的 `window.on_mouse_event` 只在
@@ -318,7 +319,7 @@ impl ReaderSession {
 
     /// 正文上的一击要不要被「选中」这一套消费掉（消费了就不算点正文：不开浮层、不翻页）。
     ///
-    /// 三条判据的**顺序**就是修的那个 bug 本身，所以它待在会话里而不是 `page.rs`：
+    /// 四条判据的**顺序**就是修的那个 bug 本身，所以它待在会话里而不是 `page.rs`：
     /// 只有在这里，「菜单刚被点掉、选区已经清空」那个窗口期才测得到。
     ///
     /// 1. 拖选 / 拖把手松手紧跟着的那一下 —— 纯粹是合成的 click，谁都不该理它。
@@ -326,6 +327,9 @@ impl ReaderSession {
     ///    清掉，所以这条必须在「有没有选区」之前问，否则等这一下冒泡到正文时
     ///    `selection()` 已是 `None`，顶栏与底栏会跟着一起冒出来。
     /// 3. 有选区时交给 [`Self::tap_with_selection`]：点选区内请回菜单、点选区外清空。
+    /// 4. 没选区时点在一条**已有的划线**上，就是把那一条重新选中
+    ///    （[`Self::reselect_annotation`]）—— 留在书上的痕迹不能只读不能改。
+    ///    这一条不分左中右三区：落在底色上的那一击归选中，两侧照常翻页。
     pub fn tap_on_body(
         &mut self,
         window: &Window,
@@ -340,7 +344,10 @@ impl ReaderSession {
         if self.taps_selection_ui(at) {
             return true;
         }
-        self.selection().is_some() && self.tap_with_selection(window, cx, at)
+        if self.selection().is_some() {
+            return self.tap_with_selection(window, cx, at);
+        }
+        self.reselect_annotation(window, cx, at)
     }
 
     /// 这一击是否落在选中的交互件上（把手命中区或菜单条）。这些面上的一击
@@ -434,7 +441,11 @@ impl ReaderSession {
     /// （`folio_core::content::hit`）的换算互为逆运算，两头的偏移必须同源：连续滚动是
     /// 「全局 y − 章基线」，分页/双页是片的 `origin_y` 与栏位 `x`，两条带子的高度
     /// 都扣在同一个地方。
-    fn to_layout(&self, window: &Window, at: Point<Pixels>) -> Option<(usize, f32, f32)> {
+    pub(in crate::ui::features::reader) fn to_layout(
+        &self,
+        window: &Window,
+        at: Point<Pixels>,
+    ) -> Option<(usize, f32, f32)> {
         let origin = self.content_bounds.get().origin;
         let local = at - origin;
         let prefs = &self.prefs;

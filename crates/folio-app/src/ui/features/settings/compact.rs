@@ -23,15 +23,15 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Div, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    AnyElement, App, AppContext as _, Context, Div, InteractiveElement as _, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
     TestSupportExt as _, Window, div, px,
 };
 
 use super::spec::{self, RowKind};
 use super::spec_pages;
 use crate::ui::shared::l10n::tr;
-use crate::ui::widgets::hairline;
+use crate::ui::widgets::{TopBar, hairline};
 
 /// 内容区两侧的留白，和书架的格间距同一档。
 const GUTTER: f32 = 12.0;
@@ -106,40 +106,22 @@ impl CompactSettings {
         Self::scrollable(body)
     }
 
-    /// 子页顶部那一条：返回 + 标题。返回回到页列表，和正文那条返回同一个道理。
+    /// 子页顶部那一条：返回 + 标题。返回回到页列表，和正文那条返回同一个道理 ——
+    /// 那条的样子现在在 [`TopBar`] 里，与阅读页顶栏、书信息页同一份。
     fn header(&self, title: &SharedString, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
-        let back_label = tr(cx, "shelf.back");
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .h(px(44.0))
-            .child(
-                Button::new("settings-back")
-                    .ghost()
-                    .small()
-                    .icon(gpui_kit::assets::IconName::ArrowLeft)
-                    .label(back_label.clone().to_string())
-                    .accessibility_label(back_label)
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.screen = Screen::Root;
-                            cx.notify();
-                        })
-                    }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(title.clone()),
-            )
+        TopBar::new("settings-bar")
+            .title(title.clone())
+            .strong()
+            .back_tooltip(tr(cx, "shelf.back"))
+            .show_back_label()
+            .back_small()
+            .on_back(move |_, cx| {
+                entity.update(cx, |this, cx| {
+                    this.screen = Screen::Root;
+                    cx.notify();
+                });
+            })
     }
 
     /// 子页正文：分组标题当节头，组里的行依次排开。

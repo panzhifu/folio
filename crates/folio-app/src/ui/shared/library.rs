@@ -284,7 +284,8 @@ mod tests {
             authors: vec!["作者".into()],
             format: Format::Epub,
             size: 10,
-        }
+            ..DocMeta::default()
+            }
     }
 
     fn flow() -> FlowDoc {

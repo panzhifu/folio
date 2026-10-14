@@ -64,6 +64,10 @@ pub struct RunStyle {
     pub color: Option<Color>,
     /// 每个空格之后额外加的宽度（px），来自 CSS 的 `word-spacing`。
     pub word_spacing: f32,
+    /// 每个字符之后额外加的宽度（px），来自 CSS 的 `letter-spacing`。形状与 `word_spacing`
+    /// 一样（都叠在两个字符之间），差别只在**叠在每个字符**还是只叠在空格上。
+    /// 宽度表（`wrap::Collector::push_widths`）与这里的 `advance` 必须同源。
+    pub letter_spacing: f32,
     /// 基线偏移，px，正数往上。来自 `vertical-align`，绘制层把它从行的基线里减掉。
     pub baseline_shift: f32,
     /// `text-decoration` 的两条线。装饰线**不计入行盒高**（CSS 也是这样），
@@ -81,6 +85,7 @@ impl std::hash::Hash for RunStyle {
         self.line_height.to_bits().hash(state);
         self.color.hash(state);
         self.word_spacing.to_bits().hash(state);
+        self.letter_spacing.to_bits().hash(state);
         self.baseline_shift.to_bits().hash(state);
         self.underline.hash(state);
         self.line_through.hash(state);
@@ -155,6 +160,8 @@ impl RunStyle {
             line_height: style.line_height,
             color: style.color,
             word_spacing: style.word_spacing.max(0.0),
+            // 字距**不夹下限**：`letter-spacing` 允许负值（收紧），绘制与折行对负字距同样成立。
+            letter_spacing: style.letter_spacing,
             baseline_shift: style.baseline_shift,
             underline: style.underline,
             line_through: style.line_through,
@@ -166,15 +173,16 @@ impl RunStyle {
         (self.font_size * self.line_height).max(1.0)
     }
 
-    /// 一个字符的前进量。`word-spacing` 叠在空格上 —— CSS 里它加在 word separator 之后，
-    /// 而我们的折行就是按字符累加的，所以两处（折行与重算已用宽）都走这一个函数，
-    /// 不会出现「折行算得下、画出来超出」的错位。
+    /// 一个字符的前进量。`letter-spacing` 叠在**每个**字符之后，`word-spacing` 叠在空格上
+    /// —— CSS 里 `word-spacing` 加在 word separator 之后，而我们的折行就是按字符累加的，
+    /// 所以两处（折行与重算已用宽）都走这一个函数，不会出现「折行算得下、画出来超出」的错位。
+    /// 宽度表（`wrap::Collector::push_widths`）里那份累加必须与这里逐字一致。
     pub fn advance(&self, measure: &dyn Measure, ch: char) -> f32 {
         let base = measure.char_width(ch, &self.font, self.font_size);
+        let mut w = base + self.letter_spacing;
         if ch == ' ' {
-            base + self.word_spacing
-        } else {
-            base
+            w += self.word_spacing;
         }
+        w
     }
 }

@@ -37,6 +37,40 @@ fn sel(text: &str) -> Selector {
     Selector::parse(text).unwrap_or_else(|| panic!("选择器应能解析：{text}"))
 }
 
+/// 属性选择器的五种算子 + 大小写标志。出版书里的真写法是 `~=` 与 `*=`；
+/// `|=`（`en` 命中 `en-US`）、`^=`、`$=` 一并接住，免得它们静默命中 0 个元素。
+#[test]
+fn attribute_selector_operators() {
+    let dom = parse_dom(
+        r#"<p class="a solid b" data-lang="en-US" title="Introduction">x</p>
+           <p class="biaoti-1" data-lang="fr">y</p>"#,
+    );
+    let ps = of(&dom, "p");
+    let (first, second) = (ps[0], ps[1]);
+    let hit = |s: &str, node: NodeId| sel(s).matches(&dom, node);
+
+    // 词包含：整词才命中。
+    assert!(hit(r#"[class~="solid"]"#, first));
+    assert!(!hit(r#"[class~="sol"]"#, first), "~= 要整词，不是子串");
+    // 破折号匹配：`en` 命中 `en-US`，但不命中 `enx`。
+    assert!(hit(r#"[data-lang|=en]"#, first));
+    assert!(!hit(r#"[data-lang|=e]"#, first));
+    // 前缀 / 后缀 / 子串。
+    assert!(hit(r#"[class^="a "]"#, first));
+    assert!(hit(r#"[class$="b"]"#, first));
+    assert!(hit(r#"[title*="duct"]"#, first));
+    // 大小写标志 `i`。
+    assert!(hit(r#"[title*="INTRODUCT" i]"#, first));
+    assert!(
+        !hit(r#"[title*="INTRODUCT"]"#, first),
+        "没有 i 就要区分大小写"
+    );
+    // 子串算子对空值一律不命中。
+    assert!(!hit(r#"[title^=""]"#, first));
+    assert!(hit(r#"[class*="biaoti"]"#, second));
+    assert!(!hit(r#"[class*="biaoti"]"#, first));
+}
+
 #[test]
 fn parses_the_supported_forms() {
     for text in [

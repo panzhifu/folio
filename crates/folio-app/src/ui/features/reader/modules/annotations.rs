@@ -16,15 +16,21 @@
 //! 解不回来的那一条（`is_stale()`）**不画**：宁可少一处底色，也不把读者的批注
 //! 画到别的字上去。库里那条的 `stale` 标记照实回写，批注侧栏（后续里程碑）才有依据
 //! 说「这条找不到了」。
+//!
+//! 画出来的那几片底色同时是**可以点回去的**：点在矩形上就是把那一条重新选中
+//! （[`ReaderSession::annotation_at`]），于是留在书上的痕迹不只是读数，还能改 ——
+//! 就地菜单跟着给出「取消划线」与四色（[`ReaderSession::selection_annotation`]）。
+//! 判据用的是画出来的那些矩形而不是「离得最近的那个字」，理由在下面那条命中方法的注释里。
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 
 use folio_core::content::anchor::TextMap;
 use folio_core::content::annotation::{ResolvedAnnotation, resolve_annotations};
 use folio_core::store::{ANNOTATION_COLORS, Annotation};
 use gpui_kit::component::Theme;
-use gpui_kit::{Context, Hsla};
+use gpui_kit::{App, Context, Hsla, Pixels, Point, Window};
 
 use super::super::session::{AnnotationSpans, ReaderSession, Selection};
 
@@ -100,6 +106,161 @@ impl ReaderSession {
                 chapter = selected.chapter + 1,
                 error = %err,
                 "划线: 写库失败"
+            ),
+        }
+        cx.notify();
+    }
+
+    /// 点在**画出来的**那片底色上：找回对应的一条批注 `(哪一章, 章内区间, 库里的 id)`。
+    ///
+    /// 判据是矩形，不是 `hit_test` 那个「最近的字」：后者的语义是给拖选收边的 —— 纵向夹到
+    /// 最近的行、横向夹进该行的墨迹范围内（`folio_core::content::hit`），于是点在段距里、
+    /// 末行之下的空白也会得到一个落在某条划线区间内的偏移。拿它当「压住了划线」，读者在
+    /// 空白处的一击就会莫名把某条批注选中。这里要的是「点到哪片颜色，选中哪一条」，所以
+    /// 落点既要在命中那一行的**行盒**里，又要在横向落进那一段字画出来的那块矩形 ——
+    /// 矩形出自同一个 `selection_rects_in_band`，与屏上那片底色同源，点得中所见。
+    pub(in crate::ui::features::reader) fn annotation_at(
+        &self,
+        window: &Window,
+        cx: &App,
+        at: Point<Pixels>,
+    ) -> Option<(usize, Range<usize>, i64)> {
+        let (chapter, x, y) = self.to_layout(window, at)?;
+        let doc = self.book()?.span_doc(chapter)?;
+        // 排版还没跟上的那一帧，行盒是旧的：按旧行盒算出的矩形对不上这一帧画出来的底色。
+        if !doc.is_current() || self.annotations.is_empty() {
+            return None;
+        }
+        let hit = doc.hit_test(window, cx, x, y)?;
+        let line = doc.lines().get(hit.line)?;
+        if y < line.y || y >= line.y + line.height {
+            return None;
+        }
+        let band = line.y..(line.y + line.height);
+        let spans = resolved_for(
+            &self.annotation_spans,
+            &self.annotations,
+            chapter,
+            doc.chapter_hash(),
+            doc.text_map(),
+        );
+        spans
+            .iter()
+            .filter(|span| !span.is_stale())
+            // 先按偏移筛掉绝大多数：一条批注的矩形只可能在它自己那几行上。
+            .filter(|span| hit.offset >= span.start && hit.offset < span.end)
+            .find(|span| {
+                doc.selection_rects_in_band(window, cx, span.start..span.end, band.clone())
+                    .iter()
+                    .any(|rect| x >= rect.x && x < rect.x + rect.width)
+            })
+            .map(|span| (chapter, span.start..span.end, span.id))
+    }
+
+    /// 点在一条已有的划线上：把那一条重新选中，菜单条跟着回来。
+    ///
+    /// 返回 `true` = 这一击归「选中」这一套，`page.rs` 不该再拿它去翻页或开浮层。
+    /// 浮层（顶栏/底栏/目录弹层）开着时让位 —— 与 `begin_mouse_selection` 同一条文：
+    /// 那一击的语义是收浮层。
+    pub(in crate::ui::features::reader) fn reselect_annotation(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        at: Point<Pixels>,
+    ) -> bool {
+        if self.overlay_open {
+            return false;
+        }
+        let Some((chapter, range, _)) = self.annotation_at(window, cx, at) else {
+            return false;
+        };
+        // 先走 `clear_selection` 那一趟：把上一手拖选/拖把手攒下的临时态一并作废，
+        // 这一次是「挑中留在书上的那一条」，不是接着上一手拖。
+        self.clear_selection();
+        self.selection = Some(Selection { chapter, range });
+        self.selection_menu_open = true;
+        cx.notify();
+        true
+    }
+
+    /// 当前选区**正好等于**库里某一条划线时，给回那一条的 id 与颜色名。
+    ///
+    /// 判据是区间相等，不是「这一击是从划线上点出来的」：读者拖过把手把范围改了，手里
+    /// 拿的就是一段新选区（该再划一次），而不是原来那一条 —— 菜单跟着这个判断换格子。
+    pub fn selection_annotation(&self) -> Option<(i64, String)> {
+        let selected = self.selection.as_ref()?;
+        let doc = self.book()?.span_doc(selected.chapter)?;
+        let spans = resolved_for(
+            &self.annotation_spans,
+            &self.annotations,
+            selected.chapter,
+            doc.chapter_hash(),
+            doc.text_map(),
+        );
+        spans
+            .iter()
+            .find(|span| {
+                !span.is_stale()
+                    && span.start == selected.range.start
+                    && span.end == selected.range.end
+            })
+            .map(|span| (span.id, span.color.clone()))
+    }
+
+    /// 取消划线：把选区对应的那一条从库里删掉，画出来的那片底色随它消失。
+    ///
+    /// 删完把选区收掉：屏上已经没东西可挑中了，留着一段「选中」只会让读者以为还能再删一次。
+    pub fn delete_highlight(&mut self, cx: &mut Context<Self>) {
+        let Some((id, _)) = self.selection_annotation() else {
+            return;
+        };
+        self.selection_menu_open = false;
+        let Some(store) = self.store.as_ref() else {
+            tracing::warn!(annotation_id = id, "划线: 书库没装，那一条删不掉");
+            cx.notify();
+            return;
+        };
+        match store.delete_annotation(id) {
+            Ok(()) => {
+                tracing::info!(annotation_id = id, "划线: 取消一条批注");
+                self.load_annotations();
+                self.clear_selection();
+            }
+            Err(err) => tracing::error!(annotation_id = id, error = %err, "划线: 删库失败"),
+        }
+        cx.notify();
+    }
+
+    /// 换颜色：改库里那一条的 `color`，选区留着（读者往往还要连着比两档颜色）。
+    ///
+    /// `note` 原样带过去：存储层那条 `update_annotation` 是整条覆盖（note + color 一起写），
+    /// 只当自己是改颜色而不带上笔记，就会把读者写过的笔记悄悄清空。
+    pub fn set_highlight_color(&mut self, color: &str, cx: &mut Context<Self>) {
+        let Some((id, current)) = self.selection_annotation() else {
+            return;
+        };
+        if current == color {
+            return; // 点的就是当下那一格：一趟都不跑
+        }
+        let Some(store) = self.store.as_ref() else {
+            tracing::warn!(annotation_id = id, "划线: 书库没装，颜色改不了");
+            return;
+        };
+        let note = self
+            .annotations
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.note.clone())
+            .unwrap_or_default();
+        match store.update_annotation(id, &note, color) {
+            Ok(()) => {
+                tracing::info!(annotation_id = id, color, "划线: 换一条批注的颜色");
+                self.load_annotations();
+            }
+            Err(err) => tracing::error!(
+                annotation_id = id,
+                error = %err,
+                "划线: 改颜色写库失败"
             ),
         }
         cx.notify();

@@ -36,6 +36,17 @@ impl Host for MobileHost {
         true
     }
 
+    fn long_press(&self) -> bool {
+        // 手指按得住：划词那条路已经在真机上跑通（`reader::paint` 的长按监听）。
+        true
+    }
+
+    fn picked_files_are_temporary(&self) -> bool {
+        // Android 的 `GpuiPathPicker`、iOS 的 sandbox copy 都先把文件拷进应用自己
+        // 的 cache / 沙盒再把路径交出来，导入读完必须清。
+        true
+    }
+
     fn body_family(&self, wanted: &str, cx: &App) -> String {
         // 命中与否都写一行：真机上「字体不对」只能从 logcat 看出来，
         // 屏幕上长得像对的字体未必是读者要的那套。

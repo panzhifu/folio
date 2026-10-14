@@ -319,7 +319,12 @@ impl ShelfView {
             // 长按（移动端）或右键（桌面端）开管理菜单，条目见 [`super::book_menu`]。
             // 与右上角那颗三点按钮的导入菜单是同一套组件，只是触发从点击换成了长按，
             // 两档浮层同宽（[`book_menu::MIN_WIDTH`]）。
-            .context_menu(move |menu, _, _| book_menu::build(menu, &labels, book_id, &menu_entity))
+            .context_menu(move |menu, _, cx| {
+                // 组的名分在**打开这一刻**现查：菜单里那几条打勾必须反映刚才那一刻的库，
+                // 而不是上一次重查架面时的那一份。
+                let groups = menu_entity.read_with(cx, |this, _| this.group_items(book_id));
+                book_menu::build(menu, &labels, book_id, &menu_entity, groups)
+            })
             .into_any_element()
     }
 }

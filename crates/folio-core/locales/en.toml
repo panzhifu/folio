@@ -41,6 +41,7 @@ toc = "Contents"
 "toc.empty" = "This book has no table of contents"
 "toc.head_meta" = "At %{percent} · %{format} · %{size}"
 "toc.more" = "Contents options"
+"toc.close" = "Close contents"
 "toc.expand_all" = "Expand all"
 "toc.collapse_all" = "Collapse all"
 "toc.reverse" = "Reverse order"
@@ -56,6 +57,8 @@ mode_spread = "Two pages"
 # Selection menu bar (M6): actions expand in place, no popover.
 sel_copy = "Copy"
 sel_highlight = "Highlight"
+# 挑中的正是留在书上的那一条时，同一格换成「取消划线」（另有一行四色可换）。
+sel_unhighlight = "Remove"
 sel_chapter = "Select chapter"
 sel_paragraph = "Select paragraph"
 sel_cancel = "Cancel"
@@ -284,6 +287,14 @@ no_results_hint = "Try another word — this searches titles and authors, not th
 # delete sits last behind a separator — a destructive action does not take the easy
 # slot. There is no "Open" row: tapping the card is opening it.
 book_delete = "Delete"
+# Groups (collections): the section in the card menu + the filter chip on the shelf bar.
+group = "Groups"
+group_all = "All groups"
+ungrouped = "Ungrouped"
+group_new = "New group"
+group_create = "Create"
+group_placeholder = "Group name"
+group_hint = "Which group this book joins. An existing name is reused rather than duplicated."
 # The info panel — the menu row and the panel header share this one wording.
 # Fetched from the library the moment the menu item is tapped.
 info_title = "Info"
@@ -300,6 +311,24 @@ info_title_required = "Title is required"
 info_save = "Save"
 info_format = "Format"
 info_size = "Size"
+# Below that: the book's own bibliographic record (the Dublin Core set). Only the fields
+# with a value get a row — listing the empty ones would read as "this book says nothing".
+# `dc:type` is stored but never shown: an e-book is almost always "text", which answers
+# no question at all.
+info_field_series = "Series"
+info_field_contributors = "Contributors"
+info_field_subjects = "Subjects"
+info_field_description = "Description"
+info_field_publisher = "Publisher"
+info_field_published = "Published"
+info_field_language = "Language"
+info_field_isbn = "ISBN"
+info_field_rights = "Rights"
+# Separator used when several values (contributors, subjects) share one line.
+info_sep = ", "
+# The whole phrase when the series carries a number — written in this language's own
+# order rather than assembled from fragments.
+info_series_ordinal = "%{name} #%{position}"
 
 # 书库管理。`library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置
 # 确认：移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。

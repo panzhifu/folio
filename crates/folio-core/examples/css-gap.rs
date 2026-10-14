@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use folio_core::content::document::Document;
 use folio_core::content::dom::Dom;
 use folio_core::content::format::FlowDoc;
 use folio_core::content::format::css::computed::{
@@ -101,12 +102,16 @@ fn survey(path: &Path) -> Result<String, String> {
         flow.chapters.len(),
         chars,
     ));
-    if flow.css.trim().is_empty() {
+    // CSS 与正文都走 `Document` 的现取入口，而不是 `flow.css` / `chapter.source()`：
+    // 索引路径（懒加载）下 `FlowDoc` 里只有位置清单、正文与样式表都不在手上，
+    // 这两处才按清单回容器取。工具若读 `flow.css`，对正经导入的书一律是空串。
+    let css = doc.stylesheet();
+    if css.trim().is_empty() {
         out.push_str("**这本书没有作者样式表**，落差为零不是因为接住了，是因为没东西可接。\n");
         return Ok(out);
     }
-    let rules = RuleSet::parse(&flow.css, Origin::Author);
-    let stats = measure(flow, &rules);
+    let rules = RuleSet::parse(&css, Origin::Author);
+    let stats = measure(doc.as_ref(), flow, &rules);
 
     let mut rows: Vec<(&String, &Gap)> = stats.gaps.iter().collect();
     // 先按影响的元素数，再按声明数；完全同名时按属性名字典序，保证输出可复现。
@@ -150,7 +155,7 @@ fn survey(path: &Path) -> Result<String, String> {
     if rows.is_empty() {
         out.push_str("| — | 0 | 0 | — | 全部接住 |\n");
     }
-    out.push_str(&impact(flow, &rules));
+    out.push_str(&impact(doc.as_ref(), flow, &rules));
     Ok(out)
 }
 
@@ -167,12 +172,15 @@ struct Totals {
 
 /// 逐章逐元素地数。样式表只解析一次，全书共用 —— 与真实排版路径一致
 /// （`ui/shared/document.rs` 也是把 `flow.css` 当文档级数据）。
-fn measure(flow: &FlowDoc, rules: &RuleSet) -> Totals {
+fn measure(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> Totals {
     let mut tot = Totals::default();
     let base = ComputedStyle::default();
     let root_px = base.font_size;
-    for chapter in &flow.chapters {
-        let dom = Dom::parse(chapter.source().as_bytes());
+    for (index, _chapter) in flow.chapters.iter().enumerate() {
+        let Ok(source) = doc.chapter_source(index) else {
+            continue;
+        };
+        let dom = Dom::parse(source.as_bytes());
         let styled = cascade(&dom, rules, &base);
         for (id, _) in dom.elements() {
             tot.elements += 1;
@@ -279,7 +287,17 @@ fn without_unsupported(rules: &RuleSet) -> RuleSet {
                     DeclStatus::Applied
                 )
             })
-            .cloned()
+            .map(|decl| {
+                // 「这些属性还没做时」那一臂 = 把**已接住但曾经空转**的声明折回它的旧行为。
+                // `text-align: justify` 就是这一格：`declaration_status` 一直认它 `Applied`，
+                // 于是两臂都留着它、差值是 0 —— 而接通前它落 `_ => 0.0`，与左对齐逐像素同解。
+                // 折回 `start` 之后，这张表的「排版影响」才看得见两端对齐那笔摊开。
+                let mut d = decl.clone();
+                if d.property == "text-align" && d.value.trim().eq_ignore_ascii_case("justify") {
+                    d.value = "start".into();
+                }
+                d
+            })
             .collect();
         if !declarations.is_empty() {
             kept.push(folio_core::content::format::css::Rule {
@@ -299,19 +317,28 @@ fn without_unsupported(rules: &RuleSet) -> RuleSet {
     }
 }
 
-/// 把**全书每一章**都排一遍，返回（行盒总数，正文总高之和，行盒左缘的平均值）。
+/// 把**全书每一章**都排一遍，返回
+/// （行盒总数，正文总高之和，行盒左缘的平均值，行盒墨迹宽的平均值）。
 ///
 /// 为什么累加而不是只取第一章：EPUB 的第一章常常是封面页或扉页（只有图，甚至没有文本），
 /// 那种页量出来的「差」是 0，看不出任何事。全书累加才是这本书的排版差。
-fn geometry(flow: &FlowDoc, rules: &RuleSet) -> (usize, f32, f32) {
+///
+/// **最后一格（墨迹宽）是两端对齐唯一看得见的地方**：它不改行数、不改高、不改左缘
+/// （`Justify` 的偏移是 0），只把字在行内摊开 —— 所以量 `ink_width`（撑开的墨迹宽）
+/// 才量得到它。没有这一格，`text-align: justify` 在这张表里永远是「差 0」。
+fn geometry(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> (usize, f32, f32, f32) {
     use folio_core::content::dom::Dom;
     use folio_core::content::format::css::computed::ComputedStyle;
     use folio_core::layout::{LayoutOptions, layout};
     let mut lines = 0usize;
     let mut height = 0.0f32;
     let mut left_sum = 0.0f32;
-    for chapter in &flow.chapters {
-        let dom = Dom::parse(chapter.source().as_bytes());
+    let mut ink_sum = 0.0f32;
+    for (index, _chapter) in flow.chapters.iter().enumerate() {
+        let Ok(source) = doc.chapter_source(index) else {
+            continue;
+        };
+        let dom = Dom::parse(source.as_bytes());
         let styles = cascade(&dom, rules, &ComputedStyle::default());
         // 没有 `<body>` 的章（手写得很野的老书）从文档根节点排，行为与 app 侧一致。
         let body = dom
@@ -333,6 +360,7 @@ fn geometry(flow: &FlowDoc, rules: &RuleSet) -> (usize, f32, f32) {
         lines += laid.lines.len();
         for line in &laid.lines {
             left_sum += line.x;
+            ink_sum += line.ink_width();
         }
         // 每章的正文高就是它最后一行的行底，然后**跨章累加** ——
         // 取 max 只会量出最长那一章，说不了整本书的事。
@@ -342,22 +370,15 @@ fn geometry(flow: &FlowDoc, rules: &RuleSet) -> (usize, f32, f32) {
             .map(|line| line.y + line.height)
             .unwrap_or(0.0);
     }
-    (
-        lines,
-        height,
-        if lines == 0 {
-            0.0
-        } else {
-            left_sum / lines as f32
-        },
-    )
+    let per_line = |sum: f32| if lines == 0 { 0.0 } else { sum / lines as f32 };
+    (lines, height, per_line(left_sum), per_line(ink_sum))
 }
 
 /// 把两份排版的差打成一行字，附在统计表后面。
-fn impact(flow: &FlowDoc, rules: &RuleSet) -> String {
-    let (lines_now, height_now, left_now) = geometry(flow, rules);
+fn impact(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> String {
+    let (lines_now, height_now, left_now, ink_now) = geometry(doc, flow, rules);
     let dropped = without_unsupported(rules);
-    let (lines_then, height_then, left_then) = geometry(flow, &dropped);
+    let (lines_then, height_then, left_then, ink_then) = geometry(doc, flow, &dropped);
     let page = 900.0;
     let pages_now = (height_now / page).ceil() as usize;
     let pages_then = (height_then / page).ceil() as usize;
@@ -369,15 +390,18 @@ fn impact(flow: &FlowDoc, rules: &RuleSet) -> String {
     format!(
         "\n### 排版影响（全书 {} 章、600px 版心、假度量）\n\
          没接住的声明整条丢掉（= 这些属性还没做时）：{lines_then} 行、正文高 {height_then:.0}px、\
-         平均行左缘 {left_then:.1}px、按 900px 页高 {pages_then} 页\n\
-         现在接住了：{lines_now} 行、正文高 {height_now:.0}px、平均行左缘 {left_now:.1}px、{pages_now} 页\n\
-         差：{} 行、{:+.0}px（{:+.2}%）、平均左缘 {:+.1}px\n\
+         平均行左缘 {left_then:.1}px、平均行墨迹宽 {ink_then:.1}px、按 900px 页高 {pages_then} 页\n\
+         现在接住了：{lines_now} 行、正文高 {height_now:.0}px、平均行左缘 {left_now:.1}px、\
+         平均行墨迹宽 {ink_now:.1}px、{pages_now} 页\n\
+         差：{} 行、{:+.0}px（{:+.2}%）、平均左缘 {:+.1}px、平均墨迹宽 {:+.1}px\n\
          口径：正文高 = 每章最后一行的行底跨章累加；水平落差（`margin-left`、缩进）不进那个数，\n\
-         所以要看「平均行左缘」这一列 —— 只报正文高会把左右边距的落差整个漏掉。\n",
+         所以要看「平均行左缘」与「平均行墨迹宽」这两列 —— 只报正文高会把左右边距与两端对齐\n\
+         的落差整个漏掉（`text-align: justify` 不改行数/高/左缘，只在行内摊开，只有墨迹宽量得到）。\n",
         flow.chapters.len(),
         lines_now as i64 - lines_then as i64,
         height_now - height_then,
         percent,
         left_now - left_then,
+        ink_now - ink_then,
     )
 }

@@ -55,7 +55,15 @@
 - CSS 子集是合同：`crates/folio-core/src/css/computed.rs` 顶部清单之外的一律忽略并记录，
   不许临时加特例进引擎核心；要扩清单，先改清单（代码里那份）再写实现。
 - `css-gap` example 的落差表口径：按元素排名的声明覆盖率，不含未实现属性的**几何**影响；
-  结论只用于排优先级，不是渲染保证。
+  结论只用于排优先级，不是渲染保证。「排版影响」一节另量**平均行墨迹宽**（`ink_width`）：
+  `text-align: justify` 不改行数/高/左缘，只在行内摊开，只有墨迹宽量得到它（并把它的
+  before 臂折回 `start`）。
+- **两端对齐（`text-align: justify`）与字距（`letter-spacing`）的 RTL 一期不做**：
+  余量的摊开方向与空隙计数、字形右推的方向在 RTL 下都反转。`layout::Justify` 对 RTL 行
+  直接给 `None`（该行不摊）；字距在绘制（`paint::GlyphRun`）的 RTL 段跳过右推，命中/选区
+  在 RTL 段则不精确（两条 shaping 路径的口径不同）。LTR 下三处逐字同源、逐像素对得上；
+  RTL 下宁可不动也不半接，记在这里而不是假装成了。本机四本书的 css/xhtml 里
+  `letter-spacing` 出现 0 次、带 justify 的 RTL 书为 0。
 
 ## 支撑「自研排版」的三条实测结论
 

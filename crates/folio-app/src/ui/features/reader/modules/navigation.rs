@@ -42,12 +42,12 @@ impl ReaderSession {
     /// 连续滚动走 90% 而不是 100%：整屏跳会让上一屏的末行彻底消失，读者找不到接续的那句。
     /// 分页 / 双页是一页一号，跳半页在这里没有意义。
     pub fn scroll_page(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.laid_out.mode.is_continuous() {
+        if !self.is_fixed() && self.laid_out.mode.is_continuous() {
             let page = self.laid_out.viewport * 0.9;
             self.set_scroll_y(self.scroll_y + delta as f32 * page, cx);
             return;
         }
-        self.set_page(self.page.saturating_add_signed(delta), cx);
+        self.set_page(self.page().saturating_add_signed(delta), cx);
     }
 
     /// 跳到本章的某个比例处（进度条）。
@@ -55,6 +55,11 @@ impl ReaderSession {
     /// 连续模式里进度条是**视口顶那一章**的章内刻度（与 `progress()` 同一口径），
     /// 拖到 1.0 就是把这一章的末屏摆上来。
     pub fn seek_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {
+        if self.is_fixed() {
+            let last = self.page_count().saturating_sub(1);
+            self.set_page((ratio.clamp(0.0, 1.0) * last as f32).round() as usize, cx);
+            return;
+        }
         if self.laid_out.mode.is_continuous() {
             let target = {
                 let Some(book) = self.book() else {
@@ -93,6 +98,24 @@ impl ReaderSession {
     /// 翻到第 `target` 页（越界夹到最后一页）。页号变了才落库、才重画。
     /// 翻走即清选中：高亮还指得上字，但被翻走的内容留在看不见的那一页上没有意义。
     pub(super) fn set_page(&mut self, target: usize, cx: &mut Context<Self>) {
+        // 定版式：页号由页表持有，翻页即改它（进度、恢复都按 `locator.chapter = 页号`）。
+        let fixed = self.fixed_mut().map(|book| {
+            let before = book.page();
+            book.set_page(target);
+            (before, book.page(), book.page_count())
+        });
+        if let Some((before, now, count)) = fixed {
+            if now == before {
+                return;
+            }
+            self.page = now;
+            self.laid_out.pages = count;
+            self.clear_selection();
+            self.wheel_accum = 0.0;
+            self.persist_if_moved();
+            cx.notify();
+            return;
+        }
         let target = target.min(self.laid_out.pages.saturating_sub(1));
         if target == self.page {
             return;
@@ -104,40 +127,55 @@ impl ReaderSession {
         cx.notify();
     }
 
-    /// 平台层算好的滚动增量落到正文。
+    /// 平台层算好的滚动增量落到正文。返回「这一下真的挪动了吗」——
+    /// 调用方拿它决定要不要重画（见 `view.rs` 的滚轮监听）。
     ///
     /// 触摸向下滑（dy > 0）时内容跟着手指往下走 ⇒ 露出的行号变小，所以是减。
-    pub(in crate::ui::features::reader) fn on_scroll(&mut self, event: &ScrollWheelEvent) {
+    pub(in crate::ui::features::reader) fn on_scroll(&mut self, event: &ScrollWheelEvent) -> bool {
         // 手指还按在屏幕上这件事，即使内容已被夹在章尾、一个字都没挪，也是「在读」。
         // 所以这一条不只靠 `persist_locator` 那个证据点（它要求位置真的变过）。
         self.note_reading_activity();
+        // 帧间隔归谁的那道判据之一：滚动事件到了几个（与「正文画了几次」「会话出了几次
+        // 元素树」三条一起看，见 `perf.rs` 模块头）。挂在最前面，因为它要数的是**事件**，
+        // 而下面那几条 `return false` 恰恰是「事件到了但没挪动」。
+        super::super::perf::note_scroll();
         let dy = match event.delta {
             ScrollDelta::Pixels(delta) => f32::from(delta.y),
             // 鼠标滚轮（外接键盘/调试时）按「行」给增量，按正文字号折算，别当 0 忽略。
             ScrollDelta::Lines(lines) => lines.y * self.prefs.font_size,
         };
         if dy == 0.0 {
-            return;
+            return false;
         }
-        if self.laid_out.mode.is_continuous() {
+        // 位置有没有真的变过：滚到章尾被夹住、分页攒不够半屏都不该重画。
+        // 这条判据与 gpui 自己的 `div` 滚动容器、zed editor 的 `scroll` 同源
+        // （位置没变就不 notify），省下的是一整帧的场景重建。
+        let before = (self.scroll_y, self.page);
+        if !self.is_fixed() && self.laid_out.mode.is_continuous() {
             let max = self.max_scroll();
             self.scroll_y = (self.scroll_y - dy).clamp(0.0, max);
         } else {
-            // 分页模式下滚轮不「滚」，它翻页：攒够半屏翻一页，方向与连续滚动一致。
+            // 分页 / 双页 / 定版式：滚轮不「滚」，它翻页：攒够半屏翻一页，方向与连续滚动一致。
             self.wheel_accum -= dy;
             let threshold = (self.laid_out.viewport * 0.5).max(1.0);
-            let before = self.page;
+            let last = self.page_count().saturating_sub(1) as isize;
+            let before = self.page() as isize;
+            let mut page = before;
             while self.wheel_accum.abs() >= threshold {
                 let step = if self.wheel_accum > 0.0 { 1 } else { -1 };
                 self.wheel_accum -= step as f32 * threshold;
-                let last = self.laid_out.pages.saturating_sub(1) as isize;
-                self.page = (self.page as isize + step).clamp(0, last) as usize;
+                page = (page + step).clamp(0, last);
             }
             // 翻走即清选中（与 `set_page` 同一条规矩；这里直接动页号，绕过了它）。
-            if self.page != before {
+            if page != before {
+                if let Some(fixed) = self.fixed_mut() {
+                    fixed.set_page(page as usize);
+                }
+                self.page = page as usize;
                 self.clear_selection();
             }
         }
         self.persist_if_moved();
+        (self.scroll_y, self.page) != before
     }
 }

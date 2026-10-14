@@ -44,9 +44,10 @@ pub enum Verdict {
     Readable(Format),
     /// 认得出是什么，但这一条路交不出一个能直接读的格式。带上的是给人看的那一句。
     ///
-    /// 三条空缺在这一档：PDF（要栅格化引擎）、MOBI / AZW3（PalmDB 容器，还没写那一族）、
-    /// UTF-16 文本（provider 那一条路只吃 UTF-8）。第四条「压缩包里装着书」**不是空缺**
-    /// 而是兜底：正常路径上管线已经逐条抽出来了，走到那一格说明抽取本身挂了。
+    /// 两条空缺在这一档：PDF（要栅格化引擎）、UTF-16 文本（provider 那一条路只吃
+    /// UTF-8）。第三条「压缩包里装着书」**不是空缺**而是兜底：正常路径上管线已经逐条
+    /// 抽出来了，走到那一格说明抽取本身挂了。（MOBI / AZW3 原先也在这档，现在有了
+    /// provider，改判成 [`Verdict::Readable`]。）
     Known(&'static str),
     /// 三层都走完了：不是能当书收的东西。
     NotABook,
@@ -158,7 +159,7 @@ fn magic(head: &[u8]) -> Option<Verdict> {
     }
     // PalmDB 的数据库类型在偏移 60..68。MOBI / AZW / AZW3 都是这一个容器。
     if head.len() >= 68 && head[60..68] == *b"BOOKMOBI" {
-        return Some(Verdict::Known("MOBI / AZW3"));
+        return Some(Verdict::Readable(Format::Mobi));
     }
     // UTF-16 的两个 BOM。provider 那一条路是 `read_to_string`（只吃 UTF-8），
     // 所以这是「认得出来但读不动」，不是「不是书」——别说成读者手里那是个假文件。
@@ -452,7 +453,7 @@ mod tests {
         mobi.extend_from_slice(&[0u8; 24]);
         for (name, body, want) in [
             ("book.pdf", b"%PDF-1.7\n".to_vec(), Verdict::Known("PDF")),
-            ("book.other", mobi.clone(), Verdict::Known("MOBI / AZW3")),
+            ("book.other", mobi.clone(), Verdict::Readable(Format::Mobi)),
         ] {
             let path = file_at(tmp.path(), name, &body);
             assert_eq!(identify(name, &path), want, "{name} 该由魔数定");

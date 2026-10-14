@@ -188,6 +188,7 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::rtf::RtfAdapter),
         Box::new(super::cbz::CbzAdapter),
         Box::new(super::chm::ChmAdapter),
+        Box::new(super::mobi::MobiAdapter),
     ]
 }
 
@@ -216,6 +217,7 @@ pub fn provider_for(path: &Path) -> Option<Box<dyn DocumentProvider>> {
 pub fn supported_extensions() -> &'static [&'static str] {
     &[
         "epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "rtf", "cbz", "chm",
+        "mobi", "azw", "azw3", "prc",
     ]
 }
 
@@ -290,6 +292,7 @@ mod tests {
                     authors: Vec::new(),
                     format: Format::Text,
                     size: 0,
+                    ..DocMeta::default()
                 },
                 Content::Reflow(Default::default()),
             ))
@@ -354,16 +357,15 @@ mod tests {
             ("a.rtf", Format::Rtf),
             ("a.cbz", Format::Cbz),
             ("a.chm", Format::Chm),
+            ("a.mobi", Format::Mobi),
+            ("a.azw3", Format::Mobi),
         ] {
             let provider =
                 provider_for(Path::new(name)).unwrap_or_else(|| panic!("{name} 该有 provider"));
             assert_eq!(provider.format(), want, "{name}");
         }
-        assert!(
-            provider_for(Path::new("a.mobi")).is_none(),
-            "没注册就是不认"
-        );
-        assert_eq!(providers().len(), 8);
+        assert!(provider_for(Path::new("a.pdf")).is_none(), "没注册就是不认");
+        assert_eq!(providers().len(), 9);
     }
 
     /// 粗筛那一道门的**名字那一半**：注册表清单里的每一个仍然过，认不出的名字不过。
