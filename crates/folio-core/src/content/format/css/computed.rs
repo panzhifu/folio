@@ -18,11 +18,86 @@ use apply::{apply, apply_in_cascade_order, parse_inline_style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextAlign {
+    /// 起始边：`ltr` 是左，`rtl` 是右。CSS 的初值就是这一档（不是 `left`）。
     #[default]
+    Start,
+    /// 结束边：`ltr` 是右，`rtl` 是左。
+    End,
+    /// 物理左。作者显式写 `text-align: left` 时用它 —— 那种写法**不跟着方向翻**，
+    /// 而 `Start` 翻，这是 CSS 的分界。
     Left,
     Right,
     Center,
     Justify,
+}
+
+/// 一段文字的书写方向，即 CSS 的 `direction`。
+///
+/// 这一版做到「块与行」这一层：它决定 `start` / `end` 落在物理的哪一边、`text-indent`
+/// 缩哪一边、以及一行里各片段的**视觉次序**（`layout::collect` 那一次同级反转）。
+/// 片段**内部**的字形重排不在这里做，也不该在这里做：绘制那条路是按整段做 shaping 的，
+/// bidi 与镜像已经在那一层发生（`cosmic-text` 每次 `shape_line` 自己跑 UAX #9），
+/// 这里再排一次就是两处各排各的。
+///
+/// 没接的两样要说清：`writing-mode`（竖排是另一根轴，见下面那份忽略名单），以及 CSS 的
+/// `unicode-bidi: isolate` / `bidi-override` 那类显式嵌入与覆盖 —— 后者出错的样子是
+/// 「混排里那一小截位置反了」，不是整段读不了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Direction {
+    #[default]
+    Ltr,
+    Rtl,
+}
+
+impl Direction {
+    pub fn is_rtl(self) -> bool {
+        self == Direction::Rtl
+    }
+}
+
+/// HTML 的 `dir="auto"`：这一节里**第一个强方向字符**决定方向，一个都没有就回 `None`
+/// （调用方留继承值 —— 「不知道」不等于「左」）。
+///
+/// 「强方向」按 UAX #9 就是 Bidi_Class ∈ {L, R, AL}。两条容易踩的正好都在这里：
+/// **阿拉伯文与希伯来文是 `AL` 而不是 `R`**，只认 `R` 会把一整类 RTL 的书判成 LTR；
+/// **CJK 汉字的 Bidi_Class 是 `L`**，所以中文段落在第一个字就上定下来，不必扫完全文。
+///
+/// 表用 `unicode-bidi`（锁里本来就有那一份，理由写在根 `Cargo.toml`），自己不抄那七千行区间。
+fn first_strong_direction(text: &str) -> Option<Direction> {
+    use unicode_bidi::BidiClass::{AL, L, R};
+    text.chars().find_map(|ch| match unicode_bidi::bidi_class(ch) {
+        L => Some(Direction::Ltr),
+        R | AL => Some(Direction::Rtl),
+        _ => None,
+    })
+}
+
+impl TextAlign {
+    /// 折成物理一侧。只有 `Start` / `End` 跟着 `direction` 翻，其余原样。
+    pub fn physical(self, dir: Direction) -> TextAlign {
+        match (self, dir) {
+            (TextAlign::Start, Direction::Rtl) | (TextAlign::End, Direction::Ltr) => {
+                TextAlign::Right
+            }
+            (TextAlign::Start, Direction::Ltr) | (TextAlign::End, Direction::Rtl) => {
+                TextAlign::Left
+            }
+            (other, _) => other,
+        }
+    }
+
+    /// 内容宽 `content` 在可用宽 `avail` 里该让出的水平偏移。
+    ///
+    /// 两处落位（块级替换元素、折好的行盒）都走这一句，于是「物理左右」这件事在全仓
+    /// 只有一份定义 —— 加 `direction` 之前那两处各写了一遍 `Right => avail - width`。
+    pub fn offset_in(self, dir: Direction, avail: f32, content: f32) -> f32 {
+        let spare = (avail - content).max(0.0);
+        match self.physical(dir) {
+            TextAlign::Right => spare,
+            TextAlign::Center => spare / 2.0,
+            _ => 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -169,6 +244,10 @@ pub struct ComputedStyle {
     /// 时，设备上没装 `MyFont` 就直接落回读者的字体，作者排在第二位的那一份明明装着。
     /// 逐个试的工作在平台层做（只有它知道这台设备注册了哪些家族，见 `ui::reader::measure`）。
     pub font_families: Vec<String>,
+    /// 书写方向。CSS 的 `direction`，**可继承**；来源有三处：作者样式表、元素的
+    /// `dir` 属性（HTML 的 presentational hint，优先级在作者样式之下），以及继承。
+    /// 见 [`Direction`] 那一段「做到哪一层」的说明。
+    pub direction: Direction,
     pub text_align: TextAlign,
     pub text_indent: f32,
     pub margin_top: f32,
@@ -238,7 +317,8 @@ impl Default for ComputedStyle {
             font_italic: false,
             font_family: String::new(),
             font_families: Vec::new(),
-            text_align: TextAlign::Left,
+            direction: Direction::Ltr,
+            text_align: TextAlign::Start,
             text_indent: 0.0,
             margin_top: 0.0,
             margin_bottom: 0.0,
@@ -303,6 +383,7 @@ impl std::hash::Hash for ComputedStyle {
         self.font_italic.hash(h);
         self.font_family.hash(h);
         self.font_families.hash(h);
+        (self.direction as u8).hash(h);
         (self.text_align as u8).hash(h);
         f(self.text_indent, h);
         f(self.margin_top, h);
@@ -357,7 +438,9 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "background",
     "min-height",
     "text-shadow",
-    "direction",
+    // `direction` 以前在这份名单里（「认得、接受、不生效」），2026-10-14 那一轮把它
+    // 变成真生效的属性，所以移出去了；`writing-mode` 留下 —— 竖排要改行轴与字形方向，
+    // 那是另一根轴，还没接。见 [`Direction`]。
     "writing-mode",
     // `orphans` / `widows` / `break-inside` / `page-break-*` 以前在这份名单里
     // （「接受、不生效」），M4 的分片器把它们变成真生效的属性，所以移出去了。
@@ -493,6 +576,29 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle) -> StyledD
         // 空标签名命中不到任何 UA 规则，等价于「只继承」。
         let mut style =
             crate::content::format::css::ua::seed(&parent, dom.tag_name(id).unwrap_or_default());
+        // HTML 的 `dir="rtl|ltr"` 是一条**呈现提示**（presentational hint）：优先级在作者
+        // 样式表之下、UA 默认之上，所以落在 `apply_in_cascade_order` 之前 —— 作者真写了
+        // `direction` 就把这一格盖掉。RTL 的书在 EPUB 里几乎都靠根元素这一个属性标注，
+        // 只认样式表等于整本不认：出版工具很少往 RTL 书里另外写 `direction` 声明。
+        //
+        // `auto` 有意不当 RTL 用（也不当 LTR 用 —— 它就落回继承值）。那档要按「第一个强
+        // 方向字符」判，而我们没有那份字符表：`unicode-bidi` 只在依赖图里（gpui 的文本栈
+        // 带进来的），没转成直接依赖。猜错的方向比不猜更难查，所以宁可少接一档。
+        if let Some(dir) = dom.attr(id, "dir") {
+            match dir.trim().to_ascii_lowercase().as_str() {
+                "ltr" => style.direction = Direction::Ltr,
+                "rtl" => style.direction = Direction::Rtl,
+                "auto" => {
+                    // `auto` 要**看内容**才能定：第一个强方向字符是哪一边。判得出就订下来，
+                    // 一个强方向字符都没有就留继承值 —— 「不知道」不等于「左」。
+                    // 这一档常见到不能不做：聊天与社媒导出的 HTML 给每一段写 `<p dir="auto">`。
+                    if let Some(found) = first_strong_direction(&dom.text_of_subtree(id)) {
+                        style.direction = found;
+                    }
+                }
+                _ => {}
+            }
+        }
         let decls = rules.matching_declarations(dom, id);
         // 元素的 `style="…"`。CSS 把它排在「作者普通声明」之上、`!important` 那两档之下：
         // 整份追加到最后会让行内普通声明盖掉书里的 `color: red !important`，

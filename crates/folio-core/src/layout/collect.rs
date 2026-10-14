@@ -17,7 +17,7 @@ use super::wrap::{
     scan_by_char, scan_by_word, trim_end_spaces,
 };
 use crate::content::dom::{Dom, NodeId, NodeKind};
-use crate::content::format::css::computed::{ComputedStyle, Display, StyledDom, TextAlign};
+use crate::content::format::css::computed::{ComputedStyle, Display, StyledDom};
 
 /// `style_of` 查不到时给的兵底样式。正常不会用到 —— `StyledDom` 为每个节点都算了一条。
 pub(super) static DEFAULT_STYLE: LazyLock<ComputedStyle> = LazyLock::new(ComputedStyle::default);
@@ -111,6 +111,26 @@ impl Collected {
         let idx = self.images.partition_point(|im| im.at < at);
         self.images.get(idx).filter(|im| im.at == at)
     }
+}
+
+/// 把一行的片段排成**视觉顺序**。
+///
+/// RTL 时整列反转：逻辑上第一个片段（阅读起点）落到最右边。每个片段内部不再动 ——
+/// 字形级的重排与镜像由绘制那一路的 shaping 负责（`cosmic-text` 每次 `shape_line`
+/// 自己按整段跑 UAX #9），这里再动一次就是两处各排各的。
+///
+/// 这等价于「每个带样式的片段是一个嵌入盒、同一层的片段整组反序」，也就是 UAX #9 在
+/// 一本书里最常见的那种情形：阿拉伯段落里插一个 `<span dir="ltr">2024</span>`，
+/// 数字岛保持自己顺序、岛与岛之间随段落反序。已知不覆盖的是作者显式写
+/// `unicode-bidi: isolate` / `bidi-override` 的那两档（我们没接那两个值）。
+fn ordered_for_display(
+    mut fragments: Vec<LineFragment>,
+    direction: crate::content::format::css::computed::Direction,
+) -> Vec<LineFragment> {
+    if direction.is_rtl() {
+        fragments.reverse();
+    }
+    fragments
 }
 
 impl<'a> Ctx<'a> {
@@ -325,7 +345,8 @@ impl<'a> Ctx<'a> {
         );
     }
 
-    /// 摆放一个块级元素（不做块级缓存），返回边框盒高度。
+    
+/// 摆放一个块级元素（不做块级缓存），返回边框盒高度。
     fn block_uncached(&mut self, node: NodeId, x: f32, y: f32, width: f32) -> f32 {
         let style = self.style_of(node);
         // 盒模型从外到内一次算清：边框与内边距一起从可用宽里扣掉，正文与折行都在内容盒里
@@ -344,11 +365,9 @@ impl<'a> Ctx<'a> {
             let content_width = (width - pl - pr).max(1.0);
             let (w, h) = image_size(style, img.width, img.height, content_width);
             let index = self.push_block(node, x, y, width, String::new(), true);
-            let offset = match style.text_align {
-                TextAlign::Right => (content_width - w).max(0.0),
-                TextAlign::Center => (content_width - w).max(0.0) / 2.0,
-                _ => 0.0,
-            };
+            // 块级图片的对齐：`start`/`end` 先按这一块的 `direction` 折成物理左右，
+            // 再算让出多少（`TextAlign::offset_in` 是全仓唯一一处这份算术）。
+            let offset = style.text_align.offset_in(style.direction, content_width, w);
             self.lines.push(LineBox {
                 owner: node,
                 fragments: vec![LineFragment::Image(ImageRun {
@@ -720,15 +739,19 @@ impl<'a> Ctx<'a> {
         // 可用宽要扣掉这一行让出去的左边距（首行的 `text-indent`、被首字符压着的
         // 那几行让开的一格），否则居中的标题会按整幅宽算偏移，把字推出版心。
         let avail = (place.width - indent - reserved).max(1.0);
-        let offset = match style.text_align {
-            TextAlign::Right => (avail - acc.width).max(0.0),
-            TextAlign::Center => (avail - acc.width).max(0.0) / 2.0,
-            _ => 0.0,
-        };
+        let offset = style.text_align.offset_in(style.direction, avail, acc.width);
+        // 起始边让出的那一段落在哪一侧：LTR 在左，RTL 在右。行盒的 `x` 记的**一直是内容
+        // 左缘**，所以 RTL 时这笔让位不加在 `x` 上，而是由上面那份 `offset` 从右缘往回算
+        // —— 两条式子对「贴起始边」给出同一个结果，而作者钉死的物理 `left` 在 RTL 里
+        // 就真的贴左（起始让位那一格因此不吃香，这是 CSS 的行为，不是漏的）。
+        let rtl = style.direction.is_rtl();
+        let inset = if rtl { 0.0 } else { indent };
         self.lines.push(LineBox {
             owner,
-            fragments: acc.fragments,
-            x: place.x + indent + offset,
+            // 片段顺序 = 视觉顺序。排版与绘制、命中与选中矩形都只吃这一份顺序，所以
+            // RTL 的反转在这里做一次就够（见 `ordered_for_display`）。
+            fragments: ordered_for_display(acc.fragments, style.direction),
+            x: place.x + inset + offset,
             y: place.y,
             width: acc.width,
             height,

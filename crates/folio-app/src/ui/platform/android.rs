@@ -117,6 +117,32 @@ pub(crate) fn set_immersive(on: bool) {
     }
 }
 
+/// 把音量键这一按还给系统：调一格 `STREAM_MUSIC`，并照常出系统音量条。
+///
+/// 为什么需要应用自己调：音量键交给 native 之后系统那一路就不再动了，而阅读页把它们花在
+/// 翻页上 —— 于是「当前不在阅读页」这一档必须有人补这一次调整（对面那份 Java 是
+/// `GpuiSystemUi.adjustVolume`）。形状照 [`set_immersive`]：递给 Java 它自己切回 UI 线程，
+/// 失败只写日志 —— 音量没动是小事，不该把按键派发拖退。
+pub(crate) fn adjust_volume(up: bool) {
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("adjustVolume"),
+            ::jni::jni_sig!("(Landroid/app/Activity;Z)V"),
+            &[JValue::Object(&act), JValue::Bool(up)],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::debug!("adjust_volume: up={up} 已递给系统"),
+        Err(err) => tracing::warn!("adjust_volume: {err}"),
+    }
+}
+
 /// folio 自己的日志在 logcat 里放到哪一档（整数档位，Error=1 … Trace=5，见 [`own_level_raw`]）。
 /// 由 `Config::logging.level` 定，装 subscriber 之前是默认的 `Info`（3，够启动那几行用）。
 /// 依赖库不看它，见 [`FilteredLogcat`]。

@@ -504,7 +504,9 @@ impl Document {
             text_align: if prefs.justify {
                 TextAlign::Justify
             } else {
-                TextAlign::Left
+                // 读者的「不两端对齐」要的是**贴起始边**，不是贴物理左边：阿拉伯语的书
+                // 关掉两端对齐应该右对齐。CSS 的初值本来也是 `start`。
+                TextAlign::Start
             },
             text_indent: prefs.font_size * prefs.indent_em.max(0.0),
             ..ComputedStyle::default()

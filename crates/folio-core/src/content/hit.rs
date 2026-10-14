@@ -212,8 +212,13 @@ pub fn rects_for_range(
                 for (k, _) in text.chars().enumerate() {
                     let at = base + k;
                     if at >= from && at < to {
-                        let cx0 = run_x + edges[k];
-                        let cx1 = run_x + edges[k + 1].max(edges[k]);
+                        // 一条边界表在 RTL 那一段上是**递减**的（`edges[k]` 的含义是
+                        // 「这个字符在阅读方向上的起点」，见 `Measure::char_edges`），
+                        // 所以取矩形要 min/max 两个都要 —— 只 `max` 那一头是以前默认
+                        // 表递增留下的写法，方向一反就塌成零宽的一条。
+                        let a = run_x + edges[k];
+                        let b = run_x + edges[k + 1];
+                        let (cx0, cx1) = (a.min(b), a.max(b));
                         let (x0, x1) = rect.unwrap_or((cx0, cx0));
                         rect = Some((x0.min(cx0), x1.max(cx1)));
                     }

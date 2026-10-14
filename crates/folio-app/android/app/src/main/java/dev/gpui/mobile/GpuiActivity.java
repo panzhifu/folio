@@ -90,24 +90,24 @@ public class GpuiActivity extends GpuiInputActivity {
     }
 
     /**
-     * Intercept key events to handle volume and media buttons.
+     * Route media buttons to the MediaSession; everything else takes the normal path.
      *
-     * NativeActivity normally forwards ALL key events to the native side,
-     * which means volume keys would be consumed by the Rust event loop
-     * without actually adjusting the system volume. We intercept them here
-     * and let the system handle them instead.
+     * The volume keys are deliberately NOT special-cased here. NativeActivity hands every key
+     * event to the native input queue on the ordinary path, and the fork maps
+     * {@code KEYCODE_VOLUME_UP/DOWN} onto bindable GPUI keystrokes, so the reader can spend them
+     * on page turns. Screens that want the buttons back call
+     * {@link GpuiSystemUi#adjustVolume}, which is what keeps the volume keys useful outside the
+     * reading page.
+     *
+     * <p>Whether the system's own volume step still fires alongside that is decided in the
+     * input policy, above this class, and not by returning from here — so on a real device the
+     * level may move while the page turns. That is measured, not assumed; see
+     * {@code plans/facts.md}.</p>
      */
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         int keyCode = event.getKeyCode();
         switch (keyCode) {
-            case KeyEvent.KEYCODE_VOLUME_UP:
-            case KeyEvent.KEYCODE_VOLUME_DOWN:
-            case KeyEvent.KEYCODE_VOLUME_MUTE:
-                // Let the system handle volume keys (adjusts STREAM_MUSIC).
-                // Don't pass to NativeActivity's native input handler.
-                return super.dispatchKeyEvent(event);
-
             case KeyEvent.KEYCODE_MEDIA_PLAY:
             case KeyEvent.KEYCODE_MEDIA_PAUSE:
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:

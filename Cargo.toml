@@ -88,6 +88,15 @@ quick-xml = "0.42"
 cssparser = "0.38"
 selectors = "0.41"
 unicode-linebreak = "0.1.5"
+# `dir="auto"` 与 CSS 的 `unicode-bidi` 都要按 UAX #9 的**字符类表**判「这个字符算哪一边」，
+# 那张表是七千多行区间 —— 自己抄一份不是省依赖，是拿抄错换一次编译通过。
+#
+# **不是新依赖树**：锁里已有 0.3.18 一份，`gpui-pre-wgpu` 与它带的 `cosmic-text` 都靠这个包
+# 做断行前的 bidi（`unicode-bidi-mirroring` 则是 `rustybuzz` 带的），这里只是把图上已有的这份
+# 转成 folio-core 的直接依赖 —— 与上面 `flate2` / `crc32fast` / `encoding_rs` 和
+# `unicode-linebreak` 完全同一条理由。默认 feature（`std` + `hardcoded-data`）就是要的那份：
+# 表编进二进制，运行时不读外部数据、不联网取 Unicode 版本。
+unicode-bidi = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

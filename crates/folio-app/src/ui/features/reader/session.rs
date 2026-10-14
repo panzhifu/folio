@@ -552,6 +552,16 @@ impl ReaderSession {
         }
     }
 
+    /// 整本的翻页方向：`true` = 从右往左翻。
+    ///
+    /// 只有 EPUB 的 `<spine page-progression-direction="rtl">` 会给 `true`（其余格式那一格
+    /// 恒为 `false`，见 `FlowDoc::progression_rtl`）。没有书（兜底那一行）按左翻。
+    /// 这一问的是**手**的事：点哪一侧算下一页、箭头按钮按下去往哪走 —— 与正文往哪边流
+    /// （CSS 的 `direction`，管排版）是两件事，各读各的。
+    pub(super) fn progression_rtl(&self) -> bool {
+        self.book().is_some_and(|book| book.progression_rtl())
+    }
+
     /// 当前那本书的可变借用；兜底那一行没有书，返回 `None`。
     pub(super) fn book_mut(&mut self) -> Option<&mut Book> {
         match &mut self.source {

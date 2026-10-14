@@ -182,6 +182,19 @@ impl ReadingPage {
         true
     }
 
+    /// 音量键要翻的那一页。`delta` 说的是**读书顺序里的那一侧**，不是屏幕的左右：
+    /// 页号本来就按阅读序排（左右分区那条换算在 `chrome::zone` 里），所以 +1 在 RTL
+    /// 的书里也还是「往后一页」。
+    ///
+    /// 走的正是点屏幕左右两边那条路（`on_body_tap` 里 `Effect::NextPage` 那一支），
+    /// 所以连续滚动与分页两种模式的行为、以及章末自动跨章，全都跟着正文一致。
+    /// 目录 / 设置 / 「⋯」那一层浮着的时候也照样翻正文 —— 那几屏自己有滚动条，
+    /// 让音量键去翻它们要另写一套消费逻辑，这一版不做。
+    pub fn turn_page(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.reader
+            .update(cx, |reader, cx| reader.scroll_page(delta, cx));
+    }
+
     fn pop(&mut self, cx: &mut Context<Self>) {
         let _ = self
             .stack
@@ -202,7 +215,9 @@ impl ReadingPage {
             return;
         }
         let width = f32::from(window.viewport_size().width);
-        let tap = zone(f32::from(position.x), width);
+        // 左右两档意味着什么，跟着整本的翻页方向走（`zone` 里那一条）。
+        let rtl = self.reader.read(cx).progression_rtl();
+        let tap = zone(f32::from(position.x), width, rtl);
         match self.chrome.handle_body_tap(tap) {
             Effect::OpenChrome | Effect::DismissChrome => cx.notify(),
             Effect::PrevPage => {
@@ -350,12 +365,23 @@ impl ReadingPage {
     /// 也能顺手跨到隔壁一章。
     fn progress_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let reader = self.reader.read(cx);
-        let can_prev = reader.can_advance(-1);
-        let can_next = reader.can_advance(1);
-        let page_prev = cx.entity().clone();
-        let page_next = cx.entity().clone();
+        // 箭头仍然只指「往哪边走」，翻书方向跟着整本走：从右往左读的书里，左边那颗
+        // 按下去是**下一章**（图标不用换 —— 它指左，而左就是阅读的前方），要换的是
+        // 动作、标签和可不可用三样。
+        let rtl = reader.progression_rtl();
+        let (left_delta, right_delta) = if rtl { (1isize, -1isize) } else { (-1isize, 1isize) };
+        let can_left = reader.can_advance(left_delta);
+        let can_right = reader.can_advance(right_delta);
+        // 两个闭包各自要一份句柄（`Entity` 不 `Copy`），所以左边右边各克隆一次。
+        let page_left = cx.entity().clone();
+        let page_right = cx.entity().clone();
         let prev_label = tr(cx, "reader.prev_chapter");
         let next_label = tr(cx, "reader.next_chapter");
+        let (left_label, right_label) = if left_delta > 0 {
+            (next_label.clone(), prev_label.clone())
+        } else {
+            (prev_label.clone(), next_label.clone())
+        };
         h_flex()
             .w_full()
             .items_center()
@@ -365,11 +391,11 @@ impl ReadingPage {
                     .ghost()
                     .small()
                     .icon(IconName::ChevronLeft)
-                    .tooltip(prev_label.clone().to_string())
-                    .accessibility_label(prev_label)
-                    .disabled(!can_prev)
+                    .tooltip(left_label.to_string())
+                    .accessibility_label(left_label)
+                    .disabled(!can_left)
                     .on_click(move |_, _, cx| {
-                        page_prev.update(cx, |this, cx| this.advance(-1, cx))
+                        page_left.update(cx, |this, cx| this.advance(left_delta, cx))
                     }),
             )
             .child(Slider::new(&self.progress).flex_1().min_w_0())
@@ -378,10 +404,12 @@ impl ReadingPage {
                     .ghost()
                     .small()
                     .icon(IconName::ChevronRight)
-                    .tooltip(next_label.clone().to_string())
-                    .accessibility_label(next_label)
-                    .disabled(!can_next)
-                    .on_click(move |_, _, cx| page_next.update(cx, |this, cx| this.advance(1, cx))),
+                    .tooltip(right_label.to_string())
+                    .accessibility_label(right_label)
+                    .disabled(!can_right)
+                    .on_click(move |_, _, cx| {
+                        page_right.update(cx, |this, cx| this.advance(right_delta, cx))
+                    }),
             )
             .into_any_element()
     }

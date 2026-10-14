@@ -2043,6 +2043,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-bidi",
  "unicode-linebreak",
  "ureq",
  "zip",
@@ -3136,7 +3137,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-mobile"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/gpui-mobile?rev=29f19d3e9e4889d79dccad67ba9902dbc6bf6091#29f19d3e9e4889d79dccad67ba9902dbc6bf6091"
+source = "git+https://github.com/panzhifu/gpui-mobile?rev=885abd899a8503dea42a5e498347a685f4f80c1d#885abd899a8503dea42a5e498347a685f4f80c1d"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -4248,9 +4249,9 @@ checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libchm"

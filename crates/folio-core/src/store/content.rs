@@ -95,7 +95,7 @@ impl Store {
         tx.execute(
             "UPDATE books
                 SET css = ?2, toc_json = ?3, index_version = ?4,
-                    cover_hash = ?5, cover_mime = ?6
+                    cover_hash = ?5, cover_mime = ?6, progression_rtl = ?7
               WHERE id = ?1",
             params![
                 book_id,
@@ -104,6 +104,7 @@ impl Store {
                 crate::content::format::INDEX_VERSION,
                 doc.cover_ref.as_ref().map(|c| c.hash.clone()),
                 doc.cover_ref.as_ref().map(|c| c.mime.clone()),
+                doc.progression_rtl as i64,
             ],
         )?;
         tx.commit()?;
@@ -173,8 +174,9 @@ impl Store {
             tracing::debug!("store: 第 {book_id} 本没有入库的章节，回 None");
             return Ok(None);
         }
-        let (css, toc_json, cover_hash, cover_mime) = conn.query_row(
-            "SELECT css, toc_json, cover_hash, cover_mime FROM books WHERE id = ?1",
+        let (css, toc_json, cover_hash, cover_mime, progression_rtl) = conn.query_row(
+            "SELECT css, toc_json, cover_hash, cover_mime, progression_rtl
+               FROM books WHERE id = ?1",
             params![book_id],
             |r| {
                 Ok((
@@ -182,6 +184,8 @@ impl Store {
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
+                    // v18 之前入库的行是 0，读回「按左翻」正是那一版唯一可能的答案。
+                    r.get::<_, i64>(4)?,
                 ))
             },
         )?;
@@ -240,6 +244,7 @@ impl Store {
             cover: None,
             images,
             cover_ref,
+            progression_rtl: progression_rtl != 0,
         }))
     }
 

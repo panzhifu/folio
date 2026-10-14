@@ -335,4 +335,16 @@ ALTER TABLE books DROP COLUMN cover_spec;
     r#"
 ALTER TABLE images ADD COLUMN source TEXT NOT NULL DEFAULT '';
 "#,
+    // v18：**整本的翻页方向入库**。`books.progression_rtl` 存 EPUB 的
+    // `<spine page-progression-direction="rtl">` 那一格，读者要的是「点屏幕哪一侧算下一页」
+    // 和「箭头按钮按下去往哪走」—— 那是**手**的事，与正文往哪边流（CSS 的 `direction`，
+    // 来自元素的 `dir`）是两件事，两格各存各的，不许从一个推另一个。
+    //
+    // 为什么不在开书时现读 OPF：开书只读索引（`plans/text-out-of-db.md` 那条立场），
+    // 而这一格是导入那一趟本来就把 OPF 读完之后顺手有的数，带过来比再开一次容器便宜。
+    // SQLite 没有布尔列，0 / 1 存 INTEGER，与 `books` 其余那几格同一口径；默认 0 = 按左翻，
+    // 也就是「这一版还没读过这本书的 spine」的旧行照旧能用。
+    r#"
+ALTER TABLE books ADD COLUMN progression_rtl INTEGER NOT NULL DEFAULT 0;
+"#,
 ];

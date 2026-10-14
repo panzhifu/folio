@@ -35,9 +35,12 @@ fn flow(parts: &[(&str, &str)]) -> FlowDoc {
                 Chapter::inline(*title, *source).with_spine_href(format!("#{i}"))
             })
             .collect(),
-        // 文档级三项一起进往返测试：EPUB 的 CSS / 目录 / 封面走的是 books 表的列。
+        // 文档级四项一起进往返测试：EPUB 的 CSS / 目录 / 封面 / 翻页方向走的是 books 表的列。
         css: "p { text-indent: 2em }".into(),
         css_hrefs: Vec::new(),
+        // 故意取 `true`：这一格默认是 `false`，填 false 的往返测试什么都守不住
+        // （漏写 INSERT 或 SELECT 都是绿）。
+        progression_rtl: true,
         toc: vec![TocEntry {
             title: parts.first().map(|t| t.0.to_string()).unwrap_or_default(),
             href: "#0".into(),
@@ -382,6 +385,10 @@ fn the_index_roundtrips_through_the_store() {
     assert_eq!(back.chapters[1].title, "第一章");
     assert_eq!(back.css, doc.css);
     assert_eq!(back.toc, doc.toc);
+    assert_eq!(
+        back.progression_rtl, doc.progression_rtl,
+        "v18 那一列得跟着回来，否则 RTL 书重开就变成左翻"
+    );
     // 封面字节**不回来**（v16）：库里只有 `cover_ref` 那两格描述，
     // 字节在 `covers/` 那个文件里。这一格是 `flow()` 造的假封面，它没有对应的
     // 文件，所以读回来是 `None` —— 这正是「字节不能进库」的形状。

@@ -95,6 +95,27 @@ pub(crate) fn set_reader_fullscreen(on: bool, _window: &mut Window) {
 #[cfg(all(mobile, not(target_os = "android")))]
 pub(crate) fn set_reader_fullscreen(_on: bool, _window: &mut Window) {}
 
+/// 音量键落在**非阅读页**时，把这一按交给系统去调音量。
+///
+/// 阅读页把音量键花在翻页上（[`crate::ui::shell`] 里那条分流），而 Android 上
+/// NativeActivity 会把音量键交给 native，系统那一路就不再动了 —— 所以「不翻页」的那一档
+/// 必须有人补一次调整，否则音量键在书架、设置里就成了死键。
+///
+/// - **Android**：递给那份 Java（`GpuiSystemUi.adjustVolume`），调 `STREAM_MUSIC` 并带
+///   `FLAG_SHOW_UI`，反馈与在应用外按一样。
+/// - **桌面**：没有这条路 —— 桌面的音量键由桌面环境自己在按键派发之前处理掉，gpui 不会
+///   把它当成一个 `Keystroke` 发进来，所以这里永远不会被调到。
+/// - **iOS / HarmonyOS**：iOS 拿不到硬件音量键的事件（只能观察输出音量的变化，既不知道
+///   「按下」也压不掉系统 HUD），所以「音量键翻页」这一档在 iOS 上做不出来；这一条静默
+///   no-op 只是把口留着。
+#[cfg(target_os = "android")]
+pub(crate) fn adjust_system_volume(up: bool) {
+    android::adjust_volume(up);
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn adjust_system_volume(_up: bool) {}
+
 /// 状态栏图标那一档，跟着界面的浅深走：浅色界面要**深色**图标。
 ///
 /// 不跟着翻会白图标画在白底上，整条状态栏看着像消失了 —— Android 15 起系统强制

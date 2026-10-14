@@ -1,6 +1,8 @@
 package dev.gpui.mobile;
 
 import android.app.Activity;
+import android.content.Context;
+import android.media.AudioManager;
 import android.os.Build;
 import android.view.View;
 import android.view.Window;
@@ -29,6 +31,41 @@ public final class GpuiSystemUi {
         if (activity == null) return;
         final boolean wanted = immersive;
         activity.runOnUiThread(() -> apply(activity, wanted));
+    }
+
+    /**
+     * Move the music stream one volume step in the direction Rust names.
+     *
+     * <p>The volume keys are not handled by the system here: NativeActivity forwards every key
+     * event to the native input queue and consumes it, so the framework's own volume handling
+     * never runs. That is what lets the reader spend the keys on page turns — and what would
+     * leave the buttons doing nothing at all on any other screen, were it not for this call. So
+     * the app decides: the reading page turns a page, everything else comes here to hand the
+     * button back.</p>
+     *
+     * <p>{@link AudioManager#FLAG_SHOW_UI} keeps the system's level bar visible, so the feedback
+     * is the one a user gets outside this app. {@code ADJUST_RAISE} and {@code ADJUST_LOWER} are
+     * the API 1 constants; the {@code ADJUST_VOLUME_*} aliases came later than the API 26
+     * {@code minSdk} allows for the older devices still in the field.</p>
+     *
+     * <p>Called by Rust, from any thread.</p>
+     */
+    public static void adjustVolume(Activity activity, boolean up) {
+        if (activity == null) return;
+        final int direction = up ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER;
+        activity.runOnUiThread(() -> {
+            AudioManager audio =
+                    (AudioManager) activity.getSystemService(Context.AUDIO_SERVICE);
+            if (audio == null) return;
+            try {
+                audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction,
+                        AudioManager.FLAG_SHOW_UI);
+            } catch (SecurityException e) {
+                // Only a managed profile or a device policy can refuse this; log rather than
+                // rethrow, because a silent volume key beats a crashed reader.
+                android.util.Log.e("GpuiSystemUi", "adjustStreamVolume refused", e);
+            }
+        });
     }
 
     private static void apply(Activity activity, boolean immersive) {

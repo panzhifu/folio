@@ -161,14 +161,24 @@ pub enum Zone {
 ///
 /// 宽度非正是**能发生的**：窗口正在销毁或还没量过。那种时候按中间那一档算，
 /// 因为左右两档要拿宽度做除法，猜一个方向比猜另一个更没根据。
-pub fn zone(x: f32, width: f32) -> Zone {
+///
+/// `rtl` 是**整本的翻页方向**（EPUB 的 `<spine page-progression-direction="rtl">`，
+/// 落在 `FlowDoc::progression_rtl`）：从右往左读的书里点左侧是「往前翻」，点右侧是「往回翻」。
+/// 三等分本身不动 —— 读者的拇指落在哪儿与语言无关，换的只是那两侧各自意味着什么。
+/// 中间那一档（开合浮层）与方向无关，所以 `rtl` 不许影响它。
+pub fn zone(x: f32, width: f32, rtl: bool) -> Zone {
     if width <= 0.0 {
         return Zone::ToggleChrome;
     }
+    let (left, right) = if rtl {
+        (Zone::NextPage, Zone::PrevPage)
+    } else {
+        (Zone::PrevPage, Zone::NextPage)
+    };
     if x < width / 3.0 {
-        Zone::PrevPage
+        left
     } else if x > width * 2.0 / 3.0 {
-        Zone::NextPage
+        right
     } else {
         Zone::ToggleChrome
     }
@@ -292,13 +302,18 @@ mod tests {
     #[test]
     fn the_body_is_split_into_three_zones() {
         // 三分之一 / 三分之二是拇指去够左右两页的距离，不是精确刻度；这里钉的是边界归属。
-        assert_eq!(zone(0.0, 300.0), Zone::PrevPage);
-        assert_eq!(zone(99.0, 300.0), Zone::PrevPage);
-        assert_eq!(zone(150.0, 300.0), Zone::ToggleChrome);
-        assert_eq!(zone(201.0, 300.0), Zone::NextPage);
+        assert_eq!(zone(0.0, 300.0, false), Zone::PrevPage);
+        assert_eq!(zone(99.0, 300.0, false), Zone::PrevPage);
+        assert_eq!(zone(150.0, 300.0, false), Zone::ToggleChrome);
+        assert_eq!(zone(201.0, 300.0, false), Zone::NextPage);
+        // 从右往左翻的书：左右两档对调，中间那一档不动。
+        assert_eq!(zone(0.0, 300.0, true), Zone::NextPage);
+        assert_eq!(zone(99.0, 300.0, true), Zone::NextPage);
+        assert_eq!(zone(150.0, 300.0, true), Zone::ToggleChrome);
+        assert_eq!(zone(201.0, 300.0, true), Zone::PrevPage);
         // 宽度非正是能发生的（窗口正在销毁或还没量过），那种时候按中间那档算。
-        assert_eq!(zone(10.0, 0.0), Zone::ToggleChrome);
-        assert_eq!(zone(10.0, -1.0), Zone::ToggleChrome);
+        assert_eq!(zone(10.0, 0.0, false), Zone::ToggleChrome);
+        assert_eq!(zone(10.0, -1.0, false), Zone::ToggleChrome);
     }
 
     #[test]

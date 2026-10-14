@@ -67,8 +67,12 @@ pub trait Measure: Send + Sync {
         None
     }
 
-    /// run 内每个字符**起点**的 x（与真实 shaping 同源），返回长度 = 字符数 + 1，
-    /// 末项是整段宽度 —— 选中矩形的左右缘用它画，才能贴住绘制出来的字。
+    /// run 内每个字符**在阅读方向上的起点**的 x（与真实 shaping 同源），返回长度 =
+    /// 字符数 + 1，末项是这一段在阅读方向上的**终点**。
+    ///
+    /// RTL 那一段是**递减**的（起点在右、终点在左），LTR 递增 —— 所以取一个字符的矩形
+    /// 要把相邻两项 min/max 都算，不许假设表是升的（`content::hit` 的选中矩形就按这条写）。
+    /// 选中矩形的左右缘用它画，才能贴住绘制出来的字。
     /// `None` = 同上，退回 [`char_width`](Self::char_width) 累加。
     fn char_edges(&self, _text: &str, _font: &FontKey, _font_size: f32) -> Option<Vec<f32>> {
         None

@@ -1237,3 +1237,103 @@ fn the_batch_width_matches_per_char_measurement() {
 mod cache;
 // 排版结果上两张索引（行 → 块、按 y 二分）与接线前线性扫的逐行对照。
 mod index;
+
+// ---- 方向：RTL 的行盒几何 ----
+
+/// RTL 段落的行盒从**起始边**（右）起笔，LTR 同一份内容从左起笔。
+///
+/// mock 度量是「拉丁 0.5 em、字号 16」，所以一行占多宽是能算死的数：`abcd` 32 + `ef` 16
+/// = 48，版心 200 → LTR 起笔 0，RTL 起笔 152。方向只许改「落在哪儿」，不许改折行与行宽 ——
+/// 那两样改了就等于进度与分片跟着变，而读者没换书。
+#[test]
+fn an_rtl_line_hangs_from_the_start_edge() {
+    let html = "<p>abcd<i>ef</i></p>";
+    let (_, ltr) = typeset(html, "", 200.0);
+    let (_, rtl) = typeset(html, "p { direction: rtl }", 200.0);
+    assert_eq!(ltr.lines.len(), rtl.lines.len(), "方向不许改变折行结果");
+    assert_eq!(ltr.lines[0].width, rtl.lines[0].width, "同一行的宽不该随方向变");
+    assert_eq!(ltr.lines[0].x, 0.0, "LTR 的起始边就是左");
+    assert_eq!(
+        rtl.lines[0].x + rtl.lines[0].width,
+        200.0,
+        "RTL 该贴住版心右缘，实际行盒 {:?}",
+        (rtl.lines[0].x, rtl.lines[0].width)
+    );
+}
+
+/// 一行里的片段按**视觉顺序**排，而每段自己的字节区间仍是逻辑的那一段。
+///
+/// 反转只做一次、做在这一层：绘制（`ui::reader::scene`）、命中与选中矩形
+/// （`content::hit`）都只吃 `LineBox::fragments` 这一份顺序，两处各反一次就又分叉了。
+/// 区间不许动 —— 锚点、进度、批注都按它算（`plans/Locator.md`）。
+#[test]
+fn rtl_reverses_fragment_order_but_not_the_byte_ranges() {
+    let html = "<p>abcd<i>ef</i></p>";
+    let norms = |laid: &Layout| -> Vec<std::ops::Range<usize>> {
+        laid.lines[0]
+            .fragments
+            .iter()
+            .filter_map(|f| match f {
+                LineFragment::Text(run) => Some(run.norm.clone()),
+                LineFragment::Image(_) => None,
+            })
+            .collect()
+    };
+    let (_, ltr) = typeset(html, "", 200.0);
+    let (_, rtl) = typeset(html, "p { direction: rtl }", 200.0);
+    let (a, b) = (norms(&ltr), norms(&rtl));
+    assert!(
+        a.len() >= 2 && b.len() >= 2,
+        "这份夹具该给出至少两个片段，实际 {a:?} / {b:?}"
+    );
+    assert!(a[0].start < a[1].start, "LTR 的视觉序就是逻辑序：{a:?}");
+    assert!(b[0].start > b[1].start, "RTL 该反过来：{b:?}");
+    let mut from_ltr = a.clone();
+    from_ltr.sort_unstable_by_key(|r| r.start);
+    let mut from_rtl = b.clone();
+    from_rtl.sort_unstable_by_key(|r| r.start);
+    assert_eq!(
+        from_ltr, from_rtl,
+        "两个方向排出来的字节区间必须一模一样（顺序除外）"
+    );
+}
+
+/// 作者钉死的物理 `left` 在 RTL 里**不跟着翻**，默认那一档（`start`）翻。
+///
+/// 这一条是 `Start` / `End` 两个变体存在的全部理由：合成一档就分不开这两种作者意图，
+/// 而写法上撞对同一个位置的只有 `right`。
+#[test]
+fn a_physical_alignment_stays_physical_under_rtl() {
+    let html = "<p>abcd</p>";
+    let (_, left) = typeset(html, "p { direction: rtl; text-align: left }", 200.0);
+    assert_eq!(left.lines[0].x, 0.0, "写了 left 就该贴左");
+    let (_, start) = typeset(html, "p { direction: rtl }", 200.0);
+    assert!(start.lines[0].x > 0.0, "不写就该贴起始边（右）");
+    let (_, right) = typeset(html, "p { direction: rtl; text-align: right }", 200.0);
+    assert_eq!(
+        right.lines[0].x,
+        start.lines[0].x,
+        "物理 right 与 RTL 的 start 撞在同一处，这是巧合而不是合并成一档的理由"
+    );
+    // LTR 那边一克都不许变：这一批改动若动了 LTR 的落位，红的是全部现有排版测试。
+    let (_, ltr_start) = typeset(html, "", 200.0);
+    assert_eq!(ltr_start.lines[0].x, 0.0);
+    let (_, ltr_end) = typeset(html, "p { text-align: end }", 200.0);
+    assert_eq!(ltr_end.lines[0].x + ltr_end.lines[0].width, 200.0);
+}
+
+/// 首行缩进让的是**起始边**：LTR 让左，RTL 让右，而让完的行宽一模一样。
+#[test]
+fn text_indent_insets_the_start_side_in_both_directions() {
+    let html = "<p>abcd</p>";
+    let (_, ltr) = typeset(html, "p { text-indent: 20px }", 200.0);
+    assert_eq!(ltr.lines[0].x, 20.0, "LTR 缩左");
+    let (_, rtl) = typeset(html, "p { direction: rtl; text-indent: 20px }", 200.0);
+    assert_eq!(
+        rtl.lines[0].x + rtl.lines[0].width,
+        180.0,
+        "RTL 缩右：右缘该让出 20，实际 {:?}",
+        (rtl.lines[0].x, rtl.lines[0].width)
+    );
+    assert_eq!(rtl.lines[0].width, ltr.lines[0].width, "让位不该改字宽");
+}

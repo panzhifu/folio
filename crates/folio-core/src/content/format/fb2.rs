@@ -96,6 +96,8 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
         css: String::new(),
         css_hrefs: Vec::new(),
         toc: Vec::new(),
+        // 翻页方向只有 EPUB 的 spine 那一格读得出来，其余格式按左翻。
+        progression_rtl: false,
         cover,
         images,
         // 同上：落盘之后由管线填。

@@ -527,6 +527,16 @@ impl Book {
         &self.document
     }
 
+    /// 整本的翻页方向：`true` = 从右往左翻。
+    ///
+    /// 只有 EPUB 的 `<spine page-progression-direction="rtl">` 会给 `true`；其余格式 provider
+    /// 那一格恒为 `false`（见 `folio_core::content::format::FlowDoc::progression_rtl`）。
+    /// 问的是**手**的事 —— 点屏幕哪一侧算下一页、进度条两端那两颗箭头按下去往哪走；
+    /// 正文往哪边流是另一件事（CSS 的 `direction`），两格各读各的，不许互相推。
+    pub fn progression_rtl(&self) -> bool {
+        self.doc.flow().is_some_and(|flow| flow.progression_rtl)
+    }
+
     pub fn document_mut(&mut self) -> &mut Document {
         &mut self.document
     }

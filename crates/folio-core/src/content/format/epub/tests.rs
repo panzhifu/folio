@@ -1781,4 +1781,47 @@ fn an_unusable_fallback_leaves_the_declared_item_alone() {
     }
 }
 
+/// 整本的**翻页方向**来自 `<spine page-progression-direction>`，与正文往哪边流是两件事。
+///
+/// 四个 case 各钉一处：显式 `rtl` 要翻；`ltr` 与**属性缺席**都是左翻；而规范里的
+/// `default` 这一档我们明知不完整也照样折成左翻 —— 它要求「由内容自己的方向定」，
+/// 而开书那一趟只读索引、不回头嗅第一章的首强字符（`FlowDoc::progression_rtl` 那条
+/// 注释写了代价：一本没写这属性的 RTL 书，正文照旧右起、点按区却还按左翻）。
+/// 属性值的大小写与首尾空格也不该成为第二道门槛。
+#[test]
+fn the_spine_page_progression_direction_lands_on_the_flow_doc() {
+    for (spine_attrs, want, why) in [
+        (r#"page-progression-direction="rtl""#, true, "显式写了 rtl"),
+        (r#"page-progression-direction="RTL""#, true, "值大小写不敏感"),
+        ("page-progression-direction=\" rtl \"", true, "首尾空格不算第二个门槛"),
+        (r#"page-progression-direction="ltr""#, false, "显式左翻"),
+        (r#"page-progression-direction="default""#, false, "default 折成左翻（已知不完整）"),
+        ("", false, "属性缺席"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ppd.epub");
+        let opf = format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>翻页方向</dc:title></metadata>
+  <manifest><item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine {spine_attrs}><itemref idref="c1"/></spine>
+</package>"#
+        );
+        write_epub(
+            &path,
+            &[
+                ("mimetype", b"application/epub+zip"),
+                ("META-INF/container.xml", CONTAINER.as_bytes()),
+                ("OEBPS/content.opf", opf.as_bytes()),
+                (
+                    "OEBPS/Text/chap1.xhtml",
+                    "<html><body><p>正文</p></body></html>".as_bytes(),
+                ),
+            ],
+        );
+        let flow = flow_of(&path);
+        assert_eq!(flow.progression_rtl, want, "{why}（spine 写的是 {spine_attrs:?}）");
+    }
+}
 

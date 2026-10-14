@@ -4,7 +4,8 @@
 //! 入口留在父模块，这里的东西只对整个 `css` 内部开放，不属于对外公开面。
 
 use super::{
-    BorderEdge, BorderStyle, ComputedStyle, Display, Hyphens, KNOWN_UNIMPLEMENTED, TextAlign,
+    BorderEdge, BorderStyle, ComputedStyle, Direction, Display, Hyphens, KNOWN_UNIMPLEMENTED,
+    TextAlign,
 };
 use crate::content::format::css::Declaration;
 use crate::content::format::css::value::{
@@ -70,6 +71,10 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         font_family: parent.font_family.clone(),
         font_families: parent.font_families.clone(),
         text_align: parent.text_align,
+        // `direction` 在 CSS 里可继承，而且它是 `start`/`end` 折边的唯一依据，
+        // 所以继承断了就等于整棵子树回到左起 —— RTL 书通常在 `<html>` 或 `<body>`
+        // 上写一次，靠的就是这一行。
+        direction: parent.direction,
         color: parent.color,
         text_indent: parent.text_indent,
         word_spacing: parent.word_spacing,
@@ -234,12 +239,36 @@ pub(super) fn apply(
             style.font_families = list;
             true
         }
+        "direction" => match value.to_ascii_lowercase().as_str() {
+            "ltr" => {
+                style.direction = Direction::Ltr;
+                true
+            }
+            "rtl" => {
+                style.direction = Direction::Rtl;
+                true
+            }
+            // 只认这两个值。CSS 里 `direction` 没有别的关键词（`auto` 不是 CSS 值，
+            // 它是 HTML 的 `dir` 属性那一侧的东西，见 `css::computed` 的层叠入口），
+            // 所以写 `auto` 进样式表算「这条没接住」，进 ignored 计数。
+            _ => false,
+        },
         "text-align" => match value.to_ascii_lowercase().as_str() {
-            "left" | "start" => {
+            // `start` / `end` 与 `left` / `right` 分开存：前者跟着 `direction` 翻边，
+            // 后者是作者钉死的物理方向。合并成一档就是把 RTL 的书全左对齐的那处错。
+            "start" => {
+                style.text_align = TextAlign::Start;
+                true
+            }
+            "end" => {
+                style.text_align = TextAlign::End;
+                true
+            }
+            "left" => {
                 style.text_align = TextAlign::Left;
                 true
             }
-            "right" | "end" => {
+            "right" => {
                 style.text_align = TextAlign::Right;
                 true
             }

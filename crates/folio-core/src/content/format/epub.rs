@@ -265,6 +265,13 @@ struct Opf {
     spine: Vec<SpineRef>,
     /// `<meta name="cover" content="<item id>">`
     cover_id: Option<String>,
+    /// `<spine page-progression-direction="rtl">`：整本往哪边翻。
+    ///
+    /// 与 `dir="rtl"`（正文往哪边流）是两件事，各读各的，别从一个推另一个。
+    /// 规范里的 `default` 与属性缺席**都折成 `false`**：那一档要求「由内容自己定」，
+    /// 而开书那一趟只读索引、不回头嗅第一章的首强字符。后果与理由写在
+    /// [`crate::content::format::FlowDoc::progression_rtl`] 上。
+    progression_rtl: bool,
 }
 
 /// spine 上 `linear="no"` 的那几节默认**不**当一章。
@@ -378,6 +385,12 @@ fn parse_opf(xml: &str) -> Opf {
                     "metadata" | "manifest" => section = name.to_string(),
                     "spine" => {
                         section = name.to_string();
+                        // 只认显式写了的 `rtl`。`ltr` / `default` / 没写 三种都落 `false`，
+                        // 其中 `default` 那一档是明知不完整的取舍，理由见字段上的注释。
+                        // 枚举值的属性按规范要先去首尾空白（`" rtl "` 是合法写法），
+                        // 比 `dir` 那一格同一口径。
+                        out.progression_rtl = attr(&e, "page-progression-direction")
+                            .is_some_and(|v| v.trim().eq_ignore_ascii_case("rtl"));
                     }
                     "title" | "creator" => {
                         pending = Some((name.to_string(), String::new()));
@@ -1578,6 +1591,7 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         css,
         css_hrefs,
         toc,
+        progression_rtl: opf.progression_rtl,
         cover: cover_bytes,
         images,
         // 封面落盘是导入管线的事：provider 只交字节，不知道书库在哪儿。

@@ -67,6 +67,30 @@ fn the_bottom_bar_yields_to_the_reading_page() {
     );
 }
 
+/// 回归门：音量键只在阅读页翻页，别处必须把这一按还给系统。
+///
+/// 这条分流是整个功能唯一的判据，而两头的失败都安静：阅读页里不翻页＝键按下去没反应，
+/// 书架里不转音量＝把系统本来就有的键做成了死键。翻页那一路要进阅读页、音量那一路要进
+/// JNI，宿主测试两样都摸不到，所以钉在 [`VolumeKey::of`] 这一层。
+/// 「音量上 = 往后一页」的符号也钉在这里 —— 改了口径测试会红，不会悄悄反过来。
+#[test]
+fn the_volume_keys_page_only_on_the_reading_view() {
+    use super::VolumeKey;
+
+    assert_eq!(VolumeKey::of(true, true), VolumeKey::Turn(1));
+    assert_eq!(VolumeKey::of(true, false), VolumeKey::Turn(-1));
+    assert_eq!(
+        VolumeKey::of(false, true),
+        VolumeKey::SystemVolume { up: true },
+        "不在阅读页时音量键该调音量"
+    );
+    assert_eq!(
+        VolumeKey::of(false, false),
+        VolumeKey::SystemVolume { up: false },
+        "两个方向都别吞"
+    );
+}
+
 /// 回归门：报给阅读页的那份扣减里必须含外壳 pad 掉的安全区。
 ///
 /// 阅读页自己量的是**窗口**高，正文盒 = 窗口高 − 报过去的这一条 − 页眉 − 页脚。

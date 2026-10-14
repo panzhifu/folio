@@ -142,6 +142,8 @@ impl DocumentProvider for ChmAdapter {
             css: String::new(),
             css_hrefs: Vec::new(),
             toc,
+ // 翻页方向只有 EPUB 的 spine 那一格读得出来，其余格式按左翻。
+            progression_rtl: false,
             cover: None,
             images,
             cover_ref: None,

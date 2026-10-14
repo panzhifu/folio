@@ -466,6 +466,8 @@ impl Measure for GpuiMeasure {
         Some(text.len())
     }
 
+    /// 每个逻辑字符边界的 x，**按阅读方向取「起点」那一侧**。算术在
+    /// [`edges_from_glyphs`] 里（那份是纯函数，方向与边界都能单测，不需要窗口）。
     fn char_edges(&self, text: &str, font: &FontKey, font_size: f32) -> Option<Vec<f32>> {
         if text.is_empty() {
             return None;
@@ -474,28 +476,74 @@ impl Measure for GpuiMeasure {
             self.window_texts
                 .shape_line(text.into(), px(font_size), &[self.run(text, font)], None);
         let width = f32::from(shaped.width);
-        let glyphs: Vec<_> = shaped.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
-        // edges[k] = 第 k 个字符起点的 x；edges[0] 恒为 0（run 的原点）。
-        // 字符边界找不到恰好落在它之上的字形（shaping 把它并进了前一个
-        // cluster，比如连字）时，沿用前一个边界的 x。
-        let mut edges = vec![0.0f32];
-        let mut cursor = 0.0f32;
-        let mut gi = 0usize;
-        for (offset, _) in text.char_indices().skip(1) {
-            while gi < glyphs.len() && (glyphs[gi].index as usize) < offset {
-                cursor = f32::from(glyphs[gi].position.x);
-                gi += 1;
-            }
-            if let Some(glyph) = glyphs.get(gi)
-                && glyph.index == offset
-            {
-                cursor = f32::from(glyph.position.x);
-            }
-            edges.push(cursor);
-        }
-        edges.push(width);
-        Some(edges)
+        // shaper 交回来的就是**视觉顺序**的 (逻辑起点, x) 对，原样递下去。
+        let visual: Vec<(usize, f32)> = shaped
+            .runs
+            .iter()
+            .flat_map(|r| r.glyphs.iter())
+            .map(|g| (g.index as usize, f32::from(g.position.x)))
+            .collect();
+        Some(edges_from_glyphs(text, &visual, width))
     }
+}
+
+/// 从**视觉顺序**的字形表算出每个逻辑字符边界的「阅读起点」x。
+///
+/// 为什么不能照旧「沿视觉顺序走、拿 `index` 与字符边界比」：RTL 那一段的 `index` 在视觉
+/// 空间里是**递减**的（阿拉伯文的最右那个字形才是逻辑第 0 个），于是那个循环一步都撞不上，
+/// 发出去的是 `[0, 0, 0, …, width]`，选中矩形塌成一条零宽 —— 图看着是对的，划词却是空的。
+///
+/// `edges[k]` 因此定义为「第 k 个字符在**阅读方向上的起点**」：LTR 是它的左缘，RTL 是它的
+/// 右缘；末项是这一段在阅读方向上的**终点**。整条表 LTR 递增、RTL 递减，调用方两边都取
+/// `min/max`（`content::hit` 的选中矩形）。
+///
+/// 方向不靠外面传进来：把簇按逻辑序排开，第二个簇落在第一个左边就是从右往左读 —— 判的是
+/// 同一份 shaping 数字，不新增一处可能漂移的状态。**代价**是一段内部混排（既有 LTR 又有
+/// RTL 的同一个 run）只能按开头两位判读，那种 run 的逐字矩形是近似的；而点击落点走的是
+/// [`byte_at_x`](Measure::byte_at_x) 那一条，它逐字形在视觉空间里找，仍然精确。
+pub(super) fn edges_from_glyphs(text: &str, visual: &[(usize, f32)], width: f32) -> Vec<f32> {
+    if visual.is_empty() {
+        return vec![0.0, width];
+    }
+    // 每个簇（同一 `index` 的几个字形）在视觉空间里占的左右两边。前进量按**视觉邻居**算：
+    // 字形总是从左往右摆的，下一位的 x 减自己的 x 就是它占多宽 —— 这与阅读方向无关，
+    // 也和 `byte_at_x` 同源。
+    let mut span: HashMap<usize, (f32, f32)> = HashMap::new();
+    for (i, (at, x)) in visual.iter().enumerate() {
+        let right = visual
+            .get(i + 1)
+            .map_or(width, |next| x + (next.1 - x).max(0.0));
+        span.entry(*at)
+            .and_modify(|(lo, hi)| {
+                *lo = lo.min(*x);
+                *hi = hi.max(right);
+            })
+            .or_insert((*x, right));
+    }
+    let mut keys: Vec<usize> = span.keys().copied().collect();
+    keys.sort_unstable();
+    let rtl = keys
+        .windows(2)
+        .next()
+        .is_some_and(|w| span[&w[1]].0 < span[&w[0]].0);
+    let reading_start = |at: usize| span.get(&at).map(|(lo, hi)| if rtl { *hi } else { *lo });
+    // 边界落在某个簇中间（连字、组合符）时沿用前一个边界的 x —— 与旧写法同一退路。
+    let mut edges = Vec::with_capacity(text.chars().count() + 1);
+    let mut cursor = reading_start(0).unwrap_or(0.0);
+    edges.push(cursor);
+    for (offset, _) in text.char_indices().skip(1) {
+        if let Some(x) = reading_start(offset) {
+            cursor = x;
+        }
+        edges.push(cursor);
+    }
+    // 终点：阅读方向上最后那一头。LTR 是整段宽，RTL 是最左边那个簇的左缘。
+    edges.push(if rtl {
+        span[&keys[0]].0.min(span[&keys[keys.len() - 1]].0)
+    } else {
+        width
+    });
+    edges
 }
 
 #[cfg(test)]
@@ -792,5 +840,74 @@ mod tests {
             (20.5, -4.0),
             "两档各取自己的最大：ascent 取高的，descent 取不那么负的"
         );
+    }
+
+    // ---- 逐字边界表（`edges_from_glyphs`，RTL 那一批加的纯函数）----
+
+    use super::edges_from_glyphs;
+
+    /// LTR：边界就是每个字符的左缘，表递增，末项是整段宽。
+    ///
+    /// 这一条也是「LTR 一克都没变」的反证基准：把 `rtl` 那一路改成恒 `false`，
+    /// 下面那条 RTL 用例红、这条照旧绿；反过来把它改成恒 `true`，这条红。
+    #[test]
+    fn ltr_edges_are_each_clusters_left_edge() {
+        let visual = [(0, 0.0), (1, 10.0), (2, 20.0), (3, 30.0)];
+        assert_eq!(
+            edges_from_glyphs("abcd", &visual, 40.0),
+            vec![0.0, 10.0, 20.0, 30.0, 40.0]
+        );
+    }
+
+    /// RTL：shaper 把阿拉伯文的簇从右往左摆，逻辑第 0 个字落在**最右**。
+    ///
+    /// 钉的是这一批之前的真事故 —— 旧写法沿视觉顺序走、拿 `index` 与字符边界比，
+    /// 在这种表上一次都撞不上，于是发出 `[0, 0, 0, 0, 40]`：字画得对，划词选中却
+    /// 塌成一条零宽。现在 `edges[k]` 是「阅读方向上的起点」（RTL 即右缘），表递减，
+    /// 相邻两项 min/max 出来就是每个字真正的框。
+    #[test]
+    fn rtl_edges_are_each_clusters_right_edge_in_logical_order() {
+        // 视觉从左到右依次是逻辑 3、2、1、0。
+        let visual = [(3, 0.0), (2, 10.0), (1, 20.0), (0, 30.0)];
+        let edges = edges_from_glyphs("abcd", &visual, 40.0);
+        assert_eq!(edges, vec![40.0, 30.0, 20.0, 10.0, 0.0], "{edges:?}");
+        assert_eq!(edges.len(), "abcd".chars().count() + 1, "长度那条门不能破");
+        for k in 0..4 {
+            let (a, b) = (edges[k], edges[k + 1]);
+            // 逻辑第 k 个字画在 [30−10k, 40−10k] 那一段上。
+            assert_eq!(
+                (a.min(b), a.max(b)),
+                (30.0 - 10.0 * k as f32, 40.0 - 10.0 * k as f32),
+                "第 {k} 个字的框该贴住它画出来的位置"
+            );
+        }
+    }
+
+    /// 一个字符由多个字形组成（同一 `index`）时，框要覆盖那几位合起来占的宽度。
+    #[test]
+    fn a_multi_glyph_cluster_spans_all_of_its_glyphs() {
+        // 逻辑 0 由两个字形画成（合字拆开排），逻辑 1 在后面一位。
+        let rtl = [(1, 0.0), (0, 10.0), (0, 25.0)];
+        let edges = edges_from_glyphs("ab", &rtl, 40.0);
+        // 递减表：字符 0 的右缘取它最右那位的右边（40），左缘取最左那位的 x（10）。
+        assert_eq!(edges[0], 40.0, "起点取最右那一头的边：{edges:?}");
+        assert_eq!(edges.len(), 3, "长度 = 字符数 + 1");
+    }
+
+    /// 一个字都没有（空串走不到这里，但整段全是不可见字形时视觉表是空的）。
+    #[test]
+    fn an_empty_glyph_table_falls_back_to_the_two_ends() {
+        assert_eq!(edges_from_glyphs("abc", &[], 30.0), vec![0.0, 30.0]);
+    }
+
+    /// 边界落在某个簇中间（连字把两个字符并成一位）时沿用前一个边界，不许 panic、
+    /// 也不许把表长短写错 —— 调用方按「字符数 + 1」这条硬校验筛过。
+    #[test]
+    fn a_boundary_inside_a_cluster_inherits_the_previous_edge() {
+        // 「ab」被合成一个簇（只有 index 0 有字形），字符 1 没有自己的起点。
+        let visual = [(0, 0.0), (0, 18.0)];
+        let edges = edges_from_glyphs("ab", &visual, 30.0);
+        assert_eq!(edges.len(), 3, "{edges:?}");
+        assert_eq!(edges[1], edges[2].min(edges[1]), "撞不上就沿用前一个：{edges:?}");
     }
 }

@@ -43,6 +43,8 @@ quick-xml.workspace = true
 cssparser.workspace = true
 selectors.workspace = true
 unicode-linebreak.workspace = true
+# `dir="auto"` 的首强字符判定与 `unicode-bidi` 的字符类，见根 Cargo.toml 那条；不新增依赖树。
+unicode-bidi.workspace = true
 rust-i18n.workspace = true
 # 日志：core 这边只管「说了什么」——`tracing` 的宏与 span，配置在 `Config::logging`，
 # 装配 subscriber 的入口在 `src/logging.rs`。（不依赖 gpui 这条边界照旧成立：

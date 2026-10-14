@@ -5,8 +5,8 @@
 
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{
-    BorderEdge, BorderStyle, Color, ComputedStyle, Display, Hyphens, Length, StyledDom, TextAlign,
-    cascade,
+    BorderEdge, BorderStyle, Color, ComputedStyle, Direction, Display, Hyphens, Length, StyledDom,
+    TextAlign, cascade,
 };
 use crate::content::format::css::{Origin, RuleSet};
 
@@ -1182,4 +1182,171 @@ fn style_hash_covers_fields() {
         color: None,
     };
     assert_ne!(h(&base), h(&bordered), "边框变了哈希该变");
+}
+
+// ---- 方向：`direction` 与 `start` / `end` ----
+
+/// `direction` 以前在「认得、接受、不生效」那份名单里，现在它是真生效的**继承**属性。
+///
+/// 继承这一格是全部意义的来源：RTL 的书在 `<html>` 或 `<body>` 上写一次就管全书，
+/// 断了继承等于每个段落都要重贴一遍。
+#[test]
+fn direction_applies_and_inherits() {
+    let page = author("<div><p>文字</p></div>", "div { direction: rtl }");
+    let div = tag(&page, "div");
+    let p = tag(&page, "p");
+    assert_eq!(style(&page, div).direction, Direction::Rtl, "写了就该生效");
+    assert_eq!(style(&page, p).direction, Direction::Rtl, "子孙靠继承拿到方向");
+    // 反过来也要能翻回来：作者明确写 ltr 的一小节不该被整本书的方向带走。
+    let back = author("<div dir=\"rtl\"><p>文字</p></div>", "p { direction: ltr }");
+    assert_eq!(style(&back, tag(&back, "p")).direction, Direction::Ltr);
+}
+
+/// EPUB 里 RTL 的书几乎只在根元素写一个 `dir="rtl"`，不另外写样式表。
+/// 只认样式表等于整本不认 —— 认这个属性才是接到真书的那条路。
+///
+/// 它是 presentational hint，所以排在作者样式**之下**：作者真写了 `direction` 就压回来。
+#[test]
+fn the_dir_attribute_sets_direction_and_author_css_beats_it() {
+    let hinted = author("<p dir=\"rtl\">مرحبا</p>", "");
+    assert_eq!(style(&hinted, tag(&hinted, "p")).direction, Direction::Rtl);
+    // 大小写与空格都不该成为第二条门槛（真书里 `dir=" RTL "` 这种写法存在）。
+    let sloppy = author("<p dir=\" RTL \">x</p>", "");
+    assert_eq!(style(&sloppy, tag(&sloppy, "p")).direction, Direction::Rtl);
+    let overridden = author("<p dir=\"rtl\">x</p>", "p { direction: ltr }");
+    assert_eq!(
+        style(&overridden, tag(&overridden, "p")).direction,
+        Direction::Ltr,
+        "作者层高于呈现提示"
+    );
+}
+
+/// `dir="auto"` 按**内容**定方向：第一个强方向字符算哪一边就往哪边排。
+///
+/// 三条用例各钉一个真会踩的点：阿拉伯文的 Bidi_Class 是 `AL` 而**不是** `R`（只认 `R`
+/// 会把一整类书判成 LTR）；数字是 `EN`、不属于强方向，所以「1234 后面跟阿拉伯文」仍然
+/// 是 RTL（按「第一个非空白字符」判就会翻错）；汉字的 Bidi_Class 是 `L`。
+/// 第四个 case 钉的是「一个强方向字符都没有」—— 那必须留继承值而不是猜成 ltr。
+#[test]
+fn dir_auto_resolves_from_the_first_strong_character() {
+    for (body, want, why) in [
+        ("مرحبا", Direction::Rtl, "阿拉伯文是 AL，也是强方向"),
+        ("1234 مرحبا", Direction::Rtl, "数字不是强方向，要跳过去"),
+        ("مرحبا 1234", Direction::Rtl, "首强在开头就已经定了"),
+        ("中文正文", Direction::Ltr, "汉字的 Bidi_Class 是 L"),
+        ("Hello", Direction::Ltr, "拉丁字母是 L"),
+        ("1234 56,78", Direction::Ltr, "全是数字与标点：没有强方向字符，落回默认的 ltr"),
+    ] {
+        let page = author(&format!("<p dir=\"auto\">{body}</p>"), "");
+        assert_eq!(
+            style(&page, tag(&page, "p")).direction,
+            want,
+            "dir=\"auto\" 的内容是 {body:?}（{why}）"
+        );
+    }
+    // 一个强方向字符都没有时，继承的那一档不许被覆盖：阿拉伯语的书里一段纯页码
+    // 该继续留在右边，而不是被折回 LTR。
+    let nested = author("<div dir=\"rtl\"><p dir=\"auto\">1234</p></div>", "");
+    let p = tag(&nested, "p");
+    assert_eq!(
+        style(&nested, p).direction,
+        Direction::Rtl,
+        "判不出方向就留继承值，「不知道」不等于「左」"
+    );
+}
+
+/// CSS 的 `text-align` 初值是 `start` 而不是 `left`，两者在 RTL 下**结果相反**。
+/// 合成一档就是把每一本 RTL 的书左对齐 —— 那是读者一眼看得出的错。
+#[test]
+fn the_four_alignment_keywords_stay_four_apart() {
+    assert_eq!(
+        ComputedStyle::default().text_align,
+        TextAlign::Start,
+        "初值该是 start（CSS 的规定），不是 left"
+    );
+    for (keyword, want) in [
+        ("start", TextAlign::Start),
+        ("end", TextAlign::End),
+        ("left", TextAlign::Left),
+        ("right", TextAlign::Right),
+        ("center", TextAlign::Center),
+        ("justify", TextAlign::Justify),
+    ] {
+        let page = author("<p>x</p>", &format!("p {{ text-align: {keyword} }}"));
+        assert_eq!(
+            style(&page, tag(&page, "p")).text_align,
+            want,
+            "text-align: {keyword}"
+        );
+    }
+}
+
+/// `start` / `end` 按 `direction` 折边，`left` / `right` 不折；折完的偏移只有一份算术。
+#[test]
+fn logical_alignment_resolves_against_direction() {
+    use crate::content::format::css::computed::Direction as D;
+    let off = |align: TextAlign, dir: D| align.offset_in(dir, 200.0, 48.0);
+    assert_eq!(off(TextAlign::Start, D::Ltr), 0.0);
+    assert_eq!(off(TextAlign::Start, D::Rtl), 152.0, "起始边翻到右");
+    assert_eq!(off(TextAlign::End, D::Rtl), 0.0);
+    assert_eq!(off(TextAlign::End, D::Ltr), 152.0);
+    assert_eq!(off(TextAlign::Left, D::Rtl), 0.0, "作者钉死的左不许跟着翻");
+    assert_eq!(off(TextAlign::Right, D::Ltr), 152.0);
+    assert_eq!(off(TextAlign::Center, D::Rtl), 76.0);
+    assert_eq!(off(TextAlign::Justify, D::Rtl), 0.0, "两端对齐本身不产生偏移");
+    // 内容比版心还宽时不许给负偏移（旧的写法里有 `.max(0.0)`，这条不能悄悄丢）。
+    assert_eq!(off(TextAlign::Start, D::Rtl), 152.0);
+    assert_eq!(TextAlign::Right.offset_in(D::Ltr, 40.0, 48.0), 0.0);
+}
+
+/// 属性换了状态，`examples/css-gap` 那张表就不该再把它报成「认得但没接」。
+#[test]
+fn direction_is_applied_now_not_inert() {
+    use crate::content::format::css::Declaration;
+    use crate::content::format::css::computed::{DeclStatus, declaration_status};
+
+    let base = ComputedStyle::default();
+    let status = |value: &str| {
+        declaration_status(
+            &Declaration {
+                property: "direction".into(),
+                value: value.into(),
+                important: false,
+            },
+            &base,
+            16.0,
+        )
+    };
+    assert_eq!(status("rtl"), DeclStatus::Applied);
+    assert_eq!(status("LTR"), DeclStatus::Applied, "值大小写不敏感");
+    assert_eq!(status("sideways"), DeclStatus::Unparsed, "认不出的值要进 ignored 计数");
+    // 同一段名单里的 `writing-mode` 仍然没接 —— 它是竖排那一根轴，动的是行轴不是行序。
+    assert_eq!(
+        declaration_status(
+            &Declaration {
+                property: "writing-mode".into(),
+                value: "vertical-rl".into(),
+                important: false,
+            },
+            &base,
+            16.0,
+        ),
+        DeclStatus::Inert
+    );
+}
+
+/// 新增字段必须进样式哈希，否则块级缓存会读到过期结果（`ComputedStyle` 那段手写 `Hash`
+/// 的规矩）。这一条是那个规矩在 `direction` 上的落点。
+#[test]
+fn the_style_hash_covers_direction() {
+    let hash = |c: &ComputedStyle| {
+        use std::hash::{Hash as _, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        c.hash(&mut h);
+        h.finish()
+    };
+    let ltr = ComputedStyle::default();
+    let mut rtl = ComputedStyle::default();
+    rtl.direction = Direction::Rtl;
+    assert_ne!(hash(&ltr), hash(&rtl), "方向改了，块级缓存该失效");
 }

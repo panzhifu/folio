@@ -41,7 +41,37 @@ use gpui_kit::TestSupportExt as _;
 
 // 系统返回。Android 上 gpui-mobile 把 `AKEYCODE_BACK`（含边缘滑动）与
 // `OnBackInvokedCallback` 都翻成 **escape**，所以绑住 escape 就接住了返回。
-actions!(folio_shell, [Back]);
+//
+// `PageNext` / `PagePrev` 是音量键那两条（见 [`VolumeKey`]）：fork 把
+// `AKEYCODE_VOLUME_UP/DOWN` 翻成 `volumeup` / `volumedown` 两个键名，绑定名不能写成
+// 带连字符的 `volume-up` —— gpui 的 `Keystroke::parse` 会把连字符前面那段当修饰键读。
+actions!(folio_shell, [Back, PageNext, PagePrev]);
+
+/// 一次音量键按下该去哪儿。
+///
+/// 判据只有一条，而它两边都错不起：阅读页在最上面时音量键是翻页，别处必须把这一按
+/// 还给系统去调音量（不然书架、设置里音量键直接成了死键）。抽成纯函数是因为翻页要走
+/// 阅读页、调音量要走 JNI，宿主测试里两样都摸不到，只有这条分流能被直接断言。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum VolumeKey {
+    /// 按读书顺序走这么多页（`+1` = 往后一页）。
+    Turn(isize),
+    /// 交给系统调音量，`up` 是哪一边。
+    SystemVolume { up: bool },
+}
+
+impl VolumeKey {
+    /// 「音量上 = 往后一页」是拍的口径，改它只改这一行。RTL 不反过来：页号本来就按
+    /// 阅读序排（左右分区那套换算在 `reader::chrome::zone` 里），所以 +1 在两种方向下
+    /// 都是「往后一页」。
+    pub(crate) fn of(reading_on_top: bool, up: bool) -> Self {
+        if reading_on_top {
+            Self::Turn(if up { 1 } else { -1 })
+        } else {
+            Self::SystemVolume { up }
+        }
+    }
+}
 
 /// 导航栏该不该整条收起。**阅读页在最上面就收**，不分档位：读者点开一本书要的是
 /// 一整屏正文，而平板与桌面上那条侧栏会吃掉 260 逻辑像素 —— 双页对开正是靠这 260
@@ -162,6 +192,13 @@ impl AppShell {
     pub fn boot(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // 系统返回 → `Back`，由本视图的 `on_action` 处理。
         cx.bind_keys([KeyBinding::new("escape", Back, None)]);
+        // 音量键 → 翻页动作。归谁管在 `volume_key` 里判（阅读页翻页，别处调系统音量），
+        // 所以这里两条都无上下文地绑上：Android 的音量键不经过任何输入框，不存在和打字
+        // 抢键的问题；桌面那几个方向键要抢，就得先给阅读页一条 key context，另做一轮。
+        cx.bind_keys([
+            KeyBinding::new("volumeup", PageNext, None),
+            KeyBinding::new("volumedown", PagePrev, None),
+        ]);
 
         // 先把主题的应用字体换成这台设备真能解析出的家族，再建任何用文字的视图：
         // 顺序反了，第一帧就会拿一个不存在的家族去 resolve 而 panic。
@@ -291,6 +328,21 @@ impl AppShell {
             }
         });
 
+        // 音量键两条动作。与 `Back` 同一个位置注册，理由也一样：这两个键是**全局**的，
+        // 焦点路径里没有任何元素接它们时也要有反应，而元素级 `.on_action` 那时候收不到。
+        let weak = cx.entity().downgrade();
+        App::on_action(&mut *cx, move |_: &PageNext, cx: &mut App| {
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |this, cx| this.volume_key(true, cx));
+            }
+        });
+        let weak = cx.entity().downgrade();
+        App::on_action(&mut *cx, move |_: &PagePrev, cx: &mut App| {
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |this, cx| this.volume_key(false, cx));
+            }
+        });
+
         Self {
             destination: Destination::Shelf,
             stacks,
@@ -410,6 +462,22 @@ impl AppShell {
             .read(cx)
             .current()
             .is_some_and(|top| top.entity_id() == reading.entity_id())
+    }
+
+    /// 音量键按下：翻页还是把这一按还给系统，分流判据在 [`VolumeKey::of`]。
+    ///
+    /// 翻页走阅读页自己那条路（与点屏幕左右两边同一个入口），所以分页 / 连续滚动 /
+    /// 章末跨章的行为全都跟着正文。调音量那一路只有 Android 有实现，见
+    /// [`crate::ui::platform::adjust_system_volume`]。
+    fn volume_key(&mut self, up: bool, cx: &mut Context<Self>) {
+        match VolumeKey::of(self.reading_on_top(cx), up) {
+            VolumeKey::Turn(delta) => {
+                if let Some(reading) = self.reading.clone() {
+                    reading.update(cx, |reading, cx| reading.turn_page(delta, cx));
+                }
+            }
+            VolumeKey::SystemVolume { up } => crate::ui::platform::adjust_system_volume(up),
+        }
     }
 
     /// 当前目的地这条栈上是不是压着页（栈底之外还有东西）。
