@@ -32,12 +32,18 @@ zoom_out = "文字を小さく"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "目次"
-# 目次屏のヘッダ行と二つの入口。
+# 目次屏：ヘッダ行、書誌行の第三行、そして ⋯ メニューの四項目。
 "toc.read" = "既読 %{read} / %{total} 章"
 "toc.search" = "目次を検索"
 "toc.style" = "目次の表示"
 "toc.placeholder" = "%{count} 章を検索"
 "toc.empty" = "この本には目次がありません"
+"toc.head_meta" = "進捗 %{percent} · %{format} · %{size}"
+"toc.more" = "目次のオプション"
+"toc.expand_all" = "すべて展開"
+"toc.collapse_all" = "すべて折りたたむ"
+"toc.reverse" = "逆順に表示"
+"toc.clear_read" = "既読表示を消去"
 night = "夜間"
 day = "昼間"
 progress = "進捗"

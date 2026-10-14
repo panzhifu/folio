@@ -173,6 +173,8 @@ pub struct TocView {
     rows: Vec<TocRow>,
     collapsed: BTreeSet<usize>,
     query: String,
+    /// 倒着摆：从最后一条往上读。只改**显示顺序**，`ix`、当前行、「已读 N」都不跟着翻。
+    reversed: bool,
 }
 
 impl TocView {
@@ -183,6 +185,7 @@ impl TocView {
             rows,
             collapsed,
             query: String::new(),
+            reversed: false,
         }
     }
 
@@ -222,10 +225,47 @@ impl TocView {
     /// 搜索词非空时**忽略折叠**：命中的那条可能正埋在一个折起来的分支下面，
     /// 让读者搜到了却看不见，等于搜索是坏的。
     pub fn visible(&self) -> Vec<&TocRow> {
-        if !self.query.trim().is_empty() {
-            return search(&self.rows, &self.query);
+        let rows = if !self.query.trim().is_empty() {
+            search(&self.rows, &self.query)
+        } else {
+            visible(&self.rows, &self.collapsed)
+        };
+        if self.reversed {
+            return rows.into_iter().rev().collect();
         }
-        visible(&self.rows, &self.collapsed)
+        rows
+    }
+
+    /// 一个分支都没折上 = 全展开。菜单上那颗「展开目录 / 折叠目录」按这个决定文案。
+    pub fn all_open(&self) -> bool {
+        self.collapsed.is_empty()
+    }
+
+    /// 全展开。
+    pub fn expand_all(&mut self) {
+        self.collapsed.clear();
+    }
+
+    /// 全折上：只留顶层那几条。
+    ///
+    /// 与 [`collapse_except`] 那条「打开时跟着阅读位置」不同 —— 那是读者一进来看到的样子，
+    /// 这一条是他明确要「把树收起来」，不该再给他留一条展开着的分支。
+    pub fn collapse_all(&mut self) {
+        self.collapsed = self
+            .rows
+            .iter()
+            .filter(|row| row.branch)
+            .map(|row| row.ix)
+            .collect();
+    }
+
+    /// 要不要倒着摆。
+    pub fn set_reversed(&mut self, reversed: bool) {
+        self.reversed = reversed;
+    }
+
+    pub fn reversed(&self) -> bool {
+        self.reversed
     }
 
     /// 「已读 N / M 章」那两个数。M 是整棵树的条目数，不是当前看得见的行数 ——
@@ -473,5 +513,43 @@ mod tests {
         // 清空搜索词回到**折叠态**，不是回到全展开：读者手动折起来的东西不该被搜一次就冲掉。
         view.set_query(String::new());
         assert!(!view.visible().iter().any(|row| row.title == "第二节"));
+    }
+
+    /// 倒着摆只改显示顺序：`ix` 是前序编号，折叠集、当前行、「已读 N」全记在它上面，
+    /// 跟着一起翻就会在读者倒过来的那一屏上指错行。
+    #[test]
+    fn reversing_flips_only_the_display_order() {
+        let (entries, hrefs) = book();
+        let rows = build(&entries, &hrefs);
+        let current = row_of_chapter(&rows, 2);
+        let mut view = TocView::open(rows, current);
+        let forward: Vec<usize> = view.visible().iter().map(|row| row.ix).collect();
+        view.set_reversed(true);
+        let backward: Vec<usize> = view.visible().iter().map(|row| row.ix).collect();
+        assert_eq!(backward, forward.into_iter().rev().collect::<Vec<_>>());
+        assert_eq!(view.current_ix(2), current, "当前行认的还是同一条");
+        assert_eq!(
+            view.read_count(view.current_ix(2)),
+            (6, 7),
+            "「已读 6 / 7 章」与摆法无关"
+        );
+    }
+
+    /// 「展开目录 / 折叠目录」那一颗的两端：折上只留顶层，展开回到整棵树。
+    #[test]
+    fn expanding_and_collapsing_all_reaches_both_ends() {
+        let (entries, hrefs) = book();
+        let rows = build(&entries, &hrefs);
+        // 当前章在「第1章」下面 → 打开时那条分支就是展开的。
+        let current = row_of_chapter(&rows, 1);
+        let mut view = TocView::open(rows, current);
+        assert!(view.all_open());
+        view.collapse_all();
+        assert!(!view.all_open());
+        let top: Vec<&str> = view.visible().iter().map(|row| row.title.as_str()).collect();
+        assert_eq!(top, vec!["扉页", "第1章", "第2章", "版权页"], "全折上只剩顶层");
+        view.expand_all();
+        assert!(view.all_open());
+        assert_eq!(view.visible().len(), 7, "全展开是整棵树");
     }
 }

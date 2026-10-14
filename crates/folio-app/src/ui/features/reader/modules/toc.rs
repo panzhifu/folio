@@ -28,6 +28,15 @@ impl ReaderSession {
         &self.read
     }
 
+    /// 抹掉「来过」的那份记录。
+    ///
+    /// 那几行灰字是读者自己翻出来的痕迹，他要一次清干净、重新看一遍读到哪儿了。
+    /// 只清这一份内存里的集合，不动落库的位置 —— 回到这本书仍然落在原来那一章。
+    pub fn clear_read_marks(&mut self, cx: &mut Context<Self>) {
+        self.read.clear();
+        cx.notify();
+    }
+
     /// 当前章的下标。
     pub fn chapter_index(&self) -> usize {
         self.book().map_or(0, |book| book.chapter_index())

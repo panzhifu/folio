@@ -590,9 +590,9 @@ fn flatten(
     (Rc::new(entries), Rc::new(sizes))
 }
 
-/// 字节数 → 人读的大小。一本书正文几 MB，单位给到 MB 就够；扫描清单与卡片
-/// 长按菜单点开的「信息」那一页（[`super::book_info`]）共用这一条。
-pub(super) fn fmt_size(bytes: u64) -> String {
+/// 字节数 → 人读的大小。一本书正文几 MB，单位给到 MB 就够；扫描清单、卡片长按菜单点开的
+/// 「信息」那一页（[`super::book_info`]），以及阅读页书头那一行，共用这一条。
+pub(crate) fn fmt_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / (1024 * 1024) as f64)
     } else if bytes >= 1024 {

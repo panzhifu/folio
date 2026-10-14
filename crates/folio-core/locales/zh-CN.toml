@@ -32,12 +32,18 @@ zoom_out = "减小字号"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "目录"
-# 目录那一屏的头部行与两个入口。
+# 目录那一屏：头部那一行、书头第三行，以及 ⋯ 菜单里那四件事。
 "toc.read" = "已读 %{read} / %{total} 章"
 "toc.search" = "搜索目录"
 "toc.style" = "目录样式"
 "toc.placeholder" = "搜索 %{count} 章"
 "toc.empty" = "这本书没有目录"
+"toc.head_meta" = "读到 %{percent} · %{format} · %{size}"
+"toc.more" = "目录选项"
+"toc.expand_all" = "展开目录"
+"toc.collapse_all" = "折叠目录"
+"toc.reverse" = "逆向排序"
+"toc.clear_read" = "清除已读痕迹"
 night = "夜间"
 day = "日间"
 progress = "进度"

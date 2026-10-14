@@ -32,12 +32,19 @@ zoom_out = "Decrease font size"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "Contents"
-# The header row and the two entries of the contents screen.
+# The contents screen: its header row, the book header's third line, and the
+# four things under the ⋯ menu.
 "toc.read" = "Read %{read} / %{total} chapters"
 "toc.search" = "Search contents"
 "toc.style" = "Contents style"
 "toc.placeholder" = "Search %{count} chapters"
 "toc.empty" = "This book has no table of contents"
+"toc.head_meta" = "At %{percent} · %{format} · %{size}"
+"toc.more" = "Contents options"
+"toc.expand_all" = "Expand all"
+"toc.collapse_all" = "Collapse all"
+"toc.reverse" = "Reverse order"
+"toc.clear_read" = "Clear read marks"
 night = "Night"
 day = "Day"
 progress = "Progress"

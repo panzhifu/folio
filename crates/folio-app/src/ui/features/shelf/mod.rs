@@ -14,3 +14,9 @@ pub mod view;
 
 pub use book_info::{BookInfoEvent, BookInfoView};
 pub use view::{ShelfEvent, ShelfView};
+
+// 阅读页那本书的书头要把多位作者并成一行、要把字节数念成人读的大小。这两条写法
+// 定义仍在架上那两处（作者分隔属于卡片，大小属于扫描清单），这里只是让读页够得着，
+// 免得第二份实现在别处长出来。
+pub(crate) use book_card::AUTHOR_SEP;
+pub(crate) use scan::fmt_size;

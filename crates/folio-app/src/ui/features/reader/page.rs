@@ -17,8 +17,10 @@
 //! 直接跑，这一屏只把结果落成动作。
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use folio_core::infra::config::Mode;
+use folio_core::store::BookRow;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{NavMotion, NavStackState, v_virtual_list};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -31,29 +33,55 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Corners, ElementId, Entity, FontWeight,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString, Size,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, hsla, px, size,
+    Image, InteractiveElement, IntoElement, ObjectFit, ParentElement, Pixels, Render, SharedString,
+    Size, StatefulInteractiveElement, Styled, StyledImage, Subscription, WeakEntity, Window, div,
+    hsla, img, px, size,
 };
 
 use super::bands;
 use super::chrome::{
-    self, Chrome, Effect, FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, PageMode, Panel, Reserve, zone,
+    self, Chrome, Effect, FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, PageMode, Panel, Reserve,
+    percent_label, zone,
 };
 use super::session::ReaderSession;
 use super::toc_tree::{self, TocView};
 use crate::ui::features::settings::CompactSettings;
+use crate::ui::features::shelf::{AUTHOR_SEP, fmt_size};
 use crate::ui::shared::config_model::ConfigHolder;
+use crate::ui::shared::images::cover_image;
 use crate::ui::shared::l10n::{tf, tr};
 
-/// 目录缩进的级差（逻辑像素）。27 是在真机上量的那一档：三级以内还能看出「这条挂在那条
-/// 下面」，再宽就把小屏的正文挤成一条竖缝。
-const TOC_INDENT: f32 = 27.0;
+/// 目录这一屏的横向刻度，全部是在 Meizu 20（scale 2.8）上逐行数参照 App 的墨迹
+/// 边界量出来的（dp = px / 2.8）。
+///
+/// 面板的统一左右内缩：书头那张封面与列表文字都从这条起（实测封面左沿 x=41px）。
+const TOC_GUTTER: f32 = 15.0;
+/// 当前行左边那条标记条的宽（实测 x=6..13px）。
+const TOC_MARKER: f32 = 2.9;
+/// 那条标记条距屏幕左边多少。
+const TOC_MARKER_INSET: f32 = 2.1;
+/// 当前行那条底色带的左边界 = 标记条的右沿（实测灰底从 x=14px 起，一直铺到屏幕右边）。
+const TOC_BAND_LEFT: f32 = TOC_MARKER_INSET + TOC_MARKER;
+/// 顶层标题文字的左边界（实测 L1 墨迹左沿 x=87..91px，两条独立行互相对上）。
+const TOC_TEXT_LEFT: f32 = 31.0;
 /// chevron 那一列的宽度。叶子也占同样一格，标题才不会因为有没有下级而左右跳。
-const TOC_CHEVRON: f32 = 20.0;
-/// 目录行的左右内缩。
-const TOC_GUTTER: f32 = 16.0;
-/// 当前行左边那条标记条的宽度。
-const TOC_MARKER: f32 = 3.0;
+const TOC_CHEVRON: f32 = 15.3;
+/// 每一级往右让多少（实测 L1 文字 87px、L2 文字 120px → 差 32px）。
+///
+/// 这一档比「看得出挂在下级下面」的直觉窄得多，但参照 App 三级书也只让这么多：
+/// 小屏上缩进每多一级就吃掉一行能摆几个字，层级靠 chevron 那一列已经读得出来。
+const TOC_INDENT: f32 = 11.4;
+
+/// 目录面板顶上那块书头要的那几样：一次打开查一回库。
+///
+/// 存整条 [`BookRow`] 而不是拆成书名 / 作者 / 格式三个字段：拆出来的那几份与库里那一行
+/// 是同一件事的两处记录，读者在「信息」那一屏改过书名之后就会有一处是旧的。
+/// 第三行那个「读到 X%」不在这里 —— 它是当场算出来的进度，存进来就成了第二真相源。
+struct BookHeader {
+    row: BookRow,
+    /// 解码好的封面。`None` 画一块灰底，不留一格空白。
+    cover: Option<Arc<Image>>,
+}
 
 pub struct ReadingPage {
     reader: Entity<ReaderSession>,
@@ -77,6 +105,10 @@ pub struct ReadingPage {
     toc_sizes: Rc<Vec<Size<Pixels>>>,
     toc_len: usize,
     toc_row_height: f32,
+    /// 右上角那颗「⋯」的菜单开没开。
+    toc_menu: bool,
+    /// 书头那几行。与目录树同一次打开一起建（见 [`Self::pick`]）。
+    header: Option<BookHeader>,
     _watches: Vec<Subscription>,
 }
 
@@ -142,6 +174,8 @@ impl ReadingPage {
             toc_sizes: Rc::new(Vec::new()),
             toc_len: 0,
             toc_row_height: 0.0,
+            toc_menu: false,
+            header: None,
             _watches: watches,
         }
     }
@@ -262,8 +296,14 @@ impl ReadingPage {
         let radius = cx.theme().radius_lg;
         let page = cx.entity().clone();
         let back_label = tr(cx, "shelf.back");
+        // 顶栏压在正文之上，落在它空隙里的一击不该再被当成「点了一下正文」而把整层收掉。
+        // gpui 的点击不是沿祖先链冒泡：一帧里每个带 handler 的元素各自判自己的 hitbox
+        // 在不在按下点下面（`Window::dispatch_mouse_event` 倒序过 `mouse_listeners`），
+        // 而正文的 hitbox 是整屏的，所以浮层的按钮点下去会连着触发正文那一份。
+        // 用 `block_mouse_except_scroll` 而不是 `occlude`：读者从顶栏那一片起手也要能滚字。
         h_flex()
             .id("reader-top-bar")
+            .block_mouse_except_scroll()
             .absolute()
             .top_0()
             .left_0()
@@ -311,6 +351,10 @@ impl ReadingPage {
         let radius = cx.theme().radius_lg;
         let mut card = v_flex()
             .id("reader-bottom-bar")
+            // 底栏与顶栏同理：正文的 hitbox 是整屏的，不拦住空隙里的一击，它会顺着
+            // 帧内的监听列表接着打到正文上，把刚切过去的面板当场收掉。滚动留着，
+            // 读者从底栏那一片起手也要能滚字。
+            .block_mouse_except_scroll()
             .absolute()
             .bottom_0()
             .left_0()
@@ -507,12 +551,34 @@ impl ReadingPage {
     fn pick(&mut self, panel: Panel, cx: &mut Context<Self>) {
         if panel == Panel::Toc && self.chrome.panel() != Panel::Toc {
             // 每次重新打开都按当前位置重算折叠集：读者上次手动折的那些格不该跨次生效，
-            // 他这一次要回答的问题还是「我现在在哪」。搜索框一并收掉。
+            // 他这一次要回答的问题还是「我现在在哪」。搜索框与 ⋯ 菜单一并收掉。
             self.toc = None;
             self.toc_search_open = false;
+            self.toc_menu = false;
+            // 书头跟着一起重查：读者可能在「信息」那一屏改过书名或作者，重开要看到新的。
+            self.header = self.read_header(cx);
         }
         self.chrome.select(panel);
         cx.notify();
+    }
+
+    /// 查一次书头要的那几样（书名 / 作者 / 格式 / 大小 / 封面）。
+    ///
+    /// 查不到就 `None`：兜底那一行没有书，那时候这一屏只剩「已读」那一行与一句实话，
+    /// 而不是摆半截空书头让读者以为这本书坏了。
+    ///
+    /// 在点击回调里查而不是在渲染里查，与架面点开「信息」那一屏同一取舍：一次打开
+    /// 一回，两趟查询（`book` 与 `book_cover`），不每帧把界面线程钉在 SQLite 上。
+    fn read_header(&self, cx: &App) -> Option<BookHeader> {
+        let reader = self.reader.read(cx);
+        let store = reader.store.clone()?;
+        let id = reader.book_id?;
+        let row = store.book(id).ok().flatten()?;
+        let cover = match store.book_cover(id).ok().flatten() {
+            Some(bytes) => cover_image(&bytes),
+            None => None,
+        };
+        Some(BookHeader { row, cover })
     }
 
     /// 连续 ⇄ 双页。换档不动位置：进度是「第几个字」，两档之间搬的是同一句话。
@@ -595,8 +661,9 @@ impl ReadingPage {
             self.toc_row_height = row_height;
         }
 
-        // 三个子元素先各自算完：`cx.theme()` 还回去的 `&Theme` 借的是 `*cx`，把它留在
+        // 这几块子元素先各自算完：`cx.theme()` 还回去的 `&Theme` 借的是 `*cx`，把它留在
         // 一条链里会活过整条 `let`，链上那几个要 `&mut cx` 的调用就过不去。
+        let head = self.toc_book_head(cx);
         let header = self.toc_header(cx);
         let mut search = None;
         if self.toc_search_open {
@@ -612,23 +679,35 @@ impl ReadingPage {
             .max(0.0);
         let mut layer = v_flex()
             .id("reader-toc-layer")
+            // 这一层整块盖在正文上面，落在它空处的一击和滚动手势都不该穿透到正文：
+            // 目录开着的时候滚的是目录，不是底下那行字。遮挡只影响**这个元素之前**
+            // 登记的 hitbox，父 hitbox 又早于它的子元素插入，所以标题行与列表照点。
+            .occlude()
             .absolute()
             .left_0()
             .right_0()
             .top(px(chrome::TOP_BAR_HEIGHT))
             .h(px(height))
             .bg(cx.theme().background)
+            .child(head)
             .child(header);
         if let Some(search) = search {
             layer = layer.child(search);
         }
-        layer.child(list).into_any_element()
+        layer = layer.child(list);
+        // 菜单画在列表之上，所以先垫一张吃掉点击的底：点卡片外面只收菜单，不该顺带
+        // 把底下那一行也跳了。卡片自己 `occlude`，落在卡片上的一击到不了这张底。
+        if self.toc_menu {
+            layer = layer.child(self.toc_menu_scrim(cx)).child(self.toc_menu_card(cx));
+        }
+        layer.into_any_element()
     }
 
-    /// 头部那一行：「已读 N / M 章」+ 搜索 + 目录样式。
+    /// 头部那一行：「已读 N / M 章」+ 搜索 + ⋯。
     ///
-    /// 那颗「目录样式」直接压进设置那一屏（与底栏的「设置」同一动作）：从目录里想改
-    /// 目录的样子，是这一屏最常发生的一次跳转，不该让读者先把它收起来。
+    /// ⋯ 里放的是这一屏用得上的那四件事（展开目录 / 逆向排序 / 目录样式 / 清除已读痕迹），
+    /// 见 [`Self::toc_menu_card`]。原先这里直接是一颗「目录样式」，那是四件事里的一件，
+    /// 摆成一颗按钮就把其余三件挤没了。
     fn toc_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.reader.read(cx).chapter_index();
         let (read, total) = self
@@ -638,9 +717,9 @@ impl ReadingPage {
             .unwrap_or((0, 0));
         let label = tf(cx, "reader.toc.read", &[("read", &read), ("total", &total)]);
         let search_page = cx.entity().clone();
-        let style_page = cx.entity().clone();
+        let more_page = cx.entity().clone();
         let search_label = tr(cx, "reader.toc.search");
-        let style_label = tr(cx, "reader.toc.style");
+        let more_label = tr(cx, "reader.toc.more");
         h_flex()
             .w_full()
             .items_center()
@@ -672,17 +751,257 @@ impl ReadingPage {
                     }),
             )
             .child(
-                Button::new("toc-style")
+                Button::new("toc-more")
                     .ghost()
                     .small()
-                    .icon(IconName::SlidersHorizontal)
-                    .tooltip(style_label.clone().to_string())
-                    .accessibility_label(style_label)
+                    .selected(self.toc_menu)
+                    .icon(IconName::CircleEllipsis)
+                    .tooltip(more_label.clone().to_string())
+                    .accessibility_label(more_label)
                     .on_click(move |_, _, cx| {
-                        style_page.update(cx, |this, cx| this.open_settings(cx))
+                        more_page.update(cx, |this, cx| {
+                            this.toc_menu = !this.toc_menu;
+                            cx.notify();
+                        })
                     }),
             )
             .into_any_element()
+    }
+
+    /// 书头那一块：封面 + 书名 + 作者 + 「读到 X% · 格式 · 大小」。
+    ///
+    /// 摆在目录树上面，因为读者从目录里认的是「这是哪一本、读到哪儿了」，而那一屏
+    /// 原本只有「已读 N / M 章」一句 —— 那个数不带书名，跳完一章回来就不确定还在不在
+    /// 同一本书里。
+    ///
+    /// 查不到书（兜底那一行）时整块不画，而不是画三个空框：那一行本来就没有书可认。
+    fn toc_book_head(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(header) = self.header.as_ref() else {
+            return div().into_any_element();
+        };
+        let progress = self.reader.read(cx).progress();
+        let row = &header.row;
+        let authors: SharedString = row.authors.join(AUTHOR_SEP).into();
+        // 那个百分比与底栏状态行、页脚那一条共用 `percent_label`：同一本书在两处念出来
+        // 的进度必须是同一个数，两处各写一套小数位迟早对不上。
+        let meta: SharedString = tf(
+            cx,
+            "reader.toc.head_meta",
+            &[
+                ("percent", &percent_label(progress)),
+                ("format", &row.format),
+                ("size", &fmt_size(row.size)),
+            ],
+        )
+        .into();
+        let muted = cx.theme().muted_foreground;
+        let placeholder = cx.theme().muted;
+        h_flex()
+            .id("reader-toc-head")
+            .w_full()
+            .items_start()
+            .gap_3()
+            .px(px(TOC_GUTTER))
+            .pt_3()
+            .pb_2()
+            .child(
+                // 封面 48×66dp（参照 App 实测 135×185px @2.8），与架上那一格同一条
+                // 2:3 比例；没有图就画一块灰底 —— 旁边那两行写着书名，不会读成坏了。
+                div()
+                    .flex_none()
+                    .w(px(48.0))
+                    .h(px(72.0))
+                    .overflow_hidden()
+                    .rounded(px(2.0))
+                    .bg(placeholder)
+                    .when_some(header.cover.clone(), |this, image| {
+                        this.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                    }),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(row.title.clone()),
+                    )
+                    .when(!authors.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(authors),
+                        )
+                    })
+                    .child(div().truncate().text_sm().text_color(muted).child(meta)),
+            )
+            .into_any_element()
+    }
+
+    /// 菜单那张卡片：四件事，每颗一行。
+    ///
+    /// 画在同一棵渲染树里的一块 `absolute`，不是 gpui-kit 的 Popup / ContextMenu ——
+    /// 浮层组件在 Android 上画得出来但点不住（书架那块内联面板记着同一条事实），
+    /// 而菜单点不动就等于没有菜单。
+    fn toc_menu_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let all_open = self.toc.as_ref().is_some_and(|toc| toc.all_open());
+        let reversed = self.toc.as_ref().is_some_and(|toc| toc.reversed());
+        let expand_label = tr(
+            cx,
+            if all_open {
+                "reader.toc.collapse_all"
+            } else {
+                "reader.toc.expand_all"
+            },
+        );
+        let reverse_label = tr(cx, "reader.toc.reverse");
+        let style_label = tr(cx, "reader.toc.style");
+        let clear_label = tr(cx, "reader.toc.clear_read");
+        let page_expand = cx.entity().clone();
+        let page_reverse = cx.entity().clone();
+        let page_style = cx.entity().clone();
+        let page_clear = cx.entity().clone();
+        v_flex()
+            .id("reader-toc-menu")
+            .occlude()
+            .absolute()
+            .top(px(40.0))
+            .right(px(TOC_GUTTER))
+            .min_w(px(176.0))
+            .py_1()
+            .popover_style(cx)
+            .child(self.menu_item(
+                "toc-menu-expand",
+                if all_open {
+                    IconName::FoldVertical
+                } else {
+                    IconName::UnfoldVertical
+                },
+                expand_label,
+                false,
+                move |_, _, cx| {
+                    page_expand.update(cx, |this, cx| this.toggle_expand_all(cx))
+                },
+            ))
+            .child(self.menu_item(
+                "toc-menu-reverse",
+                IconName::ArrowDownUp,
+                reverse_label,
+                reversed,
+                move |_, _, cx| {
+                    page_reverse.update(cx, |this, cx| this.toggle_reversed(cx))
+                },
+            ))
+            .child(self.menu_item(
+                "toc-menu-style",
+                IconName::SlidersHorizontal,
+                style_label,
+                false,
+                move |_, _, cx| {
+                    page_style.update(cx, |this, cx| {
+                        this.toc_menu = false;
+                        this.open_settings(cx);
+                    })
+                },
+            ))
+            .child(self.menu_item(
+                "toc-menu-clear",
+                IconName::Eraser,
+                clear_label,
+                false,
+                move |_, _, cx| {
+                    page_clear.update(cx, |this, cx| this.clear_read_marks(cx))
+                },
+            ))
+            .into_any_element()
+    }
+
+    /// 菜单里的一行：图标 + 一行字，整行按得下去。
+    ///
+    /// `checked` 是「这一档现在开着」（逆向排序那种开关），靠 `selected` 那层底色说话，
+    /// 不再加一颗勾 —— 四行里只有一行带勾会把读者的眼睛钉在勾上，读不到字。
+    fn menu_item(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        label: SharedString,
+        checked: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        Button::new(id)
+            .ghost()
+            .w_full()
+            .justify_start()
+            .px(px(TOC_GUTTER))
+            .selected(checked)
+            .icon(icon)
+            .label(label.clone())
+            .accessibility_label(label)
+            .on_click(on_click)
+            .into_any_element()
+    }
+
+    /// 菜单背后那张底：吃掉落在卡片外面的一击，只收菜单。
+    ///
+    /// 不垫这张底的话，那一击会接着打到列表行上（gpui 把事件发给**每一个** hitbox 含
+    /// 按下点的 handler，见 [`Self::render`] 里那条说明），读者点空白却跳了一章。
+    fn toc_menu_scrim(&self, cx: &mut Context<Self>) -> AnyElement {
+        let page = cx.entity().clone();
+        div()
+            .id("reader-toc-menu-scrim")
+            .occlude()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .child(div().size_full().bg(hsla(0.0, 0.0, 0.0, 0.32)))
+            .on_click(move |_, _, cx| {
+                page.update(cx, |this, cx| {
+                    this.toc_menu = false;
+                    cx.notify();
+                })
+            })
+            .into_any_element()
+    }
+
+    /// 「展开目录 / 折叠目录」：两端来回摆。
+    ///
+    /// 行数变了不在这儿重造那张尺寸表：渲染那一趟自己比对「行数或行高变了才重建」
+    /// （见 [`Self::toc_layer`]），在这儿再写一遍就是同一件事两处做。
+    fn toggle_expand_all(&mut self, cx: &mut Context<Self>) {
+        let Some(toc) = self.toc.as_mut() else {
+            return;
+        };
+        if toc.all_open() {
+            toc.collapse_all();
+        } else {
+            toc.expand_all();
+        }
+        self.toc_menu = false;
+        cx.notify();
+    }
+
+    /// 正着摆 / 倒着摆。
+    fn toggle_reversed(&mut self, cx: &mut Context<Self>) {
+        let Some(toc) = self.toc.as_mut() else {
+            return;
+        };
+        toc.set_reversed(!toc.reversed());
+        self.toc_menu = false;
+        cx.notify();
+    }
+
+    /// 抹掉「来过」的那份痕迹：灰字是读者自己翻出来的，他要一次清干净。
+    fn clear_read_marks(&mut self, cx: &mut Context<Self>) {
+        self.toc_menu = false;
+        self.reader.update(cx, |reader, cx| reader.clear_read_marks(cx));
+        cx.notify();
     }
 
     fn toc_search_row(&self, input: &Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
@@ -806,30 +1125,45 @@ impl ReadingPage {
                     // 叶子占同样一格，标题才不会因为有没有下级而左右跳。
                     div().w(px(TOC_CHEVRON)).flex_none().into_any_element()
                 };
+                // 三段：一点空隙 → 标记条 → 底色带。带子从标记条右边起、铺到屏幕右沿，
+                // 标题落在 `TOC_TEXT_LEFT` 那一列上（chevron 那一格在它左边）。
                 let mut row_el = div()
                     .id(ElementId::named_usize("reader-toc-row", ix))
                     .w_full()
                     .h(px(row_height))
                     .flex()
-                    .items_center()
-                    .overflow_hidden()
-                    .pl(px(TOC_GUTTER
-                        + TOC_MARKER
-                        + (row.depth as f32) * TOC_INDENT))
-                    .pr(px(TOC_GUTTER))
-                    .border_l(px(TOC_MARKER))
-                    .border_color(if active { foreground } else { transparent })
-                    .when(active, |el| el.bg(surface))
-                    .child(chevron)
+                    .items_stretch()
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(TOC_MARKER))
+                            .ml(px(TOC_MARKER_INSET))
+                            .bg(if active { foreground } else { transparent }),
+                    )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
-                            .line_clamp(lines)
-                            .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
-                            .text_color(color)
-                            .child(row.title.clone()),
+                            .flex()
+                            .items_center()
+                            .overflow_hidden()
+                            .pl(px(TOC_TEXT_LEFT
+                                - TOC_BAND_LEFT
+                                - TOC_CHEVRON
+                                + (row.depth as f32) * TOC_INDENT))
+                            .pr(px(TOC_GUTTER))
+                            .when(active, |el| el.bg(surface))
+                            .child(chevron)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .line_clamp(lines)
+                                    .when(active, |el| el.font_weight(FontWeight::SEMIBOLD))
+                                    .text_color(color)
+                                    .child(row.title.clone()),
+                            ),
                     );
                 // 对不上正文的那几条不挂回调：灰着且点不动，比「点了什么也没发生」诚实。
                 if let Some(chapter) = row.chapter {
@@ -928,8 +1262,11 @@ impl Render for ReadingPage {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
-                // 正文的点击落在这层而不是 `ReaderSession` 自己身上：浮层是它的**兄弟**，
-                // 点击只沿祖先链冒泡，所以点在顶栏/底栏上不会被当成「点了一下正文」。
+                // 正文的点击落在这层而不是 `ReaderSession` 自己身上。它的 hitbox 是整屏的，
+                // 而 gpui 的一击会发给**每一个**「自己的 hitbox 含有按下点」的 handler
+                // （`Window::dispatch_mouse_event` 倒序遍历帧内的监听列表，不是沿祖先链冒泡），
+                // 所以顶栏、底栏与目录那一层各自声明挡住身后的 hitbox，
+                // 否则浮层的按钮点下去会连着触发这里，把刚切过去的面板当场收掉。
                 div()
                     .id("reader-body")
                     .absolute()
