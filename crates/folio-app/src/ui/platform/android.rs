@@ -109,9 +109,10 @@ fn android_main(app: android_activity::AndroidApp) {
     tracing::info!("android_main: Application::run returned — activity will finish");
 }
 
-/// 藏起 / 还原系统栏（阅读沉浸）。递给 Java，它自己切回 UI 线程，所以这里可以在
-/// GPUI 的原生线程上调用而不阻塞。失败只写日志：藏不成只是顶上一条状态栏，
-/// 不该把阅读页拖退。
+/// 藏起 / 还原系统栏（阅读沉浸）。状态栏与导航栏一起藏；读者按完返回、书还在往外走的那一段，
+/// 阅读层自己让开顶上那条线（挖孔 / 状态栏）与底下那条线，所以藏栏不会让返回栏贴到屏幕顶。
+/// 递给 Java，它自己切回 UI 线程，所以这里可以在 GPUI 的原生线程上调用而不阻塞。失败只写日志：
+/// 藏不成只是顶上多一条状态栏，不该把阅读页拖退。
 pub(crate) fn set_immersive(on: bool) {
     use gpui_mobile::android::jni::{activity, find_app_class, with_env};
     // 本文件顶部把 `gpui_mobile::android::jni` 引进成了 `jni`，所以这里必须写 `::jni`

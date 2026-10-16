@@ -33,19 +33,35 @@ fn the_book_does_not_ask_the_nav_bar_to_move() {
         bottom: 25.0,
         ..Default::default()
     };
-    for size in [SizeClass::Compact, SizeClass::Medium, SizeClass::Expanded] {
-        assert_eq!(
-            reading_reserve(size, &safe).width,
-            0.0,
-            "{size:?} 那一档不该再向正文报导航栏的宽"
-        );
-    }
     assert_eq!(
-        reading_reserve(SizeClass::Medium, &safe),
+        reading_reserve(&safe),
         Reserve {
             width: 0.0,
-            height: 41.0
-        }
+            height: 41.0 + 25.0
+        },
+        "宽恒为 0（导航栏由这一层盖住，不再向正文报），高是顶上与底下两条安全区"
+    );
+}
+
+/// 回归门：背光那一格只在**书挂着**的时候接管，书收了必须交还系统。
+///
+/// 失败的样子是安静的坏：读完一本书回到架面，屏幕还停在读者为那本书调的那一档暗，而应用
+/// 以为自己从没接管过背光。它与 [`immersive_nav`] 共用「跟着书」那条判据，也同在宿主摸不到
+/// 渲染的那一层（真机才长得出那一屏），所以钉在自由函数上。
+#[test]
+fn the_brightness_follows_the_book_and_hands_back_when_it_closes() {
+    use super::reading_brightness;
+
+    assert_eq!(reading_brightness(true, Some(0.4)), Some(0.4));
+    assert_eq!(
+        reading_brightness(true, None),
+        None,
+        "读者没接管过背光时，挂着书也不该往窗口写一个数"
+    );
+    assert_eq!(
+        reading_brightness(false, Some(0.4)),
+        None,
+        "书不在上面就是交还系统，哪怕配置里还记着一档"
     );
 }
 
@@ -54,13 +70,14 @@ fn the_book_does_not_ask_the_nav_bar_to_move() {
 /// 这条分流是整个功能唯一的判据，而两头的失败都安静：阅读页里不翻页＝键按下去没反应，
 /// 书架里不转音量＝把系统本来就有的键做成了死键。翻页那一路要进阅读页、音量那一路要进
 /// JNI，宿主测试两样都摸不到，所以钉在 [`VolumeKey::of`] 这一层。
-/// 「音量上 = 往后一页」的符号也钉在这里 —— 改了口径测试会红，不会悄悄反过来。
+/// 「音量上 = 往前一页、音量下 = 往后一页」的符号也钉在这里 —— 改了口径测试会红，
+/// 不会悄悄反过来。
 #[test]
 fn the_volume_keys_page_only_on_the_reading_view() {
     use super::VolumeKey;
 
-    assert_eq!(VolumeKey::of(true, true), VolumeKey::Turn(1));
-    assert_eq!(VolumeKey::of(true, false), VolumeKey::Turn(-1));
+    assert_eq!(VolumeKey::of(true, true), VolumeKey::Turn(-1));
+    assert_eq!(VolumeKey::of(true, false), VolumeKey::Turn(1));
     assert_eq!(
         VolumeKey::of(false, true),
         VolumeKey::SystemVolume { up: true },
@@ -73,15 +90,18 @@ fn the_volume_keys_page_only_on_the_reading_view() {
     );
 }
 
-/// 回归门：报给正文的那份扣减里必须含安全区，且**只有**安全区。
+/// 回归门：报给正文的那份扣减里必须含安全区上下两条，而**摆层只让顶上那一条**。
 ///
 /// 正文自己量的是**窗口**高，正文盒 = 窗口高 − 报过去的这一条 − 页眉 − 页脚。少扣一条
 /// 安全区，那个盒子就比真能画的地方高几十逻辑像素，多出来的一段被裁在页脚带下面 ——
 /// 屏幕上的表现是「已经滚到底了，最后几行还是看不见」。多扣一条导航栏则是反过来的错：
 /// 章尾凭空少一行，而那一行本来放得下。
+///
+/// 底下那一条是**层不让、底栏与页脚自己让**（见 `reader::page` 的 `bottom_inset`）：
+/// 手势条那一段要由卡片的底色铺满，不能是层垫出来的一条空缝。
 #[test]
 fn the_reading_page_is_told_about_the_safe_areas_too() {
-    use super::{Reserve, SizeClass, reading_reserve};
+    use super::{Reserve, reading_reserve, reading_top_inset};
     use crate::ui::host::Insets;
 
     let safe = Insets {
@@ -90,36 +110,25 @@ fn the_reading_page_is_told_about_the_safe_areas_too() {
         ..Default::default()
     };
 
-    // Compact：上下两条都扣 —— 手机上横躺着的手势条同样是系统的地盘，不是应用 chrome。
+    // 正文盒上下两条都扣。
     assert_eq!(
-        reading_reserve(SizeClass::Compact, &safe),
+        reading_reserve(&safe),
         Reserve {
             width: 0.0,
             height: 41.0 + 25.0
         }
     );
 
-    // Medium / Expanded：外壳只 pad 上面那一条，所以高里只加它。
+    // 而摆层只把顶上那一条推下去：底下那一条留给底栏与页脚自己抬内容、铺底色。
+    assert_eq!(reading_top_inset(&safe), 41.0);
     assert_eq!(
-        reading_reserve(SizeClass::Medium, &safe),
-        Reserve {
-            width: 0.0,
-            height: 41.0
-        }
-    );
-    assert_eq!(
-        reading_reserve(SizeClass::Expanded, &safe),
-        Reserve {
-            width: 0.0,
-            height: 41.0
-        }
+        reading_reserve(&safe).height,
+        reading_top_inset(&safe) + safe.bottom
     );
 
-    // 安全区全 0（桌面的真实值）就是零：不多扣一个像素。
-    assert_eq!(
-        reading_reserve(SizeClass::Expanded, &Insets::ZERO),
-        Reserve::ZERO
-    );
+    // 安全区全 0（桌面的真实值）就是零：不多让一个像素。
+    assert_eq!(reading_reserve(&Insets::ZERO), Reserve::ZERO);
+    assert_eq!(reading_top_inset(&Insets::ZERO), 0.0);
 }
 
 /// 回归门：转场里那一页往哪边走、什么时候淡。
@@ -798,6 +807,51 @@ mod booted {
         assert!(
             shell.read_with(cx, |this, _| this.reading.is_none()),
             "动完了就该把这一层放手"
+        );
+    }
+
+    /// 回归门：顶栏那颗返回不许把进程带走。
+    ///
+    /// 那颗按钮的回调是 `page.update(|this| this.pop())`，而 `pop` 早先请外壳再 `update`
+    /// 一次**同一个** `ReadingPage`（`close_reading` 里的 `page.close`）—— 同一个实体的
+    /// 二次可变借用直接 panic；release 下 `panic = abort`，真机上的表现是读者报的那句
+    /// 「点返回直奔系统桌面」。这条门照按钮那条路走一遍：`dismiss_reading` 只翻退出那一格，
+    /// 正文自己先收尾。
+    #[gpui_kit::test]
+    fn the_top_bars_back_closes_the_book_without_taking_the_process_with_it(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::shell::NAV_TRANSITION;
+        use std::time::Duration;
+
+        let (handle, shell) = boot(cx, false);
+        let page = shell.update(cx, |this, cx| {
+            this.open_reading(NOT_A_BOOK, cx);
+            this.reading
+                .as_ref()
+                .map(|layer| layer.page.clone())
+                .expect("书该已经盖上来")
+        });
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        // 把进场走完：退场从半路的当前值起跑不是这条门要钉的事。
+        cx.executor()
+            .advance_clock(NAV_TRANSITION + Duration::from_millis(20));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+
+        // 照顶栏那颗按钮的回调来：正更新着正文的时候调 `pop`（旧写法在这里 panic）。
+        page.update(cx, |page, cx| page.pop(cx));
+
+        assert!(
+            !shell.read_with(cx, |this, _| this.reading_open()),
+            "返回该把这一层收走"
+        );
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert!(
+            shell.read_with(cx, |this, _| this.reading_mounted()),
+            "退场动画还在走，这一层还不能放手"
         );
     }
 

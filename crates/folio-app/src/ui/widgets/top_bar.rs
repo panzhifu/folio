@@ -25,8 +25,8 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Sizable, StyledExt as _, ThemeStyled as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Corners, ElementId, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, SharedString, Styled, Window, div, px,
+    AnyElement, App, BoxShadow, Corners, ElementId, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, SharedString, Styled, Window, div, hsla, px,
 };
 
 /// 这一条的高：44 是拇指稳定命中的下限，三处用同一个数（原来一处按内容撑、一处 44、
@@ -38,6 +38,18 @@ const PAD_X: f32 = 12.0;
 const OVERLAY_PAD_X: f32 = 16.0;
 /// 副题的宽度上限。见模块注释第三条。
 const SUBTITLE_MAX: f32 = 320.0;
+
+/// 吸顶那一档的投影：**没有** gpui-kit 平层 popover 那圈 1px 的 ring。
+///
+/// 平层靠 ring 当边框，可这一条是吸在屏幕顶上的：ring 的上缘会在它上方压出一条横线
+/// （系统状态栏藏起来之后尤其明显）。只留往下投的一层柔影，上与下靠底色和正文分开。
+///
+/// 柔影自己也会在**上方**渗出一段（模糊往四周散，实测这一档往上渗约 12 逻辑像素），
+/// 那一段被这一条自己的上沿切成一条硬边 —— 所以这一条的表面必须真的贴住窗口顶边，
+/// 让上渗的那一段落在屏幕外（见 [`TopBar::overlay`] 的 `top_inset`）。
+fn overlay_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.18)).blur_radius(px(6.))]
+}
 
 /// 「按了返回要干什么」那一格：调用方握着的是自己那个实体，这里只把窗口与应用交出去。
 type OnBack = Box<dyn Fn(&mut Window, &mut App)>;
@@ -61,6 +73,9 @@ pub struct TopBar {
     strong: bool,
     /// 压在内容之上的那一档。
     overlay: bool,
+    /// `overlay` 那一档：这一条**上方**被系统让开的那一段（状态栏 / 挖孔，逻辑像素）。
+    /// 表面向上长回这一段，贴住窗口顶边；内容仍留在原来的位置。
+    overlay_top: f32,
     on_back: Option<OnBack>,
     trailing: Vec<AnyElement>,
 }
@@ -79,6 +94,7 @@ impl TopBar {
             pad_x: PAD_X,
             strong: false,
             overlay: false,
+            overlay_top: 0.0,
             on_back: None,
             trailing: Vec::new(),
         }
@@ -133,8 +149,14 @@ impl TopBar {
 
     /// 换成压在内容之上的那一档：满宽吸顶、popover 表面、只圆下面两个角、
     /// 拦住落在它空隙里的一击。
-    pub fn overlay(mut self) -> Self {
+    ///
+    /// `top_inset` 是调用方在这一条**上方**让给系统的那一段（状态栏 / 挖孔，逻辑像素；
+    /// 桌面上是 0）。表面向上长回这一段，从窗口顶边长出来 —— 上面不该有缝，
+    /// 而投影上渗的那一段也因此落在屏幕外，不会在条子上方压出一条横线（见
+    /// [`overlay_shadow`]）。内容仍摆在原来那 44 里，位置一点不动。
+    pub fn overlay(mut self, top_inset: f32) -> Self {
         self.overlay = true;
+        self.overlay_top = top_inset.max(0.0);
         self.pad_x = OVERLAY_PAD_X;
         self
     }
@@ -156,6 +178,8 @@ impl RenderOnce for TopBar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let radius = cx.theme().radius_lg;
         let back = self.on_back;
+        // 表面向上长回的那一段：只算给 `overlay` 那一档，在流里的那一条没这回事。
+        let raised = if self.overlay { self.overlay_top } else { 0.0 };
         let mut bar = h_flex()
             .id(self.id)
             .when(self.overlay, |this| {
@@ -163,10 +187,15 @@ impl RenderOnce for TopBar {
                 // `Stateful<Div>` 的方法）。
                 this.block_mouse_except_scroll()
                     .absolute()
-                    .top_0()
+                    // 往上长回系统让开的那一段：`top_0` 是**让完之后**的顶，那条边在屏幕里，
+                    // 投影渗到它上方就会被切成一条横线。
+                    .top(px(-raised))
                     .left_0()
                     .right_0()
                     .popover_style(cx)
+                    // 盖掉 popover_style 里那圈 ring —— 它会在这一条上方压出一条横线，见
+                    // [`overlay_shadow`]。
+                    .shadow(overlay_shadow())
                     // 只圆下面两个角：这一条是从屏幕顶边长出来的，上面不该有缝。
                     .corner_radii(Corners {
                         top_left: px(0.),
@@ -179,7 +208,9 @@ impl RenderOnce for TopBar {
             // `left_0` + `right_0`（与 `bands::band` 同一套）—— 同时给两套，等于让
             // 宽度和两条边各说一次话，改哪一头都会静默不一致。
             .when(!self.overlay, |this| this.w_full())
-            .h(px(self.height))
+            // 长高的那一段用 `pt` 让给表面，内容仍然在原来那 `height` 里居中。
+            .when(raised > 0.0, |this| this.pt(px(raised)))
+            .h(px(self.height + raised))
             .items_center()
             .gap_2()
             .px(px(self.pad_x))

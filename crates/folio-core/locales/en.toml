@@ -49,6 +49,11 @@ toc = "Contents"
 night = "Night"
 day = "Day"
 progress = "Progress"
+# The two reading-panel slots: the brightness slider's label, and the button that
+# pushes the full settings screen over the reader. Font size, page turn and
+# "follow the system" reuse the existing words (`field.*`, `appearance.follow_system`).
+brightness = "Brightness"
+more_settings = "More settings"
 # The scale for paged / spread; continuous scroll reads "section" instead.
 page_position = "Page %{index} of %{total}"
 # The bottom-bar entry: two pages side by side. Narrow windows fall back to one

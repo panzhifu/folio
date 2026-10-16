@@ -380,6 +380,60 @@ fn wheel_scrolling_moves_the_reading_position(cx: &mut TestAppContext) {
     );
 }
 
+/// 滚动**不碰库**。位置那一趟 SQLite 写挂在输入路径上，平时 265 µs，可一旦摊上 WAL
+/// checkpoint 或那条全库连接上的锁竞争就没有上界 —— 真机量到一趟 34.75 ms，紧接着
+/// 一格走出邻格三倍的位移（80 px → 237 px），那就是「停止滑动那一下发抖」。所以位置
+/// 留到离席才结（`persist_position`：退出阅读、以及窗口失去焦点）。
+///
+/// 这一条钉的是分工：滚的时候库里那一行不该出现，一结账它就得对得上屏幕上那一处。
+/// 而「到过哪一章」反过来 —— 它当场就记，目录那一屏的浅色等不起退出。
+#[gpui_kit::test]
+fn scrolling_leaves_the_database_alone_until_the_book_closes(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let store = Arc::new(Store::in_memory().expect("内存库"));
+    let id = store
+        .add_book(std::path::Path::new("memory://fixture"), &meta("markdown"))
+        .expect("入库");
+    store
+        .save_flow(id, &flow, Format::Markdown)
+        .expect("章节入库");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    assert!(
+        store.position(id).expect("读进度不该报错").is_none(),
+        "开书不该先写一行位置"
+    );
+
+    scroll_down(cx, handle, 900.0);
+    let offset = offset_of(&view, cx);
+    assert!(offset > 0, "滚动该把位置推出去，实际偏移 {offset}");
+    assert!(
+        store.position(id).expect("读进度不该报错").is_none(),
+        "滚动途中不该落库 —— 那一趟写库就是要摘掉的那一刀"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.read_chapters().contains(&0)),
+        "「到过第 0 章」要当场记进库，这一笔不在该等的范围里"
+    );
+
+    view.update(cx, |v, _| v.persist_position());
+    let (_, saved) = store
+        .position(id)
+        .expect("读回进度")
+        .expect("离席该把位置落下");
+    assert_eq!(saved.chapter, 0);
+    assert_eq!(saved.offset, offset, "落库的该是屏幕上滚到的那一行");
+}
+
 #[gpui_kit::test]
 fn locator_matches_the_scrolled_ratio(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);

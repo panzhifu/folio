@@ -78,7 +78,8 @@ pub(crate) fn request_storage_access() -> bool {
 ///   `set_fullscreen`，X11 翻 `_NET_WM_STATE_FULLSCREEN`）。它是个**翻转**而不是设定，
 ///   所以这里先读一次实际状态再决定要不要翻 —— 逐帧盲调会让窗口来回跳。
 /// - **Android**：fork 只能改系统栏颜色，藏栏走我们自己那份 `GpuiSystemUi`（设定语义，
-///   重复调用无副作用）。
+///   重复调用无副作用）。它把状态栏与导航栏一起藏掉；阅读层自己把返回栏留在状态栏那条线
+///   以下（`shell::reading_top_inset`，沉浸态那条 inset 由挖孔给）。
 /// - **iOS / HarmonyOS**：没有这个口，安静地什么都不做。
 #[cfg(not(mobile))]
 pub(crate) fn set_reader_fullscreen(on: bool, window: &mut Window) {
@@ -115,6 +116,34 @@ pub(crate) fn adjust_system_volume(up: bool) {
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn adjust_system_volume(_up: bool) {}
+
+/// 阅读界面的亮度：把「压暗多少」这一格递给平台。`None` = 交还系统。
+///
+/// 与 [`set_reader_fullscreen`] 同一族——都是「书挂着的时候才接管」那一档，调用方在外壳
+/// 那一处（`AppShell::reading_brightness`），值没变就不递。
+///
+/// - **Android**：递给 fork 的 `set_screen_brightness`，它写窗口自己的
+///   `screenBrightness`（应用级、不需要权限、不动别的 app），`None` 传那个 `-1.0` 的
+///   sentinel 把背光交还系统。
+/// - **桌面**：背光不归窗口管（那是显示器的地盘，gpui 没有这个口），所以这里安静地不做
+///   任何事。桌面上这一格由外壳盖的那一层压暗实现，读的同一个数
+///   （`reader::chrome::dim_alpha`）—— 同一个读数、两种暗法。
+/// - **iOS / HarmonyOS**：iOS 上唯一的口是**整机**亮度，动了会带走读者的系统设置，
+///   这一版不接管。
+#[cfg(target_os = "android")]
+pub(crate) fn set_screen_brightness(value: Option<f32>) {
+    gpui_mobile::set_screen_brightness(value);
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn set_screen_brightness(_value: Option<f32>) {}
+
+/// 这一端的「界面亮度」是被**背光**压暗的，还是该由应用自己压一层黑。
+///
+/// 判据只有这一处：Android 有窗口级的背光口（[`set_screen_brightness`] 真能改背光），
+/// 桌面上背光不归窗口管。阅读层拿这一个 bool 决定盖不盖那层黑 —— 两处各判一次，
+/// 迟早有一端同一格暗两次（背光压一遍、黑层再压一遍），或者哪一边都不暗。
+pub(crate) const BRIGHTNESS_IS_BACKLIGHT: bool = cfg!(target_os = "android");
 
 /// 状态栏图标那一档，跟着界面的浅深走：浅色界面要**深色**图标。
 ///

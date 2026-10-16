@@ -352,7 +352,10 @@ impl<'de> Deserialize<'de> for PageTurn {
 /// 自己放进 `themes/` 的 JSON（见 `folio_app::theme`）。所以这一节只回答
 /// 「选哪套」，`None` 表示用框架自带的那套。两侧都要记，即使当前模式只用到一侧 ——
 /// 之后换模式时读者的选择还在。
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// 只 `PartialEq` 而不带 `Eq`：`brightness` 是浮点数，`Eq` 在 f32 上本来就不成立
+/// （与 [`Config`] 那条同一口径）。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
     pub mode: Mode,
@@ -362,9 +365,26 @@ pub struct Appearance {
     pub dark: Option<String>,
     /// 正文翻页沿哪根轴平移（见 [`PageTurn`] 为什么这一格不在 `Reader` 里）。
     pub page_turn: PageTurn,
+    /// 阅读界面的亮度，`None` = **不接管**（跟随系统）。
+    ///
+    /// 与 [`page_turn`](Self::page_turn) 同一个理由存在这一节而不是 [`Reader`]：`Reader`
+    /// 整份是排版失效键，而把画面压暗与一行字折在哪里毫无关系。
+    ///
+    /// 同一个数在两端各落到自己那一手上：Android 写窗口自己的 `screenBrightness`
+    /// （`None` 传 `-1.0`，即 `BRIGHTNESS_OVERRIDE_NONE`，背光交还系统）；桌面上背光没有口，
+    /// 压暗的是应用盖在阅读层上的那一层（透明度由 `ui::features::reader::chrome::dim_alpha`
+    /// 从这一个数算出来）。所以「亮度」在两端的**读数**是同一个，只是被暗的方式不同。
+    ///
+    /// 上限不写成数：滑条推到顶（`1.0`）由 [`Appearance::normalized`] 归成 `None`，
+    /// 于是「跟随系统」在这份配置里只有一个表示法。
+    pub brightness: Option<f32>,
 }
 
 impl Appearance {
+    /// 亮度滑条的下限：再往下手机屏幕基本黑了，而「黑屏」不是一种读法。
+    /// 界面那一条滑条直接引用这个数，不在 UI 里抄第二份。
+    pub const BRIGHTNESS_MIN: f32 = 0.05;
+
     /// 空串按「没设」处理：`""` 既不是合法主题名，又会让下拉框显示成空白。
     pub fn normalized(mut self) -> Self {
         for name in [&mut self.light, &mut self.dark] {
@@ -373,6 +393,13 @@ impl Appearance {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
         }
+        // 顶格与非有限值都归成「不接管」：读回来的 `1.0`、手改成 `NaN` 的数，都不该在
+        // 配置里留下第二个「最大亮度」的表示法。
+        self.brightness = match self.brightness {
+            Some(v) if v >= 1.0 || !v.is_finite() => None,
+            Some(v) => Some(v.clamp(Self::BRIGHTNESS_MIN, 1.0)),
+            None => None,
+        };
         self
     }
 }
@@ -972,6 +999,7 @@ mod tests {
                 dark: Some("Molokai".into()),
                 // 故意不是默认值：这一趟要把新键真写出去再读回来，填默认值等于没测到它。
                 page_turn: PageTurn::Vertical,
+                brightness: Some(0.6),
             },
             language: Language { locale: Locale::Ja },
             ..Default::default()
@@ -1124,6 +1152,42 @@ mod tests {
         );
         assert_eq!(got.appearance.dark.as_deref(), Some("Molokai"));
         assert_eq!(got.reader.max_measure, 0.0, "0 = 随窗口铺满");
+    }
+
+    /// 亮度这一格只有「不接管」一个顶格写法，而越界的数夹住而不是整格丢掉。
+    /// 界面那条滑条的两端读的就是这两个数（`Appearance::BRIGHTNESS_MIN` 与 `1.0`），
+    /// 所以夹取规则钉在这里：滑条与配置之间不许有第二套「最大亮度」的表示法。
+    #[test]
+    fn the_brightness_top_end_is_the_same_thing_as_following_the_system() {
+        for written in ["1.0", "3.5"] {
+            let got = load(&format!(r#"{{"appearance":{{"brightness":{written}}}}}"#));
+            assert_eq!(
+                got.appearance.brightness, None,
+                "{written} 是推到顶，该归成「跟随系统」而不是留一个 1.0"
+            );
+        }
+        for written in ["0.0", "0.001", "-2.0"] {
+            let got = load(&format!(r#"{{"appearance":{{"brightness":{written}}}}}"#));
+            assert_eq!(
+                got.appearance.brightness,
+                Some(Appearance::BRIGHTNESS_MIN),
+                "{written} 越界了，夹到下限而不是丢掉整格"
+            );
+        }
+        assert_eq!(
+            load(r#"{"appearance":{"brightness":0.6}}"#)
+                .appearance
+                .brightness,
+            Some(0.6),
+            "区间内的数原样留着"
+        );
+        assert_eq!(
+            load(r#"{"appearance":{"mode":"dark"}}"#)
+                .appearance
+                .brightness,
+            None,
+            "没写过这一格就是交还系统"
+        );
     }
 
     /// 认不出的 mode 字符串不该让配置读失败或直接变成深色。

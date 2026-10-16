@@ -48,6 +48,10 @@ toc = "目录"
 night = "夜间"
 day = "日间"
 progress = "进度"
+# 阅读面板那两格：亮度滑条的标签，与面板右下角把完整设置压进来的那颗。
+# 字号、翻页、跟随系统都复用既有的词（`field.*` 与 `appearance.follow_system`）。
+brightness = "亮度"
+more_settings = "更多设置"
 # 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
 page_position = "第 %{index} / %{total} 页"
 # 底栏那一格：一页两栏的对开。窄窗口按不下去时自动退回单页，名字不必跟着改。

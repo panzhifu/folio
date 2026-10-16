@@ -104,8 +104,13 @@ pub(in crate::ui::features::reader) fn header(
 }
 
 /// 页脚：左边章内位置，右边进度。两端各占一条边。
+///
+/// `bottom_inset` 是底下那条系统手势条的高度：带子长高那一段、内容留在带顶，于是地脚那行
+/// 小字在手势条之上，而带子的底色（页底色）一直铺到屏幕底 —— 不让的话，底栏拾起来之后
+/// 那一段就是一条空缝。
 pub(in crate::ui::features::reader) fn footer(
     reader: &Entity<ReaderSession>,
+    bottom_inset: f32,
     cx: &App,
 ) -> AnyElement {
     let Readouts {
@@ -119,7 +124,10 @@ pub(in crate::ui::features::reader) fn footer(
             .child(text)
             .into_any_element()
     };
-    band(chrome::FOOTER_HEIGHT, false, cx)
+    // `h_flex` 默认交叉轴居中；先靠 `pb` 把内容盒压回 `FOOTER_HEIGHT` 那一段，
+    // 再让居中在这个内容盒里生效。
+    band(chrome::FOOTER_HEIGHT + bottom_inset, false, cx)
+        .when(bottom_inset > 0.0, |band| band.pb(px(bottom_inset)))
         .child(label(position))
         .child(label(percent))
         .into_any_element()

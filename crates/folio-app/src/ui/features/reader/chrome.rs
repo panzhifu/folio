@@ -15,13 +15,31 @@ pub const HEADER_HEIGHT: f32 = 28.0;
 /// 干净态页脚那一行小字的高度。
 pub const FOOTER_HEIGHT: f32 = 28.0;
 
-/// 排版面板里字号滑条的范围。
+/// 设置面板里字号滑条的范围。
 ///
 /// 设置页那一项允许 9–72（那里是数字输入，宽范围不碍事），这一条是**阅读时顺手调**的
 /// 滑条，只铺常用的一段；超出这段的字号仍然在设置页里可调，滑条只是把它顶到端点显示。
 pub const FONT_SIZE_RANGE: (f32, f32) = (12.0, 40.0);
-/// 排版面板里行距滑条的范围，同样是设置页 1.0–4.0 里常用的那一段。
-pub const LINE_HEIGHT_RANGE: (f32, f32) = (1.2, 2.4);
+
+/// 亮度滑条的范围。**上界不写数就是「跟随系统」**（见 `Appearance::brightness`），
+/// 下界引用配置那一格的同一个数，不在界面里抄第二份。
+pub const BRIGHTNESS_RANGE: (f32, f32) =
+    (folio_core::infra::config::Appearance::BRIGHTNESS_MIN, 1.0);
+
+/// 桌面上「压暗那一层」的透明度。`None`（跟随系统）与顶格都是 0 —— 不压。
+///
+/// 为什么桌面上要有这一层：背光不是窗口能改的东西（那是显示器的地盘，gpui 没有这个口），
+/// 而读者要的「暗一点」在两端都得真做得到 —— Android 走 `screenBrightness`，桌面走应用自己
+/// 盖的一层黑。同一个数，两种暗法，滑条与读数完全一样。
+///
+/// 上限 0.7 而不是 1.0：这一层盖的是应用自己画的字，压满就是黑屏，而「再暗一点」从来
+/// 不是「看不见」。
+pub fn dim_alpha(brightness: Option<f32>) -> f32 {
+    match brightness {
+        None => 0.0,
+        Some(value) => (1.0 - value).clamp(0.0, 0.7),
+    }
+}
 
 /// 双页对开时一栏最少要多宽（逻辑像素）。低于这个宽度，一行只容得下十几个字，
 /// 「两页」就变成了两条窄柱子，读者的眼球要在柱子间来回跳 —— 那是比单页更差的阅读。
@@ -229,8 +247,12 @@ pub enum Panel {
     /// 只有底栏本身（状态行 + 进度条 + 入口）。
     #[default]
     None,
-    /// 字号与行距。
-    Typography,
+    /// 阅读设置：亮度、字号，底下一行是翻页方式与「更多设置」。
+    ///
+    /// 原来那一格「排版」（字号 + 行距）并到这里：底栏那颗「设置」展开的就是这一块，
+    /// 而行距不在这一屏 —— 它是换一本书才调一次的东西，住在完整设置里，靠这一屏右边
+    /// 那颗按钮压进去。
+    Reading,
 }
 
 /// 阅读页浮层：整层的开合，加上底栏上面那块面板的档位。
@@ -319,9 +341,10 @@ mod tests {
     //! 应该先在这里红过一次。
 
     use super::{
-        Chrome, Effect, MIN_COLUMN_WIDTH, PageMode, Panel, Zone, default_mode, percent_label,
-        slide_shifts, spread_fits, spread_gap, tween, zone,
+        BRIGHTNESS_RANGE, Chrome, Effect, MIN_COLUMN_WIDTH, PageMode, Panel, Zone, default_mode,
+        dim_alpha, percent_label, slide_shifts, spread_fits, spread_gap, tween, zone,
     };
+    use folio_core::infra::config::Appearance;
 
     #[test]
     fn the_body_is_split_into_three_zones() {
@@ -351,7 +374,7 @@ mod tests {
         assert!(chrome.is_open());
         // 浮层开着（还带着面板）时点哪一区都只收，不翻屏：字不该在读者眼皮底下跑走。
         // 两层（面板 + 整层）要两下才收干净，收的过程中一区都不产生翻页。
-        chrome.select(Panel::Typography);
+        chrome.select(Panel::Reading);
         for zone in [Zone::PrevPage, Zone::NextPage] {
             assert_eq!(chrome.handle_body_tap(zone), Effect::DismissChrome);
         }
@@ -364,7 +387,7 @@ mod tests {
     #[test]
     fn dismissing_peels_the_panel_before_the_whole_layer() {
         let mut chrome = Chrome::default();
-        chrome.select(Panel::Typography);
+        chrome.select(Panel::Reading);
         assert!(chrome.dismiss(), "第一下该被面板消费");
         assert_eq!(chrome.panel(), Panel::None);
         assert!(chrome.is_open(), "面板收了，底栏还在");
@@ -376,9 +399,9 @@ mod tests {
     #[test]
     fn picking_the_same_panel_twice_closes_it_without_hiding_the_bar() {
         let mut chrome = Chrome::default();
-        chrome.select(Panel::Typography);
-        assert_eq!(chrome.panel(), Panel::Typography);
-        chrome.select(Panel::Typography);
+        chrome.select(Panel::Reading);
+        assert_eq!(chrome.panel(), Panel::Reading);
+        chrome.select(Panel::Reading);
         assert_eq!(chrome.panel(), Panel::None, "再点同一格是「不要了」");
         assert!(chrome.is_open(), "但顶栏底栏不该跟着闪一下");
     }
@@ -522,5 +545,33 @@ mod tests {
         assert_eq!(tween(500.0, 100.0, 0.5), 300.0);
         // 终点就是起点（夹在章尾、一个字没挪）时不该抖出一个非零的数。
         assert_eq!(tween(240.0, 240.0, 0.37), 240.0);
+    }
+
+    /// 桌面上那一层压暗的透明度。**两端都不许压**：「跟随系统」与滑条推到顶是同一件事，
+    /// 顶格还留着黑层的话，读者没有一档能把界面调回原样。
+    #[test]
+    fn the_dim_layer_is_absent_at_both_ends_of_the_scale() {
+        assert_eq!(dim_alpha(None), 0.0, "跟随系统 = 不压");
+        assert_eq!(dim_alpha(Some(1.0)), 0.0, "顶格 = 不压");
+        // 中间按「少掉的那一成」压。数取二进制里精确的那几个，浮点上的等式才钉得住
+        // （`1.0 - 0.6` 在 f32 里是 0.39999998，等式会红在数上而不是红在逻辑上）。
+        assert_eq!(dim_alpha(Some(0.5)), 0.5);
+        assert_eq!(dim_alpha(Some(0.75)), 0.25);
+        // 下限再暗也不压满：这一层盖的是应用自己画的字，压满就是黑屏。
+        assert_eq!(dim_alpha(Some(0.05)), 0.7);
+        assert_eq!(
+            dim_alpha(Some(0.0)),
+            0.7,
+            "越界的 0 也夹住，画面不该整个消失"
+        );
+    }
+
+    /// 亮度滑条的两端。**上界必须正好是 1.0** —— 那一格归成「跟随系统」，推不到顶读者就
+    /// 关不掉这一层；下界引用配置那一格的同一个数，不在界面里抄第二份。
+    #[test]
+    fn the_brightness_slider_reaches_the_follow_the_system_end() {
+        assert_eq!(BRIGHTNESS_RANGE.1, 1.0, "推不到顶就归不成「跟随系统」");
+        assert_eq!(BRIGHTNESS_RANGE.0, Appearance::BRIGHTNESS_MIN);
+        assert!(BRIGHTNESS_RANGE.0 > 0.0, "0 是黑屏，不是一个档位");
     }
 }

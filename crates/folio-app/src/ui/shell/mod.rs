@@ -47,10 +47,14 @@ use gpui_kit::TestSupportExt as _;
 // 系统返回。Android 上 gpui-mobile 把 `AKEYCODE_BACK`（含边缘滑动）与
 // `OnBackInvokedCallback` 都翻成 **escape**，所以绑住 escape 就接住了返回。
 //
-// `PageNext` / `PagePrev` 是音量键那两条（见 [`VolumeKey`]）：fork 把
+// `VolumeUp` / `VolumeDown` 是音量键那两条（见 [`VolumeKey`]）：fork 把
 // `AKEYCODE_VOLUME_UP/DOWN` 翻成 `volumeup` / `volumedown` 两个键名，绑定名不能写成
 // 带连字符的 `volume-up` —— gpui 的 `Keystroke::parse` 会把连字符前面那段当修饰键读。
-actions!(folio_shell, [Back, PageNext, PagePrev]);
+//
+// 两个动作按**物理键**命名而不是「上一页 / 下一页」：翻页方向归 [`VolumeKey::of`]，
+// 而它还要在「不在阅读页」那一支把这一按还给系统调音量 —— 调音量得知道按的是上还是下，
+// 所以动作必须带住「哪一颗键」，不能只带「往哪翻」。
+actions!(folio_shell, [Back, VolumeUp, VolumeDown]);
 
 /// 一次音量键按下该去哪儿。
 ///
@@ -66,12 +70,13 @@ pub(crate) enum VolumeKey {
 }
 
 impl VolumeKey {
-    /// 「音量上 = 往后一页」是拍的口径，改它只改这一行。RTL 不反过来：页号本来就按
-    /// 阅读序排（左右分区那套换算在 `reader::chrome::zone` 里），所以 +1 在两种方向下
-    /// 都是「往后一页」。
+    /// 「音量上 = 往前一页、音量下 = 往后一页」是拍的口径（与 KOReader 的
+    /// `VOLUME_UP → 上一页` / `VOLUME_DOWN → 下一页` 一致），改它只改这一行。RTL 不
+    /// 反过来：页号本来就按阅读序排（左右分区那套换算在 `reader::chrome::zone` 里），
+    /// 所以 ±1 在两种方向下都还是「往前 / 往后一页」。
     pub(crate) fn of(reading_open: bool, up: bool) -> Self {
         if reading_open {
-            Self::Turn(if up { 1 } else { -1 })
+            Self::Turn(if up { -1 } else { 1 })
         } else {
             Self::SystemVolume { up }
         }
@@ -79,8 +84,8 @@ impl VolumeKey {
 }
 
 /// 系统级那一层要不要沉浸。**有一本书挂着就沉浸**，不分档位：桌面上是窗口真全屏，Android 上
-/// 是把状态栏与导航栏交给系统藏起来。退场那一段也算挂着 —— 读者按完返回，动画还在书面上走，
-/// 中途把状态栏抬起来会当场挤一次容器。
+/// 是把状态栏与导航栏都交给系统藏起来。退场那一段也算挂着 —— 读者按完返回，动画还在书面上走，
+/// 中途把系统栏抬起来会当场挤一次容器。
 ///
 /// 应用内那条导航栏**不再跟着书**：阅读层盖在它之上（见 [`ReadingLayer`]），藏着露着对读者是
 /// 同一件事，而收起它会挤动架面的盒子 —— 少一处挤，就少一处可跳的地方。双页对开要的那 260
@@ -92,17 +97,47 @@ pub fn immersive_nav(_size: SizeClass, reading_mounted: bool) -> bool {
     reading_mounted
 }
 
+/// 「界面亮度」这一帧该递给平台的是哪一格：**只有书挂着的时候才接管**，书收了就交还系统。
+///
+/// 为什么这一格归外壳而不是阅读页：阅读页不知道自己盖在谁上面，也不知道自己正在退场（那是
+/// [`ReadingLayer`] 的 `closing`），而「读完一本书出去，屏幕不该还带着那一层的暗」正是
+/// 这条判据要钉住的事。桌面上同一个数还决定压暗层盖不盖（`reader::chrome::dim_alpha`）。
+///
+/// 抽成自由函数与 [`immersive_nav`] 同一条理由：宿主测试进不到那一屏，判据摆在这里才红得起来。
+pub fn reading_brightness(reading_mounted: bool, prefs: Option<f32>) -> Option<f32> {
+    reading_mounted.then_some(prefs).flatten()
+}
+
+/// 阅读层自己要避开的那一条边：**顶上那条系统状态栏 / 挖孔**（逻辑像素）。层是不透明的整屏，
+/// 却把子元素从这里往下推 —— 顶栏、干净态那行章名、正文与目录那几屏都从这里起算。
+///
+/// 沉浸态把状态栏藏起来了，但这条 inset 照旧非零（挖孔是物理存在的，`displayCutout` 那一条
+/// 不跟可见性归零），所以返回栏不会贴到屏幕最顶上、也不会压在摄像头上。
+///
+/// **底边不在这里**：底边不让层 —— 底下那条手势条由底栏卡片与干净态页脚自己抬高内容、
+/// 把底色铺到屏幕底（见 `reader::page` 的 `bottom_inset`），这样卡片与屏幕底之间不是一条空缝。
+/// 宽也不在：阅读层 `inset_0` 盖满整窗，左右两条边没人占（目录那条左侧栏由阅读页自己加回去，
+/// 见 `reader::page`）。
+///
+/// 与 [`reading_reserve`] 是同一个数：那一个是给**量正文**用的（正文自己量窗口高，全靠
+/// 它把盒高减对），这一个是给**摆层**用的。两处不一致时，正文盒会比层里真正可用的地方多/少
+/// 一条，屏幕上的表现是底部空一截或章尾几行永远滚不进视野。
+pub fn reading_top_inset(safe: &host::Insets) -> f32 {
+    safe.top
+}
+
 /// 报给正文的「不属于它的那一段」。两个轴都带着：正文自己看哪一轴非零（宽那一轴现在只由
 /// 目录那条左侧栏占，见 `reader::page` 里把 `rail` 加回去那一步）。
 ///
-/// 只剩安全区两条：宽恒为 0（阅读层 `inset_0` 盖满整窗，左右两条边没人占），高是状态栏那一条，
-/// 手机上再加手势条那一条 —— 那是系统的地盘不是应用 chrome，沉浸态把它交给系统藏起来时这两个
-/// 数跟着归零。阅读页量的是**窗口**高，少扣一条它就会把正文盒算高几十逻辑像素，多出来的那一段
+/// 高 = 顶上那一条（[`reading_top_inset`]）+ 底下那一条。顶上那一条阅读层自己让（把子元素
+/// 整体推下去）；底下那一条**不让层** —— 底栏卡片与干净态那条页脚自己抬高内容、把底色铺到
+/// 屏幕底（见 `reader::page` 的 `bottom_inset`），这样手势条那一段不是一条空缝，颜色与卡片
+/// 保持一致。阅读页量的是**窗口**高，少扣一条它就会把正文盒算高几十逻辑像素，多出来的那一段
 /// 落在页脚带下面被裁掉，于是章尾那几行永远滚不进视野。
-pub fn reading_reserve(size: SizeClass, safe: &host::Insets) -> Reserve {
+pub fn reading_reserve(safe: &host::Insets) -> Reserve {
     Reserve {
         width: 0.0,
-        height: safe.top + if size.is_compact() { safe.bottom } else { 0.0 },
+        height: reading_top_inset(safe) + safe.bottom,
     }
 }
 
@@ -278,6 +313,12 @@ pub struct AppShell {
     /// 「统计」那一格的视图。外壳留着它有两个理由：榜单那一行点开的订阅要挂在它上面，
     /// 而**关掉一本书之后要叫它重取一次**（读者读的那几分钟不进账，那一屏就还是旧数）。
     stats: gpui_kit::Entity<StatsView>,
+    /// 书架那一格的视图。外壳留着它只有一个理由：**关掉一本书之后要叫架面重查一次**。
+    /// 开书会把这一本的 `last_opened_at` 顶到最前（`Store::touch_opened`），架面不重查就
+    /// 还按旧顺序摆 —— 读者报的「最近阅读不会排到前面」正是这一处（架面查库有去重，
+    /// 词没变、架非空就不重查，见 `ShelfView::reload`）。与 [`stats`](Self::stats) 同一条
+    /// 理由、同一个调用点（[`AppShell::dismiss_reading`]）。
+    shelf: gpui_kit::Entity<ShelfView>,
     /// 首次启动的欢迎页。书库位置没确认前，外壳画的是它而不是主界面。
     welcome: gpui_kit::Entity<WelcomeView>,
     /// 现在是不是停在欢迎页。启动时由「书库位置确认过没有」决定（见 [`AppShell::boot`]），
@@ -312,6 +353,10 @@ pub struct AppShell {
     /// `InitWindow`，真机实测每次前后台都走一遍），系统也可能顺手把栏还原。不重递的
     /// 话，读者带着阅读页回来会看见栏又露出来，而应用还以为藏着。
     was_active: bool,
+    /// 上一次已经递给系统的那一格背光（外层 `None` = 一次都没递过；`Some(None)` = 交还系统）。
+    /// 存这一份与 [`AppShell::fullscreen_asked`] 同一条理由：那一格是**发给系统的作用**，
+    /// 每帧递一遍等于每帧动一次背光。
+    brightness_asked: Option<Option<f32>>,
     /// 转场期间冻住的那对 chrome 状态。`None` = 没有在跑的转场，每帧现算。
     ///
     /// 为什么要冻：`NavStackState::pop` 一调，栈深**当场**就变了，而出场那一页还要挂满整个
@@ -337,12 +382,12 @@ impl AppShell {
     pub fn boot(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // 系统返回 → `Back`，由本视图的 `on_action` 处理。
         cx.bind_keys([KeyBinding::new("escape", Back, None)]);
-        // 音量键 → 翻页动作。归谁管在 `volume_key` 里判（阅读页翻页，别处调系统音量），
+        // 音量键 → 这两个动作。归谁管在 `volume_key` 里判（阅读页翻页，别处调系统音量），
         // 所以这里两条都无上下文地绑上：Android 的音量键不经过任何输入框，不存在和打字
         // 抢键的问题；桌面那几个方向键要抢，就得先给阅读页一条 key context，另做一轮。
         cx.bind_keys([
-            KeyBinding::new("volumeup", PageNext, None),
-            KeyBinding::new("volumedown", PagePrev, None),
+            KeyBinding::new("volumeup", VolumeUp, None),
+            KeyBinding::new("volumedown", VolumeDown, None),
         ]);
 
         // 先把主题的应用字体换成这台设备真能解析出的家族，再建任何用文字的视图：
@@ -500,13 +545,13 @@ impl AppShell {
         // 音量键两条动作。与 `Back` 同一个位置注册，理由也一样：这两个键是**全局**的，
         // 焦点路径里没有任何元素接它们时也要有反应，而元素级 `.on_action` 那时候收不到。
         let weak = cx.entity().downgrade();
-        App::on_action(&mut *cx, move |_: &PageNext, cx: &mut App| {
+        App::on_action(&mut *cx, move |_: &VolumeUp, cx: &mut App| {
             if let Some(shell) = weak.upgrade() {
                 shell.update(cx, |this, cx| this.volume_key(true, cx));
             }
         });
         let weak = cx.entity().downgrade();
-        App::on_action(&mut *cx, move |_: &PagePrev, cx: &mut App| {
+        App::on_action(&mut *cx, move |_: &VolumeDown, cx: &mut App| {
             if let Some(shell) = weak.upgrade() {
                 shell.update(cx, |this, cx| this.volume_key(false, cx));
             }
@@ -518,6 +563,7 @@ impl AppShell {
             account,
             reading: None,
             stats,
+            shelf,
             welcome,
             onboarding,
             _config_watch,
@@ -531,6 +577,8 @@ impl AppShell {
             // 建起来就算「在前台」：启动那一帧不是「回到前台」，意愿由上面那条
             // `fullscreen_asked != Some(..)` 第一次递出去，不必这里再递一遍。
             was_active: true,
+            // 背光同理：第一次递由 `brightness_asked != Some(..)` 那条判出来。
+            brightness_asked: None,
             chrome_frozen: None,
             // 第一帧画的就是「导航栏在、不沉浸」那一对（架面是栈底）。渲染每帧把它更新成
             // 当帧真正摆出来的值，所以这份初值只服务于第一次 pop 之前。
@@ -609,23 +657,43 @@ impl AppShell {
     /// 读者离开这一本书：落库、重取统计、开始退场。走完那一步由 [`Presence`] 的采样决定，
     /// 这里不等动画。
     ///
-    /// 两条入口都走到这里：系统返回键（[`AppShell::back`]）与顶栏那颗返回
-    /// （`ReadingPage::pop` —— 正文是自己的子栈的栈底，弹不动就该请外壳收层）。
+    /// 系统返回键（[`AppShell::back`]）走这里。顶栏那颗返回**不走这条** —— 它跑在正文自己
+    /// 的更新里，见 [`AppShell::dismiss_reading`]。
     ///
     /// 落库在**退场开始**那一刻而不是动完之后（与今天在同一语义上）：位置与时长是同一次离席的
     /// 两笔账，动画被打断、进程被杀都不该把它们带走。
     pub(crate) fn close_reading(&mut self, cx: &mut Context<Self>) {
-        let Some(layer) = self.reading.as_mut() else {
+        let Some(layer) = self.reading.as_ref() else {
             return;
         };
         if layer.closing {
             return;
         }
         layer.page.update(cx, |page, cx| page.close(cx));
+        self.dismiss_reading(cx);
+    }
+
+    /// `close_reading` 的**后半步**：只翻「正在退场」这一格、重取统计、重画 —— 一根手指都
+    /// 不碰正文那一页。
+    ///
+    /// 给正文自己那颗返回用（`ReadingPage::pop`）：那一句正跑在**正文的更新里**，请外壳再
+    /// `update` 一次同一个实体就是 panic（release 下 `panic = abort`，真机上的表现是
+    /// 「点返回直接掉回桌面」）。正文那一步的收尾（进度与时长落库）由它自己先做完。
+    pub(crate) fn dismiss_reading(&mut self, cx: &mut Context<Self>) {
+        let Some(layer) = self.reading.as_mut() else {
+            return;
+        };
+        if layer.closing {
+            return;
+        }
         layer.closing = true;
         // 刚结掉的那一段要出现在统计上：读者从阅读页切去「统计」看自己读了多久，
         // 那一屏拿的还是上一次进来的快照，就少算了刚才那几十分钟。
         self.stats.update(cx, |stats, cx| stats.refresh(cx));
+        // 架面的顺序与进度同理：开书把这一本的 `last_opened_at` 顶到最前、退场那一刻
+        // 位置刚落库，而架面查库有去重（词没变、架非空就不重查）—— 不在这儿推它一把，
+        // 读者读完退回来看到的还是开书前的旧顺序，「最近阅读」排不到前面。
+        self.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
         cx.notify();
     }
 
@@ -737,10 +805,15 @@ impl AppShell {
     /// 落在纸上的一击既不该算给这一页也不该算给下一页。
     ///
     /// 底下的架面在动画期间一动不动：这一层是不透明的整屏，它盖着。
+    ///
+    /// 整屏也要给系统让开顶上那一条（[`reading_top_inset`]）：返回栏与干净态那行章名落到
+    /// 状态栏／挖孔下面，不贴屏幕顶。层自己的底色照旧铺满整窗（背景画的是 padding 也在内的
+    /// 盒），所以空出来的那一条是阅读页的底色，不是一条白缝。底边不让（见同一个函数）。
     fn reading_overlay(
         &self,
         layer: &ReadingLayer,
         sample: PresenceSample,
+        top_inset: f32,
         window: &Window,
         cx: &App,
     ) -> AnyElement {
@@ -749,6 +822,7 @@ impl AppShell {
         div()
             .absolute()
             .inset_0()
+            .pt(px(top_inset))
             .bg(cx.theme().background)
             .left(px(shift))
             .right(px(-shift))
@@ -813,6 +887,8 @@ impl Render for AppShell {
         // 外观一改（或第一帧还没涂过）就重涂一次。用 `repaint` 而非 `apply`：
         // 这一帧本来就要重画，再刷所有窗口是自己触发自己。
         let appearance = ConfigHolder::appearance(cx);
+        // 亮度那一格先抠出来：下面整个 `appearance` 要挪进 `applied`，而这一帧后面还要用它。
+        let brightness_pref = appearance.brightness;
         if self.applied.as_ref() != Some(&appearance) {
             theme::repaint(&appearance, Some(window), cx);
             self.applied = Some(appearance);
@@ -847,19 +923,38 @@ impl Render for AppShell {
         if reading_sample.is_some_and(|sample| !sample.should_render()) {
             self.reading = None;
         }
-        // 报给正文的那一条只剩安全区（左右两条边没人占了），见 [`reading_reserve`]。
-        let reserve = reading_reserve(size, &safe);
+        // 报给正文的那一条是顶上那一条（层自己让）加底下那一条（底栏与页脚自己让，见
+        // `reader::page` 的 `bottom_inset`）。同一个数还要给摆层用（[`reading_top_inset`]）。
+        let reading_top = reading_top_inset(&safe);
+        let reserve = reading_reserve(&safe);
+        let bottom_inset = safe.bottom;
         if let Some(layer) = self.reading.as_ref() {
-            layer
-                .page
-                .update(cx, |page, cx| page.set_reserve(reserve, cx));
+            layer.page.update(cx, |page, cx| {
+                page.set_reserve(reserve, cx);
+                page.set_top_inset(reading_top, cx);
+                page.set_bottom_inset(bottom_inset, cx);
+            });
         }
 
-        // 系统级那一层也跟着沉浸：桌面上窗口真全屏、Android 上藏掉状态栏与导航栏，
+        // 系统级那一层也跟着沉浸：桌面上窗口真全屏、Android 上把状态栏与导航栏都藏掉，
         // 应用内那层（侧栏 / 自绘标题栏）在 `body` 里收。只在**期望变了**或**回到前台**
         // 的那一帧动手，两条理由分别见 [`AppShell::fullscreen_asked`] 与
         // [`AppShell::was_active`]。
         let active = window.is_window_active();
+        // 离开前台之前把这一屏的位置结掉。滚动那条路已经不写库了（为什么，见
+        // `ReaderSession::persist_if_moved` 那段），而 Android 一切后台，进程什么时候
+        // 被回收不由我们说 —— 这是最后一个可靠的机会。桌面上这一条也成立：窗口被别的
+        // 应用抢走焦点同样是一次离席。
+        if self.was_active
+            && !active
+            && let Some(layer) = self.reading.as_ref()
+        {
+            let page = layer.page.clone();
+            // 同样挪进 `defer`：`render` 只算画面，写库是发给存储的作用。
+            window.defer(cx, move |_, cx| {
+                page.update(cx, |page, cx| page.flush_position(cx));
+            });
+        }
         if self.fullscreen_asked != Some(immersive) || (active && !self.was_active) {
             self.fullscreen_asked = Some(immersive);
             // 不就地递：`render` 按约定只算画面，而这一条是发给系统的作用。挪到
@@ -868,6 +963,19 @@ impl Render for AppShell {
             // 句日志前几十微秒，只是不再夹在渲染中间。）
             window.defer(cx, move |window, _cx| {
                 crate::ui::platform::set_reader_fullscreen(immersive, window);
+            });
+        }
+        // 「界面亮度」跟着书走：书挂着才接管，书收了就把背光交还系统（判据在
+        // [`reading_brightness`]，而桌面上同一个数还决定那一层黑盖不盖）。动手的时机与上面
+        // 全屏那一条**逐字相同** —— 只在要的那一格变了、或回到前台的那一帧递：Android 每次
+        // 前后台都把 surface 拆了重建，新窗口带着一份默认的窗口属性回来，不重递的话背光
+        // 那一格就悄悄丢了，而应用还以为暗着。
+        let brightness = reading_brightness(self.reading_mounted(), brightness_pref);
+        if self.brightness_asked != Some(brightness) || (active && !self.was_active) {
+            self.brightness_asked = Some(brightness);
+            // 同样不就地递：`render` 按约定只算画面，这一条是发给系统的作用。
+            window.defer(cx, move |_, _| {
+                crate::ui::platform::set_screen_brightness(brightness);
             });
         }
         self.was_active = active;
@@ -960,7 +1068,7 @@ impl Render for AppShell {
         // 放手那一帧 `reading_sample` 还留着（本帧采的），所以两边都非空才画 —— 不多留一帧。
         let overlay = match (self.reading.as_ref(), reading_sample) {
             (Some(layer), Some(sample)) => Some(
-                self.reading_overlay(layer, sample, window, cx)
+                self.reading_overlay(layer, sample, reading_top, window, cx)
                     .into_any_element(),
             ),
             _ => None,

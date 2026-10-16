@@ -12,6 +12,10 @@ import android.view.WindowInsetsController;
 /**
  * Hide and restore the system bars for immersive reading.
  *
+ * <p>The reader goes full screen: both the status bar and the navigation bar are dropped. The
+ * Rust side still lays its own top bar below the status bar's line (the reading layer keeps a
+ * safe-area inset at the top), so the punch-hole camera never overlaps the back button.</p>
+ *
  * <p>GPUI's Android event loop runs on its own native thread, so Rust reaches this from a
  * non-UI thread: {@link #setImmersive} hops to the UI thread itself rather than trusting the
  * caller. Both directions are a <em>set</em>, not a toggle — calling it twice with the same
