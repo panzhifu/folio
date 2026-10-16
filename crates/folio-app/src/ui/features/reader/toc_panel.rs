@@ -883,6 +883,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;
+    use std::time::Instant;
 
     use folio_core::content::document::Document;
     use folio_core::content::format::TocEntry;
@@ -890,7 +891,8 @@ mod tests {
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Entity, Subscription, TestAppContext, px, size,
+        AnyWindowHandle, AppContext as _, Entity, InputEvent as _, ScrollDelta, ScrollWheelEvent,
+        Subscription, TestAppContext, point, px, size,
     };
 
     use super::{TOC_RAIL, TocEvent, TocPanel};
@@ -914,6 +916,23 @@ mod tests {
     /// 根就是这一屏：`v_virtual_list` 与弹层都要真窗口，而这一屏的渲染路径正是这里要测的那条。
     /// 最后那格是订阅句柄 —— `Subscription` 一 drop 就退订，测试必须把它攥着。
     fn open_panel(cx: &mut TestAppContext, width: f32) -> Opened {
+        let toc = vec![
+            TocEntry {
+                title: "第一章".into(),
+                href: "c0.xhtml".into(),
+                ..Default::default()
+            },
+            TocEntry {
+                title: "第二章".into(),
+                href: "c1.xhtml".into(),
+                ..Default::default()
+            },
+        ];
+        open_panel_with(cx, width, toc)
+    }
+
+    /// 同一套起法，目录换成递进来的那一棵：滚动仪表要的是 1400 行那一档，断言要的是两行。
+    fn open_panel_with(cx: &mut TestAppContext, width: f32, toc: Vec<TocEntry>) -> Opened {
         let flow = FlowDoc {
             chapters: vec![
                 Chapter::inline("第一章", "<p>第一章的第一段字。</p>")
@@ -921,18 +940,7 @@ mod tests {
                 Chapter::inline("第二章", "<p>第二章的第一段字。</p>")
                     .with_spine_href("c1.xhtml".to_string()),
             ],
-            toc: vec![
-                TocEntry {
-                    title: "第一章".into(),
-                    href: "c0.xhtml".into(),
-                    ..Default::default()
-                },
-                TocEntry {
-                    title: "第二章".into(),
-                    href: "c1.xhtml".into(),
-                    ..Default::default()
-                },
-            ],
+            toc,
             ..Default::default()
         };
         let meta = DocMeta {
@@ -1054,6 +1062,162 @@ mod tests {
         assert!(
             !panel.read_with(cx, |panel, cx| panel.is_open(cx)),
             "跳完该把这一层收掉：读者要看的正是跳到的那几行字"
+        );
+    }
+
+    /// **目录滚动仪表**（`#[ignore]`：量的是墙钟，不当断言用）。
+    ///
+    /// 为什么要这一条：滑动卡顿的判据是「一帧的单价」，而这一屏每帧跑的那几趟全表只住在
+    /// 渲染路径里，别处量不到 —— `pieces` 里 `visible()` 一趟只为拿一个行数、`rows` 里
+    /// 再一次。这里把**整帧**与**那一趟**分开报，改哪一处值多少钱就有数了。
+    /// 表头「已读 N / M」那两个数顺带钉住是 O(1)（`read_count` 就是 `ix + 1`），
+    /// 不在每帧的账上。
+    ///
+    /// 三个读数只在**同一台机器、同一个 profile** 下互相比，别把绝对值当手机上的数：
+    /// debug 的 CPU 段比 release 虚高数倍，所以要 `--release`。已读集合这一项在本台夹具里
+    /// 只有 1 条，克隆费量不出真书（上千条已读）的那一笔。
+    ///
+    /// 量的是**左侧栏那一档**（`SizeClass::of` 在桌面上把宽度夹到至少 Medium，460 也走栏）：
+    /// 容器与弹层不同，但那四块内容、虚拟列表与每帧的全表遍历是同一份（见 `Self::pieces`），
+    /// 所以这几趟的单价可以直接搬到手机那一档；弹层多出来的遮罩与投影不在这一格里。
+    ///
+    /// 跑法：`cargo test -p folio-app --lib --release -- --ignored --nocapture measure`
+    #[ignore = "量墙钟，只在读数字时手动跑"]
+    #[gpui_kit::test]
+    fn measure_a_toc_scroll_frame(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        // 200 组 × 每组 6 条 = 1400 行，基督山伯爵那一档的分量；全展开是 worst case
+        // （折叠着的时候 `visible()` 走得快，而读者滑目录正是展开着滑）。
+        const GROUPS: usize = 200;
+        const PER_GROUP: usize = 6;
+        const ROWS: usize = GROUPS * (PER_GROUP + 1);
+        const FRAMES: usize = 60;
+
+        let toc = (0..GROUPS)
+            .map(|group| TocEntry {
+                title: format!("第{group}组").into(),
+                href: "c0.xhtml".into(),
+                children: (0..PER_GROUP)
+                    .map(|ix| TocEntry {
+                        // 标题按真书那样长：一行放不下，截断与「最多几行」的活儿才落得下来。
+                        title: format!("第{group}组第{ix}节 · 一个足够长的标题用来把一行撑满")
+                            .into(),
+                        href: "c0.xhtml".into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .collect();
+
+        let (_session, panel, handle, _events, _watch) = open_panel_with(cx, 460., toc);
+        panel.update(cx, |panel, cx| panel.toggle(cx));
+        for _ in 0..3 {
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("前置：这一屏该画得出来");
+        }
+        panel.update(cx, |panel, cx| {
+            panel
+                .tree
+                .as_mut()
+                .expect("前置：树该建起来了")
+                .expand_all();
+            cx.notify();
+        });
+        for _ in 0..3 {
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("前置：全展开也该画得出来");
+        }
+        panel.update(cx, |panel, _| {
+            assert_eq!(
+                panel.tree.as_ref().map_or(0, |toc| toc.visible().len()),
+                ROWS,
+                "前置：{ROWS} 行都该看得见，否则量的不是那一档"
+            );
+        });
+
+        // 整帧：滚一下 + 走完一帧（gpui 的布局、绘制、文字成形全在里面）。
+        // 滚轮事件按**窗口坐标**投进列表那一条命中区，走的是 gpui 真的滚动派发
+        // （`elements/div.rs` 的 ScrollWheel 监听 → `cx.notify(current_view)`），
+        // 不是替它直接挪 offset —— 替它挪就把要量的那一段绕过去了。
+        let clock = Instant::now();
+        for _ in 0..FRAMES {
+            cx.update_window(handle, |_, window, cx| {
+                window.dispatch_event(
+                    ScrollWheelEvent {
+                        position: point(px(120.0), px(300.0)),
+                        delta: ScrollDelta::Pixels(point(px(0.0), px(-28.0))),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.render_frame(cx);
+            })
+            .expect("滚动帧该画得出来");
+        }
+        let frame_us = clock.elapsed().as_micros() as f64 / FRAMES as f64;
+        // 前置：这一趟确实在滚（偏移没动的话整帧量的是静止帧，那不是滚动单价）。
+        panel.update(cx, |panel, _| {
+            assert!(
+                panel.scroll.offset().y < px(0.0),
+                "前置：滚轮该把列表推动了，实测偏移 {:?}",
+                panel.scroll.offset()
+            );
+        });
+
+        // `visible()` 一趟（一帧里跑两趟）。
+        let clock = Instant::now();
+        for _ in 0..FRAMES {
+            panel.update(cx, |panel, _| {
+                let seen = panel.tree.as_ref().map_or(0, |toc| toc.visible().len());
+                assert_eq!(seen, ROWS, "前置：这一趟量的是全展开");
+            });
+        }
+        let visible_us = clock.elapsed().as_micros() as f64 / FRAMES as f64;
+
+        // 表头那两个数**每帧是 O(1)**：`read_count` 就是 `ix + 1` 与 `rows.len()`，
+        // `current_ix` 命中开屏那一次记下的 `(章号, 行号)`。所以这一格量的不是每帧的活儿，
+        // 而是**章一变就走一趟**的那条兜底（`row_of_chapter` 找不着就得扫完全表）——
+        // 一次翻页一笔，不在滚动帧里。放在这里是把它的单价也钉住，别当成滚动成本。
+        let clock = Instant::now();
+        for _ in 0..FRAMES {
+            panel.update(cx, |panel, _| {
+                let toc = panel.tree.as_ref().expect("前置：树该在");
+                assert!(
+                    toc.current_ix(usize::MAX).is_none(),
+                    "前置：这一趟该走完全表"
+                );
+                let (read, total) = toc.read_count(Some(ROWS - 1));
+                assert_eq!((read, total), (ROWS, ROWS), "前置：最后一行当下标时该读满");
+            });
+        }
+        let chapter_change_us = clock.elapsed().as_micros() as f64 / FRAMES as f64;
+
+        // 一屏行的元素构造（不含布局与绘制）：`rows` 里那次 `visible()` 与已读集合克隆
+        // 都记在这一格上。
+        let clock = Instant::now();
+        for _ in 0..FRAMES {
+            panel.update(cx, |panel, cx| {
+                assert_eq!(panel.rows(0..20, cx).len(), 20, "前置：20 行都该建得出来");
+            });
+        }
+        let rows_us = clock.elapsed().as_micros() as f64 / FRAMES as f64;
+
+        println!(
+            "目录 {ROWS} 行全展开 · 窗口 460×520 · {} 帧 · profile={}：\n  整帧 {frame_us:>7.0} µs/帧\
+             \n  visible() 一趟 {visible_us:>7.0} µs（一帧两趟 = {:.0} µs，占整帧 {:.1}%）\
+             \n  章一变才走的那一趟 {chapter_change_us:>7.0} µs（**不在滚动帧里**）\
+             \n  rows(0..20) 构造 {rows_us:>7.0} µs（占整帧 {:.1}%）\n  表头那两个数每帧 O(1)，没有可占的份额",
+            FRAMES,
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            visible_us * 2.0,
+            visible_us * 2.0 / frame_us * 100.0,
+            rows_us / frame_us * 100.0,
         );
     }
 }
