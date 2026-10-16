@@ -93,7 +93,7 @@ impl DocumentProvider for CbzAdapter {
             format: Format::Cbz,
             size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
             ..DocMeta::default()
-            };
+        };
         let fixed = FixedDoc {
             pages,
             toc: Vec::new(),

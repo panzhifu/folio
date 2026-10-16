@@ -139,7 +139,7 @@ impl DocumentProvider for ChmAdapter {
             format: Format::Chm,
             size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
             ..DocMeta::default()
-            };
+        };
         let flow = FlowDoc {
             chapters,
             css: String::new(),

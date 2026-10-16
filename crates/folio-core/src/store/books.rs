@@ -58,14 +58,16 @@ const META_COLUMNS: &str = "id, title, authors, contributors, subjects, descript
 
 /// 信息屏那一屏要的一行。列序与 [`META_COLUMNS`] 一致。
 fn meta_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookMeta> {
-    let list = |i: usize| -> rusqlite::Result<Vec<String>> {
-        Ok(split_list(&r.get::<_, String>(i)?))
-    };
+    let list =
+        |i: usize| -> rusqlite::Result<Vec<String>> { Ok(split_list(&r.get::<_, String>(i)?)) };
     // 系列两格：名字为空 = 不属于任何系列；序号只有在名字在的时候才取（空名字配
     // 一个孤立序号是脏数据，不该画成「第 3 本」）。
     let series = match r.get::<_, String>(12)? {
         name if name.is_empty() => None,
-        name => Some(Series { name, position: r.get(13)? }),
+        name => Some(Series {
+            name,
+            position: r.get(13)?,
+        }),
     };
     Ok(BookMeta {
         id: r.get(0)?,
@@ -362,7 +364,9 @@ impl Store {
     pub fn book_meta(&self, id: i64) -> Result<Option<BookMeta>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let sql = format!("SELECT {META_COLUMNS} FROM books WHERE id = ?1");
-        Ok(conn.query_row(&sql, params![id], meta_from_row).optional()?)
+        Ok(conn
+            .query_row(&sql, params![id], meta_from_row)
+            .optional()?)
     }
 
     /// 单拿这一本的封面字节。
@@ -851,7 +855,7 @@ mod grouping {
             format: Format::Epub,
             size: 1,
             ..DocMeta::default()
-            }
+        }
     }
 
     fn path(name: &str) -> PathBuf {

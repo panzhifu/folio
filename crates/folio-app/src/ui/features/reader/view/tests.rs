@@ -136,7 +136,7 @@ fn meta(format: &str) -> DocMeta {
         format: Format::parse(format).expect("格式名要认得"),
         size: 0,
         ..DocMeta::default()
-        }
+    }
 }
 
 /// 把这份语料落进一个内存库并登记成一行书目，返回 `(库, book_id)`。

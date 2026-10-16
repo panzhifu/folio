@@ -525,7 +525,9 @@ fn pick_series(metas: &[RawMeta]) -> Option<Series> {
         ("calibre:series", "calibre:series_index"),
         ("relation", ""),
     ] {
-        let Some(host) = metas.iter().find(|m| m.key == host_key && !m.text.trim().is_empty())
+        let Some(host) = metas
+            .iter()
+            .find(|m| m.key == host_key && !m.text.trim().is_empty())
         else {
             continue;
         };
@@ -534,7 +536,10 @@ fn pick_series(metas: &[RawMeta]) -> Option<Series> {
         } else {
             refine(host, metas, position_key)
         };
-        return Some(Series { name: host.text.trim().to_string(), position });
+        return Some(Series {
+            name: host.text.trim().to_string(),
+            position,
+        });
     }
     None
 }
@@ -593,9 +598,7 @@ fn parse_opf(xml: &str) -> Opf {
                                 elem: name.to_string(),
                                 key,
                                 id: attr(&e, "id").unwrap_or_default(),
-                                scheme: attr(&e, "scheme")
-                                    .unwrap_or_default()
-                                    .to_ascii_lowercase(),
+                                scheme: attr(&e, "scheme").unwrap_or_default().to_ascii_lowercase(),
                                 refines: attr(&e, "refines").unwrap_or_default(),
                                 text: String::new(),
                             });
@@ -606,9 +609,7 @@ fn parse_opf(xml: &str) -> Opf {
                             elem: name.to_string(),
                             key: name.to_string(),
                             id: attr(&e, "id").unwrap_or_default(),
-                            scheme: attr(&e, "scheme")
-                                .unwrap_or_default()
-                                .to_ascii_lowercase(),
+                            scheme: attr(&e, "scheme").unwrap_or_default().to_ascii_lowercase(),
                             refines: attr(&e, "refines").unwrap_or_default(),
                             text: String::new(),
                         });
@@ -1834,7 +1835,7 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         format: Format::Epub,
         size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
         ..DocMeta::default()
-        };
+    };
     let flow = FlowDoc {
         chapters,
         css,
@@ -1959,7 +1960,7 @@ fn read_fixed(
         format: Format::Epub,
         size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
         ..DocMeta::default()
-        };
+    };
     let fixed = FixedDoc {
         pages,
         toc: Vec::new(),

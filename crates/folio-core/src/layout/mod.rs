@@ -128,8 +128,8 @@ fn layout_inner(
     // 按父块的内容宽折，这条基准一路由 `collect` 的 `basis` 参数带着走。
     let pl = style.padding_left.resolve(options.width).max(0.0);
     let pt = style.padding_top.resolve(options.width).max(0.0);
-    let content_width = (options.width - pl - style.padding_right.resolve(options.width).max(0.0))
-        .max(1.0);
+    let content_width =
+        (options.width - pl - style.padding_right.resolve(options.width).max(0.0)).max(1.0);
     let height = ctx.children(root, pl, pt, content_width);
     let out = Layout::assemble(ctx.blocks, ctx.lines, content_width, pt + height);
     // 块数与行数是一章排版结果的体检指标：0 行意味着 DOM 或样式空了，而不是「这一章短」。
@@ -209,8 +209,8 @@ pub fn measure_chapter(
     let pl = style.padding_left.resolve(options.width).max(0.0);
     let pt = style.padding_top.resolve(options.width).max(0.0);
     let pb = style.padding_bottom.resolve(options.width).max(0.0);
-    let content_width = (options.width - pl - style.padding_right.resolve(options.width).max(0.0))
-        .max(1.0);
+    let content_width =
+        (options.width - pl - style.padding_right.resolve(options.width).max(0.0)).max(1.0);
 
     let mut units = Vec::new();
     let mut cursor = pt;

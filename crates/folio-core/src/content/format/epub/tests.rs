@@ -2158,16 +2158,28 @@ fn the_opf_metadata_fills_every_dublin_core_field() {
     assert_eq!(opf.authors, vec!["莫里亚克"]);
     assert_eq!(opf.contributors, vec!["顾琪静"]);
     assert_eq!(opf.subjects, vec!["法国小说", "日记体"]);
-    assert_eq!(opf.description, "一位老人的自白。", "首尾空白要剪掉，中间的不动");
+    assert_eq!(
+        opf.description, "一位老人的自白。",
+        "首尾空白要剪掉，中间的不动"
+    );
     assert_eq!(opf.publisher, "人民文学");
-    assert_eq!(opf.published, "2023-05-01T00:00:00Z", "日期原样存，不折成日期类型");
+    assert_eq!(
+        opf.published, "2023-05-01T00:00:00Z",
+        "日期原样存，不折成日期类型"
+    );
     assert_eq!(opf.language, "zh-CN");
     assert_eq!(opf.dctype, "text");
     assert_eq!(opf.rights, "版权由译者持有");
-    assert_eq!(opf.isbn, "978-7-02-000000-0", "一串 identifier 里挑有标记的那条");
+    assert_eq!(
+        opf.isbn, "978-7-02-000000-0",
+        "一串 identifier 里挑有标记的那条"
+    );
     assert_eq!(
         opf.series,
-        Some(Series { name: "译文名著系列".into(), position: "7".into() }),
+        Some(Series {
+            name: "译文名著系列".into(),
+            position: "7".into()
+        }),
         "系列名与挂在 refines 上的序号"
     );
 }
@@ -2185,7 +2197,10 @@ fn the_three_series_carriers_have_a_stated_precedence() {
     );
     assert_eq!(
         calibre.series,
-        Some(Series { name: "哈利·波特".into(), position: "1.5".into() }),
+        Some(Series {
+            name: "哈利·波特".into(),
+            position: "1.5".into()
+        }),
         "EPUB2 自闭写法 + Calibre 那一对照采，且优先于 dc:relation"
     );
 
@@ -2196,7 +2211,10 @@ fn the_three_series_carriers_have_a_stated_precedence() {
     );
     assert_eq!(
         relation.series,
-        Some(Series { name: "世界名著".into(), position: String::new() }),
+        Some(Series {
+            name: "世界名著".into(),
+            position: String::new()
+        }),
         "只有 dc:relation 时也认下来当系列（EPUB3 之前的规范读法）"
     );
 
@@ -2243,5 +2261,8 @@ fn fixed_layout_still_comes_out_of_the_same_collector() {
 </metadata><manifest/><spine/></package>"#,
     );
     assert!(fxl.pre_paginated, "定版式声明从 `property` 那条路采到");
-    assert_eq!(fxl.title, "画书", "同一段里既采声明又采书目，两边都不该受影响");
+    assert_eq!(
+        fxl.title, "画书",
+        "同一段里既采声明又采书目，两边都不该受影响"
+    );
 }

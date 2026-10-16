@@ -184,7 +184,7 @@ mod tests {
             format: Format::Epub,
             size: 4096,
             ..DocMeta::default()
-            }
+        }
     }
 
     fn path(name: &str) -> PathBuf {

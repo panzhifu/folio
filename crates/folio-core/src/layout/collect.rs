@@ -38,7 +38,8 @@ const MARKER_GAP_EM: f32 = 0.25;
 ///
 /// 两个属性都允许 0 与负数（HTML 的合法值），序号那一侧由 [`marker_text`] 夹回 1 起。
 fn attr_count(dom: &Dom, node: NodeId, name: &str) -> Option<i64> {
-    dom.attr(node, name).and_then(|v| v.trim().parse::<i64>().ok())
+    dom.attr(node, name)
+        .and_then(|v| v.trim().parse::<i64>().ok())
 }
 
 /// 摆一段行内内容的四件套：落点 `(x, y)`、行宽，以及百分比的折算基准。
@@ -276,7 +277,8 @@ impl<'a> Ctx<'a> {
         // 列表序号。CSS 的列表计数器就是「同层 `display: list-item` 的兄弟按文档序」，
         // `<ol start>` 挪起点（所以先减 1，第一项 ++ 之后正好落回 `start`），
         // `<li value>` 挪这一项并把续值接在它后面。
-        let mut ordinal: i64 = attr_count(self.dom, container, "start").map_or(0, |start| start - 1);
+        let mut ordinal: i64 =
+            attr_count(self.dom, container, "start").map_or(0, |start| start - 1);
 
         for &child in self.children_of(container) {
             let style = self.style_of(child);
@@ -296,7 +298,12 @@ impl<'a> Ctx<'a> {
                 cursor += self.wrap_paragraph(
                     container,
                     &pieces,
-                    Slot { x, y: cursor, width, basis: width },
+                    Slot {
+                        x,
+                        y: cursor,
+                        width,
+                        basis: width,
+                    },
                     &Insets(bands.as_deref()),
                     container_style,
                 );
@@ -323,9 +330,7 @@ impl<'a> Ctx<'a> {
             }
             // 浮动盒：离开常规流。摆在当前游标那一档的侧边，**不**推进 `cursor`，
             // 于是后面每一段都从同一处起排、只是行带被它折窄。认不出宽度就落回常规流。
-            if style.float != Float::None
-                && self.place_float(child, style, x, cursor, width)
-            {
+            if style.float != Float::None && self.place_float(child, style, x, cursor, width) {
                 continue;
             }
             let lines_start = self.lines.len();
@@ -342,7 +347,12 @@ impl<'a> Ctx<'a> {
             cursor += self.wrap_paragraph(
                 container,
                 &pending,
-                Slot { x, y: cursor, width, basis: width },
+                Slot {
+                    x,
+                    y: cursor,
+                    width,
+                    basis: width,
+                },
                 &Insets(bands.as_deref()),
                 container_style,
             );
@@ -407,9 +417,7 @@ impl<'a> Ctx<'a> {
         let rows = (((lowest - y) / line_px).ceil() as usize) + 2;
         Some(
             (0..rows)
-                .map(|k| {
-                    self.float_insets(x, width, y + k as f32 * line_px, line_px)
-                })
+                .map(|k| self.float_insets(x, width, y + k as f32 * line_px, line_px))
                 .collect(),
         )
     }
@@ -450,7 +458,8 @@ impl<'a> Ctx<'a> {
         // `margin-right: .8em` 正是靠这一步变成图与字之间的那条缝。
         let [_, br, _, bl] = img_style.border_drawn();
         let inner = w
-            + bl + br
+            + bl
+            + br
             + img_style.padding_left.resolve(basis).max(0.0)
             + img_style.padding_right.resolve(basis).max(0.0)
             + img_style.margin_left.resolve(basis).max(0.0)
@@ -458,7 +467,8 @@ impl<'a> Ctx<'a> {
         let [_, fb, _, fl] = style.border_drawn();
         Some(
             inner
-                + fl + fb
+                + fl
+                + fb
                 + style.padding_left.resolve(basis).max(0.0)
                 + style.padding_right.resolve(basis).max(0.0),
         )
@@ -492,7 +502,11 @@ impl<'a> Ctx<'a> {
         let mb = style.margin_bottom.resolve(basis).max(0.0);
         let right = style.float == Float::Right;
         // 靠左的贴左缘（含它自己的左边距），靠右的贴右缘 —— 让位的那一圈是外边距盒。
-        let box_x = if right { x + width - mr - box_width } else { x + ml };
+        let box_x = if right {
+            x + width - mr - box_width
+        } else {
+            x + ml
+        };
         let saved = std::mem::take(&mut self.floats);
         let height = self.block(node, box_x, y + mt, box_width, basis);
         self.floats = saved;
@@ -663,15 +677,7 @@ impl<'a> Ctx<'a> {
         let blocks_start = self.blocks.len();
         let floats_start = self.floats.len();
         let height = self.block_uncached(node, x, y, width, basis);
-        self.stash_block(
-            key,
-            lines_start,
-            blocks_start,
-            floats_start,
-            x,
-            y,
-            height,
-        );
+        self.stash_block(key, lines_start, blocks_start, floats_start, x, y, height);
         height
     }
 
@@ -837,7 +843,12 @@ impl<'a> Ctx<'a> {
             self.wrap_paragraph(
                 node,
                 pieces,
-                Slot { x: x + pl, y: y + pt, width: content_width, basis },
+                Slot {
+                    x: x + pl,
+                    y: y + pt,
+                    width: content_width,
+                    basis,
+                },
                 &Insets(bands.as_deref()),
                 style,
             )
@@ -1209,7 +1220,11 @@ impl<'a> Ctx<'a> {
         // 免掉；两侧浮动盒的让位是**物理**的，一行纯图片挨着浮动图时同样得让开，
         // 所以不参与那个豁免。
         let start = if image_only { 0.0 } else { place.insets.start };
-        let reserved = if image_only { 0.0 } else { place.insets.reserved };
+        let reserved = if image_only {
+            0.0
+        } else {
+            place.insets.reserved
+        };
         let (left, right) = (place.insets.left, place.insets.right);
         // 可用宽把这四段全扣掉：漏一段就是把字写进了不该写字的地方。
         let avail = (place.width - start - reserved - left - right).max(1.0);

@@ -742,7 +742,7 @@ mod tests {
                 format: Format::Text,
                 size: 0,
                 ..DocMeta::default()
-                }
+            }
         }
 
         /// 三章，每章只有位置。

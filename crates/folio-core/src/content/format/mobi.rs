@@ -60,10 +60,9 @@ pub(crate) use encoding::decode_text;
 use std::path::Path;
 
 use header::{
-    EXTH_AUTHOR, EXTH_CONTRIBUTOR, EXTH_COVEROFFSET, EXTH_DESCRIPTION, EXTH_ISBN,
-    EXTH_KF8BOUNDARY, EXTH_LANGUAGE, EXTH_PUBLISHER, EXTH_PUBLISHINGDATE, EXTH_RESCOFFSET,
-    EXTH_RIGHTS, EXTH_SUBJECT, EXTH_TITLE, EXTH_TYPE,
-    EXTH_UPDATEDTITLE, Header, NOTSET,
+    EXTH_AUTHOR, EXTH_CONTRIBUTOR, EXTH_COVEROFFSET, EXTH_DESCRIPTION, EXTH_ISBN, EXTH_KF8BOUNDARY,
+    EXTH_LANGUAGE, EXTH_PUBLISHER, EXTH_PUBLISHINGDATE, EXTH_RESCOFFSET, EXTH_RIGHTS, EXTH_SUBJECT,
+    EXTH_TITLE, EXTH_TYPE, EXTH_UPDATEDTITLE, Header, NOTSET,
 };
 use rawml::Records;
 
@@ -1042,7 +1041,11 @@ mod tests {
         assert_eq!(meta.title, "合成 MOBI 之书");
         assert_eq!(meta.authors, vec!["作者乙"]);
         assert_eq!(meta.contributors, vec!["译者丙"]);
-        assert_eq!(meta.subjects, vec!["科幻", "冒险"], "同一标签出现两次要都收到");
+        assert_eq!(
+            meta.subjects,
+            vec!["科幻", "冒险"],
+            "同一标签出现两次要都收到"
+        );
         assert_eq!(meta.description, "一段简介");
         assert_eq!(meta.publisher, "某某出版社");
         assert_eq!(meta.published, "2020-01");
@@ -1050,7 +1053,10 @@ mod tests {
         assert_eq!(meta.isbn, "978-7-02-000000-0");
         assert_eq!(meta.dctype, "EBOK");
         assert_eq!(meta.rights, "版权所有");
-        assert_eq!(meta.series, None, "Kindle 的 collection 不在书本文件里，别造一个");
+        assert_eq!(
+            meta.series, None,
+            "Kindle 的 collection 不在书本文件里，别造一个"
+        );
     }
 
     #[test]

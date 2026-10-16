@@ -126,7 +126,7 @@ mod tests {
             format: Format::Cbz,
             size: 0,
             ..DocMeta::default()
-            };
+        };
         let doc = folio_core::content::document::from_content(meta, Content::Fixed(fixed));
         FixedBook::new(
             Arc::from(doc),

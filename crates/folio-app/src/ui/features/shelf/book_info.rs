@@ -32,8 +32,8 @@ use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable as _, h_flex, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Image, InteractiveElement,
-    IntoElement, ObjectFit, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    StyledImage, Subscription, TestSupportExt as _, WeakEntity, Window, div, img, px,
+    IntoElement, ObjectFit, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, StyledImage, Subscription, TestSupportExt as _, WeakEntity, Window, div, img, px,
 };
 
 use crate::ui::shared::error::report;
@@ -513,12 +513,7 @@ fn fact_rows(meta: &BookMeta, cx: &App) -> Vec<AnyElement> {
                 &[("name", &series.name), ("position", &position)],
             ))
         };
-        rows.push(fact(
-            "series",
-            tr(cx, "shelf.info_field_series"),
-            value,
-            cx,
-        ));
+        rows.push(fact("series", tr(cx, "shelf.info_field_series"), value, cx));
     }
     if !meta.contributors.is_empty() {
         rows.push(fact(

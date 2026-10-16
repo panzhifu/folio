@@ -85,7 +85,7 @@ fn load(path: &Path, plain: bool) -> Result<(DocMeta, String, Vec<Chapter>)> {
         },
         size: source.len() as u64,
         ..DocMeta::default()
-        };
+    };
     Ok((meta, source, chapters))
 }
 

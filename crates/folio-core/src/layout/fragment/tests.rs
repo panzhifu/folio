@@ -293,11 +293,7 @@ fn zero_orphans_and_widows_loosen_like_one() {
     let html = format!("<p>{}</p>", cjk(40));
     let (_, zero) = paginated(&html, "p { orphans: 0; widows: 0; }", 200.0, 84.0);
     let (_, loose) = paginated(&html, "p { orphans: 1; widows: 1; }", 200.0, 84.0);
-    assert_eq!(
-        ranges(&zero),
-        ranges(&loose),
-        "0 该夹到 1，与写 1 逐行同形"
-    );
+    assert_eq!(ranges(&zero), ranges(&loose), "0 该夹到 1，与写 1 逐行同形");
     assert_eq!(ranges(&zero), vec![(0, 3), (3, 4)]);
 }
 

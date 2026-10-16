@@ -1453,7 +1453,7 @@ mod tests {
                     format: Format::Epub,
                     size: 1,
                     ..DocMeta::default()
-                    }
+                },
             )
             .expect("入库")
     }

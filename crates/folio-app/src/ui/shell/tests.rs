@@ -771,7 +771,7 @@ mod booted {
                     format: folio_core::Format::Epub,
                     size: 1,
                     ..folio_core::content::format::DocMeta::default()
-                    }
+                },
             )
             .unwrap();
         let now = folio_core::infra::time::now();
@@ -819,7 +819,7 @@ mod booted {
                     format: Format::Epub,
                     size: 4096,
                     ..folio_core::content::format::DocMeta::default()
-                    }
+                },
             )
             .unwrap();
 

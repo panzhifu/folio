@@ -200,7 +200,7 @@ mod tests {
             format: Format::Epub,
             size: 1,
             ..DocMeta::default()
-            }
+        }
     }
 
     fn chapter(title: &str) -> Chapter {

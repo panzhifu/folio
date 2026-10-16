@@ -322,14 +322,7 @@ pub(super) fn scan_by_char(
         }
     }
     finish_hard_line(
-        cap,
-        insets,
-        from,
-        hard_end,
-        line_start,
-        first,
-        indent,
-        plans,
+        cap, insets, from, hard_end, line_start, first, indent, plans,
     );
 }
 
@@ -400,14 +393,7 @@ pub(super) fn scan_by_word(
         j += 1;
     }
     finish_hard_line(
-        cap,
-        insets,
-        hard.start,
-        hard.end,
-        line_start,
-        first,
-        indent,
-        plans,
+        cap, insets, hard.start, hard.end, line_start, first, indent, plans,
     );
     None
 }

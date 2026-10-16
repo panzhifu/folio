@@ -228,7 +228,9 @@ fn note_sequence(start: &quick_xml::events::BytesStart<'_>, out: &mut Parsed) {
     if out.series.is_some() {
         return;
     }
-    let Some(name) = attr(start, "name") else { return };
+    let Some(name) = attr(start, "name") else {
+        return;
+    };
     let name = name.trim().to_string();
     if name.is_empty() {
         return;
@@ -735,7 +737,10 @@ mod tests {
         assert_eq!(meta.publisher, "某社");
         assert_eq!(meta.published, "1962", "出版日期原样存");
         assert_eq!(meta.isbn, "978-5");
-        assert_eq!(meta.description, "第一段 第二段", "两段之间补一个空格，不粘成一段");
+        assert_eq!(
+            meta.description, "第一段 第二段",
+            "两段之间补一个空格，不粘成一段"
+        );
         assert_eq!(
             meta.series,
             Some(Series {

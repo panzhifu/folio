@@ -55,7 +55,7 @@ impl DocumentProvider for HtmlAdapter {
             format: Format::Html,
             size: raw.len() as u64,
             ..DocMeta::default()
-            };
+        };
         let flow = FlowDoc {
             // 字数在索引这一趟数出来（`chapters.char_len`）：文件已经整份读过一遍，
             // 而 `chapter_source` 交回来的正文与这里数的是同一份原始内容 ——

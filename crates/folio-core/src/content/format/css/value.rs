@@ -274,7 +274,12 @@ pub(super) fn edge_length(
 }
 
 /// 单边 `margin`：折成长度值，`auto` 当 0（`margin` 认 `auto`）。
-pub(super) fn set_margin(value: &str, font_size: f32, root_font_size: f32, out: &mut Length) -> bool {
+pub(super) fn set_margin(
+    value: &str,
+    font_size: f32,
+    root_font_size: f32,
+    out: &mut Length,
+) -> bool {
     match edge_length(value, font_size, root_font_size, true) {
         Some(px) => {
             *out = px;
@@ -320,11 +325,7 @@ pub(super) fn box_sides(
 
 /// [`box_sides`] 的 px 版，给 `border-width`：CSS 的 `<border-width>` 不接受百分比，
 /// 所以这一族继续走 [`edge_px`]，折不出就整条作废。
-pub(super) fn box_side_px(
-    value: &str,
-    font_size: f32,
-    root_font_size: f32,
-) -> Option<[f32; 4]> {
+pub(super) fn box_side_px(value: &str, font_size: f32, root_font_size: f32) -> Option<[f32; 4]> {
     let parts: Vec<&str> = value.split_whitespace().collect();
     if parts.is_empty() || parts.len() > 4 {
         return None;

@@ -124,7 +124,10 @@ fn cjk_ideographic(index: usize) -> String {
 /// 48 项的书我们没见过，宁可少一个标记，也不要凭猜的记数把目录排歪。
 fn kana(index: usize, table: &[char], katakana: bool) -> Option<String> {
     let Some(&one) = table.get(index - 1) else {
-        tracing::debug!("marker: 第 {index} 项超出假名表（{} 格），这一格不画", table.len());
+        tracing::debug!(
+            "marker: 第 {index} 项超出假名表（{} 格），这一格不画",
+            table.len()
+        );
         return None;
     };
     let text = if katakana {
@@ -137,16 +140,16 @@ fn kana(index: usize, table: &[char], katakana: bool) -> Option<String> {
 
 /// 五十音（46 格，CSS 的 `hiragana` 序列：不含古假名 ゐ / ゑ）。
 const GOJÜON: [char; 46] = [
-    'あ', 'い', 'う', 'え', 'お', 'か', 'き', 'く', 'け', 'こ', 'さ', 'し', 'す', 'せ', 'そ', 'た', 'ち', 'つ',
-    'て', 'と', 'な', 'に', 'ぬ', 'ね', 'の', 'は', 'ひ', 'ふ', 'へ', 'ほ', 'ま', 'み', 'む', 'め', 'も', 'や',
-    'ゆ', 'よ', 'ら', 'り', 'る', 'れ', 'ろ', 'わ', 'を', 'ん',
+    'あ', 'い', 'う', 'え', 'お', 'か', 'き', 'く', 'け', 'こ', 'さ', 'し', 'す', 'せ', 'そ', 'た',
+    'ち', 'つ', 'て', 'と', 'な', 'に', 'ぬ', 'ね', 'の', 'は', 'ひ', 'ふ', 'へ', 'ほ', 'ま', 'み',
+    'む', 'め', 'も', 'や', 'ゆ', 'よ', 'ら', 'り', 'る', 'れ', 'ろ', 'わ', 'を', 'ん',
 ];
 
 /// いろは序（47 格，含 ゐ / ゑ —— 那两句古假名本身就是这首诗的一部分）。
 const IROHA: [char; 47] = [
-    'い', 'ろ', 'は', 'に', 'ほ', 'へ', 'と', 'ち', 'り', 'ぬ', 'る', 'を', 'わ', 'か', 'よ', 'た', 'れ', 'そ',
-    'つ', 'ね', 'な', 'ら', 'む', 'う', 'ゐ', 'の', 'お', 'く', 'や', 'ま', 'け', 'ふ', 'こ', 'え', 'て', 'あ',
-    'さ', 'き', 'ゆ', 'め', 'み', 'し', 'ゑ', 'ひ', 'も', 'せ', 'す',
+    'い', 'ろ', 'は', 'に', 'ほ', 'へ', 'と', 'ち', 'り', 'ぬ', 'る', 'を', 'わ', 'か', 'よ', 'た',
+    'れ', 'そ', 'つ', 'ね', 'な', 'ら', 'む', 'う', 'ゐ', 'の', 'お', 'く', 'や', 'ま', 'け', 'ふ',
+    'こ', 'え', 'て', 'あ', 'さ', 'き', 'ゆ', 'め', 'み', 'し', 'ゑ', 'ひ', 'も', 'せ', 'す',
 ];
 
 /// 平假名 → 片假名：两张表只差 0x60（U+3041–U+3096 与 U+30A1–U+30F6 同序），
@@ -166,7 +169,10 @@ mod tests {
         assert_eq!(marker_text(Disc, 1).as_deref(), Some("•"));
         assert_eq!(marker_text(Circle, 7).as_deref(), Some("◦"));
         assert_eq!(marker_text(Square, 99).as_deref(), Some("▪"));
-        assert!(marker_text(None, 1).is_none(), "`list-style-type: none` 一个字符都不画");
+        assert!(
+            marker_text(None, 1).is_none(),
+            "`list-style-type: none` 一个字符都不画"
+        );
     }
 
     #[test]
@@ -182,8 +188,21 @@ mod tests {
 
     #[test]
     fn roman_uses_the_standard_subtractive_forms() {
-        for (index, want) in [(1, "i."), (4, "iv."), (9, "ix."), (14, "xiv."), (40, "xl."), (90, "xc."), (400, "cd."), (1990, "mcmxc.")] {
-            assert_eq!(marker_text(LowerRoman, index).as_deref(), Some(want), "第 {index} 项");
+        for (index, want) in [
+            (1, "i."),
+            (4, "iv."),
+            (9, "ix."),
+            (14, "xiv."),
+            (40, "xl."),
+            (90, "xc."),
+            (400, "cd."),
+            (1990, "mcmxc."),
+        ] {
+            assert_eq!(
+                marker_text(LowerRoman, index).as_deref(),
+                Some(want),
+                "第 {index} 项"
+            );
         }
         assert_eq!(marker_text(UpperRoman, 4).as_deref(), Some("IV."));
     }
@@ -203,10 +222,17 @@ mod tests {
             (1010, "一千零一十、"),
             (9999, "九千九百九十九、"),
         ] {
-            assert_eq!(marker_text(CjkIdeographic, index).as_deref(), Some(want), "第 {index} 项");
+            assert_eq!(
+                marker_text(CjkIdeographic, index).as_deref(),
+                Some(want),
+                "第 {index} 项"
+            );
         }
         // 表外退回阿拉伯数字：看得见的降级，比凭空造一个读法好核对。
-        assert_eq!(marker_text(CjkIdeographic, 10000).as_deref(), Some("10000、"));
+        assert_eq!(
+            marker_text(CjkIdeographic, 10000).as_deref(),
+            Some("10000、")
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ fn meta(title: &str) -> DocMeta {
         format: Format::Markdown,
         size: 1234,
         ..DocMeta::default()
-        }
+    }
 }
 
 fn path(name: &str) -> PathBuf {
@@ -1004,7 +1004,7 @@ fn meta_by(title: &str, authors: &[&str]) -> DocMeta {
         format: Format::Markdown,
         size: 1234,
         ..DocMeta::default()
-        }
+    }
 }
 
 /// v12 迁移：老库升上来要拿到 `content_hash` / `hash_algo` 两列，而**老行留空**（懒补）。
@@ -1486,7 +1486,10 @@ fn the_dublin_core_fields_roundtrip_through_the_store() {
         isbn: "978-7-02-000000-0".into(),
         dctype: "text".into(),
         rights: "版权由出版社持有".into(),
-        series: Some(Series { name: "世界文学".into(), position: "12".into() }),
+        series: Some(Series {
+            name: "世界文学".into(),
+            position: "12".into(),
+        }),
         format: Format::Epub,
         size: 4096,
     };
@@ -1496,9 +1499,15 @@ fn the_dublin_core_fields_roundtrip_through_the_store() {
     assert_eq!(got.id, id);
     assert_eq!(got.title, "车刀集");
     assert_eq!(got.authors, want.authors);
-    assert_eq!(got.contributors, want.contributors, "多值的贡献者要拆回两条");
+    assert_eq!(
+        got.contributors, want.contributors,
+        "多值的贡献者要拆回两条"
+    );
     assert_eq!(got.subjects, want.subjects);
-    assert_eq!(got.description, want.description, "简介里的换行是内容，不是分隔符");
+    assert_eq!(
+        got.description, want.description,
+        "简介里的换行是内容，不是分隔符"
+    );
     assert_eq!(got.publisher, "某某社");
     assert_eq!(got.published, want.published, "日期原样存，不折成日期类型");
     assert_eq!(got.language, "zh-CN");
@@ -1565,7 +1574,10 @@ fn the_v19_migration_adds_the_dublin_core_columns_empty() {
 
     let got = store.book_meta(rows[0].id).unwrap().expect("旧行也读得到");
     assert_eq!(got.contributors, Vec::<String>::new());
-    assert_eq!(got.description, "", "老行没有简介可读，是「没说」不是「读错了」");
+    assert_eq!(
+        got.description, "",
+        "老行没有简介可读，是「没说」不是「读错了」"
+    );
     assert_eq!(got.series, None);
     assert_eq!(got.language, "");
 }

@@ -924,7 +924,7 @@ mod tests {
             format: Format::Markdown,
             size: 0,
             ..DocMeta::default()
-            };
+        };
         let doc: Arc<dyn Document> = Arc::from(folio_core::content::document::from_content(
             meta,
             Content::Reflow(flow),

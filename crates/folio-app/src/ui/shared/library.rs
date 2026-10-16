@@ -285,7 +285,7 @@ mod tests {
             format: Format::Epub,
             size: 10,
             ..DocMeta::default()
-            }
+        }
     }
 
     fn flow() -> FlowDoc {

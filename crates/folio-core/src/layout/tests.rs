@@ -3,9 +3,7 @@
 //! 真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
 
 use crate::content::dom::{Dom, NodeId};
-use crate::content::format::css::computed::{
-    Clear, Color, ComputedStyle, Display, Float, cascade,
-};
+use crate::content::format::css::computed::{Clear, Color, ComputedStyle, Display, Float, cascade};
 use crate::content::format::css::{Origin, RuleSet};
 use crate::layout::wrap::collect;
 use crate::layout::{
@@ -394,8 +392,7 @@ fn a_percent_margin_folds_against_the_parent_content_width() {
         200.0,
     );
     assert_eq!(
-        layout.lines[0].x,
-        38.0,
+        layout.lines[0].x, 38.0,
         "20 + 10% × 180：段落折自 div 的内容宽"
     );
 }
@@ -495,12 +492,23 @@ fn a_nested_list_resets_the_marker_type() {
 /// 那是**假阴性**；标记做了之后，`none` 必须仍然什么都不画，落差表才不是说谎的。
 #[test]
 fn list_style_type_none_draws_no_marker_while_other_types_do() {
-    let (_, circle) = typeset("<ul><li>甲</li></ul>", "li { list-style-type: circle }", 200.0);
+    let (_, circle) = typeset(
+        "<ul><li>甲</li></ul>",
+        "li { list-style-type: circle }",
+        200.0,
+    );
     assert!(
-        matches!(circle.lines[0].fragments.first(), Some(LineFragment::Marker(_))),
+        matches!(
+            circle.lines[0].fragments.first(),
+            Some(LineFragment::Marker(_))
+        ),
         "`circle` 该画出标记"
     );
-    let (_, none) = typeset("<ul><li>甲</li></ul>", "li { list-style-type: none }", 200.0);
+    let (_, none) = typeset(
+        "<ul><li>甲</li></ul>",
+        "li { list-style-type: none }",
+        200.0,
+    );
     assert_eq!(none.lines[0].fragments.len(), 1, "只剩正文那一个片段");
     assert_eq!(none.line_text(0), "甲");
 }
@@ -563,7 +571,10 @@ fn a_floated_image_shortens_only_the_lines_beside_it() {
 /// `clear: both` 是唯一一句「别绕了」：这一段整块挪到浮动盒下缘之下。
 #[test]
 fn clear_both_drops_the_block_below_the_float() {
-    let html = format!("<div class=i><img src=a></div><p>短句</p><p class=c>{}</p>", "字".repeat(12));
+    let html = format!(
+        "<div class=i><img src=a></div><p>短句</p><p class=c>{}</p>",
+        "字".repeat(12)
+    );
     let css = ".i { float: left; margin-right: 20px } img { width: 100px } .c { clear: both }";
     let wrapped = {
         let images = MockImages(vec![("a", 100.0, 300.0)]);

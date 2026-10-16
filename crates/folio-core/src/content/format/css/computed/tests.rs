@@ -177,11 +177,7 @@ fn text_align_and_indent_survive_several_levels() {
     );
     let p = style(&page, tag(&page, "p"));
     assert_eq!(p.text_align, TextAlign::Justify);
-    assert_eq!(
-        px(p.text_indent),
-        32.0,
-        "缩进继承下来但已在根元素折算成 px"
-    );
+    assert_eq!(px(p.text_indent), 32.0, "缩进继承下来但已在根元素折算成 px");
 }
 
 #[test]
@@ -263,7 +259,11 @@ fn auto_margin_computes_to_zero() {
     let page = author("<p>文</p>", "p { margin-left: auto }");
     let p = style(&page, tag(&page, "p"));
     assert_eq!(px(p.margin_left), 0.0);
-    assert_eq!(px(p.margin_top), 16.0, "UA 给 <p> 的 1em 不该被这条声明碰坏");
+    assert_eq!(
+        px(p.margin_top),
+        16.0,
+        "UA 给 <p> 的 1em 不该被这条声明碰坏"
+    );
     assert_eq!(page.styled.ignored, 0, "认得的合法值不该计进 ignored");
 }
 

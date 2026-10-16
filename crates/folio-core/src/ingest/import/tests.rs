@@ -743,7 +743,7 @@ fn backfill_gives_legacy_copies_an_identity_and_a_hash_name() {
         format: crate::content::format::Format::Text,
         size: 0,
         ..crate::content::format::DocMeta::default()
-        };
+    };
     let id = store.add_book(&legacy, &meta).unwrap();
     assert_eq!(store.rows_missing_hash().unwrap().len(), 1, "起点是没身份");
 
@@ -809,7 +809,7 @@ fn backfill_fills_the_hash_without_moving_a_file_we_do_not_own() {
         format: crate::content::format::Format::Text,
         size: 0,
         ..crate::content::format::DocMeta::default()
-        };
+    };
     let id = store.add_book(&outside, &meta).unwrap();
 
     let report = backfill_copies(&store, &lib, &StageCtx::detached());
@@ -847,7 +847,7 @@ fn a_copy_in_use_by_another_row_is_counted_and_never_overwritten() {
         format: crate::content::format::Format::Text,
         size: 0,
         ..crate::content::format::DocMeta::default()
-        };
+    };
     let a = store.add_book(&one, &meta).unwrap();
     assert_eq!(
         store.rows_sharing_path(&one.to_string_lossy(), a).unwrap(),
@@ -1383,7 +1383,7 @@ fn scheduled_reindex_does_not_run_on_the_calling_thread() {
         format: crate::content::format::Format::Cbz,
         size: 0,
         ..crate::content::format::DocMeta::default()
-        };
+    };
     let id = store.add_book(&book, &meta).unwrap();
     make_index_stale(&db, id);
     assert_eq!(
