@@ -161,6 +161,72 @@ pub(crate) fn adjust_volume(up: bool) {
     }
 }
 
+/// 把一张图的字节交给系统分享面板（对面是 `GpuiSystemUi.shareImage`）。
+///
+/// 字节从这边过去而不是递一个文件路径：图存在容器里（EPUB 是 zip），Reader 手上本来
+/// 就没有盘上的文件；那边收下字节自己落进 `cache/share/` 再用 FileProvider 发出去。
+/// 形状照 [`set_immersive`]：递给 Java、它自己切回 UI 线程，失败只写日志。
+pub(crate) fn share_image(bytes: &[u8], mime: &str, name: &str) {
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        let data = env
+            .byte_array_from_slice(bytes)
+            .map_err(|e| e.to_string())?;
+        let mime = env.new_string(mime).map_err(|e| e.to_string())?;
+        let name = env.new_string(name).map_err(|e| e.to_string())?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("shareImage"),
+            ::jni::jni_sig!("(Landroid/app/Activity;[BLjava/lang/String;Ljava/lang/String;)V"),
+            &[
+                JValue::Object(&act),
+                JValue::Object(&data),
+                JValue::Object(&mime),
+                JValue::Object(&name),
+            ],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::debug!("share_image: 已递给系统"),
+        Err(err) => tracing::warn!("share_image: {err}"),
+    }
+}
+
+/// 把一张图存进系统相册（对面是 `GpuiSystemUi.saveImageToGallery`）。
+pub(crate) fn save_image(bytes: &[u8], mime: &str, name: &str) {
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        let data = env
+            .byte_array_from_slice(bytes)
+            .map_err(|e| e.to_string())?;
+        let mime = env.new_string(mime).map_err(|e| e.to_string())?;
+        let name = env.new_string(name).map_err(|e| e.to_string())?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("saveImageToGallery"),
+            ::jni::jni_sig!("(Landroid/app/Activity;[BLjava/lang/String;Ljava/lang/String;)V"),
+            &[
+                JValue::Object(&act),
+                JValue::Object(&data),
+                JValue::Object(&mime),
+                JValue::Object(&name),
+            ],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::debug!("save_image: 已递给系统"),
+        Err(err) => tracing::warn!("save_image: {err}"),
+    }
+}
+
 /// folio 自己的日志在 logcat 里放到哪一档（整数档位，Error=1 … Trace=5，见 [`own_level_raw`]）。
 /// 由 `Config::logging.level` 定，装 subscriber 之前是默认的 `Info`（3，够启动那几行用）。
 /// 依赖库不看它，见 [`FilteredLogcat`]。

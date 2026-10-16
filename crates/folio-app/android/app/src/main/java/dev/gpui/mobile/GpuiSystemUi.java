@@ -1,13 +1,27 @@
 package dev.gpui.mobile;
 
 import android.app.Activity;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.media.AudioManager;
+import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+
+import androidx.core.content.FileProvider;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 
 /**
  * Hide and restore the system bars for immersive reading.
@@ -68,6 +82,92 @@ public final class GpuiSystemUi {
                 // Only a managed profile or a device policy can refuse this; log rather than
                 // rethrow, because a silent volume key beats a crashed reader.
                 android.util.Log.e("GpuiSystemUi", "adjustStreamVolume refused", e);
+            }
+        });
+    }
+
+    /**
+     * Hand an image to the system share sheet.
+     *
+     * <p>The bytes come from Rust (the reader holds the container, not a file), so we drop them
+     * into a {@code cache/share/} file and hand out a {@code content://} URI through our
+     * {@code FileProvider} — a raw {@code file://} URI throws {@code FileUriExposedException} on
+     * API 24+. The cache path matches {@code res/xml/file_paths.xml}.</p>
+     *
+     * <p>Called by Rust, from any thread.</p>
+     */
+    public static void shareImage(Activity activity, byte[] data, String mime, String name) {
+        if (activity == null || data == null) return;
+        final byte[] bytes = data;
+        final String type = (mime == null || mime.isEmpty()) ? "image/*" : mime;
+        final String fileName = (name == null || name.isEmpty()) ? "image" : name;
+        activity.runOnUiThread(() -> {
+            try {
+                File dir = new File(activity.getCacheDir(), "share");
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+                File out = new File(dir, fileName);
+                try (OutputStream os = new FileOutputStream(out)) {
+                    os.write(bytes);
+                }
+                Uri uri = FileProvider.getUriForFile(
+                        activity, activity.getPackageName() + ".fileprovider", out);
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType(type);
+                send.putExtra(Intent.EXTRA_STREAM, uri);
+                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                Intent chooser = Intent.createChooser(send, null);
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                activity.startActivity(chooser);
+            } catch (Exception e) {
+                android.util.Log.e("GpuiSystemUi", "shareImage failed", e);
+            }
+        });
+    }
+
+    /**
+     * Write an image into the public gallery ({@code Pictures/Folio}).
+     *
+     * <p>API 29+ goes through {@code MediaStore} with {@code RELATIVE_PATH} and the
+     * {@code IS_PENDING} dance, which needs no runtime permission. Older releases have no
+     * relative-path column, so this is best-effort there (the {@code WRITE_EXTERNAL_STORAGE}
+     * permission in the manifest covers API 26–28).</p>
+     *
+     * <p>Called by Rust, from any thread.</p>
+     */
+    public static void saveImageToGallery(Activity activity, byte[] data, String mime, String name) {
+        if (activity == null || data == null) return;
+        final byte[] bytes = data;
+        final String type = (mime == null || mime.isEmpty()) ? "image/*" : mime;
+        final String fileName = (name == null || name.isEmpty()) ? "image" : name;
+        activity.runOnUiThread(() -> {
+            try {
+                ContentResolver resolver = activity.getContentResolver();
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Images.Media.DISPLAY_NAME, fileName);
+                values.put(MediaStore.Images.Media.MIME_TYPE, type);
+                if (Build.VERSION.SDK_INT >= 29) {
+                    values.put(MediaStore.Images.Media.RELATIVE_PATH,
+                            Environment.DIRECTORY_PICTURES + "/Folio");
+                    values.put(MediaStore.Images.Media.IS_PENDING, 1);
+                }
+                Uri uri = resolver.insert(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+                if (uri == null) {
+                    android.util.Log.e("GpuiSystemUi", "saveImageToGallery: insert returned null");
+                    return;
+                }
+                try (OutputStream os = resolver.openOutputStream(uri)) {
+                    if (os == null) return;
+                    os.write(bytes);
+                }
+                if (Build.VERSION.SDK_INT >= 29) {
+                    ContentValues done = new ContentValues();
+                    done.put(MediaStore.Images.Media.IS_PENDING, 0);
+                    resolver.update(uri, done, null, null);
+                }
+            } catch (Exception e) {
+                android.util.Log.e("GpuiSystemUi", "saveImageToGallery failed", e);
             }
         });
     }

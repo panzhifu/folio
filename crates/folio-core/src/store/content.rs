@@ -53,15 +53,21 @@ impl Store {
             // 整本书才知道的数，全部在导入时算完）。`None` 原样写 NULL，不折成 0 ——
             // 「不知道」与「这一章是空的」必须分得开。
             let char_len: Option<i64> = ch.char_len().map(|n| n as i64);
+            // 图片清单与字数同一趟扫出来，也就同一趟落库：「整本书那一列图」要能在
+            // 读者走到那一章之前就把数报出来，靠的就是这一列（见 `ImageUse`）。
+            // 空表写成 `[]` 而不是 NULL —— 这一格没有「还没算」那一档，老行由
+            // `INDEX_VERSION` 的 bump 触发重扫来填。
+            let images_json = serde_json::to_string(&ch.images)?;
             tx.execute(
-                "INSERT INTO chapters (book_id, idx, title, locator, char_len)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO chapters (book_id, idx, title, locator, char_len, images_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     book_id,
                     idx as i64,
                     ch.title,
                     serde_json::to_string(&at)?,
                     char_len,
+                    images_json,
                 ],
             )?;
         }
@@ -131,8 +137,11 @@ impl Store {
         // `char_len` 可空：NULL = 这一章的字数还没算过（旧库升上来的行、
         // 或 provider 那一趟只读了清单）。读取端要把 NULL 与 0 分开 ——
         // 合成一个就会让进度条把「没算过」当成「这一章是空的」。
+        // `images_json` 不给可空：「这本书这一章没有图」与「这一版还没重扫过」在界面上
+        // 是同一个表现（查看器那一列里少一张），而 bump `INDEX_VERSION` 就是为了让
+        // 老行全部重扫一次，读侧不必再分第三档。
         let mut stmt = conn.prepare(
-            "SELECT title, locator, char_len FROM chapters WHERE book_id = ?1 ORDER BY idx",
+            "SELECT title, locator, char_len, images_json FROM chapters WHERE book_id = ?1 ORDER BY idx",
         )?;
         let mut chapters = Vec::new();
         let rows = stmt
@@ -141,11 +150,24 @@ impl Store {
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (title, locator, char_len) in rows {
+        for (title, locator, char_len, images_json) in rows {
             let char_len = char_len.and_then(|n| usize::try_from(n).ok());
+            let images =
+                match serde_json::from_str::<Vec<crate::content::scan::ImageUse>>(&images_json) {
+                    Ok(images) => images,
+                    Err(err) => {
+                        // 解不开只是这一章没有图片清单，正文照读 —— 与 `toc_json` 同一条立场，
+                        // 也必须同样出声：界面那边看不出「清单坏了」与「这本书真没图」。
+                        tracing::warn!(
+                            "store: 第 {book_id} 本有一章的 images_json 解不开，当没有图：{err}"
+                        );
+                        Vec::new()
+                    }
+                };
             // 认不出来的位置（以后加的变体、手改过的库）当作「位置不明」：
             // 打开时回容器重读一遍，而不是把这一章当空的。
             let at = serde_json::from_str::<ChapterLocator>(&locator).unwrap_or_default();
@@ -165,6 +187,9 @@ impl Store {
                     // 索引那一趟落的字数原样带回来：正文不在手上时它是**唯一**
                     // 能算出全局字符进度的东西（见 `plans/Locator.md` 第二节）。
                     char_len,
+                    // 同一趟扫描落的图片清单也原样带回来 —— 它是「整本书那一列图」
+                    // 在读者走到那一章之前的唯一来源（见 `ImageUse`）。
+                    images,
                     text: ChapterText::At(at),
                 }
             };

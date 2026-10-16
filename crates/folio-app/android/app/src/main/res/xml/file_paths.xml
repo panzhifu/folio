@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Paths the share FileProvider may hand out. GpuiSystemUi.shareImage writes the
+     reader image into cache/share/, so this must cover exactly that directory. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="share" path="share/" />
+</paths>

@@ -410,6 +410,9 @@ mod tests {
                 spine_href: ch.spine_href.clone(),
                 // 字数不跟着位置走掉：它是索引那一趟的产物，落库之后仍要读得回来。
                 char_len: ch.char_len(),
+                // 图片清单同一趟扫出来的另一样数，同理跟着位置走 —— 丢了它，
+                // 落库那一章就没有清单，而重扫要等 `INDEX_VERSION` 再 bump 一次才会来。
+                images: ch.images.clone(),
                 text: crate::content::format::ChapterText::At(crate::content::format::locator_for(
                     format, ch, ix,
                 )),
@@ -753,6 +756,7 @@ mod tests {
                         title: format!("第{}章", ix + 1),
                         spine_href: String::new(),
                         char_len: None,
+                        images: Vec::new(),
                         text: ChapterText::At(ChapterLocator::Section(ix)),
                     })
                     .collect(),

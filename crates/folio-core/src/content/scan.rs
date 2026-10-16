@@ -1,4 +1,4 @@
-//! 一遍标记扫描就得出章节摘要：可见字数 + 第一个标题的文本。
+//! 一遍标记扫描就得出章节摘要：可见字数 + 第一个标题的文本 + 文档序的图片引用。
 //!
 //! 存在的理由是导入的账。给一本书每章算 `char_len`（全局字符进度那根尺的分母）和标题
 //! 回落，走 `Dom::parse` 要建节点表、父子表，还要 `assign_paths()` 给**每个节点**拼一条
@@ -37,16 +37,43 @@ use html5ever::tendril::StrTendril;
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::content::format::css::ua;
 
-/// 一章扫出来的两样东西。
+/// 一章扫出来的三样东西。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChapterSummary {
     /// 与 `anchor::TextMap` 同口径的可见字符数。
     pub visible_chars: usize,
     /// 文档序第一个 h1/h2/h3 的文本（空白压成单空格）；没有或全空是 `None`。
     pub heading: Option<String>,
+    /// 文档序的每一处图片引用，带着它前面的可见字符数。见 [`ImageUse`]。
+    pub images: Vec<ImageUse>,
+}
+
+/// 正文里的一处图片引用：作者写下的原样 `src`，加上它在这一章里的位置。
+///
+/// 存在的理由是一件排版给不出来的事：**整本书**那一列图要在读者走到它之前就知道
+/// 「一共有几张、这一张在第几章第几个字」。排版只认识「已经排好的那一章」，
+/// 而这一列要的是清单 —— 导入那一趟已经在逐章跑 [`ChapterScan`]，顺手记下来是
+/// 一趟扫描的价钱，换掉的是「为下一张图把一章排一遍」。
+///
+/// `src` 是**未解析**的那一条原样引用（`<img src="images/a.png">` 里那一段），
+/// 与 [`crate::layout::ports::ResolvedImage::href`] 不同：后者要按本章目录解一遍、
+/// 还要对得上那本书的图片表，那是界面侧 [`ChapterImages::resolve`] 的口径。这里存原样
+/// 是因为扫描器不认容器 —— 而**同一句解析只做一次**才不会出现「列里画得出、正文里画不出」
+/// 那种两本账。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageUse {
+    /// 作者写下的那一条引用（相对本章目录）。
+    pub src: String,
+    /// 这一处前面已经数到的可见字符数 —— 与 `Locator.offset` 同一个轴。
+    ///
+    /// 指到图片**之前**那一个字：图片自己在那个轴上不占一格（它是 U+FFFC 一个替换元素，
+    /// 由排版插在文本流里，不由这里的字数器数进来）。差这一个字落在同一个行盒里，
+    /// 「定位原文」要的就是那一行。
+    pub offset: usize,
 }
 
 /// HTML 的空元素。树构造不会把它们压进「打开的元素」栈：后面出现的文本是它们的
@@ -95,6 +122,8 @@ struct Scan {
     heading_text: RefCell<String>,
     /// 标题要么已经收完，要么这本书没有标题 —— 两种情况都不该再开第二个。
     heading_done: Cell<bool>,
+    /// 文档序的图片引用（见 [`ImageUse`]）。
+    uses: RefCell<Vec<ImageUse>>,
 }
 
 impl Default for Scan {
@@ -108,6 +137,7 @@ impl Default for Scan {
             heading_tag: RefCell::new(None),
             heading_text: RefCell::new(String::new()),
             heading_done: Cell::new(false),
+            uses: RefCell::new(Vec::new()),
         }
     }
 }
@@ -116,6 +146,54 @@ impl Scan {
     /// 这一段字符进不进可见文本：正文根里、且不在被跳过的子树里。
     fn counting(&self) -> bool {
         self.root.get() == Root::Open && self.skip.borrow().is_empty()
+    }
+
+    /// 这一处引用在不在**正文流**里（图片引用只在流里才算一张）。
+    ///
+    /// 两种「在」：正文根已经开且不在被跳过的子树里；或者根还没开而这一处会当场把
+    /// body 带出来 —— `<head>` 里的 `<img>` 在树构造里就是「关掉 head、开一个 body、
+    /// 把这一张插进去」，与散文本触发 body 是同一条规则。
+    ///
+    /// 不算的是被整块跳过的子树里头（`<script>` / `<style>` / `<template>` 那一族）：
+    /// 那里头的一张图在正文坐标系里没有位置，排不出来，也就没人画它。
+    fn in_flow(&self) -> bool {
+        let skip = self.skip.borrow();
+        match self.root.get() {
+            Root::Open => skip.is_empty(),
+            Root::Before => skip.last().is_none_or(|top| *top == "head"),
+        }
+    }
+
+    /// 这一个开始标签是一次图片引用吗？是的话交出作者写下的那一条**原样**引用。
+    ///
+    /// 认的形状与 `layout::collect::picture_src` 同一套，一条都不许多：
+    /// - `<img src>` —— 一直认的那一种。
+    /// - 外来内容里的 `<image href>`（`xlink:` 那一头 html5ever 拆成前缀，`name.local`
+    ///   就是 `href`），退一步认 `<image src>`。
+    /// - HTML 内容里的 `<image>` 按 `<img>` 看（树构造就是这么改的），所以那一支只看 `src`。
+    ///
+    /// `<svg>` 自己不记：排版把「带一张 `<image>` 的 svg」当**一张**图，收了这个就不往下递归
+    /// （`wrap.rs::push_node` 那句「不再递归它的子节点」），记的是里头那张。
+    fn picture_ref(name: &str, tag: &Tag, foreign: usize) -> Option<String> {
+        let attr = |want: &str| {
+            tag.attrs
+                .iter()
+                .find(|a| {
+                    // 标记这一层**还没拆**属性名的前缀 —— `xlink:href` 整串就是名字，
+                    // 拆它是树构造那一步（`adjust foreign attributes`）的事。这里先按最后一个
+                    // `:` 切开再比，认的才是 DOM 那一条认的同一个属性。
+                    let found: &str = &a.name.local;
+                    found.rsplit(':').next() == Some(want)
+                })
+                .map(|a| a.value.to_string())
+                .filter(|value| !value.is_empty())
+        };
+        match name {
+            "img" => attr("src"),
+            "image" if foreign > 0 => attr("href").or_else(|| attr("src")),
+            "image" => attr("src"),
+            _ => None,
+        }
     }
 
     /// 名单里的名字取成 `'static` 的那一份，栈里存它就一次分配都没有。
@@ -142,6 +220,17 @@ impl Scan {
             }
             if Self::known(LF_AFTER_START, name).is_some() {
                 self.ignore_lf.set(true);
+            }
+            // 图片引用按文档序记下来，位置用**那一刻已经数到的**可见字符数。
+            // 放在跳过栈与正文根都更新之后：`<body>` 那一格要先抬起来，
+            // 一本 `<body><img .../></body>` 的第一张图才不会被判成「根还没开」。
+            if let Some(src) = Self::picture_ref(name, tag, self.foreign.get())
+                && self.in_flow()
+            {
+                self.uses.borrow_mut().push(ImageUse {
+                    src,
+                    offset: self.chars.get(),
+                });
             }
             if !self_closed {
                 if let Some(skipped) = ua::skipped_tag(name) {
@@ -240,6 +329,7 @@ impl Scan {
         ChapterSummary {
             visible_chars: self.chars.get(),
             heading,
+            images: std::mem::take(&mut self.uses.borrow_mut()),
         }
     }
 }
@@ -383,11 +473,78 @@ impl TokenSink for ScanHandle {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{ChapterScan, ChapterSummary, chapter_summary};
+    use super::{ChapterScan, ChapterSummary, ImageUse, chapter_summary};
     use crate::content::document;
-    use crate::content::dom::Dom;
+    use crate::content::dom::{Dom, NodeId, NodeKind};
+    use crate::content::format::css::ua;
     use crate::content::format::epub::tests::published_shape_epub;
     use crate::content::format::visible_chars;
+
+    /// 参照实现：文档序的图片引用（作者写下的原样 `src` + 它前面的可见字符数），
+    /// 走 DOM 原语 —— 与扫描器那条「一次都不建 DOM」的路互为对照，两条各写一遍。
+    ///
+    /// 这条为什么值得写：那一列清单就是图片查看器念的「第 3 张 / 共 27 张」，
+    /// 顺序错了读者滑到的就是别人的那一张，而屏幕上看不出来它错 —— 计数对得上、
+    /// 图也画得出来，只是每一张都指错了地方。
+    fn dom_image_uses(xhtml: &str) -> Vec<ImageUse> {
+        let dom = Dom::parse(xhtml.as_bytes());
+        // 正文根与 `visible_chars` 同一选法：有 `<body>` 从它往下走，没有就整棵当根。
+        let root = dom
+            .elements()
+            .find(|(id, _)| dom.tag_name(*id) == Some("body"))
+            .map_or(dom.document, |(id, _)| id);
+        let mut out = Vec::new();
+        dom_walk_images(&dom, root, &mut 0usize, &mut out);
+        out
+    }
+
+    /// 深度优先按文档序走一遍，累加可见字符，遇到图片引用就记一条。
+    fn dom_walk_images(dom: &Dom, node: NodeId, chars: &mut usize, out: &mut Vec<ImageUse>) {
+        let n = dom.get(node);
+        if let Some(tag) = dom.tag_name(node) {
+            // 被跳过的子树整个不进（`<script>` / `<style>` / `<template>` 那一族）：
+            // 那里头的标签在正文坐标系里没有位置。
+            if ua::is_skipped_tag(tag) {
+                return;
+            }
+            // `<img>` 与外来内容里的 `<image>` 才是引用；命中就不再往下递归 ——
+            // 排版把一张图当**一个**行内对象，`wrap.rs::push_node` 那句
+            // 「不再递归它的子节点」说的是同一件事，svg 里头那张 `image` 由这一条交出。
+            if let Some(src) = dom_picture_ref(dom, node, tag) {
+                out.push(ImageUse {
+                    src,
+                    offset: *chars,
+                });
+                return;
+            }
+        }
+        if n.kind == NodeKind::Text {
+            *chars += n.text.chars().count();
+            return;
+        }
+        for &child in n.children.iter() {
+            dom_walk_images(dom, child, chars, out);
+        }
+    }
+
+    /// DOM 那一条认的那一族（`layout::collect::picture_src` 同形）：`<img src>` 与
+    /// `<image href>`（退一步 `<image src>`）。空值不算一次引用。
+    ///
+    /// HTML 内容里写 `<image>` 不用另外处理：树构造按规范把它改成 `<img>` 再插，
+    /// 所以这里读到的标签名已经是 `img`，与扫描器那条「不在外来内容里就只看 `src`」
+    /// 是同一条规则的两种写法。
+    fn dom_picture_ref(dom: &Dom, node: NodeId, tag: &str) -> Option<String> {
+        let attr = |name: &str| {
+            dom.attr(node, name)
+                .map(str::to_string)
+                .filter(|value| !value.is_empty())
+        };
+        match tag {
+            "img" => attr("src"),
+            "image" => attr("href").or_else(|| attr("src")),
+            _ => None,
+        }
+    }
 
     /// 参照实现：第一个 h1/h2/h3 的文本，走 DOM 原语。
     ///
@@ -434,6 +591,13 @@ mod tests {
             dom_heading.as_deref(),
             "「{label}」标题不一致：流式 {:?} vs DOM {dom_heading:?}\n{xhtml:?}",
             stream.heading
+        );
+        // 图片清单：顺序、原样引用、以及它前面数到第几个字，三样都要逐字相同。
+        let dom_uses = dom_image_uses(xhtml);
+        assert_eq!(
+            stream.images, dom_uses,
+            "「{label}」图片清单不一致：流式 {:?} vs DOM {dom_uses:?}\n{xhtml:?}",
+            stream.images
         );
         // 生产里索引那一趟走的是分块喂（`EntryReader::stream`）：切块不许改变任何一个数。
         for chunk in [1usize, 7, 4096, 65536] {
@@ -572,6 +736,62 @@ mod tests {
             "嵌套的跳过子树",
             "<html><body><div><head><style>x</style></head>字</div></body></html>",
         ),
+        // ── 图片引用那一族（`ImageUse` 的那一列）───────────────────────────────
+        // 每一条都在打 `layout::collect::picture_src` 认的其中一种形状，或它不该认的
+        // 那一种：这一列是图片查看器「第 n 张 / 共 m 张」的唯一来源，多一张少一张
+        // 读者都滑得出来。
+        (
+            "正文里的两张插图按文档序",
+            "<html><body><p>甲</p><img src=\"a.png\"/><p>乙</p><img src=\"b.png\"></body></html>",
+        ),
+        (
+            "同一张图用两次算两条",
+            "<html><body><img src=\"a.png\"/>字<img src=\"a.png\"/></body></html>",
+        ),
+        (
+            "svg 套一张 image（Calibre 封面那一族）",
+            "<html><body><svg><image xlink:href=\"cover.jpeg\"/></svg>字</body></html>",
+        ),
+        (
+            "svg 套两张 image",
+            "<html><body><svg><image href=\"l.png\"/><image href=\"r.png\"/></svg></body></html>",
+        ),
+        (
+            "没有 src 的 img 不算",
+            "<html><body><img/><img src=\"\">字</body></html>",
+        ),
+        (
+            "src 为空的 image 不算",
+            "<html><body><svg><image href=\"\"/></svg></body></html>",
+        ),
+        (
+            "head 里的 img 被挪进当场开出的 body",
+            "<html><head><img src=\"h.png\"/></head><body>正文</body></html>",
+        ),
+        (
+            "script 里的 img 字符串不算一张",
+            "<html><body><script>var s = '<img src=\"x.png\"/>';</script>字</body></html>",
+        ),
+        (
+            "template 里的 img 不算",
+            "<html><body>甲<template><img src=\"t.png\"/></template>乙</body></html>",
+        ),
+        (
+            "行内包一层 span 的 img",
+            "<html><body><p>字<span><img src=\"i.png\"></span>后</p></body></html>",
+        ),
+        (
+            "figure 套 figcaption 里的 img",
+            "<html><body><figure><img src=\"f.png\"/><figcaption>图说</figcaption></figure></body></html>",
+        ),
+        (
+            "表格里的 img（foster parent 会挪出来）",
+            "<html><body><table><tr><td><img src=\"c.png\"/></td></tr></table>字</body></html>",
+        ),
+        (
+            "HTML 内容里写 image 按 img 看",
+            "<html><body><image src=\"g.png\"/>字</body></html>",
+        ),
     ];
 
     #[test]
@@ -579,6 +799,34 @@ mod tests {
         for (label, xhtml) in CASES {
             same(xhtml, label);
         }
+    }
+
+    /// 清单上那两个数**钉死成字面量**的一条。
+    ///
+    /// 上面那条对拍拿 DOM 当参照，两条一起错它照旧绿；而这一列的 `offset` 就是
+    /// 「定位原文」要跳进去的那个字 —— 它悄悄偏一格，屏幕上看不出来，只是跳过去之后
+    /// 那一张不在顶上而在半屏之下。所以这一条不复用任何参照实现，数字是手算的。
+    #[test]
+    fn the_offsets_are_the_visible_chars_before_the_picture() {
+        // 「甲乙」= 2 字，图在它们之后；「丙丁戊」= 3 字，第二张图在其后。
+        let xhtml = "<html><body><p>甲乙</p><img src=\"a.png\"/><p>丙丁戊</p><img src=\"b.png\"></body></html>";
+        assert_eq!(
+            chapter_summary(xhtml).images,
+            [
+                ImageUse {
+                    src: "a.png".into(),
+                    offset: 2
+                },
+                ImageUse {
+                    src: "b.png".into(),
+                    offset: 5
+                },
+            ],
+            "两张图按文档序，位置各是它前面已经数到的可见字符数"
+        );
+        // 图片自己不占一格：那一列的尺是可见文本，U+FFFC 那个哨兵由排版插在流里。
+        let only = "<html><body><img src=\"a.png\"/></body></html>";
+        assert_eq!(chapter_summary(only).images[0].offset, 0);
     }
 
     /// 把一本书的每一章都拿来对拍。

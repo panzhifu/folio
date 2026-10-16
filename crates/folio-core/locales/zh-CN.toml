@@ -64,6 +64,13 @@ sel_unhighlight = "取消划线"
 sel_chapter = "全选本章"
 sel_paragraph = "全选本段"
 sel_cancel = "取消"
+# 图片查看器那一层（把一张图摊开看）顶栏的五格：左上分享、下载，正中「第几张 / 共几张」，
+# 右上定位原文、关闭。标签压到两三个字是有意的 —— 那一行摆在图上，字长了就先挤掉图。
+image_share = "分享"
+image_download = "下载"
+image_locate = "定位原文"
+image_close = "关闭"
+image_counter = "%{index} / %{total}"
 
 [toast]
 font_size = "字号 %{size}px"

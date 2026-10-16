@@ -74,9 +74,15 @@ impl DocumentProvider for ChmAdapter {
             return Err(unsupported(path, "CHM 里没有可读的条目"));
         }
 
-        // 字数那一趟按**目录序**走（也就是名字序）：LZX 的解码状态跨块，顺着容器的
-        // 存放序读能把「回放到某个复位窗口」那笔重复开销摊薄，跳着读则每章都要重放。
-        let mut char_lens: HashMap<String, Option<usize>> = HashMap::new();
+        // 每一章的摘要（可见字数、第一个标题、图片清单）在**目录序**那一趟里算好收进这张
+        // 表：LZX 的解码状态跨块，顺着容器的存放序读能把「回放到某个复位窗口」那笔重复
+        // 开销摊薄，跳着读则每章都要重放。
+        //
+        // 三样数收在同一格里，不分两张表：它们出自同一次 `chapter_summary`，分开存迟早
+        // 有一格忘了填 —— 忘了图片清单的那一章在「整本书那一列图」里一个身影都没有，
+        // 而正文里那张图照样画得出，症状只是左右滑到那儿会跳过它。
+        let mut scans: HashMap<String, Option<crate::content::scan::ChapterSummary>> =
+            HashMap::new();
         let mut images: Vec<ImageRes> = Vec::new();
         let mut html_seen = 0usize;
         for entry in &listing {
@@ -87,10 +93,7 @@ impl DocumentProvider for ChmAdapter {
             };
             if is_html(&href) {
                 let text = chm.decode(&href, bytes);
-                char_lens.insert(
-                    href,
-                    Some(crate::content::scan::chapter_summary(&text).visible_chars),
-                );
+                scans.insert(href, Some(crate::content::scan::chapter_summary(&text)));
                 html_seen += 1;
             } else if let Some(media_type) = bitmap_media_type(&href) {
                 let (width, height) = image_dims(&bytes);
@@ -113,8 +116,14 @@ impl DocumentProvider for ChmAdapter {
         let chapters: Vec<Chapter> = items
             .iter()
             .map(|topic| {
-                let chars = char_lens.get(&topic.href).copied().flatten();
-                Chapter::entry(topic.title.clone(), topic.href.clone()).with_char_len(chars)
+                let chapter = Chapter::entry(topic.title.clone(), topic.href.clone());
+                match scans.get(&topic.href).and_then(|scan| scan.as_ref()) {
+                    // 字数与图片清单一起带走（`with_scan` 只接受「出自同一趟」的两样数）。
+                    Some(summary) => chapter.with_scan(summary),
+                    // 这一章没扫过（不是 html、或那一趟读挂了）：两样都是「没算过」，
+                    // 与从前写 NULL 是同一档。
+                    None => chapter,
+                }
             })
             .collect();
         let toc: Vec<TocEntry> = items

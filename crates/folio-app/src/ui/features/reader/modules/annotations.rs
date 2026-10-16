@@ -13,13 +13,13 @@
 //! 上一帧解出来的位置照样作数。这里**不**用排版代数当键 —— 解出来的是第几个字到
 //! 第几个字，字号、栏宽、片高都动不着它，用代数当键等于读者每动一次设置就重解整章。
 //!
-//! 解不回来的那一条（`is_stale()`）**不画**：宁可少一处底色，也不把读者的批注
+//! 解不回来的那一条（`is_stale()`）**不画**：宁可少一条下划线，也不把读者的批注
 //! 画到别的字上去。库里那条的 `stale` 标记照实回写，批注侧栏（后续里程碑）才有依据
 //! 说「这条找不到了」。
 //!
-//! 画出来的那几片底色同时是**可以点回去的**：点在矩形上就是把那一条重新选中
+//! 画出来的那几条下划线同时是**可以点回去的**：点在矩形上就是把那一条重新选中
 //! （[`ReaderSession::annotation_at`]），于是留在书上的痕迹不只是读数，还能改 ——
-//! 就地菜单跟着给出「取消划线」与四色（[`ReaderSession::selection_annotation`]）。
+//! 就地菜单跟着给出「取消划线」与五色（[`ReaderSession::selection_annotation`]）。
 //! 判据用的是画出来的那些矩形而不是「离得最近的那个字」，理由在下面那条命中方法的注释里。
 
 use std::cell::RefCell;
@@ -34,8 +34,9 @@ use gpui_kit::{App, Context, Hsla, Pixels, Point, Window};
 
 use super::super::session::{AnnotationSpans, ReaderSession, Selection};
 
-/// 没得选时划线用的那一种颜色。清单在 `folio_core::store::ANNOTATION_COLORS`，
-/// 排在第一位的就是它 —— 这里不另抄一份字面量。
+/// 点「划线」时用的那一种颜色（读者没先点某一枚圆点）。清单在
+/// `folio_core::store::ANNOTATION_COLORS`：amber 是其中那档黄 —— 传统划线色，
+/// 也是参考图里给勾选标记的那一枚。
 const DEFAULT_COLOR: &str = "amber";
 
 impl ReaderSession {
@@ -51,7 +52,7 @@ impl ReaderSession {
         match read {
             Ok(rows) => self.annotations = rows,
             Err(err) => {
-                // 读不出批注不影响正文：这一屏照读，只是底色没了。
+                // 读不出批注不影响正文：这一屏照读，只是划线没了。
                 tracing::warn!(
                     book_id = ?self.book_id,
                     error = %err,
@@ -63,11 +64,17 @@ impl ReaderSession {
         self.annotation_spans.borrow_mut().clear();
     }
 
-    /// 划线：把当前选区落成一条批注。
+    /// 划线：把当前选区落成一条批注，用默认那档颜色（菜单里「划线」那一格）。
+    pub fn add_highlight(&mut self, cx: &mut Context<Self>) {
+        self.add_highlight_with(DEFAULT_COLOR, cx);
+    }
+
+    /// 划线，但指定颜色：读者在颜色那一行直接点某一枚圆点时走这条 ——
+    /// 一段新选区点色即「就用这个色划线」，不必先按「划线」再换色。
     ///
     /// 落不成只写日志，不把菜单条留在屏上装作还能划 —— 读者再点一次也不会有别的结果，
     /// 而收掉菜单至少告诉他「这一下按过了」。
-    pub fn add_highlight(&mut self, cx: &mut Context<Self>) {
+    pub fn add_highlight_with(&mut self, color: &str, cx: &mut Context<Self>) {
         let Some(selected) = self.selection.clone() else {
             return;
         };
@@ -89,16 +96,17 @@ impl ReaderSession {
             cx.notify();
             return;
         };
-        match store.add_annotation(book_id, &anchor, "", DEFAULT_COLOR) {
+        match store.add_annotation(book_id, &anchor, "", color) {
             Ok(id) => {
                 tracing::info!(
                     book_id,
                     chapter = selected.chapter + 1,
                     annotation_id = id,
+                    color,
                     "划线: 落一条批注"
                 );
                 self.load_annotations();
-                // 选区收掉：此刻屏上那片底色来自刚落的批注，不是来自「选中」。
+                // 选区收掉：此刻屏上那条划线来自刚落的批注，不是来自「选中」。
                 self.clear_selection();
             }
             Err(err) => tracing::error!(
@@ -111,14 +119,14 @@ impl ReaderSession {
         cx.notify();
     }
 
-    /// 点在**画出来的**那片底色上：找回对应的一条批注 `(哪一章, 章内区间, 库里的 id)`。
+    /// 点在**画出来的**那条划线所在的行里：找回对应的一条批注 `(哪一章, 章内区间, 库里的 id)`。
     ///
     /// 判据是矩形，不是 `hit_test` 那个「最近的字」：后者的语义是给拖选收边的 —— 纵向夹到
     /// 最近的行、横向夹进该行的墨迹范围内（`folio_core::content::hit`），于是点在段距里、
     /// 末行之下的空白也会得到一个落在某条划线区间内的偏移。拿它当「压住了划线」，读者在
-    /// 空白处的一击就会莫名把某条批注选中。这里要的是「点到哪片颜色，选中哪一条」，所以
+    /// 空白处的一击就会莫名把某条批注选中。这里要的是「点到哪条划线，选中哪一条」，所以
     /// 落点既要在命中那一行的**行盒**里，又要在横向落进那一段字画出来的那块矩形 ——
-    /// 矩形出自同一个 `selection_rects_in_band`，与屏上那片底色同源，点得中所见。
+    /// 矩形出自同一个 `selection_rects_in_band`，与屏上那条划线同源，点得中所见。
     pub(in crate::ui::features::reader) fn annotation_at(
         &self,
         window: &Window,
@@ -127,7 +135,7 @@ impl ReaderSession {
     ) -> Option<(usize, Range<usize>, i64)> {
         let (chapter, x, y) = self.to_layout(window, at)?;
         let doc = self.book()?.span_doc(chapter)?;
-        // 排版还没跟上的那一帧，行盒是旧的：按旧行盒算出的矩形对不上这一帧画出来的底色。
+        // 排版还没跟上的那一帧，行盒是旧的：按旧行盒算出的矩形对不上这一帧画出来的划线。
         if !doc.is_current() || self.annotations.is_empty() {
             return None;
         }
@@ -207,7 +215,7 @@ impl ReaderSession {
             .map(|span| (span.id, span.color.clone()))
     }
 
-    /// 取消划线：把选区对应的那一条从库里删掉，画出来的那片底色随它消失。
+    /// 取消划线：把选区对应的那一条从库里删掉，画出来的那条划线随它消失。
     ///
     /// 删完把选区收掉：屏上已经没东西可挑中了，留着一段「选中」只会让读者以为还能再删一次。
     pub fn delete_highlight(&mut self, cx: &mut Context<Self>) {
@@ -304,20 +312,23 @@ impl ReaderSession {
     }
 }
 
-/// 四种批注底色，按 `folio_core::store::ANNOTATION_COLORS` 的顺序摆。
+/// 五种划线实色，按 `folio_core::store::ANNOTATION_COLORS` 的顺序摆
+/// （红 / 紫 / 蓝 / 绿 / 黄）。
 ///
-/// 渲染帧开头取一次（`cx.theme()` 每帧问一遍不贵，但逐块画时查表更省事），
-/// 画的时候按库里那个名字查。透明度是「压得住正文又能看出是划过」那一档：
-/// 划线是留在书上的痕迹，不该把字吃掉。
-pub(in crate::ui::features::reader) struct Palette([Hsla; 4]);
+/// 渲染帧开头取一次（`cx.theme()` 每帧问一遍不贵，但逐条画时查表更省事），
+/// 画的时候按库里那个名字查。**不压透明度**：划线是压在字下的一条实线、圆点是一枚实心
+/// 圆，都要看得清；从前底色版那 0.35 是给「整块铺在字下、不能把字吃掉」用的，现在这条
+/// 理由不在了。
+pub(in crate::ui::features::reader) struct Palette([Hsla; 5]);
 
 impl Palette {
     pub(in crate::ui::features::reader) fn of(theme: &Theme) -> Self {
         Self([
-            theme.yellow.opacity(0.35),
-            theme.magenta.opacity(0.35),
-            theme.cyan.opacity(0.35),
-            theme.green.opacity(0.35),
+            theme.red,
+            theme.magenta,
+            theme.cyan,
+            theme.green,
+            theme.yellow,
         ])
     }
 

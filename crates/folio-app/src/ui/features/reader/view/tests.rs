@@ -1170,7 +1170,7 @@ fn a_highlight_lands_in_the_store_and_comes_back(cx: &mut TestAppContext) {
     assert_eq!(row.color, "amber", "还没得选颜色时落清单里第一种");
     assert!(
         view.read_with(cx, |v, _| v.selection().is_none()),
-        "划完选区收掉：那片底色从此来自批注，不是来自「选中」"
+        "划完选区收掉：那条划线从此来自批注，不是来自「选中」"
     );
 
     // 重开这本书：库里那一条读回来，并解回本章坐标上的同一区间。
@@ -1200,7 +1200,7 @@ fn a_highlight_lands_in_the_store_and_comes_back(cx: &mut TestAppContext) {
     );
 }
 
-/// 拖选 → 菜单里那颗「划线」→ 点在画出来的那片底色上。把「已经重选好」这一状态共享给
+/// 拖选 → 菜单里那颗「划线」→ 点在画出来的那条划线上。把「已经重选好」这一状态共享给
 /// 后面几条用例，返回那条划线的章内区间（含头不含尾）。
 fn highlight_then_tap_it_back(
     cx: &mut TestAppContext,
@@ -1359,7 +1359,7 @@ fn a_tap_below_the_marked_line_selects_nothing(cx: &mut TestAppContext) {
     );
 }
 
-/// 「取消划线」真的删得掉库里那一条，删完那片底色与选区一起收掉。
+/// 「取消划线」真的删得掉库里那一条，删完那条划线与选区一起收掉。
 #[gpui_kit::test]
 fn the_reselected_highlight_can_be_removed(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
@@ -1431,6 +1431,32 @@ fn recoloring_a_highlight_moves_nothing(cx: &mut TestAppContext) {
         view.read_with(cx, |v, _| v.selection().is_some()),
         "选区留着：读者往往还要再比一档"
     );
+}
+
+/// 颜色那一行的「直接点色划线」：落库那一条用的就是点中的那一档，不是默认色。
+/// 拿掉 `add_highlight_with` 收的那个 `color` 参数（改回写死默认色）这条就红。
+#[gpui_kit::test]
+fn a_highlight_can_be_drawn_in_the_tapped_color(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    drag_select(cx, &view, handle);
+
+    view.update(cx, |v, cx| v.add_highlight_with("lime", cx));
+
+    let rows = store.annotations(id).expect("读库");
+    assert_eq!(rows.len(), 1, "点色也该落一条");
+    assert_eq!(rows[0].color, "lime", "落的是点中的那一档，不是默认那一档");
 }
 
 /// M6 验收：选中态下的一击——点选区内把菜单请回来、选区不动，点选区外清空，
@@ -2223,8 +2249,11 @@ fn image_flow() -> FlowDoc {
 
 /// 回归门：点正文里的一张插图，把这张图交给放大那一层。
 ///
+/// 钉的是**按不住长按的那一端**（宿主测试没装平台服务，[`supports_long_press`] 给 false
+/// ⇒ 走单击那一条）；真机（手机）上入口是长按，见 `image_child` 的两臂。
+///
 /// 两条断言各钉一段路：
-/// - `is_open` 钉「图上真挂了点击，而且那个 handler 认得要看哪张」；
+/// - `is_open` 钉「图上真挂了入口，而且那个 handler 认得要看哪张」；
 /// - 固有尺寸钉「排版有没有把尺寸带到界面」。少了后一条没有任何可见症状 —— 查看器会
 ///   静默退到经验上限，读者只看得见「放不大」，而线索指向的是排版。
 #[gpui_kit::test]
@@ -2269,6 +2298,190 @@ fn tapping_an_illustration_hands_it_to_the_zoom_layer(cx: &mut TestAppContext) {
         viewer.read_with(cx, |viewer, _| viewer.seen_natural()),
         Some((200.0, 100.0)),
         "固有尺寸要从 manifest 一路带到查看器：丢了它只会静默退到经验上限"
+    );
+}
+
+// ---- 整本书的那一列图：顺序、出处，以及「定位原文」跳到它出现的那一行 ----
+
+/// 两章都带图的一本合成书：第一章一张、第二章一张，另有一条 `src` 指向图片表里没有的路径。
+///
+/// `src` 两种形状都要有，因为那一列必须**按本章目录**解它们（与排版取字节用的是同一句
+/// `ChapterImages::resolve`）：`../Images/a.png` 对 `OEBPS/text/c1.xhtml` 解到兄弟目录，
+/// `b.png` 解到本章自己那一条。
+///
+/// 每章 20 段是**故意的**：落点要看得见，这本书就得真能滚 —— 两章各一段的书整本比
+/// 一屏还短，`scroll_y` 夹在 0 上，跳章这件事在界面上根本没有对应物。段与段之间
+/// **不留空白**：可见字符那一根尺连空白一起数（与 `anchor::TextMap` 同口径），
+/// 夹进去一个换行，下面那两条偏移就得重算。
+fn two_chapter_image_flow() -> FlowDoc {
+    use folio_core::content::format::ImageRes;
+    let table = |href: &str| ImageRes {
+        href: href.into(),
+        source: href.into(),
+        media_type: "image/png".into(),
+        width: 200,
+        height: 100,
+    };
+    // 「第N行字」= 4 个可见字符一段（N 都是一位数，所以每一段一样长）。
+    let para = |n: usize| format!("<p>第{n}行字</p>");
+    let before = |n: usize| (0..n).map(para).collect::<Vec<_>>().join("");
+    let after = |from: usize| (from..20).map(para).collect::<Vec<_>>().join("");
+
+    FlowDoc {
+        chapters: vec![
+            // 图在第 3 段之后 ⇒ 它前面已经数到 3 × 4 = 12 个字。
+            Chapter::inline(
+                "第一章",
+                format!(
+                    "{}<p><img src=\"../Images/a.png\" alt=\"\"></p>{}",
+                    before(3),
+                    after(3)
+                ),
+            )
+            .with_spine_href("OEBPS/text/c1.xhtml"),
+            // 图在第 2 段之后 ⇒ 8 个字；后面还有一条解不出的 `gone.png`。
+            Chapter::inline(
+                "第二章",
+                format!(
+                    "{}<p><img src=\"b.png\" alt=\"\"><img src=\"gone.png\" alt=\"\"></p>{}",
+                    before(2),
+                    after(2)
+                ),
+            )
+            .with_spine_href("OEBPS/text/c2.xhtml"),
+        ],
+        images: vec![table("OEBPS/Images/a.png"), table("OEBPS/text/b.png")],
+        ..Default::default()
+    }
+}
+
+/// 那一列是**阅读顺序**、带**出处**，并且只收解得出来的那几条。
+///
+/// 钉四件事，每一件错了都没有别的可见症状：
+/// - 顺序：查看器念的「第 n 张」与左右滑走的次序全跟着这一列走，顺序错了就是
+///   「第 2 张画的是第 3 张的图」，屏幕上看不出来；
+/// - 出处：`chapter` + 章内可见字符偏移，「定位原文」跳的就是这两个数；
+/// - 解不出来的 `src` 不进列：让读者滑到一张永远画不出来的黑纸上，比那一列少一张糟得多；
+/// - 键的形状：`<本书 token>/<容器路径>`，与正文摆那张图时问图集用的是同一个键 ——
+///   两边不一，点图上那一下就会认不出要看的是哪一张。
+#[gpui_kit::test]
+fn the_image_column_is_reading_order_with_a_place_to_jump_to(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = two_chapter_image_flow();
+    let (view, handle) = open(cx, &flow, "epub", prefs(16.0), Locator::start(), 460.0);
+    settle(cx, handle);
+
+    let column = view.read_with(cx, |v, _| v.image_sequence().clone());
+    let listed: Vec<(usize, usize, &str)> = column
+        .iter()
+        .map(|slot| match slot.place {
+            crate::ui::features::reader::image_viewer::Place::Reflow { chapter, offset } => {
+                (chapter, offset, slot.href.as_str())
+            }
+            crate::ui::features::reader::image_viewer::Place::Fixed { page } => {
+                panic!("可重排这一支不该出现定版式那一条：page {page}")
+            }
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            // 第一章那张在第 3 段之后 ⇒ 前面已经数到 3 × 4 = 12 个字；
+            // `../Images/` 解到兄弟目录那一条。
+            (0, 12, "OEBPS/Images/a.png"),
+            // 第二章那张在第 2 段之后 ⇒ 8 个字；同一段里后面的 `gone.png` 不在表里，不进列。
+            (1, 8, "OEBPS/text/b.png"),
+        ],
+        "顺序、章号、章内偏移与解出来的容器路径，四样都要是这一列"
+    );
+    // 固有尺寸与文件名：放大上限按前者算，文件名上那个序号是防同名的两张互相盖掉。
+    assert_eq!(column[0].natural, (200.0, 100.0));
+    assert_eq!(column[0].name, "001_a.png");
+    assert_eq!(column[1].name, "002_b.png");
+    // 键带着本书的 token 与容器路径两截（`<token>/<href>`）。
+    assert!(
+        column[0]
+            .request
+            .key
+            .ends_with(&format!("/{}", column[0].href)),
+        "图集的键该以容器路径为后一半：{}",
+        column[0].request.key
+    );
+}
+
+/// 「定位原文」：关掉那一层，把正文落到那一张出现的地方 —— 目标在**别的章**也要落得对。
+///
+/// 换章的那一跳不能就地算坐标：目标章这时往往还没排版，「第几个字在哪一像素」要等
+/// 排版做完才有答案。所以这一条真正钉的是「排版做完那一帧落对了地方」，
+/// 顺带钉三件配套的事：层关了、恢复请求被取走了（不挂着就不会再跳）、位置进了库。
+#[gpui_kit::test]
+fn locating_a_picture_closes_the_layer_and_lands_on_its_line(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::image_viewer::ImageViewer;
+
+    cx.update(gpui_kit::init);
+    let flow = two_chapter_image_flow();
+    let store = Arc::new(Store::in_memory().expect("内存库"));
+    let id = store
+        .add_book(std::path::Path::new("memory://fixture"), &meta("epub"))
+        .expect("入库");
+    store.save_flow(id, &flow, Format::Epub).expect("章节入库");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "epub",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    let viewer = cx.update(|app| app.new(|_| ImageViewer::default()));
+    cx.update(|app| view.update(app, |session, _| session.set_image_viewer(viewer.clone())));
+    settle(cx, handle);
+
+    // 正文在第 0 章；把查看器开到**第二章那一张**（那一列的第 2 条）。
+    let sequence = view.read_with(cx, |v, _| v.image_sequence().clone());
+    cx.update(|app| {
+        viewer.update(app, |viewer, cx| {
+            viewer.open(1, (460.0, 520.0), sequence);
+            cx.notify();
+        })
+    });
+    settle(cx, handle);
+    assert!(
+        viewer.read_with(cx, |viewer, _| viewer.is_open()),
+        "前置：那一层要开着，才谈得上「定位原文」把它关掉"
+    );
+
+    view.update(cx, |v, cx| v.locate_image(1, cx));
+    settle(cx, handle);
+
+    assert!(
+        !viewer.read_with(cx, |viewer, _| viewer.is_open()),
+        "定位原文该先把这一层关掉 —— 压着一层黑看那张图自己不算回到正文"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.chapter_index()),
+        1,
+        "锚章该挪到那一张所在的第 2 章"
+    );
+    let landed = offset_of(&view, cx);
+    assert!(
+        landed.abs_diff(8) <= 1,
+        "落点该在那一张之前那一个字上（第二章第 2 段末 = 第 8 个字）：实际 {landed}"
+    );
+    assert!(
+        !view.read_with(cx, |v, _| v.has_pending_restore()),
+        "恢复请求该在锚章排完那一帧被取走，而不是永远挂着"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.scroll_y) > 0.0,
+        "跳到的是本章里第 2 段之后那一处，屏上不该还停在章首"
+    );
+    let (_, locator) = store.position(id).expect("读回进度").expect("进度应存在");
+    assert_eq!(
+        locator.chapter, 1,
+        "跳过去就要落库：读者杀进程回来还在那一张的地方"
     );
 }
 

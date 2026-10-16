@@ -265,6 +265,12 @@ struct Opf {
     spine: Vec<SpineRef>,
     /// `<meta name="cover" content="<item id>">`
     cover_id: Option<String>,
+    /// `<guide><reference type="cover" href="…">`：封面**页**（一个 xhtml）的相对路径。
+    ///
+    /// 与 [`Self::cover_id`] 是两件事：`cover_id` 指的是那张**图**（拿去做书架缩略图），
+    /// 这里指的是承载它的那**一页**。封面页常被作者标成 `linear="no"`（`itemref` 上），
+    /// 于是按「非线性不当章」会被整个丢掉 —— 见 [`KEEP_NONLINEAR`] 那条破例。
+    cover_page: Option<String>,
     /// Dublin Core 的其余各项。采集在 `parse_opf`，归置在 [`place_metadata`]。
     ///
     /// 为什么先攒成一串再归置而不是边采边填：有三条规则**要看完全部条目才定得下来** ——
@@ -302,6 +308,10 @@ struct Opf {
 /// 循环里，是因为读者侧确实有「显示非线性内容」这一档（KOReader 把它做成了界面开关
 /// `hide_nonlinear_flows`，`frontend/apps/reader/modules/readerrolling.lua:248`）；
 /// **改了它要连 [`super::INDEX_VERSION`] 一起改** —— 章数与章号都变了，老库的位置会错位。
+///
+/// **封面页是唯一的例外**（不看这颗开关）：`<guide type="cover">` 指的那一页即使被标成
+/// 非线性也照样收成第一章。作者把封面页写成 `linear="no"` 很常见（《杀死玛丽苏》就是），
+/// 而读者开书第一眼要看的就是它 —— 少了它，第一屏直接落在目录页上。
 const KEEP_NONLINEAR: bool = false;
 
 /// 取命名空间前缀之后的部分：`dc:title` → `title`，`epub:type` → `type`。
@@ -580,7 +590,8 @@ fn parse_opf(xml: &str) -> Opf {
                 let n = e.name();
                 let name = local_name(n.as_ref());
                 match name {
-                    "metadata" | "manifest" => section = name.to_string(),
+                    "metadata" | "manifest" | "guide" => section = name.to_string(),
+                    "reference" if section == "guide" => read_guide_reference(&mut out, &e),
                     "spine" => {
                         section = name.to_string();
                         // 只认显式写了的 `rtl`。`ltr` / `default` / 没写 三种都落 `false`，
@@ -637,7 +648,7 @@ fn parse_opf(xml: &str) -> Opf {
                 {
                     metas.push(done);
                 }
-                if matches!(name, "manifest" | "spine") {
+                if matches!(name, "manifest" | "spine" | "guide") {
                     section = String::new();
                 }
             }
@@ -676,6 +687,7 @@ fn parse_opf(xml: &str) -> Opf {
                     ("metadata", "meta") if attr(&e, "name").as_deref() == Some("cover") => {
                         out.cover_id = attr(&e, "content");
                     }
+                    ("guide", "reference") => read_guide_reference(&mut out, &e),
                     _ => {}
                 }
             }
@@ -699,6 +711,17 @@ fn read_item(e: &quick_xml::events::BytesStart<'_>) -> Option<Item> {
         // 不在表里的 id」的误导日志，而那一格本来就不该有下一步。
         fallback: attr(e, "fallback").filter(|id| !id.is_empty()),
     })
+}
+
+/// `<guide><reference type="cover" href="…">` 里认封面页，写进 [`Opf::cover_page`]。
+///
+/// 其余 `type`（`toc` / `text` / `start` …）采进来没有用处 —— 目录我们另走 nav/ncx。
+fn read_guide_reference(out: &mut Opf, e: &quick_xml::events::BytesStart<'_>) {
+    if attr(e, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("cover"))
+        && let Some(href) = attr(e, "href").filter(|h| !h.is_empty())
+    {
+        out.cover_page = Some(href);
+    }
 }
 
 /// nav 文档里那个 `<nav>` 归哪一档。规范用 `epub:type` 标，实际出版书也常写在 `class`
@@ -1367,6 +1390,13 @@ fn parse_chapter(
         (None, read.map(|()| scan.finish()))
     };
     let char_len = summary.as_ref().map(|s| s.visible_chars);
+    // 图片清单与字数出自**同一趟**扫描，因此一起带走。`with_text=false` 那一档
+    // （导入走的就是这一档）整章字符串不进内存，这一份清单就是那一章的图
+    // 在这本书里留下的唯一痕迹 —— 图片查看器那一列靠它，不靠排版。
+    let images = summary
+        .as_ref()
+        .map(|s| s.images.clone())
+        .unwrap_or_default();
     let title = toc
         .get(job.href.as_str())
         .map(|e| e.title.clone())
@@ -1380,7 +1410,9 @@ fn parse_chapter(
             .with_spine_href(job.href.clone())
             .with_char_len(char_len),
         // 位置就是条目名，正是打开时 `Entry` 那一路要的东西。
-        None => Chapter::entry(title, job.href.clone()).with_char_len(char_len),
+        None => Chapter::entry(title, job.href.clone())
+            .with_char_len(char_len)
+            .with_images(images),
     }
 }
 
@@ -1762,6 +1794,10 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
     let mut notices: Vec<(usize, Chapter)> = Vec::new();
     // 标题回落要按 spine 下标算「第 N 节」，而下标得是**过滤之前**的那一个：
     // spine 里被跳过的 nav 与资源不该改变后面章节的编号（与 `ChapterJob::spine` 同一条理由）。
+    //
+    // 封面页解析成容器绝对路径：`<guide>` 里的 href 与 manifest 的 href 同以 OPF 目录为基，
+    // 两边都过 [`resolve`] 才比得起来。
+    let cover_page_href = opf.cover_page.as_deref().map(|h| resolve(&base_dir, h));
     for (spine, node) in opf.spine.iter().enumerate() {
         let Some(item) = by_id.get(node.id.as_str()) else {
             // spine 指着一个 manifest 里没有的 id：这一节整个没了，而且界面上看不出来。
@@ -1775,12 +1811,15 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         if item.properties.iter().any(|p| p == "nav") || is_resource(&item.media_type) {
             continue;
         }
-        // 非线性那一档的口径与那颗开关都收在 [`KEEP_NONLINEAR`]。
-        if !node.linear && !KEEP_NONLINEAR {
+        let href = resolve(&base_dir, &item.href);
+        // 非线性那一档：默认不当章，**封面页除外**。封面页（`<guide type="cover">` 指的
+        // 那一页）常被作者标成 `linear="no"`，可它是读者开书要看的第一眼；其余非线性项
+        // （脚注弹层、隐藏的封面替代文本）照旧丢。口径与那颗开关收在 [`KEEP_NONLINEAR`]。
+        let is_cover_page = cover_page_href.as_deref() == Some(href.as_str());
+        if !node.linear && !KEEP_NONLINEAR && !is_cover_page {
             tracing::debug!("epub: spine 第 {} 项写的非线性内容，不当成一章", spine + 1);
             continue;
         }
-        let href = resolve(&base_dir, &item.href);
         let titled = || {
             toc_by_href
                 .get(href.as_str())
@@ -1926,14 +1965,18 @@ fn read_fixed(
     let mut images: Vec<ImageRes> = Vec::new();
     let mut cover: Option<Vec<u8>> = None;
 
+    // 封面页：与可重排那一支同一处破例（`<guide type="cover">` 指的页即使非线性也收）。
+    let cover_page_href = opf.cover_page.as_deref().map(|h| resolve(base_dir, h));
     for node in &opf.spine {
-        // `linear="no"` 与可重排同一条：非线性内容不当一页。
-        if !node.linear {
-            continue;
-        }
         let Some(item) = by_id.get(node.id.as_str()) else {
             continue;
         };
+        // `linear="no"` 与可重排同一条：非线性内容不当一页 —— 封面页同样例外。
+        let href = resolve(base_dir, &item.href);
+        let is_cover_page = cover_page_href.as_deref() == Some(href.as_str());
+        if !node.linear && !is_cover_page {
+            continue;
+        }
         // SMIL 媒体叠加文档（音频+文本同步）不是内容页：跳过，不当一页、也不留空页。
         if item.media_type.contains("smil") {
             continue;

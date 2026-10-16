@@ -67,6 +67,14 @@ sel_unhighlight = "Remove"
 sel_chapter = "Select chapter"
 sel_paragraph = "Select paragraph"
 sel_cancel = "Cancel"
+# The image viewer's top row: share and save at the left, "which of how many" in the
+# middle, locate-in-text and close at the right. The labels stay short on purpose — the
+# row sits on top of the picture, and long words would push the picture out.
+image_share = "Share"
+image_download = "Save"
+image_locate = "Locate"
+image_close = "Close"
+image_counter = "%{index} / %{total}"
 
 [toast]
 font_size = "Font size %{size}px"

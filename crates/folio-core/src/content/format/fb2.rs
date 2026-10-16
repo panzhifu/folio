@@ -101,7 +101,12 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
             .enumerate()
             .map(|(ix, chapter)| {
                 let chars = chapter.char_len();
-                Chapter::section(chapter.title.clone(), ix).with_char_len(chars)
+                // 图片清单跟着正文一起留下：`Chapter::section` 只留位置，正文交回容器取，
+                // 而「这一章有哪几张图」是**导入这一趟**才有的数，不带走就再也算不出来。
+                let images = chapter.images;
+                Chapter::section(chapter.title.clone(), ix)
+                    .with_char_len(chars)
+                    .with_images(images)
             })
             .collect()
     };

@@ -13,9 +13,10 @@
 //! 画出的位置经 `canvas` 回写进会话的 `menu_bounds`：压在它上面的一击属于菜单，
 //! 不算「点别处清除」（`modules/selection.rs` 的 `tap_with_selection`）。
 //!
-//! 第二格跟着选区自己是谁换：选区**正好等于**库里某一条划线时它是「取消划线」，下面
-//! 再多出四格颜色（[`ReaderSession::selection_annotation`]）；改过范围的选区就是普通
-//! 选区，那一格回到「划线」。
+//! 第二格跟着选区自己是谁换：选区**正好等于**库里某一条划线时它是「取消划线」
+//! （[`ReaderSession::selection_annotation`]）；改过范围的选区就是普通选区，那一格回到
+//! 「划线」。下面那一行五格颜色**恒在**：挑中某条划线时点色＝换色，普通选区点色＝就用
+//! 这个色划一条 —— 于是「划线」那一格给的是默认那档黄，想换个色直接点圆点。
 //!
 //! 摆位分两半：[`slot`] 是**纯函数**（首末高亮的上下边 + 视口高 + 卡片高 → 摆在哪一边、
 //! 顶边在哪一像素），所以「上面放不下就翻到下面」这条规则能在宿主上直接钉死；渲染那一侧
@@ -24,7 +25,6 @@
 use folio_core::store::ANNOTATION_COLORS;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme, Icon, ThemeStyled as _, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement,
     PathBuilder, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div, point,
@@ -44,16 +44,18 @@ const MENU_PAD: f32 = 6.0;
 const MENU_TAIL: f32 = 8.0;
 /// 菜单与选区之间的缝，也是它与视口上下边的最小间距。
 const MENU_GAP: f32 = 6.0;
-/// 颜色那一行的高。四枚圆点 20 见方，上下各留 7 —— 这一行不需要文字，
+/// 颜色那一行的高。五枚圆点 20 见方，上下各留 7 —— 这一行不需要文字，
 /// 颜色本身就是它的说明。
 const MENU_SWATCH: f32 = 34.0;
 /// 一枚颜色圆点的直径。
 const SWATCH_DOT: f32 = 20.0;
+/// 叠在圆点上的那枚勾的字号（`Icon` 取当前文字号）。
+const SWATCH_CHECK: f32 = 13.0;
 
 /// 整块菜单占的高（含尾巴）：摆位与「放不下就翻面」都按这个数算。
-/// 多出来的那一行只在选区是库里某一条划线时装得上。
-pub(in crate::ui::features::reader) const fn card_height(with_colors: bool) -> f32 {
-    MENU_CELL + MENU_PAD * 2.0 + MENU_TAIL + if with_colors { MENU_SWATCH } else { 0.0 }
+/// 颜色那一行**恒在**，所以没有「一行 / 两行」两种高。
+pub(in crate::ui::features::reader) const fn card_height() -> f32 {
+    MENU_CELL + MENU_PAD * 2.0 + MENU_SWATCH + MENU_TAIL
 }
 
 /// 这一帧菜单该摆在哪。
@@ -107,14 +109,17 @@ impl ReaderSession {
         let bounds_cell = self.menu_bounds.clone();
         let surface = cx.theme().popover;
         let palette = Palette::of(cx.theme());
-        let foreground = cx.theme().foreground;
+        // 勾选标记压在圆点上，取的是页面底色：浅色主题圆点是深色（`*-600`）、底色近白，
+        // 深色主题圆点是浅色（`*-400`）、底色近黑 —— 一个数在两套主题里都够对比。
+        let check = cx.theme().background;
         let copy = tr(cx, "reader.sel_copy");
         let highlight = tr(cx, "reader.sel_highlight");
         let unhighlight = tr(cx, "reader.sel_unhighlight");
         let paragraph = tr(cx, "reader.sel_paragraph");
         let chapter = tr(cx, "reader.sel_chapter");
         let cancel = tr(cx, "reader.sel_cancel");
-        // 挑中的正是留在书上的那一条时，第二格改做「取消划线」，并多出下面那一行颜色。
+        // 挑中的正是留在书上的那一条时，第二格改做「取消划线」；下面那一行颜色恒在，
+        // 只是给它那一档多打一枚勾。
         let marked = self.selection_annotation();
         let mark_cell = match marked {
             Some(_) => menu_cell(
@@ -132,9 +137,10 @@ impl ReaderSession {
                 |r, _, cx| r.add_highlight(cx),
             ),
         };
-        let colors = marked
-            .as_ref()
-            .map(|(_, color)| swatch_row(reader.clone(), &palette, foreground, color));
+        // 颜色那一行恒在。挑中的正是库里某条划线时，给它那一档打勾、点色即换色；
+        // 普通选区没有「当下那一档」，点色即「就用这个色划一条」。
+        let current = marked.as_ref().map(|(_, color)| color.as_str());
+        let colors = swatch_row(reader.clone(), &palette, check, current);
         Some(
             v_flex()
                 .absolute()
@@ -144,7 +150,7 @@ impl ReaderSession {
                 .child(
                     v_flex()
                         .p(px(MENU_PAD))
-                        // 两行之间不留缝：`card_height` 算的就是「格子高 + 内缩 + 尾巴」，
+                        // 两行之间不留缝：`card_height` 算的就是「格子高 + 颜色行 + 内缩 + 尾巴」，
                         // 中间再插一段 gap 就成了第二个真相源，摆位按少算的那几像素翻面。
                         .gap_0()
                         .rounded(px(10.0))
@@ -185,7 +191,7 @@ impl ReaderSession {
                                     },
                                 )),
                         )
-                        .children(colors),
+                        .child(colors),
                 )
                 .children((!tail_up).then(|| menu_tail(false, surface)))
                 // 记下这一帧菜单真实落地的位置（窗口坐标），点按判定要用。
@@ -230,21 +236,22 @@ fn menu_cell(
         .into_any_element()
 }
 
-/// 颜色那一行：`ANNOTATION_COLORS` 那四档按库里的顺序摆。
+/// 颜色那一行：`ANNOTATION_COLORS` 那五档按库里的顺序摆。
 ///
-/// 格子与上面那行同宽（`MENU_CELL`），点哪一格就把库里那条改成哪个颜色；当下那一格描一圈
-/// 前景色的边 —— 只靠色块本身分不出「选中的是哪一个」，四档颜色都摆在屏上。
+/// 格子与上面那行同宽（`MENU_CELL`）。挑中的正是库里某条划线时，它那一档的圆点上叠一枚
+/// 勾（`check` 是页面底色，压在色块上对比得出）；普通选区没有勾 —— 挑选中的是哪一个
+/// 颜色，光靠色块本身看不出来。点哪一格：已有划线改色，普通选区就用这个色划一条。
 fn swatch_row(
     reader: Entity<ReaderSession>,
     palette: &Palette,
-    ring: Hsla,
-    current: &str,
+    check: Hsla,
+    current: Option<&str>,
 ) -> AnyElement {
     h_flex()
         .gap_0()
         .children(ANNOTATION_COLORS.iter().enumerate().map(|(ix, name)| {
             let name = *name;
-            let active = name == current;
+            let active = current == Some(name);
             let reader = reader.clone();
             div()
                 .id(("selection-swatch", ix))
@@ -258,12 +265,23 @@ fn swatch_row(
                     div()
                         .w(px(SWATCH_DOT))
                         .h(px(SWATCH_DOT))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .rounded(px(SWATCH_DOT / 2.0))
                         .bg(palette.color(name))
-                        .when(active, |this| this.border_2().border_color(ring)),
+                        .children(active.then(|| {
+                            div()
+                                .text_size(px(SWATCH_CHECK))
+                                .text_color(check)
+                                .child(Icon::new(IconName::Check))
+                        })),
                 )
                 .on_click(move |_, _, cx| {
-                    reader.update(cx, |reader, cx| reader.set_highlight_color(name, cx));
+                    reader.update(cx, |reader, cx| match reader.selection_annotation() {
+                        Some(_) => reader.set_highlight_color(name, cx),
+                        None => reader.add_highlight_with(name, cx),
+                    });
                 })
                 .into_any_element()
         }))
@@ -312,20 +330,18 @@ mod tests {
     //! 点名导入而不 `use super::*`：`gpui_kit` 根把 `gpui` 整个转了出来，里面有一个
     //! 叫 `test` 的属性宏，glob 会让下面的 `#[test]` 递归展开成它。
 
-    use super::{MENU_SWATCH, Slot, card_height, slot};
+    use super::{MENU_CELL, MENU_PAD, MENU_SWATCH, MENU_TAIL, Slot, card_height, slot};
 
-    /// 一行格子（普通选区）与两行（挑中的是库里某一条划线）的卡片总高。
-    /// 摆位只认递进去的那个数，所以「多了一行颜色」这件事必须由高度本身带进来。
-    const ONE_ROW: f32 = card_height(false);
-    const TWO_ROWS: f32 = card_height(true);
+    /// 卡片总高（动作行 + 恒在的颜色行）。摆位只认递进去的这个数。
+    const CARD: f32 = card_height();
 
     /// 顶部够用时摆在选区之上，尾巴朝下。
     #[test]
     fn the_menu_sits_above_the_selection_when_there_is_room() {
-        let first_top = ONE_ROW + 8.0;
+        let first_top = CARD + 8.0;
         assert_eq!(
-            slot(Some(first_top), Some(first_top + 30.0), 900.0, ONE_ROW),
-            Slot::Above(first_top - ONE_ROW - 6.0)
+            slot(Some(first_top), Some(first_top + 30.0), 900.0, CARD),
+            Slot::Above(first_top - CARD - 6.0)
         );
     }
 
@@ -334,7 +350,7 @@ mod tests {
     fn it_flips_below_when_the_top_is_taken() {
         let last_bottom = 400.0;
         assert_eq!(
-            slot(Some(20.0), Some(last_bottom), 900.0, ONE_ROW),
+            slot(Some(20.0), Some(last_bottom), 900.0, CARD),
             Slot::Below(last_bottom + 6.0)
         );
     }
@@ -343,34 +359,23 @@ mod tests {
     #[test]
     fn the_flip_happens_at_the_height_plus_the_safety_margin() {
         assert!(matches!(
-            slot(Some(ONE_ROW + 8.0), Some(600.0), 900.0, ONE_ROW),
+            slot(Some(CARD + 8.0), Some(600.0), 900.0, CARD),
             Slot::Above(_)
         ));
         assert!(matches!(
-            slot(Some(ONE_ROW + 7.0), Some(600.0), 900.0, ONE_ROW),
+            slot(Some(CARD + 7.0), Some(600.0), 900.0, CARD),
             Slot::Below(_)
         ));
     }
 
-    /// 颜色那一行是真空占地方的：同一处锚位，一行摆得下、两行就该翻面。
-    /// 卡片高若还是写死的那一个数，这一条会红在「菜单长出屏幕外」上。
+    /// 菜单恒是两行：摆位用的高必须把颜色那一行算进去。漏掉 `MENU_SWATCH` 那一项，
+    /// 卡片就会比算出来的高多出一行、贴到屏幕顶边上去 —— 这条就是防那个的。
     #[test]
-    fn the_color_row_costs_its_own_height() {
-        assert_eq!(TWO_ROWS, ONE_ROW + MENU_SWATCH, "多出来的只有那一行");
-        let first_top = ONE_ROW + 8.0;
+    fn the_card_height_includes_the_color_row() {
+        let actions_only = MENU_CELL + MENU_PAD * 2.0 + MENU_TAIL;
         assert!(
-            matches!(
-                slot(Some(first_top), Some(600.0), 900.0, ONE_ROW),
-                Slot::Above(_)
-            ),
-            "一行时这里摆得下"
-        );
-        assert!(
-            matches!(
-                slot(Some(first_top), Some(600.0), 900.0, TWO_ROWS),
-                Slot::Below(_)
-            ),
-            "两行放不下就该翻面"
+            CARD >= actions_only + MENU_SWATCH,
+            "卡片高没把颜色那一行算进去：{CARD}"
         );
     }
 
@@ -378,12 +383,12 @@ mod tests {
     #[test]
     fn a_below_slot_never_leaves_the_viewport() {
         let viewport = 600.0;
-        let Slot::Below(top) = slot(Some(20.0), Some(viewport), viewport, ONE_ROW) else {
+        let Slot::Below(top) = slot(Some(20.0), Some(viewport), viewport, CARD) else {
             panic!("顶部放不下该翻到下面");
         };
-        assert!(top + ONE_ROW <= viewport, "菜单底边越过了视口：{top}");
+        assert!(top + CARD <= viewport, "菜单底边越过了视口：{top}");
         // 视口矮到装不下整块菜单时也不给负数：负顶边意味着菜单自己跑出屏幕。
-        let Slot::Below(tiny) = slot(Some(20.0), Some(40.0), 100.0, ONE_ROW) else {
+        let Slot::Below(tiny) = slot(Some(20.0), Some(40.0), 100.0, CARD) else {
             panic!("同上");
         };
         assert!(tiny >= 2.0, "顶边不该是负数：{tiny}");
@@ -392,8 +397,8 @@ mod tests {
     /// 没有高亮可锚（排版还没跟上、选区滚出屏了）就不画，而不是拿 0 当锚位。
     #[test]
     fn no_anchor_means_no_menu() {
-        assert_eq!(slot(None, Some(300.0), 900.0, ONE_ROW), Slot::Hidden);
-        assert_eq!(slot(Some(300.0), None, 900.0, ONE_ROW), Slot::Hidden);
-        assert_eq!(slot(None, None, 900.0, ONE_ROW), Slot::Hidden);
+        assert_eq!(slot(None, Some(300.0), 900.0, CARD), Slot::Hidden);
+        assert_eq!(slot(Some(300.0), None, 900.0, CARD), Slot::Hidden);
+        assert_eq!(slot(None, None, 900.0, CARD), Slot::Hidden);
     }
 }

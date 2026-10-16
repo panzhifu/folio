@@ -115,6 +115,10 @@ pub trait DocumentProvider: Send + Sync {
                         Some(at) => self.chapter_source(path, at)?,
                         None => chapter.source().to_string(),
                     };
+                    // 字数那一格**不换来源**（`visible_chars` 走 DOM）：这条 `read()`
+                    // 只服务测试与校验，把两样数并成一趟是省一点力气，代价是给
+                    // `char_len` 换了一把尺 —— 那条尺进了库，不值得在这儿动它。
+                    let images = crate::content::scan::chapter_summary(&text).images;
                     Ok(Chapter {
                         title: chapter.title.clone(),
                         spine_href: chapter.spine_href.clone(),
@@ -122,6 +126,7 @@ pub trait DocumentProvider: Send + Sync {
                         // `Chapter::inline` 同一条口径，别让 `read` 出来的章与
                         // `index` 出来的章对同一个字段给两个答案。
                         char_len: super::visible_chars(&text),
+                        images,
                         text: ChapterText::Inline(text),
                     })
                 })

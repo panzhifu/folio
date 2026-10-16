@@ -259,8 +259,33 @@ impl BookImages {
         }
     }
 
+    /// 那张图在容器里的**原始字节**（不经缩小、不经解码）。
+    ///
+    /// 分享与下载递给系统的是这一份：摊开看着的那一份像素是按 [`MAX_IMAGE_EDGE`]
+    /// 缩过的、格式也可能是 `fallback=` 那一条换过的位图 —— 拿它去分享就是把读者
+    /// 书里的原图降一档给他。取不到给 `None`：容器丢了，或那一条根本不在表里。
+    pub fn raw_bytes(&self, href: &str) -> Option<Vec<u8>> {
+        (self.bytes)(href)
+    }
+
+    /// 取字节那条链子本身（**可以跨线程拿**）。
+    ///
+    /// 一次递出去的分享该在后台那一趟里读解压，而不是压在读者按下按钮的那一帧：
+    /// 一页漫画是 1–3 MB 的 JPEG， inflate 在手机上是要看得见的一笔。
+    pub fn source(&self) -> ByteSource {
+        Arc::clone(&self.bytes)
+    }
+
     fn get(&self, href: &str) -> Option<&ImageEntry> {
         self.index.get(href).map(|i| &self.entries[*i])
+    }
+
+    /// 这张图**声明**的媒体类型（容器路径 → manifest 里那一格），表里没有给 `None`。
+    ///
+    /// 分享与下载要按它递系统 intent（`image/png` 与 `image/*` 在接收方那边不是一回事），
+    /// 而字节要到后台那一趟才到手 —— 界面这边问得出、也只有这张表给得出的就是这一格。
+    fn media_type(&self, href: &str) -> Option<&str> {
+        self.get(href).map(|entry| entry.media_type.as_str())
     }
 
     /// 这张图的活儿（键已带上本书的 token）。
@@ -357,6 +382,22 @@ impl ChapterImages {
             .get(href)
             .map(|entry| (entry.width, entry.height))
             .unwrap_or((0.0, 0.0))
+    }
+
+    /// 这张图声明的媒体类型（容器路径 → `image/png` 那一格），表里没有给 `None`。
+    ///
+    /// 问的是**整本书那张表**，与本章目录无关，所以这一格不需要先 `resolve`。
+    /// 图片查看器那两条递给系统的活儿（分享、下载）按它决定 intent 的类型。
+    pub fn media_type(&self, href: &str) -> Option<&str> {
+        self.book.media_type(href)
+    }
+
+    /// 取字节那条链子（转交整本书那一份，可以跨线程拿走）。
+    ///
+    /// 定版式那一支手里拿的就是这一格（`FixedBook::images`），它要分享一张页图时
+    /// 不必再回头找 `BookImages`。
+    pub fn source(&self) -> ByteSource {
+        self.book.source()
     }
 }
 

@@ -36,6 +36,12 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!-- Saving a reader image into the gallery needs a write grant only on API 26–28;
+         API 29+ goes through MediaStore with RELATIVE_PATH and needs no permission. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <!-- Camera feature (optional — app works without camera) -->
 
     <!-- Vulkan feature declaration.
@@ -157,6 +163,21 @@
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
         />
+
+        <!-- Shares a reader image out through a content:// URI. The bytes land in
+             cache/share/ (see GpuiSystemUi.shareImage) and the path list lives in
+             res/xml/file_paths.xml. A raw file:// URI would throw on API 24+. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true"
+        >
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"
+            />
+        </provider>
 
     </application>
 

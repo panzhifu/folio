@@ -375,4 +375,19 @@ ALTER TABLE books ADD COLUMN rights TEXT NOT NULL DEFAULT '';
 ALTER TABLE books ADD COLUMN series TEXT NOT NULL DEFAULT '';
 ALTER TABLE books ADD COLUMN series_position TEXT NOT NULL DEFAULT '';
 "#,
+    // v20：**每章的图片引用清单入库**（`chapters.images_json`）。图片查看器要摆的是
+    // 「整本书一共有几张图、现在这一张排第几」，还要能一句话回到它出现的那个字上去 ——
+    // 那两样排版都给不出来：排版只认识**已经排好的那一章**。
+    //
+    // 存的是扫描那一趟的产物（作者写下的原样 `src` + 它前面的可见字符数，
+    // 见 `content::scan::ImageUse`），**不是**解析后的容器路径：解析要按本章目录做、
+    // 还要对得上那本书的图片表，那是界面侧 `ChapterImages::resolve` 一条路的事。
+    // 存原样才不会出现「列里说有三张、正文里只画得出两张」那种两本账。
+    //
+    // 默认 `'[]'` = 「这一章没有图」。老行不回填（回填要开容器，而这条库的规矩是
+    // 「清单是导入那一趟顺手写的」），所以跟着这一版 bump `INDEX_VERSION`，
+    // 开书时按本重扫（`stale_reason` 认 `OldIndex` 那一条路）。
+    r#"
+ALTER TABLE chapters ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]';
+"#,
 ];

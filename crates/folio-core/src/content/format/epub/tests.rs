@@ -1558,6 +1558,53 @@ fn a_non_linear_spine_item_is_not_a_chapter() {
     assert_eq!(flow.chapters[0].title, "第 2 节", "{:?}", flow.chapters[0]);
 }
 
+/// 封面页是「非线性不当章」的唯一例外：`<guide type="cover">` 指的那一页即使标了
+/// `linear="no"` 也收成**第一章** —— 读者开书第一眼要看的就是它。
+///
+/// 《杀死玛丽苏》就是这种写法（`cover_page.xhtml` 标 `linear="no"`）；少了这条破例，
+/// 第一屏直接落在目录页上。拿掉 [`read_guide_reference`] 或那一处 `!is_cover_page`，这条红。
+#[test]
+fn a_nonlinear_cover_page_becomes_the_first_chapter() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("coverpage.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>有封面页的书</dc:title></metadata>
+  <manifest>
+    <item id="cover" href="Text/cover_page.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="cover" linear="no"/>
+    <itemref idref="c1"/>
+  </spine>
+  <guide><reference type="cover" title="Cover" href="Text/cover_page.xhtml"/></guide>
+</package>"#;
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            (
+                "OEBPS/Text/cover_page.xhtml",
+                br#"<html><body><div><svg viewBox="0 0 1 1"><image xlink:href="../Images/cover.jpeg"/></svg></div></body></html>"#,
+            ),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>正文</p></body></html>".as_bytes(),
+            ),
+        ],
+    );
+    let flow = flow_of(&path);
+    assert_eq!(flow.chapters.len(), 2, "封面页该收成第一章");
+    assert_eq!(
+        flow.chapters[0].spine_href, "OEBPS/Text/cover_page.xhtml",
+        "封面页排在最前"
+    );
+    assert_eq!(flow.chapters[1].spine_href, "OEBPS/Text/chap1.xhtml");
+}
+
 /// spine 上写着读不动的内容（逐页 SVG 那一类）时，留一章说明而不是让章凭空少一页。
 ///
 /// 读者的下场本来是「这本书少了一章」，而那一件查不出原因。

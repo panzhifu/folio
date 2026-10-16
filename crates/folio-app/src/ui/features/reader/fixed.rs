@@ -18,7 +18,10 @@ use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::format::{FixedPage, PageSource};
 use gpui_kit::SharedString;
 
-use crate::ui::shared::images::{BookImages, ChapterImages, DecodeRequest, document_source};
+use super::image_viewer::{ImageSlot, Place, file_name};
+use crate::ui::shared::images::{
+    BookImages, ByteSource, ChapterImages, DecodeRequest, document_source,
+};
 
 /// 一本打开着的定版式书。
 pub struct FixedBook {
@@ -100,6 +103,42 @@ impl FixedBook {
     pub fn image_request(&self, href: &str) -> Option<DecodeRequest> {
         self.images.decode_request(href)
     }
+
+    /// 取字节那条链子（分享 / 下载那一趟要在后台线程上拿它读原图）。
+    pub(super) fn image_source(&self) -> ByteSource {
+        self.images.source()
+    }
+
+    /// 整本书的那一列图：**页序就是阅读序**，每页主图在前、附加图在后。
+    ///
+    /// 与可重排那一支不一样，这里的清单不用回引擎查：页表本身就在库里
+    /// （`store::content` 的 `page_images` 那一路），一张图属于第几页是页表说的事。
+    /// 「定位原文」在这一支就是「跳到第 n 页」—— 那一页就是那张图。
+    ///
+    /// `PageSource::Render`（整页是栅格化产物、没有 href 的那些）不进这一列：
+    /// 拿不到字节就没法摊开看，摆进列里是一张画不出来的黑纸。
+    pub(super) fn build_image_sequence(&self) -> Arc<[ImageSlot]> {
+        let mut out: Vec<ImageSlot> = Vec::new();
+        for page in 0..self.pages.len() {
+            for (href, width, height) in self.page_images(page) {
+                let Some(request) = self.image_request(href) else {
+                    continue;
+                };
+                let mime = self.images.media_type(href).unwrap_or("").to_string();
+                let index = out.len() + 1;
+                out.push(ImageSlot {
+                    href: href.to_string(),
+                    request,
+                    natural: (width as f32, height as f32),
+                    name: file_name(index, href, &mime),
+                    mime,
+                    place: Place::Fixed { page },
+                });
+            }
+        }
+        tracing::debug!("图片列: 这本定版式书有 {} 页里的图", out.len());
+        out.into()
+    }
 }
 
 #[cfg(test)]
@@ -150,6 +189,93 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// 整本书那一列（定版式那一支）：**页序就是阅读序**，多图页主图在前、附加图在后，
+    /// 而渲染型那一页（没有 href，字节拿不到）不进列。
+    ///
+    /// 每一条目带的出处是**页号**（`Place::Fixed`），「定位原文」在这一支就是
+    /// 「跳到第 n 页」—— 那一页就是那张图，没有「页里的第几个字」那一根轴。
+    #[test]
+    fn the_image_column_follows_the_page_order() {
+        use folio_core::content::format::ImageRes;
+
+        let page = |href: &str, extras: &[&str]| FixedPage {
+            source: PageSource::Image {
+                href: href.to_string(),
+            },
+            width: 100,
+            height: 200,
+            extra_images: extras
+                .iter()
+                .map(|h| PageImage {
+                    href: h.to_string(),
+                    width: 100,
+                    height: 200,
+                })
+                .collect(),
+        };
+        let pages = vec![
+            page("p0.png", &["p0r.png"]),
+            // 渲染型的一页（PDF 那一族）：页表里有这一页，图片表里没有这一条。
+            FixedPage {
+                source: PageSource::Render { index: 1 },
+                width: 100,
+                height: 200,
+                extra_images: Vec::new(),
+            },
+            page("p2.png", &[]),
+        ];
+        let table = |href: &str| ImageRes {
+            href: href.into(),
+            source: href.into(),
+            media_type: "image/jpeg".into(),
+            width: 100,
+            height: 200,
+        };
+        let fixed = FixedDoc {
+            pages,
+            images: vec![table("p0.png"), table("p0r.png"), table("p2.png")],
+            ..Default::default()
+        };
+        let meta = DocMeta {
+            title: "漫画".into(),
+            authors: Vec::new(),
+            format: Format::Cbz,
+            size: 0,
+            ..DocMeta::default()
+        };
+        let book = FixedBook::new(
+            Arc::from(folio_core::content::document::from_content(
+                meta,
+                Content::Fixed(fixed),
+            )),
+            Locator::start(),
+        );
+        let column = book.build_image_sequence();
+        let listed: Vec<(&str, usize)> = column
+            .iter()
+            .map(|slot| {
+                (
+                    slot.href.as_str(),
+                    match slot.place {
+                        super::Place::Fixed { page } => page,
+                        super::Place::Reflow { .. } => {
+                            panic!("定版式这一支不该出现章 + 字符偏移那一条")
+                        }
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [("p0.png", 0), ("p0r.png", 0), ("p2.png", 2)],
+            "跨页的两张都算、按主图在前附加图在后，渲染型那一页不算"
+        );
+        // 文件名上的序号跟着这一列走号：同一本里 `p0.png` 与 `p2.png` 之外，
+        // 一本画册里成打的重名页全靠这一格不互相盖掉。
+        let names: Vec<&str> = column.iter().map(|slot| slot.name.as_str()).collect();
+        assert_eq!(names, ["001_p0.jpg", "002_p0r.jpg", "003_p2.jpg"]);
     }
 
     #[test]

@@ -156,11 +156,11 @@ impl GlyphRun {
 /// （见 `view.rs` 绘制层级的那段注释）。
 pub struct GlyphsElement {
     runs: Vec<GlyphRun>,
-    /// 批注底色（M7 划线）。一块矩形一个颜色，画在选中高亮**之下**、字形之下。
+    /// 批注下划线（M7 划线）。一条细矩形一个颜色，画在选中高亮**之下**、字形之下。
     ///
-    /// 与选中高亮分开两份：前者是读者留在书上的东西，一屏里同时可以有几十块；
+    /// 与选中高亮分开两份：前者是读者留在书上的东西，一屏里同时可以有几十条；
     /// 后者是这一次挑中的那一段，还要长出把手。
-    fills: Vec<(Bounds<Pixels>, Hsla)>,
+    underlines: Vec<(Bounds<Pixels>, Hsla)>,
     /// 选中件（M6）。空的高亮 = 这一屏没有选中。
     selection: SelectionVisual,
     /// 会话的弱引用：paint 时回写内容边界与把手命中区、注册手势监听。
@@ -273,12 +273,12 @@ impl Element for GlyphsElement {
         cx: &mut App,
     ) {
         let __paint = super::perf::Timer::start();
-        // 绘制层级（自下而上）：块级装饰（更早入树的兄弟）→ 选中高亮 → 字形 → 把手。
-        // 高亮必须在字形之前画，否则选中的字会被自己的底色盖住。
-        // 传进来的高亮是元素局部坐标，跟字形与把手一样要加上元素在窗口里的原点：
+        // 绘制层级（自下而上）：块级装饰（更早入树的兄弟）→ 批注下划线 → 选中高亮 →
+        // 字形 → 把手。下划线与高亮都在字形之前画，字形之后再补就把字盖住了。
+        // 传进来的矩形是元素局部坐标，跟字形与把手一样要加上元素在窗口里的原点：
         // 阅读视图不在窗口原点（Android 的系统栏 inset、桌面的侧栏）时，漏加这一个
-        // 偏移，高亮就会整块飘到文字上方 —— 把手是准的、颜色是偏的，就是它。
-        for (rect, color) in &self.fills {
+        // 偏移，下划线就会整条飘到文字上方 —— 把手是准的、颜色是偏的，就是它。
+        for (rect, color) in &self.underlines {
             window.paint_quad(fill(*rect + bounds.origin, *color));
         }
         for rect in &self.selection.highlights {
@@ -336,15 +336,16 @@ impl GlyphsElement {
     pub fn new() -> Self {
         Self {
             runs: Vec::new(),
-            fills: Vec::new(),
+            underlines: Vec::new(),
             selection: SelectionVisual::default(),
             reader: None,
         }
     }
 
-    /// 添一块批注底色。坐标与 `runs` 同一套：元素局部，paint 里统一加元素原点。
-    pub fn fill(&mut self, bounds: Bounds<Pixels>, color: Hsla) {
-        self.fills.push((bounds, color));
+    /// 添一条批注下划线。`bounds` 已是那条线本身（细矩形，高由调用方给），坐标与 `runs`
+    /// 同一套：元素局部，paint 里统一加元素原点。
+    pub fn underline(&mut self, bounds: Bounds<Pixels>, color: Hsla) {
+        self.underlines.push((bounds, color));
     }
 
     /// 这一屏的选中件。没有选中时传默认值即可（空高亮、无把手）。

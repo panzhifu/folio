@@ -64,6 +64,14 @@ sel_unhighlight = "線消し"
 sel_chapter = "章全体を選択"
 sel_paragraph = "段落を選択"
 sel_cancel = "キャンセル"
+# 画像ビューア（1枚を全画面で見る層）の上部の5マス：左に共有・保存、中央に「何枚目 / 全何枚」、
+# 右に本文の位置へ・閉じる。ラベルは2〜4字に抑えてある —— この行は画像の上に重なるため、
+# 長いと画像のほうが押しのけられる。
+image_share = "共有"
+image_download = "保存"
+image_locate = "本文へ"
+image_close = "閉じる"
+image_counter = "%{index} / %{total}"
 
 [toast]
 font_size = "文字サイズ %{size}px"

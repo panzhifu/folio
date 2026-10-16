@@ -114,6 +114,10 @@ fn read(path: &Path, plain: bool, with_text: bool) -> Result<(DocMeta, Content)>
                 wrap(chapter)
             } else {
                 let chars = chapter.char_len();
+                // 图片清单**不**在这一档带走：这里的 `chapter` 装的是还没包成 XHTML 的
+                // 原始文本，而排版看到的是 `wrap` 之后的那一份（`from_plain_text` 把
+                // `<` 转义掉了，源文本里写着的 `<img>` 排出来就是一行字）。拿原始文本
+                // 扫出来的清单会比正文多几张画不出来的图。
                 Chapter::section(chapter.title.clone(), ix).with_char_len(chars)
             }
         })

@@ -87,9 +87,14 @@ pub struct ShelfItem {
     pub cover_root: Option<std::path::PathBuf>,
 }
 
-/// 界面那四色高亮的合法取值。存的是**名字**而不是 ARGB：配色属于主题，
-/// 把颜色值写死进标注，将来换主题就成了修不了的数据问题。
-pub const ANNOTATION_COLORS: &[&str] = &["amber", "rose", "sky", "lime"];
+/// 界面那五色划线的合法取值，按菜单里圆点从左到右摆：红 / 紫 / 蓝 / 绿 / 黄。
+/// 存的是**名字**而不是 ARGB：配色属于主题，把颜色值写死进标注，将来换主题就成了
+/// 修不了的数据问题。
+///
+/// 顺序就是圆点的顺序，改它要连 `Palette`（`folio-app` 的 `reader/modules/annotations`）
+/// 那份数组一起改；但**每个名字对应的主题色不许动** —— 库里存的是名字、画的时候按名字
+/// 查回颜色，名字一换色，读者已有的批注就跟着变色。
+pub const ANNOTATION_COLORS: &[&str] = &["ruby", "rose", "sky", "lime", "amber"];
 
 /// 一条标注：坐标（含找回它所需的指纹）+ 读者写的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]

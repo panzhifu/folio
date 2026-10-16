@@ -176,7 +176,7 @@ impl Render for ReaderSession {
         // 等于没接：装上真机看目录那三条仍然是黑的。`blue` 两档都是真蓝（浅 h0.614 s0.832 l0.533 /
         // 深 h0.592 s0.939 l0.678），且仍随主题走，读者换肤不会把它钉死。
         let link = cx.theme().blue;
-        // 批注底色只有那四种（`ANNOTATION_COLORS`），一次取好，逐块画时查表。
+        // 批注划线只有那五种（`ANNOTATION_COLORS`），一次取好，逐条画时查表。
         let palette = Palette::of(cx.theme());
         let family = self.family.clone();
         // 两章之间的缝：拼接坐标用它隔开相邻的章（口径在 `Book::chapter_gap`）。
@@ -269,6 +269,7 @@ impl Render for ReaderSession {
                         // 解不出字节的那一张空着，但仍然占位：多图页的排版不该因为
                         // 少一张图就把剩下的往左挤。
                         if let Some(request) = book.image_request(href) {
+                            let key = request.key.clone();
                             let Some(image) = painted(&atlas, request, view, cx) else {
                                 continue;
                             };
@@ -279,10 +280,11 @@ impl Render for ReaderSession {
                                 width,
                                 height,
                                 image,
-                                (w as f32, h as f32),
+                                key,
                                 &viewer,
                                 long_press,
                                 index,
+                                &reader_weak,
                             ));
                         }
                         x += width;
@@ -453,6 +455,7 @@ impl Render for ReaderSession {
                                 image,
                                 rendered,
                                 &viewer,
+                                long_press,
                                 index,
                                 &reader_weak,
                             ));
@@ -617,6 +620,7 @@ impl Render for ReaderSession {
                                     image,
                                     rendered,
                                     &viewer,
+                                    long_press,
                                     index,
                                     &reader_weak,
                                 ));
@@ -771,14 +775,13 @@ impl Render for ReaderSession {
         // 选中菜单（M6）：摆位是 `selection_menu::slot` 那条纯判断，元素本体在
         // `selection_menu.rs` 里。浮层点不住的教训见 page.rs 模块注释，所以它是压在正文
         // 之上的真按钮；拖动期间收起，松手即回。
-        // 卡片高按「这一帧要不要摆颜色那一行」算 —— 挑中的正是库里某一条划线时多一行格子。
-        let with_colors = self.selection_annotation().is_some();
+        // 卡片高固定两行（动作行 + 恒在的颜色行），所以不必再看这一帧有没有挑中某条划线。
         let slot = if self.selection_menu_open() {
             selection_menu::slot(
                 menu_anchor.0,
                 menu_anchor.1,
                 f32::from(viewport_size.height),
-                selection_menu::card_height(with_colors),
+                selection_menu::card_height(),
             )
         } else {
             selection_menu::Slot::Hidden
@@ -838,17 +841,20 @@ fn painted(
 /// 不进图片查看器。判据是排版期就解好的 `image.footnote`（见 [`VisibleImage::footnote`]），
 /// 这一层只按结果分流。
 ///
+/// 「看大图」的入口与定版式那一页同一套（见 [`page_image`]）：按得住长按的那一端用**长按**
+/// —— 单击留给翻页，插图上一下点按不该把正文顶开一块浮层；按不住长按的那一端（桌面鼠标）
+/// 退回单击。
+///
 /// `rendered` 是图集那一层交回来的像素：`image` 里只有摆位与那条活儿（`DecodeRequest`），
 /// 像素不随场景走（见 [`super::image_atlas`]）。
 fn image_child(
     image: VisibleImage,
     rendered: Arc<RenderImage>,
     viewer: &Option<Entity<ImageViewer>>,
+    long_press: bool,
     index: usize,
     reader: &WeakEntity<ReaderSession>,
 ) -> AnyElement {
-    let natural = image.natural;
-    let drawable = rendered.clone();
     let frame = div()
         .absolute()
         .left(px(image.x))
@@ -860,9 +866,14 @@ fn image_child(
     if let Some(note) = image.footnote {
         return footnote_marker(frame, note, reader.clone(), index);
     }
+    // 这一张在图集里的身份：整本书那一列就是按它认的（见 [`open_picture`]）。
+    let key = image.image.key;
     match viewer {
+        Some(viewer) if long_press => frame
+            .child(long_press_to_open(viewer.clone(), reader.clone(), key))
+            .into_any_element(),
         Some(viewer) => {
-            open_on_tap(frame, viewer.clone(), drawable, natural, index).into_any_element()
+            open_on_tap(frame, viewer.clone(), reader.clone(), key, index).into_any_element()
         }
         None => frame.into_any_element(),
     }
@@ -897,9 +908,6 @@ fn footnote_marker(
 /// 翻页本身。按得住长按的那一端把入口挂在长按上（单击一个字都不动，翻页照常）；
 /// 按不住的那一端（桌面鼠标根本没有长按）挂单击，翻页让给页外的留白与音量键。
 /// 判据在 [`crate::ui::host::supports_long_press`]，这一层不写 `cfg`。
-///
-/// 九个参数摆平一页：前四个是排版给好的摆位，第五六个是那张图与它的固有尺寸，
-/// 后三个是「怎么开」——拆开传反而要多造一个只活一帧的结构体。
 #[allow(clippy::too_many_arguments)]
 fn page_image(
     x: f32,
@@ -907,10 +915,11 @@ fn page_image(
     w: f32,
     h: f32,
     image: Arc<RenderImage>,
-    natural: (f32, f32),
+    key: String,
     viewer: &Option<Entity<ImageViewer>>,
     long_press: bool,
     index: usize,
+    reader: &WeakEntity<ReaderSession>,
 ) -> AnyElement {
     let frame = div()
         .absolute()
@@ -918,17 +927,51 @@ fn page_image(
         .top(px(y))
         .w(px(w))
         .h(px(h))
-        .child(img(image.clone()).size_full());
+        .child(img(image).size_full());
     let Some(viewer) = viewer.clone() else {
         return frame.into_any_element();
     };
+    let reader = reader.clone();
     if long_press {
         frame
-            .child(long_press_to_open(image, natural, viewer))
+            .child(long_press_to_open(viewer, reader, key))
             .into_any_element()
     } else {
-        open_on_tap(frame, viewer, image, natural, index).into_any_element()
+        open_on_tap(frame, viewer, reader, key, index).into_any_element()
     }
+}
+
+/// 把「正文里的这一张」翻成「整本书那一列里的第几条」，然后开那一层。
+///
+/// 为什么按**图集的键**去问而不是把手上的像素递过去：查看器摆的现在是那一列里的第几张 ——
+/// 左右滑要能接着往下走、计数要念得出来、定位原文要有出处，三样都在那一列里，
+/// 光有一份像素哪一样都给不出。
+///
+/// 问不到（那一列里没有这一条）时这一击什么都不做：开一层「0 / 0」、既滑不动也定不了位，
+/// 比这一下没反应更难向读者解释。
+fn open_picture(
+    viewer: &Entity<ImageViewer>,
+    reader: &WeakEntity<ReaderSession>,
+    key: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let viewport = viewport_size(window);
+    // 下标与那一列一起取回来：`Arc` 的克隆只是引用计数，查看器因此不必每帧回会话要。
+    let ask = reader.update(cx, |session, _| {
+        session
+            .image_index_of_key(key)
+            .map(|index| (index, session.image_sequence().clone()))
+    });
+    // 会话已经随阅读页收掉了（`WeakEntity` 升级不上来）时这一击什么都不做。
+    let Some((index, sequence)) = ask.ok().flatten() else {
+        tracing::trace!("图片查看器: {key} 不在整本书那一列里，这一击不开");
+        return;
+    };
+    viewer.update(cx, |viewer, cx| {
+        viewer.open(index, viewport, sequence);
+        cx.notify();
+    });
 }
 
 /// 给一张图挂上「点开放大」。
@@ -944,20 +987,15 @@ fn page_image(
 fn open_on_tap(
     frame: Div,
     viewer: Entity<ImageViewer>,
-    image: Arc<RenderImage>,
-    natural: (f32, f32),
+    reader: WeakEntity<ReaderSession>,
+    key: String,
     index: usize,
 ) -> impl IntoElement {
     frame
         .id(("reader-image", index))
         .block_mouse_except_scroll()
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            let viewport = viewport_size(window);
-            let image = image.clone();
-            viewer.update(cx, |viewer, cx| {
-                viewer.open(image, natural, viewport);
-                cx.notify();
-            });
+            open_picture(&viewer, &reader, &key, window, cx);
         })
         // 挂在最外层：宿主的测试要按 `("reader-image", 序)` 点在这张图上。
         .test_support()
@@ -970,14 +1008,15 @@ fn open_on_tap(
 /// 接走了」的依据（`window.rs` 里 `resolve_long_press(claimed)`）。不认领的话手指抬起时
 /// 会补出一个合成点击，而那一击的意思正是翻页 —— 按住看大图会变成「翻一页再看大图」。
 fn long_press_to_open(
-    image: Arc<RenderImage>,
-    natural: (f32, f32),
     viewer: Entity<ImageViewer>,
+    reader: WeakEntity<ReaderSession>,
+    key: String,
 ) -> AnyElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window: &mut Window, _cx: &mut App| {
             let viewer = viewer.clone();
+            let reader = reader.clone();
             window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
                 if !phase.bubble() || event.phase != TouchPhase::Started {
                     return;
@@ -986,12 +1025,7 @@ fn long_press_to_open(
                 if !bounds.contains(&event.start_position) {
                     return;
                 }
-                let viewport = viewport_size(window);
-                let image = image.clone();
-                viewer.update(cx, |viewer, cx| {
-                    viewer.open(image, natural, viewport);
-                    cx.notify();
-                });
+                open_picture(&viewer, &reader, &key, window, cx);
                 window.prevent_default();
                 cx.stop_propagation();
             });
@@ -1044,11 +1078,12 @@ fn highlight_rects(
     }
 }
 
-/// 一章的批注底色：库里的锚点 → 本章坐标 → 元素局部矩形，追加进字形元素。
+/// 一章的批注下划线：库里的锚点 → 本章坐标 → 元素局部的一条条细线，追加进字形元素。
 ///
 /// 换算口径与 [`highlight_rects`] 完全一致（同一套「这一栏摆在哪、可见带是哪一段」），
-/// 只是来源从这一次挑中的选区换成了留在书上的批注。解不回来的那一条**不画** ——
-/// 宁可少一块底色，也不把读者划过的痕迹画到别的字上去（见 `modules/annotations.rs`）。
+/// 只是来源从这一次挑中的选区换成了留在书上的批注，形状从「行盒整块」换成「字下那条线」
+/// （[`annotation_underline_rects`]）。解不回来的那一条**不画** —— 宁可少一条下划线，
+/// 也不把读者划过的痕迹画到别的字上去（见 `modules/annotations.rs`）。
 ///
 /// 缓存与那一份库里的批注按字段分开递进来而不是拿 `&self`：调用点在 `match &mut self.source`
 /// 的那一臂里，整个 `self` 已经借不出了。
@@ -1076,8 +1111,8 @@ fn annotation_fills(
         if span.is_stale() {
             continue;
         }
-        let mut rects = Vec::new();
-        highlight_rects(
+        let mut lines = Vec::new();
+        annotation_underline_rects(
             doc,
             window,
             cx,
@@ -1086,12 +1121,54 @@ fn annotation_fills(
             origin_y,
             header,
             band.clone(),
-            &mut rects,
+            &mut lines,
         );
         let color = palette.color(&span.color);
-        for rect in rects {
-            element.fill(rect, color);
+        for line in lines {
+            element.underline(line, color);
         }
+    }
+}
+
+/// 划线那条线多厚（逻辑像素）。够看清、又不至于把字下面的笔画糊成一团。
+const UNDERLINE_THICKNESS: f32 = 2.0;
+
+/// 一段批注在**可见带内**的下划线矩形（元素局部）：每行盒一条线，追加进 `out`。
+///
+/// 与 [`highlight_rects`] 同一套坐标换算，只把「行盒整块」换成「字下那条线」：
+/// 线落在基线下 `descent × 0.618` 处（与 [`super::paint`] 里 `decoration_y` 同源，
+/// 所以和正文自己的 `text-decoration: underline` 画在同一条横线上）。行盒的
+/// `baseline` 是「行顶到基线的距离」（`layout::collect` 的 `acc.ascent`，半 leading 已含），
+/// 于是 `height − baseline` 就是基线下那段。
+#[allow(clippy::too_many_arguments)]
+fn annotation_underline_rects(
+    doc: &Document,
+    window: &Window,
+    cx: &App,
+    range: std::ops::Range<usize>,
+    x: f32,
+    origin_y: f32,
+    header: f32,
+    band: std::ops::Range<f32>,
+    out: &mut Vec<Bounds<Pixels>>,
+) {
+    if range.start >= range.end {
+        return;
+    }
+    let layout = doc.layout();
+    for rect in doc.selection_rects_in_band(window, cx, range, band.clone()) {
+        if rect.y + rect.height <= band.start || rect.y >= band.end {
+            continue;
+        }
+        // 这一行盒的基线。`rects_for_range_in` 给的 `y` 就是行盒的 `line.y`，
+        // 行盒按 y 单调，所以 `+0.5` 落回它自己那一行（`line_at_y`）。
+        let line = &layout.lines[line_at_y(layout, rect.y + 0.5)];
+        let descent = (rect.height - line.baseline).max(0.0);
+        let underline_y = rect.y + line.baseline + descent * 0.618;
+        out.push(Bounds::new(
+            point(px(x + rect.x), px(underline_y - origin_y + header)),
+            size(px(rect.width), px(UNDERLINE_THICKNESS)),
+        ));
     }
 }
 

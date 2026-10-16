@@ -25,13 +25,15 @@ use std::sync::Arc;
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::format::css::RuleSet;
 use folio_core::content::format::{TocEntry, dir_of, fragment_of, resolve_href};
+use folio_core::layout::ImageProvider;
 use folio_core::{Chapter, Locator, Reader};
 use gpui_kit::{App, SharedString};
 
 use super::book_fonts::BookFonts;
 use super::document::{ChapterSource, Document, author_rules};
+use super::image_viewer::{ImageSlot, Place, file_name};
 use super::toc_tree::{self, TocRow};
-use crate::ui::shared::images::{BookImages, ChapterImages, document_source};
+use crate::ui::shared::images::{BookImages, ByteSource, ChapterImages, document_source};
 
 /// 拼进连续坐标的邻章半窗宽：锚章上下**至少**预排这么多章。
 ///
@@ -185,6 +187,59 @@ impl Book {
         };
         this.set_anchor(chapter, &prefs);
         this
+    }
+
+    /// 整本书的那一列图：各章的图片清单按**章序、章内文档序**接起来。
+    ///
+    /// 清单本身在库里（`chapters.images_json`，导入那一趟扫出来的，见
+    /// `content::scan::ImageUse`）—— 排版只认识已经排好的那一章，而这一列要在读者
+    /// 走到那儿之前就把「一共几张、这一张在第几章第几个字」报出来。
+    ///
+    /// 每一条目都过一遍 [`ChapterImages::resolve`]，与排版取那张图**同一句**解析，
+    /// 所以「列里有这张」与「正文里画得出这张」不会是两本账。解不出来的（作者写了
+    /// 一个图片表里没有的 `src`）当场丢掉：让读者滑到一张永远画不出来的黑纸上，
+    /// 比那一列少一张糟得多。
+    pub(super) fn build_image_sequence(&self) -> Arc<[ImageSlot]> {
+        let mut out: Vec<ImageSlot> = Vec::new();
+        for (chapter, ch) in self.chapters.iter().enumerate() {
+            if ch.images.is_empty() {
+                continue;
+            }
+            // 本章的视图：`src` 要按这一章在容器里的目录解，所以一章换一个。
+            let view = ChapterImages::new(Arc::clone(&self.book_images), &ch.spine_href);
+            for used in &ch.images {
+                let Some(resolved) = view.resolve(&used.src) else {
+                    tracing::trace!(
+                        "图片列: 第 {chapter} 章的 {:?} 在图片表里解不出来，不进那一列",
+                        used.src
+                    );
+                    continue;
+                };
+                let Some(request) = view.decode_request(&resolved.href) else {
+                    continue;
+                };
+                let mime = view.media_type(&resolved.href).unwrap_or("").to_string();
+                let index = out.len() + 1;
+                out.push(ImageSlot {
+                    href: resolved.href.clone(),
+                    name: file_name(index, &resolved.href, &mime),
+                    request,
+                    natural: (resolved.width, resolved.height),
+                    mime,
+                    place: Place::Reflow {
+                        chapter,
+                        offset: used.offset,
+                    },
+                });
+            }
+        }
+        tracing::debug!("图片列: 这本书有 {} 张画得出来的插图", out.len());
+        out.into()
+    }
+
+    /// 取字节那条链子（分享 / 下载那一趟要在后台线程上拿它读原图）。
+    pub(super) fn image_source(&self) -> ByteSource {
+        self.book_images.source()
     }
 
     /// 拼接坐标里两章之间的缝。跟着字号走（2em）并给一条下限：它是「上一章结束、

@@ -173,6 +173,7 @@ fn list_style_containers_are_located_by_entry_name_including_chm() {
         spine_href: "c1.htm".into(),
         text: ChapterText::Inline(String::new()),
         char_len: None,
+        images: Vec::new(),
     };
     for format in [Format::Epub, Format::Chm] {
         assert_eq!(

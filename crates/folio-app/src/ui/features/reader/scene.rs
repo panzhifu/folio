@@ -50,12 +50,6 @@ pub struct VisibleImage {
     /// [`super::image_atlas::ImageAtlas`] 答（`view.rs` 在搭元素那一趟问它）。
     /// 摆位用的是排版给的框，与字节无关，所以这一格给得起。
     pub image: crate::ui::shared::images::DecodeRequest,
-    /// **固有**像素尺寸（`(0, 0)` = 表里查不到，SVG 与 manifest 没写宽高的那些）。
-    ///
-    /// 画的时候用不着它 —— 排版给的 `width`/`height` 已经是最终摆位。带出来是给
-    /// [`super::image_viewer`] 算放大上限用的：那里要的是「一个源像素对一个 CSS 像素」
-    /// 落在哪一刻，而那是字节的事，不是这一屏的事。
-    pub natural: (f32, f32),
     /// 这张图是不是一条**脚注引用**的标记；是的话带上注文。
     ///
     /// 老书把脚注标记做成一张 10px 的「注」图（`蛇结` 就是），图外面套一条
@@ -183,7 +177,6 @@ impl Scene {
                                 top: baseline - placed.height,
                                 width: placed.width,
                                 height: placed.height,
-                                natural: document.images().natural_size(&placed.href),
                                 footnote: document.footnote_note_for_node(placed.node),
                                 image,
                             });

@@ -39,6 +39,15 @@ impl Host for DesktopHost {
         false
     }
 
+    fn share_image(&self, bytes: &[u8], _mime: &str, name: &str) {
+        // 桌面没有系统级分享面板：落到下载目录并写一行日志，读者自己去取。
+        write_to_downloads(bytes, name);
+    }
+
+    fn save_image(&self, bytes: &[u8], _mime: &str, name: &str) {
+        write_to_downloads(bytes, name);
+    }
+
     fn body_family(&self, wanted: &str, cx: &App) -> String {
         match find_family(wanted, cx) {
             Some(hit) => hit,
@@ -49,5 +58,22 @@ impl Host for DesktopHost {
                 wanted.to_string()
             }
         }
+    }
+}
+
+/// 桌面版「分享 / 下载」的落点：`~/Downloads`（拿不到就退到系统临时目录）。
+///
+/// 桌面没有系统分享面板，「分享」与「下载」因此是同一件事 —— 把文件放一个读者找得到的
+/// 地方。失败只写日志：一次分享没落盘不该把阅读页拖退。
+fn write_to_downloads(bytes: &[u8], name: &str) {
+    let dir = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join("Downloads"))
+        .filter(|dir| dir.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join(name);
+    match std::fs::write(&path, bytes) {
+        Ok(()) => tracing::info!("图片已写到 {}", path.display()),
+        Err(err) => tracing::warn!("写 {} 失败：{err}", path.display()),
     }
 }

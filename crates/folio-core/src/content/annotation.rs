@@ -6,7 +6,7 @@
 //!
 //! 为什么放 core 而不是界面：`relocate` 的四级降级是纯函数，分组与导出更是纯文本变换，
 //! 三者都能在没有窗口、没有 GPU 的情况下逐条钉死。界面只拿 `start..end` 去
-//! [`crate::content::hit::rects_for_range`] 画底色。
+//! [`crate::content::hit::rects_for_range`] 画字下那条下划线。
 
 use std::collections::BTreeMap;
 
@@ -14,7 +14,7 @@ use crate::content::anchor::{Confidence, TextMap, relocate};
 use crate::content::format::{Chapter, DocMeta};
 use crate::store::Annotation;
 
-/// 一条锚点落到本章坐标上的结果。界面拿它画底色、列侧栏、标 stale。
+/// 一条锚点落到本章坐标上的结果。界面拿它画下划线、列侧栏、标 stale。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAnnotation {
     /// 库里那一条的 id：界面靠它回指原文，写回 stale 时也用它。

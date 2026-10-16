@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use folio_core::Locator;
 use gpui_kit::{App, Context};
 
+use super::super::image_viewer::Place;
 use super::super::session::{ReaderSession, Source};
 use super::super::toc_tree::TocRow;
 use crate::ui::shared::l10n::tf;
@@ -134,6 +135,53 @@ impl ReaderSession {
             chapter: chapter as u32,
             offset: 0,
         });
+    }
+
+    /// 「定位原文」：跳到整本书那一列图里的第 `index` 张**出现的地方**。
+    ///
+    /// 与点目录那一条走的是同一条路（换章 → 位置归零 → 挂落位请求 → 落库），两处不同：
+    ///
+    /// - 请求带的是那一处图片的**字符偏移**而不是章首。那一格是导入那一趟扫出来的
+    ///   （`chapters.images_json` → `content::scan::ImageUse`），与 `Locator.offset`
+    ///   同一根轴，所以不必经过排版就有位置 —— 这正是这一跳能成立的前提。
+    /// - 目标就在当前这一章时**也要**落位。目录那条在「既没换章、又没锚点」时会直接
+    ///   说不，而这里要的恰恰是「挪到那一行」，同一章里跳是常见的那一种。
+    ///
+    /// 落点不在这里算：目标章往往还没排过版，「第几个字落在哪一像素」要等排版做完，
+    /// 由渲染帧恢复那一步落地（`view.rs` 里 `pending_restore` 那一支）。
+    ///
+    /// 先把查看器关掉 —— 「定位原文」的意思是回到正文看它出现在哪儿，压着一层黑
+    /// 看那张图自己不算回去。
+    pub fn locate_image(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(place) = self.image_sequence.get(index).map(|slot| slot.place) else {
+            // 列里没有这一条（换了书、或这一列本来就是空的）：除了关掉这一层，没地方可跳。
+            self.close_image_viewer(cx);
+            return;
+        };
+        self.close_image_viewer(cx);
+        match place {
+            Place::Fixed { page } => {
+                // 定版式那一支：那一张图**就是**那一页，跳到第几页就是定位原文。
+                self.set_page(page, cx);
+            }
+            Place::Reflow { chapter, offset } => {
+                let prefs = self.prefs.clone();
+                if let Source::Book(book) = &mut self.source {
+                    book.goto(chapter, &prefs);
+                }
+                // 换章共用的那一段：滚动与页号归零、作废上一趟没落地的跳转、丢选中。
+                self.reset_after_chapter();
+                let locator = Locator {
+                    chapter: chapter as u32,
+                    offset,
+                };
+                self.pend_restore(Some(locator));
+                // 拼接链此刻还没就位，反解不出「当前」位置 —— 落库直接写已知的目标。
+                // 偏移随后由正常的滚动补准（与跳目录那一条同一个写法）。
+                self.persist_locator(locator);
+                cx.notify();
+            }
+        }
     }
 
     /// 换一章：作废滚动位置并把新位置落库。

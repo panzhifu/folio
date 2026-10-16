@@ -16,14 +16,15 @@ stale 判定）、`annotation::annotations_by_chapter`（按章分组）、
 **回显**：进章排版完成后 → `store.annotations(book_id)` 过滤本章 →
 `relocate(anchor, map)`（四级降级：原偏移 → 同 DOM 节点 → ±400 字窗口 → 全章；
 Confidence 不足以命中时按 stale 显式标记，不静默错位）→
-`rects_for_range` → fills 层画底色。
+`rects_for_range` → 字下画一条**实线下划线**（线落在行盒基线下 `descent × 0.618` 处，
+与正文自己的 `text-decoration: underline` 同一条横线）。
 
 ## 接口落点
 
 - `modules/annotations.rs` 定义 `trait AnnotationStore`，实现包 `Store`；
   selection 模块的确认入口留 `confirm_selection()` 钩子，M7 接入。
-- 批注颜色沿用 KOReader 四色（lighten / underscore / strikeout / invert 中先做前三种的
-  底色版），存 `color` 字符串。
+- 批注颜色五档（红 / 紫 / 蓝 / 绿 / 黄，见 `folio_core::store::ANNOTATION_COLORS`），
+  画成字下的实线下划线，存 `color` 字符串（存名字不存色值，配色随主题走）。
 - 笔记（note）：`update_annotation` 已支持 note 字段，入口挂在高亮浮条上。
 
 ## 内部里程碑（启动时展开为独立文件）

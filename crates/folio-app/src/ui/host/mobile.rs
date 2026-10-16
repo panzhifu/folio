@@ -47,6 +47,14 @@ impl Host for MobileHost {
         true
     }
 
+    fn share_image(&self, bytes: &[u8], mime: &str, name: &str) {
+        crate::ui::platform::share_image(bytes, mime, name);
+    }
+
+    fn save_image(&self, bytes: &[u8], mime: &str, name: &str) {
+        crate::ui::platform::save_image(bytes, mime, name);
+    }
+
     fn body_family(&self, wanted: &str, cx: &App) -> String {
         // 命中与否都写一行：真机上「字体不对」只能从 logcat 看出来，
         // 屏幕上长得像对的字体未必是读者要的那套。

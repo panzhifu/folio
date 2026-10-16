@@ -1001,7 +1001,19 @@ impl Render for ReadingPage {
         root = root.children(self.footnote_popover(cx));
         // 查看器最后挂：它盖住的正是顶栏、底栏与弹层，所以谁都不该浮在它上面。
         // 没开着时这一格是空的，一个节点都不多。
-        root = root.children(image_viewer::overlay(&self.image_viewer, cx));
+        //
+        // 像素每帧由这一层向图集要（并预取左右那两张），落点与「定位原文」都归会话，
+        // 所以这三样都递给它：图集那格解完了要喊**这一屏**重画（`view` 传的是本页的
+        // 实体号，不是会话的 —— 喊会话还会绕一圈回到这里，多一趟元素树）。
+        let atlas = self.reader.read(cx).atlas.clone();
+        root = root.children(image_viewer::overlay(
+            &self.image_viewer,
+            &atlas,
+            &self.reader,
+            cx.entity().entity_id(),
+            self.top_inset,
+            cx,
+        ));
         // 「界面亮度」在这一端的**另一手**：桌面上背光不归窗口管（那是显示器的地盘），
         // 于是把读者要的那一成压成一层黑，透明度从同一个数算出来（[`chrome::dim_alpha`]）。
         // Android 上这一格恒为 0 —— 那边的暗走的是真背光（`platform::set_screen_brightness`），

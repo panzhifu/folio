@@ -60,7 +60,15 @@ impl DocumentProvider for HtmlAdapter {
             // 字数在索引这一趟数出来（`chapters.char_len`）：文件已经整份读过一遍，
             // 而 `chapter_source` 交回来的正文与这里数的是同一份原始内容 ——
             // `visible_chars` 走 DOM，标记不计入，只有可见文本进那根尺。
-            chapters: vec![Chapter::section(title, 0).with_char_len(super::visible_chars(&raw))],
+            //
+            // 图片清单另走一趟 `chapter_summary`（它才是那一族的判据）：单文件只有
+            // 一章、文件已在内存，多扫一遍是几微秒，不值得为此换掉上面那把尺。
+            chapters: vec![{
+                let images = crate::content::scan::chapter_summary(&raw).images;
+                Chapter::section(title, 0)
+                    .with_char_len(super::visible_chars(&raw))
+                    .with_images(images)
+            }],
             css,
             images,
             ..Default::default()

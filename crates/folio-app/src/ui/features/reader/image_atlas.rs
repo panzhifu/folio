@@ -136,6 +136,33 @@ impl ImageAtlas {
         view: EntityId,
         cx: &mut Context<Self>,
     ) -> Option<Arc<RenderImage>> {
+        self.touch(request, view, true, cx)
+    }
+
+    /// 预解一张「马上要看、但这一帧还没上屏」的图：起那趟后台活儿，把格子留在手里。
+    ///
+    /// 为什么不直接复用 [`Self::painted`]：那一句会把 `uploaded` 置真，而放掉一格时
+    /// `uploaded` 决定要不要 `drop_image` 与记一笔「放掉了多少显存」。一张从没画过的图
+    /// 被按「显存里有一格」放掉，那笔账就虚报，而 gpui 那边根本没有这么一格。
+    ///
+    /// 图片查看器用它预取左右那两张：横扫过去时解码已经完了，读者看到的是下一张，
+    /// 不是黑一下。
+    pub fn prepare(&mut self, request: &DecodeRequest, view: EntityId, cx: &mut Context<Self>) {
+        self.touch(request, view, false, cx);
+    }
+
+    /// 「这一帧这张图画得出来吗」与「先在手里留一格」共用的那半：查格子、必要时起活。
+    ///
+    /// `on_screen` = 这一帧真有人画它（`painted`）。它只决定 `uploaded` 那一格，
+    /// 两档都会把 `seen` 记成本帧，所以预取的那几张在查看器开着期间不会被回收，
+    /// 而关掉那一层之后两帧就被收走 —— 与真的在场过的是同一套规矩。
+    fn touch(
+        &mut self,
+        request: &DecodeRequest,
+        view: EntityId,
+        on_screen: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
         let frame = self.frame;
         if let Some(slot) = self.slots.get_mut(&request.key) {
             return match slot {
@@ -146,7 +173,8 @@ impl ImageAtlas {
                     ..
                 } => {
                     *seen = frame;
-                    *uploaded = true;
+                    // 只往上置，不往下清：这一格可能先被预取、后被真画。
+                    *uploaded |= on_screen;
                     Some(image.clone())
                 }
                 Slot::Loading { seen, .. } => {

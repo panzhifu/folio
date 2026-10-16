@@ -411,6 +411,98 @@ fn the_index_roundtrips_through_the_store() {
     );
 }
 
+/// 每一章的**图片引用清单**落库、读回，逐字不变。
+///
+/// 这一列是图片查看器「第 n 张 / 共 m 张」和「定位原文」的唯一来源，而它只在导入那一趟
+/// 算得出来（正文之后就不在库里了）。写漏一句 INSERT 或读漏一句 SELECT，症状都是那一列
+/// 静默少几张 —— 正文里那些图照样画得出来，没有第二个界面会喊这件事。
+#[test]
+fn the_image_uses_of_each_chapter_roundtrip_through_the_store() {
+    let store = Store::in_memory().unwrap();
+    let id = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+    let doc = flow(&[
+        (
+            "有图",
+            "<body><p>甲乙</p><img src=\"a.png\"/><p>丙</p><img src=\"b.png\"></body>",
+        ),
+        ("没图", "<body>只有字</body>"),
+    ]);
+    store.save_flow(id, &doc, Format::Epub).unwrap();
+    let back = store.load_flow(id).unwrap().unwrap();
+
+    assert_eq!(
+        back.chapters[0].images, doc.chapters[0].images,
+        "两张都要回来，顺序与位置一样"
+    );
+    assert!(
+        back.chapters[1].images.is_empty(),
+        "没有图的章读回来是空表，不是「还没算」：{:#?}",
+        back.chapters[1].images
+    );
+    // 数字本身再钉一次：只存 `src` 不存 `offset` 的那种往返，两边都缺同一格，
+    // 上面那句相等断言照样绿，而「定位原文」会跳到章首。
+    let listed: Vec<(&str, usize)> = back.chapters[0]
+        .images
+        .iter()
+        .map(|u| (u.src.as_str(), u.offset))
+        .collect();
+    assert_eq!(
+        listed,
+        [("a.png", 2), ("b.png", 3)],
+        "「甲乙」两字、图、「丙」一字、图 —— 位置是它前面已经数到的可见字符"
+    );
+}
+
+/// v20 迁移：旧库升上来多出 `chapters.images_json`，**老行全部取默认值（空表）**。
+///
+/// 不回填是有意的一条：回填要把每本的容器再开一次读一遍正文，而这个库的规矩是
+/// 「清单是导入那一趟顺手写的」。老行读出来是空表，界面按「这本书没有图」处理；
+/// 把值补回来靠 `INDEX_VERSION` 这一版的 bump 在开书时触发重扫。
+#[test]
+fn the_v20_migration_adds_image_uses_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    {
+        // 手工造一个 v19 库：跑前 19 条迁移，塞一本带一章的书。
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for sql in &MIGRATIONS[..19] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 19).unwrap();
+        conn.execute(
+            "INSERT INTO books (path, title, authors, format, size, added_at)
+             VALUES ('a.epub', 'A', '', 'epub', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chapters (book_id, idx, title, locator, char_len)
+             VALUES (1, 0, '第一章', '{\"Entry\":\"OEBPS/c1.xhtml\"}', 10)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let store = Store::open_at(&db).unwrap();
+    assert_eq!(
+        store.user_version().unwrap(),
+        MIGRATIONS.len() as i64,
+        "v20 要跑到位"
+    );
+    let flow = store.load_flow(1).unwrap().expect("旧行也读得到章表");
+    assert_eq!(flow.chapters.len(), 1);
+    assert_eq!(
+        flow.chapters[0].char_len(),
+        Some(10),
+        "同一行里字数那格不该被这一版带歪"
+    );
+    assert!(
+        flow.chapters[0].images.is_empty(),
+        "老行的清单是「这一版还没扫过」，读成空表：{:#?}",
+        flow.chapters[0].images
+    );
+}
+
 /// 图片的元数据必须原样回来（字节不入库，见 v5 迁移），且重存时是替换而非追加。
 #[test]
 fn images_roundtrip_and_replace() {

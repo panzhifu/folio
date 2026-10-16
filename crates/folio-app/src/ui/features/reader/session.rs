@@ -193,6 +193,16 @@ pub struct ReaderSession {
     /// 会话的渲染里，得有个地方把「要看这张图」写出去。没挂上（单独的会话测试）时
     /// 图片不可点，行为与这一层不存在时相同。
     pub(super) image_viewer: Option<Entity<super::image_viewer::ImageViewer>>,
+    /// 整本书的那一列图：图片查看器左右滑走的、计数念的都在这列里。
+    ///
+    /// 开书时算一次（换书 = `open_book` 重算），之后只读。它**不是**排版产物：
+    /// 可重排那一支来自库里的每章清单（`chapters.images_json`），定版式那一支来自页表，
+    /// 两支都不要求「那一章已经排好」—— 这正是它存在的理由：读者要在一章还没走到之前
+    /// 就知道一共有几张、这一张排第几。
+    ///
+    /// 每一条目建列时就解过一次 `src`（解不出的不收），所以列里的每张图都拿得出版本号
+    /// 对得上的 `DecodeRequest`。
+    pub(super) image_sequence: Arc<[super::image_viewer::ImageSlot]>,
     /// 脚注弹层的状态：点中一条脚注引用时写进来（注文 + 标记在屏上的位置）。
     /// 弹层长在**阅读页**上（见 `page::ReadingPage::footnote_popover`），这一格是它的
     /// 数据源；会话只负责「这一击落在脚注上、注文是这句」。
@@ -352,6 +362,7 @@ impl ReaderSession {
             handle_hits: Rc::default(),
             menu_bounds: Rc::default(),
             image_viewer: None,
+            image_sequence: super::image_viewer::empty_image_sequence(),
             footnote: None,
             annotations: Vec::new(),
             annotation_spans: RefCell::default(),
@@ -466,6 +477,7 @@ impl ReaderSession {
             handle_hits: Rc::default(),
             menu_bounds: Rc::default(),
             image_viewer: None,
+            image_sequence: super::image_viewer::empty_image_sequence(),
             footnote: None,
             annotations: Vec::new(),
             annotation_spans: RefCell::default(),
@@ -478,6 +490,8 @@ impl ReaderSession {
         // 屏上要有读者划过的痕迹，就得先知道库里有哪些。开书这一条路（`with_document`）
         // 与换书那一条（`open_book`）都要过一遍，漏一处就是「重开书批注不见了」。
         session.load_annotations();
+        // 整本书那一列图同理：两条路都要建，漏一条的症状是图片查看器那一列空的。
+        session.rebuild_image_sequence();
         session
     }
 
@@ -589,8 +603,13 @@ impl ReaderSession {
         self.book_id = Some(book_id);
         // 从这一刻起为这一本计时。
         self.begin_reading(cx);
-        // 换了一本书，屏上的底色也得跟着换：批注是按 `book_id` 存的。
+        // 换了一本书，屏上的划线也得跟着换：批注是按 `book_id` 存的。
         self.load_annotations();
+        // 换书时那一层若还开着，先关掉：查看器手里带的是**上一本**折出来的那一列，
+        // 留着它就能继续左右滑到上一本的图上去 —— 计数、分享、定位原文全指着别人的书。
+        self.close_image_viewer(cx);
+        // 图的那一列也按新的那一本重折一次（兜底那一行没有列，`Sample` 折成空）。
+        self.rebuild_image_sequence();
         self.scroll_y = 0.0;
         self.page = 0;
         self.wheel_accum = 0.0;

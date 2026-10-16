@@ -2,6 +2,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::content::scan::ImageUse;
+
 pub mod cbz;
 /// 字节 → 文本的那一层（BOM / 声明 / 容器报的码页）。见模块头那四档顺序。
 pub(crate) mod charset;
@@ -144,7 +146,13 @@ impl Format {
 /// 每条都是叶子，`branch` 全假，缩进与 chevron 都不会出现。真机上已经撞过一次（基督山伯爵
 /// 那本 124 个 `navPoint`、最深 2 层，装上新代码后目录面板仍是平的，就是这个原因）。
 /// 老行不重扫不会读错东西，只是永远停在旧形状，所以按同一口径 bump。
-pub const INDEX_VERSION: i64 = 5;
+/// v6：EPUB 把**封面页**收成第一章（`<guide type="cover">` 指的那一页，即使标了
+/// `linear="no"`；见 `format::epub::KEEP_NONLINEAR`）。这一本多一章、后面每章序号都往后
+/// 顶一格 —— 与 v3 同一类改动，不 bump 老库的进度就会安静地指到隔壁那一章。
+/// v7：**每章的图片引用清单入库**（`store` 的 v20 迁移那一列）。老行读回来是空表，
+/// 而「这本书没有图」与「这一版还没扫过图」在界面上是同一件事：图片查看器那一列
+/// 会一张都不剩，读者只会以为这本书是纯文字书。所以要重扫一次把它填上。
+pub const INDEX_VERSION: i64 = 7;
 
 /// 一本书的书目信息。**字段按 Dublin Core 的术语集命名与取舍**（DCMI Terms / ISO 15839），
 /// 因为各家电子书格式的书目区就是它：EPUB 的 OPF 直接写 `dc:*`，MOBI 的 EXTH 标签在
@@ -232,6 +240,13 @@ pub struct Chapter {
     /// 与 `Some(0)` 分开：前者是「不知道」，后者是「这一章真的是空的」，
     /// 合起来会让进度条把没算过的章当成空章（见 [`Chapter::char_len`]）。
     pub char_len: Option<usize>,
+    /// 这一章正文里图片引用的**文档序清单**（`<img src>` 那一族，见 [`ImageUse`]）。
+    ///
+    /// 与 `char_len` 同一趟扫出来、同一条口径，随章节表落库。它是「整本书一共有几张图、
+    /// 这一张在第几章第几个字」的唯一来源 —— 排版只认识已经排好的那一章，而查看器要的是
+    /// 还没走到的那几章。空 = 这一章没有图，**或**这一版还没重扫过这本书
+    /// （老库读回来是空表，界面按「这本书没有图」处理，见 `chapters.images_json`）。
+    pub images: Vec<ImageUse>,
 }
 
 /// 一章的正文在哪儿。
@@ -269,13 +284,13 @@ impl Chapter {
         // `Some(0)`，于是「库里没记字数」被读成「这一章是空的」—— 分母偏小、
         // 百分比偏大，而且没有任何报错。真正的空章走 `Some(0)`，
         // 它的标记（`<p></p>` 之类）不会退化成空串。
-        let char_len = (!source.is_empty())
-            .then(|| crate::content::scan::chapter_summary(&source).visible_chars);
+        let summary = (!source.is_empty()).then(|| crate::content::scan::chapter_summary(&source));
         Self {
             title: title.into(),
             spine_href: String::new(),
             text: ChapterText::Inline(source),
-            char_len,
+            char_len: summary.as_ref().map(|s| s.visible_chars),
+            images: summary.map(|s| s.images).unwrap_or_default(),
         }
     }
 
@@ -286,8 +301,9 @@ impl Chapter {
             title: title.into(),
             spine_href: href.clone(),
             text: ChapterText::At(ChapterLocator::Entry(href)),
-            // 正文不在手上，字数要等 `index()` 那一趟读过才算得出。
+            // 正文不在手上，字数与图片清单要等 `index()` 那一趟读过才算得出。
             char_len: None,
+            images: Vec::new(),
         }
     }
 
@@ -298,6 +314,7 @@ impl Chapter {
             spine_href: String::new(),
             text: ChapterText::At(ChapterLocator::Section(index)),
             char_len: None,
+            images: Vec::new(),
         }
     }
 
@@ -310,6 +327,24 @@ impl Chapter {
     /// 补上规范化可见字数（`index()` 那一趟算出来的那一格）。
     pub fn with_char_len(mut self, chars: Option<usize>) -> Self {
         self.char_len = chars;
+        self
+    }
+
+    /// 补上扫描那一趟的两样数：字数与图片清单。
+    ///
+    /// 合成一句而不是 `with_char_len` + `with_images` 两句：这两格**必须同源**，
+    /// 而分开两句写的下场是漏一句 —— 漏了 `with_images` 的那一章在「整本书那一列图」里
+    /// 一个身影都没有，正文里那张图照样画得出，只有左右滑到那儿会跳过它。
+    /// 同一趟扫描出来的两样数，一次交出去。
+    pub fn with_scan(mut self, summary: &crate::content::scan::ChapterSummary) -> Self {
+        self.char_len = Some(summary.visible_chars);
+        self.images = summary.images.clone();
+        self
+    }
+
+    /// 把另一章已经扫出来的图片清单搬过来（`Chapter::section` 那一类「重写成只留位置」的路）。
+    pub fn with_images(mut self, images: Vec<ImageUse>) -> Self {
+        self.images = images;
         self
     }
 

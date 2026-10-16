@@ -96,6 +96,30 @@ pub(crate) fn set_reader_fullscreen(on: bool, _window: &mut Window) {
 #[cfg(all(mobile, not(target_os = "android")))]
 pub(crate) fn set_reader_fullscreen(_on: bool, _window: &mut Window) {}
 
+/// 把一张图的字节交给系统分享面板。图片查看器那一层的「分享」按钮走它。
+///
+/// - **Android**：递给 `GpuiSystemUi.shareImage`，那边落进 `cache/share/` 再用
+///   FileProvider 发 `ACTION_SEND`（见 [`android::share_image`]）。
+/// - **iOS / HarmonyOS**：还没有这一档，安静 no-op。
+///
+/// 桌面端不经这条路：它由 `host::desktop` 直接落到下载目录（没有系统分享面板）。
+#[cfg(mobile)]
+pub(crate) fn share_image(bytes: &[u8], mime: &str, name: &str) {
+    #[cfg(target_os = "android")]
+    android::share_image(bytes, mime, name);
+    #[cfg(not(target_os = "android"))]
+    let _ = (bytes, mime, name);
+}
+
+/// 把一张图的字节存进系统相册。图片查看器那一层的「下载」按钮走它。
+#[cfg(mobile)]
+pub(crate) fn save_image(bytes: &[u8], mime: &str, name: &str) {
+    #[cfg(target_os = "android")]
+    android::save_image(bytes, mime, name);
+    #[cfg(not(target_os = "android"))]
+    let _ = (bytes, mime, name);
+}
+
 /// 音量键落在**非阅读页**时，把这一按交给系统去调音量。
 ///
 /// 阅读页把音量键花在翻页上（[`crate::ui::shell`] 里那条分流），而 Android 上
