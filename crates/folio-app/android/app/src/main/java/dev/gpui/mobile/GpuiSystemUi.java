@@ -14,6 +14,7 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 
 import androidx.core.content.FileProvider;
 
@@ -168,6 +169,39 @@ public final class GpuiSystemUi {
                 }
             } catch (Exception e) {
                 android.util.Log.e("GpuiSystemUi", "saveImageToGallery failed", e);
+            }
+        });
+    }
+
+    /**
+     * Override this window's screen brightness for the reader's dimmer slider.
+     *
+     * <p>{@code WindowManager.LayoutParams.screenBrightness} is window-scoped: it needs no
+     * permission and never touches another app or the system setting. {@code value} is the
+     * ratio the reader picked (0.0–1.0), or the {@code BRIGHTNESS_OVERRIDE_NONE} sentinel
+     * {@code -1.0f}, which hands the backlight straight back to the system.</p>
+     *
+     * <p>{@code Window.getAttributes()} copies the params out, so the field has to be written
+     * back through {@code setAttributes()} before the window manager sees it. That call ends up
+     * in {@code ViewRootImpl.requestLayout()}, and since API 36 that path checks the thread
+     * ({@code CalledFromWrongThreadException: Only the original thread that created a view
+     * hierarchy can touch its views}). Rust calls this from GPUI's own native thread, so the
+     * hop to the UI thread has to happen here — same shape as {@link #setImmersive}.</p>
+     *
+     * <p>Called by Rust, from any thread.</p>
+     */
+    public static void setWindowBrightness(Activity activity, float value) {
+        if (activity == null) return;
+        final float wanted = value;
+        activity.runOnUiThread(() -> {
+            try {
+                Window window = activity.getWindow();
+                WindowManager.LayoutParams attrs = window.getAttributes();
+                attrs.screenBrightness = wanted;
+                window.setAttributes(attrs);
+            } catch (Exception e) {
+                // A refused brightness must not take the reader's page down with it.
+                android.util.Log.w("GpuiSystemUi", "setWindowBrightness failed", e);
             }
         });
     }

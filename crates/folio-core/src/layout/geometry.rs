@@ -35,6 +35,12 @@ pub struct ImageRun {
     pub href: String,
     pub width: f32,
     pub height: f32,
+    /// 横向前进量：绘制宽 + 两侧留白。脚注标记图靠它在前后字之间让出缝。
+    pub advance: f32,
+    /// 绘制位置在前进量里的左偏移（留白）。
+    pub x_offset: f32,
+    /// `vertical-align` 折出来的基线偏移（正数往上）。与文本 run 的那一格同源。
+    pub baseline_shift: f32,
 }
 
 /// 行盒里的一个列表标记（CSS 的 `::marker`）。

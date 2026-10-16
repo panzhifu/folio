@@ -69,13 +69,14 @@ chrono.workspace = true
 # `c694ec8`（rustfmt 收尾）与 `29f19d3`（permission_handler 增加 MANAGE_EXTERNAL_STORAGE，
 # 「所有文件访问」—— 整机扫描在 Android 上要先拿它）；再到
 # `5079a7c`/`1b022b0`（sensors：polling API 的读数与 subscribe 那条活路）、
-# `0f93c86`/`b503c39`（合进上游的 one-window-per-host + GL fallback、系统剪贴板与 example 修复；
-# 两边的 `gpui-pre` 都要求 `=0.3.8`，所以这条 bump 不会往图里塞第二份 gpui）、
+# `0f93c86`/`b503c39`（合进上游的 one-window-per-host + GL fallback、系统剪贴板与 example 修复）、
 # `8f60e48`（pinch_guard：第二根手指成缩放而不是第二个 pan，缩放期间不产滚动也不武装惯性）、
 # `885abd8`（音量键不再被 keyboard.rs 丢掉，翻成 `volumeup`/`volumedown` —— 音量键翻页靠它）、
 # `2956607`（`set_screen_brightness`：写窗口自己的 `screenBrightness` 压暗 / 把背光交还系统
-# —— 「界面亮度」靠它；仍钉 `gpui-pre = 0.3.8`，没跟着上游的 0.3.9 走）。
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "2956607b15df88f2886f70951c13221ca379ca83", features = [
+# —— 「界面亮度」靠它）、
+# `78384e0`（跟到上游的 `gpui-pre = 0.3.9`；补上 `refresh_interval`、`on_displays_changed`
+# 与 `on_display_changed` 三个新 trait 方法）。
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "78384e0bda65989a9a9c0b4de486f674d99e5c55", features = [
     "permission_handler",
 ] }
 

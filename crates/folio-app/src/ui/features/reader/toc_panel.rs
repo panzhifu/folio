@@ -1,4 +1,5 @@
-//! 目录那一屏：一块底部弹层里装着整棵目录树 —— 书头、「已读 N / M」那一行、搜索、列表。
+//! 目录那一屏：整棵目录树 —— 书头、「已读 N / M」那一行、搜索、列表 —— 装在同一份状态里。
+//! 手机档用底部弹层升起它；平板与 PC 档用一张压在正文左边、底下垫遮罩的抽屉。
 //!
 //! 从 `page.rs` 搬出来独立成一个实体，是因为这一屏要跨帧持有的状态一大把（整棵树与它的
 //! 折叠集、搜索词与那颗输入框、弹层开合与停在哪一档、虚拟列表的尺寸表与滚动句柄、书头查回来的
@@ -21,7 +22,9 @@ use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme, Icon, Selectable, Sizable, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, Icon, Selectable, Sizable, ThemeStyled as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, Context, ElementId, Entity, EventEmitter, FontWeight,
@@ -69,18 +72,22 @@ const TOC_INDENT: f32 = 11.4;
 /// 与顶栏的章名还看得见，「我在读哪一本」不用靠书头那一行去认。
 const TOC_EXPANDED: f32 = 0.85;
 const TOC_PEEK: f32 = 0.5;
-/// 宽档（平板 / PC）上目录那条左侧栏的宽。
+/// 宽档（平板 / PC）上目录抽屉的宽。
 ///
-/// 与外壳导航侧栏的 `SIDEBAR_WIDTH`（260）差 20：那条栏放的是目的地列表，这一条放的是
-/// 章节树，而正文在这一档还要留够一栏的宽度 —— 840 的窗口上 240 之后剩下的 600 才刚够
-/// 双页对开退到分页那道线（`chrome::MIN_COLUMN_WIDTH` + 两条边距）以上。
-const TOC_RAIL: f32 = 240.0;
+/// 这一档不再是占住正文左边那一条栏：抽屉盖在正文上、底下压一层遮罩，正文一寸不让
+/// （读者开着目录时也还看得见字，关掉时更不该让字跳一下）。320 是「书头那三行 + 两三级
+/// 缩进 + 长标题」还读得顺的最小一档，再窄就只剩书名和章名了。
+const TOC_DRAWER: f32 = 320.0;
+/// 宽档抽屉离屏幕左边与底边的留白。上边距留给顶栏（44）与它下面的缝。
+const TOC_DRAWER_INSET: f32 = 12.0;
+/// 宽档抽屉的顶边：顶栏那 44 像素从它上面走，抽屉从顶栏底下长出来。
+const TOC_DRAWER_TOP: f32 = 56.0;
 /// 目录列表底部留出的空隙：滚到最后一条时，那一行不贴着弹层下沿（否则最后一行
 /// 与手势条/圆角挤在一起，读起来像被切掉了）。
 const TOC_BOTTOM_SPACE: f32 = 24.0;
 /// 这一屏那四块，装配一次、两种容器各摆各的（见 [`TocPanel::pieces`]）。
 struct Pieces {
-    /// 钉住的那一行：「已读 N / M」+ 搜索 + ⋯（左侧栏那一档再多一颗关闭）。
+    /// 钉住的那一行：「已读 N / M」+ 搜索 + ⋯（抽屉那一档再多一颗关闭）。
     header: AnyElement,
     head: AnyElement,
     /// 搜索那一行：只在点开搜索之后出现。
@@ -174,19 +181,6 @@ impl TocPanel {
         self.more_open
     }
 
-    /// 这一屏此刻占掉正文左边多少像素。
-    ///
-    /// 只有宽档的那条左侧栏占位：手机那一档它是压在正文**之上**的弹层，正文一寸不让
-    /// （阅读页的规矩 —— 点一下屏幕字不该跳走）。调用方把这 returned 加进
-    /// `Reserve.width`，正文的换行、分栏与命中换算就全跟着走同一份数。
-    pub(in crate::ui::features::reader) fn rail_width(&self, cx: &App, size: SizeClass) -> f32 {
-        if size.is_compact() || !self.is_open(cx) {
-            0.0
-        } else {
-            TOC_RAIL
-        }
-    }
-
     /// 目录弹层：开 or 关。
     ///
     /// 开的时候按当前位置重算一遍：读者上次手动折的那些格不该跨次生效，他这一次要回答的
@@ -266,16 +260,16 @@ impl TocPanel {
 
     /// 这一屏那四块：钉住的表头、书头、（开着的）搜索行、列表。
     ///
-    /// 底部弹层与左侧栏两种容器读的是同一份装配 —— 哪些行看得见、折了哪几枝、搜的什么词、
+    /// 底部弹层与宽档抽屉两种容器读的是同一份装配 —— 哪些行看得见、折了哪几枝、搜的什么词、
     /// 行高哪一档，换容器不该改任何一条。`width` 递进来只为一件事：虚拟列表那张逐项尺寸表
     /// 要用**它自己那块容器**的宽，而不是视口的宽。
     ///
     /// 这几块子元素先各自算完：`cx.theme()` 还回去的 `&Theme` 借的是 `*cx`，把它留在
     /// 一条链里会活过整条 `let`，链上那几个要 `&mut cx` 的调用就过不去。
-    fn pieces(&mut self, window: &mut Window, rail: bool, cx: &mut Context<Self>) -> Pieces {
-        // 尺寸表用**这一屏自己那块容器**的宽：弹层铺满视口，左侧栏只有 `TOC_RAIL`。
-        let width = if rail {
-            TOC_RAIL
+    fn pieces(&mut self, window: &mut Window, drawer: bool, cx: &mut Context<Self>) -> Pieces {
+        // 尺寸表用**这一屏自己那块容器**的宽：弹层铺满视口，抽屉只有 `TOC_DRAWER`。
+        let width = if drawer {
+            TOC_DRAWER
         } else {
             f32::from(window.viewport_size().width)
         };
@@ -305,7 +299,7 @@ impl TocPanel {
 
         Pieces {
             head: self.book_head(cx),
-            header: self.header_row(rail, cx),
+            header: self.header_row(drawer, cx),
             search_row: self.search_open.then(|| self.search_row(&input, cx)),
             list: self.tree_list(cx),
         }
@@ -347,47 +341,57 @@ impl TocPanel {
             .into_any_element()
     }
 
-    /// 目录那一屏（平板 / PC 档）：正文左边一条通高的定宽栏。
+    /// 目录那一屏（平板 / PC 档）：压在正文左边的一张抽屉，底下垫一层遮罩。
     ///
-    /// 与弹层那一屏的**唯一**区别是容器：四块内容、行高、折叠、搜索全同一份（见 [`Self::pieces`]）。
-    /// 这条栏占掉的宽由阅读页并进 `Reserve.width`，所以正文的换行、分栏与命中换算跟着同一数走，
-    /// 不是「栏压字、字不知道」。
+    /// 以前这一档是**占位**的左侧栏：正文让出 240，顶栏也跟着从栏右边起，读者看到的是
+    /// 「一开目录，返回栏被挤走了」。改成浮层之后两件事都消失：正文一寸不让，顶栏留在
+    /// 原地（阅读页把它抬到遮罩之上），目录只盖住左边一条，右边那大半屏的字还看得见。
     ///
-    /// `occlude` 不能少：正文的 hitbox 是整屏的，gpui 的一击发给**每一个** hitbox 含按下点的
-    /// handler，不拦住的话，点栏里的一片空白会同时被正文吃掉 —— 在正文那一侧就是「顺手翻了页」。
-    fn rail_element(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// 与手机弹层的**唯一**区别是容器：四块内容、行高、折叠、搜索全同一份
+    /// （见 [`Self::pieces`]）。遮罩负责两件事：点它即收（与底部弹层同一条退场），
+    /// 以及把正文的整屏 hitbox 拦住 —— 不拦的话，点抽屉里的一片空白会同时被正文吃掉，
+    /// 在正文那一侧就是「顺手翻了页」。
+    fn drawer_element(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !self.sheet.read(cx).is_open() {
-            // 没开着就一格不占：阅读页那头的 `rail_width` 也会跟着归零，两边必须同一个判据。
+            // 没开着就一个节点都不多：没有占宽，也没有一条看不见的遮罩挡着正文。
             return div().into_any_element();
         }
         let pieces = self.pieces(window, true, cx);
-        let (surface, border) = (cx.theme().background, cx.theme().border);
-        div()
-            .id("reader-toc-rail")
+        let background = cx.theme().background;
+        let overlay = cx.theme().overlay;
+        let close_panel = cx.entity().clone();
+        let scrim = div()
+            .id("reader-toc-scrim")
             .occlude()
             .absolute()
-            .left_0()
-            .top_0()
-            .bottom_0()
-            .w(px(TOC_RAIL))
+            .inset_0()
+            .bg(overlay)
+            .on_click(move |_, _, cx| close_panel.update(cx, |panel, cx| panel.hide(cx)));
+        let drawer = div()
+            .id("reader-toc-drawer")
+            .occlude()
+            .absolute()
+            .left(px(TOC_DRAWER_INSET))
+            .top(px(TOC_DRAWER_TOP))
+            .bottom(px(TOC_DRAWER_INSET))
+            .w(px(TOC_DRAWER))
             .flex()
             .flex_col()
-            .bg(surface)
+            // 圆角要把行底色与列表一起裁进来，否则当前行那条灰带会从卡片角上露出去。
+            .overflow_hidden()
+            .bg(background)
+            .popover_style(cx)
+            .rounded(px(16.0))
             .child(pieces.header)
             .child(pieces.head)
             .children(pieces.search_row)
-            .child(pieces.list)
-            // 右边那条竖发的分隔线自己画：栏与正文同为 `background` 色，没有这一条就分不出
-            // 「这边是目录、那边是书」。框架只有四边同宽的 `border_1`，单边只能自己摆一格。
-            .child(
-                div()
-                    .absolute()
-                    .right_0()
-                    .top_0()
-                    .bottom_0()
-                    .w(px(0.5))
-                    .bg(border),
-            )
+            .child(pieces.list);
+        div()
+            .id("reader-toc-overlay")
+            .absolute()
+            .inset_0()
+            .child(scrim)
+            .child(drawer)
             .into_any_element()
     }
 
@@ -489,7 +493,7 @@ impl TocPanel {
     /// ⋯ 里放的是这一屏用得上的那四件事（展开目录 / 逆向排序 / 目录样式 / 清除已读痕迹），
     /// 见 [`Self::more_button`]。原先这里直接是一颗「目录样式」，那是四件事里的一件，
     /// 摆成一颗按钮就把其余三件挤没了。
-    fn header_row(&mut self, rail: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn header_row(&mut self, drawer: bool, cx: &mut Context<Self>) -> AnyElement {
         let current = self.reader.read(cx).chapter_index();
         let (read, total) = self
             .tree
@@ -530,9 +534,9 @@ impl TocPanel {
                     }),
             )
             .child(self.more_button(cx))
-            // 左侧栏那一档没有遮罩可点、也没有「往下划」这回事，收它要靠这一颗：
-            // 正文那一条入口在浮层收起时就看不见，唯一常驻的入口只能长在这一屏自己身上。
-            .when(rail, |this| {
+            // 抽屉这一档没有「往下划」这回事，虽然遮罩可点，但抽屉自己的右上角也该有
+            // 一颗明确的关闭键：读者在目录树里翻了几屏之后，最顺手的出口就在手边。
+            .when(drawer, |this| {
                 let close_panel = cx.entity().clone();
                 let close_label = tr(cx, "reader.toc.close");
                 this.child(
@@ -855,7 +859,7 @@ impl TocPanel {
 
 impl Render for TocPanel {
     /// 同一份状态、两种表面：手机那一档是压在正文之上的底部弹层，平板与桌面那一档是
-    /// 左边一条定宽栏（正文让出那条宽）。哪些行看得见、折了哪几枝、搜的是什么词、
+    /// 左边一张带遮罩的抽屉（正文一寸不让）。哪些行看得见、折了哪几枝、搜的是什么词、
     /// 跳到哪一条 —— 全部只有一份，两种摆法读的是同一个 `TocView`。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if SizeClass::of(window).is_compact() {
@@ -863,7 +867,7 @@ impl Render for TocPanel {
             // 退场动画连状态一起丢（见 `widgets::bottom_sheet` 那段模块注释）。
             self.sheet_element(window, cx)
         } else {
-            self.rail_element(window, cx)
+            self.drawer_element(window, cx)
         }
     }
 }
@@ -895,10 +899,9 @@ mod tests {
         Subscription, TestAppContext, point, px, size,
     };
 
-    use super::{TOC_RAIL, TocEvent, TocPanel};
+    use super::{TOC_DRAWER, TOC_DRAWER_INSET, TocEvent, TocPanel};
     use crate::ui::features::reader::session::ReaderSession;
     use crate::ui::shared::config_model::ConfigHolder;
-    use crate::ui::shell::navigation::SizeClass;
 
     /// 一套开好了的「目录这一屏」：会话、这一屏、窗口句柄、收到的事件，以及那条订阅自己。
     ///
@@ -1007,32 +1010,57 @@ mod tests {
         assert_eq!(rows.len(), 2, "两条目录都该摆出来");
     }
 
-    /// 宽档上同一份状态换的是**容器**，不是内容：那条栏占的宽要报给阅读页，而列表里
-    /// 摆的还是那两行。判据走反了（宽档也算「压着正文」）症状是桌面上点字选不中。
+    /// 宽档上同一份状态换的是**容器**，不是内容：目录是一张压在正文上的抽屉，
+    /// 不再占正文的宽。列表里摆的还是那两行。
+    ///
+    /// 这一条能挡住的错法：把抽屉改回「占位栏」之后，正文会让宽、顶栏也会被挤到抽屉
+    /// 右边 —— 读者报的正是「一开目录，返回栏被挤走」。抽屉宽必须窄于窗口，才说明它
+    /// 是浮在正文上的一层而不是把窗口一分为二。
     #[gpui_kit::test]
-    fn the_wide_screen_swaps_the_container_not_the_content(cx: &mut TestAppContext) {
+    fn the_wide_screen_uses_a_drawer_overlay(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (_session, panel, handle, _events, _watch) = open_panel(cx, 900.);
-        // 900 宽是 Expanded 档：这条栏占位。
-        panel.update(cx, |panel, cx| {
-            assert_eq!(
-                panel.rail_width(cx, SizeClass::Expanded),
-                0.0,
-                "没开着时一寸不让"
-            );
-            panel.toggle(cx);
-            assert_eq!(
-                panel.rail_width(cx, SizeClass::Expanded),
-                TOC_RAIL,
-                "开着时正文让出这条栏"
-            );
-            // 手机那一档同一状态走的是弹层：不占位，压在正文之上。
-            assert_eq!(panel.rail_width(cx, SizeClass::Compact), 0.0);
-        });
+        assert!(
+            !panel.read_with(cx, |panel, cx| panel.is_open(cx)),
+            "没 toggle 之前不该开着"
+        );
+        panel.update(cx, |panel, cx| panel.toggle(cx));
+        assert!(
+            panel.read_with(cx, |panel, cx| panel.is_open(cx)),
+            "toggle 该把宽档抽屉开起来"
+        );
+        let window_width = cx
+            .update_window(handle, |_, window, _| window.viewport_size().width)
+            .expect("窗口应可读到");
+        assert!(
+            TOC_DRAWER + TOC_DRAWER_INSET * 2.0 < f32::from(window_width),
+            "抽屉宽超过窗口就不再是浮层了"
+        );
         cx.update_window(handle, |_, window, cx| window.render_frame(cx))
-            .expect("左侧栏那一档也该画得出来");
+            .expect("宽档抽屉那一屏该画得出来");
         let rows = panel.update(cx, |panel, cx| panel.rows(0..4, cx));
         assert_eq!(rows.len(), 2, "两种表面读的是同一棵树");
+    }
+
+    /// 宽档抽屉外面那一片是遮罩：点一下就该收。抽屉自己的点击不能顺手把这一层关掉。
+    ///
+    /// 这一条钉的是「遮罩在上面」那件事的退场：抽屉只盖左边一条，右边的正文仍然可见，
+    /// 但那一击必须先归遮罩，而不是穿到底下的正文去。
+    #[gpui_kit::test]
+    fn tapping_the_scrim_closes_the_wide_drawer(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_session, panel, handle, _events, _watch) = open_panel(cx, 900.);
+        panel.update(cx, |panel, cx| panel.toggle(cx));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("宽档抽屉那一屏该画得出来");
+
+        // 抽屉右边、窗口以内：落点归遮罩。
+        let mut visual = gpui_kit::VisualTestContext::from_window(handle, cx);
+        visual.simulate_click(point(px(700.0), px(300.0)), Default::default());
+        assert!(
+            !panel.read_with(cx, |panel, cx| panel.is_open(cx)),
+            "点遮罩该把抽屉收起来"
+        );
     }
 
     /// 点一条目录：跳章派给会话，「浮层该收了」报回阅读页，这一层自己收掉。
@@ -1077,9 +1105,9 @@ mod tests {
     /// debug 的 CPU 段比 release 虚高数倍，所以要 `--release`。已读集合这一项在本台夹具里
     /// 只有 1 条，克隆费量不出真书（上千条已读）的那一笔。
     ///
-    /// 量的是**左侧栏那一档**（`SizeClass::of` 在桌面上把宽度夹到至少 Medium，460 也走栏）：
+    /// 量的是**宽档抽屉那一档**（`SizeClass::of` 在桌面上把宽度夹到至少 Medium，460 也走抽屉）：
     /// 容器与弹层不同，但那四块内容、虚拟列表与每帧的全表遍历是同一份（见 `Self::pieces`），
-    /// 所以这几趟的单价可以直接搬到手机那一档；弹层多出来的遮罩与投影不在这一格里。
+    /// 所以这几趟的单价可以直接搬到手机那一档；弹层多出来的拖拽与抽屉的遮罩不在这一格里。
     ///
     /// 跑法：`cargo test -p folio-app --lib --release -- --ignored --nocapture measure`
     #[ignore = "量墙钟，只在读数字时手动跑"]
@@ -1095,13 +1123,12 @@ mod tests {
 
         let toc = (0..GROUPS)
             .map(|group| TocEntry {
-                title: format!("第{group}组").into(),
+                title: format!("第{group}组"),
                 href: "c0.xhtml".into(),
                 children: (0..PER_GROUP)
                     .map(|ix| TocEntry {
                         // 标题按真书那样长：一行放不下，截断与「最多几行」的活儿才落得下来。
-                        title: format!("第{group}组第{ix}节 · 一个足够长的标题用来把一行撑满")
-                            .into(),
+                        title: format!("第{group}组第{ix}节 · 一个足够长的标题用来把一行撑满"),
                         href: "c0.xhtml".into(),
                         ..Default::default()
                     })

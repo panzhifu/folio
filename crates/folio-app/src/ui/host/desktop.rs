@@ -34,6 +34,11 @@ impl Host for DesktopHost {
         false
     }
 
+    fn mouse_wheel(&self) -> bool {
+        // 桌面的滚轮是一条独立手势，该归缩放：查看器里拖动已经管平移，方向键管切图。
+        true
+    }
+
     fn picked_files_are_temporary(&self) -> bool {
         // 桌面文件选择器交回的就是读者自己的文件路径，导入只拷不删。
         false

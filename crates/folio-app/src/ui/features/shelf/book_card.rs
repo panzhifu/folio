@@ -29,8 +29,8 @@ use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, Context, Image, InteractiveElement, IntoElement, ObjectFit,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div,
-    hsla, img, px,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage,
+    TestSupportExt as _, Window, div, hsla, img, px,
 };
 
 use crate::ui::shared::images::cover_image;
@@ -267,6 +267,10 @@ impl ShelfView {
             .on_click(move |_, _, cx| tapped.update(cx, |_, cx| cx.emit(ShelfEvent::Open(book_id))))
             .child(
                 div()
+                    // 宿主门按封面这一格的真实坐标点下去，就能钉住「阅读层盖着时
+                    // 这一击到不了书架」。生产构建里 `test_support` 原样返回元素。
+                    .id(format!("shelf-cover-{book_id}"))
+                    .test_support()
                     .w_full()
                     .h(px(cover_height))
                     // 描边常驻，只是平时透明：悬停时改的是颜色，不是这一格占多宽。

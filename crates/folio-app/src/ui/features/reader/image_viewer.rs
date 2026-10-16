@@ -1,5 +1,16 @@
 //! 图片放大查看：把一张图摊满整屏，能缩放、能拖着看、能左右走到整本书的下一张，
-//! 顶栏那一行给分享 / 下载 / 「第几张 / 共几张」/ 定位原文 / 关闭，点空白处关掉。
+//! 顶栏那一行给分享 / 下载 / 「第几张 / 共几张」/ 定位原文 / 关闭。
+//!
+//! **关闭只走两条路**：右上角那颗「关闭」，与系统返回（移动端的返回键 / 边缘滑动，
+//! 外壳的 `dismiss_chrome` 先收这一层）。点空白**不**关 —— 缩着缩着松手的一下不该
+//! 把读者退出去，而移动端没有右键撤销这一档。
+//!
+//! 手势与键鼠两端的含义：
+//!
+//! - **触屏**：手指平移（平台把它翻成 `ScrollWheelEvent`）在铺满那一档横扫切一张、
+//!   放大之后两轴平移，而**一趟手势只切一张**（见 [`Looking::swiped`]）；捏合缩放。
+//! - **桌面**：滚轮缩放（横向滚轮切图）、按住拖动平移、左右方向键切图、`ctrl`/`cmd` +
+//!   滚轮也缩放。轮盘与手指走的是同一个事件通道，判据在 `crate::ui::host::has_mouse_wheel`。
 //!
 //! 入口有两条，各按内容的形态定：
 //!
@@ -27,8 +38,9 @@
 //! 分享与递去相册的那份**不是**这一份像素，而是容器里的原始字节（见 `export_image`）。
 //!
 //! 系统那两条栏不在这一层管：书挂着的那一屏本来就沉浸（`shell::immersive_nav` ⇒
-//! Android 藏状态栏与导航栏、桌面窗口真全屏），而这一层是 `reader-page` 的 `inset_0`，
-//! 黑底已经盖到屏幕最顶。要让开的只有顶上那条**挖孔**的 inset —— 按钮摆在它下面。
+//! Android 藏状态栏与导航栏、桌面窗口真全屏），而这一层向上长回 `top_inset` 那一段
+//! （阅读页那一层的盒从系统栏下面起，见 `shell::reading_top_inset`），黑底因此盖到
+//! 屏幕最顶。要让开的只有顶上那条**挖孔**的 inset —— 按钮摆在它下面。
 //!
 //! 这一层**画在**哪儿的宽高由 `canvas` 的绘制回调回写（与 `selection_menu.rs` 同一条路）：
 //! 推算出来的数与安全区、外壳内缩都有关，量出来的才是准的。回写落在 `Cell` 而不是实体里
@@ -41,11 +53,11 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, h_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EntityId,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, ParentElement, PinchEvent, ScrollDelta, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement as _, Styled, StyledImage, TestSupportExt as _,
-    Window, canvas, div, hsla, img, px,
+    AnyElement, App, AppContext as _, Context, Entity, EntityId, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, PinchEvent, ScrollDelta,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled, StyledImage,
+    TestSupportExt as _, TouchPhase, Window, canvas, div, hsla, img, px,
 };
 
 use crate::ui::features::reader::session::{ReaderSession, Source};
@@ -171,11 +183,11 @@ const UNKNOWN_MAX_SCALE: f32 = 3.0;
 const WHEEL_STEP: f32 = 24.0;
 /// `ctrl` + 滚轮一格的放大倍数。触控板的捏合在 X11 上要 compositor 支持，这条是兜底。
 const ZOOM_STEP: f32 = 0.15;
-/// 按下之后移动多少算「在拖」（CSS 像素）。手指在图上抖一下不该把查看器关掉。
+/// 按下之后移动多少算「在拖」（CSS 像素）。手指在图上抖一下不该当成一次手势。
 const DRAG_SLOP: f32 = 8.0;
 /// 铺满那一档上，横向攒过多少 CSS 像素算「横扫切一张」。
 ///
-/// 比 [`DRAG_SLOP`] 大一个量级是有意的：8 像素判定「这不是点击」，而这一个判定
+/// 比 [`DRAG_SLOP`] 大一个量级是有意的：8 像素判定「这不是一个手势」，而这一个判定
 /// 「这是要换一张」。中间那一段留给读者改主意 —— 拖一半觉得不对，往回拖就退回去了。
 const SWIPE_TRIGGER: f32 = 60.0;
 /// 顶栏那一行每颗按钮的宽（逻辑像素）：图标 + 两三字标签都要放得下。
@@ -246,13 +258,19 @@ struct Looking {
     scale: f32,
     /// 图心相对 `area` 中心的位移（CSS 像素），已经过 [`clamp_pan`]。
     pan: (f32, f32),
-    /// 这一下是**拖**出来的，不是点。松手后紧跟的那一击要吃掉，否则拖完一张图就关掉。
-    dragged: bool,
     /// 铺满那一档上攒着的横向位移（CSS 像素）。过 [`SWIPE_TRIGGER`] 切一张并清零。
     ///
     /// 攒而不是「一次性位移判阈值」：手机上一次横扫的增量是逐帧来的（惯性那段还在续），
     /// 单帧那一下未必够得着阈值，而攒过头又会一次滑出两张 —— 所以过线就清。
     swipe: f32,
+    /// 这一趟手势已经切过一张了。
+    ///
+    /// 手机上一次横扫从按下到惯性尾巴走完是一条**手势**（平台逐帧派发 `Scroll`，见
+    /// [`begin_swipe`]），而一次横扫该只换一张 —— 不拦的话一条 200 像素的横扫加上
+    /// 惯性尾巴会在半秒内滑过四五张，读者只能看到最后一张。
+    ///
+    /// 只在 [`begin_swipe`] 里清（新一趟手指按下那一刻）。
+    swiped: bool,
 }
 
 /// 没有书可列时那一列是空的：兜底那一屏、以及还没开书的会话。
@@ -315,8 +333,8 @@ impl ImageViewer {
             index,
             scale: MIN_SCALE,
             pan: (0.0, 0.0),
-            dragged: false,
             swipe: 0.0,
+            swiped: false,
         });
         self.drag = None;
     }
@@ -407,10 +425,13 @@ impl ImageViewer {
     /// 那时切图会把读者正盯着的那一小块换掉。而放大着的时候 `clamp_pan` 本来就有可拖的
     /// 余地，两条不会撞。
     ///
+    /// **一趟手势只切一张**（见 [`Looking::swiped`]）：手机上一次横扫加上惯性尾巴会
+    /// 逐帧派发很多条增量，不拦就是半秒滑过四五张。
+    ///
     /// 手指往右 ⇒ 看前面那张（与正文 `scroll_y -= dy` 那一条方向感同源）。
     fn swipe_by(&mut self, dx: f32) -> Option<isize> {
         let looking = self.looking.as_mut()?;
-        if looking.scale > MIN_SCALE + f32::EPSILON {
+        if looking.scale > MIN_SCALE + f32::EPSILON || looking.swiped {
             return None;
         }
         looking.swipe += dx;
@@ -419,7 +440,33 @@ impl ImageViewer {
         }
         let delta = if looking.swipe > 0.0 { -1 } else { 1 };
         looking.swipe = 0.0;
+        looking.swiped = true;
         Some(delta)
+    }
+
+    /// 一趟手势从这里起：调用方在平台报 `TouchPhase::Started` 那一帧叫它
+    /// （见 `overlay` 的 `on_scroll`）。
+    ///
+    /// 手机上一次横扫从按下到惯性尾巴走完是一条手势：平台逐帧派发 `Scroll`，
+    /// 首帧带 `Started`，抬指那一帧带 `Ended`，之后惯性那段又是 `Moved` 直到
+    /// 最后一条 `Ended`（见 `gpui-pre` 的 `gestures.rs`）。不在这里把
+    /// [`Looking::swiped`] 还回来，读者下一次横扫（上一趟还停在惯性尾巴上）就切不动了。
+    fn begin_swipe(&mut self) {
+        if let Some(looking) = self.looking.as_mut() {
+            looking.swipe = 0.0;
+            looking.swiped = false;
+        }
+    }
+
+    /// 桌面真鼠标滚轮的那一下：一次滚轮事件就是一格手势，上一格那面旗挡不住下一格。
+    ///
+    /// 只清 [`Looking::swiped`]，不清 [`Looking::swipe`]：一次滚一格往往不够阈值，
+    /// 那一段要留着让连续几格攒起来。
+    fn wheel_step(&mut self, dx: f32) -> Option<isize> {
+        if let Some(looking) = self.looking.as_mut() {
+            looking.swiped = false;
+        }
+        self.swipe_by(dx)
     }
 
     /// 按下：记下起点，先不当它是拖。
@@ -427,7 +474,7 @@ impl ImageViewer {
         self.drag = self.looking.as_ref().map(|looking| (at, looking.pan));
     }
 
-    /// 拖到 `at`。过阈值才算「在拖」，那一刻起紧跟的那一击就不再意味着关闭。
+    /// 拖到 `at`。过阈值才算「在拖」（`DRAG_SLOP` 以下当手指抖了一下，不当手势）。
     ///
     /// 铺满那一档、且横向为主的这一趟**不是平移**（那一带本来就没有可平移的余地），
     /// 而是攒进切图那一条，见 [`ImageViewer::swipe_by`]；纵向与放大时的两轴仍是平移。
@@ -446,11 +493,6 @@ impl ImageViewer {
         let natural = self.natural_of(looking.index);
         let at_fit = looking.scale <= MIN_SCALE + f32::EPSILON;
         let horizontal = at_fit && delta.0.abs() > delta.1.abs();
-        // 标旗与后面的动作分两步：这里只是写那一格，而下面 `swipe_by` / `step`
-        // 都要拿 `&mut self`，同一个借用不能横跨。
-        if let Some(looking) = &mut self.looking {
-            looking.dragged = true;
-        }
         if horizontal {
             // 攒的是**增量**：拖到一半往回拖要退得回去，否则来回抖几下就切出好几张。
             let walked = delta.0 - self.swipe_walked.get();
@@ -475,13 +517,6 @@ impl ImageViewer {
     fn end_drag(&mut self) {
         self.drag = None;
         self.swipe_walked.set(0.0);
-    }
-
-    /// 吃掉「这一下是拖」那面旗，读一次就清：下一次点击属于读者新的动作。
-    fn take_dragged(&mut self) -> bool {
-        self.looking
-            .as_mut()
-            .is_some_and(|looking| std::mem::take(&mut looking.dragged))
     }
 }
 
@@ -597,7 +632,8 @@ type ExportTarget = fn(bytes: &[u8], mime: &str, name: &str, cx: &App);
 ///
 /// `occlude` 是**必须**的，不是修饰：gpui 把一击发给每一个「自己的 hitbox 含有按下点」
 /// 的 handler，而正文那层的 hitbox 是整屏的（`page.rs` 里顶栏那条注释记着同一件事）。
-/// 不挡住身后，点一下关闭的同时底下那一屏也收到这一下 —— 就变成「关掉查看器并且翻了页」。
+/// 不挡住身后，点一下这一层（哪怕是空白处）的同时底下那一屏也收到这一下 ——
+/// 就变成「在图上看一眼并且把底下那页翻了」。
 /// 连滚动一起收掉也是对的：放大着的时候不该还能把正文滚走。
 ///
 /// 像素**每帧向图集要一次**（[`ImageAtlas::painted`]）并顺手预取左右那两张
@@ -606,12 +642,19 @@ type ExportTarget = fn(bytes: &[u8], mime: &str, name: &str, cx: &App);
 ///
 /// `view` 是**阅读页**的实体号 —— 解完一张图要重画的是画这一层的人，不是会话。
 /// `top_inset` 是顶上那条要让开的高度（挖孔 / 刘海，桌面为 0）：那一行按钮摆在它下面。
+///
+/// `focus` 是这一层的焦点句柄（归阅读页所有）：开着时把它拿过来，方向键那几条
+/// 因此挂得住（见 [`on_key`]）；键盘事件从焦点那一点沿祖先链向上派发，所以按了
+/// 顶栏那一行的按钮之后仍然命中这一层。
+#[allow(clippy::too_many_arguments)]
 pub fn overlay(
     viewer: &Entity<ImageViewer>,
     atlas: &Entity<ImageAtlas>,
     reader: &Entity<ReaderSession>,
     view: EntityId,
     top_inset: f32,
+    focus: &FocusHandle,
+    window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
     // 只把要用的几样取出来，`read` 的借用在问图集之前就还掉：`atlas.update` 要 `&mut App`。
@@ -625,6 +668,13 @@ pub fn overlay(
             Rc::clone(&read.area),
         )
     };
+    // 焦点在这儿拿（**判过 `looking` 之后**：没开着时这一格一个节点都不挂，
+    // 更不能把焦点从别处抢过来）。这一层是盖满整屏的一层，开着时它或它的子孙
+    // 该是焦点所在 —— 方向键、顶栏那一行按钮的键盘操作都从那儿长出来。已经在
+    // 这一层里面（点了某颗按钮）就不抢回来，读者自己点的位置比我们再抢一次准。
+    if !focus.contains_focused(window, cx) {
+        focus.focus(window, cx);
+    }
     let slot = sequence.get(looking.index).cloned()?;
 
     let image = atlas.update(cx, |atlas, cx| atlas.painted(&slot.request, view, cx));
@@ -647,20 +697,6 @@ pub fn overlay(
     let (pan_x, pan_y) = clamp_pan_to(looking.pan, fit, looking.scale, area);
     let x = (area.0 - width) / 2.0 + pan_x;
     let y = (area.1 - height) / 2.0 + pan_y;
-
-    let on_click = {
-        let viewer = viewer.clone();
-        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-            viewer.update(cx, |viewer, cx| {
-                // 拖过一张图之后松手，紧跟的那一下点击不是「关掉」。
-                if viewer.take_dragged() {
-                    return;
-                }
-                viewer.close();
-                cx.notify();
-            });
-        }
-    };
     let on_pinch = {
         let viewer = viewer.clone();
         move |event: &PinchEvent, window: &mut Window, cx: &mut App| {
@@ -671,24 +707,28 @@ pub fn overlay(
     };
     let on_scroll = {
         let viewer = viewer.clone();
+        // 这一端是不是真鼠标滚轮。每帧读一次而不是事件里现问：`has_mouse_wheel`
+        // 读的是应用全局，两处都是同一条路。
+        let wheel = crate::ui::host::has_mouse_wheel(cx);
         move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut App| {
             let (dx, dy) = match event.delta {
                 ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
                 ScrollDelta::Lines(delta) => (delta.x * WHEEL_STEP, delta.y * WHEEL_STEP),
             };
             let claimed = viewer.update(cx, |viewer, _| {
-                if event.modifiers.control || event.modifiers.platform {
-                    // 桌面：按住 ctrl（macOS 上是 command）滚轮缩放。触控板捏合要
-                    // compositor 报手势事件，这一条总使得上。
-                    viewer.zoom_by(if dy > 0.0 { -ZOOM_STEP } else { ZOOM_STEP })
-                } else if let Some(step) = viewer.swipe_by(dx) {
-                    // 横向为主、且**攒过了阈值**（放大着的时候 `swipe_by` 恒给 `None`，
-                    // 于是这条让位给下面的平移 —— 「铺满档才切图」就落在这一个判断上）。
+                if wheel {
+                    return on_wheel(viewer, event, dx, dy);
+                }
+                // 触屏：一趟手势的边界由平台报的相位定（首帧 `Started`、抬指或惯性
+                // 尾巴收尾那一帧 `Ended`），一趟里只切一张。
+                if event.touch_phase == TouchPhase::Started {
+                    viewer.begin_swipe();
+                }
+                if let Some(step) = viewer.swipe_by(dx) {
                     viewer.step(step)
                 } else {
                     // 移动端的一次手指平移被翻成 ScrollWheel（模块头那条口径），
-                    // 桌面的滚轮走同一条：都是把图往那个方向挪。
-                    // 铺满那一档又没攒够阈值也走到这里：`clamp_pan` 夹出来是零位移，
+                    // 铺满那一档没攒够阈值就走到这里：`clamp_pan` 夹出来是零位移，
                     // 于是返回 `false`，不逼出多余的一帧。
                     viewer.pan_by((dx, dy))
                 }
@@ -724,6 +764,33 @@ pub fn overlay(
         let viewer = viewer.clone();
         move |_: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
             viewer.update(cx, |viewer, _| viewer.end_drag());
+        }
+    };
+    // 方向键（桌面）：左右切一张。
+    //
+    // 挂在**这一层**而不是绑一条应用级的 `KeyBinding`：方向键在别处是打字与滚动的，
+    // 全局绑上就要与输入框抢（`shell` 里音量键那条注释记的是同一件事）。键盘事件
+    // 从焦点沿祖先链向上派发，而这一层开着时它就是焦点所在（顶部那句 `focus`），
+    // 所以这一挂只在查看器里生效。
+    let on_key = {
+        let viewer = viewer.clone();
+        move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
+            let key = event.keystroke.key.as_str();
+            // 一次不可变借阅把结果算完再还：`step` 要 `&mut self`，而 `event`
+            // 那一头还握着一条 `&str`。
+            let moved = viewer.update(cx, |viewer, _| match key {
+                "left" => Some(viewer.step(-1)),
+                "right" => Some(viewer.step(1)),
+                _ => None,
+            });
+            let Some(moved) = moved else {
+                // 不是这一层认的键：原样接着往上派发 —— `escape` 要落到外壳那条 `Back`。
+                return;
+            };
+            cx.stop_propagation();
+            if moved {
+                window.refresh();
+            }
         }
     };
 
@@ -799,16 +866,27 @@ pub fn overlay(
             .test_support()
             .occlude()
             .absolute()
-            .inset_0()
+            // 顶上那条系统状态栏 / 挖孔（`top_inset`）也归这一层：阅读页那一层的盒从
+            // 它下面起（外壳 `reading_overlay` 的 `pt`，见 `shell::reading_top_inset`），
+            // 不向上长回去，那一条露出的就是书页的浅底色 —— 读者看到的是「最上面一条白」。
+            // 与顶栏那条 `TopBar::overlay` 同一个写法（它也要长回窗口顶边）。
+            .top(px(-top_inset))
+            .bottom_0()
+            .left_0()
+            .right_0()
             // 黑底而不是主题底色：书里的插图自带白边的比例千差万别，用页面那一档米白
             // 会让「图的边缘在哪」读不出来。
             .bg(hsla(0.0, 0.0, 0.0, 1.0))
-            .on_click(on_click)
+            // 不在这里接点击——只能点「关闭」那一颗或者走系统返回（外壳的
+            // `dismiss_chrome` 会先收这一层）关掉这一层。点空白关掉会让读者
+            // 「缩着缩着松手一下就退出」，而移动端上没有右键撤销这一档。
             .on_pinch(on_pinch)
             .on_scroll_wheel(on_scroll)
             .on_mouse_down(MouseButton::Left, on_down)
             .on_mouse_move(on_move)
             .on_mouse_up(MouseButton::Left, on_up)
+            .track_focus(focus)
+            .on_key_down(on_key)
             .children(image.map(|image| {
                 div()
                     .absolute()
@@ -856,15 +934,38 @@ pub fn overlay(
     )
 }
 
+/// 桌面真鼠标滚轮的那一下。返回「这一下真的动了画面吗」—— 拿它决定要不要逼一帧。
+///
+/// 竖向滚轮是**缩放**，横向滚轮（X11 上 `shift` + 滚轮被平台翻成横轴，见
+/// `gpui-pre-linux` 的 `scroll_wheel_event`）是**切图**：两者共用同一条事件通道，
+/// 用哪一轴主导来分。`ctrl` / `cmd` + 滚轮也走缩放：触控板的捏合在 X11 上要
+/// compositor 报手势事件，这一条总使得上。
+///
+/// 缩放量按像素比例给（一「格」滚轮 = [`WHEEL_STEP`] 像素 ⇒ [`ZOOM_STEP`] 成），
+/// 所以触控板的连续滚动不会一下冲到底。
+fn on_wheel(viewer: &mut ImageViewer, event: &ScrollWheelEvent, dx: f32, dy: f32) -> bool {
+    if event.modifiers.control || event.modifiers.platform {
+        return viewer.zoom_by(if dy > 0.0 { -ZOOM_STEP } else { ZOOM_STEP });
+    }
+    if dx.abs() > dy.abs() {
+        return viewer.wheel_step(dx).is_some_and(|step| viewer.step(step));
+    }
+    let ratio = (dy.abs() / WHEEL_STEP) * ZOOM_STEP;
+    if ratio <= 0.0 {
+        return false;
+    }
+    viewer.zoom_by(if dy > 0.0 { -ratio } else { ratio })
+}
+
 /// 顶栏那一行的一颗：图标在上、两三字标签在下（与选中菜单那一行同一个形状）。
 ///
 /// 为什么带字而不是只给图标再加悬停提示：这一层在**触屏**上是主角，触屏没有悬停那一档，
 /// 只画图标就得让读者猜；而 gpui 的 `tooltip` 要的是一个浮层视图，移动端那条
 /// 「弹层画得出、点不住」的旧账不该在这一层再赌一次。字就是提示。
 ///
-/// `stop_propagation` 是**必须**的，不是修饰：这一层自己身上挂着「点空白关掉」，而
-/// gpui 把一击发给每一个 hitbox 含按下点的 handler —— 不拦住这一击，按下「分享」就
-/// 同时是「分享并且把这一层关掉」。
+/// `stop_propagation` 是**必须**的，不是修饰：这一层的 hitbox 是整屏的，而 gpui 把
+/// 一击发给每一个 hitbox 含按下点的 handler —— 不拦住这一击，按下「分享」就同时是
+/// 「分享并且把这一击漏给身后那层」（阅读页上就是跟着翻了页）。
 ///
 /// 墨色是不透白的 [`CONTROL_INK`]：这一层是盖在书上的一层黑，跟着主题换亮换暗会把它
 /// 读成「书自己的一屏」。
@@ -988,7 +1089,8 @@ mod tests {
         );
     }
 
-    /// 那一列里左右走：阈值之前不切、过了阈值切一张、两头不外溢。
+    /// 那一列里左右走：阈值之前不切、过了阈值切一张、两头不外溢；
+    /// 而**一趟手势只切一张**。
     ///
     /// 钉的是「攒」而不是「单次位移判阈值」：手机上一次横扫的增量是逐帧来的，
     /// 一帧那一两条都不够 60 像素，而惯性尾巴还在续 —— 不攒就切不动，乱攒就一次过两张。
@@ -1002,6 +1104,11 @@ mod tests {
         assert_eq!(viewer.swipe_by(-1.0), Some(1));
         assert!(viewer.step(1));
         assert_eq!(viewer.looking.as_ref().unwrap().index, 2);
+        // 同一回手势里再攒多少都切不动：惯性尾巴不会一口滑过四五张。
+        assert_eq!(viewer.swipe_by(-(SWIPE_TRIGGER * 5.0)), None);
+        assert_eq!(viewer.looking.as_ref().unwrap().index, 2);
+        // 新的一回手势（手指再次按下 ⇒ 平台报 `Started`）：旗还回来。
+        viewer.begin_swipe();
         // 反向：手指往右 ⇒ -1（前一张）。
         assert_eq!(viewer.swipe_by(SWIPE_TRIGGER + 1.0), Some(-1));
         assert!(viewer.step(-1));
@@ -1091,8 +1198,8 @@ mod tests {
 #[cfg(test)]
 mod view_tests {
     //! 这一层最容易错在四件看不见的事上：该挂的时候没挂（层根本没出来）、该拦的时候
-    //! 没拦（点一下关闭连着把底下那页翻了）、「拖一张图」被当成「点一下关闭」、
-    //! 以及顶栏那一颗按钮把自己的那一击漏给了身后的整屏关闭。
+    //! 没拦（在图上看一眼连着把底下那页翻了）、「拖一张图」被当成点击、
+    //! 以及顶栏那一颗按钮把自己的那一击漏给了身后的整屏。
     //! 四条都能在桌面测准：`try_find` 看得见元素在不在树里，鼠标、滚轮与捏合走的
     //! 是与真机同一条 `dispatch_event` 入口。
     //!
@@ -1110,7 +1217,7 @@ mod view_tests {
     use gpui_kit::test::TestWindowExt as _;
     // `test_support` 得在这儿再导入一次：内层 `mod` 不继承外层文件的 use。
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Context, Entity, EntityId, InputEvent as _,
+        AnyWindowHandle, AppContext as _, Context, Entity, EntityId, FocusHandle, InputEvent as _,
         InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
         MouseUpEvent, ParentElement as _, PinchEvent, Pixels, PlatformInput, Point, Render,
         ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Subscription,
@@ -1118,6 +1225,7 @@ mod view_tests {
     };
 
     use super::{ImageSlot, ImageViewer, Looking, overlay};
+    use crate::ui::features::reader::Arrow;
     use crate::ui::features::reader::session::ReaderSession;
 
     /// 视口 400×600，图 800×600：适配框因此是 `400×300`，放大上限 `2.0`（原像素那一档）。
@@ -1133,6 +1241,11 @@ mod view_tests {
         /// 会话带着那一列图：`overlay` 那一颗颗按钮的去向都在会话上（分享、下载、定位原文）。
         session: Entity<ReaderSession>,
         sequence: Arc<[ImageSlot]>,
+        /// 这一层的焦点句柄。生产上是阅读页手里那一份（`page::ReadingPage`），测试台照抄。
+        focus: FocusHandle,
+        /// 顶上那条系统栏 / 挖孔让给这一层的 inset。日常是 0（桌面与测试），
+        /// 一条用例把它抬起来，钉「黑底盖住那一条」这一件。
+        top_inset: f32,
         /// 落在**身后那一层**的一击次数：`occlude` 与按钮的 `stop_propagation`
         /// 没拦住就会 +1。
         body_taps: Rc<Cell<usize>>,
@@ -1159,6 +1272,8 @@ mod view_tests {
                 viewer,
                 session,
                 sequence,
+                focus: cx.focus_handle(),
+                top_inset: 0.0,
                 body_taps: Rc::default(),
                 _watch,
             }
@@ -1166,7 +1281,7 @@ mod view_tests {
     }
 
     impl Render for ViewerHost {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let taps = self.body_taps.clone();
             // 借用先还掉：`overlay` 要 `&mut App`，而这里正借着 `self.session` 读图集。
             let atlas = self
@@ -1174,6 +1289,8 @@ mod view_tests {
                 .read_with(cx, |session, _| session.atlas.clone());
             let session = self.session.clone();
             let viewer = self.viewer.clone();
+            let focus = self.focus.clone();
+            let top_inset = self.top_inset;
             let view: EntityId = cx.entity().entity_id();
             div()
                 .size_full()
@@ -1184,7 +1301,9 @@ mod view_tests {
                         .size_full()
                         .on_click(move |_, _, _| taps.set(taps.get() + 1)),
                 )
-                .children(overlay(&viewer, &atlas, &session, view, 0.0, cx))
+                .children(overlay(
+                    &viewer, &atlas, &session, view, top_inset, &focus, window, cx,
+                ))
         }
     }
 
@@ -1363,18 +1482,116 @@ mod view_tests {
     }
 
     /// 滚轮 / 手指平移的一趟：`dx` 与 `dy` 各给一条，判据在 `overlay` 那三分叉上。
+    /// 相位固定 `Moved`（触屏上手指平移中间的那些帧），一趟手势的首帧另用
+    /// [`scroll_start`]。
     fn scroll(cx: &mut TestAppContext, handle: AnyWindowHandle, dx: f32, dy: f32) {
+        scroll_at(cx, handle, dx, dy, TouchPhase::Moved);
+    }
+
+    /// 手机上一次手指按下的那一帧（`TouchPhase::Started`）：一趟手势从这里起，
+    /// 上一趟那面「已经切过一张」的旗在这里还回来。
+    fn scroll_start(cx: &mut TestAppContext, handle: AnyWindowHandle, dx: f32, dy: f32) {
+        scroll_at(cx, handle, dx, dy, TouchPhase::Started);
+    }
+
+    fn scroll_at(
+        cx: &mut TestAppContext,
+        handle: AnyWindowHandle,
+        dx: f32,
+        dy: f32,
+        touch_phase: TouchPhase,
+    ) {
         dispatch(
             cx,
             handle,
             ScrollWheelEvent {
                 position: CENTER,
                 delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+                touch_phase,
+                ..Default::default()
+            }
+            .to_platform_input(),
+        );
+    }
+
+    /// 桌面真滚轮的一格（`ScrollDelta::Lines`）：X11 平台报的就是这一形状，
+    /// 而触屏那端永远是 `Pixels`（见 `has_mouse_wheel`）。
+    fn wheel_lines(cx: &mut TestAppContext, handle: AnyWindowHandle, dx: f32, dy: f32) {
+        dispatch(
+            cx,
+            handle,
+            ScrollWheelEvent {
+                position: CENTER,
+                delta: ScrollDelta::Lines(point(dx, dy)),
                 touch_phase: TouchPhase::Moved,
                 ..Default::default()
             }
             .to_platform_input(),
         );
+    }
+
+    /// 装上桌面平台服务。没装时 [`crate::ui::host::has_mouse_wheel`] 给 `false`
+    /// （走触屏那条路），而滚轮缩放与方向键那两条要的正是桌面那一档。
+    fn desktop_host(cx: &mut TestAppContext) {
+        cx.update(crate::ui::host::install);
+    }
+
+    /// 黑底要盖上顶上那条系统栏 / 挖孔（`top_inset`）。
+    ///
+    /// 阅读页那一层的盒从系统栏下面起（外壳 `reading_overlay` 的 `pt`，见
+    /// `shell::reading_top_inset`），所以这一层得用负 `top` **向上长回去** ——
+    /// 写成 `inset_0` 就只盖到下面一段，露出的那一条是书页的浅底色，
+    /// 真机上读作「最上面一条白」。
+    #[gpui_kit::test]
+    fn the_layer_grows_up_over_the_system_bar_inset(cx: &mut TestAppContext) {
+        let (handle, host) = boot(cx);
+        cx.update(|app| {
+            host.update(app, |this, cx| {
+                this.top_inset = 30.0;
+                cx.notify();
+            });
+        });
+        open(cx, &host, 0);
+        tick(cx, handle);
+
+        let bounds = cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window
+                    .try_find("image-viewer")
+                    .expect("开着就该在树里")
+                    .bounds()
+            })
+            .expect("渲染应成功");
+        assert_eq!(
+            f32::from(bounds.origin.y),
+            -30.0,
+            "顶上那一条系统栏该归这一层的黑底"
+        );
+        assert_eq!(
+            f32::from(bounds.size.height),
+            630.0,
+            "向上长 30，高度就多那 30（600 + 30）"
+        );
+    }
+
+    /// 查看器开着时方向键**不归正文**：外壳那四条方向键绑定先跑，正文这一层必须让开，
+    /// 这一键才能落到查看器自己的 `on_key_down`（它在键绑定之后）。不让开的表现是
+    /// 「看图时按右箭头，图的下一张没来，背后的书翻了一页」。
+    #[gpui_kit::test]
+    fn the_reader_lets_go_of_the_arrow_keys_while_the_viewer_is_open(cx: &mut TestAppContext) {
+        let (handle, host) = boot(cx);
+        open(cx, &host, 1);
+        tick(cx, handle);
+
+        let handled = cx.update(|app| {
+            host.update(app, |this, app| {
+                this.session
+                    .update(app, |session, cx| session.arrow_turn(Arrow::Right, cx))
+            })
+        });
+        assert!(!handled, "查看器开着时正文该让开方向键");
+        assert_eq!(index(cx, &host), 1, "那一键不该同时把正文翻一页");
     }
 
     /// 回归门：没图就不挂层，开了才挂，关掉又收干净 —— 一层都不留在树里。
@@ -1420,19 +1637,20 @@ mod view_tests {
         }
     }
 
-    /// 点一下空白关掉这一层，**而身后那一层一个字都不许收到**。
+    /// 点一下空白**不关**这一层——只能点「关闭」那一颗或者走系统返回关掉。
     ///
-    /// 这条钉的是 `occlude`：gpui 把一击发给每一个 hitbox 含按下点的 handler，正文那层
-    /// 是整屏的，少了这一格就是「关掉查看器的同时翻了页」。
+    /// 这一层仍然是 `occlude` 的：身后那一层一个字都不许收到（gpui 把一击发给
+    /// 每一个 hitbox 含按下点的 handler，正文那层是整屏的）。点空白不关是为了
+    /// 避免「缩着缩着松手一下就退出」，移动端上没有右键撤销这一档。
     #[gpui_kit::test]
-    fn a_click_on_the_layer_closes_it_and_nothing_reaches_the_body_below(cx: &mut TestAppContext) {
+    fn a_blank_tap_keeps_the_layer_open_and_reaches_nothing_below(cx: &mut TestAppContext) {
         let (handle, host) = boot(cx);
         open(cx, &host, 0);
         tick(cx, handle);
 
         click(cx, handle, CENTER);
         tick(cx, handle);
-        assert!(!is_open(cx, &host), "点空白该关掉这一层");
+        assert!(is_open(cx, &host), "点空白不该关掉这一层");
         assert_eq!(
             body_taps(cx, &host),
             0,
@@ -1444,8 +1662,7 @@ mod view_tests {
     ///
     /// 这一条钉的不是 `occlude`（上一条已经钉过）而是按钮自己的 `stop_propagation`：
     /// 关闭那颗的 hitbox 整个落在这一层的 hitbox 里面，gpui 因此会把这一击**同时**发给
-    /// 这一层 —— 少了那一句，按下关闭就是「关掉并且再关掉一次」，而在别的摆法下它是
-    /// 「关掉并且翻了页」。
+    /// 这一层 —— 少了那一句，按下关闭就是「关掉并且把这一击漏给身后的正文」（翻页）。
     #[gpui_kit::test]
     fn the_close_button_closes_without_reaching_anything_below(cx: &mut TestAppContext) {
         let (handle, host) = boot(cx);
@@ -1494,6 +1711,73 @@ mod view_tests {
         assert_eq!(index(cx, &host), 0, "第一张没有前一张");
     }
 
+    /// 一回手势只切一张：手机上一次横扫从按下到惯性尾巴走完会逐帧派发十几条增量
+    /// （`gestures.rs` 的 `Panning` 每帧一条、抬指后还有 `Momentum`），不拦的话
+    /// 半秒滑过四五张，而读者只看到最后那一张。
+    #[gpui_kit::test]
+    fn one_swipe_switches_only_one_picture(cx: &mut TestAppContext) {
+        let (handle, host) = boot(cx);
+        open(cx, &host, 0);
+        tick(cx, handle);
+
+        // 首帧（手指刚过 slop）就过了阈值：切一张。
+        scroll_start(cx, handle, -70.0, 0.0);
+        assert_eq!(index(cx, &host), 1, "首帧过了阈值该切一张");
+        // 同一回手势里接着攒（手指还在滑 + 惯性尾巴）：一张都不再切。
+        scroll(cx, handle, -300.0, 0.0);
+        scroll(cx, handle, -300.0, 0.0);
+        assert_eq!(index(cx, &host), 1, "同一回手势只切一张");
+        // 新的一回（手指再次按下 `Started`）：旗还回来，又能切。
+        scroll_start(cx, handle, -70.0, 0.0);
+        assert_eq!(index(cx, &host), 2, "新的一回手势该能再切一张");
+    }
+
+    /// 桌面：滚轮缩放、横向滚轮切图。触屏那条路不受影响 —— 上面几条钉着。
+    #[gpui_kit::test]
+    fn the_mouse_wheel_zooms_the_picture_on_desktop(cx: &mut TestAppContext) {
+        let (handle, host) = boot(cx);
+        desktop_host(cx);
+        open(cx, &host, 0);
+        tick(cx, handle);
+
+        // 往上一格 = 放大一成（一格 24 像素 / `ZOOM_STEP` 0.15）。
+        wheel_lines(cx, handle, 0.0, -1.0);
+        assert_eq!(scale_and_pan(cx, &host).0, 1.15, "滚轮往上该放大");
+        // 往下一格：缩回去（夹在铺满那一档）。
+        wheel_lines(cx, handle, 0.0, 1.0);
+        assert_eq!(scale_and_pan(cx, &host).0, 1.0, "滚轮往下该缩小");
+        // 一路往上：顶在「一个源像素对一个 CSS 像素」那一档（800 宽铺在 400 ⇒ 2.0）。
+        for _ in 0..40 {
+            wheel_lines(cx, handle, 0.0, -1.0);
+        }
+        assert_eq!(scale_and_pan(cx, &host).0, 2.0, "放大上限仍是原像素那一档");
+
+        // 横向滚轮（X11 下 shift+滚轮被平台翻成横轴）：切图。
+        open(cx, &host, 0);
+        tick(cx, handle);
+        wheel_lines(cx, handle, -4.0, 0.0);
+        assert_eq!(index(cx, &host), 1, "横向滚轮该切下一张");
+    }
+
+    /// 桌面：方向键左右切图。
+    #[gpui_kit::test]
+    fn the_arrow_keys_walk_the_column_on_desktop(cx: &mut TestAppContext) {
+        let (handle, host) = boot(cx);
+        desktop_host(cx);
+        open(cx, &host, 1);
+        tick(cx, handle);
+
+        cx.simulate_keystrokes(handle, "right");
+        assert_eq!(index(cx, &host), 2, "右方向键该看下一张");
+        cx.simulate_keystrokes(handle, "left");
+        assert_eq!(index(cx, &host), 1, "左方向键该看前一张");
+        // 两头夹住：第一张再往左不动。
+        open(cx, &host, 0);
+        tick(cx, handle);
+        cx.simulate_keystrokes(handle, "left");
+        assert_eq!(index(cx, &host), 0, "第一张没有前一张");
+    }
+
     /// 纵向的一趟**不该**切图：读者在铺满那一档往下滑，是想看下一屏还是想切一张？
     /// 答案是都不 —— 铺满那一档纵向没有可挪的余地，横扫只认横向为主的那一趟。
     #[gpui_kit::test]
@@ -1524,9 +1808,12 @@ mod view_tests {
         );
     }
 
-    /// 拖一张放大了的图，松手那一下不是「关掉」。
+    /// 拖一张放大了的图：图跟着手指走，而这一路不漏给身后那层。
+    ///
+    /// （前两版这一条钉的是「松手那一下不该当成关闭」—— 点空白现在不关了，
+    /// 但「拖 = 平移」与「拖不漏给正文」两样仍要钉住。）
     #[gpui_kit::test]
-    fn dragging_the_picture_is_not_a_click(cx: &mut TestAppContext) {
+    fn dragging_the_picture_pans_without_reaching_the_body_below(cx: &mut TestAppContext) {
         let (handle, host) = boot(cx);
         open(cx, &host, 0);
         tick(cx, handle);
@@ -1551,6 +1838,9 @@ mod view_tests {
 
     /// 铺满那一档的横向拖动是**切图**而不是关闭：桌面上「拖一下」与「点一下」
     /// 都从同一次按下开始，靠阈值分开这两件事。
+    ///
+    /// 拖完之后单独再点一下空白也**不关**：移动端上没有右键撤销这一档，
+    /// 「缩着缩着松手一下就退出」是更差的体验。关闭只走「关闭」按钮与系统返回。
     #[gpui_kit::test]
     fn dragging_sideways_at_the_fitted_level_switches_picture(cx: &mut TestAppContext) {
         let (handle, host) = boot(cx);
@@ -1567,12 +1857,10 @@ mod view_tests {
         assert_eq!(index(cx, &host), 2, "往左拖过阈值该是下一张");
         assert!(is_open(cx, &host), "拖完不该顺手把这层关掉");
 
-        // 拖完之后**单独再点一下**空白是该关的：吃掉的是「这一下属于刚才那一拖」，
-        // 不是「这一层从此点不动」。gpui 在抬起时补出的那一击已经把 `dragged` 那面旗
-        // 消耗掉（见 `dragging_the_picture_is_not_a_click`），所以这第二下是真的一tap。
+        // 拖完之后**单独再点一下**空白也不该关：只有关闭按钮和系统返回能关。
         click(cx, handle, point(px(180.0), px(480.0)));
         tick(cx, handle);
-        assert!(!is_open(cx, &host), "新的一下该算点空白关掉");
+        assert!(is_open(cx, &host), "点空白不该关掉这一层");
     }
 
     /// 捏合的两个顶：放大顶在**原像素**那一档，缩小顶在铺满那一档。

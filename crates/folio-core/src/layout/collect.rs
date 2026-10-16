@@ -243,6 +243,14 @@ pub(super) struct ImageAtom {
     pub(super) href: String,
     pub(super) width: f32,
     pub(super) height: f32,
+    /// 横向前进量 = 画出来的宽 + 两侧留白。脚注标记图在 `sup` 里紧贴前后字，
+    /// 不加这一格就会压住「地」「等」的边；留白只进前进量，不进图片本身。
+    pub(super) advance: f32,
+    /// 图片在前进量里的左偏移（留白）。绘制 x = 行内游标 + `x_offset`。
+    pub(super) x_offset: f32,
+    /// 基线偏移（正数往上）。图片自己写在 `<img>` 上的 `vertical-align` 加上它所在
+    /// 行内父级（`<sup>` 那类）的偏移 —— 图片不是文字，不能指望样式继承替它带上。
+    pub(super) baseline_shift: f32,
     /// 哨兵在 `Collected::text` 里的字节起点。
     pub(super) at: usize,
 }
@@ -887,6 +895,9 @@ impl<'a> Ctx<'a> {
                     href: img.href,
                     width: w,
                     height: h,
+                    advance: w,
+                    x_offset: 0.0,
+                    baseline_shift: 0.0,
                 })],
                 x: x + pl + offset,
                 y: y + pt,

@@ -41,6 +41,21 @@ fn window(cx: &mut TestAppContext, width: f32, height: f32) -> AnyWindowHandle {
         .into()
 }
 
+/// 两端对齐摊开的位移也要推图片：文本 run 靠 `justify_shift` 在绘制时推，
+/// 图片没有那一层，漏掉就会被前面的字挤到左边。
+#[test]
+fn a_justified_line_pushes_an_inline_image_with_its_text() {
+    use super::inline_image_x;
+    use folio_core::layout::{Justify, JustifyMode};
+    let justify = Justify {
+        extra: 4.0,
+        mode: JustifyMode::Chars,
+        gaps: 10,
+    };
+    assert_eq!(inline_image_x(100.0, 2.0, Some(justify), 3), 114.0);
+    assert_eq!(inline_image_x(100.0, 2.0, None, 3), 102.0);
+}
+
 /// 章里写的 `<style>` 也要进层叠：样式表**文件**按清单回容器取，而写在章里的
 /// 那一份随正文到达 —— 作者把样式写在哪一份里，层叠结果都不该有差别。
 #[test]
@@ -824,6 +839,32 @@ fn a_noteref_marker_returns_the_bodys_text_before_the_marker_alt() {
         doc.footnote_note_for_node(img).as_deref(),
         Some("真正的注文"),
         "目标 <aside> 的子树文本该胜出（alt 只是兜底）"
+    );
+}
+
+/// 正文是图片、标记图的 `alt` 只写了 `"alt"`：不能把占位符当注文显示。
+#[test]
+fn a_placeholder_alt_is_not_mistaken_for_footnote_text() {
+    let source = "<p>正文开头\
+        <a epub:type=\"noteref\" href=\"notes.xhtml#fn1\">\
+        <img src=\"p.png\" alt=\"alt\"/></a>。</p>";
+    let doc = Document::new(
+        source.to_string(),
+        "",
+        prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    let dom = doc.dom();
+    let img = dom
+        .elements()
+        .find(|(id, _)| dom.tag_name(*id) == Some("img"))
+        .map(|(id, _)| id)
+        .expect("该有那张「注」图");
+    assert_eq!(
+        doc.footnote_note_for_node(img),
+        None,
+        "`alt=\"alt\"` 是占位符，不是注文；宁可回落到普通链接跳转"
     );
 }
 

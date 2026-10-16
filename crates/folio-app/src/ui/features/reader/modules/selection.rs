@@ -45,9 +45,10 @@ impl ReaderSession {
         self.selection.clone()
     }
 
-    /// 菜单条现在该不该摆出来。拖动期间收起（让位），松手即回。
+    /// 菜单条现在该不该摆出来。拖动期间收起（让位），松手即回；笔记那张便签压着时
+    /// 也不摆 —— 两层同时上屏就是两套输入焦点在抢同一只手。
     pub fn selection_menu_open(&self) -> bool {
-        self.selection_menu_open && self.edge_drag.is_none()
+        self.selection_menu_open && self.edge_drag.is_none() && self.note_editor.is_none()
     }
 
     /// 浮层（顶栏/底栏）开合，由 `page.rs` 每帧报告。开着时指针让位：
@@ -68,7 +69,7 @@ impl ReaderSession {
         cx: &mut Context<Self>,
         at: Point<Pixels>,
     ) -> bool {
-        if self.overlay_open {
+        if self.overlay_open || self.note_editor.is_some() || self.chapter_turn_in_flight() {
             return false;
         }
         let Some((chapter, word)) = self.word_at(window, cx, at) else {
@@ -141,7 +142,7 @@ impl ReaderSession {
             self.begin_edge_drag(edge, at);
             return;
         }
-        if self.overlay_open {
+        if self.overlay_open || self.note_editor.is_some() || self.chapter_turn_in_flight() {
             return;
         }
         let Some((chapter, offset)) = self.offset_at(window, cx, at) else {
@@ -338,6 +339,11 @@ impl ReaderSession {
     ) -> bool {
         // 点一下正文就是「人还在」的证据 —— 哪怕这一击只把浮层收起来、位置一点没动。
         self.note_reading_activity();
+        // 笔记那张便签压着时，正文这一击归它自己的遮罩（正常情况下也到不了这里，
+        // 遮罩是 `occlude` 的；这一句是防手势层与元素层差一帧的那一下）。
+        if self.note_editor.is_some() || self.chapter_turn_in_flight() {
+            return true;
+        }
         if self.consume_tap_suppression() {
             return true;
         }
@@ -365,45 +371,30 @@ impl ReaderSession {
 
     /// 复制所选文本进剪贴板。菜单条收起，高亮留着——读者复制完往往还要看清选了什么。
     pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(selected) = self.selection.clone() else {
+        let Some(text) = self.selected_text() else {
             return;
         };
-        let text = self
-            .book()
-            .and_then(|book| book.span_doc(selected.chapter))
-            .map(|doc| doc.text_map().slice(selected.range))
-            .unwrap_or_default();
-        if text.is_empty() {
-            return;
-        }
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.selection_menu_open = false;
         cx.notify();
     }
 
-    /// 全选本段：长按落点所在段落（跨行整段）。
-    pub fn select_paragraph(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let Some(selected) = self.selection.clone() else {
-            return;
-        };
-        let paragraph = self
+    /// 当前选区里的字。复制与笔记的引文用同一个来源：两处念出来的必须是同一段。
+    pub(in crate::ui::features::reader) fn selected_text(&self) -> Option<String> {
+        let selected = self.selection.as_ref()?;
+        let text = self
             .book()
             .and_then(|book| book.span_doc(selected.chapter))
-            .and_then(|doc| doc.paragraph_range(window, cx, selected.range.start));
-        let Some(paragraph) = paragraph else {
-            return;
-        };
-        self.selection = Some(Selection {
-            chapter: selected.chapter,
-            range: paragraph,
-        });
-        cx.notify();
+            .map(|doc| doc.text_map().slice(selected.range.clone()))
+            .unwrap_or_default();
+        (!text.is_empty()).then_some(text)
     }
 
-    /// 清空选中。菜单条与拖动临时态一并收掉。
+    /// 清空选中。菜单条、笔记编辑器与拖动临时态一并收掉。
     pub fn clear_selection(&mut self) {
         self.selection = None;
         self.selection_menu_open = false;
+        self.note_editor = None;
         self.long_press_anchor = None;
         self.mouse_drag = None;
         self.edge_drag = None;

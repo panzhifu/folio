@@ -81,7 +81,7 @@ pub fn hit_test(
         let LineFragment::Text(run) = fragment else {
             // 图片不产出字符，但**占横向位置**：游标必须推进它，后面的字才量得准。
             if let LineFragment::Image(image) = fragment {
-                cursor += image.width;
+                cursor += image.advance;
             }
             continue;
         };
@@ -141,7 +141,7 @@ pub fn hit_test(
     })
 }
 
-/// 长按落点所在**段落**的字符区间（全选本段用）。
+/// 长按落点所在**段落**的字符区间（整段选择用；阅读页的就地菜单目前不暴露它）。
 ///
 /// 段落 = 拥有这一行的最深叶子块（`<p>`；`<em>` 这类行内盒不成块）。
 /// 块的行区间是连续的，首行行首到末行行末就是整段。
@@ -237,7 +237,7 @@ pub fn rects_for_range_in(
             let LineFragment::Text(run) = fragment else {
                 // 图片占横向位置但不产出字符：推进游标，不产出矩形。
                 if let LineFragment::Image(image) = fragment {
-                    cursor += image.width;
+                    cursor += image.advance;
                 }
                 continue;
             };

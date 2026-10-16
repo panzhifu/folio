@@ -443,7 +443,7 @@ fn hit_carries_the_line_index() {
     );
 }
 
-/// 全选本段：单段书给整段，跨行也连续；两段书只取命中那一段。
+/// 整段选择：单段书给整段，跨行也连续；两段书只取命中那一段。
 #[test]
 fn paragraph_range_covers_the_whole_block_and_nothing_else() {
     let chapter = typeset(

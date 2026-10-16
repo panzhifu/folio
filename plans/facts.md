@@ -2,7 +2,16 @@
 
 从实测与真机踩坑提炼，写代码前先读。改动任何一条 = 先在真机/宿主上重新验证。
 
-## 框架（gpui-pre 0.3.8，锁版 `=0.3.8`，升级是独立任务）
+## 框架（gpui-pre 0.3.9，锁版 `=0.3.9`）
+
+- **2026-10-17 已升到 gpui-kit main `f8cf0bd9`（0.7.3）+ `gpui-pre =0.3.9`**。fork
+  `panzhifu/gpui-mobile` 同步推到 `78384e0`：补了 0.3.9 新加的
+  `PlatformDisplay::refresh_interval`（Android 返回 `None`，NDK surface 不报刷新率）、
+  `Platform::on_displays_changed` 与 `PlatformWindow::on_display_changed`（Android 窗口
+  绑一个 surface，暂为 no-op）。**两边都是精确 pin**：动一边必须同时动另一边，否则
+  图里会出现两棵互不兼容的 `gpui`（0.x 的 minor 就是 breaking，`Window` / `Element`
+  类型对不上）。升级顺序：先推 fork → 改 `crates/folio-app/Cargo.toml` 的 rev →
+  `cargo update -p gpui-kit -p gpui-pre-mobile`。
 
 - `TextSystem::resolve_font` 是 **panic 不是回退**（text_system.rs:370）：请求家族连同整串
   桌面回退名都不存在时直接 SIGABRT，Android 上这是常态。唯一公开判据是 `all_font_names()`
@@ -45,6 +54,15 @@
   需要交互的面板可以走浮层；存量代码里那几处内联面板（书库确认、阅读页底栏模式）照旧工作，
   迁移到浮层是可选的后续优化，不是必须。
 - 屏 1080×2400，scale 2.8；可用中文正文字族 `Noto Sans CJK SC`。
+- **窗口属性只能在 UI 线程上写**（Android 16 / API 36 实测）：GPUI 的原生线程直接调
+  `Window.setAttributes()` 抛
+  `CalledFromWrongThreadException: Only the original thread that created a view hierarchy can
+  touch its views. Expected: main Calling: android_main`（`Window.setAttributes` →
+  `Activity.onWindowAttributesChanged` → `decorView.setLayoutParams` → `requestLayout`）。
+  背光滑条就是踩在这上面：fork 的 `gpui_mobile::set_screen_brightness` 在原生线程直写，
+  每次都只吞掉那个 Java 异常，所以背光从未真正变过 —— 改成走 `GpuiSystemUi
+  .setWindowBrightness`（自己在 Java 里 `runOnUiThread`）后 `dumpsys display` 的
+  `mScreenBrightness` 实测随 0.35 / -1 两档变化。凡是写窗口 / View 的活都照这条路走。
 - 验证卫生：`screencap` 整帧 md5 必变（状态栏时钟），比对要裁状态栏数内容区差异像素；
   判断输入行为前先 `am force-stop` + `am start` 取基线（出现过幽灵触摸）。
 

@@ -108,26 +108,31 @@ impl ImageProvider for NoImages {
 
 /// 按 CSS 与固有尺寸算一张图的显示尺寸（CSS px）。
 ///
-/// 顺序：`width`（px/%/auto→固有宽）→ `height`（px/auto→按纵横比）→ `max-width` /
-/// `max-height` 夹 → 兜底不超容器。固有尺寸缺失（SVG）时用指定宽或容器宽，比例按 1:1。
+/// 宽高是**一对**：只写 `height` 时宽要按纵横比反算，只写 `width` 时高按比例算；
+/// 两边都写死才不保持比例。从前这里先按 intrinsic 定宽、再单独拿 `height` 覆盖高，
+/// 于是 `sup img { height:1em; width:auto }` 得到一张「固有宽 × 1em」的扁图 ——
+/// 脚注「注」图因此既过大又和行盒对不上。
 pub(super) fn image_size(style: &ComputedStyle, iw: f32, ih: f32, container_w: f32) -> (f32, f32) {
     let basis = container_w.max(1.0);
     let has_intrinsic = iw > 0.0 && ih > 0.0;
+    let width = style.width.map(|l| l.resolve(basis)).filter(|w| *w >= 0.0);
+    // 百分比高度没有包含块高度作基准，按 auto 处理（见 known-limitations）。
+    let height = match style.height {
+        Some(Length::Px(v)) if v >= 0.0 => Some(v),
+        _ => None,
+    };
 
-    let mut w = match style.width {
-        Some(l) => l.resolve(basis),
-        None if has_intrinsic => iw,
-        None => basis,
-    }
-    .max(0.0);
-
-    let mut h = match style.height {
-        // 百分比高度没有包含块高度作基准，按 auto 处理（见 known-limitations）。
-        Some(Length::Px(v)) => v,
-        _ if has_intrinsic && w > 0.0 => ih * (w / iw),
-        _ => w,
-    }
-    .max(0.0);
+    let (mut w, mut h) = match (width, height, has_intrinsic) {
+        (Some(w), Some(h), _) => (w, h),
+        (Some(w), None, true) if w > 0.0 => (w, ih * (w / iw)),
+        (Some(w), None, _) => (w, w),
+        (None, Some(h), true) if h > 0.0 => (iw * (h / ih), h),
+        (None, Some(h), _) => (h, h),
+        (None, None, true) => (iw, ih),
+        (None, None, false) => (basis, basis),
+    };
+    w = w.max(0.0);
+    h = h.max(0.0);
 
     if let Some(max_w) = style.max_width.map(|l| l.resolve(basis))
         && max_w >= 0.0

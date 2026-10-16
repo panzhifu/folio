@@ -249,7 +249,7 @@ mod booted {
     };
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
+    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, point, px, size};
 
     /// 起一版外壳，顺带把它那个实体也交出来 —— 「切个目的地」这个动作要从它上面调，
     /// 而设置整页正站在「我的」那一个目的地里。
@@ -664,6 +664,256 @@ mod booted {
             );
         })
         .expect("窗口应能渲染");
+    }
+
+    /// 方向键翻页（PC）——从键绑定一路扎到页号上。
+    ///
+    /// `reader::view` 那条钉的是 `arrow_turn` 本身；这一条钉的是它**接得上键**：
+    /// `KeyBinding` → 动作 → [`AppShell::arrow_key`] → 阅读页。接错了在屏幕上只是
+    /// 「按了没反应」，而这条链只有真窗口跑得完（正文本身不拿焦点，这些键在
+    /// `None` 上下文上绑着）。
+    #[gpui_kit::test]
+    fn the_arrow_keys_turn_the_pages(cx: &mut TestAppContext) {
+        use folio_core::content::format::{ChapterLocator, ChapterText, DocMeta};
+        use folio_core::{Chapter, FlowDoc, Format};
+
+        let (handle, shell) = boot(cx, false);
+        let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
+        // 正文换成一段够长的合成语料 —— 夹具本身只有两百多字，一页就装完了，「翻得动」
+        // 那个断言就无从成立。位置写成 `Inline`（正文在手上）：`Markdown` 那一条位置
+        // 本来算的是 `Section`，而打开时回容器按序号取，取得的是夹具自己那两百多字。
+        let fixture = std::path::Path::new("../../tests/fixtures/oss/minimal-zh.epub");
+        let source = (0..80)
+            .map(|i| {
+                format!(
+                    "<p>于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。（第 {i} 段）</p>"
+                )
+            })
+            .collect::<String>();
+        let flow = FlowDoc {
+            chapters: vec![Chapter {
+                title: "第一章".into(),
+                spine_href: String::new(),
+                text: ChapterText::At(ChapterLocator::Inline(source)),
+                char_len: None,
+                images: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let book = store
+            .add_book(
+                fixture,
+                &DocMeta {
+                    title: "测试书".into(),
+                    format: Format::Markdown,
+                    ..DocMeta::default()
+                },
+            )
+            .expect("合成书该入得了库");
+        store
+            .save_flow(book, &flow, Format::Markdown)
+            .expect("章节该存得进去");
+
+        shell.update(cx, |this, cx| this.open_reading(book, cx));
+        // 排版在渲染帧里做：一帧只把恢复请求挂上，切页要再走一帧。
+        let frames = |cx: &mut TestAppContext| {
+            for _ in 0..3 {
+                cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                    .expect("窗口应能渲染");
+                cx.run_until_parked();
+            }
+        };
+        let read_page = |cx: &mut TestAppContext| {
+            shell.read_with(cx, |this, app| {
+                this.reading
+                    .as_ref()
+                    .expect("书该挂着")
+                    .page
+                    .read(app)
+                    .page_number(app)
+            })
+        };
+        // 等这一章切出多页。语料够长，但排版是异步的，一帧未必切完。
+        let mut count = 0;
+        for _ in 0..20 {
+            frames(cx);
+            count = shell.read_with(cx, |this, app| {
+                this.reading
+                    .as_ref()
+                    .expect("书该挂着")
+                    .page
+                    .read(app)
+                    .sheet_count(app)
+            });
+            if count > 1 {
+                break;
+            }
+        }
+        assert!(count > 1, "前置：这段语料该切成多页，实得 {count} 页");
+
+        let first = read_page(cx);
+        // 往右 / 往下 = 往后一屏。
+        cx.simulate_keystrokes(handle, "right");
+        frames(cx);
+        let forward = read_page(cx);
+        assert!(forward > first, "右箭头该往前走：{first} → {forward}");
+        // 往左 / 往上 = 往回一屏。
+        cx.simulate_keystrokes(handle, "left");
+        frames(cx);
+        assert_eq!(read_page(cx), first, "左箭头该退回原来那一屏");
+        // 上下与左右同向（纵向没有 RTL 这回事）。
+        cx.simulate_keystrokes(handle, "down");
+        frames(cx);
+        assert_eq!(read_page(cx), forward, "下箭头与右箭头同向");
+        cx.simulate_keystrokes(handle, "up");
+        frames(cx);
+        assert_eq!(read_page(cx), first, "上箭头与左箭头同向");
+    }
+
+    /// 阅读层必须是一条 hit-test 边界：它盖着书架时，点击不能落到身后的卡片上。
+    ///
+    /// 这条钉的是「阅读层只在进场/退场时 occlude」的那个洞：定住时背景不透明，
+    /// 但背景不参与命中，卡片仍会收到 `ShelfEvent::Open`，`open_reading` 于是
+    /// 调 `page.open` 换书重载。测试按书架的**真实封面坐标**点下去，而不是
+    /// 直接调 `open_reading`，所以漏掉整层 occlude 时它会真的把当前书换掉。
+    #[gpui_kit::test]
+    fn reading_layer_blocks_clicks_that_land_on_a_shelf_card(cx: &mut TestAppContext) {
+        use folio_core::{Chapter, ChapterText, DocMeta, FlowDoc, Format};
+
+        let (handle, shell) = boot(cx, false);
+        // 这条钉定住后的命中；把减动效打开，`Presence` 直接给 Present，不把转场时钟混进来。
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
+        let fixture = std::path::Path::new("../../tests/fixtures/oss/minimal-zh.epub");
+        // 第二本用同一份夹具的临时副本：`add_book` 按路径认书，同一路径加两次
+        // 只会拿到同一个 id。`local/` 下的书不进 CI，不能用。
+        let fixtures = tempfile::tempdir().expect("临时目录");
+        let other_fixture = fixtures.path().join("other.epub");
+        std::fs::copy(fixture, &other_fixture).expect("复制夹具");
+        let add = |title: &str, path: &std::path::Path| -> i64 {
+            store
+                .add_book(
+                    path,
+                    &DocMeta {
+                        title: title.into(),
+                        format: Format::Markdown,
+                        ..DocMeta::default()
+                    },
+                )
+                .expect("测试书该入得了库")
+        };
+        let opened = add("正在读", fixture);
+        let other = add("身后那本", &other_fixture);
+        let flow = FlowDoc {
+            chapters: vec![Chapter {
+                title: "第一章".into(),
+                spine_href: String::new(),
+                text: ChapterText::Inline(
+                    "<p>于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。</p>".repeat(20),
+                ),
+                char_len: None,
+                images: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        store
+            .save_flow(opened, &flow, Format::Markdown)
+            .expect("正文该存得进去");
+        // 身后那本也要有可读正文：只登记索引的话，`open_book` 会在
+        // `load_content` 那一步失败、保持当前书不变 —— 那正好会把「点击穿透」
+        // 测成通过。两本都能打开，换书才藏不住。
+        store
+            .save_flow(other, &flow, Format::Markdown)
+            .expect("身后那本的正文也该存得进去");
+        shell.update(cx, |this, cx| {
+            this.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+        });
+        let frames = |cx: &mut TestAppContext| {
+            for _ in 0..3 {
+                cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                    .expect("窗口应能渲染");
+                cx.run_until_parked();
+            }
+        };
+        frames(cx);
+        let target = cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window
+                    .try_find(format!("shelf-cover-{other}"))
+                    .map(|snapshot| snapshot.bounds())
+            })
+            .expect("窗口应能渲染")
+            .expect("身后那本书的封面该在架面上画出来");
+
+        shell.update(cx, |this, cx| this.open_reading(opened, cx));
+        frames(cx);
+        let page = shell.read_with(cx, |this, _| {
+            this.reading.as_ref().expect("书该挂着").page.clone()
+        });
+        assert_eq!(
+            page.read_with(cx, |page, app| page.book_id(app)),
+            Some(opened),
+            "前置：正在读第一本"
+        );
+
+        // 点的是身后那张卡片的**真实中心**；阅读层若没有 occlude，这一击会同时
+        // 命中卡片，`open_reading` 会把 page 换成另一本。
+        cx.update_window(handle, |_, window, cx| {
+            window.click_at(
+                format!("shelf-cover-{other}"),
+                point(
+                    px(f32::from(target.size.width) / 2.0),
+                    px(f32::from(target.size.height) / 2.0),
+                ),
+                cx,
+            );
+        })
+        .expect("窗口应能渲染");
+        frames(cx);
+        assert_eq!(
+            page.read_with(cx, |page, app| page.book_id(app)),
+            Some(opened),
+            "点击落在身后书架卡片上时，阅读层必须替读者挡住这一击"
+        );
+    }
+
+    /// 整层 occlude 不能把阅读页自己也挡住：点正文中心仍然要开顶栏/底栏。
+    ///
+    /// `occlude` 挡的是这一层**后面**的 hitbox；正文、菜单、目录都是它的子元素，必须
+    /// 照常收事件。这条用「点正文 → 底栏出现」钉住，免得修点击穿透时把阅读页点死。
+    #[gpui_kit::test]
+    fn reading_layer_still_receives_clicks_when_it_occludes(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
+        for _ in 0..3 {
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("窗口应能渲染");
+            cx.run_until_parked();
+        }
+        assert!(
+            cx.update_window(handle, |_, window, _| {
+                window.try_find("reader-bottom-bar").is_none()
+            })
+            .expect("窗口应能渲染"),
+            "前置：刚开书时底栏还没出来"
+        );
+
+        cx.update_window(handle, |_, window, cx| window.click("folio-reader", cx))
+            .expect("窗口应能渲染");
+        for _ in 0..2 {
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("窗口应能渲染");
+            cx.run_until_parked();
+        }
+        assert!(
+            cx.update_window(handle, |_, window, _| {
+                window.try_find("reader-bottom-bar").is_some()
+            })
+            .expect("窗口应能渲染"),
+            "阅读层 occlude 之后，正文中心的一击仍该开底栏"
+        );
     }
 
     /// 回归门：没有焦点时，返回键照常走到外壳的导航 —— 上面那一档只在真有异议时才吃掉这一键。

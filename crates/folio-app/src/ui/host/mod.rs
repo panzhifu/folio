@@ -17,6 +17,9 @@
 //!   不在 [`Host`] trait 上。
 //! - **这一端的指针长按不长按得住**（[`supports_long_press`]），决定读书时「把图放大」
 //!   是按住图片还是点一下图片。
+//! - **这一端的滚轮是不是真鼠标滚轮**（[`has_mouse_wheel`]），决定图片查看器里滚轮是
+//!   缩放还是平移 / 切图 —— 触屏那一端的手指平移与真滚轮走的是同一个 `ScrollWheelEvent`
+//!   通道（见 [`has_mouse_wheel`] 那一段）。
 //! - **选择器交回的路径是不是应用自己的临时副本**（[`picked_files_are_temporary`]），
 //!   决定导入读完后要不要把 `cache/gpui-import-*` 那份拷贝连同目录清掉。桌面选择器
 //!   给的是读者原文件，一动都不能动；Android / iOS 的桥会先落一份 sandbox / cache 拷贝，
@@ -63,10 +66,18 @@ pub trait Host: 'static {
     /// 这一端的指针**按得住长按**吗。
     ///
     /// gpui 只在触摸手势里合成 `LongPressEvent`：那份状态机是
-    /// `gpui-pre-0.3.8/src/gestures.rs` 的 `TouchGestureState::LongPressing`，吃的是
+    /// `gpui-pre-0.3.9/src/gestures.rs` 的 `TouchGestureState::LongPressing`，吃的是
     /// `TouchEvent`。桌面的鼠标不产生 `TouchEvent`，按住不放也不会来一条长按 ——
     /// 所以「按住某物」在桌面上根本不存在，凡是把长按当入口的功能都要在这一格上分叉。
     fn long_press(&self) -> bool;
+    /// 这一端的滚轮是**真鼠标滚轮**吗。
+    ///
+    /// 触屏那一端的手指平移在平台层被翻译成同一个 `ScrollWheelEvent`
+    /// （`gpui-pre` 的 `gestures.rs`：`TouchGestureState::Panning` 每帧派发一条
+    /// `Scroll`，松手后还有一串惯性尾巴），而桌面那一条是读者第二档独立手势 ——
+    /// 同一个事件通道在两端说的不是一件事。图片查看器据此决定滚轮是**缩放**
+    /// （桌面）还是**平移 / 切图**（触屏）。
+    fn mouse_wheel(&self) -> bool;
     /// 系统选择器交回的路径是不是应用自己拷出来、用完即可删的临时副本。
     ///
     /// 桌面文件选择器给的是读者原文件，不能动；Android 的 `GpuiPathPicker` 与 iOS 的
@@ -117,7 +128,7 @@ pub fn ime_insets(window: &Window, cx: &App) -> Insets {
 /// 挑一个这台设备**真的能解析出来**的正文家族。
 ///
 /// 必须挑，不能把偏好里的名字直接交给 GPUI：`TextSystem::resolve_font` 在请求家族和它
-/// 整串回退名都不存在时是 **panic**（`gpui-pre-0.3.8/src/text_system.rs:370`），而读者的
+/// 整串回退名都不存在时是 **panic**（`gpui-pre-0.3.9/src/text_system.rs:370`），而读者的
 /// 默认偏好 `LXGW WenKai` 只在开发机上装着。Android 的字族是从 `/system/fonts/` 预载进来的，
 /// 桌面另有一份回退表 —— 所以「按名字找一个存在的」两端共用（[`find_family`]），
 /// 「一个都没有时怎么办」留给各平台（[`Host::body_family`]）。
@@ -166,6 +177,14 @@ pub fn back_exits_app(cx: &App) -> bool {
 pub fn supports_long_press(cx: &App) -> bool {
     cx.try_global::<HostServices>()
         .is_some_and(|services| services.0.long_press())
+}
+
+/// 这一端的滚轮是不是真鼠标滚轮。没装平台服务（宿主测试里）当**不是**：
+/// 测试默认走触屏那条路（手指平移即滚轮），要与 [`supports_long_press`] 那条默认
+/// 保持一致 —— 装了桌面服务才切到滚轮缩放那一档。
+pub fn has_mouse_wheel(cx: &App) -> bool {
+    cx.try_global::<HostServices>()
+        .is_some_and(|services| services.0.mouse_wheel())
 }
 
 /// 系统选择器交回的路径是不是应用自己拷出来的临时副本。没装平台服务（宿主测试里）

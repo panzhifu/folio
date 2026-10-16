@@ -17,14 +17,20 @@ folio-core = { path = "crates/folio-core" }
 # 走 git main 而不是 crates.io：上游每周发版，发布版落后一到两周，且主题目录
 # `themes/` 只存在于源码树里（发布出去的 crate 不带）。Cargo.lock 记录具体 commit，
 # 所以换依赖源不影响可复现构建。
+#
+# `Cargo.lock` 与 `crates/folio-app/Cargo.toml` 里那条 `gpui-pre-mobile` 的 rev 必须一起走：
+# gpui-kit main 与 gpui-mobile fork 都精确要求 `gpui-pre =0.3.9`，两边版本差一小格就是两棵
+# 互不兼容的 `gpui`（`Window` / `Element` 类型对不上，编译直接炸）。升级时先推 fork，
+# 再把 `crates/folio-app/Cargo.toml` 的 rev 换成新 commit，最后
+# `cargo update -p gpui-kit -p gpui-pre-mobile`。
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit.git", branch = "main", features = ["assets"] }
 
 # folio 唯一的联网出口（远程书库走 WebDAV）。`gpui-pre-` 前缀不是第二个 HTTP 栈：
 # 它就是 gpui 那条依赖图里已经在编译的 reqwest（`gpui-pre-reqwest`，rustls 而非 OpenSSL），
 # 这个包只是给同一套 `http_client::HttpClient` trait 补一个能发请求的实现。
-# `=0.3.8` 的钉法跟 gpui-pre 本身一致 —— 它是整套快照的一部分，跳版本要一起跳，
+# `=0.3.9` 的钉法跟 gpui-pre 本身一致 —— 它是整套快照的一部分，跳版本要一起跳，
 # 单独提前会拿到一个 trait 签名不同的版本。
-reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.8" }
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }
 
 rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "6"
@@ -89,7 +95,7 @@ encoding_rs = "0.8"
 #
 # **钉死 `=0.3.0`**：它 2025-12 才有第一个版本，上游仓库里没有真实世界编出的 CHM 样本
 # （只有单元测试）。版本一跳就把「我们对拍过的那份解码器」换成另一个东西，而症状是
-# 某本书突然读不出 —— 钉法与上面 `reqwest_client` 那条 `=0.3.8` 同理。
+# 某本书突然读不出 —— 钉法与上面 `reqwest_client` 那条 `=0.3.9` 同理。
 # 换掉它的成本有出口：容器寻址住在一层之后（`format::container` 的 ITSF 那一支），
 # 自己写一份只动那一处。
 libchm = "=0.3.0"

@@ -29,9 +29,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Corners, Entity, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Corners, Entity, FocusHandle,
+    Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
+    px,
 };
 
 use super::bands;
@@ -93,11 +94,10 @@ pub struct ReadingPage {
     /// 是会话里那一次点击 / 那一次长按 —— 它不是视图，改动靠下面那次 `observe` 才
     /// 收得到重画，形状与两块弹层一致。
     image_viewer: Entity<ImageViewer>,
-    /// 目录那条左侧栏这一帧占掉多少宽（0 = 手机档或栏没开）。
-    ///
-    /// 记在字段上而不是每次现问：正文那三分区的点击判据要按**减掉这条栏之后**的宽度算，
-    /// 而分区判据跑在事件里、手上没有当帧的布局结果。渲染那一趟写它，事件读它。
-    toc_rail: f32,
+    /// 查看器那一层的焦点句柄。它拿在阅读页手里而不是查看器自己里：那一层是 `overlay`
+    /// 每帧造的元素树里的 `track_focus`，句柄得属于**这一棵**元素树的那个视图，
+    /// 方向键那几条事件才能沿祖先链派发到它（见 `image_viewer::overlay`）。
+    image_viewer_focus: FocusHandle,
     _watches: Vec<Subscription>,
 }
 
@@ -186,6 +186,10 @@ impl ReadingPage {
         // 会话那一侧的点击与长按只管往里写「要看这张图」。
         let image_viewer = cx.new(|_| ImageViewer::default());
         watches.push(cx.observe(&image_viewer, |_, _, cx| cx.notify()));
+        // 查看器那一层的焦点句柄。它拿在阅读页手里而不是查看器自己里：这一层是
+        // `overlay` 每帧造的元素树里的 `track_focus`，句柄要属于**这一棵**元素树的
+        // 那个视图（`reading-page`），方向键那几条事件才能沿祖先链派发到它。
+        let image_viewer_focus = cx.focus_handle();
         reader.update(cx, |reader, _| {
             reader.set_image_viewer(image_viewer.clone())
         });
@@ -202,7 +206,7 @@ impl ReadingPage {
             brightness: brightness_state,
             toc,
             image_viewer,
-            toc_rail: 0.0,
+            image_viewer_focus,
             _watches: watches,
         }
     }
@@ -265,13 +269,20 @@ impl ReadingPage {
     ///
     /// 返回 `true` 表示这次返回已被浮层消费，调用方不该再往下走。
     ///
-    /// 收的顺序与摆的顺序相反：图片放大那一层在最上面，先收它；再收「⋯」，再收目录，
-    /// 最后才是顶栏底栏。
+    /// 收的顺序与摆的顺序相反：图片放大那一层在最上面，先收它；再收笔记便签、脚注、
+    /// 目录，最后才是顶栏底栏。
     /// 焦点的归还不在这里做 —— 这条路上没有 `&mut Window`（`App::on_action` 的派发里窗口是
     /// 借着的），弹层自己在下一帧的 `render` 里还。
     pub fn dismiss_chrome(&mut self, cx: &mut Context<Self>) -> bool {
         if self.image_viewer.read(cx).is_open() {
             self.image_viewer.update(cx, |viewer, _| viewer.close());
+            cx.notify();
+            return true;
+        }
+        // 笔记便签排在最上面那一档：它自带遮罩，先收它，再轮到脚注与目录。
+        if self.reader.read(cx).note_editor_open() {
+            self.reader
+                .update(cx, |reader, cx| reader.cancel_note_editor(cx));
             cx.notify();
             return true;
         }
@@ -312,6 +323,36 @@ impl ReadingPage {
         }
         self.reader
             .update(cx, |reader, cx| reader.scroll_page(delta, cx));
+    }
+
+    /// 方向键翻页（PC）。返回 `false` = 这一键不归阅读页，调用方该 `cx.propagate()`。
+    ///
+    /// 子栈上压着别的屏（紧凑设置）时让开：那一屏的滑条与列表用同一套方向键，抢过来
+    /// 就是滑条不动、背后正文在翻页。其余判据（图片查看器开着、文字输入框拿着焦点）
+    /// 都在会话与 gpui 那一侧 —— 见 [`ReaderSession::arrow_turn`]。
+    pub fn arrow_turn(&mut self, arrow: chrome::Arrow, cx: &mut Context<Self>) -> bool {
+        if self
+            .stack
+            .upgrade()
+            .is_some_and(|stack| stack.read(cx).depth() > 1)
+        {
+            return false;
+        }
+        self.reader
+            .update(cx, |reader, cx| reader.arrow_turn(arrow, cx))
+    }
+
+    /// 当前页号。**只由宿主测试问**：方向键那一条要从键绑定一路扎到页号上，而翻页
+    /// 落没落位在屏幕上只是「字换了一屏」，没有别的可断言的数。
+    #[cfg(test)]
+    pub fn page_number(&self, cx: &App) -> usize {
+        self.reader.read(cx).page()
+    }
+
+    /// 这一章切成了多少页（双页对开时是「多少张纸」）。同样只给宿主测试。
+    #[cfg(test)]
+    pub fn sheet_count(&self, cx: &App) -> usize {
+        self.reader.read(cx).page_count()
     }
 
     /// 顶栏那颗返回。正文是这一层那条子栈的栈底，弹不动 —— 该请外壳把整层收走。
@@ -360,13 +401,12 @@ impl ReadingPage {
         {
             return;
         }
-        // 三区分的是**正文那一栏**，不是整块窗口：宽档上目录那条左侧栏占掉左边一段，
-        // 不减掉它，左区会跑到栏上去、正文的左半就永远翻不了页。
-        let rail = self.toc_rail;
-        let width = (f32::from(window.viewport_size().width) - rail).max(1.0);
+        // 三区分的是**正文那一栏**，不是整块窗口。宽档的目录改成浮层之后正文不再让宽，
+        // 所以这里不需要再减一条栏：整块窗口就是正文的可用宽。
+        let width = f32::from(window.viewport_size().width).max(1.0);
         // 左右两档意味着什么，跟着整本的翻页方向走（`zone` 里那一条）。
         let rtl = self.reader.read(cx).progression_rtl();
-        let tap = zone(f32::from(position.x) - rail, width, rtl);
+        let tap = zone(f32::from(position.x), width, rtl);
         match self.chrome.handle_body_tap(tap) {
             Effect::OpenChrome | Effect::DismissChrome => cx.notify(),
             Effect::PrevPage => {
@@ -408,13 +448,15 @@ impl ReadingPage {
     /// 共用一份；高从 [`chrome::TOP_BAR_HEIGHT`] 递进去，那个数同时管布局与画面。
     ///
     /// 右边不摆页码 —— 底栏那条状态行已经念过一遍，而「读到哪一章了」是两栏都想一眼看到的。
-    fn top_bar(&self, rail: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// `wide` 决定目录开关长不长在这一条上：手机档的目录是底部弹层，入口在底栏；平板 / PC
+    /// 档的目录是盖在正文上的抽屉，没有常驻的栏可以挂关闭键，开关就长在这里。
+    fn top_bar(&self, wide: bool, cx: &mut Context<Self>) -> AnyElement {
         let title = self.reader.read(cx).title();
         let chapter: SharedString = self.reader.read(cx).chapter_title().into();
         let page = cx.entity().clone();
-        // 左侧栏那一档上目录开关长在顶栏：底栏浮层收起时读者常驻看见的是这一条，而栏本身
-        // 也带一颗关闭 —— 开的关的两个入口都在常驻的那一屏上，不必先猜哪里还藏着一颗。
-        let toggle = rail.then(|| {
+        // 宽档上目录开关长在顶栏：底栏浮层收起时读者常驻看见的是这一条，而抽屉本身
+        // 也带一颗关闭 —— 开的关的两个入口都在这块屏上。
+        let toggle = wide.then(|| {
             let open = self.toc.read(cx).is_open(cx);
             let toc_page = cx.entity().clone();
             let label = tr(cx, "reader.toc");
@@ -481,6 +523,8 @@ impl ReadingPage {
         card.child(self.status_row(cx))
             .child(self.progress_row(cx))
             .child(self.entry_row(cx))
+            // 宿主门：阅读层整层 occlude 之后，正文自己的点击必须还能把它叫出来。
+            .test_support()
             .into_any_element()
     }
 
@@ -891,28 +935,19 @@ impl Render for ReadingPage {
         // 「身上压着东西」也报给会话：那一刻正文的手势让位 —— 那一击的语义是收浮层，
         // 而按住一张图不该同时在底下选中字。报的是**有没有**，不是哪一层。
         //
-        // 目录那一屏有两种表面，这两种对正文的关系不一样：手机那一档的弹层**压在正文之上**
-        // （算「压着东西」，正文的手势让位）；平板与桌面那一档的左侧栏是**占位**的 ——
-        // 正文让开了那条宽、字与栏互不重叠，那一击该照常归正文（否则宽档上点字就选不中了）。
+        // 目录两种表面（手机的底部弹层、平板与桌面的左侧抽屉）都**压在正文之上**：
+        // 抽屉不再占宽，正文因此一寸不让，点字照常选得中 —— 遮罩会先把那一击收掉。
         let size = SizeClass::of(window);
-        let rail = self.toc.read(cx).rail_width(cx, size);
-        // 存一份给点击分区用：横坐标要按**减掉这条栏之后**的宽度分三区。
-        self.toc_rail = rail;
+        let wide = !size.is_compact();
+        let toc_open = self.toc.read(cx).is_open(cx);
         let layers_up = self.chrome.is_open()
-            || (size.is_compact() && self.toc.read(cx).is_open(cx))
+            || toc_open
             || self.toc.read(cx).menu_open()
             || self.reader.read(cx).footnote().is_some()
+            || self.reader.read(cx).note_editor_open()
             || self.image_viewer.read(cx).is_open();
         self.reader.update(cx, |reader, cx| {
-            // 会话那份宽里加上这条栏：`Document::content_width`、分栏的 x 与命中换算都读
-            // 同一个数，「字让开了」和「点到哪儿算哪儿」不会是两套。
-            reader.set_reserve(
-                Reserve {
-                    width: self.reserve.width + rail,
-                    height: self.reserve.height,
-                },
-                cx,
-            );
+            reader.set_reserve(self.reserve, cx);
             reader.set_chrome_bands(chrome::HEADER_HEIGHT, chrome::FOOTER_HEIGHT, cx);
             reader.set_overlay_open(layers_up, cx);
         });
@@ -922,23 +957,19 @@ impl Render for ReadingPage {
                 this.on_body_tap(event, window, cx)
             },
         );
-        // 目录那块弹层此刻开着（手机档）。它的遮罩盖整块窗口，白底顶栏压在半透明黑下面
+        // 目录那一层此刻开着。两种表面的遮罩都盖整块窗口，白底顶栏压在半透明黑下面
         // 会成一片灰 —— 而那条上的返回键正是读者开完目录要按的第一颗：又压暗又点不动是
         // 最坏的组合。所以这一档把顶栏抬到遮罩之上，让它保持原色也保持能按。
         //
-        // 底栏**不**跟着抬：那几颗（字号、进度、翻页模式）在弹层里没有对应物，压在遮罩下
+        // 底栏**不**跟着抬：那几颗（字号、进度、翻页模式）在目录里没有对应物，压在遮罩下
         // 才是「这一层是临时抬起来的」的正确读法，而当初那句「让那 172 像素反而让人以为
         // 还能点」的担心对顶栏不成立 —— 抬上来之后它是真能点。
-        //
-        // 宽档那条左侧栏不盖整块窗口，没有压暗这回事，所以只在弹层那一档抬。
-        let toc_sheet_up = self.toc.read(cx).is_open(cx) && rail <= 0.0;
-        // 正文与两条浮层共用的一栏：目录那条左侧栏占掉左边一段，这一栏就从它右边起。
-        // 两条浮层本身是 `absolute`，挂在这一栏上就跟着这一栏的左沿走，不会压到栏上。
+        let toc_up = toc_open && self.chrome.is_open();
         let column = div()
             .absolute()
             .top_0()
             .bottom_0()
-            .left(px(rail))
+            .left_0()
             .right_0()
             .child(
                 // 正文的点击落在这层而不是 `ReaderSession` 自己身上。它的 hitbox 是整屏的，
@@ -958,13 +989,13 @@ impl Render for ReadingPage {
             )
             // 干净态那两行与浮层是同一片地方的两种样子，永远只画一套。
             //
-            // 顶栏在目录那块**弹层**开着时不在这里画 —— 抬到遮罩之上去了（见下面
-            // `toc_sheet_up` 那一段）。底栏照旧压在遮罩下。
-            .when(self.chrome.is_open() && !toc_sheet_up, |this| {
-                this.child(self.top_bar(rail > 0.0, cx))
+            // 顶栏在目录那一层开着时不在这里画 —— 抬到遮罩之上去了（见下面
+            // `toc_up` 那一段）。底栏照旧压在遮罩下。
+            .when(self.chrome.is_open() && !toc_up, |this| {
+                this.child(self.top_bar(wide, cx))
                     .child(self.bottom_bar(cx))
             })
-            .when(self.chrome.is_open() && toc_sheet_up, |this| {
+            .when(self.chrome.is_open() && toc_up, |this| {
                 this.child(self.bottom_bar(cx))
             })
             .when(!self.chrome.is_open(), |this| {
@@ -984,16 +1015,16 @@ impl Render for ReadingPage {
         // `TocPanel::render` 与 `widgets::bottom_sheet` 那段模块注释）。右上角「⋯」那条
         // 菜单是 gpui-kit 自己的 `PopupMenu`，由那颗按钮按下时挂进它自己的浮层。
         root = root.child(self.toc.clone());
-        // 抬上来的顶栏：还是原来那一颗条，只是挂在弹层之后。包一层与那一栏同宽的绝对定位
-        // 容器，几何就不变（这一档 `rail` 恒为 0，左边没有栏要让）。
-        if toc_sheet_up {
+        // 抬上来的顶栏：还是原来那一颗条，只是挂在目录之后。包一层绝对定位容器，
+        // 几何就不变（正文现在整窗铺开，没有栏要让）。
+        if toc_up {
             root = root.child(
                 div()
                     .absolute()
                     .top_0()
                     .left_0()
                     .right_0()
-                    .child(self.top_bar(false, cx)),
+                    .child(self.top_bar(wide, cx)),
             );
         }
         // 脚注弹层压在目录之上、图片查看器之下：它是「从正文里抬起来的一张小纸」，
@@ -1012,6 +1043,8 @@ impl Render for ReadingPage {
             &self.reader,
             cx.entity().entity_id(),
             self.top_inset,
+            &self.image_viewer_focus,
+            window,
             cx,
         ));
         // 「界面亮度」在这一端的**另一手**：桌面上背光不归窗口管（那是显示器的地盘），

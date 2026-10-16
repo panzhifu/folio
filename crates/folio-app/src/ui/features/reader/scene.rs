@@ -174,7 +174,7 @@ impl Scene {
                         if let Some(image) = request {
                             images.push(VisibleImage {
                                 x: column_x + placed.x,
-                                top: baseline - placed.height,
+                                top: baseline - placed.height - placed.baseline_shift,
                                 width: placed.width,
                                 height: placed.height,
                                 footnote: document.footnote_note_for_node(placed.node),

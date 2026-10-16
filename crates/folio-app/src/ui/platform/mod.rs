@@ -146,9 +146,9 @@ pub(crate) fn adjust_system_volume(_up: bool) {}
 /// 与 [`set_reader_fullscreen`] 同一族——都是「书挂着的时候才接管」那一档，调用方在外壳
 /// 那一处（`AppShell::reading_brightness`），值没变就不递。
 ///
-/// - **Android**：递给 fork 的 `set_screen_brightness`，它写窗口自己的
-///   `screenBrightness`（应用级、不需要权限、不动别的 app），`None` 传那个 `-1.0` 的
-///   sentinel 把背光交还系统。
+/// - **Android**：递给 `GpuiSystemUi.setWindowBrightness`（见 `platform::android` 那一份
+///   注释：它写窗口自己的 `screenBrightness`，且必须在 UI 线程上写 —— API 36 起
+///   `Window.setAttributes` 有线程检查），`None` 传那个 `-1.0` 的 sentinel 把背光交还系统。
 /// - **桌面**：背光不归窗口管（那是显示器的地盘，gpui 没有这个口），所以这里安静地不做
 ///   任何事。桌面上这一格由外壳盖的那一层压暗实现，读的同一个数
 ///   （`reader::chrome::dim_alpha`）—— 同一个读数、两种暗法。
@@ -156,7 +156,7 @@ pub(crate) fn adjust_system_volume(_up: bool) {}
 ///   这一版不接管。
 #[cfg(target_os = "android")]
 pub(crate) fn set_screen_brightness(value: Option<f32>) {
-    gpui_mobile::set_screen_brightness(value);
+    android::set_screen_brightness(value);
 }
 
 #[cfg(not(target_os = "android"))]

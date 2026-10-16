@@ -20,12 +20,12 @@ use folio_core::{Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, Pa
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Entity, InputEvent as _, LongPressEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta,
-    TestAppContext, TouchPhase, point, px, size,
+    AnyWindowHandle, AppContext as _, Entity, Focusable as _, InputEvent as _, LongPressEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point,
+    ScrollDelta, TestAppContext, TouchPhase, point, px, size,
 };
 
-use crate::ui::features::reader::chrome::PageMode;
+use crate::ui::features::reader::chrome::{Arrow, PageMode};
 use crate::ui::features::reader::session::ReaderSession;
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shell::NAV_TRANSITION;
@@ -829,6 +829,44 @@ fn a_spread_is_two_contiguous_columns_of_one_sheet(cx: &mut TestAppContext) {
     assert!(after > before, "翻一张纸该往前走，实际 {before} → {after}");
 }
 
+/// 方向键翻页（PC）：右 / 下往前，左 / 上往回，四颗都归正文。
+///
+/// 这一条钉的是**接线**：键绑定 → 动作 → `ReadingPage::arrow_turn` → `ReaderSession`
+/// 那段路由只有真窗口跑得完，而它的错法很安静（按键没反应，或者反过来）。RTL 那一轴
+/// 在 `chrome::Arrow::turn` 的单元测试里。
+#[gpui_kit::test]
+fn the_arrow_keys_turn_the_pages(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.page()), 0);
+
+    // 每一步都把动画走完再按下一颗：翻页那 280 毫秒里再按一下，落点会叠在两趟之间。
+    for (arrow, expected) in [
+        (Arrow::Right, 1),
+        (Arrow::Down, 2),
+        (Arrow::Left, 1),
+        (Arrow::Up, 0),
+    ] {
+        let handled = view.update(cx, |v, cx| v.arrow_turn(arrow, cx));
+        settle(cx, handle);
+        assert!(handled, "{arrow:?} 该归正文");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.page()),
+            expected,
+            "{arrow:?} 之后该落到第 {expected} 页"
+        );
+    }
+}
+
 /// 窄窗口点「双页」不该得到两条窄柱子：按宽度退回分页。
 /// 这条判据按宽度而不是按 target，所以横屏平板能真双页、竖屏手机自动单页。
 #[gpui_kit::test]
@@ -1075,6 +1113,41 @@ fn a_pointer_drag_selects_and_swallows_the_trailing_click(cx: &mut TestAppContex
     assert_eq!(copied, expected, "复制内容应与可视文本一致");
 }
 
+/// 渲染出来的选字菜单必须真的把动作条圈进 `menu_bounds`。
+///
+/// 这条钉的是「点划线时闪一下」最可疑的那根线：gpui 的一击会发给**每一个**含按下点的
+/// handler，菜单没有 occlude / bounds 是空的时候，点动作条会同时落到正文上，
+/// 顶栏底栏被顺手翻出来。宿主测试不需要看见像素，只要 bounds 覆盖得住动作条就够了。
+#[gpui_kit::test]
+fn the_rendered_selection_menu_covers_its_actions(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    drag_select(cx, &view, handle);
+    settle(cx, handle);
+    let bounds = view
+        .read_with(cx, |v, _| v.menu_bounds.get())
+        .expect("菜单画上屏后 canvas 该回写 bounds");
+    assert!(
+        f32::from(bounds.size.width) >= 160.0,
+        "菜单 bounds 太窄，动作条可能漏在命中区外：{bounds:?}"
+    );
+    assert!(
+        f32::from(bounds.size.height) >= 88.0,
+        "菜单 bounds 太矮，颜色行/动作行可能漏在命中区外：{bounds:?}"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.taps_selection_ui(bounds.center())),
+        "落在菜单上的那一击必须先被选中这一套吃掉"
+    );
+}
+
 /// M6 验收：长按吸词 —— 点在词首字符上，吸出的是整个词（"Hello"，词界稳定），
 /// 手势结束后菜单条开着。
 #[gpui_kit::test]
@@ -1200,6 +1273,62 @@ fn a_highlight_lands_in_the_store_and_comes_back(cx: &mut TestAppContext) {
     );
 }
 
+/// 加一条划线**不许**动版面：页号、滚动、章高、行数、版心宽都该原地不动。
+///
+/// 用户看到过「点划线时整屏闪一下」。如果那条路真的触发了重排，这里至少有一个数会变；
+/// 全相等就说明闪来自绘制/点击层（菜单 occlude 与那帧多画），不是排版被重跑。
+#[gpui_kit::test]
+fn adding_a_highlight_does_not_reflow_or_move_the_page(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store),
+        Some(id),
+    );
+    drag_select(cx, &view, handle);
+    settle(cx, handle);
+    let before = view.read_with(cx, |v, _| {
+        let doc = v.book().expect("有书").document();
+        (
+            v.scroll_y,
+            v.page(),
+            v.chapter_index(),
+            v.content_height,
+            doc.height(),
+            doc.lines().len(),
+            v.laid_out.columns,
+            v.laid_out.pages,
+            v.laid_out.viewport,
+        )
+    });
+
+    view.update(cx, |v, cx| v.add_highlight(cx));
+    settle(cx, handle);
+
+    let after = view.read_with(cx, |v, _| {
+        let doc = v.book().expect("有书").document();
+        (
+            v.scroll_y,
+            v.page(),
+            v.chapter_index(),
+            v.content_height,
+            doc.height(),
+            doc.lines().len(),
+            v.laid_out.columns,
+            v.laid_out.pages,
+            v.laid_out.viewport,
+        )
+    });
+    assert_eq!(before, after, "加划线前后版面与位置必须逐项相同");
+}
+
 /// 拖选 → 菜单里那颗「划线」→ 点在画出来的那条划线上。把「已经重选好」这一状态共享给
 /// 后面几条用例，返回那条划线的章内区间（含头不含尾）。
 fn highlight_then_tap_it_back(
@@ -1237,6 +1366,115 @@ fn highlight_then_tap_it_back(
         "点在一条已有的划线上应被「选中」消费，不该再拿去翻页或开浮层"
     );
     (start, end)
+}
+
+/// M7 二期笔记：从既有一条划线上写笔记，存的是那一条本身；再点回去时笔记带得回来，
+/// 改一次仍然只有一条 —— 不是「先划再改」的两条路。
+///
+/// 拿掉 `save_note` 里 `editor.annotation` 那一支，这条就会在第二次保存时多落一条；
+/// 拿掉 `open_note_editor` 里回填 `note` 的那一段，输入框会是空的。
+#[gpui_kit::test]
+fn a_note_lands_on_the_highlight_and_edits_the_same_one(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    let (start, end) = highlight_then_tap_it_back(cx, &view, handle);
+
+    // 打开便签：菜单让位，输入框拿到焦点。
+    let open = cx
+        .update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.open_note_editor(window, cx);
+                v.note_editor_open()
+            })
+        })
+        .expect("窗口应可更新");
+    assert!(open, "点了笔记该把便签升起来");
+    assert!(
+        !view.read_with(cx, |v, _| v.selection_menu_open()),
+        "便签压着时动作条不该同时上屏"
+    );
+
+    let input = view.read_with(cx, |v, _| {
+        v.note_editor.as_ref().expect("便签该在").input.clone()
+    });
+    let focused = cx
+        .update_window(handle, |_, window, cx| {
+            window.focused(cx) == Some(input.read(cx).focus_handle(cx).clone())
+        })
+        .expect("窗口应可更新");
+    assert!(focused, "便签升起后焦点该落在输入框里，软键盘才会出来");
+    cx.update_window(handle, |_, window, cx| {
+        input.update(cx, |input, cx| {
+            input.set_value("这一段写得真好", window, cx)
+        });
+    })
+    .expect("窗口应可更新");
+    view.update(cx, |v, cx| v.save_note(cx));
+
+    let rows = store.annotations(id).expect("读库");
+    assert_eq!(rows.len(), 1, "写笔记应落在原来那条划线上");
+    assert_eq!(rows[0].note, "这一段写得真好");
+    assert_eq!(
+        (rows[0].anchor.start, rows[0].anchor.end),
+        (start, end),
+        "笔记锚的就是划中的那一段"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_none()),
+        "存完便签收掉，屏上只剩那条划线"
+    );
+    assert!(!view.read_with(cx, |v, _| v.note_editor_open()));
+
+    // 再点回那条划线：便签里带出原来的笔记，改完仍然只有一条。
+    let at = char_point(&view, cx, 1, 2);
+    let consumed = cx
+        .update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| v.tap_on_body(window, cx, at))
+        })
+        .expect("窗口应可更新");
+    assert!(consumed, "点在划线上应重新选中那一条");
+    assert!(
+        view.read_with(cx, |v, _| v.selection_annotation().is_some()),
+        "先要认出这一条在库里"
+    );
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| v.open_note_editor(window, cx));
+    })
+    .expect("窗口应可更新");
+    let text = view.read_with(cx, |v, cx| {
+        v.note_editor
+            .as_ref()
+            .expect("便签该在")
+            .input
+            .read(cx)
+            .value()
+            .to_string()
+    });
+    assert_eq!(text, "这一段写得真好", "已有笔记该回填进输入框");
+    let input = view.read_with(cx, |v, _| {
+        v.note_editor.as_ref().expect("便签该在").input.clone()
+    });
+    cx.update_window(handle, |_, window, cx| {
+        input.update(cx, |input, cx| input.set_value("改过的笔记", window, cx));
+    })
+    .expect("窗口应可更新");
+    view.update(cx, |v, cx| v.save_note(cx));
+
+    let rows = store.annotations(id).expect("读库");
+    assert_eq!(rows.len(), 1, "改笔记不该多落一条");
+    assert_eq!(rows[0].note, "改过的笔记");
+    assert_eq!(rows[0].color, "amber", "只改笔记不该动颜色");
 }
 
 /// M7 二期：留在书上的那片底色可以**再点回去**。点上去就是重新选中那一条，菜单跟着回来，
@@ -2748,6 +2986,129 @@ fn rebuilds_this_frame(cx: &mut TestAppContext, handle: AnyWindowHandle, wait: D
     take_local(Metric::SceneRebuilds)
 }
 
+/// 两章、每章都够长：跨章滑动要目标章真的切出页来，短到一页的语料测不出「滑到下一页」。
+fn two_chapter_flow() -> FlowDoc {
+    let source = (0..40)
+        .map(|i| format!("<p>{PARA}（第 {i} 段）</p>"))
+        .collect::<String>();
+    FlowDoc {
+        chapters: vec![
+            Chapter::inline("第一章", source.clone()),
+            Chapter::inline("第二章", source),
+        ],
+        ..Default::default()
+    }
+}
+
+/// 章界不再夹在 `set_page` 里：目标章排好后，源页与目标页各摆一份场景，
+/// 动画落地那一帧才换锚章。这条是「跨章滑动」的宿主门。
+#[gpui_kit::test]
+fn a_paged_chapter_boundary_slides_between_chapters(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &two_chapter_flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let last = view.read_with(cx, |v, _| v.page_count().saturating_sub(1));
+    assert!(last > 0, "前置：第一章该切成多页");
+    view.update(cx, |v, cx| v.set_page(last, cx));
+    settle(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 0);
+
+    // 章界按下一页：先等目标章排版，再起跨章 slide。
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    let mut turn = None;
+    for _ in 0..12 {
+        settle(cx, handle);
+        turn = view.read_with(cx, |v, _| v.turn);
+        if turn.is_some() {
+            break;
+        }
+    }
+    let turn = turn.expect("目标章排好后该起跨章滑动");
+    let (leaving, arriving) = (
+        turn.leaving.expect("有源页"),
+        turn.arriving.expect("有目标页"),
+    );
+    assert_eq!((leaving.chapter, leaving.page), (0, last));
+    assert_eq!((arriving.chapter, arriving.page), (1, 0));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.chapter_index()),
+        0,
+        "动画没走完之前不能先换章"
+    );
+
+    // 半程：两张纸都在树上（源章页 + 目标章页各一份场景）。
+    let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(140));
+    assert_eq!(rebuilds, 2, "跨章滑动要两张纸同时上屏，实得 {rebuilds}");
+    assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 0);
+
+    // 走完：锚章换成第二章，页号落到它的第一页。
+    turn_frame(cx, handle, Duration::from_millis(200));
+    assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 1);
+    assert_eq!(view.read_with(cx, |v, _| v.page()), 0);
+    assert!(view.read_with(cx, |v, _| v.turn.is_none()));
+
+    // 反向：第二章第一页往回，目标页应是第一章最后一页。
+    view.update(cx, |v, cx| v.scroll_page(-1, cx));
+    let mut back = None;
+    for _ in 0..12 {
+        settle(cx, handle);
+        back = view.read_with(cx, |v, _| v.turn);
+        if back.is_some() {
+            break;
+        }
+    }
+    let back = back.expect("反向跨章也该起滑动");
+    let arriving = back.arriving.expect("有目标页");
+    assert_eq!((arriving.chapter, arriving.page), (0, last));
+    // 第一趟采样只把 Presence 的起点钉住；再走 300ms 才越过 280ms 的转场。
+    turn_frame(cx, handle, Duration::from_millis(1));
+    turn_frame(cx, handle, Duration::from_millis(300));
+    assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 0);
+    assert_eq!(view.read_with(cx, |v, _| v.page()), last);
+}
+
+/// 滚轮翻到章末时也走同一条跨章滑动：先不夹在 `last` 上，等目标章排好再走。
+#[gpui_kit::test]
+fn a_paged_wheel_at_the_chapter_edge_starts_the_chapter_slide(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &two_chapter_flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let (last, viewport) = view.read_with(cx, |v, _| {
+        (v.page_count().saturating_sub(1), v.laid_out.viewport)
+    });
+    view.update(cx, |v, cx| v.set_page(last, cx));
+    settle(cx, handle);
+
+    scroll_down(cx, handle, viewport * 0.6);
+    let mut turn = None;
+    for _ in 0..12 {
+        settle(cx, handle);
+        turn = view.read_with(cx, |v, _| v.turn);
+        if turn.is_some() {
+            break;
+        }
+    }
+    let turn = turn.expect("章末滚轮也该起跨章滑动");
+    let arriving = turn.arriving.expect("有目标页");
+    assert_eq!((arriving.chapter, arriving.page), (1, 0));
+}
+
 /// 把翻页动画的两张纸摆上屏：分页翻页在走的那一段，出场页与进场页**同时**在场，
 /// 方向是「下一页从右外进来、上一页往左走」，走完就只画一张。
 #[gpui_kit::test]
@@ -2781,9 +3142,14 @@ fn a_paged_turn_draws_both_pages_until_the_slide_has_run(cx: &mut TestAppContext
         rebuilds, 2,
         "翻页在走，出场页与进场页要各摆一份场景（拿到 {rebuilds} 份）"
     );
-    let (turn, shift) = view.read_with(cx, |v, _| (v.turn, v.page_shift));
+    let (turn, shift, chapter) =
+        view.read_with(cx, |v, _| (v.turn, v.page_shift, v.chapter_index()));
     let turn = turn.expect("起步那一帧动画还挂着");
-    assert_eq!(turn.leaving, Some(first), "出场页该是刚离开的那一页");
+    assert_eq!(
+        turn.leaving.map(|page| (page.chapter, page.page)),
+        Some((chapter, first)),
+        "出场页该是刚离开的那一页"
+    );
     assert!(turn.forward, "往下一页翻 ⇒ 方向是往后");
     assert!(
         shift.0 > 100.0 && shift.1 == 0.0,

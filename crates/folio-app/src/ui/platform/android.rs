@@ -135,6 +135,48 @@ pub(crate) fn set_immersive(on: bool) {
     }
 }
 
+/// 阅读界面的亮度：这一屏要压多暗（`None` = 交还系统）。
+///
+/// 这一格是**窗口级**的背光覆盖（对面 `GpuiSystemUi.setWindowBrightness` 写
+/// `WindowManager.LayoutParams.screenBrightness`）：不需要权限，不动别的 app、也不改
+/// 系统设置；读者离开这一屏时把 -1.0（`BRIGHTNESS_OVERRIDE_NONE`）写回去就是交还。
+///
+/// **必须切回 UI 线程**（对面自己在 Java 里 `runOnUiThread`）：`Window.setAttributes`
+/// 会走到 `ViewRootImpl.requestLayout`，那一条自 API 36 起有线程检查 —— 实测 MEIZU 20 /
+/// Android 16 上，在 GPUI 的原生线程直写抛
+/// `CalledFromWrongThreadException: ... Expected: main Calling: android_main`，
+/// 而 fork 那版 `gpui_mobile::set_screen_brightness` 正是在那个线程直写（见下）。
+/// 形状照 [`set_immersive`]：递给 Java、它自己切线程，失败只写日志 —— 背光没跟上
+/// 是小事，不该把翻页拖退。
+///
+/// 为什么不再调 fork 的 `gpui_mobile::set_screen_brightness`：那个实现在原生线程上
+/// 直接 `getAttributes` / `setAttributes`，在 Android 16 上每一次调用都落进那条线程
+/// 检查（只能吞掉那个 Java 异常），所以那一格在真机上从来没真正生效过。
+/// 阈值与 sentinel 与它保持一致：`Some` 夹到 0.0–1.0，`None` / 非有限值归 -1.0。
+pub(crate) fn set_screen_brightness(value: Option<f32>) {
+    let wanted = match value {
+        Some(v) if v.is_finite() => v.clamp(0.0, 1.0),
+        _ => -1.0,
+    };
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("setWindowBrightness"),
+            ::jni::jni_sig!("(Landroid/app/Activity;F)V"),
+            &[JValue::Object(&act), JValue::Float(wanted)],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::debug!("set_screen_brightness: {wanted} 已递给系统"),
+        Err(err) => tracing::warn!("set_screen_brightness: {err}"),
+    }
+}
+
 /// 把音量键这一按还给系统：调一格 `STREAM_MUSIC`，并照常出系统音量条。
 ///
 /// 为什么需要应用自己调：音量键交给 native 之后系统那一路就不再动了，而阅读页把它们花在

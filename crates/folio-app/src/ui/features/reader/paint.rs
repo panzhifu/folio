@@ -11,15 +11,17 @@
 //! 于是偏移量与 `MobileMeasure::run_metrics` 量到的 ascent/descent 同源，
 //! 不会出现「按 A 算的行高、按 B 画的字形」。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode};
 use gpui_kit::{
-    App, Bounds, Element, ElementId, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    LayoutId, Length, LineLayout, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, SharedString, StrikethroughStyle, Style, TextRun, TouchDragEvent,
-    TouchPhase, UnderlineStyle, WeakEntity, Window, black, fill, point, px, relative, size,
+    App, Bounds, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla, InspectorElementId,
+    IntoElement, LayoutId, Length, LineLayout, LongPressEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StrikethroughStyle, Style, TextRun,
+    TouchDragEvent, TouchPhase, UnderlineStyle, WeakEntity, Window, black, fill, point, px,
+    relative, size,
 };
 
 use super::session::{ReaderSession, SelectionEdge};
@@ -297,10 +299,13 @@ impl Element for GlyphsElement {
         // 压在字上 —— 它们是在这个 layer 之外画的。
         let __shape_ns = std::cell::Cell::new(0u64);
         let mut __glyphs = 0u32;
+        // 同一帧里同一种 `Font` 只问一次「有没有真粗体面」：`resolve_font` 是
+        // fontdb 的一次查询，不能每个字形都付。
+        let mut synthetic_bold = HashMap::new();
         window.paint_layer(bounds, |window| {
             for run in &self.runs {
                 let __t = super::perf::Timer::start();
-                __glyphs += paint_run(window, bounds.origin, run);
+                __glyphs += paint_run(window, bounds.origin, run, &mut synthetic_bold);
                 __shape_ns.set(__shape_ns.get() + __t.ns());
             }
         });
@@ -439,7 +444,45 @@ pub(super) fn shape(window: &Window, run: &GlyphRun) -> Arc<LineLayout> {
 }
 
 /// 把一条 run 画出来：几何取自 shaping 表（没有就当场 shape 一次），再逐字形 `paint_glyph`。
-fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) -> u32 {
+/// 这个 run 要不要叠一遍假粗体。
+///
+/// CSS 的 700 已经一路传进了 `Font`；但 fontdb 只会挑同族里最接近的真实字体面。
+/// 如果这个家族只有 400，700 请求还是落回 400 —— 浏览器通常在这里做合成粗体，
+/// gpui 不做。判据是「700 与 400 resolve 到同一个 FontId」：同一个面就叠印一遍，
+/// 真的存在粗体面时那一格不同，绝不重复画。
+fn needs_synthetic_bold(window: &Window, font: &Font, cache: &mut HashMap<Font, bool>) -> bool {
+    if font.weight.0 < 600.0 {
+        return false;
+    }
+    if let Some(known) = cache.get(font) {
+        return *known;
+    }
+    let normal = Font {
+        weight: FontWeight::NORMAL,
+        ..font.clone()
+    };
+    let bold_id = window.text_system().resolve_font(font);
+    let normal_id = window.text_system().resolve_font(&normal);
+    let needed = wants_synthetic_bold_when(font, bold_id == normal_id);
+    cache.insert(font.clone(), needed);
+    needed
+}
+
+/// 请求了粗体，而且这个家族只有 regular 那一面。
+fn wants_synthetic_bold_when(font: &Font, same_face: bool) -> bool {
+    wants_synthetic_bold(font) && same_face
+}
+
+fn wants_synthetic_bold(font: &Font) -> bool {
+    font.weight.0 >= 600.0
+}
+
+fn paint_run(
+    window: &mut Window,
+    origin: Point<Pixels>,
+    run: &GlyphRun,
+    synthetic_bold: &mut HashMap<Font, bool>,
+) -> u32 {
     if run.text.is_empty() {
         return 0;
     }
@@ -452,6 +495,7 @@ fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) -> u32 
     let baseline_x = origin.x + px(run.x);
     let baseline_y = origin.y + px(run.baseline);
     let mut glyphs = 0u32;
+    let embolden = needs_synthetic_bold(window, &run.font, synthetic_bold);
     // 字距 / 两端对齐的右推：按字形在**阅读序**里的字符序号逐字累加。LTR 下字形的
     // `index` 在视觉序里递增，走一遍即可；RTL 下它在视觉序里递减（一期不做字距/对齐的
     // RTL 精确分布），跳过右推即可 —— 与 `hit`/选区的口径一致。
@@ -493,6 +537,17 @@ fn paint_run(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) -> u32 
             // 单个字形画不出去（缺字形、图集满）不该让整帧失败：与 gpui 自己的
             // `paint_line` 一致，忽略即可。
             let _ = window.paint_glyph(at, shaped_run.font_id, glyph.id, font_size, run.color);
+            if embolden {
+                // 没有粗体面时的假粗：同一字形再压一遍，水平错开 0.5px。
+                // 只动绘制，不动 shaping / 行宽，所以不会因为「加粗」触发重排。
+                let _ = window.paint_glyph(
+                    point(at.x + px(0.5), at.y),
+                    shaped_run.font_id,
+                    glyph.id,
+                    font_size,
+                    run.color,
+                );
+            }
         }
     }
     super::perf::add(|frame| frame.glyph_ns += __t_glyph.ns());
@@ -687,8 +742,8 @@ mod tests {
     //!
     //! 点名导入而不是 `use super::*`：`gpui_kit` 转出整个 `gpui`，里面有个叫 `test` 的属性宏，
     //! glob 会让 `#[test]` 递归展开成它。
-    use super::decoration_y;
-    use gpui_kit::{Pixels, px};
+    use super::{decoration_y, wants_synthetic_bold_when};
+    use gpui_kit::{Font, FontWeight, Pixels, px};
 
     fn y(box_height: f32, ascent: f32, descent: f32) -> (Pixels, Pixels) {
         // 基线摆在 100 处即可：两条线都是相对它算的，绝对值不影响比对。
@@ -722,6 +777,26 @@ mod tests {
 
     /// 删除线落在**字形身体里**：基线之上、盒顶之下。两条都从 gpui 的式子抄，
     /// 所以这个区间是无条件的 —— 一旦哪天自己改了数，它就先出界。
+    #[test]
+    fn synthetic_bold_only_when_bold_is_requested_and_the_face_is_the_same() {
+        let normal = Font::default();
+        let bold = Font {
+            weight: FontWeight::from(700.0),
+            ..Font::default()
+        };
+        assert!(!wants_synthetic_bold_when(&normal, true));
+        assert!(
+            !wants_synthetic_bold_when(&bold, false),
+            "有真粗体面时不叠印"
+        );
+        assert!(wants_synthetic_bold_when(&bold, true));
+        let semibold = Font {
+            weight: FontWeight::from(600.0),
+            ..Font::default()
+        };
+        assert!(wants_synthetic_bold_when(&semibold, true));
+    }
+
     #[test]
     fn the_strikethrough_sits_inside_the_glyph_body() {
         let (underline, strikethrough) = y(24.0, 16.0, 4.0);

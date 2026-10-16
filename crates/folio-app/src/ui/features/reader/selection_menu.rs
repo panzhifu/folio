@@ -1,13 +1,12 @@
-//! 选中的就地菜单：复制 / 划线 / 全选本段 / 全选本章 / 取消。
+//! 选中的就地菜单：一条**只有图标**的动作条 + 一条颜色胶囊。
+//!
+//! 样式照读者给的那张参考图量：动作收进一条圆角浮条，图标在上面，**不带文字**；
+//! 颜色那五档单独缩成一条更矮的胶囊，压在动作条下面。两块共用同一份表面色与投影，
+//! 中间留一道 6 像素的缝 —— 读起来是「一条工具条 + 一排颜色」，而不是一张两行的卡片。
 //!
 //! 独立成一份文件是因为它是阅读页里**改动最频繁**的一块：加一项、换图标、调格子
 //! 的尺寸与摆位，动到的都只有这一处，而它原先住在 `view.rs` 里 —— 那个文件是
 //! 「排版结果 → 元素」的渲染主干，两者改的从来不是同一件事。
-//!
-//! 一格「图标在上、文字在下」，整格可点 —— 图标必须配着文字：只有 Android 注册了
-//! asset source，iOS / HarmonyOS 上图标是静默空白的（`plans/facts.md`），只剩文字的格子
-//! 在那两端就是一颗按了不知道干什么的空白。唯一的例外是颜色那一行的实心圆：那不是
-//! 图标资源，是当场画出来的色块，两端都画得出来。
 //!
 //! 压在正文之上的真按钮而不是浮层：见 `page.rs` 模块注释与 `plans/facts.md`。
 //! 画出的位置经 `canvas` 回写进会话的 `menu_bounds`：压在它上面的一击属于菜单，
@@ -18,44 +17,62 @@
 //! 「划线」。下面那一行五格颜色**恒在**：挑中某条划线时点色＝换色，普通选区点色＝就用
 //! 这个色划一条 —— 于是「划线」那一格给的是默认那档黄，想换个色直接点圆点。
 //!
+//! 「笔记」那一格是 M7 的入口：普通选区打开一张空白便签，挑中库里某条划线则打开它
+//! 已经写下的那条（图标换成带勾的便签，提示「这一条有笔记」）。
+//!
 //! 摆位分两半：[`slot`] 是**纯函数**（首末高亮的上下边 + 视口高 + 卡片高 → 摆在哪一边、
 //! 顶边在哪一像素），所以「上面放不下就翻到下面」这条规则能在宿主上直接钉死；渲染那一侧
 //! 只负责把 [`Slot`] 落成元素。
 
 use folio_core::store::ANNOTATION_COLORS;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme, Icon, ThemeStyled as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, Context, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement,
-    PathBuilder, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div, point,
-    px,
+    AnyElement, BoxShadow, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement, PathBuilder, SharedString, StatefulInteractiveElement as _, Styled, Window,
+    canvas, div, hsla, point, px,
 };
 
 use super::modules::annotations::Palette;
 use super::session::ReaderSession;
 use crate::ui::shared::l10n::tr;
 
-/// 菜单里一格的边长（逻辑像素）。拇指能稳定命中的下限是 44，图标 + 文字竖排
-/// 要 56 才不挤（参照真机上同类阅读器的那张划词卡，量得 55dp 见方）。
-const MENU_CELL: f32 = 56.0;
-/// 卡片内缩。
-const MENU_PAD: f32 = 6.0;
-/// 指向选区那条小尾巴的高。
+/// 动作条里一格的可点边长（逻辑像素）。拇指能稳定命中的下限是 44，而图标本身只有
+/// 20：这里取 40 是参考图里那排图标的呼吸感，一颗一颗之间不挨着。
+const ACTION_CELL: f32 = 40.0;
+/// 图标本身多大。参考图里那一排图标约 22，落在 40 的格子里正好。
+const ACTION_ICON: f32 = 21.0;
+/// 动作条的内缩：上下左右各 4，整条于是 48 高。
+const BAR_PAD: f32 = 4.0;
+/// 颜色胶囊的内缩与高：五枚 20 的圆点，上下各留 6。
+const SWATCH_PAD: f32 = 6.0;
+const SWATCH_DOT: f32 = 20.0;
+/// 一枚颜色格子的可点宽。比圆点宽 6，五枚连起来仍然比动作条窄。
+const SWATCH_CELL: f32 = 28.0;
+/// 颜色胶囊的高（与摆位共用）。
+const SWATCH_BAR: f32 = SWATCH_DOT + SWATCH_PAD * 2.0;
+/// 动作条与颜色胶囊之间的缝。
+const BAR_GAP: f32 = 6.0;
+/// 指向选区那条小尾巴的高与宽。
 const MENU_TAIL: f32 = 8.0;
+const MENU_TAIL_WIDTH: f32 = 16.0;
 /// 菜单与选区之间的缝，也是它与视口上下边的最小间距。
 const MENU_GAP: f32 = 6.0;
-/// 颜色那一行的高。五枚圆点 20 见方，上下各留 7 —— 这一行不需要文字，
-/// 颜色本身就是它的说明。
-const MENU_SWATCH: f32 = 34.0;
-/// 一枚颜色圆点的直径。
-const SWATCH_DOT: f32 = 20.0;
 /// 叠在圆点上的那枚勾的字号（`Icon` 取当前文字号）。
 const SWATCH_CHECK: f32 = 13.0;
 
+/// 动作条那一行的宽：四格 + 左右内缩。整块菜单的横向居中按它算。
+const ACTION_BAR_WIDTH: f32 = ACTION_CELL * 4.0 + BAR_PAD * 2.0;
+
 /// 整块菜单占的高（含尾巴）：摆位与「放不下就翻面」都按这个数算。
-/// 颜色那一行**恒在**，所以没有「一行 / 两行」两种高。
+/// 动作条 + 缝 + 颜色胶囊 + 尾巴；颜色那一行**恒在**，所以没有「一行 / 两行」两种高。
 pub(in crate::ui::features::reader) const fn card_height() -> f32 {
-    MENU_CELL + MENU_PAD * 2.0 + MENU_SWATCH + MENU_TAIL
+    ACTION_CELL + BAR_PAD * 2.0 + BAR_GAP + SWATCH_BAR + MENU_TAIL
+}
+
+/// 整块菜单的宽。颜色胶囊比动作条窄，真正决定横向占位的是动作条。
+pub(in crate::ui::features::reader) const fn card_width() -> f32 {
+    ACTION_BAR_WIDTH
 }
 
 /// 这一帧菜单该摆在哪。
@@ -98,6 +115,7 @@ impl ReaderSession {
         &self,
         cx: &mut Context<Self>,
         slot: &Slot,
+        anchor_x: Option<f32>,
     ) -> Option<AnyElement> {
         let (top, tail_up) = match slot {
             Slot::Above(top) => (*top, false),
@@ -107,7 +125,9 @@ impl ReaderSession {
         };
         let reader = cx.entity().clone();
         let bounds_cell = self.menu_bounds.clone();
-        let surface = cx.theme().popover;
+        let surface = cx.theme().muted;
+        let foreground = cx.theme().foreground;
+        let hover = cx.theme().border;
         let palette = Palette::of(cx.theme());
         // 勾选标记压在圆点上，取的是页面底色：浅色主题圆点是深色（`*-600`）、底色近白，
         // 深色主题圆点是浅色（`*-400`）、底色近黑 —— 一个数在两套主题里都够对比。
@@ -115,84 +135,101 @@ impl ReaderSession {
         let copy = tr(cx, "reader.sel_copy");
         let highlight = tr(cx, "reader.sel_highlight");
         let unhighlight = tr(cx, "reader.sel_unhighlight");
-        let paragraph = tr(cx, "reader.sel_paragraph");
-        let chapter = tr(cx, "reader.sel_chapter");
         let cancel = tr(cx, "reader.sel_cancel");
         // 挑中的正是留在书上的那一条时，第二格改做「取消划线」；下面那一行颜色恒在，
         // 只是给它那一档多打一枚勾。
         let marked = self.selection_annotation();
+        let has_note = marked
+            .as_ref()
+            .is_some_and(|(id, _)| self.annotation_has_note(*id));
         let mark_cell = match marked {
-            Some(_) => menu_cell(
+            Some(_) => action_cell(
                 "selection-unhighlight",
                 IconName::Trash,
                 unhighlight,
+                foreground,
+                hover,
                 reader.clone(),
                 |r, _, cx| r.delete_highlight(cx),
             ),
-            None => menu_cell(
+            None => action_cell(
                 "selection-highlight",
                 IconName::Highlighter,
                 highlight,
+                foreground,
+                hover,
                 reader.clone(),
                 |r, _, cx| r.add_highlight(cx),
             ),
         };
+        let note_icon = if has_note {
+            IconName::StickyNoteCheck
+        } else {
+            IconName::StickyNote
+        };
         // 颜色那一行恒在。挑中的正是库里某条划线时，给它那一档打勾、点色即换色；
         // 普通选区没有「当下那一档」，点色即「就用这个色划一条」。
         let current = marked.as_ref().map(|(_, color)| color.as_str());
-        let colors = swatch_row(reader.clone(), &palette, check, current);
+        let actions = h_flex()
+            .p(px(BAR_PAD))
+            .gap_0()
+            .rounded(px(14.0))
+            .bg(surface)
+            .shadow(floating_shadow())
+            .child(action_cell(
+                "selection-copy",
+                IconName::Copy,
+                copy,
+                foreground,
+                hover,
+                reader.clone(),
+                |r, _, cx| r.copy_selection(cx),
+            ))
+            .child(mark_cell)
+            .child(action_cell(
+                "selection-note",
+                note_icon,
+                tr(cx, "reader.sel_note"),
+                foreground,
+                hover,
+                reader.clone(),
+                |r, window, cx| r.open_note_editor(window, cx),
+            ))
+            .child(action_cell(
+                "selection-cancel",
+                IconName::X,
+                cancel,
+                foreground,
+                hover,
+                reader.clone(),
+                |r, _, cx| {
+                    r.clear_selection();
+                    cx.notify();
+                },
+            ));
+        let swatches = swatch_row(reader.clone(), &palette, surface, check, current);
+        // 横向对着选区中线；中线不在手上（首帧还没画过）就居中在正文那一条上。
+        // 两种摆法都夹在页内，不把卡片顶出屏幕。
+        let page_width = f32::from(self.content_bounds.get().size.width);
+        let left = menu_left(page_width, self.prefs.margin_x, card_width(), anchor_x);
+        let mut bars = v_flex().items_center().child(actions).child(
+            // 一条空 div 当缝：`card_height` 算的就是这 6 像素，不能靠 `gap` 的两套账。
+            div().h(px(BAR_GAP)).flex_none(),
+        );
+        bars = bars.child(swatches);
         Some(
             v_flex()
+                .id("selection-menu")
+                // 菜单的点击必须先被它自己吃掉：正文的 hitbox 是整屏的，gpui 会把同一下
+                // 依次发给每个含按下点的 handler。少了这一条，点「划线」会同时命中正文，
+                // 轻则多画一帧，重则把顶栏底栏也翻出来 —— 读者看到的就是闪一下。
+                .occlude()
                 .absolute()
-                .left(px(self.prefs.margin_x))
+                .left(px(left))
                 .top(px(top))
+                .items_center()
                 .children(tail_up.then(|| menu_tail(true, surface)))
-                .child(
-                    v_flex()
-                        .p(px(MENU_PAD))
-                        // 两行之间不留缝：`card_height` 算的就是「格子高 + 颜色行 + 内缩 + 尾巴」，
-                        // 中间再插一段 gap 就成了第二个真相源，摆位按少算的那几像素翻面。
-                        .gap_0()
-                        .rounded(px(10.0))
-                        .popover_style(cx)
-                        .child(
-                            h_flex()
-                                .gap_0()
-                                .child(menu_cell(
-                                    "selection-copy",
-                                    IconName::Copy,
-                                    copy,
-                                    reader.clone(),
-                                    |r, _, cx| r.copy_selection(cx),
-                                ))
-                                .child(mark_cell)
-                                .child(menu_cell(
-                                    "selection-paragraph",
-                                    IconName::Pilcrow,
-                                    paragraph,
-                                    reader.clone(),
-                                    |r, window, cx| r.select_paragraph(window, cx),
-                                ))
-                                .child(menu_cell(
-                                    "selection-chapter",
-                                    IconName::BookText,
-                                    chapter,
-                                    reader.clone(),
-                                    |r, _, cx| r.select_chapter(cx),
-                                ))
-                                .child(menu_cell(
-                                    "selection-cancel",
-                                    IconName::X,
-                                    cancel,
-                                    reader.clone(),
-                                    |r, _, cx| {
-                                        r.clear_selection();
-                                        cx.notify();
-                                    },
-                                )),
-                        )
-                        .child(colors),
-                )
+                .child(bars)
                 .children((!tail_up).then(|| menu_tail(false, surface)))
                 // 记下这一帧菜单真实落地的位置（窗口坐标），点按判定要用。
                 .child(
@@ -208,28 +245,37 @@ impl ReaderSession {
     }
 }
 
-/// 菜单里的一格。动作按参数传进来，五格只差图标、文字与那一下做什么。
+/// 动作条里的一格。只有图标；`label` 不画出来，只留给无障碍与排障时读。
 ///
-/// 图标画多大由 `text_size` 定（`Icon` 取的是当前文字号），文字单独压小一档：
-/// 一格 56 像素里图标占 24，文字再占 11，剩下的留给上下留白。
-fn menu_cell(
+/// 图标画多大由 `text_size` 定（`Icon` 取的是当前文字号）。参考图里那一排没有文字，
+/// 所以 `label` 只进 `accessibility`；不要把它当成「文字太小看不见」。
+fn action_cell(
     id: &'static str,
     icon: IconName,
     label: SharedString,
+    foreground: Hsla,
+    hover: Hsla,
     reader: Entity<ReaderSession>,
     action: impl Fn(&mut ReaderSession, &mut Window, &mut Context<ReaderSession>) + 'static,
 ) -> AnyElement {
-    v_flex()
+    div()
         .id(id)
-        .w(px(MENU_CELL))
-        .h(px(MENU_CELL))
+        .w(px(ACTION_CELL))
+        .h(px(ACTION_CELL))
+        .flex()
         .items_center()
         .justify_center()
-        .gap_1()
-        .rounded_md()
+        .rounded(px(9.0))
         .cursor_pointer()
-        .child(div().text_size(px(24.0)).child(Icon::new(icon)))
-        .child(div().text_size(px(11.0)).child(label))
+        .hover(move |style| style.bg(hover))
+        .child(
+            div()
+                .text_size(px(ACTION_ICON))
+                .text_color(foreground)
+                .child(Icon::new(icon)),
+        )
+        // `label` 在这条链里没有可见的位置：图标按钮的说明只走无障碍。
+        .aria_label(label)
         .on_click(move |_, window, cx| {
             reader.update(cx, |reader, cx| action(reader, window, cx));
         })
@@ -238,25 +284,32 @@ fn menu_cell(
 
 /// 颜色那一行：`ANNOTATION_COLORS` 那五档按库里的顺序摆。
 ///
-/// 格子与上面那行同宽（`MENU_CELL`）。挑中的正是库里某条划线时，它那一档的圆点上叠一枚
-/// 勾（`check` 是页面底色，压在色块上对比得出）；普通选区没有勾 —— 挑选中的是哪一个
-/// 颜色，光靠色块本身看不出来。点哪一格：已有划线改色，普通选区就用这个色划一条。
+/// 挑中的正是库里某条划线时，它那一档的圆点上叠一枚勾（`check` 是页面底色，压在色块上
+/// 对比得出）；普通选区没有勾 —— 挑选中的是哪一个颜色，光靠色块本身看不出来。
+/// 点哪一格：已有划线改色，普通选区就用这个色划一条。
 fn swatch_row(
     reader: Entity<ReaderSession>,
     palette: &Palette,
+    surface: Hsla,
     check: Hsla,
     current: Option<&str>,
 ) -> AnyElement {
     h_flex()
+        .px(px(SWATCH_PAD))
+        .h(px(SWATCH_BAR))
         .gap_0()
+        .rounded(px(SWATCH_BAR / 2.0))
+        .bg(surface)
+        .shadow(floating_shadow())
         .children(ANNOTATION_COLORS.iter().enumerate().map(|(ix, name)| {
             let name = *name;
             let active = current == Some(name);
             let reader = reader.clone();
             div()
                 .id(("selection-swatch", ix))
-                .w(px(MENU_CELL))
-                .h(px(MENU_SWATCH))
+                .w(px(SWATCH_CELL))
+                // 整格 28×32 都可点：圆点只有 20，命中区按视觉尺寸给就会很难按中。
+                .h(px(SWATCH_BAR))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -288,7 +341,33 @@ fn swatch_row(
         .into_any_element()
 }
 
-/// 指向选区的那条小尾巴：一个实心三角形，填色与卡片同一份 `popover` 底色。
+/// 菜单横向落在哪儿：优先对着选区中线，没有锚点就居中；两边都夹在页内。
+///
+/// `page_width` 是正文那一栏的宽（不是窗口宽：分页/双页时正文只占其中一栏）。
+/// `anchor_x` 是选区首末高亮中线的平均，单位与正文元素同一套局部坐标。
+pub(in crate::ui::features::reader) fn menu_left(
+    page_width: f32,
+    margin: f32,
+    width: f32,
+    anchor_x: Option<f32>,
+) -> f32 {
+    // 页宽还没量到的那一帧，夹出来的上界会小于下界：统一退到左边距。
+    let max_left = (page_width - width - margin).max(margin);
+    let wanted = match anchor_x {
+        Some(x) if page_width > width + margin * 2.0 => x - width * 0.5,
+        _ if page_width > width + margin * 2.0 => (page_width - width) * 0.5,
+        _ => return margin,
+    };
+    wanted.clamp(margin, max_left)
+}
+
+/// 浮条那层投影：与顶栏同一档的柔影，不借 `popover_style` 的 ring ——
+/// 参考图里那两条是压在纸上的轻浮层，描一圈边会读成「另一个窗口」。
+fn floating_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.18)).blur_radius(px(8.))]
+}
+
+/// 指向选区的那条小尾巴：一个实心三角形，填色与浮条同一份表面色。
 fn menu_tail(up: bool, surface: Hsla) -> AnyElement {
     canvas(
         |_, _, _| {},
@@ -316,7 +395,7 @@ fn menu_tail(up: bool, surface: Hsla) -> AnyElement {
             }
         },
     )
-    .w(px(MENU_TAIL * 2.0))
+    .w(px(MENU_TAIL_WIDTH))
     .h(px(MENU_TAIL))
     .self_center()
     .into_any_element()
@@ -330,9 +409,11 @@ mod tests {
     //! 点名导入而不 `use super::*`：`gpui_kit` 根把 `gpui` 整个转了出来，里面有一个
     //! 叫 `test` 的属性宏，glob 会让下面的 `#[test]` 递归展开成它。
 
-    use super::{MENU_CELL, MENU_PAD, MENU_SWATCH, MENU_TAIL, Slot, card_height, slot};
+    use super::{
+        ACTION_CELL, BAR_GAP, BAR_PAD, MENU_TAIL, SWATCH_BAR, Slot, card_height, menu_left, slot,
+    };
 
-    /// 卡片总高（动作行 + 恒在的颜色行）。摆位只认递进去的这个数。
+    /// 卡片总高（动作条 + 颜色胶囊）。摆位只认递进去的这个数。
     const CARD: f32 = card_height();
 
     /// 顶部够用时摆在选区之上，尾巴朝下。
@@ -368,14 +449,14 @@ mod tests {
         ));
     }
 
-    /// 菜单恒是两行：摆位用的高必须把颜色那一行算进去。漏掉 `MENU_SWATCH` 那一项，
-    /// 卡片就会比算出来的高多出一行、贴到屏幕顶边上去 —— 这条就是防那个的。
+    /// 菜单恒是两块：摆位用的高必须把颜色胶囊与中间的缝都算进去。漏掉任何一项，
+    /// 卡片就会比算出来的高多出一截、贴到屏幕顶边上去 —— 这条就是防那个的。
     #[test]
-    fn the_card_height_includes_the_color_row() {
-        let actions_only = MENU_CELL + MENU_PAD * 2.0 + MENU_TAIL;
+    fn the_card_height_includes_the_swatches_and_the_gap() {
+        let actions_only = ACTION_CELL + BAR_PAD * 2.0 + MENU_TAIL;
         assert!(
-            CARD >= actions_only + MENU_SWATCH,
-            "卡片高没把颜色那一行算进去：{CARD}"
+            CARD >= actions_only + SWATCH_BAR + BAR_GAP,
+            "卡片高没把颜色胶囊或中间那道缝算进去：{CARD}"
         );
     }
 
@@ -400,5 +481,19 @@ mod tests {
         assert_eq!(slot(None, Some(300.0), 900.0, CARD), Slot::Hidden);
         assert_eq!(slot(Some(300.0), None, 900.0, CARD), Slot::Hidden);
         assert_eq!(slot(None, None, 900.0, CARD), Slot::Hidden);
+    }
+
+    /// 横向摆位：对着选区中线，但永远夹在页内；首帧没有中线时居中。
+    #[test]
+    fn the_menu_stays_inside_the_page() {
+        let width = 168.0;
+        let margin = 24.0;
+        assert_eq!(menu_left(1000.0, margin, width, Some(500.0)), 416.0);
+        assert_eq!(menu_left(1000.0, margin, width, Some(0.0)), margin);
+        assert_eq!(menu_left(1000.0, margin, width, Some(1000.0)), 808.0);
+        assert_eq!(menu_left(1000.0, margin, width, None), 416.0);
+        // 页宽还没量到、或窄到放不下整条：退到左边距，不给负数也不顶出右边。
+        assert_eq!(menu_left(0.0, margin, width, Some(500.0)), margin);
+        assert_eq!(menu_left(150.0, margin, width, None), margin);
     }
 }

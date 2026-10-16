@@ -12,7 +12,9 @@
 //! - [`image_atlas`] —— 书里的图与 GPU 图集之间那层**会回收**的缓存（谁持有像素、什么时候放掉）。
 //! - [`image_viewer`] —— 把一张图摊满整屏看：状态、纯几何与那一层浮层。
 //! - [`view`] —— `impl Render`：把会话状态摆成元素、接住滚轮。
-//! - [`selection_menu`] —— 选中的就地菜单（图标格子卡）与它的摆位判断。
+//! - [`selection_menu`] —— 选中的就地菜单（图标浮条 + 颜色胶囊）与它的摆位判断。
+//! - [`note_editor`] —— 选中之后就地为这一段写笔记的那张便签。
+//! - [`turn`] —— 翻页决策（连续 / 分页 / 双页、章界），纯函数，宿主直接测。
 //! - [`page`] —— 盖在整窗上的那一屏：干净态两条小字 + 浮出的顶栏与底栏（挂在它自己那条子栈的栈底）。
 //! - [`chrome`] —— 纯判断（分区、面板档位、模式退档、进度念法），无 gpui，宿主测试直接跑。
 //! - [`toc_tree`] —— 目录树的纯判断（摊平、折叠、当前行、搜索），同上。
@@ -36,6 +38,7 @@ mod image_atlas;
 mod image_viewer;
 mod measure;
 mod modules;
+mod note_editor;
 mod page;
 mod paint;
 mod perf;
@@ -44,8 +47,9 @@ mod selection_menu;
 mod session;
 mod toc_panel;
 mod toc_tree;
+mod turn;
 mod view;
 
-pub use chrome::Reserve;
+pub use chrome::{Arrow, Reserve};
 pub use page::ReadingPage;
 pub use session::ReaderSession;

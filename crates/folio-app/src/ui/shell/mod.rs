@@ -22,7 +22,6 @@ use gpui_kit::base::motion::{
 };
 use gpui_kit::base::{NavMotion, NavOperation, NavPage, NavStack, NavStackEvent, NavStackState};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
     IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled, Subscription, Task,
@@ -30,7 +29,7 @@ use gpui_kit::{
 };
 
 use crate::ui::features::notes::NotesView;
-use crate::ui::features::reader::{ReadingPage, Reserve};
+use crate::ui::features::reader::{Arrow, ReadingPage, Reserve};
 use crate::ui::features::settings::{CompactSettings, SettingsPage, SettingsView};
 use crate::ui::features::shelf::{ShelfEvent, ShelfView};
 use crate::ui::features::stats::{StatsEvent, StatsView};
@@ -54,7 +53,15 @@ use gpui_kit::TestSupportExt as _;
 // 两个动作按**物理键**命名而不是「上一页 / 下一页」：翻页方向归 [`VolumeKey::of`]，
 // 而它还要在「不在阅读页」那一支把这一按还给系统调音量 —— 调音量得知道按的是上还是下，
 // 所以动作必须带住「哪一颗键」，不能只带「往哪翻」。
-actions!(folio_shell, [Back, VolumeUp, VolumeDown]);
+//
+// `ArrowLeft/Right/Up/Down` 是 PC 的方向键（见 `reader::chrome::Arrow`）：名字同样是物理键，
+// 左右在 RTL 的书里要换手，带上「哪一颗键」才换得回来。
+actions!(
+    folio_shell,
+    [
+        Back, VolumeUp, VolumeDown, ArrowLeft, ArrowRight, ArrowUp, ArrowDown,
+    ]
+);
 
 /// 一次音量键按下该去哪儿。
 ///
@@ -116,8 +123,8 @@ pub fn reading_brightness(reading_mounted: bool, prefs: Option<f32>) -> Option<f
 ///
 /// **底边不在这里**：底边不让层 —— 底下那条手势条由底栏卡片与干净态页脚自己抬高内容、
 /// 把底色铺到屏幕底（见 `reader::page` 的 `bottom_inset`），这样卡片与屏幕底之间不是一条空缝。
-/// 宽也不在：阅读层 `inset_0` 盖满整窗，左右两条边没人占（目录那条左侧栏由阅读页自己加回去，
-/// 见 `reader::page`）。
+/// 宽也不在：阅读层 `inset_0` 盖满整窗，左右两条边没人占（平板 / PC 的目录现在是一层
+/// 压在正文上的抽屉，不再让宽，见 `reader::toc_panel`）。
 ///
 /// 与 [`reading_reserve`] 是同一个数：那一个是给**量正文**用的（正文自己量窗口高，全靠
 /// 它把盒高减对），这一个是给**摆层**用的。两处不一致时，正文盒会比层里真正可用的地方多/少
@@ -126,8 +133,8 @@ pub fn reading_top_inset(safe: &host::Insets) -> f32 {
     safe.top
 }
 
-/// 报给正文的「不属于它的那一段」。两个轴都带着：正文自己看哪一轴非零（宽那一轴现在只由
-/// 目录那条左侧栏占，见 `reader::page` 里把 `rail` 加回去那一步）。
+/// 报给正文的「不属于它的那一段」。两个轴都带着：正文自己看哪一轴非零（目录改成浮层之后
+/// 宽那一轴恒为 0，只剩外壳自己的占位；见 `reader::page` 里把 `reserve` 递回去那一步）。
 ///
 /// 高 = 顶上那一条（[`reading_top_inset`]）+ 底下那一条。顶上那一条阅读层自己让（把子元素
 /// 整体推下去）；底下那一条**不让层** —— 底栏卡片与干净态那条页脚自己抬高内容、把底色铺到
@@ -384,10 +391,22 @@ impl AppShell {
         cx.bind_keys([KeyBinding::new("escape", Back, None)]);
         // 音量键 → 这两个动作。归谁管在 `volume_key` 里判（阅读页翻页，别处调系统音量），
         // 所以这里两条都无上下文地绑上：Android 的音量键不经过任何输入框，不存在和打字
-        // 抢键的问题；桌面那几个方向键要抢，就得先给阅读页一条 key context，另做一轮。
+        // 抢键的问题。
         cx.bind_keys([
             KeyBinding::new("volumeup", VolumeUp, None),
             KeyBinding::new("volumedown", VolumeDown, None),
+        ]);
+        // 方向键（PC）→ 翻页。四条同样无上下文地绑：焦点是文字输入时 gpui **根本不派发
+        // 键绑定**（`InputPreference::CharacterInput`，见 `Window::dispatch_key_event`），
+        // 所以搜索框、设置页里的输入框不必另设一条 key context；其余看书的翻页方向、
+        // 子栈上有没有压着别的屏、图片查看器开没开，判据在
+        // [`ReadingPage::arrow_turn`]。那边不接时这里的处理者 `propagate`，这一键就
+        // 落回焦点元素自己（滑条、列表、下拉都拿得到）。
+        cx.bind_keys([
+            KeyBinding::new("left", ArrowLeft, None),
+            KeyBinding::new("right", ArrowRight, None),
+            KeyBinding::new("up", ArrowUp, None),
+            KeyBinding::new("down", ArrowDown, None),
         ]);
 
         // 先把主题的应用字体换成这台设备真能解析出的家族，再建任何用文字的视图：
@@ -554,6 +573,34 @@ impl AppShell {
         App::on_action(&mut *cx, move |_: &VolumeDown, cx: &mut App| {
             if let Some(shell) = weak.upgrade() {
                 shell.update(cx, |this, cx| this.volume_key(false, cx));
+            }
+        });
+
+        // 方向键四条。与音量键同一个位置、同一个理由：这几个键要在**没有焦点**时也
+        // 有效（正文本身不拿焦点），元素级 `.on_action` 那时候收不到。归不归阅读页由
+        // [`ReadingPage::arrow_turn`] 判，不归就 `propagate`（见 [`AppShell::arrow_key`]）。
+        let weak = cx.entity().downgrade();
+        App::on_action(&mut *cx, move |_: &ArrowLeft, cx: &mut App| {
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |this, cx| this.arrow_key(Arrow::Left, cx));
+            }
+        });
+        let weak = cx.entity().downgrade();
+        App::on_action(&mut *cx, move |_: &ArrowRight, cx: &mut App| {
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |this, cx| this.arrow_key(Arrow::Right, cx));
+            }
+        });
+        let weak = cx.entity().downgrade();
+        App::on_action(&mut *cx, move |_: &ArrowUp, cx: &mut App| {
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |this, cx| this.arrow_key(Arrow::Up, cx));
+            }
+        });
+        let weak = cx.entity().downgrade();
+        App::on_action(&mut *cx, move |_: &ArrowDown, cx: &mut App| {
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |this, cx| this.arrow_key(Arrow::Down, cx));
             }
         });
 
@@ -800,11 +847,17 @@ impl AppShell {
     /// （`Pop` / `Exiting`）—— 与栈里每一页同一只手，读者不必学两种方向。`Presence` 那两个数
     /// 怎么对接到「走了多远」在 [`layer_offset`]。
     ///
-    /// 定住的时候（`Present`）一个样式都不加，这一层就是 `inset_0` 铺满整窗。动的时候挂
-    /// `.occlude()`：与 `NavStack` 在转场里拦住点击同一个理由 —— 正在滑的那 280 毫秒里，
-    /// 落在纸上的一击既不该算给这一页也不该算给下一页。
+    /// 这一层**始终**挂 `.occlude()`：进场、定住、退场都一样。gpui 的鼠标事件按 hitbox
+    /// 分发 —— 一次点击会发给**每一个** hitbox 含有按下点的 handler，不透明的背景并不会
+    /// 自动给后面的元素设边界。少了这一条，定住时点正文会同时命中身后书架上的卡片：
+    /// 书架发 `ShelfEvent::Open`，外壳已经开着书，于是 `page.open(book_id)` 把当前书换掉
+    /// 重载 —— 读者看到的是「点阅读界面突然进了另一本书 / 划线时闪一下」。转场那 280ms
+    /// 当然也要挡，但那只解决了一半。
     ///
-    /// 底下的架面在动画期间一动不动：这一层是不透明的整屏，它盖着。
+    /// `occlude` 挡的是**这一层后面**的 hitbox；这一层的子元素（正文、菜单、目录、设置、
+    /// 图片查看器）画在它前面，照常收事件。
+    ///
+    /// 底下的架面在这一层存在期间一动不动：它被这一层盖着，也不该再收到 hover 或滚轮。
     ///
     /// 整屏也要给系统让开顶上那一条（[`reading_top_inset`]）：返回栏与干净态那行章名落到
     /// 状态栏／挖孔下面，不贴屏幕顶。层自己的底色照旧铺满整窗（背景画的是 padding 也在内的
@@ -827,13 +880,7 @@ impl AppShell {
             .left(px(shift))
             .right(px(-shift))
             .opacity(alpha)
-            .when(
-                matches!(
-                    sample.phase,
-                    PresencePhase::Entering | PresencePhase::Exiting
-                ),
-                |this| this.occlude(),
-            )
+            .occlude()
             .child(
                 NavStack::new(&layer.stack)
                     .size_full()
@@ -856,6 +903,23 @@ impl AppShell {
                 }
             }
             VolumeKey::SystemVolume { up } => crate::ui::platform::adjust_system_volume(up),
+        }
+    }
+
+    /// 方向键按下（PC）：翻页，或者把这一键放回焦点元素。
+    ///
+    /// 没有书挂着、子栈上压着别的屏、图片查看器开着这三档都不接 —— 前两档是「这一键
+    /// 属于别人」，最后一档是「那一层自己的 `on_key_down` 在键绑定之后跑」。判据在
+    /// [`ReadingPage::arrow_turn`]，这里只负责在它说不接时 `propagate`：不 `propagate`
+    /// 的话，这一键就被外壳吃掉了，下面的滑条 / 列表永远拿不到。
+    fn arrow_key(&mut self, arrow: Arrow, cx: &mut Context<Self>) {
+        let Some(layer) = self.reading.as_ref() else {
+            cx.propagate();
+            return;
+        };
+        let handled = layer.page.update(cx, |page, cx| page.arrow_turn(arrow, cx));
+        if !handled {
+            cx.propagate();
         }
     }
 

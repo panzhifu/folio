@@ -30,14 +30,17 @@ use folio_core::content::anchor::TextMap;
 use folio_core::content::annotation::{ResolvedAnnotation, resolve_annotations};
 use folio_core::store::{ANNOTATION_COLORS, Annotation};
 use gpui_kit::component::Theme;
-use gpui_kit::{App, Context, Hsla, Pixels, Point, Window};
+use gpui_kit::component::input::{InputEvent, TextareaState};
+use gpui_kit::{App, AppContext as _, Context, Hsla, Pixels, Point, Window};
 
+use super::super::note_editor::NoteEditor;
 use super::super::session::{AnnotationSpans, ReaderSession, Selection};
+use crate::ui::shared::l10n::tr;
 
 /// 点「划线」时用的那一种颜色（读者没先点某一枚圆点）。清单在
 /// `folio_core::store::ANNOTATION_COLORS`：amber 是其中那档黄 —— 传统划线色，
 /// 也是参考图里给勾选标记的那一枚。
-const DEFAULT_COLOR: &str = "amber";
+pub(super) const DEFAULT_COLOR: &str = "amber";
 
 impl ReaderSession {
     /// 把库里的批注原样读回一份（还没解锚）。开书时一次，写入之后再来一次。
@@ -274,26 +277,149 @@ impl ReaderSession {
         cx.notify();
     }
 
-    /// 全选本章：从章首到章尾。选区仍挂在它自己那一章上。
-    pub fn select_chapter(&mut self, cx: &mut Context<Self>) {
-        let Some(selected) = self.selection.clone() else {
-            return;
-        };
-        let Some(total) = self
-            .book()
-            .and_then(|book| book.span_doc(selected.chapter))
-            .map(|doc| doc.text_map().chars())
-        else {
-            return;
-        };
-        if total == 0 {
+    /// 这一条批注有没有文字笔记。菜单上那格图标换不换，按它决定。
+    pub fn annotation_has_note(&self, id: i64) -> bool {
+        self.annotations
+            .iter()
+            .any(|row| row.id == id && !row.note.trim().is_empty())
+    }
+
+    /// 就地为当前选区写笔记。挑中的正好是库里某条划线时，输入框里带出它原有的笔记；
+    /// 否则是一张空白便签，保存那一刻才落一条新批注。
+    ///
+    /// 输入框在这里建而不是每帧建：`TextareaState` 握着光标、选区与撤销历史，
+    /// 每帧新建会把读者刚打的字连同光标一起丢回第一帧。
+    pub fn open_note_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection.is_none() {
             return;
         }
-        self.selection = Some(Selection {
-            chapter: selected.chapter,
-            range: 0..total,
+        let existing = self.selection_annotation();
+        let note = existing
+            .as_ref()
+            .and_then(|(id, _)| self.annotations.iter().find(|row| row.id == *id))
+            .map(|row| row.note.clone())
+            .unwrap_or_default();
+        // 引文只留开头一段：选了一整章也能一秒画完，`line_clamp(2)` 之外的部分本来也看不见。
+        // 在这里取一次而不是每帧重切：便签压着时选区不会变。
+        let excerpt: String = self
+            .selected_text()
+            .map(|text| {
+                let mut chars = text.chars();
+                let head: String = chars.by_ref().take(160).collect();
+                if chars.next().is_some() {
+                    format!("{head}…")
+                } else {
+                    head
+                }
+            })
+            .unwrap_or_default();
+        let placeholder = tr(cx, "reader.note_placeholder");
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(placeholder)
+                .default_value(note)
         });
+        // 输入一变就重画这一层：保存键在「新笔记还空着」时是灰的，得跟着框里的字翻。
+        let watch = cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify());
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.note_editor = Some(NoteEditor {
+            input,
+            annotation: existing,
+            excerpt: excerpt.into(),
+            _watch: watch,
+        });
+        self.selection_menu_open = false;
         cx.notify();
+    }
+
+    /// 保存笔记。已有批注走 `update_annotation`（笔记与原来的颜色一起写回），
+    /// 普通选区才新建一条 —— 两件事混成一条「先划再改」，只改笔记时会多落一条。
+    pub fn save_note(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.note_editor.take() else {
+            return;
+        };
+        let text = editor.input.read(cx).value().trim().to_string();
+        let Some(selected) = self.selection.clone() else {
+            cx.notify();
+            return;
+        };
+        if let Some((id, color)) = editor.annotation {
+            let Some(store) = self.store.clone() else {
+                tracing::warn!(annotation_id = id, "笔记: 书库没装，这一条改不了");
+                self.selection_menu_open = true;
+                cx.notify();
+                return;
+            };
+            match store.update_annotation(id, &text, &color) {
+                Ok(()) => {
+                    tracing::info!(annotation_id = id, "笔记: 改一条批注的笔记");
+                    self.load_annotations();
+                    self.clear_selection();
+                }
+                Err(err) => {
+                    tracing::error!(annotation_id = id, error = %err, "笔记: 写库失败");
+                    self.selection_menu_open = true;
+                }
+            }
+            cx.notify();
+            return;
+        }
+        // 新笔记空着等于什么都没发生：把菜单还给读者，让他改按「划线」或某枚颜色。
+        if text.is_empty() {
+            self.selection_menu_open = true;
+            cx.notify();
+            return;
+        }
+        let Some(anchor) = self.anchor_for(&selected) else {
+            tracing::warn!(
+                book_id = ?self.book_id,
+                chapter = selected.chapter + 1,
+                "笔记: 排版还没跟上，这一条没落库"
+            );
+            self.selection_menu_open = true;
+            cx.notify();
+            return;
+        };
+        let (Some(book_id), Some(store)) = (self.book_id, self.store.clone()) else {
+            tracing::warn!(
+                book_id = ?self.book_id,
+                "笔记: 没登记进书库（没有 book_id 或书库没装），批注没处落"
+            );
+            self.selection_menu_open = true;
+            cx.notify();
+            return;
+        };
+        match store.add_annotation(book_id, &anchor, &text, DEFAULT_COLOR) {
+            Ok(id) => {
+                tracing::info!(
+                    book_id,
+                    chapter = selected.chapter + 1,
+                    annotation_id = id,
+                    color = DEFAULT_COLOR,
+                    "笔记: 落一条带笔记的批注"
+                );
+                self.load_annotations();
+                self.clear_selection();
+            }
+            Err(err) => {
+                tracing::error!(
+                    book_id,
+                    chapter = selected.chapter + 1,
+                    error = %err,
+                    "笔记: 写库失败"
+                );
+                self.selection_menu_open = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// 取消笔记：收起这一层，选区与菜单原样回去。
+    pub fn cancel_note_editor(&mut self, cx: &mut Context<Self>) {
+        if self.note_editor.take().is_some() {
+            self.selection_menu_open = self.selection.is_some();
+            cx.notify();
+        }
     }
 
     /// 选区 → 锚点。章下标与偏移都照选区自己那份，锚点里存的原文指纹由 `TextMap` 给。

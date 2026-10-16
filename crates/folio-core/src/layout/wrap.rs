@@ -205,15 +205,22 @@ impl LineAcc {
         }
     }
 
-    /// 图片底贴基线：它的整高就是本行基线以上的距离（行内替换盒没有 leading 可言）。
+    /// 行内替换盒：整高在基线以上，再按 `vertical-align` 上抬/下沉。
+    ///
+    /// 从前这里只看 `height`，图片的 `baseline_shift` 被丢在地上；`sup img` 因此
+    /// 既没有上标位移，行盒也没把它的顶算进去，视觉上就是压到上一行字上。
     pub(super) fn push_image(&mut self, img: &ImageAtom) {
-        self.width += img.width;
-        self.ascent = self.ascent.max(img.height);
+        self.width += img.advance;
+        self.ascent = self.ascent.max(img.height + img.baseline_shift.max(0.0));
+        self.descent = self.descent.max((-img.baseline_shift).max(0.0));
         self.fragments.push(LineFragment::Image(ImageRun {
             node: img.node,
             href: img.href.clone(),
             width: img.width,
             height: img.height,
+            advance: img.advance,
+            x_offset: img.x_offset,
+            baseline_shift: img.baseline_shift,
         }));
     }
 }
@@ -633,11 +640,43 @@ impl<'a> Collector<'a> {
         let aspect = super::collect::svg_aspect(self.dom, node);
         let resolved = self.provider.resolve(&src);
         let style = self.styles.get(node).unwrap_or(&DEFAULT_STYLE);
-        let (w, h) = match (&resolved, aspect) {
+        let (mut w, mut h) = match (&resolved, aspect) {
             (_, Some(ratio)) => (self.width, self.width * ratio),
             (Some(img), None) => image_size(style, img.width, img.height, self.width),
             (None, None) => return,
         };
+        // 上标里的标记图：书里的 `sup img { height: 1em; width: auto }` 常常被
+        // 作者样式表漏掉；没有这一道上限时，36×48 的「注」图会按固有尺寸顶出整行。
+        // 上限取最近那个 `<sup>` 的字号 —— 那是上标本身那一档，不是父块的正文字号。
+        let sup = self
+            .dom
+            .ancestors(node)
+            .find(|id| self.dom.tag_name(*id) == Some("sup"));
+        let sup_font = sup
+            .and_then(|id| self.styles.get(id))
+            .map(|style| style.font_size)
+            .filter(|cap| *cap > 0.0);
+        if let Some(cap) = sup_font
+            && h > cap
+        {
+            if h > 0.0 {
+                w *= cap / h;
+            }
+            h = cap;
+        }
+        // 标记图与前后字之间留一道缝。浏览器里 `sup` 边缘贴着前者是常态，可
+        // 读者看到的是「圆圈盖在字上」；这道留白只加前进量，不拉伸图片。
+        let x_offset = sup_font.map_or(0.0, |cap| (cap * 0.18).max(1.5));
+        let advance = w + x_offset * 2.0;
+        // `vertical-align` 不继承，但图片在 `sup` 里面时，那个上标位移属于它所在的行内盒。
+        // 逐级把祖先的基线偏移加回来，`<sup><a><img></a></sup>` 这条链才不会丢。
+        let mut baseline_shift = style.baseline_shift;
+        for anc in self.dom.ancestors(node) {
+            baseline_shift += self
+                .styles
+                .get(anc)
+                .map_or(0.0, |style| style.baseline_shift);
+        }
         let href = match resolved {
             Some(img) => img.href,
             None => src,
@@ -645,7 +684,7 @@ impl<'a> Collector<'a> {
         self.flush_space();
         let at = self.text.len();
         self.text.push(IMAGE_GLYPH);
-        self.widths.push(w);
+        self.widths.push(advance);
         for _ in 1..IMAGE_GLYPH.len_utf8() {
             self.widths.push(0.0);
         }
@@ -654,6 +693,9 @@ impl<'a> Collector<'a> {
             href,
             width: w,
             height: h,
+            advance,
+            x_offset,
+            baseline_shift,
             at,
         });
         self.pending_space = false;

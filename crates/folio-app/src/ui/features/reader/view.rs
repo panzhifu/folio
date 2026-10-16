@@ -49,7 +49,7 @@ use super::modules::annotations::{self, Palette};
 use super::paint::{GlyphRun, GlyphsElement, SelectionVisual, shape};
 use super::scene::{BlockDecor, Scene, VisibleImage};
 use super::selection_menu;
-use super::session::{AnnotationSpans, ReaderSession, Source, land_at_anchor};
+use super::session::{AnnotationSpans, PageRef, ReaderSession, Source, Turn, land_at_anchor};
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::images::DecodeRequest;
 use crate::ui::shell::nav_transition;
@@ -60,8 +60,9 @@ use crate::ui::shell::navigation::SizeClass;
 struct TurnFrame {
     /// 这一趟走了多少（已经过完缓动）：0 = 刚起步，1 = 走完。
     progress: f32,
-    /// 出场那一页的页号。连续滚动没有「页」⇒ `None`，那一臂只看 [`Self::scroll`]。
-    leaving: Option<usize>,
+    /// 出场与进场那两张纸。连续滚动没有「页」⇒ 两格都是 `None`，那一臂只看 [`Self::scroll`]。
+    leaving: Option<super::session::PageRef>,
+    arriving: Option<super::session::PageRef>,
     /// 连续滚动这一趟的两端（起点 = 起那一刻画出来的 y，终点 = 目标 y）。
     ///
     /// 存两端而不是存算好的当前值：拼接坐标的补偿会在动画期间挪动 `scroll_y`（邻章排版
@@ -93,6 +94,13 @@ impl ReaderSession {
             .sample(window, cx)
             .progress;
         if progress >= 1.0 {
+            // 跨章那一趟走到这里才把锚章换过去：滑动全程两张纸各在各的章里，落地这一步
+            // 之后才改成新章，命中/进度/落库都只看到一套坐标。
+            if let Some(to) = turn.arriving
+                && to.chapter != self.chapter_index()
+            {
+                self.finish_chapter_turn(to);
+            }
             // 走完的那一帧起就没有第二张要画了：进场那张的位移正好归零，出场那张已经走满
             // `dist` 出画。少摆一张省下一趟场景重建，而**减弱动态效果那一档走的就是这条路**
             // （`Presence` 在 `reduce_motion` 时直接给终值）⇒ 那一档是当场落定，不多画一张纸。
@@ -102,6 +110,7 @@ impl ReaderSession {
         Some(TurnFrame {
             progress,
             leaving: turn.leaving,
+            arriving: turn.arriving,
             scroll: turn.scroll,
             forward: turn.forward,
         })
@@ -479,17 +488,14 @@ impl Render for ReaderSession {
                         super::perf::add(|frame| frame.fills_ns += __fills);
                     }
                 } else {
-                    // —— 分页 / 双页：只用锚章那份排版，一页取几片、每片一栏 ——
-                    let column_width = book.document_mut().ensure_viewport(
-                        window,
-                        cx,
-                        Viewport {
-                            reserve: self.reserve.width,
-                            columns,
-                            height: viewport_height,
-                            gap,
-                        },
-                    );
+                    // —— 分页 / 双页：当前页 +（动画时）同章邻页或跨章目标页 ——
+                    let paged = Viewport {
+                        reserve: self.reserve.width,
+                        columns,
+                        height: viewport_height,
+                        gap,
+                    };
+                    let column_width = book.document_mut().ensure_viewport(window, cx, paged);
                     let pages = book.document().page_count();
                     self.laid_out = super::session::LaidOut {
                         mode,
@@ -518,20 +524,75 @@ impl Render for ReaderSession {
                         // 与连续臂同一句：恢复是一次跳转，不是翻一页，不该让一张从旧页号
                         // 起点的纸平移过来。
                         self.turn = None;
+                        self.pending_chapter_turn = None;
                     }
                     self.page = self.page.min(pages.saturating_sub(1));
 
-                    // 要摆的那几页：定住时只有当前这一页；动画在走时**多出出场那一页**，
-                    // 两张沿当前轴同速平移（判据与算法都在 [`chrome::slide_shifts`]）。
-                    //
-                    // 为什么两张纸共用同一份 `element` / `column` / `overlays`，而不是各配一张
-                    // 容器：位移在这里已经烘进 [`Scene::build`] 的 `x` / `top` 两个参数，而那
-                    // 两个数是 run、块级装饰与图片**一起**加的（见 `Scene::build` 里那三处加号）。
-                    // 各配一张容器就要多摊一倍元素，还要重新安排图与字形谁先入树那一坑
-                    // （上面 `column` 的底色注释记的就是它）。定长数组而不是 `Vec`：这一格
-                    // 每帧都跑，而定住的时候只用得上一格。
-                    let mut slots: [(usize, (f32, f32)); 2] = [(self.page, (0.0, 0.0)); 2];
+                    // 邻章预排版：跨章滑动要两张纸同时上屏，目标章必须先有排版与切页。
+                    // 当前章排完才铺邻章，避免刚换章时把三章的重排一起压进队列。
+                    let current = book.chapter_index();
+                    if book.document().is_current() {
+                        for delta in [-1isize, 1] {
+                            let target = current as isize + delta;
+                            if target < 0 || target as usize >= book.chapter_count() {
+                                continue;
+                            }
+                            let target = target as usize;
+                            book.ensure_paged_span(target, &self.prefs);
+                            if let Some(doc) = book.span_doc_mut(target) {
+                                doc.ensure_viewport(window, cx, paged);
+                            }
+                        }
+                    }
+
+                    // 读者在章界按了一下：目标章一排好就起滑。排版没落地时保持当前页
+                    // 不动 —— 先切章再等排版会留下白屏，正是跨章瞬切最难看的那个空档。
+                    if let Some(delta) = self.pending_chapter_turn {
+                        let target = current as isize + delta;
+                        if target >= 0
+                            && (target as usize) < book.chapter_count()
+                            && let Some(doc) = book.span_doc(target as usize)
+                            && doc.is_current()
+                        {
+                            let target = target as usize;
+                            let target_pages = doc.page_count().max(1);
+                            let target_page = if delta > 0 {
+                                0
+                            } else {
+                                target_pages.saturating_sub(1)
+                            };
+                            self.turn = Some(Turn {
+                                seq: 0,
+                                leaving: Some(PageRef {
+                                    chapter: current,
+                                    page: self.page,
+                                }),
+                                arriving: Some(PageRef {
+                                    chapter: target,
+                                    page: target_page,
+                                }),
+                                scroll: None,
+                                forward: delta > 0,
+                            });
+                            self.turn_seq += 1;
+                            self.pending_chapter_turn = None;
+                            // 这一帧的 `turn` 已经在上面采过样了；再要一帧才轮到这次滑动。
+                            window.request_animation_frame();
+                        }
+                    }
+
+                    // 要摆的那几页：定住时只有当前这一页；动画在走时**多出另一张纸**
+                    // （同章邻页，或跨章的目标页），两张沿当前轴同速平移
+                    // （判据与算法都在 [`chrome::slide_shifts`]）。
+                    let mut slots: [(PageRef, (f32, f32)); 2] = [(
+                        PageRef {
+                            chapter: current,
+                            page: self.page,
+                        },
+                        (0.0, 0.0),
+                    ); 2];
                     let mut count = 1usize;
+                    let mut cross_chapter = false;
                     if let Some(frame) = turn {
                         let dist = if vertical {
                             viewport_height
@@ -540,40 +601,49 @@ impl Render for ReaderSession {
                         };
                         let (leaving, incoming) =
                             chrome::slide_shifts(frame.progress, dist, frame.forward);
-                        slots[0] = (
-                            self.page,
-                            if vertical {
-                                (0.0, incoming)
-                            } else {
-                                (incoming, 0.0)
-                            },
-                        );
-                        // 出场页与进场页**不同章**的那种播不了：`set_page` 把页号夹在本章
-                        // 页数里，跨章要从底栏那两颗箭头走（`advance_chapter`），而它作废动画。
-                        if let Some(page) = frame.leaving.filter(|page| *page != self.page) {
-                            slots[1] = (
-                                page,
-                                if vertical {
-                                    (0.0, leaving)
-                                } else {
-                                    (leaving, 0.0)
-                                },
-                            );
+                        let shift_of = |value: f32| {
+                            if vertical { (0.0, value) } else { (value, 0.0) }
+                        };
+                        let leaving_ref = frame.leaving.unwrap_or(PageRef {
+                            chapter: current,
+                            page: self.page,
+                        });
+                        let arriving_ref = frame.arriving.unwrap_or(PageRef {
+                            chapter: current,
+                            page: self.page,
+                        });
+                        if arriving_ref.chapter != current {
+                            // 跨章：源页往外走、目标页往里走，各用各的章。
+                            cross_chapter = true;
+                            slots[0] = (leaving_ref, shift_of(leaving));
+                            slots[1] = (arriving_ref, shift_of(incoming));
                             count = 2;
+                        } else {
+                            // 同章：进场页在前（命中与 `page_shift` 归它），出场页在后。
+                            slots[0] = (arriving_ref, shift_of(incoming));
+                            if leaving_ref != arriving_ref {
+                                slots[1] = (leaving_ref, shift_of(leaving));
+                                count = 2;
+                            }
                         }
                     }
                     // 当前页这一帧偏了多少。命中换算读这一格（`to_layout` 里减掉它）：
-                    // 不减的话读者快速连点两下，按在新那一页上的手指算到空地那边去。
-                    // 出场页那一条缝里的一击不在这格的账里 —— 它落进新页的坐标系，
-                    // 而这一趟最多 `nav_transition` 那么久。
-                    self.page_shift = slots[0].1;
+                    // 跨章时两张纸的章不同，命中在 [`Self::chapter_turn_in_flight`] 已经让位，
+                    // 这里给 0 是让旧坐标不再被减第二次。
+                    self.page_shift = if cross_chapter {
+                        (0.0, 0.0)
+                    } else {
+                        slots[0].1
+                    };
 
-                    // 分页 / 双页：一页取几片、每片一栏，摆在各自的栏位上。
-                    let slices = book.document().slices();
-                    for (page, at) in slots.into_iter().take(count) {
+                    for (page_ref, at) in slots.into_iter().take(count) {
+                        let Some(doc) = book.span_doc(page_ref.chapter) else {
+                            continue;
+                        };
+                        let slices = doc.slices();
                         let (shift_x, shift_y) = at;
                         for index in 0..columns {
-                            let Some(slice) = slices.get(page * columns + index) else {
+                            let Some(slice) = slices.get(page_ref.page * columns + index) else {
                                 continue;
                             };
                             if slice.empty {
@@ -584,7 +654,7 @@ impl Render for ReaderSession {
                                 + shift_x;
                             let top = self.header_reserve + shift_y;
                             let mut scene = Scene::build(
-                                book.document(),
+                                doc,
                                 font_cache,
                                 &family,
                                 slice.lines.clone(),
@@ -596,20 +666,15 @@ impl Render for ReaderSession {
                                 link,
                             );
                             let __sh = super::perf::Timer::start();
-                            shape_runs(&mut scene, book.document(), window);
+                            shape_runs(&mut scene, doc, window);
                             let __sh = __sh.ns();
                             super::perf::add(|f| f.shape_runs_ns += __sh);
                             element.extend(scene.runs);
                             for decor in scene.decorations {
                                 column.extend(decoration_child(decor));
                             }
-                            // 两张栏的图都要摆进同一份 `overlays`。从前这里是
-                            // `overlays = scene.images...collect()`，后一栏把前一栏那几张
-                            // **整份覆盖掉** —— 双页对开时只有右边那栏的图画得出来。
-                            // 除了少画，它还让图集的账算错：被覆盖掉的那几张已经按「这一帧
-                            // 在场」记过一笔，却没有元素去画它（回收看的就是这个数）。
-                            // 动画期里出场页那几张同样走这一格 ⇒ 它们按「在场」记账，
-                            // 帧末的回收就不会把还在画的那张图放掉。
+                            // 两张栏的图都要摆进同一份 `overlays`；跨章滑动时目标章那几张
+                            // 也按「这一帧在场」记账，帧末回收就不会把还在画的图放掉。
                             for image in scene.images {
                                 let Some(rendered) = painted(&atlas, image.image.clone(), view, cx)
                                 else {
@@ -628,13 +693,13 @@ impl Render for ReaderSession {
                             let __fills = super::perf::Timer::start();
                             annotation_fills(
                                 &mut element,
-                                book.document(),
+                                doc,
                                 window,
                                 cx,
                                 &self.annotation_spans,
                                 &self.annotations,
                                 &palette,
-                                book.chapter_index(),
+                                page_ref.chapter,
                                 x,
                                 slice.origin_y,
                                 top,
@@ -655,6 +720,10 @@ impl Render for ReaderSession {
                 .is_none_or(|book| book.span_doc(selected.chapter).is_none())
         {
             self.selection = None;
+            self.selection_menu_open = false;
+            // 选区没有数据源了，笔记便签也就没有可锚的东西：别把一张能打字、存不进去的
+            // 便签留在屏上。
+            self.note_editor = None;
         }
         // 选中件（M6）：把「选区 ∩ 可见范围」换成元素局部矩形喂给字形元素
         // （高亮压在字下、把手压在字上、手势监听随 paint 注册），两端坐标留给菜单条。
@@ -751,7 +820,7 @@ impl Render for ReaderSession {
                 ));
             }
         }
-        // 菜单条锚在首行高亮之上，放不下就掉到末行高亮之下。
+        // 菜单条锚在首行高亮之上，放不下就掉到末行高亮之下；横向则对着选区中线。
         let menu_anchor = (
             visual.highlights.first().map(|rect| f32::from(rect.top())),
             visual
@@ -759,6 +828,11 @@ impl Render for ReaderSession {
                 .last()
                 .map(|rect| f32::from(rect.bottom())),
         );
+        let menu_x = visual
+            .highlights
+            .first()
+            .zip(visual.highlights.last())
+            .map(|(first, last)| (f32::from(first.center().x) + f32::from(last.center().x)) * 0.5);
         element = element.selection(visual);
         if matches!(self.source, Source::Book(_)) {
             element = element.reader(Some(cx.entity().downgrade()));
@@ -775,7 +849,7 @@ impl Render for ReaderSession {
         // 选中菜单（M6）：摆位是 `selection_menu::slot` 那条纯判断，元素本体在
         // `selection_menu.rs` 里。浮层点不住的教训见 page.rs 模块注释，所以它是压在正文
         // 之上的真按钮；拖动期间收起，松手即回。
-        // 卡片高固定两行（动作行 + 恒在的颜色行），所以不必再看这一帧有没有挑中某条划线。
+        // 卡片高固定两块（动作条 + 恒在的颜色胶囊），所以不必再看这一帧有没有挑中某条划线。
         let slot = if self.selection_menu_open() {
             selection_menu::slot(
                 menu_anchor.0,
@@ -788,9 +862,13 @@ impl Render for ReaderSession {
         };
         // 没有菜单上屏时必须把上一帧的锚位清掉：`tap_with_selection` 读的就是那份
         // bounds，留着的话「点一下菜单原来那块空地」还算点在菜单上。
-        match self.selection_menu(cx, &slot) {
+        match self.selection_menu(cx, &slot, menu_x) {
             Some(menu) => column = column.child(menu),
             None => self.menu_bounds.set(None),
+        }
+        // 笔记便签最后挂：它盖着正文、把手与菜单，遮罩上的一击归它自己。
+        if let Some(note) = self.note_editor_element(window, cx) {
+            column = column.child(note);
         }
 
         // `render` 这一段结账。收在**整条元素树搭完**之后：从前它收在连续滚动那一臂的
@@ -802,7 +880,7 @@ impl Render for ReaderSession {
         let listener = cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _window, cx| {
             // 挪动了才重画：滚到章尾夹住、分页没攒够半屏时一整帧的重建可以整份省掉
             // （判据与 gpui 的 `div` 滚动容器、zed editor 的 `scroll` 一致）。
-            if this.on_scroll(event) {
+            if this.on_scroll(event, cx) {
                 cx.notify();
             }
         });

@@ -59,14 +59,19 @@ page_position = "Page %{index} of %{total}"
 # The bottom-bar entry: two pages side by side. Narrow windows fall back to one
 # page on their own, so the label does not change with it.
 mode_spread = "Two pages"
-# Selection menu bar (M6): actions expand in place, no popover.
+# Selection menu bar (M6/M7): icon-only action bar plus a colour capsule, in place.
 sel_copy = "Copy"
 sel_highlight = "Highlight"
-# 挑中的正是留在书上的那一条时，同一格换成「取消划线」（另有一行四色可换）。
+# 挑中的正是留在书上的那一条时，同一格换成「取消划线」（另有一行五色可换）。
 sel_unhighlight = "Remove"
-sel_chapter = "Select chapter"
-sel_paragraph = "Select paragraph"
 sel_cancel = "Cancel"
+# The sticky note in the action bar: write a fresh note, or edit the one the
+# tapped highlight already has.
+sel_note = "Note"
+# The note sheet: title, input placeholder and the save button.
+note_title = "Note"
+note_placeholder = "Write a note about this passage…"
+note_save = "Save"
 # The image viewer's top row: share and save at the left, "which of how many" in the
 # middle, locate-in-text and close at the right. The labels stay short on purpose — the
 # row sits on top of the picture, and long words would push the picture out.

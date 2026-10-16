@@ -225,6 +225,48 @@ pub fn zone(x: f32, width: f32, rtl: bool) -> Zone {
     }
 }
 
+/// PC 上的一颗方向键。
+///
+/// 按**物理键**记而不是「上一页 / 下一页」：左右两颗在 RTL 的书里换手，上下不换 ——
+/// 合成一个方向就把那一轴丢了（音量键那两条动作也是按物理键命名的，同一个理由）。
+/// 判断只有 [`Arrow::turn`] 一条，宿主测试直接跑。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Arrow {
+    /// 左：从左往右读的书里往回翻，从右往左读的书里往前翻。
+    Left,
+    /// 右：与 [`Arrow::Left`] 相反。
+    Right,
+    /// 上：往回一屏。
+    Up,
+    /// 下：往前一屏。
+    Down,
+}
+
+impl Arrow {
+    /// 读书顺序里的 ±1（`+1` = 往后）。`rtl` 与 [`zone`] 那一支同源
+    /// （`ReaderSession::progression_rtl`）：左右跟它换手，上下不换。
+    pub fn turn(self, rtl: bool) -> isize {
+        match self {
+            Self::Left => {
+                if rtl {
+                    1
+                } else {
+                    -1
+                }
+            }
+            Self::Right => {
+                if rtl {
+                    -1
+                } else {
+                    1
+                }
+            }
+            Self::Up => -1,
+            Self::Down => 1,
+        }
+    }
+}
+
 /// 一次正文点击应当产生的效果。调用方照它去动正文，状态机自己只碰浮层。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Effect {
@@ -341,10 +383,26 @@ mod tests {
     //! 应该先在这里红过一次。
 
     use super::{
-        BRIGHTNESS_RANGE, Chrome, Effect, MIN_COLUMN_WIDTH, PageMode, Panel, Zone, default_mode,
-        dim_alpha, percent_label, slide_shifts, spread_fits, spread_gap, tween, zone,
+        Arrow, BRIGHTNESS_RANGE, Chrome, Effect, MIN_COLUMN_WIDTH, PageMode, Panel, Zone,
+        default_mode, dim_alpha, percent_label, slide_shifts, spread_fits, spread_gap, tween, zone,
     };
     use folio_core::infra::config::Appearance;
+
+    /// 方向键：左右跟整本的翻页方向换手，上下不换。
+    ///
+    /// 换反了不报错，只是「RTL 的书里按右箭头往前翻」—— 与点屏幕左右分区那一条
+    /// 口径对不上，而那一层只有键盘能摸到。
+    #[test]
+    fn the_arrow_keys_follow_the_book_direction_on_one_axis() {
+        // 从左往右读：左 = 往回，右 = 往前。
+        assert_eq!((Arrow::Left.turn(false), Arrow::Right.turn(false)), (-1, 1));
+        // 从右往左读：左右对调。
+        assert_eq!((Arrow::Left.turn(true), Arrow::Right.turn(true)), (1, -1));
+        // 上下与翻页方向无关：RTL 也只换左右那一轴。
+        for rtl in [false, true] {
+            assert_eq!((Arrow::Up.turn(rtl), Arrow::Down.turn(rtl)), (-1, 1));
+        }
+    }
 
     #[test]
     fn the_body_is_split_into_three_zones() {

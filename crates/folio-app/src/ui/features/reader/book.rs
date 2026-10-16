@@ -754,4 +754,32 @@ impl Book {
     pub fn document_mut(&mut self) -> &mut Document {
         &mut self.document
     }
+
+    /// 分页/双页的邻章预排版入口：把第 `index` 章作为 `Span` 建出来（不动锚章）。
+    ///
+    /// 连续滚动走 [`Self::ensure_window_spans`]，那里按像素窗口一次铺一串；分页模式不需要
+    /// 一条拼接链，只需要「下一章第一页」与「上一章最后一页」能在一帧里被画出来 ——
+    /// 跨章滑动要两张纸同时在屏上，目标章必须先排版、先切页。
+    pub(super) fn ensure_paged_span(&mut self, index: usize, prefs: &Reader) {
+        if index >= self.chapters.len() || index == self.chapter {
+            return;
+        }
+        if self.spans.iter().any(|span| span.index == index) {
+            return;
+        }
+        let span = self.make_span(index, prefs);
+        self.spans.push(span);
+        self.spans.sort_by_key(|span| span.index);
+    }
+
+    /// 第 `index` 章的排版状态（当前章取 `document`，邻章取 `spans`）。
+    pub(super) fn span_doc_mut(&mut self, index: usize) -> Option<&mut Document> {
+        if index == self.chapter {
+            return Some(&mut self.document);
+        }
+        self.spans
+            .iter_mut()
+            .find(|span| span.index == index)
+            .map(|span| &mut span.doc)
+    }
 }

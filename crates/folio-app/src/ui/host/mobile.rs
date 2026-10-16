@@ -41,6 +41,12 @@ impl Host for MobileHost {
         true
     }
 
+    fn mouse_wheel(&self) -> bool {
+        // 那一端的「滚轮」就是手指平移（`gestures.rs` 把 pan 翻成 `ScrollWheelEvent`），
+        // 它在图片查看器里的含义是平移与横扫切图，不是缩放。
+        false
+    }
+
     fn picked_files_are_temporary(&self) -> bool {
         // Android 的 `GpuiPathPicker`、iOS 的 sandbox copy 都先把文件拷进应用自己
         // 的 cache / 沙盒再把路径交出来，导入读完必须清。

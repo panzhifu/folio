@@ -1250,6 +1250,56 @@ fn width_percent_resolves_against_the_container() {
     assert_eq!((img.width, img.height), (300.0, 200.0));
 }
 
+/// 只写 `height`：宽按纵横比反算。脚注的「注」图就是这条 ——
+/// `sup img { height:1em; width:auto }` 以前会得到「固有宽 × 1em」的扁图。
+#[test]
+fn height_in_px_scales_the_width_by_aspect_ratio() {
+    let imgs = MockImages(vec![("note.png", 36.0, 48.0)]);
+    let (_, layout) = typeset_images(
+        "<p><img src=\"note.png\"></p>",
+        "img { height: 24px }",
+        300.0,
+        &imgs,
+    );
+    let img = layout.lines[0].images().next().unwrap();
+    assert_eq!((img.width, img.height), (18.0, 24.0));
+}
+
+/// 脚注编号图在 `<sup>` 里：高度受 1em 限制、宽按比例，并且图片的基线偏移要
+/// 进到行盒的 ascent 里 —— 否则它会压到上一行。
+#[test]
+fn a_superscript_marker_image_is_capped_and_lifted_with_its_line() {
+    let imgs = MockImages(vec![("note.png", 36.0, 48.0)]);
+    let html = "<p>字<sup><a href=\"#n\"><img src=\"note.png\"></a></sup>字</p>";
+    let css = "sup { font-size: 10px; vertical-align: 6px } sup img { height: 10px; width: auto }";
+    let (_, layout) = typeset_images(html, css, 300.0, &imgs);
+    let img = layout.lines[0].images().next().unwrap();
+    assert_eq!(
+        (img.width, img.height),
+        (7.5, 10.0),
+        "宽按 36:48 反算，高受 1em 限制"
+    );
+    assert_eq!(img.baseline_shift, 6.0, "上标偏移要落在图片本身上");
+    assert!(
+        img.x_offset > 0.0 && img.advance > img.width,
+        "标记图要在前后字之间让出留白：width={} advance={} offset={}",
+        img.width,
+        img.advance,
+        img.x_offset
+    );
+    let line = &layout.lines[0];
+    assert!(
+        line.baseline >= img.height + img.baseline_shift,
+        "行盒基线之上必须容得下图片高度 + 上标偏移：{} < {}",
+        line.baseline,
+        img.height + img.baseline_shift
+    );
+    assert!(
+        line.baseline - img.height - img.baseline_shift >= 0.0,
+        "图片顶边掉出了行盒顶"
+    );
+}
+
 /// `max-width` 夹小图片，高度按纵横比跟着缩。
 #[test]
 fn max_width_clamps_and_scales_height() {

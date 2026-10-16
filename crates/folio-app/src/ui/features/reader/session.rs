@@ -27,6 +27,7 @@ use super::book::Book;
 use super::chrome::{PageMode, Reserve};
 use super::fixed::FixedBook;
 use super::measure::FontCache;
+use super::note_editor::NoteEditor;
 use crate::ui::host::device_family;
 use crate::ui::shared::config_model::ConfigHolder;
 
@@ -99,6 +100,9 @@ pub struct ReaderSession {
     pub(super) laid_out: LaidOut,
     /// 正在走的那一次翻页动画（见 [`Turn`]）。`None` = 画面定住了。
     pub(super) turn: Option<Turn>,
+    /// 方向键/点击/音量键在章界按了一下、目标章还在后台排版：等它 `is_current()`
+    /// 那一帧再起跨章滑动。`None` = 没有等待中的换章。
+    pub(super) pending_chapter_turn: Option<isize>,
     /// 每次起动画加一的时钟键，供 [`Turn::seq`] 用。
     pub(super) turn_seq: u64,
     /// 已滚过的像素（内容坐标，向下为正）。只在连续滚动里有意义。
@@ -168,6 +172,10 @@ pub struct ReaderSession {
     pub(super) selection: Option<Selection>,
     /// 就地菜单条开合。拖动期间收起（让位），成选即开。
     pub(super) selection_menu_open: bool,
+    /// 笔记编辑器（M7 二期）：打开时就地为选区写笔记，收起时为 `None`。
+    /// 输入框、改的是哪一条批注都在里面；开 / 存 / 取消在 `modules/annotations.rs`，
+    /// 元素在 `note_editor.rs`。
+    pub(super) note_editor: Option<NoteEditor>,
     /// 指针拖选的临时态：按下锚点 + 起始位置 + 是否已拖过阈值。
     pub(super) mouse_drag: Option<MouseDrag>,
     /// 长按扩展的锚点：长按吸成词后手指继续拖，活动端绕它走。
@@ -335,6 +343,7 @@ impl ReaderSession {
             scroll_painted: 0.0,
             page_shift: (0.0, 0.0),
             turn: None,
+            pending_chapter_turn: None,
             turn_seq: 0,
             page: 0,
             wheel_accum: 0.0,
@@ -353,6 +362,7 @@ impl ReaderSession {
             atlas: super::image_atlas::ImageAtlas::entity(cx),
             selection: None,
             selection_menu_open: false,
+            note_editor: None,
             mouse_drag: None,
             long_press_anchor: None,
             edge_drag: None,
@@ -446,6 +456,7 @@ impl ReaderSession {
             scroll_painted: 0.0,
             page_shift: (0.0, 0.0),
             turn: None,
+            pending_chapter_turn: None,
             turn_seq: 0,
             page: 0,
             wheel_accum: 0.0,
@@ -468,6 +479,7 @@ impl ReaderSession {
             atlas: super::image_atlas::ImageAtlas::entity(cx),
             selection: None,
             selection_menu_open: false,
+            note_editor: None,
             mouse_drag: None,
             long_press_anchor: None,
             edge_drag: None,
@@ -873,21 +885,30 @@ impl ReaderSession {
     }
 }
 
+/// 分页 / 双页里「哪一章的第几页」。跨章滑动要同时拿两张纸，页号必须带上章号 ——
+/// 从前 `leaving: Option<usize>` 只够同一章里滑，跨章就只能瞬切。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PageRef {
+    pub chapter: usize,
+    pub page: usize,
+}
+
 /// 正在走的那一次翻页动画。
 ///
-/// 记的是**出场那一张**而不是两张各自的位置：进场那一张永远是 `self.page` / `scroll_y`，
-/// 那两个数本身就是权威，再抄一份进动画状态就多出两处会各自漂移的坐标。
+/// 分页 / 双页记**出场与进场两张纸**：跨章时进场页属于另一章，不可能从 `self.page`
+/// 推出来。连续滚动仍只记补间两端，`scroll_y` 是权威，不抄第二份会漂移的坐标。
 ///
 /// 时钟不在这里存：那口表由 gpui 的 `Presence` 按 `seq` 那把键持有（见
 /// `view.rs` 的 `turn_frame`），它自己续帧、自己按系统的减弱动态效果归零。
 /// 在这里再存一个 `Instant`，就有了两套「走了多久」，而其中一套不会被测试时钟推着走。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Turn {
     /// 这一趟的时钟键。每次起动画换新键：复用同一个键会把上一趟**还没走完**的状态
     /// 接到这一趟上，读者看见的是第二次翻页只滑了一半就到位。
     pub seq: u64,
-    /// 分页 / 双页：出场那一页的页号。连续滚动没有「页」，那一臂看 [`Self::scroll`]。
-    pub leaving: Option<usize>,
+    /// 分页 / 双页：出场与进场那两张纸。连续滚动没有「页」，这两格都是 `None`。
+    pub leaving: Option<PageRef>,
+    pub arriving: Option<PageRef>,
     /// 连续滚动：补间的起点（起那一刻**画出来的**那一个数）与终点。
     ///
     /// 起点不用 `scroll_y` 而用画出来的那个：读者连点两下时，第二趟要从他眼前那一屏

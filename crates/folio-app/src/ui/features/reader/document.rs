@@ -328,6 +328,16 @@ pub struct RowUnit {
     pub justify_shift: f32,
 }
 
+/// 行内图片在行内的 x。
+///
+/// 文本 run 的 `x` 只是**原始前进量**，两端对齐的额外位移由每个 run 的
+/// `justify_shift` 在绘制时推；图片没有 run 内逐字那一层，必须在这里把同一笔
+/// 位移加上。漏掉它，图片会被前面已经摊开的字挤到左边 —— 脚注编号图看起来
+/// 「盖在字上」正是这条路。
+fn inline_image_x(x: f32, x_offset: f32, justify: Option<Justify>, gap_cursor: u32) -> f32 {
+    x + x_offset + justify.map_or(0.0, |j| j.shift(gap_cursor))
+}
+
 /// 一行里一张图的摆位（章内量）。见 [`RowFragment::Image`] 为什么字节不进这一格。
 #[derive(Clone, Debug)]
 pub struct RowImage {
@@ -335,6 +345,8 @@ pub struct RowImage {
     pub x: f32,
     pub width: f32,
     pub height: f32,
+    /// `vertical-align` 折出来的基线偏移（正数往上）。绘制时图顶要跟着抬。
+    pub baseline_shift: f32,
     /// 容器路径。图片索引（`ChapterImages`）按它查字节与固有尺寸。
     pub href: String,
     /// 所属 DOM 节点。脚注注文按它解（`Document::footnote_note_for_node`）。
@@ -885,13 +897,14 @@ impl Document {
                 LineFragment::Image(placed) => {
                     out.push(RowFragment::Image(RowImage {
                         slot,
-                        x,
+                        x: inline_image_x(x, placed.x_offset, justify, gap_cursor),
                         width: placed.width,
                         height: placed.height,
+                        baseline_shift: placed.baseline_shift,
                         href: placed.href.clone(),
                         node: placed.node,
                     }));
-                    x += placed.width;
+                    x += placed.advance;
                 }
                 // 列表标记：文字是它自己的（不在块文本里），位置在行首之外。
                 // **不**把宽度加进 `x` —— 它挂在流动之外，正文一个字都不该挪。
@@ -1207,6 +1220,15 @@ impl Document {
             .map_or_else(|| self.page_count() - 1, |slice| slice.page)
     }
 
+    /// 第 `page` 页开头那一个可见字符的章内偏移。跨章滑动落地时用它落库；
+    /// 页为空（还没切出来 / 末页之后）给 0。
+    pub fn offset_of_page(&self, page: usize, columns: usize) -> usize {
+        let Some(slice) = self.slice_of(page, 0, columns) else {
+            return 0;
+        };
+        self.coordinate_of_line(slice.lines.start)
+    }
+
     // ---- 进度与锚点：滚动位置 ↔ 可见文本偏移 ----
     //
     // 两端各自换算过一次就会各错一次：桌面读虚拟列表的像素偏移、移动读自己的
@@ -1276,7 +1298,7 @@ impl Document {
         for id in dom.ancestors_including_self(node) {
             for name in ["zy-footnote", "alt", "title"] {
                 if let Some(v) = dom.attr(id, name)
-                    && !v.trim().is_empty()
+                    && useful_marker_text(v)
                 {
                     return Some(v.trim().to_string());
                 }
@@ -1464,22 +1486,6 @@ impl Document {
         folio_core::content::hit::snap_word(self.text_map(), offset)
     }
 
-    /// 长按所在段落的字符区间（「全选本段」）。
-    pub fn paragraph_range(
-        &self,
-        window: &Window,
-        cx: &App,
-        offset: usize,
-    ) -> Option<std::ops::Range<usize>> {
-        let _ = (window, cx);
-        folio_core::content::hit::paragraph_range(
-            self.layout(),
-            self.dom(),
-            self.text_map(),
-            offset,
-        )
-    }
-
     /// 那个**会话级复用**的度量器（见 [`Document::measure`] 字段的说明）。
     ///
     /// 与排版作业里那个 `GpuiMeasure` 用同一组构造参数 —— 这一点是硬要求：
@@ -1583,6 +1589,22 @@ fn is_footnote_body(dom: &Dom, node: NodeId) -> bool {
         }
     }
     false
+}
+
+/// 标记图上的 `alt` / `title` 是不是**真注文**。
+///
+/// 这类书（哈利波特附录那本就是这样）把脚注正文做成图片，标记图的 `alt` 只写
+/// `"alt"` 或 `"注"`；把它当注文显示，读者看到的是一句「alt」。没有真文字就返回
+/// `None`，让点击落回普通链接跳转，至少能滚到那张注文图本身。
+fn useful_marker_text(value: &str) -> bool {
+    let text = value.trim();
+    if text.is_empty() {
+        return false;
+    }
+    !matches!(
+        text.to_ascii_lowercase().as_str(),
+        "alt" | "image" | "img" | "note" | "footnote" | "注" | "图片" | "脚注"
+    )
 }
 
 /// 属性值按空白分词后是否含 `want`（`epub:type` 可以写多个，空格分隔）。
