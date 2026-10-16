@@ -9,7 +9,7 @@
 
 use std::ops::Range;
 
-use folio_core::content::format::css::computed::Color;
+use folio_core::content::format::css::computed::{BorderStyle, Color};
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::DecorSeed;
 use gpui_kit::{Hsla, SharedString};
@@ -31,9 +31,10 @@ pub struct BlockDecor {
     pub height: f32,
     /// `background-color`。`None` = 书里没写这一条 —— 别拿不透明色去盖主题底色。
     pub background: Option<Hsla>,
-    /// `[上, 右, 下, 左]` 的 `(宽, 色)`，宽 0 不画。`double` / `dotted` 等花式
-    /// 一律按实心画：引擎对 `border-style` 的支持目前就到「有没有」。
-    pub border: [(f32, Hsla); 4],
+    /// `[上, 右, 下, 左]` 的 `(宽, 色, 画法)`，宽 0 不画。画法今天就 `solid` 与
+    /// `double` 两档：`double` 由绘制层拆成两条 1/3 细线，其余（`dotted` / `groove` …）
+    /// 在解析期就没接住，到不了这里（见 `css::value::parse_border_style`）。
+    pub border: [(f32, Hsla, BorderStyle); 4],
 }
 
 /// 可见范围内的一张图：位置与尺寸已由排版算好，这里只负责把「画在哪儿」记下来。
@@ -235,8 +236,10 @@ fn place_decorations(
         // 边框色在表里已经把 `currentColor`（本块自己的 `color`）折完了，
         // 这里只剩「没色就落主题前景」那一步。
         // 表里的宽已经是 `BorderEdge::drawn()` 的结果（「有 width 但 style 是 none」
-        // 那种不存在的边在折表时就折成 0 了），这里只落色。
-        let edge = |(width, color): (f32, Option<Color>)| (width, run_color(color, foreground));
+        // 那种不存在的边在折表时就折成 0 了），这里只落色，画法原样带过去。
+        let edge = |(width, color, style): (f32, Option<Color>, BorderStyle)| {
+            (width, run_color(color, foreground), style)
+        };
         out.push(BlockDecor {
             x: x + seed.x,
             top: seed.y - origin_y + top,
@@ -268,10 +271,10 @@ mod tests {
     use super::DecorSeed;
     use super::place_decorations;
     use crate::ui::widgets::run_color;
-    use folio_core::content::format::css::computed::Color;
+    use folio_core::content::format::css::computed::{BorderStyle, Color};
     use gpui_kit::black;
 
-    /// 一条 300×60 的底色种子，`None` 的那条边框走主题前景。
+    /// 一条 300×60 的底色种子：下边一条 `double`、左边一条 `solid`，`None` 的色走主题前景。
     fn seed(y: f32, height: f32) -> DecorSeed {
         DecorSeed {
             x: 12.0,
@@ -280,16 +283,16 @@ mod tests {
             height,
             background: Some(Color(193, 204, 192)),
             border: [
-                (0.0, None),
-                (0.0, None),
-                (2.0, None),
-                (0.0, Some(Color(12, 34, 56))),
+                (0.0, None, BorderStyle::None),
+                (0.0, None, BorderStyle::None),
+                (2.0, None, BorderStyle::Double),
+                (2.0, Some(Color(12, 34, 56)), BorderStyle::Solid),
             ],
         }
     }
 
     /// 几何按 `x` 与「origin_y / top 两个偏移」落位；色按主题前景落；
-    /// 已经折好的 `currentColor`（那条有色边框）不许被主题覆盖。
+    /// 已经折好的 `currentColor`（那条有色边框）不许被主题覆盖，画法原样带过去。
     #[test]
     fn a_seed_is_placed_with_the_translations_and_the_theme() {
         let decor = place_decorations(&[seed(40.0, 60.0)], 0.0..700.0, 100.0, 20.0, 60.0, black());
@@ -306,7 +309,11 @@ mod tests {
             Some(run_color(Some(Color(193, 204, 192)), black())),
             "背景色按字节转主题色"
         );
-        assert_eq!(decor.border[2], (2.0, black()), "没写色的边框落主题前景");
+        assert_eq!(
+            decor.border[2],
+            (2.0, black(), BorderStyle::Double),
+            "没写色的边框落主题前景，画法要跟着走"
+        );
         assert_eq!(
             decor.border[3].1,
             run_color(Some(Color(12, 34, 56)), black()),

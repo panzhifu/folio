@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use folio_core::PageTurn;
 use folio_core::content::anchor::line_at_y;
+use folio_core::content::format::css::computed::BorderStyle;
 use folio_core::layout::FontKey;
 use folio_core::layout::fragment::column_offset;
 use folio_core::store::Annotation;
@@ -1137,30 +1138,86 @@ fn decoration_child(decor: BlockDecor) -> Vec<AnyElement> {
     }
     let [top, right, bottom, left] = decor.border;
     if top.0 > 0.0 {
-        parts.push(fill_quad(decor.x, decor.top, decor.width, top.0, top.1));
+        push_border(
+            &mut parts,
+            decor.x,
+            decor.top,
+            decor.width,
+            top.0,
+            top.1,
+            top.2,
+            true,
+        );
     }
     if bottom.0 > 0.0 {
-        parts.push(fill_quad(
+        push_border(
+            &mut parts,
             decor.x,
             decor.top + decor.height - bottom.0,
             decor.width,
             bottom.0,
             bottom.1,
-        ));
+            bottom.2,
+            true,
+        );
     }
     if left.0 > 0.0 {
-        parts.push(fill_quad(decor.x, decor.top, left.0, decor.height, left.1));
+        push_border(
+            &mut parts,
+            decor.x,
+            decor.top,
+            left.0,
+            decor.height,
+            left.1,
+            left.2,
+            false,
+        );
     }
     if right.0 > 0.0 {
-        parts.push(fill_quad(
+        push_border(
+            &mut parts,
             decor.x + decor.width - right.0,
             decor.top,
             right.0,
             decor.height,
             right.1,
-        ));
+            right.2,
+            false,
+        );
     }
     parts
+}
+
+/// 把一条边框条推进 `parts`。
+///
+/// `solid` 就是整段一块；`double` 按 CSS 的口径三段等分 —— 外线 1/3、缝 1/3、内线 1/3，
+/// 于是 3px 的双线画成两条 1px 细线。`split_y` 说明沿**纵**向拆（上/下边，条是横的）；
+/// 为假则沿**横**向拆（左/右边，条是竖的）。
+#[allow(clippy::too_many_arguments)]
+fn push_border(
+    parts: &mut Vec<AnyElement>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: Hsla,
+    style: BorderStyle,
+    split_y: bool,
+) {
+    if style != BorderStyle::Double {
+        parts.push(fill_quad(x, y, width, height, color));
+        return;
+    }
+    let seg = if split_y { height } else { width } / 3.0;
+    if split_y {
+        // 上/下边：两条横线落在这条带子的两端（3px 带 = 1px 线 / 1px 缝 / 1px 线）。
+        parts.push(fill_quad(x, y, width, seg, color));
+        parts.push(fill_quad(x, y + 2.0 * seg, width, seg, color));
+    } else {
+        // 左/右边：两条竖线同理。
+        parts.push(fill_quad(x, y, seg, height, color));
+        parts.push(fill_quad(x + 2.0 * seg, y, seg, height, color));
+    }
 }
 
 #[cfg(test)]

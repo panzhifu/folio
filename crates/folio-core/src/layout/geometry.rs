@@ -8,7 +8,7 @@ use std::ops::Range;
 use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
 use crate::content::dom::NodeId;
-use crate::content::format::css::computed::{Color, StyledDom, TextAlign};
+use crate::content::format::css::computed::{BorderStyle, Color, StyledDom, TextAlign};
 use crate::infra::metrics::Metric;
 
 /// 行盒里的一段连续同样式文本，同时带着两套坐标。
@@ -208,12 +208,18 @@ pub struct DecorSeed {
     pub height: f32,
     /// `background-color`。`None` = 书里没写这一条 —— 绘制侧别拿不透明色去盖主题底色。
     pub background: Option<Color>,
-    /// `[上, 右, 下, 左]` 的（要画的宽, 色）。宽 0 不画。
+    /// `[上, 右, 下, 左]` 的（要画的宽, 色, 画法）。宽 0 不画。
     ///
     /// 色在这里**已经把 `currentColor` 折完了**：没写 border-color 就取本块自己的
     /// `color`（`color` 可继承，所以那一色在层叠期不一定写在本元素上）。
     /// 剩下的只有「`None` 落主题前景」那一步 —— 那是主题，必须每帧现落，不许烘进这张表。
-    pub border: [(f32, Option<Color>); 4],
+    ///
+    /// 画法只可能是 `Solid` / `Double`（[`BorderEdge::drawn`] 已经把 `none` 折成 0
+    /// 的边挡在外面）。`Double` 必须带出去：绘制层要把它拆成两条 1/3 细线，
+    /// 丢了画法就退化成一条实线（真书《人类简史》的章名 `.biaoti` 上下双线）。
+    ///
+    /// [`BorderEdge::drawn`]: crate::content::format::css::computed::BorderEdge::drawn
+    pub border: [(f32, Option<Color>, BorderStyle); 4],
 }
 
 /// 排版结果：两张扁平表 + 两张**排完就折好**的查询索引。
@@ -380,10 +386,26 @@ impl Layout {
                 height: block.height,
                 background: style.background_color,
                 border: [
-                    (drawn[0], style.border[0].color.or(style.color)),
-                    (drawn[1], style.border[1].color.or(style.color)),
-                    (drawn[2], style.border[2].color.or(style.color)),
-                    (drawn[3], style.border[3].color.or(style.color)),
+                    (
+                        drawn[0],
+                        style.border[0].color.or(style.color),
+                        style.border[0].style,
+                    ),
+                    (
+                        drawn[1],
+                        style.border[1].color.or(style.color),
+                        style.border[1].style,
+                    ),
+                    (
+                        drawn[2],
+                        style.border[2].color.or(style.color),
+                        style.border[2].style,
+                    ),
+                    (
+                        drawn[3],
+                        style.border[3].color.or(style.color),
+                        style.border[3].style,
+                    ),
                 ],
             });
         }

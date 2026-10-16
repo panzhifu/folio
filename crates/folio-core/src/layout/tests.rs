@@ -3,7 +3,9 @@
 //! 真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
 
 use crate::content::dom::{Dom, NodeId};
-use crate::content::format::css::computed::{Clear, Color, ComputedStyle, Display, Float, cascade};
+use crate::content::format::css::computed::{
+    BorderStyle, Clear, Color, ComputedStyle, Display, Float, cascade,
+};
 use crate::content::format::css::{Origin, RuleSet};
 use crate::layout::wrap::collect;
 use crate::layout::{
@@ -837,6 +839,73 @@ fn borders_and_padding_inset_the_content_box() {
     assert_eq!(layout.lines[0].x, 25.0, "行盒跟着内容盒走");
     // 10 = div 的上内边距（上边框是 0），再加 `<p>` 自己的 UA 上边距 16（1em）。
     assert_eq!(p.y, 26.0, "内容起点在边框盒往里数第二层");
+}
+
+/// 根元素（通常是 `<body>`）**自己的**底色要进装饰表。
+///
+/// 真书《人类简史》第一部分那页是 `<body class="brownll">` + `background-color: #c4aa87`：
+/// 整幅棕底挂在根上，而从前 `layout_inner` 只排 `children`、从不登记根自己，
+/// 于是那一层底色整屏丢掉（读者看到的就是「这一页的图片没有背景颜色」）。
+#[test]
+fn the_root_elements_own_background_reaches_the_decor_table() {
+    let dom = Dom::parse("<body class=\"page\"><p>正文</p></body>".as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(".page { background-color: #c4aa87 }", Origin::Author),
+        &ComputedStyle::default(),
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions::with_width(300.0),
+        &Mono,
+        &NoImages,
+    );
+    let root = laid
+        .decor_seeds(&styles)
+        .into_iter()
+        .find(|s| s.x == 0.0 && s.width == 300.0)
+        .expect("根那一层要有一条装饰，而不是整屏丢掉");
+    assert_eq!(root.background, Some(Color(0xc4, 0xaa, 0x87)));
+    assert_eq!((root.x, root.y), (0.0, 0.0), "根铺满整个视口、从页首起");
+    assert_eq!(root.height, laid.height, "根底色盖满整章");
+}
+
+/// `border-style: double` 的**画法**要一路带到装饰表：绘制层据此拆成两条细线，
+/// 丢了它真书 `.biaoti` 的上下双线就退化成一条实线。
+#[test]
+fn a_double_border_reaches_the_decor_table_with_its_style() {
+    let dom = Dom::parse("<body><h2 class=\"t\">章名</h2></body>".as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(
+            ".t { border-top: double 3px #000; border-bottom: double 3px #000 }",
+            Origin::Author,
+        ),
+        &ComputedStyle::default(),
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions::with_width(300.0),
+        &Mono,
+        &NoImages,
+    );
+    let t = laid
+        .decor_seeds(&styles)
+        .into_iter()
+        .find(|s| s.border[0].0 > 0.0 && s.border[2].0 > 0.0)
+        .expect("章名那块要有上下边框");
+    assert_eq!(
+        t.border[0],
+        (3.0, Some(Color(0, 0, 0)), BorderStyle::Double)
+    );
+    assert_eq!(
+        t.border[2],
+        (3.0, Some(Color(0, 0, 0)), BorderStyle::Double)
+    );
 }
 
 /// 中文禁则：行首不能是收尾标点，行尾不能是起句标点。

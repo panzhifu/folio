@@ -288,7 +288,9 @@ fn a_layout_without_lines_still_answers_every_query() {
 
 // ---- 装饰短表：折一次，而不是每帧走整章（§十一 第 12 条）----
 
-use crate::content::format::css::computed::{BorderEdge, Color, ComputedStyle, StyledDom};
+use crate::content::format::css::computed::{
+    BorderEdge, BorderStyle, Color, ComputedStyle, StyledDom,
+};
 
 /// 一条带几何的块盒（`block()` 那个助手全给 y=0，装饰要按 y/height 判，这里要能指定）。
 fn box_at(node: u32, y: f32, height: f32, border_box: bool) -> BlockBox {
@@ -334,10 +336,26 @@ fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
             height: block.height,
             background: style.background_color,
             border: [
-                (drawn[0], style.border[0].color.or(style.color)),
-                (drawn[1], style.border[1].color.or(style.color)),
-                (drawn[2], style.border[2].color.or(style.color)),
-                (drawn[3], style.border[3].color.or(style.color)),
+                (
+                    drawn[0],
+                    style.border[0].color.or(style.color),
+                    style.border[0].style,
+                ),
+                (
+                    drawn[1],
+                    style.border[1].color.or(style.color),
+                    style.border[1].style,
+                ),
+                (
+                    drawn[2],
+                    style.border[2].color.or(style.color),
+                    style.border[2].style,
+                ),
+                (
+                    drawn[3],
+                    style.border[3].color.or(style.color),
+                    style.border[3].style,
+                ),
             ],
         });
     }
@@ -362,9 +380,10 @@ fn the_decor_table_matches_the_per_frame_full_scan() {
         ..ComputedStyle::default()
     };
     let mut bordered = ComputedStyle::default();
+    // `double` 而不只是 `solid`：画法要被折进短表带到绘制层（真书 `.biaoti` 的上下双线）。
     bordered.border[2] = BorderEdge {
-        width: 2.0,
-        style: crate::content::format::css::computed::BorderStyle::Solid,
+        width: 3.0,
+        style: BorderStyle::Double,
         color: None,
     };
     bordered.color = Some(Color(12, 34, 56));
@@ -393,10 +412,14 @@ fn the_decor_table_matches_the_per_frame_full_scan() {
         "短表必须与全表扫描逐条相同"
     );
     assert_eq!(got.len(), 2, "只该有底色与下边框那两条：{got:?}");
-    // currentColor 在折表时就折完了：那条下边框的色是块自己的文字色，不是 None。
-    assert_eq!(got[1].border[2], (2.0, Some(Color(12, 34, 56))));
+    // currentColor 在折表时就折完了：那条下边框的色是块自己的文字色，不是 None；
+    // 画法 `double` 也必须原样带出去，丢了它就退化成一条实线。
+    assert_eq!(
+        got[1].border[2],
+        (3.0, Some(Color(12, 34, 56)), BorderStyle::Double)
+    );
     // 主题色一格都没进表 —— 剩下的那步「None 落主题前景」是绘制侧每帧做的。
-    assert_eq!(got[0].border[2], (0.0, None));
+    assert_eq!(got[0].border[2], (0.0, None, BorderStyle::None));
 }
 
 /// 零宽/零高、内容盒副本、无装饰、层叠查不到这四条筛子单独钉一遍。

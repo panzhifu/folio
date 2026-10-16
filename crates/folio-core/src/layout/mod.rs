@@ -128,10 +128,17 @@ fn layout_inner(
     // 按父块的内容宽折，这条基准一路由 `collect` 的 `basis` 参数带着走。
     let pl = style.padding_left.resolve(options.width).max(0.0);
     let pt = style.padding_top.resolve(options.width).max(0.0);
+    let pb = style.padding_bottom.resolve(options.width).max(0.0);
     let content_width =
         (options.width - pl - style.padding_right.resolve(options.width).max(0.0)).max(1.0);
-    let height = ctx.children(root, pl, pt, content_width);
-    let out = Layout::assemble(ctx.blocks, ctx.lines, content_width, pt + height);
+    // **根自己的盒子也要入表**：`<body>` 上的 `background-color` / 边框要画在这一层。
+    // 从前这里直接排 `children`，根自己从不登记 ⇒ 真书《人类简史》第一部分那页
+    // `<body class="brownll">`（`background-color: #c4aa87`）的整幅棕底凭空消失。
+    // 盒子取整个视口宽、从 (0, 0) 起，高度与 [`Layout::height`] 同一个数，两者自洽。
+    let index = ctx.push_block(root, 0.0, 0.0, options.width, String::new(), true);
+    let content = ctx.children(root, pl, pt, content_width);
+    let height = ctx.close_block(index, pt + content + pb);
+    let out = Layout::assemble(ctx.blocks, ctx.lines, content_width, height);
     // 块数与行数是一章排版结果的体检指标：0 行意味着 DOM 或样式空了，而不是「这一章短」。
     tracing::debug!(
         "layout: {} 块 / {} 行，版心 {}，高 {}",

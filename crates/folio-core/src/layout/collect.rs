@@ -1028,7 +1028,10 @@ impl<'a> Ctx<'a> {
     ///
     /// `border_box` 见 [`BlockBox::border_box`]：`block_uncached` 走 true，
     /// `wrap_paragraph` 的内容盒副本走 false。
-    fn push_block(
+    ///
+    /// `pub(super)`：`layout` 主模块的入口要用它给**根元素**（通常是 `<body>`）也登记
+    /// 一条边框盒，否则根自己的 `background-color` / 边框会整屏丢掉（见 `layout_inner`）。
+    pub(super) fn push_block(
         &mut self,
         node: NodeId,
         x: f32,
@@ -1051,7 +1054,7 @@ impl<'a> Ctx<'a> {
         self.blocks.len() - 1
     }
 
-    fn close_block(&mut self, index: usize, height: f32) -> f32 {
+    pub(super) fn close_block(&mut self, index: usize, height: f32) -> f32 {
         let block = &mut self.blocks[index];
         block.height = height;
         block.lines = block.lines.start..self.lines.len();
