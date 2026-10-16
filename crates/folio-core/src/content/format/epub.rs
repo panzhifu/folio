@@ -984,16 +984,57 @@ fn fill_hrefs(entries: &mut [TocEntry]) -> Option<String> {
     first
 }
 
-/// EPUB2 的 NCX。navMap 本身是树，但阅读器只用来跳章，这里拍平成一层。
+/// EPUB2 的 NCX —— **按树读回来**。
+///
+/// 这里曾经拍平成一层，写的理由是「阅读器只用来跳章」。那一档现在不够：目录那一屏要摆
+/// 父子级、默认折叠、点分支才展开 —— 层级一旦在解析层丢掉，界面上就没有东西可折：
+/// `toc_tree::build` 拿到的每条都是叶子，`branch` 全假，缩进与 chevron 都不会出现。
+///
+/// 每一层 `navPoint` 一个帧：自己的标题、自己的 `content/@src`、已经收齐的子条目。
+/// 父子各写各的帧，正是拍平那一版做不到的事（父级标题会被最后那个子级覆盖）。
+/// 形状与 EPUB3 nav 那一路的 `LiFrame` 同一个道理；两条路都交 `Vec<TocEntry>` 树，
+/// 上层（`rebase` 递归、库里的 `toc_json`、`toc_tree`）本来就吃树。
 ///
 /// NCX 是**大小写敏感**的 XML，元素名按规范写成 `navMap` / `navPoint` / `navLabel`，
 /// 而我们要比对的是小写形式 —— 这里每个事件都过一次 `to_ascii_lowercase`。
 /// nav 文档（XHTML）本来就全小写，不需要这一层。
 fn parse_ncx(xml: &str) -> Vec<TocEntry> {
+    #[derive(Default)]
+    struct Frame {
+        title: String,
+        href: String,
+        children: Vec<TocEntry>,
+    }
+
+    /// 结算当前这一层：交回给上一层，栈空了就是一根条目。
+    fn close(frame: Frame, stack: &mut [Frame], roots: &mut Vec<TocEntry>) {
+        let Frame {
+            title,
+            href,
+            children,
+        } = frame;
+        let title = title.trim().to_string();
+        // 「有内容」有三种：有标题、有落点、有子条目。纯容器那一档的位置由下面
+        // `fill_hrefs` 从子孙回填，留空是给 `rebase` 认的那个信号。
+        if title.is_empty() && href.is_empty() && children.is_empty() {
+            return;
+        }
+        let entry = TocEntry {
+            title,
+            href,
+            // 采下来的是原始 src；换成绝对路径时（`rebase`）才拆出 fragment。
+            fragment: None,
+            children,
+        };
+        match stack.last_mut() {
+            Some(parent) => parent.children.push(entry),
+            None => roots.push(entry),
+        }
+    }
+
     let mut reader = Reader::from_str(xml);
-    let mut out: Vec<TocEntry> = Vec::new();
-    let mut label = String::new();
-    let mut href = String::new();
+    let mut roots: Vec<TocEntry> = Vec::new();
+    let mut stack: Vec<Frame> = Vec::new();
     let mut in_text = false;
     let mut in_navmap = false;
     // 读不出下一个事件就到此为止（畸形 XML 与读完是同一档）：
@@ -1001,18 +1042,25 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
     while let Ok(ev) = reader.read_event() {
         match ev {
             Event::Start(e) => {
-                let n = e.name();
-                match local_name(n.as_ref()).to_ascii_lowercase().as_str() {
+                let name = local_name(e.name().as_ref()).to_ascii_lowercase();
+                match name.as_str() {
                     "navmap" => in_navmap = true,
+                    "navpoint" if in_navmap => stack.push(Frame::default()),
                     "text" if in_navmap => in_text = true,
                     _ => {}
                 }
             }
-            Event::Text(e) if in_text => label.push_str(&text_of(e.as_ref())),
+            Event::Text(e) if in_text => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.title.push_str(&text_of(e.as_ref()));
+                }
+            }
             Event::Empty(e) if in_navmap => {
                 let n = e.name();
-                if local_name(n.as_ref()).eq_ignore_ascii_case("content") {
-                    href = attr(&e, "src").unwrap_or_default();
+                if local_name(n.as_ref()).eq_ignore_ascii_case("content")
+                    && let Some(frame) = stack.last_mut()
+                {
+                    frame.href = attr(&e, "src").unwrap_or_default();
                 }
             }
             Event::End(e) => {
@@ -1021,17 +1069,9 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
                 if name == "text" {
                     in_text = false;
                 } else if name == "navpoint" && in_navmap {
-                    let title = label.trim().to_string();
-                    if !title.is_empty() || !href.is_empty() {
-                        out.push(TocEntry {
-                            title,
-                            href: std::mem::take(&mut href),
-                            // 采下来的是原始 src；换成绝对路径时（`rebase`）才拆出 fragment。
-                            fragment: None,
-                            children: Vec::new(),
-                        });
+                    if let Some(frame) = stack.pop() {
+                        close(frame, &mut stack, &mut roots);
                     }
-                    label = String::new();
                 } else if name == "navmap" {
                     in_navmap = false;
                 }
@@ -1040,7 +1080,12 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
             _ => {}
         }
     }
-    out
+    // XML 断在半路时栈里还剩着几层：从最里往外结算，已采到的部分一样交出去。
+    while let Some(frame) = stack.pop() {
+        close(frame, &mut stack, &mut roots);
+    }
+    fill_hrefs(&mut roots);
+    roots
 }
 
 /// 一份书内索引解析作业的坐标。

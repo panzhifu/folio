@@ -605,7 +605,10 @@ impl<'a> Collector<'a> {
             self.pending_space = false;
             return;
         }
-        if self.dom.is_element(node, "img") {
+        // 行内替换元素：`<img>` 与 Calibre 封面那一族 `<svg><image xlink:href/></svg>`
+        // —— 判据与「这一格该多大」的来源见 [`super::collect::picture_src`]。
+        // 命中就当一张图占住，不再递归它的子节点（svg 里那张 image 不能再被收一次）。
+        if super::collect::picture_src(self.dom, node).is_some() {
             self.push_image(node);
             return;
         }
@@ -616,17 +619,29 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// 行内图片：命中资源就写一个哨兵占位并记下尺寸；命中不到就整张跳过
-    /// （不产出任何字符，也不会把段落撑乱）。
+    /// 行内图片：写一个哨兵占位并记下尺寸。
+    ///
+    /// 资源解不出来时分两档，与 `scene.rs` 那句「解不出资源的 `<img>` 留位不画」同一个口径：
+    /// - `<svg>` 带 `viewBox`：比例是**版面**给的，不依赖那张图，所以照样占位（否则这一页
+    ///   高 0，在滚动链里根本不存在 —— 症状就是「回滑滑不到封面」）。`href` 交原始引用，
+    ///   画的那一层查不到就是不画。
+    /// - `<img>`：尺寸只能从图本身来，取不到就整张跳过（不产出字符，也不会把段落撑乱）。
     fn push_image(&mut self, node: NodeId) {
-        let Some(src) = self.dom.attr(node, "src").map(str::to_string) else {
+        let Some(src) = super::collect::picture_src(self.dom, node) else {
             return;
         };
-        let Some(img) = self.provider.resolve(&src) else {
-            return;
-        };
+        let aspect = super::collect::svg_aspect(self.dom, node);
+        let resolved = self.provider.resolve(&src);
         let style = self.styles.get(node).unwrap_or(&DEFAULT_STYLE);
-        let (w, h) = image_size(style, img.width, img.height, self.width);
+        let (w, h) = match (&resolved, aspect) {
+            (_, Some(ratio)) => (self.width, self.width * ratio),
+            (Some(img), None) => image_size(style, img.width, img.height, self.width),
+            (None, None) => return,
+        };
+        let href = match resolved {
+            Some(img) => img.href,
+            None => src,
+        };
         self.flush_space();
         let at = self.text.len();
         self.text.push(IMAGE_GLYPH);
@@ -636,7 +651,7 @@ impl<'a> Collector<'a> {
         }
         self.images.push(ImageAtom {
             node,
-            href: img.href,
+            href,
             width: w,
             height: h,
             at,

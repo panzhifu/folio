@@ -147,6 +147,68 @@ fn single_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
     found
 }
 
+/// 「这一格的内容就是一张图」的那一族，交回它的**原始**引用值（给 `images.resolve` 那张表）。
+///
+/// 认三种形状：
+/// - `<img src>` —— 一直认的那一种。
+/// - `<image href>` / `<image xlink:href>` —— SVG 里的图。DOM 存属性名时丢掉前缀并转小写
+///   （`content/dom` 的 `add_attrs_if_missing` 用 `name.local`），所以 `xlink:href` 落表就是
+///   `href`，不需要按前缀找。
+/// - `<svg …><image href="cover.jpeg"/></svg>` —— **Calibre 导出封面页的标准写法**
+///   （EPUB2 的 `titlepage.xhtml` 十有八九是这个形状，基督山伯爵那本就是）。以前只认 `img`，
+///   这一章就折成 0 高：0 高的章在滚动链里不存在（`reader/book.rs` 那道 `height() > 0.0`
+///   的筛子），症状是「从第二章回滑，滑不到第一节那张封面」。
+///
+/// 只认**一张** `image` 的 svg：叠多张、或带 `path`/`text` 的那种是矢量画，该走
+/// `content::format::svg` 的整幅栅格化，不在排版里冒充一张位图。
+pub(super) fn picture_src(dom: &Dom, node: NodeId) -> Option<String> {
+    if dom.is_element(node, "img") {
+        return dom.attr(node, "src").map(str::to_string);
+    }
+    if dom.is_element(node, "image") {
+        return dom
+            .attr(node, "href")
+            .or_else(|| dom.attr(node, "src"))
+            .map(str::to_string);
+    }
+    if !dom.is_element(node, "svg") {
+        return None;
+    }
+    let mut images = dom
+        .element_children(node)
+        .filter(|child| dom.is_element(*child, "image"));
+    let image = images.next()?;
+    if images.next().is_some() {
+        return None;
+    }
+    dom.attr(image, "href")
+        .or_else(|| dom.attr(image, "src"))
+        .map(str::to_string)
+}
+
+/// `<svg>` 这一格的高宽比，来自它的 `viewBox`（属性名同样已转小写）。不是 svg、或 viewBox
+/// 读不出正数时给 `None`。
+///
+/// 这一格的比例是**版面**信息而不是图片信息：Calibre 那份写的是
+/// `width="100%" height="100%" viewBox="0 0 563 751"`，意思是「铺满版心，按 563:751 摊开」。
+/// 所以有 viewBox 就按它给高 —— 图暂时解不出来也照样留这一格，否则那一章高 0、
+/// 在滚动链里根本不存在。
+pub(super) fn svg_aspect(dom: &Dom, node: NodeId) -> Option<f32> {
+    if !dom.is_element(node, "svg") {
+        return None;
+    }
+    let view = dom.attr(node, "viewbox")?;
+    let nums: Vec<f32> = view
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter_map(|part| part.trim().parse().ok())
+        .collect();
+    // `viewBox="min-x min-y width height"`：四位，且宽高都是正数。
+    if nums.len() != 4 || nums[2] <= 0.0 {
+        return None;
+    }
+    (nums[3] > 0.0).then_some(nums[3] / nums[2])
+}
+
 /// 一段行内内容展平后的产物。
 pub(super) struct Collected {
     pub(super) text: String,
@@ -797,14 +859,22 @@ impl<'a> Ctx<'a> {
         let pt = bt + style.padding_top.resolve(basis).max(0.0);
         let pb = bb + style.padding_bottom.resolve(basis).max(0.0);
         // 替换元素（`display: block` 的图片）：整块就是这张图，独立成行。
-        if self.dom.is_element(node, "img") {
-            let src = self.dom.attr(node, "src").map(str::to_string);
-            let Some(img) = src.as_deref().and_then(|s| self.images.resolve(s)) else {
-                return 0.0; // 图取不到就整块不留痕，不塌成空盒子
-            };
+        // 认的那一族见 [`picture_src`]（`<img>` 与 Calibre 封面那种 `<svg><image>`）。
+        if let Some(src) = picture_src(self.dom, node) {
             let content_width = (width - pl - pr).max(1.0);
-            let (w, h) = image_size(style, img.width, img.height, content_width);
+            let img = self.images.resolve(&src);
+            let aspect = svg_aspect(self.dom, node);
+            let (w, h) = match (&img, aspect) {
+                // 有 viewBox 的那一档：宽铺满版心、高按比例，与图解没解出来无关。
+                (_, Some(ratio)) => (content_width, content_width * ratio),
+                (Some(img), None) => image_size(style, img.width, img.height, content_width),
+                (None, None) => return 0.0, // 图取不到就整块不留痕，不塌成空盒子
+            };
             let index = self.push_block(node, x, y, width, String::new(), true);
+            let Some(img) = img else {
+                // 格子留着、这一格不画：图还没解出来时，这一页也得滑得进来。
+                return self.close_block(index, pt + h + pb);
+            };
             // 块级图片的对齐：`start`/`end` 先按这一块的 `direction` 折成物理左右，
             // 再算让出多少（`TextAlign::offset_in` 是全仓唯一一处这份算术）。
             let offset = style
@@ -867,15 +937,18 @@ impl<'a> Ctx<'a> {
         let pt = bt + style.padding_top.resolve(basis).max(0.0);
         let pb = bb + style.padding_bottom.resolve(basis).max(0.0);
 
-        // 替换元素（图片）：按固有尺寸算高。
-        if self.dom.is_element(node, "img") {
-            let src = self.dom.attr(node, "src").map(str::to_string);
-            if let Some(img) = src.as_deref().and_then(|s| self.images.resolve(s)) {
-                let content_width = (width - pl - pr).max(1.0);
-                let (_, h) = image_size(style, img.width, img.height, content_width);
-                return pt + h + pb;
-            }
-            return 0.0;
+        // 替换元素（图片）：按固有尺寸算高。认的那一族与高的来源见 [`picture_src`]、
+        // [`svg_aspect`] —— 这一格必须与 `block_uncached` 同口径，否则两阶段的
+        // 高度与实际排版不一致，滚动位置会错位。
+        if let Some(src) = picture_src(self.dom, node) {
+            let content_width = (width - pl - pr).max(1.0);
+            let img = self.images.resolve(&src);
+            let h = match (img, svg_aspect(self.dom, node)) {
+                (_, Some(ratio)) => content_width * ratio,
+                (Some(img), None) => image_size(style, img.width, img.height, content_width).1,
+                (None, None) => return 0.0,
+            };
+            return pt + h + pb;
         }
 
         let content_width = (width - pl - pr).max(1.0);

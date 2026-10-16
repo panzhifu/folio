@@ -732,6 +732,81 @@ fn a_whole_published_shaped_book_reads_back_chapters_css_and_toc() {
     assert_eq!(full.chapters[27].title, "第28章", "全文那一趟同答案");
 }
 
+/// NCX 的 `navMap` 是树，读回来也得是树。
+///
+/// 这一条钉的是**层级本身**：目录那一屏的缩进、chevron、「默认全折、点分支才展开」
+/// 全都建立在 `children` 上，一旦在解析层被拍平，每条都是叶子，界面上就没有东西可折。
+/// 曾经就是拍平的（理由写的是「阅读器只用来跳章」），那一档不够用了。
+#[test]
+fn ncx_keeps_the_navpoint_nesting() {
+    let xml = r#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="nest"/></head>
+  <docTitle><text>文档标题不该进目录</text></docTitle>
+  <navMap>
+    <navPoint id="v1" playOrder="1">
+      <navLabel><text>第一卷</text></navLabel>
+      <content src="Text/v1.xhtml"/>
+      <navPoint id="v1c1" playOrder="2">
+        <navLabel><text>第一章</text></navLabel>
+        <content src="Text/chap1.xhtml"/>
+      </navPoint>
+      <navPoint id="v1c2" playOrder="3">
+        <navLabel><text>第二章</text></navLabel>
+        <content src="Text/chap2.xhtml#mid"/>
+      </navPoint>
+    </navPoint>
+    <navPoint id="v2" playOrder="4">
+      <navLabel><text>第二卷</text></navLabel>
+      <navPoint id="v2c1" playOrder="5">
+        <navLabel><text>第三章</text></navLabel>
+        <content src="Text/chap3.xhtml"/>
+      </navPoint>
+    </navPoint>
+  </navMap>
+</ncx>"#;
+
+    let toc = super::parse_ncx(xml);
+    assert_eq!(toc.len(), 2, "两根，`<docTitle>` 那一格在 navMap 之外");
+    assert_eq!(
+        (toc[0].title.as_str(), toc[0].children.len()),
+        ("第一卷", 2)
+    );
+    assert_eq!(toc[0].children[1].title, "第二章");
+    // 父级自己有 `content` 时不许被子级覆盖：拍平那一版的写法是「label/href 各一个全局
+    // 缓冲」，走到父级的 `</navPoint>` 时里面装的是**最后那个子级**的标题与位置。
+    assert_eq!(
+        toc[0].href, "Text/v1.xhtml",
+        "父级自己的位置不许被最后那个子级顶掉"
+    );
+    // 纯容器（第二卷没有自己的 `content`）：位置从第一个解得开的子孙回填，
+    // 点「第二卷」这一行该跳到第三章，而不是什么都不发生。
+    assert_eq!(
+        toc[1].href, "Text/chap3.xhtml",
+        "没有位置的父级回填子孙那一条"
+    );
+}
+
+/// XML 断在半路（出版书里编码坏一章、截断的 NCX 都算）时，已经采到的部分照样交出来。
+///
+/// 断点落在子级里面：父级那一帧还挂在栈上，收尾时从最里往外结算，父级因此**带着
+/// 它已经收齐的子级**回到根那一层，而不是整块丢掉。
+#[test]
+fn a_truncated_ncx_still_hands_back_what_was_read() {
+    let xml = r#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="v1"><navLabel><text>第一卷</text></navLabel><content src="Text/v1.xhtml"/>
+      <navPoint id="v1c1"><navLabel><text>第一章</text></navLabel><content src="Text/chap1.xhtml"/>
+    </navPoint>
+  </navMap>
+"#;
+    let toc = super::parse_ncx(xml);
+    assert_eq!(toc.len(), 1, "断之前那一卷要还在");
+    assert_eq!(toc[0].children.len(), 1, "子级跟着父级一起交回来");
+    assert_eq!(toc[0].children[0].title, "第一章");
+}
+
 /// 强制顺序与强制并行必须逐字段等价。
 ///
 /// 并行路径把「读章节正文」和「读图片尺寸」放进同一条动态队列，worker 各自开

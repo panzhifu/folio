@@ -1016,6 +1016,69 @@ fn typeset_images(html: &str, css: &str, width: f32, images: &dyn ImageProvider)
     (dom, laid)
 }
 
+/// Calibre 封面页那一族：`<svg viewBox="0 0 563 751"><image xlink:href="cover.jpeg"/></svg>`
+/// 要排成**一张占满版心的图**。
+///
+/// 这一条钉的是「回滑滑不到封面」那个 bug 的地基：只认 `<img>` 的排版在这格上给 0 高，
+/// 而 0 高的章在滚动链里根本不存在（`reader/book.rs` 那道 `height() > 0.0` 的筛子），
+/// 于是从第二章往上滑，滑到顶就是第二章自己的头。基督山伯爵那本的 `titlepage.xhtml`
+/// 就是这个形状，spine 第 0 项。
+///
+/// 宽按 `width="100%"` 铺满版心、高按 `viewBox` 的比例 —— 这两个数是 SVG 的属性而不是
+/// CSS，样式表里查不到，只能从元素上直接读。
+#[test]
+fn a_calibre_svg_cover_page_lays_out_as_one_picture() {
+    let html = "<div><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" \
+                viewBox=\"0 0 563 751\" preserveAspectRatio=\"none\">\
+                <image width=\"563\" height=\"751\" xlink:href=\"cover.jpeg\"/></svg></div>";
+    let imgs = MockImages(vec![("cover.jpeg", 563.0, 751.0)]);
+    let (_, layout) = typeset_images(html, "", 563.0, &imgs);
+
+    assert_eq!(layout.lines.len(), 1, "整页就这一张图，一行");
+    let img = layout.lines[0].images().next().expect("要有图片片段");
+    // `xlink:href` 在 DOM 里存的是去掉前缀的 `href`（`content/dom` 用 `name.local`）。
+    assert_eq!(img.href, "cover.jpeg");
+    assert_eq!(
+        (img.width, img.height),
+        (563.0, 751.0),
+        "铺满版心 + viewBox 比例"
+    );
+    assert!(
+        (layout.height - 751.0).abs() < 0.5,
+        "这一章的高就是那张图的高：{} 而不是 0",
+        layout.height
+    );
+}
+
+/// 图暂时解不出来时，那一格**也要留着**：留了高，那一页才滑得进去。
+///
+/// 与 `<img>` 那一档的分别是有意的：`<img>` 的尺寸只能从图本身来，取不到就整张跳过；
+/// `<svg>` 的比例是它自己的 `viewBox` 给的，不依赖那张图。占位照常产出（哨兵字符 + 宽度表
+/// 里有这一格），而 `scene.rs` 查不到那条 `href` 就是**留位不画** —— 那一句本来就是它
+/// 对解不出资源的图的规定动作。
+#[test]
+fn an_unresolvable_svg_cover_still_holds_its_box() {
+    let html = "<div><svg width=\"100%\" viewBox=\"0 0 563 751\">\
+                <image href=\"cover.jpeg\"/></svg></div>";
+    let (dom, layout) = typeset_images(html, "", 563.0, &MockImages(vec![]));
+
+    assert_eq!(layout.lines.len(), 1, "占位照常成行");
+    let img = layout.lines[0].images().next().expect("要有那一格");
+    assert_eq!(
+        (img.width, img.height),
+        (563.0, 751.0),
+        "没有固有尺寸也要按 viewBox 占位"
+    );
+    // `href` 交的是原始引用：查不到就是不画，不是画错东西。
+    assert_eq!(img.href, "cover.jpeg");
+    assert_eq!(dom.tag_name(img.node), Some("svg"), "那一格记在 svg 上");
+    assert!(
+        (layout.height - 751.0).abs() < 0.5,
+        "图解不出来也要占住这一页的高，否则那一章在滚动链里不存在：{}",
+        layout.height
+    );
+}
+
 /// 行内图片：变成图片片段，参与行宽累加，文本照旧在两侧。
 #[test]
 fn an_inline_image_becomes_a_fragment_and_adds_width() {

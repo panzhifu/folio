@@ -138,7 +138,13 @@ impl Format {
 /// v4：书目按 Dublin Core 补齐（`store` 的 v19 迁移那 11 列）。老行取默认值 = 全空，
 /// 而「全空」在信息屏上与「这本书没有简介」长得一样 —— 所以要重扫一次把它们填上。
 /// 开书时由 `stale_reason` 认成 `OldIndex` 投递，不在升级那一刻整库付。
-pub const INDEX_VERSION: i64 = 4;
+/// v5：EPUB2 的 NCX 目录**不再拍平**（`format::epub::parse_ncx` 按 `navPoint` 的层读成树）。
+/// 目录是落库的（`books.toc_json`），所以这一格改了以后老库里那份还是平的那一份 ——
+/// 症状不是「跳错地方」而是**界面上看不出层级、也没有可折的分支**：`toc_tree::build` 拿到的
+/// 每条都是叶子，`branch` 全假，缩进与 chevron 都不会出现。真机上已经撞过一次（基督山伯爵
+/// 那本 124 个 `navPoint`、最深 2 层，装上新代码后目录面板仍是平的，就是这个原因）。
+/// 老行不重扫不会读错东西，只是永远停在旧形状，所以按同一口径 bump。
+pub const INDEX_VERSION: i64 = 5;
 
 /// 一本书的书目信息。**字段按 Dublin Core 的术语集命名与取舍**（DCMI Terms / ISO 15839），
 /// 因为各家电子书格式的书目区就是它：EPUB 的 OPF 直接写 `dc:*`，MOBI 的 EXTH 标签在
