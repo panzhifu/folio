@@ -63,7 +63,7 @@ fn chapters_flow(count: usize) -> FlowDoc {
                 let source = (0..30)
                     .map(|k| format!("<p>{PARA}（第{i}章 第{k}段）</p>"))
                     .collect::<String>();
-                Chapter::inline(&format!("第{i}章"), source)
+                Chapter::inline(format!("第{i}章"), source)
             })
             .collect(),
         ..Default::default()

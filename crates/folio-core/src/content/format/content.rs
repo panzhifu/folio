@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(page.image_href(), Some("left.jpg"));
         assert_eq!(page.image_hrefs(), vec!["left.jpg", "right.jpg"]);
 
-        let json = serde_json::to_string(&[page.clone()]).unwrap();
+        let json = serde_json::to_string(std::slice::from_ref(&page)).unwrap();
         let back: Vec<FixedPage> = serde_json::from_str(&json).unwrap();
         assert_eq!(back[0].image_hrefs(), vec!["left.jpg", "right.jpg"]);
     }

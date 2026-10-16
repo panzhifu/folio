@@ -567,7 +567,7 @@ mod tests {
         let store = Arc::new(Store::in_memory().unwrap());
         let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
         for ix in 0..HOURS_MIN_SESSIONS {
-            let at = noon(0) + i64::from(ix) * 60;
+            let at = noon(0) + ix * 60;
             store.record_session(book, at, at + 30, 0).unwrap();
         }
         let report = cx.update(|cx| Report::load(&store, Range::Fourteen, TZ, cx));

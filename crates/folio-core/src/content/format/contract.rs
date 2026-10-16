@@ -117,7 +117,7 @@ fn every_reflow_provider_hands_the_engine_parseable_xhtml() {
                 "{name} 第 {ix} 章的 source 不是标记：{:?}",
                 &chapter.source()[..chapter.source().len().min(120)]
             );
-            let text = visible(&chapter.source());
+            let text = visible(chapter.source());
             assert!(
                 !text.trim().is_empty(),
                 "{name} 第 {ix} 章解析出来没有可见文本"
@@ -145,7 +145,7 @@ fn the_plain_text_wrapper_preserves_visible_text() {
         let Content::Reflow(flow) = content else {
             panic!("{name} 该读成可重排");
         };
-        let joined: String = flow.chapters.iter().map(|c| visible(&c.source())).collect();
+        let joined: String = flow.chapters.iter().map(|c| visible(c.source())).collect();
         let expected = super::xhtml::atx_markers_removed(body);
         assert_eq!(
             without_whitespace(&joined),

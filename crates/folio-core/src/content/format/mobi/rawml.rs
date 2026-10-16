@@ -126,7 +126,7 @@ pub(crate) fn reconstruct(
     // markup：KF8 用 SKEL/FRAG 重建多个文件；否则整段当一章。
     let skel = if header.skeleton_index != NOTSET {
         Some(indx::read_index(
-            |at| read(at),
+            read,
             header.skeleton_index as usize + kf8_offset,
             header.encoding,
         ))
@@ -135,7 +135,7 @@ pub(crate) fn reconstruct(
     };
     let frag = if header.fragment_index != NOTSET {
         Some(indx::read_index(
-            |at| read(at),
+            read,
             header.fragment_index as usize + kf8_offset,
             header.encoding,
         ))
@@ -210,7 +210,7 @@ pub(crate) fn decompress_text(
 fn build_huffcdic(read: Records<'_>, header: &Header, kf8_offset: usize) -> Option<HuffCdic> {
     let index = header.huff_rec_index;
     let count = header.huff_rec_count;
-    if index == NOTSET || count < 2 || count > 0xFFFF {
+    if index == NOTSET || !(2..=0xFFFF).contains(&count) {
         return None;
     }
     let first = index as usize + kf8_offset;
@@ -358,14 +358,14 @@ fn scan_resources(read: Records<'_>, first_resource: Option<usize>) -> Vec<Resou
         if is_end_marker(&bytes) {
             break;
         }
-        if let Some((kind, media_type)) = classify_resource(&bytes) {
-            if kind.kept() {
-                out.push(Resource {
-                    record,
-                    kind,
-                    media_type,
-                });
-            }
+        if let Some((kind, media_type)) = classify_resource(&bytes)
+            && kind.kept()
+        {
+            out.push(Resource {
+                record,
+                kind,
+                media_type,
+            });
         }
         record += 1;
         if record > start + 100_000 {

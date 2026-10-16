@@ -419,11 +419,9 @@ fn parse_metadata(xml: &str) -> Parsed {
                                 // 简介里的段落是各自的文本节点，中间没有任何分隔符，
                                 // 直接拼会把两段粘成一段。折成一个空格：这一格在界面上
                                 // 是一行标签文本，不是正文区。
-                                "annotation" => {
-                                    if out.description.is_empty() {
-                                        out.description =
-                                            buf.split_whitespace().collect::<Vec<_>>().join(" ");
-                                    }
+                                "annotation" if out.description.is_empty() => {
+                                    out.description =
+                                        buf.split_whitespace().collect::<Vec<_>>().join(" ");
                                 }
                                 _ => {}
                             }

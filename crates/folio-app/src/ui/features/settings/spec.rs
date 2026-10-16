@@ -38,6 +38,11 @@ pub(crate) struct Row {
     pub kind: RowKind,
 }
 
+/// 写入器那一格：四个带写入器的行型形状相同，只差新值的类型。写全
+/// `Rc<dyn Fn(SharedString, &mut App)>` 那一族会被 clippy 报 `type_complexity`，
+/// 而这一格在四个地方重复，起个名字比数它的复杂度便宜。
+pub(crate) type Setter<A> = Rc<dyn Fn(A, &mut App)>;
+
 /// 行的控件种类。真源是 [`crate::ui::shared::config_model::ConfigHolder`]，
 /// 这里只是把「读哪个字段、写哪个字段」钉死。
 ///
@@ -48,7 +53,7 @@ pub(crate) enum RowKind {
     /// 开关。
     Toggle {
         get: Rc<dyn Fn(&App) -> bool>,
-        set: Rc<dyn Fn(bool, &mut App)>,
+        set: Setter<bool>,
     },
     /// 下拉选择。`options` 是 (值, 标签) 对 —— 值是写回配置的形态，标签是显示文字；
     /// `scrollable` 只对桌面有意义（弹层是否滚动），手机的弹层本来就滚。
@@ -56,7 +61,7 @@ pub(crate) enum RowKind {
         options: Rc<Vec<(SharedString, SharedString)>>,
         scrollable: bool,
         get: Rc<dyn Fn(&App) -> SharedString>,
-        set: Rc<dyn Fn(SharedString, &mut App)>,
+        set: Setter<SharedString>,
     },
     /// 数值输入。桌面上是数字输入框，手机上是 −/+ 步进行。
     ///
@@ -65,12 +70,12 @@ pub(crate) enum RowKind {
     Number {
         spec: NumberSpec,
         get: Rc<dyn Fn(&App) -> f32>,
-        set: Rc<dyn Fn(f32, &mut App)>,
+        set: Setter<f32>,
     },
     /// 自由文本（字体家族、书库位置）。
     Text {
         get: Rc<dyn Fn(&App) -> SharedString>,
-        set: Rc<dyn Fn(SharedString, &mut App)>,
+        set: Setter<SharedString>,
     },
     /// 一行「读得出但改不了」的事实：标签在左，值在右（版本、commit 那几行）。
     Info { value: SharedString },

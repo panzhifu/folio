@@ -461,10 +461,11 @@ fn kf8_titles(read: Records<'_>, header: &Header, kf8_offset: usize, count: usiz
             .tag_value(3, 0)
             .and_then(|at| index.cncx_string(at))
             .unwrap_or_default();
-        if let Some(slot) = titles.get_mut(fid as usize) {
-            if slot.is_empty() && !title.is_empty() {
-                *slot = title.to_string();
-            }
+        if let Some(slot) = titles.get_mut(fid as usize)
+            && slot.is_empty()
+            && !title.is_empty()
+        {
+            *slot = title.to_string();
         }
     }
     titles
@@ -495,10 +496,11 @@ fn kf7_titles(
             .rev()
             .find(|(_, (start, _))| *start <= pos)
             .map(|(i, _)| i);
-        if let Some(i) = slot {
-            if titles[i].is_empty() && !item.title.is_empty() {
-                titles[i] = item.title.clone();
-            }
+        if let Some(i) = slot
+            && titles[i].is_empty()
+            && !item.title.is_empty()
+        {
+            titles[i] = item.title.clone();
         }
     }
     titles
@@ -583,16 +585,16 @@ fn rewrite_html(html: &str, ctx: &Rewrite) -> String {
     let mut i = 0usize;
     while i < html.len() {
         let rest = &html[i..];
-        if rest.starts_with('<') {
-            if let Some(end) = rest.find('>') {
-                let tag = &rest[..=end];
-                match rewrite_tag(tag, ctx) {
-                    TagAction::Keep(text) => out.push_str(&text),
-                    TagAction::Drop => {}
-                }
-                i += end + 1;
-                continue;
+        if rest.starts_with('<')
+            && let Some(end) = rest.find('>')
+        {
+            let tag = &rest[..=end];
+            match rewrite_tag(tag, ctx) {
+                TagAction::Keep(text) => out.push_str(&text),
+                TagAction::Drop => {}
             }
+            i += end + 1;
+            continue;
         }
         let ch = rest.chars().next().expect("非空");
         out.push(ch);

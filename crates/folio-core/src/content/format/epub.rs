@@ -647,17 +647,18 @@ fn parse_opf(xml: &str) -> Opf {
                 // 自闭的 `<meta name="calibre:series" content="…"/>`：EPUB2 那一路的
                 // Calibre 导出就是这么写的（EPUB3 用带文本的 `property` 形式）。
                 // 值在 `content` 属性里，所以这一条不走文本采集那一套。
-                if section == "metadata" && name == "meta" {
-                    if let Some(key) = meta_key(&e) {
-                        metas.push(RawMeta {
-                            elem: name.to_string(),
-                            key,
-                            id: attr(&e, "id").unwrap_or_default(),
-                            scheme: attr(&e, "scheme").unwrap_or_default().to_ascii_lowercase(),
-                            refines: attr(&e, "refines").unwrap_or_default(),
-                            text: attr(&e, "content").unwrap_or_default(),
-                        });
-                    }
+                if section == "metadata"
+                    && name == "meta"
+                    && let Some(key) = meta_key(&e)
+                {
+                    metas.push(RawMeta {
+                        elem: name.to_string(),
+                        key,
+                        id: attr(&e, "id").unwrap_or_default(),
+                        scheme: attr(&e, "scheme").unwrap_or_default().to_ascii_lowercase(),
+                        refines: attr(&e, "refines").unwrap_or_default(),
+                        text: attr(&e, "content").unwrap_or_default(),
+                    });
                 }
                 match (section.as_str(), name) {
                     ("manifest", "item") => {
@@ -1834,7 +1835,6 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         series: opf.series,
         format: Format::Epub,
         size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
-        ..DocMeta::default()
     };
     let flow = FlowDoc {
         chapters,
@@ -1959,7 +1959,6 @@ fn read_fixed(
         series: opf.series.clone(),
         format: Format::Epub,
         size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
-        ..DocMeta::default()
     };
     let fixed = FixedDoc {
         pages,
@@ -2026,14 +2025,15 @@ fn all_image_refs(xhtml: &str) -> Vec<String> {
             };
             let tag = &rest[..end];
             for key in ["xlink:href", "href", "src"] {
-                if let Some(value) = attr_in_tag(tag, key) {
-                    if !value.is_empty() && !value.starts_with("http") {
-                        let owned = value.to_string();
-                        if !out.contains(&owned) {
-                            out.push(owned);
-                        }
-                        break;
+                if let Some(value) = attr_in_tag(tag, key)
+                    && !value.is_empty()
+                    && !value.starts_with("http")
+                {
+                    let owned = value.to_string();
+                    if !out.contains(&owned) {
+                        out.push(owned);
                     }
+                    break;
                 }
             }
             haystack = &haystack[at + marker.len()..];

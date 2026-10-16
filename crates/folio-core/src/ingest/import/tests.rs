@@ -201,7 +201,7 @@ fn url_import_streams_into_a_hash_named_copy_and_registers() {
     );
     let outcomes = import_from(&source, &lib, &store2, &StageCtx::detached());
     assert_eq!(outcomes.len(), 1);
-    assert!(matches!(outcomes[0].result, Err(_)), "取消落一条 Err");
+    assert!(outcomes[0].result.is_err(), "取消落一条 Err");
     assert!(store2.shelf("").unwrap().is_empty());
     assert_eq!(
         copies(&lib),

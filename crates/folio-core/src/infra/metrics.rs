@@ -28,6 +28,14 @@
 //! [`take_local`]: take_local
 //! [`global`]: global
 
+// `clippy::missing_const_for_thread_local` 在这一格是空转：下面那个 `thread_local!` 写的
+// `const { [const { Cell::new(0) }; 14] }` 已经是它要的那个形态，而 `cargo clippy --fix` 交回的
+// 是把 `const` 加回来的同一份代码（2026-10-16 实测，改前改后 `diff -q` 一致）。只有
+// `--target aarch64-linux-android --lib` 报它（CI 的移动端那道门），宿主三条 target 都不报，
+// 诊断的 span 出自宏展开内部 —— 挂在 `thread_local!` 语句上的 allow 也压不住它（同样实测）。
+// 所以这是那条 lint 在这个 target 上的假阳性，不是这里少写了一层；没有可改的形态，allow 收在文件级。
+#![allow(clippy::missing_const_for_thread_local)]
+
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 

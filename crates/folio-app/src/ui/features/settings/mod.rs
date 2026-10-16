@@ -98,10 +98,7 @@ pub(super) fn spec_pages(cx: &App) -> Vec<spec::Page> {
 
 /// 桌面的整页字段：把规格映射回 `Settings` 组件的数据形状。
 pub(super) fn pages(cx: &App) -> Vec<SettingPage> {
-    spec_pages(cx)
-        .iter()
-        .map(|page| setting_page(page))
-        .collect()
+    spec_pages(cx).iter().map(setting_page).collect()
 }
 
 use gpui_kit::component::h_flex;

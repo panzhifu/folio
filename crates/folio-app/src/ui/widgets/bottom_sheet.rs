@@ -961,7 +961,7 @@ mod view_tests {
         let mut host = None;
         let handle: AnyWindowHandle = cx
             .open_window(size(px(400.0), px(600.0)), |window, cx| {
-                let view = cx.new(|cx| SheetHost::boot(cx));
+                let view = cx.new(SheetHost::boot);
                 host = Some(view.clone());
                 Root::new(view, window, cx)
             })

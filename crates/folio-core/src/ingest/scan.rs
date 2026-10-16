@@ -320,7 +320,13 @@ mod tests {
         touch(&root, "图片.png", "png"); // 不认识的扩展名
 
         let ctx = StageCtx::detached();
-        let report = find_with(&[root.clone()], &[library], &[], Limits::default(), &ctx);
+        let report = find_with(
+            std::slice::from_ref(&root),
+            &[library],
+            &[],
+            Limits::default(),
+            &ctx,
+        );
         let mut got = names(&report);
         got.sort();
         assert_eq!(

@@ -36,6 +36,12 @@ const TICK: Duration = Duration::from_secs(60);
 /// 最后一次交互之后还宽限多久算在读。见文件头第 3 条。
 const IDLE_GRACE: i64 = 300;
 
+// 宽限不该长过一段：否则每一段都会先被宽限线裁一刀，`SEGMENT_SECS` 就不是
+// 「最多丢多少」那个数了。这一条只能写在 const 上 —— 两边都是常量，测试里那句
+// `assert!` 会被编译器直接折成 `true`（clippy::assertions_on_constants 报的就是它），
+// 而挂在这里改一个字就编不过。
+const _: () = assert!(SEGMENT_SECS >= IDLE_GRACE);
+
 impl ReaderSession {
     /// 开始为当前这本书计时。换书时**先** [`Self::settle_reading`] 再调这里，
     /// 否则上一本那一段会被算到新头上。
@@ -175,8 +181,5 @@ mod tests {
             tick_secs <= SEGMENT_SECS,
             "时钟一拍 {tick_secs} 秒不该长过一段 {SEGMENT_SECS} 秒"
         );
-        // 宽限不该长过一段：否则每一段都会先被宽限线裁一刀，`SEGMENT_SECS` 就不是
-        // 「最多丢多少」那个数了。
-        assert!(SEGMENT_SECS >= IDLE_GRACE);
     }
 }

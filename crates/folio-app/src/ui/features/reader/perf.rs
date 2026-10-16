@@ -124,6 +124,16 @@
 //!    答案是：`render` 这一段已经没有可省的大头了，能省的只有 ②（下一屏的字形预热）**，
 //!    而它的上限就是那 21–44 ms 里「首次光栅化」那部分（暖屏对照：同一层字形环 15 ms）。
 
+// `clippy::missing_const_for_thread_local` 在移动端那道门上要分两件事看（宿主 target 不报它，
+// 只有 CI 的 `--target aarch64-linux-android --lib` 报，且 allow 挂在 `thread_local!` 语句上压不住
+// —— 诊断的 span 出自宏展开内部）。`FRAME` / `LAST_PAINT_US` / `LAST_RENDER_US` / `PAINTED` 那四条
+// 写的已经是 `const { … }`，`cargo clippy --fix` 交回的是同一份代码（与 `infra/metrics.rs` 同量）：
+// 假阳性，没有可改的形态。最后那条 `AGG` 是**真**的，它要的 const 初始化造不出
+// `Vec::with_capacity(WINDOW)`（那不是 const fn），而换成 `Vec::new()` 等于让这六个 `Vec` 在头
+// `WINDOW` 帧里边推边 realloc —— 那些分配就落进了它正在量的那几帧里。量尺不该改被测对象，
+// 预分配留着，allow 收在文件级。
+#![allow(clippy::missing_const_for_thread_local)]
+
 use std::cell::{Cell, RefCell};
 use std::time::Instant;
 

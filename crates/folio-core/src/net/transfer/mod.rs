@@ -395,21 +395,28 @@ mod tests {
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"三体.epub\"\r\nContent-Type: application/octet-stream\r\n\r\n{}\r\n--{boundary}--\r\n",
             "这是假装的 epub 内容"
         );
-        let post = |pin: &str| {
-            client
+        // 闭包只回状态码。`ureq::Error::Status` 里揣着整个 `Response`，照原样把它当 `Err`
+        // 交回来就是 clippy::result_large_err（那一格的 `Ok` 侧本来也是拿来数状态码的）；
+        // 而这条测试从头到尾要的只是「几号状态」，所以把两条路折成一个 `u16`。
+        let post = |pin: &str| -> u16 {
+            match client
                 .post(&format!("{base}/upload?pin={pin}"))
                 .set(
                     "Content-Type",
                     &format!("multipart/form-data; boundary={boundary}"),
                 )
                 .send(body.as_bytes())
+            {
+                Ok(resp) => resp.status(),
+                Err(ureq::Error::Status(code, _)) => code,
+                Err(other) => panic!("上传不该走到传输错误：{other}"),
+            }
         };
         // 错配对码 403，一个字节都不落。
-        assert!(matches!(post("0000"), Err(ureq::Error::Status(403, _))));
+        assert_eq!(post("0000"), 403);
         assert!(std::fs::read_dir(&inbox).unwrap().next().is_none());
         // 对配对码：落盘 + 回调。
-        let resp = post("2468").unwrap();
-        assert_eq!(resp.status(), 200);
+        assert_eq!(post("2468"), 200);
         assert_eq!(
             std::fs::read(inbox.join("三体.epub")).unwrap(),
             "这是假装的 epub 内容".as_bytes(),

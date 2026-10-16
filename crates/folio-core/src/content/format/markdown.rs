@@ -364,7 +364,7 @@ mod tests {
     fn chapter_sources_reconcatenate_losslessly() {
         let src = "# A\ntext\n## B\nmore\n";
         let (_, flow) = opened("d.md", src);
-        let joined: String = flow.chapters.iter().map(|c| visible(&c.source())).collect();
+        let joined: String = flow.chapters.iter().map(|c| visible(c.source())).collect();
         let expected = crate::content::format::xhtml::atx_markers_removed(src);
         assert_eq!(without_whitespace(&joined), without_whitespace(&expected));
     }
