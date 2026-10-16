@@ -2113,4 +2113,6 @@ fn unsupported(path: &Path, why: &str) -> crate::Error {
 }
 
 #[cfg(test)]
-mod tests;
+// `pub(crate)` 只为让 `content::scan` 的逐章对拍复用 `published_shape_epub` ——
+// 同一份合成书在仓库里写一处，别到第二处再抄一遍。
+pub(crate) mod tests;

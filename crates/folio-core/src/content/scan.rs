@@ -386,6 +386,7 @@ mod tests {
     use super::{ChapterScan, ChapterSummary, chapter_summary};
     use crate::content::document;
     use crate::content::dom::Dom;
+    use crate::content::format::epub::tests::published_shape_epub;
     use crate::content::format::visible_chars;
 
     /// 参照实现：第一个 h1/h2/h3 的文本，走 DOM 原语。
@@ -637,26 +638,35 @@ mod tests {
         }
     }
 
-    /// 合成书与那本 0.6 MB 的真书：一次 `cargo test` 就要跑到的门。
+    /// 仓库里那两份（合成的出版书形状 + 合成小样本）：一次 `cargo test` 就要跑到的门。
+    ///
+    /// 这一条以前读的是 `tests/fixtures/local/` 那本真书，而那个目录在 `.gitignore` 里
+    /// （`.gitignore` 顶上就写着「本地真书样本一律不入库」）—— 于是 CI 上它不是跳过而是
+    /// NotFound 红。输入必须在仓库里，所以换成 `published_shape_epub` 当场写的那一份；
+    /// 真书那一族进下面 `#[ignore]` 的那条。
     #[test]
     fn the_streaming_scan_matches_the_dom_chapter_by_chapter_in_the_repo_books() {
         let (chapters, chars) =
             against_a_book(&fixture("../../tests/fixtures/oss/minimal-zh.epub"));
         assert!(chapters > 0 && chars > 0, "合成书该有正文可对");
-        let (chapters, chars) =
-            against_a_book(&fixture("../../tests/fixtures/local/shejie-mauriac.epub"));
-        assert_eq!(chapters, 28, "《蛇结》28 章都过了一遍对拍");
-        assert!(chars > 100_000, "对拍覆盖的字数太少了：{chars}");
+        let dir = tempfile::tempdir().unwrap();
+        let (chapters, chars) = against_a_book(&published_shape_epub(&dir));
+        assert_eq!(chapters, 28, "28 章都过了一遍对拍");
+        assert!(chars > 250, "逐章对拍覆盖的字数太少了：{chars}");
     }
 
-    /// 大部头那本（1225 章 / 430 万字）不进每次跑批：一次几秒，`--ignored` 单独跑。
+    /// 本机那两本真书不进每次跑批：一次几秒，而且输入不在仓库里，`--ignored` 单独跑。
     #[test]
     #[ignore = "全库对拍：1225 章两遍解析，几秒"]
-    fn the_streaming_scan_matches_the_dom_on_the_big_book() {
+    fn the_streaming_scan_matches_the_dom_on_the_local_books() {
         let (chapters, chars) = against_a_book(&fixture(
             "../../tests/fixtures/local/斗战狂潮校对版全本.epub",
         ));
         assert_eq!(chapters, 1225);
         assert!(chars > 4_000_000, "对拍覆盖的字数：{chars}");
+        let (chapters, chars) =
+            against_a_book(&fixture("../../tests/fixtures/local/shejie-mauriac.epub"));
+        assert_eq!(chapters, 28, "《蛇结》28 章都过了一遍对拍");
+        assert!(chars > 100_000, "对拍覆盖的字数：{chars}");
     }
 }

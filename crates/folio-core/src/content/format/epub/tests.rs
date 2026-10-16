@@ -289,7 +289,9 @@ fn synth_epub(dir: &tempfile::TempDir, chapter_xhtml: &str) -> PathBuf {
 /// 但容器本身**当场合成** —— 一条要每次 `cargo test` 与 CI 都真跑的测试，
 /// 输入必须在仓库里。它验的不是「能不能打开」，而是合成小样本装不下的那几个形状：
 /// manifest 与 spine 反着排、几十条 NCX 条目、条目里的 `#fragment`、章数多于目录数。
-fn published_shape_epub(dir: &tempfile::TempDir) -> PathBuf {
+///
+/// `pub(crate)` 是给 `content::scan` 那一层的逐章对拍用的：同一份合成书只写一处。
+pub(crate) fn published_shape_epub(dir: &tempfile::TempDir) -> PathBuf {
     const CHAPTERS: usize = 28;
     const TOC_ENTRIES: usize = 25;
     let path = dir.path().join("published-shape.epub");
@@ -1190,8 +1192,8 @@ fn the_cover_is_a_queue_job_not_main_thread_work() {
 fn indexing_a_book_parses_no_dom_at_all() {
     use crate::infra::metrics::{Metric, take_local};
 
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/local/shejie-mauriac.epub");
+    let dir = tempfile::tempdir().unwrap();
+    let path = published_shape_epub(&dir);
     for with_text in [false, true] {
         take_local(Metric::DomParses);
         let (_, content) =
@@ -1219,8 +1221,8 @@ fn indexing_a_book_parses_no_dom_at_all() {
 fn an_indexing_pass_opens_the_container_once() {
     use crate::infra::metrics::{Metric, take_local};
 
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/local/shejie-mauriac.epub");
+    let dir = tempfile::tempdir().unwrap();
+    let path = published_shape_epub(&dir);
     take_local(Metric::ContainerOpens);
     let (_, content) =
         super::read_with_impl(&path, false, ParseBudget::Exactly(4)).expect("并行索引该打得开");
@@ -1244,15 +1246,15 @@ fn an_indexing_pass_opens_the_container_once() {
 ///   说了算」的本体。
 /// * 给一个比 `auto` 还高的上限，结果不许超过 `auto`：预算是往下压，不是往上抬。
 ///
-/// 用的是条目过了「少条目不起线程」那道门的书（`shejie-mauriac.epub`，53 个条目），
-/// 否则三条都会退化成 1 而假绿。拿掉 `EpubAdapter::index_with` 里把 `budget` 传下去那一步，
-/// 第二条立刻变红。
+/// 用的是条目过了「少条目不起线程」那道门的书（`published_shape_epub`：28 个 spine 条目，
+/// 多过 `MIN_PARALLEL_ITEMS` = 16），否则三条都会退化成 1 而假绿。拿掉 `EpubAdapter::index_with`
+/// 里把 `budget` 传下去那一步，第二条立刻变红。
 #[test]
 fn the_budget_handed_down_from_the_batch_caps_the_parser() {
     use crate::content::document;
 
-    let book = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/local/shejie-mauriac.epub");
+    let dir = tempfile::tempdir().unwrap();
+    let book = published_shape_epub(&dir);
     // 这台机器上不被外层压限时自己会定几路。
     let auto = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -1267,7 +1269,9 @@ fn the_budget_handed_down_from_the_batch_caps_the_parser() {
     let (one, doc_one) = picked(1);
     assert_eq!(one, 1, "给了 1 路就必须只起 1 路");
 
-    let below = auto - 1;
+    // 单核机上 `auto - 1` 是 0，而 0 在 `AtMost` 那一头被 `n.max(1)` 折回 1 —— 那条断言会在
+    // 合法的机器上假红，所以这一档最低留 1 路。
+    let below = (auto - 1).max(1);
     let (capped, doc_capped) = picked(below);
     assert_eq!(
         capped, below,
