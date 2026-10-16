@@ -144,6 +144,31 @@ pub fn default_mode(total: f32, gap: f32) -> PageMode {
     }
 }
 
+/// 平移翻页里**两张纸各沿轴走多远**，按「这一趟走了多少」`progress` 算（0 = 刚起步，
+/// 1 = 走完），给回 `(出场页, 进场页)`。沿哪根轴由调用方定 —— 这一层只管一个数，
+/// 分成 `x` / `y` 是绘制侧的事（档位来自 `folio_core::PageTurn`）。
+///
+/// 两张**同速**、并且始终相距 `dist`，读起来才是一条纸带整体平移；两张走同样的量而
+/// 间距会变，就变成了两张卡片各自飞。进场那张起步时在阅读方向的前方外 `dist` 处
+/// （`progress` = 0 ⇒ 位移 = `±dist`），走完回到原位（`progress` = 1 ⇒ 位移 = 0）；
+/// 出场那张正好相反，走完走满 `dist` 出画。
+///
+/// 方向接反了**不报错**，画面是「下一页从左边滑进来」—— 所以这一句抽成纯函数、
+/// 并且在这里钉住方向，与 `ui::shell::nav_offset` 那一条同一取舍：宿主测试只有
+/// 在这一层才摸得到位移。
+pub fn slide_shifts(progress: f32, dist: f32, forward: bool) -> (f32, f32) {
+    let dir = if forward { 1.0 } else { -1.0 };
+    (-dir * dist * progress, dir * dist * (1.0 - progress))
+}
+
+/// 连续滚动那一屏跳的补间：起点与终点之间按走了的比例插值。
+///
+/// 起点是**上一帧画出来的**那一个数而不是 `scroll_y`：读者连点两下时，第二趟要从
+/// 他眼前那一屏起步，否则画面先跳回上一趟的终点再走，看着像卡了一下。
+pub fn tween(from: f32, to: f32, progress: f32) -> f32 {
+    from + (to - from) * progress
+}
+
 /// 正文被点中的哪一区。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Zone {
@@ -295,7 +320,7 @@ mod tests {
 
     use super::{
         Chrome, Effect, MIN_COLUMN_WIDTH, PageMode, Panel, Zone, default_mode, percent_label,
-        spread_fits, spread_gap, zone,
+        slide_shifts, spread_fits, spread_gap, tween, zone,
     };
 
     #[test]
@@ -443,5 +468,59 @@ mod tests {
         // 越界的比例（滚动位置刚从上一个模式残留下来时会遇到）夹住而不是念出 130%。
         assert_eq!(percent_label(1.7), "100%");
         assert_eq!(percent_label(-0.3), "0%");
+    }
+
+    /// 平移翻页的两张纸各走多远。接反了不报错，画面是「下一页从左边滑进来」，
+    /// 而位移只有宿主这一层摸得到 —— 所以钉在这里。
+    #[test]
+    fn the_two_pages_slide_apart_at_the_same_speed() {
+        let dist = 400.0;
+
+        // 起步：出场那张还在原位，进场那张停在阅读方向的前方外一整个 `dist`。
+        assert_eq!(slide_shifts(0.0, dist, true), (0.0, dist));
+        // 走完：进场那张落回原位，出场那张走满 `dist` 出画。
+        assert_eq!(slide_shifts(1.0, dist, true), (-dist, 0.0));
+
+        // 中途两张始终相距 `dist`（同速 = 一条纸带），间距变了就是两张卡片各自飞。
+        for step in 0..=10 {
+            let progress = step as f32 / 10.0;
+            let (leaving, incoming) = slide_shifts(progress, dist, true);
+            assert_eq!(
+                incoming - leaving,
+                dist,
+                "走了 {progress} 之后两张不再相距 {dist}"
+            );
+        }
+
+        // 进场那张**单调靠近**原位：读数越大越往右 = 往回退着走，方向接反的现场。
+        let mut last = dist;
+        for step in 0..=10 {
+            let progress = step as f32 / 10.0;
+            let (_, incoming) = slide_shifts(progress, dist, true);
+            assert!(
+                incoming <= last,
+                "往后翻时进场那一页在 {progress} 反而更往右了"
+            );
+            last = incoming;
+        }
+
+        // 往前翻整对符号反过来：进场从左边来，出场往右边退。
+        assert_eq!(slide_shifts(0.0, dist, false), (0.0, -dist));
+        assert_eq!(slide_shifts(1.0, dist, false), (dist, 0.0));
+
+        // 零距离（窗口还没量过）不该长出 NaN 或半张纸。
+        assert_eq!(slide_shifts(0.5, 0.0, true), (0.0, 0.0));
+    }
+
+    /// 连续滚动那一屏跳的补间。起点用「画出来的那一个数」，不是 `scroll_y`。
+    #[test]
+    fn the_scroll_tween_runs_between_the_painted_positions() {
+        assert_eq!(tween(100.0, 500.0, 0.0), 100.0, "刚起步还在原地");
+        assert_eq!(tween(100.0, 500.0, 1.0), 500.0, "走完落在终点");
+        assert_eq!(tween(100.0, 500.0, 0.5), 300.0);
+        // 往回翻是同一句式的负方向，不需要另一条规则。
+        assert_eq!(tween(500.0, 100.0, 0.5), 300.0);
+        // 终点就是起点（夹在章尾、一个字没挪）时不该抖出一个非零的数。
+        assert_eq!(tween(240.0, 240.0, 0.37), 240.0);
     }
 }

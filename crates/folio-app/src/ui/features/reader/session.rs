@@ -97,8 +97,21 @@ pub struct ReaderSession {
     /// `effective` 只能把它退成分页，而不是它本来该是的样子。
     pub(super) mode_undecided: bool,
     pub(super) laid_out: LaidOut,
+    /// 正在走的那一次翻页动画（见 [`Turn`]）。`None` = 画面定住了。
+    pub(super) turn: Option<Turn>,
+    /// 每次起动画加一的时钟键，供 [`Turn::seq`] 用。
+    pub(super) turn_seq: u64,
     /// 已滚过的像素（内容坐标，向下为正）。只在连续滚动里有意义。
     pub(super) scroll_y: f32,
+    /// 这一帧**画在**哪一个全局 y。动画期间它落后于 [`ReaderSession::scroll_y`]，
+    /// 而绘制与命中两处都必须读它而不是 `scroll_y`：用后者命中的话，补间走完之前
+    /// 按在某个字上的手指会算到隔壁那一行去（起点也从这里取，见 [`Turn::scroll`]）。
+    pub(super) scroll_painted: f32,
+    /// 分页 / 双页这一帧的当前页偏了多少（平移翻页期间非零，定住时是 `(0, 0)`）。
+    ///
+    /// 由渲染帧按当前页写入，命中换算（`modules/selection.rs` 的 `to_layout`）减掉同一个
+    /// 数 —— 绘制把位移烘进了 run 的坐标，命中不减就会在快速连点两下时按到新页的空地上。
+    pub(super) page_shift: (f32, f32),
     /// 分页 / 双页的当前页号（一张纸一号，两栏算同一号）。
     pub(super) page: usize,
     /// 滚轮攒下的增量：分页模式下翻一页要攒够半屏，不然一次惯性滚动能翻过去三页。
@@ -309,6 +322,10 @@ impl ReaderSession {
             mode_undecided: false,
             laid_out: LaidOut::default(),
             scroll_y: 0.0,
+            scroll_painted: 0.0,
+            page_shift: (0.0, 0.0),
+            turn: None,
+            turn_seq: 0,
             page: 0,
             wheel_accum: 0.0,
             content_height: 0.0,
@@ -415,6 +432,10 @@ impl ReaderSession {
             mode_undecided,
             laid_out: LaidOut::default(),
             scroll_y: 0.0,
+            scroll_painted: 0.0,
+            page_shift: (0.0, 0.0),
+            turn: None,
+            turn_seq: 0,
             page: 0,
             wheel_accum: 0.0,
             content_height: 0.0,
@@ -822,12 +843,40 @@ impl ReaderSession {
             self.prefs = effective.clone();
             // body / mono 不入 `FontKey`，换了必须让缓存失效，否则同一个 key 会命中旧字体。
             self.font_cache.clear();
+            // 重排会把每一页的片高与行盒换掉：正在平移的那一张是按旧行盒摆出来的，
+            // 让它继续走完只会把两张对不上的纸叠在屏幕上。
+            self.cancel_turn();
             if let Some(book) = self.book_mut() {
                 // 拼接窗口里的每一章都吃同一份偏好：一起作废，一起重排。
                 book.set_prefs_on_all(effective);
             }
         }
     }
+}
+
+/// 正在走的那一次翻页动画。
+///
+/// 记的是**出场那一张**而不是两张各自的位置：进场那一张永远是 `self.page` / `scroll_y`，
+/// 那两个数本身就是权威，再抄一份进动画状态就多出两处会各自漂移的坐标。
+///
+/// 时钟不在这里存：那口表由 gpui 的 `Presence` 按 `seq` 那把键持有（见
+/// `view.rs` 的 `turn_frame`），它自己续帧、自己按系统的减弱动态效果归零。
+/// 在这里再存一个 `Instant`，就有了两套「走了多久」，而其中一套不会被测试时钟推着走。
+#[derive(Clone, Copy)]
+pub(super) struct Turn {
+    /// 这一趟的时钟键。每次起动画换新键：复用同一个键会把上一趟**还没走完**的状态
+    /// 接到这一趟上，读者看见的是第二次翻页只滑了一半就到位。
+    pub seq: u64,
+    /// 分页 / 双页：出场那一页的页号。连续滚动没有「页」，那一臂看 [`Self::scroll`]。
+    pub leaving: Option<usize>,
+    /// 连续滚动：补间的起点（起那一刻**画出来的**那一个数）与终点。
+    ///
+    /// 起点不用 `scroll_y` 而用画出来的那个：读者连点两下时，第二趟要从他眼前那一屏
+    /// 起步，否则画面先跳回上一趟的终点再走，看着像卡了一下。
+    pub scroll: Option<(f32, f32)>,
+    /// `true` = 往后走（下一页 / 往下滚）。接反了不报错，画面是反着走的，
+    /// 所以方向的判据收在 [`chrome::slide_shifts`] 那一格里钉住。
+    pub forward: bool,
 }
 
 /// 开书时读一次「到过的章」。

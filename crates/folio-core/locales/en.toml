@@ -92,6 +92,7 @@ toc = "Contents"
 [group]
 body = "Body text"
 paragraph = "Paragraph"
+page_turn = "Page turn"
 measure = "Text block"
 family = "Font family"
 themes = "Themes"
@@ -150,6 +151,13 @@ toc_max_lines = "Title lines"
 "toc_max_lines.desc" = "How many lines a long title may take before it is truncated with an ellipsis."
 toc_dim_read = "Dim chapters you have read"
 "toc_dim_read.desc" = "Chapters you have opened are drawn faded in the contents list."
+page_turn = "Page-turn animation"
+"page_turn.desc" = "Which axis a page slides along when you turn it. Continuous scrolling ignores this, and changing it never re-typesets a chapter."
+
+# Labels for the two page-turn axes. The value written back to config is `PageTurn::as_str()`.
+[page_turn]
+horizontal = "Slide sideways"
+vertical = "Slide up and down"
 
 [account]
 settings = "Settings"

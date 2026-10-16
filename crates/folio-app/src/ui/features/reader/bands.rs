@@ -4,7 +4,8 @@
 //! 挪内缩）不该住在 `page.rs` 里 —— 那一屏管的是「什么时候摆干净态、什么时候摆浮层」
 //! 以及浮层本体，两件事从来不同时改。
 //!
-//! 两条带共用 [`band`] 那一层壳：满幅、定高、左右内缩、垂直居中、**不透明**底色。
+//! 两条带共用 [`band`] 那一层壳：满幅、定高、左右内缩、**不透明**底色。带里的字垂直摆位
+//! 两条不一样：页眉贴带顶（见 [`HEADER_TOP_PAD`]），页脚居中。
 //! 不透明是要害：正文让出的那一段只是按 `header_reserve` / `footer_reserve` 往下错开，
 //! 跨在视口上下沿的那一行照样会被画出来（它的行顶在可见带起点之外），带子透明就等于
 //! 让半行字压在章名上。滚动时字在这里被干净地切掉，才是「让出」这条带的本意。
@@ -18,6 +19,14 @@ use gpui_kit::{
 use super::chrome;
 use super::session::ReaderSession;
 use crate::ui::shared::l10n::tf;
+
+/// 页眉那条带里，字的上沿离带顶留多少（逻辑像素）。
+///
+/// [`band`] 的壳是 `h_flex`，交叉轴居中：带高 28 而 `text_xs` 的行盒约 17，居中就把这一行
+/// 小字往下推了 5–6 像素。章名是贴着屏幕顶的一行读数（它上面只剩状态栏安全区），靠上排才
+/// 不像正文的第一行。带高 [`chrome::HEADER_HEIGHT`] 不动 —— 那个数同时是正文让出的高度
+/// （`page.rs` 把它递进 `set_chrome_bands`），改它等于改版心。
+const HEADER_TOP_PAD: f32 = 2.0;
 
 /// 这一屏该念出去的三个数。
 pub(in crate::ui::features::reader) struct Readouts {
@@ -58,7 +67,8 @@ fn position(reader: &ReaderSession, cx: &App) -> String {
     )
 }
 
-/// 一条带的壳。顶边那条贴屏幕顶、底边那条贴屏幕底，其余规格两端一致。
+/// 一条带的壳。顶边那条贴屏幕顶、底边那条贴屏幕底，宽度与底色两端一致；
+/// 带里的字只有垂直摆位不同：顶边那条靠带顶（[`HEADER_TOP_PAD`]），底边那条居中。
 fn band(height: f32, at_top: bool, cx: &App) -> Div {
     let shell = h_flex()
         .absolute()
@@ -69,7 +79,8 @@ fn band(height: f32, at_top: bool, cx: &App) -> Div {
         .bg(cx.theme().background)
         .overflow_hidden();
     if at_top {
-        shell.top_0()
+        // `h_flex` 已经把交叉轴设成居中了，这里按同一根轴改到带顶。
+        shell.top_0().items_start().pt(px(HEADER_TOP_PAD))
     } else {
         shell.bottom_0().justify_between()
     }

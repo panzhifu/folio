@@ -89,6 +89,7 @@ toc = "目次"
 [group]
 body = "本文"
 paragraph = "段落"
+page_turn = "ページめくり"
 measure = "本文幅"
 family = "フォントファミリー"
 themes = "テーマ"
@@ -147,6 +148,13 @@ toc_max_lines = "題名の最大行数"
 "toc_max_lines.desc" = "長い題名が目次で何行まで並ぶか。超えると省略記号で切る。"
 toc_dim_read = "読んだ章を薄く表示"
 "toc_dim_read.desc" = "開いたことのある章を目次で薄く描画する。"
+page_turn = "ページめくりの動き"
+"page_turn.desc" = "めくる時に紙がどの軸へ滑るか。連続スクロールでは効かず、組み直しも起きません。"
+
+# 二段組のラベル。設定に書き戻す値は `PageTurn::as_str()`。
+[page_turn]
+horizontal = "左右に滑る"
+vertical = "上下に滑る"
 
 [account]
 settings = "設定"

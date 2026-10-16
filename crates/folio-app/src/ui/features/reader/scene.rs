@@ -17,7 +17,7 @@ use gpui_kit::{Hsla, SharedString};
 use super::document::{Document, RowFragment};
 use super::measure::FontCache;
 use super::paint::GlyphRun;
-use crate::ui::widgets::run_color;
+use crate::ui::widgets::{run_color, run_color_link};
 
 /// 可见范围内一块盒子的块级装饰：背景色与四边边框（实心画）。
 ///
@@ -89,6 +89,9 @@ impl Scene {
         x: f32,
         top: f32,
         foreground: Hsla,
+        // 主题的链接色。作者没写 `color` 而这一段在一条 `<a href>` 里时落到它，
+        // 由调用方从当前主题取（引擎里不嵌任何色值）。
+        link: Hsla,
     ) -> Self {
         // 等宽偏好与书的字体整份取一次：一个场景里所有 run 共用，别在逐 run 里克隆。
         let mono = SharedString::from(document.prefs().mono_font_family.clone());
@@ -139,7 +142,7 @@ impl Scene {
                             // 每条 run 自己的基线：`vertical-align` 折出来的偏移在这里减掉，
                             // 正数（往上抬）就是基线 y 变小。行盒高与行基线已由排版层算过。
                             .at(column_x + unit.x, baseline - unit.baseline_shift)
-                            .color(run_color(unit.color, foreground))
+                            .color(run_color_link(unit.color, foreground, link, unit.link))
                             // 装饰线要这个 run 的 inline box 高才能定纵向落点
                             // （见 `paint::decoration_y`），它是样式给的数，shaping 里没有。
                             .in_box(unit.box_height)

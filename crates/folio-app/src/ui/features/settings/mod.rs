@@ -31,7 +31,7 @@ pub(crate) use compact::CompactSettings;
 pub use view::SettingsView;
 
 // 页面文件之间共用的前言：规格构造器、主题、配置入口与文案函数。
-pub(super) use folio_core::Mode;
+pub(super) use folio_core::{Mode, PageTurn};
 pub(super) use gpui_kit::assets::IconName;
 pub(super) use gpui_kit::component::ActiveTheme;
 pub(super) use gpui_kit::component::ThemeMode;

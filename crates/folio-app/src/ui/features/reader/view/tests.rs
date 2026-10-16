@@ -10,12 +10,13 @@
 //! 叫 `test` 的属性宏，glob 会让下面的 `#[test]` 递归展开成它。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use folio_core::content::document::Document;
 use folio_core::content::format::TocEntry;
 use folio_core::infra::metrics::{Metric, take_local};
 use folio_core::store::Store;
-use folio_core::{Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, Reader};
+use folio_core::{Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, PageTurn, Reader};
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -27,6 +28,7 @@ use gpui_kit::{
 use crate::ui::features::reader::chrome::PageMode;
 use crate::ui::features::reader::session::ReaderSession;
 use crate::ui::shared::config_model::ConfigHolder;
+use crate::ui::shell::NAV_TRANSITION;
 
 /// 一段足够长的中文，保证它会折行 —— 不折行的话「缩进改变了布局」这种断言无从成立。
 const PARA: &str = "于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。";
@@ -1498,6 +1500,10 @@ fn a_page_turn_and_a_mode_switch_clear_the_selection(cx: &mut TestAppContext) {
         view.read_with(cx, |v, _| v.selection().is_none()),
         "翻走即清"
     );
+    // 让那一张平移走完，再挑下一次。命中的是**画出来的**位置（`page_shift`），而测试时钟
+    // 不自己走 —— 不走完这一趟，第二次拖选按下去落在新页前方外整整一页的地方，
+    // 选不出字来。这不是选中坏了，是这一帧的字确实还不在那儿。
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
 
     // 换摆法：清。
     drag_select(cx, &view, handle);
@@ -2449,4 +2455,234 @@ fn a_long_chapter_with_a_short_tail_still_scrolls_on(cx: &mut TestAppContext) {
         "图说后面那一章该滚得到，实际停在 {last}（窗口 {:?}）",
         view.read_with(cx, |v, _| v.span_window())
     );
+}
+
+// ---- 翻页动画：左右平移 / 上下平移 / 连续滚动的补间（`chrome::slide_shifts`、`turn_frame`）----
+
+/// 走一帧翻页动画：先把测试时钟推进 `wait`，再渲一帧。
+///
+/// 必须推时钟：`Presence` 的进度取自 `background_executor().now()`，而测试时钟不会自己走
+/// （`run_until_parked` 只走到下一个到期的定时器）。不推就是永远停在起步那一格 ——
+/// 那种红看着像「动画没接上」，其实只是表没走。
+fn turn_frame(cx: &mut TestAppContext, handle: AnyWindowHandle, wait: Duration) {
+    cx.executor().advance_clock(wait);
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .expect("渲染应成功");
+    cx.run_until_parked();
+}
+
+/// 这一帧重建了几次场景。分页且定住时应当是 1（一栏一份），动画在走时是 2
+/// （出场页 + 进场页各一份）—— 这是「两张纸真的都在树上」的唯一可测证据，
+/// 因为位移本身看不见，而少摆一张的画法在屏幕上只是「下一页没来」。
+fn rebuilds_this_frame(cx: &mut TestAppContext, handle: AnyWindowHandle, wait: Duration) -> u64 {
+    take_local(Metric::SceneRebuilds);
+    turn_frame(cx, handle, wait);
+    take_local(Metric::SceneRebuilds)
+}
+
+/// 把翻页动画的两张纸摆上屏：分页翻页在走的那一段，出场页与进场页**同时**在场，
+/// 方向是「下一页从右外进来、上一页往左走」，走完就只画一张。
+#[gpui_kit::test]
+fn a_paged_turn_draws_both_pages_until_the_slide_has_run(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_none()),
+        "定住的时候不该有动画挂着"
+    );
+    assert_eq!(
+        rebuilds_this_frame(cx, handle, Duration::from_millis(1)),
+        1,
+        "定住的一帧只该摆当前这一页"
+    );
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    // 起步那一帧：时钟还没走，进场那张整页停在阅读方向的前方外，出场那张还占着屏。
+    let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(1));
+    assert_eq!(
+        rebuilds, 2,
+        "翻页在走，出场页与进场页要各摆一份场景（拿到 {rebuilds} 份）"
+    );
+    let (turn, shift) = view.read_with(cx, |v, _| (v.turn, v.page_shift));
+    let turn = turn.expect("起步那一帧动画还挂着");
+    assert_eq!(turn.leaving, Some(first), "出场页该是刚离开的那一页");
+    assert!(turn.forward, "往下一页翻 ⇒ 方向是往后");
+    assert!(
+        shift.0 > 100.0 && shift.1 == 0.0,
+        "左右平移应当只沿 x 走，实得 {shift:?}"
+    );
+
+    // 走到一半：进场那张在靠近，还没落位。
+    turn_frame(cx, handle, Duration::from_millis(140));
+    let half = view.read_with(cx, |v, _| v.page_shift);
+    assert!(
+        half.0 > 0.0 && half.0 < shift.0,
+        "位移该单调收小：{shift:?} → {half:?}"
+    );
+
+    // 走完：状态收干净，第二张不再入树。
+    let rebuilds = rebuilds_this_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(
+        rebuilds, 1,
+        "走完的那一帧不该再摆出场页（拿到 {rebuilds} 份场景）"
+    );
+    view.read_with(cx, |v, _| {
+        assert!(v.turn.is_none(), "走完该把动画状态收掉");
+        assert_eq!(v.page_shift, (0.0, 0.0), "定住后当前页不该带着位移");
+    });
+    assert_eq!(view.read_with(cx, |v, _| v.page()), first + 1);
+}
+
+/// 竖档只沿 y 走：接到 x 上不报错，画面是「一页从左边滑进来」，而这是这一档唯一的
+/// 可见差别，所以钉在位移的两个分量上。
+#[gpui_kit::test]
+fn the_vertical_axis_moves_the_page_up_not_across(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    // 轴是**全局**偏好（`appearance.page_turn`），不挂在书上：走的是配置那条路，
+    // 与设置页里那一档同一个入口。
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Vertical);
+    });
+    turn_frame(cx, handle, Duration::from_millis(1));
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let shift = view.read_with(cx, |v, _| v.page_shift);
+    assert_eq!(shift.0, 0.0, "竖档不该在 x 上留下位移：{shift:?}");
+    assert!(shift.1 > 100.0, "竖档起步该整页偏在 y 上：{shift:?}");
+
+    // 翻回上一页：方向反号，仍然是竖着走。
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    view.update(cx, |v, cx| v.scroll_page(-1, cx));
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let back = view.read_with(cx, |v, _| v.page_shift);
+    assert_eq!(back.0, 0.0, "往回翻也不该在 x 上位移：{back:?}");
+    assert!(back.1 < 0.0, "往回翻时进场那张该从上方来：{back:?}");
+}
+
+/// 连续滚动的「上下滚动」：一次离散翻页跳的是**画出来的**那个 y，
+/// 从起点补间到终点，而 `scroll_y` 一开始就是终点（那才是权威位置、落库的口径）。
+#[gpui_kit::test]
+fn a_continuous_turn_tweens_the_painted_position(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    settle(cx, handle);
+    let start = view.read_with(cx, |v, _| v.scroll_y);
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    let (target, turn) = view.read_with(cx, |v, _| (v.scroll_y, v.turn));
+    assert!(
+        target > start,
+        "连续模式点一下要往前一屏：{start} → {target}"
+    );
+    let turn = turn.expect("离散翻页该起一趟补间");
+    assert!(turn.scroll.is_some(), "连续那一臂的两端在这里");
+    assert_eq!(turn.scroll.expect("上面刚判过"), (start, target));
+
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let painted = view.read_with(cx, |v, _| v.scroll_painted);
+    assert!(
+        (painted - start).abs() < 1.0,
+        "起步该还画在起点上，实得 {painted}（起点 {start}）"
+    );
+
+    turn_frame(cx, handle, Duration::from_millis(140));
+    let half = view.read_with(cx, |v, _| v.scroll_painted);
+    assert!(
+        half > start && half < target,
+        "走到一半该落在两点之间：{start} < {half} < {target}"
+    );
+
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    let (painted, settled) = view.read_with(cx, |v, _| (v.scroll_painted, v.turn));
+    assert!(settled.is_none(), "走完要把补间收掉");
+    assert!(
+        (painted - target).abs() < 1.0,
+        "定住后画的位置就是权威位置：{painted} vs {target}"
+    );
+}
+
+/// 手指还在屏上，补间就该让位：滚轮事件一到当场落定，别让一张纸追在手指后面滑。
+#[gpui_kit::test]
+fn a_wheel_event_cancels_a_scroll_tween(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    settle(cx, handle);
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    turn_frame(cx, handle, Duration::from_millis(60));
+    assert!(view.read_with(cx, |v, _| v.turn.is_some()), "补间还在走");
+
+    scroll_down(cx, handle, 40.0);
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_none()),
+        "滚轮一到位，补间必须当场让路"
+    );
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let (painted, target) = view.read_with(cx, |v, _| (v.scroll_painted, v.scroll_y));
+    assert_eq!(painted, target, "没有动画在走时，画的位置就是权威位置");
+}
+
+/// 系统不让动的时候（减弱动态效果）：翻页当场落位，一张多余的纸都不画。
+/// 判据不能只写「时长归零」—— 那要落到 `Presence` 给终值、而给终值那一帧仍可能多摆一张。
+#[gpui_kit::test]
+fn reduced_motion_lands_the_page_without_drawing_a_second_one(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    cx.update(|app| app.set_reduce_motion(true));
+    let first = view.read_with(cx, |v, _| v.page());
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(1));
+    assert_eq!(
+        rebuilds, 1,
+        "减动效那一档只画当前这一页（拿到 {rebuilds} 份场景）"
+    );
+    let (turn, shift, page) = view.read_with(cx, |v, _| (v.turn, v.page_shift, v.page()));
+    assert!(turn.is_none(), "减动效不该留下还在走的动画");
+    assert_eq!(shift, (0.0, 0.0), "位移当场归零");
+    assert_eq!(page, first + 1, "页号照旧往前，动画让路而不是拦下这一翻");
 }

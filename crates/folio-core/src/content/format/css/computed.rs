@@ -402,6 +402,19 @@ pub struct ComputedStyle {
     /// 所以排版层只用它透传到 run 上。
     pub underline: bool,
     pub line_through: bool,
+    /// 这一格在不在一条 `<a href>` 里。**不是 CSS 属性**，是 DOM 的事实：书面样式表给不给链接
+    /// 上色是作者的事，而「链接看着得像链接」是阅读器的事。
+    ///
+    /// 为什么需要这一格：出版工具的目录页几乎都不写链接色 —— 本机那本基督山伯爵的目录页是
+    /// 38 条 `<a class="calibre1">`，而 `stylesheet.css` 全文（2678 字节）一个 `color` 都没有，
+    /// `.calibre1` 写的还是 `text-decoration: none`。于是目录项与正文逐字同色同饰，读者看不出
+    /// 那是一栏可以点的东西。UA 那一档（`css/ua.rs` 的 `a`）当年只落下划线、把颜色「留给以后
+    /// 按主题着墨」，这一格就是那个着墨的入口：`color` 仍是 `None`（作者没写），由绘制层换成
+    /// **当前主题**的链接色，而不是在引擎里嵌一个十六进制数。
+    ///
+    /// 走继承传播（`inherit_from` 里那一行）：子元素与其中的文本都算在链接里，与 CSS 装饰线
+    /// 向后代传播同理。作者写了 `color` 时它照旧赢 —— 这一格只在 `color == None` 时才有话语权。
+    pub link: bool,
     pub white_space_pre: bool,
     /// 替换元素（图片）的尺寸。块级元素的 width 一期不做，只有图片用得上。
     pub width: Option<Length>,
@@ -463,6 +476,7 @@ impl Default for ComputedStyle {
             baseline_shift: 0.0,
             underline: false,
             line_through: false,
+            link: false,
             white_space_pre: false,
             width: None,
             height: None,
@@ -713,6 +727,15 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle) -> StyledD
         // 空标签名命中不到任何 UA 规则，等价于「只继承」。
         let mut style =
             crate::content::format::css::ua::seed(&parent, dom.tag_name(id).unwrap_or_default());
+        // 「在一条链接里」这一格来自 DOM 而不是样式表（判据与理由见 [`ComputedStyle::link`]）：
+        // 空 `href`（`<a name="x">` 那种老式锚点）不算链接 —— 它点不动，染蓝等于骗读者。
+        if dom.is_element(id, "a")
+            && dom
+                .attr(id, "href")
+                .is_some_and(|href| !href.trim().is_empty())
+        {
+            style.link = true;
+        }
         // HTML 的 `dir="rtl|ltr"` 是一条**呈现提示**（presentational hint）：优先级在作者
         // 样式表之下、UA 默认之上，所以落在 `apply_in_cascade_order` 之前 —— 作者真写了
         // `direction` 就把这一格盖掉。RTL 的书在 EPUB 里几乎都靠根元素这一个属性标注，

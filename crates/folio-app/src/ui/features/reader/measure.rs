@@ -50,6 +50,86 @@ fn is_generic(family: &str) -> bool {
         .any(|g| family.eq_ignore_ascii_case(g))
 }
 
+/// 作者点名的家族**这台设备没按那个名字装着**时，按名字判他要的是哪一类的中文，
+/// 再到设备上找同一类的那一份。名单按优先级排，落到第一个真装着的。
+///
+/// 为什么需要：书面 CSS 点的是出版那台机器上的名字（本机那本基督山伯爵的 `.calibre`
+/// 写的是 `宋体`，Calibre 导出十有八九这么写；易pub 那族爱写 `SimSun`/`微软雅黑`），
+/// 而目标设备上按这个名字装着的东西几乎一定不存在。以前整条链落空就直接换读者偏好，
+/// 「作者要衬线、读者给楷体」这类错配是静默发生的。
+///
+/// **只接中文这一族，拉丁家族名一律不映射**，这是有意的边界：primary 必须覆盖得住正文
+/// 的汉字 —— 把只有拉丁的 `Times New Roman` 当 primary，度量那趟会拿到 .notdef 的宽度
+/// （[`GENERIC_FAMILIES`] 那段讲的正是同一个坑），标题会歪出版心，而汉字要靠系统兜底
+/// 才画得出来。拉丁那一路要做得带一份覆盖表，不在这一格顺手猜。
+///
+/// 本机实测（2026-10-16，两台都量过）：手机 Meizu 20 的 `/system/fonts` 里 serif 家族
+/// **一个都没有**（`ls /system/fonts | grep -ci serif` = 0），CJK 只有一份
+/// `NotoSansCJK-Regular.ttc`；桌面这端有 `Noto Sans CJK` 而没有 `Noto Serif CJK`
+/// （`fc-list : family` 数出来的）。所以「宋体」这一档在**这两台机器上都找不到同类**，
+/// 会照名单往下掉 —— 这一格真正生效的是装着衬线中文字体的那类设备。
+/// 名单加长要照 `all_font_names()` 实际报出来的数，不照猜（全落空时日志会整份打出来，
+/// 见 `ui::host::CJK_PREFERRED` 上那三行同样的叮嘱）。
+const CJK_CLASS: &[(&[&str], &[&str])] = &[
+    // 衬线那一族：宋 / 明体 / Mincho / SimSun。
+    (
+        &[
+            "宋",
+            "明体",
+            "simsun",
+            "nsimsum",
+            "songti",
+            "ming",
+            "mincho",
+            "serif cjk",
+            "han serif",
+        ],
+        &[
+            "Noto Serif CJK SC",
+            "Source Han Serif SC",
+            "Noto Serif SC",
+            "Songti SC",
+            "SimSun",
+        ],
+    ),
+    // 楷体那一族：随包的 LXGW WenKai 就是楷。
+    (
+        &["楷", "kai", "wenkai", "圆", "round"],
+        &["LXGW WenKai", "Kaiti SC", "KaiTi", "STKaiti"],
+    ),
+    // 黑体那一族（无衬线中文）：与 `ui::host::CJK_PREFERRED` 同一口径的那几条。
+    (
+        &[
+            "黑",
+            "hei",
+            "gothic",
+            "yahei",
+            "pingfang",
+            "冬青",
+            "sans cjk",
+            "source han sans",
+        ],
+        &[
+            "Noto Sans CJK SC",
+            "Source Han Sans SC",
+            "Noto Sans SC",
+            "Microsoft YaHei",
+            "PingFang SC",
+            "Heiti SC",
+            "Droid Sans Fallback",
+        ],
+    ),
+];
+
+/// 一个家族名属于哪一类中文。不是中文那一族（含拉丁名与泛族名）时给 `None`。
+fn cjk_class(family: &str) -> Option<&'static [&'static str]> {
+    let lowered = family.to_lowercase();
+    CJK_CLASS
+        .iter()
+        .find(|(needles, _)| needles.iter().any(|needle| lowered.contains(needle)))
+        .map(|(_, list)| *list)
+}
+
 /// `FontKey` → gpui `Font`。**度量与绘制必须走这一个函数**：
 /// 两边各自拼 Font 的话，一次字段改动就会让居中偏移与实际字宽对不上。
 ///
@@ -80,21 +160,35 @@ pub fn gpui_font(
         .iter()
         .find(|name| !is_generic(name) && known.iter().any(|n| n.eq_ignore_ascii_case(name)));
     let installed = chosen.is_some();
-    let family = match chosen {
-        Some(name) => SharedString::from(name.to_string()),
-        // 整条链都没装着：泛族名里等宽那几种换成读者的等宽偏好，其余换成正文偏好。
-        // `mono` 自己也要在册，否则退回 `body`（读者填了个没装的名字不该让全书画方框）。
-        None if MONO_FAMILIES
+    // 整条链都没装着：先按**同一类**在设备上找一份中文（判据与那条边界见 [`CJK_CLASS`]），
+    // 找到就用它 —— 作者点名了家族，落不到同类就直接换读者偏好是静默错配。
+    let mapped = if installed {
+        None
+    } else {
+        key.candidates()
             .iter()
-            .any(|m| key.family.eq_ignore_ascii_case(m))
-            && known
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(mono.as_ref())) =>
-        {
-            mono.clone()
-        }
-        None => body.clone(),
+            .find(|name| !is_generic(name))
+            .and_then(|name| cjk_class(name))
+            .and_then(|list| {
+                list.iter()
+                    .find(|want| known.iter().any(|n| n.eq_ignore_ascii_case(want)))
+            })
+            .map(|found| SharedString::from(found.to_string()))
     };
+    // 四档优先级：作者点名的、这台机器真装着的 → 同类的那一份 → 读者的等宽偏好
+    // （只泛族名是等宽那几种时）→ 读者的正文偏好。`mono` 自己也要在册，否则退回 `body`
+    // （读者填了个没装的名字不该让全书画方框）。
+    let mono_pref = MONO_FAMILIES
+        .iter()
+        .any(|m| key.family.eq_ignore_ascii_case(m))
+        && known
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(mono.as_ref()));
+    let family = chosen
+        .map(|name| SharedString::from(name.to_string()))
+        .or(mapped)
+        .or_else(|| mono_pref.then(|| mono.clone()))
+        .unwrap_or_else(|| body.clone());
     // primary 已经是作者点名的那一个时，别再把它自己挂成 fallback（同族自己补自己没意义）。
     // 找书的字体时同样按整条链试：`@font-face` 声明的名字可能是链上的第二个。
     let fallbacks = if installed {
@@ -608,6 +702,90 @@ mod tests {
             .iter()
             .map(|n| n.to_string())
             .collect()
+    }
+
+    /// 自己拼一份设备在册表：同类映射那几条要按具体机器上的名单试，`known()` 那一份不够用。
+    fn known_in(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// 作者点名了「宋体」而机器上没这个名字 → 落**同一类**的那一份（衬线中文），
+    /// 而不是直接换读者偏好。这一格治的是「作者要衬线、读者给楷体」那类静默错配。
+    #[test]
+    fn a_named_cjk_family_falls_to_the_same_class_on_the_device() {
+        let font = gpui_font(
+            &key("宋体"),
+            &body(),
+            &mono(),
+            &BookFonts::empty(),
+            &known_in(&["Noto Serif CJK SC", "Noto Sans CJK SC", "LXGW WenKai"]),
+        );
+        assert_eq!(
+            font.family.as_ref(),
+            "Noto Serif CJK SC",
+            "衬线那一族里在册的第一个"
+        );
+    }
+
+    /// 楷体那一族：随包的 LXGW WenKai 就是楷，所以作者写「楷体」时该选到它 ——
+    /// 哪怕读者偏好是无衬线的那一份。
+    #[test]
+    fn a_kai_intent_picks_the_bundled_wenkai() {
+        let sans_body: SharedString = "Noto Sans CJK SC".into();
+        let font = gpui_font(
+            &key("楷体"),
+            &sans_body,
+            &mono(),
+            &BookFonts::empty(),
+            &known_in(&["Noto Sans CJK SC", "LXGW WenKai"]),
+        );
+        assert_eq!(font.family.as_ref(), "LXGW WenKai");
+    }
+
+    /// 设备上这一类**一个都没装着**时照旧落回读者偏好 —— 不许把一个不存在的名字交出去，
+    /// `TextSystem::resolve_font` 对那种名字是 panic 而不是回退。
+    ///
+    /// 这正是本机两台机器的现状：Meizu 20 的 `/system/fonts` 里 serif 家族数为 0，
+    /// 桌面有 `Noto Sans CJK` 而没有 `Noto Serif CJK`，所以「宋体」在两台上都只能落回偏好。
+    #[test]
+    fn an_unmatched_class_falls_back_to_the_readers_choice() {
+        let font = gpui_font(
+            &key("宋体"),
+            &body(),
+            &mono(),
+            &BookFonts::empty(),
+            &known_in(&["Noto Sans CJK SC", "LXGW WenKai"]),
+        );
+        assert_eq!(font.family, body(), "同类里没装着的，就不硬给一个名字");
+    }
+
+    /// **拉丁家族名一律不映射**：primary 得覆盖得住汉字。把只有拉丁的 `Times New Roman`
+    /// 当 primary，度量那趟拿到的是 .notdef 的宽（`GENERIC_FAMILIES` 那个坑），
+    /// 标题会歪出版心。拉丁那一路要做得带覆盖表，不在这一格猜。
+    #[test]
+    fn a_latin_family_name_is_not_mapped() {
+        let font = gpui_font(
+            &key("Times New Roman"),
+            &body(),
+            &mono(),
+            &BookFonts::empty(),
+            &known_in(&["DejaVu Serif", "Noto Serif", "LXGW WenKai"]),
+        );
+        assert_eq!(font.family, body(), "拉丁名不碰汉字，留给覆盖表那一轮");
+    }
+
+    /// 泛族名（`serif` / `sans-serif`）照旧不盖读者的选择 —— 那是 `GENERIC_FAMILIES`
+    /// 上写明的那条决策，同类映射不许把它改掉。
+    #[test]
+    fn a_generic_family_still_honours_the_readers_choice() {
+        let font = gpui_font(
+            &key("serif"),
+            &body(),
+            &mono(),
+            &BookFonts::empty(),
+            &known_in(&["Noto Serif CJK SC", "Noto Sans CJK SC"]),
+        );
+        assert_eq!(font.family, body(), "书的 serif 不盖掉读者选的字体");
     }
 
     /// 一条 `Font` 上的补缺链读回来。`FontFallbacks` 只有 `fallback_list()` 这一个出口，

@@ -1,9 +1,13 @@
-//! 「文字」页：字号、行距、段距、首行缩进、两端对齐。
+//! 「文字」页：字号、行距、段距、首行缩进、两端对齐，加上翻页沿哪根轴走。
 //!
-//! 五项都是**即时生效**的：写入即规整、即落盘、即让所有已打开的书重排，
+//! 各项都是**即时生效**的：写入即规整、即落盘，正文各项即让所有已打开的书重排，
 //! 所以这里没有「应用」按钮，也没有改了不生效的中间态。
 //!
-//! 分成两组是照读者改它们的时机分的：「正文」那一组是行的高度（一路跟着眼睛走），
+//! 「翻页」那一组是个例外，而且是刻意的：它即时生效但**不重排**，因为它存在
+//! `appearance` 而不是 `Reader` 那一节 —— `Reader` 整份是排版失效键，把动画档位塞进去
+//! 等于「换一种翻页动画触发整章重排」（见 `folio_core::infra::config::PageTurn`）。
+//!
+//! 前面两组是照读者改它们的时机分的：「正文」那一组是行的高度（一路跟着眼睛走），
 //! 「段落」那一组是每一段的形状（开头缩进与行尾齐不齐）。
 
 use super::*;
@@ -80,6 +84,39 @@ pub(super) fn typography_page(cx: &App) -> Page {
                     )
                     .description(tr(cx, "field.justify.desc"))
                     .keywords(&["justify", "align", "对齐", "两端"]),
+                ],
+            ),
+            group(
+                tr(cx, "group.page_turn"),
+                vec![
+                    Row::dropdown(
+                        tr(cx, "field.page_turn"),
+                        [
+                            (PageTurn::Horizontal, tr(cx, "page_turn.horizontal")),
+                            (PageTurn::Vertical, tr(cx, "page_turn.vertical")),
+                        ]
+                        .into_iter()
+                        .map(|(turn, label)| (SharedString::from(turn.as_str()), label))
+                        .collect(),
+                        false,
+                        |cx: &App| {
+                            SharedString::from(ConfigHolder::appearance(cx).page_turn.as_str())
+                        },
+                        |val: SharedString, cx| {
+                            ConfigHolder::edit_appearance(cx, |a| {
+                                a.page_turn = PageTurn::parse(&val)
+                            })
+                        },
+                    )
+                    .description(tr(cx, "field.page_turn.desc"))
+                    .keywords(&[
+                        "page",
+                        "turn",
+                        "animation",
+                        "翻页",
+                        "动画",
+                        "平移",
+                    ]),
                 ],
             ),
         ],

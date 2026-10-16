@@ -316,6 +316,9 @@ pub struct RowUnit {
     pub line_through: bool,
     /// CSS 声明的文字色。`None` = 书里没写，每帧落到主题前景。
     pub color: Option<Color>,
+    /// 这一段在不在一条 `<a href>` 里（`ComputedStyle::link`）。`color` 为 `None` 时绘制层
+    /// 拿它落到主题的链接色 —— 出版工具的目录页普遍不写颜色，而那栏看着必须是能点的。
+    pub link: bool,
     /// 字距（px），来自 `letter-spacing`。绘制时按字形所在字符序号右推 `ls × k`。
     pub letter_spacing: f32,
     /// 两端对齐：这一段起点已累计的右推量（px），以及这一行的摊法。绘制时字形再按
@@ -866,6 +869,7 @@ impl Document {
                             underline: run.style.underline,
                             line_through: run.style.line_through,
                             color: run.style.color,
+                            link: run.style.link,
                             letter_spacing: run.style.letter_spacing,
                             justify,
                             justify_shift: justify.map_or(0.0, |j| j.shift(gap_cursor)),
@@ -904,6 +908,8 @@ impl Document {
                             underline: false,
                             line_through: false,
                             color: marker.style.color,
+                            // 列表标记不是链接的一部分：`<li><a>…` 里那个点/数字不该跟着染蓝。
+                            link: false,
                             letter_spacing: marker.style.letter_spacing,
                             // 标记挂在流动之外，不参与两端对齐。
                             justify: None,

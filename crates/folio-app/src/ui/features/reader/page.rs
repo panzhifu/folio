@@ -43,14 +43,24 @@ use super::toc_panel::{TocEvent, TocPanel};
 use crate::ui::features::settings::CompactSettings;
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::l10n::tr;
+use crate::ui::shell::AppShell;
 use crate::ui::shell::navigation::SizeClass;
 use crate::ui::widgets::TopBar;
 
 pub struct ReadingPage {
     reader: Entity<ReaderSession>,
-    /// 外壳报告不属于正文的那条边占掉多少（桌面宽、移动高）。
+    /// 外壳报来的「不属于正文的那一段」。这一层盖满整窗，所以那一段只剩系统的安全区
+    /// （状态栏、手势条）—— 见 `shell::reading_reserve`。
     reserve: Reserve,
+    /// 这一层自己的返回栈（弱句柄）。**正文是栈底**，从阅读页压进去的那一屏（设置）叠在
+    /// 它上面 —— 借架面那条栈的话，压进来的那一屏会被这一层盖住。
+    ///
+    /// 弱是因为栈里存着正文自己的 `AnyView`：两边都攥紧就是互相拽着，这一层放手之后
+    /// 两边都散不掉。
     stack: WeakEntity<NavStackState>,
+    /// 拿着这一层的外壳（同样是弱句柄：外壳攥着这一层，这一层不该反过来攥着外壳）。
+    /// 顶栏那颗返回要请它收起这一层 —— 收层是外壳的事，正文这一屏不知道自己盖在谁上面。
+    shell: WeakEntity<AppShell>,
     /// 浮层的开合与面板档位。见 [`chrome`]。
     chrome: Chrome,
     /// 进度滑条。`Slider` 是有状态组件，句柄必须跨帧持有 —— 每帧新建会把拖动打断。
@@ -74,7 +84,11 @@ pub struct ReadingPage {
 }
 
 impl ReadingPage {
-    pub fn new(stack: WeakEntity<NavStackState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        stack: WeakEntity<NavStackState>,
+        shell: WeakEntity<AppShell>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let reader = cx.new(|cx| ReaderSession::boot(cx));
         // 字号与行距两条滑条的初值先取出来：`cx.new` 要 `&mut cx`，而把 `cx` 再关进
         // 构造闭包里就是同一个 `Context` 的二次可变借用。
@@ -149,6 +163,7 @@ impl ReadingPage {
             reader,
             reserve: Reserve::ZERO,
             stack,
+            shell,
             chrome: Chrome::default(),
             progress,
             font_size,
@@ -238,10 +253,14 @@ impl ReadingPage {
             .update(cx, |reader, cx| reader.scroll_page(delta, cx));
     }
 
+    /// 顶栏那颗返回。正文是这一层那条子栈的栈底，弹不动 —— 该请外壳把整层收走。
+    ///
+    /// 从正文压进来的那一屏（设置）自己带返回，它压着的时候这一屏根本看不见，所以这里
+    /// 不必先问子栈。
     fn pop(&mut self, cx: &mut Context<Self>) {
-        let _ = self
-            .stack
-            .update(cx, |state, cx| state.pop(NavMotion::Animated, cx));
+        if let Some(shell) = self.shell.upgrade() {
+            shell.update(cx, |shell, cx| shell.close_reading(cx));
+        }
     }
 
     /// 正文上的一击：先让选中说话（拖选松手的豁免、选中的清除/菜单回开），
@@ -598,12 +617,15 @@ impl ReadingPage {
         });
     }
 
-    /// 「设置」= 往同一栈里再压一屏钻入式设置。
+    /// 「设置」= 往正文这条子栈里再压一屏钻入式设置。
     ///
     /// 手机上没有独立设置窗口（两栏的整页字段塞不进这块小屏），压进栈的这屏吃的是
     /// 与桌面同一份页面规格。压进栈而不是切目的地：系统返回 pop 它就回到刚才那
     /// 一行字，阅读位置一点没动。桌面同样走这条 —— 少一个只在一端存在的窗口，
     /// 就少一处「这功能那端没有」。
+    ///
+    /// 压的是**这一层自己的**那条栈而不是架面那条：这一层盖在整窗上，架面的栈在它下面，
+    /// 压那边的话这一屏会被自己盖住。
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         let settings = cx.new(|_| CompactSettings::new());
         let _ = self.stack.update(cx, |state, cx| {
@@ -755,6 +777,16 @@ impl Render for ReadingPage {
                 this.on_body_tap(event, window, cx)
             },
         );
+        // 目录那块弹层此刻开着（手机档）。它的遮罩盖整块窗口，白底顶栏压在半透明黑下面
+        // 会成一片灰 —— 而那条上的返回键正是读者开完目录要按的第一颗：又压暗又点不动是
+        // 最坏的组合。所以这一档把顶栏抬到遮罩之上，让它保持原色也保持能按。
+        //
+        // 底栏**不**跟着抬：那几颗（字号、进度、翻页模式）在弹层里没有对应物，压在遮罩下
+        // 才是「这一层是临时抬起来的」的正确读法，而当初那句「让那 172 像素反而让人以为
+        // 还能点」的担心对顶栏不成立 —— 抬上来之后它是真能点。
+        //
+        // 宽档那条左侧栏不盖整块窗口，没有压暗这回事，所以只在弹层那一档抬。
+        let toc_sheet_up = self.toc.read(cx).is_open(cx) && rail <= 0.0;
         // 正文与两条浮层共用的一栏：目录那条左侧栏占掉左边一段，这一栏就从它右边起。
         // 两条浮层本身是 `absolute`，挂在这一栏上就跟着这一栏的左沿走，不会压到栏上。
         let column = div()
@@ -780,9 +812,15 @@ impl Render for ReadingPage {
                     .child(self.reader.clone()),
             )
             // 干净态那两行与浮层是同一片地方的两种样子，永远只画一套。
-            .when(self.chrome.is_open(), |this| {
+            //
+            // 顶栏在目录那块**弹层**开着时不在这里画 —— 抬到遮罩之上去了（见下面
+            // `toc_sheet_up` 那一段）。底栏照旧压在遮罩下。
+            .when(self.chrome.is_open() && !toc_sheet_up, |this| {
                 this.child(self.top_bar(rail > 0.0, cx))
                     .child(self.bottom_bar(cx))
+            })
+            .when(self.chrome.is_open() && toc_sheet_up, |this| {
+                this.child(self.bottom_bar(cx))
             })
             .when(!self.chrome.is_open(), |this| {
                 this.child(bands::header(&self.reader, cx))
@@ -801,6 +839,18 @@ impl Render for ReadingPage {
         // `TocPanel::render` 与 `widgets::bottom_sheet` 那段模块注释）。右上角「⋯」那条
         // 菜单是 gpui-kit 自己的 `PopupMenu`，由那颗按钮按下时挂进它自己的浮层。
         root = root.child(self.toc.clone());
+        // 抬上来的顶栏：还是原来那一颗条，只是挂在弹层之后。包一层与那一栏同宽的绝对定位
+        // 容器，几何就不变（这一档 `rail` 恒为 0，左边没有栏要让）。
+        if toc_sheet_up {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .child(self.top_bar(false, cx)),
+            );
+        }
         // 脚注弹层压在目录之上、图片查看器之下：它是「从正文里抬起来的一张小纸」，
         // 盖住目录那种整屏弹层是对的，而放大看图时读者要的是图。
         root = root.children(self.footnote_popover(cx));

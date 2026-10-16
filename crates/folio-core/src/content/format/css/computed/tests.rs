@@ -1563,3 +1563,94 @@ fn the_style_hash_covers_direction() {
     };
     assert_ne!(hash(&ltr), hash(&rtl), "方向改了，块级缓存该失效");
 }
+
+/// 「这一段在不在一条链接里」是 DOM 的事实，不是 CSS 属性。
+///
+/// 为什么引擎要带这一格：出版工具的目录页几乎不给链接上色 —— 本机那本基督山伯爵的目录章
+/// 是 38 条 `<a class="calibre1">`，`stylesheet.css` 全文一个 `color` 都没有（`.calibre1`
+/// 写的还是 `text-decoration: none`）。于是那一栏与正文逐字同色，读者看不出它是能点的。
+/// 颜色由绘制层从**当前主题**取（`ui::widgets::run_color_link`），所以样式层只负责把
+/// 「在链接里」这一件事传到 run 上，`color` 照旧留 `None`。
+#[test]
+fn an_anchor_with_a_target_marks_its_subtree_as_a_link() {
+    let page = author(
+        "<p><a href=\"part0042.html#x\">跳过去</a><a name=\"old\">老式锚</a>\
+         <a href=\"b.html\"><span>套一层</span><b>再套一层</b></a></p>",
+        "",
+    );
+    // 按标签加一条属性找一个元素：这份夹具里同标签有三个，位置不算身份。
+    let one = |tag: &str, key: &str, value_prefix: &str| -> NodeId {
+        page.dom
+            .elements()
+            .find(|(id, _)| {
+                page.dom.tag_name(*id) == Some(tag)
+                    && page
+                        .dom
+                        .attr(*id, key)
+                        .is_some_and(|v| v.starts_with(value_prefix))
+            })
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| panic!("该找得到那个 <{tag} {key}=…>"))
+    };
+
+    let with_href = one("a", "href", "part0042");
+    assert!(style(&page, with_href).link, "有目标的 <a> 是链接");
+    assert_eq!(
+        style(&page, with_href).color,
+        None,
+        "不许在这一层写死一个颜色 —— 色是主题的事"
+    );
+
+    // `<a name="old">` 那种老式锚点没有 `href`：点不动，染蓝等于骗读者。
+    let named = page
+        .dom
+        .elements()
+        .find(|(id, _)| {
+            page.dom.tag_name(*id) == Some("a")
+                && page.dom.attr(*id, "href").is_none()
+                && page.dom.attr(*id, "name") == Some("old")
+        })
+        .map(|(id, _)| id)
+        .expect("只有 name 的那个锚");
+    assert!(!style(&page, named).link, "没有可去的地方的不算链接");
+
+    let deep = page
+        .dom
+        .elements()
+        .find(|(id, _)| page.dom.tag_name(*id) == Some("b"))
+        .map(|(id, _)| id)
+        .expect("链接里再套一层的 <b>");
+    assert!(
+        style(&page, deep).link,
+        "链接里的后代也算链接的一部分（与装饰线向后代传播同理）"
+    );
+
+    // 传到 run 上：绘制层拿的是 `RunStyle`，不是 `ComputedStyle`。
+    assert!(
+        crate::layout::RunStyle::new(style(&page, with_href)).link,
+        "run 要带得上这一格，否则界面读不到"
+    );
+    assert!(
+        !crate::layout::RunStyle::new(style(&page, named)).link,
+        "非链接的 run 不许带上这一格"
+    );
+}
+
+/// 作者写了颜色就照作者的：主题那一格只在作者没写时才有话语权。
+#[test]
+fn an_author_color_on_a_link_beats_the_theme_slot() {
+    let page = author("<p><a href=\"x.html\">绿的</a></p>", "a { color: #00ff00 }");
+    let a = page
+        .dom
+        .elements()
+        .find(|(id, _)| page.dom.tag_name(*id) == Some("a"))
+        .map(|(id, _)| id)
+        .expect("<a>");
+    let styled = style(&page, a);
+    assert!(styled.link, "在链接里这件事不变");
+    assert_eq!(
+        styled.color,
+        Some(Color(0, 255, 0)),
+        "作者写明了色，主题那一格让位"
+    );
+}

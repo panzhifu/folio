@@ -74,6 +74,9 @@ pub struct RunStyle {
     /// 所以排版层只负责把它带到 run 上。
     pub underline: bool,
     pub line_through: bool,
+    /// 这一段在不在一条链接里（[`ComputedStyle::link`]）。作者没写 `color` 时，绘制层拿它
+    /// 换**当前主题**的链接色；作者写了就照作者的走。
+    pub link: bool,
 }
 
 impl std::hash::Hash for RunStyle {
@@ -89,6 +92,7 @@ impl std::hash::Hash for RunStyle {
         self.baseline_shift.to_bits().hash(state);
         self.underline.hash(state);
         self.line_through.hash(state);
+        self.link.hash(state);
     }
 }
 
@@ -165,6 +169,7 @@ impl RunStyle {
             baseline_shift: style.baseline_shift,
             underline: style.underline,
             line_through: style.line_through,
+            link: style.link,
         }
     }
 

@@ -42,6 +42,20 @@ impl ReaderSession {
         self.book().map_or(0, |book| book.chapter_index())
     }
 
+    /// **(哪一章, 章内第几个字)**：目录那一屏要靠它挑出「读者正处在第几小节下面」。
+    /// 与进度、批注读的是同一套坐标（`modules/position.rs` 的 `resolve_position`）。
+    pub fn position_in_chapter(&self) -> Option<(usize, usize)> {
+        self.resolve_position()
+    }
+
+    /// 当前那一章的**锚点偏移表**（`id` → 章内第几个字）。排版产物，所以只能在
+    /// 那一章排完之后问（见 `Document::id_offsets`）。没有书时给空表。
+    pub fn id_offsets(&self) -> std::collections::HashMap<String, usize> {
+        self.book()
+            .map(|book| book.document().id_offsets())
+            .unwrap_or_default()
+    }
+
     /// 第 `index` 章的标题。越界是空串，不是 panic —— 列表在换章那一帧可能还按旧长度画。
     pub fn chapter_title_at(&self, index: usize) -> String {
         self.book()
@@ -155,6 +169,8 @@ impl ReaderSession {
         self.page = 0;
         self.wheel_accum = 0.0;
         self.content_height = 0.0;
+        // 换章是整条参照系换掉：正在平移的那一张属于上一章，不该跟着跨章飞过来。
+        self.cancel_turn();
         // 换章这一跳没有锚点：上一趟跳转留下的那个由 `pend_restore` 一并作废。
         self.pend_restore(self.mode.is_continuous().then(|| Locator {
             chapter: self.chapter_index() as u32,

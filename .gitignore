@@ -35,3 +35,11 @@ crates/folio-app/android/app/src/main/jniLibs/
 crates/folio-app/android/**/build/
 crates/folio-app/android/.gradle/
 crates/folio-app/android/local.properties
+
+# 封面与缩略图的磁盘缓存。文件名是内容的哈希（`<书库>/covers/<哈希>.png`、
+# `<书库>/.thumbs/<像素数>/<哈希>.jpg`，见 `crates/folio-core/src/infra/paths.rs`），
+# 由 `content/format/cover.rs` 与 `content/format/thumb.rs` 在需要时现生成，
+# 整目录删掉只需重跑生成 —— 测试或应用只要拿 `tests/fixtures/oss/` 当书库根跑一次就会出现这一对，
+# 提交进来就是第二真相源，而且每次跑测试都可能换一张。
+/tests/fixtures/oss/covers/
+/tests/fixtures/oss/.thumbs/

@@ -9,9 +9,12 @@
 //! 1. **折叠的是孩子，不是自己**：一个分支折起来之后它那一行还在，chevron 还指着
 //!    「点开有东西」。
 //! 2. **搜索命中要带祖先**：只留命中那一行的话，读者看不出它挂在第几章下面。
-//! 3. **打开时整棵树全折**，只露顶层那一排：一进来先看「这本书分几大块」，而不是被
-//!    直接塞进当前章那一条链里。位置靠列表**滚到当前章那一行**（看不见的就往上看它
-//!    最近的那条祖先，见 [`landing_row`]）来交代，不靠展开来交代。
+//! 3. **打开时整棵树全折，只有当前章那一条链例外**：一进来先看「这本书分几大块」，
+//!    但读者同时得知道「我在第几章的哪一节下面」——所以当前行通往根的每一级自动展开
+//!    （[`TocView::reveal`]），其余分支照旧折着。这一条 2026-10-16 由读者改的：原来
+//!    写的是「位置只靠滚动交代、不靠展开交代」，真机上用下来是要看见那一条链，而不是
+//!    只把列表滚到一条折着的分支上。滚动照旧跟着走（[`landing_row`] 那一条现在通常
+//!    就直接落在当前行上）。
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -99,9 +102,9 @@ fn hidden_by_ancestor(rows: &[TocRow], row: &TocRow, collapsed: &BTreeSet<usize>
 
 /// 整棵树的分支都折上：只留顶层那几条。
 ///
-/// 与「跟着阅读位置留一条链」是两种做法，这里选前者（见模块注释第三条）—— 目录一进来要
-/// 答的是「这本书分几大块」，而一条展开到第三层的链答的是「你现在在这一节的哪一小节下面」。
-/// 位置由 [`landing_row`] 那一趟滚动交代，不必靠展开来交代。
+/// 这是打开那一屏的**底子**，不是最终形状：当前章那条的祖先链随后由 [`TocView::reveal`]
+/// 单独展开（模块注释第三条）。分开两步是因为折叠集要能整份重置，而「跟着位置留一条链」
+/// 只在开屏那一次做 —— 中途重做会把读者手动折的格冲掉。
 pub fn fold_all(rows: &[TocRow]) -> BTreeSet<usize> {
     rows.iter()
         .filter(|row| row.branch)
@@ -111,9 +114,9 @@ pub fn fold_all(rows: &[TocRow]) -> BTreeSet<usize> {
 
 /// 打开这一屏该把列表停在哪儿：`current` 那一行自己，或它往上**第一条看得见**的祖先。
 ///
-/// 全折之后当前章常常正埋在一个折起来的分支下面 —— 看不见当前行不等于丢了位置，读者要的
-/// 是「我知道我在这块里面」，而那正好是最近的那条看得见的祖先（顶层那一排的某一条）。
-/// 当前行本来就看得见（它就挂在顶层、或它自己就是个折着的分支）时给的是它自己。
+/// 接上 [`TocView::reveal`] 之后当前行通常本来就看得见，这一条走的是第一支；留着第二支
+/// 是因为它不依赖调用顺序 —— 拿一份没 reveal 过的折叠集来问，也要给出一个能滚到的行，
+/// 而不是 `None`（看不见当前行不等于丢了位置，最近的那条看得见的祖先同样在说「你在这块里」）。
 pub fn landing_row(
     rows: &[TocRow],
     current: Option<usize>,
@@ -150,7 +153,47 @@ pub fn row_of_chapter(rows: &[TocRow], chapter: usize) -> Option<usize> {
         .map(|row| row.ix)
 }
 
-/// 搜索：命中行**连同它们的祖先**留下，顺序不变。
+/// 当前位置那一行：指到 `chapter` 的那几条里，**读者已经走过的那一条中最靠后的**。
+///
+/// 为什么不能直接用 [`row_of_chapter`]（先序第一条）：一个 spine 文件常常挂着一整批小节
+/// （《未来简史》第 8 章那一份 `text00007.html` 挂了「第一部分」+ 十条小节），先序第一条
+/// 永远是那个**父级行**本身。拿它去展开祖先等于什么都没展开 —— 父级自己还折着，链断在
+/// 最上面那一格，症状就是「读到『祖先的需求』这一节，目录却还是全折」。
+///
+/// 挑法：每条的起点 = 它 `fragment` 在 `offsets` 里的章内偏移，父级行没有 fragment 就是
+/// 章首 0。取「起点 ≤ 读者当前位置」里起点最大的那一条，于是读者往下走时这一行会一节一节
+/// 往后挪；一条都没走过（偏移还在章首之前）就落回父级行，那正是它该在的位置。
+/// 起点相同的多条（同一锚点写了两遍）取先序第一条，也就是更浅的那一条。
+pub fn position_row(
+    rows: &[TocRow],
+    chapter: usize,
+    offset: usize,
+    offsets: &HashMap<String, usize>,
+) -> Option<usize> {
+    // `Option`：锚点在这一章的偏移表里查不到时给 `None`，让下面跳过那一条而不是拿 0 冒充章首。
+    let start = |row: &TocRow| match &row.fragment {
+        Some(id) => offsets.get(id).copied(),
+        None => Some(0),
+    };
+    let mut best: Option<(usize, usize)> = None;
+    let mut first: Option<usize> = None;
+    for row in rows.iter().filter(|row| row.chapter == Some(chapter)) {
+        first.get_or_insert(row.ix);
+        // 锚点查不到（作者写了个这一章里不存在的 id）的那一条不参与「走过哪一节」的比较，
+        // 父级行那条兜底还在。
+        let Some(at) = start(row) else { continue };
+        if at > offset {
+            continue;
+        }
+        // 严格大于才换：同一起点时留住更靠前的那一条。
+        if best.is_none_or(|(best_at, _)| at > best_at) {
+            best = Some((at, row.ix));
+        }
+    }
+    best.map(|(_, ix)| ix).or(first)
+}
+
+/// 搜索：命中行**连同它们的祖先**留下，顺序不变。/// 搜索：命中行**连同它们的祖先**留下，顺序不变。
 ///
 /// 空串（或只按着空格）等于不过滤 —— 读者清掉输入框要看到原样，而不是「什么都没有」。
 pub fn search<'a>(rows: &'a [TocRow], query: &str) -> Vec<&'a TocRow> {
@@ -194,6 +237,11 @@ pub struct TocView {
     query: String,
     /// 倒着摆：从最后一条往上读。只改**显示顺序**，`ix`、当前行、「已读 N」都不跟着翻。
     reversed: bool,
+    /// 开屏那一次算出的当前行：**(算自哪一章, 那一行的 ix)**。
+    ///
+    /// 记下章号是因为它可能失效：宽档那条栏开着时读者还能翻页，章一变，这个号就该重算
+    /// 而不是继续认（`current_ix` 里那条判据）。
+    current: Option<(usize, usize)>,
 }
 
 impl TocView {
@@ -205,12 +253,32 @@ impl TocView {
             collapsed,
             query: String::new(),
             reversed: false,
+            current: None,
         }
     }
 
+    /// 按章内偏移定一次当前行（判据见 [`position_row`]），并记下来给 `current_ix` 用。
+    /// 返回定到的那一行，调用方（`toc_panel::ensure_tree`）顺手拿它展开祖先链。
+    pub fn locate(
+        &mut self,
+        chapter: usize,
+        offset: usize,
+        offsets: &HashMap<String, usize>,
+    ) -> Option<usize> {
+        let ix = position_row(&self.rows, chapter, offset, offsets);
+        self.current = ix.map(|ix| (chapter, ix));
+        ix
+    }
+
     /// 当前章对应的那一行的 `ix`（画标记条、算「已读 N」都要它）。
+    ///
+    /// 优先给开屏时按偏移定到的那一条（一节一节跟着走），章号对不上（栏开着时翻了页）
+    /// 就退回「先序第一条」那一档，至少还在这一章里。
     pub fn current_ix(&self, chapter: usize) -> Option<usize> {
-        row_of_chapter(&self.rows, chapter)
+        match self.current {
+            Some((at_chapter, ix)) if at_chapter == chapter => Some(ix),
+            _ => row_of_chapter(&self.rows, chapter),
+        }
     }
 
     /// 打开这一屏时列表该停在哪一行的 `ix`：当前章那一行，或它往上第一条看得见的祖先。
@@ -232,6 +300,17 @@ impl TocView {
 
     pub fn set_query(&mut self, query: String) {
         self.query = query;
+    }
+
+    /// 把 `ix` 通往根的每一级展开：`ix` 自己折不折不动。
+    ///
+    /// 开屏那一次做（`toc_panel::ensure_tree` 里），阅读中途不反复做 —— 反复做会把读者
+    /// 自己折上的分支又悄悄掀开。只展开**祖先链**不展开 `ix` 自己：读者要看到的是
+    /// 「我现在挂在第几章的哪一节下面」，而不是被塞进去一整章的目录。
+    pub fn reveal(&mut self, ix: usize) {
+        for ancestor in ancestors_including(&self.rows, ix).skip(1) {
+            self.collapsed.remove(&ancestor);
+        }
     }
 
     /// 点 chevron：折上还是展开。叶子没有得折。
@@ -416,6 +495,100 @@ mod tests {
     }
 
     /// 当前行看不见时，落点是它往上第一条看得见的祖先；本来就看得见时就是它自己。
+    /// 一个 spine 文件挂着一整批小节的那本书（《未来简史》的形状）：当前行要跟着读者
+    /// 走到哪一节挪，而不是永远钉在那个父级行上。
+    ///
+    /// 这条钉的是「展开祖先没反应」那个真 bug：先序第一条永远是父级行，拿它去展开祖先
+    /// 等于什么都没展开（父级自己还折着）。所以先验挑行，再验挑对了之后链能不能露出来。
+    #[test]
+    fn the_current_row_follows_the_section_being_read() {
+        let entries = vec![entry(
+            "第一部分",
+            "part.xhtml",
+            vec![
+                entry_at("祖先的需求", "part.xhtml", "anc"),
+                entry_at("神性的火花", "part.xhtml", "spark"),
+            ],
+        )];
+        let hrefs = HashMap::from([("part.xhtml".to_string(), 7usize)]);
+        let rows = build(&entries, &hrefs);
+        // 章内偏移是排版产物，这里直接给一张表当那份产物。
+        let offsets = HashMap::from([
+            ("anc".to_string(), 100usize),
+            ("spark".to_string(), 900usize),
+        ]);
+
+        // 还没走过第一节：落回父级行（章首），那是它该在的位置。
+        assert_eq!(position_row(&rows, 7, 40, &offsets), Some(0));
+        assert_eq!(
+            position_row(&rows, 7, 300, &offsets),
+            Some(1),
+            "走进第一节了"
+        );
+        assert_eq!(
+            position_row(&rows, 7, 1_200, &offsets),
+            Some(2),
+            "走进第二节了"
+        );
+        // 这一章根本没有的行：不给当前行，而不是乱指一条。
+        assert_eq!(position_row(&rows, 8, 300, &offsets), None);
+        // 锚点查不到（作者写了个这一章里不存在的 id）不许把那条当「已经走过」。
+        let broken = HashMap::from([("anc".to_string(), 100usize)]);
+        assert_eq!(position_row(&rows, 7, 5_000, &broken), Some(1));
+
+        // 挑对了行之后，链才露得出来：读者在第一节下面，父级要展开。
+        let mut toc = TocView::open(rows.clone());
+        assert_eq!(toc.locate(7, 300, &offsets), Some(1));
+        toc.reveal(1);
+        assert!(!toc.is_collapsed(0), "父级那一枝要展开");
+        assert!(
+            toc.visible_position(1).is_some(),
+            "读者正读的那一节要看得见"
+        );
+        assert_eq!(toc.current_ix(7), Some(1), "标记条与「已读 N」读的是同一行");
+        // 章号对不上（那条栏开着时翻了页）就不认这份缓存，退回按章号现算。
+        assert_eq!(toc.current_ix(9), None);
+    }
+
+    /// 开屏那一次：当前章那条埋在多深的分支里都要露出来，其余分支照旧折着。
+    ///
+    /// 这条钉的是「跟着位置留一条链」。判据不能只看当前行在不在 `visible()` 里 ——
+    /// 把整棵树都展开也能过，所以要同时断「别的那条分支还折着」。
+    #[test]
+    fn opening_reveals_the_ancestors_of_the_current_row_only() {
+        let (entries, hrefs) = book();
+        let rows = build(&entries, &hrefs);
+        // 当前章是 chap1（第1章），树里第一条指到它的是「第1章」那一行本身；
+        // 拿它最里那条小节当当前位置来验，才是「祖先链」这件事。
+        let deep = rows
+            .iter()
+            .find(|row| row.title == "第二节")
+            .expect("夹具里有那一行")
+            .ix;
+        let mut toc = TocView::open(rows.clone());
+        // 全折的底子：当前那一行现在看不见。
+        assert!(toc.landing_ix(1).is_some());
+        assert!(
+            toc.visible_position(deep).is_none(),
+            "没 reveal 之前那条应该还折着"
+        );
+
+        toc.reveal(deep);
+        assert!(
+            toc.visible_position(deep).is_some(),
+            "祖先链展开后当前行要看得见"
+        );
+        assert!(!toc.is_collapsed(1), "第1章那一枝要展开");
+        // 别处的分支不许被顺手掀开：扉页与版权页本来就没孩子，
+        // 拿有孩子的比是比不出来的，所以这里断「除第1章之外没有分支被展开」。
+        let opened: Vec<_> = rows
+            .iter()
+            .filter(|row| row.branch && !toc.is_collapsed(row.ix))
+            .map(|row| row.title.as_str())
+            .collect();
+        assert_eq!(opened, vec!["第1章"], "只留当前行那一条链");
+    }
+
     #[test]
     fn the_landing_row_is_the_nearest_visible_ancestor() {
         // 三层：第一部分 → 第1章 → 第1节，只有顶层那条看得见。

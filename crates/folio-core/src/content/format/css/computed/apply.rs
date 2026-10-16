@@ -80,6 +80,9 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         // 上写一次，靠的就是这一行。
         direction: parent.direction,
         color: parent.color,
+        // 「在一条链接里」按继承传播：链接里的 `<span>`、`<b>` 与其中的文本都算链接的一部分，
+        // 与下面装饰线那一格同一个理由。它不是 CSS 属性，判据见 `ComputedStyle::link`。
+        link: parent.link,
         text_indent: parent.text_indent,
         word_spacing: parent.word_spacing,
         // 字距在 CSS 里可继承（`letter-spacing` 是 inheritable），书里常在 `<body>` 上写一次。

@@ -294,6 +294,58 @@ impl<'de> Deserialize<'de> for TocDensity {
     }
 }
 
+/// 翻页那一张纸沿哪根轴走过来。
+///
+/// 存**全局**而不是存进 [`Reader`]：`Reader` 整份是排版失效键（见它自己那条注释 ——
+/// 那里按序列化后的整份取哈希），把动画档位塞进去就等于「换一种翻页动画触发整章重排」。
+/// 沿哪根轴平移与一行字折在哪里毫无关系，它只是画面上的一次搬运。
+///
+/// 只有两档，没有「无动画」：系统级的减弱动态效果已经把时长归零（那一条判据在
+/// `ui::shell::nav_transition`，正文翻页共用同一口时钟），读者在系统设置里就选好了的事
+/// 不在这里再摆一个重复的开关。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PageTurn {
+    /// 左右平移：下一页从阅读方向的前方滑进来，上一页往反方向走满同样距离。
+    #[default]
+    Horizontal,
+    /// 上下平移：同一张纸沿竖轴走，像把一叠纸往上抽。
+    Vertical,
+}
+
+impl PageTurn {
+    /// 配置文件与设置界面用的键名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Horizontal => "horizontal",
+            Self::Vertical => "vertical",
+        }
+    }
+
+    /// 认不出的值回落 `Horizontal`：手改坏一个键不该让整节外观退回默认。
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "vertical" => Self::Vertical,
+            _ => Self::Horizontal,
+        }
+    }
+}
+
+/// 自己实现序列化，理由与 [`Mode`]、[`TocDensity`] 那两条一样：derive 碰到认不出的字符串
+/// 会报错，而报错的代价是**整节** `Appearance` 退回默认（见 [`salvage`]）—— 浅深两侧选过的
+/// 主题名会跟着一起没，而那只是这一档写坏了。
+impl Serialize for PageTurn {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PageTurn {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(Self::parse(&text))
+    }
+}
+
 /// 界面外观：浅深怎么选，以及解析到浅、深时各用哪套主题。
 ///
 /// 主题**名字**存在这里，主题**本身**不存：配色来自 UI 框架的主题集和用户
@@ -308,6 +360,8 @@ pub struct Appearance {
     pub light: Option<String>,
     /// 解析到深色时用的主题名。
     pub dark: Option<String>,
+    /// 正文翻页沿哪根轴平移（见 [`PageTurn`] 为什么这一格不在 `Reader` 里）。
+    pub page_turn: PageTurn,
 }
 
 impl Appearance {
@@ -780,7 +834,7 @@ mod tests {
 
     use crate::infra::config::{Config, Env, Layer, WatchDir};
     use crate::infra::i18n::Locale;
-    use crate::{Appearance, Language, Library, Mode, Reader};
+    use crate::{Appearance, Language, Library, Mode, PageTurn, Reader};
     use serde_json::json;
 
     fn load(text: &str) -> Config {
@@ -916,6 +970,8 @@ mod tests {
                 mode: Mode::Light,
                 light: Some("Gruvbox".into()),
                 dark: Some("Molokai".into()),
+                // 故意不是默认值：这一趟要把新键真写出去再读回来，填默认值等于没测到它。
+                page_turn: PageTurn::Vertical,
             },
             language: Language { locale: Locale::Ja },
             ..Default::default()
@@ -1081,6 +1137,26 @@ mod tests {
         );
         assert_eq!(Mode::parse("dark"), Mode::Dark);
         assert_eq!(Mode::default(), Mode::System);
+    }
+
+    /// 认不出的 `page_turn` 回落横向平移，而且**同一节里别的键一个都不许跟着没**。
+    /// 这一格的存在理由是：`PageTurn` 的 `Deserialize` 是自己实现的（同 [`Mode`]、
+    /// [`TocDensity`] 那两条），derive 在这里会让整节 `appearance` 退回默认 ——
+    /// 浅、深两侧选过的主题名就成了一个拼错的动画键的代价。
+    #[test]
+    fn an_unknown_page_turn_falls_back_without_taking_the_section_with_it() {
+        let got = load(r#"{"appearance":{"mode":"dark","light":"Gruvbox","page_turn":"spin"}}"#);
+        assert_eq!(got.appearance.page_turn, PageTurn::Horizontal);
+        assert_eq!(got.appearance.mode, Mode::Dark);
+        assert_eq!(got.appearance.light.as_deref(), Some("Gruvbox"));
+        // 认得出的两个值各自落对，`vertical` 不会被 `parse` 的兜底吃掉。
+        assert_eq!(
+            load(r#"{"appearance":{"page_turn":"vertical"}}"#)
+                .appearance
+                .page_turn,
+            PageTurn::Vertical
+        );
+        assert_eq!(PageTurn::default(), PageTurn::Horizontal);
     }
 
     #[test]

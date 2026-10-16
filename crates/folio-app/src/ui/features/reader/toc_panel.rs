@@ -61,9 +61,13 @@ const TOC_CHEVRON: f32 = 15.3;
 /// 小屏上缩进每多一级就吃掉一行能摆几个字，层级靠 chevron 那一列已经读得出来。
 const TOC_INDENT: f32 = 11.4;
 
-/// 目录弹层的两档：全屏档留 8% 让读者认「这是从哪本书抬上来的」，半屏档是扫「当前章上下
-/// 各几章」的那一眼 —— 目录真正的用途是扫，所以打开就落在全屏档，缩到半屏是主动选择。
-const TOC_EXPANDED: f32 = 0.92;
+/// 目录弹层的两档：高的一档留 15% 屏幕让读者认「这是从哪本书抬上来的」（顶上那截还露着
+/// 正文与章名），半屏档是扫「当前章上下各几章」的那一眼 —— 目录真正的用途是扫，所以打开
+/// 就落在高的一档，缩到半屏是主动选择。
+///
+/// 0.85 是读者 2026-10-16 定的那一档（原来是 0.92，留 8%）：留得多一点，遮罩底下那截正文
+/// 与顶栏的章名还看得见，「我在读哪一本」不用靠书头那一行去认。
+const TOC_EXPANDED: f32 = 0.85;
 const TOC_PEEK: f32 = 0.5;
 /// 宽档（平板 / PC）上目录那条左侧栏的宽。
 ///
@@ -228,21 +232,34 @@ impl TocPanel {
     /// 按当前位置建一次目录树。已经建过就不动 —— 重建会把读者手动折的格冲掉；
     /// 「重新打开要跟着位置走」那条重置在 [`Self::toggle`] 里显式做。
     ///
-    /// 建好顺手把列表滚到当前章那里：默认全折，所以那常常是**顶层那条装着它的分支**
-    /// （判据在 `toc_tree::landing_row`）。`scroll_to_item` 记的是「下一趟布局要滚到哪」，
-    /// 此刻列表还没搭 —— 正合适，虚拟列表建起来那一帧自己会应用它。
+    /// 建好做两件事：① 把当前章那条的**祖先链**展开（其余分支照旧全折），读者一进来
+    /// 就看得见「我在第几章的哪一节下面」，判据与为什么只在这一次做见 `TocView::reveal`；
+    /// ② 把列表滚到那一行。`scroll_to_item` 记的是「下一趟布局要滚到哪」，此刻列表还没搭
+    /// —— 正合适，虚拟列表建起来那一帧自己会应用它。
     fn ensure_tree(&mut self, cx: &mut Context<Self>) {
         if self.tree.is_some() {
             return;
         }
         let rows = self.reader.read(cx).toc_rows();
         let current = self.reader.read(cx).chapter_index();
-        self.tree = Some(TocView::open(rows));
-        let toc = self.tree.as_ref().expect("上面刚建好");
-        if let Some(ix) = toc
+        // 定当前行要**章内偏移**与这一章的锚点表：只看章号的话，一个文件挂十条小节的书
+        // （《未来简史》就是这样）永远定在那个父级行上，而父级行自己还折着 —— 展开祖先
+        // 等于什么都没展开。判据见 `toc_tree::position_row`。
+        let offset = self
+            .reader
+            .read(cx)
+            .position_in_chapter()
+            .map_or(0, |(_, at)| at);
+        let offsets = self.reader.read(cx).id_offsets();
+        let mut toc = TocView::open(rows);
+        if let Some(ix) = toc.locate(current, offset, &offsets) {
+            toc.reveal(ix);
+        }
+        let landing = toc
             .landing_ix(current)
-            .and_then(|ix| toc.visible_position(ix))
-        {
+            .and_then(|ix| toc.visible_position(ix));
+        self.tree = Some(toc);
+        if let Some(ix) = landing {
             self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
     }

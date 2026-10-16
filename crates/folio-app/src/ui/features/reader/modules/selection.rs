@@ -452,7 +452,9 @@ impl ReaderSession {
         if self.laid_out.mode.is_continuous() {
             let book = self.book()?;
             let gap = Book::chapter_gap(prefs);
-            let global_y = f32::from(local.y) - self.header_reserve + self.scroll_y;
+            // 读**画出来的**那一个 y（`scroll_painted`）而不是 `scroll_y`：平移补间在走的
+            // 那两百多毫秒里，屏上的字按画出来的位置摆，命中也按它算才对得上一个字段。
+            let global_y = f32::from(local.y) - self.header_reserve + self.scroll_painted;
             let chapter = book.chapter_at_y(global_y, gap)?;
             let base = book.base_of(chapter, gap).unwrap_or(0.0);
             return Some((
@@ -466,7 +468,10 @@ impl ReaderSession {
         let usable = Document::content_width(window, prefs, self.reserve.width);
         let width =
             folio_core::layout::fragment::column_width(usable, self.laid_out.columns, gap).max(1.0);
-        let column = if (f32::from(local.x) - prefs.margin_x) >= width + gap / 2.0 {
+        // 平移翻页在走的时候整页偏了一段（`page_shift`，由渲染帧按当前页写入）。减掉它，
+        // 两条轴才与 `view.rs` 烘进 `Scene::build` 的那两个加数互为逆运算。
+        let (shift_x, shift_y) = self.page_shift;
+        let column = if (f32::from(local.x) - prefs.margin_x - shift_x) >= width + gap / 2.0 {
             1
         } else {
             0
@@ -475,12 +480,13 @@ impl ReaderSession {
         let slice = book
             .document()
             .slice_of(self.page, column, self.laid_out.columns)?;
-        let x =
-            prefs.margin_x + folio_core::layout::fragment::column_offset(width, gap, slice.column);
+        let x = prefs.margin_x
+            + folio_core::layout::fragment::column_offset(width, gap, slice.column)
+            + shift_x;
         Some((
             book.chapter_index(),
             f32::from(local.x) - x,
-            f32::from(local.y) - self.header_reserve + slice.origin_y,
+            f32::from(local.y) - self.header_reserve - shift_y + slice.origin_y,
         ))
     }
 

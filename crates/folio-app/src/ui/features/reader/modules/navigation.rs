@@ -8,7 +8,7 @@ use gpui_kit::{Context, ScrollDelta, ScrollWheelEvent};
 
 use super::super::book::Book;
 use super::super::chrome::PageMode;
-use super::super::session::ReaderSession;
+use super::super::session::{ReaderSession, Turn};
 
 impl ReaderSession {
     /// 换成另一种摆法。位置**不丢**：进度存的是「第几个字」，所以先把当前字偏移取下来，
@@ -34,20 +34,67 @@ impl ReaderSession {
         self.scroll_y = 0.0;
         self.page = 0;
         self.wheel_accum = 0.0;
+        // 摆法换了，动画里那张出场页属于旧摆法（旧片高、旧栏数），让它继续平移只会
+        // 把两张对不上的纸叠在屏幕上。
+        self.cancel_turn();
         cx.notify();
     }
 
-    /// 按「一屏」翻正文。
+    /// 按「一屏」翻正文。这一趟**会**播动画（分页沿当前轴平移两张纸，连续滚动补间
+    /// 画出来的那个 y），因为这一句的来路都是「一次离散动作」：点屏幕左右两边、
+    /// 音量键。滚轮与触摸拖动走 [`ReaderSession::on_scroll`]，那一趟是手在直接控制，
+    /// 不该有东西追在手指后面补间。
     ///
     /// 连续滚动走 90% 而不是 100%：整屏跳会让上一屏的末行彻底消失，读者找不到接续的那句。
     /// 分页 / 双页是一页一号，跳半页在这里没有意义。
     pub fn scroll_page(&mut self, delta: isize, cx: &mut Context<Self>) {
         if !self.is_fixed() && self.laid_out.mode.is_continuous() {
             let page = self.laid_out.viewport * 0.9;
-            self.set_scroll_y(self.scroll_y + delta as f32 * page, cx);
+            let target = (self.scroll_y + delta as f32 * page).clamp(0.0, self.max_scroll());
+            // 判据与 `set_scroll_y` 那条 `< 0.5` 的早退同一个数：夹在章首/章尾的那一下
+            // 一个字都不挪，起一趟 280 毫秒的动画只为了什么都不动，还白续几十帧。
+            if (target - self.scroll_y).abs() >= 0.5 {
+                // 起点是**画出来的**那一个数而不是 `scroll_y`：读者连点两下时，第二趟
+                // 要从他眼前那一屏起步，否则画面先跳回上一趟的终点再走，读成卡了一下。
+                self.begin_turn(Turn {
+                    seq: 0,
+                    leaving: None,
+                    scroll: Some((self.scroll_painted, target)),
+                    forward: delta > 0,
+                });
+            }
+            self.set_scroll_y(target, cx);
             return;
         }
-        self.set_page(self.page().saturating_add_signed(delta), cx);
+        let before = self.page();
+        self.set_page(before.saturating_add_signed(delta), cx);
+        // 页号真变了才播，理由与上面那一格同一条。定版式那一臂不播：它的「一页」是
+        // 一整张图，摆图那条代码路与正文的切片是两套（`view.rs` 的 `Source::Fixed` 臂），
+        // 平移要在那边另接一处，这一轮不做。
+        if !self.is_fixed() && self.page() != before {
+            self.begin_turn(Turn {
+                seq: 0,
+                leaving: Some(before),
+                scroll: None,
+                forward: delta > 0,
+            });
+        }
+    }
+
+    /// 起一次翻页动画，把上一趟还没走完的那次**换掉**而不是排队：读者的第二下点击要看见
+    /// 新的一趟在走，而两张以上的纸同时在屏幕上位移没有意义（出场页只留最近一张）。
+    fn begin_turn(&mut self, turn: Turn) {
+        self.turn_seq += 1;
+        self.turn = Some(Turn {
+            seq: self.turn_seq,
+            ..turn
+        });
+    }
+
+    /// 作废正在走的动画，画面当场落定。跳章、换摆法、改字号、排版恢复落地都走这一句 ——
+    /// 它们的共同点是**位置本身换了参照系**，让一张按旧参照系摆出来的纸继续平移没有意义。
+    pub(in crate::ui::features::reader) fn cancel_turn(&mut self) {
+        self.turn = None;
     }
 
     /// 跳到本章的某个比例处（进度条）。
@@ -55,6 +102,9 @@ impl ReaderSession {
     /// 连续模式里进度条是**视口顶那一章**的章内刻度（与 `progress()` 同一口径），
     /// 拖到 1.0 就是把这一章的末屏摆上来。
     pub fn seek_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {
+        // 进度条那一拖的意思是「跳到哪儿」，不是「翻一页」：位移可以大到跨越整章，
+        // 播一张出场页的平移只会把读者甩进一段他没法预期的滑行里。
+        self.cancel_turn();
         if self.is_fixed() {
             let last = self.page_count().saturating_sub(1);
             self.set_page((ratio.clamp(0.0, 1.0) * last as f32).round() as usize, cx);
@@ -139,6 +189,9 @@ impl ReaderSession {
         // 元素树」三条一起看，见 `perf.rs` 模块头）。挂在最前面，因为它要数的是**事件**，
         // 而下面那几条 `return false` 恰恰是「事件到了但没挪动」。
         super::super::perf::note_scroll();
+        // 手已经在直接控制这一屏了，补间不该追在手指后面：正在走的那一趟当场落定。
+        // 落定之后画出来的位置由渲染帧按「没有动画」那一条重新对齐到 `scroll_y`。
+        self.cancel_turn();
         let dy = match event.delta {
             ScrollDelta::Pixels(delta) => f32::from(delta.y),
             // 鼠标滚轮（外接键盘/调试时）按「行」给增量，按正文字号折算，别当 0 忽略。

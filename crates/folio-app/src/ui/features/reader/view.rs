@@ -24,13 +24,15 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
 
+use folio_core::PageTurn;
 use folio_core::content::anchor::line_at_y;
 use folio_core::layout::FontKey;
 use folio_core::layout::fragment::column_offset;
 use folio_core::store::Annotation;
+use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, Hsla,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, EntityId, Hsla,
     InteractiveElement as _, IntoElement, LongPressEvent, ParentElement, Pixels, Render,
     RenderImage, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled,
     TestSupportExt as _, TouchPhase, WeakEntity, Window, canvas, div, img, point, px, size,
@@ -47,8 +49,71 @@ use super::paint::{GlyphRun, GlyphsElement, SelectionVisual, shape};
 use super::scene::{BlockDecor, Scene, VisibleImage};
 use super::selection_menu;
 use super::session::{AnnotationSpans, ReaderSession, Source, land_at_anchor};
+use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::images::DecodeRequest;
+use crate::ui::shell::nav_transition;
 use crate::ui::shell::navigation::SizeClass;
+
+/// 一次翻页动画在这一帧的样子。时钟已经采完、方向与进度都在里面，两臂各自折成位移。
+#[derive(Clone, Copy)]
+struct TurnFrame {
+    /// 这一趟走了多少（已经过完缓动）：0 = 刚起步，1 = 走完。
+    progress: f32,
+    /// 出场那一页的页号。连续滚动没有「页」⇒ `None`，那一臂只看 [`Self::scroll`]。
+    leaving: Option<usize>,
+    /// 连续滚动这一趟的两端（起点 = 起那一刻画出来的 y，终点 = 目标 y）。
+    ///
+    /// 存两端而不是存算好的当前值：拼接坐标的补偿会在动画期间挪动 `scroll_y`（邻章排版
+    /// 回来把整条链挪了），那一趟的两头要**一起**挪，否则补间落在补偿前的坐标上，
+    /// 读者看见的是内容突然跳一屏。
+    scroll: Option<(f32, f32)>,
+    /// `true` = 往后走（下一页 / 往下滚）。
+    forward: bool,
+}
+
+impl ReaderSession {
+    /// 采一次翻页的时钟，走完就把动画状态收掉。没有动画在走 ⇒ `None`。
+    ///
+    /// 时钟用 gpui 的 `Presence`，与整屏转场同一件东西（见 `ui::shell::layer_offset`）：
+    /// 它自己按 `nav_transition` 的时长插值、**自己续帧**（`MotionStatus::Running` 那一支
+    /// 里调 `request_animation_frame`），所以这里不再另挂一条帧循环；系统的减弱动态效果
+    /// 它直接给终值，动画当场落定而画面不多走一帧。
+    ///
+    /// 键按 `turn_seq` 分，一趟一把新键：复用同一把会把上一趟**没走完**的状态接到这一趟
+    /// 上（读者看见第二次翻页只滑了一半就到位），而没人再采样的那把由 gpui 在帧末自己回收。
+    fn turn_frame(&mut self, window: &mut Window, cx: &mut App) -> Option<TurnFrame> {
+        let turn = self.turn?;
+        // `present` 给 `true`：这一趟只需要「进场」那半 —— 走了多少就是 `progress`，
+        // 出场那一页由同一个数反着算（`chrome::slide_shifts` 那两个返回值），
+        // 所以不必再为出场页单独挂一把 `Presence`。
+        let id = TransitionId::from(ElementId::from(("reader-turn", turn.seq)));
+        let progress = Presence::new(id, true)
+            .transition(nav_transition(cx))
+            .sample(window, cx)
+            .progress;
+        if progress >= 1.0 {
+            // 走完的那一帧起就没有第二张要画了：进场那张的位移正好归零，出场那张已经走满
+            // `dist` 出画。少摆一张省下一趟场景重建，而**减弱动态效果那一档走的就是这条路**
+            // （`Presence` 在 `reduce_motion` 时直接给终值）⇒ 那一档是当场落定，不多画一张纸。
+            self.turn = None;
+            return None;
+        }
+        Some(TurnFrame {
+            progress,
+            leaving: turn.leaving,
+            scroll: turn.scroll,
+            forward: turn.forward,
+        })
+    }
+
+    /// 平移翻页当前沿哪根轴走（读者在全局配置里选的那一档）。
+    ///
+    /// 每帧读一次而不是挂订阅：这一帧的位移本来就要用这个数，而 `sync_prefs` 早就是
+    /// 同一形状的每帧比较。
+    fn page_turn_vertical(&self, cx: &App) -> bool {
+        matches!(ConfigHolder::appearance(cx).page_turn, PageTurn::Vertical)
+    }
+}
 
 impl Render for ReaderSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -81,6 +146,12 @@ impl Render for ReaderSession {
             - self.header_reserve
             - self.footer_reserve)
             .max(1.0);
+        // 翻页动画这一帧的时钟。必须在进 `match` 之前采：`Presence::sample` 要
+        // `&mut Window` + `&mut App`，而 `match &mut self.source` 进去之后 `self` 就只能
+        // 逐字段借了（见下面那条同样的取舍）。采完给回的是一个 `Copy` 的快照，两臂各读各的。
+        let turn = self.turn_frame(window, cx);
+        // 平移沿竖轴还是横轴，是读者在全局配置里选的那一档（`PageTurn`）。
+        let vertical = self.page_turn_vertical(cx);
         let gap = chrome::spread_gap(self.prefs.margin_x);
         // 退档判据与排版必须量同一个版心宽，所以用 `Document` 的那个式子算，不在这里另定一套。
         let usable = Document::content_width(window, &self.prefs, self.reserve.width);
@@ -95,6 +166,15 @@ impl Render for ReaderSession {
         let columns = mode.columns();
 
         let foreground = cx.theme().foreground;
+        // 链接色：书面 CSS 十有八九不给链接上色（出版工具的目录页就是这么交的），所以这一格
+        // 只能由阅读器给，而给的是什么色得**由主题定**（深浅两套各自对），不在这里嵌数。
+        //
+        // 取的是主题的 `blue` 那一格，**不是语义上的 `link`** —— 后者在框架自带的两套默认主题里
+        // 与正文色是同一个值（2026-10-16 在 `TestAppContext` 上量的：浅色 `link` = Hsla{l:0.09,s:0}
+        // 而 `foreground` = l:0.039；深色 `link` = l:0.98 与 `foreground` 逐字段相同），拿它上色
+        // 等于没接：装上真机看目录那三条仍然是黑的。`blue` 两档都是真蓝（浅 h0.614 s0.832 l0.533 /
+        // 深 h0.592 s0.939 l0.678），且仍随主题走，读者换肤不会把它钉死。
+        let link = cx.theme().blue;
         // 批注底色只有那四种（`ANNOTATION_COLORS`），一次取好，逐块画时查表。
         let palette = Palette::of(cx.theme());
         let family = self.family.clone();
@@ -244,7 +324,17 @@ impl Render for ReaderSession {
                     super::perf::add(|frame| frame.layout_ns += __layout);
                     // 4–7. 坐标链那一段：补偿、恢复落点、锚章迁移、总高与夹取。
                     let __spine = super::perf::Timer::start();
+                    let before_compensate = self.scroll_y;
                     book.compensate_spine(snapshot, &mut self.scroll_y, chapter_gap);
+                    // 补偿把整条链挪了多少，正在走的那一趟两端就跟着挪多少：两端留在
+                    // 补偿前的坐标里，补间走完落的就是**跳了那一跳之后**的位置，读者看见
+                    // 内容突然闪一下。挪完这一笔，动画跟着坐标链一起走。
+                    let shift = self.scroll_y - before_compensate;
+                    if let Some(t) = self.turn.as_mut()
+                        && let Some((from, to)) = t.scroll
+                    {
+                        t.scroll = Some((from + shift, to + shift));
+                    }
                     self.laid_out = super::session::LaidOut {
                         mode,
                         columns,
@@ -270,18 +360,45 @@ impl Render for ReaderSession {
                                 chapter_gap,
                             )
                             .unwrap_or_else(|| book.document().y_at_offset(locator.offset));
+                        // 恢复是一次跳转（开书、跳目录、换摆法），不是翻一页：让一张从旧位置
+                        // 起点的纸平移过来，读者看见的就是自己刚选的那一秒在飞。
+                        //
+                        // 这里写字段而不调 [`ReaderSession::cancel_turn`]：那一臂里
+                        // `font_cache` 还从 `self` 上借着自己，任何 `&mut self` 的方法都过不去，
+                        // 只有逐字段的写法合法（`land_at_anchor` 那条注释记的是同一件事）。
+                        self.turn = None;
                     }
                     // 6. 锚章迁移：视口顶跨进了邻章（锚章自己排完才有资格答）。
+                    let before_migrate = self.scroll_y;
                     book.migrate_spine(&mut self.scroll_y, chapter_gap, &self.prefs);
+                    // 迁移就是「视口顶换了一章」：补间那两端是换手之前那条链上的数，让它
+                    // 继续走完等于把读者送到隔壁一章的中间去。当场落定，这一帧就给他目标屏。
+                    if (self.scroll_y - before_migrate).abs() >= 0.5 {
+                        self.turn = None;
+                    }
                     // 7. 总高与夹取：全局坐标里「滚到底」是整条链的末端。
                     self.content_height = book.content_height(chapter_gap);
                     let max_scroll = (self.content_height - viewport_height).max(0.0);
                     self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
+                    // 这一帧**画在**哪一个全局 y：动画在走就落在补间上，没有动画就是
+                    // `scroll_y` 自己。它是绘制与命中共用的唯一一个数 —— `to_layout` 读的
+                    // 就是 `scroll_painted`，两处各读各的话，补间那两百多毫秒里按在字上的
+                    // 手指会指到隔壁那一行去。终点可能因为总高在动画期间缩水而越界，夹一下。
+                    let painted_y = match turn {
+                        Some(frame) => frame
+                            .scroll
+                            .map_or(self.scroll_y, |(from, to)| {
+                                chrome::tween(from, to, frame.progress)
+                            })
+                            .clamp(0.0, max_scroll),
+                        None => self.scroll_y,
+                    };
+                    self.scroll_painted = painted_y;
                     let __spine = __spine.ns();
                     super::perf::add(|frame| frame.spine_ns += __spine);
                     // 8. 可见带 → 逐章切场景：每章用自己的排版与图片索引，
                     //    换算只差一个章基线。没排完的章不进链，自然一帧都不画。
-                    let band = self.scroll_y..(self.scroll_y + viewport_height);
+                    let band = painted_y..(painted_y + viewport_height);
                     for placed in book.placements(chapter_gap) {
                         if placed.base_y + placed.height < band.start || placed.base_y > band.end {
                             continue;
@@ -304,6 +421,7 @@ impl Render for ReaderSession {
                             self.prefs.margin_x,
                             self.header_reserve,
                             foreground,
+                            link,
                         );
                         let __scene = __t.ns();
                         let __sh = super::perf::Timer::start();
@@ -393,75 +511,133 @@ impl Render for ReaderSession {
                             .document()
                             .page_of_line(line)
                             .min(pages.saturating_sub(1));
+                        // 与连续臂同一句：恢复是一次跳转，不是翻一页，不该让一张从旧页号
+                        // 起点的纸平移过来。
+                        self.turn = None;
                     }
                     self.page = self.page.min(pages.saturating_sub(1));
 
+                    // 要摆的那几页：定住时只有当前这一页；动画在走时**多出出场那一页**，
+                    // 两张沿当前轴同速平移（判据与算法都在 [`chrome::slide_shifts`]）。
+                    //
+                    // 为什么两张纸共用同一份 `element` / `column` / `overlays`，而不是各配一张
+                    // 容器：位移在这里已经烘进 [`Scene::build`] 的 `x` / `top` 两个参数，而那
+                    // 两个数是 run、块级装饰与图片**一起**加的（见 `Scene::build` 里那三处加号）。
+                    // 各配一张容器就要多摊一倍元素，还要重新安排图与字形谁先入树那一坑
+                    // （上面 `column` 的底色注释记的就是它）。定长数组而不是 `Vec`：这一格
+                    // 每帧都跑，而定住的时候只用得上一格。
+                    let mut slots: [(usize, (f32, f32)); 2] = [(self.page, (0.0, 0.0)); 2];
+                    let mut count = 1usize;
+                    if let Some(frame) = turn {
+                        let dist = if vertical {
+                            viewport_height
+                        } else {
+                            f32::from(viewport_size.width)
+                        };
+                        let (leaving, incoming) =
+                            chrome::slide_shifts(frame.progress, dist, frame.forward);
+                        slots[0] = (
+                            self.page,
+                            if vertical {
+                                (0.0, incoming)
+                            } else {
+                                (incoming, 0.0)
+                            },
+                        );
+                        // 出场页与进场页**不同章**的那种播不了：`set_page` 把页号夹在本章
+                        // 页数里，跨章要从底栏那两颗箭头走（`advance_chapter`），而它作废动画。
+                        if let Some(page) = frame.leaving.filter(|page| *page != self.page) {
+                            slots[1] = (
+                                page,
+                                if vertical {
+                                    (0.0, leaving)
+                                } else {
+                                    (leaving, 0.0)
+                                },
+                            );
+                            count = 2;
+                        }
+                    }
+                    // 当前页这一帧偏了多少。命中换算读这一格（`to_layout` 里减掉它）：
+                    // 不减的话读者快速连点两下，按在新那一页上的手指算到空地那边去。
+                    // 出场页那一条缝里的一击不在这格的账里 —— 它落进新页的坐标系，
+                    // 而这一趟最多 `nav_transition` 那么久。
+                    self.page_shift = slots[0].1;
+
                     // 分页 / 双页：一页取几片、每片一栏，摆在各自的栏位上。
                     let slices = book.document().slices();
-                    for index in 0..columns {
-                        let Some(slice) = slices.get(self.page * columns + index) else {
-                            continue;
-                        };
-                        if slice.empty {
-                            continue;
-                        }
-                        let x =
-                            self.prefs.margin_x + column_offset(column_width, gap, slice.column);
-                        let mut scene = Scene::build(
-                            book.document(),
-                            font_cache,
-                            &family,
-                            slice.lines.clone(),
-                            slice.origin_y..(slice.origin_y + slice.height + 1.0),
-                            slice.origin_y,
-                            x,
-                            self.header_reserve,
-                            foreground,
-                        );
-                        let __sh = super::perf::Timer::start();
-                        shape_runs(&mut scene, book.document(), window);
-                        let __sh = __sh.ns();
-                        super::perf::add(|frame| frame.shape_runs_ns += __sh);
-                        element.extend(scene.runs);
-                        for decor in scene.decorations {
-                            column.extend(decoration_child(decor));
-                        }
-                        // 两张栏的图都要摆进同一份 `overlays`。从前这里是
-                        // `overlays = scene.images...collect()`，后一栏把前一栏那几张
-                        // **整份覆盖掉** —— 双页对开时只有右边那栏的图画得出来。
-                        // 除了少画，它还让图集的账算错：被覆盖掉的那几张已经按「这一帧
-                        // 在场」记过一笔，却没有元素去画它（回收看的就是这个数）。
-                        for image in scene.images {
-                            let Some(rendered) = painted(&atlas, image.image.clone(), view, cx)
-                            else {
+                    for (page, at) in slots.into_iter().take(count) {
+                        let (shift_x, shift_y) = at;
+                        for index in 0..columns {
+                            let Some(slice) = slices.get(page * columns + index) else {
                                 continue;
                             };
-                            let index = overlays.len();
-                            overlays.push(image_child(
-                                image,
-                                rendered,
-                                &viewer,
-                                index,
-                                &reader_weak,
-                            ));
+                            if slice.empty {
+                                continue;
+                            }
+                            let x = self.prefs.margin_x
+                                + column_offset(column_width, gap, slice.column)
+                                + shift_x;
+                            let top = self.header_reserve + shift_y;
+                            let mut scene = Scene::build(
+                                book.document(),
+                                font_cache,
+                                &family,
+                                slice.lines.clone(),
+                                slice.origin_y..(slice.origin_y + slice.height + 1.0),
+                                slice.origin_y,
+                                x,
+                                top,
+                                foreground,
+                                link,
+                            );
+                            let __sh = super::perf::Timer::start();
+                            shape_runs(&mut scene, book.document(), window);
+                            let __sh = __sh.ns();
+                            super::perf::add(|f| f.shape_runs_ns += __sh);
+                            element.extend(scene.runs);
+                            for decor in scene.decorations {
+                                column.extend(decoration_child(decor));
+                            }
+                            // 两张栏的图都要摆进同一份 `overlays`。从前这里是
+                            // `overlays = scene.images...collect()`，后一栏把前一栏那几张
+                            // **整份覆盖掉** —— 双页对开时只有右边那栏的图画得出来。
+                            // 除了少画，它还让图集的账算错：被覆盖掉的那几张已经按「这一帧
+                            // 在场」记过一笔，却没有元素去画它（回收看的就是这个数）。
+                            // 动画期里出场页那几张同样走这一格 ⇒ 它们按「在场」记账，
+                            // 帧末的回收就不会把还在画的那张图放掉。
+                            for image in scene.images {
+                                let Some(rendered) = painted(&atlas, image.image.clone(), view, cx)
+                                else {
+                                    continue;
+                                };
+                                let index = overlays.len();
+                                overlays.push(image_child(
+                                    image,
+                                    rendered,
+                                    &viewer,
+                                    index,
+                                    &reader_weak,
+                                ));
+                            }
+                            let __fills = super::perf::Timer::start();
+                            annotation_fills(
+                                &mut element,
+                                book.document(),
+                                window,
+                                cx,
+                                &self.annotation_spans,
+                                &self.annotations,
+                                &palette,
+                                book.chapter_index(),
+                                x,
+                                slice.origin_y,
+                                top,
+                                slice.origin_y..(slice.origin_y + slice.height + 1.0),
+                            );
+                            let __fills = __fills.ns();
+                            super::perf::add(|f| f.fills_ns += __fills);
                         }
-                        let __fills = super::perf::Timer::start();
-                        annotation_fills(
-                            &mut element,
-                            book.document(),
-                            window,
-                            cx,
-                            &self.annotation_spans,
-                            &self.annotations,
-                            &palette,
-                            book.chapter_index(),
-                            x,
-                            slice.origin_y,
-                            self.header_reserve,
-                            slice.origin_y..(slice.origin_y + slice.height + 1.0),
-                        );
-                        let __fills = __fills.ns();
-                        super::perf::add(|frame| frame.fills_ns += __fills);
                     }
                 }
             }
@@ -492,8 +668,8 @@ impl Render for ReaderSession {
                     let base = book.base_of(selected.chapter, chapter_gap).unwrap_or(0.0);
                     let layout = doc.layout();
                     let total = doc.text_map().chars();
-                    let band_top = self.scroll_y - base;
-                    let band_bottom = self.scroll_y + viewport_height - base;
+                    let band_top = self.scroll_painted - base;
+                    let band_bottom = self.scroll_painted + viewport_height - base;
                     let first = line_at_y(layout, band_top);
                     let last = line_at_y(layout, band_bottom);
                     let sub = selected.range.start.max(doc.coordinate_of_line(first))
@@ -545,9 +721,12 @@ impl Render for ReaderSession {
                             window,
                             cx,
                             sub,
-                            self.prefs.margin_x + column_offset(width, gap, slice.column),
+                            // 与 `Scene::build` 那两个参数同源：正文偏了多少，高亮就跟着偏。
+                            self.prefs.margin_x
+                                + column_offset(width, gap, slice.column)
+                                + self.page_shift.0,
                             slice.origin_y,
-                            self.header_reserve,
+                            self.header_reserve + self.page_shift.1,
                             first_box.y..(last_box.y + last_box.height),
                             &mut visual.highlights,
                         );

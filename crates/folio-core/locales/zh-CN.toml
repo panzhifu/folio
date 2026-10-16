@@ -89,6 +89,7 @@ toc = "目录"
 [group]
 body = "正文"
 paragraph = "段落"
+page_turn = "翻页"
 measure = "版心"
 family = "字体家族"
 themes = "主题"
@@ -147,6 +148,13 @@ toc_max_lines = "标题最大行数"
 "toc_max_lines.desc" = "长标题在目录里最多排几行，超了截成省略号。"
 toc_dim_read = "读过的章节浅色显示"
 "toc_dim_read.desc" = "到过的章在目录里画成浅色，没读过的保持正常颜色。"
+page_turn = "翻页动画"
+"page_turn.desc" = "翻页时那一张纸沿哪一根轴平移。连续滚动不吃这一档；换它也不会让任何一章重排。"
+
+# 翻页动画那两档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
+[page_turn]
+horizontal = "左右平移"
+vertical = "上下平移"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]

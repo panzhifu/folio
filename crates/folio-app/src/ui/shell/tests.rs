@@ -1,68 +1,50 @@
-//! 外壳要钉住的两层：导航栏在哪些档位收起（纯判据，两端都编译），
-//! 以及「外壳起得来、标题栏真在视图树里、换语言能重画」这串启动回路。
+//! 外壳要钉住的两层：读书与导航栏/架面栈互不牵连的那些判据（纯函数，两端都编译），
+//! 以及「外壳起得来、书盖得上也收得回、标题栏真在视图树里、换语言能重画」这串启动回路。
 //!
 //! 后半截只在桌面跑：`try_find` 来自 `TestSupportExt`，那个 trait 在本文件是
 //! `#[cfg(not(mobile))]` 才挂上的（移动端没有测试支持注册路径）。
 
-/// 回归门：手机上正文压在栈顶时底栏收起，正文也不再为它预留那 56px。
+/// 回归门：读书这件事**不再牵动**应用内那条导航栏。
+///
+/// 这一条钉的就是阅读层化要买的东西本身：那一层盖在导航栏之上，「收起导航栏给正文腾地方」
+/// 已经没有意义；而它一旦留着，退场时就没有任何东西能挤动正在滑走的那一页 —— 上一版
+/// 「返回时底部那条进度被往上顶」跳的正是这一处的容器。
 ///
 /// 宿主到不了 Compact 档（`SizeClass::of` 在桌面把窄窗口夹到 `Medium`，底栏只在真机
-/// 长出来），所以钉住渲染时用的那两条判据：收起与否、以及随之而来的预留量。
-/// 预留不归零的话，正文底下会白留一条永远滚不进视野的空带；而预留报错了轴，
-/// 另一端就会拿它去扣错的那一边。
+/// 长出来），所以钉住渲染用的那两条判据：沉浸跟着书、预留不含导航栏。
 #[test]
-fn the_bottom_bar_yields_to_the_reading_page() {
-    use super::{Reserve, immersive_nav, nav_reserve};
-    use crate::ui::shell::navigation::{BOTTOM_BAR_HEIGHT, RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
+fn the_book_does_not_ask_the_nav_bar_to_move() {
+    use super::{Reserve, SizeClass, immersive_nav, reading_reserve};
+    use crate::ui::host::Insets;
 
+    // 系统级那一层跟着书：挂着就沉浸，没书就还给系统。
+    assert!(immersive_nav(SizeClass::Compact, true));
     assert!(
-        immersive_nav(SizeClass::Compact, true),
-        "阅读页在栈顶时底栏应收起"
+        immersive_nav(SizeClass::Expanded, true),
+        "平板与桌面上开着书同样沉浸"
     );
-    assert_eq!(
-        nav_reserve(SizeClass::Compact, true),
-        Reserve::ZERO,
-        "底栏收起后正文不该再预留底栏高"
-    );
-
-    // 没进阅读页就是原样：底栏在、预留也还在 —— 而手机上它横躺着，占的是**高**。
     assert!(!immersive_nav(SizeClass::Compact, false));
+    assert!(!immersive_nav(SizeClass::Expanded, false));
+
+    // 而报给正文的那一条**永远不含导航栏**：宽恒为 0。底栏那 56 与侧栏那 260 都还在
+    // 原地画着，只是被这一层盖住 —— 报错了轴的那一步正是上一版让两端各扣错一条边的地方。
+    let safe = Insets {
+        top: 41.0,
+        bottom: 25.0,
+        ..Default::default()
+    };
+    for size in [SizeClass::Compact, SizeClass::Medium, SizeClass::Expanded] {
+        assert_eq!(
+            reading_reserve(size, &safe).width,
+            0.0,
+            "{size:?} 那一档不该再向正文报导航栏的宽"
+        );
+    }
     assert_eq!(
-        nav_reserve(SizeClass::Compact, false),
+        reading_reserve(SizeClass::Medium, &safe),
         Reserve {
             width: 0.0,
-            height: BOTTOM_BAR_HEIGHT
-        },
-        "手机的导航栏占的是正文的高，不是宽"
-    );
-
-    // 桌面（Medium / Expanded）的阅读同样收起侧栏 —— 它竖着，占的是**宽**，
-    // 而那一条宽正是双页对开要用的。收的是导航，不是目的地：回出有阅读页顶栏的返回。
-    assert!(
-        immersive_nav(SizeClass::Medium, true),
-        "平板与桌面上进阅读页也该把侧栏让出来"
-    );
-    assert!(immersive_nav(SizeClass::Expanded, true));
-    assert_eq!(
-        nav_reserve(SizeClass::Medium, true),
-        Reserve::ZERO,
-        "侧栏收起后正文不该再预留那条宽"
-    );
-    assert_eq!(nav_reserve(SizeClass::Expanded, true), Reserve::ZERO);
-    // 没进阅读页就是原样：侧栏在、预留也还在。
-    assert!(!immersive_nav(SizeClass::Expanded, false));
-    assert_eq!(
-        nav_reserve(SizeClass::Medium, false),
-        Reserve {
-            width: RAIL_WIDTH,
-            height: 0.0
-        }
-    );
-    assert_eq!(
-        nav_reserve(SizeClass::Expanded, false),
-        Reserve {
-            width: SIDEBAR_WIDTH,
-            height: 0.0
+            height: 41.0
         }
     );
 }
@@ -91,16 +73,16 @@ fn the_volume_keys_page_only_on_the_reading_view() {
     );
 }
 
-/// 回归门：报给阅读页的那份扣减里必须含外壳 pad 掉的安全区。
+/// 回归门：报给正文的那份扣减里必须含安全区，且**只有**安全区。
 ///
-/// 阅读页自己量的是**窗口**高，正文盒 = 窗口高 − 报过去的这一条 − 页眉 − 页脚。
-/// 少扣一条安全区，那个盒子就比真能画的地方高几十逻辑像素，多出来的一段被裁在
-/// 页脚带下面 —— 屏幕上的表现是「已经滚到底了，最后几行还是看不见」。
+/// 正文自己量的是**窗口**高，正文盒 = 窗口高 − 报过去的这一条 − 页眉 − 页脚。少扣一条
+/// 安全区，那个盒子就比真能画的地方高几十逻辑像素，多出来的一段被裁在页脚带下面 ——
+/// 屏幕上的表现是「已经滚到底了，最后几行还是看不见」。多扣一条导航栏则是反过来的错：
+/// 章尾凭空少一行，而那一行本来放得下。
 #[test]
 fn the_reading_page_is_told_about_the_safe_areas_too() {
-    use super::{Reserve, SizeClass, nav_reserve, reading_reserve};
+    use super::{Reserve, SizeClass, reading_reserve};
     use crate::ui::host::Insets;
-    use crate::ui::shell::navigation::{BOTTOM_BAR_HEIGHT, SIDEBAR_WIDTH};
 
     let safe = Insets {
         top: 41.0,
@@ -108,37 +90,140 @@ fn the_reading_page_is_told_about_the_safe_areas_too() {
         ..Default::default()
     };
 
-    // Compact：底栏 + 上下两条一起扣。底栏收起时那两条还在 —— 那是系统的地盘，
-    // 不是应用 chrome，收起导航栏不动它。
+    // Compact：上下两条都扣 —— 手机上横躺着的手势条同样是系统的地盘，不是应用 chrome。
     assert_eq!(
-        reading_reserve(SizeClass::Compact, false, &safe),
-        Reserve {
-            width: 0.0,
-            height: BOTTOM_BAR_HEIGHT + 41.0 + 25.0
-        }
-    );
-    assert_eq!(
-        reading_reserve(SizeClass::Compact, true, &safe),
+        reading_reserve(SizeClass::Compact, &safe),
         Reserve {
             width: 0.0,
             height: 41.0 + 25.0
         }
     );
 
-    // 桌面那一支：导航栏占的是宽，纵向只 pad 上面那条安全区，所以高里只加它。
+    // Medium / Expanded：外壳只 pad 上面那一条，所以高里只加它。
     assert_eq!(
-        reading_reserve(SizeClass::Expanded, false, &safe),
+        reading_reserve(SizeClass::Medium, &safe),
         Reserve {
-            width: SIDEBAR_WIDTH,
+            width: 0.0,
+            height: 41.0
+        }
+    );
+    assert_eq!(
+        reading_reserve(SizeClass::Expanded, &safe),
+        Reserve {
+            width: 0.0,
             height: 41.0
         }
     );
 
-    // 安全区全 0（桌面的真实值）时这条退回 `nav_reserve` 原样：不多扣一个像素。
+    // 安全区全 0（桌面的真实值）就是零：不多扣一个像素。
     assert_eq!(
-        reading_reserve(SizeClass::Medium, false, &Insets::ZERO),
-        nav_reserve(SizeClass::Medium, false)
+        reading_reserve(SizeClass::Expanded, &Insets::ZERO),
+        Reserve::ZERO
     );
+}
+
+/// 回归门：转场里那一页往哪边走、什么时候淡。
+///
+/// 位移是从 `NavStack` 那个**已经过完缓动**的进度折出来的，所以这一层钉得住的是方向与端点：
+/// 返回时出场那页往右走并淡出、架面从左外滑回原位；进书正好反过来。接反了不报错、不 panic，
+/// 只在真机上读成「书是从右边来的」—— 而这是外壳里唯一一个方向不该靠猜的数。
+#[test]
+fn the_exit_pages_right_and_the_entry_comes_from_the_left() {
+    use super::{FOLLOW, LEAVE, NavOperation, PresencePhase, nav_offset};
+
+    let width = 400.0;
+    // 返回的起步：出场那页还在原位、还满不透明。
+    assert_eq!(
+        nav_offset(NavOperation::Pop, PresencePhase::Exiting, 0.0, width),
+        (0.0, 1.0)
+    );
+    // 动完：往右走满 `LEAVE`、完全淡出。
+    assert_eq!(
+        nav_offset(NavOperation::Pop, PresencePhase::Exiting, 1.0, width),
+        (width * LEAVE, 0.0)
+    );
+    // 进场的架面：起步在左外 `FOLLOW`，动完回到 0，全程不淡（它身后只有外壳背景，淡起来是灰）。
+    assert_eq!(
+        nav_offset(NavOperation::Pop, PresencePhase::Entering, 0.0, width),
+        (-width * FOLLOW, 1.0)
+    );
+    assert_eq!(
+        nav_offset(NavOperation::Pop, PresencePhase::Entering, 1.0, width),
+        (0.0, 1.0)
+    );
+
+    // 进书 = 返回反过来：新那页从右外走满 `LEAVE` 盖上来，底下的架面往左退 `FOLLOW`，两张都不淡。
+    assert_eq!(
+        nav_offset(NavOperation::Push, PresencePhase::Entering, 0.0, width),
+        (width * LEAVE, 1.0)
+    );
+    assert_eq!(
+        nav_offset(NavOperation::Push, PresencePhase::Entering, 1.0, width),
+        (0.0, 1.0)
+    );
+    assert_eq!(
+        nav_offset(NavOperation::Push, PresencePhase::Exiting, 1.0, width),
+        (-width * FOLLOW, 1.0)
+    );
+    // 替换按进书摆：换上来那张同样是盖住别人的一张。
+    assert_eq!(
+        nav_offset(NavOperation::Replace, PresencePhase::Entering, 0.0, width),
+        (width * LEAVE, 1.0)
+    );
+
+    // 中间每一帧都单调往前挪，不会冲过头再退回来；不透明度始终在 0..=1 里。
+    let mut last = 0.0;
+    for step in 0..=10 {
+        let progress = step as f32 / 10.0;
+        let (shift, alpha) = nav_offset(NavOperation::Pop, PresencePhase::Exiting, progress, width);
+        assert!(shift >= last, "进度 {progress} 时出场那页往回退了");
+        last = shift;
+        assert!(
+            (0.0..=1.0).contains(&alpha),
+            "进度 {progress} 时不透明度 {alpha} 跑出了 0..=1"
+        );
+    }
+}
+
+/// 回归门：阅读层那两个数接对头了没有。
+///
+/// `Presence` 报的是「还有多在场」（进场 0→1、退场 1→0），`nav_offset` 要的是「这一趟走了
+/// 多远」。进场同向、退场相反 —— 两边都取反或都不取反都不会报错，画面分别是
+/// 「书一边出现一边往右 drift 走」与「书退到一半又停住不动」。这一层专门钉两头各一次。
+#[test]
+fn the_layer_reads_presence_and_writes_distance_apart() {
+    use super::{LEAVE, PresencePhase, layer_offset};
+
+    let width = 400.0;
+    // 进场：还没在场 = 还在右外 `LEAVE`；完全在场 = 回到原位、满不透明。
+    assert_eq!(
+        layer_offset(PresencePhase::Entering, 0.0, width),
+        (width * LEAVE, 1.0)
+    );
+    assert_eq!(
+        layer_offset(PresencePhase::Entering, 1.0, width),
+        (0.0, 1.0)
+    );
+
+    // 退场：还满在场 = 还在原位；一丝不剩 = 走满 `LEAVE` 并淡光。
+    assert_eq!(layer_offset(PresencePhase::Exiting, 1.0, width), (0.0, 1.0));
+    assert_eq!(
+        layer_offset(PresencePhase::Exiting, 0.0, width),
+        (width * LEAVE, 0.0)
+    );
+
+    // 定住与不在：一个样式都不加。
+    assert_eq!(layer_offset(PresencePhase::Present, 1.0, width), (0.0, 1.0));
+    assert_eq!(layer_offset(PresencePhase::Absent, 0.0, width), (0.0, 1.0));
+
+    // 进场那一趟是**从右外回到原位**，所以位移必须单调变小 —— 反过来就是那处不报错的错。
+    let mut last = width * LEAVE;
+    for step in 0..=10 {
+        let present = step as f32 / 10.0;
+        let (shift, _) = layer_offset(PresencePhase::Entering, present, width);
+        assert!(shift <= last, "进场时读数 {present} 这一层反而更往右了");
+        last = shift;
+    }
 }
 
 #[cfg(not(mobile))]
@@ -572,18 +657,19 @@ mod booted {
         .expect("窗口应能渲染");
     }
 
-    /// 回归门：没有焦点时，返回照常弹栈 —— 上面那一档只在真有异议时才吃掉这一键。
+    /// 回归门：没有焦点时，返回键照常走到外壳的导航 —— 上面那一档只在真有异议时才吃掉这一键。
+    ///
+    /// 书开着时「导航」就是收起那一层（它是最上面那一屏），而不是去弹架面那条栈。
     #[gpui_kit::test]
-    fn back_still_pops_when_nothing_has_focus(cx: &mut TestAppContext) {
+    fn back_still_reaches_the_shell_when_nothing_has_focus(cx: &mut TestAppContext) {
         let (handle, shell) = boot(cx, false);
         let stack = shell.read_with(cx, |this, _| {
             this.stacks[Destination::Shelf.index()].clone()
         });
         shell.update(cx, |this, cx| this.open_reading(1, cx));
-        assert_eq!(
-            stack.read_with(cx, |state, _| state.depth()),
-            2,
-            "阅读页应已压上书架栈"
+        assert!(
+            shell.read_with(cx, |this, _| this.reading_open()),
+            "书该已经盖上来了"
         );
 
         cx.update_window(handle, |_, window, cx| {
@@ -593,10 +679,210 @@ mod booted {
         .expect("窗口应能渲染");
         cx.simulate_keystrokes(handle, "escape");
 
+        assert!(
+            shell.read_with(cx, |this, _| !this.reading_open()),
+            "没有焦点时返回要收那一层，而不是空转一次"
+        );
         assert_eq!(
             stack.read_with(cx, |state, _| state.depth()),
             1,
-            "没有焦点时返回要弹栈，而不是空转一次"
+            "收书不该去动架面那条栈"
+        );
+    }
+
+    /// 回归门：书盖着与退场的整段时间，架面那条栈与那条导航栏**一动不动**。
+    ///
+    /// 这一条钉的是阅读层化买的东西本身。上一版书是架面栈上的第 2 页，「栈上压了页」与
+    /// 「导航栏收起」被绑成同一件事，于是 pop 那一帧导航栏回来、正文容器矮一截，而贴着
+    /// 容器底边的那条进度带当场往上跳一段 —— 正文按**窗口**量、带子按容器贴，两套参照系
+    /// 在读者眼前分开。现在书是盖在整窗上的一层：架面栈深全程是 1，导航栏压根没被收起，
+    /// 也就没有可跳的地方。跟着书的只剩系统级那一层（`immersive`），那是另一件事。
+    #[gpui_kit::test]
+    fn the_book_leaves_the_shelf_stack_alone(cx: &mut TestAppContext) {
+        use crate::ui::shell::{ChromeState, NAV_TRANSITION};
+        use std::time::Duration;
+
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+
+        assert_eq!(
+            stack.read_with(cx, |state, _| state.depth()),
+            1,
+            "书不在架面那条栈上 —— 它盖在上面"
+        );
+        assert_eq!(
+            shell.read_with(cx, |this, _| this.chrome_painted),
+            ChromeState {
+                nav_gone: false,
+                immersive: true
+            },
+            "读书时导航栏该照旧画着（被那一层盖住），只有系统级那一层跟着书"
+        );
+
+        // 退场走完：系统级那一层放开，栈深还是那个 1 —— 全程没人挤过容器。
+        shell.update(cx, |this, cx| this.close_reading(cx));
+        cx.executor()
+            .advance_clock(NAV_TRANSITION + Duration::from_millis(20));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert_eq!(
+            shell.read_with(cx, |this, _| this.chrome_painted),
+            ChromeState {
+                nav_gone: false,
+                immersive: false
+            },
+            "书没了就该把系统栏还给系统，而导航栏本来就没走"
+        );
+        assert_eq!(stack.read_with(cx, |state, _| state.depth()), 1);
+    }
+
+    /// 回归门：退场没走完之前那一层不许放手，走完了就该放手。
+    ///
+    /// `close_reading` 一调，落库与统计当场就记了账（不等动画，动画被打断、进程被杀都不该
+    /// 把这两笔带走），而画面还要往外滑 280 毫秒。两头都得钉：提前收是一刀切断的动画，
+    /// 拖到最后不收是把已经离开的那本书一直挂在树上。
+    ///
+    /// 进场要先走完再收：`Presence` 的退场是**从当前值**起跑的，进场只画了一帧就收，
+    /// 那一层的当前值还停在起点 —— 那不是 bug，是不把动画走完就测退场的测法本身。
+    #[gpui_kit::test]
+    fn the_book_stays_mounted_until_its_exit_has_run(cx: &mut TestAppContext) {
+        use crate::ui::shell::NAV_TRANSITION;
+        use std::time::Duration;
+
+        let (handle, shell) = boot(cx, false);
+        shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert!(
+            shell.read_with(cx, |this, _| this.reading_open()),
+            "书该已经盖上来了"
+        );
+        // 把进场走完。
+        cx.executor()
+            .advance_clock(NAV_TRANSITION + Duration::from_millis(20));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert!(
+            shell.read_with(cx, |this, _| this.reading_open()),
+            "进场走完，这一层该稳稳挂着"
+        );
+
+        shell.update(cx, |this, cx| this.close_reading(cx));
+        // 音量键那一条已经不再认这本书了：它不在退场动画里替人翻页。
+        assert!(
+            !shell.read_with(cx, |this, _| this.reading_open()),
+            "退场期间不该还能用音量键翻这本书的页"
+        );
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+
+        // 退场走了一半：还挂着。
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert!(
+            shell.read_with(cx, |this, _| this.reading_mounted()),
+            "退场还在走，这一层不该已经放手"
+        );
+
+        // 走完：放手。
+        cx.executor()
+            .advance_clock(NAV_TRANSITION + Duration::from_millis(20));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert!(
+            shell.read_with(cx, |this, _| this.reading.is_none()),
+            "动完了就该把这一层放手"
+        );
+    }
+
+    /// 回归门：删掉**正开着**的那一本，那一层要退回架面；删掉别的那本，它一动不动。
+    ///
+    /// 架面删完书会广播 `ShelfEvent::Deleted`，而这条广播只有外壳接得住（那一层在它手上）。
+    /// 没人接的表现不是崩，是安静：那一层继续显示一行已经不在的书，离席那两笔账各走一条
+    /// `tracing::warn!`，那几十分钟就此不记账。后半句（删别的那本不该动）一样要紧 ——
+    /// 判据是「开着的是不是正是被删的那一本」，不看 id 就成了一删就退。
+    ///
+    /// 起点是架面**发那条事件**而不是它自己那颗删除按钮：删那一步要动硬盘上的副本文件，
+    /// 而这条门钉的是外壳那一侧的分流。
+    ///
+    /// 开着的那一本必须**真入过库**（索引也存进去），不是只登记一行：`open_book` 从库里取
+    /// 索引出来的章节，只有行的那本会走到「书库里读不出来」那条 error、停在原屏，那样的
+    /// `book_id()` 是 `None` —— 分流的两半就都在拿空值比空值。这三句的形状抄自
+    /// `ReaderSession` 那条内置样本路径（`open(path)` → `add_book` → `save_document`）。
+    /// 前置条件本身也钉了一条（那一层记下的 id 必须就是这一本）。
+    #[gpui_kit::test]
+    fn deleting_the_opened_book_sends_the_layer_back(cx: &mut TestAppContext) {
+        use crate::ui::features::shelf::ShelfEvent;
+        use crate::ui::shell::NAV_TRANSITION;
+        use std::time::Duration;
+
+        let (handle, shell) = boot(cx, false);
+        let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
+        // 宿主测试的工作目录是 crate 目录，所以仓库根的夹具在 `../../`。
+        let fixture = std::path::Path::new("../../tests/fixtures/oss/minimal-zh.epub");
+        let doc = folio_core::content::document::open(fixture).expect("仓库里那份合成书该打得开");
+        let opened = store
+            .add_book(fixture, doc.meta())
+            .expect("合成书该入得了库");
+        store
+            .save_document(opened, doc.as_ref())
+            .expect("那份索引该存得进去");
+        // 另一本不需要真文件：这一条只要 id 不同。
+        let other = store
+            .add_book(
+                std::path::Path::new("/books/not-the-open-one.epub"),
+                doc.meta(),
+            )
+            .unwrap();
+
+        shell.update(cx, |this, cx| this.open_reading(opened, cx));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert_eq!(
+            shell.read_with(cx, |this, app| {
+                this.reading
+                    .as_ref()
+                    .and_then(|layer| layer.page.read(app).book_id(app))
+            }),
+            Some(opened),
+            "那一层得真的开着这一本并记下它的 id"
+        );
+
+        let shelf = cx
+            .update(|cx| {
+                let stack = shell.read(cx).stacks[Destination::Shelf.index()].clone();
+                stack
+                    .read(cx)
+                    .current()
+                    .cloned()
+                    .and_then(|top| top.downcast::<ShelfView>().ok())
+            })
+            .expect("书架栈底就是架面本身");
+
+        cx.update(|cx| shelf.update(cx, |_, cx| cx.emit(ShelfEvent::Deleted(other))));
+        assert!(
+            shell.read_with(cx, |this, _| this.reading_open()),
+            "删的不是开着的那一本，那一层不该退场"
+        );
+
+        cx.update(|cx| shelf.update(cx, |_, cx| cx.emit(ShelfEvent::Deleted(opened))));
+        assert!(
+            !shell.read_with(cx, |this, _| this.reading_open()),
+            "开着的那本被删了：那一层该开始退场，而不是继续盖着一行没了的书"
+        );
+        cx.executor()
+            .advance_clock(NAV_TRANSITION + Duration::from_millis(20));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert!(
+            shell.read_with(cx, |this, _| this.reading.is_none()),
+            "退场走完就该把这一层放手"
         );
     }
 
@@ -711,11 +997,11 @@ mod booted {
 
     /// 回归门：统计的榜单那一行点开一本书 = 与书架同一个动作。
     ///
-    /// 走的是外壳已有的 `open_reading`（往书架栈 push 阅读页），所以这条要同时钉住
-    /// 两件事：栈上多了一页，而 `reading` 那格被填上了 —— 少了后者，返回时没人结那
-    /// 一笔位置与时长的账。
+    /// 走的是外壳已有的 `open_reading`（把那一层盖上来），所以这条同时钉住两件事：那一层
+    /// 挂上了，而**目的地没被切走** —— 书盖的是读者当前看着的那一屏，退完场他就回到榜单上。
+    /// 上一版把书压进架面那条栈，从统计点进去时栈与目的地各说一套，是一个没人报过的错位。
     #[gpui_kit::test]
-    fn a_stats_row_opens_the_book_on_the_shelf_stack(cx: &mut TestAppContext) {
+    fn a_stats_row_opens_the_book_over_the_report(cx: &mut TestAppContext) {
         let (_handle, shell) = boot(cx, false);
         let stack = shell.read_with(cx, |this, _| {
             this.stacks[Destination::Shelf.index()].clone()
@@ -729,21 +1015,21 @@ mod booted {
             })
         });
 
+        assert!(
+            shell.read_with(cx, |this, _| this.reading_open()),
+            "那一层要盖上来了：返回时靠它把位置与时长一起结掉"
+        );
         assert_eq!(
             stack.read_with(cx, |state, _| state.depth()),
-            2,
-            "从统计点开一本书应压上书架那条栈，而不是留在报告里"
-        );
-        assert!(
-            shell.read_with(cx, |this, _| this.reading.is_some()),
-            "阅读页那格要填上：弹栈时靠它把位置与时长一起结掉"
+            1,
+            "从统计点开一本书不该去动架面那条栈"
         );
     }
 
     /// 回归门：关掉一本书之后统计要跟上，不必等读者再切一次目的地。
     ///
-    /// 读者最自然的一次追问就是「我刚读的那几分钟记上了吗」。结算是 pop 那一刻做的
-    /// （`ReadingPage::close`），所以同一个回调里必须顺手叫一次重取，否则那一屏
+    /// 读者最自然的一次追问就是「我刚读的那几分钟记上了吗」。结算是收层那一刻做的
+    /// （`ReadingPage::close`，不等退场动画），所以同一处必须顺手叫一次重取，否则那一屏
     /// 画的还是进来时的快照，读到的答案永远是上一次。
     #[gpui_kit::test]
     fn closing_the_reading_page_refreshes_the_stats(cx: &mut TestAppContext) {
@@ -758,8 +1044,8 @@ mod booted {
         assert_eq!(before, Some(0), "内存库里此刻还没有一段阅读");
 
         // 那一行必须挂在库里真的存在的 `book_id` 上（外键），所以先登记一本。
-        // 而**压上栈的那一页**故意用一个读不出来的 id：`open_book` 认不出库里的行
-        // 就只写日志、不动别的，弹栈时那次重取照样发生 —— 这条门钉的是「pop 会叫重取」，
+        // 而**盖上来的那一层**故意用一个读不出来的 id：`open_book` 认不出库里的行
+        // 就只写日志、不动别的，收层时那次重取照样发生 —— 这条门钉的是「收层会叫重取」，
         // 不是「书真能打开」。时间戳取现在附近：`reading_summary(14)` 只看最近两周。
         let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
         let book = store
@@ -777,12 +1063,7 @@ mod booted {
         let now = folio_core::infra::time::now();
         shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
         store.record_session(book, now - 600, now, 0).unwrap();
-        shell.update(cx, |this, cx| {
-            let stack = this.stacks[Destination::Shelf.index()].clone();
-            stack.update(cx, |state, cx| {
-                state.pop(gpui_kit::base::NavMotion::Immediate, cx)
-            });
-        });
+        shell.update(cx, |this, cx| this.close_reading(cx));
 
         let after = shell.read_with(cx, |this, cx| this.stats.read(cx).window_sessions());
         assert_eq!(after, Some(1), "弹掉阅读页那次重取要把新的一段带上来");

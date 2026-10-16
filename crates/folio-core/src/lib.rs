@@ -48,7 +48,7 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
     Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, LOG_OFF_ENV, Language, Layer,
-    Library, Logging, Mode, Provenance, Reader, Resolved, TocDensity,
+    Library, Logging, Mode, PageTurn, Provenance, Reader, Resolved, TocDensity,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
