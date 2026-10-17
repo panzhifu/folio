@@ -170,8 +170,19 @@ log = "0.4"
 # gpui-mobile（移动平台层）带过来的补丁。原先在 folio-mobile 自己的 workspace 根
 # 才生效，现在两个 crate 共用一张依赖图，只能声明在这里 —— 于是桌面端也一起走这个 rev。
 # 注：上游 longbridge/gpui-mobile 已经不声明这条了，若实测确认不再需要，直接删。
+#
+# `gpui-pre-wgpu` 这条是给 `gpui-pre-mobile` 的 `offscreen`（把视图渲成图）用的：那个
+# feature 要的是打了补丁的渲染器（`WgpuHeadlessRenderer` 上多出的 `render_to_image` 等
+# 六个方法），而 crates.io 的 0.3.9 只有 `new()` 是公开的。longbridge 把那份补丁放在
+# `gpui-mobile/vendor/gpui-pre-wgpu/` 里，**cargo 的 git 源只读仓库根那份 manifest，
+# 指不到别人仓库的子目录**，所以链接不上 —— 已按那一带几家快照仓库的惯例，原样抽成
+# `panzhifu/gpui-pre-wgpu`（版本仍留 0.3.9，否则不满足各处的 `=0.3.9`）。与上面那条
+# 同样的道理：**只有写在根上才生效，而它同时换掉桌面的渲染器**（`gpui-pre-linux` /
+# `gpui-pre-platform` 也要这个 crate），桌面像素因此是这份的像素。上游哪天发了带
+# `offscreen` 的版本，这一整条连同 `gpui-pre-mobile` 的那个 feature 一起删。
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-pre-wgpu", rev = "617a93340cd282e859a75e6fc710f735b8c17b6c" }
 
 # 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
 # opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；

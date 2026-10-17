@@ -80,9 +80,16 @@ chrono.workspace = true
 # `4ab10c3` 把 GPUI 的 AccessKit 树交给 TalkBack（读屏）、`c24a130` 跟随系统夜间模式
 # —— 后者顺手修掉「窗口 appearance 初值硬编码 Light，所以冷启动时「跟随系统」恒为浅色」
 # 这一格，`Platform::window_appearance()` 也第一次被真实现；另加 `e151036`，只取那条
-# 0.3.9 bump 里 iOS 侧的三个方法，因为我们的 line 先前只补了 Android）。
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "522551b9ca95dfd8fb9de363f9482a29c06ff07a", features = [
+# 0.3.9 bump 里 iOS 侧的三个方法，因为我们的 line 先前只补了 Android）、
+# `095c9b3`（合进 longbridge 的 offscreen 三条 `d04e1b3`/`b28e203`/`4411403`：开一个真的
+# GPUI 窗口、把它渲成图而不是画上屏（`gpui_mobile::offscreen`）。它按上游原样带着自己
+# 那份 `vendor/gpui-pre-wgpu` 与 `[patch.crates-io]` —— 那条 patch 在我们这侧**不生效**
+# （cargo 只认工作区根上的 patch），生效的是根上那条指向 `panzhifu/gpui-pre-wgpu` 的；
+# 留着它只为与上游那三条零冲突，并让他们自己的 example 仍能开 offscreen）。
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "095c9b3562a31f372b450c844848077100ec08e6", features = [
     "permission_handler",
+    # 把视图渲成图（分享卡片那一格的地基）。要的是打了补丁的渲染器，见根上那条 patch。
+    "offscreen",
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]

@@ -3046,7 +3046,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-mobile"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/gpui-mobile?rev=522551b9ca95dfd8fb9de363f9482a29c06ff07a#522551b9ca95dfd8fb9de363f9482a29c06ff07a"
+source = "git+https://github.com/panzhifu/gpui-mobile?rev=095c9b3562a31f372b450c844848077100ec08e6#095c9b3562a31f372b450c844848077100ec08e6"
 dependencies = [
  "accesskit_android",
  "android-activity",
@@ -3060,6 +3060,7 @@ dependencies = [
  "futures",
  "gpui-pre",
  "gpui-pre-wgpu",
+ "image",
  "jni 0.22.4",
  "libc",
  "log",
@@ -3236,8 +3237,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b1cdb26c1503bf9662ee8fbc5ab0b44b2deeee4b5c12dc67491ba6fb5fc544b"
+source = "git+https://github.com/panzhifu/gpui-pre-wgpu?rev=617a93340cd282e859a75e6fc710f735b8c17b6c#617a93340cd282e859a75e6fc710f735b8c17b6c"
 dependencies = [
  "anyhow",
  "bytemuck",
