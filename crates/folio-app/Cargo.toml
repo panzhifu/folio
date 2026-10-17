@@ -75,8 +75,13 @@ chrono.workspace = true
 # `2956607`（`set_screen_brightness`：写窗口自己的 `screenBrightness` 压暗 / 把背光交还系统
 # —— 「界面亮度」靠它）、
 # `78384e0`（跟到上游的 `gpui-pre = 0.3.9`；补上 `refresh_interval`、`on_displays_changed`
-# 与 `on_display_changed` 三个新 trait 方法）。
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "78384e0bda65989a9a9c0b4de486f674d99e5c55", features = [
+# 与 `on_display_changed` 三个新 trait 方法）、
+# `522551b`（合进 longbridge 那三条 Android：`426cc54` 随包 emoji 字体的装载时机、
+# `4ab10c3` 把 GPUI 的 AccessKit 树交给 TalkBack（读屏）、`c24a130` 跟随系统夜间模式
+# —— 后者顺手修掉「窗口 appearance 初值硬编码 Light，所以冷启动时「跟随系统」恒为浅色」
+# 这一格，`Platform::window_appearance()` 也第一次被真实现；另加 `e151036`，只取那条
+# 0.3.9 bump 里 iOS 侧的三个方法，因为我们的 line 先前只补了 Android）。
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "522551b9ca95dfd8fb9de363f9482a29c06ff07a", features = [
     "permission_handler",
 ] }
 
