@@ -146,6 +146,7 @@ language = "界面语言"
 "language.desc" = "界面文案的语言，不影响书的正文语言。"
 config_path = "配置文件"
 "config_path.desc" = "阅读偏好都存在这个 JSON 文件里，换机器时拷过去即可。"
+open_folder = "打开所在文件夹"
 library_dir = "书库位置"
 "library_dir.desc" = "导入的书会复制到这里。填成空就等于没确认过：下次导入会再问一次。"
 "library_dir.suggested" = "建议位置"
@@ -167,12 +168,16 @@ toc_max_lines = "标题最大行数"
 toc_dim_read = "读过的章节浅色显示"
 "toc_dim_read.desc" = "到过的章在目录里画成浅色，没读过的保持正常颜色。"
 page_turn = "翻页动画"
-"page_turn.desc" = "翻页时那一张纸沿哪一根轴平移。连续滚动不吃这一档；换它也不会让任何一章重排。"
+"page_turn.desc" = "翻页时那一张纸怎么走：平移、覆盖，还是干脆不走。分页与双页按这一档摆那两张纸；连续滚动只看它要不要走动画。换它不会让任何一章重排。"
 
-# 翻页动画那两档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
+# 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
 [page_turn]
-horizontal = "左右平移"
-vertical = "上下平移"
+slide = "左右平移"
+slide_up = "上下平移"
+cover = "左右覆盖"
+curl = "仿真翻页"
+scroll = "上下滚动"
+none = "不走动画"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
@@ -316,6 +321,8 @@ group_new = "新建分组"
 group_create = "建组"
 group_placeholder = "组名"
 group_hint = "这本书进哪个组。名字已经有了就直接用那一组，不会建出第二条同名的。"
+# 组卡下面那一行：卡上画不下整组，那一行数字才是「这个组有几本」的答案。
+group_count = "%{n} 本"
 # 「信息」：菜单里那一条与面板标题共用这一条文案 —— 都叫「信息」，不叫「书籍信息」。
 # 面板摆这一本的事实，点菜单那一刻查库取一次。
 info_title = "信息"
@@ -361,9 +368,6 @@ pick_dir = "选择文件夹…"
 [about]
 version = "版本"
 version_desc = "现在跑着的这一份二进制编译自哪个版本。"
-gpui_pre = "GPUI 本体"
-kit = "组件层 gpui-kit"
-mobile = "移动平台层"
 
 # 首次启动的欢迎页：先选书库位置再进主界面。没有「取消」可退 ——
 # 要么用系统文件夹选择器挑一个，要么一键用建议位置。

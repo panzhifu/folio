@@ -16,7 +16,9 @@ use folio_core::content::document::Document;
 use folio_core::content::format::TocEntry;
 use folio_core::infra::metrics::{Metric, take_local};
 use folio_core::store::Store;
-use folio_core::{Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, PageTurn, Reader};
+use folio_core::{
+    Appearance, Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, PageTurn, Reader,
+};
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -223,6 +225,13 @@ fn open_with_document(
         // `prefs` 当场冲掉 —— 而画面照样出得来，只有几何不对，最难查的那种红。
         let config = Config {
             reader: prefs.clone(),
+            // 测试台给一档**有动画**的翻页。软件初始默认是「不走动画」，而这一批门测的就是
+            // 那两张纸怎么走 —— 没有动画，`page_shift` 恒为零，那些断言就全成了空话。
+            // 要测别的档自己在装好之后改 `ConfigHolder`（竖轴、覆盖、折页那几条就是这么做的）。
+            appearance: Appearance {
+                page_turn: PageTurn::Slide,
+                ..Default::default()
+            },
             ..Default::default()
         };
         ConfigHolder::install(config, cx);
@@ -2823,6 +2832,68 @@ fn tapping_a_footnote_ref_raises_the_note(cx: &mut TestAppContext) {
     );
 }
 
+/// 锚点是**标记自己那一格**，不是手指那一下。
+///
+/// 同一个标记上点两处（第二处往下 40 像素，等于手指肚盖在标记下方），抬出来的小纸片该落在
+/// 同一个地方 —— 从前这里存的就是落点，于是纸片跟着手指往下掉一截，读者看到的是「离标记
+/// 有点远、不在正下方」。
+#[gpui_kit::test]
+fn the_footnote_anchor_is_the_marker_not_the_finger(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &footnote_flow(),
+        "epub",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    let marker = char_point(&view, cx, 0, 4);
+    // 那一行的下缘与它的横向范围（窗口坐标）：小纸片该贴在这一行的下缘起笔，横向不许跑出
+    // 这一行去。`char_point` 是按字号估的落点，标记本身是个窄上标，所以这里不拿它当尺量 x。
+    let (bottom, line_left, line_right) = view.read_with(cx, |v, _| {
+        let box_ = &v.lines()[0];
+        let left = px(v.prefs.margin_x + box_.x);
+        (
+            px(box_.y + box_.height - v.scroll_y + v.header_reserve),
+            left,
+            left + px(box_.width),
+        )
+    });
+    let mut anchors = vec![];
+    for (tag, tap) in [
+        ("点在标记正中", marker),
+        (
+            "点在标记下方 12 像素（手指肚那一挡，还在同一行里）",
+            point(marker.x, marker.y + px(12.0)),
+        ),
+    ] {
+        let got = cx
+            .update_window(handle, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    let consumed = v.open_footnote_at(window, cx, tap);
+                    (consumed, v.footnote().map(|f| f.anchor))
+                })
+            })
+            .expect("渲染应成功");
+        assert!(got.0, "{tag}：这一击该被脚注吃掉");
+        let anchor = got.1.expect("{tag}：锚点该有值");
+        assert!(
+            (anchor.y - bottom).abs() < px(1.0),
+            "{tag}：锚点该贴在标记那一行的下缘 {bottom}，实得 {anchor:?}（落点是 {tap:?}）"
+        );
+        assert!(
+            anchor.x >= line_left && anchor.x <= line_right,
+            "{tag}：锚点横向该落在标记那一行里（{line_left}…{line_right}），实得 {anchor:?}"
+        );
+        anchors.push(anchor);
+    }
+    assert_eq!(
+        anchors[0], anchors[1],
+        "同一个标记上的两处落点，抬出来的小纸片该在同一个地方"
+    );
+}
+
 /// 短章语料：每章只有一小段（远不到一屏），用来钉连续滚动在「章比屏短」时也不卡死。
 fn short_chapters_flow(count: usize) -> FlowDoc {
     FlowDoc {
@@ -2975,6 +3046,318 @@ fn turn_frame(cx: &mut TestAppContext, handle: AnyWindowHandle, wait: Duration) 
     cx.update_window(handle, |_, window, cx| window.render_frame(cx))
         .expect("渲染应成功");
     cx.run_until_parked();
+}
+
+/// 一根手指的原始触摸，与真机同一入口：识别器就在这条路上跑（`gestures.rs` 把一笔折成
+/// `Started` 一整截 + `Moved` 若干步 + `Ended` 收尾的 `ScrollWheelEvent`，横轴锁死）。
+/// 横扫那两条门都从这里发事件，所以它们验的是真路，不是绕开识别器直发事件。
+fn raw_touch(cx: &mut TestAppContext, handle: AnyWindowHandle, phase: TouchPhase, x: f32) {
+    raw_touch_at(cx, handle, phase, point(px(x), px(200.0)));
+}
+
+/// 同一条，但落点由调用方给：竖着那一档要测的是 y。
+fn raw_touch_at(
+    cx: &mut TestAppContext,
+    handle: AnyWindowHandle,
+    phase: TouchPhase,
+    at: Point<Pixels>,
+) {
+    use gpui_kit::{TouchEvent, TouchId};
+
+    dispatch(
+        cx,
+        handle,
+        TouchEvent {
+            id: TouchId(1),
+            phase,
+            position: at,
+            predicted_position: None,
+            force: None,
+        }
+        .to_platform_input(),
+    );
+}
+
+/// 横扫过半：跟手起来 → 页号在松手前一个字不动 → 松手那一刻翻过去、剩下那截走完。
+#[gpui_kit::test]
+fn a_horizontal_swipe_follows_the_finger_and_lands(cx: &mut TestAppContext) {
+    use super::super::session::TurnRun;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 240.0);
+    let following = view.read_with(cx, |v, _| v.turn);
+    assert!(
+        matches!(following, Some(turn) if matches!(turn.run, TurnRun::Following { .. })),
+        "横扫过阈值该进入跟手，实得 {following:?}"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first,
+        "跟手期间页号一个字都不动 —— 弹回时才不必撤销任何东西"
+    );
+    assert_ne!(
+        view.read_with(cx, |v, _| v.page_shift),
+        (0.0, 0.0),
+        "跟手就是纸真的跟着手指走了，不是只挂了个状态"
+    );
+
+    raw_touch(cx, handle, TouchPhase::Moved, 60.0);
+    raw_touch(cx, handle, TouchPhase::Ended, 60.0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "走过大半屏，松手那一下就该翻页"
+    );
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert!(view.read_with(cx, |v, _| v.turn.is_none()));
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 横扫没过那一屏的三分之一：跟手照样起来，松手弹回，页号一个字不动。
+/// 这条与上面那条是一对 —— 只钉「该翻」会漏掉「不该翻」，而那半才是弹回那段动画的去处。
+#[gpui_kit::test]
+fn a_short_horizontal_swipe_bounces_back(cx: &mut TestAppContext) {
+    use super::super::session::TurnRun;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 330.0);
+    assert!(
+        matches!(view.read_with(cx, |v, _| v.turn), Some(turn) if matches!(turn.run, TurnRun::Following { .. })),
+        "三十像素过了本层的阈值，该起跟手"
+    );
+    raw_touch(cx, handle, TouchPhase::Ended, 330.0);
+    assert_eq!(view.read_with(cx, |v, _| v.page()), first, "没过线不该翻");
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_none()),
+        "弹回走完该收掉"
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 回上一页那一趟：往右横扫同样要跟手、同样过线落定。
+///
+/// 这条与「往后翻」那条是一对，钉的是一个只漏一半的缺陷：位移按读书顺序折出来时，
+/// 回上一页天生是**负**的，而进度那一步把负的夹成 0 —— 于是往右划纸不动、松手也永远
+/// 过不了线，横扫只有半个方向能用。认领之后按那一步的方向取距离才两边都成立。
+#[gpui_kit::test]
+fn a_horizontal_swipe_back_lands_on_the_previous_page(cx: &mut TestAppContext) {
+    use super::super::session::TurnRun;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    // 先往后走两页再往回划：从第 0 页起划回去，那一趟本来就没有上一页可去。
+    for _ in 0..2 {
+        view.update(cx, |v, cx| v.scroll_page(1, cx));
+    }
+    settle(cx, handle);
+    let from = view.read_with(cx, |v, _| v.page());
+    assert_eq!(from, 2, "语料该够切出第三页，否则这条测不到东西");
+
+    // 往右划：跟手起来的那一张纸该是**动过的**，不只是挂了个状态。
+    raw_touch(cx, handle, TouchPhase::Started, 60.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 210.0);
+    let following = view.read_with(cx, |v, _| v.turn);
+    assert!(
+        matches!(following, Some(turn) if matches!(turn.run, TurnRun::Following { .. })),
+        "往右横扫过阈值该进入跟手，实得 {following:?}"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        from,
+        "跟手期间页号不动"
+    );
+    assert_ne!(
+        view.read_with(cx, |v, _| v.page_shift),
+        (0.0, 0.0),
+        "回上一页那一趟纸也得跟着手指走"
+    );
+    raw_touch(cx, handle, TouchPhase::Moved, 360.0);
+    raw_touch(cx, handle, TouchPhase::Ended, 360.0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        from - 1,
+        "走过大半屏往回划，松手该落回上一页"
+    );
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert!(view.read_with(cx, |v, _| v.turn.is_none()));
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+
+    // 连着再往右划一次：读者来回划是常态，前一划的惯性不该把下一划的方向带偏。
+    raw_touch(cx, handle, TouchPhase::Started, 60.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 360.0);
+    raw_touch(cx, handle, TouchPhase::Ended, 360.0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        from - 2,
+        "第二划该再往回一页"
+    );
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 选了「上下平移」之后，竖着拖的那一趟也得跟着手指走。
+///
+/// 从前这一档在手指上永远不成立：跟手那一层只认横轴，竖的那一趟整个被 `on_scroll` 的
+/// 攒半屏接走，读者拖过半屏看到的是一次没有动画的跳页 —— 设置里选得到的东西，手上拿不到。
+#[gpui_kit::test]
+fn a_vertical_drag_follows_the_vertical_style(cx: &mut TestAppContext) {
+    use super::super::session::TurnRun;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::SlideUp);
+    });
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+
+    // 往上拖：读书顺序里是往后翻。
+    let from = point(px(200.0), px(400.0));
+    raw_touch_at(cx, handle, TouchPhase::Started, from);
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(260.0)));
+    let following = view.read_with(cx, |v, _| v.turn);
+    assert!(
+        matches!(following, Some(turn) if matches!(turn.run, TurnRun::Following { .. })),
+        "竖档里往上拖过阈值该进入跟手，实得 {following:?}"
+    );
+    let shift = view.read_with(cx, |v, _| v.page_shift);
+    assert_eq!(shift.0, 0.0, "竖档不该在 x 上留下位移：{shift:?}");
+    assert_ne!(shift.1, 0.0, "跟手就是纸真的跟着手指走了：{shift:?}");
+
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(120.0)));
+    raw_touch_at(cx, handle, TouchPhase::Ended, point(px(200.0), px(120.0)));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "走过大半屏，松手该翻过去"
+    );
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 轴不合也翻页，只是不跟手：选的是「左右平移」（横轴），竖着拖那一笔照样该翻一页。
+///
+/// 拖的途中纸不动 —— 纸横着走而手指竖着拖，读起来不是跟手，是画错了。松手那一刻交给
+/// 点屏那同一条路，于是走的仍是读者选的那一档动画。
+#[gpui_kit::test]
+fn a_vertical_drag_turns_pages_with_a_horizontal_style(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+
+    let from = point(px(200.0), px(400.0));
+    raw_touch_at(cx, handle, TouchPhase::Started, from);
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(260.0)));
+    assert!(
+        view.read_with(cx, |v, _| v.turn).is_none(),
+        "横档遇上竖划不该摆跟手那两张纸"
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.page()), first, "拖的途中页号不动");
+
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(120.0)));
+    raw_touch_at(cx, handle, TouchPhase::Ended, point(px(200.0), px(120.0)));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "竖着拖过大半屏，松手该翻过去"
+    );
+    // 走的是读者选的那一档：动画在跑，且是横着走的。
+    let shift = view.read_with(cx, |v, _| v.page_shift);
+    assert_ne!(shift.0, 0.0, "松手后该看到横档那趟平移：{shift:?}");
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 反过来的那一半：选「上下平移」时横扫也不再是死手势 —— 它翻一页，走竖档那趟动画。
+#[gpui_kit::test]
+fn a_horizontal_drag_turns_pages_with_a_vertical_style(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::SlideUp);
+    });
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 210.0);
+    assert!(
+        view.read_with(cx, |v, _| v.turn).is_none(),
+        "竖档遇上横划不该摆跟手那两张纸"
+    );
+    raw_touch(cx, handle, TouchPhase::Moved, 60.0);
+    raw_touch(cx, handle, TouchPhase::Ended, 60.0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "选了上下平移之后横扫也该翻一页，从前它整笔没有反应"
+    );
+    let shift = view.read_with(cx, |v, _| v.page_shift);
+    assert_eq!(shift.0, 0.0, "竖档的动画不该在 x 上位移：{shift:?}");
+    assert_ne!(shift.1, 0.0, "松手后该看到竖档那趟平移：{shift:?}");
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
 }
 
 /// 这一帧重建了几次场景。分页且定住时应当是 1（一栏一份），动画在走时是 2
@@ -3195,7 +3578,7 @@ fn the_vertical_axis_moves_the_page_up_not_across(cx: &mut TestAppContext) {
     // 轴是**全局**偏好（`appearance.page_turn`），不挂在书上：走的是配置那条路，
     // 与设置页里那一档同一个入口。
     cx.update(|app| {
-        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Vertical);
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::SlideUp);
     });
     turn_frame(cx, handle, Duration::from_millis(1));
 
@@ -3212,6 +3595,50 @@ fn the_vertical_axis_moves_the_page_up_not_across(cx: &mut TestAppContext) {
     let back = view.read_with(cx, |v, _| v.page_shift);
     assert_eq!(back.0, 0.0, "往回翻也不该在 x 上位移：{back:?}");
     assert!(back.1 < 0.0, "往回翻时进场那张该从上方来：{back:?}");
+}
+
+/// 横扫不该把正在走的平移掐掉。`on_scroll` 读的是 `delta.y`，一次只有横分量的滑动
+/// 就是 `dy == 0`；从前落定动画写在 `dy` 判据**之前**，于是「点屏翻页 + 随手一划」
+/// 看到的直接是跳页。这一条钉的就是那两百多毫秒还该在屏幕上走完。
+#[gpui_kit::test]
+fn a_horizontal_swipe_does_not_cut_the_slide_short(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let before = view.read_with(cx, |v, _| v.page_shift);
+    assert!(before.0 > 100.0, "起步那一帧该有横向位移：{before:?}");
+
+    // 纯横扫：有 dx、dy 为 0。
+    cx.update_window(handle, |_, window, cx| {
+        window.scroll(
+            "folio-reader",
+            ScrollDelta::Pixels(point(px(-160.0), px(0.0))),
+            cx,
+        );
+    })
+    .expect("滚动应送达阅读视图");
+    cx.run_until_parked();
+
+    turn_frame(cx, handle, Duration::from_millis(40));
+    view.read_with(cx, |v, _| {
+        assert!(v.turn.is_some(), "横扫不该收掉这趟动画");
+        let shift = v.page_shift;
+        assert!(
+            shift.0 > 0.0,
+            "横扫之后平移还在走（x 归零就是被掐掉了）：{shift:?}"
+        );
+    });
 }
 
 /// 连续滚动的「上下滚动」：一次离散翻页跳的是**画出来的**那个 y，
@@ -3318,6 +3745,173 @@ fn reduced_motion_lands_the_page_without_drawing_a_second_one(cx: &mut TestAppCo
     assert!(turn.is_none(), "减动效不该留下还在走的动画");
     assert_eq!(shift, (0.0, 0.0), "位移当场归零");
     assert_eq!(page, first + 1, "页号照旧往前，动画让路而不是拦下这一翻");
+}
+
+/// 「不走动画」那一档：当场落位，多余的纸一张都不画。
+///
+/// 上面那条减动效测的不是这一件事：那条靠 `Presence` 给回终值（时钟仍然挂了），这一条靠
+/// **根本不挂时钟**（`start_turn` 直接不挂），少的是那一趟多摆的切片与重排。
+#[gpui_kit::test]
+fn the_disabled_style_lands_the_page_without_a_second_sheet(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::None);
+    });
+    let first = view.read_with(cx, |v, _| v.page());
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(1));
+    assert_eq!(
+        rebuilds, 1,
+        "不走动画那一档只画当前这一页（拿到 {rebuilds} 份场景）"
+    );
+    let (turn, shift, page) = view.read_with(cx, |v, _| (v.turn, v.page_shift, v.page()));
+    assert!(turn.is_none(), "这一档不该留下还在走的动画");
+    assert_eq!(shift, (0.0, 0.0), "没有位移可减，命中不必知道这一页在动");
+    assert_eq!(page, first + 1, "页号照旧往前");
+}
+
+/// 覆盖档仍然摆两张纸（新页盖在**停着不动**的旧页之上），而 `page_shift` 归进场那一张：
+/// 命中要减的是当前页的位移，与谁后画无关。这两条各钉一半 —— 只验「两张」的话，把
+/// `slots[0]` 换成出场页也不会报错，但横扫之后点字就点偏了。
+#[gpui_kit::test]
+fn a_cover_draws_two_sheets_and_keeps_the_offset_on_the_arriving_one(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Cover);
+    });
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(1));
+    assert_eq!(
+        rebuilds, 2,
+        "覆盖档起步要两张纸同时上屏（拿到 {rebuilds} 份场景）"
+    );
+    let shift = view.read_with(cx, |v, _| v.page_shift);
+    assert!(
+        shift.0 > 100.0 && shift.1 == 0.0,
+        "覆盖也是横轴，且位移该记在进场那一张上：{shift:?}"
+    );
+
+    let rebuilds = rebuilds_this_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(
+        rebuilds, 1,
+        "走完不该再摆那张停着的旧页（拿到 {rebuilds} 份）"
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 折页那一档也摆两张纸，但**两张都不位移**：新页平躺在下面被一点点露出来，旧页停在原地
+/// 被折走，动的只有「各自被折线裁到哪一侧」。于是 `page_shift` 全程归零，命中换算什么
+/// 都不必减 —— 这是这一档换掉「新页盖进来」那套几何之后多出来的一条约定，得单独钉：
+/// 谁把 `Curl::sheets` 改回带位移的那一支，画面仍然能动，只有点在补间途中会偏。
+#[gpui_kit::test]
+fn a_fold_draws_two_sheets_without_any_offset(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(1));
+    assert_eq!(
+        rebuilds, 2,
+        "折页起步也要两张纸同时上屏（拿到 {rebuilds} 份场景）：少摆一张，折面就是盖在一块空纸上"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page_shift),
+        (0.0, 0.0),
+        "折页里两张纸都停在原位，命中不该减任何东西"
+    );
+
+    let rebuilds = rebuilds_this_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(
+        rebuilds, 1,
+        "走完不该再摆那张被折走的旧页（拿到 {rebuilds} 份）"
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 每一趟翻页都要一把**新**时钟键。章界那一趟从前在渲染帧里手摆 `seq: 0`、再把计数器加一
+/// —— 于是它和任何一趟都可能撞同一把键；撞了不报错，那把键上还挂着上一趟「已走完」的状态，
+/// `Presence` 第一帧就给回 1.0，章当场落定、看着像没有跨章动画。
+#[gpui_kit::test]
+fn consecutive_chapter_turns_get_their_own_clock_key(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &two_chapter_flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let last = view.read_with(cx, |v, _| v.page_count().saturating_sub(1));
+    view.update(cx, |v, cx| v.set_page(last, cx));
+    settle(cx, handle);
+
+    // 正向跨章：等目标章排版，然后拿到那一趟。
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    let mut forward = None;
+    for _ in 0..12 {
+        settle(cx, handle);
+        forward = view.read_with(cx, |v, _| v.turn);
+        if forward.is_some() {
+            break;
+        }
+    }
+    let forward = forward.expect("正向跨章该起滑动");
+
+    // 走完落地，再往回跨一次。
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    settle(cx, handle);
+    view.update(cx, |v, cx| v.scroll_page(-1, cx));
+    let mut back = None;
+    for _ in 0..12 {
+        settle(cx, handle);
+        back = view.read_with(cx, |v, _| v.turn);
+        if back.is_some() {
+            break;
+        }
+    }
+    let back = back.expect("反向跨章也该起滑动");
+    assert_ne!(
+        back.seq, forward.seq,
+        "两趟跨章共用一把时钟键：{:?} vs {:?}",
+        back.seq, forward.seq
+    );
 }
 
 /// 读屏那一份「这一屏的字」：**念的正好是带内那些非空行，顺序与画出来的一致，带外一条不念**。

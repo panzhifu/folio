@@ -89,15 +89,28 @@ pub(super) fn typography_page(cx: &App) -> Page {
             group(
                 tr(cx, "group.page_turn"),
                 vec![
-                    Row::dropdown(
+                    Row::choice(
                         tr(cx, "field.page_turn"),
-                        [
-                            (PageTurn::Horizontal, tr(cx, "page_turn.horizontal")),
-                            (PageTurn::Vertical, tr(cx, "page_turn.vertical")),
-                        ]
-                        .into_iter()
-                        .map(|(turn, label)| (SharedString::from(turn.as_str()), label))
-                        .collect(),
+                        PageTurn::ALL
+                            .iter()
+                            .copied()
+                            .map(|turn| {
+                                // 这一屏不知道当前是什么摆法（模式挂在会话而不是配置），
+                                // 所以不按 `applies` 筛：「上下滚动」在这里也摆出来，由
+                                // 上面那条说明讲清它什么时候才有效。
+                                (
+                                    SharedString::from(turn.as_str()),
+                                    match turn {
+                                        PageTurn::Slide => tr(cx, "page_turn.slide"),
+                                        PageTurn::SlideUp => tr(cx, "page_turn.slide_up"),
+                                        PageTurn::Cover => tr(cx, "page_turn.cover"),
+                                        PageTurn::Curl => tr(cx, "page_turn.curl"),
+                                        PageTurn::Scroll => tr(cx, "page_turn.scroll"),
+                                        PageTurn::None => tr(cx, "page_turn.none"),
+                                    },
+                                )
+                            })
+                            .collect(),
                         false,
                         |cx: &App| {
                             SharedString::from(ConfigHolder::appearance(cx).page_turn.as_str())

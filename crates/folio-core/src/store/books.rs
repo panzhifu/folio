@@ -14,7 +14,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::types::{BookMeta, BookRow, ShelfItem};
+use super::types::{BookMeta, BookRow, Collection, ShelfItem};
 use super::{Store, now};
 use crate::Result;
 use crate::content::format::{DocMeta, Series};
@@ -719,6 +719,26 @@ impl Store {
             });
         }
         Ok(groups)
+    }
+
+    /// 每个组带**前 `limit` 本**，按 [`Store::collections`] 那条名字序排。架面顶部那一排组卡走这一条。
+    ///
+    /// 只取前 `limit` 本而不是整组：一张卡装得下的就是那几格，而一个组可能有几百本 ——
+    /// 一次查全部会把画不出来的那些行也读一遍。取的是组内那条「最近放进去的在先」
+    /// （与 [`Store::shelf_in_collection`] 同一个排序），所以卡上那几本就是读者最后丢进来的那几本。
+    ///
+    /// 空组照样给一条（`items` 是空的）：理由与 [`Store::collection_groups`] 留着空集合同一条 ——
+    /// 刚建的组在架面上消失，读者会以为没建成。
+    pub fn collection_tiles(&self, limit: usize) -> Result<Vec<(Collection, Vec<ShelfItem>)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Self::collections_in(&conn)?
+            .into_iter()
+            .map(|c| {
+                let mut items = Self::shelf_in_collection_in(&conn, c.id, "")?;
+                items.truncate(limit);
+                Ok((c, items))
+            })
+            .collect()
     }
 
     /// 一个集合里的书，可再按书名 / 作者筛一道。架面顶部那颗分组筛选走这一条。

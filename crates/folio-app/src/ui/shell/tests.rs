@@ -610,6 +610,9 @@ mod booted {
                 shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
             });
             window.render_frame(cx);
+            // 连画两帧：`Popover` 的那一层要先量一次触发器的 bounds 才把卡挂进弹窗层，
+            // 所以「开」与「看得见」之间隔了一帧 —— 一帧就断言会把这条正常的延迟读成没画出来。
+            window.render_frame(cx);
             assert!(
                 window.try_find("shelf-scan-panel").is_some(),
                 "结果到手面板要出现"

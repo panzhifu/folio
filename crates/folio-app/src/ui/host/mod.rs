@@ -10,8 +10,8 @@
 //!   从此不再按 target 分叉，这条也一起搬进了边界。
 //! - **浮层控件点不点得住**（[`supports_overlay_controls`]），决定「我的」那一格
 //!   画整页设置还是行列表。
-//! - **返回键走到栈底之后退不退程序**（[`back_exits_app`]），手机要退，桌面的窗口
-//!   由窗口管理器管，不该被一次返回关掉。
+//! - **返回键走到栈底之后做什么**（[`back_at_root`]）：手机把任务丢回后台（系统才有过渡
+//!   动画可播），桌面的窗口由窗口管理器管，一次返回不该关掉进程。
 //! - **这台设备此刻的本地时区偏移**（[`local_offset_secs`]），统计按本地日分桶要把它
 //!   当参数交给 core。这一项两端同一个实现，所以它是这个模块上的一个自由函数，
 //!   不在 [`Host`] trait 上。
@@ -48,6 +48,18 @@ impl Insets {
     };
 }
 
+/// 返回键走到栈底（当前目的地那条栈已经弹不动了）时，这一端该做什么。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackAtRoot {
+    /// 把整个任务丢到后台（与按 HOME 同一条路）：Activity 不结束、进程不退出，系统走它
+    /// 自己那套「应用 → 桌面」的过渡，再进来是瞬时恢复。
+    SendToBack,
+    /// 就此退出应用。
+    Quit,
+    /// 什么都不做。
+    Stay,
+}
+
 /// 一台设备提供的平台服务。实现一个就是接上一个平台。
 pub trait Host: 'static {
     /// 系统栏 / 手势 / 挖孔占掉的四条边（**不含**输入法）。逻辑像素。
@@ -58,11 +70,18 @@ pub trait Host: 'static {
     fn body_family(&self, wanted: &str, cx: &App) -> String;
     /// gpui-kit 的浮层控件（下拉框、菜单、对话框、侧边面板）在这端**点得住**吗。
     fn overlay_controls(&self) -> bool;
-    /// 返回键走到栈底（当前目的地那条栈已经弹不动了）时，这一端要不要**就此退出**。
+    /// 返回键走到栈底（当前目的地那条栈已经弹不动了）时，这一端该做什么。
     ///
-    /// 手机要：那一端没有别的退出入口，宿主也不该留着前台空转。桌面不要：窗口归窗口
-    /// 管理器管，一次返回键把进程关掉是错的。
-    fn back_exits_app(&self) -> bool;
+    /// 手机是 [`BackAtRoot::SendToBack`]，**不是** `Quit`，这条是量出来的：`Quit` 那一条走到
+    /// `Application::run` 返回，而进程是在自己还挂着前台顶窗的时候消失的 —— WindowManager
+    /// 只能记 `WINDOW DIED` + `Force removing ActivityRecord … app died, no saved state`。
+    /// 没有 saved state 就没有任务快照，系统因此**没有过渡动画可播**，读者看到的就是「闪退
+    /// 一下回到桌面」（2026-10-18 Meizu 20 上按返回键四次，每次都是这一条链）。而那一端本来
+    /// 也没有别的退出入口：真要退，划掉后台卡片就是，那一条系统会连进程一起收。
+    ///
+    /// 桌面是 [`BackAtRoot::Stay`]：窗口归窗口管理器与那条标题栏管，一次返回键把进程关掉是
+    /// 错的动作。
+    fn back_at_root(&self) -> BackAtRoot;
     /// 这一端的指针**按得住长按**吗。
     ///
     /// gpui 只在触摸手势里合成 `LongPressEvent`：那份状态机是
@@ -164,11 +183,12 @@ pub fn supports_overlay_controls(cx: &App) -> bool {
         .is_some_and(|services| services.0.overlay_controls())
 }
 
-/// 返回键走到栈底要不要就此退出应用。没装平台服务（宿主测试里）当**不退**：
-/// 那条路是 `AppShell::back()` 的最后一档，测试里一次返回键不该把整个测试循环关掉。
-pub fn back_exits_app(cx: &App) -> bool {
+/// 返回键走到栈底该做什么。没装平台服务（宿主测试里）当**什么都不做**：那条路是
+/// `AppShell::back()` 的最后一档，测试里一次返回键既不该把整个测试循环关掉，也不该真去
+/// 递一次系统口。
+pub fn back_at_root(cx: &App) -> BackAtRoot {
     cx.try_global::<HostServices>()
-        .is_some_and(|services| services.0.back_exits_app())
+        .map_or(BackAtRoot::Stay, |services| services.0.back_at_root())
 }
 
 /// 这一端的指针按得住长按吗。没装平台服务（宿主测试里）当**按不住**：

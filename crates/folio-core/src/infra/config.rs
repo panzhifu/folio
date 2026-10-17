@@ -294,38 +294,77 @@ impl<'de> Deserialize<'de> for TocDensity {
     }
 }
 
-/// 翻页那一张纸沿哪根轴走过来。
+/// 翻页时那一张纸怎么走：沿哪根轴、要不要把旧页留在原地、还是干脆不走。
 ///
 /// 存**全局**而不是存进 [`Reader`]：`Reader` 整份是排版失效键（见它自己那条注释 ——
 /// 那里按序列化后的整份取哈希），把动画档位塞进去就等于「换一种翻页动画触发整章重排」。
-/// 沿哪根轴平移与一行字折在哪里毫无关系，它只是画面上的一次搬运。
+/// 一张纸怎么搬与一行字折在哪里毫无关系。
 ///
-/// 只有两档，没有「无动画」：系统级的减弱动态效果已经把时长归零（那一条判据在
-/// `ui::shell::nav_transition`，正文翻页共用同一口时钟），读者在系统设置里就选好了的事
-/// 不在这里再摆一个重复的开关。
+/// 「禁用」必须是应用自己的一档，不能指望系统位：`gpui-pre 0.3.9` 里
+/// `App::reduce_motion` 初始为 `false`，`set_reduce_motion` 唯一的调用者是它自己的两条
+/// 测试；`gpui-mobile` 那份 fork 里 `reduce_motion` 零命中。也就是说两端都**不会**有人把
+/// 它置真，「系统已经归零」这条理由不成立（从前那一版据此不设无动画档）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PageTurn {
-    /// 左右平移：下一页从阅读方向的前方滑进来，上一页往反方向走满同样距离。
+    /// 左右平移：两张纸同速反向走，读起来像一张长纸被抽过去。
+    Slide,
+    /// 上下平移：同一趟沿竖轴走，像把一叠纸往上抽。
+    SlideUp,
+    /// 左右覆盖：旧页停在原地，新页整张盖上来。
+    Cover,
+    /// 仿真翻页：一张纸被**折走**。纸当一张不会弯的硬片，绕一条直线（折线）做刚体翻转 ——
+    /// 动的是旧页，新页平躺在它下面被一点点露出来；折线的倾角由起折点那一个常数给出，
+    /// 随行程自己变直（几何与阴影见 `reader::turn_animation::Curl`）。
+    Curl,
+    /// 上下滚动：不摆第二张纸，翻页就是画出来的位置补间过去。只有连续滚动摆法成立
+    /// （见 `reader::turn_animation::applies` 那一格怎么筛选项）。
+    Scroll,
+    /// 不走动画：当场落定，也就不必为这一帧多摆一张纸。**初始默认是这一档** —— 与初始
+    /// 摆法「上下滚动」（[`default_mode`] 那一处）配成一对：一本没动过设置的书就是从上往下
+    /// 读，不摆第二张纸。动画是读者加上去的东西，不是我们替他先选好的东西。
     #[default]
-    Horizontal,
-    /// 上下平移：同一张纸沿竖轴走，像把一叠纸往上抽。
-    Vertical,
+    None,
 }
 
 impl PageTurn {
+    /// 全部档位，按设置界面该出现的顺序。加一档忘了在这里挂，界面上就永远选不到它。
+    pub const ALL: &'static [Self] = &[
+        Self::Slide,
+        Self::SlideUp,
+        Self::Cover,
+        Self::Curl,
+        Self::Scroll,
+        Self::None,
+    ];
+
     /// 配置文件与设置界面用的键名。
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Horizontal => "horizontal",
-            Self::Vertical => "vertical",
+            Self::Slide => "slide",
+            Self::SlideUp => "slide_up",
+            Self::Cover => "cover",
+            Self::Curl => "curl",
+            Self::Scroll => "scroll",
+            Self::None => "none",
         }
     }
 
-    /// 认不出的值回落 `Horizontal`：手改坏一个键不该让整节外观退回默认。
+    /// 认不出的值回落 [`Self::default`]：手改坏一个键不该让整节外观退回默认，而「没有有效
+    /// 值」这一格全书只该有一个答案 —— 与一份新配置落进同一档。
+    ///
+    /// `horizontal` / `vertical` 是这一档只有两格时写进配置的老键名，照读：
+    /// 读者换过一次软件版本就发现动画选项回到默认，是没道理的。
     pub fn parse(value: &str) -> Self {
         match value {
-            "vertical" => Self::Vertical,
-            _ => Self::Horizontal,
+            // `slide` 从前是兜底那一格，所以自己不需要臂；兜底换成「不走动画」之后它就得
+            // 明写，否则配置里手写 "slide" 会落错档。
+            "slide" | "horizontal" => Self::Slide,
+            "slide_up" | "vertical" => Self::SlideUp,
+            "cover" => Self::Cover,
+            "curl" => Self::Curl,
+            "scroll" => Self::Scroll,
+            "none" => Self::None,
+            _ => Self::default(),
         }
     }
 }
@@ -998,7 +1037,7 @@ mod tests {
                 light: Some("Gruvbox".into()),
                 dark: Some("Molokai".into()),
                 // 故意不是默认值：这一趟要把新键真写出去再读回来，填默认值等于没测到它。
-                page_turn: PageTurn::Vertical,
+                page_turn: PageTurn::SlideUp,
                 brightness: Some(0.6),
             },
             language: Language { locale: Locale::Ja },
@@ -1203,24 +1242,38 @@ mod tests {
         assert_eq!(Mode::default(), Mode::System);
     }
 
-    /// 认不出的 `page_turn` 回落横向平移，而且**同一节里别的键一个都不许跟着没**。
+    /// 认不出的 `page_turn` 回落**初始那一档**（不走动画），而且**同一节里别的键一个都不许
+    /// 跟着没**。
     /// 这一格的存在理由是：`PageTurn` 的 `Deserialize` 是自己实现的（同 [`Mode`]、
     /// [`TocDensity`] 那两条），derive 在这里会让整节 `appearance` 退回默认 ——
     /// 浅、深两侧选过的主题名就成了一个拼错的动画键的代价。
     #[test]
     fn an_unknown_page_turn_falls_back_without_taking_the_section_with_it() {
         let got = load(r#"{"appearance":{"mode":"dark","light":"Gruvbox","page_turn":"spin"}}"#);
-        assert_eq!(got.appearance.page_turn, PageTurn::Horizontal);
+        assert_eq!(got.appearance.page_turn, PageTurn::None);
         assert_eq!(got.appearance.mode, Mode::Dark);
         assert_eq!(got.appearance.light.as_deref(), Some("Gruvbox"));
-        // 认得出的两个值各自落对，`vertical` 不会被 `parse` 的兜底吃掉。
-        assert_eq!(
-            load(r#"{"appearance":{"page_turn":"vertical"}}"#)
-                .appearance
-                .page_turn,
-            PageTurn::Vertical
-        );
-        assert_eq!(PageTurn::default(), PageTurn::Horizontal);
+        // 认得出的档各自落对：兜底不许把认得出的那几个吃掉。`horizontal` / `vertical` 是
+        // 这一档只有两格时写进配置的旧键名，换过版本不该让读者的选项忽然回到默认。
+        for (text, want) in [
+            ("slide", PageTurn::Slide),
+            ("slide_up", PageTurn::SlideUp),
+            ("cover", PageTurn::Cover),
+            ("curl", PageTurn::Curl),
+            ("scroll", PageTurn::Scroll),
+            ("none", PageTurn::None),
+            ("horizontal", PageTurn::Slide),
+            ("vertical", PageTurn::SlideUp),
+        ] {
+            assert_eq!(
+                load(&format!(r#"{{"appearance":{{"page_turn":"{text}"}}}}"#))
+                    .appearance
+                    .page_turn,
+                want,
+                "配置里的 {text:?} 落错了档"
+            );
+        }
+        assert_eq!(PageTurn::default(), PageTurn::None);
     }
 
     #[test]

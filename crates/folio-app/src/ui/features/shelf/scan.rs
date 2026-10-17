@@ -87,7 +87,7 @@ impl ShelfView {
     /// 线程阻塞到读者从系统设置页回来，见 [`crate::ui::platform`]::
     /// request_storage_access），要不到就退回只扫应用自己目录的小范围扫描。
     pub(super) fn start_scan(&mut self, cx: &mut Context<Self>) {
-        if self.scan.is_some() || self.importing.is_some() {
+        if self.scan_open || self.importing.is_some() {
             // 正在扫或正在导：同一时刻一条线，读数行就是「等一下再点」的提示。
             return;
         }
@@ -128,6 +128,7 @@ impl ShelfView {
         );
         let cancel = handle.cancel.clone();
         self.scan = Some(ScanPhase::Scanning { found: 0, cancel });
+        self.scan_open = true;
         self._scan = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
             // 与导入同款的桥：mpsc 会阻塞读它的线程，转发进能 await 的通道。
             let (forward, events) = async_channel::unbounded::<TaskEvent<ScanReport>>();
@@ -197,17 +198,24 @@ impl ShelfView {
                     entries,
                     sizes,
                 });
+                // 清单到手 = 有东西可看了，这一屏就抬起来。读者若在扫的途中关掉过它，
+                // 结果会把它再开一遍 —— 这是迁浮层**之前**就有的行为（那时判据就是
+                // `scan.is_some()`），改的是容器不是这条。真要「扫完不打扰」，那是另一个
+                // 决定：得让关掉那一下顺手把作业也停了。
+                self.scan_open = true;
                 cx.notify();
             }
             TaskEvent::Finished(Err(err)) => {
                 tracing::error!("ShelfView: 扫描作业失败 {err:#}");
                 self.scan = None;
+                self.scan_open = false;
                 cx.notify();
             }
             TaskEvent::Cancelled => {
                 // 扫描可取消、没有副作用：取消就是收摊，不留半个面板。
                 tracing::info!("ShelfView: 扫描被取消");
                 self.scan = None;
+                self.scan_open = false;
                 cx.notify();
             }
         }
@@ -263,29 +271,34 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 「导入所选」：收掉面板，把勾中的路径按 Picked 语义交进导入管线。
+    /// 「导入所选」：收掉那一屏，把勾中的路径按 Picked 语义交进导入管线。
     fn import_checked(&mut self, cx: &mut Context<Self>) {
-        let Some(ScanPhase::Results { rows, checked, .. }) = self.scan.take() else {
-            return;
+        // 清单是**读**出来的而不是 `take()` 走的：take 会把内容当场抽掉，手机上那一屏
+        // 就在退场那半程空给读者看。收的只是意图。
+        let paths: Vec<PathBuf> = match self.scan.as_ref() {
+            Some(ScanPhase::Results { rows, checked, .. }) => rows
+                .iter()
+                .filter_map(|row| match &row.candidate.origin {
+                    folio_core::Origin::Local(path) if checked.contains(path) => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => return,
         };
-        let paths: Vec<PathBuf> = rows
-            .iter()
-            .filter_map(|row| match &row.candidate.origin {
-                folio_core::Origin::Local(path) if checked.contains(path) => Some(path.clone()),
-                _ => None,
-            })
-            .collect();
         if paths.is_empty() {
             cx.notify();
             return;
         }
         tracing::info!("ShelfView: 从扫描清单导入 {} 本", paths.len());
+        self.scan_open = false;
         self.dispatch_import(Box::new(folio_core::PathsSource::picked(paths)), cx);
     }
 
-    /// 收掉面板回架面。
-    fn close_scan(&mut self, cx: &mut Context<Self>) {
-        self.scan = None;
+    /// 收掉那一屏回架面。**只**改意图，理由同 [`ShelfView::close_url_panel`]。
+    pub(super) fn close_scan(&mut self, cx: &mut Context<Self>) {
+        self.scan_open = false;
         cx.notify();
     }
 
@@ -308,8 +321,12 @@ impl ShelfView {
         self.import_checked(cx);
     }
 
-    /// 扫描面板：正在扫是读数 + 停止；扫完了是清单 + 勾选 + 导入所选。
-    pub(crate) fn scan_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// 扫描那一屏的内容：正在扫是读数 + 停止；扫完了是清单 + 勾选 + 导入所选。
+    ///
+    /// 容器不在这儿 —— 桌面是一张居中的浮层、手机是底部弹层（见 [`super::overlay`]），
+    /// 这一屏只交内容。两支都用 `flex_1` / `size_full` 撑满给到的那块高，所以换容器
+    /// 不必改这里。
+    pub(crate) fn scan_body(&self, cx: &mut Context<Self>) -> AnyElement {
         match &self.scan {
             Some(ScanPhase::Scanning { found, .. }) => {
                 let entity = cx.entity().clone();

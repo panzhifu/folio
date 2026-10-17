@@ -4,12 +4,15 @@
 //! 要问的是「关于这个应用」这两件事，而字、版面那些是要改的东西，各归各页。
 //!
 //! 这里没有那颗「检查更新」的开关，也没有许可证那一组：本应用还没有更新检查与授权子系统，
-//! 为了对齐样式先摆一颗点了没用的控件是错的。依赖版本那几行是构建时从 `Cargo.lock` 抄来的
-//! （见 `folio-app/build.rs`）—— 这一页的全部价值就是它不会另说一套。
+//! 为了对齐样式先摆一颗点了没用的控件是错的。依赖那几行版本（GPUI 本体、组件层、移动平台层
+//! 各是哪个 commit）也不摆：读者要的是「手上这份是多少」，那三串是排障时的话。
 
 use folio_core::infra::i18n::Locale;
 use folio_core::infra::paths::config_path;
+use gpui_kit::component::h_flex;
 use gpui_kit::{IntoElement as _, ParentElement, SharedString, Styled, div};
+
+use crate::ui::widgets::muted_label;
 
 use super::*;
 
@@ -21,55 +24,23 @@ pub(super) fn about_page(cx: &App) -> Page {
     )
 }
 
-/// 「关于」这一组：跑着的这一份二进制，以及它是用哪几版依赖编出来的。
+/// 「关于」这一组：跑着的这一份二进制是什么版本。
 fn version_group(cx: &App) -> Group {
     group(
         tr(cx, "page.about"),
-        vec![
-            value_item(
-                tr(cx, "about.version"),
-                version(),
-                Some(tr(cx, "about.version_desc")),
-                &["version", "build", "版本"],
-            ),
-            value_item(
-                tr(cx, "about.gpui_pre"),
-                gpui_pre(),
-                None,
-                &["gpui", "engine"],
-            ),
-            value_item(tr(cx, "about.kit"), kit(), None, &["gpui-kit", "component"]),
-            value_item(
-                tr(cx, "about.mobile"),
-                mobile_layer(),
-                None,
-                &["android", "mobile", "移动"],
-            ),
-        ],
+        vec![value_item(
+            tr(cx, "about.version"),
+            version(),
+            Some(tr(cx, "about.version_desc")),
+            &["version", "build", "版本"],
+        )],
     )
 }
 
-// 下面四份事实刻意不手写：值由 `build.rs` 从 `Cargo.lock` 抄成编译期常量，
-// 手写的一份和锁文件迟早分叉，而分叉的恰好是最需要准的那几行。
-
-/// 本应用版本（`Cargo.toml` 里那一份 workspace 版本）。
+/// 本应用版本（`Cargo.toml` 里那一份 workspace 版本）：编译期就定死在这份二进制里，
+/// 不手写第二份，所以它不会和实际跑着的东西分叉。
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-/// GPUI 本体（crates.io 上的 `gpui-pre` 快照）。
-fn gpui_pre() -> &'static str {
-    option_env!("FOLIO_GPUI_PRE").unwrap_or("未知")
-}
-
-/// 组件层 gpui-kit：版本号 + 用的那个 commit。
-fn kit() -> &'static str {
-    option_env!("FOLIO_KIT").unwrap_or("未知")
-}
-
-/// 移动平台层 gpui-pre-mobile（fork）：版本号 + 钉住的那个 commit。
-fn mobile_layer() -> &'static str {
-    option_env!("FOLIO_MOBILE").unwrap_or("未知")
 }
 
 /// 一行「读得出但改不了」的事实：标签在左，值在右 —— 与每项字段那一行的动作位同一侧。
@@ -139,24 +110,34 @@ fn language_options() -> Vec<(SharedString, SharedString)> {
         .collect()
 }
 
-/// 配置文件在哪儿。
+/// 配置文件在哪儿，加一颗「打开所在文件夹」。
 ///
 /// 它是这一页少数几条「读者改不了但需要知道」的事实之一：换主题要往哪个目录放 JSON、
-/// 偏好存在哪个文件，都从这一条推出来。
+/// 偏好存在哪个文件，都从这一条推出来。路径本身留在行上而不是只留一颗按钮：
+/// 手机上那一颗是尽力而为（没有文件管理器认领这个目录就什么也不发生），那时这一串字
+/// 就是读者唯一拿得到的东西。
 fn config_group(cx: &App) -> Group {
-    let path = config_path().display().to_string();
+    let path = config_path();
     group(
         tr(cx, "field.config_path"),
         vec![
             Row::custom_titled(tr(cx, "field.config_path"), move |cx| {
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(path.clone())
+                let path = path.clone();
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(muted_label(path.display().to_string(), cx)),
+                    )
+                    .child(super::open_folder_button("about-open-config-dir", path, cx))
                     .into_any_element()
             })
             .description(tr(cx, "field.config_path.desc"))
-            .keywords(&["config", "path", "配置", "文件"]),
+            .keywords(&["config", "path", "配置", "文件", "打开"]),
         ],
     )
 }

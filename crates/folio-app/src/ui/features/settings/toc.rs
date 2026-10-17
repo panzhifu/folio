@@ -18,7 +18,7 @@ pub(super) fn toc_page(cx: &App) -> Page {
         vec![group(
             tr(cx, "group.rows"),
             vec![
-                Row::dropdown(
+                Row::choice(
                     tr(cx, "field.toc_density"),
                     density_options(cx),
                     false,

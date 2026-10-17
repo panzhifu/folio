@@ -18,13 +18,12 @@ use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode};
 use gpui_kit::{
     App, Bounds, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, LayoutId, Length, LineLayout, LongPressEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StrikethroughStyle, Style, TextRun,
-    TouchDragEvent, TouchPhase, UnderlineStyle, WeakEntity, Window, black, fill, point, px,
-    relative, size,
+    IntoElement, LayoutId, Length, LineLayout, Pixels, Point, SharedString, StrikethroughStyle,
+    Style, TextRun, UnderlineStyle, WeakEntity, Window, black, fill, point, px, relative, size,
 };
 
-use super::session::{ReaderSession, SelectionEdge};
+use super::selection::{self, SelectionVisual};
+use super::session::ReaderSession;
 
 /// 一条已经定好位置的 run，等于 `folio_core::layout::LineRun` 的绘制侧投影。
 /// `x` / `baseline` 相对本元素原点（行框左上角，未滚动时就是版心左上角）。
@@ -63,9 +62,24 @@ pub struct GlyphRun {
     /// 与 `hit`/选区同一句规则（见 `folio_core::layout::Justify`）。
     pub justify: Option<Justify>,
     pub justify_shift: f32,
+    /// 折页那一档给这条 run 的裁剪：这个字按它的**平面位置**判还在不在这一张纸上。
+    ///
+    /// 两张纸各带一个，而且两侧的判据严格互补（[`turn_animation::Cut::keeps`] 用的是带符号
+    /// 距离与一个布尔），所以压在折线上的那个字只归一张画 —— 两边都留会在同一帧把它画两遍，
+    /// 字色深一档；两边都丢会在折线上留出一道没有字的缝。裁剪按点不按列：折线是有倾角的
+    /// 一条斜线，「第几列之后不画」那种竖棍式的判据表达不了它。
+    pub cut: Option<super::turn_animation::Cut>,
 }
 
 impl GlyphRun {
+    /// 这条 run 里一个字（元素局部坐标）这一帧还画不画。
+    fn keeps(&self, x: f32, y: f32) -> bool {
+        match self.cut {
+            Some(cut) => cut.keeps(x, y),
+            None => true,
+        }
+    }
+
     /// 文本收 `SharedString` 而不是 `impl Into<SharedString>`：`From<&str>` 只覆盖
     /// `&'static str`，而行文本借自 `BlockBox::text`（活不过一帧），
     /// 在这里泛型化会把调用点逼成 `'static`。构造点自己 `SharedString::new(...)`。
@@ -87,6 +101,7 @@ impl GlyphRun {
             letter_spacing: 0.0,
             justify: None,
             justify_shift: 0.0,
+            cut: None,
         }
     }
 
@@ -163,64 +178,11 @@ pub struct GlyphsElement {
     /// 与选中高亮分开两份：前者是读者留在书上的东西，一屏里同时可以有几十条；
     /// 后者是这一次挑中的那一段，还要长出把手。
     underlines: Vec<(Bounds<Pixels>, Hsla)>,
-    /// 选中件（M6）。空的高亮 = 这一屏没有选中。
+    /// 选中件（M6）。空的高亮 = 这一屏没有选中。画法与命中都在 [`selection`]。
     selection: SelectionVisual,
     /// 会话的弱引用：paint 时回写内容边界与把手命中区、注册手势监听。
     /// `None` = 兜底那一行没有书，不参与选中。
     reader: Option<WeakEntity<ReaderSession>>,
-}
-
-/// 一屏里选中的全部绘制信息，元素局部坐标（逻辑像素）。
-///
-/// 由 `view.rs` 按「排版矩形 → 屏幕矩形」换算好整批传入；绘制与命中都不再碰排版层。
-#[derive(Default)]
-pub struct SelectionVisual {
-    /// 每行一条的高亮矩形，压在字形之下。
-    pub highlights: Vec<Bounds<Pixels>>,
-    /// 两端把手的插入符盒（0 宽、一行高，长在首个/末个选中字符的字缘上）。
-    /// 那一端被裁出可视范围时不给 —— 把手跟着它标记的字消失，与 gpui-kit 一致。
-    pub start_caret: Option<Bounds<Pixels>>,
-    pub end_caret: Option<Bounds<Pixels>>,
-    /// 高亮与把手的颜色（主题的 selection 色）。
-    pub color: Hsla,
-}
-
-/// 把手的几何常量（逻辑像素），照 gpui-kit `touch_selection` 的那套：
-/// 圆钮 10、杆 2、命中区 44（拇指稳定命中的下限），命中区往圆钮那一侧多伸 12。
-const KNOB_SIZE: f32 = 10.0;
-const BAR_WIDTH: f32 = 2.0;
-const HIT_SIZE: f32 = 44.0;
-const HIT_EXTENT: f32 = 12.0;
-
-/// 把手的命中区：竖条围着插入符，往圆钮那一侧多伸一截（起点的圆钮在行上、
-/// 终点的在行下，与绘制一侧同一套规矩）。
-fn handle_hit(edge: SelectionEdge, caret: &Bounds<Pixels>) -> Bounds<Pixels> {
-    let top = match edge {
-        SelectionEdge::Start => caret.top() - px(HIT_EXTENT),
-        SelectionEdge::End => caret.top(),
-    };
-    Bounds::new(
-        point(caret.left() - px(HIT_SIZE / 2.0), top),
-        size(px(HIT_SIZE), caret.size.height + px(HIT_EXTENT)),
-    )
-}
-
-/// 画一个把手：杆沿插入符立起来，圆钮长在行外（起点在上、终点在下）。
-fn paint_handle(edge: SelectionEdge, caret: Bounds<Pixels>, color: Hsla, window: &mut Window) {
-    let bar = Bounds::new(
-        point(caret.left() - px(BAR_WIDTH / 2.0), caret.top()),
-        size(px(BAR_WIDTH), caret.size.height),
-    );
-    let knob_top = match edge {
-        SelectionEdge::Start => caret.top() - px(KNOB_SIZE),
-        SelectionEdge::End => caret.bottom(),
-    };
-    let knob = Bounds::new(
-        point(caret.left() - px(KNOB_SIZE / 2.0), knob_top),
-        size(px(KNOB_SIZE), px(KNOB_SIZE)),
-    );
-    window.paint_quad(fill(bar, color));
-    window.paint_quad(fill(knob, color).corner_radii(px(KNOB_SIZE / 2.0)));
 }
 
 impl Element for GlyphsElement {
@@ -283,11 +245,9 @@ impl Element for GlyphsElement {
         for (rect, color) in &self.underlines {
             window.paint_quad(fill(*rect + bounds.origin, *color));
         }
-        for rect in &self.selection.highlights {
-            window.paint_quad(fill(*rect + bounds.origin, self.selection.color));
-        }
+        selection::paint_highlights(&self.selection, bounds.origin, window);
         if let Some(reader) = self.reader.clone() {
-            register_selection(&self.selection, &reader, bounds, window, cx);
+            selection::register(&self.selection, &reader, bounds, window, cx);
         }
         // 字形整屏共用**一个 layer**：gpui 的 `Scene::insert_primitive` 在没有活动 layer 时，
         // 每个 primitive 都要往 BoundsTree 里插一次（`scene.rs` 的 `push_layer` 分支），
@@ -310,22 +270,7 @@ impl Element for GlyphsElement {
             }
         });
         super::perf::log_paint(__paint.ns(), __shape_ns.get(), __glyphs);
-        if let Some(caret) = self.selection.start_caret {
-            paint_handle(
-                SelectionEdge::Start,
-                caret + bounds.origin,
-                self.selection.color,
-                window,
-            );
-        }
-        if let Some(caret) = self.selection.end_caret {
-            paint_handle(
-                SelectionEdge::End,
-                caret + bounds.origin,
-                self.selection.color,
-                window,
-            );
-        }
+        selection::paint_handles(&self.selection, bounds.origin, window);
     }
 }
 
@@ -513,7 +458,6 @@ fn paint_run(
     let __t_glyph = super::perf::Timer::start();
     for shaped_run in &shaped.runs {
         for glyph in &shaped_run.glyphs {
-            glyphs += 1;
             let shift = if rtl {
                 0.0
             } else {
@@ -530,10 +474,15 @@ fn paint_run(
                 }
                 run.glyph_shift(char_index, spaces_before)
             };
-            let at = point(
-                baseline_x + glyph.position.x + px(shift),
-                baseline_y + glyph.position.y,
-            );
+            // 折页：按这个字的**平面位置**判它还在不在这一张纸上。用的是元素局部坐标
+            // （`run.x` / `run.baseline` 那一套），与 `view.rs` 摆折面同一条折线、同一把尺。
+            // 数过 `glyphs` 之后再裁，那个计数才真的是「这一帧画了几个字」。
+            let x = run.x + f32::from(glyph.position.x) + shift;
+            if !run.keeps(x, run.baseline + f32::from(glyph.position.y)) {
+                continue;
+            }
+            glyphs += 1;
+            let at = point(origin.x + px(x), baseline_y + glyph.position.y);
             // 单个字形画不出去（缺字形、图集满）不该让整帧失败：与 gpui 自己的
             // `paint_line` 一致，忽略即可。
             let _ = window.paint_glyph(at, shaped_run.font_id, glyph.id, font_size, run.color);
@@ -558,7 +507,10 @@ fn paint_run(
     // 一条 run 一种样式（样式来自 `RunStyle`，整段一致），所以整条 run 就是一个装饰段，
     // 不必照 gpui 那样按 `decoration_runs` 切字符区间。宽度用 `shaped.width`（**画出来的**
     // 那份宽），不用布局给的 run 宽：后者含 `word-spacing` 一类的富余，线会伸到字后面去。
-    if run.underline || run.line_through {
+    // 被折线裁到的这一张这一帧不画装饰线：字按逐点判据收了，线的起止却没有对应的收法
+    // （它是一整条 run 一个矩形，而折线是斜的），伸到折线外面会比缺一根线更难看。
+    // 280ms 之内的事，且只影响带下划线/删除线的那些 run。
+    if (run.underline || run.line_through) && run.cut.is_none() {
         let (underline_y, strikethrough_y) = decoration_y(
             baseline_y,
             px(run.box_height),
@@ -589,149 +541,6 @@ fn paint_run(
         }
     }
     glyphs
-}
-
-/// 把这一帧的选中几何交给会话（内容边界、把手命中区），并注册手势监听。
-///
-/// `window.on_mouse_event` 注册的监听只活到本帧事件分发结束，所以每个绘制帧
-/// 都要重新挂一遍 —— 这与 gpui-kit 的 `TextSelectionLayer` 同一条规矩。监听收到
-/// 的是窗口里**所有**同类事件，落到会话的方法里再按范围与状态过滤。
-fn register_selection(
-    visual: &SelectionVisual,
-    reader: &WeakEntity<ReaderSession>,
-    bounds: Bounds<Pixels>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let Some(entity) = reader.upgrade() else {
-        return;
-    };
-    let handle_hits = {
-        let session = entity.read(cx);
-        session.content_bounds.set(bounds);
-        session.handle_hits.clone()
-    };
-    // 插入符盒换算成窗口坐标：事件侧（modules/selection.rs）只认这一份。
-    *handle_hits.borrow_mut() = [
-        (SelectionEdge::Start, visual.start_caret),
-        (SelectionEdge::End, visual.end_caret),
-    ]
-    .into_iter()
-    .flat_map(|(edge, caret)| caret.map(|caret| (edge, handle_hit(edge, &caret) + bounds.origin)))
-    .collect();
-
-    // 指针按下（capture）：新的一手开始。上一手攒下的 click 豁免在这里作废——
-    // 正常它已被拖选松手的那一下 click 消费掉，没消费说明那一下没落在正文上。
-    let down_reader = reader.clone();
-    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-        if !phase.capture() || event.button != MouseButton::Left {
-            return;
-        }
-        let _ = down_reader.update(cx, |reader, cx| {
-            reader.suppress_tap = false;
-            if reader.content_bounds.get().contains(&event.position) {
-                reader.begin_mouse_selection(window, cx, event.position);
-            }
-        });
-    });
-
-    // 指针拖动（bubble）：把手拖动优先，否则过了阈值进入拖选。
-    let move_reader = reader.clone();
-    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-        if !phase.bubble() || event.pressed_button != Some(MouseButton::Left) {
-            return;
-        }
-        let _ = move_reader.update(cx, |reader, cx| {
-            reader.drag_mouse_selection(window, cx, event.position)
-        });
-    });
-
-    // 指针抬起（bubble）：拖选成过就拦掉紧跟着的 click。不按落点过滤——
-    // 拖出正文松手也要把拖动状态收掉。
-    let up_reader = reader.clone();
-    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-        if !phase.bubble() || event.button != MouseButton::Left {
-            return;
-        }
-        let _ = up_reader.update(cx, |reader, cx| reader.end_mouse_selection(cx));
-    });
-
-    // 长按（触摸）：500ms 后由手势识别器送来。Started 落在字上才抢占这一手势，
-    // 抢占后手指的移动/抬起都从这里走（后续选区绕词锚点扩展）。
-    let long_press_reader = reader.clone();
-    window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
-        if !phase.bubble() {
-            return;
-        }
-        let Some(entity) = long_press_reader.upgrade() else {
-            return;
-        };
-        match event.phase {
-            TouchPhase::Started => {
-                let began = entity.update(cx, |reader, cx| {
-                    reader.begin_long_press(window, cx, event.start_position)
-                });
-                if !began {
-                    return;
-                }
-                window.capture_long_press(&entity);
-                window.prevent_default();
-                cx.stop_propagation();
-            }
-            _ if window.has_long_press_capture(&entity) => {
-                entity.update(cx, |reader, cx| match event.phase {
-                    TouchPhase::Moved => reader.drag_long_press(window, cx, event.position),
-                    TouchPhase::Ended | TouchPhase::Cancelled => reader.end_long_press(cx),
-                    TouchPhase::Started => {}
-                });
-                window.prevent_default();
-                cx.stop_propagation();
-            }
-            _ => {}
-        }
-    });
-
-    // 触摸拖动：落在把手上才认领（prevent_default 把它从「滚动」里抢过来），
-    // 认领后的移动/抬起归把手拖动；落在别处什么都不做，滚动照常。
-    let drag_reader = reader.clone();
-    window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
-        if !phase.bubble() {
-            return;
-        }
-        let Some(entity) = drag_reader.upgrade() else {
-            return;
-        };
-        match event.phase {
-            TouchPhase::Started => {
-                let edge = entity.read_with(cx, |reader, _| {
-                    reader
-                        .content_bounds
-                        .get()
-                        .contains(&event.position)
-                        .then(|| reader.handle_at(event.position))
-                        .flatten()
-                });
-                let Some(edge) = edge else {
-                    return;
-                };
-                entity.update(cx, |reader, _| reader.begin_edge_drag(edge, event.position));
-                window.prevent_default();
-                cx.stop_propagation();
-            }
-            _ => {
-                let dragging = entity.read_with(cx, |reader, _| reader.edge_drag.is_some());
-                if !dragging {
-                    return;
-                }
-                cx.stop_propagation();
-                entity.update(cx, |reader, cx| match event.phase {
-                    TouchPhase::Moved => reader.update_edge_drag(window, cx, event.position),
-                    TouchPhase::Ended | TouchPhase::Cancelled => reader.end_edge_drag(cx),
-                    TouchPhase::Started => {}
-                });
-            }
-        }
-    });
 }
 
 #[cfg(test)]

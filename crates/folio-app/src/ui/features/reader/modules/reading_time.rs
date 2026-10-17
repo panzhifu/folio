@@ -56,7 +56,7 @@ impl ReaderSession {
     ///
     /// 挂在两条已有之路上（落库位置、点正文），而不是逐个输入口各插一刀：
     /// 那些入口最终都要落这两条，而漏插一个输入口的后果由 [`IDLE_GRACE`] 那五分钟吸收。
-    pub(super) fn note_reading_activity(&mut self) {
+    pub(in crate::ui::features::reader) fn note_reading_activity(&mut self) {
         if self.reading_segment_start != 0 {
             self.reading_last_activity = folio_core::infra::time::now();
         }

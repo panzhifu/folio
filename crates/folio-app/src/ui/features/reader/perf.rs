@@ -463,3 +463,129 @@ fn report(tag: &str, frame: &Frame, total_ns: u64) {
         "{tag}",
     );
 }
+
+// ══ 临时探针（量完整块摘掉，连同 navigation.rs 的两处、position.rs 的一处挂点）══
+//
+// 要判的事：读者说「停止滑动那一下发抖」。gpui 的惯性是**关于 elapsed time 的闭式曲线**
+// （`gpui-pre-0.3.9/src/gestures.rs:972-1001`，增量还被 `.max(0.)` 夹成只许前进），所以
+// 一帧晚到的表现不是丢帧，而是**下一步特别大** —— 中段看不出来，减速尾巴上邻居都是
+// 一两像素的碎步，那一步就是「抖」。于是要把三件事放在同一个样本里看：
+// 事件隔了多久（帧节拍）、那一步挪了多少（位移）、处理器自己花了多久（我们占的）。
+//
+// 为什么攒 64 个样本才出一行：`LogFile` 是**同步**写的（见 `folio_core::logging`），
+// 逐事件打日志会把 write() 那一趟算进被量的 `handler_us` 里，探针自己就成了被测的抖动。
+// 出那一行的耗时落在样本记完之后，只推迟下一帧约几十微秒。
+
+/// 攒多少个滚动事件出一行。30 秒连续滑动约 1800 个事件 → 28 行。
+const SCROLL_WINDOW: usize = 64;
+
+/// 一个滚动事件的样本。全部是微秒与像素。
+struct ScrollSample {
+    /// 与上一个滚动事件到达时刻的间隔。惯性段里这就是真正的帧节拍。
+    gap_us: u64,
+    /// `on_scroll` 整个处理器花掉的时间（含下面两项）。
+    handler_us: u64,
+    /// `persist_if_moved` 那一趟：反解位置 + 可能写库。没走到记 0。
+    persist_us: u64,
+    /// 其中真正落在 `store.set_position` 上的一段（含抢那条全库连接互斥锁的等待）。
+    write_us: u64,
+    /// 平台给的增量（像素）。
+    dy: f32,
+    /// 这一步实际挪了多少（夹过滚动范围之后）。与 `dy` 不等就是被夹住或被人改写过。
+    step: f32,
+    /// 触摸相位：0=Started 1=Moved 2=Ended 3=Cancelled 9=没有（桌面滚轮）。
+    phase: u8,
+    /// 这一步开始时 `scroll_y` 的**绝对值**。为什么要它：`step` 只记处理器自己那一段，
+    /// 而渲染帧还会在两次事件之间再改一遍位置（补偿 / 迁移 / 按新总高重夹）。
+    /// `y0_i` 与 `y0_{i-1} + step_{i-1}` 不等，中间就有人动过手，差值即挪了多少像素。
+    y0: f32,
+}
+
+thread_local! {
+    /// 上一个滚动事件到达的时刻（微秒）。0 = 还没有。
+    static SCROLL_ARRIVAL_US: Cell<u64> = const { Cell::new(0) };
+    /// 上一次 `set_position` 花掉的那一段。写库在 `persist_if_moved` 里，而它先于
+    /// [`scroll_end`] 发生，所以是**同一个事件**的样本把它收走并清零。
+    static SCROLL_WRITE_US: Cell<u64> = const { Cell::new(0) };
+    static SCROLL_SAMPLES: RefCell<Vec<ScrollSample>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 起表：记到达时刻，返回与上一个事件的间隔。挂在 `on_scroll` 最前面。
+pub fn scroll_begin() -> u64 {
+    if !audible() {
+        return 0;
+    }
+    let now = now_us();
+    SCROLL_ARRIVAL_US.with(|last| {
+        let previous = last.replace(now);
+        if previous == 0 {
+            0
+        } else {
+            now.saturating_sub(previous)
+        }
+    })
+}
+
+/// 记「刚才这一趟写库花了多久」。挂在 `persist_locator` 里 `set_position` 两侧。
+/// 记在线程局部而不是返回给调用方：那条路要穿过三层 `Option`/`Result`，挂点会铺开。
+pub fn scroll_note_write(us: u64) {
+    if audible() {
+        SCROLL_WRITE_US.with(|cell| cell.set(us));
+    }
+}
+
+/// 收表：一个样本进窗口，攒满就出一行。
+#[allow(clippy::too_many_arguments)]
+pub fn scroll_end(
+    gap_us: u64,
+    handler_us: u64,
+    persist_us: u64,
+    dy: f32,
+    step: f32,
+    y0: f32,
+    phase: u8,
+) {
+    if !audible() {
+        return;
+    }
+    let write_us = SCROLL_WRITE_US.with(|cell| cell.replace(0));
+    SCROLL_SAMPLES.with(|samples| {
+        let mut samples = samples.borrow_mut();
+        samples.push(ScrollSample {
+            gap_us,
+            handler_us,
+            persist_us,
+            write_us,
+            dy,
+            step,
+            y0,
+            phase,
+        });
+        if samples.len() < SCROLL_WINDOW {
+            return;
+        }
+        // 逐样本一段紧凑串，离线用脚本拆。字段顺序：gap;handler;persist;write;dy;step;y0;phase
+        let strip = samples
+            .iter()
+            .map(|s| {
+                format!(
+                    "{};{};{};{};{:.1};{:.1};{:.1};{}",
+                    s.gap_us, s.handler_us, s.persist_us, s.write_us, s.dy, s.step, s.y0, s.phase
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let max_gap = samples.iter().map(|s| s.gap_us).max().unwrap_or(0);
+        let max_handler = samples.iter().map(|s| s.handler_us).max().unwrap_or(0);
+        let max_write = samples.iter().map(|s| s.write_us).max().unwrap_or(0);
+        samples.clear();
+        tracing::debug!(
+            target: "folio_app::perf",
+            max_gap_us = max_gap,
+            max_handler_us = max_handler,
+            max_write_us = max_write,
+            strip = %strip,
+            "滚动事件探针",
+        );
+    });
+}

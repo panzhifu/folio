@@ -1428,7 +1428,6 @@ impl Document {
     /// 与接线前逐字同一条口径。
     ///
     /// 每帧的批注回显与选区要的是带内那一条：[`Document::selection_rects_in_band`]。
-    #[allow(dead_code)] // 参考实现那一条，门都拿它当基准（见 document::tests）
     pub fn selection_rects(
         &self,
         window: &Window,

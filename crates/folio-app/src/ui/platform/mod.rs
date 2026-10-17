@@ -97,6 +97,23 @@ pub(crate) fn set_reader_fullscreen(on: bool, _window: &mut Window) {
 #[cfg(all(mobile, not(target_os = "android")))]
 pub(crate) fn set_reader_fullscreen(_on: bool, _window: &mut Window) {}
 
+/// 把整个任务丢回后台（等同按 HOME）—— 返回键走到栈底时走这一条，而不是退出进程。
+///
+/// 为什么要它而不是 `cx.quit()`：`quit` 那条路让进程在自己还挂着前台顶窗的时候消失，
+/// 系统拿不到任务快照（logcat：`app died, no saved state`），于是没有过渡动画可播 ——
+/// 读者看到的就是一次闪退。丢回后台则一切交给系统：动画是系统的，进程留着，再进来是
+/// 瞬时恢复，真要退出还有「划掉后台卡片」那一条。
+///
+/// 只有 Android 有这个口（`Activity.moveTaskToBack`）。iOS / HarmonyOS 没有系统返回键，
+/// 这条永远不会被走到，所以安静地什么都不做；桌面同样不接（那一端的答案是 `Stay`）。
+#[cfg(target_os = "android")]
+pub(crate) fn send_task_to_back() {
+    android::send_task_to_back();
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn send_task_to_back() {}
+
 /// 把一张图的字节交给系统分享面板。图片查看器那一层的「分享」按钮走它。
 ///
 /// - **Android**：递给 `GpuiSystemUi.shareImage`，那边落进 `cache/share/` 再用
@@ -119,6 +136,55 @@ pub(crate) fn save_image(bytes: &[u8], mime: &str, name: &str) {
     android::save_image(bytes, mime, name);
     #[cfg(not(target_os = "android"))]
     let _ = (bytes, mime, name);
+}
+
+/// 打开一个目录：把它交给系统的文件管理器去显示。设置页那两格（配置文件在哪儿、
+/// 自定义主题往哪儿放 JSON）走它。
+///
+/// 返回的是「有没有人接手」，不是「读者一定看见了」：
+///
+/// - **桌面**：起一个 `xdg-open`（Linux）/ `open`（macOS）/ `explorer`（Windows），
+///   进程起来了就算 `true` —— 桌面环境那头开没开窗，这一层看不到。
+/// - **Android / iOS**：递一条 `ACTION_VIEW` 给系统挑应用（fork 的 `url_launcher`，
+///   走 JNI，所以和 [`share_image`] 一样只能在界面线程上调）。这一条是尽力而为：没有
+///   应用认领这个 URI、或系统不肯收 `file://`（Android 7 起 StrictMode 对它有感）时
+///   返回 `false`，界面上那一格仍留着路径本身，读者不至于什么也拿不到。
+/// - **HarmonyOS**：没有这条路，`false`。
+#[cfg(not(mobile))]
+pub(crate) fn open_folder(path: &std::path::Path) -> bool {
+    use std::process::Command;
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    match Command::new(opener).arg(path).spawn() {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!("open_folder: {opener} 起不来：{error}");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn open_folder(path: &std::path::Path) -> bool {
+    use gpui_mobile::packages::url_launcher;
+    // `path.display()` 以 `/` 开头，拼出来就是 `file:///…`。
+    match url_launcher::launch_url(&format!("file://{}", path.display())) {
+        Ok(launched) => launched,
+        Err(error) => {
+            tracing::warn!("open_folder: {error}");
+            false
+        }
+    }
+}
+
+#[cfg(all(mobile, not(target_os = "android")))]
+pub(crate) fn open_folder(_path: &std::path::Path) -> bool {
+    false
 }
 
 /// 音量键落在**非阅读页**时，把这一按交给系统去调音量。

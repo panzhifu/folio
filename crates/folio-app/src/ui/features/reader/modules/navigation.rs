@@ -4,12 +4,13 @@
 //! 位置本身存在 [`super::super::session::ReaderSession`] 上，方法的可见性靠 `pub(super)`。
 
 use folio_core::Locator;
-use gpui_kit::{Context, ScrollDelta, ScrollWheelEvent};
+use gpui_kit::{App, Context, ScrollDelta, ScrollWheelEvent};
 
 use super::super::book::Book;
 use super::super::chrome::{Arrow, PageMode};
-use super::super::session::{PageRef, ReaderSession, Source, Turn};
+use super::super::session::{PageRef, ReaderSession, Source, Turn, TurnRun, start_turn};
 use super::super::turn::{PagingFacts, TurnIntent, TurnPlan};
+use crate::ui::shared::config_model::ConfigHolder;
 
 impl ReaderSession {
     /// 换成另一种摆法。位置**不丢**：进度存的是「第几个字」，所以先把当前字偏移取下来，
@@ -89,7 +90,7 @@ impl ReaderSession {
         cx: &mut Context<Self>,
     ) {
         // 章界已在等排版或正在滑：再按也只有一个去向，重开一趟只会把动画打断。
-        if self.chapter_turn_in_flight() {
+        if self.turn_in_flight() {
             return;
         }
         let facts = self.paging_facts();
@@ -98,13 +99,14 @@ impl ReaderSession {
             TurnPlan::Scroll { to } => {
                 // 起点是**画出来的**那一个数而不是 `scroll_y`：读者连点两下时，第二趟
                 // 要从他眼前那一屏起步，否则画面先跳回上一趟的终点再走，读成卡了一下。
-                self.begin_turn(Turn {
-                    seq: 0,
-                    leaving: None,
-                    arriving: None,
-                    scroll: Some((self.scroll_painted, to)),
-                    forward: intent == TurnIntent::Next,
-                });
+                self.begin_turn(
+                    cx,
+                    Turn {
+                        scroll: Some((self.scroll_painted, to)),
+                        forward: intent == TurnIntent::Next,
+                        ..Default::default()
+                    },
+                );
                 self.set_scroll_y(to, cx);
             }
             TurnPlan::Page { to } => {
@@ -114,19 +116,21 @@ impl ReaderSession {
                 // 是两套（`view.rs` 的 `Source::Fixed` 臂），平移要在那边另接一处。
                 if !self.is_fixed() && self.page() != before {
                     let chapter = self.chapter_index();
-                    self.begin_turn(Turn {
-                        seq: 0,
-                        leaving: Some(PageRef {
-                            chapter,
-                            page: before,
-                        }),
-                        arriving: Some(PageRef {
-                            chapter,
-                            page: self.page(),
-                        }),
-                        scroll: None,
-                        forward: intent == TurnIntent::Next,
-                    });
+                    self.begin_turn(
+                        cx,
+                        Turn {
+                            leaving: Some(PageRef {
+                                chapter,
+                                page: before,
+                            }),
+                            arriving: Some(PageRef {
+                                chapter,
+                                page: self.page(),
+                            }),
+                            forward: intent == TurnIntent::Next,
+                            ..Default::default()
+                        },
+                    );
                 }
             }
             TurnPlan::Chapter { delta } => self.begin_chapter_turn(delta, cx),
@@ -134,7 +138,9 @@ impl ReaderSession {
     }
 
     /// 决策层要的那份事实快照。不借 `self` 进策略：策略只认这些数。
-    fn paging_facts(&self) -> PagingFacts {
+    ///
+    /// 跟手那一趟（`swipe.rs`）在定轴那一刻也要问同一份决策，所以它对 `reader` 这一纵切可见。
+    pub(in crate::ui::features::reader) fn paging_facts(&self) -> PagingFacts {
         let fixed = self.is_fixed();
         let continuous = self.laid_out.mode.is_continuous();
         let ready = if fixed {
@@ -210,12 +216,18 @@ impl ReaderSession {
 
     /// 起一次翻页动画，把上一趟还没走完的那次**换掉**而不是排队：读者的第二下点击要看见
     /// 新的一趟在走，而两张以上的纸同时在屏幕上位移没有意义（出场页只留最近一张）。
-    fn begin_turn(&mut self, turn: Turn) {
-        self.turn_seq += 1;
-        self.turn = Some(Turn {
-            seq: self.turn_seq,
-            ..turn
-        });
+    ///
+    /// 时钟键与档位都在 [`start_turn`] 那一格里定 —— 章界那一趟（渲染帧里排版落地时补的）
+    /// 走的也是同一句。两处各写一遍，就是从前那个「第二次跨章不滑」的成因。
+    pub(in crate::ui::features::reader) fn begin_turn(&mut self, cx: &App, turn: Turn) {
+        let mode = self.laid_out.mode;
+        start_turn(
+            &mut self.turn,
+            &mut self.turn_seq,
+            ConfigHolder::appearance(cx).page_turn,
+            mode,
+            turn,
+        );
     }
 
     /// 作废正在走的动画，画面当场落定。跳章、换摆法、改字号、排版恢复落地都走这一句 ——
@@ -225,14 +237,18 @@ impl ReaderSession {
         self.pending_chapter_turn = None;
     }
 
-    /// 章界正在等排版或正在跨章滑动：这时正文上的点按/长按/拖选一律让位。
-    /// 两个章落在同一屏上，命中坐标只可能属于其中一套；让位比猜错强。
-    pub(in crate::ui::features::reader) fn chapter_turn_in_flight(&self) -> bool {
+    /// 画面正处在「两套坐标同时在上屏」的那一段时间：章界在等排版、正在跨章滑动，
+    /// 或者**手指正握着一次跟手翻页**。这时正文上的点按 / 长按 / 拖选一律让位 ——
+    /// 命中坐标只可能属于其中一套；让位比猜错强。
+    pub(in crate::ui::features::reader) fn turn_in_flight(&self) -> bool {
         self.pending_chapter_turn.is_some()
             || self
                 .turn
                 .and_then(|turn| turn.arriving)
                 .is_some_and(|to| to.chapter != self.chapter_index())
+            || self
+                .turn
+                .is_some_and(|turn| matches!(turn.run, TurnRun::Following { .. }))
     }
 
     /// 跳到本章的某个比例处（进度条）。
@@ -328,6 +344,10 @@ impl ReaderSession {
         event: &ScrollWheelEvent,
         cx: &mut Context<Self>,
     ) -> bool {
+        // ── 临时探针（量完随 `perf::scroll_*` 整块摘掉）──
+        let __gap_us = super::super::perf::scroll_begin();
+        let __start = std::time::Instant::now();
+        let __y_before = self.scroll_y;
         // 手指还按在屏幕上这件事，即使内容已被夹在章尾、一个字都没挪，也是「在读」。
         // 所以这一条不只靠 `persist_locator` 那个证据点（它要求位置真的变过）。
         self.note_reading_activity();
@@ -335,22 +355,63 @@ impl ReaderSession {
         // 元素树」三条一起看，见 `perf.rs` 模块头）。挂在最前面，因为它要数的是**事件**，
         // 而下面那几条 `return false` 恰恰是「事件到了但没挪动」。
         super::super::perf::note_scroll();
+        let (dx, dy) = match event.delta {
+            ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
+            // 鼠标滚轮（外接键盘/调试时）按「行」给增量，按正文字号折算，别当 0 忽略。
+            ScrollDelta::Lines(lines) => (
+                lines.x * self.prefs.font_size,
+                lines.y * self.prefs.font_size,
+            ),
+        };
+        // 跟手翻页那一层先拿这一笔，它自己按读者选的档位与那根轴决定认不认（`swipe_scroll`
+        // 给回 `false` 就是让回去，下面纵向那两条路照旧）。
+        //
+        // 这一问**必须**在 `turn_in_flight` 之前 —— 跟手那一趟一挂上，那条判据就为真，
+        // 第二帧起的每一个增量都会被它挡掉，读者看到的是纸跟了半程就停住。
+        //
+        // 也不能按增量是否为 0 筛：抬手那一条 `Ended` 恒为零增量，而恰恰是它带着「松手」；
+        // 一笔的 `Started` 同样可能是零增量 —— 上一笔的惯性被这一按接走时，识别器先把那段
+        // 尾巴结掉，再给这一笔开个头，错过这一格就没有跟踪态，后面每一个增量都会被当成
+        // 惯性尾巴丢掉（症状：连着划第二下没反应）。
+        if self.swipe_scroll(event.touch_phase, dx, dy, cx) {
+            super::super::perf::scroll_end(
+                __gap_us,
+                (__start.elapsed().as_micros() as u64).max(1),
+                0,
+                dy,
+                0.0,
+                __y_before,
+                phase_code(event.touch_phase),
+            );
+            // 这一趟挪动的是那两张纸，不是 `scroll_y`：重画由跟手那几处自己 `cx.notify()`，
+            // 这里给回 `false`，调用方不必再补一次。
+            return false;
+        }
         // 跨章滑动（或等目标章排版）期间滚轮不参与：这一趟的坐标属于两章，
         // 再叠一次页码会把两张纸的方向搅乱。等它落地再滚。
-        if self.chapter_turn_in_flight() {
+        if self.turn_in_flight() {
+            return false;
+        }
+        if dy == 0.0 {
+            // 零增量也是样本：惯性尾巴上「这一帧该走的距离被上一帧走过了」就是它。
+            super::super::perf::scroll_end(
+                __gap_us,
+                (__start.elapsed().as_micros() as u64).max(1),
+                0,
+                dy,
+                0.0,
+                __y_before,
+                phase_code(event.touch_phase),
+            );
+            // 这一条**必须**在落定动画之前问：一次纯横扫（没被上面那一路认领时）就是
+            // `dy == 0`，而横扫在读者那儿不是「开始控制这一屏的纵向位置」。从前这句落定
+            // 写在 `dy` 判据之前，症状是点屏翻页那两百多毫秒的平移被紧随的横扫当场按停，
+            // 读者看到的是「没有动画，直接跳页」。
             return false;
         }
         // 手已经在直接控制这一屏了，补间不该追在手指后面：正在走的那一趟当场落定。
         // 落定之后画出来的位置由渲染帧按「没有动画」那一条重新对齐到 `scroll_y`。
         self.cancel_turn();
-        let dy = match event.delta {
-            ScrollDelta::Pixels(delta) => f32::from(delta.y),
-            // 鼠标滚轮（外接键盘/调试时）按「行」给增量，按正文字号折算，别当 0 忽略。
-            ScrollDelta::Lines(lines) => lines.y * self.prefs.font_size,
-        };
-        if dy == 0.0 {
-            return false;
-        }
         // 位置有没有真的变过：滚到章尾被夹住、分页攒不够半屏都不该重画。
         // 这条判据与 gpui 自己的 `div` 滚动容器、zed editor 的 `scroll` 同源
         // （位置没变就不 notify），省下的是一整帧的场景重建。
@@ -389,7 +450,30 @@ impl ReaderSession {
                 self.begin_chapter_turn(step, cx);
             }
         }
+        let __persist = std::time::Instant::now();
         self.persist_if_moved();
+        // ── 临时探针：这一趟的收尾三笔（落库耗时 / 处理器总耗时 / 这一步真正挪了多少）──
+        let __persist_us = __persist.elapsed().as_micros() as u64;
+        let __handler_us = __start.elapsed().as_micros() as u64;
+        super::super::perf::scroll_end(
+            __gap_us,
+            __handler_us.max(1),
+            __persist_us,
+            dy,
+            self.scroll_y - __y_before,
+            __y_before,
+            phase_code(event.touch_phase),
+        );
         boundary.is_some() || (self.scroll_y, self.page) != before
+    }
+}
+
+/// 临时探针用的相位编码（量完随 `perf::scroll_*` 一起摘）。
+fn phase_code(phase: gpui_kit::TouchPhase) -> u8 {
+    match phase {
+        gpui_kit::TouchPhase::Started => 0,
+        gpui_kit::TouchPhase::Moved => 1,
+        gpui_kit::TouchPhase::Ended => 2,
+        gpui_kit::TouchPhase::Cancelled => 3,
     }
 }

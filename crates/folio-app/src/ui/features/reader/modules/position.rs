@@ -117,7 +117,11 @@ impl ReaderSession {
         } else {
             self.laid_out.mode.storage_name().to_string()
         };
-        if let Err(err) = store.set_position(id, &mode, &locator) {
+        // ── 临时探针：写库这一趟的耗时，含抢那条全库连接互斥锁的等待（量完摘）──
+        let __write = std::time::Instant::now();
+        let written = store.set_position(id, &mode, &locator);
+        super::super::perf::scroll_note_write(__write.elapsed().as_micros() as u64);
+        if let Err(err) = written {
             tracing::warn!(
                 book_id = id,
                 chapter = locator.chapter,

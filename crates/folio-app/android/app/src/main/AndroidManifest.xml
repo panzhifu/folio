@@ -101,13 +101,22 @@
 
              `enableOnBackInvokedCallback`: required for GpuiInputActivity's
              OnBackInvokedDispatcher callback to fire on Android 13+. Without it
-             the edge-swipe back gesture never reaches the app. -->
+             the edge-swipe back gesture never reaches the app.
+
+             `screenOrientation="portrait"`：不是「不让界面转」这一条审美选择，是拔掉一个
+             系统副作用。原先的 `unspecified` 等于告诉系统「这个窗口两种方向都吃」，而
+             MEIZU 20 / Android 16 实测：folio 一到前台（冷启动、热恢复都算），系统就把
+             `system/accelerometer_rotation` 写成 1 —— 读者的「自动旋转」被应用替他打开了，
+             而 folio 自己拿不到 `WRITE_SECURE_SETTINGS`，那一笔不是它写的。锁成 portrait 后
+             窗口不再声明可转，那个开关就没人碰。手机这一档本来也只有竖屏一套版式：横屏
+             宽度 853dp 会跨过 SizeClass 的 Expanded 阈值 840dp，整套桌面版式压到手机上，
+             正文还要整章重排。 -->
         <activity
             android:name="dev.gpui.mobile.GpuiActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density"
             android:exported="true"
             android:launchMode="singleTask"
-            android:screenOrientation="unspecified"
+            android:screenOrientation="portrait"
             android:theme="@style/GpuiSplashTheme"
             android:windowSoftInputMode="adjustNothing"
         >

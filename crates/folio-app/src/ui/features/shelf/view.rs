@@ -30,14 +30,15 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme, Selectable, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight, Image,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FontWeight, Image,
     InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _,
     UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 
-use super::book_card::{COVER_RATIO, Card};
+use super::book_card::{COVER_RATIO, Card, GroupCard, TILE_SLOTS};
 use super::book_menu;
+use super::overlay;
 use super::scan::ScanPhase;
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::error::{Context as _, report};
@@ -45,7 +46,9 @@ use crate::ui::shared::l10n::{tf, tr};
 use crate::ui::shared::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::shared::services;
 use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
-use crate::ui::widgets::{SearchBox, SearchBoxEvent, empty_state, muted_label};
+use crate::ui::widgets::{
+    BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, empty_state, muted_label,
+};
 
 /// 出网共用的那一份传输（`ureq` + rustls）。一个进程一个连接池就够 ——
 /// 所有 URL 下载都从这里拿。
@@ -171,6 +174,12 @@ pub struct ShelfView {
     /// 弱句柄：栈是外壳的东西，架面不该反过来把它拽住不让它退。
     pub(super) stack: WeakEntity<NavStackState>,
     items: Vec<Card>,
+    /// 架面最前面那几张组卡。只在「整架 + 没搜词」时非空，其余时候是空的。
+    ///
+    /// 与 [`Self::items`] 分开放而不是并成一个列表：`items` 的格数有好几处按「几本」来读
+    /// （回归门数的是书，不是格子），混在一起会让那个数悄悄变成「书 + 组」。
+    /// 排格子时两组才接成一条下标（见 [`Self::grid`]）。
+    tiles: Vec<GroupCard>,
     /// 架面那片虚拟格子滚到哪儿了。
     ///
     /// 句柄归视图拿着，不是每帧现造：`uniform_list` 的滚动位置、可见区间都记在它里面，
@@ -186,11 +195,14 @@ pub struct ShelfView {
     group: GroupFilter,
     /// 库里的全部组（带书数）。顶部那颗筛选的条目读这一份，与架面同一次重查更新。
     collections: Vec<Collection>,
-    /// 「新建分组」面板：`Some` = 开着，带的是**为哪本书**建的那个书 id + 输入框。
+    /// 「新建分组」那一屏的输入框 + **为哪本书**建的那个书 id。
     ///
-    /// 存成面板状态而不是立刻建：组名要读者打，而浮层里塞输入框在移动端是另一套
-    /// 焦点与键盘的事——架面已有「从链接导入」那块就地面板，照同一形状摆最省。
+    /// 这一格存的是**内容**，不是「开没开」：开没开看 [`Self::group_open`]。分开两半是因为
+    /// 手机上那半程 —— 读者关掉弹层之后卡片还要往下沉 ~280ms，那一段内容得继续画，
+    /// 所以内容要活到弹层报「停稳了」（[`Self::rest`]）才 drop，而意图得当场就变。
     group_entry: Option<(i64, Entity<InputState>)>,
+    /// 建组那一屏的意图。`false` 而内容还在 = 正在沉下去。
+    group_open: bool,
     /// 架面上是不是站着那块「书库位置」确认面板。
     ///
     /// 导入会把文件**拷一份**进硬盘，所以位置要先说定。没定过的时候点导入不开选择器，
@@ -219,7 +231,9 @@ pub struct ShelfView {
     /// 读数行旁那颗「取消」按钮置位它；管线在两本书之间看见，已落库的那些是真的
     /// （`Cancelled` 事件来了重查一次架面就有）。
     import_cancel: Option<Cancel>,
-    /// 整机扫描面板的状态：正在扫 / 已出清单。`None` = 没在扫，架面照常。
+    /// 整机扫描那一屏的意图（内容在 [`Self::scan`]）。见 [`Self::group_open`] 那一段为什么分两半。
+    pub(super) scan_open: bool,
+    /// 整机扫描那一屏的状态：正在扫 / 已出清单。`None` = 这一屏没东西可画了。
     /// 面板本体与全部动作在 [`super::scan`]。
     pub(super) scan: Option<ScanPhase>,
     /// 扫描那条异步链（事件桥）。与 `_import` 同理，要活到整轮结束。
@@ -227,8 +241,19 @@ pub struct ShelfView {
     /// 自动导入（监听 / 传书）事件的订阅链。这些批次不是这个视图提交的，
     /// 靠共享事件通道流回来 —— 处理与手工导入同一套（读数、重查架面）。
     _auto_import: Option<Task<()>>,
-    /// 「从链接导入」面板上的输入框。`Some` = 面板开着；收面板即 drop。
+    /// 「从链接导入」那一屏的输入框（内容）。开没开看 [`Self::url_open`]。
     url_entry: Option<Entity<InputState>>,
+    /// 链接导入那一屏的意图。见 [`Self::group_open`] 那一段为什么分两半。
+    url_open: bool,
+    /// 移动端那三块弹层各自的开合与停靠档。桌面那一档用的是 `Popover`，这三份只是
+    /// 没挂载而已 —— 状态留着比按档位分叉省一件事：转屏 / 拉窗口时不必重建。
+    group_sheet: Entity<BottomSheetState>,
+    url_sheet: Entity<BottomSheetState>,
+    scan_sheet: Entity<BottomSheetState>,
+    /// 三块弹层各自「读者自己关掉了」那一条：下拉过头、点遮罩、按返回都走它。
+    /// 订阅在 `boot` 里装一次，清的是架面这一侧的状态（面板留着而弹层没了会立刻被
+    /// 重新抬起来，见 [`Self::sync_sheet`]）。
+    _sheet_watches: Vec<Subscription>,
     /// 压上栈的那页「信息」的订阅。`Some` = 那一页还开着。
     ///
     /// 只要一条：那一页写回书名作者之后报一声，架面重查 —— 那一行字就是这张卡上的。
@@ -287,16 +312,41 @@ impl ShelfView {
                 }
             }
         });
+        // 三块弹层各订阅一次「读者自己把它关掉了」：下拉过头、点遮罩、按返回都只报这一条。
+        // 不据此清架面那一侧的状态的话，下一帧 [`Self::sync_sheet`] 看着「面板还开着」
+        // 又把弹层抬起来 —— 在读者手里就成了「这层关不掉」。
+        let group_sheet = cx.new(|cx| BottomSheetState::closed(cx));
+        let url_sheet = cx.new(|cx| BottomSheetState::closed(cx));
+        let scan_sheet = cx.new(|cx| BottomSheetState::closed(cx));
+        let _sheet_watches = vec![
+            cx.subscribe(&group_sheet, |this, _, event, _| {
+                if matches!(event, BottomSheetEvent::Dismissed) {
+                    this.group_open = false;
+                }
+            }),
+            cx.subscribe(&url_sheet, |this, _, event, _| {
+                if matches!(event, BottomSheetEvent::Dismissed) {
+                    this.url_open = false;
+                }
+            }),
+            cx.subscribe(&scan_sheet, |this, _, event, _| {
+                if matches!(event, BottomSheetEvent::Dismissed) {
+                    this.scan_open = false;
+                }
+            }),
+        ];
         let mut this = Self {
             store,
             stack,
             items: Vec::new(),
+            tiles: Vec::new(),
             grid_scroll: UniformListScrollHandle::new(),
             query: SharedString::default(),
             search,
             group: GroupFilter::All,
             collections: Vec::new(),
             group_entry: None,
+            group_open: false,
             confirming: false,
             covers: HashMap::new(),
             _search_watch,
@@ -304,9 +354,15 @@ impl ShelfView {
             importing: None,
             import_cancel: None,
             scan: None,
+            scan_open: false,
             _scan: None,
             _auto_import: Some(_auto_import),
             url_entry: None,
+            url_open: false,
+            group_sheet,
+            url_sheet,
+            scan_sheet,
+            _sheet_watches,
             _info_watch: None,
             _pick: None,
             pending_reload: false,
@@ -334,6 +390,14 @@ impl ShelfView {
         {
             self.group = GroupFilter::All;
         }
+        // 组卡只在「整架 + 没搜词」那一屏出现。筛到某一组时再摆一排组卡，等于把读者刚
+        // 走进去的那一层又摊回他面前；而搜的是书不是组 —— 词非空时那几张卡上的封面跟
+        // 搜索结果没有半点关系，摆出来只会读成「这几本匹配」。
+        self.tiles = if matches!(self.group, GroupFilter::All) && query.trim().is_empty() {
+            self.tile_cards()
+        } else {
+            Vec::new()
+        };
         let queried = self.store.as_ref().map(|store| match self.group {
             GroupFilter::All => store.shelf(query),
             GroupFilter::Ungrouped => store.shelf_ungrouped(query),
@@ -371,6 +435,37 @@ impl ShelfView {
         self.items.clear();
         let query = self.query.clone();
         self.reload(&query, cx);
+    }
+
+    /// 架面顶部那几张组卡：每个组一张，卡上是这个组最后丢进去的那几本的封面。
+    ///
+    /// 封面走的是 [`Self::resolve_cover`] 那一条，与书卡同一份缓存：组卡与下面那片书
+    /// 十有八九是同一批封面，解两遍是白解。
+    ///
+    /// 查不动就是一片空的：架面顶部少一排卡看着像「还没建组」，比摆几张假卡或整屏报错好。
+    fn tile_cards(&mut self) -> Vec<GroupCard> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        let Ok(tiles) = store.collection_tiles(TILE_SLOTS) else {
+            tracing::error!("ShelfView: 查组卡失败，架面顶部那一排是空的");
+            return Vec::new();
+        };
+        tiles
+            .into_iter()
+            .map(|(collection, items)| {
+                let covers = items
+                    .iter()
+                    .map(|item| self.resolve_cover(item))
+                    .collect();
+                GroupCard {
+                    id: collection.id,
+                    name: collection.name.into(),
+                    count: collection.book_count,
+                    covers,
+                }
+            })
+            .collect()
     }
 
     /// 把焦点放进搜索框。
@@ -562,6 +657,20 @@ impl ShelfView {
         self.items.get(ix).map(|card| card.title.clone())
     }
 
+    /// 架面顶部此刻摆着几张组卡。只给回归门读，理由同 [`Self::card_count`]。
+    #[cfg(all(test, not(mobile)))]
+    pub(crate) fn tile_count(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// 第 `ix` 张组卡认的是哪个组、下面那行念的是几本。
+    #[cfg(all(test, not(mobile)))]
+    pub(crate) fn tile_at(&self, ix: usize) -> Option<(i64, SharedString, usize)> {
+        self.tiles
+            .get(ix)
+            .map(|t| (t.id, t.name.clone(), t.count))
+    }
+
     /// 后端导入管线的一条事件 → 架面的一次变化。
     fn import_event(&mut self, event: TaskEvent<Vec<ImportOutcome>>, cx: &mut Context<Self>) {
         match event {
@@ -656,10 +765,10 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 打开「从链接导入」面板。书库位置没确认过先摆确认面板 —— 与选文件导入
+    /// 打开「从链接导入」那一屏。书库位置没确认过先摆确认面板 —— 与选文件导入
     /// 同一道门禁：往哪儿拷还没说清楚，就不该动手。
     fn open_url_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.url_entry.is_some() || self.importing.is_some() || self.scan.is_some() {
+        if self.url_open || self.importing.is_some() || self.scan_open {
             return;
         }
         if target_dir(&ConfigHolder::library(cx)).is_none() {
@@ -671,15 +780,18 @@ impl ShelfView {
             Some(cx.new(|cx| {
                 InputState::new(window, cx).placeholder(tr(cx, "shelf.url_placeholder"))
             }));
+        self.url_open = true;
         cx.notify();
     }
 
+    /// 收「从链接导入」那一屏。**只**改意图：内容（那个输入框）留到弹层停稳才 drop，
+    /// 不然手机上读者看到的是一张空卡往下沉。桌面那张浮层没有退场动画，同一帧就没了。
     fn close_url_panel(&mut self, cx: &mut Context<Self>) {
-        self.url_entry = None;
+        self.url_open = false;
         cx.notify();
     }
 
-    /// 面板上那颗「导入」。链接不对（不是 http/https）就不动 —— 假链接交给
+    /// 那一屏上那颗「导入」。链接不对（不是 http/https）就不动 —— 假链接交给
     /// 管线只会得到一条谁都看不懂的网络错误。
     fn import_from_url(&mut self, cx: &mut Context<Self>) {
         let Some(entry) = &self.url_entry else {
@@ -693,12 +805,12 @@ impl ShelfView {
             );
             return;
         }
-        self.url_entry = None;
+        self.close_url_panel(cx);
         self.dispatch_import(Box::new(UrlSource::new(url, url_transport())), cx);
     }
 
-    /// 「从链接导入」面板。
-    fn url_panel(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
+    /// 「从链接导入」那一屏的内容。与建组那一屏同一形状，也只有容器不同。
+    fn url_form(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity().clone();
         let close_entity = entity.clone();
         let import_entity = entity.clone();
@@ -707,11 +819,8 @@ impl ShelfView {
         v_flex()
             .id("shelf-url-panel")
             .test_support()
-            .flex_1()
-            .min_h_0()
+            .w_full()
             .gap_3()
-            .px(px(GUTTER))
-            .py_4()
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -743,6 +852,166 @@ impl ShelfView {
                     ),
             )
             .into_any_element()
+    }
+
+    /// 「从链接导入」在桌面那一档：屏幕居中的一张浮层。
+    ///
+    /// 居中而不是钉在 ⋮ 那颗按钮底下：这一屏的入口在那条菜单里，而菜单点开这张卡的
+    /// 同一帧就散了 —— 钉在一个刚消失的元素上，读者看到的是卡从半空里长出来。
+    fn url_popover(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
+        let shelf = cx.entity().clone();
+        let body = self.url_form(entry, cx);
+        overlay::centered(
+            "shelf-url-popover",
+            overlay::URL_HEIGHT,
+            &shelf,
+            |this, cx| this.close_url_panel(cx),
+            div()
+                .w(px(overlay::URL_WIDTH))
+                .min_h(px(overlay::URL_HEIGHT))
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    /// 顶部那颗分组按钮，外加它底下那张浮层（开着的时候）。
+    ///
+    /// 浮层挂在按钮**之后**而不是包着那颗按钮：`Popover` 要拿一个元素的 bounds 当锚点，
+    /// 而那颗按钮自己已经挂着一条筛选菜单 —— 两层浮层抢同一个触发器会互相顶掉。
+    /// 外面包一层 `div` 而不是把它塞成 `h_flex` 的下一个孩子：那样那两颗按钮之间会多算
+    /// 一条 `gap_2`，而浮层是个零尺寸的东西。
+    fn group_cell(&self, cx: &mut Context<Self>) -> AnyElement {
+        let button = self.group_button(cx).into_any_element();
+        match (&self.group_entry, self.group_open) {
+            (Some((_, entry)), true) => div()
+                .child(button)
+                .child(self.group_popover(entry.clone(), cx))
+                .into_any_element(),
+            _ => button,
+        }
+    }
+
+    /// 建组那一屏在手机上：同一份表单压进底部弹层。
+    fn group_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
+        let body = self.form_body(&self.group_sheet, self.group_entry.as_ref().map(|(_, e)| e), cx, |this, entry, cx| {
+            this.group_form(entry, cx)
+        });
+        overlay::sheet(
+            "shelf-group-sheet",
+            &self.group_sheet,
+            overlay::SHEET_EXPANDED,
+            body,
+        )
+    }
+
+    /// 链接导入那一屏在手机上。
+    fn url_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
+        let body = self.form_body(&self.url_sheet, self.url_entry.as_ref(), cx, |this, entry, cx| {
+            this.url_form(entry, cx)
+        });
+        overlay::sheet(
+            "shelf-url-sheet",
+            &self.url_sheet,
+            overlay::SHEET_EXPANDED,
+            body,
+        )
+    }
+
+    /// 扫描那一屏在手机上。清单要滚，所以展开那一档比另两屏高。
+    fn scan_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
+        let body = (!self.scan_sheet.read(cx).is_idle() && self.scan.is_some()).then(|| {
+            div()
+                .flex_1()
+                .min_h_0()
+                .px(px(GUTTER))
+                .pb_2()
+                .child(self.scan_body(cx))
+                .into_any_element()
+        });
+        overlay::sheet(
+            "shelf-scan-sheet",
+            &self.scan_sheet,
+            overlay::SCAN_SHEET_EXPANDED,
+            body,
+        )
+    }
+
+    /// 扫描那一屏在桌面那一档：屏幕居中的一张卡，清单在里面自己滚。
+    ///
+    /// 高是**定死**的而不是「至少」：`scan_body` 里那条 `v_virtual_list` 要一个能滚的框，
+    /// 「至少多高」给不出这个框。
+    fn scan_popover(&self, cx: &mut Context<Self>) -> AnyElement {
+        let shelf = cx.entity().clone();
+        let body = div()
+            .w(px(overlay::SCAN_WIDTH))
+            .h(px(overlay::SCAN_HEIGHT))
+            .flex()
+            .flex_col()
+            .child(self.scan_body(cx))
+            .into_any_element();
+        overlay::centered(
+            "shelf-scan-popover",
+            overlay::SCAN_HEIGHT,
+            &shelf,
+            |this, cx| this.close_scan(cx),
+            body,
+        )
+    }
+
+    /// 两块表单那一屏在弹层里的内容：弹层还没停稳、且内容还在的时候才给。
+    ///
+    /// 弹层里给横向留白而浮层里不给：浮层自己那一圈 `p_3` 已经留了，弹层那块表面是满幅的。
+    fn form_body(
+        &self,
+        state: &Entity<BottomSheetState>,
+        entry: Option<&Entity<InputState>>,
+        cx: &mut Context<Self>,
+        form: impl Fn(&Self, Entity<InputState>, &mut Context<Self>) -> AnyElement,
+    ) -> Option<AnyElement> {
+        if state.read(cx).is_idle() {
+            return None;
+        }
+        Some(
+            div()
+                .w_full()
+                .px(px(GUTTER))
+                .pb_4()
+                .child(form(self, entry?.clone(), cx))
+                .into_any_element(),
+        )
+    }
+
+    /// 把三块弹层的开合**派生**自那三个意图位，顺手把「已经停稳」的那些内容 drop 掉。
+    ///
+    /// 派生而不是在每一处改意图的地方各叫一次 `show()` / `hide()`：那样有五六处，漏一处
+    /// 就是一屏关不掉的弹层。桌面那一档 `want` 恒假，于是意图一收内容当场跟着没 ——
+    /// 与那张本来就没有退场动画的浮层正好对得上。
+    fn sync_panels(&mut self, compact: bool, cx: &mut Context<Self>) {
+        for (want, state) in [
+            (self.group_open, &self.group_sheet),
+            (self.url_open, &self.url_sheet),
+            (self.scan_open, &self.scan_sheet),
+        ] {
+            match (want && compact, state.read(cx).is_open()) {
+                (true, false) => state.update(cx, |state, cx| state.show(cx)),
+                (false, true) => state.update(cx, |state, cx| state.hide(cx)),
+                _ => {}
+            }
+        }
+        if !self.group_open && self.rest(&self.group_sheet, cx) {
+            self.group_entry = None;
+        }
+        if !self.url_open && self.rest(&self.url_sheet, cx) {
+            self.url_entry = None;
+        }
+        if !self.scan_open && self.rest(&self.scan_sheet, cx) {
+            self.scan = None;
+        }
+    }
+
+    /// 这一块弹层是不是已经**沉到底、不在动了**：那一刻起内容不必再画。
+    fn rest(&self, state: &Entity<BottomSheetState>, cx: &App) -> bool {
+        state.read(cx).is_idle()
     }
 
     /// 读数行旁那颗「取消」。置位旗标就返回：管线在两本书之间看见它，已落库的
@@ -814,29 +1083,33 @@ impl ShelfView {
         self.force_reload(cx);
     }
 
-    /// 「新建分组…」：开那块就地输入面板（与「从链接导入」同一形状 —— 架面上要读者
-    /// 打字的事不放进浮层），并记下是为哪一本书建的。
+    /// 「新建分组…」：开那一屏，并记下是为哪一本书建的。
+    ///
+    /// 入口在书的长按菜单里，浮层却钉在顶部那颗分组按钮上 —— 菜单点完就散了，把它当锚点
+    /// 等于钉在一个下一帧就不存在的元素上（见 [`Self::group_popover`]）。
     pub(super) fn new_group(&mut self, book_id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.group_entry.is_some() {
+        if self.group_open {
             return;
         }
         self.group_entry = Some((
             book_id,
             cx.new(|cx| InputState::new(window, cx).placeholder(tr(cx, "shelf.group_placeholder"))),
         ));
+        self.group_open = true;
         cx.notify();
     }
 
+    /// 收「新建分组」那一屏。**只**改意图，理由同 [`Self::close_url_panel`]。
     pub(super) fn close_group_panel(&mut self, cx: &mut Context<Self>) {
-        self.group_entry = None;
+        self.group_open = false;
         cx.notify();
     }
 
-    /// 面板上那颗「建组」：建好就把这本书丢进去，然后重查架面。
+    /// 那一屏上那颗「建组」：建好就把这本书丢进去，然后重查架面。
     ///
     /// 同名即复用是库里定的规矩（`ON CONFLICT(name) DO NOTHING` 再回查 id），所以这里
     /// 不该拦「那个组已经有了」—— 读者要的是进那个组。空名由存储层回
-    /// `EmptyCollectionName`，报出来而**面板留着**：把人家打了一半的字清掉是错的方向。
+    /// `EmptyCollectionName`，报出来而**那一屏留着**：把人家打了一半的字清掉是错的方向。
     fn create_group(&mut self, cx: &mut Context<Self>) {
         let Some((book_id, entry)) = self.group_entry.clone() else {
             return;
@@ -853,7 +1126,7 @@ impl ShelfView {
         match created {
             Ok(id) => {
                 tracing::info!("ShelfView: 第 {book_id} 本进了组 {id}「{name}」");
-                self.group_entry = None;
+                self.group_open = false;
                 self.force_reload(cx);
             }
             Err(err) => report("ShelfView", &err),
@@ -862,7 +1135,10 @@ impl ShelfView {
 
     /// 换架面看的那一片。搜索词不动而架子动了，所以要先清空再查（同 [`Self::force_reload`]
     /// 那一手）—— 否则 `reload` 的去重会认为「什么都没变」。
-    fn set_group(&mut self, group: GroupFilter, cx: &mut Context<Self>) {
+    ///
+    /// 组卡那一格点下去走的就是这一条：卡与顶部那颗筛选改的是同一个 [`Self::group`]，
+    /// 所以两处永远说同一件事。
+    pub(super) fn set_group(&mut self, group: GroupFilter, cx: &mut Context<Self>) {
         self.group = group;
         self.items.clear();
         let query = self.query.clone();
@@ -937,8 +1213,12 @@ impl ShelfView {
             })
     }
 
-    /// 「新建分组」那块就地面板：一行输入 + 两颗按钮，样式照「从链接导入」那一块。
-    fn group_panel(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
+    /// 「新建分组」那一屏的内容：一行输入 + 两颗按钮。桌面与移动共用这一份，
+    /// 只有容器不同（见 [`overlay`]）。
+    ///
+    /// 不带横向留白也不带 `flex_1`：宽度与高归容器给 —— 桌面那张浮层是定宽的，手机上
+    /// 弹层天生满幅，写在这里两头都会多算一层。
+    fn group_form(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity().clone();
         let close_entity = entity.clone();
         let create_entity = entity.clone();
@@ -947,11 +1227,8 @@ impl ShelfView {
         v_flex()
             .id("shelf-group-panel")
             .test_support()
-            .flex_1()
-            .min_h_0()
+            .w_full()
             .gap_3()
-            .px(px(GUTTER))
-            .py_4()
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -983,6 +1260,24 @@ impl ShelfView {
                     ),
             )
             .into_any_element()
+    }
+
+    /// 「新建分组」在桌面那一档：钉在顶部那颗分组按钮底下的一张浮层。
+    ///
+    /// 入口仍在书的长按菜单里（那一格说的是「为这本书建个组」），但浮层跟着**管组的那颗
+    /// 按钮**开：菜单点完就没了，钉在它消失的位置上等于钉在一个已经不存在的锚点上。
+    /// 挂在按钮之后而不是按钮里面 —— 它是那颗按钮那一条命令的延续。
+    fn group_popover(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
+        let shelf = cx.entity().clone();
+        let body = self.group_form(entry, cx);
+        overlay::anchored(
+            "shelf-group-popover",
+            Anchor::TopLeft,
+            6.0,
+            &shelf,
+            |this, cx| this.close_group_panel(cx),
+            div().w(px(overlay::GROUP_WIDTH)).child(body).into_any_element(),
+        )
     }
 
     /// 删掉一本：库里的行、属于我们自己的那份副本，然后重查一次架面。
@@ -1078,7 +1373,7 @@ impl ShelfView {
             .px(px(GUTTER))
             .py_2()
             .child(div().flex_1().min_w_0().child(self.search.clone()))
-            .child(self.group_button(cx))
+            .child(self.group_cell(cx))
             .child(self.more_button(cx))
     }
 
@@ -1105,7 +1400,7 @@ impl ShelfView {
                 // 框的 small 档在 `boot` 建组件时就定下了。
                 div().w_64().child(self.search.clone()),
             )
-            .child(self.group_button(cx))
+            .child(self.group_cell(cx))
             .child(self.more_button(cx))
     }
 
@@ -1187,24 +1482,15 @@ impl ShelfView {
     }
 
     /// 网格本体，或者两种「这里没有东西」—— 它们必须说得不一样。
+    ///
+    /// 建组 / 链接导入 / 扫描那三块**不在这里**：它们是浮在架面之上的浮层与弹层，
+    /// 架面照旧画在底下（见 [`Self::overlays`]）。只有「书库位置」那一屏还是就地换掉整片
+    /// —— 它是导入的前置而不是「答一句话」，答完之前那片格子没有意义。
     fn body(&self, cx: &mut Context<Self>, spec: GridSpec) -> AnyElement {
         if self.confirming {
             return self.confirm_panel(cx);
         }
-        // 扫描面板盖过架面：清单在时读者要看的就是它，不是底下一片旧格子。
-        if self.scan.is_some() {
-            return self.scan_panel(cx);
-        }
-        // 「从链接导入」面板：一行输入 + 两颗按钮。内联面板与书库确认面板同一套
-        // 样式（浮层在 Android 上也能点住了，迁浮层是可选项）。
-        if let Some(entry) = &self.url_entry {
-            return self.url_panel(entry.clone(), cx);
-        }
-        // 「新建分组」面板同样盖过架面：要打字的那几步里，底下一片格子只会分散注意。
-        if let Some((_, entry)) = &self.group_entry {
-            return self.group_panel(entry.clone(), cx);
-        }
-        if !self.items.is_empty() {
+        if !self.items.is_empty() || !self.tiles.is_empty() {
             return self.grid(cx, spec).into_any_element();
         }
         // 空架要说「导一本书进来」，有书但都不匹配要说「换个词」：
@@ -1238,7 +1524,8 @@ impl ShelfView {
         let labels = book_menu::Labels::resolve(cx);
         let columns = spec.columns as usize;
         // 一横排算一项；不满一排的尾巴也算一排，不然最后那几本会画不出来。
-        let rows = self.items.len().div_ceil(columns);
+        // 数的是**格子**：组卡占的那几格与书占的那几格排在同一条下标上。
+        let rows = (self.tiles.len() + self.items.len()).div_ceil(columns);
         let shelf = cx.entity().clone();
         let scroll = self.grid_scroll.clone();
         let cover_height = spec.cover_height;
@@ -1248,10 +1535,12 @@ impl ShelfView {
                     let from = row * columns;
                     // 句柄只在这一排真要画的时候读那几行数据：整片 `items` 不 clone。
                     shelf.update(cx, |this, cx| {
-                        let to = (from + columns).min(this.items.len());
+                        let tiles = this.tiles.len();
+                        let total = tiles + this.items.len();
+                        let to = (from + columns).min(total);
                         // 落定的时钟先取，再借 `items`：进度是这一片格子共用的一个
                         // 数，逐格只是起步早晚不同。
-                        let enter = this.enter_clock(this.items.len(), window, cx);
+                        let enter = this.enter_clock(total, window, cx);
                         div()
                             .w_full()
                             .grid()
@@ -1260,15 +1549,27 @@ impl ShelfView {
                             // 左右留白仍归每一排自己：滚轴贴的是这块区域真正的边。
                             .px(px(GUTTER))
                             .py_1()
-                            .children(this.items[from..to].iter().enumerate().map(|(col, card)| {
-                                this.card_element(
-                                    card,
-                                    &labels,
-                                    cover_height,
-                                    &enter,
-                                    from + col,
-                                    cx,
-                                )
+                            .children((from..to).map(|ix| {
+                                // 前面那几格是组卡，往后才是书 —— 与 [`Self::tiles`] /
+                                // [`Self::items`] 那两个数的分界是同一条。
+                                if ix < tiles {
+                                    this.group_cell_element(
+                                        &this.tiles[ix],
+                                        cover_height,
+                                        &enter,
+                                        ix,
+                                        cx,
+                                    )
+                                } else {
+                                    this.card_element(
+                                        &this.items[ix - tiles],
+                                        &labels,
+                                        cover_height,
+                                        &enter,
+                                        ix,
+                                        cx,
+                                    )
+                                }
                             }))
                             .into_any_element()
                     })
@@ -1346,12 +1647,36 @@ impl Render for ShelfView {
                 )
                 .into_any_element()
         });
+        // 那三块「答一句话」的面板：桌面是一张浮层，手机是同一份内容压进底部弹层。
+        // 建组那一张挂在顶部那颗分组按钮上（锚点在那儿），所以不在这一列里，见 `group_cell`。
+        self.sync_panels(size.is_compact(), cx);
+        let overlays: Vec<AnyElement> = if size.is_compact() {
+            // 三块弹层每帧都交元素：弹簧的采样在里面，收稳的那些只是不给内容。
+            vec![
+                self.group_sheet(cx),
+                self.url_sheet(cx),
+                self.scan_sheet(cx),
+            ]
+        } else {
+            let mut overlays = Vec::new();
+            if self.url_open && let Some(entry) = &self.url_entry {
+                overlays.push(self.url_popover(entry.clone(), cx));
+            }
+            if self.scan_open && self.scan.is_some() {
+                overlays.push(self.scan_popover(cx));
+            }
+            overlays
+        };
         v_flex()
             .id("folio-shelf")
+            // 那两块居中的浮层要有一个「内容区」可以居中，而这一格就是内容区：
+            // 导航栏在它的左边、不在它里面。
+            .relative()
             .size_full()
             .child(top)
             .children(status)
             .child(self.body(cx, spec))
+            .children(overlays)
     }
 }
 
@@ -1366,7 +1691,10 @@ mod tests {
     use gpui_kit::base::NavStackState;
     use gpui_kit::component::Root;
     use gpui_kit::component::input::InputState;
-    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, ElementId, Entity, TestAppContext, px, size,
+    };
 
     use super::{COVER_RATIO, GAP, GUTTER, GroupFilter, ShelfView, columns_for, grid_spec};
     use crate::ui::shared::config_model::ConfigHolder;
@@ -1598,5 +1926,108 @@ mod tests {
             shelf.read_with(cx, |this, _| this.group_entry.is_some()),
             "没建成不该把面板和他打了一半的字一起清掉"
         );
+    }
+
+    /// 组卡只在「整架 + 没搜词」那一屏领头，一筛一搜就退场；点它等于筛到那一组。
+    ///
+    /// 三条各自都能单独坏掉而编译照样绿：筛到某一组时还摆一排组卡，等于把读者刚走进去的
+    /// 那层又摊回他面前；带着搜索词还摆，卡上那几本封面与搜索结果毫无关系，读起来就是
+    /// 「这几本匹配」；而 `reload` 的去重按「词没变且架子非空」判，换筛不重排的话
+    /// 那一排卡会留在原地不动。
+    #[gpui_kit::test]
+    fn the_group_tiles_lead_the_shelf_and_step_aside(cx: &mut TestAppContext) {
+        let (shelf, _, store) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        let b = add(&store, "乙");
+        let c = add(&store, "丙");
+        let want = store.create_collection("想读").expect("建组");
+        let misc = store.create_collection("杂项").expect("建组");
+        store.add_to_collection(want, a).expect("挂进去");
+        store.add_to_collection(want, b).expect("挂进去");
+        store.add_to_collection(misc, c).expect("挂进去");
+
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.tile_count()),
+            2,
+            "整架那一屏顶部两张组卡"
+        );
+        // 组卡在前、书在后，所以「第 0 格」与「第 0 本」不是一回事：`items` 只数书。
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_count()),
+            3,
+            "组卡不占书的格子数"
+        );
+        let tiles = shelf.read_with(cx, |this, _| {
+            (0..this.tile_count())
+                .map(|ix| this.tile_at(ix).expect("第 {ix} 张在"))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            tiles,
+            vec![(want, "想读".into(), 2), (misc, "杂项".into(), 1)],
+            "两张卡跟着库里那条名字序（`ORDER BY c.name` 是字节序），下面那行念的是这一组一共几本"
+        );
+
+        // 筛到某一组：那一排的卡退场，剩下的就是这一组里的书。
+        shelf.update(cx, |this, cx| {
+            this.set_group(GroupFilter::Collection(want), cx)
+        });
+        assert_eq!(shelf.read_with(cx, |this, _| this.tile_count()), 0);
+        assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 2);
+
+        // 回到整架再搜一个词：卡还是不摆。
+        shelf.update(cx, |this, cx| this.set_group(GroupFilter::All, cx));
+        assert_eq!(shelf.read_with(cx, |this, _| this.tile_count()), 2);
+        shelf.update(cx, |this, cx| this.reload("甲", cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.tile_count()),
+            0,
+            "带着搜索词还摆组卡，读起来就是「这几本匹配」"
+        );
+
+        // 「未分组」那一头同理：筛的是书，不是组。
+        shelf.update(cx, |this, cx| this.reload("", cx));
+        shelf.update(cx, |this, cx| this.set_group(GroupFilter::Ungrouped, cx));
+        assert_eq!(shelf.read_with(cx, |this, _| this.tile_count()), 0);
+    }
+
+    /// 建组那一屏是**浮在**架面上的：它开着的时候，底下那张格子还在原地、还点得着。
+    ///
+    /// 迁浮层之前它是就地换掉整片格子的，所以这一条钉的是这次改动的正面：`body` 不再
+    /// 为它让位。浮层自己晚一帧才挂进弹窗层（要先量一次触发器），所以断言前连画两帧。
+    #[gpui_kit::test]
+    fn the_group_form_floats_over_the_grid(cx: &mut TestAppContext) {
+        let (shelf, handle, store) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-group-panel").is_none(),
+                "没开那一屏时不该有表单"
+            );
+            shelf.update(cx, |this, cx| this.new_group(a, window, cx));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-group-panel").is_some(),
+                "点开「新建分组」要浮起那张卡"
+            );
+            assert!(
+                window
+                    .try_find(ElementId::Name(format!("shelf-cover-{a}").into()))
+                    .is_some(),
+                "卡浮在架面上，不是把整片格子换掉"
+            );
+            shelf.update(cx, |this, cx| this.close_group_panel(cx));
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-group-panel").is_none(),
+                "关掉之后就没了：桌面那张浮层没有退场动画"
+            );
+        })
+        .expect("窗口应可更新");
     }
 }

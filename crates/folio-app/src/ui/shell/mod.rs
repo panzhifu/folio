@@ -813,10 +813,21 @@ impl AppShell {
         {
             return;
         }
-        // 栈底再往后要不要退出，问平台边界：`#[cfg(mobile)]` 写在外壳里就是越界
+        // 栈底再往后该做什么，问平台边界：`#[cfg(mobile)]` 写在外壳里就是越界
         // （`plans/基础设施.md` §5.9 —— 平台判断只允许出现在 `host` 与 `platform`）。
-        if host::back_exits_app(cx) {
-            cx.quit();
+        match host::back_at_root(cx) {
+            host::BackAtRoot::Quit => cx.quit(),
+            host::BackAtRoot::SendToBack => {
+                // 丢回后台之前先把该落盘的落盘：`on_app_quit` 这条路上**不会**再来一次，
+                // 而进程在后台随时可能被系统回收。结的只有位置那一笔 —— 时长有自己的
+                // 60 秒时钟，与「窗口失去焦点」那一档同一个口径（见 `render` 里那条）。
+                ConfigHolder::save(cx);
+                if let Some(layer) = self.reading.as_ref() {
+                    layer.page.update(cx, |page, cx| page.flush_position(cx));
+                }
+                super::platform::send_task_to_back();
+            }
+            host::BackAtRoot::Stay => {}
         }
     }
 

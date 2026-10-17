@@ -10,6 +10,7 @@
 | [导入管线.md](导入管线.md) | 导入七步：`ingest` / `index` 那道缝、`sha2` 当身份、去重统计旧文件、封面自哈希、`Source` trait 一条管线 |
 | [基础设施.md](基础设施.md) | 作业（含关闭时排空队列）、配置三层 + provenance + Arc 换页 + 热/重启清单、错误三档、日志纪律、十一件没人管的事、**§七 实现台账（2026-10-12）** |
 | [Locator.md](Locator.md) | 坐标系：存的五个字段含原文快照、不依赖排版的**全局字符进度**、按格式的 source_key、四级降级复用 `anchor::relocate` |
+| [听书.md](听书.md) | 合成朗读后端（`tts` 0.26.3）：两端能力表、Android 三条硬约束（`JNI_OnLoad` / 死的 `onStop` / 500 ms 阻塞）、Linux 要 `speechd`、段而非句、进度落 `positions`、必须与可省 |
 | [M5-refactor.md](M5-refactor.md) | 架构重构（KOReader 式模块化）+ 绘制层简化 + 引擎查询接口 |
 | [M6-selection.md](M6-selection.md) | 选中一期：长按选词、拖动扩展、复制 |
 | [M7-annotations.md](M7-annotations.md) | 批注二期设计：TextAnchor 落库、回显、侧栏 |
@@ -18,6 +19,9 @@
 | [background-pipeline.md](background-pipeline.md) | 后台任务管线（`task`）：可取消、可报进度的后台作业 |
 | [import-trait.md](import-trait.md) | 导入管线：`Source` trait 一条抽象七种来源（选文件/批量/整机扫描/监听/Wi-Fi 传书/URL/WebDAV），落库在后台 |
 | [layout-optimization.md](layout-optimization.md) | 排版引擎优化记录（Tier 1 + §7.1–§7.5：两阶段排版 / 块级缓存 / 词级断行等） |
+| [翻页轴向.md](翻页轴向.md) | 手势的轴由动画档决定（不再由手指定）+ 一笔手势只落一个动作 + 惯性尾巴归发起那一笔；含四条缺陷与判定表 |
+| [目录与组件.md](目录与组件.md) | 目录重构：四条依赖方向 + 纵切统一四层（model/view/components/overlay）+ reader 26 文件逐行搬迁表 + 页面拆组件的三条自查 + 六次提交 |
+| [目录架构.md](目录架构.md) | 上一份的**可执行版**：目标态完整目录树、依赖矩阵、`mod.rs` 骨架、按批次的 `mv`/`sed` 脚本与门禁命令 |
 | [facts.md](facts.md) | 已钉死的事实：框架/平台/构建的实测约束（写代码前先读） |
 
 ## 架构

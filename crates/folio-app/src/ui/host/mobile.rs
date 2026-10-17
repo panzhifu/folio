@@ -11,7 +11,7 @@ use gpui_kit::{App, Window};
 #[cfg(target_os = "android")]
 use gpui_mobile::android::jni;
 
-use super::{Host, Insets, find_family, log_no_family};
+use super::{BackAtRoot, Host, Insets, find_family, log_no_family};
 
 pub(super) struct MobileHost;
 
@@ -30,10 +30,13 @@ impl Host for MobileHost {
         false
     }
 
-    fn back_exits_app(&self) -> bool {
-        // 那一侧的返回键与边缘滑动都被 fork 翻成 escape（见 `plans/facts.md`），
-        // 走到栈底就是「没有可退的了」—— 不退出就只能让读者自己去划掉卡片。
-        true
+    fn back_at_root(&self) -> BackAtRoot {
+        // 那一侧的返回键与边缘滑动都被 fork 翻成 escape（见 `plans/facts.md`），走到栈底
+        // 就是「没有可退的了」。这时候**丢回后台**而不是退出：退出那条路会让进程在自己还
+        // 挂着前台顶窗时消失，系统拿不到任务快照，就没有过渡动画可播 —— 实测那就是一次
+        // 闪退的样子（`Host::back_at_root` 里记着那四条量出来的日志）。要真退出，读者划掉
+        // 后台卡片就是，那一条系统连进程一起收，动画也是系统的。
+        BackAtRoot::SendToBack
     }
 
     fn long_press(&self) -> bool {

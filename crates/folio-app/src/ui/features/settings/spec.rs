@@ -55,11 +55,16 @@ pub(crate) enum RowKind {
         get: Rc<dyn Fn(&App) -> bool>,
         set: Setter<bool>,
     },
-    /// 下拉选择。`options` 是 (值, 标签) 对 —— 值是写回配置的形态，标签是显示文字；
+    /// 多选一。`options` 是 (值, 标签) 对 —— 值是写回配置的形态，标签是显示文字；
     /// `scrollable` 只对桌面有意义（弹层是否滚动），手机的弹层本来就滚。
+    ///
+    /// `push` 只管手机端那一端怎么交：`false` 是**浮层菜单**（就地弹出、点中即收），
+    /// `true` 是**推一屏勾选**（整屏都是命中区，适合项多或名字长的）。桌面两端都渲染成
+    /// 同一个 `Select`：这条差别是版式的，不是数据的。
     Dropdown {
         options: Rc<Vec<(SharedString, SharedString)>>,
         scrollable: bool,
+        push: bool,
         get: Rc<dyn Fn(&App) -> SharedString>,
         set: Setter<SharedString>,
     },
@@ -105,7 +110,31 @@ impl Row {
         }
     }
 
+    /// 一行「多选一」，手机端用浮层菜单就地选。
     pub(super) fn dropdown(
+        title: SharedString,
+        options: Vec<(SharedString, SharedString)>,
+        scrollable: bool,
+        get: impl Fn(&App) -> SharedString + 'static,
+        set: impl Fn(SharedString, &mut App) + 'static,
+    ) -> Self {
+        Self::choice_with(false, title, options, scrollable, get, set)
+    }
+
+    /// 同一份「多选一」，手机端改成**推一屏勾选**：项多、名字长的时候，浮层要盖掉半屏，
+    /// 而推入式的每一行都能整行命中 44。桌面不受这一格影响。
+    pub(super) fn choice(
+        title: SharedString,
+        options: Vec<(SharedString, SharedString)>,
+        scrollable: bool,
+        get: impl Fn(&App) -> SharedString + 'static,
+        set: impl Fn(SharedString, &mut App) + 'static,
+    ) -> Self {
+        Self::choice_with(true, title, options, scrollable, get, set)
+    }
+
+    fn choice_with(
+        push: bool,
         title: SharedString,
         options: Vec<(SharedString, SharedString)>,
         scrollable: bool,
@@ -119,6 +148,7 @@ impl Row {
             kind: RowKind::Dropdown {
                 options: Rc::new(options),
                 scrollable,
+                push,
                 get: Rc::new(get),
                 set: Rc::new(set),
             },
@@ -239,4 +269,48 @@ pub(crate) fn number(
             set: Rc::new(set),
         },
     }
+}
+
+/// 手机根屏那一行右端的「当前值」：按行序取这一页里**第一个读得出值**的行。
+///
+/// 值是从那一行自己的 getter 与同一份选项表里取的，不是新抄的一份：改完设置回根屏，
+/// 那格跟着变，不会有两处各说一套。取不到就返回 `None`，根屏那一行只留标题与箭头 ——
+/// 「挂哪个字段当一页的代表值」这条规则只写在这一个地方，两端都不必再猜。
+///
+/// 已知代价：一页只露一个数，所以「文字」那页露的是字号而看不到行距；数值为 0 的
+/// 那一档（最大行长 0＝铺满）在这里念出来是个「0」。
+pub(crate) fn page_summary(page: &Page, cx: &App) -> Option<SharedString> {
+    page.groups
+        .iter()
+        .flat_map(|group| group.rows.iter())
+        .find_map(|row| match &row.kind {
+            RowKind::Info { value } => (!value.is_empty()).then(|| value.clone()),
+            RowKind::Dropdown { options, get, .. } => {
+                let current = get(cx);
+                Some(
+                    options
+                        .iter()
+                        .find(|(value, _)| *value == current)
+                        .map(|(_, label)| label.clone())
+                        .unwrap_or(current),
+                )
+            }
+            // 显示格式与步进行同一句：整数步长念整数，小数步长念两位。
+            RowKind::Number { spec, get, .. } => {
+                let value = get(cx);
+                Some(
+                    if spec.step >= 1.0 {
+                        format!("{value:.0}")
+                    } else {
+                        format!("{value:.2}")
+                    }
+                    .into(),
+                )
+            }
+            RowKind::Text { get, .. } => {
+                let value = get(cx);
+                (!value.is_empty()).then_some(value)
+            }
+            RowKind::Toggle { .. } | RowKind::Custom { .. } => None,
+        })
 }

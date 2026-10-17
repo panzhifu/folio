@@ -26,6 +26,7 @@ use folio_core::store::ShelfItem;
 use gpui_kit::base::motion::{Easing, Stagger, StaggerOrigin, Timing};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::menu::ContextMenuExt;
+use gpui_kit::component::h_flex;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, Context, Image, InteractiveElement, IntoElement, ObjectFit,
@@ -34,6 +35,7 @@ use gpui_kit::{
 };
 
 use crate::ui::shared::images::cover_image;
+use crate::ui::shared::l10n::tf;
 
 use super::book_menu;
 use super::view::{ShelfEvent, ShelfView};
@@ -120,6 +122,39 @@ pub(super) struct Card {
     pub(super) title: SharedString,
     pub(super) authors: SharedString,
     pub(super) cover: Option<Arc<Image>>,
+}
+
+/// 一张组卡：一个组摊到架面那一格上的样子。
+///
+/// `covers` 是这个组摆在卡上的那几本封面（至多 [`TILE_SLOTS`] 张，缺封面的那本占一格但什么都不画），
+/// `count` 是组里**一共**几本 —— 卡上画不下全部，那一行数字才是答案。
+pub(super) struct GroupCard {
+    pub(super) id: i64,
+    pub(super) name: SharedString,
+    pub(super) count: usize,
+    pub(super) covers: Vec<Option<Arc<Image>>>,
+}
+
+/// 组卡里封面马赛克的格数：两行两列。
+///
+/// 写死 2×2 而不是按卡宽算能塞几格：一张组卡与一本的书卡占同一格宽，塞得下的就是这四张。
+const TILE_ROWS: usize = 2;
+const TILE_COLS: usize = 2;
+pub(super) const TILE_SLOTS: usize = TILE_ROWS * TILE_COLS;
+
+/// 马赛克与卡边的留白、格与格之间的缝（逻辑像素）。
+///
+/// 比书卡那一格的边松一点：卡里装的是四张小图，边太紧会读成一张被切成四块的图，
+/// 而不是四本书。
+const TILE_PAD: f32 = 6.0;
+const TILE_GAP: f32 = 4.0;
+
+/// 一格马赛克该多高：从卡面高里扣掉上下留白与中间那道缝，再对半。
+///
+/// 高由 `cover_height` 算而不是让排版自己按宽度推 —— 与 [`COVER_RATIO`] 那一段同一条理由，
+/// `uniform_list` 量的是 min-content 宽。
+fn tile_height(cover_height: f32) -> f32 {
+    ((cover_height - TILE_PAD * 2.0 - TILE_GAP) / TILE_ROWS as f32).max(0.0)
 }
 
 impl ShelfView {
@@ -329,6 +364,118 @@ impl ShelfView {
                 let groups = menu_entity.read_with(cx, |this, _| this.group_items(book_id));
                 book_menu::build(menu, &labels, book_id, &menu_entity, groups)
             })
+            .into_any_element()
+    }
+
+    /// 一张组卡 → 一格元素。
+    ///
+    /// 占的正是书卡那一格：封面槽换成 2×2 的马赛克，书名槽写组名，作者槽写一共几本 ——
+    /// 于是「一组」与「一本」在同一排里对齐得起来，不必为它另起一段排版。
+    ///
+    /// 点下去是**筛到那一组**（[`ShelfView::set_group`]），不是开书：这一格没有「这一本」
+    /// 可开。长按菜单不挂在这里 —— 组本身能改的事（改名 / 删除）此刻还没有入口，
+    /// 摆一条空的或半条能点的菜单比不摆更糟。
+    pub(super) fn group_cell_element(
+        &self,
+        tile: &GroupCard,
+        cover_height: f32,
+        enter: &Enter,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = tile.id;
+        let name = tile.name.clone();
+        let count = tile.count;
+        let count_label = tf(cx, "shelf.group_count", &[("n", &count)]);
+        let card_bg = cx.theme().popover;
+        let empty_bg = cx.theme().muted;
+        let muted_fg = cx.theme().muted_foreground;
+        let ring = cx.theme().border;
+        let tapped = cx.entity().clone();
+        let group: SharedString = format!("shelf-tile-{id}").into();
+        let cell = tile_height(cover_height);
+        div()
+            .id(group.clone())
+            .group(group.clone())
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .cursor_pointer()
+            .active(|style| style.opacity(0.75))
+            .opacity(enter.progress(index))
+            .on_click(move |_, _, cx| {
+                tapped.update(cx, |this, cx| {
+                    this.set_group(super::view::GroupFilter::Collection(id), cx)
+                })
+            })
+            .child(
+                div()
+                    .id(format!("shelf-tile-face-{id}"))
+                    .test_support()
+                    .w_full()
+                    .h(px(cover_height))
+                    .p(px(TILE_PAD))
+                    .border_1()
+                    .border_color(cx.theme().transparent)
+                    .rounded_md()
+                    .overflow_hidden()
+                    .bg(card_bg)
+                    .group_hover(group, |style| {
+                        style.border_color(ring).shadow(hover_shadow())
+                    })
+                    // 四格一律摆满：只有一本时那一本仍占左上那一格，而不是被
+                    // `flex_1` 拉成半张卡宽 —— 卡上那几格的尺寸在组与组之间得是同一个数，
+                    // 读者才比得出「这两组看着差不多满」。
+                    .children((0..TILE_ROWS).map(|row| {
+                        h_flex()
+                            .w_full()
+                            .h(px(cell))
+                            .gap(px(TILE_GAP))
+                            .when(row + 1 < TILE_ROWS, |this| this.pb(px(TILE_GAP)))
+                            .children((0..TILE_COLS).map(|col| {
+                                let slot = row * TILE_COLS + col;
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .size_full()
+                                    .rounded(px(2.0))
+                                    .overflow_hidden()
+                                    .when_some(
+                                        tile.covers.get(slot).cloned().flatten(),
+                                        |this, image| {
+                                            this.child(
+                                                img(image).size_full().object_fit(ObjectFit::Cover),
+                                            )
+                                        },
+                                    )
+                                    // 画不出图的那一格退成一块比卡面更深的底：留白看着像卡还没画完，
+                                    // 一块底才像「这里有一本，只是它没有封面」。
+                                    .when(
+                                        tile.covers.get(slot).is_none_or(|c| c.is_none()),
+                                        |this| this.bg(empty_bg),
+                                    )
+                            }))
+                    })),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(name),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(count_label),
+            )
             .into_any_element()
     }
 }

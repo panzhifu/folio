@@ -42,6 +42,10 @@ anyhow.workspace = true
 # 那段说明：`std::sync::mpsc` 的 `recv` 只能阻塞，界面线程不能阻塞）。挂在
 # `ui::features::shelf::view` 的导入链上。
 async-channel.workspace = true
+# Android 入口在 Activity 结束时把进程带走，要的是不跑 atexit 的那一种退出（理由与实测到的
+# 那个 HWUI abort 都写在 workspace 根那条说明里）。只用这一个符号，且只在
+# `ui::platform::android` 那一臂里 —— 桌面与 iOS 都不读它。
+libc.workspace = true
 # 只用来问一次「这台设备此刻的本地时区偏移是多少秒」（`ui::host::local_offset_secs`）。
 # 为什么不让 core 自己问：`folio_core` 零进程环境依赖是硬约束（它的时区一律是参数），
 # 而「读者在哪个时区」本来就是界面侧才知道的事。为什么不是新依赖树见 workspace 根那条。

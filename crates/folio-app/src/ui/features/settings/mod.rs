@@ -33,7 +33,6 @@ pub use view::SettingsView;
 // 页面文件之间共用的前言：规格构造器、主题、配置入口与文案函数。
 pub(super) use folio_core::{Mode, PageTurn};
 pub(super) use gpui_kit::assets::IconName;
-pub(super) use gpui_kit::component::ActiveTheme;
 pub(super) use gpui_kit::component::ThemeMode;
 pub(super) use gpui_kit::{App, SharedString};
 pub(super) use spec::{Group, NumberSpec, Page, Row, group, number, page};
@@ -41,6 +40,13 @@ pub(super) use spec::{Group, NumberSpec, Page, Row, group, number, page};
 pub(super) use crate::ui::shared::config_model::ConfigHolder;
 pub(super) use crate::ui::shared::l10n::{tf, tr};
 pub(super) use crate::ui::shared::theme;
+
+// 那颗「打开所在文件夹」的按钮要用的几样（页面文件通过 `super::` 拿到它本身）。
+use gpui_kit::IntoElement;
+use gpui_kit::component::button::Button;
+use std::path::PathBuf;
+
+use crate::ui::platform;
 
 // 每一页的构造函数只在 [`spec_pages`] 里用，所以是私有导入而不是再导出。
 use about::about_page;
@@ -50,6 +56,21 @@ use layout::layout_page;
 use library::library_page;
 use toc::toc_page;
 use typography::typography_page;
+
+/// 「打开所在文件夹」那颗按钮：设置页两格共用（配置文件在哪儿、自定义主题往哪个目录放
+/// JSON）。两格的动作一模一样，所以只写这一颗，别在两个文件里各拼一份。
+///
+/// 打不开时**不弹任何东西**：那一行本身还留着路径，读者能自己抄；摆一个报错弹窗只是把
+/// 「这台设备的文件管理器不认领这个 URI」变成读者的问题。
+pub(super) fn open_folder_button(id: &'static str, path: PathBuf, cx: &App) -> impl IntoElement {
+    Button::new(id)
+        .label(tr(cx, "field.open_folder").to_string())
+        .on_click(move |_, _, _| {
+            if !platform::open_folder(&path) {
+                tracing::warn!("设置：没有应用接手打开 {path:?}");
+            }
+        })
+}
 
 /// 各设置页。变体顺序就是 `Settings` 侧栏里从上到下的顺序，
 /// [`SettingsPage::index`] 靠它定位，所以**新增变体只能加在末尾**。
@@ -145,11 +166,13 @@ fn setting_item(row: &spec::Row) -> SettingItem {
                 SettingField::switch(move |cx| get(cx), move |val, cx| set(val, cx)),
             )
         }
+        // `push` 是手机端怎么交这一格，桌面的 `Select` 不受影响，所以这里不读它。
         RowKind::Dropdown {
             options,
             scrollable,
             get,
             set,
+            ..
         } => {
             let options = options.as_ref().clone();
             let (get, set) = (get.clone(), set.clone());

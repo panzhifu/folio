@@ -79,6 +79,15 @@ git worktree remove --force /home/noke/Code/folio-commitcheck
 内置 **Grep 工具就是 ripgrep**，优先用它（`-n`/`-C`/`-A`/`-B`/`output_mode`/`glob`/`multiline`
 都在参数里）。只有要管道、统计、`--json`、或搜非文本文件时才走 shell 的 `rg` / `rga`。
 
+- **`rg` 的 `-r` 是 `--replace`，不是 grep 的「recursive」也不是「regexp」**：它吃掉紧跟的那个参数当
+  替换文本。于是 `rg -rn 'a|b' crates`（把 grep 的习惯带过来）不会报错，而是**把所有命中替换成字母
+  `n`**、连 `-n` 也没生效。真实危害不是少个行号，是它凭空造出一份「符号都改名了」的假证据 —— 本机
+  已据此误判过一次不存在的重命名。要行号只写 `-n`；`rg` 本来就递归，不需要 `-r`。
+  任何短 flag 与 `-r` 合并都危险（`-rn`、`-rw`、`-rl`）。
+  **读输出时的自检**：命中处变成一个与 pattern 完全无关的短 token、或整片行数里夹着 `n`，就是踩了；
+  这一条不能拿来当证据，重跑一遍只用 `-n` 并核对**匹配文本本身**还在。
+  这也是上面那句「优先用内置 Grep 工具」的又一个理由 —— 那边 `-n` 是布尔参数，结构上不可能踩到。
+
 - **ignore 只在「遍历」时生效，显式给出路径就照搜**（实测）：从仓库根跑 `rg` 会跳过 `target/`、
   `.debug/`（走 `.git/info/exclude`）、`reference/`、`/screenshots/`、`tests/fixtures/local/`；
   而 `rg 关键词 reference/` 这种把被 ignore 的目录**写全**的形式，`rg` 与 `rga` 都正常搜，
@@ -87,9 +96,10 @@ git worktree remove --force /home/noke/Code/folio-commitcheck
   `rg -l <符号>`（哪些文件）、`rg -t rust`、`rg -g '!**/tests.rs'`、`rg -F`（字面量，中文文案里
   带括号时必加）。
 - 跨行模式要显式开：`rg -U --multiline-dotall -c 'struct X \{[\s\S]*?\n\}' crates`。
-- 按命中密度找改动落点：`rg -c <符号> crates | sort -t: -k2 -rn | head`。
+- 按命中密度找改动落点：`rg -c <符号> crates | sort -t: -k2 -rn | head`（那句里的 `-rn` 属于
+  `sort`，倒序数字；`rg` 那一头永远不该带 `-r`）。
 - **rg 是文本级**：语法级的搜索与批量改写（比如「给某个方法加一个参数后找出所有少传一位的调用」）
-  它做不到，本机也没装 `ast-grep`；那种活按文件逐个改，改完靠 `cargo check` 兜。
+  它做不到，走下面「结构级搜索」那条 `ast-grep`（本机装了 0.44.1，只有 `ast-grep` 这个命令名，没有 `sg`）。
 - **搜 EPUB 里的正文不要用 `rga`**：它的抽取按扩展名挑外部命令，EPUB 那一支要 `pandoc`，本机没装，
   实测直接失败（`run_adapter … adapter: pandoc`）。解包管道就够：
 
@@ -129,6 +139,7 @@ ast-grep run -p 'fn font_extents($$$) -> $T $B' -l rust crates  # 实现体 → 
 ```
 
 批量带修补的改写走 `ast-grep scan -r <规则.yml>`，那要先写规则文件 —— 一次性的改动别建。
+这里的 `-r` 是 `--rules`，与上面 `rg` 那个 `-r`（`--replace`）不是同一回事，别把一条的规矩带到另一条。
 
 ### 任务配方：just 1.58.0（仓库里**还没有** `justfile`）
 

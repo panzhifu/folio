@@ -20,7 +20,8 @@ use std::sync::Arc;
 use folio_core::content::annotation::ResolvedAnnotation;
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::store::{Annotation, Store};
-use folio_core::{DocMeta, Format, Locator, Reader, StaleReason};
+use folio_core::{DocMeta, Format, Locator, PageTurn, Reader, StaleReason};
+use gpui_kit::base::SelectionEdge;
 use gpui_kit::{App, Bounds, Context, Entity, Pixels, Point, SharedString, Task};
 
 use super::book::Book;
@@ -105,6 +106,8 @@ pub struct ReaderSession {
     pub(super) pending_chapter_turn: Option<isize>,
     /// 每次起动画加一的时钟键，供 [`Turn::seq`] 用。
     pub(super) turn_seq: u64,
+    /// 正文上那一趟手指拖动（跟手翻页）。`None` = 没有手指按在正文上。
+    pub(super) swipe: Option<SwipeTrack>,
     /// 已滚过的像素（内容坐标，向下为正）。只在连续滚动里有意义。
     pub(super) scroll_y: f32,
     /// 这一帧**画在**哪一个全局 y。动画期间它落后于 [`ReaderSession::scroll_y`]，
@@ -113,7 +116,7 @@ pub struct ReaderSession {
     pub(super) scroll_painted: f32,
     /// 分页 / 双页这一帧的当前页偏了多少（平移翻页期间非零，定住时是 `(0, 0)`）。
     ///
-    /// 由渲染帧按当前页写入，命中换算（`modules/selection.rs` 的 `to_layout`）减掉同一个
+    /// 由渲染帧按当前页写入，命中换算（`selection.rs` 的 `to_layout`）减掉同一个
     /// 数 —— 绘制把位移烘进了 run 的坐标，命中不减就会在快速连点两下时按到新页的空地上。
     pub(super) page_shift: (f32, f32),
     /// 分页 / 双页的当前页号（一张纸一号，两栏算同一号）。
@@ -166,7 +169,7 @@ pub struct ReaderSession {
     /// 把剩下的格子全部放掉 —— 少了这两条里的任何一条，读过的图就永久压在显存里。
     pub(super) atlas: gpui_kit::Entity<super::image_atlas::ImageAtlas>,
 
-    // ---- 选中（M6）：状态在这里，交互逻辑在 modules/selection.rs，绘制在 paint.rs / view.rs ----
+    // ---- 选中（M6）：状态在这里，交互逻辑、绘制件与菜单条都在 `selection.rs` ----
     /// 当前选中（某章的章内可见文本坐标，含头不含尾）。滚动不动它，重排不丢它，
     /// 它所属的章被裁出窗口时丢。
     pub(super) selection: Option<Selection>,
@@ -191,7 +194,8 @@ pub struct ReaderSession {
     /// 正文元素这一帧画在窗口里的位置。事件坐标 → 排版坐标的原点，
     /// 由 `GlyphsElement::paint` 每帧写入（gpui 事件只有窗口坐标）。
     pub(super) content_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// 本帧两端把手的命中区（窗口坐标，44px）。paint 每帧写入，事件时读。
+    /// 本帧两端把手的命中区（窗口坐标，那份尺寸见 `selection.rs` 引的 `TouchHandle`）。
+    /// paint 每帧写入，事件时读。
     pub(super) handle_hits: HandleHits,
     /// 本帧菜单条的位置（窗口坐标）。视图每帧写入；压在它上面的一击属于菜单，
     /// 不算「点别处清除」。
@@ -240,23 +244,6 @@ pub struct ReaderSession {
 /// 起别名是因为它出现在三处签名里（会话字段、解算入口、渲染帧），摊开写每次都得
 /// 把四层嵌套重抄一遍，clippy 也嫌复杂。
 pub(super) type AnnotationSpans = HashMap<usize, (u64, Rc<Vec<ResolvedAnnotation>>)>;
-
-/// 选区的一端：起点（首个选中字符之前）或终点（末个选中字符之后）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SelectionEdge {
-    Start,
-    End,
-}
-
-impl SelectionEdge {
-    /// 被拖动时按住不动的另一端。
-    pub(super) fn opposite(self) -> Self {
-        match self {
-            SelectionEdge::Start => SelectionEdge::End,
-            SelectionEdge::End => SelectionEdge::Start,
-        }
-    }
-}
 
 /// 指针拖选的临时态。
 pub(super) struct MouseDrag {
@@ -345,6 +332,7 @@ impl ReaderSession {
             turn: None,
             pending_chapter_turn: None,
             turn_seq: 0,
+            swipe: None,
             page: 0,
             wheel_accum: 0.0,
             content_height: 0.0,
@@ -458,6 +446,7 @@ impl ReaderSession {
             turn: None,
             pending_chapter_turn: None,
             turn_seq: 0,
+            swipe: None,
             page: 0,
             wheel_accum: 0.0,
             content_height: 0.0,
@@ -906,6 +895,11 @@ pub(super) struct Turn {
     /// 这一趟的时钟键。每次起动画换新键：复用同一个键会把上一趟**还没走完**的状态
     /// 接到这一趟上，读者看见的是第二次翻页只滑了一半就到位。
     pub seq: u64,
+    /// 这一趟沿哪根轴、要不要摆第二张纸。
+    ///
+    /// 存进这一格而不是每帧去读配置：一趟只有两百多毫秒，中途换档会让 `dist`、轴、
+    /// 两张纸的入树顺序同时改，读者看到的是「那张纸走到一半忽然换方向」。
+    pub style: PageTurn,
     /// 分页 / 双页：出场与进场那两张纸。连续滚动没有「页」，这两格都是 `None`。
     pub leaving: Option<PageRef>,
     pub arriving: Option<PageRef>,
@@ -915,8 +909,98 @@ pub(super) struct Turn {
     /// 起步，否则画面先跳回上一趟的终点再走，看着像卡了一下。
     pub scroll: Option<(f32, f32)>,
     /// `true` = 往后走（下一页 / 往下滚）。接反了不报错，画面是反着走的，
-    /// 所以方向的判据收在 [`chrome::slide_shifts`] 那一格里钉住。
+    /// 所以方向的判据收在 [`turn_animation::slide::slide_shifts`] 那一格里钉住。
     pub forward: bool,
+    /// 这一帧的进度由谁给，以及走完时该不该落在 [`Self::arriving`] 那一张上。
+    pub run: TurnRun,
+}
+
+/// 一趟翻页的进度是谁给的。
+///
+/// 分成三态而不是「一个 `t` 加一个布尔」：跟手期间时钟**根本不该插手**（那口表的意义是
+/// 自己续帧追一个终点，而终点此刻在手指上）；松手之后又不能从头再来一趟（读者握过的
+/// 那一截得接着走）。松手那一刻是唯一一次「位置归谁」的决断 —— 走完就把页号翻过去，
+/// 弹回就什么都不动。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum TurnRun {
+    /// 点屏 / 按键 / 滚轮起的那一趟：时钟从 0 走到 1，落在进场那张上。
+    Clock,
+    /// 手指还握着：这一帧的进度就是它给的，页号**还没翻**。
+    Following { t: f32 },
+    /// 跟手之后松手：从手指那一点接着走（`revert` 时退回原地，页号不动）。
+    Released { from: f32, revert: bool },
+}
+
+impl TurnRun {
+    /// 这一趟走完时该落在进场那一张上吗。`false` = 弹回，页号与锚章都不动。
+    pub(in crate::ui::features::reader) fn lands(&self) -> bool {
+        !matches!(self, Self::Released { revert: true, .. })
+    }
+}
+
+impl Default for Turn {
+    /// 默认值就是「点屏翻一页」那一趟：进度交给时钟，从 0 走到 1。
+    fn default() -> Self {
+        Self {
+            seq: 0,
+            style: PageTurn::default(),
+            leaving: None,
+            arriving: None,
+            scroll: None,
+            forward: false,
+            run: TurnRun::Clock,
+        }
+    }
+}
+
+/// 手指这一趟正文横扫的跟踪态（只在跟手翻页期间有值）。
+///
+/// 放在会话而不是监听闭包里：监听每帧重建一次，而一趟手势横跨很多帧。
+///
+/// 记的是**累计**位移而不是按下点：这一趟的增量是一段一段从滚动事件里来的（识别器把
+/// 一笔折成 `Started` 一整截 + `Moved` 若干步 + `Ended` 收尾），而 `ScrollWheelEvent`
+/// 自带的 `position` 在整趟里恒等于按下点，拿不到手指眼下在哪。
+///
+/// 横扫与竖划都归翻页，但「走了多远」按定性那一次锁下的那根轴算。
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SwipeTrack {
+    /// 横轴累计走了多少像素（屏幕像素，未折阅读方向：往右划为正）。
+    pub dx: f32,
+    /// 纵轴累计走了多少像素。只用来定轴，翻页不吃这一格。
+    pub dy: f32,
+    /// 定性那一次锁下的那一趟：沿哪根轴、往哪一步。`None` = 还没定性，那一下仍可能是
+    /// 点按或长按。两格同一个 `Option` 是因为它们本来就同时成立：一趟只沿一根轴走。
+    pub claim: Option<(super::turn_animation::Axis, super::turn::TurnIntent)>,
+}
+
+/// 挂上一趟翻页动画：换新时钟键、把档位抄进去，回报「这一趟挂上了吗」。
+///
+/// 两处起动画的地方（点屏/按键走的 [`turn`](super::modules::navigation::ReaderSession::turn)，
+/// 以及渲染帧里章界排好版那一刻补上的那一趟）都过这一句。从前跨章那一处自己手摆
+/// `Turn { seq: 0, .. }` 再把计数器加一 —— 于是每一趟跨章用的都是**同一把**键，第二次跨章
+/// 时那把键上还挂着上一趟「已走完」的状态，`Presence` 第一帧就给回 1.0，章当场落定。
+///
+/// 自由函数而不是方法：渲染帧把 `self` 拆成字段借（`font_cache` 那批），方法要整块
+/// `&mut self` 在那里调不动。
+pub(in crate::ui::features::reader) fn start_turn(
+    slot: &mut Option<Turn>,
+    seq: &mut u64,
+    style: PageTurn,
+    mode: super::chrome::PageMode,
+    fresh: Turn,
+) -> bool {
+    // 报「这一档在这种摆法下不走动画」的那条在这里判：不挂时钟就不多摆一张纸（省一整趟
+    // 切片重摆与重排），`page_shift` 也就保持归零，命中不必减任何东西。
+    if !super::turn_animation::of(style).animates(mode) {
+        return false;
+    }
+    *seq += 1;
+    *slot = Some(Turn {
+        seq: *seq,
+        style,
+        ..fresh
+    });
+    true
 }
 
 /// 开书时读一次「到过的章」。

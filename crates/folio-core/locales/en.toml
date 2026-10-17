@@ -152,6 +152,7 @@ language = "Interface language"
 "language.desc" = "Language of the interface, not of the book text."
 config_path = "Config file"
 "config_path.desc" = "Reading preferences live in this JSON file; copy it to move machines."
+open_folder = "Open folder"
 library_dir = "Library folder"
 "library_dir.desc" = "Imported books are copied here. Leave it empty to be asked again on the next import."
 "library_dir.suggested" = "Suggested location"
@@ -173,12 +174,16 @@ toc_max_lines = "Title lines"
 toc_dim_read = "Dim chapters you have read"
 "toc_dim_read.desc" = "Chapters you have opened are drawn faded in the contents list."
 page_turn = "Page-turn animation"
-"page_turn.desc" = "Which axis a page slides along when you turn it. Continuous scrolling ignores this, and changing it never re-typesets a chapter."
+"page_turn.desc" = "How the page moves when you turn it: slide, cover, or not at all. Paged and two-column spreads lay two sheets out according to this; continuous scrolling only asks whether there is an animation. Changing it never re-typesets a chapter."
 
-# Labels for the two page-turn axes. The value written back to config is `PageTurn::as_str()`.
+# Labels for the four page-turn styles. The value written back to config is `PageTurn::as_str()`.
 [page_turn]
-horizontal = "Slide sideways"
-vertical = "Slide up and down"
+slide = "Slide sideways"
+slide_up = "Slide up and down"
+cover = "Cover from the side"
+curl = "Page curl"
+scroll = "Scroll down"
+none = "No animation"
 
 [account]
 settings = "Settings"
@@ -324,6 +329,9 @@ group_new = "New group"
 group_create = "Create"
 group_placeholder = "Group name"
 group_hint = "Which group this book joins. An existing name is reused rather than duplicated."
+# The line under a group tile: the card cannot hold the whole group, so the
+# count is what answers "how many books are in here".
+group_count = "%{n} books"
 # The info panel — the menu row and the panel header share this one wording.
 # Fetched from the library the moment the menu item is tapped.
 info_title = "Info"
@@ -373,9 +381,6 @@ pick_dir = "Choose folder…"
 [about]
 version = "Version"
 version_desc = "The version this running binary was built from."
-gpui_pre = "GPUI"
-kit = "Component layer (gpui-kit)"
-mobile = "Mobile platform layer"
 
 # The first-run welcome screen: pick a library location before entering the app.
 # There is no cancel — either choose a folder or use the default location.

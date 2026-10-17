@@ -38,11 +38,11 @@ use folio_core::store::Annotation;
 use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    A11ySubtreeBuilder, AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity,
-    EntityId, Hsla, InteractiveElement as _, IntoElement, LongPressEvent, ParentElement, Pixels,
-    Render, RenderImage, Role, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
-    Styled, TestSupportExt as _, TouchPhase, WeakEntity, Window, accesskit, canvas, div, img,
-    point, px, size,
+    A11ySubtreeBuilder, AnyElement, App, Background, Bounds, ClickEvent, Context, Div, ElementId,
+    Entity, EntityId, Hsla, InteractiveElement as _, IntoElement, LongPressEvent, ParentElement,
+    PathBuilder, Pixels, Point, Render, RenderImage, Role, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement as _, Styled, TestSupportExt as _, TouchPhase, WeakEntity, Window,
+    accesskit, canvas, div, hsla, img, linear_color_stop, linear_gradient, point, px, size,
 };
 
 use super::book::Book;
@@ -52,20 +52,25 @@ use super::document::{Document, Viewport};
 use super::image_atlas::ImageAtlas;
 use super::image_viewer::ImageViewer;
 use super::modules::annotations::{self, Palette};
-use super::paint::{GlyphRun, GlyphsElement, SelectionVisual, shape};
+use super::paint::{GlyphRun, GlyphsElement, shape};
 use super::scene::{BlockDecor, Scene, VisibleImage};
-use super::selection_menu;
-use super::session::{AnnotationSpans, PageRef, ReaderSession, Source, Turn, land_at_anchor};
+use super::selection::{self, SelectionVisual};
+use super::session::{
+    AnnotationSpans, PageRef, ReaderSession, Source, Turn, TurnRun, land_at_anchor, start_turn,
+};
+use super::turn_animation::{self, Sheet, Tint};
 use crate::ui::shared::config_model::ConfigHolder;
 use crate::ui::shared::images::DecodeRequest;
 use crate::ui::shell::nav_transition;
 use crate::ui::shell::navigation::SizeClass;
 
-/// 一次翻页动画在这一帧的样子。时钟已经采完、方向与进度都在里面，两臂各自折成位移。
+/// 一次翻页动画在这一帧的样子。时钟已经采完、方向与档位都在里面，两臂各自折成位移。
 #[derive(Clone, Copy)]
 struct TurnFrame {
     /// 这一趟走了多少（已经过完缓动）：0 = 刚起步，1 = 走完。
     progress: f32,
+    /// 起这一趟时抄下来的那一档（见 [`Turn::style`]）：摆位层按它取轴、取两张纸的位移与层级。
+    style: PageTurn,
     /// 出场与进场那两张纸。连续滚动没有「页」⇒ 两格都是 `None`，那一臂只看 [`Self::scroll`]。
     leaving: Option<super::session::PageRef>,
     arriving: Option<super::session::PageRef>,
@@ -91,18 +96,36 @@ impl ReaderSession {
     /// 上（读者看见第二次翻页只滑了一半就到位），而没人再采样的那把由 gpui 在帧末自己回收。
     fn turn_frame(&mut self, window: &mut Window, cx: &mut App) -> Option<TurnFrame> {
         let turn = self.turn?;
-        // `present` 给 `true`：这一趟只需要「进场」那半 —— 走了多少就是 `progress`，
-        // 出场那一页由同一个数反着算（`chrome::slide_shifts` 那两个返回值），
-        // 所以不必再为出场页单独挂一把 `Presence`。
-        let id = TransitionId::from(ElementId::from(("reader-turn", turn.seq)));
-        let progress = Presence::new(id, true)
-            .transition(nav_transition(cx))
-            .sample(window, cx)
-            .progress;
-        if progress >= 1.0 {
-            // 跨章那一趟走到这里才把锚章换过去：滑动全程两张纸各在各的章里，落地这一步
-            // 之后才改成新章，命中/进度/落库都只看到一套坐标。
-            if let Some(to) = turn.arriving
+        // 进度由谁给，看这一趟是谁在驱动它。
+        //
+        // 手指还握着时**不采时钟**：`Presence` 的意义是「自己续帧追一个终点」，而此刻终点
+        // 在手指上，两头一起动就是画面在拉扯。
+        let (progress, walked) = match turn.run {
+            TurnRun::Following { t } => (t, false),
+            _ => {
+                // `present` 给 `true`：这一趟只需要「进场」那半 —— 走了多少就是 `progress`，
+                // 出场那一页由同一个数反着算（`turn_animation::slide::slide_shifts` 那两个返回值），
+                // 所以不必再为出场页单独挂一把 `Presence`。
+                let id = TransitionId::from(ElementId::from(("reader-turn", turn.seq)));
+                let clock = Presence::new(id, true)
+                    .transition(nav_transition(cx))
+                    .sample(window, cx)
+                    .progress;
+                // 松手那一腿不是从 0 走的：从手指那一点接着走完或走回，否则读者会看见
+                // 自己握过的那一截被重放一遍。
+                let progress = match turn.run {
+                    TurnRun::Released { from, revert } => {
+                        chrome::tween(from, if revert { 0.0 } else { 1.0 }, clock)
+                    }
+                    _ => clock,
+                };
+                (progress, clock >= 1.0)
+            }
+        };
+        if walked {
+            // 弹回那一趟不落地：它「走完」的意思是回到出发那一张，页号与锚章一个字都不动。
+            if turn.run.lands()
+                && let Some(to) = turn.arriving
                 && to.chapter != self.chapter_index()
             {
                 self.finish_chapter_turn(to);
@@ -115,19 +138,12 @@ impl ReaderSession {
         }
         Some(TurnFrame {
             progress,
+            style: turn.style,
             leaving: turn.leaving,
             arriving: turn.arriving,
             scroll: turn.scroll,
             forward: turn.forward,
         })
-    }
-
-    /// 平移翻页当前沿哪根轴走（读者在全局配置里选的那一档）。
-    ///
-    /// 每帧读一次而不是挂订阅：这一帧的位移本来就要用这个数，而 `sync_prefs` 早就是
-    /// 同一形状的每帧比较。
-    fn page_turn_vertical(&self, cx: &App) -> bool {
-        matches!(ConfigHolder::appearance(cx).page_turn, PageTurn::Vertical)
     }
 }
 
@@ -166,8 +182,9 @@ impl Render for ReaderSession {
         // `&mut Window` + `&mut App`，而 `match &mut self.source` 进去之后 `self` 就只能
         // 逐字段借了（见下面那条同样的取舍）。采完给回的是一个 `Copy` 的快照，两臂各读各的。
         let turn = self.turn_frame(window, cx);
-        // 平移沿竖轴还是横轴，是读者在全局配置里选的那一档（`PageTurn`）。
-        let vertical = self.page_turn_vertical(cx);
+        // 章界那一趟起时要抄的档位。在 `self` 被拆成字段借之前采好：`begin_turn` 那种
+        // 要整块 `&mut self` 的方法在下面那臂里调不动。
+        let page_turn = ConfigHolder::appearance(cx).page_turn;
         let gap = chrome::spread_gap(self.prefs.margin_x);
         // 退档判据与排版必须量同一个版心宽，所以用 `Document` 的那个式子算，不在这里另定一套。
         let usable = Document::content_width(window, &self.prefs, self.reserve.width);
@@ -210,6 +227,9 @@ impl Render for ReaderSession {
         let mut column = div().size_full().relative().bg(cx.theme().background);
         // 图片永远压在字形之上：收集起来，等 `element` 入树之后再挂。
         let mut overlays: Vec<AnyElement> = Vec::new();
+        // 这一档这一帧要盖在两张纸之上的那几块：折页的纸面与折谷四道，覆盖/层叠的前缘
+        // 投影与纸边光。其余档位给的是空清单，所以下面那一块一个形状都不会入树。
+        let mut shades = turn_animation::Shades::new();
         // 「点这张图」要写出去的那个状态，由阅读页持有（见 `image_viewer`）。没挂上的
         // 会话（单独的渲染测试）图片就不可点。
         let viewer = self.image_viewer.clone();
@@ -505,6 +525,9 @@ impl Render for ReaderSession {
                             band.start - placed.base_y,
                             self.header_reserve,
                             (band.start - placed.base_y)..(band.end - placed.base_y),
+                            // 连续滚动这一臂只摆一张纸（翻页就是补间那一个 y），没有要裁的
+                            // 另一张 ⇒ 不裁。
+                            None,
                         );
                         let __fills = __fills.ns();
                         super::perf::add(|frame| frame.fills_ns += __fills);
@@ -583,49 +606,63 @@ impl Render for ReaderSession {
                             } else {
                                 target_pages.saturating_sub(1)
                             };
-                            self.turn = Some(Turn {
-                                seq: 0,
-                                leaving: Some(PageRef {
-                                    chapter: current,
-                                    page: self.page,
-                                }),
-                                arriving: Some(PageRef {
-                                    chapter: target,
-                                    page: target_page,
-                                }),
-                                scroll: None,
-                                forward: delta > 0,
-                            });
-                            self.turn_seq += 1;
+                            // 起这一趟走 [`start_turn`]，不在这里手摆：从前这里写死
+                            // `seq: 0` 再把计数器加一，于是**每一趟**跨章用的都是同一把时钟键
+                            // —— 第二次跨章时那把键上还挂着上一趟「已经走完」的状态，
+                            // `Presence` 第一帧就给回 1.0，章当场落定。
                             self.pending_chapter_turn = None;
+                            start_turn(
+                                &mut self.turn,
+                                &mut self.turn_seq,
+                                page_turn,
+                                mode,
+                                Turn {
+                                    leaving: Some(PageRef {
+                                        chapter: current,
+                                        page: self.page,
+                                    }),
+                                    arriving: Some(PageRef {
+                                        chapter: target,
+                                        page: target_page,
+                                    }),
+                                    forward: delta > 0,
+                                    ..Default::default()
+                                },
+                            );
                             // 这一帧的 `turn` 已经在上面采过样了；再要一帧才轮到这次滑动。
                             window.request_animation_frame();
                         }
                     }
 
                     // 要摆的那几页：定住时只有当前这一页；动画在走时**多出另一张纸**
-                    // （同章邻页，或跨章的目标页），两张沿当前轴同速平移
-                    // （判据与算法都在 [`chrome::slide_shifts`]）。
-                    let mut slots: [(PageRef, (f32, f32)); 2] = [(
+                    // （同章邻页，或跨章的目标页），两张各自怎么摆由这一趟带上来的那一档
+                    // 决定 —— 位移与层级都来自 [`turn_animation`]。
+                    let rest = Sheet {
+                        offset: (0.0, 0.0),
+                        z: 0,
+                        cut: None,
+                    };
+                    let mut slots: [(PageRef, Sheet); 2] = [(
                         PageRef {
                             chapter: current,
                             page: self.page,
                         },
-                        (0.0, 0.0),
+                        rest,
                     ); 2];
                     let mut count = 1usize;
                     let mut cross_chapter = false;
                     if let Some(frame) = turn {
-                        let dist = if vertical {
-                            viewport_height
-                        } else {
-                            f32::from(viewport_size.width)
-                        };
-                        let (leaving, incoming) =
-                            chrome::slide_shifts(frame.progress, dist, frame.forward);
-                        let shift_of = |value: f32| {
-                            if vertical { (0.0, value) } else { (value, 0.0) }
-                        };
+                        let style = turn_animation::of(frame.style);
+                        // 那张纸占的矩形，**元素坐标**：折线、逐字裁剪与折面多边形全算在
+                        // 这一套里，画的那一头就一个偏移都不必再加。
+                        let area = turn_animation::Area::new(
+                            0.0,
+                            self.header_reserve,
+                            f32::from(viewport_size.width),
+                            self.header_reserve + viewport_height,
+                        );
+                        shades = style.shades(frame.progress, frame.forward, area);
+                        let [incoming, outgoing] = style.sheets(frame.progress, frame.forward, area);
                         let leaving_ref = frame.leaving.unwrap_or(PageRef {
                             chapter: current,
                             page: self.page,
@@ -637,33 +674,42 @@ impl Render for ReaderSession {
                         if arriving_ref.chapter != current {
                             // 跨章：源页往外走、目标页往里走，各用各的章。
                             cross_chapter = true;
-                            slots[0] = (leaving_ref, shift_of(leaving));
-                            slots[1] = (arriving_ref, shift_of(incoming));
+                            slots[0] = (leaving_ref, outgoing);
+                            slots[1] = (arriving_ref, incoming);
                             count = 2;
                         } else {
-                            // 同章：进场页在前（命中与 `page_shift` 归它），出场页在后。
-                            slots[0] = (arriving_ref, shift_of(incoming));
+                            // 同章：`slots[0]` 恒是进场那一张 —— 命中与 `page_shift` 归它。
+                            // 入树顺序另按 `z` 排（见下），两者不必一致：覆盖档要把这张
+                            // 抬到停着的旧页之上，而它始终是「这一屏的当前页」。
+                            slots[0] = (arriving_ref, incoming);
                             if leaving_ref != arriving_ref {
-                                slots[1] = (leaving_ref, shift_of(leaving));
+                                slots[1] = (leaving_ref, outgoing);
                                 count = 2;
                             }
                         }
                     }
                     // 当前页这一帧偏了多少。命中换算读这一格（`to_layout` 里减掉它）：
-                    // 跨章时两张纸的章不同，命中在 [`Self::chapter_turn_in_flight`] 已经让位，
+                    // 跨章时两张纸的章不同，命中在 [`Self::turn_in_flight`] 已经让位，
                     // 这里给 0 是让旧坐标不再被减第二次。
                     self.page_shift = if cross_chapter {
                         (0.0, 0.0)
                     } else {
-                        slots[0].1
+                        slots[0].1.offset
                     };
 
-                    for (page_ref, at) in slots.into_iter().take(count) {
+                    // 入树顺序就是绘制层级（后入树的压在上面）。两张同层时保持上面的
+                    // 原顺序，所以平移仍然读成一条纸带整体在走。
+                    let mut order = [0usize, 1];
+                    if count == 2 && slots[0].1.z > slots[1].1.z {
+                        order.swap(0, 1);
+                    }
+                    for which in order.into_iter().take(count) {
+                        let (page_ref, at) = slots[which];
                         let Some(doc) = book.span_doc(page_ref.chapter) else {
                             continue;
                         };
                         let slices = doc.slices();
-                        let (shift_x, shift_y) = at;
+                        let (shift_x, shift_y) = at.offset;
                         for index in 0..columns {
                             let Some(slice) = slices.get(page_ref.page * columns + index) else {
                                 continue;
@@ -698,17 +744,53 @@ impl Render for ReaderSession {
                             shape_runs(&mut scene, doc, window);
                             let __sh = __sh.ns();
                             super::perf::add(|f| f.shape_runs_ns += __sh);
+                            // 折页：这一张纸按它**自己那一条**裁剪收字 —— 进场那一张只画
+                            // 已经空出来的那一侧，出场那一张只画还平摊着的那一侧。裁剪与
+                            // 折面用的是同一条折线，所以影子收掉的那一刻字也正好收干净，
+                            // 不会出现「影子没了、字还压着走」的那一帧。
+                            if let Some(cut) = at.cut {
+                                for run in scene.runs.iter_mut() {
+                                    run.cut = Some(cut);
+                                }
+                            }
                             element.extend(scene.runs);
+                            // 块级装饰（`background-color`、`border`、`<hr>`）也跟着那张纸
+                            // 走：中心落在裁掉那一侧就整块不画。字是逐点裁的，而一个装饰块
+                            // 是一个矩形、没有「裁一半」的画法 —— 逐像素的多边形裁剪要的是
+                            // gpui 没有的东西（`ContentMask` 只有矩形）。留白块比伸到隔壁那
+                            // 张纸上的色块好读。
                             for decor in scene.decorations {
+                                if at.cut.is_some_and(|cut| {
+                                    !cut.keeps(
+                                        decor.x + decor.width * 0.5,
+                                        decor.top + decor.height * 0.5,
+                                    )
+                                }) {
+                                    continue;
+                                }
                                 column.extend(decoration_child(decor));
                             }
                             // 两张栏的图都要摆进同一份 `overlays`；跨章滑动时目标章那几张
                             // 也按「这一帧在场」记账，帧末回收就不会把还在画的图放掉。
                             for image in scene.images {
+                                // 中心落在折线哪一侧，就按那一侧决定画不画。整张一起收而不
+                                // 是切一半：切一半要逐像素的多边形裁剪，而 gpui 的 `ContentMask`
+                                // 只有矩形（gpui-pre-0.3.9 `src/window.rs:2226` 那条注释）。
+                                // 但 `painted` 照问 —— 那一问就是「这一帧在场」的记账，跳过它
+                                // 会让被折走的图在 17 帧里被判离场，露出来时再白上传一趟。
+                                let shown = at.cut.is_none_or(|cut| {
+                                    cut.keeps(
+                                        image.x + image.width * 0.5,
+                                        image.top + image.height * 0.5,
+                                    )
+                                });
                                 let Some(rendered) = painted(&atlas, image.image.clone(), view, cx)
                                 else {
                                     continue;
                                 };
+                                if !shown {
+                                    continue;
+                                }
                                 let index = overlays.len();
                                 overlays.push(image_child(
                                     image,
@@ -733,6 +815,7 @@ impl Render for ReaderSession {
                                 slice.origin_y,
                                 top,
                                 slice.origin_y..(slice.origin_y + slice.height + 1.0),
+                                at.cut,
                             );
                             let __fills = __fills.ns();
                             super::perf::add(|f| f.fills_ns += __fills);
@@ -867,6 +950,50 @@ impl Render for ReaderSession {
             element = element.reader(Some(cx.entity().downgrade()));
         }
         column = column.child(element);
+        // 这一档要盖在两张纸**之上**的那几块：折页的纸面与它的四道阴影，覆盖/层叠的前缘
+        // 投影与纸边光。它们都不属于任何一张纸 —— 两张纸的字形 runs 烘在同一个元素里，
+        // 纸与纸之间没有可插入的绘制层 —— 所以只能作为一组盖上去的多边形来画。形状、渐变
+        // 方向、浓淡全由 `turn_animation` 算好，这一头一个几何都不做。
+        //
+        // 层级是字形之上、图片之下：这些影子本来就落在纸面上，而图是纸面上的另一层内容。
+        if !shades.items().is_empty() {
+            let paper = cx.theme().background;
+            column = column.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let origin = bounds.origin;
+                        for shade in shades.items() {
+                            // 零面积与零墨都是「这一帧这一块不存在」：折到尽头折面镜像到
+                            // 页外去、投影走到页的左缘自己被裁没，两处都靠这一步收干净。
+                            if shade.shape.is_empty() || shade.ink <= 0.0 {
+                                continue;
+                            }
+                            let base = match shade.tint {
+                                // 纸面是唯一不透明的一块。有它在那儿，那一片才读成「纸折
+                                // 过去了」，而不是「字一排排消失了」。
+                                Tint::Paper => paper,
+                                Tint::Dark => hsla(0., 0., 0., shade.ink),
+                                Tint::Light => hsla(0., 0., 1., shade.ink),
+                            };
+                            let color: Background = match shade.angle {
+                                // 渐变方向也由那一头给：它指的是「离开折线（或离开前缘）
+                                // 的那一侧」，所以浓的那端总正好贴在自己的边上。
+                                Some(angle) => linear_gradient(
+                                    angle,
+                                    linear_color_stop(base, 0.),
+                                    linear_color_stop(base.opacity(0.), 1.),
+                                ),
+                                None => base.into(),
+                            };
+                            paint_fold(window, &shade.shape, origin, color);
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
         // 图片最后入树：绝对定位不参与布局，却要压住上面所有层级。
         for image in overlays {
             column = column.child(image);
@@ -875,19 +1002,19 @@ impl Render for ReaderSession {
         // 里的 `img` 重新传回去，白花一趟上传（`image_atlas::end_frame` 那两条不动的规矩）。
         self.atlas
             .update(cx, |atlas, cx| atlas.end_frame(window, cx));
-        // 选中菜单（M6）：摆位是 `selection_menu::slot` 那条纯判断，元素本体在
-        // `selection_menu.rs` 里。浮层点不住的教训见 page.rs 模块注释，所以它是压在正文
+        // 选中菜单（M6）：摆位是 `selection::slot` 那条纯判断，元素本体在
+        // `selection.rs` 里。浮层点不住的教训见 page.rs 模块注释，所以它是压在正文
         // 之上的真按钮；拖动期间收起，松手即回。
         // 卡片高固定两块（动作条 + 恒在的颜色胶囊），所以不必再看这一帧有没有挑中某条划线。
         let slot = if self.selection_menu_open() {
-            selection_menu::slot(
+            selection::slot(
                 menu_anchor.0,
                 menu_anchor.1,
                 f32::from(viewport_size.height),
-                selection_menu::card_height(),
+                selection::card_height(),
             )
         } else {
-            selection_menu::Slot::Hidden
+            selection::Slot::Hidden
         };
         // 没有菜单上屏时必须把上一帧的锚位清掉：`tap_with_selection` 读的就是那份
         // bounds，留着的话「点一下菜单原来那块空地」还算点在菜单上。
@@ -967,6 +1094,37 @@ pub(in crate::ui::features::reader) fn spoken_lines(
             (!text.is_empty()).then(|| SharedString::from(text))
         })
         .collect()
+}
+
+/// 把要盖在纸上的那一个多边形填进场景。顶点已经带在元素坐标里（与字形的 `run.x` /
+/// `run.baseline` 同一套），所以这里只加一个 `origin` 就完事，不必再补页边距 —— 补了就是
+/// 旧版那一处「影子按 `margin + at` 摆、裁剪按 `at` 判」，两处差着一个页边距。
+///
+/// 为什么不用 `paint_quad`：quad 只能轴对齐，而这一档要的全部就是那条**斜的**折线（以及
+/// 层叠那条跟着纸一起沉的上缘）；用 quad 画出来的就是旧版那一根竖棍。`build()` 失败只可能
+/// 是退化到零面积的那一片，画不出东西不该让整帧失败 —— 与 `paint.rs` 里单个字形画不出去时
+/// 同一个取舍。
+fn paint_fold(
+    window: &mut Window,
+    poly: &turn_animation::Poly,
+    origin: Point<Pixels>,
+    color: impl Into<Background>,
+) {
+    let mut path = PathBuilder::fill();
+    let mut first = true;
+    poly.each(|x, y| {
+        let at = point(origin.x + px(x), origin.y + px(y));
+        if first {
+            path.move_to(at);
+            first = false;
+        } else {
+            path.line_to(at);
+        }
+    });
+    path.close();
+    if let Ok(built) = path.build() {
+        window.paint_path(built, color);
+    }
 }
 
 /// 这一帧这张图画得出来吗 —— 顺手把「这一帧在场」记进图集（帧末的回收按这个数放人）。
@@ -1252,6 +1410,7 @@ fn annotation_fills(
     origin_y: f32,
     header: f32,
     band: Range<f32>,
+    cut: Option<super::turn_animation::Cut>,
 ) {
     if stored.is_empty() || band.start >= band.end {
         return;
@@ -1276,6 +1435,12 @@ fn annotation_fills(
         );
         let color = palette.color(&span.color);
         for line in lines {
+            // 读者划的那道底色也跟着那张纸走：中心落在被裁掉那一侧就不画。不然一条亮黄的
+            // 线会浮在已经被盖走/折走的字上，那一帧读起来像划线自己没跟着翻页。
+            let center = line.center();
+            if cut.is_some_and(|cut| !cut.keeps(f32::from(center.x), f32::from(center.y))) {
+                continue;
+            }
             element.underline(line, color);
         }
     }

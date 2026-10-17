@@ -53,6 +53,27 @@ public final class GpuiSystemUi {
     }
 
     /**
+     * Send the whole task to the back — the same thing HOME does.
+     *
+     * <p>This is what the back gesture asks for once the app has nothing left to pop. The
+     * alternative ({@code finish()} / letting the process drop) looks like a crash: the process
+     * disappears while its window is still the foreground top window, so WindowManager logs
+     * {@code WINDOW DIED} and {@code Force removing ActivityRecord … app died, no saved state}
+     * — with no saved state there is no task snapshot, and with no snapshot the system has
+     * nothing to animate. Going to the back keeps the process and the activity alive, plays the
+     * system's own app→home transition, and makes the next entry an instant resume. To actually
+     * leave, the user swipes the card away in recents, which is a transition the system owns
+     * end to end.</p>
+     *
+     * <p>Called by Rust, from any thread: {@link Activity#moveTaskToBack} is
+     * {@code @MainThread}, so it goes through {@code runOnUiThread} like everything else here.</p>
+     */
+    public static void moveTaskToBack(Activity activity, boolean nonRoot) {
+        if (activity == null) return;
+        activity.runOnUiThread(() -> activity.moveTaskToBack(nonRoot));
+    }
+
+    /**
      * Move the music stream one volume step in the direction Rust names.
      *
      * <p>The volume keys are not handled by the system here: NativeActivity forwards every key

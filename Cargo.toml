@@ -134,6 +134,13 @@ anyhow = "1"
 # 直接依赖 —— 与上面 `flate2` / `base64` 那两条同样的理由。
 async-channel = "2"
 
+# 只要一个 `_exit`。Activity 结束那条路上 `std::process::exit` 会跑 atexit 与全局析构，
+# 而 Android 的 HWUI 工作线程正好去拿那把已经被销毁的锁 —— 2026-10-18 在 Meizu 20 上实测到
+# `FORTIFY: pthread_mutex_lock called on a destroyed mutex` → `Fatal signal 6` in `hwuiTask0`，
+# 也就是「不闪退」的退出自己变成了闪退。`_exit` 直接陷进 `exit_group`，一个处理器都不跑。
+# **这不是新依赖树**：锁里已有 0.2.189，gpui / wgpu / ndk 那几条链本来就在编译它。
+libc = "0.2"
+
 # 只为一件事：把「读者在哪个时区」这个数问出来（`ui::host::local_offset_secs`），
 # 好把它作为参数交给 `folio_core` 的那些按本地日汇总的查询。
 #

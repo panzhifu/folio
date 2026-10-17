@@ -1908,6 +1908,7 @@ dependencies = [
  "gpui-pre-mobile",
  "image",
  "jni 0.22.4",
+ "libc",
  "log",
  "tempfile",
  "tracing",

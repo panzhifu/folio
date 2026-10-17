@@ -107,6 +107,41 @@ fn android_main(app: android_activity::AndroidApp) {
     crate::ui::shared::services::shutdown();
 
     tracing::info!("android_main: Application::run returned — activity will finish");
+
+    // 收尾之后**必须把这个进程带走**，不能只是让 `android_main` 返回。
+    //
+    // 理由是两条撞在一起的事实：
+    // - `android-activity` 每条 Activity 实例都换一根**新的** native 线程跑 `android_main`；
+    // - `gpui_mobile` 的 `PLATFORM` 是进程内的 `OnceLock`，里面那个 `AndroidDispatcher`
+    //   记的是**第一次**那根线程的 `ALooper`（`AndroidDispatcher::new()` 当场
+    //   `ALooper_forThread()` 存的）。
+    //
+    // 所以只要进程活到下一次进入，新的 `android_main` 就会拿旧 looper 去
+    // `App::new_app` → `assert!(is_main_thread(), "must construct App on main thread")`
+    // → SIGABRT。2026-10-18 在 Meizu 20 上实测到整条链：按返回键结束 Activity 后进程留在
+    // 后台（logcat：`The Process dev.folio.reader Already Exists in BG. So sending its
+    // PID: 28388`），再点开是同一 pid、新的 tid 28688，日志停在
+    // `android_main: creating GPUI Application` 紧跟一句
+    // `PANIC ... app.rs:927:9: must construct App on main thread`。第三次能进是因为那次
+    // abort 已经把进程带走了 —— 也就是说「闪退一次」本身就是这个 bug 的自愈。
+    //
+    // 同一根因还有第二处症状：第二次进入时 `日志装不上：这个进程里只有一个 subscriber 的
+    // 位置`（tracing 的全局 dispatcher 也只有一个坑位），所以那一次连日志都是残的。
+    //
+    // 按 HOME 退到后台**不走这条路**：Activity 没结束、`run` 不返回，进程留着是好事
+    // （再进来是瞬时的，不用重开书、不用重排）。这里退的只有「Activity 已经决定结束」
+    // 那一种情况，而它下一次进来本来就要重建整个应用。
+    //
+    // 真正的长期解不在这一句：要么把 `PLATFORM` 做成可重绑（要动 gpui-mobile 那份 fork），
+    // 要么迁到 fork 里 `android::host` 那条进程常驻渲染线程的路（它存在的理由就是这一条）。
+    //
+    // 用 `_exit` 而不是 `std::process::exit`：后者会跑 atexit 与全局析构，而 Android 的
+    // HWUI 工作线程正好去拿那把已经被销毁的锁 —— 2026-10-18 实测
+    // `FORTIFY: pthread_mutex_lock called on a destroyed mutex` → `Fatal signal 6` in
+    // `hwuiTask0`，「不闪退」的退出自己变成了闪退。`_exit` 直接陷进 `exit_group`，一个
+    // 处理器都不跑；上面那句 `run returned` 与有序收尾都已经写完了，日志的最后一两行可能
+    // 留在缓冲区里没落盘，换一次不崩的启动是划算的。
+    unsafe { libc::_exit(0) };
 }
 
 /// 藏起 / 还原系统栏（阅读沉浸）。状态栏与导航栏一起藏；读者按完返回、书还在往外走的那一段，
@@ -132,6 +167,32 @@ pub(crate) fn set_immersive(on: bool) {
     }) {
         Ok(()) => tracing::debug!("set_immersive: {on} 已递给系统"),
         Err(err) => tracing::warn!("set_immersive: {err}"),
+    }
+}
+
+/// 把整个任务丢回后台（返回键走到栈底那一档，见 `platform::send_task_to_back` 那条）。
+///
+/// 形状照 [`set_immersive`]：递给 Java、它自己切回 UI 线程（`moveTaskToBack` 是
+/// `@MainThread`，在 GPUI 的原生线程直调会撞 `CalledFromWrongThreadException`），失败只写
+/// 日志 —— 退不回后台不该把返回键这一按变成崩，最坏情况就是再按一次 HOME。
+pub(crate) fn send_task_to_back() {
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    // 同上：本文件顶部把 `gpui_mobile::android::jni` 引进成了 `jni`，这里要走 crate 根。
+    use ::jni::objects::JValue;
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("moveTaskToBack"),
+            ::jni::jni_sig!("(Landroid/app/Activity;Z)V"),
+            &[JValue::Object(&act), JValue::Bool(true)],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::info!("send_task_to_back: 已递给系统"),
+        Err(err) => tracing::warn!("send_task_to_back: {err}"),
     }
 }
 

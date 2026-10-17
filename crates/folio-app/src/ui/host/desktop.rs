@@ -6,7 +6,7 @@
 
 use gpui_kit::{App, Window};
 
-use super::{Host, Insets, find_family, log_no_family};
+use super::{BackAtRoot, Host, Insets, find_family, log_no_family};
 
 pub(super) struct DesktopHost;
 
@@ -23,10 +23,10 @@ impl Host for DesktopHost {
         true
     }
 
-    fn back_exits_app(&self) -> bool {
+    fn back_at_root(&self) -> BackAtRoot {
         // 桌面的窗口归窗口管理器与那条标题栏管：返回键弹完栈就该停在那儿，
-        // 把整个进程关掉是错的动作。
-        false
+        // 把整个进程关掉是错的动作，也没有「丢回后台」这一说 —— 那一条是任务栈的概念。
+        BackAtRoot::Stay
     }
 
     fn long_press(&self) -> bool {

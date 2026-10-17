@@ -5,7 +5,10 @@
 //! 加上读者自己放进 `themes/` 的 JSON（见 `ui/shared/theme.rs`）。每一侧都记名字，
 //! 即使当前模式只用到其中一侧 —— 之后换模式时读者的选择还在。
 
+use gpui_kit::component::h_flex;
 use gpui_kit::{IntoElement as _, ParentElement, Styled, div};
+
+use crate::ui::widgets::muted_label;
 
 use super::*;
 
@@ -124,25 +127,37 @@ fn theme_item(cx: &App, mode: ThemeMode, title: &str, hint: &str) -> Row {
     .keywords(&["theme", "color", "主题", "配色"])
 }
 
-/// 读者自己的配色往哪个目录放。
+/// 读者自己的配色往哪个目录放，加一颗「打开所在文件夹」—— 与配置文件那一格同一个动作
+/// （共用 [`super::open_folder_button`]）。
 ///
-/// 只报路径、不给「打开这个目录」那颗按钮：本应用没有调起文件管理器的平台代码，
-/// 摆一颗点了没反应的按钮比少一颗更糟。也不会当场重扫 —— 那一份是启动时读的
-/// （`theme::register_user_themes`），所以说明写的是「下次启动」。
+/// 点了它**不会**当场重扫：那一份是启动时读的（`theme::register_user_themes`），所以说明
+/// 写的仍是「下次启动」。按钮只负责把人送到那个目录跟前，放 JSON 进去还是要读者自己做。
 fn custom_group(cx: &App) -> Group {
-    let dir = folio_core::infra::paths::themes_dir().display().to_string();
+    let dir = folio_core::infra::paths::themes_dir();
     group(
         tr(cx, "group.custom_themes"),
         vec![
             Row::custom_titled(tr(cx, "field.theme_dir"), move |cx| {
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(dir.clone())
+                let dir = dir.clone();
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(muted_label(dir.display().to_string(), cx)),
+                    )
+                    .child(super::open_folder_button(
+                        "appearance-open-themes-dir",
+                        dir,
+                        cx,
+                    ))
                     .into_any_element()
             })
             .description(tr(cx, "field.theme_dir.desc"))
-            .keywords(&["theme", "folder", "目录", "配色"]),
+            .keywords(&["theme", "folder", "目录", "配色", "打开"]),
         ],
     )
 }

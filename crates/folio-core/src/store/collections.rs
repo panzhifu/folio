@@ -341,4 +341,42 @@ mod tests {
             "撞上已有名字要被 UNIQUE 挡下，而不是静默合并"
         );
     }
+
+    /// 组卡要的数：卡上画得下的那几本封面 + 那一行念的**整组**本数。
+    ///
+    /// 三条各自都能单独坏掉而编译照样绿：`truncate` 忘了 → 一个几百本的组每次重查架面都
+    /// 把几百行读出来（画不出来的那些也读）；`count` 跟着 `items` 走 → 卡下面那行念成
+    /// 「4 本」而那一组其实有 300 本；空组被滤掉 → 读者刚建的那组当场看着像没建成。
+    #[test]
+    fn a_tile_carries_the_head_of_its_group_and_the_whole_count() {
+        let store = Store::in_memory().unwrap();
+        let ids: Vec<i64> = (0..5).map(|ix| book(&store, &format!("{ix}.epub"))).collect();
+        let full = store.create_collection("满的").unwrap();
+        let empty = store.create_collection("空的").unwrap();
+        for id in &ids {
+            store.add_to_collection(full, *id).unwrap();
+        }
+
+        let tiles = store.collection_tiles(2).unwrap();
+        assert_eq!(
+            tiles.iter().map(|(c, _)| c.id).collect::<Vec<_>>(),
+            vec![full, empty],
+            "空的那组也要有一条 —— 它排在后面是因为名字的字字节序在后"
+        );
+        let (group, head) = &tiles[0];
+        assert_eq!(group.book_count, 5, "下面那行念的是整组，不是卡上画得下的那几本");
+        assert_eq!(head.len(), 2, "卡上只装得下两格");
+        // 组内那条「最近放进去的在先」（`shelf_in_collection_in` 的 `added_at DESC`）：
+        // 卡上那几本就是最后丢进来的那几本。
+        assert_eq!(
+            head.iter().map(|i| i.id).collect::<Vec<_>>(),
+            vec![ids[4], ids[3]],
+            "取的是组内那条排序的头几本，不是库里最小 id 的那几本"
+        );
+        assert!(tiles[1].1.is_empty(), "空组的卡上什么都没有，但那张卡在");
+
+        // `limit` 比整组还大时不该多出一条也不该报错。
+        let all = store.collection_tiles(50).unwrap();
+        assert_eq!(all[0].1.len(), 5);
+    }
 }

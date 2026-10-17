@@ -30,7 +30,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Corners, Entity, FocusHandle,
-    Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
     px,
 };
@@ -42,6 +42,7 @@ use super::chrome::{
 use super::image_viewer::{self, ImageViewer};
 use super::session::ReaderSession;
 use super::toc_panel::{TocEvent, TocPanel};
+use super::turn_animation;
 use crate::ui::features::settings::CompactSettings;
 use crate::ui::platform;
 use crate::ui::shared::config_model::ConfigHolder;
@@ -49,6 +50,15 @@ use crate::ui::shared::l10n::tr;
 use crate::ui::shell::AppShell;
 use crate::ui::shell::navigation::SizeClass;
 use crate::ui::widgets::TopBar;
+
+/// 脚注小纸片的最宽那一条：内容的 `max_w` 与夹边算的是同一个数。
+const FOOTNOTE_CARD_W: Pixels = px(300.);
+/// 弹层自己那层内边距的**上估**。算少了卡片会压到屏外，算多了只是偏进来一点 —— 宁可偏进来。
+const FOOTNOTE_PAD: Pixels = px(12.);
+/// 卡片离屏边最少留这么多。
+const FOOTNOTE_EDGE: Pixels = px(8.);
+/// 标记下缘与卡片之间的缝。
+const FOOTNOTE_GAP: Pixels = px(10.);
 
 pub struct ReadingPage {
     reader: Entity<ReaderSession>,
@@ -374,7 +384,7 @@ impl ReadingPage {
 
     /// 正文上的一击：先让选中说话（拖选松手的豁免、选中的清除/菜单回开），
     /// 再按分区照结果动。见 [`chrome::Chrome::handle_body_tap`] 与
-    /// `modules/selection.rs` 的 `tap_with_selection`。
+    /// `selection.rs` 的 `tap_with_selection`。
     fn on_body_tap(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let position = event.position();
         // 三条判据的归因与顺序都在 `ReaderSession::tap_on_body` 里（那里才测得到）。
@@ -757,20 +767,31 @@ impl ReadingPage {
     /// 下一帧自然消失。
     ///
     /// 宽度给上限而不是铺满：一条注文常常只有一句，铺满整屏读起来像一屏正文。
-    fn footnote_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn footnote_popover(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let note = self.reader.read(cx).footnote()?;
         let text = note.text.clone();
         let anchor = note.anchor;
+        // 小纸片按**最宽那一条**夹在屏内：靠右缘的标记不能再让卡片从那儿起笔，靠近左缘的
+        // 也不能。夹的是最宽值，所以内容窄于它时卡片会偏左一点 —— 偏一点看得见，飞出屏外
+        // 看不见，两害相权取其轻。
+        let card = FOOTNOTE_CARD_W + FOOTNOTE_PAD * 2.;
+        let edge = FOOTNOTE_EDGE;
+        let room = window.bounds().size.width - card - edge;
+        let left = (anchor.x - card * 0.5).clamp(edge, room.max(edge));
         let page = cx.entity().clone();
         Some(
             div()
                 .absolute()
-                .left(anchor.x)
+                .left(left)
                 .top(anchor.y)
                 .child(
                     Popover::new("reader-footnote")
                         .anchor(Anchor::TopLeft)
-                        .offset(px(10.))
+                        .offset(FOOTNOTE_GAP)
                         .open(true)
                         .on_open_change(move |open, _window, cx| {
                             if !*open {
@@ -791,7 +812,7 @@ impl ReadingPage {
                         )
                         .content(move |_, _, cx| {
                             div()
-                                .max_w(px(300.))
+                                .max_w(FOOTNOTE_CARD_W)
                                 .text_sm()
                                 .text_color(cx.theme().popover_foreground)
                                 .child(text.clone())
@@ -833,26 +854,38 @@ impl ReadingPage {
             .into_any_element()
     }
 
-    /// 面板最后一行：左边那颗下拉选翻页沿哪根轴走，右边那颗把完整的设置屏压进来。
+    /// 面板最后一行：左边那颗下拉选翻页怎么走，右边那颗把完整的设置屏压进来。
     ///
     /// 下拉**往上开**（`Anchor::BottomLeft`）：这一行长在底栏卡片里、贴在屏幕底，往下开的话
     /// 那两块菜单有一半掉到屏幕外，读者只点得到上面那一块。
     ///
-    /// 两档的标签与设置页那一格共用 `[page_turn]` 那两条键，值走 `PageTurn` 的同一套形态，
-    /// 于是一处改了另一处不会各念各的。右边那一格存在是因为底栏的「设置」不再压屏了：
-    /// 完整那一屏（行距、段距、版心、字体家族）得在这一屏上有个入口。
+    /// 选项按**当前摆法**筛过（[`turn_animation::applies`]）：连续里只有「上下滚动」与「不走
+    /// 动画」讲得通，分页里「上下滚动」没有东西可滚。筛掉而不是灰着摆 —— 一排点不动的选项
+    /// 在手机上读起来像坏了。
+    ///
+    /// 按钮上念的是 `label_of`（与列表同源、对每一档都有答案），不是「在列表里找一找」：
+    /// 读者在连续里选了「上下滚动」再换成分页，那一档被筛掉了，但按钮不该因此退成一句
+    /// 「翻页动画」—— 他选的东西还在配置里，只是眼下这一屏用不上。
+    /// 右边那一格存在是因为底栏的「设置」不再压屏了：完整那一屏（行距、段距、版心、
+    /// 字体家族）得在这一屏上有个入口。
     fn turn_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mode = self.reader.read(cx).mode();
         let turn = ConfigHolder::appearance(cx).page_turn;
-        let items = [
-            (PageTurn::Horizontal, tr(cx, "page_turn.horizontal")),
-            (PageTurn::Vertical, tr(cx, "page_turn.vertical")),
-        ];
-        // 值对不上任何一个选项时念裸的键名而不是留一个空按钮 —— 与紧凑设置那一格同一条规矩。
-        let current = items
+        let label_of = |turn| match turn {
+            PageTurn::Slide => tr(cx, "page_turn.slide"),
+            PageTurn::SlideUp => tr(cx, "page_turn.slide_up"),
+            PageTurn::Cover => tr(cx, "page_turn.cover"),
+            PageTurn::Curl => tr(cx, "page_turn.curl"),
+            PageTurn::Scroll => tr(cx, "page_turn.scroll"),
+            PageTurn::None => tr(cx, "page_turn.none"),
+        };
+        let items: Vec<(PageTurn, SharedString)> = PageTurn::ALL
             .iter()
-            .find(|(value, _)| *value == turn)
-            .map(|(_, label)| label.clone())
-            .unwrap_or_else(|| tr(cx, "field.page_turn"));
+            .copied()
+            .filter(|value| turn_animation::applies(*value, mode))
+            .map(|value| (value, label_of(value)))
+            .collect();
+        let current = label_of(turn);
         let page_menu = cx.entity().clone();
         let page_more = cx.entity().clone();
         h_flex()
@@ -1029,7 +1062,7 @@ impl Render for ReadingPage {
         }
         // 脚注弹层压在目录之上、图片查看器之下：它是「从正文里抬起来的一张小纸」，
         // 盖住目录那种整屏弹层是对的，而放大看图时读者要的是图。
-        root = root.children(self.footnote_popover(cx));
+        root = root.children(self.footnote_popover(window, cx));
         // 查看器最后挂：它盖住的正是顶栏、底栏与弹层，所以谁都不该浮在它上面。
         // 没开着时这一格是空的，一个节点都不多。
         //

@@ -2,7 +2,8 @@
 //!
 //! 弹层本体在 **阅读页**（`page::ReadingPage::footnote_popover`，用 gpui-kit 的
 //! [`Popover`](gpui_kit::component::popover::Popover)），这里只负责三步：
-//! 「这一击落在脚注上」「注文是这句」「锚点是这儿」（窗口坐标）。会话把这个状态写进
+//! 「这一击落在脚注上」「注文是这句」「锚点是**标记自己那一格的下缘中点**」（窗口坐标）。
+//! 会话把这个状态写进
 //! [`ReaderSession::footnote`](super::super::session::ReaderSession)，阅读页订阅了会话，
 //! 于是下一帧把它画出来。
 //!
@@ -10,7 +11,7 @@
 //! `epub:type="noteref"` / `<aside epub:type="footnote">`，也认得老书塞在标记图
 //! `alt` / `zy-footnote` 里的注文。这一层只把它接到「屏幕上的一次点」。
 
-use gpui_kit::{Context, Pixels, Point, Window};
+use gpui_kit::{Context, Pixels, Point, Window, point, px};
 
 use super::super::session::Footnote;
 use super::super::session::ReaderSession;
@@ -39,23 +40,45 @@ impl ReaderSession {
     /// 排在普通链接之前（见 `page::ReadingPage::on_body_tap`）：脚注标记本身就是一条
     /// `<a href="#...">`，但它要的是「就地看注文」，不是「跳到注文那一行」。注文取不到
     /// （目标不在本章、也没有 `alt` 兜底）时返回 `false`，那一击落回寻常的链接跳转。
+    ///
+    /// 锚点取**标记自己那一格的下缘中点**，不取手指那一下：手机上手指肚盖住的是标记下方十几
+    /// 二十像素，按落点摆出来的小纸片读起来就是「离标记有点远、不在正下方」。标记与落点同在
+    /// 一栏、一片里，那一段排版坐标 → 窗口坐标的换算只是**一个平移量**，所以把两者在排版坐标
+    /// 里的差直接搬到窗口上就行 —— 不必在这里抄第二份「片原点 + 栏位 + 页眉让位」的式子，
+    /// 抄出来的第二份迟早与画字那一份对不上。
     pub fn open_footnote_at(
         &mut self,
         window: &Window,
         cx: &mut Context<Self>,
         at: Point<Pixels>,
     ) -> bool {
-        let Some((chapter, offset)) = self.offset_at(window, cx, at) else {
+        let Some((chapter, x, y)) = self.to_layout(window, at) else {
             return false;
         };
-        let Some(text) = self
+        let Some(doc) = self
             .book()
             .and_then(|book| book.span_doc(chapter))
-            .and_then(|doc| doc.footnote_note_at(offset))
         else {
             return false;
         };
-        self.show_footnote(text, at, cx);
+        let Some(hit) = doc.hit_test(window, cx, x, y) else {
+            return false;
+        };
+        let Some(text) = doc.footnote_note_at(hit.offset) else {
+            return false;
+        };
+        let anchor = match doc
+            .selection_rects(window, cx, hit.offset..hit.offset + 1)
+            .first()
+        {
+            Some(rect) => point(
+                at.x + px(rect.x + rect.width * 0.5 - x),
+                at.y + px(rect.y + rect.height - y),
+            ),
+            // 那一格量不出矩形（纯图片行等）时退回落点：小纸片还是要出来。
+            None => at,
+        };
+        self.show_footnote(text, anchor, cx);
         true
     }
 }
