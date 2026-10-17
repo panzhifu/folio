@@ -19,6 +19,11 @@
 //! （`gpui-mobile/src/android/window.rs:1316` 起，用 `momentum::VelocityTracker` 估速度、
 //! 用 `MomentumScroller` 在松手后每帧派发一次衰减增量），视图只要把事件里的 dy 累加到
 //! `scroll_y`。在这里再套一个 `MomentumScroller` 会把同一份惯量算两遍，滚起来直接翻倍。
+//!
+//! 读屏（TalkBack 那一类）也接在这一层的根节点上：正文是逐字形自绘的，accesskit 那棵树
+//! 里本来一个字都没有，所以要按「这一屏的行」现造一份合成子节点（[`spoken_lines`] 收集，
+//! `folio-reader` 那一句 `.role()` + `.a11y_synthetic_children()` 入树）。这份收集只在
+//! `Window::is_a11y_active()` 为真时跑 —— 没有读屏连着就一个节点都不建，也不为它分配。
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -33,10 +38,11 @@ use folio_core::store::Annotation;
 use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, EntityId, Hsla,
-    InteractiveElement as _, IntoElement, LongPressEvent, ParentElement, Pixels, Render,
-    RenderImage, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled,
-    TestSupportExt as _, TouchPhase, WeakEntity, Window, canvas, div, img, point, px, size,
+    A11ySubtreeBuilder, AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity,
+    EntityId, Hsla, InteractiveElement as _, IntoElement, LongPressEvent, ParentElement, Pixels,
+    Render, RenderImage, Role, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
+    Styled, TestSupportExt as _, TouchPhase, WeakEntity, Window, accesskit, canvas, div, img,
+    point, px, size,
 };
 
 use super::book::Book;
@@ -210,6 +216,12 @@ impl Render for ReaderSession {
         // 定版式那一页用什么手势放大：按得住长按的那一端用长按（单击留给翻页），
         // 按不住的那一端（桌面鼠标）用单击图内，翻页让给页外的留白。
         let long_press = crate::ui::host::supports_long_press(cx);
+        // 读屏（TalkBack 那一类）连着时才收集「这一屏念得出来的字」：一屏几十行、每行
+        // 一次分配，压在画字那条最热的路径上就是每帧的白花钱。gpui 在读屏接上的那一帧
+        // 会强制重画一次，所以这一格不需要自己盯变化（`Window::is_a11y_active` 的文档写的
+        // 就是这套）。收集到的那份在树根那一头交给 `a11y_synthetic_children`。
+        let speaking = window.is_a11y_active();
+        let mut spoken: Vec<SharedString> = Vec::new();
         // `&mut self.source` 只借用这一个字段，所以臂里写 `self.content_height`、
         // 读 `self.scroll_y` 都不冲突（前提是别把 `self` 整个传进函数）。
         match &mut self.source {
@@ -237,6 +249,10 @@ impl Render for ReaderSession {
                 );
                 self.content_height = 0.0;
                 self.laid_out.viewport = viewport_height;
+                // 兜底那一行也是正文位置上的字：读屏该念到它，不然这一状态整屏是静音的。
+                if speaking {
+                    spoken.push(text.clone());
+                }
             }
             Source::Fixed(book) => {
                 // 定版式：页是既定的，没有排版链。摆当前页，等比缩进视口、居中。
@@ -422,12 +438,18 @@ impl Render for ReaderSession {
                         // 「哪些行与这条带有关」是行盒的知识，不是界面的（`plans/阅读管线.md`
                         // §十一 第 4、10 条）——以前这里递的是 `0..行数`，每帧扫一遍整章。
                         let local = (band.start - placed.base_y)..(band.end - placed.base_y);
+                        // 可见行区间向引擎要一次，画与念共用同一个数：两处各要一次，
+                        // 念出来的与画出来的就会差一行。
+                        let lines = doc.visible_lines(local.clone());
+                        if speaking {
+                            spoken.extend(spoken_lines(doc, lines.clone()));
+                        }
                         let __t = super::perf::Timer::start();
                         let mut scene = Scene::build(
                             doc,
                             font_cache,
                             &family,
-                            doc.visible_lines(local.clone()),
+                            lines,
                             local,
                             band.start - placed.base_y,
                             self.prefs.margin_x,
@@ -653,6 +675,13 @@ impl Render for ReaderSession {
                                 + column_offset(column_width, gap, slice.column)
                                 + shift_x;
                             let top = self.header_reserve + shift_y;
+                            // 分页/双页这一臂的「在屏」就是这一片自己的行区间（片是引擎切的，
+                            // 一片一栏）。两栏按 `index` 依次接上去：`slices()` 的顺序是
+                            // 「页优先、页内按栏」的**逻辑**栏序，所以 RTL 的书念出来也是
+                            // 逻辑顺序 —— 与那一栏画在左边还是右边无关。
+                            if speaking {
+                                spoken.extend(spoken_lines(doc, slice.lines.clone()));
+                            }
                             let mut scene = Scene::build(
                                 doc,
                                 font_cache,
@@ -884,7 +913,7 @@ impl Render for ReaderSession {
                 cx.notify();
             }
         });
-        div()
+        let body = div()
             .id("folio-reader")
             // 宿主的测试要按 id 把滚轮事件投到这里。非 `test-support` 构建里这一层是透明的
             // （`Observed` 原样转交内部元素），所以真机上不多花一个节点。
@@ -892,8 +921,52 @@ impl Render for ReaderSession {
             .size_full()
             .overflow_hidden()
             .on_scroll_wheel(listener)
-            .child(column)
+            .child(column);
+        if !speaking {
+            return body;
+        }
+        // 正文是逐字形自绘的：accesskit 走的是元素树那一层，字不在树里，读屏念到的就是
+        // 一片空白。这一格把这一屏的行一行一个节点挂进 `folio-reader` 那个文档节点底下。
+        //
+        // 节点用 `Role::Label`，不用看着更贴切的 `Role::TextRun`：accesskit 那个通用过滤器
+        // （`accesskit_consumer::common_filter`）把 `TextRun` 判成 `ExcludeNode`，建了等于
+        // 没建；而 `Label` 正是 gpui 自己那个 `Text` 元素用的那一档（`elements/text.rs`），
+        // 也是 `accesskit_android` 唯一映射成 `android.widget.TextView` 的角色。
+        //
+        // `synthetic_node_id(ix)` 按行号取，所以**滚动前后同一格是同一个节点**：不然每翻
+        // 一屏 TalkBack 都会当成「一整片新内容」重新播报一遍。
+        body.role(Role::Document).a11y_synthetic_children(
+            move |builder: &mut A11ySubtreeBuilder| {
+                for (ix, line) in spoken.into_iter().enumerate() {
+                    let mut node = accesskit::Node::new(Role::Label);
+                    node.set_value(line.to_string());
+                    let id = builder.synthetic_node_id(ix);
+                    builder.push_child(id, node);
+                }
+            },
+        )
     }
+}
+
+/// 读屏（TalkBack 那一类）要的那份「这一屏的字」：`lines` 里每一行的可见文本，空行不占一格。
+///
+/// 文本向引擎要（`Layout::line_text`，与状态栏和那一族测试断言同一个来源），界面不重算：
+/// 行内图片位置上的哨兵字符它已经摘掉，念出来不会带一串乱码。列表标记（`::marker` 那个
+/// 「1.」）也不在这一份里 —— 它与选区、命中、批注锚点那三条路同一个口径，都不进可见文本，
+/// 把它念进去等于让同一个节点上两套坐标系并存。
+///
+/// 只在有读屏连着的时候调（判据是调用点那一句 `Window::is_a11y_active`）：一屏几十行、
+/// 每行一次分配，压在画字那条最热的路径上就是每帧白花的钱。
+pub(in crate::ui::features::reader) fn spoken_lines(
+    doc: &Document,
+    lines: Range<usize>,
+) -> Vec<SharedString> {
+    lines
+        .filter_map(|ix| {
+            let text = doc.layout().line_text(ix);
+            (!text.is_empty()).then(|| SharedString::from(text))
+        })
+        .collect()
 }
 
 /// 这一帧这张图画得出来吗 —— 顺手把「这一帧在场」记进图集（帧末的回收按这个数放人）。
