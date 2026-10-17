@@ -284,8 +284,8 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
     // 老副本改名的那一趟：投进 Cleanup 档，不等它、也不在界面线程上算哈希。
     crate::ui::shared::library::schedule_backfill(cx);
 
-    // 还没有窗口，浅深只能问平台 —— 而 Android 上平台级那一问恒为深色。
-    // 这只是「先有个能看的配色」，真正的跟随系统由 `AppShell::render` 拿窗口自己的外观再涂。
+    // 还没有窗口，浅深只能问平台。这一趟只求「先有个能看的配色」：窗口一开，
+    // `AppShell::render` 每帧按窗口自己的浅深判该不该重涂，系统翻面也有那条订阅接住。
     theme::apply(&ConfigHolder::appearance(cx), None, cx);
 
     // 监听是后台能力：配置开着就随启动起，活过任何一屏。
@@ -307,7 +307,9 @@ fn open_main_window(cx: &mut App) {
             ..Default::default()
         },
         |window, cx| {
-            // 「跟随系统」在 Android 上只能问窗口：平台级那一问固定返回深色。
+            // 读窗口自己那一档：平台在开窗时已经把系统的夜间模式写进来（fork 的
+            // `open_window` → `refresh_appearance`），gpui 建这个窗口时又取一次缓存，
+            // 所以第一帧就是系统那一档，不必等第一次配置变更。
             theme::apply(&ConfigHolder::appearance(cx), Some(window), cx);
             let shell = cx.new(|cx| AppShell::boot(window, cx));
             cx.new(|cx| Root::new(shell, window, cx))

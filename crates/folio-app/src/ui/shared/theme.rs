@@ -124,9 +124,10 @@ pub fn apply(appearance: &Appearance, window: Option<&mut Window>, cx: &mut App)
 /// 换肤的公共部分：解析浅深、挑两侧的主题、切 `Theme::mode`。
 /// **不刷任何窗口**，所以可以在渲染那一帧里安全调用。
 ///
-/// 移动端就是这么用的：偏好一改，外壳自己会重画（订阅里 `cx.notify()`），
-/// 而那一帧必须用**这一窗口**的浅深 —— Android 上 `cx.window_appearance()` 恒为深色，
-/// 只有 `window.appearance()` 真的通过 JNI 问过系统的夜间模式。
+/// 移动端与桌面都走这一条：偏好一改、或系统翻了面，外壳重画那一帧时读**这一窗口**的浅深。
+/// 一是上面那条借用规矩（`cx.window_appearance()` 在外观观察者的回调里会 panic），
+/// 二是窗口的这一份由平台在系统翻面时主动写进来（Android 读 `Configuration.uiMode`，
+/// 开窗时先取一次），跟着眼前这一屏走。
 /// 返回解析出来的那一档，调用方要用它做别的判断时不必再算一遍。
 pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut App) -> ThemeMode {
     let os = window

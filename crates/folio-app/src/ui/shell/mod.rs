@@ -21,7 +21,7 @@ use gpui_kit::base::motion::{
     Easing, Presence, PresencePhase, PresenceSample, Transition, TransitionId,
 };
 use gpui_kit::base::{NavMotion, NavOperation, NavPage, NavStack, NavStackEvent, NavStackState};
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, ThemeMode, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
     IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled, Subscription, Task,
@@ -339,8 +339,13 @@ pub struct AppShell {
     _stats_watch: Subscription,
     /// 书架栈的 `Popped` 订阅：pop 出阅读页时把位置落库。
     _stack_watch: Subscription,
-    /// 上一次涂到界面上的外观配置。渲染时比较它。
-    applied: Option<Appearance>,
+    /// 系统深浅翻面的订阅。`Window::appearance()` 是 gpui 里的缓存，只由平台回调刷新，
+    /// 而一屏静止的文字自己不会要求重画 —— 不接这一条，「跟随系统」就只有改偏好或重启
+    /// 才看得见。这里只要一次 `notify`：该不该重涂、涂成哪一档，判据都在渲染那一处。
+    _appearance_watch: Subscription,
+    /// 上一次涂到界面上的外观配置，**连同它解析出来的浅深**。渲染时比较这一对：只比配置
+    /// 的话，系统翻了面而偏好一个字没动，这一帧就永远不会重涂。
+    applied: Option<(Appearance, ThemeMode)>,
     /// 上一次已经同步给监听服务的 `library` 一节。配置观察者比较它，
     /// 只有书库目录或监听那几项真的变了才重启监听（`plans/基础设施.md` §2.5）。
     watched_library: Library,
@@ -408,6 +413,11 @@ impl AppShell {
             KeyBinding::new("up", ArrowUp, None),
             KeyBinding::new("down", ArrowDown, None),
         ]);
+
+        // 系统深浅翻面（Android 的 `Configuration.uiMode`、桌面的门户设置）由平台推给 gpui，
+        // gpui 刷新这一窗口的缓存 —— 剩下的「那一下要重画」归这里，因为缓存自己不会让一屏
+        // 静止的文字重新渲染。判据不在这条回调里做：只递一次 `notify`，比较留在渲染那一处。
+        let _appearance_watch = cx.observe_window_appearance(window, |_, _, cx| cx.notify());
 
         // 先把主题的应用字体换成这台设备真能解析出的家族，再建任何用文字的视图：
         // 顺序反了，第一帧就会拿一个不存在的家族去 resolve 而 panic。
@@ -617,6 +627,7 @@ impl AppShell {
             _shelf_watch,
             _stats_watch,
             _stack_watch,
+            _appearance_watch,
             applied: None,
             watched_library: ConfigHolder::library(cx),
             _save_debounce: None,
@@ -953,9 +964,16 @@ impl Render for AppShell {
         let appearance = ConfigHolder::appearance(cx);
         // 亮度那一格先抠出来：下面整个 `appearance` 要挪进 `applied`，而这一帧后面还要用它。
         let brightness_pref = appearance.brightness;
-        if self.applied.as_ref() != Some(&appearance) {
+        // 比较的是「配置 + 它解析出来的浅深」那一对：偏好一个字没动、只有系统翻了面，
+        // 变的就只有后面那一格。
+        let resolved = theme::resolve_mode(appearance.mode, window.appearance());
+        let stale = self
+            .applied
+            .as_ref()
+            .is_none_or(|(last, last_mode)| *last != appearance || *last_mode != resolved);
+        if stale {
             theme::repaint(&appearance, Some(window), cx);
-            self.applied = Some(appearance);
+            self.applied = Some((appearance, resolved));
         }
 
         let size = SizeClass::of(window);
