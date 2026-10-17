@@ -20,6 +20,10 @@
 //! 「笔记」那一格是 M7 的入口：普通选区打开一张空白便签，挑中库里某条划线则打开它
 //! 已经写下的那条（图标换成带勾的便签，提示「这一条有笔记」）。
 //!
+//! 「分享卡片」那一格只在**能把视图离屏渲成图的那一端**摆（判据
+//! [`crate::ui::platform::RENDERS_SHARE_CARDS`]），整块菜单的宽跟着它一起算，见
+//! [`card_width`]；卡片本体的画法在 `share_card.rs`。
+//!
 //! 摆位分两半：[`slot`] 是**纯函数**（首末高亮的上下边 + 视口高 + 卡片高 → 摆在哪一边、
 //! 顶边在哪一像素），所以「上面放不下就翻到下面」这条规则能在宿主上直接钉死；渲染那一侧
 //! 只负责把 [`Slot`] 落成元素。
@@ -35,6 +39,7 @@ use gpui_kit::{
 
 use super::modules::annotations::Palette;
 use super::session::ReaderSession;
+use crate::ui::platform;
 use crate::ui::shared::l10n::tr;
 
 /// 动作条里一格的可点边长（逻辑像素）。拇指能稳定命中的下限是 44，而图标本身只有
@@ -61,8 +66,12 @@ const MENU_GAP: f32 = 6.0;
 /// 叠在圆点上的那枚勾的字号（`Icon` 取当前文字号）。
 const SWATCH_CHECK: f32 = 13.0;
 
-/// 动作条那一行的宽：四格 + 左右内缩。整块菜单的横向居中按它算。
-const ACTION_BAR_WIDTH: f32 = ACTION_CELL * 4.0 + BAR_PAD * 2.0;
+/// 动作条的格子数：复制、划线（或取消）、笔记、清除，加上**只有能离屏渲染那一端才有**的
+/// 「分享卡片」。判据在 [`crate::ui::platform::RENDERS_SHARE_CARDS`]，只写一次：桌面上
+/// 那一按渲不出字节，摆出来就是一个坏按钮。
+fn action_cells(share: bool) -> f32 {
+    if share { 5.0 } else { 4.0 }
+}
 
 /// 整块菜单占的高（含尾巴）：摆位与「放不下就翻面」都按这个数算。
 /// 动作条 + 缝 + 颜色胶囊 + 尾巴；颜色那一行**恒在**，所以没有「一行 / 两行」两种高。
@@ -71,8 +80,11 @@ pub(in crate::ui::features::reader) const fn card_height() -> f32 {
 }
 
 /// 整块菜单的宽。颜色胶囊比动作条窄，真正决定横向占位的是动作条。
-pub(in crate::ui::features::reader) const fn card_width() -> f32 {
-    ACTION_BAR_WIDTH
+///
+/// `share` 是这一端摆不摆「分享卡片」那一格（与渲染那一侧读同一个判据），
+/// 横向居中与夹边都按它算 —— 两处不一致，菜单就会摆歪或顶出屏幕。
+pub(in crate::ui::features::reader) fn card_width(share: bool) -> f32 {
+    ACTION_CELL * action_cells(share) + BAR_PAD * 2.0
 }
 
 /// 这一帧菜单该摆在哪。
@@ -136,6 +148,7 @@ impl ReaderSession {
         let highlight = tr(cx, "reader.sel_highlight");
         let unhighlight = tr(cx, "reader.sel_unhighlight");
         let cancel = tr(cx, "reader.sel_cancel");
+        let share = tr(cx, "reader.sel_share");
         // 挑中的正是留在书上的那一条时，第二格改做「取消划线」；下面那一行颜色恒在，
         // 只是给它那一档多打一枚勾。
         let marked = self.selection_annotation();
@@ -195,6 +208,19 @@ impl ReaderSession {
                 reader.clone(),
                 |r, window, cx| r.open_note_editor(window, cx),
             ))
+            // 渲不出图的那一端这一格直接缺席（见 [`crate::ui::platform::RENDERS_SHARE_CARDS`]），
+            // 所以它是 `children(Option)` 而不是一个禁用的按钮。
+            .children(platform::RENDERS_SHARE_CARDS.then(|| {
+                action_cell(
+                    "selection-share",
+                    IconName::Share2,
+                    share,
+                    foreground,
+                    hover,
+                    reader.clone(),
+                    |r, window, cx| r.share_selection(window, cx),
+                )
+            }))
             .child(action_cell(
                 "selection-cancel",
                 IconName::X,
@@ -211,7 +237,12 @@ impl ReaderSession {
         // 横向对着选区中线；中线不在手上（首帧还没画过）就居中在正文那一条上。
         // 两种摆法都夹在页内，不把卡片顶出屏幕。
         let page_width = f32::from(self.content_bounds.get().size.width);
-        let left = menu_left(page_width, self.prefs.margin_x, card_width(), anchor_x);
+        let left = menu_left(
+            page_width,
+            self.prefs.margin_x,
+            card_width(platform::RENDERS_SHARE_CARDS),
+            anchor_x,
+        );
         let mut bars = v_flex().items_center().child(actions).child(
             // 一条空 div 当缝：`card_height` 算的就是这 6 像素，不能靠 `gap` 的两套账。
             div().h(px(BAR_GAP)).flex_none(),
@@ -410,7 +441,8 @@ mod tests {
     //! 叫 `test` 的属性宏，glob 会让下面的 `#[test]` 递归展开成它。
 
     use super::{
-        ACTION_CELL, BAR_GAP, BAR_PAD, MENU_TAIL, SWATCH_BAR, Slot, card_height, menu_left, slot,
+        ACTION_CELL, BAR_GAP, BAR_PAD, MENU_TAIL, SWATCH_BAR, Slot, card_height, card_width,
+        menu_left, slot,
     };
 
     /// 卡片总高（动作条 + 颜色胶囊）。摆位只认递进去的这个数。
@@ -458,6 +490,14 @@ mod tests {
             CARD >= actions_only + SWATCH_BAR + BAR_GAP,
             "卡片高没把颜色胶囊或中间那道缝算进去：{CARD}"
         );
+    }
+
+    /// 摆不摆「分享卡片」那一格，动作条就差**正好一格**：横向居中与夹边读的是同一个宽，
+    /// 渲染那一侧与摆位那一侧各算一次就会摆歪或顶出屏幕。
+    #[test]
+    fn the_bar_widens_by_exactly_one_cell_when_the_share_action_is_present() {
+        assert_eq!(card_width(false), ACTION_CELL * 4.0 + BAR_PAD * 2.0);
+        assert_eq!(card_width(true) - card_width(false), ACTION_CELL);
     }
 
     /// 下面也放不下（选区贴在视口底边）时夹在视口内，而不是掉出屏幕外。

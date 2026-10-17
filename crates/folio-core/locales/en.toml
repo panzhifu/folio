@@ -68,6 +68,9 @@ sel_cancel = "Cancel"
 # The sticky note in the action bar: write a fresh note, or edit the one the
 # tapped highlight already has.
 sel_note = "Note"
+# The share card: this passage plus title and position, drawn into an image and
+# handed to the system share sheet. Only on the platforms that can render offscreen.
+sel_share = "Share"
 # The note sheet: title, input placeholder and the save button.
 note_title = "Note"
 note_placeholder = "Write a note about this passage…"

@@ -36,6 +36,7 @@ use super::super::document::Document;
 use super::super::session::{
     DRAG_THRESHOLD_PX, EdgeDrag, MouseDrag, ReaderSession, Selection, SelectionEdge,
 };
+use super::super::share_card;
 
 impl ReaderSession {
     // ---- 查询：视图与 page.rs 用 ----
@@ -377,6 +378,23 @@ impl ReaderSession {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.selection_menu_open = false;
         cx.notify();
+    }
+
+    /// 「分享这一段」：把选区连同书名与当前位置渲成一张卡片，递给系统的分享面板。
+    ///
+    /// 卡片不在这里画：三份文字都只有会话读得到（选区的字、书名、位置念法），所以在
+    /// 这里收齐，渲染与递交交给 [`super::super::share_card`]。菜单里那一格只在有离屏
+    /// 渲染那条路的平台上摆（判据 [`crate::ui::platform::RENDERS_SHARE_CARDS`]），
+    /// 命令本身两端都有：桌面上渲不出字节，于是安静地什么都不递。
+    pub fn share_selection(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(quote) = self.selected_text() else {
+            return;
+        };
+        let title = self.title();
+        let copy = share_card::card_copy(&quote, title.as_ref(), &self.position_label(cx));
+        self.selection_menu_open = false;
+        cx.notify();
+        share_card::present(copy, window.appearance(), cx);
     }
 
     /// 当前选区里的字。复制与笔记的引文用同一个来源：两处念出来的必须是同一段。

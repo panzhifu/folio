@@ -10,8 +10,9 @@
 #[cfg(mobile)]
 extern crate gpui_mobile;
 
-// 三个平台的 `set_reader_fullscreen` 签名里都出现它，所以不按档位 gate。
-use gpui_kit::Window;
+// 三个平台的 `set_reader_fullscreen` 与 [`render_png_offscreen`] 的签名里都出现这些类型，
+// 所以不按档位 gate。
+use gpui_kit::{App, AsyncApp, Entity, Pixels, Render, Size, Window, WindowAppearance};
 
 #[cfg(not(mobile))]
 pub mod desktop;
@@ -30,7 +31,7 @@ use folio_core::Resolved;
 #[cfg(mobile)]
 use gpui_kit::component::Root;
 #[cfg(mobile)]
-use gpui_kit::{App, AppContext as _, WindowOptions};
+use gpui_kit::{AppContext as _, WindowOptions};
 
 #[cfg(mobile)]
 use crate::ui::host;
@@ -198,6 +199,90 @@ pub(crate) fn set_status_bar_icons(dark_icons: bool) {
 /// 状态栏是操作系统的地盘，不归应用管。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn set_status_bar_icons(_dark_icons: bool) {}
+
+/// 这一端能不能把一个视图在**不显示的窗口**里渲成一张图。分享卡片靠它。
+///
+/// 判据只写在这一处（与 [`BRIGHTNESS_IS_BACKLIGHT`] 同一个理由）：`gpui_mobile::offscreen`
+/// 那个模块的门是 `all(feature = "offscreen", any(ios, android))`，桌面上它根本不存在。
+/// 选区菜单据此决定摆不摆「分享卡片」那一格，[`render_png_offscreen`] 据此决定编不编
+/// 那半实现 —— 两处各判一次，迟早有一端摆出一个按下去什么都不发生的按钮。
+pub(crate) const RENDERS_SHARE_CARDS: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// 在一个 `show: false` 的窗口里把 `make` 建出来的那个视图渲成一帧，交回 PNG 字节。
+///
+/// 整趟是**同步**的，但只能在界面线程「没有借用 `App`」的那一刻调：那一帧的像素是 GPUI
+/// 通过窗口自己的回调交出来的，而那些回调自己借用 `App`。所以调用方要在 `cx.spawn`
+/// 出来的任务里调它，不能停在按下事件的处理函数里 —— 那里 `App` 正被借用。
+/// 开窗、渲帧、关窗都在这一个函数里，因此中间不会插入别的界面工作。
+///
+/// 渲不出来（开窗失败、那一帧没交出来、编码失败）返回 `None`，原因已经写进日志。
+/// 一次分享没成不该把阅读页拖退 —— 与 [`crate::ui::host`] 那两条导出同一个立场。
+///
+/// `scale` 是这张图自己的设备像素比，**不是**读者屏幕的那一个：卡片是要离开应用的
+/// 成品，它的像素数就该在每台设备上都一样，而不是跟着读者的屏幕密度忽大忽小。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn render_png_offscreen<V>(
+    size: Size<Pixels>,
+    scale: f32,
+    appearance: WindowAppearance,
+    make: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
+    cx: &mut AsyncApp,
+) -> Option<Vec<u8>>
+where
+    V: Render + 'static,
+{
+    use gpui_mobile::offscreen::OffscreenWindow;
+    use image::ImageEncoder as _;
+
+    let window = match cx.update(|cx| OffscreenWindow::open(size, scale, appearance, cx, make)) {
+        Ok(window) => window,
+        Err(err) => {
+            tracing::warn!("离屏渲染: 开不了那个不显示的窗口 —— {err:#}");
+            return None;
+        }
+    };
+    // 这一帧必须在两次 `update` 之间渲：`render` 自己会借 `App`。
+    let rendered = window.render(size);
+    cx.update(|cx| window.close(cx));
+    let image = match rendered {
+        Ok(image) => image,
+        Err(err) => {
+            tracing::warn!("离屏渲染: GPUI 没画出那一帧 —— {err:#}");
+            return None;
+        }
+    };
+    let mut buf = Vec::new();
+    let encoded = image::codecs::png::PngEncoder::new(&mut buf).write_image(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+        image::ExtendedColorType::Rgba8,
+    );
+    match encoded {
+        Ok(()) => Some(buf),
+        Err(err) => {
+            tracing::warn!("离屏渲染: PNG 编码失败 —— {err}");
+            None
+        }
+    }
+}
+
+/// 桌面与 HarmonyOS 那一支：没有离屏窗口可开，交不出字节。
+///
+/// 空臂与 [`set_screen_brightness`] 同一族写法 —— 界面那一侧因此一个 `cfg` 都不必写。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn render_png_offscreen<V>(
+    _size: Size<Pixels>,
+    _scale: f32,
+    _appearance: WindowAppearance,
+    _make: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
+    _cx: &mut AsyncApp,
+) -> Option<Vec<u8>>
+where
+    V: Render + 'static,
+{
+    None
+}
 
 #[cfg(mobile)]
 use crate::ui::shared::error::{Context as _, report};

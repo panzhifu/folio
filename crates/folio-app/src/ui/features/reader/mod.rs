@@ -14,6 +14,7 @@
 //! - [`view`] —— `impl Render`：把会话状态摆成元素、接住滚轮。
 //! - [`selection_menu`] —— 选中的就地菜单（图标浮条 + 颜色胶囊）与它的摆位判断。
 //! - [`note_editor`] —— 选中之后就地为这一段写笔记的那张便签。
+//! - [`share_card`] —— 把选中的那一段连同书名与位置渲成一张图递给系统分享面板（离屏那一趟在 `platform` 那侧）。
 //! - [`turn`] —— 翻页决策（连续 / 分页 / 双页、章界），纯函数，宿主直接测。
 //! - [`page`] —— 盖在整窗上的那一屏：干净态两条小字 + 浮出的顶栏与底栏（挂在它自己那条子栈的栈底）。
 //! - [`chrome`] —— 纯判断（分区、面板档位、模式退档、进度念法），无 gpui，宿主测试直接跑。
@@ -45,6 +46,7 @@ mod perf;
 mod scene;
 mod selection_menu;
 mod session;
+mod share_card;
 mod toc_panel;
 mod toc_tree;
 mod turn;
