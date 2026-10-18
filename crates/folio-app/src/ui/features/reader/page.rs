@@ -45,11 +45,11 @@ use super::toc_panel::{TocEvent, TocPanel};
 use super::turn_animation;
 use crate::ui::features::settings::CompactSettings;
 use crate::ui::platform;
-use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::l10n::tr;
+use crate::ui::services::config::ConfigHolder;
+use crate::ui::services::l10n::tr;
 use crate::ui::shell::AppShell;
 use crate::ui::shell::navigation::SizeClass;
-use crate::ui::widgets::TopBar;
+use crate::ui::components::TopBar;
 
 /// 脚注小纸片的最宽那一条：内容的 `max_w` 与夹边算的是同一个数。
 const FOOTNOTE_CARD_W: Pixels = px(300.);

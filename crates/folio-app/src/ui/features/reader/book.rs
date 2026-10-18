@@ -33,7 +33,7 @@ use super::book_fonts::BookFonts;
 use super::document::{ChapterSource, Document, author_rules};
 use super::image_viewer::{ImageSlot, Place, file_name};
 use super::toc_tree::{self, TocRow};
-use crate::ui::shared::images::{BookImages, ByteSource, ChapterImages, document_source};
+use crate::ui::foundation::images::{BookImages, ByteSource, ChapterImages, document_source};
 
 /// 拼进连续坐标的邻章半窗宽：锚章上下**至少**预排这么多章。
 ///

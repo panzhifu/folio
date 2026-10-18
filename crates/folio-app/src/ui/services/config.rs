@@ -23,7 +23,7 @@ use std::sync::Arc;
 use folio_core::{Appearance, Config, Env, Language, Library, Provenance, Reader, Resolved};
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
-use super::error::{Context as _, report};
+use crate::ui::foundation::error::{Context as _, report};
 
 pub struct ConfigState {
     /// **用户层**：内置默认 ⊕ 用户文件。**落盘写的是它**（§2.1 写回只写用户层）。
@@ -214,7 +214,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let store = folio_core::Store::in_memory().unwrap();
         let handle = cx.open_window(size(px(600.), px(400.)), |window, cx| {
-            crate::ui::shared::app_store::install(store, cx);
+            crate::ui::services::app_store::install(store, cx);
             ConfigHolder::install(Config::default(), cx);
             Root::new(cx.new(|cx| AppShell::boot(window, cx)), window, cx)
         });
@@ -239,7 +239,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let handle: AnyWindowHandle = cx
             .open_window(size(px(900.), px(600.)), |window, cx| {
-                crate::ui::shared::app_store::install(
+                crate::ui::services::app_store::install(
                     folio_core::Store::in_memory().expect("内存库"),
                     cx,
                 );

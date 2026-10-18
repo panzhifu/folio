@@ -36,10 +36,10 @@ use gpui_kit::{
     Styled, StyledImage, Subscription, TestSupportExt as _, WeakEntity, Window, div, img, px,
 };
 
-use crate::ui::shared::error::report;
-use crate::ui::shared::images::cover_image;
-use crate::ui::shared::l10n::{tf, tr};
-use crate::ui::widgets::{TopBar, hairline};
+use crate::ui::foundation::error::report;
+use crate::ui::foundation::images::cover_image;
+use crate::ui::services::l10n::{tf, tr};
+use crate::ui::components::{TopBar, hairline};
 
 use super::book_card::AUTHOR_SEP;
 use super::scan::fmt_size;

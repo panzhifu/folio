@@ -38,7 +38,7 @@ use gpui_kit::{
     App, AppContext as _, Context, Entity, EntityId, RenderImage, Task, WeakEntity, Window,
 };
 
-use crate::ui::shared::images::DecodeRequest;
+use crate::ui::foundation::images::DecodeRequest;
 
 /// 一张图离开元素树之后，还留着不放的那几帧。
 ///
@@ -426,7 +426,7 @@ mod tests {
     };
 
     use super::ImageAtlas;
-    use crate::ui::shared::images::{BookImages, ChapterImages, DecodeRequest, TINY_PNG};
+    use crate::ui::foundation::images::{BookImages, ChapterImages, DecodeRequest, TINY_PNG};
 
     /// 一屏摆几张图的视图。`showing` 就是「这一帧在场的那几张」。
     ///
@@ -906,7 +906,7 @@ mod tests {
     /// 容器答不出来的那张：**一次都不重试**，且不占字节名额。
     ///
     /// 与从前那张 `OnceLock` 缓存 `None` 的行为对齐 —— 一本坏书不该每帧回容器赌一次
-    /// （`ui::shared::images` 的 `a_missing_container_yields_no_image_instead_of_a_panic`
+    /// （`ui::foundation::images` 的 `a_missing_container_yields_no_image_instead_of_a_panic`
     /// 钉的是同一件事的另一半：索引照旧、那一块空着）。
     #[gpui_kit::test]
     fn a_container_that_cannot_answer_is_not_asked_again_every_frame(cx: &mut TestAppContext) {
@@ -962,8 +962,8 @@ mod tests {
     /// 上，而且看不出任何错。删掉 `BookImages::job` 里的 token 前缀这一条当场红。
     #[test]
     fn two_books_with_the_same_container_path_do_not_share_a_slot() {
-        use crate::ui::shared::images::BookImages;
-        use crate::ui::shared::images::ChapterImages;
+        use crate::ui::foundation::images::BookImages;
+        use crate::ui::foundation::images::ChapterImages;
 
         let one = BookImages::new(
             &[ImageRes {

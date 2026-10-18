@@ -80,7 +80,7 @@ use super::modules::annotations::Palette;
 use super::session::{DRAG_THRESHOLD_PX, EdgeDrag, MouseDrag, ReaderSession, Selection};
 use super::share_card;
 use crate::ui::platform;
-use crate::ui::shared::l10n::tr;
+use crate::ui::services::l10n::tr;
 
 // ====================== 绘制件（由 paint.rs 的字形元素调用）======================
 

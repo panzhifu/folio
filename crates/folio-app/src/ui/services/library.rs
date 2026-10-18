@@ -12,8 +12,8 @@ use folio_core::Library;
 use folio_core::Store;
 use gpui_kit::{App, PathPromptOptions, Task};
 
-use super::config_model::ConfigHolder;
-use super::error::{Context as _, Result};
+use super::config::ConfigHolder;
+use crate::ui::foundation::error::{Context as _, Result};
 
 /// 导入的目标目录：读者确认过的那个。
 ///
@@ -274,7 +274,7 @@ mod tests {
 
     use std::path::Path;
 
-    use crate::ui::shared::library::{delete_book, owned_copy, target_dir};
+    use crate::ui::services::library::{delete_book, owned_copy, target_dir};
     use folio_core::content::format::{Chapter, DocMeta, FlowDoc, Format};
     use folio_core::{Library, Store};
 

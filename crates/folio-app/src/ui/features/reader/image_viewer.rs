@@ -30,7 +30,7 @@
 //! 收得到 —— 阅读页 `cx.observe` 它，于是手势改的是同一个数、重画的是整屏，
 //! 形状与 `widgets::BottomSheetState` 一致。
 //!
-//! 清晰度就是正文那份像素：`ui::shared::images` 把字节缩到长边 2048 才交出去
+//! 清晰度就是正文那份像素：`ui::foundation::images` 把字节缩到长边 2048 才交出去
 //! （sprite atlas 的纹理上限，超了手机上静默画空），所以放大倍率的上限按「一个源像素
 //! 对一个 CSS 像素」算，不多给一分糊。摊开看的那一张与正文里的是**同一份像素**
 //! （[`super::image_atlas`] 按容器路径存着），放大不额外占一格图集；左右那两张由这一层
@@ -61,8 +61,8 @@ use gpui_kit::{
 };
 
 use crate::ui::features::reader::session::{ReaderSession, Source};
-use crate::ui::shared::images::DecodeRequest;
-use crate::ui::shared::l10n::{tf, tr};
+use crate::ui::foundation::images::DecodeRequest;
+use crate::ui::services::l10n::{tf, tr};
 
 use super::image_atlas::ImageAtlas;
 
@@ -1018,7 +1018,7 @@ mod tests {
         ImageSlot, ImageViewer, MIN_SCALE, Place, SWIPE_TRIGGER, UNKNOWN_MAX_SCALE, clamp_pan,
         file_name, fit_size, max_scale,
     };
-    use crate::ui::shared::images::BookImages;
+    use crate::ui::foundation::images::BookImages;
 
     /// 竖图在横窗口里按**高**顶住，横图反过来：等比，不裁。
     #[test]
@@ -1168,7 +1168,7 @@ mod tests {
     /// 那一列里的一条，走的是**生产那条建表路**（`BookImages` → `ChapterImages`），
     /// 所以 `request.key` 与真书里的同一个形状，不是手搓的字符串。
     pub(super) fn slot(href: &str, chapter: usize, offset: usize) -> ImageSlot {
-        use crate::ui::shared::images::{ByteSource, ChapterImages, TINY_PNG};
+        use crate::ui::foundation::images::{ByteSource, ChapterImages, TINY_PNG};
         use folio_core::content::format::ImageRes;
 
         let images = vec![ImageRes {
@@ -1313,7 +1313,7 @@ mod view_tests {
         // （不是进程级那个全局，见 `shared::l10n` 模块头）。不装就是把界面语言
         // 交给上一个测试留下的那一份 —— 并行跑批时会互相改语言。
         cx.update(|app| {
-            crate::ui::shared::config_model::ConfigHolder::install(
+            crate::ui::services::config::ConfigHolder::install(
                 folio_core::Config::default(),
                 app,
             );

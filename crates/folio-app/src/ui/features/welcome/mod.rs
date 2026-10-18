@@ -18,9 +18,9 @@ use gpui_kit::{
     TestSupportExt as _, Window, div, px,
 };
 
-use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::l10n::tr;
-use crate::ui::shared::library::{pick_dir, suggested_dir};
+use crate::ui::services::config::ConfigHolder;
+use crate::ui::services::l10n::tr;
+use crate::ui::services::library::{pick_dir, suggested_dir};
 
 /// 内容列的两侧留白（逻辑像素）。手机上让按钮离屏幕边有距离，不至于顶到边。
 const GUTTER: f32 = 24.0;

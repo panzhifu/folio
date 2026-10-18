@@ -93,6 +93,8 @@ mod tests {
     use crate::ui::features::reader::turn_animation::cover::{Cover};
     use crate::ui::features::reader::turn_animation::geometry::{Area, Tint, EDGE_WIDE};
     use crate::ui::features::reader::turn_animation::testing::{page, complementary, x_span, W};
+    use crate::ui::features::reader::turn_animation::PageTurnStyle as _;
+    use crate::ui::features::reader::turn_animation::PageTurnStyle as _;
 
     /// 覆盖档的差别就两格：旧页停着不动，新页压在它上面。少任何一条，`Cover` 与
     /// `Slide` 就是一模一样的画面。

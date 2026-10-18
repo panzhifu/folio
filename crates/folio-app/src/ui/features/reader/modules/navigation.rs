@@ -10,7 +10,7 @@ use super::super::book::Book;
 use super::super::chrome::{Arrow, PageMode};
 use super::super::session::{PageRef, ReaderSession, Source, Turn, TurnRun, start_turn};
 use super::super::turn::{PagingFacts, TurnIntent, TurnPlan};
-use crate::ui::shared::config_model::ConfigHolder;
+use crate::ui::services::config::ConfigHolder;
 
 impl ReaderSession {
     /// 换成另一种摆法。位置**不丢**：进度存的是「第几个字」，所以先把当前字偏移取下来，

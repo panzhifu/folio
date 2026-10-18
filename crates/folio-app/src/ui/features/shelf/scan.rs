@@ -22,11 +22,11 @@ use gpui_kit::{
     ParentElement as _, SharedString, Styled as _, TestSupportExt as _, WeakEntity, div, px, size,
 };
 
-use crate::ui::shared::app_store;
-use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::l10n::{tf, tr};
-use crate::ui::shared::library::{scan_noise_exempt, scan_roots, target_dir};
-use crate::ui::widgets::muted_label;
+use crate::ui::services::app_store;
+use crate::ui::services::config::ConfigHolder;
+use crate::ui::services::l10n::{tf, tr};
+use crate::ui::services::library::{scan_noise_exempt, scan_roots, target_dir};
+use crate::ui::components::muted_label;
 
 use super::view::ShelfView;
 
@@ -121,7 +121,7 @@ impl ShelfView {
         let noise_exempt = scan_noise_exempt();
         // 与导入共用同一个池（§1.1）：扫描走预热档，导入走落库档。
         let handle = submit_scan(
-            &crate::ui::shared::services::pool(),
+            &crate::ui::services::services::pool(),
             roots,
             exclude,
             noise_exempt,

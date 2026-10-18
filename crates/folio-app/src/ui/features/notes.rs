@@ -3,8 +3,8 @@
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{Context, IntoElement, ParentElement, Render, Styled, Window, div};
 
-use crate::ui::shared::l10n::tr;
-use crate::ui::widgets::empty_state;
+use crate::ui::services::l10n::tr;
+use crate::ui::components::empty_state;
 
 #[derive(Default)]
 pub struct NotesView;

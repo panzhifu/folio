@@ -30,7 +30,7 @@ use super::fixed::FixedBook;
 use super::measure::FontCache;
 use super::note_editor::NoteEditor;
 use crate::ui::host::device_family;
-use crate::ui::shared::config_model::ConfigHolder;
+use crate::ui::services::config::ConfigHolder;
 
 /// 视图现在拿的是什么内容。
 pub enum Source {
@@ -306,7 +306,7 @@ impl ReaderSession {
         let prefs = ConfigHolder::reader(cx);
         // 书库没装不是 fatal：照样能读，只是进度与偏好落不了盘，
         // 而「读了但没记住」比「直接退出」更可接受。
-        let store = crate::ui::shared::app_store::handle(cx);
+        let store = crate::ui::services::app_store::handle(cx);
         tracing::debug!("ReaderSession: 启动进占位屏，等外壳按书架点选换书");
         Self::sample(&prefs, store, cx)
     }
@@ -524,7 +524,7 @@ impl ReaderSession {
                 }
                 Ok(Some(reason)) => {
                     tracing::info!(book_id, reason = ?reason, "ReaderSession: 索引要重扫，已交后台");
-                    let pool = crate::ui::shared::services::pool();
+                    let pool = crate::ui::services::services::pool();
                     // 不等：重扫必然把整本书重读一遍（要读完全书才知道的数全在导入那趟算），
                     // 而旧索引只是粗一点、不是打不开 —— 三处兜底见 `folio_core::schedule_reindex`
                     // 的文档。新索引下次开书才生效，正看着的这一屏不重建。

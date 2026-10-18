@@ -55,8 +55,8 @@ use gpui_kit::{
 
 use super::spec::{self, RowKind, page_summary};
 use super::spec_pages;
-use crate::ui::shared::l10n::tr;
-use crate::ui::widgets::{TopBar, hairline};
+use crate::ui::services::l10n::tr;
+use crate::ui::components::{TopBar, hairline};
 
 /// 一行的可命中高度。Apple HIG 明文那条 44×44；规范点名的 `px` 例外之一就是
 /// 「最小命中容差」，所以这一格不跟着 rem 走。
@@ -787,7 +787,7 @@ mod tests {
     #[gpui_kit::test]
     async fn the_grouped_surfaces_stay_elevated_in_both_appearances(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        cx.update(crate::ui::shared::theme::register_builtin_themes);
+        cx.update(crate::ui::foundation::theme::register_builtin_themes);
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
             cx.update(|app| {
                 Theme::change(mode, None, app);

@@ -35,9 +35,9 @@ use crate::ui::features::shelf::{ShelfEvent, ShelfView};
 use crate::ui::features::stats::{StatsEvent, StatsView};
 use crate::ui::features::welcome::WelcomeView;
 use crate::ui::host;
-use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::theme;
-use crate::ui::widgets::hairline;
+use crate::ui::services::config::ConfigHolder;
+use crate::ui::foundation::theme;
+use crate::ui::components::hairline;
 use navigation::{Destination, SizeClass, navigation};
 
 #[cfg(not(mobile))]
@@ -535,7 +535,7 @@ impl AppShell {
             let library = ConfigHolder::library(cx);
             if library != this.watched_library {
                 this.watched_library = library;
-                crate::ui::shared::watch::sync_from_config(cx);
+                crate::ui::services::watch::sync_from_config(cx);
             }
             // 欢迎页那一关：读者挑完书库位置后位置被确认，就该把这一屏换掉。
             // 不用欢迎页自己回调 —— 位置写进配置是唯一的信号，这里观察到即可。

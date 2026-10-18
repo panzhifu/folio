@@ -11,7 +11,7 @@ use gpui_kit::{App, Context};
 use super::super::image_viewer::Place;
 use super::super::session::{ReaderSession, Source};
 use super::super::toc_tree::TocRow;
-use crate::ui::shared::l10n::tf;
+use crate::ui::services::l10n::tf;
 
 impl ReaderSession {
     /// 章节数（兜底那一行没有章，是 0）。目录面板的列表长度。

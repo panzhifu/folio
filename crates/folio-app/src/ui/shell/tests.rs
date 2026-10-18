@@ -238,7 +238,7 @@ fn the_layer_reads_presence_and_writes_distance_apart() {
 #[cfg(not(mobile))]
 mod booted {
     use crate::ui::features::shelf::ShelfView;
-    use crate::ui::shared::config_model::ConfigHolder;
+    use crate::ui::services::config::ConfigHolder;
     use crate::ui::shell::AppShell;
     use crate::ui::shell::navigation::Destination;
     use folio_core::infra::i18n::{Locale, t_in};
@@ -265,7 +265,7 @@ mod booted {
         let mut shell = None;
         let handle = cx
             .open_window(size(px(900.), px(600.)), |window, cx| {
-                crate::ui::shared::app_store::install(Store::in_memory().expect("内存库"), cx);
+                crate::ui::services::app_store::install(Store::in_memory().expect("内存库"), cx);
                 ConfigHolder::install(confirmed_config(), cx);
                 if desktop_host {
                     crate::ui::host::install(cx);
@@ -295,7 +295,7 @@ mod booted {
         let mut shell = None;
         let handle = cx
             .open_window(size(px(900.), px(600.)), |window, cx| {
-                crate::ui::shared::app_store::install(Store::in_memory().expect("内存库"), cx);
+                crate::ui::services::app_store::install(Store::in_memory().expect("内存库"), cx);
                 ConfigHolder::install(Config::default(), cx);
                 let view = cx.new(|cx| AppShell::boot(window, cx));
                 shell = Some(view.clone());
@@ -488,7 +488,7 @@ mod booted {
         // 落库在管线里做完：作业跑完，库里已经有那本好的；喂给架面的
         // 只是「结果到了」的信号，架面自己重查库。
         let store = cx
-            .update(|cx| crate::ui::shared::app_store::handle(cx))
+            .update(|cx| crate::ui::services::app_store::handle(cx))
             .expect("书库应已装上");
         let job = submit_import(
             &manager,
@@ -681,7 +681,7 @@ mod booted {
         use folio_core::{Chapter, FlowDoc, Format};
 
         let (handle, shell) = boot(cx, false);
-        let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
+        let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
         // 正文换成一段够长的合成语料 —— 夹具本身只有两百多字，一页就装完了，「翻得动」
         // 那个断言就无从成立。位置写成 `Inline`（正文在手上）：`Markdown` 那一条位置
         // 本来算的是 `Section`，而打开时回容器按序号取，取得的是夹具自己那两百多字。
@@ -786,7 +786,7 @@ mod booted {
         let (handle, shell) = boot(cx, false);
         // 这条钉定住后的命中；把减动效打开，`Presence` 直接给 Present，不把转场时钟混进来。
         cx.update(|cx| cx.set_reduce_motion(true));
-        let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
+        let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
         let fixture = std::path::Path::new("../../tests/fixtures/oss/minimal-zh.epub");
         // 第二本用同一份夹具的临时副本：`add_book` 按路径认书，同一路径加两次
         // 只会拿到同一个 id。`local/` 下的书不进 CI，不能用。
@@ -1130,7 +1130,7 @@ mod booted {
         use std::time::Duration;
 
         let (handle, shell) = boot(cx, false);
-        let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
+        let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
         // 宿主测试的工作目录是 crate 目录，所以仓库根的夹具在 `../../`。
         let fixture = std::path::Path::new("../../tests/fixtures/oss/minimal-zh.epub");
         let doc = folio_core::content::document::open(fixture).expect("仓库里那份合成书该打得开");
@@ -1244,7 +1244,7 @@ mod booted {
         };
         let handle: AnyWindowHandle = cx
             .open_window(size(px(900.), px(600.)), |window, cx| {
-                crate::ui::shared::app_store::install(store, cx);
+                crate::ui::services::app_store::install(store, cx);
                 ConfigHolder::install(config.clone(), cx);
                 let view = cx.new(|cx| AppShell::boot(window, cx));
                 Root::new(view, window, cx)
@@ -1354,7 +1354,7 @@ mod booted {
         // 而**盖上来的那一层**故意用一个读不出来的 id：`open_book` 认不出库里的行
         // 就只写日志、不动别的，收层时那次重取照样发生 —— 这条门钉的是「收层会叫重取」，
         // 不是「书真能打开」。时间戳取现在附近：`reading_summary(14)` 只看最近两周。
-        let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
+        let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
         let book = store
             .add_book(
                 std::path::Path::new("/books/a.epub"),
@@ -1395,7 +1395,7 @@ mod booted {
             this.stacks[Destination::Shelf.index()].clone()
         });
         let store = cx
-            .update(|cx| crate::ui::shared::app_store::handle(cx))
+            .update(|cx| crate::ui::services::app_store::handle(cx))
             .expect("书库应已装上");
         // 一本名字是导入时抠出来的那种烂名字：正是读者要自己改掉的场景。
         let id = store
@@ -1482,7 +1482,7 @@ mod booted {
             this.stacks[Destination::Shelf.index()].clone()
         });
         let store = cx
-            .update(|cx| crate::ui::shared::app_store::handle(cx))
+            .update(|cx| crate::ui::services::app_store::handle(cx))
             .expect("书库应已装上");
         let full = store
             .add_book(

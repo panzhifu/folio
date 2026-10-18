@@ -36,10 +36,10 @@ use gpui_kit::{
     TestSupportExt as _, Window, div, px,
 };
 
-use crate::ui::shared::app_store;
-use crate::ui::shared::l10n::{tf, tr};
+use crate::ui::services::app_store;
+use crate::ui::services::l10n::{tf, tr};
 use crate::ui::shell::navigation::SizeClass;
-use crate::ui::widgets::{hairline, muted_label};
+use crate::ui::components::{hairline, muted_label};
 use report::{Bar, HourCell, Report, WeekdayPattern, WeekdaySpoke};
 
 /// 内容列的最大宽度（逻辑像素）。

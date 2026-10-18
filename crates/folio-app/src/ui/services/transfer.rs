@@ -17,7 +17,7 @@ use folio_core::{ImportKind, ImportOutcome, Imported, PathsSource, TaskEvent};
 use gpui_kit::App;
 
 use super::app_store;
-use super::config_model::ConfigHolder;
+use super::config::ConfigHolder;
 use super::import_queue::auto_import_sender;
 use super::library::target_dir;
 use super::services;

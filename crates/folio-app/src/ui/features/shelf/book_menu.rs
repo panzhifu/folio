@@ -24,7 +24,7 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{App, Entity, SharedString, px};
 
-use crate::ui::shared::l10n::tr;
+use crate::ui::services::l10n::tr;
 
 use super::view::ShelfView;
 

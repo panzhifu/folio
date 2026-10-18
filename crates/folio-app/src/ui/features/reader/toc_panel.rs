@@ -37,11 +37,11 @@ use super::chrome::percent_label;
 use super::session::ReaderSession;
 use super::toc_tree::TocView;
 use crate::ui::features::shelf::{AUTHOR_SEP, fmt_size};
-use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::images::cover_image;
-use crate::ui::shared::l10n::{tf, tr};
+use crate::ui::services::config::ConfigHolder;
+use crate::ui::foundation::images::cover_image;
+use crate::ui::services::l10n::{tf, tr};
 use crate::ui::shell::navigation::SizeClass;
-use crate::ui::widgets::{BottomSheet, BottomSheetState};
+use crate::ui::components::{BottomSheet, BottomSheetState};
 
 /// 目录这一屏的横向刻度，全部是在 Meizu 20（scale 2.8）上逐行数参照 App 的墨迹
 /// 边界量出来的（dp = px / 2.8）。
@@ -901,7 +901,7 @@ mod tests {
 
     use super::{TOC_DRAWER, TOC_DRAWER_INSET, TocEvent, TocPanel};
     use crate::ui::features::reader::session::ReaderSession;
-    use crate::ui::shared::config_model::ConfigHolder;
+    use crate::ui::services::config::ConfigHolder;
 
     /// 一套开好了的「目录这一屏」：会话、这一屏、窗口句柄、收到的事件，以及那条订阅自己。
     ///

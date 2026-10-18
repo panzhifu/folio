@@ -29,7 +29,7 @@ use gpui_kit::{
 };
 
 use super::session::ReaderSession;
-use crate::ui::shared::l10n::tr;
+use crate::ui::services::l10n::tr;
 use crate::ui::shell::navigation::SizeClass;
 
 /// 会话里那份笔记编辑状态。

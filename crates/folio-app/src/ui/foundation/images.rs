@@ -467,7 +467,7 @@ mod tests {
     //! 的字节里把格式猜出来。它错了不会报错，只会让书架上那张卡片永远画不出来，
     //! 所以按契约钉住：认得出的要给出图，认不出的要给 `None` 而不是「按 PNG 试一把」。
 
-    use crate::ui::shared::images::{bgra_render_image, cover_image};
+    use crate::ui::foundation::images::{bgra_render_image, cover_image};
     use folio_core::layout::ImageProvider as _;
 
     /// 够 `with_guessed_format` 探测的一段 PNG 头。
@@ -507,7 +507,7 @@ mod tests {
         use folio_core::content::format::ImageRes;
         use gpui_kit::ImageFormat;
 
-        use crate::ui::shared::images::{BookImages, ChapterImages};
+        use crate::ui::foundation::images::{BookImages, ChapterImages};
 
         let book = BookImages::new(
             &[ImageRes {
@@ -549,7 +549,7 @@ mod tests {
         use folio_core::content::format::ImageRes;
         use folio_core::infra::metrics::{Metric, take_local};
 
-        use crate::ui::shared::images::{BookImages, ChapterImages};
+        use crate::ui::foundation::images::{BookImages, ChapterImages};
 
         let book = BookImages::new(
             &[ImageRes {
@@ -586,7 +586,7 @@ mod tests {
         use folio_core::content::format::ImageRes;
         use folio_core::infra::metrics::{Metric, take_local};
 
-        use crate::ui::shared::images::{BookImages, ChapterImages};
+        use crate::ui::foundation::images::{BookImages, ChapterImages};
 
         // 谎报一个超限尺寸：判据取的是索引里那个数，正好把这条分支逼出来。
         let book = BookImages::new(
@@ -633,7 +633,7 @@ mod tests {
     fn a_missing_container_yields_no_image_instead_of_a_panic() {
         use folio_core::content::format::ImageRes;
 
-        use crate::ui::shared::images::{BookImages, ChapterImages, no_images};
+        use crate::ui::foundation::images::{BookImages, ChapterImages, no_images};
 
         let book = BookImages::new(
             &[ImageRes {

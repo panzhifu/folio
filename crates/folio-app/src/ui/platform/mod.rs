@@ -36,7 +36,7 @@ use gpui_kit::{AppContext as _, WindowOptions};
 #[cfg(mobile)]
 use crate::ui::host;
 #[cfg(mobile)]
-use crate::ui::shared::config_model::{ConfigHolder, ConfigPath};
+use crate::ui::services::config::{ConfigHolder, ConfigPath};
 
 /// 整机扫描前的存储授权：拿到了「所有文件访问」（或旧设备的读存储）没有。
 ///
@@ -351,10 +351,10 @@ where
 }
 
 #[cfg(mobile)]
-use crate::ui::shared::error::{Context as _, report};
+use crate::ui::foundation::error::{Context as _, report};
 #[cfg(mobile)]
 #[cfg(mobile)]
-use crate::ui::shared::theme;
+use crate::ui::foundation::theme;
 #[cfg(mobile)]
 use crate::ui::shell::AppShell;
 
@@ -410,14 +410,14 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
                 Ok(_) => {}
                 Err(err) => tracing::warn!("boot: 清理失效的书失败：{err:#}"),
             }
-            crate::ui::shared::app_store::install(store, cx)
+            crate::ui::services::app_store::install(store, cx)
         }
         Err(err) => report("boot", &err),
     }
 
     // 常驻资源（导入作业池 + 监听 + 传书）收拢到一个进程级句柄里；书库句柄也交过去，
     // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
-    crate::ui::shared::services::install(cx);
+    crate::ui::services::services::install(cx);
     // 诊断 dump（§5.8）：`FOLIO_DUMP=1` 时把生效配置 + 库版本 + 队列长度打一份。
     if folio_core::infra::diagnostics::enabled() {
         let provenance = ConfigHolder::provenance(cx);
@@ -425,22 +425,22 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
             &ConfigHolder::snapshot(cx),
             Some(&provenance),
             db_version,
-            Some(crate::ui::shared::services::pool().queued()),
+            Some(crate::ui::services::services::pool().queued()),
             // 物理内存还没接（平台层给），所以给 `None` —— 报「未知」也不报假数。
             None,
         );
     }
     // 清掉上次崩溃留在书库目录里的 `.part` 半成品（§1.3 末条）。
-    crate::ui::shared::library::sweep_partials(cx);
+    crate::ui::services::library::sweep_partials(cx);
     // 老副本改名的那一趟：投进 Cleanup 档，不等它、也不在界面线程上算哈希。
-    crate::ui::shared::library::schedule_backfill(cx);
+    crate::ui::services::library::schedule_backfill(cx);
 
     // 还没有窗口，浅深只能问平台。这一趟只求「先有个能看的配色」：窗口一开，
     // `AppShell::render` 每帧按窗口自己的浅深判该不该重涂，系统翻面也有那条订阅接住。
     theme::apply(&ConfigHolder::appearance(cx), None, cx);
 
     // 监听是后台能力：配置开着就随启动起，活过任何一屏。
-    crate::ui::shared::watch::sync_from_config(cx);
+    crate::ui::services::watch::sync_from_config(cx);
 
     open_main_window(cx);
     cx.activate(true);

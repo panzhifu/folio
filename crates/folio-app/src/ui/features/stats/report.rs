@@ -16,7 +16,7 @@ use folio_core::store::{ReadingRank, ReadingSummary, ReadingTotals, Store};
 use folio_core::{DailyReading, civil_date, duration_parts, infra::time, local_day};
 use gpui_kit::{App, SharedString};
 
-use crate::ui::shared::l10n::{tf, tr};
+use crate::ui::services::l10n::{tf, tr};
 
 /// 窗口档位。三档都是「往回看几天」：切换换的是筛选，不是目的地。
 ///
@@ -232,7 +232,7 @@ const WEEKDAYS_PER_WEEK: usize = 7;
 
 /// 一条读不出来的统计查询：写一句日志，交出默认值。
 ///
-/// 不用 `ui::shared::error::or_log` 而在这开一个小口子，是因为那一条收 `anyhow::Result`
+/// 不用 `ui::foundation::error::or_log` 而在这开一个小口子，是因为那一条收 `anyhow::Result`
 /// 而这里手上是 `folio_core::Result` —— 为七条只读查询各挂一次 `.context()` 再把同一句话
 /// 当第二个参数重抄一遍，换来的只是日志前缀的位置不同。
 /// 要守的两条规矩这里都守住了：**失败一定留声音**，以及**默认值不会伪装成数据**。
@@ -405,7 +405,7 @@ mod tests {
 
     use super::{Bar, HOURS_MIN_SESSIONS, Range, Report, WEEKDAYS_PER_WEEK, duration};
     use crate::ui::features::stats::StatsView;
-    use crate::ui::shared::config_model::ConfigHolder;
+    use crate::ui::services::config::ConfigHolder;
 
     const TZ: i64 = 8 * 3600;
 
@@ -829,9 +829,9 @@ mod tests {
         // 库先装进去，再通过 `app_store` 那份句柄写：`install` 收的是值，而 `Store`
         // 不可复制，手里再留一份 `Arc` 就得靠 handle 拿回来的那一份。
         cx.update(|cx: &mut App| {
-            crate::ui::shared::app_store::install(Store::in_memory().unwrap(), cx)
+            crate::ui::services::app_store::install(Store::in_memory().unwrap(), cx)
         });
-        let store = cx.update(|cx| crate::ui::shared::app_store::handle(cx).unwrap());
+        let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
         let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
         store
             .record_session(book, noon(0), noon(0) + 600, 0)

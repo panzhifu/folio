@@ -18,7 +18,7 @@ use gpui_kit::{
 
 use super::chrome;
 use super::session::ReaderSession;
-use crate::ui::shared::l10n::tf;
+use crate::ui::services::l10n::tf;
 
 /// 页眉那条带里，字的上沿离带顶留多少（逻辑像素）。
 ///

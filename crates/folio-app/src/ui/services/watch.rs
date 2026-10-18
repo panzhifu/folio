@@ -18,7 +18,7 @@ use std::time::Duration;
 use folio_core::ingest::watch::{WatchConfig, WatchEvents, WatchService};
 use gpui_kit::App;
 
-use super::config_model::ConfigHolder;
+use super::config::ConfigHolder;
 use super::library::target_dir;
 use super::services;
 

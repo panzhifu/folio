@@ -14,7 +14,7 @@
 //! 按压两端都有（轻点在移动端合成成 MouseDown/MouseUp，见 `plans/facts.md`）。
 //!
 //! 封面走 gpui 的 `img` 元素，纹理上传由它负责（正文里的 `<img>` 用的是同一条路径，
-//! 见 `reader_view`）；解码只在这一处调用 [`crate::ui::shared::images::cover_image`]。
+//! 见 `reader_view`）；解码只在这一处调用 [`crate::ui::foundation::images::cover_image`]。
 //!
 //! 没封面的书**必须**照样出现在架上并占住一格，否则「导入了一本但看不见」和
 //! 「根本没导进来」在真机上没法分开 —— 所以那一格画的是书名，不是空白。
@@ -34,8 +34,8 @@ use gpui_kit::{
     TestSupportExt as _, Window, div, hsla, img, px,
 };
 
-use crate::ui::shared::images::cover_image;
-use crate::ui::shared::l10n::tf;
+use crate::ui::foundation::images::cover_image;
+use crate::ui::services::l10n::tf;
 
 use super::book_menu;
 use super::view::{ShelfEvent, ShelfView};

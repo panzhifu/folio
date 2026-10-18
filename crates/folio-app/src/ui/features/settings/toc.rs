@@ -79,7 +79,7 @@ mod tests {
     //! 而 setter 那边 `parse` 认不出来就静默回落 —— 读者点了没反应。
 
     use super::*;
-    use crate::ui::shared::config_model::ConfigHolder;
+    use crate::ui::services::config::ConfigHolder;
     use folio_core::Config;
     use gpui_kit::TestAppContext;
 

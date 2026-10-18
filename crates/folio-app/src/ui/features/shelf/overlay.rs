@@ -21,7 +21,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::{Anchor, AnyElement, Context, Entity, IntoElement, ParentElement, Styled, div, px};
 
-use crate::ui::widgets::{BottomSheet, BottomSheetState};
+use crate::ui::components::{BottomSheet, BottomSheetState};
 
 use super::view::ShelfView;
 

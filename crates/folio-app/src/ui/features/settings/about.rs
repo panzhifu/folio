@@ -12,7 +12,7 @@ use folio_core::infra::paths::config_path;
 use gpui_kit::component::h_flex;
 use gpui_kit::{IntoElement as _, ParentElement, SharedString, Styled, div};
 
-use crate::ui::widgets::muted_label;
+use crate::ui::components::muted_label;
 
 use super::*;
 

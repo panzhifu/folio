@@ -35,7 +35,7 @@ use gpui_kit::{App, Context, TouchPhase};
 use super::session::{PageRef, ReaderSession, SwipeTrack, Turn, TurnRun, start_turn};
 use super::turn::{TurnIntent, TurnPlan};
 use super::turn_animation::{self, Axis};
-use crate::ui::shared::config_model::ConfigHolder;
+use crate::ui::services::config::ConfigHolder;
 
 /// 按下来后要走过多远才算「在拖」而不是「点了一下」。
 ///

@@ -19,7 +19,7 @@ use folio_core::content::format::{FixedPage, PageSource};
 use gpui_kit::SharedString;
 
 use super::image_viewer::{ImageSlot, Place, file_name};
-use crate::ui::shared::images::{
+use crate::ui::foundation::images::{
     BookImages, ByteSource, ChapterImages, DecodeRequest, document_source,
 };
 
@@ -29,7 +29,7 @@ pub struct FixedBook {
     pages: Vec<FixedPage>,
     /// 页图片视图（`href` → 这一张的活儿）。字节与解码都不在这里：那一趟由
     /// [`super::image_atlas`] 在后台线程上跑（SVG 页也在那条路上被栅格化，见
-    /// `ui::shared::images`）。
+    /// `ui::foundation::images`）。
     images: ChapterImages,
     /// 留住文档：字节要按 `href` 现取，只有它知道容器怎么开。
     #[allow(dead_code)]

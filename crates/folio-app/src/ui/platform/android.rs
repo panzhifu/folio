@@ -104,7 +104,7 @@ fn android_main(app: android_activity::AndroidApp) {
 
     // `run` 返回 = activity 即将结束、`App` 已 drop（它的 `AppStore` 句柄也放了）。
     // 这时按 §1.3/§5.6 的有序收尾：停监听/传书 → 关作业池 → 放掉最后一个书库句柄。
-    crate::ui::shared::services::shutdown();
+    crate::ui::services::services::shutdown();
 
     tracing::info!("android_main: Application::run returned — activity will finish");
 

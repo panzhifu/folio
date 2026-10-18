@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::ui::features::reader::book_fonts::BookFonts;
 use crate::ui::features::reader::document::{ChapterSource, Document, body_of, narrowed_lines};
-use crate::ui::shared::images::ChapterImages;
+use crate::ui::foundation::images::ChapterImages;
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::layout::LineFragment;
 use folio_core::{Chapter, Content, DocMeta, FlowDoc, Format, Reader};

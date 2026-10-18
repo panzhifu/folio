@@ -14,7 +14,7 @@ use std::rc::Rc;
 use gpui_kit::assets::IconName;
 use gpui_kit::{AnyElement, App, SharedString};
 
-use crate::ui::shared::l10n::tr;
+use crate::ui::services::l10n::tr;
 
 /// 一个数值字段的规格：标签键、说明键、搜索关键词，以及可填范围与步长。
 ///
@@ -43,7 +43,7 @@ pub(crate) struct Row {
 /// 而这一格在四个地方重复，起个名字比数它的复杂度便宜。
 pub(crate) type Setter<A> = Rc<dyn Fn(A, &mut App)>;
 
-/// 行的控件种类。真源是 [`crate::ui::shared::config_model::ConfigHolder`]，
+/// 行的控件种类。真源是 [`crate::ui::services::config::ConfigHolder`]，
 /// 这里只是把「读哪个字段、写哪个字段」钉死。
 ///
 /// 取值与赋值装的是**装箱闭包**而不是函数指针：「浅深各用哪套主题」那一行的 getter

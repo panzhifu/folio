@@ -35,7 +35,7 @@ use gpui_kit::{App, AppContext as _, Context, Hsla, Pixels, Point, Window};
 
 use super::super::note_editor::NoteEditor;
 use super::super::session::{AnnotationSpans, ReaderSession, Selection};
-use crate::ui::shared::l10n::tr;
+use crate::ui::services::l10n::tr;
 
 /// 点「划线」时用的那一种颜色（读者没先点某一枚圆点）。清单在
 /// `folio_core::store::ANNOTATION_COLORS`：amber 是其中那档黄 —— 传统划线色，

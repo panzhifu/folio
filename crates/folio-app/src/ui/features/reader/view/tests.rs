@@ -29,7 +29,7 @@ use gpui_kit::{
 
 use crate::ui::features::reader::chrome::{Arrow, PageMode};
 use crate::ui::features::reader::session::ReaderSession;
-use crate::ui::shared::config_model::ConfigHolder;
+use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::NAV_TRANSITION;
 
 /// 一段足够长的中文，保证它会折行 —— 不折行的话「缩进改变了布局」这种断言无从成立。
@@ -2457,7 +2457,7 @@ impl Document for Illustrated {
     }
 
     fn image_bytes(&self, href: &str) -> Option<Vec<u8>> {
-        (href == "p.png").then(|| crate::ui::shared::images::TINY_PNG.to_vec())
+        (href == "p.png").then(|| crate::ui::foundation::images::TINY_PNG.to_vec())
     }
 
     fn stylesheet(&self) -> String {

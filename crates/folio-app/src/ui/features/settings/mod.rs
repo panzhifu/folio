@@ -37,9 +37,9 @@ pub(super) use gpui_kit::component::ThemeMode;
 pub(super) use gpui_kit::{App, SharedString};
 pub(super) use spec::{Group, NumberSpec, Page, Row, group, number, page};
 
-pub(super) use crate::ui::shared::config_model::ConfigHolder;
-pub(super) use crate::ui::shared::l10n::{tf, tr};
-pub(super) use crate::ui::shared::theme;
+pub(super) use crate::ui::services::config::ConfigHolder;
+pub(super) use crate::ui::services::l10n::{tf, tr};
+pub(super) use crate::ui::foundation::theme;
 
 // 那颗「打开所在文件夹」的按钮要用的几样（页面文件通过 `super::` 拿到它本身）。
 use gpui_kit::IntoElement;

@@ -8,7 +8,7 @@
 use gpui_kit::component::h_flex;
 use gpui_kit::{IntoElement as _, ParentElement, Styled, div};
 
-use crate::ui::widgets::muted_label;
+use crate::ui::components::muted_label;
 
 use super::*;
 

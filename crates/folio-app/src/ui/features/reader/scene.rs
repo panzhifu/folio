@@ -17,7 +17,7 @@ use gpui_kit::{Hsla, SharedString};
 use super::document::{Document, RowFragment};
 use super::measure::FontCache;
 use super::paint::GlyphRun;
-use crate::ui::widgets::{run_color, run_color_link};
+use crate::ui::foundation::style::{run_color, run_color_link};
 
 /// 可见范围内一块盒子的块级装饰：背景色与四边边框（实心画）。
 ///
@@ -49,7 +49,7 @@ pub struct VisibleImage {
     /// **像素不在这里** —— 场景只负责「这一帧该摆哪张图」，解没解好由
     /// [`super::image_atlas::ImageAtlas`] 答（`view.rs` 在搭元素那一趟问它）。
     /// 摆位用的是排版给的框，与字节无关，所以这一格给得起。
-    pub image: crate::ui::shared::images::DecodeRequest,
+    pub image: crate::ui::foundation::images::DecodeRequest,
     /// 这张图是不是一条**脚注引用**的标记；是的话带上注文。
     ///
     /// 老书把脚注标记做成一张 10px 的「注」图（`蛇结` 就是），图外面套一条
@@ -263,7 +263,7 @@ mod tests {
 
     use super::DecorSeed;
     use super::place_decorations;
-    use crate::ui::widgets::run_color;
+    use crate::ui::foundation::style::run_color;
     use folio_core::content::format::css::computed::{BorderStyle, Color};
     use gpui_kit::black;
 

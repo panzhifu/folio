@@ -59,8 +59,8 @@ use super::session::{
     AnnotationSpans, PageRef, ReaderSession, Source, Turn, TurnRun, land_at_anchor, start_turn,
 };
 use super::turn_animation::{self, Sheet, Tint};
-use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::images::DecodeRequest;
+use crate::ui::services::config::ConfigHolder;
+use crate::ui::foundation::images::DecodeRequest;
 use crate::ui::shell::nav_transition;
 use crate::ui::shell::navigation::SizeClass;
 

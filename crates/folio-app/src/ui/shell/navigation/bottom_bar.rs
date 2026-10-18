@@ -15,7 +15,7 @@ use gpui_kit::{
 };
 
 use super::Destination;
-use crate::ui::shared::l10n::tr;
+use crate::ui::services::l10n::tr;
 
 /// 底栏高度（逻辑像素）。够放下「图标 + 一行小字」两行，又贴着 Material 底栏的档位。
 pub const BAR_HEIGHT: f32 = 56.0;

@@ -40,13 +40,13 @@ use super::book_card::{COVER_RATIO, Card, GroupCard, TILE_SLOTS};
 use super::book_menu;
 use super::overlay;
 use super::scan::ScanPhase;
-use crate::ui::shared::config_model::ConfigHolder;
-use crate::ui::shared::error::{Context as _, report};
-use crate::ui::shared::l10n::{tf, tr};
-use crate::ui::shared::library::{delete_book, pick_dir, suggested_dir, target_dir};
-use crate::ui::shared::services;
+use crate::ui::services::config::ConfigHolder;
+use crate::ui::foundation::error::{Context as _, report};
+use crate::ui::services::l10n::{tf, tr};
+use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
+use crate::ui::services::services;
 use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
-use crate::ui::widgets::{
+use crate::ui::components::{
     BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, empty_state, muted_label,
 };
 
@@ -163,7 +163,7 @@ pub enum ShelfEvent {
 }
 
 pub struct ShelfView {
-    /// 书库句柄，来自 [`crate::ui::shared::app_store`]。放 `None` 时架面是空的，
+    /// 书库句柄，来自 [`crate::ui::services::app_store`]。放 `None` 时架面是空的，
     /// 但界面照常起得来。
     ///
     /// `pub(super)` 只为 [`super::book_info`] 那一页：它要在点开的时刻自己查一次库。
@@ -282,7 +282,7 @@ impl ShelfView {
         cx: &mut Context<Self>,
         stack: WeakEntity<NavStackState>,
     ) -> Self {
-        let store = crate::ui::shared::app_store::handle(cx);
+        let store = crate::ui::services::app_store::handle(cx);
         if store.is_none() {
             tracing::error!("ShelfView: 书库没装，架面会是空的");
         }
@@ -301,7 +301,7 @@ impl ShelfView {
             this.reload(query, cx);
         });
         // 自动导入（监听、传书）的事件流。处理与手工导入完全同一套。
-        let auto_events = crate::ui::shared::import_queue::auto_import_events();
+        let auto_events = crate::ui::services::import_queue::auto_import_events();
         let _auto_import = cx.spawn(async move |this: WeakEntity<Self>, cx| {
             while let Ok(event) = auto_events.recv().await {
                 if this
@@ -584,7 +584,7 @@ impl ShelfView {
             return;
         };
         // 管线在后台落库，要的是能跨线程的 `Arc<Store>`。
-        let Some(store) = crate::ui::shared::app_store::handle(cx) else {
+        let Some(store) = crate::ui::services::app_store::handle(cx) else {
             tracing::error!("ShelfView: 书库没装上，这一批没有导入");
             return;
         };
@@ -1697,7 +1697,7 @@ mod tests {
     };
 
     use super::{COVER_RATIO, GAP, GUTTER, GroupFilter, ShelfView, columns_for, grid_spec};
-    use crate::ui::shared::config_model::ConfigHolder;
+    use crate::ui::services::config::ConfigHolder;
     use crate::ui::shell::navigation::SizeClass;
 
     /// 架面一行放几本：手机钉在 3，桌面与平板随窗口宽往上加，任何宽度都不许塌成 0 列。
@@ -1793,7 +1793,7 @@ mod tests {
         let mut built = None;
         let handle = cx
             .open_window(size(px(900.), px(600.)), |window, cx| {
-                crate::ui::shared::app_store::install(Store::in_memory().expect("内存库"), cx);
+                crate::ui::services::app_store::install(Store::in_memory().expect("内存库"), cx);
                 ConfigHolder::install(
                     Config {
                         library: Library {
@@ -1811,7 +1811,7 @@ mod tests {
             })
             .into();
         let store = cx
-            .update(|cx| crate::ui::shared::app_store::handle(cx))
+            .update(|cx| crate::ui::services::app_store::handle(cx))
             .expect("书库应已装上");
         (built.expect("架面应已建起"), handle, store)
     }

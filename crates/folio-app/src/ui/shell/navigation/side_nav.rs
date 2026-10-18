@@ -7,7 +7,7 @@ use gpui_kit::component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, Sid
 use gpui_kit::{App, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::{Destination, RAIL_WIDTH, SIDEBAR_WIDTH};
-use crate::ui::shared::l10n::tr;
+use crate::ui::services::l10n::tr;
 
 pub(super) fn side_nav<F>(
     cx: &App,

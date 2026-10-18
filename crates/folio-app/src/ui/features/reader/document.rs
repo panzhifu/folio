@@ -36,7 +36,7 @@ use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window, WindowTextSyst
 
 use super::measure::GpuiMeasure;
 use crate::ui::features::reader::book_fonts::BookFonts;
-use crate::ui::shared::images::ChapterImages;
+use crate::ui::foundation::images::ChapterImages;
 
 /// 打开一个文档，返回统一接口。
 ///

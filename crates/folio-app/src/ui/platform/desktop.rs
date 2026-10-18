@@ -13,8 +13,8 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::{App, AppContext as _, Font, TitlebarOptions, px, size};
 
 use crate::ui::host;
-use crate::ui::shared::config_model::{ConfigHolder, ConfigPath};
-use crate::ui::shared::theme;
+use crate::ui::services::config::{ConfigHolder, ConfigPath};
+use crate::ui::foundation::theme;
 use crate::ui::shell::AppShell;
 
 /// 桌面入口：`main.rs` 在非移动 target 上调它。
@@ -87,7 +87,7 @@ pub fn run_desktop() {
                 Err(err) => tracing::warn!("desktop: 清理失效的书失败：{err:#}"),
             }
             // 书库挂成全局：书架、阅读、批注都从这里读同一个库。
-            crate::ui::shared::app_store::install(store, cx);
+            crate::ui::services::app_store::install(store, cx);
             // 配置落盘到系统标准目录，再把配置挂成可观察的 Global。
             // `install` 必须在开窗前：`AppShell::boot` 一上来就查读者偏好定字体，
             // 而外壳的订阅要拿到那个实体 —— 晚一步就是「no state of type ConfigHolder」。
@@ -95,7 +95,7 @@ pub fn run_desktop() {
             ConfigHolder::install_resolved(resolved, cx);
             // 常驻资源（导入作业池 + 监听 + 传书）收拢到一个进程级句柄里；书库句柄也交过去，
             // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
-            crate::ui::shared::services::install(cx);
+            crate::ui::services::services::install(cx);
             // 诊断 dump（§5.8）：`FOLIO_DUMP=1` 时把生效配置 + 库版本 + 队列长度打一份。
             if folio_core::infra::diagnostics::enabled() {
                 let provenance = ConfigHolder::provenance(cx);
@@ -103,17 +103,17 @@ pub fn run_desktop() {
                     &ConfigHolder::snapshot(cx),
                     Some(&provenance),
                     db_version,
-                    Some(crate::ui::shared::services::pool().queued()),
+                    Some(crate::ui::services::services::pool().queued()),
                     // 物理内存还没接（平台层给），所以给 `None` —— 报「未知」也不报假数。
                     None,
                 );
             }
             // 清掉上次崩溃留在书库目录里的 `.part` 半成品（§1.3 末条）。
-            crate::ui::shared::library::sweep_partials(cx);
+            crate::ui::services::library::sweep_partials(cx);
             // 老副本改名的那一趟：投进 Cleanup 档，不等它、也不在界面线程上算哈希。
-            crate::ui::shared::library::schedule_backfill(cx);
+            crate::ui::services::library::schedule_backfill(cx);
             // 监听是后台能力：配置开着就随启动起，活过任何一屏。
-            crate::ui::shared::watch::sync_from_config(cx);
+            crate::ui::services::watch::sync_from_config(cx);
 
             // 阅读字体是否已由 fontconfig 解析到，决定「字体随包」的优先级。
             let probe = Font {
@@ -144,5 +144,5 @@ pub fn run_desktop() {
 
     // `run` 返回 = 窗口全关、`App` 已 drop（它的 `AppStore` 句柄也放了）。
     // 这时按 §1.3/§5.6 的有序收尾：停监听/传书 → 关作业池 → 放掉我们这份最后一个书库句柄。
-    crate::ui::shared::services::shutdown();
+    crate::ui::services::services::shutdown();
 }
