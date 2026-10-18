@@ -38,7 +38,7 @@ use crate::ui::foundation::images::cover_image;
 use crate::ui::services::l10n::tf;
 
 use super::book_menu;
-use super::view::{ShelfEvent, ShelfView};
+use super::super::view::{ShelfEvent, ShelfView};
 
 /// 封面格的宽高比（宽 ÷ 高），出版物的通行比例。
 ///
@@ -46,13 +46,13 @@ use super::view::{ShelfEvent, ShelfView};
 /// 让每格按图算高会得到一片参差的边。统一裁成这一档，多出来的部分由
 /// `ObjectFit::Cover` 裁掉。
 ///
-/// 架上这一格不是在这里按格宽推出高度来的，而是 [`super::view::grid_spec`] 算好
+/// 架上这一格不是在这里按格宽推出高度来的，而是 [`super::super::view::grid_spec`] 算好
 /// `cover_height` 递进 [`ShelfView::card_element`]：那一格的高要被 `uniform_list`
 /// 拿去当整排的排距，而它量的是 min-content 宽度 —— 让排版自己按宽度推会得到一片
 /// 被书名撑开的排距（那里有原因）。
 ///
-/// `pub(super)` 就是为 [`super::view`] 那一个用处。
-pub(super) const COVER_RATIO: f32 = 2.0 / 3.0;
+/// `pub(in crate::ui::features::shelf)` 就是为 [`super::view`] 那一个用处。
+pub(in crate::ui::features::shelf) const COVER_RATIO: f32 = 2.0 / 3.0;
 
 /// 多个作者并成一行用的分隔（逻辑上是一个字符的空格 + `·` + 空格）。
 ///
@@ -91,7 +91,7 @@ fn hover_shadow() -> Vec<BoxShadow> {
 ///
 /// 动的是不透明度，不是排距：格子的位置一开始就是对的，淡到位不会让任何一行推离
 /// 它那条对齐脊线。
-pub(super) struct Enter {
+pub(in crate::ui::features::shelf) struct Enter {
     /// 从第一次画出格子起算过去了多久。`None` = 预算已经花完，或者系统要求减少
     /// 动态效果：两种都是每一格直接画成到位的样子。
     elapsed: Option<Duration>,
@@ -117,22 +117,22 @@ impl Enter {
 }
 
 /// 一张卡片：库行摊平到界面直接用的样子 —— 封面已解码，作者已并成一行。
-pub(super) struct Card {
-    pub(super) id: i64,
-    pub(super) title: SharedString,
-    pub(super) authors: SharedString,
-    pub(super) cover: Option<Arc<Image>>,
+pub(in crate::ui::features::shelf) struct Card {
+    pub(in crate::ui::features::shelf) id: i64,
+    pub(in crate::ui::features::shelf) title: SharedString,
+    pub(in crate::ui::features::shelf) authors: SharedString,
+    pub(in crate::ui::features::shelf) cover: Option<Arc<Image>>,
 }
 
 /// 一张组卡：一个组摊到架面那一格上的样子。
 ///
 /// `covers` 是这个组摆在卡上的那几本封面（至多 [`TILE_SLOTS`] 张，缺封面的那本占一格但什么都不画），
 /// `count` 是组里**一共**几本 —— 卡上画不下全部，那一行数字才是答案。
-pub(super) struct GroupCard {
-    pub(super) id: i64,
-    pub(super) name: SharedString,
-    pub(super) count: usize,
-    pub(super) covers: Vec<Option<Arc<Image>>>,
+pub(in crate::ui::features::shelf) struct GroupCard {
+    pub(in crate::ui::features::shelf) id: i64,
+    pub(in crate::ui::features::shelf) name: SharedString,
+    pub(in crate::ui::features::shelf) count: usize,
+    pub(in crate::ui::features::shelf) covers: Vec<Option<Arc<Image>>>,
 }
 
 /// 组卡里封面马赛克的格数：两行两列。
@@ -140,7 +140,7 @@ pub(super) struct GroupCard {
 /// 写死 2×2 而不是按卡宽算能塞几格：一张组卡与一本的书卡占同一格宽，塞得下的就是这四张。
 const TILE_ROWS: usize = 2;
 const TILE_COLS: usize = 2;
-pub(super) const TILE_SLOTS: usize = TILE_ROWS * TILE_COLS;
+pub(in crate::ui::features::shelf) const TILE_SLOTS: usize = TILE_ROWS * TILE_COLS;
 
 /// 马赛克与卡边的留白、格与格之间的缝（逻辑像素）。
 ///
@@ -166,7 +166,7 @@ impl ShelfView {
     ///
     /// 系统那条「减少动态效果」的偏好也在这一处认：认的话直接不给 `elapsed`，
     /// 每一格从一开始就画成到位的样子，一帧都不动。
-    pub(super) fn enter_clock(&mut self, count: usize, window: &Window, cx: &App) -> Enter {
+    pub(in crate::ui::features::shelf) fn enter_clock(&mut self, count: usize, window: &Window, cx: &App) -> Enter {
         let duration = cx.theme().motion.duration_normal;
         let at = *self.enter_at.get_or_insert_with(Instant::now);
         let elapsed = at.elapsed();
@@ -197,7 +197,7 @@ impl ShelfView {
     ///
     /// 只有「信息」那一屏用原图（`book_info` 走 `store.book_cover`）：那里封面是主视觉，
     /// 要大。
-    pub(super) fn card(&mut self, item: ShelfItem, cover: Option<Arc<Image>>) -> Card {
+    pub(in crate::ui::features::shelf) fn card(&mut self, item: ShelfItem, cover: Option<Arc<Image>>) -> Card {
         Card {
             id: item.id,
             title: item.title.into(),
@@ -215,7 +215,7 @@ impl ShelfView {
     /// 解码结果记在架面那份 [`ShelfView::covers`] 里：改一个搜索词会把同一本书再查
     /// 出来一遍，没缓存的话每敲一个字都要把整个架面的 JPEG 重解一遍；`None` 也要存 ——
     /// 不记住这次失败，每查一次都会再试一遍同样的失败。
-    pub(super) fn resolve_cover(&mut self, item: &ShelfItem) -> Option<Arc<Image>> {
+    pub(in crate::ui::features::shelf) fn resolve_cover(&mut self, item: &ShelfItem) -> Option<Arc<Image>> {
         if let Some(cached) = self.covers.get(&item.id) {
             return cached.clone();
         }
@@ -252,14 +252,14 @@ impl ShelfView {
     /// `labels` 是管理菜单那两条的文案：整个架面取一次再逐卡 clone 进来（浮层的
     /// builder 是 `Fn`，菜单每次打开都重建一遍），条目本身在 [`super::book_menu`]。
     ///
-    /// `cover_height` 由架面按格宽算好递进来（[`super::view::grid_spec`]），而不是在这里
+    /// `cover_height` 由架面按格宽算好递进来（[`super::super::view::grid_spec`]），而不是在这里
     /// 交给 `aspect_ratio` 让排版自己按宽度推 —— 那一格的高度要被 `uniform_list` 拿去当
     /// 整排的排距，而它量的是 min-content 宽度。比例仍是 [`COVER_RATIO`]，只是从这一格
     /// 挪到了算它的那一处。
     ///
     /// `enter` 与 `index` 一起管这一格的落定：`index` 是它在这面架上的第几格（横排
     /// 从左往右、从上往下数），落定的先后由它定，进度由那一片共同的那条时钟算。
-    pub(super) fn card_element(
+    pub(in crate::ui::features::shelf) fn card_element(
         &self,
         card: &Card,
         labels: &book_menu::Labels,
@@ -375,7 +375,7 @@ impl ShelfView {
     /// 点下去是**筛到那一组**（[`ShelfView::set_group`]），不是开书：这一格没有「这一本」
     /// 可开。长按菜单不挂在这里 —— 组本身能改的事（改名 / 删除）此刻还没有入口，
     /// 摆一条空的或半条能点的菜单比不摆更糟。
-    pub(super) fn group_cell_element(
+    pub(in crate::ui::features::shelf) fn group_cell_element(
         &self,
         tile: &GroupCard,
         cover_height: f32,
@@ -406,7 +406,7 @@ impl ShelfView {
             .opacity(enter.progress(index))
             .on_click(move |_, _, cx| {
                 tapped.update(cx, |this, cx| {
-                    this.set_group(super::view::GroupFilter::Collection(id), cx)
+                    this.set_group(super::super::view::GroupFilter::Collection(id), cx)
                 })
             })
             .child(

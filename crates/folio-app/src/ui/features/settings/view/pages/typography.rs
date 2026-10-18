@@ -10,9 +10,9 @@
 //! 前面两组是照读者改它们的时机分的：「正文」那一组是行的高度（一路跟着眼睛走），
 //! 「段落」那一组是每一段的形状（开头缩进与行尾齐不齐）。
 
-use super::*;
+use super::super::*;
 
-pub(super) fn typography_page(cx: &App) -> Page {
+pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
     page(
         tr(cx, "page.typography"),
         IconName::Type,

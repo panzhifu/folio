@@ -9,9 +9,9 @@
 
 use folio_core::TocDensity;
 
-use super::*;
+use super::super::*;
 
-pub(super) fn toc_page(cx: &App) -> Page {
+pub(in crate::ui::features::settings) fn toc_page(cx: &App) -> Page {
     page(
         tr(cx, "page.toc"),
         IconName::ListTree,

@@ -5,9 +5,9 @@
 //!
 //! 一组而不是两组：这一页只有两项，且它们是同一件事的两头（一栏多宽、两侧留多少）。
 
-use super::*;
+use super::super::*;
 
-pub(super) fn layout_page(cx: &App) -> Page {
+pub(in crate::ui::features::settings) fn layout_page(cx: &App) -> Page {
     page(
         tr(cx, "page.layout"),
         IconName::Columns3,

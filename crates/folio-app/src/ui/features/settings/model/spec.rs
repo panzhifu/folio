@@ -94,7 +94,7 @@ pub(crate) enum RowKind {
 }
 
 impl Row {
-    pub(super) fn toggle(
+    pub(in crate::ui::features::settings) fn toggle(
         title: SharedString,
         get: impl Fn(&App) -> bool + 'static,
         set: impl Fn(bool, &mut App) + 'static,
@@ -111,7 +111,7 @@ impl Row {
     }
 
     /// 一行「多选一」，手机端用浮层菜单就地选。
-    pub(super) fn dropdown(
+    pub(in crate::ui::features::settings) fn dropdown(
         title: SharedString,
         options: Vec<(SharedString, SharedString)>,
         scrollable: bool,
@@ -123,7 +123,7 @@ impl Row {
 
     /// 同一份「多选一」，手机端改成**推一屏勾选**：项多、名字长的时候，浮层要盖掉半屏，
     /// 而推入式的每一行都能整行命中 44。桌面不受这一格影响。
-    pub(super) fn choice(
+    pub(in crate::ui::features::settings) fn choice(
         title: SharedString,
         options: Vec<(SharedString, SharedString)>,
         scrollable: bool,
@@ -155,7 +155,7 @@ impl Row {
         }
     }
 
-    pub(super) fn text(
+    pub(in crate::ui::features::settings) fn text(
         title: SharedString,
         get: impl Fn(&App) -> SharedString + 'static,
         set: impl Fn(SharedString, &mut App) + 'static,
@@ -171,7 +171,7 @@ impl Row {
         }
     }
 
-    pub(super) fn info(title: SharedString, value: impl Into<SharedString>) -> Self {
+    pub(in crate::ui::features::settings) fn info(title: SharedString, value: impl Into<SharedString>) -> Self {
         Self {
             title,
             desc: None,
@@ -182,7 +182,7 @@ impl Row {
         }
     }
 
-    pub(super) fn custom(render: impl Fn(&App) -> AnyElement + 'static) -> Self {
+    pub(in crate::ui::features::settings) fn custom(render: impl Fn(&App) -> AnyElement + 'static) -> Self {
         Self {
             title: SharedString::default(),
             desc: None,
@@ -194,7 +194,7 @@ impl Row {
         }
     }
 
-    pub(super) fn custom_titled(
+    pub(in crate::ui::features::settings) fn custom_titled(
         title: SharedString,
         render: impl Fn(&App) -> AnyElement + 'static,
     ) -> Self {
@@ -209,12 +209,12 @@ impl Row {
         }
     }
 
-    pub(super) fn description(mut self, desc: impl Into<SharedString>) -> Self {
+    pub(in crate::ui::features::settings) fn description(mut self, desc: impl Into<SharedString>) -> Self {
         self.desc = Some(desc.into());
         self
     }
 
-    pub(super) fn keywords(mut self, keywords: &'static [&'static str]) -> Self {
+    pub(in crate::ui::features::settings) fn keywords(mut self, keywords: &'static [&'static str]) -> Self {
         self.keywords = keywords;
         self
     }

@@ -6,7 +6,7 @@
 //! [`ShelfView::toggle_group`] 与 [`ShelfView::new_group`] 管这本书在各组里的名分），
 //! 那些改的是架面自己的状态（查库、压页、删行、重查），不属于这一屏浮层。
 //!
-//! 「打开」不在菜单里：点卡片本身就是打开（[`super::view::ShelfEvent::Open`] 由卡片的
+//! 「打开」不在菜单里：点卡片本身就是打开（[`super::super::view::ShelfEvent::Open`] 由卡片的
 //! tap 派发），菜单只管信息、分组与删除那些次要的事。
 //!
 //! **分组那一节是开关，不是单向的「加入」**：每一条组一行，这本书已经在其中的打勾，
@@ -26,18 +26,18 @@ use gpui_kit::{App, Entity, SharedString, px};
 
 use crate::ui::services::l10n::tr;
 
-use super::view::ShelfView;
+use super::super::view::ShelfView;
 
 /// 架面两处浮层共用的最小宽度（逻辑像素）：卡片的管理菜单与右上角的导入菜单同宽，
 /// 短标签的那条不至于比长标签的瘦一圈。
-pub(super) const MIN_WIDTH: f32 = 140.0;
+pub(in crate::ui::features::shelf) const MIN_WIDTH: f32 = 140.0;
 
 /// 这本书在某个分组里的名分：`(组 id, 组名, 在不在里面)`。
-pub(super) type GroupRow = (i64, SharedString, bool);
+pub(in crate::ui::features::shelf) type GroupRow = (i64, SharedString, bool);
 
 /// 各条的文案。整个架面取一次（[`Labels::resolve`]），逐卡 clone 进 [`build`]。
 #[derive(Clone)]
-pub(super) struct Labels {
+pub(in crate::ui::features::shelf) struct Labels {
     info: SharedString,
     delete: SharedString,
     /// 分组那一节的节头那一行字（不可点）。
@@ -50,7 +50,7 @@ impl Labels {
     ///
     /// 「信息」复用那一页的标题 `shelf.info_title`：菜单点开的就是那页，一处写
     /// 「书籍信息」一处写「信息」会让读者以为是两件事。
-    pub(super) fn resolve(cx: &App) -> Self {
+    pub(in crate::ui::features::shelf) fn resolve(cx: &App) -> Self {
         Self {
             info: tr(cx, "shelf.info_title"),
             delete: tr(cx, "shelf.book_delete"),
@@ -72,7 +72,7 @@ impl Labels {
 /// `groups` 由调用方在**菜单打开那一刻**现查（[`ShelfView::group_items`]），所以读者刚
 /// 建完的组立刻就在这一节里，不必等架面重查；一个组都没有时整节不出现（一节空条目
 /// 比没有这一节更让人以为功能坏了）。
-pub(super) fn build(
+pub(in crate::ui::features::shelf) fn build(
     menu: PopupMenu,
     labels: &Labels,
     book_id: i64,

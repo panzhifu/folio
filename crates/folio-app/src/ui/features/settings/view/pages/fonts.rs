@@ -4,9 +4,9 @@
 //! 家族名，排版层会退回设备能解析的名字（见 `ui/shared/measure.rs` 的泛族名处理），
 //! 而不是把字画成方框。列一个「本机字体清单」反而会把没装的也列出来。
 
-use super::*;
+use super::super::*;
 
-pub(super) fn fonts_page(cx: &App) -> Page {
+pub(in crate::ui::features::settings) fn fonts_page(cx: &App) -> Page {
     let family = Row::text(
         tr(cx, "field.font_family"),
         |cx: &App| SharedString::from(ConfigHolder::reader(cx).font_family),

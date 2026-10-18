@@ -10,9 +10,9 @@ use gpui_kit::{IntoElement as _, ParentElement, Styled, div};
 
 use crate::ui::components::muted_label;
 
-use super::*;
+use super::super::*;
 
-pub(super) fn appearance_page(cx: &App) -> Page {
+pub(in crate::ui::features::settings) fn appearance_page(cx: &App) -> Page {
     page(
         tr(cx, "page.appearance"),
         IconName::Palette,
@@ -128,7 +128,7 @@ fn theme_item(cx: &App, mode: ThemeMode, title: &str, hint: &str) -> Row {
 }
 
 /// 读者自己的配色往哪个目录放，加一颗「打开所在文件夹」—— 与配置文件那一格同一个动作
-/// （共用 [`super::open_folder_button`]）。
+/// （共用 [`super::super::open_folder_button`]）。
 ///
 /// 点了它**不会**当场重扫：那一份是启动时读的（`theme::register_user_themes`），所以说明
 /// 写的仍是「下次启动」。按钮只负责把人送到那个目录跟前，放 JSON 进去还是要读者自己做。
@@ -149,7 +149,7 @@ fn custom_group(cx: &App) -> Group {
                             .min_w_0()
                             .child(muted_label(dir.display().to_string(), cx)),
                     )
-                    .child(super::open_folder_button(
+                    .child(super::super::open_folder_button(
                         "appearance-open-themes-dir",
                         dir,
                         cx,

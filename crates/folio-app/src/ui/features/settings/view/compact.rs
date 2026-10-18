@@ -269,7 +269,7 @@ pub(crate) struct CompactSettings {
 }
 
 impl CompactSettings {
-    /// 由外壳（「我的」目的地）与阅读页各建一屏，所以是 `pub(crate)` 而不是 `pub(super)`。
+    /// 由外壳（「我的」目的地）与阅读页各建一屏，所以是 `pub(crate)` 而不是 `pub(in crate::ui::features::settings)`。
     pub(crate) fn new() -> Self {
         Self {
             screen: Screen::Root,

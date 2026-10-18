@@ -12,6 +12,10 @@
 //! 一片格子怎么排（几列、格间距、整片滚动）在 `grid`；一格长什么样在
 //! [`super::book_card`] —— 包括「没有封面的书也要照样占住一格」那一条。
 
+// 这一屏压出来的两页与它共用同一个实体：信息页（压导航栈的整屏）与整机扫描的候选清单。
+pub(in crate::ui::features::shelf) mod book_info;
+pub(in crate::ui::features::shelf) mod scan;
+
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -36,10 +40,10 @@ use gpui_kit::{
     UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 
-use super::book_card::{COVER_RATIO, Card, GroupCard, TILE_SLOTS};
-use super::book_menu;
+use super::components::book_card::{COVER_RATIO, Card, GroupCard, TILE_SLOTS};
+use super::components::book_menu;
 use super::overlay;
-use super::scan::ScanPhase;
+use scan::ScanPhase;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::foundation::error::{Context as _, report};
 use crate::ui::services::l10n::{tf, tr};
@@ -79,7 +83,7 @@ const MIN_CARD: f32 = 168.0;
 
 /// 网格与搜索行两侧的留白（逻辑像素）。和顶部那条章导航的 `px_3` 不同一档，
 /// 因为这里是整片卡片的边，视觉上要比一条文字栏松。
-pub(super) const GUTTER: f32 = 12.0;
+pub(in crate::ui::features::shelf) const GUTTER: f32 = 12.0;
 
 /// 一横排的量：几列，以及一格封面该多高。
 ///
@@ -90,9 +94,9 @@ pub(super) const GUTTER: f32 = 12.0;
 /// 两还多，第二排直接被推到屏幕外（真机 1080×2400 实测：量出 544，实际 236）。
 /// 写死高度让行高与测量时给的宽度无关，这个坑就填上了。
 #[derive(Clone, Copy)]
-pub(super) struct GridSpec {
-    pub(super) columns: u16,
-    pub(super) cover_height: f32,
+pub(in crate::ui::features::shelf) struct GridSpec {
+    pub(in crate::ui::features::shelf) columns: u16,
+    pub(in crate::ui::features::shelf) cover_height: f32,
 }
 
 /// 网格真正能用到的宽度：扣掉导航栏与两侧留白。
@@ -146,7 +150,7 @@ pub fn columns_for(width: f32, size: SizeClass) -> u16 {
 /// `Ungrouped` 是**筛**出来的、不是存出来的：库里没有一个叫这名字的组，它是
 /// 「不在任何 `collection_books` 行里」那一批（`Store::shelf_ungrouped`）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum GroupFilter {
+pub(in crate::ui::features::shelf) enum GroupFilter {
     /// 整架：与「读者还没建过任何组」时看到的是同一片。
     All,
     /// 还没进任何组的那一批。
@@ -166,13 +170,13 @@ pub struct ShelfView {
     /// 书库句柄，来自 [`crate::ui::services::app_store`]。放 `None` 时架面是空的，
     /// 但界面照常起得来。
     ///
-    /// `pub(super)` 只为 [`super::book_info`] 那一页：它要在点开的时刻自己查一次库。
-    pub(super) store: Option<Arc<Store>>,
+    /// `pub(in crate::ui::features::shelf)` 只为 [`super::book_info`] 那一页：它要在点开的时刻自己查一次库。
+    pub(in crate::ui::features::shelf) store: Option<Arc<Store>>,
     /// 书架这一目的地的导航栈（外壳建的，见 `AppShell::boot`）。
     ///
     /// 「信息」那一页由架面自己压上去 —— 与阅读页把设置屏压进同一条栈是同一条路。
     /// 弱句柄：栈是外壳的东西，架面不该反过来把它拽住不让它退。
-    pub(super) stack: WeakEntity<NavStackState>,
+    pub(in crate::ui::features::shelf) stack: WeakEntity<NavStackState>,
     items: Vec<Card>,
     /// 架面最前面那几张组卡。只在「整架 + 没搜词」时非空，其余时候是空的。
     ///
@@ -208,15 +212,15 @@ pub struct ShelfView {
     /// 导入会把文件**拷一份**进硬盘，所以位置要先说定。没定过的时候点导入不开选择器，
     /// 而是就地换成这块面板 —— 用普通按钮而不是浮层：浮层（长按菜单那条路）在
     /// Android 上现在点不住，见 `plans/facts.md`。
-    pub(super) confirming: bool,
+    pub(in crate::ui::features::shelf) confirming: bool,
     /// 封面解码结果，按书的主键存着。
     ///
     /// 键用 `id` 而不是每次现解：改一个搜索词会把同一本书再查出来一遍，
     /// 没缓存的话每敲一个字都要把整个架面的 JPEG 重解一遍。
     /// `None` 也要存 —— 不记住这次失败，每查一次都会再试一遍同样的失败。
     ///
-    /// `pub(super)` 只为 [`super::book_card`] 那一格：它按需解码，缓存得跟着架面活。
-    pub(super) covers: HashMap<i64, Option<Arc<Image>>>,
+    /// `pub(in crate::ui::features::shelf)` 只为 [`super::book_card`] 那一格：它按需解码，缓存得跟着架面活。
+    pub(in crate::ui::features::shelf) covers: HashMap<i64, Option<Arc<Image>>>,
     _search_watch: Subscription,
     /// 导入那条异步链：等选择器 → 把选中的文件交给后端管线 → 收事件直到这批结束。
     /// Task 一 drop 链就断，于是「选了文件但界面已经忘了」；而断在管线跑到一半时，
@@ -226,18 +230,18 @@ pub struct ShelfView {
     /// 正在进行的那批导入的读数：`(已完成, 总数)`。`total == 0` 是不定进度 ——
     /// 刚提交、管线第一条读数还没上来时就是这个样子；`None` 表示没在导入。
     /// 读数来自后端报的 `Progress` 事件，画在哪一处见 `Render` 那一段。
-    pub(super) importing: Option<(u64, u64)>,
+    pub(in crate::ui::features::shelf) importing: Option<(u64, u64)>,
     /// 正在进行的这批导入的取消旗标，来自 [`TaskHandle`](folio_core::infra::task::TaskHandle)。
     /// 读数行旁那颗「取消」按钮置位它；管线在两本书之间看见，已落库的那些是真的
     /// （`Cancelled` 事件来了重查一次架面就有）。
     import_cancel: Option<Cancel>,
     /// 整机扫描那一屏的意图（内容在 [`Self::scan`]）。见 [`Self::group_open`] 那一段为什么分两半。
-    pub(super) scan_open: bool,
+    pub(in crate::ui::features::shelf) scan_open: bool,
     /// 整机扫描那一屏的状态：正在扫 / 已出清单。`None` = 这一屏没东西可画了。
     /// 面板本体与全部动作在 [`super::scan`]。
-    pub(super) scan: Option<ScanPhase>,
+    pub(in crate::ui::features::shelf) scan: Option<ScanPhase>,
     /// 扫描那条异步链（事件桥）。与 `_import` 同理，要活到整轮结束。
-    pub(super) _scan: Option<Task<()>>,
+    pub(in crate::ui::features::shelf) _scan: Option<Task<()>>,
     /// 自动导入（监听 / 传书）事件的订阅链。这些批次不是这个视图提交的，
     /// 靠共享事件通道流回来 —— 处理与手工导入同一套（读数、重查架面）。
     _auto_import: Option<Task<()>>,
@@ -258,7 +262,7 @@ pub struct ShelfView {
     ///
     /// 只要一条：那一页写回书名作者之后报一声，架面重查 —— 那一行字就是这张卡上的。
     /// 每压一页换掉它，上一页的订阅跟着 drop（`Subscription` 一没就退订）。
-    pub(super) _info_watch: Option<Subscription>,
+    pub(in crate::ui::features::shelf) _info_watch: Option<Subscription>,
     /// 「书要拷到哪儿」那块面板里，系统文件夹选择器那条异步链。与 `_import` 同理，要活到选完。
     _pick: Option<Task<()>>,
     /// 导入完成后的**下一帧兜底重查**。选择器把应用切到后台，恢复前台的那一帧上
@@ -271,9 +275,9 @@ pub struct ShelfView {
     /// 记在架面而不是元素状态里：`uniform_list` 量行高时也在 `request_layout` 阶段
     /// 跑一遍 item 闭包，那里碰不得 gpui 的元素状态。
     ///
-    /// `pub(super)` 只为 [`super::book_card::ShelfView::enter_clock`] 那一处：动效的
+    /// `pub(in crate::ui::features::shelf)` 只为 [`super::book_card::ShelfView::enter_clock`] 那一处：动效的
     /// 那几条规矩都收在卡片文件里，时钟也得由它自己拨。
-    pub(super) enter_at: Option<Instant>,
+    pub(in crate::ui::features::shelf) enter_at: Option<Instant>,
 }
 
 impl ShelfView {
@@ -573,7 +577,7 @@ impl ShelfView {
     /// 扫描清单勾选「导入所选」走的是同一条路。
     ///
     /// 架面已经不在了（`update` 报错的那些时刻）就直接返回：后面没有界面可画了。
-    pub(super) fn dispatch_import(
+    pub(in crate::ui::features::shelf) fn dispatch_import(
         &mut self,
         source: Box<dyn folio_core::ingest::import::Source>,
         cx: &mut Context<Self>,
@@ -1029,7 +1033,7 @@ impl ShelfView {
     /// 现查而不是用架面那份 [`Self::collections`]：读者可能刚在另一本书的菜单里建了一个组，
     /// 这一本紧接着就该看得见它，而那份清单只在重查架面时更新一次。库里的组是几十行的量，
     /// 一次点击查两趟比缓存它便宜。
-    pub(super) fn group_items(&self, book_id: i64) -> Vec<book_menu::GroupRow> {
+    pub(in crate::ui::features::shelf) fn group_items(&self, book_id: i64) -> Vec<book_menu::GroupRow> {
         let Some(store) = &self.store else {
             return Vec::new();
         };
@@ -1054,7 +1058,7 @@ impl ShelfView {
     /// 「在不在」问的是库里那份名分而不是界面状态：这一条既是加入也是移出，判错一次
     /// 就是把读者刚加的组又删回去。存储层两头都幂等（重复加是 `false`、空移出也是 `false`），
     /// 所以这里不需要额外的防抖。
-    pub(super) fn toggle_group(
+    pub(in crate::ui::features::shelf) fn toggle_group(
         &mut self,
         book_id: i64,
         collection_id: i64,
@@ -1087,7 +1091,7 @@ impl ShelfView {
     ///
     /// 入口在书的长按菜单里，浮层却钉在顶部那颗分组按钮上 —— 菜单点完就散了，把它当锚点
     /// 等于钉在一个下一帧就不存在的元素上（见 [`Self::group_popover`]）。
-    pub(super) fn new_group(&mut self, book_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::shelf) fn new_group(&mut self, book_id: i64, window: &mut Window, cx: &mut Context<Self>) {
         if self.group_open {
             return;
         }
@@ -1100,7 +1104,7 @@ impl ShelfView {
     }
 
     /// 收「新建分组」那一屏。**只**改意图，理由同 [`Self::close_url_panel`]。
-    pub(super) fn close_group_panel(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::shelf) fn close_group_panel(&mut self, cx: &mut Context<Self>) {
         self.group_open = false;
         cx.notify();
     }
@@ -1138,7 +1142,7 @@ impl ShelfView {
     ///
     /// 组卡那一格点下去走的就是这一条：卡与顶部那颗筛选改的是同一个 [`Self::group`]，
     /// 所以两处永远说同一件事。
-    pub(super) fn set_group(&mut self, group: GroupFilter, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::shelf) fn set_group(&mut self, group: GroupFilter, cx: &mut Context<Self>) {
         self.group = group;
         self.items.clear();
         let query = self.query.clone();
@@ -1285,7 +1289,7 @@ impl ShelfView {
     /// 「哪些文件算我们自己的」这条判据在 [`delete_book`] 里，不在这里：桌面端记的是
     /// 读者手里的原文件，和移动端的副本在库里长得一模一样，只有位置能分开它们，
     /// 而删错的那一头是不可逆的。菜单上那颗「删除」见 [`super::book_menu`]。
-    pub(super) fn remove(&mut self, book_id: i64, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::shelf) fn remove(&mut self, book_id: i64, cx: &mut Context<Self>) {
         let Some(store) = &self.store else {
             tracing::error!("ShelfView: 没有书库，删不掉第 {book_id} 本");
             return;

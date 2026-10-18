@@ -14,9 +14,9 @@ use gpui_kit::{IntoElement as _, ParentElement, SharedString, Styled, div};
 
 use crate::ui::components::muted_label;
 
-use super::*;
+use super::super::*;
 
-pub(super) fn about_page(cx: &App) -> Page {
+pub(in crate::ui::features::settings) fn about_page(cx: &App) -> Page {
     page(
         tr(cx, "page.about"),
         IconName::Info,
@@ -133,7 +133,7 @@ fn config_group(cx: &App) -> Group {
                             .min_w_0()
                             .child(muted_label(path.display().to_string(), cx)),
                     )
-                    .child(super::open_folder_button("about-open-config-dir", path, cx))
+                    .child(super::super::open_folder_button("about-open-config-dir", path, cx))
                     .into_any_element()
             })
             .description(tr(cx, "field.config_path.desc"))

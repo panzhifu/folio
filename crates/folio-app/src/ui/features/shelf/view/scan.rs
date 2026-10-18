@@ -28,7 +28,7 @@ use crate::ui::services::l10n::{tf, tr};
 use crate::ui::services::library::{scan_noise_exempt, scan_roots, target_dir};
 use crate::ui::components::muted_label;
 
-use super::view::ShelfView;
+use super::ShelfView;
 
 /// 一行候选的高度（逻辑像素）。虚拟列表按它画视口。
 const ROW_HEIGHT: f32 = 36.0;
@@ -42,7 +42,7 @@ pub(crate) struct ScanRow {
 }
 
 /// 虚拟列表里的一项：一条目录分组头，或一行候选（下标指回 `rows`）。
-pub(super) enum ListEntry {
+pub(in crate::ui::features::shelf) enum ListEntry {
     Header(String),
     Row(usize),
 }
@@ -86,7 +86,7 @@ impl ShelfView {
     /// Android 上多一道门：先在**后台线程**上要「所有文件访问」（请求会把调用
     /// 线程阻塞到读者从系统设置页回来，见 [`crate::ui::platform`]::
     /// request_storage_access），要不到就退回只扫应用自己目录的小范围扫描。
-    pub(super) fn start_scan(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::shelf) fn start_scan(&mut self, cx: &mut Context<Self>) {
         if self.scan_open || self.importing.is_some() {
             // 正在扫或正在导：同一时刻一条线，读数行就是「等一下再点」的提示。
             return;
@@ -297,7 +297,7 @@ impl ShelfView {
     }
 
     /// 收掉那一屏回架面。**只**改意图，理由同 [`ShelfView::close_url_panel`]。
-    pub(super) fn close_scan(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::shelf) fn close_scan(&mut self, cx: &mut Context<Self>) {
         self.scan_open = false;
         cx.notify();
     }
@@ -504,7 +504,7 @@ fn scan_rows(
                 out.push(
                     div()
                         .h(px(HEADER_HEIGHT))
-                        .px(px(super::view::GUTTER))
+                        .px(px(super::GUTTER))
                         .text_color(muted)
                         .child(dir.clone())
                         .into_any_element(),
@@ -542,7 +542,7 @@ fn scan_rows(
                         .id(("shelf-scan-row", ix))
                         .h(px(ROW_HEIGHT))
                         .w_full()
-                        .px(px(super::view::GUTTER))
+                        .px(px(super::GUTTER))
                         .gap_2()
                         .items_center()
                         .child(

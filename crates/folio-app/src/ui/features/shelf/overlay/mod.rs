@@ -33,25 +33,25 @@ use super::view::ShelfView;
 const POPOVER_PAD: f32 = 12.0;
 
 /// 「从链接导入」那张居中浮层的宽与内容高。
-pub(super) const URL_WIDTH: f32 = 420.0;
-pub(super) const URL_HEIGHT: f32 = 152.0;
+pub(in crate::ui::features::shelf) const URL_WIDTH: f32 = 420.0;
+pub(in crate::ui::features::shelf) const URL_HEIGHT: f32 = 152.0;
 
 /// 扫描结果那张。高是**定死**的而不是「至少」：里面是一条虚拟列表，列表要滚就得有一个
 /// 能滚的框，「至少多高」给不出这个框。
-pub(super) const SCAN_WIDTH: f32 = 460.0;
-pub(super) const SCAN_HEIGHT: f32 = 460.0;
+pub(in crate::ui::features::shelf) const SCAN_WIDTH: f32 = 460.0;
+pub(in crate::ui::features::shelf) const SCAN_HEIGHT: f32 = 460.0;
 
 /// 建组那张的宽：比另两张窄，因为它只有「一个名字 + 两颗按钮」。它钉在按钮底下，
 /// 不需要报高度 —— 只有居中的那两张要靠高度算往上抬多少。
-pub(super) const GROUP_WIDTH: f32 = 340.0;
+pub(in crate::ui::features::shelf) const GROUP_WIDTH: f32 = 340.0;
 
 /// 底部弹层展开那一档占视口高的比例。
 ///
 /// 比目录那一屏（九成）矮一档：这三块是「答一句话就走」的层，压掉九成屏幕等于把架面
 /// 整个藏起来，而读者关掉它之后要看的就是那片架面。扫描那一屏要看得下几行清单，
 /// 所以它走 [`SCAN_SHEET_EXPANDED`] 那一档。
-pub(super) const SHEET_EXPANDED: f32 = 0.6;
-pub(super) const SCAN_SHEET_EXPANDED: f32 = 0.85;
+pub(in crate::ui::features::shelf) const SHEET_EXPANDED: f32 = 0.6;
+pub(in crate::ui::features::shelf) const SCAN_SHEET_EXPANDED: f32 = 0.85;
 /// 一张浮层。`anchor`/`offset` 决定它钉在哪儿，`close` 只在**读者自己关掉**那一刻派回去
 /// （点卡外面、按返回）—— 关掉之后把架面那份状态清掉的是调用方，不是这里。
 ///
@@ -102,7 +102,7 @@ fn popover(
 /// `height` 是调用方**报上来**的整张卡高，不是画完再量的：`Popover` 开完之后不回调报尺寸，
 /// 而「往上抬半张高」需要一个数。报的数与真实高对不上时卡会偏上或偏下几像素 —— 不截断、
 /// 不挡别的东西，这是换来「不必等一帧才定得准」的代价。
-pub(super) fn centered(
+pub(in crate::ui::features::shelf) fn centered(
     key: &'static str,
     height: f32,
     shelf: &Entity<ShelfView>,
@@ -127,7 +127,7 @@ pub(super) fn centered(
 }
 
 /// 钉在某个锚点旁边的浮层（建组那一张：跟着顶部那颗分组按钮走）。
-pub(super) fn anchored(
+pub(in crate::ui::features::shelf) fn anchored(
     key: &'static str,
     anchor: Anchor,
     offset: f32,
@@ -144,7 +144,7 @@ pub(super) fn anchored(
 /// [`BottomSheetState::is_idle`]，不是 `is_open()`：退场那半程 `is_open()` 已经是 `false`
 /// 而卡片还浮在屏幕上，那时断掉内容就等于看着它空着沉下去。判内容留不留的活儿在调用方
 /// （`ShelfView` 那一侧握着内容），这里只负责装。
-pub(super) fn sheet(
+pub(in crate::ui::features::shelf) fn sheet(
     key: &'static str,
     state: &Entity<BottomSheetState>,
     expanded: f32,

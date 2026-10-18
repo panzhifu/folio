@@ -6,18 +6,15 @@
 //! [`scan`]；那三块「要读者答一句话」的面板装进哪一块容器在 [`overlay`]；这里只做模块
 //! 边界与再导出。打开一本书与点开一页信息在当前阶段都由外壳负责 push（见 `shell`）。
 
-mod book_card;
-mod book_info;
-mod book_menu;
+mod components;
 mod overlay;
-mod scan;
-pub mod view;
+mod view;
 
-pub use book_info::{BookInfoEvent, BookInfoView};
+pub use view::book_info::{BookInfoEvent, BookInfoView};
 pub use view::{ShelfEvent, ShelfView};
 
 // 阅读页那本书的书头要把多位作者并成一行、要把字节数念成人读的大小。这两条写法
 // 定义仍在架上那两处（作者分隔属于卡片，大小属于扫描清单），这里只是让读页够得着，
 // 免得第二份实现在别处长出来。
-pub(crate) use book_card::AUTHOR_SEP;
-pub(crate) use scan::fmt_size;
+pub(crate) use components::AUTHOR_SEP;
+pub(crate) use view::scan::fmt_size;
