@@ -8,7 +8,10 @@ use gpui_kit::{App, Context, ScrollDelta, ScrollWheelEvent};
 
 use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
-use crate::ui::features::reader::model::session::{PageRef, ReaderSession, Source, Turn, TurnRun, start_turn};
+use crate::ui::features::reader::model::session::{
+    PageRef, ReaderSession, Source, Turn, TurnRun, start_turn,
+};
+use crate::ui::features::reader::model::swipe::SwipeStep;
 use crate::ui::features::reader::model::turn::{PagingFacts, TurnIntent, TurnPlan};
 use crate::ui::services::config::ConfigHolder;
 
@@ -289,7 +292,11 @@ impl ReaderSession {
     }
 
     /// 两条滚动入口共用的落点：夹进范围、落库、重画。
-    pub(in crate::ui::features::reader) fn set_scroll_y(&mut self, target: f32, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn set_scroll_y(
+        &mut self,
+        target: f32,
+        cx: &mut Context<Self>,
+    ) {
         let clamped = target.clamp(0.0, self.max_scroll());
         if (clamped - self.scroll_y).abs() < 0.5 {
             return;
@@ -373,7 +380,12 @@ impl ReaderSession {
         // 一笔的 `Started` 同样可能是零增量 —— 上一笔的惯性被这一按接走时，识别器先把那段
         // 尾巴结掉，再给这一笔开个头，错过这一格就没有跟踪态，后面每一个增量都会被当成
         // 惯性尾巴丢掉（症状：连着划第二下没反应）。
-        if self.swipe_scroll(event.touch_phase, dx, dy, cx) {
+        // 滚轮不是手势：增量按「行」给。它一到就把上一笔的惯性闸门放下 —— 触屏设备上
+        // 拖完一次之后，第一格滚轮不该被当成惯性吃掉。
+        let wheel = matches!(event.delta, ScrollDelta::Lines(_));
+        // 手势层：翻页那一趟（跟手 / 松手 / 惯性尾巴 / 轴不对）全在这里结账。
+        // `Ignore` 才是「这一笔不归我」—— 连续滚动里手指带着内容走的那一段。
+        if self.swipe_scroll(event.touch_phase, dx, dy, wheel, cx) != SwipeStep::Ignore {
             crate::ui::features::reader::model::perf::scroll_end(
                 __gap_us,
                 (__start.elapsed().as_micros() as u64).max(1),
@@ -409,41 +421,62 @@ impl ReaderSession {
             // 读者看到的是「没有动画，直接跳页」。
             return false;
         }
-        // 手已经在直接控制这一屏了，补间不该追在手指后面：正在走的那一趟当场落定。
-        // 落定之后画出来的位置由渲染帧按「没有动画」那一条重新对齐到 `scroll_y`。
-        self.cancel_turn();
-        // 位置有没有真的变过：滚到章尾被夹住、分页攒不够半屏都不该重画。
+        // 位置有没有真的变过：滚到章尾被夹住、手指拖到一半都不该重画。
         // 这条判据与 gpui 自己的 `div` 滚动容器、zed editor 的 `scroll` 同源
         // （位置没变就不 notify），省下的是一整帧的场景重建。
         let before = (self.scroll_y, self.page);
         let mut boundary = None;
         if !self.is_fixed() && self.laid_out.mode.is_continuous() {
+            // 手已经在直接控制这一屏了，补间不该追在手指后面：正在走的那一趟当场落定。
+            // 落定之后画出来的位置由渲染帧按「没有动画」那一条重新对齐到 `scroll_y`。
+            //
+            // **这一句只属于连续滚动**：分页里正在走的是那两张纸，滚动事件不该能按停它
+            // （从前它挂在两支共用的位置上，于是竖向拖动的惯性把松手动画当场掐掉）。
+            self.cancel_turn();
             let max = self.max_scroll();
             self.scroll_y = (self.scroll_y - dy).clamp(0.0, max);
         } else {
-            // 分页 / 双页 / 定版式：滚轮不「滚」，它翻页：攒够半屏翻一页，方向与连续滚动一致。
-            self.wheel_accum -= dy;
-            let threshold = (self.laid_out.viewport * 0.5).max(1.0);
+            // 分页 / 双页 / 定版式：这里不「滚」，它翻页。两种来源分两种算法：
+            //
+            // - **鼠标滚轮**（按「行」给）一格一页。攒半屏那条规矩对滚轮是错的：
+            //   一格 1 行折成 16px，而半屏阈值是几百像素 —— 转二十五格才翻一页。
+            // - **平台的像素增量**（触摸板 / 没有阶段信息的合成滚动）照旧攒半屏翻一页：
+            //   一次横扫会发几十条增量，一增量一页就是几十页。
+            //
+            // 手指拖动**到不了这里**：`swipe_scroll` 已经把它接走（`Turn` / `Swallow`）。
+            // 从前它漏进来，惯性把余量推过半屏就又翻一页 —— 那是「竖向滑动影响竖向翻页」
+            // 的另一半现场。
             let last = self.page_count().saturating_sub(1) as isize;
-            let before = self.page() as isize;
-            let mut page = before;
-            while self.wheel_accum.abs() >= threshold {
-                let step = if self.wheel_accum > 0.0 { 1 } else { -1 };
-                self.wheel_accum -= step as f32 * threshold;
+            let from = self.page() as isize;
+            let mut page = from;
+            if wheel {
+                let step = if dy > 0.0 { -1 } else { 1 };
                 let next = page + step;
                 if next < 0 || next > last {
-                    // 章界：这一格攒出的那一页交给跨章滑动，不再夹在 `0..last` 里。
                     boundary = (!self.is_fixed()).then_some(step);
-                    break;
+                } else {
+                    page = next;
                 }
-                page = next;
+            } else {
+                self.wheel_accum -= dy;
+                let threshold = (self.laid_out.viewport * 0.5).max(1.0);
+                while self.wheel_accum.abs() >= threshold {
+                    let step = if self.wheel_accum > 0.0 { 1 } else { -1 };
+                    self.wheel_accum -= step as f32 * threshold;
+                    let next = page + step;
+                    if next < 0 || next > last {
+                        boundary = (!self.is_fixed()).then_some(step);
+                        break;
+                    }
+                    page = next;
+                }
             }
-            // 翻走即清选中（与 `set_page` 同一条规矩；这里直接动页号，绕过了它）。
-            if page != before {
+            if page != from {
                 if let Some(fixed) = self.fixed_mut() {
                     fixed.set_page(page as usize);
                 }
                 self.page = page as usize;
+                // 翻走即清选中（与 `set_page` 同一条规矩；这里直接动页号，绕过了它）。
                 self.clear_selection();
             }
             if let Some(step) = boundary {

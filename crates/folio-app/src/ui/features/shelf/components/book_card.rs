@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 use folio_core::store::ShelfItem;
 use gpui_kit::base::motion::{Easing, Stagger, StaggerOrigin, Timing};
 use gpui_kit::component::ActiveTheme;
-use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::h_flex;
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, Context, Image, InteractiveElement, IntoElement, ObjectFit,
@@ -37,8 +37,8 @@ use gpui_kit::{
 use crate::ui::foundation::images::cover_image;
 use crate::ui::services::l10n::tf;
 
-use super::book_menu;
 use super::super::view::{ShelfEvent, ShelfView};
+use super::book_menu;
 
 /// 封面格的宽高比（宽 ÷ 高），出版物的通行比例。
 ///
@@ -166,7 +166,12 @@ impl ShelfView {
     ///
     /// 系统那条「减少动态效果」的偏好也在这一处认：认的话直接不给 `elapsed`，
     /// 每一格从一开始就画成到位的样子，一帧都不动。
-    pub(in crate::ui::features::shelf) fn enter_clock(&mut self, count: usize, window: &Window, cx: &App) -> Enter {
+    pub(in crate::ui::features::shelf) fn enter_clock(
+        &mut self,
+        count: usize,
+        window: &Window,
+        cx: &App,
+    ) -> Enter {
         let duration = cx.theme().motion.duration_normal;
         let at = *self.enter_at.get_or_insert_with(Instant::now);
         let elapsed = at.elapsed();
@@ -197,7 +202,11 @@ impl ShelfView {
     ///
     /// 只有「信息」那一屏用原图（`book_info` 走 `store.book_cover`）：那里封面是主视觉，
     /// 要大。
-    pub(in crate::ui::features::shelf) fn card(&mut self, item: ShelfItem, cover: Option<Arc<Image>>) -> Card {
+    pub(in crate::ui::features::shelf) fn card(
+        &mut self,
+        item: ShelfItem,
+        cover: Option<Arc<Image>>,
+    ) -> Card {
         Card {
             id: item.id,
             title: item.title.into(),
@@ -215,7 +224,10 @@ impl ShelfView {
     /// 解码结果记在架面那份 [`ShelfView::covers`] 里：改一个搜索词会把同一本书再查
     /// 出来一遍，没缓存的话每敲一个字都要把整个架面的 JPEG 重解一遍；`None` 也要存 ——
     /// 不记住这次失败，每查一次都会再试一遍同样的失败。
-    pub(in crate::ui::features::shelf) fn resolve_cover(&mut self, item: &ShelfItem) -> Option<Arc<Image>> {
+    pub(in crate::ui::features::shelf) fn resolve_cover(
+        &mut self,
+        item: &ShelfItem,
+    ) -> Option<Arc<Image>> {
         if let Some(cached) = self.covers.get(&item.id) {
             return cached.clone();
         }

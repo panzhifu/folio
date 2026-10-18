@@ -270,6 +270,15 @@ fn scroll_down(cx: &mut TestAppContext, handle: AnyWindowHandle, pixels: f32) {
     cx.run_until_parked();
 }
 
+/// 鼠标滚轮那一路：增量按「行」给，与触摸拖动的像素增量不是一回事。
+fn wheel_lines(cx: &mut TestAppContext, handle: AnyWindowHandle, lines: f32) {
+    cx.update_window(handle, |_, window, cx| {
+        window.scroll("folio-reader", ScrollDelta::Lines(point(0.0, lines)), cx);
+    })
+    .expect("滚轮应送达阅读视图");
+    cx.run_until_parked();
+}
+
 fn progress_of(view: &Entity<ReaderSession>, cx: &mut TestAppContext) -> f32 {
     view.read_with(cx, |v, _| v.progress())
 }
@@ -286,7 +295,8 @@ fn offset_of(view: &Entity<ReaderSession>, cx: &mut TestAppContext) -> usize {
 fn epub_flow() -> FlowDoc {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/oss/minimal-zh.epub");
-    let doc = crate::ui::features::reader::model::chapter_layout::open(&path).expect("合成 EPUB 应能打开");
+    let doc = crate::ui::features::reader::model::chapter_layout::open(&path)
+        .expect("合成 EPUB 应能打开");
     let mut flow = doc.flow().expect("合成 EPUB 应读成可重排").clone();
     for (ix, chapter) in flow.chapters.iter_mut().enumerate() {
         let text = doc.chapter_source(ix).expect("正文该能从容器取到");
@@ -2510,8 +2520,9 @@ fn tapping_an_illustration_hands_it_to_the_zoom_layer(cx: &mut TestAppContext) {
         meta: meta("epub"),
         content: Content::Reflow(image_flow()),
     });
-    let viewer = cx
-        .update(|cx| cx.new(|_| crate::ui::features::reader::components::image_viewer::ImageViewer::default()));
+    let viewer = cx.update(|cx| {
+        cx.new(|_| crate::ui::features::reader::components::image_viewer::ImageViewer::default())
+    });
     let (view, handle) =
         open_with_document(cx, doc, prefs(16.0), Locator::start(), 460.0, None, None);
     // 生产上这一层由阅读页挂上（它画在那一屏的最上面）；这里只要那个句柄，
@@ -2622,9 +2633,10 @@ fn the_image_column_is_reading_order_with_a_place_to_jump_to(cx: &mut TestAppCon
     let listed: Vec<(usize, usize, &str)> = column
         .iter()
         .map(|slot| match slot.place {
-            crate::ui::features::reader::components::image_viewer::Place::Reflow { chapter, offset } => {
-                (chapter, offset, slot.href.as_str())
-            }
+            crate::ui::features::reader::components::image_viewer::Place::Reflow {
+                chapter,
+                offset,
+            } => (chapter, offset, slot.href.as_str()),
             crate::ui::features::reader::components::image_viewer::Place::Fixed { page } => {
                 panic!("可重排这一支不该出现定版式那一条：page {page}")
             }
@@ -3279,12 +3291,13 @@ fn a_vertical_drag_follows_the_vertical_style(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
 }
 
-/// 轴不合也翻页，只是不跟手：选的是「左右平移」（横轴），竖着拖那一笔照样该翻一页。
+/// 轴归**动画档**：选的是「左右平移」（横轴），竖着拖这一笔什么都不该发生。
 ///
-/// 拖的途中纸不动 —— 纸横着走而手指竖着拖，读起来不是跟手，是画错了。松手那一刻交给
-/// 点屏那同一条路，于是走的仍是读者选的那一档动画。
+/// 从前这条路径是「轴不合也翻页，只是不跟手」—— 松手那一刻交给点屏那条路，照样翻一页。
+/// 读者的观感是「我竖着划了一下，页面莫名其妙往前跳」，而那一跳走的还是横着的动画。
+/// 现在另一根轴上的手势归滚动层（见 `swipe::claim_swipe` 的 `Claim::Refused`）。
 #[gpui_kit::test]
-fn a_vertical_drag_turns_pages_with_a_horizontal_style(cx: &mut TestAppContext) {
+fn a_vertical_drag_on_a_horizontal_style_does_nothing(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (view, handle) = open(
         cx,
@@ -3297,33 +3310,32 @@ fn a_vertical_drag_turns_pages_with_a_horizontal_style(cx: &mut TestAppContext) 
     view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
     settle(cx, handle);
     let first = view.read_with(cx, |v, _| v.page());
+    let scroll = view.read_with(cx, |v, _| v.scroll_y);
 
     let from = point(px(200.0), px(400.0));
     raw_touch_at(cx, handle, TouchPhase::Started, from);
     raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(260.0)));
     assert!(
         view.read_with(cx, |v, _| v.turn).is_none(),
-        "横档遇上竖划不该摆跟手那两张纸"
+        "横档遇上竖划，一格纸都不该动"
     );
-    assert_eq!(view.read_with(cx, |v, _| v.page()), first, "拖的途中页号不动");
-
     raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(120.0)));
     raw_touch_at(cx, handle, TouchPhase::Ended, point(px(200.0), px(120.0)));
     assert_eq!(
         view.read_with(cx, |v, _| v.page()),
-        first + 1,
-        "竖着拖过大半屏，松手该翻过去"
+        first,
+        "竖着拖过大半屏也不该翻页：轴是读者选的那一档说了算"
     );
-    // 走的是读者选的那一档：动画在跑，且是横着走的。
-    let shift = view.read_with(cx, |v, _| v.page_shift);
-    assert_ne!(shift.0, 0.0, "松手后该看到横档那趟平移：{shift:?}");
-    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
-    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.scroll_y),
+        scroll,
+        "分页里竖着拖也不该滚 —— 这一笔既不翻页也不滚动"
+    );
 }
 
-/// 反过来的那一半：选「上下平移」时横扫也不再是死手势 —— 它翻一页，走竖档那趟动画。
+/// 反过来那一半：选「上下平移」（竖轴），横扫同样什么都不该发生。
 #[gpui_kit::test]
-fn a_horizontal_drag_turns_pages_with_a_vertical_style(cx: &mut TestAppContext) {
+fn a_horizontal_drag_on_a_vertical_style_does_nothing(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (view, handle) = open(
         cx,
@@ -3350,12 +3362,109 @@ fn a_horizontal_drag_turns_pages_with_a_vertical_style(cx: &mut TestAppContext) 
     raw_touch(cx, handle, TouchPhase::Ended, 60.0);
     assert_eq!(
         view.read_with(cx, |v, _| v.page()),
+        first,
+        "竖档里横扫也不该翻页"
+    );
+}
+
+/// 轴对上的那一半照旧：选「上下平移」，竖着拖就跟手、松手翻一页，动画在 y 上走。
+#[gpui_kit::test]
+fn a_vertical_drag_on_a_vertical_style_follows_the_finger(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::SlideUp);
+    });
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+
+    let from = point(px(200.0), px(400.0));
+    raw_touch_at(cx, handle, TouchPhase::Started, from);
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(300.0)));
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_some()),
+        "竖档 + 竖划：纸该跟着手指走"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first,
+        "跟手期间页号不动"
+    );
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(120.0)));
+    raw_touch_at(cx, handle, TouchPhase::Ended, point(px(200.0), px(120.0)));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
         first + 1,
-        "选了上下平移之后横扫也该翻一页，从前它整笔没有反应"
+        "走过大半屏，松手翻过去"
     );
     let shift = view.read_with(cx, |v, _| v.page_shift);
     assert_eq!(shift.0, 0.0, "竖档的动画不该在 x 上位移：{shift:?}");
     assert_ne!(shift.1, 0.0, "松手后该看到竖档那趟平移：{shift:?}");
+}
+
+/// 松手后的惯性尾巴归**发起那一笔**，不该再翻一页，也不该把收尾动画按停。
+///
+/// 从前这条是「竖向滑动影响竖向翻页」的现场：惯性 `Moved` 没有跟踪态，落到滚动臂里，
+/// 一句 `cancel_turn()` 把松手那一腿当场按停（读者看到「啪」一下到位），
+/// 而 `wheel_accum` 又攒过半屏，于是再翻一页。
+#[gpui_kit::test]
+fn momentum_after_a_swipe_neither_turns_again_nor_cuts_the_animation(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::SlideUp);
+    });
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+
+    let from = point(px(200.0), px(400.0));
+    raw_touch_at(cx, handle, TouchPhase::Started, from);
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(300.0)));
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(120.0)));
+    raw_touch_at(cx, handle, TouchPhase::Ended, point(px(200.0), px(120.0)));
+    assert_eq!(view.read_with(cx, |v, _| v.page()), first + 1);
+
+    // 惯性：同一根轴上继续往前的四段合成增量，然后收尾。
+    for (y, dy) in [(110.0, 110.0), (80.0, 80.0), (40.0, 40.0), (20.0, 20.0)] {
+        let _ = y;
+        raw_touch_at(
+            cx,
+            handle,
+            TouchPhase::Moved,
+            point(px(200.0), px(400.0 - dy)),
+        );
+    }
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "惯性不该再翻一页"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_some()),
+        "惯性也不该把松手那一腿按停 —— 动画还在走"
+    );
+    raw_touch_at(cx, handle, TouchPhase::Ended, point(px(200.0), px(20.0)));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "收尾那一条同样不该翻页"
+    );
     turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
 }
@@ -4017,5 +4126,39 @@ fn a_blank_line_takes_no_spoken_node(cx: &mut TestAppContext) {
     assert!(
         spoken.iter().all(|line| !line.is_empty()),
         "念出来的每一格都该有字"
+    );
+}
+
+/// 鼠标滚轮一格一页，不攒半屏。
+///
+/// 从前滚轮与触摸拖动共用「攒够半屏翻一页」那条规矩：一格 1 行折成 16px，而阈值是
+/// 视口一半（几百像素），于是要转二十五格才翻一页。
+#[gpui_kit::test]
+fn a_wheel_notch_turns_exactly_one_page(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+
+    wheel_lines(cx, handle, -1.0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "一格就是一页"
+    );
+    wheel_lines(cx, handle, -1.0);
+    wheel_lines(cx, handle, -1.0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 3,
+        "三格三页：不该攒着，也不该一次跳两页"
     );
 }

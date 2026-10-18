@@ -43,4 +43,3 @@ pub fn empty_state(
         .child(div().text_color(cx.theme().foreground).child(title))
         .child(muted_label(note, cx))
 }
-

@@ -531,7 +531,10 @@ fn clamp_pan_to(pan: (f32, f32), fit: (f32, f32), scale: f32, area: (f32, f32)) 
 impl ReaderSession {
     /// 挂上阅读页持有的那一个查看器句柄。会话只认这个句柄：状态是同一份，
     /// 而重画的是那一屏（构造时给一次，见 `page::ReadingPage::new`）。
-    pub(in crate::ui::features::reader) fn set_image_viewer(&mut self, viewer: Entity<ImageViewer>) {
+    pub(in crate::ui::features::reader) fn set_image_viewer(
+        &mut self,
+        viewer: Entity<ImageViewer>,
+    ) {
         self.image_viewer = Some(viewer);
     }
 
@@ -1167,7 +1170,11 @@ mod tests {
 
     /// 那一列里的一条，走的是**生产那条建表路**（`BookImages` → `ChapterImages`），
     /// 所以 `request.key` 与真书里的同一个形状，不是手搓的字符串。
-    pub(in crate::ui::features::reader) fn slot(href: &str, chapter: usize, offset: usize) -> ImageSlot {
+    pub(in crate::ui::features::reader) fn slot(
+        href: &str,
+        chapter: usize,
+        offset: usize,
+    ) -> ImageSlot {
         use crate::ui::foundation::images::{ByteSource, ChapterImages, TINY_PNG};
         use folio_core::content::format::ImageRes;
 
@@ -1313,10 +1320,7 @@ mod view_tests {
         // （不是进程级那个全局，见 `shared::l10n` 模块头）。不装就是把界面语言
         // 交给上一个测试留下的那一份 —— 并行跑批时会互相改语言。
         cx.update(|app| {
-            crate::ui::services::config::ConfigHolder::install(
-                folio_core::Config::default(),
-                app,
-            );
+            crate::ui::services::config::ConfigHolder::install(folio_core::Config::default(), app);
         });
         let mut host = None;
         let handle: AnyWindowHandle = cx

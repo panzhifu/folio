@@ -29,9 +29,9 @@ use folio_core::layout::ImageProvider;
 use folio_core::{Chapter, Locator, Reader};
 use gpui_kit::{App, SharedString};
 
+use crate::ui::features::reader::components::image_viewer::{ImageSlot, Place, file_name};
 use crate::ui::features::reader::model::book_fonts::BookFonts;
 use crate::ui::features::reader::model::chapter_layout::{ChapterSource, Document, author_rules};
-use crate::ui::features::reader::components::image_viewer::{ImageSlot, Place, file_name};
 use crate::ui::features::reader::model::toc_tree::{self, TocRow};
 use crate::ui::foundation::images::{BookImages, ByteSource, ChapterImages, document_source};
 
@@ -540,7 +540,11 @@ impl Book {
 
     /// 视口顶的快照：`(哪一章, 它此刻的 base)`。排版收结果前后各读一次，
     /// 差额就是 [`Self::compensate_spine`] 要补的数。
-    pub(in crate::ui::features::reader) fn spine_snapshot(&self, scroll_y: f32, gap: f32) -> Option<(usize, f32)> {
+    pub(in crate::ui::features::reader) fn spine_snapshot(
+        &self,
+        scroll_y: f32,
+        gap: f32,
+    ) -> Option<(usize, f32)> {
         let index = self.chapter_at_y(scroll_y, gap)?;
         let base = self.base_of(index, gap)?;
         Some((index, base))
@@ -569,7 +573,12 @@ impl Book {
     ///
     /// 锚章自己还没排完时**不迁移**：那时「视口顶在哪一章」没有可信答案 ——
     /// 改字号的重排在飞、跳章刚落地都走这里，等锚章排完的那一帧自然会答。
-    pub(in crate::ui::features::reader) fn migrate_spine(&mut self, scroll_y: &mut f32, gap: f32, prefs: &Reader) {
+    pub(in crate::ui::features::reader) fn migrate_spine(
+        &mut self,
+        scroll_y: &mut f32,
+        gap: f32,
+        prefs: &Reader,
+    ) {
         if !self.document.is_current() {
             return;
         }
@@ -596,7 +605,9 @@ impl Book {
 
     /// 全部排版状态（锚章优先，邻居随后）。渲染帧逐个收排版结果用：
     /// 锚章先提交，恢复落点才不用多等一帧。
-    pub(in crate::ui::features::reader) fn docs_mut(&mut self) -> impl Iterator<Item = &mut Document> {
+    pub(in crate::ui::features::reader) fn docs_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut Document> {
         std::iter::once(&mut self.document).chain(self.spans.iter_mut().map(|span| &mut span.doc))
     }
 
@@ -760,7 +771,11 @@ impl Book {
     /// 连续滚动走 [`Self::ensure_window_spans`]，那里按像素窗口一次铺一串；分页模式不需要
     /// 一条拼接链，只需要「下一章第一页」与「上一章最后一页」能在一帧里被画出来 ——
     /// 跨章滑动要两张纸同时在屏上，目标章必须先排版、先切页。
-    pub(in crate::ui::features::reader) fn ensure_paged_span(&mut self, index: usize, prefs: &Reader) {
+    pub(in crate::ui::features::reader) fn ensure_paged_span(
+        &mut self,
+        index: usize,
+        prefs: &Reader,
+    ) {
         if index >= self.chapters.len() || index == self.chapter {
             return;
         }
@@ -773,7 +788,10 @@ impl Book {
     }
 
     /// 第 `index` 章的排版状态（当前章取 `document`，邻章取 `spans`）。
-    pub(in crate::ui::features::reader) fn span_doc_mut(&mut self, index: usize) -> Option<&mut Document> {
+    pub(in crate::ui::features::reader) fn span_doc_mut(
+        &mut self,
+        index: usize,
+    ) -> Option<&mut Document> {
         if index == self.chapter {
             return Some(&mut self.document);
         }

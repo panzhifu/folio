@@ -55,8 +55,8 @@ use gpui_kit::{
 
 use super::spec::{self, RowKind, page_summary};
 use super::spec_pages;
-use crate::ui::services::l10n::tr;
 use crate::ui::components::{TopBar, hairline};
+use crate::ui::services::l10n::tr;
 
 /// 一行的可命中高度。Apple HIG 明文那条 44×44；规范点名的 `px` 例外之一就是
 /// 「最小命中容差」，所以这一格不跟着 rem 走。

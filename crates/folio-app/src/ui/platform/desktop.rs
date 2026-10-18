@@ -12,9 +12,9 @@ use folio_core::Store;
 use gpui_kit::component::TitleBar;
 use gpui_kit::{App, AppContext as _, Font, TitlebarOptions, px, size};
 
+use crate::ui::foundation::theme;
 use crate::ui::host;
 use crate::ui::services::config::{ConfigHolder, ConfigPath};
-use crate::ui::foundation::theme;
 use crate::ui::shell::AppShell;
 
 /// 桌面入口：`main.rs` 在非移动 target 上调它。

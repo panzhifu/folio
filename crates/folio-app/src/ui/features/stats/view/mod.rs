@@ -19,31 +19,24 @@
 //! muted 的结论**。图说的是形状，那句说的是形状里唯一要记住的那个数 —— 移动端的浮层
 //! 点不住（`shelf` 里记过的那条事实），读数通路不能只剩 tooltip 一条。
 
-
 pub use super::model::report::Range;
 
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::chart::{BarChart, RadarChart};
 use gpui_kit::component::plot::AxisLabelPlacement;
-use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, Selectable, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Corners, ElementId, EventEmitter, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt as _, Window, div, px,
+    AnyElement, Context, Corners, ElementId, EventEmitter, FontWeight, InteractiveElement,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, TestSupportExt as _,
+    Window, div, px,
 };
 
+use super::model::report::Report;
+use crate::ui::components::hairline;
 use crate::ui::services::app_store;
-use crate::ui::services::l10n::{tf, tr};
 use crate::ui::shell::navigation::SizeClass;
-use crate::ui::components::{hairline, muted_label};
-use super::model::report::{Bar, HourCell, Report, WeekdayPattern, WeekdaySpoke};
 
 mod sections;
-
-use sections::*;
 
 /// 内容列的最大宽度（逻辑像素）。
 ///

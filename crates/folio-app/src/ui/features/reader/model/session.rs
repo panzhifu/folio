@@ -24,11 +24,11 @@ use folio_core::{DocMeta, Format, Locator, PageTurn, Reader, StaleReason};
 use gpui_kit::base::SelectionEdge;
 use gpui_kit::{App, Bounds, Context, Entity, Pixels, Point, SharedString, Task};
 
+use crate::ui::features::reader::components::note_editor::NoteEditor;
 use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chrome::{PageMode, Reserve};
 use crate::ui::features::reader::model::fixed_book::FixedBook;
 use crate::ui::features::reader::model::measure::FontCache;
-use crate::ui::features::reader::components::note_editor::NoteEditor;
 use crate::ui::host::device_family;
 use crate::ui::services::config::ConfigHolder;
 
@@ -108,6 +108,12 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) turn_seq: u64,
     /// 正文上那一趟手指拖动（跟手翻页）。`None` = 没有手指按在正文上。
     pub(in crate::ui::features::reader) swipe: Option<SwipeTrack>,
+    /// 上一笔已经在松手那一刻结掉，但同一趟的**惯性尾巴**还会来一串 `Moved`。
+    ///
+    /// 这道闸门就是「竖向滑动被自己打断」那条缺陷的堵法：抬手之后到下一笔 `Started`
+    /// 之前（或到惯性那条收尾 `Ended`），滚动事件一律 `Swallow`，不落到滚动 / 滚轮那条路 ——
+    /// 从前它们落到那里，`cancel_turn()` 把收尾动画当场按停，`wheel_accum` 又攒出第二页。
+    pub(in crate::ui::features::reader) swipe_sealed: bool,
     /// 已滚过的像素（内容坐标，向下为正）。只在连续滚动里有意义。
     pub(in crate::ui::features::reader) scroll_y: f32,
     /// 这一帧**画在**哪一个全局 y。动画期间它落后于 [`ReaderSession::scroll_y`]，
@@ -122,6 +128,9 @@ pub struct ReaderSession {
     /// 分页 / 双页的当前页号（一张纸一号，两栏算同一号）。
     pub(in crate::ui::features::reader) page: usize,
     /// 滚轮攒下的增量：分页模式下翻一页要攒够半屏，不然一次惯性滚动能翻过去三页。
+    ///
+    /// 滚轮那一臂现在**一格一页、不累积**（见 `paging::on_scroll`），这一格只剩
+    /// 「换摆法 / 落页时清一手」的用处，留着是为了下一次真需要累积时不用再改结构。
     pub(in crate::ui::features::reader) wheel_accum: f32,
     /// 上一帧的内容总高。与 `laid_out.viewport` 一起决定连续滚动的可滚上限。
     pub(in crate::ui::features::reader) content_height: f32,
@@ -167,7 +176,8 @@ pub struct ReaderSession {
     /// 挂在会话而不是挂在书上：它管的是「这一屏画过的像素」，而一屏同时只有一本书；
     /// 换书时显式 `clear`（`open_book` 里那一趟），会话被扔掉时 `observe_release`
     /// 把剩下的格子全部放掉 —— 少了这两条里的任何一条，读过的图就永久压在显存里。
-    pub(in crate::ui::features::reader) atlas: gpui_kit::Entity<crate::ui::features::reader::model::image_atlas::ImageAtlas>,
+    pub(in crate::ui::features::reader) atlas:
+        gpui_kit::Entity<crate::ui::features::reader::model::image_atlas::ImageAtlas>,
 
     // ---- 选中（M6）：状态在这里，交互逻辑、绘制件与菜单条都在 `selection.rs` ----
     /// 当前选中（某章的章内可见文本坐标，含头不含尾）。滚动不动它，重排不丢它，
@@ -204,7 +214,8 @@ pub struct ReaderSession {
     /// 那两块弹层）。会话只拿句柄：正文插图的那一击与定版式那一次的长按都发生在
     /// 会话的渲染里，得有个地方把「要看这张图」写出去。没挂上（单独的会话测试）时
     /// 图片不可点，行为与这一层不存在时相同。
-    pub(in crate::ui::features::reader) image_viewer: Option<Entity<crate::ui::features::reader::components::image_viewer::ImageViewer>>,
+    pub(in crate::ui::features::reader) image_viewer:
+        Option<Entity<crate::ui::features::reader::components::image_viewer::ImageViewer>>,
     /// 整本书的那一列图：图片查看器左右滑走的、计数念的都在这列里。
     ///
     /// 开书时算一次（换书 = `open_book` 重算），之后只读。它**不是**排版产物：
@@ -214,7 +225,8 @@ pub struct ReaderSession {
     ///
     /// 每一条目建列时就解过一次 `src`（解不出的不收），所以列里的每张图都拿得出版本号
     /// 对得上的 `DecodeRequest`。
-    pub(in crate::ui::features::reader) image_sequence: Arc<[crate::ui::features::reader::components::image_viewer::ImageSlot]>,
+    pub(in crate::ui::features::reader) image_sequence:
+        Arc<[crate::ui::features::reader::components::image_viewer::ImageSlot]>,
     /// 脚注弹层的状态：点中一条脚注引用时写进来（注文 + 标记在屏上的位置）。
     /// 弹层长在**阅读页**上（见 `page::ReadingPage::footnote_popover`），这一格是它的
     /// 数据源；会话只负责「这一击落在脚注上、注文是这句」。
@@ -243,7 +255,8 @@ pub struct ReaderSession {
 ///
 /// 起别名是因为它出现在三处签名里（会话字段、解算入口、渲染帧），摊开写每次都得
 /// 把四层嵌套重抄一遍，clippy 也嫌复杂。
-pub(in crate::ui::features::reader) type AnnotationSpans = HashMap<usize, (u64, Rc<Vec<ResolvedAnnotation>>)>;
+pub(in crate::ui::features::reader) type AnnotationSpans =
+    HashMap<usize, (u64, Rc<Vec<ResolvedAnnotation>>)>;
 
 /// 指针拖选的临时态。
 pub(in crate::ui::features::reader) struct MouseDrag {
@@ -333,6 +346,7 @@ impl ReaderSession {
             pending_chapter_turn: None,
             turn_seq: 0,
             swipe: None,
+            swipe_sealed: false,
             page: 0,
             wheel_accum: 0.0,
             content_height: 0.0,
@@ -360,7 +374,8 @@ impl ReaderSession {
             handle_hits: Rc::default(),
             menu_bounds: Rc::default(),
             image_viewer: None,
-            image_sequence: crate::ui::features::reader::components::image_viewer::empty_image_sequence(),
+            image_sequence:
+                crate::ui::features::reader::components::image_viewer::empty_image_sequence(),
             footnote: None,
             annotations: Vec::new(),
             annotation_spans: RefCell::default(),
@@ -447,6 +462,7 @@ impl ReaderSession {
             pending_chapter_turn: None,
             turn_seq: 0,
             swipe: None,
+            swipe_sealed: false,
             page: 0,
             wheel_accum: 0.0,
             content_height: 0.0,
@@ -478,7 +494,8 @@ impl ReaderSession {
             handle_hits: Rc::default(),
             menu_bounds: Rc::default(),
             image_viewer: None,
-            image_sequence: crate::ui::features::reader::components::image_viewer::empty_image_sequence(),
+            image_sequence:
+                crate::ui::features::reader::components::image_viewer::empty_image_sequence(),
             footnote: None,
             annotations: Vec::new(),
             annotation_spans: RefCell::default(),
@@ -970,7 +987,13 @@ pub(in crate::ui::features::reader) struct SwipeTrack {
     pub dy: f32,
     /// 定性那一次锁下的那一趟：沿哪根轴、往哪一步。`None` = 还没定性，那一下仍可能是
     /// 点按或长按。两格同一个 `Option` 是因为它们本来就同时成立：一趟只沿一根轴走。
-    pub claim: Option<(crate::ui::features::reader::motion::turn_animation::Axis, crate::ui::features::reader::model::turn::TurnIntent)>,
+    pub claim: Option<(
+        crate::ui::features::reader::motion::turn_animation::Axis,
+        crate::ui::features::reader::model::turn::TurnIntent,
+    )>,
+    /// 这一笔已经判过「不归翻页」（轴不对、书尾、定版式）。**留着跟踪态**而不是清掉：
+    /// 清掉之后同一笔后面的每个增量都会漏回滚动那条路。
+    pub refused: bool,
 }
 
 /// 挂上一趟翻页动画：换新时钟键、把档位抄进去，回报「这一趟挂上了吗」。
@@ -1025,7 +1048,11 @@ fn read_at_open(book_id: Option<i64>, store: Option<&Arc<Store>>) -> HashSet<usi
 ///
 /// 做成自由函数而不是方法：调用点在 `match &mut self.source` 的分支里，那时 `self.source`
 /// 已被可变借用，任何 `&mut self` 的方法都过不去；而这里的锚点与请求是两个独立字段。
-pub(in crate::ui::features::reader) fn land_at_anchor(anchor: Option<String>, locator: Locator, book: &Book) -> Locator {
+pub(in crate::ui::features::reader) fn land_at_anchor(
+    anchor: Option<String>,
+    locator: Locator,
+    book: &Book,
+) -> Locator {
     let Some(fragment) = anchor else {
         return locator;
     };

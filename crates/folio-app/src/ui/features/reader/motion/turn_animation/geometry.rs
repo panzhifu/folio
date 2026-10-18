@@ -23,8 +23,18 @@ pub(in crate::ui::features::reader) struct Area {
 }
 
 impl Area {
-    pub(in crate::ui::features::reader) fn new(left: f32, top: f32, right: f32, bottom: f32) -> Self {
-        Self { left, top, right, bottom }
+    pub(in crate::ui::features::reader) fn new(
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    ) -> Self {
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 
     pub(in crate::ui::features::reader) fn width(self) -> f32 {
@@ -59,7 +69,10 @@ pub(in crate::ui::features::reader) struct Crease {
 
 impl Crease {
     /// 由「被折走那一角的原位置」与「它被拖到哪」作垂直平分线。两点重合时折线不存在 ⇒ `None`。
-    pub(in crate::ui::features::reader) fn from_corner(corner: (f32, f32), dragged: (f32, f32)) -> Option<Self> {
+    pub(in crate::ui::features::reader) fn from_corner(
+        corner: (f32, f32),
+        dragged: (f32, f32),
+    ) -> Option<Self> {
         let dx = corner.0 - dragged.0;
         let dy = corner.1 - dragged.1;
         let long = (dx * dx + dy * dy).sqrt();
@@ -67,10 +80,7 @@ impl Crease {
             return None;
         }
         let (nx, ny) = (dx / long, dy / long);
-        let middle = (
-            (corner.0 + dragged.0) * 0.5,
-            (corner.1 + dragged.1) * 0.5,
-        );
+        let middle = ((corner.0 + dragged.0) * 0.5, (corner.1 + dragged.1) * 0.5);
         Some(Self {
             nx,
             ny,
@@ -218,7 +228,10 @@ impl Poly {
     }
 
     /// 只留下 `signed >= 0` 那一侧。
-    pub(in crate::ui::features::reader) fn clip(&self, mut signed: impl FnMut(f32, f32) -> f32) -> Self {
+    pub(in crate::ui::features::reader) fn clip(
+        &self,
+        mut signed: impl FnMut(f32, f32) -> f32,
+    ) -> Self {
         let mut out = Self::empty();
         if self.len < 3 {
             return out;
@@ -340,7 +353,11 @@ pub(in crate::ui::features::reader) const BLANK_SHADE: Shade = Shade {
 ///
 /// 法向 `n` 指向纸走进来的那一侧（也就是这张纸自己占的那一侧），所以「前缘之前」=
 /// `past < 0` = 下面那张还露着的地方，投影就裁在那一侧。
-pub(in crate::ui::features::reader) fn travel_edge(progress: f32, forward: bool, area: Area) -> Crease {
+pub(in crate::ui::features::reader) fn travel_edge(
+    progress: f32,
+    forward: bool,
+    area: Area,
+) -> Crease {
     let t = progress.clamp(0.0, 1.0);
     // 往后翻时新页从阅读方向的前方盖进来，前缘是它的左缘（从 `页宽` 走到 `0`）；
     // 往前翻时是它的右缘（从 `0` 走到 `页宽`）。
@@ -365,7 +382,13 @@ pub(in crate::ui::features::reader) const EDGE_INK: f32 = 0.14;
 ///
 /// `n` 指向纸那一侧 ⇒ 投影落在**纸外面**（`past < 0`），纸边光落在**纸里面**
 /// （`past > 0`）：前者读起来是「这张压着下面那张」，后者读起来是「它有自己的厚度」。
-pub(in crate::ui::features::reader) fn edge_pair(page: Poly, crease: Crease, wide: f32, ink: f32, out: &mut Shades) {
+pub(in crate::ui::features::reader) fn edge_pair(
+    page: Poly,
+    crease: Crease,
+    wide: f32,
+    ink: f32,
+    out: &mut Shades,
+) {
     out.push(Shade {
         shape: page.slab(crease, -wide, 0.0),
         tint: Tint::Dark,
@@ -380,14 +403,13 @@ pub(in crate::ui::features::reader) fn edge_pair(page: Poly, crease: Crease, wid
     });
 }
 
-
 #[cfg(test)]
 mod tests {
     //! 搬自摆位层那一份：一挡的门跟着那一档走，共用的尺在 `testing.rs`。
 
-    use crate::ui::features::reader::motion::turn_animation::curl::{crease_of};
-    use crate::ui::features::reader::motion::turn_animation::geometry::{Cut};
-    use crate::ui::features::reader::motion::turn_animation::testing::{page, W};
+    use crate::ui::features::reader::motion::turn_animation::curl::crease_of;
+    use crate::ui::features::reader::motion::turn_animation::geometry::Cut;
+    use crate::ui::features::reader::motion::turn_animation::testing::{W, page};
 
     /// 裁剪两侧用的是**同一个** `Cut` 判据（`paint.rs` 逐字剔那一步读的式子），
     /// 而且按点给的是严格不等号：正翻到「页的中线」与反翻到同一位置必须判得一样。

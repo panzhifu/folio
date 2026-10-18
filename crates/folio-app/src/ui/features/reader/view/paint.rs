@@ -269,7 +269,11 @@ impl Element for GlyphsElement {
                 __shape_ns.set(__shape_ns.get() + __t.ns());
             }
         });
-        crate::ui::features::reader::model::perf::log_paint(__paint.ns(), __shape_ns.get(), __glyphs);
+        crate::ui::features::reader::model::perf::log_paint(
+            __paint.ns(),
+            __shape_ns.get(),
+            __glyphs,
+        );
         selection::paint_handles(&self.selection, bounds.origin, window);
     }
 }

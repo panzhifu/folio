@@ -32,7 +32,9 @@
 
 use gpui_kit::{App, Context, TouchPhase};
 
-use crate::ui::features::reader::model::session::{PageRef, ReaderSession, SwipeTrack, Turn, TurnRun, start_turn};
+use crate::ui::features::reader::model::session::{
+    PageRef, ReaderSession, SwipeTrack, Turn, TurnRun, start_turn,
+};
 use crate::ui::features::reader::model::turn::{TurnIntent, TurnPlan};
 use crate::ui::features::reader::motion::turn_animation::{self, Axis};
 use crate::ui::services::config::ConfigHolder;
@@ -113,140 +115,209 @@ pub(in crate::ui::features::reader) fn snap(toward: f32, dist: f32) -> bool {
     progress(toward, dist) >= SNAP_FRACTION
 }
 
+/// 一笔拖动这一帧该给谁。
+///
+/// 三档而不是布尔：`Swallow` 正是这次要修的那个洞的反面 —— 「这一笔归翻页管，但这一帧
+/// 什么都不做」。从前它是 `false`，于是轴不对、书尾、松手后的惯性尾巴一律漏进滚动 / 滚轮
+/// 那条路，一次竖向拖动变成「翻页 + 又滚又翻」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::ui::features::reader) enum SwipeStep {
+    /// 归翻页（或刚落地）。
+    Turn,
+    /// 归翻页，但这一帧什么都不做。调用方**不要**滚动。
+    Swallow,
+    /// 不归翻页，调用方照旧（连续滚动里手指就是滚）。
+    Ignore,
+}
+
+/// 定性这一步的三种答案。
+enum Claim {
+    /// 这一趟归翻页，方向已经锁好。
+    Claimed,
+    /// 还没走够 [`SLOP`]，那一下仍可能是点按：留着跟踪态。
+    NotYet,
+    /// 这一趟不归翻页（轴不对 / 书尾 / 定版式）：标记掉，后面每一步都 `Swallow`。
+    Refused,
+}
+
 impl ReaderSession {
-    /// 这一笔能不能归翻页管。给回 `(读者那一档走的轴, 沿**这一笔那根轴**的一屏有多长,
-    /// 往哪边读)`；`None` = 让回去。
+    /// 这一屏这一档的翻页轴、沿**那根轴**的一屏有多长、往哪边读。
     ///
-    /// 让开的三种情况各有各的理由：连续滚动里手指本来就是「滚」（那一档没有「一页」可摆）；
-    /// 定版式那一臂没有正文切片可摆（`view.rs` 的 `Source::Fixed` 那条）；而那一屏还没量出来
-    /// 时距离是 0，进度无从归一。
-    ///
-    /// 距离按**这一笔**的轴量，不按动画的轴：竖着拖半屏就是竖着拖半屏，哪怕读者选的是一档
-    /// 横着走的动画。两件事在这里分开，正是「轴不合也翻页、只是不跟手」那条规矩的落点。
+    /// 轴从 [`turn_animation::page_axis`] 来（动画档说了算），距离按**那根轴**量 ——
+    /// 从前距离按手指那根轴量，于是「横着划、按横宽归一」这种细节和轴的判据混在一起。
+    /// `None` = 这一屏没有「翻页」这件事：连续滚动（手指就是滚）、定版式（没有正文切片）、
+    /// 还没量出版心（距离是 0，进度无从归一）、或者没有书。
     pub(in crate::ui::features::reader) fn swipe_geometry(
         &self,
         cx: &App,
-        drag: Axis,
     ) -> Option<(Axis, f32, bool)> {
-        if self.laid_out.mode.is_continuous() || self.is_fixed() || self.book().is_none() {
+        if self.is_fixed() || self.book().is_none() {
             return None;
         }
-        let style = ConfigHolder::appearance(cx).page_turn;
-        let dist = match drag {
+        let axis =
+            turn_animation::page_axis(ConfigHolder::appearance(cx).page_turn, self.laid_out.mode)?;
+        let dist = match axis {
             Axis::Horizontal => f32::from(self.content_bounds.get().size.width),
             Axis::Vertical => self.laid_out.viewport,
         };
-        (dist > 0.0).then(|| (turn_animation::of(style).axis(), dist, self.progression_rtl()))
+        (dist > 0.0).then(|| (axis, dist, self.progression_rtl()))
+    }
+
+    /// 这一屏现在是不是有一笔拖动还开着（含已经松手、惯性还没走完的那一段）。
+    ///
+    /// 滚轮那一臂用它分辨「这是读者的滚轮」与「这是上一笔的惯性」。
+    pub(in crate::ui::features::reader) fn swipe_open(&self) -> bool {
+        self.swipe.is_some() || self.swipe_sealed
     }
 
     /// 滚动那一路的一步增量落到跟手翻页。`step_x` / `step_y` 是**这一帧走的那一段**，
     /// 累计由这一层自己做（[`SwipeTrack`]）。
     ///
-    /// 给回 `true` = 这一趟归翻页管，调用方（`on_scroll`）不该再走纵向那两条路。
+    /// `wheel` = 这一条事件的增量是按「行」给的（鼠标滚轮），不是手指拖动。滚轮不是手势：
+    /// 它一到就把「上一笔的惯性尾巴」这道闸门放下，否则触屏设备上拖完一次之后，
+    /// 第一格滚轮会被当成惯性吃掉。
     pub(in crate::ui::features::reader) fn swipe_scroll(
         &mut self,
         phase: TouchPhase,
         step_x: f32,
         step_y: f32,
+        wheel: bool,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> SwipeStep {
+        if wheel {
+            self.swipe_sealed = false;
+        }
         match phase {
             // 一笔的开头。识别器要走过它自己的 `touch_slop` 才发这一条，且带来的那一段
             // 是从按下点算起的整截（它把 slop 也留在里面，内容才不落后于手指）。
             TouchPhase::Started => {
+                self.swipe_sealed = false;
                 self.swipe = Some(SwipeTrack::default());
                 self.swipe_walk(step_x, step_y, cx)
             }
-            // 没有跟踪态的 `Moved` 只有两种来源：让开之后的同一趟（规矩第五条：不再起头）
-            // 与抬手后惯性那段合成增量。两种都不该被认成新的一笔。
-            TouchPhase::Moved => self.swipe_walk(step_x, step_y, cx),
+            // 没有跟踪态的 `Moved` 只有两种来源：上一笔松手后的惯性，与「让开之后」的
+            // 同一趟。前者由 `swipe_sealed` 吃掉，后者是这里 `Ignore` 的那一半。
+            TouchPhase::Moved => {
+                if self.swipe.is_none() {
+                    return if self.swipe_sealed {
+                        SwipeStep::Swallow
+                    } else {
+                        SwipeStep::Ignore
+                    };
+                }
+                self.swipe_walk(step_x, step_y, cx)
+            }
             TouchPhase::Ended | TouchPhase::Cancelled => {
                 if self.swipe.is_none() {
-                    return false;
+                    return if self.swipe_sealed {
+                        SwipeStep::Swallow
+                    } else {
+                        SwipeStep::Ignore
+                    };
                 }
-                self.swipe_walk(step_x, step_y, cx);
-                self.swipe_release(cx)
+                let walked = self.swipe_walk(step_x, step_y, cx);
+                if walked == SwipeStep::Ignore {
+                    self.swipe = None;
+                    return SwipeStep::Ignore;
+                }
+                // 这一笔已经归翻页管过（不管有没有落地）：收掉跟踪态、落下闸门，
+                // 让紧随其后的惯性 `Moved` 全都 `Swallow`。
+                self.swipe_release(cx);
+                SwipeStep::Turn
             }
         }
     }
 
     /// 把这一步记进累计，然后按累计值决定：还没定性的试着定性，已认领的摆跟手。
-    fn swipe_walk(&mut self, step_x: f32, step_y: f32, cx: &mut Context<Self>) -> bool {
+    fn swipe_walk(&mut self, step_x: f32, step_y: f32, cx: &mut Context<Self>) -> SwipeStep {
         let Some(track) = self.swipe.as_mut() else {
-            return false;
+            return SwipeStep::Ignore;
         };
+        if track.refused {
+            return SwipeStep::Swallow;
+        }
         track.dx += step_x;
         track.dy += step_y;
-        let (dx, dy, claimed) = (track.dx, track.dy, track.claim.is_some());
-        if !claimed && !self.claim_swipe(dx, dy, cx) {
-            return false;
+        let (dx, dy) = (track.dx, track.dy);
+        if track.claim.is_none() {
+            match self.claim_swipe(dx, dy, cx) {
+                Claim::Claimed => {}
+                // 没过阈值：连续滚动里手指本来就该带着内容走，分页里则一步都不动。
+                Claim::NotYet => {
+                    return if self.laid_out.mode.is_continuous() {
+                        SwipeStep::Ignore
+                    } else {
+                        SwipeStep::Swallow
+                    };
+                }
+                Claim::Refused => {
+                    if let Some(track) = self.swipe.as_mut() {
+                        track.refused = true;
+                    }
+                    return SwipeStep::Swallow;
+                }
+            }
         }
-        // 已经认领。摆得出第二张纸的就跟手，摆不出的（章界、轴不合、不走动画那一档）也照样
-        // 回 `true` —— 那一趟仍然归翻页管，只是它到松手那一刻才落地。
         let Some(track) = self.swipe else {
-            return true;
+            return SwipeStep::Swallow;
         };
         let Some((axis, intent)) = track.claim else {
-            return true;
+            return SwipeStep::Swallow;
         };
-        let Some((style_axis, dist, rtl)) = self.swipe_geometry(cx, axis) else {
-            return true;
+        // 轴归动画档：这里拿到的轴**就是**认领时用的那根，`dist` 也按它量。
+        let Some((_, dist, rtl)) = self.swipe_geometry(cx) else {
+            return SwipeStep::Swallow;
         };
-        if style_axis != axis {
-            return true; // 轴不合：等松手，那一趟走的是读者选的那一档
-        }
         let along = travel(toward(axis, rtl, track.dx, track.dy), intent);
         let Some(turn) = self.turn.as_mut() else {
-            return true;
+            return SwipeStep::Swallow;
         };
         turn.run = TurnRun::Following {
             t: progress(along, dist),
         };
         cx.notify();
-        true
+        SwipeStep::Turn
     }
 
-    /// 定性并认领这一趟。给回 `false` 有两种意思，靠要不要清掉跟踪态区分：
-    /// 还没过阈值（留着，那一下仍可能是点按）或这一趟根本不该归翻页（清掉，让回去）。
-    fn claim_swipe(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) -> bool {
+    /// 定性这一趟。
+    ///
+    /// 「轴不对就让回去」是这次修的那一条：以前轴不合也认领（只是不摆第二张纸），
+    /// 松手照样翻一页 —— 于是选了横向动画，竖着划也翻。现在**只有读者选的那一档那根轴
+    /// 上的拖动才算翻页**，另一根轴的手势归滚动那一路（连续）或者干脆不动（分页）。
+    fn claim_swipe(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) -> Claim {
         if !passed(dx, dy) {
-            return false; // 还在阈值之内
+            return Claim::NotYet;
         }
         let Some(drag) = dominant(dx, dy) else {
-            self.swipe = None;
-            return false;
+            return Claim::Refused;
         };
-        let Some((style_axis, _, rtl)) = self.swipe_geometry(cx, drag) else {
-            self.swipe = None;
-            return false;
+        let Some((page_axis, _, rtl)) = self.swipe_geometry(cx) else {
+            return Claim::Refused;
         };
+        if drag != page_axis {
+            return Claim::Refused;
+        }
         let Some(intent) = TurnIntent::from_delta(toward(drag, rtl, dx, dy).signum() as isize)
         else {
-            self.swipe = None;
-            return false;
+            return Claim::Refused;
         };
-        // 问决策层那一步是什么：章界与书尾都不摆第二张纸，但章界仍归这一趟管
-        // （松手时把方向交给既有的那一套，跟点屏同一条路）。
+        // 问决策层那一步是什么：书尾与「排版还没就绪」都不该起一趟。
         let facts = self.paging_facts();
         let plan = self.laid_out.mode.paging().plan(&facts, intent);
         if matches!(plan, TurnPlan::None | TurnPlan::Scroll { .. }) {
-            self.swipe = None;
-            return false;
+            return Claim::Refused;
         }
         if let Some(track) = self.swipe.as_mut() {
             track.claim = Some((drag, intent));
         }
         // 手指之前攒下的那一截滚动增量作废：不然松手后它还会再多翻一页。
         self.wheel_accum = 0.0;
-        // 轴不合就不摆第二张纸：那一趟到松手才走，走的是读者选的那一档。
-        if style_axis != drag {
-            return true;
-        }
         let TurnPlan::Page { to } = plan else {
-            return true;
+            // 章界：这一趟仍归翻页管，但目标章还没排版 —— 到松手那一刻交给 `turn()`。
+            return Claim::Claimed;
         };
         if to == self.page() {
-            return true;
+            return Claim::Claimed;
         }
         let chapter = self.chapter_index();
         // 页号**不动**：`leaving` 是眼下这一页（权威），`arriving` 是松手后可能去的那一页。
@@ -271,15 +342,20 @@ impl ReaderSession {
             },
         );
         cx.notify();
-        true
+        Claim::Claimed
     }
 
     /// 抬手：走完就把页号翻过去、剩下那一截接着走完；没过线就退回原地、页号一个字不动。
     /// 没摆跟手那一趟的（章界、`PageTurn::None`）落回点屏那条路，方向照旧。
+    ///
+    /// 无论落没落地，这里都把 `swipe_sealed` 放下：紧随其后的惯性 `Moved` 属于这一笔，
+    /// 该由翻页这一趟吃掉，不该漏回滚动那条路（从前漏回去，收尾动画被 `cancel_turn()`
+    /// 当场按停、`wheel_accum` 还攒出第二页）。
     fn swipe_release(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(track) = self.swipe.take() else {
             return false;
         };
+        self.swipe_sealed = true;
         let Some((axis, intent)) = track.claim else {
             return false; // 没定性过：这一按该由点按那条路处理（我们不该消费它）
         };
@@ -290,7 +366,7 @@ impl ReaderSession {
             self.turn(intent, cx);
             return true;
         }
-        let Some((_, dist, rtl)) = self.swipe_geometry(cx, axis) else {
+        let Some((_, dist, rtl)) = self.swipe_geometry(cx) else {
             self.cancel_turn();
             return true;
         };
@@ -411,7 +487,10 @@ mod tests {
         let prev = toward(Axis::Horizontal, false, 200.0, 0.0);
         assert_eq!(prev, -200.0, "回上一页那一趟在读书顺序里是负的");
         assert_eq!(travel(prev, TurnIntent::Previous), 200.0);
-        assert!(snap(travel(prev, TurnIntent::Previous), DIST), "回上一页也该过得了线");
+        assert!(
+            snap(travel(prev, TurnIntent::Previous), DIST),
+            "回上一页也该过得了线"
+        );
         // 认领之后拖到那一步的反面：仍给 0，画面停在「还没起步」那一帧。
         assert_eq!(progress(-travel(prev, TurnIntent::Previous), DIST), 0.0);
         // RTL 里整套符号反过来，句式子不变：那一本里右划才是往后翻。
@@ -420,7 +499,10 @@ mod tests {
             200.0
         );
         assert_eq!(
-            travel(toward(Axis::Horizontal, true, -200.0, 0.0), TurnIntent::Previous),
+            travel(
+                toward(Axis::Horizontal, true, -200.0, 0.0),
+                TurnIntent::Previous
+            ),
             200.0
         );
     }

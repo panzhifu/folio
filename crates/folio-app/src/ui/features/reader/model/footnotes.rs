@@ -55,10 +55,7 @@ impl ReaderSession {
         let Some((chapter, x, y)) = self.to_layout(window, at) else {
             return false;
         };
-        let Some(doc) = self
-            .book()
-            .and_then(|book| book.span_doc(chapter))
-        else {
+        let Some(doc) = self.book().and_then(|book| book.span_doc(chapter)) else {
             return false;
         };
         let Some(hit) = doc.hit_test(window, cx, x, y) else {

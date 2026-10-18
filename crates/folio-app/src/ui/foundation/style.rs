@@ -37,7 +37,6 @@ pub fn run_color_link(color: Option<Color>, foreground: Hsla, link: Hsla, in_lin
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     // 这个 crate 里 `use super::*` 会把 lib test 目标弄挂（`plans/testing.md`），逐条引。

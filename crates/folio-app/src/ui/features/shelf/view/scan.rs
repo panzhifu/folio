@@ -22,11 +22,11 @@ use gpui_kit::{
     ParentElement as _, SharedString, Styled as _, TestSupportExt as _, WeakEntity, div, px, size,
 };
 
+use crate::ui::components::muted_label;
 use crate::ui::services::app_store;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 use crate::ui::services::library::{scan_noise_exempt, scan_roots, target_dir};
-use crate::ui::components::muted_label;
 
 use super::ShelfView;
 
@@ -279,9 +279,7 @@ impl ShelfView {
             Some(ScanPhase::Results { rows, checked, .. }) => rows
                 .iter()
                 .filter_map(|row| match &row.candidate.origin {
-                    folio_core::Origin::Local(path) if checked.contains(path) => {
-                        Some(path.clone())
-                    }
+                    folio_core::Origin::Local(path) if checked.contains(path) => Some(path.clone()),
                     _ => None,
                 })
                 .collect(),

@@ -33,15 +33,15 @@ use gpui_kit::{
     Subscription, Window, div, hsla, img, px, size,
 };
 
+use crate::ui::components::{BottomSheet, BottomSheetState};
 use crate::ui::features::reader::model::chrome::percent_label;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::toc_tree::TocView;
 use crate::ui::features::shelf::{AUTHOR_SEP, fmt_size};
-use crate::ui::services::config::ConfigHolder;
 use crate::ui::foundation::images::cover_image;
+use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 use crate::ui::shell::navigation::SizeClass;
-use crate::ui::components::{BottomSheet, BottomSheetState};
 
 /// 目录这一屏的横向刻度，全部是在 Meizu 20（scale 2.8）上逐行数参照 App 的墨迹
 /// 边界量出来的（dp = px / 2.8）。

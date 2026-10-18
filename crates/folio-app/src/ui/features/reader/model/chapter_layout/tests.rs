@@ -12,7 +12,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::ui::features::reader::model::book_fonts::BookFonts;
-use crate::ui::features::reader::model::chapter_layout::{ChapterSource, Document, body_of, narrowed_lines};
+use crate::ui::features::reader::model::chapter_layout::{
+    ChapterSource, Document, body_of, narrowed_lines,
+};
 use crate::ui::foundation::images::ChapterImages;
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::layout::LineFragment;

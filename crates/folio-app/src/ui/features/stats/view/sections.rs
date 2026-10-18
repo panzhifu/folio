@@ -6,23 +6,22 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::chart::{BarChart, RadarChart};
-use gpui_kit::component::plot::AxisLabelPlacement;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::{ActiveTheme, Selectable, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{
-    AnyElement, App, Context, IntoElement, ParentElement, SharedString, Styled, WeakEntity, px,
-    relative, rems,
-};
+use gpui_kit::{AnyElement, App, Context, IntoElement, ParentElement, SharedString, Styled, px};
 
 use super::super::model::report::{Bar, HourCell, Report, WeekdayPattern, WeekdaySpoke};
 use super::*;
 use crate::ui::components::muted_label;
 use crate::ui::services::l10n::{tf, tr};
 
-
 impl StatsView {
-    pub(in crate::ui::features::stats) fn today(&self, report: &Report, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::ui::features::stats) fn today(
+        &self,
+        report: &Report,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let today = report.window.seconds_at_today();
         // 三种话说三条路：今天读了 ⇒ 报连续天数；今天还没读但读过别的 ⇒ 说「今天还没读」；
         // 整库空的 ⇒ 说「还没有连续记录」，而不是「今天还没开始读」那种把人绕进去的话。
@@ -56,7 +55,12 @@ impl StatsView {
     /// 最后一格那个日期、tooltip 里写着完整日期，而图下面那一行 muted 直接把窗口结论念出来。
     /// 后两条尤其要紧 —— 移动端的浮层点不住（`shelf` 里记过的那条事实），
     /// tooltip 不能是唯一那条读数通路。
-    pub(in crate::ui::features::stats) fn trend(&self, report: &Report, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::ui::features::stats) fn trend(
+        &self,
+        report: &Report,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let bars: Vec<Bar> = report.bars.clone();
         let solid = cx.theme().chart_3;
         let faded = solid.opacity(0.45);
@@ -73,7 +77,11 @@ impl StatsView {
                 ),
                 (
                     "avg",
-                    &super::super::model::report::duration(cx, report.window.average_per_active_day()).to_string(),
+                    &super::super::model::report::duration(
+                        cx,
+                        report.window.average_per_active_day(),
+                    )
+                    .to_string(),
                 ),
             ],
         ));
@@ -121,7 +129,11 @@ impl StatsView {
     }
 
     /// 累计：四个全时段的读数。不跟着窗口档位变 —— 「累计」跟着筛就不是累计了。
-    pub(in crate::ui::features::stats) fn totals(&self, report: &Report, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::ui::features::stats) fn totals(
+        &self,
+        report: &Report,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let cells = [
             (
                 tr(cx, "stats.total_time"),
@@ -160,7 +172,11 @@ impl StatsView {
     }
 
     /// 时间花在哪些书上。一行一本，点一下就去读它。
-    pub(in crate::ui::features::stats) fn ranks(&self, report: &Report, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::ui::features::stats) fn ranks(
+        &self,
+        report: &Report,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let view = cx.entity().clone();
         let total = (report.window.seconds.max(1)) as f64;
         let track = cx.theme().muted;
@@ -223,7 +239,12 @@ impl StatsView {
     /// 不许只靠颜色传义），而四档深浅把「读了 40 分钟」和「读了 55 分钟」压成同一格。
     /// 换成柱子之后高低自己会说话，轴上有钟点可数，悬停还能读出本地化过的那一句。
     /// 结论那一行照旧留着 —— 移动端的浮层点不住。
-    pub(in crate::ui::features::stats) fn hours(&self, report: &Report, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::ui::features::stats) fn hours(
+        &self,
+        report: &Report,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let cells: Vec<HourCell> = report.hours.clone();
         let fill = cx.theme().chart_3;
         let peak = cx.theme().chart_4;
@@ -283,7 +304,11 @@ impl StatsView {
     ///
     /// 雷达没有数值轴，图自己也说不出「平均多少分钟」，所以下面那一行 muted 是这一节
     /// 唯一的读数通路（与趋势、时段两节同一条规矩：移动端浮层点不住）。
-    pub(in crate::ui::features::stats) fn weekday(&self, pattern: &WeekdayPattern, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::ui::features::stats) fn weekday(
+        &self,
+        pattern: &WeekdayPattern,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let spokes: Vec<WeekdaySpoke> = pattern.spokes.clone();
         let line = cx.theme().chart_3;
         let note = SharedString::from(tf(
@@ -344,7 +369,10 @@ impl StatsView {
     /// 交回 `AnyElement` 而不是 `impl IntoElement`：那个不透明类型会把 `cx` 的可变借用
     /// 一直带在类型里，后面每一处 `cx.theme()` 都撞在它上面（与 `reader::page::toc_sheet_element`
     /// 那处是同一个坑）。
-    pub(in crate::ui::features::stats) fn range_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(in crate::ui::features::stats) fn range_bar(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         self.report.as_ref()?;
         let view = cx.entity().clone();
         let current = self.range;
@@ -373,17 +401,23 @@ impl StatsView {
 /// 这一屏的主角是数，标题只负责分组。用尺寸与间距分层而不是加色、加容器，
 /// 是 `Hierarchy` 那条（"use size, weight, spacing, and separators before adding color
 /// or containers"）。
-pub(in crate::ui::features::stats) fn section_label(title: SharedString, cx: &App) -> impl IntoElement {
+pub(in crate::ui::features::stats) fn section_label(
+    title: SharedString,
+    cx: &App,
+) -> impl IntoElement {
     muted_label(title, cx)
 }
 
 /// 一节 = 一个 muted 小标题 + 内容。标题与内容之间 `gap_2`（一组之内），
 /// 节与节之间那条 `gap_6` 与发丝线由调用点给。
-pub(in crate::ui::features::stats) fn section(title: SharedString, content: impl IntoElement, cx: &App) -> impl IntoElement {
+pub(in crate::ui::features::stats) fn section(
+    title: SharedString,
+    content: impl IntoElement,
+    cx: &App,
+) -> impl IntoElement {
     v_flex()
         .w_full()
         .gap_2()
         .child(section_label(title, cx))
         .child(content)
 }
-

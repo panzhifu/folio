@@ -19,6 +19,6 @@ mod model;
 mod motion;
 mod view;
 
-pub use model::chrome::{Arrow, Reserve};
 pub use model::ReaderSession;
+pub use model::chrome::{Arrow, Reserve};
 pub use view::ReadingPage;

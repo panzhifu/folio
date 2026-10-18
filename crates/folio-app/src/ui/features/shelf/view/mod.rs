@@ -14,7 +14,10 @@
 
 // 这一屏压出来的两页与它共用同一个实体：信息页（压导航栈的整屏）与整机扫描的候选清单。
 pub(in crate::ui::features::shelf) mod book_info;
+pub(in crate::ui::features::shelf) mod grid;
 pub(in crate::ui::features::shelf) mod scan;
+pub(in crate::ui::features::shelf) mod sheets;
+pub(in crate::ui::features::shelf) mod toolbar;
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -26,33 +29,31 @@ use folio_core::{
     Cancel, ImportOutcome, ImportReport, Imported, PathsSource, Store, TaskEvent, UrlSource,
     submit_import,
 };
-use gpui_kit::assets::IconName;
 use gpui_kit::base::NavStackState;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, Selectable, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Selectable, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FontWeight, Image,
-    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Image, InteractiveElement,
+    IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _,
     UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 
 use super::components::book_card::{COVER_RATIO, Card, GroupCard, TILE_SLOTS};
 use super::components::book_menu;
-use super::overlay;
-use scan::ScanPhase;
-use crate::ui::services::config::ConfigHolder;
+use crate::ui::components::{
+    BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, empty_state, muted_label,
+};
 use crate::ui::foundation::error::{Context as _, report};
+use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::services::services;
 use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
-use crate::ui::components::{
-    BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, empty_state, muted_label,
-};
+use grid::{GUTTER, GridSpec, columns_for, grid_spec};
+use scan::ScanPhase;
 
 /// 出网共用的那一份传输（`ureq` + rustls）。一个进程一个连接池就够 ——
 /// 所有 URL 下载都从这里拿。
@@ -70,79 +71,6 @@ fn url_transport() -> Arc<dyn Transport> {
 /// 能稳定命中的最小格宽（56）。
 ///
 /// 桌面与平板不按这个数，见 [`columns_for`]。
-const COLUMNS: u16 = 3;
-
-/// 网格间距，与 `grid` 的 `gap_2` 同一档（默认 rem 下 8 逻辑像素）。
-const GAP: f32 = 8.0;
-
-/// 桌面上一格封面的最小宽度（逻辑像素）。
-///
-/// 比手机的 112 宽：鼠标桌面上书名要一眼读完，而不是靠点进去看，而一格多宽，
-/// 标题那一行就能塞下几个字。再往下加一列会开始把长书名截成看不懂的半句。
-const MIN_CARD: f32 = 168.0;
-
-/// 网格与搜索行两侧的留白（逻辑像素）。和顶部那条章导航的 `px_3` 不同一档，
-/// 因为这里是整片卡片的边，视觉上要比一条文字栏松。
-pub(in crate::ui::features::shelf) const GUTTER: f32 = 12.0;
-
-/// 一横排的量：几列，以及一格封面该多高。
-///
-/// 封面高必须由格宽**在这里算出来**，不能留给 `aspect_ratio` 在排版时按宽度推：
-/// `uniform_list` 量行高时给的是 **min-content 宽度**（`measure_item(None, ..)`），
-/// 而书名那一行是 `whitespace_nowrap` —— 它的 min-content 宽就是整条不折行的标题宽。
-/// 于是量出来的那一格有 300 多逻辑像素宽，封面按 2:3 推出 500 多的高，行高比真实的
-/// 两还多，第二排直接被推到屏幕外（真机 1080×2400 实测：量出 544，实际 236）。
-/// 写死高度让行高与测量时给的宽度无关，这个坑就填上了。
-#[derive(Clone, Copy)]
-pub(in crate::ui::features::shelf) struct GridSpec {
-    pub(in crate::ui::features::shelf) columns: u16,
-    pub(in crate::ui::features::shelf) cover_height: f32,
-}
-
-/// 网格真正能用到的宽度：扣掉导航栏与两侧留白。
-///
-/// `columns_for` 与 [`grid_spec`] 都从这一个式子取数：两处各算一份的话，改一侧忘另一侧
-/// 会表现为「列数对了但每格宽得莫名其妙」。
-fn available_width(width: f32, size: SizeClass) -> f32 {
-    let nav = match size {
-        SizeClass::Compact => 0.0,
-        SizeClass::Medium => RAIL_WIDTH,
-        SizeClass::Expanded => SIDEBAR_WIDTH,
-    };
-    (width - nav - GUTTER * 2.0).max(0.0)
-}
-
-/// 一横排该排成什么样：列数按 [`columns_for`]，封面高按那个列数均出来的格宽。
-fn grid_spec(width: f32, size: SizeClass) -> GridSpec {
-    let columns = columns_for(width, size);
-    // n 格之间只有 n−1 条间距，所以只扣一条 `GAP * (n−1)`。
-    let card = (available_width(width, size) - GAP * f32::from(columns - 1)) / f32::from(columns);
-    GridSpec {
-        columns,
-        cover_height: card / COVER_RATIO,
-    }
-}
-
-/// 一行放几本：手机固定 [`COLUMNS`]，桌面与平板按**内容区实际宽度**排到每格
-/// 不低于 [`MIN_CARD`]。
-///
-/// 3 列写死在桌面上是不成立的：1600 宽的窗口会给出三格 440 像素的封面，
-/// 一屏只看得见两本书 —— 而「我的书都在哪儿」正是架面要回答的问题。
-///
-/// 导航栏的宽度从 `shell::navigation` 取：那两个常数是阅读页预留版心用的同一份，
-/// 在这里再写一遍数字的话，改一侧忘另一侧只会表现为「书架的格子宽得莫名其妙」。
-///
-/// `pub` 只为测试能钉住这三档的列数 —— 列数算错不会报错，只会让架面在某个窗口宽上
-/// 突然变成一格一本。
-pub fn columns_for(width: f32, size: SizeClass) -> u16 {
-    if size.is_compact() {
-        return COLUMNS;
-    }
-    // 第 n 格要占 n 个格宽加 n−1 条间距，所以分子补回一条 GAP。
-    let fitted = ((available_width(width, size) + GAP) / (MIN_CARD + GAP)).floor() as u16;
-    fitted.max(1)
-}
-
 /// 书架向外层报的两件事，都带书库主键而不是路径 —— 选择器给的那份路径是临时的，
 /// 书的内容早就在库里了。
 /// 架面顶部那颗分组筛选看的是哪一片。
@@ -458,10 +386,7 @@ impl ShelfView {
         tiles
             .into_iter()
             .map(|(collection, items)| {
-                let covers = items
-                    .iter()
-                    .map(|item| self.resolve_cover(item))
-                    .collect();
+                let covers = items.iter().map(|item| self.resolve_cover(item)).collect();
                 GroupCard {
                     id: collection.id,
                     name: collection.name.into(),
@@ -670,9 +595,7 @@ impl ShelfView {
     /// 第 `ix` 张组卡认的是哪个组、下面那行念的是几本。
     #[cfg(all(test, not(mobile)))]
     pub(crate) fn tile_at(&self, ix: usize) -> Option<(i64, SharedString, usize)> {
-        self.tiles
-            .get(ix)
-            .map(|t| (t.id, t.name.clone(), t.count))
+        self.tiles.get(ix).map(|t| (t.id, t.name.clone(), t.count))
     }
 
     /// 后端导入管线的一条事件 → 架面的一次变化。
@@ -813,155 +736,6 @@ impl ShelfView {
         self.dispatch_import(Box::new(UrlSource::new(url, url_transport())), cx);
     }
 
-    /// 「从链接导入」那一屏的内容。与建组那一屏同一形状，也只有容器不同。
-    fn url_form(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
-        let entity = cx.entity().clone();
-        let close_entity = entity.clone();
-        let import_entity = entity.clone();
-        let cancel_label = tr(cx, "shelf.cancel");
-        let import_label = tr(cx, "shelf.url_import");
-        v_flex()
-            .id("shelf-url-panel")
-            .test_support()
-            .w_full()
-            .gap_3()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr(cx, "shelf.url_title")),
-            )
-            .child(muted_label(tr(cx, "shelf.url_hint"), cx))
-            .child(div().w_full().child(Input::new(&entry).cleanable(true)))
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        Button::new("shelf-url-cancel")
-                            .ghost()
-                            .label(cancel_label.to_string())
-                            .accessibility_label(cancel_label)
-                            .on_click(move |_, _, cx| {
-                                close_entity.update(cx, |this, cx| this.close_url_panel(cx))
-                            }),
-                    )
-                    .child(
-                        Button::new("shelf-url-import")
-                            .primary()
-                            .label(import_label.to_string())
-                            .accessibility_label(import_label)
-                            .on_click(move |_, _, cx| {
-                                import_entity.update(cx, |this, cx| this.import_from_url(cx))
-                            }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// 「从链接导入」在桌面那一档：屏幕居中的一张浮层。
-    ///
-    /// 居中而不是钉在 ⋮ 那颗按钮底下：这一屏的入口在那条菜单里，而菜单点开这张卡的
-    /// 同一帧就散了 —— 钉在一个刚消失的元素上，读者看到的是卡从半空里长出来。
-    fn url_popover(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
-        let shelf = cx.entity().clone();
-        let body = self.url_form(entry, cx);
-        overlay::centered(
-            "shelf-url-popover",
-            overlay::URL_HEIGHT,
-            &shelf,
-            |this, cx| this.close_url_panel(cx),
-            div()
-                .w(px(overlay::URL_WIDTH))
-                .min_h(px(overlay::URL_HEIGHT))
-                .child(body)
-                .into_any_element(),
-        )
-    }
-
-    /// 顶部那颗分组按钮，外加它底下那张浮层（开着的时候）。
-    ///
-    /// 浮层挂在按钮**之后**而不是包着那颗按钮：`Popover` 要拿一个元素的 bounds 当锚点，
-    /// 而那颗按钮自己已经挂着一条筛选菜单 —— 两层浮层抢同一个触发器会互相顶掉。
-    /// 外面包一层 `div` 而不是把它塞成 `h_flex` 的下一个孩子：那样那两颗按钮之间会多算
-    /// 一条 `gap_2`，而浮层是个零尺寸的东西。
-    fn group_cell(&self, cx: &mut Context<Self>) -> AnyElement {
-        let button = self.group_button(cx).into_any_element();
-        match (&self.group_entry, self.group_open) {
-            (Some((_, entry)), true) => div()
-                .child(button)
-                .child(self.group_popover(entry.clone(), cx))
-                .into_any_element(),
-            _ => button,
-        }
-    }
-
-    /// 建组那一屏在手机上：同一份表单压进底部弹层。
-    fn group_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
-        let body = self.form_body(&self.group_sheet, self.group_entry.as_ref().map(|(_, e)| e), cx, |this, entry, cx| {
-            this.group_form(entry, cx)
-        });
-        overlay::sheet(
-            "shelf-group-sheet",
-            &self.group_sheet,
-            overlay::SHEET_EXPANDED,
-            body,
-        )
-    }
-
-    /// 链接导入那一屏在手机上。
-    fn url_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
-        let body = self.form_body(&self.url_sheet, self.url_entry.as_ref(), cx, |this, entry, cx| {
-            this.url_form(entry, cx)
-        });
-        overlay::sheet(
-            "shelf-url-sheet",
-            &self.url_sheet,
-            overlay::SHEET_EXPANDED,
-            body,
-        )
-    }
-
-    /// 扫描那一屏在手机上。清单要滚，所以展开那一档比另两屏高。
-    fn scan_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
-        let body = (!self.scan_sheet.read(cx).is_idle() && self.scan.is_some()).then(|| {
-            div()
-                .flex_1()
-                .min_h_0()
-                .px(px(GUTTER))
-                .pb_2()
-                .child(self.scan_body(cx))
-                .into_any_element()
-        });
-        overlay::sheet(
-            "shelf-scan-sheet",
-            &self.scan_sheet,
-            overlay::SCAN_SHEET_EXPANDED,
-            body,
-        )
-    }
-
-    /// 扫描那一屏在桌面那一档：屏幕居中的一张卡，清单在里面自己滚。
-    ///
-    /// 高是**定死**的而不是「至少」：`scan_body` 里那条 `v_virtual_list` 要一个能滚的框，
-    /// 「至少多高」给不出这个框。
-    fn scan_popover(&self, cx: &mut Context<Self>) -> AnyElement {
-        let shelf = cx.entity().clone();
-        let body = div()
-            .w(px(overlay::SCAN_WIDTH))
-            .h(px(overlay::SCAN_HEIGHT))
-            .flex()
-            .flex_col()
-            .child(self.scan_body(cx))
-            .into_any_element();
-        overlay::centered(
-            "shelf-scan-popover",
-            overlay::SCAN_HEIGHT,
-            &shelf,
-            |this, cx| this.close_scan(cx),
-            body,
-        )
-    }
-
     /// 两块表单那一屏在弹层里的内容：弹层还没停稳、且内容还在的时候才给。
     ///
     /// 弹层里给横向留白而浮层里不给：浮层自己那一圈 `p_3` 已经留了，弹层那块表面是满幅的。
@@ -1033,7 +807,10 @@ impl ShelfView {
     /// 现查而不是用架面那份 [`Self::collections`]：读者可能刚在另一本书的菜单里建了一个组，
     /// 这一本紧接着就该看得见它，而那份清单只在重查架面时更新一次。库里的组是几十行的量，
     /// 一次点击查两趟比缓存它便宜。
-    pub(in crate::ui::features::shelf) fn group_items(&self, book_id: i64) -> Vec<book_menu::GroupRow> {
+    pub(in crate::ui::features::shelf) fn group_items(
+        &self,
+        book_id: i64,
+    ) -> Vec<book_menu::GroupRow> {
         let Some(store) = &self.store else {
             return Vec::new();
         };
@@ -1091,7 +868,12 @@ impl ShelfView {
     ///
     /// 入口在书的长按菜单里，浮层却钉在顶部那颗分组按钮上 —— 菜单点完就散了，把它当锚点
     /// 等于钉在一个下一帧就不存在的元素上（见 [`Self::group_popover`]）。
-    pub(in crate::ui::features::shelf) fn new_group(&mut self, book_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::shelf) fn new_group(
+        &mut self,
+        book_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.group_open {
             return;
         }
@@ -1142,146 +924,15 @@ impl ShelfView {
     ///
     /// 组卡那一格点下去走的就是这一条：卡与顶部那颗筛选改的是同一个 [`Self::group`]，
     /// 所以两处永远说同一件事。
-    pub(in crate::ui::features::shelf) fn set_group(&mut self, group: GroupFilter, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::shelf) fn set_group(
+        &mut self,
+        group: GroupFilter,
+        cx: &mut Context<Self>,
+    ) {
         self.group = group;
         self.items.clear();
         let query = self.query.clone();
         self.reload(&query, cx);
-    }
-
-    /// 顶部那颗分组筛选：图标一颗，筛着某一组时吃选中态。
-    ///
-    /// 手机上那一行只剩「满幅框 + 两颗图标」的宽度，所以这里不带文字；点开那一条菜单里
-    /// 写着筛的是哪一组，组名后面缀着书数（「想读 · 12」），读者不必点进去才知道有几本。
-    fn group_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity().clone();
-        let label = tr(cx, "shelf.group");
-        let all_label = tr(cx, "shelf.group_all");
-        let ungrouped_label = tr(cx, "shelf.ungrouped");
-        let collections = self.collections.clone();
-        let current = self.group;
-        Button::new("shelf-group-filter")
-            .ghost()
-            .small()
-            .icon(IconName::FolderTree)
-            .selected(current != GroupFilter::All)
-            .tooltip(label.clone().to_string())
-            .accessibility_label(label)
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let menu = menu
-                    .min_w(px(book_menu::MIN_WIDTH))
-                    .item(
-                        PopupMenuItem::new(all_label.clone())
-                            .checked(current == GroupFilter::All)
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, _, cx| {
-                                    entity.update(cx, |this, cx| {
-                                        this.set_group(GroupFilter::All, cx)
-                                    });
-                                }
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(ungrouped_label.clone())
-                            .checked(current == GroupFilter::Ungrouped)
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, _, cx| {
-                                    entity.update(cx, |this, cx| {
-                                        this.set_group(GroupFilter::Ungrouped, cx)
-                                    });
-                                }
-                            }),
-                    );
-                // 一个组都还没建时这一节整块不出现：条目只有「全部分组 / 未分组」两条的
-                // 菜单，读起来像坏了。
-                if collections.is_empty() {
-                    return menu;
-                }
-                let menu = menu.separator();
-                // 菜单每开一遍重建一次（builder 是 `Fn`），所以这一份清单每次现摘一份。
-                collections.clone().into_iter().fold(menu, |menu, c| {
-                    let entity = entity.clone();
-                    let name = format!("{} · {}", c.name, c.book_count);
-                    menu.item(
-                        PopupMenuItem::new(name)
-                            .checked(current == GroupFilter::Collection(c.id))
-                            .on_click(move |_, _, cx| {
-                                entity.update(cx, |this, cx| {
-                                    this.set_group(GroupFilter::Collection(c.id), cx)
-                                });
-                            }),
-                    )
-                })
-            })
-    }
-
-    /// 「新建分组」那一屏的内容：一行输入 + 两颗按钮。桌面与移动共用这一份，
-    /// 只有容器不同（见 [`overlay`]）。
-    ///
-    /// 不带横向留白也不带 `flex_1`：宽度与高归容器给 —— 桌面那张浮层是定宽的，手机上
-    /// 弹层天生满幅，写在这里两头都会多算一层。
-    fn group_form(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
-        let entity = cx.entity().clone();
-        let close_entity = entity.clone();
-        let create_entity = entity.clone();
-        let cancel_label = tr(cx, "shelf.cancel");
-        let create_label = tr(cx, "shelf.group_create");
-        v_flex()
-            .id("shelf-group-panel")
-            .test_support()
-            .w_full()
-            .gap_3()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr(cx, "shelf.group_new")),
-            )
-            .child(muted_label(tr(cx, "shelf.group_hint"), cx))
-            .child(div().w_full().child(Input::new(&entry).cleanable(true)))
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        Button::new("shelf-group-cancel")
-                            .ghost()
-                            .label(cancel_label.to_string())
-                            .accessibility_label(cancel_label)
-                            .on_click(move |_, _, cx| {
-                                close_entity.update(cx, |this, cx| this.close_group_panel(cx))
-                            }),
-                    )
-                    .child(
-                        Button::new("shelf-group-create")
-                            .primary()
-                            .label(create_label.to_string())
-                            .accessibility_label(create_label)
-                            .on_click(move |_, _, cx| {
-                                create_entity.update(cx, |this, cx| this.create_group(cx))
-                            }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// 「新建分组」在桌面那一档：钉在顶部那颗分组按钮底下的一张浮层。
-    ///
-    /// 入口仍在书的长按菜单里（那一格说的是「为这本书建个组」），但浮层跟着**管组的那颗
-    /// 按钮**开：菜单点完就没了，钉在它消失的位置上等于钉在一个已经不存在的锚点上。
-    /// 挂在按钮之后而不是按钮里面 —— 它是那颗按钮那一条命令的延续。
-    fn group_popover(&self, entry: Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
-        let shelf = cx.entity().clone();
-        let body = self.group_form(entry, cx);
-        overlay::anchored(
-            "shelf-group-popover",
-            Anchor::TopLeft,
-            6.0,
-            &shelf,
-            |this, cx| this.close_group_panel(cx),
-            div().w(px(overlay::GROUP_WIDTH)).child(body).into_any_element(),
-        )
     }
 
     /// 删掉一本：库里的行、属于我们自己的那份副本，然后重查一次架面。
@@ -1310,179 +961,6 @@ impl ShelfView {
         self.items.clear();
         let query = self.query.clone();
         self.reload(&query, cx);
-    }
-
-    /// 右上角那颗三点按钮：本体不做任何事，点开一条菜单，三种导入方式摆在菜单里。
-    ///
-    /// 三颗按钮并排把搜索框挤成一条缝，而导入是偶尔才用一次的命令 —— 收进一条
-    /// 「⋮」后面，这一行就只剩「搜书」与「更多」两件事。组件是 gpui-kit 的
-    /// [`DropdownMenu`]：按钮负责开合，浮层内容是一条 [`PopupMenu`]，与架面卡片
-    /// 长按（`ContextMenuExt`）弹出的那一份同源，只是触发从右键/长按换成了点击。
-    /// 浮层在 Android 上点得住（`plans/facts.md`，2026-10-11 读者更正过旧的记录），
-    /// 所以两端共用这一颗。
-    ///
-    /// 菜单项各自把命令派回本视图的既有方法（`import` / `open_url_panel` /
-    /// `start_scan`），门禁照旧：书库位置没确认过先摆确认面板，一批没导完就按不动。
-    /// 菜单每次打开都会重建一遍（builder 是 `Fn`），所以闭包里先 clone 再 move：
-    /// 从捕获的句柄里现摘一份，而不是把上次那一份搬走。
-    fn more_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity().clone();
-        let url_entity = entity.clone();
-        let scan_entity = entity.clone();
-        let import_label = tr(cx, "shelf.import");
-        let scan_label = tr(cx, "shelf.scan");
-        let url_label = tr(cx, "shelf.url_import");
-        let more_label = tr(cx, "shelf.more");
-        Button::new("shelf-more")
-            .ghost()
-            .small()
-            .icon(IconName::EllipsisVertical)
-            .tooltip(more_label.clone().to_string())
-            .accessibility_label(more_label)
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let entity = entity.clone();
-                let url_entity = url_entity.clone();
-                let scan_entity = scan_entity.clone();
-                menu.min_w(px(book_menu::MIN_WIDTH))
-                    .item(
-                        PopupMenuItem::new(import_label.clone())
-                            .icon(IconName::Plus)
-                            .on_click(move |_, _, cx| {
-                                entity.update(cx, |this, cx| this.import(cx))
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(url_label.clone())
-                            .icon(IconName::Link)
-                            .on_click(move |_, window, cx| {
-                                url_entity.update(cx, |this, cx| this.open_url_panel(window, cx))
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(scan_label.clone())
-                            .icon(IconName::ScanSearch)
-                            .on_click(move |_, _, cx| {
-                                scan_entity.update(cx, |this, cx| this.start_scan(cx))
-                            }),
-                    )
-            })
-    }
-
-    /// 搜索框那一行：框占满剩下的宽度，三点按钮钉在右边。
-    fn search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .px(px(GUTTER))
-            .py_2()
-            .child(div().flex_1().min_w_0().child(self.search.clone()))
-            .child(self.group_cell(cx))
-            .child(self.more_button(cx))
-    }
-
-    /// 桌面/平板的工具栏：钉在架面最上方，搜索框与三点按钮靠右。
-    ///
-    /// 不复用手机上那一行，因为两者要回答的问题不同：手机上宽度只够一条满幅的框，
-    /// 框被拉满就是「先搜」；桌面上把同一颗框拉到 1300 像素宽，它就从一条命令
-    /// 变成一块空白。所以这里给它一个和「书名或作者」这句话相称的定宽，
-    /// 与三点按钮一起收在右上角。
-    ///
-    /// 左右留白与网格共用 [`GUTTER`]：两行不共用一条对齐脊线的话，
-    /// 搜索框的左边会莫名其妙地比第一格封面缩进一截。
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .w_full()
-            .flex_shrink_0()
-            .items_center()
-            .justify_end()
-            .gap_2()
-            .px(px(GUTTER))
-            .py_2()
-            .child(
-                // 工具栏按 compact 档排：框和按钮同一档，否则一行里会长出两种高度。
-                // 框的 small 档在 `boot` 建组件时就定下了。
-                div().w_64().child(self.search.clone()),
-            )
-            .child(self.group_cell(cx))
-            .child(self.more_button(cx))
-    }
-
-    /// 「书要拷到哪儿」那块面板。
-    ///
-    /// 它是架面的一部分而不是浮层：浮层在 Android 上现在点不住（长按菜单那条路的缺陷），
-    /// 而这一步是导入的前提，点不动就等于没有导入。
-    fn confirm_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let pick_entity = cx.entity().clone();
-        let confirm_entity = pick_entity.clone();
-        let cancel_entity = pick_entity.clone();
-        let pick_label = tr(cx, "library.pick_dir");
-        let confirm_label = tr(cx, "library.confirm");
-        let cancel_label = tr(cx, "library.cancel");
-        // 已经选过就显示选中的那个位置，没选过显示建议位置 —— 选完当场能看出结果。
-        let chosen = ConfigHolder::library(cx).dir;
-        let shown = if chosen.trim().is_empty() {
-            suggested_dir().display().to_string()
-        } else {
-            chosen
-        };
-        v_flex()
-            .id("library-confirm-panel")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .gap_3()
-            .px(px(GUTTER))
-            .py_4()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr(cx, "library.title")),
-            )
-            .child(muted_label(tr(cx, "library.hint"), cx))
-            .child(
-                div()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(cx.theme().muted)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(shown),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        Button::new("library-pick")
-                            .ghost()
-                            .label(pick_label.clone().to_string())
-                            .accessibility_label(pick_label)
-                            .on_click(move |_, _, cx| {
-                                pick_entity.update(cx, |this, cx| this.pick_library(cx))
-                            }),
-                    )
-                    .child(
-                        Button::new("library-confirm")
-                            .primary()
-                            .label(confirm_label.clone().to_string())
-                            .accessibility_label(confirm_label)
-                            .on_click(move |_, _, cx| {
-                                confirm_entity.update(cx, |this, cx| this.confirm_library(cx))
-                            }),
-                    )
-                    .child(
-                        Button::new("library-cancel")
-                            .ghost()
-                            .label(cancel_label.clone().to_string())
-                            .accessibility_label(cancel_label)
-                            .on_click(move |_, _, cx| {
-                                cancel_entity.update(cx, |this, cx| this.cancel_confirm(cx))
-                            }),
-                    ),
-            )
-            .into_any_element()
     }
 
     /// 网格本体，或者两种「这里没有东西」—— 它们必须说得不一样。
@@ -1663,7 +1141,9 @@ impl Render for ShelfView {
             ]
         } else {
             let mut overlays = Vec::new();
-            if self.url_open && let Some(entry) = &self.url_entry {
+            if self.url_open
+                && let Some(entry) = &self.url_entry
+            {
                 overlays.push(self.url_popover(entry.clone(), cx));
             }
             if self.scan_open && self.scan.is_some() {
@@ -1696,11 +1176,12 @@ mod tests {
     use gpui_kit::component::Root;
     use gpui_kit::component::input::InputState;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{
-        AnyWindowHandle, AppContext as _, ElementId, Entity, TestAppContext, px, size,
-    };
+    use gpui_kit::{AnyWindowHandle, AppContext as _, ElementId, Entity, TestAppContext, px, size};
 
-    use super::{COVER_RATIO, GAP, GUTTER, GroupFilter, ShelfView, columns_for, grid_spec};
+    use super::super::components::book_card::COVER_RATIO;
+    use super::GroupFilter;
+    use super::ShelfView;
+    use super::grid::{GAP, GUTTER, columns_for, grid_spec};
     use crate::ui::services::config::ConfigHolder;
     use crate::ui::shell::navigation::SizeClass;
 

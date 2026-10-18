@@ -24,17 +24,18 @@ pub(crate) use compact::CompactSettings;
 pub use desktop::SettingsView;
 
 // 页面文件之间共用的前言：规格构造器、主题、配置入口与文案函数。
+pub(in crate::ui::features::settings) use crate::ui::features::settings::model::spec;
+pub(in crate::ui::features::settings) use crate::ui::features::settings::model::spec::{
+    Group, NumberSpec, Page, Row, group, number, page,
+};
 pub(in crate::ui::features::settings) use folio_core::{Mode, PageTurn};
 pub(in crate::ui::features::settings) use gpui_kit::assets::IconName;
 pub(in crate::ui::features::settings) use gpui_kit::component::ThemeMode;
 pub(in crate::ui::features::settings) use gpui_kit::{App, SharedString};
-pub(in crate::ui::features::settings) use crate::ui::features::settings::model;
-pub(in crate::ui::features::settings) use crate::ui::features::settings::model::spec;
-pub(in crate::ui::features::settings) use crate::ui::features::settings::model::spec::{Group, NumberSpec, Page, Row, group, number, page};
 
+pub(in crate::ui::features::settings) use crate::ui::foundation::theme;
 pub(in crate::ui::features::settings) use crate::ui::services::config::ConfigHolder;
 pub(in crate::ui::features::settings) use crate::ui::services::l10n::{tf, tr};
-pub(in crate::ui::features::settings) use crate::ui::foundation::theme;
 
 // 那颗「打开所在文件夹」的按钮要用的几样（页面文件通过 `super::` 拿到它本身）。
 use gpui_kit::IntoElement;
@@ -57,7 +58,11 @@ use pages::typography::typography_page;
 ///
 /// 打不开时**不弹任何东西**：那一行本身还留着路径，读者能自己抄；摆一个报错弹窗只是把
 /// 「这台设备的文件管理器不认领这个 URI」变成读者的问题。
-pub(in crate::ui::features::settings) fn open_folder_button(id: &'static str, path: PathBuf, cx: &App) -> impl IntoElement {
+pub(in crate::ui::features::settings) fn open_folder_button(
+    id: &'static str,
+    path: PathBuf,
+    cx: &App,
+) -> impl IntoElement {
     Button::new(id)
         .label(tr(cx, "field.open_folder").to_string())
         .on_click(move |_, _, _| {

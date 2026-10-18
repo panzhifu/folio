@@ -34,14 +34,13 @@ impl PageTurnStyle for SlideUp {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     //! 搬自摆位层那一份：一挡的门跟着那一档走，共用的尺在 `testing.rs`。
 
     use crate::ui::features::reader::motion::turn_animation::PageTurnStyle as _;
-    use crate::ui::features::reader::motion::turn_animation::slide_up::{SlideUp};
-    use crate::ui::features::reader::motion::turn_animation::testing::{page, H};
+    use crate::ui::features::reader::motion::turn_animation::slide_up::SlideUp;
+    use crate::ui::features::reader::motion::turn_animation::testing::{H, page};
 
     /// 竖档把同样一趟搬到 y 上：x 分量必须恒为 0，否则读起来就是斜着飞。
     #[test]

@@ -28,16 +28,16 @@ use gpui_kit::{
     Window, actions, div, px,
 };
 
+use crate::ui::components::hairline;
 use crate::ui::features::notes::NotesView;
 use crate::ui::features::reader::{Arrow, ReadingPage, Reserve};
 use crate::ui::features::settings::{CompactSettings, SettingsPage, SettingsView};
 use crate::ui::features::shelf::{ShelfEvent, ShelfView};
 use crate::ui::features::stats::{StatsEvent, StatsView};
 use crate::ui::features::welcome::WelcomeView;
+use crate::ui::foundation::theme;
 use crate::ui::host;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::foundation::theme;
-use crate::ui::components::hairline;
 use navigation::{Destination, SizeClass, navigation};
 
 #[cfg(not(mobile))]

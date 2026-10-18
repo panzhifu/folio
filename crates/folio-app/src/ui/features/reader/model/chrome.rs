@@ -534,7 +534,6 @@ mod tests {
         assert_eq!(percent_label(-0.3), "0%");
     }
 
-
     /// 连续滚动那一屏跳的补间。起点用「画出来的那一个数」，不是 `scroll_y`。
     #[test]
     fn the_scroll_tween_runs_between_the_painted_positions() {

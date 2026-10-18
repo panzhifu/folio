@@ -3,8 +3,8 @@
 //! 两张纸的位移式子（[`slide_shifts`]）也住在这儿 —— 它是这一档的式子，从前寄在
 //! `chrome.rs` 里，摆位层拆开后回到了它该在的地方。
 
-use crate::ui::features::reader::model::chrome::PageMode;
 use super::{Area, Axis, PageTurnStyle, Sheet};
+use crate::ui::features::reader::model::chrome::PageMode;
 
 /// 平移翻页里**两张纸各沿轴走多远**，按「这一趟走了多少」`progress` 算（0 = 刚起步，
 /// 1 = 走完），给回 `(出场页, 进场页)`。这一层只管这一个数：分成 `x` / `y`、要不要让

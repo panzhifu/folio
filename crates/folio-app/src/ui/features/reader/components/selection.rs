@@ -73,12 +73,14 @@ use gpui_kit::{
     canvas, div, fill, hsla, point, px,
 };
 
-use crate::ui::features::reader::model::book::Book;
-use crate::ui::features::reader::model::chrome;
-use crate::ui::features::reader::model::chapter_layout::Document;
-use crate::ui::features::reader::model::annotations::Palette;
-use crate::ui::features::reader::model::session::{DRAG_THRESHOLD_PX, EdgeDrag, MouseDrag, ReaderSession, Selection};
 use crate::ui::features::reader::components::share_card;
+use crate::ui::features::reader::model::annotations::Palette;
+use crate::ui::features::reader::model::book::Book;
+use crate::ui::features::reader::model::chapter_layout::Document;
+use crate::ui::features::reader::model::chrome;
+use crate::ui::features::reader::model::session::{
+    DRAG_THRESHOLD_PX, EdgeDrag, MouseDrag, ReaderSession, Selection,
+};
 use crate::ui::platform;
 use crate::ui::services::l10n::tr;
 

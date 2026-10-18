@@ -11,9 +11,9 @@ use gpui_kit::component::button::Button;
 use gpui_kit::{FontWeight, IntoElement as _, ParentElement, SharedString, Styled, div};
 
 use super::super::*;
+use crate::ui::components::muted_label;
 use crate::ui::services::library::{choose_dir, pick_dir, suggested_dir, suggested_watch_dir};
 use crate::ui::services::transfer as wifi;
-use crate::ui::components::muted_label;
 
 pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
     let dir = Row::text(

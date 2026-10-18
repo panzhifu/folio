@@ -45,22 +45,22 @@ use gpui_kit::{
     accesskit, canvas, div, hsla, img, linear_color_stop, linear_gradient, point, px, size,
 };
 
+use crate::ui::features::reader::components::image_viewer::ImageViewer;
+use crate::ui::features::reader::components::selection::{self, SelectionVisual};
+use crate::ui::features::reader::model::annotations::{self, Palette};
 use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::book_fonts::BookFonts;
-use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::chapter_layout::{Document, Viewport};
+use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::image_atlas::ImageAtlas;
-use crate::ui::features::reader::components::image_viewer::ImageViewer;
-use crate::ui::features::reader::model::annotations::{self, Palette};
-use crate::ui::features::reader::view::paint::{GlyphRun, GlyphsElement, shape};
-use crate::ui::features::reader::view::scene::{BlockDecor, Scene, VisibleImage};
-use crate::ui::features::reader::components::selection::{self, SelectionVisual};
 use crate::ui::features::reader::model::session::{
     AnnotationSpans, PageRef, ReaderSession, Source, Turn, TurnRun, land_at_anchor, start_turn,
 };
 use crate::ui::features::reader::motion::turn_animation::{self, Sheet, Tint};
-use crate::ui::services::config::ConfigHolder;
+use crate::ui::features::reader::view::paint::{GlyphRun, GlyphsElement, shape};
+use crate::ui::features::reader::view::scene::{BlockDecor, Scene, VisibleImage};
 use crate::ui::foundation::images::DecodeRequest;
+use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::nav_transition;
 use crate::ui::shell::navigation::SizeClass;
 
@@ -369,7 +369,9 @@ impl Render for ReaderSession {
                         );
                     }
                     let __layout = __t.ns();
-                    crate::ui::features::reader::model::perf::add(|frame| frame.layout_ns += __layout);
+                    crate::ui::features::reader::model::perf::add(|frame| {
+                        frame.layout_ns += __layout
+                    });
                     // 4–7. 坐标链那一段：补偿、恢复落点、锚章迁移、总高与夹取。
                     let __spine = crate::ui::features::reader::model::perf::Timer::start();
                     let before_compensate = self.scroll_y;
@@ -443,7 +445,9 @@ impl Render for ReaderSession {
                     };
                     self.scroll_painted = painted_y;
                     let __spine = __spine.ns();
-                    crate::ui::features::reader::model::perf::add(|frame| frame.spine_ns += __spine);
+                    crate::ui::features::reader::model::perf::add(|frame| {
+                        frame.spine_ns += __spine
+                    });
                     // 8. 可见带 → 逐章切场景：每章用自己的排版与图片索引，
                     //    换算只差一个章基线。没排完的章不进链，自然一帧都不画。
                     let band = painted_y..(painted_y + viewport_height);
@@ -481,7 +485,9 @@ impl Render for ReaderSession {
                         let __sh = crate::ui::features::reader::model::perf::Timer::start();
                         shape_runs(&mut scene, doc, window);
                         let __sh = __sh.ns();
-                        crate::ui::features::reader::model::perf::add(|frame| frame.shape_runs_ns += __sh);
+                        crate::ui::features::reader::model::perf::add(|frame| {
+                            frame.shape_runs_ns += __sh
+                        });
                         let (__runs, __images) =
                             (scene.runs.len() as u32, scene.images.len() as u32);
                         crate::ui::features::reader::model::perf::add(|frame| {
@@ -530,7 +536,9 @@ impl Render for ReaderSession {
                             None,
                         );
                         let __fills = __fills.ns();
-                        crate::ui::features::reader::model::perf::add(|frame| frame.fills_ns += __fills);
+                        crate::ui::features::reader::model::perf::add(|frame| {
+                            frame.fills_ns += __fills
+                        });
                     }
                 } else {
                     // —— 分页 / 双页：当前页 +（动画时）同章邻页或跨章目标页 ——
@@ -662,7 +670,8 @@ impl Render for ReaderSession {
                             self.header_reserve + viewport_height,
                         );
                         shades = style.shades(frame.progress, frame.forward, area);
-                        let [incoming, outgoing] = style.sheets(frame.progress, frame.forward, area);
+                        let [incoming, outgoing] =
+                            style.sheets(frame.progress, frame.forward, area);
                         let leaving_ref = frame.leaving.unwrap_or(PageRef {
                             chapter: current,
                             page: self.page,
@@ -743,7 +752,9 @@ impl Render for ReaderSession {
                             let __sh = crate::ui::features::reader::model::perf::Timer::start();
                             shape_runs(&mut scene, doc, window);
                             let __sh = __sh.ns();
-                            crate::ui::features::reader::model::perf::add(|f| f.shape_runs_ns += __sh);
+                            crate::ui::features::reader::model::perf::add(|f| {
+                                f.shape_runs_ns += __sh
+                            });
                             // 折页：这一张纸按它**自己那一条**裁剪收字 —— 进场那一张只画
                             // 已经空出来的那一侧，出场那一张只画还平摊着的那一侧。裁剪与
                             // 折面用的是同一条折线，所以影子收掉的那一刻字也正好收干净，
@@ -818,7 +829,9 @@ impl Render for ReaderSession {
                                 at.cut,
                             );
                             let __fills = __fills.ns();
-                            crate::ui::features::reader::model::perf::add(|f| f.fills_ns += __fills);
+                            crate::ui::features::reader::model::perf::add(|f| {
+                                f.fills_ns += __fills
+                            });
                         }
                     }
                 }

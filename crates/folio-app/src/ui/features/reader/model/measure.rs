@@ -595,7 +595,11 @@ impl Measure for GpuiMeasure {
 /// 同一份 shaping 数字，不新增一处可能漂移的状态。**代价**是一段内部混排（既有 LTR 又有
 /// RTL 的同一个 run）只能按开头两位判读，那种 run 的逐字矩形是近似的；而点击落点走的是
 /// [`byte_at_x`](Measure::byte_at_x) 那一条，它逐字形在视觉空间里找，仍然精确。
-pub(in crate::ui::features::reader) fn edges_from_glyphs(text: &str, visual: &[(usize, f32)], width: f32) -> Vec<f32> {
+pub(in crate::ui::features::reader) fn edges_from_glyphs(
+    text: &str,
+    visual: &[(usize, f32)],
+    width: f32,
+) -> Vec<f32> {
     if visual.is_empty() {
         return vec![0.0, width];
     }

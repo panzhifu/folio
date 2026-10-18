@@ -3,9 +3,9 @@
 //! 与平移之间**唯一**看得见的差别是那两条影子：位移只差在停不停那一张，而停着的那一张
 //! 没有影子 —— 没有它们，这一档在画面上与平移分不开。
 
-use crate::ui::features::reader::model::chrome::PageMode;
-use super::{Area, Axis, Cut, PageTurnStyle, Poly, Shades, Sheet};
 use super::geometry::{edge_pair, travel_edge};
+use super::{Area, Axis, Cut, PageTurnStyle, Poly, Shades, Sheet};
+use crate::ui::features::reader::model::chrome::PageMode;
 
 /// 覆盖那一档：移动那张纸前缘投在下面那张上的带有多宽（按页宽）。
 pub(in crate::ui::features::reader) const SLIDE_WIDE: f32 = 0.08;
@@ -13,8 +13,6 @@ pub(in crate::ui::features::reader) const SLIDE_WIDE: f32 = 0.08;
 /// 那条投影有多黑。定值、不随进度：前缘走到页的左缘时投影自己被裁没了，
 /// 不需要再乘一个 `(1 − t)`。
 pub(in crate::ui::features::reader) const SLIDE_INK: f32 = 0.18;
-
-
 
 /// 覆盖那一档两张纸各占哪一块：`[压在上面那张, 被压住那张]`。
 ///
@@ -85,15 +83,16 @@ impl PageTurnStyle for Cover {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     //! 搬自摆位层那一份：一挡的门跟着那一档走，共用的尺在 `testing.rs`。
 
-    use crate::ui::features::reader::motion::turn_animation::cover::{Cover};
-    use crate::ui::features::reader::motion::turn_animation::geometry::{Area, Tint, EDGE_WIDE};
-    use crate::ui::features::reader::motion::turn_animation::testing::{page, complementary, x_span, W};
     use crate::ui::features::reader::motion::turn_animation::PageTurnStyle as _;
+    use crate::ui::features::reader::motion::turn_animation::cover::Cover;
+    use crate::ui::features::reader::motion::turn_animation::geometry::{Area, EDGE_WIDE, Tint};
+    use crate::ui::features::reader::motion::turn_animation::testing::{
+        W, complementary, page, x_span,
+    };
 
     /// 覆盖档的差别就两格：旧页停着不动，新页压在它上面。少任何一条，`Cover` 与
     /// `Slide` 就是一模一样的画面。

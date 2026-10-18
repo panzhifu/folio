@@ -34,8 +34,8 @@ use folio_core::layout::{
 };
 use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window, WindowTextSystem};
 
-use crate::ui::features::reader::model::measure::GpuiMeasure;
 use crate::ui::features::reader::model::book_fonts::BookFonts;
+use crate::ui::features::reader::model::measure::GpuiMeasure;
 use crate::ui::foundation::images::ChapterImages;
 
 /// 打开一个文档，返回统一接口。

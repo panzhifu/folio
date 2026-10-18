@@ -9,8 +9,8 @@
 pub mod app_store;
 pub mod config;
 pub mod import_queue;
-pub mod library;
 pub mod l10n;
+pub mod library;
 pub mod services;
 pub mod transfer;
 pub mod watch;

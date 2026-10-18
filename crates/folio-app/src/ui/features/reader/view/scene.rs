@@ -161,7 +161,9 @@ impl Scene {
                         let __t = crate::ui::features::reader::model::perf::Timer::start();
                         let request = document.images().decode_request(&placed.href);
                         let __image = __t.ns();
-                        crate::ui::features::reader::model::perf::add(|frame| frame.image_ns += __image);
+                        crate::ui::features::reader::model::perf::add(|frame| {
+                            frame.image_ns += __image
+                        });
                         // 每张图片每帧一条 `info!` 会把日志刷爆，而格式化本身就是要省的开销
                         // （`plans/阅读管线.md` §十一 第 11 条）：这一句降到 `trace!`。
                         tracing::trace!(

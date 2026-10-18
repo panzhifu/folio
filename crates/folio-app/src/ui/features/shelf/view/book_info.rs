@@ -36,10 +36,10 @@ use gpui_kit::{
     Styled, StyledImage, Subscription, TestSupportExt as _, WeakEntity, Window, div, img, px,
 };
 
+use crate::ui::components::{TopBar, hairline};
 use crate::ui::foundation::error::report;
 use crate::ui::foundation::images::cover_image;
 use crate::ui::services::l10n::{tf, tr};
-use crate::ui::components::{TopBar, hairline};
 
 use super::super::components::book_card::AUTHOR_SEP;
 use super::scan::fmt_size;
@@ -102,7 +102,12 @@ impl ShelfView {
     ///
     /// 只查不拦 —— 书查不到（已删、库坏了）就不开这一页，留一条日志：菜单是瞬间的事，
     /// 这里没有要保的旧状态。封面读不出来不拦 —— 那一格画占位，右边那两格才是正事。
-    pub(in crate::ui::features::shelf) fn show_info(&mut self, book_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::shelf) fn show_info(
+        &mut self,
+        book_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(store) = self.store.clone() else {
             tracing::error!("ShelfView: 没有书库，查不了第 {book_id} 本的信息");
             return;

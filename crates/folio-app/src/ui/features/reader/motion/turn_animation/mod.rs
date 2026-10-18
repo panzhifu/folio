@@ -41,10 +41,14 @@ use scroll::Scroll;
 use slide::Slide;
 use slide_up::SlideUp;
 
-pub(in crate::ui::features::reader) use geometry::{Area, Axis, Crease, Cut, Poly, Shade, Shades, Sheet, Tint};
+pub(in crate::ui::features::reader) use geometry::{
+    Area, Axis, Crease, Cut, Poly, Shade, Shades, Sheet, Tint,
+};
 
 /// 一档翻页动画。
-pub(in crate::ui::features::reader) trait PageTurnStyle: Sync {
+pub(in crate::ui::features::reader) trait PageTurnStyle:
+    Sync
+{
     /// 这一屏在这种摆法下有没有一趟要走。`false` = 当场落定：既不必多摆一张纸
     /// （省一整趟切片重摆与重排），`page_shift` 也就保持归零，命中不用减任何东西。
     ///
@@ -88,6 +92,26 @@ pub(in crate::ui::features::reader) fn of(turn: PageTurn) -> &'static dyn PageTu
     }
 }
 
+/// 这一档在这种摆法下，**手势翻页走哪根轴**。
+///
+/// 全项目唯一一处「翻页的轴从哪来」的答案：**轴归动画档，不归手指**。读者选了横向的
+/// 平移 / 覆盖 / 仿真，竖着划就不该翻页；选了上下平移，横着划就不该翻页。从前
+/// `dominant(dx, dy)` 说了算，于是「选了横向动画也照竖着划翻页」。
+///
+/// 三种没有轴的问号各有一句话：
+/// - 连续摆法没有「翻页」这件事（手指本身就是滚）⇒ `None`；
+/// - 「上下滚动」在分页里本就不成立（[`applies`] 会把它从选项里筛掉），真落到这里按竖轴；
+/// - 「不走动画」没有方向可言，跟着默认摆法（上下滚动）走 ⇒ 竖轴。
+pub(in crate::ui::features::reader) fn page_axis(turn: PageTurn, mode: PageMode) -> Option<Axis> {
+    if mode.is_continuous() {
+        return None;
+    }
+    Some(match turn {
+        PageTurn::Slide | PageTurn::Cover | PageTurn::Curl => Axis::Horizontal,
+        PageTurn::SlideUp | PageTurn::Scroll | PageTurn::None => Axis::Vertical,
+    })
+}
+
 /// 这一档在当前摆法下有没有一趟要走。底栏那一格按它筛选项：连续里只剩「上下滚动」与
 /// 「不走动画」两档讲得通，分页里「上下滚动」讲不通。
 pub(in crate::ui::features::reader) fn applies(turn: PageTurn, mode: PageMode) -> bool {
@@ -98,28 +122,55 @@ pub(in crate::ui::features::reader) fn applies(turn: PageTurn, mode: PageMode) -
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     //! 搬自摆位层那一份：一挡的门跟着那一档走，共用的尺在 `testing.rs`。
 
     use crate::ui::features::reader::model::chrome::PageMode;
-    use crate::ui::features::reader::motion::turn_animation::cover::{Cover};
-    use crate::ui::features::reader::motion::turn_animation::curl::{Curl};
-    use crate::ui::features::reader::motion::turn_animation::curl::{crease_of};
-    use crate::ui::features::reader::motion::turn_animation::geometry::{Area, Axis};
-    use crate::ui::features::reader::motion::turn_animation::none::{Immediate};
-    use crate::ui::features::reader::motion::turn_animation::scroll::{Scroll};
-    use crate::ui::features::reader::motion::turn_animation::slide::{Slide};
-    use crate::ui::features::reader::motion::turn_animation::slide_up::{SlideUp};
-    use crate::ui::features::reader::motion::turn_animation::testing::{page};
-    use crate::ui::features::reader::motion::turn_animation::{of, applies};
     use crate::ui::features::reader::motion::turn_animation::PageTurnStyle as _;
+    use crate::ui::features::reader::motion::turn_animation::cover::Cover;
+    use crate::ui::features::reader::motion::turn_animation::curl::Curl;
+    use crate::ui::features::reader::motion::turn_animation::curl::crease_of;
+    use crate::ui::features::reader::motion::turn_animation::geometry::{Area, Axis};
+    use crate::ui::features::reader::motion::turn_animation::none::Immediate;
+    use crate::ui::features::reader::motion::turn_animation::scroll::Scroll;
+    use crate::ui::features::reader::motion::turn_animation::slide::Slide;
+    use crate::ui::features::reader::motion::turn_animation::slide_up::SlideUp;
+    use crate::ui::features::reader::motion::turn_animation::testing::page;
+    use crate::ui::features::reader::motion::turn_animation::{applies, of, page_axis};
     use folio_core::PageTurn;
 
     /// 「走不走一趟」是**按摆法**答的：`None` 哪儿都不走；「上下滚动」只在连续里走
     /// （分页里没有可滚的东西，那一趟退化成当场落定）；其余几档两种摆法都要摆那两张纸。
     /// 底栏那一格的选项就是按这条筛的，所以它错一格，界面上就少一档或多一档。
+    /// 翻页的轴**归动画档**，不归手指。这张表就是那条判据的全部：
+    /// 读者选了横向的平移 / 覆盖 / 仿真，竖着划不该翻页；选了上下平移，横着划不该翻页。
+    #[test]
+    fn the_page_axis_comes_from_the_style_not_the_finger() {
+        use Axis::{Horizontal, Vertical};
+        for mode in [PageMode::Paged, PageMode::Spread] {
+            for (turn, want) in [
+                (PageTurn::Slide, Horizontal),
+                (PageTurn::Cover, Horizontal),
+                (PageTurn::Curl, Horizontal),
+                (PageTurn::SlideUp, Vertical),
+                // 「上下滚动」在分页里本就不成立，真落进来按竖轴；「不走动画」跟着默认摆法走。
+                (PageTurn::Scroll, Vertical),
+                (PageTurn::None, Vertical),
+            ] {
+                assert_eq!(page_axis(turn, mode), Some(want), "{turn:?} 在 {mode:?} 里");
+            }
+        }
+        // 连续滚动没有「翻页」这件事：手指就是滚，任何档都不该有一根翻页轴。
+        for turn in PageTurn::ALL {
+            assert_eq!(
+                page_axis(*turn, PageMode::Continuous),
+                None,
+                "{turn:?} 在连续滚动里不该有翻页轴"
+            );
+        }
+    }
+
     #[test]
     fn which_styles_run_a_slide_is_an_answer_per_layout() {
         for mode in [PageMode::Continuous, PageMode::Paged, PageMode::Spread] {
@@ -169,7 +220,10 @@ mod tests {
             assert_eq!(of(turn).axis(), axis, "{turn:?} 的轴不对");
             // 漏挂进 `ALL` 的那一档在界面上永远选不到，而配置里手写它又能读回来 ——
             // 就成了一个只有改文件才到达的影子档。
-            assert!(PageTurn::ALL.contains(&turn), "{turn:?} 没挂进 PageTurn::ALL");
+            assert!(
+                PageTurn::ALL.contains(&turn),
+                "{turn:?} 没挂进 PageTurn::ALL"
+            );
         }
     }
     /// 距离按轴取：横档取宽、竖档取高。取错那个数不会报错，只会让纸走半屏就落定。
@@ -201,10 +255,7 @@ mod tests {
                 assert_eq!(sheet.cut, None, "竖平移同样不重叠");
             }
             // 反过来：凡是真会重叠的那两档，两张纸都必须各有一条裁剪 —— 少一张就是字叠字。
-            for mut style in [
-                Cover.sheets(t, true, page()),
-                Curl.sheets(t, true, page()),
-            ] {
+            for mut style in [Cover.sheets(t, true, page()), Curl.sheets(t, true, page())] {
                 for sheet in style.iter_mut() {
                     assert!(
                         sheet.cut.is_some(),
@@ -230,10 +281,7 @@ mod tests {
     fn an_unmeasured_page_sheds_nothing() {
         let flat = Area::new(0.0, 0.0, 0.0, 0.0);
         assert!(crease_of(0.5, true, flat).is_none());
-        for style in [
-            Curl.shades(0.5, true, flat),
-            Cover.shades(0.5, true, flat),
-        ] {
+        for style in [Curl.shades(0.5, true, flat), Cover.shades(0.5, true, flat)] {
             assert!(style.items().is_empty(), "量不出面积时一块都不该画");
         }
         for sheet in Curl.sheets(0.5, true, flat) {

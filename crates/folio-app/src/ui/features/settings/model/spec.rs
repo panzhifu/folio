@@ -171,7 +171,10 @@ impl Row {
         }
     }
 
-    pub(in crate::ui::features::settings) fn info(title: SharedString, value: impl Into<SharedString>) -> Self {
+    pub(in crate::ui::features::settings) fn info(
+        title: SharedString,
+        value: impl Into<SharedString>,
+    ) -> Self {
         Self {
             title,
             desc: None,
@@ -182,7 +185,9 @@ impl Row {
         }
     }
 
-    pub(in crate::ui::features::settings) fn custom(render: impl Fn(&App) -> AnyElement + 'static) -> Self {
+    pub(in crate::ui::features::settings) fn custom(
+        render: impl Fn(&App) -> AnyElement + 'static,
+    ) -> Self {
         Self {
             title: SharedString::default(),
             desc: None,
@@ -209,12 +214,18 @@ impl Row {
         }
     }
 
-    pub(in crate::ui::features::settings) fn description(mut self, desc: impl Into<SharedString>) -> Self {
+    pub(in crate::ui::features::settings) fn description(
+        mut self,
+        desc: impl Into<SharedString>,
+    ) -> Self {
         self.desc = Some(desc.into());
         self
     }
 
-    pub(in crate::ui::features::settings) fn keywords(mut self, keywords: &'static [&'static str]) -> Self {
+    pub(in crate::ui::features::settings) fn keywords(
+        mut self,
+        keywords: &'static [&'static str],
+    ) -> Self {
         self.keywords = keywords;
         self
     }

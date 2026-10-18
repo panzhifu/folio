@@ -133,7 +133,11 @@ fn config_group(cx: &App) -> Group {
                             .min_w_0()
                             .child(muted_label(path.display().to_string(), cx)),
                     )
-                    .child(super::super::open_folder_button("about-open-config-dir", path, cx))
+                    .child(super::super::open_folder_button(
+                        "about-open-config-dir",
+                        path,
+                        cx,
+                    ))
                     .into_any_element()
             })
             .description(tr(cx, "field.config_path.desc"))

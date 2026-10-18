@@ -17,10 +17,9 @@
 //! 直接跑，这一屏只把结果落成动作。
 
 use folio_core::infra::config::{Mode, PageTurn};
-use gpui_kit::assets::IconName;
 use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{
@@ -29,27 +28,23 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Corners, Entity, FocusHandle,
-    Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
-    px,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, StatefulInteractiveElement,
+    Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
-use crate::ui::features::reader::view::bands;
-use crate::ui::features::reader::model::chrome::{
-    self, BRIGHTNESS_RANGE, Chrome, Effect, FONT_SIZE_RANGE, PageMode, Panel, Reserve, zone,
-};
 use crate::ui::features::reader::components::image_viewer::{self, ImageViewer};
-use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::components::toc_panel::{TocEvent, TocPanel};
-use crate::ui::features::reader::motion::turn_animation;
+use crate::ui::features::reader::model::chrome::{
+    self, BRIGHTNESS_RANGE, Chrome, Effect, FONT_SIZE_RANGE, Panel, Reserve, zone,
+};
+use crate::ui::features::reader::model::session::ReaderSession;
+use crate::ui::features::reader::view::bands;
 use crate::ui::features::settings::CompactSettings;
 use crate::ui::platform;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::services::l10n::tr;
 use crate::ui::shell::AppShell;
 use crate::ui::shell::navigation::SizeClass;
-use crate::ui::components::TopBar;
 
 /// 脚注小纸片的最宽那一条：内容的 `max_w` 与夹边算的是同一个数。
 const FOOTNOTE_CARD_W: Pixels = px(300.);
@@ -61,54 +56,54 @@ const FOOTNOTE_EDGE: Pixels = px(8.);
 const FOOTNOTE_GAP: Pixels = px(10.);
 
 pub struct ReadingPage {
-    reader: Entity<ReaderSession>,
+    pub(in crate::ui::features::reader) reader: Entity<ReaderSession>,
     /// 外壳报来的「不属于正文的那一段」。顶层盖满整窗，所以那一段只剩顶上那条系统状态栏 /
     /// 挖孔（底边见 [`ReadingPage::bottom_inset`]）—— `shell::reading_reserve`。
-    reserve: Reserve,
+    pub(in crate::ui::features::reader) reserve: Reserve,
     /// 顶上那条系统状态栏 / 挖孔占掉多高（逻辑像素）。见 [`shell::reading_top_inset`]。
     ///
     /// 整层已经由外壳按这一个数往下推过了，这里只给顶栏用：那条的表面要**再往上长回屏幕顶边**，
     /// 不然它投影的上半截会露在条子上方，被条子自己的边切成一条横线（见 [`TopBar::overlay`]）。
     ///
     /// [`shell::reading_top_inset`]: crate::ui::shell::reading_top_inset
-    top_inset: f32,
+    pub(in crate::ui::features::reader) top_inset: f32,
     /// 底下那条系统手势条占掉多高（逻辑像素）。
     ///
     /// 它**不拿去推整层**，只给底栏卡片与干净态页脚用：那两处把内容抬高 `bottom_inset`、
     /// 底色铺到屏幕底，所以卡片与屏幕底之间不是一条空缝（与读者那句「位于系统底部栏之上、
     /// 颜色保持一致」同一条口径）。正文那边已经由 `reserve.height` 扣过它，不再重复扣。
-    bottom_inset: f32,
+    pub(in crate::ui::features::reader) bottom_inset: f32,
     /// 这一层自己的返回栈（弱句柄）。**正文是栈底**，从阅读页压进去的那一屏（设置）叠在
     /// 它上面 —— 借架面那条栈的话，压进来的那一屏会被这一层盖住。
     ///
     /// 弱是因为栈里存着正文自己的 `AnyView`：两边都攥紧就是互相拽着，这一层放手之后
     /// 两边都散不掉。
-    stack: WeakEntity<NavStackState>,
+    pub(in crate::ui::features::reader) stack: WeakEntity<NavStackState>,
     /// 拿着这一层的外壳（同样是弱句柄：外壳攥着这一层，这一层不该反过来攥着外壳）。
     /// 顶栏那颗返回要请它收起这一层 —— 收层是外壳的事，正文这一屏不知道自己盖在谁上面。
-    shell: WeakEntity<AppShell>,
+    pub(in crate::ui::features::reader) shell: WeakEntity<AppShell>,
     /// 浮层的开合与面板档位。见 [`chrome`]。
-    chrome: Chrome,
+    pub(in crate::ui::features::reader) chrome: Chrome,
     /// 进度滑条。`Slider` 是有状态组件，句柄必须跨帧持有 —— 每帧新建会把拖动打断。
-    progress: Entity<SliderState>,
-    font_size: Entity<SliderState>,
+    pub(in crate::ui::features::reader) progress: Entity<SliderState>,
+    pub(in crate::ui::features::reader) font_size: Entity<SliderState>,
     /// 亮度滑条。它写的是 `appearance.brightness` 那一格（不在 `Reader` 里：压暗不该让任何
     /// 一章重排）；把这一格递给平台的是外壳每一帧那一次问（`AppShell::reading_brightness`），
     /// 这一屏只管教滑条自己。
-    brightness: Entity<SliderState>,
+    pub(in crate::ui::features::reader) brightness: Entity<SliderState>,
     /// 目录那一屏。整棵树、折叠集、搜索、弹层档位、书头都装在它自己那个实体里
     /// （见 [`TocPanel`]），这一屏只留一个句柄：开合状态要报给会话（身上压着东西时
     /// 正文的手势让位），元素要挂在最后（谁在上面由入树顺序定）。
-    toc: Entity<TocPanel>,
+    pub(in crate::ui::features::reader) toc: Entity<TocPanel>,
     /// 图片放大那一层的状态。它画在**最上面**（要盖住顶栏底栏与那块弹层），而写它的
     /// 是会话里那一次点击 / 那一次长按 —— 它不是视图，改动靠下面那次 `observe` 才
     /// 收得到重画，形状与两块弹层一致。
-    image_viewer: Entity<ImageViewer>,
+    pub(in crate::ui::features::reader) image_viewer: Entity<ImageViewer>,
     /// 查看器那一层的焦点句柄。它拿在阅读页手里而不是查看器自己里：那一层是 `overlay`
     /// 每帧造的元素树里的 `track_focus`，句柄得属于**这一棵**元素树的那个视图，
     /// 方向键那几条事件才能沿祖先链派发到它（见 `image_viewer::overlay`）。
-    image_viewer_focus: FocusHandle,
-    _watches: Vec<Subscription>,
+    pub(in crate::ui::features::reader) image_viewer_focus: FocusHandle,
+    pub(in crate::ui::features::reader) _watches: Vec<Subscription>,
 }
 
 impl ReadingPage {
@@ -385,7 +380,12 @@ impl ReadingPage {
     /// 正文上的一击：先让选中说话（拖选松手的豁免、选中的清除/菜单回开），
     /// 再按分区照结果动。见 [`chrome::Chrome::handle_body_tap`] 与
     /// `selection.rs` 的 `tap_with_selection`。
-    fn on_body_tap(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn on_body_tap(
+        &mut self,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let position = event.position();
         // 三条判据的归因与顺序都在 `ReaderSession::tap_on_body` 里（那里才测得到）。
         let consumed = self
@@ -435,7 +435,11 @@ impl ReadingPage {
     ///
     /// 带阈值比较：拖动的时候滑条自己就是权威，每帧再按正文读回来的数写回去，
     /// 就是拿手指算出来的值和滚动算出来的值互相追。
-    fn sync_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn sync_sliders(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let progress = self.reader.read(cx).progress();
         let prefs = ConfigHolder::reader(cx);
         let brightness = ConfigHolder::appearance(cx)
@@ -453,252 +457,9 @@ impl ReadingPage {
         }
     }
 
-    /// 顶栏：返回 + 书名，右边是这一章的章名。那条本身的样子（高、内缩、popover 表面、
-    /// 只圆下角、拦住落在它空隙里的一击）都在 [`TopBar`] 里，与书信息页、紧凑设置那一屏
-    /// 共用一份；高从 [`chrome::TOP_BAR_HEIGHT`] 递进去，那个数同时管布局与画面。
-    ///
-    /// 右边不摆页码 —— 底栏那条状态行已经念过一遍，而「读到哪一章了」是两栏都想一眼看到的。
-    /// `wide` 决定目录开关长不长在这一条上：手机档的目录是底部弹层，入口在底栏；平板 / PC
-    /// 档的目录是盖在正文上的抽屉，没有常驻的栏可以挂关闭键，开关就长在这里。
-    fn top_bar(&self, wide: bool, cx: &mut Context<Self>) -> AnyElement {
-        let title = self.reader.read(cx).title();
-        let chapter: SharedString = self.reader.read(cx).chapter_title().into();
-        let page = cx.entity().clone();
-        // 宽档上目录开关长在顶栏：底栏浮层收起时读者常驻看见的是这一条，而抽屉本身
-        // 也带一颗关闭 —— 开的关的两个入口都在这块屏上。
-        let toggle = wide.then(|| {
-            let open = self.toc.read(cx).is_open(cx);
-            let toc_page = cx.entity().clone();
-            let label = tr(cx, "reader.toc");
-            Button::new("toc-toggle")
-                .ghost()
-                .small()
-                .selected(open)
-                .icon(IconName::ListTree)
-                .tooltip(label.clone().to_string())
-                .accessibility_label(label)
-                .on_click(move |_, _, cx| {
-                    toc_page.update(cx, |this, cx| this.toggle_toc(cx));
-                })
-                .into_any_element()
-        });
-        TopBar::new("reader-top-bar")
-            .overlay(self.top_inset)
-            .height(chrome::TOP_BAR_HEIGHT)
-            .title(title)
-            .subtitle(chapter)
-            .back_tooltip(tr(cx, "shelf.back"))
-            .on_back(move |_, cx| {
-                page.update(cx, |this, cx| this.pop(cx));
-            })
-            .children(toggle)
-            .into_any_element()
-    }
-
-    /// 底栏：一块卡片，从上到下是「面板（可有可无）+ 状态行 + 进度条 + 一排入口」。
-    ///
-    /// 面板和入口条在**同一块**表面里，不是两张卡片：两张会各有一套圆角与投影，
-    /// 接缝处读起来是两个东西叠着，而它们说的是同一件事。
-    fn bottom_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let radius = cx.theme().radius_lg;
-        let mut card = v_flex()
-            .id("reader-bottom-bar")
-            // 底栏与顶栏同理：正文的 hitbox 是整屏的，不拦住空隙里的一击，它会顺着
-            // 帧内的监听列表接着打到正文上，把刚切过去的面板当场收掉。滚动留着，
-            // 读者从底栏那一片起手也要能滚字。
-            .block_mouse_except_scroll()
-            .absolute()
-            .bottom_0()
-            .left_0()
-            .right_0()
-            .px_4()
-            .pt_3()
-            // 底下那条系统手势条那一段也归卡片：卡片一直铺到屏幕底，内容抬高
-            // `bottom_inset`（多出来的那一段是卡片自己的底色，不是一条缝）。
-            .pb(px(8.0 + self.bottom_inset))
-            .gap_3()
-            .popover_style(cx)
-            .corner_radii(Corners {
-                top_left: radius,
-                top_right: radius,
-                bottom_left: px(0.),
-                bottom_right: px(0.),
-            });
-        card = match self.chrome.panel() {
-            Panel::None => card,
-            // 目录不在这块卡片里：它盖的是整块窗口，那一屏自己的实体在 [`TocPanel`]。
-            // 阅读设置留在这里：两条滑条加一行下拉，抬着正文看一眼再放回去正合适。
-            Panel::Reading => card.child(self.reading_panel(cx)),
-        };
-        card.child(self.status_row(cx))
-            .child(self.progress_row(cx))
-            .child(self.entry_row(cx))
-            // 宿主门：阅读层整层 occlude 之后，正文自己的点击必须还能把它叫出来。
-            .test_support()
-            .into_any_element()
-    }
-
-    /// 状态行：章内位置与进度各占一端的边。分页 / 双页时左边那半念「第几页 / 共几页」，
-    /// 连续滚动念「第几节 / 共几节」—— 读者认的是自己那一档的刻度。
-    fn status_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        // 与干净态那条页脚共用 `bands::readouts`：两处念的必须是同一份数。
-        let bands::Readouts {
-            position, percent, ..
-        } = bands::readouts(&self.reader, cx);
-        let progress_label = format!("{} {}", tr(cx, "reader.progress"), percent);
-        h_flex()
-            .w_full()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(position),
-            )
-            .child(div().text_sm().child(progress_label))
-            .into_any_element()
-    }
-
-    /// 进度条两端是上一章 / 下一章：手指在条上既能「跳到这一章的哪儿」，
-    /// 也能顺手跨到隔壁一章。
-    fn progress_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let reader = self.reader.read(cx);
-        // 箭头仍然只指「往哪边走」，翻书方向跟着整本走：从右往左读的书里，左边那颗
-        // 按下去是**下一章**（图标不用换 —— 它指左，而左就是阅读的前方），要换的是
-        // 动作、标签和可不可用三样。
-        let rtl = reader.progression_rtl();
-        let (left_delta, right_delta) = if rtl {
-            (1isize, -1isize)
-        } else {
-            (-1isize, 1isize)
-        };
-        let can_left = reader.can_advance(left_delta);
-        let can_right = reader.can_advance(right_delta);
-        // 两个闭包各自要一份句柄（`Entity` 不 `Copy`），所以左边右边各克隆一次。
-        let page_left = cx.entity().clone();
-        let page_right = cx.entity().clone();
-        let prev_label = tr(cx, "reader.prev_chapter");
-        let next_label = tr(cx, "reader.next_chapter");
-        let (left_label, right_label) = if left_delta > 0 {
-            (next_label.clone(), prev_label.clone())
-        } else {
-            (prev_label.clone(), next_label.clone())
-        };
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .child(
-                Button::new("prev-chapter")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ChevronLeft)
-                    .tooltip(left_label.to_string())
-                    .accessibility_label(left_label)
-                    .disabled(!can_left)
-                    .on_click(move |_, _, cx| {
-                        page_left.update(cx, |this, cx| this.advance(left_delta, cx))
-                    }),
-            )
-            .child(Slider::new(&self.progress).flex_1().min_w_0())
-            .child(
-                Button::new("next-chapter")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ChevronRight)
-                    .tooltip(right_label.to_string())
-                    .accessibility_label(right_label)
-                    .disabled(!can_right)
-                    .on_click(move |_, _, cx| {
-                        page_right.update(cx, |this, cx| this.advance(right_delta, cx))
-                    }),
-            )
-            .into_any_element()
-    }
-
-    /// 一排入口。目录是一块弹层（选中态读弹层自己的状态），设置是底栏卡片里的面板，夜间
-    /// 是当场生效的动作，双页是当场换摆法 —— 四件事不同，所以只有带档位的那三格吃 `selected`。
-    ///
-    /// 「排版」那一格并进了设置面板（亮度 / 字号 / 翻页方式都在那块里），入口因此从五格减到
-    /// 四格；完整那一屏（行距、段距、版心、字体）从面板右下角那颗进去，也与目录那屏的 ⋯
-    /// 同一条路。
-    fn entry_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let panel = self.chrome.panel();
-        let toc_open = self.toc.read(cx).is_open(cx);
-        let dark = cx.theme().mode == ThemeMode::Dark;
-        let spread = self.reader.read(cx).wanted_mode() != PageMode::Continuous;
-        let page_toc = cx.entity().clone();
-        let page_night = cx.entity().clone();
-        let page_spread = cx.entity().clone();
-        let page_settings = cx.entity().clone();
-        let night_label = tr(cx, if dark { "reader.day" } else { "reader.night" });
-        let spread_label = tr(cx, "reader.mode_spread");
-        h_flex()
-            .w_full()
-            .items_center()
-            .child(
-                Button::new("entry-toc")
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .justify_center()
-                    .selected(toc_open)
-                    .icon(IconName::ListTree)
-                    .label(tr(cx, "reader.toc").to_string())
-                    .on_click(move |_, _, cx| page_toc.update(cx, |this, cx| this.toggle_toc(cx))),
-            )
-            .child(
-                Button::new("entry-settings")
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .justify_center()
-                    .selected(panel == Panel::Reading)
-                    .icon(IconName::Settings)
-                    .label(tr(cx, "account.settings").to_string())
-                    .on_click(move |_, _, cx| {
-                        page_settings.update(cx, |this, cx| this.pick(Panel::Reading, cx))
-                    }),
-            )
-            .child(
-                // 这一格只给图标：一排几格入口再各带两个字，手机上每格会被挤到点不准。
-                // 双页按宽度退档，所以这格在窄屏上也仍然按得下去（按下去就是分页）。
-                Button::new("entry-spread")
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .justify_center()
-                    .selected(spread)
-                    .icon(IconName::Columns3)
-                    .tooltip(spread_label.clone().to_string())
-                    .accessibility_label(spread_label)
-                    .on_click(move |_, _, cx| {
-                        page_spread.update(cx, |this, cx| this.toggle_spread(cx))
-                    }),
-            )
-            .child(
-                Button::new("entry-night")
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .justify_center()
-                    .icon(if dark {
-                        IconName::SunMedium
-                    } else {
-                        IconName::Moon
-                    })
-                    .label(night_label.to_string())
-                    .on_click(move |_, _, cx| {
-                        page_night.update(cx, |this, cx| this.toggle_night(cx))
-                    }),
-            )
-            .into_any_element()
-    }
-
     /// 底栏那排入口里的面板档位切换（现在只剩「阅读设置」一块，目录已经换成弹层）。
     /// 整层保持露出 —— 切面板不该让顶栏闪一下。
-    fn pick(&mut self, panel: Panel, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn pick(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.chrome.select(panel);
         cx.notify();
     }
@@ -706,7 +467,7 @@ impl ReadingPage {
     /// 目录弹层：开 or 关。树跟着阅读位置重建、搜索框与「⋯」一并收掉、书头跟着重查，
     /// 那些都在 [`TocPanel::toggle`] 里；这一屏只多管一件事 —— 设置那块面板同时收掉，
     /// 弹层升起来之后卡片还压在它下面，等于两层东西说同一件事。
-    fn toggle_toc(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn toggle_toc(&mut self, cx: &mut Context<Self>) {
         if !self.toc.read(cx).is_open(cx) {
             // 设置那块面板同时收掉 —— 弹层升起来之后卡片还压在它下面，等于两层东西说同一件事。
             self.chrome.select(Panel::None);
@@ -716,7 +477,7 @@ impl ReadingPage {
     }
 
     /// 连续 ⇄ 双页。换档不动位置：进度是「第几个字」，两档之间搬的是同一句话。
-    fn toggle_spread(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn toggle_spread(&mut self, cx: &mut Context<Self>) {
         let wanted = self.reader.read(cx).wanted_mode();
         let next = wanted.next();
         self.reader
@@ -727,7 +488,7 @@ impl ReadingPage {
     ///
     /// 判据是**解析出来的**那一档（`cx.theme().mode`），不是配置里写的 `system`：
     /// 跟着系统走的读者点这一下要落到系统此刻的反面，而不是在 `system` 上原地打转。
-    fn toggle_night(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn toggle_night(&mut self, cx: &mut Context<Self>) {
         let dark = cx.theme().mode == ThemeMode::Dark;
         ConfigHolder::edit_appearance(cx, |appearance| {
             appearance.mode = if dark { Mode::Light } else { Mode::Dark }
@@ -747,14 +508,18 @@ impl ReadingPage {
     ///
     /// 压的是**这一层自己的**那条栈而不是架面那条：这一层盖在整窗上，架面的栈在它下面，
     /// 压那边的话这一屏会被自己盖住。
-    fn open_settings(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn open_settings(&mut self, cx: &mut Context<Self>) {
         let settings = cx.new(|_| CompactSettings::new());
         let _ = self.stack.update(cx, |state, cx| {
             state.push(settings, NavMotion::Animated, cx)
         });
     }
 
-    fn advance(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn advance(
+        &mut self,
+        delta: isize,
+        cx: &mut Context<Self>,
+    ) {
         self.reader
             .update(cx, |reader, cx| reader.advance_chapter(delta, cx));
     }
@@ -767,11 +532,7 @@ impl ReadingPage {
     /// 下一帧自然消失。
     ///
     /// 宽度给上限而不是铺满：一条注文常常只有一句，铺满整屏读起来像一屏正文。
-    fn footnote_popover(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn footnote_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let note = self.reader.read(cx).footnote()?;
         let text = note.text.clone();
         let anchor = note.anchor;
@@ -822,119 +583,18 @@ impl ReadingPage {
         )
     }
 
-    /// 阅读设置面板：亮度、字号两条滑条，最后一行左边是翻页方式、右边是「更多设置」。
-    /// 标签在左、当前值在右、滑条在下面 —— 手机上横着排三样会让滑条只剩一半宽，
-    /// 调一档要划好几下。
-    ///
-    /// 顺序照读者动它们的频度排：亮度一天里跟着光线走，字号换一本书动一次，翻页方式是
-    /// 钉下来就不再碰的那一格。
-    fn reading_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let prefs = ConfigHolder::reader(cx);
-        // 「跟随系统」念成一句话而不是「100%」：那一档应用确实什么都没接管。
-        let brightness_label = match ConfigHolder::appearance(cx).brightness {
-            None => tr(cx, "appearance.follow_system").to_string(),
-            Some(value) => format!("{}%", (value * 100.0).round()),
-        };
-        v_flex()
-            .w_full()
-            .gap_3()
-            .child(self.slider_row(
-                tr(cx, "reader.brightness").to_string(),
-                brightness_label,
-                &self.brightness,
-                cx,
-            ))
-            .child(self.slider_row(
-                tr(cx, "field.font_size").to_string(),
-                format!("{:.1}", prefs.font_size),
-                &self.font_size,
-                cx,
-            ))
-            .child(self.turn_row(cx))
-            .into_any_element()
-    }
-
-    /// 面板最后一行：左边那颗下拉选翻页怎么走，右边那颗把完整的设置屏压进来。
-    ///
-    /// 下拉**往上开**（`Anchor::BottomLeft`）：这一行长在底栏卡片里、贴在屏幕底，往下开的话
-    /// 那两块菜单有一半掉到屏幕外，读者只点得到上面那一块。
-    ///
-    /// 选项按**当前摆法**筛过（[`turn_animation::applies`]）：连续里只有「上下滚动」与「不走
-    /// 动画」讲得通，分页里「上下滚动」没有东西可滚。筛掉而不是灰着摆 —— 一排点不动的选项
-    /// 在手机上读起来像坏了。
-    ///
-    /// 按钮上念的是 `label_of`（与列表同源、对每一档都有答案），不是「在列表里找一找」：
-    /// 读者在连续里选了「上下滚动」再换成分页，那一档被筛掉了，但按钮不该因此退成一句
-    /// 「翻页动画」—— 他选的东西还在配置里，只是眼下这一屏用不上。
-    /// 右边那一格存在是因为底栏的「设置」不再压屏了：完整那一屏（行距、段距、版心、
-    /// 字体家族）得在这一屏上有个入口。
-    fn turn_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode = self.reader.read(cx).mode();
-        let turn = ConfigHolder::appearance(cx).page_turn;
-        let label_of = |turn| match turn {
-            PageTurn::Slide => tr(cx, "page_turn.slide"),
-            PageTurn::SlideUp => tr(cx, "page_turn.slide_up"),
-            PageTurn::Cover => tr(cx, "page_turn.cover"),
-            PageTurn::Curl => tr(cx, "page_turn.curl"),
-            PageTurn::Scroll => tr(cx, "page_turn.scroll"),
-            PageTurn::None => tr(cx, "page_turn.none"),
-        };
-        let items: Vec<(PageTurn, SharedString)> = PageTurn::ALL
-            .iter()
-            .copied()
-            .filter(|value| turn_animation::applies(*value, mode))
-            .map(|value| (value, label_of(value)))
-            .collect();
-        let current = label_of(turn);
-        let page_menu = cx.entity().clone();
-        let page_more = cx.entity().clone();
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap_3()
-            .child(
-                Button::new("reader-page-turn")
-                    .outline()
-                    .small()
-                    .label(current.to_string())
-                    .dropdown_caret(true)
-                    .accessibility_label(tr(cx, "field.page_turn").to_string())
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                        items.iter().fold(menu, |menu, (value, label)| {
-                            let checked = *value == turn;
-                            let value = *value;
-                            // 菜单闭包是 `Fn`，每一项的回调要各自一份句柄（`Entity` 不 `Copy`）。
-                            let page = page_menu.clone();
-                            menu.item(PopupMenuItem::new(label.clone()).checked(checked).on_click(
-                                move |_, _, cx| {
-                                    page.update(cx, |this, cx| this.set_page_turn(value, cx))
-                                },
-                            ))
-                        })
-                    }),
-            )
-            .child(div().flex_1())
-            .child(
-                Button::new("reader-more-settings")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Settings)
-                    .label(tr(cx, "reader.more_settings").to_string())
-                    .on_click(move |_, _, cx| {
-                        page_more.update(cx, |this, cx| this.open_settings(cx))
-                    }),
-            )
-            .into_any_element()
-    }
-
     /// 翻页方式写回 `appearance` 那一节：它不是排版失效键，换它不该让任何一章重排
     /// （见 `folio_core::infra::config::PageTurn` 为什么这一格不在 `Reader` 里）。
-    fn set_page_turn(&mut self, turn: PageTurn, cx: &mut Context<Self>) {
+    pub(in crate::ui::features::reader) fn set_page_turn(
+        &mut self,
+        turn: PageTurn,
+        cx: &mut Context<Self>,
+    ) {
         ConfigHolder::edit_appearance(cx, |appearance| appearance.page_turn = turn);
         cx.notify();
     }
 
-    fn slider_row(
+    pub(in crate::ui::features::reader) fn slider_row(
         &self,
         label: String,
         value: String,

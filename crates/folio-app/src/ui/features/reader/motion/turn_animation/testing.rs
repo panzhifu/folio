@@ -2,7 +2,6 @@
 
 use super::geometry::{Area, Crease, Cut, Poly, Shades, Tint};
 
-
 /// 一块竖版心：400 × 600，左上角在原点。
 pub(in crate::ui::features::reader) fn page() -> Area {
     Area::new(0.0, 0.0, 400.0, 600.0)
@@ -15,7 +14,6 @@ pub(in crate::ui::features::reader) fn count(poly: &Poly) -> usize {
     poly.each(|_, _| n += 1);
     n
 }
-
 
 /// 起步与走完这两端各是什么，全靠这几个数说话。
 pub(in crate::ui::features::reader) const W: f32 = 400.0;
@@ -42,7 +40,11 @@ pub(in crate::ui::features::reader) fn complementary(top: Cut, bottom: Cut, area
                 top.keeps(x, y),
                 bottom.keeps(x, y),
                 "({x:.0}, {y:.0}) 处两张纸{}：必须恰好一张画",
-                if top.keeps(x, y) { "都画" } else { "都不画" }
+                if top.keeps(x, y) {
+                    "都画"
+                } else {
+                    "都不画"
+                }
             );
         }
     }

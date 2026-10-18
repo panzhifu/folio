@@ -9,5 +9,5 @@
 mod model;
 mod view;
 
-pub use view::{SettingsPage, SettingsView};
 pub(crate) use view::CompactSettings;
+pub use view::{SettingsPage, SettingsView};

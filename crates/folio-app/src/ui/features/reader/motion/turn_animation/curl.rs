@@ -36,7 +36,11 @@ const OUTER_TAIL: f32 = 0.55;
 /// 走了 `progress` 那一刻的折线。往回翻是同一件事沿页的中线镜像。
 ///
 /// `None` = 这块版心还没量出面积，或角与它的原位置重合到折线无从定义。
-pub(in crate::ui::features::reader) fn crease_of(progress: f32, forward: bool, area: Area) -> Option<Crease> {
+pub(in crate::ui::features::reader) fn crease_of(
+    progress: f32,
+    forward: bool,
+    area: Area,
+) -> Option<Crease> {
     if area.width() <= 0.0 || area.height() <= 0.0 {
         return None;
     }
@@ -64,7 +68,11 @@ pub(in crate::ui::features::reader) fn crease_of(progress: f32, forward: bool, a
 }
 
 /// 折页那一档这一帧要盖上去的那几块。
-pub(in crate::ui::features::reader) fn fold_shades(progress: f32, forward: bool, area: Area) -> Shades {
+pub(in crate::ui::features::reader) fn fold_shades(
+    progress: f32,
+    forward: bool,
+    area: Area,
+) -> Shades {
     let mut out = Shades::new();
     let Some(crease) = crease_of(progress, forward, area) else {
         return out;
@@ -201,19 +209,22 @@ impl PageTurnStyle for Curl {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     //! 搬自摆位层那一份：一挡的门跟着那一档走，共用的尺在 `testing.rs`。
 
     use crate::ui::features::reader::motion::turn_animation::PageTurnStyle as _;
-    use crate::ui::features::reader::motion::turn_animation::curl::{CORNER_TILT};
-    use crate::ui::features::reader::motion::turn_animation::curl::{Curl};
-    use crate::ui::features::reader::motion::turn_animation::curl::{SHADOW_INK};
-    use crate::ui::features::reader::motion::turn_animation::curl::{SHADOW_WIDE};
-    use crate::ui::features::reader::motion::turn_animation::curl::{crease_of};
-    use crate::ui::features::reader::motion::turn_animation::geometry::{Poly, Tint, POLY_MAX, SHADES_MAX};
-    use crate::ui::features::reader::motion::turn_animation::testing::{page, count, paper_of, complementary, past_span, W, H};
+    use crate::ui::features::reader::motion::turn_animation::curl::CORNER_TILT;
+    use crate::ui::features::reader::motion::turn_animation::curl::Curl;
+    use crate::ui::features::reader::motion::turn_animation::curl::SHADOW_INK;
+    use crate::ui::features::reader::motion::turn_animation::curl::SHADOW_WIDE;
+    use crate::ui::features::reader::motion::turn_animation::curl::crease_of;
+    use crate::ui::features::reader::motion::turn_animation::geometry::{
+        POLY_MAX, Poly, SHADES_MAX, Tint,
+    };
+    use crate::ui::features::reader::motion::turn_animation::testing::{
+        H, W, complementary, count, page, paper_of, past_span,
+    };
 
     /// 起步：折面已经在了（角被折起一小块），但**一道阴影都还没有** —— 折痕刚起，
     /// 带宽按走了多少算，此刻就是 0。落位：整页折走、折面镜像到页外去了 ⇒ 形状全空。
@@ -387,12 +398,18 @@ mod tests {
                 (high - wanted).abs() < 1e-3,
                 "t = {t} 时投影该正好走到 {wanted} 宽，实得外缘 {high}"
             );
-            assert!(low.abs() < 1e-3, "t = {t} 时投影该从折线本身起算，实得内缘 {low}");
+            assert!(
+                low.abs() < 1e-3,
+                "t = {t} 时投影该从折线本身起算，实得内缘 {low}"
+            );
             assert!(
                 (cast.ink - SHADOW_INK * (1.0 - t)).abs() < 1e-6,
                 "t = {t} 时墨色不线性"
             );
-            assert!(cast.shape.area().abs() > 0.5, "t = {t} 时投影不该是个零面积的壳");
+            assert!(
+                cast.shape.area().abs() > 0.5,
+                "t = {t} 时投影不该是个零面积的壳"
+            );
             assert!(wanted > previous_wide, "带宽只能越翻越宽");
             assert!(cast.ink <= previous_ink, "墨色只能越翻越淡");
             previous_wide = wanted;
@@ -424,14 +441,15 @@ mod tests {
                 high <= previous_high + 1e-3,
                 "折谷那三段只能一段比一段更往外，实得 high = {high}，上一段到 {previous_high}"
             );
-            assert!(
-                low < high,
-                "这一段是倒着裁的：low = {low}, high = {high}"
-            );
+            assert!(low < high, "这一段是倒着裁的：low = {low}, high = {high}");
             previous_high = low;
         }
         // 亮芯只有一条窄带的量级，压过了就成一条白棍 —— 上一版 `CURL_EDGE` 就是这个毛病。
-        assert!(valley[1].ink <= 0.12, "亮芯不该盖过折谷本身，实得 {}", valley[1].ink);
+        assert!(
+            valley[1].ink <= 0.12,
+            "亮芯不该盖过折谷本身，实得 {}",
+            valley[1].ink
+        );
     }
     /// 裁剪与镜像这两步是折面几何的全部家当，直接钉住定义：**被折走的那个角落在它被拖
     /// 到的那一点上**。这一条不是近似 —— 折线既然是对称轴，镜像就必须把角送到那儿；
@@ -482,10 +500,7 @@ mod tests {
             POLY_MAX
         );
         assert!(worst >= 3, "一趟都没裁出多边形说明折面根本没生成");
-        assert_eq!(
-            most, SHADES_MAX,
-            "折页那一档最满应该是满配额，实得 {most}"
-        );
+        assert_eq!(most, SHADES_MAX, "折页那一档最满应该是满配额，实得 {most}");
     }
     /// 折谷那三段与投影各占一边：投影整片在**已经空出来**那一侧，折谷三段整片在平摊侧。
     /// 这条是给绘制层的层级承诺 —— 两边要是重叠，被折走的那半页上就会同时出现纸和它的影子。
@@ -496,13 +511,13 @@ mod tests {
         let crease = crease_of(t, true, page()).expect("量得出折线");
         let items = shades.items();
         let (low, high) = past_span(crease, &items[1].shape);
-        assert!(low > -1e-3 && high > 1.0, "投影该整片在空侧，实得 [{low}, {high}]");
+        assert!(
+            low > -1e-3 && high > 1.0,
+            "投影该整片在空侧，实得 [{low}, {high}]"
+        );
         for shade in &items[2..5] {
             let (_, high) = past_span(crease, &shade.shape);
-            assert!(
-                high <= 1e-3,
-                "折谷那道越过折线跑到空侧去了：high = {high}"
-            );
+            assert!(high <= 1e-3, "折谷那道越过折线跑到空侧去了：high = {high}");
         }
     }
 }
