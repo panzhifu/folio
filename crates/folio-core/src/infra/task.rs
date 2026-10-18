@@ -461,7 +461,7 @@ mod tests {
 
     /// 在预算内收一条作业的事件流，预算用尽就把手里收到的交出去。有界收干是为了让
     /// 「永远等不到结果」读成一条红的断言，而不是一场要人来掐的挂死。
-    fn drain_within<R>(mut events: Receiver<TaskEvent<R>>, budget: Duration) -> Vec<TaskEvent<R>> {
+    fn drain_within<R>(events: Receiver<TaskEvent<R>>, budget: Duration) -> Vec<TaskEvent<R>> {
         let deadline = std::time::Instant::now() + budget;
         let mut saw = Vec::new();
         loop {

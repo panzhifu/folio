@@ -43,11 +43,15 @@ pub fn book_count(cx: &App, count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! 界面里写下的每一个文案键，都必须真的能在每一份语言表里解出来。
+    //! 界面里写下的每一个文案键，都必须真的存在于每一份语言表里。
     //!
-    //! 这条测试存在的理由是一种**编译与测试全绿**的坏状态：`rust_i18n` 认不出的键不会报错，
-    //! 而是把键本身原样画到界面上（屏幕上出现 `account.theme`）。而键是字符串，写错、漏加、
-    //! 或者改了文案表却没重编，都只有跑到那一屏才看得见。
+    //! 这条测试存在的理由是一种**编译与测试全绿**的坏状态：`rust_i18n` 认不出一个键时不报错。
+    //! 这里有两种坏法，症状不一样：
+    //! - 所有语言都没有这个键（写错、改了文案表却没重编）→ 界面上原样画出键名；
+    //! - 只有某一门没有 → 按 `fallback = "en"` 回落成英文那一句，屏幕上半英半韩。
+    //!
+    //! 语言从三份加到九份之后，第二种成了常态，而它**用返回值是查不出来的**（回落也算解开了），
+    //! 所以判据是「这门语言自己那份表里有没有这一行」，见 [`keys_in_language`]。
     //!
     //! 做法是把视图源码里以 `tr`/`tf` 加一个字面量键的那些调用全扫出来逐个问一遍。
     //! 这一行不能再举出带引号的实际形状：本文件此刻也在被扫的 `src/` 里，注释里出现
@@ -117,8 +121,10 @@ mod tests {
     fn every_literal_key_resolves_in_every_language() {
         let keys = keys_in_source();
         assert!(!keys.is_empty(), "一个键都没扫到，测试本身坏了");
-        let tables: Vec<(&str, BTreeSet<String>)> =
-            Locale::ALL.iter().map(|l| (l.code(), keys_in_language(l.code()))).collect();
+        let tables: Vec<(&str, BTreeSet<String>)> = Locale::ALL
+            .iter()
+            .map(|l| (l.code(), keys_in_language(l.code())))
+            .collect();
         let mut broken = String::new();
         for key in &keys {
             for (tag, table) in &tables {
