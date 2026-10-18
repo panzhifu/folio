@@ -317,8 +317,9 @@ pub(in crate::ui::features::reader) struct Shades {
     len: usize,
 }
 
-/// 最多同时挂几块：折页那一档是五块（纸面 + 投影 + 折谷三段），覆盖两到三块。
-pub(in crate::ui::features::reader) const SHADES_MAX: usize = 5;
+/// 最多同时挂几块：折页那一档最满（纸背 + 卷筒纸面 + 十几条受光带 + 高光 + 投影），
+/// 覆盖两到三块。留几格余量，加一层不必动这个数。
+pub(in crate::ui::features::reader) const SHADES_MAX: usize = 20;
 
 impl Shades {
     pub(in crate::ui::features::reader) fn new() -> Self {

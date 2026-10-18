@@ -80,6 +80,8 @@ struct TurnFrame {
     /// 回来把整条链挪了），那一趟的两头要**一起**挪，否则补间落在补偿前的坐标上，
     /// 读者看见的是内容突然跳一屏。
     scroll: Option<(f32, f32)>,
+    /// 读者这一笔的起手点（版心内归一化 0..1）。折页那一档按它决定从哪个角起折。
+    finger: Option<(f32, f32)>,
     /// `true` = 往后走（下一页 / 往下滚）。
     forward: bool,
 }
@@ -142,6 +144,7 @@ impl ReaderSession {
             leaving: turn.leaving,
             arriving: turn.arriving,
             scroll: turn.scroll,
+            finger: turn.finger,
             forward: turn.forward,
         })
     }
@@ -669,9 +672,13 @@ impl Render for ReaderSession {
                             f32::from(viewport_size.width),
                             self.header_reserve + viewport_height,
                         );
-                        shades = style.shades(frame.progress, frame.forward, area);
+                        // 手指锚点：归一化 0..1 换成这一屏的元素坐标（折页按它挑从哪个角起折）。
+                        let finger = frame.finger.map(|(u, v)| {
+                            (area.left + u * area.width(), area.top + v * area.height())
+                        });
+                        shades = style.shades_at(frame.progress, frame.forward, area, finger);
                         let [incoming, outgoing] =
-                            style.sheets(frame.progress, frame.forward, area);
+                            style.sheets_at(frame.progress, frame.forward, area, finger);
                         let leaving_ref = frame.leaving.unwrap_or(PageRef {
                             chapter: current,
                             page: self.page,

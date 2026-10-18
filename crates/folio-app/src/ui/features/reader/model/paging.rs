@@ -383,9 +383,23 @@ impl ReaderSession {
         // 滚轮不是手势：增量按「行」给。它一到就把上一笔的惯性闸门放下 —— 触屏设备上
         // 拖完一次之后，第一格滚轮不该被当成惯性吃掉。
         let wheel = matches!(event.delta, ScrollDelta::Lines(_));
+        // 手指按在版心的哪个位置（归一化 0..1）。折页那一档按它挑**从哪个角起折**：
+        // 落在下半屏就从下面卷起来。版心还没量出来时给 `None`，那一档退回上缘。
+        let at = {
+            let bounds = self.content_bounds.get();
+            let width = f32::from(bounds.size.width).max(1.0);
+            let height = f32::from(bounds.size.height).max(1.0);
+            if width <= 1.0 || height <= 1.0 {
+                None
+            } else {
+                let x = f32::from(event.position.x) - f32::from(bounds.origin.x);
+                let y = f32::from(event.position.y) - f32::from(bounds.origin.y);
+                Some(((x / width).clamp(0.0, 1.0), (y / height).clamp(0.0, 1.0)))
+            }
+        };
         // 手势层：翻页那一趟（跟手 / 松手 / 惯性尾巴 / 轴不对）全在这里结账。
         // `Ignore` 才是「这一笔不归我」—— 连续滚动里手指带着内容走的那一段。
-        if self.swipe_scroll(event.touch_phase, dx, dy, wheel, cx) != SwipeStep::Ignore {
+        if self.swipe_scroll(event.touch_phase, dx, dy, wheel, at, cx) != SwipeStep::Ignore {
             crate::ui::features::reader::model::perf::scroll_end(
                 __gap_us,
                 (__start.elapsed().as_micros() as u64).max(1),

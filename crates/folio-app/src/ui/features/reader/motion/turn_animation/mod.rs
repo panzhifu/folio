@@ -56,6 +56,25 @@ pub(in crate::ui::features::reader) trait PageTurnStyle:
     /// 它自己（补间画出来的位置），在分页里没有东西可滚。
     fn animates(&self, mode: PageMode) -> bool;
 
+    /// 同上，但带上读者这一笔的起手点（**版心内的归一化坐标**）。
+    ///
+    /// 只有折页那一档用得上：别的档纸是整张平移/覆盖的，起点在哪儿都不改变几何。默认实现
+    /// 直接转给 [`Self::sheets`]，所以那几档一个字都不用改。
+    fn sheets_at(
+        &self,
+        t: f32,
+        forward: bool,
+        area: Area,
+        _finger: Option<(f32, f32)>,
+    ) -> [Sheet; 2] {
+        self.sheets(t, forward, area)
+    }
+
+    /// [`Self::shades`] 的带锚点版本，同上。
+    fn shades_at(&self, t: f32, forward: bool, area: Area, _finger: Option<(f32, f32)>) -> Shades {
+        self.shades(t, forward, area)
+    }
+
     /// 量距离、摆位移沿哪根轴。
     fn axis(&self) -> Axis;
 
@@ -270,9 +289,17 @@ mod tests {
             // 覆盖的位移档不看进度有没有起步：前缘一上屏就该带影子。
             assert_eq!(Cover.shades(t, true, page()).items().len(), 2);
         }
-        // 折页那一条从一块（起步）走到五块（折起来之后），落位归零，全在上面那条测试里。
+        // 折页那一条从两块（起步：只有纸背与它的暗部）走到七块（卷筒 + 高光 + 投影），
+        // 落位归零 —— 各档自己的读法在 `curl.rs` 的门里。
         assert_eq!(Curl.shades(0.0, true, page()).items().len(), 1);
-        assert_eq!(Curl.shades(0.5, true, page()).items().len(), 5);
+        // 纸背 + 卷筒纸面 + 若干条受光带 + 高光 + 投影：条数由受光曲线决定（卷顶几条
+        // 墨色几乎为零不画），所以只钉「在配额之内、而且确实是一摞带子」。
+        let folded = Curl.shades(0.5, true, page()).items().len();
+        assert!(
+            (8..=crate::ui::features::reader::motion::turn_animation::geometry::SHADES_MAX)
+                .contains(&folded),
+            "折到一半的形状数该是一摞带子，实得 {folded}"
+        );
     }
     /// 版心还没量出来（宽或高为 0）时不该起任何几何：既不能 panic，也不能画出一张
     /// 凭空出现的纸或一条没人看得见的投影。这一格在真机上是**会发生的** —— 首帧布局前

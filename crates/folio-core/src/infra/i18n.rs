@@ -145,8 +145,14 @@ impl Locale {
     pub fn code(self) -> &'static str {
         match self {
             Locale::ZhHans => "zh-CN",
+            Locale::ZhHant => "zh-TW",
             Locale::En => "en",
             Locale::Ja => "ja",
+            Locale::Ko => "ko",
+            Locale::Fr => "fr",
+            Locale::De => "de",
+            Locale::Es => "es",
+            Locale::Ru => "ru",
         }
     }
 
@@ -155,8 +161,14 @@ impl Locale {
     pub fn endonym(self) -> &'static str {
         match self {
             Locale::ZhHans => "简体中文",
+            Locale::ZhHant => "繁體中文",
             Locale::En => "English",
             Locale::Ja => "日本語",
+            Locale::Ko => "한국어",
+            Locale::Fr => "Français",
+            Locale::De => "Deutsch",
+            Locale::Es => "Español",
+            Locale::Ru => "Русский",
         }
     }
 
@@ -191,10 +203,18 @@ impl Locale {
         match self {
             Locale::ZhHans | Locale::ZhHant | Locale::Ja | Locale::Ko => Plural::Other,
             Locale::En | Locale::De | Locale::Es => {
-                if n == 1 { Plural::One } else { Plural::Other }
+                if n == 1 {
+                    Plural::One
+                } else {
+                    Plural::Other
+                }
             }
             Locale::Fr => {
-                if n == 0 || n == 1 { Plural::One } else { Plural::Other }
+                if n == 0 || n == 1 {
+                    Plural::One
+                } else {
+                    Plural::Other
+                }
             }
             // 三条按 CLDR 的顺序判：先 one，再 few，再 many，剩下的 other。
             // 落不到前三条的俄语 `n` 只有「十分位是 1 且 11~14 之外」这一族的补集，
@@ -207,12 +227,6 @@ impl Locale {
             }
             Locale::Ru => Plural::Other,
         }
-    }
-
-    /// 该语言里 `n` 是否用「单数」那一条文案。俄语的 `Few` / `Many` 不在这里 ——
-    /// 要选到那两条得用 [`Locale::plural`]。
-    pub fn plural_one(self, n: usize) -> bool {
-        self.plural(n) == Plural::One
     }
 
     /// 把当前选择推给 `rust_i18n` 的全局 locale（框架组件读同一个值）。
@@ -283,22 +297,22 @@ mod tests {
     //! 文案表的形状测试。价值在于**结构性**：不管措辞好不好，
     //! 只管有没有漏翻、占位符对不对得上 —— 正是人眼最容易漏过去的两类错。
     //!
-    //! 文案按语言分成 `locales/{en,zh-CN,ja}.toml` 三份之后，漏翻不再是「并排一张表里空着
-    //! 的那一格」，而是另一个文件里少了一行 —— 三份各自看都像是完整的。所以这两件事只能由
-    //! 这里来保证，别指望读文件的人发现。
+    //! 文案按语言分成 `locales/<语言标签>.toml`，一门语言一份。漏翻在这里不再是「并排一张表里
+    //! 空着的那一格」，而是另一个文件里少了一行 —— 每一份各自看都像是完整的。所以这两件事只能
+    //! 由这里来保证，别指望读文件的人发现。
     //!
     //! 换成 rust-i18n 之后 key 是字符串，写错只能运行时发现（界面上会原样显示
-    //! `page.foo`），所以这里把「三种语言的 key 集合一致」变成一条会失败的测试，
+    //! `page.foo`），所以这里把「各门语言的 key 集合一致」变成一条会失败的测试，
     //! 顶替过去 `Msg` 枚举提供的编译期穷举。
     //!
     //! 除了 `apply_and_current_agree`，其余测试都走 `t_in`（显式语言）：全局 locale 只有一份，
     //! 而 cargo 会把同一文件里的测试跑到不同线程上，改全局的断言会互相踩。
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
     use std::fmt::Display;
 
     use crate::_rust_i18n_backend;
-    use crate::infra::i18n::{self, Locale};
+    use crate::infra::i18n::{self, Locale, Plural};
 
     /// 某个语言下全部 (key, 文案)。少一个语言就报错，而不是悄悄跳过。
     fn messages(locale: &str) -> BTreeSet<(String, String)> {
@@ -441,8 +455,62 @@ mod tests {
         assert_eq!(Locale::parse("zh-Hans-CN"), Some(Locale::ZhHans));
         assert_eq!(Locale::parse("en"), Some(Locale::En));
         assert_eq!(Locale::parse("  JA_jp "), Some(Locale::Ja));
-        assert_eq!(Locale::parse("fr"), None);
+        assert_eq!(Locale::parse("ko-KR"), Some(Locale::Ko));
+        assert_eq!(Locale::parse("ru_RU"), Some(Locale::Ru));
+        assert_eq!(Locale::parse("de-AT"), Some(Locale::De));
         assert_eq!(Locale::parse(""), None);
+        // 还认不出来的写法必须是真不存在的语言，不能是还没接上的那一门。
+        assert_eq!(Locale::parse("th"), None);
+        assert_eq!(Locale::parse("pt-BR"), None);
+    }
+
+    /// `zh-` 打头的标签里，繁体那几个子签不能被折进简体 —— 折进去等于把看得懂繁体的人
+    /// 无声降级成一份他要不要都行的文案，而且一句反馈都没有。
+    #[test]
+    fn traditional_chinese_is_not_folded_into_simplified() {
+        for input in [
+            "zh-TW",
+            "zh-tw",
+            "zh_TW",
+            "zh-Hant",
+            "zh-Hant-HK",
+            "zh-Hant-MO",
+            "zh-HK",
+        ] {
+            assert_eq!(
+                Locale::parse(input),
+                Some(Locale::ZhHant),
+                "{input:?} 应当认成繁体中文"
+            );
+            assert_eq!(
+                Locale::from_label(input),
+                Some(Locale::ZhHant),
+                "{input:?} 走宽松路径也要认成繁体中文"
+            );
+        }
+        // 简体那一侧的写法照旧，裸 `zh` 也照旧落简体：这条是既有的默认。
+        assert_eq!(Locale::parse("zh"), Some(Locale::ZhHans));
+        assert_eq!(Locale::parse("zh-CN"), Some(Locale::ZhHans));
+        assert_eq!(Locale::parse("zh-Hans"), Some(Locale::ZhHans));
+        assert_eq!(Locale::parse("zh-SG"), Some(Locale::ZhHans));
+    }
+
+    /// 两个 `Locale` 共用一个标签时，`messages_for_locale` 会给同一份文案，
+    /// 上面那条 key 集合一致的测试就悄悄绿了 —— 下拉框里则出现两个看不出差别的选项。
+    #[test]
+    fn every_language_has_its_own_label_and_name() {
+        let codes: HashSet<&str> = Locale::ALL.iter().map(|locale| locale.code()).collect();
+        assert_eq!(
+            codes.len(),
+            Locale::ALL.len(),
+            "语言标签不能撞车：{codes:?}"
+        );
+        let names: HashSet<&str> = Locale::ALL.iter().map(|locale| locale.endonym()).collect();
+        assert_eq!(
+            names.len(),
+            Locale::ALL.len(),
+            "语言的本族名不能撞车：{names:?}"
+        );
     }
 
     #[test]
@@ -469,10 +537,25 @@ mod tests {
             ("zh_CN", Locale::ZhHans),
             ("简体中文", Locale::ZhHans),
             ("ZhHans", Locale::ZhHans),
+            ("zh-TW", Locale::ZhHant),
+            ("繁體中文", Locale::ZhHant),
+            ("ZhHant", Locale::ZhHant),
             ("ja", Locale::Ja),
             ("JA_jp", Locale::Ja),
             ("日本語", Locale::Ja),
             ("Ja", Locale::Ja),
+            ("ko", Locale::Ko),
+            ("ko_KR", Locale::Ko),
+            ("한국어", Locale::Ko),
+            ("fr-FR", Locale::Fr),
+            ("Français", Locale::Fr),
+            ("de", Locale::De),
+            ("Deutsch", Locale::De),
+            ("es-MX", Locale::Es),
+            ("Español", Locale::Es),
+            ("ru", Locale::Ru),
+            ("RU", Locale::Ru),
+            ("Русский", Locale::Ru),
         ] {
             assert_eq!(
                 Locale::from_label(input),
@@ -480,12 +563,12 @@ mod tests {
                 "{input:?} 应该认成 {want:?}"
             );
         }
-        assert_eq!(Locale::from_label("fr"), None);
+        assert_eq!(Locale::from_label("th"), None);
         assert_eq!(Locale::from_label(""), None);
         assert_eq!(Locale::from_label("   "), None);
     }
 
-    /// 存出去的必须是 `code()`：与界面标签、与 `locales/` 那三份的文件名同一形态。
+    /// 存出去的必须是 `code()`：与界面标签、与 `locales/` 那个文件名同一形态。
     #[test]
     fn locale_serializes_as_its_bcp47_code() {
         for locale in Locale::ALL.iter().copied() {
@@ -513,32 +596,119 @@ mod tests {
         assert!(serde_json::from_str::<Locale>("3").is_err());
     }
 
+    /// 报错里那份可用清单必须由 `ALL` 现拼：语言加过去了而提示没跟上，等于把可用值说错。
     #[test]
-    fn only_english_distinguishes_singular_from_plural() {
-        assert!(Locale::En.plural_one(1));
-        assert!(!Locale::En.plural_one(2));
-        assert!(!Locale::ZhHans.plural_one(1));
-        assert!(!Locale::Ja.plural_one(1));
-        // 库不做复数，所以「选单数那条」之后还得自己填对：这条测试盯着那一步。
-        assert_eq!(
-            at(Locale::En, "reader.book_count_one", &[("count", &1usize)]),
-            "1 book",
-            "单数那条要真的写成单数"
+    fn the_error_names_every_language_on_offer() {
+        let listing = Locale::available_labels();
+        for locale in Locale::ALL {
+            assert!(
+                listing.split(" / ").any(|part| part == locale.code()),
+                "{} 没有出现在可用清单里：{listing}",
+                locale.code()
+            );
+        }
+        let err = serde_json::from_str::<Locale>(r#""klingon""#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(Locale::Ru.code()) && err.contains(Locale::ZhHant.code()),
+            "报错要把最新加上的语言也说出去，实际：{err}"
         );
-        assert_eq!(
-            at(Locale::En, "reader.book_count_other", &[("count", &2usize)]),
-            "2 books"
+    }
+
+    #[test]
+    fn plural_arms_follow_the_language_not_a_one_or_other_guess() {
+        // 中日韩没有数的形态变化。
+        for locale in [Locale::ZhHans, Locale::ZhHant, Locale::Ja, Locale::Ko] {
+            for n in [0usize, 1, 2, 5, 21] {
+                assert_eq!(locale.plural(n), Plural::Other, "{locale:?} 的 {n}");
+            }
+        }
+        // 英德西只看 1。
+        for locale in [Locale::En, Locale::De, Locale::Es] {
+            assert_eq!(locale.plural(1), Plural::One);
+            assert_eq!(locale.plural(0), Plural::Other);
+            assert_eq!(locale.plural(2), Plural::Other);
+        }
+        // 法语按 CLDR 把 0 也算单数：0 livre，但 2 livres。
+        assert_eq!(Locale::Fr.plural(0), Plural::One);
+        assert_eq!(Locale::Fr.plural(1), Plural::One);
+        assert_eq!(Locale::Fr.plural(2), Plural::Other);
+        // 俄语的三类：个位 1（除 11）→ one，个位 2~4（除 12~14）→ few，其余 → many。
+        for n in [1usize, 21, 101] {
+            assert_eq!(Locale::Ru.plural(n), Plural::One, "{n} 应当配 книга");
+        }
+        for n in [2usize, 3, 4, 22, 102, 122] {
+            assert_eq!(Locale::Ru.plural(n), Plural::Few, "{n} 应当配 книги");
+        }
+        // 12~14 这十几个是个位看着像 few、整条却归 many 的例子。
+        for n in [0usize, 5, 11, 12, 14, 20, 25, 105, 112] {
+            assert_eq!(Locale::Ru.plural(n), Plural::Many, "{n} 应当配 книг");
+        }
+    }
+
+    /// 库不做复数，所以「四臂选对之后文案还得真的写成那样」这一步仍然要人负责。
+    #[test]
+    fn the_plural_arms_read_right_in_the_languages_that_have_them() {
+        let count = |locale: Locale, n: usize| {
+            let key = format!("reader.book_count_{}", locale.plural(n).key_suffix());
+            at(locale, &key, &[("count", &n)])
+        };
+        assert_eq!(count(Locale::En, 1), "1 book");
+        assert_eq!(count(Locale::En, 2), "2 books");
+        assert_eq!(count(Locale::Fr, 0), "0 livre", "法语里 0 走单数");
+        assert_eq!(count(Locale::Fr, 2), "2 livres");
+        assert_eq!(count(Locale::De, 1), "1 Buch");
+        assert_eq!(count(Locale::Es, 2), "2 libros");
+        assert_eq!(count(Locale::Ru, 1), "1 книга");
+        assert_eq!(count(Locale::Ru, 3), "3 книги");
+        assert_eq!(count(Locale::Ru, 5), "5 книг");
+        assert_eq!(count(Locale::Ru, 21), "21 книга");
+        assert_eq!(count(Locale::Ru, 11), "11 книг");
+        assert_eq!(count(Locale::Ja, 2), "2 冊");
+        assert_eq!(count(Locale::Ko, 2), "2권");
+        assert_eq!(count(Locale::ZhHant, 2), "2 本書");
+    }
+
+    /// 每一条带复数后缀的键，每一份语言表都必须四条臂齐全：缺一条，选到那一臂时
+    /// 界面就显示键名本身。
+    #[test]
+    fn every_plural_key_has_all_four_arms_in_every_language() {
+        const ARMS: [Plural; 4] = [Plural::One, Plural::Few, Plural::Many, Plural::Other];
+        let base = messages(Locale::ZhHans.code());
+        let prefixed: BTreeSet<String> = base
+            .iter()
+            .filter(|(key, _)| key.ends_with("_one"))
+            .map(|(key, _)| key[..key.len() - "_one".len()].to_string())
+            .collect();
+        assert!(
+            !prefixed.is_empty(),
+            "扫不到任何复数键，说明这条测试的形状已经和文案表脱钩了"
         );
-        assert_eq!(
-            at(Locale::Ja, "reader.book_count_other", &[("count", &2usize)]),
-            "2 冊"
-        );
+        for stem in &prefixed {
+            for locale in Locale::ALL {
+                for arm in ARMS {
+                    let key = format!("{stem}_{}", arm.key_suffix());
+                    assert!(
+                        messages(locale.code()).iter().any(|(k, _)| *k == key),
+                        "{} 缺 {key}",
+                        locale.code()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
     fn language_names_are_written_in_their_own_language() {
         assert_eq!(Locale::ZhHans.endonym(), "简体中文");
+        assert_eq!(Locale::ZhHant.endonym(), "繁體中文");
         assert_eq!(Locale::En.endonym(), "English");
         assert_eq!(Locale::Ja.endonym(), "日本語");
+        assert_eq!(Locale::Ko.endonym(), "한국어");
+        assert_eq!(Locale::Fr.endonym(), "Français");
+        assert_eq!(Locale::De.endonym(), "Deutsch");
+        assert_eq!(Locale::Es.endonym(), "Español");
+        assert_eq!(Locale::Ru.endonym(), "Русский");
     }
 }

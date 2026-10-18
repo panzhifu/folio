@@ -1,6 +1,6 @@
 //! 视图侧取文案的三个函数。
 //!
-//! 文案表在 `folio-core` 的 `locales/{en,zh-CN,ja}.toml`（一门语言一份），由 `rust-i18n` 在编译期嵌进来；
+//! 文案表在 `folio-core` 的 `locales/<语言标签>.toml`（一门语言一份），由 `rust-i18n` 在编译期嵌进来；
 //! 这里只多做一件事：**把当前语言从配置实体里读出来**再交给库。
 //!
 //! 为什么不用 `rust_i18n` 的全局 locale 当唯一来源：那个值是进程级的，
@@ -30,21 +30,20 @@ pub fn tf(cx: &App, key: &str, args: &[(&str, &dyn Display)]) -> String {
     i18n::t_in(locale(cx), key, args)
 }
 
-/// 「N 本书」这类要分单复数的：选哪条文案由语言的规则决定，
-/// 而不是让调用处去记「英文有复数、中文没有」。
+/// 「N 本书」这类要分单复数的：选哪一条文案由这门语言的复数规则决定，
+/// 而不是让调用处去记「英文有单复数、俄语有三种、中文没有」。
+///
+/// 后缀就是 `Plural` 的四臂，每条键在每一份 `locales/*.toml` 里都摆着
+/// （这一门用不到的臂照抄 `_other`），所以拼出来的键永远解得开。
 pub fn book_count(cx: &App, count: usize) -> String {
     let locale = locale(cx);
-    let key = if locale.plural_one(count) {
-        "reader.book_count_one"
-    } else {
-        "reader.book_count_other"
-    };
-    i18n::t_in(locale, key, &[("count", &count)])
+    let key = format!("reader.book_count_{}", locale.plural(count).key_suffix());
+    i18n::t_in(locale, &key, &[("count", &count)])
 }
 
 #[cfg(test)]
 mod tests {
-    //! 界面里写下的每一个文案键，都必须真的能在三种语言里解出来。
+    //! 界面里写下的每一个文案键，都必须真的能在每一份语言表里解出来。
     //!
     //! 这条测试存在的理由是一种**编译与测试全绿**的坏状态：`rust_i18n` 认不出的键不会报错，
     //! 而是把键本身原样画到界面上（屏幕上出现 `account.theme`）。而键是字符串，写错、漏加、
@@ -60,7 +59,7 @@ mod tests {
     use std::fmt::Write as _;
     use std::path::{Path, PathBuf};
 
-    use folio_core::infra::i18n::{Locale, t_in};
+    use folio_core::infra::i18n::Locale;
 
     /// 收集 `src/` 下所有 `.rs` 里以字面量出现的文案键。
     fn keys_in_source() -> BTreeSet<String> {
@@ -99,23 +98,38 @@ mod tests {
         }
     }
 
-    /// 每个键在每种语言里都解得出来 —— 解不出来时 `t_in` 回吐键本身。
+    /// 某一门语言**自己那份表**里的全部键。
+    ///
+    /// 判存在不能用 `t_in` 的返回值：`i18n!` 带 `fallback = "en"`，一门语言里缺一条时它
+    /// 回吐的是英文那一句 —— 看着像解开了，界面上其实是半英半韩。这里拿的正是核心侧
+    /// `every_language_carries_the_same_keys` 用的同一份表。
+    fn keys_in_language(tag: &str) -> BTreeSet<String> {
+        folio_core::_rust_i18n_backend()
+            .messages_for_locale(tag)
+            .unwrap_or_else(|| panic!("locales/ 里没有 {tag}.toml 这一份"))
+            .into_iter()
+            .map(|(key, _)| key.to_string())
+            .collect()
+    }
+
+    /// 界面用到的每个键，每一份语言表里都得真有这一行。
     #[test]
     fn every_literal_key_resolves_in_every_language() {
         let keys = keys_in_source();
         assert!(!keys.is_empty(), "一个键都没扫到，测试本身坏了");
+        let tables: Vec<(&str, BTreeSet<String>)> =
+            Locale::ALL.iter().map(|l| (l.code(), keys_in_language(l.code()))).collect();
         let mut broken = String::new();
         for key in &keys {
-            for locale in Locale::ALL {
-                let got = t_in(*locale, key, &[]);
-                if &got == key {
-                    let _ = writeln!(broken, "{}  {key}", locale.code());
+            for (tag, table) in &tables {
+                if !table.contains(key) {
+                    let _ = writeln!(broken, "{tag}  {key}");
                 }
             }
         }
         assert!(
             broken.is_empty(),
-            "这些键在某种语言里解不出来（界面会原样显示键名）：\n{broken}"
+            "这些键在某门语言的表里根本没有（回落成英文，界面会半英半韩）：\n{broken}"
         );
     }
 }

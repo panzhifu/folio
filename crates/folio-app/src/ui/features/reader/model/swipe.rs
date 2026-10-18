@@ -175,6 +175,7 @@ impl ReaderSession {
         step_x: f32,
         step_y: f32,
         wheel: bool,
+        at: Option<(f32, f32)>,
         cx: &mut Context<Self>,
     ) -> SwipeStep {
         if wheel {
@@ -185,7 +186,10 @@ impl ReaderSession {
             // 是从按下点算起的整截（它把 slop 也留在里面，内容才不落后于手指）。
             TouchPhase::Started => {
                 self.swipe_sealed = false;
-                self.swipe = Some(SwipeTrack::default());
+                self.swipe = Some(SwipeTrack {
+                    at,
+                    ..SwipeTrack::default()
+                });
                 self.swipe_walk(step_x, step_y, cx)
             }
             // 没有跟踪态的 `Moved` 只有两种来源：上一笔松手后的惯性，与「让开之后」的
@@ -330,6 +334,8 @@ impl ReaderSession {
                 leaving: Some(leaving),
                 arriving: Some(arriving),
                 forward: intent == TurnIntent::Next,
+                // 折页那一档要从**手指按下的那个角**卷起来。
+                finger: self.swipe.and_then(|track| track.at),
                 run: TurnRun::Following { t: 0.0 },
                 ..Default::default()
             },

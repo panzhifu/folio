@@ -196,6 +196,15 @@ type Job = Box<dyn FnOnce() + Send>;
 
 /// 作业队列：`Mutex<VecDeque>` 加 `Condvar`，够多条工作线程公平取活。
 ///
+/// **唤醒纪律**：工作线程入睡所依据的三个判据 —— 队列内容、[`Queue::closed`]、
+/// [`Queue::running`] 的每档在跑数 —— 都必须**在持有 `jobs` 这把锁时改动**，改完再
+/// `notify`。工作线程正是「持着这把锁读判据 → 读到该等就 `ready.wait` 松开锁入睡」，
+/// 所以改判据若不拿这把锁，那一发 notify 就可能落在「已读到旧值、还没入睡」的窗口里，
+/// 唤醒永久丢失：睡着的线程不会被任何后来的事件叫醒。
+/// （实测形状：3000 轮 `TaskManager::new(3)` 起停，锁外写 `closed` 时每个进程都卡死，
+/// 挪进锁里 0 卡死；封顶那一档同形，2 条线程 + 两个落库作业，10/10 个进程卡在第二个
+/// 作业没人取。）
+///
 /// 不用 std 的 `mpsc` 当队列：它的接收端不是 `Sync`，多线程只能有一个 `recv`，
 /// 那样工作线程数会退化成 1。`Mutex<VecDeque>` + `Condvar` 是 std 范围内的标准做法，
 /// 取活那一下的锁竞争相对作业本身可忽略。
@@ -333,8 +342,15 @@ impl TaskManager {
     ///
     /// 会**阻塞**到所有工作线程退出 —— 所以别在正被工作线程占用的路径上调它。
     pub fn shutdown(&self) {
-        self.queue.closed.store(true, Ordering::SeqCst);
-        self.queue.ready.notify_all();
+        // `closed` 要**在 `jobs` 锁里**写。工作线程是「持着这把锁读 closed，读到没活就
+        // 入睡」；锁外写再 notify，唤醒就落进「已读到 false、还没入睡」那段窗口里永久丢掉，
+        // 下面的 join 于是永远不返回。锁里写之后，两种时序都收敛：要么工作线程读到已置位
+        // 直接退出，要么它已入睡、这一发 notify_all 一定送得到一个睡着的线程。
+        {
+            let _guard = self.queue.jobs.lock().unwrap_or_else(|e| e.into_inner());
+            self.queue.closed.store(true, Ordering::SeqCst);
+            self.queue.ready.notify_all();
+        }
         let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
         for handle in workers.drain(..) {
             let _ = handle.join();
@@ -387,9 +403,14 @@ fn worker(queue: Arc<Queue>) {
         match taken {
             Some((class, job)) => {
                 job();
-                // 腾出一个名额：唤醒可能正卡在「这一档满了」上的线程。
+                // 腾名额也要在 `jobs` 锁里做，理由与关停那一处同形：工作线程的封顶判据
+                // （`running[class] >= cap`）是在这把锁里读的，锁外减数 + notify 会把唤醒
+                // 落进「已读到满、还没入睡」的窗口里，队里剩下的作业就永远没人取。
+                // 用 `notify_all` 而不是 `notify_one`：睡着的线程各自在等不同的档，
+                // 叫醒其中一条可能它要的那一档还是满的，就又睡回去。
+                let _guard = queue.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 queue.running[class].fetch_sub(1, Ordering::SeqCst);
-                queue.ready.notify_one();
+                queue.ready.notify_all();
             }
             None => break,
         }

@@ -57,6 +57,37 @@ fn value_item(
     row.keywords(keywords)
 }
 
+/// 「界面语言」这一格的搜索词：通用几个，加上**每一门在选的语言**的本族名与标签。
+///
+/// 这一份是 [`Locale::ALL`] 的第二份副本，会有漂移风险，所以 `tests` 里有一条测试
+/// 逐个核对 `code()` 与 `endonym()` 都在列 —— 加一门语言忘了补词，搜索框就搜不到这一格。
+const LANGUAGE_KEYWORDS: &[&'static str] = &[
+    "language",
+    "locale",
+    "语言",
+    "中文",
+    "简体",
+    "繁体",
+    "简体中文",
+    "繁體中文",
+    "English",
+    "日本語",
+    "한국어",
+    "Français",
+    "Deutsch",
+    "Español",
+    "Русский",
+    "zh-CN",
+    "zh-TW",
+    "en",
+    "ja",
+    "ko",
+    "fr",
+    "de",
+    "es",
+    "ru",
+];
+
 /// 界面语言。选项用**该语言自己的写法**标注：用户切换语言往往正是在看不懂
 /// 当前界面的时候，把 "English" 翻成「英语」反而认不出来。
 fn language_group(cx: &App) -> Group {
@@ -77,15 +108,7 @@ fn language_group(cx: &App) -> Group {
                 },
             )
             .description(tr(cx, "field.language.desc"))
-            .keywords(&[
-                "language",
-                "locale",
-                "语言",
-                "中文",
-                "简体",
-                "English",
-                "日本語",
-            ]),
+            .keywords(LANGUAGE_KEYWORDS),
         ],
     )
 }
@@ -179,6 +202,25 @@ mod tests {
             assert!(
                 values.iter().any(|value| *value == locale.code()),
                 "{} 应该作为选项值出现",
+                locale.code()
+            );
+        }
+    }
+
+    /// 每一门在选的语言都要能被搜索词命中：[`LANGUAGE_KEYWORDS`] 是 `Locale::ALL`
+    /// 的第二份副本，加一门语言时最容易漏的就是这里 —— 漏了不会有任何报错，
+    /// 只是那一格在搜索框里搜不到。
+    #[test]
+    fn every_language_on_offer_is_findable_in_the_search_box() {
+        for locale in Locale::ALL {
+            assert!(
+                LANGUAGE_KEYWORDS.contains(&locale.code()),
+                "{} 的标签没进搜索词",
+                locale.code()
+            );
+            assert!(
+                LANGUAGE_KEYWORDS.contains(&locale.endonym()),
+                "{} 的本族名没进搜索词",
                 locale.code()
             );
         }

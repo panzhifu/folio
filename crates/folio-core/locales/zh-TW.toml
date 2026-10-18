@@ -1,0 +1,383 @@
+# Folio 界面文案 —— 繁体中文（`zh-TW`）。文案表按语言分成 `locales/` 下同级的若干份，一门语言一份。
+#
+# 每份的结构必须逐条对应：加一条文案就往每一份各加一行，删一条也一起删。漏翻在这张表里不再是
+# 一眼看得见的事，而是另一个文件里少了一行 —— 每一份各自看都像是完整的。所以这两件事只能由
+# `src/infra/i18n.rs` 的 tests 模块来保证（比对各门语言的 key 集合与占位符集合），
+# 再加 `ui/services/l10n.rs` 的 tests 核对源码里用到的键每种语言都解得出来。
+#
+# 格式是 rust-i18n 的 v1：**文件名去掉扩展名就是语言标签**（`i18n!("locales")` 按文件名认语言），
+# 所以这一份里没有 `zh-TW` 那一层，`[section]` 直接就是键的前缀；取用仍是 `t!("page.font_size")`。
+# 文件名必须与 `Locale::code()` 一字不差 —— 改文件名等于改语言。
+#
+# 命名规则：`page.*` 设置页标题、`group.*` 设置页里的分组标题、`field.*` 设置项（`.desc` 是它的说明文字）、
+# `error.*` 会显示成通知的失败信息、其余按界面区域走。
+# `.desc` 这种「和同名的那一项平级」的键写成带引号的 `"font_size.desc"`：
+# TOML 里 `font_size.desc` 会把 `font_size` 当表来扩展，而它已经是字符串，两行会打架。
+#
+# 占位符是 `%{名字}`，**必须带名字**：各语言语序不同，靠顺序替换会翻错。
+#
+# 复数：`*_one` / `*_few` / `*_many` / `*_other` 是 CLDR 的那四臂，取哪一条由 `Locale::plural(n)` 判。
+# **这一门语言用不到的臂照抄 `_other`** —— key 集合一致那条测试要求每一份都有这四行，
+# 宁可重复也不能少一行。
+[sidebar]
+import = "匯入書籍"
+account = "帳號"
+
+[reader]
+empty_hint = "從左側書架選一本書，或用側欄標題列的「匯入書籍」"
+no_book = "沒有開啟的書"
+chapter_position = "第 %{index} / %{total} 節"
+prev_chapter = "上一章"
+next_chapter = "下一章"
+book_count_one = "%{count} 本書"
+book_count_few = "%{count} 本書"
+book_count_many = "%{count} 本書"
+book_count_other = "%{count} 本書"
+zoom_in = "增大字型"
+zoom_out = "縮小字型"
+# 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
+# 不在这里再给同一个东西起第二个名字。
+toc = "目錄"
+# 目录那一屏：头部那一行、书头第三行，以及 ⋯ 菜单里那四件事。
+"toc.read" = "已讀 %{read} / %{total} 章"
+"toc.search" = "搜尋目錄"
+"toc.style" = "目錄樣式"
+"toc.placeholder" = "搜尋 %{count} 章"
+"toc.empty" = "這本書沒有目錄"
+"toc.head_meta" = "讀到 %{percent} · %{format} · %{size}"
+"toc.more" = "目錄選項"
+"toc.close" = "收起目錄"
+"toc.expand_all" = "展開目錄"
+"toc.collapse_all" = "摺疊目錄"
+"toc.reverse" = "逆向排序"
+"toc.clear_read" = "清除已讀痕跡"
+night = "夜間"
+day = "日間"
+progress = "進度"
+# 阅读面板那两格：亮度滑条的标签，与面板右下角把完整设置压进来的那颗。
+# 字号、翻页、跟随系统都复用既有的词（`field.*` 与 `appearance.follow_system`）。
+brightness = "亮度"
+more_settings = "更多設定"
+# 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
+page_position = "第 %{index} / %{total} 頁"
+# 底栏那一格：一页两栏的对开。窄窗口按不下去时自动退回单页，名字不必跟着改。
+mode_spread = "雙頁"
+# 选中菜单条（M6/M7）：一条只有图标的动作浮条 + 一条颜色胶囊，就地压在正文上。
+sel_copy = "複製"
+sel_highlight = "劃記"
+# 挑中的正是留在书上的那一条时，同一格换成「取消划线」（另有一行五色可换）。
+sel_unhighlight = "取消劃記"
+sel_cancel = "取消"
+# 动作条上那颗便签：普通选区写一条新笔记，挑中已划的那条则编辑它原有的笔记。
+sel_note = "筆記"
+# 动作条上的分享卡片：把这一段连同书名与位置渲成一张图，递给系统的分享面板。
+# 只在能把视图离屏渲成图的那一端出现（桌面没有那条路）。
+sel_share = "分享"
+# 笔记便签那一层：标题、输入框占位与保存键。
+note_title = "筆記"
+note_placeholder = "寫下這一段的筆記…"
+note_save = "儲存"
+# 图片查看器那一层（把一张图摊开看）顶栏的五格：左上分享、下载，正中「第几张 / 共几张」，
+# 右上定位原文、关闭。标签压到两三个字是有意的 —— 那一行摆在图上，字长了就先挤掉图。
+image_share = "分享"
+image_download = "下載"
+image_locate = "定位原文"
+image_close = "關閉"
+image_counter = "%{index} / %{total}"
+
+[toast]
+font_size = "字型大小 %{size}px"
+theme = "主題：%{name}"
+
+[appearance]
+follow_system = "跟隨系統"
+light = "淺色"
+dark = "深色"
+
+# 目录行高档位的两个选项（设置里「排列密度」那一格）。
+[density]
+compact = "緊湊"
+comfortable = "寬鬆"
+
+[page]
+typography = "文字"
+layout = "版面"
+fonts = "字型"
+appearance = "外觀"
+about = "關於"
+library = "書庫"
+toc = "目錄"
+
+# 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
+# 所以每个都得是一个名词，而不是「其它」「更多」。
+[group]
+body = "正文"
+paragraph = "段落"
+page_turn = "翻頁"
+measure = "版心"
+family = "字型家族"
+themes = "主題"
+custom_themes = "自訂主題"
+location = "位置"
+watch = "資料夾監聽"
+transfer = "Wi-Fi 傳輸"
+rows = "條目"
+
+[field]
+font_size = "字型大小"
+"font_size.desc" = "正文的像素字型大小。"
+line_height = "行距"
+"line_height.desc" = "行高 = 字型大小 × 這個倍數。中文書一般 1.6–2.0。"
+paragraph_gap = "段距"
+"paragraph_gap.desc" = "段落之間的空白，單位是字型大小倍。"
+indent = "首行縮排"
+"indent.desc" = "中文排版習慣是 2 個字元；0 表示不縮排。"
+justify = "左右對齊"
+"justify.desc" = "中文正文建議開啟；開啟後行尾會更整齊。"
+max_measure = "最大行長"
+"max_measure.desc" = "正文欄的最大寬度（像素）。0 表示隨視窗鋪滿。"
+margin_x = "左右頁邊距"
+"margin_x.desc" = "正文欄兩側留白（像素）。"
+font_family = "正文字型"
+"font_family.desc" = "填字型家族名，例如 LXGW WenKai、Noto Serif CJK SC。"
+appearance_mode = "淺深"
+"appearance_mode.desc" = "跟著系統走，或者固定淺色 / 深色。"
+theme_light = "淺色主題"
+"theme_light.desc" = "解析成淺色時用的那一套配色。"
+theme_dark = "深色主題"
+"theme_dark.desc" = "解析成深色時用的那一套配色。即使現在固定在淺色也照樣記住，切過去還在。"
+theme_dir = "主題資料夾"
+"theme_dir.desc" = "框架自帶配色之外，放進這個資料夾的 `.json` 會在下次啟動時被讀進來。"
+language = "介面語言"
+"language.desc" = "介面文案的語言，不影響書的正文語言。"
+config_path = "設定檔"
+"config_path.desc" = "閱讀偏好都存在這個 JSON 設定檔裡，換機器時複製過去即可。"
+open_folder = "開啟所在資料夾"
+library_dir = "書庫位置"
+"library_dir.desc" = "匯入的書會複製到這裡。填成空就等於沒確認過：下次匯入會再問一次。"
+"library_dir.suggested" = "建議位置"
+"watch" = "監聽資料夾"
+"watch.desc" = "盯一個「收件匣」資料夾：往裡放書，書自己進庫。開關開啟時沒有選過資料夾就落到下面建議的位置。"
+"watch.dir.pick" = "選取監聽資料夾…"
+"watch.suggested" = "建議的收件匣"
+"transfer" = "Wi-Fi 傳輸"
+
+"transfer.desc" = "同一 Wi-Fi 下的瀏覽器開啟下面的網址，就能把書直接傳進書架。服務開到關掉為止，重新啟動不會自己開。"
+"transfer.off" = "開關開啟後，這裡會顯示能開啟的地址與配對碼。"
+"transfer.pin" = "配對碼：%{pin}"
+"transfer.no_url" = "沒探到區域網路網址 —— 請在瀏覽器裡輸入這臺裝置的 IP（連接埠見開關旁的日誌）。"
+"library_dir.pick" = "選擇資料夾…"
+toc_density = "排列密度"
+"toc_density.desc" = "目錄每一行佔多高。緊湊時看得更多，寬鬆時手指更容易點。"
+toc_max_lines = "標題最大行數"
+"toc_max_lines.desc" = "長標題在目錄裡最多排幾行，超了截成省略號。"
+toc_dim_read = "讀過的章節淺色顯示"
+"toc_dim_read.desc" = "到過的章在目錄裡畫成淺色，沒讀過的保持正常顏色。"
+page_turn = "翻頁動畫"
+"page_turn.desc" = "翻頁時那一張紙怎麼走：平移、覆蓋，還是乾脆不走。分頁與雙頁按這一檔擺那兩張紙；連續滾動只看它要不要走動畫。換它不會讓任何一章重排。"
+
+# 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
+[page_turn]
+slide = "左右平移"
+slide_up = "上下平移"
+cover = "左右覆蓋"
+curl = "模擬翻頁"
+scroll = "上下滾動"
+none = "不走動畫"
+
+# 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
+[account]
+settings = "設定"
+
+[import]
+title = "匯入書籍"
+submit = "匯入書籍…"
+placeholder = "書的路徑，例如 /path/to/book.epub"
+hint = "支援 EPUB、Markdown 與純文字。"
+
+[error]
+library_load_failed = "讀取書庫失敗：%{reason}"
+database_unopenable = "打不開書庫資料庫：%{reason}"
+import_failed = "匯入失敗：%{reason}"
+store_write_failed = "寫入書庫失敗：%{reason}"
+cache_chapters_failed = "快取章節失敗：%{reason}"
+import_not_found = "匯入後找不到這本書"
+book_not_parsed = "這本書還沒有解析過，請重新匯入"
+read_chapter_failed = "讀取章節失敗：%{reason}"
+stage_failed = "複製進書庫失敗：%{reason}"
+
+# 一级导航的目的地（两端共用）。标签是名词（目的地本身），「还缺什么」单独一条 ——
+# 「暂无数据」和「这台设备上还没有这个功能」必须能分开说，
+# 否则读者会以为是自己把书读空了。
+[nav]
+shelf = "書架"
+stats = "統計"
+notes = "筆記"
+account = "我的"
+
+[nav.pending]
+notes = "還沒有新增過註解"
+
+# 「统计」那一屏。三条措辞约束决定了这里的形状：
+# - 读数本身是**数**（`folio_core::time::duration_parts` 只拆时/分/秒，不出文字），
+#   单位与句式留在这里 —— `plans/基础设施.md` §五.4：日期与数字的呈现格式也不许写进代码。
+# - 「今天还没读」与「读不到书库」是两句话：前者是真实读数 0，后者是功能没数据源。
+# - 时间范围是这一屏内的筛选，不是三个页面，所以措辞是「近 N 天」而不是名词化的标签。
+[stats]
+today = "今天"
+today_none = "今天還沒開始讀"
+streak = "連續第 %{days} 天"
+streak_none = "還沒有連續記錄"
+range_7 = "近 7 天"
+range_14 = "近 14 天"
+range_30 = "近 30 天"
+trend = "趨勢"
+# 结论写成一句话摆在图下面：移动端浮层点不住，tooltip 不能是唯一那条读数通路，
+# 而「今天那根」也不该只靠颜色认（Design Guides：不许只用颜色传义）。
+trend_note = "%{days} 天裡讀了 %{total}，日均 %{avg}"
+duration_hours_minutes = "%{hours} 小時 %{minutes} 分鐘"
+duration_hours = "%{hours} 小時"
+duration_minutes = "%{minutes} 分鐘"
+duration_seconds = "%{seconds} 秒"
+minutes_unit = "分鐘"
+total = "累計"
+total_time = "總時長"
+total_days = "讀過的天數"
+total_books = "讀過的書"
+total_notes = "註解條數"
+top = "時間花在哪些書上"
+hours = "一般幾點讀"
+hours_peak = "最常在讀 %{hour} 點前後"
+# 轴上只有那个裸钟点（24 格排 24 个「21 点」会叠成一团），tooltip 的标题才是这一句。
+hour_cell = "%{hour} 點"
+# 星期几名只有七个、且是界面自己排的一圈轴，所以留在这里而不是 core 的日期层。
+weekday = "一週裡哪天讀得多"
+weekday_note = "%{day} 讀得最多，平均 %{avg}"
+weekday_mon = "週一"
+weekday_tue = "週二"
+weekday_wed = "週三"
+weekday_thu = "週四"
+weekday_fri = "週五"
+weekday_sat = "週六"
+weekday_sun = "週日"
+no_store = "讀不到書庫"
+no_store_hint = "統計讀的是本機書庫，請確認書庫資料夾能開啟。"
+
+# 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
+[mobile.tab]
+shelf = "書架"
+stats = "統計"
+notes = "筆記"
+account = "我的"
+
+[mobile.pending]
+stats = "還沒有閱讀時長記錄"
+notes = "還沒有新增過註解"
+
+# 移动端书架。空架与「搜不到」是两条不同的话：并成一句会让读者以为自己把书弄丢了。
+# `shelf.back` 是顶部那颗返回键，和底栏的目的地名（`mobile.tab.shelf`）故意不同 ——
+# 一个是动作，一个是去处。
+[shelf]
+search_placeholder = "搜尋書名或作者"
+# 右上角那颗三点按钮：本体不做事，点开是一条导入方式的菜单，文案挂在
+# 无障碍标签与桌面的 tooltip 上。
+more = "匯入方式"
+import = "匯入"
+# 导入进行中的那一行读数，摆在命令行与架面之间。后端报的第一条读数还没上来时总数
+# 不知道，那一句不带数字。
+importing = "匯入中…"
+importing_of = "匯入中 %{done}/%{total}"
+# 整机扫描。扫描只找不导：找到的候选摆成清单，读者勾选再导（勾选 = 亲手挑的，
+# 重名算更新）。已在书架的那几条默认不勾并标出来。
+cancel = "取消"
+url_import = "連結匯入"
+url_title = "從連結匯入"
+url_placeholder = "貼上書籍的下載連結（http…）"
+url_hint = "下載在背景進行，進度擺在架面上；書名取自連結的末段。"
+scan = "掃描"
+scan_title = "在裝置裡找書"
+scan_running = "正在掃描…"
+scan_found = "正在掃描… 已找到 %{n} 本"
+scan_stop = "停止掃描"
+scan_none = "裝置裡沒找到可匯入的書"
+scan_summary = "找到 %{n} 本，勾選後匯入"
+scan_skipped = "有 %{n} 處讀不了（權限），已跳過"
+scan_truncated = "書太多，只列了一部分 —— 結果不完整"
+scan_row = "%{name}（%{size}）"
+scan_on_shelf = "已在書架"
+scan_select_all = "全選"
+scan_clear = "清除"
+scan_import = "匯入選取的 %{n} 本"
+scan_close = "關閉"
+cancel_import = "取消匯入"
+back = "返回"
+empty = "書架還是空的"
+empty_hint = "用右邊的「匯入」選一本 epub、markdown 或純文字"
+no_results = "沒有書名或作者對得上"
+no_results_hint = "換個詞試試 —— 這裡搜的是書名和作者，不是正文"
+# 卡片上的管理菜单：长按（移动端）或右键（桌面端）弹出，与右上角那条导入菜单
+# 是同一套组件。两条都是图标 + 短标签；信息在前，删除垫底并用分隔线隔开 ——
+# 破坏性的动作不排在顺手的位置。「打开」不在菜单里：点卡片本身就是打开。
+book_delete = "刪除"
+# 分组（集合）：卡片菜单里那一节 + 架面顶部那颗筛选。
+group = "群組"
+group_all = "全部群組"
+ungrouped = "未分群組"
+group_new = "新增群組"
+group_create = "建立"
+group_placeholder = "群組名稱"
+group_hint = "這本書進哪個群組。名字已經有了就直接用那一個，不會建出第二個同名的。"
+# 组卡下面那一行：卡上画不下整组，那一行数字才是「这个组有几本」的答案。
+group_count = "%{n} 本"
+# 「信息」：菜单里那一条与面板标题共用这一条文案 —— 都叫「信息」，不叫「书籍信息」。
+# 面板摆这一本的事实，点菜单那一刻查库取一次。
+info_title = "資訊"
+# 面板上改得动的两格：书名与作者是读者自己认的，写回 `books` 的那两列
+# （`Store::set_book_meta`）；格式、大小、文件位置是那份文件的事实，只摆不改。
+info_field_title = "書名"
+info_field_author = "作者"
+# 多位作者怎么写要说清：那一格里摆的是一行「甲 · 乙」，保存时按同一个分隔拆回人名。
+info_author_hint = "多位作者用 · 分隔"
+# 书名清空时那颗「保存」按不动 —— 只禁用不解释，读者得自己猜是哪里不对。
+info_title_required = "書名不能為空"
+info_save = "儲存"
+info_format = "格式"
+info_size = "大小"
+# 底下那一组是这本书自带的书目（都柏林核心那一组）。**有值才摆那一行** —— 一本电子书
+# 通常只说其中几项，把空项摆出来读到的就成了「这本书什么都没写」。
+# `dc:type` 库里存着但界面不摆：电子书几乎全是 text，那一行答不出任何问题。
+info_field_series = "系列"
+info_field_contributors = "貢獻者"
+info_field_subjects = "主題"
+info_field_description = "簡介"
+info_field_publisher = "出版者"
+info_field_published = "出版日期"
+info_field_language = "語言"
+info_field_isbn = "ISBN"
+info_field_rights = "版權"
+# 多值那几项（贡献者、主题词）并成一行用的分隔符。
+info_sep = "、"
+# 系列带序号时整句怎么读：各语言按自己的语序写这一条，不拿中文的形状去拼。
+info_series_ordinal = "%{name} · 第 %{position} 本"
+
+# 书库管理。`library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置
+# 确认：移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
+[library]
+delete_failed = "刪除失敗：%{reason}"
+title = "匯入的書複製到哪裡"
+hint = "匯入會把檔案複製一份到這個資料夾；之後原檔案移走或刪掉，架上這本書都不受影響。"
+confirm = "確認並匯入"
+cancel = "取消"
+pick_dir = "選擇資料夾…"
+
+# 关于页。版本与依赖那几行是构建时从 Cargo.lock 抄来的（见 folio-app/build.rs）。
+[about]
+version = "版本"
+version_desc = "現在跑著的這一份二進位檔編譯自哪個版本。"
+
+# 首次启动的欢迎页：先选书库位置再进主界面。没有「取消」可退 ——
+# 要么用系统文件夹选择器挑一个，要么一键用建议位置。
+[welcome]
+title = "歡迎使用 Folio"
+pick = "選擇書庫資料夾…"
+use_default = "使用預設位置"
