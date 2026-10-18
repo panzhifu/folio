@@ -189,7 +189,11 @@ log = "0.4"
 # `offscreen` 的版本，这一整条连同 `gpui-pre-mobile` 的那个 feature 一起删。
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
-gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-pre-wgpu", rev = "617a93340cd282e859a75e6fc710f735b8c17b6c" }
+# 仿真翻页 C 方案：本地分叉同时改了 `gpui-pre`（Mesh primitive / 页面捕获）
+# 与 `gpui-pre-wgpu`（网格管线 / shadow pass）。两条必须一起换，否则两棵 gpui
+# 的 `Window` / `Scene` 类型对不上。上游哪天合入这些口子，就把两条一起删。
+gpui-pre = { path = "../gpui-folio/gpui-pre" }
+gpui-pre-wgpu = { path = "../gpui-folio/gpui-pre-wgpu" }
 
 # 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
 # opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；

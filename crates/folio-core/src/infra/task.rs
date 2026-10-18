@@ -194,16 +194,32 @@ impl<R> TaskHandle<R> {
 /// 结果类型 `R` 在包装闭包的捕获里，不体现在这个类型上，所以它不带泛型。
 type Job = Box<dyn FnOnce() + Send>;
 
+/// 把 panic 载荷折成一条错误。载荷的常见形态就 `&'static str` 与 `String` 两种，
+/// 两种都不是时给一句实话，不假装知道 panic 的内容 —— 调用方拿到的是「这个作业炸了」，
+/// 具体为什么炸由 panic 自己打进 stderr 那一条负责。
+fn panic_error(payload: Box<dyn std::any::Any + Send>) -> TaskError {
+    let text = payload
+        .downcast_ref::<&'static str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "作业 panic，载荷没有可读信息".to_string());
+    TaskError::from(text)
+}
+
 /// 作业队列：`Mutex<VecDeque>` 加 `Condvar`，够多条工作线程公平取活。
 ///
-/// **唤醒纪律**：工作线程入睡所依据的三个判据 —— 队列内容、[`Queue::closed`]、
-/// [`Queue::running`] 的每档在跑数 —— 都必须**在持有 `jobs` 这把锁时改动**，改完再
-/// `notify`。工作线程正是「持着这把锁读判据 → 读到该等就 `ready.wait` 松开锁入睡」，
-/// 所以改判据若不拿这把锁，那一发 notify 就可能落在「已读到旧值、还没入睡」的窗口里，
-/// 唤醒永久丢失：睡着的线程不会被任何后来的事件叫醒。
-/// （实测形状：3000 轮 `TaskManager::new(3)` 起停，锁外写 `closed` 时每个进程都卡死，
-/// 挪进锁里 0 卡死；封顶那一档同形，2 条线程 + 两个落库作业，10/10 个进程卡在第二个
-/// 作业没人取。）
+/// **唤醒纪律**：工作线程拿着 `jobs` 这把锁读判据，读到「该等」就 `ready.wait` 松开锁入睡。
+/// 所以凡是**只在被唤醒时才会再读一次**的判据，改动必须也在 `jobs` 锁里，改完再 `notify`；
+/// 否则那一发 notify 会落进「已读到旧值、还没入睡」的窗口里永久丢掉，睡着的线程不再有任何
+/// 事件能叫醒它。[`Queue::closed`] 属于这一类：置位之后不会再有入队来补一发唤醒，
+/// 于是 `TaskManager::shutdown` 的 `join` 永远不返回。
+/// 而「这一档跑满封顶」那一类不需要：腾名额的那条线程自己会回到循环顶端重查队列，
+/// 真有新活时 `enqueue` 也一定在锁里推进队列再 `notify_all`，两条路都能把它捞回来。
+///
+/// 实测（3000 轮 × 10 个进程，`TaskManager::new(3)` 起停）：`closed` 写在锁外 **10/10 个进程
+/// 卡死**，中位数第 500 轮命中；写进锁里 **0/10**。封顶那一档（2 条线程 + 两个落库作业）
+/// 同压 12 个进程，「队里的作业没人取」这条断言**一次都没红过**（7 次失败全部落在关停那条
+/// 断言上），所以它确实只是延迟，不是卡死。
 ///
 /// 不用 std 的 `mpsc` 当队列：它的接收端不是 `Sync`，多线程只能有一个 `recv`，
 /// 那样工作线程数会退化成 1。`Mutex<VecDeque>` + `Condvar` 是 std 范围内的标准做法，
@@ -320,7 +336,14 @@ impl TaskManager {
                 }),
                 cancel: job_cancel,
             };
-            let result = job(&stage);
+            // 作业里 panic 不能带走这条工作线程和它占着的并发名额：接住它、折成一条错误，
+            // 下面的取消判定与事件发送照旧走，于是线程数不掉、`running` 计数也不掉。
+            // `AssertUnwindSafe` 的理由：`job` 是 FnOnce，`stage` 只有两条发送闭包与一面旗，
+            // 展开结束后没有「半改好、之后还要回读」的状态留在手里。
+            // 注意 release 档接不住：workspace 根 `[profile.release] panic = "abort"`，那条路上
+            // 进程直接终止。这里挡的是 dev/test 那种静默形状 —— 线程死了没人报，界面永远等结果。
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&stage)))
+                .unwrap_or_else(|payload| Err(panic_error(payload)));
             let event = if finish_cancel.triggered() {
                 TaskEvent::Cancelled
             } else {
@@ -403,14 +426,14 @@ fn worker(queue: Arc<Queue>) {
         match taken {
             Some((class, job)) => {
                 job();
-                // 腾名额也要在 `jobs` 锁里做，理由与关停那一处同形：工作线程的封顶判据
-                // （`running[class] >= cap`）是在这把锁里读的，锁外减数 + notify 会把唤醒
-                // 落进「已读到满、还没入睡」的窗口里，队里剩下的作业就永远没人取。
-                // 用 `notify_all` 而不是 `notify_one`：睡着的线程各自在等不同的档，
-                // 叫醒其中一条可能它要的那一档还是满的，就又睡回去。
-                let _guard = queue.jobs.lock().unwrap_or_else(|e| e.into_inner());
+                // 腾出一个名额：唤醒可能正卡在「这一档满了」上的线程。
+                // 这一步不在 `jobs` 锁里做，也不必：取走这份作业的正是马上要回到循环顶端
+                // 重查队列的本线程，就算这一发唤醒落进别的线程「读到满、还没入睡」的窗口，
+                // 下一次入队会在锁里 `notify_all`（见 `Queue` 的说明），活不会没人取。
+                // 实测过它不是卡死点：未修的写法上，「队里的作业没人取」这条断言在
+                // 3000 轮 × 12 个进程里一次都没红过，红的全是 `closed` 那一条。
                 queue.running[class].fetch_sub(1, Ordering::SeqCst);
-                queue.ready.notify_all();
+                queue.ready.notify_one();
             }
             None => break,
         }
@@ -434,6 +457,24 @@ mod tests {
             TaskEvent::Finished(r) => Some(r),
             _ => None,
         })
+    }
+
+    /// 在预算内收一条作业的事件流，预算用尽就把手里收到的交出去。有界收干是为了让
+    /// 「永远等不到结果」读成一条红的断言，而不是一场要人来掐的挂死。
+    fn drain_within<R>(mut events: Receiver<TaskEvent<R>>, budget: Duration) -> Vec<TaskEvent<R>> {
+        let deadline = std::time::Instant::now() + budget;
+        let mut saw = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match events.recv_timeout(left) {
+                Ok(event) => saw.push(event),
+                Err(_) => break,
+            }
+        }
+        saw
     }
 
     /// 作业跑起来、进度回流、结果落进 `Finished`。
@@ -494,6 +535,33 @@ mod tests {
             .collect();
         assert_eq!(items, vec![1, 2], "整批读数不被字节级打断");
         assert_eq!(bytes, vec![41, 100], "字节级读数不被整批盖掉");
+    }
+
+    /// 作业里 panic 不该带走工作线程、也不该带走它占着的并发名额：接住它、折成
+    /// `Finished(Err(..))` 递回调用方，随后那一件照常跑。挑 `new(1)` 是最狠的形状 ——
+    /// 线程一死整个后台就停，而症状是「界面永远等不到结果」，不是任何一条报错。
+    /// 不接住的写法：炸掉的作业只留下 `Started` 就通道关闭（结果谁也拿不到），
+    /// 第二件躺在队里没人取；这条门在 2 秒预算内红，不是挂死。
+    #[test]
+    fn a_panicking_job_does_not_cost_the_pool_a_worker() {
+        let manager = TaskManager::new(1);
+        let boom = manager.submit(|_stage| -> Result<u8, super::TaskError> {
+            panic!("作业里炸了");
+        });
+        let events = drain_within(boom.events, Duration::from_secs(2));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TaskEvent::Finished(Err(_)))),
+            "panic 该折成一条错误事件回来，实际收到 {events:?}"
+        );
+
+        let next = manager.submit(|_stage| Ok(7u8));
+        let got = drain_within(next.events, Duration::from_secs(2));
+        assert!(
+            matches!(got.last(), Some(TaskEvent::Finished(Ok(7)))),
+            "前一件炸了，后一件也该照常被跑起来，实际收到 {got:?}"
+        );
     }
 
     /// 作业失败：`Finished(Err(..))` 带着错原文回来。
@@ -606,6 +674,32 @@ mod tests {
         assert_eq!(manager.workers(), 3);
         manager.shutdown();
         assert_eq!(manager.workers(), 0, "关停后线程该被回收");
+    }
+
+    /// 关停那一发唤醒不能丢。工作线程是「拿着 `jobs` 锁读 `closed` → 读到没活就
+    /// `ready.wait` 松开锁入睡」，所以 `closed` 也要在 `jobs` 锁里写；写在锁外时那一发
+    /// `notify_all` 可能落进「已读到 false、还没入睡」的窗口里永久丢掉，`shutdown` 里的
+    /// `join` 再也不返回 —— 症状不是某条测试失败，是整包测试卡住不动。
+    ///
+    /// 每轮把关停放到另一条线程上、只给它 500 ms：一轮正常是微秒级，所以这条读不出「慢」，
+    /// 只读得出「有没有人再也不醒了」。未修的写法压 3000 轮 × 10 个进程是 **10/10 个进程红**
+    /// （中位数第 500 轮命中），写进锁里 0/10。
+    #[test]
+    fn shutdown_wakes_every_idle_worker() {
+        use std::sync::mpsc;
+
+        for round in 0..3000u32 {
+            let manager = TaskManager::new(3);
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                drop(manager);
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(Duration::from_millis(500)).is_ok(),
+                "第 {round} 轮：关停后有工作线程没被叫醒，join 不返回"
+            );
+        }
     }
 
     /// §1.1：跨档按优先级取活，高优先级先出（同档仍先进先出）。

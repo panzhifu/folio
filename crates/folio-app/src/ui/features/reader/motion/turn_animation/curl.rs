@@ -23,7 +23,7 @@
 //! 没透出来。所以卷筒上画的是**纸**，不是转过弯的字 —— 这一点与 iBooks 一致（它卷起来
 //! 那一段也不带正文）。等 gpui 透出那个矩阵，这张纸才能真正贴上字。
 
-use super::{Area, Axis, Crease, Cut, PageTurnStyle, Poly, Shade, Shades, Sheet, Tint};
+use super::{Area, Axis, Crease, Cut, Grip, PageTurnStyle, Poly, Shade, Shades, Sheet, Tint};
 use crate::ui::features::reader::model::chrome::PageMode;
 
 pub(in crate::ui::features::reader) const CORNER_TILT: f32 = 0.1;
@@ -64,11 +64,24 @@ const ROLL_LIGHT: f32 = 0.10;
 /// 「一块半透明的灰色贴纸」—— 上一版那第二条灰条就是它。
 const BACK_INK: f32 = 0.0;
 
-/// 卷筒抬起来之后投在下面那张纸上的影，最宽到页宽的几成（走完那一刻纸已经离场，墨色归零）。
-const SHADOW_WIDE: f32 = 0.52;
+/// 卷筒抬起来之后投在下面那张纸上的影，最宽到页宽的几成。
+///
+/// 取 0.75：那是 StPageFlip 的 `width = pageWidth * 3/4 * progress`（`Render.ts` 的
+/// `setShadowData`）。比这个窄，影子就像贴在折痕上的一条硬带，看不出「整张纸被抬起来」。
+const SHADOW_WIDE: f32 = 0.75;
 
 /// 那道投影起步有多黑。
-const SHADOW_INK: f32 = 0.22;
+const SHADOW_INK: f32 = 0.26;
+
+/// 折痕**内侧**那道影：贴着卷筒的外缘、盖在纸背上，宽度按行程收（同 StPageFlip 的
+/// `drawHardInnerShadow`：`(100 − progress) * 2.5 * pageWidth / 100 + 20`）。
+///
+/// 有没有这一道，是「一张纸被折起来」与「一块灰色形状贴在纸上」之间的差别 —— 折页最难看的
+/// 读数就是纸背整片均匀、边缘一刀切。
+const INNER_WIDE: f32 = 0.35;
+
+/// 折痕内侧那道影起步有多黑。
+const INNER_INK: f32 = 0.34;
 
 /// 走了 `progress` 那一刻的折线。往回翻是同一件事沿页的中线镜像。
 ///
@@ -81,37 +94,48 @@ pub(in crate::ui::features::reader) fn crease_of(
     crease_at(progress, forward, area, None)
 }
 
-/// 同 [`crease_of`]，但带上读者这一笔的起手点（版心内归一化坐标）。
+/// 同 [`crease_of`]，但带上读者这一笔的手（起手点 + 此刻的位置）。
 ///
-/// **起折的那一角由手指位置决定**：落在上半屏（`v < 0.5`）从右上角卷起，落在下半屏
-/// 从右下角卷起 —— 这就是「跟随手指方向」在折页这一步的落点。从前角是常数（永远右上），
-/// 于是竖屏上不管从哪儿划，纸都从上面卷下来，读者读到的就是「只有上面能翻」。
+/// **折线就是「那个角」与「手指此刻」的垂直平分线** —— 与 StPageFlip 那套点屏折叠同一条
+/// 判据，只是被拖的点从「沿一条写死的对角线走」换成了手指本身。于是：
+///
+/// - 起折的角看 `from`：落在下半屏从右下角卷起，落在上半屏从右上角卷起（从前角是常数，
+///   所以竖屏上「只有上面能翻」）；
+/// - 折线的倾角看 `at`：手指往左划、斜着划、往上划，折痕跟着转（从前它只会沿一条对角线走）。
 pub(in crate::ui::features::reader) fn crease_at(
     progress: f32,
     forward: bool,
     area: Area,
-    finger: Option<(f32, f32)>,
+    grip: Option<Grip>,
 ) -> Option<Crease> {
     if area.width() <= 0.0 || area.height() <= 0.0 {
         return None;
     }
     let t = progress.clamp(0.0, 1.0);
-    let tilt = CORNER_TILT * area.height();
-    // 归一化的 0..1 → 这一屏的两个上/下缘；`None` 沿用上半（点屏、按键、滚轮那一档）。
-    let from_bottom = finger.is_some_and(|(_, v)| v > 0.5);
+    let from_bottom = grip.is_some_and(|grip| grip.from.1 > 0.5);
     let (edge, inward) = if from_bottom {
         (area.bottom, -1.0)
     } else {
         (area.top, 1.0)
     };
-    // 规范框：一律从 `right` 那一条边起折，角贴着这一侧的上（下）缘。
     let corner = (area.right, edge);
-    let start = (area.right - tilt, edge + inward * tilt);
-    let dest = (area.right - 2.0 * area.width(), edge);
-    let dragged = (
-        start.0 + (dest.0 - start.0) * t,
-        start.1 + (dest.1 - start.1) * t,
-    );
+    let dragged = match grip {
+        // 手指握着：折线跟着手指走（两个轴都跟）。
+        Some(grip) => (
+            area.left + grip.at.0 * area.width(),
+            area.top + grip.at.1 * area.height(),
+        ),
+        // 没有手指（点屏 / 按键 / 滚轮）：沿用「角沿对角线走到页外」那条写死的路径。
+        None => {
+            let tilt = CORNER_TILT * area.height();
+            let start = (area.right - tilt, edge + inward * tilt);
+            let dest = (area.right - 2.0 * area.width(), edge);
+            (
+                start.0 + (dest.0 - start.0) * t,
+                start.1 + (dest.1 - start.1) * t,
+            )
+        }
+    };
     let crease = Crease::from_corner(corner, dragged)?;
     Some(if forward {
         crease
@@ -150,10 +174,10 @@ pub(in crate::ui::features::reader) fn fold_shades_at(
     progress: f32,
     forward: bool,
     area: Area,
-    finger: Option<(f32, f32)>,
+    grip: Option<Grip>,
 ) -> Shades {
     let mut out = Shades::new();
-    let Some(crease) = crease_at(progress, forward, area, finger) else {
+    let Some(crease) = crease_at(progress, forward, area, grip) else {
         return out;
     };
     let page = Poly::rect(area);
@@ -182,6 +206,20 @@ pub(in crate::ui::features::reader) fn fold_shades_at(
             Tint::Dark,
             Some(crease.angle_back()),
             BACK_INK,
+        );
+    }
+
+    // ①′ 折痕**内侧**的影：贴卷筒外缘压在纸背上，随行程收窄、变淡。
+    //
+    // 画在纸背之上、卷筒之下 —— 它是「纸背靠近折痕那一侧被压暗」，不该盖住卷筒。
+    let inner = INNER_WIDE * area.width() * (1.0 - t) + 8.0;
+    if t > 0.02 {
+        push(
+            &mut out,
+            page.slab(crease, -roll - inner, -roll),
+            Tint::Dark,
+            Some(crease.angle_back()),
+            INNER_INK * (1.0 - 0.4 * t),
         );
     }
 
@@ -274,6 +312,11 @@ impl PageTurnStyle for Curl {
         Axis::Horizontal
     }
 
+    /// 折页**两轴都认**：折线跟着手指走，从右下角往左上划是最自然的一笔。
+    fn claims(&self, _axis: Axis) -> bool {
+        true
+    }
+
     fn animates(&self, _: PageMode) -> bool {
         true
     }
@@ -282,14 +325,8 @@ impl PageTurnStyle for Curl {
         self.sheets_at(t, forward, area, None)
     }
 
-    fn sheets_at(
-        &self,
-        t: f32,
-        forward: bool,
-        area: Area,
-        finger: Option<(f32, f32)>,
-    ) -> [Sheet; 2] {
-        let cut = match crease_at(t, forward, area, finger) {
+    fn sheets_at(&self, t: f32, forward: bool, area: Area, grip: Option<Grip>) -> [Sheet; 2] {
+        let cut = match crease_at(t, forward, area, grip) {
             Some(crease) => crease,
             // 版心还没量出来：两张纸都停在原位整张画，等下一帧。
             None => {
@@ -329,8 +366,8 @@ impl PageTurnStyle for Curl {
         fold_shades(t, forward, area)
     }
 
-    fn shades_at(&self, t: f32, forward: bool, area: Area, finger: Option<(f32, f32)>) -> Shades {
-        fold_shades_at(t, forward, area, finger)
+    fn shades_at(&self, t: f32, forward: bool, area: Area, grip: Option<Grip>) -> Shades {
+        fold_shades_at(t, forward, area, grip)
     }
 }
 
@@ -347,7 +384,7 @@ mod tests {
     use crate::ui::features::reader::motion::turn_animation::curl::SHADOW_WIDE;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_at;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_of;
-    use crate::ui::features::reader::motion::turn_animation::geometry::Crease;
+    use crate::ui::features::reader::motion::turn_animation::geometry::{Crease, Grip};
     use crate::ui::features::reader::motion::turn_animation::geometry::{
         POLY_MAX, Poly, SHADES_MAX, Tint,
     };
@@ -575,7 +612,7 @@ mod tests {
             let wide = high - low;
             // 页的左缘会把影子裁掉一截，所以「越翻越宽」只在不贴边的这几步里钉。
             // 页的左缘会把影子裁掉一截，所以「越翻越宽」只钉到影还完整的那几步。
-            if t <= 0.6 {
+            if t <= 0.4 {
                 assert!(wide > previous_wide, "t = {t} 时投影只能越翻越宽");
                 previous_wide = wide;
             }
@@ -635,8 +672,10 @@ mod tests {
         let area = page();
         // 起点附近：折的还只是那个角，所以「哪个角折了」这件事判得干净。
         let t = 0.06;
-        let upper = crease_at(t, true, area, Some((0.5, 0.15))).expect("量得出折线");
-        let lower = crease_at(t, true, area, Some((0.5, 0.85))).expect("量得出折线");
+        let upper =
+            crease_at(t, true, area, Some(Grip::new((0.5, 0.15), (0.9, 0.2)))).expect("量得出折线");
+        let lower =
+            crease_at(t, true, area, Some(Grip::new((0.5, 0.85), (0.9, 0.8)))).expect("量得出折线");
         // 判据看**哪个角已经被折走**：这一条与「从哪个角卷起来」是同义的。
         // （折线在横向中线处上下两条正好左右镜像，所以不能拿中线取点比较。）
         assert!(
@@ -655,9 +694,17 @@ mod tests {
             lower.past(area.right, area.top) < 0.0,
             "从下往上卷：右上角该还平摊着"
         );
-        // 没有手指（点屏 / 按键 / 滚轮）时沿用上缘那一套。
+        // 没有手指（点屏 / 按键 / 滚轮）时沿用**写死的对角线**，但那一条也是从上缘起折的。
         let tapped = crease_of(t, true, area).expect("同上");
-        assert_eq!(tapped, upper, "没有起手点时就该退回上缘那一条");
+        assert!(
+            tapped.past(area.right, area.top) > 0.0,
+            "没有起手点时也该从上缘起折"
+        );
+        // 而且「手指握着」与「写死路径」不是同一条：握着时折线由手指给。
+        assert_ne!(
+            tapped, upper,
+            "握着手指时折线该由手指算，不是那条写死的路径"
+        );
     }
 
     /// 裁剪与镜像这两步是折面几何的全部家当，直接钉住定义：**被折走的那个角落在它被拖

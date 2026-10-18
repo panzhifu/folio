@@ -925,12 +925,12 @@ pub(in crate::ui::features::reader) struct Turn {
     /// 起点不用 `scroll_y` 而用画出来的那个：读者连点两下时，第二趟要从他眼前那一屏
     /// 起步，否则画面先跳回上一趟的终点再走，看着像卡了一下。
     pub scroll: Option<(f32, f32)>,
-    /// 读者这一笔从哪儿起的（**归一化**在版心内：0..1 / 0..1），`None` = 不是手指起的
-    /// （点屏 / 按键 / 滚轮）。
+    /// 读者这一笔的手：起手点 + **此刻**的位置（都归一化在版心内）。
     ///
-    /// 折页那一档用它决定**从哪个角起折**：手指落在下半屏就从右下角卷起来，落在上半屏
-    /// 就从上往下卷。从前它只会从右上角起折 —— 竖屏上「只有上面能翻」就是这么来的。
-    pub finger: Option<(f32, f32)>,
+    /// 折页那一档全用它：起手点挑「从哪个角起折」，此刻的位置直接给出折线 —— 折线是
+    /// 「那个角」与「手指此刻」的垂直平分线，所以纸跟着手指走，不再沿一条写死的对角线扫。
+    /// `None` = 不是手指起的（点屏 / 按键 / 滚轮），那一档退回写死的路径。
+    pub grip: Option<crate::ui::features::reader::motion::turn_animation::Grip>,
     /// `true` = 往后走（下一页 / 往下滚）。接反了不报错，画面是反着走的，
     /// 所以方向的判据收在 [`turn_animation::slide::slide_shifts`] 那一格里钉住。
     pub forward: bool,
@@ -970,7 +970,7 @@ impl Default for Turn {
             leaving: None,
             arriving: None,
             scroll: None,
-            finger: None,
+            grip: None,
             forward: false,
             run: TurnRun::Clock,
         }
@@ -1002,6 +1002,8 @@ pub(in crate::ui::features::reader) struct SwipeTrack {
     /// 清掉之后同一笔后面的每个增量都会漏回滚动那条路。
     pub refused: bool,
     /// 手指按下的位置（版心内归一化 0..1）。折页那一档用它决定从哪个角起折。
+    pub from: Option<(f32, f32)>,
+    /// 手指**此刻**的位置（同上）。折线由「起折的角 ↔ 这里」给出，所以纸跟着手指走。
     pub at: Option<(f32, f32)>,
 }
 

@@ -10,6 +10,26 @@ pub(in crate::ui::features::reader) enum Axis {
     Vertical,
 }
 
+/// 读者这一笔的手：**从哪儿起**、**此刻在哪儿**（两个点都在版心内归一化：0..1）。
+///
+/// 折页那一档全用它：
+/// - `from` 决定**从哪个角起折**（下半屏按下的就从右下角卷起）；
+/// - `at` 决定**折线此刻在哪** —— 折线是「那个角」与「手指此刻的位置」的垂直平分线，
+///   所以纸是真的跟着手指走，不是沿一条写死的对角线扫过去。
+///
+/// 松手之后 `at` 由绘制层补间到落点（见 `view::body`），折线跟着走完，不会在松手那一帧跳。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::ui::features::reader) struct Grip {
+    pub from: (f32, f32),
+    pub at: (f32, f32),
+}
+
+impl Grip {
+    pub(in crate::ui::features::reader) fn new(from: (f32, f32), at: (f32, f32)) -> Self {
+        Self { from, at }
+    }
+}
+
 /// 一张纸占的那块矩形，**元素坐标**（与字形的 `run.x` / `run.baseline` 同一把尺）。
 ///
 /// 折线、裁剪、折面多边形全都算在这一套坐标里，画的那一头就一个偏移都不必再加：原先

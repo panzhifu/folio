@@ -80,8 +80,10 @@ struct TurnFrame {
     /// 回来把整条链挪了），那一趟的两头要**一起**挪，否则补间落在补偿前的坐标上，
     /// 读者看见的是内容突然跳一屏。
     scroll: Option<(f32, f32)>,
-    /// 读者这一笔的起手点（版心内归一化 0..1）。折页那一档按它决定从哪个角起折。
-    finger: Option<(f32, f32)>,
+    /// 读者这一笔的手（起手点 + 此刻位置，版心内归一化）。折页那一档按它算折线。
+    grip: Option<crate::ui::features::reader::motion::turn_animation::Grip>,
+    /// 这一趟的进度由谁给（松手那一腿要把「手指此刻」补间到落点，所以要看见 `Released`）。
+    run: crate::ui::features::reader::model::session::TurnRun,
     /// `true` = 往后走（下一页 / 往下滚）。
     forward: bool,
 }
@@ -144,7 +146,8 @@ impl ReaderSession {
             leaving: turn.leaving,
             arriving: turn.arriving,
             scroll: turn.scroll,
-            finger: turn.finger,
+            grip: turn.grip,
+            run: turn.run,
             forward: turn.forward,
         })
     }
@@ -672,13 +675,31 @@ impl Render for ReaderSession {
                             f32::from(viewport_size.width),
                             self.header_reserve + viewport_height,
                         );
-                        // 手指锚点：归一化 0..1 换成这一屏的元素坐标（折页按它挑从哪个角起折）。
-                        let finger = frame.finger.map(|(u, v)| {
-                            (area.left + u * area.width(), area.top + v * area.height())
+                        // 手：松手之后把「手指此刻」一路补间到落点，折线跟着走完，
+                        // 不会在松手那一帧跳一下。
+                        let grip = frame.grip.map(|mut grip| {
+                            if let TurnRun::Released { from, revert } = frame.run {
+                                let span = (1.0 - from).max(1e-3);
+                                let u = ((frame.progress - from) / span).clamp(0.0, 1.0);
+                                // 落点：整页折走 ⇒ 角被拖到页面另一侧外（归一化 x = −1），
+                                // 纵向停在它自己那一侧；弹回 ⇒ 回到起手点。
+                                let target = if revert {
+                                    grip.from
+                                } else if grip.from.1 > 0.5 {
+                                    (-1.0, 1.0)
+                                } else {
+                                    (-1.0, 0.0)
+                                };
+                                grip.at = (
+                                    grip.at.0 + (target.0 - grip.at.0) * u,
+                                    grip.at.1 + (target.1 - grip.at.1) * u,
+                                );
+                            }
+                            grip
                         });
-                        shades = style.shades_at(frame.progress, frame.forward, area, finger);
+                        shades = style.shades_at(frame.progress, frame.forward, area, grip);
                         let [incoming, outgoing] =
-                            style.sheets_at(frame.progress, frame.forward, area, finger);
+                            style.sheets_at(frame.progress, frame.forward, area, grip);
                         let leaving_ref = frame.leaving.unwrap_or(PageRef {
                             chapter: current,
                             page: self.page,

@@ -150,12 +150,16 @@ impl ReaderSession {
     pub(in crate::ui::features::reader) fn swipe_geometry(
         &self,
         cx: &App,
+        axis: Axis,
     ) -> Option<(Axis, f32, bool)> {
-        if self.is_fixed() || self.book().is_none() {
+        if self.is_fixed() || self.book().is_none() || self.laid_out.mode.is_continuous() {
             return None;
         }
-        let axis =
-            turn_animation::page_axis(ConfigHolder::appearance(cx).page_turn, self.laid_out.mode)?;
+        // 「这一笔算不算翻页」由档位说：折页两轴都认，其余只认它自己那根轴。
+        let style = ConfigHolder::appearance(cx).page_turn;
+        if !turn_animation::of(style).claims(axis) {
+            return None;
+        }
         let dist = match axis {
             Axis::Horizontal => f32::from(self.content_bounds.get().size.width),
             Axis::Vertical => self.laid_out.viewport,
@@ -187,6 +191,7 @@ impl ReaderSession {
             TouchPhase::Started => {
                 self.swipe_sealed = false;
                 self.swipe = Some(SwipeTrack {
+                    from: at,
                     at,
                     ..SwipeTrack::default()
                 });
@@ -235,6 +240,14 @@ impl ReaderSession {
         }
         track.dx += step_x;
         track.dy += step_y;
+        // 手指此刻在哪：跟着每一步更新，折页那一档的折线就是靠它转的。
+        let grip = match (track.from, track.at) {
+            (Some(from), Some(at)) => Some(turn_animation::Grip::new(from, at)),
+            _ => None,
+        };
+        if let (Some(grip), Some(turn)) = (grip, self.turn.as_mut()) {
+            turn.grip = Some(grip);
+        }
         let (dx, dy) = (track.dx, track.dy);
         if track.claim.is_none() {
             match self.claim_swipe(dx, dy, cx) {
@@ -261,8 +274,8 @@ impl ReaderSession {
         let Some((axis, intent)) = track.claim else {
             return SwipeStep::Swallow;
         };
-        // 轴归动画档：这里拿到的轴**就是**认领时用的那根，`dist` 也按它量。
-        let Some((_, dist, rtl)) = self.swipe_geometry(cx) else {
+        // 距离按**这一笔自己的轴**量（折页可能是一笔竖着划的）。
+        let Some((_, dist, rtl)) = self.swipe_geometry(cx, axis) else {
             return SwipeStep::Swallow;
         };
         let along = travel(toward(axis, rtl, track.dx, track.dy), intent);
@@ -288,12 +301,9 @@ impl ReaderSession {
         let Some(drag) = dominant(dx, dy) else {
             return Claim::Refused;
         };
-        let Some((page_axis, _, rtl)) = self.swipe_geometry(cx) else {
+        let Some((drag, _, rtl)) = self.swipe_geometry(cx, drag) else {
             return Claim::Refused;
         };
-        if drag != page_axis {
-            return Claim::Refused;
-        }
         let Some(intent) = TurnIntent::from_delta(toward(drag, rtl, dx, dy).signum() as isize)
         else {
             return Claim::Refused;
@@ -334,8 +344,12 @@ impl ReaderSession {
                 leaving: Some(leaving),
                 arriving: Some(arriving),
                 forward: intent == TurnIntent::Next,
-                // 折页那一档要从**手指按下的那个角**卷起来。
-                finger: self.swipe.and_then(|track| track.at),
+                // 折页那一档：起折的角看按下点，折线看手指此刻的位置。
+                grip: self.swipe.and_then(|track| {
+                    track
+                        .from
+                        .map(|from| turn_animation::Grip::new(from, track.at.unwrap_or(from)))
+                }),
                 run: TurnRun::Following { t: 0.0 },
                 ..Default::default()
             },
@@ -365,7 +379,7 @@ impl ReaderSession {
             self.turn(intent, cx);
             return true;
         }
-        let Some((_, dist, rtl)) = self.swipe_geometry(cx) else {
+        let Some((_, dist, rtl)) = self.swipe_geometry(cx, axis) else {
             self.cancel_turn();
             return true;
         };

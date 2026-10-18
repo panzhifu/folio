@@ -2797,8 +2797,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34f61c1cfd36fc9c436af09308c963822ae27a45a84feb21a77ba5c9e051f1c0"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2806,6 +2804,7 @@ dependencies = [
  "async-task",
  "backtrace",
  "bitflags 2.13.2",
+ "bytemuck",
  "chrono",
  "ctor",
  "derive_more",
@@ -3238,7 +3237,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-pre-wgpu?rev=617a93340cd282e859a75e6fc710f735b8c17b6c#617a93340cd282e859a75e6fc710f735b8c17b6c"
 dependencies = [
  "anyhow",
  "bytemuck",

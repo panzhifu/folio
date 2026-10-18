@@ -399,6 +399,10 @@ impl ReaderSession {
         };
         // 手势层：翻页那一趟（跟手 / 松手 / 惯性尾巴 / 轴不对）全在这里结账。
         // `Ignore` 才是「这一笔不归我」—— 连续滚动里手指带着内容走的那一段。
+        // 手指此刻的位置先进跟踪态：折页那一档每一步都要按它重算折线。
+        if let (Some(at), Some(track)) = (at, self.swipe.as_mut()) {
+            track.at = Some(at);
+        }
         if self.swipe_scroll(event.touch_phase, dx, dy, wheel, at, cx) != SwipeStep::Ignore {
             crate::ui::features::reader::model::perf::scroll_end(
                 __gap_us,

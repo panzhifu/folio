@@ -42,7 +42,7 @@ use slide::Slide;
 use slide_up::SlideUp;
 
 pub(in crate::ui::features::reader) use geometry::{
-    Area, Axis, Crease, Cut, Poly, Shade, Shades, Sheet, Tint,
+    Area, Axis, Crease, Cut, Grip, Poly, Shade, Shades, Sheet, Tint,
 };
 
 /// 一档翻页动画。
@@ -60,23 +60,27 @@ pub(in crate::ui::features::reader) trait PageTurnStyle:
     ///
     /// 只有折页那一档用得上：别的档纸是整张平移/覆盖的，起点在哪儿都不改变几何。默认实现
     /// 直接转给 [`Self::sheets`]，所以那几档一个字都不用改。
-    fn sheets_at(
-        &self,
-        t: f32,
-        forward: bool,
-        area: Area,
-        _finger: Option<(f32, f32)>,
-    ) -> [Sheet; 2] {
+    fn sheets_at(&self, t: f32, forward: bool, area: Area, _grip: Option<Grip>) -> [Sheet; 2] {
         self.sheets(t, forward, area)
     }
 
     /// [`Self::shades`] 的带锚点版本，同上。
-    fn shades_at(&self, t: f32, forward: bool, area: Area, _finger: Option<(f32, f32)>) -> Shades {
+    fn shades_at(&self, t: f32, forward: bool, area: Area, _grip: Option<Grip>) -> Shades {
         self.shades(t, forward, area)
     }
 
     /// 量距离、摆位移沿哪根轴。
     fn axis(&self) -> Axis;
+
+    /// 这根轴上的拖动算不算「翻页」。
+    ///
+    /// 默认只认 [`Self::axis`] 那一根（平移/覆盖/上下平移都是整张纸沿轴走，斜着划没有意义）。
+    /// **折页两轴都认**：它的折线是「角 ↔ 手指」的垂直平分线，斜着划本来就对 —— 而且
+    /// 手机上没人会横着平移手指，从右下角往左上划才是真实手势。从前它只认横轴，
+    /// 于是斜划被判成「竖向拖动」直接让开，读者的读数是「不跟手 / 根本翻不动」。
+    fn claims(&self, axis: Axis) -> bool {
+        axis == self.axis()
+    }
 
     /// `t` ∈ [0,1] —— 已经过完缓动，0 是刚起步、1 是走完；`forward` = 沿读书顺序往后。
     /// 给回 `[进场, 出场]` 两张纸。
