@@ -1,5 +1,5 @@
 //! 界面语言：`Locale` 是「用户选了哪种语言」这件事的表示，
-//! 文案本身在 `locales/{en,zh-CN,ja}.toml`（一门语言一份，**文件名就是语言标签**），
+//! 文案本身在 `locales/<语言标签>.toml`（一门语言一份，**文件名就是语言标签**），
 //! 由 `rust_i18n` 在编译期嵌进来（见 `lib.rs` 的 `i18n!`）。
 //!
 //! 文案表在 **crate 根**的 `locales/`，不在这个目录里：宏的路径是相对
@@ -8,11 +8,11 @@
 //! 为什么交给库而不是自己写一张表：`rust-i18n` 就是 gpui-kit 组件层自己在用的那套
 //! （`gpui-component/src/lib.rs` 里一句 `i18n!("locales", fallback = "en")`），
 //! 用它意味着 `Settings` 搜索框、下拉框这些框架文案能和 Folio 的文案同步切换，
-//! 而且加一条文案只是往三份 TOML 各加一行，不用同时改枚举、`ALL` 数组和三列大表。
+//! 而且加一条文案只是往每份 TOML 各加一行，不用同时改枚举、`ALL` 数组和一张按语言分列的大表。
 //!
 //! 两个必须知道的取舍：
 //! - **key 写错不再是编译期错误**。库里查不到的 key 会原样显示成 `page.foo`，
-//!   看得见但太晚，所以本文件的 `tests` 模块会拿三种语言的 key 集合互相比对。
+//!   看得见但太晚，所以本文件的 `tests` 模块会拿各门语言的 key 集合互相比对。
 //! - **全局只有一份 locale**（`rust_i18n::set_locale`）。真正的来源仍是
 //!   `Config.language.locale`，改配置的人负责同步一次（见 `ConfigHolder`）。
 
@@ -22,8 +22,13 @@ use serde::{Deserialize, Serialize};
 
 /// 界面语言。`Default` 是简体中文：这个项目的正文排版以中文书为第一目标。
 ///
+/// `ALL` 里的顺序就是语言下拉框里的顺序：本项目的主要读者群在前（简中、繁中、英文、日文、
+/// 韩文），欧洲语言按字母跟在后面。加一门语言要做两件事 —— 往 `locales/` 放一份以语言标签
+/// 命名的 TOML，在这里加一个变体并把 `code()` / `endonym()` / `parse()` / `plural()` 的分支
+/// 补齐。少放那份 TOML 不会静默少一种语言：`every_language_carries_the_same_keys` 会直接报错。
+///
 /// **JSON 形式由下面的 `Serialize` / `Deserialize` 手写，不用 derive。** derive 会把
-/// 变体名（`En` / `ZhHans`）当唯一合法值，而界面上、`locales/` 那三份的文件名里、
+/// 变体名（`En` / `ZhHans`）当唯一合法值，而界面上、`locales/` 那些文件的文件名里、
 /// 以及 `code()` 给的标签都是 `en` / `zh-CN` / `ja` —— 读者照自己看到的写法手改
 /// `config.json` 就会读失败。失败在这里不是小事：`Config::load_from` 读不出来时会把
 /// **整节** `language` 退回默认值（简体中文），于是读者刚选的语言被无声改掉，
@@ -32,12 +37,18 @@ use serde::{Deserialize, Serialize};
 pub enum Locale {
     #[default]
     ZhHans,
+    ZhHant,
     En,
     Ja,
+    Ko,
+    Fr,
+    De,
+    Es,
+    Ru,
 }
 
 impl Serialize for Locale {
-    /// 存出去的必须是 `code()`：与界面上的标签、与 `locales/` 那三份的文件名同一形态。
+    /// 存出去的必须是 `code()`：与界面上的标签、与 `locales/` 那个文件名同一形态。
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.code())
     }
@@ -47,7 +58,10 @@ impl<'de> Deserialize<'de> for Locale {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
         Locale::from_label(&raw).ok_or_else(|| {
-            serde::de::Error::custom(format!("不认识的语言 {raw:?}；可用的是 zh-CN / en / ja"))
+            // 可用清单从 `ALL` 现取。这里曾经硬编码成 `zh-CN / en / ja`：那句话是读者手改
+            // 配置出错时唯一能看到的提示，语言加过去了而提示没跟上，等于把可用值说错。
+            let available = Locale::available_labels();
+            serde::de::Error::custom(format!("不认识的语言 {raw:?}；可用的是 {available}"))
         })
     }
 }
@@ -63,17 +77,58 @@ fn normalize(input: &str) -> String {
         .collect()
 }
 
-impl Locale {
-    pub const ALL: &'static [Locale] = &[Locale::ZhHans, Locale::En, Locale::Ja];
+/// `zh` 打头的标签里挑简体还是繁体：后面的子签出现 `hant*` / `tw` / `hk` / `mo` 就算繁体，
+/// 其余（`hans` / `cn` / `sg` / `my`，以及光秃秃的 `zh`）算简体。
+///
+/// 这一步不能省成「`zh` 前缀一律简体」：`zh-TW`、`zh-HK` 是现实里会有人手写进配置或系统
+/// 语言里给出的标签，折成简体等于把看得懂繁体的人无声降级 —— 而这一节要是读失败，退回的
+/// 还是简体中文，一句反馈都没有（见 `Deserialize`）。裸 `zh` 没有别的线索可依据，仍走简体。
+fn chinese_variant(tag: &str) -> Locale {
+    let traditional = tag
+        .split('-')
+        .skip(1)
+        .any(|part| part.starts_with("hant") || matches!(part, "tw" | "hk" | "mo"));
+    if traditional {
+        Locale::ZhHant
+    } else {
+        Locale::ZhHans
+    }
+}
 
-    /// 宽松到「凡是人能写出来的形式都认」：`en`、`en-US`、`EN_us`、以及 BCP-47 的
-    /// `zh-Hans-CN`。老配置文件里还可能是 derive 时代的 serde 变体名 `En` / `ZhHans`，
+impl Locale {
+    /// 下拉框、错误提示与测试遍历用的全部语言。前面是本项目的主要读者群，
+    /// 后面按语言自己的名字排 —— 这个顺序就是界面上看得到的顺序。
+    pub const ALL: &'static [Locale] = &[
+        Locale::ZhHans,
+        Locale::ZhHant,
+        Locale::En,
+        Locale::Ja,
+        Locale::Ko,
+        Locale::Fr,
+        Locale::De,
+        Locale::Es,
+        Locale::Ru,
+    ];
+
+    /// 可用语言标签的清单，供报错与日志用：由 [`Locale::ALL`] 现拼，
+    /// 这样加一门语言不用再改第二处文案。
+    pub fn available_labels() -> String {
+        Locale::ALL
+            .iter()
+            .map(|locale| locale.code())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+
+    /// 宽松到「凡是人能写出来的形式都认」：`en`、`en-US`、`EN_us`、BCP-47 的
+    /// `zh-Hans-CN`、`ko_KR`、`ru-RU`，以及繁体中文的 `zh-TW` / `zh-Hant-HK`。
+    /// 老配置文件里还可能是 derive 时代的 serde 变体名 `En` / `ZhHans`，
     /// 语言自己的名字 `English` / `简体中文` 同样认 —— 那些文件必须继续读得出来，
     /// 读失败的那一节会退回默认值（简体中文），等于把读者选过的语言无声改掉
     /// （见上面的 `Deserialize` 与 `config.rs::salvage`）。
     ///
-    /// 与 [`Locale::parse`] 的区别只在覆盖面：`parse` 只认 `zh`/`en`/`ja` 打头的
-    /// 前缀写法（BCP-47 标签就够它认），这里还要认变体名和本族名。
+    /// 与 [`Locale::parse`] 的区别只在覆盖面：`parse` 认的是语言标签那种写法
+    /// （BCP-47 的子签就够它判），这里还要认变体名和本族名。
     pub fn from_label(input: &str) -> Option<Locale> {
         if let Some(found) = Locale::parse(input) {
             return Some(found);
@@ -105,31 +160,88 @@ impl Locale {
         }
     }
 
-    /// 宽松解析：`zh`、`zh_CN`、`zh-Hans-CN`、`en_US`、`ja_JP` 都能认。
+    /// 宽松解析：`zh`、`zh_CN`、`zh-Hans-CN`、`zh_TW`、`en_US`、`ja_JP`、`ko_KR`、`ru-RU` 都能认。
     pub fn parse(input: &str) -> Option<Locale> {
         let s = input.trim().to_ascii_lowercase().replace('_', "-");
         let head = s.split('-').next().unwrap_or("");
         match head {
-            "zh" => Some(Locale::ZhHans),
+            "zh" => Some(chinese_variant(&s)),
             "en" => Some(Locale::En),
             "ja" => Some(Locale::Ja),
+            "ko" => Some(Locale::Ko),
+            "fr" => Some(Locale::Fr),
+            "de" => Some(Locale::De),
+            "es" => Some(Locale::Es),
+            "ru" => Some(Locale::Ru),
             _ => None,
         }
     }
 
-    /// 该语言里 `n` 是否用「单数」那条文案。中日文没有单复数形态变化。
+    /// `n` 在这个语言里归哪一类复数 —— 决定取文案表里 `_one` / `_few` / `_many` / `_other`
+    /// 后缀的那一条。
     ///
-    /// rust-i18n 4 不做复数，所以「选哪条文案」这件事留在这里由我们判断。
-    pub fn plural_one(self, n: usize) -> bool {
+    /// 判据取 CLDR 的整数规则，不是「只有英文有单复数」：`fr` 把 0 也算单数（`0 livre`，
+    /// 但 `2 livres`），`ru` 更是要三类 —— 一本书 `книга`、两本 `книги`、五本 `книг`，
+    /// 只备两条文案必然有一句是错话。中文（繁简）、日文、韩文没有数的形态变化，恒为 `Other`。
+    ///
+    /// rust-i18n 4 不做复数，所以「选哪一条」这件事留在这里由我们自己判。
+    pub fn plural(self, n: usize) -> Plural {
+        let m10 = n % 10;
+        let m100 = n % 100;
         match self {
-            Locale::En => n == 1,
-            Locale::ZhHans | Locale::Ja => false,
+            Locale::ZhHans | Locale::ZhHant | Locale::Ja | Locale::Ko => Plural::Other,
+            Locale::En | Locale::De | Locale::Es => {
+                if n == 1 { Plural::One } else { Plural::Other }
+            }
+            Locale::Fr => {
+                if n == 0 || n == 1 { Plural::One } else { Plural::Other }
+            }
+            // 三条按 CLDR 的顺序判：先 one，再 few，再 many，剩下的 other。
+            // 落不到前三条的俄语 `n` 只有「十分位是 1 且 11~14 之外」这一族的补集，
+            // 而那条已经在 `One` 用掉 —— 留 `Other` 是为了这个 `match` 保持穷举，
+            // 实际取值范围里它是不可达的一臂。
+            Locale::Ru if m10 == 1 && m100 != 11 => Plural::One,
+            Locale::Ru if (2..=4).contains(&m10) && !(12..=14).contains(&m100) => Plural::Few,
+            Locale::Ru if m10 == 0 || (5..=9).contains(&m10) || (11..=14).contains(&m100) => {
+                Plural::Many
+            }
+            Locale::Ru => Plural::Other,
         }
+    }
+
+    /// 该语言里 `n` 是否用「单数」那一条文案。俄语的 `Few` / `Many` 不在这里 ——
+    /// 要选到那两条得用 [`Locale::plural`]。
+    pub fn plural_one(self, n: usize) -> bool {
+        self.plural(n) == Plural::One
     }
 
     /// 把当前选择推给 `rust_i18n` 的全局 locale（框架组件读同一个值）。
     pub fn apply(self) {
         rust_i18n::set_locale(self.code());
+    }
+}
+
+/// CLDR 的整数复数类别，只列文案表里真备了文案的那四种。
+///
+/// 没有 `Two`（斯洛文尼亚语、马耳他语那一类要用）：本项目还没这些语言，多加一臂只会让
+/// 「哪个后缀背后真有文案」这件事变成猜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Plural {
+    One,
+    Few,
+    Many,
+    Other,
+}
+
+impl Plural {
+    /// 文案键的后缀：`Plural::Few` 就是 `reader.book_count_few` 里那一段。
+    pub fn key_suffix(self) -> &'static str {
+        match self {
+            Plural::One => "one",
+            Plural::Few => "few",
+            Plural::Many => "many",
+            Plural::Other => "other",
+        }
     }
 }
 

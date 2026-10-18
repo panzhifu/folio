@@ -350,7 +350,9 @@ mod tests {
     #[test]
     fn a_tile_carries_the_head_of_its_group_and_the_whole_count() {
         let store = Store::in_memory().unwrap();
-        let ids: Vec<i64> = (0..5).map(|ix| book(&store, &format!("{ix}.epub"))).collect();
+        let ids: Vec<i64> = (0..5)
+            .map(|ix| book(&store, &format!("{ix}.epub")))
+            .collect();
         let full = store.create_collection("满的").unwrap();
         let empty = store.create_collection("空的").unwrap();
         for id in &ids {
@@ -364,7 +366,10 @@ mod tests {
             "空的那组也要有一条 —— 它排在后面是因为名字的字字节序在后"
         );
         let (group, head) = &tiles[0];
-        assert_eq!(group.book_count, 5, "下面那行念的是整组，不是卡上画得下的那几本");
+        assert_eq!(
+            group.book_count, 5,
+            "下面那行念的是整组，不是卡上画得下的那几本"
+        );
         assert_eq!(head.len(), 2, "卡上只装得下两格");
         // 组内那条「最近放进去的在先」（`shelf_in_collection_in` 的 `added_at DESC`）：
         // 卡上那几本就是最后丢进来的那几本。
