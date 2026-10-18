@@ -163,13 +163,6 @@ impl ReaderSession {
         (dist > 0.0).then(|| (axis, dist, self.progression_rtl()))
     }
 
-    /// 这一屏现在是不是有一笔拖动还开着（含已经松手、惯性还没走完的那一段）。
-    ///
-    /// 滚轮那一臂用它分辨「这是读者的滚轮」与「这是上一笔的惯性」。
-    pub(in crate::ui::features::reader) fn swipe_open(&self) -> bool {
-        self.swipe.is_some() || self.swipe_sealed
-    }
-
     /// 滚动那一路的一步增量落到跟手翻页。`step_x` / `step_y` 是**这一帧走的那一段**，
     /// 累计由这一层自己做（[`SwipeTrack`]）。
     ///
