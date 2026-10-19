@@ -10,7 +10,7 @@
 //! `cfg(test)` 里编译。
 
 use super::typeset;
-use crate::content::format::css::computed::TextAlign;
+use crate::content::format::css::computed::{TextAlign, WritingMode};
 use crate::layout::geometry::scan_reference;
 use crate::layout::{BlockBox, DecorSeed, Layout, LineBox};
 
@@ -41,6 +41,12 @@ fn block(node: u32, lines: std::ops::Range<usize>, border_box: bool) -> BlockBox
         lines,
         border_box,
     }
+}
+
+/// 横排那一档的组装入口。这一片测试的手拼表全是横排，所以轴那一格由这里默认给，
+/// 竖排的用例直接调 `Layout::assemble` 并把轴写明白 —— 一根轴要看得见，才看得出是谁错了。
+fn assemble(blocks: Vec<BlockBox>, lines: Vec<LineBox>, width: f32, height: f32) -> Layout {
+    Layout::assemble(blocks, lines, width, height, WritingMode::HorizontalTb)
 }
 
 /// 真排一章版：标题 + 嵌套容器 + 强调 + 引用 + 尾段，行盒与块盒都够多，边界也自然。
@@ -203,7 +209,7 @@ fn a_degenerate_band_falls_back_to_every_line() {
 #[test]
 fn unstacked_lines_fall_back_to_the_scan_and_stay_right() {
     // 故意把第二条摆在第一条上面：`stacked` 一量就是假。
-    let layout = Layout::assemble(
+    let layout = assemble(
         vec![block(7, 0..2, true), block(9, 1..2, true)],
         vec![line(7, 100.0, 20.0), line(9, 10.0, 20.0)],
         100.0,
@@ -234,7 +240,7 @@ fn unstacked_lines_fall_back_to_the_scan_and_stay_right() {
 /// 表里留的是**后入表**那一条 —— 与接线前那句 `blocks.iter().rev().find(...)` 同一条规则。
 #[test]
 fn the_later_registration_of_a_range_keeps_the_slot() {
-    let layout = Layout::assemble(
+    let layout = assemble(
         vec![block(3, 0..1, true), block(3, 0..1, false)],
         vec![line(3, 0.0, 18.0)],
         100.0,
@@ -250,7 +256,7 @@ fn the_later_registration_of_a_range_keeps_the_slot() {
 /// 祖先包含子孙的区间时，叶子块赢：这正是「底色画在段上而不是整篇上」那条规则。
 #[test]
 fn the_deepest_block_wins_a_shared_line() {
-    let layout = Layout::assemble(
+    let layout = assemble(
         vec![
             block(1, 0..3, true), // <div>：三行都算它的
             block(2, 0..2, true), // <p>：前两行
@@ -277,7 +283,7 @@ fn the_deepest_block_wins_a_shared_line() {
 /// 零行盒的表（轻量排版、空章）：折表是空的，三条查询都不许 panic。
 #[test]
 fn a_layout_without_lines_still_answers_every_query() {
-    let empty = Layout::assemble(vec![block(1, 0..0, true)], Vec::new(), 260.0, 40.0);
+    let empty = assemble(vec![block(1, 0..0, true)], Vec::new(), 260.0, 40.0);
     assert!(empty.lines.is_empty());
     assert!(empty.stacked(), "零行的表当然算叠放");
     assert!(empty.line_at(0.0).is_none());
@@ -390,7 +396,7 @@ fn the_decor_table_matches_the_per_frame_full_scan() {
     // 节点 5 有样式但什么装饰都没写 —— 不该进表。
     let plain = ComputedStyle::default();
 
-    let layout = Layout::assemble(
+    let layout = assemble(
         vec![
             box_at(1, 0.0, 120.0, true),   // 底色
             box_at(2, 120.0, 300.0, true), // 下边框，色走 currentColor
@@ -430,7 +436,7 @@ fn each_decor_filter_still_fires_on_its_own() {
         background_color: Some(Color(1, 2, 3)),
         ..ComputedStyle::default()
     };
-    let one = |b: BlockBox| Layout::assemble(vec![b], Vec::new(), 336.0, 600.0);
+    let one = |b: BlockBox| assemble(vec![b], Vec::new(), 336.0, 600.0);
     let sheet = decorated(&[(1, bg.clone()), (2, bg)]);
 
     assert_eq!(one(box_at(1, 0.0, 50.0, true)).decor_seeds(&sheet).len(), 1);
@@ -460,4 +466,37 @@ fn each_decor_filter_still_fires_on_its_own() {
             .decor_seeds(&bare)
             .is_empty()
     );
+}
+
+/// 推进轴上那三句，横排下必须**逐字**等于它们取代掉的那两个字段。
+///
+/// 「把轴收到一个入口」这一刀的验收就是这一句：整片改动不该动任何一个数，所以这里不挑
+/// 期望值，而是把每一条行盒都拿去与 `line.y` / `line.height` 比 —— 上面那几条参照实现
+/// 的门比的是「快路径与慢路径一致」，比不出「新入口与旧字段一致」。
+///
+/// 竖排那一刀改这些 bodies 时这一条一定变红，那时它要**换成**「竖排下等于
+/// `extent − (x + width)` 与 `width`」，而不是顺手删掉。
+#[test]
+fn the_flow_accessors_are_the_horizontal_fields() {
+    let layout = a_real_layout();
+    for line in &layout.lines {
+        assert_eq!(layout.flow_start(line), line.y, "推进轴起点 = 行顶");
+        assert_eq!(layout.flow_thickness(line), line.height, "厚度 = 行高");
+        assert_eq!(
+            layout.flow_end(line),
+            line.y + line.height,
+            "底边 = 起点 + 厚度"
+        );
+    }
+
+    // 零高行盒走的是同一条式子（`flow_end` 是折出来的，不是第三个字段），
+    // 所以这里不该出现「height 为 0 时底边读成了别的」。
+    let flat = assemble(
+        vec![block(1, 0..1, true)],
+        vec![line(1, 12.0, 0.0)],
+        260.0,
+        40.0,
+    );
+    let only = &flat.lines[0];
+    assert_eq!(flat.flow_end(only), flat.flow_start(only));
 }

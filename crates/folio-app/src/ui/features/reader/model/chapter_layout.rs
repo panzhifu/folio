@@ -21,7 +21,7 @@ use folio_core::content::anchor::{CharLines, TextMap};
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::dom::{Dom, NodeId};
 use folio_core::content::format::css::computed::{
-    Color, ComputedStyle, Length, StyledDom, TextAlign, cascade,
+    Color, ComputedStyle, Length, StyledDom, TextAlign, WritingMode, cascade,
 };
 use folio_core::content::format::css::{Origin, RuleSet};
 use folio_core::content::hit::Hit;
@@ -206,6 +206,17 @@ pub struct Document {
     /// （作业照跑完，结果没人收；队列单线程 FIFO，天然不会堆积）。
     pending: Option<(LayoutKey, TaskHandle<Typeset>)>,
     layout: Layout,
+    /// 这一章的 CSS 自己有没有声明竖排。**纯样式事实**，与读者用哪种阅读模式无关。
+    ///
+    /// 为什么只能在排版之后才知道：轴写在书的 CSS 里，而 CSS 要到后台作业里才层叠。
+    /// 于是第一遍按横排排（那一趟的折行宽就是栏宽），`apply_typeset` 读出问题、
+    /// 把这一格订正，下一帧 `ensure_viewport` 用**列长**当折行宽重排一次。
+    /// 横排的书一次就到位（这一格恒为 `false`，不会多派作业）；竖排的书每章多一次排版，
+    /// 换来的是「界面不需要预先知道这本书是什么轴」。
+    ///
+    /// 生效还多一个条件：只有**分页**那一档真按竖排排（`paged && wants_vertical`），
+    /// 理由记在 `folio_core::layout::LayoutOptions::allow_vertical` 上。
+    wants_vertical: bool,
     /// 层叠结果。分片要读块级的 `break-*` 与 orphans/widows，而这些只在层叠之后存在，
     /// 所以它跟排版结果同批算、同批存，不在分片时重来一遍。
     styles: Option<StyledDom>,
@@ -398,6 +409,10 @@ struct TypesetInput {
     /// 这一趟要算的那把键；排版宽度取键里量化后的 `width`，别在传一个未量化的数进来，
     /// 那样「键相同而版心差半像素」的两次排版会互相复用缓存。
     key: LayoutKey,
+    /// 允许按书声明的竖排排吗。界面给的分页档 + 那一章 CSS 的合取，
+    /// 与键里的 `width` 必须同批决定（横排喂栏宽、竖排喂列长）——
+    /// 见 `folio_core::layout::LayoutOptions::allow_vertical`。
+    allow_vertical: bool,
     /// 这一章正文的来路。`Arc` 克隆，不是整章文本克隆 —— 界面每投一次作业从前都要
     /// `self.source.clone()` 搬一整章过去，现在搬的是一个引用计数。
     source: Arc<ChapterSource>,
@@ -478,6 +493,8 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
             width: input.key.width as f32,
             // 完整排版：界面要行盒来摆字，不能用只算高的轻量档。
             light: false,
+            // 与键里的 `width` 同批决定：竖排那一档喂的是列长，见 `ensure_viewport`。
+            allow_vertical: input.allow_vertical,
         },
         &measure,
         input.images.as_ref(),
@@ -635,6 +652,7 @@ impl Document {
             desired: None,
             pending: None,
             layout: Layout::default(),
+            wants_vertical: false,
             styles: None,
             fragmented: None,
             decorated: Rc::new(Vec::new()),
@@ -684,6 +702,14 @@ impl Document {
     ///
     /// 它与章文本无关，所以**不进 `ChapterArtifacts`**（那一份按内容哈希复用，
     /// 掺进偏好就等于把偏好烘进了缓存），每次作业现拼一条。
+    ///
+    /// 竖排那一格现在不从读者偏好来：`writing-mode` 只认书自己写的（层叠已接住，
+    /// 排版层还没读，见 `css::computed::WritingMode`）。将来要读者强制竖排，落点是
+    /// 这一层而不是 [`root_base`](Self::root_base) —— 根样式只是继承的种子，书在
+    /// `<html>` 上写一条 `writing-mode: horizontal-tb` 就能把它压掉；读者层要赢过作者声明
+    /// 得带 `!important`（`(Origin::Reader, true)` 折成 `CascadeLevel::ReaderImportant`，
+    /// 那一档排在作者普通层之上，见 `css::mod` 的层叠级别表）。缓存那一级
+    /// 不用动：`prefs_hash` 折的是**整份** `Reader`，加一格偏好自动换键。
     fn reader_rules(prefs: &Reader) -> RuleSet {
         let gap = prefs.paragraph_gap_em;
         // 固定三位小数：滑条的步长到不了第四位，而写全精度会让同一段距在不同机器上
@@ -985,7 +1011,14 @@ impl Document {
 
     /// 整章的内容总高（像素），滚动范围由它算。
     pub fn height(&self) -> f32 {
-        self.layout.height
+        // 沿**推进轴**的整章长度：横排就是 `layout.height`（一行行往下叠），竖排是
+        // `layout.width`（一列列往左叠）。这一格喂的是「切片 / 进度 / 跳转」那一类
+        // 「这本书还剩多少」的问句，它们问的从来都是沿阅读方向走了多远。
+        if self.layout.vertical() {
+            self.layout.width
+        } else {
+            self.layout.height
+        }
     }
 
     /// 版心宽度 = 视口宽 − `pane_reserve` − 左右页边距。
@@ -1033,6 +1066,7 @@ impl Document {
     fn request_typeset(
         &mut self,
         key: LayoutKey,
+        allow_vertical: bool,
         texts: Arc<TextSystem>,
         window_texts: Arc<WindowTextSystem>,
     ) {
@@ -1049,6 +1083,7 @@ impl Document {
         let input = TypesetInput {
             blocks: std::mem::take(&mut self.blocks),
             key,
+            allow_vertical,
             source: self.source.clone(),
             artifacts: self.artifacts.clone(),
             rules: Arc::clone(&self.rules),
@@ -1127,6 +1162,13 @@ impl Document {
         // 装饰表与这一代排版结果同批折：`layout` 与 `styles` 一到，表就是它们的函数，
         // 之后每帧只裁短表（`Scene::build` 那条路）。
         self.decorated = Rc::new(out.layout.decor_seeds(&out.styles));
+        // 轴是样式事实，只有层叠之后才看得见：这里读一次，下一帧的折行宽就喂对了。
+        // 读的必须是**这一代**的样式表，而 `body` 与排版作业用的是同一个来路（`body_of`）。
+        let wants = out
+            .styles
+            .get(body_of(&self.artifacts.dom))
+            .is_some_and(|style| style.writing_mode != WritingMode::HorizontalTb);
+        self.wants_vertical = wants;
         self.styles = Some(out.styles);
         self.layout = out.layout;
         self.applied = Some(out.key);
@@ -1161,20 +1203,41 @@ impl Document {
         cx: &mut App,
         viewport: Viewport,
     ) -> f32 {
-        let columns = viewport.columns.max(1);
+        let paged = viewport.height > 0.0;
+        // 竖排要三样同时成立：书自己声明了（那一格是排完才知道的）、读者在用分页、
+        // 而且是**单栏**。双页对开那一档这里不当竖排：切片按 `columns=1` 切、界面按
+        // `columns=2` 取片会互相取错页，而「一页两栏各装几列」本来就是竖排没接的那件事。
+        // 连续滚动不转轴的理由记在 `LayoutOptions::allow_vertical`。
+        let vertical = paged && viewport.columns.max(1) == 1 && self.wants_vertical;
+        let columns = if vertical { 1 } else { viewport.columns.max(1) };
         let total = Self::content_width(window, &self.prefs, viewport.reserve);
-        let width = column_width(total, columns, viewport.gap).max(1.0);
+        // 折行永远发生在**内联轴**上，切片永远沿**推进轴**切，两根轴在竖排里对调：
+        // 横排喂栏宽、切片量页高；竖排喂列长（= 可用高）、切片量页宽。而「一页几栏」在
+        // 竖排里就是「一页几列」，那是分片器按列厚塞出来的，不是界面给的数 —— 所以给 1。
+        let (wrap, slice) = if vertical {
+            (viewport.height.max(1.0), total)
+        } else {
+            (
+                column_width(total, columns, viewport.gap).max(1.0),
+                viewport.height,
+            )
+        };
         // 键在这里算，算是「这一帧想要什么」的唯一表述：排版、切片、绘制三级都从它出发。
-        let key = self.layout_key(width, columns);
+        let key = self.layout_key(wrap, columns);
         let width = key.width as f32;
-        // 片高同样量化一档，且**切片用的就是量化后的那个数**：排版按 A 宽折行、切片按 B 高切、
+        // 片长同样量化一档，且**切片用的就是量化后的那个数**：排版按 A 宽折行、切片按 B 高切、
         // 绘制按 C 摆，三方都以为自己对，其实是三方各对（`quantize_px` 那条纪律的另一半）。
-        let slice_height = quantize_px(viewport.height.max(0.0));
+        let slice_height = quantize_px(slice.max(0.0));
         let height = slice_height as f32;
         self.desired = Some(key);
         // 先收上一帧的作业成果，再看要不要派新活 —— 顺序反了会把刚回来的结果当旧的丢掉。
         self.poll_typeset();
-        self.request_typeset(key, cx.text_system().clone(), window.text_system().clone());
+        self.request_typeset(
+            key,
+            vertical,
+            cx.text_system().clone(),
+            window.text_system().clone(),
+        );
         // 作业在飞就必须再要一帧：`poll_typeset` 只有渲染帧会调，而后台那一份完成时
         // 没有任何人知道。不主动要帧的话，「排版早就排好了、屏上却一个字都没有」会一直
         // 挂着，直到读者随手碰一下屏幕 —— 平板上尤其明显（没有键盘与鼠标带来的零散重绘）。

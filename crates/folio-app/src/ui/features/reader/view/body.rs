@@ -539,6 +539,9 @@ impl Render for ReaderSession {
                             lines,
                             local,
                             band.start - placed.base_y,
+                            // 连续滚动不分片，也就永远不走竖排（`allow_vertical` 那一档），
+                            // 长度这一格在横排那条路里根本不参与，递整章的长只为读起来不心虚。
+                            doc.height(),
                             self.prefs.margin_x,
                             self.header_reserve,
                             foreground,
@@ -956,6 +959,7 @@ impl Render for ReaderSession {
                                 slice.lines.clone(),
                                 slice.origin_y..(slice.origin_y + slice.height + 1.0),
                                 slice.origin_y,
+                                slice.height,
                                 x,
                                 top,
                                 foreground,
@@ -1096,6 +1100,8 @@ impl Render for ReaderSession {
                         sub,
                         self.prefs.margin_x,
                         band_top,
+                        // 连续滚动永远走横排（竖排只在分页那一档落地），长度这一格不参与。
+                        band_bottom - band_top,
                         self.header_reserve,
                         band_top..band_bottom,
                         &mut visual.highlights,
@@ -1137,7 +1143,10 @@ impl Render for ReaderSession {
                                 + column_offset(width, gap, slice.column)
                                 + self.page_shift.0,
                             slice.origin_y,
+                            slice.height,
                             self.header_reserve + self.page_shift.1,
+                            // 带说的是推进轴：递分片自己那一段，比从首末行盒再折一次准，
+                            // 而横排下这两个数是同一个区间（片的长就是末行底减首行顶）。
                             first_box.y..(last_box.y + last_box.height),
                             &mut visual.highlights,
                         );
@@ -1748,19 +1757,44 @@ fn highlight_rects(
     sub: std::ops::Range<usize>,
     x: f32,
     origin_y: f32,
+    // 本片沿推进轴的长度（`Fragment::height`）。连续滚动那一档递整章的长，
+    // 而竖排只存在于分页，所以那一档里这一格根本不参与。
+    flow_len: f32,
     header: f32,
+    // 可见带，说的是**推进轴**上的一段（横排 = 章内 y，竖排 = 从长条右缘往里数）。
     band: std::ops::Range<f32>,
     out: &mut Vec<Bounds<Pixels>>,
 ) {
     if sub.start >= sub.end {
         return;
     }
+    let layout = doc.layout();
+    let vertical = layout.vertical();
+    // 与 `Scene::build` 里同一个 `slide`：竖排那一档推进轴从长条右缘反着数。
+    let slide = if vertical {
+        origin_y + flow_len - layout.width
+    } else {
+        0.0
+    };
     for rect in doc.selection_rects_in_band(window, cx, sub, band.clone()) {
-        if rect.y + rect.height <= band.start || rect.y >= band.end {
+        // 重复的那一道滤，问的还是推进轴上那一段（竖排时矩形的推进轴那一格是 x）。
+        let (at, thick) = if vertical {
+            (layout.width - (rect.x + rect.width), rect.width)
+        } else {
+            (rect.y, rect.height)
+        };
+        if at + thick < band.start || at > band.end {
             continue;
         }
+        // 落位分轴：横排沿 y 减片原点，竖排沿 x 加 `slide`（推进轴从长条右缘反着数）。
+        let left = x + rect.x + if vertical { slide } else { 0.0 };
+        let top_at = if vertical {
+            rect.y + header
+        } else {
+            rect.y - origin_y + header
+        };
         out.push(Bounds::new(
-            point(px(x + rect.x), px(rect.y - origin_y + header)),
+            point(px(left), px(top_at)),
             size(px(rect.width), px(rect.height)),
         ));
     }

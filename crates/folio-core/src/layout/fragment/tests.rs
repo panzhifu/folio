@@ -103,6 +103,7 @@ fn styled(html: &str, css: &str, width: f32) -> (Layout, StyledDom) {
         LayoutOptions {
             width,
             light: false,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,

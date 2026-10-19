@@ -353,6 +353,7 @@ fn geometry(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> (usize, f32,
             LayoutOptions {
                 width: 600.0,
                 light: false,
+                allow_vertical: false,
             },
             &Mock,
             &folio_core::layout::NoImages,

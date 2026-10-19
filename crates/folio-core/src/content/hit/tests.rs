@@ -72,6 +72,7 @@ fn typeset(html: &str, css: &str, width: f32) -> Chapter {
         LayoutOptions {
             width,
             light: false,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
@@ -415,6 +416,7 @@ fn hitting_an_image_lands_after_the_previous_text() {
         LayoutOptions {
             width: 600.0,
             light: false,
+            allow_vertical: false,
         },
         &Mono,
         &OneImage,

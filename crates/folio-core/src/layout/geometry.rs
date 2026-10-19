@@ -8,7 +8,9 @@ use std::ops::Range;
 use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
 use crate::content::dom::NodeId;
-use crate::content::format::css::computed::{BorderStyle, Color, StyledDom, TextAlign};
+use crate::content::format::css::computed::{
+    BorderStyle, Color, StyledDom, TextAlign, WritingMode,
+};
 use crate::infra::metrics::Metric;
 
 /// 行盒里的一段连续同样式文本，同时带着两套坐标。
@@ -240,40 +242,226 @@ pub struct Layout {
     pub lines: Vec<LineBox>,
     pub width: f32,
     pub height: f32,
+    /// 这一份用的是哪根推进轴（CSS 的 `writing-mode`，取**根样式**那一格）。
+    ///
+    /// 竖排时 `blocks` / `lines` 里已经是**物理**坐标：[`assemble`](Self::assemble) 在折索引
+    /// 之前把引擎排好的那份逻辑横排长条整体投影了一次（见 [`transposed`]）。所以
+    /// `width` / `height` 说的也是物理那两条边，而竖排下他们对调过：`width` 是长条沿块轴的
+    /// 总长（一整串列占多宽，切片就是按它切的），`height` 是一列能排多长。
+    flow: WritingMode,
     /// 第 `i` 行属于 `blocks` 里哪一条；与 `lines` 等长，`u32::MAX` 表示没有归属
     /// （正常排版不会出现，只有手工拼的表才有）。用 `u32` 而不是 `usize`：
     /// 一万多行一章省下的是几十 KB 的整数倍。
     owner: Vec<u32>,
-    /// 行盒是否**严格叠放**：`lines[i].y + lines[i].height <= lines[i+1].y`。
+    /// 行盒是否**严格叠放**：沿推进轴上一条的底不超过下一条的顶（横排就是
+    /// `lines[i].y + lines[i].height <= lines[i+1].y`，见 [`Self::flow_start`]）。
     ///
     /// 真排版一定满足（每个块按游标一行行往下推），但「一定」是靠假设，而二分错了是
-    /// **静默答错**：屏幕上就是「点这一行选中的是别处」。所以这一格为假时，按 y 的查询
+    /// **静默答错**：屏幕上就是「点这一行选中的是别处」。所以这一格为假时，按推进轴的查询
     /// 全部退回线性扫 —— 慢一点但不会答错，也不报错（将来接负外边距 / 绝对定位那天，
     /// 症状会先在速度上出现，而不是先在读代码的人的脑子里）。
     stacked: bool,
 }
 
+/// 把引擎排好的那份**逻辑横排**长条整体投影成竖排的物理坐标。
+///
+/// **为什么是整体投影，而不是让 `collect` 直接按竖轴摆**：断行、行盒基线、shaping、
+/// 命中用的 `Measure::byte_at_x` 与 `char_edges`，全都只认「沿内联轴的一个纯量」，
+/// 它们在逻辑空间里本来就对。真要转轴就得把 `x` / `y` 这两个名字在引擎里改一遍，
+/// 还要在 `folio-app` 那三处读 `glyph.position` 的地方各分一个叉。投影只在这里发生一次。
+///
+/// **代价要说清，这一条不是免费的**：盒模型那几族边是**物理**的
+/// （`margin-top` / `padding-left` / `border[上右下左]`），转置会把它们摆到另一条边上。
+/// CSS Writing Modes 那张 logical→physical 映射表还没接，所以竖排里
+/// 「段落之间的上下留白」会变成「列与列之间的留白」，而作者写给**行**的 `margin-bottom`
+/// 会横过来。段落分开的那个方向在竖排里恰好就是列间，所以多数中文竖排本看着是对的；
+/// 一条式子内缩进的物理边（如表格、`hr`）会错到另一侧去。显式记进降级清单，别当它不存在。
+fn transposed(
+    blocks: Vec<BlockBox>,
+    mut lines: Vec<LineBox>,
+    width: f32,
+    height: f32,
+    mode: WritingMode,
+) -> (Vec<BlockBox>, Vec<LineBox>, f32, f32) {
+    // 长条沿块轴的总长 = 逻辑高；一列的长 = 逻辑宽。物理那两条边因此互换。
+    let strip = height;
+    // `vertical-rl` 的列从右往左堆：块轴反着走，所以起点要从右缘翻面数。
+    let flip = mode == WritingMode::VerticalRl;
+    // 逻辑 (x=沿字, y=沿列堆, w=沿字长, h=列厚) → 物理那四格。
+    // `baseline` 不动：它存的始终是「沿块轴从**起点边**算进去的深度」，
+    // 起点边在 rl 是列的右缘、在 lr 是左缘 —— 落地成物理 x 是 [`Layout::cross_baseline`] 的事。
+    let map = |x: f32, y: f32, w: f32, h: f32| -> (f32, f32, f32, f32) {
+        (if flip { strip - (y + h) } else { y }, x, h, w)
+    };
+    for line in &mut lines {
+        let (x, y, w, h) = map(line.x, line.y, line.width, line.height);
+        line.x = x;
+        line.y = y;
+        line.width = w;
+        line.height = h;
+    }
+    let blocks = blocks
+        .into_iter()
+        .map(|mut b| {
+            let (x, y, w, h) = map(b.x, b.y, b.width, b.height);
+            b.x = x;
+            b.y = y;
+            b.width = w;
+            b.height = h;
+            b
+        })
+        .collect();
+    (blocks, lines, strip, width)
+}
+
 impl Layout {
-    /// 组装排版结果：折「行 → 块」那张表，并量一次叠放性。
+    /// 组装排版结果：竖排先把两张表整体投影成物理坐标，然后折「行 → 块」那张表，
+    /// 并量一次沿推进轴的叠放性。
     ///
     /// 排版各条路径（[`layout`](super::layout)、两阶段的
     /// [`render_window`](super::render_window)）都从这里出去，所以索引不可能漏折。
     /// 公开它是有意的：**手工构造 `Layout` 只能走这一句**，不能拼结构体字面量 ——
     /// 索引是私有的，能拼出「有行盒但没有归属表」的排版结果就等于留了一条
     /// 「测试里过、生产里 `block_of_line` 全给 `None`」的路。测试要造表就调这个函数。
-    pub fn assemble(blocks: Vec<BlockBox>, lines: Vec<LineBox>, width: f32, height: f32) -> Self {
+    ///
+    /// `width` / `height` 传的是**逻辑**那两条边（折行宽与整章长），竖排下返回值里对调。
+    pub fn assemble(
+        blocks: Vec<BlockBox>,
+        lines: Vec<LineBox>,
+        width: f32,
+        height: f32,
+        flow: WritingMode,
+    ) -> Self {
+        let (blocks, lines, width, height) = if flow == WritingMode::HorizontalTb {
+            (blocks, lines, width, height)
+        } else {
+            transposed(blocks, lines, width, height, flow)
+        };
         let owner = fold_line_owner(&blocks, lines.len());
-        let stacked = lines
-            .windows(2)
-            .all(|pair| pair[0].y + pair[0].height <= pair[1].y);
-        Self {
+        let mut out = Self {
             blocks,
             lines,
             width,
             height,
+            flow,
             owner,
-            stacked,
+            stacked: false,
+        };
+        // 叠放性最后才折：那条判据问的是「沿推进轴的底边」，而那两个入口是 `Layout` 的
+        // 方法（竖排的起点要按长条总长翻面，那份信息在 `self` 上）。
+        // 横排下这一句与从前那句 `pair[0].y + pair[0].height <= pair[1].y` 逐字同一个式子。
+        out.stacked = out
+            .lines
+            .windows(2)
+            .all(|pair| out.flow_end(&pair[0]) <= out.flow_start(&pair[1]));
+        out
+    }
+
+    // ---- 推进轴上的问句 ----
+    //
+    // `stacked`、`line_at`、`line_covering_or_above`、`lines_in_band` 和分片器的 `fits`
+    // 问的其实是同一件事：「沿**推进轴**走到哪儿了」。横排里那根轴就是 `y`；
+    // `writing-mode: vertical-rl` 把字改成沿 `+y` 推进、一列一列沿 `−x` 堆，于是那根轴换成
+    // `x`，而且是**反着**走的 —— 阅读顺序上的第一列摆在最右边，它的物理 `x` 最大。
+    // 下面那两个 match 就是那一根轴的全部；调用点一个都不用改，因为它们早就只在问
+    // 「沿推进轴的起点 / 底边」了。
+    //
+    // 长条沿块轴的总长就是 `Layout::width`（[`transposed`] 已经把 `width` / `height` 对调过），
+    // 所以 `vertical-rl` 那一条不用额外的格子。**但它必须先过 `assemble`**：一张没投影过的
+    // 表配上这两条竖排分支，症状是「横排的字按错的坐标被裁掉」—— 那正是把轴拆成两刀接的
+    // 坏样子，所以这两半是同一刀。
+
+    /// 这一行在推进轴上的起点。横排 = `line.y`；竖排 = 从阅读顺序那一侧数进来的距离。
+    pub fn flow_start(&self, line: &LineBox) -> f32 {
+        match self.flow {
+            WritingMode::HorizontalTb => line.y,
+            WritingMode::VerticalRl => self.width - (line.x + line.width),
+            WritingMode::VerticalLr => line.x,
         }
+    }
+
+    /// 这一行沿推进轴占多厚。横排 = 行高（一行一行往下堆的那一格）；竖排 = 一列的宽。
+    pub fn flow_thickness(&self, line: &LineBox) -> f32 {
+        match self.flow {
+            WritingMode::HorizontalTb => line.height,
+            WritingMode::VerticalRl | WritingMode::VerticalLr => line.width,
+        }
+    }
+
+    /// 这一行在推进轴上的底边。命中与分片比的都是它，写成一句免得两处各折一次。
+    pub fn flow_end(&self, line: &LineBox) -> f32 {
+        self.flow_start(line) + self.flow_thickness(line)
+    }
+
+    // ---- 内联轴 / 侧轴上的投影 ----
+    //
+    // 界面那三层（绘制、命中、选区）手里的数从来只有两个纯量：「沿字走了多远」与
+    // 「在侧轴上落在哪儿」。横排里那两个纯量分别是 x 与 y，竖排里对调 —— 下面这几句
+    // 就是对调本身，也是**整个界面层唯一**该知道轴的地方。
+    //
+    // `measure.rs` 里那三处读 `glyph.position` 的一格都不用改：shaping 永远发生在
+    // 逻辑横排里，所以 `position.x` 永远是推进量、`position.y` 永远是离基线的深度，
+    // 只有把它们落成物理点的时候才需要问这里。
+
+    /// 这一份排版用的是竖排那根轴吗。
+    pub fn vertical(&self) -> bool {
+        self.flow.is_vertical()
+    }
+
+    /// 一行在**内联轴**上的起点：横排 = 行带的左缘，竖排 = 这一列的列顶。
+    pub fn inline_start(&self, line: &LineBox) -> f32 {
+        match self.flow {
+            WritingMode::HorizontalTb => line.x,
+            WritingMode::VerticalRl | WritingMode::VerticalLr => line.y,
+        }
+    }
+
+    /// 一行的基线在**侧轴**上的位置：横排 = 那条横线的 `y`，竖排 = 那条竖线的 `x`。
+    ///
+    /// `LineBox::baseline` 存的从头到尾是「沿块轴从**起点边**算进去的深度」——
+    /// 起点边在横排是行顶，在 `vertical-rl` 是列的**右**缘，在 `vertical-lr` 是左缘。
+    /// 那一个数落成物理坐标只在这一句发生一次，绘制与命中都从它起算。
+    pub fn cross_baseline(&self, line: &LineBox) -> f32 {
+        match self.flow {
+            WritingMode::HorizontalTb => line.y + line.baseline,
+            WritingMode::VerticalRl => line.x + line.width - line.baseline,
+            WritingMode::VerticalLr => line.x + line.baseline,
+        }
+    }
+
+    /// 从基线沿块轴走 `depth`（就是 `glyph.position.y` 与 `baseline_shift` 那一格，
+    /// 正数在横排是往下）之后，落在侧轴上的物理位置。
+    ///
+    /// `vertical-rl` 的块轴反着走，所以同一个正数在竖排里往**左** —— 那一档的符号写在
+    /// [`WritingMode::project_delta`]，这里只挑出侧轴那一个分量，两处不再各折一遍。
+    /// 这一句存在的全部理由就是那个符号：画在基线右边的字在竖排里会跑到基线左边去，
+    /// 而两处各自看起来都「合理」。
+    pub fn cross_from_baseline(&self, line: &LineBox, depth: f32) -> f32 {
+        let (dx, dy) = self.flow.project_delta(0.0, depth);
+        // 侧轴是哪一根物理轴，与 `project` 那一句是同一件事：横排的侧轴是 y，竖排的是 x。
+        self.cross_baseline(line) + if self.vertical() { dx } else { dy }
+    }
+
+    /// 把「内联轴上 `inline`、侧轴上 `cross`」折成物理的 `(x, y)`。
+    /// 规则只有 [`WritingMode::project`] 那一处，这里只是拿着这一份排版的轴问一句。
+    pub fn project(&self, inline: f32, cross: f32) -> (f32, f32) {
+        self.flow.project(inline, cross)
+    }
+
+    /// 这一份排版用的轴。界面那几层把它**存一份**在自己的行元素上，
+    /// 逐字形与装饰线那一趟才知道自己在问谁 —— 规则只有这一处，界面不许各自再折一遍。
+    pub fn flow_mode(&self) -> WritingMode {
+        self.flow
+    }
+
+    /// 把「沿字走了 `along`、沿块轴从基线走了 `depth`（正数 = 横排往下）」这两个**增量**
+    /// 折成物理的 `(dx, dy)`。
+    ///
+    /// 这一句与 [`Self::project`](Self::project) 的分别是：`project` 折的是已经落在侧轴上的
+    /// 位置，而这里折的是**还没落地的增量**，所以带符号。规则只有
+    /// [`WritingMode::project_delta`] 那一处。
+    pub fn project_delta(&self, along: f32, depth: f32) -> (f32, f32) {
+        self.flow.project_delta(along, depth)
     }
 
     /// 行盒是否严格叠放（见 `stacked` 那一格）。测试与诊断读它：
@@ -282,55 +470,55 @@ impl Layout {
         self.stacked
     }
 
-    /// 命中测试：纵坐标 → 行盒下标。选择与批注回显从这里起步。
+    /// 命中测试：推进轴上的位置 → 行盒下标（横排下它就是纵坐标）。选择与批注回显从这里起步。
     ///
-    /// 口径是「**第一条**覆盖这个像素的行」：`y` 落在两块之间的留白里时没有人覆盖它，
+    /// 口径是「**第一条**覆盖这个像素的行」：`at` 落在两块之间的留白里时没有人覆盖它，
     /// 给 `None`（要「上方最近那一行」的场合用 [`line_covering_or_above`](Self::line_covering_or_above)）。
-    pub fn line_at(&self, y: f32) -> Option<usize> {
+    pub fn line_at(&self, at: f32) -> Option<usize> {
         if !self.stacked {
             return self
                 .lines
                 .iter()
-                .position(|l| y >= l.y && y < l.y + l.height);
+                .position(|l| at >= self.flow_start(l) && at < self.flow_end(l));
         }
         // 二分定位到「行顶不超过 y」的最后一行，再往回退过同一 y 上的并列行（正常排版没有）。
-        let end = self.lines.partition_point(|l| l.y <= y);
+        let end = self.lines.partition_point(|l| self.flow_start(l) <= at);
         let mut found = None;
-        let mut at = end;
-        while at > 0 {
-            at -= 1;
-            let line = &self.lines[at];
-            if line.y + line.height > y {
-                found = Some(at);
-            } else if line.y < y {
+        let mut i = end;
+        while i > 0 {
+            i -= 1;
+            let line = &self.lines[i];
+            if self.flow_end(line) > at {
+                found = Some(i);
+            } else if self.flow_start(line) < at {
                 break; // 已经严格在上方且没覆盖到，再往前只会更低
             }
         }
         found
     }
 
-    /// 覆盖 `y` 的那一行；没有覆盖者（块间留白、或超出末尾）给**上方最近**的那一行，
-    /// 一行都没有时给 0。
+    /// 覆盖 `at`（推进轴上的位置）的那一行；没有覆盖者（块间留白、或超出末尾）给**上方最近**
+    /// 的那一行，一行都没有时给 0。
     ///
     /// 滚动位置 → 行号走这一句：读者停在最后一屏要回到最后一屏，而不是回到「章尾但
     /// 看不见任何字」的地方。
-    pub fn line_covering_or_above(&self, y: f32) -> usize {
+    pub fn line_covering_or_above(&self, at: f32) -> usize {
         if self.lines.is_empty() {
             return 0;
         }
         if !self.stacked {
             let mut line = 0usize;
             for (ix, box_) in self.lines.iter().enumerate() {
-                if box_.y + box_.height > y {
+                if self.flow_end(box_) > at {
                     return ix;
                 }
                 line = ix;
             }
             return line;
         }
-        // 底边越过 `y` 的第一行。底边在叠放前提下随表序单调，所以能二分。
-        let at = self.lines.partition_point(|l| l.y + l.height <= y);
-        at.min(self.lines.len() - 1)
+        // 底边越过 `at` 的第一行。底边在叠放前提下随表序单调，所以能二分。
+        let i = self.lines.partition_point(|l| self.flow_end(l) <= at);
+        i.min(self.lines.len() - 1)
     }
 
     /// 真正拥有第 `i` 行的盒子：先序入表 ⇒ 最后一个区间包含它的就是最深的叶子块。
@@ -418,13 +606,22 @@ impl Layout {
         out
     }
 
-    pub fn lines_in_band(&self, from_y: f32, to_y: f32) -> Range<usize> {
+    /// 与可见带 `[from, to)` 有关的那些行 —— **绘制那一帧只该问这个数**。
+    /// 带是推进轴上的一段（横排就是 `[上缘, 下缘)`）。
+    ///
+    /// 原来的写法是把 `0..行数` 整个交给场景层，每行一次 y 比较裁剔（`plans/阅读管线.md`
+    /// §十一 第 4 条），于是每帧 O(章行数)；这里两次二分。带的起点包含**顶边在带上方、
+    /// 但盒子伸进来**的那一行，否则窗口最上面会缺一截。
+    ///
+    /// 行盒不叠放（`stacked` 为假）或带是空的时给全区间：调用方自己的 y 裁剔照旧兜住
+    /// 正确性，这里只是没省下来。
+    pub fn lines_in_band(&self, from: f32, to: f32) -> Range<usize> {
         let all = 0..self.lines.len();
-        if !self.stacked || to_y <= from_y {
+        if !self.stacked || to <= from {
             return all;
         }
-        let start = self.lines.partition_point(|l| l.y + l.height <= from_y);
-        let end = self.lines.partition_point(|l| l.y < to_y);
+        let start = self.lines.partition_point(|l| self.flow_end(l) <= from);
+        let end = self.lines.partition_point(|l| self.flow_start(l) < to);
         if end <= start {
             return start..start;
         }
@@ -512,13 +709,22 @@ pub(super) mod scan_reference {
 
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutOptions {
-    /// 内容区宽度（页面左右边距已扣）。
+    /// 内容区宽度（页面左右边距已扣）。竖排时这一格是**一列能排多长**（= 视口高），
+    /// 因为折行永远发生在内联轴上 —— 名字里的 width 说的是「沿字的那一条」，不是屏幕的宽。
     pub width: f32,
     /// 轻量模式：只算块高，不产出行盒。
     ///
     /// 用于目录跳转、进度条等只需要「这一章多高」的场合，不需要行盒级别的细节。
     /// 跳过断行、跳过 `run_metrics`、跳过 `LineFragment` 构建，速度提升一个量级。
     pub light: bool,
+    /// 允许按书自己声明的那根轴排吗。`false` = 不管 CSS 写了什么竖排都按横排排。
+    ///
+    /// 这一格由**界面**给，不是引擎的取舍：竖排现在只在分页那一档落地。连续滚动整条
+    /// 滚动链（跨章拼接、全局进度、屏幕↔章内坐标那一句反算）全按「沿 y 走」建着，
+    /// 转轴等于把那条 spine 重做一遍 —— 那一档接上之前，宁可让一本竖排书横着排，
+    /// 也不要在滚动里把列往 y 上叠。判据与症状都记在
+    /// `ui::features::reader::model::chapter_layout` 的 `vertical` 那一格上。
+    pub allow_vertical: bool,
 }
 
 impl LayoutOptions {
@@ -526,12 +732,14 @@ impl LayoutOptions {
     pub const FULL: Self = Self {
         width: 0.0,
         light: false,
+        allow_vertical: false,
     };
 
     /// 轻量排版（只算高）。
     pub const LIGHT: Self = Self {
         width: 0.0,
         light: true,
+        allow_vertical: false,
     };
 
     /// 指定宽度的完整排版。
@@ -539,6 +747,7 @@ impl LayoutOptions {
         Self {
             width,
             light: false,
+            allow_vertical: false,
         }
     }
 }

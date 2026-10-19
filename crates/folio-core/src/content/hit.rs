@@ -10,6 +10,10 @@
 //! 坐标是**排版坐标**（一章的绝对坐标，行盒 `y` 那一套），不是屏幕坐标：
 //! 连续滚动时调用方先减掉 `scroll_y`，分页/双页时减掉片的 `origin_y` 与栏位 `x`。
 //! 返回的矩形同样是排版坐标，绘制侧照 `place_lines` 的同一条换算搬上屏。
+//!
+//! 进来的 `(x, y)` 与出去的矩形都是**物理**的，只有函数内部沿字走的那一段是纯量 ——
+//! 竖排下这一进一出各换一次轴（`Layout::inline_start` / `vertical`），
+//! 所以调用方不需要知道轴，也不需要自己翻面。
 
 use std::ops::Range;
 
@@ -56,7 +60,15 @@ pub fn hit_test(
     if layout.lines.is_empty() {
         return None;
     }
-    let line_index = line_at_y(layout, y);
+    // 物理那两个数先折成「沿推进轴」与「沿字」：横排是 (y, x)，竖排整根轴换了方向 ——
+    // 点在屏上的左边那一条，是竖排里**更晚**的一列（列从右往左堆），所以推进轴那一格
+    // 要从右缘翻着数。规则只有 `Layout` 那份，这里不重算。
+    let (along_flow, inline) = if layout.vertical() {
+        (layout.width - x, y)
+    } else {
+        (y, x)
+    };
+    let line_index = line_at_y(layout, along_flow);
     let line = &layout.lines[line_index];
     // 这一行的文本边界。没有字符的行（纯图片 / 空行）给不出坐标。
     let line_range = line_chars(layout, dom, map, line_index)?;
@@ -64,8 +76,11 @@ pub fn hit_test(
 
     // 横向夹进这一行的墨迹范围内再逐段走。用 `ink_width`（两端对齐把行撑满，
     // 字真铺到了右边）而不是 `width`（未撑开的片段宽之和）。
-    let x = x.clamp(line.x, line.x + line.ink_width());
-    let mut cursor = line.x;
+    // 起点取**内联轴**上那一格的起点：横排是行带左缘 `line.x`，竖排是列顶 `line.y` ——
+    // 下面一整趟走的都是「沿字走了多少」这一个纯量，只有落地时才分轴。
+    let start = layout.inline_start(line);
+    let inline = inline.clamp(start, start + line.ink_width());
+    let mut cursor = start;
     // 行内「隙游标」：两端对齐按它算每个字的右推量（见 `Justify`）。不两端对齐时恒 0。
     let justify = line.justify;
     let mut gap_cursor = 0u32;
@@ -91,7 +106,7 @@ pub fn hit_test(
         if run.style.letter_spacing == 0.0
             && justify.is_none()
             && let Some(bytes) =
-                measure.byte_at_x(text, &run.style.font, run.style.font_size, x - run_x)
+                measure.byte_at_x(text, &run.style.font, run.style.font_size, inline - run_x)
         {
             let offset = map
                 .chars_of_bytes(dom, run.node, orig_at(run.orig.start, bytes))
@@ -112,8 +127,8 @@ pub fn hit_test(
             let advance = run.style.advance(measure, ch);
             let shift = justify.map_or(0.0, |j| j.shift(gap));
             let char_x = run_x + pixel + shift;
-            if x < char_x + advance {
-                let after = x > char_x + advance * 0.5;
+            if inline < char_x + advance {
+                let after = inline > char_x + advance * 0.5;
                 let bytes = bytes_before + if after { ch.len_utf8() } else { 0 };
                 let offset = map
                     .chars_of_bytes(dom, run.node, orig_at(run.orig.start, bytes))
@@ -227,7 +242,9 @@ pub fn rects_for_range_in(
             continue;
         };
         let line = &layout.lines[line_index];
-        let mut cursor = line.x;
+        // 与 `hit_test` 同一个起点：沿**内联轴**走，落地时才分轴。
+        let start = layout.inline_start(line);
+        let mut cursor = start;
         // 与 `hit_test` 同一份「隙游标」：两端对齐按它算每个字的右推量。
         let justify = line.justify;
         let mut gap_cursor = 0u32;
@@ -305,15 +322,26 @@ pub fn rects_for_range_in(
         }
         // 命中过至少一个字符才画：交集非空但逐字没命中（空白折叠的退化映射）
         // 时退回整行宽，宁宽勿丢。
-        let (x0, x1) = match rect {
+        let (i0, i1) = match rect {
             Some(span) if span.1 > span.0 => span,
-            _ => (line.x, line.x + line.ink_width()),
+            _ => (start, start + line.ink_width()),
         };
-        out.push(SelectionRect {
-            x: x0,
-            y: line.y,
-            width: x1 - x0,
-            height: line.height,
+        // 这两个数是**沿字**的两个位置，落回物理得分轴：横排铺在 x 上、吃整行高，
+        // 竖排铺在 y 上、吃整列宽。「选区按行（列）断开」这一条两档相同。
+        out.push(if layout.vertical() {
+            SelectionRect {
+                x: line.x,
+                y: i0,
+                width: line.width,
+                height: i1 - i0,
+            }
+        } else {
+            SelectionRect {
+                x: i0,
+                y: line.y,
+                width: i1 - i0,
+                height: line.height,
+            }
         });
     }
     Metric::RectLines.add(walked);

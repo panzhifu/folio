@@ -12,8 +12,8 @@ use crate::content::format::css::value::{
     BorderElement, border_target, border_width_px, box_side_px, box_sides, four_of,
     parse_baseline_shift, parse_border_style, parse_break_when, parse_clear, parse_color,
     parse_count, parse_decoration, parse_float, parse_font_family_list, parse_font_size,
-    parse_font_weight, parse_line_height, parse_list_style, relative_weight, set_edge, set_length,
-    set_margin, set_px,
+    parse_font_weight, parse_line_height, parse_list_style, parse_writing_mode, relative_weight,
+    set_edge, set_length, set_margin, set_px,
 };
 
 /// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
@@ -79,6 +79,9 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         // 所以继承断了就等于整棵子树回到左起 —— RTL 书通常在 `<html>` 或 `<body>`
         // 上写一次，靠的就是这一行。
         direction: parent.direction,
+        // `writing-mode` 在 CSS 里同样可继承，理由与上面那一行一模一样：竖排的本子只在
+        // `<html>` 或 `<body>` 上写一次，整棵子树靠这一行拿到那一根推进轴。
+        writing_mode: parent.writing_mode,
         color: parent.color,
         // 「在一条链接里」按继承传播：链接里的 `<span>`、`<b>` 与其中的文本都算链接的一部分，
         // 与下面装饰线那一格同一个理由。它不是 CSS 属性，判据见 `ComputedStyle::link`。
@@ -264,6 +267,13 @@ pub(super) fn apply(
             // 它是 HTML 的 `dir` 属性那一侧的东西，见 `css::computed` 的层叠入口），
             // 所以写 `auto` 进样式表算「这条没接住」，进 ignored 计数。
             _ => false,
+        },
+        "writing-mode" => match parse_writing_mode(value) {
+            Some(mode) => {
+                style.writing_mode = mode;
+                true
+            }
+            None => false,
         },
         "text-align" => match value.to_ascii_lowercase().as_str() {
             // `start` / `end` 与 `left` / `right` 分开存：前者跟着 `direction` 翻边，

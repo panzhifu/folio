@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use folio_core::content::format::css::computed::WritingMode;
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode};
 use gpui_kit::{
@@ -32,8 +33,14 @@ pub struct GlyphRun {
     pub font: Font,
     pub font_size: f32,
     pub color: Hsla,
+    /// 这条 run 沿**内联轴**的起点（屏幕坐标）。横排就是 x，`vertical-rl` 是 y。
     pub x: f32,
+    /// 基线在**侧轴**上的位置（屏幕坐标）。横排就是基线那条横线的 y，竖排是那条竖线的 x。
     pub baseline: f32,
+    /// 这一份排版用的推进轴。整个场景同一份，逐 run 带着是因为绘制这一趟只有 run 在手。
+    /// 有了它，`x` / `baseline` 这两个纯量才知道自己落在哪根轴上 —— 对调与符号都只在
+    /// `WritingMode::project` / `project_delta` 那一处写，界面不许各折一遍。
+    pub flow: WritingMode,
     /// `text-decoration` 的两条线。gpui 的 shaping 直接支持，所以这里只是把
     /// CSS 算出来的布尔传到 `TextRun` 上；线宽 1px、颜色跟字，与桌面端 `.underline()`
     /// 那条样式方法的默认值一致 —— 两端各定一个数的话，同一本书在两处会画得不一样。
@@ -91,6 +98,7 @@ impl GlyphRun {
             color: black(),
             x: 0.0,
             baseline: font_size,
+            flow: WritingMode::HorizontalTb,
             underline: false,
             line_through: false,
             // 默认按字号一档（UA 的 `line-height: normal` 近似）。真排版会用
@@ -127,6 +135,12 @@ impl GlyphRun {
     pub fn at(mut self, x: f32, baseline: f32) -> Self {
         self.x = x;
         self.baseline = baseline;
+        self
+    }
+
+    /// 这一条 run 用哪根推进轴。竖排那一档必须由场景层显式给，默认是横排。
+    pub fn on_flow(mut self, flow: WritingMode) -> Self {
+        self.flow = flow;
         self
     }
 
@@ -443,6 +457,11 @@ fn paint_run(
 
     let baseline_x = origin.x + px(run.x);
     let baseline_y = origin.y + px(run.baseline);
+    // 上面那一对是**横排那一档**的读法，只有画装饰线那条老路还在用。
+    // 竖排走下面这一对：`run.x` / `run.baseline` 是两个轴中性的纯量（沿字的起点、
+    // 基线在侧轴上的位置），经 `project` 才知道各落在物理的哪根轴上。
+    let flow = run.flow;
+    let (run_inline, run_cross) = flow.project(run.x, run.baseline);
     let mut glyphs = 0u32;
     let embolden = needs_synthetic_bold(window, &run.font, synthetic_bold);
     // 字距 / 两端对齐的右推：按字形在**阅读序**里的字符序号逐字累加。LTR 下字形的
@@ -481,12 +500,19 @@ fn paint_run(
             // 折页：按这个字的**平面位置**判它还在不在这一张纸上。用的是元素局部坐标
             // （`run.x` / `run.baseline` 那一套），与 `view.rs` 摆折面同一条折线、同一把尺。
             // 数过 `glyphs` 之后再裁，那个计数才真的是「这一帧画了几个字」。
-            let x = run.x + f32::from(glyph.position.x) + shift;
-            if !run.keeps(x, run.baseline + f32::from(glyph.position.y)) {
+            // shaping 报的两个数永远是「沿字走了多少」与「离基线多远」—— 竖排不重做
+            // shaping，所以这里只是把它们经同一处投影折成物理位移。
+            let (dx, dy) = flow.project_delta(
+                f32::from(glyph.position.x) + shift,
+                f32::from(glyph.position.y),
+            );
+            let x = run_inline + dx;
+            let y = run_cross + dy;
+            if !run.keeps(x, y) {
                 continue;
             }
             glyphs += 1;
-            let at = point(origin.x + px(x), baseline_y + glyph.position.y);
+            let at = point(origin.x + px(x), origin.y + px(y));
             // 单个字形画不出去（缺字形、图集满）不该让整帧失败：与 gpui 自己的
             // `paint_line` 一致，忽略即可。
             let _ = window.paint_glyph(at, shaped_run.font_id, glyph.id, font_size, run.color);
@@ -514,7 +540,35 @@ fn paint_run(
     // 被折线裁到的这一张这一帧不画装饰线：字按逐点判据收了，线的起止却没有对应的收法
     // （它是一整条 run 一个矩形，而折线是斜的），伸到折线外面会比缺一根线更难看。
     // 280ms 之内的事，且只影响带下划线/删除线的那些 run。
-    if (run.underline || run.line_through) && run.cut.is_none() {
+    if (run.underline || run.line_through) && run.cut.is_none() && flow.is_vertical() {
+        // 竖排：线是**竖**的，而 `paint_underline` / `paint_strikethrough` 只会画
+        // `size(width, thickness)` 的横矩形（`gpui-pre/window.rs:4846-4892`），
+        // 所以这里自己走 `paint_quad`。
+        // 「离基线多远」仍按横排那一份式子算：把基线喂 0，拿回来的就是纯深度；
+        // 深度与长度都经同一处投影换成物理的 x / y —— `vertical-rl` 的正深度往**左**。
+        let (u, s) = decoration_y(px(0.0), px(run.box_height), shaped.ascent, shaped.descent);
+        let width = shaped.width;
+        for (on, depth) in [
+            (run.underline, f32::from(u)),
+            (run.line_through, f32::from(s)),
+        ] {
+            if !on {
+                continue;
+            }
+            let (dx, dy) = flow.project_delta(0.0, depth);
+            let (lx, lt) = flow.project(f32::from(width), 1.0);
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(
+                        origin.x + px(run_inline + dx),
+                        origin.y + px(run_cross + dy),
+                    ),
+                    size(px(lx), px(lt)),
+                ),
+                run.color,
+            ));
+        }
+    } else if (run.underline || run.line_through) && run.cut.is_none() {
         let (underline_y, strikethrough_y) = decoration_y(
             baseline_y,
             px(run.box_height),

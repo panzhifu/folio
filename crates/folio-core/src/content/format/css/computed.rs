@@ -39,9 +39,9 @@ pub enum TextAlign {
 /// bidi 与镜像已经在那一层发生（`cosmic-text` 每次 `shape_line` 自己跑 UAX #9），
 /// 这里再排一次就是两处各排各的。
 ///
-/// 没接的两样要说清：`writing-mode`（竖排是另一根轴，见下面那份忽略名单），以及 CSS 的
-/// `unicode-bidi: isolate` / `bidi-override` 那类显式嵌入与覆盖 —— 后者出错的样子是
-/// 「混排里那一小截位置反了」，不是整段读不了。
+/// 没接的那一样要说清：CSS 的 `unicode-bidi: isolate` / `bidi-override` 那类显式嵌入与
+/// 覆盖 —— 它出错的样子是「混排里那一小截位置反了」，不是整段读不了。竖排那一根轴是
+/// [`WritingMode`]，与这一格是两条互不相干的声明。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Direction {
     #[default]
@@ -52,6 +52,64 @@ pub enum Direction {
 impl Direction {
     pub fn is_rtl(self) -> bool {
         self == Direction::Rtl
+    }
+}
+
+/// 一段文字的推进轴与行的堆叠方向，即 CSS 的 `writing-mode`。
+///
+/// 它与 [`Direction`] 是**两根独立的轴**：`direction` 改的是「一行里的字符往哪边排、
+/// `start`/`end` 落在物理的哪一边」，行的推进轴不变；`writing-mode` 改的是「字沿哪根轴
+/// 推进、行沿哪根轴堆」。竖排的本子通常两样都写（`vertical-rl` 的书列序天然从右往左）。
+///
+/// **目前的落地程度：层叠接住了，排版层还没读它。** 值会算出来、进 `ComputedStyle` 的
+/// 哈希、按 CSS 继承下来，但 `layout` 仍按横排折行与摆放，所以屏上还是横排。
+///
+/// 那为什么先落这一格：`writing-mode` 以前在 `KNOWN_UNIMPLEMENTED` 里，
+/// `examples/css-gap` 那张报表只能说「这条我们认得、没接」；而真实竖排书里它是**唯一**
+/// 的竖排来源（那些本子不会另外写别的声明）。接住层叠之后报表才数得出「库里哪几本书
+/// 声明了竖排」，那一列数决定后面几刀的优先级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum WritingMode {
+    /// 横排：字沿 `+x` 推进，行沿 `+y` 堆。CSS 的初值。
+    #[default]
+    HorizontalTb,
+    /// 竖排，列从右往左换 —— 中日韩竖排本的那一档。
+    VerticalRl,
+    /// 竖排，列从左往右换。
+    VerticalLr,
+}
+
+impl WritingMode {
+    /// 这一档是不是竖排（推进轴换成竖直那一根）。
+    pub fn is_vertical(self) -> bool {
+        self != WritingMode::HorizontalTb
+    }
+
+    /// 把「内联轴上 `inline`、侧轴上 `cross`」这两个纯量折成物理的 `(x, y)`。
+    ///
+    /// 界面那一层（`ui::reader::view` 的绘制与命中）手里的数从来只有这两个纯量：
+    /// 「沿字走了多远」与「离基线多远」。横排里它们分别是 x 与 y，竖排里对调。
+    /// **符号在 [`Self::project_delta`] 那一句里**，这一句只管哪一格落到哪根轴。
+    pub fn project(self, inline: f32, cross: f32) -> (f32, f32) {
+        match self {
+            WritingMode::HorizontalTb => (inline, cross),
+            WritingMode::VerticalRl | WritingMode::VerticalLr => (cross, inline),
+        }
+    }
+
+    /// 增量版：`along` 是沿字又走了多远，`depth` 是从基线沿块轴走了多远
+    /// （正数在横排是**往下**，在 `vertical-rl` 是往**左** —— 那一档的列从右往左堆，
+    /// 块轴整个反着走），物理的 `(dx, dy)` 就从这里出。
+    ///
+    /// 逐字形绘制、逐字命中、选区矩形、装饰线四处在推同一笔位移，所以符号只许写在这一个
+    /// match 上：别处再折一次，就会出现「字与下划线各朝一边」这种两边看着都合理、合起来
+    /// 一定错的账。
+    pub fn project_delta(self, along: f32, depth: f32) -> (f32, f32) {
+        match self {
+            WritingMode::HorizontalTb => (along, depth),
+            WritingMode::VerticalRl => (-depth, along),
+            WritingMode::VerticalLr => (depth, along),
+        }
     }
 }
 
@@ -343,6 +401,10 @@ pub struct ComputedStyle {
     /// `dir` 属性（HTML 的 presentational hint，优先级在作者样式之下），以及继承。
     /// 见 [`Direction`] 那一段「做到哪一层」的说明。
     pub direction: Direction,
+    /// 推进轴（CSS 的 `writing-mode`），**可继承**：竖排的本子在 `<html>` 或 `<body>` 上
+    /// 写一次就管全书，靠的是 `inherit_from` 里那一行，与 `direction` 同一条通路。
+    /// 落地程度（层叠接住、排版层还没读）见 [`WritingMode`]。
+    pub writing_mode: WritingMode,
     pub text_align: TextAlign,
     /// `text-justify`：两端对齐时余量往哪种隙摊。见 [`TextJustify`]；CSS 里**可继承**。
     pub text_justify: TextJustify,
@@ -453,6 +515,7 @@ impl Default for ComputedStyle {
             font_family: String::new(),
             font_families: Vec::new(),
             direction: Direction::Ltr,
+            writing_mode: WritingMode::HorizontalTb,
             text_align: TextAlign::Start,
             text_justify: TextJustify::Auto,
             text_indent: Length::ZERO,
@@ -530,6 +593,7 @@ impl std::hash::Hash for ComputedStyle {
         self.font_family.hash(h);
         self.font_families.hash(h);
         (self.direction as u8).hash(h);
+        (self.writing_mode as u8).hash(h);
         (self.text_align as u8).hash(h);
         (self.text_justify as u8).hash(h);
         len(&self.text_indent, h);
@@ -590,9 +654,12 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "min-height",
     "text-shadow",
     // `direction` 以前在这份名单里（「认得、接受、不生效」），2026-10-14 那一轮把它
-    // 变成真生效的属性，所以移出去了；`writing-mode` 留下 —— 竖排要改行轴与字形方向，
-    // 那是另一根轴，还没接。见 [`Direction`]。
-    "writing-mode",
+    // 变成真生效的属性，所以移出去了。
+    // `writing-mode` 同一条路，2026-10-19 那一轮移出去的 —— 但只走完半程：值现在进
+    // `ComputedStyle`、会继承、进哈希，`DeclStatus` 报 `Applied`，而排版层还没读它，
+    // 屏上仍是横排。这一档里「认得且不生效」讲的是**这条声明会不会被记进 ignored**，
+    // 不是屏上有没有变化；两件事的差别写在 [`WritingMode`] 的落地程度那一段。
+    //
     // `orphans` / `widows` / `break-inside` / `page-break-*` 以前在这份名单里
     // （「接受、不生效」），M4 的分片器把它们变成真生效的属性，所以移出去了。
     // `float` / `clear` 同一条路，2026-10-16 那一轮移出去的 —— 现在真会摆浮动盒、

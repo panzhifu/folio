@@ -50,6 +50,11 @@ use super::Layout;
 pub struct FragmentOptions {
     /// 一片可用的内容高（页高减上下留白，或**一栏**的高）。
     ///
+    /// 说的是**推进轴上**的那一段：横排是一列行盒能占多高的 y，竖排（`vertical-rl`）就是一列
+    /// 字能排多长 —— 那一档里它折自视口的**高**，而切片切的是 x。这一格与排版期的
+    /// `LayoutOptions.width`（折行宽）必须一起换轴，否则「按 800 高折的行」对上
+    /// 「按 400 高切的片」，每一页都会少一行而没人报错。
+    ///
     /// **`0` 是「不分片」的哨兵值**：连续滚动就是单一无限分片，三种模式同源的落点就在这儿。
     /// 别把它当成「每页 0 高」—— 那样每一行都要独占一片、每片又装不下，就是死循环。
     pub height: f32,
@@ -91,9 +96,11 @@ pub fn column_offset(width: f32, gap: f32, column: usize) -> f32 {
 pub struct Fragment {
     /// `Layout::lines` 的下标区间。补出来的空片是 `start == end`。
     pub lines: Range<usize>,
-    /// 首行的绝对 y。片内第 `i` 行画在 `lines[i].y - origin_y`。
+    /// 首行在**推进轴**上的绝对起点。横排就是首行的 `y`，于是片内第 `i` 行画在
+    /// `lines[i].y - origin_y`。字段名里那个 `y` 是横排留下的：换轴那一刀它说的是 `x`，
+    /// 与界面那一侧的读法（[`super::Layout::flow_start`]）同一批改，不能只改这边。
     pub origin_y: f32,
-    /// 本片占用的内容高（首行顶到末行底）。
+    /// 本片沿推进轴占用的长度（首行的推进轴起点到末行的推进轴底边）。
     pub height: f32,
     /// 这一片是被作者的强制断点结束的（`break-before/after: page|always|left|right`）。
     pub forced: bool,
@@ -280,7 +287,7 @@ impl<'a> Fragmentainer<'a> {
             }
         }
 
-        let origin_y = self.layout.lines[start].y;
+        let origin_y = self.layout.flow_start(&self.layout.lines[start]);
         let limit = origin_y + self.options.height;
 
         // ① 能塞几行塞几行。首行**无条件**进来：一行比一页高是常事（大图、长表格），
@@ -345,7 +352,7 @@ impl<'a> Fragmentainer<'a> {
         self.token.fragment = slot + 1;
         Fragment {
             lines: self.token.line..self.token.line,
-            origin_y: self.layout.lines[self.token.line].y,
+            origin_y: self.layout.flow_start(&self.layout.lines[self.token.line]),
             height: 0.0,
             forced: true,
             empty: true,
@@ -354,13 +361,13 @@ impl<'a> Fragmentainer<'a> {
         }
     }
 
-    /// 第 `line` 行的行盒底是否还在本片的可用高度之内。
+    /// 第 `line` 行沿推进轴的底边是否还在本片可用长度之内。
     ///
-    /// `limit` 已经是「本片原点的绝对底边」，所以这里只比 `bottom`，**不再**减一次原点 ——
-    /// 减了会让第二页之后的每一页都按「原点 + 页高 + 原点」放行，页高越往后越能塞，
+    /// `limit` 已经是「本片原点在推进轴上的绝对底边」，所以这里只比 `bottom`，**不再**减一次
+    /// 原点 —— 减了会让第二页之后的每一页都按「原点 + 页高 + 原点」放行，页高越往后越能塞，
     /// 表现是第三页比第一页多两行，而第一页看起来完全正常。
     fn fits(&self, line: usize, limit: f32) -> bool {
-        let bottom = self.layout.lines[line].y + self.layout.lines[line].height;
+        let bottom = self.layout.flow_end(&self.layout.lines[line]);
         bottom <= limit
     }
 
@@ -426,10 +433,10 @@ impl<'a> Fragmentainer<'a> {
     fn emit(&mut self, start: usize, end: usize, forced: bool) -> Fragment {
         let columns = self.columns();
         let slot = self.token.fragment;
-        let origin_y = self.layout.lines[start].y;
+        let origin_y = self.layout.flow_start(&self.layout.lines[start]);
         let height = if end > start {
             let last = &self.layout.lines[end - 1];
-            (last.y + last.height) - origin_y
+            self.layout.flow_end(last) - origin_y
         } else {
             0.0
         };

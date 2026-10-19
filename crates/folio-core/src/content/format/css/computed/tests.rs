@@ -6,7 +6,7 @@
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{
     BorderEdge, BorderStyle, Color, ComputedStyle, Direction, Display, Float, Hyphens, Length,
-    ListStyle, StyledDom, TextAlign, TextJustify, cascade,
+    ListStyle, StyledDom, TextAlign, TextJustify, WritingMode, cascade,
 };
 use crate::content::format::css::{Origin, RuleSet};
 
@@ -1401,6 +1401,51 @@ fn direction_applies_and_inherits() {
     assert_eq!(style(&back, tag(&back, "p")).direction, Direction::Ltr);
 }
 
+/// 竖排那根轴也靠继承走完全书：这样的本子只在 `<html>` 或 `<body>` 上写一次
+/// `writing-mode: vertical-rl`，不会往每个段落重贴一遍。这一条钉的是继承没断 ——
+/// 屏上这时候还是横排（排版层还没读这一格，见 [`writing_mode_is_applied_now_not_inert`]）。
+#[test]
+fn writing_mode_applies_and_inherits() {
+    let page = author(
+        "<div><p>文字</p></div>",
+        "div { writing-mode: vertical-rl }",
+    );
+    let div = tag(&page, "div");
+    let p = tag(&page, "p");
+    assert_eq!(
+        style(&page, div).writing_mode,
+        WritingMode::VerticalRl,
+        "写了就该进计算样式"
+    );
+    assert_eq!(
+        style(&page, p).writing_mode,
+        WritingMode::VerticalRl,
+        "子孙靠继承拿到推进轴"
+    );
+    // 反过来：作者明确写回横排的一小节（竖排本里的拉丁引文、诗页那种）不该被整本书的轴带走。
+    let back = author(
+        "<div><p>文字</p></div>",
+        "div { writing-mode: vertical-rl } p { writing-mode: horizontal-tb }",
+    );
+    assert_eq!(
+        style(&back, tag(&back, "p")).writing_mode,
+        WritingMode::HorizontalTb
+    );
+    // 一本没写这一条的书必须是横排初值：默认值错了是全书跟着歪。
+    assert_eq!(
+        style(&back, tag(&back, "div")).writing_mode,
+        WritingMode::VerticalRl,
+        "同一份夹具里 div 仍该是竖排"
+    );
+    let plain = author("<p>正文</p>", "");
+    assert_eq!(
+        style(&plain, tag(&plain, "p")).writing_mode,
+        WritingMode::HorizontalTb,
+        "初值"
+    );
+    assert_eq!(plain.styled.ignored, 0, "没写过这一条就不该有任何 ignored");
+}
+
 /// EPUB 里 RTL 的书几乎只在根元素写一个 `dir="rtl"`，不另外写样式表。
 /// 只认样式表等于整本不认 —— 认这个属性才是接到真书的那条路。
 ///
@@ -1531,19 +1576,57 @@ fn direction_is_applied_now_not_inert() {
         DeclStatus::Unparsed,
         "认不出的值要进 ignored 计数"
     );
-    // 同一段名单里的 `writing-mode` 仍然没接 —— 它是竖排那一根轴，动的是行轴不是行序。
-    assert_eq!(
+}
+
+/// `writing-mode` 2026-10-19 起也离开了那份「认得、接受、不生效」名单，但**只走完半程**：
+/// 值算出来了、进样式哈希、按 CSS 继承下来，而排版层还没读它，所以屏上仍是横排
+/// （生效是 `plans/README.md` M8 后面那几刀的事）。
+///
+/// 因此这一条门断的是「`examples/css-gap` 那张表别再把它报成没接的属性」，不是「竖起来了」。
+/// 报 `Applied` 是有意的：`DeclStatus` 讲的是**层叠有没有接住这条声明**，与它改过哪个像素
+/// 无关 —— 把这半程写成 `Inert` 会让报表说「这本书的竖排声明丢了」，而事实是它已经进了
+/// 计算样式，只差排版层去读。
+#[test]
+fn writing_mode_is_applied_now_not_inert() {
+    use crate::content::format::css::Declaration;
+    use crate::content::format::css::computed::{DeclStatus, declaration_status};
+
+    let base = ComputedStyle::default();
+    let status = |value: &str| {
         declaration_status(
             &Declaration {
                 property: "writing-mode".into(),
-                value: "vertical-rl".into(),
+                value: value.into(),
                 important: false,
             },
             &base,
             16.0,
-        ),
-        DeclStatus::Inert
+        )
+    };
+    assert_eq!(status("horizontal-tb"), DeclStatus::Applied);
+    assert_eq!(
+        status("vertical-rl"),
+        DeclStatus::Applied,
+        "竖排本里唯一的那条竖排来源"
     );
+    assert_eq!(status("VERTICAL-LR"), DeclStatus::Applied, "值大小写不敏感");
+    assert_eq!(
+        status("  vertical-rl  "),
+        DeclStatus::Applied,
+        "两侧空格不该成为第二道门槛"
+    );
+    // 这两条折进 vertical-*：与 sideways 的唯一差别在拉丁侧转，而那一项本来就显式降级
+    // （渲染器没有字形旋转通道），所以合起来报是诚实的，不是把写法悄悄改掉。
+    assert_eq!(status("sideways-rl"), DeclStatus::Applied);
+    assert_eq!(status("sideways-lr"), DeclStatus::Applied);
+    // SVG 遗留那一族不接：本机书目里没出现过，而它是「先转整页再转字」的另一套语义。
+    // 按不认识计数 = 记进报表，猜错语义 = 屏幕上一本读不下去的书。
+    assert_eq!(
+        status("tb-rl"),
+        DeclStatus::Unparsed,
+        "认不出的值要进 ignored 计数"
+    );
+    assert_eq!(status("auto"), DeclStatus::Unparsed);
 }
 
 /// 新增字段必须进样式哈希，否则块级缓存会读到过期结果（`ComputedStyle` 那段手写 `Hash`
@@ -1562,6 +1645,29 @@ fn the_style_hash_covers_direction() {
         ..ComputedStyle::default()
     };
     assert_ne!(hash(&ltr), hash(&rtl), "方向改了，块级缓存该失效");
+}
+
+/// 同一条规矩在 `writing-mode` 上的落点。这一格比 `direction` 更要紧：竖排一旦生效，
+/// 块级缓存复用旧行盒的表现是「整章按错轴折行」，而样式哈希没变、章文本没变、
+/// 读者偏好也没变 —— 只有这一格会动。
+#[test]
+fn the_style_hash_covers_writing_mode() {
+    let hash = |c: &ComputedStyle| {
+        use std::hash::{Hash as _, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        c.hash(&mut h);
+        h.finish()
+    };
+    let horizontal = ComputedStyle::default();
+    let vertical = ComputedStyle {
+        writing_mode: WritingMode::VerticalRl,
+        ..ComputedStyle::default()
+    };
+    assert_ne!(
+        hash(&horizontal),
+        hash(&vertical),
+        "推进轴改了，块级缓存该失效"
+    );
 }
 
 /// 「这一段在不在一条链接里」是 DOM 的事实，不是 CSS 属性。

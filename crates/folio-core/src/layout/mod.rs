@@ -45,7 +45,7 @@ use self::cache::subtree_style_hash;
 // 而 `tests.rs` 用 `use super::*` 拿符号，所以这里显式把函数名也导入进来。
 use self::collect::Ctx;
 use crate::content::dom::{Dom, NodeId};
-use crate::content::format::css::computed::{Display, StyledDom};
+use crate::content::format::css::computed::{Display, StyledDom, WritingMode};
 
 pub use cache::{BlockCache, LayoutCache, layout_cached};
 pub use font::{FontKey, RunStyle, StyleArena, StyleRef};
@@ -138,7 +138,16 @@ fn layout_inner(
     let index = ctx.push_block(root, 0.0, 0.0, options.width, String::new(), true);
     let content = ctx.children(root, pl, pt, content_width);
     let height = ctx.close_block(index, pt + content + pb);
-    let out = Layout::assemble(ctx.blocks, ctx.lines, content_width, height);
+    // 轴取**根样式**那一格：整章一根轴。混排（这一章里既有一竖排段又有一横排表格）
+    // 明确不支持 —— 那样切片、进度、命中都得按块各问一次轴，而分片器只会切一根轴。
+    // `allow_vertical` 是界面那一侧的门（竖排现在只在分页那一档落地），判据与理由
+    // 写在 [`LayoutOptions::allow_vertical`]。
+    let flow = if options.allow_vertical {
+        style.writing_mode
+    } else {
+        WritingMode::HorizontalTb
+    };
+    let out = Layout::assemble(ctx.blocks, ctx.lines, content_width, height, flow);
     // 块数与行数是一章排版结果的体检指标：0 行意味着 DOM 或样式空了，而不是「这一章短」。
     tracing::debug!(
         "layout: {} 块 / {} 行，版心 {}，高 {}",
@@ -292,6 +301,8 @@ pub fn render_window(
             LayoutOptions {
                 width: chapter.page_width,
                 light: false,
+                // 两阶段那条路整个按「单元沿 y 排」建着，竖排接不上（见 `render_window` 尾）。
+                allow_vertical: false,
             },
             measure,
             images,
@@ -329,7 +340,17 @@ pub fn render_window(
         bottom = top + h;
         prev = Some(unit);
     }
-    Layout::assemble(ctx.blocks, ctx.lines, chapter.width, chapter.height)
+    // 两阶段那条路是给「必须只排一部分」准备的（见 `plans/阅读管线.md` §十二），
+    // 界面现在没接。它整条都按「单元沿 y 排、切片沿 y 切」建着（`ChapterMeasure::units`
+    // 的 `y`、`block_at(y)`、`RenderUnit`），竖排要接上去得先把那套改成沿推进轴 ——
+    // 所以这里钉死横排，别让一份「轴说竖排、单元表还按 y」的结果从这里出去。
+    Layout::assemble(
+        ctx.blocks,
+        ctx.lines,
+        chapter.width,
+        chapter.height,
+        WritingMode::HorizontalTb,
+    )
 }
 
 #[cfg(test)]

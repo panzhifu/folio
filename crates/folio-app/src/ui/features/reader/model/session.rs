@@ -740,7 +740,12 @@ impl ReaderSession {
     /// 这一问的是**手**的事：点哪一侧算下一页、箭头按钮按下去往哪走 —— 与正文往哪边流
     /// （CSS 的 `direction`，管排版）是两件事，各读各的。
     pub(in crate::ui::features::reader) fn progression_rtl(&self) -> bool {
-        self.book().is_some_and(|book| book.progression_rtl())
+        // 竖排的本子一列一列从右往左堆，「往下读」在屏上就是往左走 —— 与 RTL 那一档同一条
+        // 翻页方向，哪怕这本书的 `<spine page-progression-direction>` 压根没写 rtl。
+        // 竖排只在分页单栏那一档落地，所以轴定下来之前的一帧这里还给 `false`
+        // （`Document::wants_vertical` 那一段记的就是那次自我修正）。
+        self.book()
+            .is_some_and(|book| book.progression_rtl() || book.document().layout().vertical())
     }
 
     /// 当前那本书的可变借用；兜底那一行与定版式书都没有「可重排的书」，返回 `None`。

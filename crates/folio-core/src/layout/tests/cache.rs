@@ -157,6 +157,7 @@ fn layout_cache_returns_cached_on_hit() {
     let opts = LayoutOptions {
         width: 600.0,
         light: false,
+        allow_vertical: false,
     };
     let key = key_for(source, 600.0);
 
@@ -193,6 +194,7 @@ fn layout_cache_misses_on_width_change() {
         LayoutOptions {
             width: 600.0,
             light: false,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
@@ -206,6 +208,7 @@ fn layout_cache_misses_on_width_change() {
         LayoutOptions {
             width: 300.0,
             light: false,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
@@ -235,6 +238,7 @@ fn layout_cache_keeps_light_and_full_apart() {
         LayoutOptions {
             width: 600.0,
             light: true,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
@@ -251,6 +255,7 @@ fn layout_cache_keeps_light_and_full_apart() {
         LayoutOptions {
             width: 600.0,
             light: false,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
@@ -292,6 +297,7 @@ fn layout_cache_misses_when_metrics_revision_differs() {
         LayoutOptions {
             width: 600.0,
             light: false,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
@@ -405,6 +411,7 @@ fn block_cache_reuses_and_matches_fresh_layout() {
     let opts = LayoutOptions {
         width: 300.0,
         light: false,
+        allow_vertical: false,
     };
     let key = key_for(FLAT_SOURCE, 300.0);
     let fresh = layout(&dom, &styles, body, opts, &Mono, &NoImages);
@@ -448,6 +455,7 @@ fn a_reused_block_replays_the_floats_it_placed() {
     let opts = LayoutOptions {
         width: 200.0,
         light: false,
+        allow_vertical: false,
     };
     let key = key_for(&html, 200.0);
     let fresh = layout(&dom, &styles, body, opts, &Mono, &images);
@@ -476,6 +484,7 @@ fn block_cache_only_relayouts_the_changed_block() {
     let opts = LayoutOptions {
         width: 300.0,
         light: false,
+        allow_vertical: false,
     };
     let key = key_for(FLAT_SOURCE, 300.0);
 
@@ -512,6 +521,7 @@ fn block_cache_clears_when_the_context_changes() {
     let opts = LayoutOptions {
         width: 300.0,
         light: false,
+        allow_vertical: false,
     };
     let base = key_for(FLAT_SOURCE, 300.0);
 
@@ -568,6 +578,7 @@ fn block_cache_survives_a_preference_change() {
     let opts = LayoutOptions {
         width: 300.0,
         light: false,
+        allow_vertical: false,
     };
     let plain_prefs = crate::infra::config::Reader::default();
     let plain = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
@@ -631,6 +642,7 @@ fn block_cache_evicts_over_capacity() {
     let opts = LayoutOptions {
         width: 300.0,
         light: false,
+        allow_vertical: false,
     };
     let mut cache = BlockCache::with_capacity(2);
     layout_with_blocks(

@@ -729,12 +729,22 @@ impl ReaderSession {
             0
         };
         let book = self.book()?;
-        let slice = book
-            .document()
-            .slice_of(self.page, column, self.laid_out.columns)?;
+        let doc = book.document();
+        let slice = doc.slice_of(self.page, column, self.laid_out.columns)?;
         let x = prefs.margin_x
             + folio_core::layout::fragment::column_offset(width, gap, slice.column)
             + shift_x;
+        // 竖排那一档这一句是 `Scene::build` 里那两个平移数的**逆**：
+        // 屏上的横偏移对应章内物理 x，而那一根轴从长条右缘反着数（`slide`），
+        // 片的推进轴原点因此加在横坐标上而不是纵坐标上；纵坐标直接就是列内位置。
+        if doc.layout().vertical() {
+            let slide = slice.origin_y + slice.height - doc.height();
+            return Some((
+                book.chapter_index(),
+                f32::from(local.x) - x - slide,
+                f32::from(local.y) - self.header_reserve - shift_y,
+            ));
+        }
         Some((
             book.chapter_index(),
             f32::from(local.x) - x,

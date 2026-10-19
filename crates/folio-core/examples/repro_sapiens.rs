@@ -50,6 +50,7 @@ fn main() {
             LayoutOptions {
                 width: 370.0,
                 light: false,
+                allow_vertical: false,
             },
             &StdMeasure,
             &NoImages,

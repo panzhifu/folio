@@ -14,7 +14,9 @@
 //! - 带单位的 `line-height` 折成倍数（除以**自己的**字号），代价是改字号时不重算。
 //! - `pt` 按 96/72 折算，裸数字按 `px`。
 
-use super::computed::{BorderStyle, BreakWhen, Clear, Color, Float, Length, ListStyle};
+use super::computed::{
+    BorderStyle, BreakWhen, Clear, Color, Float, Length, ListStyle, WritingMode,
+};
 
 /// `list-style-type` 的关键字表。认不出的关键字返回 `None`（计进 ignored），
 /// **不降级成 `disc`** —— 把作者要的 `hebrew` 画成一个黑点，比承认没做更难被发现。
@@ -77,6 +79,26 @@ pub(super) fn parse_break_when(value: &str) -> Option<BreakWhen> {
         "always" => Some(BreakWhen::Always),
         _ => None,
     }
+}
+
+/// `writing-mode` 的取值。
+///
+/// `sideways-rl` / `sideways-lr` 折进 `vertical-*` 那一两格：两者的差别**只在拉丁**
+/// （sideways 连拉丁一起转 90°，vertical 让汉字直立、只转拉丁），而这台渲染器根本没有
+/// 字形旋转通道（`Window::paint_glyph` 没有旋转参数），于是竖排里的拉丁本来就显式降级成
+/// 「直立」—— 那一档降级见 `plans/README.md` M8。降级之后两档在屏上是同一个画面，
+/// 所以合起来报 `Applied` 比按不认识计数更诚实：竖排的那一本照样竖，写法没被丢。
+///
+/// SVG 遗留的那一族（`tb-rl`、`tb-lr`、`lr`、`lr-tb`、`rl`）不接：本机书目里没出现过，
+/// 而它们是「先转整页再转字」的另一套语义，猜错的症状比不猜难查。按不认识计数，
+/// `examples/css-gap` 的表会告诉我们哪一本真用了它。
+pub(super) fn parse_writing_mode(value: &str) -> Option<WritingMode> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "horizontal-tb" => WritingMode::HorizontalTb,
+        "vertical-rl" | "sideways-rl" => WritingMode::VerticalRl,
+        "vertical-lr" | "sideways-lr" => WritingMode::VerticalLr,
+        _ => return None,
+    })
 }
 
 /// `orphans` / `widows` 的取值：整数，`0` **夹到 1** 而不是判不认识。

@@ -183,6 +183,7 @@ fn main() {
         LayoutOptions {
             width: WIDTH,
             light: false,
+            allow_vertical: false,
         },
     );
     report("完整排版", full, &format!("{lines} 行"));
@@ -193,6 +194,7 @@ fn main() {
         LayoutOptions {
             width: WIDTH,
             light: true,
+            allow_vertical: false,
         },
     );
     report(
@@ -208,6 +210,7 @@ fn main() {
             LayoutOptions {
                 width: WIDTH,
                 light: false,
+                allow_vertical: false,
             },
             &Mock,
             &NoImages,
@@ -220,6 +223,7 @@ fn main() {
             LayoutOptions {
                 width: WIDTH,
                 light: true,
+                allow_vertical: false,
             },
             &Mock,
             &NoImages,
@@ -237,6 +241,7 @@ fn main() {
         let opts = LayoutOptions {
             width: WIDTH,
             light: false,
+            allow_vertical: false,
         };
         // 阶段一：整章量高（不建行盒）。
         let mut t = Duration::MAX;
@@ -289,6 +294,7 @@ fn main() {
         LayoutOptions {
             width: WIDTH,
             light: false,
+            allow_vertical: false,
         },
     );
     report("完整排版（拉丁）", latin, &format!("{ll} 行"));
@@ -304,6 +310,7 @@ fn main() {
         LayoutOptions {
             width: WIDTH,
             light: false,
+            allow_vertical: false,
         },
     );
     report("完整排版（混排）", mixed_t, &format!("{ml} 行"));
@@ -331,6 +338,7 @@ fn main() {
             LayoutOptions {
                 width: WIDTH,
                 light: false,
+                allow_vertical: false,
             },
             &Mock,
             &NoImages,
@@ -349,6 +357,7 @@ fn main() {
                     LayoutOptions {
                         width: WIDTH,
                         light: false,
+                        allow_vertical: false,
                     },
                     &Mock,
                     &NoImages,
@@ -382,6 +391,7 @@ fn main() {
         let opts = LayoutOptions {
             width: WIDTH,
             light: false,
+            allow_vertical: false,
         };
         let key_b = LayoutKey::compose(
             LayoutInputs::compute("", &Reader::default()),

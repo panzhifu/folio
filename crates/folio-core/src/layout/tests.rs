@@ -77,6 +77,8 @@ fn typeset_with(measure: &dyn Measure, html: &str, css: &str, width: f32) -> (Do
         LayoutOptions {
             width,
             light: false,
+            // 夹具里会写 `writing-mode`，所以这两条排版入口都让书的 CSS 说了算。
+            allow_vertical: true,
         },
         measure,
         &NoImages,
@@ -1078,6 +1080,8 @@ fn typeset_images(html: &str, css: &str, width: f32, images: &dyn ImageProvider)
         LayoutOptions {
             width,
             light: false,
+            // 夹具里会写 `writing-mode`，所以这两条排版入口都让书的 CSS 说了算。
+            allow_vertical: true,
         },
         &Mono,
         images,
@@ -1458,6 +1462,7 @@ fn light_mode_produces_no_lines() {
         LayoutOptions {
             width: 600.0,
             light: true,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
@@ -1485,6 +1490,7 @@ fn light_mode_height_matches_full_within_tolerance() {
         LayoutOptions {
             width: 600.0,
             light: false,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
@@ -1496,6 +1502,7 @@ fn light_mode_height_matches_full_within_tolerance() {
         LayoutOptions {
             width: 600.0,
             light: true,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
@@ -1530,6 +1537,7 @@ fn two_stage_corpus() -> (Dom, NodeId, LayoutOptions) {
         LayoutOptions {
             width: 320.0,
             light: false,
+            allow_vertical: false,
         },
     )
 }
@@ -1713,8 +1721,10 @@ fn the_batch_width_matches_per_char_measurement() {
 // 那一大片（`LayoutKey` / `LayoutCache` / `BlockCache`）挪到了同目录的 `tests/cache.rs`：
 // 三块连着写一份文件读不完，而它们钉的是同一件事——「输入没变就别重算」。
 mod cache;
-// 排版结果上两张索引（行 → 块、按 y 二分）与接线前线性扫的逐行对照。
+// 排版结果上两张索引（行 → 块、按推进轴二分）与接线前线性扫的逐行对照。
 mod index;
+// 竖排：同一份几何在两根轴上的逐条对照（转置漏一面、接反轴、基线符号错都在这片露）。
+mod vertical;
 
 // ---- 方向：RTL 的行盒几何 ----
 

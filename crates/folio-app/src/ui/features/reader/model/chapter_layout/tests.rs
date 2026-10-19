@@ -1559,3 +1559,124 @@ fn the_author_stylesheet_is_parsed_once_per_book(cx: &mut TestAppContext) {
         "改偏好把作者层重解析了一遍"
     );
 }
+
+/// 一本声明了竖排的书，界面怎么走到竖排上 —— 以及走过去之后**停得下来**。
+///
+/// 轴写在书的 CSS 里，而 CSS 要到后台作业里才层叠，所以第一遍只能按横排排。
+/// `apply_typeset` 读出那一条声明、把 `wants_vertical` 订正，下一帧折行宽换成列长重排。
+/// 这一条钉三件事：第二遍真的换了轴；第三遍不再换（不收敛就是每帧重排一整章）；
+/// 换完之后命中与选区矩形都跟着轴走 —— 屏幕上一个物理点要能落回它自己那一列。
+#[gpui_kit::test]
+fn a_vertical_book_settles_on_the_vertical_axis(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::chapter_layout::Viewport;
+
+    let xhtml = "<body><p>中文足够长的一段，长到必须折成好几行才排得下，\
+                 这样才有好几列可以对着看：折行处、留白处、块与块的接缝处都该有东西可探。\
+                 再多写几句，好让这一章的列数配得上「翻页」这两个字。一列能排四十来个字，\
+                 所以这里要把段落写得再长一些：中文竖排的本子通常一页十几二十列，\
+                 每列从列顶排到列底，列与列之间靠行高隔开，读的顺序是从右往左一列一列推。\
+                 这一段的长度要够切出好几页，也要够让命中与选区逐列走一遍，\
+                 否则那些断言只在第一列里打转，第二列之后的换算错了也没人替我说话。</p></body>";
+    // 窗口只有 100 宽：一页装得下三四列，这一段就非跨页不可 —— 分页那一档的
+    // 「沿推进轴切片」要被真切到才算验过。
+    let handle = window(cx, 100.0, 900.0);
+    let mut doc = Document::new(
+        xhtml.to_string(),
+        "body { writing-mode: vertical-rl }",
+        bare_prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    // 分页：一片 700 高、单栏、没有侧栏。竖排只在分页那一档落地。
+    let page = || Viewport {
+        reserve: 0.0,
+        columns: 1,
+        height: 700.0,
+        gap: 0.0,
+    };
+
+    cx.update_window(handle, |_, win, cx| {
+        doc.ensure_viewport(win, cx, page());
+    })
+    .expect("窗口应当可排版");
+    assert!(
+        !doc.layout().vertical(),
+        "轴要层叠完才看得见，所以第一遍只能按横排排"
+    );
+
+    cx.update_window(handle, |_, win, cx| {
+        doc.ensure_viewport(win, cx, page());
+    })
+    .expect("窗口应当可排版");
+    assert!(doc.layout().vertical(), "第二遍必须换成竖排那根轴");
+    let columns = doc.lines().len();
+    assert!(columns >= 4, "这段得排出几列才有东西可验：{columns}");
+
+    // 第三遍不许再变：不收敛的话每一帧都在重排整章。
+    cx.update_window(handle, |_, win, cx| {
+        doc.ensure_viewport(win, cx, page());
+    })
+    .expect("窗口应当可排版");
+    assert!(doc.layout().vertical(), "轴定了就不该摆回横排");
+    assert_eq!(
+        doc.lines().len(),
+        columns,
+        "收敛之后每帧重排了一遍，行数还会跟着抖"
+    );
+
+    // 列从右往左堆，而每一列都从同一个列顶起。
+    for pair in doc.lines().windows(2) {
+        assert!(
+            pair[1].x <= pair[0].x,
+            "后一列应当更靠左：{} 之后是 {}",
+            pair[0].x,
+            pair[1].x
+        );
+    }
+    // 首行缩进跟着轴走：横排里它推的是行首的 x，竖排里推的是**列顶的 y**。
+    // 读者的 2em 缩进落在哪一根轴，是「转置做对了没有」最省事的一个判据 ——
+    // 接错轴的症状是段首那一格跑到左边去，而列顶整整齐齐。
+    let first = &doc.lines()[0];
+    assert!(
+        first.y > 0.0,
+        "第一列的列顶该被首行缩进推开，实际 y = {}",
+        first.y
+    );
+    assert!(
+        doc.lines().iter().skip(1).any(|line| line.y < first.y),
+        "同一段后面的列该回到列顶，不该一路带着缩进"
+    );
+
+    // 命中：拿列内靠上的一个物理点问回去，必须落在它自己那一列。
+    cx.update_window(handle, |_, win, cx| {
+        for (i, line) in doc.lines().iter().enumerate() {
+            let at_x = line.x + line.width * 0.5;
+            let at_y = line.y + 4.0;
+            let hit = doc
+                .hit_test(win, cx, at_x, at_y)
+                .unwrap_or_else(|| panic!("第 {i} 列里点进去应当命中"));
+            assert_eq!(hit.line, i, "竖排的命中要落回同一列");
+        }
+    })
+    .expect("窗口应当可命中");
+
+    // 选区矩形是「高的一条」而不是「宽的一条」：轴换过来的直接证据。
+    let total = doc.text_map().chars();
+    let rects = cx
+        .update_window(handle, |_, win, cx| doc.selection_rects(win, cx, 0..total))
+        .expect("窗口应当可求矩形");
+    assert!(
+        rects.len() >= 4,
+        "整章的选区应当逐列给矩形：{}",
+        rects.len()
+    );
+    for rect in &rects {
+        assert!(
+            rect.height > rect.width,
+            "竖排的选区矩形该沿 y 铺：{rect:?}"
+        );
+    }
+
+    // 切片切的是列：一页装得下几列由列厚决定，而且片与片按列号首尾相接。
+    assert!(doc.page_count() > 1, "这么长一章在 600 宽的页里该不止一页");
+}

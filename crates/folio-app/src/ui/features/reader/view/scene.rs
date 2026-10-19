@@ -79,8 +79,14 @@ impl Scene {
         cache: &mut FontCache,
         family: &SharedString,
         lines: Range<usize>,
+        // 这一帧的可见带，说的是**推进轴**上的一段（横排 = 屏上的 y，竖排 = 从长条右缘
+        // 往里数的距离）。分片与裁剔都活在那一根轴上，界面不许自己换成 y 再递进来。
         cull: Range<f32>,
+        // 本片在推进轴上的原点（`Fragment::origin_y` 那一个数）。
         origin_y: f32,
+        // 本片沿推进轴的长度（`Fragment::height`）。竖排要用它算这一页的左缘落在哪，
+        // 横排用不到 —— 一列一列从右往左堆，物理 x 与推进轴是反着数的。
+        flow_len: f32,
         x: f32,
         top: f32,
         foreground: Hsla,
@@ -92,6 +98,18 @@ impl Scene {
         let mono = SharedString::from(document.prefs().mono_font_family.clone());
         let faces = document.fonts();
         let layout = document.layout();
+        let flow = layout.flow_mode();
+        let vertical = layout.vertical();
+        // 竖排：长条沿物理 x 铺，而推进轴从**右缘**往里数。本片覆盖推进轴
+        // `[origin_y, origin_y + flow_len)`，它的左缘在物理上距长条右缘 `strip − origin − len`，
+        // 于是「物理坐标 → 屏上」要加的平移就是这个 `slide`（横排恒 0：那一档的平移
+        // 是沿 y 减 `origin_y`，写在下面每一式的老式子里）。
+        let strip = layout.width;
+        let slide = if vertical {
+            origin_y + flow_len - strip
+        } else {
+            0.0
+        };
         let mut runs = Vec::new();
         let mut images = Vec::new();
         // 块级装饰与行一样按可见区间裁：只在 cull 覆盖到的盒子上花钱。
@@ -100,8 +118,14 @@ impl Scene {
         // 每帧在这里只做三件**必须**每帧做的事：按可见带裁、加两个平移、落主题前景。
         let decorations = place_decorations(
             document.decor_seeds(),
-            cull.clone(),
+            if vertical {
+                (strip - cull.end, strip - cull.start)
+            } else {
+                (cull.start, cull.end)
+            },
             origin_y,
+            vertical,
+            slide,
             x,
             top,
             foreground,
@@ -112,15 +136,29 @@ impl Scene {
             let Some(line) = layout.lines.get(ix) else {
                 continue;
             };
-            if line.y + line.height < cull.start || line.y > cull.end {
+            // 裁剔问的是**推进轴**上的一段：横排是行顶与行底，竖排是这一列离长条右缘多远。
+            let at = layout.flow_start(line);
+            if at + layout.flow_thickness(line) < cull.start || at > cull.end {
                 continue;
             }
             // 章内那一份「这一行摆什么」一章只物化一次（`Document::row_units`）：文本句柄、
             // 字体描述、行内 x、基线偏移、盒高、装饰布尔、CSS 色全在那里。每帧只往上加
             // 三个平移数，以及把两个每帧才有的东西现落一次（主题色、解析好的 `Font`）。
             let row = document.row_units(ix);
-            let column_x = x + line.x;
-            let baseline = line.y + line.baseline - origin_y + top;
+            // 两个**轴中性**的屏幕纯量：`inline` 是这一行沿字方向的起点，`cross` 是基线
+            // 在侧轴上的位置。横排里就是 (x, y)，竖排里同一对数落在对调的两根轴上 ——
+            // 谁把这对数折回物理坐标？只有 `paint` 里 `project` / `project_delta` 那两句，
+            // 规则写在 `WritingMode` 上，界面不许各折一遍。
+            let inline = if vertical {
+                top + layout.inline_start(line)
+            } else {
+                x + layout.inline_start(line)
+            };
+            let cross = if vertical {
+                x + layout.cross_baseline(line) + slide
+            } else {
+                top + layout.cross_baseline(line) - origin_y
+            };
             for fragment in row.iter() {
                 match fragment {
                     RowFragment::Text(unit) => {
@@ -135,8 +173,17 @@ impl Scene {
                             // `Document::drop_fragments` 就把两张表一起清掉。
                             .keyed((ix as u32, unit.slot))
                             // 每条 run 自己的基线：`vertical-align` 折出来的偏移在这里减掉，
-                            // 正数（往上抬）就是基线 y 变小。行盒高与行基线已由排版层算过。
-                            .at(column_x + unit.x, baseline - unit.baseline_shift)
+                            // 正数（往上抬）在横排就是基线 y 变小；竖排那一档「抬」是朝列的
+                            // 起点边（`vertical-rl` 的起点边在右）—— 那个符号取自同一处投影，
+                            // 不在这里另立一条。行盒高与行基线已由排版层算过。
+                            .at(
+                                inline + unit.x,
+                                cross + {
+                                    let (dx, dy) = flow.project_delta(0.0, -unit.baseline_shift);
+                                    if vertical { dx } else { dy }
+                                },
+                            )
+                            .on_flow(flow)
                             .color(run_color_link(unit.color, foreground, link, unit.link))
                             // 装饰线要这个 run 的 inline box 高才能定纵向落点
                             // （见 `paint::decoration_y`），它是样式给的数，shaping 里没有。
@@ -174,9 +221,21 @@ impl Scene {
                             request.is_some()
                         );
                         if let Some(image) = request {
+                            // 竖排里的图片**不转置也不旋转**：矩形按原尺寸画，只是
+                            // 「底贴基线」换成「左缘贴基线」（rl 的起点边在右，图朝起点边那侧
+                            // 长出去）。列的厚度是行高，图比它宽时会压到邻列 —— 显式降级，
+                            // 接竖排的图片夹取要等块级转轴那一轮。
                             images.push(VisibleImage {
-                                x: column_x + placed.x,
-                                top: baseline - placed.height - placed.baseline_shift,
+                                x: if vertical {
+                                    cross + placed.baseline_shift
+                                } else {
+                                    inline + placed.x
+                                },
+                                top: if vertical {
+                                    inline + placed.x
+                                } else {
+                                    cross - placed.height - placed.baseline_shift
+                                },
                                 width: placed.width,
                                 height: placed.height,
                                 footnote: document.footnote_note_for_node(placed.node),
@@ -211,21 +270,32 @@ impl Scene {
 /// 剩下来的这三件事确实必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、
 /// 主题色（主题不许烘进表 —— `plans/阅读管线.md` §九 那四条硬约束的第 2 条）。
 ///
-/// 相交判据与原式逐字一致（`y + height < start || y > end`），而且**只能整表扫**：
-/// 块是嵌套的，父盒的 `y + height` 远大于紧随其后的子盒，所以「与一条带相交的那些块
-/// 是连续下标区间」这个前提在块上不成立 —— `Layout::stacked` 那一格是为行盒量的，
-/// 搬过来会悄悄漏画底色。这张表短（只有真带装饰的块），短是它的代价低，不是它被二分了。
+/// 相交判据与原式逐字一致（横排那条是 `y + height < start || y > end`，竖排换成物理 x），
+/// 而且**只能整表扫**：块是嵌套的，父盒的 `y + height` 远大于紧随其后的子盒，所以
+/// 「与一条带相交的那些块是连续下标区间」这个前提在块上不成立 —— `Layout::stacked`
+/// 那一格是为行盒量的，搬过来会悄悄漏画底色。这张表短（只有真带装饰的块），
+/// 短是它的代价低，不是它被二分了 —— 漏了这条前提的活证据就是下面那条高盒测试。
+#[allow(clippy::too_many_arguments)] // 八个都是「这一帧」的输入，包成结构体只是换个地方摆
 fn place_decorations(
     seeds: &[DecorSeed],
-    cull: Range<f32>,
+    // 可见带，已经折到**盒子自己那一条被裁的轴**上：横排是 y 的一段，竖排是物理 x 的一段
+    // （`Scene::build` 里从推进轴翻回来一次，这里不再各折一遍）。
+    band: (f32, f32),
     origin_y: f32,
+    vertical: bool,
+    slide: f32,
     x: f32,
     top: f32,
     foreground: Hsla,
 ) -> Vec<BlockDecor> {
     let mut out = Vec::new();
     for seed in seeds {
-        if seed.y + seed.height < cull.start || seed.y > cull.end {
+        let (start, thick) = if vertical {
+            (seed.x, seed.width)
+        } else {
+            (seed.y, seed.height)
+        };
+        if start + thick < band.0 || start > band.1 {
             continue;
         }
         // 边框色在表里已经把 `currentColor`（本块自己的 `color`）折完了，
@@ -236,8 +306,16 @@ fn place_decorations(
             (width, run_color(color, foreground), style)
         };
         out.push(BlockDecor {
-            x: x + seed.x,
-            top: seed.y - origin_y + top,
+            x: if vertical {
+                x + seed.x + slide
+            } else {
+                x + seed.x
+            },
+            top: if vertical {
+                top + seed.y
+            } else {
+                seed.y - origin_y + top
+            },
             width: seed.width,
             height: seed.height,
             background: seed
@@ -290,7 +368,16 @@ mod tests {
     /// 已经折好的 `currentColor`（那条有色边框）不许被主题覆盖，画法原样带过去。
     #[test]
     fn a_seed_is_placed_with_the_translations_and_the_theme() {
-        let decor = place_decorations(&[seed(40.0, 60.0)], 0.0..700.0, 100.0, 20.0, 60.0, black());
+        let decor = place_decorations(
+            &[seed(40.0, 60.0)],
+            (0.0, 700.0),
+            100.0,
+            false,
+            0.0,
+            20.0,
+            60.0,
+            black(),
+        );
         assert_eq!(decor.len(), 1);
         let decor = &decor[0];
         assert_eq!(
@@ -322,7 +409,9 @@ mod tests {
     fn a_seed_outside_the_visible_band_is_dropped() {
         let decor = place_decorations(
             &[seed(40.0, 60.0), seed(900.0, 60.0)],
-            0.0..700.0,
+            (0.0, 700.0),
+            0.0,
+            false,
             0.0,
             0.0,
             0.0,
@@ -338,7 +427,16 @@ mod tests {
     #[test]
     fn a_tall_box_starting_far_above_the_band_is_still_painted() {
         let parent = seed(0.0, 5000.0);
-        let decor = place_decorations(&[parent], 4000.0..4700.0, 0.0, 0.0, 0.0, black());
+        let decor = place_decorations(
+            &[parent],
+            (4000.0, 4700.0),
+            0.0,
+            false,
+            0.0,
+            0.0,
+            0.0,
+            black(),
+        );
         assert_eq!(decor.len(), 1, "父盒跨着整条带，必须画：{decor:?}");
         assert_eq!(decor[0].height, 5000.0);
     }
@@ -346,6 +444,8 @@ mod tests {
     /// 空表（这一章没有一处带装饰）必须给空，而不是给出一条零尺寸的东西。
     #[test]
     fn an_empty_table_paints_nothing() {
-        assert!(place_decorations(&[], 0.0..700.0, 0.0, 0.0, 0.0, black()).is_empty());
+        assert!(
+            place_decorations(&[], (0.0, 700.0), 0.0, false, 0.0, 0.0, 0.0, black()).is_empty()
+        );
     }
 }

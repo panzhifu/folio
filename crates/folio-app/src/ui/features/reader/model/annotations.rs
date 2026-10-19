@@ -144,10 +144,16 @@ impl ReaderSession {
         }
         let hit = doc.hit_test(window, cx, x, y)?;
         let line = doc.lines().get(hit.line)?;
-        if y < line.y || y >= line.y + line.height {
+        // 点落在不在这一行（列）里，问的是**推进轴**：横排量 y，竖排量物理 x。
+        // 区间向 `Layout` 的 `flow_*` 要，别在这里各写一根轴。
+        let layout = doc.layout();
+        let vertical = layout.vertical();
+        let start = layout.flow_start(line);
+        let band = start..(start + layout.flow_thickness(line));
+        let along_flow = if vertical { x } else { y };
+        if !band.contains(&along_flow) {
             return None;
         }
-        let band = line.y..(line.y + line.height);
         let spans = resolved_for(
             &self.annotation_spans,
             &self.annotations,
@@ -163,7 +169,16 @@ impl ReaderSession {
             .find(|span| {
                 doc.selection_rects_in_band(window, cx, span.start..span.end, band.clone())
                     .iter()
-                    .any(|rect| x >= rect.x && x < rect.x + rect.width)
+                    // 矩形是物理的：横排看点在不在它那段 x 里，竖排看那段 y
+                    //（那才是「沿字」的方向）。
+                    .any(|rect| {
+                        let (lo, hi, at) = if vertical {
+                            (rect.y, rect.y + rect.height, y)
+                        } else {
+                            (rect.x, rect.x + rect.width, x)
+                        };
+                        at >= lo && at < hi
+                    })
             })
             .map(|span| (chapter, span.start..span.end, span.id))
     }

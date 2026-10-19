@@ -76,6 +76,7 @@ fn typeset(html: &str, css: &str, width: f32) -> Chapter {
         LayoutOptions {
             width,
             light: false,
+            allow_vertical: false,
         },
         &Mono,
         &NoImages,
