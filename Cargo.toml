@@ -174,6 +174,32 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 log = "0.4"
 
+# 合成朗读（听书）的后端，见 `plans/听书.md`。只挂在拿得到系统 TTS 的这两个平台上：
+# Linux 那一档连的是 **Speech Dispatcher**（不是直接 espeak），Android 那一档走
+# `android.speech.tts.TextToSpeech`；macOS / Windows 的本仓库根本不构建，用不到的后端
+# 不挂上来 —— 每个平台的后端各带一条依赖树（winrt 那一档是 `windows` 0.58）。
+#
+# **两条平台各一的硬约束**，改这个包之前要先知道：
+#   1. Linux：`speech-dispatcher-sys` 在 build 脚本里跑 **bindgen**，所以构建机要
+#      libclang 与 `/usr/include/speech-dispatcher/libspeechd.h`。缺任何一条，
+#      `cargo check` 在这一格红。
+#   2. Android：`tts` 会往我们的 cdylib 里塞一个 `JNI_OnLoad`（`android.rs:30`），它
+#      `find_class("rs/tts/Bridge").expect(...)`。APK 里没有 `rs/tts/Bridge` 这个类就是
+#      **加载期崩**，而 `GpuiActivity` 每次启动都 `System.loadLibrary`。所以随包的
+#      `Bridge.java` 与它的 R8 keep 是这条依赖的一部分，不是可选项。
+#
+# 回调映射两端**是反的**（读过 0.26.3 源码逐条对过，出处在 `plans/听书.md` 第三节）：
+# Android 的 Java `onDone` 喂的是 `on_utterance_stop`、`onError` 喂的是 `on_utterance_end`，
+# 而那个 `onStop(String, Boolean)` 声明的是装箱 `Boolean`、盖不住 SDK 的
+# `onStop(String, boolean)`，所以永远不来。Linux 则是 `on_end` = 念完、`on_cancel` = 取消。
+#
+# 语速与音高的单位两端不同：Android 0.1–10.0（常速 1.0），Linux -100–100（常速 0，
+# `set_voice_rate` 收的是整数）。配置里存的必须是语义值，换算住在 `folio_core::speech`。
+#
+# 钉 `=0.26.3` 与上面 `libchm` / `reqwest_client` 同理：跳版本换掉的是「我们对过源码的那套
+# 映射与那组 `Features` 位」，而它的下场是听不出原因的「按了没声音」。
+tts = "=0.26.3"
+
 # gpui-mobile（移动平台层）带过来的补丁。原先在 folio-mobile 自己的 workspace 根
 # 才生效，现在两个 crate 共用一张依赖图，只能声明在这里 —— 于是桌面端也一起走这个 rev。
 # 注：上游 longbridge/gpui-mobile 已经不声明这条了，若实测确认不再需要，直接删。
@@ -189,11 +215,18 @@ log = "0.4"
 # `offscreen` 的版本，这一整条连同 `gpui-pre-mobile` 的那个 feature 一起删。
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
-# 仿真翻页 C 方案：本地分叉同时改了 `gpui-pre`（Mesh primitive / 页面捕获）
-# 与 `gpui-pre-wgpu`（网格管线 / shadow pass）。两条必须一起换，否则两棵 gpui
-# 的 `Window` / `Scene` 类型对不上。上游哪天合入这些口子，就把两条一起删。
-gpui-pre = { path = "../gpui-folio/gpui-pre" }
-gpui-pre-wgpu = { path = "../gpui-folio/gpui-pre-wgpu" }
+# 仿真翻页那三处改动都在 `panzhifu/gpui-folio`：一个 workspace 三个成员 —— `gpui-pre` 补
+# Mesh primitive 与页面捕获，`gpui-pre-wgpu` 补网格管线与片元里的圆柱受光，`folio-curl`
+# 是纯 CPU 的顶点与 uniform 定义（folio-app 直接引它，见 `crates/folio-app/Cargo.toml`）。
+# 两条 patch 必须一起换，否则两棵 gpui 的 `Window` / `Scene` 类型对不上；包名与版本维持
+# 0.3.9，否则不满足各处的 `=0.3.9`。
+#
+# 这三条从前是 `path = "../gpui-folio/…"`：仓库外同级目录成了构建前提，全新克隆连
+# `cargo metadata` 都跑不起来（CI 那两个 job 红在第 1 步就是这一条），而 `actions/checkout`
+# 不许把依赖检出到 workspace 外面 —— 所以只能钉 rev，不能指子目录。上游哪天合入这些口子，
+# 这两条连同 `folio-curl` 一起删。
+gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "07bd73e0428d826c7a30efa6bc3d962fbb981c34" }
+gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "07bd73e0428d826c7a30efa6bc3d962fbb981c34" }
 
 # 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
 # opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；
