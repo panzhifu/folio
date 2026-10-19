@@ -68,6 +68,23 @@
         android:required="false"
     />
 
+    <!--
+      合成朗读（听书）要绑到系统 TTS 引擎。API 30+ 的包可见性规则会把别的应用的
+      service 藏起来，`TextToSpeech` 因此看不见、也列不出非默认引擎，所以按官方
+      做法显式声明这一条意图。
+
+      一条实测更正，别再拿旧说法当依据：2026-10-19 在 Meizu 20 / Android 16 上，
+      **没加这一条也绑上了**（logcat：`Sucessfully bound to com.google.android.tts`），
+      因为 `tts_default_synth` 指向的那个默认引擎不受可见性限制。所以这条的作用范围是
+      「非默认引擎与音色清单」，不是「有没有声音」；留着它是因为换 ROM、换引擎、
+      或读者改过默认引擎之后答案就不同了，而我们不打算在运行时去猜那些。
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:hardwareAccelerated="true"

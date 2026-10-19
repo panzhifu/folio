@@ -55,6 +55,22 @@ rust-i18n.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# 听书（合成朗读）的后端。为什么只挂这两个平台、Linux 构建要 libclang + libspeechd 头、
+# Android 随包要有 `rs/tts/Bridge` 类，全部写在根 `Cargo.toml` 的 `tts` 那条注释里。
+#
+# **这一格目前没有 Rust 代码在用它**：`crate::speech` 还没写，Step 0 的两件量具（Android 的
+# 真机探针 `speech::probe`、桌面那个 `speech-smoke` example）只活在测量那一轮，量完就删、
+# **没进仓库**；结论都落在 `plans/听书.md`。留这条依赖要落的是打包而不是代码 —— `tts` 的
+# `JNI_OnLoad` 在 cdylib 加载那一刻就找 `rs/tts/Bridge`，所以随包的 `Bridge.java`、它的 R8
+# keep、manifest 的 `<queries>` 与 gradle 里排除 `libtts*.so` 必须跟它同进同退，缺一样就是
+# 加载期 abort。
+# 写引擎时别忘了它的形状：`tts::Tts` 内部是 `Rc<RwLock<Box<dyn Backend>>>`（那句
+# `unsafe impl Send + Sync` 只让类型通过检查，跨线程用会炸在 clone-on-drop 与回调表上），
+# 所以句柄只能由**一根专职线程**持有，别处通过命令与事件两条管道跟它说话；folio-core 不许
+# 依赖 gpui，`std::sync::mpsc` 足够。
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+tts.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
 # `rust-i18n` 不再单列：文案表那几条断言搬进 `src/i18n.rs` 之后就是本 crate 的代码，

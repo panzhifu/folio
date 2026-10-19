@@ -86,7 +86,15 @@ android {
             // manifest 的 android.app.lib_name（= folio_app），而 libfolio_app.so 的 NEEDED
             // 只有 liblog/libandroid/libdl/libm/libc，整库里也搜不到 "libgpui_mobile" 这个
             // 字符串。手动删没用（下次构建又生成一份新的），所以在这里排除掉。
-            excludes += listOf("**/libgpui_mobile*.so")
+            //
+            // `libtts` 那条是同一件事的第二次发生（2026-10-19 加 `tts` 之后实测）：它是
+            // rlib + cdylib + staticlib 三种 crate-type，cargo-ndk 把 cdylib 那份
+            // （`libtts-ec8918794bb18dab.so`，390,104 B）也拷了进来，而链进
+            // `libfolio_app.so` 的是 rlib 那一份 —— NEEDED 里没有任何 libtts，整库里
+            // grep 不到 "libtts" 这个串。所以它打进 APK 纯属死重。
+            // `JNI_OnLoad` 与五条 `Java_rs_tts_Bridge_*` 在 libfolio_app.so 自己的导出表里
+            // （llvm-readelf --dyn-syms 查到），不靠那个 .so。
+            excludes += listOf("**/libgpui_mobile*.so", "**/libtts*.so")
             keepDebugSymbols += listOf(
                 "*/arm64-v8a/libfolio_app.so",
                 "*/armeabi-v7a/libfolio_app.so",

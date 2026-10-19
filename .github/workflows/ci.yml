@@ -78,12 +78,19 @@ jobs:
           #   libx11-dev libxcb1-dev  x11 / x11rb / xcb
           #   libegl1-mesa-dev libgl1-mesa-dev   khronos-egl、GL 上下文
           #   libdrm-dev              wgpu 的 GBM/DRM 路径
+          #   libspeechd-dev          speech-dispatcher-sys（听书在 Linux 那一档的后端）
+          #   libclang-dev            同一个包的 build.rs 跑 bindgen：它 `header("wrapper.h")`
+          #                           之后直接 `.unwrap()`，缺头或缺 libclang 都是**构建期**
+          #                           panic，不是链接期找不到符号 —— 所以这一条不是 -sys
+          #                           链接规则里的例外，它是那条规则的姊妹：bindgen 也要一个
+          #                           系统依赖，只是它发生在 build 脚本而不是链接。
           # 没装的同样有理由：objc2-* 只在 macOS 目标上出现，ash（Vulkan）是运行时加载，
           # CI 里不建真窗口所以不需要任何 ICD。
           sudo apt-get install -y \
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-dev libxcb1-dev \
-            libegl1-mesa-dev libgl1-mesa-dev libdrm-dev
+            libegl1-mesa-dev libgl1-mesa-dev libdrm-dev \
+            libspeechd-dev libclang-dev
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
