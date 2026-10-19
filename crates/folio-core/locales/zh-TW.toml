@@ -52,12 +52,20 @@ toc = "目錄"
 "toc.collapse_all" = "摺疊目錄"
 "toc.reverse" = "逆向排序"
 "toc.clear_read" = "清除已讀痕跡"
+"search.label" = "全文"
+"search.placeholder" = "搜尋正文裡的文字"
+"search.hint" = "寫下要找的那幾個字"
+"search.none" = "這本書裡沒有那幾個字"
+"search.scanning" = "搜到第 %{done} / %{total} 章"
+"search.hits" = "命中 %{hits} 處"
+"search.capped" = "只看前 %{hits} 處"
 night = "夜間"
 day = "日間"
 progress = "進度"
 # 阅读面板那两格：亮度滑条的标签，与面板右下角把完整设置压进来的那颗。
 # 字号、翻页、跟随系统都复用既有的词（`field.*` 与 `appearance.follow_system`）。
 brightness = "亮度"
+turn_duration = "翻頁時長"
 more_settings = "更多設定"
 # 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
 page_position = "第 %{index} / %{total} 頁"
@@ -317,13 +325,13 @@ empty_hint = "用右邊的「匯入」選一本 epub、markdown 或純文字"
 no_results = "沒有書名或作者對得上"
 no_results_hint = "換個詞試試 —— 這裡搜的是書名和作者，不是正文"
 # 卡片上的管理菜单：长按（移动端）或右键（桌面端）弹出，与右上角那条导入菜单
-# 是同一套组件。两条都是图标 + 短标签；信息在前，删除垫底并用分隔线隔开 ——
+# 是同一套组件。每条都是图标 + 短标签；信息在前、分享紧随，删除垫底并用分隔线隔开 ——
 # 破坏性的动作不排在顺手的位置。「打开」不在菜单里：点卡片本身就是打开。
+# 「分享」递的是库里那一份副本的文件本身，只在有系统分享面板的那一端摆这一条（Android）。
+share = "分享"
 book_delete = "刪除"
-# 分组（集合）：卡片菜单里那一节 + 架面顶部那颗筛选。
+# 分组（集合）：卡片菜单里那一节 + 架面顶部那几张组卡。
 group = "群組"
-group_all = "全部群組"
-ungrouped = "未分群組"
 group_new = "新增群組"
 group_create = "建立"
 group_placeholder = "群組名稱"

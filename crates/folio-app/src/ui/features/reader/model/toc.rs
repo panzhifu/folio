@@ -165,23 +165,42 @@ impl ReaderSession {
                 self.set_page(page, cx);
             }
             Place::Reflow { chapter, offset } => {
-                let prefs = self.prefs.clone();
-                if let Source::Book(book) = &mut self.source {
-                    book.goto(chapter, &prefs);
-                }
-                // 换章共用的那一段：滚动与页号归零、作废上一趟没落地的跳转、丢选中。
-                self.reset_after_chapter();
-                let locator = Locator {
-                    chapter: chapter as u32,
-                    offset,
-                };
-                self.pend_restore(Some(locator));
-                // 拼接链此刻还没就位，反解不出「当前」位置 —— 落库直接写已知的目标。
-                // 偏移随后由正常的滚动补准（与跳目录那一条同一个写法）。
-                self.persist_locator(locator);
-                cx.notify();
+                self.goto_offset(chapter, offset, cx);
             }
         }
+    }
+
+    /// 跳到第 `chapter` 章的第 `offset` 个字（**章内可见文本**的字符数，与
+    /// `Locator.offset`、`chapters.char_len` 同一把尺）。
+    ///
+    /// 「定位原文」那一处与正文全文检索的每一处命中的落点都折到这一句上：两者拿到的
+    /// 都是「哪一章 + 第几个字」，而那个数都不必经过排版就有（前者来自导入那一趟扫出的
+    /// `images_json`，后者来自 [`crate::search`]）。同一件事两处各写一遍，就会有一处
+    /// 忘了 `reset_after_chapter` 或忘了落库 —— 症状是跳过去了、位置却又滑回章首。
+    ///
+    /// 落点照样不在这里算：目标章多半还没排过版，「第几个字落在哪一像素」要等排版做完，
+    /// 由渲染帧恢复那一步落地（`view.rs` 里 `pending_restore` 那一支）。
+    pub(in crate::ui::features::reader) fn goto_offset(
+        &mut self,
+        chapter: usize,
+        offset: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let prefs = self.prefs.clone();
+        if let Source::Book(book) = &mut self.source {
+            book.goto(chapter, &prefs);
+        }
+        // 换章共用的那一段：滚动与页号归零、作废上一趟没落地的跳转、丢选中。
+        self.reset_after_chapter();
+        let locator = Locator {
+            chapter: chapter as u32,
+            offset,
+        };
+        self.pend_restore(Some(locator));
+        // 拼接链此刻还没就位，反解不出「当前」位置 —— 落库直接写已知的目标。
+        // 偏移随后由正常的滚动补准（与跳目录那一条同一个写法）。
+        self.persist_locator(locator);
+        cx.notify();
     }
 
     /// 换一章：作废滚动位置并把新位置落库。

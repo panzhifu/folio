@@ -58,13 +58,14 @@ use crate::ui::features::reader::model::session::{
     AnnotationSpans, CurlMesh, PageRef, ReaderSession, Source, Turn, TurnRun, land_at_anchor,
     start_turn,
 };
+use crate::ui::features::reader::model::swipe::release_transition;
 use crate::ui::features::reader::motion::turn_animation::{self, Sheet, Tint};
 use crate::ui::features::reader::view::paint::{GlyphRun, GlyphsElement, shape};
 use crate::ui::features::reader::view::scene::{BlockDecor, Scene, VisibleImage};
 use crate::ui::foundation::images::DecodeRequest;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::shell::nav_transition;
 use crate::ui::shell::navigation::SizeClass;
+use crate::ui::shell::{turn_duration, turn_transition};
 
 /// 一次翻页动画在这一帧的样子。时钟已经采完、方向与档位都在里面，两臂各自折成位移。
 #[derive(Clone, Copy)]
@@ -97,7 +98,8 @@ impl ReaderSession {
     /// 采一次翻页的时钟，走完就把动画状态收掉。没有动画在走 ⇒ `None`。
     ///
     /// 时钟用 gpui 的 `Presence`，与整屏转场同一件东西（见 `ui::shell::layer_offset`）：
-    /// 它自己按 `nav_transition` 的时长插值、**自己续帧**（`MotionStatus::Running` 那一支
+    /// 它自己按这一趟那一个时长插值（`Turn::over`，见 [`turn_transition`]）、**自己续帧**
+    /// （`MotionStatus::Running` 那一支
     /// 里调 `request_animation_frame`），所以这里不再另挂一条帧循环；系统的减弱动态效果
     /// 它直接给终值，动画当场落定而画面不多走一帧。
     ///
@@ -115,15 +117,24 @@ impl ReaderSession {
                 // `present` 给 `true`：这一趟只需要「进场」那半 —— 走了多少就是 `progress`，
                 // 出场那一页由同一个数反着算（`turn_animation::slide::slide_shifts` 那两个返回值），
                 // 所以不必再为出场页单独挂一把 `Presence`。
+                // 松手那一腿有自己的时长与曲线：它要以松手那一刻的速度起步（
+                // `swipe::release_duration` / `release_shape`），而共用那一条 `EaseInOut`
+                // 两端速度都是 0，接手就是「手一抬纸先停死」。点屏 / 按键那一趟用的是读者
+                // 那一格的快照（`Turn::over`）—— 它没有前一段速度要接，但也**不能**每帧现读：
+                // 拖那条滑条每一帧都在写配置，现读等于给正在走的时钟每帧重新瞄准。
+                let transition = match turn.run {
+                    TurnRun::Released { over, .. } => release_transition(over),
+                    _ => turn_transition(turn.over, cx),
+                };
                 let id = TransitionId::from(ElementId::from(("reader-turn", turn.seq)));
                 let clock = Presence::new(id, true)
-                    .transition(nav_transition(cx))
+                    .transition(transition)
                     .sample(window, cx)
                     .progress;
                 // 松手那一腿不是从 0 走的：从手指那一点接着走完或走回，否则读者会看见
                 // 自己握过的那一截被重放一遍。
                 let progress = match turn.run {
-                    TurnRun::Released { from, revert } => {
+                    TurnRun::Released { from, revert, .. } => {
                         chrome::tween(from, if revert { 0.0 } else { 1.0 }, clock)
                     }
                     _ => clock,
@@ -202,9 +213,10 @@ impl Render for ReaderSession {
         // `&mut Window` + `&mut App`，而 `match &mut self.source` 进去之后 `self` 就只能
         // 逐字段借了（见下面那条同样的取舍）。采完给回的是一个 `Copy` 的快照，两臂各读各的。
         let turn = self.turn_frame(window, cx);
-        // 章界那一趟起时要抄的档位。在 `self` 被拆成字段借之前采好：`begin_turn` 那种
+        // 章界那一趟起时要抄的档位与时长。在 `self` 被拆成字段借之前采好：`begin_turn` 那种
         // 要整块 `&mut self` 的方法在下面那臂里调不动。
         let page_turn = ConfigHolder::appearance(cx).page_turn;
+        let turn_over = turn_duration(cx);
         let gap = chrome::spread_gap(self.prefs.margin_x);
         // 退档判据与排版必须量同一个版心宽，所以用 `Document` 的那个式子算，不在这里另定一套。
         let usable = Document::content_width(window, &self.prefs, self.reserve.width);
@@ -689,6 +701,7 @@ impl Render for ReaderSession {
                                 &mut self.turn,
                                 &mut self.turn_seq,
                                 page_turn,
+                                turn_over,
                                 mode,
                                 Turn {
                                     leaving: Some(PageRef {
@@ -734,7 +747,7 @@ impl Render for ReaderSession {
                         // 手：松手之后把「手指此刻」沿**这一笔自己的方向**补间到落点，折线跟着
                         // 走完，既不在松手那一帧跳、也不改倾角。
                         let grip = frame.grip.map(|grip| match frame.run {
-                            TurnRun::Released { from, revert } => {
+                            TurnRun::Released { from, revert, .. } => {
                                 let span = (1.0 - from).max(1e-3);
                                 turn_animation::release_grip(
                                     grip,

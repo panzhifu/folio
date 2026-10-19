@@ -14,6 +14,7 @@ use crate::ui::features::reader::model::session::{
 use crate::ui::features::reader::model::swipe::SwipeStep;
 use crate::ui::features::reader::model::turn::{PagingFacts, TurnIntent, TurnPlan};
 use crate::ui::services::config::ConfigHolder;
+use crate::ui::shell::turn_duration;
 
 impl ReaderSession {
     /// 换成另一种摆法。位置**不丢**：进度存的是「第几个字」，所以先把当前字偏移取下来，
@@ -230,7 +231,7 @@ impl ReaderSession {
     /// 起一次翻页动画，把上一趟还没走完的那次**换掉**而不是排队：读者的第二下点击要看见
     /// 新的一趟在走，而两张以上的纸同时在屏幕上位移没有意义（出场页只留最近一张）。
     ///
-    /// 时钟键与档位都在 [`start_turn`] 那一格里定 —— 章界那一趟（渲染帧里排版落地时补的）
+    /// 时钟键、档位与时长都在 [`start_turn`] 那一格里定 —— 章界那一趟（渲染帧里排版落地时补的）
     /// 走的也是同一句。两处各写一遍，就是从前那个「第二次跨章不滑」的成因。
     pub(in crate::ui::features::reader) fn begin_turn(&mut self, cx: &App, turn: Turn) {
         let mode = self.laid_out.mode;
@@ -238,6 +239,7 @@ impl ReaderSession {
             &mut self.turn,
             &mut self.turn_seq,
             ConfigHolder::appearance(cx).page_turn,
+            turn_duration(cx),
             mode,
             turn,
         );

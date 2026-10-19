@@ -138,11 +138,11 @@ const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, b
 /// （`store::now`），一次批量导入的十几本会拿到同一个 `added_at`，于是 `added_at DESC`
 /// 全是并列 —— 并列之间 SQLite 不保证任何顺序，实测同一份数据能给出两种先后（本项目的
 /// `store::books::grouping::shelf_grouped_splits_by_author` 就是这么翻车的）。后果不只是
-/// 难看：书架与「未分组」那一栏在两次查询之间换序，读者的眼睛跟着丢一行。
+/// 难看：整架那一片与某一组那一页在两次查询之间换序，读者的眼睛跟着丢一行。
 ///
 /// 按 `id DESC` 收尾 = 「同秒入库的，后落库的在先」，与 `added_at DESC` 同向。
 ///
-/// 整架、某一组那一页、「未分组」那一页三条查询共用这一条常量 —— 分组只回答「摆哪几本」，
+/// 整架、某一组那一页、还没进组的那一批三条查询共用这一条常量 —— 分组只回答「摆哪几本」，
 /// 「先看见哪一本」不归它管（见 [`Store::shelf_in_collection`]）。
 const SHELF_ORDER: &str =
     "ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC, books.id DESC";
@@ -342,6 +342,9 @@ impl Store {
     /// 这里**不**查正文。全文检索是另一件事，而书架上那颗框在读者眼里是
     /// 「找我那本书」，输入两个字就该立刻列出书名 —— 把两者混在一个入口会让短查询
     /// 静默返回空。
+    ///
+    /// 这一条数的是**全部**书，不看集合名分 —— 所以架面带搜索词时走的是它而不是
+    /// [`Store::shelf_ungrouped`]：挂进过组的书也要搜得出来。
     ///
     /// （正文的全文检索推后做。真要接的时候，索引该是**可重建的派生数据**，
     /// 而不是现在这样跟正文一起当权威数据存，见 `plans/text-compressed.md`。）
@@ -702,9 +705,9 @@ impl Store {
 
     /// 每个集合一组，末尾追一个「未分组」（装了但还没进任何集合的书）。
     ///
-    /// 这里**空集合也留着**：这一条是「按组清点」那份数据形状（一组一串书），不是架面那
-    /// 两处入口的读法 —— 组卡与那颗去处菜单都按 [`Collection::is_shown`] 筛掉 0 本的。
-    /// 判据不同是有意的：清点要看得到空组，去处那一列不该有一条点进去是空的入口。
+    /// 这里**空集合也留着**：这一条是「按组清点」那份数据形状（一组一串书），不是架面顶部
+    /// 那一排组卡的读法 —— 组卡按 [`Collection::is_shown`] 筛掉 0 本的。判据不同是有意的：
+    /// 清点要看得到空组，而一张点进去是空白的卡不该占架面顶部那一格。
     /// 组名用 [`UNGROUPED`] 而不是空串，理由见那里的说明。
     pub fn collection_groups(&self) -> Result<Vec<ShelfGroup>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -759,29 +762,15 @@ impl Store {
         Self::shelf_in_collection_in(&conn, collection_id, query)
     }
 
-    /// 还没进任何集合的书，同一套书名 / 作者过滤。架面点开「未分组」那一页走这一条。
+    /// 还没进任何集合的书，同一套书名 / 作者过滤。**架面整架那一片走这一条**：一本挂进了
+    /// 某个组就从整架消失，只有走进那一组才看得见（界面侧只有组卡与那颗「去处」菜单两处
+    /// 入口，没有叫「未分组」的那一页 —— 整架那一片本身就是它）。
     ///
     /// 「未分组」是筛出来的、不是存出来的：库里没有一个叫这个名字的组，它是
     /// [`Store::collection_groups`] 末尾追加的那一格（名字用 [`crate::group::UNGROUPED`]）。
     pub fn shelf_ungrouped(&self, query: &str) -> Result<Vec<ShelfItem>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::shelf_in_no_collection_in(&conn, query)
-    }
-
-    /// 还没进任何集合的书有几本。架面那颗分组菜单按它判「未分组」这一条摆不摆 ——
-    /// 一本都没有却摆出一条，点进去是一屏「这里没有东西」。
-    ///
-    /// 不复用 [`Store::shelf_ungrouped`] 的 `len`：那条要按 `SHELF_COLUMNS` 把每一本的
-    /// 进度、字数、封面都算一遍（五条相关子查询 × 每一行），而这里只要一个数。
-    pub fn ungrouped_count(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let n: i64 = conn.query_row(
-            "SELECT count(*) FROM books
-             WHERE books.id NOT IN (SELECT book_id FROM collection_books)",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(n as usize)
     }
 
     /// [`Store::shelf`] 的不上锁版本；只由已经持了锁的一方调用。
@@ -828,7 +817,7 @@ impl Store {
     }
 
     /// 还没进任何集合的书，排序与 [`Store::shelf`] 同一条（同一个 `SHELF_ORDER` 常量）。
-    /// [`Store::collection_groups`] 与架面那颗「未分组」筛选都走这里，不上锁。
+    /// [`Store::collection_groups`] 与架面整架那一片都走这里，不上锁。
     fn shelf_in_no_collection_in(conn: &Connection, query: &str) -> Result<Vec<ShelfItem>> {
         let trimmed = query.trim();
         let sql = format!(
@@ -1039,9 +1028,14 @@ mod grouping {
         );
     }
 
-    /// 「未分组」那一格有几本：架面按它判这一条摆不摆。
+    /// 还没进组的那一批跟着名分变 —— **那一片就是架面的整架**（`ShelfScope::Shelf` 不带
+    /// 搜索词时查的正是这一条），所以「进组」在读者手里等于从整架消失、「移出」等于回到整架。
+    ///
+    /// 四句各自都能单独坏掉而别的门还是绿的：名分那行写重了会让同一本在架上出现两次；
+    /// 移出没删行会让一本书从整架与那一组两头一起消失；删书不清 `collection_books` 会让
+    /// 某一组数着一本已经不存在的书。
     #[test]
-    fn the_ungrouped_count_follows_membership() {
+    fn the_ungrouped_bucket_follows_membership() {
         let store = Store::in_memory().unwrap();
         let a = store
             .add_book(&path("a.epub"), &meta("甲", "作者"))
@@ -1049,17 +1043,29 @@ mod grouping {
         let b = store
             .add_book(&path("b.epub"), &meta("乙", "作者"))
             .unwrap();
-        assert_eq!(store.ungrouped_count().unwrap(), 2);
+        assert_eq!(ids(&store.shelf_ungrouped("").unwrap()), vec![b, a]);
 
         let shelf = store.create_collection("想读").unwrap();
         store.add_to_collection(shelf, a).unwrap();
         store.add_to_collection(shelf, a).unwrap();
-        assert_eq!(store.ungrouped_count().unwrap(), 1, "同一本进两次不算两次");
+        assert_eq!(
+            ids(&store.shelf_ungrouped("").unwrap()),
+            vec![b],
+            "同一本进两次不算两次"
+        );
 
         store.remove_from_collection(shelf, a).unwrap();
-        assert_eq!(store.ungrouped_count().unwrap(), 2, "移出来就又算未分组");
+        assert_eq!(
+            ids(&store.shelf_ungrouped("").unwrap()),
+            vec![b, a],
+            "移出来就又回到整架那一片"
+        );
         store.remove_book(b).unwrap();
-        assert_eq!(store.ungrouped_count().unwrap(), 1, "删掉一本少一本");
+        assert_eq!(
+            ids(&store.shelf_ungrouped("").unwrap()),
+            vec![a],
+            "删掉一本少一本"
+        );
     }
 
     /// 「按组清点」那份数据形状里要看得见空组 —— 架面那两处入口不摆它，判据见

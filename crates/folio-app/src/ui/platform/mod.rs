@@ -114,6 +114,14 @@ pub(crate) fn send_task_to_back() {
 #[cfg(not(target_os = "android"))]
 pub(crate) fn send_task_to_back() {}
 
+/// 这一端有没有**系统级的分享面板**可递。书架卡片菜单据此决定摆不摆「分享」那一条。
+///
+/// 判据只写在这一处（[`RENDERS_SHARE_CARDS`] 是同一个理由）：[`share_image`] 那三条臂里，
+/// 桌面是把字节写进下载目录 —— 那是「下载」不是「分享」；iOS / HarmonyOS 安静 no-op；
+/// 只有 Android 真弹出一个让读者挑应用的面板。摆一条按下去什么都不弹出的条目，
+/// 读者读到的是「这个应用的分享坏了」。
+pub(crate) const HAS_SHARE_SHEET: bool = cfg!(target_os = "android");
+
 /// 把一张图的字节交给系统分享面板。图片查看器那一层的「分享」按钮走它。
 ///
 /// - **Android**：递给 `GpuiSystemUi.shareImage`，那边落进 `cache/share/` 再用

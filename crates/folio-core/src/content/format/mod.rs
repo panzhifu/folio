@@ -102,6 +102,29 @@ impl Format {
             .unwrap_or_else(|| self.as_str())
     }
 
+    /// 对外交出这本书时报的 media type —— 系统的分享面板按它筛选能收件的应用。
+    ///
+    /// 与 [`Format::copy_extension`]（它问 provider 注册表）不同，这张对照只有这一份：
+    /// 注册表管的是「哪个 provider 来读这个扩展名」，不是「对面把这个文件当成什么」，
+    /// 两者各写一张表反而会漂。已注册的类型优先（EPUB、RTF、HTML、CHM），没注册的用
+    /// 事实标准那个（FB2、MOBI、CBZ）。
+    ///
+    /// 返回值不会是空串：Android 的 `GpuiSystemUi.shareImage` 把空 mime 退成 `image/*`，
+    /// 一本 `.epub` 顶着 `image/*` 出去，读者看到的是相册那一排应用，一个也打不开书。
+    pub fn mime(self) -> &'static str {
+        match self {
+            Format::Markdown => "text/markdown",
+            Format::Text => "text/plain",
+            Format::Epub => "application/epub+zip",
+            Format::Fb2 => "application/x-fictionbook+xml",
+            Format::Html => "text/html",
+            Format::Cbz => "application/vnd.comicbook+zip",
+            Format::Rtf => "application/rtf",
+            Format::Chm => "application/vnd.ms-htmlhelp",
+            Format::Mobi => "application/x-mobipocket-ebook",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Format> {
         match s {
             "markdown" => Some(Format::Markdown),
@@ -401,6 +424,21 @@ impl Chapter {
 /// 在各章之间不均匀（中英混排、标签密度），估出来的百分比会不单调 ——
 /// 读者往下读而进度条后退，是产品上不可接受的（`plans/导入管线.md` §八 第 3 条）。
 pub fn visible_chars(xhtml: &str) -> Option<usize> {
+    Some(text_map(xhtml).chars())
+}
+
+/// 一段引擎就绪的 XHTML 的**可见文本**本身 —— 与 [`visible_chars`] 同一个 `TextMap`，
+/// 一个数、一条串。
+///
+/// 全文搜索在这条串上找命中，于是命中的字符偏移天生就是 [`crate::Locator::offset`]
+/// 那一把尺（见 [`crate::search`]）。分成两处实现就会有一处漂移，症状是「搜到『猫』、
+/// 跳过去屏上是『狗』」。
+pub fn visible_text(xhtml: &str) -> String {
+    text_map(xhtml).text().to_string()
+}
+
+/// 两条路共用的那一次解析：折出这一章的可见文本与它的坐标表。
+fn text_map(xhtml: &str) -> crate::content::anchor::TextMap {
     let dom = crate::content::dom::Dom::parse(xhtml.as_bytes());
     // 没有 `<body>` 的片段（FB2 / Markdown 的包装产物都带，但裸片段不带）
     // 就整棵当正文根 —— `TextMap::build` 自己会跳过 `<script>` / `<style>`。
@@ -408,8 +446,7 @@ pub fn visible_chars(xhtml: &str) -> Option<usize> {
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))
         .map_or(dom.document, |(id, _)| id);
-    let map = crate::content::anchor::TextMap::build(&dom, body);
-    Some(map.chars())
+    crate::content::anchor::TextMap::build(&dom, body)
 }
 
 /// 一章正文在容器里的位置 —— 库里只存这个，不存正文。

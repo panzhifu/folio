@@ -55,6 +55,13 @@ toc = "Contents"
 "toc.collapse_all" = "Collapse all"
 "toc.reverse" = "Reverse order"
 "toc.clear_read" = "Clear read marks"
+"search.label" = "Full text"
+"search.placeholder" = "Search the text of this book"
+"search.hint" = "Type what you are looking for"
+"search.none" = "Those words are not in this book"
+"search.scanning" = "Scanned %{done} of %{total} chapters"
+"search.hits" = "%{hits} matches"
+"search.capped" = "Only the first %{hits} matches"
 night = "Night"
 day = "Day"
 progress = "Progress"
@@ -62,6 +69,7 @@ progress = "Progress"
 # pushes the full settings screen over the reader. Font size, page turn and
 # "follow the system" reuse the existing words (`field.*`, `appearance.follow_system`).
 brightness = "Brightness"
+turn_duration = "Page turn duration"
 more_settings = "More settings"
 # The scale for paged / spread; continuous scroll reads "section" instead.
 page_position = "Page %{index} of %{total}"
@@ -325,15 +333,16 @@ empty_hint = "Use “Import” to pick an epub, markdown or text file"
 no_results = "No book matches"
 no_results_hint = "Try another word — this searches titles and authors, not the text"
 # The card's manage menu: long-press (mobile) or right-click (desktop), the same
-# component as the import menu on the toolbar. Both rows are an icon plus a short
-# label, no book title — the menu knows which card it popped from. Info goes first;
-# delete sits last behind a separator — a destructive action does not take the easy
-# slot. There is no "Open" row: tapping the card is opening it.
+# component as the import menu on the toolbar. Each row is an icon plus a short
+# label, no book title — the menu knows which card it popped from. Info goes first,
+# Share right after it; delete sits last behind a separator — a destructive action
+# does not take the easy slot. There is no "Open" row: tapping the card is opening
+# it. Share hands over the library's own copy of the file, and only grows on the
+# end that has a system share sheet (Android).
+share = "Share"
 book_delete = "Delete"
-# Groups (collections): the section in the card menu + the filter chip on the shelf bar.
+# Groups (collections): the section in the card menu + the group tiles at the top of the shelf.
 group = "Groups"
-group_all = "All groups"
-ungrouped = "Ungrouped"
 group_new = "New group"
 group_create = "Create"
 group_placeholder = "Group name"

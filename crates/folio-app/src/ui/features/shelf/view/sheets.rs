@@ -12,8 +12,8 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::{
-    Anchor, AnyElement, Context, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement, Styled, TestSupportExt as _, div, px,
+    AnyElement, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, div, px,
 };
 
 use super::{GUTTER, ShelfView};
@@ -81,32 +81,15 @@ impl ShelfView {
         let body = self.url_form(entry, cx);
         overlay::centered(
             "shelf-url-popover",
-            overlay::URL_HEIGHT,
+            overlay::FORM_HEIGHT,
             &shelf,
             |this, cx| this.close_url_panel(cx),
             div()
-                .w(px(overlay::URL_WIDTH))
-                .min_h(px(overlay::URL_HEIGHT))
+                .w(px(overlay::FORM_WIDTH))
+                .min_h(px(overlay::FORM_HEIGHT))
                 .child(body)
                 .into_any_element(),
         )
-    }
-
-    /// 顶部那颗分组按钮，外加它底下那张浮层（开着的时候）。
-    ///
-    /// 浮层挂在按钮**之后**而不是包着那颗按钮：`Popover` 要拿一个元素的 bounds 当锚点，
-    /// 而那颗按钮自己已经挂着一条筛选菜单 —— 两层浮层抢同一个触发器会互相顶掉。
-    /// 外面包一层 `div` 而不是把它塞成 `h_flex` 的下一个孩子：那样那两颗按钮之间会多算
-    /// 一条 `gap_2`，而浮层是个零尺寸的东西。
-    pub(in crate::ui::features::shelf) fn group_cell(&self, cx: &mut Context<Self>) -> AnyElement {
-        let button = self.group_button(cx).into_any_element();
-        match (&self.group_entry, self.group_open) {
-            (Some((_, entry)), true) => div()
-                .child(button)
-                .child(self.group_popover(entry.clone(), cx))
-                .into_any_element(),
-            _ => button,
-        }
     }
 
     /// 建组那一屏在手机上：同一份表单压进底部弹层。
@@ -238,11 +221,12 @@ impl ShelfView {
             .into_any_element()
     }
 
-    /// 「新建分组」在桌面那一档：钉在顶部那颗分组按钮底下的一张浮层。
+    /// 「新建分组」在桌面那一档：屏幕居中的一张浮层。
     ///
-    /// 入口仍在书的长按菜单里（那一格说的是「为这本书建个组」），但浮层跟着**管组的那颗
-    /// 按钮**开：菜单点完就没了，钉在它消失的位置上等于钉在一个已经不存在的锚点上。
-    /// 挂在按钮之后而不是按钮里面 —— 它是那颗按钮那一条命令的延续。
+    /// 与「从链接导入」那一张同一个容器、同一个尺寸：两张卡都是「一句提示 + 一行输入 +
+    /// 两颗按钮」的形状。也同一个理由摆在中间而不是钉在某颗按钮底下 —— 入口在卡片菜单里
+    /// （长按或右键，那一格说的是「为这本书建个组」），而菜单点完就散了，没有留下能钉的
+    /// 东西。
     pub(in crate::ui::features::shelf) fn group_popover(
         &self,
         entry: Entity<InputState>,
@@ -250,14 +234,14 @@ impl ShelfView {
     ) -> AnyElement {
         let shelf = cx.entity().clone();
         let body = self.group_form(entry, cx);
-        overlay::anchored(
+        overlay::centered(
             "shelf-group-popover",
-            Anchor::TopLeft,
-            6.0,
+            overlay::FORM_HEIGHT,
             &shelf,
             |this, cx| this.close_group_panel(cx),
             div()
-                .w(px(overlay::GROUP_WIDTH))
+                .w(px(overlay::FORM_WIDTH))
+                .min_h(px(overlay::FORM_HEIGHT))
                 .child(body)
                 .into_any_element(),
         )

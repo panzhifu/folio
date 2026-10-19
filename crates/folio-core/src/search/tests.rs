@@ -1,0 +1,453 @@
+//! 搜索这一层的门。
+//!
+//! 钉的全是**坐标**那一件事：命中报出来的那几个字，跳过去必须正好是那几个字。
+//! 体积与耗时都验不出来这个错 —— 偏移挪半格，屏上指到的就是旁边那个词，
+//! 而列表里那句上下文照样读得通（它是另一把尺量出来的）。
+
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+
+use super::{Found, Hit, Options, Query, fold, scan, scan_book_at, scan_chapter};
+use crate::content::document::{Document, from_content};
+use crate::content::format::epub::tests::published_shape_epub;
+use crate::content::format::{Chapter, Content, DocMeta, FlowDoc, visible_text};
+use crate::infra::task::StageCtx;
+
+/// 一本正文就在手上的书：每对 `(章名, XHTML)` 一章。
+fn book(chapters: &[(&str, &str)]) -> Box<dyn Document> {
+    let flow = FlowDoc {
+        chapters: chapters
+            .iter()
+            .map(|(title, source)| Chapter::inline(*title, *source))
+            .collect(),
+        ..Default::default()
+    };
+    from_content(
+        DocMeta {
+            title: "测试书".into(),
+            ..Default::default()
+        },
+        Content::Reflow(flow),
+    )
+}
+
+/// 跑一趟扫描（没人看进度、没按取消的那一档）。
+fn sweep(doc: &dyn Document, raw: &str) -> Found {
+    sweep_with(doc, raw, &Options::default(), &StageCtx::detached())
+}
+
+fn sweep_with(doc: &dyn Document, raw: &str, options: &Options, ctx: &StageCtx) -> Found {
+    let query = Query::parse(raw).expect("前置：查询不该是空的");
+    scan(doc, &query, options, ctx)
+}
+
+/// 按 `Hit` 报出来的那两个数从可见文本里切回去。切的应当正是命中的那几个字。
+fn slice(text: &str, hit: &Hit) -> String {
+    between(text, hit.start..hit.end)
+}
+
+/// 按**字符**区间取一段（`String` 的切片是字节，中文一处差半个字就 panic）。
+fn between(text: &str, chars: Range<usize>) -> String {
+    text.chars()
+        .skip(chars.start)
+        .take(chars.end - chars.start)
+        .collect()
+}
+
+/// 命中报的偏移是**可见文本**的字符数，不是源文本的字节数。
+///
+/// 这一条是整个搜索层的地基：`Locator.offset`、`chapters.char_len`、锚点的 `start`
+/// 全在这一把尺上（见 `plans/Locator.md`）。它错了，症状是「搜『猫』、跳过去屏上是
+/// 『狗』」—— 而列表里那句上下文照样读得通，因为它是从同一章折出来的。
+#[test]
+fn a_hit_lands_on_the_visible_char_axis() {
+    let doc = book(&[("第一章", "<p>她的猫，睡了。</p>")]);
+    let text = visible_text("<p>她的猫，睡了。</p>");
+    assert_eq!(text, "她的猫，睡了。", "前置：可见文本");
+
+    let out = sweep(doc.as_ref(), "猫");
+    assert_eq!(out.hits.len(), 1);
+    let hit = &out.hits[0];
+    assert_eq!((hit.chapter, hit.start, hit.end), (0, 2, 3));
+    assert_eq!(
+        slice(text.as_str(), hit),
+        "猫",
+        "按报出来的偏移切回去，就是那一个字"
+    );
+}
+
+/// 同一段话，标记写得繁简不同，命中不许挪地方。
+///
+/// 走源文本字节那条路一定会挪：多一个 `<span>` 就多几个字节，而读者看到的字一个没变。
+#[test]
+fn markup_does_not_move_a_hit() {
+    let plain = "<p>她的猫睡了</p>";
+    let fussy = "<div><p><span class=\"a\">她的</span><em>猫</em>睡了</p></div>";
+    let a = sweep(book(&[("第一章", plain)]).as_ref(), "猫");
+    let b = sweep(book(&[("第一章", fussy)]).as_ref(), "猫");
+    assert_eq!(a.hits, b.hits, "两段的可见文本逐字相同");
+    assert_eq!(b.hits[0].start, 2);
+}
+
+/// 两个字的中文查询照样命中 —— 这一条是「不建索引」那条路白拿的东西。
+///
+/// FTS5 的 `trigram` 对 `MATCH '一个'` 实测**静默返回 0 行**（不报错），而中文里两个字的
+/// 词占一大半：那一条路要么改成 `LIKE` 全表扫，要么让读者的查询凭空落空。
+#[test]
+fn two_chinese_characters_match() {
+    let doc = book(&[("第一章", "<p>一个人来了，又一个人在等。</p>")]);
+    let out = sweep(doc.as_ref(), "一个");
+    assert_eq!(out.hits.len(), 2, "两处『一个』都该报出来");
+    assert_eq!(out.hits[0].chapter, 0);
+}
+
+/// 拉丁的大小写不必写对，而偏移仍按原文那几个字算。
+#[test]
+fn latin_case_is_not_part_of_the_query() {
+    let doc = book(&[("ch", "<p>The cat sat on the mat.</p>")]);
+    for raw in ["cat", "Cat", "CAT"] {
+        let out = sweep(doc.as_ref(), raw);
+        assert_eq!(out.hits.len(), 1, "{raw:?} 该命中那一只猫");
+        assert_eq!(
+            (out.hits[0].start, out.hits[0].end),
+            (4, 7),
+            "{raw:?} 落在第 4 个字，而报出来的区间是原文那三个小写字母"
+        );
+    }
+    // 同一句里两处 the：一处句首大写、一处全小写，都算命中。
+    let out = sweep(doc.as_ref(), "the");
+    let starts: Vec<usize> = out.hits.iter().map(|h| h.start).collect();
+    assert_eq!(starts, vec![0, 15]);
+}
+
+/// 折过去会多出一个字符的那些字**不折**，为的是下标不挪位。
+#[test]
+fn a_fold_that_would_add_a_char_is_left_alone() {
+    assert_eq!(fold('A'), 'a', "一对一的照常折");
+    assert_eq!(fold('İ'), 'İ', "小写是『i + 组合点』两个字符，折了就挪位");
+    assert_eq!(fold('猫'), '猫', "没有大小写的字原样");
+    // 查询里带这种折不动的字，报出来的偏移仍要切得回去。
+    let doc = book(&[("ch", "<p>İstanbul 见 İ 一面。</p>")]);
+    let out = sweep(doc.as_ref(), "İ");
+    let text = visible_text("<p>İstanbul 见 İ 一面。</p>");
+    assert_eq!(
+        out.hits.len(),
+        2,
+        "两处 İ 都该命中（'I' 那三个拉丁字母不算）"
+    );
+    for hit in &out.hits {
+        assert_eq!(slice(&text, hit), "İ");
+    }
+}
+
+/// 两条路（按字节 / 逐字符折叠）报的都是**不重叠**的命中，位置一致。
+#[test]
+fn hits_do_not_overlap_on_both_paths() {
+    let doc = book(&[("ch", "<p>aaaa</p>")]);
+    let exact = sweep(doc.as_ref(), "aa");
+    let folded = sweep(doc.as_ref(), "AA");
+    let exact_starts: Vec<usize> = exact.hits.iter().map(|h| h.start).collect();
+    let folded_starts: Vec<usize> = folded.hits.iter().map(|h| h.start).collect();
+    assert_eq!(exact_starts, vec![0, 2], "『aa』在『aaaa』里两处，不是三处");
+    assert_eq!(
+        folded_starts, exact_starts,
+        "折叠那一条与按字节那一条同一份结果"
+    );
+}
+
+/// 到上限就收手，并且**只说**「没扫完」—— 不说还剩几处。
+#[test]
+fn the_cap_stops_the_sweep_and_says_so() {
+    let doc = book(&[
+        ("一", "<p>猫猫猫猫猫</p>"),
+        ("二", "<p>猫猫猫猫猫</p>"),
+        ("三", "<p>猫猫</p>"),
+    ]);
+    let out = sweep_with(
+        doc.as_ref(),
+        "猫",
+        &Options {
+            max_hits: 2,
+            ..Options::default()
+        },
+        &StageCtx::detached(),
+    );
+    assert_eq!(out.hits.len(), 2);
+    assert!(out.truncated, "到上限收的手该报出来");
+    assert_eq!(out.scanned, 1, "第一章就满了，第二、三章压根没读");
+    assert_eq!(
+        out.chapters, 3,
+        "总章数照报 —— 界面要说『前 2 处 / 共 3 章』"
+    );
+}
+
+/// 取消在**每一章的开头**看一眼，于是它既停得下来，也不会停在半章上。
+#[test]
+fn a_triggered_cancel_stops_at_the_first_chapter() {
+    let doc = book(&[("一", "<p>猫</p>"), ("二", "<p>猫</p>")]);
+    let ctx = StageCtx::detached();
+    ctx.cancel().trigger();
+    let out = sweep_with(doc.as_ref(), "猫", &Options::default(), &ctx);
+    assert!(out.cancelled, "置了旗标就该以取消收尾");
+    assert_eq!((out.scanned, out.hits.len()), (0, 0), "一章都不该扫");
+}
+
+/// 没置旗标时取消那一格是 false —— 上面那条把判定写反了才拦得住。
+#[test]
+fn an_uncancelled_sweep_says_so() {
+    let doc = book(&[("一", "<p>猫</p>")]);
+    let out = sweep(doc.as_ref(), "猫");
+    assert!(!out.cancelled && !out.truncated);
+    assert_eq!((out.scanned, out.chapters), (1, 1));
+}
+
+/// 全库那一档自己取正文，用的就是 [`scan_chapter`] 这一句：判据必须与整本那一趟同一份。
+#[test]
+fn one_chapter_scans_on_its_own() {
+    let text = visible_text("<p>她的猫睡了</p>");
+    let mut hits = Vec::new();
+    let full = scan_chapter(
+        7,
+        &text,
+        &Query::parse("猫").unwrap(),
+        &Options::default(),
+        &mut hits,
+    );
+    assert!(!full, "没到上限");
+    assert_eq!(hits.len(), 1);
+    assert_eq!((hits[0].chapter, hits[0].start), (7, 2), "章号由调用方给");
+    assert_eq!(slice(&text, &hits[0]), "猫");
+}
+
+/// 上下文里命中的那一段要能单独上色，两端裁掉处补 `…`。
+#[test]
+fn a_snippet_marks_the_match_and_narrows_the_ends() {
+    let long = format!("<p>前{}猫后{}</p>", "一".repeat(40), "二".repeat(40));
+    let doc = book(&[("第一章", &long)]);
+    let hit = &sweep(doc.as_ref(), "猫").hits[0];
+    assert_eq!(
+        between(&hit.snippet, hit.mark.clone()),
+        "猫",
+        "mark 切回来正是命中的那几个字"
+    );
+    assert!(
+        hit.snippet.starts_with('…') && hit.snippet.ends_with('…'),
+        "两头都裁了：{}",
+        hit.snippet
+    );
+    let budget = Options::default();
+    assert!(
+        hit.snippet.chars().count() <= budget.before + 1 + 1 + budget.after + 1,
+        "一句上下文不该长过那两档之和：{}",
+        hit.snippet.chars().count()
+    );
+
+    // 整章短到裁不动时不补 `…`，也不该把首尾的字吃掉。
+    let short = book(&[("第一章", "<p>她的猫睡了</p>")]);
+    let hit = &sweep(short.as_ref(), "猫").hits[0];
+    assert_eq!(hit.snippet, "她的猫睡了", "没裁就不假装有省略号");
+    assert_eq!(between(&hit.snippet, hit.mark.clone()), "猫");
+}
+
+/// 段首缩进（全角空格）与换行折成一个普通空格：列表那一行只摆得下一句。
+#[test]
+fn whitespace_in_a_snippet_is_flattened() {
+    let doc = book(&[("第一章", "<p>　　夜来了。\n　　猫睡了。</p>")]);
+    let hit = &sweep(doc.as_ref(), "猫").hits[0];
+    assert_eq!(hit.snippet, "夜来了。 猫睡了。", "换行与缩进都成一个空格");
+    assert!(!hit.snippet.contains("  "), "连着几处空白折成一个");
+}
+
+/// 只有空白的查询算「没在搜」，而不是一趟把所有正文读一遍。
+#[test]
+fn an_empty_query_is_not_a_search() {
+    assert!(Query::parse("").is_none());
+    assert!(Query::parse("  \n 　").is_none(), "全角空格也是空白");
+    let q = Query::parse(" 猫 ").expect("两头空白去掉之后还有字");
+    assert_eq!(q.as_str(), "猫", "查询去过两头空白");
+    assert!(!q.folds_case(), "中文查询走按字节那一条快路");
+    assert!(Query::parse(" Cat ").expect("有字").folds_case());
+}
+
+/// 全库那一档的基本单位：给一个路径，自己开容器扫一本。
+///
+/// 这里摆两本真的书（各在一个临时目录里），为的是钉住**逐本**这件事的形状：每一本各自的
+/// `Found`、各自的章号与偏移，而不是把两本的字混成一条串。偏移的切回验与整本那一档共用
+/// 同一条判据（`Locator.offset` 那把尺）。
+#[test]
+fn one_book_per_path_with_its_own_hits() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let paths = [published_shape_epub(&first), published_shape_epub(&second)];
+    let query = Query::parse("正文").expect("前置：查询不可能是空的");
+    for path in &paths {
+        let found = scan_book_at(path, &query, &Options::default(), &StageCtx::detached())
+            .expect("合成书该扫得动");
+        assert_eq!(found.chapters, 28, "前置：一本 28 章的合成书");
+        assert_eq!(found.hits.len(), 28, "每章那句『第 N 章的正文。』都该命中");
+        // 章号与偏移属于**这一本**：与另一本的行号毫无关系，所以逐本提交是干净的。
+        assert_eq!(found.hits[0].chapter, 0);
+        assert_eq!(found.hits[27].chapter, 27);
+    }
+
+    // 坏掉的那一本（路径不存在 = 文件被换掉 / 同步走了）回 `None`：架上有一本读不了，
+    // 不该让整架的搜索停下来。
+    let gone = paths[0].parent().unwrap().join("no-such-book.epub");
+    assert!(
+        scan_book_at(&gone, &query, &Options::default(), &StageCtx::detached()).is_none(),
+        "开不了的那一本该回 None，而不是 panic 也不是空命中"
+    );
+}
+
+/// 跨格式的一扇真门：同一本 CHM 的两份码页（UTF-8 与 GBK），搜同一个词要给出**同一个答案**。
+///
+/// CHM 那一层的最大一坑写在 `tests/fixtures/oss/chm/README.md` 里：真实中文书九成按 GBK
+/// 存，而 `String::from_utf8` 那一族的失败方式是一排问号**且不报错** —— 那种书能打开、能排版、
+/// 读者看得见字，只有搜索会露馅（问号串里没有那几个字）。这一条把「搜得到」与「两码页同一个
+/// 答案」钉在同一处，比只断言「解出来是不是同一串汉字」更接近读者的那一下。
+#[test]
+fn the_same_book_on_two_codepages_answers_the_same() {
+    let query = Query::parse("天地玄黄").expect("前置：查询不可能是空的");
+    let mut answers: Vec<(usize, usize)> = Vec::new();
+    for name in ["minimal-zh-utf8.chm", "minimal-zh-gbk.chm"] {
+        let path = fixture(&format!("../../tests/fixtures/oss/chm/{name}"));
+        let found = scan_book_at(&path, &query, &Options::default(), &StageCtx::detached())
+            .unwrap_or_else(|| panic!("{name} 该扫得动"));
+        assert_eq!(found.hits.len(), 1, "{name}：那句该只命中一次");
+        let hit = &found.hits[0];
+        // 偏移切回去必须正是查询本身 —— 判据与整本那一档同一份。
+        let doc = crate::content::document::open(&path).expect("合成容器应能打开");
+        let text = visible_text(&doc.chapter_source(hit.chapter).unwrap());
+        assert_eq!(slice(&text, hit), "天地玄黄", "{name}：切回去不是那四个字");
+        answers.push((hit.chapter, hit.start));
+    }
+    assert_eq!(
+        answers[0], answers[1],
+        "两码页给的是同一本书，章号与偏移不该分家"
+    );
+}
+
+/// 定版式（CBZ / 逐页 SVG 的漫画）没有「正文」这一列字：回空的读数，不 panic。
+///
+/// 全库那一档会把架上每一本都交给这一趟，所以「这一本没有字可搜」必须是一个能安静回答的
+/// 状态 —— 那一档的症状若是崩或挂，整架的搜索就废了。
+#[test]
+fn a_fixed_book_answers_with_nothing_to_read() {
+    let flow = crate::content::format::FixedDoc::default();
+    let doc = from_content(
+        DocMeta {
+            title: "漫画包".into(),
+            ..Default::default()
+        },
+        Content::Fixed(flow),
+    );
+    let out = sweep(doc.as_ref(), "猫");
+    assert_eq!((out.chapters, out.scanned, out.hits.len()), (0, 0, 0));
+    assert!(!out.cancelled && !out.truncated, "没扫过就该是干净的读数");
+}
+
+/// 仓库里那本合成的出版书形状：一次 `cargo test` 就要跑到的真容器门。
+///
+/// 这一条走的是读者那一条完整的路：开容器 → 按位置回 ZIP 取每章正文 → 折可见文本 →
+/// 扫 → 报章号与偏移。前面那几条用的是正文就在手上的夹具，测不到 ZIP 与位置那两环。
+#[test]
+fn the_synthetic_published_book_answers_with_chapter_and_offset() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = published_shape_epub(&dir);
+    let doc = crate::content::document::open(&path).expect("合成容器应能打开");
+    let out = sweep(doc.as_ref(), "正文");
+    assert_eq!(out.chapters, 28, "前置：28 章");
+    assert_eq!(out.hits.len(), 28, "每一章那句『第 N 章的正文。』都该命中");
+    assert!(!out.truncated && !out.cancelled);
+    assert_eq!(out.scanned, 28, "一章都不该落下");
+    // 单数码那章「第1章第1章的正文。」里『正文』前正好七个字。多位数码的要长两个，
+    // 所以这里只钉第一章，其余各章切回去验（同一个判据，不依赖位数）。
+    assert_eq!(out.hits[0].start, 7, "第 1 章的『正文』在第 7 个字上");
+    assert_eq!(out.hits[0].chapter, 0);
+    for hit in &out.hits {
+        let text = visible_text(&doc.chapter_source(hit.chapter).unwrap());
+        assert_eq!(
+            slice(&text, hit),
+            "正文",
+            "第 {} 章切回去不是那两个字",
+            hit.chapter
+        );
+    }
+    // `<head><title>` 里的字不在正文坐标系里：搜它应当搜不到（搜得到就等于把 head 数进去了）。
+    assert!(
+        sweep(doc.as_ref(), "合成出版书").hits.is_empty(),
+        "书名只写在 <title> 与 OPF 里"
+    );
+}
+
+/// 三本真书上的对拍 + 墙钟（`#[ignore]`：开一次容器实测 77–102 ms、全本折一遍最坏 231 ms，
+/// debug 档还要再虚高数倍。
+/// 跑法 `cargo test -p folio-core --lib --release -- --ignored --nocapture search`）。
+///
+/// 为什么值得单独一条：合成夹具钉的是**判据**，这三本验的是**判据在真书的排版产物上成立** ——
+/// 带 `　` 段首缩进、带 `<h1>`、一章一文件那种。断言只有一条：报出来的偏移切回去必须正是
+/// 查询本身；其余是读数。
+#[test]
+#[ignore = "全本现读现扫，几秒"]
+fn the_local_books_answer_on_the_same_axis() {
+    for name in [
+        "../../tests/fixtures/local/shejie-mauriac.epub",
+        "../../tests/fixtures/local/斗战狂潮校对版全本.epub",
+        "../../tests/fixtures/local/hali-bote-quanji.epub",
+    ] {
+        let path = fixture(name);
+        if !path.exists() {
+            println!("跳过 {name}（这台机器上没有）");
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let doc = crate::content::document::open(&path).expect("真书该打得开");
+        let opened = started.elapsed();
+        // 查询从这本书自己的正文里摘：换一本书也不会红在「那句话不在书里」上。
+        let middle = doc.flow().unwrap().chapters.len() / 2;
+        let probe = visible_text(&doc.chapter_source(middle).unwrap());
+        let query: String = probe
+            .chars()
+            .skip(probe.chars().count() / 2)
+            .take(6)
+            .collect();
+        let query = Query::parse(&query).expect("前置：摘出来的那六个字不该是空白");
+        let started = std::time::Instant::now();
+        let out = scan(
+            doc.as_ref(),
+            &query,
+            &Options::default(),
+            &StageCtx::detached(),
+        );
+        let swept = started.elapsed();
+        assert!(
+            out.scanned == out.chapters || out.truncated,
+            "没取消也没截断，就该一章不落地扫完（实扫 {} / {} 章）",
+            out.scanned,
+            out.chapters
+        );
+        assert!(!out.hits.is_empty(), "查询摘自这本书的正文，不可能搜不到");
+        for hit in out.hits.iter().take(20) {
+            let text = visible_text(&doc.chapter_source(hit.chapter).unwrap());
+            assert_eq!(
+                slice(&text, hit),
+                query.as_str(),
+                "第 {} 章第 {} 个字切回去不是查询本身",
+                hit.chapter,
+                hit.start
+            );
+        }
+        println!(
+            "{}：{} 章 · 开书 {:>6.0} ms · 现读现扫 {:>7.0} ms · 命中 {} 处",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or(name),
+            out.chapters,
+            opened.as_secs_f64() * 1000.0,
+            swept.as_secs_f64() * 1000.0,
+            out.hits.len(),
+        );
+    }
+}
+
+fn fixture(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+}

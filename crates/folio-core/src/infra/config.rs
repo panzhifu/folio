@@ -394,7 +394,7 @@ impl<'de> Deserialize<'de> for PageTurn {
 ///
 /// 只 `PartialEq` 而不带 `Eq`：`brightness` 是浮点数，`Eq` 在 f32 上本来就不成立
 /// （与 [`Config`] 那条同一口径）。
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
     pub mode: Mode,
@@ -404,6 +404,18 @@ pub struct Appearance {
     pub dark: Option<String>,
     /// 正文翻页沿哪根轴平移（见 [`PageTurn`] 为什么这一格不在 `Reader` 里）。
     pub page_turn: PageTurn,
+    /// 一次翻页动画走多久，单位**毫秒**（跟手那一截不算：它 1:1 跟着手指，没有时长可言）。
+    ///
+    /// 存**时长**而不是「速度倍数」：两者互为倒数，倍数那一头要在界面上反着摆才符合
+    /// 「往右 = 更慢」的直觉，读数还得换算一次；而毫秒这个数读者有参照物（280 与 700 一眼
+    /// 能分清），「1.7×」没有。
+    ///
+    /// 与 [`page_turn`](Self::page_turn) 同一个理由存在这一节而不是 [`Reader`]：一张纸走
+    /// 多久与一行字折在哪里毫无关系，放进 `Reader` 就等于「调一次动画速度触发整章重排」。
+    ///
+    /// 管到的那两腿：点屏 / 按键 / 滚轮起的那一趟，以及松手惯性那一腿的**时长上限**
+    /// （那一腿自己按剩余行程与手指速度算，只被这一个数夹住上端）。
+    pub turn_duration: f32,
     /// 阅读界面的亮度，`None` = **不接管**（跟随系统）。
     ///
     /// 与 [`page_turn`](Self::page_turn) 同一个理由存在这一节而不是 [`Reader`]：`Reader`
@@ -424,6 +436,18 @@ impl Appearance {
     /// 界面那一条滑条直接引用这个数，不在 UI 里抄第二份。
     pub const BRIGHTNESS_MIN: f32 = 0.05;
 
+    /// 翻页时长的默认档。这一档与外壳整屏进出的那一个数同一档
+    /// （`folio_app::ui::shell::NAV_TRANSITION`，它是照底部弹层那根弹簧定的）：同一屏里
+    /// 换两张纸与换一整屏若被同一只手读出两种快慢，就该有一边是错的。
+    ///
+    /// 这里没法直接引用那个常数（core 不依赖 app），所以靠 app 那侧一条门钉住这个等式 ——
+    /// 不是靠这条注释里的那个数不走偏。
+    pub const TURN_DURATION_DEFAULT: f32 = 280.0;
+    /// 下限：短到这一档以下，纸怎么走已经看不清了，落定读成「啪」的一声。
+    pub const TURN_DURATION_MIN: f32 = 120.0;
+    /// 上限：长到这一档以上就不是「慢一点」而是「纸自己在磨」。
+    pub const TURN_DURATION_MAX: f32 = 700.0;
+
     /// 空串按「没设」处理：`""` 既不是合法主题名，又会让下拉框显示成空白。
     pub fn normalized(mut self) -> Self {
         for name in [&mut self.light, &mut self.dark] {
@@ -439,7 +463,33 @@ impl Appearance {
             Some(v) => Some(v.clamp(Self::BRIGHTNESS_MIN, 1.0)),
             None => None,
         };
+        // 非有限值退回**默认档**而不是夹到某个端点：`NaN` 被读成「推到最慢」等于把坏数据
+        // 当成一个选择。区间两端则照亮度那条老规矩夹住，手改 `config.json` 越界不改语义。
+        self.turn_duration = if !self.turn_duration.is_finite() {
+            Self::TURN_DURATION_DEFAULT
+        } else {
+            self.turn_duration
+                .clamp(Self::TURN_DURATION_MIN, Self::TURN_DURATION_MAX)
+        };
         self
+    }
+}
+
+/// 手写而不是 derive：`turn_duration` 的默认档不是 `f32` 的零值。derive 出来的那份会把
+/// 翻页读成**零时长**（纸当场落定），而配置里那个 `0.0` 没人看得出它从哪来。
+///
+/// 这里不能写 `..Default::default()` —— 那是自己调自己。少写一个字段编译器直接报，
+/// 正是这一格想要的：新增字段时默认值必须显式想过一遍。
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            mode: Mode::default(),
+            light: None,
+            dark: None,
+            page_turn: PageTurn::default(),
+            turn_duration: Self::TURN_DURATION_DEFAULT,
+            brightness: None,
+        }
     }
 }
 
@@ -1038,6 +1088,7 @@ mod tests {
                 dark: Some("Molokai".into()),
                 // 故意不是默认值：这一趟要把新键真写出去再读回来，填默认值等于没测到它。
                 page_turn: PageTurn::SlideUp,
+                turn_duration: 420.0,
                 brightness: Some(0.6),
             },
             language: Language { locale: Locale::Ja },
@@ -1226,6 +1277,48 @@ mod tests {
                 .brightness,
             None,
             "没写过这一格就是交还系统"
+        );
+    }
+
+    /// 翻页时长那一条滑条的两端与默认档就是这里这三个数，所以夹取规则钉在同一格：
+    /// 界面与配置之间不许有第二套「最慢/最快」的表示法，而 `NaN` 退回**默认档**而不是
+    /// 某个端点 —— 坏数据不该被读成读者的一个选择。
+    #[test]
+    fn the_turn_duration_clamps_to_the_slider_ends() {
+        for (written, want) in [
+            ("-1.0", Appearance::TURN_DURATION_MIN),
+            ("60.0", Appearance::TURN_DURATION_MIN),
+            ("300.0", 300.0),
+            ("1800.0", Appearance::TURN_DURATION_MAX),
+        ] {
+            let got = load(&format!(
+                r#"{{"appearance":{{"turn_duration":{written}}}}}"#
+            ));
+            assert_eq!(
+                got.appearance.turn_duration, want,
+                "{written} 该读成 {want}，实得 {}",
+                got.appearance.turn_duration
+            );
+        }
+        // 缺键走容器的 `#[serde(default)]`：取整份 `Default`，于是没写过这一格就是默认档，
+        // 而不是零时长（那等于纸当场落定）。
+        let got = load(r#"{"appearance":{"mode":"dark"}}"#);
+        assert_eq!(
+            got.appearance.turn_duration,
+            Appearance::TURN_DURATION_DEFAULT,
+            "没写过这一格就是默认档"
+        );
+        // 非有限值 → 退回默认档而不是夹到最慢那一头。这一条不走 JSON：`NaN` 不是合法
+        // JSON 字面量，而 `1e400` 在 serde_json 那侧先炸成读不出键，测不到这一格。
+        let nan = Appearance {
+            turn_duration: f32::NAN,
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(
+            nan.turn_duration,
+            Appearance::TURN_DURATION_DEFAULT,
+            "NaN 该退回默认档，而不是被当成「推到最慢」"
         );
     }
 

@@ -1,4 +1,4 @@
-//! 架面顶上那一行：搜索框、三点菜单、建组按钮。
+//! 架面顶上那一行：搜索框、三点菜单。
 //!
 //! 三种导入方式（选文件 / URL / 整机扫描）收在三点菜单里，手机上只剩一颗搜索框 ——
 //! 收与不收的判据是窗口档位，见 `columns_for` 与调用点。
@@ -11,7 +11,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Sizable as _, h_flex};
 use gpui_kit::{Anchor, Context, IntoElement, ParentElement, Styled, div, px};
 
-use super::{GUTTER, ShelfScope, ShelfView, menu_groups};
+use super::{GUTTER, ShelfView};
 
 impl ShelfView {
     /// 桌面/平板的工具栏：钉在架面最上方，搜索框与三点按钮靠右。
@@ -40,7 +40,6 @@ impl ShelfView {
                 // 框的 small 档在 `boot` 建组件时就定下了。
                 div().w_64().child(self.search.clone()),
             )
-            .child(self.group_cell(cx))
             .child(self.more_button(cx))
     }
 
@@ -56,7 +55,6 @@ impl ShelfView {
             .px(px(GUTTER))
             .py_2()
             .child(div().flex_1().min_w_0().child(self.search.clone()))
-            .child(self.group_cell(cx))
             .child(self.more_button(cx))
     }
 
@@ -116,74 +114,6 @@ impl ShelfView {
                                 scan_entity.update(cx, |this, cx| this.start_scan(cx))
                             }),
                     )
-            })
-    }
-
-    /// 顶部那颗分组按钮：点开的是**去处**那一列 —— 一条组一行，点一行压上那一组那一页。
-    ///
-    /// 图标一颗，不带文字：手机上那一行只剩「满幅框 + 两颗图标」的宽度。组名后面缀着书数
-    /// （「想读 · 12」），读者不必点进去才知道有几本。0 本的组不摆这一条
-    /// （[`menu_groups`]），一条摆得出的组都没有时段落整块不出现 —— 只有一条「全部分组」的
-    /// 菜单读起来像坏了。
-    pub(in crate::ui::features::shelf) fn group_button(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let entity = cx.entity().clone();
-        let label = tr(cx, "shelf.group");
-        let all_label = tr(cx, "shelf.group_all");
-        let ungrouped_label = tr(cx, "shelf.ungrouped");
-        // 菜单每开一遍重建一次（builder 是 `Fn`），所以这一份清单在建按钮这一刻摘好、
-        // 由闭包 own 着，每次点一条再 clone 一份。
-        let collections = menu_groups(&self.collections)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let ungrouped = self.ungrouped;
-        Button::new("shelf-group-filter")
-            .ghost()
-            .small()
-            .icon(IconName::FolderTree)
-            .tooltip(label.clone().to_string())
-            .accessibility_label(label)
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let menu = menu.min_w(px(book_menu::MIN_WIDTH)).item(
-                    PopupMenuItem::new(all_label.clone()).on_click({
-                        let entity = entity.clone();
-                        move |_, _, cx| {
-                            entity.update(cx, |this, cx| this.back_to_shelf(cx));
-                        }
-                    }),
-                );
-                // 一本没分组的都没有时不摆「未分组」这一条：点进去是一屏空。
-                let menu = if ungrouped > 0 {
-                    menu.item(
-                        PopupMenuItem::new(format!("{} · {}", ungrouped_label.clone(), ungrouped))
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, window, cx| {
-                                    entity.update(cx, |this, cx| {
-                                        this.open_page(ShelfScope::Ungrouped, window, cx)
-                                    });
-                                }
-                            }),
-                    )
-                } else {
-                    menu
-                };
-                if collections.is_empty() {
-                    return menu;
-                }
-                let menu = menu.separator();
-                collections.clone().into_iter().fold(menu, |menu, c| {
-                    let entity = entity.clone();
-                    let name = format!("{} · {}", c.name, c.book_count);
-                    menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.open_page(ShelfScope::Collection(c.id), window, cx)
-                        });
-                    }))
-                })
             })
     }
 }

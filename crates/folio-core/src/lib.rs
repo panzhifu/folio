@@ -30,6 +30,7 @@ pub mod ingest;
 pub mod layout;
 pub mod net;
 pub mod position;
+pub mod search;
 pub mod store;
 
 pub use content::anchor::{

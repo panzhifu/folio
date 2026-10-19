@@ -151,13 +151,15 @@ pub fn reading_reserve(safe: &host::Insets) -> Reserve {
 /// 一次 push / pop 走这么久。与底部弹层那根弹簧的响应时间同一档（`widgets::bottom_sheet`），
 /// 两处不同步的话，同一只手在两屏之间会感到两种快慢。
 ///
-/// `pub(crate)` 只因为门的测试要按这一个数推进时钟（正文翻页的动画门同用），不是给谁
-/// 另起一个时长用的口子 —— 那个口子是 [`nav_transition`]，全仓只有它取值。
+/// `pub(crate)` 只因为门的测试要按这一个数推进时钟（正文翻页那几条门用的是配置默认档，
+/// 而那一个档与这一个数相等，等式由 `tests` 里的门钉住），不是给谁另起一个时长用的口子 ——
+/// 读者的那一格是 [`turn_duration`]。
 pub(crate) const NAV_TRANSITION: Duration = Duration::from_millis(280);
 /// 一次进出的时钟：栈里的每一页与阅读层自己都走这一口，两端不该有两种快慢。
 ///
-/// 正文翻页共用**这一口**（`reader/view.rs` 的 `turn_frame`）：同一只手在同一屏里换两张纸，
-/// 不该比换一整屏还慢，而时长这个数一旦有两个家，改一处另一处就悄悄不一致了。
+/// 正文翻页**不**共用这一口了（2026-10-20 起）：读者要调的是那一张纸怎么走，见
+/// [`turn_duration`]。没调过的读者用的就是这同一个数 —— 等式由 `tests` 里一条门钉住，
+/// 不靠注释里那句「同一档」不走偏。
 ///
 /// 减动效那一档给零时长 —— `NavStack` 内部本来就是这个判据（它的 `immediate` 那一条），
 /// 阅读层在这里跟着同一件事，才不会出现在「系统不许动」的时候还硬滑 280 毫秒。
@@ -166,6 +168,38 @@ pub(crate) fn nav_transition(cx: &App) -> Transition {
         Transition::new(Duration::ZERO)
     } else {
         Transition::new(NAV_TRANSITION).easing(Easing::EaseInOut)
+    }
+}
+
+/// 正文一次翻页走多久，来自读者那一格（`appearance.turn_duration`；界面是阅读面板里
+/// 「翻页时长」那条滑条）。
+///
+/// 它**故意不**带着整屏进出一起走：那一屏盖过来的是整片界面，没有一张纸可看，放慢它读出来
+/// 的不是从容而是卡顿，而它的 280 ms 是照底部弹层那根弹簧定的、和纸没有约定。
+///
+/// 管到的那两腿是点屏 / 按键 / 滚轮起的那一趟，以及松手惯性那一腿的**上限**（那一腿按剩余
+/// 行程与手指速度自己算，见 `reader::model::swipe::release_duration`）。跟手那一截不在这里：
+/// 它 1:1 跟着手指，没有时长可言。
+pub(crate) fn turn_duration(cx: &App) -> Duration {
+    // 取整毫秒而不是 `from_secs_f32`：`280 / 1000` 在 f32 里不是 0.28，绕一圈回来会变成
+    // 280.000001 ms —— 动画上没人看得出差一微秒，但默认档与 `NAV_TRANSITION` 那一条等式
+    // 就是靠逐毫秒相等钉住的。
+    Duration::from_millis(ConfigHolder::appearance(cx).turn_duration.round() as u64)
+}
+
+/// 翻页那一趟的时钟：时长由读者那一格给，曲线与整屏进出同一条。
+///
+/// 时长是**起那一趟时快照**下来的 `Turn::over` 而不是每帧现读：一趟只有两三百毫秒，而拖滑条
+/// 每一帧都在写配置 —— 现读就是每帧重新瞄准那个正在走的时钟，读者看见纸停在半路。档位
+/// （[`nav_transition`] 那条注释里的同一个理由）中途换档会让轴与两张纸的入树顺序同时改。
+///
+/// 减动效那一档照旧给零时长，判据与 [`nav_transition`] 完全一致：系统不许动的时候两端都不该
+/// 硬滑。
+pub(crate) fn turn_transition(over: Duration, cx: &App) -> Transition {
+    if cx.reduce_motion() {
+        Transition::new(Duration::ZERO)
+    } else {
+        Transition::new(over).easing(Easing::EaseInOut)
     }
 }
 

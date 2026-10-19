@@ -16,6 +16,7 @@
 //! 后端（`folio_core::ingest::import`），真正的排版状态没有理由对别的屏可见。
 
 pub mod error;
+pub mod file_stem;
 pub mod images;
 pub mod style;
 pub mod theme;

@@ -24,6 +24,7 @@ use gpui_kit::{
 };
 
 use crate::ui::features::reader::model::session::ReaderSession;
+use crate::ui::foundation::file_stem::title_stem;
 use crate::ui::platform;
 
 /// 卡片的宽与高（逻辑像素）。竖版 2:3 是社交平台那张卡的比例。
@@ -71,21 +72,10 @@ pub(in crate::ui::features::reader) fn card_copy(
     }
 }
 
-/// 文件名里带书名，而书名里可能有 `/`、空格甚至引号：递给 Java 那侧会被当成路径或直接
-/// 拒掉。所以只留字母数字与 CJK，其余一律丢掉，并截到 40 个字符；一个字符都不剩时用
-/// `folio` 兜底，不然文件名会只剩 `-quote.png`。
+/// 卡片那一侧的文件名：书名的干（过滤规则见 [`crate::ui::foundation::file_stem`]，与书架
+/// 分享那本书共用一份）后面接 `-quote.png`。
 fn file_name(title: &str) -> String {
-    let stem: String = title
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .take(40)
-        .collect();
-    let stem = if stem.is_empty() {
-        "folio".into()
-    } else {
-        stem
-    };
-    format!("{stem}-quote.png")
+    format!("{}-quote.png", title_stem(title))
 }
 
 /// 把卡片渲成 PNG 并递给系统的分享面板。

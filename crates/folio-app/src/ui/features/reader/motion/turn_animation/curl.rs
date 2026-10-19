@@ -9,6 +9,11 @@
 //! 0**。于是按在哪儿就从哪儿那一格高度起卷、往哪划就往哪折、起步只揭一条边而不是半页。倾角再
 //! 夹一道上限（[`MAX_TILT`]）。
 //!
+//! 这一律**以手指为时钟**，所以只在跟手时成话。点屏 / 按键 / 滚轮那一趟没有手指，走 [`tap_roll`]
+//! 那一条：折线自己从**右下角**扫到书脊之外一个卷径，卷径全程不收。把前一条律拿去做那一趟的
+//! 补间，读出来是「首帧跨 8.8% 页宽、第 11 帧一帧走掉页宽三成七、最后 5 帧钉死」—— 2026-10-19
+//! 在 Meizu 20 上按应用自己那行 `folio_app::perf` 读数量到的，两处根因都写在那一格的注释里。
+//!
 //! 律本身**只有一套坐标**：自由边在右、书脊在左、手指往左划。别的情形不另写一条律，进出各映
 //! 一次横向（[`cylinder_at`] 配 [`flip_x`]），映不映由「自由边到底在哪一侧」判（
 //! [`Pose::free_edge_right`] = `forward != rtl`：往回翻与「从右往左读的那一本」各反一次）。
@@ -105,6 +110,40 @@ fn flip_x(p: (f32, f32), free_right: bool) -> (f32, f32) {
 /// [`curl_of`] 给回的那一组：`(法向, 轴, 卷径)`，全在「正向 + 页局部」那一套里。
 type Roll = ((f32, f32), (f32, f32), f32);
 
+/// 点屏 / 按键 / 滚轮那一趟的几何：**折线自己走，不借手**。
+///
+/// 跟手那一律不能拿来当补间曲线用，两条都是 2026-10-19 在 Meizu 20 上量出来的：
+///
+/// - 那条律的推进量 `advance = (dist + curl_len) / 2` 在 `dist > 2·页宽 − πR` 那一段里，
+///   代进 `curl_len = 2·页宽 − dist` 就是 **`advance ≡ 页宽`，与走了多远无关** —— 而从前点屏
+///   那一笔的终点定义恰是 `dist = 2·页宽`，所以最后 22% 的时钟被数学上钉死。真机 17 帧里有
+///   **5 帧画的与上一帧逐字相同**。
+/// - 起手那一截 `R·sin(π·√(dist/curlLen))` 是给手指用的（√ 在 0 处斜率无穷大 = 「一碰就有
+///   反应」），交给固定时钟重放就是**首帧跨 8.8% 页宽、第 11 帧材料平均位移 142.8 dp**（= 页宽
+///   的 37% 一帧走完），读者看见的就是「不动、然后突然翻完」。
+///
+/// 所以这一支直接给折线参数化，三件事一起定：
+///
+/// 1. **从右下角起卷**（`tilt` 从 [`MAX_TILT`] 收到 0）：参照那一派（静读天下）逐帧读下来，
+///    折线起手就是斜 43°、落位时已经转回竖直。拇指落在下缘，纸就从那一角被揭起来。
+/// 2. **卷径全程是 [`ROLL`] 页宽，不收**：从前那句 `radius.min(axis.0)` 只在最后两帧起作用，
+///    恰好是落位那一刻 —— 纸在最该像纸的地方先塌成一张硬片。
+/// 3. **轴走到书脊之外一个卷径才收工**（`end = −卷径`）：平摊那一段的投影最远到 `轴 + 卷径`，
+///    所以差一个卷径就是「纸还在画里却被删掉」，那一帧的弹跳就是「要不翻」。
+///
+/// 时钟不在这格里 —— 进来的是已经缓动过的 `progress`，`EaseInOut` 那条 S 形正好把折线速度
+/// 铺成一个单峰。同一把尺量到的改后读数：首帧 0.0%、峰值 59.3 dp/帧、末尾零帧死图。
+fn tap_roll(progress: f32, area: Area) -> Roll {
+    let (width, height) = (area.width(), area.height());
+    let radius = ROLL * width;
+    let tilt = MAX_TILT * (1.0 - progress);
+    let n = (tilt.cos(), tilt.sin());
+    // 过页的右下角那一格的支撑值：轴停在这里时一个角都还没折走。
+    let reach = n.0 * width + n.1 * height;
+    let d = reach + (-radius - reach) * progress;
+    (n, (n.0 * d, n.1 * d), radius)
+}
+
 /// 这一帧圆柱的参数，全部在「正向 + 页局部」那一套坐标里给：页占 `u ∈ [0, 宽]`、自由边在
 /// `u = 宽`、书脊在 `u = 0`，`v` 从页顶往下。**进来的那个 `grip` 也得是这一套里的**（往回翻
 /// 由 [`cylinder_at`] 先映一次），它自己不看翻页方向。
@@ -112,7 +151,7 @@ type Roll = ((f32, f32), (f32, f32), f32);
 /// 法向指向**已经卷走**那一侧（与 [`Crease::past`] 同一读法），所以它可以直接填进 GPU 那份
 /// uniform —— 网格的顶点本来就是页局部坐标。
 ///
-/// **整条律照抄 `harism/android-pagecurl` 的 `CurlView.updateCurlPos`**（`fi.harism.curl`，
+/// **跟手那一趟的律照抄 `harism/android-pagecurl` 的 `CurlView.updateCurlPos`**（`fi.harism.curl`，
 /// 安卓上这一派的事实标准，国产阅读器的「仿真」多数是它的后代）。三条一起才读成翻书：
 ///
 /// 1. 方向与走量都来自**这一笔的划动**（按下点 → 手指此刻）。参照里那一格是从页边锚点量的，
@@ -121,29 +160,26 @@ type Roll = ((f32, f32), (f32, f32), f32);
 ///    `radius = clamp(mCurlPos.x − pageLeftX, 0, radius)`）—— 这一格是「卷」看得见的全部来源。
 /// 3. 轴在柱面那一段**跑在手指前面**（`sqrt` 那一档），绕过柱顶之后推进量退到手指后面。起手快、
 ///    收尾稳 —— 这条就是手感本身；纯线性读起来是一根匀速平移的棍。
+///
+/// 这三条都以**手指**为时钟，所以只在有 `grip` 时成话：没有手指那一趟走 [`tap_roll`]，那里第 3
+/// 条的 `sqrt` 与第 2 条收尾那一句各自都会退化成一处缺陷（一帧跨半页 / 最后几帧钉死不动）。
 fn curl_of(progress: f32, area: Area, grip: Option<Grip>) -> Option<Roll> {
     let (width, height) = (area.width(), area.height());
     if width <= 0.0 || height <= 0.0 {
         return None;
     }
     let t = progress.clamp(0.0, 1.0);
-    let (anchor, press, finger) = match grip {
-        Some(grip) => {
-            let grabbed = grabbed_edge(area, grip);
-            (
-                (grabbed.0 - area.left, grabbed.1 - area.top),
-                (grip.from.0 * width, grip.from.1 * height),
-                (grip.at.0 * width, grip.at.1 * height),
-            )
-        }
-        // 没有手指（点屏 / 按键 / 滚轮）：没有划动方向可读，就取**最中立的那一笔** —— 从自由边
-        // 的正中笔直往页内走，走完正好两页宽。那条律在 `dist = 2·页宽` 处把轴送到书脊、卷径收到
-        // 0，正好一页翻干净；参照里的松手动画也是同一个做法（把 pointer 沿直线插值到对边，再走
-        // 同一条律），不会自带第二个方向。
-        None => {
-            let start = (width, 0.5 * height);
-            (start, start, (start.0 - 2.0 * width * t, start.1))
-        }
+    // 没有手指（点屏 / 按键 / 滚轮）那一趟不借手：见 [`tap_roll`]。
+    let Some(grip) = grip else {
+        return Some(tap_roll(t, area));
+    };
+    let (anchor, press, finger) = {
+        let grabbed = grabbed_edge(area, grip);
+        (
+            (grabbed.0 - area.left, grabbed.1 - area.top),
+            (grip.from.0 * width, grip.from.1 * height),
+            (grip.at.0 * width, grip.at.1 * height),
+        )
     };
     let (dir_x, dir_y) = (finger.0 - press.0, finger.1 - press.1);
     // 往翻页方向**反面**走的那一截不算：夹成 0，画面停在「还没起步」那一帧（与
@@ -623,17 +659,16 @@ mod tests {
             rolled(0.0)
         );
         let whole = area.width() * area.height();
-        // 点屏那一趟是**中立的那一笔**：没有手指就没有方向可读，所以从自由边正中笔直往里走两页
-        // 宽。那条律正好在 `dist = 2·页宽` 把轴送到书脊、卷径收到 0 —— 落位那一刻整页折干净，
-        // 不留余量。留余数就是轴没走到底。
+        // 点屏那一趟走 [`tap_roll`]：折线自己从右下角扫到书脊之外一个卷径，落位那一刻整页折
+        // 干净而且纸已经出画。留余数就是轴没走到底。
         assert!(
             rolled(1.0) > whole * 0.999,
             "走完该把整页折干净，实得 {} / {whole}",
             rolled(1.0)
         );
         let mut previous = 0.0f32;
-        for step in 1..=20 {
-            let t = step as f32 / 20.0;
+        for step in 1..=60 {
+            let t = step as f32 / 60.0;
             let now = rolled(t);
             assert!(
                 now >= previous - 1.0,
@@ -641,6 +676,105 @@ mod tests {
             );
             previous = now;
         }
+    }
+
+    /// 点屏那一趟**一路走到位**：轴每走 1/48 程都要往里推进半格以上，一帧都不许原地不动。
+    ///
+    /// 钉的是从前那一处代数退化：`curl_of` 里 `dist > 2·页宽 − πR` 那一段同时给出
+    /// `curl_len = 2·页宽 − dist` 与 `advance = (dist + curl_len)/2`，代进去 `advance ≡ 页宽`
+    /// 而与走了多远无关 —— 折线钉死在书脊。点屏那一笔的终点恰是 `dist = 2·页宽`，于是真机 17 帧
+    /// 里 5 帧画的与上一帧逐字相同（读者那句「要翻要不翻」的后一半）。
+    ///
+    /// 用**轴位**而不是「已卷走的面积」量：面积那一读到 100% 就瞎了，而纸还在往画外走 ——
+    /// 起手那几格也真的只揭得起一个角，拿面积卡会把正确的缓起步判成平台。
+    #[test]
+    fn a_tapped_turn_keeps_moving_to_the_last_frame() {
+        let area = page();
+        let axis = |t: f32| cylinder_at(t, true, area, None).expect("量得出圆柱").d;
+        let mut previous = axis(0.0);
+        for step in 1..=48 {
+            let t = step as f32 / 48.0;
+            let now = axis(t);
+            assert!(
+                now < previous - 0.5,
+                "t = {t} 这一格轴没往前走：{previous:.1} → {now:.1}"
+            );
+            previous = now;
+        }
+    }
+
+    /// 点屏那一趟**卷径全程不收**：纸要一直卷着出画，不许在落位前塌成一张硬片。
+    ///
+    /// 从前那一句 `radius.min(axis.0)` 只在最后两帧起作用（轴离书脊不足一个卷径才夹得到），
+    /// 恰好是读者盯着看的那一瞬：真机读数 53.8 → 45.9 → 11.0 → 0，卷感在 33 ms 内消失。
+    #[test]
+    fn a_tapped_turn_keeps_its_curl_until_the_paper_is_gone() {
+        let area = page();
+        for step in 1..=48 {
+            let t = step as f32 / 48.0;
+            let cylinder = cylinder_at(t, true, area, None).expect("量得出圆柱");
+            assert!(
+                (cylinder.radius - ROLL * area.width()).abs() < 1e-3,
+                "t = {t} 时卷径塌到了 {}，全程该是页宽的 {ROLL}",
+                cylinder.radius
+            );
+        }
+        // 而走完那一刻纸确实出了画：轴在书脊之外至少一个卷径。
+        let end = cylinder_at(1.0, true, area, None).expect("同上");
+        assert!(
+            end.d <= -end.radius,
+            "落位时轴停在 d = {}，卷径 {}：纸还压在页里就被删掉",
+            end.d,
+            end.radius
+        );
+    }
+
+    /// 点屏那一趟**从右下角起卷**，落位前折线转回竖直。
+    ///
+    /// 拇指落在下缘，纸就从那一角被揭起来 —— 静读天下逐帧读下来就是这个形状（起手斜约 43°、
+    /// 收尾竖直）。旧那一版取「自由边正中笔直往里」，起手那一帧就把整条右缘连顶角一起揭走。
+    #[test]
+    fn a_tapped_turn_lifts_from_the_bottom_corner() {
+        let area = page();
+        let early = crease_of(0.10, true, area).expect("量得出折线");
+        assert!(
+            early.past(area.right, area.bottom) > 0.0,
+            "走一成程时右下角该已经离页，实得 {}",
+            early.past(area.right, area.bottom)
+        );
+        assert!(
+            early.past(area.right, area.top) < 0.0,
+            "走一成程时右缘顶上那一格还该平摊着，实得 {}",
+            early.past(area.right, area.top)
+        );
+        let end = crease_of(1.0, true, area).expect("同上");
+        assert!(
+            end.ny.abs() < 0.01,
+            "落位时折线该已经转回竖直，实得 ny = {}",
+            end.ny
+        );
+    }
+
+    /// 点屏那一趟**首帧不许跨半页**：一帧（60 Hz 下 1/17 程）走掉的页面积不超过 3%。
+    ///
+    /// 那条 `R·sin(π·√(dist/curlLen))` 是给手指用的 —— √ 在 0 处斜率无穷大，「一碰就有反应」
+    /// 正是它存在的理由。交给固定时钟重放，进度走满一格（1/17 程）就已经翻掉 **25.7% 页面积**；
+    /// 真机上那一格还要过一遍 `EaseInOut`（那一刻时钟只走到 0.7% 进度），读数是 8.8% —— 两个都
+    /// 是「没有起步这回事」，第 11 帧更是一帧走掉页宽的三成七。
+    #[test]
+    fn a_tapped_turn_does_not_leap_on_the_first_frame() {
+        let area = page();
+        let whole = area.width() * area.height();
+        let rolled = |t: f32| {
+            let crease = crease_of(t, true, area).expect("量得出折线");
+            Poly::rect(area).past(crease).area() / whole
+        };
+        let first = rolled(1.0 / 17.0) - rolled(0.0);
+        let leapt = first * 100.0;
+        assert!(
+            first < 0.03,
+            "第一帧就走掉了 {leapt:.1}% 页宽，读者看见的是「突然翻完」而不是起步"
+        );
     }
     /// 折线**只往页内走一遍**：起步时角还整页都在平摊侧，落位时整页都在空侧。
     /// 这条钉的是起折点与终点那两个坐标；取错的话纸走半程就已经全没了，或者走满还剩半页。
@@ -656,7 +790,7 @@ mod tests {
             end.past(W * 0.5, 0.0) > 0.0 && end.past(W * 0.5, H) > 0.0,
             "落位时整页都该已经折走了"
         );
-        // 走一半时页的四分之一处还在平摊侧，而且离折线有一截（轴那时才走到两成半的位置）。
+        // 走一半时页的四分之一处还在平摊侧，而且离折线有一截（那一格折线正斜着扫过页面中部）。
         let middle = crease_of(0.5, true, page()).expect("同上");
         assert!(
             middle.past(W * 0.25, H * 0.5) < -1.0,

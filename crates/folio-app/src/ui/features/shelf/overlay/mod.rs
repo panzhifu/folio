@@ -32,18 +32,16 @@ use super::view::ShelfView;
 /// 内边距（24 像素的一半）。
 const POPOVER_PAD: f32 = 12.0;
 
-/// 「从链接导入」那张居中浮层的宽与内容高。
-pub(in crate::ui::features::shelf) const URL_WIDTH: f32 = 420.0;
-pub(in crate::ui::features::shelf) const URL_HEIGHT: f32 = 152.0;
+/// 两张「答一句话」的表单卡（建组、从链接导入）的宽与内容高：两张共用一个数，
+/// 因为形状一样 —— 一句标题、一行提示、一行输入、两颗按钮。卡片本身按 `min_h` 给，
+/// 提示那一行在某些语言里会多折一行，长出来的那一点只让卡偏离正中几像素。
+pub(in crate::ui::features::shelf) const FORM_WIDTH: f32 = 420.0;
+pub(in crate::ui::features::shelf) const FORM_HEIGHT: f32 = 152.0;
 
 /// 扫描结果那张。高是**定死**的而不是「至少」：里面是一条虚拟列表，列表要滚就得有一个
 /// 能滚的框，「至少多高」给不出这个框。
 pub(in crate::ui::features::shelf) const SCAN_WIDTH: f32 = 460.0;
 pub(in crate::ui::features::shelf) const SCAN_HEIGHT: f32 = 460.0;
-
-/// 建组那张的宽：比另两张窄，因为它只有「一个名字 + 两颗按钮」。它钉在按钮底下，
-/// 不需要报高度 —— 只有居中的那两张要靠高度算往上抬多少。
-pub(in crate::ui::features::shelf) const GROUP_WIDTH: f32 = 340.0;
 
 /// 底部弹层展开那一档占视口高的比例。
 ///
@@ -124,18 +122,6 @@ pub(in crate::ui::features::shelf) fn centered(
             body,
         )))
         .into_any_element()
-}
-
-/// 钉在某个锚点旁边的浮层（建组那一张：跟着顶部那颗分组按钮走）。
-pub(in crate::ui::features::shelf) fn anchored(
-    key: &'static str,
-    anchor: Anchor,
-    offset: f32,
-    shelf: &Entity<ShelfView>,
-    close: impl Fn(&mut ShelfView, &mut Context<ShelfView>) + 'static,
-    body: AnyElement,
-) -> AnyElement {
-    popover(key, anchor, offset, shelf, close, body)
 }
 
 /// 移动端的一块底部弹层。

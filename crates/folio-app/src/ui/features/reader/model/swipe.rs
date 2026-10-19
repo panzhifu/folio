@@ -32,9 +32,11 @@
 //!
 //! [`swipe_scroll`]: 事件搬运与累计；[`claim_swipe`]: 定轴与认领；[`swipe_release`]: 落定或弹回。
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use folio_core::PageTurn;
+use gpui_kit::base::motion::{Easing, Transition};
 use gpui_kit::{App, Context, Pixels, Point, TouchPhase};
 
 use crate::ui::features::reader::model::session::{
@@ -43,6 +45,7 @@ use crate::ui::features::reader::model::session::{
 use crate::ui::features::reader::model::turn::{TurnIntent, TurnPlan};
 use crate::ui::features::reader::motion::turn_animation::{self, Axis};
 use crate::ui::services::config::ConfigHolder;
+use crate::ui::shell::turn_duration;
 
 /// 按下来后要走过多远才算「在拖」而不是「点了一下」。
 ///
@@ -155,6 +158,71 @@ pub(in crate::ui::features::reader) fn fling_floor(dist: f32) -> f32 {
 /// （[`SwipeTrack::note_step`] / [`SwipeTrack::speed_along`]），停过手传进来的就是 0。
 pub(in crate::ui::features::reader) fn snap(along: f32, dist: f32, speed: f32) -> bool {
     progress(along, dist) >= SNAP_FRACTION || (along >= fling_floor(dist) && speed >= FLING_SPEED)
+}
+
+/// 松手那一腿的时长下限。
+///
+/// 再狠的一甩也不许短到看不清纸怎么落（落定读成「啪」）。上限不在这儿：上限就是 `fallback`
+/// （读者那一格「翻页时长」，`crate::ui::shell::turn_duration`），见 [`release_duration`]。
+const RELEASE_MIN: Duration = Duration::from_millis(120);
+
+/// 松手那一腿走多久：**以松手那一刻的速度起步、匀减速到落点正好停住**。
+///
+/// 匀减速走完剩余行程 `Δ` 用时 `T` ⇒ `Δ = v·T/2` ⇒ `T = 2Δ/v`。这一格同时替掉两处旧毛病：
+///
+/// - 从前这一腿用全仓共用的那一个转场时长（280 ms、`EaseInOut`），而那条 S 形**两端速度都是
+///   0** —— 松手前纸正跟着手指在动，手一抬纸先停死再重新加速，读起来就是「顿一下」。
+/// - 时长与还剩多少路无关：拖到 95% 松手，最后 5% 也走满 280 ms（慢慢爬完）；拖到 21% 松手，
+///   79% 也在 280 ms 里走完。同一只手，两种快慢差四倍。
+///
+/// 参照那三家没有一家读手指速度，但**没有一家用两端零速的曲线**，而且时长都跟着剩余行程走：
+/// `harism/android-pagecurl` 固定 300 ms 而 pointer 是**线性**插值（起步即全速）；`StPageFlip`
+/// 干脆 `duration = 剩余帧数 / 1000 × flippingTime`（恒定速度、时长 ∝ 距离）；`XBPageCurl` 固定
+/// 300 ms + EaseInOut，靠**就近吸附点**让剩余行程天生短。这里取 StPageFlip 那条比例再乘上实测
+/// 速度，两头各夹一次：
+///
+/// - **上不越过 `fallback`**：慢而长的一笔按公式能算出 600–700 ms，那是「纸自己磨」。夹住之后
+///   起点速度反而**高于**手指那一刻（`2Δ/T > v`），读起来是纸抢跑半步，不是停死 —— 误差只朝
+///   这一边偏，是有意的。
+/// - **下不到 [`RELEASE_MIN`] 为止**：一甩落定也得让人看见纸怎么落的。
+///
+/// 速度读成 0（拖到一半停过手再松，[`SwipeTrack::speed_along`] 按新鲜度判的那一格）就整条退回
+/// `fallback`，等于今天的行为，只是曲线换了。
+pub(in crate::ui::features::reader) fn release_duration(
+    remaining_dp: f32,
+    speed_dp_s: f32,
+    fallback: Duration,
+) -> Duration {
+    if remaining_dp <= 0.0 || speed_dp_s <= 0.0 {
+        return fallback;
+    }
+    let ms = 2000.0 * f64::from(remaining_dp) / f64::from(speed_dp_s);
+    Duration::from_millis(
+        ms.clamp(RELEASE_MIN.as_millis() as f64, fallback.as_millis() as f64) as u64,
+    )
+}
+
+/// 松手那一腿的形状：走了这一腿几成时间 → 走了几成路。
+///
+/// `2x − x²` 就是「匀减速」那条抛物线本身：起点斜率 2、终点斜率 0。斜率 2 不是调出来的数 ——
+/// 由 [`release_duration`] 那句 `T = 2Δ/v` 反解，匀减速恰好让第一帧的速度等于松手时手指的速度。
+/// 换掉的正是 `EaseInOut` 的起点斜率 0。
+fn release_shape(x: f32) -> f32 {
+    x * (2.0 - x)
+}
+
+/// 松手那一腿的**整条补间**：时长与曲线一处给全，渲染那头只管拿它去问时钟。
+///
+/// 两半分开挑的话，「按了速度算出时长」与「用了两端零速的曲线」会各自成立、合起来仍是「手一抬
+/// 纸先停死」—— 所以收在这一个出口里。
+pub(in crate::ui::features::reader) fn release_transition(over: Duration) -> Transition {
+    Transition::new(over).easing(release_easing())
+}
+
+/// 那条曲线本身，单列一个出口：`Transition::sample` 不对外，光测 [`release_transition`] 钉不住
+/// 曲线，只钉得住时长。
+pub(in crate::ui::features::reader) fn release_easing() -> Easing {
+    Easing::Custom(Rc::new(release_shape))
 }
 
 /// 一笔拖动这一帧该给谁。
@@ -478,6 +546,7 @@ impl ReaderSession {
             &mut self.turn,
             &mut self.turn_seq,
             style,
+            turn_duration(cx),
             mode,
             Turn {
                 leaving: Some(leaving),
@@ -526,6 +595,9 @@ impl ReaderSession {
         let from = progress(along, dist);
         let speed = track.speed_along(axis, rtl, intent, cx.background_executor().now());
         let revert = !snap(along, dist, speed);
+        // 这一腿还要走多远（dp）：走完 = 剩下那一截页宽，弹回 = 已经走过那一截。
+        let remaining = (if revert { from } else { 1.0 - from }) * dist;
+        let over = release_duration(remaining, speed, turn_duration(cx));
         let target = self
             .turn
             .and_then(|turn| turn.arriving)
@@ -540,7 +612,7 @@ impl ReaderSession {
         self.turn_seq += 1;
         if let Some(turn) = self.turn.as_mut() {
             turn.seq = self.turn_seq;
-            turn.run = TurnRun::Released { from, revert };
+            turn.run = TurnRun::Released { from, revert, over };
         }
         cx.notify();
         true
@@ -552,10 +624,14 @@ mod tests {
     //! 只钉这一层独有的那五条判据。事件搬运那一半不用在真机上验：`view::tests` 里
     //! 「横扫该翻页」那条发的是**原始触摸**，走的就是识别器 → 滚动事件这一条真路。
 
+    use std::time::Duration;
+
     use super::{
-        Axis, FLING_MIN_PX, FLING_SPEED, SLOP, SNAP_FRACTION, TurnIntent, dominant, fling_floor,
-        passed, progress, snap, toward, travel,
+        Axis, FLING_MIN_PX, FLING_SPEED, RELEASE_MIN, SLOP, SNAP_FRACTION, TurnIntent, dominant,
+        fling_floor, passed, progress, release_duration, release_easing, release_shape, snap,
+        toward, travel,
     };
+    use crate::ui::shell::NAV_TRANSITION;
 
     const DIST: f32 = 400.0;
 
@@ -711,5 +787,97 @@ mod tests {
             ),
             200.0
         );
+    }
+
+    /// 松手那一腿的时长**跟着还剩多远走**：同一只手，路长一倍就多花一倍时间。
+    ///
+    /// 从前它是全仓共用的那一个数，于是拖到 95% 松手也要用满 280 ms 走完最后 5%（慢慢爬完），
+    /// 而拖到 21% 松手用同一个数走完 79% —— 同一只手两种快慢差四倍。这两个取样点都落在没被
+    /// 夹紧的区间里，比例才读得出来。
+    #[test]
+    fn the_release_leg_scales_with_what_is_left() {
+        // 2Δ/v：250 dp @ 2000 dp/s = 250 ms；125 dp @ 同速 = 125 ms。
+        assert_eq!(
+            release_duration(250.0, 2000.0, NAV_TRANSITION),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            release_duration(125.0, 2000.0, NAV_TRANSITION),
+            Duration::from_millis(125)
+        );
+    }
+
+    /// 两头各一道闸：一甩不许短到看不见纸怎么落，慢拖也不许自己磨。
+    ///
+    /// 上限就是那个共用的转场数 —— 慢而长的一笔按 `2Δ/v` 能算出 600 ms，那是「纸自己爬」。
+    /// 夹住之后起点速度反而**高于**手指那一刻，误差只朝「抢跑半步」那一边偏，不朝停死那一边。
+    #[test]
+    fn the_release_leg_is_clamped_at_both_ends() {
+        assert_eq!(
+            release_duration(384.0, 12000.0, NAV_TRANSITION),
+            RELEASE_MIN,
+            "狠甩被夹到下限了吗"
+        );
+        assert_eq!(
+            release_duration(300.0, 1000.0, NAV_TRANSITION),
+            NAV_TRANSITION,
+            "慢拖不许比共用的那一档更久"
+        );
+    }
+
+    /// 停过手再松（`SwipeTrack::speed_along` 按新鲜度读成 0）⇒ 整条退回共用的那一档。
+    #[test]
+    fn a_stalled_release_falls_back_to_the_shared_turn() {
+        assert_eq!(release_duration(300.0, 0.0, NAV_TRANSITION), NAV_TRANSITION);
+        assert_eq!(
+            release_duration(0.0, 3000.0, NAV_TRANSITION),
+            NAV_TRANSITION
+        );
+    }
+
+    /// 松手那一腿的补间**第一格就已经在走**：八分之一时间过，路走过两成。
+    ///
+    /// 这一条钉的是「时长与曲线一处给全」那一句。只测 [`release_duration`] 测不到它 —— 时长算得
+    /// 再对，曲线换回全仓那条 `EaseInOut`（起点斜率 0）仍是「手一抬纸先停死」。线性那一档是
+    /// 0.125，匀减速在八分之一处是 `2x − x²` = 0.234，S 形只有 0.06 上下。
+    #[test]
+    fn the_release_easing_is_already_moving_on_the_first_frame() {
+        let first = release_easing().sample(0.125);
+        assert!(
+            first > 0.2,
+            "第一格只走了 {first:.3}：松手那一帧纸没接上速度"
+        );
+        let end = release_easing().sample(1.0);
+        assert!(
+            (end - 1.0).abs() < 1e-4,
+            "走完没落到 1.0，实得 {end:.4}：那一帧纸会自己跳一下"
+        );
+    }
+
+    /// 松手那一腿的曲线**起点有速度、终点没有**：起点斜率 2、终点斜率 0。
+    ///
+    /// 斜率 2 不是调出来的：由 `T = 2Δ/v` 反解，匀减速恰好让起步那一帧的速度等于松手时手指的
+    /// 速度。换回全仓那条 `EaseInOut`（起点斜率 0 = 手一抬纸先停死）这一条就红。
+    #[test]
+    fn the_release_shape_starts_at_full_speed_and_ends_at_rest() {
+        let start_slope = release_shape(0.01) / 0.01;
+        let end_slope = (1.0 - release_shape(0.99)) / 0.01;
+        assert!(
+            start_slope > 1.9,
+            "起点斜率只剩 {start_slope:.2}，松手那一帧纸会先停死"
+        );
+        assert!(
+            end_slope < 0.02,
+            "终点斜率 {end_slope:.2}，落位那一刻还在冲"
+        );
+        assert_eq!(release_shape(0.0), 0.0);
+        assert_eq!(release_shape(1.0), 1.0);
+        for k in 1..=20 {
+            let (a, b) = (
+                release_shape((k - 1) as f32 / 20.0),
+                release_shape(k as f32 / 20.0),
+            );
+            assert!(b > a, "走了 {k}/20 反而往回退：{a} → {b}");
+        }
     }
 }

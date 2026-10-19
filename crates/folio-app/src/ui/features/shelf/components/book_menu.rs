@@ -2,12 +2,18 @@
 //!
 //! 菜单单独成文件，是为了让「有哪几条、各带什么图标、什么顺序、点了派给谁」只有一处
 //! 可改：[`build`] 摆条目，[`Labels`] 管文案。动作本体仍留在 [`ShelfView`] 的方法里
-//! （[`ShelfView::show_info`] 把「信息」那一页压上导航栈、[`ShelfView::remove`] 删那一行、
+//! （[`ShelfView::show_info`] 把「信息」那一页压上导航栈、[`ShelfView::share_book`] 把那一本
+//! 的字节递给系统、[`ShelfView::remove`] 删那一行、
 //! [`ShelfView::toggle_group`] 与 [`ShelfView::new_group`] 管这本书在各组里的名分），
 //! 那些改的是架面自己的状态（查库、压页、删行、重查），不属于这一屏浮层。
 //!
 //! 「打开」不在菜单里：点卡片本身就是打开（[`super::super::view::ShelfEvent::Open`] 由卡片的
 //! tap 派发），菜单只管信息、分组与删除那些次要的事。
+//!
+//! 「分享这本书」排在信息之后，交出去的是库里那一份副本的文件本身 —— 读者发出去的那一样，
+//! 对方收到就能直接读，而不是一张书的图。这一条只在真能弹出系统面板的那一端摆得出来
+//! （判据一条，在 [`platform::HAS_SHARE_SHEET`]）：桌面上按下它只会让一个文件悄悄出现在
+//! 下载目录里，那不是「分享」。
 //!
 //! **分组那一节是开关，不是单向的「加入」**：每一条组一行，这本书已经在其中的打勾，
 //! 点一下切出、再点一下切进。一本书可以同时在几个组里，所以没有另配「移出」那类条目 ——
@@ -24,6 +30,7 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{App, Entity, SharedString, px};
 
+use crate::ui::platform;
 use crate::ui::services::l10n::tr;
 
 use super::super::view::ShelfView;
@@ -39,6 +46,9 @@ pub(in crate::ui::features::shelf) type GroupRow = (i64, SharedString, bool);
 #[derive(Clone)]
 pub(in crate::ui::features::shelf) struct Labels {
     info: SharedString,
+    /// 「分享这本书」那一条。摆不摆由 [`crate::ui::platform::HAS_SHARE_SHEET`] 决定，
+    /// 但文案两端都取一次：取与摆分在两处，判据就只有一条。
+    share: SharedString,
     delete: SharedString,
     /// 分组那一节的节头那一行字（不可点）。
     group: SharedString,
@@ -53,6 +63,7 @@ impl Labels {
     pub(in crate::ui::features::shelf) fn resolve(cx: &App) -> Self {
         Self {
             info: tr(cx, "shelf.info_title"),
+            share: tr(cx, "shelf.share"),
             delete: tr(cx, "shelf.book_delete"),
             group: tr(cx, "shelf.group"),
             new_group: tr(cx, "shelf.group_new"),
@@ -60,7 +71,7 @@ impl Labels {
     }
 }
 
-/// 把条目摆进浮层：信息在最前，分组那一节跟在后面，删除垫底并用分隔线隔开 ——
+/// 把条目摆进浮层：信息在最前、分享紧随，分组那一节跟在后面，删除垫底并用分隔线隔开 ——
 /// 破坏性的动作不排在顺手的位置。
 ///
 /// 标签一律图标 + 短词，不插书名：弹出菜单的那张卡就是目标，读者要核对某一本书的
@@ -80,6 +91,7 @@ pub(in crate::ui::features::shelf) fn build(
     groups: Vec<GroupRow>,
 ) -> PopupMenu {
     let info = shelf.clone();
+    let share = shelf.clone();
     let create = shelf.clone();
     let delete = shelf.clone();
     // 先摆信息与分组那一节，最后才垫上删除：`fold` 是因为组的条数是运行时才知道的。
@@ -93,6 +105,17 @@ pub(in crate::ui::features::shelf) fn build(
                     info.update(cx, |this, cx| this.show_info(book_id, window, cx));
                 }),
         )
+        // 「分享」紧跟着信息：两条都是「把这一本交出去看看」，而它只在真能弹出系统
+        // 面板的那一端摆得出来（判据见 [`platform::HAS_SHARE_SHEET`]，桌面按下不会有任何结果）。
+        .when(platform::HAS_SHARE_SHEET, |menu| {
+            menu.item(
+                PopupMenuItem::new(labels.share.clone())
+                    .icon(IconName::Share2)
+                    .on_click(move |_, _, cx| {
+                        share.update(cx, |this, cx| this.share_book(book_id, cx));
+                    }),
+            )
+        })
         .when(!groups.is_empty(), |menu| {
             menu.item(PopupMenuItem::label(labels.group.clone()))
         });

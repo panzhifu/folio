@@ -16,7 +16,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use folio_core::content::annotation::ResolvedAnnotation;
 use folio_core::content::document::Document as OpenedDocument;
@@ -777,6 +777,17 @@ impl ReaderSession {
         matches!(self.source, Source::Fixed(_))
     }
 
+    /// 全文检索那一趟要的东西：打开着的这份文档。
+    ///
+    /// 定版式（CBZ / 逐页 SVG）与兜底那一行都回 `None` —— 前者没有「正文」这一列字，
+    /// 后者根本没有书。那一屏于是摆一句实话，而不是跑一趟注定为空的扫描。
+    pub(in crate::ui::features::reader) fn searchable(&self) -> Option<Arc<dyn OpenedDocument>> {
+        match &self.source {
+            Source::Book(book) => Some(book.opened()),
+            Source::Sample(_) | Source::Fixed(_) => None,
+        }
+    }
+
     /// 当前开着的那本书的主键；兜底那一行没有书，返回 `None`。
     /// 外壳用它判断「被删掉的那本是不是正开着的那本」。
     pub fn book_id(&self) -> Option<i64> {
@@ -1017,6 +1028,12 @@ pub(in crate::ui::features::reader) struct Turn {
     /// 存进这一格而不是每帧去读配置：一趟只有两百多毫秒，中途换档会让 `dist`、轴、
     /// 两张纸的入树顺序同时改，读者看到的是「那张纸走到一半忽然换方向」。
     pub style: PageTurn,
+    /// 点屏 / 按键 / 滚轮那一趟走多久（松手那一腿有自己的 `TurnRun::Released::over`）。
+    ///
+    /// 与档位同一个理由快照：读者一面拖「翻页时长」那条滑条一面翻页时，每帧现读就是给正在走
+    /// 的时钟每帧重新瞄准，纸会停在半路。`0` 不是合法值 —— 配置那一格已经夹过区间，
+    /// 减动效则由 [`crate::ui::shell::turn_transition`] 归零。
+    pub over: Duration,
     /// 分页 / 双页：出场与进场那两张纸。连续滚动没有「页」，这两格都是 `None`。
     pub leaving: Option<PageRef>,
     pub arriving: Option<PageRef>,
@@ -1051,7 +1068,16 @@ pub(in crate::ui::features::reader) enum TurnRun {
     /// 手指还握着：这一帧的进度就是它给的，页号**还没翻**。
     Following { t: f32 },
     /// 跟手之后松手：从手指那一点接着走（`revert` 时退回原地，页号不动）。
-    Released { from: f32, revert: bool },
+    ///
+    /// `over` 是**这一腿自己要走多久**，由松手那一刻的剩余行程与手指速度算出来（
+    /// [`crate::ui::features::reader::model::swipe::release_duration`]），不是全仓共用的
+    /// 那一个转场时长：纸此刻正跟着手指在动，用一条两端零速的 S 形接手，读者看见的是
+    /// 手一抬纸先停死、再重新加速。
+    Released {
+        from: f32,
+        revert: bool,
+        over: Duration,
+    },
 }
 
 impl TurnRun {
@@ -1067,6 +1093,9 @@ impl Default for Turn {
         Self {
             seq: 0,
             style: PageTurn::default(),
+            // 起一趟的人必须递这一格（`start_turn` 是唯一挂载口，它拿读者那一格的快照覆盖
+            // 这里）。零值只是「还没挂上」的占位，不该被任何一条路当成时长读走。
+            over: Duration::ZERO,
             leaving: None,
             arriving: None,
             scroll: None,
@@ -1118,7 +1147,7 @@ pub(in crate::ui::features::reader) struct SwipeTrack {
     pub speed_at: Option<Instant>,
 }
 
-/// 挂上一趟翻页动画：换新时钟键、把档位抄进去，回报「这一趟挂上了吗」。
+/// 挂上一趟翻页动画：换新时钟键、把档位与时长抄进去，回报「这一趟挂上了吗」。
 ///
 /// 两处起动画的地方（点屏/按键走的 [`turn`](crate::ui::features::reader::model::paging::ReaderSession::turn)，
 /// 以及渲染帧里章界排好版那一刻补上的那一趟）都过这一句。从前跨章那一处自己手摆
@@ -1131,6 +1160,7 @@ pub(in crate::ui::features::reader) fn start_turn(
     slot: &mut Option<Turn>,
     seq: &mut u64,
     style: PageTurn,
+    over: Duration,
     mode: crate::ui::features::reader::model::chrome::PageMode,
     fresh: Turn,
 ) -> bool {
@@ -1143,6 +1173,7 @@ pub(in crate::ui::features::reader) fn start_turn(
     *slot = Some(Turn {
         seq: *seq,
         style,
+        over,
         ..fresh
     });
     true

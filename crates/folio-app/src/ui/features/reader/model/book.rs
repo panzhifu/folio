@@ -766,6 +766,13 @@ impl Book {
         &mut self.document
     }
 
+    /// 打开着的这份文档。正文不在库里，只存位置，所以「把整本书读一遍」的活儿
+    /// （全文检索那一趟）要拿着它去后台线程 —— `content::document::Document: Send + Sync`
+    /// 正是那一趟能出界面线程的前提，与排版作业带的同一份、同一条理由。
+    pub(in crate::ui::features::reader) fn opened(&self) -> Arc<dyn OpenedDocument> {
+        self.doc.clone()
+    }
+
     /// 分页/双页的邻章预排版入口：把第 `index` 章作为 `Span` 建出来（不动锚章）。
     ///
     /// 连续滚动走 [`Self::ensure_window_spans`]，那里按像素窗口一次铺一串；分页模式不需要

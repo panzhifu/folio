@@ -201,3 +201,34 @@ fn list_style_containers_are_located_by_entry_name_including_chm() {
         "没有条目名时 CHM 退到 Inline —— 正常路径走不到这一档"
     );
 }
+
+/// 一本书递给系统那侧时，收件应用是按 media type 筛的：九种格式各报一个说得清的书的类型。
+///
+/// 钉的是两条会静默坏掉的形状 —— 空串（Android 的 `GpuiSystemUi.shareImage` 把空 mime 退成
+/// `image/*`，一本 `.epub` 顶着它出去，弹出来的是整排相册），以及 `application/` 那种
+/// 副型空白的半截串（写进 intent-filter 没人认领）。真正的漏项由 `Format::mime` 那个
+/// 不写 `_ =>` 的 match 兜：加一种格式而忘了给它类型，编译就过不去。
+#[test]
+fn every_format_reports_a_book_media_type() {
+    for format in [
+        Format::Markdown,
+        Format::Text,
+        Format::Epub,
+        Format::Fb2,
+        Format::Html,
+        Format::Cbz,
+        Format::Rtf,
+        Format::Chm,
+        Format::Mobi,
+    ] {
+        let mime = format.mime();
+        let (top, sub) = mime
+            .split_once('/')
+            .unwrap_or_else(|| panic!("{format:?} 报的不是 type/subtype：{mime:?}"));
+        assert!(!top.is_empty() && !sub.is_empty(), "{format:?} → {mime:?}");
+        assert_ne!(top, "image", "{format:?} 不能报成图片：{mime:?}");
+    }
+    // 两条抽出来钉死：EPUB 是 IANA 注册过的那个，MOBI 是各家文件管理器都在认的那个。
+    assert_eq!(Format::Epub.mime(), "application/epub+zip");
+    assert_eq!(Format::Mobi.mime(), "application/x-mobipocket-ebook");
+}

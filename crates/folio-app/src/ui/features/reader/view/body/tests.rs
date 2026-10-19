@@ -32,7 +32,7 @@ use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::swipe::{FLING_SPEED, SNAP_FRACTION, fling_floor};
 use crate::ui::features::reader::motion::turn_animation::Axis;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::shell::NAV_TRANSITION;
+use crate::ui::shell::{NAV_TRANSITION, turn_duration};
 
 /// 一段足够长的中文，保证它会折行 —— 不折行的话「缩进改变了布局」这种断言无从成立。
 const PARA: &str = "于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。";
@@ -3439,6 +3439,125 @@ fn a_horizontal_swipe_back_lands_on_the_previous_page(cx: &mut TestAppContext) {
     );
     turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 「翻页时长」那一格真管到了点屏那一趟：设成 700 ms 之后，300 ms 时那张纸还在半路，
+/// 走过整趟才落定。
+///
+/// 这一条测的是**接线**而不是算术 —— `release_duration` 那类纯函数的门测不到这里。
+/// 假如渲染帧仍然现读全仓共用那一个数（或 `Turn::over` 那一份快照没接上），300 ms 那一趟
+/// 早就落定，第一个断言直接红。
+#[gpui_kit::test]
+fn a_longer_turn_duration_keeps_the_paper_in_flight(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    // 界面上那条滑条推到最慢那一头，就是这一句。
+    view.update(cx, |_, cx| {
+        ConfigHolder::edit_appearance(cx, |appearance| appearance.turn_duration = 700.0)
+    });
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    turn_frame(cx, handle, Duration::from_millis(300));
+    assert!(
+        view.read_with(cx, |v, _| v.turn).is_some(),
+        "700 ms 的一趟在 300 ms 时不该已经落定"
+    );
+    assert_ne!(
+        view.read_with(cx, |v, _| v.page_shift),
+        (0.0, 0.0),
+        "还在走的那一趟纸该还带着位移"
+    );
+
+    turn_frame(cx, handle, Duration::from_millis(420));
+    assert!(
+        view.read_with(cx, |v, _| v.turn).is_none(),
+        "走过 720 ms（> 700）该落定了"
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 同一格也管得住松手那一腿的**上限**：停过手再抬（最近那次取样到松手之间过了
+/// `FLING_STOPPED` 那一格的新鲜度，速度读成 0），`release_duration` 整条退回 `fallback`，
+/// 于是这一腿的时长就是读者那一格的**准数**，可以逐毫秒断言。
+///
+/// 这条钉的是 `swipe_release` 里那一个 `fallback` 实参。它若还写死全仓共用那一个数，这里
+/// 量到的就是 280 ms 而不是 700 —— 上限不跟着走，慢速档下「狠一点的一甩」仍比点屏那一趟快，
+/// 读者感到的正是当初那句「太快」。
+#[gpui_kit::test]
+fn the_release_leg_is_capped_by_the_turn_duration(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::session::TurnRun;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    view.update(cx, |_, cx| {
+        ConfigHolder::edit_appearance(cx, |appearance| appearance.turn_duration = 700.0)
+    });
+
+    let first = view.read_with(cx, |v, _| v.page());
+    // 往**左**划 180 dp（> 认领那一格要的 0.3 屏 ≈ 138 dp，也过 0.2 的落线）：从第 0 页起
+    // 只有「下一页」可去，往右划那一趟没有上一页可落，`swipe_release` 根本不会起动画。
+    raw_touch(cx, handle, TouchPhase::Started, 300.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 120.0);
+    // 停一下手：让最近那次取样到松手之间过了新鲜度那一格（`FLING_STOPPED` = 100 ms），
+    // 速度读成 0。
+    cx.executor().advance_clock(Duration::from_millis(140));
+    raw_touch(cx, handle, TouchPhase::Ended, 120.0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "这一笔该把页翻过去，否则下面测的是不存在的动画"
+    );
+
+    let run = view.read_with(cx, |v, _| v.turn);
+    let over = match run {
+        Some(turn) => match turn.run {
+            TurnRun::Released { over, .. } => over,
+            other => panic!("松手后该在 Released 那一态，实得 {other:?}"),
+        },
+        None => panic!("松手该留下一趟在走的动画"),
+    };
+    assert_eq!(
+        over,
+        Duration::from_millis(700),
+        "速度读成 0 时这一腿就该等于读者那一格"
+    );
+    turn_frame(cx, handle, Duration::from_millis(720));
+    assert!(view.read_with(cx, |v, _| v.turn).is_none());
+}
+
+/// 默认档必须与整屏进出那一个数相等：那条「时长只有一个家」的规则就靠这一句钉住 ——
+/// core 那侧的常数（`Appearance::TURN_DURATION_DEFAULT`）引用不到这一个数，等式只能在
+/// app 这一侧断言。不等的那天，没碰过滑条的读者在同一屏里先感到两种快慢。
+#[gpui_kit::test]
+fn the_default_turn_duration_is_the_nav_transition(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    assert_eq!(cx.update(|cx| turn_duration(cx)), NAV_TRANSITION);
 }
 
 /// 折页那一档往**右**横扫：纸得真的跟着卷起来，而且起的是**左**边那一条。
