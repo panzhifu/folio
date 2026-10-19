@@ -341,7 +341,6 @@ fn inline_image_x(x: f32, x_offset: f32, justify: Option<Justify>, gap_cursor: u
 /// 一行里一张图的摆位（章内量）。见 [`RowFragment::Image`] 为什么字节不进这一格。
 #[derive(Clone, Debug)]
 pub struct RowImage {
-    pub slot: u32,
     pub x: f32,
     pub width: f32,
     pub height: f32,
@@ -528,6 +527,10 @@ impl Document {
     ///
     /// 这一条自己解析 `css`。一本书会建好几个 `Document`，所以那条路走
     /// [`Document::new_with_rules`]（共用 [`author_rules`] 的那一份）。
+    ///
+    /// `#[cfg(test)]`：生产那一侧现在全都走 `new_with_rules`，这一条只剩测试在调；
+    /// 挂着不给 lib 目标编，`cargo clippy --workspace --all-targets` 就报 never used。
+    #[cfg(test)]
     pub fn new(
         source: String,
         css: &str,
@@ -563,6 +566,8 @@ impl Document {
     /// 解析产物先按空章建、等第一趟作业带回来。从前 `Book::make_span` 走的其实是同一条
     /// 形状 —— 先 `Document::new(String::new())` 再 `set_chapter(现取的那一段)`，
     /// 区别只在于那一趟取文本从 UI 线程挪进了后台。
+    /// `#[cfg(test)]`：同上，生产走 `fetching_with_rules`，这一条只剩测试在调。
+    #[cfg(test)]
     pub fn fetching(
         doc: Arc<dyn OpenedDocument>,
         chapter: usize,
@@ -896,7 +901,6 @@ impl Document {
                 }
                 LineFragment::Image(placed) => {
                     out.push(RowFragment::Image(RowImage {
-                        slot,
                         x: inline_image_x(x, placed.x_offset, justify, gap_cursor),
                         width: placed.width,
                         height: placed.height,
@@ -966,6 +970,8 @@ impl Document {
         self.layout.lines_in_band(band.start, band.end)
     }
 
+    /// `#[cfg(test)]`：只有测试拿它数行 —— 界面那一侧走 [`Document::visible_lines`] 的区间。
+    #[cfg(test)]
     pub fn line_count(&self) -> usize {
         self.layout.lines.len()
     }

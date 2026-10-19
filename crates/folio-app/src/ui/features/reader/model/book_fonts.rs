@@ -85,6 +85,8 @@ impl BookFonts {
         self.fallbacks.get(name).map(Vec::as_slice)
     }
 
+    /// 只有测试在调（钉「空表读不出别名」那一格），生产这一侧没人问。
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.fallbacks.is_empty()
     }
