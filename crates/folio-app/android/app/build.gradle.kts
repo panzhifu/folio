@@ -80,6 +80,13 @@ android {
         // Prevent stripping of the Rust library — cargo already strips in
         // release mode and stripping again can break backtraces.
         jniLibs {
+            // gpui-mobile 这个依赖同时编 rlib（静态链进 libfolio_app.so，运行的就是它）和
+            // cdylib；cargo-ndk 会把那个 cdylib 也拷进 jniLibs，名字带源码版本的哈希，于是
+            // 每换一个版本就多一份，全都被打进 APK。实测都不需要：Java 那头两处加载都只读
+            // manifest 的 android.app.lib_name（= folio_app），而 libfolio_app.so 的 NEEDED
+            // 只有 liblog/libandroid/libdl/libm/libc，整库里也搜不到 "libgpui_mobile" 这个
+            // 字符串。手动删没用（下次构建又生成一份新的），所以在这里排除掉。
+            excludes += listOf("**/libgpui_mobile*.so")
             keepDebugSymbols += listOf(
                 "*/arm64-v8a/libfolio_app.so",
                 "*/armeabi-v7a/libfolio_app.so",

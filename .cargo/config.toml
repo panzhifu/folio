@@ -1,0 +1,15 @@
+# Android 交叉编译的链接参数。链接器是 NDK 自带的 lld（主机那条 mold 挂在
+# `~/.cargo/config.toml` 的 x86_64-unknown-linux-gnu 上，两回事，互不影响）。
+#
+# `--pack-dyn-relocs=android+relr` 把动态重定位表压成位打包的 RELR：`libfolio_app.so` 里
+# 有 91,730 条 `R_AARCH64_RELATIVE`，每条 24 字节 = `.rela.dyn` 2.20 MB（实测 `size -A`），
+# 而这类重定位的地址几乎连续，RELR 用「起点 + 位图」一段就能盖掉几十个。同时**装载时的
+# 重定位工作量也一起变小**，那是要在 `System.loadLibrary` 里付的钱。
+#
+# 取 `android+relr` 而不是单 `relr`：前者同时写 Android 自己的 `DT_ANDROID_RELR` 与标准的
+# `DT_RELR`，所以 minSdk 26 的旧 loader 也认。
+#
+# 只挂这一节，不动 `[build]`：`[build] rustflags` 会连 build script 与 proc-macro 一起吃到，
+# 而那些是跑在宿主上的。
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android+relr"]
