@@ -11,6 +11,11 @@
 //!
 //! 一片格子怎么排（几列、格间距、整片滚动）在 `grid`；一格长什么样在
 //! [`super::book_card`] —— 包括「没有封面的书也要照样占住一格」那一条。
+//!
+//! 分组那两处入口（架面顶部那几张组卡、右上角那颗按钮里的去处那一列）点下去都是**在
+//! 架面这条栈上压一整页**（`open_page`）：那一页用的是同一份架面，只是查的是另一片书
+//! （`ShelfScope`）。压成「一页」买到的正是返回那一头 —— 系统返回键把它弹掉就回到
+//! 书架，而身后那一片连滚动位置都没动过。
 
 // 这一屏压出来的两页与它共用同一个实体：信息页（压导航栈的整屏）与整机扫描的候选清单。
 pub(in crate::ui::features::shelf) mod book_info;
@@ -29,7 +34,7 @@ use folio_core::{
     Cancel, ImportOutcome, ImportReport, Imported, PathsSource, Store, TaskEvent, UrlSource,
     submit_import,
 };
-use gpui_kit::base::NavStackState;
+use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -43,11 +48,11 @@ use gpui_kit::{
 use super::components::book_card::{Card, GroupCard, TILE_SLOTS};
 use super::components::book_menu;
 use crate::ui::components::{
-    BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, empty_state, muted_label,
+    BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, TopBar, empty_state, muted_label,
 };
 use crate::ui::foundation::error::{Context as _, report};
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::services::l10n::{tf, tr};
+use crate::ui::services::l10n::{book_count, tf, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::services::resident;
 use crate::ui::shell::navigation::SizeClass;
@@ -70,27 +75,41 @@ fn url_transport() -> Arc<dyn Transport> {
 /// 能稳定命中的最小格宽（56）。
 ///
 /// 桌面与平板不按这个数，见 [`columns_for`]。
-/// 书架向外层报的两件事，都带书库主键而不是路径 —— 选择器给的那份路径是临时的，
-/// 书的内容早就在库里了。
-/// 架面顶部那颗分组筛选看的是哪一片。
+/// 架面这一屏摆的是哪一片书。**一块架面一个片**，在建成那一刻就定死 —— 不是同一块
+/// 架面上来回换的筛选。
 ///
 /// `Ungrouped` 是**筛**出来的、不是存出来的：库里没有一个叫这名字的组，它是
 /// 「不在任何 `collection_books` 行里」那一批（`Store::shelf_ungrouped`）。
+///
+/// `Shelf` 那一块是外壳拿着的根实例；另外两样是**压上导航栈的一页**（见 `open_page`）：
+/// 它们与整架同一条栈，所以系统返回键把这页弹掉就回到书架，而栈上压着页时那条导航栏
+/// 自己收起 —— 这两件事都是「一页」买来的，不必各自再维护一遍。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(in crate::ui::features::shelf) enum GroupFilter {
+pub(in crate::ui::features::shelf) enum ShelfScope {
     /// 整架：与「读者还没建过任何组」时看到的是同一片。
-    All,
+    Shelf,
     /// 还没进任何组的那一批。
     Ungrouped,
     /// 某一个组里的书。
     Collection(i64),
 }
 
+/// 书架向外层报的两件事，都带书库主键而不是路径 —— 选择器给的那份路径是临时的，
+/// 书的内容早就在库里了。
 pub enum ShelfEvent {
     /// 点了一张卡片。
     Open(i64),
     /// 删掉了一本。外壳需要这条：正文可能正开着这一本，书没了，那一层就该退回架面。
     Deleted(i64),
+}
+
+/// 那颗「去处」菜单上该摆的条目：0 本的组不摆，剩下的照库里那一份序（组内有过打开的
+/// 在前，见 [`Store::collections`](folio_core::Store::collections)）。
+///
+/// 判据本身在 [`Collection::is_shown`] —— 顶部那几张组卡走的是同一条，两处各写一份
+/// 「0 本」迟早漂开。
+pub(in crate::ui::features::shelf) fn menu_groups(collections: &[Collection]) -> Vec<&Collection> {
+    collections.iter().filter(|c| c.is_shown()).collect()
 }
 
 pub struct ShelfView {
@@ -122,10 +141,20 @@ pub struct ShelfView {
     /// 顶上那颗搜索框。外观与「点外面退编辑态」都在 [`SearchBox`] 里，这里只
     /// 接它的 `Change` 事件重查库。
     search: Entity<SearchBox>,
-    /// 架面此刻筛的是哪一片。默认整架。
-    group: GroupFilter,
-    /// 库里的全部组（带书数）。顶部那颗筛选的条目读这一份，与架面同一次重查更新。
+    /// 这一屏摆的是哪一片书。建成那一刻定，之后不改：换片 = 另开一块架面压上栈。
+    scope: ShelfScope,
+    /// 库里的全部组（带书数），与架面同一次重查取的那一份。两处读它：那颗菜单摆之前按
+    /// [`menu_groups`] 筛掉 0 本的，而某一页顶栏那个名字也按 id 从这里取。
+    /// 顺序归库：组内有过打开的在前（`Store::collections`）。
     collections: Vec<Collection>,
+    /// 还没进任何组的有几本。那颗菜单按它判「未分组」这一条摆不摆 —— 一本都没有还摆出
+    /// 一条，点进去是一屏「这里没有东西」。
+    ungrouped: usize,
+    /// 压在栈上的那一页（某一组 / 未分组），只有根实例这一格是 `Some`。
+    ///
+    /// 拿弱句柄：那一页归栈管，pop 掉就该跟着没；根实例拽着强句柄等于让一屏已经看不见
+    /// 的格子和它的封面缓存常驻。
+    group_page: Option<WeakEntity<ShelfView>>,
     /// 「新建分组」那一屏的输入框 + **为哪本书**建的那个书 id。
     ///
     /// 这一格存的是**内容**，不是「开没开」：开没开看 [`Self::group_open`]。分开两半是因为
@@ -185,6 +214,12 @@ pub struct ShelfView {
     /// 订阅在 `boot` 里装一次，清的是架面这一侧的状态（面板留着而弹层没了会立刻被
     /// 重新抬起来，见 [`Self::sync_sheet`]）。
     _sheet_watches: Vec<Subscription>,
+    /// 压上栈的那页「分组」的订阅。`Some` = 那一页还开着。
+    ///
+    /// 外壳只挂着**根实例**这一条订阅（`AppShell::boot` 里的 `_shelf_watch`），而点开一本
+    /// 书与删掉一本都是从眼下那一页发出来的 —— 所以那一页报的两件事要由根实例转一道，
+    /// 否则在组里点封面没反应、删了开着的那本也不退那一层。
+    _group_watch: Option<Subscription>,
     /// 压上栈的那页「信息」的订阅。`Some` = 那一页还开着。
     ///
     /// 只要一条：那一页写回书名作者之后报一声，架面重查 —— 那一行字就是这张卡上的。
@@ -213,6 +248,35 @@ impl ShelfView {
         cx: &mut Context<Self>,
         stack: WeakEntity<NavStackState>,
     ) -> Self {
+        let mut this = Self::build(window, cx, stack, ShelfScope::Shelf);
+        // 自动导入（监听、传书）的事件流。处理与手工导入完全同一套，而**只由根实例接**：
+        // `auto_import_events()` 给的是同一条通道的又一个接收端（`async_channel` 的
+        // `Receiver::clone` 是**分流**不是广播），组里那一页再挂一条就会把架面该收到的那些
+        // 事件偷走 —— 表现是导入完成后哪一屏都不动，全看谁先抢到新事件。
+        let auto_events = crate::ui::services::import_queue::auto_import_events();
+        this._auto_import = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            while let Ok(event) = auto_events.recv().await {
+                if this
+                    .update(cx, |this, cx| this.import_event(event, cx))
+                    .is_err()
+                {
+                    return; // 架面没了，订阅跟着收。
+                }
+            }
+        }));
+        this
+    }
+
+    /// 起一块架面：查库、建那三块弹层，并按 `scope` 决定这一屏摆哪一片书。
+    ///
+    /// 整架与某一组走的是同一份实现（同一套格子、同一张管理菜单、同一条空态），只有顶上
+    /// 那一行不同 —— 见 `Render` 里对 [`Self::scope`] 的那一次分叉。
+    fn build(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        stack: WeakEntity<NavStackState>,
+        scope: ShelfScope,
+    ) -> Self {
         let store = crate::ui::services::app_store::handle(cx);
         if store.is_none() {
             tracing::error!("ShelfView: 书库没装，架面会是空的");
@@ -230,18 +294,6 @@ impl ShelfView {
             // 编译器会逼着补齐。
             let SearchBoxEvent::Change(query) = event;
             this.reload(query, cx);
-        });
-        // 自动导入（监听、传书）的事件流。处理与手工导入完全同一套。
-        let auto_events = crate::ui::services::import_queue::auto_import_events();
-        let _auto_import = cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            while let Ok(event) = auto_events.recv().await {
-                if this
-                    .update(cx, |this, cx| this.import_event(event, cx))
-                    .is_err()
-                {
-                    return; // 架面没了，订阅跟着收。
-                }
-            }
         });
         // 三块弹层各订阅一次「读者自己把它关掉了」：下拉过头、点遮罩、按返回都只报这一条。
         // 不据此清架面那一侧的状态的话，下一帧 [`Self::sync_sheet`] 看着「面板还开着」
@@ -274,8 +326,10 @@ impl ShelfView {
             grid_scroll: UniformListScrollHandle::new(),
             query: SharedString::default(),
             search,
-            group: GroupFilter::All,
+            scope,
             collections: Vec::new(),
+            ungrouped: 0,
+            group_page: None,
             group_entry: None,
             group_open: false,
             confirming: false,
@@ -287,13 +341,14 @@ impl ShelfView {
             scan: None,
             scan_open: false,
             _scan: None,
-            _auto_import: Some(_auto_import),
+            _auto_import: None,
             url_entry: None,
             url_open: false,
             group_sheet,
             url_sheet,
             scan_sheet,
             _sheet_watches,
+            _group_watch: None,
             _info_watch: None,
             _pick: None,
             pending_reload: false,
@@ -309,30 +364,37 @@ impl ShelfView {
         if self.query == query && !self.items.is_empty() {
             return;
         }
-        // 组清单与架面同一次重查：那颗筛选的条目与卡片菜单读的都是这一份。
+        // 组清单与架面同一次重查：那颗菜单的条目、卡片菜单与某一页的标题读的都是这一份。
         self.collections = self
             .store
             .as_ref()
             .and_then(|store| store.collections().ok())
             .unwrap_or_default();
-        // 筛着的那个组已经没了（在别处删掉的）：退回整架，而不是给一屏看着像坏掉的空白。
-        if let GroupFilter::Collection(id) = self.group
+        self.ungrouped = self
+            .store
+            .as_ref()
+            .and_then(|store| store.ungrouped_count().ok())
+            .unwrap_or_default();
+        // 这一页对应的那个组已经没了（在别处删掉的）：pop 自己回上一层，而不是给一屏
+        // 看着像坏掉的空白。根实例不受这一条影响 —— 它的 `scope` 不是某一组。
+        if let ShelfScope::Collection(id) = self.scope
             && !self.collections.iter().any(|c| c.id == id)
         {
-            self.group = GroupFilter::All;
+            self.pop(cx);
+            return;
         }
-        // 组卡只在「整架 + 没搜词」那一屏出现。筛到某一组时再摆一排组卡，等于把读者刚
+        // 组卡只在「整架 + 没搜词」那一屏出现。某一组那一页再摆一排组卡，等于把读者刚
         // 走进去的那一层又摊回他面前；而搜的是书不是组 —— 词非空时那几张卡上的封面跟
         // 搜索结果没有半点关系，摆出来只会读成「这几本匹配」。
-        self.tiles = if matches!(self.group, GroupFilter::All) && query.trim().is_empty() {
+        self.tiles = if self.scope == ShelfScope::Shelf && query.trim().is_empty() {
             self.tile_cards()
         } else {
             Vec::new()
         };
-        let queried = self.store.as_ref().map(|store| match self.group {
-            GroupFilter::All => store.shelf(query),
-            GroupFilter::Ungrouped => store.shelf_ungrouped(query),
-            GroupFilter::Collection(id) => store.shelf_in_collection(id, query),
+        let queried = self.store.as_ref().map(|store| match self.scope {
+            ShelfScope::Shelf => store.shelf(query),
+            ShelfScope::Ungrouped => store.shelf_ungrouped(query),
+            ShelfScope::Collection(id) => store.shelf_in_collection(id, query),
         });
         match queried {
             Some(Ok(items)) => {
@@ -366,6 +428,13 @@ impl ShelfView {
         self.items.clear();
         let query = self.query.clone();
         self.reload(&query, cx);
+        // 压在栈上的那一页是**另一块架面**，查的是自己那一片，而外壳手上只有根实例这一条
+        // 句柄。开一本书把它的 `last_opened_at` 顶到最前，正落在某一组那一页的序与进度上，
+        // 监听目录与传书那几本也只有根实例接得到事件 —— 不跟着敲一下，读者读完退回来看见
+        // 的是进组前的旧序。
+        if let Some(page) = self.group_page.as_ref().and_then(|page| page.upgrade()) {
+            page.update(cx, |page, cx| page.force_reload(cx));
+        }
     }
 
     /// 架面顶部那几张组卡：每个组一张，卡上是这个组最后丢进去的那几本的封面。
@@ -577,12 +646,26 @@ impl ShelfView {
     pub(crate) fn card_count(&self) -> usize {
         self.items.len()
     }
-
     /// 架上第 `ix` 格此刻摆的书名。同样只给回归门读：那一行字是「信息」那一页改完
     /// 该立刻看到的结果，而读格子这件事不该成为公开接口。
     #[cfg(all(test, not(mobile)))]
     pub(crate) fn card_title(&self, ix: usize) -> Option<SharedString> {
         self.items.get(ix).map(|card| card.title.clone())
+    }
+
+    /// 喂一条「点开某一组」的命令。真实入口是顶部那几张组卡与那颗「去处」菜单里的组名，
+    /// 而测试窗口里没有「点到这一块元素」的定位法 —— 与 [`Self::feed_import_event`] 同一取舍。
+    ///
+    /// 收的是组的主键而不是 [`ShelfScope`]：那个枚举归架面模块自己用，外壳那侧的门不该为了
+    /// 压一页去 import 它。
+    #[cfg(all(test, not(mobile)))]
+    pub(crate) fn open_group_for_test(
+        &mut self,
+        group: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_page(ShelfScope::Collection(group), window, cx);
     }
 
     /// 架面顶部此刻摆着几张组卡。只给回归门读，理由同 [`Self::card_count`]。
@@ -636,9 +719,7 @@ impl ShelfView {
                 tracing::info!("ShelfView: 导入被取消，已登记的那些保留");
                 self.importing = None;
                 self.import_cancel = None;
-                self.items.clear();
-                let query = self.query.clone();
-                self.reload(&query, cx);
+                self.force_reload(cx);
                 self.pending_reload = true;
                 cx.notify();
             }
@@ -679,11 +760,10 @@ impl ShelfView {
             outcomes.len(),
             ImportReport::tally(&outcomes).summary()
         );
-        // 新入库的书要立刻上架，但搜索词得留着：读者可能正搜到一半。
-        // `reload` 的去重按「词没变且架面非空」判，所以先把它清空逼它重查。
-        self.items.clear();
-        let query = self.query.clone();
-        self.reload(&query, cx);
+        // 新入库的书要立刻上架，但搜索词得留着：读者可能正搜到一半。走 `force_reload`
+        // 那一手（清空逼它重查，顺带敲一下压着的那一页 —— 监听目录与传书那几本只有根实例
+        // 接得到事件，压着的那一页要由这一手带着重查）。
+        self.force_reload(cx);
         // 这一批是后台跑完才回到这里的一次更新，没有别的动作会顺带把架面弄脏 ——
         // 不 `notify` 的话读者得等到下一次别的输入才看见新上来的那几本。
         // 下一帧再兜底重查一次：选择器把应用切到后台期间发的 notify 可能丢。
@@ -918,20 +998,97 @@ impl ShelfView {
         }
     }
 
-    /// 换架面看的那一片。搜索词不动而架子动了，所以要先清空再查（同 [`Self::force_reload`]
-    /// 那一手）—— 否则 `reload` 的去重会认为「什么都没变」。
+    /// 从组卡那一格或那颗「去处」菜单点进某一组（或「未分组」）：在架面那条栈上**压一整页**。
+    /// 与「信息」那一页同一条路（见 [`super::book_info`]）。
     ///
-    /// 组卡那一格点下去走的就是这一条：卡与顶部那颗筛选改的是同一个 [`Self::group`]，
-    /// 所以两处永远说同一件事。
-    pub(in crate::ui::features::shelf) fn set_group(
+    /// 压页而不是把眼前这片换个筛选，换来三件不用各自维护的事：系统返回键把这页弹掉就回到
+    /// 书架（`AppShell::back` 那条「栈深大于 1 就 pop」）、栈上压着页时那条导航栏自己收起、
+    /// 而整架那一片的格子与**滚到的那一排**原样留在身后 —— 换筛选那一手要重查一遍，读者
+    /// 退回来看见的不是自己离开时的那一排。
+    pub(in crate::ui::features::shelf) fn open_page(
         &mut self,
-        group: GroupFilter,
+        scope: ShelfScope,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.group = group;
-        self.items.clear();
-        let query = self.query.clone();
-        self.reload(&query, cx);
+        // 这里**不**加「已经压着一页就退回去」那道守卫。转场那一段 `NavStack` 自己在这一层
+        // 上盖一块 `occlude`，两页都不吃点击（gpui-base `nav_stack.rs` 的「Neither page
+        // takes pointer input while the change runs」）；而「有没有一页还开着」只能问手上
+        // 那个弱句柄什么时候失效 —— 栈要把出场那一页挂在树上直到退场走完，拿它当判据会把
+        // 「回过整架再点进别一组」一起拦掉（试过，就是那样）。
+        let stack = self.stack.clone();
+        let page = cx.new(|cx| Self::build(window, cx, stack, scope));
+        self.group_page = Some(page.downgrade());
+        // 那一页与架面同一种格子，报的也是同两件事，而外壳只订阅了根实例这一个 ——
+        // 不转这一道，在组里点封面开不了书，删掉开着的那本也不退那一层。
+        self._group_watch = Some(cx.subscribe(&page, |this, _, event, cx| match event {
+            ShelfEvent::Open(book_id) => cx.emit(ShelfEvent::Open(*book_id)),
+            ShelfEvent::Deleted(book_id) => {
+                // 删掉一本改的是**两片**：那一页自己已经重查过了，身后的整架还留着那一格。
+                this.items.clear();
+                let query = this.query.clone();
+                this.reload(&query, cx);
+                cx.emit(ShelfEvent::Deleted(*book_id));
+            }
+        }));
+        let _ = self
+            .stack
+            .update(cx, |state, cx| state.push(page, NavMotion::Animated, cx));
+    }
+
+    /// 收掉自己这一页，回到上一层。顶栏那颗「返回」与「这一组已经没了」那一条都走这里，
+    /// 与「信息」那一页的退场同一手。
+    fn pop(&mut self, cx: &mut Context<Self>) {
+        let _ = self
+            .stack
+            .update(cx, |state, cx| state.pop(NavMotion::Animated, cx));
+    }
+
+    /// 「全部分组」那一条：把架面这条栈退回栈底（整架）—— 身后压着某一组或「信息」都算数，
+    /// 栈底那一页不会被弹掉（`NavStackState::pop_to_root` 的规矩）。
+    fn back_to_shelf(&mut self, cx: &mut Context<Self>) {
+        let _ = self
+            .stack
+            .update(cx, |state, cx| state.pop_to_root(NavMotion::Animated, cx));
+    }
+
+    /// 某一页顶栏那一行叫什么：组名按 id 从库里那份清单现取（在别处改名了跟着变），
+    /// 「未分组」用那条文案。整架那一屏不走这里 —— 它的顶行是搜索那一行。
+    pub(in crate::ui::features::shelf) fn page_title(&self, cx: &App) -> SharedString {
+        match self.scope {
+            ShelfScope::Shelf => SharedString::default(),
+            ShelfScope::Ungrouped => tr(cx, "shelf.ungrouped"),
+            ShelfScope::Collection(id) => self
+                .collections
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| SharedString::from(c.name.clone()))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// 某一页头顶那一条：返回 + 这一组叫什么 + 几本，右边那颗分组按钮还在。
+    /// 用的是「信息」那一页同一条 [`TopBar`](crate::ui::components::TopBar)，内缩也对齐
+    /// 同一份 [`GUTTER`]。
+    ///
+    /// 那个本数读的是**这一页已经摆出来的格子**而不是库里那个 `book_count`：一屏上两行字
+    /// 说的必须是同一件事，而格子才是读者数得见的那一份。
+    ///
+    /// 那颗分组按钮留在右边槽里，有两个理由：卡片菜单上「新建分组」在桌面那一档要把表单
+    /// 钉在它底下（`group_cell` 那张浮层的锚点就是它，缺了它那一屏在桌面上点不出来）；
+    /// 而读者站在某一组里也应该能直接跳去别一组，不必先退回整架再点。
+    pub(in crate::ui::features::shelf) fn page_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let back = cx.entity().clone();
+        TopBar::new("shelf-group-bar")
+            .title(self.page_title(cx))
+            .subtitle(book_count(cx, self.items.len()))
+            .strong()
+            .back_tooltip(tr(cx, "shelf.back"))
+            .show_back_label()
+            .pad_x(GUTTER)
+            .on_back(move |_, cx| back.update(cx, |this, cx| this.pop(cx)))
+            .child(self.group_cell(cx))
+            .into_any_element()
     }
 
     /// 删掉一本：库里的行、属于我们自己的那份副本，然后重查一次架面。
@@ -974,12 +1131,14 @@ impl ShelfView {
         if !self.items.is_empty() || !self.tiles.is_empty() {
             return self.grid(cx, spec).into_any_element();
         }
-        // 空架要说「导一本书进来」，有书但都不匹配要说「换个词」：
-        // 写成一句会让读者以为自己把书弄丢了。
-        let (title, note) = if self.query.is_empty() {
-            ("shelf.empty", "shelf.empty_hint")
-        } else {
-            ("shelf.no_results", "shelf.no_results_hint")
+        // 空架要说「导一本书进来」，有书但都不匹配要说「换个词」，某一组那一页空了要说
+        // 「这一片还没有书」：三件事写成一句，读者会以为自己把书弄丢了。
+        let (title, note) = match self.scope {
+            ShelfScope::Collection(_) | ShelfScope::Ungrouped => {
+                ("shelf.group_empty", "shelf.group_empty_hint")
+            }
+            ShelfScope::Shelf if self.query.is_empty() => ("shelf.empty", "shelf.empty_hint"),
+            ShelfScope::Shelf => ("shelf.no_results", "shelf.no_results_hint"),
         };
         empty_state(tr(cx, title), tr(cx, note), cx).into_any_element()
     }
@@ -1077,17 +1236,22 @@ impl Render for ShelfView {
         // 导入后的兜底重查：notify 在后台被丢的那一帧，恢复前台的第一帧补上。
         if self.pending_reload {
             self.pending_reload = false;
-            self.items.clear();
-            let query = self.query.clone();
-            self.reload(&query, cx);
+            self.force_reload(cx);
         }
         // 顶部那一行按窗口档位换：手机上满幅的搜索框是「先搜再翻」，桌面上同一颗框
         // 拉到整片内容宽就成了一块空白，所以那边是定宽搜索框 + 导入的工具栏。
         let size = SizeClass::of(window);
-        let top = if size.is_compact() {
-            self.search_bar(cx).into_any_element()
-        } else {
-            self.toolbar(cx).into_any_element()
+        let top = match self.scope {
+            ShelfScope::Shelf => {
+                if size.is_compact() {
+                    self.search_bar(cx).into_any_element()
+                } else {
+                    self.toolbar(cx).into_any_element()
+                }
+            }
+            // 某一组那一页不摆搜索行：这一屏要回答的是「这一组都有谁」，而搜书是整架那一片
+            // 的命令 —— 那颗框此刻还在身后那一屏上，读者退回就够得着。
+            _ => self.page_bar(cx),
         };
         let spec = grid_spec(f32::from(window.viewport_size().width), size);
         // 导入进行中的那一句读数摆在命令行与架面之间：这几秒里架面是不动的，读者要确认
@@ -1178,11 +1342,13 @@ mod tests {
     use gpui_kit::{AnyWindowHandle, AppContext as _, ElementId, Entity, TestAppContext, px, size};
 
     use super::super::components::book_card::COVER_RATIO;
-    use super::GroupFilter;
     use super::ShelfView;
     use super::grid::{GAP, GUTTER, columns_for, grid_spec};
+    use super::{ShelfScope, menu_groups};
     use crate::ui::services::config::ConfigHolder;
     use crate::ui::shell::navigation::SizeClass;
+    use folio_core::store::Collection;
+    use gpui_kit::base::NavMotion;
 
     /// 架面一行放几本：手机钉在 3，桌面与平板随窗口宽往上加，任何宽度都不许塌成 0 列。
     ///
@@ -1271,8 +1437,19 @@ mod tests {
     }
 
     /// 起一屏架面：装一个内存书库，加上**确认过位置**的配置（没确认过的时候架面画的是
-    /// 那块「书要拷到哪儿」的面板，不是格子）。返回（架面, 窗口, 书库）。
-    fn boot_shelf(cx: &mut TestAppContext) -> (Entity<ShelfView>, AnyWindowHandle, Arc<Store>) {
+    /// 那块「书要拷到哪儿」的面板，不是格子）。返回（架面, 窗口, 书库, 架面那条栈）。
+    ///
+    /// 栈也要交出来：某一组与「信息」都是压在同一条栈上的一页，而这一轮要钉的正是
+    /// 「压上去 = 栈深 +1、返回 = 弹回整架」这一头一尾。架面自己也**压上去**当栈底 ——
+    /// 外壳给每个目的地压根视图就是这么做的，少这一手测出来的栈深会差一层。
+    fn boot_shelf(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<ShelfView>,
+        AnyWindowHandle,
+        Arc<Store>,
+        Entity<NavStackState>,
+    ) {
         cx.update(gpui_kit::init);
         let mut built = None;
         let handle = cx
@@ -1290,26 +1467,29 @@ mod tests {
                 );
                 let stack = cx.new(|_| NavStackState::new());
                 let view = cx.new(|cx| ShelfView::boot(window, cx, stack.downgrade()));
-                built = Some(view.clone());
+                stack.update(cx, |state, cx| {
+                    state.push(view.clone(), NavMotion::Immediate, cx)
+                });
+                built = Some((view.clone(), stack.clone()));
                 Root::new(view, window, cx)
             })
             .into();
         let store = cx
             .update(|cx| crate::ui::services::app_store::handle(cx))
             .expect("书库应已装上");
-        (built.expect("架面应已建起"), handle, store)
+        let (view, stack) = built.expect("架面应已建起");
+        (view, handle, store, stack)
     }
 
-    /// 分组那三处共用同一份库状态：卡片菜单里那颗是**开关**（切进 / 切出）、顶部那颗
-    /// 筛选跟着换看到的那一片、而「新建分组…」建完要把这本书顺手挂进去。
+    /// 分组那两处共用同一份库状态：卡片菜单里那颗是**开关**（切进 / 切出），而
+    /// 「新建分组…」建完要把这本书顺手挂进去。
     ///
-    /// 三条各自都能单独坏掉而编译照样绿：开关写成单向的「加入」→ 点第二下什么也不发生；
-    /// 筛选只改状态不重查 → 架面看着还是整架（`reload` 的去重按「词没变且架子非空」判，
-    /// 正会跳过这一趟，所以 `set_group` 必须先清空）；新建只建组不挂书 → 组有了、书还在外面；
-    /// 空名那一趟把面板清了 → 读者打了一半的字凭空消失。
+    /// 两条各自都能单独坏掉而编译照样绿：开关写成单向的「加入」→ 点第二下什么也不发生；
+    /// 新建只建组不挂书 → 组有了、书还在外面；空名那一趟把面板清了 → 读者打了一半的字
+    /// 凭空消失。
     #[gpui_kit::test]
-    fn the_group_switch_and_the_filter_agree(cx: &mut TestAppContext) {
-        let (shelf, handle, store) = boot_shelf(cx);
+    fn the_group_switch_and_the_new_group_agree(cx: &mut TestAppContext) {
+        let (shelf, handle, store, _) = boot_shelf(cx);
         let a = add(&store, "甲");
         let b = add(&store, "乙");
         let group = store.create_collection("想读").expect("建组");
@@ -1343,38 +1523,6 @@ mod tests {
         assert!(
             store.collections_of_book(b).expect("读库").is_empty(),
             "已经在里面时同一下是移出"
-        );
-
-        // 顶部那颗筛选：某一组 / 未分组，两片是互补的。
-        shelf.update(cx, |this, cx| {
-            this.set_group(GroupFilter::Collection(group), cx)
-        });
-        assert_eq!(
-            shelf.read_with(cx, |this, _| this.card_count()),
-            1,
-            "组里只有甲那一本"
-        );
-        shelf.update(cx, |this, cx| this.set_group(GroupFilter::Ungrouped, cx));
-        assert_eq!(
-            shelf.read_with(cx, |this, _| this.card_count()),
-            1,
-            "没进组的只剩乙"
-        );
-        assert_eq!(
-            shelf.read_with(cx, |this, _| this.card_title(0)),
-            Some("乙".into()),
-            "筛出来的那一本要认得"
-        );
-
-        // 搜索词与筛选项**叠加**：同一句「甲」，整架那一片命中、未分组那一片不该命中。
-        shelf.update(cx, |this, cx| this.set_group(GroupFilter::All, cx));
-        shelf.update(cx, |this, cx| this.reload("甲", cx));
-        assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 1);
-        shelf.update(cx, |this, cx| this.set_group(GroupFilter::Ungrouped, cx));
-        assert_eq!(
-            shelf.read_with(cx, |this, _| this.card_count()),
-            0,
-            "未分组那一头不许绕开搜索词"
         );
 
         // 「新建分组…」：面板上那颗「建组」建完就把这本书挂进去，面板随后收掉。
@@ -1412,15 +1560,15 @@ mod tests {
         );
     }
 
-    /// 组卡只在「整架 + 没搜词」那一屏领头，一筛一搜就退场；点它等于筛到那一组。
+    /// 组卡只在「整架 + 没搜词」那一屏领头；点一张 = 在架面那条栈上**压一整页**，而身后
+    /// 那一片原样不动。
     ///
-    /// 三条各自都能单独坏掉而编译照样绿：筛到某一组时还摆一排组卡，等于把读者刚走进去的
-    /// 那层又摊回他面前；带着搜索词还摆，卡上那几本封面与搜索结果毫无关系，读起来就是
-    /// 「这几本匹配」；而 `reload` 的去重按「词没变且架子非空」判，换筛不重排的话
-    /// 那一排卡会留在原地不动。
+    /// 三条各自都能单独坏掉而编译照样绿：某一组那一页还摆一排组卡，等于把读者刚走进去的那层
+    /// 又摊回他面前；带着搜索词还摆，卡上那几本封面与搜索结果毫无关系，读起来就是「这几本
+    /// 匹配」；而 `reload` 的去重按「词没变且架子非空」判，换片不重排的话那一排卡会留在原地。
     #[gpui_kit::test]
     fn the_group_tiles_lead_the_shelf_and_step_aside(cx: &mut TestAppContext) {
-        let (shelf, _, store) = boot_shelf(cx);
+        let (shelf, handle, store, stack) = boot_shelf(cx);
         let a = add(&store, "甲");
         let b = add(&store, "乙");
         let c = add(&store, "丙");
@@ -1450,19 +1598,41 @@ mod tests {
         assert_eq!(
             tiles,
             vec![(want, "想读".into(), 2), (misc, "杂项".into(), 1)],
-            "两张卡跟着库里那条名字序（`ORDER BY c.name` 是字节序），下面那行念的是这一组一共几本"
+            "两张卡跟着库里那条序：这一轮谁都没翻开过，于是落到组名（`ORDER BY c.name` 是字节序）"
         );
 
-        // 筛到某一组：那一排的卡退场，剩下的就是这一组里的书。
-        shelf.update(cx, |this, cx| {
-            this.set_group(GroupFilter::Collection(want), cx)
-        });
-        assert_eq!(shelf.read_with(cx, |this, _| this.tile_count()), 0);
-        assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 2);
+        // 点一张组卡 = 压一页：那一页里没有组卡，摆的是这一组的书，身后的整架一次库都没重查。
+        cx.update_window(handle, |_, window, cx| {
+            shelf.update(cx, |this, cx| {
+                this.open_page(ShelfScope::Collection(want), window, cx)
+            });
+        })
+        .expect("窗口应可更新");
+        assert_eq!(
+            stack.read_with(cx, |state, _| state.depth()),
+            2,
+            "某一组是栈上的一页，不是架面换个筛选"
+        );
+        let page = shelf
+            .read_with(cx, |this, _| {
+                this.group_page.as_ref().and_then(|p| p.upgrade())
+            })
+            .expect("那一页应已挂上");
+        assert_eq!(
+            page.read_with(cx, |this, _| this.tile_count()),
+            0,
+            "走进那一组时不许把那排组卡又摊回面前"
+        );
+        assert_eq!(page.read_with(cx, |this, _| this.card_count()), 2);
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.tile_count()),
+            2,
+            "身后的整架还在原样"
+        );
 
-        // 回到整架再搜一个词：卡还是不摆。
-        shelf.update(cx, |this, cx| this.set_group(GroupFilter::All, cx));
-        assert_eq!(shelf.read_with(cx, |this, _| this.tile_count()), 2);
+        // 弹回整架再搜一个词：卡还是不摆。
+        drop(page);
+        stack.update(cx, |state, cx| state.pop(NavMotion::Immediate, cx));
         shelf.update(cx, |this, cx| this.reload("甲", cx));
         assert_eq!(
             shelf.read_with(cx, |this, _| this.tile_count()),
@@ -1470,10 +1640,170 @@ mod tests {
             "带着搜索词还摆组卡，读起来就是「这几本匹配」"
         );
 
-        // 「未分组」那一头同理：筛的是书，不是组。
+        // 「未分组」那一页同理：那一屏筛的是书，不是组。
         shelf.update(cx, |this, cx| this.reload("", cx));
-        shelf.update(cx, |this, cx| this.set_group(GroupFilter::Ungrouped, cx));
-        assert_eq!(shelf.read_with(cx, |this, _| this.tile_count()), 0);
+        cx.update_window(handle, |_, window, cx| {
+            shelf.update(cx, |this, cx| {
+                this.open_page(ShelfScope::Ungrouped, window, cx)
+            });
+        })
+        .expect("窗口应可更新");
+        let loose = shelf
+            .read_with(cx, |this, _| {
+                this.group_page.as_ref().and_then(|p| p.upgrade())
+            })
+            .expect("未分组那一页");
+        assert_eq!(loose.read_with(cx, |this, _| this.tile_count()), 0);
+    }
+
+    /// 站在某一组那一页里按返回，落点是**书架**：栈深从 2 回到 1，那一页没了，还能再点进去。
+    ///
+    /// 这一条钉的是这轮改动买的东西本身。旧写法里某一组是架面上的一格筛选状态，那条栈的
+    /// 栈深自始至终是 1 —— 手机那一端 `host::back_exits_app` 是真，于是在组里按返回 = 退出
+    /// 应用，读者报的「在分组内返回直接返回系统主界面」就是这一条。
+    #[gpui_kit::test]
+    fn a_group_opens_as_a_page_and_back_returns_to_the_shelf(cx: &mut TestAppContext) {
+        let (shelf, handle, store, stack) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        add(&store, "乙");
+        let group = store.create_collection("想读").expect("建组");
+        store.add_to_collection(group, a).expect("挂进去");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        assert_eq!(
+            stack.read_with(cx, |state, _| state.depth()),
+            1,
+            "前置：栈底就是整架"
+        );
+
+        cx.update_window(handle, |_, window, cx| {
+            shelf.update(cx, |this, cx| {
+                this.open_page(ShelfScope::Collection(group), window, cx)
+            });
+        })
+        .expect("窗口应可更新");
+        let page = shelf
+            .read_with(cx, |this, _| {
+                this.group_page.as_ref().and_then(|p| p.upgrade())
+            })
+            .expect("那一页应已挂上");
+        assert_eq!(page.read_with(cx, |this, _| this.card_count()), 1);
+        assert_eq!(
+            page.read_with(cx, |this, _| this.card_title(0)),
+            Some("甲".into()),
+            "那一页摆的该是组里的那一本"
+        );
+        assert_eq!(
+            page.update(cx, |this, cx| this.page_title(cx).to_string()),
+            "想读",
+            "顶栏那一行叫的就是组名"
+        );
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_count()),
+            2,
+            "身后的整架没被换掉，也没重查"
+        );
+
+        // 返回：弹掉那一页，栈深回 1。
+        stack.update(cx, |state, cx| state.pop(NavMotion::Animated, cx));
+        drop(page);
+        assert_eq!(
+            stack.read_with(cx, |state, _| state.depth()),
+            1,
+            "返回弹掉那一页，落回整架"
+        );
+
+        // 回过整架之后还要能再点进同一组 —— 根实例手上那个弱句柄不许成为守卫。
+        cx.update_window(handle, |_, window, cx| {
+            shelf.update(cx, |this, cx| {
+                this.open_page(ShelfScope::Collection(group), window, cx)
+            });
+        })
+        .expect("窗口应可更新");
+        assert_eq!(
+            stack.read_with(cx, |state, _| state.depth()),
+            2,
+            "回到整架之后再点进同一组，还得进得去"
+        );
+    }
+
+    /// 「未分组」同样是一页且**不许绕开搜索词**；某一组那一页对应的组被在别处删掉时，
+    /// 它自己弹回上一层，不摆一屏看着像坏掉的空白。
+    #[gpui_kit::test]
+    fn the_ungrouped_page_honours_the_query_and_a_vanished_group_pops(cx: &mut TestAppContext) {
+        let (shelf, handle, store, stack) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        add(&store, "乙");
+        let group = store.create_collection("想读").expect("建组");
+        store.add_to_collection(group, a).expect("挂进去");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+
+        cx.update_window(handle, |_, window, cx| {
+            shelf.update(cx, |this, cx| {
+                this.open_page(ShelfScope::Ungrouped, window, cx)
+            });
+        })
+        .expect("窗口应可更新");
+        let loose = shelf
+            .read_with(cx, |this, _| {
+                this.group_page.as_ref().and_then(|p| p.upgrade())
+            })
+            .expect("未分组那一页");
+        assert_eq!(
+            loose.read_with(cx, |this, _| this.card_count()),
+            1,
+            "没进组的只剩乙"
+        );
+        assert_eq!(
+            loose.read_with(cx, |this, _| this.card_title(0)),
+            Some("乙".into()),
+            "那一本要认得"
+        );
+        // 两片是互补的：同一句「甲」，整架那一片命中、未分组这一页该是 0。
+        loose.update(cx, |this, cx| this.reload("甲", cx));
+        assert_eq!(
+            loose.read_with(cx, |this, _| this.card_count()),
+            0,
+            "那一页不许绕开搜索词"
+        );
+
+        // 回整架，再点进某一组：那一组被在别处删掉 → 重查这一次就是它退场的时候。
+        drop(loose);
+        stack.update(cx, |state, cx| state.pop(NavMotion::Immediate, cx));
+        cx.update_window(handle, |_, window, cx| {
+            shelf.update(cx, |this, cx| {
+                this.open_page(ShelfScope::Collection(group), window, cx)
+            });
+        })
+        .expect("窗口应可更新");
+        assert_eq!(stack.read_with(cx, |state, _| state.depth()), 2);
+        store.delete_collection(group).expect("删组");
+        // 读者在那一页上做点什么（挪书、删书）都会撞上一次重查，那正是发现组没了的时刻。
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        assert_eq!(
+            stack.read_with(cx, |state, _| state.depth()),
+            1,
+            "组没了，那一页自己弹掉，回到它压上来的那一片"
+        );
+    }
+
+    /// 0 本的组不进那颗「去处」菜单，摆出来的照库里那一份序（组内有过打开的在前）。
+    #[test]
+    fn an_empty_group_is_not_offered_as_a_place_to_go() {
+        let row = |id: i64, name: &str, book_count: usize| Collection {
+            id,
+            name: name.into(),
+            book_count,
+        };
+        let all = vec![row(1, "甲组", 3), row(2, "空组", 0), row(3, "乙组", 1)];
+        let shown: Vec<&str> = menu_groups(&all)
+            .into_iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            shown,
+            vec!["甲组", "乙组"],
+            "0 本的不摆，摆出来的不许换个序"
+        );
     }
 
     /// 建组那一屏是**浮在**架面上的：它开着的时候，底下那张格子还在原地、还点得着。
@@ -1482,7 +1812,7 @@ mod tests {
     /// 为它让位。浮层自己晚一帧才挂进弹窗层（要先量一次触发器），所以断言前连画两帧。
     #[gpui_kit::test]
     fn the_group_form_floats_over_the_grid(cx: &mut TestAppContext) {
-        let (shelf, handle, store) = boot_shelf(cx);
+        let (shelf, handle, store, _) = boot_shelf(cx);
         let a = add(&store, "甲");
         shelf.update(cx, |this, cx| this.force_reload(cx));
 

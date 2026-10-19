@@ -124,6 +124,23 @@ pub struct Collection {
     pub book_count: usize,
 }
 
+impl Collection {
+    /// 这个组该不该出现在「分组」那一列里 —— **一本都没有就不出现**：架面顶部那几张组卡
+    /// 与那颗去处菜单都不该有一条点进去是空白的入口，而它占的那一行正压着「我刚在读的
+    /// 那一组在哪儿」。
+    ///
+    /// 判据写在这里而不是各摆一份：两处表面（组卡、菜单）读的是同一份 `book_count`，
+    /// 一处改口径另一处跟着改才不会靠记性。库里那一行**不跟着删** —— 读者移出最后一本
+    /// 时未必想连组一起去掉，而他下次给别的书挂同一个组名，`create_collection` 照旧复用
+    /// 那一行（同名即复用）。
+    ///
+    /// 「按组清点」那份数据形状（[`Store::collection_groups`](crate::Store::collection_groups)）
+    /// 不归这条判据管：那一串是每组一串书，不是读者眼下的去处那一列。
+    pub fn is_shown(&self) -> bool {
+        self.book_count > 0
+    }
+}
+
 /// 一次阅读会话。时间都是 Unix 秒。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadingSession {

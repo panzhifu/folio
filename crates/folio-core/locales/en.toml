@@ -338,6 +338,11 @@ group_new = "New group"
 group_create = "Create"
 group_placeholder = "Group name"
 group_hint = "Which group this book joins. An existing name is reused rather than duplicated."
+# 某一组 / 「未分组」那一屏摆空了要说这一片的话：架上明明有书，只是这一片里没有 ——
+# 拿整架那句「书架还是空的」来回它，读者以为自己把书删了。
+
+group_empty = "Nothing here yet"
+group_empty_hint = "Long-press or right-click a card, then pick this group under Groups"
 # The line under a group tile: the card cannot hold the whole group, so the
 # count is what answers "how many books are in here".
 group_count = "%{n} books"

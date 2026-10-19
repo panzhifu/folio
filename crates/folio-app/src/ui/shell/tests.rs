@@ -952,6 +952,84 @@ mod booted {
         );
     }
 
+    /// 回归门：站在某一组那一页里按返回，落点是**书架**，不是把进程退掉。
+    ///
+    /// 手机那一端 `host::back_exits_app` 是真：那条栈走到栈底就 `cx.quit()`。某一组若是
+    /// 架面上的一格筛选状态，栈深自始至终是 1 —— 在组里按返回就是退出应用，读者报的
+    /// 「在分组内返回直接返回系统主界面」正是这一条。现在某一组是压在同一条栈上的一页：
+    /// 第一下弹回整架，第二下才轮到平台边界（这一端是桌面，不退出，所以原地不动）。
+    ///
+    /// 起点是「点开那一组的命令已经派到架面」：真实入口是顶部那几张组卡与那颗「去处」菜单，
+    /// 而测试窗口没有「点到这一块元素」的定位法（`open_group_for_test` 同 `feed_import_event`）。
+    #[gpui_kit::test]
+    fn back_inside_a_group_lands_on_the_shelf_not_the_home_screen(cx: &mut TestAppContext) {
+        use std::path::Path;
+
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
+        let meta = |title: &str| folio_core::DocMeta {
+            title: title.into(),
+            authors: vec!["作者丙".into()],
+            format: folio_core::Format::Epub,
+            size: 1,
+            ..Default::default()
+        };
+        let book = store
+            .add_book(Path::new("/books/甲.epub"), &meta("甲"))
+            .expect("入库");
+        store
+            .add_book(Path::new("/books/乙.epub"), &meta("乙"))
+            .expect("入库");
+        let group = store.create_collection("想读").expect("建组");
+        store.add_to_collection(group, book).expect("挂进去");
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let shelf = stack
+                .read(cx)
+                .current()
+                .cloned()
+                .and_then(|top| top.downcast::<ShelfView>().ok())
+                .expect("书架栈底就是架面本身");
+            shelf.update(cx, |shelf, cx| shelf.open_group_for_test(group, window, cx));
+        })
+        .expect("窗口应能渲染");
+        assert_eq!(
+            stack.read_with(cx, |state, _| state.depth()),
+            2,
+            "前置：某一组是架面栈上压着的一页"
+        );
+
+        cx.simulate_keystrokes(handle, "escape");
+        assert_eq!(
+            stack.read_with(cx, |state, _| state.depth()),
+            1,
+            "在组里按返回要弹回书架，而不是走到那条退出路"
+        );
+        let top = stack
+            .read_with(cx, |state, _| state.current().cloned())
+            .expect("栈底总有一页")
+            .downcast::<ShelfView>()
+            .expect("弹回来的该是整架那一块架面");
+        assert_eq!(
+            top.read_with(cx, |this, _| this.card_count()),
+            2,
+            "落回的是整架那一片（两本），不是组里那一本"
+        );
+
+        // 栈底那一按照旧归平台边界：这一端不退出，所以栈深与目的地都不动。
+        cx.simulate_keystrokes(handle, "escape");
+        assert_eq!(stack.read_with(cx, |state, _| state.depth()), 1);
+        assert_eq!(
+            shell.read_with(cx, |this, _| this.destination),
+            Destination::Shelf,
+            "返回不许把读者甩到别的目的地"
+        );
+    }
+
     /// 回归门：书盖着与退场的整段时间，架面那条栈与那条导航栏**一动不动**。
     ///
     /// 这一条钉的是阅读层化买的东西本身。上一版书是架面栈上的第 2 页，「栈上压了页」与

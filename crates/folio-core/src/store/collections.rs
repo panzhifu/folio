@@ -34,7 +34,12 @@ impl Store {
         Ok(id)
     }
 
-    /// 全部集合，按名字排序，每条带上书数。
+    /// 全部集合：**组内有过打开的在前**，按组内最近那一次打开的时间倒序；没打开过的
+    /// 按名字排在后面。每条带上书数。
+    ///
+    /// 这一条序与 [`Store::shelf`](crate::Store::shelf) 的「最近在先」是同一件事，只是
+    /// 主语换成组：读者点开分组那串条目时找的是「我刚在读的那一组在哪儿」，按字母找
+    /// 等于让他自己回忆组名叫什么。
     pub fn collections(&self) -> Result<Vec<Collection>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::collections_in(&conn)
@@ -122,9 +127,12 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?)
     }
 
-    /// 集合里的书，最近放进去的在前（同一秒靠 id 定序，保证稳定）。
-    /// 排序与 [`Store::list_books`] 那条「最近在读」无关：这里的主语是集合，
-    /// 读者刚往这个文件夹里丢的那本应当先看见。
+    /// 集合里的书（书目那几列），最近放进去的在前（同一秒靠 id 定序，保证稳定）。
+    ///
+    /// 这一条按的是**进组**的先后，与架面那一页的序不是一回事 —— 架面点开一组走
+    /// [`Store::shelf_in_collection`](crate::Store::shelf_in_collection)，与整架同一条
+    /// 「最近在先」（那里写了为什么）。这里回的是 [`BookRow`]，没有进度那几格，用的场合
+    /// 要的是「这组里按丢进来的顺序的一串」（导出、按组清点），不是架面上那一片格子。
     pub fn books_in_collection(&self, collection_id: i64) -> Result<Vec<BookRow>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let sql = format!(
@@ -141,13 +149,20 @@ impl Store {
 
     /// [`Store::collections`] 的不上锁版本；只由已经持了锁的一方调用。
     /// 分组查询要按同一份定义取集合，所以它对 `store` 内可见。
+    ///
+    /// 第 4 列 `opened_at`（组内各书最近的一次打开时间，一本都没翻开过就是 NULL）**只为
+    /// 排序**而 select 出来，`collection_from_row` 不读它。写成子查询而不是 join `books`：
+    /// join 会把下面那个 `count(cb.book_id)` 的分母搅成一本书在几个组里算几次的错数。
     pub(super) fn collections_in(conn: &Connection) -> Result<Vec<Collection>> {
         let mut stmt = conn.prepare(
-            "SELECT c.id, c.name, count(cb.book_id)
+            "SELECT c.id, c.name, count(cb.book_id),
+                    (SELECT MAX(b.last_opened_at) FROM collection_books x
+                       JOIN books b ON b.id = x.book_id
+                      WHERE x.collection_id = c.id) AS opened_at
              FROM collections c
              LEFT JOIN collection_books cb ON cb.collection_id = c.id
              GROUP BY c.id, c.name
-             ORDER BY c.name, c.id",
+             ORDER BY opened_at IS NULL, opened_at DESC, c.name, c.id",
         )?;
         Ok(stmt
             .query_map([], collection_from_row)?
@@ -290,6 +305,35 @@ mod tests {
         assert!(store.books_in_collection(9999).unwrap().is_empty());
     }
 
+    /// 组列表按「组里最近被打开过的那一本」排：翻开过的组在先，从没翻开过的按名字垫后。
+    ///
+    /// 那条 `a 组 / z 组` 的命名是这条门的关键：光按名字排，`a 组` 在第一格；按打开时间排，
+    /// `z 组` 才在第一格。写两个都打开过的组反而钉不住 —— `now()` 只到秒，同一秒里两格
+    /// 并列，先后就落到名字上，测试结果跟着时钟走。
+    #[test]
+    fn a_group_whose_book_was_opened_comes_first() {
+        let store = Store::in_memory().unwrap();
+        let quiet = book(&store, "a.epub");
+        let loud = book(&store, "z.epub");
+        let a_group = store.create_collection("a 组").unwrap();
+        let z_group = store.create_collection("z 组").unwrap();
+        store.add_to_collection(a_group, quiet).unwrap();
+        store.add_to_collection(z_group, loud).unwrap();
+        store.touch_opened(loud).unwrap();
+
+        let names: Vec<String> = store
+            .collections()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["z 组", "a 组"],
+            "读者刚在读的那一组该在第一格，而不是字母第一"
+        );
+    }
+
     /// 删集合只断链接，书本身必须还在 —— 这是集合与「删除」最容易搞混的一条。
     #[test]
     fn deleting_a_collection_keeps_its_books() {
@@ -342,11 +386,13 @@ mod tests {
         );
     }
 
-    /// 组卡要的数：卡上画得下的那几本封面 + 那一行念的**整组**本数。
+    /// 组卡要的数：卡上画得下的那几本封面 + 那一行念的**整组**本数，而 0 本的组不给卡。
     ///
-    /// 三条各自都能单独坏掉而编译照样绿：`truncate` 忘了 → 一个几百本的组每次重查架面都
+    /// 四条各自都能单独坏掉而编译照样绿：`truncate` 忘了 → 一个几百本的组每次重查架面都
     /// 把几百行读出来（画不出来的那些也读）；`count` 跟着 `items` 走 → 卡下面那行念成
-    /// 「4 本」而那一组其实有 300 本；空组被滤掉 → 读者刚建的那组当场看着像没建成。
+    /// 「4 本」而那一组其实有 300 本；空组没滤掉 → 顶部多出一条点进去是空白的入口；
+    /// 头几本按进组先后取 → 卡上画的是「最后丢进来的」，而读者认一组靠的是「这里我在
+    /// 读什么」。
     #[test]
     fn a_tile_carries_the_head_of_its_group_and_the_whole_count() {
         let store = Store::in_memory().unwrap();
@@ -362,8 +408,13 @@ mod tests {
         let tiles = store.collection_tiles(2).unwrap();
         assert_eq!(
             tiles.iter().map(|(c, _)| c.id).collect::<Vec<_>>(),
-            vec![full, empty],
-            "空的那组也要有一条 —— 它排在后面是因为名字的字字节序在后"
+            vec![full],
+            "0 本的那一组不给卡 —— 顶部不该有一条点进去是空白的入口"
+        );
+        assert_eq!(
+            store.collection(empty).unwrap().unwrap().book_count,
+            0,
+            "库里那一行不跟着删：只是不摆出来，别的书下次挂同名照旧复用"
         );
         let (group, head) = &tiles[0];
         assert_eq!(
@@ -371,14 +422,25 @@ mod tests {
             "下面那行念的是整组，不是卡上画得下的那几本"
         );
         assert_eq!(head.len(), 2, "卡上只装得下两格");
-        // 组内那条「最近放进去的在先」（`shelf_in_collection_in` 的 `added_at DESC`）：
-        // 卡上那几本就是最后丢进来的那几本。
+        // 组内那条序与整架同一条（`shelf_in_collection_in` 吃 `SHELF_ORDER`）：五本都还没
+        // 翻开过，于是靠末尾那对 `added_at DESC, books.id DESC` 收尾 —— 同秒入库的，
+        // 后落库的在先。
         assert_eq!(
             head.iter().map(|i| i.id).collect::<Vec<_>>(),
             vec![ids[4], ids[3]],
             "取的是组内那条排序的头几本，不是库里最小 id 的那几本"
         );
-        assert!(tiles[1].1.is_empty(), "空组的卡上什么都没有，但那张卡在");
+        // 翻开过的那本要顶到卡上第一格 —— 这才是「卡上画的是这一组里我在读什么」。
+        store.touch_opened(ids[0]).unwrap();
+        assert_eq!(
+            store.collection_tiles(2).unwrap()[0]
+                .1
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<_>>(),
+            vec![ids[0], ids[4]],
+            "最近翻开的那本该占卡上第一格"
+        );
 
         // `limit` 比整组还大时不该多出一条也不该报错。
         let all = store.collection_tiles(50).unwrap();

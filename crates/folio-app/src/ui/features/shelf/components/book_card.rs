@@ -384,9 +384,9 @@ impl ShelfView {
     /// 占的正是书卡那一格：封面槽换成 2×2 的马赛克，书名槽写组名，作者槽写一共几本 ——
     /// 于是「一组」与「一本」在同一排里对齐得起来，不必为它另起一段排版。
     ///
-    /// 点下去是**筛到那一组**（[`ShelfView::set_group`]），不是开书：这一格没有「这一本」
-    /// 可开。长按菜单不挂在这里 —— 组本身能改的事（改名 / 删除）此刻还没有入口，
-    /// 摆一条空的或半条能点的菜单比不摆更糟。
+    /// 点下去是**走进那一组**（[`ShelfView::open_page`]：在架面那条栈上压一整页），不是开书：
+    /// 这一格没有「这一本」可开。长按菜单不挂在这里 —— 组本身能改的事（改名 / 删除）此刻
+    /// 还没有入口，摆一条空的或半条能点的菜单比不摆更糟。
     pub(in crate::ui::features::shelf) fn group_cell_element(
         &self,
         tile: &GroupCard,
@@ -416,9 +416,9 @@ impl ShelfView {
             .cursor_pointer()
             .active(|style| style.opacity(0.75))
             .opacity(enter.progress(index))
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 tapped.update(cx, |this, cx| {
-                    this.set_group(super::super::view::GroupFilter::Collection(id), cx)
+                    this.open_page(super::super::view::ShelfScope::Collection(id), window, cx)
                 })
             })
             .child(

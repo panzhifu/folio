@@ -8,10 +8,10 @@ use crate::ui::services::l10n::tr;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{Selectable, Sizable as _, h_flex};
+use gpui_kit::component::{Sizable as _, h_flex};
 use gpui_kit::{Anchor, Context, IntoElement, ParentElement, Styled, div, px};
 
-use super::{GUTTER, GroupFilter, ShelfView};
+use super::{GUTTER, ShelfScope, ShelfView, menu_groups};
 
 impl ShelfView {
     /// 桌面/平板的工具栏：钉在架面最上方，搜索框与三点按钮靠右。
@@ -119,10 +119,12 @@ impl ShelfView {
             })
     }
 
-    /// 顶部那颗分组筛选：图标一颗，筛着某一组时吃选中态。
+    /// 顶部那颗分组按钮：点开的是**去处**那一列 —— 一条组一行，点一行压上那一组那一页。
     ///
-    /// 手机上那一行只剩「满幅框 + 两颗图标」的宽度，所以这里不带文字；点开那一条菜单里
-    /// 写着筛的是哪一组，组名后面缀着书数（「想读 · 12」），读者不必点进去才知道有几本。
+    /// 图标一颗，不带文字：手机上那一行只剩「满幅框 + 两颗图标」的宽度。组名后面缀着书数
+    /// （「想读 · 12」），读者不必点进去才知道有几本。0 本的组不摆这一条
+    /// （[`menu_groups`]），一条摆得出的组都没有时段落整块不出现 —— 只有一条「全部分组」的
+    /// 菜单读起来像坏了。
     pub(in crate::ui::features::shelf) fn group_button(
         &self,
         cx: &mut Context<Self>,
@@ -131,61 +133,56 @@ impl ShelfView {
         let label = tr(cx, "shelf.group");
         let all_label = tr(cx, "shelf.group_all");
         let ungrouped_label = tr(cx, "shelf.ungrouped");
-        let collections = self.collections.clone();
-        let current = self.group;
+        // 菜单每开一遍重建一次（builder 是 `Fn`），所以这一份清单在建按钮这一刻摘好、
+        // 由闭包 own 着，每次点一条再 clone 一份。
+        let collections = menu_groups(&self.collections)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let ungrouped = self.ungrouped;
         Button::new("shelf-group-filter")
             .ghost()
             .small()
             .icon(IconName::FolderTree)
-            .selected(current != GroupFilter::All)
             .tooltip(label.clone().to_string())
             .accessibility_label(label)
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let menu = menu
-                    .min_w(px(book_menu::MIN_WIDTH))
-                    .item(
-                        PopupMenuItem::new(all_label.clone())
-                            .checked(current == GroupFilter::All)
+                let menu = menu.min_w(px(book_menu::MIN_WIDTH)).item(
+                    PopupMenuItem::new(all_label.clone()).on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.back_to_shelf(cx));
+                        }
+                    }),
+                );
+                // 一本没分组的都没有时不摆「未分组」这一条：点进去是一屏空。
+                let menu = if ungrouped > 0 {
+                    menu.item(
+                        PopupMenuItem::new(format!("{} · {}", ungrouped_label.clone(), ungrouped))
                             .on_click({
                                 let entity = entity.clone();
-                                move |_, _, cx| {
+                                move |_, window, cx| {
                                     entity.update(cx, |this, cx| {
-                                        this.set_group(GroupFilter::All, cx)
+                                        this.open_page(ShelfScope::Ungrouped, window, cx)
                                     });
                                 }
                             }),
                     )
-                    .item(
-                        PopupMenuItem::new(ungrouped_label.clone())
-                            .checked(current == GroupFilter::Ungrouped)
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, _, cx| {
-                                    entity.update(cx, |this, cx| {
-                                        this.set_group(GroupFilter::Ungrouped, cx)
-                                    });
-                                }
-                            }),
-                    );
-                // 一个组都还没建时这一节整块不出现：条目只有「全部分组 / 未分组」两条的
-                // 菜单，读起来像坏了。
+                } else {
+                    menu
+                };
                 if collections.is_empty() {
                     return menu;
                 }
                 let menu = menu.separator();
-                // 菜单每开一遍重建一次（builder 是 `Fn`），所以这一份清单每次现摘一份。
                 collections.clone().into_iter().fold(menu, |menu, c| {
                     let entity = entity.clone();
                     let name = format!("{} · {}", c.name, c.book_count);
-                    menu.item(
-                        PopupMenuItem::new(name)
-                            .checked(current == GroupFilter::Collection(c.id))
-                            .on_click(move |_, _, cx| {
-                                entity.update(cx, |this, cx| {
-                                    this.set_group(GroupFilter::Collection(c.id), cx)
-                                });
-                            }),
-                    )
+                    menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.open_page(ShelfScope::Collection(c.id), window, cx)
+                        });
+                    }))
                 })
             })
     }

@@ -328,6 +328,11 @@ group_new = "Nouveau groupe"
 group_create = "Créer"
 group_placeholder = "Nom du groupe"
 group_hint = "Le groupe où va ce livre. Un nom qui existe déjà est réutilisé au lieu d’être dupliqué."
+# 某一组 / 「未分组」那一屏摆空了要说这一片的话：架上明明有书，只是这一片里没有 ——
+# 拿整架那句「书架还是空的」来回它，读者以为自己把书删了。
+
+group_empty = "Rien ici pour l’instant"
+group_empty_hint = "Maintiens une carte ou fais un clic droit, puis choisis ce groupe dans « Groupes »"
 # 组卡下面那一行：卡上画不下整组，那一行数字才是「这个组有几本」的答案。
 group_count = "%{n} livres"
 # 「信息」：菜单里那一条与面板标题共用这一条文案 —— 都叫「信息」，不叫「书籍信息」。

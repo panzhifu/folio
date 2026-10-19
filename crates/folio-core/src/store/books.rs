@@ -140,8 +140,10 @@ const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, b
 /// `store::books::grouping::shelf_grouped_splits_by_author` 就是这么翻车的）。后果不只是
 /// 难看：书架与「未分组」那一栏在两次查询之间换序，读者的眼睛跟着丢一行。
 ///
-/// 按 `id DESC` 收尾 = 「同秒入库的，后落库的在先」，与 `added_at DESC` 同向，也和
-/// `shelf_in_collection_in` 那条早就在用的 `cb.added_at DESC, books.id DESC` 一致。
+/// 按 `id DESC` 收尾 = 「同秒入库的，后落库的在先」，与 `added_at DESC` 同向。
+///
+/// 整架、某一组那一页、「未分组」那一页三条查询共用这一条常量 —— 分组只回答「摆哪几本」，
+/// 「先看见哪一本」不归它管（见 [`Store::shelf_in_collection`]）。
 const SHELF_ORDER: &str =
     "ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC, books.id DESC";
 
@@ -700,7 +702,9 @@ impl Store {
 
     /// 每个集合一组，末尾追一个「未分组」（装了但还没进任何集合的书）。
     ///
-    /// **空集合也留着**：读者刚建的空组如果在分组视图里消失，他会以为没建成。
+    /// 这里**空集合也留着**：这一条是「按组清点」那份数据形状（一组一串书），不是架面那
+    /// 两处入口的读法 —— 组卡与那颗去处菜单都按 [`Collection::is_shown`] 筛掉 0 本的。
+    /// 判据不同是有意的：清点要看得到空组，去处那一列不该有一条点进去是空的入口。
     /// 组名用 [`UNGROUPED`] 而不是空串，理由见那里的说明。
     pub fn collection_groups(&self) -> Result<Vec<ShelfGroup>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -721,18 +725,22 @@ impl Store {
         Ok(groups)
     }
 
-    /// 每个组带**前 `limit` 本**，按 [`Store::collections`] 那条名字序排。架面顶部那一排组卡走这一条。
+    /// 每个**摆得出来**的组带前 `limit` 本，按 [`Store::collections`] 那条序排（组内有过
+    /// 打开的在前）。架面顶部那一排组卡走这一条。
     ///
     /// 只取前 `limit` 本而不是整组：一张卡装得下的就是那几格，而一个组可能有几百本 ——
-    /// 一次查全部会把画不出来的那些行也读一遍。取的是组内那条「最近放进去的在先」
-    /// （与 [`Store::shelf_in_collection`] 同一个排序），所以卡上那几本就是读者最后丢进来的那几本。
+    /// 一次查全部会把画不出来的那些行也读一遍。取的是组内那条「最近在先」（与
+    /// [`Store::shelf_in_collection`] 同一个排序），所以卡上那几张封面就是读者在这一组里
+    /// 最后翻开的那几本 —— 认一组靠的是「这里我在读什么」，不是「最后丢进来的是什么」。
     ///
-    /// 空组照样给一条（`items` 是空的）：理由与 [`Store::collection_groups`] 留着空集合同一条 ——
-    /// 刚建的组在架面上消失，读者会以为没建成。
+    /// 0 本的组**不给卡**（[`Collection::is_shown`]）：那条入口点进去是一屏空，而它占的
+    /// 那一格正压着「我刚在读的那一组在哪儿」。留着空组原本的顾虑是「刚建的组消失会像没
+    /// 建成」，而架面建组那一刻必然同时挂进一本书（`ShelfView::create_group`），那条走不到。
     pub fn collection_tiles(&self, limit: usize) -> Result<Vec<(Collection, Vec<ShelfItem>)>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::collections_in(&conn)?
             .into_iter()
+            .filter(Collection::is_shown)
             .map(|c| {
                 let mut items = Self::shelf_in_collection_in(&conn, c.id, "")?;
                 items.truncate(limit);
@@ -741,22 +749,39 @@ impl Store {
             .collect()
     }
 
-    /// 一个集合里的书，可再按书名 / 作者筛一道。架面顶部那颗分组筛选走这一条。
+    /// 一个集合里的书，可再按书名 / 作者筛一道。架面点开某一组那一页走这一条。
     ///
-    /// 排序仍是「最近放进去的在先」（`added_at`），与整架那条「最近在读在先」不同：
-    /// 这里的主语是组，读者刚丢进来的那本应当先看见，与 [`Store::books_in_collection`] 同源。
+    /// 排序**与整架同一条**（同一个 `SHELF_ORDER` 常量）：分组只回答「摆哪几本」，不改
+    /// 「先看见哪一本」。按进组先后排的话，刚丢进来的那本会把读到一半的书挤到下面，
+    /// 而读者点开一组要找的正是「我上次读到哪儿了」。
     pub fn shelf_in_collection(&self, collection_id: i64, query: &str) -> Result<Vec<ShelfItem>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::shelf_in_collection_in(&conn, collection_id, query)
     }
 
-    /// 还没进任何集合的书，同一套书名 / 作者过滤。架面筛「未分组」走这一条。
+    /// 还没进任何集合的书，同一套书名 / 作者过滤。架面点开「未分组」那一页走这一条。
     ///
     /// 「未分组」是筛出来的、不是存出来的：库里没有一个叫这个名字的组，它是
     /// [`Store::collection_groups`] 末尾追加的那一格（名字用 [`crate::group::UNGROUPED`]）。
     pub fn shelf_ungrouped(&self, query: &str) -> Result<Vec<ShelfItem>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::shelf_in_no_collection_in(&conn, query)
+    }
+
+    /// 还没进任何集合的书有几本。架面那颗分组菜单按它判「未分组」这一条摆不摆 ——
+    /// 一本都没有却摆出一条，点进去是一屏「这里没有东西」。
+    ///
+    /// 不复用 [`Store::shelf_ungrouped`] 的 `len`：那条要按 `SHELF_COLUMNS` 把每一本的
+    /// 进度、字数、封面都算一遍（五条相关子查询 × 每一行），而这里只要一个数。
+    pub fn ungrouped_count(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let n: i64 = conn.query_row(
+            "SELECT count(*) FROM books
+             WHERE books.id NOT IN (SELECT book_id FROM collection_books)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
     }
 
     /// [`Store::shelf`] 的不上锁版本；只由已经持了锁的一方调用。
@@ -777,6 +802,10 @@ impl Store {
     }
 
     /// [`Store::shelf_in_collection`] 的不上锁版本；只由已经持了锁的一方调用。
+    ///
+    /// 名分用 `IN (SELECT …)` 问而不是 join `collection_books`：join 进来会带一张也有
+    /// `added_at` 的表，那条共用的 `SHELF_ORDER` 里的裸列名就此变成歧义列（SQLite 当场
+    /// 报错，不是静默选错），与 [`Store::shelf_in_no_collection_in`] 同一写法。
     fn shelf_in_collection_in(
         conn: &Connection,
         collection_id: i64,
@@ -786,9 +815,9 @@ impl Store {
         let sql = format!(
             r#"SELECT {SHELF_COLUMNS} FROM books
              LEFT JOIN positions ON positions.book_id = books.id
-             JOIN collection_books cb ON cb.book_id = books.id
-             WHERE cb.collection_id = ?1 AND {}
-             ORDER BY cb.added_at DESC, books.id DESC"#,
+             WHERE books.id IN (SELECT book_id FROM collection_books WHERE collection_id = ?1)
+               AND {}
+             {SHELF_ORDER}"#,
             query_clause("?2", "?3")
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -983,7 +1012,58 @@ mod grouping {
         assert_eq!(loose, vec![b, c]);
     }
 
-    /// 刚建的空组也要在分组里看得见，否则读者会以为没建成。
+    /// 组里那一页的序与整架同一条：**翻开过的那本在先**，不是「最近丢进组的在先」。
+    ///
+    /// 这一条钉的是把 `cb.added_at` 换成 `SHELF_ORDER` 那一手。旧写法下这两句会是
+    /// `[b, a]`（b 后进组），读者「读到一半的那本」被一次分组操作挤到第二排。门要的是
+    /// 「组只决定摆哪几本，不决定先看见哪一本」这条不改的序。
+    #[test]
+    fn a_collection_page_keeps_the_shelf_order() {
+        let store = Store::in_memory().unwrap();
+        let a = store
+            .add_book(&path("a.epub"), &meta("甲", "作者"))
+            .unwrap();
+        let b = store
+            .add_book(&path("b.epub"), &meta("乙", "作者"))
+            .unwrap();
+        let shelf = store.create_collection("想读").unwrap();
+        store.add_to_collection(shelf, a).unwrap();
+        store.add_to_collection(shelf, b).unwrap();
+        // 后进组的是 b，先翻开的是 a —— 两条序在这里给出相反的答案。
+        store.touch_opened(a).unwrap();
+
+        assert_eq!(
+            ids(&store.shelf_in_collection(shelf, "").unwrap()),
+            vec![a, b],
+            "组内该按最近打开排，与整架同一条"
+        );
+    }
+
+    /// 「未分组」那一格有几本：架面按它判这一条摆不摆。
+    #[test]
+    fn the_ungrouped_count_follows_membership() {
+        let store = Store::in_memory().unwrap();
+        let a = store
+            .add_book(&path("a.epub"), &meta("甲", "作者"))
+            .unwrap();
+        let b = store
+            .add_book(&path("b.epub"), &meta("乙", "作者"))
+            .unwrap();
+        assert_eq!(store.ungrouped_count().unwrap(), 2);
+
+        let shelf = store.create_collection("想读").unwrap();
+        store.add_to_collection(shelf, a).unwrap();
+        store.add_to_collection(shelf, a).unwrap();
+        assert_eq!(store.ungrouped_count().unwrap(), 1, "同一本进两次不算两次");
+
+        store.remove_from_collection(shelf, a).unwrap();
+        assert_eq!(store.ungrouped_count().unwrap(), 2, "移出来就又算未分组");
+        store.remove_book(b).unwrap();
+        assert_eq!(store.ungrouped_count().unwrap(), 1, "删掉一本少一本");
+    }
+
+    /// 「按组清点」那份数据形状里要看得见空组 —— 架面那两处入口不摆它，判据见
+    /// [`Store::collection_tiles`] 与 `Collection::is_shown`。
     #[test]
     fn an_empty_collection_still_shows_up_as_an_empty_group() {
         let store = Store::in_memory().unwrap();

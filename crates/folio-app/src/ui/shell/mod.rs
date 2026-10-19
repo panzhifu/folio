@@ -496,8 +496,9 @@ impl AppShell {
             }
         });
 
-        // 架面那条栈的形状变了 = 导航栏该不该收回来。今天压进去的只有「信息」那一页 ——
-        // 书不在栈上（见 [`ReadingLayer`]），它的落库与统计重取在 [`AppShell::close_reading`]。
+        // 架面那条栈的形状变了 = 导航栏该不该收回来。压进去的是「信息」那一页与某一组
+        // 那一页 —— 书不在栈上（见 [`ReadingLayer`]），它的落库与统计重取在
+        // [`AppShell::close_reading`]。
         let _stack_watch = cx.subscribe(&shelf_stack, |this, _, event, cx| match event {
             NavStackEvent::Popped => {
                 // 先把导航栏与沉浸态冻住，理由见 [`AppShell::chrome_frozen`]。减动效那一档
@@ -505,6 +506,10 @@ impl AppShell {
                 if !cx.reduce_motion() {
                     this.hold_chrome(cx);
                 }
+                // 弹回整架这一刻重查一遍。在那一页里做的事改的是**库**：把最后一本移出
+                // 那个组、新建一个组 —— 而身后那块架面手上还是压页那一刻的组清单，不敲
+                // 这一下，读者回到整架看到的还是那个已经空了的组（它不该再摆出来了）。
+                this.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
                 // 导航栏画不画看栈上压了几页，所以栈一变这一帧就得重画 ——
                 // 不敲这一下，pop 回架面后那条底栏不会自己回来。
                 cx.notify();
