@@ -12,8 +12,8 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::{
-    Anchor, AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, StatefulInteractiveElement, Styled, TestSupportExt as _, div, px,
+    Anchor, AnyElement, Context, Entity, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, StatefulInteractiveElement, Styled, TestSupportExt as _, div, px,
 };
 
 use super::{GUTTER, ShelfView};

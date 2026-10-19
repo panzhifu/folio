@@ -1904,6 +1904,7 @@ dependencies = [
  "async-channel",
  "chrono",
  "folio-core",
+ "folio-curl",
  "gpui-kit",
  "gpui-pre-mobile",
  "image",
@@ -1947,6 +1948,13 @@ dependencies = [
  "unicode-linebreak",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "folio-curl"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
 ]
 
 [[package]]

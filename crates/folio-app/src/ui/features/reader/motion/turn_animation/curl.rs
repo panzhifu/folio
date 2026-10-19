@@ -4,88 +4,70 @@
 //! —— 而观感的差别全在这一格上：硬折的纸是一条直边扫过屏幕，卷起来的纸在折痕旁边有一段
 //! **受光的圆筒**，于是纸有了厚度。
 //!
-//! 参考的几处公开实现（都是「卷筒」这一派，`XBPageCurl` 是 iBooks 那一档的开源复刻）：
+//! 折线怎么定，一条律管三件事（[`curl_of`]）：**方向与走量来自这一笔的划动**（按下点 → 手指
+//! 此刻），**轴从页边锚点起步**往里推进，**卷径起手是页宽的 [`ROLL`] 那一成、逼近书脊线性收到
+//! 0**。于是按在哪儿就从哪儿那一格高度起卷、往哪划就往哪折、起步只揭一条边而不是半页。倾角再
+//! 夹一道上限（[`MAX_TILT`]）。
 //!
-//! - **XBPageCurl**（OpenGL ES，iOS）：把纸的顶点投影到一段可移动/缩放/旋转的**虚拟圆柱**上，
-//!   圆柱的受光决定明暗 —— 本文件的 `ROLL` / `ROLL_INK` / `ROLL_LIGHT` 那条「暗—亮—暗」
-//!   就是它那条受光曲线的二维近似；
-//! - **PaperStack**（iOS，`PageCurl` 那个 CIFilter 的几何说明）：卷筒的半径与折线方向由
-//!   手指位置与纸的挺度定，**不随拖动距离变化** —— 对应 [`ROLL_LIFT`]：卷径前 12% 长出来，
-//!   之后定住；
-//! - **Hong et al., "Turning Pages of 3D Electronic Books"**：纸绕**圆锥**而不是圆柱弯曲，
-//!   锥尖落在书脊那条线上，所以整页纸不会被拉长。folio 画不出锥（正文是逐字形自绘的、
-//!   用不了投影变换，见下），圆柱在二维投影里与本档要的那条受光带一致，就取圆柱；
-//! - **StPageFlip**（canvas）：折线怎么算（角与其镜像连线的垂直平分线）沿用它的做法，
-//!   [`crease_of`] 那一格没动。
+//! 律本身**只有一套坐标**：自由边在右、书脊在左、手指往左划。别的情形不另写一条律，进出各映
+//! 一次横向（[`cylinder_at`] 配 [`flip_x`]），映不映由「自由边到底在哪一侧」判（
+//! [`Pose::free_edge_right`] = `forward != rtl`：往回翻与「从右往左读的那一本」各反一次）。
+//! 少映进那一次，往右拖那一笔会被「往翻页反方向走的那一截不算」夹成 0，整趟停在「还没起步」。
 //!
-//! 画面上**没有转了角度的字**：gpui 的 `paint_glyph` 把字形 sprite 的变换写死成单位阵
-//! （`gpui-pre-0.3.9/src/window.rs:4882`），GPU 侧的顶点着色器认得那个矩阵，缺的只是参数
-//! 没透出来。所以卷筒上画的是**纸**，不是转过弯的字 —— 这一点与 iBooks 一致（它卷起来
-//! 那一段也不带正文）。等 gpui 透出那个矩阵，这张纸才能真正贴上字。
+//! 整条律照抄 `harism/android-pagecurl` 的 `CurlView.updateCurlPos`（`fi.harism.curl`，安卓上
+//! 这一派的事实标准，国产阅读器的「仿真」多数是它的后代）。中间试过另两家，都不对：
+//!
+//! - **StPageFlip**（`reference/StPageFlip`）：折线是「页的固定右角 ↔ 手指绝对位置」的垂直
+//!   平分线，划动方向根本不进式子。按在页面中间往左划一下，揭起来的是右下角 —— 读者报的
+//!   「不跟手」就是它。
+//! - **把按下点当锚点的垂直平分线**：方向对了，但折线永远落在两点正中 —— 往左拖 500 像素，
+//!   折线立刻落到页面正中，半页字一瞬间被一整张空白纸背盖住。真机截图量到左半均值 226、
+//!   方差 15、一个字都没有。这一版只活了半天。
+//!
+//! 卷径也不照 XBPageCurl 的 `16 + l/8`（那是 iPad 尺寸上的点，照搬到 390dp 会涨到屏宽六成，
+//! 读起来是一捆纸），也不照 gmpagecurl 那个死常数 —— 起手 [`ROLL`] 页宽，随轴逼近书脊收到 0。
+//!
+//! 卷过去那一段是真画出来的：`folio_curl::build_page_mesh` 给一张页面网格，顶点按「平摊 /
+//! 卷在半径 R 的柱面上 / 绕过柱顶落在背面」三段变形（`gpui-pre-wgpu/src/page_curl.wgsl`），
+//! 采的是这一页烘成的那张捕获纹理 —— 所以卷起来那一段**带着正文**。CPU 那一版做不到：gpui 的
+//! `paint_glyph` 把字形 sprite 的变换写死成单位阵（`gpui-pre-0.3.9/src/window.rs:4882`），GPU
+//! 侧认得那个矩阵，缺的只是参数没透出来，所以转了角度的字画不出来。
+//!
+//! 圆锥（Hong et al.「纸绕锥而不是绕柱弯，锥尖落在书脊那条线上，所以整页纸不会被拉长」）
+//! **没有**实现：半径按「到锥顶的距离」线性收，手指靠近书脊那一段锥顶会跑远、半径随折线角度
+//! 剧变，到某一档角度上跳一帧。
 
-use super::{Area, Axis, Crease, Cut, Grip, PageTurnStyle, Poly, Shade, Shades, Sheet, Tint};
+use super::{Area, Axis, Crease, Cut, Grip, PageTurnStyle, Pose, Sheet};
 use crate::ui::features::reader::model::chrome::PageMode;
 
-pub(in crate::ui::features::reader) const CORNER_TILT: f32 = 0.1;
-
-/// **卷筒半径**占页短边的几成。
+/// 折线倾角的上限（弧度，从读书那根轴量起）。
 ///
-/// 这是「折成硬片」与「卷成圆筒」之间唯一多出来的自由度，也是苹果那种仿真感的来源：
-/// 纸不是绕一条线转过去的，而是在折痕处**卷起来**一段，正对读者的那面被照亮、两次贴着
-/// 切线的地方压暗 —— 于是一条纸上出现「暗—亮—暗」，读起来才有厚度。
+/// 读者竖着划那一笔，不夹的话折线会转成近水平 —— 纸从页顶或页底卷走，而书没有那两条自由边。
+/// 这一格照的是 `reference/gmpagecurl-ios` 的 `maxPhi = π/4 − 1°`（`InputUtils.swift:64` 那句
+/// `phi.clamp(to: -maxPhi...maxPhi)`，默认值在 `MetalPageCurlView.swift:60`）。
+const MAX_TILT: f32 = std::f32::consts::FRAC_PI_4 - 0.017_453_293;
+
+/// **起手卷径**占页宽的几成。
 ///
-/// 取 5.5%：手机上（短边 390）卷径约 21px、整条卷筒 42px 宽，与 iBooks 的量级一致；
-/// 再粗就是「一捆纸」，再细那条高光会窄到看不见。
-pub(in crate::ui::features::reader) const ROLL: f32 = 0.07;
-
-/// 卷筒起势：翻页进度前几成才把卷筒**长出来**。
+/// 这是「折成硬片」与「卷成圆筒」之间唯一多出来的自由度，也是苹果那种仿真感的来源：纸不是
+/// 绕一条线转过去的，而是在折痕处**卷起来**一段，正对读者的那面被照亮、两次贴着切线的地方
+/// 压暗 —— 于是一条纸上出现「暗—亮—暗」，读起来才有厚度。
 ///
-/// 不这么写，一按下去就有一根满宽的圆筒贴在那儿 —— 而那一刻纸其实还没离页。
-/// 12% 是个手感值：比一次点按的加速段还短，读者只会觉得「纸是被拎起来的」。
-const ROLL_LIFT: f32 = 0.12;
-
-/// 卷筒贴折线与贴外缘那两处的黑度（卷筒两侧都是切线，受光最少）。
-const ROLL_INK: f32 = 0.34;
-
-/// 卷筒的受光拆成几条**平的**带。
+/// 取 **0.14 页宽**：手机上（页宽 360 逻辑像素）卷径约 50px、柱顶横移约 100px。
 ///
-/// 为什么不用两条互相对着的渐变（那是上一版）：gpui 的渐变只有两个色标（`Background`
-/// 装的是 `[LinearColorStop; 2]`），两段渐变各有一端是满墨、另一端透明，接在卷顶上就是
-/// 两道**边是硬的**灰条 —— 真机上读到的正是「后面有两条灰色的条」。平带子按 `sin` 取浓淡，
-/// 一条比一条淡，边是软的，卷筒才读成一根圆筒。
-const ROLL_BANDS: usize = 12;
+/// 参照 `harism/android-pagecurl` 给的是页宽的 1/3 —— 那是平板上翻相册的比例，搬到 390dp
+/// 的阅读页上，`πR` 比一整页还宽，整页都落进「卷在柱面上」那一段：字被剪斜、页面像被掰弯。
+/// 真机截图量到的正是这个。再往前一版取 5.5%（约 21px）又小到没人看得出纸在卷。0.14 是
+/// 这两个读数中间的一个，还要不要再细，等下一张截图说话。
+pub(in crate::ui::features::reader) const ROLL: f32 = 0.14;
 
-/// 卷筒正对读者那一侧的高光有多亮。压过了就成一条白棍。
-const ROLL_LIGHT: f32 = 0.10;
-
-/// 纸**背面**（折起来那一张）压暗多少。
+/// 没有手指那一条路的折线（点屏 / 按键 / 滚轮）。
 ///
-/// 0.0 = 不压：背面就是纸色。苹果那一档折起来的背面也是一整片干净的纸，压暗会让它读成
-/// 「一块半透明的灰色贴纸」—— 上一版那第二条灰条就是它。
-const BACK_INK: f32 = 0.0;
-
-/// 卷筒抬起来之后投在下面那张纸上的影，最宽到页宽的几成。
+/// `None` = 这块版心还没量出面积。
 ///
-/// 取 0.75：那是 StPageFlip 的 `width = pageWidth * 3/4 * progress`（`Render.ts` 的
-/// `setShadowData`）。比这个窄，影子就像贴在折痕上的一条硬带，看不出「整张纸被抬起来」。
-const SHADOW_WIDE: f32 = 0.75;
-
-/// 那道投影起步有多黑。
-const SHADOW_INK: f32 = 0.26;
-
-/// 折痕**内侧**那道影：贴着卷筒的外缘、盖在纸背上，宽度按行程收（同 StPageFlip 的
-/// `drawHardInnerShadow`：`(100 − progress) * 2.5 * pageWidth / 100 + 20`）。
-///
-/// 有没有这一道，是「一张纸被折起来」与「一块灰色形状贴在纸上」之间的差别 —— 折页最难看的
-/// 读数就是纸背整片均匀、边缘一刀切。
-const INNER_WIDE: f32 = 0.35;
-
-/// 折痕内侧那道影起步有多黑。
-const INNER_INK: f32 = 0.34;
-
-/// 走了 `progress` 那一刻的折线。往回翻是同一件事沿页的中线镜像。
-///
-/// `None` = 这块版心还没量出面积，或角与它的原位置重合到折线无从定义。
+/// 只有门用得到这一个别名：生产那一头每一步都把（可能确实是 `None` 的）手交给 [`crease_at`]，
+/// 不必再留一个不带手的入口。
+#[cfg(test)]
 pub(in crate::ui::features::reader) fn crease_of(
     progress: f32,
     forward: bool,
@@ -94,217 +76,234 @@ pub(in crate::ui::features::reader) fn crease_of(
     crease_at(progress, forward, area, None)
 }
 
-/// 同 [`crease_of`]，但带上读者这一笔的手（起手点 + 此刻的位置）。
+/// 这一笔的**锚点**：把按下点投影到页的自由边（往后翻是右缘），y 取按下点。
 ///
-/// **折线就是「那个角」与「手指此刻」的垂直平分线** —— 与 StPageFlip 那套点屏折叠同一条
-/// 判据，只是被拖的点从「沿一条写死的对角线走」换成了手指本身。于是：
+/// 不是页角。`harism/android-pagecurl` 在 `CurlView.onTouch` 的 `ACTION_DOWN` 里就是这么做的
+/// （`mDragStartPos.x = rightRect.right`，y 夹进页内），于是纸从**手指那一格的高度**起卷。取角
+/// 的话，按在页面中间往左划会先从右下角揭起来 —— 那就是读者说的「不跟手」。
 ///
-/// - 起折的角看 `from`：落在下半屏从右下角卷起，落在上半屏从右上角卷起（从前角是常数，
-///   所以竖屏上「只有上面能翻」）；
-/// - 折线的倾角看 `at`：手指往左划、斜着划、往上划，折痕跟着转（从前它只会沿一条对角线走）。
-pub(in crate::ui::features::reader) fn crease_at(
-    progress: f32,
-    forward: bool,
-    area: Area,
-    grip: Option<Grip>,
-) -> Option<Crease> {
-    if area.width() <= 0.0 || area.height() <= 0.0 {
+/// 只在「正向」那一侧给（自由边 = 右缘）；往回翻由 [`flip_x`] + [`cylinder_at`] 那一对映射负责。
+fn grabbed_edge(area: Area, grip: Grip) -> (f32, f32) {
+    (
+        area.right,
+        (area.top + grip.from.1 * area.height()).clamp(area.top, area.bottom),
+    )
+}
+
+/// 把手势读数（版心内归一化）映进「正向」那一套：自由边不在右就是横向 `x → 1 − x`，纵向一个字
+/// 不动。
+///
+/// [`curl_of`] 通篇假设自由边在右、书脊在左、手指往左划，它自己不看翻页方向，也不看书从哪边读。
+/// 所以凡是不满足那一套的（往回翻、从右往左读的那一本）要在**进出口各映一次**：出口那一次在
+/// [`cylinder_at`] 末尾（法向反号 + 轴映回来），进这一次是它的另一半。只映出口不映进口，读出来
+/// 是「只能往左滑不能往右滑」—— 往回拖那一笔的 `dir_x` 在真实坐标里是正的，进律正好被「往翻页
+/// 反方向走的那一截不算」夹成 0，于是整趟都停在「还没起步」那一帧，松手才突然卷起来。
+fn flip_x(p: (f32, f32), free_right: bool) -> (f32, f32) {
+    if free_right { p } else { (1.0 - p.0, p.1) }
+}
+
+/// [`curl_of`] 给回的那一组：`(法向, 轴, 卷径)`，全在「正向 + 页局部」那一套里。
+type Roll = ((f32, f32), (f32, f32), f32);
+
+/// 这一帧圆柱的参数，全部在「正向 + 页局部」那一套坐标里给：页占 `u ∈ [0, 宽]`、自由边在
+/// `u = 宽`、书脊在 `u = 0`，`v` 从页顶往下。**进来的那个 `grip` 也得是这一套里的**（往回翻
+/// 由 [`cylinder_at`] 先映一次），它自己不看翻页方向。
+///
+/// 法向指向**已经卷走**那一侧（与 [`Crease::past`] 同一读法），所以它可以直接填进 GPU 那份
+/// uniform —— 网格的顶点本来就是页局部坐标。
+///
+/// **整条律照抄 `harism/android-pagecurl` 的 `CurlView.updateCurlPos`**（`fi.harism.curl`，
+/// 安卓上这一派的事实标准，国产阅读器的「仿真」多数是它的后代）。三条一起才读成翻书：
+///
+/// 1. 方向与走量都来自**这一笔的划动**（按下点 → 手指此刻）。参照里那一格是从页边锚点量的，
+///    于是按在页面中间、手指一格没动就已经折了半页；这里锚点只决定轴**从哪儿起步推进**。
+/// 2. 卷径起手是页宽的 [`ROLL`]，随轴逼近书脊**线性收到 0**（参照里那句
+///    `radius = clamp(mCurlPos.x − pageLeftX, 0, radius)`）—— 这一格是「卷」看得见的全部来源。
+/// 3. 轴在柱面那一段**跑在手指前面**（`sqrt` 那一档），绕过柱顶之后推进量退到手指后面。起手快、
+///    收尾稳 —— 这条就是手感本身；纯线性读起来是一根匀速平移的棍。
+fn curl_of(progress: f32, area: Area, grip: Option<Grip>) -> Option<Roll> {
+    let (width, height) = (area.width(), area.height());
+    if width <= 0.0 || height <= 0.0 {
         return None;
     }
     let t = progress.clamp(0.0, 1.0);
-    let from_bottom = grip.is_some_and(|grip| grip.from.1 > 0.5);
-    let (edge, inward) = if from_bottom {
-        (area.bottom, -1.0)
-    } else {
-        (area.top, 1.0)
-    };
-    let corner = (area.right, edge);
-    let dragged = match grip {
-        // 手指握着：折线跟着手指走（两个轴都跟）。
-        Some(grip) => (
-            area.left + grip.at.0 * area.width(),
-            area.top + grip.at.1 * area.height(),
-        ),
-        // 没有手指（点屏 / 按键 / 滚轮）：沿用「角沿对角线走到页外」那条写死的路径。
-        None => {
-            let tilt = CORNER_TILT * area.height();
-            let start = (area.right - tilt, edge + inward * tilt);
-            let dest = (area.right - 2.0 * area.width(), edge);
+    let (anchor, press, finger) = match grip {
+        Some(grip) => {
+            let grabbed = grabbed_edge(area, grip);
             (
-                start.0 + (dest.0 - start.0) * t,
-                start.1 + (dest.1 - start.1) * t,
+                (grabbed.0 - area.left, grabbed.1 - area.top),
+                (grip.from.0 * width, grip.from.1 * height),
+                (grip.at.0 * width, grip.at.1 * height),
             )
         }
-    };
-    let crease = Crease::from_corner(corner, dragged)?;
-    Some(if forward {
-        crease
-    } else {
-        // x ↦ left + right − x 代进 `past`：法向反号，`d` 补回那段镜像平移。
-        Crease {
-            nx: -crease.nx,
-            ny: crease.ny,
-            d: crease.d - crease.nx * (area.left + area.right),
+        // 没有手指（点屏 / 按键 / 滚轮）：没有划动方向可读，就取**最中立的那一笔** —— 从自由边
+        // 的正中笔直往页内走，走完正好两页宽。那条律在 `dist = 2·页宽` 处把轴送到书脊、卷径收到
+        // 0，正好一页翻干净；参照里的松手动画也是同一个做法（把 pointer 沿直线插值到对边，再走
+        // 同一条律），不会自带第二个方向。
+        None => {
+            let start = (width, 0.5 * height);
+            (start, start, (start.0 - 2.0 * width * t, start.1))
         }
+    };
+    let (dir_x, dir_y) = (finger.0 - press.0, finger.1 - press.1);
+    // 往翻页方向**反面**走的那一截不算：夹成 0，画面停在「还没起步」那一帧（与
+    // `swipe::progress` 那条夹法同一个读法）。这一格读的是**正向那一套**里的横向 —— 往回翻的手
+    // 指坐标进律之前已经由 [`flip_x`] 映过一次，否则往右拖那一笔在这里正好被夹死。
+    let dir_x = dir_x.min(0.0);
+    // 倾角上限：竖着划那一笔不夹的话折线转成近水平，纸从页顶/页底卷走 —— 书没有那两条自由边。
+    // 这一格是**故意偏离参照**的：harism 允许（它卷的是一张自由的纸），书不许。夹的是纵向**偏移
+    // 量**而不是角度，所以横向往复一格没动的竖划正好退化成「纸还没动」。
+    let limit = MAX_TILT.tan() * dir_x.abs();
+    let dir_y = dir_y.clamp(-limit, limit);
+    let dist = (dir_x * dir_x + dir_y * dir_y).sqrt();
+    if dist < 1e-3 {
+        // 一格没动：轴停在自由边之外一格，整页都在平摊侧。
+        return Some(((1.0, 0.0), (width + 1.0, 0.0), 0.0));
+    }
+    // 划动方向，与它的反号（= 指向已经卷走那一侧）。
+    let (ux, uy) = (dir_x / dist, dir_y / dist);
+    let (nx, ny) = (-ux, -uy);
+    let pi = std::f32::consts::PI;
+    let mut radius = ROLL * width;
+    let mut curl_len = pi * radius;
+    // 拖到快够着对边之外：还能卷的弧长只剩「两页宽 − 走了多远」，卷径跟着收到 0。
+    if dist > 2.0 * width - curl_len {
+        curl_len = (2.0 * width - dist).max(0.0);
+        radius = curl_len / pi;
+    }
+    // 轴从锚点往划动方向推进多少，两段各一条。
+    let advance = if dist >= curl_len {
+        // 绕过柱顶：推进量退到手指**后面**去，纸铺平盖到下面那一张上。
+        (dist + curl_len) * 0.5
+    } else {
+        // 还在柱面上：多走一截 `R·sin(π·sqrt(dist/curlLen))`，轴跑在手指前面。
+        dist + radius * (pi * (dist / curl_len).sqrt()).sin()
+    };
+    let axis = (anchor.0 + ux * advance, anchor.1 + uy * advance);
+    // 轴逼近书脊（u = 0）的路上把卷径收掉，到书脊正好为 0。参照里这一句只挂在后段那一支，这里
+    // 两段都收 —— 只挂后段的话收尾那一刻卷径从满值直接跳到 0，中间没有过渡。
+    let radius = radius.min(axis.0).max(0.0);
+    Some(((nx, ny), axis, radius))
+}
+
+/// GPU 卷曲所需的参数（**页局部坐标**，原点在页的左上角 —— 与网格顶点同一把尺；进场景前由
+/// gpui 统一乘 `scale_factor` 换成设备像素）。
+///
+/// `nx·x + ny·y = d` 既是折线也是圆柱的轴；`radius` 是「折成硬片」与「卷成圆筒」之间那一个
+/// 自由度，也就是这一档全部的仿真感所在。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::ui::features::reader) struct Cylinder {
+    pub nx: f32,
+    pub ny: f32,
+    pub d: f32,
+    pub radius: f32,
+}
+
+/// 这一帧的圆柱参数。`free_right` = 这一趟纸的**自由边在右**（见 [`Pose::free_edge_right`]：
+/// 往回翻与「从右往左读的那一本」都是换手，两个各反一次）。`None` = 这块版心还没量出面积。
+pub(in crate::ui::features::reader) fn cylinder_at(
+    progress: f32,
+    free_right: bool,
+    area: Area,
+    grip: Option<Grip>,
+) -> Option<Cylinder> {
+    // 律只有一套坐标，进来的手先映进那一套（自由边不在右 = 横向反号）。
+    let grip = grip.map(|g| Grip::new(flip_x(g.from, free_right), flip_x(g.at, free_right)));
+    let ((nx, ny), axis, radius) = curl_of(progress, area, grip)?;
+    let width = area.width();
+    // 算完再映回读数那一侧：`curl_of` 在「自由边在右」那一套里给，那里 u 是 `宽 − x`。法向的
+    // 横向分量反号，轴的位置也跟着映回来。
+    let (nx, axis_u) = if free_right {
+        (nx, axis.0)
+    } else {
+        (-nx, width - axis.0)
+    };
+    Some(Cylinder {
+        nx,
+        ny,
+        d: nx * axis_u + ny * axis.1,
+        radius,
     })
 }
 
-/// 折页那一档这一帧要盖上去的那几块：一张卷起来的纸 + 它投在下面那张上的影。
+/// 走了 `progress` 那一刻的折线，带上读者这一笔的手（起手点 + 此刻的位置）。
 ///
-/// 画的东西从远到近（也就是从 `past` 负得多的地方往折线走）：
+/// 就是 [`cylinder_at`] 那条轴映回**版心坐标**的那一份，所以 GPU 判「哪一半已经卷走」与逐字
+/// 裁剪判「这个字还留不留」用的是同一个式子 —— 两边差一点，读出来就是「影子和纸不是同一张」。
 ///
-/// 1. **纸背**：被折走那一片绕折线镜像之后落在平摊侧 —— 读者看到的是纸的背面，
-///    所以它先铺一层页色，再压一道朝折线渐深的暗，免得读成一块剪出来的硬纸板；
-/// 2. **卷筒**：折痕那一侧 `2R` 宽的一条。纸面铺一层，两侧各压一道切线暗、中间一道高光
-///    —— 这三段合起来就是「纸在这里卷过去」的全部观感；
-/// 3. **投影**：卷筒悬在纸面上方，下面那张纸被压出一道从卷筒外缘往外淡出的影。
-///
-/// 三处都不碰字形：正文是逐字形自绘的，转角度的字画不出来（`paint_glyph` 的变换是
-/// 单位阵），所以卷筒上画的就是**纸**，不是转过弯的字 —— 这一点与 iBooks 一致。
-pub(in crate::ui::features::reader) fn fold_shades(
+/// `None` = 这块版心还没量出面积。
+pub(in crate::ui::features::reader) fn crease_at(
     progress: f32,
-    forward: bool,
-    area: Area,
-) -> Shades {
-    fold_shades_at(progress, forward, area, None)
-}
-
-/// 同 [`fold_shades`]，带上读者这一笔的起手点（决定从哪个角起折）。
-pub(in crate::ui::features::reader) fn fold_shades_at(
-    progress: f32,
-    forward: bool,
+    free_right: bool,
     area: Area,
     grip: Option<Grip>,
-) -> Shades {
-    let mut out = Shades::new();
-    let Some(crease) = crease_at(progress, forward, area, grip) else {
-        return out;
+) -> Option<Crease> {
+    let cylinder = cylinder_at(progress, free_right, area, grip)?;
+    Some(Crease {
+        nx: cylinder.nx,
+        ny: cylinder.ny,
+        d: cylinder.d + cylinder.nx * area.left + cylinder.ny * area.top,
+    })
+}
+
+/// 松手之后那一腿的手指落点：沿**这一笔已经划出去的方向**继续走到整页折完（或退回起点）。
+///
+/// 参照里那句「animation source/target 都是手指位置，走的是同一条 `updateCurlPos`，所以输出与
+/// 用户真的一路拖过去完全相同」就是这个意思。只把这一笔拉长，方向一个字不改 —— 写死一个落点
+/// 的话，松手那一帧划动方向被硬掰，折线倾角跟着跳一下。
+pub(in crate::ui::features::reader) fn release_grip(
+    grip: Grip,
+    u: f32,
+    free_right: bool,
+    revert: bool,
+    area: Area,
+) -> Grip {
+    if revert {
+        return Grip::new(grip.from, grip.from);
+    }
+    let (width, height) = (area.width(), area.height());
+    let start = (grip.from.0 * width, grip.from.1 * height);
+    let finger = (grip.at.0 * width, grip.at.1 * height);
+    // 一律换算到「手指往左划」那一套里：自由边不在右就是横向反号。
+    let sign = if free_right { 1.0 } else { -1.0 };
+    let dx = (finger.0 - start.0) * sign;
+    let dy = finger.1 - start.1;
+    let long = (dx * dx + dy * dy).sqrt();
+    let (ux, uy) = if long > 1e-3 {
+        (dx / long, dy / long)
+    } else {
+        (-1.0, 0.0)
     };
-    let page = Poly::rect(area);
-    let t = progress.clamp(0.0, 1.0);
-    // 卷筒的半径：前 12% 长出来，之后定住。定住这一条也是物理的 —— 纸的弯曲半径由
-    // 纸的挺度决定，不随手指走多远而变。
-    let radius = ROLL * area.width().min(area.height()) * (t / ROLL_LIFT).min(1.0);
-    let roll = 2.0 * radius;
-
-    // ① 纸背。裁掉卷筒占的那一段：那一小截归卷筒自己画，两边都画会叠出一道深边。
-    //
-    // 下界用一个**有限的**很大的数而不是 `NEG_INFINITY`：`Poly::clip` 在跨边界那一支要算
-    // `sa / (sa - sb)`，喂进无穷大就是 `inf / inf = NaN`，顶点一旦被 NaN 毒到，那一块
-    // 画出来是一大片斜着的淡色楔子（真机第一版就是这个读数）。
-    let far = -(area.width() + area.height()) * 4.0;
-    let flap = page
-        .past(crease)
-        .reflected(crease)
-        .inside(area)
-        .slab(crease, far, -roll);
-    push(&mut out, flap, Tint::Paper, None, 1.0);
-    if BACK_INK > 0.0 {
-        push(
-            &mut out,
-            flap,
-            Tint::Dark,
-            Some(crease.angle_back()),
-            BACK_INK,
-        );
-    }
-
-    // ①′ 折痕**内侧**的影：贴卷筒外缘压在纸背上，随行程收窄、变淡。
-    //
-    // 画在纸背之上、卷筒之下 —— 它是「纸背靠近折痕那一侧被压暗」，不该盖住卷筒。
-    let inner = INNER_WIDE * area.width() * (1.0 - t) + 8.0;
-    if t > 0.02 {
-        push(
-            &mut out,
-            page.slab(crease, -roll - inner, -roll),
-            Tint::Dark,
-            Some(crease.angle_back()),
-            INNER_INK * (1.0 - 0.4 * t),
-        );
-    }
-
-    // ② 卷筒：一整块纸面 + 几条**平**的暗带。
-    //
-    // 受光按圆柱取：`u` 从折线（0）走到外缘（1），明暗 ∝ 1 − sin(πu) —— 两个切线处最暗、
-    // 正对读者那一侧最亮。带中点采样，前六条带子就是「暗—渐亮—最亮—渐暗—暗」。
-    let body = page.slab(crease, -roll, 0.0);
-    push(&mut out, body, Tint::Paper, None, 1.0);
-    for band in 0..ROLL_BANDS {
-        let u0 = band as f32 / ROLL_BANDS as f32;
-        let u1 = (band + 1) as f32 / ROLL_BANDS as f32;
-        let mid = (u0 + u1) * 0.5;
-        let shadow = 1.0 - (std::f32::consts::PI * mid).sin();
-        let ink = ROLL_INK * shadow;
-        // 卷顶那几条几乎没有墨，推上去只是占配额。
-        if ink < 0.012 {
-            continue;
-        }
-        push(
-            &mut out,
-            page.slab(crease, -roll * u1, -roll * u0),
-            Tint::Dark,
-            None,
-            ink,
-        );
-    }
-    // 卷顶那道高光：正对读者的那一窄条，窄且淡。
-    push(
-        &mut out,
-        page.slab(crease, -radius * 0.6, -radius * 0.4),
-        Tint::Light,
-        None,
-        ROLL_LIGHT,
-    );
-
-    // ③ 投影：卷筒悬在纸面上方，下面那张纸被压出一道宽而软的影。
-    // 宽度随行程长、墨色随行程淡：走到最后纸已经离场，不该还留一条带子。
-    let wide = SHADOW_WIDE * area.width() * t;
-    if wide > 0.5 {
-        push(
-            &mut out,
-            page.slab(crease, -roll - wide, -roll),
-            Tint::Dark,
-            Some(crease.angle_back()),
-            SHADOW_INK * (1.0 - t),
-        );
-    }
-    out
+    // 走完这一页要划过多远：那条律的推进量在 `dist` 超过 `2·页宽 − πR` 之后饱和在正好一个页宽
+    // （轴落到书脊、卷径收到 0），所以落点得按**当前卷径**算，不能写死一个页宽 —— 那只在
+    // R = 页宽/3 时刚好够。多让 8 像素，落位那一刻轴真的出画。
+    let end = (2.0 * width - std::f32::consts::PI * ROLL * width).max(width) + 8.0;
+    let travelled = long + (end - long) * u.clamp(0.0, 1.0);
+    // 起点必须是**按下点**而不是页边锚点，否则 u = 0 那一格手指会先跳一下。
+    let landed = (start.0 + ux * travelled * sign, start.1 + uy * travelled);
+    Grip::new(grip.from, (landed.0 / width, landed.1 / height))
 }
 
-/// 只把**画得出来**的那一块放进去：零面积的形状（折到尽头、裁到页外、还没长出来）
-/// 在绘制层也是空转，提前丢掉能让「这一帧还剩几块」这个读数干净。
-fn push(out: &mut Shades, shape: Poly, tint: Tint, angle: Option<f32>, ink: f32) {
-    if shape.is_empty() || shape.area().abs() < 0.5 || ink <= 0.0 {
-        return;
-    }
-    out.push(Shade {
-        shape,
-        tint,
-        angle,
-        ink,
-    });
-}
-
-/// 仿真翻页：一张纸被折走的样子。
+/// 仿真翻页：一张纸被卷起来折走的样子。
 ///
-/// **纸模型是「沿一条直线折」，不是「卷成圆柱」**。前者是 StPageFlip（canvas 那一族事实
-/// 上的标准库）的做法：纸当一张不会弯的硬片，绕折线做刚体翻转，全部仿真感来自折线的倾角
-/// 加沿折线的两条渐变阴影。另一派是 crengine 的 `drawDistorted`：逐列横向压缩，纸真的弯
-/// 成一条弧 —— 那一派要求「压扁一张页面位图」，而 folio 的正文是逐字形自绘的，没有位图可压。
+/// 两张纸都不位移（[`Curl::sheets_at`] 给的 `offset` 恒为 0），全部几何都在「这一帧的折线在哪」
+/// 那一格上：新页本来就平躺在原位，旧页绕着折线**卷**过去。所以这一档比 `Cover` 还省一处 ——
+/// 命中换算什么都不必减。
 ///
-/// 与旧版那一档的三处区别，就是「奇怪」那三个读数各自的根：
+/// 旧页这一侧由 GPU 那张网格接管：`view::body` 按 [`cylinder_at`] 摆出网格、把这一页烘成的捕获
+/// 纹理卷上去，于是折走那一片**带着正文**。这是 CPU 那一版做不到的事（gpui 的 `paint_glyph`
+/// 把字形 sprite 的变换写死成单位阵，转了角度的字画不出来），也是这一档从前「不像翻页」的第一
+/// 个原因 —— 卷起来那一片是一片空白纸。
+///
+/// 与 `Cover` 那一档的三处区别，就是先前「奇怪」那三个读数各自的根：
 ///
 /// 1. **动的是旧页**。旧页被折走，新页平躺在它下面等着露出来；先前是 `Cover` 的几何 ——
 ///    新页盖进来、旧页停在原地被裁字，受力方向整条反了。
-/// 2. **折线有倾角**，而且随行程自己变直（见 [`CORNER_TILT`]）。先前 `Seam` 只有一个横
-///    坐标，那条边是竖直扫过屏幕的一根棍。
-/// 3. **折起来那一面画的是纸**（[`fold_shades`]：一张纸面 + 一道投影 + 折谷暗—亮—暗三段，
-///    全部随走了多少生长）。先前盖在
-///    接缝上的是不透明页色矩形，宽按 `α − sin α` 反解走，整个行程几乎不塌。
-///
-/// 折面上**没有转了角度的字**：gpui 的 `paint_glyph` 把字形 sprite 的变换写死成单位阵
-/// （gpui-pre-0.3.9 `src/window.rs:4882`），GPU 侧的顶点着色器其实认这个矩阵，缺的只是
-/// 参数没透出来。所以这一档画的是纸的背面。
+/// 2. **折线有倾角**，跟着手指转（见 [`crease_at`]）。先前 `Seam` 只有一个横坐标，那条边是
+///    竖直扫过屏幕的一根棍。
+/// 3. **折起来那一面是纸**，有自己的圆柱受光。投影是卷筒几何自己的事，不乘到平摊页面上：
+///    后者会在右侧纸边罩出一条浅灰带。先前盖在接缝上的是不透明页色矩形，宽按 `α − sin α`
+///    反解走，整个行程几乎不塌。
 pub(in crate::ui::features::reader) struct Curl;
 
 impl PageTurnStyle for Curl {
@@ -312,7 +311,8 @@ impl PageTurnStyle for Curl {
         Axis::Horizontal
     }
 
-    /// 折页**两轴都认**：折线跟着手指走，从右下角往左上划是最自然的一笔。
+    /// 折页**两轴都认**：折线的朝向由这一笔的划动向量给，斜着划本来就对，而手机上没人会把
+    /// 手指拖成一条严格的水平线。
     fn claims(&self, _axis: Axis) -> bool {
         true
     }
@@ -321,12 +321,27 @@ impl PageTurnStyle for Curl {
         true
     }
 
+    /// 不带手的那一条只按「从左往右读」算（`rtl = false`）：这一格没有地方可以问那本书，
+    /// 所以生产那一路走的是 [`PageTurnStyle::sheets_at`]，这条留给门与兜底。
     fn sheets(&self, t: f32, forward: bool, area: Area) -> [Sheet; 2] {
-        self.sheets_at(t, forward, area, None)
+        self.sheets_at(
+            t,
+            area,
+            Pose {
+                forward,
+                rtl: false,
+                grip: None,
+            },
+        )
     }
 
-    fn sheets_at(&self, t: f32, forward: bool, area: Area, grip: Option<Grip>) -> [Sheet; 2] {
-        let cut = match crease_at(t, forward, area, grip) {
+    fn sheets_at(&self, t: f32, area: Area, pose: Pose) -> [Sheet; 2] {
+        let cut = match crease_at(
+            t,
+            Pose::free_edge_right(pose.forward, pose.rtl),
+            area,
+            pose.grip,
+        ) {
             Some(crease) => crease,
             // 版心还没量出来：两张纸都停在原位整张画，等下一帧。
             None => {
@@ -361,14 +376,6 @@ impl PageTurnStyle for Curl {
             },
         ]
     }
-
-    fn shades(&self, t: f32, forward: bool, area: Area) -> Shades {
-        fold_shades(t, forward, area)
-    }
-
-    fn shades_at(&self, t: f32, forward: bool, area: Area, grip: Option<Grip>) -> Shades {
-        fold_shades_at(t, forward, area, grip)
-    }
 }
 
 #[cfg(test)]
@@ -376,139 +383,261 @@ mod tests {
     //! 搬自摆位层那一份：一挡的门跟着那一档走，共用的尺在 `testing.rs`。
 
     use crate::ui::features::reader::motion::turn_animation::PageTurnStyle as _;
-    use crate::ui::features::reader::motion::turn_animation::curl::CORNER_TILT;
     use crate::ui::features::reader::motion::turn_animation::curl::Curl;
+    use crate::ui::features::reader::motion::turn_animation::curl::MAX_TILT;
     use crate::ui::features::reader::motion::turn_animation::curl::ROLL;
-    use crate::ui::features::reader::motion::turn_animation::curl::ROLL_INK;
-    use crate::ui::features::reader::motion::turn_animation::curl::SHADOW_INK;
-    use crate::ui::features::reader::motion::turn_animation::curl::SHADOW_WIDE;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_at;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_of;
-    use crate::ui::features::reader::motion::turn_animation::geometry::{Crease, Grip};
-    use crate::ui::features::reader::motion::turn_animation::geometry::{
-        POLY_MAX, Poly, SHADES_MAX, Tint,
-    };
-    use crate::ui::features::reader::motion::turn_animation::testing::{
-        H, W, complementary, count, page, paper_of, past_span,
-    };
+    use crate::ui::features::reader::motion::turn_animation::curl::cylinder_at;
+    use crate::ui::features::reader::motion::turn_animation::curl::release_grip;
+    use crate::ui::features::reader::motion::turn_animation::geometry::Grip;
+    use crate::ui::features::reader::motion::turn_animation::geometry::Poly;
+    use crate::ui::features::reader::motion::turn_animation::geometry::Pose;
+    use crate::ui::features::reader::motion::turn_animation::testing::{H, W, complementary, page};
 
-    /// 卷筒**从折痕里长出来**，走完那一刻整条跟着纸一起离场。
+    /// 圆柱的轴**就是**那条折线（逐字相等），而且卷径按那条律走：起手 [`ROLL`] 页宽、逼近书脊
+    /// 收 0。
     ///
-    /// 两端都是硬读数：t = 0 时纸还没被拎起来（一块都不该有）；卷径在 [`ROLL_LIFT`]
-    /// 之后定住（纸的弯曲半径由纸的挺度决定，不随手指走多远变）；t = 1 时纸已经整张
-    /// 折走，折线扫到页外，一条带子都不该剩下 —— 从前那一版在落位还挂着满宽的带子，
-    /// 画面上就是一道白条横在屏上。
+    /// 轴同源这一条钉的是「GPU 与 CPU 两套几何还是一家」：网格那头按 `n·p − d` 判哪一段该卷
+    /// 起来，这一头按同一个式子裁字。两边差一点，读出来的就是「影子和纸不是同一张」。
     #[test]
-    fn a_roll_grows_out_of_the_crease_and_rides_off() {
-        // t = 0：角刚被抠起一个小三角 —— 只有纸背那两块，卷筒还没长出来、影也没有。
-        let start = Curl.shades(0.0, true, page());
-        assert_eq!(
-            start.items().len(),
-            1,
-            "起步只该有纸背那一片，不该有卷筒或投影"
-        );
+    fn the_cylinder_axis_is_the_crease() {
+        let area = page();
+        for (forward, grip) in [
+            (true, Grip::new((0.5, 0.15), (0.1, 0.2))),
+            (true, Grip::new((0.5, 0.85), (0.2, 0.8))),
+            (false, Grip::new((0.5, 0.4), (0.7, 0.3))),
+        ] {
+            for step in [0.0f32, 0.2, 0.6, 1.0] {
+                let crease = crease_at(step, forward, area, Some(grip)).expect("量得出折线");
+                let cylinder = cylinder_at(step, forward, area, Some(grip)).expect("量得出圆柱");
+                assert_eq!(
+                    (cylinder.nx, cylinder.ny, cylinder.d),
+                    (crease.nx, crease.ny, crease.d),
+                    "t = {step} 时圆柱的轴和折线不是同一条线"
+                );
+                // 法向是单位长：`n·p − d` 才是一个**距离**，网格那头的三段分界才量得对。
+                assert!(
+                    (crease.nx.hypot(crease.ny) - 1.0).abs() < 1e-5,
+                    "t = {step} 时法向不是单位长：({}, {})",
+                    crease.nx,
+                    crease.ny
+                );
+            }
+        }
+
+        // 卷径只由「轴走到哪儿」给，不由别的东西给：**起手**是页宽的 [`ROLL`]（参照里那句是
+        // `radius = pageRect.width()/3`，手机上量下来太粗，见常数自己的注释），随轴逼近书脊一路
+        // 收到 0。先前这里取常数 5.5% 短边（手机上约 21px），卷曲带窄到没人看得出纸卷起来了 ——
+        // 「不像翻页」的头一号原因就是这一格。
+        let radii = [0.49f32, 0.0, -0.5, -1.0, -1.5]
+            .into_iter()
+            .map(|at_x| {
+                cylinder_at(0.0, true, area, Some(Grip::new((0.5, 0.5), (at_x, 0.5))))
+                    .expect("量得出圆柱")
+                    .radius
+            })
+            .collect::<Vec<_>>();
         assert!(
-            start
-                .items()
-                .iter()
-                .all(|shade| shade.shape.area().abs() > 0.0),
-            "起步那两块不该是空壳"
+            (radii[0] - ROLL * area.width()).abs() < 1.0,
+            "起手卷径该是页宽的 {ROLL}，实得 {}",
+            radii[0]
         );
-        assert_eq!(
-            Curl.shades(1.0, true, page()).items().len(),
-            0,
-            "纸已经整张离场，不该还挂着卷筒或投影"
-        );
-        // 卷筒那一块（纸面）在折线法向上的宽度：前 12% 长、之后定住。
-        let width_at = |t: f32| {
-            let shades = Curl.shades(t, true, page());
-            let crease = crease_of(t, true, page()).expect("量得出折线");
-            // 卷筒本体 = 贴着折线那一块纸色（纸背在它更外侧，跨度随行程缩）。
-            shades
-                .items()
-                .iter()
-                .filter(|shade| shade.tint == Tint::Paper)
-                .find(|shade| past_span(crease, &shade.shape).1 > -1.0)
-                .map(|shade| {
-                    let (low, high) = past_span(crease, &shade.shape);
-                    high - low
-                })
-                .unwrap_or(0.0)
-        };
-        let mut previous = 0.0;
-        // 卷筒贴到页左缘之后会被裁掉一截，所以「只长不缩」钉到 85% 为止。
-        for step in 1..=17 {
-            let t = step as f32 / 20.0;
-            let now = width_at(t);
+        for pair in radii.windows(2) {
             assert!(
-                now >= previous - 0.01,
-                "t = {t} 时卷筒反而变窄了：{previous} → {now}"
+                pair[0] >= pair[1],
+                "轴往书脊走的时候卷径只能一路收：{} → {}",
+                pair[0],
+                pair[1]
             );
-            previous = now;
         }
         assert!(
-            width_at(0.6) > 20.0,
-            "卷起来之后该有一条真的卷筒，实得 {}",
-            width_at(0.6)
+            radii[0] > radii[3] && radii[3] > 0.0,
+            "中段该看得见一根真的筒，实得 {:?}",
+            radii
         );
+        assert_eq!(
+            *radii.last().unwrap(),
+            0.0,
+            "走完那一刻卷径该收到 0：纸抬平了"
+        );
+
+        // 按下没动的那一格：纸还没离页，卷筒也还没长出来。
+        let rest = cylinder_at(0.0, true, area, Some(Grip::new((0.5, 0.5), (0.5, 0.5))))
+            .expect("量得出圆柱");
+        assert_eq!(rest.radius, 0.0);
     }
-    /// 折面永远落在**还平摊那一侧**、而且裁在页内。这一条是「折过去的纸盖在旧页上，
-    /// 不伸到屏幕外面去」的全部内容 —— 折面要是跑到折线的空侧，就是字面意义上的
-    /// 「纸穿过了它自己」。
+
+    /// 往回翻那一笔是**往右**拖的，律照样得走，而且拖到哪儿折到哪儿。
+    ///
+    /// 手势读数是真实坐标，`curl_of` 只认「往左划」那一套，所以进出口各要映一次横向。只映
+    /// 出口不映进口时症状很具体：往回拖的整趟都停在「还没起步」那一帧，松手才突然卷起来 —— 读者
+    /// 读成「只能往左滑不能往右滑」。
     #[test]
-    fn the_flap_always_lies_on_the_flat_side_and_inside_the_page() {
-        for forward in [true, false] {
-            for step in 1..=20 {
-                let t = step as f32 / 20.0;
-                let Some(paper) = paper_of(&Curl.shades(t, forward, page())) else {
-                    continue;
-                };
-                if paper.is_empty() {
-                    continue;
-                }
-                let crease = crease_of(t, forward, page()).expect("量得出折线");
-                let area = page();
-                paper.each(|x, y| {
-                    assert!(
-                        crease.past(x, y) <= 1e-3,
-                        "t = {t} forward = {forward} 时折面有点跑到折线的空侧：({x}, {y})"
-                    );
-                    assert!(
-                        x >= area.left - 1e-3
-                            && x <= area.right + 1e-3
-                            && y >= area.top - 1e-3
-                            && y <= area.bottom + 1e-3,
-                        "t = {t} 时折面有点伸到页外：({x}, {y})"
-                    );
-                });
+    fn a_backward_drag_folds_the_same_way_as_its_mirror() {
+        let area = page();
+        // 横向镜像的两个版本：归一化那一套（手就是这一套）与版心坐标那一套（折线是这一套）。
+        let flip_n = |p: (f32, f32)| (1.0 - p.0, p.1);
+        let flip_p = |x: f32| area.left + area.right - x;
+        for (from, at) in [
+            ((0.5, 0.5), (0.7, 0.45)),
+            ((0.2, 0.2), (0.55, 0.3)),
+            ((0.9, 0.8), (0.95, 0.7)),
+        ] {
+            let back = crease_at(0.5, false, area, Some(Grip::new(from, at))).expect("量得出折线");
+            let fwd = crease_at(0.5, true, area, Some(Grip::new(flip_n(from), flip_n(at))))
+                .expect("同上");
+            // 这一笔真的折走了东西：一片都没有就是「停在还没起步」。
+            let rolled = Poly::rect(area).past(back).area().abs();
+            assert!(
+                rolled > 1.0,
+                "往回拖到 {at:?} 时一片都没折走，折线停在 ({}, {})",
+                back.nx,
+                back.ny
+            );
+            // 而且是正向那一张的镜像：镜像点上「谁已经卷走」必须一致，页的两缘各判一次，中间
+            // 再判一次。
+            for x in [
+                area.left + 1.0,
+                (area.left + area.right) * 0.5,
+                area.right - 1.0,
+            ] {
+                assert_eq!(
+                    back.past(x, 300.0) > 0.0,
+                    fwd.past(flip_p(x), 300.0) > 0.0,
+                    "往回翻在 x = {x} 不是正向的镜像",
+                );
             }
         }
     }
-    /// 倾角随行程**自己变直**：法向的纵向分量从 1/√2 收到 0。这一个读数就是
-    /// 「一个常数（[`CORNER_TILT`]）为什么够用」的凭据 —— 若它不收敛，落位那一刻
-    /// 那条折线还是斜的，纸就没抬平。
-    #[test]
-    fn the_crease_straightens_as_the_corner_travels() {
-        let start = crease_of(0.0, true, page()).expect("起步量得出折线");
-        let end = crease_of(1.0, true, page()).expect("落位量得出折线");
-        assert!(
-            (start.ny.abs() - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01,
-            "起步该是 45° 的一个角，实得 ny = {}",
-            start.ny
-        );
-        assert!(end.ny.abs() < 1e-6, "落位该是正竖的一条线，ny = {}", end.ny);
-        assert_eq!(end.past(200.0, 300.0), 200.0, "落位时整页都该在空侧");
 
-        let mut previous = start.ny.abs();
-        for step in 1..=20 {
-            let now = crease_of(step as f32 / 20.0, true, page())
-                .expect("中间每一步都量得出")
-                .ny
-                .abs();
+    /// 那一两帧「纸还没动」的读数（刚按下、或者往翻页反方向拖回去）：折线停在页外，但**两张纸
+    /// 各自仍然有一条裁剪**。
+    ///
+    /// 这一格从前回 `None`，于是两张纸都没有裁剪 —— 两页的字同时出现在屏上，而那是这一层最
+    /// 不该出现的读数（`turn_animation::mod` 那条「重叠的档里有一张纸没裁」的门就是这么写的）。
+    /// 现在给的是一条停在页外一格的折线：旧页整张画、新页一片不画。
+    #[test]
+    fn a_press_that_has_not_moved_yet_still_splits_the_two_sheets() {
+        let area = page();
+        // 按下点在页里，手指往页外那一侧拖回去 —— 律给的就是「一格都没动」。
+        let grip = Grip::new((0.5, 0.2), (1.0, 0.0));
+        let crease = crease_at(0.0, true, area, Some(grip)).expect("没动也要量得出折线");
+        for (x, y) in [
+            (area.left, area.top),
+            (area.right, area.bottom),
+            (area.left, area.bottom),
+        ] {
             assert!(
-                now <= previous + 1e-6,
-                "t = {} 时倾角又回来了：{previous} → {now}",
-                step as f32 / 20.0
+                crease.past(x, y) < 0.0,
+                "一格没动的时候 ({x}, {y}) 该还整片平摊着，实得 past = {}",
+                crease.past(x, y)
+            );
+        }
+        let [incoming, outgoing] = Curl.sheets_at(
+            0.0,
+            area,
+            Pose {
+                forward: true,
+                rtl: false,
+                grip: Some(grip),
+            },
+        );
+        let incoming_cut = incoming
+            .cut
+            .expect("退化成「还没动」也要有裁剪，否则两页字叠字");
+        let outgoing_cut = outgoing.cut.expect("同上");
+        complementary(incoming_cut, outgoing_cut, area);
+        assert!(
+            outgoing_cut.keeps(area.right - 1.0, area.top + 1.0),
+            "整页都该还归那张停着的旧页"
+        );
+        // 圆柱同样量得出来，而这一刻卷筒还没长出来：网格整页画平的旧页。
+        let cylinder = cylinder_at(0.0, true, area, Some(grip)).expect("同上");
+        assert_eq!(cylinder.radius, 0.0, "纸还没离页那一格不该长出卷筒");
+    }
+
+    /// 从右往左读的那一本里，**往后翻**揭的是**左**边那一窄条：折页读的是「自由边在哪一侧」，
+    /// 不是「往哪边翻」。
+    ///
+    /// 那一套律只有一套坐标（自由边在右、手指往左划），换手是在进出口各映一次横向，而映不映
+    /// 由 [`Pose::free_edge_right`] 给 —— 往回翻与 RTL 各反一次，所以 `(往后翻, RTL)` 与
+    /// `(往回翻, LTR)` 必须折出**同一条线**。从前这一格直接把 `forward` 当判据：RTL 那一本里
+    /// 往后翻是一笔往右拖的，`dir_x` 为正被夹成 0，症状与「只能往左滑不能往右滑」一模一样。
+    #[test]
+    fn an_rtl_book_folds_from_the_other_edge() {
+        let area = page();
+        // RTL 那一本里「往后翻」那一笔是往右拖的。
+        let grip = Grip::new((0.5, 0.5), (0.7, 0.5));
+        for (a, b) in [
+            ((true, true), (false, false)),
+            ((true, false), (false, true)),
+        ] {
+            let x = crease_at(0.5, Pose::free_edge_right(a.0, a.1), area, Some(grip))
+                .expect("量得出折线");
+            let y =
+                crease_at(0.5, Pose::free_edge_right(b.0, b.1), area, Some(grip)).expect("同上");
+            assert_eq!(
+                (x.nx, x.ny, x.d),
+                (y.nx, y.ny, y.d),
+                "({:?}) 与 ({:?}) 该折出同一条线",
+                a,
+                b
+            );
+        }
+        // 判据反过来接不住的那一半：RTL 往后翻这一笔得真的折走了东西，而且起的是左边。
+        let back =
+            crease_at(0.5, Pose::free_edge_right(true, true), area, Some(grip)).expect("同上");
+        let rolled = Poly::rect(area).past(back).area().abs();
+        assert!(rolled > 1.0, "RTL 往右拖这一笔一片都没折走，实得整页平摊");
+        assert!(
+            back.past(area.left + 1.0, 300.0) > 0.0,
+            "自由边在左，左缘那一窄条该已经离场"
+        );
+        assert!(
+            back.past(area.right - 1.0, 300.0) < 0.0,
+            "右缘那一条还该平摊着"
+        );
+        // 不带手的点屏那一路同理：RTL 里它也得从左边起。
+        let tapped = crease_at(0.5, Pose::free_edge_right(true, true), area, None).expect("同上");
+        assert!(
+            tapped.past(area.left + 1.0, 300.0) > 0.0,
+            "点屏那一趟在 RTL 里也得从左边卷起来"
+        );
+    }
+
+    /// 点屏 / 按键那一趟从「一格没动」扫到「整页折走」，而且**单调**往里走。
+    ///
+    /// 两端都是硬读数：t = 0 时纸还没被拎起来（折线停在页外，一个角都没折走）；t = 1 时整页
+    /// 都已经在空侧。中间每一步「已经卷走的面积」只能变大 —— 变小就是纸在往回长。
+    #[test]
+    fn a_tapped_turn_sweeps_the_whole_page_once() {
+        let area = page();
+        let rolled = |t: f32| {
+            let crease = crease_of(t, true, area).expect("每一步都量得出折线");
+            Poly::rect(area).past(crease).area().abs()
+        };
+        assert!(
+            rolled(0.0) < 1.0,
+            "起步一个角都不该折走，实得 {}",
+            rolled(0.0)
+        );
+        let whole = area.width() * area.height();
+        // 点屏那一趟是**中立的那一笔**：没有手指就没有方向可读，所以从自由边正中笔直往里走两页
+        // 宽。那条律正好在 `dist = 2·页宽` 把轴送到书脊、卷径收到 0 —— 落位那一刻整页折干净，
+        // 不留余量。留余数就是轴没走到底。
+        assert!(
+            rolled(1.0) > whole * 0.999,
+            "走完该把整页折干净，实得 {} / {whole}",
+            rolled(1.0)
+        );
+        let mut previous = 0.0f32;
+        for step in 1..=20 {
+            let t = step as f32 / 20.0;
+            let now = rolled(t);
+            assert!(
+                now >= previous - 1.0,
+                "t = {t} 时已经卷走的面积反而变小了：{previous} → {now}"
             );
             previous = now;
         }
@@ -527,11 +656,12 @@ mod tests {
             end.past(W * 0.5, 0.0) > 0.0 && end.past(W * 0.5, H) > 0.0,
             "落位时整页都该已经折走了"
         );
-        // 走满一整程时，页中心正好在折线上（角走到 −页宽 ⇒ 折线过页的左缘）。
+        // 走一半时页的四分之一处还在平摊侧，而且离折线有一截（轴那时才走到两成半的位置）。
         let middle = crease_of(0.5, true, page()).expect("同上");
         assert!(
-            (middle.past(W * 0.25, H * 0.5)).abs() > 1.0,
-            "走一半时页的四分之一处该明显还在平摊侧"
+            middle.past(W * 0.25, H * 0.5) < -1.0,
+            "走一半时页的四分之一处该明显还在平摊侧，实得 {}",
+            middle.past(W * 0.25, H * 0.5)
         );
     }
     /// 折页两张纸的裁剪互补，而且各归对的那一侧。
@@ -577,206 +707,157 @@ mod tests {
             assert_eq!(forward.ny, back.ny, "纵向分量不该跟着反号");
         }
     }
-    /// 投影**在卷筒外面**（不压在卷筒上），宽度随行程长、墨色随行程淡。
+    /// 折线的**朝向**由这一笔的划动方向给：往哪划就往哪折。
     ///
-    /// 这三条合起来是「卷筒悬在纸面上方」的全部观感：卷筒自己那一条已经画满了，
-    /// 再往里压一道影就会读成「卷筒是黑的」。
+    /// 参照是 `harism/android-pagecurl` 的 `CurlView`：锚点是按下点投影到页的自由边那一点
+    /// （既不是页角、也不是按下点本身），折线垂直于划动向量。于是按在页面中间往左划，是从**手指
+    /// 那一格的高度**起卷 —— 固定角那一版一上来先揭的是某个角。划动向量这里取
+    /// `手指此刻 − 按下点`，参照那一格是从锚点量的，差别见 `curl_of` 的第 1 条。
     #[test]
-    fn the_cast_shadow_sits_outside_the_roll_and_fades_away() {
-        let mut previous_wide = -1.0;
-        let mut previous_ink = SHADOW_INK + 1.0;
-        // 只走到九分：落位那一刻整条都裁没了，那一端由 `a_roll_grows...` 单独钉。
-        for step in 4..10 {
-            let t = step as f32 / 10.0;
-            let shades = Curl.shades(t, true, page());
-            let crease = crease_of(t, true, page()).expect("量得出折线");
-            let radius = ROLL * W.min(H);
-            // 投影永远是**最后一块**（它压在卷筒外面）；没有它说明这一刻影子已经出画了。
-            let Some(cast) = shades.items().last().filter(|shade| {
-                shade.tint == Tint::Dark
-                    && (past_span(crease, &shade.shape).1 + 2.0 * radius).abs() < 2.0
-            }) else {
-                continue;
-            };
-            let (low, high) = past_span(crease, &cast.shape);
-            assert!(
-                high <= -1.0,
-                "t = {t} 时投影压到卷筒上去了：外缘 past = {high}"
-            );
-            assert!(low < high, "t = {t} 时投影是倒着裁的：{low}..{high}");
-            assert!(
-                (cast.ink - SHADOW_INK * (1.0 - t)).abs() < 1e-6,
-                "t = {t} 时墨色不线性：{}",
-                cast.ink
-            );
-            let wide = high - low;
-            // 页的左缘会把影子裁掉一截，所以「越翻越宽」只在不贴边的这几步里钉。
-            // 页的左缘会把影子裁掉一截，所以「越翻越宽」只钉到影还完整的那几步。
-            if t <= 0.4 {
-                assert!(wide > previous_wide, "t = {t} 时投影只能越翻越宽");
-                previous_wide = wide;
-            }
-            assert!(cast.ink <= previous_ink, "t = {t} 时墨色只能越翻越淡");
-            previous_ink = cast.ink;
-        }
-    }
-    /// 卷筒的受光：**贴折线最暗 → 卷顶最亮 → 贴外缘又暗**。
-    ///
-    /// 一组平带子按 `1 − sin(πu)` 取浓淡，所以读数只有一条：**从折线往外走，墨色先降后升**。
-    /// 上一版是两段互相对着的渐变，接在卷顶上就是两道硬边灰条 —— 真机上读到的
-    /// 「后面有两条灰色的条」就是它。这条把「先降后升」钉死，接缝一硬就红。
-    #[test]
-    fn the_roll_reads_dark_then_light_then_dark() {
-        let t = 0.6;
-        let shades = Curl.shades(t, true, page());
-        let crease = crease_of(t, true, page()).expect("量得出折线");
-        let radius = ROLL * W.min(H);
-        // 卷筒里的暗带：整块落在 [−2R, 0] 之内（投影在它外面，被这条筛掉）。
-        let mut bands: Vec<(f32, f32)> = shades
-            .items()
-            .iter()
-            .filter(|shade| shade.tint == Tint::Dark && shade.angle.is_none())
-            .map(|shade| (past_span(crease, &shade.shape), shade.ink))
-            .map(|((low, high), ink)| (low, ink.max(high * 0.0 + ink)))
-            .collect();
-        assert!(!bands.is_empty(), "卷筒里该有暗带");
-        bands.sort_by(|a, b| b.0.total_cmp(&a.0)); // 从折线往外
-        let inks: Vec<f32> = bands.iter().map(|(_, ink)| *ink).collect();
-        assert!(
-            inks[0] >= ROLL_INK * 0.6,
-            "贴折线那条该是最暗的一档：{inks:?}"
-        );
-        let mid = inks.len() / 2;
-        assert!(inks[mid] < inks[0] * 0.35, "卷顶附近该几乎不压暗：{inks:?}");
-        assert!(
-            (*inks.last().unwrap() - inks[0]).abs() < 0.06,
-            "贴外缘那条该和最暗处一样暗：{inks:?}"
-        );
-        // 高光只有一窄条，而且落在卷筒里。
-        let highlight = shades
-            .items()
-            .iter()
-            .find(|shade| shade.tint == Tint::Light)
-            .expect("卷顶该有一道高光");
-        let (light_low, light_high) = past_span(crease, &highlight.shape);
-        assert!(light_low > -2.0 * radius && light_high < 1.0);
-        assert!((light_high - light_low) < radius, "高光只是一窄条");
-        assert!(highlight.ink <= 0.12, "高光太亮了：{}", highlight.ink);
-    }
-    /// **起折的角跟着手指走**：手指落在下半屏就从右下角卷起，落在上半屏从右上角卷起。
-    ///
-    /// 这一条是「只能上面能翻」那个读数的反面。判据取折线在中线处的纵向位置：从下面起折
-    /// 时它偏下（`past` 在页下半的符号相反），从上面起折时偏上。
-    #[test]
-    fn the_corner_follows_the_finger() {
+    fn the_fold_follows_the_drag_direction() {
         let area = page();
-        // 起点附近：折的还只是那个角，所以「哪个角折了」这件事判得干净。
-        let t = 0.06;
-        let upper =
-            crease_at(t, true, area, Some(Grip::new((0.5, 0.15), (0.9, 0.2)))).expect("量得出折线");
-        let lower =
-            crease_at(t, true, area, Some(Grip::new((0.5, 0.85), (0.9, 0.8)))).expect("量得出折线");
-        // 判据看**哪个角已经被折走**：这一条与「从哪个角卷起来」是同义的。
-        // （折线在横向中线处上下两条正好左右镜像，所以不能拿中线取点比较。）
-        assert!(
-            upper.past(area.right, area.top) > 0.0,
-            "从上往下卷：右上角该已经折走"
-        );
-        assert!(
-            upper.past(area.right, area.bottom) < 0.0,
-            "从上往下卷：右下角该还平摊着"
-        );
-        assert!(
-            lower.past(area.right, area.bottom) > 0.0,
-            "从下往上卷：右下角该已经折走"
-        );
-        assert!(
-            lower.past(area.right, area.top) < 0.0,
-            "从下往上卷：右上角该还平摊着"
-        );
-        // 没有手指（点屏 / 按键 / 滚轮）时沿用**写死的对角线**，但那一条也是从上缘起折的。
-        let tapped = crease_of(t, true, area).expect("同上");
-        assert!(
-            tapped.past(area.right, area.top) > 0.0,
-            "没有起手点时也该从上缘起折"
-        );
-        // 而且「手指握着」与「写死路径」不是同一条：握着时折线由手指给。
-        assert_ne!(
-            tapped, upper,
-            "握着手指时折线该由手指算，不是那条写死的路径"
-        );
-    }
-
-    /// 裁剪与镜像这两步是折面几何的全部家当，直接钉住定义：**被折走的那个角落在它被拖
-    /// 到的那一点上**。这一条不是近似 —— 折线既然是对称轴，镜像就必须把角送到那儿；
-    /// 送错了就是整块折面与手指脱开，而那是这一档唯一一处「看着不对但没人报错」的错。
-    #[test]
-    fn the_folded_corner_lands_where_it_was_dragged() {
-        let area = page();
-        let crease = crease_of(0.0, true, area).expect("起步量得出折线");
-        // 起步时被折走的那一片就是右上角那个角，镜像它就是折面。
-        let folded = Poly::rect(area).past(crease).reflected(crease);
-        assert!(!folded.is_empty(), "起步该折出一个角");
-        let tilt = CORNER_TILT * H;
-        let mut points = Vec::new();
-        let mut landed = false;
-        folded.each(|x, y| {
-            points.push((x, y));
-            if (x - (W - tilt)).abs() < 1e-2 && (y - tilt).abs() < 1e-2 {
-                landed = true;
-            }
-        });
-        assert!(
-            landed,
-            "页的右上角 ({W}, 0) 折过去必须正好落在被拖到的 ({}, {tilt})，实得 {points:?}",
-            W - tilt
-        );
-    }
-    /// `Poly` 与 `Shades` 的容量兜底：顶点上界是「每次裁一个多一个」，从矩形出发最多
-    /// 折线两次 + 页四条；一块一帧的配额是五块。溢出只在 debug 里断言，所以这两条要在
-    /// **正常构建里跑得到** —— 静默丢点的话画面只会少一块影子，谁都看不见。
-    #[test]
-    fn a_fold_stays_within_its_budget() {
-        let area = page();
-        let mut worst = 0usize;
-        let mut most = 0usize;
-        for step in 0..=40 {
-            let t = step as f32 / 40.0;
-            for forward in [true, false] {
-                let shades = Curl.shades(t, forward, area);
-                most = most.max(shades.items().len());
-                for shade in shades.items() {
-                    worst = worst.max(count(&shade.shape));
+        for from in [(0.5, 0.5), (0.5, 0.15), (0.5, 0.85)] {
+            for at in [(0.1, 0.5), (0.1, 0.35), (0.1, 0.65), (0.3, 0.45)] {
+                let crease =
+                    crease_at(0.5, true, area, Some(Grip::new(from, at))).expect("量得出折线");
+                let (vx, vy) = (
+                    (at.0 - from.0) * area.width(),
+                    (at.1 - from.1) * area.height(),
+                );
+                let long = (vx * vx + vy * vy).sqrt();
+                let dot = (crease.nx * vx + crease.ny * vy).abs() / long;
+                if (vy / vx).abs() <= MAX_TILT.tan() + 1e-3 {
+                    // 倾角上限之内：法向必须与划动向量平行。
+                    assert!(
+                        (dot - 1.0).abs() < 1e-3,
+                        "手指划向 ({vx:.0}, {vy:.0})，折线法向却给到 ({}, {})：|n·v̂| = {dot}",
+                        crease.nx,
+                        crease.ny,
+                    );
+                } else {
+                    // 超出上限的那几笔：法向只能被夹到上限那一格，仍然不许反向。
+                    assert!(
+                        crease.nx > 0.0,
+                        "斜到超出倾角上限时折线该被夹住而不是翻面，实得 ({}, {})",
+                        crease.nx,
+                        crease.ny
+                    );
+                    assert!(
+                        (crease.ny / crease.nx).abs() <= MAX_TILT.tan() + 1e-3,
+                        "倾角夹住了没有：实得斜率 {}",
+                        (crease.ny / crease.nx).abs()
+                    );
                 }
             }
         }
+        // 同一个锚点，往上划与往下划转出**相反**的倾角。
+        let up =
+            crease_at(0.5, true, area, Some(Grip::new((0.5, 0.5), (0.1, 0.35)))).expect("同上");
+        let down =
+            crease_at(0.5, true, area, Some(Grip::new((0.5, 0.5), (0.1, 0.65)))).expect("同上");
         assert!(
-            worst < POLY_MAX,
-            "最坏情况 {worst} 个点，离容量 {} 还有余量才算没偷偷丢点",
-            POLY_MAX
+            up.ny > 0.0 && down.ny < 0.0,
+            "折线倾角没跟着划动方向转：往上划 ny = {}，往下划 ny = {}",
+            up.ny,
+            down.ny
         );
-        assert!(worst >= 3, "一趟都没裁出多边形说明折面根本没生成");
+        // 竖着划那一笔被倾角上限夹住：不夹的话折线转成近水平，纸从页顶/页底卷走 —— 书没有
+        // 那两条自由边。（这一格是故意偏离参照的：它卷的是一张自由的纸。）
+        let steep =
+            crease_at(0.5, true, area, Some(Grip::new((0.5, 0.5), (0.48, 0.9)))).expect("同上");
         assert!(
-            (5..=SHADES_MAX).contains(&most),
-            "折页那一档最满该在 5..={SHADES_MAX} 之间，实得 {most}"
+            (steep.ny / steep.nx).abs() <= MAX_TILT.tan() + 1e-3,
+            "倾角夹住了没有：实得斜率 {}",
+            (steep.ny / steep.nx).abs()
         );
+        // 起步那一格纸还没动：整页都在平摊侧。
+        let rest =
+            crease_at(0.0, true, area, Some(Grip::new((0.5, 0.5), (0.5, 0.5)))).expect("同上");
+        for (x, y) in [(area.left, area.top), (area.right, area.bottom)] {
+            assert!(
+                rest.past(x, y) < 0.0,
+                "按下没动的时候 ({x}, {y}) 该还平摊着，实得 past = {}",
+                rest.past(x, y)
+            );
+        }
     }
-    /// 卷筒、纸背、投影**全在平摊侧**（`past <= 0`），已经空出来那一侧一块都不许有。
+
+    /// 松手那一腿沿**同一方向**把这一笔推到走完，中途不改朝向。
     ///
-    /// 空出来那一侧是**进场那张纸**的地盘：那里多画一块影子，读者看到的就是
-    /// 「新页上有一道莫名其妙的脸盆大的暗斑」。
+    /// 参照里那句「animation source/target 都是手指位置，走的是同一条 `updateCurlPos`，所以
+    /// 输出与用户真的一路拖过去完全相同」就是这个意思。写死一个落点的话，松手那一帧划动方向
+    /// 被硬掰，折线倾角跟着跳一下。
     #[test]
-    fn nothing_is_painted_on_the_vacated_side() {
-        for t in [0.2, 0.4, 0.6, 0.8] {
-            let shades = Curl.shades(t, true, page());
-            let crease = crease_of(t, true, page()).expect("量得出折线");
-            for shade in shades.items() {
-                let (_, high) = past_span(crease, &shade.shape);
-                assert!(
-                    high <= 1e-3,
-                    "t = {t} 时有一块画到了已经空出来那一侧：past 上界 {high}"
-                );
-            }
+    fn the_release_stretches_the_stroke_without_turning_it() {
+        let area = page();
+        let grip = Grip::new((0.5, 0.5), (0.3, 0.4));
+        let slope = |at: (f32, f32)| {
+            (at.1 * area.height() - grip.from.1 * area.height())
+                / (at.0 * area.width() - grip.from.0 * area.width())
+        };
+        let start = slope(grip.at);
+        let mut previous_length = 0.0f32;
+        for u in [0.25, 0.5, 0.75, 1.0] {
+            let run = release_grip(grip, u, true, false, area);
+            assert!(
+                (slope(run.at) - start).abs() < 1e-3,
+                "u = {u} 时松手那一腿把这一笔转了方向：斜率 {start} → {}",
+                slope(run.at)
+            );
+            let length = ((run.at.0 - grip.from.0) * area.width()).powi(2)
+                + ((run.at.1 - grip.from.1) * area.height()).powi(2);
+            assert!(
+                length > previous_length,
+                "u = {u} 时纸该继续往外走：{previous_length} → {length}"
+            );
+            previous_length = length;
+        }
+        // 走完那一刻整页都该已经折走 —— 用**水平**那一笔。参照那条律的收尾是
+        // `curlLen = 2·页宽 − dist`，它对斜笔不额外补投影，所以斜到 44° 那一档时轴只能停在
+        // 离书脊还有两成的地方（这一格是参照本身的边界，不是这里的走样；真翻页落定靠的是页号
+        // 翻过去，不靠轴走到 0）。
+        let straight = Grip::new((0.5, 0.5), (0.3, 0.5));
+        let end = release_grip(straight, 1.0, true, false, area);
+        let crease = crease_at(1.0, true, area, Some(end)).expect("落位量得出折线");
+        // 按**面积**判，不按某个角点判：那条律的推进量在绕顶之后饱和在正好一个页宽，轴停在
+        // 书脊上，页的左上角正好落在折线那一格（`past = 0`）。按角点判会卡在边界等号上，
+        // 而读者在意的是「整页有没有走干净」。
+        let rolled = Poly::rect(area).past(crease).area().abs();
+        let whole = area.width() * area.height();
+        assert!(
+            rolled > whole * 0.999,
+            "落位那一刻整页都该已经卷走，实得 {rolled} / {whole}"
+        );
+        // 弹回那一腿退回按下那一点：一格都没动。
+        let back = release_grip(grip, 1.0, true, true, area);
+        assert_eq!(back.at, back.from, "弹回该退回起点");
+    }
+
+    /// 起步那几像素，轴**走得比手指还深** —— 那条 `sqrt` 就是「纸被滚起来」的读数。
+    ///
+    /// 轴从页边锚点沿划动方向推进，推进量在柱面那一段是 `dist + R·sin(π·sqrt(dist/curlLen))`：
+    /// 多出来的那一截让折线比「轴只跟着手指平移」那一版更早进页。把那一截去掉（纯线性 = 一根匀速
+    /// 平移的棍），这里量的正好是轴该到达的那一格，读数落在 0 上，门就红。
+    #[test]
+    fn the_axis_leads_the_finger_on_the_way_in() {
+        let area = page();
+        let from = (0.5, 0.5);
+        for fraction in [1.0 / 16.0, 1.0 / 8.0, 1.0 / 4.0] {
+            let stroke = area.width() * fraction;
+            let crease = crease_at(
+                0.5,
+                true,
+                area,
+                Some(Grip::new(from, (from.0 - fraction, 0.5))),
+            )
+            .expect("量得出折线");
+            // 纯线性那一版把轴停在「锚点 − 划动距离」：锚点在自由边上，页局部就是 `宽 − stroke`。
+            let linear = area.width() - stroke;
+            let past = crease.past(linear, area.top + 0.5 * area.height());
+            assert!(
+                past > 1.0,
+                "划 {stroke:.0} 像素那一刻折线该已经越过纯线性的那一格，实得 past = {past}"
+            );
         }
     }
 }

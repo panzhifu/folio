@@ -19,10 +19,9 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt as _, ThemeMode, ThemeStyled as _,
     h_flex, v_flex,
 };
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, AppContext as _, Context, Corners, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, div, px,
+    Anchor, AnyElement, Context, Corners, InteractiveElement, IntoElement, ParentElement,
+    SharedString, Styled, TestSupportExt as _, div, px,
 };
 
 use super::reading_page::ReadingPage;

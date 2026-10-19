@@ -3,7 +3,7 @@
 //! 这些是**纯状态迁移**：给定当前模式与视口，动 `scroll_y` / `page` 并顺手落库。
 //! 位置本身存在 [`crate::ui::features::reader::model::session::ReaderSession`] 上，方法的可见性靠 `pub(in crate::ui::features::reader)`。
 
-use folio_core::Locator;
+use folio_core::{Locator, PageTurn};
 use gpui_kit::{App, Context, ScrollDelta, ScrollWheelEvent};
 
 use crate::ui::features::reader::model::book::Book;
@@ -97,7 +97,17 @@ impl ReaderSession {
             return;
         }
         let facts = self.paging_facts();
-        match self.laid_out.mode.paging().plan(&facts, intent) {
+        let plan = self.laid_out.mode.paging().plan(&facts, intent);
+        // 旧页纹理没烘好（进书横移还没停、尺寸/偏好刚变）就等一下：折页那张网格按整页采
+        // 纹理，拿半张纹理去卷，右侧会直接露出捕获矩形外的黑边。下一帧烘完自然会重试。
+        // 只挡真正要上纸的 Page/Chapter；连续滚动不读这张纹理，不能一起挡住。
+        let needs_curl_capture = !self.is_fixed()
+            && ConfigHolder::appearance(cx).page_turn == PageTurn::Curl
+            && matches!(plan, TurnPlan::Page { .. } | TurnPlan::Chapter { .. });
+        if needs_curl_capture && !self.curl_capture_ready() {
+            return;
+        }
+        match plan {
             TurnPlan::None => {}
             TurnPlan::Scroll { to } => {
                 // 起点是**画出来的**那一个数而不是 `scroll_y`：读者连点两下时，第二趟
@@ -383,18 +393,22 @@ impl ReaderSession {
         // 滚轮不是手势：增量按「行」给。它一到就把上一笔的惯性闸门放下 —— 触屏设备上
         // 拖完一次之后，第一格滚轮不该被当成惯性吃掉。
         let wheel = matches!(event.delta, ScrollDelta::Lines(_));
-        // 手指按在版心的哪个位置（归一化 0..1）。折页那一档按它挑**从哪个角起折**：
-        // 落在下半屏就从下面卷起来。版心还没量出来时给 `None`，那一档退回上缘。
+        // 手指按在版心的哪个位置（按 `page_area` 归一化，与折线、捕获矩形同一把尺）。
+        // 折页那一档按它挑**从哪个角起折**：落在下半屏就从下面卷起来。
+        // 版心还没量出来时给 `None`，那一档退回上缘。
         let at = {
-            let bounds = self.content_bounds.get();
-            let width = f32::from(bounds.size.width).max(1.0);
-            let height = f32::from(bounds.size.height).max(1.0);
-            if width <= 1.0 || height <= 1.0 {
+            let area = self.page_area;
+            if area.width() <= 1.0 || area.height() <= 1.0 {
                 None
             } else {
-                let x = f32::from(event.position.x) - f32::from(bounds.origin.x);
-                let y = f32::from(event.position.y) - f32::from(bounds.origin.y);
-                Some(((x / width).clamp(0.0, 1.0), (y / height).clamp(0.0, 1.0)))
+                // 从前这里按 `content_bounds`（字形元素自己那块）归一，而折线按 `page_area`
+                // 还原 —— 两个矩形差着页边距，手指在左缘时折线的锚点已经偏出三十来像素。
+                let x = f32::from(event.position.x) - area.left;
+                let y = f32::from(event.position.y) - area.top;
+                Some((
+                    (x / area.width()).clamp(0.0, 1.0),
+                    (y / area.height()).clamp(0.0, 1.0),
+                ))
             }
         };
         // 手势层：翻页那一趟（跟手 / 松手 / 惯性尾巴 / 轴不对）全在这里结账。

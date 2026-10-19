@@ -24,6 +24,9 @@ test = false
 
 [dependencies]
 folio-core.workspace = true
+# 仿真翻页 C 方案：页面网格与 uniform 的纯 CPU 定义。与 gpui-folio 分叉
+# 放在一起维护；这里只拿数据，不拿 GPU 类型。
+folio-curl = { path = "../../../gpui-folio/folio-curl" }
 gpui-kit.workspace = true
 # 只依赖 gpui-kit 一个门面：它顶层 `pub use ::gpui::*`，把移动端那份 `gpui-pre` 整个
 # 转了出来，所以两端都用 `use gpui_kit::…`，不再单独声明一条 `gpui` 依赖。

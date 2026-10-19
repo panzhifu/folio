@@ -19,18 +19,14 @@
 use folio_core::infra::config::{Mode, PageTurn};
 use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::{
-    ActiveTheme, Disableable, Selectable, Sizable, StyledExt as _, ThemeMode, ThemeStyled as _,
-    h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme, ThemeMode, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Hsla,
     InteractiveElement, IntoElement, ParentElement, Pixels, Render, StatefulInteractiveElement,
-    Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    Styled, Subscription, WeakEntity, Window, div, px,
 };
 
 use crate::ui::features::reader::components::image_viewer::{self, ImageViewer};
@@ -224,6 +220,9 @@ impl ReadingPage {
     /// 落库。外壳在 pop 之前调它。
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.reader.update(cx, |reader, _cx| {
+            // 先把挂着的那一趟翻页放下。退场那几百毫秒里这一层的时钟不再续帧，`turn` 会冻在
+            // 松手前那一刻 —— 于是仿真翻页那张网格把一片纸背留在书架上（2026-10-19 真机撞见）。
+            reader.turn = None;
             reader.persist_position();
             // 位置与时长是同一次离席要结的两笔账：漏掉后一笔，这一段就只能靠
             // 那条时钟在五分钟之内结掉，而读者往往在五分钟之内就再没回来过。

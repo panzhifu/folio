@@ -9,10 +9,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Selectable, Sizable as _, h_flex};
-use gpui_kit::{
-    Anchor, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, div, px,
-};
+use gpui_kit::{Anchor, Context, IntoElement, ParentElement, Styled, div, px};
 
 use super::{GUTTER, GroupFilter, ShelfView};
 

@@ -12,12 +12,18 @@ pub(in crate::ui::features::reader) enum Axis {
 
 /// 读者这一笔的手：**从哪儿起**、**此刻在哪儿**（两个点都在版心内归一化：0..1）。
 ///
-/// 折页那一档全用它：
-/// - `from` 决定**从哪个角起折**（下半屏按下的就从右下角卷起）；
-/// - `at` 决定**折线此刻在哪** —— 折线是「那个角」与「手指此刻的位置」的垂直平分线，
-///   所以纸是真的跟着手指走，不是沿一条写死的对角线扫过去。
+/// 折页那一档全用它，而且用的是这两点**之差**：
 ///
-/// 松手之后 `at` 由绘制层补间到落点（见 `view::body`），折线跟着走完，不会在松手那一帧跳。
+/// - 划动向量决定折线的**朝向**（往哪划就往哪折）和轴往里推进**多少**；
+/// - `from` 因此就是被捏住的那一点 —— 不是页的某个固定角。从前取固定角（按下点在上半屏就
+///   揭右上角、下半屏揭右下角），划动方向根本不进式子，读出来是「按在页面中间，揭起来的是
+///   右下角」。
+///
+/// 位置本身由档位自己算：折页把 `from` 投影到页的自由边当**锚点**，轴从锚点起步（见
+/// `curl::grabbed_edge`），不是停在两点中间。
+///
+/// `at` 允许走到 0..1 之外：那一格折线要越过书脊那一侧的页边，整页才算折完。松手之后由
+/// `curl::release_grip` 沿同一方向补间到落点，所以纸不会在松手那一帧跳。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::ui::features::reader) struct Grip {
     pub from: (f32, f32),
@@ -27,6 +33,35 @@ pub(in crate::ui::features::reader) struct Grip {
 impl Grip {
     pub(in crate::ui::features::reader) fn new(from: (f32, f32), at: (f32, f32)) -> Self {
         Self { from, at }
+    }
+}
+
+/// 摆位层每一帧读的那一组：往哪边翻、这一本从哪边读、读者这一笔的手。
+///
+/// 只有带手的两条入口（[`super::PageTurnStyle::sheets_at`] / [`super::PageTurnStyle::shades_at`]）
+/// 用它：平移/覆盖那几档整张纸沿轴走，起点在哪儿、书从哪边读都不改变它们的几何，所以默认的
+/// [`super::PageTurnStyle::sheets`] 仍然只吃 `forward`。
+#[derive(Clone, Copy, Debug)]
+pub(in crate::ui::features::reader) struct Pose {
+    /// `true` = 沿读书顺序往后（下一页）。
+    pub forward: bool,
+    /// `true` = 这一本从右往左读。
+    pub rtl: bool,
+    /// 读者这一笔的手；`None` = 不是手指起的（点屏 / 按键 / 滚轮）。
+    pub grip: Option<Grip>,
+}
+
+impl Pose {
+    /// 纸的**自由边**在哪一侧（`true` = 右）。
+    ///
+    /// 折页那一档只认这一个数：它那套律只有一套坐标（自由边在右、书脊在左、手指往左划），
+    /// 进出口各映一次横向。所以「往回翻」与「从右往左读的那一本」在这里是**各反一次**而不是
+    /// 照抄 `forward` —— 后翻揭的是左边那一窄条，RTL 那一本里连往后翻都换边。
+    ///
+    /// 写成两个数而不是一条 `self` 的方法：补间手指落点那一步（`release_grip`）只要这一个判据，
+    /// 手还没算出来。竖着走的档位不读它（手势那头的 `swipe::toward` 对竖轴不看读书方向）。
+    pub(in crate::ui::features::reader) fn free_edge_right(forward: bool, rtl: bool) -> bool {
+        forward != rtl
     }
 }
 
@@ -76,8 +111,9 @@ impl Area {
 
 /// 折线（一条有向直线）。
 ///
-/// 构造照 StPageFlip：手上捏的是页的那个**角**，折线就是「角的原位置」与「它被拖到的位置」
-/// 这两点连线的垂直平分线 —— 纸绕这条线翻过去，翻出去的那一片正好落在线另一侧的镜像位置上。
+/// 谁给出它谁定这条线的读法：折页那一档给的是「绕着它卷起来」的那根轴（见
+/// `curl::cylinder_at`），覆盖那一档给的是移动那张纸的前缘。这里的式子只认三个数：纸沿法向
+/// 那一侧已经离场，另一侧还平摊着。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::ui::features::reader) struct Crease {
     /// 单位法向，指向**已经被折走**那一侧。
@@ -88,26 +124,6 @@ pub(in crate::ui::features::reader) struct Crease {
 }
 
 impl Crease {
-    /// 由「被折走那一角的原位置」与「它被拖到哪」作垂直平分线。两点重合时折线不存在 ⇒ `None`。
-    pub(in crate::ui::features::reader) fn from_corner(
-        corner: (f32, f32),
-        dragged: (f32, f32),
-    ) -> Option<Self> {
-        let dx = corner.0 - dragged.0;
-        let dy = corner.1 - dragged.1;
-        let long = (dx * dx + dy * dy).sqrt();
-        if long < 1e-3 {
-            return None;
-        }
-        let (nx, ny) = (dx / long, dy / long);
-        let middle = ((corner.0 + dragged.0) * 0.5, (corner.1 + dragged.1) * 0.5);
-        Some(Self {
-            nx,
-            ny,
-            d: nx * middle.0 + ny * middle.1,
-        })
-    }
-
     /// 这一点离折线多远，带符号：正 = 这一片纸已经折走了，负 = 还平摊着。
     pub(in crate::ui::features::reader) fn past(self, x: f32, y: f32) -> f32 {
         self.nx * x + self.ny * y - self.d
@@ -119,7 +135,7 @@ impl Crease {
         90.0 + self.ny.atan2(self.nx).to_degrees()
     }
 
-    /// 上一条的反号：折面那道阴影在折线的**平摊侧**，淡出方向正好相反。
+    /// 上一条的反号：移动那张纸投出去的影在它**外面**那一侧，淡出方向正好相反。
     pub(in crate::ui::features::reader) fn angle_back(self) -> f32 {
         90.0 + (-self.ny).atan2(-self.nx).to_degrees()
     }
@@ -214,10 +230,12 @@ impl Poly {
     }
 
     /// 多边形围住的面积（绝对值）。
+    #[cfg(test)]
     ///
     /// 判空**必须**用它而不是顶点数：落位那一刻折面镜像到页外面去，裁回来剩下贴着页
     /// 左缘的一条退化四边形 —— 四个点、零面积。按顶点数判会留下一个宽零像素却真的入树
     /// 的路径，而「纸已经走光了画面还挂着一张」正是这一档最不该出现的读数。
+    #[cfg(test)]
     pub(in crate::ui::features::reader) fn area(self) -> f32 {
         let mut sum = 0.0f32;
         if self.len < 3 {
@@ -273,16 +291,9 @@ impl Poly {
     }
 
     /// 只留已经被折走那一侧（`past >= 0`）。
+    #[cfg(test)]
     pub(in crate::ui::features::reader) fn past(self, crease: Crease) -> Self {
         self.clip(|x, y| crease.past(x, y))
-    }
-
-    /// 裁回页的那块矩形：折过去的那一片不能伸到屏幕外面去。
-    pub(in crate::ui::features::reader) fn inside(self, area: Area) -> Self {
-        self.clip(|x, _| x - area.left)
-            .clip(|_, y| y - area.top)
-            .clip(|x, _| area.right - x)
-            .clip(|_, y| area.bottom - y)
     }
 
     /// 折线两侧之间的那一条平行带（`from <= past <= to`）。
@@ -290,30 +301,19 @@ impl Poly {
         self.clip(|x, y| crease.past(x, y) - from)
             .clip(|x, y| to - crease.past(x, y))
     }
-
-    /// 绕折线做镜像 —— 「被折走那一片」翻过去之后落在哪，就是这一步。
-    pub(in crate::ui::features::reader) fn reflected(self, crease: Crease) -> Self {
-        let mut out = Self::empty();
-        for index in 0..self.len {
-            let (x, y) = self.pts[index];
-            let step = 2.0 * crease.past(x, y);
-            out.push((x - step * crease.nx, y - step * crease.ny));
-        }
-        out
-    }
 }
 
 /// 一块要盖在两张纸之上的形状。几何与浓淡全在这里算好，绘制层只做「填」。
+///
+/// 只有**不平铺在 GPU 网格上**的那些形状走这一条：覆盖那一档的前缘投影与纸边光。折页那一张
+/// 的受光（暗—亮芯—暗）在顶点着色器里按柱面算法线算，不占这一层的配额 —— 一条两段渐变糊出
+/// 不来一摞带子，而 gpui 的 `Background` 本来就只装**两个**色标（color.rs 里
+/// `colors: [LinearColorStop; 2]`）。
 #[derive(Clone, Copy, Debug)]
 pub(in crate::ui::features::reader) struct Shade {
     pub shape: Poly,
     pub tint: Tint,
     /// 渐变方向（gpui `linear_gradient` 那一套角）。`None` = 纯色填。
-    ///
-    /// 为什么只有两挡颜色：gpui 的 `Background` 装的是**两个**色标（color.rs 里
-    /// `colors: [LinearColorStop; 2]`），而 StPageFlip 折谷那道阴影是四个色标
-    /// （暗 5% → 0.05 → 暗 35% → 0）。所以那道阴影在这里被拆成三条**互不重叠**的带
-    /// 叠出来 —— 见 [`fold_shades`]，那三条合起来才是「暗—亮芯—暗—淡出」。
     pub angle: Option<f32>,
     /// 峰值不透明度。`0` = 这一条不必画（宽度或墨色已经归零）。
     pub ink: f32,
@@ -322,11 +322,12 @@ pub(in crate::ui::features::reader) struct Shade {
 /// 一块形状用哪种底色。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::ui::features::reader) enum Tint {
-    /// 页色：折起来那一张的**背面**。只有它是不透明的。
+    /// 页色：不透明的纸底。目前没有哪一块形状用它 —— 折页那张纸的正面背面都改由 GPU 网格
+    /// 采捕获纹理来画，CPU 这一层只剩半透明的带子。它是 `BLANK_SHADE` 那一格的填充值。
     Paper,
-    /// 黑：压暗。投影、接触影、折谷都用它。
+    /// 黑：压暗。投影与纸边光外侧那道接触影用它。
     Dark,
-    /// 白：提亮。纸的前缘、折谷里那道亮芯用它。
+    /// 白：提亮。移动那张纸自己的前缘用它。
     Light,
 }
 

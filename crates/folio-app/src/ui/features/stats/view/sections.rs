@@ -7,8 +7,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::chart::{BarChart, RadarChart};
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::{ActiveTheme, Selectable, Sizable as _, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::{ActiveTheme, Selectable, h_flex, v_flex};
 use gpui_kit::{AnyElement, App, Context, IntoElement, ParentElement, SharedString, Styled, px};
 
 use super::super::model::report::{Bar, HourCell, Report, WeekdayPattern, WeekdaySpoke};

@@ -4,38 +4,8 @@
 //! 全是纯函数/常数 —— 列数算错不会报错，只会让架面在某个窗口宽上突然变成一格一本，
 //! 所以它们能单独被断言（见 `columns_for` 的那三条）。
 
-use super::super::components::book_card::{COVER_RATIO, Card, GroupCard, TILE_SLOTS};
-use super::super::components::book_menu;
-use super::scan::ScanPhase;
-use crate::ui::components::{
-    BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, empty_state, muted_label,
-};
-use crate::ui::foundation::error::{Context as _, report};
-use crate::ui::services::config::ConfigHolder;
-use crate::ui::services::l10n::{tf, tr};
-use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
-use crate::ui::services::services;
+use super::super::components::book_card::COVER_RATIO;
 use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
-use folio_core::net::remote::Transport;
-use folio_core::store::Collection;
-use folio_core::{
-    Cancel, ImportOutcome, ImportReport, Imported, PathsSource, Store, TaskEvent, UrlSource,
-    submit_import,
-};
-use gpui_kit::base::NavStackState;
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::InputState;
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{Selectable, Sizable as _, h_flex, v_flex};
-use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Image, InteractiveElement,
-    IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _,
-    UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
-};
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
 
 pub(in crate::ui::features::shelf) const COLUMNS: u16 = 3;
 

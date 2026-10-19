@@ -41,8 +41,9 @@ use scroll::Scroll;
 use slide::Slide;
 use slide_up::SlideUp;
 
+pub(in crate::ui::features::reader) use curl::{cylinder_at, release_grip};
 pub(in crate::ui::features::reader) use geometry::{
-    Area, Axis, Crease, Cut, Grip, Poly, Shade, Shades, Sheet, Tint,
+    Area, Axis, Crease, Cut, Grip, Poly, Pose, Shades, Sheet, Tint,
 };
 
 /// 一档翻页动画。
@@ -56,17 +57,17 @@ pub(in crate::ui::features::reader) trait PageTurnStyle:
     /// 它自己（补间画出来的位置），在分页里没有东西可滚。
     fn animates(&self, mode: PageMode) -> bool;
 
-    /// 同上，但带上读者这一笔的起手点（**版心内的归一化坐标**）。
+    /// 同上，但带上读者这一笔的手与那本书的阅读方向（见 [`Pose`]）。
     ///
-    /// 只有折页那一档用得上：别的档纸是整张平移/覆盖的，起点在哪儿都不改变几何。默认实现
-    /// 直接转给 [`Self::sheets`]，所以那几档一个字都不用改。
-    fn sheets_at(&self, t: f32, forward: bool, area: Area, _grip: Option<Grip>) -> [Sheet; 2] {
-        self.sheets(t, forward, area)
+    /// 只有折页那一档用得上：别的档纸是整张平移/覆盖的，起点在哪儿、书从哪边读都不改变几何，
+    /// 所以默认实现只把 [`Pose::forward`] 转给 [`Self::sheets`]，一个字都不必改。
+    fn sheets_at(&self, t: f32, area: Area, pose: Pose) -> [Sheet; 2] {
+        self.sheets(t, pose.forward, area)
     }
 
-    /// [`Self::shades`] 的带锚点版本，同上。
-    fn shades_at(&self, t: f32, forward: bool, area: Area, _grip: Option<Grip>) -> Shades {
-        self.shades(t, forward, area)
+    /// [`Self::shades`] 的带手版本，同上。
+    fn shades_at(&self, t: f32, area: Area, pose: Pose) -> Shades {
+        self.shades(t, pose.forward, area)
     }
 
     /// 量距离、摆位移沿哪根轴。
@@ -75,9 +76,9 @@ pub(in crate::ui::features::reader) trait PageTurnStyle:
     /// 这根轴上的拖动算不算「翻页」。
     ///
     /// 默认只认 [`Self::axis`] 那一根（平移/覆盖/上下平移都是整张纸沿轴走，斜着划没有意义）。
-    /// **折页两轴都认**：它的折线是「角 ↔ 手指」的垂直平分线，斜着划本来就对 —— 而且
-    /// 手机上没人会横着平移手指，从右下角往左上划才是真实手势。从前它只认横轴，
-    /// 于是斜划被判成「竖向拖动」直接让开，读者的读数是「不跟手 / 根本翻不动」。
+    /// **折页两轴都认**：它的折线朝向由这一笔的划动向量给，斜着划本来就对 —— 而且手机上没人会
+    /// 把手指拖成一条严格的水平线。从前它只认横轴，于是斜划被判成「竖向拖动」直接让开，读者的
+    /// 读数是「不跟手 / 根本翻不动」。
     fn claims(&self, axis: Axis) -> bool {
         axis == self.axis()
     }
@@ -115,26 +116,6 @@ pub(in crate::ui::features::reader) fn of(turn: PageTurn) -> &'static dyn PageTu
     }
 }
 
-/// 这一档在这种摆法下，**手势翻页走哪根轴**。
-///
-/// 全项目唯一一处「翻页的轴从哪来」的答案：**轴归动画档，不归手指**。读者选了横向的
-/// 平移 / 覆盖 / 仿真，竖着划就不该翻页；选了上下平移，横着划就不该翻页。从前
-/// `dominant(dx, dy)` 说了算，于是「选了横向动画也照竖着划翻页」。
-///
-/// 三种没有轴的问号各有一句话：
-/// - 连续摆法没有「翻页」这件事（手指本身就是滚）⇒ `None`；
-/// - 「上下滚动」在分页里本就不成立（[`applies`] 会把它从选项里筛掉），真落到这里按竖轴；
-/// - 「不走动画」没有方向可言，跟着默认摆法（上下滚动）走 ⇒ 竖轴。
-pub(in crate::ui::features::reader) fn page_axis(turn: PageTurn, mode: PageMode) -> Option<Axis> {
-    if mode.is_continuous() {
-        return None;
-    }
-    Some(match turn {
-        PageTurn::Slide | PageTurn::Cover | PageTurn::Curl => Axis::Horizontal,
-        PageTurn::SlideUp | PageTurn::Scroll | PageTurn::None => Axis::Vertical,
-    })
-}
-
 /// 这一档在当前摆法下有没有一趟要走。底栏那一格按它筛选项：连续里只剩「上下滚动」与
 /// 「不走动画」两档讲得通，分页里「上下滚动」讲不通。
 pub(in crate::ui::features::reader) fn applies(turn: PageTurn, mode: PageMode) -> bool {
@@ -160,40 +141,52 @@ mod tests {
     use crate::ui::features::reader::motion::turn_animation::slide::Slide;
     use crate::ui::features::reader::motion::turn_animation::slide_up::SlideUp;
     use crate::ui::features::reader::motion::turn_animation::testing::page;
-    use crate::ui::features::reader::motion::turn_animation::{applies, of, page_axis};
+    use crate::ui::features::reader::motion::turn_animation::{applies, of};
     use folio_core::PageTurn;
+
+    /// 翻页的轴**归动画档**，不归手指。这两问的答案就是那条判据的全部：
+    ///
+    /// - `axis` = 走了多远**沿哪根轴**归一（也是动画那两张纸走的轴），由档位自己给；
+    /// - `claims` = 手指那根轴上的拖动算不算翻页。读者选了横向的平移 / 覆盖，竖着划不该翻页；
+    ///   选了上下平移，横着划不该翻页。
+    ///
+    /// 折页是 `claims` 唯一的例外（一笔斜划也得算翻页），但它的 `axis` 仍只有一根横的 —— 翻的是
+    /// 一张横排页。这两问从前由一处 `page_axis(turn, mode)` 合并答，于是「两轴都认」与「按哪根
+    /// 归一」打架：一笔竖着划的按页高归一，纸几乎没卷而进度已经过半，读出来是「页翻了纸没动」。
+    #[test]
+    fn the_page_axis_comes_from_the_style_not_the_finger() {
+        use Axis::{Horizontal, Vertical};
+        for (turn, want) in [
+            (PageTurn::Slide, Horizontal),
+            (PageTurn::Cover, Horizontal),
+            (PageTurn::Curl, Horizontal),
+            (PageTurn::SlideUp, Vertical),
+            // 「上下滚动」在分页里本就不成立（`applies` 会把它从选项里筛掉），真落进来按竖轴；
+            // 「不走动画」没有一趟要走，那一格不被读到，给个确定答案就够了。
+            (PageTurn::Scroll, Vertical),
+            (PageTurn::None, Horizontal),
+        ] {
+            let style = of(turn);
+            assert_eq!(style.axis(), want, "{turn:?} 的翻页该沿那根轴量距离");
+            let claimed = [Horizontal, Vertical]
+                .into_iter()
+                .filter(|axis| style.claims(*axis))
+                .collect::<Vec<_>>();
+            if turn == PageTurn::Curl {
+                assert_eq!(
+                    claimed.len(),
+                    2,
+                    "折页只认一根轴：斜划又被判成竖向拖动直接让开"
+                );
+            } else {
+                assert_eq!(claimed, [want], "{turn:?} 只该认它自己那根轴");
+            }
+        }
+    }
 
     /// 「走不走一趟」是**按摆法**答的：`None` 哪儿都不走；「上下滚动」只在连续里走
     /// （分页里没有可滚的东西，那一趟退化成当场落定）；其余几档两种摆法都要摆那两张纸。
     /// 底栏那一格的选项就是按这条筛的，所以它错一格，界面上就少一档或多一档。
-    /// 翻页的轴**归动画档**，不归手指。这张表就是那条判据的全部：
-    /// 读者选了横向的平移 / 覆盖 / 仿真，竖着划不该翻页；选了上下平移，横着划不该翻页。
-    #[test]
-    fn the_page_axis_comes_from_the_style_not_the_finger() {
-        use Axis::{Horizontal, Vertical};
-        for mode in [PageMode::Paged, PageMode::Spread] {
-            for (turn, want) in [
-                (PageTurn::Slide, Horizontal),
-                (PageTurn::Cover, Horizontal),
-                (PageTurn::Curl, Horizontal),
-                (PageTurn::SlideUp, Vertical),
-                // 「上下滚动」在分页里本就不成立，真落进来按竖轴；「不走动画」跟着默认摆法走。
-                (PageTurn::Scroll, Vertical),
-                (PageTurn::None, Vertical),
-            ] {
-                assert_eq!(page_axis(turn, mode), Some(want), "{turn:?} 在 {mode:?} 里");
-            }
-        }
-        // 连续滚动没有「翻页」这件事：手指就是滚，任何档都不该有一根翻页轴。
-        for turn in PageTurn::ALL {
-            assert_eq!(
-                page_axis(*turn, PageMode::Continuous),
-                None,
-                "{turn:?} 在连续滚动里不该有翻页轴"
-            );
-        }
-    }
-
     #[test]
     fn which_styles_run_a_slide_is_an_answer_per_layout() {
         for mode in [PageMode::Continuous, PageMode::Paged, PageMode::Spread] {
@@ -257,7 +250,7 @@ mod tests {
         assert_eq!(area.distance(Axis::Vertical), 400.0);
     }
     /// 每一档该掉几块影子是有数的：平移两张纸之间没有压着谁 ⇒ 一块都不该有；覆盖两块
-    /// （前缘投影 + 纸边光）；折页五块。默认实现是空，
+    /// （前缘投影 + 纸边光）；折页零块（纸面与投影都在 GPU 那张网格里）。默认实现是空，
     /// 所以这条守的是「哪天顺手给平移也接上一条影子」—— 那种改法不会让任何一处现有
     /// 断言变红，只会在屏幕上多出一条没人看得见的边。
     #[test]
@@ -293,17 +286,15 @@ mod tests {
             // 覆盖的位移档不看进度有没有起步：前缘一上屏就该带影子。
             assert_eq!(Cover.shades(t, true, page()).items().len(), 2);
         }
-        // 折页那一条从两块（起步：只有纸背与它的暗部）走到七块（卷筒 + 高光 + 投影），
-        // 落位归零 —— 各档自己的读法在 `curl.rs` 的门里。
-        assert_eq!(Curl.shades(0.0, true, page()).items().len(), 1);
-        // 纸背 + 卷筒纸面 + 若干条受光带 + 高光 + 投影：条数由受光曲线决定（卷顶几条
-        // 墨色几乎为零不画），所以只钉「在配额之内、而且确实是一摞带子」。
-        let folded = Curl.shades(0.5, true, page()).items().len();
-        assert!(
-            (8..=crate::ui::features::reader::motion::turn_animation::geometry::SHADES_MAX)
-                .contains(&folded),
-            "折到一半的形状数该是一摞带子，实得 {folded}"
-        );
+        // 折页那一档**一块 CPU 影子都不掉**：纸面、受光与投影全在 GPU 那张网格里画
+        // （`curl.rs` 的 `curl_of` + `page_curl.wgsl`）。这里守的是「别又把那套平色带接回来」——
+        // 接回来不会让任何画面变好，只会在网格之上多盖一层假卷筒。
+        for t in [0.0, 0.35, 0.5, 0.9, 1.0] {
+            assert!(
+                Curl.shades(t, true, page()).items().is_empty(),
+                "折页那一档又掉了 {t} 块的 CPU 影子"
+            );
+        }
     }
     /// 版心还没量出来（宽或高为 0）时不该起任何几何：既不能 panic，也不能画出一张
     /// 凭空出现的纸或一条没人看得见的投影。这一格在真机上是**会发生的** —— 首帧布局前

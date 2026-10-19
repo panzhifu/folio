@@ -16,6 +16,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use folio_core::content::annotation::ResolvedAnnotation;
 use folio_core::content::document::Document as OpenedDocument;
@@ -29,8 +30,28 @@ use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chrome::{PageMode, Reserve};
 use crate::ui::features::reader::model::fixed_book::FixedBook;
 use crate::ui::features::reader::model::measure::FontCache;
+use crate::ui::features::reader::motion::turn_animation::Area;
 use crate::ui::host::device_family;
 use crate::ui::services::config::ConfigHolder;
+
+/// 仿真翻页那张页面网格的顶点与索引。
+///
+/// 它们只由页宽页高决定 —— 翻页进度改的是 uniform，顶点一个都不动。所以按尺寸缓存一份：
+/// 每帧重造是 9409 个顶点加 55296 个索引（近 1 MB）的分配与拷贝，全在 `render()` 里跑，
+/// 而算出来的字节和上一帧一模一样。
+#[derive(Clone)]
+pub(in crate::ui::features::reader) struct CurlMesh {
+    pub(in crate::ui::features::reader) width: f32,
+    pub(in crate::ui::features::reader) height: f32,
+    pub(in crate::ui::features::reader) vertices: Arc<[gpui_kit::PageCurlVertex]>,
+    pub(in crate::ui::features::reader) indices: Arc<[u32]>,
+}
+
+/// 「哪一帧把完整页框交给了捕获 pass」这一格：`(章号, 页号)` + 那一刻的窗口尺寸（逻辑像素）。
+///
+/// 键与尺寸要一起比，所以合成一个类型：页号章号在分屏 / 折叠展开 / surface 重建后一个字不动，
+/// 只有尺寸这一格拦得住那张被裁过的纹理。
+type CaptureCommit = ((usize, usize), (f32, f32));
 
 /// 视图现在拿的是什么内容。
 pub enum Source {
@@ -101,6 +122,45 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) laid_out: LaidOut,
     /// 正在走的那一次翻页动画（见 [`Turn`]）。`None` = 画面定住了。
     pub(in crate::ui::features::reader) turn: Option<Turn>,
+    /// 页面捕获纹理的脏标记：偏好/主题/排版变了就置真，下一帧重烘。
+    pub(in crate::ui::features::reader) capture_dirty: bool,
+    /// 上一次烘的是哪一页；页号/章号不变且不脏时不重复跑整页捕获 pass。
+    pub(in crate::ui::features::reader) captured_page: Option<(usize, usize)>,
+    /// 烘那一张时窗口有多大（逻辑像素）。网格取 uv 按**今天**的窗口归一，而那张纹理里被写过的
+    /// 只有当时那块矩形 —— 尺寸一变（分屏、折叠展开、surface 重建、进后台回来）两者就对不上，
+    /// 差出来的那一截采到没被写过的地方。页号与章号在这时候一个字都不动，所以这一格不能并进
+    /// [`Self::captured_page`] 那个键，得单独比。
+    pub(in crate::ui::features::reader) captured_size: Option<(f32, f32)>,
+    /// 翻页几何用的那一块版心（**窗口坐标**）。`render` 每帧写，手指坐标归一化读它。
+    ///
+    /// 折线、捕获矩形、手指归一这三处必须是同一个数：捕获纹理是整窗大小、只有这一块被写过，
+    /// 而网格按 `(页框原点 + 局部坐标) / 窗口` 取 uv。差一个页边距，卷起来那一片就采到横移的
+    /// 页面，读成「纸上的字与对不齐的那半页叠在一起」。
+    pub(in crate::ui::features::reader) page_area: Area,
+    /// 页面网格的顶点与索引缓存。它们只由页宽页高决定，每帧重造那近 1 MB 是纯浪费。
+    pub(in crate::ui::features::reader) curl_mesh: Option<CurlMesh>,
+    /// 烘那张页纹理**那一刻**，页框左上角落在窗口里的哪儿（逻辑像素）。
+    ///
+    /// 网格摆几何用本帧的原点、取纹理用这一格，两者分开才不会采到未写区域：进出书那 280 ms
+    /// 的视差滑动里整栏在横移，真机量到烘的那一刻栏还偏着 134.4 逻辑像素，于是第一趟翻页左缘
+    /// 是一条 378 设备像素的纯黑带，之后层停稳就再没有。
+    ///
+    /// 这一格只能由绘制回调写（只有那里知道这一栏在窗口里的真实原点），而回调拿不到 `&mut
+    /// self` —— 所以是 `Rc<Cell<..>>`：会话持有一份，两个回调各拿一个克隆。
+    pub(in crate::ui::features::reader) curl_bake_origin: Rc<Cell<Option<(f32, f32)>>>,
+    /// 绘制回调真正把「完整页框」交给捕获 pass 之后写回的键。
+    ///
+    /// 捕获请求是在 `render` 里排的，但**能不能烘**要等绘制回调拿到绝对坐标才知道：进书那
+    /// 280 ms 的整层横移会让页框右半截落到窗口外，此时按该原点烘出来的纹理只有可见的那一截；
+    /// 网格随后把整页 UV 映过去，右侧就采到矩形外，真机读数正是那条黑色横带。所以这里只在
+    /// 「页框完整落在窗口内」时记下键与尺寸，下一次 `render` 才把 `captured_*` 落定并停止重试。
+    pub(in crate::ui::features::reader) capture_committed: Rc<Cell<Option<CaptureCommit>>>,
+    /// 眼下按在正文上的那根手指：编号 + 此刻在 [`ReaderSession::page_area`] 里的位置。
+    ///
+    /// 只给折页那一档用。跟手翻页吃的是识别器折出来的 `ScrollWheelEvent`，而它在定性那一刻
+    /// 就把另一根的增量抹成 0，所以「起手点 + 累计位移」反推出的那一格只有一个自由度，
+    /// 折痕转不起来 —— 原始触摸流是唯一还留着第二个自由度的地方。
+    pub(in crate::ui::features::reader) finger: Option<(gpui_kit::TouchId, (f32, f32))>,
     /// 方向键/点击/音量键在章界按了一下、目标章还在后台排版：等它 `is_current()`
     /// 那一帧再起跨章滑动。`None` = 没有等待中的换章。
     pub(in crate::ui::features::reader) pending_chapter_turn: Option<isize>,
@@ -343,6 +403,14 @@ impl ReaderSession {
             scroll_painted: 0.0,
             page_shift: (0.0, 0.0),
             turn: None,
+            capture_dirty: true,
+            captured_page: None,
+            captured_size: None,
+            page_area: Area::new(0.0, 0.0, 0.0, 0.0),
+            curl_mesh: None,
+            curl_bake_origin: Rc::new(Cell::new(None)),
+            capture_committed: Rc::new(Cell::new(None)),
+            finger: None,
             pending_chapter_turn: None,
             turn_seq: 0,
             swipe: None,
@@ -459,6 +527,14 @@ impl ReaderSession {
             scroll_painted: 0.0,
             page_shift: (0.0, 0.0),
             turn: None,
+            capture_dirty: true,
+            captured_page: None,
+            captured_size: None,
+            page_area: Area::new(0.0, 0.0, 0.0, 0.0),
+            curl_mesh: None,
+            curl_bake_origin: Rc::new(Cell::new(None)),
+            capture_committed: Rc::new(Cell::new(None)),
+            finger: None,
             pending_chapter_turn: None,
             turn_seq: 0,
             swipe: None,
@@ -863,6 +939,24 @@ impl ReaderSession {
             .map(|slice| slice.lines.clone())
     }
 
+    /// 仿真翻页这张网格要的那张旧页纹理是否已经完整烘好。
+    ///
+    /// 只在折页这一档用。进书那 280 ms 的整层横移里页框有一截在窗口外，捕获 pass 拿不到
+    /// 那部分像素；此时若放行翻页，网格会按整页 UV 去采一张被裁过的纹理，右侧页边就是一条
+    /// 黑带。所以这条件没满足前，翻页入口一律拒绝 —— 入场动画结束后重试烘好再放行。
+    pub(in crate::ui::features::reader) fn curl_capture_ready(&self) -> bool {
+        let key = (self.chapter_index(), self.page);
+        // `capture_committed` 是绘制回调刚写好、下一次 `render` 才会落到 `captured_page` 的
+        // 那一份。静态页没有别的东西触发重绘时，它会一直等在那里；此时纹理其实已经在 GPU
+        // 上就绪，输入事件若只认 `captured_page`，读者进场后的第一划会被无故吞掉。
+        !self.capture_dirty
+            && (self.captured_page == Some(key)
+                || self
+                    .capture_committed
+                    .get()
+                    .is_some_and(|(pending, _)| pending == key))
+    }
+
     /// 读者在设置里改了字号、行距、缩进或字体，在这一帧同步进来。
     ///
     /// 每帧读一次 Global 再比较，比给这个会话挂一条订阅更合适：偏好本来就是每帧都要用
@@ -878,6 +972,7 @@ impl ReaderSession {
         effective.font_family = self.family.to_string();
         if effective != self.prefs {
             self.prefs = effective.clone();
+            self.capture_dirty = true;
             // body / mono 不入 `FontKey`，换了必须让缓存失效，否则同一个 key 会命中旧字体。
             self.font_cache.clear();
             // 重排会把每一页的片高与行盒换掉：正在平移的那一张是按旧行盒摆出来的，
@@ -927,9 +1022,9 @@ pub(in crate::ui::features::reader) struct Turn {
     pub scroll: Option<(f32, f32)>,
     /// 读者这一笔的手：起手点 + **此刻**的位置（都归一化在版心内）。
     ///
-    /// 折页那一档全用它：起手点挑「从哪个角起折」，此刻的位置直接给出折线 —— 折线是
-    /// 「那个角」与「手指此刻」的垂直平分线，所以纸跟着手指走，不再沿一条写死的对角线扫。
-    /// `None` = 不是手指起的（点屏 / 按键 / 滚轮），那一档退回写死的路径。
+    /// 折页那一档全用它：起手点投影到页的自由边就是**锚点**（轴从那儿起步推进），两点之差给出
+    /// 折线的**朝向**与这一趟**走了多远**。`None` = 不是手指起的（点屏 / 按键 / 滚轮），那一档
+    /// 退回「从自由边正中笔直往里走」那一条中立路径。
     pub grip: Option<crate::ui::features::reader::motion::turn_animation::Grip>,
     /// `true` = 往后走（下一页 / 往下滚）。接反了不报错，画面是反着走的，
     /// 所以方向的判据收在 [`turn_animation::slide::slide_shifts`] 那一格里钉住。
@@ -1001,10 +1096,21 @@ pub(in crate::ui::features::reader) struct SwipeTrack {
     /// 这一笔已经判过「不归翻页」（轴不对、书尾、定版式）。**留着跟踪态**而不是清掉：
     /// 清掉之后同一笔后面的每个增量都会漏回滚动那条路。
     pub refused: bool,
-    /// 手指按下的位置（版心内归一化 0..1）。折页那一档用它决定从哪个角起折。
+    /// 手指按下的位置（版心内归一化 0..1）。折页那一档把它投影到页的自由边当锚点。
     pub from: Option<(f32, f32)>,
-    /// 手指**此刻**的位置（同上）。折线由「起折的角 ↔ 这里」给出，所以纸跟着手指走。
+    /// 手指**此刻**的位置（同上）。与 `from` 之差就是划动向量，折线的朝向与推进量都由它给。
     pub at: Option<(f32, f32)>,
+    /// 速度的分母起点：上一次取样的时刻，与那一次的累计位移。
+    ///
+    /// 记的是「起点」而不是「这一段的速度」，因为这一段可能没攒够时间就被下一格接走
+    /// （见 `swipe::SwipeTrack::note_step`）。
+    pub speed_from: Option<(Instant, f32, f32)>,
+    /// 最近一次**有位移**的那一段的速度（屏幕像素/秒，未折阅读方向：往右 / 往下为正）。
+    ///
+    /// 只有一格，不铺一条时间线：这一档判的是「松手那一下快不快」，不是轨迹拟合。
+    pub speed: (f32, f32),
+    /// 那一段速度是在哪一刻取到的。抬手时距今太久（停过手）就按 0 处理。
+    pub speed_at: Option<Instant>,
 }
 
 /// 挂上一趟翻页动画：换新时钟键、把档位抄进去，回报「这一趟挂上了吗」。

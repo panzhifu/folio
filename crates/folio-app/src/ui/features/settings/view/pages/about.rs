@@ -61,7 +61,7 @@ fn value_item(
 ///
 /// 这一份是 [`Locale::ALL`] 的第二份副本，会有漂移风险，所以 `tests` 里有一条测试
 /// 逐个核对 `code()` 与 `endonym()` 都在列 —— 加一门语言忘了补词，搜索框就搜不到这一格。
-const LANGUAGE_KEYWORDS: &[&'static str] = &[
+const LANGUAGE_KEYWORDS: &[&str] = &[
     "language",
     "locale",
     "语言",

@@ -33,15 +33,14 @@ use gpui_kit::base::NavStackState;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{Selectable, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Image, InteractiveElement,
-    IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _,
-    UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
+    IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
+    Task, TestSupportExt as _, UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 
-use super::components::book_card::{COVER_RATIO, Card, GroupCard, TILE_SLOTS};
+use super::components::book_card::{Card, GroupCard, TILE_SLOTS};
 use super::components::book_menu;
 use crate::ui::components::{
     BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, empty_state, muted_label,
@@ -51,8 +50,8 @@ use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::services::services;
-use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
-use grid::{GUTTER, GridSpec, columns_for, grid_spec};
+use crate::ui::shell::navigation::SizeClass;
+use grid::{GUTTER, GridSpec, grid_spec};
 use scan::ScanPhase;
 
 /// 出网共用的那一份传输（`ureq` + rustls）。一个进程一个连接池就够 ——

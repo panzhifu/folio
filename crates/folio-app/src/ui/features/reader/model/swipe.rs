@@ -4,7 +4,9 @@
 //! 「是不是在拖」、[`dominant`] 定轴、[`toward`] 折阅读方向、[`progress`] 归一、[`snap`]
 //! 判落点），能在宿主的 `cargo test` 里表驱动钉住；[`swipe_scroll`] 那一头只做
 //! 事件搬运，被 `on_scroll` 在滚轮监听里调（`view.rs` 挂在 `folio-reader` 那个 `div` 上的
-//! `.on_scroll_wheel`），所以这一层自己不再 `on_mouse_event`。
+//! `.on_scroll_wheel`），所以这一层自己不再 `on_mouse_event`。松手速度也在事件搬运那一头量
+//! （[`SwipeTrack::note_step`]：`ScrollWheelEvent` 自己不带时间戳，钟取
+//! `cx.background_executor().now()`），折成沿已认领那一步的那个数之后与距离一起喂 [`snap`]。
 //!
 //! **事件走的是滚动那一路，不是 `TouchDragEvent`。** 识别器在手指走过 `touch_slop` 那一刻
 //! 就把这一笔判给了某一个轴（`gpui-pre-0.3.9/src/gestures.rs` 的 `Panning`：`dominant_axis`
@@ -30,7 +32,10 @@
 //!
 //! [`swipe_scroll`]: 事件搬运与累计；[`claim_swipe`]: 定轴与认领；[`swipe_release`]: 落定或弹回。
 
-use gpui_kit::{App, Context, TouchPhase};
+use std::time::{Duration, Instant};
+
+use folio_core::PageTurn;
+use gpui_kit::{App, Context, Pixels, Point, TouchPhase};
 
 use crate::ui::features::reader::model::session::{
     PageRef, ReaderSession, SwipeTrack, Turn, TurnRun, start_turn,
@@ -45,8 +50,33 @@ use crate::ui::services::config::ConfigHolder;
 /// 「手指挪过一点点，该出高亮了」，这一条判的是「这一下是翻页」。拇指落在屏上的抖动就有
 /// 4–8 像素，取 4 会让每一次点屏都先抖出半张纸。
 pub(in crate::ui::features::reader) const SLOP: f32 = 16.0;
-/// 抬手时走过这一屏的几成才算「要走完」。
-pub(in crate::ui::features::reader) const SNAP_FRACTION: f32 = 1.0 / 3.0;
+/// 抬手时走过这一屏的几成才算「要走完」（慢速那一半的唯一判据）。
+///
+/// 从前是 1/3：384 宽的一屏要拖过 128 才落定，慢拖不到半屏就弹回，读起来是纸跟了手而
+/// 松手没翻。这一格只降到 0.2（同一屏 77），**没有**一路降到 1/10 —— 撑住「轻碰一下不该
+/// 翻页」的不是这一格，是 [`snap`] 里速度那一条连同它的 [`fling_floor`] 下限：慢而短照旧
+/// 弹回，快而短才走。两头各管一头，才敢把这一格往下挪。
+pub(in crate::ui::features::reader) const SNAP_FRACTION: f32 = 0.2;
+/// 靠速度落定时，至少走过这一屏的几成。
+pub(in crate::ui::features::reader) const FLING_MIN_FRACTION: f32 = 0.08;
+/// 与上面那条取大者的**下限**（逻辑像素）：屏再窄也至少走过这一截才允许靠速度落定。
+///
+/// 这一格是「极短促的误触」唯一那道闸：只有速度判据的话，拇指在屏上蹭一下的两三毫秒
+/// 三十像素就能算出上千像素每秒。
+pub(in crate::ui::features::reader) const FLING_MIN_PX: f32 = 36.0;
+/// 松手那一下沿已认领那一步至少这么快（逻辑像素/秒 —— 手机上 gpui 的 Pixels 就是 dp，
+/// 见 `gpui-mobile` 的 `AndroidDisplay::logical_width`），短距离那一档才翻页。
+pub(in crate::ui::features::reader) const FLING_SPEED: f32 = 700.0;
+/// 速度取样：这一段至少攒够这么久才除一次。识别器会合帧，两条事件挤在同一毫秒时
+/// 除出来的是天文数字。
+const FLING_SAMPLE_MIN: Duration = Duration::from_millis(8);
+/// 停手这么久，「最近一次有位移的速度」作废：拖到一半停住再松手不该翻页。
+///
+/// 比识别器那一条动量的门宽（`gpui-pre/src/gestures.rs` 的 `VELOCITY_ASSUME_STOPPED_GAP`
+/// = 40ms，量出来是给连续滚动收尾用的）：动量松手之后还要替手指滚很长一段，判错一眼就看得见；
+/// 翻页只在意松手那一下，这一截可以给得宽，但 100 是上限那一头 —— 抬手前已经停这么久，
+/// 读者的意图是「停住」，不是「甩」。
+const FLING_STOPPED: Duration = Duration::from_millis(100);
 
 /// 走过 [`SLOP`] 了吗（按平面距离算，不按单轴 —— 斜着划也该被认下来）。
 pub(in crate::ui::features::reader) fn passed(dx: f32, dy: f32) -> bool {
@@ -107,12 +137,24 @@ pub(in crate::ui::features::reader) fn progress(toward: f32, dist: f32) -> f32 {
     (toward / dist).clamp(0.0, 1.0)
 }
 
-/// 抬手：走完还是弹回。只看过没过 [`SNAP_FRACTION`]。
+/// 靠速度落定时那一截最低距离：页宽的 [`FLING_MIN_FRACTION`] 与 [`FLING_MIN_PX`] 取大者。
 ///
-/// 不看速度 —— 这一版没有可靠的逐帧时间戳，而「慢而长」的一笔本来就该翻页、「快而短」的
-/// 一抖不该。真机上若「轻轻一甩就该翻」成了抱怨，再补速度那一条。
-pub(in crate::ui::features::reader) fn snap(toward: f32, dist: f32) -> bool {
-    progress(toward, dist) >= SNAP_FRACTION
+/// 取大而不是取小：36 是「拇指蹭一下」的下限，8% 是「窄屏上别把半屏当一甩」的比例，
+/// 哪一头更严听哪一头的。384 宽那一屏上它是 36，800 宽（平板横档）上是 64。
+pub(in crate::ui::features::reader) fn fling_floor(dist: f32) -> f32 {
+    (dist * FLING_MIN_FRACTION).max(FLING_MIN_PX)
+}
+
+/// 抬手：走完还是弹回。两律任一成立就走完。
+///
+/// - `along >= 页宽 × [`SNAP_FRACTION`]` —— 慢而长的一笔本来就该翻页。
+/// - `along >= [`fling_floor`]` **且** `speed >= [`FLING_SPEED`]` —— 短而快的一甩。
+///
+/// `along` 是沿**已认领那一步**真正走过的距离，`speed` 是松手那一下沿同一步的速度，
+/// 两者同一把尺、同一个符号（反着甩 `speed` 就是负的，过不了第二条）。速度由事件层量
+/// （[`SwipeTrack::note_step`] / [`SwipeTrack::speed_along`]），停过手传进来的就是 0。
+pub(in crate::ui::features::reader) fn snap(along: f32, dist: f32, speed: f32) -> bool {
+    progress(along, dist) >= SNAP_FRACTION || (along >= fling_floor(dist) && speed >= FLING_SPEED)
 }
 
 /// 一笔拖动这一帧该给谁。
@@ -140,11 +182,64 @@ enum Claim {
     Refused,
 }
 
-impl ReaderSession {
-    /// 这一屏这一档的翻页轴、沿**那根轴**的一屏有多长、往哪边读。
+impl SwipeTrack {
+    /// 每一步量一次「这一段走了多快」，攒够 [`FLING_SAMPLE_MIN`] 才除一次。
     ///
-    /// 轴从 [`turn_animation::page_axis`] 来（动画档说了算），距离按**那根轴**量 ——
-    /// 从前距离按手指那根轴量，于是「横着划、按横宽归一」这种细节和轴的判据混在一起。
+    /// 三条各自的用处，缺一条就出对应的错：
+    ///
+    /// - **不逐事件除**：识别器会合帧，两条挤在同一毫秒时除出来的是天文数字。没攒够就不动
+    ///   分母起点，增量继续往这一段里攒。
+    /// - **这一段没走过位移就不更新**：松手那一条 `Ended` 恒为零增量，除掉来的是 0，会把
+    ///   「最近一次**有位移**的速度」抹掉 —— 于是轻轻一甩永远过不了速度那一档。
+    /// - **这一段的时长过 [`FLING_STOPPED`] 就丢**：中间停过手，除出来的是「含一段静止」的
+    ///   平均，既不是松手那一下的，也可能虚高（拖一半停住、停手前那一格攒了二百像素，
+    ///   一百多毫秒一除还剩一千多）。丢它而不是清零：清零由 [`SwipeTrack::speed_along`]
+    ///   按新鲜度判，只有一处说「作废」。
+    fn note_step(&mut self, now: Instant) {
+        let Some((from, x, y)) = self.speed_from else {
+            // 这一笔的第一格只立分母的起点：还没有一段时间可以除。
+            self.speed_from = Some((now, self.dx, self.dy));
+            return;
+        };
+        let dt = now.duration_since(from);
+        if dt < FLING_SAMPLE_MIN {
+            return;
+        }
+        self.speed_from = Some((now, self.dx, self.dy));
+        let seg = (self.dx - x, self.dy - y);
+        if seg.0 == 0.0 && seg.1 == 0.0 {
+            return;
+        }
+        if dt > FLING_STOPPED {
+            return;
+        }
+        let secs = dt.as_secs_f32();
+        self.speed = (seg.0 / secs, seg.1 / secs);
+        self.speed_at = Some(now);
+    }
+
+    /// 松手那一下沿**已认领那一步**有多快（与 `along` 同一把尺、同一个符号）。
+    ///
+    /// 最近那次取样距今过 [`FLING_STOPPED`] 给 0 —— 「拖到一半停住再松手」到这里就是没有速度。
+    fn speed_along(&self, axis: Axis, rtl: bool, intent: TurnIntent, now: Instant) -> f32 {
+        let fresh = self
+            .speed_at
+            .is_some_and(|at| now.duration_since(at) <= FLING_STOPPED);
+        if !fresh {
+            return 0.0;
+        }
+        travel(toward(axis, rtl, self.speed.0, self.speed.1), intent)
+    }
+}
+
+impl ReaderSession {
+    /// 这一屏这一档的翻页轴、沿**那一根轴**的一屏有多长、往哪边读。
+    ///
+    /// 两件事分开判：**「这一笔算不算翻页」**由 `PageTurnStyle::claims` 看手指那根轴（折页两轴
+    /// 都认，其余只认自己那根），**「走了多远」永远沿这一档自己的轴**（`PageTurnStyle::axis`）量
+    /// —— 与动画那一头 `area.distance(self.axis())` 同一把尺。从前两头都按手指那根轴量：折页是一笔
+    /// 两轴的，于是一笔竖着划的按页高归一，纸几乎没卷、进度却已经过半，松手读出来是「页翻了纸没
+    /// 动」。其余几档 `claims` 只认自己那根，两把尺本来就重合。
     /// `None` = 这一屏没有「翻页」这件事：连续滚动（手指就是滚）、定版式（没有正文切片）、
     /// 还没量出版心（距离是 0，进度无从归一）、或者没有书。
     pub(in crate::ui::features::reader) fn swipe_geometry(
@@ -155,16 +250,29 @@ impl ReaderSession {
         if self.is_fixed() || self.book().is_none() || self.laid_out.mode.is_continuous() {
             return None;
         }
-        // 「这一笔算不算翻页」由档位说：折页两轴都认，其余只认它自己那根轴。
-        let style = ConfigHolder::appearance(cx).page_turn;
-        if !turn_animation::of(style).claims(axis) {
+        let style = turn_animation::of(ConfigHolder::appearance(cx).page_turn);
+        if !style.claims(axis) {
             return None;
         }
-        let dist = match axis {
-            Axis::Horizontal => f32::from(self.content_bounds.get().size.width),
-            Axis::Vertical => self.laid_out.viewport,
-        };
-        (dist > 0.0).then(|| (axis, dist, self.progression_rtl()))
+        // 归一化与判轴用的是同一块版心：[`ReaderSession::page_area`]，与折线、捕获纹理同一把尺。
+        let dist = self.page_area.distance(style.axis());
+        (dist > 0.0).then(|| (style.axis(), dist, self.progression_rtl()))
+    }
+
+    /// 把一个**窗口坐标**下的落点折成 [`ReaderSession::page_area`] 里的归一化位置。
+    ///
+    /// `origin` 是挂监听那一栏在窗口里的原点：`page_area` 记的是这一栏自己的坐标，两头差着
+    /// 这一个数。两个轴都不夹 —— 读者把角拖到页外，折线才走得完。
+    pub(in crate::ui::features::reader) fn finger_of(
+        &self,
+        at: Point<Pixels>,
+        origin: Point<Pixels>,
+    ) -> (f32, f32) {
+        let area = self.page_area;
+        (
+            (f32::from(at.x) - f32::from(origin.x) - area.left) / area.width().max(1.0),
+            (f32::from(at.y) - f32::from(origin.y) - area.top) / area.height().max(1.0),
+        )
     }
 
     /// 滚动那一路的一步增量落到跟手翻页。`step_x` / `step_y` 是**这一帧走的那一段**，
@@ -231,7 +339,25 @@ impl ReaderSession {
     }
 
     /// 把这一步记进累计，然后按累计值决定：还没定性的试着定性，已认领的摆跟手。
+    ///
+    /// 手指此刻的位置**不能**读 `ScrollWheelEvent.position`：那一格在整趟拖动里
+    /// 恒等于按下点（见 [`SwipeTrack`] 的注释）。优先用原始触摸流给的那一个点（两个轴都在），
+    /// 拿不到才退回「起手点 + 累计位移」反推 —— 后者只有一个自由度，识别器把另一根的增量抹成
+    /// 了 0。两条来源都每一步写回 [`SwipeTrack::at`]：那条律的**朝向**与**推进量**全读划动向量，
+    /// 不更新就钉在按下那一格不动 —— 真机上读成「不跟手」。
+    ///
+    /// 归一化按 [`ReaderSession::page_area`]，与折线、捕获纹理那块矩形同一把尺。参照里是同一个
+    /// 做法：`harism/android-pagecurl` 的 `CurlView.onTouchEvent` 在 `ACTION_MOVE` 里每一步把
+    /// 当前点写进 `mCurlPos`，再走一遍 `updateCurlPos`。
+    ///
+    /// 两条来源都**不夹**在 0..1 里：手指要拖到页的另一侧之外，整页才算折完；夹住了，一笔拖到
+    /// 底画面永远停在半页。判定走完/弹回的那一格（[`progress`]）照旧夹，不吃这个数。
     fn swipe_walk(&mut self, step_x: f32, step_y: f32, cx: &mut Context<Self>) -> SwipeStep {
+        // 先取版心尺寸与这一格的时刻：下面 `self.swipe.as_mut()` 会把 `self` 的字段借走。
+        let now = cx.background_executor().now();
+        let area = self.page_area;
+        let width = area.width().max(1.0);
+        let height = area.height().max(1.0);
         let Some(track) = self.swipe.as_mut() else {
             return SwipeStep::Ignore;
         };
@@ -240,8 +366,15 @@ impl ReaderSession {
         }
         track.dx += step_x;
         track.dy += step_y;
-        // 手指此刻在哪：跟着每一步更新，折页那一档的折线就是靠它转的。
-        let grip = match (track.from, track.at) {
+        track.note_step(now);
+        // 手指此刻在哪：原始触摸流给得出就用它（两个轴都在），给不出才退回「起手点 + 累计
+        // 位移」反推 —— 那一格只有一个自由度，因为识别器把另一根的增量抹成了 0。
+        let raw = self.finger.map(|(_, at)| at);
+        let at = raw.or(track
+            .from
+            .map(|from| (from.0 + track.dx / width, from.1 + track.dy / height)));
+        track.at = at;
+        let grip = match (track.from, at) {
             (Some(from), Some(at)) => Some(turn_animation::Grip::new(from, at)),
             _ => None,
         };
@@ -274,7 +407,7 @@ impl ReaderSession {
         let Some((axis, intent)) = track.claim else {
             return SwipeStep::Swallow;
         };
-        // 距离按**这一笔自己的轴**量（折页可能是一笔竖着划的）。
+        // 距离沿**这一档自己的那根轴**量（折页两轴都认，但它翻的是一张横排页）。
         let Some((_, dist, rtl)) = self.swipe_geometry(cx, axis) else {
             return SwipeStep::Swallow;
         };
@@ -301,7 +434,8 @@ impl ReaderSession {
         let Some(drag) = dominant(dx, dy) else {
             return Claim::Refused;
         };
-        let Some((drag, _, rtl)) = self.swipe_geometry(cx, drag) else {
+        // 方向读**手指那根轴**（那一根上位移最大，读数最稳），走了多远沿这一档自己的那根量。
+        let Some((page_axis, _, rtl)) = self.swipe_geometry(cx, drag) else {
             return Claim::Refused;
         };
         let Some(intent) = TurnIntent::from_delta(toward(drag, rtl, dx, dy).signum() as isize)
@@ -315,7 +449,7 @@ impl ReaderSession {
             return Claim::Refused;
         }
         if let Some(track) = self.swipe.as_mut() {
-            track.claim = Some((drag, intent));
+            track.claim = Some((page_axis, intent));
         }
         // 手指之前攒下的那一截滚动增量作废：不然松手后它还会再多翻一页。
         self.wheel_accum = 0.0;
@@ -326,6 +460,12 @@ impl ReaderSession {
         if to == self.page() {
             return Claim::Claimed;
         }
+        // 旧页捕获还没完整落地时不让这一笔起跟手翻页。否则兜底会退回 CPU 裁页，两张正常
+        // 页面叠在一起；等入场动画结束、捕获完整后再划才有那张带正文的卷曲纸。
+        let style = ConfigHolder::appearance(cx).page_turn;
+        if style == PageTurn::Curl && !self.curl_capture_ready() {
+            return Claim::Refused;
+        }
         let chapter = self.chapter_index();
         // 页号**不动**：`leaving` 是眼下这一页（权威），`arriving` 是松手后可能去的那一页。
         let leaving = PageRef {
@@ -333,7 +473,6 @@ impl ReaderSession {
             page: self.page(),
         };
         let arriving = PageRef { chapter, page: to };
-        let style = ConfigHolder::appearance(cx).page_turn;
         let mode = self.laid_out.mode;
         start_turn(
             &mut self.turn,
@@ -344,7 +483,7 @@ impl ReaderSession {
                 leaving: Some(leaving),
                 arriving: Some(arriving),
                 forward: intent == TurnIntent::Next,
-                // 折页那一档：起折的角看按下点，折线看手指此刻的位置。
+                // 折页那一档：锚点是按下点投影到页的自由边，朝向与推进量看这一笔的划动向量。
                 grip: self.swipe.and_then(|track| {
                     track
                         .from
@@ -385,7 +524,8 @@ impl ReaderSession {
         };
         let along = travel(toward(axis, rtl, track.dx, track.dy), intent);
         let from = progress(along, dist);
-        let revert = !snap(along, dist);
+        let speed = track.speed_along(axis, rtl, intent, cx.background_executor().now());
+        let revert = !snap(along, dist, speed);
         let target = self
             .turn
             .and_then(|turn| turn.arriving)
@@ -413,7 +553,8 @@ mod tests {
     //! 「横扫该翻页」那条发的是**原始触摸**，走的就是识别器 → 滚动事件这一条真路。
 
     use super::{
-        Axis, SLOP, SNAP_FRACTION, TurnIntent, dominant, passed, progress, snap, toward, travel,
+        Axis, FLING_MIN_PX, FLING_SPEED, SLOP, SNAP_FRACTION, TurnIntent, dominant, fling_floor,
+        passed, progress, snap, toward, travel,
     };
 
     const DIST: f32 = 400.0;
@@ -478,14 +619,66 @@ mod tests {
         assert_eq!(progress(100.0, 0.0), 0.0, "版心还没量过时不起动画");
     }
 
-    /// 抬手判据：过三分之一才落定，差一点就弹回 —— 这一条决定「松手后到底翻没翻」。
+    /// 慢拖那一半的抬手判据：过五分之一才落定，差一点就弹回。
+    ///
+    /// 速度一律给 0 —— 这一条只钉距离那一律，把速度那一条混进来就分不清是哪一条放行的。
     #[test]
-    fn it_lands_only_past_a_third_of_the_screen() {
+    fn it_lands_only_past_a_fifth_of_the_screen() {
         let edge = SNAP_FRACTION * DIST;
-        assert!(snap(edge, DIST), "刚好过线该走完");
-        assert!(snap(edge + 1.0, DIST));
-        assert!(!snap(edge - 1.0, DIST), "差一点就弹回，不该翻");
-        assert!(!snap(-edge, DIST), "往反方向拖绝不该被当成翻页");
+        assert!(snap(edge, DIST, 0.0), "刚好过线该走完");
+        assert!(snap(edge + 1.0, DIST, 0.0));
+        assert!(!snap(edge - 1.0, DIST, 0.0), "差一点就弹回，不该翻");
+        assert!(!snap(-edge, DIST, 0.0), "往反方向拖绝不该被当成翻页");
+        // 慢拖到线之前，再快也不该由这一条放行（速度那条自己另有下限，见下面两条）。
+        assert!(!snap(edge - 1.0, DIST, FLING_SPEED - 1.0));
+    }
+
+    /// 距离没过线但甩得够快，也算走完 —— 这一条救的是「短促一甩」。
+    ///
+    /// 但速度不是万能：先要走过 [`fling_floor`] 那一截，方向还得是已认领的那一步。
+    #[test]
+    fn a_fast_flick_lands_below_the_distance_line() {
+        let floor = fling_floor(DIST);
+        assert!(
+            floor < SNAP_FRACTION * DIST,
+            "前置：下限那一截要真的低于落定线，否则这条测的是距离那一律"
+        );
+        assert!(
+            snap(floor, DIST, FLING_SPEED),
+            "刚好那一截 + 刚好那个速度该落定"
+        );
+        assert!(
+            !snap(floor - 1.0, DIST, FLING_SPEED * 10.0),
+            "没走过最小那一截，再快也不翻 —— 挡的是拇指在屏上蹭一下"
+        );
+        assert!(
+            !snap(floor + 1.0, DIST, FLING_SPEED - 1.0),
+            "差一点速度就还是弹回"
+        );
+        assert!(!snap(floor, DIST, -FLING_SPEED), "朝反方向甩不该翻");
+        assert!(
+            !snap(-floor, DIST, FLING_SPEED * 10.0),
+            "拖回起点之外不该翻"
+        );
+    }
+
+    /// 那一截下限随页宽走：窄屏靠 36 兜住误触，宽屏（平板横档）按 8% 抬上去，
+    /// 免得「走过半屏的十分之一」也算一甩。
+    #[test]
+    fn the_flick_floor_follows_the_page_width() {
+        assert_eq!(
+            fling_floor(384.0),
+            FLING_MIN_PX,
+            "384 的 8% 才 30.7，取下限"
+        );
+        assert_eq!(
+            FLING_MIN_PX / 384.0,
+            0.09375,
+            "所以 384 宽那屏是九分之一的距离"
+        );
+        assert_eq!(fling_floor(800.0), 64.0, "宽屏取比例那一头：800 的 8%");
+        assert!(!snap(50.0, 800.0, 3000.0), "800 宽走过 50 不算甩");
+        assert!(snap(64.0, 800.0, FLING_SPEED));
     }
 
     /// 认领之后距离按**那一步**算，不按读书顺序算：回上一页那一趟在读书顺序里天生是负的，
@@ -495,13 +688,13 @@ mod tests {
         // 顺读的书里左划 = 往后翻：读书顺序为正，`travel` 原样递过去。
         let next = toward(Axis::Horizontal, false, -200.0, 0.0);
         assert_eq!(travel(next, TurnIntent::Next), 200.0);
-        assert!(snap(travel(next, TurnIntent::Next), DIST));
+        assert!(snap(travel(next, TurnIntent::Next), DIST, 0.0));
         // 右划 = 回上一页：读书顺序那一段是负的，反一次号才是手指真正走过的距离。
         let prev = toward(Axis::Horizontal, false, 200.0, 0.0);
         assert_eq!(prev, -200.0, "回上一页那一趟在读书顺序里是负的");
         assert_eq!(travel(prev, TurnIntent::Previous), 200.0);
         assert!(
-            snap(travel(prev, TurnIntent::Previous), DIST),
+            snap(travel(prev, TurnIntent::Previous), DIST, 0.0),
             "回上一页也该过得了线"
         );
         // 认领之后拖到那一步的反面：仍给 0，画面停在「还没起步」那一帧。

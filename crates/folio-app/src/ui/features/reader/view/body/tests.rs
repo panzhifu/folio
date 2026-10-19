@@ -29,6 +29,8 @@ use gpui_kit::{
 
 use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
 use crate::ui::features::reader::model::session::ReaderSession;
+use crate::ui::features::reader::model::swipe::{FLING_SPEED, SNAP_FRACTION, fling_floor};
+use crate::ui::features::reader::motion::turn_animation::Axis;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::NAV_TRANSITION;
 
@@ -3138,7 +3140,7 @@ fn a_horizontal_swipe_follows_the_finger_and_lands(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
 }
 
-/// 横扫没过那一屏的三分之一：跟手照样起来，松手弹回，页号一个字不动。
+/// 横扫没过那一屏的五分之一：跟手照样起来，松手弹回，页号一个字不动。
 /// 这条与上面那条是一对 —— 只钉「该翻」会漏掉「不该翻」，而那半才是弹回那段动画的去处。
 #[gpui_kit::test]
 fn a_short_horizontal_swipe_bounces_back(cx: &mut TestAppContext) {
@@ -3171,6 +3173,202 @@ fn a_short_horizontal_swipe_bounces_back(cx: &mut TestAppContext) {
         "弹回走完该收掉"
     );
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 短促一甩：走过的距离没到落定线，可松手那一下够快 —— 照样翻页。
+///
+/// `swipe::tests` 里那几条只钉判据本身；这一条钉的是**速度真从事件里量出来了**。量不出来
+/// 只有「一甩不翻」这一种表现，而它与「这一律压根没生效」在屏幕上看不出差别：钟没走、
+/// 取样窗口写反、抬手那一条零增量把最近一次有位移的速度抹掉，三种都红在这里。
+///
+/// 走的是真机那条路（原始触摸 → 识别器 → 锁了轴的 `ScrollWheelEvent`），钟按 16ms 一格推：
+/// 一笔的第一格只立分母起点，所以速度来自第二格那一段。
+#[gpui_kit::test]
+fn a_short_but_fast_flick_lands(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+    // 两条线都按这一屏那一档的轴长算，不写死像素：窗口或语料一改，写死的数就会
+    // 悄悄落到线的那一边去，用例绿着却什么都没测。
+    let (_, dist, _) = view
+        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal))
+        .expect("分页 + 横扫该有几何");
+    let total = (fling_floor(dist) + SNAP_FRACTION * dist) * 0.5;
+    assert!(
+        total > fling_floor(dist) + 1.0 && total < SNAP_FRACTION * dist - 1.0,
+        "前置：走的那一截要落在下限与落定线之间（轴长 {dist:.0}，取 {total:.0}）"
+    );
+    let step = total * 0.5;
+    assert!(
+        step / 0.016 >= FLING_SPEED,
+        "前置：第二格那一段在 16ms 里要走够快（{:.0} dp/s）",
+        step / 0.016
+    );
+
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    // 这一格是识别器发来的第一条（`Started`，带走过 slop 的整截）：只立起点，还没有速度。
+    cx.executor().advance_clock(Duration::from_millis(16));
+    raw_touch(cx, handle, TouchPhase::Moved, 360.0 - step);
+    // 这一格才是速度：同一段位移除以 16ms。
+    cx.executor().advance_clock(Duration::from_millis(16));
+    raw_touch(cx, handle, TouchPhase::Moved, 360.0 - total);
+    raw_touch(cx, handle, TouchPhase::Ended, 360.0 - total);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "走过 {total:.0}（落定线 {line:.0}）但松手 {:.0} dp/s，该由速度那一律翻页",
+        step / 0.016,
+        line = SNAP_FRACTION * dist,
+    );
+}
+
+/// 慢拖过五分之一：不甩也翻页 —— 这一条钉的是落定线本身降到了 1/5。
+///
+/// 抬手前故意停 150ms，速度那一律在这一条里必然读成 0，放行它的只有距离那一律。少了这一句，
+/// 「过线」可能来自速度那一支，把 `SNAP_FRACTION` 改回 1/3 也照样绿 —— 那条改动的门就空转了。
+#[gpui_kit::test]
+fn a_slow_drag_past_a_fifth_of_the_screen_lands(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+    let (_, dist, _) = view
+        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal))
+        .expect("分页 + 横扫该有几何");
+    let total = SNAP_FRACTION * dist + 4.0;
+    assert!(
+        total < dist / 3.0,
+        "前置：走的那一截要短于旧的三分之一线，否则这一条挡不住改回去"
+    );
+
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    cx.executor().advance_clock(Duration::from_millis(16));
+    raw_touch(cx, handle, TouchPhase::Moved, 360.0 - total);
+    cx.executor().advance_clock(Duration::from_millis(150));
+    raw_touch(cx, handle, TouchPhase::Ended, 360.0 - total);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "慢拖走过 {total:.0}（线 {:.0}）就该落定，不必甩",
+        SNAP_FRACTION * dist,
+    );
+}
+
+/// 拖到一半停住再松手：那一截位移再快也不该翻 —— 速度按停手作废，退回距离那一律。
+///
+/// 与上面那条是一对：只钉「快就翻」会漏掉「停过手不翻」，而后者才是读者慢慢挪到半屏、
+/// 想了想、抬手这一路的去处。
+#[gpui_kit::test]
+fn a_flick_that_stops_before_the_release_bounces_back(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+    let (_, dist, _) = view
+        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal))
+        .expect("分页 + 横扫该有几何");
+    let total = (fling_floor(dist) + SNAP_FRACTION * dist) * 0.5;
+
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    cx.executor().advance_clock(Duration::from_millis(16));
+    raw_touch(cx, handle, TouchPhase::Moved, 360.0 - total * 0.5);
+    cx.executor().advance_clock(Duration::from_millis(16));
+    raw_touch(cx, handle, TouchPhase::Moved, 360.0 - total);
+    // 停手：比 FLING_STOPPED 宽，且别宽到把识别器那一笔判成上一笔的收尾（500ms 长按档）。
+    cx.executor().advance_clock(Duration::from_millis(150));
+    raw_touch(cx, handle, TouchPhase::Ended, 360.0 - total);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first,
+        "停过手就没有速度，走过 {total:.0} 没过线 {line:.0} 该弹回",
+        line = SNAP_FRACTION * dist,
+    );
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_none()),
+        "弹回走完该收掉"
+    );
+}
+
+/// 宽屏上「冲一格、停住、再抬手」：那一段摊出来的平均，不该当成松手那一下的速度。
+///
+/// 上面那条测的是**抬手时的新鲜度**（最近一次有位移的取样过旧就作废）。这一条测的是
+/// **取样那一段**：一笔里有一条长段 —— 分母盖过停手那一档，手指在头几毫秒冲了八十来像素、
+/// 随后停住不动、抬手 —— 平均除出来过了速度门，可松手那一下其实没有速度。
+///
+/// 这一支在手机那一档的屏宽上量不出来：摊过 110ms 才够 700 的那一截（≈77）加上一笔起步
+/// 刚过 [`SLOP`](crate::ui::features::reader::model::swipe::SLOP) 的那 20，在 384 宽那一屏上
+/// 已经越过落定线，归距离那一律管了。所以这里开宽窗。
+#[gpui_kit::test]
+fn a_burst_then_a_stall_on_a_wide_page_does_not_fling(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        1000.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+    let (_, dist, _) = view
+        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal))
+        .expect("分页 + 横扫该有几何");
+
+    // 攒下来那一段摊到的时长：比停手那一档（100ms）长，又不长到把识别器那一笔判成上一笔。
+    const STALL: f32 = 0.11;
+    let start = 20.0;
+    let burst = FLING_SPEED * STALL + 8.0;
+    let total = start + burst;
+    let line = SNAP_FRACTION * dist;
+    assert!(
+        burst / STALL >= FLING_SPEED,
+        "前置：那一段摊到 {STALL}s 要过得了速度门，实得 {:.0}",
+        burst / STALL
+    );
+    assert!(
+        fling_floor(dist) < total && total < line - 1.0,
+        "前置：这一屏得够宽 —— 走过 {total:.0} 要过了下限、又没到落定线 {line:.0}（轴长 {dist:.0}）"
+    );
+
+    raw_touch(cx, handle, TouchPhase::Started, 900.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 900.0 - start);
+    // 同一格再冲一截：钟没走，这一段攒着不取样。
+    raw_touch(cx, handle, TouchPhase::Moved, 900.0 - total);
+    cx.executor().advance_clock(Duration::from_secs_f32(STALL));
+    raw_touch(cx, handle, TouchPhase::Ended, 900.0 - total);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first,
+        "停过手之后抬手，那一段 {burst:.0} 摊到 {STALL}s 的平均不该被当成松手速度"
+    );
 }
 
 /// 回上一页那一趟：往右横扫同样要跟手、同样过线落定。
@@ -3241,6 +3439,206 @@ fn a_horizontal_swipe_back_lands_on_the_previous_page(cx: &mut TestAppContext) {
     );
     turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 折页那一档往**右**横扫：纸得真的跟着卷起来，而且起的是**左**边那一条。
+///
+/// 那条律只认「往左划」那一套坐标，往回翻的手势要在进出口各映一次横向。只映出口那一半的时候，
+/// 进度那一步照样在走（它读的是折过号的位移），而上面那条 `a_horizontal_swipe_back…` 走的是
+/// 平移那一档（判的是 `page_shift`，折页恒为 0），两扇门都绿，屏上却是「往右拖整趟不动、松手
+/// 才突然卷起来」—— 读者报的「只能往左滑不能往右滑」。这条读的是 GPU 那份 uniform。
+#[gpui_kit::test]
+fn a_curl_swipe_back_rolls_the_page(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::session::TurnRun;
+    use crate::ui::features::reader::motion::turn_animation::cylinder_at;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    // 先往后走两页：从第 0 页往回划，那一趟没有上一页可去，测不到东西。
+    //
+    // 折页要等当前页的捕获纹理完整落地才放行下一页，而静态页不会自己再续一帧，所以每
+    // 翻一页都把动画走完、再 settle 两帧让 `capture_committed` 落到 `captured_page`。
+    for _ in 0..2 {
+        view.update(cx, |v, cx| v.scroll_page(1, cx));
+        turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+        settle(cx, handle);
+    }
+    let from = view.read_with(cx, |v, _| v.page());
+    assert_eq!(from, 2, "语料该够切出第三页");
+
+    raw_touch(cx, handle, TouchPhase::Started, 60.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 210.0);
+    let turn = view
+        .read_with(cx, |v, _| v.turn)
+        .expect("往右横扫过阈值该挂上跟手那一趟");
+    let TurnRun::Following { t } = turn.run else {
+        panic!("该在跟手那一态，实得 {:?}", turn.run);
+    };
+    assert!(!turn.forward, "往右横扫该被判成回上一页");
+    assert!(t > 0.0, "进度那一步该跟着走，实得 {t}");
+    let grip = turn.grip.expect("折页这一档，手是每一步都跟着写的");
+    let area = view.read_with(cx, |v, _| v.page_area);
+
+    // 网格那头判「哪一段已经卷走」读的就是这一份 uniform：`n·x + n·y − d > 0` 那一侧离场。
+    let cylinder = cylinder_at(t, turn.forward, area, Some(grip)).expect("量得出圆柱");
+    let rolled = |x: f32| cylinder.nx * x + cylinder.ny * 200.0 - cylinder.d > 0.0;
+    assert!(
+        rolled(area.left + 1.0),
+        "往右拖这一笔该把**左**边那一窄条卷起来，实得 n = ({}, {}) d = {}",
+        cylinder.nx,
+        cylinder.ny,
+        cylinder.d
+    );
+    assert!(
+        !rolled(area.right - 1.0),
+        "右缘那一条还该整片平摊着 —— 起的是左边，不是整页一起走"
+    );
+    // 卷筒也得真的长出来：半径为 0 就是一根硬折的棍，与「仿真」那一格无关。
+    assert!(
+        cylinder.radius > 0.0,
+        "跟手途中该有一段落在柱面上，实得 radius = {}",
+        cylinder.radius
+    );
+
+    raw_touch(cx, handle, TouchPhase::Moved, 360.0);
+    raw_touch(cx, handle, TouchPhase::Ended, 360.0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        from - 1,
+        "走过大半屏往回划，松手该落回上一页"
+    );
+}
+
+/// 窗口尺寸与那张捕获纹理不同源 ⇒ 必须重烘。
+///
+/// 「烘过哪一页」那个键拦不住这一格：分屏、折叠展开、surface 重建之后章号页号一个字都不动，而
+/// 纹理里被写过的只有**当时**那块矩形，网格取 uv 却按**今天**的窗口归一 —— 差出来的那一截采到没
+/// 被写过的地方，读出来就是黑。这里不去动测试平台的 resize（那一段不归这一档管），直接把
+/// 「记下来的尺寸与今天不同」那一格状态摆出来，看下一帧认不认。
+#[gpui_kit::test]
+fn a_stale_captured_size_forces_a_recapture(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    let fresh = view.read_with(cx, |v, _| {
+        (v.captured_size, v.capture_dirty, v.captured_page)
+    });
+    assert!(
+        fresh.0.is_some() && !fresh.1,
+        "定住的这一帧该已经把当前页烘了，实得 {fresh:?}"
+    );
+
+    // 摆成「窗口变了」那一样子：尺寸那一格与今天对不上，页号章号一个字不动。
+    view.update(cx, |v, _| v.captured_size = Some((0.0, 0.0)));
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .expect("渲染应成功");
+    // 捕获是两帧的事：这一帧在绘制回调里发请求并记下 `capture_committed`，下一次
+    // `render` 开头才把它落到 `captured_page` / `captured_size`。
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .expect("第二帧应成功");
+    cx.run_until_parked();
+    let now = view.read_with(cx, |v, _| {
+        (v.captured_size, v.capture_dirty, v.captured_page)
+    });
+    assert_ne!(
+        now.0,
+        Some((0.0, 0.0)),
+        "尺寸不同源却没重烘：那条黑就是从这里来的"
+    );
+    assert!(!now.1, "重烘之后脏标记该落下，实得 {now:?}");
+    assert_eq!(now.2, fresh.2, "重烘不改页号");
+}
+
+/// 从右往左读的那一本里走折页：往**右**划是「往后翻」，而纸揭的是**左**边那一窄条。
+///
+/// 这条钉的是「阅读方向真的一路走到了几何」：会话读那本书的 `progression_rtl` → 动画帧带着它
+/// → 折页按「自由边在哪一侧」判（`forward != rtl`）。从前那条链断在最后一格，折页把 `forward`
+/// 直接当判据用，于是 RTL 里往后翻那一笔（往右拖）被「往翻页反方向走的那一截不算」夹成 0 ——
+/// 与 LTR 往回翻那个缺陷同一个读数，而这一半从来没有门过。
+#[gpui_kit::test]
+fn a_curl_swipe_in_an_rtl_book_rolls_from_the_left_edge(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::session::TurnRun;
+    use crate::ui::features::reader::motion::turn_animation::Pose;
+    use crate::ui::features::reader::motion::turn_animation::cylinder_at;
+
+    cx.update(gpui_kit::init);
+    let mut doc = flow();
+    doc.progression_rtl = true;
+    let (view, handle) = open(cx, &doc, "markdown", prefs(16.0), Locator::start(), 460.0);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    let rtl = view.read_with(cx, |v, _| v.progression_rtl());
+    assert!(rtl, "语料得真的是从右往左读的那一本，否则这条什么都测不到");
+    let from = view.read_with(cx, |v, _| v.page());
+
+    // 往**右**划：从右往左读的那一本里，那才是「往后翻」那一笔。
+    raw_touch(cx, handle, TouchPhase::Started, 60.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 210.0);
+    let turn = view
+        .read_with(cx, |v, _| v.turn)
+        .expect("RTL 里往右横扫过阈值该挂上跟手那一趟");
+    let TurnRun::Following { t } = turn.run else {
+        panic!("该在跟手那一态，实得 {:?}", turn.run);
+    };
+    assert!(turn.forward, "RTL 里往右划该是**往后**翻");
+    assert!(t > 0.0, "进度那一步该跟着走，实得 {t}");
+    let grip = turn.grip.expect("折页这一档，手是每一步都跟着写的");
+    let area = view.read_with(cx, |v, _| v.page_area);
+
+    let free_right = Pose::free_edge_right(turn.forward, rtl);
+    let cylinder = cylinder_at(t, free_right, area, Some(grip)).expect("量得出圆柱");
+    let rolled = |x: f32| cylinder.nx * x + cylinder.ny * 200.0 - cylinder.d > 0.0;
+    assert!(
+        rolled(area.left + 1.0),
+        "自由边在该本的左边，左缘那一窄条得已经离场；n = ({}, {}) d = {}",
+        cylinder.nx,
+        cylinder.ny,
+        cylinder.d
+    );
+    assert!(
+        !rolled(area.right - 1.0),
+        "右缘那一条还该平摊着 —— 判据要是读成了 `forward`，这里整页都不会动"
+    );
+    assert!(
+        cylinder.radius > 0.0,
+        "跟手途中该有一段落在柱面上，实得 radius = {}",
+        cylinder.radius
+    );
+
+    raw_touch(cx, handle, TouchPhase::Moved, 360.0);
+    raw_touch(cx, handle, TouchPhase::Ended, 360.0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        from + 1,
+        "往右划过大半屏，松手该往后翻一页"
+    );
 }
 
 /// 选了「上下平移」之后，竖着拖的那一趟也得跟着手指走。
@@ -3930,12 +4328,11 @@ fn a_cover_draws_two_sheets_and_keeps_the_offset_on_the_arriving_one(cx: &mut Te
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
 }
 
-/// 折页那一档也摆两张纸，但**两张都不位移**：新页平躺在下面被一点点露出来，旧页停在原地
-/// 被折走，动的只有「各自被折线裁到哪一侧」。于是 `page_shift` 全程归零，命中换算什么
-/// 都不必减 —— 这是这一档换掉「新页盖进来」那套几何之后多出来的一条约定，得单独钉：
-/// 谁把 `Curl::sheets` 改回带位移的那一支，画面仍然能动，只有点在补间途中会偏。
+/// 折页那一档现在只摆**进场**那一张：旧页在 `capture_page_region` 烘的纹理里，
+/// 由 GPU 网格卷起来。于是 `page_shift` 全程归零，命中换算什么都不必减 ——
+/// 谁把 `Curl::sheets_at` 改回带位移的那一支，画面仍然能动，只有点在补间途中会偏。
 #[gpui_kit::test]
-fn a_fold_draws_two_sheets_without_any_offset(cx: &mut TestAppContext) {
+fn a_gpu_fold_draws_one_sheet_and_the_captured_old_page(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (view, handle) = open(
         cx,
@@ -3954,8 +4351,8 @@ fn a_fold_draws_two_sheets_without_any_offset(cx: &mut TestAppContext) {
     view.update(cx, |v, cx| v.scroll_page(1, cx));
     let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(1));
     assert_eq!(
-        rebuilds, 2,
-        "折页起步也要两张纸同时上屏（拿到 {rebuilds} 份场景）：少摆一张，折面就是盖在一块空纸上"
+        rebuilds, 1,
+        "GPU 折页只摆进场那一张：旧页在捕获纹理里，不该再走一遍字形（拿到 {rebuilds} 份场景）"
     );
     assert_eq!(
         view.read_with(cx, |v, _| v.page_shift),
@@ -3969,6 +4366,48 @@ fn a_fold_draws_two_sheets_without_any_offset(cx: &mut TestAppContext) {
         "走完不该再摆那张被折走的旧页（拿到 {rebuilds} 份）"
     );
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 斜着那一笔的**第二个自由度**只能来自原始触摸流。
+///
+/// 识别器把一笔定性成某一轴之后，就把另一根的增量抹成 0（`lock_delta_to_axis`）：只靠它折
+/// 出来的 `ScrollWheelEvent`，「起手点 + 累计位移」反推出的手指此刻永远停在按下那一格的纵
+/// 坐标上，折线转不起来。这一条同时是给元素订阅 `TouchEvent` 那个口子留的门 —— 口子没开，
+/// `finger` 就是 `None`，`at.1` 与 `from.1` 逐字相同，这里当场红。
+#[gpui_kit::test]
+fn a_diagonal_swipe_moves_the_fold_on_both_axes(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+
+    // 横着走得比竖着多一点：定性该归横轴（翻页），而纵向那一截只有原始流里还留着。
+    raw_touch_at(cx, handle, TouchPhase::Started, point(px(400.), px(120.)));
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(250.), px(260.)));
+
+    assert!(
+        view.read_with(cx, |v, _| v.finger.is_some()),
+        "原始触摸没到元素这一层：折线只剩一个自由度"
+    );
+    let grip = view
+        .read_with(cx, |v, _| v.turn.and_then(|turn| turn.grip))
+        .expect("跟手那一趟该带着读者这只手");
+    assert!(
+        (grip.at.1 - grip.from.1).abs() > 0.1,
+        "斜着那一笔的折线只走了一根轴：按下 y = {}，此刻 y = {}",
+        grip.from.1,
+        grip.at.1
+    );
 }
 
 /// 每一趟翻页都要一把**新**时钟键。章界那一趟从前在渲染帧里手摆 `seq: 0`、再把计数器加一
