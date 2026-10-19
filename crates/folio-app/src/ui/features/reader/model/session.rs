@@ -617,7 +617,7 @@ impl ReaderSession {
                 }
                 Ok(Some(reason)) => {
                     tracing::info!(book_id, reason = ?reason, "ReaderSession: 索引要重扫，已交后台");
-                    let pool = crate::ui::services::services::pool();
+                    let pool = crate::ui::services::resident::pool();
                     // 不等：重扫必然把整本书重读一遍（要读完全书才知道的数全在导入那趟算），
                     // 而旧索引只是粗一点、不是打不开 —— 三处兜底见 `folio_core::schedule_reindex`
                     // 的文档。新索引下次开书才生效，正看着的这一屏不重建。

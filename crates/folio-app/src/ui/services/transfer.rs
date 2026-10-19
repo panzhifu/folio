@@ -1,7 +1,7 @@
 //! Wi-Fi 传书在 app 侧的编排：设置页的开关 → 起 / 停
 //! [`folio_core::net::transfer::TransferServer`]。
 //!
-//! 服务句柄挂在 [`super::services`] 的进程级常驻资源里，只活到读者关掉或进程退出 ——
+//! 服务句柄挂在 [`super::resident`] 的进程级常驻资源里，只活到读者关掉或进程退出 ——
 //! **不写进配置**：开着的传书服务是一个「我在局域网里裸着」的状态，读者离开设置页它还在
 //! 没问题（那是他刚开的），但重启还自动开着就是惊吓。收件箱里的原件在导入成功后清掉，
 //! 失败保留待查（与监听同一套提交路径：勾选 = 亲手传的，重名算更新）。
@@ -20,7 +20,7 @@ use super::app_store;
 use super::config::ConfigHolder;
 use super::import_queue::auto_import_sender;
 use super::library::target_dir;
-use super::services;
+use super::resident;
 
 /// 默认端口。被占就顺延（core 里最多试 10 个），真实的以 `addr` 为准。
 const DEFAULT_PORT: u16 = 8410;
@@ -33,7 +33,7 @@ pub struct TransferStatus {
 
 /// 服务活着就给出它的对外信息；没起就是 `None`。
 pub fn running() -> Option<TransferStatus> {
-    services::services().with_transfer(|server| TransferStatus {
+    resident::services().with_transfer(|server| TransferStatus {
         urls: server.urls(),
         pin: server.pin().to_string(),
     })
@@ -42,17 +42,17 @@ pub fn running() -> Option<TransferStatus> {
 /// 按开关起停。书库没装、位置没确认过就不起 —— 收下的书总得有个去处。
 pub fn set_enabled(on: bool, cx: &App) {
     if !on {
-        services::services().set_transfer(None);
+        resident::services().set_transfer(None);
         return;
     }
     let Some(store) = app_store::handle(cx) else {
         tracing::error!("transfer: 书库没装上，传书不开");
-        services::services().set_transfer(None);
+        resident::services().set_transfer(None);
         return;
     };
     let Some(dest_dir) = target_dir(&ConfigHolder::library(cx)) else {
         tracing::error!("transfer: 书库位置没确认过，传书不开");
-        services::services().set_transfer(None);
+        resident::services().set_transfer(None);
         return;
     };
     let inbox_dir: PathBuf = folio_core::infra::paths::data_dir().join("inbox");
@@ -64,7 +64,7 @@ pub fn set_enabled(on: bool, cx: &App) {
             // 「重名怎么办」这一问；库里已经有同内容的那一本会在判重那一步报 Duplicate。
             let source = PathsSource::new(vec![path.clone()], ImportKind::Transfer);
             let handle = folio_core::submit_import(
-                &services::pool(),
+                &resident::pool(),
                 Box::new(source),
                 dest_dir.clone(),
                 Arc::clone(&store),
@@ -81,10 +81,10 @@ pub fn set_enabled(on: bool, cx: &App) {
         on_file,
     ) {
         // `set_transfer` 会先停旧的那只再存新的。
-        Ok(server) => services::services().set_transfer(Some(server)),
+        Ok(server) => resident::services().set_transfer(Some(server)),
         Err(err) => {
             tracing::error!("transfer: 传书服务起不来：{err:#}");
-            services::services().set_transfer(None);
+            resident::services().set_transfer(None);
         }
     }
 }

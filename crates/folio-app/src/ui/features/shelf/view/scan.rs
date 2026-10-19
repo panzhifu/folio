@@ -121,7 +121,7 @@ impl ShelfView {
         let noise_exempt = scan_noise_exempt();
         // 与导入共用同一个池（§1.1）：扫描走预热档，导入走落库档。
         let handle = submit_scan(
-            &crate::ui::services::services::pool(),
+            &crate::ui::services::resident::pool(),
             roots,
             exclude,
             noise_exempt,

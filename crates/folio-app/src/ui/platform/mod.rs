@@ -417,7 +417,7 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
 
     // 常驻资源（导入作业池 + 监听 + 传书）收拢到一个进程级句柄里；书库句柄也交过去，
     // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
-    crate::ui::services::services::install(cx);
+    crate::ui::services::resident::install(cx);
     // 诊断 dump（§5.8）：`FOLIO_DUMP=1` 时把生效配置 + 库版本 + 队列长度打一份。
     if folio_core::infra::diagnostics::enabled() {
         let provenance = ConfigHolder::provenance(cx);
@@ -425,7 +425,7 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
             &ConfigHolder::snapshot(cx),
             Some(&provenance),
             db_version,
-            Some(crate::ui::services::services::pool().queued()),
+            Some(crate::ui::services::resident::pool().queued()),
             // 物理内存还没接（平台层给），所以给 `None` —— 报「未知」也不报假数。
             None,
         );

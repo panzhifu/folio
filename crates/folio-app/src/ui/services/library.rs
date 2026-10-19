@@ -174,7 +174,7 @@ pub fn schedule_backfill(cx: &App) {
     // 句柄直接丢：这一趟没有界面读数（它不改书目内容，只改文件名与身份列）。
     // 作业照跑，跑完自己结束 —— 池在关停时会等它把已排的做完（`plans/基础设施.md` §1.3）。
     let for_log = dir.clone();
-    let _report = super::services::pool().submit_with(folio_core::Priority::Cleanup, move |ctx| {
+    let _report = super::resident::pool().submit_with(folio_core::Priority::Cleanup, move |ctx| {
         Ok(folio_core::backfill_copies(&store, &dir, ctx))
     });
     tracing::info!("library: 补齐这一趟已投进 Cleanup 档（{for_log:?}）");

@@ -49,7 +49,7 @@ use crate::ui::foundation::error::{Context as _, report};
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
-use crate::ui::services::services;
+use crate::ui::services::resident;
 use crate::ui::shell::navigation::SizeClass;
 use grid::{GUTTER, GridSpec, grid_spec};
 use scan::ScanPhase;
@@ -517,7 +517,7 @@ impl ShelfView {
             return;
         };
         // 拷贝、解析、落库都在后端管线里逐本完成（`folio_core::ingest::import`）。
-        let handle = submit_import(&services::pool(), source, dir, store);
+        let handle = submit_import(&resident::pool(), source, dir, store);
         let cancel = handle.cancel.clone();
         self.importing = Some((0, 0));
         self.import_cancel = Some(cancel);
