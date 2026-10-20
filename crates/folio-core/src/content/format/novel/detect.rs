@@ -373,14 +373,12 @@ pub(crate) struct BookInfo {
 /// 只读头部那几十行，按规则表的别名表取书名 / 作者 / 简介。
 ///
 /// **只看头部是有意的**：`作者：` 那一行长在文件开头，而整本去找就会把正文里那句
-/// 「他写道：作者：某某」当成书目 —— 那与「正文里提到第三章」是同一类假阳性。
-/// 上限 [`HEAD_LINES`] 行足够覆盖「书名 / 作者 / 简介 / 目录标题」这一组，真书上它们
-/// 都挤在最前面。
-const HEAD_LINES: usize = 40;
-
+/// 「他写道：作者：某某」当成书目 —— 那与「正文里提到第三章」是同一类假阳性。行数上限
+/// 在规则表里（`meta.head_lines`）：40 行够覆盖「书名 / 作者 / 简介 / 目录标题」这一组，
+/// 真书上它们都挤在最前面，而换语言这一组未必一样长。
 pub(crate) fn book_info(source: &str, stem: &str, rules: &CompiledRules) -> BookInfo {
     let meta = rules.meta();
-    let head: Vec<&str> = source.lines().take(HEAD_LINES).collect();
+    let head: Vec<&str> = source.lines().take(meta.head_lines.max(1)).collect();
     let value_after = |line: &str, keys: &[String]| -> Option<String> {
         let t = line.trim_matches(|c: char| c.is_whitespace());
         keys.iter().find_map(|key| {
@@ -388,7 +386,8 @@ pub(crate) fn book_info(source: &str, stem: &str, rules: &CompiledRules) -> Book
             let value = rest
                 .trim_start_matches([' ', '\t', '　', ':', '：', '=', '＝', ' ', '　'])
                 .trim_end();
-            (!value.is_empty() && value.chars().count() <= 60).then(|| value.to_string())
+            (!value.is_empty() && value.chars().count() <= meta.value_max_chars)
+                .then(|| value.to_string())
         })
     };
     let mut out = BookInfo::default();
@@ -415,14 +414,19 @@ pub(crate) fn book_info(source: &str, stem: &str, rules: &CompiledRules) -> Book
             out.description = desc;
         }
     }
-    // `《书名》` 那一行：网文导出最常见，且不写「书名：」这个键。
+    // 括号裹着书名的那一行（`《书名》`）：网文导出最常见，它不写「书名：」这个键。
+    // 认哪几对括号是规则表的事 —— 英文那套交空表，就是「不认括号」。
     if out.title.is_empty() {
         out.title = head
             .iter()
             .filter_map(|line| {
                 let t = line.trim();
-                let inner = t.strip_prefix('《')?.split('》').next()?;
-                (!inner.is_empty() && inner.chars().count() <= 40).then(|| inner.to_string())
+                meta.title_brackets.iter().find_map(|bracket| {
+                    let (open, close) = bracket.pair();
+                    let inner = t.strip_prefix(open)?.split(close).next()?;
+                    (!inner.is_empty() && inner.chars().count() <= meta.value_max_chars)
+                        .then(|| inner.to_string())
+                })
             })
             .next()
             .unwrap_or_default();

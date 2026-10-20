@@ -199,6 +199,45 @@ pub struct MetaKeys {
     pub completion_marks: Vec<String>,
     #[serde(default)]
     pub filename_noise: Vec<String>,
+    /// 只读头部这么多行找书目（见 `book_info` 那条「只看头部」的理由）。
+    #[serde(default = "default_head_lines")]
+    pub head_lines: usize,
+    /// 键后面的值最长收多少字：超过就说明那一行不是字段，而是一句正文。
+    #[serde(default = "default_value_max")]
+    pub value_max_chars: usize,
+    /// 作者那一行的分隔字符（「甲、乙」是两个人），**一个字符串而不是数组**：
+    /// 它是要喂给 `str::split` 的字符集，写成数组反而多一次转换。
+    #[serde(default = "default_author_separators")]
+    pub author_separators: String,
+    /// 按分隔切完之后要扔掉的碎片（`合著`、单独一个 `著`）。
+    #[serde(default)]
+    pub author_noise: Vec<String>,
+    /// 书名可能裹在哪对括号里（中文《》与【】；英文那套规则交空表）。
+    #[serde(default)]
+    pub title_brackets: Vec<TitleBracket>,
+}
+
+/// 一对括号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleBracket {
+    open: char,
+    close: char,
+}
+
+impl TitleBracket {
+    pub(crate) fn pair(&self) -> (char, char) {
+        (self.open, self.close)
+    }
+}
+
+fn default_head_lines() -> usize {
+    40
+}
+fn default_value_max() -> usize {
+    60
+}
+fn default_author_separators() -> String {
+    "、，,;；　 ".to_string()
 }
 
 /// 一条规则编译后的样子。`Rejected` 存在这里而不是被删掉，是为了让 `markers()` 的下标
