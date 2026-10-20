@@ -112,6 +112,48 @@ unicode-linebreak = "0.1.5"
 # `unicode-linebreak` 完全同一条理由。默认 feature（`std` + `hardcoded-data`）就是要的那份：
 # 表编进二进制，运行时不读外部数据、不联网取 Unicode 版本。
 unicode-bidi = "0.3"
+# 一本纯文本小说该按哪一套章标记走，取决于它是**什么文字**写的：CJK / 平假名 / 片假名 /
+# 谚文 / 拉丁 / 阿拉伯 的占比要按 Unicode 的 Script 属性数出来，而那张表随 Unicode 版本长
+# （15.0 与 16.0 的区间不一样），自己抄一份区间不是省依赖，是拿抄错换一次编译通过 ——
+# 与上面 `unicode-bidi` 那条同一句话。
+#
+# **不是新依赖树**：锁里已有 0.5.8，它是 `folio-core → resvg → usvg → rustybuzz` 这条链上
+# 本来就在编译、本来就在产物里的一份（`cargo tree -p folio-core -e normal -i unicode-script`
+# 可验），这里只是把图上已有的这份转成 folio-core 的直接依赖 —— 与上面 `flate2` /
+# `crc32fast` / `encoding_rs` 完全同一条理由。版本需求写 `"0.5"`，与 rustybuzz 那一份对齐，
+# 不会拉出第二条 `unicode-script`（写一个两边都不沾的号是上面 `sha2` 那条坑的同一形状）。
+unicode-script = "0.5"
+# 既没有 BOM、又没有声明、也不是合法 UTF-8 的裸文本（简体 GBK / 繁体 Big5 / 日轻
+# Shift-JIS / 韩文 EUC-KR 的小说 `.txt`）该按哪一码页解。
+#
+# **为什么这一格不是我们自己写**：实测过两条更便宜的判据都不成立。字节合法性分不开
+# —— 一段简体 GBK 的字节流拿 Big5 解**同样一个坏字节都没有**，得到的却是一串夹着注音
+# 符号的怪汉字；「取坏字节最少」因此是掷硬币（纯 ASCII 同时是五种码页的合法输入）。
+# 而误读的产物在屏幕上查不出错，正是 `content::format::charset` 模块头那句话防的那种
+# 事故。剩下唯一能分开它们的办法就是按字符序列做统计，那件事已经有人按 WHATWG 的规格
+# 写完并测过，不必重做一遍。
+#
+# **新增的包只有一个**：它自己的 deps 是 cfg-if / encoding_rs / memchr，三样都在 folio
+# 的锁里；连 encoding_rs 带的那几样（core_detect / simdutf8 / scopeguard / multiversion
+# 那个 shim / rustversion）也早就在锁里了 —— 实测集合差：`chardetng` 一条包名，别的一律
+# 复用。版本需求写 `"1"`，与它唯一的 1.0.0 对齐。
+# 纯 Rust、没有 `cc`，交叉到 Android 与鸿蒙不用加工具链变量 —— 与上面 `sha2` 那条同一理由。
+chardetng = "1"
+# 纯文本小说的章标记、编号体系与书目字段别名（书名/著者/作者/by…）是一族**存在外部数据里的
+# 模式串**：规则表要能按语言换一套、要能被读者整份替换，而字符串模式只有正则引擎吃得下 ——
+# 手写扫描器等于替每条模式各写一遍解析，那些解析从此没人复核。
+#
+# **这一条是新增，别拿上面那句「图上已有」照抄它**：`regex` 1.13.1 确实在锁里、也确实在编译，
+# 但带上它的是 `gpui-base` / `gpui-pre` / `env_filter`（`android_logger` 那条）—— 全在
+# folio-app 那一侧；`cargo tree -p folio-core -e normal -i regex` 回的是 `nothing to print`，
+# 即 core 的运行时图里没有它。所以这里新增的是 folio-core 的一条依赖边与链接面，不是第三个
+# crate 版本：需求写 `"1"`，被锁里那份 1.13.1 直接满足，`Cargo.lock` 因此不动。
+#
+# 默认 feature（`std` + `perf` + `unicode`）就是要的那份：`unicode` 给 `\p{Script}` 与全
+# Unicode 的大小写折叠，多语言那几套模式靠它；`perf` 带的 `aho-corasick` / `memchr` 本来就在
+# 图上。真省下来的不是引擎而是**用法**：规则表里每条自带匹配方式，只有声明成正则的那几条
+# 才编译，字面量那一族走 `starts_with` 或 aho-corasick 的多模式扫。
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

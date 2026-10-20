@@ -48,6 +48,16 @@ selectors.workspace = true
 unicode-linebreak.workspace = true
 # `dir="auto"` 的首强字符判定与 `unicode-bidi` 的字符类，见根 Cargo.toml 那条；不新增依赖树。
 unicode-bidi.workspace = true
+# 纯文本小说按哪种文字的章标记切章，要按 Unicode 的 Script 属性数出 CJK / 假名 / 谚文 /
+# 拉丁的占比。图上已有的一份（`resvg → usvg → rustybuzz`），理由与版本对齐写在根 Cargo.toml。
+unicode-script.workspace = true
+# 「没有 BOM、没有声明、又不是合法 UTF-8」的裸文本按哪一码页解。自己写的两条判据
+# （字节合法性、坏字节最少）都被实测否了，理由与「只多 1 个包」那组数写在根 Cargo.toml。
+chardetng.workspace = true
+# 章标记与书目字段的别名是存在外部数据里的模式串（规则表按语言换、可被读者整份替换），
+# 只有正则能吃字符串模式。**这条是 core 的运行时图里新增的**（不是第三个 crate 版本），
+# 为什么与「图上已有」那几条不同、以及逐条才编译的用法，全写在根 Cargo.toml 那条上。
+regex.workspace = true
 rust-i18n.workspace = true
 # 日志：core 这边只管「说了什么」——`tracing` 的宏与 span，配置在 `Config::logging`，
 # 装配 subscriber 的入口在 `src/logging.rs`。（不依赖 gpui 这条边界照旧成立：
