@@ -390,4 +390,24 @@ ALTER TABLE books ADD COLUMN series_position TEXT NOT NULL DEFAULT '';
     r#"
 ALTER TABLE chapters ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]';
 "#,
+    // v21：**划线怎么画入库**（`annotations.style`）。此前这一件事没有地方存 ——
+    // 表里只有 `color`，而界面那一层把「划线的样子」写死成一条 2 像素实线
+    // （`folio-app` 的 `annotation_underline_rects`），于是读者只能选颜色、不能选画法。
+    //
+    // 存的是**名字**（`highlight` / `line` / `wavy`）而不是一个小整数：与同一张表里
+    // `color` 那一列同一条口径（枚举的顺序是界面的摆法，会动；名字是身份，不该动）。
+    // 把它折成序号等于把「菜单里第几格」写进历史数据，将来往中间插一档就把老行读错。
+    //
+    // **默认 `'line'` 而偏好那一带的默认是 `highlight`，两个默认值不是一件事**，
+    // 各自答的是各自的问题：
+    //
+    // - 这一列的默认答的是「v21 之前落的那些条长什么样」。答案确定是实线 —— 那时界面
+    //   只会画实线。老行因此一行都不改观感，也不需要回填（回填要猜，而这里本不用猜）。
+    // - 配置里那一格答的是「下一条款该长什么样」，那是读者的选择，与历史无关。
+    //
+    // 新建一条永远显式写这一列（`Store::add_annotation` 多带一格），所以 `'line'` 这个
+    // 默认只对**迁移之前就在的那些行**生效，不会变成「新划线悄悄实线」。
+    r#"
+ALTER TABLE annotations ADD COLUMN style TEXT NOT NULL DEFAULT 'line';
+"#,
 ];

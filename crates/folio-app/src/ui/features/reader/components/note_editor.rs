@@ -8,8 +8,9 @@
 //! 两件容易写错的判断：
 //!
 //! - **`annotation: Some` 与 `None` 是两种保存语义**：挑中库里已有一条划线时，保存是
-//!   `update_annotation`（笔记连同原来的颜色一起写回）；普通选区保存才新建一条批注，
-//!   用的是默认那档颜色。把两者混成一条「先划再改」的路，会在读者只改笔记时多落一条。
+//!   `update_annotation`（笔记连同那一行原来的颜色与画法一起写回）；普通选区保存才新建一条
+//!   批注，用的是默认那档颜色与配置里那一格画法。把两者混成一条「先划再改」的路，
+//!   会在读者只改笔记时多落一条。
 //! - **新笔记空着不能保存**：按「笔记」却什么都不写，等于什么都没有发生；已有笔记
 //!   清空则是有意义的一步（把笔记删掉，划线留着），所以只有 `None` 那一臂禁用它。
 //!
@@ -28,6 +29,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
 };
 
+use crate::ui::features::reader::model::annotations::MarkedRow;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::l10n::tr;
 use crate::ui::shell::navigation::SizeClass;
@@ -36,8 +38,10 @@ use crate::ui::shell::navigation::SizeClass;
 pub(in crate::ui::features::reader) struct NoteEditor {
     /// 多行输入框。改动会经订阅转成一次重画：保存键的可用状态跟着它走。
     pub(in crate::ui::features::reader) input: Entity<TextareaState>,
-    /// `Some((批注 id, 颜色名))` = 改库里已有的一条；`None` = 保存时才落一条新的。
-    pub(in crate::ui::features::reader) annotation: Option<(i64, String)>,
+    /// `Some(那一行)` = 改库里已有的一条（保存时把它的颜色与画法原样带回去）；
+    /// `None` = 保存时才落一条新的。类型是 [`MarkedRow`] 而不是 `(id, 颜色)` 那一对：
+    /// `update_annotation` 整条覆盖，少带一格就悄悄把读者另一格改的东西退回默认档。
+    pub(in crate::ui::features::reader) annotation: Option<MarkedRow>,
     /// 选中文字的开头一段（最多 160 字）。打开时取一次，不跟着每帧重切。
     pub(in crate::ui::features::reader) excerpt: SharedString,
     /// 输入框的变更订阅。跟着编辑器一起活，drop 掉就收不到重画了。

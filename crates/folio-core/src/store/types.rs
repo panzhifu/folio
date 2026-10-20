@@ -96,6 +96,68 @@ pub struct ShelfItem {
 /// 查回颜色，名字一换色，读者已有的批注就跟着变色。
 pub const ANNOTATION_COLORS: &[&str] = &["ruby", "rose", "sky", "lime", "amber"];
 
+/// 划线怎么画。三档，按菜单里左边那条胶囊从左到右摆：底色带 / 字下实线 / 字下波浪。
+///
+/// 与 [`ANNOTATION_COLORS`] 同一条存法：**存名字而不是存画法**（不存线宽、不存透明度、
+/// 也不存路径点位）。那三样都属于绘制，将来调一个数就该跟着那一档走，而不是回头改库。
+///
+/// 这一档同时是全局偏好里那一格（`infra::config::Appearance::highlight_style`，
+/// 「新划的一条默认用哪种」）—— 两件事共用一个枚举是本意的：偏好问的就是「下一条款式」，
+/// 而库里那条记的就是「这一条款式」，中间不该隔一层翻译。它**不**进 `Reader` 那一节：
+/// `Reader` 整份是排版失效键，一条痕迹怎么画与一行字折在哪里毫无关系（同 `PageTurn`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnnotationStyle {
+    /// 铺在字底的一条色带（整行行盒那块矩形，压透明度）。默认档。
+    #[default]
+    Highlight,
+    /// 字下那条 2 像素实线 —— v21 之前库里只有这一种画法，所以它是老行的读回值
+    /// （见 `store::schema` 的 v21 那条）。
+    Line,
+    /// 字下那条波浪线。与 [`Self::Line`] 同一个落点（基线下 `descent × 0.618`），
+    /// 只是那条线自己起伏。
+    Wavy,
+}
+
+impl AnnotationStyle {
+    /// 全部三档，按界面该出现的顺序。加一档忘了在这里挂，界面上就永远选不到它。
+    pub const ALL: &'static [Self] = &[Self::Highlight, Self::Line, Self::Wavy];
+
+    /// 库里与配置文件用的键名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Highlight => "highlight",
+            Self::Line => "line",
+            Self::Wavy => "wavy",
+        }
+    }
+
+    /// 认不出的值回落 [`Self::default`]：手改坏一个键不该让整节配置退回默认，而「没有有效
+    /// 值」这一格全书只该有一个答案 —— 与 [`PageTurn::parse`](crate::PageTurn::parse) 同一条理由。
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "line" => Self::Line,
+            "wavy" => Self::Wavy,
+            // "highlight" 与它认不出的那些写法一起落这里：默认就是它。
+            _ => Self::default(),
+        }
+    }
+}
+
+/// 自己实现序列化，理由与 [`Mode`](crate::Mode)、[`PageTurn`](crate::PageTurn) 那两条一样：
+/// derive 碰到认不出的字符串会报错，而报错的代价是**整节** `Appearance` 退回默认。
+impl Serialize for AnnotationStyle {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AnnotationStyle {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(Self::parse(&text))
+    }
+}
+
 /// 一条标注：坐标（含找回它所需的指纹）+ 读者写的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Annotation {
@@ -107,6 +169,9 @@ pub struct Annotation {
     pub anchor: TextAnchor,
     pub note: String,
     pub color: String,
+    /// 这一条怎么画。库里那一列是名字，读回来已是 [`AnnotationStyle`]
+    /// （认不出的写法由存储层兜成默认档，与颜色同一口径）。
+    pub style: AnnotationStyle,
     /// 锚点找不回来了。界面要显式标出来，而不是把批注画在猜出来的位置上。
     pub stale: bool,
     pub created_at: i64,

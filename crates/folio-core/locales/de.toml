@@ -93,6 +93,10 @@ image_download = "Sichern"
 image_locate = "Textstelle"
 image_close = "Schließen"
 image_counter = "%{index} / %{total}"
+# Die drei Zeichentypen — die drei Felder der linken Kapsel im Auswahmenue.
+style_highlight = "Textmarker"
+style_line = "Unterstreichen"
+style_wavy = "Wellenlinie"
 
 [toast]
 font_size = "Schriftgröße %{size} px"
@@ -131,6 +135,7 @@ location = "Ort"
 watch = "Ordnerüberwachung"
 transfer = "Übertragung per WLAN"
 rows = "Einträge"
+marking = "Markierungen"
 
 [field]
 font_size = "Schriftgröße"
@@ -184,6 +189,8 @@ toc_dim_read = "Gelesene Kapitel abdunkeln"
 "toc_dim_read.desc" = "Kapitel, die du schon aufgeschlagen hast, werden im Verzeichnis blasser gezeichnet."
 page_turn = "Blätteranimation"
 "page_turn.desc" = "Wie das Blatt beim Umblättern wandert: wischen, überdecken, oder gar nicht. Seitenweise und Zwei-Seiten legen nach diesem Wert zwei Blätter aus; fortlaufendes Scrollen fragt nur, ob es eine Animation gibt. Der Wechsel setzt kein Kapitel neu."
+highlight_style = "Markierungsstil"
+"highlight_style.desc" = "Welche Spur eine neue Markierung im Text hinterlässt: ein Farbband hinter den Glyphen, eine gerade Linie darunter oder eine Wellenlinie. Markierungen im Buch behalten ihren eigenen Stil; hier zu ändern setzt nichts neu."
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
 [page_turn]
@@ -193,6 +200,11 @@ cover = "Von der Seite überdecken"
 curl = "Blättereffekt"
 scroll = "Nach unten scrollen"
 none = "Ohne Animation"
+
+[highlight_style]
+highlight = "Textmarker"
+line = "Unterstreichen"
+wavy = "Wellenlinie"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]

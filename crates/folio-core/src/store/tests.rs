@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::AnnotationStyle;
 use crate::Store;
 use crate::content::format::{
     Chapter, ChapterLocator, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
@@ -503,6 +504,63 @@ fn the_v20_migration_adds_image_uses_empty() {
     );
 }
 
+/// v21 迁移：旧库升上来多出 `annotations.style`，**老行一律读回实线（`line`）**。
+///
+/// 这一条钉的是两个默认值里属于库的那一个。v21 之前界面只会画一条 2 像素实线，所以
+/// 「那些条当时长什么样」有确定答案 —— 默认给 `line` 就是老行一条都不改观感，也不必回填
+/// （回填要猜，而这里本不用猜）。配置里那一格「下一条款长什么样」的默认是 `highlight`，
+/// 与这一列无关，见 `infra::config` 那侧的同名测试。
+#[test]
+fn the_v21_migration_keeps_old_rows_reading_as_the_straight_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    {
+        // 手工造一个 v20 库：跑前 20 条迁移，塞一本书与一条批注（那会儿没有 style 这一列）。
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for sql in &MIGRATIONS[..20] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 20).unwrap();
+        conn.execute(
+            "INSERT INTO books (path, title, authors, format, size, added_at)
+             VALUES ('a.epub', 'A', '', 'epub', 0, 0)",
+            [],
+        )
+        .unwrap();
+        let anchor = crate::content::anchor::TextAnchor {
+            chapter: 0,
+            start: 4,
+            end: 8,
+            exact: "重点句子".into(),
+            prefix: "前面的字".into(),
+            suffix: "后面的字".into(),
+            path: "/html[1]/body[1]/p[1]#0".into(),
+        };
+        conn.execute(
+            "INSERT INTO annotations (book_id, anchor_json, note, color, stale, created_at, updated_at)
+             VALUES (1, ?1, '旧的一条', 'rose', 0, 0, 0)",
+            rusqlite::params![anchor.to_json()],
+        )
+        .unwrap();
+    }
+
+    let store = Store::open_at(&db).unwrap();
+    assert_eq!(
+        store.user_version().unwrap(),
+        MIGRATIONS.len() as i64,
+        "v21 要跑到位"
+    );
+    let rows = store.annotations(1).unwrap();
+    assert_eq!(rows.len(), 1, "老行不该因为多一列就读不回来");
+    assert_eq!(
+        rows[0].style,
+        AnnotationStyle::Line,
+        "v21 之前划的那条只有实线这一种可能"
+    );
+    assert_eq!(rows[0].color, "rose", "同一行里颜色那格不该被这一版带歪");
+    assert_eq!(rows[0].note, "旧的一条");
+}
+
 /// 图片的元数据必须原样回来（字节不入库，见 v5 迁移），且重存时是替换而非追加。
 #[test]
 fn images_roundtrip_and_replace() {
@@ -797,7 +855,13 @@ fn reindexing_keeps_the_reader_data_and_touches_no_new_record() {
         path: "/html[1]/body[1]/p[1]#0".into(),
     };
     store
-        .add_annotation(id, &anchor, "这一段写得真好", "amber")
+        .add_annotation(
+            id,
+            &anchor,
+            "这一段写得真好",
+            "amber",
+            AnnotationStyle::default(),
+        )
         .unwrap();
     assert_eq!(store.annotations(id).unwrap().len(), 1);
 

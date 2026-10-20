@@ -40,13 +40,18 @@
 //! 不算「点别处清除」（[`ReaderSession::tap_with_selection`]）。
 //!
 //! 样式照读者给的那张参考图量：动作收进一条圆角浮条，图标在上面，**不带文字**；
-//! 颜色那五档单独缩成一条更矮的胶囊，压在动作条下面。两块共用同一份表面色与投影，
-//! 中间留一道 6 像素的缝 —— 读起来是「一排颜色 + 一条工具条」，而不是一张两行的卡片。
+//! 上面那一行是**两条胶囊分列两端** —— 左边三格「划线方式」（底色带 / 字下实线 / 字下波浪），
+//! 右边五枚颜色圆点，各自带一份表面色与投影，顶到整块菜单的左右两边；两块与下面那条
+//! 动作条同一档投影，中间留一道 6 像素的缝。
+//!
+//! 那一行比动作条宽，所以整块菜单的宽由它定（[`card_width`] 取两者的较大者），动作条在它
+//! 下面自己居中 ——「两端对齐」说的是那一行里那两组各顶各的边，不是三块同宽。
 //!
 //! 第二格跟着选区自己是谁换：选区**正好等于**库里某一条划线时它是「取消划线」
 //! （[`ReaderSession::selection_annotation`]）；改过范围的选区就是普通选区，那一格回到
-//! 「划线」。上面那一行五格颜色**恒在**：挑中某条划线时点色＝换色，普通选区点色＝就用
-//! 这个色划一条 —— 于是「划线」那一格给的是默认那档黄，想换个色直接点圆点。
+//! 「划线」。上面那一行的画法与颜色**恒在**：挑中某条划线时点它们＝改那一条，
+//! 普通选区点它们＝就用这一档划一条 —— 于是「划线」那一格给的是默认那档黄加配置里那一格
+//! 画法，想换个色直接点圆点，想换种画法直接点左边那三格。
 //!
 //! 「笔记」那一格是 M7 的入口：普通选区打开一张空白便签，挑中库里某条划线则打开它
 //! 已经写下的那条（图标换成带勾的便签，提示「这一条有笔记」）。
@@ -61,10 +66,11 @@
 
 use std::ops::Range;
 
-use folio_core::store::ANNOTATION_COLORS;
+use folio_core::store::{ANNOTATION_COLORS, AnnotationStyle};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{ColorSwatch, SelectionEdge, TouchHandle};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Bounds, BoxShadow, ClipboardItem, Context, Entity, Hsla,
     InteractiveElement as _, IntoElement, LongPressEvent, MouseButton, MouseDownEvent,
@@ -778,7 +784,7 @@ impl ReaderSession {
     }
 }
 
-// ====================== 就地菜单条（图标浮条 + 颜色胶囊）======================
+// ====================== 就地菜单条（图标浮条 + 两条胶囊分列两端）======================
 
 /// 动作条里一格的可点边长（逻辑像素）。拇指能稳定命中的下限是 44，而图标本身只有
 /// 20：这里取 40 是参考图里那排图标的呼吸感，一颗一颗之间不挨着。
@@ -787,15 +793,23 @@ const ACTION_CELL: f32 = 40.0;
 const ACTION_ICON: f32 = 21.0;
 /// 动作条的内缩：上下左右各 4，整条于是 48 高。
 const BAR_PAD: f32 = 4.0;
-/// 颜色胶囊的内缩与高：五枚 20 的圆点，上下各留 6。
+/// 顶端那一行两条胶囊的内缩与高：颜色那五枚 20 的圆点，上下各留 6。
 const SWATCH_PAD: f32 = 6.0;
 const SWATCH_DOT: f32 = 20.0;
-/// 一枚颜色格子的可点宽。比圆点宽 6，五枚连起来仍然比动作条窄。
+/// 一枚颜色格子的可点宽。比圆点宽 6。
 const SWATCH_CELL: f32 = 28.0;
-/// 颜色胶囊的高（与摆位共用）。
+/// 一枚画法格子的可点宽。**与颜色格子同宽**：那两条胶囊分列两端、同一高度，
+/// 一格宽不一样就会读出「这是两排不同的东西」，而它们答的是同一件事（这一条怎么留）。
+const STYLE_CELL: f32 = SWATCH_CELL;
+/// 画法那三格的图标多大。胶囊只有 32 高，21 那个数（动作条 40 格子里的尺寸）会顶到边。
+const STYLE_ICON: f32 = 17.0;
+/// 颜色胶囊的高（与摆位共用，那一行的两条胶囊同一个高）。
 const SWATCH_BAR: f32 = SWATCH_DOT + SWATCH_PAD * 2.0;
-/// 动作条与颜色胶囊之间的缝。
+/// 动作条与顶端那一行之间的缝。
 const BAR_GAP: f32 = 6.0;
+/// 顶端那一行里两条胶囊之间的缝。比 [`BAR_GAP`] 宽一点：同一行里两块是并列的两件事，
+/// 而上下两块属于同一张卡片。
+const MARK_GAP: f32 = 12.0;
 /// 指向选区那条小尾巴的高与宽。
 const MENU_TAIL: f32 = 8.0;
 const MENU_TAIL_WIDTH: f32 = 16.0;
@@ -812,17 +826,39 @@ fn action_cells(share: bool) -> f32 {
 }
 
 /// 整块菜单占的高（含尾巴）：摆位与「放不下就翻面」都按这个数算。
-/// 颜色胶囊 + 缝 + 动作条 + 尾巴；颜色那一行**恒在**，所以没有「一行 / 两行」两种高。
+/// 顶端那一行 + 缝 + 动作条 + 尾巴；那一行**恒在**，所以没有「一行 / 两行」两种高。
+/// 画法那三格与颜色那五枚同住那一行，所以这一格高**没有因为加画法而变**。
 pub(in crate::ui::features::reader) const fn card_height() -> f32 {
     ACTION_CELL + BAR_PAD * 2.0 + BAR_GAP + SWATCH_BAR + MENU_TAIL
 }
 
-/// 整块菜单的宽。颜色胶囊比动作条窄，真正决定横向占位的是动作条。
+/// 左边那条画法胶囊的宽。
+fn style_pill_width() -> f32 {
+    SWATCH_PAD * 2.0 + STYLE_CELL * AnnotationStyle::ALL.len() as f32
+}
+
+/// 右边那条颜色胶囊的宽。
+fn swatch_pill_width() -> f32 {
+    SWATCH_PAD * 2.0 + SWATCH_CELL * ANNOTATION_COLORS.len() as f32
+}
+
+/// 顶端那一行的宽：两条胶囊 + 中间那道缝。这一行现在**是整块菜单最宽的一行**，
+/// 所以它决定了横向占位 —— 但下面那句 `max` 不许把这层关系当成已知，见 [`card_width`]。
+fn mark_row_width() -> f32 {
+    style_pill_width() + MARK_GAP + swatch_pill_width()
+}
+
+/// 整块菜单的宽 = 顶端那一行与动作条里的**较宽者**。
+///
+/// 为什么不写死其中一个：动作条的宽跟着「摆不摆分享卡片那一格」变（168 / 208），
+/// 而那一行的宽跟着「几档画法、几档颜色」变。今天那一行更宽，于是摆位与夹边按它算，
+/// 动作条居中在它下面；哪天颜色减到三枚而画法只留两格，那条关系就反过来 —— 写死任何
+/// 一边都会让另一顶出屏幕或摆歪。
 ///
 /// `share` 是这一端摆不摆「分享卡片」那一格（与渲染那一侧读同一个判据），
-/// 横向居中与夹边都按它算 —— 两处不一致，菜单就会摆歪或顶出屏幕。
+/// 横向居中与夹边都按它算 —— 两处不一致同样会摆歪。
 pub(in crate::ui::features::reader) fn card_width(share: bool) -> f32 {
-    ACTION_CELL * action_cells(share) + BAR_PAD * 2.0
+    (ACTION_CELL * action_cells(share) + BAR_PAD * 2.0).max(mark_row_width())
 }
 
 /// 这一帧菜单该摆在哪。
@@ -887,12 +923,12 @@ impl ReaderSession {
         let unhighlight = tr(cx, "reader.sel_unhighlight");
         let cancel = tr(cx, "reader.sel_cancel");
         let share = tr(cx, "reader.sel_share");
-        // 挑中的正是留在书上的那一条时，第二格改做「取消划线」；上面那一行颜色恒在，
-        // 只是给它那一档多打一枚勾。
+        // 挑中的正是留在书上的那一条时，第二格改做「取消划线」；上面那一行画法与颜色恒在，
+        // 只是给它那一档多打个标记。
         let marked = self.selection_annotation();
         let has_note = marked
             .as_ref()
-            .is_some_and(|(id, _)| self.annotation_has_note(*id));
+            .is_some_and(|row| self.annotation_has_note(row.id));
         let mark_cell = match marked {
             Some(_) => action_cell(
                 "selection-unhighlight",
@@ -918,9 +954,14 @@ impl ReaderSession {
         } else {
             IconName::StickyNote
         };
-        // 颜色那一行恒在。挑中的正是库里某条划线时，给它那一档打勾、点色即换色；
-        // 普通选区没有「当下那一档」，点色即「就用这个色划一条」。
-        let current = marked.as_ref().map(|(_, color)| color.as_str());
+        // 顶端那一行恒在。挑中的正是库里某条划线时，它那一档打勾 / 打亮，点下去即改那一条；
+        // 普通选区没有「当下那一条」，画法的当下那一档取自配置（点下去即用它划一条，
+        // 并把它记成配置里那一格 —— 见 [`ReaderSession::pick_style`]），颜色则一律「点色即划线」。
+        let current = marked.as_ref().map(|row| row.color.as_str());
+        let style = marked
+            .as_ref()
+            .map(|row| row.style)
+            .unwrap_or_else(|| self.pending_style(cx));
         let actions = h_flex()
             .p(px(BAR_PAD))
             .gap_0()
@@ -972,23 +1013,36 @@ impl ReaderSession {
                 },
             ));
         let swatches = swatch_row(reader.clone(), &palette, surface, check, current);
+        let styles = style_row(
+            reader.clone(),
+            style,
+            surface,
+            hover,
+            foreground,
+            &style_cells(cx),
+        );
         // 横向对着选区中线；中线不在手上（首帧还没画过）就居中在正文那一条上。
         // 两种摆法都夹在页内，不把卡片顶出屏幕。
         let page_width = f32::from(self.content_bounds.get().size.width);
-        let left = menu_left(
-            page_width,
-            self.prefs.margin_x,
-            card_width(platform::RENDERS_SHARE_CARDS),
-            anchor_x,
-        );
-        // 颜色那一行摆在上头，动作条贴着尾巴。理由是那一行的点击**直接写库**：挑中某条
-        // 划线时点色即换色、普通选区点色即用那个色新划一条（见 [`swatch_row`] 里的
-        // `on_click`），中间没有预览也没有撤销台阶 —— 于是把它推到离选区、离拇指远的
-        // 那一头。顺带一条形状账：尾巴从最宽那一行（动作条）长出，卡片读起来才像从选区
-        // 里立起来的一整块，而不是尖角顶着一截窄胶囊。
+        let width = card_width(platform::RENDERS_SHARE_CARDS);
+        let left = menu_left(page_width, self.prefs.margin_x, width, anchor_x);
+        // 顶端那一行摆在上头，动作条贴着尾巴。理由是那一行的点击**直接写库或写配置**：
+        // 挑中某条划线时点画法即改那一条、点色即换色，普通选区点哪格就用那一档新划一条
+        // （见 [`style_row`] 与 [`swatch_row`] 里的 `on_click`），中间没有预览也没有撤销
+        // 台阶 —— 于是把它推到离选区、离拇指远的那一头。
+        //
+        // 两条胶囊顶到整块菜单的左右两端（`justify_between` + 显式给宽）：这一行今天比
+        // 动作条宽，所以它就是 [`card_width`] 那一侧；宽给足之后两边各顶各的边，
+        // 「两端对齐」这件事就写在布局里而不是靠常数凑。
+        let marks = h_flex()
+            .w(px(width))
+            .items_center()
+            .justify_between()
+            .child(styles)
+            .child(swatches);
         let bars = v_flex()
             .items_center()
-            .child(swatches)
+            .child(marks)
             .child(
                 // 一条空 div 当缝：`card_height` 算的就是这 6 像素，不能靠 `gap` 的两套账。
                 div().h(px(BAR_GAP)).flex_none(),
@@ -1122,6 +1176,81 @@ fn swatch_row(
         .into_any_element()
 }
 
+/// 三档画法在菜单里的样子：`(哪一档, 图标, 说明)`，顺序就是 `AnnotationStyle::ALL` 的顺序
+/// —— 左边那条胶囊从左到右摆它，库里那一列存的也是同一套名字，所以三处不会各排各的。
+///
+/// 图标各挑各的形状而不是一枚图标配三个数：这三格与右边那五枚同住一行，读的是「哪种痕迹」，
+/// 形状本身要能一眼分开。`label` 不画出来，只进无障碍（与动作条那几格同一条规矩）。
+fn style_cells(cx: &App) -> Vec<(AnnotationStyle, IconName, SharedString)> {
+    AnnotationStyle::ALL
+        .iter()
+        .copied()
+        .map(|style| {
+            let (icon, key) = match style {
+                AnnotationStyle::Highlight => (IconName::Highlighter, "reader.style_highlight"),
+                AnnotationStyle::Line => (IconName::Underline, "reader.style_line"),
+                AnnotationStyle::Wavy => (IconName::WavesHorizontal, "reader.style_wavy"),
+            };
+            (style, icon, tr(cx, key))
+        })
+        .collect()
+}
+
+/// 左边那条胶囊：三格「划线方式」。
+///
+/// 当下是哪一格：挑中了库里某一条时是**那一条自己**那一格，普通选区时是配置里那一格
+/// （调用方把两件事折成一个数递进来，见 [`ReaderSession::pending_style`]）。打亮的方式与
+/// 圆点不同 —— 圆点是色块上叠一枚勾，这里图标压不住第二层，所以给那一格一块背景，
+/// 与动作条 hover 同一份色，读起来是「这一格正按着」。
+///
+/// 点下去做什么由 [`ReaderSession::pick_style`] 分岔：已有一条就改那一条（不碰配置），
+/// 普通选区就用这个画法划一条 **并**把它记成配置里那一格（跨书持久，与设置里那一格同家）。
+fn style_row(
+    reader: Entity<ReaderSession>,
+    current: AnnotationStyle,
+    surface: Hsla,
+    hover: Hsla,
+    foreground: Hsla,
+    cells: &[(AnnotationStyle, IconName, SharedString)],
+) -> AnyElement {
+    h_flex()
+        .px(px(SWATCH_PAD))
+        .h(px(SWATCH_BAR))
+        .gap_0()
+        .rounded(px(SWATCH_BAR / 2.0))
+        .bg(surface)
+        .shadow(floating_shadow())
+        .children(cells.iter().enumerate().map(|(ix, (style, icon, label))| {
+            let active = *style == current;
+            let reader = reader.clone();
+            let style = *style;
+            div()
+                .id(("selection-style", ix))
+                .w(px(STYLE_CELL))
+                // 整格可点：图标只有 17，按图标尺寸给命中面在手机上就按不中。
+                .h(px(SWATCH_BAR))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(SWATCH_BAR / 2.0))
+                .cursor_pointer()
+                .when(active, |cell| cell.bg(hover))
+                .hover(move |cell| cell.bg(hover))
+                .child(
+                    div()
+                        .text_size(px(STYLE_ICON))
+                        .text_color(foreground)
+                        .child(Icon::new(*icon)),
+                )
+                .aria_label(label.clone())
+                .on_click(move |_, _, cx| {
+                    reader.update(cx, |reader, cx| reader.pick_style(style, cx));
+                })
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
 /// 菜单横向落在哪儿：优先对着选区中线，没有锚点就居中；两边都夹在页内。
 ///
 /// `page_width` 是正文那一栏的宽（不是窗口宽：分页/双页时正文只占其中一栏）。
@@ -1184,7 +1313,8 @@ fn menu_tail(up: bool, surface: Hsla) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    //! 只钉两类值得钉的判断：**摆位会不会翻面、卡片多高**，以及**把手的可点宽还够不够拇指**。
+    //! 只钉三类值得钉的判断：**摆位会不会翻面、卡片多高多宽**，**哪一边决定宽**，
+    //! 以及**把手的可点宽还够不够拇指**。
     //! 格子尺寸、图标、尾巴形状都是画出来的东西，测了只是把常数抄进断言里两遍；唯独把手那份
     //! 常数不住在这份文件里（在 gpui-kit 的 `TouchHandle` 上），它变小了这边一行代码都不会坏，
     //! 只有读者的拇指会察觉。
@@ -1195,11 +1325,12 @@ mod tests {
     use gpui_kit::{Bounds, point, px, size};
 
     use super::{
-        ACTION_CELL, BAR_GAP, BAR_PAD, MENU_TAIL, SWATCH_BAR, SelectionEdge, Slot, TouchHandle,
-        card_height, card_width, menu_left, slot,
+        ACTION_CELL, BAR_GAP, BAR_PAD, MARK_GAP, MENU_TAIL, STYLE_CELL, SWATCH_BAR, SWATCH_CELL,
+        SelectionEdge, Slot, TouchHandle, action_cells, card_height, card_width, mark_row_width,
+        menu_left, slot, style_pill_width, swatch_pill_width,
     };
 
-    /// 卡片总高（动作条 + 颜色胶囊）。摆位只认递进去的这个数。
+    /// 卡片总高（动作条 + 顶端那一行）。摆位只认递进去的这个数。
     const CARD: f32 = card_height();
 
     /// 顶部够用时摆在选区之上，尾巴朝下。
@@ -1246,12 +1377,58 @@ mod tests {
         );
     }
 
-    /// 摆不摆「分享卡片」那一格，动作条就差**正好一格**：横向居中与夹边读的是同一个宽，
-    /// 渲染那一侧与摆位那一侧各算一次就会摆歪或顶出屏幕。
+    /// 整块菜单的宽是「顶端那一行」与「动作条」里的**较宽者**，两者都不许探出去。
+    ///
+    /// 这条今天钉的是较宽者**换了人**这件事：顶端那一行（三格画法 + 五枚颜色 = 260）比
+    /// 动作条最宽那一档（带分享格 = 208）还宽，所以摆位与夹边按那一行算。哪天颜色减到
+    /// 三枚、画法只留两格，那条关系反过来，`card_width` 里那句 `max` 仍然对 ——
+    /// 写死任何一边都会让另一边顶出屏幕，而 `menu_left` 的夹边只保证整块不出界，
+    /// 出了那一截的元素本身已经被裁掉。
+    ///
+    /// 顺带钉住动作条自己的账：摆不摆「分享卡片」那一格差**正好一格**（渲染那一侧与
+    /// 摆位那一侧读同一个判据，各算一次就会摆歪）。
     #[test]
-    fn the_bar_widens_by_exactly_one_cell_when_the_share_action_is_present() {
-        assert_eq!(card_width(false), ACTION_CELL * 4.0 + BAR_PAD * 2.0);
-        assert_eq!(card_width(true) - card_width(false), ACTION_CELL);
+    fn the_card_is_as_wide_as_whichever_row_is_wider() {
+        for share in [false, true] {
+            let actions = ACTION_CELL * action_cells(share) + BAR_PAD * 2.0;
+            assert!(
+                card_width(share) >= actions && card_width(share) >= mark_row_width(),
+                "窄的一边被当成了整块的宽：{} 格动作条 = {actions}，那一行 = {}",
+                action_cells(share),
+                mark_row_width()
+            );
+            // 取的是较宽者而不是两者相加 —— 多算一项就会白白把菜单推到边外。
+            assert_eq!(card_width(share), actions.max(mark_row_width()));
+        }
+        assert_eq!(
+            ACTION_CELL * action_cells(true) - ACTION_CELL * action_cells(false),
+            ACTION_CELL
+        );
+        // 今天决定宽的是**那一行**而不是动作条。哪天颜色减到三枚、画法只留两格，`max`
+        // 那句照旧对，而这一句会红 —— 那是提示「两端对齐」那一行的读法要重新看一眼：
+        // 动作条反过来变成较宽的一边时，顶端那两条胶囊就不再顶到卡片的两个边了。
+        assert_eq!(card_width(true), mark_row_width());
+        assert!(card_width(false) > ACTION_CELL * action_cells(false) + BAR_PAD * 2.0);
+    }
+
+    /// 加画法那一档**不该把卡片撑高**：三格画法与五枚颜色同住顶端那一行（同一份 32 高），
+    /// 所以整块卡片的高与加这一档之前一模一样，`slot` 那条「放不下就翻面」的临界点没动。
+    /// 哪天把那一行改成两行（或把画法格子做成 40 高），这条会红 —— 那是摆位的账，
+    /// 不只是好看与否：卡片高了，头顶放不下的一批选区就都翻到下面去了。
+    #[test]
+    fn the_style_pill_does_not_make_the_card_taller() {
+        assert_eq!(
+            STYLE_CELL, SWATCH_CELL,
+            "两格不同宽，两条胶囊读起来是两排东西"
+        );
+        assert!(
+            style_pill_width() + MARK_GAP + swatch_pill_width() == mark_row_width(),
+            "那一行的宽不是两条胶囊加一道缝"
+        );
+        assert_eq!(
+            card_height(),
+            ACTION_CELL + BAR_PAD * 2.0 + BAR_GAP + SWATCH_BAR + MENU_TAIL
+        );
     }
 
     /// 下面也放不下（选区贴在视口底边）时夹在视口内，而不是掉出屏幕外。

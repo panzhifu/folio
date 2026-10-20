@@ -19,8 +19,9 @@ use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode};
 use gpui_kit::{
     App, Bounds, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, LayoutId, Length, LineLayout, Pixels, Point, SharedString, StrikethroughStyle,
-    Style, TextRun, UnderlineStyle, WeakEntity, Window, black, fill, point, px, relative, size,
+    IntoElement, LayoutId, Length, LineLayout, PathBuilder, Pixels, Point, SharedString,
+    StrikethroughStyle, Style, TextRun, UnderlineStyle, WeakEntity, Window, black, fill, point, px,
+    relative, size,
 };
 
 use crate::ui::features::reader::components::selection::{self, SelectionVisual};
@@ -179,6 +180,81 @@ impl GlyphRun {
     }
 }
 
+/// 留在书上的一条痕迹在这一帧的形状。三档画法（`folio_core::AnnotationStyle`）到这里归成
+/// 两件事：**一块实心矩形**（高亮带、字下实线）或**一条要现铺的波浪**。
+///
+/// 为什么不是「一屏一条 enum」：高亮带与实线在绘制上是同一句 `paint_quad`，差的只是那块
+/// 矩形多高、压多少透明度 —— 那是几何那一层（`view/body.rs`）算出来的事。只有波浪线需要
+/// 这一层多做一次路径构造，所以分叉只分在这里。
+pub(in crate::ui::features::reader) enum Mark {
+    /// 一块实心矩形，坐标与 `runs` 同一套（元素局部）。高亮带与实线都走这一格。
+    Quad(Bounds<Pixels>, Hsla),
+    /// 一条波浪线。`bounds` 是它的**外盒**：左端、中线所在的 y、长，高 = 峰峰值
+    /// （上下各一半）。起伏怎么排归这一层（见 [`wave_half_waves`]），落点归几何那一层。
+    Wave(Bounds<Pixels>, Hsla),
+}
+
+/// 波浪线在这一段长度里排几个**半波**，永远是**偶数**（一整个波 = 两个半波）。
+///
+/// 只按整波取数：于是每一条划线的波浪都**起于中线、终于中线**，一排划线并眼看过去收尾
+/// 是齐的。按固定波长铺满再截断的话，右端会留下长短不一的残波，那是最扎眼的一种不齐。
+///
+/// 每一段等长（`宽度 ÷ 个数`），所以「整波」这一档是靠**轻微拉伸波长**达成的，不是靠截断：
+/// 一段 8 像素的字给一个波（波长 8 而不是 7），一段 15 像素的给两个（7.5）。偏离不超过
+/// 半个波，肉眼分不出与标准波长。
+///
+/// `0` = 这一段没有线可画（窄到一像素都不到）；短到一个波的段落也给**一整波**而不是半个，
+/// 于是划一个字的那条读起来是「一个小起伏」而不是半个起伏翘在中线上。
+pub(in crate::ui::features::reader) fn wave_half_waves(width: f32) -> usize {
+    if width < 1.0 {
+        return 0;
+    }
+    ((width / WAVE_LENGTH).round().max(1.0) as usize) * 2
+}
+
+/// 波浪线一个完整波占多长（逻辑像素）。
+///
+/// 定在 7 是照字下的空间来的：正文行高约 30、基线下那一段只有几像素，波长再短就成了
+/// 一片糊，再长则一条划线凑不出两个波、读起来像一条歪线。
+const WAVE_LENGTH: f32 = 7.0;
+/// 波浪线离中线最远多远（单侧振幅）。
+const WAVE_AMPLITUDE: f32 = 1.6;
+/// 波浪线那块盒子的总高 = 峰峰值。几何那一层（`view/body.rs`）按它摆盒子，
+/// 这一层从盒子的高反读振幅 —— 所以这个数是两边共用的**唯一一个**家。
+pub(in crate::ui::features::reader) const WAVE_HEIGHT: f32 = WAVE_AMPLITUDE * 2.0;
+/// 波浪线那条线多粗。比实线那一档（`UNDERLINE_THICKNESS = 2`）细一点：起伏的线在同样的
+/// 粗细下会显得更重，因为墨都堆在同一条窄带里。
+const WAVE_STROKE: f32 = 1.6;
+
+/// 把一条波浪线画出来：从 `bounds` 的左端沿中线起，每半个波一段二次贝塞尔，
+/// 控制点压在中线上下交替 `振幅` 处（振幅 = `bounds` 高的一半）。
+fn paint_wave(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
+    let width = f32::from(bounds.size.width);
+    let count = wave_half_waves(width);
+    if count == 0 {
+        return;
+    }
+    let mid = f32::from(bounds.origin.y) + f32::from(bounds.size.height) * 0.5;
+    let amp = f32::from(bounds.size.height) * 0.5;
+    let left = f32::from(bounds.origin.x);
+    let step = width / count as f32;
+    let mut path = PathBuilder::stroke(px(WAVE_STROKE));
+    path.move_to(point(px(left), px(mid)));
+    for ix in 0..count {
+        let from = left + step * ix as f32;
+        let to = from + step;
+        // 交替方向：第一段先**上**起，于是每条划线的起头长得一样。
+        let ctrl_y = mid + if ix % 2 == 0 { -amp } else { amp };
+        path.curve_to(
+            point(px(to), px(mid)),
+            point(px((from + to) * 0.5), px(ctrl_y)),
+        );
+    }
+    if let Ok(built) = path.build() {
+        window.paint_path(built, color);
+    }
+}
+
 /// 背景矩形 + 一批 run。视口内的可见行由调用方挑好再传进来
 /// （没有组件层的虚拟列表，裁剪就在这儿做）。
 ///
@@ -187,11 +263,11 @@ impl GlyphRun {
 /// （见 `view.rs` 绘制层级的那段注释）。
 pub struct GlyphsElement {
     runs: Vec<GlyphRun>,
-    /// 批注下划线（M7 划线）。一条细矩形一个颜色，画在选中高亮**之下**、字形之下。
+    /// 批注（M7 划线）。一屏里同时可以有几十条，画在选中高亮**之下**、字形之下。
     ///
     /// 与选中高亮分开两份：前者是读者留在书上的东西，一屏里同时可以有几十条；
     /// 后者是这一次挑中的那一段，还要长出把手。
-    underlines: Vec<(Bounds<Pixels>, Hsla)>,
+    marks: Vec<Mark>,
     /// 选中件（M6）。空的高亮 = 这一屏没有选中。画法与命中都在 [`selection`]。
     selection: SelectionVisual,
     /// 会话的弱引用：paint 时回写内容边界与把手命中区、注册手势监听。
@@ -251,13 +327,17 @@ impl Element for GlyphsElement {
         cx: &mut App,
     ) {
         let __paint = crate::ui::features::reader::model::perf::Timer::start();
-        // 绘制层级（自下而上）：块级装饰（更早入树的兄弟）→ 批注下划线 → 选中高亮 →
-        // 字形 → 把手。下划线与高亮都在字形之前画，字形之后再补就把字盖住了。
+        // 绘制层级（自下而上）：块级装饰（更早入树的兄弟）→ 批注痕迹 → 选中高亮 →
+        // 字形 → 把手。痕迹与高亮都在字形之前画，字形之后再补就把字盖住了。
         // 传进来的矩形是元素局部坐标，跟字形与把手一样要加上元素在窗口里的原点：
         // 阅读视图不在窗口原点（Android 的系统栏 inset、桌面的侧栏）时，漏加这一个
-        // 偏移，下划线就会整条飘到文字上方 —— 把手是准的、颜色是偏的，就是它。
-        for (rect, color) in &self.underlines {
-            window.paint_quad(fill(*rect + bounds.origin, *color));
+        // 偏移，痕迹就会整条飘到文字上方 —— 把手是准的、颜色是偏的，就是它。
+        // 波浪那一条加的是同一个偏移：`paint_wave` 认的是窗口坐标。
+        for mark in &self.marks {
+            match mark {
+                Mark::Quad(rect, color) => window.paint_quad(fill(*rect + bounds.origin, *color)),
+                Mark::Wave(rect, color) => paint_wave(*rect + bounds.origin, *color, window),
+            }
         }
         selection::paint_highlights(&self.selection, bounds.origin, window);
         if let Some(reader) = self.reader.clone() {
@@ -304,16 +384,16 @@ impl GlyphsElement {
     pub fn new() -> Self {
         Self {
             runs: Vec::new(),
-            underlines: Vec::new(),
+            marks: Vec::new(),
             selection: SelectionVisual::default(),
             reader: None,
         }
     }
 
-    /// 添一条批注下划线。`bounds` 已是那条线本身（细矩形，高由调用方给），坐标与 `runs`
-    /// 同一套：元素局部，paint 里统一加元素原点。
-    pub fn underline(&mut self, bounds: Bounds<Pixels>, color: Hsla) {
-        self.underlines.push((bounds, color));
+    /// 添一条留在书上的痕迹。那块矩形已是它本身（实线与高亮带差的是高与透明度，
+    /// 波浪差的是形状），坐标与 `runs` 同一套：元素局部，paint 里统一加元素原点。
+    pub fn mark(&mut self, mark: Mark) {
+        self.marks.push(mark);
     }
 
     /// 这一屏的选中件。没有选中时传默认值即可（空高亮、无把手）。
@@ -609,8 +689,34 @@ mod tests {
     //!
     //! 点名导入而不是 `use super::*`：`gpui_kit` 转出整个 `gpui`，里面有个叫 `test` 的属性宏，
     //! glob 会让 `#[test]` 递归展开成它。
-    use super::{decoration_y, wants_synthetic_bold_when};
+    use super::{WAVE_LENGTH, decoration_y, wants_synthetic_bold_when, wave_half_waves};
     use gpui_kit::{Font, FontWeight, Pixels, px};
+
+    /// 波浪线的分段：永远是**偶数个半波**（整波），于是每条划线都起于中线、终于中线。
+    ///
+    /// 把 `* 2` 那一步去掉（改成按半波数取整）这条红在「奇数」那一格 —— 症状是屏上一排
+    /// 划线的右端一半收在上、一半收在下，那是锯齿不齐最容易被看见的一种。
+    #[test]
+    fn the_wave_always_lands_on_a_whole_wave() {
+        assert_eq!(wave_half_waves(0.0), 0, "没有宽就没有线");
+        assert_eq!(wave_half_waves(0.5), 0, "窄到一像素以下不值得画");
+        assert_eq!(wave_half_waves(1.0), 2, "短到一个字也给一整波，不给半个");
+        assert_eq!(wave_half_waves(WAVE_LENGTH), 2, "刚好一个波长 = 两个半波");
+        assert_eq!(wave_half_waves(WAVE_LENGTH * 3.0), 6);
+        for width in [8.0, 23.0, 77.0, 340.0, 1200.0] {
+            let halves = wave_half_waves(width);
+            assert!(
+                halves.is_multiple_of(2) && halves >= 2,
+                "{width} 排了 {halves} 个半波，收口不在中线上"
+            );
+            // 每一段等长 ⇒ 实际波长与标准档的偏离不超过半波一半（`round` 的最大误差）。
+            let stretched = width / (halves / 2) as f32;
+            assert!(
+                (stretched - WAVE_LENGTH).abs() <= WAVE_LENGTH * 0.5,
+                "{width} 被拉成波长 {stretched}，离标准 {WAVE_LENGTH} 太远"
+            );
+        }
+    }
 
     fn y(box_height: f32, ascent: f32, descent: f32) -> (Pixels, Pixels) {
         // 基线摆在 100 处即可：两条线都是相对它算的，绝对值不影响比对。

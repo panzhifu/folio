@@ -1,20 +1,29 @@
-//! 批注：锚点 JSON 的往返、笔记与颜色、找不回来的标记。
+//! 批注：锚点 JSON 的往返、笔记与颜色、画法、找不回来的标记。
 //!
 //! 存储层只存**已经算好的锚点**，不参与坐标换算（那要有排版，见 `crate::content::anchor`）。
 
 use rusqlite::{OptionalExtension, params};
 
-use super::types::{ANNOTATION_COLORS, Annotation};
+use super::types::{ANNOTATION_COLORS, Annotation, AnnotationStyle};
 use super::{Store, now};
 use crate::Result;
 use crate::content::anchor::TextAnchor;
+
+/// [`Store::annotation`] 一次从库里读回来的形状：
+/// `(锚点 JSON, 书 id, stale, 创建, 更新, 笔记, 颜色, 画法)`。
+///
+/// 起这个名字是因为「画法」那一格加上来之后，第八元素让 clippy 的
+/// `type_complexity` 直接报错。而它报得对：裸的八个元组在这里既读不出哪一格是什么，
+/// 换一次 `SELECT` 的顺序也不会被编译器抓住 —— 颜色与画法同为 `String`，错位照样编得过。
+type AnnotationRow = (String, i64, i64, i64, i64, String, String, String);
 
 impl Store {
     /// 记一条标注。`anchor` 是调用方从可见文本坐标建好的（见 `crate::content::anchor`），
     /// 存储层不参与坐标换算 —— 它不知道排版，也不该知道。
     ///
     /// 颜色不认识时回落到默认那条，而不是拒写：写失败会让读者刚划的批注直接丢掉，
-    /// 那比颜色不对严重得多。
+    /// 那比颜色不对严重得多。画法这一档由 [`AnnotationStyle`] 本身兜（它是枚举，
+    /// 递不进来一个不存在的值）。
     ///
     /// **章只在 `anchor_json` 里，表里没有第二个地方记它**（v13 之前那一列
     /// `chapter_id` 是外键挂到 `chapters(id)` 上的，重扫一次就被级联删光，
@@ -26,13 +35,21 @@ impl Store {
         anchor: &TextAnchor,
         note: &str,
         color: &str,
+        style: AnnotationStyle,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let stamp = now();
         conn.execute(
-            "INSERT INTO annotations (book_id, anchor_json, note, color, stale, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
-            params![book_id, anchor.to_json(), note, color_of(color), stamp],
+            "INSERT INTO annotations (book_id, anchor_json, note, color, style, stale, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+            params![
+                book_id,
+                anchor.to_json(),
+                note,
+                color_of(color),
+                style.as_str(),
+                stamp
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -44,7 +61,7 @@ impl Store {
     pub fn annotations(&self, book_id: i64) -> Result<Vec<Annotation>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT id, book_id, anchor_json, note, color, stale, created_at, updated_at
+            "SELECT id, book_id, anchor_json, note, color, style, stale, created_at, updated_at
              FROM annotations WHERE book_id = ?1 ORDER BY created_at, id",
         )?;
         let rows = stmt.query_map(params![book_id], |r| {
@@ -54,14 +71,15 @@ impl Store {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
-                r.get::<_, i64>(5)? != 0,
-                r.get::<_, i64>(6)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, i64>(6)? != 0,
                 r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, book, json, note, color, stale, created_at, updated_at) = row?;
+            let (id, book, json, note, color, style, stale, created_at, updated_at) = row?;
             let Some(anchor) = TextAnchor::from_json(&json) else {
                 continue;
             };
@@ -72,6 +90,7 @@ impl Store {
                 anchor,
                 note,
                 color,
+                style: AnnotationStyle::parse(&style),
                 stale,
                 created_at,
                 updated_at,
@@ -82,9 +101,9 @@ impl Store {
 
     pub fn annotation(&self, id: i64) -> Result<Option<Annotation>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let row: Option<(String, i64, i64, i64, i64, String, String)> = conn
+        let row: Option<AnnotationRow> = conn
             .query_row(
-                "SELECT anchor_json, book_id, stale, created_at, updated_at, note, color
+                "SELECT anchor_json, book_id, stale, created_at, updated_at, note, color, style
                  FROM annotations WHERE id = ?1",
                 params![id],
                 |r| {
@@ -96,12 +115,13 @@ impl Store {
                         r.get(4)?,
                         r.get(5)?,
                         r.get(6)?,
+                        r.get(7)?,
                     ))
                 },
             )
             .optional()?;
         Ok(row.and_then(
-            |(json, book_id, stale, created_at, updated_at, note, color)| {
+            |(json, book_id, stale, created_at, updated_at, note, color, style)| {
                 TextAnchor::from_json(&json).map(|anchor| Annotation {
                     id,
                     book_id,
@@ -109,6 +129,7 @@ impl Store {
                     anchor,
                     note,
                     color,
+                    style: AnnotationStyle::parse(&style),
                     stale: stale != 0,
                     created_at,
                     updated_at,
@@ -117,12 +138,22 @@ impl Store {
         ))
     }
 
-    /// 改批注文字与颜色。`updated_at` 跟着走 —— 界面的「最近改动」排序用它。
-    pub fn update_annotation(&self, id: i64, note: &str, color: &str) -> Result<()> {
+    /// 改批注文字、颜色与画法。`updated_at` 跟着走 —— 界面的「最近改动」排序用它。
+    ///
+    /// **这是整条覆盖**：三格都要带齐当时那一格的值。只想改颜色而不带画法（或反过来），
+    /// 就会把读者另一格改的东西悄悄抹回默认 —— 换色与换画法两个动作共用这一条语句，
+    /// 各自都要先从内存里那份读出另一格的原值再递进来。
+    pub fn update_annotation(
+        &self,
+        id: i64,
+        note: &str,
+        color: &str,
+        style: AnnotationStyle,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
-            "UPDATE annotations SET note = ?2, color = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, note, color_of(color), now()],
+            "UPDATE annotations SET note = ?2, color = ?3, style = ?4, updated_at = ?5 WHERE id = ?1",
+            params![id, note, color_of(color), style.as_str(), now()],
         )?;
         Ok(())
     }
@@ -175,7 +206,7 @@ mod tests {
 
     use crate::content::anchor::TextAnchor;
     use crate::content::format::{DocMeta, Format};
-    use crate::{ANNOTATION_COLORS, Store};
+    use crate::{ANNOTATION_COLORS, AnnotationStyle, Store};
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {
@@ -216,7 +247,13 @@ mod tests {
         let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let want = anchor(3, 120, 124);
         let id = store
-            .add_annotation(book, &want, "这一段写得真好", "rose")
+            .add_annotation(
+                book,
+                &want,
+                "这一段写得真好",
+                "rose",
+                AnnotationStyle::default(),
+            )
             .unwrap();
 
         let got = store.annotation(id).unwrap().expect("刚写的标注该读得回来");
@@ -243,10 +280,22 @@ mod tests {
         let (_dir, store) = store();
         let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let up = store
-            .add_annotation(book, &anchor(0, 0, 4), "大写与空白", "  ROSE  ")
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "大写与空白",
+                "  ROSE  ",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         let odd = store
-            .add_annotation(book, &anchor(0, 0, 4), "没这个颜色", "chartreuse")
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "没这个颜色",
+                "chartreuse",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         assert_eq!(store.annotation(up).unwrap().unwrap().color, "rose");
         assert_eq!(
@@ -261,12 +310,118 @@ mod tests {
         let (_dir, store) = store();
         let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let id = store
-            .add_annotation(book, &anchor(1, 10, 14), "初稿", "sky")
+            .add_annotation(
+                book,
+                &anchor(1, 10, 14),
+                "初稿",
+                "sky",
+                AnnotationStyle::default(),
+            )
             .unwrap();
-        store.update_annotation(id, "改过的批注", "lime").unwrap();
+        store
+            .update_annotation(id, "改过的批注", "lime", AnnotationStyle::Wavy)
+            .unwrap();
         let got = store.annotation(id).unwrap().expect("改过之后还在");
         assert_eq!(got.note, "改过的批注");
         assert_eq!(got.color, "lime");
+    }
+
+    /// 三档画法各写一条、各自原样读回，而且存进库的是**名字**而不是序号 ——
+    /// 那一列一旦按「菜单里第几格」落库，往中间插一档就把老行读成别的画法。
+    #[test]
+    fn every_style_round_trips_under_its_own_name() {
+        let (dir, store) = store();
+        let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
+        for (ix, style) in AnnotationStyle::ALL.iter().copied().enumerate() {
+            let id = store
+                .add_annotation(book, &anchor(0, ix, ix + 4), "同一条", "amber", style)
+                .unwrap();
+            let got = store.annotation(id).unwrap().expect("刚写的该读得回来");
+            assert_eq!(got.style, style, "{} 落库后读成了另一档", style.as_str());
+            // 整表那条路也得带上画法：绘制与菜单认的就是 `annotations()` 这一份，
+            // 只钉单条那个入口等于没钉读者看得见的这一条。
+            assert_eq!(
+                store.annotations(book).unwrap()[ix].style,
+                style,
+                "{} 从整表读回时丢了画法",
+                style.as_str()
+            );
+        }
+        // 那一列里此刻躺着什么，用一条裸连接按库文件契约问一遍（同本模块别的测试）。
+        let db = dir.path().join("folio.db");
+        drop(store);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let mut stmt = conn.prepare("SELECT style FROM annotations").unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|v| v.unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["highlight", "line", "wavy"],
+            "库里那一列写的该是名字，按 ALL 的顺序 —— 落成序号就等于把「菜单里第几格」写进历史"
+        );
+    }
+
+    /// 认不出的写法读回默认档，而不是把整条批注弄没 —— 与颜色那一条同一口径。
+    /// 走的是裸连接改列：这一格没有别的入口能写出脏值（`add_annotation` 收的是枚举）。
+    #[test]
+    fn an_unreadable_style_name_reads_as_the_default_row_not_a_missing_one() {
+        let (dir, store) = store();
+        let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
+        let id = store
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "手改过的行",
+                "amber",
+                AnnotationStyle::Wavy,
+            )
+            .unwrap();
+        drop(store);
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("folio.db")).unwrap();
+            conn.execute(
+                "UPDATE annotations SET style = 'dotted' WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+        let store = Store::open_at(&dir.path().join("folio.db")).unwrap();
+        let got = store.annotation(id).unwrap().expect("脏值不该把这一条吞掉");
+        assert_eq!(got.style, AnnotationStyle::default());
+        assert_eq!(
+            got.note, "手改过的行",
+            "另一格读得到才算真的只是画法那一格兜住"
+        );
+    }
+
+    /// 换画法与换颜色共用一条 `update_annotation`，而它是**整条覆盖**（note + color + style
+    /// 三格一起写）。所以那两个动作各自都得先从内存里那份读出另两格的原值再递进来 ——
+    /// 只递新画法、另两格填空，读者刚写的笔记当场就没了，而这在界面上看不出来。
+    /// 这条钉的就是「带着另两格去改」这件事在存储层成立。
+    #[test]
+    fn changing_the_style_keeps_the_note_and_color_of_the_same_row() {
+        let (_dir, store) = store();
+        let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
+        let id = store
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "这一段的笔记",
+                "rose",
+                AnnotationStyle::Line,
+            )
+            .unwrap();
+        let row = store.annotation(id).unwrap().unwrap();
+        store
+            .update_annotation(id, &row.note, &row.color, AnnotationStyle::Wavy)
+            .unwrap();
+        let got = store.annotation(id).unwrap().unwrap();
+        assert_eq!(got.style, AnnotationStyle::Wavy, "改的那一格要落下去");
+        assert_eq!(got.note, "这一段的笔记", "笔记不该跟着画法一起没");
+        assert_eq!(got.color, "rose", "颜色不该跟着画法一起没");
     }
 
     /// stale 是「锚点现在落不落了回去」这件事，不是读者编辑过的证据。
@@ -276,7 +431,13 @@ mod tests {
         let (_dir, store) = store();
         let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let id = store
-            .add_annotation(book, &anchor(0, 0, 4), "批注", "amber")
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "批注",
+                "amber",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         let before = store.annotation(id).unwrap().unwrap();
         store.set_annotation_stale(id, true).unwrap();
@@ -295,10 +456,22 @@ mod tests {
         let (_dir, store) = store();
         let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let first = store
-            .add_annotation(book, &anchor(0, 0, 4), "一", "amber")
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "一",
+                "amber",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         let second = store
-            .add_annotation(book, &anchor(0, 10, 14), "二", "rose")
+            .add_annotation(
+                book,
+                &anchor(0, 10, 14),
+                "二",
+                "rose",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         let ids: Vec<i64> = store
             .annotations(book)
@@ -325,7 +498,13 @@ mod tests {
         let a = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let b = store.add_book(&path("b.epub"), &meta("书乙")).unwrap();
         store
-            .add_annotation(a, &anchor(0, 0, 4), "甲的", "amber")
+            .add_annotation(
+                a,
+                &anchor(0, 0, 4),
+                "甲的",
+                "amber",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         assert!(store.annotations(b).unwrap().is_empty(), "乙那儿该是空的");
     }
@@ -337,10 +516,22 @@ mod tests {
         let (dir, store) = store();
         let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let good = store
-            .add_annotation(book, &anchor(0, 0, 4), "读得到的", "amber")
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "读得到的",
+                "amber",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         let broken = store
-            .add_annotation(book, &anchor(0, 20, 24), "读不到的", "rose")
+            .add_annotation(
+                book,
+                &anchor(0, 20, 24),
+                "读不到的",
+                "rose",
+                AnnotationStyle::default(),
+            )
             .unwrap();
 
         let db = dir.path().join("folio.db");
@@ -376,7 +567,13 @@ mod tests {
         let (dir, store) = store();
         let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let id = store
-            .add_annotation(book, &anchor(7, 0, 4), "没有章节行也能记", "amber")
+            .add_annotation(
+                book,
+                &anchor(7, 0, 4),
+                "没有章节行也能记",
+                "amber",
+                AnnotationStyle::default(),
+            )
             .unwrap();
 
         // 当时根本没有第 7 章那一行，批注照样读得回来，章号从锚点里报。
@@ -403,10 +600,22 @@ mod tests {
         let a = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let b = store.add_book(&path("b.epub"), &meta("书乙")).unwrap();
         store
-            .add_annotation(a, &anchor(0, 0, 4), "甲的", "amber")
+            .add_annotation(
+                a,
+                &anchor(0, 0, 4),
+                "甲的",
+                "amber",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         store
-            .add_annotation(b, &anchor(0, 0, 4), "乙的", "amber")
+            .add_annotation(
+                b,
+                &anchor(0, 0, 4),
+                "乙的",
+                "amber",
+                AnnotationStyle::default(),
+            )
             .unwrap();
 
         store.remove_book(a).unwrap();

@@ -1,4 +1,4 @@
-//! 划线（M7 第一步）：把选中的字落成一条批注，并把库里的批注解回本章坐标画出来。
+//! 划线（M7）：把选中的字落成一条批注（带颜色与画法），并把库里的批注解回本章坐标画出来。
 //!
 //! 两头各有一套坐标，中间只隔一次解锚：
 //!
@@ -13,13 +13,14 @@
 //! 上一帧解出来的位置照样作数。这里**不**用排版代数当键 —— 解出来的是第几个字到
 //! 第几个字，字号、栏宽、片高都动不着它，用代数当键等于读者每动一次设置就重解整章。
 //!
-//! 解不回来的那一条（`is_stale()`）**不画**：宁可少一条下划线，也不把读者的批注
+//! 解不回来的那一条（`is_stale()`）**不画**：宁可少一条痕迹，也不把读者的批注
 //! 画到别的字上去。库里那条的 `stale` 标记照实回写，批注侧栏（后续里程碑）才有依据
 //! 说「这条找不到了」。
 //!
-//! 画出来的那几条下划线同时是**可以点回去的**：点在矩形上就是把那一条重新选中
-//! （[`ReaderSession::annotation_at`]），于是留在书上的痕迹不只是读数，还能改 ——
-//! 就地菜单跟着给出「取消划线」与五色（[`ReaderSession::selection_annotation`]）。
+//! 画出来的那几条痕迹同时是**可以点回去的**：点在矩形上就是把那一条重新选中
+//! （[`ReaderSession::annotation_at`]），于是留在书上的东西不只是读数，还能改 ——
+//! 就地菜单跟着给出「取消划线」、三种画法与五色
+//! （[`ReaderSession::selection_annotation`]）。
 //! 判据用的是画出来的那些矩形而不是「离得最近的那个字」，理由在下面那条命中方法的注释里。
 
 use std::cell::RefCell;
@@ -28,19 +29,32 @@ use std::rc::Rc;
 
 use folio_core::content::anchor::TextMap;
 use folio_core::content::annotation::{ResolvedAnnotation, resolve_annotations};
-use folio_core::store::{ANNOTATION_COLORS, Annotation};
+use folio_core::store::{ANNOTATION_COLORS, Annotation, AnnotationStyle};
 use gpui_kit::component::Theme;
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::{App, AppContext as _, Context, Hsla, Pixels, Point, Window};
 
 use crate::ui::features::reader::components::note_editor::NoteEditor;
 use crate::ui::features::reader::model::session::{AnnotationSpans, ReaderSession, Selection};
+use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::tr;
 
 /// 点「划线」时用的那一种颜色（读者没先点某一枚圆点）。清单在
 /// `folio_core::store::ANNOTATION_COLORS`：amber 是其中那档黄 —— 传统划线色，
 /// 也是参考图里给勾选标记的那一枚。
 pub(in crate::ui::features::reader) const DEFAULT_COLOR: &str = "amber";
+
+/// 挑中的选区**正好等于**库里某一条划线时要带回的三格。
+///
+/// 为什么不是 `(id, 颜色)` 那一对：存储层那条 `update_annotation` 是**整条覆盖**
+/// （笔记 + 颜色 + 画法一起写），改其中任何一格都得把另两格的原值带回去。上一轮只有
+/// 颜色一格可改时，`(id, color)` 勉强够；如今画法也能改，元组就开始漏带东西 ——
+/// 漏带的那一格不会报错，只会悄悄退回默认档，而那正是「读者改了 A，B 没了」。
+pub(in crate::ui::features::reader) struct MarkedRow {
+    pub(in crate::ui::features::reader) id: i64,
+    pub(in crate::ui::features::reader) color: String,
+    pub(in crate::ui::features::reader) style: AnnotationStyle,
+}
 
 impl ReaderSession {
     /// 把库里的批注原样读回一份（还没解锚）。开书时一次，写入之后再来一次。
@@ -67,17 +81,51 @@ impl ReaderSession {
         self.annotation_spans.borrow_mut().clear();
     }
 
-    /// 划线：把当前选区落成一条批注，用默认那档颜色（菜单里「划线」那一格）。
+    /// 划线：把当前选区落成一条批注。颜色用默认那档、画法用配置里那一格
+    /// （菜单里「划线」那一格按下去走的就是这条）。
     pub fn add_highlight(&mut self, cx: &mut Context<Self>) {
-        self.add_highlight_with(DEFAULT_COLOR, cx);
+        let style = self.pending_style(cx);
+        self.add_highlight_as(DEFAULT_COLOR, style, cx);
     }
 
     /// 划线，但指定颜色：读者在颜色那一行直接点某一枚圆点时走这条 ——
-    /// 一段新选区点色即「就用这个色划线」，不必先按「划线」再换色。
+    /// 一段新选区点色即「就用这个色划线」，不必先按「划线」再换色。画法仍按配置里那一格。
+    pub fn add_highlight_with(&mut self, color: &str, cx: &mut Context<Self>) {
+        let style = self.pending_style(cx);
+        self.add_highlight_as(color, style, cx);
+    }
+
+    /// 下一条该用哪种画法。挑中了库里某一条时调用方问的是**那一条**的画法
+    /// （[`ReaderSession::selection_annotation`]），这一格只管「还没有条」的情形。
+    ///
+    /// 读的是全局配置而不是会话里再存一份：读者在设置里改过一次，这一趟阅读就该跟着变，
+    /// 而会话自己那份会多出第二个「下一条用什么画法」的家。
+    pub(in crate::ui::features::reader) fn pending_style(&self, cx: &App) -> AnnotationStyle {
+        ConfigHolder::appearance(cx).highlight_style
+    }
+
+    /// 菜单里「划线方式」那三格按下去做什么。两件事按挑中的是不是库里已有的一条分岔：
+    ///
+    /// - **是**：改那一条的画法（连同它的笔记与颜色原样带回去），**不碰配置** ——
+    ///   读者回头改一条老批注的方式，不该顺手把自己「下一条怎么划」那格改掉。
+    /// - **不是**：把这一档记成配置里那一格（跨书持久，与设置里那一格同一个家），
+    ///   并用它把当前这段划上。点色那五枚也是这条规矩（点色即划线），
+    ///   所以菜单里那一行的两类点击读起来是同一件事。
+    pub fn pick_style(&mut self, style: AnnotationStyle, cx: &mut Context<Self>) {
+        if self.selection_annotation().is_some() {
+            self.set_highlight_style(style, cx);
+            return;
+        }
+        ConfigHolder::edit_appearance(cx, |appearance| appearance.highlight_style = style);
+        self.add_highlight_as(DEFAULT_COLOR, style, cx);
+    }
+
+    /// 划线，颜色与画法都由调用方给。上面那三个入口最后都汇到这里，
+    /// 所以「排版还没跟上就不落库」「落库后重读整表」「收掉选区」这三条只写一遍。
     ///
     /// 落不成只写日志，不把菜单条留在屏上装作还能划 —— 读者再点一次也不会有别的结果，
     /// 而收掉菜单至少告诉他「这一下按过了」。
-    pub fn add_highlight_with(&mut self, color: &str, cx: &mut Context<Self>) {
+    fn add_highlight_as(&mut self, color: &str, style: AnnotationStyle, cx: &mut Context<Self>) {
         let Some(selected) = self.selection.clone() else {
             return;
         };
@@ -99,13 +147,14 @@ impl ReaderSession {
             cx.notify();
             return;
         };
-        match store.add_annotation(book_id, &anchor, "", color) {
+        match store.add_annotation(book_id, &anchor, "", color, style) {
             Ok(id) => {
                 tracing::info!(
                     book_id,
                     chapter = selected.chapter + 1,
                     annotation_id = id,
                     color,
+                    style = style.as_str(),
                     "划线: 落一条批注"
                 );
                 self.load_annotations();
@@ -209,11 +258,11 @@ impl ReaderSession {
         true
     }
 
-    /// 当前选区**正好等于**库里某一条划线时，给回那一条的 id 与颜色名。
+    /// 当前选区**正好等于**库里某一条划线时，给回那一条的 id、颜色名与画法。
     ///
     /// 判据是区间相等，不是「这一击是从划线上点出来的」：读者拖过把手把范围改了，手里
     /// 拿的就是一段新选区（该再划一次），而不是原来那一条 —— 菜单跟着这个判断换格子。
-    pub fn selection_annotation(&self) -> Option<(i64, String)> {
+    pub(in crate::ui::features::reader) fn selection_annotation(&self) -> Option<MarkedRow> {
         let selected = self.selection.as_ref()?;
         let doc = self.book()?.span_doc(selected.chapter)?;
         let spans = resolved_for(
@@ -230,16 +279,34 @@ impl ReaderSession {
                     && span.start == selected.range.start
                     && span.end == selected.range.end
             })
-            .map(|span| (span.id, span.color.clone()))
+            .map(|span| MarkedRow {
+                id: span.id,
+                color: span.color.clone(),
+                style: span.style,
+            })
+    }
+
+    /// 改库里那一条的**任何一格**之前，先把整条要带的另几格凑齐。
+    ///
+    /// 存储层那条 `update_annotation` 是整条覆盖（笔记 + 颜色 + 画法一起写），漏带的那一格
+    /// 不报错，只是悄悄退回默认档 —— 于是「读者换了个颜色，他写的笔记没了」这种事在界面上
+    /// 完全看不出来。三个改格子的动作（改笔记、换色、换画法）都从这里取另两格，
+    /// 这条规矩就只有一处。
+    fn marked_edit(&self, id: i64) -> Option<(String, String, AnnotationStyle)> {
+        self.annotations
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| (row.note.clone(), row.color.clone(), row.style))
     }
 
     /// 取消划线：把选区对应的那一条从库里删掉，画出来的那条划线随它消失。
     ///
     /// 删完把选区收掉：屏上已经没东西可挑中了，留着一段「选中」只会让读者以为还能再删一次。
     pub fn delete_highlight(&mut self, cx: &mut Context<Self>) {
-        let Some((id, _)) = self.selection_annotation() else {
+        let Some(row) = self.selection_annotation() else {
             return;
         };
+        let id = row.id;
         self.selection_menu_open = false;
         let Some(store) = self.store.as_ref() else {
             tracing::warn!(annotation_id = id, "划线: 书库没装，那一条删不掉");
@@ -259,34 +326,68 @@ impl ReaderSession {
 
     /// 换颜色：改库里那一条的 `color`，选区留着（读者往往还要连着比两档颜色）。
     ///
-    /// `note` 原样带过去：存储层那条 `update_annotation` 是整条覆盖（note + color 一起写），
-    /// 只当自己是改颜色而不带上笔记，就会把读者写过的笔记悄悄清空。
+    /// 笔记与画法从 [`Self::marked_edit`] 原样带过去 —— 只当自己是改颜色而不带那两格，
+    /// 就会把读者写过的笔记或选过的画法悄悄清空。
     pub fn set_highlight_color(&mut self, color: &str, cx: &mut Context<Self>) {
-        let Some((id, current)) = self.selection_annotation() else {
+        let Some(row) = self.selection_annotation() else {
             return;
         };
-        if current == color {
+        if row.color == color {
             return; // 点的就是当下那一格：一趟都不跑
         }
         let Some(store) = self.store.as_ref() else {
-            tracing::warn!(annotation_id = id, "划线: 书库没装，颜色改不了");
+            tracing::warn!(annotation_id = row.id, "划线: 书库没装，颜色改不了");
             return;
         };
-        let note = self
-            .annotations
-            .iter()
-            .find(|row| row.id == id)
-            .map(|row| row.note.clone())
-            .unwrap_or_default();
-        match store.update_annotation(id, &note, color) {
+        let Some((note, _, style)) = self.marked_edit(row.id) else {
+            return;
+        };
+        match store.update_annotation(row.id, &note, color, style) {
             Ok(()) => {
-                tracing::info!(annotation_id = id, color, "划线: 换一条批注的颜色");
+                tracing::info!(annotation_id = row.id, color, "划线: 换一条批注的颜色");
                 self.load_annotations();
             }
             Err(err) => tracing::error!(
-                annotation_id = id,
+                annotation_id = row.id,
                 error = %err,
                 "划线: 改颜色写库失败"
+            ),
+        }
+        cx.notify();
+    }
+
+    /// 换画法：改库里那一条怎么画（底色带 / 实线 / 波浪），选区留着。
+    ///
+    /// 与换颜色同一条语句、同一份「带齐另两格」的规矩。**不碰配置里那一格**：
+    /// 回头改一条老批注的画法，不该顺手把「下一条怎么划」也改掉（那条岔路在
+    /// [`ReaderSession::pick_style`]）。
+    pub fn set_highlight_style(&mut self, style: AnnotationStyle, cx: &mut Context<Self>) {
+        let Some(row) = self.selection_annotation() else {
+            return;
+        };
+        if row.style == style {
+            return; // 点的就是当下那一格：一趟都不跑
+        }
+        let Some(store) = self.store.as_ref() else {
+            tracing::warn!(annotation_id = row.id, "划线: 书库没装，画法改不了");
+            return;
+        };
+        let Some((note, color, _)) = self.marked_edit(row.id) else {
+            return;
+        };
+        match store.update_annotation(row.id, &note, &color, style) {
+            Ok(()) => {
+                tracing::info!(
+                    annotation_id = row.id,
+                    style = style.as_str(),
+                    "划线: 换一条批注的画法"
+                );
+                self.load_annotations();
+            }
+            Err(err) => tracing::error!(
+                annotation_id = row.id,
+                error = %err,
+                "划线: 改画法写库失败"
             ),
         }
         cx.notify();
@@ -311,7 +412,7 @@ impl ReaderSession {
         let existing = self.selection_annotation();
         let note = existing
             .as_ref()
-            .and_then(|(id, _)| self.annotations.iter().find(|row| row.id == *id))
+            .and_then(|row| self.annotations.iter().find(|stored| stored.id == row.id))
             .map(|row| row.note.clone())
             .unwrap_or_default();
         // 引文只留开头一段：选了一整章也能一秒画完，`line_clamp(2)` 之外的部分本来也看不见。
@@ -347,7 +448,7 @@ impl ReaderSession {
         cx.notify();
     }
 
-    /// 保存笔记。已有批注走 `update_annotation`（笔记与原来的颜色一起写回），
+    /// 保存笔记。已有批注走 `update_annotation`（笔记连同原来的颜色与画法一起写回），
     /// 普通选区才新建一条 —— 两件事混成一条「先划再改」，只改笔记时会多落一条。
     pub fn save_note(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.note_editor.take() else {
@@ -358,14 +459,18 @@ impl ReaderSession {
             cx.notify();
             return;
         };
-        if let Some((id, color)) = editor.annotation {
+        if let Some(row) = editor.annotation {
+            let id = row.id;
             let Some(store) = self.store.clone() else {
                 tracing::warn!(annotation_id = id, "笔记: 书库没装，这一条改不了");
                 self.selection_menu_open = true;
                 cx.notify();
                 return;
             };
-            match store.update_annotation(id, &text, &color) {
+            // 颜色与画法从便签开那张时挑中的那一行带回去：这一句是整条覆盖，
+            // 漏带哪一格哪一格就没。便签压着时菜单是收的（见 `selection_menu_open`），
+            // 所以这两格在便签开着的这段路上不可能被别处改过，不必再回库里读一遍。
+            match store.update_annotation(id, &text, &row.color, row.style) {
                 Ok(()) => {
                     tracing::info!(annotation_id = id, "笔记: 改一条批注的笔记");
                     self.load_annotations();
@@ -404,13 +509,15 @@ impl ReaderSession {
             cx.notify();
             return;
         };
-        match store.add_annotation(book_id, &anchor, &text, DEFAULT_COLOR) {
+        let style = self.pending_style(cx);
+        match store.add_annotation(book_id, &anchor, &text, DEFAULT_COLOR, style) {
             Ok(id) => {
                 tracing::info!(
                     book_id,
                     chapter = selected.chapter + 1,
                     annotation_id = id,
                     color = DEFAULT_COLOR,
+                    style = style.as_str(),
                     "笔记: 落一条带笔记的批注"
                 );
                 self.load_annotations();
@@ -453,13 +560,14 @@ impl ReaderSession {
     }
 }
 
-/// 五种划线实色，按 `folio_core::store::ANNOTATION_COLORS` 的顺序摆
+/// 五种划线的实色，按 `folio_core::store::ANNOTATION_COLORS` 的顺序摆
 /// （红 / 紫 / 蓝 / 绿 / 黄）。
 ///
 /// 渲染帧开头取一次（`cx.theme()` 每帧问一遍不贵，但逐条画时查表更省事），
-/// 画的时候按库里那个名字查。**不压透明度**：划线是压在字下的一条实线、圆点是一枚实心
-/// 圆，都要看得清；从前底色版那 0.35 是给「整块铺在字下、不能把字吃掉」用的，现在这条
-/// 理由不在了。
+/// 画的时候按库里那个名字查。这里给出的**一律是实色**：菜单里那枚圆点是实心圆，
+/// 字下那两条线（实线、波浪）也都要看得清。唯一压透明度的是**底色带**那一档，
+/// 而那个数不住在这里 —— 它是绘制那一层的选择，见 `view/body.rs` 的 `HIGHLIGHT_ALPHA`
+/// （整片铺在字下、不能把字吃掉，量的就是那一个 0.35）。
 pub(in crate::ui::features::reader) struct Palette([Hsla; 5]);
 
 impl Palette {

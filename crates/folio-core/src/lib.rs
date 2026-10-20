@@ -68,6 +68,6 @@ pub use ingest::scan::{ScanReport, ScanSource, find};
 pub use position::{LOCATOR_FORMAT_VERSION, Locator};
 pub use store::StaleReason;
 pub use store::{
-    ANNOTATION_COLORS, Annotation, BookReading, Collection, DailyReading, ReadingRank,
-    ReadingSession, ReadingSummary, ReadingTotals, ShelfItem, Store,
+    ANNOTATION_COLORS, Annotation, AnnotationStyle, BookReading, Collection, DailyReading,
+    ReadingRank, ReadingSession, ReadingSummary, ReadingTotals, ShelfItem, Store,
 };

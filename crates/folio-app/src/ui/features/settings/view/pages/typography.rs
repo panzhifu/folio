@@ -1,14 +1,18 @@
-//! 「文字」页：字号、行距、段距、首行缩进、两端对齐，加上翻页沿哪根轴走。
+//! 「文字」页：字号、行距、段距、首行缩进、两端对齐，加上翻页沿哪根轴走、
+//! 新划的一条留哪种痕迹。
 //!
 //! 各项都是**即时生效**的：写入即规整、即落盘，正文各项即让所有已打开的书重排，
 //! 所以这里没有「应用」按钮，也没有改了不生效的中间态。
 //!
-//! 「翻页」那一组是个例外，而且是刻意的：它即时生效但**不重排**，因为它存在
-//! `appearance` 而不是 `Reader` 那一节 —— `Reader` 整份是排版失效键，把动画档位塞进去
-//! 等于「换一种翻页动画触发整章重排」（见 `folio_core::infra::config::PageTurn`）。
+//! 「翻页」与「划线」那两组是例外，而且是刻意的：它们即时生效但**不重排**，因为它们存在
+//! `appearance` 而不是 `Reader` 那一节 —— `Reader` 整份是排版失效键，把动画档位或一条痕迹
+//! 怎么画塞进去，等于「调一次翻页速度 / 换一种划线方式触发整章重排」
+//! （见 `folio_core::infra::config::PageTurn` 与 `AnnotationStyle`）。
 //!
 //! 前面两组是照读者改它们的时机分的：「正文」那一组是行的高度（一路跟着眼睛走），
 //! 「段落」那一组是每一段的形状（开头缩进与行尾齐不齐）。
+
+use folio_core::AnnotationStyle;
 
 use super::super::*;
 
@@ -129,6 +133,53 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                         "翻页",
                         "动画",
                         "平移",
+                    ]),
+                ],
+            ),
+            group(
+                tr(cx, "group.marking"),
+                vec![
+                    // 三档画法的键名就是库里那一列存的东西（`AnnotationStyle::as_str`），
+                    // 与 `[page_turn]` 那张表同一条口径：配置里那份与库里的读法共用一套名字，
+                    // 换一档不需要在两个地方各改一次。
+                    Row::choice(
+                        tr(cx, "field.highlight_style"),
+                        AnnotationStyle::ALL
+                            .iter()
+                            .copied()
+                            .map(|style| {
+                                (
+                                    SharedString::from(style.as_str()),
+                                    match style {
+                                        AnnotationStyle::Highlight => {
+                                            tr(cx, "highlight_style.highlight")
+                                        }
+                                        AnnotationStyle::Line => tr(cx, "highlight_style.line"),
+                                        AnnotationStyle::Wavy => tr(cx, "highlight_style.wavy"),
+                                    },
+                                )
+                            })
+                            .collect(),
+                        false,
+                        |cx: &App| {
+                            SharedString::from(
+                                ConfigHolder::appearance(cx).highlight_style.as_str(),
+                            )
+                        },
+                        |val: SharedString, cx| {
+                            ConfigHolder::edit_appearance(cx, |a| {
+                                a.highlight_style = AnnotationStyle::parse(&val)
+                            })
+                        },
+                    )
+                    .description(tr(cx, "field.highlight_style.desc"))
+                    .keywords(&[
+                        "highlight",
+                        "underline",
+                        "wavy",
+                        "划线",
+                        "高亮",
+                        "波浪",
                     ]),
                 ],
             ),

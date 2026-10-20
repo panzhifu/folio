@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::infra::error::IoResultExt as _;
 use crate::infra::i18n::Locale;
 use crate::infra::paths;
+use crate::store::AnnotationStyle;
 
 /// 配置文件的**格式版本**。加字段、改某个键的含义时 +1。
 ///
@@ -416,6 +417,20 @@ pub struct Appearance {
     /// 管到的那两腿：点屏 / 按键 / 滚轮起的那一趟，以及松手惯性那一腿的**时长上限**
     /// （那一腿自己按剩余行程与手指速度算，只被这一个数夹住上端）。
     pub turn_duration: f32,
+    /// 新划的一条用哪种画法（底色带 / 实线 / 波浪）。
+    ///
+    /// 存的是**这一档**而不是「读者划的每一条」：每一条款式在库里自己那一行上
+    /// （[`AnnotationStyle`](crate::AnnotationStyle)，v21 起有 `annotations.style` 这一列），
+    /// 这一格只回答「下一条款长什么样」。挑中库里已有一条时，菜单里那三格改的是**那一条**，
+    /// 不碰这一格 —— 读者的默认档不该被一次改色动作顺手改掉。
+    ///
+    /// 与 [`page_turn`](Self::page_turn) 同一个理由存在这一节而不是 [`Reader`]：一条痕迹
+    /// 怎么画与一行字折在哪里毫无关系，塞进 `Reader` 就是「换一种画法触发整本书重排」。
+    ///
+    /// 默认档是 [`AnnotationStyle::Highlight`]，而**库里那一列的默认是 `line`**，两个默认值
+    /// 各答各的问题、不冲突：那一列答「v21 之前划的那些条当时长什么样」（答案确定是实线），
+    /// 这一格答「往后的新条目长什么样」。见 `store::schema` 的 v21 那条。
+    pub highlight_style: AnnotationStyle,
     /// 阅读界面的亮度，`None` = **不接管**（跟随系统）。
     ///
     /// 与 [`page_turn`](Self::page_turn) 同一个理由存在这一节而不是 [`Reader`]：`Reader`
@@ -488,6 +503,7 @@ impl Default for Appearance {
             dark: None,
             page_turn: PageTurn::default(),
             turn_duration: Self::TURN_DURATION_DEFAULT,
+            highlight_style: AnnotationStyle::default(),
             brightness: None,
         }
     }
@@ -950,7 +966,7 @@ mod tests {
 
     use crate::infra::config::{Config, Env, Layer, WatchDir};
     use crate::infra::i18n::Locale;
-    use crate::{Appearance, Language, Library, Mode, PageTurn, Reader};
+    use crate::{AnnotationStyle, Appearance, Language, Library, Mode, PageTurn, Reader};
     use serde_json::json;
 
     fn load(text: &str) -> Config {
@@ -1089,6 +1105,7 @@ mod tests {
                 // 故意不是默认值：这一趟要把新键真写出去再读回来，填默认值等于没测到它。
                 page_turn: PageTurn::SlideUp,
                 turn_duration: 420.0,
+                highlight_style: AnnotationStyle::Wavy,
                 brightness: Some(0.6),
             },
             language: Language { locale: Locale::Ja },
@@ -1367,6 +1384,41 @@ mod tests {
             );
         }
         assert_eq!(PageTurn::default(), PageTurn::None);
+    }
+
+    /// 认不出的 `highlight_style` 回落默认那档（底色带），而**同一节里别的键一个都不许跟着没**。
+    /// 这条与上面那条 `page_turn` 是同一条规矩的第二次发生：`AnnotationStyle` 的
+    /// `Deserialize` 也是自己实现的，derive 会让一个拼错的画法键吃掉浅深两侧选过的主题名。
+    ///
+    /// 顺带钉住那个**两个默认值不许互相串**的分工：配置里缺这一格时读成 `highlight`
+    /// （「往后的新条目」），而库里那一列缺值时读成 `line`（「v21 之前那些条」），
+    /// 见 `store::annotations` 的 `a_row_written_before_the_style_column_reads_back_as_line`。
+    #[test]
+    fn an_unknown_highlight_style_falls_back_without_taking_the_section_with_it() {
+        let got =
+            load(r#"{"appearance":{"mode":"dark","light":"Gruvbox","highlight_style":"zigzag"}}"#);
+        assert_eq!(got.appearance.highlight_style, AnnotationStyle::Highlight);
+        assert_eq!(got.appearance.mode, Mode::Dark);
+        assert_eq!(got.appearance.light.as_deref(), Some("Gruvbox"));
+        for (text, want) in [
+            ("highlight", AnnotationStyle::Highlight),
+            ("line", AnnotationStyle::Line),
+            ("wavy", AnnotationStyle::Wavy),
+        ] {
+            assert_eq!(
+                load(&format!(
+                    r#"{{"appearance":{{"highlight_style":"{text}"}}}}"#
+                ))
+                .appearance
+                .highlight_style,
+                want,
+                "配置里的 {text:?} 落错了档"
+            );
+        }
+        // 一份没有这一格的旧配置：读成默认档，而不是让整节 appearance 退回默认。
+        let old = load(r#"{"appearance":{"light":"Gruvbox"}}"#);
+        assert_eq!(old.appearance.highlight_style, AnnotationStyle::default());
+        assert_eq!(old.appearance.light.as_deref(), Some("Gruvbox"));
     }
 
     #[test]

@@ -93,6 +93,10 @@ image_download = "下載"
 image_locate = "定位原文"
 image_close = "關閉"
 image_counter = "%{index} / %{total}"
+# 三種畫法，就是劃詞選單左邊那顆膠囊由左至右那三格。
+style_highlight = "高亮"
+style_line = "實線"
+style_wavy = "波浪線"
 
 [toast]
 font_size = "字型大小 %{size}px"
@@ -131,6 +135,7 @@ location = "位置"
 watch = "資料夾監聽"
 transfer = "Wi-Fi 傳輸"
 rows = "條目"
+marking = "劃線"
 
 [field]
 font_size = "字型大小"
@@ -184,6 +189,8 @@ toc_dim_read = "讀過的章節淺色顯示"
 "toc_dim_read.desc" = "到過的章在目錄裡畫成淺色，沒讀過的保持正常顏色。"
 page_turn = "翻頁動畫"
 "page_turn.desc" = "翻頁時那一張紙怎麼走：平移、覆蓋，還是乾脆不走。分頁與雙頁按這一檔擺那兩張紙；連續滾動只看它要不要走動畫。換它不會讓任何一章重排。"
+highlight_style = "劃線方式"
+"highlight_style.desc" = "新劃的一條在正文上留哪種痕跡：字底一塊顏色、字下一條實線、或一條波浪。已經留在書上的那幾條各照自己當初那一檔畫，不動。改這一格不重排。"
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
 [page_turn]
@@ -193,6 +200,11 @@ cover = "左右覆蓋"
 curl = "模擬翻頁"
 scroll = "上下滾動"
 none = "不走動畫"
+
+[highlight_style]
+highlight = "高亮"
+line = "實線"
+wavy = "波浪線"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]

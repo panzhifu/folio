@@ -100,6 +100,10 @@ image_download = "Save"
 image_locate = "Locate"
 image_close = "Close"
 image_counter = "%{index} / %{total}"
+# The three marks a highlight can be drawn as, left to right in the selection menu.
+style_highlight = "Highlight"
+style_line = "Underline"
+style_wavy = "Wavy line"
 
 [toast]
 font_size = "Font size %{size}px"
@@ -139,6 +143,7 @@ location = "Location"
 watch = "Folder watching"
 transfer = "Wi-Fi transfer"
 rows = "Rows"
+marking = "Marking"
 
 [field]
 font_size = "Font size"
@@ -192,6 +197,8 @@ toc_dim_read = "Dim chapters you have read"
 "toc_dim_read.desc" = "Chapters you have opened are drawn faded in the contents list."
 page_turn = "Page-turn animation"
 "page_turn.desc" = "How the page moves when you turn it: slide, cover, or not at all. Paged and two-column spreads lay two sheets out according to this; continuous scrolling only asks whether there is an animation. Changing it never re-typesets a chapter."
+highlight_style = "Highlight style"
+"highlight_style.desc" = "Which mark a new highlight leaves in the text: a colour band behind the glyphs, a straight line under them, or a wavy one. Marks already in the book keep whichever they were drawn with, and changing this re-typesets nothing."
 
 # Labels for the four page-turn styles. The value written back to config is `PageTurn::as_str()`.
 [page_turn]
@@ -201,6 +208,11 @@ cover = "Cover from the side"
 curl = "Page curl"
 scroll = "Scroll down"
 none = "No animation"
+
+[highlight_style]
+highlight = "Highlight"
+line = "Underline"
+wavy = "Wavy"
 
 [account]
 settings = "Settings"

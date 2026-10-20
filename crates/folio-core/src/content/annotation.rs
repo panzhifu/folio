@@ -12,9 +12,12 @@ use std::collections::BTreeMap;
 
 use crate::content::anchor::{Confidence, TextMap, relocate};
 use crate::content::format::{Chapter, DocMeta};
-use crate::store::Annotation;
+use crate::store::{Annotation, AnnotationStyle};
 
-/// 一条锚点落到本章坐标上的结果。界面拿它画下划线、列侧栏、标 stale。
+/// 一条锚点落到本章坐标上的结果。界面拿它画痕迹、列侧栏、标 stale。
+///
+/// 落到哪儿是这一层唯一的新信息；颜色与画法只是从库里那一行**原样带过来**，
+/// 因为绘制两头都要它们 —— 少带一格，界面就得为了画法再回库里读一次整表。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAnnotation {
     /// 库里那一条的 id：界面靠它回指原文，写回 stale 时也用它。
@@ -24,6 +27,8 @@ pub struct ResolvedAnnotation {
     /// 在哪一级找回的。`Stale` 表示没找回，界面要显式标出来而不是画到别处。
     pub confidence: Confidence,
     pub color: String,
+    /// 这一条怎么画（底色带 / 实线 / 波浪）。
+    pub style: AnnotationStyle,
     pub note: String,
 }
 
@@ -56,6 +61,7 @@ pub fn resolve_annotations(
                 end: at.end,
                 confidence: at.confidence,
                 color: a.color.clone(),
+                style: a.style,
                 note: a.note.clone(),
             }
         })
@@ -160,7 +166,7 @@ mod tests {
     };
     use crate::content::dom::Dom;
     use crate::content::format::{Chapter, DocMeta, Format};
-    use crate::store::Annotation;
+    use crate::store::{Annotation, AnnotationStyle};
 
     /// 一段正文的可见文本坐标表。`TextMap` 自己持有文本，不借 `Dom`。
     fn map_of(html: &str) -> TextMap {
@@ -187,6 +193,9 @@ mod tests {
             anchor,
             note: note.into(),
             color: "amber".into(),
+            // 画法给默认档：这一格的测试问的是锚点落不回时 `confidence` 怎么说，
+            // 不是画法。要验画法的往返在 `store::annotations` 那组测试里。
+            style: AnnotationStyle::default(),
             stale,
             created_at: id,
             updated_at: id,

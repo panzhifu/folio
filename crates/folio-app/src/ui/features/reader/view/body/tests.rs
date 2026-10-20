@@ -17,7 +17,8 @@ use folio_core::content::format::TocEntry;
 use folio_core::infra::metrics::{Metric, take_local};
 use folio_core::store::Store;
 use folio_core::{
-    Appearance, Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, PageTurn, Reader,
+    AnnotationStyle, Appearance, Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator,
+    PageTurn, Reader,
 };
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
@@ -1524,7 +1525,7 @@ fn a_tap_on_a_highlight_selects_it_again(cx: &mut TestAppContext) {
             v.selection()
                 .map(|selected| (selected.range.start, selected.range.end)),
             v.selection_menu_open(),
-            v.selection_annotation().map(|(_, color)| color),
+            v.selection_annotation().map(|row| row.color),
         )
     });
     assert_eq!(range, Some((start, end)), "重选中的就是那一条原本那一段字");
@@ -1676,12 +1677,17 @@ fn recoloring_a_highlight_moves_nothing(cx: &mut TestAppContext) {
     assert_eq!(rows.len(), 1, "换颜色不该多落一条");
     assert_eq!(rows[0].color, "sky", "库里那条的颜色要跟着改");
     assert_eq!(
+        rows[0].style,
+        folio_core::AnnotationStyle::Highlight,
+        "只换颜色不该把画法抹回默认档 —— `update_annotation` 是整条覆盖，漏带哪格哪格就没"
+    );
+    assert_eq!(
         (rows[0].anchor.start, rows[0].anchor.end),
         (start, end),
         "改的只是颜色，锚点一个字都没动"
     );
     assert_eq!(
-        view.read_with(cx, |v, _| v.selection_annotation().map(|(_, color)| color))
+        view.read_with(cx, |v, _| v.selection_annotation().map(|row| row.color))
             .as_deref(),
         Some("sky"),
         "菜单认得的还是那一条，读的也是新那一档"
@@ -1716,6 +1722,108 @@ fn a_highlight_can_be_drawn_in_the_tapped_color(cx: &mut TestAppContext) {
     let rows = store.annotations(id).expect("读库");
     assert_eq!(rows.len(), 1, "点色也该落一条");
     assert_eq!(rows[0].color, "lime", "落的是点中的那一档，不是默认那一档");
+}
+
+/// 左边那三格按下去，挑中的是库里**已有**那一条时：只改那一条的画法，颜色一个字都不动，
+/// 而且**不碰配置里那一格** —— 回头改一条老批注的画法，不该顺手把「下一条怎么划」也改掉。
+///
+/// 把 `set_highlight_style` 里那句「笔记与颜色原样带过去」写死成默认色，这条红在颜色那一格；
+/// 把「不碰配置」那条岔路去掉（两个岔都写偏好），这条红在最后那一格。
+#[gpui_kit::test]
+fn re_styling_an_existing_row_moves_only_the_style(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    // 划一条、再点回那一条：手里挑中的正是库里那一行（菜单第二格已是「取消划线」）。
+    let (start, end) = highlight_then_tap_it_back(cx, &view, handle);
+    // 先把颜色换成**不是默认那档**的一格：留着默认黄的话，「换画法时把颜色写回默认」
+    // 那种缺陷根本测不出来（改坏了也还是 amber）。
+    view.update(cx, |v, cx| v.set_highlight_color("sky", cx));
+    let before = store.annotations(id).expect("读库");
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].color, "sky", "这一条已经被换成非默认那一档");
+    assert_eq!(
+        before[0].style,
+        AnnotationStyle::Highlight,
+        "新划的一条用的就是配置里那一格"
+    );
+
+    view.update(cx, |v, cx| v.set_highlight_style(AnnotationStyle::Wavy, cx));
+
+    let rows = store.annotations(id).expect("改过之后读库");
+    assert_eq!(rows.len(), 1, "换画法不该多落一条");
+    assert_eq!(rows[0].style, AnnotationStyle::Wavy, "改的那一格要落下去");
+    assert_eq!(rows[0].color, "sky", "只换画法不该把颜色抹回默认档");
+    assert_eq!(
+        (rows[0].anchor.start, rows[0].anchor.end),
+        (start, end),
+        "改的只是画法，锚点一个字都没动"
+    );
+    assert_eq!(
+        cx.update(|cx| ConfigHolder::appearance(cx).highlight_style),
+        AnnotationStyle::Highlight,
+        "改一条老账不该动「下一条怎么划」那一格"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_some()),
+        "选区留着：与换色同一口径，读者往往还要再比一档"
+    );
+}
+
+/// 左边那三格按下去，手里是**普通选区**时是两件事一起：用它把这一段划上，**并**把它记进
+/// 配置 —— 于是下一段不必再点格子，按「划线」那一格就是同一档。
+///
+/// 这条同时钉住两个默认值的分工：库里那一列的默认（`line`，答的是 v21 之前那些条）与
+/// 配置里那一格的默认（`highlight`）不是一件事，界面上划出来的每一条都**显式**带画法。
+#[gpui_kit::test]
+fn a_tapped_style_draws_the_selection_and_becomes_the_default(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    drag_select(cx, &view, handle);
+
+    view.update(cx, |v, cx| v.pick_style(AnnotationStyle::Wavy, cx));
+
+    let rows = store.annotations(id).expect("读库");
+    assert_eq!(rows.len(), 1, "点画法那一格也该直接落一条，与点色同一口径");
+    assert_eq!(rows[0].style, AnnotationStyle::Wavy);
+    assert_eq!(rows[0].color, "amber", "没点色就用默认那档");
+    assert_eq!(
+        cx.update(|cx| ConfigHolder::appearance(cx).highlight_style),
+        AnnotationStyle::Wavy,
+        "选中的这一档要记进配置：跨书持久，重开一本书也还是它"
+    );
+
+    // 第二段不必再点格子：按「划线」那一格走的就是刚记下的那一档。
+    drag_select(cx, &view, handle);
+    view.update(cx, |v, cx| v.add_highlight(cx));
+    let rows = store.annotations(id).expect("再读库");
+    assert_eq!(rows.len(), 2, "两段各一条");
+    assert_eq!(
+        rows[1].style,
+        AnnotationStyle::Wavy,
+        "「划线」那一格读的也是配置里那一格，不是写死的默认档"
+    );
 }
 
 /// M6 验收：选中态下的一击——点选区内把菜单请回来、选区不动，点选区外清空，

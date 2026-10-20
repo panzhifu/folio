@@ -34,7 +34,7 @@ use folio_core::content::anchor::line_at_y;
 use folio_core::content::format::css::computed::BorderStyle;
 use folio_core::layout::FontKey;
 use folio_core::layout::fragment::column_offset;
-use folio_core::store::Annotation;
+use folio_core::store::{Annotation, AnnotationStyle};
 use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
@@ -60,7 +60,7 @@ use crate::ui::features::reader::model::session::{
 };
 use crate::ui::features::reader::model::swipe::release_transition;
 use crate::ui::features::reader::motion::turn_animation::{self, Sheet, Tint};
-use crate::ui::features::reader::view::paint::{GlyphRun, GlyphsElement, shape};
+use crate::ui::features::reader::view::paint::{self, GlyphRun, GlyphsElement, Mark, shape};
 use crate::ui::features::reader::view::scene::{BlockDecor, Scene, VisibleImage};
 use crate::ui::foundation::images::DecodeRequest;
 use crate::ui::services::config::ConfigHolder;
@@ -607,6 +607,9 @@ impl Render for ReaderSession {
                             placed.index,
                             self.prefs.margin_x,
                             band.start - placed.base_y,
+                            // 连续滚动这一臂递整带的长：竖排不在这档落地，所以这一格
+                            // 只在底色带那条换算里被读一次（见 `highlight_rects`）。
+                            band.end - band.start,
                             self.header_reserve,
                             (band.start - placed.base_y)..(band.end - placed.base_y),
                             // 连续滚动这一臂只摆一张纸（翻页就是补间那一个 y），没有要裁的
@@ -1053,6 +1056,7 @@ impl Render for ReaderSession {
                                 page_ref.chapter,
                                 x,
                                 slice.origin_y,
+                                slice.height,
                                 top,
                                 slice.origin_y..(slice.origin_y + slice.height + 1.0),
                                 cut,
@@ -1813,12 +1817,18 @@ fn highlight_rects(
     }
 }
 
-/// 一章的批注下划线：库里的锚点 → 本章坐标 → 元素局部的一条条细线，追加进字形元素。
+/// 一章的批注：库里的锚点 → 本章坐标 → 元素局部的一条条痕迹，追加进字形元素。
 ///
 /// 换算口径与 [`highlight_rects`] 完全一致（同一套「这一栏摆在哪、可见带是哪一段」），
-/// 只是来源从这一次挑中的选区换成了留在书上的批注，形状从「行盒整块」换成「字下那条线」
-/// （[`annotation_underline_rects`]）。解不回来的那一条**不画** —— 宁可少一条下划线，
-/// 也不把读者划过的痕迹画到别的字上去（见 `modules/annotations.rs`）。
+/// 只是来源从这一次挑中的选区换成了留在书上的批注。三档画法各要一块不同的矩形：
+///
+/// - **底色带**要的就是行盒那一整块，所以直接复用 [`highlight_rects`] —— 与选中高亮同一条
+///   换算，顺带把竖排一起对上（那条认推进轴，而字下那两条不认，见
+///   [`annotation_underline_rects`] 末尾那条限制）。
+/// - **字下实线**与**波浪线**要的是基线下同一条中线上的两块矩形，只差厚度。
+///
+/// 解不回来的那一条**不画** —— 宁可少一条痕迹，也不把读者划过的痕迹画到别的字上去
+/// （见 `modules/annotations.rs`）。
 ///
 /// 缓存与那一份库里的批注按字段分开递进来而不是拿 `&self`：调用点在 `match &mut self.source`
 /// 的那一臂里，整个 `self` 已经借不出了。
@@ -1834,6 +1844,9 @@ fn annotation_fills(
     chapter: usize,
     x: f32,
     origin_y: f32,
+    // 本片沿推进轴的长度（`Fragment::height`）。只有底色带那一档要它：那一档走
+    // `highlight_rects`。连续滚动永远横排，那一档里这一格不参与。
+    flow_len: f32,
     header: f32,
     band: Range<f32>,
     cut: Option<crate::ui::features::reader::motion::turn_animation::Cut>,
@@ -1843,45 +1856,95 @@ fn annotation_fills(
     }
     let spans =
         annotations::resolved_for(cache, stored, chapter, doc.chapter_hash(), doc.text_map());
-    for span in spans.iter() {
-        if span.is_stale() {
-            continue;
-        }
+    for span in spans.iter().filter(|span| !span.is_stale()) {
         let mut lines = Vec::new();
-        annotation_underline_rects(
-            doc,
-            window,
-            cx,
-            span.start..span.end,
-            x,
-            origin_y,
-            header,
-            band.clone(),
-            &mut lines,
-        );
-        let color = palette.color(&span.color);
+        match span.style {
+            AnnotationStyle::Highlight => highlight_rects(
+                doc,
+                window,
+                cx,
+                span.start..span.end,
+                x,
+                origin_y,
+                flow_len,
+                header,
+                band.clone(),
+                &mut lines,
+            ),
+            AnnotationStyle::Line => annotation_underline_rects(
+                doc,
+                window,
+                cx,
+                span.start..span.end,
+                x,
+                origin_y,
+                header,
+                band.clone(),
+                UNDERLINE_THICKNESS,
+                &mut lines,
+            ),
+            AnnotationStyle::Wavy => annotation_underline_rects(
+                doc,
+                window,
+                cx,
+                span.start..span.end,
+                x,
+                origin_y,
+                header,
+                band.clone(),
+                paint::WAVE_HEIGHT,
+                &mut lines,
+            ),
+        }
+        // 底色带压透明度：那一块是整片铺在字下的，实色会把字吃掉。字下那两条不压 ——
+        // 它们只占基线下那几像素，压了就分不清是哪一档。
+        let solid = palette.color(&span.color);
+        let color = if span.style == AnnotationStyle::Highlight {
+            solid.opacity(HIGHLIGHT_ALPHA)
+        } else {
+            solid
+        };
         for line in lines {
-            // 读者划的那道底色也跟着那张纸走：中心落在被裁掉那一侧就不画。不然一条亮黄的
-            // 线会浮在已经被盖走/折走的字上，那一帧读起来像划线自己没跟着翻页。
+            // 读者划的那道也跟着那张纸走：中心落在被裁掉那一侧就不画。不然一条亮黄的
+            // 带会浮在已经被盖走/折走的字上，那一帧读起来像划线自己没跟着翻页。
             let center = line.center();
             if cut.is_some_and(|cut| !cut.keeps(f32::from(center.x), f32::from(center.y))) {
                 continue;
             }
-            element.underline(line, color);
+            element.mark(if span.style == AnnotationStyle::Wavy {
+                Mark::Wave(line, color)
+            } else {
+                Mark::Quad(line, color)
+            });
         }
     }
 }
 
-/// 划线那条线多厚（逻辑像素）。够看清、又不至于把字下面的笔画糊成一团。
+/// 划线那条实线多厚（逻辑像素）。够看清、又不至于把字下面的笔画糊成一团。
 const UNDERLINE_THICKNESS: f32 = 2.0;
 
-/// 一段批注在**可见带内**的下划线矩形（元素局部）：每行盒一条线，追加进 `out`。
+/// 高亮带那一片压的透明度。`0.35` 是这一档还是唯一画法时量下来的那个数：整片铺在字下、
+/// 不能把字吃掉，又要在浅深两套主题里都读得出「这一句我划过」。
+///
+/// 只给底色带那一档用。字下那两条线是实色 —— 它们不占字的背景，压了反而看不清是哪一档。
+const HIGHLIGHT_ALPHA: f32 = 0.35;
+
+/// 一段批注在**可见带内**字下那两块矩形（元素局部）：每行盒一块，追加进 `out`。
 ///
 /// 与 [`highlight_rects`] 同一套坐标换算，只把「行盒整块」换成「字下那条线」：
 /// 线落在基线下 `descent × 0.618` 处（与 [`crate::ui::features::reader::view::paint`] 里 `decoration_y` 同源，
 /// 所以和正文自己的 `text-decoration: underline` 画在同一条横线上）。行盒的
 /// `baseline` 是「行顶到基线的距离」（`layout::collect` 的 `acc.ascent`，半 leading 已含），
 /// 于是 `height − baseline` 就是基线下那段。
+/// `thickness` 决定这块矩形多厚 —— 实线给 [`UNDERLINE_THICKNESS`]，波浪给
+/// [`paint::WAVE_HEIGHT`]（那条线要起伏，盒子得比线本身高出一倍峰峰值）。两种厚度**压在
+/// 同一条中线**上：只按顶边对齐的话，读者换一个画法会发现痕迹往下跳了一小截 ——
+/// 那是这一屏里最容易被看见的错。
+///
+/// 这一条只算横排。竖排那一线该往哪偏，`selection_rects_in_band` 给的**物理**矩形里
+/// 没有这个信息（要问的是推进轴上的 `line.baseline`），所以竖排的书只有底色带那一档
+/// 是对的（它复用 [`highlight_rects`]，那条认轴）。字下那两档在竖排里照旧画进行盒的
+/// `y` 那一维 —— 已知限制，与盒模型那几族边一起留给竖排的第二轮。
 #[allow(clippy::too_many_arguments)]
 fn annotation_underline_rects(
     doc: &Document,
@@ -1892,6 +1955,7 @@ fn annotation_underline_rects(
     origin_y: f32,
     header: f32,
     band: std::ops::Range<f32>,
+    thickness: f32,
     out: &mut Vec<Bounds<Pixels>>,
 ) {
     if range.start >= range.end {
@@ -1907,9 +1971,14 @@ fn annotation_underline_rects(
         let line = &layout.lines[line_at_y(layout, rect.y + 0.5)];
         let descent = (rect.height - line.baseline).max(0.0);
         let underline_y = rect.y + line.baseline + descent * 0.618;
+        // 那条 2 像素实线的中心。波浪那块更厚的盒子围绕同一个中心摆。
+        let center = underline_y + UNDERLINE_THICKNESS * 0.5;
         out.push(Bounds::new(
-            point(px(x + rect.x), px(underline_y - origin_y + header)),
-            size(px(rect.width), px(UNDERLINE_THICKNESS)),
+            point(
+                px(x + rect.x),
+                px(center - thickness * 0.5 - origin_y + header),
+            ),
+            size(px(rect.width), px(thickness)),
         ));
     }
 }

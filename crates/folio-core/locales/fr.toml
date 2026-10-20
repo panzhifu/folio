@@ -93,6 +93,10 @@ image_download = "Enregistrer"
 image_locate = "Localiser"
 image_close = "Fermer"
 image_counter = "%{index} / %{total}"
+# Les trois tracés : les trois cases de la capsule de gauche du menu de sélection.
+style_highlight = "Surlignage"
+style_line = "Soulignement"
+style_wavy = "Trait ondulé"
 
 [toast]
 font_size = "Taille du texte %{size} px"
@@ -131,6 +135,7 @@ location = "Emplacement"
 watch = "Surveillance de dossier"
 transfer = "Transfert Wi-Fi"
 rows = "Lignes"
+marking = "Marquages"
 
 [field]
 font_size = "Taille du texte"
@@ -184,6 +189,8 @@ toc_dim_read = "Estomper les chapitres lus"
 "toc_dim_read.desc" = "Les chapitres déjà ouverts sont dessinés estompés dans le sommaire."
 page_turn = "Animation de page"
 "page_turn.desc" = "Le mouvement de la feuille quand on tourne la page : glissement, recouvrement, ou aucun. La pagination et le deux-pages disposent deux feuilles selon ce réglage ; le défilement continu ne demande que s’il y a une animation. Le changer ne recompose aucun chapitre."
+highlight_style = "Style de marquage"
+"highlight_style.desc" = "Quelle trace laisse un nouveau marquage dans le texte : un bandeau de couleur derrière les glyphes, une ligne droite dessous, ou un trait ondulé. Les marquages déjà dans le livre gardent le leur ; changer ceci ne recompose rien."
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
 [page_turn]
@@ -193,6 +200,11 @@ cover = "Recouvrement latéral"
 curl = "Effet feuille"
 scroll = "Défilement vertical"
 none = "Sans animation"
+
+[highlight_style]
+highlight = "Surlignage"
+line = "Soulignement"
+wavy = "Ondulé"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]

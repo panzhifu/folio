@@ -96,6 +96,10 @@ image_download = "保存"
 image_locate = "本文へ"
 image_close = "閉じる"
 image_counter = "%{index} / %{total}"
+# 三つの引き方。選択メニュー左のカプセルの左から三枠です。
+style_highlight = "ハイライト"
+style_line = "下線"
+style_wavy = "波線"
 
 [toast]
 font_size = "文字サイズ %{size}px"
@@ -134,6 +138,7 @@ location = "保存先"
 watch = "フォルダ監視"
 transfer = "Wi-Fi 転送"
 rows = "行"
+marking = "マーキング"
 
 [field]
 font_size = "文字サイズ"
@@ -187,6 +192,8 @@ toc_dim_read = "読んだ章を薄く表示"
 "toc_dim_read.desc" = "開いたことのある章を目次で薄く描画する。"
 page_turn = "ページめくりの動き"
 "page_turn.desc" = "めくる時に紙がどう動くか（滑る／覆う／動かさない）。ページめくりと見開きはこの設定で二枚を並べ、連続スクロールでは動きがあるかどうかだけを見ます。設定を変えても組み直しは起きません。"
+highlight_style = "線の種類"
+"highlight_style.desc" = "新しく引いたマーカーが本文にどんな形の痕跡を残すか：文字の後ろに色の帯、文字の下に直線、または波線。すでに本にある線はそれぞれ引いた時の形で描かれ、変わりません。ここを変えても組版はやり直ししません。"
 
 # ページめくり四通りのラベル。設定に書き戻す値は `PageTurn::as_str()`。
 [page_turn]
@@ -196,6 +203,11 @@ cover = "横から覆う"
 curl = "紙めくり"
 scroll = "下にスクロール"
 none = "動きなし"
+
+[highlight_style]
+highlight = "ハイライト"
+line = "下線"
+wavy = "波線"
 
 [account]
 settings = "設定"

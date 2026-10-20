@@ -93,6 +93,10 @@ image_download = "Guardar"
 image_locate = "Localizar"
 image_close = "Cerrar"
 image_counter = "%{index} / %{total}"
+# Los tres trazos: las tres casillas de la cápsula izquierda del menú de selección.
+style_highlight = "Resaltado"
+style_line = "Subrayado"
+style_wavy = "Línea ondulada"
 
 [toast]
 font_size = "Tamaño de texto %{size} px"
@@ -131,6 +135,7 @@ location = "Ubicación"
 watch = "Vigilancia de carpeta"
 transfer = "Transferencia por Wi-Fi"
 rows = "Entradas"
+marking = "Marcas"
 
 [field]
 font_size = "Tamaño de texto"
@@ -184,6 +189,8 @@ toc_dim_read = "Atenuar capítulos leídos"
 "toc_dim_read.desc" = "Los capítulos que ya abriste se dibujan apagados en el índice."
 page_turn = "Animación de cambio"
 "page_turn.desc" = "Cómo se mueve la hoja al pasarla: deslizar, cubrir o nada. Por páginas y a doble página colocan dos hojas según este valor; el desplazamiento continuo solo pregunta si hay animación. Cambiarlo no recompone ningún capítulo."
+highlight_style = "Estilo de marca"
+"highlight_style.desc" = "Qué huella deja en el texto una marca nueva: una banda de color detrás de los glifos, una línea recta debajo o una línea ondulada. Las marcas que ya están en el libro conservan la suya; cambiar esto no vuelve a componer nada."
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
 [page_turn]
@@ -193,6 +200,11 @@ cover = "Cubrir desde el lado"
 curl = "Pasar página"
 scroll = "Desplazar hacia abajo"
 none = "Sin animación"
+
+[highlight_style]
+highlight = "Resaltado"
+line = "Subrayado"
+wavy = "Ondulada"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]

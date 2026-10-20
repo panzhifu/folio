@@ -93,6 +93,10 @@ image_download = "저장"
 image_locate = "원문으로"
 image_close = "닫기"
 image_counter = "%{index} / %{total}"
+# 세 가지 긋는 방법. 선택 메뉴 왼쪽 캡슐의 왼쪽부터 세 칸입니다.
+style_highlight = "하이라이트"
+style_line = "실선"
+style_wavy = "물결선"
 
 [toast]
 font_size = "글자 크기 %{size}px"
@@ -131,6 +135,7 @@ location = "위치"
 watch = "폴더 감시"
 transfer = "Wi-Fi 전송"
 rows = "항목"
+marking = "표시"
 
 [field]
 font_size = "글자 크기"
@@ -184,6 +189,8 @@ toc_dim_read = "읽은 장 흐리게"
 "toc_dim_read.desc" = "읽은 장을 목차에서 흐린 색으로 그려 읽지 않은 장과 구분합니다."
 page_turn = "페이지 넘기기 효과"
 "page_turn.desc" = "페이지를 넘길 때 종이 한 장이 어떻게 움직이는지: 미끄러짐, 덮힘, 또는 없음. 쪽 나눔과 두 페이지는 이 설정으로 두 장을 배치하고, 연속 스크롤은 효과 유무만 봅니다. 바꿔도 어떤 장도 다시 조판하지 않습니다."
+highlight_style = "줄 종류"
+"highlight_style.desc" = "새로 그은 표시가 본문에 어떤 흔적을 남기는지: 글자 뒤에 색 띠, 글자 아래 실선, 또는 물결선. 이미 책에 있는 표시는 그었을 때 그대로 유지되고, 여기 바꿔도 재정판하지 않습니다."
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
 [page_turn]
@@ -193,6 +200,11 @@ cover = "옆에서 덮기"
 curl = "페이지 넘김"
 scroll = "위로 스크롤"
 none = "효과 없음"
+
+[highlight_style]
+highlight = "하이라이트"
+line = "실선"
+wavy = "물결선"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
