@@ -58,6 +58,9 @@ chardetng.workspace = true
 # 只有正则能吃字符串模式。**这条是 core 的运行时图里新增的**（不是第三个 crate 版本），
 # 为什么与「图上已有」那几条不同、以及逐条才编译的用法，全写在根 Cargo.toml 那条上。
 regex.workspace = true
+# PDF（M9）。为什么是纯 Rust 的 `pdf_oxide` 而不是 `lopdf`/`printpdf`/`oxpdf`、以及
+# 「两个 CJK feature 先不开」的理由，全写在根 Cargo.toml 那条上。**这一格没有代码在用。**
+pdf_oxide.workspace = true
 rust-i18n.workspace = true
 # 日志：core 这边只管「说了什么」——`tracing` 的宏与 span，配置在 `Config::logging`，
 # 装配 subscriber 的入口在 `src/logging.rs`。（不依赖 gpui 这条边界照旧成立：

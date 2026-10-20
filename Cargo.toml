@@ -139,6 +139,22 @@ unicode-script = "0.5"
 # 复用。版本需求写 `"1"`，与它唯一的 1.0.0 对齐。
 # 纯 Rust、没有 `cc`，交叉到 Android 与鸿蒙不用加工具链变量 —— 与上面 `sha2` 那条同一理由。
 chardetng = "1"
+# PDF：`pdf_oxide`。这是**纯 Rust 那一族里唯一能真把页面画成位图的**（`lopdf` 只有对象模型、
+# 页树、内容流与文字抽取，画不出东西，M9 要的「栅格 + 文字层锚点 + LRU 页缓存」它只够地基）。
+# 为什么它算纯 Rust：它的 normal deps 里有 `hayro-jbig2` / `hayro-jpeg2000` / `fax`（图像
+# 过滤流）、`qcms`（ICC 色彩）、`tiny-skia`、`harfrust`、`taffy`、`fontdb`，而
+# `pdfium-render` 在它的依赖表里是 **optional** —— 不打开那条就一行 C 都不碰，
+# `cargo check` 后 `Cargo.lock` 的包名差实测 **44 个新包**（默认 feature）。临时 crate 里量到过 32 —— 那个数别用：
+# 它没算上这个工作区里 `image` / `quick-xml` / `regex` 等被重新统一 feature 后带出来的分支。`lopdf` 是 8 个，
+# 但那 8 个换不来一个渲染器。**不带 `cc`、不带 bindgen、也没有任何 `*-sys`**（锁里新条目一条都没踩到，实测）。
+# 排除掉的两条也记在这：`printpdf` 36 个包还把整个 azul GUI 栈拖进来；`extractous` 的
+# `bzip2-sys` / `lzma-sys` 要 C；`oxpdf` 索引里 13 个版本**全部 yanked**，作者自己撤完的
+# 东西不进这个仓库。
+#
+# 两个 CJK feature（`cjk-form-fonts` / `cjk-render-fallback`）现在**先不开**：它们各自带
+# 字库进来，开与不开要在真拿一本中文 PDF 试渲染的那一笔里一起量，届时按 APK 体积算账 ——
+# 与 `regex` / `unicode-script` 一样，**这一格目前没有任何 Rust 代码在用它**。
+pdf_oxide = "0.3"
 # 纯文本小说的章标记、编号体系与书目字段别名（书名/著者/作者/by…）是一族**存在外部数据里的
 # 模式串**：规则表要能按语言换一套、要能被读者整份替换，而字符串模式只有正则引擎吃得下 ——
 # 手写扫描器等于替每条模式各写一遍解析，那些解析从此没人复核。
