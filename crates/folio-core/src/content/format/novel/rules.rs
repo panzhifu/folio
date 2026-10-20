@@ -103,7 +103,7 @@ impl Default for Numbering {
 }
 
 fn default_digits() -> String {
-    "〇零一二三四五六七八九十百千万两".to_string()
+    "〇○零一二三四五六七八九十百千万两".to_string()
 }
 fn default_true() -> bool {
     true

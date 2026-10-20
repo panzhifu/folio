@@ -132,7 +132,10 @@ pub(crate) fn parse_number(text: &str, rules: &CompiledRules) -> Option<usize> {
     }
     let value = |c: char| -> Option<usize> {
         match c {
-            '〇' | '零' => Some(0),
+            // 白圈 `○`（U+25CB）与表意零 `〇`（U+3007）都得当 0：那个 PG 西游本用的就是
+            // 前者，只认后者的话 `第一○回` 的号读不出来、章却已经切出来了 —— 号连不起来
+            // 比丢章更难查，因为屏上看着是对的。
+            '〇' | '○' | '零' => Some(0),
             '一' => Some(1),
             '二' => Some(2),
             '三' => Some(3),
@@ -178,39 +181,34 @@ pub(crate) fn parse_number(text: &str, rules: &CompiledRules) -> Option<usize> {
     if saw_unit {
         return Some(total + current);
     }
-    // 没有单位：单个字符就是它自己；两位以上只能按刻本省略式读，**不能**按十进制读
-    // （`一一` 不是 11 的十进制写法，而是明刻本省略了「十」）。
+    // 没有单位：单个字符就是它自己；两位以上是**按位值读**（`一○` = 10、`一一` = 11、
+    // `一○五` = 105、`二一` = 21）—— 那既是明刻本省略「十」的写法，也是 PG 那个本子用
+    // 白圈 `○` 当零的写法，两件事在这一条上合成一条规则。
     let chars: Vec<char> = s.chars().collect();
     if chars.len() == 1 {
         return value(chars[0]).filter(|v| *v > 0);
     }
-    colophon(s, rules, &value)
+    positional(&chars, rules, &value)
 }
 
-/// 明刻本式的省略写法：`一一` = 11、`二一` = 21、`三五` = 35（中间不写「十」）。
+/// 连续位数字按位值读：`一○`=10、`一一`=11、`一○五`=105、`二一`=21。
 ///
-/// 这一档是**真书逼出来的**：《西游记》那个本子写「第一一回」「第二一回」，按标准写法
-/// 那 90 枚标记只落出 14 个不同的号，整本连不起来，递增校验就会把它们大面积判死 ——
-/// 症状是「一本 100 回的书一章都没分开」。只在标准解析用不上时启用，且要规则表显式
-/// 开着（`numbering.colophon_style`），因为「二一」在别的写法里可能是编号而不是 21。
-fn colophon(
-    s: &str,
+/// 这一档要规则表显式开着（`colophon_style`），因为「二一」在别的写法里可能是编号而不是
+/// 21；开了之后同时覆盖两件事 —— 明刻本省略「十」（第一一回 = 11）与那个 PG 西游本用
+/// 白圈当零（`第一○回` = 10）。
+fn positional(
+    chars: &[char],
     rules: &CompiledRules,
     value: &impl Fn(char) -> Option<usize>,
 ) -> Option<usize> {
     if !rules.colophon_style() {
         return None;
     }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() != 2 {
-        return None;
+    let mut out = 0usize;
+    for c in chars {
+        out = out * 10 + value(*c)?;
     }
-    let tens = value(chars[0])?;
-    let ones = value(chars[1])?;
-    if tens == 0 || ones == 0 {
-        return None;
-    }
-    Some(tens * 10 + ones)
+    (out > 0).then_some(out)
 }
 
 /// 标题 = **整行**（标记 + 它后面那句），只有超过上限时才切下来。
@@ -548,6 +546,11 @@ mod tests {
             ("一百零八", 108),
             ("12", 12),
             ("１２", 12),
+            // 白圈当零的那个本子：`一○`=10、`一○五`=105。少了这一条，西游整本的整十回
+            // 都会「切出来了但号读不出」—— 屏上看着对、目录跳不对，比丢章更难查。
+            ("一○", 10),
+            ("一○五", 105),
+            ("二○五", 205),
         ] {
             assert_eq!(
                 parse_number(text, &rules),
@@ -626,6 +629,39 @@ mod tests {
 
     /// 标记后面粘着整段正文（转档噪声，真书上见过 618 字一行）：标题截断，
     /// **多出来的字必须留在正文开头**，不能跟着进章名而消失。
+    /// 「编号」那一族曾经吃掉一整本：红楼第十七回之后有一句正文
+    /// `五六．又值人來回，有雨村處遣人回話．…` 被它命中、读成 56，于是第十八到五十六回
+    /// 全被判成「号回退」而丢掉（60/99）。修法是给那条模式加**尾巴必须短**的上限。
+    /// 把 `title_max` 那一段上限从模式里去掉，这一条就红。
+    #[test]
+    fn a_prose_line_starting_with_two_numerals_is_not_a_chapter() {
+        let mut body = String::new();
+        for n in 1..=12 {
+            body.push_str(&format!("第{n}章 开\n{}\n\n", "雪".repeat(400)));
+            if n == 5 {
+                // 行首是两个数字加一个全角句号，后面是一整句正文。
+                body.push_str("五六．又值人來回，有雨村處遣人回話．賈政笑道此數處不能游了\n");
+            }
+        }
+        let source = normalize(&body);
+        let split = split_with(&source, "书名", &CompiledRules::builtin());
+        assert_eq!(
+            split.len(),
+            12,
+            "那一句正文不该被当成第五十六章：{:?}",
+            split
+                .iter()
+                .map(|c| c.title.chars().take(6).collect::<String>())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            split
+                .iter()
+                .all(|c| c.title.chars().take(3).collect::<String>() != "五六．"),
+            "正文行不许成为一章"
+        );
+    }
+
     /// 头部那一块把书名与作者说出来：这是「按内容提取」那一问的正身。
     /// 三个来源各断一次（`书名：` 键、`《…》` 那一行、以及两者都没有时**不许**瞎猜）。
     #[test]
@@ -828,12 +864,16 @@ mod tests {
             let max = numbers.iter().copied().max().unwrap_or(0);
             let missing: Vec<usize> = (1..=max).filter(|n| !numbers.contains(n)).collect();
             // 这条**不是**「不许缺号」，是一条覆盖率门：断在中间就把名单打出来，让人看见。
-            // 已实测到的真实断口：红楼梦 83/100 章，缺号连成一段（第十八回到第三十四回一带），
-            // 而那些回目**确实在行首**、格式与其他回一模一样 —— 所以这是目录链与递增门
-            // 的交互还没吃透，不是语料脏。覆盖率下限先钉在 0.6：低于它就是 regress。
+            // 现在的实测数（八本公版）：红楼 120/120、西游 100/100、三国 120/120、水浒 70/70、
+            // 老残 20/20、呐喊 9/9 全连；只有儒林外史 40/56 —— 那是**那本电子书自己少了
+            // 第二到第十一回**（整篇搜「第二回」零命中），不是引擎丢的。所以下限钉 0.7 而不是
+            // 1.0：再往上是拿语料的缺陷冤枉引擎，再往下就放得过真 regress。
+            // 历史上这一条门第一次跑是 60/99：毒源是一条正文行「五六．又值人來回，…」被
+            // 「编号」那族吃成 56，把第十八到五十六回全判成回退 —— 修法是收紧那条模式的
+            // 长度上限，不是把校验调松。
             let coverage = numbers.len() as f64 / max as f64;
             assert!(
-                coverage >= 0.6,
+                coverage >= 0.7,
                 "{}：{} 章里号只连起 {}/{}（缺 {:?}",
                 meta.title,
                 flow.chapters.len(),
