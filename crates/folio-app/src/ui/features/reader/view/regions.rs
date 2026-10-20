@@ -309,7 +309,27 @@ impl ReadingPage {
                 cx,
             ))
             .child(self.turn_row(cx))
+            .child(self.turn_duration_row(cx))
             .into_any_element()
+    }
+
+    /// 「翻页时长」那一行：读数直接写毫秒，不写倍数 —— 倍数没有参照物，而「280 ms 一页」
+    /// 与「700 ms 一页」读者一眼能分清哪一头更从容。
+    ///
+    /// 摆在 [`turn_row`](Self::turn_row) 正下面而不是完整设置页里：这一格管的正是上面那颗
+    /// 下拉选出来的那张纸，调完就地伸手点一下屏就能试下一趟，多两跳等于让读者在两个屏之间
+    /// 来回猜自己改的是哪一档。
+    pub(in crate::ui::features::reader) fn turn_duration_row(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let value = ConfigHolder::appearance(cx).turn_duration;
+        self.slider_row(
+            tr(cx, "reader.turn_duration").to_string(),
+            format!("{value:.0} ms"),
+            &self.turn_duration,
+            cx,
+        )
     }
 
     /// 面板最后一行：左边那颗下拉选翻页怎么走，右边那颗把完整的设置屏压进来。

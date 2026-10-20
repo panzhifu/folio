@@ -32,7 +32,8 @@ use gpui_kit::{
 use crate::ui::features::reader::components::image_viewer::{self, ImageViewer};
 use crate::ui::features::reader::components::toc_panel::{TocEvent, TocPanel};
 use crate::ui::features::reader::model::chrome::{
-    self, BRIGHTNESS_RANGE, Chrome, Effect, FONT_SIZE_RANGE, Panel, Reserve, zone,
+    self, BRIGHTNESS_RANGE, Chrome, Effect, FONT_SIZE_RANGE, Panel, Reserve, TURN_DURATION_RANGE,
+    zone,
 };
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::view::bands;
@@ -87,6 +88,10 @@ pub struct ReadingPage {
     /// 一章重排）；把这一格递给平台的是外壳每一帧那一次问（`AppShell::reading_brightness`），
     /// 这一屏只管教滑条自己。
     pub(in crate::ui::features::reader) brightness: Entity<SliderState>,
+    /// 翻页时长滑条。它写的也是 `appearance` 那一节（`turn_duration`）：一张纸走多久与一行字
+    /// 折在哪里无关，改它不该让任何一章重排。管到的是点屏 / 按键那一趟，以及松手那一腿的
+    /// 时长上限 —— 跟手那一截 1:1 跟着手指，没有时长可言。
+    pub(in crate::ui::features::reader) turn_duration: Entity<SliderState>,
     /// 目录那一屏。整棵树、折叠集、搜索、弹层档位、书头都装在它自己那个实体里
     /// （见 [`TocPanel`]），这一屏只留一个句柄：开合状态要报给会话（身上压着东西时
     /// 正文的手势让位），元素要挂在最后（谁在上面由入树顺序定）。
@@ -109,13 +114,13 @@ impl ReadingPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let reader = cx.new(|cx| ReaderSession::boot(cx));
-        // 三条滑条的初值先取出来：`cx.new` 要 `&mut cx`，而把 `cx` 再关进构造闭包里就是
+        // 四条滑条的初值先取出来：`cx.new` 要 `&mut cx`，而把 `cx` 再关进构造闭包里就是
         // 同一个 `Context` 的二次可变借用。
         let prefs = ConfigHolder::reader(cx);
+        let appearance = ConfigHolder::appearance(cx);
         // 「跟随系统」在滑条上就是推到顶：配置里那一格是 `None`，滑条上得有个能显示的数。
-        let brightness = ConfigHolder::appearance(cx)
-            .brightness
-            .unwrap_or(BRIGHTNESS_RANGE.1);
+        let brightness = appearance.brightness.unwrap_or(BRIGHTNESS_RANGE.1);
+        let turn_duration = appearance.turn_duration;
         let progress = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
@@ -137,8 +142,21 @@ impl ReadingPage {
                 .step(0.01)
                 .default_value(brightness)
         });
-        // 三条滑条各订阅一次：拖动当场生效（正文滚到那一处 / 换字号重排 / 换背光），
-        // 所以这里没有「应用」按钮，也没有改了不生效的中间态。
+        // 步长 10 ms：一整条滑条 58 个刻度，手指一次划动能停稳的刻度比这少，再细则是在
+        // 骗读者说这格能调准 —— 两三百毫秒的差别肉眼分不出 5 ms。
+        //
+        // `max` 必须写在 `min` 前面：`SliderState::new()` 的默认区间是 0..**100**，而每一步
+        // setter 都会拿当前区间去 `clamp` 已有的值。这条的下限是 120，先写 `min` 就是
+        // `clamp(120.0, 100.0)` —— 当场 panic（实测炸在 `ReadingPage::new` 那一格）。
+        let turn_duration_state = cx.new(|_| {
+            SliderState::new()
+                .max(TURN_DURATION_RANGE.1)
+                .min(TURN_DURATION_RANGE.0)
+                .step(10.0)
+                .default_value(turn_duration)
+        });
+        // 四条滑条各订阅一次：拖动当场生效（正文滚到那一处 / 换字号重排 / 换背光 /
+        // 下一趟翻页走多久），所以这里没有「应用」按钮，也没有改了不生效的中间态。
         let mut watches = vec![
             cx.subscribe(&progress, |this: &mut Self, _, event, cx| {
                 if let SliderEvent::Change(value) = event {
@@ -164,6 +182,12 @@ impl ReadingPage {
                             Some(value)
                         }
                     });
+                }
+            }),
+            cx.subscribe(&turn_duration_state, |_, _, event, cx| {
+                if let SliderEvent::Change(value) = event {
+                    let value = value.end();
+                    ConfigHolder::edit_appearance(cx, |prefs| prefs.turn_duration = value);
                 }
             }),
         ];
@@ -205,6 +229,7 @@ impl ReadingPage {
             progress,
             font_size,
             brightness: brightness_state,
+            turn_duration: turn_duration_state,
             toc,
             image_viewer,
             image_viewer_focus,
@@ -441,13 +466,13 @@ impl ReadingPage {
     ) {
         let progress = self.reader.read(cx).progress();
         let prefs = ConfigHolder::reader(cx);
-        let brightness = ConfigHolder::appearance(cx)
-            .brightness
-            .unwrap_or(BRIGHTNESS_RANGE.1);
+        let appearance = ConfigHolder::appearance(cx);
+        let brightness = appearance.brightness.unwrap_or(BRIGHTNESS_RANGE.1);
         let wanted = [
             (&self.progress, progress),
             (&self.font_size, prefs.font_size),
             (&self.brightness, brightness),
+            (&self.turn_duration, appearance.turn_duration),
         ];
         for (state, value) in wanted {
             if (state.read(cx).value().end() - value).abs() > 0.005 {

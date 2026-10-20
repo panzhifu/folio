@@ -26,6 +26,16 @@ pub const FONT_SIZE_RANGE: (f32, f32) = (12.0, 40.0);
 pub const BRIGHTNESS_RANGE: (f32, f32) =
     (folio_core::infra::config::Appearance::BRIGHTNESS_MIN, 1.0);
 
+/// 翻页时长滑条的范围，单位毫秒。两端直接引用配置那两个常数，不在界面抄第二份 ——
+/// 抄了就有了第二套「最慢/最快」，滑条推到顶与文件里那个数未必是同一个东西。
+///
+/// 往右是**更慢**（时长变长），因为配的是时长而不是速度：两者互为倒数，取速度就得在界面上
+/// 反着摆才符合「往右 = 慢一点」的直觉，读数还要再换算一次。
+pub const TURN_DURATION_RANGE: (f32, f32) = (
+    folio_core::infra::config::Appearance::TURN_DURATION_MIN,
+    folio_core::infra::config::Appearance::TURN_DURATION_MAX,
+);
+
 /// 桌面上「压暗那一层」的透明度。`None`（跟随系统）与顶格都是 0 —— 不压。
 ///
 /// 为什么桌面上要有这一层：背光不是窗口能改的东西（那是显示器的地盘，gpui 没有这个口），
