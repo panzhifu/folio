@@ -57,8 +57,8 @@ pub(crate) struct PlainFamily {
     pub format: Format,
     /// (规范化全文, 文件名主名) → 章表。
     pub split: fn(&str, &str) -> Vec<Chapter>,
-    /// (规范化全文, 文件名主名) → 书名。
-    pub title: fn(&str, &str) -> String,
+    /// (规范化全文, 文件名主名) → 书目（书名 / 作者 / 简介）。
+    pub info: fn(&str, &str) -> novel::detect::BookInfo,
     /// 章表 → 目录。空表就是「这本没有目录」，界面上那一屏什么都不摆。
     pub toc: fn(&[Chapter]) -> Vec<TocEntry>,
 }
@@ -70,9 +70,13 @@ pub(crate) struct PlainFamily {
 const TEXT: PlainFamily = PlainFamily {
     format: Format::Text,
     split: split_by_rules,
-    title: |_source, stem| stem.to_owned(),
+    info: book_info_by_rules,
     toc: novel::detect::toc_of,
 };
+
+fn book_info_by_rules(source: &str, stem: &str) -> novel::detect::BookInfo {
+    novel::detect::book_info(source, stem, &novel::rules::CompiledRules::builtin())
+}
 
 fn split_by_rules(source: &str, stem: &str) -> Vec<Chapter> {
     novel::detect::split_with(source, stem, &novel::rules::CompiledRules::builtin())
@@ -102,9 +106,11 @@ pub(crate) fn read_with(
 ) -> Result<(DocMeta, Content)> {
     let source = read_normalized(path)?;
     let stem = stem_of(path);
-    let title = (family.title)(&source, &stem);
+    let info = (family.info)(&source, &stem);
     let meta = DocMeta {
-        title,
+        title: info.title,
+        authors: info.authors,
+        description: info.description,
         format: family.format,
         size: source.len() as u64,
         ..DocMeta::default()
@@ -281,11 +287,28 @@ mod tests {
         for n in 1..=6 {
             body.push_str(&format!("第{n}章 标题{n}\n{}\n\n", "雪".repeat(600)));
         }
-        let (_, flow) = opened("书.txt", &body);
-        assert_eq!(flow.chapters.len(), 6, "该切成六章");
-        assert_eq!(flow.chapters[0].title, "第1章 标题1");
-        assert_eq!(flow.toc.len(), 6, "目录要跟章表一起交出来");
-        assert_eq!(flow.toc[5].title, "第6章 标题6");
+        let body = format!("书名：雪夜关门\n作者：无名氏\n\n{body}");
+        let (meta, flow) = opened("书.txt", &body);
+        assert_eq!(meta.title, "雪夜关门", "头部那行「书名：」要用上");
+        assert_eq!(
+            meta.authors,
+            vec!["无名氏".to_string()],
+            "作者也要一起落进书目"
+        );
+        // 头部那两行（书名 / 作者）自己也占一章 —— 分章不吃字，就不许把它们的字吞掉。
+        assert_eq!(
+            flow.chapters.len(),
+            7,
+            "六章正文 + 头部那一块： {:?}",
+            flow.chapters
+                .iter()
+                .map(|c| c.title.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(flow.chapters[0].title, "书", "没认出目录页时那块就叫主名");
+        assert_eq!(flow.chapters[1].title, "第1章 标题1");
+        assert_eq!(flow.toc.len(), 7, "目录要跟章表一起交出来");
+        assert_eq!(flow.toc[6].title, "第6章 标题6");
         // 章标题得画成标题，不是普通段落：这条是屏上「看得出章起点」的全部依赖。
         assert!(
             flow.chapters[2].source().starts_with("<h1>"),

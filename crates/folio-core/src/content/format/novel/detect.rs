@@ -28,7 +28,7 @@
 //! 尾巴（真书上见过 618 字一行）会被截进标题，**多出来的字另起一行留在正文开头**，
 //! 加的那个换行是空白，同样不动可见文本。
 
-use super::rules::{Compiled, CompiledRules};
+use super::rules::{Compiled, CompiledRules, MetaKeys};
 use crate::content::format::{Chapter, TocEntry};
 
 /// 一枚命中的章标记。
@@ -363,6 +363,95 @@ fn cut(lines: &[&str], hits: &[Hit], fallback_title: &str, toc_dropped: bool) ->
     out
 }
 
+/// 头部那一块读出来的书目。三个字段都是「书自己说的」，说不清就留空 —— 空在信息屏上
+/// 是「不摆那一行」，不是「这本书没有作者」。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BookInfo {
+    pub title: String,
+    pub authors: Vec<String>,
+    pub description: String,
+}
+
+/// 只读头部那几十行，按规则表的别名表取书名 / 作者 / 简介。
+///
+/// **只看头部是有意的**：`作者：` 那一行长在文件开头，而整本去找就会把正文里那句
+/// 「他写道：作者：某某」当成书目 —— 那与「正文里提到第三章」是同一类假阳性。
+/// 上限 [`HEAD_LINES`] 行足够覆盖「书名 / 作者 / 简介 / 目录标题」这一组，真书上它们
+/// 都挤在最前面。
+const HEAD_LINES: usize = 40;
+
+pub(crate) fn book_info(source: &str, stem: &str, rules: &CompiledRules) -> BookInfo {
+    let meta = rules.meta();
+    let head: Vec<&str> = source.lines().take(HEAD_LINES).collect();
+    let value_after = |line: &str, keys: &[String]| -> Option<String> {
+        let t = line.trim_matches(|c: char| c.is_whitespace());
+        keys.iter().find_map(|key| {
+            let rest = t.strip_prefix(key.as_str())?;
+            let value = rest
+                .trim_start_matches([' ', '\t', '　', ':', '：', '=', '＝', ' ', '　'])
+                .trim_end();
+            (!value.is_empty() && value.chars().count() <= 60).then(|| value.to_string())
+        })
+    };
+    let mut out = BookInfo::default();
+    for line in &head {
+        if out.title.is_empty()
+            && let Some(title) = value_after(line, &meta.title_keys)
+        {
+            out.title = title;
+        }
+        if out.authors.is_empty()
+            && let Some(author) = value_after(line, &meta.author_keys)
+        {
+            // 一行里可能写「甲、乙 合著」：按常见的分隔切开，逐个去噪。
+            out.authors = author
+                .split(['、', '，', ',', '；', ';', '　', ' '])
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty() && *s != "合著" && !s.contains("著"))
+                .map(String::from)
+                .collect::<Vec<_>>();
+        }
+        if out.description.is_empty()
+            && let Some(desc) = value_after(line, &meta.description_keys)
+        {
+            out.description = desc;
+        }
+    }
+    // `《书名》` 那一行：网文导出最常见，且不写「书名：」这个键。
+    if out.title.is_empty() {
+        out.title = head
+            .iter()
+            .filter_map(|line| {
+                let t = line.trim();
+                let inner = t.strip_prefix('《')?.split('》').next()?;
+                (!inner.is_empty() && inner.chars().count() <= 40).then(|| inner.to_string())
+            })
+            .next()
+            .unwrap_or_default();
+    }
+    if out.title.is_empty() {
+        out.title = denoise(stem, meta);
+    }
+    out
+}
+
+/// 文件名去噪：剥掉 `《》`、扩展名残留与「TXT下载」那一类词。
+fn denoise(stem: &str, meta: &MetaKeys) -> String {
+    let trimmed = stem
+        .trim_matches(|c: char| c.is_whitespace())
+        .trim_matches(['《', '》', '【', '】', '_', '-', ' ']);
+    let mut out = trimmed.to_string();
+    for noise in &meta.filename_noise {
+        out = out.replace(noise.as_str(), " ");
+    }
+    // 剥噪声词之后可能又露出括号来（`《书名》TXT下载` 去掉 `TXT下载` 才轮到尾部那个 `》`），
+    // 所以再夹一次；顺序反过来就会留下一个半个括号的书名。
+    let joined = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    joined
+        .trim_matches(['《', '》', '【', '】', '_', '-', ' '])
+        .to_string()
+}
+
 /// 引擎的入口：规范化文本 → 章表。判定不通过就回落成一整篇一章。
 pub(crate) fn split_with(
     source: &str,
@@ -433,7 +522,7 @@ mod tests {
     //! `assets/novel-rules.zh-Hans.json` 的 `gates.comment`）。真书那批不在仓库里，
     //! 由 `examples/novel-probe.rs` 逐本打印章数与丢字数来验，不在这里当门。
 
-    use super::{parse_number, split_with};
+    use super::{book_info, parse_number, split_with};
     use crate::content::format::novel::rules::CompiledRules;
     use crate::content::format::text::normalize;
     use crate::content::format::{visible_text, xhtml};
@@ -537,6 +626,53 @@ mod tests {
 
     /// 标记后面粘着整段正文（转档噪声，真书上见过 618 字一行）：标题截断，
     /// **多出来的字必须留在正文开头**，不能跟着进章名而消失。
+    /// 头部那一块把书名与作者说出来：这是「按内容提取」那一问的正身。
+    /// 三个来源各断一次（`书名：` 键、`《…》` 那一行、以及两者都没有时**不许**瞎猜）。
+    #[test]
+    fn the_head_block_names_the_book_the_author_and_the_blurb() {
+        use crate::content::format::novel::rules::CompiledRules;
+        let rules = CompiledRules::builtin();
+        let head =
+            "书名：雪夜关门\n作者：无名氏、补刀居士\n内容简介：一夜之间，门里门外两个人。\n\n";
+        let body: String = (1..=4)
+            .map(|n| format!("第{n}章 关门\n{}\n\n", "雪".repeat(400)))
+            .collect();
+        let info = book_info(&(head.to_string() + &body), "随手起的文件名", &rules);
+        assert_eq!(info.title, "雪夜关门", "「书名：」那一行要用上");
+        assert_eq!(
+            info.authors,
+            vec!["无名氏", "补刀居士"],
+            "两个作者都要收到：{:?}",
+            info.authors
+        );
+        assert_eq!(info.description, "一夜之间，门里门外两个人。");
+
+        // 只写《书名》那一行（网文导出最常见，不写「书名：」这个键）。
+        let info = book_info(&format!("《雪夜关门》\n\n{body}"), "随手起的文件名", &rules);
+        assert_eq!(info.title, "雪夜关门", "《…》 那一行也要认");
+        assert!(info.authors.is_empty(), "头部没说作者就是空，不是猜一个");
+    }
+
+    /// 头部什么都没说：回落**去噪后的文件名**，而且作者留空。
+    /// 空在信息屏上是「不摆那一行」；填一个猜出来的作者比空着更糟。
+    #[test]
+    fn a_silent_head_falls_back_to_the_denoised_file_name() {
+        let rules = CompiledRules::builtin();
+        let body: String = (1..=4)
+            .map(|n| format!("第{n}章 开门\n{}\n\n", "雪".repeat(400)))
+            .collect();
+        let info = book_info(&body, "《雪夜关门》TXT下载", &rules);
+        assert_eq!(
+            info.title, "雪夜关门",
+            "文件名里的书名括号与噪声词都要剥掉：{:?}",
+            info.title
+        );
+        assert!(
+            info.authors.is_empty() && info.description.is_empty(),
+            "没说过的一律留空"
+        );
+    }
+
     #[test]
     fn a_glued_long_tail_keeps_every_character() {
         let tail = prose(300);

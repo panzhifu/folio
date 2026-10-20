@@ -249,6 +249,11 @@ impl CompiledRules {
         &self.rules.gates
     }
 
+    /// 书目那几个字段的别名表与去噪词（`book_info` 用它读头部那一块）。
+    pub(crate) fn meta(&self) -> &MetaKeys {
+        &self.rules.meta
+    }
+
     pub(crate) fn digits(&self) -> &str {
         &self.rules.numbering.digits
     }

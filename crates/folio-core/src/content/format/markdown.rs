@@ -50,12 +50,21 @@ impl DocumentProvider for MarkdownAdapter {
 const MARKDOWN: PlainFamily = PlainFamily {
     format: Format::Markdown,
     split: split_on_headings,
-    title: first_heading_or_stem,
+    info: book_info_from_heading,
     toc: |_| Vec::new(),
 };
 
-fn first_heading_or_stem(source: &str, stem: &str) -> String {
-    first_heading(source).unwrap_or_else(|| stem.to_owned())
+/// Markdown 的书目只有书名那一格（第一个一级标题），作者与简介**这族没有地方可说**：
+/// 单个 `.md` 文件里既没有 OPF 也没有 `<meta>`，硬猜只会造出一条不存在的事实。
+fn book_info_from_heading(
+    source: &str,
+    stem: &str,
+) -> crate::content::format::novel::detect::BookInfo {
+    crate::content::format::novel::detect::BookInfo {
+        title: first_heading(source).unwrap_or_else(|| stem.to_owned()),
+        authors: Vec::new(),
+        description: String::new(),
+    }
 }
 
 /// 在每个 1–2 级 ATX 标题前分章，标题归属于其后的内容。
