@@ -122,6 +122,25 @@ pub struct Marker {
     pub level: u8,
     #[serde(default)]
     pub numbering: NumberingStyle,
+    /// 这条规则自己的正例与反例。`compile()` 加载时当场拿去自测。
+    #[serde(default)]
+    pub examples: Examples,
+}
+
+/// 一条规则的自检样本。
+///
+/// 为什么样本住在数据里而不是测试里：这次「编号」那族吃掉红楼一整本（正文一句
+/// `五六．又值人來回，…` 被读成第 56 章，于是第十八到五十六回全被递增校验判成回退）——
+/// 那种事故**属于这条规则自己的性质**，写在 Rust 测试里就只有改 Rust 的人会想起来跑它，
+/// 而读者换一份规则文件时没有任何东西提醒他这一条会吃正文。写进数据，加载就红。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Examples {
+    /// 必须认下来的行。撞不上 = 这条规则做不成它声称做的事。
+    #[serde(default)]
+    pub must_match: Vec<String>,
+    /// 必须**不**认下来的行。撞上了 = 这条规则太松，会吃正文。
+    #[serde(default)]
+    pub must_not_match: Vec<String>,
 }
 
 fn default_level() -> u8 {
@@ -312,6 +331,7 @@ impl CompiledRules {
     }
 
     /// 章标记与其编译结果，同序成对给出（下标配不上是编程错误，不是运行期的事）。
+    /// 章标记与其编译结果，同序成对（判一行用 [`marker_matches`]，两条路共用一份）。
     pub(crate) fn markers(&self) -> impl Iterator<Item = (&Marker, &Compiled)> {
         self.rules.markers.iter().zip(&self.compiled)
     }
@@ -345,7 +365,45 @@ pub(crate) fn compile(json: &str) -> (Arc<CompiledRules>, Vec<String>) {
             "小说规则里 markers 是空的，已按出厂那份分章（要关掉分章请别交回一份空表）".to_string(),
         );
     }
-    let compiled = rules.markers.iter().map(compile_marker).collect::<Vec<_>>();
+    let mut compiled = rules.markers.iter().map(compile_marker).collect::<Vec<_>>();
+    // 自检：拿每条规则自己的正例与反例当场面具。判「认不认」用的是
+    // [`CompiledRules::marker_matches`] —— 与真扫描同一个函数，不是它的简化版。
+    // 先记下要作废哪几条，再统一改：边遍历边按下标改 `compiled` 既过不了借用检查，
+    // 也容易留下「循环变量只用来当下标」那种读不懂的形状。
+    let mut rejected: Vec<(usize, String)> = Vec::new();
+    for (ix, (marker, slot)) in rules.markers.iter().zip(compiled.iter()).enumerate() {
+        if matches!(slot, Compiled::Rejected) {
+            continue;
+        }
+        let mut dropped = None;
+        for line in &marker.examples.must_match {
+            if !marker_matches(marker, slot, line) {
+                dropped = Some(format!(
+                    "小说规则里那条「{}」连自己的正例都不认，已作废：{line:?}",
+                    marker_name(marker)
+                ));
+                break;
+            }
+        }
+        if dropped.is_none() {
+            for line in &marker.examples.must_not_match {
+                if marker_matches(marker, slot, line) {
+                    dropped = Some(format!(
+                        "小说规则里那条「{}」会吃掉它自己的反例（那通常是正文），已作废：{line:?}",
+                        marker_name(marker)
+                    ));
+                    break;
+                }
+            }
+        }
+        if let Some(warn) = dropped {
+            rejected.push((ix, warn));
+        }
+    }
+    let warnings: Vec<String> = rejected.iter().map(|(_, w)| w.clone()).collect();
+    for (ix, _) in rejected {
+        compiled[ix] = Compiled::Rejected;
+    }
     let bad_entries = rules
         .markers
         .iter()
@@ -353,8 +411,11 @@ pub(crate) fn compile(json: &str) -> (Arc<CompiledRules>, Vec<String>) {
         .filter(|(_, c)| matches!(c, Compiled::Rejected))
         .map(|(m, _)| marker_name(m))
         .collect::<Vec<_>>();
-    for name in &bad_entries {
-        tracing::warn!("小说规则里那条「{name}」不可用，已作废；其余条目照旧生效");
+    for warn in &warnings {
+        tracing::warn!("{warn}");
+    }
+    if bad_entries.is_empty() {
+        tracing::debug!("小说规则自检通过：{} 条", compiled.len());
     }
     (
         Arc::new(CompiledRules {
@@ -363,8 +424,29 @@ pub(crate) fn compile(json: &str) -> (Arc<CompiledRules>, Vec<String>) {
             compiled,
             bad_entries,
         }),
-        Vec::new(),
+        warnings,
     )
+}
+
+/// **一条规则认不认这一行 —— 全仓库只有这一份定义。**
+///
+/// 真扫描（`detect::find_hits`）与加载时的自检（[`compile`]）都调它。分成两份的后果很
+/// 具体：自检全绿、真书上却漏章，因为两份「什么算命中」会在某一种行上不一致。行首尾的
+/// 空白与全角空白在这里统一剥掉；`literal` 那族对的是**整行**，所以允许尾随一个冒号类
+/// 分隔（「楔子」与「楔子：」都算）。
+pub(crate) fn marker_matches(marker: &Marker, slot: &Compiled, line: &str) -> bool {
+    let line = line.trim_matches(|c: char| c.is_whitespace());
+    if line.is_empty() {
+        return false;
+    }
+    match slot {
+        Compiled::Literal => {
+            let head = line.split(['：', ':', '　', ' ']).next().unwrap_or(line);
+            marker.text.as_deref() == Some(head)
+        }
+        Compiled::Regex(re) => re.is_match(line),
+        Compiled::Rejected => false,
+    }
 }
 
 fn compile_marker(marker: &Marker) -> Compiled {
@@ -423,7 +505,7 @@ fn short_hash(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Compiled, CompiledRules, compile};
+    use super::{Compiled, CompiledRules, compile, marker_name};
 
     #[test]
     fn the_builtin_rules_compile_every_entry() {
@@ -437,6 +519,53 @@ mod tests {
         // 让「有人动了出厂表」这件事在 CI 上出声，而不是静默换掉所有人的分章结果。
         assert_eq!(rules.markers().count(), 15);
         assert_eq!(rules.content_hash().len(), 12);
+        // 自检要有牙：一条没有正例的规则等于一条不来自检的规则，那这整层就是空转的。
+        let toothless = rules
+            .markers()
+            .filter(|(m, _)| {
+                m.examples.must_match.is_empty() || m.examples.must_not_match.is_empty()
+            })
+            .map(|(m, _)| marker_name(m))
+            .collect::<Vec<_>>();
+        assert!(
+            toothless.is_empty(),
+            "出厂表里这些条目没带正反例，自检对它们形同虚设：{toothless:?}"
+        );
+    }
+
+    /// 一条会吃正文的规则，**加载时就该被自己的反例踢掉**，而不是等到真书上少三十七章才发现。
+    /// 这条也是「出厂表那条 `\s*\S{0,20}$` 上限不许被拿掉」的证人：把它拿掉，
+    /// `the_builtin_rules_compile_every_entry` 就红。
+    #[test]
+    fn a_rule_that_eats_a_prose_line_is_rejected_at_load_time() {
+        let json = r#"{
+            "version": 1, "locale": "zh-Hans",
+            "numbering": {"digits": [["一",1],["五",5],["六",6]], "units": [["十",10]]},
+            "markers": [
+                {"name": "编号（不限长）", "kind": "regex",
+                 "pattern": "^\\s*([0-9一二三四五六七八九十]{1,4})\\s*[、.．]",
+                 "examples": {"must_match": ["一、初见"],
+                              "must_not_match": ["五六．又值人來回，有雨村處遣人回話．"]}},
+                {"name": "章", "kind": "regex",
+                 "pattern": "^\\s*第\\s*([0-9一二三]{1,4})\\s*章",
+                 "examples": {"must_match": ["第三章 起"], "must_not_match": ["他说第三章写得太慢"]}}
+            ]
+        }"#;
+        let (rules, warnings) = compile(json);
+        assert_eq!(
+            rules.bad_entries(),
+            vec!["编号（不限长）".to_string()],
+            "只该踢掉那一条，别的一律照用"
+        );
+        assert_eq!(
+            rules.markers().count(),
+            2,
+            "作废是逐条降级，条目还在原位（下标不能漂）"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("反例")),
+            "要说出为什么作废：{warnings:?}"
+        );
     }
 
     /// 逐条降级：坏模式只作废那一条，好的那条照样能用。
@@ -471,8 +600,12 @@ mod tests {
     fn an_unreadable_file_falls_back_to_the_builtin_one() {
         let (rules, warnings) = compile("{ 这不是 JSON ");
         assert_eq!(rules.markers().count(), 15, "该是出厂那份那 15 条");
-        assert_eq!(warnings.len(), 1, "该留下一句话：{warnings:?}");
-        assert!(warnings[0].contains("出厂"));
+        // 第一句必须是「为什么退回」；后面可能还有出厂表自己的逐条降级声。
+        assert!(!warnings.is_empty(), "该留下一句话");
+        assert!(
+            warnings[0].contains("出厂"),
+            "第一句要说清退回的原因：{warnings:?}"
+        );
     }
 
     /// 空表不等于「这本书没章」，而是配置写坏了 —— 它同样退回出厂。

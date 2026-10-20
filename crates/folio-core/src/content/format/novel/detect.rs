@@ -56,16 +56,9 @@ fn find_hits(lines: &[&str], rules: &CompiledRules) -> Vec<Hit> {
             continue;
         }
         for (marker, compiled) in rules.markers() {
-            let matched = match compiled {
-                Compiled::Literal => {
-                    // 整行等于它（允许尾随标点与空白：「楔子」「楔子：」都算）。
-                    let head = line.split(['：', ':', '　', ' ']).next().unwrap_or(line);
-                    marker.text.as_deref() == Some(head)
-                }
-                Compiled::Regex(re) => re.is_match(line),
-                Compiled::Rejected => false,
-            };
-            if !matched {
+            // 「认不认这一行」只有一份定义（`rules::marker_matches`）：真扫描与
+            // 加载时的自检必须同判据，两份迟早分叉，分叉的表现是自检全绿而真书上漏章。
+            if !super::rules::marker_matches(marker, compiled, line) {
                 continue;
             }
             let number = extracted_number(marker, compiled, line, rules);
