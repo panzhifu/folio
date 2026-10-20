@@ -1115,8 +1115,9 @@ fn the_same_book_bare_and_packed_is_one_book() {
 
 /// 架子上不许出现哈希串：**书名与章名要跟着来源给的那个名字走**。
 ///
-/// 单文件格式（TXT、无标题行的 Markdown）的标题是 `stem(path)` 回落出来的
-/// （`format::markdown` 里那两处），而副本按内容命名之后主名就是一串 base32 ——
+/// 单文件格式（TXT、无标题行的 Markdown）的标题是文件主名回落出来的
+/// （书名与章名各一处，住在 `format::text` 与 `format::markdown` 那两族的
+/// `title` / `split` 里），而副本按内容命名之后主名就是一串 base32 ——
 /// 不接「解析前换一个看得懂的名字」那一步，每一本 TXT 在架上就叫
 /// `tuqddpm7nrheuceu`。这一条是哈希名接上之后实测翻出来的，所以钉成门。
 /// 反面也要钉：书里真写了标题（Markdown 的一级标题）时不许被建议名盖掉。

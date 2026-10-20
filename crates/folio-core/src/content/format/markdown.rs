@@ -1,17 +1,19 @@
+//! Markdown 那一族（`.md` / `.markdown`）：按 ATX 标题切章，书名取第一个一级标题。
+//!
+//! 这一族比纯文本多出来的只有「怎么切」与「书名从哪儿来」两处，其余那条链
+//! （读成文本 → 规范化 → 折成章表 → 包装）住在 [`super::text`] 且**只有一份** ——
+//! 那里面 `normalize` 的产物就是锚点坐标系，各写一份迟早会漂，漂的症状是已存批注
+//! 与进度整体错位。分成两个 provider 而不是一个 provider 按扩展名返回不同格式，
+//! 是因为 `DocumentProvider::format()` 是**身份**：一个 provider 只能有一个 `Format`，
+//! 而 `books.format` 那一列要把 Markdown 与纯文本分开。
+
 use std::path::Path;
 
-use super::{Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format};
+use super::{Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, Format};
 use crate::Result;
+use crate::content::format::text::{PlainFamily, read_with, section_source};
 
-/// Markdown 与纯文本是两种东西（[`Format::Markdown`] / [`Format::Text`]），但共用
-/// 「读成字符串 → 规范化 → 分章（或不分）」这条链，所以住同一个模块。
-///
-/// 分成两个 provider、而不是一个 provider 按扩展名返回不同格式，是因为
-/// `DocumentProvider::format()` 是**身份**：一个 provider 只能有一个 `Format`，
-/// 而 `books.format` 那一列要能把 Markdown 与纯文本分开（它们的排版预处理其实不同：
-/// 一个按 `#` 分章，一个整篇一章）。两边共用的是同一份 `read()`。
 pub struct MarkdownAdapter;
-pub struct PlainTextAdapter;
 
 impl DocumentProvider for MarkdownAdapter {
     fn format(&self) -> Format {
@@ -19,189 +21,41 @@ impl DocumentProvider for MarkdownAdapter {
     }
 
     fn supports(&self, path: &Path) -> bool {
-        matches!(extension(path).as_deref(), Some("md" | "markdown"))
+        matches!(
+            super::extension_of(path).as_deref(),
+            Some("md" | "markdown")
+        )
     }
 
     /// 只分章、**不包装**：正文等翻开那一章再取。
     fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        read(path, false, false)
+        read_with(path, &MARKDOWN, false)
     }
 
     /// 单文件容器里的第 N 章：重读一遍、重分一次章，取第 N 段。
     /// 分章规则是确定的，所以同一个序号每次都指到同一章。
     fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
-        section_source(path, false, at)
+        section_source(path, &MARKDOWN, at)
     }
 
     fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        read(path, false, true)
+        read_with(path, &MARKDOWN, true)
     }
 }
 
-impl DocumentProvider for PlainTextAdapter {
-    fn format(&self) -> Format {
-        Format::Text
-    }
+/// Markdown 相对那条链的两处差异：按 1–2 级 ATX 标题切，书名取第一个一级标题。
+const MARKDOWN: PlainFamily = PlainFamily {
+    format: Format::Markdown,
+    split: split_on_headings,
+    title: first_heading_or_stem,
+};
 
-    fn supports(&self, path: &Path) -> bool {
-        matches!(extension(path).as_deref(), Some("txt"))
-    }
-
-    fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        read(path, true, false)
-    }
-
-    fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
-        section_source(path, true, at)
-    }
-
-    fn read(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        read(path, true, true)
-    }
-}
-
-/// 读一遍、规范化、分章。返回 (书目, 规范化后的全文, 章表[纯文本])。
-///
-/// 分章本来就得把整份文本过一遍（标题在行里），所以「只读索引」这一趟省下的是
-/// **包装**（`from_plain_text`）与把正文搬来搬去，不是读盘 —— 单文件格式的
-/// I/O 是躲不掉的。
-fn load(path: &Path, plain: bool) -> Result<(DocMeta, String, Vec<Chapter>)> {
-    // 走 `charset::read_plain` 而不是 `read_to_string`：后者只吃 UTF-8，而中文小说的
-    // `.txt` 与日文轻小说的 `.txt` 满地是非 UTF-8。纯文本没有声明位，所以那一档在这里
-    // 故意**不生效**（会被书里的一行代码劫持），能走到的只有 BOM 与 UTF-8 那两档。
-    let raw = super::charset::read_plain(path)?;
-    let source = normalize(&raw);
-    let chapters = if plain {
-        vec![Chapter::inline(stem(path), source.clone())]
-    } else {
-        split_chapters(&source, &stem(path))
-    };
-    let title = first_heading(&source).unwrap_or_else(|| stem(path));
-    let meta = DocMeta {
-        title,
-        authors: Vec::new(),
-        format: if plain {
-            Format::Text
-        } else {
-            Format::Markdown
-        },
-        size: source.len() as u64,
-        ..DocMeta::default()
-    };
-    Ok((meta, source, chapters))
-}
-
-/// 把一章的纯文本包成引擎就绪的 XHTML。
-///
-/// 包装放在这里而不是界面里：正文的契约是「引擎就绪」，界面就不必知道哪个格式
-/// 需要包一层（见 [`super::xhtml`] 的模块说明）。
-fn wrap(chapter: Chapter) -> Chapter {
-    let wrapped = super::xhtml::from_plain_text(chapter.source());
-    Chapter::inline(chapter.title.clone(), wrapped)
-}
-
-/// 索引那一趟：章表只留标题与位置，正文等翻开那一章再包。
-///
-/// **字数在这一趟算**（`chapters.char_len`，见 `plans/导入管线.md` §八 第 3 条）：
-/// 单文件格式的 I/O 本来就躲不掉（分章要把整份文本过一遍），所以这一趟的正文
-/// 已经在手上，数一遍是白拿的。数的是**包装之后**那份 XHTML 的可见文本 ——
-/// 与 `Chapter::inline` 同一条口径，也与引擎真正吃到的东西同一份。
-fn read(path: &Path, plain: bool, with_text: bool) -> Result<(DocMeta, Content)> {
-    let (meta, _source, chapters) = load(path, plain)?;
-    let chapters = chapters
-        .into_iter()
-        .enumerate()
-        .map(|(ix, chapter)| {
-            if with_text {
-                wrap(chapter)
-            } else {
-                let chars = chapter.char_len();
-                // 图片清单**不**在这一档带走：这里的 `chapter` 装的是还没包成 XHTML 的
-                // 原始文本，而排版看到的是 `wrap` 之后的那一份（`from_plain_text` 把
-                // `<` 转义掉了，源文本里写着的 `<img>` 排出来就是一行字）。拿原始文本
-                // 扫出来的清单会比正文多几张画不出来的图。
-                Chapter::section(chapter.title.clone(), ix).with_char_len(chars)
-            }
-        })
-        .collect();
-    Ok((
-        meta,
-        Content::Reflow(FlowDoc {
-            chapters,
-            ..Default::default()
-        }),
-    ))
-}
-
-/// [`ChapterLocator::Section`] 那一路：重读整本、重分一次章，取第 N 段并包装。
-///
-/// 每次翻章都要过一遍全文件 —— 阅读会话按章缓存，所以一本书里一章只付一次
-/// （见 `reader::Book::chapter_text`）。
-fn section_source(path: &Path, plain: bool, at: &ChapterLocator) -> Result<String> {
-    let index = match at {
-        ChapterLocator::Section(index) => *index,
-        other => {
-            return Err(crate::Error::ChapterUnavailable {
-                path: path.to_path_buf(),
-                index: 0,
-                at: format!("{other:?}"),
-            });
-        }
-    };
-    let (_, _, chapters) = load(path, plain)?;
-    let text = chapters
-        .get(index)
-        .map(|c| super::xhtml::from_plain_text(c.source()))
-        .ok_or_else(|| crate::Error::ChapterUnavailable {
-            path: path.to_path_buf(),
-            index,
-            at: format!("{at:?}"),
-        })?;
-    Ok(text)
-}
-
-fn extension(path: &Path) -> Option<String> {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-}
-
-fn stem(path: &Path) -> String {
-    path.file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "未命名".to_string())
-}
-
-/// 统一行尾、压掉多余空行。规范化必须在分章之前，
-/// 因为锚点坐标系就是这份规范化文本，改动它会让已存标注整体漂移。
-fn normalize(src: &str) -> String {
-    let mut out = String::with_capacity(src.len() + 1);
-    let mut blanks = 0usize;
-    for line in src.lines() {
-        let line = line.trim_end_matches('\r');
-        if line.trim().is_empty() {
-            blanks += 1;
-            if blanks > 1 {
-                continue;
-            }
-        } else {
-            blanks = 0;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    while out.ends_with("\n\n") {
-        out.pop();
-    }
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+fn first_heading_or_stem(source: &str, stem: &str) -> String {
+    first_heading(source).unwrap_or_else(|| stem.to_owned())
 }
 
 /// 在每个 1–2 级 ATX 标题前分章，标题归属于其后的内容。
-/// 每章的 `spine_href` 记下该章起始的字节偏移，供跳转与目录显示用。
-fn split_chapters(source: &str, fallback_title: &str) -> Vec<Chapter> {
+fn split_on_headings(source: &str, fallback_title: &str) -> Vec<Chapter> {
     let mut chapters = Vec::new();
     let mut buf = String::new();
     let mut title: Option<String> = None;
@@ -290,43 +144,14 @@ fn first_heading(source: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    //! Markdown 适配器：规范化、分章、标题回落。改为黑盒——把内容写进临时 `.md`，
-    //! 经公开的 `open()` 读回来断言。只依赖公开 API。
+    //! Markdown 适配器：分章、标题回落、代码围栏里的 `#` 不算标题。黑盒 ——
+    //! 把内容写进临时 `.md`，经公开的 `open()` 读回来断言，只依赖公开 API。
 
-    use std::path::PathBuf;
+    use crate::content::format::text::test_support::{
+        opened, opened_bytes, utf16le, visible, without_whitespace,
+    };
 
-    use crate::content::anchor::TextMap;
-    use crate::content::dom::Dom;
-    use crate::content::format::{Chapter, DocMeta, FlowDoc};
-
-    fn opened(name: &str, body: &str) -> (DocMeta, FlowDoc) {
-        opened_bytes(name, body.as_bytes())
-    }
-
-    /// 把**原始字节**写进临时文件再走公开入口读回来。UTF-16 那几条门要的就是这种
-    /// 不经手字符串的输入 —— 用 [`opened`] 那种 `&str` 参数造不出带 BOM 的字节。
-    fn opened_bytes(name: &str, body: &[u8]) -> (DocMeta, FlowDoc) {
-        let dir = tempfile::tempdir().unwrap();
-        let path: PathBuf = dir.path().join(name);
-        std::fs::write(&path, body).unwrap();
-        let doc = crate::content::document::open(&path).expect("临时文件应能读入");
-        // `open` 只给索引；这一层要断言的绝大多数是正文，按位置取回来。
-        let mut flow = doc.flow().expect("该读成可重排").clone();
-        for (ix, chapter) in flow.chapters.iter_mut().enumerate() {
-            let text = doc.chapter_source(ix).expect("正文该取得到");
-            *chapter = Chapter::inline(chapter.title.clone(), text);
-        }
-        (doc.meta().clone(), flow)
-    }
-
-    /// UTF-16LE 那份字节（BOM + 每两字节一个小端码元）。
-    fn utf16le(text: &str) -> Vec<u8> {
-        let mut out = b"\xff\xfe".to_vec();
-        out.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
-        out
-    }
-
-    /// BOM 这一档通到 TXT / Markdown 的正文：解出来的章表与同一份内容的 UTF-8 版
+    /// UTF-16 这一档通到 Markdown 的正文：解出来的章表与同一份内容的 UTF-8 版
     /// **逐字相同**，包括分章、章名与 `#` 有没有被剥掉。
     #[test]
     fn a_utf16_markdown_lands_on_the_same_chapters_as_its_utf8_twin() {
@@ -357,10 +182,10 @@ mod tests {
         );
     }
 
-    /// **纯文本没有声明位，所以那一档对它故意不生效。** 一本合法 UTF-8 的技术书在
-    /// 前 1 KB 里出现 `charset=gbk` 那样一串字（真书里就长在代码清单里），按 HTML 那套
-    /// 「文件自己说的优先」会把整本书解成 GBK —— 症状是通屏像汉字的乱码，而判定与
-    /// 导入全程报「成功」。这条门把住的就是这个：合法 UTF-8 一律直接收，不看里面。
+    /// **纯文本没有声明位，所以那一档对它故意不生效**（`format::charset` 里那条）。
+    /// 一本合法 UTF-8 的技术书在前 1 KB 里出现 `charset=gbk` 那样一串字（真书里就长在
+    /// 代码清单里），按 HTML 那套「文件自己说的优先」会把整本书解成 GBK —— 症状是通屏
+    /// 像汉字的乱码，而判定与导入全程报「成功」。这一条走 `.md`，与 `.txt` 那条同判据。
     #[test]
     fn a_plain_file_does_not_obey_a_charset_line_inside_it() {
         let src = "```html\n<meta http-equiv=\"Content-Type\" content=\"text/html; charset=gbk\">\n```\n\n# 第一章\n这一行是合法 UTF-8 的正文：大雪封山的那一夜\n";
@@ -375,52 +200,6 @@ mod tests {
             body.contains("大雪封山的那一夜") && !body.contains('\u{fffd}'),
             "被声明劫持过的 UTF-8 文本会在这里露出来：{body}"
         );
-    }
-
-    /// 没有 BOM、没有声明、也不是合法 UTF-8 的小说 `.txt`（简体 GBK）端到端地读得开。
-    /// 改之前它的下场是 `read_to_string` 报错、而且那个错误在 `ImportReject` 里没有
-    /// 分类 —— 既不是「不支持」也不是「读不动」，是一句说不清的失败。
-    /// 这一条走的是公开入口，所以它同时钉住三件事：判定放行、`read_plain` 接上了
-    /// 码页判定、包装出来的正文是那串汉字。
-    #[test]
-    fn an_undeclared_gbk_novel_txt_reads_as_chinese_instead_of_holes() {
-        let src = "大雪封山的那一夜，他终于推开那扇门。\n第二行也还是正文。\n";
-        let bytes = encoding_rs::GBK.encode(src).0.to_vec();
-        assert!(
-            std::str::from_utf8(&bytes).is_err(),
-            "这份字节该真的不是 UTF-8，否则这条测试没测到东西"
-        );
-        let (meta, flow) = opened_bytes("书.txt", &bytes);
-        let body = visible(flow.chapters[0].source());
-        assert!(
-            body.contains("大雪封山的那一夜"),
-            "GBK 的书要解成汉字：{body}"
-        );
-        assert!(!body.contains('\u{fffd}'), "解得通就不该留洞：{body}");
-        assert_eq!(meta.format, crate::content::format::Format::Text);
-        assert_eq!(flow.chapters.len(), 1, "现在还是一整篇一章（分章是下一刀）");
-    }
-
-    /// 一段 XHTML 的可见文本。契约里最要紧的一条是「包装不改内容」，断言就得看可见文本，
-    /// 而不是看标记 —— 后者一改包装口径就红，前者才钉得住真正的不变量。
-    fn visible(xhtml: &str) -> String {
-        let dom = Dom::parse(xhtml.as_bytes());
-        let body = dom
-            .elements()
-            .find(|(id, _)| dom.tag_name(*id) == Some("body"))
-            .map_or(dom.document, |(id, _)| id);
-        TextMap::build(&dom, body).text().to_string()
-    }
-
-    fn without_whitespace(text: &str) -> String {
-        text.chars().filter(|c| !c.is_whitespace()).collect()
-    }
-
-    #[test]
-    fn normalize_unifies_crlf_and_blank_runs() {
-        let (_, flow) = opened("d.md", "a\r\n\r\n\r\n\r\nb\n\n");
-        assert_eq!(flow.chapters.len(), 1);
-        assert_eq!(flow.chapters[0].source(), "<p>a</p>\n<p>b</p>\n");
     }
 
     #[test]
@@ -463,13 +242,10 @@ mod tests {
         assert_eq!(without_whitespace(&joined), without_whitespace(&expected));
     }
 
-    /// `spine_href` 是**包装之前**那份规范化纯文本里的字节偏移（分章时算的），
-    /// 所以它指向的是原文里这一章自己的标题行。
+    /// 分章要保证的那件事本来就是「这一章的正文以它自己的标题开头」——
+    /// 直接从正文看，不看位置（`spine_href` 里那个字节偏移早已不外带）。
     #[test]
     fn each_chapter_starts_at_its_own_heading() {
-        // 以前这条靠 `spine_href` 里塞的字节偏移看切点（`#<offset>`）。
-        // 正文出库之后那个字段不再外带偏移，而分章要保证的那件事本来就是
-        // 「这一章的正文以它自己的标题开头」—— 直接从正文看。
         let src = "# A\ntext\n## B\nmore\n";
         let (_, flow) = opened("d.md", src);
         assert_eq!(flow.chapters.len(), 2);
@@ -503,5 +279,19 @@ mod tests {
     fn the_document_title_ignores_fenced_content() {
         let (meta, _) = opened("d.md", "```\n# fake\n```\n# real\n");
         assert_eq!(meta.title, "real");
+    }
+
+    /// 这条只是让上面那句「与 `.txt` 同判据」不是一句空话：两族共用同一份规范化，
+    /// 所以 CRLF 与多余空行在 `.md` 上的结果与在 `.txt` 上一字不差。
+    #[test]
+    fn normalization_is_the_same_on_both_families() {
+        let body = "a\r\n\r\n\r\n\r\nb\n\n";
+        let (_, md) = opened("d.md", body);
+        let (_, txt) = opened("d.txt", body);
+        assert_eq!(
+            visible(md.chapters[0].source()),
+            visible(txt.chapters[0].source()),
+            "规范化只有一份，两族的结果必须相同"
+        );
     }
 }

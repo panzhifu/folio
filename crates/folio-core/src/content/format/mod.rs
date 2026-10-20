@@ -25,6 +25,9 @@ pub mod rtf;
 pub(crate) mod sniff;
 /// SVG 栅格化：把矢量资源（SVG 封面、逐页漫画、正文内联 SVG）画成位图。
 pub mod svg;
+/// 纯文本那一族（`.txt`），以及它与 Markdown 共用的那条链（读成文本 → 规范化 →
+/// 折成章表 → 包装）。共用件只在这一份里有一份。
+pub mod text;
 pub mod thumb;
 pub mod woff;
 pub mod xhtml;

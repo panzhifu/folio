@@ -189,7 +189,7 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::fb2::Fb2Adapter),
         Box::new(super::html::HtmlAdapter),
         Box::new(super::markdown::MarkdownAdapter),
-        Box::new(super::markdown::PlainTextAdapter),
+        Box::new(super::text::PlainTextAdapter),
         Box::new(super::rtf::RtfAdapter),
         Box::new(super::cbz::CbzAdapter),
         Box::new(super::chm::ChmAdapter),
