@@ -65,8 +65,9 @@ pub(crate) struct PlainFamily {
 
 /// `.txt`：按规则表分章（`format::novel`），认出目录页，目录跟着章表一起交出去。
 ///
-/// 书名这一格**还没接规则**：`《书名》作者：…` 那种头部块与「书名：」键的提取是下一刀，
-/// 现在仍然回落文件名主名。分章已经是真的了。
+/// 三格都吃同一份生效那套表：`split` 用 `markers` / `gates`，`info` 用 `meta` 那几串别名，
+/// `toc` 从切好的章表建。**没接的只剩一格**：`volumes` 那族认得出来但不切，它要的是目录
+/// 的第二层（`plans/纯文本小说.md` 的后续）。
 const TEXT: PlainFamily = PlainFamily {
     format: Format::Text,
     split: split_by_rules,

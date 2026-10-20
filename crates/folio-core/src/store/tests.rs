@@ -818,13 +818,123 @@ fn folio_core_reindex(store: &Store, id: i64) {
     crate::reindex(store, id).unwrap();
 }
 
+/// 读回 `books.rules_hash` 那一格（库文件契约，不碰私有字段）。
+fn rules_hash_column(db: &Path, book_id: i64) -> Option<String> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row(
+        "SELECT rules_hash FROM books WHERE id = ?1",
+        [book_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .unwrap()
+}
+
+fn set_rules_hash(db: &Path, book_id: i64, value: Option<&str>) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute(
+        "UPDATE books SET rules_hash = ?2 WHERE id = ?1",
+        rusqlite::params![book_id, value],
+    )
+    .unwrap();
+}
+
+/// `.txt` 那一本的规则表换了，`stale_reason` 要说出**「规则变了」**而不是「索引版本旧」。
+///
+/// 这一格是 `plans/纯文本小说.md` 步骤三的全部理由：库里存的不是字节区间而是**章的序号**
+/// （`ChapterLocator::Section(n)`），换一套规则 = 每一本的序号重排一遍；不记账，进度与批注
+/// 就会**安静地**指到隔壁那一章 —— 屏上看着是对的，那是这一层最坏的一种错。
+/// 记了账，调一个阈值就不再需要 bump `INDEX_VERSION`、也就不再需要为此发一版。
+#[test]
+fn a_txt_book_notices_that_the_rule_table_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let path = dir.path().join("书.txt");
+    std::fs::write(&path, "第一章 大雪\n\n正文一\n\n第二章 封山\n\n正文二\n").unwrap();
+    let store = Store::open_at(&db).unwrap();
+    let mut m = meta("书");
+    m.format = Format::Text;
+    let id = store.add_book(&path, &m).unwrap();
+    store
+        .save_flow(id, &flow(&[("第一章", "正文一")]), Format::Text)
+        .unwrap();
+
+    // 落库那一趟把**生效那套表**的哈希记下了：直接问规则层，不走 `rules_hash` 那把尺，
+    // 否则这条门会变成自己验自己。
+    let active = crate::content::format::novel::rules::CompiledRules::builtin()
+        .content_hash()
+        .to_string();
+    assert_eq!(
+        rules_hash_column(&db, id).as_deref(),
+        Some(active.as_str()),
+        "索引算自哪份表必须记下来，NULL 就是没记账"
+    );
+    assert_eq!(
+        store.stale_reason(id).unwrap(),
+        None,
+        "刚按当前这套规则扫完的书该是可信的"
+    );
+
+    // 换了一份表（这里是手改那一格，真路径是换了生效的那份 JSON）。
+    set_rules_hash(&db, id, Some("另一套表"));
+    assert_eq!(
+        store.stale_reason(id).unwrap(),
+        Some(StaleReason::RulesChanged),
+        "要说「规则变了」，不能含糊成「索引版本旧」"
+    );
+
+    // NULL 走同一条路：v22 之前入库的老行没记这一格，而它正是该重扫的那批
+    // （老序号按当时的规则算的，而当时那套规则今天可能已经换了）。
+    set_rules_hash(&db, id, None);
+    assert_eq!(
+        store.stale_reason(id).unwrap(),
+        Some(StaleReason::RulesChanged),
+        "没记哈希的 `.txt` 不许当成可信"
+    );
+
+    // 重扫一趟自己好：新哈希落库，判据重新闭合。
+    folio_core_reindex(&store, id);
+    assert_eq!(rules_hash_column(&db, id).as_deref(), Some(active.as_str()));
+    assert_eq!(store.stale_reason(id).unwrap(), None);
+}
+
+/// **除 `.txt` 以外的格式不许看那一格**。判据问的是「这个格式的索引算不算自那张表」，
+/// 不是「那一列有没有值」—— 写成后者，每一本 Markdown 与 EPUB 在换规则时都会被白重扫一遍，
+/// 而那两族的切法（`#` 层级 / spine）里一条模式都没碰到那张表。
+#[test]
+fn a_book_that_never_read_the_rule_table_ignores_the_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let path = dir.path().join("a.md");
+    std::fs::write(&path, "# 一\n\n正文\n").unwrap();
+    let store = Store::open_at(&db).unwrap();
+    let id = store.add_book(&path, &meta("A")).unwrap();
+    store
+        .save_flow(id, &flow(&[("一", "正文")]), Format::Markdown)
+        .unwrap();
+    assert_eq!(
+        rules_hash_column(&db, id),
+        None,
+        "不依赖规则表的格式落库就该留 NULL，而不是抄一个数进去装成依赖"
+    );
+    assert_eq!(store.stale_reason(id).unwrap(), None);
+
+    // 那一格里被塞进一个对不上的值（手改库、或未来某个 bug），Markdown 照旧可信。
+    set_rules_hash(&db, id, Some("另一套表"));
+    assert_eq!(
+        store.stale_reason(id).unwrap(),
+        None,
+        "判据必须按格式分档，不然整架书都跟着换一次规则重扫"
+    );
+}
+
 /// **重扫一本书不许动读者的数据**（`plans/导入管线.md` §九 那条门）。
 ///
 /// 旧形状下这条会红，而且红在最要命的那一格：`annotations.chapter_id` 带着
 /// `ON DELETE CASCADE` 挂在 `chapters(id)` 上，而 `save_flow_in` 落库的第一句是
 /// 「删光这本书的章行再重插」—— 于是**每重扫一次就清空一次批注**，界面上那句
-/// 「位置与批注都还在」是一句谎话。触发它的路是日常的：文件被换过，或者
-/// `INDEX_VERSION` 被 bump 过一次（改分章规则时必须 bump）。
+/// 「位置与批注都还在」是一句谎话。触发它的路是日常的：文件被换过、
+/// `INDEX_VERSION` 被 bump 过一次（动了那台分章引擎时必须 bump），或者
+/// `.txt` 那一本的规则表换了（`RulesChanged`）。
 ///
 /// 五问合一条，因为「重扫」这个动作的正确性本来就是一个整体：
 /// 不重读来源、不改文件名、不新增记录、章表真的跟着新内容走了、读者的批注还在。

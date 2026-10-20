@@ -603,9 +603,9 @@ impl ReaderSession {
     /// 坏记录而变成空白页。
     pub fn open_book(&mut self, book_id: i64, cx: &mut Context<Self>) {
         // 正文只在源文件里，所以「文件还是那份文件吗」是能不能读的前提。
-        // 三种不可信各自处置：文件不在 → 连数据一起删（读者看见的是这本书从架上消失，
-        // 而不是点开一片空白）；文件换了 / 索引是旧算法算的 → **投一趟后台重扫**，
-        // 这一屏照旧用现有索引开，位置与批注都还在（`book_id` 没变）。
+        // 不可信的那几种各自处置：文件不在 → 连数据一起删（读者看见的是这本书从架上消失，
+        // 而不是点开一片空白）；文件换了 / 索引是旧引擎算的 / 那套分章规则换了 →
+        // **投一趟后台重扫**，这一屏照旧用现有索引开，位置与批注都还在（`book_id` 没变）。
         if let Some(store) = self.store.clone() {
             match store.stale_reason(book_id) {
                 Ok(Some(StaleReason::Missing)) => {

@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::types::{BookMeta, BookRow, Collection, ShelfItem};
 use super::{Store, now};
 use crate::Result;
-use crate::content::format::{DocMeta, Series};
+use crate::content::format::{DocMeta, Format, Series};
 use crate::group::{GroupBy, ShelfGroup, UNGROUPED, group_shelf};
 use crate::position::Locator;
 
@@ -163,7 +163,21 @@ const SHELF_ORDER: &str =
 ///
 /// 与 [`CoverRow`] 同一个理由：七元组摊在 `query_row` 闭包里的话，
 /// 「哪一格是什么」只存在于 `SELECT` 那一行的顺序里，改列序时编译器帮不上忙。
-type StaleRow = (String, i64, i64, i64, Option<String>);
+/// [`Store::stale_reason`] 一趟读回来的那几格。
+///
+/// 用带名字的字段而不是元组：这里有 3 个相邻的 `i64` 和 2 个相邻的 `Option<String>`，
+/// 排错一位不会有任何编译错误，只会让「文件换了」去看修改时间那一格。
+struct StaleRow {
+    path: String,
+    /// `books.format` 那一列，原样（库里是字符串，`Format::parse` 认不出来就当不依赖规则表）。
+    format: String,
+    size: i64,
+    mtime: i64,
+    version: i64,
+    cover_hash: Option<String>,
+    /// 这份索引算自哪一份分章规则表（v22 起）。NULL 的含义见 `store::schema` 那一版。
+    rules_hash: Option<String>,
+}
 
 pub fn book_root(copy_path: &Path) -> std::path::PathBuf {
     let parent = copy_path.parent().unwrap_or(Path::new(""));
@@ -1088,8 +1102,16 @@ pub enum StaleReason {
     Missing,
     /// 源文件换了（大小或修改时间对不上）—— 位置还在，指的却是别的内容。
     Changed,
-    /// 索引是旧算法算的（分章规则 / 位置方案改过）。
+    /// 索引是旧引擎算的（[`crate::content::format::INDEX_VERSION`] 对不上）：
+    /// 切章的算法、位置方案或页表算法改过。
     OldIndex,
+    /// 分章那套**规则数据**换了（`.txt`，`books.rules_hash` 对不上）。
+    ///
+    /// 与 `OldIndex` 分两档是因为它们答的是两个问题：那一档说「代码里的算法变了」，
+    /// 这一档说「读者或出厂那份 JSON 变了」。合成一个的话，界面与日志就只能说
+    /// 「索引旧了」，而读者刚换了一份规则表、想看到的是这一句。
+    /// 分开的代价是零：两者的处置本来相同（重扫），只是出处不同。
+    RulesChanged,
     // 曾经还有一档 `OldCover`（封面按旧规格生成）：v16 之后封面是一个文件，
     // 换规格只要重新生成缩略图（`format::thumb`），不必重扫全书 —— 所以这一档
     // 连同它的判据（`cover_spec` 那一列）一起作废了。
@@ -1099,11 +1121,12 @@ impl Store {
     /// 这本书记下的索引还可信吗？`None` = 可信。
     ///
     /// 正文只在文件里（见 `plans/text-out-of-db.md`），所以「文件还是那份文件吗」从
-    /// 锦上添花变成了**能不能读**的前提。四种不可信各自有后果：
+    /// 锦上添花变成了**能不能读**的前提。五种不可信各自有后果：
     ///
     /// - 文件不在 → 这一章取不到，重扫也没用；
     /// - 文件换了 → 位置指到别的内容上，进度与批注也跟着漂；
-    /// - 索引旧了 → 序号（`Section(n)`）按旧规则算的，可能整体错位；
+    /// - 索引是旧引擎算的 → 序号（`Section(n)`）按旧规则算的，可能整体错位；
+    /// - 规则表换了 → 同上，只是换的是那份 JSON 而不是代码；
     /// - 封面旧了 → 只影响书架那张缩略图，重扫一次就按新规格重生成。
     ///
     /// 第一种可以直接删数据（`prune_missing`），其余该重扫 —— 调用方选。
@@ -1117,23 +1140,33 @@ impl Store {
             // （`cover_spec`）连同 BLOB 一起没了：封面现在是一个文件，换规格只要重新生成
             // 缩略图（`format::thumb::purge` + 懒生成），不必重扫全书。
             conn.query_row(
-                "SELECT path, size, mtime, index_version, cover_hash
+                "SELECT path, format, size, mtime, index_version, cover_hash, rules_hash
                    FROM books WHERE id = ?1",
                 params![book_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok(StaleRow {
+                        path: r.get(0)?,
+                        format: r.get(1)?,
+                        size: r.get(2)?,
+                        mtime: r.get(3)?,
+                        version: r.get(4)?,
+                        cover_hash: r.get(5)?,
+                        rules_hash: r.get(6)?,
+                    })
+                },
             )
             .optional()?
         };
-        let Some((path, size, mtime, version, cover_hash)) = row else {
+        let Some(row) = row else {
             return Ok(None);
         };
-        let _has_cover = cover_hash.is_some_and(|h| !h.is_empty());
+        let _has_cover = row.cover_hash.as_ref().is_some_and(|h| !h.is_empty());
         // 顺序即优先级：文件不在最严重（要删数据），其次才是「算法换了」与「文件换了」。
-        let meta = std::fs::metadata(&path);
+        let meta = std::fs::metadata(&row.path);
         let Ok(meta) = meta else {
             return Ok(Some(StaleReason::Missing));
         };
-        if version != crate::content::format::INDEX_VERSION {
+        if row.version != crate::content::format::INDEX_VERSION {
             return Ok(Some(StaleReason::OldIndex));
         }
         let now_mtime = meta
@@ -1144,11 +1177,24 @@ impl Store {
             .unwrap_or(0);
         // `size` 用的是导入那一刻文件的大小；`books.size` 在旧库里可能来自 provider
         // 报的正文长度而不是文件长度，所以只在**两个数都非零且都不一样**时才判换了。
-        let changed = mtime != 0 && now_mtime != 0 && mtime != now_mtime;
+        let changed = row.mtime != 0 && now_mtime != 0 && row.mtime != now_mtime;
         if changed {
             return Ok(Some(StaleReason::Changed));
         }
-        let _ = size;
+        // 排在「文件换了」之后：文件都换过了，报规则换了会把真原因盖掉。
+        // 不看规则表的那些格式在这里直接跳过 —— `rules_hash` 交出 `None` 就是
+        // 「这一格式的索引不依赖那张表」，判据只在那一处定义（见它的文档）。
+        // 库里那一列认不出来的格式串（将来加的格式手改进来的）也一并跳过。
+        // NULL 则**不**跳过：v22 之前入库的老行没记这一格，而它正是该重扫的那批
+        // （老序号按当时那套规则算的，而当时那套规则今天可能已经换了）。
+        let format = Format::parse(&row.format);
+        let want = format.and_then(crate::content::format::rules_hash);
+        if let Some(want) = want
+            && row.rules_hash.as_deref() != Some(want.as_str())
+        {
+            return Ok(Some(StaleReason::RulesChanged));
+        }
+        let _ = row.size;
         Ok(None)
     }
 

@@ -8,10 +8,13 @@
 //! 两边就各扫一遍全文、各判一次「这是不是头部」，而两处迟早分叉，症状是目录跳过去
 //! 屏上没有那一章。
 //!
-//! 落点在 `format::text` 那一族的 `PlainFamily`：`split` / `extract` 两格换成这里的
-//! 函数就是接通，共用件（`charset::read_plain` → `normalize` → 折成章表 → 包装）
-//! 一行都不用动。**目前还没接**：接它要同时 bump `INDEX_VERSION` 并把
-//! `CompiledRules::content_hash` 弄进失效判据，那是下一笔的事。
+//! 落点在 `format::text` 那一族的 `PlainFamily`：`split` / `info` / `toc` 三格就是这里的
+//! 函数，共用件（`charset::read_plain` → `normalize` → 折成章表 → 包装）一行都没动。
+//!
+//! **生效那套表换了要说得出来**：`rules_hash` 那一格（`store::schema` 的 v22）记着
+//! 「这份索引算自哪一份表」，`store::stale_reason` 认成 `RulesChanged`。没有它，换一份
+//! 规则表就是一次没有代价的静默漂移 —— 库里存的是章的**序号**。判据只有一处定义：
+//! [`super::rules_hash`]。
 
 pub(crate) mod detect;
 pub mod rules;

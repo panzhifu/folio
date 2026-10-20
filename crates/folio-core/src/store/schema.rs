@@ -410,4 +410,24 @@ ALTER TABLE chapters ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]';
     r#"
 ALTER TABLE annotations ADD COLUMN style TEXT NOT NULL DEFAULT 'line';
 "#,
+    // v22：**这份索引算自哪一份分章规则**（`books.rules_hash`）。
+    //
+    // 为什么要有这一格：库里存的不是字节区间而是**章的序号**
+    // （`ChapterLocator::Section(n)`），而那个序号只在「按今天这套规则切」的前提下指到
+    // 第三章。`.txt` 的分章规则是一份可换的数据（`content::format::novel::rules`），
+    // 换一套 = 每一本书的序号重新排一遍 —— 不记账的话，进度与批注会**安静地**指到隔壁
+    // 那一章，而这是这一层最坏的一种错：屏上看着是对的。
+    //
+    // 有了这一格，调一个阈值不再需要 bump `INDEX_VERSION` 再发一版：数据自己会说话
+    // （判据见 [`crate::content::format::rules_hash`]，`stale_reason` 认成
+    // `RulesChanged` 那一条路）。
+    //
+    // **可空而不是 `NOT NULL DEFAULT ''`**：空串会变成「有一本书的哈希恰好是空串」，
+    // 而它答不出任何问题；NULL 才敢说「这一行没记」。三种行都读回 NULL ——
+    // 除 `.txt` 以外的格式（它们的索引不碰那张表，所以判据根本不看这一格）、
+    // 定版式那一路（`save_fixed` 不写它），以及 v22 之前入库的老行。
+    // 老行不回填：回填要把整本重读一遍，而那正是重扫本身，交给开书时那一趟顺手做完。
+    r#"
+ALTER TABLE books ADD COLUMN rules_hash TEXT;
+"#,
 ];

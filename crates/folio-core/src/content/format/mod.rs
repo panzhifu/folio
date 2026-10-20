@@ -185,10 +185,32 @@ impl Format {
 /// 的话老库里每一本 TXT 的进度都会指到第一章的第一页，批注 relocate 也全部落在错的章上。
 /// 代价按那条不兼容的口径付：整库重扫一次，开书时才投，不在升级那一刻。
 ///
-/// **往后这一格绑上了规则表**：改 `assets/novel-rules.*.json` 里的任何一条模式或阈值，
-/// 分章结果就可能挪动，那与改分章规则是同一件事，必须同样 bump（`rules` 那侧有一条门
-/// 钉住出厂表的条数与内容哈希，动了出厂表一定会在那里出声）。
+/// **这一格从此只管引擎，不管数据**：改 `assets/novel-rules.*.json` 里的任何一条模式或
+/// 阈值不必 bump —— [`rules_hash`] 那一格会说「规则表换了」，老库在开书时逐本重扫，
+/// 不必为一套正则发一版。要 bump 的仍然是动那台引擎：四条否决门的编排、号怎么读、
+/// 切点怎么落（`novel::detect`），因为那是「同一份表算出什么」变了。
 pub const INDEX_VERSION: i64 = 8;
+
+/// 这一格式的索引算自哪一份小说规则表 —— 交出**此刻生效**那一份的内容哈希。
+///
+/// `None` = 这个格式的索引与那张表无关（Markdown 按 `#` 切、EPUB 按 spine 切，表里那些
+/// 模式一条都碰不到它们）。落库（`store::content`）与判失效（`store::stale_reason`）问的
+/// 是同一个问题，所以答案只有这一处：两处各写一遍「哪些格式看规则表」，早晚会一处把
+/// `.md` 算进去、另一处不算，症状是同一本书每次开都重扫、或永远不重扫。
+///
+/// 只有 `.txt` 那一条依赖，而它依赖的是**编译好且在用**的那一份：将来读者那一层
+/// （`plans/纯文本小说.md` 步骤四）换掉生效表时，改的是 [`novel::rules`] 里「生效那份」
+/// 怎么取，这一格不必动。
+pub fn rules_hash(format: Format) -> Option<String> {
+    match format {
+        Format::Text => Some(
+            novel::rules::CompiledRules::builtin()
+                .content_hash()
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
 
 /// 一本书的书目信息。**字段按 Dublin Core 的术语集命名与取舍**（DCMI Terms / ISO 15839），
 /// 因为各家电子书格式的书目区就是它：EPUB 的 OPF 直接写 `dc:*`，MOBI 的 EXTH 标签在

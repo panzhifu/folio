@@ -22,6 +22,7 @@
 //! **二、出厂默认永远在场。** 读不到、解不开、校验不过 → 交回 [`CompiledRules::builtin`]，
 //! 症状是「按出厂那样分章」，绝不是一本书打不开。见 [`compile`]。
 
+use std::fmt::Write as _;
 use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -31,9 +32,10 @@ const BUILTIN_ZH_HANS: &str = include_str!("../../../../assets/novel-rules.zh-Ha
 
 /// 一份规则表。字段就是 JSON 里的字段，一一对应，不另存第二份形状。
 ///
-/// `meta` 与 `volumes` 那两格今天只有**数据**在场、没有读者：书名与作者的提取（那两串
-/// 别名表）与分卷的第二层是下一刀，它们各自的读取器到时和这俩字段一起用。形状现在就定
-/// 下来是为了别让 JSON 以后再改形状 —— 那会让读者手里那份表忽然解不开。
+/// `meta` 有读者（`detect::book_info` 按那几串别名读头部那一块，所以它进内容哈希：别名
+/// 改了，架上的书名就是旧名字）。`volumes` 此刻只有**数据**在场、没有读者 —— 分卷的第二层
+/// 是后续那一刀。形状现在就定下来是为了别让 JSON 以后再改形状 ——
+/// 那会让读者手里那份表忽然解不开。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rules {
     /// 表的**形状**版本：字段一改就 +1，旧表解不开时能说出是哪一版不匹配。
@@ -272,7 +274,8 @@ pub struct CompiledRules {
     rules: Rules,
     /// 与 `rules.markers` **同长同序**。
     compiled: Vec<Compiled>,
-    /// 生效那套表的字节 SHA-256 前 12 位。它进失效判据的理由见模块头。
+    /// 生效那套表**内容**的 SHA-256 前 12 位。它进失效判据的理由见模块头，
+    /// 它为什么不算原始字节见 [`content_hash`]。
     content_hash: String,
     /// 加载时剔掉的那几条的名字，供诊断与界面说话。空 = 整份都好用。
     bad_entries: Vec<String>,
@@ -419,13 +422,64 @@ pub(crate) fn compile(json: &str) -> (Arc<CompiledRules>, Vec<String>) {
     }
     (
         Arc::new(CompiledRules {
-            content_hash: short_hash(json.as_bytes()),
+            content_hash: content_hash(&rules, &compiled),
             rules,
             compiled,
             bad_entries,
         }),
         warnings,
     )
+}
+
+/// 「这套表切出来的章会不会变」这一问题的**唯一**答案。
+///
+/// 喂给哈希的只有下面这些：活着的章标记与分卷标记的形状、读号那两张表、五条阈值、
+/// 书目那几串别名。表里其余的格一概不进 —— `name` 与 JSON 里那格 `comment` 是给人看的，
+/// `version` 说的是形状，`locale` 只是个标签，`examples` 在 [`compile`] 里当完场面具
+/// 之后就不再生成分章结果。按**原始字节**算的话，读者改一个错别字就会让整库为它重扫
+/// 一遍，那是把「改了个注释」的成本收成「换了一套规则」。
+///
+/// 被剔掉的条目不进清单，所以这条链自己也是活的：有人删掉一条反例让那条规则复活，
+/// 清单里就多一条，哈希跟着动 —— 而那正是该动的时刻，多一条规则就是多切一些章。
+///
+/// 编码成一行一个 JSON 值：`to_string` 出来的标记里没有裸换行（字符串里的换行必被转义
+/// 成 `\n` 两个字符），所以换行是安全的分隔符，拼不出「两组不同的表得到同一串」那种歧义。
+fn content_hash(rules: &Rules, compiled: &[Compiled]) -> String {
+    let mut buf = String::new();
+    put(&mut buf, "markers");
+    for (marker, slot) in rules.markers.iter().zip(compiled) {
+        if !matches!(slot, Compiled::Rejected) {
+            put_marker(&mut buf, marker);
+        }
+    }
+    put(&mut buf, "volumes");
+    for marker in &rules.volumes {
+        put_marker(&mut buf, marker);
+    }
+    put(&mut buf, "numbering");
+    put(&mut buf, &rules.numbering);
+    put(&mut buf, "gates");
+    put(&mut buf, &rules.gates);
+    // 书目那几串也落库（`books.title` / `authors` / `description`），所以改了别名表
+    // 同样该重扫 —— 同一趟重扫顺手把架上那一格改成新名字，而不是让它停在旧结果上。
+    put(&mut buf, "meta");
+    put(&mut buf, &rules.meta);
+    short_hash(buf.as_bytes())
+}
+
+/// 一条规则里**参与匹配**的那几格。`name` 与 `examples` 不在其中，理由见 [`content_hash`]。
+fn put_marker(out: &mut String, marker: &Marker) {
+    put(out, &marker.kind);
+    put(out, &marker.pattern);
+    put(out, &marker.text);
+    put(out, &marker.level);
+    put(out, &marker.numbering);
+}
+
+fn put(out: &mut String, value: &(impl Serialize + ?Sized)) {
+    // 这几个类型（字符串、整数、布尔、枚举、它们的 `Vec`）序列化不会失败：会失败的
+    // 只有 `f64` 那种非有限浮点，而这份表里一个都没有。
+    let _ = writeln!(out, "{}", serde_json::to_string(value).unwrap_or_default());
 }
 
 /// **一条规则认不认这一行 —— 全仓库只有这一份定义。**
@@ -496,7 +550,6 @@ fn short_hash(bytes: &[u8]) -> String {
     let digest = sha2::Sha256::digest(bytes);
     let mut out = String::with_capacity(12);
     for byte in digest.iter().take(6) {
-        use std::fmt::Write as _;
         // 一位都不会丢：一字节写两位十六进制，取前 6 字节 = 12 个字符。
         let _ = write!(out, "{byte:02x}");
     }
@@ -639,5 +692,92 @@ mod tests {
             "只改了一个数，不该退回出厂：{warnings:?}"
         );
         assert_ne!(rules.content_hash(), a.as_str(), "阈值动了，哈希必须跟着动");
+    }
+
+    /// 书目那几串别名也进清单：`book_info` 用的是同一张表，别名改了，架上的
+    /// `books.title` 那一格就是旧名字 —— 同一趟重扫顺手改过来，而不是让它停在旧结果上。
+    #[test]
+    fn a_bibliography_alias_edit_also_moves_the_hash() {
+        let base = CompiledRules::builtin();
+        let a = base.content_hash().to_string();
+        let changed = super::BUILTIN_ZH_HANS.replace("\"head_lines\": 40", "\"head_lines\": 60");
+        let (rules, warnings) = compile(&changed);
+        assert!(warnings.is_empty(), "只改了一格读数：{warnings:?}");
+        assert_ne!(
+            rules.content_hash(),
+            a.as_str(),
+            "只读头部 40 行与 60 行读出来的书名可能不同，哈希该动"
+        );
+    }
+
+    /// 哈希答的是「切出来的章会不会变」，**不是**「文件字节变没变」。
+    /// 只给人看的那些格 —— JSON 里那格 `comment`（它压根不是 `Rules` 的字段）、条目的
+    /// `name`、`locale`、以及自检用完就丢的 `examples` —— 改了都不该让整库重扫一遍；
+    /// 连字节布局（整份压成一行）也一样，因为按原始字节算的话，排个版就是一次「换规则」。
+    ///
+    /// 这条门是给 `store::stale_reason` 的：那边按哈希判重扫，读者改一个错别字就要
+    /// 把每一本 `.txt` 重读一遍 —— 那是把「改了个注释」的代价收成「换了一套规则」。
+    #[test]
+    fn the_human_only_cells_do_not_move_the_hash() {
+        let want = CompiledRules::builtin().content_hash().to_string();
+        let mut value: serde_json::Value =
+            serde_json::from_str(super::BUILTIN_ZH_HANS).expect("出厂那份该解得开");
+        value["comment"] = serde_json::json!("改过说明的出厂规则");
+        value["locale"] = serde_json::json!("zh-Hant");
+        {
+            let first = &mut value["markers"][0];
+            first["name"] = serde_json::json!("给这一条另起的名字");
+            first["comment"] = serde_json::json!("改过的条目说明");
+            // 加一条**本来就认得**的正例：自检照过，清单不多不少。
+            first["examples"]["must_match"]
+                .as_array_mut()
+                .expect("出厂那份的正例是数组")
+                .push(serde_json::json!("第3章 起风了"));
+        }
+        // `to_string` 交出的是一份没有缩进的字节，与出厂文件不是一样东西。
+        let (rules, warnings) = compile(&value.to_string());
+        assert!(
+            warnings.is_empty(),
+            "只动了给人看的几格，不该有任何一条被作废：{warnings:?}"
+        );
+        assert_eq!(
+            rules.content_hash(),
+            want.as_str(),
+            "同一套规则换了排版与注释，哈希不许动 —— 动一次就是整库白重扫"
+        );
+    }
+
+    /// 被作废的规则**不进清单**，所以「有人删掉那条反例、这条规则活了」一定动着哈希。
+    /// 这一档要是安静地不变，症状就是老库的序号整体漂：多一条规则等于多切一些章。
+    #[test]
+    fn reviving_a_rule_rejected_by_its_own_example_moves_the_hash() {
+        fn table(anti: &str) -> String {
+            format!(
+                r#"{{
+                  "version": 1, "locale": "zh-Hans",
+                  "numbering": {{"digits": [["一",1],["二",2],["三",3]], "units": [["十",10]]}},
+                  "markers": [
+                    {{"name": "章", "kind": "regex", "pattern": "^\\s*第([一二三])章",
+                      "examples": {{"must_match": ["第一章"], "must_not_match": ["{anti}"]}}}}
+                  ]
+                }}"#
+            )
+        }
+        // 反例「第三章」自己撞得上那条模式 → 整条作废，清单里没有它。
+        let (dead, warnings) = compile(&table("第三章"));
+        assert_eq!(
+            dead.bad_entries(),
+            vec!["章".to_string()],
+            "反例撞成正例，该只作废这一条：{warnings:?}"
+        );
+        // 换成一句正文 → 这条活了，会多切章。
+        let (alive, warnings) = compile(&table("他说第三章写得太慢"));
+        assert!(warnings.is_empty(), "这一份该整条能用：{warnings:?}");
+        assert!(alive.bad_entries().is_empty());
+        assert_ne!(
+            dead.content_hash(),
+            alive.content_hash(),
+            "一条规则从作废变成生效，哈希必须动"
+        );
     }
 }

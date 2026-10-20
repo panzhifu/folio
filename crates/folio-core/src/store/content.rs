@@ -101,7 +101,8 @@ impl Store {
         tx.execute(
             "UPDATE books
                 SET css = ?2, toc_json = ?3, index_version = ?4,
-                    cover_hash = ?5, cover_mime = ?6, progression_rtl = ?7
+                    cover_hash = ?5, cover_mime = ?6, progression_rtl = ?7,
+                    rules_hash = ?8
               WHERE id = ?1",
             params![
                 book_id,
@@ -111,6 +112,10 @@ impl Store {
                 doc.cover_ref.as_ref().map(|c| c.hash.clone()),
                 doc.cover_ref.as_ref().map(|c| c.mime.clone()),
                 doc.progression_rtl as i64,
+                // 「这份索引按哪一套规则切的」。除 `.txt` 以外一律 NULL —— 那些格式的
+                // 切法写死在代码里，由 `index_version` 那一格管。判据只有一处定义
+                // （[`crate::content::format::rules_hash`]），这一趟不自己猜哪些格式看规则表。
+                crate::content::format::rules_hash(format),
             ],
         )?;
         tx.commit()?;
