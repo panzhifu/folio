@@ -11,6 +11,8 @@
 | [基础设施.md](基础设施.md) | 作业（含关闭时排空队列）、配置三层 + provenance + Arc 换页 + 热/重启清单、错误三档、日志纪律、十一件没人管的事、**§七 实现台账（2026-10-12）** |
 | [Locator.md](Locator.md) | 坐标系：存的五个字段含原文快照、不依赖排版的**全局字符进度**、按格式的 source_key、四级降级复用 `anchor::relocate` |
 | [听书.md](听书.md) | 合成朗读后端（`tts` 0.26.3）：两端能力表、Android 三条硬约束（`JNI_OnLoad` / 死的 `onStop` / 500 ms 阻塞）、Linux 要 `speechd`、段而非句、进度落 `positions`、必须与可省 |
+| [纯文本小说.md](纯文本小说.md) | `.txt` 那一族的三段边界（文本说了算 / 规则说了算 / 代码说了算）、四条否决门的固定顺序、真书教出来的三则修正、下一步四件事各带验收门、以及**明确不做**的清单 |
+
 | [M5-refactor.md](M5-refactor.md) | 架构重构（KOReader 式模块化）+ 绘制层简化 + 引擎查询接口 |
 | [M6-selection.md](M6-selection.md) | 选中一期：长按选词、拖动扩展、复制 |
 | [M7-annotations.md](M7-annotations.md) | 批注二期设计：TextAnchor 落库、回显、侧栏 |

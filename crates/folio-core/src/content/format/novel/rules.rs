@@ -41,7 +41,8 @@ pub struct Rules {
     pub version: u32,
     /// BCP 47 原样，与 `DocMeta::language` 同一把尺。
     pub locale: String,
-    #[serde(default)]
+    /// **必填**：省了它就等于没有数字表，那时所有号都读不出、递增校验静默失效 ——
+    /// 一份「看起来能用、其实什么都判不了」的规则表比解不开更坏，所以宁可解不开。
     pub numbering: Numbering,
     /// 切成一章的那些标记。顺序即优先级：先碰到的赢。
     pub markers: Vec<Marker>,
@@ -78,33 +79,26 @@ pub enum NumberingStyle {
     Either,
 }
 
-/// 中文数字那两张表。
+/// 中文数字的两张表：**哪些字符算位数字、值多少，哪些是单位**。
+///
+/// 整张表住在数据里，代码一份都不留。理由是被撞出来的：上次给《西游记》补那个白圈
+/// `○`（U+25CB，那个本子写它而不是 `〇` U+3007）时，要同时改数据的字符集**和**代码里
+/// 的 `value()` 分支 —— 一份事实抄两处，而第二处漏改的症状是「章切出来了、号读不出」，
+/// 比丢章更难查，因为屏上看着是对的。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Numbering {
-    /// 参与解析的字符集。**跟着语言走，不是 Unicode 属性**，所以写在数据里。
-    #[serde(default = "default_digits")]
-    pub digits: String,
-    /// 认明刻本式的省略写法：`一一` = 11、`二一` = 21、`三五` = 35。
+    /// 位数字（`一` = 1、`○` = 0、`两` = 2）。
+    pub digits: Vec<(char, usize)>,
+    /// 单位（`十` = 10、`万` = 10000）。繁简两套各是一份表，不是这一份的多字符。
+    pub units: Vec<(char, usize)>,
+    /// 认「没有单位的连续位数字」：明刻本省略式 `一一` = 11、白圈式 `一○` = 10。
     ///
-    /// 这一条不是趣味：实测《西游记》（PG 本）那 90 枚标记按标准写法解析只落出 14 个
-    /// 不同的号，整本的序号连不起来，递增校验就会把它们大面积判死 —— 症状是「一本
-    /// 100 回的书一章都没分开」。
+    /// 不是趣味：实测《西游记》那 90 枚标记按标准写法解析只落出 14 个不同的号，整本
+    /// 连不起来，递增校验就会把它们大面积判死 —— 症状是「一本 100 回的书一章没分开」。
     #[serde(default = "default_true")]
     pub colophon_style: bool,
 }
 
-impl Default for Numbering {
-    fn default() -> Self {
-        Self {
-            digits: default_digits(),
-            colophon_style: true,
-        }
-    }
-}
-
-fn default_digits() -> String {
-    "〇○零一二三四五六七八九十百千万两".to_string()
-}
 fn default_true() -> bool {
     true
 }
@@ -293,8 +287,24 @@ impl CompiledRules {
         &self.rules.meta
     }
 
-    pub(crate) fn digits(&self) -> &str {
-        &self.rules.numbering.digits
+    /// 某个字符是不是位数字、值多少。表在数据里（见 `Numbering` 的理由）。
+    pub(crate) fn digit(&self, c: char) -> Option<usize> {
+        self.rules
+            .numbering
+            .digits
+            .iter()
+            .find(|(ch, _)| *ch == c)
+            .map(|(_, v)| *v)
+    }
+
+    /// 某个字符是不是单位（十百千万）、值多少。
+    pub(crate) fn unit(&self, c: char) -> Option<usize> {
+        self.rules
+            .numbering
+            .units
+            .iter()
+            .find(|(ch, _)| *ch == c)
+            .map(|(_, v)| *v)
     }
 
     pub(crate) fn colophon_style(&self) -> bool {
@@ -435,6 +445,7 @@ mod tests {
     fn a_bad_pattern_rejects_only_its_own_entry() {
         let json = r#"{
             "version": 1, "locale": "zh-Hans",
+            "numbering": {"digits": [["一",1],["二",2]], "units": [["十",10]]},
             "markers": [
                 {"name": "好的一条", "kind": "regex", "pattern": "^\\s*第\\s*([0-9一二三]{1,4})\\s*章"},
                 {"name": "坏的一条", "kind": "regex", "pattern": "^\\s*(第[章+"},
@@ -467,9 +478,15 @@ mod tests {
     /// 空表不等于「这本书没章」，而是配置写坏了 —— 它同样退回出厂。
     #[test]
     fn an_empty_marker_list_is_not_taken_as_a_request_to_cut_nothing() {
-        let (rules, warnings) = compile(r#"{"version":1,"locale":"zh-Hans","markers":[]}"#);
+        // 带上 `numbering`：否则这份样本会先因为「少了必填的一格」而解不开，那条断言
+        // 就成了在验另一件事（红的是对的门、报的是错的因）。
+        let json = r#"{"version":1,"locale":"zh-Hans","numbering":{"digits":[["一",1]],"units":[["十",10]]},"markers":[]}"#;
+        let (rules, warnings) = compile(json);
         assert_eq!(rules.markers().count(), 15);
-        assert!(!warnings.is_empty(), "要说出「空表被拒」这件事");
+        assert!(
+            warnings.iter().any(|w| w.contains("markers")),
+            "要说出「空表被拒」这件事，而不是含糊一句解不开：{warnings:?}"
+        );
     }
 
     /// 内容哈希必须**跟着内容动**：它是「规则换了没有」的唯一判据，两个不同的表撞出

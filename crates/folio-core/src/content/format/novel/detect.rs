@@ -109,7 +109,7 @@ fn extracted_number(
 /// 中文数字 / 阿拉伯 / 全角数字 / 明刻本省略式都能读。读不出回 `None`。
 ///
 /// 表外字符不算（`〇〇一` 那种没登记的写法直接放弃这一枚的号），因为「哪些字符算数字」
-/// 是**语言**的事，写在规则表的 `numbering.digits` 里，而不是问 Unicode 属性。
+/// 是**语言**的事，写在规则表的 `numbering.digits` / `units` 两张表里，而不是问 Unicode 属性。
 pub(crate) fn parse_number(text: &str, rules: &CompiledRules) -> Option<usize> {
     let s = text.trim();
     // 先试纯数字：全角那一族先折成半角，因为 `parse::<usize>` 只认半角。
@@ -126,41 +126,20 @@ pub(crate) fn parse_number(text: &str, rules: &CompiledRules) -> Option<usize> {
     if !half.is_empty() && half.chars().all(|c| c.is_ascii_digit()) {
         return half.parse().ok();
     }
-    let digits = rules.digits();
-    if s.is_empty() || !s.chars().all(|c| digits.contains(c)) {
+    // 认不认这一段，只看它每个字符是不是表里的位数字或单位 —— 表在数据里（`numbering`）。
+    if s.is_empty()
+        || !s
+            .chars()
+            .all(|c| rules.digit(c).is_some() || rules.unit(c).is_some())
+    {
         return None;
     }
-    let value = |c: char| -> Option<usize> {
-        match c {
-            // 白圈 `○`（U+25CB）与表意零 `〇`（U+3007）都得当 0：那个 PG 西游本用的就是
-            // 前者，只认后者的话 `第一○回` 的号读不出来、章却已经切出来了 —— 号连不起来
-            // 比丢章更难查，因为屏上看着是对的。
-            '〇' | '○' | '零' => Some(0),
-            '一' => Some(1),
-            '二' => Some(2),
-            '三' => Some(3),
-            '四' => Some(4),
-            '五' => Some(5),
-            '六' => Some(6),
-            '七' => Some(7),
-            '八' => Some(8),
-            '九' => Some(9),
-            '两' => Some(2),
-            _ => None,
-        }
-    };
-    let unit = |c: char| match c {
-        '十' => Some(10),
-        '百' => Some(100),
-        '千' => Some(1000),
-        '万' | '萬' => Some(10_000),
-        _ => None,
-    };
     let mut total = 0usize;
     let mut current = 0usize;
     let mut saw_unit = false;
     for c in s.chars() {
-        if let Some(power) = unit(c) {
+        if let Some(power) = rules.unit(c) {
+            // 「十」前面没有数字就是 1×（`十五`）；「万」把前面整段乘进去（`三十五万`）。
             let mult = if current == 0 && !saw_unit {
                 1
             } else {
@@ -174,7 +153,7 @@ pub(crate) fn parse_number(text: &str, rules: &CompiledRules) -> Option<usize> {
             current = 0;
             saw_unit = true;
         } else {
-            current = value(c)?;
+            current = rules.digit(c)?;
         }
     }
     // 有单位就是标准写法（`三十五`、`一百零八`）。
@@ -182,31 +161,25 @@ pub(crate) fn parse_number(text: &str, rules: &CompiledRules) -> Option<usize> {
         return Some(total + current);
     }
     // 没有单位：单个字符就是它自己；两位以上是**按位值读**（`一○` = 10、`一一` = 11、
-    // `一○五` = 105、`二一` = 21）—— 那既是明刻本省略「十」的写法，也是 PG 那个本子用
-    // 白圈 `○` 当零的写法，两件事在这一条上合成一条规则。
+    // `一○五` = 105、`二一` = 21）—— 明刻本省略「十」与那个本子拿白圈当零，两件事合成一条。
     let chars: Vec<char> = s.chars().collect();
     if chars.len() == 1 {
-        return value(chars[0]).filter(|v| *v > 0);
+        return rules.digit(chars[0]).filter(|v| *v > 0);
     }
-    positional(&chars, rules, &value)
+    positional(&chars, rules)
 }
 
 /// 连续位数字按位值读：`一○`=10、`一一`=11、`一○五`=105、`二一`=21。
 ///
-/// 这一档要规则表显式开着（`colophon_style`），因为「二一」在别的写法里可能是编号而不是
-/// 21；开了之后同时覆盖两件事 —— 明刻本省略「十」（第一一回 = 11）与那个 PG 西游本用
-/// 白圈当零（`第一○回` = 10）。
-fn positional(
-    chars: &[char],
-    rules: &CompiledRules,
-    value: &impl Fn(char) -> Option<usize>,
-) -> Option<usize> {
+/// 要规则表显式开着这一档（`colophon_style`），因为「二一」在别的写法里可能是编号而不是
+/// 21。字符与各自的值都取自数据 —— 代码这里只有一条「乘十再加下一位」的算法。
+fn positional(chars: &[char], rules: &CompiledRules) -> Option<usize> {
     if !rules.colophon_style() {
         return None;
     }
     let mut out = 0usize;
     for c in chars {
-        out = out * 10 + value(*c)?;
+        out = out * 10 + rules.digit(*c)?;
     }
     (out > 0).then_some(out)
 }
@@ -860,7 +833,11 @@ mod tests {
                     // 缺号与重号两条断言就变成永远绿的假灯 —— 这一条门差点就这么废了。
                     let digits: String = head
                         .chars()
-                        .take_while(|c| builtin.digits().contains(*c) || c.is_ascii_digit())
+                        .take_while(|c| {
+                            builtin.digit(*c).is_some()
+                                || builtin.unit(*c).is_some()
+                                || c.is_ascii_digit()
+                        })
                         .collect();
                     parse_number(&digits, &builtin)
                 })
