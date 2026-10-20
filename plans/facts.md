@@ -70,12 +70,29 @@
 
 - Markdown 适配器按 `#`/`##` 分章：以标题开头的语料 chapter 0 只有标题，看起来像
   「正文没渲染」，不是 bug。测试语料把正文段落放在第一个标题之前。
-- CSS 子集是合同：`crates/folio-core/src/css/computed.rs` 顶部清单之外的一律忽略并记录，
+- CSS 子集是合同：`crates/folio-core/src/content/format/css/computed/apply.rs` 里那批
+  match 臂（加上 `computed.rs` 的 `KNOWN_UNIMPLEMENTED`）之外的一律忽略并记录，
   不许临时加特例进引擎核心；要扩清单，先改清单（代码里那份）再写实现。
-- `css-gap` example 的落差表口径：按元素排名的声明覆盖率，不含未实现属性的**几何**影响；
+- `css-gap` example 的落差表口径：按元素排名的声明覆盖率，**不含**未实现属性的几何影响；
   结论只用于排优先级，不是渲染保证。「排版影响」一节另量**平均行墨迹宽**（`ink_width`）：
   `text-align: justify` 不改行数/高/左缘，只在行内摊开，只有墨迹宽量得到它（并把它的
   before 臂折回 `start`）。
+- 2026-10-20 把这张表读完的结论：**声明级覆盖率已经见底，剩下的「不认识」大多不是落差**。
+  《哈利·波特全集》那 10.9% 里 5149/5647 是 `duokan-text-indent` —— 多看转换器把标准
+  `text-indent` 连同厂商前缀那一条一起写在同一条规则里，17 条规则逐条对过，16 条两侧同值；
+  《蛇结》那 102 条 `list-style-image: none` / `list-style-position: outside` 要的正是
+  CSS 初值，也就是引擎现在的行为；`padding: 0 auto` 那 240 条在 CSS 里是非法值
+  （`padding` 不吃 `auto`），拒掉才与浏览器逐字一致。所以看到这张表的百分比要先拆属性，
+  别把「不认识」直接读成「屏上还差多少」。
+- `vertical-align` 在《哈利·波特全集》那 241 条**不在 `<td>` 上**（旧记录错过一次），
+  实测选择器是 `sup img`，落点 `[p>sup>a>img]` —— 上标里的注号图。它仍然几乎不改屏上
+  的东西，但理由不是「没有表格布局」，而是 `layout::collect` 摆图片时**逐级累加祖先的
+  `baseline_shift`**，UA 给 `<sup>` 的那一档上标位移早就落在那张图上。要重测这类结论，
+  用层叠自己的选择器匹配（`RuleSet::matching_declarations`），别用正则扫 CSS。
+- 块级 `width` / `max-width` / `height` / `max-height` 与 `margin: auto` 均分是 2026-10-20
+  这一刀接的，判据在 `layout::collect::solve_block_width`。**这一族从前就报 `Applied`，
+  所以 `css-gap` 那张表上一个痕迹都没有** —— 声明解出来了不等于排版层读了它，
+  这两件事之间的缝只能靠「同一份排版、把声明整条丢掉」这种对照去量。
 - **两端对齐（`text-align: justify`）与字距（`letter-spacing`）的 RTL 一期不做**：
   余量的摊开方向与空隙计数、字形右推的方向在 RTL 下都反转。`layout::Justify` 对 RTL 行
   直接给 `None`（该行不摊）；字距在绘制（`paint::GlyphRun`）的 RTL 段跳过右推，命中/选区

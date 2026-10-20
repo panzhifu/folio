@@ -126,6 +126,11 @@ fn layout_inner(
     let style = ctx.style_of(root);
     // 根的包含块就是视口（`options.width`）：根上那族百分比按它折，再往里每一层
     // 按父块的内容宽折，这条基准一路由 `collect` 的 `basis` 参数带着走。
+    //
+    // **根自己不读 `width` / `max-width`**，与它下面的块级盒故意不同：从网页导出来的
+    // 书满地是 `body { width: 600px; margin: 0 auto }` 那一类「桌面版定宽居中」，
+    // 照做就等于把读者的版心缩成作者屏幕上那一栏，而版心归视口与读者设定 —— 不归作者。
+    // 往下一层（`<div>`、`<p>`）就照 `collect::solve_block_width` 那条等式走。
     let pl = style.padding_left.resolve(options.width).max(0.0);
     let pt = style.padding_top.resolve(options.width).max(0.0);
     let pb = style.padding_bottom.resolve(options.width).max(0.0);
@@ -242,8 +247,6 @@ pub fn measure_chapter(
             simple = false;
             break;
         }
-        let ml = s.margin_left.resolve(content_width).max(0.0);
-        let mr = s.margin_right.resolve(content_width).max(0.0);
         let mt = s.margin_top.resolve(content_width).max(0.0);
         // 与 `children_light` 同一条外边距折叠：兄弟间取较大值，不叠加。
         cursor += if prev_bottom > 0.0 {
@@ -251,7 +254,9 @@ pub fn measure_chapter(
         } else {
             mt
         };
-        let cw = (content_width - ml - mr).max(1.0);
+        // 横向也走同一条求解式（`layout::collect::solve_block_width`）：这一张表要是
+        // 少算一处，作者写了定宽的块就会「量出来满宽、排出来定宽」，窗口对不上。
+        let (ml, cw) = ctx.solve_block_width(s, content_width);
         let height = ctx.block_light(child, cw, content_width);
         units.push(RenderUnit {
             node: child,

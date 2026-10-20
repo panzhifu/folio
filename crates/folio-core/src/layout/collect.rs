@@ -21,7 +21,7 @@ use super::wrap::{
 };
 use crate::content::dom::{Dom, NodeId, NodeKind};
 use crate::content::format::css::computed::{
-    Clear, ComputedStyle, Direction, Display, Float, StyledDom, TextAlign, TextJustify,
+    Clear, ComputedStyle, Direction, Display, Float, Length, StyledDom, TextAlign, TextJustify,
 };
 
 /// `style_of` 查不到时给的兵底样式。正常不会用到 —— `StyledDom` 为每个节点都算了一条。
@@ -122,7 +122,7 @@ fn first_letter_norm(collected: &Collected) -> Option<Range<usize>> {
 
 /// 有没有「这块的内容就是一张图」：跳过纯空白文本与非 `img` 的行内包裹，整棵子树里
 /// 只找一个 `<img>`。两张、或图旁边还站着正文，就不是这一档 → `None`
-/// （那一块按不浮动处理，理由见 [`Ctx::float_outer_width`]）。
+/// （那一块按不浮动处理，两档判据见 [`Ctx::float_box_width`]）。
 fn single_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
     if dom.is_element(node, "img") {
         return Some(node);
@@ -331,6 +331,80 @@ impl<'a> Ctx<'a> {
         &self.dom.get(node).children
     }
 
+    /// 作者写了尺寸就用它，没写给 `None`。`height` 那一族只认 px：百分比折自包含块的
+    /// **高**，而流式排版里父块的高是由内容算出来的，CSS 在同一条规则下也判 `auto`，
+    /// 所以「没写过」与「写了 `50%`」在这里是同一个数。
+    ///
+    /// 只给流内块级盒用。替换元素（`<img>` / `<svg>`）走
+    /// [`super::ports::image_size`]，那条路里百分比折得动（基准是图的可用宽）。
+    fn definite(length: Option<Length>) -> Option<f32> {
+        match length {
+            Some(Length::Px(v)) => Some(v.max(0.0)),
+            _ => None,
+        }
+    }
+
+    /// 流内块级盒的横向求解（CSS 2.1 §10.3.3），返回 `(左边距, 边框盒宽)`。
+    ///
+    /// `avail` 是包含块的内容宽，同时是 `width` / `margin` / `padding` 这一族百分比的
+    /// 折算基准 —— CSS 规定它们全部折自包含块宽，不折自这一块自己。三条规则照规范走：
+    ///
+    /// - `width: auto` 吃掉「减去两边与边框内边距之后的余量」，与这一格改之前逐字相同；
+    ///   写了 `width` 或 `max-width` 就按折出的边框盒宽定下来（`max-width` 夹在**内容宽**
+    ///   上再加边框与内边距，因为这四个数一律按内容盒解释 —— `box-sizing` 不认）。
+    /// - 装不满时的余量归 `margin: auto`：两边都 `auto` 就均分，只有一边 `auto` 就全给它。
+    ///   这一条就是「定宽块默认贴左缘、写着 `margin: 0 auto` 才居中」那一条的分界。
+    ///   两边都不是 `auto` 时余量天然留在右边，右边距不必动 —— 与浏览器同解。
+    /// - 装不下（`width` + 两边 > `avail`）时按溢出排，不缩作者写的数：over-constrained
+    ///   那一档规范改的也是右边距。
+    ///
+    /// 为什么这一格只有一份：流内摆放有三条路都要问它 —— [`Self::children`]（实排）、
+    /// [`Self::children_light`]（只量高）与 `layout::measure_chapter`（顶层单元表）。
+    /// 抄三遍迟早漂，症状是滚动位置与屏幕上的块对不上。
+    pub(super) fn solve_block_width(&self, style: &ComputedStyle, avail: f32) -> (f32, f32) {
+        let [_, border_right, _, border_left] = style.border_drawn();
+        let bl = border_left + style.padding_left.resolve(avail).max(0.0);
+        let br = border_right + style.padding_right.resolve(avail).max(0.0);
+        let auto_left = style.margin_left.is_auto();
+        let auto_right = style.margin_right.is_auto();
+        // `resolve` 给 `auto` 回 0，所以这两格先按「不占位」收着，余量最后再分回左边距。
+        let ml_set = style.margin_left.resolve(avail).max(0.0);
+        let mr_set = style.margin_right.resolve(avail).max(0.0);
+        let room = (avail - ml_set - mr_set - bl - br).max(0.0);
+        let mut content = style.width.map_or(room, |w| w.resolve(avail).max(0.0));
+        if let Some(max_w) = style.max_width {
+            content = content.min(max_w.resolve(avail).max(0.0));
+        }
+        let box_width = (content + bl + br).max(1.0);
+        let mut ml = ml_set;
+        let spare = avail - ml_set - mr_set - box_width;
+        if spare > 0.0 && auto_left {
+            // 两边都 `auto` 时各得一半：左边距拿一半，另一半就是留在右边的那段余量，
+            // 不必再动右边距；只有一边 `auto` 时整个余量归它。
+            ml += if auto_right { spare / 2.0 } else { spare };
+        } else if spare < 0.0 && auto_left {
+            ml = 0.0;
+        }
+        (ml, box_width)
+    }
+
+    /// 把作者写的 `height` / `max-height` 盖到内容算出来的高上。
+    ///
+    /// 写了 `height` 就按那一档定盒，没写就由内容撑；`max-height` 两种情况都夹一刀。
+    /// **内容照排、溢出可见**：CSS 里 `height` 不裁剪（`overflow` 这一版也不认），
+    /// 行盒仍然画到盒子外面去，只是后面的兄弟从这一格的高度下移 —— 浏览器同一条规则，
+    /// 跟着它比自创一套「看起来更合理」的取巧稳。
+    ///
+    /// 只给非替换的流内块用；替换元素的高由
+    /// [`super::ports::image_size`] 从图的固有尺寸折。
+    fn used_content_height(style: &ComputedStyle, inner: f32) -> f32 {
+        let mut h = Self::definite(style.height).unwrap_or(inner);
+        if let Some(max_h) = Self::definite(style.max_height) {
+            h = h.min(max_h);
+        }
+        h
+    }
+
     /// 摆放 `container` 的流内子内容。`x`/`y` 是其内容盒左上角（绝对），返回内容高度。
     ///
     /// `width` 就是 `container` 的内容宽，因此它同时是子节点那一族百分比
@@ -383,8 +457,6 @@ impl<'a> Ctx<'a> {
             if is_item {
                 ordinal = attr_count(self.dom, child, "value").unwrap_or(ordinal + 1);
             }
-            let ml = style.margin_left.resolve(width).max(0.0);
-            let mr = style.margin_right.resolve(width).max(0.0);
             let mt = style.margin_top.resolve(width).max(0.0);
             // 兄弟之间折叠取较大值而不是相加：这是段间距不显松的唯一原因。
             cursor += if prev_bottom > 0.0 {
@@ -403,8 +475,11 @@ impl<'a> Ctx<'a> {
             if style.float != Float::None && self.place_float(child, style, x, cursor, width) {
                 continue;
             }
+            // 横向那两个数一起解：`width` 写了就按作者的数收窄盒子，`margin: auto`
+            // 因此第一次有东西可均分（判据见 [`Self::solve_block_width`]）。
+            let (ml, box_width) = self.solve_block_width(style, width);
             let lines_start = self.lines.len();
-            cursor += self.block(child, x + ml, cursor, (width - ml - mr).max(1.0), width);
+            cursor += self.block(child, x + ml, cursor, box_width, width);
             // 标记贴在 `block()` **之后**：见 [`Self::attach_marker`] 那三条口径。
             if is_item {
                 self.attach_marker(child, style, ordinal.max(1) as usize, lines_start);
@@ -513,35 +588,53 @@ impl<'a> Ctx<'a> {
 
     /// 浮动块的**边框盒宽**（外边距由调用方加，因为让位的那一圈是外边距盒）。
     ///
-    /// 这一版只认「整块内容就是一张图」那一种，也就是书里插图框的全部写法
-    /// （《哈利·波特》那 78 个 `div.img1` / `div.img2` 都是 `<div><img width="20%"></div>`）。
-    /// 真正的 shrink-to-fit 要 max-content，等于再跑一趟排版；认不出来时按**不浮动**处理
-    /// 并留一条 `debug!`，而不是猜一个宽度 —— 猜宽了会把整页正文挤成一条窄柱，
-    /// 那比插图不绕文糟得多。
+    /// 认两档，都不猜：
+    ///
+    /// - 作者自己写了 `width`（《哈利·波特》的 `.muen .left { width: 20%; float: left }`）：
+    ///   那一档本来就是既定值，不必收缩，按内容盒折出宽再加边框与内边距。
+    ///   只有 `max-width` 没写 `width` 时**不走这一档** —— 那等于把「不超过」当成
+    ///   「就是」，满宽的浮动盒会把后面每一行的可用宽压成 0，正文直接消失。
+    /// - 「整块内容就是一张图」（《哈利·波特》那 78 个 `div.img1` / `div.img2` 都是
+    ///   `<div><img width="20%"></div>`）：按图的尺寸折。
+    ///
+    /// 两档都对不上时返回 `None`，按**不浮动**处理并留一条 `debug!`。真正的
+    /// shrink-to-fit 要 max-content，等于再跑一趟排版；猜一个宽度会把整页正文挤成
+    /// 一条窄柱，那比插图不绕文糟得多。
     fn float_box_width(&self, node: NodeId, style: &ComputedStyle, basis: f32) -> Option<f32> {
+        let [_, d_border_right, _, d_border_left] = style.border_drawn();
+        let d_bl = d_border_left + style.padding_left.resolve(basis).max(0.0);
+        let d_br = d_border_right + style.padding_right.resolve(basis).max(0.0);
+        if let Some(width) = style.width {
+            // `max-width` 夹在内容宽上（这四个数一律按内容盒解释），再加边框与内边距。
+            let content = match style.max_width {
+                Some(max_w) => width.resolve(basis).min(max_w.resolve(basis)).max(0.0),
+                None => width.resolve(basis).max(0.0),
+            };
+            return Some((content + d_bl + d_br).max(1.0));
+        }
         let img = single_image(self.dom, node)?;
         let img_style = self.style_of(img);
         let src = self.dom.attr(img, "src")?;
         let image = self.images.resolve(src)?;
-        let (w, _) = image_size(img_style, image.width, image.height, basis);
+        // 图的百分比宽折自**这个浮动盒的内容宽**，不是折自版心：`.img1` 那类
+        // 带内边距的插图框里 `<img width="100%">` 要铺满的是框里面那一圈。
+        let (w, _) = image_size(
+            img_style,
+            image.width,
+            image.height,
+            (basis - d_bl - d_br).max(1.0),
+        );
         // 图自己的左右外边距、边框与内边距都要算进来：`.img1` 里那句
         // `margin-right: .8em` 正是靠这一步变成图与字之间的那条缝。
-        let [_, br, _, bl] = img_style.border_drawn();
+        let [_, i_border_right, _, i_border_left] = img_style.border_drawn();
         let inner = w
-            + bl
-            + br
+            + i_border_left
+            + i_border_right
             + img_style.padding_left.resolve(basis).max(0.0)
             + img_style.padding_right.resolve(basis).max(0.0)
             + img_style.margin_left.resolve(basis).max(0.0)
             + img_style.margin_right.resolve(basis).max(0.0);
-        let [_, fb, _, fl] = style.border_drawn();
-        Some(
-            inner
-                + fl
-                + fb
-                + style.padding_left.resolve(basis).max(0.0)
-                + style.padding_right.resolve(basis).max(0.0),
-        )
+        Some(inner + d_bl + d_br)
     }
 
     /// 摆一个浮动盒：算出它的边框盒宽、摆在所属侧、排它自己的内容，然后记进浮动表。
@@ -671,9 +764,9 @@ impl<'a> Ctx<'a> {
                 cursor = clear_to;
             }
 
-            let content_width = (width - ml - mr).max(1.0);
-
             // 浮动盒：量它的高（里面看不见外面的浮动表），但**不推进** `cursor`。
+            // 这一档不走 [`Self::solve_block_width`]：CSS 里浮动盒的 `auto` 边距一律按 0，
+            // 且它的宽是收缩的而不是填满余量，与流内块是两条式子。
             if style.float != Float::None {
                 let right = style.float == Float::Right;
                 if let Some(box_width) = self.float_box_width(child, style, width) {
@@ -696,14 +789,17 @@ impl<'a> Ctx<'a> {
                 }
             }
 
-            let height = self.block_light(child, content_width, width);
+            // 流内块：横向与 `children` 同一条求解式（定宽收窄 + `auto` 均分）。
+            let (used_ml, box_width) = self.solve_block_width(style, width);
+            let height = self.block_light(child, box_width, width);
 
-            // 记录块（无行盒）。
+            // 记录块（无行盒）。`x` 与宽都取求解后的那两个数 —— 与 `children` 那条路
+            // 逐字同源，两阶段排版的「量高」与「实排」才给出同一个盒子。
             self.blocks.push(BlockBox {
                 node: child,
-                x: x + ml,
+                x: x + used_ml,
                 y: cursor,
-                width,
+                width: box_width,
                 height,
                 text: String::new(),
                 lines: 0..0,
@@ -934,7 +1030,7 @@ impl<'a> Ctx<'a> {
                 style,
             )
         };
-        self.close_block(index, pt + inner + pb)
+        self.close_block(index, pt + Self::used_content_height(style, inner) + pb)
     }
 
     /// 轻量模式：算一个块的高，不断行。`basis` 见 [`Self::block`] —— 这一条必须与
@@ -974,7 +1070,7 @@ impl<'a> Ctx<'a> {
             let lines = (est / content_width).ceil().max(1.0);
             lines * line_px
         };
-        pt + inner + pb
+        pt + Self::used_content_height(style, inner) + pb
     }
 
     /// 估算一个节点下文本的总宽，单位是 em（用于轻量模式 / 两阶段量高）。

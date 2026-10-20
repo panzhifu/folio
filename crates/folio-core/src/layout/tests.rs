@@ -660,6 +660,179 @@ fn float_and_clear_take_their_physical_keywords() {
     );
 }
 
+/// 按 class 找那一块的**边框盒**注册（画背景与边框用的就是这一条）。
+fn box_of_class<'a>(dom: &Dom, layout: &'a Layout, want: &str) -> &'a BlockBox {
+    let node = dom
+        .elements()
+        .find(|(id, _)| dom.classes(*id).any(|c| c == want))
+        .map(|(id, _)| id)
+        .expect("文档里应有带这一 class 的元素");
+    layout
+        .blocks
+        .iter()
+        .find(|b| b.node == node && b.border_box)
+        .expect("这一块注册了边框盒")
+}
+
+/// 作者写了 `width` 的块按那一档收窄，横向余量归 `margin: auto` 均分。
+///
+/// 块级居中在这一格之前不是「没做」，是那条等式无解：块从不比可用宽窄，`auto` 边距
+/// 能分到的余量恒为 0（`css::value` 当年正是按这个把 `auto` 折成 0 的）。三条都照
+/// CSS 2.1 §10.3.3：两边 `auto` 才居中，只写一边就贴另一边，两边都不写则留在右边。
+#[test]
+fn a_written_width_narrows_the_block_and_auto_margins_center_it() {
+    let (dom, laid) = typeset(
+        "<div class=a>甲</div><div class=b>乙</div><div class=c>丙</div>",
+        ".a { width: 100px; margin: 0 auto }\
+         .b { width: 100px }\
+         .c { width: 100px; margin-left: auto }",
+        200.0,
+    );
+    let a = box_of_class(&dom, &laid, "a");
+    assert_eq!((a.x, a.width), (50.0, 100.0), "两边 auto → 各得 50px 余量");
+    let b = box_of_class(&dom, &laid, "b");
+    assert_eq!(
+        (b.x, b.width),
+        (0.0, 100.0),
+        "两边都不是 auto → 定宽块贴左缘，余量留在右边"
+    );
+    let c = box_of_class(&dom, &laid, "c");
+    assert_eq!(
+        (c.x, c.width),
+        (100.0, 100.0),
+        "只有左边 auto → 整个余量归它，块贴右缘"
+    );
+}
+
+/// `max-width` 夹的是**折行宽度**，不只是那块矩形 —— 写着它的段落每行只剩六字。
+///
+/// 这一条正是「按元素排名的落差表」量不到的那一格：声明早就 `Applied`，表上不留痕迹，
+/// 而排版层从前不读它。`plans/facts.md` 给那张表写的口径本来就点明了「不含几何影响」，
+/// 这几条排版断言就是那一侧的替身。
+#[test]
+fn a_max_width_shortens_every_line_of_the_paragraph() {
+    let html = format!("<p class=mw>{}</p>", "字".repeat(18));
+    let (dom, laid) = typeset(&html, ".mw { max-width: 100px; margin: 0 auto }", 200.0);
+    let box_ = box_of_class(&dom, &laid, "mw");
+    assert_eq!(
+        (box_.x, box_.width),
+        (50.0, 100.0),
+        "100px 定宽在 200px 版心里居中"
+    );
+    assert_eq!(
+        texts(&laid),
+        vec!["字".repeat(6), "字".repeat(6), "字".repeat(6)],
+        "每行按收窄后的 100px 折，不是按版心 200px"
+    );
+    assert!(
+        laid.lines.iter().all(|l| l.x == 50.0),
+        "行盒跟着内容盒走：{:?}",
+        laid.lines.iter().map(|l| l.x).collect::<Vec<_>>()
+    );
+}
+
+/// 作者写的 `height` 定住盒高与游标推进量，**内容溢出可见**。
+///
+/// 《哈利·波特》每章末尾那道分隔条就是这一档：`<ol class="duokan-footnote-content hr">`
+/// 是个**空**列表，上面写着 `width:50%; height:2px; background-color:#F3221D`，全书 120 处。
+/// 从前高由内容算就是 0，而 `decor_seeds` 把零高的块整个筛掉 —— 那道红线在屏上并不存在。
+/// 这里连装饰一起断言，因为「盒子有了高」与「看得见」是两件事。
+#[test]
+fn a_written_height_holds_the_box_and_the_next_sibling_starts_below_it() {
+    let html = "<ol class=hr></ol><p>注</p>";
+    let css = ".hr { margin: 0; padding: 0; width: 50%; height: 2px; background-color: #ff0000 }";
+    let dom = Dom::parse(html.as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(css, Origin::Author),
+        &ComputedStyle::default(),
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions {
+            width: 200.0,
+            light: false,
+            allow_vertical: false,
+        },
+        &Mono,
+        &NoImages,
+    );
+    let bar = box_of_class(&dom, &laid, "hr");
+    assert_eq!(
+        (bar.x, bar.y, bar.width, bar.height),
+        (0.0, 0.0, 100.0, 2.0)
+    );
+    assert_eq!(
+        laid.lines[0].y, 18.0,
+        "后面的段从 2px 底下 + 它自己那 1em 上边距起排，而不是从一块红底下面"
+    );
+    let seeds = laid.decor_seeds(&styles);
+    assert_eq!(
+        seeds.len(),
+        1,
+        "这道分隔条该进「要画装饰」那张表：{seeds:?}"
+    );
+    assert_eq!(
+        (seeds[0].x, seeds[0].y, seeds[0].width, seeds[0].height),
+        (0.0, 0.0, 100.0, 2.0),
+        "画出来的是半宽两像素的一道，不是整幅一堵墙"
+    );
+}
+
+/// 流式排版里 `height` 与 `max-height` 的**百分比**落空：它们的基准是包含块的高，
+/// 而父块的高本来就是由内容算出来的 —— CSS 在同一条规则下也判 `auto`，不是我们偷懒。
+#[test]
+fn a_percent_height_is_not_a_number_in_flow() {
+    let (dom, laid) = typeset(
+        "<div class=t>字</div><div class=u>字</div>",
+        ".t { height: 100% } .u { max-height: 50% }",
+        200.0,
+    );
+    assert_eq!(
+        box_of_class(&dom, &laid, "t").height,
+        28.0,
+        "一行字由内容撑，不会被百分比撑成整页"
+    );
+    assert_eq!(
+        box_of_class(&dom, &laid, "u").height,
+        28.0,
+        "`max-height` 同一条"
+    );
+}
+
+/// 作者写了定宽的浮动盒：不必收缩就知道它多宽，于是这一块真的离开常规流。
+///
+/// `.muen .left { width: 20%; float: left }`（《哈利·波特》13 处）从前落在
+/// 「只认整块内容是一张图」那一条之外，整行退回常规流：插图框旁边不再有绕文。
+/// 与 [`a_floated_image_shortens_only_the_lines_beside_it`] 同一形状，只是宽的来源换了。
+#[test]
+fn a_definite_width_float_shortens_the_lines_beside_it() {
+    let html = format!("<div class=l>题</div><p>{}</p>", "字".repeat(24));
+    let (_, laid) = typeset(
+        &html,
+        ".l { width: 40px; float: left; margin-right: 20px }",
+        200.0,
+    );
+    assert_eq!(
+        laid.lines[1].y, 16.0,
+        "浮动盒不吃垂直空间：正文第一段只按自己那 1em 上边距起排，\
+         而不是等浮动盒那一档（28px）排完 —— 落回常规流会是 44"
+    );
+    assert_eq!(laid.lines[1].x, 60.0, "让开的是图那 40px 加它 20px 右边距");
+    assert_eq!(
+        texts(&laid),
+        vec![
+            "题".to_string(),
+            "字".repeat(8),
+            "字".repeat(12),
+            "字".repeat(4)
+        ],
+        "压在它旁边那一行只剩 140px，出了那一档回到十二字"
+    );
+}
+
 #[test]
 fn display_none_removes_the_whole_subtree() {
     let (_, layout) = typeset("<p>留</p><p class=x>去</p>", "p.x { display: none }", 200.0);

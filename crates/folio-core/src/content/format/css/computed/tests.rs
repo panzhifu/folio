@@ -36,10 +36,14 @@ fn style(page: &Page, id: NodeId) -> &ComputedStyle {
 /// 断言按 px 读那一条边距 / 缩进。折出 `Percent` 会被这条直接判失败 —— 层叠期
 /// 不该折算百分比（那是排版期拿到包含块宽之后的事），所以这些用例里出现
 /// `Percent` 意味着取值层走错了路。要验百分比本身就用 `Length::Percent(..)` 直接对。
+/// `Auto` 同理：那是「等排版期均分」的记号，要断言它就写 `Length::Auto`。
 fn px(l: Length) -> f32 {
     match l {
         Length::Px(v) => v,
         Length::Percent(p) => panic!("层叠期把百分比折掉了（{p}），折算点在排版期"),
+        Length::Auto => {
+            panic!("这一条是 `auto`，均分在排版期（layout::collect::solve_block_width）")
+        }
     }
 }
 
@@ -247,24 +251,44 @@ fn percentage_boxes_are_kept_for_the_layout_phase() {
     );
 }
 
-/// `auto` 边距折成 **0**，并且不再计进 `ignored`。
+/// `auto` 边距**原样留在计算样式里**，既不折成 0，也不计进 `ignored`。
 ///
-/// 这条改动是因为仓库里那本《蛇结》写了 `margin: 5px auto`：旧规则把整条声明判为不认识，
-/// 于是连那 5px 的上下边距一起丢掉 —— 静默丢一半比折成 0 糟得多。折成 0 也不是降级：
-/// CSS 的 `auto` 前后边距是均分剩余宽度，而我们的正文块使用宽度就等于可用宽度
-/// （块级不吃 `max-width` 收窄），剩余宽度本来就是 0。等排版层支持块级 `max-width`
-/// 时这里要改成均分，那时才会出现块级居中。
+/// 这一条改过两次。第一版把 `margin: 5px auto` 整条判为不认识，于是连那 5px 的上下
+/// 边距一起丢掉（《蛇结》就是这么丢的）；第二版折成 `Px(0)`，因为当时块级不吃
+/// `width` / `max-width` 的收窄，剩余宽度恒为 0，取 0 恰好等于 CSS 的均分结果。
+/// 现在排版层真按作者的 `width` 收窄盒子了（`layout::collect::solve_block_width`），
+/// 「均分多少」取决于那块折出来多宽 —— 那是排版期才知道的数，层叠期再猜一次就是
+/// 把居中猜没了。所以这一格只负责「认得、留下」，具体几个像素归排版层，
+/// 那一侧的断言在 `layout::tests`。
 #[test]
-fn auto_margin_computes_to_zero() {
+fn auto_margin_survives_the_cascade() {
     let page = author("<p>文</p>", "p { margin-left: auto }");
     let p = style(&page, tag(&page, "p"));
-    assert_eq!(px(p.margin_left), 0.0);
+    assert_eq!(p.margin_left, Length::Auto);
     assert_eq!(
         px(p.margin_top),
         16.0,
         "UA 给 <p> 的 1em 不该被这条声明碰坏"
     );
     assert_eq!(page.styled.ignored, 0, "认得的合法值不该计进 ignored");
+}
+
+/// `auto` 只许出现在 `margin` 这一族：CSS 里 `padding: auto` 与 `text-indent: auto`
+/// 都是非法值。认下来就等于把一条写坏的声明显示成「已处理」。
+#[test]
+fn auto_is_not_a_padding_or_indent_value() {
+    let page = author(
+        "<p>文</p>",
+        "p { padding: 4px auto; text-indent: auto; max-width: auto }",
+    );
+    let p = style(&page, tag(&page, "p"));
+    assert_eq!(px(p.padding_top), 0.0, "整条作废，不该留下半个 4px");
+    assert_eq!(px(p.text_indent), 0.0);
+    assert_eq!(p.max_width, None, "`max-width: auto` 与「没写过」同解");
+    assert_eq!(
+        page.styled.ignored, 2,
+        "`padding: auto` 与 `text-indent: auto` 各计一条不认识"
+    );
 }
 
 /// 四边简写是这本书里最大的一处落差：917 个元素身上有胜出的 `margin` 简写，

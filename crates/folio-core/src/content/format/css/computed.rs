@@ -2,7 +2,8 @@
 //!
 //! 单个值怎么解成 Rust 在 [`super::value`]；这里只管属性名到字段的对应关系。
 //!
-//! 支持的属性就是 `css/computed.rs` 顶部那份清单。清单外的声明**被忽略而不是报错**，
+//! 支持面就是 `computed/apply.rs` 里那批 match 臂（一条声明写进哪几个字段），加上
+//! [`KNOWN_UNIMPLEMENTED`]（认得、这一版不生效）。清单外的声明**被忽略而不是报错**，
 //! 因为真实出版书里总有些用不上的声明，为一两个 `transform` 让整本书排版失败
 //! 是最糟的失败方式。
 
@@ -61,13 +62,19 @@ impl Direction {
 /// `start`/`end` 落在物理的哪一边」，行的推进轴不变；`writing-mode` 改的是「字沿哪根轴
 /// 推进、行沿哪根轴堆」。竖排的本子通常两样都写（`vertical-rl` 的书列序天然从右往左）。
 ///
-/// **目前的落地程度：层叠接住了，排版层还没读它。** 值会算出来、进 `ComputedStyle` 的
-/// 哈希、按 CSS 继承下来，但 `layout` 仍按横排折行与摆放，所以屏上还是横排。
+/// **落地程度：排版层真的按这一根轴排了**（2026-10-19 那一轮）。架构是「逻辑横排 +
+/// 一次转置」——引擎照旧排一条横长的带，`layout::Layout::assemble` 里的 `transposed`
+/// 在折索引之前把两张表整体投影成物理坐标，所以 shaping、命中与选区那几套一行都不用改。
+/// 界面唯一该知道轴的地方收成本文件的 [`WritingMode::project`] 与 [`project_delta`]。
 ///
-/// 那为什么先落这一格：`writing-mode` 以前在 `KNOWN_UNIMPLEMENTED` 里，
-/// `examples/css-gap` 那张报表只能说「这条我们认得、没接」；而真实竖排书里它是**唯一**
-/// 的竖排来源（那些本子不会另外写别的声明）。接住层叠之后报表才数得出「库里哪几本书
-/// 声明了竖排」，那一列数决定后面几刀的优先级。
+/// 明确降级的那三处，都在 `layout::LayoutOptions::allow_vertical` 与 `transposed` 的文档里：
+/// 盒模型那几族边是**物理**的（`margin-top` 这类落到转置后的错边，logical→physical
+/// 那张表没接）；连续滚动与双页对开回退横排；行内图片不转置。
+///
+/// 触发源只有一处，就是书的 CSS：`writing-mode` 在真实竖排书里是**唯一**的竖排来源
+/// （那些本子不会另外写别的声明），所以这一格必须先接住层叠，报表才数得出库里哪几本
+/// 声明了竖排。读者那一档没有加，落点埋在 `ui::features::reader::model::chapter_layout`
+/// 的 `reader_rules` 注释里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WritingMode {
     /// 横排：字沿 `+x` 推进，行沿 `+y` 堆。CSS 的初值。
@@ -266,8 +273,18 @@ impl BorderEdge {
 ///
 /// CSS 3 的 `inline-start` / `inline-end` / `float-inherit` 不接（判不认识）：那三个
 /// 要的是「方向敏感的左右」，而我们这一族里唯一真实的写法（出版书的插图与章首下沉）
-/// 都写死 `left` / `right`。`display` 与 `float` 的相互调整（行内盒被浮动改成块）在
-/// 排版层做，不在这里 —— 层叠期只记作者要什么。
+/// 都写死 `left` / `right`。
+///
+/// 落地分两条路，行内盒那一条只走了一半，这里说清：
+///
+/// - **块级盒**（UA 判成 block 的 `<div>` / `<p>` …）走 `layout::collect::place_float`，
+///   真的离开常规流。它的宽认两档：作者写了 `width`（`.muen .left { width:20%; float:left }`），
+///   或整块内容就是一张图（`div.img1` 那一族）。两档都对不上时按不浮动排。
+///   max-content 那种 shrink-to-fit 还没做 —— 猜宽会把整页正文挤成一条窄柱。
+/// - **行内盒**（`<span class=first>` 那种章首下沉）只有**站在这一段第一片**时才生效：
+///   `wrap_lines` 把它收成下沉盒（`Ctx::drop_cap`），按它自己的宽高跨几行让宽。
+///   落在段中或段尾的行内浮动不认 —— 那要的是「行内盒改判成块、并从行内流里摘出去」
+///   那一步（CSS 的 used-value 规则），动的是 `children` 的整条分流，比这一格大。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Float {
     #[default]
@@ -353,8 +370,7 @@ impl BreakWhen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color(pub u8, pub u8, pub u8);
 
-/// 一个尺寸值。`auto` / `none` 用 `Option::None` 表示，两种「没有显式值」在这里
-/// 是一回事（都用内在尺寸或默认值兜底）。百分比不在此刻折算 —— 它要按**包含块
+/// 一个尺寸值。`none` 用 `Option::None` 表示。百分比不在此刻折算 —— 它要按**包含块
 /// 的宽度**来算，那是排版期才知道的数，见 [`Length::resolve`]。
 ///
 /// 带百分比的字段都存这个类型，不是只有替换元素的 `width`：外边距、内边距与
@@ -365,6 +381,16 @@ pub enum Length {
     Px(f32),
     /// 比例，`50%` 存成 `0.5`。
     Percent(f32),
+    /// `auto`。**只有外边距会走到这一档**：CSS 里 `padding: auto` 与 `text-indent: auto`
+    /// 是非法值（层叠期就判不认识），`width: auto` 那一族用 `Option::None` 表示。
+    ///
+    /// 为什么不在层叠期折成 0：CSS 2.1 §10.3.3 里 `margin-left: auto` 与
+    /// `margin-right: auto` 是「把这一块横向剩余宽度均分」，而剩余宽度取决于**作者的
+    /// `width` 折出来是多少**，那是排版期才有的一对数。折成 0 等于宣布「本书没有块级
+    /// 居中」，症状是写着 `margin: 0 auto` 的定宽插图与分隔条一律贴左缘。
+    /// 求解那一步在 `layout::collect::solve_block_width`；[`Length::resolve`] 给 `auto`
+    /// 回 0，所以**没接进那条求解式的调用点行为与以前逐字相同**。
+    Auto,
 }
 
 impl Length {
@@ -372,12 +398,19 @@ impl Length {
     /// 「作者写了 `auto` / `none`」，与「没写过」是两件事。
     pub const ZERO: Length = Length::Px(0.0);
 
-    /// 按包含块基准长度折算成 px。
+    /// 按包含块基准长度折算成 px。`Auto` 给 0 —— 它真正的用处由排版层拿去均分
+    /// （见 [`Length::Auto`]），单看这一格就是「不占位」。
     pub fn resolve(self, basis: f32) -> f32 {
         match self {
             Length::Px(v) => v,
             Length::Percent(p) => p * basis,
+            Length::Auto => 0.0,
         }
+    }
+
+    /// 这一格是不是 `auto`。横向求解要靠它分辨「作者写的 0」与「作者要均分」。
+    pub fn is_auto(self) -> bool {
+        matches!(self, Length::Auto)
     }
 }
 
@@ -412,7 +445,8 @@ pub struct ComputedStyle {
     /// 口径。读者那条「首行缩进（em）」从 `ui::features::reader::document` 注入时已是 px。
     pub text_indent: Length,
     /// 四边外边距。百分比折算自包含块宽 —— 就是 `layout` 逐层递下来的那一个 `basis`。
-    /// `auto` 折成 `Px(0)`，理由见 `value::edge_length`。
+    /// 左右两边可以是 [`Length::Auto`]（均分剩余宽度），那一步在排版期解，
+    /// 见 `layout::collect::solve_block_width`。
     pub margin_top: Length,
     pub margin_bottom: Length,
     pub margin_left: Length,
@@ -430,9 +464,10 @@ pub struct ComputedStyle {
     /// 通路：浏览器 UA 表写的是 `ol { list-style-type: decimal }`，而不是往每个 li 上
     /// 撒一条规则。所以 `inherit_from` 必须带它 —— 不带的话 `<ol><li>` 会全线画成圆点。
     pub list_style_type: ListStyle,
-    /// `float`。非 `None` 时这一块离开常规流：排版层给它算收缩宽度、摆在侧边，
+    /// `float`。非 `None` 时这一块离开常规流：排版层给它算宽、摆在侧边，
     /// 并把它记进当前块格式上下文的浮动表（见 `layout::collect::PlacedFloat`）。
-    /// 行内盒写了 `float` 会被排版层按块处理 —— CSS 的 used-value 规则就是如此。
+    /// 块级盒与行内盒走的是两条路，行内那一条只认段首那一档 —— 判据与没接的那半截
+    /// 写在 [`Float`]。
     pub float: Float,
     /// `clear`。不继承（CSS 规定），只在**这一块**的顶边上生效。
     pub clear: Clear,
@@ -478,7 +513,20 @@ pub struct ComputedStyle {
     /// 向后代传播同理。作者写了 `color` 时它照旧赢 —— 这一格只在 `color == None` 时才有话语权。
     pub link: bool,
     pub white_space_pre: bool,
-    /// 替换元素（图片）的尺寸。块级元素的 width 一期不做，只有图片用得上。
+    /// 尺寸四件套。**一律按内容盒解释**（`box-sizing` 不认，见下）。落点分两条：
+    ///
+    /// - 替换元素（`<img>` / `<svg>`）：`layout::ports::image_size` 拿它与固有尺寸、
+    ///   可用宽一起折出这张图实际多大。这一条早就生效。
+    /// - 流内块级盒：`width` / `max-width` 定出这一块的边框盒宽
+    ///   （`layout::collect::solve_block_width`），于是写着 `margin: 0 auto` 的定宽插图
+    ///   与分隔条第一次能居中；`height` / `max-height` 定出盒高与游标推进量，
+    ///   **内容照排、溢出可见** —— 与浏览器同一条规则，不是我们的取巧。
+    ///   `<body>` 那一层除外：根不吃 `width`，版心归视口与读者设定，判据写在
+    ///   `layout::layout_inner`。
+    ///
+    /// `height` / `max-height` 的百分比在这里落空：它们的基准是包含块的**高**，
+    /// 而流式排版里父块的高本来就是由内容算出来的，CSS 在同一条规则下也判 `auto`。
+    /// `min-width` 连属性名都不在清单里（计「不认识」），`min-height` 认得、不生效。
     pub width: Option<Length>,
     pub height: Option<Length>,
     pub max_width: Option<Length>,
@@ -578,6 +626,8 @@ impl std::hash::Hash for ComputedStyle {
                     2u8.hash(h);
                     f(*p, h);
                 }
+                // `auto` 没有数可折，档位本身就是键里的那一格。
+                Length::Auto => 3u8.hash(h),
             }
         }
         fn opt_len<H: std::hash::Hasher>(l: &Option<Length>, h: &mut H) {
@@ -655,10 +705,10 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "text-shadow",
     // `direction` 以前在这份名单里（「认得、接受、不生效」），2026-10-14 那一轮把它
     // 变成真生效的属性，所以移出去了。
-    // `writing-mode` 同一条路，2026-10-19 那一轮移出去的 —— 但只走完半程：值现在进
-    // `ComputedStyle`、会继承、进哈希，`DeclStatus` 报 `Applied`，而排版层还没读它，
-    // 屏上仍是横排。这一档里「认得且不生效」讲的是**这条声明会不会被记进 ignored**，
-    // 不是屏上有没有变化；两件事的差别写在 [`WritingMode`] 的落地程度那一段。
+    // `writing-mode` 同一条路，2026-10-19 那一轮移出去的，而且那一轮排版层真读到了它：
+    // 竖排按「逻辑横排 + 一次转置」排，降级清单写在 [`WritingMode`] 的落地程度那一段。
+    // 这一档里「认得且不生效」讲的是**这条声明会不会被记进 ignored**，
+    // 不是屏上有没有变化；两件事的差别就以这一格为例 —— 移出去的理由是「已经生效」。
     //
     // `orphans` / `widows` / `break-inside` / `page-break-*` 以前在这份名单里
     // （「接受、不生效」），M4 的分片器把它们变成真生效的属性，所以移出去了。

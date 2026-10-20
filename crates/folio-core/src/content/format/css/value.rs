@@ -251,42 +251,35 @@ pub(super) fn set_px(value: &str, font_size: f32, root_font_size: f32, out: &mut
     }
 }
 
-/// 一条边的长度。`auto_in_zero` 为真时 `auto` 折成 0，而不是当不认识。
+/// 一条边的**长度**（`border-width` 那一族）：`auto` 在这一族里是非法值，
+/// 所以它只是一层 [`length_px`] 的包装。
 ///
-/// 为什么 `auto` 取 0 不是降级而是当前盒模型下的正确结果：CSS 里块级盒的
-/// `auto` 前后边距是「均分剩余宽度」，而我们的正文块使用宽度就等于可用宽度
-/// （`layout` 里 `content_width = width − padding − margin`，块级不吃 `max-width`
-/// 的收窄），剩余宽度恒为 0。等排版层真按 `max-width` 收窄正文时，这里要改成均分，
-/// 块级居中才会出现 —— 那一条改动的位置就在这儿，不在别处。
-///
-/// 但**不能整条作废**：`margin: 5px auto` 是书里真实出现的写法（这本《蛇结》就有），
-/// 拒掉它等于连那 5px 的上下边距一起丢，那才是把作者意图静默抹掉。
-pub(super) fn edge_px(
-    value: &str,
-    font_size: f32,
-    root_font_size: f32,
-    auto_is_zero: bool,
-) -> Option<f32> {
-    if auto_is_zero && value.eq_ignore_ascii_case("auto") {
-        return Some(0.0);
-    }
+/// 从前这条式子还带一个 `auto_is_zero` 档位，用来把 `margin: auto` 当场折成 0。
+/// 那一档已经搬进排版期（[`crate::layout::collect`] 的 `solve_block_width`），
+/// 因为「剩余宽度均分」取决于作者的 `width` 折出来是多少，而那是排版期才知道的数 ——
+/// 留着这个参数就等于留着第二个「`auto` 是什么」的定义。
+pub(super) fn edge_px(value: &str, font_size: f32, root_font_size: f32) -> Option<f32> {
     length_px(value, font_size, root_font_size)
 }
 
-/// 一条边的**长度值**：与 [`edge_px`] 同一套单位口径，多收一种写法 —— 百分比。
+/// 一条边的**长度值**：与 [`edge_px`] 同一套单位口径，多收两种写法 —— 百分比与 `auto`。
 ///
 /// 外边距、内边距与 `text-indent` 的百分比折算自包含块宽，那是排版期才有的数，
 /// 所以这里存 `Length::Percent` 而不是当场折。这一族在真书上不是边角料：多看转换的
 /// 《哈利·波特》每一段都写着 `margin: 0% 1% 0% 1%`，全书 86441 个元素身上挂着它。
+///
+/// `auto_ok` 为真时 `auto` 存成 [`Length::Auto`]（只有 `margin` 那一路给真）：
+/// CSS 里 `padding: auto` 与 `text-indent: auto` 都是非法值，认下来就是把一条写坏的
+/// 声明显示成「已处理」。
 pub(super) fn edge_length(
     value: &str,
     font_size: f32,
     root_font_size: f32,
-    auto_is_zero: bool,
+    auto_ok: bool,
 ) -> Option<Length> {
     let v = value.trim().to_ascii_lowercase();
-    if auto_is_zero && v == "auto" {
-        return Some(Length::Px(0.0));
+    if auto_ok && v == "auto" {
+        return Some(Length::Auto);
     }
     if let Some(percent) = v.strip_suffix('%') {
         let n: f32 = percent.trim().parse().ok()?;
@@ -295,7 +288,7 @@ pub(super) fn edge_length(
     length_px(&v, font_size, root_font_size).map(Length::Px)
 }
 
-/// 单边 `margin`：折成长度值，`auto` 当 0（`margin` 认 `auto`）。
+/// 单边 `margin`：折成长度值，`auto` 收成 [`Length::Auto`]（均分留给排版期）。
 pub(super) fn set_margin(
     value: &str,
     font_size: f32,
@@ -327,12 +320,13 @@ pub(super) fn set_edge(value: &str, font_size: f32, root_font_size: f32, out: &m
 /// 分配的规则是 CSS 的：1 值四边相同；2 值「上下 左右」；3 值「上 左右 下」；
 /// 4 值顺时针。值数不对（0 个或 5 个以上）或任一个解析失败，**整条作废** ——
 /// 半套边距比没边距更难解释，而且静默只吃前两个值会让 `margin: 1px 2px 3px 4px 5px`
-/// 这种写错的书看起来「已经处理了」。
+/// 这种写错的书看起来「已经处理了」。`auto_ok` 决定这一族吃不吃 `auto`
+/// （`margin` 吃、`padding` 不吃），见 [`edge_length`]。
 pub(super) fn box_sides(
     value: &str,
     font_size: f32,
     root_font_size: f32,
-    auto_is_zero: bool,
+    auto_ok: bool,
 ) -> Option<[Length; 4]> {
     let parts: Vec<&str> = value.split_whitespace().collect();
     if parts.is_empty() || parts.len() > 4 {
@@ -340,7 +334,7 @@ pub(super) fn box_sides(
     }
     let mut parsed = Vec::with_capacity(parts.len());
     for part in parts {
-        parsed.push(edge_length(part, font_size, root_font_size, auto_is_zero)?);
+        parsed.push(edge_length(part, font_size, root_font_size, auto_ok)?);
     }
     four_of(&parsed)
 }
@@ -354,7 +348,7 @@ pub(super) fn box_side_px(value: &str, font_size: f32, root_font_size: f32) -> O
     }
     let mut parsed = Vec::with_capacity(parts.len());
     for part in parts {
-        parsed.push(edge_px(part, font_size, root_font_size, false)?);
+        parsed.push(edge_px(part, font_size, root_font_size)?);
     }
     four_of(&parsed)
 }
@@ -387,7 +381,7 @@ pub(super) fn border_width_px(value: &str, own: f32, root_px: f32) -> Option<f32
         "thick" => return Some(5.0),
         _ => {}
     }
-    edge_px(value, own, root_px, false)
+    edge_px(value, own, root_px)
 }
 
 /// `border` 一族里一条声明指向哪儿：哪几条边、给三要素中的哪一个。
