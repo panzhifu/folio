@@ -18,6 +18,8 @@ pub mod fb2;
 pub mod html;
 pub mod markdown;
 pub(crate) mod mobi;
+/// 纯文本（`.txt`）小说的分章与书目提取：规则表 + 引擎两份，见 `novel` 的模块说明。
+pub mod novel;
 #[allow(dead_code)] // 装配那一步（KF7/KF8 的 provider）由下一轮接上，这一层先被它用。
 pub(crate) mod palmdb;
 pub mod provider;
@@ -178,7 +180,15 @@ impl Format {
 /// v7：**每章的图片引用清单入库**（`store` 的 v20 迁移那一列）。老行读回来是空表，
 /// 而「这本书没有图」与「这一版还没扫过图」在界面上是同一件事：图片查看器那一列
 /// 会一张都不剩，读者只会以为这本书是纯文字书。所以要重扫一次把它填上。
-pub const INDEX_VERSION: i64 = 7;
+/// v8：`.txt` **按规则表分章**（`content::format::novel`）。这一族的章从「一整篇一章」
+/// 变成「几十到几百章」，而 `ChapterLocator::Section(序号)` 存的就是那个序号 —— 不 bump
+/// 的话老库里每一本 TXT 的进度都会指到第一章的第一页，批注 relocate 也全部落在错的章上。
+/// 代价按那条不兼容的口径付：整库重扫一次，开书时才投，不在升级那一刻。
+///
+/// **往后这一格绑上了规则表**：改 `assets/novel-rules.*.json` 里的任何一条模式或阈值，
+/// 分章结果就可能挪动，那与改分章规则是同一件事，必须同样 bump（`rules` 那侧有一条门
+/// 钉住出厂表的条数与内容哈希，动了出厂表一定会在那里出声）。
+pub const INDEX_VERSION: i64 = 8;
 
 /// 一本书的书目信息。**字段按 Dublin Core 的术语集命名与取舍**（DCMI Terms / ISO 15839），
 /// 因为各家电子书格式的书目区就是它：EPUB 的 OPF 直接写 `dc:*`，MOBI 的 EXTH 标签在

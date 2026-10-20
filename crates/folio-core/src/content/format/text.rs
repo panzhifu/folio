@@ -17,11 +17,12 @@
 use std::path::Path;
 
 use super::{
-    Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, stem_of,
+    Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, TocEntry, stem_of,
 };
 use crate::Result;
+use crate::content::format::novel;
 
-/// 一整篇就是一章的 `.txt`。
+/// 按规则表分章的 `.txt`（纯文本电子书的主要形态）。
 pub struct PlainTextAdapter;
 
 impl DocumentProvider for PlainTextAdapter {
@@ -48,7 +49,7 @@ impl DocumentProvider for PlainTextAdapter {
     }
 }
 
-/// 一族纯文本相对这条链的两个差异点。函数指针而不是泛型参数：调用点就两处，
+/// 一族纯文本相对这条链的三个差异点。函数指针而不是泛型参数：调用点就两处，
 /// 而它们要能被当成常量传下去。
 pub(crate) struct PlainFamily {
     /// 书目里那一格报的**身份**：一个 provider 只能有一个 `Format`，
@@ -58,20 +59,23 @@ pub(crate) struct PlainFamily {
     pub split: fn(&str, &str) -> Vec<Chapter>,
     /// (规范化全文, 文件名主名) → 书名。
     pub title: fn(&str, &str) -> String,
+    /// 章表 → 目录。空表就是「这本没有目录」，界面上那一屏什么都不摆。
+    pub toc: fn(&[Chapter]) -> Vec<TocEntry>,
 }
 
-/// 一整篇一章，书名就是文件名主名 —— 这一族现在**没有任何**分章与书目判据。
+/// `.txt`：按规则表分章（`format::novel`），认出目录页，目录跟着章表一起交出去。
 ///
-/// 这一格就是纯文本小说那一刀的落点：`split` 换成按章标记切，`title` 换成
-/// 「文件名 → 头部那几行 → 文件名去噪」那条优先链，共用件一行都不用动。
+/// 书名这一格**还没接规则**：`《书名》作者：…` 那种头部块与「书名：」键的提取是下一刀，
+/// 现在仍然回落文件名主名。分章已经是真的了。
 const TEXT: PlainFamily = PlainFamily {
     format: Format::Text,
-    split: whole_file_as_one_chapter,
+    split: split_by_rules,
     title: |_source, stem| stem.to_owned(),
+    toc: novel::detect::toc_of,
 };
 
-fn whole_file_as_one_chapter(source: &str, stem: &str) -> Vec<Chapter> {
-    vec![Chapter::inline(stem, source.to_owned())]
+fn split_by_rules(source: &str, stem: &str) -> Vec<Chapter> {
+    novel::detect::split_with(source, stem, &novel::rules::CompiledRules::builtin())
 }
 
 /// 读一遍并按 [`normalize`] 折好：两族共用的起点。
@@ -105,7 +109,11 @@ pub(crate) fn read_with(
         size: source.len() as u64,
         ..DocMeta::default()
     };
-    let chapters = (family.split)(&source, &stem)
+    let chapters = (family.split)(&source, &stem);
+    // 目录从**切好的**章表建：索引那一趟随后会把它们换成「只有标题与序号」的位置，
+    // 那时标题还在，但间隔与字数已经数过了 —— 早一步取省一次遍历。
+    let toc = (family.toc)(&chapters);
+    let chapters = chapters
         .into_iter()
         .enumerate()
         .map(|(ix, chapter)| {
@@ -125,6 +133,7 @@ pub(crate) fn read_with(
         meta,
         Content::Reflow(FlowDoc {
             chapters,
+            toc,
             ..Default::default()
         }),
     ))
@@ -253,15 +262,36 @@ mod tests {
     use super::test_support::{opened, opened_bytes, utf16le, visible};
     use crate::content::format::Format;
 
-    /// `.txt` 是一整篇一章，章名就是文件名主名 —— 这一条钉住「现在还没有分章判据」，
-    /// 分章那一刀落地时它要跟着改，而不是静默留着当假绿灯。
+    /// 认不出标记的一本：一整篇一章，章名与书名都是文件名主名。这是**降级**那一档，
+    /// 不是这一族的目标形态（目标见下一条）。
     #[test]
-    fn a_text_file_is_one_chapter_named_after_the_file() {
+    fn a_text_file_without_markers_is_one_chapter_named_after_the_file() {
         let (meta, flow) = opened("三体.txt", "正文第一行\n正文第二行\n");
         assert_eq!(flow.chapters.len(), 1);
         assert_eq!(flow.chapters[0].title, "三体");
         assert_eq!(meta.title, "三体");
-        assert_eq!(meta.format, Format::Text);
+    }
+
+    /// 这一族真正要交付的那件事：一本有章标记的 `.txt` 按规则表切开，**并且目录跟着一起
+    /// 交出去**（目录那屏从前对 TXT 是空的）。章标题行同时要走 `<h*>` 那一档 —— 屏上
+    /// 看得出章从哪儿起，而不是「第一章」混在正文段落里。
+    #[test]
+    fn a_chaptered_text_file_splits_and_gets_a_table_of_contents() {
+        let mut body = String::new();
+        for n in 1..=6 {
+            body.push_str(&format!("第{n}章 标题{n}\n{}\n\n", "雪".repeat(600)));
+        }
+        let (_, flow) = opened("书.txt", &body);
+        assert_eq!(flow.chapters.len(), 6, "该切成六章");
+        assert_eq!(flow.chapters[0].title, "第1章 标题1");
+        assert_eq!(flow.toc.len(), 6, "目录要跟章表一起交出来");
+        assert_eq!(flow.toc[5].title, "第6章 标题6");
+        // 章标题得画成标题，不是普通段落：这条是屏上「看得出章起点」的全部依赖。
+        assert!(
+            flow.chapters[2].source().starts_with("<h1>"),
+            "章标题行要包成 `<h1>`：{}",
+            flow.chapters[2].source()
+        );
     }
 
     /// 没有 BOM、没有声明、也不是合法 UTF-8 的小说 `.txt`（简体 GBK）端到端地读得开。

@@ -44,10 +44,14 @@ impl DocumentProvider for MarkdownAdapter {
 }
 
 /// Markdown 相对那条链的两处差异：按 1–2 级 ATX 标题切，书名取第一个一级标题。
+///
+/// 目录那一格交回空表：这一族的章表**就是**结构（章名即标题），再抄一份进 `FlowDoc.toc`
+/// 会多出两份「这本书有哪些章」的说法，而它们迟早要漂。
 const MARKDOWN: PlainFamily = PlainFamily {
     format: Format::Markdown,
     split: split_on_headings,
     title: first_heading_or_stem,
+    toc: |_| Vec::new(),
 };
 
 fn first_heading_or_stem(source: &str, stem: &str) -> String {
