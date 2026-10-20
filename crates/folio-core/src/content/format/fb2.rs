@@ -19,7 +19,6 @@ use super::{
     image_dims, shrink_image, stem_of,
 };
 use crate::Result;
-use crate::infra::error::IoResultExt as _;
 
 /// 封面上限与 EPUB 同一条口径（见 `epub` 里的 `COVER_MAX_EDGE`）：书架用缩略图，
 /// 原图随时能从文件里再解一次，不该在库里留第二份。
@@ -29,7 +28,10 @@ pub struct Fb2Adapter;
 
 /// `with_text == false` 的那一趟：章表只有标题与序号，正文等打开时再扫。
 fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
-    let raw = std::fs::read_to_string(path).io_path(path)?;
+    // FB2 按规范是 UTF-8，但真文件里带 BOM 的、XML 声明写着别的码页的都存在。
+    // 走 `charset::read_markup` 就是白拿那两档：BOM 与 `<?xml encoding=…>` 都按文件自己
+    // 说的话解，而 `read_to_string` 对这两样一律「整本打不开」。
+    let raw = super::charset::read_markup(path)?;
     let parsed = parse_metadata(&raw);
 
     let images: Vec<ImageRes> = parsed
@@ -186,8 +188,9 @@ impl DocumentProvider for Fb2Adapter {
 
     fn image_bytes(&self, path: &Path, href: &str) -> Option<Vec<u8>> {
         // 图片在文件里是 base64 的 `<binary>`，每次按 id 现解一次 —— 与 EPUB 每次
-        // 重开容器同形，字节不常驻。
-        let raw = std::fs::read_to_string(path).ok()?;
+        // 重开容器同形，字节不常驻。**必须与 `read_with` 同一条读法**：两处各定义一遍
+        // 「这个文件是什么文本」，就会出现在「正文读得动、它的插图读不动」那种漂移上。
+        let raw = super::charset::read_markup(path).ok()?;
         parse_metadata(&raw)
             .binaries
             .into_iter()

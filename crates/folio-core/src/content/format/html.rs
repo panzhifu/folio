@@ -15,7 +15,6 @@ use super::{
 };
 use crate::Result;
 use crate::content::dom::{Dom, NodeId, NodeKind};
-use crate::infra::error::IoResultExt as _;
 
 pub struct HtmlAdapter;
 
@@ -36,7 +35,7 @@ impl DocumentProvider for HtmlAdapter {
     /// 整篇就是那一章：重读一遍文件。
     fn chapter_source(&self, path: &Path, at: &ChapterLocator) -> Result<String> {
         match at {
-            ChapterLocator::Section(_) => std::fs::read_to_string(path).io_path(path),
+            ChapterLocator::Section(_) => super::charset::read_markup(path),
             other => Err(crate::Error::ChapterUnavailable {
                 path: path.to_path_buf(),
                 index: 0,
@@ -46,7 +45,11 @@ impl DocumentProvider for HtmlAdapter {
     }
 
     fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        let raw = std::fs::read_to_string(path).io_path(path)?;
+        // 走 `charset::read_markup` 而不是 `read_to_string`：这一族的正文按规范**可以**不是
+        // UTF-8，只要文件自己声明了码页（`<meta http-equiv=… charset=gb2312>` 或 XML 的
+        // `encoding=`），中文网页另存出来的单文件 HTML 满地是那种。声明那一档早就写好了，
+        // 以前只是没接进来。
+        let raw = super::charset::read_markup(path)?;
         let title = document_title(&raw).unwrap_or_else(|| stem_of(path));
         let (css, images) = styles_and_images(&raw, path);
         let meta = DocMeta {
@@ -255,6 +258,26 @@ mod tests {
 
         let bare = write(dir.path(), "c.html", b"<html><body><p>x</p></body></html>");
         assert_eq!(flow_of(&bare).0.title, "c");
+    }
+
+    /// 声明那一档以前对单文件 HTML **根本不生效**：入口是 `read_to_string`，GBK 的字节
+    /// 在那一步就整本打不开。中文网页另存出来的文件满地是这个形态 —— 它自带的
+    /// `charset=gbk` 本来就是够的，缺的只是把这条链接上。
+    #[test]
+    fn a_declared_gbk_html_is_decoded_from_its_own_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=gbk\"><title>书名</title></head><body><p>大雪封山的那一夜</p></body></html>";
+        let bytes = encoding_rs::GBK.encode(doc).0.to_vec();
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "这份字节必须真的不是 UTF-8，否则这条测试没测到东西"
+        );
+        let path = write(dir.path(), "gbk.html", &bytes);
+        let (meta, flow) = flow_of(&path);
+        assert_eq!(meta.title, "书名", "标题要从 GBK 的字节里按声明解出来");
+        let body = &flow.chapters[0].source();
+        assert!(body.contains("大雪封山"), "正文不能是一排问号：{body}");
+        assert!(!body.contains('\u{fffd}'), "解得通就不该留洞：{body}");
     }
 
     #[test]

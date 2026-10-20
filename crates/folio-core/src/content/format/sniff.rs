@@ -44,10 +44,11 @@ pub enum Verdict {
     Readable(Format),
     /// 认得出是什么，但这一条路交不出一个能直接读的格式。带上的是给人看的那一句。
     ///
-    /// 两条空缺在这一档：PDF（要栅格化引擎）、UTF-16 文本（provider 那一条路只吃
-    /// UTF-8）。第三条「压缩包里装着书」**不是空缺**而是兜底：正常路径上管线已经逐条
-    /// 抽出来了，走到那一格说明抽取本身挂了。（MOBI / AZW3 原先也在这档，现在有了
-    /// provider，改判成 [`Verdict::Readable`]。）
+    /// 只剩一条真空缺：PDF（要栅格化引擎）。三条原先在这档的都已经改判成
+    /// [`Verdict::Readable`]：MOBI / AZW3（有了 provider）、UTF-16 文本（裸文件的读
+    /// 入口从 `read_to_string` 换成 `format::charset` 那两条读法，那两个 BOM 现在解得开）、
+    /// 以及「压缩包里装着书」—— 那一条**不是空缺而是兜底**：正常路径上管线已经逐条
+    /// 抽出来了，走到那一格说明抽取本身挂了。
     Known(&'static str),
     /// 三层都走完了：不是能当书收的东西。
     NotABook,
@@ -161,11 +162,11 @@ fn magic(head: &[u8]) -> Option<Verdict> {
     if head.len() >= 68 && head[60..68] == *b"BOOKMOBI" {
         return Some(Verdict::Readable(Format::Mobi));
     }
-    // UTF-16 的两个 BOM。provider 那一条路是 `read_to_string`（只吃 UTF-8），
-    // 所以这是「认得出来但读不动」，不是「不是书」——别说成读者手里那是个假文件。
-    if head.starts_with(b"\xff\xfe") || head.starts_with(b"\xfe\xff") {
-        return Some(Verdict::Known("UTF-16 文本"));
-    }
+    // UTF-16 的两个 BOM **不在这一层判**，挪到 [`bare_file`] 那一支去了。理由是那一层
+    // 一锤定音不了：`FF FE` 只说得出「这是文本、且不是 UTF-8」，说不出它是 `.md` 还是
+    // `.html`，而在这里写死成 `Text` 会把一本 `书.md` 的分章规则整个丢掉。
+    // 它也不再是「认得出来但读不动」：裸文件的读入口已经换成 `format::charset` 那两条
+    // 那两个 BOM 解得开（`format::charset` 里那条 UTF-16 分支早就跑在 CHM 上）。
     None
 }
 
@@ -320,8 +321,12 @@ fn container(path: &Path) -> Verdict {
 
 /// 裸文件那一支：扩展名优先，认不出再看壳。
 fn bare_file(display_name: &str, head: &[u8]) -> Verdict {
-    // 文本类的第一道门是「它是不是文本」：头部里有 NUL 就不是。
-    if head.contains(&0) {
+    // UTF-16 的两个 BOM 必须排在「有 NUL 就不是文本」那道门**前面**：那种正文每两个
+    // 字节就落一个 `00`，那道门会把每一本 UTF-16 的书都挡在外面，而给出的说法是
+    // 「这不是书」。同一条位置上的道理在这个文件里写过三次 —— RTF 的 `\bin` 排在
+    // `magic()` 那一层，CHM 的容器排在 ZIP 那一层，这里是第三次。
+    let utf16 = head.starts_with(b"\xff\xfe") || head.starts_with(b"\xfe\xff");
+    if !utf16 && head.contains(&0) {
         return Verdict::NotABook;
     }
     match extension_of(display_name).as_deref() {
@@ -336,8 +341,17 @@ fn bare_file(display_name: &str, head: &[u8]) -> Verdict {
         // 没有扩展名（下载来的东西常常这样）：只能看壳。
         None => {}
     }
+    if utf16 {
+        // 没扩展名而有 BOM：BOM 就是它自己说了「我是文本」，按纯文本收 —— 与下面
+        // 「剩下的当纯文本收」同一立场，只是这一条不必再看字节的形状。
+        return Verdict::Readable(Format::Text);
+    }
     let Some(prefix) = utf8_prefix(head) else {
-        // 头部就不是合法 UTF-8，而后面每一层都只会 `read_to_string` 一遍。
+        // 头部既不是合法 UTF-8，又没有 BOM，也没有扩展名替它说话：这时候连「它是文本」
+        // 都不确定。**不猜码页** —— 实测过分不开：一段简体 GBK 的字节流拿 Big5 去解同样
+        // 一个坏字节都没有，得到的却是一串夹着注音符号的怪汉字，屏幕上查不出错
+        // （判据与理由写在 `format::charset` 的模块头）。有扩展名的那一族由扩展名承担
+        // 「这是文本」这句话，所以轮得到 provider 去解；这一条两样都没有。
         return Verdict::NotABook;
     };
     if prefix.contains("<FictionBook") {
@@ -799,15 +813,54 @@ mod tests {
         }
     }
 
-    /// 二进制的判据是头部有 NUL。UTF-16 的两个 BOM 单独一档：那是「读不动」，
-    /// 不是「不是书」。
+    /// 「有 NUL 就不是文本」那道门是为**没有 BOM** 的字节流立的。UTF-16 的正文里每两个
+    /// 字节就有一个 `00`，所以那两个 BOM 必须排在门前面，而排前面之后扩展名照旧说话：
+    /// BOM 只负责放行，不负责宣布这是哪种文本。
+    ///
+    /// 把 `utf16` 那一判撤掉，这一条三处全红（前两条退成 `NotABook`，第三条退成
+    /// `NotABook` 而不是 `Markdown`）—— 门不是空转的。
     #[test]
-    fn binary_and_utf16_are_told_apart() {
-        let tmp = dir("binary");
+    fn a_utf16_bom_opens_the_nul_gate_without_choosing_the_family() {
+        let tmp = dir("utf16");
+        // 「中文」两个字的 UTF-16 码元，后面再跟一串 NUL：非 BOM 的字节流会死在那道门上。
+        let units: Vec<u16> = "\u{4e2d}\u{6587}".encode_utf16().collect();
+        let mut le = b"\xff\xfe".to_vec();
+        le.extend(units.iter().copied().flat_map(u16::to_le_bytes));
+        le.extend([0u8, 0, 0, 0]);
+        let mut be = b"\xfe\xff".to_vec();
+        be.extend(units.iter().copied().flat_map(u16::to_be_bytes));
+        be.extend([0u8, 0, 0, 0]);
+        for (name, want) in [
+            ("书.txt", Verdict::Readable(Format::Text)),
+            ("书.md", Verdict::Readable(Format::Markdown)),
+            ("书.html", Verdict::Readable(Format::Html)),
+        ] {
+            assert_eq!(
+                identify(name, &file_at(tmp.path(), name, &le)),
+                want,
+                "{name}"
+            );
+            assert_eq!(
+                identify(name, &file_at(tmp.path(), name, &be)),
+                want,
+                "{name} BE"
+            );
+        }
+        // 没有扩展名时 BOM 自己就是那句「我是文本」，按纯文本收（与「剩下的当纯文本收」
+        // 同一立场），而**不是**因为下面那条 UTF-8 前缀判据放它过去 —— 那种字节流
+        // 一定过不了 `utf8_prefix`。
+        assert_eq!(
+            identify("无扩展名", &file_at(tmp.path(), "无扩展名", &le)),
+            Verdict::Readable(Format::Text)
+        );
+        // 反向：真有 NUL 又没有 BOM 的还是「不是书」；扩展名不认识的一律不放行。
         let nul = file_at(tmp.path(), "a.bin", b"\x00\x01\x02\x03");
         assert_eq!(identify("a.bin", &nul), Verdict::NotABook);
-        let utf16 = file_at(tmp.path(), "a.txt", b"\xff\xfe\x00\x4f\x00k");
-        assert_eq!(identify("a.txt", &utf16), Verdict::Known("UTF-16 文本"));
+        assert_eq!(
+            identify("书.doc", &file_at(tmp.path(), "书.doc", &le)),
+            Verdict::NotABook,
+            "BOM 不许把一条不认的扩展名救活：那是另一个格式，不是编码问题"
+        );
     }
 
     /// RTF 由**魔数**定，而它必须在 `magic()` 那一层：合法 RTF 里的 `\binN` 后面是

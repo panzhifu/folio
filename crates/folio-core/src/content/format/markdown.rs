@@ -2,7 +2,6 @@ use std::path::Path;
 
 use super::{Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format};
 use crate::Result;
-use crate::infra::error::IoResultExt as _;
 
 /// Markdown 与纯文本是两种东西（[`Format::Markdown`] / [`Format::Text`]），但共用
 /// 「读成字符串 → 规范化 → 分章（或不分）」这条链，所以住同一个模块。
@@ -67,7 +66,10 @@ impl DocumentProvider for PlainTextAdapter {
 /// **包装**（`from_plain_text`）与把正文搬来搬去，不是读盘 —— 单文件格式的
 /// I/O 是躲不掉的。
 fn load(path: &Path, plain: bool) -> Result<(DocMeta, String, Vec<Chapter>)> {
-    let raw = std::fs::read_to_string(path).io_path(path)?;
+    // 走 `charset::read_plain` 而不是 `read_to_string`：后者只吃 UTF-8，而中文小说的
+    // `.txt` 与日文轻小说的 `.txt` 满地是非 UTF-8。纯文本没有声明位，所以那一档在这里
+    // 故意**不生效**（会被书里的一行代码劫持），能走到的只有 BOM 与 UTF-8 那两档。
+    let raw = super::charset::read_plain(path)?;
     let source = normalize(&raw);
     let chapters = if plain {
         vec![Chapter::inline(stem(path), source.clone())]
@@ -298,10 +300,16 @@ mod tests {
     use crate::content::format::{Chapter, DocMeta, FlowDoc};
 
     fn opened(name: &str, body: &str) -> (DocMeta, FlowDoc) {
+        opened_bytes(name, body.as_bytes())
+    }
+
+    /// 把**原始字节**写进临时文件再走公开入口读回来。UTF-16 那几条门要的就是这种
+    /// 不经手字符串的输入 —— 用 [`opened`] 那种 `&str` 参数造不出带 BOM 的字节。
+    fn opened_bytes(name: &str, body: &[u8]) -> (DocMeta, FlowDoc) {
         let dir = tempfile::tempdir().unwrap();
         let path: PathBuf = dir.path().join(name);
         std::fs::write(&path, body).unwrap();
-        let doc = crate::content::document::open(&path).expect("临时 .md 应能读入");
+        let doc = crate::content::document::open(&path).expect("临时文件应能读入");
         // `open` 只给索引；这一层要断言的绝大多数是正文，按位置取回来。
         let mut flow = doc.flow().expect("该读成可重排").clone();
         for (ix, chapter) in flow.chapters.iter_mut().enumerate() {
@@ -309,6 +317,88 @@ mod tests {
             *chapter = Chapter::inline(chapter.title.clone(), text);
         }
         (doc.meta().clone(), flow)
+    }
+
+    /// UTF-16LE 那份字节（BOM + 每两字节一个小端码元）。
+    fn utf16le(text: &str) -> Vec<u8> {
+        let mut out = b"\xff\xfe".to_vec();
+        out.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        out
+    }
+
+    /// BOM 这一档通到 TXT / Markdown 的正文：解出来的章表与同一份内容的 UTF-8 版
+    /// **逐字相同**，包括分章、章名与 `#` 有没有被剥掉。
+    #[test]
+    fn a_utf16_markdown_lands_on_the_same_chapters_as_its_utf8_twin() {
+        let src = "# 书名\n前言\n## 第一章\n正文一\n## 第二章\n正文二\n";
+        let (utf8_meta, utf8) = opened("d.md", src);
+        let (u16_meta, u16) = opened_bytes("d.md", &utf16le(src));
+        assert_eq!(u16_meta.title, utf8_meta.title, "书名要一样");
+        assert_eq!(
+            u16.chapters
+                .iter()
+                .map(|c| c.title.as_str())
+                .collect::<Vec<_>>(),
+            utf8.chapters
+                .iter()
+                .map(|c| c.title.as_str())
+                .collect::<Vec<_>>(),
+            "章数与每一章的章名都该与 UTF-8 那份相同"
+        );
+        for (a, b) in u16.chapters.iter().zip(&utf8.chapters) {
+            assert_eq!(a.source(), b.source(), "正文要逐字相同：{:?}", a.title);
+        }
+        // 独立验一次内容而不是只验「两趟一致」：两趟都坏也会一致。
+        assert!(
+            !u16.chapters[1].source().contains('\u{fffd}')
+                && u16.chapters[1].source().contains("正文一"),
+            "UTF-16 不该退成一排问号：{}",
+            u16.chapters[1].source()
+        );
+    }
+
+    /// **纯文本没有声明位，所以那一档对它故意不生效。** 一本合法 UTF-8 的技术书在
+    /// 前 1 KB 里出现 `charset=gbk` 那样一串字（真书里就长在代码清单里），按 HTML 那套
+    /// 「文件自己说的优先」会把整本书解成 GBK —— 症状是通屏像汉字的乱码，而判定与
+    /// 导入全程报「成功」。这条门把住的就是这个：合法 UTF-8 一律直接收，不看里面。
+    #[test]
+    fn a_plain_file_does_not_obey_a_charset_line_inside_it() {
+        let src = "```html\n<meta http-equiv=\"Content-Type\" content=\"text/html; charset=gbk\">\n```\n\n# 第一章\n这一行是合法 UTF-8 的正文：大雪封山的那一夜\n";
+        let (meta, flow) = opened("note.md", src);
+        assert_eq!(meta.title, "第一章", "标题要按 UTF-8 解出来，不是乱码");
+        let body = flow
+            .chapters
+            .iter()
+            .map(|c| visible(c.source()))
+            .collect::<String>();
+        assert!(
+            body.contains("大雪封山的那一夜") && !body.contains('\u{fffd}'),
+            "被声明劫持过的 UTF-8 文本会在这里露出来：{body}"
+        );
+    }
+
+    /// 没有 BOM、没有声明、也不是合法 UTF-8 的小说 `.txt`（简体 GBK）端到端地读得开。
+    /// 改之前它的下场是 `read_to_string` 报错、而且那个错误在 `ImportReject` 里没有
+    /// 分类 —— 既不是「不支持」也不是「读不动」，是一句说不清的失败。
+    /// 这一条走的是公开入口，所以它同时钉住三件事：判定放行、`read_plain` 接上了
+    /// 码页判定、包装出来的正文是那串汉字。
+    #[test]
+    fn an_undeclared_gbk_novel_txt_reads_as_chinese_instead_of_holes() {
+        let src = "大雪封山的那一夜，他终于推开那扇门。\n第二行也还是正文。\n";
+        let bytes = encoding_rs::GBK.encode(src).0.to_vec();
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "这份字节该真的不是 UTF-8，否则这条测试没测到东西"
+        );
+        let (meta, flow) = opened_bytes("书.txt", &bytes);
+        let body = visible(flow.chapters[0].source());
+        assert!(
+            body.contains("大雪封山的那一夜"),
+            "GBK 的书要解成汉字：{body}"
+        );
+        assert!(!body.contains('\u{fffd}'), "解得通就不该留洞：{body}");
+        assert_eq!(meta.format, crate::content::format::Format::Text);
+        assert_eq!(flow.chapters.len(), 1, "现在还是一整篇一章（分章是下一刀）");
     }
 
     /// 一段 XHTML 的可见文本。契约里最要紧的一条是「包装不改内容」，断言就得看可见文本，
