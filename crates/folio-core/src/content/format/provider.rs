@@ -245,12 +245,15 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::chm::ChmAdapter),
         Box::new(super::mobi::MobiAdapter),
         Box::new(super::pdf::PdfAdapter),
+        Box::new(super::docx::DocxAdapter),
+        Box::new(super::odt::OdtAdapter),
         Box::new(super::pdb::PdbAdapter),
         Box::new(super::azw4::Azw4Adapter),
         Box::new(super::cb7::Cb7Adapter),
         Box::new(super::cbr::CbrAdapter),
         Box::new(super::cbt::CbtAdapter),
         Box::new(super::djvu::DjvuAdapter),
+        Box::new(super::htmlz::HtmlzAdapter),
     ]
 }
 

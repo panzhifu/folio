@@ -30,13 +30,19 @@ pub mod cover;
 pub mod css;
 /// DjVu：定版式扫描书/漫画，页是既定的画布（纯 Rust `djvu-rs`）。
 pub mod djvu;
+/// WordprocessingML（`.docx`）：一个 ZIP 里的 `word/document.xml`。
+pub mod docx;
 pub mod epub;
 pub mod fb2;
 pub mod html;
+/// Calibre HTMLZ：一个 ZIP 里装着 index.html、章节 HTML 与图片。
+pub mod htmlz;
 pub mod markdown;
 pub(crate) mod mobi;
 /// 纯文本（`.txt`）小说的分章与书目提取：规则表 + 引擎两份，见 `novel` 的模块说明。
 pub mod novel;
+/// OpenDocument Text（`.odt`）：一个 ZIP 里的 `content.xml`。
+pub mod odt;
 // 压着的不是「没人用的模块」——MOBI / AZW4 / PDB 与判定层都在用它 —— 而是那张记录表里
 // 没人读的三格（`path()` 与每条记录的 `attributes` / `uid`）。它们留在类型里是为了
 // 读文件时一次到位、也方便排障时打印，但别当成「已经接上了」：删掉任何一格都会红。
@@ -274,12 +280,35 @@ impl Format {
 /// 变成「几十到几百章」，而 `ChapterLocator::Section(序号)` 存的就是那个序号 —— 不 bump
 /// 的话老库里每一本 TXT 的进度都会指到第一章的第一页，批注 relocate 也全部落在错的章上。
 /// 代价按那条不兼容的口径付：整库重扫一次，开书时才投，不在升级那一刻。
+/// v9：`.md` 的**正文过一次真的 CommonMark 解析**（`content::format::markdown::to_xhtml`）。
+/// 章表一个字都没动（还是按 1–2 级 ATX 切），但**可见文本这把尺变了**：`**粗**` 那四个
+/// 星号以前在屏上看得见、现在折成 `<strong>` 就没了，`- 列表项` 的短横、围栏的反引号、
+/// `[文字](链接)` 的方括号同理。而 `chapters.char_len` 与 `crate::Locator::offset` 数的
+/// 都是这份可见文本 —— 不 bump 的后果是老 .md 书的进度分母偏大、批注锚点整体偏后，
+/// 且差值随每章标记密度不均匀，所以不是「挪一格」而是**每一章错得不一样**。
+/// 同一条 v8 的口径付：整库重扫一次，开书时由 `stale_reason` 认成 `OldIndex` 投递。
+/// v10：`.docx` / `.odt` 读出了**列表与脚注**（`format::docx` 的 `w:numPr` +
+/// `word/numbering.xml`、`w:footnoteReference` + `word/footnotes.xml`，`format::odt` 的
+/// `text:list` + `text:list-style`、`text:note`）。章表没动，动的还是**可见文本那把尺**：
+/// 引用那一个上标把注的号（`1`、`i.`）注进了正文，而注体里那些原先整块没读的字现在才算进
+/// 本章 —— `chapters.char_len` 与 `crate::Locator::offset` 数的都是这份文本，所以老库里
+/// 带脚注的那几本同时错两处：进度分母偏小，批注锚点整体偏前。列表本身不改字数，但它与
+/// 脚注是同一次归约加的，同一版里一起重扫只付一次。
+///
+/// v11：**CHM 与单文件 HTML 的作者样式真的进库了**。CHM 从前把 `FlowDoc::css` 写死成
+/// 空串（容器里没有 manifest 可指，样式躺在每一页的 `<head>` 里没人去读），单文件 HTML
+/// 只认内联 `<style>`、`<link rel="stylesheet">` 那一份整个丢掉。两条都不动章表、也不动
+/// 可见文本那把尺（改的是 CSS 这一层，字数与锚点一根字节都没变），动的是**落库的 `css`
+/// 列**：`BookDocument::stylesheet` 见 `flow.css` 非空就直接用它（先文本后清单），所以
+/// 老库里那两本 CHM 与那些 `.html` 会一直拿着「空」或「半份」的样式，屏上不显示任何异常、
+/// 报表上也不算落差 —— 书的样式有没有生效本来就不在任何计数器里。代价按 v8 那一条口径付：
+/// 整库重扫一次，开书时由 `stale_reason` 认成 `OldIndex` 投递。
 ///
 /// **这一格从此只管引擎，不管数据**：改 `assets/novel-rules.*.json` 里的任何一条模式或
 /// 阈值不必 bump —— [`rules_hash`] 那一格会说「规则表换了」，老库在开书时逐本重扫，
 /// 不必为一套正则发一版。要 bump 的仍然是动那台引擎：四条否决门的编排、号怎么读、
 /// 切点怎么落（`novel::detect`），因为那是「同一份表算出什么」变了。
-pub const INDEX_VERSION: i64 = 8;
+pub const INDEX_VERSION: i64 = 11;
 
 /// 这一格式的索引算自哪一份小说规则表 —— 交出**此刻生效**那一份的内容哈希。
 ///
@@ -852,6 +881,170 @@ pub(crate) fn xml_unescape(raw: &str) -> String {
     quick_xml::escape::unescape(raw)
         .map(|text| text.into_owned())
         .unwrap_or_else(|_| raw.to_string())
+}
+
+/// 列表该画的那一个号。
+///
+/// 它与 `css::computed::ListStyle` 不是同一件事：那一格是作者写在 CSS 里的词，这一格是
+/// **文档格式自己的记数**折过来之后的形状（Word 的 `w:numFmt`、ODF 的 `style:num-format`
+/// 与 `text:bullet-char`）。两个 provider 各折一次就会各漂一次，所以形状与「落成哪一截
+/// XHTML」收在这一处，由 [`ListWriter`] 一起写。
+///
+/// 表外的记数（希伯来、阿拉伯、泰文、印度诸系统）折成 `Ordered(None)`：文档格式已经说了
+/// 「这是一个编号列表」，而引擎没有那些记数 —— 画一个十进制号比画一个圆点更接近作者要的，
+/// 也比静默丢掉这一格可读。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Marker {
+    Disc,
+    Circle,
+    Square,
+    /// 记数：`None` = 用引擎给 `<ol>` 的默认（十进制）；`Some` = `list-style-type` 那一词。
+    Ordered(Option<&'static str>),
+    /// 一个字符都不画。作者明确说了不要号（Word 的 `w:numFmt="none"`），缩进留着。
+    Nothing,
+}
+
+impl Marker {
+    /// 开这一层时写的那一截。`list-style-type` 只在**不是这一族的默认**时才写：
+    /// `<ul>` 本来就是圆点、`<ol>` 本来就是十进制，多写一截只会让归约产物难以比对。
+    fn open_tag(self) -> &'static str {
+        match self {
+            Marker::Disc => "<ul>",
+            Marker::Circle => r#"<ul style="list-style-type: circle">"#,
+            Marker::Square => r#"<ul style="list-style-type: square">"#,
+            Marker::Ordered(None) => "<ol>",
+            Marker::Ordered(Some("lower-alpha")) => r#"<ol style="list-style-type: lower-alpha">"#,
+            Marker::Ordered(Some("upper-alpha")) => r#"<ol style="list-style-type: upper-alpha">"#,
+            Marker::Ordered(Some("lower-roman")) => r#"<ol style="list-style-type: lower-roman">"#,
+            Marker::Ordered(Some("upper-roman")) => r#"<ol style="list-style-type: upper-roman">"#,
+            Marker::Ordered(Some("cjk-ideographic")) => {
+                r#"<ol style="list-style-type: cjk-ideographic">"#
+            }
+            // `Ordered` 的 `Some` 只可能是上面这几个（两个 provider 都从这一张表来）。
+            Marker::Ordered(Some(_)) => "<ol>",
+            Marker::Nothing => r#"<ul style="list-style-type: none">"#,
+        }
+    }
+
+    fn close_tag(self) -> &'static str {
+        match self {
+            Marker::Ordered(_) => "</ol>",
+            _ => "</ul>",
+        }
+    }
+}
+
+/// 一层正开着的项目列表。
+struct OpenList {
+    /// 这一层是**哪一个**列表。DOCX 用 `w:numId`：两份编号实例就算记数相同也是两个列表，
+    /// Word 的号跟着实例从头再数（真样本 `numbering.docx` 的 `numId` 1 与 2 都是
+    /// `decimal`，写成一条就会把 1 / 1、2 数成 1 / 2、3）。
+    id: String,
+    marker: Marker,
+    /// 这一层当前那个 `<li>` 还开着（`</li>` 还没写）。往里再开一层要靠它 ——
+    /// 嵌套在 XHTML 里就是「子列表长在父项里面」。
+    item_open: bool,
+}
+
+/// 正在往里写字的那几层列表（栈顶 = 当前层）。
+///
+/// 两族 driving 方式不同：**DOCX** 只在段落上挂一个 `w:ilvl`（层号是绝对的，可以跳级、
+/// 也可以回头），所以它按层号定位；**ODT** 的 `<text:list>` 是嵌套元素，层由容器自己开合。
+/// 两种驱动写的却是同一串 XHTML，所以这台状态机只有一份。
+#[derive(Default)]
+pub(crate) struct ListWriter {
+    layers: Vec<OpenList>,
+}
+
+impl ListWriter {
+    /// 有没有层开着，与开着几层（ODT 那一族按 `<text:list>` 的嵌套定层级，层号就取这个数）。
+    pub(crate) fn depth(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// 往里再开一层。上一层那个 `<li>` 故意不关（见 [`OpenList::item_open`]）。
+    pub(crate) fn push(&mut self, id: &str, marker: Marker, out: &mut String) {
+        out.push_str(marker.open_tag());
+        out.push('\n');
+        self.layers.push(OpenList {
+            id: id.to_string(),
+            marker,
+            item_open: false,
+        });
+    }
+
+    /// 关掉栈顶那一层（连同它当前那个 `<li>`）。
+    pub(crate) fn pop(&mut self, out: &mut String) {
+        let Some(layer) = self.layers.pop() else {
+            return;
+        };
+        if layer.item_open {
+            out.push_str("</li>\n");
+        }
+        out.push_str(layer.marker.close_tag());
+        out.push('\n');
+    }
+
+    /// 关掉所有开着的层。换普通段落、换章、整篇结束都要先走这一步，
+    /// 否则 `</ul>` 会落到下一章的正文里。
+    pub(crate) fn close_all(&mut self, out: &mut String) {
+        while !self.layers.is_empty() {
+            self.pop(out);
+        }
+    }
+
+    /// 把 `html` 写成**第 `level` 层**（0 起）的一项：需要时开层、退层。
+    ///
+    /// 同一层换了记数**或换了列表实例**（`id`）就关掉再开：关掉重开的代价是号跟着从头
+    /// 数，而那正是 Word 换 `numId` 时的行为。目标层与已有层之间缺的那几层用同一个
+    /// 记数补上：`w:ilvl` 从 0 跳到 2 的文档真存在，中间那层没有别的依据可取。
+    pub(crate) fn write(
+        &mut self,
+        level: usize,
+        id: &str,
+        marker: Marker,
+        html: &str,
+        out: &mut String,
+    ) {
+        while self.layers.len() > level + 1 {
+            self.pop(out);
+        }
+        if self.layers.len() == level + 1
+            && (self.layers[level].marker != marker || self.layers[level].id != id)
+        {
+            self.pop(out);
+        }
+        while self.layers.len() < level + 1 {
+            self.push(id, marker, out);
+        }
+        let top = self
+            .layers
+            .last_mut()
+            .expect("上面已经补齐到 level + 1 层了");
+        if top.item_open {
+            out.push_str("</li>\n");
+        }
+        top.item_open = true;
+        out.push_str("<li>");
+        out.push_str(html);
+    }
+
+    /// 往**当前那一层**添一项（调用方已经用 [`push`] 把这一层开了）。
+    pub(crate) fn item(&mut self, html: &str, out: &mut String) {
+        let Some(top) = self.layers.last_mut() else {
+            // 没有层可写：这一格就当普通段落，别凭空吐出一个孤零零的 `<li>`。
+            out.push_str("<p>");
+            out.push_str(html);
+            out.push_str("</p>\n");
+            return;
+        };
+        if top.item_open {
+            out.push_str("</li>\n");
+        }
+        top.item_open = true;
+        out.push_str("<li>");
+        out.push_str(html);
+    }
 }
 
 /// 扩展名的小写形式（不带点）。认不出返回 `None`。

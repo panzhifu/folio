@@ -44,11 +44,15 @@ pub enum Verdict {
     Readable(Format),
     /// 认得出是什么，但这一条路交不出一个能直接读的格式。带上的是给人看的那一句。
     ///
-    /// 只剩一条真空缺：PDF（要栅格化引擎）。三条原先在这档的都已经改判成
-    /// [`Verdict::Readable`]：MOBI / AZW3（有了 provider）、UTF-16 文本（裸文件的读
-    /// 入口从 `read_to_string` 换成 `format::charset` 那两条读法，那两个 BOM 现在解得开）、
-    /// 以及「压缩包里装着书」—— 那一条**不是空缺而是兜底**：正常路径上管线已经逐条
-    /// 抽出来了，走到那一格说明抽取本身挂了。
+    /// **现在只剩一条**：「压缩包里装着书」，而那一条不是空缺而是兜底 —— 正常路径上管线
+    /// 已经逐条抽出来了，走到那一格说明抽取本身挂了。四条原先在这档的都已改判成
+    /// [`Verdict::Readable`]：MOBI / AZW3（有了 provider）、UTF-16 文本（裸文件的读入口
+    /// 从 `read_to_string` 换成 `format::charset` 那两条读法，那两个 BOM 现在解得开）、
+    /// PDF（`format::pdf`：栅格化引擎接上了，一页画多大见那条 `RENDER_EDGE`），
+    /// 以及上面那条压缩包。
+    ///
+    /// 留着这一档而不是把它并进 [`Verdict::NotABook`]：「这种书还不支持」与「这不是书」
+    /// 对读者是两个动作（等我们支持 / 换一个文件），并成一句就等于什么都没说。
     Known(&'static str),
     /// 三层都走完了：不是能当书收的东西。
     NotABook,
@@ -114,6 +118,25 @@ pub(crate) fn identify(display_name: &str, path: &Path) -> Verdict {
     if let Some(verdict) = magic(&head) {
         return verdict;
     }
+    // RAR 与 7z 的壳只能说「这是个压缩包」：是不是「条目全是图」由 provider 去确认。
+    // 两者都不许落到「这不是书」——那对读者是另一句话。
+    if head.starts_with(b"Rar!\x1A\x07") {
+        return Verdict::Readable(Format::Cbr);
+    }
+    if head.starts_with(b"7z\xBC\xAF\x27\x1C") {
+        return Verdict::Readable(Format::Cb7);
+    }
+    if head.starts_with(b"AT&TFORM") {
+        return Verdict::Readable(Format::Djvu);
+    }
+    if is_tar(&head) {
+        return Verdict::Readable(Format::Cbt);
+    }
+    // PalmDB 的数据库类型在偏移 60：`TEXt`/`REAd` 是 PalmDoc 文本，`BOOKMOBI` 是
+    // MOBI 家族。后者里还藏着 AZW4（PalmDB 内嵌 PDF），要开记录看。
+    if is_palmdb(&head) {
+        return palm(path, &head);
+    }
     // CHM 与 ZIP 同一档：`ITSF` 那四个字节只说得出「这是个 ITS 容器」，说不出它是不是
     // 一本读得动的书，所以要开进去看（下面 `chm` 那一层）。
     if head.starts_with(b"ITSF") {
@@ -123,6 +146,38 @@ pub(crate) fn identify(display_name: &str, path: &Path) -> Verdict {
         return container(path);
     }
     bare_file(display_name, &head)
+}
+
+/// POSIX/GNU tar 的 `ustar` 魔数在偏移 257；不用扩展名当判据。
+fn is_tar(head: &[u8]) -> bool {
+    head.len() >= 262 && &head[257..262] == b"ustar"
+}
+
+/// PalmDB 的三类书：MOBI 家族（`BOOKMOBI`）、PalmDoc 文本（`TEXt` 或 `BOOK`+`REAd`）。
+fn is_palmdb(head: &[u8]) -> bool {
+    // `BOOK` 是电子书大类（MOBI / AZW4 都在里面，creator 各不相同），`TEXt` 是 PalmDoc。
+    head.len() >= 68 && (head[60..64] == *b"BOOK" || head[60..64] == *b"TEXt")
+}
+
+/// 打开 PalmDB 判细类。MOBI 家族里先看记录里有没有 PDF：AZW4 就是「PalmDB 装 PDF」，
+/// 不是另一种 PDF 引擎。
+fn palm(path: &Path, head: &[u8]) -> Verdict {
+    use super::palmdb::PalmDb;
+    let db = match PalmDb::open(path) {
+        Ok(db) => db,
+        // 类型字段像书、记录表却读不出来：坏书，不是「不是书」。
+        Err(_) => return Verdict::CorruptContainer,
+    };
+    if head[60..64] == *b"BOOK" && super::azw4::pdf_record(&db).is_some() {
+        return Verdict::Readable(Format::Azw4);
+    }
+    if head[60..68] == *b"BOOKMOBI" {
+        return Verdict::Readable(Format::Mobi);
+    }
+    if super::pdb::is_palmdoc(&db) {
+        return Verdict::Readable(Format::Pdb);
+    }
+    Verdict::NotABook
 }
 
 /// 第三层（ITSF 那一支）：**真把容器开一次**。
@@ -149,7 +204,7 @@ fn chm(path: &Path) -> Verdict {
 /// 第二层：头部字节。只有这里能一锤定音的才在这一层返回。
 fn magic(head: &[u8]) -> Option<Verdict> {
     if head.starts_with(b"%PDF") {
-        return Some(Verdict::Known("PDF"));
+        return Some(Verdict::Readable(Format::Pdf));
     }
     // RTF 的魔数必须在**这一层**，不能在裸文件那一层：合法的 RTF 里可以有 NUL
     // （`\binN` 后面就是裸字节，WMF 插图与嵌入字体都这么写），而裸文件那一支的第一道门
@@ -158,10 +213,8 @@ fn magic(head: &[u8]) -> Option<Verdict> {
     if starts_with_rtf(head) {
         return Some(Verdict::Readable(Format::Rtf));
     }
-    // PalmDB 的数据库类型在偏移 60..68。MOBI / AZW / AZW3 都是这一个容器。
-    if head.len() >= 68 && head[60..68] == *b"BOOKMOBI" {
-        return Some(Verdict::Readable(Format::Mobi));
-    }
+    // PalmDB 的数据库类型在偏移 60..68，但「MOBI 还是 AZW4」要开记录才知道，
+    // 所以那一档挪到 [`identify`] 的 `palm` 那一支。
     // UTF-16 的两个 BOM **不在这一层判**，挪到 [`bare_file`] 那一支去了。理由是那一层
     // 一锤定音不了：`FF FE` 只说得出「这是文本、且不是 UTF-8」，说不出它是 `.md` 还是
     // `.html`，而在这里写死成 `Text` 会把一本 `书.md` 的分章规则整个丢掉。
@@ -243,18 +296,30 @@ pub(crate) fn zip_shape(path: &Path) -> ZipShape {
     // EPUB 的正解：第一个条目必须是 `mimetype`，内容是 `application/epub+zip`。
     // 规范还要求它「存而不压缩」（所以硬读偏移 38 那 20 个字节就能判）；这里走的是
     // 中央目录，压缩方法只剩优化意义，**不当判据**——真书的打包工具并不都守这一条。
-    if let Some((name, _stored)) = zip.head_entry()
-        && name == "mimetype"
-    {
-        let body = zip.read(&name).unwrap_or_default();
-        if std::str::from_utf8(&body)
-            .map(str::trim)
-            .is_ok_and(|text| text == "application/epub+zip")
-        {
-            return ZipShape::Book(Format::Epub);
-        }
+    let mimetype = zip.head_entry().and_then(|(name, _stored)| {
+        (name == "mimetype").then(|| {
+            std::str::from_utf8(&zip.read(&name).unwrap_or_default())
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string()
+        })
+    });
+    if mimetype.as_deref() == Some("application/epub+zip") {
+        return ZipShape::Book(Format::Epub);
     }
     let names = zip.names();
+    let has = |want: &str| names.iter().any(|name| name.eq_ignore_ascii_case(want));
+    // ODT 的正解与 EPUB 同一条：第一个条目 `mimetype` 说自己是 OpenDocument。
+    // 兜底认 `content.xml` + `META-INF/manifest.xml` —— 有些转换器不守「mimetype 第一条」。
+    if mimetype.as_deref() == Some("application/vnd.oasis.opendocument.text")
+        || (has("content.xml") && has("META-INF/manifest.xml"))
+    {
+        return ZipShape::Book(Format::Odt);
+    }
+    // DOCX 没有 mimetype 条目：`[Content_Types].xml` + `word/document.xml` 就是它的形状。
+    if has("[Content_Types].xml") && has("word/document.xml") {
+        return ZipShape::Book(Format::Docx);
+    }
     // 噪音条目（目录、`.DS_Store`、`__MACOSX/`）不参与判断——它们既不是页，
     // 也不该让一个正常包被评成「不是漫画包」。
     let entries: Vec<&str> = names
@@ -266,6 +331,16 @@ pub(crate) fn zip_shape(path: &Path) -> ZipShape {
     // `cbz::is_page_image` 那一份，不再写第二份。
     if !entries.is_empty() && entries.iter().all(|name| is_page_image(name)) {
         return ZipShape::Book(Format::Cbz);
+    }
+    // HTMLZ：一个装着网页书的包。根下有 `index.html` 就是它；没有索引页时，
+    // 「至少一份 HTML + 至少一张图」也按它收 —— 这样的包退层只带走 HTML、会把图丢掉。
+    let html_count = entries.iter().filter(|name| is_html_entry(name)).count();
+    let root_index = entries.iter().any(|name| {
+        name.eq_ignore_ascii_case("index.html") || name.eq_ignore_ascii_case("index.htm")
+    });
+    let has_image = entries.iter().any(|name| is_page_image(name));
+    if html_count > 0 && (root_index || has_image) {
+        return ZipShape::Book(Format::Htmlz);
     }
     // 剩下的那一族：把**每一条像书的条目**都交出去，一条算一本书。
     //
@@ -302,6 +377,14 @@ pub(crate) fn zip_shape(path: &Path) -> ZipShape {
 /// 条目名里的文件部分（容器里的路径分隔符两种都认）。
 fn file_name(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+/// 这一条是不是 HTML 文档（HTMLZ 的章节单位）。
+fn is_html_entry(name: &str) -> bool {
+    matches!(
+        extension_of(name).as_deref(),
+        Some("html" | "htm" | "xhtml")
+    )
 }
 
 /// 第三层：ZIP 家族。判据全在 [`zip_shape`]，这一格只把那份答案换成判定面那四种说法。
@@ -439,6 +522,57 @@ mod tests {
         path
     }
 
+    /// 摆一个最小 PalmDB：头 78 字节 + 记录表 + 记录内容。
+    fn palmdb_at(dir: &Path, name: &str, db_name: &str, records: &[&[u8]]) -> PathBuf {
+        const HEADER: usize = 78;
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).unwrap();
+        let mut head = vec![0u8; HEADER];
+        head[..db_name.len().min(32)].copy_from_slice(&db_name.as_bytes()[..db_name.len().min(32)]);
+        head[60..64].copy_from_slice(b"BOOK");
+        head[64..68].copy_from_slice(b"MOBI");
+        head[76..78].copy_from_slice(&(records.len() as u16).to_be_bytes());
+        file.write_all(&head).unwrap();
+        let mut start = HEADER + records.len() * 8;
+        let mut table = Vec::with_capacity(records.len() * 8);
+        for record in records {
+            table.extend_from_slice(&(start as u32).to_be_bytes());
+            table.push(0);
+            table.extend_from_slice(&[0, 0, 0]);
+            start += record.len();
+        }
+        file.write_all(&table).unwrap();
+        for record in records {
+            file.write_all(record).unwrap();
+        }
+        path
+    }
+
+    /// PalmDoc 的 PalmDB：类型 `TEXt`、creator `REAd`。
+    fn palmdoc_at(dir: &Path, name: &str, records: &[&[u8]]) -> PathBuf {
+        const HEADER: usize = 78;
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).unwrap();
+        let mut head = vec![0u8; HEADER];
+        head[60..64].copy_from_slice(b"TEXt");
+        head[64..68].copy_from_slice(b"REAd");
+        head[76..78].copy_from_slice(&(records.len() as u16).to_be_bytes());
+        file.write_all(&head).unwrap();
+        let mut start = HEADER + records.len() * 8;
+        let mut table = Vec::with_capacity(records.len() * 8);
+        for record in records {
+            table.extend_from_slice(&(start as u32).to_be_bytes());
+            table.push(0);
+            table.extend_from_slice(&[0, 0, 0]);
+            start += record.len();
+        }
+        file.write_all(&table).unwrap();
+        for record in records {
+            file.write_all(record).unwrap();
+        }
+        path
+    }
+
     const EPUB_ENTRIES: &[(&str, &[u8], bool)] = &[
         ("mimetype", b"application/epub+zip", true),
         ("META-INF/container.xml", b"<container/>", true),
@@ -461,17 +595,30 @@ mod tests {
     #[test]
     fn pdf_and_palmdb_land_by_magic_not_by_name() {
         let tmp = dir("magic");
-        // PalmDB 的签名在偏移 60，前面填够 60 个字节。
-        let mut mobi = vec![0u8; 60];
-        mobi.extend_from_slice(b"BOOKMOBI");
-        mobi.extend_from_slice(&[0u8; 24]);
-        for (name, body, want) in [
-            ("book.pdf", b"%PDF-1.7\n".to_vec(), Verdict::Known("PDF")),
-            ("book.other", mobi.clone(), Verdict::Readable(Format::Mobi)),
-        ] {
-            let path = file_at(tmp.path(), name, &body);
-            assert_eq!(identify(name, &path), want, "{name} 该由魔数定");
-        }
+        let pdf = file_at(tmp.path(), "book.pdf", b"%PDF-1.7\n");
+        assert_eq!(
+            identify("book.pdf", &pdf),
+            Verdict::Readable(Format::Pdf),
+            "PDF 由魔数定"
+        );
+        // PalmDB 的记录表必须真的开得出来：判定层现在要打开记录看它是不是 AZW4。
+        let mobi = palmdb_at(tmp.path(), "book.other", "书", &[b"MOBI-HEADER"]);
+        assert_eq!(
+            identify("book.other", &mobi),
+            Verdict::Readable(Format::Mobi),
+            "PalmDB 里没有 PDF 记录就是 MOBI"
+        );
+        let azw4 = palmdb_at(
+            tmp.path(),
+            "print.other",
+            "印刷版",
+            &[b"MOBI-HEADER", b"%PDF-1.7\n"],
+        );
+        assert_eq!(
+            identify("print.other", &azw4),
+            Verdict::Readable(Format::Azw4),
+            "PalmDB 里有 PDF 记录就是 AZW4"
+        );
     }
 
     /// EPUB 的正解：第一个条目叫 `mimetype` 且内容是那个串。**换了文件名也认**，
@@ -767,6 +914,90 @@ mod tests {
             Verdict::NotABook,
             "没有容器的 `.chm` 不收：替它猜一个格式等于多一本坏书"
         );
+    }
+
+    /// DOCX：`[Content_Types].xml` + `word/document.xml` 就是形状，名字不参与。
+    #[test]
+    fn docx_is_decided_by_its_parts_not_the_extension() {
+        let tmp = dir("docx");
+        let path = zip_at(
+            tmp.path(),
+            "a.zip",
+            &[
+                ("[Content_Types].xml", b"<Types/>", true),
+                ("word/document.xml", b"<w:document/>", true),
+            ],
+        );
+        assert_eq!(identify("a.zip", &path), Verdict::Readable(Format::Docx));
+    }
+
+    /// ODT：`mimetype` 第一条就是它的正解；`content.xml` + manifest 是兜底。
+    #[test]
+    fn odt_is_decided_by_its_mimetype_or_manifest() {
+        let tmp = dir("odt");
+        let path = zip_at(
+            tmp.path(),
+            "a.zip",
+            &[
+                ("mimetype", b"application/vnd.oasis.opendocument.text", true),
+                ("content.xml", b"<office:document-content/>", true),
+            ],
+        );
+        assert_eq!(identify("a.zip", &path), Verdict::Readable(Format::Odt));
+
+        let fallback = zip_at(
+            tmp.path(),
+            "b.zip",
+            &[
+                ("content.xml", b"<office:document-content/>", true),
+                ("META-INF/manifest.xml", b"<manifest/>", true),
+            ],
+        );
+        assert_eq!(identify("b.zip", &fallback), Verdict::Readable(Format::Odt));
+    }
+
+    /// HTMLZ：根下有 `index.html` 就按一本书收，不许退层把图片丢掉。
+    #[test]
+    fn an_htmlz_is_one_book_not_a_pack() {
+        let tmp = dir("htmlz");
+        let path = zip_at(
+            tmp.path(),
+            "书.zip",
+            &[
+                ("index.html", b"<html><body>x</body></html>", true),
+                ("Images/pic.png", b"\x89PNG", true),
+            ],
+        );
+        assert_eq!(identify("书.zip", &path), Verdict::Readable(Format::Htmlz));
+    }
+
+    /// PalmDoc：PalmDB 的类型是 `TEXt`，记录 0 有 PalmDoc 头才是书。
+    #[test]
+    fn palmdoc_is_decided_by_the_palmdoc_header() {
+        let tmp = dir("pdb");
+        let mut header = vec![0u8; 16];
+        header[0..2].copy_from_slice(&1u16.to_be_bytes());
+        header[4..8].copy_from_slice(&4u32.to_be_bytes());
+        header[8..10].copy_from_slice(&1u16.to_be_bytes());
+        header[10..12].copy_from_slice(&4096u16.to_be_bytes());
+        let path = palmdoc_at(tmp.path(), "书.pdb", &[&header, b"text"]);
+        assert_eq!(identify("书.pdb", &path), Verdict::Readable(Format::Pdb));
+    }
+
+    /// CBR：RAR 魔数先收下，条目是不是图由 provider 确认。
+    #[test]
+    fn a_rar_magic_is_cbr() {
+        let tmp = dir("cbr");
+        let path = file_at(tmp.path(), "书.cbr", b"Rar!\x1A\x07\x00rest");
+        assert_eq!(identify("书.cbr", &path), Verdict::Readable(Format::Cbr));
+    }
+
+    /// 7z 魔数：CB7 由 provider 去确认条目是不是图，判定层先收下。
+    #[test]
+    fn a_7z_magic_is_cb7() {
+        let tmp = dir("cb7");
+        let path = file_at(tmp.path(), "书.cb7", b"7z\xBC\xAF\x27\x1Crest");
+        assert_eq!(identify("书.cb7", &path), Verdict::Readable(Format::Cb7));
     }
 
     /// 裸文件按扩展名定，TXT 与 Markdown 分不出来是**格式本身没有魔数**，不是实现偷懒。

@@ -70,6 +70,48 @@ fn rtf(dir: &Path) -> PathBuf {
     )
 }
 
+fn docx(dir: &Path) -> PathBuf {
+    let path = dir.join("a.docx");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    for (name, body) in [
+        ("[Content_Types].xml", b"<Types/>".as_slice()),
+        (
+            "word/document.xml",
+            r#"<w:document xmlns:w="x"><w:body><w:p><w:r><w:t>正文</w:t></w:r></w:p></w:body></w:document>"#
+                .as_bytes(),
+        ),
+    ] {
+        zip.start_file(name, opts).unwrap();
+        zip.write_all(body).unwrap();
+    }
+    zip.finish().unwrap();
+    path
+}
+
+fn odt(dir: &Path) -> PathBuf {
+    let path = dir.join("a.odt");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    for (name, body) in [
+        (
+            "mimetype",
+            b"application/vnd.oasis.opendocument.text".as_slice(),
+        ),
+        (
+            "content.xml",
+            r#"<office:document-content xmlns:office="o" xmlns:text="t"><office:body><office:text><text:p>正文</text:p></office:text></office:body></office:document-content>"#
+                .as_bytes(),
+        ),
+    ] {
+        zip.start_file(name, opts).unwrap();
+        zip.write_all(body).unwrap();
+    }
+    zip.finish().unwrap();
+    path
+}
 
 fn pdb(dir: &Path) -> PathBuf {
     const HEADER: usize = 78;
@@ -95,6 +137,19 @@ fn pdb(dir: &Path) -> PathBuf {
     for record in records {
         file.write_all(record).unwrap();
     }
+    path
+}
+
+fn htmlz(dir: &Path) -> PathBuf {
+    let path = dir.join("a.htmlz");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("index.html", opts).unwrap();
+    zip.write_all("<html><body><p>正文</p></body></html>".as_bytes())
+        .unwrap();
+    zip.finish().unwrap();
     path
 }
 
@@ -127,7 +182,10 @@ fn every_reflow_provider_hands_the_engine_parseable_xhtml() {
         ("fb2", fb2(dir.path())),
         ("rtf", rtf(dir.path())),
         ("epub", epub_fixture()),
+        ("docx", docx(dir.path())),
+        ("odt", odt(dir.path())),
         ("pdb", pdb(dir.path())),
+        ("htmlz", htmlz(dir.path())),
     ];
 
     for (name, path) in cases {
