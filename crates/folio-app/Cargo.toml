@@ -127,11 +127,11 @@ image = "0.25.10"
 # compute」报成「没有可用 GPU」。
 # 屏还是黑的，卡在那台模拟器的 GLES 3.0 没有 SSBO —— 那一格由 `c261858` 解决，见根上那条。
 # `6b4cfa6`（字体探测表按当前镜像发的名字重排：裸名字在前，带字重的猜测留在后面。装机第一帧
-# 画出来之后中文是一整屏 `.notdef` 豆腐块 —— 那份表九个路径只有 `HarmonyOS_Sans_Italic.ttf`
+# 画出来之后中文是一整屏 `.notdef` 豆腐块 —— 那份表十八个路径只有 `HarmonyOS_Sans_Italic.ttf`
 # 碰巧对上，中文唯一有字形的 `HarmonyOS_Sans_SC.ttf` 从没被读过，而 Latin 照常出，所以静默。
 # 另剔掉 `HMOSColorEmojiCompat.ttf`：它一进 fontdb，gpui 就拿它的家族名去 resolve emoji，
 # 那份面没有期待的 style，第一次画字就 panic。鸿蒙的 emoji 与 Android 同解 —— 随包带一份）。
-# `52f06cc`（OHOS 补一条 `install_with_assets` —— Android 有 `start_with_assets`，iOS 与
+# `4a7e29a`（OHOS 补一条 `install_with_assets` —— Android 有 `start_with_assets`，iOS 与
 # OHOS 都没有：`Application` 在库内部构造，宿主只拿到闭包里的 `&mut App`，而 `with_assets`
 # 消费的是 builder 本身，从那个位置够不着。后果不是报错是**静默空白**：`svg().path("icons/…")`
 # 解析不出字节。装机实测过这条链：接上之后 debug 构建仍报 `could not find asset at path
@@ -139,8 +139,11 @@ image = "0.25.10"
 # rust-embed 的字节只在 `#[cfg(not(debug_assertions))]` 下嵌进二进制，debug 构建是按编译期
 # 的 checkout 路径去读盘 —— 设备上没那个目录。换 release 构建（46 MB，debug 是 1.3 GB）后
 # 放大镜、⋮、底部四个 tab 图标全画出来了，`could not find asset` 归零。
-# 也就是说：**鸿蒙的调试期看不到任何嵌入资源，这不是鸿蒙的坑，是 debug profile 的坑**。）
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "52f06cc9f0cc859de409ccf532cd467d003cacc3", features = [
+# 也就是说：**鸿蒙的调试期看不到任何嵌入资源，这不是鸿蒙的坑，是 debug profile 的坑**。
+# 这条 sha 是 amend 出来的：原来那条 `52f06cc` 正文末尾混进了一个字面 `EOF`（heredoc 多写了
+# 一行），清理只能改写 `fork/main` 顶端那一条，所以 pin 跟着换 —— `b1744b40` 的提交信息里
+# 写的 `52f06cc` 已经不在分支上了，以这里钉住的数为准。）
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "4a7e29a9d1effa81c5b15500198f2da8f54d7119", features = [
     "permission_handler",
     # 把视图渲成图（分享卡片那一格的地基）。要的是打了补丁的渲染器，见根上那条 patch。
     "offscreen",
