@@ -337,8 +337,24 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 # `cargo metadata` 都跑不起来（CI 那两个 job 红在第 1 步就是这一条），而 `actions/checkout`
 # 不许把依赖检出到 workspace 外面 —— 所以只能钉 rev，不能指子目录。上游哪天合入这些口子，
 # 这两条连同 `folio-curl` 一起删。
-gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "07bd73e0428d826c7a30efa6bc3d962fbb981c34" }
-gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "07bd73e0428d826c7a30efa6bc3d962fbb981c34" }
+#
+# 改完 `~/Code/gpui-folio` 要让它在这生效，三步（rev 不推上去 cargo 就取不到）：
+#   1. 在 gpui-folio 里 commit 并 `git push origin main`；
+#   2. 把新 sha 一次替换这里的两条 + `crates/folio-app/Cargo.toml` 那条 `folio-curl`
+#      （三处必须同一个数）；
+#   3. `cargo update -p gpui-pre -p gpui-pre-wgpu -p folio-curl`，然后 `cargo check`。
+#
+# 只想在本机试一版、不打算推：这两条临时改成 `path = "../gpui-folio/gpui-pre"` 与
+# `…/gpui-pre-wgpu`（改完别提交 —— 就是上面说的那条让 CI 红的路）。注意 `paths = [...]`
+# 那一种覆盖对这两个包**不灵**：实测 cargo 报 "path override … has altered the original
+# list of dependencies"（gpui-folio 那份的依赖表与注册表那份不同），并明说将来会变成硬
+# 错误。`gpui-pre-mobile` 没这个问题，它照旧走 `paths`，见 `crates/folio-app/Cargo.toml`。
+# `002b89f`：卷曲的接缝改在片元里从 `uv` 现算（顶点插值的 `past` / 法向只能对齐网格顶点，
+# 斜接缝在屏上是一格一格的台阶），另一处是把 `required_limits` 从 `downlevel_defaults()` 换成
+# 直接取 `adapter.limits()` —— GLES 适配器把 compute 与 storage buffer 两族整族报成 0，
+# 鸿蒙模拟器上那一次 `request_device` 一个 adapter 都留不下。
+gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "002b89f54338e4a13f8a361885cf2d5c1f4323b2" }
+gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "002b89f54338e4a13f8a361885cf2d5c1f4323b2" }
 
 # 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
 # opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；

@@ -27,7 +27,7 @@ folio-core.workspace = true
 # 仿真翻页那一档的页面网格与 uniform 的纯 CPU 定义：这里只拿数据，不拿 GPU 类型。
 # 它住在 `panzhifu/gpui-folio` 那个 workspace 里（第三个成员），rev 必须跟根
 # `[patch.crates-io]` 那两条同一个数 —— 一份 fork 三个成员，钉成两个 rev 就是两份代码。
-folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "07bd73e0428d826c7a30efa6bc3d962fbb981c34" }
+folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "002b89f54338e4a13f8a361885cf2d5c1f4323b2" }
 gpui-kit.workspace = true
 # 只依赖 gpui-kit 一个门面：它顶层 `pub use ::gpui::*`，把移动端那份 `gpui-pre` 整个
 # 转了出来，所以两端都用 `use gpui_kit::…`，不再单独声明一条 `gpui` 依赖。
@@ -96,9 +96,24 @@ image = "0.25.10"
 # `095c9b3`（合进 longbridge 的 offscreen 三条 `d04e1b3`/`b28e203`/`4411403`：开一个真的
 # GPUI 窗口、把它渲成图而不是画上屏（`gpui_mobile::offscreen`）。它按上游原样带着自己
 # 那份 `vendor/gpui-pre-wgpu` 与 `[patch.crates-io]` —— 那条 patch 在我们这侧**不生效**
-# （cargo 只认工作区根上的 patch），生效的是根上那条指向 `panzhifu/gpui-pre-wgpu` 的；
+# （cargo 只认工作区根上的 patch），生效的是根上那两条指向 `panzhifu/gpui-folio` 的；
 # 留着它只为与上游那三条零冲突，并让他们自己的 example 仍能开 offscreen）。
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "095c9b3562a31f372b450c844848077100ec08e6", features = [
+# `4ea3dea`（在 `095c9b3` 之上只多一条：把 `feat/harmonyos-support` 那份 ohos 后端移植到
+# gpui-pre 0.3.9 这条线上 —— `src/ohos/` 十个文件、ArkTS 宿主工程 `example/ohos/`，加上
+# 三个只有真跑一遍才暴露出来的修复：hilog 的 `LOG_APP` 在现在的 SDK 里是 0 不是 1（传 1
+# 会把 native 每一条日志静默丢掉）、那 29 个 `extern "C"` 块缺 `#[link]` 所以 cdylib 只
+# 带着 `libc.so` 就链上了、装载时才在 `OH_LOG_Print` 上 relocation 失败，以及 `build.sh`
+# 写死 aarch64 而 x86_64 那台模拟器只认 `x86_64`。移植量全是 trait 签名漂移，每一条都照
+# 这条线上 Android 臂已有的做法对齐）。
+# `949536e`（把上面那份 `vendor/gpui-pre-wgpu` 删了：与 `panzhifu/gpui-pre-wgpu@617a933` 逐
+# 文件相同、只差一个 `.gitignore`，而树里的第二份副本不会自己更新 —— 忘了同步的那一版是
+# 静默的，症状只有像素。根上那条 patch 换成钉死 rev 的 git 源，理由是它换的是**所有**平台的
+# 渲染器，不只有移动那几头，跟着分支头漂就是画面在漂）。
+# `2beb14c`（OHOS 的入口补上 hilog logger 与 panic hook —— 另两个移动臂都装了，只它没有。
+# 没装时 `src/ohos` 里每一条 `log::*` 都被丢掉，native 侧看着全死，而同进程 ArkTS 的
+# `hilog.info` 照打，正好把人指离真因；panic hook 是为 `-Z build-std=std,panic_abort` 那
+# 一种构建，默认 hook 写 stderr，faultlog 里只剩裸 PC）。
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "2beb14c6ef1a8b4c35af55355487ec7f1e92d65d", features = [
     "permission_handler",
     # 把视图渲成图（分享卡片那一格的地基）。要的是打了补丁的渲染器，见根上那条 patch。
     "offscreen",
