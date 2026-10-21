@@ -20,6 +20,10 @@ pub mod markdown;
 pub(crate) mod mobi;
 /// 纯文本（`.txt`）小说的分章与书目提取：规则表 + 引擎两份，见 `novel` 的模块说明。
 pub mod novel;
+// 压着的不是「没人用的模块」——MOBI / AZW4 / PDB 与判定层都在用它 —— 而是那张记录表里
+// 没人读的三格（`path()` 与每条记录的 `attributes` / `uid`）。它们留在类型里是为了
+// 读文件时一次到位、也方便排障时打印，但别当成「已经接上了」：删掉任何一格都会红。
+#[allow(dead_code)]
 pub(crate) mod palmdb;
 pub mod provider;
 pub mod rtf;

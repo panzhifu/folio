@@ -272,6 +272,7 @@ pub fn provider_for(path: &Path) -> Option<Box<dyn DocumentProvider>> {
 pub fn supported_extensions() -> &'static [&'static str] {
     &[
         "epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "rtf", "cbz", "chm",
+        "mobi", "azw", "azw3", "prc", "pdf", "docx", "odt", "pdb", "azw4", "cb7", "cbr", "cbt",
     ]
 }
 

@@ -123,7 +123,12 @@ const COVER_MAX_EDGE: u32 = 512;
 ///
 /// 为什么不干脆不兜底：带大 EXIF 缩略图或长注释段的 JPEG 会把 SOFn 推到更后面，
 /// 那种图给个 0×0 就是版面按容器宽度硬拉。宁可多读一张，不多错一张。
-const IMAGE_HEAD_BYTES: u64 = 32 * 1024;
+/// 一张插图进清单时先读的前缀字节数。
+///
+/// 不是 MOBI 专属的数：它的口径是「尺寸头通常排在位图最前面，32 KB 够跨过一张
+/// 带大 EXIF 缩略图的 JPEG」。`format::mobi` 取同一条口径（见那里的 `image_size`），
+/// 所以这一格跟着 `pub(crate)`，不再抄第二份。
+pub(crate) const IMAGE_HEAD_BYTES: u64 = 32 * 1024;
 
 /// 认得哪些 media-type 是字体，以及要不要先过一道 WOFF。
 ///

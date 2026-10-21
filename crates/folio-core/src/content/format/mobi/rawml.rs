@@ -37,6 +37,17 @@ use crate::content::format::palmdb::PalmDb;
 /// 「按 PalmDB 记录号取原始字节」的回调。与 [`super::indx`] 同一个形状。
 pub(crate) type Records<'a> = &'a dyn Fn(usize) -> Option<Vec<u8>>;
 
+/// 「按号取一条记录的**头部**，连同整条记录的长度」的回调。
+///
+/// 只有一件事用它：认资源记录的魔数。从前它走的是 `Records` —— 为了嗅出「这条是 JPEG」
+/// 把 2 MB 的图整条读进一个新的 `Vec`，实测一本 551 KB 的 KF8 在扫资源那一步扛回 **831 KB**
+/// （比它自己的正文还长），而真正需要的字节是 16 个。
+/// 长度单独给，是因为 BMP 那一支的判据是「头里声明的尺寸 == 整条记录的长度」。
+pub(crate) type Heads<'a> = &'a dyn Fn(usize) -> Option<(Vec<u8>, usize)>;
+
+/// 认魔数要读的字节数：最长的那个标记是 PNG 的 8 字节签名，再留几格给 BMP 的尺寸字段。
+const HEAD_BYTES: usize = 16;
+
 /// 一个资源记录的种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResourceKind {
@@ -88,42 +99,32 @@ pub(crate) struct Reconstructed {
 ///
 /// `kf8_offset` 是 hybrid 文件里 KF8 那一半的偏移（非 hybrid 是 0）；`first_resource`
 /// 是首个资源记录的绝对号（`None` 时不扫资源）。
+///
+/// `heads` 只服务于扫资源那一步（见 [`Heads`]）：那一步从前也走 `read`，为了认魔数
+/// 把每一条资源记录整条读回来。
 pub(crate) fn reconstruct(
     read: Records<'_>,
+    heads: Heads<'_>,
     header: &Header,
     kf8_offset: usize,
     first_resource: Option<usize>,
 ) -> Option<Reconstructed> {
     let text = decompress_text(read, header, kf8_offset)?;
     let fdst = read_fdst(read, header, kf8_offset);
-    let flow = flow_parts(&text, fdst.as_deref());
+    // 只有一段（或没有 FDST）就等于「整本正文是一条流」，不必切，也不必为归类再读一遍。
+    let sections = fdst.as_deref().filter(|s| s.len() > 1);
 
     let mut out = Reconstructed {
-        resources: scan_resources(read, first_resource),
+        resources: scan_resources(heads, first_resource),
         ..Default::default()
     };
 
-    // flow[0] 是 html；其余段按 KF8 的 `kindle:flow:NNNN?mime=` 归类。
-    let first_html = flow
-        .first()
-        .map(|part| String::from_utf8_lossy(part).into_owned());
-    for (n, part) in flow.iter().enumerate().skip(1) {
-        match first_html
-            .as_deref()
-            .map(|html| flow_type(html, n))
-            .unwrap_or(FlowType::Unknown)
-        {
-            FlowType::Css => {
-                out.css.push_str(&String::from_utf8_lossy(part));
-                out.css.push('\n');
-            }
-            FlowType::Svg => out.flow_svgs.push((n, part.clone())),
-            // html 段只该有一个头；其余未归类的段丢掉（不是我们认得的内容）。
-            _ => {}
-        }
-    }
-
     // markup：KF8 用 SKEL/FRAG 重建多个文件；否则整段当一章。
+    //
+    // 两张索引**先读**，因为下面那条「一次都不拷」的快道判的是「拼不出东西」而不是
+    // 「头里写了个号」：老书（KF7）的 `skeleton_index` 站在那 232 字节的 MOBI 头之外，
+    // `Header::parse` 从那个偏移读回来的是 EXTH 的字节 —— 那不是骨架号，解出来必然
+    // 是一张空表。以「表是不是空的」为准，KF7 才真走上这条快道。
     let skel = if header.skeleton_index != NOTSET {
         Some(indx::read_index(
             read,
@@ -143,19 +144,57 @@ pub(crate) fn reconstruct(
         None
     };
 
+    // KF7 的形状：一条流、又没有骨架可拼 —— 整本正文**就是**那一章。
+    // 把解压缓冲直接搬进 String，一次都不拷（从前是「切段拷一份 → lossy 转 String 拷一份
+    // → 交出去再拷一份」，2.7 MB 的书一本要多搬 5 MB）。
+    if sections.is_none() && skel.as_ref().is_none_or(|s| s.entries.is_empty()) {
+        out.markup = vec![into_string(text)];
+        return Some(out);
+    }
+
+    let flow = flow_parts(&text, sections);
+    // flow[0] 是 html。`from_utf8_lossy` 在合法 UTF-8 时给的是 `Cow::Borrowed`，
+    // 所以这一趟不拷贝；拷贝只发生在真要交出一个 String 的地方。
+    let first_html: Option<std::borrow::Cow<'_, str>> =
+        flow.first().map(|bytes| String::from_utf8_lossy(bytes));
+
+    // 其余段按 KF8 的 `kindle:flow:NNNN?mime=` 归类：css 汇成一份样式，svg 留着字节。
+    if let Some(html) = first_html.as_deref() {
+        for (n, part) in flow.iter().enumerate().skip(1) {
+            match flow_type(html, n) {
+                FlowType::Css => {
+                    out.css.push_str(&String::from_utf8_lossy(part));
+                    out.css.push('\n');
+                }
+                FlowType::Svg => out.flow_svgs.push((n, part.to_vec())),
+                // html 段只该有一个头；其余未归类的段丢掉（不是我们认得的内容）。
+                _ => {}
+            }
+        }
+    }
+
     out.markup = match (flow.first(), skel.as_ref(), frag.as_ref()) {
         (Some(html), Some(skel), Some(frag)) if !skel.entries.is_empty() => {
             match reconstruct_markup(html, skel, frag) {
                 // 重建失败退回整段（降级口径三）。
                 Some(parts) if !parts.is_empty() => parts,
-                _ => vec![String::from_utf8_lossy(html).into_owned()],
+                _ => vec![into_string(html.to_vec())],
             }
         }
-        (Some(html), _, _) => vec![String::from_utf8_lossy(html).into_owned()],
+        (Some(html), _, _) => vec![into_string(html.to_vec())],
         (None, _, _) => Vec::new(),
     };
 
     Some(out)
+}
+
+/// 把解出来的字节变成 String。
+///
+/// 合法 UTF-8 时**搬走**缓冲（一次拷贝都不发生）；不合法才按 `from_utf8_lossy` 的口径
+/// 把坏字节换成 U+FFFD —— 与改写前的产物逐字节一致，只是不再先整份抄一遍。
+fn into_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
 }
 
 /// 解压全部文本记录，拼成一整段字节。
@@ -250,9 +289,12 @@ fn read_fdst(read: Records<'_>, header: &Header, kf8_offset: usize) -> Option<Ve
 }
 
 /// 把一整段 rawml 按 FDST 切成若干 flow 段；没有 FDST 时就是**一段**。
-fn flow_parts(text: &[u8], fdst: Option<&[(u32, u32)]>) -> Vec<Vec<u8>> {
-    match fdst {
-        Some(sections) if sections.len() > 1 => {
+///
+/// 交回的是 `text` 的**切片**，不是各段自己的一份缓冲 —— 切段这件事本身不该重抄正文。
+/// 调用方只在「段数 > 1」时走进来（那件事由 `reconstruct` 判），这里不再重复判一次。
+fn flow_parts<'a>(text: &'a [u8], sections: Option<&[(u32, u32)]>) -> Vec<&'a [u8]> {
+    match sections {
+        Some(sections) => {
             let mut out = Vec::with_capacity(sections.len());
             for &(start, end) in sections {
                 let (start, end) = (start as usize, end as usize);
@@ -260,11 +302,11 @@ fn flow_parts(text: &[u8], fdst: Option<&[(u32, u32)]>) -> Vec<Vec<u8>> {
                     // 一段越界：宁可少一段，别 panic。
                     break;
                 }
-                out.push(text[start..end].to_vec());
+                out.push(&text[start..end]);
             }
             out
         }
-        _ => vec![text.to_vec()],
+        None => vec![text],
     }
 }
 
@@ -344,21 +386,32 @@ fn reconstruct_markup(flow: &[u8], skel: &indx::Index, frag: &indx::Index) -> Op
     Some(parts)
 }
 
+/// 只列资源记录，**不碰正文**。
+///
+/// 给 `MobiAdapter::fonts` 用：它要的是「哪几条记录是 FONT」。从前那一趟走的是
+/// `reconstruct` —— 为了一张记录表把整本正文解压、重建一遍，实测 2.7 MB 那本 9.2 ms、
+/// 5 MB 那本 38.9 ms，而认 FONT 只要每条记录开头十六个字节。
+pub(crate) fn list_resources(heads: Heads<'_>, first_resource: Option<usize>) -> Vec<Resource> {
+    scan_resources(heads, first_resource)
+}
+
 /// 扫资源记录：从 `first_resource` 起，按魔数认图 / 字体，遇到 EOF / BOUNDARY 终止。
 ///
 /// 认不出的记录跳过（KindleGen 会在资源之间塞对齐/填充）。`first_resource` 为 `None`
 /// 时**不扫**（宁可没有图，也别把正文记录当图）。
-fn scan_resources(read: Records<'_>, first_resource: Option<usize>) -> Vec<Resource> {
+///
+/// 走 `Heads`：认魔数只要每条记录的开头十六个字节（见 [`Heads`] 那段实测）。
+fn scan_resources(heads: Heads<'_>, first_resource: Option<usize>) -> Vec<Resource> {
     let Some(start) = first_resource else {
         return Vec::new();
     };
     let mut out = Vec::new();
     let mut record = start;
-    while let Some(bytes) = read(record) {
-        if is_end_marker(&bytes) {
+    while let Some((head, len)) = heads(record) {
+        if is_end_marker(&head) {
             break;
         }
-        if let Some((kind, media_type)) = classify_resource(&bytes)
+        if let Some((kind, media_type)) = classify_resource(&head, len)
             && kind.kept()
         {
             out.push(Resource {
@@ -375,8 +428,8 @@ fn scan_resources(read: Records<'_>, first_resource: Option<usize>) -> Vec<Resou
     out
 }
 
-/// 资源记录的魔数分类。
-fn classify_resource(bytes: &[u8]) -> Option<(ResourceKind, &'static str)> {
+/// 资源记录的魔数分类。`len` 是**整条记录**的字节数（BMP 那一支要拿它对头里声明的尺寸）。
+fn classify_resource(bytes: &[u8], len: usize) -> Option<(ResourceKind, &'static str)> {
     if bytes.len() >= 3 && bytes[..3] == [0xff, 0xd8, 0xff] {
         return Some((ResourceKind::Image, "image/jpeg"));
     }
@@ -388,7 +441,7 @@ fn classify_resource(bytes: &[u8]) -> Option<(ResourceKind, &'static str)> {
     }
     if bytes.len() >= 6
         && bytes.get(..2) == Some(b"BM".as_slice())
-        && u32_at_le(bytes, 2).is_some_and(|size| size as usize == bytes.len())
+        && u32_at_le(bytes, 2).is_some_and(|size| size as usize == len)
     {
         return Some((ResourceKind::Image, "image/bmp"));
     }
@@ -424,17 +477,15 @@ pub(crate) fn split_kf7(html: &str) -> Vec<String> {
 /// 给章配标题（NCX 的 filepos 就是原串里的字节偏移）。
 pub(crate) fn split_kf7_ranges(html: &str) -> Vec<(usize, String)> {
     let mut parts: Vec<(usize, String)> = Vec::new();
-    let mut rest = html;
     let mut base = 0usize;
     loop {
-        match find_pagebreak(rest) {
+        match find_pagebreak(html, base) {
             Some((start, end)) => {
-                parts.push((base, rest[..start].to_string()));
-                base += end;
-                rest = &rest[end..];
+                parts.push((base, html[base..start].to_string()));
+                base = end;
             }
             None => {
-                parts.push((base, rest.to_string()));
+                parts.push((base, html[base..].to_string()));
                 break;
             }
         }
@@ -446,15 +497,34 @@ pub(crate) fn split_kf7_ranges(html: &str) -> Vec<(usize, String)> {
     parts
 }
 
-/// 找下一个 `<mbp:pagebreak...>` 标签，返回它在串里的 `(起点, 终点)`。
+/// 分页符标签的头 14 个字节（`<mbp:pagebreak`）。
+const PAGEBREAK: &[u8] = b"<mbp:pagebreak";
+
+/// 找 `from` 之后的下一个 `<mbp:pagebreak...>`，返回**绝对**的 `(起点, 终点)`。
 ///
 /// 大小写不敏感（真实文件两种都写），属性（`pagebreak` 之后到 `>` 之前）整段吃掉，
 /// 所以 `<mbp:pagebreak/>` 与 `<mbp:pagebreak style="x">` 都认。
-fn find_pagebreak(text: &str) -> Option<(usize, usize)> {
-    let lower = text.to_ascii_lowercase();
-    let at = lower.find("<mbp:pagebreak")?;
-    let close = text[at..].find('>')?;
-    Some((at, at + close + 1))
+///
+/// 逐字节比，**不**先把剩下的正文 `to_ascii_lowercase()` 一遍再找：那一版每切开一章都要
+/// 把「还没扫过的那部分」整份重抄一遍，n 个分页符就是 n 遍 —— 实测 2.7 MB 正文插 121 个
+/// 分页符要 104 ms（占导入那一趟的 71%），插到 484 个要 377 ms，而正文一个字节都没多。
+/// 现在只按 `<` 定位（`find` 走 std 自带的 memchr），命中才比 14 个字节。
+///
+/// 标签起了头却没有 `>`：回 `None`，即「从这里往下不再切」，与改写前那一支同口径。
+fn find_pagebreak(html: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = html.as_bytes();
+    let mut at = from;
+    while let Some(rel) = html[at..].find('<') {
+        let start = at + rel;
+        let tail = &bytes[start..];
+        if tail.len() >= PAGEBREAK.len() && tail[..PAGEBREAK.len()].eq_ignore_ascii_case(PAGEBREAK)
+        {
+            let close = html[start..].find('>')?;
+            return Some((start, start + close + 1));
+        }
+        at = start + 1;
+    }
+    None
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
@@ -474,19 +544,36 @@ pub(crate) fn palm_records(db: &PalmDb) -> impl Fn(usize) -> Option<Vec<u8>> + '
     move |i| db.read(i)
 }
 
+/// `PalmDb` → [`Heads`] 的适配：给记录头 + 整条长度，不必为认魔数把整条读回来。
+pub(crate) fn palm_heads(db: &PalmDb) -> impl Fn(usize) -> Option<(Vec<u8>, usize)> + '_ {
+    move |i| {
+        let len = db.record(i)?.len;
+        db.read_head(i, HEAD_BYTES).map(|head| (head, len))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! 这一层的断言只看**解出的字节与重建出的 markup**：把记录表摆好，看结果。
 
     use super::FlowType;
     use super::{
-        ResourceKind, classify_resource, decompress_text, flow_type, reconstruct, split_kf7,
+        PalmDb, ResourceKind, classify_resource, decompress_text, flow_type, palm_records,
+        reconstruct, split_kf7, split_kf7_ranges,
     };
     use crate::content::format::mobi::header::{COMPRESSION_NONE, COMPRESSION_PALMDOC, Header};
 
     /// 一张记录表 → [`super::Records`] 回调。
     fn reader(table: &[Vec<u8>]) -> impl Fn(usize) -> Option<Vec<u8>> + '_ {
         move |i| table.get(i).cloned()
+    }
+
+    /// 同一张表 → [`super::Heads`] 回调：截到头部十六字节，长度给**整条**的。
+    fn headed(table: &[Vec<u8>]) -> impl Fn(usize) -> Option<(Vec<u8>, usize)> + '_ {
+        move |i| {
+            let row = table.get(i)?;
+            Some((row[..row.len().min(16)].to_vec(), row.len()))
+        }
     }
 
     /// 一份只填了「压缩 / 正文记录数 / 正文长度」的头，够 `decompress_text` 用。
@@ -506,6 +593,118 @@ mod tests {
     fn kf7_splits_on_pagebreaks_in_any_spelling() {
         let html = "a<mbp:pagebreak/>b<MBP:PAGEBREAK>c";
         assert_eq!(split_kf7(html), vec!["a", "b", "c"]);
+    }
+
+    /// 切章快版与「改写前那一版」**逐字节**对拍。
+    ///
+    /// 快版换掉的是「先把剩下的正文小写化一遍再找」这句 —— 那正是平方级的来源，也是最容易
+    /// 在大小写、属性、缺 `>` 这些形状上切错位的改动。所以这里留一份慢版当参照，
+    /// 判据不是人算的「应该是同一处」，而是两版真的相同。
+    fn split_ranges_reference(html: &str) -> Vec<(usize, String)> {
+        let mut parts: Vec<(usize, String)> = Vec::new();
+        let mut rest = html;
+        let mut base = 0usize;
+        loop {
+            let lower = rest.to_ascii_lowercase();
+            let hit = lower
+                .find("<mbp:pagebreak")
+                .and_then(|at| rest[at..].find('>').map(|close| (at, at + close + 1)));
+            match hit {
+                Some((start, end)) => {
+                    parts.push((base, rest[..start].to_string()));
+                    base += end;
+                    rest = &rest[end..];
+                }
+                None => {
+                    parts.push((base, rest.to_string()));
+                    break;
+                }
+            }
+        }
+        parts.retain(|(_, p)| !p.trim().is_empty());
+        if parts.is_empty() {
+            parts.push((0, html.to_string()));
+        }
+        parts
+    }
+
+    /// 边界形状各摆一条：这些都是真实文件里出现过的写法（大小写两种、不带斜杠、带属性、
+    /// 起了头没有尾、`<` 出现在正文里、多字节字符紧挨着标签）。
+    #[test]
+    fn the_fast_splitter_cuts_where_the_reference_did_on_awkward_shapes() {
+        let cases = [
+            "a<mbp:pagebreak/>b".to_string(),
+            "A<MBP:PageBreak>B<mbp:pagebreak style=\"x\">C".to_string(),
+            "只有正文，没有分页符".to_string(),
+            "<mbp:pagebreak 起了头没有尾<mbp:pagebreak/>后面的".to_string(),
+            "正文里的 < 号不是标签 1 < 2</p><mbp:pagebreak/>下一段".to_string(),
+            "<p>甲</p><mbp:pagebreak/><p>乙</p><mbp:pagebreak/>".to_string(),
+            "<mbp:pagebreak/>".to_string(),
+            "中文\u{fffd}混排<mbp:pagebreak/>尾".to_string(),
+            "<mbp:pagebreakx/>不该切<mobi:xxx/>也不切".to_string(),
+        ];
+        for html in cases {
+            assert_eq!(
+                split_kf7_ranges(&html),
+                split_ranges_reference(&html),
+                "形状：{html}"
+            );
+        }
+    }
+
+    /// 真书对拍：把语料里每一本能读的书的正文都拿来比一遍。
+    ///
+    /// 数量门不能少 —— 一本都没扫到时两条断言都是真空里过的。
+    #[test]
+    fn the_fast_splitter_matches_the_reference_on_the_real_samples() {
+        let dir = std::path::Path::new("../../../reference/libmobi/tests/samples");
+        let mut checked = 0usize;
+        let mut bytes = 0usize;
+        let mut entries = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect::<Vec<_>>(),
+            Err(_) => return, // 语料不在（worktree / CI 精简）：这一条不成立也不拦人
+        };
+        entries.sort();
+        for path in entries {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".mobi") && !name.ends_with(".azw3") {
+                continue;
+            }
+            let Ok(db) = PalmDb::open(&path) else {
+                continue;
+            };
+            let Some(rec0) = db.read(0) else { continue };
+            let Ok(header) = Header::parse(&rec0) else {
+                continue;
+            };
+            if header.encryption_type != 0 {
+                continue;
+            }
+            let Some(text) = decompress_text(&palm_records(&db), &header, 0) else {
+                continue;
+            };
+            let html = String::from_utf8_lossy(&text).into_owned();
+            if !html.contains("<mbp:pagebreak") && !html.contains("<MBP:PAGEBREAK") {
+                continue;
+            }
+            assert_eq!(
+                split_kf7_ranges(&html),
+                split_ranges_reference(&html),
+                "{name} 切的位置不一样"
+            );
+            checked += 1;
+            bytes += html.len();
+        }
+        assert!(
+            checked >= 3,
+            "真书对拍只跑了 {checked} 本（语料里该有的分页书至少 3 本），这一条等于没跑"
+        );
+        // 分页符个数也要一起报：它是那条平方级判据的自变量。
+        println!("切章对拍：{checked} 本 / {} KB 正文一致", bytes / 1024);
     }
 
     #[test]
@@ -530,20 +729,59 @@ mod tests {
 
     #[test]
     fn resources_are_recognized_by_magic() {
+        // 第二个参数是「整条记录的长度」：扫资源只读头，BMP 那一支的尺寸对账要靠它。
         assert_eq!(
-            classify_resource(&[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]),
+            classify_resource(&[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10], 6),
             Some((ResourceKind::Image, "image/jpeg"))
         );
         assert_eq!(
-            classify_resource(b"\x89PNG\r\n\x1a\n\x00\x00"),
+            classify_resource(b"\x89PNG\r\n\x1a\n0123", 12),
             Some((ResourceKind::Image, "image/png"))
         );
         assert_eq!(
-            classify_resource(&[b'F', b'O', b'N', b'T', 1, 2, 3, 4]),
+            classify_resource(&[b'F', b'O', b'N', b'T', 1, 2, 3, 4], 8),
             Some((ResourceKind::Font, "application/x-font"))
         );
+        // BMP：头里声明的尺寸要**等于整条长度**才算，差一格就是撞了 `BM` 的别的记录。
+        let mut bmp = vec![0u8; 20];
+        bmp[..2].copy_from_slice(b"BM");
+        bmp[2..6].copy_from_slice(&20u32.to_le_bytes());
+        assert_eq!(
+            classify_resource(&bmp, 20),
+            Some((ResourceKind::Image, "image/bmp"))
+        );
+        assert_eq!(classify_resource(&bmp, 4096), None, "尺寸对不上就不算 BMP");
         // 认不出的记录（对齐填充、正文残留）安静地跳过。
-        assert_eq!(classify_resource(b"random bytes"), None);
+        assert_eq!(classify_resource(b"random bytes", 12), None);
+    }
+
+    /// 扫资源**只读头**：一本带一张 2 MB 插图的书，扫完不该把图扛回来。
+    ///
+    /// 这一条钉的是 `Heads` 那条回调存在的理由。从前这一步走 `Records`，实测一本
+    /// 551 KB 的 KF8 在扫资源时扛回 831 KB —— 认魔数只要十六个字节。
+    #[test]
+    fn the_resource_scan_reads_heads_not_whole_records() {
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut huge = vec![0u8; 2 * 1024 * 1024];
+        huge[..8].copy_from_slice(&png);
+        let eof = b"\xe9\x8e\r\n".to_vec();
+        let table = [Vec::new(), huge, png, eof];
+
+        // 进账的是「这次回调真的搬回来多少字节」，不是记录声明的长度。
+        let bytes = std::cell::Cell::new(0usize);
+        let head = |i: usize| {
+            let row = table.get(i)?;
+            bytes.set(bytes.get() + row.len().min(16));
+            Some((row[..row.len().min(16)].to_vec(), row.len()))
+        };
+        let found = super::scan_resources(&head, Some(1));
+        assert_eq!(found.len(), 2, "两条都在 EOF 之前，都该认出来");
+        assert_eq!(
+            bytes.get(),
+            28,
+            "被碰到的三条记录各按 min(16, 长度) 取：16 + 8 + EOF 那 4 个字节。\
+             还是整条读的那一档，这一格会是 2097180 —— 2 MB 那张图一个字都不许进账"
+        );
     }
 
     #[test]
@@ -587,7 +825,7 @@ mod tests {
         let eof = b"\xe9\x8e\r\n".to_vec();
         let table = vec![Vec::new(), body.clone(), png, eof];
         let header = plain_header(COMPRESSION_NONE, 1, body.len() as u32);
-        let out = reconstruct(&reader(&table), &header, 0, Some(2)).unwrap();
+        let out = reconstruct(&reader(&table), &headed(&table), &header, 0, Some(2)).unwrap();
         assert_eq!(out.markup, vec!["<p>x</p>".to_string()]);
         assert_eq!(out.resources.len(), 1);
         assert_eq!(out.resources[0].record, 2);

@@ -41,10 +41,13 @@ pub struct BookDocument {
     image_sources: std::sync::OnceLock<HashMap<String, String>>,
     /// [`ChapterLocator::Section`] 那一族的**整本正文 memo**（会话级，关书即走）。
     ///
-    /// 为什么要它：单文件容器取一章 = provider 重解**整本**。合成 KF8/KF7 实测（release、
-    /// 正文不压缩那一档，所以是**下界**）：600 章一本，全文那一趟 109 ms，而**翻一章 107 ms**
-    /// —— 单步与整本同价，顺着读完整本就是 600 × 107 ms。留下第一次的结果，后面每次
-    /// 都是一次下标取值。
+    /// 为什么要它：单文件容器取一章 = provider 重解**整本**。由真中文小说正文包的那一本
+    /// （2.7 MB / 122 章，release、热页缓存、3 轮取最小）解一遍是 13 ms，顺着读下去就是
+    /// 每章一次 13 ms。留下第一次的结果，后面每次都是一次下标取值。
+    ///
+    /// 先问 [`read_texts`](format::DocumentProvider::read_texts)（只要正文那一趟），问不
+    /// 出来才退回 [`read`](format::DocumentProvider::read)：后者顺手算的封面重编、逐章
+    /// 字数、每张插图的尺寸，这一格**一个都不看** —— MOBI 实测那三格占全文那一趟的七成。
     ///
     /// 驻留实测：600 章（约 13 万字）改写后的 XHTML 是 405 KB，一千二百万字级别的书约 4 MB。
     /// 这一条**取代**了 `reader::Book::texts` 那个 ±3 章窗口在同一条路上吃的亏：窗口还在，
@@ -705,9 +708,9 @@ mod tests {
     /// 第一趟解完就 memo 住，之后取章是一次下标取值。
     ///
     /// 判据只能取 `WholeBookRereads` 那个量具：两条路给读者的文字**一模一样**，
-    /// 内容断言永远看不出省下的那几趟。而省下的是实测数量级 —— 合成 600 章 KF7
-    /// （release、正文不压缩那一档，所以是下界）整本 109 ms、**翻一章 107 ms**，
-    /// 顺着读完整本就是 600 个 107 ms。
+    /// 内容断言永远看不出省下的那几趟。而省下的是实测数量级 —— 由真中文小说正文包的那一本
+    /// KF7（2.7 MB / 122 章，release、热页缓存、3 轮取最小）**翻一章 13 ms**，
+    /// 顺着读完整本就是 122 个 13 ms。
     #[test]
     fn paging_through_a_single_file_book_reparses_it_only_once() {
         use crate::infra::metrics::{Metric, take_local};
