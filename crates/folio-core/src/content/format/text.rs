@@ -3,16 +3,16 @@
 //! ## 为什么共用件住在这一份
 //!
 //! 两族走的是同一条链：读成文本 → [`normalize`] → 切成章 → 包装成引擎就绪的 XHTML。
-//! 真正不同的只有两处 —— **怎么切**与**书名从哪儿来** —— 所以那两处收进
-//! [`PlainFamily`] 这两个字段，其余全部只有一份。
+//! 链只有一份，两族各给的是链上的**四个差异点** —— [`PlainFamily`] 那四个函数指针：
+//! 怎么切、书目从哪儿来、目录怎么折、正文里那些标记怎么变成结构。
 //!
 //! 值得单独说清的是 [`normalize`]：锚点坐标系就是它的产物（见那条自己的说明），
 //! 两族各写一份迟早会漂，而漂的症状是已存批注与进度**整体错位**、屏幕上查不出原因。
 //! 同理 [`read_with`] 里「索引那一档怎么折成章表」也只有一份 —— 那格定的是
 //! `chapters.char_len` 与 `ChapterLocator::Section` 的口径，两边本该逐字相同。
 //!
-//! Markdown 那一族比这一族多出来的只有「按 ATX 标题切」那一步，所以它住在
-//! [`super::markdown`] 并从这一份拿共用件；反过来不成立，纯文本不该知道 `#` 是什么。
+//! Markdown 那一族多的只有那四个格子里的答案，所以它住在 [`super::markdown`] 并从这一份
+//! 拿共用件；反过来不成立，纯文本不该知道 `#` 是什么。
 
 use std::path::Path;
 
@@ -49,7 +49,7 @@ impl DocumentProvider for PlainTextAdapter {
     }
 }
 
-/// 一族纯文本相对这条链的三个差异点。函数指针而不是泛型参数：调用点就两处，
+/// 一族纯文本相对这条链的四个差异点。函数指针而不是泛型参数：调用点就两处，
 /// 而它们要能被当成常量传下去。
 pub(crate) struct PlainFamily {
     /// 书目里那一格报的**身份**：一个 provider 只能有一个 `Format`，
@@ -61,6 +61,15 @@ pub(crate) struct PlainFamily {
     pub info: fn(&str, &str) -> novel::detect::BookInfo,
     /// 章表 → 目录。空表就是「这本没有目录」，界面上那一屏什么都不摆。
     pub toc: fn(&[Chapter]) -> Vec<TocEntry>,
+    /// 一章的源文本 → 引擎就绪的 XHTML。
+    ///
+    /// 这一格**同时定着那把尺**：`chapters.char_len` 与 `Locator.offset` 数的都是它产物
+    /// 的可见文本，所以它是「一族有几个字段」里最不能各写一份的那一个 —— 索引那一趟与
+    /// 开书那一趟问的是同一个问题，两份答案就会让进度分母与章内偏移不同源（见
+    /// [`read_with`] 里数字数那一格）。纯文本认的是没有标记的正文，
+    /// [`super::xhtml::from_plain_text`]；Markdown 的源文本满屏是 `**` 与 `- `，
+    /// 要过一次真的解析。
+    pub wrap: fn(&str) -> String,
 }
 
 /// `.txt`：按规则表分章（`format::novel`），认出目录页，目录跟着章表一起交出去。
@@ -73,13 +82,14 @@ const TEXT: PlainFamily = PlainFamily {
     split: split_by_rules,
     info: book_info_by_rules,
     toc: novel::detect::toc_of,
+    wrap: super::xhtml::from_plain_text,
 };
 
-fn book_info_by_rules(source: &str, stem: &str) -> novel::detect::BookInfo {
+pub(crate) fn book_info_by_rules(source: &str, stem: &str) -> novel::detect::BookInfo {
     novel::detect::book_info(source, stem, &novel::rules::CompiledRules::builtin())
 }
 
-fn split_by_rules(source: &str, stem: &str) -> Vec<Chapter> {
+pub(crate) fn split_by_rules(source: &str, stem: &str) -> Vec<Chapter> {
     novel::detect::split_with(source, stem, &novel::rules::CompiledRules::builtin())
 }
 
@@ -107,7 +117,21 @@ pub(crate) fn read_with(
 ) -> Result<(DocMeta, Content)> {
     let source = read_normalized(path)?;
     let stem = stem_of(path);
-    let info = (family.info)(&source, &stem);
+    content_from_source(&source, &stem, family, with_text)
+}
+
+/// 已经拿到**规范化文本**之后的那半条链：书目、切章、目录、包装。
+///
+/// 单文件格式里只有 `.txt` / `.md` / PDB 三族走这里，而 PDB 的文本不是从文件直接
+/// 读出来的（要先解 PalmDOC 记录），所以把「读文件」与「文本之后」拆开 —— 两族用的
+/// 仍是同一套分章、书目与字尺，不另写一份。
+pub(crate) fn content_from_source(
+    source: &str,
+    stem: &str,
+    family: &PlainFamily,
+    with_text: bool,
+) -> Result<(DocMeta, Content)> {
+    let info = (family.info)(source, stem);
     let meta = DocMeta {
         title: info.title,
         authors: info.authors,
@@ -116,7 +140,7 @@ pub(crate) fn read_with(
         size: source.len() as u64,
         ..DocMeta::default()
     };
-    let chapters = (family.split)(&source, &stem);
+    let chapters = (family.split)(source, stem);
     // 目录从**切好的**章表建：索引那一趟随后会把它们换成「只有标题与序号」的位置，
     // 那时标题还在，但间隔与字数已经数过了 —— 早一步取省一次遍历。
     let toc = (family.toc)(&chapters);
@@ -125,13 +149,18 @@ pub(crate) fn read_with(
         .enumerate()
         .map(|(ix, chapter)| {
             if with_text {
-                wrap(chapter)
+                wrap(family, chapter)
             } else {
-                let chars = chapter.char_len();
+                // 字数要按**包装之后**那一份数，不是按源文本数。两趟数的是同一件东西
+                // （`Locator.offset` 那把尺），而 Markdown 的包装会吃掉 `**` 与 `- `
+                // 这些源里看得见、屏上看不见的字符：按源文本数就比读者看到的多几个字，
+                // 进度分母偏大、章内偏移整体偏小，而屏幕上只会表现为「进度条差一点点」。
+                // 宁可在这里多包一次（一次纯内存的解析），也不留两份口径。
+                let chars = super::visible_chars(&(family.wrap)(chapter.source()));
                 // 图片清单**不**在这一档带走：这里的 `chapter` 装的是还没包成 XHTML 的
-                // 原始文本，而排版看到的是 `wrap` 之后的那一份（`from_plain_text` 把
-                // `<` 转义掉了，源文本里写着的 `<img>` 排出来就是一行字）。拿原始文本
-                // 扫出来的清单会比正文多几张画不出来的图。
+                // 原始文本，而排版看到的是 `(family.wrap)` 之后的那一份（纯文本那一族
+                // 会把源里写着的 `<img>` 转义成一行字）。拿原始文本扫出来的清单会比
+                // 正文多几张画不出来的图。
                 Chapter::section(chapter.title.clone(), ix).with_char_len(chars)
             }
         })
@@ -155,6 +184,19 @@ pub(crate) fn section_source(
     family: &PlainFamily,
     at: &ChapterLocator,
 ) -> Result<String> {
+    let source = read_normalized(path)?;
+    let stem = stem_of(path);
+    section_from_source(&source, &stem, path, family, at)
+}
+
+/// 已经拿到规范化文本之后的 [`ChapterLocator::Section`] 那一路（PDB 用这一支）。
+pub(crate) fn section_from_source(
+    source: &str,
+    stem: &str,
+    path: &Path,
+    family: &PlainFamily,
+    at: &ChapterLocator,
+) -> Result<String> {
     let unavailable = |index: usize| crate::Error::ChapterUnavailable {
         path: path.to_path_buf(),
         index,
@@ -164,21 +206,20 @@ pub(crate) fn section_source(
         ChapterLocator::Section(index) => *index,
         _ => return Err(unavailable(0)),
     };
-    let source = read_normalized(path)?;
-    let stem = stem_of(path);
-    (family.split)(&source, &stem)
+    (family.split)(source, stem)
         .into_iter()
         .nth(index)
-        .map(|chapter| super::xhtml::from_plain_text(chapter.source()))
+        .map(|chapter| (family.wrap)(chapter.source()))
         .ok_or_else(|| unavailable(index))
 }
 
-/// 把一章的纯文本包成引擎就绪的 XHTML。
+/// 把一章的源文本包成引擎就绪的 XHTML。
 ///
 /// 包装放在这一层而不是界面里：正文的契约是「引擎就绪」，界面就不必知道哪个格式
-/// 需要包一层（见 [`super::xhtml`] 的模块说明）。
-pub(crate) fn wrap(chapter: Chapter) -> Chapter {
-    let wrapped = super::xhtml::from_plain_text(chapter.source());
+/// 需要包一层（见 [`super::xhtml`] 的模块说明）。怎么包由 `family` 给 —— 纯文本的
+/// 源文本已经没有标记，Markdown 的还有 `**`、`- `、围栏要折成结构。
+pub(crate) fn wrap(family: &PlainFamily, chapter: Chapter) -> Chapter {
+    let wrapped = (family.wrap)(chapter.source());
     Chapter::inline(chapter.title.clone(), wrapped)
 }
 
@@ -257,10 +298,6 @@ pub(crate) mod test_support {
             .find(|(id, _)| dom.tag_name(*id) == Some("body"))
             .map_or(dom.document, |(id, _)| id);
         TextMap::build(&dom, body).text().to_string()
-    }
-
-    pub(crate) fn without_whitespace(text: &str) -> String {
-        text.chars().filter(|c| !c.is_whitespace()).collect()
     }
 }
 

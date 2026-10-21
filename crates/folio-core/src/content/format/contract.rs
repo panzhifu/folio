@@ -129,15 +129,22 @@ fn every_reflow_provider_hands_the_engine_parseable_xhtml() {
 /// 纯文本那一支的核心不变量：**包装不增删一个可见字符**。
 ///
 /// 这条断了，读者的进度与批注坐标会整体漂移 —— 而屏幕上什么都看不出来。
+///
+/// 这一条**只管 `.txt`**：Markdown 那一支的包装一定要删字（`**` 那四个字符不是给人看的
+/// 正文），它自己的那份在 [`the_markdown_wrapper_only_removes_markers`]。硬把两族并到
+/// 一条断言里，就得让期望值替 Markdown 把所有标记都剥一遍 —— 那等于在测试里再写一个
+/// Markdown 解析器，而它坏了的时候正好照不出解析器坏在哪。
 #[test]
 fn the_plain_text_wrapper_preserves_visible_text() {
     let dir = tempfile::tempdir().unwrap();
     for (name, body) in [
+        ("a.txt", "第一段\n\n第二段\n"),
+        // 规则表那一族会把命中的标记行改写成 `# 章名` 再交给包装，所以 `#` 这一族也要
+        // 按这条算 —— 它正是「允许少几个字符」的那唯一一处。
         (
-            "a.md",
+            "a.txt",
             "# 第一章\n\n正文一\n第二行\n\n## 第二章\n\n正文二\n",
         ),
-        ("a.txt", "第一段\n\n第二段\n"),
     ] {
         let path = write(dir.path(), name, body);
         let provider = provider_for(&path).unwrap();
@@ -155,6 +162,108 @@ fn the_plain_text_wrapper_preserves_visible_text() {
     }
 }
 
+/// Markdown 那一支的不变量与纯文本那条**方向不同**：标记一定要删，但一个字符都不许造，
+/// 而「长得像标记的字」在代码块与转义下来的原始 HTML 里必须一字不差地留着。
+///
+/// 三条各钉住一种会**静默**坏掉的实现：
+///
+/// - **不造字**：渲染出的可见文本（去空白）必须是源文本（去空白）的**子序列**。给空 alt
+///   的图片补「图：」那类占位、把脚注标签塞进正文、alt 为空时替读者编一句话 —— 全在这里红。
+///   用子序列而不是等号，是因为「删掉多少标记」这件事本身就等于再写一个解析器。
+/// - **标记不许残留**：`**`、`~~`、反引号、`[文字](链接)` 那对括号、列表项前的 `-`，
+///   渲染后都该不见了。这一条防的是「包装根本没换成结构」。
+/// - **像标记的字不许被吃掉**：围栏代码里的 `# 注释` 与 `int *p` 还在，作者手写的
+///   `<i>` 还带着尖括号。这一条防的是「拿全局字符串替换冒充解析」—— 那种实现会把代码
+///   清单一起洗掉，而屏上正好看不出少了几个星号。
+/// - 外加一条本族特有的：**图片不许发 `<img>`**（单文件格式取不到任何字节），alt 出文字、
+///   没有 alt 就整条不见，而 `chapter_summary` 扫出来的图片清单必须是空的 —— 那一列
+///   进了库就是图片查看器里一张永远点不开的图。
+#[test]
+fn the_markdown_wrapper_only_removes_markers() {
+    let source = "# 书名\n\n这是**重要**的一句，还有~~删掉~~与`码`，外加[一张链接](https://example.com/a)。\n\n```\n# 注释不是标题\nint *p = 0; // **\n```\n\n> 引用一行\n\n- 甲项\n- 乙项\n\n作者手写 <i>venus</i> 在这里是字面。\n\n![插图说明](./assets/a.png)\n\n![](no-alt.png)\n\n| 甲 | 乙 |\n|---|---|\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "d.md", source);
+    let provider = provider_for(&path).unwrap();
+    let (_, content) = provider.read(&path).unwrap();
+    let Content::Reflow(flow) = content else {
+        panic!("该读成可重排");
+    };
+    assert_eq!(flow.chapters.len(), 1, "只有一个一级标题，就只该有一章");
+    let xhtml = flow.chapters[0].source();
+    let text = visible(xhtml);
+    let rendered = without_whitespace(&text);
+    let original = without_whitespace(source);
+
+    // 一、不造字。逐字符在下标数组上走，不用 `&str[cursor..]`：`position` 数的是
+    // **字符**而切片下标要的是**字节**，中文文本上把两者混起来会当场 panic。
+    let original_chars: Vec<char> = original.chars().collect();
+    let mut cursor = 0usize;
+    for ch in rendered.chars() {
+        let offset = original_chars[cursor..]
+            .iter()
+            .position(|&candidate| candidate == ch)
+            .unwrap_or_else(|| panic!("渲染出的 {ch:?} 在源文本里根本没有：{text}"));
+        cursor += offset + 1;
+    }
+
+    // 二、标记不残留。断「连起来的那句字」而不是断「没有星号」：代码块里本来就合法地
+    // 有星号，后者会把这一条变成一条永远不成立的死断言。
+    assert!(
+        rendered.contains("这是重要的一句"),
+        "粗体标记没被吃掉：{text}"
+    );
+    assert!(
+        rendered.contains("还有删掉与码"),
+        "删除线与行内码的标记没被吃掉：{text}"
+    );
+    assert!(
+        rendered.contains("外加一张链接"),
+        "链接那对方括号没被吃掉：{text}"
+    );
+    assert!(
+        !rendered.contains("- 甲项"),
+        "列表项前面那个短横该由排版来画：{text}"
+    );
+    assert!(!rendered.contains("# 书名"), "标题的井号该不见了：{text}");
+
+    // 三、像标记的字不许被吃。
+    assert!(
+        text.contains("# 注释不是标题") && text.contains("int *p = 0; // **"),
+        "围栏代码里的 `#` 与 `**` 是正文，不是标记：{text}"
+    );
+    assert!(
+        text.contains("<i>venus</i>"),
+        "作者手写的 HTML 按字面收，尖括号要还在：{text}"
+    );
+
+    // 表格那一档没开（引擎的 UA 表认不出 table，未认标签会被拆成一竖列字块），
+    // 所以那几行该原样是一段带竖线的字。有人把 `gfm_table` 打开，这一条就红着提醒他
+    // 先去补 layout 的行盒。
+    assert!(
+        text.contains("| 甲 | 乙 |"),
+        "表格这一版**不该**渲成结构：{text}"
+    );
+
+    // 四、图片。
+    assert!(
+        !xhtml.contains("<img"),
+        "单文件格式拿不到字节，不许发 <img>：{xhtml}"
+    );
+    assert!(
+        text.contains("插图说明"),
+        "有 alt 的图该把 alt 出成正文：{text}"
+    );
+    assert!(
+        !text.contains("no-alt"),
+        "没有 alt 的整条消失，但 alt 之外不许造字：{text}"
+    );
+    assert!(
+        crate::content::scan::chapter_summary(xhtml)
+            .images
+            .is_empty(),
+        "图片清单里不许有这条永远点不开的 src"
+    );
+}
 
 /// 定版式走另一族：产出的是页表，不是章源。它压根不该有 `Chapter`。
 #[test]
