@@ -365,9 +365,10 @@ impl Render for ReaderSession {
                 self.page = book.page();
                 self.content_height = 0.0;
                 let current = book.page();
-                // 一页可能引好几张图（多图页 / 对开跨页）：按**共享高度**横成一行，整体居中。
-                // 一张图时这条式子退化成「等比缩进视口」，与普通漫画的旧表现逐像素相同。
-                let images = book.page_images(current);
+                // 一页可能摆好几格（多图页 / 对开跨页，或渲染型的一整页）：按**共享高度**
+                // 横成一行，整体居中。一格时这条式子退化成「等比缩进视口」，与普通漫画的
+                // 旧表现逐像素相同。
+                let tiles = book.page_tiles(current);
                 // 尺寸未知（0）时按视口那一格的宽高比补：一格时等于「铺满」，正是
                 // 原来那条兜底；多格共享高度则必须有个比例，视口比例是最不失真的猜。
                 let box_aspect = usable / viewport_height;
@@ -378,17 +379,20 @@ impl Render for ReaderSession {
                         w as f32 / h as f32
                     }
                 };
-                let row_aspect: f32 = images.iter().map(|(_, w, h)| aspect(*w, *h)).sum();
+                let row_aspect: f32 = tiles
+                    .iter()
+                    .map(|tile| aspect(tile.width, tile.height))
+                    .sum();
                 if row_aspect > 0.0 {
                     let height = viewport_height.min(usable / row_aspect);
                     let y = self.header_reserve + (viewport_height - height).max(0.0) / 2.0;
-                    // 整行居中：先从左边把行宽的余量让出一半，再逐张往右推进。
+                    // 整行居中：先从左边把行宽的余量让出一半，再逐格往右推进。
                     let mut x = (usable - row_aspect * height) / 2.0;
-                    for &(href, w, h) in &images {
-                        let width = aspect(w, h) * height;
-                        // 解不出字节的那一张空着，但仍然占位：多图页的排版不该因为
+                    for tile in tiles {
+                        let width = aspect(tile.width, tile.height) * height;
+                        // 解不出像素的那一格空着，但仍然占位：多图页的排版不该因为
                         // 少一张图就把剩下的往左挤。
-                        if let Some(request) = book.image_request(href) {
+                        if let Some(request) = tile.request {
                             let key = request.key.clone();
                             let Some(image) = painted(&atlas, request, view, cx) else {
                                 continue;

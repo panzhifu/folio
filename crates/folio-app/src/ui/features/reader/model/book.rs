@@ -33,7 +33,7 @@ use crate::ui::features::reader::components::image_viewer::{ImageSlot, Place, fi
 use crate::ui::features::reader::model::book_fonts::BookFonts;
 use crate::ui::features::reader::model::chapter_layout::{ChapterSource, Document, author_rules};
 use crate::ui::features::reader::model::toc_tree::{self, TocRow};
-use crate::ui::foundation::images::{BookImages, ByteSource, ChapterImages, document_source};
+use crate::ui::foundation::images::{BookImages, ChapterImages, document_source};
 
 /// 拼进连续坐标的邻章半窗宽：锚章上下**至少**预排这么多章。
 ///
@@ -230,16 +230,12 @@ impl Book {
                         chapter,
                         offset: used.offset,
                     },
+                    export: view.source(),
                 });
             }
         }
         tracing::debug!("图片列: 这本书有 {} 张画得出来的插图", out.len());
         out.into()
-    }
-
-    /// 取字节那条链子（分享 / 下载那一趟要在后台线程上拿它读原图）。
-    pub(in crate::ui::features::reader) fn image_source(&self) -> ByteSource {
-        self.book_images.source()
     }
 
     /// 拼接坐标里两章之间的缝。跟着字号走（2em）并给一条下限：它是「上一章结束、

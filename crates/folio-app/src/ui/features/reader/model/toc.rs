@@ -20,8 +20,18 @@ impl ReaderSession {
     }
 
     /// 整本书的目录，带层级。没有书（兜底那一行）时是空表。
+    ///
+    /// 定版式那一支也走这一问：PDF 的 `/Outlines` 是文档自带的书签，落点是**页号**
+    /// （`TocEntry::page`），由 `toc_tree::build` 认那一格优先。漫画包没有书签，
+    /// 回的是空表，目录那一屏在那些书上仍然没有行可画。
     pub fn toc_rows(&self) -> Vec<TocRow> {
-        self.book().map(|book| book.toc_rows()).unwrap_or_default()
+        if let Some(book) = self.book() {
+            return book.toc_rows();
+        }
+        match &self.source {
+            Source::Fixed(fixed) => fixed.toc_rows(),
+            _ => Vec::new(),
+        }
     }
 
     /// 到过的章。目录那一屏把来过的画成浅色，没来过的正常前景。
@@ -102,10 +112,28 @@ impl ReaderSession {
     /// 锚点不在这里换算成章内偏移 —— 目标章往往还没排版，偏移表还不存在。带着 `id`
     /// 挂进恢复请求，排版做完那一帧再落地（见 [`crate::ui::features::reader::model::session::land_at_anchor`]）。
     pub fn goto_entry(&mut self, chapter: usize, fragment: Option<String>, cx: &mut Context<Self>) {
+        // 定版式那一支的目录条落点是**页号**（`TocEntry::page`），走会话级翻页那一条
+        // （`set_page`：改页表、清选中、落库、notify 都在里面），不走「换章 → 等排版
+        // 完再落锚点」那一条 —— 那一族在这里既没有章表也没有锚点。
+        // 锚点在定版式里也不适用：`format::pdf` 造的书签只说到页，`fragment` 永远是 `None`，
+        // 而这一支压根没有「章内第几个字」那一根轴。
+        if self.is_fixed() {
+            let before = self.page();
+            self.set_page(chapter, cx);
+            if self.page() != before {
+                // 与可重排那一条同一立场：跳转**当场**写盘。`set_page` 里那句
+                // `persist_if_moved` 只改内存里的「上次写到哪儿」与「来过」集合，
+                // 真往库里写的是这一句 —— 少了它，读者点完书签就杀进程，回来还在旧页。
+                self.persist_locator(Locator {
+                    chapter: chapter as u32,
+                    offset: 0,
+                });
+            }
+            return;
+        }
         let prefs = self.prefs.clone();
         let moved = match &mut self.source {
             Source::Book(book) => book.goto(chapter, &prefs),
-            // 定版式没有目录条（那一屏回退成页表），跳目录不适用。
             Source::Sample(_) | Source::Fixed(_) => false,
         };
         // 一个 spine 文件挂着好几条目录（一章对十个小节）时，跳到同一章的另一条不算

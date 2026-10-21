@@ -6,6 +6,10 @@
 //! 这条契约成为 provider 的**唯一输出约定**，界面与引擎都不再问格式。
 //!
 //! 这里用真实 provider 跑（不是构造 `Chapter`），因为要钉住的正是「provider 有没有
+//! 真的守约」。五类源都覆盖：本来就是标记的（HTML / FB2 / EPUB）、没有标记只需补一层
+//! 包装的（TXT）、把 Markdown 的 `**` 与 `- ` **解析成**结构的（Markdown）、把 RTF 的
+//! 格式指令**翻译成**标记的（RTF），以及不进引擎的定版式
+//! （CBZ 的页是图源、PDF 的页要栅格化 —— 两族成员各一条门）。
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

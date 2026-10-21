@@ -71,7 +71,9 @@ fn walk(
             depth,
             title: entry.title.clone(),
             branch: !entry.children.is_empty(),
-            chapter: hrefs.get(&entry.href).copied(),
+            // 页号那一格**优先**：定版式（PDF 的书签）的目录条对不上任何一条容器路径，
+            // 落点直接就是页。可重排的那一路永远没有这一格，所以查表那条一步都没变。
+            chapter: entry.page.or_else(|| hrefs.get(&entry.href).copied()),
             fragment: entry.fragment.clone(),
         });
         walk(&entry.children, Some(ix), depth + 1, hrefs, out);

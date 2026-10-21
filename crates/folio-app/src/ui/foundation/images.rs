@@ -294,6 +294,43 @@ impl BookImages {
         request.key = format!("{}/{}", self.token, entry.href);
         request
     }
+
+    /// 定版式里**要算出来才有字节**的那一页（`PageSource::Render`，PDF 那一族）→ 那条活儿。
+    ///
+    /// 与 [`job`](Self::job) 的分别只在取字节那一半：那条按 `href` 去容器读现成的字节，
+    /// 这一条叫 `render` 现画一张。所以格式是**已知的** PNG（不必猜字节头），也不必缩小 ——
+    /// 「画多大」是这一问的输入，不是事后补的一步。跑 `render` 的那一趟仍然在后台线程上
+    /// （由图集那一层调度）：一页 A4 按 2048 那一档实测 30–90 ms（本机 release、纯字的页），
+    /// 图多的那类书到 400–500 ms，绝不能在绘制帧里问。
+    ///
+    /// 键里带页号**和**那一档的长边：同一本书将来若改成按视口宽栅格，同一页会并存好几个
+    /// 尺寸，撞键的后果是「按 1024 摆的那一格画出 2048 的像素」。token 前缀与图片那一族
+    /// 同一条理由 —— 两本书的第 7 页可以长得一模一样。
+    pub fn render_job(
+        &self,
+        page: usize,
+        edge: u32,
+        width: u32,
+        height: u32,
+        render: Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>,
+    ) -> DecodeRequest {
+        let loader: Arc<dyn Fn() -> Option<Arc<Image>> + Send + Sync> = Arc::new(move || {
+            let png = render()?;
+            Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)))
+        });
+        // 记账用的是**页表里那一格说的尺寸**。尺寸不知道（0）时与 SVG 那一族同一口径：
+        // 按 `UNKNOWN_TILE_BYTES` 猜一个，解完之后图集会拿真的像素数换掉它。
+        let tile_bytes = if width == 0 || height == 0 {
+            UNKNOWN_TILE_BYTES
+        } else {
+            width as usize * height as usize * 4
+        };
+        DecodeRequest {
+            key: format!("{}/render/{page}@{edge}", self.token),
+            loader,
+            tile_bytes,
+        }
+    }
 }
 
 /// mime → gpui 的 `ImageFormat`。认不出时返回 `None`，由调用方决定最后的降级 ——
@@ -370,6 +407,21 @@ impl ChapterImages {
     pub fn decode_request(&self, href: &str) -> Option<DecodeRequest> {
         let entry = self.book.get(href)?;
         Some(self.book.job(entry))
+    }
+
+    /// 定版式里**渲染型**的那一页（`PageSource::Render`）→ 那条活儿。
+    ///
+    /// 走的是同一张 `BookImages`，为的是那一本开着的书只有一个 token、一份缓存 —— 渲染页
+    /// 与图源页混在同一个图集里回收，不分两套账（理由见 [`BookImages::render_job`]）。
+    pub fn render_request(
+        &self,
+        page: usize,
+        edge: u32,
+        width: u32,
+        height: u32,
+        render: Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>,
+    ) -> DecodeRequest {
+        self.book.render_job(page, edge, width, height, render)
     }
 
     /// 一张图的**固有像素**尺寸（容器路径 → `(宽, 高)`），查不到给 `(0, 0)`。

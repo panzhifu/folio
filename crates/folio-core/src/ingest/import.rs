@@ -908,13 +908,11 @@ fn import_one(
 /// - **失败只记日志，不回 Err**：封面是装饰。写不成时 `cover_ref` 留 `None`，
 ///   读那一侧退回 `books.cover` 那个 BLOB，读者照旧看得见封面。
 ///
-/// 只处理可重排那一支：定版式（CBZ）的封面是它第一页的缩略图，走 `save_fixed`，
-/// 与这里这条「容器里抽出来的字节」不是同一件事。
+/// 两族都走这一条。从前它开头挡了一句「只处理可重排」，理由写的是「定版式的封面走
+/// `save_fixed`」—— 而 `save_fixed_in` 里根本没有那两列，于是**整族的封面算完就丢**：
+/// 漫画一直是这样，PDF 接上首页栅格之后也会一样。现在两族写的是同一张
+/// `covers/<hash>.<ext>`、同一对 `cover_hash` / `cover_mime` 列，界面不再问格式。
 fn land_cover(root: &Path, doc: &mut dyn crate::content::document::Document) {
-    let crate::content::document::ContentRef::Reflow(_) = doc.content() else {
-        return;
-    };
-    // 字节与 MIME 都要：前者定哈希，后者定扩展名。
     let Some(bytes) = doc.cover().map(<[u8]>::to_vec) else {
         return;
     };

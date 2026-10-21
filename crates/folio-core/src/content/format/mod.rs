@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::scan::ImageUse;
 
+/// AZW4：PalmDB 容器里装着一份 PDF（Kindle Print Replica）。
+pub mod azw4;
 /// 7z 漫画包：与 CBZ 同一族（定版式、逐页图片），只是容器换成了 7z。
 pub mod cb7;
 /// RAR 漫画包：与 CBZ 同一族，容器换成 RAR（纯 Rust `rars`）。
@@ -40,6 +42,9 @@ pub mod novel;
 pub(crate) mod palmdb;
 /// PDB / PalmDoc：PalmDB 容器里的纯文本记录。
 pub mod pdb;
+/// PDF：一页是既定的画布，字节要栅格化才有像素。定版式那一族的成员之一（同族的还有
+/// 漫画包那四种与 DjVu）。
+pub mod pdf;
 pub mod provider;
 pub mod rtf;
 pub(crate) mod sniff;
@@ -170,7 +175,7 @@ impl Format {
     ///
     /// 与 [`Format::copy_extension`]（它问 provider 注册表）不同，这张对照只有这一份：
     /// 注册表管的是「哪个 provider 来读这个扩展名」，不是「对面把这个文件当成什么」，
-    /// 两者各写一张表反而会漂。已注册的类型优先（EPUB、RTF、HTML、CHM），没注册的用
+    /// 两者各写一张表反而会漂。已注册的类型优先（EPUB、RTF、HTML、CHM、PDF），没注册的用
     /// 事实标准那个（FB2、MOBI、CBZ）。
     ///
     /// 返回值不会是空串：Android 的 `GpuiSystemUi.shareImage` 把空 mime 退成 `image/*`，
@@ -236,7 +241,7 @@ impl Format {
 /// FB2 的 section 嵌套、EPUB 的 spine 过滤，任一改动都会让老库的序号指到别处 ——
 /// 那时版本号对不上，[`crate::store::Store::stale_reason`] 会说「该重扫」。
 ///
-/// 定版式文档（CBZ / 将来的 PDF）没有章表，但页表同样是「按某套算法产出的索引」，
+/// 定版式文档（漫画包 / PDF / AZW4 / DjVu）没有章表，但页表同样是「按某套算法产出的索引」，
 /// 所以**两条落库路径都要盖这一格** —— 不盖的话定版式书会被永远判成「索引旧了」，
 /// 每次开书都白重扫一遍。
 ///

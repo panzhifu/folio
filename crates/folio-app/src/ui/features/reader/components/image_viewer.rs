@@ -61,7 +61,7 @@ use gpui_kit::{
 };
 
 use crate::ui::features::reader::model::session::{ReaderSession, Source};
-use crate::ui::foundation::images::DecodeRequest;
+use crate::ui::foundation::images::{ByteSource, DecodeRequest};
 use crate::ui::services::l10n::{tf, tr};
 
 use crate::ui::features::reader::model::image_atlas::ImageAtlas;
@@ -95,6 +95,13 @@ pub struct ImageSlot {
     pub name: String,
     /// 这一张在正文里的出处。「定位原文」跳的就是它。
     pub place: Place,
+    /// 递给系统（分享 / 下载）的那一份**原始字节**从哪儿来。
+    ///
+    /// 单独一格而不是「拿 `href` 去整本书的表里查」：定版式里渲染型的那一页
+    /// （PDF / AZW4 / DjVu）**没有容器路径**，它的字节是「按那一档现画一张 PNG」。
+    /// 摆成同一条链子，`export_image` 就不必知道这一条属于哪一族 —— 与 core 那边
+    /// 「格式差异到 `Content` 为止」同一立场。
+    pub export: ByteSource,
 }
 
 /// 一张图的出处。两支内容各有各的坐标轴，硬合成一格就会有一支在说谎。
@@ -592,9 +599,10 @@ impl ReaderSession {
 
     /// 那两条递给系统的路共用的那一半：取字节、然后交出去。
     ///
-    /// 递的是**容器里的原始字节**，不是摊开看着的那一份像素：那一份是按
+    /// 递的是**原始字节**，不是摊开看着的那一份像素：那一份是按
     /// `images::MAX_IMAGE_EDGE` 缩过的、也可能是 EPUB3 `fallback=` 换过的位图，
-    /// 拿它去分享就是把读者书里的原图降一档给他。
+    /// 拿它去分享就是把读者书里的原图降一档给他。渲染型的那一页没有「原图」，
+    /// 它自己的像素就是原图 —— 那一格在 [`ImageSlot::export`] 里。
     ///
     /// 解压不在 UI 线程上：一页漫画是一两兆的 JPEG，inflate 那一下是看得见的卡，
     /// 而按下按钮的人期待的是「系统面板过一会儿自己出来」。
@@ -603,17 +611,12 @@ impl ReaderSession {
         let Some(slot) = self.image_sequence.get(index) else {
             return;
         };
-        let source = match &self.source {
-            Source::Book(book) => book.image_source(),
-            Source::Fixed(fixed) => fixed.image_source(),
-            // 兜底那一行没有容器，也就没有字节可递。
-            Source::Sample(_) => return,
-        };
+        let export = slot.export.clone();
         let href = slot.href.clone();
         let mime = slot.mime.clone();
         let name = slot.name.clone();
         let logged = href.clone();
-        let read = cx.background_spawn(async move { source(&href) });
+        let read = cx.background_spawn(async move { export(&href) });
         cx.spawn(async move |this, cx| {
             let Some(bytes) = read.await else {
                 tracing::warn!("图片导出: {logged} 从容器里读不出字节");
@@ -1198,6 +1201,7 @@ mod tests {
             name: file_name(chapter + 1, href, "image/png"),
             request,
             place: Place::Reflow { chapter, offset },
+            export: view.source(),
         }
     }
 }

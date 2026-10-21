@@ -4828,3 +4828,80 @@ fn a_wheel_notch_turns_exactly_one_page(cx: &mut TestAppContext) {
         "三格三页：不该攒着，也不该一次跳两页"
     );
 }
+
+/// 定版式的书签：点目录里的一条，屏上真的换成那一页，位置也当场落库。
+///
+/// 用入库的那本 PDF（`tests/fixtures/oss/pdf/three-pages.pdf`）而不是 `from_content` 造的
+/// 合成文档：这一条要测的是「书签的落点是**页号**」这一整路 —— 合成那一份没有容器，
+/// 取像素永远回空，界面就算跳对了也证明不了读者看得见。这里走的是生产上那条路：
+/// provider 读索引 → 落库 → `with_container` 打开（正文与像素都回原文件现取）。
+#[gpui_kit::test]
+fn a_bookmark_in_a_pdf_moves_the_screen_to_that_page(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let (meta, content) = folio_core::content::format::provider_for(&path)
+        .expect("PDF 该有 provider")
+        .index(&path)
+        .expect("入库的那本夹具该读得开");
+    let store = Arc::new(Store::in_memory().expect("内存库"));
+    let id = store.add_book(&path, &meta).expect("入库");
+    store
+        .save_content(id, &content, folio_core::content::format::Format::Pdf)
+        .expect("页表入库");
+
+    let document = folio_core::content::document::with_container(meta, content, &path);
+    let (view, handle) = open_with_document(
+        cx,
+        Arc::from(document),
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    // `with_document` 那一条构造路不分族（它只吃一份现成的文档），而读者真的翻开一本
+    // 书走的是 `open_book`：从库读回内容 → 按 `doc.is_fixed()` 分流。这里按生产那条路
+    // 再走一遍，测的才是读者撞到的那一段。
+    view.update(cx, |v, cx| v.open_book(id, cx));
+    settle(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.page_count()), 3);
+    assert!(
+        view.read_with(cx, |v, _| v.is_fixed()),
+        "这一本该走定版式那一条"
+    );
+
+    // 目录那一屏的行：标题 + 点下去去哪儿。`chapter` 在定版式这一支装的是**页号**
+    // （`Locator.chapter` 在这一族本来就是页码，`toc_tree::build` 认 `TocEntry::page` 优先）。
+    let rows = view.read_with(cx, |v, _| {
+        v.toc_rows()
+            .iter()
+            .map(|row| (row.title.clone(), row.chapter))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        rows,
+        vec![
+            ("第一章".to_string(), Some(0)),
+            ("第二章".to_string(), Some(1))
+        ],
+        "书签该上屏，落点是页号"
+    );
+
+    view.update(cx, |v, cx| v.goto_entry(1, None, cx));
+    settle(cx, handle);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        1,
+        "点「第二章」该落在第 2 页"
+    );
+    let (_, locator) = store.position(id).expect("读回进度").expect("进度应存在");
+    assert_eq!(
+        locator,
+        Locator {
+            chapter: 1,
+            offset: 0
+        },
+        "页号就是定版式的位置：跳转当场落库，杀进程回来还在这一页"
+    );
+}

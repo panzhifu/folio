@@ -343,18 +343,22 @@ impl Store {
         // `index_version` 必须盖：不盖的话 `stale_reason` 永远说这份定版式索引是旧的
         // （定版式的页表同样由「当前这套算法」产出），于是**每次开书都白重扫一遍**。
         //
-        // 封面字节不进库（v16）。定版式的封面是首页那张图，与可重排那一路
-        // 「从容器里抽出来的封面」不是同一件事，所以它没有 `cover_ref` ——
-        // 界面为它画占位（`book_cover` 回 `None`）。
+        // 封面写那两格描述（`cover_hash` / `cover_mime`），与可重排那一路同一条式子：
+        // 字节不进库（v16），文件在 `covers/<hash>.<ext>`，库里只留拼文件名的两个数。
+        // 这两列以前**不在这一条 UPDATE 里**，于是 `land_cover` 写进磁盘的那份首页图
+        // 没有哪一列指向它 —— 漫画与 PDF 的书架封面就是这么整个丢掉的。
         conn.execute(
             "UPDATE books
-                SET fixed_json = ?2, toc_json = ?3, index_version = ?4
+                SET fixed_json = ?2, toc_json = ?3, index_version = ?4,
+                    cover_hash = ?5, cover_mime = ?6
               WHERE id = ?1",
             params![
                 book_id,
                 pages,
                 serde_json::to_string(&doc.toc)?,
                 crate::content::format::INDEX_VERSION,
+                doc.cover_ref.as_ref().map(|cover| cover.hash.clone()),
+                doc.cover_ref.as_ref().map(|cover| cover.mime.clone()),
             ],
         )?;
         tracing::debug!(
@@ -539,9 +543,14 @@ mod tests {
 
         let got = store.load_fixed(book).unwrap().expect("刚存的该读得回来");
         assert_eq!(got.pages, doc.pages);
-        // 封面字节不进库（v16）：定版式那份封面是首页图，读回来是 `None`，
-        // 界面为它画占位。
+        // 封面字节不进库（v16），**描述进**：读回来的是那两格，界面按它去 `covers/` 取文件。
+        // 这两列以前不在 `save_fixed_in` 的 UPDATE 里，于是定版式整族（漫画、PDF 的首页
+        // 栅格）算完的封面没有哪一列指向它 —— 书架上就是一片占位。
         assert_eq!(got.cover, None, "封面字节不该跟着库回来");
+        assert_eq!(
+            got.cover_ref, doc.cover_ref,
+            "封面的两格描述该原样回来，否则书架找不着那个文件"
+        );
         assert_eq!((got.width, got.height), (800, 1200));
         assert_eq!(got.images.len(), 2, "图片表由页表重建");
         assert_eq!(got.images[0].href, "1.png");

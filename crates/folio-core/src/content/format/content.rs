@@ -6,7 +6,7 @@
 //! - [`FlowDoc`]（可重排）：行由排版引擎按视口算出，页是结果不是事实。
 //!   EPUB / FB2 / HTML / Markdown / TXT 都归它。
 //! - [`FixedDoc`]（定版式）：页是既定的，缩放与裁剪只是显示变换。
-//!   CBZ 归它；将来的 PDF / DJVU 也是这一族。
+//!   CBZ / CB7 / CBR / CBT / PDF / AZW4 / DjVu 归它。
 
 use super::{Chapter, ImageRes, TocEntry};
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,7 @@ pub struct FixedDoc {
     /// 阅读顺序的页表。
     pub pages: Vec<FixedPage>,
     pub toc: Vec<TocEntry>,
+    /// 首页那一张：漫画是容器里的第一页，PDF 是栅格化出来的第一页。
     pub cover: Option<Vec<u8>>,
     /// 封面**落盘之后**的描述（`covers/<hash>.<ext>` 那两个格）。
     ///

@@ -145,7 +145,7 @@ CREATE TABLE reading_sessions (
 CREATE INDEX idx_sessions_book ON reading_sessions(book_id, started_at);
 CREATE INDEX idx_sessions_time ON reading_sessions(started_at);
 "#,
-    // v7：定版式文档（漫画 / 将来的 PDF）。页表存成 JSON 一列 —— 页是一条线性的
+    // v7：定版式文档（漫画四种 / PDF / AZW4 / DjVu）。页表存成 JSON 一列 —— 页是一条线性的
     // 「一页接一页」，没有要按列查的东西，为它单建一张表只会多一层 join。
     // 图片字节照旧不入库（见 v5）：页表里的 href 只是去容器里现取的钥匙。
     r#"
