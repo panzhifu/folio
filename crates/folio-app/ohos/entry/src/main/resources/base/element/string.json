@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Folio reader"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Folio for HarmonyOS"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Folio"
+    }
+  ]
+}

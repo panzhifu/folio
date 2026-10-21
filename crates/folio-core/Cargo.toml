@@ -92,7 +92,12 @@ tracing-subscriber.workspace = true
 # `unsafe impl Send + Sync` 只让类型通过检查，跨线程用会炸在 clone-on-drop 与回调表上），
 # 所以句柄只能由**一根专职线程**持有，别处通过命令与事件两条管道跟它说话；folio-core 不许
 # 依赖 gpui，`std::sync::mpsc` 足够。
-[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+#
+# `not(target_env = "ohos")` 是鸿蒙那一格：它的三元组报 `target_os = "linux"`，于是这条
+# 判据本来就把 `tts` 放了进来，而 `tts` 的 linux 后端是 Speech Dispatcher —— 链接行上就多
+# 一个 `-lspeechd`，OHOS 的 sysroot 里没有（实测：整个鸿蒙构建全过，只死在这一格）。
+# 听书在鸿蒙上要等 NAPI / ArkTS 那一层（`@ohos.textToSpeech`）另起一条后端，不在这里。
+[target.'cfg(any(all(target_os = "linux", not(target_env = "ohos")), target_os = "android"))'.dependencies]
 tts.workspace = true
 
 [dev-dependencies]

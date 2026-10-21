@@ -2360,7 +2360,7 @@ dependencies = [
 [[package]]
 name = "folio-curl"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=002b89f54338e4a13f8a361885cf2d5c1f4323b2#002b89f54338e4a13f8a361885cf2d5c1f4323b2"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=9790a60d619522db8ec904ddfe62931755b7b130#9790a60d619522db8ec904ddfe62931755b7b130"
 dependencies = [
  "bytemuck",
 ]
@@ -3226,7 +3226,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=002b89f54338e4a13f8a361885cf2d5c1f4323b2#002b89f54338e4a13f8a361885cf2d5c1f4323b2"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=9790a60d619522db8ec904ddfe62931755b7b130#9790a60d619522db8ec904ddfe62931755b7b130"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3476,7 +3476,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-mobile"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/gpui-mobile?rev=2beb14c6ef1a8b4c35af55355487ec7f1e92d65d#2beb14c6ef1a8b4c35af55355487ec7f1e92d65d"
+source = "git+https://github.com/panzhifu/gpui-mobile?rev=ab131849bb10aaafb444c13e3d2ae84ea126b865#ab131849bb10aaafb444c13e3d2ae84ea126b865"
 dependencies = [
  "accesskit_android",
  "android-activity",
@@ -3511,8 +3511,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbdbdac421178313fed8929fe95b42634a266a735079fcf03ff231bc2ccb2c5e"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=9790a60d619522db8ec904ddfe62931755b7b130#9790a60d619522db8ec904ddfe62931755b7b130"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3667,7 +3666,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=002b89f54338e4a13f8a361885cf2d5c1f4323b2#002b89f54338e4a13f8a361885cf2d5c1f4323b2"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=9790a60d619522db8ec904ddfe62931755b7b130#9790a60d619522db8ec904ddfe62931755b7b130"
 dependencies = [
  "anyhow",
  "bytemuck",

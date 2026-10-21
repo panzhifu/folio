@@ -340,9 +340,10 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 #
 # 改完 `~/Code/gpui-folio` 要让它在这生效，三步（rev 不推上去 cargo 就取不到）：
 #   1. 在 gpui-folio 里 commit 并 `git push origin main`；
-#   2. 把新 sha 一次替换这里的两条 + `crates/folio-app/Cargo.toml` 那条 `folio-curl`
-#      （三处必须同一个数）；
-#   3. `cargo update -p gpui-pre -p gpui-pre-wgpu -p folio-curl`，然后 `cargo check`。
+#   2. 把新 sha 一次替换这里的三条 + `crates/folio-app/Cargo.toml` 那条 `folio-curl`
+#      （四处必须同一个数）；
+#   3. `cargo update -p gpui-pre -p gpui-pre-wgpu -p gpui-pre-platform -p folio-curl`，
+#      然后 `cargo check`。
 #
 # 只想在本机试一版、不打算推：这两条临时改成 `path = "../gpui-folio/gpui-pre"` 与
 # `…/gpui-pre-wgpu`（改完别提交 —— 就是上面说的那条让 CI 红的路）。注意 `paths = [...]`
@@ -353,8 +354,19 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 # 斜接缝在屏上是一格一格的台阶），另一处是把 `required_limits` 从 `downlevel_defaults()` 换成
 # 直接取 `adapter.limits()` —— GLES 适配器把 compute 与 storage buffer 两族整族报成 0，
 # 鸿蒙模拟器上那一次 `request_device` 一个 adapter 都留不下。
-gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "002b89f54338e4a13f8a361885cf2d5c1f4323b2" }
-gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "002b89f54338e4a13f8a361885cf2d5c1f4323b2" }
+# `9790a60`：多一个成员 `gpui-pre-platform`，也就是第三条 patch。鸿蒙的三元组报
+# `target_os = "linux"`，而那层门面按 `target_os` 选平台，于是它把桌面 `gpui-pre-linux`
+# （X11 / Wayland）整条拖进图里，`-lxcb -lxkbcommon -lxkbcommon-x11` 在 OHOS 的 sysroot
+# 里没有对应库 —— **编译全过、只在最后一步链接上撞，`cargo check` 一路绿灯**。消费侧改不动
+# （gpui-kit 显式开了 `gpui_platform` 的 `x11` + `wayland`，那是传递依赖的 feature），所以
+# 判据收紧成 `all(target_os = "linux", not(target_env = "ohos"))` 只能发生在这份快照里。
+# 换上前实测：鸿蒙的 cdylib 链得出来了（DT_NEEDED 只剩 hilog / ace_napi / ace_ndk /
+# native_vsync / time_service / libc），HAP 装得上，hilog 一路到 `vsync frame loop started`
+# 与 `Router: render()`。链得出 ≠ 画得出：那台模拟器的 GLES 3.0 给不出 `VERTEX_STORAGE`，
+# 而 UI 一 build 就撞在 gpui-mobile 那份 OHOS dispatcher 的前台执行器上（见 `plans/facts.md`）。
+gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "9790a60d619522db8ec904ddfe62931755b7b130" }
+gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "9790a60d619522db8ec904ddfe62931755b7b130" }
+gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "9790a60d619522db8ec904ddfe62931755b7b130" }
 
 # 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
 # opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；
