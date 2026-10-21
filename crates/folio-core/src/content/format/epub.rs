@@ -2081,6 +2081,8 @@ fn read_fixed(
         pages,
         toc: Vec::new(),
         cover,
+        // 封面的落盘描述由导入管线填（`ingest::import::land_cover`），provider 只交字节。
+        cover_ref: None,
         images,
         width,
         height,

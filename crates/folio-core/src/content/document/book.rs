@@ -194,15 +194,16 @@ impl Document for BookDocument {
     fn cover_ref(&self) -> Option<&crate::content::format::cover::CoverRef> {
         match &self.content {
             Content::Reflow(flow) => flow.cover_ref.as_ref(),
-            // 定版式的封面是首页缩略图，存在 `save_fixed` 那条路上，没有文件描述。
-            Content::Fixed(_) => None,
+            Content::Fixed(fixed) => fixed.cover_ref.as_ref(),
         }
     }
 
     fn set_cover_ref(&mut self, cover: Option<crate::content::format::cover::CoverRef>) {
-        // 只对可重排生效：定版式没有「从容器里抽出来的封面」这个概念。
-        if let Content::Reflow(flow) = &mut self.content {
-            flow.cover_ref = cover;
+        // 两族都填：封面落盘那条路与「字节是从容器抽的还是栅格化出来的」无关，
+        // 写的都是同一个 `covers/<hash>.<ext>`，记的都是同两列。
+        match &mut self.content {
+            Content::Reflow(flow) => flow.cover_ref = cover,
+            Content::Fixed(fixed) => fixed.cover_ref = cover,
         }
     }
 

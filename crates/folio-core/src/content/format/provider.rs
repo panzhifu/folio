@@ -245,6 +245,9 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::chm::ChmAdapter),
         Box::new(super::mobi::MobiAdapter),
         Box::new(super::pdb::PdbAdapter),
+        Box::new(super::cb7::Cb7Adapter),
+        Box::new(super::cbr::CbrAdapter),
+        Box::new(super::cbt::CbtAdapter),
     ]
 }
 
@@ -449,6 +452,10 @@ mod tests {
         }
         assert!(!looks_like_a_book(Path::new("/x/报告.lit")));
         assert!(!looks_like_a_book(Path::new("/x/无扩展名")));
+        assert!(
+            looks_like_a_book(Path::new("/x/漫画.cbr")),
+            "漫画包不管容器解不解得动都要过粗筛：过不了筛的书连一句「这本读不动」都收不到"
+        );
         // 名字说了不算：这两个都是 `.zip`，一个开得出书一个开不出，
         // 而这里给的都是**读不到**的路径 —— 谈不上容器就是不过筛，不报坏包。
         assert!(!looks_like_a_book(Path::new("/x/书.fb2.zip")));

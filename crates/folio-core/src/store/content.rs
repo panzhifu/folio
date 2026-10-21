@@ -389,11 +389,19 @@ impl Store {
         let toc = serde_json::from_str(&toc_json).unwrap_or_default();
         let (width, height) = pages.first().map_or((0, 0), |p| (p.width, p.height));
         let images = pages.iter().flat_map(page_images).collect();
+        // 封面字节不在库里（v16）：这两格描述拼出去年的那个文件，与可重排那一路同一条读法
+        // —— 两格要么都有，只剩一格就当没有（拿半个描述去猜路径是更糟的那个错）。
+        let cover_ref = match (cover_hash, cover_mime) {
+            (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
+                Some(crate::content::format::cover::CoverRef { hash, mime })
+            }
+            _ => None,
+        };
         Ok(Some(FixedDoc {
             pages,
             toc,
-            // 字节不在库里（v16）：定版式那份封面是首页图，界面为它画占位。
             cover: None,
+            cover_ref,
             images,
             width,
             height,
@@ -476,6 +484,11 @@ mod tests {
             cover: Some(vec![1, 2, 3]),
             // 存的时候会由页表重建，这里故意留空。
             images: Vec::new(),
+            // 封面落盘之后的那两格描述（`covers/<hash>.<ext>` 的拼名材料）。
+            cover_ref: Some(crate::content::format::cover::CoverRef {
+                hash: "0123456789abcdef".into(),
+                mime: "image/png".into(),
+            }),
             width: 800,
             height: 1200,
         }

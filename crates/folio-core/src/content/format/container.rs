@@ -44,6 +44,9 @@ enum Family {
     /// ITSF 一族（CHM）：名字来自 PMGL 目录，那里**恒带前导斜杠**，所以取的时候要
     /// 过 [`lookup_names`] 那几种写法（我们的 href 不带，见 `chm::ours`）。
     Itsf(ChmFile),
+    /// 已解到磁盘的漫画页（CB7 / CBR / CBT）：7z、RAR 与 tar 只有顺序解压，第一次打开
+    /// 就把图片条目整体解到 `comic_cache` 那一格，之后按相对路径读文件。
+    Extracted(std::path::PathBuf),
 }
 
 /// 一个开一次的容器句柄。
@@ -128,6 +131,7 @@ impl Container {
                 }
                 None
             }
+            Found::Extracted(dir) => super::comic_cache::read_page(&dir, href),
             Found::Absent => None,
         }
     }
@@ -146,7 +150,7 @@ impl Container {
     pub fn read_text(&self, href: &str) -> Option<String> {
         match self.address(href) {
             Found::Range(range) => EntryReader::open(&self.path)?.read_text(&range),
-            Found::Itsf | Found::Absent => None,
+            Found::Itsf | Found::Extracted(_) | Found::Absent => None,
         }
     }
 
@@ -159,6 +163,7 @@ impl Container {
         match &mut *family {
             Family::Zip(zip) => zip.range_at(href).map_or(Found::Absent, Found::Range),
             Family::Itsf(_) => Found::Itsf,
+            Family::Extracted(dir) => Found::Extracted(dir.clone()),
         }
     }
 }
@@ -169,6 +174,8 @@ enum Found {
     Range(EntryRange),
     /// ITSF 一族：libchm 自己持有解码状态，只能在锁内读。
     Itsf,
+    /// 已解到磁盘的漫画页：按缓存目录里的相对路径读。
+    Extracted(std::path::PathBuf),
     /// 这一族里没有这个名字，或容器开不出来。
     Absent,
 }
@@ -179,18 +186,35 @@ enum Found {
 /// `ITSF` 那一族就是 CHM。认不出家族的（裸文件、PalmDB 那种键不是名字的容器）
 /// 回 `None`：这一层只服务「按条目名取字节」这件事，谈不上家族。
 fn family_for(path: &Path) -> Option<Family> {
-    let mut head = [0u8; 4];
+    // 512 是 tar 头一整个块的大小：`ustar` 在偏移 257，只读 8 字节看不到。
+    let mut head = [0u8; 512];
     let mut file = std::fs::File::open(path).ok()?;
-    file.read_exact(&mut head).ok()?;
-    if head == *b"PK\x03\x04" {
+    let read = file.read(&mut head).ok()?;
+    let head = &head[..read];
+    if head.starts_with(b"PK\x03\x04") {
         // `Zip::open` 自己记 `ContainerOpens`（一次打开 = 一次计数）。
         return Some(Family::Zip(Zip::open(path).ok()?));
     }
-    if head == *b"ITSF" {
+    if head.starts_with(b"ITSF") {
         let opened = ChmFile::open(path).ok()?;
         // libchm 不替我们记这一笔，而「读一本书该只开一次容器」那条断言数的是它。
         Metric::ContainerOpens.count();
         return Some(Family::Itsf(opened));
+    }
+    if head.starts_with(b"7z\xBC\xAF\x27\x1C") {
+        let dir = super::comic_cache::ensure_sevenz(path).ok()?;
+        Metric::ContainerOpens.count();
+        return Some(Family::Extracted(dir));
+    }
+    if head.starts_with(b"Rar!\x1A\x07") {
+        let dir = super::comic_cache::ensure_rar(path).ok()?;
+        Metric::ContainerOpens.count();
+        return Some(Family::Extracted(dir));
+    }
+    if head.len() >= 262 && &head[257..262] == b"ustar" {
+        let dir = super::comic_cache::ensure_tar(path).ok()?;
+        Metric::ContainerOpens.count();
+        return Some(Family::Extracted(dir));
     }
     None
 }
@@ -418,5 +442,61 @@ mod tests {
             serial.as_secs_f64() / parallel.as_secs_f64(),
             std::thread::available_parallelism().map_or(0, |n| n.get()),
         );
+    }
+
+    /// CB7 的家族：7z 解到缓存后按相对路径取页；`..` 不许穿出缓存目录。
+    #[test]
+    fn a_sevenz_container_serves_cached_pages_and_refuses_traversal() {
+        use crate::content::format::comic_cache::CacheGuard;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let png = |width: u32, height: u32| {
+            use image::ImageEncoder as _;
+            let img = image::RgbaImage::from_pixel(width, height, image::Rgba([1, 2, 3, 255]));
+            let mut out = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut out)
+                .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            out
+        };
+        std::fs::write(src.join("p1.png"), png(4, 5)).unwrap();
+        let path = dir.path().join("a.cb7");
+        sevenz_rust2::compress_to_path(&src, &path).unwrap();
+        let _guard = CacheGuard::new(dir.path().join("cache"));
+
+        let container = Container::new(&path);
+        assert_eq!(container.read("p1.png").unwrap(), png(4, 5));
+        assert!(container.read("../p1.png").is_none());
+        assert!(container.read("/etc/passwd").is_none());
+    }
+
+    /// CBR 的家族走同一份 `Extracted`：RAR 也解到缓存后按相对路径取页。
+    #[test]
+    fn a_rar_container_serves_cached_pages() {
+        use crate::content::format::comic_cache::CacheGuard;
+
+        let dir = tempfile::tempdir().unwrap();
+        let png = |width: u32, height: u32| {
+            use image::ImageEncoder as _;
+            let img = image::RgbaImage::from_pixel(width, height, image::Rgba([5, 6, 7, 255]));
+            let mut out = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut out)
+                .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            out
+        };
+        let mut builder = rars::Builder::new(rars::ArchiveVersion::Rar50);
+        builder
+            .add_bytes(b"p1.png".to_vec(), png(3, 4), None, None)
+            .unwrap();
+        let path = dir.path().join("a.cbr");
+        builder.write_to_path(&path, None).unwrap();
+        let _guard = CacheGuard::new(dir.path().join("cache"));
+
+        let container = Container::new(&path);
+        assert_eq!(container.read("p1.png").unwrap(), png(3, 4));
+        assert!(container.read("../p1.png").is_none());
     }
 }

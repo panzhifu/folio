@@ -225,6 +225,9 @@ pub fn delete_book(store: &Store, id: i64, staged_dir: Option<&Path>) -> Result<
     if let Err(err) = std::fs::remove_file(&copy) {
         tracing::warn!("delete_book: 副本 {copy:?} 没删掉：{err}");
     }
+    // 漫画那一族（CB7 / CBR / CBT）在第一次打开时把整本图片解到了磁盘缓存，
+    // 那一格比副本本身还大，而它没人认领就永远留在盘上 —— 删书是它唯一的清账时机。
+    folio_core::content::format::comic_cache::drop_for(&copy);
     Ok(())
 }
 

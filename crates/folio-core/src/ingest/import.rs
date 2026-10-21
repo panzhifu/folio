@@ -854,10 +854,15 @@ fn import_one(
     // 扩展名来自**判定**（不是来源那个名字），而且要问注册表要它认得的那一个：
     // 副本的再一次识别走的就是那张表（`Format::copy_extension`）。
     let dest = dest_dir.join(hash.file_name(format.copy_extension()));
+    // 漫画那一族在步 6 已经把整本解到磁盘缓存了，而**缓存的键里带着这个路径**。
+    // 所以旧键要在改名之前算，改完名把那一格跟着搬过去 —— 不搬就是白解一遍：
+    // 开书时按新名字算出的键对不上任何东西，几百页的图片再倒出来一次。
+    let comic_cache_dir = crate::content::format::comic_cache::dir_for(&readable);
     if let Err(err) = std::fs::rename(&readable, &dest).io_path(&dest) {
         abandon(&readable);
         return Err(err);
     }
+    crate::content::format::comic_cache::relocate(&comic_cache_dir, &dest);
 
     // 步 7：落库。自愈那一支**不新增行** —— 同一份内容有两行就是两套进度、两套批注，
     // 而读者要的只是原来那一本回来了。

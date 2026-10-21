@@ -267,6 +267,8 @@ fn a_fixed_document_is_not_perpetually_stale() {
         }],
         toc: Vec::new(),
         cover: Some(vec![0x89, b'P', b'N', b'G']),
+        // 这一本只测「定版式也要盖 index_version」，封面描述留空。
+        cover_ref: None,
         images: Vec::new(),
         width: 800,
         height: 1200,

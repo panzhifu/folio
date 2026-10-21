@@ -88,6 +88,13 @@ pub struct FixedDoc {
     pub pages: Vec<FixedPage>,
     pub toc: Vec<TocEntry>,
     pub cover: Option<Vec<u8>>,
+    /// 封面**落盘之后**的描述（`covers/<hash>.<ext>` 那两个格）。
+    ///
+    /// 与 [`FlowDoc::cover_ref`] 同一件事、同一来源：由导入管线在写文件成功之后填，
+    /// provider 只交字节。定版式以前没有这一格，于是 `land_cover` 把整族挡在门外，
+    /// **首页那张图算完就丢**（漫画一直是这样，PDF 接上封面之后也会一样）——
+    /// 现在这一族与可重排走同一条落盘路，界面不再问格式。
+    pub cover_ref: Option<crate::content::format::cover::CoverRef>,
     /// 全书图片资源。整页漫画也在其中 —— 与 [`FlowDoc::images`] 同义。
     pub images: Vec<ImageRes>,
     /// 首屏默认画布尺寸。单页各自的尺寸以 [`FixedPage`] 为准：

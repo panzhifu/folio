@@ -174,12 +174,23 @@ pub enum Metric {
     ///
     /// 口径与 `AtlasDecodes` 一对：一个记放掉了多少，一个记为此重解了几趟。
     AtlasFreed,
+    /// 7z / RAR / tar 漫画包**真解了一遍**的次数（`format::comic_cache::ensure_*` 里
+    /// 缓存未命中那一支）。
+    ///
+    /// 为什么数它：这三种容器只能顺序解压，第一次打开要把整本图片落到磁盘 —— 那是
+    /// 「读一本漫画」里最贵的一笔，比解一张图贵两个量级，所以它必须**每本只付一次**。
+    /// 导入那一步已经解过一遍而开书时再解一遍，屏幕上看不出任何区别，只有第一次翻页
+    /// 会卡在那里；这一格就是那条重复解压唯一能被抓到的地方。
+    ///
+    /// 目标值：**导入一本漫画并打开它，这一格是 1**。它涨到 2 就是缓存键在改名那一趟
+    /// 换了来源（`ingest::import` 的 `relocate` 断了）。
+    ComicExtracts,
 }
 
 /// 计数器条目的存储顺序。新增 [`Metric`] 变体时必须同步扩这两个数组，否则下面的
 /// `ALL` 数组长度对不上，编译期就会报错——这是刻意的：让"漏加一个计数器"成为
 /// 编译错误而不是运行时的零。
-const ALL: [Metric; 14] = [
+const ALL: [Metric; 15] = [
     Metric::ContainerOpens,
     Metric::EntryNameTablePasses,
     Metric::DomParses,
@@ -194,13 +205,14 @@ const ALL: [Metric; 14] = [
     Metric::RuleSetParses,
     Metric::AtlasDecodes,
     Metric::AtlasFreed,
+    Metric::ComicExtracts,
 ];
 
 thread_local! {
-    static LOCAL: [Cell<u64>; 14] = const { [const { Cell::new(0) }; 14] };
+    static LOCAL: [Cell<u64>; 15] = const { [const { Cell::new(0) }; 15] };
 }
 
-static GLOBAL: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+static GLOBAL: [AtomicU64; 15] = [const { AtomicU64::new(0) }; 15];
 
 impl Metric {
     fn slot(self) -> usize {
@@ -219,6 +231,7 @@ impl Metric {
             Metric::RuleSetParses => 11,
             Metric::AtlasDecodes => 12,
             Metric::AtlasFreed => 13,
+            Metric::ComicExtracts => 14,
         }
     }
 
@@ -285,6 +298,7 @@ pub fn label(metric: Metric) -> &'static str {
         Metric::RuleSetParses => "rule_set_parses",
         Metric::AtlasDecodes => "atlas_decodes",
         Metric::AtlasFreed => "atlas_freed",
+        Metric::ComicExtracts => "comic_extracts",
     }
 }
 

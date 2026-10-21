@@ -4,11 +4,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::scan::ImageUse;
 
+/// 7z 漫画包：与 CBZ 同一族（定版式、逐页图片），只是容器换成了 7z。
+pub mod cb7;
+/// RAR 漫画包：与 CBZ 同一族，容器换成 RAR（纯 Rust `rars`）。
+pub mod cbr;
+/// tar 漫画包：与 CBZ 同一族，容器换成 tar。
+pub mod cbt;
 pub mod cbz;
 /// 字节 → 文本的那一层（BOM / 声明 / 容器报的码页）。见模块头那四档顺序。
 pub(crate) mod charset;
 /// CHM（Microsoft Compiled HTML Help）：一个 ITSF 容器里的一组 HTML topic。
 pub mod chm;
+/// 7z / RAR / tar 漫画包解到磁盘的那一层缓存（CB7 / CBR / CBT）。
+///
+/// 这一层公开出去的只有一格 —— [`comic_cache::drop_for`]：界面上「删书」那一步要连着
+/// 带走它那一格解压产物，而只有这一层知道缓存目录按什么键摆。
+pub mod comic_cache;
+/// ComicInfo.xml —— 漫画包的书目便条（ComicRack 那一族写手共用）。四种容器共用这一份读法。
+pub(crate) mod comicinfo;
 pub mod container;
 pub mod content;
 pub mod cover;

@@ -1206,16 +1206,20 @@ fn a_batch_tallies_into_a_report_with_rejects() {
         2,
         "两本都要算进拒绝，不许悄悄少算：{report:?}"
     );
+    // 「杂物.pdf」只有一个 `%PDF` 头，没有对象表也没有 trailer。**它现在不再落进「不支持」
+    // 那一栏**：PDF 有 provider 了，判定层放行，失败发生在步 6 的解析那一步 ——
+    // 报表说的是「读不动」（重导一次 / 换个文件），而不是「这一版还不支持」（等版本）。
+    // 那一格从 2 变 1 正是 PDF 落地带来的读数变化，留着这条门就是为了记下它。
     assert_eq!(
-        report.unsupported, 2,
-        "PDF 认得出但不支持、二进制不是书，同属「不支持」这一栏"
+        report.unsupported, 1,
+        "二进制不是书 = 「不支持」那一栏；PDF 不再属于这里"
+    );
+    assert_eq!(
+        report.unreadable, 1,
+        "只有头的 PDF 该算「读不动」：{report:?}"
     );
     assert_eq!(report.duplicate, 0);
-    assert_eq!(
-        report.corrupt + report.unreadable + report.encrypted,
-        0,
-        "这一批里没有另两档"
-    );
+    assert_eq!(report.corrupt + report.encrypted, 0, "这一批里没有那两档");
     assert!(
         report.summary().contains("成功 1"),
         "那句总结要说得出数：{}",
@@ -1351,6 +1355,78 @@ fn cbz_book(dir: &Path) -> std::path::PathBuf {
     }
     zip.finish().unwrap();
     path
+}
+
+/// 两页的 CB7（7z 漫画包）：条目与 `cbz_book` 同形，只是容器换成只能顺序解压的那一种。
+fn cb7_book(dir: &Path) -> std::path::PathBuf {
+    let pages = dir.join("cb7-pages");
+    std::fs::create_dir_all(&pages).unwrap();
+    std::fs::write(pages.join("01.png"), png(8, 8)).unwrap();
+    std::fs::write(pages.join("02.png"), png(8, 8)).unwrap();
+    let path = dir.join("two-pages.cb7");
+    sevenz_rust2::compress_to_path(&pages, &path).unwrap();
+    path
+}
+
+/// 导入一本只能顺序解压的漫画：**整趟只能解一遍**。
+///
+/// 这条门是被缓存键的形状叫出来的：那一格是「路径 + 长度 + mtime」，而导入的最后一步
+/// 要把 `.staging` 里那个人看得懂的名字改成哈希名 —— 键跟着变，导入那一趟解出来的
+/// 几百页就成了没人认领的孤儿，开书时再解一遍。屏幕上看不出任何区别，只是第一次翻页
+/// 要等一整本。判据只有 `ComicExtracts` 这一格：两条路给读者的字节一模一样。
+///
+/// **把 `import.rs` 里那句 `relocate` 拿掉，第二条断言当场红**（`left: 1, right: 0`）。
+#[test]
+fn importing_a_comic_unpacks_it_exactly_once() {
+    use crate::content::format::comic_cache::CacheGuard;
+    use crate::infra::metrics::{Metric, take_local};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+    let _guard = CacheGuard::new(tmp.path().join("cache"));
+    let book = cb7_book(tmp.path());
+
+    take_local(Metric::ComicExtracts);
+    let outcomes = import_from(
+        &PathsSource::picked(vec![book]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    );
+    let registered = added(&outcomes);
+    assert_eq!(
+        take_local(Metric::ComicExtracts),
+        1,
+        "导入那一趟该解一次（页表要在手上才能落库）"
+    );
+
+    // 开书那一趟：按**副本**（改名之后的哈希名）再索引一遍，一次都不许重解。
+    let provider = crate::content::format::provider_for(&registered.dest)
+        .expect("副本的扩展名要认得（`Format::copy_extension` 那条链）");
+    assert_eq!(
+        copies(&lib),
+        vec![
+            registered
+                .dest
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ],
+        "根上就该是那一份哈希名"
+    );
+    let (_, content) = provider.index(&registered.dest).unwrap();
+    assert!(
+        matches!(content, crate::content::format::Content::Fixed(_)),
+        "CB7 该读成定版式"
+    );
+    assert_eq!(
+        take_local(Metric::ComicExtracts),
+        0,
+        "改名把解压缓存一起搬过去了：第 {} 本开书不许再解一遍",
+        registered.book_id
+    );
 }
 
 /// 把库里那一行的索引版本退回「旧算法算的」。`Store` 的连接是私有的，所以走第二条连接
@@ -1803,5 +1879,86 @@ fn a_chm_imports_lands_and_reads_back() {
     assert!(
         doc.image_bytes("img/fig.png").is_some(),
         "图按 href 现取要拿得到"
+    );
+}
+
+/// 一本真 PDF 走完整条导入：**收下 → 副本按 `.pdf` 落 → 页表与书签入库 → 首页栅格
+/// 落进 `covers/` 且库里指着它**。
+///
+/// 这一条是「能读能翻」那句验收在 core 侧的形状。为什么用入库的那份夹具而不是
+/// 合成的字节：导入那条路上有六件事（判重、落副本、算封面哈希、写缩略图、落库、
+/// 报表），任何一件对新格式没接上，症状都是「书在架上但打不开 / 一片占位图」，
+/// 而那些只有走完整条管线才看得见。
+///
+/// 封面这一格同时是那条既存缺陷的回归门：`land_cover` 从前一句 `Reflow` 就 return，
+/// `save_fixed_in` 又不写 `cover_hash` / `cover_mime` —— 定版式整族（漫画与 PDF 的
+/// 首页栅格）算出来的封面掉进一个没人读的黑洞。
+#[test]
+fn a_pdf_walks_the_whole_import_pipeline_including_its_cover() {
+    let shipped =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("原处");
+    std::fs::create_dir_all(&source).unwrap();
+    let copied = source.join("三页的一本.pdf");
+    std::fs::copy(&shipped, &copied).unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let outcomes = import_from(
+        &PathsSource::picked(vec![copied]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    );
+    let registered = added(&outcomes);
+
+    // 副本的扩展名问的是 provider 注册表，不是 `Format::as_str` —— 两处各写一份
+    // 就会漂成「导进来一本书，它自己的副本再也认不出来」。
+    let names = copies(&lib);
+    assert_eq!(names.len(), 1, "副本该有一份：{names:?}");
+    assert!(
+        names[0].ends_with(".pdf"),
+        "副本该按 .pdf 落，实际 {}",
+        names[0]
+    );
+
+    let fixed = store
+        .load_fixed(registered.book_id)
+        .unwrap()
+        .expect("定版式的页表该在库里");
+    assert_eq!(fixed.page_count(), 3, "pdfinfo 说 3 页");
+    assert_eq!(fixed.toc.len(), 2, "书签两条该落库");
+    assert_eq!(
+        fixed.toc.iter().map(|e| e.page).collect::<Vec<_>>(),
+        vec![Some(0), Some(1)],
+        "落点是页号，不是容器路径"
+    );
+
+    // 封面：文件在 `covers/` 下，而库里那两格指着它。
+    // 路径问 `cover::cover_path` 而不是在这里自己拼：文件名是哈希的**前 20 字**而不是
+    // 完整哈希，写与读必须走同一个函数 —— 各拼一遍的错法是「文件明明在、封面却没了」。
+    let cover = fixed
+        .cover_ref
+        .expect("首页栅格该落进 covers/ 并被库里指着");
+    let dest = crate::content::format::cover::cover_path(&lib, &cover.hash, &cover.mime);
+    assert!(
+        dest.exists(),
+        "封面文件该在 {}，covers/ 里实际 {:?}",
+        dest.display(),
+        std::fs::read_dir(lib.join("covers"))
+            .expect("covers/ 该存在")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(cover.mime, "image/png", "栅格化交回的就是 PNG");
+
+    // 架上那一格：格式名要认得出来（`Format::parse` 与 `as_str` 两张表的往返）。
+    let row = store.book(registered.book_id).unwrap().expect("行该在");
+    assert_eq!(row.format, "pdf", "{:?}", row.format);
+    assert_eq!(
+        crate::content::format::Format::parse(&row.format),
+        Some(crate::content::format::Format::Pdf)
     );
 }
