@@ -1,6 +1,6 @@
 # Folio 开发计划
 
-基于 gpui-kit 的 EPUB / Markdown / TXT 阅读器，桌面（Wayland）与 Android 两端一份实现。
+基于 gpui-kit 的中文电子书阅读器，桌面（Wayland）与 Android 两端一份实现。支持哪些格式**以 provider 注册表为准**（`content/format/provider.rs` 的 `providers()`，现在 19 个），这份文档不抄第二张表。
 
 ## 文档索引
 
@@ -21,6 +21,7 @@
 | [background-pipeline.md](background-pipeline.md) | 后台任务管线（`task`）：可取消、可报进度的后台作业 |
 | [import-trait.md](import-trait.md) | 导入管线：`Source` trait 一条抽象七种来源（选文件/批量/整机扫描/监听/Wi-Fi 传书/URL/WebDAV），落库在后台 |
 | [layout-optimization.md](layout-optimization.md) | 排版引擎优化记录（Tier 1 + §7.1–§7.5：两阶段排版 / 块级缓存 / 词级断行等） |
+| [layout-engine-refactoring.md](layout-engine-refactoring.md) | 排版引擎的重构方案（与上一份的优化记录分开放：那一份记量过的数，这一份记结构的去向） |
 | [翻页轴向.md](翻页轴向.md) | 手势的轴由动画档决定（不再由手指定）+ 一笔手势只落一个动作 + 惯性尾巴归发起那一笔；含四条缺陷与判定表 |
 | [目录与组件.md](目录与组件.md) | 目录重构：四条依赖方向 + 纵切统一四层（model/view/components/overlay）+ reader 26 文件逐行搬迁表 + 页面拆组件的三条自查 + 六次提交 |
 | [目录架构.md](目录架构.md) | 上一份的**可执行版**：目标态完整目录树、依赖矩阵、`mod.rs` 骨架、按批次的 `mv`/`sed` 脚本与门禁命令 |
@@ -50,42 +51,53 @@ crates/folio-core/src/
 `CARGO_MANIFEST_DIR` 解，不是相对源文件 —— 搬模块时它不该跟着动。
 
 ```
-crates/folio-core/          纯 Rust，无 gpui
-  src/document/             统一文档接口：Document trait（可重排 / 定版式）+ BookDocument 门面
-  src/dom/                  html5ever arena DOM
-  src/css/                  cssparser + selectors，层叠与 UA 表
-  src/layout/               排版引擎：行盒 / 分页 / 双栏分片（fragment.rs）
-    key.rs                  失效键 `LayoutKey`：**一处构造，各级缓存共用**
-    cache.rs                整章 `LayoutCache` 与块级 `BlockCache`（改一段只重排一段）
-  src/anchor.rs             TextMap（可见文本坐标系）/ TextAnchor / 四级降级 relocate
-  src/annotation.rs         批注读侧：relocate 批量解析 / 按章分组 / Markdown 导出
-  src/group.rs              书架分组（按作者 / 格式；集合见 store）
-  src/time.rs               日历换算（Unix 秒 ↔ 本地日 ↔ YYYY-MM-DD）
-  src/hit.rs                引擎查询接口：hit_test / rects_for_range / snap_word
-  src/format/               provider 注册表 + 容器解析
-    content.rs              Content：可重排 FlowDoc / 定版式 FixedDoc（KOReader 的 has_pages 那一刀）
-    provider.rs             DocumentProvider trait + 注册表（认领 / 权重）
-    zip.rs / cbz.rs         zip 容器共用层；CBZ（定版式，自然序页表）
-    epub.rs / fb2.rs / html.rs / markdown.rs / rtf.rs  可重排容器
-  src/remote/               WebDAV + 传输 trait（同步签名）：dav 协议规则离线可测，ureq 是同步实现
-  src/task.rs               后台任务管线：可取消、可报进度的后台作业（thread + mpsc）
-  src/import.rs             导入管线：Source trait + 逐本「拷 → 解析 → 落库」（后台完成）
-  src/scan.rs               整机扫描：找书不导入，候选清单勾选再走管线
-  src/watch.rs              文件夹监听：inotify 事件攒批自动入库（notify）
-  src/transfer/             Wi-Fi 传书：HTTP 服务器收上传（tokio/axum 只住这里）
-  src/store.rs              SQLite：书目、进度、批注、集合、阅读统计、定版式页表（图片只存元数据）
+crates/folio-core/src/              纯 Rust，无 gpui
+  content/                          内容与文档
+    dom/  css/  layout 那一侧的输入
+    document/                       统一文档接口：`Document` trait + `BookDocument` 门面
+                                    （可重排 / 定版式两族都从这一个入口出去）
+    format/                         provider 注册表 + 容器解析，**格式差异到这一层为止**
+      provider.rs                   `DocumentProvider`（index / chapter_source / read_texts /
+                                    image_bytes / render_page / fonts / entry_text）与注册表
+      content.rs                    `Content`：可重排 `FlowDoc` / 定版式 `FixedDoc`
+                                    （KOReader 的 has_pages 那一刀）
+      zip.rs container.rs palmdb.rs 三种容器共用层（ZIP、按偏移直读的条目、PalmDB）
+      comic_cache.rs                7z / RAR / tar 的磁盘解压缓存（CB7 / CBR / CBT）
+      epub.rs fb2.rs html.rs htmlz.rs markdown.rs text.rs rtf.rs chm.rs mobi.rs
+      pdf.rs azw4.rs docx.rs odt.rs pdb.rs cbz.rs cb7.rs cbr.rs cbt.rs djvu.rs
+      novel/                        `.txt` 那一族：规则表（`assets/novel-rules.*.json`）+ 引擎
+      charset.rs                    字节 → 文本那四档（BOM / 声明 / 探测 / UTF-8）
+      css/ cover.rs thumb.rs svg.rs woff.rs xhtml.rs sniff.rs
+    anchor/ hit/ annotation.rs scan.rs
+  layout/                           排版引擎：行盒、分片、失效键与两级缓存
+    key.rs                          失效键 `LayoutKey`：**一处构造，各级缓存共用**
+    cache.rs                        整章 `LayoutCache` 与块级 `BlockCache`（改一段只重排一段）
+  store/                            SQLite：书目、进度、批注、集合、阅读统计、定版式页表
+  ingest/                           书怎么进来：`import`（Source + 七步管线）、`scan`、
+                                    `watch`、`identity`（sha2 当身份）、`validate`
+  net/                              出网与入网：WebDAV、Wi-Fi 传书（tokio 只许在 transfer/）
+  infra/                            横切：配置、日志、路径、错误、作业、服务、量具、时间、预算
+  search/                           书内全文搜索（现读现扫，零索引）
+  group.rs position.rs time.rs      还没找到邻居的三个小模块（书架分组、阅读位置、日历换算）
 
-crates/folio-app/src/ui/    gpui-kit 界面
-  reader/                   阅读器（对应 KOReader ReaderUI）
-    session.rs              ReaderSession：组装模块、命令入口、跨模块协调
-    modules/                功能模块：navigation / position / toc / selection / annotations
-    book.rs                 章节表、目录、Document 会话
-    document.rs             一章的排版状态（层叠 + 排版 + 分片 + 坐标映射）
-    view.rs                 纯渲染：读 session 状态 → scene；输入翻译
-    scene.rs / paint.rs     排版结果 → 绘制单元 → canvas + ShapedLine::paint
-    chrome.rs               点击分区、面板档位（纯函数）
-  shell/ shelf/ settings/   导航外壳、书架、设置
-  shared/                   跨屏共用：theme / l10n / config_model / book_fonts / images
+crates/folio-app/src/ui/            gpui-kit 界面
+  features/reader/                  阅读器（对应 KOReader 的 ReaderUI），按纵切分四层
+    model/                          状态与判断：`session`（组装与命令入口）、`book`（章表 +
+                                    排版会话）、`fixed_book`（定版式页表 + 当前页）、
+                                    `chapter_layout`（一章的层叠 + 排版 + 分片）、
+                                    `toc` / `toc_tree`、`position`、`selection` 那几条、
+                                    `image_atlas`（图集回收）、`turn` / `paging` / `swipe`
+    view/                           纯渲染：`body`（读状态 → 场景 + 输入翻译）、`scene`、
+                                    `paint`、`regions` / `bands` / `reading_page`
+    components/                     有交互的部件：`toc_panel`、`image_viewer`、`selection`、
+                                    `share_card`、`note_editor`
+    motion/                         翻页动画（仿真卷曲那一条）
+  features/shelf|notes|stats|settings|welcome/   其余目的地
+  components/ widgets/              跨屏共用的小件（发丝线、空状态、顶栏）
+  foundation/                       图片、字体、动效这类没有界面的地基
+  services/                         l10n、library（删书那几条路）、config
+  shell/                            应用外壳：自适应导航 + 每目的地一条返回栈
+  host/ platform/                   平台边界（`cfg(mobile)` 只许留在这两层）
 ```
 
 **模块化原则**（KOReader registerModule 的 Rust 化）：每个 module 是普通 struct，由
@@ -112,6 +124,8 @@ crates/folio-app/src/ui/    gpui-kit 界面
 
 | 里程碑 | 内容 |
 |---|---|
-| M8 | 脚注弹层、`<ruby>` 注音、`writing-mode: vertical-rl` 竖排（拉丁侧转不支持，显式降级） |
-| M9 | PDF（pdfium-render 栅格 + 文字层锚点、LRU 页缓存） |
-| M10 | 打磨：FTS5 搜索、集合、CBZ、快捷键、打包发布 |
+| M8 | **已落地两条**：`writing-mode: vertical-rl` 竖排（逻辑横排 + 一次转置；拉丁侧转不支持，显式降级，见 `layout/geometry.rs` 与 `layout/tests/vertical.rs`）、脚注弹层（`reader/model/footnotes.rs` + 阅读页那张小纸片）。剩一条：**`<ruby>` 注音** —— 层叠与排版两侧都还没有这一族标签的位置 |
+| M9 | PDF。**已落地**：纯 Rust 的 `pdf_oxide`（不是 `pdfium-render` —— 那条要 C，且只在 `table-ml` 那一档后面）栅格化一页、页缓存复用图集那一层（`reader::image_atlas`，24 MB 封顶 + 离场两帧就放）、书签上屏并能跳页、书目与首页封面、**那一页也点得开放大 / 分享 / 保存**（`PageSource::Render` 的页现在进整本书那一列，见 `fixed_book::build_image_sequence`）。剩下的是一刀：**文字层锚点**（`extract_words` 实测存在，交回 pt 的盒子、原点左下 y 朝上，而栅格原点在左上 —— 接进 `hit` / `anchor` 要翻 y），在那之前 PDF / AZW4 / DjVu 里选不出字，与漫画同档 |
+| M10 | 打磨：全库搜索（书内那一条已落地：现读现扫零索引；FTS5 被数否决）、集合、快捷键、打包发布。**CBZ 早已落地，从这一行拿掉了** |
+| 格式扩展 | **已落地**：DOCX / ODT、PDB / PalmDoc、AZW4（PalmDB 内嵌 PDF）、HTMLZ、CB7 / CBR / CBT（7z / RAR / tar 漫画包；CBR 走纯 Rust 的 `rars`，不绑 unrar 的 C++）、DjVu（纯 Rust 的 `djvu-rs`，不引进 DjVuLibre；bundled 与 indirect 两种容器形状都读，NAVM 书签 → 目录、`(metadata …)` → 书目）。三种只能顺序解压的容器共用一份磁盘缓存（`comic_cache`：导入改名时那一格跟着搬、删书时跟着删、每次解压后压回上限），也共用同一份书目来源 —— 包里那份 `ComicInfo.xml`（口径按 Komga 的生产级 DTO），以及那张 `folder.jpg` / `cover.jpg` 封面缓存（认成封面，不排进页表）。Word / ODT 的**列表与脚注**也落了：DOCX 走 `w:numPr` + `word/numbering.xml`（含 `w:lvlOverride`）与 `w:footnoteReference` + `word/footnotes.xml` / `endnotes.xml`，ODT 走 `text:list` + `text:list-style`（`style:num-format` 与 `text:bullet-char`）与 `text:note`；两族都归约成引擎已有的 `<ul>/<ol>/<li>` 与 `epub:type="noteref"` / `epub:type="footnote"` 那一对形状，脚注弹层不用改。<br>**后置**：PDF / AZW4 / DjVu 的文字层（`FixedDoc` 页内文本框与批注坐标）、加密 RAR（无密码入口）、`ComicInfo.xml` 的 `<Chapters>`（页号基数没有权威，故意不读）、indirect DjVu 的**真样本验证**（代码走 `open_dir`，本机没有一份真 indirect 文件可撞）、Word 的**样式间接编号**（两个生产者都把 `numPr` 写在段落上，所以没去 `word/styles.xml` 找那一层）、`w:numRestart` 与 ODT 的 `text:continue-numbering`（号一律按出现序数，「接上一串」的那种写法屏上会从 1 重来） |
+| 真样本覆盖 | 拿**别人生产的文件**量过的：EPUB（calibre 导出）、CHM（7-Zip 打包）、MOBI / AZW3（libmobi 样本 11 本，含两本 `TEXt`/`REAd` 的真 PalmDOC）、TXT（Gutenberg 公版 8 本）、DjVu（djvu-rs 测试集 + 一份 71 页带 100 条书签的公版 spec）、RAR（rarlab 测试集）、PDF（合成，形状经 poppler 验）、**DOCX（python-docx 那四份 + docx-rs 测试集里带 `w:numPr` / `w:footnote` 的五份，共 9 份真 Word 文件**，量出表格里每个格子是一整段、编号定义在 `numbering.xml` 而引用在段落上、`separator` / `continuationSeparator` / `continuationNotice` 那三种格子占着与真注文同一个 id）、**ODT（odfjs 测试集 + webodf 的 welcome.odt，共 5 份**，量出 `text:bullet-char` 的 `•` `◦` `▪` `➢` 四层与 `style:num-format="A"` / `"1"`，以及 LibreOffice 真写出的空 `text:style-name`）、**PalmDOC（那两本**，量出三条：书名在数据库名那一格、正文可以是标记、加密方式那一格没人读）。真样本顺带量出一条**跨格式**的：`&amp;` 在 quick-xml 0.42 里是独立事件，四处只吃 `Event::Text` 的解析会静默丢掉那一个字符（EPUB 的 OPF / NCX / nav、DOCX、ODT、ComicInfo），收口在 `format::xml_piece`。还**只有合成夹具**的：ODT 的 `text:note`（手边五份 .odt 里没有任何一份带注）、HTMLZ、AZW4、CB7 / CBT、ComicInfo.xml、漫画那张 `folder.jpg` —— 这几条的门目前是「自己写的夹具刚好符合自己的解析」，撞到真文件形状之前别当成已验过 |

@@ -2,7 +2,7 @@
 
 用 Rust + [gpui-kit](https://gpui-kit.com) 写的原生 GPU 桌面阅读器。不嵌浏览器，不用 WebView。
 
-**状态**：M0–M4 引擎主线完成（排版、局部样式、图片、连续/分页/双页）。目前可用：EPUB 导入 → 侧栏书库 → 多标签阅读 → 自研引擎排版（首行缩进、居中、多 run 局部样式、行内/块级图片按 width/max-width 缩放）→ 字号/行距/字体/主题设置 → 进度记忆（重启回到原位置）。格式侧另有 MOBI / AZW3（KF7 + KF8，含 hybrid）、SVG 栅格化（resvg）、定版式阅读（CBZ 与 EPUB fixed-layout，逐页含 SVG 漫画）。进行中：M5 架构重构 + 绘制简化，M6 选中功能，见 [`plans/`](plans/README.md)。
+**状态**：M0–M4 引擎主线完成（排版、局部样式、图片、连续/分页/双页），M5 架构重构与 M6 选中已完成，M7 批注的后端与划线写入口已落地、笔记那一屏还是空状态。目前可用：EPUB 导入 → 侧栏书库 → 多标签阅读 → 自研引擎排版（首行缩进、居中、多 run 局部样式、行内/块级图片按 width/max-width 缩放）→ 字号/行距/字体/主题设置 → 进度记忆（重启回到原位置）。格式侧另有 MOBI / AZW3（KF7 + KF8，含 hybrid）、AZW4（PalmDB 内嵌 PDF）、PDF、DOCX / ODT、PDB / PalmDoc（认 DRM 那一格、认正文其实是标记、读早期 OEB1 的都柏林核心块）、HTMLZ、CB7 / CBR / CBT（7z / RAR / tar 漫画包；CBR 走纯 Rust 的 `rars`，不绑 unrar 的 C++）、DjVu（纯 Rust 的 `djvu-rs`，不引进 DjVuLibre；bundled 与 indirect 两种容器形状都读，NAVM 书签上屏当目录、`(metadata …)` 那块进书目）、SVG 栅格化（resvg）、定版式阅读（CBZ / CB7 / CBR / CBT / PDF / AZW4 / DjVu 与 EPUB fixed-layout，逐页含 SVG 漫画；栅格化那三族的页也点得开放大、能分享与保存）。漫画那一族的书目来自包里那份 `ComicInfo.xml`（ComicRack / CDisplayEx / Calibre 写的那份便条：书名、著者、其余角色、系列与期号、出版社、简介、主题、语种、条码），包里那张 `folder.jpg` / `cover.jpg` 认成**封面**而不是凭空多出来的一页。Word / ODT 那两族读出**列表**（记数按 `word/numbering.xml` 与 `text:list-style`，层号按 `w:ilvl` / `<text:list>` 的嵌套）与**脚注尾注**（引用落成可点的上标，注体摆回引用它的那一章，接现有脚注弹层那条链）。**未接**：PDF / AZW4 / DjVu 的文字层（选中、批注、听书在这三族上是空的）、加密 RAR（没有密码入口）、`ComicInfo.xml` 里 `<Chapters>` 的页号（基数没有可信权威，猜了会整条目录偏一页）、Word 靠样式间接触发的编号与每节从头再数的编号、ODT 的 `text:continue-numbering`。见 [`plans/`](plans/README.md)。
 Android 侧（Meizu 20 实测）：正文与插图上屏、章节可前后翻、偏好与主题从同一份 `config.json` 读、
 进度落库、界面文案跟随语言。实测约束清单见 [`plans/facts.md`](plans/facts.md)。
 
@@ -22,7 +22,8 @@ gpui-kit 的富文本组件明确不做 CSS（其 Not Goals 原文：*As a HTML 
 crates/folio-core/   零 gpui 依赖：统一文档接口（Document trait：可重排 / 定版式）、
                      DOM、CSS、排版算法、锚点与批注（重定位/分组/导出）、书架分组、
                      SQLite（书目/进度/批注/集合/阅读统计/定版式页表）、
-                     格式 provider 注册表（EPUB / FB2 / HTML / Markdown / TXT / RTF / CBZ / CHM / MOBI）、
+                     格式 provider 注册表（EPUB / FB2 / HTML / Markdown / TXT / RTF / CBZ / CHM / MOBI /
+                     PDF / DOCX / ODT / PDB / AZW4 / CB7 / CBR / CBT / DJVU / HTMLZ，共 19 个）、
                      SVG 栅格化（resvg，封面 / 内联 / 逐页漫画共用）、WebDAV、配置（含 `logging` 一节）、
                      日志（`tracing` subscriber 装在这）
 

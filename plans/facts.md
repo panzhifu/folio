@@ -28,7 +28,7 @@
   静默不画**（`gpui-pre-wgpu` 的 `WgpuAtlasTextures::allocate` → `paint_image` 的
   `.expect`）。tile 用的是**图像原始像素**，而 GLES 上这个上限常见 4096、部分只有 2048；
   一张 1200×1600 的插图在 2.8 倍屏手机上就是 3360×4480 超过上限 —— 手机「书里的图看不见」
-  多半是这一条。所以 `folio_core::format::shrink_image` 在第一次要画时把长边缩到 2048 以内
+  多半是这一条。所以 `folio_core::content::format::shrink_image` 在第一次要画时把长边缩到 2048 以内
   （KOReader 的 `ImageWidget` 也是先缩再缓存）。
 - 文字 run 的 `Font` 解析（`gpui_font`）要拿候选链去 `all_font_names()` 里线性扫；
   `all_font_names()` 每次调用都把整张字体表枚举+排序+去重。两者都**不能每帧做** ——
@@ -99,6 +99,133 @@
   在 RTL 段则不精确（两条 shaping 路径的口径不同）。LTR 下三处逐字同源、逐像素对得上；
   RTL 下宁可不动也不半接，记在这里而不是假装成了。本机四本书的 css/xhtml 里
   `letter-spacing` 出现 0 次、带 justify 的 RTL 书为 0。
+
+- **CB7 / CBR / CBT 的 7z、RAR、tar 只有顺序解压**：要第 100 页得从第 1 页一路解过来，
+  滚动时每页重解是 O(n²)。所以第一次打开把图片条目解到
+  `<数据根>/cache/comics/<sha256(路径+长度+mtime)>/`，之后按相对路径现取。缓存是派生数据，
+  删掉只会触发重解；目录用 `.folio-done` 标记完成，**内容记着「解出来多少字节 + 是哪本书」**
+  （算总量不必再走一遍目录，而源文件没了一本才算得出那是孤儿），没标记的半成品会被整个删掉重来。
+  解压回调自己拒绝绝对路径、`..` 与盘符，且只写图片。三件事必须一起记着：
+  **键里带着路径，而导入的最后一步要把副本改名成哈希名**，所以那一格得跟着搬
+  （`comic_cache::relocate`，不搬就是导入那一趟白解、开书时整本再解一遍）；删书要连着删它
+  （`drop_for`，`folio-app` 的 `library::delete_book` 那一步）；每次解压之后把整棵压回
+  `MAX_CACHED_BYTES`（那是**政策不是实测**：源文件已不在的先删，剩下的按标记 mtime 从最旧的丢）。
+  这一族唯一的量具是 `Metric::ComicExtracts`：重复解压给读者的字节一模一样，屏幕上看不出来。
+  **已知没管的一件事**：正在读的那一本在 `prune` 里没有豁免（只有开书那一次盖 mtime，逐页取字节
+  不写盘），所以「开着旧漫画 + 解压一本新的 + 总量正好超上限」这一种组合会让被丢掉那一本的
+  页变空，重开才恢复。上限那一档就是为了让它尽量不发生。
+- **CBR 用纯 Rust `rars`，不绑 unrar C++**：RAR4/RAR5 的正文是 LZSS + PPMd + 滤波器，
+  还有 solid 字典、跨卷与 CRC/BLAKE2sp；手写等于重做一遍 unRAR。`rars` 0.11 是独立实现
+  （Apache-2.0，MSRV 1.89），支持 RAR 1.4–7、solid/多卷、store/LZ/PPMd，`cargo ndk`
+  交叉检查过。关掉默认 feature（write/recovery/encryption/parallel），只带读路径；
+  **加密 RAR 这一版没有密码入口**，会明确报错而不是读出一本乱码书。目录缓存与 CB7
+  共用（`ensure_rar`）。
+- **AZW4 不是新 PDF 引擎**：它是 PalmDB 里一条以 `%PDF-` 开头的记录，取出来交给
+  `PdfDocument::from_bytes`，页表/书签/封面复用 `format::pdf::read_pdf`。判定时先看
+  记录里有没有 PDF，再看 `BOOKMOBI`，所以 `BOOK` 系的其他 creator 也能认出来。
+- **PalmDOC 的记录 0 头偏移 12 是加密方式，不是「当前位置」**：非 0 就是加过密，那一本的
+  正文永远解不开。MOBI 那一路早就读这一格（`mobi::header`），PDB 这一路以前没读，
+  于是 libmobi 的真样本 `sample-drm-v1` 被「解压」成一屏乱码交出去，而屏幕上看着有正文。
+  同一张头还有两处别再抄错：偏移 0..32 是**数据库名**（PalmDOC 没有 EXTH 时书名就只有它，
+  mobitool 报的 Title 就是那一格），偏移 4 是正文总长（头里的记录数会说谎，按实际记录夹住）。
+- **`TEXt`/`REAd` 只说得出「文本记录」，说不出那文本是纯字还是标记**：早期 PalmDOC
+  （TextReader / OEB1 那一类）记录里直接写着 `<HTML><HEAD>…`，libmobi 两本真样本里就有一本。
+  按纯文本收会把整份标记转义成屏上一堆尖括号。判据锚在**开头**（`<!doctype` / `<html` /
+  `<?xml`），不能「整本里含 `<html` 就算」—— 一本讲 HTML 的小说会含那几个字符。
+  同一批样本还写着 `<dc:*>` 那一块（早期 Mobipocket 的书目就在这里，没有 EXTH）：
+  认**带 `dc:` 前缀**的标签名，裸 `<title>` 是页面标题、不是书名；`<dc:Identifier>` 要按
+  scheme 筛，真样本第一条是 `id="uid"`，不是 ISBN。
+- **Word 的表格里每个格子是一整段**（`<w:tc><w:p>…`，四份真 Word 文件都这形状）：所以
+  「一行拼成一个 `<p>`」的那一步必须先把格子里的段落包拆掉，否则交出去的是
+  `<p><p>…</p></p>`，而 html5ever 见到 `<p>` 里开 `<p>` 会当场关掉外层 —— 那一行被劈成两段。
+- **DjVu 用纯 Rust 的 `djvu-rs`（0.43，MIT，无 GPL），不引进 DjVuLibre**。三条按上游源码
+  注释与本机实测钉住：
+  ① `Document::open` **只吃 bundled**（自包含的 DJVM），indirect（索引 + 一页一个文件）要
+  `Document::open_dir`；实测 `open_dir` 对 bundled 同样给得出正确页数（两份真样本各开一次），
+  所以入口走 `open_dir` 一条路 covers 两种形状。**没验到的那半边如实记着**：本机没有一份
+  真 indirect DjVu（`djvu encode` 与 CLI 的 `split` 都只产 bundled），所以 indirect 那一支
+  是按上游文档 + `open_dir` 在 bundled 上的实测推的，不是撞到的。
+  ② 书签（NAVM）与书目（`(metadata …)`，也就是 ANTT / AGINT 那一块）都解得出来，也都接了。
+  书签那份 71 页的公版 spec 样本实测 100 条、最深五层，url 三种形态：`#64`（**1 起**的页号）、
+  `#p0064.djvu`（按 DIRM 里 `P` 条目的顺序换页号）、空串（根那一条，只管分组）。
+  **绝不猜组件名里的数字**：真样本里第一页可以叫 `p0001_1.djvu`，另一本 Internet Archive 的
+  页组件从 `_0000` 起 —— 按数字减一在后者上整整差一页，而那正是「点目录跳错地方」那一类最难查的错。
+  书目那一格的门是**合成**的：手边四份真 DjVu（含两本 IA 公版扫描）`metadata()` 全回 `None`
+  —— IA 那一族的元数据写在旁边的 `.meta` 文件里，不在 DjVu 内。所以那条门用上游编码器
+  （`djvu_mut::set_metadata`）往真样本上加一块再读回来：钉的是「那一块怎么落到书目的格子」，
+  不是「那一块的字节长什么样」。
+- **quick-xml 0.42 把实体引用报成**独立事件**，只吃 `Event::Text` 的解析会静默丢字符**：
+  `Text("一个城市的") + GeneralRef("#38") + Text("与它的灯。")`（实测）。四处各自攒文本的地方
+  都中过这一枪 —— EPUB 的 OPF 书目与 NCX / nav 标签、DOCX 的 `w:t` 与 `docProps/core.xml`、
+  ODT 的 `text:p` 与 `meta.xml`、漫画那份 `ComicInfo.xml`。症状是**书名与正文少一个 `&`**
+  （`Harry Potter & the ...`、`R&D`、`Tom & Jerry` 满地都是），而屏幕上看着像原书就这么印的。
+  收口在 `format::xml_piece`：`Text` 与 `GeneralRef` 两支都走它，实体还原成 `&名;` 再统一 unescape。
+  门四条（`entity_references_*` 那几条），**把 `is_reference` 那一支掏空，四条一起红**。
+- **ComicInfo.xml 里 `<Chapter Page="…">` 的基数没找到可信权威**（Komga 那份生产级 DTO
+  干脆没建模它、calibre 的漫画入口不读这份便条、手边也没有带 `<Chapters>` 的真包），
+  所以**故意不读**那一族：猜 0 起还是 1 起的后果是「每一条目录都跳到隔壁那一页」，
+  比目录少一条糟得多。书目那一半（Title / Writer / Series / Number / Genre / Tags /
+  Year + Month / LanguageISO / GTIN）没有这个歧义，按 Komga 的口径接了（角色全进
+  `dc:contributor`，只有 `Writer` 进 `dc:creator`；多值按**逗号**切）。
+
+- **`folder.jpg` / `cover.jpg` 是封面缓存，不是页** —— CDisplayEx / Kavita / YACReader 往包里写
+  `folder.jpg`，Calibre 导出写 `cover.jpg`。从前没人认，于是它们被自然序排进页表：同一张封面
+  在书架上一次、在正文里多出来一页（数字命名的页排在字母之前，所以多半落在**书末**，症状是
+  翻到最后凭空多一页封面）。现在 `folder.*` 优先于 `cover.*`（前者是阅读器写的缓存，与封面
+  同义得更彻底），同类按自然序取第一张，子目录里的 `images/cover.jpg` 也算，大小写都算。
+  **一个兜底**：包里的图只有那一张时留着当页 —— 摘掉它就是「一页都没有」，而那一格当场判
+  打不开，比书架与正文共用同一张图糟得多。门四条 + 一条 CB7 的（那一族走磁盘缓存，四个
+  provider 各接一次，漏一个就有一族多一页）。
+- **DOCX 的列表分两半，形状与记数各在一处**：段落的 `w:pPr/w:numPr` 只交 `w:ilvl`（层号）+
+  `w:numId`（实例号），**怎么记数在 `word/numbering.xml`**（`w:num` → `w:abstractNumId` →
+  那一层的 `w:numFmt`），所以跳一层就认不出号。真样本 `numbering.docx` 量出三件事：
+  ①两个生产者（Word 与 LibreOffice 导出的 docx）都把 `numPr` **写在段落自己身上**，所以没去
+  `word/styles.xml` 找样式间接那一层（那几份里的 `List*` 样式只是出厂定义，正文一条没引用）；
+  ②`numId` 1 与 2 **都是 `decimal` 但是两份列表**，Word 的纸面是「1 / 1、2」，合成一条就成了
+  「1 / 2、3」—— 所以归约时换了实例就关掉重开，而不问记数；③`w:lvlText` 那种模板
+  （`Section %1.`）画不出来（标记由 `layout::marker` 按记数折），取同一条 `w:lvl` 里的 `w:numFmt`，
+  代价是「Section 1.」读成「1.」。认不出的那几档（实例没有、层超出定义、整份文件缺失）一律
+  **只留缩进不画号**：编一个圆点或一个「1.」是造出一个书里没有的东西。
+- **DOCX 脚注那三种 `w:type` 格子不能按 id 判**：`separator` / `continuationSeparator` /
+  `continuationNotice` 的内容是「画页底那条线」的东西，真样本 `without_numid.docx` 里它们占着
+  id `-1` / `0` / **`1`**，而 `footnotes.docx` 里那条**真注文的 id 也是 `1`**。所以判据只能是
+  `w:type` 在不在。另一条：注体的段间用空格接、`w:footnoteRef`（注里那个标记自己）不计入注体的字。
+  引用落成的形状必须是弹层那条链认的（`<sup><a epub:type="noteref" href="#fnN">` +
+  `<aside epub:type="footnote" id="fnN">`，注体必须在**引用它的那一章**里 —— 弹层只在本章找 id）。
+  同一条注被引用第二次（Word 的交叉引用）：号不变、注体只摆一份，否则一章里两个同 id 的元素，
+  解到的是后那一个而屏上看不出异常。
+- **ODT 的列表同样是两半，但形状来自元素本身**：`text:list` 是**嵌套元素**（层号取嵌套深度），
+  记数在 `text:list-style` 里 —— 而且定义**两处都可能出现**（`styles.xml` 的命名样式与
+  `content.xml` 的 automatic-styles），扫的时候不看它的父容器。真样本量到的四种记数：
+  `text:bullet-char` 的 `•` `◦` `▪`（→ disc / circle / square 三档，`liste-courses.odt` 一份里
+  就前三层）与 `➢`（表外的自定义符号 → 圆点）、`style:num-format="1"` 与 `"A"`（十进制与
+  上写字母，`welcome.odt`）。**`text:style-name=""` 是 LibreOffice 真写出来的**（那份 welcome
+  里两个注解列表就是这样），认不出的一律圆点。`text:continue-numbering`（接上一串的号）不读。
+- **ODT 的 `text:note` 是内联的**：引用点在句子中间，注体（`text:note-body` 里那些 `text:p`）
+  也写在这里 —— 与 DOCX 的「注体在另一份部件里」正相反。所以进 `text:note` 必须先把外层那段
+  寄存起来，否则注体里那个 `text:p` 会把外层段落提前 flush，症状是「正文」与「尾巴」被劈成两段。
+  号取 `text:note-citation` 自己写的那串（Writer 已算好，含 `a.` 这种写法），那一格空着才按出现序数。
+  **手边五份真 .odt 里没有任何一份带 `text:note`**：这一路的形状按 ODF 的三格写、由合成夹具钉，
+  「真生产者到底怎么摆」没被量过。
+- **DOCX / ODT 的依赖候选实测**（在仓库外的空项目里跑真样本，`/home/noke/tmp/docxdep`、
+  `/tmp/probe-*`；代价按「`cargo tree -e normal` 的闭包减去 folio-core 已有的」算）：
+  `docx-rs` 0.4.22 净新增 **1 个包**（闭包 57 个全在 folio-core 那 339 个里），列表那一半它
+  确实替得掉（每段的 `numbering_property` 与 `numberings.abstract_nums[].levels[].format` 都是
+  `pub`，实测 8 个 numPr 段落交出来），内嵌图片走 `doc.images`（`having-images.docx` 交 4 条，
+  而 `doc.media` 恒空 —— 别按那个判它读不到图）；**脚注交不出**（七份样本全 `footnotes=0`，
+  包括真有 `<w:footnote w:id="1">` 那一份：`src/reader/` 里 footnote 出现 0 次，而
+  `Footnotes.footnotes` 是 `pub(crate)`）；**书目交不出**（`CoreProps.config` 与
+  `CorePropsConfig` 九格全私有、只有 builder 式 setter，reader 根本不打开 `docProps/core.xml`
+  —— 注意不能用样本读出的 null 当证据，那几份的 core.xml 本来就是空的）。
+  `docx` 1.1.2 要 +8 且带 `bzip2-sys`（C）；`ferrodoc-docx` +2、`ferrodoc-odt` +3（pandoc 那棵
+  AST，`ferrodoc` 整包 +19 且会把 `xml5ever` / `comrak` 这套**与 html5ever / pulldown-cmark 重复**
+  的栈搬进来）；`docx-to-md` 0.1.0 只要 **+1**，实测两种格式都读得动（`Hello[^fn-1]` +
+  `[^fn-1]: World`、`1. / -` 按实例分开、docProps 的作者与时间都拿到了）。**但它把图片摊成
+  base64 内联**（`having-images.docx` 一份 50 KB）、书目写成 Markdown 顶上的一行 HTML 注释，
+  而产出是 MD 不是 XHTML —— 与「字节不入库」和「provider 交引擎就绪的 XHTML」两条都顶，
+  所以结论是**不换**：它适合当对照实现与夹具发生器，不适合当我们的 reader。
+  顺带一条与格式表有关的：`rwml` 0.1.5（MIT，纯 Rust 的**旧 .doc / Word 97-2003** 读写）净新增
+  只有 **3 个包**（`cfb` / `fnv` / 自身），而 `.doc` 是我们现在整个缺的那一族。
 
 ## 支撑「自研排版」的三条实测结论
 

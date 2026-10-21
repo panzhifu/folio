@@ -38,8 +38,8 @@
 
 | 变体 | 谁用 | 取一章的成本 |
 |---|---|---|
-| `Entry(href)` | EPUB（以及将来的 zip 族） | 解一个 zip 条目 |
-| `Section(n)` | TXT / MD / HTML / FB2（单文件） | 重读整本 + 重分一次章 |
+| `Entry(href)` | EPUB、CHM（那份 hhc 的 topic 条目）、HTMLZ（包里每份 HTML 一章） | 解一个条目 |
+| `Section(n)` | TXT / MD / HTML / FB2 / RTF / MOBI / DOCX / ODT / PDB（单文件） | 重读整本 + 重分一次章 |
 | `Inline(text)` | 测试、`from_content`、旧库兜底 | 0（正文就在手上） |
 
 **为什么不给单文件格式存字节区间**：分章规则（Markdown 的 `#`、FB2 的
