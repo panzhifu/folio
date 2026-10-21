@@ -14,6 +14,13 @@
 //! 补间，读出来是「首帧跨 8.8% 页宽、第 11 帧一帧走掉页宽三成七、最后 5 帧钉死」—— 2026-10-19
 //! 在 Meizu 20 上按应用自己那行 `folio_app::perf` 读数量到的，两处根因都写在那一格的注释里。
 //!
+//! 松手之后的两条腿也按「有没有手指」分，不按「往哪边翻」分：**走完**那一腿手指还在这笔上，
+//! 把这一笔沿原方向拉长到落点（[`release_grip`]）；**弹回**那一腿手已经抬走了，它跟点屏那一趟
+//! 是同一件事，所以走同一类「折线自己走」的式子（[`revert_cylinder`]）—— 保持松手那一刻的朝向
+//! 与卷径，沿自己的法向匀速退出页。从前弹回是「把这一笔的长度直接归零」，于是松手第一帧就
+//! 撞上 `dist < 1e-3` 那条早退：折线整条摆回页外、卷径归零，读出来是右下角啪一下塌平，而
+//! `release_duration` 那 120 ms 里画面一个字都不动。
+//!
 //! 律本身**只有一套坐标**：自由边在右、书脊在左、手指往左划。别的情形不另写一条律，进出各映
 //! 一次横向（[`cylinder_at`] 配 [`flip_x`]），映不映由「自由边到底在哪一侧」判（
 //! [`Pose::free_edge_right`] = `forward != rtl`：往回翻与「从右往左读的那一本」各反一次）。
@@ -262,41 +269,112 @@ pub(in crate::ui::features::reader) fn cylinder_at(
     })
 }
 
-/// 走了 `progress` 那一刻的折线，带上读者这一笔的手（起手点 + 此刻的位置）。
+/// 页局部的圆柱 → **版心坐标**下的那条折线。
+fn crease_from(cylinder: Cylinder, area: Area) -> Crease {
+    Crease {
+        nx: cylinder.nx,
+        ny: cylinder.ny,
+        d: cylinder.d + cylinder.nx * area.left + cylinder.ny * area.top,
+    }
+}
+
+/// 这一帧的圆柱，摆位层与 GPU 网格**共用**的那一个入口：跟手、走完、点屏都只读 `pose.grip`，
+/// 弹回那一腿（`pose.revert = Some(u)`）在同一格之上再套 [`revert_cylinder`]。
 ///
-/// 就是 [`cylinder_at`] 那条轴映回**版心坐标**的那一份，所以 GPU 判「哪一半已经卷走」与逐字
-/// 裁剪判「这个字还留不留」用的是同一个式子 —— 两边差一点，读出来就是「影子和纸不是同一张」。
+/// 为什么只留一个出口：这条不变量是「圆柱的轴**就是**那条折线」—— 逐字裁剪与网格判「哪一半
+/// 已经卷走」必须读同一个式子，两处各算一遍就早晚差一点，读出来是「影子和纸不是同一张」。
 ///
 /// `None` = 这块版心还没量出面积。
+pub(in crate::ui::features::reader) fn cylinder_for(
+    progress: f32,
+    area: Area,
+    pose: Pose,
+) -> Option<Cylinder> {
+    let base = cylinder_at(
+        progress,
+        Pose::free_edge_right(pose.forward, pose.rtl),
+        area,
+        pose.grip,
+    )?;
+    Some(match pose.revert {
+        Some(u) => revert_cylinder(base, u, area),
+        None => base,
+    })
+}
+
+/// [`cylinder_for`] 那条轴映回版心坐标的那一份。`None` = 版心还没量出面积。
+pub(in crate::ui::features::reader) fn crease_for(
+    progress: f32,
+    area: Area,
+    pose: Pose,
+) -> Option<Crease> {
+    Some(crease_from(cylinder_for(progress, area, pose)?, area))
+}
+
+/// 门与兜底用的那一条入口：不带弹回那一腿（`revert = None`）的 [`crease_for`]。
+///
+/// 生产那一路每一步都把弹回的时钟交给 [`Pose`]，所以它只在门里被读到。
+#[cfg(test)]
 pub(in crate::ui::features::reader) fn crease_at(
     progress: f32,
     free_right: bool,
     area: Area,
     grip: Option<Grip>,
 ) -> Option<Crease> {
-    let cylinder = cylinder_at(progress, free_right, area, grip)?;
-    Some(Crease {
-        nx: cylinder.nx,
-        ny: cylinder.ny,
-        d: cylinder.d + cylinder.nx * area.left + cylinder.ny * area.top,
-    })
+    crease_for(
+        progress,
+        area,
+        Pose {
+            forward: free_right,
+            rtl: false,
+            grip,
+            revert: None,
+        },
+    )
 }
 
-/// 松手之后那一腿的手指落点：沿**这一笔已经划出去的方向**继续走到整页折完（或退回起点）。
+/// 弹回那一腿的圆柱：**不借手**。`base` 是松手那一刻律给出的那一格，之后折线沿自己的法向一路
+/// 匀速退出页 —— 终点取「一个角都没折走」再让开一个卷径，所以纸是**退着出画**的，不是被哪一帧
+/// 硬删掉的。朝向与卷径全程一个字不改：卷径在落位前塌成 0，就是「纸在最该像纸的地方先塌成一张
+/// 硬片」，与点屏那一趟 [`tap_roll`] 的主张同一条。
+///
+/// `u` 是这一腿走了几成（[`super::release_clock`] 给），`0` = 松手那一刻 —— 那一格逐字等于
+/// `base`，所以这一腿的第一帧不可能跳。
+///
+/// 为什么这一腿不能像走完那一腿那样把手指原路缩回按下点：那条律的推进量在 `dist` 缩向 0 的一段
+/// 里由 `R·sin(π·√(dist/curlLen))` 主导（√ 在 0 处斜率无穷大，收尾比手指快得多），而它的终点是
+/// 「轴停在锚点」—— 锚点在**自由边上**，对一条斜的折线来说那还差着一截，最后一帧只能由「按下
+/// 没动」那条早退硬摆成一条竖线。2026-10-22 实测：按下点在上半屏、斜划到下缘那一笔按 `1 − u`
+/// 缩回时，最坏的一帧走掉 366 逻辑像素，是平均速度的 5.5 倍（17 帧那一档 12.3 倍）。
+pub(in crate::ui::features::reader) fn revert_cylinder(
+    base: Cylinder,
+    u: f32,
+    area: Area,
+) -> Cylinder {
+    // 沿 `n` 看过去页的最后一个角：折线退过这里，一个角都还没被折走。
+    let reach = base.nx.abs() * area.width() + base.ny.abs() * area.height();
+    let end = reach + base.radius.max(0.0);
+    Cylinder {
+        d: base.d + (end - base.d) * u.clamp(0.0, 1.0),
+        ..base
+    }
+}
+
+/// 松手**走完**那一腿的手指落点：沿这一笔自己的方向把它拉长到整页折完（弹回那一腿不借手，
+/// 走 [`revert_cylinder`]，不走这里）。
 ///
 /// 参照里那句「animation source/target 都是手指位置，走的是同一条 `updateCurlPos`，所以输出与
 /// 用户真的一路拖过去完全相同」就是这个意思。只把这一笔拉长，方向一个字不改 —— 写死一个落点
-/// 的话，松手那一帧划动方向被硬掰，折线倾角跟着跳一下。
+/// 的话，松手那一帧划动方向被硬掰，折线倾角跟着跳一下。朝向之所以能整条腿不改：律里那道倾角
+/// 夹法的上限是 `tan(MAX_TILT)·|dir_x|`，整条向量等比缩放时比值不变，所以它是齐次的。
+///
+/// `u` 是这一腿走了几成（[`super::release_clock`] 给），`0` = 松手那一刻。
 pub(in crate::ui::features::reader) fn release_grip(
     grip: Grip,
     u: f32,
     free_right: bool,
-    revert: bool,
     area: Area,
 ) -> Grip {
-    if revert {
-        return Grip::new(grip.from, grip.from);
-    }
     let (width, height) = (area.width(), area.height());
     let start = (grip.from.0 * width, grip.from.1 * height);
     let finger = (grip.at.0 * width, grip.at.1 * height);
@@ -310,11 +388,14 @@ pub(in crate::ui::features::reader) fn release_grip(
     } else {
         (-1.0, 0.0)
     };
-    // 走完这一页要划过多远：那条律的推进量在 `dist` 超过 `2·页宽 − πR` 之后饱和在正好一个页宽
-    // （轴落到书脊、卷径收到 0），所以落点得按**当前卷径**算，不能写死一个页宽 —— 那只在
-    // R = 页宽/3 时刚好够。多让 8 像素，落位那一刻轴真的出画。
+    let u = u.clamp(0.0, 1.0);
+    // 走完这一页要划过多远：那条律的推进量在 `dist` 超过 `2·页宽 − πR` 之后**恒等于一个页宽**
+    // （`(dist + curl_len)/2` 里代进 `curl_len = 2·页宽 − dist` 就是这个数），所以落点得按
+    // **当前卷径**算、不能写死一个页宽 —— 那只在 R = 页宽/3 时刚好够。多让 8 像素把 `dist` 推过
+    // 饱和点，落位那一刻收回来的是卷径（少收 `8/π`）而不是轴：平拖时轴正好停在书脊，斜拖时停在
+    // 离书脊还有 `1 − |ux|` 成页宽的地方 —— 后者是参照那条律本身的边界，不在这一格里治。
     let end = (2.0 * width - std::f32::consts::PI * ROLL * width).max(width) + 8.0;
-    let travelled = long + (end - long) * u.clamp(0.0, 1.0);
+    let travelled = long + (end - long) * u;
     // 起点必须是**按下点**而不是页边锚点，否则 u = 0 那一格手指会先跳一下。
     let landed = (start.0 + ux * travelled * sign, start.1 + uy * travelled);
     Grip::new(grip.from, (landed.0 / width, landed.1 / height))
@@ -367,17 +448,13 @@ impl PageTurnStyle for Curl {
                 forward,
                 rtl: false,
                 grip: None,
+                revert: None,
             },
         )
     }
 
     fn sheets_at(&self, t: f32, area: Area, pose: Pose) -> [Sheet; 2] {
-        let cut = match crease_at(
-            t,
-            Pose::free_edge_right(pose.forward, pose.rtl),
-            area,
-            pose.grip,
-        ) {
+        let cut = match crease_for(t, area, pose) {
             Some(crease) => crease,
             // 版心还没量出来：两张纸都停在原位整张画，等下一帧。
             None => {
@@ -423,13 +500,141 @@ mod tests {
     use crate::ui::features::reader::motion::turn_animation::curl::MAX_TILT;
     use crate::ui::features::reader::motion::turn_animation::curl::ROLL;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_at;
+    use crate::ui::features::reader::motion::turn_animation::curl::crease_for;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_of;
     use crate::ui::features::reader::motion::turn_animation::curl::cylinder_at;
+    use crate::ui::features::reader::motion::turn_animation::curl::cylinder_for;
     use crate::ui::features::reader::motion::turn_animation::curl::release_grip;
     use crate::ui::features::reader::motion::turn_animation::geometry::Grip;
     use crate::ui::features::reader::motion::turn_animation::geometry::Poly;
     use crate::ui::features::reader::motion::turn_animation::geometry::Pose;
     use crate::ui::features::reader::motion::turn_animation::testing::{H, W, complementary, page};
+
+    /// 门里那块竖版心里四种方向的手：平拖、平拖到底（`dist = 2·页宽`，律在那一段饱和）、
+    /// 往左上角那一笔、按下点在上半屏斜划到下缘那一笔（倾角与早退都在这条上才撞得着）。
+    fn release_grips() -> [Grip; 4] {
+        [
+            Grip::new((0.5, 0.5), (0.25, 0.5)),
+            Grip::new((0.5, 0.5), (-0.5, 0.5)),
+            Grip::new((0.5, 0.5), (0.25, 0.2)),
+            Grip::new((0.5, 0.8), (0.1, 0.95)),
+        ]
+    }
+
+    /// 把一手 `grip` 摊成一个不带弹回的 `Pose`（门里绝大多数情形不需要那一个数）。
+    fn hand(grip: Grip, free_right: bool, revert: Option<f32>) -> Pose {
+        Pose {
+            forward: free_right,
+            rtl: false,
+            grip: Some(grip),
+            revert,
+        }
+    }
+
+    /// 松手那**两条腿**的第一帧都必须逐字等于松手那一刻跟手给的那一格：落点、折线朝向、卷径
+    /// 三样一起。
+    ///
+    /// 钉的是两处各自的跳法。弹回：`release_grip` 从前有一条 `if revert { return
+    /// Grip::new(from, from) }`，它把这一腿的时钟整个扔掉，于是松手第一帧的划动长度就是 0，
+    /// 撞上律里 `dist < 1e-3` 那条早退 —— 折线整条摆回页外、卷径归零，读者看到的是「右下角啪
+    /// 一下回到底下」，而 `release_duration` 那 120 ms 里画面一个字都不动。走完：落点若写成页宽
+    /// 之外的一个定值，同一帧的朝向会被硬掰。
+    #[test]
+    fn the_release_leg_starts_exactly_where_the_finger_left_it() {
+        let area = page();
+        for grip in release_grips() {
+            // 先探一下这一笔真的卷起了纸：门里的手都是往读书方向拖的，正向那一格必须有卷径、
+            // 也必须有面积离场 —— 否则下面两句「逐字相等」会在两张都没动的平摊态之间空转。
+            let folding = cylinder_for(0.5, area, hand(grip, true, None)).expect("量得出圆柱");
+            let crease = crease_for(0.5, area, hand(grip, true, None)).expect("量得出折线");
+            assert!(
+                folding.radius > 1.0,
+                "{grip:?} 这一格卷径已经是 {:.1}，样本没卷起纸",
+                folding.radius
+            );
+            assert!(
+                Poly::rect(area).past(crease).area().abs() > 1.0,
+                "{grip:?} 这一格一片都没折走，样本没卷起纸"
+            );
+            for free_right in [true, false] {
+                let here = cylinder_for(0.5, area, hand(grip, free_right, None))
+                    .expect("跟手那一帧量得出圆柱");
+                // 走完那一腿：u = 0 时手指还在原处，圆柱逐字不动。
+                let run = release_grip(grip, 0.0, free_right, area);
+                assert!(
+                    (run.at.0 - grip.at.0).abs() < 1e-6 && (run.at.1 - grip.at.1).abs() < 1e-6,
+                    "走完那一腿的第一帧把手指挪了：{:?} → {:?}",
+                    grip.at,
+                    run.at
+                );
+                assert_eq!(
+                    cylinder_for(0.5, area, hand(run, free_right, None)),
+                    Some(here),
+                    "走完那一腿的第一帧折线/卷径跳了 {grip:?}"
+                );
+                // 弹回那一腿：不借手，u = 0 那一格必须就是松手那一刻。
+                assert_eq!(
+                    cylinder_for(0.5, area, hand(grip, free_right, Some(0.0))),
+                    Some(here),
+                    "弹回那一腿的第一帧跳了 {grip:?}"
+                );
+            }
+        }
+    }
+
+    /// 弹回那一腿一路**匀速**退出页：朝向与卷径全程一个字不改，每帧位移与平均值不差千分之一，
+    /// 走完那一刻一个角都没折走。
+    ///
+    /// 这一条守的是「不借手」到底不借到什么程度：折线由松手那一刻的朝向与卷径决定，之后只有
+    /// `d` 在动。从前这里试过「把手指沿原路缩回按下点」，量下来最坏的一帧走掉 366 逻辑像素
+    /// （17 帧那一档是平均的 12.3 倍）—— 因为律的推进量在 `dist` 缩向 0 时由 √ 项主导，而它的
+    /// 终点只能停在自由边上的锚点，斜的折线到不了「一个角都没折走」那一格，最后一帧硬摆成竖线。
+    #[test]
+    fn the_revert_leg_exits_at_a_constant_rate() {
+        let area = page();
+        for grip in release_grips() {
+            let at = |u: f32| {
+                cylinder_for(0.5, area, hand(grip, true, Some(u)))
+                    .expect("弹回每一帧都量得出圆柱")
+            };
+            let base = at(0.0);
+            let total = at(1.0).d - base.d;
+            assert!(
+                total > 1.0,
+                "{grip:?} 弹回这一腿折线没往外走：d 从 {:.1} 到 {:.1}",
+                base.d,
+                at(1.0).d
+            );
+            for frames in [7usize, 12, 17] {
+                let step = total / frames as f32;
+                let mut previous = base.d;
+                for i in 1..=frames {
+                    let now = at(i as f32 / frames as f32);
+                    assert_eq!(
+                        (now.nx, now.ny, now.radius),
+                        (base.nx, base.ny, base.radius),
+                        "第 {i} 帧改了朝向或卷径：({:.3},{:.3}) R={:.1}",
+                        now.nx,
+                        now.ny,
+                        now.radius
+                    );
+                    assert!(
+                        (now.d - previous - step).abs() < 1e-3,
+                        "{grip:?} {frames} 帧里第 {i} 帧走了 {:.1}，平均 {step:.1}",
+                        now.d - previous
+                    );
+                    previous = now.d;
+                }
+            }
+            let end = crease_for(0.5, area, hand(grip, true, Some(1.0)))
+                .expect("弹回终态量得出折线");
+            assert!(
+                Poly::rect(area).past(end).area().abs() < 1.0,
+                "{grip:?} 弹回走完还折着纸：一片都没该折走，实得 {}",
+                Poly::rect(area).past(end).area()
+            );
+        }
+    }
 
     /// 圆柱的轴**就是**那条折线（逐字相等），而且卷径按那条律走：起手 [`ROLL`] 页宽、逼近书脊
     /// 收 0。
@@ -577,6 +782,7 @@ mod tests {
                 forward: true,
                 rtl: false,
                 grip: Some(grip),
+                revert: None,
             },
         );
         let incoming_cut = incoming
@@ -932,7 +1138,7 @@ mod tests {
         let start = slope(grip.at);
         let mut previous_length = 0.0f32;
         for u in [0.25, 0.5, 0.75, 1.0] {
-            let run = release_grip(grip, u, true, false, area);
+            let run = release_grip(grip, u, true, area);
             assert!(
                 (slope(run.at) - start).abs() < 1e-3,
                 "u = {u} 时松手那一腿把这一笔转了方向：斜率 {start} → {}",
@@ -951,7 +1157,7 @@ mod tests {
         // 离书脊还有两成的地方（这一格是参照本身的边界，不是这里的走样；真翻页落定靠的是页号
         // 翻过去，不靠轴走到 0）。
         let straight = Grip::new((0.5, 0.5), (0.3, 0.5));
-        let end = release_grip(straight, 1.0, true, false, area);
+        let end = release_grip(straight, 1.0, true, area);
         let crease = crease_at(1.0, true, area, Some(end)).expect("落位量得出折线");
         // 按**面积**判，不按某个角点判：那条律的推进量在绕顶之后饱和在正好一个页宽，轴停在
         // 书脊上，页的左上角正好落在折线那一格（`past = 0`）。按角点判会卡在边界等号上，
@@ -962,9 +1168,8 @@ mod tests {
             rolled > whole * 0.999,
             "落位那一刻整页都该已经卷走，实得 {rolled} / {whole}"
         );
-        // 弹回那一腿退回按下那一点：一格都没动。
-        let back = release_grip(grip, 1.0, true, true, area);
-        assert_eq!(back.at, back.from, "弹回该退回起点");
+        // 弹回那一腿不归这里：它不借手，几何在 `revert_cylinder`，门是
+        // [`the_revert_leg_exits_at_a_constant_rate`]。
     }
 
     /// 起步那几像素，轴**走得比手指还深** —— 那条 `sqrt` 就是「纸被滚起来」的读数。

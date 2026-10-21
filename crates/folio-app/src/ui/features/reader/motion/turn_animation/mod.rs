@@ -41,7 +41,10 @@ use scroll::Scroll;
 use slide::Slide;
 use slide_up::SlideUp;
 
-pub(in crate::ui::features::reader) use curl::{cylinder_at, release_grip};
+pub(in crate::ui::features::reader) use curl::{cylinder_for, release_grip};
+/// 不带弹回时钟的那一条入口：生产那一路走 [`cylinder_for`]，这条只剩门在读。
+#[cfg(test)]
+pub(in crate::ui::features::reader) use curl::cylinder_at;
 pub(in crate::ui::features::reader) use geometry::{
     Area, Axis, Crease, Cut, Grip, Poly, Pose, Shades, Sheet, Tint,
 };
@@ -126,6 +129,32 @@ pub(in crate::ui::features::reader) fn applies(turn: PageTurn, mode: PageMode) -
     }
 }
 
+/// 松手那一腿自己走了几成：`0` = 松手那一刻那一格，`1` = 这一腿到底（走完或退回按下点）。
+///
+/// 两条腿的尺**不是同一个**，因为 `progress` 走的方向相反：走完那一腿从 `from` 涨到 `1`，
+/// 弹回那一腿从 `from` 退到 `0`。两头都按 `1 − from` 归一时，弹回那一腿算出来是负的，下游
+/// 那一格 `clamp` 就把落点冻在松手那一点上 —— 整趟纸一动不动，而 `release_duration` 那
+/// 120 ms 还在走，读者读到的是「先跳一下，再停一下」。`from` 为 0（一按就松手）时这一腿本来
+/// 没有路要走，直接给 0，不留一个除零。
+///
+/// 为什么不夹进 `0..1`：这一格的上下界由 `progress` 与 `from` 自己保证，而夹住会把「时钟跑过头
+/// 那一帧」这种真错误读成正常终值。要用的那一头（[`release_grip`]）自己夹。
+pub(in crate::ui::features::reader) fn release_clock(
+    progress: f32,
+    from: f32,
+    revert: bool,
+) -> f32 {
+    if revert {
+        if from > 0.0 {
+            (from - progress) / from
+        } else {
+            0.0
+        }
+    } else {
+        (progress - from) / (1.0 - from).max(1e-3)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! 搬自摆位层那一份：一挡的门跟着那一档走，共用的尺在 `testing.rs`。
@@ -141,7 +170,7 @@ mod tests {
     use crate::ui::features::reader::motion::turn_animation::slide::Slide;
     use crate::ui::features::reader::motion::turn_animation::slide_up::SlideUp;
     use crate::ui::features::reader::motion::turn_animation::testing::page;
-    use crate::ui::features::reader::motion::turn_animation::{applies, of};
+    use crate::ui::features::reader::motion::turn_animation::{applies, of, release_clock};
     use folio_core::PageTurn;
 
     /// 翻页的轴**归动画档**，不归手指。这两问的答案就是那条判据的全部：
@@ -310,5 +339,43 @@ mod tests {
             assert_eq!(sheet.cut, None, "量不出面积时两张纸都整张画");
             assert_eq!(sheet.offset, (0.0, 0.0));
         }
+    }
+
+    /// 松手那两条腿各有一把自己的尺，而且**首帧必须是 0**：走完那一腿 `progress` 从 `from` 涨到
+    /// `1`，弹回那一腿从 `from` 退到 `0`。两头共用 `1 − from` 时弹回算出来是负的，下游一夹就
+    /// 变成 0 —— 于是整条腿的落点冻在松手那一刻，纸一动不动，而这一腿的 120 ms 还在走。
+    #[test]
+    fn each_release_leg_gets_its_own_clock() {
+        for from in [0.2f32, 0.5, 0.9] {
+            // 走完：起点 = 松手那一刻，终点 = 走满。
+            assert_eq!(release_clock(from, from, false), 0.0, "走完的第一帧不是 0");
+            assert!((release_clock(1.0, from, false) - 1.0).abs() < 1e-5, "走完的终帧不是 1");
+            let mid = (from + 1.0) * 0.5;
+            assert!(
+                (release_clock(mid, from, false) - 0.5).abs() < 1e-5,
+                "走完走了一半，时钟该给 0.5，实得 {}",
+                release_clock(mid, from, false)
+            );
+            // 弹回：起点同样是松手那一刻，终点是退回按下点。
+            assert_eq!(release_clock(from, from, true), 0.0, "弹回的第一帧不是 0");
+            assert!((release_clock(0.0, from, true) - 1.0).abs() < 1e-5, "弹回的终帧不是 1");
+            assert!(
+                (release_clock(from * 0.5, from, true) - 0.5).abs() < 1e-5,
+                "弹回退了一半，时钟该给 0.5，实得 {}",
+                release_clock(from * 0.5, from, true)
+            );
+            // 每一格都得是有限数：`from` 贴在 1 那一侧时靠的是分母那一格的下限。
+            for progress in [0.0, from * 0.5, from, (from + 1.0) * 0.5, 1.0] {
+                for revert in [false, true] {
+                    assert!(
+                        release_clock(progress, from, revert).is_finite(),
+                        "progress = {progress}、from = {from}、revert = {revert} 算出了非有限数"
+                    );
+                }
+            }
+        }
+        // 一按就松手：这一腿本来没有路要走，给 0 而不是除零。
+        assert_eq!(release_clock(0.0, 0.0, true), 0.0, "from = 0 的弹回不该是 NaN");
+        assert!(release_clock(0.0, 0.0, false).is_finite(), "from = 0 的走完不该是 NaN");
     }
 }

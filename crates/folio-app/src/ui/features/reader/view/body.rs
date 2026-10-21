@@ -383,6 +383,13 @@ impl Render for ReaderSession {
                     .iter()
                     .map(|tile| aspect(tile.width, tile.height))
                     .sum();
+                // 这一页有没有字：PDF / AZW4 / DjVu 那一族才有（漫画的一页就是一张图，
+                // EPUB 的定版式字在 XHTML 里而不在页上）。问一次用三处 —— 长按归谁、
+                // 命中那把尺记不记、上面那两层画不画 —— 而每一次问的都是会话里那份
+                // 按页备忘（`FixedBook::page_text`），不在这一帧里回引擎第二趟。
+                let text = book.page_text(current);
+                let text_key = book.page_text_key(current);
+                let mut placed: Option<Bounds<Pixels>> = None;
                 if row_aspect > 0.0 {
                     let height = viewport_height.min(usable / row_aspect);
                     let y = self.header_reserve + (viewport_height - height).max(0.0) / 2.0;
@@ -397,6 +404,19 @@ impl Render for ReaderSession {
                             let Some(image) = painted(&atlas, request, view, cx) else {
                                 continue;
                             };
+                            // 带字的那一格才有选中：它的矩形就是「屏幕点 ↔ 页内字序」
+                            // 那一把尺唯一该记的地方。
+                            let selected = text.is_some() && tile.renders;
+                            if selected {
+                                placed = Some(Bounds::new(point(px(x), px(y)), size(px(width), px(height))));
+                            }
+                            // 「看大图」那一格在这一族里按端分岔（`page_image` 顶上写着）：
+                            // 手机上它吃的是**长按**，而那正是选中要的手势 —— 于是有字的
+                            // 那一页不再挂它（入口挪进浮层那颗按钮），没字的页照旧。
+                            // 桌面那一端挂的是**单击**，与拖选不打架（拖过阈值那一下的合成
+                            // 点击由 `open_on_tap` 里那一条吃掉），所以原样留着。
+                            let no_entry = None;
+                            let entry = if selected && long_press { &no_entry } else { &viewer };
                             let index = overlays.len();
                             overlays.push(page_image(
                                 x,
@@ -405,7 +425,7 @@ impl Render for ReaderSession {
                                 height,
                                 image,
                                 key,
-                                &viewer,
+                                entry,
                                 long_press,
                                 index,
                                 &reader_weak,
@@ -413,6 +433,53 @@ impl Render for ReaderSession {
                         }
                         x += width;
                     }
+                }
+                // 命中换算读的那一把尺，与上面摆出去的那一格同源。每一帧都写：
+                // 没有字的那一页必须把它清干净，否则留着上一页的矩形，长按会按新页的
+                // 字序去解旧页的盒子 —— 症状是色块整片画在别处。
+                self.fixed_text_box.set(placed.map(|at| (current, at)));
+                // 一屏就是一页：选区挂在别的页上就是「翻走了」，按分页那一族同一条规矩
+                // 收掉（那里的选区也必须落在锚章）。不收会留着一份屏上看不见的选中 ——
+                // 菜单条还开着，而它锚的那一段字已经不在这一帧里了。
+                if self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selected| selected.chapter != current)
+                {
+                    self.clear_selection();
+                }
+                // 留在书上的那几条痕迹，与这一帧挑中的那一块。这两层在定版式上必须
+                // **盖在页图之上**：这一族的字就在那张栅格出来的图里，压在它下面等于没画
+                // （可重排那一族正相反 —— 高亮压在字形之下才不吃掉笔画）。
+                if let (Some(text), Some(at)) = (&text, placed) {
+                    let marks = fixed_marks(
+                        &self.annotation_spans,
+                        &self.annotations,
+                        current,
+                        text_key.unwrap_or(0),
+                        text,
+                        at,
+                        &palette,
+                    );
+                    if !marks.is_empty() {
+                        overlays.push(marks_above(marks));
+                    }
+                    // 选中的那一块：选区挂在它自己那一页上，翻到别页就不再画。
+                    let visual = self
+                        .selection
+                        .clone()
+                        .filter(|selected| selected.chapter == current)
+                        .map(|selected| {
+                            selection::page_visual(
+                                text,
+                                selected.range,
+                                at,
+                                cx.theme().selection,
+                                cx.theme().selection.opacity(HIGHLIGHT_ALPHA),
+                            )
+                        })
+                        .unwrap_or_default();
+                    overlays.push(selection::overlay(visual, &reader_weak));
                 }
             }
             Source::Book(book) => {
@@ -751,25 +818,37 @@ impl Render for ReaderSession {
                         // 的几何全按它判，别的档不看。
                         let free_right =
                             turn_animation::Pose::free_edge_right(frame.forward, frame.rtl);
-                        // 手：松手之后把「手指此刻」沿**这一笔自己的方向**补间到落点，折线跟着
-                        // 走完，既不在松手那一帧跳、也不改倾角。
-                        let grip = frame.grip.map(|grip| match frame.run {
+                        // 手与弹回的时钟：走完那一腿把这一笔沿**它自己的方向**拉长到落点，弹回
+                        // 那一腿不借手 —— 手指停在松手那一刻那一格，改由 `Pose::revert` 那一个数
+                        // 让折线自己退出去。两条腿的第一帧都逐字等于松手那一刻，所以都不跳；
+                        // 这一腿自己走了几成由 [`turn_animation::release_clock`] 给（两边的尺
+                        // 不一样：那一腿 `progress` 是往 0 退的）。
+                        let (grip, revert) = match frame.run {
                             TurnRun::Released { from, revert, .. } => {
-                                let span = (1.0 - from).max(1e-3);
-                                turn_animation::release_grip(
-                                    grip,
-                                    (frame.progress - from) / span,
-                                    free_right,
-                                    revert,
-                                    area,
-                                )
+                                let u =
+                                    turn_animation::release_clock(frame.progress, from, revert);
+                                if revert {
+                                    (frame.grip, Some(u))
+                                } else {
+                                    (
+                                        frame.grip.map(|grip| {
+                                            turn_animation::release_grip(grip, u, free_right, area)
+                                        }),
+                                        None,
+                                    )
+                                }
                             }
-                            _ => grip,
-                        });
-                        // 圆柱的轴就是那条折线（[`cylinder_at`]）：GPU 那头判「哪一半已经卷走」
-                        // 与 CPU 那头裁字用的是同一个式子，两边差一点就是「影子和纸不是同一张」。
+                            _ => (frame.grip, None),
+                        };
+                        // 摆位层（逐字裁剪）与 GPU 网格（判哪一半已经卷走）从这里**共走一个**入口：
+                        // `cylinder_for` 一份几何两处用，「圆柱的轴就是那条折线」不可能在两处走样。
                         // 旧页由页面捕获纹理提供，网格只负责把它卷起来。
-                        //
+                        let pose = turn_animation::Pose {
+                            forward: frame.forward,
+                            rtl: frame.rtl,
+                            grip,
+                            revert,
+                        };
                         // 只有这张「出场页」的捕获确实完整时才开 GPU 卷曲。捕获也可能因为
                         // 进场横移还没停、尺寸刚变或偏好刚重排而不可用；此时强行用半张/旧的
                         // 纹理，右侧就会采到捕获矩形外。没有可用纹理时退回 CPU 裁页，宁可不
@@ -784,7 +863,7 @@ impl Render for ReaderSession {
                         if frame.style == PageTurn::Curl
                             && capture_valid
                             && let Some(cylinder) =
-                                turn_animation::cylinder_at(frame.progress, free_right, area, grip)
+                                turn_animation::cylinder_for(frame.progress, area, pose)
                         {
                             // 途中那一帧的读数。「页边有时候一条黑带」这种抱怨没法用眼睛验，也
                             // 没法在 headless 里画出来，只能把这几组同源约束一起落进日志：几何
@@ -885,13 +964,8 @@ impl Render for ReaderSession {
                         }
                         // 折页那一档不再给 CPU 影子：纸面与圆柱受光都在 GPU 那张网格里
                         // （见 `curl.rs`、`page_curl.wgsl`）。`shades_at` 的默认实现给回空清单，
-                        // 所以这一句对别的几档就是「照旧」。摆位层要的是**补间之后**的那只手，
-                        // 所以 `Pose` 在这儿才拼出来。
-                        let pose = turn_animation::Pose {
-                            forward: frame.forward,
-                            rtl: frame.rtl,
-                            grip,
-                        };
+                        // 所以这一句对别的几档就是「照旧」。`pose` 是上面拼的那一份：带着**补间
+                        // 之后**的手与弹回的时钟，网格与摆位层读的都是它。
                         shades = style.shades_at(frame.progress, area, pose);
                         let [incoming, outgoing] = style.sheets_at(frame.progress, area, pose);
                         let leaving_ref = frame.leaving.unwrap_or(PageRef {
@@ -1076,10 +1150,14 @@ impl Render for ReaderSession {
         }
         // 选区挂在它自己的章上：那一章被裁出拼接窗口（滚远了）就一并丢 ——
         // 高亮、把手、复制都再没有数据源了。
+        //
+        // 这一问**只属于可重排那一族**：定版式没有 `book()`（字在 `fixed()` 那一臂里），
+        // 用 `is_none_or` 判它等于「定版式每一帧都把刚成立的选区清掉」—— 拖选的手感
+        // 于是变成一个都抓不住的空动作。那一族的「翻走即清」按**页号**判，写在上面
+        // 定版式那一臂里（一屏就是一页，不必问拼接窗口）。
         if let Some(selected) = &self.selection
-            && self
-                .book()
-                .is_none_or(|book| book.span_doc(selected.chapter).is_none())
+            && let Some(book) = self.book()
+            && book.span_doc(selected.chapter).is_none()
         {
             self.selection = None;
             self.selection_menu_open = false;
@@ -1617,7 +1695,7 @@ fn page_image(
 ///
 /// 问不到（那一列里没有这一条）时这一击什么都不做：开一层「0 / 0」、既滑不动也定不了位，
 /// 比这一下没反应更难向读者解释。
-fn open_picture(
+pub(in crate::ui::features::reader) fn open_picture(
     viewer: &Entity<ImageViewer>,
     reader: &WeakEntity<ReaderSession>,
     key: &str,
@@ -1662,7 +1740,21 @@ fn open_on_tap(
     frame
         .id(("reader-image", index))
         .block_mouse_except_scroll()
-        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+        .on_click(move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let at = event.position();
+            // 这一击先问「选中」那一套，再谈放大 —— 走的是正文那一臂同一个入口
+            // （`ReaderSession::tap_on_body`，四条判据与顺序都写在那儿）。为什么要在
+            // 这一层问：`block_mouse_except_scroll` 把这一击从正文那三层里抢了过来，
+            // 正文那一臂就再也收不到它 —— 于是桌面上读 PDF 的人点在已划的那条线上，
+            // 会被这张图整页放大抢走，「挑回去改一条」那条路在定版式上断掉。
+            // 三条判据都不成立（没有选区、没压在划线上、不在拖选的合成 click 里）才开
+            // 大图：普通单击的行为与从前逐字相同。
+            let claimed = reader
+                .update(cx, |session, cx| session.tap_on_body(window, cx, at))
+                .unwrap_or(false);
+            if claimed {
+                return;
+            }
             open_picture(&viewer, &reader, &key, window, cx);
         })
         // 挂在最外层：宿主的测试要按 `("reader-image", 序)` 点在这张图上。
@@ -1922,6 +2014,92 @@ fn annotation_fills(
             });
         }
     }
+}
+
+/// 定版式一页上**留在书上的那几条痕迹**（元素局部矩形，交给盖在页图之上那一层画）。
+///
+/// 与 [`annotation_fills`] 的分工只有一处：解锚那一步完全复用 core 那一份
+/// （`annotations::resolved_for`：库里的锚点 → 第几个字到第几个字，四级降级同一条），
+/// 只有「一段字 → 矩形」换了一把尺 —— 排版那一族问的是行盒，这一族问的是
+/// `PageText::rects` 那份逐字盒。键也跟着换：那一族用章文本的内容哈希，这一族用
+/// **这一页字层**的内容哈希（`FixedBook::page_text_key`），两者担的是同一个问题
+/// 「坐标系所依据的那份内容变了没有」。
+///
+/// 三档画法落的还是那三块矩形：读者在设置里挑的那一档不该因为书的族别换个长相。
+/// 字下那两条贴的是**字盒的底**而不是基线下 `descent × 0.618`：栅格出来的那一页里
+/// 没有「基线」这一格可问，引擎给的盒就是那一段字的全部占位，盒底也就是墨迹之下
+/// 最近的一条线。差的那几个像素在屏上是「线离字更近了一点」，不是画到别处去。
+#[allow(clippy::too_many_arguments)]
+fn fixed_marks(
+    cache: &RefCell<AnnotationSpans>,
+    stored: &[Annotation],
+    page: usize,
+    key: u64,
+    text: &folio_core::content::format::PageText,
+    at: Bounds<Pixels>,
+    palette: &Palette,
+) -> Vec<Mark> {
+    if stored.is_empty() {
+        return Vec::new();
+    }
+    let map = text.text_map();
+    let spans = annotations::resolved_for(cache, stored, page, key, &map);
+    let mut out = Vec::new();
+    for span in spans.iter().filter(|span| !span.is_stale()) {
+        let boxes = selection::page_boxes(text, span.start..span.end, at);
+        let (lines, color, wavy) = match span.style {
+            // 底色带压透明度：那一块是整片铺在字上的，实色会把字吃掉。
+            AnnotationStyle::Highlight => (boxes, palette.color(&span.color).opacity(HIGHLIGHT_ALPHA), false),
+            AnnotationStyle::Line => (
+                strip_bottom(boxes, UNDERLINE_THICKNESS),
+                palette.color(&span.color),
+                false,
+            ),
+            AnnotationStyle::Wavy => (
+                strip_bottom(boxes, paint::WAVE_HEIGHT),
+                palette.color(&span.color),
+                true,
+            ),
+        };
+        for line in lines {
+            out.push(if wavy {
+                Mark::Wave(line, color)
+            } else {
+                Mark::Quad(line, color)
+            });
+        }
+    }
+    out
+}
+
+/// 把每块矩形压成贴着**盒底**的那一条（字下那两档画法要的就是它）。
+fn strip_bottom(mut boxes: Vec<Bounds<Pixels>>, thickness: f32) -> Vec<Bounds<Pixels>> {
+    for box_ in &mut boxes {
+        let bottom = f32::from(box_.origin.y) + f32::from(box_.size.height);
+        box_.origin.y = px(bottom - thickness);
+        box_.size.height = px(thickness);
+    }
+    boxes
+}
+
+/// 把一批痕迹盖在页图**之上**的那一层。
+///
+/// 为什么定版式要另起一层，而不是复用字形元素里那一份 `mark`：这一族的字就在那张
+/// 栅格出来的图里，而页图排在 `element` 之后入树，gpui 的 z-order 是后入树者居上 ——
+/// 压在字形之下等于没画。画法一行都不重写：走 [`paint::paint_mark`]，与字形元素里
+/// 那一份逐像素同一条式子（波浪的起伏排布、实线的落法都在那一处）。
+fn marks_above(marks: Vec<Mark>) -> AnyElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            for mark in &marks {
+                paint::paint_mark(mark, bounds.origin, window);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
 }
 
 /// 划线那条实线多厚（逻辑像素）。够看清、又不至于把字下面的笔画糊成一团。
