@@ -351,7 +351,11 @@ impl<'a> Ctx<'a> {
     ///
     /// - `width: auto` 吃掉「减去两边与边框内边距之后的余量」，与这一格改之前逐字相同；
     ///   写了 `width` 或 `max-width` 就按折出的边框盒宽定下来（`max-width` 夹在**内容宽**
-    ///   上再加边框与内边距，因为这四个数一律按内容盒解释 —— `box-sizing` 不认）。
+    ///   上再加边框与内边距，因为作者写的那三个数一律先过 [`ComputedStyle::content_size`]
+    ///   —— `box-sizing: border-box` 时那一格里已经含着边框与内边距）。
+    /// - `min-width` 夹在 `max-width` **之后**（CSS 2.1 §10.4：两者写出矛盾时赢的是
+    ///   `min-width`），并且它同样管 `width: auto` 那一档 —— 填满之后还可以被抬到溢出，
+    ///   浏览器就是这么溢出（`spare < 0` 那一支跟着把 `auto` 左边距收 0）。
     /// - 装不满时的余量归 `margin: auto`：两边都 `auto` 就均分，只有一边 `auto` 就全给它。
     ///   这一条就是「定宽块默认贴左缘、写着 `margin: 0 auto` 才居中」那一条的分界。
     ///   两边都不是 `auto` 时余量天然留在右边，右边距不必动 —— 与浏览器同解。
@@ -371,9 +375,18 @@ impl<'a> Ctx<'a> {
         let ml_set = style.margin_left.resolve(avail).max(0.0);
         let mr_set = style.margin_right.resolve(avail).max(0.0);
         let room = (avail - ml_set - mr_set - bl - br).max(0.0);
-        let mut content = style.width.map_or(room, |w| w.resolve(avail).max(0.0));
+        // 作者写的三个数先按 `box-sizing` 折成**内容宽**（式子只有一份，见
+        // [`ComputedStyle::content_size`]）；`width: auto` 那一档不折 —— `room` 本来就是
+        // 从可用宽扣掉边框内边距之后剩下的内容宽。
+        let fold = |declared: Length| style.content_size(declared.resolve(avail).max(0.0), bl + br);
+        let mut content = style.width.map_or(room, fold);
         if let Some(max_w) = style.max_width {
-            content = content.min(max_w.resolve(avail).max(0.0));
+            content = content.min(fold(max_w));
+        }
+        // 夹序在 `max-width` 之后：见本函数文档里 §10.4 那一条。反过来写的话，
+        // 「`max-width: 40px` + `min-width: 60px`」这种矛盾声明会得 40，浏览器得 60。
+        if let Some(min_w) = style.min_width {
+            content = content.max(fold(min_w));
         }
         let box_width = (content + bl + br).max(1.0);
         let mut ml = ml_set;
@@ -388,19 +401,29 @@ impl<'a> Ctx<'a> {
         (ml, box_width)
     }
 
-    /// 把作者写的 `height` / `max-height` 盖到内容算出来的高上。
+    /// 把作者写的 `height` / `max-height` / `min-height` 盖到内容算出来的高上。
     ///
-    /// 写了 `height` 就按那一档定盒，没写就由内容撑；`max-height` 两种情况都夹一刀。
+    /// 写了 `height` 就按那一档定盒，没写就由内容撑；`max-height` 两种情况都夹一刀，
+    /// `min-height` 夹在**之后**（CSS 2.1 §10.7：与 `max-height` 矛盾时 `min-height` 赢，
+    /// 与横向那一族同一条）。`min-height` 对「由内容撑高」这一档是真会改屏的：
+    /// 内容只有一行、作者要的是至少三行的空白（诗排版与填空册常见写法）。
     /// **内容照排、溢出可见**：CSS 里 `height` 不裁剪（`overflow` 这一版也不认），
     /// 行盒仍然画到盒子外面去，只是后面的兄弟从这一格的高度下移 —— 浏览器同一条规则，
     /// 跟着它比自创一套「看起来更合理」的取巧稳。
     ///
     /// 只给非替换的流内块用；替换元素的高由
     /// [`super::ports::image_size`] 从图的固有尺寸折。
-    fn used_content_height(style: &ComputedStyle, inner: f32) -> f32 {
-        let mut h = Self::definite(style.height).unwrap_or(inner);
+    fn used_content_height(style: &ComputedStyle, inner: f32, pad_border: f32) -> f32 {
+        // 作者写的三个数都先过 [`ComputedStyle::content_size`]：`box-sizing: border-box`
+        // 时那一格里已经含上下的边框与内边距。`pad_border` 就是调用点那一对 `pt + pb`，
+        // 由调用方传进来 —— 这一格自己不算边距，是为了不与「哪几条边算进去」再有一份定义。
+        let fold = |px: f32| style.content_size(px, pad_border);
+        let mut h = Self::definite(style.height).map_or(inner, fold);
         if let Some(max_h) = Self::definite(style.max_height) {
-            h = h.min(max_h);
+            h = h.min(fold(max_h));
+        }
+        if let Some(min_h) = Self::definite(style.min_height) {
+            h = h.max(fold(min_h));
         }
         h
     }
@@ -605,11 +628,20 @@ impl<'a> Ctx<'a> {
         let d_bl = d_border_left + style.padding_left.resolve(basis).max(0.0);
         let d_br = d_border_right + style.padding_right.resolve(basis).max(0.0);
         if let Some(width) = style.width {
-            // `max-width` 夹在内容宽上（这四个数一律按内容盒解释），再加边框与内边距。
-            let content = match style.max_width {
-                Some(max_w) => width.resolve(basis).min(max_w.resolve(basis)).max(0.0),
-                None => width.resolve(basis).max(0.0),
+            // 三个数先过 [`ComputedStyle::content_size`]（与流内块那一条同源），夹序也同
+            // 一条：`max-width` 先夹、`min-width` 后夹。浮动盒从前不看 `min-width`，
+            // 于是 `.x { min-width: 120px; float: left }` 排出来的盒比作者要窄 ——
+            // 这一格与流内块共用式子之后不会再分叉。
+            let fold = |declared: Length| {
+                style.content_size(declared.resolve(basis).max(0.0), d_bl + d_br)
             };
+            let mut content = fold(width);
+            if let Some(max_w) = style.max_width {
+                content = content.min(fold(max_w));
+            }
+            if let Some(min_w) = style.min_width {
+                content = content.max(fold(min_w));
+            }
             return Some((content + d_bl + d_br).max(1.0));
         }
         let img = single_image(self.dom, node)?;
@@ -1030,7 +1062,10 @@ impl<'a> Ctx<'a> {
                 style,
             )
         };
-        self.close_block(index, pt + Self::used_content_height(style, inner) + pb)
+        self.close_block(
+            index,
+            pt + Self::used_content_height(style, inner, pt + pb) + pb,
+        )
     }
 
     /// 轻量模式：算一个块的高，不断行。`basis` 见 [`Self::block`] —— 这一条必须与
@@ -1070,7 +1105,7 @@ impl<'a> Ctx<'a> {
             let lines = (est / content_width).ceil().max(1.0);
             lines * line_px
         };
-        pt + Self::used_content_height(style, inner) + pb
+        pt + Self::used_content_height(style, inner, pt + pb) + pb
     }
 
     /// 估算一个节点下文本的总宽，单位是 em（用于轻量模式 / 两阶段量高）。

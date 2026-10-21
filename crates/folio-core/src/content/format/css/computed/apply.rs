@@ -4,8 +4,8 @@
 //! 入口留在父模块，这里的东西只对整个 `css` 内部开放，不属于对外公开面。
 
 use super::{
-    BorderEdge, BorderStyle, ComputedStyle, Direction, Display, Hyphens, KNOWN_UNIMPLEMENTED,
-    TextAlign, TextJustify,
+    BorderEdge, BorderStyle, BoxSizing, ComputedStyle, Direction, Display, Hyphens,
+    KNOWN_UNIMPLEMENTED, TextAlign, TextJustify,
 };
 use crate::content::format::css::Declaration;
 use crate::content::format::css::value::{
@@ -13,7 +13,7 @@ use crate::content::format::css::value::{
     parse_baseline_shift, parse_border_style, parse_break_when, parse_clear, parse_color,
     parse_count, parse_decoration, parse_float, parse_font_family_list, parse_font_size,
     parse_font_weight, parse_line_height, parse_list_style, parse_writing_mode, relative_weight,
-    set_edge, set_length, set_margin, set_px,
+    set_edge, set_length, set_margin, set_min_length, set_px,
 };
 
 /// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
@@ -544,6 +544,27 @@ pub(super) fn apply(
         "height" => set_length(value, own, root_px, &mut style.height),
         "max-width" => set_length(value, own, root_px, &mut style.max_width),
         "max-height" => set_length(value, own, root_px, &mut style.max_height),
+        // 两个 `min-*`：值只收长度（`auto` / `none` 整条作废，判据写在 `set_min_length`）。
+        // 生效点在排版层，而且**夹序**是它们最难写错的一格：`max-*` 先夹、`min-*` 后夹，
+        // 所以「`max-width: 40px` 与 `min-width: 60px` 同时写」这种自相矛盾的声明里
+        // 赢的是 `min-width`（CSS 2.1 §10.4 / §10.7），反过来就与浏览器不一致。
+        // 见 `layout::collect::solve_block_width` 与 `used_content_height`。
+        "min-width" => set_min_length(value, own, root_px, &mut style.min_width),
+        "min-height" => set_min_length(value, own, root_px, &mut style.min_height),
+        // 这一格决定上面六格的数**含不含**边框与内边距。生效点只有
+        // `ComputedStyle::content_size` 一个式子（四个落点共用），所以这里只管存哪一档。
+        // `padding-box` 不认（见 [`BoxSizing`]）：认成 `border-box` 会把边框也扣掉。
+        "box-sizing" => match value.to_ascii_lowercase().as_str() {
+            "content-box" => {
+                style.box_sizing = BoxSizing::ContentBox;
+                true
+            }
+            "border-box" => {
+                style.box_sizing = BoxSizing::BorderBox;
+                true
+            }
+            _ => false,
+        },
         "list-style-type" => match parse_list_style(value) {
             Some(kind) => {
                 style.list_style_type = kind;

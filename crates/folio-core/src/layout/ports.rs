@@ -108,17 +108,42 @@ impl ImageProvider for NoImages {
 
 /// 按 CSS 与固有尺寸算一张图的显示尺寸（CSS px）。
 ///
+/// 返回的是**内容盒**上的尺寸：调用方在外面再加边框与内边距（`collect::block_uncached`
+/// 与 `block_light` 那两处都是 `pt + h + pb`）。作者写的 `width` / `height` 含不含那两对，
+/// 由 `box-sizing` 定，折法只走 [`ComputedStyle::content_size`] 那一个式子 —— 与流内块、
+/// 浮动盒同源，四条路上「谁含谁不含」不许各有各的定义。
+///
 /// 宽高是**一对**：只写 `height` 时宽要按纵横比反算，只写 `width` 时高按比例算；
 /// 两边都写死才不保持比例。从前这里先按 intrinsic 定宽、再单独拿 `height` 覆盖高，
 /// 于是 `sup img { height:1em; width:auto }` 得到一张「固有宽 × 1em」的扁图 ——
-/// 脚注「注」图因此既过大又和行盒对不上。
+/// 脚注「注」图因此既过大又和行盒对不上。夹 `min-*` / `max-*` 时同样**按比例反算另一轴**，
+/// 夹序与流内块一致（`max-*` 先、`min-*` 后，矛盾时 `min-*` 赢，CSS 2.1 §10.4 / §10.7）。
+///
+/// 最后一刀「绝不溢出容器」压在 `min-*` 之后，是**产品口径**而不是 CSS：书里没写
+/// `max-width` 的插图也不该被裁掉，所以一张 `min-width: 900px` 的图在 600px 版心里
+/// 就是 600 宽，而不是溢出到版心外（流内块那一侧不夹这一刀，两者行为不同是有意的，
+/// 溢出的一块矩形会被滚动链带出去，一张图则是直接切掉）。
 pub(super) fn image_size(style: &ComputedStyle, iw: f32, ih: f32, container_w: f32) -> (f32, f32) {
     let basis = container_w.max(1.0);
     let has_intrinsic = iw > 0.0 && ih > 0.0;
-    let width = style.width.map(|l| l.resolve(basis)).filter(|w| *w >= 0.0);
+    // `box-sizing: border-box` 时作者写的数已经含边框与内边距。横向与纵向各自扣自己那一对，
+    // 内边距的百分比按图的可用宽折（与这一族在替换元素上的既有口径一致）。
+    let [btop, bright, bbot, bleft] = style.border_drawn();
+    let fold_x = bleft
+        + bright
+        + style.padding_left.resolve(basis).max(0.0)
+        + style.padding_right.resolve(basis).max(0.0);
+    let fold_y = btop
+        + bbot
+        + style.padding_top.resolve(basis).max(0.0)
+        + style.padding_bottom.resolve(basis).max(0.0);
+    let width = style
+        .width
+        .map(|l| style.content_size(l.resolve(basis).max(0.0), fold_x))
+        .filter(|w| *w >= 0.0);
     // 百分比高度没有包含块高度作基准，按 auto 处理（见 known-limitations）。
     let height = match style.height {
-        Some(Length::Px(v)) if v >= 0.0 => Some(v),
+        Some(Length::Px(v)) if v >= 0.0 => Some(style.content_size(v.max(0.0), fold_y)),
         _ => None,
     };
 
@@ -152,7 +177,28 @@ pub(super) fn image_size(style: &ComputedStyle, iw: f32, ih: f32, container_w: f
         }
         h = max_h;
     }
-    // 绝不溢出容器：书里没写 max-width 的插图也不该被裁掉。
+    // 两个 `min-*` 夹在 `max-*` **之后**：与流内块那一条同序，矛盾时 `min-*` 赢。
+    // 放大也要按纵横比反算另一轴，否则一张 100×50 的图被 `min-width: 300px` 抬成
+    // 「300 宽 × 50 高」的扁图 —— 那正是 `height` 那一格从前犯过的形状。
+    if let Some(min_w) = style.min_width.map(|l| l.resolve(basis))
+        && min_w >= 0.0
+        && w < min_w
+    {
+        if w > 0.0 {
+            h *= min_w / w;
+        }
+        w = min_w;
+    }
+    if let Some(Length::Px(min_h)) = style.min_height
+        && min_h >= 0.0
+        && h < min_h
+    {
+        if h > 0.0 {
+            w *= min_h / h;
+        }
+        h = min_h;
+    }
+    // 绝不溢出容器：书里没写 max-width 的插图也不该被裁掉（口径见函数文档）。
     if w > basis {
         if w > 0.0 {
             h *= basis / w;

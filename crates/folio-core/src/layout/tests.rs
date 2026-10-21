@@ -802,6 +802,114 @@ fn a_percent_height_is_not_a_number_in_flow() {
     );
 }
 
+/// `min-width` 夹在 `max-width` **之后**，而且管 `width: auto` 那一档（CSS 2.1 §10.4）。
+///
+/// 三条各钉一个失败模式：前两条钉**夹序**（写成先 min 后 max，矛盾声明会给 40 而不是
+/// 60 —— 与浏览器不一致，且屏上只是「那块窄了一点」，最难查）；第三条钉 `auto` 也被抬，
+/// 那块溢出到 200px 版心外面去，这是 CSS 的行为，不是排版 bug。
+#[test]
+fn a_min_width_wins_over_a_smaller_max_width() {
+    let (dom, laid) = typeset(
+        "<div class=a>字</div><div class=b>字</div><div class=c>字</div>",
+        ".a { width: 100px; max-width: 40px; min-width: 60px } \
+         .b { max-width: 40px; min-width: 60px } \
+         .c { min-width: 260px }",
+        200.0,
+    );
+    assert_eq!(
+        box_of_class(&dom, &laid, "a").width,
+        60.0,
+        "矛盾声明里 min-width 赢"
+    );
+    assert_eq!(
+        box_of_class(&dom, &laid, "b").width,
+        60.0,
+        "没写 width 时同一条夹序"
+    );
+    let c = box_of_class(&dom, &laid, "c");
+    assert_eq!(
+        (c.x, c.width),
+        (0.0, 260.0),
+        "`width: auto` 填满 200px 之后仍被抬到 260：溢出到版心外"
+    );
+}
+
+/// `min-height` 抬「由内容撑高」那一档，夹序同横向（§10.7：与 `max-height` 矛盾时它赢）。
+///
+/// 三条断言里 `u` 是闸门：把 min/max 两条夹反，`s` 与 `t` 仍然各自对得上，只有 `u` 会
+/// 从 40 掉回 20 —— 那一格才是「夹序」本身的证据。
+/// 高定住之后**后面的块跟着下移**，这是屏上看得见的那一半（内容照排、溢出可见）。
+#[test]
+fn a_min_height_holds_a_short_box_and_the_cursor_with_it() {
+    let (dom, laid) = typeset(
+        "<p class=s>短</p><p class=t>字字字字字字字字</p><p class=u>字</p>",
+        ".s { margin: 0; min-height: 90px } \
+         .t { margin: 0; min-height: 10px; max-height: 20px } \
+         .u { margin: 0; min-height: 40px; max-height: 20px }",
+        200.0,
+    );
+    let s = box_of_class(&dom, &laid, "s");
+    let t = box_of_class(&dom, &laid, "t");
+    let u = box_of_class(&dom, &laid, "u");
+    assert_eq!((s.y, s.height), (0.0, 90.0), "一行字的内容高被抬到 90");
+    assert_eq!(
+        (t.y, t.height),
+        (90.0, 20.0),
+        "游标从 90 底下起排；内容 28 被 max-height 夹到 20，比它小的 min-height 不改"
+    );
+    assert_eq!(
+        u.height, 40.0,
+        "`max-height: 20` 与 `min-height: 40` 矛盾时 min 赢"
+    );
+}
+
+/// 轻量模式（只量高，给目录与进度条）与实排必须给同一个数。
+///
+/// 这条不是重复断言：`children_light` 与 `block_light` 走的是另一条分流，从前它把
+/// `width` 当块宽记过（见 `solve_block_width` 的文档），症状是滚动位置对不上屏上的块。
+/// 两个 `min-*` 各有一格留在实排那一路而轻路没走，两条高就会岔开。
+#[test]
+fn the_min_sizing_clamps_agree_between_full_and_light() {
+    let html = "<p class=s>短</p><p class=w>字</p>";
+    let css = ".s { margin: 0; min-height: 90px } .w { margin: 0; min-width: 260px }";
+    let dom = Dom::parse(html.as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(css, Origin::Author),
+        &ComputedStyle::default(),
+    );
+    let body = find(&dom, "body");
+    let run = |light: bool| {
+        layout(
+            &dom,
+            &styles,
+            body,
+            LayoutOptions {
+                width: 200.0,
+                light,
+                allow_vertical: false,
+            },
+            &Mono,
+            &NoImages,
+        )
+    };
+    let full = run(false);
+    let light = run(true);
+    assert_eq!(
+        box_of_class(&dom, &light, "s").height,
+        box_of_class(&dom, &full, "s").height,
+        "轻路的这一块高要与实排同一条等式"
+    );
+    assert_eq!(
+        box_of_class(&dom, &light, "w").width,
+        box_of_class(&dom, &full, "w").width,
+        "轻路的这一块宽要与实排同一条等式"
+    );
+    // 两格都必须是「走新路径才可能出」的数：夹子被删掉时这两条一起掉回 28 与 200。
+    assert_eq!(box_of_class(&dom, &light, "s").height, 90.0);
+    assert_eq!(box_of_class(&dom, &light, "w").width, 260.0);
+}
+
 /// 作者写了定宽的浮动盒：不必收缩就知道它多宽，于是这一块真的离开常规流。
 ///
 /// `.muen .left { width: 20%; float: left }`（《哈利·波特》13 处）从前落在
@@ -2081,5 +2189,197 @@ fn letter_spacing_widens_each_character_and_breaks_earlier() {
         (spaced.lines[0].width - 240.0).abs() < 0.01,
         "首行宽该是 10 × 24 = 240，实际 {}",
         spaced.lines[0].width
+    );
+}
+
+/// `box-sizing: border-box` 时作者写的数**已经含**边框与内边距：横向那一格。
+///
+/// 两条断言钉两件不同的事，缺一条就是「看着对了」：盒宽只证明矩形折了，而**折行宽**
+/// 才证明排版层真按内容盒走 —— 从前有一条改动把矩形改窄而行仍按 100px 折，屏上正文
+/// 溢出插图框，报表上什么也没说。
+#[test]
+fn border_box_folds_padding_and_border_out_of_the_declared_width() {
+    let html = format!("<p class=a>{}</p>", "字".repeat(12));
+
+    let (dom, laid) = typeset(
+        &html,
+        ".a { width: 100px; padding: 0 10px; border: 5px solid black }",
+        200.0,
+    );
+    assert_eq!(
+        box_of_class(&dom, &laid, "a").width,
+        130.0,
+        "初值 content-box：100 是内容宽，边框盒再加左右各 15"
+    );
+    assert_eq!(
+        texts(&laid),
+        vec!["字".repeat(6), "字".repeat(6)],
+        "按内容宽 100 折：一行 6 字"
+    );
+
+    let (dom, laid) = typeset(
+        &html,
+        ".a { box-sizing: border-box; width: 100px; padding: 0 10px; border: 5px solid black }",
+        200.0,
+    );
+    assert_eq!(
+        box_of_class(&dom, &laid, "a").width,
+        100.0,
+        "border-box：作者写的 100 就是边框盒，内容只剩 70"
+    );
+    assert_eq!(
+        texts(&laid),
+        vec!["字".repeat(4), "字".repeat(4), "字".repeat(4)],
+        "折行跟着内容盒走，不是跟着矩形走"
+    );
+}
+
+/// 纵向那一格：`height` 与**游标推进量**一起折，后面的兄弟不许留在原地。
+#[test]
+fn border_box_folds_the_vertical_pair_out_of_the_declared_height() {
+    let html = "<p class=h>字</p><p class=n>后</p>";
+    let box_edges = "height: 60px; padding: 10px 0; border: 5px solid black; margin: 0";
+
+    let (dom, laid) = typeset(
+        html,
+        &format!(".h {{ {box_edges} }} .n {{ margin: 0 }}"),
+        200.0,
+    );
+    let h = box_of_class(&dom, &laid, "h");
+    assert_eq!(
+        h.height, 90.0,
+        "content-box：60 的内容 + 上下各 15 的边距与边框"
+    );
+    assert_eq!(
+        box_of_class(&dom, &laid, "n").y,
+        90.0,
+        "后面的块从 90 底下起排"
+    );
+
+    let (dom, laid) = typeset(
+        html,
+        &format!(".h {{ box-sizing: border-box; {box_edges} }} .n {{ margin: 0 }}"),
+        200.0,
+    );
+    assert_eq!(
+        box_of_class(&dom, &laid, "h").height,
+        60.0,
+        "border-box：60 含上下各 15，内容只剩 30"
+    );
+    assert_eq!(
+        box_of_class(&dom, &laid, "n").y,
+        60.0,
+        "推进量跟着折 —— 这一格错了就是滚动位置与屏上的块对不上"
+    );
+}
+
+/// 浮动盒那一格与流内块共用同一份式子：`border-box` 的 40 就是 40，旁边的行让开 40。
+///
+/// 这一条之所以要单独钉：浮动盒的宽从前是**另一条**算式（`float_box_width`），
+/// 它连 `min-width` 都不看，而 `solve_block_width` 看 —— 两个落点迟早分叉，
+/// 症状是同一张插图框在流内与浮在旁边宽窄不同。
+#[test]
+fn a_border_box_float_lets_the_lines_beside_it_pass_the_authors_number() {
+    let html = format!("<div class=l>题</div><p>{}</p>", "字".repeat(24));
+    let edges = "width: 40px; padding: 0 8px; border: 2px solid black; float: left";
+
+    let (_, laid) = typeset(&html, &format!(".l {{ {edges} }}"), 200.0);
+    assert_eq!(
+        laid.lines[1].x, 60.0,
+        "content-box：让开的是 40 + 左右各 10"
+    );
+
+    let (_, laid) = typeset(
+        &html,
+        &format!(".l {{ box-sizing: border-box; {edges} }}"),
+        200.0,
+    );
+    assert_eq!(
+        laid.lines[1].x, 40.0,
+        "border-box：让开的就是作者写的那 40，内容只剩 20"
+    );
+}
+
+/// `min-width` 在浮动盒那一条也算数（从前只有流内块那一条看它）。
+#[test]
+fn a_min_width_raises_a_float_the_author_left_undimensioned_enough() {
+    let html = format!("<div class=l>题目</div><p>{}</p>", "字".repeat(24));
+    let (_, laid) = typeset(
+        &html,
+        ".l { width: 20px; min-width: 40px; float: left }",
+        200.0,
+    );
+    assert_eq!(
+        laid.lines[1].x, 40.0,
+        "`min-width` 把浮动盒抬到 40，与流内块同一条夹序"
+    );
+}
+
+/// 替换元素那一条路上的 `min-*` / `max-*` / `box-sizing`。
+///
+/// 这一组是直接问 [`image_size`] 本身，不绕排版：它是一张图的**唯一**算式，
+/// 而从前 `min-*` 在这里根本不参与 —— 声明在层叠期报了 `Applied`，屏上一点不变，
+/// 正是 `plans/facts.md` 记过的那条「Applied ≠ 排版层读了」的缝。
+#[test]
+fn image_size_folds_the_min_pair_and_the_box_sizing_pair() {
+    use crate::content::format::css::computed::{BorderEdge, BorderStyle, Length};
+    use crate::layout::ports::image_size;
+    let base = ComputedStyle::default();
+
+    // 1) `min-width` 抬一张窄图，另一轴按纵横比跟着走。
+    let style = ComputedStyle {
+        min_width: Some(Length::Px(300.0)),
+        ..base.clone()
+    };
+    assert_eq!(image_size(&style, 100.0, 50.0, 600.0), (300.0, 150.0));
+
+    // 2) 夹序：与流内块同一条，`max-width` 先夹、`min-width` 后夹，矛盾时 min 赢。
+    let style = ComputedStyle {
+        max_width: Some(Length::Px(40.0)),
+        min_width: Some(Length::Px(60.0)),
+        ..base.clone()
+    };
+    assert_eq!(image_size(&style, 100.0, 50.0, 600.0), (60.0, 30.0));
+
+    // 3) `min-height` 反算宽（正方形，两条轴一起走）。
+    let style = ComputedStyle {
+        min_height: Some(Length::Px(200.0)),
+        ..base.clone()
+    };
+    assert_eq!(image_size(&style, 100.0, 100.0, 900.0), (200.0, 200.0));
+
+    // 4) 「绝不溢出容器」那一刀仍压在最后，是产品口径：`min-width` 赢不过版心。
+    let style = ComputedStyle {
+        min_width: Some(Length::Px(900.0)),
+        ..base.clone()
+    };
+    assert_eq!(image_size(&style, 100.0, 50.0, 600.0), (600.0, 300.0));
+
+    // 5) `box-sizing: border-box` 在替换元素上同样把边框与内边距从作者写的数里扣掉。
+    let edges = [BorderEdge {
+        width: 5.0,
+        style: BorderStyle::Solid,
+        color: None,
+    }; 4];
+    let boxed = ComputedStyle {
+        width: Some(Length::Px(100.0)),
+        padding_left: Length::Px(10.0),
+        padding_right: Length::Px(10.0),
+        border: edges,
+        ..base.clone()
+    };
+    assert_eq!(
+        image_size(&boxed, 400.0, 200.0, 600.0),
+        (100.0, 50.0),
+        "初值 content-box：100 是内容宽"
+    );
+    let border_box = ComputedStyle {
+        box_sizing: crate::content::format::css::computed::BoxSizing::BorderBox,
+        ..boxed
+    };
+    assert_eq!(
+        image_size(&border_box, 400.0, 200.0, 600.0),
+        (70.0, 35.0),
+        "border-box：100 含左右各 15，内容只剩 70，高按比例算"
     );
 }

@@ -221,6 +221,27 @@ pub(super) fn set_length(
     }
 }
 
+/// `min-width` / `min-height` 的值：只收长度，`auto` 与 `none` 判不认识。
+///
+/// 有意**不走** [`set_length`]：那条把 `auto` / `none` 折成「清掉显式值」并返回成功，
+/// 因为 `width` / `height` 里这两个词是合法值；而 CSS 2.1 的 `<min-width>` /
+/// `<min-height>` 不收它们（`min-*: auto` 是 CSS Sizing 3 给弹性盒的写法）。认下来等于
+/// 把一条浏览器会整条丢掉的声明报成 `Applied` —— 与 [`set_edge`] 那一条纪律同源。
+pub(super) fn set_min_length(
+    value: &str,
+    font_size: f32,
+    root_font_size: f32,
+    out: &mut Option<Length>,
+) -> bool {
+    match edge_length(value, font_size, root_font_size, false) {
+        Some(length) => {
+            *out = Some(length);
+            true
+        }
+        None => false,
+    }
+}
+
 /// 外层 `None` = 值不认识（计入 ignored）；内层 `None` = `auto` / `none`（清掉显式值）。
 pub(super) fn parse_length(
     value: &str,

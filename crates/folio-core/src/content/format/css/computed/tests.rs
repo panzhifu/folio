@@ -1784,3 +1784,136 @@ fn an_author_color_on_a_link_beats_the_theme_slot() {
         "作者写明了色，主题那一格让位"
     );
 }
+
+/// 两个 `min-*` 只收**长度**，`auto` 与 `none` 整条作废。
+///
+/// 前四条走 `declaration_status` —— 它是 `examples/css-gap.rs` 的唯一判定口，所以这一格
+/// 同时钉住「`min-height` 不再报 Inert」「`min-width` 不再报不认识」，两边少一条那张
+/// 落差表就指错地方；后两条钉住**不假装接住**：CSS 2.1 的 `<min-width>` / `<min-height>`
+/// 不收这两个词（`min-*: auto` 是 CSS Sizing 3 给弹性盒的），浏览器整条丢掉，我们若在
+/// 层叠期收成「清掉显式值并返回成功」，屏上没错而报表说好，那是更难查的一侧。
+#[test]
+fn min_width_and_min_height_take_lengths_only() {
+    use crate::content::format::css::Declaration;
+    use crate::content::format::css::computed::{DeclStatus, declaration_status};
+
+    let status = |property: &str, value: &str| {
+        declaration_status(
+            &Declaration {
+                property: property.into(),
+                value: value.into(),
+                important: false,
+            },
+            &ComputedStyle::default(),
+            16.0,
+        )
+    };
+    assert_eq!(status("min-width", "60px"), DeclStatus::Applied);
+    assert_eq!(status("min-height", "50%"), DeclStatus::Applied);
+    assert_eq!(status("min-width", "auto"), DeclStatus::Unparsed);
+    assert_eq!(status("min-height", "none"), DeclStatus::Unparsed);
+
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>",
+        ".a { font-size: 20px; min-width: 60px; min-height: 2em } \
+         .b { min-width: auto; min-height: none }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert_eq!(a.min_width, Some(Length::Px(60.0)));
+    assert_eq!(
+        a.min_height,
+        Some(Length::Px(40.0)),
+        "2em 按自己的 20px 字号"
+    );
+    let b = style(&page, class(&page, "b"));
+    assert_eq!(b.min_width, None, "非法值不该留下任何一个数");
+    assert_eq!(b.min_height, None);
+    assert_eq!(page.styled.ignored, 2, "两条非法值都该计「不认识」");
+}
+
+/// 块级排版缓存按「这一块子树的样式」判命中，而 `ComputedStyle` 的 `Hash` 是逐字段手写的。
+///
+/// 新增字段忘了补那一行时，缓存会拿着旧的块高服务 —— 屏上高了对，滚动位置与目录进度
+/// 还是旧的。这一格把两个 `min-*` 钉进哈希，让「忘了补」至少在这里变红一次。
+#[test]
+fn the_min_sizing_fields_reach_the_style_hash() {
+    use std::hash::{Hash, Hasher};
+
+    let hash_of = |style: &ComputedStyle| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        style.hash(&mut h);
+        h.finish()
+    };
+    let base = ComputedStyle::default();
+    let wide = ComputedStyle {
+        min_width: Some(Length::Px(60.0)),
+        ..Default::default()
+    };
+    let tall = ComputedStyle {
+        min_height: Some(Length::Px(60.0)),
+        ..Default::default()
+    };
+    assert_ne!(hash_of(&wide), hash_of(&base), "min-width 没进哈希");
+    assert_ne!(hash_of(&tall), hash_of(&base), "min-height 没进哈希");
+}
+
+/// `box-sizing` 只认两档，而**百分比不许在层叠期折**。
+///
+/// 后半句是这一条存在的主要理由：`width` 那一族的百分比折算自**包含块宽**，那是排版期
+/// 才拿到手的数（`Length::Percent` 就是为它存在的）。谁在 `apply` 里把 `width: 50%` 折成
+/// px，能用的基准只有字号 —— 折出来的其实是「父字号的一半」，600px 版心里变成 8px，
+/// 而屏上只是那一块窄得离谱，报表上说这条已接住。
+#[test]
+fn box_sizing_takes_two_keywords_and_leaves_percent_for_the_layout_phase() {
+    use crate::content::format::css::Declaration;
+    use crate::content::format::css::computed::{BoxSizing, DeclStatus, declaration_status};
+
+    let status = |value: &str| {
+        declaration_status(
+            &Declaration {
+                property: "box-sizing".into(),
+                value: value.into(),
+                important: false,
+            },
+            &ComputedStyle::default(),
+            16.0,
+        )
+    };
+    assert_eq!(status("border-box"), DeclStatus::Applied);
+    assert_eq!(status("content-box"), DeclStatus::Applied);
+    // `padding-box`（css3-ui，只有个别引擎收）判不认识，而不是当成 `border-box`：
+    // 那一档要把边框留着只扣内边距，认成邻近的一档就是错得看不出来。
+    assert_eq!(status("padding-box"), DeclStatus::Unparsed);
+
+    let page = author(
+        "<div class=\"a\"></div><div class=\"b\"></div>",
+        ".a { box-sizing: border-box; width: 50%; max-height: 40% } \
+         .b { box-sizing: padding-box }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert_eq!(a.box_sizing, BoxSizing::BorderBox);
+    assert_eq!(
+        a.width,
+        Some(Length::Percent(0.5)),
+        "border-box 不改百分比的**基准**，只改扣不扣边"
+    );
+    assert_eq!(a.max_height, Some(Length::Percent(0.4)));
+    let b = style(&page, class(&page, "b"));
+    assert_eq!(
+        b.box_sizing,
+        BoxSizing::ContentBox,
+        "不认识的那一档不该改任何东西"
+    );
+    assert_eq!(page.styled.ignored, 1, "只有 padding-box 那条计不认识");
+
+    // 默认档 = CSS 初值，且**不继承**（CSS 规定 `box-sizing` 非继承属性）。
+    let nested = author(
+        "<div class=o><p class=i>文</p></div>",
+        ".o { box-sizing: border-box }",
+    );
+    assert_eq!(
+        style(&nested, class(&nested, "i")).box_sizing,
+        BoxSizing::ContentBox,
+        "`box-sizing` 不跟着往下传"
+    );
+}

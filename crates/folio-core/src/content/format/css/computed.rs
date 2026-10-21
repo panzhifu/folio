@@ -269,6 +269,22 @@ impl BorderEdge {
     }
 }
 
+/// 作者写的那个尺寸**含不含**边框与内边距，即 CSS 的 `box-sizing`。
+///
+/// 只有两档：`content-box` 是 CSS 初值也是这一族从前唯一的行为；`border-box` 是出版书与
+/// 转换器实际写的那一档（插图框、色带标题、`padding` 不为 0 的定宽分隔条）。
+/// `padding-box`（css3-ui，Firefox 收）有意**不认**，判「不认识」而不是当成 `border-box`：
+/// 那一档要把边框留着只扣内边距，而扣错的表现是「盒子宽了边框那几像素」，比一条明确的
+/// 「不认识」难查。`min-*` 与 `max-*` 跟着同一格走 —— 分开判就成了两份「谁含谁不含」的定义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BoxSizing {
+    /// 初值：作者写的数是内容盒，边框与内边距在**外面**加。
+    #[default]
+    ContentBox,
+    /// 作者写的数已经含边框与内边距。
+    BorderBox,
+}
+
 /// `float`：盒子贴到所在块的哪一侧，后面的行带在它旁边让出宽度。
 ///
 /// CSS 3 的 `inline-start` / `inline-end` / `float-inherit` 不接（判不认识）：那三个
@@ -314,6 +330,21 @@ impl ComputedStyle {
     /// 不该把正文挤窄 40px。
     pub fn border_drawn(&self) -> [f32; 4] {
         self.border.map(|edge| edge.drawn())
+    }
+
+    /// 把作者写下的一个**尺寸**折成内容盒上的数（`box-sizing` 落在这一个式子里）。
+    ///
+    /// `pad_border` 交的是这一格该扣的那一对：横向是「左 + 右的边框与内边距」，纵向是
+    /// 「上 + 下的」。四个落点（流内块的宽、浮动盒的宽、块高、替换元素）共用这一份，
+    /// 是因为它们从前各自按内容盒解释作者写的数 —— 抄四遍迟早漂，而漂的表现是同一张
+    /// 插图框在「量高」与「实排」两趟里给两个宽，滚动位置跟着错位。
+    ///
+    /// 扣穿了回 0 而不是负数：浏览器把内容盒夹到 0，盒子本身还在。
+    pub fn content_size(&self, declared: f32, pad_border: f32) -> f32 {
+        match self.box_sizing {
+            BoxSizing::ContentBox => declared,
+            BoxSizing::BorderBox => (declared - pad_border).max(0.0),
+        }
     }
 }
 
@@ -513,24 +544,34 @@ pub struct ComputedStyle {
     /// 向后代传播同理。作者写了 `color` 时它照旧赢 —— 这一格只在 `color == None` 时才有话语权。
     pub link: bool,
     pub white_space_pre: bool,
-    /// 尺寸四件套。**一律按内容盒解释**（`box-sizing` 不认，见下）。落点分两条：
+    /// 尺寸六件套。作者写的数**含不含**边框与内边距由 [`ComputedStyle::box_sizing`] 定，
+    /// 折算只走 [`ComputedStyle::content_size`] 那一个式子（四个落点共用）。落点分两条：
     ///
     /// - 替换元素（`<img>` / `<svg>`）：`layout::ports::image_size` 拿它与固有尺寸、
     ///   可用宽一起折出这张图实际多大。这一条早就生效。
-    /// - 流内块级盒：`width` / `max-width` 定出这一块的边框盒宽
+    /// - 流内块级盒：`width` / `max-width` / `min-width` 定出这一块的边框盒宽
     ///   （`layout::collect::solve_block_width`），于是写着 `margin: 0 auto` 的定宽插图
-    ///   与分隔条第一次能居中；`height` / `max-height` 定出盒高与游标推进量，
+    ///   与分隔条第一次能居中；`height` / `max-height` / `min-height` 定出盒高与游标推进量，
     ///   **内容照排、溢出可见** —— 与浏览器同一条规则，不是我们的取巧。
     ///   `<body>` 那一层除外：根不吃 `width`，版心归视口与读者设定，判据写在
     ///   `layout::layout_inner`。
     ///
-    /// `height` / `max-height` 的百分比在这里落空：它们的基准是包含块的**高**，
-    /// 而流式排版里父块的高本来就是由内容算出来的，CSS 在同一条规则下也判 `auto`。
-    /// `min-width` 连属性名都不在清单里（计「不认识」），`min-height` 认得、不生效。
+    /// 两个 `min-*` 的**夹序**是 CSS 2.1 §10.4 / §10.7 那一条：`max-*` 先夹、`min-*` 后夹，
+    /// 所以作者写出「`max-width` 比 `min-width` 还小」这种自相矛盾的声明时赢的是
+    /// `min-width`，与浏览器一致。它们也管 `width: auto` 那一档：没写 `width` 的块填满
+    /// 包含块之后仍会被 `min-width` 抬到溢出 —— 那是 CSS 的行为，不是排版 bug。
+    ///
+    /// `height` / `max-height` / `min-height` 的百分比在这里落空：它们的基准是包含块的**高**，
+    /// 而流式排版里父块的高本来就是由内容算出来的，CSS 在同一条规则下也判 `auto`
+    /// （`definite()` 只认 px，三条一起走那一格）。
     pub width: Option<Length>,
-    pub height: Option<Length>,
+    pub min_width: Option<Length>,
     pub max_width: Option<Length>,
+    pub height: Option<Length>,
+    pub min_height: Option<Length>,
     pub max_height: Option<Length>,
+    /// `box-sizing`：上面那六格的数含不含边框与内边距。不继承（CSS 规定）。
+    pub box_sizing: BoxSizing,
     /// 分片意图。见 `fragment` 模块：连续滚动 / 分页 / 双页对开共用同一套分片代码，
     /// 差别只是「可用高度」这一个数。
     pub break_before: BreakWhen,
@@ -590,9 +631,12 @@ impl Default for ComputedStyle {
             link: false,
             white_space_pre: false,
             width: None,
-            height: None,
+            min_width: None,
             max_width: None,
+            height: None,
+            min_height: None,
             max_height: None,
+            box_sizing: BoxSizing::default(),
             break_before: BreakWhen::Auto,
             break_after: BreakWhen::Auto,
             break_inside_avoid: false,
@@ -673,9 +717,12 @@ impl std::hash::Hash for ComputedStyle {
         self.line_through.hash(h);
         self.white_space_pre.hash(h);
         opt_len(&self.width, h);
-        opt_len(&self.height, h);
+        opt_len(&self.min_width, h);
         opt_len(&self.max_width, h);
+        opt_len(&self.height, h);
+        opt_len(&self.min_height, h);
         opt_len(&self.max_height, h);
+        self.box_sizing.hash(h);
         (self.break_before as u8).hash(h);
         (self.break_after as u8).hash(h);
         self.break_inside_avoid.hash(h);
@@ -701,7 +748,8 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // `background` 简写 2026-10-14 起**接住了它里面的颜色**（见 `apply` 的 `background`
     // 那一臂）：出版书里「深色底块 + 白字标题」满地都是，只认 `background-color`
     // 会让这种标题变成白纸上的白字、整条标题消失。简写里的图（`url(...)`）仍不接。
-    "min-height",
+    // `min-height` 在这份名单里空转过（认得、不生效）：2026-10-21 与 `min-width` 一起
+    // 接进 `used_content_height` / `solve_block_width` 那两夹，所以移了出去。
     "text-shadow",
     // `direction` 以前在这份名单里（「认得、接受、不生效」），2026-10-14 那一轮把它
     // 变成真生效的属性，所以移出去了。
