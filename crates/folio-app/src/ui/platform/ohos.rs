@@ -20,10 +20,17 @@ pub extern "C" fn ohos_napi_init(
     }));
     // SAFETY: `env` / `exports` 直接来自 NAPI 运行时。
     unsafe {
-        gpui_mobile::ohos::napi::install(
+        // `with_assets` 决定 `svg().path("icons/xxx.svg")` 能否解析出字节；不调它
+        // 图标会是一片空白，而且是静默的空白。走 `install_with_assets` 而不是在
+        // 下面的闭包里想办法：`Application::with_assets` 消费的是 builder 本身，
+        // 而闭包只拿到 `&mut App`（与 Android 臂的 `start_with_assets` 同一条理由）。
+        // `AllAssets` 是编译期嵌进 `.so` 的那一份（rust-embed），所以鸿蒙这边不需要
+        // 再去接 ArkTS 的 rawfile / resourceManager。
+        gpui_mobile::ohos::napi::install_with_assets(
             env,
             exports,
             "folio_app",
+            gpui_kit::assets::AllAssets,
             Box::new(|cx: &mut App| {
                 // 与 iOS 同一条：在模块初始化回调里读配置 + 装日志，再把配置交给 `boot`。
                 let (resolved, _) = folio_core::infra::logging::init_from_config(None);
