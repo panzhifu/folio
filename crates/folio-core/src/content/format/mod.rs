@@ -25,6 +25,8 @@ pub mod novel;
 // 读文件时一次到位、也方便排障时打印，但别当成「已经接上了」：删掉任何一格都会红。
 #[allow(dead_code)]
 pub(crate) mod palmdb;
+/// PDB / PalmDoc：PalmDB 容器里的纯文本记录。
+pub mod pdb;
 pub mod provider;
 pub mod rtf;
 pub(crate) mod sniff;

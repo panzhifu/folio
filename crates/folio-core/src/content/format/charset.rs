@@ -123,13 +123,22 @@ pub(crate) fn read_markup(path: &Path) -> Result<String> {
 /// 症状是一排替换字符 —— 看得见的坏，好过猜出一个像汉字的东西。
 pub(crate) fn read_plain(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path).io_path(path)?;
+    Ok(decode_detected(&bytes))
+}
+
+/// 没有文件、只有字节时的同一条链（PDB 的 PalmDOC 记录用这一支）。
+///
+/// 与 [`read_plain`] 逐字同源：合法 UTF-8 先收，否则问一次白名单内的探测器，
+/// 认不出就按 UTF-8 收留看得见的洞。分成两处写就会有一处忘了「UTF-8 先收」，
+/// 那类症状是中文 UTF-8 被猜成 windows-1252。
+pub(crate) fn decode_detected(bytes: &[u8]) -> String {
     // 合法 UTF-8 一律直接收，也不看里面有没有那串关键字：这是最保守的一档，同时是
     // 「纯 ASCII 永远不漂」的原因（ASCII 同时是五种候选码页的合法输入，任何
     // 「比谁坏字节少」的判据在这种文件上都是掷硬币）。
-    if let Ok(text) = std::str::from_utf8(&bytes) {
-        return Ok(text.to_owned());
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_owned();
     }
-    Ok(decode_plain(&bytes, guess_codepage(&bytes)))
+    decode_plain(bytes, guess_codepage(bytes))
 }
 
 /// 探测器答出来才肯采纳的那几族。

@@ -244,6 +244,7 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::cbz::CbzAdapter),
         Box::new(super::chm::ChmAdapter),
         Box::new(super::mobi::MobiAdapter),
+        Box::new(super::pdb::PdbAdapter),
     ]
 }
 

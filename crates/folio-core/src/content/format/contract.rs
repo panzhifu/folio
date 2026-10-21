@@ -67,6 +67,33 @@ fn rtf(dir: &Path) -> PathBuf {
 }
 
 
+fn pdb(dir: &Path) -> PathBuf {
+    const HEADER: usize = 78;
+    let path = dir.join("a.pdb");
+    let header: [u8; 16] = [0, 1, 0, 0, 0, 0, 0, 4, 0, 1, 16, 0, 0, 0, 0, 0];
+    let body = b"text";
+    let records: [&[u8]; 2] = [&header, body];
+    let mut file = std::fs::File::create(&path).unwrap();
+    let mut head = vec![0u8; HEADER];
+    head[60..64].copy_from_slice(b"TEXt");
+    head[64..68].copy_from_slice(b"REAd");
+    head[76..78].copy_from_slice(&(records.len() as u16).to_be_bytes());
+    file.write_all(&head).unwrap();
+    let mut start = HEADER + records.len() * 8;
+    let mut table = Vec::new();
+    for record in records {
+        table.extend_from_slice(&(start as u32).to_be_bytes());
+        table.push(0);
+        table.extend_from_slice(&[0, 0, 0]);
+        start += record.len();
+    }
+    file.write_all(&table).unwrap();
+    for record in records {
+        file.write_all(record).unwrap();
+    }
+    path
+}
+
 /// 可重排的每一种 provider：产物必须能直接进引擎。
 ///
 /// 断言是「能解析 + body 里有可见文本」，不是「标签在白名单里」—— 引擎对不认识的
@@ -96,6 +123,7 @@ fn every_reflow_provider_hands_the_engine_parseable_xhtml() {
         ("fb2", fb2(dir.path())),
         ("rtf", rtf(dir.path())),
         ("epub", epub_fixture()),
+        ("pdb", pdb(dir.path())),
     ];
 
     for (name, path) in cases {
