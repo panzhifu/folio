@@ -28,6 +28,8 @@ pub mod container;
 pub mod content;
 pub mod cover;
 pub mod css;
+/// DjVu：定版式扫描书/漫画，页是既定的画布（纯 Rust `djvu-rs`）。
+pub mod djvu;
 pub mod epub;
 pub mod fb2;
 pub mod html;

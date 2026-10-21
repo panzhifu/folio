@@ -250,6 +250,7 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::cb7::Cb7Adapter),
         Box::new(super::cbr::CbrAdapter),
         Box::new(super::cbt::CbtAdapter),
+        Box::new(super::djvu::DjvuAdapter),
     ]
 }
 
@@ -279,6 +280,7 @@ pub fn supported_extensions() -> &'static [&'static str] {
     &[
         "epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "rtf", "cbz", "chm",
         "mobi", "azw", "azw3", "prc", "pdf", "docx", "odt", "pdb", "azw4", "cb7", "cbr", "cbt",
+        "djvu", "djv", "htmlz",
     ]
 }
 
