@@ -216,6 +216,8 @@ pub trait DocumentProvider: Send + Sync {
 
     /// 容器内某个条目 → 一章的引擎就绪 XHTML。
     ///
+    /// 只对**名单式**容器有意义（[`Format::Epub`] 的 spine 项、[`Format::Htmlz`] 的
+    /// 每一份 HTML、[`Format::Chm`] 的那份 hhc topic）：库里存了
     /// `ChapterLocator::Entry`，打开时按名字现取。默认 `None` 的格式（单文件那几个）
     /// 由 [`crate::content::document::Document::chapter_source`] 走「整本重读 + 取第 N 章」的
     /// 降级路，所以它们不必实现这一个。
@@ -411,6 +413,17 @@ mod tests {
             ("a.chm", Format::Chm),
             ("a.mobi", Format::Mobi),
             ("a.azw3", Format::Mobi),
+            ("a.pdf", Format::Pdf),
+            ("a.docx", Format::Docx),
+            ("a.odt", Format::Odt),
+            ("a.pdb", Format::Pdb),
+            ("a.azw4", Format::Azw4),
+            ("a.cb7", Format::Cb7),
+            ("a.cbr", Format::Cbr),
+            ("a.cbt", Format::Cbt),
+            ("a.djvu", Format::Djvu),
+            ("a.djv", Format::Djvu),
+            ("a.htmlz", Format::Htmlz),
         ] {
             let provider =
                 provider_for(Path::new(name)).unwrap_or_else(|| panic!("{name} 该有 provider"));

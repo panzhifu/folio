@@ -69,6 +69,33 @@ pub enum Format {
     /// Mobipocket / Kindle：PalmDB 容器里的一条正文流（KF7），或 SKEL/FRAG 拼出的多个
     /// 文件（KF8）。`.mobi` / `.azw` / `.azw3` / `.prc` 都归这一族。可重排。
     Mobi,
+    /// PDF：页是既定的画布，**内容流里没有「行」这个事实**，要栅格化才有像素。定版式。
+    ///
+    /// 与 [`Format::Cbz`] 同在这一族而分歧只有一处：漫画的一页本身就是张图（按 `href`
+    /// 去容器取字节），PDF 的一页是「要算出来的一张图」，所以页表里那条是
+    /// `PageSource::Render` 而不是 `Image`。
+    Pdf,
+    /// WordprocessingML（`.docx`）：ZIP + `word/document.xml`。可重排。
+    Docx,
+    /// OpenDocument Text（`.odt`）：ZIP + `content.xml`。可重排。
+    Odt,
+    /// PalmDoc 纯文本（`.pdb`）：PalmDB 容器里的压缩文本记录。可重排。
+    Pdb,
+    /// AZW4（Kindle Print Replica）：PalmDB 容器里装着 PDF。定版式。
+    ///
+    /// 与 [`Format::Pdf`] 共用同一套页表与栅格化，差别只在「PDF 字节从哪儿来」——
+    /// 这里要先从 PalmDB 的记录里取出来。
+    Azw4,
+    /// CB7：一个 7z，里面按页排着图片。定版式，与 [`Format::Cbz`] 同族。
+    Cb7,
+    /// CBR：一个 RAR，里面按页排着图片。定版式，与 [`Format::Cbz`] 同族。
+    Cbr,
+    /// CBT：一个 tar，里面按页排着图片。定版式，与 [`Format::Cbz`] 同族。
+    Cbt,
+    /// DjVu：扫描书/漫画，页是既定的画布，要渲染才有像素。定版式。
+    Djvu,
+    /// Calibre HTMLZ：一个 ZIP，里面是 `index.html`、章节 HTML 与图片。可重排。
+    Htmlz,
 }
 
 impl Format {
@@ -83,6 +110,16 @@ impl Format {
             Format::Rtf => "rtf",
             Format::Chm => "chm",
             Format::Mobi => "mobi",
+            Format::Pdf => "pdf",
+            Format::Docx => "docx",
+            Format::Odt => "odt",
+            Format::Pdb => "pdb",
+            Format::Azw4 => "azw4",
+            Format::Cb7 => "cb7",
+            Format::Cbr => "cbr",
+            Format::Cbt => "cbt",
+            Format::Djvu => "djvu",
+            Format::Htmlz => "htmlz",
         }
     }
 
@@ -130,6 +167,20 @@ impl Format {
             Format::Rtf => "application/rtf",
             Format::Chm => "application/vnd.ms-htmlhelp",
             Format::Mobi => "application/x-mobipocket-ebook",
+            Format::Pdf => "application/pdf",
+            Format::Docx => {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
+            Format::Odt => "application/vnd.oasis.opendocument.text",
+            Format::Pdb => "application/vnd.palm",
+            // AZW4 在系统分享面板里仍是 Kindle 那一族；它不是 PDF 文件本身。
+            Format::Azw4 => "application/x-mobipocket-ebook",
+            Format::Cb7 => "application/x-7z-compressed",
+            Format::Cbr => "application/vnd.comicbook-rar",
+            Format::Cbt => "application/vnd.comicbook+tar",
+            // IANA 注册的是 image/vnd.djvu；`image/x-djvu` 是历史别名，不另报。
+            Format::Djvu => "image/vnd.djvu",
+            Format::Htmlz => "application/zip",
         }
     }
 
@@ -144,6 +195,16 @@ impl Format {
             "rtf" => Some(Format::Rtf),
             "chm" => Some(Format::Chm),
             "mobi" => Some(Format::Mobi),
+            "pdf" => Some(Format::Pdf),
+            "docx" => Some(Format::Docx),
+            "odt" => Some(Format::Odt),
+            "pdb" => Some(Format::Pdb),
+            "azw4" => Some(Format::Azw4),
+            "cb7" => Some(Format::Cb7),
+            "cbr" => Some(Format::Cbr),
+            "cbt" => Some(Format::Cbt),
+            "djvu" => Some(Format::Djvu),
+            "htmlz" => Some(Format::Htmlz),
             _ => None,
         }
     }
@@ -206,7 +267,8 @@ pub const INDEX_VERSION: i64 = 8;
 /// 怎么取，这一格不必动。
 pub fn rules_hash(format: Format) -> Option<String> {
     match format {
-        Format::Text => Some(
+        // PalmDoc 的正文是纯文本，分章与书目同样交给那张规则表。
+        Format::Text | Format::Pdb => Some(
             novel::rules::CompiledRules::builtin()
                 .content_hash()
                 .to_string(),
@@ -548,7 +610,7 @@ pub fn locator_for(format: Format, chapter: &Chapter, index: usize) -> ChapterLo
         return at.clone();
     }
     match format {
-        Format::Epub | Format::Chm if !chapter.spine_href.is_empty() => {
+        Format::Epub | Format::Chm | Format::Htmlz if !chapter.spine_href.is_empty() => {
             ChapterLocator::Entry(chapter.spine_href.clone())
         }
         Format::Text
@@ -556,8 +618,11 @@ pub fn locator_for(format: Format, chapter: &Chapter, index: usize) -> ChapterLo
         | Format::Html
         | Format::Fb2
         | Format::Rtf
-        | Format::Mobi => ChapterLocator::Section(index),
-        // 没有可寻址的位置（EPUB 少了 href、将来的格式、测试替身）：只能说正文在手上。
+        | Format::Mobi
+        | Format::Docx
+        | Format::Odt
+        | Format::Pdb => ChapterLocator::Section(index),
+        // 没有可寻址的位置（EPUB 少了 href、定版式那几族、测试替身）：只能说正文在手上。
         _ => ChapterLocator::Inline(chapter.source().to_string()),
     }
 }

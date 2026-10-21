@@ -190,3 +190,54 @@ fn the_fixed_family_hands_pages_not_chapters() {
         assert!(page.image_href().is_some(), "CBZ 的页都是图源");
     }
 }
+
+/// 定版式这一族的第二个成员：PDF 的一页**不是容器里的一条图**，而是「要算出来的一张图」。
+///
+/// 这一条钉的是那一刀切在哪个位置：`PageSource::Render` 没有 `href`，所以它不该出现在
+/// 图片表里（进了库就是图片查看器中一张永远点不开的图），而它的字节只能问
+/// [`DocumentProvider::render_page`]。契约测试跑真 provider 而不是构造 `FixedPage`，
+/// 要钉住的正是「provider 有没有真的按这个形状交出来」。
+///
+/// 样本是 `tests/fixtures/oss/pdf/three-pages.pdf`（形状由 poppler 独立验过，来源说明在
+/// 那个目录的 `README.md`）。
+#[test]
+fn the_rendered_member_of_the_fixed_family_has_no_hrefs() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let provider = provider_for(&path).expect("PDF 该有 provider");
+    assert_eq!(provider.format(), Format::Pdf);
+    let (_, content) = provider
+        .read(&path)
+        .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+    let Content::Fixed(fixed) = content else {
+        panic!("PDF 该读成定版式");
+    };
+    assert_eq!(fixed.page_count(), 3, "pdfinfo 说 3 页");
+    for (index, page) in fixed.pages.iter().enumerate() {
+        assert!(
+            page.image_href().is_none(),
+            "渲染型的一页没有容器路径，第 {index} 页却有"
+        );
+        assert!(
+            matches!(page.source, crate::content::format::PageSource::Render { index: at } if at as usize == index),
+            "第 {index} 页的落点该是自己的页号"
+        );
+    }
+    assert!(
+        fixed.images.is_empty(),
+        "渲染型的页不许进图片表：{:?}",
+        fixed.images.iter().map(|i| &i.href).collect::<Vec<_>>()
+    );
+    // 字节问得到，只是要现算。
+    let png = provider
+        .render_page(&path, 0, 512)
+        .expect("第 1 页该画得出来");
+    assert!(png.starts_with(b"\x89PNG"), "交回的该是 PNG");
+    // 而它压根没有「正文」这一问：定版式不进排版引擎。
+    assert!(
+        provider
+            .chapter_source(&path, &crate::content::format::ChapterLocator::Section(0))
+            .is_err(),
+        "PDF 没有章，第 0 章这一问该说不"
+    );
+}

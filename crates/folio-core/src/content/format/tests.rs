@@ -221,15 +221,67 @@ fn every_format_reports_a_book_media_type() {
         Format::Rtf,
         Format::Chm,
         Format::Mobi,
+        Format::Pdf,
+        Format::Docx,
+        Format::Odt,
+        Format::Pdb,
+        Format::Azw4,
+        Format::Cb7,
+        Format::Cbr,
+        Format::Cbt,
+        Format::Djvu,
+        Format::Htmlz,
     ] {
         let mime = format.mime();
         let (top, sub) = mime
             .split_once('/')
             .unwrap_or_else(|| panic!("{format:?} 报的不是 type/subtype：{mime:?}"));
         assert!(!top.is_empty() && !sub.is_empty(), "{format:?} → {mime:?}");
-        assert_ne!(top, "image", "{format:?} 不能报成图片：{mime:?}");
+        // DjVu 的注册类型本身就是 `image/vnd.djvu`；其余书格式不能报成图片，
+        // 否则分享面板会把它交给相册。
+        if format != Format::Djvu {
+            assert_ne!(top, "image", "{format:?} 不能报成图片：{mime:?}");
+        }
     }
     // 两条抽出来钉死：EPUB 是 IANA 注册过的那个，MOBI 是各家文件管理器都在认的那个。
     assert_eq!(Format::Epub.mime(), "application/epub+zip");
     assert_eq!(Format::Mobi.mime(), "application/x-mobipocket-ebook");
+}
+
+/// `copy_extension` 必须落到 provider 注册表真正认的那个扩展名：
+/// 副本按它命名，下一次按扩展名打开时认不出来就是「导进去一本、再也打不开」。
+#[test]
+fn every_format_copies_under_an_extension_its_provider_claims() {
+    for format in [
+        Format::Markdown,
+        Format::Text,
+        Format::Epub,
+        Format::Fb2,
+        Format::Html,
+        Format::Cbz,
+        Format::Rtf,
+        Format::Chm,
+        Format::Mobi,
+        Format::Pdf,
+        Format::Docx,
+        Format::Odt,
+        Format::Pdb,
+        Format::Azw4,
+        Format::Cb7,
+        Format::Cbr,
+        Format::Cbt,
+        Format::Djvu,
+        Format::Htmlz,
+    ] {
+        let ext = format.copy_extension();
+        let path = std::path::Path::new("probe").with_extension(ext);
+        let provider = crate::content::format::provider_for(&path)
+            .unwrap_or_else(|| panic!("{format:?} 的副本扩展名 .{ext} 没有 provider 认领"));
+        assert_eq!(
+            provider.format(),
+            format,
+            "{format:?} 的副本被认成了别的格式"
+        );
+        assert_eq!(Format::parse(format.as_str()), Some(format));
+    }
 }
