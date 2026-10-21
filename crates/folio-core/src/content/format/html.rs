@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
-    extension_of, image_dims, media_type_of, percent_decode, stem_of,
+    absolutize_css_urls, asset_href, dir_of, extension_of, image_dims, media_type_of, stem_of,
 };
 use crate::Result;
-use crate::content::dom::{Dom, NodeId, NodeKind};
+use crate::content::dom::{Dom, NodeId};
 
 pub struct HtmlAdapter;
 
@@ -96,7 +96,10 @@ fn file_dir(path: &Path) -> PathBuf {
 }
 
 /// `<title>` 优先，退到第一个非空 `<h1>`；都没有就交给调用方用文件名。
-fn document_title(raw: &str) -> Option<String> {
+///
+/// 不只单文件 `.html` 用它：PalmDOC 那一族里正文写着标记的那些本子（`format::pdb`）也问
+/// 同一个问题，两份实现在「`<title>` 与 `<h1>` 谁算书名」上迟早会分叉。
+pub(crate) fn document_title(raw: &str) -> Option<String> {
     let dom = Dom::parse(raw.as_bytes());
     let mut fallback = None;
     for (id, _) in dom.elements() {
@@ -119,7 +122,23 @@ fn document_title(raw: &str) -> Option<String> {
     fallback
 }
 
-/// `<style>` 文本拼成作者样式；`<img src>` 解析成图片元数据。
+/// 一条作者写下的引用**够不够得着**：绝对路径、UNC、带盘符的一律不收。
+///
+/// 单文件 HTML 的「容器」就是磁盘上那一个目录，而 `Path::join` 有个众所周知的性质：
+/// 右侧是绝对路径（`/etc/passwd`）或带盘符（`C:/Windows/win.ini`）时**整个赢**，
+/// join 出来的早不在书那个目录里。所以书里一句 `<link rel="stylesheet" href="/etc/hostname">`
+/// 不该让阅读器把宿主的内容当样式表读进去，`<img src="/…">` 同理。
+/// `..` 有意留着：把 CSS 放在书的隔壁目录（`../css/a.css`）是手工转出来的单文件书的
+/// 合法形状，而它仍落在「这本书附近」这条线上 —— 越界的是绝对形式，不是相对形式。
+/// 这与 `format::comic_cache` 那条「解压只写书目录内、拒绝绝对路径与盘符」是同一口径的两半。
+fn reachable_from_the_book(href: &str) -> bool {
+    let bytes = href.as_bytes();
+    let drive_letter =
+        bytes.first().is_some_and(|c| c.is_ascii_alphabetic()) && href.get(1..2) == Some(":");
+    !(href.starts_with('/') || href.starts_with('\\') || drive_letter)
+}
+
+/// `<style>` 文本 + `<link rel=stylesheet>` 拼成作者样式；`<img src>` 解析成图片元数据。
 ///
 /// 图片要读磁盘拿固有尺寸，读不到的（路径错、格式不认）就**不登记**：登记成 0×0
 /// 会让排版按容器宽度硬拉，反而把版面撑坏。
@@ -137,12 +156,42 @@ fn styles_and_images(raw: &str, path: &Path) -> (String, Vec<ImageRes>) {
                     css.push('\n');
                 }
             }
+            // 外链样式表。这一族从前只认内联 `<style>`，「手工转出来的 book.html + css/
+            // 那一堆」整包样式看不见 —— 与 CHM 那个入口缺口是同一条判据，所以「算不算
+            // 样式表」共用 [`crate::content::scan::is_stylesheet_rel`] 那一份（CHM 不建
+            // DOM、走标记扫描，两边判据不许长得不一样）。
+            //
+            // 取不到就跳过这一份：少一份样式正文照排，与图片缺失同一立场；塞一条空规则
+            // 才是难查的那种错。
+            Some("link") => {
+                if !crate::content::scan::is_stylesheet_rel(dom.attr(id, "rel").unwrap_or_default())
+                {
+                    continue;
+                }
+                let Some(href) = dom.attr(id, "href").map(asset_href) else {
+                    continue;
+                };
+                if href.is_empty() || !reachable_from_the_book(&href) {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(dir.join(&href)) else {
+                    continue;
+                };
+                // 每一**份**外链在它自己的目录里：`css/a.css` 写 `url(../img/x.png)`
+                // 指的是 html 隔壁那个 `img/`，按 html 的目录折就折错了。内联那块不必折
+                // —— 它的基准本来就是这一份 html 的目录，而图片登记也按那一个目录 join。
+                css.push_str(&absolutize_css_urls(&text, &dir_of(&href)));
+                css.push('\n');
+            }
             Some("img") => {
                 let Some(src) = dom.attr(id, "src") else {
                     continue;
                 };
-                let href = image_href(src);
-                if href.is_empty() || images.iter().any(|i| i.href == href) {
+                let href = asset_href(src);
+                if href.is_empty()
+                    || !reachable_from_the_book(&href)
+                    || images.iter().any(|i| i.href == href)
+                {
                     continue;
                 }
                 let Ok(bytes) = std::fs::read(dir.join(&href)) else {
@@ -166,30 +215,10 @@ fn styles_and_images(raw: &str, path: &Path) -> (String, Vec<ImageRes>) {
 
 /// 该元素子树里的**原始**文本，不跳过 `title` / `style` / `script`。
 ///
-/// [`Dom::text_of_subtree`] 是给锚点坐标系用的，它故意剔掉这些「非内容」元素；
-/// 而这里要的恰恰是它们（书名、样式表），所以自己走一遍。
+/// 走 [`Dom::raw_text_of_subtree`]：[`Dom::text_of_subtree`] 是给锚点坐标系用的，它故意
+/// 剔掉这些「非内容」元素；而这里要的恰恰是它们（书名、样式表）。
 fn raw_text(dom: &Dom, root: NodeId) -> String {
-    let mut out = String::new();
-    let mut stack = vec![root];
-    while let Some(id) = stack.pop() {
-        let node = dom.get(id);
-        if node.kind == NodeKind::Text {
-            out.push_str(&node.text);
-        }
-        stack.extend(node.children.iter().rev().copied());
-    }
-    out
-}
-
-/// `src` → 磁盘相对路径：去掉 query / fragment，百分号解码，其余原样（含 `..`）。
-/// `data:` 与绝对 URL 一律空串 —— 前者不是文件，后者不该由单文件适配器去取。
-fn image_href(src: &str) -> String {
-    let src = src.trim();
-    if src.is_empty() || src.starts_with("data:") || src.contains("://") {
-        return String::new();
-    }
-    let cut = src.split(['?', '#']).next().unwrap_or(src);
-    percent_decode(cut)
+    dom.raw_text_of_subtree(root)
 }
 
 #[cfg(test)]
@@ -333,5 +362,71 @@ mod tests {
             "百分号解码后才是磁盘上的名字"
         );
         assert!(HtmlAdapter.image_bytes(&path, "a b.png").is_some());
+    }
+
+    /// 单文件 HTML 认 `<link rel="stylesheet">`。从前这里只认内联 `<style>`，
+    /// 「book.html + 旁边那个 css/」这种手工转出来的书**整包样式看不见** ——
+    /// 屏上不显示异常，`css-gap` 那张表也不算落差，因为压根没有声明进过层叠。
+    ///
+    /// 两条一起钉：`rel="icon"` 是诱饵（按 rel 的令牌列表它不是样式表），
+    /// 而 href 里的 `%20` 必须解得开（真书名里有空格是常态）。
+    #[test]
+    fn a_linked_stylesheet_comes_in_while_the_icon_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("css")).unwrap();
+        write(
+            dir.path(),
+            "css/a b.css",
+            b"p { text-indent: 2em } h1 { font-weight: 900 }",
+        );
+        write(dir.path(), "css/icon-only.css", b"p { color: #ff0000 }");
+        let book = write(
+            dir.path(),
+            "book.html",
+            r#"<html><head><link rel="stylesheet" href="css/a%20b.css">
+               <link rel="icon" href="css/icon-only.css"></head>
+               <body><p>文</p></body></html>"#
+                .as_bytes(),
+        );
+        let (_, flow) = flow_of(&book);
+        assert!(
+            flow.css.contains("text-indent: 2em"),
+            "带空格的 href 要解得开：{}",
+            flow.css
+        );
+        assert!(
+            !flow.css.contains("#ff0000"),
+            "rel=\"icon\" 不是样式表：{}",
+            flow.css
+        );
+    }
+
+    /// 绝对路径与带盘符的引用**不碰磁盘**。
+    ///
+    /// 这条不是洁癖：`Path::join` 在右侧是绝对路径时整个赢，所以书里一句
+    /// `<link rel="stylesheet" href="/etc/hostname">` 就会让阅读器把宿主上任意一个文本
+    /// 文件当作者样式读进层叠。判据写在 [`reachable_from_the_book`]，与
+    /// `format::comic_cache` 那条「解压只写书目录内、拒绝绝对路径与盘符」同一口径。
+    #[test]
+    fn an_absolute_reference_never_reaches_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = write(dir.path(), "outside.css", b"p { color: #112233 }");
+        let href = outside.to_str().expect("tempdir 路径是 UTF-8").to_string();
+        let html = format!(
+            "<html><head><link rel=\"stylesheet\" href=\"{href}\"></head>\
+             <body><img src=\"{href}\"><p>文</p></body></html>"
+        );
+        let book = write(dir.path(), "book.html", html.as_bytes());
+        let (_, flow) = flow_of(&book);
+        assert!(
+            !flow.css.contains("112233"),
+            "绝对路径那条 link 不该被读进来：{}",
+            flow.css
+        );
+        assert!(
+            flow.images.is_empty(),
+            "绝对路径的 img 不该登记：{:?}",
+            flow.images
+        );
     }
 }

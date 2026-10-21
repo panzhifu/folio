@@ -117,6 +117,28 @@ impl Dom {
         out
     }
 
+    /// 同样是子树文本，但**不**跳过 `title` / `style` / `head` / `script`。
+    ///
+    /// 要的是「这些元素的字本身」那几处：书名取自 `<title>`、样式表取自 `<style>`、
+    /// 书目块里的 `<dc:title>` 在 HTML 解析后与 `<title>` 同名同形（html5ever 把
+    /// `<dc:Title>` 记成本地名 `dc:title`，而裸 `<title>` 恰好在同一份文档里是空的）。
+    /// [`text_of_subtree`] 是为锚点坐标服务的，它必须跳；这一条不是。
+    pub fn raw_text_of_subtree(&self, root: NodeId) -> String {
+        let mut out = String::new();
+        self.collect_raw_text(root, &mut out);
+        out
+    }
+
+    fn collect_raw_text(&self, id: NodeId, out: &mut String) {
+        let node = self.get(id);
+        if node.kind == NodeKind::Text {
+            out.push_str(&node.text);
+        }
+        for child in node.children.clone() {
+            self.collect_raw_text(child, out);
+        }
+    }
+
     fn is_non_content_element(&self, node: &Node) -> bool {
         if node.kind != NodeKind::Element {
             return false;

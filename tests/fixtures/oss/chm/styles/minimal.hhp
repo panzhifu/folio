@@ -1,0 +1,18 @@
+[OPTIONS]
+Compatibility=1.1 or later
+Compiled file=chm-with-css.chm
+Contents file=toc.hhc
+Default topic=index.htm
+Display of Online Sources=No
+HTML Help Workshop version=4.53
+Language=0x804
+Plat=Win32
+Compression=yes
+Binary TOC=yes
+Title=带样式的中文书
+[FILES]
+c2.htm
+css/theme.css
+c1.htm
+img/fig.png
+index.htm

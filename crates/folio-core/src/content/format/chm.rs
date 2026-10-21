@@ -17,6 +17,11 @@
 //! CHM 目录里的条目名一律**带**，而 hhc 的 `Local` 偶尔写反斜杠 —— 这三个形状在
 //! [`lookup_names`] 一处统一完，别处不再各写一遍。
 //!
+//! **四、样式。** CHM 没有 OPF/manifest，作者样式躺在页里：要么内联在每页 `<head>` 的
+//! `<style>` 里，要么用 `<link rel=stylesheet>` 指一份兄弟条目。所以「这本书有没有样式」
+//! 只有读过页才知道，而读那一趟本来就要为字数解码每一页（见 [`crate::content::scan`]）——
+//! 顺手抽出是零代价。拼接走 [`author_css`]，位置清单给不出来，落库走 `CssStored::Inline`。
+//!
 //! ## 一期的四条已知局限
 //!
 //! - **层级**：`Binary TOC=yes` 编出来的书只有 `#TOCIDX`（二进制目录流），没有可读的
@@ -27,7 +32,7 @@
 //! - **并行**：`index()` 是单线程顺序读全本。EPUB 那一族按条目并行的做法在这里同样
 //!   可行（LZX 的状态跨块，所以并行度受复位窗口牵制），一期不做。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use encoding_rs::Encoding;
@@ -38,8 +43,9 @@ use quick_xml::events::{BytesStart, Event};
 use super::cbz::natural_cmp;
 use super::charset;
 use super::{
-    Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes, TocEntry, dir_of,
-    extension_of, image_dims, media_type_of, resolve_href, stem_of,
+    Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes, TocEntry,
+    absolutize_css_urls, asset_href, dir_of, extension_of, image_dims, media_type_of, resolve_href,
+    stem_of,
 };
 use crate::Result;
 
@@ -113,6 +119,10 @@ impl DocumentProvider for ChmAdapter {
         }
 
         let items = chapter_order(&mut chm, &listing);
+        // 作者样式：按**章序**把每一页的内联 `<style>` 与 `<link rel=stylesheet>` 拼一份。
+        // CHM 没有 OPF/manifest，样式表藏在页里，所以这一步只能在读完页之后做 ——
+        // 读的字节与解码那趟已经跑过（上面那个循环），这里只回容器多取几份 CSS 文件。
+        let css = author_css(&mut chm, path, &items, &scans);
         let chapters: Vec<Chapter> = items
             .iter()
             .map(|topic| {
@@ -152,7 +162,7 @@ impl DocumentProvider for ChmAdapter {
         };
         let flow = FlowDoc {
             chapters,
-            css: String::new(),
+            css,
             css_hrefs: Vec::new(),
             toc,
             // 翻页方向只有 EPUB 的 spine 那一格读得出来，其余格式按左翻。
@@ -330,6 +340,79 @@ pub(crate) fn lookup_names(name: &str) -> [String; 4] {
 /// 两边形状不一致的话，`<img src>` 的解析结果查不到图片表里那一格。
 fn ours(directory_name: &str) -> String {
     directory_name.trim_start_matches('/').replace('\\', "/")
+}
+
+/// CHM 的作者样式：按**章序**把每一页里的内联 `<style>` 与 `<link rel=stylesheet>` 拼成一份。
+///
+/// CHM 没有 OPF/manifest —— 样式表藏在页里，所以「这本书有没有作者样式」只有读过页才知道。
+/// 从前这一格写的是 `String::new()`，于是整条链路（`Document::stylesheet` → `RuleSet::parse`
+/// → `cascade`）对着零份样式跑，屏上任何差都不可能出现，而报表上也不会留痕迹。
+///
+/// 三件事各有一条门盯着（见本文件 `tests` 里那组），因为它们对应三种不同的错法：
+///
+/// - **顺序是章序**（`items`），不是容器的存放序（上面那趟 `listing` 用的那个）。样式表的
+///   先后就是层叠的先后，`RuleSet::extend` 靠 `order` 决胜。样本 `chm-with-css.chm` 的
+///   `.hhp` 故意把 `[FILES]` 排成 `c2 → css/theme.css → c1 → img/fig.png → index`，与
+///   `toc.hhc` 的章序不同：按容器序拼，末章那句 `text-indent: 0em` 会被序里那句 `2em` 盖掉。
+/// - **内联块按整块内容去重，留第一次出现**。导出工具给每一页撒同一份 CSS 是这一族的常态
+///   （样本的第一章就原样重复了序那一块），不去重就是一本书里躺着几百遍同样的规则。
+///   取舍写在这里：极端写法 `A B B A` 去重成 `A B` 会改掉「同名属性谁最后赢」；那种写法
+///   在实测样本里没见过，而它换回来的是一本书不再装几百份同样的字节。
+/// - **外链只取一次**（按解析后的容器路径去重），取不到就跳过并留一句 warn：少一份样式
+///   正文照排，与图片缺失、`Document::stylesheet` 取不到容器同一个立场。
+///
+/// `url(...)` 在拼接前按**各自**的目录绝对化：内联那一块基准是它所在那一页的目录，外链那份
+/// CSS 基准是它自己的目录 —— 拼完就再也不知道某条 `url()` 原本写在哪一层（与 EPUB 同一条
+/// 理由，见 [`super::absolutize_css_urls`]）。样本里 `css/theme.css` 写的是 `../img/fig.png`，
+/// 折错一层就变成 `css/img/fig.png`。
+///
+/// **落库的形状与 EPUB 不同，是有意为之**：EPUB 有 manifest，位置清单（`css_hrefs`）就够，
+/// 开书时按清单回容器现取；CHM 的位置就藏在页里，回取等于把整本 LZX 再放一遍。所以这里
+/// 交出的文本走 `CssStored::Inline` 那一格（`store::content` 在 `css_hrefs` 为空时就是它）。
+/// 后果要说清：**已经导入过的 CHM 拿不到这一份样式**，要等重扫 —— 这一格跟着
+/// `INDEX_VERSION` 那一版走，判据见 `content::format` 的文档。
+fn author_css(
+    chm: &mut Chm,
+    book: &Path,
+    items: &[Topic],
+    scans: &HashMap<String, Option<crate::content::scan::ChapterSummary>>,
+) -> String {
+    let mut out = String::new();
+    let mut seen_blocks: HashSet<String> = HashSet::new();
+    let mut seen_files: HashSet<String> = HashSet::new();
+    for topic in items {
+        let Some(Some(summary)) = scans.get(&topic.href) else {
+            // 这一章没扫过（不是 html，或那一趟读挂了）：它带没带样式都无从知道，跳过。
+            continue;
+        };
+        let base = dir_of(&topic.href);
+        for block in &summary.styles {
+            if !seen_blocks.insert(block.clone()) {
+                continue;
+            }
+            out.push_str(&absolutize_css_urls(block, &base));
+            out.push('\n');
+        }
+        for href in &summary.stylesheets {
+            // `asset_href` 把空值、`data:` 与带协议的外链一律折成空串：一期不取外部资源，
+            // 也不假装取过。判据与 `html` / `htmlz` 同一份。
+            let cleaned = asset_href(href);
+            if cleaned.is_empty() {
+                continue;
+            }
+            let path = resolve_href(&base, &cleaned);
+            if !seen_files.insert(path.clone()) {
+                continue;
+            }
+            let Some(text) = chm.text_of(&path) else {
+                tracing::warn!("chm: {} 里 {path} 取不到（{href} 指向它）", book.display());
+                continue;
+            };
+            out.push_str(&absolutize_css_urls(&text, &dir_of(&path)));
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// 章表：`.hhc` 清单优先，退化成「容器里的 html 按自然序」。
@@ -576,6 +659,95 @@ mod tests {
         // 一期没有封面这个概念：如实留空，界面走无封面那一档。
         assert!(flow.cover.is_none());
         assert_eq!(flow.toc.len(), 3);
+    }
+
+    /// CHM 的作者样式：页里藏的 `<style>` 与 `<link rel=stylesheet>` 抽成一份 CSS，
+    /// 而**层叠出来的结果**按章序定赢家。
+    ///
+    /// 这一本的每一格都是为一条具体的错法摆的：
+    ///
+    /// - 序要 `text-indent: 2em`、末章要 `3em`，而 `.hhp` 把 `c2.htm` 排在容器第一个 ——
+    ///   按容器序拼就赢错一章（48px 变 32px），而两份文本都在、看不出少东西。
+    /// - 第一章原样重复序那块内联、并把同一份 `css/theme.css` 再链一次 —— 不去重就是两遍。
+    /// - `theme.css` 里写 `h1 { font-weight: 900 }` 而不是 700：UA 那一份已经给 `<h1>` 写了
+    ///   700，写 700 的门分不清「外链那份进了层叠」与「只有 UA 在起作用」。
+    /// - `url(../img/fig.png)` 要按**那份 CSS 自己的目录**折成 `img/fig.png`。
+    /// - 序里那条 `rel="icon"` 是诱饵：按 rel 的令牌列表它不是样式表，真去读 `img/fig.png`
+    ///   就当 CSS 解析出一堆拼不出规则的块（下面 `rules.ignored` 那一条盯着）。
+    #[test]
+    fn the_styles_hidden_in_the_pages_come_out_in_chapter_order() {
+        use crate::content::dom::Dom;
+        use crate::content::format::css::computed::{Color, ComputedStyle, Length, cascade};
+        use crate::content::format::css::{Origin, RuleSet};
+
+        let (meta, flow) = flow_of(&fixture("chm-with-css.chm"));
+        assert_eq!(meta.title, "带样式的中文书");
+        assert_eq!(flow.chapters.len(), 3, "章表来自 hhc");
+        assert!(
+            flow.css_hrefs.is_empty(),
+            "CHM 给不出按路径回取的清单，走内联那一格"
+        );
+
+        // 文本层：去重两条 + url 折对一层。
+        assert_eq!(
+            flow.css.matches("2em").count(),
+            1,
+            "序与第一章带的是同一块内联，只该出现一次：{}",
+            flow.css
+        );
+        assert_eq!(
+            flow.css.matches("font-weight: 900").count(),
+            1,
+            "同一份外链被两页各链一次，只该取一次"
+        );
+        assert!(
+            flow.css.contains("url(\"img/fig.png\")"),
+            "url 要按 theme.css 自己的目录折：{}",
+            flow.css
+        );
+        assert!(
+            !flow.css.contains("css/img/fig.png"),
+            "多折一层就指到 css/ 底下去了"
+        );
+
+        // 结构层：四块规则（序的内联、theme.css 的两条、末章的内联），一条都没丢。
+        let rules = RuleSet::parse(&flow.css, Origin::Author);
+        assert_eq!(rules.rules.len(), 4, "该拼出四条规则：{}", flow.css);
+        assert_eq!(rules.ignored, 0, "没有一条声明拼不出来：{}", flow.css);
+
+        // 层叠层：按章序拼才有末章赢 —— 这一条是「顺序」唯一的证据。
+        let dom = Dom::parse("<body><h1>题</h1><p>文</p></body>".as_bytes());
+        let styled = cascade(&dom, &rules, &ComputedStyle::default());
+        let find = |want: &str| {
+            dom.elements()
+                .find(|(id, _)| dom.tag_name(*id) == Some(want))
+                .map(|(id, _)| id)
+                .unwrap_or_else(|| panic!("文档里应有 <{want}>"))
+        };
+        let p = styled.get(find("p")).unwrap();
+        assert_eq!(p.text_indent, Length::Px(48.0), "末章的 3em 要赢序里的 2em");
+        assert_eq!(p.color, Some(Color(0x12, 0x34, 0x56)));
+        assert_eq!(
+            styled.get(find("h1")).unwrap().font_weight,
+            900,
+            "外链那份 CSS 真的进了层叠"
+        );
+    }
+
+    /// 没有样式的两本老样本照旧**是空的**：这一刀不许凭空造出 CSS 来。
+    ///
+    /// 有这一条才分得清「抽到了」与「拼接出点噪声」—— 后者在屏上什么也不动，
+    /// 却会让 `css-gap` 那张表凭空多几行。
+    #[test]
+    fn a_chm_without_any_style_stays_without_any() {
+        for name in ["minimal-zh-utf8.chm", "minimal-zh-gbk.chm"] {
+            let (_, flow) = flow_of(&fixture(name));
+            assert!(
+                flow.css.trim().is_empty(),
+                "{name} 里没有 <style> 也没有 <link>，拼出来的该是空：{}",
+                flow.css
+            );
+        }
     }
 
     /// **这一条钉住整个格式最大的一坑**：GBK 那本的正文与标题必须与 UTF-8 那本

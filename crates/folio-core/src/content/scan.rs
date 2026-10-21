@@ -1,4 +1,5 @@
-//! 一遍标记扫描就得出章节摘要：可见字数 + 第一个标题的文本 + 文档序的图片引用。
+//! 一遍标记扫描就得出章节摘要：可见字数 + 第一个标题的文本 + 文档序的图片引用，
+//! 外加文档序的作者样式（内联 `<style>` 与 `<link rel=stylesheet>`）。
 //!
 //! 存在的理由是导入的账。给一本书每章算 `char_len`（全局字符进度那根尺的分母）和标题
 //! 回落，走 `Dom::parse` 要建节点表、父子表，还要 `assign_paths()` 给**每个节点**拼一条
@@ -41,7 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::format::css::ua;
 
-/// 一章扫出来的三样东西。
+/// 一章扫出来的几样东西。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChapterSummary {
     /// 与 `anchor::TextMap` 同口径的可见字符数。
@@ -50,6 +51,37 @@ pub struct ChapterSummary {
     pub heading: Option<String>,
     /// 文档序的每一处图片引用，带着它前面的可见字符数。见 [`ImageUse`]。
     pub images: Vec<ImageUse>,
+    /// 文档序的每一块内联 `<style>` 文本（**原样**，含注释与前后空白）。
+    ///
+    /// 存在的理由与 [`ImageUse`] 同一件事：CHM 没有 OPF，作者样式要么内联在每一页的
+    /// `<head>` 里，要么用 `<link>` 指一页兄弟文件，而这两样都要**读过那一页**才知道。
+    /// 导入那一趟本来就要逐章跑这里（数字数与图清单），顺路收走是一趟扫描的价钱；
+    /// 单开一趟 `Dom::parse` 实测 **4.1 ms / 章**（《哈利·波特》301 章、8.6 MB；
+    /// 同一批走本扫描是 2.1 ms / 章），对 CHM 那种「整本都得 LZX 重放」的容器是白加的一倍。
+    ///
+    /// 这段文本不进 `visible_chars`：DOM 把 RCDATA 归 `<style>` 自己，两边同口径，
+    /// 对拍那一组盯着这件事。
+    pub styles: Vec<String>,
+    /// 文档序的每一个 `<link rel="stylesheet">` 的 href，**未解析**的原样引用。
+    ///
+    /// 与 [`ImageUse::src`] 同一个立场：扫描器不认容器，所以清洗（去 query / fragment、
+    /// 百分号解码）与按本章目录解析都留给格式层做 —— 只有「算不算样式表」这一句判据
+    /// 需要共用（[`is_stylesheet_rel`]）。
+    pub stylesheets: Vec<String>,
+}
+
+/// `<link rel="…">` 里算作者样式表的那一条判据：`rel` 按空白切词，**任一词**是
+/// `stylesheet`（大小写不敏感）。
+///
+/// 抽出来只因为这一句在两处要用：本扫描（CHM 那一族，不建 DOM）与 `format::htmlz`
+/// 的 DOM 走查。两份各写一遍迟早漂在一句 `rel="alternate stylesheet"` 或
+/// `rel="STYLESHEET"` 上，而漂的症状是「这本书的样式整包看不见」，屏上没有线索。
+///
+/// 认「任一词」而不是「整串相等」是照 HTML 的规定：`rel` 是一个**令牌列表**。
+/// 于是 `rel="icon stylesheet"` 算样式表，`rel="icon"` 不算。
+pub(crate) fn is_stylesheet_rel(rel: &str) -> bool {
+    rel.split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case("stylesheet"))
 }
 
 /// 正文里的一处图片引用：作者写下的原样 `src`，加上它在这一章里的位置。
@@ -124,6 +156,12 @@ struct Scan {
     heading_done: Cell<bool>,
     /// 文档序的图片引用（见 [`ImageUse`]）。
     uses: RefCell<Vec<ImageUse>>,
+    /// 正在收的那一块 `<style>` 的文本；`</style>` 到达时整块搬进 `styles`。
+    style_text: RefCell<String>,
+    /// 文档序的内联样式块。
+    styles: RefCell<Vec<String>>,
+    /// 文档序的 `<link rel=stylesheet>` 引用。
+    sheets: RefCell<Vec<String>>,
 }
 
 impl Default for Scan {
@@ -138,6 +176,9 @@ impl Default for Scan {
             heading_text: RefCell::new(String::new()),
             heading_done: Cell::new(false),
             uses: RefCell::new(Vec::new()),
+            style_text: RefCell::new(String::new()),
+            styles: RefCell::new(Vec::new()),
+            sheets: RefCell::new(Vec::new()),
         }
     }
 }
@@ -196,6 +237,25 @@ impl Scan {
         }
     }
 
+    /// 这一个开始标签是一次样式表引用吗？是的话交出作者写下的那一条 `href` 原样引用。
+    ///
+    /// `rel` 的判据只有 [`is_stylesheet_rel`] 那一份；`href` 为空（`<link rel=stylesheet href="">`）
+    /// 不算一次引用，与图片那一支「空值不记」同一口径。属性名按最后一个 `:` 切开再比，
+    /// 与 [`Self::picture_ref`] 同一个理由：标记这一层还没拆前缀。
+    fn stylesheet_ref(name: &str, tag: &Tag) -> Option<String> {
+        if name != "link" {
+            return None;
+        }
+        let attr = |want: &str| {
+            tag.attrs
+                .iter()
+                .find(|a| a.name.local.rsplit(':').next() == Some(want))
+                .map(|a| a.value.to_string())
+        };
+        attr("rel").filter(|rel| is_stylesheet_rel(rel))?;
+        attr("href").filter(|href| !href.trim().is_empty())
+    }
+
     /// 名单里的名字取成 `'static` 的那一份，栈里存它就一次分配都没有。
     fn known(list: &[&'static str], name: &str) -> Option<&'static str> {
         list.iter().copied().find(|known| *known == name)
@@ -240,6 +300,15 @@ impl Scan {
                     }
                 }
                 self.open_heading(name);
+                // 开一块新的 `<style>`：把残留清掉，免得上一块没闭合的字串进这一块。
+                if name == "style" {
+                    self.style_text.borrow_mut().clear();
+                }
+            }
+            // 样式表引用：`<link>` 是空元素、不进跳过栈，也不问正文根 —— 它写在 `<head>`
+            // 里是常态，而样式本来就不占正文坐标系的一格。
+            if let Some(href) = Self::stylesheet_ref(name, tag) {
+                self.sheets.borrow_mut().push(href);
             }
         } else {
             if Self::known(FOREIGN_TAGS, name).is_some() {
@@ -248,6 +317,14 @@ impl Scan {
             // `</body>` 什么都不做：它不把 body 弹出打开栈，之后的文本仍归第一个 body。
             if self.skip.borrow().last() == Some(&name) {
                 self.skip.borrow_mut().pop();
+            }
+            if name == "style" {
+                // 收完这一块。文本可能是空的（`<style></style>`），那种不进清单 ——
+                // 拼接时它一个字符都不加，留着只会让「这本书有几块内联样式」多算。
+                let text = std::mem::take(&mut *self.style_text.borrow_mut());
+                if !text.trim().is_empty() {
+                    self.styles.borrow_mut().push(text);
+                }
             }
             if self
                 .heading_tag
@@ -294,6 +371,15 @@ impl Scan {
         if text.is_empty() {
             return;
         }
+        // `<style>` 里的字符归样式表自己（DOM 那一侧是 RCDATA），所以这段既不进字数也不
+        // 开正文根 —— 但**收走必须在这里，在那两个 `return` 之前**。实测：把这一段挪到
+        // 「head 里散文本」那一支之后，`<head>` 里的样式块整块丢掉（`stray_in_head` 为假
+        // 就 return 了），只有 body 里那一块还在 —— 症状是 CHM 的书「样式表只有一半」，
+        // 而字数与进度条一点不变，屏上看着全对。
+        if self.skip.borrow().last() == Some(&"style") {
+            self.style_text.borrow_mut().push_str(text);
+            return;
+        }
         let blank = text.chars().all(char::is_whitespace);
         if self.root.get() == Root::Before {
             // `<head>` 里的散文本会让树构造当场开 body；纯空白不触发，而
@@ -330,6 +416,17 @@ impl Scan {
             visible_chars: self.chars.get(),
             heading,
             images: std::mem::take(&mut self.uses.borrow_mut()),
+            styles: {
+                // 到章末还开着的 `<style>`（作者少写了闭合标签，真实导出里见得到）：
+                // DOM 那边这段文本仍归 style 节点，所以这里也收走，不丢。
+                let last = std::mem::take(&mut *self.style_text.borrow_mut());
+                let mut blocks = std::mem::take(&mut *self.styles.borrow_mut());
+                if !last.trim().is_empty() {
+                    blocks.push(last);
+                }
+                blocks
+            },
+            stylesheets: std::mem::take(&mut self.sheets.borrow_mut()),
         }
     }
 }
@@ -916,5 +1013,81 @@ mod tests {
             against_a_book(&fixture("../../tests/fixtures/local/shejie-mauriac.epub"));
         assert_eq!(chapters, 28, "《蛇结》28 章都过了一遍对拍");
         assert!(chars > 100_000, "对拍覆盖的字数：{chars}");
+    }
+
+    // ---- 作者样式：内联 `<style>` 与 `<link rel=stylesheet>` ----
+
+    /// 内联样式块按文档序交出，而**一个字都不进字数**。
+    ///
+    /// 前半句是放置位置的闸门：capture 挪到「head 里散文本」那一支之后，`<head>` 里那块
+    /// CSS 就整个丢掉、只剩 body 那块（实测过），而字数一点不动 —— 样式少一半而进度条
+    /// 照旧，是最难查的那一类。所以后半句也要钉：字数直接对 DOM 那一侧
+    /// （[`visible_chars`]）比，不比一个我自己算出来的数。
+    #[test]
+    fn inline_style_blocks_come_back_in_document_order_without_touching_the_count() {
+        let xhtml = "<html><head><style>p { color: red }</style></head>\
+                     <body><p>甲</p><style>q { color: blue }</style><p>乙</p></body></html>";
+        let summary = chapter_summary(xhtml);
+        assert_eq!(
+            summary.styles,
+            vec![
+                "p { color: red }".to_string(),
+                "q { color: blue }".to_string()
+            ],
+            "head 与 body 里各一块，按文档序"
+        );
+        assert_eq!(summary.visible_chars, 2, "两个汉字的正文，CSS 一个都不算");
+        assert_eq!(
+            summary.visible_chars,
+            visible_chars(xhtml).expect("参照侧该解析得动"),
+            "字数与 DOM 那条逐字相同"
+        );
+
+        // 样式文本本身也与 DOM 那条同串：`raw_text_of_subtree` 取 style 子树就是它，
+        // 那正是 `format::html` 现在拿去做作者样式的同一份字节。
+        let dom = Dom::parse(xhtml.as_bytes());
+        let from_dom: Vec<String> = dom
+            .elements()
+            .filter(|(id, _)| dom.tag_name(*id) == Some("style"))
+            .map(|(id, _)| dom.raw_text_of_subtree(id))
+            .collect();
+        assert_eq!(from_dom.len(), 2, "DOM 那侧也看到两块：{from_dom:?}");
+        assert_eq!(summary.styles, from_dom, "两条路交出的是同一串字节");
+    }
+
+    /// `<link>` 只收样式表那几处，`rel` 按令牌列表认（大小写不敏感、任一词命中）。
+    ///
+    /// 空 `href` 不算一次引用，`rel` 缺位也不算 —— 与图片那一支「空值不记」同口径，
+    /// 否则会拼出一条指不到任何条目的路径。
+    #[test]
+    fn only_links_that_are_stylesheets_are_collected() {
+        let summary = chapter_summary(
+            "<head><link rel=\"icon\" href=\"f.ico\">\
+             <link rel=\"stylesheet\" href=\"a.css\">\
+             <LINK REL=\"alternate STYLESHEET\" HREF=\"b.css\"></head><body><p>甲</p></body>",
+        );
+        assert_eq!(
+            summary.stylesheets,
+            vec!["a.css", "b.css"],
+            "{:?}",
+            summary.stylesheets
+        );
+
+        let none = chapter_summary("<link rel=\"stylesheet\" href=\"\"><link href=\"c.css\">");
+        assert!(none.stylesheets.is_empty(), "{:?}", none.stylesheets);
+    }
+
+    /// 作者少写 `</style>`（导出的书里见得到）：到章末还开着的那一块照样交出去，
+    /// 而空块（`<style> </style>`）不进清单 —— 拼接时它一个字符都不加，留着只会让
+    /// 「这本书有几块内联样式」多算。
+    #[test]
+    fn an_unclosed_style_is_flushed_and_an_empty_one_is_dropped() {
+        let open = chapter_summary("<html><head><style>p{color:red}");
+        assert_eq!(open.styles, vec!["p{color:red}".to_string()]);
+        assert_eq!(open.visible_chars, 0, "这段文本始终不进字数");
+
+        let blank = chapter_summary("<style>   </style><p>甲</p>");
+        assert!(blank.styles.is_empty(), "{:?}", blank.styles);
+        assert_eq!(blank.visible_chars, 1);
     }
 }
