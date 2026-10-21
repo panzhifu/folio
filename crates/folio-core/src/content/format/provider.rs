@@ -146,6 +146,22 @@ pub trait DocumentProvider: Send + Sync {
         ))
     }
 
+    /// 只要**每一章的正文**，其余格子可以一律不算。
+    ///
+    /// 存在的理由是一条实测：`Section` 那一族（单文件容器）开书时建的整本 memo 只要
+    /// 每章的 `source()`，而它调的是 [`read`](Self::read) —— 那一趟顺手把封面整张
+    /// 解码 + 重编（MOBI 的 KF8 样本实测 29 ms，占全文那一趟的 68%）、把每张插图全读
+    /// 回来量尺寸、把 CSS 改写完、再逐章数一遍可见字。这几格 memo 一个都不看。
+    ///
+    /// 默认 `None` = 没有更便宜的路，调用方照旧退回 [`read`](Self::read)。
+    ///
+    /// **覆盖时的硬条件**：第 `i` 串必须与 `read` 那一路第 `i` 章的 `source()` **逐字节
+    /// 相同**，章数必须与 `index` 那一趟相同。这一趟丢掉的封面 / 图片 / CSS / 字数是
+    /// 「没人看」，正文不是 —— 进度、锚点、划线都建在那一串上。
+    fn read_texts(&self, _path: &Path) -> Option<Vec<String>> {
+        None
+    }
+
     /// 只读书目元信息。默认走索引 —— 它已经够便宜了。
     fn metadata(&self, path: &Path) -> Result<DocMeta> {
         self.index(path).map(|(meta, _)| meta)
@@ -165,9 +181,41 @@ pub trait DocumentProvider: Send + Sync {
         None
     }
 
+    /// 定版式里**要算出来才有字节**的那一页（`PageSource::Render`），交回 PNG。
+    ///
+    /// 默认 `None`：只有栅格化引擎在那儿的格式才有这一问。漫画（CBZ）与 EPUB 的定版式
+    /// 一页本来就是容器里的一条图，走 [`DocumentProvider::image_bytes`]。
+    ///
+    /// `edge` 是**长边上限**（像素）：由调用方定档位，provider 只管按它画。这一问的签名
+    /// 里只有尺寸没有「视口 / 缩放倍数」是有意的 —— 那一格属于界面（它在屏幕上要把这页
+    /// 摆多大），而「按多大画」是个要进缓存键的事实，两处都让界面自己说清（见
+    /// `content::format::pdf::RENDER_EDGE` 那条「改它要 bump `INDEX_VERSION`」）。
+    ///
+    /// 与取图字节同一立场：读不到是 `None` 而不是 `Err` —— 那一页空着，页的摆位不变。
+    fn render_page(&self, _path: &Path, _page: usize, _edge: u32) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// 定版式那一页的**文字层**（页内盒 + 字序）。
+    ///
+    /// 默认 `None` = 这一页没有可读的字：漫画包的一页就是一张图，EPUB 的 fixed-layout
+    /// 那一族字在 XHTML 里而不是在页上，扫描件没带 OCR。这一格与 [`Self::render_page`]
+    /// 分开问正是因为这个 —— **画得出这一页不等于读得出这一页的字**，把两者合成一问
+    /// 就会逼每个 provider 都回去翻一遍引擎，而扫描本要的恰恰是「有图没字也照样读」。
+    ///
+    /// 有字的那三族：PDF / AZW4（PalmDB 里那份 PDF）走栅格引擎的文字抽取，DjVu 走它自己
+    /// 那份隐藏文字层（OCR 产物）。
+    ///
+    /// **不入库、按页现取**：实测每页 0.3–10 ms，而一次选中只用得上看得着的那一两页；
+    /// 存起来就要为它开一列、并让引擎升版时整库重扫（理由写在 [`super::PageText`]）。
+    ///
+    /// 拿不到也是 `None` 而不是 `Err`：那一页与从前一样只是图，选不出字，页的摆位不变。
+    fn page_text(&self, _path: &Path, _page: usize) -> Option<super::PageText> {
+        None
+    }
+
     /// 容器内某个条目 → 一章的引擎就绪 XHTML。
     ///
-    /// 只对**名单式**容器（[`Format::Epub`]，将来的 zip 族）有意义：库里存了
     /// `ChapterLocator::Entry`，打开时按名字现取。默认 `None` 的格式（单文件那几个）
     /// 由 [`crate::content::document::Document::chapter_source`] 走「整本重读 + 取第 N 章」的
     /// 降级路，所以它们不必实现这一个。
@@ -222,7 +270,6 @@ pub fn provider_for(path: &Path) -> Option<Box<dyn DocumentProvider>> {
 pub fn supported_extensions() -> &'static [&'static str] {
     &[
         "epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "rtf", "cbz", "chm",
-        "mobi", "azw", "azw3", "prc",
     ]
 }
 
@@ -369,8 +416,8 @@ mod tests {
                 provider_for(Path::new(name)).unwrap_or_else(|| panic!("{name} 该有 provider"));
             assert_eq!(provider.format(), want, "{name}");
         }
-        assert!(provider_for(Path::new("a.pdf")).is_none(), "没注册就是不认");
-        assert_eq!(providers().len(), 9);
+        assert!(provider_for(Path::new("a.lit")).is_none(), "没注册就是不认");
+        assert_eq!(providers().len(), 19);
     }
 
     /// 粗筛那一道门的**名字那一半**：注册表清单里的每一个仍然过，认不出的名字不过。
@@ -385,7 +432,7 @@ mod tests {
             let probe = Path::new("/x/a").with_extension(ext);
             assert!(looks_like_a_book(&probe), "清单里的 .{ext} 该继续过筛");
         }
-        assert!(!looks_like_a_book(Path::new("/x/报告.docx")));
+        assert!(!looks_like_a_book(Path::new("/x/报告.lit")));
         assert!(!looks_like_a_book(Path::new("/x/无扩展名")));
         // 名字说了不算：这两个都是 `.zip`，一个开得出书一个开不出，
         // 而这里给的都是**读不到**的路径 —— 谈不上容器就是不过筛，不报坏包。

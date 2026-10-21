@@ -366,14 +366,14 @@ impl Store {
 
     /// [`Store::load_fixed`] 的不上锁版本；只由已经持了锁的一方调用。
     fn load_fixed_in(conn: &Connection, book_id: i64) -> Result<Option<FixedDoc>> {
-        let row: Option<(String, String)> = conn
+        let row: Option<(String, String, Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT fixed_json, toc_json FROM books WHERE id = ?1",
+                "SELECT fixed_json, toc_json, cover_hash, cover_mime FROM books WHERE id = ?1",
                 params![book_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((pages_json, toc_json)) = row else {
+        let Some((pages_json, toc_json, cover_hash, cover_mime)) = row else {
             return Ok(None);
         };
         if pages_json.trim().is_empty() {

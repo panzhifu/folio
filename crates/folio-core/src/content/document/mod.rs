@@ -52,6 +52,32 @@ pub trait Document: Send + Sync {
     /// 读不到是 `None`，不是错误 —— 那块地方空着就好。
     fn image_bytes(&self, href: &str) -> Option<Vec<u8>>;
 
+    /// 定版式里那一页**要算出来才有字节**（`PageSource::Render`）：交回 PNG。
+    ///
+    /// 与 [`image_bytes`](Document::image_bytes) 的分别是「字节在不在容器里」：漫画的一页
+    /// 是一条 zip 条目，PDF 的一页是栅格化的产物，没有 `href` 可问。所以它不进图片表
+    /// （那一列进了库只会多出一条永远取不到字节的图），界面按页表的
+    /// `PageSource::Render { index }` 来问这一句。
+    ///
+    /// `edge` 是长边上限（像素），由界面定档 —— 与 `image_bytes` 交原始字节不同，这里
+    /// 交的是**按这一档画出来的一张图**，所以画多大是这一问的一部分。
+    ///
+    /// 默认 `None`：可重排的书没有「一页」这个事实，从书库读回、没有容器的合成文档
+    /// 也拿不到字节（与图片缺失同一表现：那块地方空着）。
+    fn render_page(&self, _page: usize, _edge: u32) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// 定版式那一页的**文字层**（页内盒 + 字序）。与 [`Self::render_page`] 分开问同一条
+    /// 理由：画得出这一页不等于读得出它的字（扫描本没带 OCR、漫画包的一页就是一张图）。
+    ///
+    /// 按页现取、不入库：实测每页 0.3–10 ms，而一次选中只用得上看得着的那一两页
+    /// （理由与单位都写在 `content::format::PageText`）。默认 `None` = 这一族没有引擎
+    /// 能给的字；可重排的书也不实现它（它的字与行盒在排版结果里）。
+    fn page_text(&self, _page: usize) -> Option<crate::content::format::PageText> {
+        None
+    }
+
     /// 这本书的作者样式表（拼接后的 CSS 文本）。
     ///
     /// 索引路径下库里只有位置清单（[`crate::content::format::FlowDoc::css_hrefs`]），
@@ -96,8 +122,8 @@ pub trait Document: Send + Sync {
         None
     }
 
-    /// 填上封面描述。只有可重排那一支实现它 —— 定版式的封面是首页缩略图，
-    /// 走另一条路（`save_fixed`）。
+    /// 填上封面描述。两族都填：封面落盘写的是同一个 `covers/<哈希>.<后缀>`、
+    /// 记的是库里同两列，与「那张图是从容器抽的还是栅格化出来的」无关。
     fn set_cover_ref(&mut self, _cover: Option<crate::content::format::cover::CoverRef>) {}
 
     fn cover(&self) -> Option<&[u8]> {

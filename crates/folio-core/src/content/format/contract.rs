@@ -6,9 +6,8 @@
 //! 这条契约成为 provider 的**唯一输出约定**，界面与引擎都不再问格式。
 //!
 //! 这里用真实 provider 跑（不是构造 `Chapter`），因为要钉住的正是「provider 有没有
-//! 真的守约」。四类源都覆盖：本来就是标记的（HTML / FB2 / EPUB）、纯文本的
-//! （Markdown / TXT）、把格式指令**翻译成**标记的（RTF），以及不进引擎的定版式（CBZ）。
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::content::anchor::TextMap;
@@ -66,6 +65,7 @@ fn rtf(dir: &Path) -> PathBuf {
            \pard\fs21\'d6\'d0\'ce\'c8\par}",
     )
 }
+
 
 /// 可重排的每一种 provider：产物必须能直接进引擎。
 ///
@@ -154,6 +154,7 @@ fn the_plain_text_wrapper_preserves_visible_text() {
         );
     }
 }
+
 
 /// 定版式走另一族：产出的是页表，不是章源。它压根不该有 `Chapter`。
 #[test]

@@ -132,6 +132,7 @@ impl DocumentProvider for ChmAdapter {
                 title: topic.title.clone(),
                 href: topic.href.clone(),
                 fragment: None,
+                page: None,
                 children: Vec::new(),
             })
             .collect();

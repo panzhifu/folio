@@ -47,6 +47,7 @@ fn flow(parts: &[(&str, &str)]) -> FlowDoc {
             title: parts.first().map(|t| t.0.to_string()).unwrap_or_default(),
             href: "#0".into(),
             fragment: Some("sec1".into()),
+            page: None,
             children: Vec::new(),
         }],
         cover: Some(vec![0x89, b'P', b'N', b'G', 13, 10]),

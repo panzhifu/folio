@@ -382,8 +382,12 @@ pub fn snap_word(map: &TextMap, offset: usize) -> Range<usize> {
 }
 
 /// 与 gpui-kit `text/selection.rs` 同一套分类（词 / 空白 / 换行 / 其他）。
+///
+/// `pub(crate)` 的理由是**只有一份**：定版式那一族（PDF / DjVu 的文字层，
+/// [`crate::content::format::PageText::snap`]）要收的是同一个边 —— 中文与标点单字自为界、
+/// 拉丁连成词。两处各写一遍分类表，就会有一处的双击在中文里选中一整句、另一处只选一个字。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CharClass {
+pub(crate) enum CharClass {
     Word,
     Whitespace,
     Newline,
@@ -391,7 +395,7 @@ enum CharClass {
 }
 
 impl CharClass {
-    fn of(ch: char) -> Self {
+    pub(crate) fn of(ch: char) -> Self {
         if is_word_char(ch) {
             Self::Word
         } else if ch == '\n' || ch == '\r' {
@@ -404,7 +408,7 @@ impl CharClass {
     }
 
     /// 同类字符连成一段。换行与 CJK/标点不连。
-    fn is_connectable(self) -> bool {
+    pub(crate) fn is_connectable(self) -> bool {
         matches!(self, Self::Word | Self::Whitespace)
     }
 }

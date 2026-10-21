@@ -45,7 +45,7 @@ ureq = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util"] }
 axum = { version = "0.8", features = ["multipart"] }
 html5ever = "0.40"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
 # SVG 栅格化：SVG 封面 / 逐页 SVG 漫画 / 正文内联 `<img src="x.svg">` 都要先画成位图。
 # **`resvg` 同样不是新依赖树**：它已经在图上且本来就在编译 —— `gpui-pre → gpui-base`
 # 用它画图标（`cargo tree -i resvg@0.46.0` 可验），这里只是把图上已有的一份转成
@@ -141,20 +141,57 @@ unicode-script = "0.5"
 chardetng = "1"
 # PDF：`pdf_oxide`。这是**纯 Rust 那一族里唯一能真把页面画成位图的**（`lopdf` 只有对象模型、
 # 页树、内容流与文字抽取，画不出东西，M9 要的「栅格 + 文字层锚点 + LRU 页缓存」它只够地基）。
-# 为什么它算纯 Rust：它的 normal deps 里有 `hayro-jbig2` / `hayro-jpeg2000` / `fax`（图像
-# 过滤流）、`qcms`（ICC 色彩）、`tiny-skia`、`harfrust`、`taffy`、`fontdb`，而
-# `pdfium-render` 在它的依赖表里是 **optional** —— 不打开那条就一行 C 都不碰，
-# `cargo check` 后 `Cargo.lock` 的包名差实测 **44 个新包**（默认 feature）。临时 crate 里量到过 32 —— 那个数别用：
-# 它没算上这个工作区里 `image` / `quick-xml` / `regex` 等被重新统一 feature 后带出来的分支。`lopdf` 是 8 个，
-# 但那 8 个换不来一个渲染器。**不带 `cc`、不带 bindgen、也没有任何 `*-sys`**（锁里新条目一条都没踩到，实测）。
-# 排除掉的两条也记在这：`printpdf` 36 个包还把整个 azul GUI 栈拖进来；`extractous` 的
+# 排除掉的另三条也记在这：`printpdf` 36 个包还把整个 azul GUI 栈拖进来；`extractous` 的
 # `bzip2-sys` / `lzma-sys` 要 C；`oxpdf` 索引里 13 个版本**全部 yanked**，作者自己撤完的
 # 东西不进这个仓库。
 #
-# 两个 CJK feature（`cjk-form-fonts` / `cjk-render-fallback`）现在**先不开**：它们各自带
-# 字库进来，开与不开要在真拿一本中文 PDF 试渲染的那一笔里一起量，届时按 APK 体积算账 ——
-# 与 `regex` / `unicode-script` 一样，**这一格目前没有任何 Rust 代码在用它**。
-pdf_oxide = "0.3"
+# **`features = ["rendering"]` 不是可选项，是这一格能不能画页的那一刀**：0.3.78 的
+# `default` 只有 `["icc", "legacy-crypto"]`，而整个 `rendering` 模块（tiny-skia 那条把一页
+# 画成位图的路，`render_page_fit` 住在里面）在 `#[cfg(feature = "rendering")]` 后面 ——
+# 只写 `pdf_oxide = "0.3"` 的那几版里，`folio-core` 连这个名字都不存在，「PDF 支持」其实是
+# 零行代码。这一条被记错过一次（当时看的是它的 normal deps 表，那张表列的是**所有**可选依赖）。
+#
+# 开这一档的代价，按提交里那份 `Cargo.lock` 与开了之后的锁相减实测：**9 个新包条目** ——
+# `fast_image_resize` 6.1.0、`tiny-skia` 0.12.0 + `tiny-skia-path` 0.12.0、`fontdb` 0.24.0、
+# `harfrust` 0.13.3 + `read-fonts` 0.43.3、`hayro-jbig2` 0.3.1、`hayro-jpeg2000` 0.4.1、
+# `hayro-ccitt` 0.4.0。其中 tiny-skia / fontdb / harfrust 是**与图上已有的并存的第二个版本**
+# （0.11.4 / 0.23.0 / 0.5.2，gpui 那一支在用），feature 统一没能把它们合到同一版 —— 那就是
+# 三份编译、两份进二进制。从前记在这个位置的「44 个新包」量的是**整个 `pdf_oxide` 子树 vs
+# 完全没有它**，不是这一档的增量，别拿那个数算这一格的账。
+#
+# 仍然算纯 Rust：`pdfium-render` 只在 `table-ml` 那条 feature 后面（没开），没有 `cc`、
+# 没有 bindgen、没有任何 `*-sys`。唯一会拉进 C 的是 `icc-lcms2`（lcms2），这条也没开 ——
+# ICC 走的是默认那条 `icc-qcms`（纯 Rust）。Android 交叉编译实测过 `--lib` 那一道门。
+#
+# 两个 CJK feature（`cjk-form-fonts` / `cjk-render-fallback`）**这一轮量过了，仍然不开**。
+# 它们各自 `include_bytes!` 一份 4.03 MB 的 `DroidSansFallbackFull.ttf` 进二进制（feature
+# 本身不带任何依赖，代价全在体积与驻留上）。实测三本真中文 PDF（`简历.pdf`、`main-zh.pdf`、
+# `sample.pdf`，长边 2048 那一档）：**开与不开的输出逐字节相同** —— PNG 字节数一样、像素
+# 校验和一样，因为这三本都把自己的字型内嵌进了文件（`/Type0` 带 CIDFont），不需要替换。
+# 代价那一头是 APK +4 MB 与峰值驻留 +10 MB（45.0 MB → 54.6 MB）。它真正管的是**字型没内嵌**、
+# 靠阅读器做字体替换的那一类 PDF（Word/Pages 导出、不少扫描流水线会出这种），而这批样本里
+# 没有那种 —— 所以这一格是「量过、知道边界、暂不开」，不是「没看就不开」。撞到那种书时
+# 按 APK +4 MB 这一格重新算账。
+pdf_oxide = { version = "0.3", features = ["rendering"] }
+# CB7（7z 漫画包）：纯 Rust 的 7z 解压。CBR（RAR）这一版不接 —— rarlab 的 unrar 是 C++，
+# Android NDK 那条构建线还没验，先让 `.cbr` 在判定层得到一句「这一版还读不动」。
+# **钉 0.20 而不是 0.24**：0.20.2 的 MSRV 是 1.85，工作区是 1.90；0.24 要 1.93。
+# 默认 feature 含 `util`（解压入口）与 `compress`（测试里合成 CB7 夹具）。
+sevenz-rust2 = "0.20"
+# CBR（RAR 漫画包）：纯 Rust 的 RAR 读写实现，**不绑 C/C++**。
+#
+# 为什么不自己写：RAR4/RAR5 的正文是 LZSS + PPMd + 滤波器，外加 solid 字典、跨卷
+# 续传、CRC/BLAKE2sp 校验；手写等于重做一遍 unRAR。`rars` 是独立实现（不搬 unRAR
+# 源码），Apache-2.0，支持 RAR 1.4–7、solid/多卷、store/LZ/PPMd；0.11.0 的 MSRV 是
+# 1.89（工作区 1.90）。默认 feature 含 write/recovery/encryption/parallel，我们只用
+# 读，所以关掉默认 feature，避免把 Rayon、写归档与加密依赖带进来；加密 RAR 会明确
+# 报「这一版不支持」。
+rars = { version = "0.11", default-features = false }
+# CBT（tar 漫画包）：tar 只是顺序解包，路径校验与图片过滤沿用 comic_cache。
+tar = "0.4"
+# DjVu：纯 Rust 的 DjVu 解码/渲染（MIT，无 GPL），只开 std（默认），
+# 不带到 PDF/EPUB/CBZ 导出、OCR、并行等可选 feature。MSRV 1.88。
+djvu-rs = "0.43"
 # 纯文本小说的章标记、编号体系与书目字段别名（书名/著者/作者/by…）是一族**存在外部数据里的
 # 模式串**：规则表要能按语言换一套、要能被读者整份替换，而字符串模式只有正则引擎吃得下 ——
 # 手写扫描器等于替每条模式各写一遍解析，那些解析从此没人复核。
@@ -170,6 +207,23 @@ pdf_oxide = "0.3"
 # 图上。真省下来的不是引擎而是**用法**：规则表里每条自带匹配方式，只有声明成正则的那几条
 # 才编译，字面量那一族走 `starts_with` 或 aho-corasick 的多模式扫。
 regex = "1"
+# `.md` 正文里那些标记（`**粗**` / `- 列表` / `> 引用` / ``` 围栏 ```）要变成引擎吃得下的
+# XHTML。CommonMark 是一台状态机加一套 flanking 规则，自己写的那一份永远只覆盖**我们试过的
+# 那几本**；而这一族的坑恰恰在没试过的形状上（`这是**重要**的` 那种 CJK 两侧无空格的强调、
+# 缩进四空格的代码块、围栏里的 `#` 不算标题）。micromark 那一系按 spec 写完并带着
+# CommonMark/GFM 的合规测试跑，不必重做一遍。
+#
+# **这不是新依赖树，一条新包都不带**：锁里已有 1.0.0，`cargo tree -e normal -i markdown`
+# 回的是 `gpui-base` / `gpui-component`（folio-app 经 `gpui-kit` 在吃），而它自己的 deps
+# `serde` 与 `unicode-id` 也都在锁里 —— 实测加进 folio-core 之后 `Cargo.lock` 一条包名都没动。
+# 与上面 `flate2` / `encoding_rs` / `unicode-script` 那几条同一条理由：把图上已有的这份转成
+# folio-core 的直接依赖。版本需求写 `"1"`，与锁里那一份对齐。
+#
+# 取的是默认档（CommonMark）而不是 `Constructs::gfm()`：GFM 多出来的两样里，删除线那一族的
+# `<del>` 引擎的 UA 表已经认，表格那族的 `<table>` 还没有 —— 未认标签一律按 block 降级，
+# 格子会竖着堆成一列字块（`css::ua::is_inline_tag` 那条规则），所以先只开 `gfm_strikethrough`
+# 一条，表格留在「原样一段字」那一档，等 layout 补了行盒再开。
+markdown = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

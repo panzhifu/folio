@@ -477,6 +477,7 @@ pub(crate) fn toc_of(chapters: &[Chapter]) -> Vec<TocEntry> {
             title: chapter.title.clone(),
             href: String::new(),
             fragment: None,
+            page: None,
             children: Vec::new(),
         })
         .collect()

@@ -389,6 +389,7 @@ mod tests {
             title: title.into(),
             href: href.into(),
             fragment: None,
+            page: None,
             children,
         }
     }
@@ -398,6 +399,7 @@ mod tests {
             title: title.into(),
             href: href.into(),
             fragment: Some(fragment.into()),
+            page: None,
             children: Vec::new(),
         }
     }

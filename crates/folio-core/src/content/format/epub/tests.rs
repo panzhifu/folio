@@ -1843,22 +1843,22 @@ fn an_svg_image_reads_the_png_it_falls_back_to() {
     );
 }
 
-/// 链可以经过一份同样解不动的：SVG → TIFF（工作区没开解码器）→ PNG。
+/// 链可以经过一份同样解不动的：SVG → AVIF（工作区没开解码器）→ PNG。
 ///
 /// 钉的是「找的是链上**第一份解得动的**」而不是「只看一跳」。真书里这条两跳的链常来自
-/// 出版流水线：先给 SVG 挂一份 TIFF 当印刷源，再往下才是网页用的 PNG。
+/// 出版流水线：先给 SVG 挂一份印刷源，再往下才是网页用的 PNG。
 #[test]
 fn the_fallback_chain_walks_past_another_undecodable_item() {
     let dir = tempfile::tempdir().unwrap();
     let png = png_bytes(8, 6);
     let path = epub_chart(
         &dir,
-        r#"<item id="svg1" href="Images/chart.svg" media-type="image/svg+xml" fallback="tiff1"/>
-    <item id="tiff1" href="Images/chart.tiff" media-type="image/tiff" fallback="png1"/>
+        r#"<item id="svg1" href="Images/chart.svg" media-type="image/svg+xml" fallback="avif1"/>
+    <item id="avif1" href="Images/chart.avif" media-type="image/avif" fallback="png1"/>
     <item id="png1" href="Images/chart.png" media-type="image/png"/>"#,
         &[
             ("OEBPS/Images/chart.svg", SVG),
-            ("OEBPS/Images/chart.tiff", b"II\x2a\x00 whatever"),
+            ("OEBPS/Images/chart.avif", b"avif whatever"),
             ("OEBPS/Images/chart.png", &png),
         ],
     );
@@ -2254,6 +2254,50 @@ fn a_smil_spine_item_is_not_a_chapter() {
 
 use super::parse_opf;
 use crate::content::format::Series;
+
+/// 实体引用是一个**独立事件**：只吃 `Event::Text` 的解析会把 `&` 整颗丢掉。
+///
+/// 三条一起钉，因为它们是三处各自攒文本的地方（OPF 的书目、NCX 的 `navLabel`、
+/// nav 的 `<a>` 标签）。这一族的标题里 `&` 是常见写法（`Harry Potter & the Goblet of Fire`），
+/// 症状不是打不开而是**书名少一个字符**，而屏幕上看着像原书就这么印的。
+#[test]
+fn entity_references_survive_the_three_text_loops() {
+    let opf = parse_opf(
+        r##"<package version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+          <dc:title>哈利·波特 &amp; 与死亡圣器</dc:title>
+          <dc:creator>J·K·罗琳 &amp; 某某</dc:creator>
+        </metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest>
+        <spine><itemref idref="c1"/></spine></package>"##,
+    );
+    assert_eq!(opf.title, "哈利·波特 & 与死亡圣器", "OPF 的书名");
+
+    let toc = super::parse_ncx(
+        r#"<?xml version="1.0"?>
+        <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head/><navMap>
+          <navPoint id="a" playOrder="1"><navLabel><text>R&amp;D 章</text></navLabel>
+            <content src="a.xhtml"/></navPoint>
+        </navMap></ncx>"#,
+    );
+    assert_eq!(toc[0].title, "R&D 章", "NCX 的 navLabel");
+
+    let nav = super::parse_nav(
+        r#"<html><body><nav epub:type="toc"><ol>
+          <li><a href="c1.xhtml">Tom &amp; Jerry</a></li>
+        </ol></nav></body></html>"#,
+    );
+    assert_eq!(nav.toc[0].title, "Tom & Jerry", "nav 的 `<a>` 标签");
+}
+
+/// 一条门不够，反向也要钉：**数字实体**（`&#38;`）与裸文本混在同一段里也不能丢字符。
+#[test]
+fn numeric_entities_and_split_text_land_in_one_piece() {
+    let opf = parse_opf(
+        r##"<package version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+          <dc:description>一个城市的&#38;与它的灯。</dc:description>
+        </metadata><manifest/><spine/></package>"##,
+    );
+    assert_eq!(opf.description, "一个城市的&与它的灯。");
+}
 
 /// 一封全字段的 OPF：都柏林那几项各归各格。
 #[test]

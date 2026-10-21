@@ -20,7 +20,6 @@ pub mod markdown;
 pub(crate) mod mobi;
 /// 纯文本（`.txt`）小说的分章与书目提取：规则表 + 引擎两份，见 `novel` 的模块说明。
 pub mod novel;
-#[allow(dead_code)] // 装配那一步（KF7/KF8 的 provider）由下一轮接上，这一层先被它用。
 pub(crate) mod palmdb;
 pub mod provider;
 pub mod rtf;
@@ -35,7 +34,10 @@ pub mod woff;
 pub mod xhtml;
 pub(crate) mod zip;
 
-pub use content::{Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageImage, PageSource};
+pub use content::{
+    Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageChar, PageImage, PageRect, PageSource,
+    PageText,
+};
 pub use provider::{
     DocumentProvider, ParseBudget, looks_like_a_book, provider_for, providers,
     supported_extensions, supports_extension,
@@ -94,7 +96,8 @@ impl Format {
     ///
     /// 认法：拿注册表全部被认领的扩展名逐个探，取第一个「provider 认下它，且它
     /// 报出的格式就是自己」的那个。剩下没有命中的（例如还没写 provider 的格式）
-    /// 退回 `as_str`，让日志里至少有个说得清的名字。
+    /// 退回 `as_str`，让日志里至少有个说得清的名字（**注册表里 19 种格式都有 provider，
+    /// 所以这一档现在只兜「忘了往 `supported_extensions` 里加」这种漂移**）。
     pub fn copy_extension(self) -> &'static str {
         crate::content::format::provider::supported_extensions()
             .iter()
@@ -574,6 +577,17 @@ pub struct TocEntry {
     /// 表现就是「跳到章首」，与它被加进来之前的行为一致。
     #[serde(default)]
     pub fragment: Option<String>,
+    /// **定版式**的落点：第几页。可重排的那一路永远是 `None`。
+    ///
+    /// 有 `href` 为什么还要这一格：`href` 是「容器里哪一条」的比对键（与
+    /// `Chapter::spine_href` 同形），而 PDF / 漫画的目录条对不上任何一条容器路径 ——
+    /// 它要说的是「第 7 页」。把页号编码进 `href` 那根字符串会让比对键变成两义，
+    /// 所以另开一格，两格互斥。
+    ///
+    /// `#[serde(default)]`：库里已有的 `toc_json` 没有这一项，老书解出来是 `None`
+    /// = 「按 href 跳」，与它被加进来之前逐字节一致。
+    #[serde(default)]
+    pub page: Option<usize>,
     pub children: Vec<TocEntry>,
 }
 
@@ -724,6 +738,31 @@ pub fn shrink_image(bytes: &[u8], max_edge: u32) -> Option<(Vec<u8>, &'static st
 // 这里把它们再导出，旧路径 `format::{FlowDoc, Content, FormatAdapter, adapters}` 全线保留：
 // 调用方不需要知道内部拆成了几块。
 
+/// 把 quick-xml 报的一个文本片段攒进 `out`。
+///
+/// quick-xml 0.42 把实体引用（`&amp;`、`&#38;`）报成**独立的 `Event::GeneralRef`**，
+/// 文本在实体处被切成两段（实测：`Text("一个城市的") + GeneralRef("#38") + Text("与它的灯。")`）。
+/// 只吃 `Event::Text` 的解析器会把实体整颗丢掉 —— 而 `&` 在书名与作者名里是常见写法
+/// （`Harry Potter & the Goblet of Fire`、`Tom & Jerry`、`R&D`），丢掉的症状是书目少一个字符、
+/// 正文少一个字符，屏幕上最难查。所以这里 `Text` 原样攒、`GeneralRef` 还原成 `&名字;` 再攒，
+/// 由**消费那一步统一 unescape**（各文件自己的 `text_of`）。
+pub(crate) fn xml_piece(out: &mut String, raw: &str, is_reference: bool) {
+    if is_reference {
+        // quick-xml 交回来的是**去掉 `&` 与 `;`** 的那一截（`amp`、`#38`）。
+        let wrapped = format!("&{raw};");
+        out.push_str(&xml_unescape(&wrapped));
+    } else {
+        out.push_str(&xml_unescape(raw));
+    }
+}
+
+/// `&amp;` → `&`。折不动（原文里有一个不该出现的裸 `&`）就原样留着。
+pub(crate) fn xml_unescape(raw: &str) -> String {
+    quick_xml::escape::unescape(raw)
+        .map(|text| text.into_owned())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
 /// 扩展名的小写形式（不带点）。认不出返回 `None`。
 pub(crate) fn extension_of(path: &Path) -> Option<String> {
     path.extension()
@@ -770,12 +809,13 @@ pub(crate) enum HeadDims {
 /// 一张表三处用：猜 mime（[`guess_media_type`]）、判断「这格式值不值得为尺寸多读一趟」
 /// （[`image_dims_from_head`]）、以及按**作者声明的 media-type** 判这张图要不要找降级路
 /// （[`is_decodable_bitmap`]）。加一种格式只改这里，三处不会分叉。
-const DECODABLE_BITMAPS: [(image::ImageFormat, &str); 5] = [
+const DECODABLE_BITMAPS: [(image::ImageFormat, &str); 6] = [
     (image::ImageFormat::Png, "image/png"),
     (image::ImageFormat::Jpeg, "image/jpeg"),
     (image::ImageFormat::WebP, "image/webp"),
     (image::ImageFormat::Gif, "image/gif"),
     (image::ImageFormat::Bmp, "image/bmp"),
+    (image::ImageFormat::Tiff, "image/tiff"),
 ];
 
 /// 容器 / manifest **声明**的 media-type 是不是我们解得动的位图。
@@ -837,6 +877,7 @@ pub(crate) fn media_type_of(ext: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
         "svg" => "image/svg+xml",
         _ => "application/octet-stream",
     }
@@ -900,6 +941,22 @@ pub fn dir_of(path: &str) -> String {
         Some((dir, _)) => format!("{dir}/"),
         None => String::new(),
     }
+}
+
+/// 一条作者写下的资源引用（`<img src>`、`<link href>`）折成容器内的相对路径候选。
+/// 空串 = 这一条**不该去取**（空值、`data:`、带协议的外链）。
+///
+/// 三个容器（单文件 `html`、`htmlz`、`chm`）共用这一份是必须的：前两个从前各抄一遍
+/// （逐字相同），CHM 认 `<link rel=stylesheet>` 时要再抄第三遍，「哪种写法算外链」就会
+/// 在三个容器里长得不一样 —— 而它的症状是某一本书「样式表整包看不见」，屏上没有线索。
+/// 真正把路径解析掉（按本页目录合并、折 `..`）留给 [`resolve_href`]。
+pub(crate) fn asset_href(src: &str) -> String {
+    let src = src.trim();
+    if src.is_empty() || src.starts_with("data:") || src.contains("://") {
+        return String::new();
+    }
+    let cut = src.split(['?', '#']).next().unwrap_or(src);
+    percent_decode(cut)
 }
 
 pub(crate) fn percent_decode(input: &str) -> String {

@@ -332,13 +332,6 @@ fn attr(start: &quick_xml::events::BytesStart<'_>, want: &str) -> Option<String>
     None
 }
 
-/// 文本事件里的内容，反转义后拿。
-fn text_of(raw: &str) -> String {
-    quick_xml::escape::unescape(raw)
-        .map(|c| c.into_owned())
-        .unwrap_or_else(|_| raw.to_string())
-}
-
 /// 把 `href` 相对 `base_dir` 解析成容器内规范路径。实现收在 `format::resolve_href`，
 /// 与 app 侧图片 resolver 共用同一份（见那里的说明）。
 fn resolve(base_dir: &str, href: &str) -> String {
@@ -489,6 +482,29 @@ fn place_metadata(out: &mut Opf, metas: &[RawMeta]) {
     });
 }
 
+/// nav 那一族的文字片段落到哪一格：`<a>` 里的算链接的标签，`<span>` 里的算列表项的标签。
+///
+/// 单列成一个函数是因为一条门：`&amp;` 在 quick-xml 0.42 里是一个**独立事件**，
+/// `Text` 与 `GeneralRef` 两支必须走同一段落格逻辑，写在两个 arm 里迟早一处漏掉另一处。
+fn nav_text(
+    link: &mut Option<(String, String, String)>,
+    navs: &mut [NavFrame],
+    span: usize,
+    raw: &str,
+    is_reference: bool,
+) {
+    let mut text = String::new();
+    super::xml_piece(&mut text, raw, is_reference);
+    if let Some((_, label, _)) = link.as_mut() {
+        label.push_str(&text);
+    } else if span > 0
+        && let Some(nav) = navs.last_mut()
+        && let Some(li) = nav.lis.last_mut()
+    {
+        li.label.push_str(&text);
+    }
+}
+
 /// 一串 identifier 里挑 ISBN。**只认明确标着的**四种写法：`urn:isbn:` 前缀、
 /// `ISBN:` 前缀、`opf:scheme="ISBN"` / `scheme="ISBN"` 标着的、以及 Calibre 的
 /// `meta name="calibre:isbn"`。
@@ -628,9 +644,17 @@ fn parse_opf(xml: &str) -> Opf {
                     _ => {}
                 }
             }
+            // `&amp;` 在 quick-xml 0.42 里**单独成一个事件**，只吃 `Text` 的写法会把书名里
+            // 那一个 `&` 整颗丢掉（`Harry Potter & the ...` 这类标题满地都是），
+            // 而屏幕上只是少一个字符 —— 见 `super::xml_piece`。
             Event::Text(e) => {
                 if let Some(top) = open.last_mut() {
-                    top.text.push_str(&text_of(e.as_ref()));
+                    super::xml_piece(&mut top.text, e.as_ref(), false);
+                }
+            }
+            Event::GeneralRef(e) => {
+                if let Some(top) = open.last_mut() {
+                    super::xml_piece(&mut top.text, e.as_ref(), true);
                 }
             }
             Event::End(e) => {
@@ -869,17 +893,9 @@ fn parse_nav(xml: &str) -> NavTrees {
                 "span" => span += 1,
                 _ => {}
             },
-            Event::Text(e) => {
-                let text = text_of(e.as_ref());
-                if let Some((_, label, _)) = link.as_mut() {
-                    label.push_str(&text);
-                } else if span > 0
-                    && let Some(nav) = navs.last_mut()
-                    && let Some(li) = nav.lis.last_mut()
-                {
-                    li.label.push_str(&text);
-                }
-            }
+            // 同一件事的第二处（nav 的标签）：`&amp;` 是一个独立事件，见 `super::xml_piece`。
+            Event::Text(e) => nav_text(&mut link, &mut navs, span, e.as_ref(), false),
+            Event::GeneralRef(e) => nav_text(&mut link, &mut navs, span, e.as_ref(), true),
             Event::End(e) => {
                 let n = e.name();
                 let name = local_name(n.as_ref());
@@ -907,6 +923,7 @@ fn parse_nav(xml: &str) -> NavTrees {
                                     href,
                                     // 采下来的是原始 href；换成绝对路径时（`rebase`）才拆出 fragment。
                                     fragment: None,
+                                    page: None,
                                     children: Vec::new(),
                                 };
                                 match nav.lis.last_mut() {
@@ -939,6 +956,7 @@ fn parse_nav(xml: &str) -> NavTrees {
                                             // 第一个解得开的子孙回填一个。
                                             href: String::new(),
                                             fragment: None,
+                                            page: None,
                                             children: done,
                                         }),
                                         Vec::new(),
@@ -1047,6 +1065,7 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
             href,
             // 采下来的是原始 src；换成绝对路径时（`rebase`）才拆出 fragment。
             fragment: None,
+            page: None,
             children,
         };
         match stack.last_mut() {
@@ -1075,7 +1094,12 @@ fn parse_ncx(xml: &str) -> Vec<TocEntry> {
             }
             Event::Text(e) if in_text => {
                 if let Some(frame) = stack.last_mut() {
-                    frame.title.push_str(&text_of(e.as_ref()));
+                    super::xml_piece(&mut frame.title, e.as_ref(), false);
+                }
+            }
+            Event::GeneralRef(e) if in_text => {
+                if let Some(frame) = stack.last_mut() {
+                    super::xml_piece(&mut frame.title, e.as_ref(), true);
                 }
             }
             Event::Empty(e) if in_navmap => {
@@ -2180,6 +2204,10 @@ fn rebase(entry: TocEntry, doc_dir: &str, opf_dir: &str, zip: &Zip) -> TocEntry 
         title: entry.title,
         href,
         fragment,
+        // 页号那一格原样带过去：`rebase` 改的是「容器里的哪一条」，不是「第几页」。
+        // 现在 EPUB 这一路没人填它，但在这儿丢掉会变成一个安静的错 —— 目录条从
+        // 「按页跳」退成「按 href 跳」，而屏幕上只是那一行点不动。
+        page: entry.page,
         children: entry
             .children
             .into_iter()

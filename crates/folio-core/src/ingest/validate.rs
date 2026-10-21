@@ -287,6 +287,7 @@ mod tests {
                 title: "不存在的章".into(),
                 href: "nowhere.xhtml".into(),
                 fragment: None,
+                page: None,
                 children: vec![],
             }],
             ..Default::default()

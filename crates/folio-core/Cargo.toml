@@ -58,9 +58,20 @@ chardetng.workspace = true
 # 只有正则能吃字符串模式。**这条是 core 的运行时图里新增的**（不是第三个 crate 版本），
 # 为什么与「图上已有」那几条不同、以及逐条才编译的用法，全写在根 Cargo.toml 那条上。
 regex.workspace = true
-# PDF（M9）。为什么是纯 Rust 的 `pdf_oxide` 而不是 `lopdf`/`printpdf`/`oxpdf`、以及
-# 「两个 CJK feature 先不开」的理由，全写在根 Cargo.toml 那条上。**这一格没有代码在用。**
+# `.md` 正文的标记 → XHTML。CommonMark 那台状态机不自己写（flanking 规则、围栏里的 `#`、
+# 缩进代码这类没试过的形状是坑），理由与「锁里已有、一条新包都不带」那组实测写在根 Cargo.toml。
+markdown.workspace = true
+# PDF（M9）。为什么是纯 Rust 的 `pdf_oxide`、`rendering` 那条 feature 为什么必须开、以及
+# 「两个 CJK feature 量过仍不开」的那笔账，全写在根 Cargo.toml 那条上。用它的只有
+# `content::format::pdf`：页表与书签读 `document` / `outline`，一页的 PNG 读 `rendering`。
 pdf_oxide.workspace = true
+# CB7：纯 Rust 的 7z 解压；CBR：纯 Rust 的 RAR（rars），两者都不带 C/C++。
+sevenz-rust2.workspace = true
+rars.workspace = true
+# CBT：tar 漫画包（纯 Rust）。
+tar.workspace = true
+# DjVu：纯 Rust 解码/渲染（MIT，无 GPL）。
+djvu-rs.workspace = true
 rust-i18n.workspace = true
 # 日志：core 这边只管「说了什么」——`tracing` 的宏与 span，配置在 `Config::logging`，
 # 装配 subscriber 的入口在 `src/logging.rs`。（不依赖 gpui 这条边界照旧成立：
@@ -86,5 +97,7 @@ tts.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# 测试里合成 CBR 夹具；生产只用读，不开 write。
+rars = { workspace = true, features = ["write"] }
 # `rust-i18n` 不再单列：文案表那几条断言搬进 `src/i18n.rs` 之后就是本 crate 的代码，
 # 而它本来就是普通依赖 —— 集成测试时代的那条 dev-dependency 到此作废。

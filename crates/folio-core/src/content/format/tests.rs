@@ -202,7 +202,8 @@ fn list_style_containers_are_located_by_entry_name_including_chm() {
     );
 }
 
-/// 一本书递给系统那侧时，收件应用是按 media type 筛的：九种格式各报一个说得清的书的类型。
+/// 一本书递给系统那侧时，收件应用是按 media type 筛的：注册表里每一种格式都各报一个
+/// 说得清的书的类型（现在 19 种，逐条列在 `Format::mime` 那个 match 里）。
 ///
 /// 钉的是两条会静默坏掉的形状 —— 空串（Android 的 `GpuiSystemUi.shareImage` 把空 mime 退成
 /// `image/*`，一本 `.epub` 顶着它出去，弹出来的是整排相册），以及 `application/` 那种

@@ -218,6 +218,20 @@ impl Document for BookDocument {
         provider.image_bytes(path, at)
     }
 
+    fn render_page(&self, page: usize, edge: u32) -> Option<Vec<u8>> {
+        // 页号是**引擎那一侧**的号（`PageSource::Render { index }` 存的就是它），与阅读序
+        // 是否一致由产出页表的那个 provider 定 —— 这一层不换算，与 `image_bytes` 交条目名
+        // 同一立场：交出去的是「哪儿」，不是「第几页该是哪页」这件格式知识。
+        let (provider, path) = self.container()?;
+        provider.render_page(path, page, edge)
+    }
+
+    fn page_text(&self, page: usize) -> Option<crate::content::format::PageText> {
+        // 同一个页号口径：这一问交的也是引擎那一侧的页号，与 `render_page` 一路。
+        let (provider, path) = self.container()?;
+        provider.page_text(path, page)
+    }
+
     fn stylesheet(&self) -> String {
         let ContentRef::Reflow(flow) = self.content() else {
             // 定版式没有作者样式表。
@@ -352,6 +366,24 @@ impl BookDocument {
             .get_or_init(|| {
                 // 这一趟是「为取一章而重解整本」，量具挂在它身上：memo 生效时一本书只涨 1。
                 crate::infra::metrics::Metric::WholeBookRereads.count();
+                // 便宜的那一问先试：只要正文。这一趟不看的封面 / 图片尺寸 / CSS / 字数
+                // 在 MOBI 那种格式上实测占全文那一趟的七成（见 `read_texts` 的文档）。
+                if let Some(texts) = provider.read_texts(path) {
+                    // 章数要与库里这一份对得上：对不上就是格式自己切了两遍、切得不一样，
+                    // 那种 memo 会把读者送到隔壁那一章 —— 宁可用慢的那条路。
+                    let want = match &self.content {
+                        Content::Reflow(flow) => flow.chapters.len(),
+                        Content::Fixed(_) => 0,
+                    };
+                    if want > 0 && texts.len() == want {
+                        return Some(std::sync::Arc::new(texts));
+                    }
+                    tracing::debug!(
+                        "document: {} 的 read_texts 给了 {} 章，库里是 {want} 章，退回全文那一趟",
+                        path.display(),
+                        texts.len()
+                    );
+                }
                 match provider.read(path) {
                     // 每一章都正文在手（`locator()` 是 `None`）才收下这一趟。
                     Ok((_, Content::Reflow(flow)))
@@ -822,6 +854,127 @@ mod tests {
             PROBE_READS.with(|n| n.get()),
             2,
             "没 memo 就照旧每章回容器取，正文不许变成空"
+        );
+    }
+
+    /// memo 先问「只要正文」那一趟：`read` 一次都不许跑。
+    ///
+    /// 存在的理由是那条实测：MOBI 的全文那一趟里，封面重编（29 ms）+ 逐章数可见字
+    /// （21 ms / 2.7 MB）+ 每张插图整条读回来量尺寸，memo **一格都不看**。
+    /// 第二条断言钉的是章数那道门：便宜的那一趟给了错位数量的章，就必须退回慢而对的
+    /// `read` —— 那种 memo 会把读者送到隔壁那一章，而屏上看着全对。
+    #[test]
+    fn the_memo_asks_for_texts_first_and_refuses_a_mismatched_chapter_count() {
+        use std::cell::Cell;
+        use std::path::PathBuf;
+
+        use crate::content::format::{
+            Chapter, ChapterText, Content as FormatContent, DocMeta, DocumentProvider, FlowDoc,
+        };
+        use crate::infra::metrics::{Metric, take_local};
+
+        thread_local! {
+            /// 全文那一趟被跑了几次 —— 便宜的路生效时它必须是 0。
+            static FULL_READS: Cell<u32> = const { Cell::new(0) };
+        }
+
+        fn meta() -> DocMeta {
+            DocMeta {
+                title: "替身".into(),
+                authors: Vec::new(),
+                format: Format::Text,
+                size: 0,
+                ..DocMeta::default()
+            }
+        }
+
+        /// 库里那一份：三章，每章只有位置。
+        fn positions() -> FormatContent {
+            FormatContent::Reflow(FlowDoc {
+                chapters: (0..3)
+                    .map(|ix| Chapter {
+                        title: format!("第{}章", ix + 1),
+                        spine_href: String::new(),
+                        char_len: None,
+                        images: Vec::new(),
+                        text: ChapterText::At(ChapterLocator::Section(ix)),
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+        }
+
+        /// 一个 provider：便宜那一问给三串（或故意少给一串），`read` 给正文并数自己。
+        struct Three {
+            short_by_one: bool,
+        }
+
+        impl DocumentProvider for Three {
+            fn format(&self) -> Format {
+                Format::Text
+            }
+            fn supports(&self, _path: &Path) -> bool {
+                true
+            }
+            fn index(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
+                Ok((meta(), positions()))
+            }
+            fn read(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
+                FULL_READS.with(|n| n.set(n.get() + 1));
+                Ok((
+                    meta(),
+                    FormatContent::Reflow(FlowDoc {
+                        chapters: (0..3)
+                            .map(|ix| {
+                                Chapter::inline(format!("第{}章", ix + 1), format!("正文{ix}·全文"))
+                            })
+                            .collect(),
+                        ..Default::default()
+                    }),
+                ))
+            }
+            fn read_texts(&self, _path: &Path) -> Option<Vec<String>> {
+                let mut texts = (0..3).map(|ix| format!("正文{ix}")).collect::<Vec<_>>();
+                if self.short_by_one {
+                    texts.pop();
+                }
+                Some(texts)
+            }
+        }
+
+        let open = |short_by_one| {
+            take_local(Metric::WholeBookRereads);
+            FULL_READS.with(|n| n.set(0));
+            BookDocument {
+                provider: Some(Box::new(Three { short_by_one })),
+                path: Some(PathBuf::from("/x.txt")),
+                container: std::sync::OnceLock::new(),
+                image_sources: std::sync::OnceLock::new(),
+                section_texts: std::sync::OnceLock::new(),
+                meta: meta(),
+                content: positions(),
+            }
+        };
+
+        // 生效的那一档：三章全走 memo，`read` 一次都没跑。
+        let book = open(false);
+        for ix in 0..3 {
+            assert_eq!(book.chapter_source(ix).unwrap(), format!("正文{ix}"));
+        }
+        assert_eq!(
+            FULL_READS.with(|n| n.get()),
+            0,
+            "便宜的那一问够用时，全文那一趟一次都不该跑"
+        );
+        assert_eq!(take_local(Metric::WholeBookRereads), 1);
+
+        // 章数对不上：退回 `read`，而且取回的还是正文（不许是空串或错位号）。
+        let book = open(true);
+        assert_eq!(book.chapter_source(1).unwrap(), "正文1·全文");
+        assert_eq!(
+            FULL_READS.with(|n| n.get()),
+            1,
+            "章数对不上就该退回全文那一趟"
         );
     }
 }

@@ -183,6 +183,18 @@ impl PalmDb {
         self.read_bounded(index, max)
     }
 
+    /// 第一条以 `magic` 开头的记录号。
+    ///
+    /// PalmDB 没有名字，格式层只能按「记录里装的是什么」找：AZW4 的那条 PDF 记录走的就是
+    /// 这一条，判定层（`format::sniff::palm`）与 provider 共用它，所以「这是不是 AZW4」
+    /// 在两边是同一个判据。只读每条记录的头几个字节，不把正文扛回来。
+    pub(crate) fn find_record_starting_with(&self, magic: &[u8]) -> Option<usize> {
+        (0..self.records.len()).find(|&index| {
+            self.read_head(index, magic.len())
+                .is_some_and(|head| head == magic)
+        })
+    }
+
     /// 两条取字节的路共用的一步：`&self` + 锁里的游标。
     ///
     /// 读不满（文件被截短、竞态改了它）当取不到，而不是把半截 buffer 交出去：
