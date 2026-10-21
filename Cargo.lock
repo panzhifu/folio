@@ -2360,7 +2360,7 @@ dependencies = [
 [[package]]
 name = "folio-curl"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9790a60d619522db8ec904ddfe62931755b7b130#9790a60d619522db8ec904ddfe62931755b7b130"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=c261858052370b83a4f8725f42628c5dde0c459c#c261858052370b83a4f8725f42628c5dde0c459c"
 dependencies = [
  "bytemuck",
 ]
@@ -3226,7 +3226,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9790a60d619522db8ec904ddfe62931755b7b130#9790a60d619522db8ec904ddfe62931755b7b130"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=c261858052370b83a4f8725f42628c5dde0c459c#c261858052370b83a4f8725f42628c5dde0c459c"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3476,7 +3476,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-mobile"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/gpui-mobile?rev=ab131849bb10aaafb444c13e3d2ae84ea126b865#ab131849bb10aaafb444c13e3d2ae84ea126b865"
+source = "git+https://github.com/panzhifu/gpui-mobile?rev=6b4cfa6eb613c46e1e388e8e0f5d76dfb736b6a7#6b4cfa6eb613c46e1e388e8e0f5d76dfb736b6a7"
 dependencies = [
  "accesskit_android",
  "android-activity",
@@ -3511,7 +3511,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9790a60d619522db8ec904ddfe62931755b7b130#9790a60d619522db8ec904ddfe62931755b7b130"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=c261858052370b83a4f8725f42628c5dde0c459c#c261858052370b83a4f8725f42628c5dde0c459c"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3666,7 +3666,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9790a60d619522db8ec904ddfe62931755b7b130#9790a60d619522db8ec904ddfe62931755b7b130"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=c261858052370b83a4f8725f42628c5dde0c459c#c261858052370b83a4f8725f42628c5dde0c459c"
 dependencies = [
  "anyhow",
  "bytemuck",
