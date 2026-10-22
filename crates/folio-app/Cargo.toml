@@ -27,7 +27,7 @@ folio-core.workspace = true
 # 仿真翻页那一档的页面网格与 uniform 的纯 CPU 定义：这里只拿数据，不拿 GPU 类型。
 # 它住在 `panzhifu/gpui-folio` 那个 workspace 里（四个成员之一），rev 必须跟根
 # `[patch.crates-io]` 那三条同一个数 —— 一份 fork 四个成员，钉成两个 rev 就是两份代码。
-folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "3d8535ed90b91cdbcc73403d6fe909f3a1990b3a" }
+folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "c901978f22013e00249b75a06b26fbe500ca1b51" }
 gpui-kit.workspace = true
 # 只依赖 gpui-kit 一个门面：它顶层 `pub use ::gpui::*`，把移动端那份 `gpui-pre` 整个
 # 转了出来，所以两端都用 `use gpui_kit::…`，不再单独声明一条 `gpui` 依赖。
