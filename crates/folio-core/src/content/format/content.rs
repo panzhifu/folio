@@ -684,11 +684,15 @@ mod tests {
 
         // 原样读回：第一级就中，不必降级。
         let back = relocate(&anchor, &page.text_map());
-        assert_eq!((back.start, back.end, back.confidence), (5, 9, Confidence::Exact));
+        assert_eq!(
+            (back.start, back.end, back.confidence),
+            (5, 9, Confidence::Exact)
+        );
         // 页首多出一个字（文字层换了一版引擎、前面那点字被认成别的）：偏移漂了，
         // 靠指纹从附近找回来 —— 这一级只做子串匹配，没有 DOM 也照样成立。
-        let shifted = crate::content::anchor::TextMap::from_visible_text(String::from("x")
-            + page.text().as_str());
+        let shifted = crate::content::anchor::TextMap::from_visible_text(
+            String::from("x") + page.text().as_str(),
+        );
         let moved = relocate(&anchor, &shifted);
         assert_eq!(moved.confidence, Confidence::Nearby);
         assert_eq!((moved.start, moved.end), (6, 10), "整串跟着平移一格");

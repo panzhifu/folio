@@ -261,12 +261,15 @@ impl ReaderSession {
         let key = book.page_text_key(page)?;
         let map = text.text_map();
         let spans = resolved_for(&self.annotation_spans, &self.annotations, page, key, &map);
-        spans.iter().filter(|span| !span.is_stale()).find(|span| {
-            selection::page_boxes(&text, span.start..span.end, box_)
-                .iter()
-                .any(|rect| rect.contains(&local))
-        })
-        .map(|span| (page, span.start..span.end, span.id))
+        spans
+            .iter()
+            .filter(|span| !span.is_stale())
+            .find(|span| {
+                selection::page_boxes(&text, span.start..span.end, box_)
+                    .iter()
+                    .any(|rect| rect.contains(&local))
+            })
+            .map(|span| (page, span.start..span.end, span.id))
     }
 
     /// 点在一条已有的划线上：把那一条重新选中，菜单条跟着回来。

@@ -719,11 +719,7 @@ impl ReaderSession {
     /// 由定版式那一臂每帧写入），以及那一页自己的可见框多大（`PageText` 带着）。
     /// 两把尺之间只差一个等比缩放，所以这里不做「猜比例」那一类兜底：量不出比例
     /// 就是这一页选不出字，而不是把色块画到别处。
-    fn fixed_offset_at(
-        &self,
-        book: &FixedBook,
-        at: Point<Pixels>,
-    ) -> Option<(usize, usize)> {
+    fn fixed_offset_at(&self, book: &FixedBook, at: Point<Pixels>) -> Option<(usize, usize)> {
         let (page, box_) = self.fixed_text_box.get()?;
         let text = book.page_text(page)?;
         let (x, y) = page_units(&text, box_, at - self.content_bounds.get().origin)?;
@@ -884,7 +880,10 @@ pub(in crate::ui::features::reader) fn page_boxes(
     // （落在留白上的一条黄带读起来像选中的是页外的东西），而 min/max 这两下不依赖
     // 引擎版本给不给得出某个助手。
     let (left, top) = (f32::from(box_.origin.x), f32::from(box_.origin.y));
-    let (right, bottom) = (left + f32::from(box_.size.width), top + f32::from(box_.size.height));
+    let (right, bottom) = (
+        left + f32::from(box_.size.width),
+        top + f32::from(box_.size.height),
+    );
     text.rects(range)
         .into_iter()
         .filter_map(|rect| {
@@ -918,9 +917,12 @@ pub(in crate::ui::features::reader) fn page_visual(
     let start_caret = highlights
         .first()
         .map(|first| Bounds::new(first.origin, size(px(0.0), first.size.height)));
-    let end_caret = highlights
-        .last()
-        .map(|last| Bounds::new(point(last.right(), last.top()), size(px(0.0), last.size.height)));
+    let end_caret = highlights.last().map(|last| {
+        Bounds::new(
+            point(last.right(), last.top()),
+            size(px(0.0), last.size.height),
+        )
+    });
     SelectionVisual {
         highlights,
         start_caret,
@@ -1752,8 +1754,10 @@ mod tests {
         let boxes = page_boxes(&page, 0..4, box_);
         assert_eq!(boxes.len(), 2, "两行各一条");
         assert!(
-            boxes.iter().all(|rect| f32::from(rect.right()) <= 100.0 + 0.001
-                && f32::from(rect.origin.x) >= -0.001),
+            boxes
+                .iter()
+                .all(|rect| f32::from(rect.right()) <= 100.0 + 0.001
+                    && f32::from(rect.origin.x) >= -0.001),
             "色块探出那一格之外：{boxes:?}"
         );
         let second = &boxes[1];
@@ -1799,6 +1803,10 @@ mod tests {
             "末了那只该落在最后那条的右沿"
         );
         assert_eq!(visual.color, handle, "把手用实色");
-        assert_eq!(visual.highlight_color, Some(band), "高亮用压过透明度的那一色");
+        assert_eq!(
+            visual.highlight_color,
+            Some(band),
+            "高亮用压过透明度的那一色"
+        );
     }
 }

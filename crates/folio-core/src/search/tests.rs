@@ -460,15 +460,18 @@ fn fixture(relative: &str) -> PathBuf {
 /// 一个字都没有 —— 拿它测「扫得出命中」就是让断言空跑。它的形状正适合下面那条
 /// 「没有字的一页」那一道。
 fn wps() -> (PathBuf, Box<dyn Document>) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/oss/pdf/wps-paper.pdf");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/pdf/wps-paper.pdf");
     let doc = crate::content::document::open(&path).expect("WPS 那本该开得动");
     (path, doc)
 }
 
 /// 那一列字的第 `from..to` 个（按**字符**数，与 `Hit.start` / `Hit.end` 同一把尺）。
 fn chars(text: &str, from: usize, to: usize) -> String {
-    text.chars().skip(from).take(to.saturating_sub(from)).collect()
+    text.chars()
+        .skip(from)
+        .take(to.saturating_sub(from))
+        .collect()
 }
 
 /// **契约门**：整本一次取齐的那一列，与逐页问的每一页**逐字节相同**。
@@ -491,7 +494,8 @@ fn the_batched_pages_are_the_per_page_ones_byte_for_byte() {
             .map(|layer| layer.text())
             .unwrap_or_default();
         assert_eq!(
-            &taken, text,
+            &taken,
+            text,
             "第 {} 页两处不是一个序（整本 {} 字 vs 逐页 {} 字）",
             page,
             text.chars().count(),
@@ -574,7 +578,12 @@ fn a_triggered_cancel_stops_the_page_scan() {
     let (_, doc) = wps();
     let ctx = StageCtx::detached();
     ctx.cancel().trigger();
-    let out = scan(&*doc, &Query::parse("A").unwrap(), &Options::default(), &ctx);
+    let out = scan(
+        &*doc,
+        &Query::parse("A").unwrap(),
+        &Options::default(),
+        &ctx,
+    );
     assert!(out.cancelled, "置了旗标就该以取消收尾");
     assert_eq!(out.scanned, 0, "一页都不该扫");
 }
@@ -586,13 +595,17 @@ fn a_triggered_cancel_stops_the_page_scan() {
 /// 与「搜索坏了」「那个词不在书里」在界面上是同一句话，而读者的动作完全不同。
 #[test]
 fn a_wordless_book_scans_to_nothing_and_still_counts_its_pages() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/pdf/three-pages.pdf");
     let doc = crate::content::document::open(&path).expect("入库的那本夹具该读得开");
-    let out = scan(&*doc, &Query::parse("猫").unwrap(), &Options::default(), &StageCtx::detached());
+    let out = scan(
+        &*doc,
+        &Query::parse("猫").unwrap(),
+        &Options::default(),
+        &StageCtx::detached(),
+    );
     assert!(out.hits.is_empty(), "一个字都没有，不该有命中");
     assert_eq!(out.chapters, 3, "三页照实报 —— 界面念得出「这一本没有字」");
     assert_eq!(out.scanned, 3, "三页都扫过（每页都是空串）");
     assert!(!out.truncated && !out.cancelled);
 }
-

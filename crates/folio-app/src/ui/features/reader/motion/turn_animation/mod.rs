@@ -41,10 +41,10 @@ use scroll::Scroll;
 use slide::Slide;
 use slide_up::SlideUp;
 
-pub(in crate::ui::features::reader) use curl::{cylinder_for, release_grip};
 /// 不带弹回时钟的那一条入口：生产那一路走 [`cylinder_for`]，这条只剩门在读。
 #[cfg(test)]
 pub(in crate::ui::features::reader) use curl::cylinder_at;
+pub(in crate::ui::features::reader) use curl::{cylinder_for, release_grip};
 pub(in crate::ui::features::reader) use geometry::{
     Area, Axis, Crease, Cut, Grip, Poly, Pose, Shades, Sheet, Tint,
 };
@@ -349,7 +349,10 @@ mod tests {
         for from in [0.2f32, 0.5, 0.9] {
             // 走完：起点 = 松手那一刻，终点 = 走满。
             assert_eq!(release_clock(from, from, false), 0.0, "走完的第一帧不是 0");
-            assert!((release_clock(1.0, from, false) - 1.0).abs() < 1e-5, "走完的终帧不是 1");
+            assert!(
+                (release_clock(1.0, from, false) - 1.0).abs() < 1e-5,
+                "走完的终帧不是 1"
+            );
             let mid = (from + 1.0) * 0.5;
             assert!(
                 (release_clock(mid, from, false) - 0.5).abs() < 1e-5,
@@ -358,7 +361,10 @@ mod tests {
             );
             // 弹回：起点同样是松手那一刻，终点是退回按下点。
             assert_eq!(release_clock(from, from, true), 0.0, "弹回的第一帧不是 0");
-            assert!((release_clock(0.0, from, true) - 1.0).abs() < 1e-5, "弹回的终帧不是 1");
+            assert!(
+                (release_clock(0.0, from, true) - 1.0).abs() < 1e-5,
+                "弹回的终帧不是 1"
+            );
             assert!(
                 (release_clock(from * 0.5, from, true) - 0.5).abs() < 1e-5,
                 "弹回退了一半，时钟该给 0.5，实得 {}",
@@ -375,7 +381,14 @@ mod tests {
             }
         }
         // 一按就松手：这一腿本来没有路要走，给 0 而不是除零。
-        assert_eq!(release_clock(0.0, 0.0, true), 0.0, "from = 0 的弹回不该是 NaN");
-        assert!(release_clock(0.0, 0.0, false).is_finite(), "from = 0 的走完不该是 NaN");
+        assert_eq!(
+            release_clock(0.0, 0.0, true),
+            0.0,
+            "from = 0 的弹回不该是 NaN"
+        );
+        assert!(
+            release_clock(0.0, 0.0, false).is_finite(),
+            "from = 0 的走完不该是 NaN"
+        );
     }
 }

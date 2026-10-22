@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use folio_core::Locator;
 use folio_core::content::document::Document as OpenedDocument;
-use folio_core::content::format::{FixedPage, PageSource, PageText};
 use folio_core::content::format::pdf::RENDER_EDGE;
+use folio_core::content::format::{FixedPage, PageSource, PageText};
 use gpui_kit::SharedString;
 
 use crate::ui::features::reader::components::image_viewer::{ImageSlot, Place, file_name};
@@ -812,7 +812,11 @@ mod tests {
         let first = book.page_text(0).expect("第 0 页写着字");
         let again = book.page_text(0).expect("第二次问也该有");
         assert!(Rc::ptr_eq(&first, &again), "同一页两次问到的是同一份");
-        assert_eq!(doc.asks.lock().unwrap().as_slice(), &[0], "第二趟不该回引擎");
+        assert_eq!(
+            doc.asks.lock().unwrap().as_slice(),
+            &[0],
+            "第二趟不该回引擎"
+        );
 
         // 没字的那一页：答案是 `None`，而这一问也要记账（只回引擎一次）。
         assert!(book.page_text(1).is_none(), "第 1 页没字");
@@ -833,7 +837,10 @@ mod tests {
         // 换页才重取：只留**一页**是刻意的（与 core 那边「文字层不入库、按页现取」
         // 同一条立场），翻回第 0 页就是第三趟 —— 那是那份立场明码标出的代价，
         // 不是一处漏缓存。换回去之后同一页再问，仍然拿备忘。
-        assert!(book.page_text_key(0).is_some(), "有字的那一页该给得出缓存的键");
+        assert!(
+            book.page_text_key(0).is_some(),
+            "有字的那一页该给得出缓存的键"
+        );
         assert_eq!(doc.asks.lock().unwrap().len(), 3, "换页才重取一趟");
         assert!(book.page_text(0).is_some());
         assert_eq!(
@@ -851,7 +858,10 @@ mod tests {
     fn the_page_key_follows_the_page_being_read() {
         let (_, book) = counted(2, &[0]);
         let first = book.current_page_key().expect("这一页该有身份");
-        assert!(first.ends_with("/render/0@2048"), "身份要说清是哪一页: {first}");
+        assert!(
+            first.ends_with("/render/0@2048"),
+            "身份要说清是哪一页: {first}"
+        );
         let mut book = book;
         book.set_page(1);
         let second = book.current_page_key().expect("第二页也该有身份");
@@ -873,6 +883,10 @@ mod tests {
             }),
             Locator::start(),
         );
-        assert_eq!(empty.current_page_key(), None, "没有可摆的一格就没有身份可问");
+        assert_eq!(
+            empty.current_page_key(),
+            None,
+            "没有可摆的一格就没有身份可问"
+        );
     }
 }

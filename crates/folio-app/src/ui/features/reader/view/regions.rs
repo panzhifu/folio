@@ -15,11 +15,11 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::slider::Slider;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt as _, ThemeMode, ThemeStyled as _,
     h_flex, v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, Context, Corners, InteractiveElement, IntoElement, ParentElement,
     SharedString, Styled, TestSupportExt as _, div, px,
@@ -276,7 +276,9 @@ impl ReadingPage {
                             });
                             let reader = zoom_reader.downgrade();
                             let Some(key) = key else {
-                                tracing::debug!("放大整页: 这一页取不到那张图的键，这一击什么都不做");
+                                tracing::debug!(
+                                    "放大整页: 这一页取不到那张图的键，这一击什么都不做"
+                                );
                                 return;
                             };
                             crate::ui::features::reader::view::body::open_picture(
