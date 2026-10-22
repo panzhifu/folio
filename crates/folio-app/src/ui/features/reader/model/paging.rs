@@ -24,6 +24,9 @@ impl ReaderSession {
             return;
         }
         self.mode = mode;
+        // 单页/双页的捕获纹理不是同一块：一页一栏 vs 一页两栏。不重烘就按旧布局取 uv，
+        // 双页的右半张会采到单页那张纹理的空白/邻区。摆法一换就作废。
+        self.capture_dirty = true;
         // 这一下是读者选的：默认档那面旗落下，之后落库就写他选的这一档。
         self.mode_undecided = false;
         // 摆法换了，同一句话会挪到另一处坐标位置；选中跟着字走虽不至于指错，
@@ -106,8 +109,13 @@ impl ReaderSession {
             && ConfigHolder::appearance(cx).page_turn == PageTurn::Curl
             && matches!(plan, TurnPlan::Page { .. } | TurnPlan::Chapter { .. });
         if needs_curl_capture && !self.curl_capture_ready() {
+            // 不丢这一下：记下方向，等门开了在渲染帧末补一趟。从前这里直接 return，
+            // 读者读到的是「进书后第一划没反应」。
+            self.queue_pending_turn(intent, cx);
             return;
         }
+        // 这一趟已经能走了：之前排队的那一趟作废，别在动画走完后又补一页。
+        self.pending_turn = None;
         match plan {
             TurnPlan::None => {}
             TurnPlan::Scroll { to } => {
@@ -250,6 +258,8 @@ impl ReaderSession {
     pub(in crate::ui::features::reader) fn cancel_turn(&mut self) {
         self.turn = None;
         self.pending_chapter_turn = None;
+        // 参照系换了：排队那趟还按旧页/旧方向算，补上只会翻错一页。
+        self.pending_turn = None;
     }
 
     /// 画面正处在「两套坐标同时在上屏」的那一段时间：章界在等排版、正在跨章滑动，

@@ -57,6 +57,9 @@ pub struct ReadingPage {
     /// 外壳报来的「不属于正文的那一段」。顶层盖满整窗，所以那一段只剩顶上那条系统状态栏 /
     /// 挖孔（底边见 [`ReadingPage::bottom_inset`]）—— `shell::reading_reserve`。
     pub(in crate::ui::features::reader) reserve: Reserve,
+    /// 外壳进场横移的当前位移（逻辑像素）。捕获层要把这一格抵消掉，才能在整个
+    /// 280 ms 进场期间按**最终位置**烘页，而不是等层停稳。
+    pub(in crate::ui::features::reader) enter_shift: f32,
     /// 顶上那条系统状态栏 / 挖孔占掉多高（逻辑像素）。见 [`shell::reading_top_inset`]。
     ///
     /// 整层已经由外壳按这一个数往下推过了，这里只给顶栏用：那条的表面要**再往上长回屏幕顶边**，
@@ -221,6 +224,7 @@ impl ReadingPage {
         Self {
             reader,
             reserve: Reserve::ZERO,
+            enter_shift: 0.0,
             top_inset: 0.0,
             bottom_inset: 0.0,
             stack,
@@ -292,6 +296,15 @@ impl ReadingPage {
             self.bottom_inset = bottom;
             cx.notify();
         }
+    }
+
+    /// 外壳进场横移这一帧走了多少（逻辑像素）。正文画捕获层那两份副本时按 `-enter_shift`
+    /// 抵消它，于是进书那 280 ms 里也能按**最终位置**烘页，不必等层停稳。
+    ///
+    /// 这一格**不** `cx.notify()`：它是外壳在自己那一帧的渲染里报进来的，而这一帧这一页本来
+    /// 就要画；补一发通知只会让同一帧再排一次重绘，转场期间逐帧空转。
+    pub(in crate::ui) fn set_enter_shift(&mut self, shift: f32) {
+        self.enter_shift = shift;
     }
 
     /// 浮层挡着的时候，系统返回先收它；收干净了才轮到 pop 这一页。
@@ -667,6 +680,7 @@ impl Render for ReadingPage {
             reader.set_reserve(self.reserve, cx);
             reader.set_chrome_bands(chrome::HEADER_HEIGHT, chrome::FOOTER_HEIGHT, cx);
             reader.set_overlay_open(layers_up, cx);
+            reader.enter_shift = self.enter_shift;
         });
         self.sync_sliders(window, cx);
         let tap = cx.listener(

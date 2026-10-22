@@ -31,6 +31,7 @@ use gpui_kit::{
 use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::swipe::{FLING_SPEED, SNAP_FRACTION, fling_floor};
+use crate::ui::features::reader::model::turn::TurnIntent;
 use crate::ui::features::reader::motion::turn_animation::Axis;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::{NAV_TRANSITION, turn_duration};
@@ -849,6 +850,234 @@ fn a_spread_is_two_contiguous_columns_of_one_sheet(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.page()), 1);
     let after = offset_of(&view, cx);
     assert!(after > before, "翻一张纸该往前走，实际 {before} → {after}");
+}
+
+/// 双页折页的「一屏」是**一张 leaf**，不是整张跨页：从右缘划到中缝就该走满。
+///
+/// 取错的话，读者拖过整屏才翻一张纸，而前一半只是把折痕推到中缝 —— 真机上读成
+/// 「拖了半天不翻」。
+#[gpui_kit::test]
+fn a_spread_curl_measures_one_leaf_not_the_whole_spread(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 1200.0);
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.mode()),
+        PageMode::Spread,
+        "1200 宽该立起双页"
+    );
+    let width = view.read_with(cx, |v, _| v.page_area.width());
+    for intent in [TurnIntent::Next, TurnIntent::Previous] {
+        let (_, dist, _) = view
+            .read_with(cx, |v, cx| {
+                v.swipe_geometry(cx, Axis::Horizontal, Some(intent))
+            })
+            .expect("双页折页该有几何");
+        assert!(
+            (dist - width * 0.5).abs() < 1.0,
+            "{intent:?} 的一屏该是半张 leaf（{}），实得 {dist}",
+            width * 0.5
+        );
+    }
+}
+
+/// 进书那 280ms 里旧页纹理没烘好：这一下**不能吞掉**，要排队等门开。
+///
+/// 从前的行为是 `turn()` 直接 return、`claim_swipe` 直接 `Refused`，读者读到的是
+/// 「第一划没反应，过一会儿才行」。这条钉的是排队与补执行。
+#[gpui_kit::test]
+fn a_curl_turn_waits_for_the_capture_instead_of_being_dropped(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.page_count()) > 1,
+        "这本书至少要有两页才测得到下一趟"
+    );
+
+    let before = view.read_with(cx, |v, _| v.page());
+    view.update(cx, |v, _| {
+        // 模拟「进场横移还没结束、纹理没烘好」：门关着。
+        v.capture_dirty = true;
+        v.pending_turn = None;
+    });
+    view.update(cx, |v, cx| v.turn(TurnIntent::Next, cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        before,
+        "门没开时不该翻页"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.pending_turn),
+        Some(TurnIntent::Next),
+        "被拒的那一趟该排队，而不是丢掉"
+    );
+
+    // 纹理落地：门开，渲染帧末补执行。
+    let key = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    view.update(cx, |v, _| {
+        v.capture_dirty = false;
+        v.captured_page = Some(key);
+    });
+    view.update(cx, |v, cx| v.drain_pending_turn(cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        before + 1,
+        "门一开就该把排队那一趟补上"
+    );
+}
+
+/// 折页那一趟把**纸的背面**也烘了：双页是目标跨页的另一半，单页是目标页整张。
+///
+/// 卷起来那一片的背面采的是捕获层 2（`page_curl.wgsl` 里那句镜像 U），从前采的是正面的
+/// 镜像 —— 读起来像墨透过来，而不是「这张纸背面印着下一页」。这一条钉的是接上之后「烘的
+/// 是哪一格」：往前翻要目标那一页的左半，往后翻要它的右半（同一页在两趟里要的栏不一样）。
+#[gpui_kit::test]
+fn a_curl_turn_bakes_the_back_of_the_sheet_being_peeled(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 1200.0);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Spread, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    let resting = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some(resting),
+        "前置：定住那一帧正面该烘好（门是开的）"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_back),
+        None,
+        "前置：没起趟之前不该烘背面"
+    );
+
+    // 往前翻：自由边在右 ⇒ 揭起来的是右半，背面 = 目标那一页的左半。
+    view.update(cx, |v, cx| v.turn(TurnIntent::Next, cx));
+    settle(cx, handle);
+    let ahead = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    assert_ne!(ahead.1, resting.1, "前置：这一趟真翻了页");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_back.map(|(back, _)| back)),
+        Some((ahead.0, ahead.1, 0)),
+        "往前翻该烘目标跨页的左半"
+    );
+
+    // 往后翻：自由边在左 ⇒ 背面换成退回来那一跨页的右半。先把上一趟走完、再让正面为新的
+    // 一页烘一次（门没开的话这一趟会排队，那就是另一条门在测的事了）。
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    settle(cx, handle);
+    settle(cx, handle);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some(ahead),
+        "前置：正面该已经为新一页重烘好"
+    );
+    view.update(cx, |v, cx| v.turn(TurnIntent::Previous, cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.pending_turn),
+        None,
+        "门开着，这一趟不该排队"
+    );
+    settle(cx, handle);
+    let back_to = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_back.map(|(back, _)| back)),
+        Some((back_to.0, back_to.1, 1)),
+        "往后翻该烘退回来那一跨页的右半"
+    );
+}
+
+/// 单页那一档没有「另一半」可取：背面就是目标页整张（与静读天下那条实测一致 —— 卷起来的
+/// 那一片背面是下一页的真字，不是透墨）。
+#[gpui_kit::test]
+fn a_single_page_curl_bakes_the_arriving_page_on_its_back(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    let resting = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some(resting),
+        "前置：正面已经烘好"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.page_count()) > 1,
+        "这本书至少要有两页才测得到下一趟"
+    );
+
+    view.update(cx, |v, cx| v.turn(TurnIntent::Next, cx));
+    settle(cx, handle);
+    let ahead = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_back.map(|(back, _)| back)),
+        Some((ahead.0, ahead.1, 0)),
+        "单页的背面该是目标页整张（只有一栏）"
+    );
+}
+
+/// 捕获矩形按**最终位置**取：横向抵消外壳进场那一段的横移（[`super::capture_region`]）。
+///
+/// 测试台没有外壳，横移不会真的把内容推走，所以这里只能把两半分开钉：
+/// - 纯函数那一半钉**符号**（往回减，不是往前加）；
+/// - 会话那一半钉「正文真把 `enter_shift` 喂进了那一格」——shift 非零时矩形整块滑出窗口，
+///   那一帧就该拒烘。真机上是内容同样偏着、两边一起动，重合回窗口内才烘得成完整的一张。
+#[gpui_kit::test]
+fn the_capture_rect_is_taken_at_the_resting_position(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::motion::turn_animation::Area;
+    let area = Area::new(0.0, 40.0, 900.0, 700.0);
+    let rect = super::capture_region(area, 300.0);
+    assert_eq!(f32::from(rect.origin.x), -300.0, "该往回减，不是往前加");
+    assert_eq!(f32::from(rect.origin.y), 40.0, "纵向没有横移");
+    assert_eq!(f32::from(rect.size.width), 900.0);
+    let viewport = (900.0, 700.0);
+    assert!(
+        !super::in_viewport(rect, viewport),
+        "偏出窗口的那一趟不该请求捕获"
+    );
+    assert!(super::in_viewport(
+        super::capture_region(area, 0.0),
+        viewport
+    ));
+
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let key = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some(key),
+        "前置：定住那一帧烘好了"
+    );
+    view.update(cx, |v, _| {
+        v.enter_shift = 300.0;
+        v.capture_dirty = true;
+        v.captured_page = None;
+    });
+    settle(cx, handle);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        None,
+        "偏移没对上时那一格在窗口外，该拒烘"
+    );
 }
 
 /// 方向键翻页（PC）：右 / 下往前，左 / 上往回，四颗都归正文。
@@ -3308,7 +3537,7 @@ fn a_short_but_fast_flick_lands(cx: &mut TestAppContext) {
     // 两条线都按这一屏那一档的轴长算，不写死像素：窗口或语料一改，写死的数就会
     // 悄悄落到线的那一边去，用例绿着却什么都没测。
     let (_, dist, _) = view
-        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal))
+        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal, None))
         .expect("分页 + 横扫该有几何");
     let total = (fling_floor(dist) + SNAP_FRACTION * dist) * 0.5;
     assert!(
@@ -3358,7 +3587,7 @@ fn a_slow_drag_past_a_fifth_of_the_screen_lands(cx: &mut TestAppContext) {
     settle(cx, handle);
     let first = view.read_with(cx, |v, _| v.page());
     let (_, dist, _) = view
-        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal))
+        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal, None))
         .expect("分页 + 横扫该有几何");
     let total = SNAP_FRACTION * dist + 4.0;
     assert!(
@@ -3398,7 +3627,7 @@ fn a_flick_that_stops_before_the_release_bounces_back(cx: &mut TestAppContext) {
     settle(cx, handle);
     let first = view.read_with(cx, |v, _| v.page());
     let (_, dist, _) = view
-        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal))
+        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal, None))
         .expect("分页 + 横扫该有几何");
     let total = (fling_floor(dist) + SNAP_FRACTION * dist) * 0.5;
 
@@ -3447,7 +3676,7 @@ fn a_burst_then_a_stall_on_a_wide_page_does_not_fling(cx: &mut TestAppContext) {
     settle(cx, handle);
     let first = view.read_with(cx, |v, _| v.page());
     let (_, dist, _) = view
-        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal))
+        .read_with(cx, |v, cx| v.swipe_geometry(cx, Axis::Horizontal, None))
         .expect("分页 + 横扫该有几何");
 
     // 攒下来那一段摊到的时长：比停手那一档（100ms）长，又不长到把识别器那一笔判成上一笔。
@@ -4914,7 +5143,12 @@ fn a_bookmark_in_a_pdf_moves_the_screen_to_that_page(cx: &mut TestAppContext) {
 /// 字层折回来，与 `selection::page_units` 互为逆运算。换窗口宽、换 `RENDER_EDGE` 那一档、
 /// 换一页的尺寸，这条式子都不用改 —— 而它同时也是「绘制摆的那一格」与「命中折回去的那
 /// 一格」是同一格的证据：两处各算一把尺的话，这一条会红在色块与手指错开上。
-fn pdf_char(view: &Entity<ReaderSession>, cx: &TestAppContext, index: usize, along: f32) -> Point<Pixels> {
+fn pdf_char(
+    view: &Entity<ReaderSession>,
+    cx: &TestAppContext,
+    index: usize,
+    along: f32,
+) -> Point<Pixels> {
     view.read_with(cx, |v, _| {
         let (page, box_) = v.fixed_text_box.get().expect("那一格该被量出来了");
         let text = v
@@ -4927,8 +5161,12 @@ fn pdf_char(view: &Entity<ReaderSession>, cx: &TestAppContext, index: usize, alo
         let sx = f32::from(box_.size.width) / text.width;
         let sy = f32::from(box_.size.height) / text.height;
         point(
-            px(f32::from(origin.x) + f32::from(box_.origin.x) + (item.rect.x + item.rect.width * along) * sx),
-            px(f32::from(origin.y) + f32::from(box_.origin.y) + (item.rect.y + item.rect.height * 0.5) * sy),
+            px(f32::from(origin.x)
+                + f32::from(box_.origin.x)
+                + (item.rect.x + item.rect.width * along) * sx),
+            px(f32::from(origin.y)
+                + f32::from(box_.origin.y)
+                + (item.rect.y + item.rect.height * 0.5) * sy),
         )
     })
 }
@@ -5028,7 +5266,10 @@ fn a_pdf_page_selects_copies_marks_and_points_back(cx: &mut TestAppContext) {
             view.update(cx, |v, cx| v.tap_on_body(window, cx, on_mark))
         })
         .expect("点击应送达");
-    assert!(picked, "点在画出来的那条痕迹上该把那一条挑回来，而不是去翻页");
+    assert!(
+        picked,
+        "点在画出来的那条痕迹上该把那一条挑回来，而不是去翻页"
+    );
     assert_eq!(
         view.read_with(cx, |v, _| v.selection().map(|s| s.range)),
         Some(0..5)
@@ -5095,8 +5336,7 @@ fn a_pdf_page_selects_copies_marks_and_points_back(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_pdf_page_without_a_text_layer_selects_nothing(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let (view, handle, _, _) =
-        open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
     assert!(
         view.read_with(cx, |v, _| v.is_fixed()),
         "前置：这一本该走定版式那一条"
@@ -5104,7 +5344,12 @@ fn a_pdf_page_without_a_text_layer_selects_nothing(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.page_count()), 3, "三页都该在");
 
     // 整页中央拖一把：从前的表现就是「什么都不发生」，这一条不许变。
-    drag_select_between(cx, handle, point(px(180.0), px(240.0)), point(px(300.0), px(240.0)));
+    drag_select_between(
+        cx,
+        handle,
+        point(px(180.0), px(240.0)),
+        point(px(300.0), px(240.0)),
+    );
     assert!(
         view.read_with(cx, |v, _| v.selection().is_none()),
         "没有字的一页不该成立选区"
@@ -5133,7 +5378,9 @@ fn the_zoom_entry_follows_the_page_being_read(cx: &mut TestAppContext) {
     cx.update(|cx| view.update(cx, |v, _| v.set_image_viewer(viewer.clone())));
 
     let key = view
-        .read_with(cx, |v, _| v.fixed().and_then(|book| book.current_page_key()))
+        .read_with(cx, |v, _| {
+            v.fixed().and_then(|book| book.current_page_key())
+        })
         .expect("定版式的一页该在整本书那一列里有身份");
     assert_eq!(
         view.read_with(cx, |v, _| v.image_index_of_key(&key)),
@@ -5160,7 +5407,9 @@ fn the_zoom_entry_follows_the_page_being_read(cx: &mut TestAppContext) {
     view.update(cx, |v, cx| v.set_page(1, cx));
     settle(cx, handle);
     let second = view
-        .read_with(cx, |v, _| v.fixed().and_then(|book| book.current_page_key()))
+        .read_with(cx, |v, _| {
+            v.fixed().and_then(|book| book.current_page_key())
+        })
         .expect("第二页也该有身份");
     assert_ne!(second, key, "身份跟着在读的那一页走");
     assert_eq!(
@@ -5182,7 +5431,8 @@ fn the_zoom_entry_follows_the_page_being_read(cx: &mut TestAppContext) {
             meta,
             Content::Fixed(folio_core::content::format::FixedDoc::default()),
         ));
-        let (book, _) = open_with_document(cx, doc, prefs(16.0), Locator::start(), 460.0, None, None);
+        let (book, _) =
+            open_with_document(cx, doc, prefs(16.0), Locator::start(), 460.0, None, None);
         book.read_with(cx, |v, _| v.fixed().and_then(|b| b.current_page_key()))
     };
     assert_eq!(empty, None, "空页表取不出身份，那一格就不该开那一层");
@@ -5237,7 +5487,10 @@ fn a_pdf_book_searches_and_a_hit_jumps_to_its_page(cx: &mut TestAppContext) {
     let (_, locator) = store.position(id).expect("读回进度").expect("进度该在");
     assert_eq!(
         locator,
-        folio_core::Locator { chapter: 1, offset: 0 },
+        folio_core::Locator {
+            chapter: 1,
+            offset: 0
+        },
         "页号就是定版式的位置：命中的页内偏移不许进库"
     );
 }

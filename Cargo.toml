@@ -368,9 +368,16 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 # 问 `target_family`。纹理那条路本来就写全了，只是 `WgpuBackend::Gl` 是 wasm 那个变体、
 # 原生 GLES 进来的是 `Native(Backend::Gl)`，没人走得进去。换上前每帧
 # `instance data needs 480 bytes, above the maximum of 0`，换上后 folio 的启动页整页画出来。
-gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51" }
-gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51" }
-gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51" }
+# `b1e3215` 起这四笔都在仿真翻页上：圆锥卷径与锥面法向（亮脊跟着锥面斜）、真 shadow map
+# （按光源方向跑一趟正交深度，主片元 3×3 PCF，平摊页与卷面共用同一张深度图）、捕获分层
+# （`Scene` 的 `capture_layer` 与高 order 段、`Window::set_capture_layer`、第二张捕获纹理与
+# group 4 的背页采样），最后一笔把背面捕获改读第 2 层并给 `Window` 加了 `capture_layer()` 探针。
+# app 侧的接法是：正面画进层 1、背面那一页画进层 2，而主 pass 只画 `order < CAPTURE_ORDER_BASE` ——
+# 层里没内容时卷起来那一片就是清成纸色的空白，所以这四条 rev 与 `crates/folio-app/Cargo.toml`
+# 那条 `folio-curl` 必须同一个数一起走。
+gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "3d8535ed90b91cdbcc73403d6fe909f3a1990b3a" }
+gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "3d8535ed90b91cdbcc73403d6fe909f3a1990b3a" }
+gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "3d8535ed90b91cdbcc73403d6fe909f3a1990b3a" }
 
 # 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
 # opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；

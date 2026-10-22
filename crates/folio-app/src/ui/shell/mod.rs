@@ -929,10 +929,22 @@ impl AppShell {
         sample: PresenceSample,
         top_inset: f32,
         window: &Window,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let width = f32::from(window.viewport_size().width).max(1.0);
         let (shift, alpha) = layer_offset(sample.phase, sample.progress, width);
+        // 捕获层要按最终位置烘页：把外壳这一帧的横移交给正文，正文用 `-shift` 抵消。
+        //
+        // 只在**进场**那一段交：退场那一段整层同时在淡出（`alpha` 从 1 走到 0，见
+        // [`nav_offset`] 的 `Pop`/`Exiting` 那一支），烘出来的纹理会带着那一层淡，而它会被
+        // 下一趟翻页一直采下去。退场时交 0，捕获回调按老规矩因为页框滑出窗口而拒绝这一趟。
+        let enter_shift = match sample.phase {
+            PresencePhase::Entering => shift,
+            _ => 0.0,
+        };
+        layer
+            .page
+            .update(cx, |page, _| page.set_enter_shift(enter_shift));
         div()
             .absolute()
             .inset_0()

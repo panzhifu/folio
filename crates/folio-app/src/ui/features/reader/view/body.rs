@@ -181,6 +181,10 @@ impl Render for ReaderSession {
             self.captured_size = Some(size);
             self.capture_dirty = false;
         }
+        // 背面那张同口径：绘制回调真把 leaf 那一块交给背面捕获 pass 了，才算烘好。
+        if let Some(back) = self.capture_back_committed.take() {
+            self.captured_back = Some(back);
+        }
         // 「会话出了元素树」与「正文那一层真画了」是两件事，分开数才分得清帧间隔归谁。
         crate::ui::features::reader::model::perf::note_render();
         let __render = crate::ui::features::reader::model::perf::Timer::start();
@@ -225,7 +229,12 @@ impl Render for ReaderSession {
             // 手机档（Compact）不参与 —— 那里连续滚动是习惯本身，两条窄柱子不是体验。
             // 每帧重算而不是定一次：窗口从 1200 收到 700，双页就该退回连续滚动，
             // 不该把「第一次打开时是横屏平板」那一刻钉死。
+            let before = self.mode;
             self.mode = chrome::default_mode(usable, gap);
+            if self.mode != before {
+                // 默认档自己换了摆法（平板第一次打开从连续切双页）：捕获纹理同样作废。
+                self.capture_dirty = true;
+            }
         }
         let mode = self.mode.effective(usable, gap);
         let columns = mode.columns();
@@ -262,9 +271,19 @@ impl Render for ReaderSession {
         if self.captured_size != Some(viewport) {
             self.capture_dirty = true;
         }
+        // 版心 / 偏好 / 摆法变了 ⇒ 背面那张一起作废。它的键里只有「章·页·栏」，拦不住重排：
+        // 字号一改，同一栏里已经是另一批字了。
+        if self.capture_dirty {
+            self.captured_back = None;
+        }
         let capture_needed = turn.is_none()
             && !mode.is_continuous()
             && (self.capture_dirty || self.captured_page != Some(page_key));
+        // 捕获层 1（正面）这一帧要不要画一份副本。只有可重排那一族要：定版式那一族不出卷曲
+        // 网格（它的页面本来就是整张位图），连续滚动那一档根本不烘（上面那条已经挡掉）。
+        // 副本必须自己画一份 —— 主 pass 只画 `order < CAPTURE_ORDER_BASE`，层里的东西不上屏，
+        // 而这一帧上屏的那一份又正在跟着外壳横移（见下面 `-enter_shift` 那一段）。
+        let capture_front = capture_needed && !self.is_fixed();
         // 日志里要摆的是「烘那一张时」的两组数，与今天这帧的比一眼就能看出差在哪。`Option` 进不了
         // tracing 的字段，所以摊成数：哨兵 = 还没烘过（那一格正是要盯的状态）。
         let (captured_ch, captured_pg) = self.captured_page.unwrap_or((usize::MAX, usize::MAX));
@@ -305,6 +324,22 @@ impl Render for ReaderSession {
         // C 方案：这一帧要画的卷曲网格，以及它对应的进场页。网格取代旧页的
         // 字形与图片 —— 旧页已经烘进页面纹理，网格自己把它卷起来。
         let mut gpu_curl_mesh: Option<PageCurlMesh> = None;
+        // 折页这一趟被揭起来的那一张 leaf（双页 = 半张跨页，单页 = 整块版心）。捕获纹理、
+        // 卷曲网格、手指归一化三处共用这一块；`None` = 这一帧没有折页在飞。
+        let mut curl_leaf: Option<turn_animation::Area> = None;
+        // 捕获层 1（正面）那一份副本里，不属于字形元素的两类内容：块级装饰与图片。
+        // 字形与批注痕迹整份克隆 `element` 就有（见 `GlyphsElement::capture_copy`）。
+        let mut front_decor: Vec<AnyElement> = Vec::new();
+        let mut front_images: Vec<AnyElement> = Vec::new();
+        // 捕获层 2（背面）那一份：揭起来那张纸的背面 = 目标跨页的另一半（双页）/ 目标页整张
+        // （单页）。双页那一栏在主场景里本来就跳过，所以这里攒的是单独的一份。
+        let mut back_element = GlyphsElement::new();
+        let mut back_children: Vec<AnyElement> = Vec::new();
+        // 背面那一栏要横向挪进 leaf 那一格：纹理按 leaf 那块矩形烘，网格也按 leaf 的尺寸采，
+        // 而这一栏的字与图算出来的 x 是它**自己**那一栏的位置。
+        let mut back_dx = 0.0f32;
+        // 这一趟要烘进捕获层 2 的是哪一格（`(章, 页, 物理栏)`）。`None` = 这一帧不烘背面。
+        let mut back_key: Option<(usize, usize, usize)> = None;
         // 「点这张图」要写出去的那个状态，由阅读页持有（见 `image_viewer`）。没挂上的
         // 会话（单独的渲染测试）图片就不可点。
         let viewer = self.image_viewer.clone();
@@ -408,7 +443,10 @@ impl Render for ReaderSession {
                             // 那一把尺唯一该记的地方。
                             let selected = text.is_some() && tile.renders;
                             if selected {
-                                placed = Some(Bounds::new(point(px(x), px(y)), size(px(width), px(height))));
+                                placed = Some(Bounds::new(
+                                    point(px(x), px(y)),
+                                    size(px(width), px(height)),
+                                ));
                             }
                             // 「看大图」那一格在这一族里按端分岔（`page_image` 顶上写着）：
                             // 手机上它吃的是**长按**，而那正是选中要的手势 —— 于是有字的
@@ -416,7 +454,11 @@ impl Render for ReaderSession {
                             // 桌面那一端挂的是**单击**，与拖选不打架（拖过阈值那一下的合成
                             // 点击由 `open_on_tap` 里那一条吃掉），所以原样留着。
                             let no_entry = None;
-                            let entry = if selected && long_press { &no_entry } else { &viewer };
+                            let entry = if selected && long_press {
+                                &no_entry
+                            } else {
+                                &viewer
+                            };
                             let index = overlays.len();
                             overlays.push(page_image(
                                 x,
@@ -812,12 +854,32 @@ impl Render for ReaderSession {
                     ); 2];
                     let mut count = 1usize;
                     let mut cross_chapter = false;
+                    // 折页这一趟的逐栏取舍要在 `if let Some(frame)` 之外读，先把这几格提出来。
+                    let mut spread_curl = false;
+                    let mut leaf_column = 0usize;
+                    let mut other_column = 1usize;
+                    let mut turn_leaving: Option<PageRef> = None;
+                    let mut turn_arriving: Option<PageRef> = None;
                     if let Some(frame) = turn {
                         let style = turn_animation::of(frame.style);
                         // 自由边到底在哪一侧（往回翻与「从右往左读的那一本」各反一次）：折页那一档
                         // 的几何全按它判，别的档不看。
                         let free_right =
                             turn_animation::Pose::free_edge_right(frame.forward, frame.rtl);
+                        // 双页只揭**一张 leaf**：书脊在中缝，不是整屏左缘。单页仍是整块版心。
+                        // 这一块也是捕获纹理/网格/手指归一化共用的那一把尺。
+                        let spread_leaf = (frame.style == PageTurn::Curl
+                            && mode == chrome::PageMode::Spread)
+                            .then(|| area.leaf(free_right));
+                        let curl_area = spread_leaf.unwrap_or(area);
+                        if frame.style == PageTurn::Curl {
+                            curl_leaf = Some(curl_area);
+                        }
+                        // 手是在整块版心里归一化的；双页要映进这张 leaf 的 0..1，
+                        // 否则从右缘划到中缝只走了半张 leaf，纸却已经该翻完了。
+                        let frame_grip = frame
+                            .grip
+                            .map(|grip| spread_leaf.map_or(grip, |leaf| grip.remap(area, leaf)));
                         // 手与弹回的时钟：走完那一腿把这一笔沿**它自己的方向**拉长到落点，弹回
                         // 那一腿不借手 —— 手指停在松手那一刻那一格，改由 `Pose::revert` 那一个数
                         // 让折线自己退出去。两条腿的第一帧都逐字等于松手那一刻，所以都不跳；
@@ -825,20 +887,21 @@ impl Render for ReaderSession {
                         // 不一样：那一腿 `progress` 是往 0 退的）。
                         let (grip, revert) = match frame.run {
                             TurnRun::Released { from, revert, .. } => {
-                                let u =
-                                    turn_animation::release_clock(frame.progress, from, revert);
+                                let u = turn_animation::release_clock(frame.progress, from, revert);
                                 if revert {
-                                    (frame.grip, Some(u))
+                                    (frame_grip, Some(u))
                                 } else {
                                     (
-                                        frame.grip.map(|grip| {
-                                            turn_animation::release_grip(grip, u, free_right, area)
+                                        frame_grip.map(|grip| {
+                                            turn_animation::release_grip(
+                                                grip, u, free_right, curl_area,
+                                            )
                                         }),
                                         None,
                                     )
                                 }
                             }
-                            _ => (frame.grip, None),
+                            _ => (frame_grip, None),
                         };
                         // 摆位层（逐字裁剪）与 GPU 网格（判哪一半已经卷走）从这里**共走一个**入口：
                         // `cylinder_for` 一份几何两处用，「圆柱的轴就是那条折线」不可能在两处走样。
@@ -863,7 +926,7 @@ impl Render for ReaderSession {
                         if frame.style == PageTurn::Curl
                             && capture_valid
                             && let Some(cylinder) =
-                                turn_animation::cylinder_for(frame.progress, area, pose)
+                                turn_animation::cylinder_for(frame.progress, curl_area, pose)
                         {
                             // 途中那一帧的读数。「页边有时候一条黑带」这种抱怨没法用眼睛验，也
                             // 没法在 headless 里画出来，只能把这几组同源约束一起落进日志：几何
@@ -898,8 +961,8 @@ impl Render for ReaderSession {
                                 radius = cylinder.radius,
                                 "折页途中那一帧的读数"
                             );
-                            let page_width = area.width();
-                            let page_height = area.height();
+                            let page_width = curl_area.width();
+                            let page_height = curl_area.height();
                             if page_width > 0.0 && page_height > 0.0 {
                                 let paper = cx.theme().background.to_rgb();
                                 // 顶点与索引只由页宽页高决定，进度改的是 uniform。尺寸没变就
@@ -931,7 +994,7 @@ impl Render for ReaderSession {
                                     }
                                 };
                                 let page = Bounds::new(
-                                    point(px(area.left), px(area.top)),
+                                    point(px(curl_area.left), px(curl_area.top)),
                                     size(px(page_width), px(page_height)),
                                 );
                                 gpu_curl_mesh = Some(PageCurlMesh {
@@ -940,11 +1003,12 @@ impl Render for ReaderSession {
                                     vertices: mesh.vertices,
                                     indices: mesh.indices,
                                     uniforms: PageCurlUniforms {
-                                        page_origin: [area.left, area.top],
+                                        page_origin: [curl_area.left, curl_area.top],
                                         // 采样原点：先按本帧的页框填，画那一趟的回调里再换成
                                         // 「烘那一刻」的那一个（`curl_bake_origin`）。层在动时
                                         // 两者不同，混用就会采到纹理里未写的区域。
-                                        capture_origin: [area.left, area.top],
+                                        capture_origin: [curl_area.left, curl_area.top],
+                                        back_capture_origin: [curl_area.left, curl_area.top],
                                         page_size: [page_width, page_height],
                                         // `window_size` 与 `scale_factor` 由
                                         // `paint_page_curl_mesh` 按真实窗口与 DPI 覆盖，
@@ -958,6 +1022,13 @@ impl Render for ReaderSession {
                                         scale_factor: 1.0,
                                         back_color: [paper.r, paper.g, paper.b, 1.0],
                                         light_dir: [-0.35, -0.25, 1.0, 0.0],
+                                        cone_a: [
+                                            cylinder.cone_apex_s,
+                                            cylinder.cone_far_s,
+                                            cylinder.cone_weight,
+                                            cylinder.cone_min,
+                                        ],
+                                        cone_b: [cylinder.cone_max, 0.0, 0.0, 0.0],
                                     },
                                 });
                             }
@@ -966,8 +1037,8 @@ impl Render for ReaderSession {
                         // （见 `curl.rs`、`page_curl.wgsl`）。`shades_at` 的默认实现给回空清单，
                         // 所以这一句对别的几档就是「照旧」。`pose` 是上面拼的那一份：带着**补间
                         // 之后**的手与弹回的时钟，网格与摆位层读的都是它。
-                        shades = style.shades_at(frame.progress, area, pose);
-                        let [incoming, outgoing] = style.sheets_at(frame.progress, area, pose);
+                        shades = style.shades_at(frame.progress, curl_area, pose);
+                        let [incoming, outgoing] = style.sheets_at(frame.progress, curl_area, pose);
                         let leaving_ref = frame.leaving.unwrap_or(PageRef {
                             chapter: current,
                             page: self.page,
@@ -976,6 +1047,31 @@ impl Render for ReaderSession {
                             chapter: current,
                             page: self.page,
                         });
+                        // 同一张纸既当出场又当进场时不拆栏：正常走不到（`turn()` 只按
+                        // `TurnPlan` 里真会换页那几支起趟），但真走到了，拆栏会把两栏都判给
+                        // 捕获层，主场景一片空白。
+                        spread_curl = frame.style == PageTurn::Curl
+                            && mode == chrome::PageMode::Spread
+                            && leaving_ref != arriving_ref;
+                        leaf_column = if free_right { 1 } else { 0 };
+                        other_column = 1 - leaf_column;
+                        turn_leaving = Some(leaving_ref);
+                        turn_arriving = Some(arriving_ref);
+                        // 这一趟要烘的背面（捕获层 2）：揭起来那张纸的背面 = 目标跨页的另一半
+                        // （双页）/ 目标页整张（单页）。网格真画出来了才有采样它的人；同一趟里
+                        // 目标不变、纹理跨帧留着，所以只对**没烘过**的那一格烘一趟。
+                        // 跨章那一趟的目标章可能还没排完版：那一栏排不出内容，背面就只是一张
+                        // 清成纸色的空纹理（与同一帧底下那张目标页同样空着是一致的）。
+                        if gpu_curl_mesh.is_some() {
+                            let key = (
+                                arriving_ref.chapter,
+                                arriving_ref.page,
+                                if spread_curl { other_column } else { 0 },
+                            );
+                            if self.captured_back != Some((key, viewport)) {
+                                back_key = Some(key);
+                            }
+                        }
                         if arriving_ref.chapter != current {
                             // 跨章：源页往外走、目标页往里走，各用各的章。
                             cross_chapter = true;
@@ -992,9 +1088,11 @@ impl Render for ReaderSession {
                                 count = 2;
                             }
                         }
-                        // C 方案只摆进场那一张：旧页已经在捕获纹理里，由 GPU 网格卷。
-                        // 进场页要整张画（不裁）—— 网格的平面段会盖住 `d < 0` 那一半。
-                        if gpu_curl_mesh.is_some() {
+                        // 单页 C 方案只摆进场那一张：旧页已经在捕获纹理里，由 GPU 网格卷。
+                        // 双页不能只摆一张：静态页（当前跨页的另一半）与底层新页（下一跨页的
+                        // 同侧半页）都得留着，网格只盖住被揭起来的那一张 leaf。两张纸都不裁，
+                        // 由下面的逐栏跳过把 leaf 正面与背面取掉。
+                        if gpu_curl_mesh.is_some() && mode != chrome::PageMode::Spread {
                             let arriving_slot = if slots[0].0 == arriving_ref { 0 } else { 1 };
                             slots[0] = slots[arriving_slot];
                             count = 1;
@@ -1017,12 +1115,6 @@ impl Render for ReaderSession {
                     }
                     for which in order.into_iter().take(count) {
                         let (page_ref, at) = slots[which];
-                        // C 方案：进场页整张画，裁剪交给 GPU 网格的平面/卷曲面。
-                        let cut = if gpu_curl_mesh.is_some() {
-                            None
-                        } else {
-                            at.cut
-                        };
                         let Some(doc) = book.span_doc(page_ref.chapter) else {
                             continue;
                         };
@@ -1035,15 +1127,51 @@ impl Render for ReaderSession {
                             if slice.empty {
                                 continue;
                             }
+                            // 这一栏在**物理**上靠左还是靠右：判据一律读 `slice.column`，不读
+                            // `index` —— RTL 的书 `slices()` 按逻辑栏序给，两者是反的。
+                            let is_leaf = spread_curl && slice.column == leaf_column;
+                            let is_back = spread_curl && slice.column == other_column;
+                            // 折页那一趟这一栏归谁：
+                            //  - 揭起来那张纸的正面（leaf 那一栏）在 GPU 路径由网格从捕获纹理里
+                            //    取，主场景不再画它；CPU 兜底（纹理不可用那一帧）仍画，按折线裁字。
+                            //  - 背面那一栏（目标跨页的另一半）任何情况下都不进主场景 —— 它是纸
+                            //    的背面，只该出现在卷起来的那一片上。
+                            let skip_main = spread_curl
+                                && ((turn_arriving == Some(page_ref) && is_back)
+                                    || (gpu_curl_mesh.is_some()
+                                        && turn_leaving == Some(page_ref)
+                                        && is_leaf));
+                            // 这一栏要不要画进捕获层 2。`back_key` 只在纹理对不上这一趟的目标
+                            // 那一格时才是 `Some`：同一趟只烘一帧，后面那些帧用纹理里留着的那张。
+                            let to_back = back_key.is_some()
+                                && turn_arriving == Some(page_ref)
+                                && (is_back || !spread_curl);
+                            if skip_main && !to_back {
+                                continue;
+                            }
+                            // C 方案：进场页整张画，裁剪交给 GPU 网格的平面/卷曲面。
+                            // 双页的 CPU 兜底只裁 leaf 那一栏；静态页（另一半）不裁。
+                            let cut = if gpu_curl_mesh.is_some() || (spread_curl && !is_leaf) {
+                                None
+                            } else {
+                                at.cut
+                            };
                             let x = self.prefs.margin_x
                                 + column_offset(column_width, gap, slice.column)
                                 + shift_x;
                             let top = self.header_reserve + shift_y;
+                            // 背面那一栏要横向挪进 leaf 那一格：背面纹理按 leaf 那块矩形烘、网格
+                            // 也按 leaf 的尺寸采，而这一栏算出来的 x 是它自己那一栏的位置。
+                            if to_back && spread_curl {
+                                back_dx = column_offset(column_width, gap, leaf_column)
+                                    - column_offset(column_width, gap, slice.column);
+                            }
                             // 分页/双页这一臂的「在屏」就是这一片自己的行区间（片是引擎切的，
                             // 一片一栏）。两栏按 `index` 依次接上去：`slices()` 的顺序是
                             // 「页优先、页内按栏」的**逻辑**栏序，所以 RTL 的书念出来也是
-                            // 逻辑顺序 —— 与那一栏画在左边还是右边无关。
-                            if speaking {
+                            // 逻辑顺序 —— 与那一栏画在左边还是右边无关。只为**上屏**的那一栏
+                            // 收集：背面那一栏不在屏上，念出来就是把同一句话念两遍。
+                            if speaking && !skip_main {
                                 spoken.extend(spoken_lines(doc, slice.lines.clone()));
                             }
                             let mut scene = Scene::build(
@@ -1065,22 +1193,38 @@ impl Render for ReaderSession {
                             crate::ui::features::reader::model::perf::add(|f| {
                                 f.shape_runs_ns += __sh
                             });
-                            // 折页：这一张纸按它**自己那一条**裁剪收字 —— 进场那一张只画
-                            // 已经空出来的那一侧，出场那一张只画还平摊着的那一侧。裁剪与
-                            // 折面用的是同一条折线，所以影子收掉的那一刻字也正好收干净，
-                            // 不会出现「影子没了、字还压着走」的那一帧。
-                            if let Some(cut) = cut {
-                                for run in scene.runs.iter_mut() {
-                                    run.cut = Some(cut);
-                                }
+                            // 背面那一份不裁：整张纸的背面都得在纹理里，卷到哪儿就采到哪儿。
+                            // 克隆只到 run 这一层（`shaped` 是 `Arc<LineLayout>`），不重跑 shaping。
+                            if to_back {
+                                back_element.extend(scene.runs.iter().cloned());
                             }
-                            element.extend(scene.runs);
+                            if !skip_main {
+                                // 折页：这一张纸按它**自己那一条**裁剪收字 —— 进场那一张只画
+                                // 已经空出来的那一侧，出场那一张只画还平摊着的那一侧。裁剪与
+                                // 折面用的是同一条折线，所以影子收掉的那一刻字也正好收干净，
+                                // 不会出现「影子没了、字还压着走」的那一帧。
+                                if let Some(cut) = cut {
+                                    for run in scene.runs.iter_mut() {
+                                        run.cut = Some(cut);
+                                    }
+                                }
+                                element.extend(scene.runs);
+                            }
                             // 块级装饰（`background-color`、`border`、`<hr>`）也跟着那张纸
                             // 走：中心落在裁掉那一侧就整块不画。字是逐点裁的，而一个装饰块
                             // 是一个矩形、没有「裁一半」的画法 —— 逐像素的多边形裁剪要的是
                             // gpui 没有的东西（`ContentMask` 只有矩形）。留白块比伸到隔壁那
-                            // 张纸上的色块好读。
+                            // 张纸上的色块好读。捕获层里那两份副本照单全收（不裁）。
                             for decor in scene.decorations {
+                                if capture_front {
+                                    front_decor.extend(decoration_child(decor.clone()));
+                                }
+                                if to_back {
+                                    back_children.extend(decoration_child(decor.clone()));
+                                }
+                                if skip_main {
+                                    continue;
+                                }
                                 if cut.is_some_and(|cut| {
                                     !cut.keeps(
                                         decor.x + decor.width * 0.5,
@@ -1109,7 +1253,27 @@ impl Render for ReaderSession {
                                 else {
                                     continue;
                                 };
-                                if !shown {
+                                // 捕获层里那两份用不带手势的纯 `img`：同一屏摆两个同 id 的元素，
+                                // 命中区就叠了一份，「看大图」那一击会落到纹理的副本上。
+                                if capture_front {
+                                    front_images.push(plain_image(
+                                        image.x,
+                                        image.top,
+                                        image.width,
+                                        image.height,
+                                        rendered.clone(),
+                                    ));
+                                }
+                                if to_back {
+                                    back_children.push(plain_image(
+                                        image.x,
+                                        image.top,
+                                        image.width,
+                                        image.height,
+                                        rendered.clone(),
+                                    ));
+                                }
+                                if skip_main || !shown {
                                     continue;
                                 }
                                 let index = overlays.len();
@@ -1123,22 +1287,45 @@ impl Render for ReaderSession {
                                 ));
                             }
                             let __fills = crate::ui::features::reader::model::perf::Timer::start();
-                            annotation_fills(
-                                &mut element,
-                                doc,
-                                window,
-                                cx,
-                                &self.annotation_spans,
-                                &self.annotations,
-                                &palette,
-                                page_ref.chapter,
-                                x,
-                                slice.origin_y,
-                                slice.height,
-                                top,
-                                slice.origin_y..(slice.origin_y + slice.height + 1.0),
-                                cut,
-                            );
+                            // 正面那一份副本不用在这儿再算一遍批注：它整份克隆 `element`
+                            // （见下面 `capture_copy`），痕迹与高亮跟着一起过去。背面那一份
+                            // 是另一页的内容，得自己算一趟（同样不裁）。
+                            if !skip_main {
+                                annotation_fills(
+                                    &mut element,
+                                    doc,
+                                    window,
+                                    cx,
+                                    &self.annotation_spans,
+                                    &self.annotations,
+                                    &palette,
+                                    page_ref.chapter,
+                                    x,
+                                    slice.origin_y,
+                                    slice.height,
+                                    top,
+                                    slice.origin_y..(slice.origin_y + slice.height + 1.0),
+                                    cut,
+                                );
+                            }
+                            if to_back {
+                                annotation_fills(
+                                    &mut back_element,
+                                    doc,
+                                    window,
+                                    cx,
+                                    &self.annotation_spans,
+                                    &self.annotations,
+                                    &palette,
+                                    page_ref.chapter,
+                                    x,
+                                    slice.origin_y,
+                                    slice.height,
+                                    top,
+                                    slice.origin_y..(slice.origin_y + slice.height + 1.0),
+                                    None,
+                                );
+                            }
                             let __fills = __fills.ns();
                             crate::ui::features::reader::model::perf::add(|f| {
                                 f.fills_ns += __fills
@@ -1278,6 +1465,47 @@ impl Render for ReaderSession {
             .first()
             .zip(visual.highlights.last())
             .map(|(first, last)| (f32::from(first.center().x) + f32::from(last.center().x)) * 0.5);
+        // 捕获层 1（正面）那一份副本：字形与批注痕迹整份克隆（`shaped` 是 `Arc<LineLayout>`，
+        // 克隆只是引用计数，不重跑 shaping），块级装饰与图片在上面那个循环里各收了一份。
+        // 选中件不带 —— 高亮与把手是这一次交互的临时物，烘进纹理就跟着纸一起卷走了。
+        let front_copy = capture_front.then(|| element.capture_copy());
+        // 外壳进场那 280 ms 的横移：捕获层里的副本按 `-enter_shift` 画在**最终位置**上，捕获
+        // 矩形也按最终位置取（[`capture_region`]）。两处必须同一个数 —— 副本画在最终位置而矩形
+        // 按当下位置取，烘出来的就是错位的一页。
+        let enter_shift = self.enter_shift;
+        // 捕获层里的那两份副本。主 pass 只画 `order < CAPTURE_ORDER_BASE`，层里的东西不上屏、
+        // 只被捕获 pass 取走，所以它可以画在与上屏那一份不同的位置上（见上面 `enter_shift`）。
+        //
+        // 入树必须排在字形元素**之前**：`log_paint` 会把本帧那一份账 `take()` 走，副本晚了就
+        // 并进下一帧去（见 `perf::log_capture_paint`）。两份也不会同帧出现 —— 正面只在定住
+        // 那一帧烘，背面只在动画在飞且目标还没烘过时烘。
+        if let Some(copy) = front_copy {
+            column = column.child(capture_gate(1));
+            column = column.child(
+                div()
+                    .absolute()
+                    .left(px(-enter_shift))
+                    .top(px(0.0))
+                    .size_full()
+                    .children(front_decor)
+                    .child(copy)
+                    .children(front_images),
+            );
+            column = column.child(capture_gate(0));
+        }
+        if back_key.is_some() && curl_leaf.is_some() {
+            column = column.child(capture_gate(2));
+            column = column.child(
+                div()
+                    .absolute()
+                    .left(px(back_dx - enter_shift))
+                    .top(px(0.0))
+                    .size_full()
+                    .children(back_children)
+                    .child(back_element.capture()),
+            );
+            column = column.child(capture_gate(0));
+        }
         element = element.selection(visual);
         if matches!(self.source, Source::Book(_)) {
             element = element.reader(Some(cx.entity().downgrade()));
@@ -1331,16 +1559,38 @@ impl Render for ReaderSession {
         for image in overlays {
             column = column.child(image);
         }
+        // 双页中缝：两页纸在书脊处贴在一起的暗部。压在正文/图片之上、卷曲网格之下；
+        // 单页不画 —— 那里没有书脊，只有屏幕边缘。
+        if mode == chrome::PageMode::Spread {
+            let spine_x = area.left + area.width() * 0.5;
+            let gutter = (gap * 0.9).max(18.0);
+            let dark = hsla(0.0, 0.0, 0.0, 0.14);
+            let clear = hsla(0.0, 0.0, 0.0, 0.0);
+            let band = |left: f32, from: Hsla, to: Hsla| {
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(area.top))
+                    .w(px(gutter))
+                    .h(px(area.height()))
+                    .bg(linear_gradient(
+                        90.0,
+                        linear_color_stop(from, 0.0),
+                        linear_color_stop(to, 1.0),
+                    ))
+            };
+            column = column.child(band(spine_x - gutter, clear, dark));
+            column = column.child(band(spine_x, dark, clear));
+        }
+        // 捕获区清屏色必须取纸张底色；闭包里的 `window` 拿不到主题，所以先取好。卷曲网格取 uv
+        // 落在捕获矩形外半像素时，透明黑就是页边那条黑带的来源（参照实现的
+        // `glClearColor(mBackgroundColor)` 用同一个口径）。
+        let capture_clear = cx.theme().background.to_rgb();
         // 烘一张旧页纹理：就是上面那块 `area`，原点按这一栏在窗口里的位置补齐。纹理是整窗
         // 大小、只有这一块被写过，而网格取 uv 用的是 `(页框原点 + 局部坐标) / 窗口` —— 两处
         // 必须同一个数，差一个页边距就读成「纸上的字与底下那半页叠在一起」。
         if capture_needed {
-            let region = Bounds::new(
-                point(px(area.left), px(area.top)),
-                size(px(area.width()), px(area.height())),
-            );
-            // 捕获区清屏色必须取纸张底色；闭包里的 `window` 拿不到主题，所以先取好。
-            let capture_clear = cx.theme().background.to_rgb();
+            let region = capture_region(area, enter_shift);
             let committed = std::rc::Rc::clone(&self.capture_committed);
             column = column.child(
                 canvas(|_, _, _| {}, {
@@ -1350,16 +1600,11 @@ impl Render for ReaderSession {
                             bounds.origin.x + region.origin.x,
                             bounds.origin.y + region.origin.y,
                         );
-                        let right = f32::from(at.x) + f32::from(region.size.width);
-                        let bottom = f32::from(at.y) + f32::from(region.size.height);
-                        // 捕获纹理只有整窗大。页框只要有一部分在窗外，那一部分就永远烘不进
-                        // 纹理；而网格仍按完整页宽采 UV，右侧便会采到矩形外那条边（真机读数
-                        // 是一条黑色横带）。此时**不请求捕获**，下一帧等整层进场滑完再重试。
-                        if f32::from(at.x) < 0.0
-                            || f32::from(at.y) < 0.0
-                            || right > viewport.0
-                            || bottom > viewport.1
-                        {
+                        // 捕获纹理只有整窗大：页框有一截在窗外，那一截就永远烘不进去，而网格仍按
+                        // 完整页宽采 UV，边上便采到矩形外（真机读数是一条黑色横带）。此时**不请求
+                        // 捕获**，下一帧重试。进场那一段的横移已经在 `region` 里抵消掉了，走到这儿
+                        // 还不合身的只剩「窗口本身比这一页窄」（分屏、桌面把窗口拖小）。
+                        if !in_viewport(Bounds::new(at, region.size), viewport) {
                             return;
                         }
                         // 记下这一刻的原点：画网格那一趟取 uv 要用它，而不是本帧的。
@@ -1374,9 +1619,6 @@ impl Render for ReaderSession {
                             h = f32::from(region.size.height),
                             "烘这一页：捕获矩形"
                         );
-                        // 捕获矩形之外的清屏色取纸张底色：卷曲网格取 uv 落在矩形外
-                        // 半像素时，透明黑就是页边那条黑带的来源（参照实现的
-                        // `glClearColor(mBackgroundColor)` 用同一个口径）。
                         window.capture_page_region_with_color(
                             Bounds::new(at, region.size),
                             capture_clear,
@@ -1384,6 +1626,51 @@ impl Render for ReaderSession {
                         committed.set(Some((page_key, viewport)));
                     }
                 })
+                .absolute()
+                .inset_0(),
+            );
+        }
+        // 背面那张纹理：揭起来那张纸的背面 = 目标跨页的另一半（双页）/ 目标页整张（单页）。
+        // 内容与请求都排在**这一帧**：捕获 pass 在主 pass 之前编码，所以同一帧画进层 2 的东西，
+        // 这一帧的网格就采得到，不必为它多等一帧。
+        //
+        // 目标章还没排完版那一趟排不出内容（上面那个循环里 `span_doc` 给 `None` 就跳过了），
+        // 这一帧仍然请求捕获 —— 纹理被清成纸色，背面是一张干净的纸，而不是上一趟留下的字。
+        if let Some(key) = back_key
+            && let Some(leaf) = curl_leaf
+        {
+            let region = capture_region(leaf, enter_shift);
+            let committed = std::rc::Rc::clone(&self.capture_back_committed);
+            column = column.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let at = point(
+                            bounds.origin.x + region.origin.x,
+                            bounds.origin.y + region.origin.y,
+                        );
+                        if !in_viewport(Bounds::new(at, region.size), viewport) {
+                            return;
+                        }
+                        tracing::debug!(
+                            target: "folio_app::perf",
+                            chapter = key.0,
+                            page = key.1,
+                            column = key.2,
+                            dx = back_dx,
+                            x = f32::from(at.x),
+                            y = f32::from(at.y),
+                            w = f32::from(region.size.width),
+                            h = f32::from(region.size.height),
+                            "烘背面那一页：捕获矩形"
+                        );
+                        window.capture_page_region_back_with_color(
+                            Bounds::new(at, region.size),
+                            capture_clear,
+                        );
+                        committed.set(Some((key, viewport)));
+                    },
+                )
                 .absolute()
                 .inset_0(),
             );
@@ -1396,7 +1683,14 @@ impl Render for ReaderSession {
             column = column.child(
                 canvas(|_, _, _| {}, {
                     let bake_origin = std::rc::Rc::clone(&self.curl_bake_origin);
+                    // 正面纹理按整块版心烘，网格只卷其中一张 leaf：采样原点要往右让出 leaf 的
+                    // 起点（单页那一档 leaf 就是整块版心，这一格是 0）。
+                    let leaf_dx = curl_leaf.map_or(0.0, |leaf| leaf.left - area.left);
                     move |bounds, _, window, _| {
+                        // 走到这里必须已经切回主场景：漏了收尾那道闸，网格的 primitive 会排进
+                        // 捕获那一段、主 pass 一个都不画 —— 翻页就读成「字消失了但没有纸在卷」，
+                        // 而且不报错。
+                        debug_assert_eq!(window.capture_layer(), 0, "捕获层没切回主场景就画了网格");
                         let mut mesh = mesh.clone();
                         let origin = bounds.origin;
                         mesh.bounds.origin = point(
@@ -1415,7 +1709,11 @@ impl Render for ReaderSession {
                         // 没烘过（`None`）就与几何同源 —— 那一帧渲染器本来也会因为缺纹理
                         // 跳过这一趟。
                         if let Some((x, y)) = bake_origin.get() {
-                            mesh.uniforms.capture_origin = [x, y];
+                            mesh.uniforms.capture_origin = [x + leaf_dx, y];
+                            // 背面纹理按 leaf 那一块烘（见上面 `back_key` 那一段），它与正面
+                            // 采样原点差的正是同一个 `leaf_dx`：正面那张烘的是整块版心，
+                            // 背面那张只烘 leaf 那一格。
+                            mesh.uniforms.back_capture_origin = [x + leaf_dx, y];
                         }
                         // 两条原点并排打：它们不等就是层在动，而这正是那条黑带的成因。
                         tracing::debug!(
@@ -1470,6 +1768,9 @@ impl Render for ReaderSession {
         // 这一格**之外** —— 那部分落在 `gap_us` 里，这一层量不到。
         let __total = __render.ns();
         crate::ui::features::reader::model::perf::add(|frame| frame.render_ns = __total);
+        // 进书横移那 280 ms 里被旧页纹理门拒掉的那一趟，到这里再补。放在元素树搭完
+        // 之后：`turn()` 会改页号与 `laid_out`，中途调会让同一帧上下半截按两页画。
+        self.drain_pending_turn(cx);
         let listener = cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _window, cx| {
             // 挪动了才重画：滚到章尾夹住、分页没攒够半屏时一整帧的重建可以整份省掉
             // （判据与 gpui 的 `div` 滚动容器、zed editor 的 `scroll` 一致）。
@@ -1562,6 +1863,71 @@ fn paint_fold(
     if let Ok(built) = path.build() {
         window.paint_path(built, color);
     }
+}
+
+/// 捕获层的那道闸：在绘制回调里把场景切进 `layer`（`0` = 切回主场景）。
+///
+/// 用法是把要进层的内容夹在 `capture_gate(n)` 与 `capture_gate(0)` 之间，而且**中间不许有
+/// 别的东西画**：那一段里画的每个 primitive 都按层号排到 `CAPTURE_ORDER_BASE` 之上，主 pass
+/// 一律跳过。夹错了一处不报错，只是屏上少一块内容。
+fn capture_gate(layer: u8) -> AnyElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            // 进出这道闸各有一条不该破的规矩：进层之前必须停在主场景，切回主场景之前必须还在层里。
+            // 夹错一处不会报错，只会让后面所有内容都排进捕获那一段、主 pass 一个都不画。
+            let before = window.capture_layer();
+            debug_assert!(
+                if layer == 0 { before != 0 } else { before == 0 },
+                "捕获层夹错了：切到 {layer} 之前场景在 {before}"
+            );
+            window.set_capture_layer(layer)
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
+}
+
+/// 捕获层里的一张图：与 [`image_child`] 同一块矩形，但**不带**任何手势与元素 id。
+///
+/// 同一屏摆两个同 id 的元素，命中区就叠了一份 —— 「看大图」那一击可能落到纹理的副本上。
+/// 而层里这一份根本不上屏（主 pass 跳过它的 order），它只要被捕获 pass 取走，画出来就够。
+fn plain_image(
+    x: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    rendered: Arc<RenderImage>,
+) -> AnyElement {
+    div()
+        .absolute()
+        .left(px(x))
+        .top(px(top))
+        .w(px(width))
+        .h(px(height))
+        .child(img(rendered).size_full())
+        .into_any_element()
+}
+
+/// 捕获矩形（**元素局部**坐标）：`area` 那一块，横向抵消掉外壳进场那一段的横移。
+///
+/// 副本画在最终位置、矩形也按最终位置取，于是进书那 280 ms 里就能烘：页框滑出窗口的那一截
+/// 是永远烘不进纹理的（纹理只有整窗大），而网格随后按整页 UV 去采，边上一条黑带。
+fn capture_region(area: turn_animation::Area, enter_shift: f32) -> Bounds<Pixels> {
+    Bounds::new(
+        point(px(area.left - enter_shift), px(area.top)),
+        size(px(area.width()), px(area.height())),
+    )
+}
+
+/// 这一块是否完整落在窗口内 —— 出了一截就**不要**请求捕获（那一截永远烘不进来，
+/// 而网格仍按整页采 UV；真机读数就是页边那条黑色横带）。
+fn in_viewport(rect: Bounds<Pixels>, viewport: (f32, f32)) -> bool {
+    f32::from(rect.origin.x) >= 0.0
+        && f32::from(rect.origin.y) >= 0.0
+        && f32::from(rect.origin.x) + f32::from(rect.size.width) <= viewport.0
+        && f32::from(rect.origin.y) + f32::from(rect.size.height) <= viewport.1
 }
 
 /// 这一帧这张图画得出来吗 —— 顺手把「这一帧在场」记进图集（帧末的回收按这个数放人）。
@@ -1740,23 +2106,25 @@ fn open_on_tap(
     frame
         .id(("reader-image", index))
         .block_mouse_except_scroll()
-        .on_click(move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
-            let at = event.position();
-            // 这一击先问「选中」那一套，再谈放大 —— 走的是正文那一臂同一个入口
-            // （`ReaderSession::tap_on_body`，四条判据与顺序都写在那儿）。为什么要在
-            // 这一层问：`block_mouse_except_scroll` 把这一击从正文那三层里抢了过来，
-            // 正文那一臂就再也收不到它 —— 于是桌面上读 PDF 的人点在已划的那条线上，
-            // 会被这张图整页放大抢走，「挑回去改一条」那条路在定版式上断掉。
-            // 三条判据都不成立（没有选区、没压在划线上、不在拖选的合成 click 里）才开
-            // 大图：普通单击的行为与从前逐字相同。
-            let claimed = reader
-                .update(cx, |session, cx| session.tap_on_body(window, cx, at))
-                .unwrap_or(false);
-            if claimed {
-                return;
-            }
-            open_picture(&viewer, &reader, &key, window, cx);
-        })
+        .on_click(
+            move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                let at = event.position();
+                // 这一击先问「选中」那一套，再谈放大 —— 走的是正文那一臂同一个入口
+                // （`ReaderSession::tap_on_body`，四条判据与顺序都写在那儿）。为什么要在
+                // 这一层问：`block_mouse_except_scroll` 把这一击从正文那三层里抢了过来，
+                // 正文那一臂就再也收不到它 —— 于是桌面上读 PDF 的人点在已划的那条线上，
+                // 会被这张图整页放大抢走，「挑回去改一条」那条路在定版式上断掉。
+                // 三条判据都不成立（没有选区、没压在划线上、不在拖选的合成 click 里）才开
+                // 大图：普通单击的行为与从前逐字相同。
+                let claimed = reader
+                    .update(cx, |session, cx| session.tap_on_body(window, cx, at))
+                    .unwrap_or(false);
+                if claimed {
+                    return;
+                }
+                open_picture(&viewer, &reader, &key, window, cx);
+            },
+        )
         // 挂在最外层：宿主的测试要按 `("reader-image", 序)` 点在这张图上。
         .test_support()
 }
@@ -2049,7 +2417,11 @@ fn fixed_marks(
         let boxes = selection::page_boxes(text, span.start..span.end, at);
         let (lines, color, wavy) = match span.style {
             // 底色带压透明度：那一块是整片铺在字上的，实色会把字吃掉。
-            AnnotationStyle::Highlight => (boxes, palette.color(&span.color).opacity(HIGHLIGHT_ALPHA), false),
+            AnnotationStyle::Highlight => (
+                boxes,
+                palette.color(&span.color).opacity(HIGHLIGHT_ALPHA),
+                false,
+            ),
             AnnotationStyle::Line => (
                 strip_bottom(boxes, UNDERLINE_THICKNESS),
                 palette.color(&span.color),

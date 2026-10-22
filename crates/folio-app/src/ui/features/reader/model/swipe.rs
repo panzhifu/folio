@@ -39,6 +39,7 @@ use folio_core::PageTurn;
 use gpui_kit::base::motion::{Easing, Transition};
 use gpui_kit::{App, Context, Pixels, Point, TouchPhase};
 
+use crate::ui::features::reader::model::chrome::PageMode;
 use crate::ui::features::reader::model::session::{
     PageRef, ReaderSession, SwipeTrack, Turn, TurnRun, start_turn,
 };
@@ -314,6 +315,7 @@ impl ReaderSession {
         &self,
         cx: &App,
         axis: Axis,
+        intent: Option<TurnIntent>,
     ) -> Option<(Axis, f32, bool)> {
         if self.is_fixed() || self.book().is_none() || self.laid_out.mode.is_continuous() {
             return None;
@@ -323,8 +325,17 @@ impl ReaderSession {
             return None;
         }
         // 归一化与判轴用的是同一块版心：[`ReaderSession::page_area`]，与折线、捕获纹理同一把尺。
-        let dist = self.page_area.distance(style.axis());
-        (dist > 0.0).then(|| (style.axis(), dist, self.progression_rtl()))
+        // 双页折页的「一屏」是**一张 leaf**，不是整张跨页：从右侧划到中缝就该走满，不是走一半。
+        let rtl = self.progression_rtl();
+        let dist = if ConfigHolder::appearance(cx).page_turn == PageTurn::Curl
+            && self.laid_out.mode == PageMode::Spread
+        {
+            let free_right = intent.is_none_or(|intent| (intent == TurnIntent::Next) != rtl);
+            self.page_area.leaf(free_right).distance(style.axis())
+        } else {
+            self.page_area.distance(style.axis())
+        };
+        (dist > 0.0).then(|| (style.axis(), dist, rtl))
     }
 
     /// 把一个**窗口坐标**下的落点折成 [`ReaderSession::page_area`] 里的归一化位置。
@@ -476,7 +487,8 @@ impl ReaderSession {
             return SwipeStep::Swallow;
         };
         // 距离沿**这一档自己的那根轴**量（折页两轴都认，但它翻的是一张横排页）。
-        let Some((_, dist, rtl)) = self.swipe_geometry(cx, axis) else {
+        // 双页折页的「一屏」是一张 leaf；意图已经由 `track.claim` 定下，传进去才能拿到半屏宽。
+        let Some((_, dist, rtl)) = self.swipe_geometry(cx, axis, Some(intent)) else {
             return SwipeStep::Swallow;
         };
         let along = travel(toward(axis, rtl, track.dx, track.dy), intent);
@@ -503,11 +515,13 @@ impl ReaderSession {
             return Claim::Refused;
         };
         // 方向读**手指那根轴**（那一根上位移最大，读数最稳），走了多远沿这一档自己的那根量。
-        let Some((page_axis, _, rtl)) = self.swipe_geometry(cx, drag) else {
-            return Claim::Refused;
-        };
+        // `intent` 要先定：双页折页的「一屏」是左/右哪一张 leaf 由它决定，距离也跟着半屏走。
+        let rtl = self.progression_rtl();
         let Some(intent) = TurnIntent::from_delta(toward(drag, rtl, dx, dy).signum() as isize)
         else {
+            return Claim::Refused;
+        };
+        let Some((page_axis, _, _)) = self.swipe_geometry(cx, drag, Some(intent)) else {
             return Claim::Refused;
         };
         // 问决策层那一步是什么：书尾与「排版还没就绪」都不该起一趟。
@@ -532,7 +546,10 @@ impl ReaderSession {
         // 页面叠在一起；等入场动画结束、捕获完整后再划才有那张带正文的卷曲纸。
         let style = ConfigHolder::appearance(cx).page_turn;
         if style == PageTurn::Curl && !self.curl_capture_ready() {
-            return Claim::Refused;
+            // 这一笔先不跟手，但**别吞掉**：方向记下来，松手时 `turn()` 会在门开的那一帧
+            // 补一趟。返回 `Claimed` 让识别器把整笔归给翻页（不落到滚动），页号仍然不动。
+            self.pending_turn = Some(intent);
+            return Claim::Claimed;
         }
         let chapter = self.chapter_index();
         // 页号**不动**：`leaving` 是眼下这一页（权威），`arriving` 是松手后可能去的那一页。
@@ -587,7 +604,7 @@ impl ReaderSession {
             self.turn(intent, cx);
             return true;
         }
-        let Some((_, dist, rtl)) = self.swipe_geometry(cx, axis) else {
+        let Some((_, dist, rtl)) = self.swipe_geometry(cx, axis, Some(intent)) else {
             self.cancel_turn();
             return true;
         };

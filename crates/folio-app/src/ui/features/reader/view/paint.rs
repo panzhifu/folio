@@ -29,6 +29,10 @@ use crate::ui::features::reader::model::session::ReaderSession;
 
 /// 一条已经定好位置的 run，等于 `folio_core::layout::LineRun` 的绘制侧投影。
 /// `x` / `baseline` 相对本元素原点（行框左上角，未滚动时就是版心左上角）。
+///
+/// `Clone` 是给捕获层那一份副本用的（见 [`GlyphsElement::capture_copy`]）：`shaped` 是
+/// `Arc<LineLayout>`，克隆一条 run 只是几个标量加一次引用计数，不重跑 shaping。
+#[derive(Clone)]
 pub struct GlyphRun {
     pub text: SharedString,
     pub font: Font,
@@ -186,6 +190,7 @@ impl GlyphRun {
 /// 为什么不是「一屏一条 enum」：高亮带与实线在绘制上是同一句 `paint_quad`，差的只是那块
 /// 矩形多高、压多少透明度 —— 那是几何那一层（`view/body.rs`）算出来的事。只有波浪线需要
 /// 这一层多做一次路径构造，所以分叉只分在这里。
+#[derive(Clone)]
 pub(in crate::ui::features::reader) enum Mark {
     /// 一块实心矩形，坐标与 `runs` 同一套（元素局部）。高亮带与实线都走这一格。
     Quad(Bounds<Pixels>, Hsla),
@@ -291,6 +296,9 @@ pub struct GlyphsElement {
     /// 会话的弱引用：paint 时回写内容边界与把手命中区、注册手势监听。
     /// `None` = 兜底那一行没有书，不参与选中。
     reader: Option<WeakEntity<ReaderSession>>,
+    /// 这一份是**捕获层里的副本**，不是上屏那一份：`paint` 的耗时并进本帧那一份账，不另发
+    /// 一条 perf 记录（见 `perf::log_capture_paint`）。
+    capture: bool,
 }
 
 impl Element for GlyphsElement {
@@ -378,11 +386,20 @@ impl Element for GlyphsElement {
                 __shape_ns.set(__shape_ns.get() + __t.ns());
             }
         });
-        crate::ui::features::reader::model::perf::log_paint(
-            __paint.ns(),
-            __shape_ns.get(),
-            __glyphs,
-        );
+        if self.capture {
+            // 副本那一趟并进本帧那一份账，不另发一条 `render_ns = 0` 的记录。
+            crate::ui::features::reader::model::perf::log_capture_paint(
+                __paint.ns(),
+                __shape_ns.get(),
+                __glyphs,
+            );
+        } else {
+            crate::ui::features::reader::model::perf::log_paint(
+                __paint.ns(),
+                __shape_ns.get(),
+                __glyphs,
+            );
+        }
         selection::paint_handles(&self.selection, bounds.origin, window);
     }
 }
@@ -402,6 +419,7 @@ impl GlyphsElement {
             marks: Vec::new(),
             selection: SelectionVisual::default(),
             reader: None,
+            capture: false,
         }
     }
 
@@ -429,6 +447,28 @@ impl GlyphsElement {
 
     pub fn extend(&mut self, runs: impl IntoIterator<Item = GlyphRun>) {
         self.runs.extend(runs);
+    }
+
+    /// 捕获层要的那一份副本：同一批 run 与痕迹，但**不带**选中件与会话句柄。
+    ///
+    /// 选中高亮与把手是这一次交互的临时物，烘进页纹理就跟着纸一起卷走了；`reader` 更不能带 ——
+    /// `paint` 里那一句 `selection::register` 会给同一屏注册第二份手势监听。run 的克隆只是
+    /// 几个标量加一次 `Arc<LineLayout>` 引用计数（见 [`GlyphRun`]），不重跑 shaping。
+    pub(in crate::ui::features::reader) fn capture_copy(&self) -> Self {
+        Self {
+            runs: self.runs.clone(),
+            marks: self.marks.clone(),
+            selection: SelectionVisual::default(),
+            reader: None,
+            capture: true,
+        }
+    }
+
+    /// 标成「捕获层里的副本」。手写一份进层的内容时用（背面那一页不是从主场景克隆的，
+    /// 它是另一页的字）。
+    pub(in crate::ui::features::reader) fn capture(mut self) -> Self {
+        self.capture = true;
+        self
     }
 }
 

@@ -2360,7 +2360,7 @@ dependencies = [
 [[package]]
 name = "folio-curl"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51#b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=3d8535ed90b91cdbcc73403d6fe909f3a1990b3a#3d8535ed90b91cdbcc73403d6fe909f3a1990b3a"
 dependencies = [
  "bytemuck",
 ]
@@ -3226,7 +3226,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51#b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=3d8535ed90b91cdbcc73403d6fe909f3a1990b3a#3d8535ed90b91cdbcc73403d6fe909f3a1990b3a"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3511,7 +3511,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51#b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=3d8535ed90b91cdbcc73403d6fe909f3a1990b3a#3d8535ed90b91cdbcc73403d6fe909f3a1990b3a"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3666,7 +3666,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51#b5bd8dabd35f8900b27f0fad8f3c38513ab2aa51"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=3d8535ed90b91cdbcc73403d6fe909f3a1990b3a#3d8535ed90b91cdbcc73403d6fe909f3a1990b3a"
 dependencies = [
  "anyhow",
  "bytemuck",

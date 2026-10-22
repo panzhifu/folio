@@ -324,14 +324,33 @@ fn percentile(values: &[u64], ratio: f64) -> u64 {
     sorted[index]
 }
 
+/// 捕获层副本那一趟绘制：把耗时与字数**并进本帧那一份账**，不另发一条记录。
+///
+/// 正面与背面的副本在同一帧里各画一遍同一批字形（`shaped` 是共享的 `Arc<LineLayout>`，
+/// 重的只是走一遍字形那一环）。走 `log_paint` 就会给同一帧多发一条 `render_ns = 0` 的记录，
+/// 顺带把「帧间隔」那一栏灌进两趟绘制之间那几微秒的假间隙 —— 慢帧报告读起来像「翻页时有一帧
+/// 什么都没干」。
+///
+/// 前提是副本**先**画、上屏那一份**后**画（`view/body.rs` 里那两道 `capture_gate` 就排在字形
+/// 元素之前）：`log_paint` 会 `take()` 走这一份账，晚了就并不进同一帧，只会脏了下一帧。
+pub fn log_capture_paint(paint_ns: u64, shape_ns: u64, glyphs: u32) {
+    add(|frame| {
+        frame.paint_ns += paint_ns;
+        frame.shape_ns += shape_ns;
+        frame.glyphs += glyphs;
+    });
+}
+
 /// 绘制那一跳调用：补上绘制自己的两格，攒进窗口，慢帧当场报。
 pub fn log_paint(paint_ns: u64, shape_ns: u64, glyphs: u32) {
     let mut frame = take();
     // 本帧画过正文（`note_render` 在下一次出元素树时读走）。
     PAINTED.set(true);
-    frame.paint_ns = paint_ns;
-    frame.shape_ns = shape_ns;
-    frame.glyphs = glyphs;
+    // 三格都是**累加**：捕获层那两份副本在同一帧里各画一遍（见 `log_capture_paint`），
+    // 按 `=` 写就只剩最后那一趟的数，报出来的「这一帧画了多少字、花了多少」就不是这一帧的。
+    frame.paint_ns += paint_ns;
+    frame.shape_ns += shape_ns;
+    frame.glyphs += glyphs;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)

@@ -35,6 +35,18 @@ impl Grip {
     pub(in crate::ui::features::reader) fn new(from: (f32, f32), at: (f32, f32)) -> Self {
         Self { from, at }
     }
+
+    /// 把一手从**整屏**归一化坐标映进一张 leaf 的 0..1。
+    ///
+    /// 只映横轴：双页的 leaf 是左右半张，纵向与整页同一把尺。`from` 是手势归一化用的那块
+    /// 版心，`to` 是这一趟真正被揭起来的那半张 —— 两处同一把尺，折线才会从手指那一格起卷。
+    pub(in crate::ui::features::reader) fn remap(self, from: Area, to: Area) -> Self {
+        let x = |value: f32| ((value * from.width() + from.left) - to.left) / to.width().max(1.0);
+        Self {
+            from: (x(self.from.0), self.from.1),
+            at: (x(self.at.0), self.at.1),
+        }
+    }
 }
 
 /// 摆位层每一帧读的那一组：往哪边翻、这一本从哪边读、读者这一笔的手。
@@ -111,6 +123,17 @@ impl Area {
 
     pub(in crate::ui::features::reader) fn height(self) -> f32 {
         (self.bottom - self.top).max(0.0)
+    }
+
+    /// 双页里靠右/靠左的那半张纸。书脊落在整屏中线；`right = true` 时自由边在右，
+    /// 那一趟揭起来的是右半张。
+    pub(in crate::ui::features::reader) fn leaf(self, right: bool) -> Self {
+        let middle = self.left + self.width() * 0.5;
+        if right {
+            Self::new(middle, self.top, self.right, self.bottom)
+        } else {
+            Self::new(self.left, self.top, middle, self.bottom)
+        }
     }
 
     /// 按轴取那一屏的距离。取错那个数不会报错，只会让纸走半屏就落定。
@@ -443,8 +466,40 @@ mod tests {
     //! 搬自摆位层那一份：一挡的门跟着那一档走，共用的尺在 `testing.rs`。
 
     use crate::ui::features::reader::motion::turn_animation::curl::crease_of;
-    use crate::ui::features::reader::motion::turn_animation::geometry::Cut;
-    use crate::ui::features::reader::motion::turn_animation::testing::{W, page};
+    use crate::ui::features::reader::motion::turn_animation::geometry::{Area, Cut, Grip};
+    use crate::ui::features::reader::motion::turn_animation::testing::{H, W, page};
+
+    /// 双页的 leaf 是整屏的一半；手势从整屏归一化坐标映进 leaf 之后，右缘 = 1、中缝 = 0
+    /// （左 leaf 反过来）。映错一格，折痕就从手指旁边起卷。
+    #[test]
+    fn a_leaf_is_half_the_page_and_grips_remap_into_it() {
+        let area = Area::new(0.0, 0.0, W, H);
+        let right = area.leaf(true);
+        let left = area.leaf(false);
+        assert_eq!(right.width(), W * 0.5);
+        assert_eq!(left.width(), W * 0.5);
+        assert_eq!(right.left, W * 0.5);
+        assert_eq!(left.right, W * 0.5);
+        assert_eq!(right.top, area.top);
+        assert_eq!(right.height(), H);
+
+        let from = (W * 0.75, H * 0.5);
+        let grip = Grip::new((from.0 / W, from.1 / H), (W * 0.99 / W, from.1 / H));
+        let mapped = grip.remap(area, right);
+        assert!(
+            (mapped.from.0 - 0.5).abs() < 1e-5,
+            "整屏 75% 该是右 leaf 的 50%"
+        );
+        assert!((mapped.from.1 - 0.5).abs() < 1e-5, "纵向不该被映");
+        assert!(
+            (mapped.at.0 - 0.98).abs() < 1e-5,
+            "整屏 99% 该是右 leaf 的 98%"
+        );
+
+        let mapped_left = Grip::new((0.25, 0.5), (0.01, 0.5)).remap(area, left);
+        assert!((mapped_left.from.0 - 0.5).abs() < 1e-5);
+        assert!((mapped_left.at.0 - 0.02).abs() < 1e-5);
+    }
 
     /// 裁剪两侧用的是**同一个** `Cut` 判据（`paint.rs` 逐字剔那一步读的式子），
     /// 而且按点给的是严格不等号：正翻到「页的中线」与反翻到同一位置必须判得一样。

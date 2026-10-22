@@ -55,19 +55,20 @@ use crate::ui::features::reader::model::chrome::PageMode;
 /// 折线倾角的上限（弧度，从读书那根轴量起）。
 ///
 /// 读者竖着划那一笔，不夹的话折线会转成近水平 —— 纸从页顶或页底卷走，而书没有那两条自由边。
-/// 这一格照的是 `reference/gmpagecurl-ios` 的 `maxPhi = π/4 − 1°`（`InputUtils.swift:64` 那句
-/// `phi.clamp(to: -maxPhi...maxPhi)`，默认值在 `MetalPageCurlView.swift:60`）。
-const MAX_TILT: f32 = std::f32::consts::FRAC_PI_4 - 0.017_453_293;
+/// 参照 `reference/gmpagecurl-ios` 的 `maxPhi = π/4 − 1°` 取的是 44°；这里故意收到 **38°**，
+/// 让「手指已经很斜」那一档的折痕也不至于被掰成四十多度的硬边。可见斜角还要再乘下面的
+/// [`TILT_FOLLOW`]：`atan(0.35 × tan 38°) ≈ 15.3°`，与静读天下的观感对齐。
+const MAX_TILT: f32 = 38.0 * std::f32::consts::PI / 180.0;
 
 /// 折线转角对手指角度的**跟随系数**。
 ///
-/// 参照那一派（`harism`）是 1.0：折线永远垂直于划动向量，于是往左上角那一笔拖出 44° 的斜边
-/// —— 读者报的「角度太大」。书翻页时纸的折痕本来就不跟着手指转满：拇指斜着推，纸还是主要
-/// 沿横轴往里走。取 **0.5** 是把最斜那一档从 44° 压到约 22°，同时保留「往哪划就往哪折」这条
-/// 跟手感（系数给 0 就退回一根竖直扫过的棍，那是 `Cover` 那档的读法）。
+/// 参照那一派（`harism`）是 1.0：折线永远垂直于划动向量，于是往左上角那一笔拖出四十多度的
+/// 斜边 —— 读者报的「角度太大」。书翻页时纸的折痕本来就不跟着手指转满：拇指斜着推，纸还是
+/// 主要沿横轴往里走。取 **0.35** 后，手指 45° 那一笔的折痕约 15–16°，仍保留「往哪划就往哪折」
+/// 的跟手感（系数给 0 就退回一根竖直扫过的棍，那是 `Cover` 那档的读法）。
 ///
-/// 这个数是手感口径，不是几何推出来的：觉得还斜就往 0.35 调，觉得不跟手就往 0.7 调。
-pub(in crate::ui::features::reader) const TILT_FOLLOW: f32 = 0.5;
+/// 这个数是手感口径，不是几何推出来的：觉得还斜就往 0.30 调，觉得不跟手就往 0.40 调。
+pub(in crate::ui::features::reader) const TILT_FOLLOW: f32 = 0.35;
 
 /// **起手卷径**占页宽的几成。
 ///
@@ -253,6 +254,40 @@ pub(in crate::ui::features::reader) struct Cylinder {
     pub ny: f32,
     pub d: f32,
     pub radius: f32,
+    /// 圆锥顶点在折痕切向上的坐标（`t = (-ny, nx)`、`s = t·p`）。锥顶落在**书脊**上：
+    /// 半径从锥顶的 0 线性长到自由边的 `radius`，纸就不会沿折痕被均匀拉长。
+    pub cone_apex_s: f32,
+    /// 折痕与自由边的交点在切向上的坐标；与 `cone_apex_s` 一起定锥面的斜率。
+    pub cone_far_s: f32,
+    /// 圆锥相对于圆柱的权重：折痕越接近竖直、锥顶越远、越接近收尾，越退回圆柱。
+    /// `0` = 纯圆柱（与从前的行为逐字相同），`1` = 完整圆锥。
+    pub cone_weight: f32,
+    pub cone_min: f32,
+    pub cone_max: f32,
+}
+
+impl Cylinder {
+    /// 折痕切向坐标 `s` 处的圆锥半径。片元 shader 里那份 `radius_at` 与这里同一条式子；
+    /// 两处差一点，斜折痕上的受光就会与网格错开。生产路径只用 shader 那一份，这里留给门。
+    #[cfg(test)]
+    pub(in crate::ui::features::reader) fn radius_at(&self, s: f32) -> f32 {
+        let denom = self.cone_far_s - self.cone_apex_s;
+        let cone = if denom.abs() > 1.0 {
+            (self.radius * (s - self.cone_apex_s) / denom).clamp(self.cone_min, self.cone_max)
+        } else {
+            self.radius
+        };
+        (self.radius + (cone - self.radius) * self.cone_weight.clamp(0.0, 1.0)).max(0.001)
+    }
+}
+
+/// `0..1` 的平滑阶跃，`edge0 >= edge1` 时给 0 或 1。只给圆锥权重用，不追求数学上的通用。
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if edge1 <= edge0 {
+        return if x >= edge1 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// 这一帧的圆柱参数。`free_right` = 这一趟纸的**自由边在右**（见 [`Pose::free_edge_right`]：
@@ -274,11 +309,43 @@ pub(in crate::ui::features::reader) fn cylinder_at(
     } else {
         (-nx, width - axis.0)
     };
+    let d = nx * axis_u + ny * axis.1;
+    // 圆锥：锥顶 = 折痕与**书脊**的交点，自由边那一端给满 `radius`。`ny` 太小（折痕接近
+    // 竖直）时交点会跑到很远，半径随角度剧变 —— 这一档权重直接回 0，退回圆柱。
+    let (spine_x, free_x) = if free_right {
+        (0.0, width)
+    } else {
+        (width, 0.0)
+    };
+    let tangent = (-ny, nx);
+    let (apex_s, far_s) = if ny.abs() > 1e-4 {
+        let apex_y = (d - nx * spine_x) / ny;
+        let far_y = (d - nx * free_x) / ny;
+        (
+            tangent.0 * spine_x + tangent.1 * apex_y,
+            tangent.0 * free_x + tangent.1 * far_y,
+        )
+    } else {
+        (0.0, radius)
+    };
+    let spine_gap = if free_right { axis_u } else { width - axis_u };
+    // 锥顶可以远在页外（斜折痕与书脊的交点常常在页顶之上），远本身不是问题；旧版跳变是
+    // 锥顶**从近处快速跑远**那一档。所以这里只在极端远时淡出，阈值按页的对角量级取，
+    // 不能用页宽 —— 15° 的折痕就已经在 3–4 个页宽之外了。
+    let far_scale = (width + area.height()).max(1.0);
+    let cone_weight = smoothstep(0.12, 0.45, ny.abs())
+        * (1.0 - smoothstep(4.0 * far_scale, 8.0 * far_scale, (far_s - apex_s).abs()))
+        * smoothstep(0.0, 0.15 * width, spine_gap);
     Some(Cylinder {
         nx,
         ny,
-        d: nx * axis_u + ny * axis.1,
+        d,
         radius,
+        cone_apex_s: apex_s,
+        cone_far_s: far_s,
+        cone_weight,
+        cone_min: width * 0.03,
+        cone_max: width * 0.35,
     })
 }
 
@@ -608,8 +675,7 @@ mod tests {
         let area = page();
         for grip in release_grips() {
             let at = |u: f32| {
-                cylinder_for(0.5, area, hand(grip, true, Some(u)))
-                    .expect("弹回每一帧都量得出圆柱")
+                cylinder_for(0.5, area, hand(grip, true, Some(u))).expect("弹回每一帧都量得出圆柱")
             };
             let base = at(0.0);
             let total = at(1.0).d - base.d;
@@ -640,8 +706,8 @@ mod tests {
                     previous = now.d;
                 }
             }
-            let end = crease_for(0.5, area, hand(grip, true, Some(1.0)))
-                .expect("弹回终态量得出折线");
+            let end =
+                crease_for(0.5, area, hand(grip, true, Some(1.0))).expect("弹回终态量得出折线");
             assert!(
                 Poly::rect(area).past(end).area().abs() < 1.0,
                 "{grip:?} 弹回走完还折着纸：一片都没该折走，实得 {}",
@@ -721,6 +787,62 @@ mod tests {
         let rest = cylinder_at(0.0, true, area, Some(Grip::new((0.5, 0.5), (0.5, 0.5))))
             .expect("量得出圆柱");
         assert_eq!(rest.radius, 0.0);
+    }
+
+    /// 圆锥：半径从书脊的 0 线性长到自由边的 `radius`；折痕竖直时权重归 0，退回圆柱。
+    #[test]
+    fn the_cone_radius_grows_from_the_spine_to_the_free_edge() {
+        let area = page();
+        let cylinder =
+            cylinder_at(0.2, true, area, Some(Grip::new((0.5, 0.5), (0.35, 0.4)))).expect("量得出");
+        assert!(
+            cylinder.cone_weight > 0.1,
+            "斜着拖该长出圆锥，实得权重 {}",
+            cylinder.cone_weight
+        );
+        let at_spine = cylinder.radius_at(cylinder.cone_apex_s);
+        let at_free = cylinder.radius_at(cylinder.cone_far_s);
+        assert!(
+            at_free > at_spine + 1.0,
+            "自由边该比书脊宽：{at_spine} → {at_free}"
+        );
+        assert!(
+            (at_free - cylinder.radius).abs() < 1.0,
+            "自由边该回到调好的卷径 {}，实得 {at_free}",
+            cylinder.radius
+        );
+        let middle = (cylinder.cone_apex_s + cylinder.cone_far_s) * 0.5;
+        assert!(
+            cylinder.radius_at(middle) >= at_spine - 1e-3
+                && cylinder.radius_at(middle) <= at_free + 1e-3
+        );
+
+        // 竖折痕（横向拖）：锥顶在无穷远，权重必须干净地归 0，回退成原圆柱。
+        let vertical =
+            cylinder_at(0.5, true, area, Some(Grip::new((0.5, 0.5), (0.1, 0.5)))).expect("同上");
+        assert!(vertical.ny.abs() < 1e-5);
+        assert_eq!(vertical.cone_weight, 0.0);
+        assert!((vertical.radius_at(0.0) - vertical.radius).abs() < 1e-3);
+    }
+
+    /// 圆锥权重在角度扫掠里连续：旧版锥顶在书脊附近跑远时某一档会跳一帧，这条就是那条的回归门。
+    #[test]
+    fn the_cone_weight_does_not_jump_across_the_sweep() {
+        let area = page();
+        let mut previous: Option<f32> = None;
+        for step in 0..=80 {
+            let y = 0.5 - step as f32 * 0.004;
+            let cylinder = cylinder_at(0.5, true, area, Some(Grip::new((0.5, 0.5), (0.1, y))))
+                .expect("量得出");
+            let free = cylinder.radius_at(cylinder.cone_far_s);
+            if let Some(previous) = previous {
+                assert!(
+                    (free - previous).abs() < area.width() * 0.25,
+                    "第 {step} 步半径从 {previous:.1} 跳到 {free:.1}"
+                );
+            }
+            previous = Some(free);
+        }
     }
 
     /// 往回翻那一笔是**往右**拖的，律照样得走，而且拖到哪儿折到哪儿。
@@ -1129,6 +1251,30 @@ mod tests {
                 rest.past(x, y) < 0.0,
                 "按下没动的时候 ({x}, {y}) 该还平摊着，实得 past = {}",
                 rest.past(x, y)
+            );
+        }
+    }
+
+    /// 折痕的**可见**斜角比手指小一截，而且再斜也不会超过 `atan(TILT_FOLLOW · tan(MAX_TILT))`。
+    ///
+    /// 这一条守的是「往左上角翻，角度别像 harism 那样掰成四十多度」。只改 `MAX_TILT` 而不看
+    /// 跟随系数会误判：可见上限是两者的乘积，不是 44°/38° 本身。
+    #[test]
+    fn the_crease_is_straighter_than_the_finger_and_capped() {
+        let area = page();
+        let cap = (TILT_FOLLOW * MAX_TILT.tan()).atan().to_degrees();
+        assert!(cap < 16.0, "可见最大折痕斜角该在 16° 以内，实得 {cap:.1}°");
+        for (from, at) in [
+            ((0.5, 0.5), (0.1, 0.1)),
+            ((0.5, 0.5), (0.1, 0.0)),
+            ((0.5, 0.2), (0.2, 0.9)),
+            ((0.5, 0.8), (0.2, 0.1)),
+        ] {
+            let crease = crease_at(0.5, true, area, Some(Grip::new(from, at))).expect("量得出折线");
+            let slant = (crease.ny / crease.nx).abs().atan().to_degrees();
+            assert!(
+                slant <= cap + 0.1,
+                "手指从 {from:?} 划到 {at:?} 时折痕斜到 {slant:.1}°，超过了 {cap:.1}° 的上限"
             );
         }
     }

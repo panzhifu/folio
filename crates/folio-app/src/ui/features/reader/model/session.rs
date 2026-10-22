@@ -30,6 +30,7 @@ use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chrome::{PageMode, Reserve};
 use crate::ui::features::reader::model::fixed_book::FixedBook;
 use crate::ui::features::reader::model::measure::FontCache;
+use crate::ui::features::reader::model::turn::TurnIntent;
 use crate::ui::features::reader::motion::turn_animation::Area;
 use crate::ui::host::device_family;
 use crate::ui::services::config::ConfigHolder;
@@ -52,6 +53,12 @@ pub(in crate::ui::features::reader) struct CurlMesh {
 /// 键与尺寸要一起比，所以合成一个类型：页号章号在分屏 / 折叠展开 / surface 重建后一个字不动，
 /// 只有尺寸这一格拦得住那张被裁过的纹理。
 type CaptureCommit = ((usize, usize), (f32, f32));
+
+/// 背面那张纹理里躺着的是哪一格：`(章号, 页号, 物理栏)` + 那一刻的窗口尺寸。
+///
+/// 比正面那一格多出**栏**：双页折页揭起来那张纸的背面是目标跨页的另一半，同一个页号在
+/// 往前翻与往回翻时要的是左右两栏里不同的那一栏（栏号是物理的，RTL 的书与逻辑序相反）。
+type BackCommit = ((usize, usize, usize), (f32, f32));
 
 /// 视图现在拿的是什么内容。
 pub enum Source {
@@ -122,6 +129,12 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) laid_out: LaidOut,
     /// 正在走的那一次翻页动画（见 [`Turn`]）。`None` = 画面定住了。
     pub(in crate::ui::features::reader) turn: Option<Turn>,
+    /// 因为旧页纹理还没烘好而**被拒**的那一趟。下一帧门一开就补上。
+    ///
+    /// 进书那 280 ms 的横移里捕获不完整，`turn()`/`claim_swipe` 从前直接丢掉这一下 ——
+    /// 读者读到的是「第一划没反应，过一会儿才行」。现在把意图留在这里：不跟手，但门一开
+    /// 就按同一方向补一趟。偏好/模式/换书把它清掉，免得把上一个参照系的方向带过来。
+    pub(in crate::ui::features::reader) pending_turn: Option<TurnIntent>,
     /// 页面捕获纹理的脏标记：偏好/主题/排版变了就置真，下一帧重烘。
     pub(in crate::ui::features::reader) capture_dirty: bool,
     /// 上一次烘的是哪一页；页号/章号不变且不脏时不重复跑整页捕获 pass。
@@ -137,6 +150,9 @@ pub struct ReaderSession {
     /// 而网格按 `(页框原点 + 局部坐标) / 窗口` 取 uv。差一个页边距，卷起来那一片就采到横移的
     /// 页面，读成「纸上的字与对不齐的那半页叠在一起」。
     pub(in crate::ui::features::reader) page_area: Area,
+    /// 外壳进场横移的当前位移（逻辑像素）。捕获层按 `-enter_shift` 抵消它，
+    /// 于是进书 280 ms 期间也能按最终位置烘页，不必等层停稳。
+    pub(in crate::ui::features::reader) enter_shift: f32,
     /// 页面网格的顶点与索引缓存。它们只由页宽页高决定，每帧重造那近 1 MB 是纯浪费。
     pub(in crate::ui::features::reader) curl_mesh: Option<CurlMesh>,
     /// 烘那张页纹理**那一刻**，页框左上角落在窗口里的哪儿（逻辑像素）。
@@ -155,6 +171,14 @@ pub struct ReaderSession {
     /// 网格随后把整页 UV 映过去，右侧就采到矩形外，真机读数正是那条黑色横带。所以这里只在
     /// 「页框完整落在窗口内」时记下键与尺寸，下一次 `render` 才把 `captured_*` 落定并停止重试。
     pub(in crate::ui::features::reader) capture_committed: Rc<Cell<Option<CaptureCommit>>>,
+    /// 背面那张纹理里已经烘好的那一格（口径同 [`Self::captured_page`]，键多一栏见 `BackCommit`）。
+    ///
+    /// 与正面分开记：正面是「定住那一帧的当前页」，背面是「这一趟揭起来那张纸的背面」，
+    /// 而背面只有在动画**在飞**的那一帧才知道要烘谁。同一趟里目标不变 ⇒ 只烘第一帧，
+    /// 纹理跨帧留着；换一趟（或换栏、换尺寸、偏好重排）才对不上，那一帧重烘一次。
+    pub(in crate::ui::features::reader) captured_back: Option<BackCommit>,
+    /// 绘制回调把背面那一块交给捕获 pass 之后写回的键（口径同 [`Self::capture_committed`]）。
+    pub(in crate::ui::features::reader) capture_back_committed: Rc<Cell<Option<BackCommit>>>,
     /// 眼下按在正文上的那根手指：编号 + 此刻在 [`ReaderSession::page_area`] 里的位置。
     ///
     /// 只给折页那一档用。跟手翻页吃的是识别器折出来的 `ScrollWheelEvent`，而它在定性那一刻
@@ -419,13 +443,17 @@ impl ReaderSession {
             scroll_painted: 0.0,
             page_shift: (0.0, 0.0),
             turn: None,
+            pending_turn: None,
             capture_dirty: true,
             captured_page: None,
             captured_size: None,
             page_area: Area::new(0.0, 0.0, 0.0, 0.0),
+            enter_shift: 0.0,
             curl_mesh: None,
             curl_bake_origin: Rc::new(Cell::new(None)),
             capture_committed: Rc::new(Cell::new(None)),
+            captured_back: None,
+            capture_back_committed: Rc::new(Cell::new(None)),
             finger: None,
             pending_chapter_turn: None,
             turn_seq: 0,
@@ -544,13 +572,17 @@ impl ReaderSession {
             scroll_painted: 0.0,
             page_shift: (0.0, 0.0),
             turn: None,
+            pending_turn: None,
             capture_dirty: true,
             captured_page: None,
             captured_size: None,
             page_area: Area::new(0.0, 0.0, 0.0, 0.0),
+            enter_shift: 0.0,
             curl_mesh: None,
             curl_bake_origin: Rc::new(Cell::new(None)),
             capture_committed: Rc::new(Cell::new(None)),
+            captured_back: None,
+            capture_back_committed: Rc::new(Cell::new(None)),
             finger: None,
             pending_chapter_turn: None,
             turn_seq: 0,
@@ -995,6 +1027,35 @@ impl ReaderSession {
                     .capture_committed
                     .get()
                     .is_some_and(|(pending, _)| pending == key))
+    }
+
+    /// 把这一趟被旧页纹理门拒掉的翻页记下来，等门开了再补。
+    ///
+    /// 只存**意图**，不存手指位置：跟手那一截已经过去了，补的是一趟点屏同款的落定；
+    /// 同一个方向再划一次覆盖上一次，不会攒出一串迟到的翻页。
+    pub(in crate::ui::features::reader) fn queue_pending_turn(
+        &mut self,
+        intent: TurnIntent,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_turn = Some(intent);
+        cx.notify();
+    }
+
+    /// 渲染帧末调：门开了、没有手指、也没有正在走的动画时，把被拒的那一趟补上。
+    ///
+    /// 必须等这一帧的元素树搭完再调：`turn()` 会改页号与 `laid_out`，放在中途会让同一帧
+    /// 上半截按旧页、下半截按新页。晚一帧补上，读者看到的只是「翻页晚到一帧」，不是
+    /// 「这一划没了」。
+    pub(in crate::ui::features::reader) fn drain_pending_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(intent) = self.pending_turn else {
+            return;
+        };
+        if self.swipe.is_some() || self.turn_in_flight() || !self.curl_capture_ready() {
+            return;
+        }
+        self.pending_turn = None;
+        self.turn(intent, cx);
     }
 
     /// 读者在设置里改了字号、行距、缩进或字体，在这一帧同步进来。
