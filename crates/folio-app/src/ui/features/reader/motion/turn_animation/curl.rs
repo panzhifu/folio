@@ -59,6 +59,16 @@ use crate::ui::features::reader::model::chrome::PageMode;
 /// `phi.clamp(to: -maxPhi...maxPhi)`，默认值在 `MetalPageCurlView.swift:60`）。
 const MAX_TILT: f32 = std::f32::consts::FRAC_PI_4 - 0.017_453_293;
 
+/// 折线转角对手指角度的**跟随系数**。
+///
+/// 参照那一派（`harism`）是 1.0：折线永远垂直于划动向量，于是往左上角那一笔拖出 44° 的斜边
+/// —— 读者报的「角度太大」。书翻页时纸的折痕本来就不跟着手指转满：拇指斜着推，纸还是主要
+/// 沿横轴往里走。取 **0.5** 是把最斜那一档从 44° 压到约 22°，同时保留「往哪划就往哪折」这条
+/// 跟手感（系数给 0 就退回一根竖直扫过的棍，那是 `Cover` 那档的读法）。
+///
+/// 这个数是手感口径，不是几何推出来的：觉得还斜就往 0.35 调，觉得不跟手就往 0.7 调。
+pub(in crate::ui::features::reader) const TILT_FOLLOW: f32 = 0.5;
+
 /// **起手卷径**占页宽的几成。
 ///
 /// 这是「折成硬片」与「卷成圆筒」之间唯一多出来的自由度，也是苹果那种仿真感的来源：纸不是
@@ -197,7 +207,10 @@ fn curl_of(progress: f32, area: Area, grip: Option<Grip>) -> Option<Roll> {
     // 这一格是**故意偏离参照**的：harism 允许（它卷的是一张自由的纸），书不许。夹的是纵向**偏移
     // 量**而不是角度，所以横向往复一格没动的竖划正好退化成「纸还没动」。
     let limit = MAX_TILT.tan() * dir_x.abs();
-    let dir_y = dir_y.clamp(-limit, limit);
+    // 折线的转角只吃手指角度的 `TILT_FOLLOW` 那一半：斜划仍然斜折（跟手），但纸不会被掰成
+    // 一条四十多度的斜边。上限在前、阻尼在后 —— 夹住的是「最斜能斜到哪」，阻尼管的是「平时
+    // 斜多少」。
+    let dir_y = dir_y.clamp(-limit, limit) * TILT_FOLLOW;
     let dist = (dir_x * dir_x + dir_y * dir_y).sqrt();
     if dist < 1e-3 {
         // 一格没动：轴停在自由边之外一格，整页都在平摊侧。
@@ -499,6 +512,7 @@ mod tests {
     use crate::ui::features::reader::motion::turn_animation::curl::Curl;
     use crate::ui::features::reader::motion::turn_animation::curl::MAX_TILT;
     use crate::ui::features::reader::motion::turn_animation::curl::ROLL;
+    use crate::ui::features::reader::motion::turn_animation::curl::TILT_FOLLOW;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_at;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_for;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_of;
@@ -1065,29 +1079,26 @@ mod tests {
                     (at.1 - from.1) * area.height(),
                 );
                 let long = (vx * vx + vy * vy).sqrt();
-                let dot = (crease.nx * vx + crease.ny * vy).abs() / long;
-                if (vy / vx).abs() <= MAX_TILT.tan() + 1e-3 {
-                    // 倾角上限之内：法向必须与划动向量平行。
-                    assert!(
-                        (dot - 1.0).abs() < 1e-3,
-                        "手指划向 ({vx:.0}, {vy:.0})，折线法向却给到 ({}, {})：|n·v̂| = {dot}",
-                        crease.nx,
-                        crease.ny,
-                    );
-                } else {
-                    // 超出上限的那几笔：法向只能被夹到上限那一格，仍然不许反向。
-                    assert!(
-                        crease.nx > 0.0,
-                        "斜到超出倾角上限时折线该被夹住而不是翻面，实得 ({}, {})",
-                        crease.nx,
-                        crease.ny
-                    );
-                    assert!(
-                        (crease.ny / crease.nx).abs() <= MAX_TILT.tan() + 1e-3,
-                        "倾角夹住了没有：实得斜率 {}",
-                        (crease.ny / crease.nx).abs()
-                    );
-                }
+                // 期望的法向按同一条式子算一遍：先夹到 [`MAX_TILT`]，再乘跟随系数。
+                let limit = MAX_TILT.tan() * vx.abs();
+                let ey = vy.clamp(-limit, limit) * TILT_FOLLOW;
+                let elen = (vx * vx + ey * ey).sqrt().max(1e-6);
+                let (want_nx, want_ny) = (-vx / elen, -ey / elen);
+                assert!(
+                    (crease.nx - want_nx).abs() < 1e-3 && (crease.ny - want_ny).abs() < 1e-3,
+                    "手指划向 ({vx:.0}, {vy:.0})：折线法向给到 ({:.3}, {:.3})，按「夹住再乘 {TILT_FOLLOW}」该是 ({want_nx:.3}, {want_ny:.3})",
+                    crease.nx,
+                    crease.ny,
+                );
+                // 上限这一侧仍然守得住：不管手指多斜，折线的斜率不许越过 `MAX_TILT`（阻尼之后
+                // 只会更小），也不许翻面。
+                assert!(crease.nx > 0.0, "折线法向翻面了：({})", crease.nx);
+                assert!(
+                    (crease.ny / crease.nx).abs() <= MAX_TILT.tan() + 1e-3,
+                    "倾角夹住了没有：实得斜率 {}",
+                    (crease.ny / crease.nx).abs()
+                );
+                let _ = long;
             }
         }
         // 同一个锚点，往上划与往下划转出**相反**的倾角。
