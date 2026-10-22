@@ -38,6 +38,11 @@ book_count_many = "%{count} books"
 book_count_other = "%{count} books"
 zoom_in = "Increase font size"
 zoom_out = "Decrease font size"
+# The bottom-bar entry for a fixed-layout book: hand this page to the zoom layer.
+# It lives there because on the touch end a long press now belongs to text selection
+# whenever the page has a text layer (PDF / AZW4 / DjVu), and that gesture used to be
+# the only way in.
+zoom_page = "Zoom page"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "Contents"
@@ -58,8 +63,11 @@ toc = "Contents"
 "search.label" = "Full text"
 "search.placeholder" = "Search the text of this book"
 "search.hint" = "Type what you are looking for"
-"search.none" = "Those words are not in this book"
-"search.scanning" = "Scanned %{done} of %{total} chapters"
+# 两句都不许出现「章 / 页」那个单位词：可重排那一族扫的是章，定版式那一族扫的是页，
+# 而这一屏只有一份读数。`none` 说的是「文字里」—— 一本没带文字的扫描本同样搜不出命中，
+# 那句「这本书里没有」会把「没有可搜的字」说成「没有这个词」。
+"search.none" = "Nothing was found in the text of this book"
+"search.scanning" = "Scanned %{done} of %{total}"
 "search.hits" = "%{hits} matches"
 "search.capped" = "Only the first %{hits} matches"
 night = "Night"

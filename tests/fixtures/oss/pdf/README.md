@@ -35,3 +35,39 @@ pdftoppm -r 72 -png three-pages.pdf /tmp/out  # 三页都画得出来（第 2 �
 
 写这份夹具的脚本（Python，与 Rust 合成器同构）留在版本历史里；它只用来生成字节，
 **不进测试路径** —— 测试读的是这个文件本身。
+
+## `wps-paper.pdf` —— 带文字层的**别人生产的**那一份
+
+前一份的形状是故意摆的，但它**一个字符都没有**：内容流只画灰矩形。于是「文字层」那一整条
+路（逐字盒、翻 y、词与词之间补缝）此前只被我们自己的合成器量过 —— 而合成器与解析器同时
+写错时，两边是互相圆场的。这一份补的就是那一格。
+
+| 格 | 值 |
+| --- | --- |
+| 生产者 | Kingsoft Office Professional（WPS）—— 与 Word、LaTeX、预览器各不相同的一条写盘路 |
+| 页 | 2 页，`612 × 792`（Letter），无 `/Rotate`、无 `CropBox` |
+| 字体 | `ABCDEF+TeXGyreTermes-{Regular,Bold,Italic,BoldItalic}`，`/Subtype /Type0` + `/Encoding /Identity-H` + 各带一份 `ToUnicode` CMap |
+| 大小 | 90 191 字节 |
+| 来源 | `reference/readest/apps/readest-app/src/__tests__/fixtures/data/sample-paper.pdf`（别家阅读器的测试夹具，正文是一份空白论文模板：`TITLE OF THE PAPER` / `Author(s) Name(s)` / `ABSTRACT`，没有创作内容） |
+
+字体那一格才是这份样本的价值：内容流里摆的不是 ASCII 而是**两位数码**，靠 `ToUnicode`
+折回 Unicode。一份书的字能不能选出来，全看这一折对不对，而这与我们自己写的合成器
+（`/Helvetica` 标准十四、不带字库、直接写 ASCII）是两条完全不同的路。
+
+裁判仍是 poppler：
+
+```sh
+pdfinfo wps-paper.pdf                       # Pages: 2 / 612x792 pts (letter) / Producer: Kingsoft Office Professional
+pdftotext -f 1 -l 1 wps-paper.pdf -         # TITLE OF THE PAPER / Author(s) Name(s) / ABSTRACT …
+pdftotext -f 1 -l 1 -bbox wps-paper.pdf -   # 逐词框：TITLE = xMin 249.000 yMin 99.230 xMax 280.211
+```
+
+门是 `crates/folio-core/src/content/format/pdf.rs` 的
+`a_real_producer_pdf_agrees_with_poppler_on_its_boxes`：x 轴对到 0.01 pt，y 轴对到 1 pt 以内
+（poppler 那个盒高是**行**的 16.03，我们的是**字号**的 12.0，差的就是那条 leading ——
+把它当「y 翻反了」去修就真的修错了）。
+
+**同一扇门里还钉着一条已知限制**：WPS 把词尾的空格算进了前一个字的前进量（`F` 宽 9.60 =
+字形 6.67 + 空格 2.93），于是几何上没有缝、poppler 分得开的两个词在这位引擎那里合成一个，
+摊平出来是 `TITLE OFTHE PAPER`。这条不是认命，是让它有名有姓：哪天引擎补回那一个空格，
+断言先红，改期望的那一手才轮得到人来决定。

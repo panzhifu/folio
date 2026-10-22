@@ -61,6 +61,25 @@ impl DocumentProvider for Azw4Adapter {
         let document = PdfDocument::from_bytes(bytes).ok()?;
         page_text(&document, page)
     }
+
+    /// 整本一次：**PalmDB 开一趟、那份 PDF 的字节解一趟**，然后逐页抽字。
+    ///
+    /// 比逐页问多省的还不止容器那一次：这一族每次问都要先把整份 PDF 从记录里
+    /// 拷出来再解一遍结构（`pdf_payload` 交回的是 `Vec<u8>`）。搜索那一趟走的必须是这一条。
+    fn page_texts(&self, path: &Path) -> Option<Vec<String>> {
+        let (_, bytes) = pdf_payload(path).ok()?;
+        let document = PdfDocument::from_bytes(bytes).ok()?;
+        let pages = document.page_count().ok()?;
+        Some(
+            (0..pages)
+                .map(|page| {
+                    page_text(&document, page)
+                        .map(|text| text.text())
+                        .unwrap_or_default()
+                })
+                .collect(),
+        )
+    }
 }
 
 /// 记录里那条 PDF 的起始记录号；判定层与本适配器共用。

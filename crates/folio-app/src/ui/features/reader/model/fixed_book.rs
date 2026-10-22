@@ -11,13 +11,15 @@
 //! 位置坐标与可重排共用 [`folio_core::Locator`]：定版式里 `chapter` 就是**页号**、
 //! `offset` 恒为 0（`LocatorKind::Page` 那条口径，见 `content::document`）。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use folio_core::Locator;
 use folio_core::content::document::Document as OpenedDocument;
-use folio_core::content::format::FixedPage;
-use folio_core::content::format::PageSource;
+use folio_core::content::format::{FixedPage, PageSource, PageText};
 use folio_core::content::format::pdf::RENDER_EDGE;
 use gpui_kit::SharedString;
 
@@ -48,7 +50,22 @@ pub struct PageTile {
     pub mime: String,
     /// 分享 / 下载那一条取的字节。
     pub export: ByteSource,
+    /// 这一格是**栅格化出来**的一页（PDF / AZW4 / DjVu），不是容器里的一条图。
+    ///
+    /// 绘制侧不看这一格（两格拿像素的路已经分在 `request` 里了），看它的是**选中那一条
+    /// 链**：只有栅格化出来的那一页有文字层，于是「屏幕点 ↔ 页内字序」那把尺必须记在
+    /// 这一格摆出去的矩形上，而不是记在多图页的第一张上。用 `href` 的前缀猜这件事等于
+    /// 把一种身份同时挂在两个地方。
+    pub renders: bool,
 }
+
+/// 那一格按页的文字层备忘：`(哪一页, 那一页的字层, 那一份串的哈希)`。
+///
+/// 内层是 `Option`，因为「这一页没有字」也是一份**答案**，而它必须被记下来 —— 不记的
+/// 那一版每帧都回引擎重开一次容器（一份扫描版 PDF 实测重开一趟 61–374 ms）。外层 `None`
+/// 才是「还没问过」。类型收成这一个名字是因为 `RefCell<Option<(usize, Option<Rc<..>>, u64)>>`
+/// 那种写法读起来像一叠括号，而这几层每一层都有含义。
+type PageTextMemo = Option<(usize, Option<Rc<PageText>>, u64)>;
 
 /// 一本打开着的定版式书。
 pub struct FixedBook {
@@ -61,6 +78,24 @@ pub struct FixedBook {
     /// 留住文档：字节要按 `href` 现取，渲染型的页要按页号现画，只有它知道容器怎么开。
     doc: Arc<dyn OpenedDocument>,
     page: usize,
+    /// 那一页的文字层（选中、色块、批注回显都问它），连同它属于第几页与那一份串的哈希。
+    ///
+    /// **必须留一份备忘**：`Document::page_text` 那一头每次问都要重开一次容器 —— PDF
+    /// 实测一份 3.6 MB、45 页的书重开一趟 374 ms（`format::pdf` 模块头那笔账）。
+    /// 而选中这一套在一帧里要问好几趟（命中、吸词、色块、落批注、回显），手指拖着走
+    /// 就是每来一个事件一趟。一页的字层只有一副样子，重开第二次买不到任何新信息。
+    ///
+    /// 只留**一页**而不是整本：这与 core 那边「文字层不入库、按页现取」是同一条立场
+    /// （`format::provider::DocumentProvider::page_text` 写的理由），一次阅读真正用得上
+    /// 的就是看得着的那一两页。翻页之后第一次长按会重付一次取字层，那一趟不在绘制
+    /// 热路径上，也不在读者手底下连发的第二、第三帧上。
+    ///
+    /// 那个哈希是**批注回显那一份缓存的键**（`annotations::resolved_for` 要一把尺问
+    /// 「这一页的字还是刚才那些字吗」）：算一次存在这里，而不是每帧把整页的字重数一遍。
+    /// 那一页的文字层（选中、色块、批注回显都问它），连同它属于第几页、那一份串、
+    /// 以及那份串的哈希。内层 `None` = **问过引擎，这一页没有字**（那也是一份答案，
+    /// 见 [`Self::cached_page_text`]）。
+    text: RefCell<PageTextMemo>,
 }
 
 impl FixedBook {
@@ -81,6 +116,7 @@ impl FixedBook {
             images,
             doc,
             page,
+            text: RefCell::new(None),
         }
     }
 
@@ -131,6 +167,7 @@ impl FixedBook {
                 href: href.clone(),
                 mime: self.images.media_type(href).unwrap_or("").to_string(),
                 export: self.images.source(),
+                renders: false,
             }),
             PageSource::Render { index } => {
                 // 页号是**引擎那一侧**的号（页表里存的就是它），与阅读序一致由
@@ -153,6 +190,7 @@ impl FixedBook {
                     // 这一条不看传进来的地址：渲染页的「原字节」就是按那一档画出来的
                     // 那张 PNG —— 没有「容器里另存着一份更大的原图」这回事。
                     export: Arc::new(move |_| render()),
+                    renders: true,
                 });
             }
         }
@@ -168,6 +206,7 @@ impl FixedBook {
                     .unwrap_or("")
                     .to_string(),
                 export: self.images.source(),
+                renders: false,
             });
         }
         out
@@ -180,6 +219,77 @@ impl FixedBook {
     fn render_bytes(&self, index: usize) -> Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync> {
         let document = self.doc.clone();
         Arc::new(move || document.render_page(index, RENDER_EDGE))
+    }
+
+    /// 当前这一页在**整本书那一列图**里的身份（图集的键）。
+    ///
+    /// 存在的理由只有一条：底栏那颗「整页」不在正文的绘制帧里，手上没有那张图的键，
+    /// 而放大那一层认的就是这个键（`ReaderSession::image_index_of_key`）。取**第一格
+    /// 有活儿的**那张：多图页的主图在前，而那一层一次只看一张。
+    ///
+    /// 一格都取不到（空页表、这一张不在图片索引里）时 `None` —— 按下去什么都不做，
+    /// 比开一层「0 / 0」、既滑不动也定不了位诚实（同 [`Self::build_image_sequence`] 那条
+    /// 「问不到那一列就这一击什么都不做」的立场）。
+    pub(in crate::ui::features::reader) fn current_page_key(&self) -> Option<String> {
+        self.page_tiles(self.page)
+            .into_iter()
+            .find_map(|tile| tile.request)
+            .map(|request| request.key)
+    }
+
+    /// 第 `page` 页的**文字层**（页内字序 + 逐字盒）。`None` = 这一页没有可读的字：
+    /// 漫画包的一页就是一张图，EPUB 的定版式字在 XHTML 里而不是在页上，扫描件没带 OCR。
+    ///
+    /// 「没有字」与「取字取失败」在这里**故意不分开**：两样在屏上是同一件事 —— 那一页
+    /// 选不出字，页的摆位不变（与 core 那条 `page_text` 的契约同一条立场）。
+    ///
+    /// 这一格按页备忘，理由见 [`Self::text`] 那一栏。
+    pub(in crate::ui::features::reader) fn page_text(&self, page: usize) -> Option<Rc<PageText>> {
+        self.cached_page_text(page).map(|(text, _)| text)
+    }
+
+    /// 第 `page` 页那一份字层此刻的**内容哈希**：批注回显那一份缓存的键
+    /// （`annotations::resolved_for` 按它问「这一页的字还是刚才那些字吗」）。
+    ///
+    /// 与 [`Self::page_text`] 同一次备忘，所以第二问不重开容器。这一页没有字时给
+    /// `None`：调用方要的正是「这一页有没有字要画」，而不是「哈希是多少」。
+    pub(in crate::ui::features::reader) fn page_text_key(&self, page: usize) -> Option<u64> {
+        self.cached_page_text(page).map(|(_, hash)| hash)
+    }
+
+    /// 备忘的那一格本身：命中就直接给，换了页才回引擎取一次。
+    ///
+    /// **「这一页没有字」也要记下来**。不记的话那一族每帧都回引擎重开一次容器：一份
+    /// 扫描版 PDF 实测重开一趟 61–374 ms（`format::pdf` 模块头那笔账），画十帧就是半秒，
+    /// 而那本书本来一个字也选不中、屏上什么都不该变 —— 付的完全是冤枉钱。缓存里那一格
+    /// 因此是 `Option`：`None` 是一份**答案**，不是「还没问过」。
+    fn cached_page_text(&self, page: usize) -> Option<(Rc<PageText>, u64)> {
+        let cached = self.text.borrow();
+        if let Some((at, text, hash)) = cached.as_ref()
+            && *at == page
+        {
+            return text.as_ref().map(|text| (text.clone(), *hash));
+        }
+        drop(cached);
+        let (text, hash) = match self.doc.page_text(page) {
+            Some(taken) => {
+                let hash = page_text_hash(&taken);
+                (Some(Rc::new(taken)), hash)
+            }
+            // 没字的那一页哈希记 0：它不参与批注回显那一份缓存（没有字就没有痕迹可解），
+            // 所以那个数在这一档没有读者。
+            None => (None, 0),
+        };
+        *self.text.borrow_mut() = Some((page, text.clone(), hash));
+        text.map(|text| (text, hash))
+    }
+
+    /// 留住的那份文档（页图要按 `href` 现取、渲染型的一页要按页号现画，都从它走）。
+    ///
+    /// 书内搜索那一趟也要它：那一趟按页取文字层，取的就是这一份（`Document::page_texts`）。
+    /// 交 `Arc` 而不是引用，是因为那一趟在作业线程上跑，活不过这一屏的借用。
+    pub(in crate::ui::features::reader) fn opened(&self) -> Arc<dyn OpenedDocument> {
+        self.doc.clone()
     }
 
     /// 这一本的目录：**文档自带的书签**（PDF 的 `/Outlines`）。
@@ -232,15 +342,33 @@ impl FixedBook {
     }
 }
 
+/// 一页文字层的内容哈希 —— 批注回显那一份缓存的键。
+///
+/// 数的是**字序**（那一串字，按页内阅读序），不数盒子也不数行号：缓存里存的是
+/// 「第几个字到第几个字」这一份解锚结果，而它只跟字有关。同一页换个 `RENDER_EDGE`
+/// 档位重画、或把窗口从手机挪到桌面，盒子在屏幕上的位置全变了，但那一段偏移该落在
+/// 哪几个字上一格不动 —— 拿盒子当键就会每帧重解一次，白付一遍整页的子串搜索。
+///
+/// 可重排那一族的同一把尺是 `Document::chapter_hash`（那一章文本的内容哈希）。两族
+/// 的算法不同、职责同一个：**键只能是「锚点坐标系所依据的那份内容」**，不能是排版代数。
+fn page_text_hash(text: &PageText) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for item in &text.chars {
+        item.ch.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
-    //! 定版式状态本身（页表 + 当前页）。不需要窗口：翻页只是一次夹取。
-
+    //! 定版式状态本身（页表 + 当前页 + 那一格按页的文字层）。不需要窗口：翻页只是一次夹取。
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use folio_core::Locator;
     use folio_core::content::format::{
-        Content, DocMeta, FixedDoc, FixedPage, Format, PageImage, PageSource,
+        Content, DocMeta, FixedDoc, FixedPage, Format, PageChar, PageImage, PageRect, PageSource,
+        PageText,
     };
 
     use super::FixedBook;
@@ -575,5 +703,176 @@ mod tests {
             "索引里没有这张图（这份假文档不带图片表），页表照旧"
         );
         assert!(fixed.page_tiles(1).is_empty(), "越界页是空表，不是 panic");
+    }
+
+    /// 一份**数得出来**的定版式文档：只为了问「回引擎取字层取了几趟、取的是第几页」。
+    ///
+    /// 计数住在测试这一侧是因为那一笔账没有别的可见症状：漏缓存不报错、不改变屏上的
+    /// 任何东西，只让每一帧多付一趟容器。
+    struct Counted {
+        meta: DocMeta,
+        content: Content,
+        /// 哪几页给得出字层。不在清单里的那些交 `None` —— 扫描本与漫画那一族的形状。
+        text_pages: Vec<usize>,
+        /// `Mutex` 而不是 `RefCell`：统一文档接口是 `Send + Sync` 的，而这一份计数只在
+        /// 测试里被同一根线程读写 —— 挑一个不会让整本书变得不能跨线程的容器。
+        asks: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl folio_core::content::document::Document for Counted {
+        fn meta(&self) -> &DocMeta {
+            &self.meta
+        }
+
+        fn kind(&self) -> folio_core::content::format::ContentKind {
+            self.content.kind()
+        }
+
+        fn content(&self) -> folio_core::content::document::ContentRef<'_> {
+            match &self.content {
+                Content::Reflow(flow) => folio_core::content::document::ContentRef::Reflow(flow),
+                Content::Fixed(fixed) => folio_core::content::document::ContentRef::Fixed(fixed),
+            }
+        }
+
+        fn image_bytes(&self, _href: &str) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn stylesheet(&self) -> String {
+            String::new()
+        }
+
+        fn chapter_source(&self, index: usize) -> folio_core::Result<String> {
+            Err(folio_core::Error::NoSuchChapter(index as i64))
+        }
+
+        fn page_text(&self, page: usize) -> Option<PageText> {
+            self.asks.lock().unwrap().push(page);
+            self.text_pages.contains(&page).then(|| PageText {
+                width: 100.0,
+                height: 60.0,
+                chars: vec![PageChar {
+                    ch: 'A',
+                    rect: PageRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 10.0,
+                        height: 12.0,
+                    },
+                    line: 0,
+                }],
+            })
+        }
+    }
+
+    fn counted(pages: usize, text_pages: &[usize]) -> (Arc<Counted>, FixedBook) {
+        let fixed = FixedDoc {
+            pages: (0..pages)
+                .map(|i| FixedPage {
+                    source: PageSource::Render { index: i as u32 },
+                    width: 100,
+                    height: 60,
+                    extra_images: Vec::new(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let doc = Arc::new(Counted {
+            meta: DocMeta {
+                title: "一本 PDF".into(),
+                authors: Vec::new(),
+                format: Format::Pdf,
+                size: 0,
+                ..DocMeta::default()
+            },
+            content: Content::Fixed(fixed),
+            text_pages: text_pages.to_vec(),
+            asks: std::sync::Mutex::new(Vec::new()),
+        });
+        let book = FixedBook::new(doc.clone(), Locator::start());
+        (doc, book)
+    }
+
+    /// 那一格按页备忘，而且**「这一页没有字」也要把答案记下来**。
+    ///
+    /// 两条各钉一段冤枉钱：
+    ///
+    /// - **有的那一页不缓存**：选中那一套一帧里要问好几趟（命中、吸词、色块、落批注、
+    ///   回显），而 provider 那一头每次问都重开一次容器 —— PDF 实测一份 3.6 MB、45 页的
+    ///   书重开一趟 374 ms（`format::pdf` 模块头那笔账）。
+    /// - **没有的那一页不缓存**：绘制那一臂每帧问一次，于是扫描本与漫画那一族**每一帧**
+    ///   白跑一趟容器 —— 十帧就是半秒，而那一本书屏上本来一个字都不会变。症状是「翻页
+    ///   卡」，线索却指向绘制，最难查的那种。
+    ///
+    /// `Rc::ptr_eq` 钉「第二次拿到的是同一份」，那份计数钉「引擎只被回过一趟」。
+    #[test]
+    fn the_text_layer_is_memoized_per_page_including_a_missing_one() {
+        let (doc, book) = counted(3, &[0]);
+        let first = book.page_text(0).expect("第 0 页写着字");
+        let again = book.page_text(0).expect("第二次问也该有");
+        assert!(Rc::ptr_eq(&first, &again), "同一页两次问到的是同一份");
+        assert_eq!(doc.asks.lock().unwrap().as_slice(), &[0], "第二趟不该回引擎");
+
+        // 没字的那一页：答案是 `None`，而这一问也要记账（只回引擎一次）。
+        assert!(book.page_text(1).is_none(), "第 1 页没字");
+        assert!(book.page_text(1).is_none(), "再问还是没字");
+        assert_eq!(
+            doc.asks.lock().unwrap().as_slice(),
+            &[0, 1],
+            "「没有字」也要缓存 —— 不记就是每帧白跑一趟容器"
+        );
+        // 键与字层共用同一份备忘。渲染帧每帧就是这一串问句（取字、取键、再取字），
+        // 而它们问的都是**同一页** —— 所以整串只该回引擎一趟。
+        assert!(book.page_text_key(1).is_none(), "没字的那一页没有键可给");
+        assert_eq!(
+            doc.asks.lock().unwrap().len(),
+            2,
+            "同一页上问键不该再回引擎"
+        );
+        // 换页才重取：只留**一页**是刻意的（与 core 那边「文字层不入库、按页现取」
+        // 同一条立场），翻回第 0 页就是第三趟 —— 那是那份立场明码标出的代价，
+        // 不是一处漏缓存。换回去之后同一页再问，仍然拿备忘。
+        assert!(book.page_text_key(0).is_some(), "有字的那一页该给得出缓存的键");
+        assert_eq!(doc.asks.lock().unwrap().len(), 3, "换页才重取一趟");
+        assert!(book.page_text(0).is_some());
+        assert_eq!(
+            doc.asks.lock().unwrap().len(),
+            3,
+            "回到同一页的第二次问还是拿备忘"
+        );
+    }
+
+    /// 底栏那颗「放大整页」用的身份：**当前在读的那一页**那一格，而不是第一格。
+    ///
+    /// 多图页取主图在前（与那一列图的顺序同一条），空页表取不到 —— 那一格按下去就
+    /// 什么都不做，比开一层「0 / 0」诚实。
+    #[test]
+    fn the_page_key_follows_the_page_being_read() {
+        let (_, book) = counted(2, &[0]);
+        let first = book.current_page_key().expect("这一页该有身份");
+        assert!(first.ends_with("/render/0@2048"), "身份要说清是哪一页: {first}");
+        let mut book = book;
+        book.set_page(1);
+        let second = book.current_page_key().expect("第二页也该有身份");
+        assert_ne!(first, second, "在读的那一页换了，身份跟着换");
+
+        // 一格都没有的书（空页表）取不出身份。
+        let empty = FixedBook::new(
+            Arc::new(Counted {
+                meta: DocMeta {
+                    title: "空".into(),
+                    authors: Vec::new(),
+                    format: Format::Pdf,
+                    size: 0,
+                    ..DocMeta::default()
+                },
+                content: Content::Fixed(FixedDoc::default()),
+                text_pages: Vec::new(),
+                asks: std::sync::Mutex::new(Vec::new()),
+            }),
+            Locator::start(),
+        );
+        assert_eq!(empty.current_page_key(), None, "没有可摆的一格就没有身份可问");
     }
 }

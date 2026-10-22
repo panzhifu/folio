@@ -1004,9 +1004,10 @@ impl TocPanel {
             .skip(range.start)
             .take(end - range.start)
             .map(|(ix, hit)| {
-                // 章名由会话按章号给：它手里那份章节表才是权威。命中自己不带标题，
-                // 免得同一章在目录那一屏与这一屏念出两个名字。
-                let title = reader.read(cx).chapter_title_at(hit.chapter);
+                // 那一行上面那句「这是哪儿的字」由会话给：可重排是章名（会话手里那份章节表
+                // 才是权威，命中自己不带标题，免得同一章在目录那一屏与这一屏念出两个名字），
+                // 定版式是「第几页 / 共几页」—— 那一族没有章表，念章名会念出一个空摆位。
+                let title = reader.read(cx).hit_place_at(hit.chapter, cx);
                 let pre: String = hit.snippet.chars().take(hit.mark.start).collect();
                 let mid: String = hit
                     .snippet

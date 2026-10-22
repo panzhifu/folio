@@ -36,6 +36,9 @@ book_count_many = "%{count} 本书"
 book_count_other = "%{count} 本书"
 zoom_in = "增大字号"
 zoom_out = "减小字号"
+# 定版式那一族底栏的入口：把这一页交给摊开看那一层。它搬到这里是因为手机上的长按
+# 现在归选中（那一页有字的时候），而那一手势原先是唯一的入口。
+zoom_page = "放大整页"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "目录"
@@ -55,8 +58,10 @@ toc = "目录"
 "search.label" = "全文"
 "search.placeholder" = "搜正文里的字"
 "search.hint" = "写下要找的那几个字"
-"search.none" = "这本书里没有那几个字"
-"search.scanning" = "搜到第 %{done} / %{total} 章"
+# 单位词一律不写：可重排那一族扫的是章，定版式那一族（PDF / AZW4 / DjVu）扫的是页。
+# `none` 念「文字里」—— 扫描本没有字可搜，那句不能把它说成「书里没有这个词」。
+"search.none" = "在这本书的文字里没找到"
+"search.scanning" = "已扫 %{done} / %{total}"
 "search.hits" = "命中 %{hits} 处"
 "search.capped" = "只看前 %{hits} 处"
 night = "夜间"

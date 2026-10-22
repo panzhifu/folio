@@ -451,3 +451,148 @@ fn the_local_books_answer_on_the_same_axis() {
 fn fixture(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
+
+// ---- 定版式那一族：一页是一段字，不是一章 ----
+
+/// 那本**带文字层的真样本**：Kingsoft Office（WPS）写的两页论文模板。
+///
+/// 为什么用它而不是仓库里那本 `three-pages.pdf`：后者的内容流只有一个灰矩形，
+/// 一个字都没有 —— 拿它测「扫得出命中」就是让断言空跑。它的形状正适合下面那条
+/// 「没有字的一页」那一道。
+fn wps() -> (PathBuf, Box<dyn Document>) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/oss/pdf/wps-paper.pdf");
+    let doc = crate::content::document::open(&path).expect("WPS 那本该开得动");
+    (path, doc)
+}
+
+/// 那一列字的第 `from..to` 个（按**字符**数，与 `Hit.start` / `Hit.end` 同一把尺）。
+fn chars(text: &str, from: usize, to: usize) -> String {
+    text.chars().skip(from).take(to.saturating_sub(from)).collect()
+}
+
+/// **契约门**：整本一次取齐的那一列，与逐页问的每一页**逐字节相同**。
+///
+/// 这条不是把契约抄一遍当测试。搜索命中的 `start` / `end` 是按那一列数的，而选中、
+/// 批注锚点按逐页问那一问的字序数 —— 两把尺一旦分叉，症状是「搜到了 `ABSTRACT`、
+/// 跳过去挑中的是别处那几个字」，而两处各自都仍然自洽，没有任何别的门会红。
+/// 没字的那一页：整本那一列给空串，逐页问给 `None` —— 这一条差在契约里写明了，
+/// 所以在这里也按那条折起来比。
+#[test]
+fn the_batched_pages_are_the_per_page_ones_byte_for_byte() {
+    let (path, doc) = wps();
+    let provider = crate::content::format::provider_for(&path).expect("PDF 该有 provider");
+    let batch = doc.page_texts().expect("带字的 PDF 该给得出整本");
+    let pages = doc.fixed().expect("这一本该是定版式").pages.len();
+    assert_eq!(batch.len(), pages, "整本那一列的长度就是页数");
+    for (page, text) in batch.iter().enumerate() {
+        let taken = provider
+            .page_text(&path, page)
+            .map(|layer| layer.text())
+            .unwrap_or_default();
+        assert_eq!(
+            &taken, text,
+            "第 {} 页两处不是一个序（整本 {} 字 vs 逐页 {} 字）",
+            page,
+            text.chars().count(),
+            taken.chars().count()
+        );
+    }
+}
+
+/// 扫得动，而报出来的那两个偏移**就是选中那套的偏移**。
+#[test]
+fn a_fixed_layout_book_searches_its_pages() {
+    let (_, doc) = wps();
+    let query = Query::parse("ABSTRACT").expect("有词");
+    let out = scan(&*doc, &query, &Options::default(), &StageCtx::detached());
+    assert!(
+        !out.hits.is_empty(),
+        "第一页写着 ABSTRACT，扫不出命中就是搜索坏了"
+    );
+    let hit = &out.hits[0];
+    assert_eq!(hit.chapter, 0, "那一格在这一族是页号：它在第一页");
+    let text = doc.page_texts().expect("整本")[hit.chapter].clone();
+    assert_eq!(
+        chars(&text, hit.start, hit.end),
+        "ABSTRACT",
+        "偏移摊回那一页的字序，念出来的就是查的那几个字"
+    );
+    assert_eq!(out.chapters, 2, "读数里的单位在这一族是页");
+    assert_eq!(out.scanned, 2, "两页都扫到了");
+    assert!(!out.truncated && !out.cancelled, "一趟干净的扫描");
+}
+
+/// 命中在**第二页**上也归第二页：那一趟真按页走，不是只扫首页。
+///
+/// 只钉首页的那一版实现（把整本拼成一串再扫、或 `break` 得太早）在这一条上红，
+/// 而它上面那两条照样绿 —— 所以这一条不是重复。
+#[test]
+fn a_hit_on_a_later_page_is_attributed_to_that_page() {
+    let (_, doc) = wps();
+    let query = Query::parse("COPYRIGHT").expect("有词");
+    let out = scan(&*doc, &query, &Options::default(), &StageCtx::detached());
+    let hit = out.hits.first().expect("第二页有 COPYRIGHT 那一行");
+    assert_eq!(hit.chapter, 1, "命中该归第二页，而不是被算到第一页头上");
+    assert!(
+        out.scanned == 2 || out.truncated,
+        "要扫到第二页才可能报出它：读数就该说扫到第二页（实际 {}）",
+        out.scanned
+    );
+}
+
+/// **大小写不敏感**那一圈在定版式上同样成立：WPS 那一行写的是 `COPYRIGHT FORMS`，
+/// 读者打的可能是 `forms`。这一族没有 DOM、没有可见文本的折法，折叠那一条路
+/// 走的是同一份 `each_hit`，所以它不该因为换了族就退化成区分大小写。
+#[test]
+fn a_folded_query_still_hits_a_typeset_page() {
+    let (_, doc) = wps();
+    let query = Query::parse("forms").expect("有词");
+    assert!(query.folds_case(), "带拉丁小写的查询要走折叠那一条");
+    let out = scan(&*doc, &query, &Options::default(), &StageCtx::detached());
+    assert!(!out.hits.is_empty(), "正文里写着 FORMS，`forms` 也该找得着");
+}
+
+/// 到上限就收手，并且把「后面可能还有」说出来。
+#[test]
+fn the_page_scan_stops_at_the_limit_and_says_so() {
+    let (_, doc) = wps();
+    let query = Query::parse("A").expect("一个字母也有得搜");
+    let tight = Options {
+        max_hits: 1,
+        ..Default::default()
+    };
+    let out = scan(&*doc, &query, &tight, &StageCtx::detached());
+    assert_eq!(out.hits.len(), 1, "到一档就收");
+    assert!(out.truncated, "收的手要说「没扫完」，界面才敢说「还有」");
+    assert_eq!(out.scanned, 1, "只扫过第一页");
+}
+
+/// 旗标置了就停，且以「取消」收尾而不是「扫完」。
+#[test]
+fn a_triggered_cancel_stops_the_page_scan() {
+    let (_, doc) = wps();
+    let ctx = StageCtx::detached();
+    ctx.cancel().trigger();
+    let out = scan(&*doc, &Query::parse("A").unwrap(), &Options::default(), &ctx);
+    assert!(out.cancelled, "置了旗标就该以取消收尾");
+    assert_eq!(out.scanned, 0, "一页都不该扫");
+}
+
+/// **没有文字层的那一本**：命中是空的，而页数照实报。
+///
+/// 用仓库里那本 `three-pages.pdf` —— 三页、内容流只有一个灰矩形、一个字都没有，
+/// 正是扫描件那一档的形状。这一条与上面几条配成一对：缺了它，「这本书没字可搜」
+/// 与「搜索坏了」「那个词不在书里」在界面上是同一句话，而读者的动作完全不同。
+#[test]
+fn a_wordless_book_scans_to_nothing_and_still_counts_its_pages() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let doc = crate::content::document::open(&path).expect("入库的那本夹具该读得开");
+    let out = scan(&*doc, &Query::parse("猫").unwrap(), &Options::default(), &StageCtx::detached());
+    assert!(out.hits.is_empty(), "一个字都没有，不该有命中");
+    assert_eq!(out.chapters, 3, "三页照实报 —— 界面念得出「这一本没有字」");
+    assert_eq!(out.scanned, 3, "三页都扫过（每页都是空串）");
+    assert!(!out.truncated && !out.cancelled);
+}
+

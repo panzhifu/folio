@@ -110,6 +110,26 @@ impl DocumentProvider for DjvuAdapter {
         let page = document.page(page).ok()?;
         page_text(&page)
     }
+
+    /// 全书每一页的字序，**容器只开一次**（契约见 [`DocumentProvider::page_texts`]）。
+    ///
+    /// 这一族的 `Document::page` 是从已经开好的索引里取一页，逐页问那一问重开的是整份
+    /// 文档 —— 搜索要的整本一遍因此必须走这一条。
+    fn page_texts(&self, path: &Path) -> Option<Vec<String>> {
+        let document = open_document(path).ok()?;
+        let pages = document.page_count();
+        Some(
+            (0..pages)
+                .map(|index| {
+                    document
+                        .page(index)
+                        .ok()
+                        .and_then(|page| page_text(&page).map(|text| text.text()))
+                        .unwrap_or_default()
+                })
+                .collect(),
+        )
+    }
 }
 
 /// 一页 DjVu → 文字层。PDF 那一路交 pt 与翻过的 y，这里交原生像素与**没翻**的 y

@@ -267,6 +267,18 @@ pub struct ReaderSession {
     /// 本帧两端把手的命中区（窗口坐标，那份尺寸见 `selection.rs` 引的 `TouchHandle`）。
     /// paint 每帧写入，事件时读。
     pub(in crate::ui::features::reader) handle_hits: HandleHits,
+    /// 定版式：**本帧画在屏上的那一格带文字层的页**（第几页 + 它在版心里的矩形）。
+    ///
+    /// 可重排那一族里「屏幕点 ↔ 章内字序」的换算住在 [`ReaderSession::to_layout`]，
+    /// 它读的是排版产物（片原点、栏宽、章基线）。定版式没有排版，那一把尺只有一处
+    /// 来源：**这一页的像素这一帧摆在哪、多大**。所以由定版式那一臂每帧写入，
+    /// 命中换算与色块两处读同一个数 —— 与 `page_shift` 那条立场相同：绘制烘进坐标的
+    /// 位移，命中必须减掉同一个数，否则色块与手指各按一把尺。
+    ///
+    /// 带着**页号**一起写：翻页动画走完之前那一帧摆的还是上一页，只记矩形不记页号，
+    /// 长按就会按着新一页的字序去解上一页的盒子（症状是色块整片偏到别处）。
+    /// `None` = 这一帧没有带文字层的页（漫画、EPUB 的定版式、扫描页），那一页选不出字。
+    pub(in crate::ui::features::reader) fixed_text_box: Rc<Cell<FixedTextBox>>,
     /// 本帧菜单条的位置（窗口坐标）。视图每帧写入；压在它上面的一击属于菜单，
     /// 不算「点别处清除」。
     pub(in crate::ui::features::reader) menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -351,6 +363,10 @@ pub struct Footnote {
 
 /// 把手命中区：`(哪一端, 命中盒)` 的每帧快照。paint 每帧整表重写，事件侧只读。
 type HandleHits = Rc<RefCell<Vec<(SelectionEdge, Bounds<Pixels>)>>>;
+
+/// 定版式那一族「屏幕点 ↔ 页内字序」那把尺的每帧快照：`(哪一页, 那一格在版心里的矩形)`。
+/// 外层 `None` = 这一帧没有带文字层的页（漫画、EPUB 的定版式、扫描页），那一页选不出字。
+type FixedTextBox = Option<(usize, Bounds<Pixels>)>;
 
 /// 拖选成立要越过的位移（逻辑像素）。更小的位移是手抖，不是选择——
 /// 普通点击（含触摸合成的按下/抬起）不该留下高亮。
@@ -440,6 +456,7 @@ impl ReaderSession {
             overlay_open: false,
             content_bounds: Rc::default(),
             handle_hits: Rc::default(),
+            fixed_text_box: Rc::default(),
             menu_bounds: Rc::default(),
             image_viewer: None,
             image_sequence:
@@ -568,6 +585,7 @@ impl ReaderSession {
             overlay_open: false,
             content_bounds: Rc::default(),
             handle_hits: Rc::default(),
+            fixed_text_box: Rc::default(),
             menu_bounds: Rc::default(),
             image_viewer: None,
             image_sequence:
@@ -779,12 +797,18 @@ impl ReaderSession {
 
     /// 全文检索那一趟要的东西：打开着的这份文档。
     ///
-    /// 定版式（CBZ / 逐页 SVG）与兜底那一行都回 `None` —— 前者没有「正文」这一列字，
-    /// 后者根本没有书。那一屏于是摆一句实话，而不是跑一趟注定为空的扫描。
+    /// 两族都在这一格里：可重排那一族扫章正文（`Document::chapter_source` 那一列），
+    /// 定版式那一族扫**每一页的文字层**（`Document::page_texts` 那一列）。分岔在
+    /// `folio_core::search::scan` 里按 `Content` 的两族划分走，界面只交出这份文档。
+    ///
+    /// 只有兜底那一行回 `None` —— 它根本没有书，那一趟注定为空，那一屏于是摆一句实话。
+    /// 定版式里**没有文字层**的那一本（漫画包、没带 OCR 的扫描本）仍然交得出文档：
+    /// 那一趟扫得完、命中是空的，与「这本书搜不了」是两件事。
     pub(in crate::ui::features::reader) fn searchable(&self) -> Option<Arc<dyn OpenedDocument>> {
         match &self.source {
             Source::Book(book) => Some(book.opened()),
-            Source::Sample(_) | Source::Fixed(_) => None,
+            Source::Fixed(book) => Some(book.opened()),
+            Source::Sample(_) => None,
         }
     }
 

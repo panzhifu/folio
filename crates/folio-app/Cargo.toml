@@ -27,7 +27,7 @@ folio-core.workspace = true
 # 仿真翻页那一档的页面网格与 uniform 的纯 CPU 定义：这里只拿数据，不拿 GPU 类型。
 # 它住在 `panzhifu/gpui-folio` 那个 workspace 里（四个成员之一），rev 必须跟根
 # `[patch.crates-io]` 那三条同一个数 —— 一份 fork 四个成员，钉成两个 rev 就是两份代码。
-folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "c261858052370b83a4f8725f42628c5dde0c459c" }
+folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "1ef09175cbfb46f19647bee205ab1c2d08716840" }
 gpui-kit.workspace = true
 # 只依赖 gpui-kit 一个门面：它顶层 `pub use ::gpui::*`，把移动端那份 `gpui-pre` 整个
 # 转了出来，所以两端都用 `use gpui_kit::…`，不再单独声明一条 `gpui` 依赖。
@@ -143,7 +143,20 @@ image = "0.25.10"
 # 这条 sha 是 amend 出来的：原来那条 `52f06cc` 正文末尾混进了一个字面 `EOF`（heredoc 多写了
 # 一行），清理只能改写 `fork/main` 顶端那一条，所以 pin 跟着换 —— `b1744b40` 的提交信息里
 # 写的 `52f06cc` 已经不在分支上了，以这里钉住的数为准。）
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "4a7e29a9d1effa81c5b15500198f2da8f54d7119", features = [
+# `5e39b46`（鸿蒙的「选择文件夹」第一次是真问：`prompt_for_paths` 从前直接答 `Ok(None)`，
+# 也就是「用户按了取消」，folio 的 `choose_dir` 把取消当无事发生，那颗按钮按下去连一句错都不
+# 留。NDK 没有 picker（`@ohos.file.picker` 只活在 ArkTS），所以形状只能是转发：ArkTS 用
+# `nativeSetFolderPicker` 注册一个函数，问走 request id + mode，答案从 `nativeDeliverPick` /
+# `nativeFailPick` 回来。顺带修掉一条错了很多年的枚举值 —— `NAPI_FUNCTION` 写的 6 其实是
+# `napi_object`（`undefined=0 … object=6, function=7`），于是每个 JS 函数参数都比成 object，
+# 两个收函数的入口一起回「argument is not a function」；键盘那条也是这一笔通的。）
+# `ad8fb25`（帧循环改按需，这条是 picker 能在模拟器上验完的前提：faultlog 里 10 份
+# `THREAD_BLOCK_6S`，主线程每次停在 `eglSwapBuffers → RequestBuffer → binder
+# WaitForCompletion` —— 缓冲区队列归合成器，它不消费就不返回，而 picker 一开正盖住我们的
+# XComponent。原先每帧无条件 re-arm，等于按 60Hz 撞满那条队列。现在 `demand` / `armed` 两格
+# 说了算，GPUI 那头本来就按这套契约升 demand（`frame_waker` / `schedule_frame` /
+# `wake_platform`）。）
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "ad8fb25993f1aa3e0d2ee6e5d3220fcc1dd63298", features = [
     "permission_handler",
     # 把视图渲成图（分享卡片那一格的地基）。要的是打了补丁的渲染器，见根上那条 patch。
     "offscreen",

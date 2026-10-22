@@ -236,6 +236,12 @@ impl Document for BookDocument {
         provider.page_text(path, page)
     }
 
+    fn page_texts(&self) -> Option<Vec<String>> {
+        // 整本一次：容器与句柄都只开一趟（那一笔就是这一问存在的全部理由）。
+        let (provider, path) = self.container()?;
+        provider.page_texts(path)
+    }
+
     fn stylesheet(&self) -> String {
         let ContentRef::Reflow(flow) = self.content() else {
             // 定版式没有作者样式表。

@@ -15,6 +15,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::slider::Slider;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt as _, ThemeMode, ThemeStyled as _,
     h_flex, v_flex,
@@ -209,12 +210,16 @@ impl ReadingPage {
         let toc_open = self.toc.read(cx).is_open(cx);
         let dark = cx.theme().mode == ThemeMode::Dark;
         let spread = self.reader.read(cx).wanted_mode() != PageMode::Continuous;
+        // 「放大整页」那一格**只在定版式那一族摆**：那一族才有「这一页就是一张图」这件
+        // 事，可重排那一族的插图另有入口（按宽度退档那一格在正文里，不在这一排）。
+        let fixed = self.reader.read(cx).fixed().is_some();
         let page_toc = cx.entity().clone();
         let page_night = cx.entity().clone();
         let page_spread = cx.entity().clone();
         let page_settings = cx.entity().clone();
         let night_label = tr(cx, if dark { "reader.day" } else { "reader.night" });
         let spread_label = tr(cx, "reader.mode_spread");
+        let zoom_label = tr(cx, "reader.zoom_page");
         h_flex()
             .w_full()
             .items_center()
@@ -242,6 +247,48 @@ impl ReadingPage {
                         page_settings.update(cx, |this, cx| this.pick(Panel::Reading, cx))
                     }),
             )
+            // 「放大整页」只在定版式那一族摆（判据在上面那一格 `fixed`）。
+            //
+            // 为什么这一格现在才需要：那一族的「看大图」原先挂在**长按**上，而那一族的
+            // 字如今住在同一页里 —— 长按要留给选中（与可重排正文同一条规矩：有字的地方
+            // 长按就是挑字），于是那一击不能再拿去看图。入口得有个不跟选中抢的地方，
+            // 而底栏这一排正是读者已经在找功能的位置。
+            //
+            // 只给图标，与「双页」那一格同一条理由：一排几格各带两个字，手机上每格会被
+            // 挤到点不准。
+            .when(fixed, |row| {
+                let zoom_reader = self.reader.clone();
+                let zoom_viewer = self.image_viewer.clone();
+                row.child(
+                    Button::new("entry-zoom-page")
+                        .ghost()
+                        .small()
+                        .flex_1()
+                        .justify_center()
+                        .icon(IconName::Maximize)
+                        .tooltip(zoom_label.clone().to_string())
+                        .accessibility_label(zoom_label)
+                        .on_click(move |_, window, cx| {
+                            // 键按**按下这一刻**问：从渲染到这一击之间读者可能已经翻过页，
+                            // 把键烘进闭包会开成上一页的那一张。
+                            let key = zoom_reader.read_with(cx, |session, _| {
+                                session.fixed().and_then(|book| book.current_page_key())
+                            });
+                            let reader = zoom_reader.downgrade();
+                            let Some(key) = key else {
+                                tracing::debug!("放大整页: 这一页取不到那张图的键，这一击什么都不做");
+                                return;
+                            };
+                            crate::ui::features::reader::view::body::open_picture(
+                                &zoom_viewer,
+                                &reader,
+                                &key,
+                                window,
+                                cx,
+                            );
+                        }),
+                )
+            })
             .child(
                 // 这一格只给图标：一排几格入口再各带两个字，手机上每格会被挤到点不准。
                 // 双页按宽度退档，所以这格在窄屏上也仍然按得下去（按下去就是分页）。

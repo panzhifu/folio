@@ -76,14 +76,17 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, LongPressEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, SharedString,
     StatefulInteractiveElement as _, Styled, TouchDragEvent, TouchPhase, WeakEntity, Window,
-    canvas, div, fill, hsla, point, px,
+    canvas, div, fill, hsla, point, px, size,
 };
+
+use folio_core::content::format::PageText;
 
 use crate::ui::features::reader::components::share_card;
 use crate::ui::features::reader::model::annotations::Palette;
 use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chapter_layout::Document;
 use crate::ui::features::reader::model::chrome;
+use crate::ui::features::reader::model::fixed_book::FixedBook;
 use crate::ui::features::reader::model::session::{
     DRAG_THRESHOLD_PX, EdgeDrag, MouseDrag, ReaderSession, Selection,
 };
@@ -103,8 +106,17 @@ pub(in crate::ui::features::reader) struct SelectionVisual {
     /// 那一端被裁出可视范围时不给 —— 把手跟着它标记的字消失，与 gpui-kit 一致。
     pub start_caret: Option<Bounds<Pixels>>,
     pub end_caret: Option<Bounds<Pixels>>,
-    /// 高亮与把手的颜色（主题的 selection 色）。
+    /// 把手的颜色（主题的 selection 色）。
     pub color: Hsla,
+    /// 高亮那一块另给一色的口子。**只有定版式那一族用它**。
+    ///
+    /// 理由是两族的层级相反：可重排的高亮压在字形**之下**，实色不会吃掉笔画；定版式的
+    /// 字在那张栅格出来的图里，高亮只能压在图**之上**，实色就把读者要选的那几个字糊掉了。
+    /// 所以那一族递一个压过透明度的色，而把手仍用上面那个实色 —— 一条半透明的把手
+    /// 在一页密密麻麻的字上根本找不着。
+    ///
+    /// `None` = 与把手同色（可重排那一族的从前）。
+    pub highlight_color: Option<Hsla>,
 }
 
 /// 高亮矩形：压在字形**之下**画，所以必须在字形之前调用。
@@ -117,8 +129,9 @@ pub(in crate::ui::features::reader) fn paint_highlights(
     origin: Point<Pixels>,
     window: &mut Window,
 ) {
+    let color = visual.highlight_color.unwrap_or(visual.color);
     for rect in &visual.highlights {
-        window.paint_quad(fill(*rect + origin, visual.color));
+        window.paint_quad(fill(*rect + origin, color));
     }
 }
 
@@ -647,8 +660,19 @@ impl ReaderSession {
     }
 
     /// 当前选区里的字。复制与笔记的引文用同一个来源：两处念出来的必须是同一段。
+    ///
+    /// 定版式那一族走 [`PageText::slice`]：跨行处补一个换行，复制出去还是那一行一行的
+    /// 样子。锚点存的那一串**不带**那个换行（它数的是字，见
+    /// `content::format::PageText::text_map`），两份串各有各的主人，别在这里合并成一串。
     pub(in crate::ui::features::reader) fn selected_text(&self) -> Option<String> {
         let selected = self.selection.as_ref()?;
+        if let Some(book) = self.fixed() {
+            let text = book
+                .page_text(selected.chapter)
+                .map(|text| text.slice(selected.range.clone()))
+                .unwrap_or_default();
+            return (!text.is_empty()).then_some(text);
+        }
         let text = self
             .book()
             .and_then(|book| book.span_doc(selected.chapter))
@@ -671,25 +695,57 @@ impl ReaderSession {
 
     /// 屏幕点 → `(哪一章, 章内字符偏移)`。没有书 / 版心还没量过 / 那一点落进的章
     /// 还没排出版来，都是 `None`。
+    ///
+    /// 定版式那一族在这一处岔开：它的「第几章」就是**第几页**（`LocatorKind::Page`
+    /// 那条口径），而换算不读排版产物 —— 那一族没有排版。见 [`Self::fixed_offset_at`]。
     pub(in crate::ui::features::reader) fn offset_at(
         &self,
         window: &Window,
         cx: &App,
         at: Point<Pixels>,
     ) -> Option<(usize, usize)> {
+        if let Some(book) = self.fixed() {
+            return self.fixed_offset_at(book, at);
+        }
         let (chapter, x, y) = self.to_layout(window, at)?;
         let doc = self.book()?.span_doc(chapter)?;
         doc.hit_test(window, cx, x, y)
             .map(|hit| (chapter, hit.offset))
     }
 
+    /// 屏幕点 → `(哪一页, 那一页字序里的插入点)`。
+    ///
+    /// 尺只有两把：那一格的页这一帧摆在版心里哪一块（[`ReaderSession::fixed_text_box`]，
+    /// 由定版式那一臂每帧写入），以及那一页自己的可见框多大（`PageText` 带着）。
+    /// 两把尺之间只差一个等比缩放，所以这里不做「猜比例」那一类兜底：量不出比例
+    /// 就是这一页选不出字，而不是把色块画到别处。
+    fn fixed_offset_at(
+        &self,
+        book: &FixedBook,
+        at: Point<Pixels>,
+    ) -> Option<(usize, usize)> {
+        let (page, box_) = self.fixed_text_box.get()?;
+        let text = book.page_text(page)?;
+        let (x, y) = page_units(&text, box_, at - self.content_bounds.get().origin)?;
+        text.hit(x, y).map(|index| (page, index))
+    }
+
     /// 屏幕点吸一个词（长按用）。命中不到字（纯图片行、空白）给 `None`。
+    ///
+    /// 定版式走 [`PageText::snap`]：那一份收边判据不重写，与排版那一族共用
+    /// `content::hit::CharClass`（拉丁连成词、中文与空白单字自为界），
+    /// 而它同样不跨行 —— 两条路的观感因此是一个手势一套规矩。
     fn word_at(
         &self,
         window: &Window,
         cx: &App,
         at: Point<Pixels>,
     ) -> Option<(usize, Range<usize>)> {
+        if let Some(book) = self.fixed() {
+            let (page, offset) = self.fixed_offset_at(book, at)?;
+            let word = book.page_text(page)?.snap(offset);
+            return (word.start < word.end).then_some((page, word));
+        }
         let (chapter, offset) = self.offset_at(window, cx, at)?;
         let word = self.book()?.span_doc(chapter)?.snap_word(offset);
         (word.start < word.end).then_some((chapter, word))
@@ -784,8 +840,140 @@ impl ReaderSession {
     }
 }
 
-// ====================== 就地菜单条（图标浮条 + 两条胶囊分列两端）======================
+// ====================== 定版式那一族的几何（页内字序 ↔ 屏上那一格）======================
 
+/// 那一页字序自己的尺 → 版心里那一格上的位置（元素局部坐标）。
+///
+/// `PageText` 的坐标单位是**它自己那一页的可见框**（`width` / `height` 那一格说清了
+/// 单位在哪里，见 `folio_core::content::format::PageText`），而屏上那一格是等比缩放后
+/// 的像素。两把尺之间只差这一个比例，所以横竖**各按各的轴**除：拿一个比例同时乘两条轴
+/// 等于假设页的宽高比与那一格的逐位相等，而取整与裁边都会让它差出一两个像素 ——
+/// 差出来的那一格在屏上是「色块偏一截」，不是「尺寸不对」。
+///
+/// 页的尺寸说不出来（0）、或那一格还没量过时给 `None`。宁可这一页这一帧选不出字，
+/// 也不按一个猜的比例把色块画到别的字上：前者读者只当这页没字（与扫描页同档），
+/// 后者是一条会说谎的痕迹。
+pub(in crate::ui::features::reader) fn page_units(
+    text: &PageText,
+    box_: Bounds<Pixels>,
+    local: Point<Pixels>,
+) -> Option<(f32, f32)> {
+    let scale = page_scale(text, box_)?;
+    Some((
+        (f32::from(local.x) - f32::from(box_.origin.x)) * scale.0,
+        (f32::from(local.y) - f32::from(box_.origin.y)) * scale.1,
+    ))
+}
+
+/// 那一页字序 → 屏上那一格的选区矩形（每行一条，与排版那一族同一口径：
+/// 一行一段连续的字并成一块，跨行断开）。夹在那一格之内 —— 色块不该长出页图去，
+/// 落在留白上的一条黄带读起来像选中的是页外的东西。
+pub(in crate::ui::features::reader) fn page_boxes(
+    text: &PageText,
+    range: Range<usize>,
+    box_: Bounds<Pixels>,
+) -> Vec<Bounds<Pixels>> {
+    let Some((per_px_x, per_px_y)) = page_scale(text, box_) else {
+        return Vec::new();
+    };
+    // [`page_scale`] 给的是「一像素等于多少页内单位」—— 命中要的正是那一把（屏幕点折回
+    // 字序）。色块要的是它的倒数（一个单位占几像素），两处都从同一条式子来：这样
+    // 「按在哪个字上」与「那块色画在哪」不可能各拿一把尺。
+    let (sx, sy) = (1.0 / per_px_x, 1.0 / per_px_y);
+    // 夹回那一格的四条边。手写而不叫 `Bounds` 自己求交：这一族要的只是「别长出页图」
+    // （落在留白上的一条黄带读起来像选中的是页外的东西），而 min/max 这两下不依赖
+    // 引擎版本给不给得出某个助手。
+    let (left, top) = (f32::from(box_.origin.x), f32::from(box_.origin.y));
+    let (right, bottom) = (left + f32::from(box_.size.width), top + f32::from(box_.size.height));
+    text.rects(range)
+        .into_iter()
+        .filter_map(|rect| {
+            let x0 = (left + rect.x * sx).clamp(left, right);
+            let x1 = (left + (rect.x + rect.width) * sx).clamp(left, right);
+            let y0 = (top + rect.y * sy).clamp(top, bottom);
+            let y1 = (top + (rect.y + rect.height) * sy).clamp(top, bottom);
+            if x1 <= x0 || y1 <= y0 {
+                return None;
+            }
+            Some(Bounds::new(
+                point(px(x0), px(y0)),
+                size(px(x1 - x0), px(y1 - y0)),
+            ))
+        })
+        .collect()
+}
+
+/// 定版式这一帧的选中几何一次算齐：高亮那几块与两端把手。
+///
+/// 把手的落点交给首末那一块矩形，与可重排那一族同一条式子（`view/body.rs` 里那份）——
+/// 两端把手长在色块的字缘上这一观感不该因为这一族没有排版就换一套。
+pub(in crate::ui::features::reader) fn page_visual(
+    text: &PageText,
+    range: Range<usize>,
+    box_: Bounds<Pixels>,
+    color: Hsla,
+    highlight: Hsla,
+) -> SelectionVisual {
+    let highlights = page_boxes(text, range, box_);
+    let start_caret = highlights
+        .first()
+        .map(|first| Bounds::new(first.origin, size(px(0.0), first.size.height)));
+    let end_caret = highlights
+        .last()
+        .map(|last| Bounds::new(point(last.right(), last.top()), size(px(0.0), last.size.height)));
+    SelectionVisual {
+        highlights,
+        start_caret,
+        end_caret,
+        color,
+        highlight_color: Some(highlight),
+    }
+}
+
+/// 那一层「盖在页图之上」的选中件：色块、把手，以及那几条手势监听。
+///
+/// 为什么定版式要另起一层，而不是复用字形元素里那一份：这一族的字就在那张栅格出来的
+/// 图里，而 gpui 的 z-order 是后入树者居上 —— 页图是 `overlays`，比字形元素晚入树，
+/// 所以压在字形之下的高亮与把手会被整页图盖得看不见。可重排那一族的高亮必须压在
+/// 字形**之下**才不吃掉笔画，两族要的层级正好相反。这里不是把同一件事画两遍，
+/// 是同一份 [`SelectionVisual`] 换一层画。
+///
+/// 监听也挂在这一层（`window.on_mouse_event` 只活到本帧事件分发结束，与 [`register`]
+/// 同一条规矩）。递进去的 `bounds` 是整块版心（这一层 `inset_0`），所以会话里
+/// `content_bounds` 写进来的与字形那一层是同一个数 —— 点按分区不必问自己盖的是哪一族。
+pub(in crate::ui::features::reader) fn overlay(
+    visual: SelectionVisual,
+    reader: &WeakEntity<ReaderSession>,
+) -> AnyElement {
+    let reader = reader.clone();
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, cx| {
+            paint_highlights(&visual, bounds.origin, window);
+            register(&visual, &reader, bounds, window, cx);
+            paint_handles(&visual, bounds.origin, window);
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
+}
+
+/// 那一格上**一像素等于多少页内单位**（横、竖各一条）。
+///
+/// 只有一条式子，两个方向用它的正反面：命中把屏幕点乘过去（[`page_units`]），色块把
+/// 页内盒除回来（[`page_boxes`]）。量不出来时 `None`，理由见 [`page_units`] —— 那一格
+/// 是这一族唯一「宁可什么都不画」的口子。
+fn page_scale(text: &PageText, box_: Bounds<Pixels>) -> Option<(f32, f32)> {
+    let width = f32::from(box_.size.width);
+    let height = f32::from(box_.size.height);
+    if text.width <= 0.0 || text.height <= 0.0 || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some((text.width / width, text.height / height))
+}
+
+// ====================== 就地菜单条（图标浮条 + 两条胶囊分列两端）======================
 /// 动作条里一格的可点边长（逻辑像素）。拇指能稳定命中的下限是 44，而图标本身只有
 /// 20：这里取 40 是参考图里那排图标的呼吸感，一颗一颗之间不挨着。
 const ACTION_CELL: f32 = 40.0;
@@ -1322,12 +1510,13 @@ mod tests {
     //! 点名导入而不 `use super::*`：`gpui_kit` 根把 `gpui` 整个转了出来，里面有一个
     //! 叫 `test` 的属性宏，glob 会让下面的 `#[test]` 递归展开成它。
 
-    use gpui_kit::{Bounds, point, px, size};
+    use folio_core::content::format::{PageChar, PageRect, PageText};
+    use gpui_kit::{Bounds, Hsla, point, px, size};
 
     use super::{
         ACTION_CELL, BAR_GAP, BAR_PAD, MARK_GAP, MENU_TAIL, STYLE_CELL, SWATCH_BAR, SWATCH_CELL,
         SelectionEdge, Slot, TouchHandle, action_cells, card_height, card_width, mark_row_width,
-        menu_left, slot, style_pill_width, swatch_pill_width,
+        menu_left, page_boxes, page_units, page_visual, slot, style_pill_width, swatch_pill_width,
     };
 
     /// 卡片总高（动作条 + 顶端那一行）。摆位只认递进去的这个数。
@@ -1479,5 +1668,137 @@ mod tests {
             let width = f32::from(TouchHandle::hit_bounds(edge, caret).size.width);
             assert!(width >= 44.0, "把手的可点宽低于拇指下限：{width}");
         }
+    }
+
+    // ---- 定版式那一族：页内字序 ↔ 屏上那一格 ----
+
+    /// 一页两行：第一行 `ab`，第二行 `中文`。页自己的框是 **100 × 60**（`PageText`
+    /// 的坐标单位就是它），每格 10 宽、行高 12。
+    fn page() -> PageText {
+        let rows = [('a', 0u32), ('b', 0), ('中', 1), ('文', 1)];
+        let mut chars = Vec::new();
+        for (index, (ch, line)) in rows.iter().enumerate() {
+            // 每行两格，一格 10 单位宽；行与行之间空 20。
+            chars.push(PageChar {
+                ch: *ch,
+                rect: PageRect {
+                    x: (index % 2) as f32 * 10.0,
+                    y: 10.0 + *line as f32 * 20.0,
+                    width: 10.0,
+                    height: 12.0,
+                },
+                line: *line,
+            });
+        }
+        PageText {
+            width: 100.0,
+            height: 60.0,
+            chars,
+        }
+    }
+
+    /// **两条轴各按各的比例**。这一格故意把那一格摆成 50 × 120（页框 100 × 60 的
+    /// 反比例），于是「拿一个比例同时乘两条轴」的写法会把纵坐标算成横的六倍：
+    /// 横 25 px ↔ 50 单位，纵 60 px ↔ 120 单位。
+    ///
+    /// 症状是色块与手指各指一处，而页面上看不出是哪条轴错了 —— 所以这一条按两条轴
+    /// 各自断言，而不是只断「落在那一个字上」。
+    #[test]
+    fn the_page_maps_each_axis_by_its_own_box() {
+        let box_ = Bounds::new(point(px(8.), px(20.)), size(px(50.), px(120.)));
+        // 页内 (10, 20) 那一格的正中 → 屏上 (8 + 5, 20 + 40)。
+        let back = page();
+        let at = point(px(13.0), px(60.0));
+        let (x, y) = page_units(&back, box_, at).expect("量得出比例");
+        assert!((x - 10.0).abs() < 0.01, "横该按 100/50 折：{x}");
+        assert!((y - 20.0).abs() < 0.01, "纵该按 60/120 折：{y}");
+        // 这一格左上角就是页内 (0, 0)。
+        let (x0, y0) = page_units(&back, box_, box_.origin).expect("同上");
+        assert_eq!((x0, y0), (0.0, 0.0));
+    }
+
+    /// 页框说不出来（0）或那一格还没量过时交 `None` —— 而不是猜一个比例。
+    ///
+    /// 猜的症状是色块画在别的字上（读者看得见、说不清），而 `None` 的表现与扫描页
+    /// 逐字节相同：这一页选不出字。宁可后者。
+    #[test]
+    fn an_unmeasurable_page_or_tile_selects_nothing() {
+        let box_ = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.)));
+        let no_size = PageText {
+            width: 0.0,
+            height: 0.0,
+            chars: page().chars,
+        };
+        assert!(page_units(&no_size, box_, point(px(1.), px(1.))).is_none());
+        let no_tile = Bounds::new(point(px(0.), px(0.)), size(px(0.), px(0.)));
+        assert!(page_units(&page(), no_tile, point(px(1.), px(1.))).is_none());
+        assert!(page_boxes(&page(), 0..4, no_tile).is_empty());
+    }
+
+    /// 色块**夹在那一格之内**。一页真 PDF 里偶尔有一个字的盒越过页面自己声明的可见框
+    /// （内容流把字排出页边，而 `PageText` 的宽与高说的就是那一带），选中那样的字之后
+    /// 黄带不许画到留白上 —— 落在页外的一条带读起来像「选中了页外的东西」。
+    ///
+    /// 同时钉住「按行并成一条」：末行那两个字的盒中间空了一大截，并成一条才能画得下
+    /// 一次跨它们的选中（`PageText::rects` 那一头是它自己数行号，这里只把它折上屏）。
+    #[test]
+    fn the_boxes_stay_inside_the_tile() {
+        // 页框 100 × 60 单位摆进 100 × 60 像素：一单位 = 一像素，好核对。
+        let box_ = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(60.)));
+        let mut page = page();
+        let last = page.chars.last_mut().expect("这一页有字");
+        last.rect.x = 90.0;
+        last.rect.width = 50.0; // 越过页框右沿 40 个单位
+        let boxes = page_boxes(&page, 0..4, box_);
+        assert_eq!(boxes.len(), 2, "两行各一条");
+        assert!(
+            boxes.iter().all(|rect| f32::from(rect.right()) <= 100.0 + 0.001
+                && f32::from(rect.origin.x) >= -0.001),
+            "色块探出那一格之外：{boxes:?}"
+        );
+        let second = &boxes[1];
+        assert!(
+            (f32::from(second.right()) - 100.0).abs() < 0.01,
+            "越界的那一条该收到页框右沿为止：{second:?}"
+        );
+        assert!(
+            f32::from(second.size.width) > 0.0,
+            "越界的一截也不能把整条丢掉 —— 读者选中的那几个字在屏上看得见"
+        );
+    }
+
+    /// 两端把手落在首末那两条的字缘上，而高亮另压一档透明度（那一族的字在页图里，
+    /// 实色会把要选的那几个字糊掉）。
+    #[test]
+    fn the_carets_sit_on_the_two_ends_and_the_band_is_translucent() {
+        let handle = Hsla {
+            h: 0.1,
+            s: 0.5,
+            l: 0.5,
+            a: 1.0,
+        };
+        let band = Hsla {
+            h: 0.1,
+            s: 0.5,
+            l: 0.5,
+            a: 0.35,
+        };
+        let box_ = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(60.)));
+        let visual = page_visual(&page(), 1..4, box_, handle, band);
+        assert_eq!(visual.highlights.len(), 2, "两行两条");
+        let start = visual.start_caret.expect("起手端该有把手");
+        assert_eq!(
+            (f32::from(start.origin.x), f32::from(start.size.width)),
+            (10.0, 0.0),
+            "起手那只把手落在 `b` 的字缘上"
+        );
+        let end = visual.end_caret.expect("收尾端该有把手");
+        assert_eq!(
+            f32::from(end.origin.x),
+            20.0,
+            "末了那只该落在最后那条的右沿"
+        );
+        assert_eq!(visual.color, handle, "把手用实色");
+        assert_eq!(visual.highlight_color, Some(band), "高亮用压过透明度的那一色");
     }
 }

@@ -266,8 +266,12 @@ impl PageText {
         index.min(self.chars.len())
     }
 
-    /// 一段偏移的原文。**跨行处插一个换行**：复制出去要还是那一行一行的样子，
-    /// 而批注的原文快照也存这一串（与排版那一侧同一条口径：快照带断行才认得出诗）。
+    /// 一段偏移的原文。**跨行处插一个换行**：复制出去要还是那一行一行的样子。
+    ///
+    /// 这一串**不进批注的原文快照**，也不进任何坐标系：坐标系数的是字、不数断行
+    /// （[`Self::text`] 那一串就是它），把带断行的这一串存进快照就等于给同一页立第二份
+    /// 坐标系，而「翻回原文」那一步只认其中一份。可重排那一族的段落之间同样不掺字节
+    /// （`</p><p>` 之间没有换行），所以两侧存的那一串本来就该同形。
     pub fn slice(&self, range: std::ops::Range<usize>) -> String {
         let start = self.clamp(range.start);
         let end = self.clamp(range.end).max(start);
@@ -286,6 +290,21 @@ impl PageText {
     /// 整页原文（不插换行，纯字序）。偏移空间就是它，所以 [`Self::slice`] 与它对得上。
     pub fn text(&self) -> String {
         self.chars.iter().map(|item| item.ch).collect()
+    }
+
+    /// 这一页的**锚点坐标系**：[`Self::text`] 那一串包成一张 [`TextMap`]。
+    ///
+    /// 定版式没有 DOM，所以这张表没有节点路径 —— 批注与进度因此走的是同一把尺、
+    /// 只是少一级找回办法（代价写在
+    /// [`TextMap::from_visible_text`](crate::content::anchor::TextMap::from_visible_text)）。
+    /// 存在的理由只有一条：「第几个字」这件事的算法（截取、上下文库、子串搜索）全在
+    /// 锚点那一层，而那一层的入口要的是 `TextMap`。在这里转一次形，界面就不必自己
+    /// 决定「这一页的坐标系该数什么」—— 那个决定只该有人做一次。
+    ///
+    /// 每次现建，不缓存：一页一份 `String` 与一张空表，而调用它的是「选中/落批注」
+    /// 那种一帧最多一次的事件，不是绘制热路径。
+    pub fn text_map(&self) -> crate::content::anchor::TextMap {
+        crate::content::anchor::TextMap::from_visible_text(self.text())
     }
 
     /// 点落在哪一格 → 插入点偏移（`0..=len`）。
@@ -632,5 +651,50 @@ mod tests {
         // 空区间与越界的区间都不该 panic，也不该画东西。
         assert!(page.rects(4..4).is_empty());
         assert_eq!(page.slice(6..999), "文字词");
+    }
+
+    /// 一页的**字序、锚点坐标系、色块**三件事必须是同一个序：界面拿 `hit` 得到的那个数
+    /// 直接建锚点、直接喂 `rects`，中间没有人换轴。
+    ///
+    /// 这条门存在的理由是一次失败要长什么样：换了轴的症状是「色块画在别的字上」与
+    /// 「划线翻回原文时对不上」，两处都不报错。而两族文档共用一把尺（可重排的坐标系
+    /// 数的是 DOM 文本节点拼起来的字，定版式数的是栅格引擎交出的字），两侧只要有一侧
+    /// 把断行也数进去，同一份批注 JSON 在两种书上就指两个地方。
+    #[test]
+    fn a_page_offsets_are_the_same_number_in_the_text_layer_and_the_anchor() {
+        use crate::content::anchor::{Confidence, TextAnchor, relocate};
+
+        let page = two_lines();
+        let map = page.text_map();
+        assert_eq!(map.text(), page.text(), "坐标系的那一串就是摊平的字序");
+        assert_eq!(map.chars(), page.char_count());
+        // 断行只在复制那一头还给读者：同一区间两份串，差的就是那一个换行。
+        assert_eq!(map.slice(0..page.char_count()), page.text());
+        assert_eq!(page.slice(0..page.char_count()), "ab cd\n中文字词");
+
+        // 第二行那四个汉字：`hit` 给的插入点、`rects` 画的色块、锚点存的区间三个数同形。
+        let start = page.hit(4.0, 34.0).expect("第二行行首该命中");
+        let end = page.hit(36.0, 34.0).expect("第二行行尾该命中");
+        assert_eq!((start, end), (5, 9));
+        assert_eq!(page.rects(start..end).len(), 1, "同一行并成一条色块");
+        let anchor = TextAnchor::new(&map, 3, start, end);
+        assert_eq!(anchor.exact, "中文字词", "快照存的是字序那一串");
+        assert_eq!(anchor.chapter, 3, "定版式里那一格就是页号");
+        assert!(anchor.path.is_empty(), "一页没有 DOM 路径可指");
+
+        // 原样读回：第一级就中，不必降级。
+        let back = relocate(&anchor, &page.text_map());
+        assert_eq!((back.start, back.end, back.confidence), (5, 9, Confidence::Exact));
+        // 页首多出一个字（文字层换了一版引擎、前面那点字被认成别的）：偏移漂了，
+        // 靠指纹从附近找回来 —— 这一级只做子串匹配，没有 DOM 也照样成立。
+        let shifted = crate::content::anchor::TextMap::from_visible_text(String::from("x")
+            + page.text().as_str());
+        let moved = relocate(&anchor, &shifted);
+        assert_eq!(moved.confidence, Confidence::Nearby);
+        assert_eq!((moved.start, moved.end), (6, 10), "整串跟着平移一格");
+        // 那一串字整页没了：显式判 stale，而不是猜一个位置。
+        let gone =
+            crate::content::anchor::TextMap::from_visible_text(String::from("完全没有那几个字"));
+        assert_eq!(relocate(&anchor, &gone).confidence, Confidence::Stale);
     }
 }

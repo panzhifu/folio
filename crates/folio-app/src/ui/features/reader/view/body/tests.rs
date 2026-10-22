@@ -4905,3 +4905,339 @@ fn a_bookmark_in_a_pdf_moves_the_screen_to_that_page(cx: &mut TestAppContext) {
         "页号就是定版式的位置：跳转当场落库，杀进程回来还在这一页"
     );
 }
+
+// ---- 定版式那一页上的选中：字选得中、复制得到、划得进库、点得回来 ----
+
+/// 第 `index` 个字在屏上的落点（窗口坐标），`along` 是压在这个字的哪一分之几处。
+///
+/// 一个像素都不硬编码：落点由**这一帧记下的那一格**（`fixed_text_box`）与那一页自己的
+/// 字层折回来，与 `selection::page_units` 互为逆运算。换窗口宽、换 `RENDER_EDGE` 那一档、
+/// 换一页的尺寸，这条式子都不用改 —— 而它同时也是「绘制摆的那一格」与「命中折回去的那
+/// 一格」是同一格的证据：两处各算一把尺的话，这一条会红在色块与手指错开上。
+fn pdf_char(view: &Entity<ReaderSession>, cx: &TestAppContext, index: usize, along: f32) -> Point<Pixels> {
+    view.read_with(cx, |v, _| {
+        let (page, box_) = v.fixed_text_box.get().expect("那一格该被量出来了");
+        let text = v
+            .fixed()
+            .and_then(|book| book.page_text(page))
+            .expect("这一页该有文字层");
+        let item = text.chars[index];
+        let origin = v.content_bounds.get().origin;
+        // 一单位折几像素：与 `page_boxes` 同一把倒数。
+        let sx = f32::from(box_.size.width) / text.width;
+        let sy = f32::from(box_.size.height) / text.height;
+        point(
+            px(f32::from(origin.x) + f32::from(box_.origin.x) + (item.rect.x + item.rect.width * along) * sx),
+            px(f32::from(origin.y) + f32::from(box_.origin.y) + (item.rect.y + item.rect.height * 0.5) * sy),
+        )
+    })
+}
+
+/// 开一本真 PDF：入库 → 带容器打开 → 走 `open_book` 那条生产路（只有它按 `is_fixed()`
+/// 分流到定版式那一支 —— `with_document` 那条构造路不分族，用它测定版式就是测可重排）。
+fn open_fixed_pdf(
+    cx: &mut TestAppContext,
+    name: &str,
+) -> (Entity<ReaderSession>, AnyWindowHandle, Arc<Store>, i64) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+    let (meta, content) = folio_core::content::format::provider_for(&path)
+        .expect("PDF 该有 provider")
+        .index(&path)
+        .expect("入库的那份真样本该读得开");
+    let store = Arc::new(Store::in_memory().expect("内存库"));
+    let id = store.add_book(&path, &meta).expect("入库");
+    store
+        .save_content(id, &content, Format::Pdf)
+        .expect("页表入库");
+    let document = folio_core::content::document::with_container(meta, content, &path);
+    let (view, handle) = open_with_document(
+        cx,
+        Arc::from(document),
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    view.update(cx, |v, cx| v.open_book(id, cx));
+    settle(cx, handle);
+    (view, handle, store, id)
+}
+
+/// 拖过 `TITLE` 那五个字：选区成立、复制到手的是那一串、划下去真进了库，
+/// 而翻回这一屏时那条痕迹**点得回去**（留在书上的东西不只是读数）。
+///
+/// 样本是 `tests/fixtures/oss/pdf/wps-paper.pdf` —— WPS（Kingsoft Office）生产的两页
+/// 论文模板，字体是 `Identity-H` 子集 + `ToUnicode`。**不用仓库里那本 `three-pages.pdf`**：
+/// 它的内容流只有一个灰矩形，一个字都没有，拿它测「选中」就是让一排断言空跑而全绿
+/// （那本正好留给下面那条「没有字的一页」的用例）。
+#[gpui_kit::test]
+fn a_pdf_page_selects_copies_marks_and_points_back(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, store, id) =
+        open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/wps-paper.pdf");
+    assert!(
+        view.read_with(cx, |v, _| v.is_fixed()),
+        "前置：这一本该走定版式那一条"
+    );
+
+    // 起手压在第一个字的左半边（给插入点 0），收尾压在第五个字的右半边（给 5）。
+    let from = pdf_char(&view, cx, 0, 0.25);
+    let to = pdf_char(&view, cx, 4, 0.75);
+    drag_select_between(cx, handle, from, to);
+    let selected = view
+        .read_with(cx, |v, _| v.selection())
+        .expect("拖过阈值该成立选区");
+    assert_eq!(
+        (selected.chapter, selected.range),
+        (0, 0..5),
+        "定版式里 `chapter` 就是页号，偏移是那一页字序里的第几个字"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.selected_text()),
+        Some("TITLE".to_string()),
+        "复制那一格取的该是选中的那几个字"
+    );
+
+    // 划线：落库的是那一条锚点，而选区收掉（屏上那条从此来自库里）。
+    view.update(cx, |v, cx| v.add_highlight(cx));
+    let rows = store.annotations(id).expect("读回批注");
+    assert_eq!(rows.len(), 1, "划下去该有一条批注");
+    let anchor = &rows[0].anchor;
+    assert_eq!((anchor.chapter, anchor.start, anchor.end), (0, 0, 5));
+    assert_eq!(anchor.exact, "TITLE", "快照存的是字序那一串");
+    assert!(
+        anchor.path.is_empty(),
+        "定版式没有 DOM 路径可指：{}",
+        anchor.path
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_none()),
+        "落库之后选区该收掉"
+    );
+
+    // 点回那一条：压在中间那个字上（痕迹画出来的那一条之内）。
+    //
+    // 先把拖选松手攒下的那一下豁免作废 —— 它是上一手的尾巴，而 `tap_on_body` 的
+    // **第一条**判据就是它：不先吃掉，下面这一击会被它拦下来，测到的还是第一条。
+    // 可重排那几条用例有同一道前置（见上面 `tap_on_body` 那组注释）。
+    view.update(cx, |v, _| v.consume_tap_suppression());
+    let on_mark = pdf_char(&view, cx, 1, 0.5);
+    let picked = cx
+        .update_window(handle, |_, window, cx| {
+            view.update(cx, |v, cx| v.tap_on_body(window, cx, on_mark))
+        })
+        .expect("点击应送达");
+    assert!(picked, "点在画出来的那条痕迹上该把那一条挑回来，而不是去翻页");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.selection().map(|s| s.range)),
+        Some(0..5)
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.selection_annotation().is_some()),
+        "挑回来的正是库里那一条 → 菜单那一格该回到「取消划线」"
+    );
+
+    // 桌面上「单击这一页」本来是看大图（宿主测试没装平台服务，`supports_long_press`
+    // 给 false ⇒ 那一族的入口挂在单击上）。接上选中之后这一族的入口不许悄悄没掉：
+    // 没有选区时那一击仍然摊得开。
+    //
+    // 只能钉这半边：`window.click(那个 id)` 点的是元素**正中**，而页心那一点落在留白上
+    // （`TITLE` 在页顶），所以「已划的线上的一击归选中」那一条先后没法用 id 投出来 ——
+    // 它由上面那次直接问 `tap_on_body` 钉住（同一个入口函数，只是落点得由测试自己定），
+    // 屏幕上的分别要真机点一下才算看完。
+    let viewer = cx.update(|cx| {
+        cx.new(|_| crate::ui::features::reader::components::image_viewer::ImageViewer::default())
+    });
+    cx.update(|cx| view.update(cx, |v, _| v.set_image_viewer(viewer.clone())));
+    settle(cx, handle);
+    view.update(cx, |v, _| v.clear_selection());
+    cx.update_window(handle, |_, window, cx| {
+        window.click(("reader-image", 0usize), cx);
+    })
+    .expect("那一击该送达");
+    assert!(
+        viewer.read_with(cx, |v, _| v.is_open()),
+        "没有选区时单击仍该把这一页摊开看"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_none()),
+        "开大图这一趟不该顺手成立一个选区"
+    );
+    viewer.update(cx, |v, _| v.close());
+
+    // 翻到第二页：一屏就是一页，挂在旧页的选区没有字可锚，跟着清。
+    view.update(cx, |v, cx| v.set_page(1, cx));
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_none()),
+        "翻走即清：留着就是一份屏上看不见、菜单还开着的选中"
+    );
+    // 第二页也有文字层（一本真书不会只有首页读得出字），那一格该重新量出来。
+    assert!(
+        view.read_with(cx, |v, _| v.fixed_text_box.get().is_some()),
+        "换页之后那一格要重新记上，否则新一页选不中"
+    );
+    let second = pdf_char(&view, cx, 0, 0.25);
+    let second_to = pdf_char(&view, cx, 3, 0.75);
+    drag_select_between(cx, handle, second, second_to);
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_some()),
+        "第二页照样选得中"
+    );
+}
+
+/// 没有文字层的那一页：什么都选不中，也不 panic，页的摆位与从前逐字节相同。
+///
+/// 用 `three-pages.pdf` —— 它的内容流只有一个灰矩形，**一个字都没有**，正是扫描件与
+/// 漫画那一档的形状。这一条与上一条配成一对：缺了它，「这一页没字」与「选中坏了」
+/// 在屏上是同一个表现，而测试分不出两者。
+#[gpui_kit::test]
+fn a_pdf_page_without_a_text_layer_selects_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) =
+        open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
+    assert!(
+        view.read_with(cx, |v, _| v.is_fixed()),
+        "前置：这一本该走定版式那一条"
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.page_count()), 3, "三页都该在");
+
+    // 整页中央拖一把：从前的表现就是「什么都不发生」，这一条不许变。
+    drag_select_between(cx, handle, point(px(180.0), px(240.0)), point(px(300.0), px(240.0)));
+    assert!(
+        view.read_with(cx, |v, _| v.selection().is_none()),
+        "没有字的一页不该成立选区"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.fixed_text_box.get().is_none()),
+        "没有文字层的那一页不该记下那一格"
+    );
+}
+
+/// 底栏那颗「放大整页」用的身份：**当前在读的那一页**在整本书那一列里的第几条。
+///
+/// 这一格值得单独钉：按钮不在正文的绘制帧里，手上没有那张图的键，只能回会话问
+/// （`FixedBook::current_page_key`）。两处各数一遍「这一页是第几张」的话，翻过页之后
+/// 按下去就会开成上一页 —— 而那一层看起来一切正常，只是摆的不是这一页。
+///
+/// 顺带钉住那条「按图集的键开得动那一层」的共用路：正文里点在图上那一次与这一格
+/// 走的是同一个 `open_picture`，所以它红的时候两处一起红。
+#[gpui_kit::test]
+fn the_zoom_entry_follows_the_page_being_read(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/wps-paper.pdf");
+    let viewer = cx.update(|cx| {
+        cx.new(|_| crate::ui::features::reader::components::image_viewer::ImageViewer::default())
+    });
+    cx.update(|cx| view.update(cx, |v, _| v.set_image_viewer(viewer.clone())));
+
+    let key = view
+        .read_with(cx, |v, _| v.fixed().and_then(|book| book.current_page_key()))
+        .expect("定版式的一页该在整本书那一列里有身份");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.image_index_of_key(&key)),
+        Some(0),
+        "第一页该是那一列里的第一条"
+    );
+
+    cx.update_window(handle, |_, window, cx| {
+        crate::ui::features::reader::view::body::open_picture(
+            &viewer,
+            &view.downgrade(),
+            &key,
+            window,
+            cx,
+        );
+    })
+    .expect("那一格该送达");
+    assert!(
+        viewer.read_with(cx, |v, _| v.is_open()),
+        "底栏那一格该把这一页交给放大那一层"
+    );
+
+    // 翻到第二页：身份跟着换到第二条，而按钮按这一刻问的就是这一个。
+    view.update(cx, |v, cx| v.set_page(1, cx));
+    settle(cx, handle);
+    let second = view
+        .read_with(cx, |v, _| v.fixed().and_then(|book| book.current_page_key()))
+        .expect("第二页也该有身份");
+    assert_ne!(second, key, "身份跟着在读的那一页走");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.image_index_of_key(&second)),
+        Some(1)
+    );
+
+    // 一页空的定版式书没有身份可取（空页表）：那一格按下去什么都不做，而不是开一层
+    // 「0 / 0」。这一条与上面那条成对 —— 缺了它，「取不到」与「取错了」在屏上分不出。
+    let empty = {
+        let meta = folio_core::DocMeta {
+            title: "空".into(),
+            authors: Vec::new(),
+            format: Format::Cbz,
+            size: 0,
+            ..folio_core::DocMeta::default()
+        };
+        let doc: Arc<dyn Document> = Arc::from(folio_core::content::document::from_content(
+            meta,
+            Content::Fixed(folio_core::content::format::FixedDoc::default()),
+        ));
+        let (book, _) = open_with_document(cx, doc, prefs(16.0), Locator::start(), 460.0, None, None);
+        book.read_with(cx, |v, _| v.fixed().and_then(|b| b.current_page_key()))
+    };
+    assert_eq!(empty, None, "空页表取不出身份，那一格就不该开那一层");
+}
+
+/// 定版式那一本搜得动，而点一处命中跳的是**那一页**，落库的那条位置仍然只有页号。
+///
+/// 走的是真那一条链：会话交出打开着的文档（`searchable()`）→ core 那一趟按页扫 →
+/// 命中跳过去走 `goto_offset`。三段各钉一件事：
+///
+/// - 交不出文档时那一屏只会摆一句「还没写词」—— 这一族接通之前 `searchable()` 对
+///   定版式回的就是 `None`，于是那条空态永远挂着，没人发现搜索是断的。
+/// - 命中归它自己那一页（不是首页，也不是「第几章」）。
+/// - 跳过去之后屏上换了页，而库里那条 `Locator` 的偏移是 0：页内那几个字进了库，
+///   进度条与「上次阅读的位置」就各读到一个解释不了的数（`resolve_position` 那条口径）。
+#[gpui_kit::test]
+fn a_pdf_book_searches_and_a_hit_jumps_to_its_page(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, store, id) =
+        open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/wps-paper.pdf");
+    // 那一趟扫描本身的门在 core（`search::tests`，那里造得出 `StageCtx`）；这一侧只钉
+    // 界面这一环：**交得出整本的字**，而且命中那一页上确实有那几个字。
+    let (texts, pages) = view.read_with(cx, |v, _| {
+        let doc = v.searchable().expect("定版式也该交得出那份文档");
+        let pages = doc.fixed().expect("这一本该是定版式").pages.len();
+        (doc.page_texts().expect("带字的 PDF 该给得出整本"), pages)
+    });
+    assert_eq!(texts.len(), pages, "整本那一列的长度就是页数");
+    assert!(
+        texts[1].contains("COPYRIGHT"),
+        "第二页该有那几个字（扫描扫的就是这一列）"
+    );
+    let hit = folio_core::search::Hit {
+        chapter: 1,
+        start: texts[1].find("COPYRIGHT").expect("上面刚验过它在"),
+        end: 0,
+        snippet: String::new(),
+        mark: 0..0,
+    };
+
+    // 那一行上面那句「这是哪儿的字」：定版式没有章表，念章名会念出一个空摆位。
+    let place = view.read_with(cx, |v, cx| v.hit_place_at(hit.chapter, cx));
+    assert!(
+        !place.is_empty() && place.contains('2'),
+        "那一行要说得出是第几页，而不是一个空摆位：{place:?}"
+    );
+    let _ = &hit.end;
+
+    view.update(cx, |v, cx| v.goto_offset(hit.chapter, hit.start, cx));
+    settle(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.page()), 1, "跳过去该落在第二页");
+    let (_, locator) = store.position(id).expect("读回进度").expect("进度该在");
+    assert_eq!(
+        locator,
+        folio_core::Locator { chapter: 1, offset: 0 },
+        "页号就是定版式的位置：命中的页内偏移不许进库"
+    );
+}

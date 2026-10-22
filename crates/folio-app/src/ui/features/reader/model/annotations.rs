@@ -35,6 +35,8 @@ use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::{App, AppContext as _, Context, Hsla, Pixels, Point, Window};
 
 use crate::ui::features::reader::components::note_editor::NoteEditor;
+use crate::ui::features::reader::components::selection;
+use crate::ui::features::reader::model::fixed_book::FixedBook;
 use crate::ui::features::reader::model::session::{AnnotationSpans, ReaderSession, Selection};
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::tr;
@@ -185,6 +187,9 @@ impl ReaderSession {
         cx: &App,
         at: Point<Pixels>,
     ) -> Option<(usize, Range<usize>, i64)> {
+        if let Some(book) = self.fixed() {
+            return self.fixed_annotation_at(book, at);
+        }
         let (chapter, x, y) = self.to_layout(window, at)?;
         let doc = self.book()?.span_doc(chapter)?;
         // 排版还没跟上的那一帧，行盒是旧的：按旧行盒算出的矩形对不上这一帧画出来的划线。
@@ -232,6 +237,38 @@ impl ReaderSession {
             .map(|span| (chapter, span.start..span.end, span.id))
     }
 
+    /// 定版式那一族：点在**画出来的**那块痕迹上才算挑中那一条。
+    ///
+    /// 判据与排版那一族同一条立场（上面那条注释写着为什么不能用「最近的字」）：
+    /// 这一族的 `PageText::hit` 同样是给拖选收边用的，拿它判「压住了划线」，读者按在
+    /// 页边空白上也会把某条批注选中。所以这里问的是落点在不在那一块矩形里，而矩形
+    /// 与屏上那条痕迹出自同一个 `selection::page_boxes` —— 点得中所见。
+    ///
+    /// 矩形按**整块字盒**问，不按字下那两条细线：实线与波浪在屏上只占盒底那几像素，
+    /// 但挑中的是「这一段字我划过」，拇指压在那段字的中间该算点中。排版那一族也是这么
+    /// 判的（它问的是行盒那一段），两族因此是同一只手感。
+    fn fixed_annotation_at(
+        &self,
+        book: &FixedBook,
+        at: Point<Pixels>,
+    ) -> Option<(usize, Range<usize>, i64)> {
+        let (page, box_) = self.fixed_text_box.get()?;
+        let local = at - self.content_bounds.get().origin;
+        if !box_.contains(&local) || self.annotations.is_empty() {
+            return None;
+        }
+        let text = book.page_text(page)?;
+        let key = book.page_text_key(page)?;
+        let map = text.text_map();
+        let spans = resolved_for(&self.annotation_spans, &self.annotations, page, key, &map);
+        spans.iter().filter(|span| !span.is_stale()).find(|span| {
+            selection::page_boxes(&text, span.start..span.end, box_)
+                .iter()
+                .any(|rect| rect.contains(&local))
+        })
+        .map(|span| (page, span.start..span.end, span.id))
+    }
+
     /// 点在一条已有的划线上：把那一条重新选中，菜单条跟着回来。
     ///
     /// 返回 `true` = 这一击归「选中」这一套，`page.rs` 不该再拿它去翻页或开浮层。
@@ -264,14 +301,7 @@ impl ReaderSession {
     /// 拿的就是一段新选区（该再划一次），而不是原来那一条 —— 菜单跟着这个判断换格子。
     pub(in crate::ui::features::reader) fn selection_annotation(&self) -> Option<MarkedRow> {
         let selected = self.selection.as_ref()?;
-        let doc = self.book()?.span_doc(selected.chapter)?;
-        let spans = resolved_for(
-            &self.annotation_spans,
-            &self.annotations,
-            selected.chapter,
-            doc.chapter_hash(),
-            doc.text_map(),
-        );
+        let spans = self.resolved_selection(selected)?;
         spans
             .iter()
             .find(|span| {
@@ -284,6 +314,38 @@ impl ReaderSession {
                 color: span.color.clone(),
                 style: span.style,
             })
+    }
+
+    /// 选区所在的那一章 / 那一页现在解出来的批注清单（与回显共用那一份缓存）。
+    ///
+    /// 两族只在**两格**上不同：坐标系从哪儿来（章的 DOM 文本节点 / 一页栅格出来的字序），
+    /// 以及那份缓存的键（章文本的内容哈希 / 那一页字层的内容哈希）。「解出来的是第几个字
+    /// 到第几个字」这条判据、四级降级、以及那条「解不回来就不算」的立场两侧同一条 ——
+    /// 所以判据留调用方自己写，这里只把两族的来源对上。
+    ///
+    /// 定版式取不到字层（扫描页、漫画页）时交 `None`：那与「这一章还没解出批注」在屏上
+    /// 是同一件事（挑中的就是一段没有痕迹的字）。
+    fn resolved_selection(&self, selected: &Selection) -> Option<Rc<Vec<ResolvedAnnotation>>> {
+        if let Some(book) = self.fixed() {
+            let text = book.page_text(selected.chapter)?;
+            let key = book.page_text_key(selected.chapter)?;
+            let map = text.text_map();
+            return Some(resolved_for(
+                &self.annotation_spans,
+                &self.annotations,
+                selected.chapter,
+                key,
+                &map,
+            ));
+        }
+        let doc = self.book()?.span_doc(selected.chapter)?;
+        Some(resolved_for(
+            &self.annotation_spans,
+            &self.annotations,
+            selected.chapter,
+            doc.chapter_hash(),
+            doc.text_map(),
+        ))
     }
 
     /// 改库里那一条的**任何一格**之前，先把整条要带的另几格凑齐。
@@ -545,7 +607,21 @@ impl ReaderSession {
     }
 
     /// 选区 → 锚点。章下标与偏移都照选区自己那份，锚点里存的原文指纹由 `TextMap` 给。
+    ///
+    /// 定版式在这一处也岔开：那两格里「章」就是**页**、「章内偏移」就是那一页字序里的
+    /// 第几个字（坐标系由 `PageText::text_map` 给，与排版那一族同形：数的是字，不数断行）。
+    /// 这一族没有排版，于是也没有「排版还没跟上」的那一帧 —— 取到字层就是这一页此刻的
+    /// 答案；取不到（扫描页、漫画页）就是这一条落不成，与那一族交 `None` 同一档。
     fn anchor_for(&self, selected: &Selection) -> Option<folio_core::content::anchor::TextAnchor> {
+        if let Some(book) = self.fixed() {
+            let text = book.page_text(selected.chapter)?;
+            return Some(folio_core::content::anchor::TextAnchor::new(
+                &text.text_map(),
+                selected.chapter as u32,
+                selected.range.start,
+                selected.range.end,
+            ));
+        }
         let doc = self.book()?.span_doc(selected.chapter)?;
         // 排版没跟上的那一帧，`TextMap` 还是上一章的：这时落库会把批注钉错字。
         if !doc.is_current() {

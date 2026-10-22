@@ -112,6 +112,26 @@ impl DocumentProvider for PdfAdapter {
             .ok()
             .and_then(|document| page_text(&document, page))
     }
+
+    /// 全书每一页的字序，**容器只开一次**（契约与那条「必须与逐页问逐字节相同」写在
+    /// [`DocumentProvider::page_texts`]）。
+    ///
+    /// 为什么专门开这一问：逐页问那一问每页重开一次 `PdfDocument`（这一族没有全局句柄），
+    /// 实测一份 3.6 MB、45 页的书重开一趟 374 ms —— 搜索要的正是整本一遍，69 页按那条路
+    /// 走是二十几秒，读者每敲一个字付一次。开一次再逐页抽，抽取本身实测每页 0.3–10 ms。
+    fn page_texts(&self, path: &Path) -> Option<Vec<String>> {
+        let document = PdfDocument::open(path).ok()?;
+        let pages = page_count(path, &document).ok()?;
+        Some(
+            (0..pages)
+                .map(|page| {
+                    page_text(&document, page)
+                        .map(|text| text.text())
+                        .unwrap_or_default()
+                })
+                .collect(),
+        )
+    }
 }
 
 /// 一份已打开的 PDF → 这一页的文字层。PDF 与 AZW4 共用（与 [`read_pdf`]、[`render_png`]
@@ -145,6 +165,10 @@ pub(crate) fn page_text(document: &PdfDocument, page: usize) -> Option<PageText>
             // 一串粘在一起的词（实测 `Heading alpha` 交回 `Heading` + `alpha` 两个词）。
             // 补的口径只有一条：后一个词的左沿在前一个词的右沿之后。中文那一族整行常常是
             // 一个词（见 `PageText::snap` 那条实测），缝不存在，于是一个多余的空格也不掺。
+            //
+            // 为什么**不**按词边界无条件补：一份 Word / WPS 排出来的书里，同一个词常常
+            // 被拆成几条样式片段（前半粗体、后半斜体），它们左右沿正好接上，按词边界补
+            // 就补出一个 `Hel lo`。缝是几何事实，比聚类给的词编号可信。
             if first.bbox.x > right.unwrap_or(first.bbox.x) {
                 let previous = right.unwrap_or(first.bbox.x);
                 chars.push(PageChar {
@@ -1400,6 +1424,95 @@ mod tests {
             page_text(&document, 1).is_none(),
             "转 90 的那一页不许交出一套会画歪的盒",
         );
+    }
+
+    /// **别人生产的 PDF 上量文字层，裁判是 poppler**。
+    ///
+    /// 样本是 `tests/fixtures/oss/pdf/wps-paper.pdf`：Kingsoft Office（WPS）写的两页论文
+    /// 模板，字体是 `ABCDEF+TeXGyreTermes-*` 的 **Identity-H 子集 + ToUnicode CMap** ——
+    /// 真书里最常见也最容易读歪的那一族：内容流里摆的不是 ASCII 而是两位数码，靠 CMap
+    /// 折回 Unicode。仓库里原先那本 `three-pages.pdf` 内容流只有一个灰矩形、不吃任何
+    /// 字体，所以「文字层」这一整条路此前只被我们自己的合成器量过。
+    ///
+    /// 盒的期望值抄自 poppler 的逐词框（`pdftotext -f 1 -l 1 -bbox`，重验命令与来源写在
+    /// `tests/fixtures/oss/pdf/README.md`）。这一条门真正盯的是**翻 y 那一刀**：引擎给的
+    /// 盒是 pt、原点左下 y 朝上，而栅格出来的页图与屏幕都是 y 朝下 —— 翻错的症状不是少
+    /// 一个字，而是色块画在字的上下对称位置（`680` 与 `99` 差出去一整页，红得干脆）。
+    ///
+    /// 两条轴分开信：**x 轴**对到 0.01 pt（两家用同一把 pt 尺，没有可争的口径），
+    /// **y 轴**只要求 1 pt 以内 —— poppler 那个盒高 16.03 是**行**的（含 leading），
+    /// 我们那个 12.0 是**字号**的，差的正是那一条；把它当成翻反去修就会真把 y 改错。
+    #[test]
+    fn a_real_producer_pdf_agrees_with_poppler_on_its_boxes() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/oss/pdf/wps-paper.pdf");
+        assert!(path.exists(), "真样本夹具不许丢：{}", path.display());
+        let document = PdfDocument::open(&path).expect("WPS 那本该开得动");
+        let text = page_text(&document, 0).expect("这一页写着字");
+        assert_eq!(
+            (text.width, text.height),
+            (612.0, 792.0),
+            " Letter 一页，poppler 报 612×792"
+        );
+
+        // 第一个词 `TITLE` 的首字与末字右沿。poppler：xMin=249.000000 yMin=99.230000
+        // xMax=280.210906 yMax=115.262000。
+        let first = text.chars[0];
+        assert_eq!(first.ch, 'T', "阅读序第一个字是 TITLE 的 T");
+        assert!(
+            (first.rect.x - 249.0).abs() < 0.01,
+            "左沿该与 poppler 逐字对上：{} vs 249.000",
+            first.rect.x
+        );
+        assert!(
+            (first.rect.y - 99.23).abs() < 1.0,
+            "顶该落在 poppler 那一格附近（差的是行高与字号那一条 leading）：{}",
+            first.rect.y
+        );
+        let title_end = text.chars[4];
+        assert_eq!(title_end.ch, 'E');
+        assert!(
+            (title_end.rect.x + title_end.rect.width - 280.211).abs() < 0.01,
+            "末字右沿该落在 poppler 那个词的 xMax 上：{}",
+            title_end.rect.x + title_end.rect.width
+        );
+        // 行号：`TITLE OF THE PAPER` 是同一行（poppler 那三词 yMin 相同），
+        // 而下一行 `Author(s) Name(s)` 必须是另一个号。
+        assert_eq!(text.chars[0].line, text.chars[4].line);
+        let next = text
+            .chars
+            .iter()
+            .find(|item| item.line != 0)
+            .expect("第二行也该在");
+        assert_eq!(next.ch, 'A', "第二行以 Author 开头");
+        assert!(
+            next.rect.y > title_end.rect.y,
+            "下一行的盒必须更靠下：{} vs {}",
+            next.rect.y,
+            title_end.rect.y
+        );
+
+        // 这一页**记下一条已知限制**，而不是让它没人说：WPS 那一族把词尾的空格算进了
+        // 前一个字的前进量里（`F` 的宽 9.60 = 字形 6.67 + 空格 2.93），于是几何上没有缝、
+        // 引擎的聚类也不把它分成两词 —— 摊平出来是 `OFTHE`。补缝那一段注释写了为什么
+        // 不在我们这层按词编号硬补（样式分片会补出 `Hel lo`）。
+        //
+        // 这一条断言的存在理由是「哪天引擎补回空格，这里就红」：那时该改的是这句期望，
+        // 而不是让复制出去的串悄悄变好而没人知道为什么。
+        let flat = text.text();
+        assert!(
+            flat.starts_with("TITLE OFTHE PAPER"),
+            "实测的形状是词缝被并进前进量（少那两个空格）：{}",
+            flat.chars().take(40).collect::<String>()
+        );
+        // 字多不多也问一句：整页三千多个字，一字节不缺地摊平了。
+        assert!(
+            text.char_count() > 3_000,
+            "这一页该有几千个字，实测 {}",
+            text.char_count()
+        );
+        // 第二页同样读得出字（一本真书不会只有首页有文字层）。
+        assert!(page_text(&document, 1).is_some(), "第二页也该有文字层");
     }
 
     /// 没有文字层的一页就是「画得出但读不出」：交 `None`，与从前一样只是图。

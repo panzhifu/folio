@@ -74,6 +74,23 @@ impl ReaderSession {
             .unwrap_or_default()
     }
 
+    /// 一处命中摆在哪一段字上的那句话：可重排给章名，**定版式给「第几页 / 共几页」**。
+    ///
+    /// 为什么不能一律念章名：定版式没有章表，[`Self::chapter_title_at`] 回的是空串 ——
+    /// 命中那一行就成了一个空摆位，而读者点那一行之前想认的恰恰是「这处在哪」。
+    /// 那句读数与底栏、干净态页脚共用同一条键（`reader.page_position`）：同一件事
+    /// 在两处念出两个名字，下一个人就不知道该改哪一条。
+    pub(in crate::ui::features::reader) fn hit_place_at(&self, index: usize, cx: &App) -> String {
+        if self.fixed().is_some() {
+            return tf(
+                cx,
+                "reader.page_position",
+                &[("index", &(index + 1)), ("total", &self.page_count())],
+            );
+        }
+        self.chapter_title_at(index)
+    }
+
     /// 当前章的标题；兜底那一行没有章，返回空串。
     pub fn chapter_title(&self) -> String {
         self.book()
@@ -215,9 +232,18 @@ impl ReaderSession {
         cx: &mut Context<Self>,
     ) {
         let prefs = self.prefs.clone();
-        if let Source::Book(book) = &mut self.source {
-            book.goto(chapter, &prefs);
-        }
+        // 定版式在这一处岔开：那一格里 `chapter` 就是页号，而位置在这一族**只有页** ——
+        // 页内那几个字不进落库也不进进度（`resolve_position` 那条「定版式 offset 恒为 0」
+        // 的口径，`LocatorKind::Page` 同一个说法）。所以命中的偏移在这里只是「去哪一页」
+        // 的说明，不是落点：把它写进库里，进度条与「上次阅读的位置」就会读到一个
+        // 谁也解释不了的数。
+        let offset = match &mut self.source {
+            Source::Book(book) => {
+                book.goto(chapter, &prefs);
+                offset
+            }
+            Source::Fixed(_) | Source::Sample(_) => 0,
+        };
         // 换章共用的那一段：滚动与页号归零、作废上一趟没落地的跳转、丢选中。
         self.reset_after_chapter();
         let locator = Locator {

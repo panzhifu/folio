@@ -194,6 +194,24 @@ pub(in crate::ui::features::reader) enum Mark {
     Wave(Bounds<Pixels>, Hsla),
 }
 
+/// 画一条痕迹。`origin` 是承载它的那块元素在窗口里的原点 —— 矩形是元素局部坐标，
+/// 不加这一个偏移，阅读视图不在窗口原点（Android 的系统栏 inset、桌面的侧栏）时
+/// 痕迹就整片飘到文字上方（把手准、颜色偏，就是它）。
+///
+/// 这一条同时服务两个画法层：可重排那一族把它压在**字形之下**（高亮带不能吃掉笔画），
+/// 定版式那一族把它压在**页图之上**（那一族的字就在那张栅格出来的图里，压在图下等于
+/// 没画）。两层的几何各算各的矩形，画法只有这一份 —— 三档画法将来加一档时不必两处改。
+pub(in crate::ui::features::reader) fn paint_mark(
+    mark: &Mark,
+    origin: Point<Pixels>,
+    window: &mut Window,
+) {
+    match mark {
+        Mark::Quad(rect, color) => window.paint_quad(fill(*rect + origin, *color)),
+        Mark::Wave(rect, color) => paint_wave(*rect + origin, *color, window),
+    }
+}
+
 /// 波浪线在这一段长度里排几个**半波**，永远是**偶数**（一整个波 = 两个半波）。
 ///
 /// 只按整波取数：于是每一条划线的波浪都**起于中线、终于中线**，一排划线并眼看过去收尾
@@ -334,10 +352,7 @@ impl Element for GlyphsElement {
         // 偏移，痕迹就会整条飘到文字上方 —— 把手是准的、颜色是偏的，就是它。
         // 波浪那一条加的是同一个偏移：`paint_wave` 认的是窗口坐标。
         for mark in &self.marks {
-            match mark {
-                Mark::Quad(rect, color) => window.paint_quad(fill(*rect + bounds.origin, *color)),
-                Mark::Wave(rect, color) => paint_wave(*rect + bounds.origin, *color, window),
-            }
+            paint_mark(mark, bounds.origin, window);
         }
         selection::paint_highlights(&self.selection, bounds.origin, window);
         if let Some(reader) = self.reader.clone() {

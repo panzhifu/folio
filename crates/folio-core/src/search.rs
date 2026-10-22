@@ -51,7 +51,31 @@
 //! [`crate::content::format::ChapterLocator`] 足够回容器取字节，所以 OPF 与目录那两趟解析
 //! 在这一档是白付的。那一刀归下一轮（界面侧落点也归下一轮：读者 2026-10-20 定「先停在 core」）。
 //!
-//! ## 坐标是 `TextMap` 那一把尺
+//! ## 定版式那一族：钱全在「每页重开一次容器」
+//!
+//! 2026-10-22 实测，release 档，本机，一本 Word 生产的 69 页 PDF（15.9 万字）：
+//!
+//! | 走法 | 一趟 |
+//! |---|---|
+//! | [`Document::page_texts`]：**开一次容器**，逐页抽字 | **263 ms** |
+//! | 逐页问 [`Document::page_text`]（选中那一条路） | 外推 **4.8 s**（18×） |
+//!
+//! 差的全是「开容器」那一笔：PDF 那一族的 `page_text` 每问一次都要把整本重读进来再懒解
+//! 一次结构（3.6 MB 那份实测一趟 374 ms），选中只用得上看得着的一两页所以无所谓，
+//! 而搜索要的正是整本一遍。263 ms 落在上面那张表里最坏那本可重排书（274 ms）同一档 ——
+//! 两族的现扫因此是同一个量级的一件事，不必给哪一族单独一档策略。
+//!
+//! 逐页问与整本一次**必须逐字节给同一串字**（那条契约与它的门写在
+//! [`crate::content::format::DocumentProvider::page_texts`]）：命中的偏移与选中、
+//! 批注锚点是同一把尺，两处各数一遍就是「搜到了、跳过去挑中的是别处」。
+//!
+//! ## 坐标是 `TextMap` 那一把尺，而两族各有各的一把
+//!
+//! 可重排的一把是**那一章**的可见文本（[`crate::content::anchor::TextMap::build`] 从 DOM
+//! 的文本节点拼出来），定版式的一把是**那一页**的字序
+//! （[`crate::content::anchor::TextMap::from_visible_text`]，栅格引擎交出的那几个字）。
+//! 两把都是「数的是字、不数断行」，所以同一份 `Hit` 在两族里都能被选中那套原样挑回来 ——
+//! 而两族**不能共用一把**：一页没有章，一章没有既定的页。
 //!
 //! 命中的 `start` / `end` 是**那一章可见文本**里的字符数，与 [`crate::Locator::offset`]、
 //! `chapters.char_len`、锚点的 `start` 全用同一份 [`crate::content::anchor::TextMap`]。
@@ -133,9 +157,11 @@ impl Query {
 /// 一处命中。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hit {
-    /// 章下标，与 `chapters.idx`、`Locator.chapter` 同一个数法。
+    /// 章下标，与 `chapters.idx`、`Locator.chapter` 同一个数法。**定版式那一族里这一格是页号**
+    /// （`LocatorKind::Page` 那条口径：那一族没有章，页就是位置的单位）。
     pub chapter: usize,
-    /// 这一章可见文本里的字符区间：跳过去用的就是 `start`。
+    /// 这一段可见文本里的字符区间：跳过去用的就是 `start`。可重排数的是那一章的字，
+    /// 定版式数的是那一页的字序 —— 两族各自与选中、批注锚点同一把尺。
     pub start: usize,
     pub end: usize,
     /// 摆给读者看的那句上下文：命中前后各截一点，换行与缩进折成一个普通空格。
@@ -148,9 +174,10 @@ pub struct Hit {
 #[derive(Clone, Debug, Default)]
 pub struct Found {
     pub hits: Vec<Hit>,
-    /// 这本书一共几章。
+    /// 这本书一共几章（定版式：几页）。界面念那一格时要跟着族换单位，
+    /// 别让一本 PDF 念出「共 69 章」。
     pub chapters: usize,
-    /// 实际扫到第几章就停了（取消或到上限都会提前停）。
+    /// 实际扫到第几章（第几页）就停了（取消或到上限都会提前停）。
     pub scanned: usize,
     /// 到了 `Options::max_hits` 就收的手：**后面还可能还有**，没数过。
     ///
@@ -212,6 +239,11 @@ pub fn scan_book_at(
 /// [`Document::chapter_source`] 那句「是 `ChapterUnavailable` 不是空串」同一口径 ——
 /// 「这几章搜不了」与「这本书没了」是两件事。
 pub fn scan(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageCtx) -> Found {
+    // 两族文档各有各的「一段字」：可重排按章取正文，定版式按页取文字层。分岔只看
+    // `doc.flow()` 在不在 —— 那正是 `Content` 的两族划分，不看格式、也不看扩展名。
+    if doc.flow().is_none() {
+        return scan_pages(doc, query, options, ctx);
+    }
     let chapters = doc.flow().map_or(0, |flow| flow.chapters.len());
     let mut out = Found {
         chapters,
@@ -246,10 +278,58 @@ pub fn scan(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageCtx
     out
 }
 
-/// 扫一章的可见文本，命中追加进 `hits`。返回 `true` = 到了上限，别再往下扫了。
+/// 定版式那一族：一页一段字，判据与上面那一趟**共用同一份** [`scan_chapter`]。
 ///
-/// 单列出来是给「全库那一档」复用：它自己负责开容器与取正文，命中这一件事两档共用
-/// 同一份判据，两档各写一遍就会有一处漂移。
+/// 为什么整本一次取齐而不是逐页问：[`Document::page_texts`] 那条契约写的就是这笔账 ——
+/// 逐页问每页重开一次容器（PDF 实测一份 3.6 MB 的书 374 ms），69 页按那条路走是二十几秒，
+/// 而读者每敲一个字都要重付一次。
+///
+/// 偏移是**那一页字序里的第几个字**（数的是字、不数断行），与选中、批注锚点同一把尺：
+/// 一处命中跳过去，挑中它的应该就是那几个字。两把尺在这里必须是同一把 —— 不然界面
+/// 得再问一遍「第 N 个字落在哪一像素」，而那一问在栅格出来的页上恰恰没有答案。
+///
+/// 给不出文字层的那一本（漫画包、没带 OCR 的扫描本）命中是空的而**页数照实报**：
+/// 界面因此分得出「这本书一页字都没有」与「这个词不在书里」那两句话。
+/// 一页没字是空串而不是缺项，所以 `scanned` 数的是真扫过的页。
+fn scan_pages(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageCtx) -> Found {
+    // 页数取页表那一份（库里躺着的事实），不是取回的那一列的长度：provider 少给一页
+    // 是多嘴，多给一页是违约，两种都不该把「这本书几页」改掉。
+    let pages = doc.fixed().map_or(0, |fixed| fixed.pages.len());
+    let mut out = Found {
+        chapters: pages,
+        ..Default::default()
+    };
+    let Some(texts) = doc.page_texts() else {
+        return out;
+    };
+    for (page, text) in texts.iter().enumerate().take(pages) {
+        if ctx.cancel().triggered() {
+            out.cancelled = true;
+            break;
+        }
+        if !text.is_empty() && scan_chapter(page, text, query, options, &mut out.hits) {
+            out.truncated = true;
+        }
+        out.scanned += 1;
+        if out.truncated || out.hits.len() >= options.max_hits {
+            out.truncated = true;
+            break;
+        }
+        if page % PROGRESS_EVERY == 0 || page + 1 == pages {
+            ctx.item(out.scanned as u64, pages as u64);
+        }
+    }
+    out
+}
+
+/// 扫一章（或定版式的一页）的可见文本，命中追加进 `hits`。返回 `true` = 到了上限，别再往下扫了。
+///
+/// 单列出来是给两族与两档共用：全库那一档自己负责开容器与取正文，界面这一档自己负责挑章
+/// 还是挑页，而**命中这一件事只有一份判据**（不重叠、增量数字符、同一份折叠），
+/// 两处各写一遍就会有一处漂移。
+///
+/// `chapter` 那一格在可重排是章下标，在定版式是**页号** —— 不是复用了一个名字，是
+/// `Locator::chapter` 本来就在两族各说一个数（`LocatorKind::Page` 那条口径）。
 pub fn scan_chapter(
     chapter: usize,
     text: &str,
