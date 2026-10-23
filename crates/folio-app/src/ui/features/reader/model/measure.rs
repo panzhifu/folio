@@ -137,14 +137,21 @@ fn cjk_class(family: &str) -> Option<&'static [&'static str]> {
 /// `TextSystem::resolve_font` 解析不到时是 **panic**，不是回退，而书的 `font-family`
 /// 在目标设备上几乎都不存在（实测《斗战狂潮》的 `easypub` 会让 Android 直接 SIGABRT）：
 ///
-/// - `key` 的候选链里有**设备上真装着**的非泛族名 → 那一个当 primary（作者点名了，照旧生效）；
-/// - 泛族名或设备上没装的 → primary 换成读者偏好：等宽那几种用 `mono`，其余用 `body`；
-///   而 `mono` 自己也要在 `known` 里，否则退回 `body`（读者填了个没装的等宽名，
-///   不该因此把整本书画成方框）；
-/// - `faces` 是这本书注册成功的内嵌字体，**只进 `fallbacks`**：gpui 在 shaping 时
-///   逐字符挑覆盖得住的那一份（`cosmic_text_system.rs` 的 `pick_covering_slot`），
-///   于是读者的字体照常是正文，只有它画不出来的那一格才轮到书里的字体。
-///   ASCII 永远留在 primary 上 —— 那是 gpui 的规则，不是这里的取舍。
+/// 优先级从前往后是：**作者随书带的那一份** → 作者点名的、这台机器真装着的非泛族名 →
+/// 同一类的那一份 → 读者的等宽偏好 → 读者的正文偏好。
+///
+/// - `faces` 是这本书注册成功的内嵌字体。作者的候选链里任何一个声明名在表里查得到，
+///   那份字节就是作者要的正文 —— `@font-face` 的 `src: url(...)` 指的是他随书交来的
+///   文件，比「这台机器上恰好也叫这个名字」更贴近作者的意思，所以它排第一，
+///   连设备上装着的同名家族也让它一档；
+/// - primary 是书里那一份时，读者那一档（同类映射 + 等宽偏好 + 正文偏好）整体降到
+///   `fallbacks` 上补缺：书里的字体常常不带全部拉丁与生僻字，gpui 在 shaping 时逐字符
+///   挑覆盖得住的那一份（`cosmic_text_system.rs` 的 `pick_covering_slot`）。
+///   ASCII 永远留在 primary 上 —— 那是 gpui 的规则，不是这里的取舍，所以随书那一份
+///   必须自己带拉丁，否则数字与英文会掉成方框（`load_family` 还会把不带 `m` 的脸直接
+///   从 primary 候选里剔掉，见同文件 424 行那段 HACK）；
+/// - 泛族名（`serif` 那一族）不许从设备注册表里当 primary（交出去就是一条断掉的回退链），
+///   但作者给泛族名挂上随书那份字体时照认 —— 那是他写明的正文用字。
 pub fn gpui_font(
     key: &FontKey,
     body: &SharedString,
@@ -152,6 +159,14 @@ pub fn gpui_font(
     faces: &BookFonts,
     known: &[String],
 ) -> Font {
+    // 作者随书带的那一份：整条候选链里第一个在别名表里查到的声明名，值就是注册成功的
+    // 内部家族名（注册时就已进 `all_font_names()`，所以它必然是这台机器认得的名字）。
+    // 一个声明名可能对多份内部家族（一份字体文件带好几个名字），第一个当 primary、
+    // 其余仍挂在补缺链上。
+    let shipped = key
+        .candidates()
+        .iter()
+        .find_map(|name| faces.families_for(name));
     // 作者点名的是一整条候选链（`"MyFont", "Noto Serif CJK SC", serif`），逐个试，
     // 取第一个这台设备真装着的。只认第一个的话，`MyFont` 不在就整条落回读者的字体，
     // 而作者排在第二的那一份明明装着 —— 泛族名不算「装着」，见 [`GENERIC_FAMILIES`]。
@@ -184,21 +199,43 @@ pub fn gpui_font(
         && known
             .iter()
             .any(|name| name.eq_ignore_ascii_case(mono.as_ref()));
-    let family = chosen
-        .map(|name| SharedString::from(name.to_string()))
-        .or(mapped)
-        .or_else(|| mono_pref.then(|| mono.clone()))
-        .unwrap_or_else(|| body.clone());
-    // primary 已经是作者点名的那一个时，别再把它自己挂成 fallback（同族自己补自己没意义）。
-    // 找书的字体时同样按整条链试：`@font-face` 声明的名字可能是链上的第二个。
-    let fallbacks = if installed {
-        None
-    } else {
-        key.candidates()
-            .iter()
-            .find_map(|name| faces.fallbacks_for(name))
-            .map(|names| FontFallbacks::from_fonts(names.to_vec()))
-    };
+    // 读者这一侧的整条链，按上面四档排好并去重。primary 取它的第一档，除非作者随书带了
+    // 一份字体（那种情况下整条链降到补缺位，见下面 `fallbacks`）。
+    let mut reader_chain: Vec<String> = Vec::new();
+    for name in [
+        chosen.map(|name| name.to_string()),
+        mapped.map(|found| found.to_string()),
+        mono_pref.then(|| mono.to_string()),
+        Some(body.to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !reader_chain.contains(&name) {
+            reader_chain.push(name);
+        }
+    }
+    let family: SharedString = SharedString::from(
+        shipped
+            .and_then(|names| names.first().cloned())
+            // `reader_chain` 至少装着 `body` 那一条，所以这里不会拿到空串。
+            .or_else(|| reader_chain.first().cloned())
+            .unwrap_or_default(),
+    );
+    // primary 是书里那一份时，读者那条链整体挂上去补缺：随书的字体常常缺拉丁、缺生僻字，
+    // gpui 逐字符挑覆盖得住的那一张脸（`pick_covering_slot`），缺的那几格才轮到读者的字体。
+    // 同一份字体注册出的其余内部家族名也留在链上（primary 只取第一个）。
+    // 这本书的字体没被这一条链点名时是 `None` —— 与「没有内嵌字体」那一档同一表现，
+    // 不许顺手把书里的字体塞给一个没点名的元素。
+    let fallbacks = shipped.map(|names| {
+        let mut chain: Vec<String> = names.iter().skip(1).cloned().collect();
+        for name in &reader_chain {
+            if name.as_str() != family.as_ref() && !chain.contains(name) {
+                chain.push(name.clone());
+            }
+        }
+        FontFallbacks::from_fonts(chain)
+    });
     Font {
         family,
         fallbacks,
@@ -647,8 +684,8 @@ pub(in crate::ui::features::reader) fn edges_from_glyphs(
 #[cfg(test)]
 mod tests {
     //! [`gpui_font`] 那一个出口的分支。它是纯函数（只拼一个 `Font`，不碰文本系统），
-    //! 所以这四条能在宿主机上钉住「读者的字体是 primary，书里的字体只补缺字」这条决策 ——
-    //! 真机上 `add_fonts` 会带出什么名字，测不到，也不该在这里假装测到了。
+    //! 所以这几条能在宿主机上钉住「作者随书带的那一份当 primary，读者的字体降到补缺」
+    //! 这条决策 —— 真机上 `add_fonts` 会带出什么名字，测不到，也不该在这里假装测到了。
 
     // 这里不用 `use super::*`：那会把 `gpui_kit` 顶层的 `test` 宏一起带进这个模块，
     // 于是 `#[test]` 解析到它而不是内建的测试属性 —— 展开自己套自己，
@@ -700,12 +737,19 @@ mod tests {
         "JetBrains Mono".into()
     }
 
-    /// 读者选的字体在册，书里那份不在册（内部名才是真的）。
+    /// 读者选的字体在册；书里那份注册成功后也在册（内部名才是真的，`BookFonts` 的键
+    /// 是作者声明的那个名字，两边不会撞）。
     fn known() -> Vec<String> {
-        ["LXGW WenKai", "JetBrains Mono", "Noto Serif"]
-            .iter()
-            .map(|n| n.to_string())
-            .collect()
+        [
+            "LXGW WenKai",
+            "JetBrains Mono",
+            "Noto Serif",
+            "Publisher Serif",
+            "Publisher Serif SC",
+        ]
+        .iter()
+        .map(|n| n.to_string())
+        .collect()
     }
 
     /// 自己拼一份设备在册表：同类映射那几条要按具体机器上的名单试，`known()` 那一份不够用。
@@ -802,39 +846,62 @@ mod tests {
     }
 
     #[test]
-    fn the_readers_font_stays_primary_and_the_books_font_only_fills_gaps() {
+    fn the_books_face_named_by_the_author_becomes_the_primary() {
         let font = gpui_font(
             &key("Book Body"),
             &body(),
             &mono(),
-            &faces(&[("Book Body", &["Noto Serif"])]),
+            &faces(&[("Book Body", &["Publisher Serif"])]),
             &known(),
         );
-        assert_eq!(font.family, body(), "正文永远先用读者选的那一份");
-        assert!(font.fallbacks.is_some(), "书里声明过就该挂上补缺链");
+        assert_eq!(
+            font.family, "Publisher Serif",
+            "作者随书交了这份字节，正文就该是它，不是读者偏好"
+        );
+        assert!(font.fallbacks.is_some(), "读者的那一档要挂在补缺链上");
         assert_eq!(
             chain(&font),
-            vec!["Noto Serif".to_string()],
-            "补缺字的是书的字体，不是替正文的那一份"
+            vec![body().to_string()],
+            "书里那份画不出来的字才轮到读者的字体"
         );
     }
 
-    /// 没写 `font-family`（泛族名也一样）时照样要挂得上：真书里正文常常一句字族都不写，
-    /// 而 `@font-face` 声明的名字只写在 `body` 那条规则里。
+    /// 一份 `@font-face` 注册出好几张脸（同名多族）时：第一张当 primary，
+    /// 其余留在链头上 —— 丢掉它们就等于让那些字形无处可去。
     #[test]
-    fn a_generic_family_still_gets_the_books_font_as_fallback() {
+    fn the_other_registered_names_stay_on_the_chain() {
+        let font = gpui_font(
+            &key("Book Body"),
+            &body(),
+            &mono(),
+            &faces(&[("Book Body", &["Publisher Serif", "Publisher Serif SC"])]),
+            &known(),
+        );
+        assert_eq!(font.family, "Publisher Serif");
+        assert_eq!(
+            chain(&font),
+            vec!["Publisher Serif SC".to_string(), body().to_string()],
+            "同族其余的那一张排在读者的之前"
+        );
+    }
+
+    /// 没写 `font-family`（泛族名也一样）时照样认：真书里正文常常一句字族都不写，
+    /// 而 `@font-face` 声明的名字只写在 `body` 那条规则里 —— 作者给泛族名挂上随书那份
+    /// 字节，就是他写明的正文用字。
+    #[test]
+    fn a_generic_family_named_by_a_book_face_takes_it_as_primary() {
         let font = gpui_font(
             &key("serif"),
             &body(),
             &mono(),
-            &faces(&[("serif", &["Noto Serif"])]),
+            &faces(&[("serif", &["Publisher Serif"])]),
             &known(),
         );
-        assert_eq!(font.family, body());
+        assert_eq!(font.family, "Publisher Serif");
         assert_eq!(
             chain(&font),
-            vec!["Noto Serif".to_string()],
-            "泛族名也不该把书的字体丢掉"
+            vec![body().to_string()],
+            "泛族名也不该把书的字体丢掉，但读者的那一档降级"
         );
     }
 
@@ -873,22 +940,63 @@ mod tests {
         assert_eq!(font.family, body(), "链上只剩泛族名时用读者的");
     }
 
-    /// 书的内嵌字体挂在链上**第二个**名字时也要找得到：`fallbacks` 按整条链试。
+    /// 书的内嵌字体挂在链上**第二个**名字时也要找得到：`families_for` 按整条链试。
     #[test]
     fn the_books_face_may_be_named_by_a_later_candidate() {
         let font = gpui_font(
             &key_chain("MyFont", &["Book Body"]),
             &body(),
             &mono(),
-            &faces(&[("Book Body", &["Noto Serif"])]),
+            &faces(&[("Book Body", &["Publisher Serif"])]),
             &known(),
         );
-        assert_eq!(font.family, body(), "两个都没装着，正文用读者的");
-        assert_eq!(chain(&font), vec!["Noto Serif".to_string()]);
+        assert_eq!(
+            font.family, "Publisher Serif",
+            "作者排在第二的那一份是他随书带的，正文用它"
+        );
+        assert_eq!(chain(&font), vec![body().to_string()]);
     }
 
-    /// 作者点名了一个设备上**真装着**的家族：这是原有的语义，不动 ——
-    /// 内嵌字体那一条不该顺手把「装过的字体」也压回读者的。
+    /// 随书那一份排在「设备上恰好装着同名家族」之前：`@font-face` 的 `src` 指的是作者
+    /// 交来的字节，机器上碰巧有个同名家族不该把它顶掉。
+    #[test]
+    fn the_books_face_outranks_an_installed_family_of_the_same_name() {
+        let font = gpui_font(
+            &key("Noto Serif"),
+            &body(),
+            &mono(),
+            &faces(&[("Noto Serif", &["Publisher Serif"])]),
+            &known(),
+        );
+        assert_eq!(font.family, "Publisher Serif", "同名时让书里那份先");
+        assert_eq!(
+            chain(&font),
+            vec!["Noto Serif".to_string(), body().to_string()],
+            "设备上那一张与读者的偏好都留在补缺位"
+        );
+    }
+
+    /// 这本书带了字体，但这一条链没点名它 → 与「没有内嵌字体」走逐字节同一条路径：
+    /// primary 照读者的四档，`fallbacks` 是 `None`。不许顺手把书里的字体塞给没点名的元素
+    /// ——《哈利·波特全集》就是这样：正文 40951 个元素写的是 `宋体`，而书里那两份挂在
+    /// `hanyi` / `qingkong` 名下，只有 1009 个标题与 161 段引文点名了它们。
+    #[test]
+    fn an_element_that_never_names_the_book_face_is_left_alone() {
+        let font = gpui_font(
+            &key("宋体"),
+            &body(),
+            &mono(),
+            &faces(&[("hanyi", &["Publisher Serif"])]),
+            &known(),
+        );
+        assert_eq!(font.family, body(), "没点名的正文仍是读者的");
+        assert!(
+            font.fallbacks.is_none(),
+            "链上没这个名字就别把书里那份挂上去"
+        );
+    }
+
+    /// 作者点名了一个设备上**真装着**的家族，而这本书没带同名字节：原有的语义，不动。
     #[test]
     fn a_family_the_device_actually_has_stays_primary() {
         let font = gpui_font(&key("Noto Serif"), &body(), &mono(), &faces(&[]), &known());

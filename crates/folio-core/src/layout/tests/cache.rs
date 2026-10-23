@@ -150,7 +150,7 @@ fn width_is_quantized_to_one_pixel() {
 fn layout_cache_returns_cached_on_hit() {
     let source = "<p>缓存测试。</p>";
     let dom = Dom::parse(source.as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let body = body_of(&dom);
     let mut cache = LayoutCache::new();
 
@@ -181,7 +181,7 @@ fn layout_cache_returns_cached_on_hit() {
 fn layout_cache_misses_on_width_change() {
     let source = "<p>宽度变化测试。</p>";
     let dom = Dom::parse(source.as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let body = body_of(&dom);
     let mut cache = LayoutCache::new();
 
@@ -224,7 +224,7 @@ fn layout_cache_misses_on_width_change() {
 fn layout_cache_keeps_light_and_full_apart() {
     let source = "<p>两档。</p>";
     let dom = Dom::parse(source.as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let body = body_of(&dom);
     let mut cache = LayoutCache::new();
     let key = key_for(source, 600.0);
@@ -274,7 +274,7 @@ fn layout_cache_keeps_light_and_full_apart() {
 fn layout_cache_misses_when_metrics_revision_differs() {
     let source = "<p>口径。</p>";
     let dom = Dom::parse(source.as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let body = body_of(&dom);
     let prefs = crate::infra::config::Reader::default();
     let mut cache = LayoutCache::new();
@@ -407,7 +407,7 @@ fn assert_same_lines(a: &Layout, b: &Layout) {
 #[test]
 fn block_cache_reuses_and_matches_fresh_layout() {
     let (dom, body) = flat_three();
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let opts = LayoutOptions {
         width: 300.0,
         light: false,
@@ -450,6 +450,7 @@ fn a_reused_block_replays_the_floats_it_placed() {
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let body = body_of(&dom);
     let opts = LayoutOptions {
@@ -488,7 +489,7 @@ fn block_cache_only_relayouts_the_changed_block() {
     };
     let key = key_for(FLAT_SOURCE, 300.0);
 
-    let plain = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let plain = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let mut cache = BlockCache::new();
     layout_with_blocks(&mut cache, &key, &dom, &plain, body, opts, &Mono, &NoImages);
 
@@ -497,6 +498,7 @@ fn block_cache_only_relayouts_the_changed_block() {
         &dom,
         &RuleSet::parse(".hot { font-size: 28px }", Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let (hits0, misses0) = (cache.hits, cache.misses);
     let out = layout_with_blocks(&mut cache, &key, &dom, &hot, body, opts, &Mono, &NoImages);
@@ -517,7 +519,7 @@ fn block_cache_only_relayouts_the_changed_block() {
 #[test]
 fn block_cache_clears_when_the_context_changes() {
     let (dom, body) = flat_three();
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let opts = LayoutOptions {
         width: 300.0,
         light: false,
@@ -581,7 +583,7 @@ fn block_cache_survives_a_preference_change() {
         allow_vertical: false,
     };
     let plain_prefs = crate::infra::config::Reader::default();
-    let plain = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let plain = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let key0 = LayoutKey::compose(
         LayoutInputs::compute("", &plain_prefs),
         content_hash(FLAT_SOURCE),
@@ -621,6 +623,7 @@ fn block_cache_survives_a_preference_change() {
             font_size: bigger.font_size,
             ..ComputedStyle::default()
         },
+        "",
     );
     layout_with_blocks(&mut cache, &key1, &dom, &hot, body, opts, &Mono, &NoImages);
     assert_eq!(
@@ -638,7 +641,7 @@ fn block_cache_survives_a_preference_change() {
 #[test]
 fn block_cache_evicts_over_capacity() {
     let (dom, body) = flat_three();
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let opts = LayoutOptions {
         width: 300.0,
         light: false,

@@ -38,7 +38,7 @@ pub fn sync_from_config(cx: &App) {
         stopped();
         return;
     };
-    let Some(dest_dir) = target_dir(&library) else {
+    let Some(book_dir) = target_dir(&library) else {
         tracing::error!("watch: 书库位置没确认过，监听不开");
         stopped();
         return;
@@ -66,7 +66,7 @@ pub fn sync_from_config(cx: &App) {
         config,
         store,
         queue,
-        dest_dir,
+        book_dir,
         Some(on_event),
     )));
     tracing::info!("watch: 监听已起（{}）", watch.dir);

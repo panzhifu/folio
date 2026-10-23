@@ -3477,6 +3477,102 @@ fn a_horizontal_swipe_follows_the_finger_and_lands(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
 }
 
+/// 整章只有一页的那种插页（一本书里每张整页照片就是这样一个章）：横扫该**跟手**。
+///
+/// 从前 `claim_swipe` 在跨章那一格直接放弃跟手（理由写成「目标章还没排版」），于是这种页
+/// 每一划都要等抬手由 `turn()` 补一趟自动动画 —— 真机 2026-10-22 量到读者那九划全是
+/// `released=false` 的 380 ms 动画，跟手腿一帧都没有。把跨章那一格改回「不跟手直接返回」，
+/// 这里第一条断言就红。
+#[gpui_kit::test]
+fn a_swipe_off_a_one_page_chapter_follows_the_finger(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::session::TurnRun;
+
+    cx.update(gpui_kit::init);
+    // 四章、每章一行 ⇒ 整章只有一页 ⇒ 往左那一划必是跨章那一笔。
+    let short_chapters = FlowDoc {
+        chapters: (0..4)
+            .map(|i| Chapter::inline(format!("第{i}章"), format!("<p>短章第{i}行。</p>")))
+            .collect(),
+        ..Default::default()
+    };
+    let (view, handle) = open(
+        cx,
+        &short_chapters,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    // 前置两格：夹具走样（不止一页）或邻章没排好，这条就会空跑成「章内翻页」那一档。
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page_count()),
+        1,
+        "夹具要走样了：这一章不止一页，测的就不是跨章"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.chapter_landing(1).is_some()),
+        "前置：邻章该已经排好（生产上每帧预排版都会做到），否则这条测的是「没排好」那一格"
+    );
+
+    let before = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 240.0);
+    let following = view.read_with(cx, |v, _| v.turn);
+    assert!(
+        matches!(following, Some(turn) if matches!(turn.run, TurnRun::Following { .. })),
+        "从整页插页往左划该起跟手，实得 {following:?}"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.turn.and_then(|turn| turn.arriving)),
+        Some(crate::ui::features::reader::model::session::PageRef {
+            chapter: 1,
+            page: 0
+        }),
+        "跟手这一趟要摆的第二张纸该是下一章第一页"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| (v.chapter_index(), v.page())),
+        before,
+        "跟手期间章号与页号一个字都不动"
+    );
+    // 折页这一档旧页由 GPU 网格画，`page_shift` 不归它管（那是 Cover / Slide 的位移），
+    // 所以「跟手走了没有」读的是这一趟的推进量：手指走了 120 / 460 ≈ 0.26。
+    let t = match view.read_with(cx, |v, _| v.turn.map(|turn| turn.run)) {
+        Some(TurnRun::Following { t }) => t,
+        other => panic!("跟手那一趟该在飞，实得 {other:?}"),
+    };
+    assert!(
+        (0.2..0.35).contains(&t),
+        "推进量该跟着手指走（约 0.26），实得 {t}"
+    );
+
+    // 走过大半屏：松手落定到下一章去（换锚章由动画走完那一刻接手，不在松手那一格）。
+    raw_touch(cx, handle, TouchPhase::Moved, 60.0);
+    raw_touch(cx, handle, TouchPhase::Ended, 60.0);
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(
+        view.read_with(cx, |v, _| (v.chapter_index(), v.page())),
+        (1, 0),
+        "走完那一刻该落在下一章第一页"
+    );
+
+    // 没过线那一划退回原地：章号一个字不动。
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 330.0);
+    raw_touch(cx, handle, TouchPhase::Ended, 330.0);
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(
+        view.read_with(cx, |v, _| (v.chapter_index(), v.page())),
+        (1, 0),
+        "短划该弹回原地，不该把章换掉"
+    );
+}
+
 /// 横扫没过那一屏的五分之一：跟手照样起来，松手弹回，页号一个字不动。
 /// 这条与上面那条是一对 —— 只钉「该翻」会漏掉「不该翻」，而那半才是弹回那段动画的去处。
 #[gpui_kit::test]

@@ -1305,6 +1305,67 @@ mod booted {
         );
     }
 
+    /// 回归门：手机端「我的」钻进展屏时，应用导航栏整条收起 = 那一屏占满整窗。
+    ///
+    /// 那一屏不在这几条目的地栈上（它是「我的」那一个目的地的栈底，自己攥着「现在站着哪一屏」），
+    /// 所以底栏的判据除了栈深还要问它一句。钉的是渲染用的那一句 `AppShell::nav_gone`：底栏只长在
+    /// 真机上（`SizeClass::of` 在桌面把窄窗口夹到 `Medium`），宿主进不到那一屏的画。
+    ///
+    /// 三个方向各防一种写反：判据漏掉设置那一问 → 钻进详情时底下那条栏还占着 56，读者看到的是
+    /// 「同一屏的下半段换了内容」；不设目的地的门 → 停在详情里切去书架，那边的栏也没了；
+    /// 退回根屏不重算 → 栏再也不回来。
+    #[gpui_kit::test]
+    fn drilling_into_the_account_settings_takes_the_whole_window(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let account = shell
+            .read_with(cx, |this, _| this.account.clone())
+            .expect("Compact 档的「我的」装的就是钻入式列表");
+
+        let at = |cx: &mut TestAppContext| shell.read_with(cx, |this, cx| this.nav_gone(cx));
+        cx.update_window(handle, |_, window, cx| {
+            shell.update(cx, |this, cx| this.go(Destination::Account, window, cx));
+            window.render_frame(cx);
+        })
+        .expect("窗口应能渲染");
+        assert!(!at(cx), "站在根屏时底栏该在");
+
+        cx.update(|cx| {
+            account.update(cx, |account, cx| {
+                account.drill_into_for_test(1, cx);
+            })
+        });
+        assert!(at(cx), "钻进详情那一屏要吃满整窗");
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .expect("窗口应能渲染");
+        assert!(at(cx), "钻进详情那一屏要吃满整窗");
+
+        // 退回根屏：判据跟着翻回 false（重画那一趟由外壳挂在 notify 上的观察者触发，
+        // 这里只钉判据本身）。
+        cx.update(|cx| {
+            account.update(cx, |account, cx| {
+                account.go_back(cx);
+            })
+        });
+        assert!(!at(cx), "回到根屏底栏要跟着回来");
+
+        // 停在详情里切去别的目的地：那边的栏不该被这一屏收走。
+        cx.update(|cx| {
+            account.update(cx, |account, cx| {
+                account.drill_into_for_test(1, cx);
+            })
+        });
+        assert!(at(cx), "前置：切走之前它确实钻进去了");
+        cx.update_window(handle, |_, window, cx| {
+            shell.update(cx, |this, cx| this.go(Destination::Shelf, window, cx));
+            window.render_frame(cx);
+        })
+        .expect("窗口应能渲染");
+        assert!(!at(cx), "「我的」停在详情里不该把书架的底栏也收掉");
+    }
+
     /// 多语言的验收：导航栏的文案由配置里的语言驱动，改偏好后视图能重画到新语言。
     ///
     /// 不断言侧栏那一格的元素 id —— `SidebarMenuItem` 的 id 是内部拼的

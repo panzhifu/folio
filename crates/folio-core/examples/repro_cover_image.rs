@@ -184,7 +184,7 @@ fn main() {
     );
     let dom = folio_core::content::dom::Dom::parse(chapter.source().as_bytes());
     let styles =
-        folio_core::content::format::css::computed::cascade(&dom, &css, &Default::default());
+        folio_core::content::format::css::computed::cascade(&dom, &css, &Default::default(), "");
     let root = dom
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))

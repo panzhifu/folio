@@ -28,7 +28,7 @@ use folio_core::content::document::Document;
 use folio_core::content::dom::Dom;
 use folio_core::content::format::FlowDoc;
 use folio_core::content::format::css::computed::{
-    ComputedStyle, DeclStatus, cascade, declaration_status,
+    ComputedStyle, DeclStatus, cascade, declaration_status, inline_declarations,
 };
 use folio_core::content::format::css::{Origin, RuleSet};
 
@@ -176,12 +176,14 @@ fn measure(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> Totals {
     let mut tot = Totals::default();
     let base = ComputedStyle::default();
     let root_px = base.font_size;
-    for (index, _chapter) in flow.chapters.iter().enumerate() {
+    for (index, chapter) in flow.chapters.iter().enumerate() {
         let Ok(source) = doc.chapter_source(index) else {
             continue;
         };
         let dom = Dom::parse(source.as_bytes());
-        let styled = cascade(&dom, rules, &base);
+        // 内联那一份的基准目录：与界面递给 `cascade` 的同一个数（`ChapterImages` 手里那一个）。
+        let base_dir = folio_core::content::format::dir_of(&chapter.spine_href);
+        let styled = cascade(&dom, rules, &base, &base_dir);
         for (id, _) in dom.elements() {
             tot.elements += 1;
             let Some(own) = styled.get(id) else {
@@ -191,8 +193,27 @@ fn measure(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> Totals {
             // 所以同一属性留最后一条就是胜出的那条。
             let mut winner: BTreeMap<&str, &folio_core::content::format::css::Declaration> =
                 BTreeMap::new();
-            for decl in rules.matching_declarations(&dom, id) {
-                winner.insert(decl.property.as_str(), decl);
+            // 元素上的 `style="…"` 也是一条声明。**这一条从前整个漏了**：这台秤只遍历样式表
+            // 规则，于是哈利波特的 21 处内联整页底图（七张册扉页、五张附录扉页、`toc3`、
+            // `authorhis` 那一族）一条也没记，表上只剩 `.oval` 那一处样式表写法，
+            // 读表的人会以为这条属性已经见底 —— 量具漏计一个形状，比引擎少接一个属性更坏。
+            // 次序照抄 `cascade` 那一刀：作者普通 < 内联普通 < 内联 `!important` < 作者 `!important`。
+            let decls = rules.matching_declarations(&dom, id);
+            let inline = dom
+                .attr(id, "style")
+                .map(|text| inline_declarations(text, &base_dir))
+                .unwrap_or_default();
+            for d in decls.iter().filter(|d| !d.important) {
+                winner.insert(d.property.as_str(), *d);
+            }
+            for d in inline.iter().filter(|d| !d.important) {
+                winner.insert(d.property.as_str(), d);
+            }
+            for d in inline.iter().filter(|d| d.important) {
+                winner.insert(d.property.as_str(), d);
+            }
+            for d in decls.iter().filter(|d| d.important) {
+                winner.insert(d.property.as_str(), *d);
             }
             let mut hit = false;
             for (name, decl) in winner {
@@ -339,7 +360,7 @@ fn geometry(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> (usize, f32,
             continue;
         };
         let dom = Dom::parse(source.as_bytes());
-        let styles = cascade(&dom, rules, &ComputedStyle::default());
+        let styles = cascade(&dom, rules, &ComputedStyle::default(), "");
         // 没有 `<body>` 的章（手写得很野的老书）从文档根节点排，行为与 app 侧一致。
         let body = dom
             .elements()

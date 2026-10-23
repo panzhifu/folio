@@ -218,7 +218,7 @@ mod tests {
         let html = "<div><h2>章</h2><p>文</p></div>";
 
         let dom = Dom::parse(html.as_bytes());
-        let styled = cascade(&dom, &RuleSet::default(), &base);
+        let styled = cascade(&dom, &RuleSet::default(), &base, "");
         assert_eq!(
             styled.get(node_id(&dom, "h2")).unwrap().text_indent,
             Length::ZERO
@@ -230,7 +230,7 @@ mod tests {
 
         let dom = Dom::parse(html.as_bytes());
         let rules = RuleSet::parse("h2 { text-indent: 40px }", Origin::Author);
-        let styled = cascade(&dom, &rules, &base);
+        let styled = cascade(&dom, &rules, &base, "");
         assert_eq!(
             styled.get(node_id(&dom, "h2")).unwrap().text_indent,
             Length::Px(40.0),

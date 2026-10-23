@@ -10,6 +10,7 @@
 //! - [`anchor`] —— 可见文本坐标系（`TextMap` / `TextAnchor`）与四级降级重定位。
 //! - [`hit`] —— 引擎查询接口：命中、选区矩形、词边界吸附。
 //! - [`annotation`] —— 批注读侧：批量解算、按章分组、Markdown 导出。
+//! - [`validate`] —— 解析产物的结构完整性检查：「读出来不对」只写日志，不阻塞阅读。
 //!
 //! **分区的判据是「谁依赖谁」**：这一区可以依赖 [`crate::infra`]，但不依赖
 //! [`crate::store`] 与 [`crate::ingest`] —— 所以它能被 `cargo test` 全量覆盖，
@@ -22,3 +23,4 @@ pub mod dom;
 pub mod format;
 pub mod hit;
 pub mod scan;
+pub mod validate;

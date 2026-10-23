@@ -487,6 +487,15 @@ impl AppShell {
                 (Some(view), root)
             };
 
+        // 手机那一端钻进展屏时，底栏整条收起 —— 而「收不收」画在外壳这一层，所以外壳得跟着
+        // 重画一次。观察者挂在 `notify` 上：`CompactSettings` 每改一次 `screen` 都敲 notify
+        // （进、退、选项屏选中写回那三处），因此不必为这一格另发一种事件。
+        // 目的地的门留在 [`AppShell::settings_pushed`] 那一头：切到别的目的地时「我的」那屏
+        // 还停在详情里，那是它自己的状态，不该把别的目的地的栏也收掉。
+        let _account_watch = account
+            .as_ref()
+            .map(|account| cx.observe(account, |_, _, cx| cx.notify()));
+
         // 每个目的地一条栈，根视图先压进去。书架那一条已经在架面之前建好了。
         let mut stacks = Vec::with_capacity(Destination::ALL.len());
         for destination in Destination::ALL {
@@ -1005,6 +1014,31 @@ impl AppShell {
         self.stacks[self.destination.index()].read(cx).depth() > 1
     }
 
+    /// 「我的」那一屏自己钻进了详情（某一页，或某一格的选项屏）。
+    ///
+    /// 这一问不在上面那条栈上，因为钻入没有压页：紧凑设置是一个实体自己攥着「现在站着哪一屏」，
+    /// 它的根视图就是这条栈的栈底。把每一屏拆成独立视图压进目的地那条栈，书里那一处复用跟着一起
+    /// 改形 —— 阅读页「更多设置」压进子栈的是**同一份** `CompactSettings`（见
+    /// `reader::ReadingPage::open_settings`），拆成每屏一个视图就没有一份能两边都用。
+    /// 所以「这一屏要占满整窗」得单独问一句；代价是这一句要自己认目的地 —— 切去别的目的地时
+    /// 「我的」还停在详情里，那是它自己的状态，不该把别处的底栏也收掉。
+    fn settings_pushed(&self, cx: &App) -> bool {
+        self.destination == Destination::Account
+            && self
+                .account
+                .as_ref()
+                .is_some_and(|account| account.read(cx).pushed())
+    }
+
+    /// 这一帧该不该把应用导航栏整条收起：当前目的地的栈上压了页，或「我的」那屏钻进了详情。
+    ///
+    /// 摆成方法而不是留在 `render` 里就地算：宿主到不了 Compact 档（`SizeClass::of` 在桌面把
+    /// 窄窗口夹到 `Medium`，底栏只在真机长出来），判据得能被测试问一句才红得起来 ——
+    /// 与 [`immersive_nav`] 抽成自由函数同一条理由。
+    fn nav_gone(&self, cx: &App) -> bool {
+        self.page_pushed(cx) || self.settings_pushed(cx)
+    }
+
     /// 当前档位的导航栏：点击即切目的地。
     fn nav(&self, size: SizeClass, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
@@ -1040,12 +1074,14 @@ impl Render for AppShell {
 
         let size = SizeClass::of(window);
         let safe = host::safe_area(window, cx);
-        // 栈上压了页 = 那一页要吃满整屏 → 导航栏整条收起。今天走这一条的只有「信息」那一页：
-        // 书不在栈上（它盖在整层之上），而设置那一屏住在书自己那条子栈里，也不在这条上。
+        // 要吃满整屏的那一屏在前面 → 导航栏整条收起。今天走这一条的有两处：架面那条栈上压上来
+        // 的「信息」那一页，和「我的」自己钻进详情的那一屏（两条判据见 [`AppShell::nav_gone`]）。
+        // 书不在这条栈上（它盖在整层之上），而书里「更多设置」压进去用的是那一层自己的子栈，
+        // 两条都不算在这里。
         // 系统级那一层（真全屏、藏状态栏）只跟着书：一页表单不该把状态栏也藏掉。
         // 应用内的导航栏不再跟着书 —— 那一层盖在它上面，收它只会挤动架面（见 [`ReadingLayer`]）。
         let wanted = ChromeState {
-            nav_gone: self.page_pushed(cx),
+            nav_gone: self.nav_gone(cx),
             immersive: immersive_nav(size, self.reading_mounted()),
         };
         // 转场在跑的时候画面上还是**改变之前**那一对，理由见 [`AppShell::chrome_frozen`]。

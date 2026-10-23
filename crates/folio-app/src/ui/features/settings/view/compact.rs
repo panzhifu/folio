@@ -3,10 +3,12 @@
 //! 桌面的 `Settings` 组件是「侧栏 + 正文」两栏，塞不进一块 360dp 的小屏；这里吃
 //! 同一份 [`spec_pages`]，渲染成「页列表 → 全屏子页 → 选项子页」三层：
 //!
-//! - 根屏一个大标题 + 一张内嵌分组，一行一页，右端挂这一页的**当前值**（值从那一行
-//!   自己的 getter 取，见 [`page_summary`]），末尾一枚进去的箭头；
+//! - 根屏一个大标题 + 一张内嵌分组，一行一页，末尾只留一枚进去的箭头。右端**不挂这一页的
+//!   当前值**：入口列表那一行管的是「去哪儿」，不是「现在是多少」，而一页几十行里只能挑一个
+//!   数当代表（「文字」那页从前露字号、看不到行距），念不准还看着像已经调过了；
 //! - 子页顶部一条 [`TopBar`]（返回 + 页名），下面按规格里的组各成一张分组卡，组名当节头，
-//!   节头下面才摆行；
+//!   节头下面才摆行。钻进子页（以及它的选项屏）时**整窗都是它**：底下那条应用导航栏由外壳
+//!   收起，判据是 [`CompactSettings::pushed`]，退回根屏那一趟它自己回来；
 //! - 多选一（浅深、翻页方式、排列密度…）**推一屏勾选**，不再开内联下拉：七项的下拉在
 //!   393dp 那块屏上要盖掉半屏，而推入式的每一行都能整行命中 44；
 //! - 开关用 `Switch`（受控值：回调给的就是要写进去的新值），数值用 −/+ 步进行：拖动滑条
@@ -53,7 +55,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window, div, px, rems,
 };
 
-use super::spec::{self, RowKind, page_summary};
+use super::spec::{self, RowKind};
 use super::spec_pages;
 use crate::ui::components::{TopBar, hairline};
 use crate::ui::services::l10n::tr;
@@ -138,8 +140,9 @@ fn label_block(title: SharedString, desc: Option<SharedString>, cx: &App) -> Div
 /// 右端那一格「当前值」：与标题同字号、取次要文字色、右对齐（Apple 的 value1 就是
 /// body 那一档）。
 ///
-/// 只许占一行、放不下就省略号 —— 真机上「书库」那一格装的是 `/storage/emulated/0/folio`
-/// 这么一串，让它折行会把一行 44 撑成三行，整张卡的节奏就散了（Apple 那一格从不折行）。
+/// 只许占一行、放不下就省略号：这一格现在挂在子页那些「多选一」的行尾，选项标签有九门语言
+/// 的版本，德语那一串完全可能长过剩下那点宽度。让它折行会把一行 44 撑成三行，整张卡的节奏
+/// 就散了（Apple 那一格从不折行）。
 fn value_text(value: SharedString, cx: &App) -> impl IntoElement {
     div()
         .min_w_0()
@@ -171,9 +174,10 @@ fn list_row(
         .into_any_element()
 }
 
-/// 「进去还有一屏」那一类行：图标位（可空）+ 标题（+说明）+ 右端的当前值 + 一枚箭头。
+/// 「进去还有一屏」那一类行：图标位（可空）+ 标题（+说明）+ 可选的当前值 + 一枚箭头。
 ///
-/// 右端没有值（「关于」这类纯推入的页）就只留箭头 —— Apple 的 push 行本来就不挂值。
+/// 右端没有值就只留箭头：根屏每一行都不挂值（那里的一行是「去哪儿」），而子页里「多选一」
+/// 那一行要挂 —— 那一行的当前值就是它自己，点进去之前读者得先看得见现在用的是哪一档。
 fn push_cell(
     id: SharedString,
     icon: Option<IconName>,
@@ -296,7 +300,26 @@ impl CompactSettings {
         true
     }
 
-    /// 根屏：大标题 + 一张分组卡，一行一页，右端挂这一页的当前值。
+    /// 这一屏是不是**占满整窗**：钻进子页或选项屏之后，底下那条应用导航栏该整条收起，
+    /// 读者看到的是「换了一屏」，不是「同一屏的下半段换了内容」。
+    ///
+    /// 判据只有这一句，画不画那条栏归外壳（[`crate::ui::shell`]）—— 栏是外壳的 chrome，
+    /// 而「现在站着哪一屏」是这一屏自己的状态。这两格之间靠一条 `observe` 接上：本屏每一处
+    /// 改 `screen` 都敲了 `cx.notify()`，外壳收到就把栏重画一次，所以这里不用另发一种事件。
+    /// 根屏返回 `false`：那一屏是「我的」这一个目的地，栏该在。
+    pub(crate) fn pushed(&self) -> bool {
+        !matches!(self.screen, Screen::Root)
+    }
+
+    /// 外壳测试用的钻入入口：`open` 是本模块私有的，而「栏收不收」那条判据要钉的是外壳
+    /// 那一头（宿主到不了 Compact 档的渲染，只能问判据），所以留这一个口子。
+    #[cfg(test)]
+    pub(crate) fn drill_into_for_test(&mut self, page_ix: usize, cx: &mut Context<Self>) -> bool {
+        self.open(page_ix, cx);
+        self.pushed()
+    }
+
+    /// 根屏：大标题 + 一张分组卡，一行一页，右端只留那枚进去的箭头。
     fn root_screen(&self, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity().clone();
         let pages = spec_pages(cx);
@@ -305,14 +328,13 @@ impl CompactSettings {
             if ix > 0 {
                 rows.push(separator(3.5, cx).into_any_element());
             }
-            let value = page_summary(page, cx);
             let entity = entity.clone();
             rows.push(push_cell(
                 SharedString::from(format!("settings-page-{ix}")),
                 Some(page.icon),
                 page.title.clone(),
                 None,
-                value,
+                None,
                 move |_, _, app| entity.update(app, |this, cx| this.open(ix, cx)),
                 cx,
             ));
@@ -777,6 +799,41 @@ mod tests {
         assert_eq!(shown(cx), Screen::Root);
         assert!(!press(cx), "已经在根屏就不该吞下返回，让外壳接着决定");
         assert_eq!(shown(cx), Screen::Root);
+    }
+
+    /// 钻进展屏 = 那一屏要吃满整窗。这一句要报给外壳，因为底栏归外壳画。
+    ///
+    /// 钉的是「根屏不报、进了详情就报、退回根屏又不报」这一整条判据，不是某一帧的画面：
+    /// 底栏只长在真机上（`SizeClass::of` 在桌面把窄窗口夹到 `Medium`），宿主测试进不到那一屏。
+    /// 恒写成 `true` 会让「我的」那一格从此看不见底栏，恒写成 `false` 会让读者钻进详情时底下
+    /// 那条栏还占着 56 —— 两个方向这条都红。
+    #[gpui_kit::test]
+    async fn the_drilled_screen_reports_that_it_occupies_the_window(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let view: Entity<CompactSettings> = cx.update(|cx| cx.new(|_| CompactSettings::new()));
+        let pushed = |cx: &mut TestAppContext| cx.read(|cx| view.read(cx).pushed());
+        let back =
+            |cx: &mut TestAppContext| cx.update(|cx| view.update(cx, |this, cx| this.go_back(cx)));
+
+        assert!(!pushed(cx), "根屏就是「我的」这一格，底栏该在");
+        cx.update(|cx| view.update(cx, |this, cx| this.open(2, cx)));
+        assert!(pushed(cx), "钻进某一页要吃满整窗");
+
+        cx.update(|cx| {
+            view.update(cx, |this, _| {
+                this.screen = Screen::Pick {
+                    page: 2,
+                    group: 0,
+                    row: 0,
+                };
+            })
+        });
+        assert!(pushed(cx), "选项屏同样是整屏");
+
+        assert!(back(cx), "选项屏往外弹一层");
+        assert!(pushed(cx), "退回的是那一页，还在详情里，底栏不该当场回来");
+        assert!(back(cx), "那一页再往外弹一层");
+        assert!(!pushed(cx), "回到根屏，底栏跟着回来");
     }
 
     /// 两层表面那一对的方向：卡片必须比页面亮一档，浅深两套外观都得成立。

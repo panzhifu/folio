@@ -23,6 +23,7 @@ fn typeset_kept(html: &str, css: &str, wrap: f32) -> (Dom, StyledDom, Layout) {
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let root: NodeId = find(&dom, "body");
     let laid = layout(
@@ -293,6 +294,7 @@ fn light_layout_agrees_with_the_full_one_on_the_flow_extent() {
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let root: NodeId = find(&dom, "body");
     let opts = |light: bool| LayoutOptions {

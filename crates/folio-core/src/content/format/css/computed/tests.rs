@@ -5,10 +5,11 @@
 
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{
-    BorderEdge, BorderStyle, Color, ComputedStyle, Direction, Display, Float, Hyphens, Length,
-    ListStyle, StyledDom, TextAlign, TextJustify, WritingMode, cascade,
+    BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundSize, BackgroundTile, BorderEdge,
+    BorderStyle, Color, ComputedStyle, DeclStatus, Direction, Display, Float, Hyphens, Length,
+    ListStyle, StyledDom, TextAlign, TextJustify, WritingMode, cascade, declaration_status,
 };
-use crate::content::format::css::{Origin, RuleSet};
+use crate::content::format::css::{Declaration, Origin, RuleSet};
 
 struct Page {
     dom: Dom,
@@ -21,7 +22,20 @@ fn page(html: &str, sheets: &[(&str, Origin)]) -> Page {
     for (css, origin) in sheets {
         rules.extend(RuleSet::parse(css, *origin));
     }
-    let styled = cascade(&dom, &rules, &ComputedStyle::default());
+    let styled = cascade(&dom, &rules, &ComputedStyle::default(), "");
+    Page { dom, styled }
+}
+
+/// 与 [`page`] 同一件事，只是这一份文档在容器里的**目录**给得出来。
+///
+/// 只有内联 `style="…"` 与章内 `<style>` 会读它：那两处的 `url(...)` 基准是**这一份文档
+/// 自己的目录**，而外链样式表按它自己的目录折（在拼接前由 `absolutize_css_urls` 做过）。
+/// 绝大多数用例不涉及路径，走 [`page`] 那个空目录就够。
+fn page_in_dir(html: &str, css: &str, base_dir: &str) -> Page {
+    let dom = Dom::parse(html.as_bytes());
+    let mut rules = RuleSet::default();
+    rules.extend(RuleSet::parse(css, Origin::Author));
+    let styled = cascade(&dom, &rules, &ComputedStyle::default(), base_dir);
     Page { dom, styled }
 }
 
@@ -917,7 +931,7 @@ fn root_base_from_reader_prefs_is_the_inheritance_seed() {
         font_family: "Noto Serif CJK SC".into(),
         ..ComputedStyle::default()
     };
-    let styled = cascade(&dom, &rules, &base);
+    let styled = cascade(&dom, &rules, &base, "");
     let p = dom
         .elements()
         .find(|(_, n)| {
@@ -1286,6 +1300,362 @@ fn the_background_shorthand_yields_its_color() {
     assert_eq!(
         style(&page, class(&page, "t")).background_color,
         Some(Color(255, 255, 255))
+    );
+}
+
+/// 背景图那条路：`url()` 要留在图层表里，而不是像从前那样只把颜色挑出来、图整条丢掉。
+/// 症状写在 `the_background_shorthand_clears_a_picture_it_does_not_mention` 那一条的注释上，
+/// 是哈利·波特七张册扉页「白底上一片看不见的淡金字」。
+#[test]
+fn a_background_url_reaches_the_layer_table() {
+    let page = author(
+        "<p>正文</p>",
+        "p { background-image: url(\"OEBPS/Images/a.png\") }",
+    );
+    let style = style(&page, tag(&page, "p"));
+    assert_eq!(style.background_layers.len(), 1, "一层");
+    assert_eq!(
+        style.background_layers[0].image.as_deref(),
+        Some("OEBPS/Images/a.png"),
+        "路径原样留着：样式表拼接前已经折成容器内绝对路径，这里不该再动它"
+    );
+    // 没写的那三条落回 CSS 初值，不是落回「看不出来」的值。
+    assert_eq!(style.background_layers[0].size, BackgroundSize::Auto);
+    assert_eq!(style.background_layers[0].repeat.x, BackgroundTile::Repeat);
+}
+
+/// 简写要把一条声明里的**四件事**一起接住。这一条抄的是哈利波特 `.speci` 的原文
+/// （`background: #f4f7f1 url(../Images/p0.png) no-repeat bottom right`
+/// 加 `background-size: 55% auto`），次序随意是这一族的常态。
+#[test]
+fn the_background_shorthand_yields_every_item_it_carries() {
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background: #f4f7f1 url(\"OEBPS/Images/p0.png\") no-repeat bottom right;\n\
+               background-size: 55% auto }",
+    );
+    let style = style(&page, class(&page, "t"));
+    assert_eq!(style.background_color, Some(Color(0xf4, 0xf7, 0xf1)));
+    let layer = &style.background_layers[0];
+    assert_eq!(layer.image.as_deref(), Some("OEBPS/Images/p0.png"));
+    assert_eq!(layer.repeat.x, BackgroundTile::NoRepeat);
+    assert_eq!(layer.repeat.y, BackgroundTile::NoRepeat);
+    // `bottom right`：两根轴都到末端。纵轴那个 `bottom` 不该被当成「还没写」。
+    assert_eq!(
+        layer.position.x,
+        BackgroundAxis::Edge(BackgroundEdge::End, None)
+    );
+    assert_eq!(
+        layer.position.y,
+        BackgroundAxis::Edge(BackgroundEdge::End, None)
+    );
+    // 长手那条跟在简写后面，按层叠顺序盖住简写里同一属性 —— 这里简写没写尺寸，
+    // 所以两条各说各的，不打架。
+    assert_eq!(
+        layer.size,
+        BackgroundSize::Explicit {
+            width: Some(Length::Percent(0.55)),
+            height: None,
+        }
+    );
+}
+
+/// **简写没写到的长手要拉回初值**（CSS 明文）。这一条是这一轮最要紧的门：
+/// 不重置的症状是转换器写的 `.a{background:url(x) center/cover}` 后面再跟一条
+/// `.a{background:#fff}` 时，白底**叠在图上**，扉页那张底图变成灰蒙蒙一片。
+/// 把 `apply_background_shorthand` 里那两行 `clear()` / `= None` 去掉，这一条立刻红。
+#[test]
+fn the_background_shorthand_clears_a_picture_it_does_not_mention() {
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background: url(\"a.png\") }\n.t { background: #ffffff }",
+    );
+    let style = style(&page, class(&page, "t"));
+    assert_eq!(
+        style.background_pictures().count(),
+        0,
+        "第二条简写没提图，就要把第一条那层图撤掉"
+    );
+    assert_eq!(style.background_color, Some(Color(255, 255, 255)));
+}
+
+/// 百分比**不许在层叠期折算**。`background-position` 的百分比基准是「盒减图」那段余量，
+/// `background-size` 的是这一块自己的盒 —— 两个都要等排版期才拿得到。
+/// 当场折成 px 等于拿窗口宽猜，正是 `margin` 那一族从前踩过的那一处。
+#[test]
+fn background_percentages_stay_unfolded() {
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background-image: url(\"a.png\"); background-position: 90% 14% }",
+    );
+    let position = style(&page, class(&page, "t")).background_layers[0].position;
+    assert_eq!(position.x, BackgroundAxis::Fraction(0.9));
+    assert_eq!(position.y, BackgroundAxis::Fraction(0.14));
+
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background-image: url(\"a.png\"); background-size: 50% }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "t")).background_layers[0].size,
+        BackgroundSize::Explicit {
+            width: Some(Length::Percent(0.5)),
+            height: None,
+        },
+        "只写一条时第二轴是 `auto`，不是 0"
+    );
+}
+
+/// `cover` / `contain` 是简写斜杠后面那一截，也是七张册扉页用的那两个词。
+#[test]
+fn background_size_keywords_survive_the_shorthand() {
+    for (css, want) in [
+        ("center/cover", BackgroundSize::Cover),
+        ("center / contain", BackgroundSize::Contain),
+        ("center", BackgroundSize::Auto),
+    ] {
+        let page = author(
+            "<p class=t>正文</p>",
+            &format!(".t {{ background: url(a.png) {css} }}"),
+        );
+        let layer = &style(&page, class(&page, "t")).background_layers[0];
+        assert_eq!(layer.size, want, "写法 {css:?}");
+        // 斜杠前面那一截仍然是位置，不是被尺寸吃掉半条声明。
+        assert_eq!(
+            layer.position.x,
+            BackgroundAxis::Edge(BackgroundEdge::Center, None),
+            "写法 {css:?} 的位置"
+        );
+    }
+}
+
+/// `repeat-x` 一句话就把**两根轴**都说了（纵轴是 `no-repeat`）。
+/// 拆成「只说横轴、纵轴落回初值 `repeat`」，一条横向分隔纹理会变成整片马赛克。
+#[test]
+fn repeat_x_sets_both_axes_at_once() {
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background-image: url(a.png); background-repeat: repeat-x }",
+    );
+    let repeat = style(&page, class(&page, "t")).background_layers[0].repeat;
+    assert_eq!(repeat.x, BackgroundTile::Repeat);
+    assert_eq!(repeat.y, BackgroundTile::NoRepeat);
+}
+
+/// 图层数取各条列表的较大者，短的那一条**从头循环**（规范定的）。
+/// 只把值给第一层的症状：第二张图在扉页上铺成一片马赛克。
+#[test]
+fn a_short_background_list_cycles_over_the_layers() {
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background-image: url(a.png), url(b.png); background-repeat: no-repeat }",
+    );
+    let layers = &style(&page, class(&page, "t")).background_layers;
+    assert_eq!(layers.len(), 2, "图层数跟着最长那条列表走");
+    assert_eq!(layers[0].repeat.x, BackgroundTile::NoRepeat);
+    assert_eq!(
+        layers[1].repeat.x,
+        BackgroundTile::NoRepeat,
+        "只有一条值时两层都要吃到它"
+    );
+}
+
+/// 渐变这一版不画。**整条判不认识**而不是折成「这一层没有图」：
+/// 后者会把作者的渐变底块悄悄画空，屏幕上与「书里本来没写」长得一模一样。
+#[test]
+fn a_gradient_background_is_counted_as_unrecognized() {
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background: linear-gradient(#fff, #000) }",
+    );
+    assert_eq!(page.styled.ignored, 1, "整条作废并计进 ignored");
+    assert!(style(&page, class(&page, "t")).background_layers.is_empty());
+
+    // 四值边缘语法同样判不认识（见 `parse_background_position` 那条注释）。
+    // 注意这里**图那一层还在**：作废的只有 `background-position` 那一条声明，
+    // 图是另一条已经接住的声明 —— 一条声明失败不许牵连另一条。
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background-image: url(a.png); background-position: left 10px top 20px }",
+    );
+    assert_eq!(page.styled.ignored, 1);
+    let layer = &style(&page, class(&page, "t")).background_layers[0];
+    assert_eq!(layer.image.as_deref(), Some("a.png"));
+    assert_eq!(
+        layer.position,
+        BackgroundPosition {
+            x: BackgroundAxis::Edge(BackgroundEdge::Start, None),
+            y: BackgroundAxis::Edge(BackgroundEdge::Start, None),
+        },
+        "位置那条没接住，就该留在初值（CSS 初值是 `0% 0%` = 左上）"
+    );
+}
+
+/// 背景图层**必须进那份手写的样式哈希**。块级排版缓存按子树样式哈希判命中，
+/// 漏掉的表现不是画错而是画旧：只改 `background-size` 时缓存命中上一代，
+/// 图仍按旧的摆 —— 读者改设置看不出为什么没变。
+/// 把 `computed.rs` 里 `self.background_layers.len().hash(h)` 那一行删掉，这一条红。
+#[test]
+fn the_background_layers_change_the_style_hash() {
+    let of = |css: &str| {
+        let page = author("<p class=t>正文</p>", css);
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(style(&page, class(&page, "t")), &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    };
+    let base = ".t { background-image: url(a.png); background-size: cover }";
+    assert_eq!(of(base), of(base), "同一条声明必须同哈希");
+    assert_ne!(
+        of(base),
+        of(".t { background-image: url(a.png); background-size: contain }"),
+        "只改尺寸也要换哈希"
+    );
+    assert_ne!(
+        of(base),
+        of(
+            ".t { background-image: url(a.png); background-size: cover; background-repeat: no-repeat }"
+        ),
+        "只改铺法也要换哈希"
+    );
+    assert_ne!(
+        of(base),
+        of(".t { background-image: url(b.png); background-size: cover }"),
+        "换一张图更要换哈希"
+    );
+}
+
+/// 「认得、不生效」与「接住了」是两件事，缺口量具必须说得出这一层差别。
+///
+/// `background-attachment: fixed` 单写时屏上确实没有任何变化（流式排版里没有对应物，
+/// 判据写在 `KNOWN_UNIMPLEMENTED` 那一格），所以它只能记 `Inert`。真在 `apply` 里给那条
+/// 写一个 `=> true` 的臂，`examples/css-gap` 就会报「这个属性我们做完了」——
+/// 那是把「没做」记成「做了」，比少接一条属性更坏。
+/// 反过来，同一句话**写在简写里**时必须被吃掉而不作废整条声明：
+/// `background: url(x) no-repeat fixed center` 里那个 `fixed` 要是不认，
+/// 底色与图会一起消失，症状比「fixed 没生效」大一个量级。
+#[test]
+fn attachment_is_known_but_inert_while_the_shorthand_still_eats_it() {
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background-image: url(a.png); background-attachment: fixed; background-clip: padding-box }",
+    );
+    let own = style(&page, class(&page, "t"));
+    assert_eq!(own.background_pictures().count(), 1, "图那条照常接住");
+    assert_eq!(
+        page.styled.ignored, 0,
+        "两条认得的长手不该计进 ignored，它们是「不生效」不是「不认识」"
+    );
+    for name in [
+        "background-attachment",
+        "background-clip",
+        "background-origin",
+    ] {
+        let decl = Declaration {
+            property: name.to_string(),
+            value: if name == "background-attachment" {
+                "fixed".to_string()
+            } else {
+                "padding-box".to_string()
+            },
+            important: false,
+        };
+        assert_eq!(
+            declaration_status(&decl, own, own.font_size),
+            DeclStatus::Inert,
+            "{name} 该报「认得，不生效」"
+        );
+    }
+
+    // 同一句话挪进简写：不许作废整条声明。
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background: url(a.png) no-repeat fixed center }",
+    );
+    let own = style(&page, class(&page, "t"));
+    assert_eq!(page.styled.ignored, 0);
+    let picture = own
+        .background_pictures()
+        .next()
+        .expect("简写里的 fixed 不该让整条作废");
+    assert_eq!(picture.image.as_deref(), Some("a.png"));
+    assert_eq!(picture.repeat.x, BackgroundTile::NoRepeat);
+}
+
+/// 背景色与背景图层**都不继承**（CSS 规定）。扉页那张底图只属于 `<body>` 自己，
+/// 跟着继承走会让整章每一段都垫一层图。
+#[test]
+fn background_does_not_inherit() {
+    let page = author(
+        "<div class=w><p>正文</p></div>",
+        ".w { background: #eee url(a.png) repeat }",
+    );
+    let style = style(&page, tag(&page, "p"));
+    assert!(style.background_color.is_none());
+    assert!(style.background_layers.is_empty());
+}
+
+/// 内联 `style="…"` 里的 `url(...)` **必须折成容器内路径**，与样式表那一侧同一个形状。
+///
+/// 这一条是 CI 上跑得到的那一半：真书门（`the_harry_potter_title_pages_carry_their_backdrop`）
+/// 是 `#[ignore]`，而这处断口本来就写在**合成夹具**里就能复现的形状上 ——
+/// 七张册扉页的原文就是 `<body style="background: url(../Images/v2.jpg) no-repeat center">`。
+/// 不折的表现是图层表里躺着一条 `../Images/v2.jpg`：图片索引按容器路径精确查，查不到，
+/// 屏上仍是「白底上一片看不见的淡金字」，而 `css-gap` 那台秤报「这条声明接住了」。
+/// 把 `parse_inline_style` 里那一行 `absolutize_css_urls` 去掉，这一条立刻红。
+#[test]
+fn a_relative_url_in_an_inline_style_folds_like_a_stylesheet() {
+    let page = page_in_dir(
+        r#"<body style="background: url(../Images/v2.jpg) no-repeat center"><p>正文</p></body>"#,
+        "",
+        "OEBPS/Text/",
+    );
+    let body = page
+        .styled
+        .iter()
+        .find(|(_, style)| !style.background_layers.is_empty())
+        .map(|(id, _)| id)
+        .expect("body 上那条内联样式该折出一层图");
+    let picture = &page.styled.get(body).unwrap().background_layers[0];
+    assert_eq!(
+        picture.image.as_deref(),
+        Some("OEBPS/Images/v2.jpg"),
+        "按这一章自己的目录折，少一层就查不到"
+    );
+    // 同一句话写在样式表里，答案必须一模一样。基准**不同**是应该的：样式表写在
+    // `OEBPS/Styles/main.css`，它那句 `../Images/…` 相对的是自己那一层目录；
+    // 折算是拼进层叠**之前**做的（`book.rs` 对每一份样式表走一次 `absolutize_css_urls`），
+    // 所以这里照抄那一步，而不是指望 `cascade` 去折样式表。
+    let sheet_css = crate::content::format::absolutize_css_urls(
+        "body { background: url(../Images/v2.jpg) no-repeat center }",
+        "OEBPS/Styles/",
+    );
+    let sheet = page_in_dir("<p>正文</p>", &sheet_css, "OEBPS/Text/");
+    let inner = sheet.styled.iter().find_map(|(_, style)| {
+        style
+            .background_layers
+            .first()
+            .and_then(|layer| layer.image.clone())
+    });
+    assert_eq!(
+        inner.as_deref(),
+        picture.image.as_deref(),
+        "写在 class 里有底、写在 style 里没底，就是这两处形状漂了"
+    );
+
+    // 章内那块 `<style>` 由**宿主**收进规则表（`chapter_style_rules`），层叠这一侧
+    // 根本不读 DOM 里的 `<style>` 元素 —— 这一点也顺手钉住：两边都收会收两次，
+    // 两边都折会折两次。那条路的落点在 `folio-app` 的 `chapter_layout/tests.rs`。
+    let style_block = page_in_dir(
+        "<style>body { background-image: url(../Images/p.png) }</style><p>正文</p>",
+        "",
+        "OEBPS/Text/",
+    );
+    assert!(
+        style_block
+            .styled
+            .iter()
+            .all(|(_, style)| style.background_layers.is_empty()),
+        "层叠不该自己去读章内 `<style>` —— 那是宿主那一层唯一的收口"
     );
 }
 
@@ -1915,5 +2285,78 @@ fn box_sizing_takes_two_keywords_and_leaves_percent_for_the_layout_phase() {
         style(&nested, class(&nested, "i")).box_sizing,
         BoxSizing::ContentBox,
         "`box-sizing` 不跟着往下传"
+    );
+}
+
+/// **真书门**：哈利·波特全集那七张册扉页，样式表里的整页底图必须真的落到图层表上，
+/// 而且那个容器路径必须在这本书自己的图片清单里查得到。
+///
+/// 为什么值得为它开一次真书（`#[ignore]`，几秒）：这一条同时钉住两处**屏幕上看不出区别**
+/// 的断口 ——
+/// - 解析断了：`<body style="background: url(...) no-repeat center; background-size: cover">`
+///   里那个 `url()` 被当成颜色之外的东西丢掉，扉页变成白底上一片看不见的淡金字；
+/// - 图源断了：EPUB 的图片清单按 manifest 里所有 `image/*` 建（`epub.rs` 的
+///   「全文图片」那一段），而样式表里的路径是 `absolutize_css_urls` 折算出来的形状。
+///   两边**拼写对不上时屏上同样是白底**，而且比解析断了更难查 —— CSS 那侧一切正常。
+///   只被 CSS 引用、不被任何 `<img src>` 引用的图（`v2.jpg` 就是）正踩在这一条上。
+#[test]
+#[ignore = "开真书并把 301 章的样式表走一遍"]
+fn the_harry_potter_title_pages_carry_their_backdrop() {
+    let path = std::path::Path::new("../../tests/fixtures/local/hali-bote-quanji.epub");
+    if !path.is_file() {
+        // 夹具目录在 .gitignore 里，克隆的人手上可能没有这一本 —— 跳过要说出来，
+        // 静默通过等于这条门不存在。
+        println!("跳过：{} 不在", path.display());
+        return;
+    }
+    let doc = crate::content::document::open(path).expect("真书该打得开");
+    let flow = doc.flow().expect("这本是可重排");
+    let rules = RuleSet::parse(&doc.stylesheet(), Origin::Author);
+    let base = ComputedStyle::default();
+
+    // 期望值不写死在测试里，而是从这本书自己的图片清单反查：换一本再导一次也不会红在
+    // 「书名改了」上，只会红在「CSS 引用的那张图不在清单里」这一件真事上。
+    let listed: Vec<&str> = flow.images.iter().map(|i| i.href.as_str()).collect();
+    let mut found = 0usize;
+    for index in 0..flow.chapters.len() {
+        let Ok(source) = doc.chapter_source(index) else {
+            continue;
+        };
+        let dom = Dom::parse(source.as_bytes());
+        // 基准目录按**这一章自己的** spine 项折出来，与界面那条路（`ChapterImages::new`
+        // 拿的就是同一个数）逐字同一句。传空串会得到 `Images/v1.jpg` 这种少一层的形状，
+        // 而清单里躺着的是 `OEBPS/Images/v1.jpg` —— 差的正是那一层，而且屏上看不出来。
+        let chapter_dir = crate::content::format::dir_of(&flow.chapters[index].spine_href);
+        let styled = cascade(&dom, &rules, &base, &chapter_dir);
+        for (id, _) in dom.elements() {
+            let Some(style) = styled.get(id) else {
+                continue;
+            };
+            for picture in style.background_pictures() {
+                let href = picture.image.clone().unwrap_or_default();
+                found += 1;
+                assert!(
+                    listed.contains(&href.as_str()),
+                    "第 {index} 章有一张背景图（{href}）不在这本书的图片清单里：\
+                     屏上会是「有样式、没底色」，而 CSS 那侧一切正常，最难查的那一类",
+                );
+                // 扉页那一族写的是 `cover`，别在层叠里把它折没了。
+                assert!(
+                    matches!(
+                        picture.size,
+                        BackgroundSize::Cover
+                            | BackgroundSize::Contain
+                            | BackgroundSize::Auto
+                            | BackgroundSize::Explicit { .. }
+                    ),
+                    "尺寸那一格必须有值"
+                );
+            }
+        }
+    }
+    assert!(
+        found >= 20,
+        "这本书的 CSS-only 背景图应该至少 20 处（实测 23），只找到 {found} 处：\
+         要么解析断了，要么样式表没读进来"
     );
 }

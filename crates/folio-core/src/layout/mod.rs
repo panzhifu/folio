@@ -50,8 +50,8 @@ use crate::content::format::css::computed::{Display, StyledDom, WritingMode};
 pub use cache::{BlockCache, LayoutCache, layout_cached};
 pub use font::{FontKey, RunStyle, StyleArena, StyleRef};
 pub use geometry::{
-    BlockBox, DecorSeed, ImageRun, Justify, JustifyMode, Layout, LayoutOptions, LineBox,
-    LineFragment, LineRun, MarkerRun,
+    BlockBox, DecorPicture, DecorSeed, ImageRun, Justify, JustifyMode, Layout, LayoutOptions,
+    LineBox, LineFragment, LineRun, MarkerRun,
 };
 pub use key::{LayoutInputs, LayoutKey, METRICS_REV, content_hash, quantize_px};
 pub use ports::{ImageProvider, LineMetrics, Measure, NoImages, ResolvedImage};

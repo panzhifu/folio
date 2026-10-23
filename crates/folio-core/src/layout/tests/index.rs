@@ -295,7 +295,7 @@ fn a_layout_without_lines_still_answers_every_query() {
 // ---- 装饰短表：折一次，而不是每帧走整章（§十一 第 12 条）----
 
 use crate::content::format::css::computed::{
-    BorderEdge, BorderStyle, Color, ComputedStyle, StyledDom,
+    BackgroundLayer, BackgroundSize, BorderEdge, BorderStyle, Color, ComputedStyle, StyledDom,
 };
 
 /// 一条带几何的块盒（`block()` 那个助手全给 y=0，装饰要按 y/height 判，这里要能指定）。
@@ -329,7 +329,21 @@ fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
             style.border[2].drawn(),
             style.border[3].drawn(),
         ];
-        if style.background_color.is_none() && drawn.iter().all(|w| *w <= 0.0) {
+        let pictures: Vec<crate::layout::DecorPicture> = style
+            .background_pictures()
+            .map(|layer| crate::layout::DecorPicture {
+                href: layer.image.clone().unwrap_or_default(),
+                size: layer.size,
+                position: layer.position,
+                repeat: layer.repeat,
+            })
+            .collect();
+        // 三条筛子逐条与短表同式（含图那一格）：参照实现与短表要是各写一条式子，
+        // 下面那条等价测试就只是在比两个不同的口径，而不是在比对不对。
+        if style.background_color.is_none()
+            && drawn.iter().all(|w| *w <= 0.0)
+            && pictures.is_empty()
+        {
             continue;
         }
         if block.width <= 0.0 || block.height <= 0.0 {
@@ -363,6 +377,7 @@ fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
                     style.border[3].style,
                 ),
             ],
+            pictures,
         });
     }
     out
@@ -464,6 +479,48 @@ fn each_decor_filter_still_fires_on_its_own() {
     assert!(
         one(box_at(1, 0.0, 50.0, true))
             .decor_seeds(&bare)
+            .is_empty()
+    );
+}
+
+/// 只有背景图、既没底色也没边框的那一块**必须进表**，而零高那一条对它同样成立。
+///
+/// 这两句是同一处改动钉的两枚钉子，各挡一种走法：
+/// - 筛子里漏掉 `pictures.is_empty()`（只按底色与边框筛），扉页那张整页底图就永远不进表，
+///   屏上是「白底上一片看不见的淡金字」—— 哈利波特七张册扉页的真实症状；
+/// - 反过来为图开一条例外、不筛零尺寸，一块排不出高度的盒会带着一条摆不出任何像素的
+///   记录进表，每帧白扫，还把图集那一层的「这一帧在场」记到一张根本不画的图上。
+#[test]
+fn a_picture_alone_puts_the_block_in_the_table_and_a_zero_box_still_keeps_it_out() {
+    let only_picture = ComputedStyle {
+        background_layers: vec![BackgroundLayer {
+            image: Some("OEBPS/Images/v2.jpg".to_string()),
+            size: BackgroundSize::Cover,
+            ..BackgroundLayer::default()
+        }],
+        ..ComputedStyle::default()
+    };
+    let sheet = decorated(&[(1, only_picture)]);
+    let one = |b: BlockBox| assemble(vec![b], Vec::new(), 336.0, 600.0);
+
+    let seeds = one(box_at(1, 0.0, 1400.0, true)).decor_seeds(&sheet);
+    assert_eq!(seeds.len(), 1, "只有图也要进表");
+    assert_eq!(seeds[0].pictures.len(), 1);
+    assert_eq!(seeds[0].pictures[0].href, "OEBPS/Images/v2.jpg");
+    assert_eq!(seeds[0].pictures[0].size, BackgroundSize::Cover);
+    assert_eq!(seeds[0].background, None, "底色那一格仍然是没写过");
+
+    // 零高：同一份样式，一条都不该进表。
+    assert!(
+        one(box_at(1, 0.0, 0.0, true))
+            .decor_seeds(&sheet)
+            .is_empty(),
+        "图不许绕过零尺寸那一条筛"
+    );
+    // 内容盒副本同样不许绕过（那块只承载文字，画它会把图按内缩后的盒摆歪）。
+    assert!(
+        one(box_at(1, 0.0, 1400.0, false))
+            .decor_seeds(&sheet)
             .is_empty()
     );
 }

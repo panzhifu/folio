@@ -36,7 +36,7 @@ fn main() {
         let src = std::fs::read_to_string(path).unwrap();
         let dom = Dom::parse(src.as_bytes());
         let rules = RuleSet::parse(&css, Origin::Author);
-        let styles = cascade(&dom, &rules, &ComputedStyle::default());
+        let styles = cascade(&dom, &rules, &ComputedStyle::default(), "");
         let root = dom
             .elements()
             .find(|(id, _)| dom.tag_name(*id) == Some("body"))

@@ -9,7 +9,8 @@ use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
 use crate::content::dom::NodeId;
 use crate::content::format::css::computed::{
-    BorderStyle, Color, StyledDom, TextAlign, WritingMode,
+    BackgroundPosition, BackgroundRepeat, BackgroundSize, BorderStyle, Color, StyledDom, TextAlign,
+    WritingMode,
 };
 use crate::infra::metrics::Metric;
 
@@ -207,7 +208,7 @@ pub struct BlockBox {
 /// 是连续下标区间」这个前提在块表上根本不成立 —— `Layout::stacked` 那一格是为行盒
 /// 量的（行不嵌套），搬到块上就会悄悄漏画。于是这张表的正确用法就是整表扫：
 /// 它短（只有真带装饰的块），而且扫得对。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecorSeed {
     /// 边框盒左上角（章内坐标，与 `BlockBox::x`/`y` 同一套）。
     pub x: f32,
@@ -228,6 +229,23 @@ pub struct DecorSeed {
     ///
     /// [`BorderEdge::drawn`]: crate::content::format::css::computed::BorderEdge::drawn
     pub border: [(f32, Option<Color>, BorderStyle); 4],
+    /// `background-image` 的那些层，按 CSS 书写顺序（先画的在屏幕上更靠上）。空 = 没图。
+    ///
+    /// **字节与固有尺寸不在这里**，与 `RowImage::href` 同一个口径：那两样随图片索引变，
+    /// 每帧现问 `ChapterImages` 才是对的，烘进这张表就是第二个真相。
+    /// 摆位要的盒尺寸倒是已经在 `x/y/width/height` 里了。
+    pub pictures: Vec<DecorPicture>,
+}
+
+/// 一块背景图的一层：哪张图 + 怎么摆。全是 CSS 侧的原始数，一个像素结果都不带。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecorPicture {
+    /// 容器内的绝对路径。样式表拼进层叠前已由 `absolutize_css_urls` 折算过，
+    /// 所以这里能直接拿去问图片索引，不需要再按本章目录解一次相对路径。
+    pub href: String,
+    pub size: BackgroundSize,
+    pub position: BackgroundPosition,
+    pub repeat: BackgroundRepeat,
 }
 
 /// 排版结果：两张扁平表 + 两张**排完就折好**的查询索引。
@@ -551,8 +569,12 @@ impl Layout {
     /// 三条筛掉的理由与绘制侧原本逐条一致，一条都没松：
     /// - **内容盒副本不画**：`wrap_paragraph` 为正文映射补注册的那条几何内缩了边框与
     ///   padding，它的边框条会不偏不倚落在文字起点上（真书《斗战狂潮》目录页踩过）；
-    /// - 没有底色、四条边又都不可见的块，进表只是让每帧多扫一条空记录；
+    /// - 没有底色、四条边又都不可见、背景里又没有图的块，进表只是让每帧多扫一条空记录；
     /// - 零宽零高的块画不出任何东西，进表同样只是白扫。
+    ///
+    /// 第三条对新加的图那一格**同样是筛**：`width`/`height` 是边框盒的数，一块零高的盒
+    /// 摆不出任何图，让扉页那种「整块是一个 `<body>`，图按盒铺」走同一道筛就够，
+    /// 不需要为图另开一条例外。
     pub fn decor_seeds(&self, styles: &StyledDom) -> Vec<DecorSeed> {
         Metric::DecorRebuilds.count();
         let mut out = Vec::new();
@@ -570,7 +592,19 @@ impl Layout {
                 style.border[2].drawn(),
                 style.border[3].drawn(),
             ];
-            if style.background_color.is_none() && drawn.iter().all(|w| *w <= 0.0) {
+            let pictures: Vec<DecorPicture> = style
+                .background_pictures()
+                .map(|layer| DecorPicture {
+                    href: layer.image.clone().unwrap_or_default(),
+                    size: layer.size,
+                    position: layer.position,
+                    repeat: layer.repeat,
+                })
+                .collect();
+            if style.background_color.is_none()
+                && drawn.iter().all(|w| *w <= 0.0)
+                && pictures.is_empty()
+            {
                 continue;
             }
             out.push(DecorSeed {
@@ -601,6 +635,7 @@ impl Layout {
                         style.border[3].style,
                     ),
                 ],
+                pictures,
             });
         }
         out

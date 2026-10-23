@@ -1,5 +1,11 @@
 //! 文档格式校验：在 provider 解析之后、排版之前，对文档结构做一轮完整性检查。
 //!
+//! 住在 [`crate::content`] 而不是 [`crate::ingest`]：它吃的是一份**已经解析好的**
+//! `Content`，不碰容器、不碰文件系统、不碰库，而调用它的是开书那一路
+//! （`document::BookDocument::open_with` / `from_content`）—— 导入只是顺带也走那一趟。
+//! `content` 那一区的分区判据写的是「不依赖 `store` 与 `ingest`」，从前这两句调用
+//! 正好是这条判据上唯一的破口。
+//!
 //! 目标不是「拒绝坏书」（provider 已经做了「坏一处不整本失败」的降级），而是：
 //! - **尽早发现结构矛盾**：manifest 列了但 zip 里没有、spine 指了 manifest 里不存在的 id、
 //!   目录锚点指着一章里不存在的 `id` —— 这些在排版期会变成空白页或跳错位置，
@@ -72,21 +78,16 @@ pub fn check(content: &Content, path: &Path) -> Issues {
             || path.to_string_lossy().into_owned(),
             |n| n.to_string_lossy().into_owned(),
         );
-        let errors = issues
-            .items
-            .iter()
-            .filter(|i| i.kind == IssueKind::Error)
-            .count();
-        let warns = issues
-            .items
-            .iter()
-            .filter(|i| i.kind == IssueKind::Warn)
-            .count();
-        let infos = issues
-            .items
-            .iter()
-            .filter(|i| i.kind == IssueKind::Info)
-            .count();
+        let mut errors = 0;
+        let mut warns = 0;
+        let mut infos = 0;
+        for issue in &issues.items {
+            match issue.kind {
+                IssueKind::Error => errors += 1,
+                IssueKind::Warn => warns += 1,
+                IssueKind::Info => infos += 1,
+            }
+        }
         tracing::warn!(
             "validation: {file} {} issues ({errors} errors, {warns} warnings, {infos} infos)",
             issues.len()

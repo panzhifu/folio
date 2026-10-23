@@ -170,13 +170,13 @@ impl ShelfView {
             TaskEvent::Bytes(_) => {}
             TaskEvent::Finished(Ok(report)) => {
                 // 「已在书架」按副本路径判：候选落进书库时的那个路径。
-                let dest_dir = target_dir(&ConfigHolder::library(cx));
+                let book_dir = target_dir(&ConfigHolder::library(cx));
                 let store = app_store::handle(cx);
                 let rows: Vec<ScanRow> = report
                     .candidates
                     .into_iter()
                     .map(|candidate| {
-                        let on_shelf = match (&store, &dest_dir) {
+                        let on_shelf = match (&store, &book_dir) {
                             (Some(store), Some(dir)) => store
                                 .book_by_path(&dir.join(&candidate.name))
                                 .map(|row| row.is_some())

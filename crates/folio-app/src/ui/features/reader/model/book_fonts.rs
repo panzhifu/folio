@@ -5,14 +5,15 @@
 //! 只认后者。度量与绘制都要把「作者点名的那个名字」翻译成「设备真有的那个名字」，
 //! 两边共用这一份表，才不会出现「按 A 的宽度居中、按 B 的宽度绘制」。
 //!
-//! 它与 [`crate::ui::features::reader::model::measure::gpui_font`] 的分工：那张表**只进
-//! fallbacks**，从不抢 primary —— 读者的字体照常是正文，只有它画不出来的那一格
-//! 才轮到书里的字体（ASCII 永远留在 primary，那是 gpui 的规则）。
+//! 它与 [`crate::ui::features::reader::model::measure::gpui_font`] 的分工：作者的
+//! `font-family` 候选链里查得到这张表，**那份字体就当 primary**（随书带来的字节就是作者
+//! 写明的正文用字，优先级排在「设备上恰好装着同名家族」之前）；读者的那一档整体降到
+//! 补缺链上，只有书里那一份画不出来的那一格才轮到它（ASCII 永远留在 primary，
+//! 那是 gpui 的规则）。
 //!
 //! 字节不进这里，也不进书库（见 `folio_core::content::format::FontBytes`）：每次开书按
 //! `@font-face` 的 `src` 去容器现读一次，注册进进程级文本系统。任何一步失败都
-//! 降级成「这本书没有内嵌字体」—— 与没有这个功能时逐字节同一条路径，只是少补几个
-//! 生僻字，正文照排。
+//! 降级成「这本书没有内嵌字体」—— 与没有这个功能时逐字节同一条路径，正文照读者的字体排。
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -43,7 +44,9 @@ fn face_registered() {
 
 /// 声明名 → 设备家族名。`Send + Sync`：会在后台线程的度量里被拿着。
 pub struct BookFonts {
-    fallbacks: HashMap<String, Vec<String>>,
+    /// 一个声明名可能对应多份内部家族（一份字体文件带好几个名字），
+    /// 第一个当 primary，其余留在补缺链上。
+    families: HashMap<String, Vec<String>>,
     /// 建这张表时的字体表版本，见 [`FACE_EVENTS`]。
     revision: u32,
 }
@@ -53,7 +56,7 @@ impl Default for BookFonts {
     /// 重要的是它建出来时设备上的字体是哪一批。
     fn default() -> Self {
         Self {
-            fallbacks: HashMap::new(),
+            families: HashMap::new(),
             revision: face_revision(),
         }
     }
@@ -72,7 +75,7 @@ impl BookFonts {
 
     /// 登记一条别名。同名重复登记不会重复条目，`@font-face` 的多条 `src` 归到同一个家族。
     pub fn insert(&mut self, declared: String, families: Vec<String>) {
-        let entry = self.fallbacks.entry(declared).or_default();
+        let entry = self.families.entry(declared).or_default();
         for name in families {
             if !entry.iter().any(|existing| existing == &name) {
                 entry.push(name);
@@ -80,15 +83,16 @@ impl BookFonts {
         }
     }
 
-    /// 某个声明名的补缺链；没登记过时是 `None`。返回借用而不是克隆，度量热路径每帧都要问。
-    pub fn fallbacks_for(&self, name: &str) -> Option<&[String]> {
-        self.fallbacks.get(name).map(Vec::as_slice)
+    /// 某个声明名注册到的内部家族名（按注册顺序）；没登记过时是 `None`。返回借用而不是
+    /// 克隆，度量与绘制每一条 run 都要问。
+    pub fn families_for(&self, name: &str) -> Option<&[String]> {
+        self.families.get(name).map(Vec::as_slice)
     }
 
     /// 只有测试在调（钉「空表读不出别名」那一格），生产这一侧没人问。
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.fallbacks.is_empty()
+        self.families.is_empty()
     }
 
     /// 从一本书的 CSS 与容器建别名表：读 `@font-face` 的 `src` → 去容器取字节 →
@@ -201,14 +205,14 @@ mod tests {
     fn an_inserted_alias_is_read_back_and_unknown_names_are_absent() {
         let mut fonts = BookFonts::empty();
         assert!(fonts.is_empty());
-        assert!(fonts.fallbacks_for("Book Body").is_none());
+        assert!(fonts.families_for("Book Body").is_none());
 
         fonts.insert("Book Body".into(), vec!["Noto Serif".into()]);
         assert_eq!(
-            fonts.fallbacks_for("Book Body").unwrap(),
+            fonts.families_for("Book Body").unwrap(),
             &["Noto Serif".to_string()]
         );
-        assert!(fonts.fallbacks_for("serif").is_none(), "泛族名不该凭空有链");
+        assert!(fonts.families_for("serif").is_none(), "泛族名不该凭空有链");
     }
 
     /// 同名重复登记（`@font-face` 的多条 `src`）不产生重复条目。
@@ -221,7 +225,7 @@ mod tests {
             vec!["Noto Serif".into(), "Noto Serif CJK".into()],
         );
         assert_eq!(
-            fonts.fallbacks_for("Book Body").unwrap(),
+            fonts.families_for("Book Body").unwrap(),
             &["Noto Serif".to_string(), "Noto Serif CJK".to_string()]
         );
     }

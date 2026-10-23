@@ -3,10 +3,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use super::pipeline::{Budget, MAX_IMPORT_BOOKS, import_batch, split_budget};
 use super::{
-    BackfillReport, Budget, Candidate, ImportKind, ImportOutcome, ImportReport, Imported,
-    MAX_IMPORT_BOOKS, PathsSource, Source, backfill_copies, import_batch, import_from,
-    schedule_reindex, split_budget, stage_local, submit_import, sweep_partials,
+    BackfillReport, Candidate, ImportKind, ImportOutcome, ImportReport, Imported, PathsSource,
+    Source, backfill_copies, import_from, schedule_reindex, stage_local, submit_import,
+    sweep_partials,
 };
 use crate::infra::metrics::{Metric, take_local};
 use crate::infra::task::{StageCtx, TaskEvent, TaskManager};
@@ -73,7 +74,7 @@ fn staged(lib: &Path) -> Vec<String> {
 /// URL 候选的名字：路径末段、百分号解码、查询串与锚点不算、非法字符换下划线。
 #[test]
 fn url_names_come_from_the_last_path_segment() {
-    use super::url_name;
+    use super::sources::url_name;
     assert_eq!(url_name("https://example.com/books/三体.epub"), "三体.epub");
     assert_eq!(
         url_name("https://example.com/get?token=abc&file=%E4%B9%A6.epub"),
@@ -1961,4 +1962,386 @@ fn a_pdf_walks_the_whole_import_pipeline_including_its_cover() {
         crate::content::format::Format::parse(&row.format),
         Some(crate::content::format::Format::Pdf)
     );
+}
+
+/// §二 那条不变量在并行下的样子：**同一批里同名不同内容的几本，每一本落地的那份字节
+/// 必须就是它自己那一份**，而库里那一行的内容身份问回来的必须是同一本。
+///
+/// 门在暂存区那间小屋上：解析前换的那个「给人看的名字」只由「建议名 + 扩展名」定，
+/// 不分小屋的话几本会在同一个路径上互相盖 —— 甲正拿着它解析，乙把同名文件盖进来，
+/// 甲再把**乙的字节**改名成**甲的哈希名**（库里那行于是记着甲的身份、躺着乙的内容）。
+/// 并行度钉成 4：`import_from` 默认那一档跟着这台机器的核数切，单核机器上这一条
+/// 根本碰不到并行，拿它当输入的话同一测试在两台机器上测的是两件不同的事。
+#[test]
+fn parallel_import_of_same_named_books_keeps_each_copy_its_own_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("books");
+    let mut paths = Vec::new();
+    for n in 0..16 {
+        paths.push(write(
+            &tmp.path().join(format!("第{n}本")),
+            "同名的书.txt",
+            &format!("第 {n} 本的正文，每一本都不一样。\n"),
+        ));
+    }
+    let store = Store::in_memory().unwrap();
+    let outcomes = import_parallel(
+        &PathsSource::picked(paths),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+        4,
+    );
+
+    let mut wrong: Vec<String> = Vec::new();
+    let mut added = 0;
+    for outcome in &outcomes {
+        let Ok(Imported::Added(registered)) = &outcome.result else {
+            wrong.push(format!(
+                "《{}》没收进来：{:?}",
+                outcome.candidate.name, outcome.result
+            ));
+            continue;
+        };
+        added += 1;
+        let super::Origin::Local(from) = &outcome.candidate.origin else {
+            panic!("本地候选该是 Origin::Local");
+        };
+        if std::fs::read(&registered.dest).unwrap_or_default() != std::fs::read(from).unwrap() {
+            wrong.push(format!("第 {} 本的副本里是别的字节", registered.book_id));
+        }
+        // 身份与内容必须对上：拿副本那份字节现算的哈希去问库，问回来的就是这一本自己。
+        let hash = crate::ingest::identity::sha256_of_path(&registered.dest)
+            .unwrap()
+            .to_hex();
+        match store.book_by_hash(&hash).unwrap() {
+            Some(row) if row.id == registered.book_id => {}
+            other => wrong.push(format!(
+                "第 {} 本：副本字节算出的身份问不回自己（{other:?}）",
+                registered.book_id
+            )),
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{added}/16 本收进来，身份与内容分开的有：{wrong:?}"
+    );
+    assert_eq!(added, 16, "十六本同名不同内容的书，十六本都该进来");
+    assert_eq!(store.shelf("").unwrap().len(), 16, "一本一格");
+    assert!(
+        staged(&lib).is_empty(),
+        "每一本那间小屋走散时该收干净，实际剩 {:?}",
+        staged(&lib)
+    );
+}
+
+/// §一 步 7 那句「库里有这一行就等于能打开」由 [`super::unwind_landing`] 兜住：落地之后
+/// 的四种失败形状各自该撤掉什么，都在这里直接喂值问一遍。
+///
+/// **这里钉住的是回滚本身，不是「`import_one` 在正确的三处调了它」**：那三处的触发条件
+/// 都是「库说失败」，而 `Store` 没有注错入口（`add_book` 在一个事务里，要么整行要么
+/// 没有行，所以从外面造不出半截状态）。要钉那一段就得给落库加一条 `#[cfg(test)]` 的假失败
+/// 开关 —— 值不值这一格由他定。
+#[test]
+fn unwinding_the_landing_step_takes_back_whichever_pieces_landed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+    let first = added(&import_from(
+        &PathsSource::picked(vec![write(tmp.path(), "甲.txt", "甲这一本的正文\n")]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    ));
+    let second = added(&import_from(
+        &PathsSource::picked(vec![write(tmp.path(), "乙.txt", "乙那一本的正文\n")]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    ));
+    let second_row = store.book(second.book_id).unwrap().expect("行该在");
+
+    // 一、自增那一支：行是我们新加的，撤行 + 撤副本，两边都不留。
+    super::pipeline::unwind_landing(&store, None, Some(first.book_id), &first.dest);
+    assert!(
+        store.book(first.book_id).unwrap().is_none(),
+        "行该跟着撤掉（留着就是「库里有行而文件没了」）"
+    );
+    assert!(!first.dest.exists(), "副本该退掉");
+
+    // 二、自愈那一支：行是别人那一条，位置要退回动手之前那个**不存在**的旧名字。
+    let moved = lib.join("改指到新位置.txt");
+    std::fs::write(&moved, "乙那一本的正文\n").unwrap();
+    store.retarget_book_path(second_row.id, &moved).unwrap();
+    super::pipeline::unwind_landing(&store, Some(&second_row), Some(second_row.id), &moved);
+    assert_eq!(
+        store.book(second_row.id).unwrap().expect("行该还在").path,
+        second_row.path,
+        "位置该退回动手之前那一格"
+    );
+    assert!(!moved.exists(), "副本该退掉");
+
+    // 三、行根本没落地（`add_book` 与 `retarget_book_path` 自己失败）：只退副本，
+    // 不许去撤一条并不存在的行，也不许连带删掉别人那一本。
+    let stray = lib.join("没人认领.txt");
+    std::fs::write(&stray, "x").unwrap();
+    super::pipeline::unwind_landing(&store, None, None, &stray);
+    assert!(!stray.exists(), "副本该退掉");
+    assert_eq!(
+        store.shelf("").unwrap().len(),
+        1,
+        "只剩乙那一本：第三支不该带走任何行"
+    );
+}
+
+/// 落库那几句的假失败旗子（线程局部），出了作用域自动收回。
+struct FailHere;
+
+impl Drop for FailHere {
+    fn drop(&mut self) {
+        super::pipeline::fail_landing(None);
+    }
+}
+
+/// 让落库的 `which` 那一句在下一次假失败。
+///
+/// 用它的测试都把并行度钉成 **1**：那时 [`Batch::run`] 就在调用线程上，而旗子是按线程放的。
+fn fail_at(which: &'static str) -> FailHere {
+    super::pipeline::fail_landing(Some(which));
+    FailHere
+}
+
+/// §一 步 7 那句「库里有这一行就等于能打开」，逐条钉在**管线真的调了回滚**上：
+/// 落库那五句各自假失败一次，看退回去的到底是不是只有已经落好的那几样。
+///
+/// 前四档都该「一本书没进来，而书库根与暂存区都干干净净」；最后一档正好相反 ——
+/// 身份列写不进去**不算这本没进来**（行与副本都在，只是哈希空着，交给补齐）。
+#[test]
+fn each_landing_failure_takes_back_just_the_pieces_that_landed() {
+    let good = |n: u32| format!("第 {n} 本的正文，内容各不相同。\n");
+
+    // 一、判重那一问失败：字节还没换名、没进根、没落库，退掉 `.part` 就该完事。
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("books");
+        let store = Store::in_memory().unwrap();
+        let source = PathsSource::picked(vec![write(tmp.path(), "一问.txt", &good(1))]);
+        let _guard = fail_at("book_by_hash");
+        let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
+        drop(_guard);
+        assert!(outcomes[0].result.is_err(), "库问不出就该拒这一本");
+        assert_eq!(copies(&lib), Vec::<String>::new(), "书库根上不许有东西");
+        assert!(staged(&lib).is_empty(), "暂存区那一份要退掉");
+        assert!(store.shelf("").unwrap().is_empty(), "库里没有那一行");
+    }
+
+    // 二、新增那一行失败：副本已经 rename 进根了，得跟着退掉 —— 这正是原来漏掉的那个洞
+    // （根上的半成品**没有** `sweep_partials` 兜底，它只认 `.{名字}.part` 那种名字）。
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("books");
+        let store = Store::in_memory().unwrap();
+        let source = PathsSource::picked(vec![write(tmp.path(), "新增.txt", &good(2))]);
+        let _guard = fail_at("add_book");
+        let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
+        drop(_guard);
+        assert!(outcomes[0].result.is_err());
+        assert_eq!(copies(&lib), Vec::<String>::new(), "没人认领的副本要退掉");
+        assert!(staged(&lib).is_empty());
+        assert!(store.shelf("").unwrap().is_empty());
+    }
+
+    // 三、`save_document` 失败：行已经插进去了，得连着撤掉（留一行指向没内容的东西最坏）。
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("books");
+        let store = Store::in_memory().unwrap();
+        let source = PathsSource::picked(vec![write(tmp.path(), "章表.txt", &good(3))]);
+        let _guard = fail_at("save_document");
+        let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
+        drop(_guard);
+        assert!(outcomes[0].result.is_err());
+        assert_eq!(copies(&lib), Vec::<String>::new(), "副本要退掉");
+        assert!(
+            store.shelf("").unwrap().is_empty(),
+            "刚插的那一行要跟着撤掉"
+        );
+        assert!(staged(&lib).is_empty());
+    }
+
+    // 四、身份列写不进去：**这本照样进来**。行与章节都在、书能打开，只是哈希还空着。
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("books");
+        let store = Store::in_memory().unwrap();
+        let source = PathsSource::picked(vec![write(tmp.path(), "身份.txt", &good(4))]);
+        let _guard = fail_at("set_content_hash");
+        let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
+        drop(_guard);
+        let registered = added(&outcomes);
+        assert!(registered.dest.exists(), "副本留着，书能打开");
+        assert_eq!(copies(&lib).len(), 1, "根上就那一份");
+        assert_eq!(store.shelf("").unwrap().len(), 1, "那一行也留着");
+        assert_eq!(
+            store.rows_missing_hash().unwrap().len(),
+            1,
+            "哈希空着是懒补允许的状态，补齐作业会重算它"
+        );
+    }
+}
+
+/// 自愈那一支（命中的行还在、副本文件没了）在 `retarget_book_path` 失败时不许把行改指
+/// 到一份没人认领的副本上：位置退回原来那个不存在的文件，新来的那份字节退掉。
+#[test]
+fn a_failed_heal_leaves_the_row_pointing_where_it_started() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+    let body = "同一本书，两次送来。\n";
+    let first = added(&import_from(
+        &PathsSource::picked(vec![write(tmp.path(), "第一次.txt", body)]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    ));
+    // 读者手工删掉了那个副本 —— 判重命中而文件不在，下一本同内容的要走自愈。
+    std::fs::remove_file(&first.dest).unwrap();
+
+    let second_file = write(&tmp.path().join("第二次"), "第二次.txt", body);
+    let source = PathsSource::picked(vec![second_file]);
+    let _guard = fail_at("retarget_book_path");
+    let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
+    drop(_guard);
+
+    assert!(outcomes[0].result.is_err(), "改指失败就是这一本没进来");
+    let row = store
+        .book(first.book_id)
+        .unwrap()
+        .expect("那一行不能被撤掉");
+    assert_eq!(
+        row.path,
+        first.dest.to_string_lossy(),
+        "位置要退回动手之前那一格（哪怕是那个不存在的旧名）"
+    );
+    assert_eq!(
+        copies(&lib),
+        Vec::<String>::new(),
+        "不许留一份没人认领的副本"
+    );
+    assert!(staged(&lib).is_empty(), "暂存区要结清");
+}
+
+/// 重扫那一路失败**两边都不许动**：那一行本来就在、那份副本是权威的。
+/// 这是 `Landing::Rescan` 与 `Landing::New` 唯一真正的分别，所以单独钉一条。
+#[test]
+fn a_failed_rescan_touches_neither_the_row_nor_the_copy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+    let landed = added(&import_from(
+        &PathsSource::picked(vec![write(tmp.path(), "重扫.txt", "重扫这一本的正文\n")]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    ));
+    let before = copies(&lib);
+
+    let _guard = fail_at("add_book");
+    let err = super::reindex(&store, landed.book_id).expect_err("落库那句假失败，重扫要报失败");
+    drop(_guard);
+
+    assert!(format!("{err:#}").contains("假失败"), "{err:#}");
+    assert_eq!(copies(&lib), before, "权威副本一个字节都不许动");
+    assert!(
+        store.book(landed.book_id).unwrap().is_some(),
+        "那一行本来就在，失败不许把它带走"
+    );
+    assert_eq!(store.shelf("").unwrap().len(), 1, "架上还是那一格");
+}
+
+/// 测试夹具：`paths` 里等于 `boom` 的那一本在 `stage` 那一步直接 panic，其余照常暂存。
+/// 崩点选在 `stage` 而不是 `candidates`，是因为真源因崩长这样：来源或 provider 里一句
+/// `unwrap`，而 `stage` 正是并行那一段真正跑起来的地方。
+struct Booming {
+    paths: Vec<PathBuf>,
+    boom: PathBuf,
+}
+
+impl Source for Booming {
+    fn kind(&self) -> ImportKind {
+        ImportKind::Paths
+    }
+
+    fn candidates(&self, _book_dir: &Path, _ctx: &StageCtx) -> crate::Result<Vec<Candidate>> {
+        Ok(PathsSource::candidates_from(&self.paths))
+    }
+
+    fn stage(
+        &self,
+        candidate: &Candidate,
+        staging_dir: &Path,
+        ctx: &StageCtx,
+    ) -> crate::Result<PathBuf> {
+        let super::Origin::Local(path) = &candidate.origin else {
+            panic!("本地候选该是 Origin::Local")
+        };
+        if *path == self.boom {
+            panic!("测试：这一本把跑它的线程弄崩了");
+        }
+        stage_local(candidate, staging_dir, ctx)
+    }
+}
+
+/// 一批里有一本把跑它的那一路弄崩了（真源因崩长这样：来源或 provider 里一句 `unwrap`）：
+/// **只算它自己失败**，另外两本照常进来，报表一条都不许多、也一条都不许少。
+///
+/// 两种并行度各跑一遍：钉 1 路时整批就在调用线程上跑，钉 2 路时崩的那本在 worker 里 ——
+/// 而 `thread::scope` 会把 scoped 线程的 panic 在 scope 结束时再传回调用线程（实测：
+/// 不接这一句两种都整批红，`landed` 里已经落好的那些跟着整张报表一起丢，
+/// 而 `finish()` 那段「缺的那几本补跑」根本跑不到）。
+#[test]
+fn a_panicking_book_only_fails_itself() {
+    for books in [1usize, 2] {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("books");
+        let a = write(&tmp.path().join("甲"), "甲.txt", "甲这一本的正文\n");
+        let b = write(&tmp.path().join("乙"), "乙.txt", "乙这一本的正文\n");
+        let c = write(&tmp.path().join("丙"), "丙.txt", "丙这一本的正文\n");
+        let boom = b.clone();
+        let source = Booming {
+            paths: vec![a, b, c],
+            boom,
+        };
+        let store = Store::in_memory().unwrap();
+        let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), books);
+
+        assert_eq!(outcomes.len(), 3, "{books} 路：三本该有三条结论");
+        let report = ImportReport::tally(&outcomes);
+        assert_eq!(
+            (report.added, report.rejected()),
+            (2, 1),
+            "{books} 路：{report:?}"
+        );
+        assert_eq!(report.unreadable, 1, "崩的那本算「读不动」那一档");
+        let crashed: Vec<String> = outcomes
+            .iter()
+            .filter(|o| o.result.is_err())
+            .map(|o| o.candidate.name.clone())
+            .collect();
+        assert_eq!(
+            crashed,
+            vec!["乙.txt".to_string()],
+            "{books} 路：崩的该就是那一本"
+        );
+        assert_eq!(
+            store.shelf("").unwrap().len(),
+            2,
+            "{books} 路：另外两本要真的在架上"
+        );
+        assert!(
+            staged(&lib).is_empty(),
+            "{books} 路：崩在半路也不该在暂存区留下东西，实际 {:?}",
+            staged(&lib)
+        );
+    }
 }

@@ -15,7 +15,8 @@
 //! - `pt` 按 96/72 折算，裸数字按 `px`。
 
 use super::computed::{
-    BorderStyle, BreakWhen, Clear, Color, Float, Length, ListStyle, WritingMode,
+    BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundRepeat, BackgroundSize,
+    BackgroundTile, BorderStyle, BreakWhen, Clear, Color, Float, Length, ListStyle, WritingMode,
 };
 
 /// `list-style-type` 的关键字表。认不出的关键字返回 `None`（计进 ignored），
@@ -595,4 +596,288 @@ pub(super) fn parse_color(value: &str) -> Option<Color> {
         _ => return None,
     };
     Some(Color(named.0, named.1, named.2))
+}
+
+// ---------------------------------------------------------------------------
+// 背景图一族：`background-image` / `-size` / `-position` / `-repeat` 与 `background` 简写。
+//
+// 这一族的单位口径与别处有一处**有意的不同**：`background-size` 与 `background-position`
+// 的百分比折算是按**这一块自己的盒**（以及盒减图的那段余量），不是按包含块宽。基准在排版期
+// 才拿得到，所以这里一律留成 `Length` / 分数，不做任何折算 —— 与 `margin` 那一族同一个理由。
+// ---------------------------------------------------------------------------
+
+/// 把一段值按括号与引号外的空白切开。`url(a b.png)` 里的那个空格不是分隔符，
+/// 真书里带空格的图名（`body italic.otf` 那一族）就踩在这一条上。
+pub(super) fn split_value_tokens(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for c in value.chars() {
+        if let Some(q) = quote {
+            buf.push(c);
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                quote = Some(c);
+                buf.push(c);
+            }
+            '(' => {
+                depth += 1;
+                buf.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                buf.push(c);
+            }
+            c if c.is_whitespace() && depth <= 0 => {
+                if !buf.is_empty() {
+                    out.push(std::mem::take(&mut buf));
+                }
+            }
+            _ => buf.push(c),
+        }
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
+/// 取出 `url("…")` / `url(…)` 里的路径并去引号；不是 `url()` 形态给 `None`。
+///
+/// 到这里路径**已经是容器内的绝对路径**了：样式表拼进层叠前 `absolutize_css_urls`
+/// 做过折算并统一加了引号（见 `content::format`），所以这一格只管剥壳，不再解相对路径。
+pub(super) fn parse_url_token(token: &str) -> Option<String> {
+    let t = token.trim();
+    // `URL(` / `Url(` 都算：函数名在 CSS 里大小写不敏感，而转换器两种都写得出来。
+    // 走 `get` 而不是直接切片：值可能以全角字符开头，切在非字符边界上会当场 panic。
+    if !t
+        .get(..4)
+        .is_some_and(|head| head.eq_ignore_ascii_case("url("))
+    {
+        return None;
+    }
+    let rest = &t[4..];
+    let inner = rest.strip_suffix(')')?.trim();
+    let path = inner.trim_matches(|c| c == '"' || c == '\'').trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// 一个铺法关键字。`repeat-x` / `repeat-y` 是**两轴一起写**的那两条，所以只在这里出现。
+fn tile_axis(token: &str) -> Option<(BackgroundTile, BackgroundTile)> {
+    Some(match token {
+        "repeat" => (BackgroundTile::Repeat, BackgroundTile::Repeat),
+        "no-repeat" => (BackgroundTile::NoRepeat, BackgroundTile::NoRepeat),
+        "repeat-x" => (BackgroundTile::Repeat, BackgroundTile::NoRepeat),
+        "repeat-y" => (BackgroundTile::NoRepeat, BackgroundTile::Repeat),
+        "space" => (BackgroundTile::Space, BackgroundTile::Space),
+        "round" => (BackgroundTile::Round, BackgroundTile::Round),
+        _ => return None,
+    })
+}
+
+/// `background-repeat`：一到两个值（先横后纵）。`repeat-x` / `repeat-y` 只能单独写。
+pub(super) fn parse_background_repeat(value: &str) -> Option<BackgroundRepeat> {
+    let parts = split_value_tokens(&value.to_ascii_lowercase());
+    if parts.is_empty() || parts.len() > 2 {
+        return None;
+    }
+    if parts.len() == 1 {
+        let (x, y) = tile_axis(parts[0].as_str())?;
+        // `repeat-x` 那一档本身就已经把两轴写全了，不能再当「只说了横轴」用。
+        return Some(BackgroundRepeat { x, y });
+    }
+    let one = |t: &str| match t {
+        "repeat" => Some(BackgroundTile::Repeat),
+        "no-repeat" => Some(BackgroundTile::NoRepeat),
+        "space" => Some(BackgroundTile::Space),
+        "round" => Some(BackgroundTile::Round),
+        _ => None,
+    };
+    Some(BackgroundRepeat {
+        x: one(&parts[0])?,
+        y: one(&parts[1])?,
+    })
+}
+
+/// `background-size`：`cover` / `contain` / `auto`，或一到两个长度·百分比·`auto`。
+pub(super) fn parse_background_size(value: &str) -> Option<BackgroundSize> {
+    let parts = split_value_tokens(value);
+    if parts.is_empty() || parts.len() > 2 {
+        return None;
+    }
+    if parts.len() == 1 {
+        let head = parts[0].to_ascii_lowercase();
+        return match head.as_str() {
+            "cover" => Some(BackgroundSize::Cover),
+            "contain" => Some(BackgroundSize::Contain),
+            "auto" => Some(BackgroundSize::Auto),
+            // 单个长度或百分比：CSS 规定第二条就是 `auto`。
+            _ => Some(BackgroundSize::Explicit {
+                width: Some(size_axis(&head)?),
+                height: None,
+            }),
+        };
+    }
+    let axis = |t: &str| -> Option<Option<Length>> {
+        let low = t.to_ascii_lowercase();
+        if low == "auto" {
+            return Some(None);
+        }
+        Some(Some(size_axis(&low)?))
+    };
+    Some(BackgroundSize::Explicit {
+        width: axis(&parts[0])?,
+        height: axis(&parts[1])?,
+    })
+}
+
+/// `background-size` 一轴上的长度或百分比。`auto` 由调用方挡在外面。
+fn size_axis(token: &str) -> Option<Length> {
+    if let Some(percent) = token.strip_suffix('%') {
+        let n: f32 = percent.trim().parse().ok()?;
+        return Some(Length::Percent(n / 100.0));
+    }
+    let low = token.to_ascii_lowercase();
+    if low.is_empty() || low.starts_with("calc(") {
+        return None;
+    }
+    let (number, unit) = [
+        ("rem", "rem"),
+        ("vw", "vw"),
+        ("vh", "vh"),
+        ("px", "px"),
+        ("pt", "pt"),
+        ("em", "em"),
+    ]
+    .into_iter()
+    .find_map(|(suffix, unit)| low.strip_suffix(suffix).map(|n| (n, unit)))
+    .unwrap_or((low.as_str(), "px"));
+    let n: f32 = number.trim().parse().ok()?;
+    Some(match unit {
+        "px" => Length::Px(n),
+        "pt" => Length::Px(n * 96.0 / 72.0),
+        // `em` / `rem` 在这里按**自己的**字号与读者字号折 —— 与别处同一口径。
+        // `vw` / `vh` 这一版不接：版心宽是界面给的数，层叠期拿不到（真书里这一族
+        // 只出现在 `background-size: 100%`，视口单位一次也没见过）。
+        "em" | "rem" | "vw" | "vh" => return None,
+        _ => Length::Px(n),
+    })
+}
+
+/// 位置一轴上的长度或百分比。
+fn position_axis(token: &str) -> Option<BackgroundAxis> {
+    if let Some(percent) = token.strip_suffix('%') {
+        let n: f32 = percent.trim().parse().ok()?;
+        return Some(BackgroundAxis::Fraction(n / 100.0));
+    }
+    let length = size_axis(token)?;
+    Some(BackgroundAxis::Length(length))
+}
+
+/// `background-position`：一到两个值（先横后纵），关键字、长度、百分比可以混着写。
+///
+/// **四值边缘语法（`left 10px top 20px`）这一版不接**，整条判不认识：那一族要的是
+/// 「两边各给一个边缘锚点再往里推」的状态机，而哈利波特那 23 处写到的只有
+/// `center`、`center 60%`、`center 80%`、`bottom right`、`90% 14%` 这五档，
+/// 两值那一档已经盖住全部 —— 为四值再写一套状态机，风险是把现在这些写法判错。
+pub(super) fn parse_background_position(value: &str) -> Option<BackgroundPosition> {
+    let parts = split_value_tokens(&value.to_ascii_lowercase());
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let center = || BackgroundAxis::Edge(BackgroundEdge::Center, None);
+    // 「横轴关键字 + 一条偏移」的写法（`center 20px`、`center 80%`）：两个 token 一起说
+    // **一根横轴**，纵轴取 `center`。偏移是从这个关键字那一边往里推，不是从起始边量。
+    if parts.len() == 2
+        && let Some((edge, PositionAxis::Horizontal)) = position_keyword(&parts[0])
+        && let Some(offset) = size_axis(&parts[1])
+    {
+        return Some(BackgroundPosition {
+            x: BackgroundAxis::Edge(edge, Some(offset)),
+            y: center(),
+        });
+    }
+    let mut x: Option<BackgroundAxis> = None;
+    let mut y: Option<BackgroundAxis> = None;
+    for token in &parts {
+        // 逐个归位。规则就三条：`left`/`right` 只说横轴，`top`/`bottom` 只说纵轴，
+        // 剩下的（数字与 `center`）先填横轴、横轴有了就填纵轴 —— 所以 `0 0` 是合法的
+        // 「横 0、纵 0」，而 `left right` 因为横轴被占了两次而判非法。
+        let axis = match position_keyword(token) {
+            Some((edge, PositionAxis::Horizontal)) => {
+                if x.is_some() {
+                    return None;
+                }
+                x = Some(BackgroundAxis::Edge(edge, None));
+                continue;
+            }
+            Some((edge, PositionAxis::Vertical)) => {
+                if y.is_some() {
+                    return None;
+                }
+                y = Some(BackgroundAxis::Edge(edge, None));
+                continue;
+            }
+            Some((edge, PositionAxis::Either)) => {
+                if x.is_none() {
+                    x = Some(BackgroundAxis::Edge(edge, None));
+                } else if y.is_none() {
+                    y = Some(BackgroundAxis::Edge(edge, None));
+                } else {
+                    return None;
+                }
+                continue;
+            }
+            None => position_axis(token)?,
+        };
+        if x.is_none() {
+            x = Some(axis);
+        } else if y.is_none() {
+            y = Some(axis);
+        } else {
+            return None;
+        }
+    }
+    // 只给了横轴时纵轴取 `center`（CSS 明文），只写了 `top`/`bottom` 时横轴取 `center`。
+    Some(BackgroundPosition {
+        x: x.unwrap_or_else(center),
+        y: y.unwrap_or_else(center),
+    })
+}
+
+/// 一个位置关键字能说哪根轴。`center` 两根都能说，所以单独一档。
+enum PositionAxis {
+    Horizontal,
+    Vertical,
+    Either,
+}
+
+/// 一个位置关键字落在哪一边、说的是哪根轴。
+fn position_keyword(token: &str) -> Option<(BackgroundEdge, PositionAxis)> {
+    Some(match token {
+        "left" => (BackgroundEdge::Start, PositionAxis::Horizontal),
+        "right" => (BackgroundEdge::End, PositionAxis::Horizontal),
+        "top" => (BackgroundEdge::Start, PositionAxis::Vertical),
+        "bottom" => (BackgroundEdge::End, PositionAxis::Vertical),
+        "center" => (BackgroundEdge::Center, PositionAxis::Either),
+        _ => return None,
+    })
+}
+
+/// `background-image` 的一层：`none` → `None`，`url("…")` → `Some(路径)`。
+///
+/// 渐变（`linear-gradient(...)`）与 `element()` 一律 `None` 让调用方判整条不认识 ——
+/// 这一版不会画渐变，把它折成「没有图」等于把作者的底色块悄悄画空。
+pub(super) fn parse_background_image_layer(token: &str) -> Option<Option<String>> {
+    let t = token.trim();
+    if t.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    parse_url_token(t).map(Some)
 }

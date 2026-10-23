@@ -269,6 +269,103 @@ impl BorderEdge {
     }
 }
 
+/// 背景图的一层：`background-image` 的一个 `url()` 加上与它**配对**的摆法三件。
+///
+/// 存的是 CSS 侧的原始数，一块背景图真正落在哪、多大要等排版期拿到盒尺寸才算得出
+/// （`cover` / `contain` / 百分比都要读那一个盒），所以这里不带任何 px 结果。
+///
+/// **图不在这里取**：`href` 是容器内的绝对路径（样式表拼进层叠前已由
+/// `content::format::absolutize_css_urls` 把 `../Images/a.png` 折算成 `OEBPS/Images/a.png`
+/// 并去掉引号），字节与固有尺寸每帧现问图片索引 —— 与行内图片 `RowImage::href`
+/// 同一个口径，理由也同一条：那两样随图片索引变，烘进这张表就是第二个真相。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BackgroundLayer {
+    /// `None` = 这一层是 `background-image: none`（作者明确不要图），不是「没写过」。
+    pub image: Option<String>,
+    pub size: BackgroundSize,
+    pub position: BackgroundPosition,
+    pub repeat: BackgroundRepeat,
+}
+
+/// `background-size`。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BackgroundSize {
+    /// 初值：图按固有尺寸摆，两轴都不缩。
+    #[default]
+    Auto,
+    /// 缩到**刚好装下**整张图（留白可见）。
+    Contain,
+    /// 缩到**盖满**这个盒（多出来的那一部分裁掉）。
+    Cover,
+    /// 一到两个显式长度／百分比；`None` 那一轴就是 `auto`。
+    /// 百分比按**这个盒**的对应轴折，不是按包含块 —— 与 `width` 那一族不同源是有意的，
+    /// CSS 规定 `background-size` 的基准是背景定位区（我们一律取边框盒）。
+    Explicit {
+        width: Option<Length>,
+        height: Option<Length>,
+    },
+}
+
+/// 一轴的摆法。`Fraction` 单独一档是因为 CSS 的百分比在这里的基准**不是盒宽**：
+/// `background-position: 25%` 说的是「图的 25% 处对齐盒的 25% 处」，
+/// 于是余量（盒宽 − 图宽）乘那个分数，`0%` 贴起始边、`100%` 贴结束边。
+/// 把它折成「盒宽的分数」会在图比盒大时把图推出可视区。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundAxis {
+    /// 关键字档（`left`/`top` = Start，`center` = Center，`right`/`bottom` = End），
+    /// 后面那条偏移是 `right 10px` 那种写法：从这一边再往里推。
+    Edge(BackgroundEdge, Option<Length>),
+    /// 一条长度（px / em / rem），从起始边量。
+    Length(Length),
+    /// CSS 的百分比：按「盒减图」那段余量的分数，`50%` 存成 `0.5`。
+    Fraction(f32),
+}
+
+/// `background-position` 落在哪一边。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundEdge {
+    Start,
+    Center,
+    End,
+}
+
+/// `background-position` 的两轴。单值写法（`center`）在解析期就把另一轴补成 `Center`，
+/// 所以这里不带 `Option`。初值见下面那条手写的 `Default`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackgroundPosition {
+    pub x: BackgroundAxis,
+    pub y: BackgroundAxis,
+}
+
+impl Default for BackgroundPosition {
+    /// CSS 初值是 `0% 0%`（两条规范版本都写作 `left top`），不是 `center`。
+    fn default() -> Self {
+        Self {
+            x: BackgroundAxis::Edge(BackgroundEdge::Start, None),
+            y: BackgroundAxis::Edge(BackgroundEdge::Start, None),
+        }
+    }
+}
+
+/// `background-repeat` 的两轴。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BackgroundRepeat {
+    pub x: BackgroundTile,
+    pub y: BackgroundTile,
+}
+
+/// 一个轴上的铺法。CSS 初值两轴都是 `repeat`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundTile {
+    #[default]
+    Repeat,
+    /// 铺满那一轴，隙缝均摊（不裁剪图）。
+    Space,
+    /// 铺满那一轴，整张图跟着缩放（会改纵横比）。
+    Round,
+    NoRepeat,
+}
+
 /// 作者写的那个尺寸**含不含**边框与内边距，即 CSS 的 `box-sizing`。
 ///
 /// 只有两档：`content-box` 是 CSS 初值也是这一族从前唯一的行为；`border-box` 是出版书与
@@ -445,6 +542,21 @@ impl Length {
     }
 }
 
+impl ComputedStyle {
+    /// 这一块的背景里**真带图**的那些层，按 CSS 书写顺序（先写的在屏幕上更靠上）。
+    ///
+    /// 只留一个出口而不是让各处直接读 `background_layers`：图层表里允许存在「有摆法、
+    /// 没有图」的惰性层（`background: #fff` 这条简写就会留一层，而 `background-repeat`
+    /// 写在 `background-image` 之前时也必须先有一层才能挂上值 —— 去掉它们会让配对关系
+    /// 看声明次序而定）。排版与绘制要的从来只是「有哪几张图、各怎么摆」，
+    /// 这一格就是那句话唯一的说法。
+    pub fn background_pictures(&self) -> impl Iterator<Item = &BackgroundLayer> {
+        self.background_layers
+            .iter()
+            .filter(|layer| layer.image.is_some())
+    }
+}
+
 /// 排版层需要的计算后样式。除 `margin` / `padding` / `text-indent` / 替换元素的
 /// 尺寸这一族（它们可能带百分比，要等排版期拿到包含块宽才折得动，见 [`Length`]），
 /// 长度一律已折算成 px，`line_height` 是倍数。
@@ -507,6 +619,16 @@ pub struct ComputedStyle {
     /// 与「写了一个颜色」在绘制上是两件事：前者什么都不画，后者要盖住读者的主题底色）。
     /// 背景色在 CSS 里**不继承**，所以 `inherit_from` 不带它。
     pub background_color: Option<Color>,
+    /// `background-image` 及其**配对**的 size / position / repeat，按 CSS 书写顺序排列。
+    /// 画的时候反过来（先写的在**最上面**，最后写的垫底），与 CSS 的图层次序一致。
+    ///
+    /// 空表 = 这一层根本没有图（`None` 与「一条不画的图」在这里是同一件事，所以不需要
+    /// `Option`）。`background-color` 不在这里：CSS 把它归给最底那一层，而我们的底色字段
+    /// 早就存在并且绘制侧按它筛装饰表，两处并存的差别只在「同一块同时写了底色与多层图」
+    /// 这种书上极少的组合里，按 CSS 画就是底色垫在所有图下面 —— 落点确实是那一个。
+    ///
+    /// 与 `background_color` 同一条规矩：**不继承**，所以 `inherit_from` 不带它。
+    pub background_layers: Vec<BackgroundLayer>,
     /// 四边边框，顺序 `[上, 右, 下, 左]`（与 `box_sides` 同一套展开规则）。
     /// 布局拿它算盒宽与盒高，绘制拿它画线；不继承。
     pub border: [BorderEdge; 4],
@@ -622,6 +744,7 @@ impl Default for ComputedStyle {
             clear: Clear::default(),
             color: None,
             background_color: None,
+            background_layers: Vec::new(),
             border: [BorderEdge::default(); 4],
             word_spacing: 0.0,
             letter_spacing: 0.0,
@@ -680,6 +803,35 @@ impl std::hash::Hash for ComputedStyle {
                 Some(inner) => len(inner, h),
             }
         }
+        fn axis<H: std::hash::Hasher>(a: &BackgroundAxis, h: &mut H) {
+            match a {
+                BackgroundAxis::Edge(edge, offset) => {
+                    1u8.hash(h);
+                    match edge {
+                        BackgroundEdge::Start => 0u8.hash(h),
+                        BackgroundEdge::Center => 1u8.hash(h),
+                        BackgroundEdge::End => 2u8.hash(h),
+                    }
+                    opt_len(offset, h);
+                }
+                BackgroundAxis::Length(l) => {
+                    2u8.hash(h);
+                    len(l, h);
+                }
+                BackgroundAxis::Fraction(p) => {
+                    3u8.hash(h);
+                    f(*p, h);
+                }
+            }
+        }
+        fn tile<H: std::hash::Hasher>(t: &BackgroundTile, h: &mut H) {
+            match t {
+                BackgroundTile::Repeat => 0u8.hash(h),
+                BackgroundTile::Space => 1u8.hash(h),
+                BackgroundTile::Round => 2u8.hash(h),
+                BackgroundTile::NoRepeat => 3u8.hash(h),
+            }
+        }
         f(self.font_size, h);
         f(self.line_height, h);
         self.font_weight.hash(h);
@@ -705,6 +857,27 @@ impl std::hash::Hash for ComputedStyle {
         (self.clear as u8).hash(h);
         self.color.hash(h);
         self.background_color.hash(h);
+        // 背景图层一族。漏了这一格的表现不是「画错」而是「画旧」：只改 `background-size`
+        // 时块级缓存命中上一代，盒子和图都按旧的摆 —— 与上面那条「新增字段必须补一行」
+        // 讲的是同一件事，这里就是那一条新写的字段。
+        self.background_layers.len().hash(h);
+        for layer in &self.background_layers {
+            layer.image.hash(h);
+            match &layer.size {
+                BackgroundSize::Auto => 0u8.hash(h),
+                BackgroundSize::Contain => 1u8.hash(h),
+                BackgroundSize::Cover => 2u8.hash(h),
+                BackgroundSize::Explicit { width, height } => {
+                    3u8.hash(h);
+                    opt_len(width, h);
+                    opt_len(height, h);
+                }
+            }
+            axis(&layer.position.x, h);
+            axis(&layer.position.y, h);
+            tile(&layer.repeat.x, h);
+            tile(&layer.repeat.y, h);
+        }
         for edge in &self.border {
             f(edge.width, h);
             (edge.style as u8).hash(h);
@@ -747,7 +920,23 @@ impl std::hash::Hash for ComputedStyle {
 pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // `background` 简写 2026-10-14 起**接住了它里面的颜色**（见 `apply` 的 `background`
     // 那一臂）：出版书里「深色底块 + 白字标题」满地都是，只认 `background-color`
-    // 会让这种标题变成白纸上的白字、整条标题消失。简写里的图（`url(...)`）仍不接。
+    // 会让这种标题变成白纸上的白字、整条标题消失。2026-10-23 这一轮把 `url(...)`
+    // 那一截也接上了，落在 [`ComputedStyle::background_layers`]。
+    //
+    // 这一族里**只有三条**留在「认得、不生效」这一档，各有一条给不了的理由：
+    // - `background-attachment: fixed` —— 流式排版里没有对应物。这里的「视口」是一栏纸，
+    //   滚动时背景跟着纸走才是读者要的；真按 `fixed` 摆会让扉页那张底图钉在屏幕上、
+    //   正文从它底下漂过去。`local` 要的是「按这一块的内容盒滚动」，而流式块没有自己的
+    //   滚动区。两条都按初值 `scroll` 摆。
+    // - `background-clip` / `background-origin` —— 一律按**边框盒**，正是出版书里
+    //   「底色盖到边框下面」那一大片的写法；`padding-box` / `content-box` 那一档
+    //   要给的是内缩的矩形，本书语料里一次没出现过。
+    // 留在这份名单里而不是在 `apply` 里返回 `true`：单写这三条时长手确实什么都不改，
+    // 报成「接住了」就是把「没做」记成「做了」，`examples/css-gap` 的表会跟着说谎。
+    // 简写里的这些词仍然被**吃掉**（不作废整条），判据写在 `apply` 那一臂的注释上。
+    "background-attachment",
+    "background-clip",
+    "background-origin",
     // `min-height` 在这份名单里空转过（认得、不生效）：2026-10-21 与 `min-width` 一起
     // 接进 `used_content_height` / `solve_block_width` 那两夹，所以移了出去。
     "text-shadow",
@@ -872,8 +1061,24 @@ impl StyledDom {
     }
 }
 
+/// 一份 `style="…"` 文本 → 声明列表，用的就是层叠内部那**同一个**解析（含按本章目录
+/// 折算 `url(...)` 那一步）。
+///
+/// 抬到公开面只为一件事：缺口量具 `examples/css-gap` 从前只遍历样式表规则，元素上写的
+/// 内联声明**一条也没进那台秤** —— 于是哈利波特整本书报出来只有 1 处 `background` 没接住，
+/// 而那七张册扉页的底图恰恰全部写在内联里（`<body style="background: url(…)">`）。
+/// 量具漏计一个形状，比引擎少接一个属性更坏：它会让「已经接住了」这个读数本身失真。
+pub fn inline_declarations(text: &str, base_dir: &str) -> Vec<Declaration> {
+    parse_inline_style(text, base_dir)
+}
+
 /// 层叠整棵树。`root_base` 是读者偏好折算出来的根样式（字号、行距、字体等）。
-pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle) -> StyledDom {
+///
+/// `base_dir` 是**这一份文档**在容器里的目录（EPUB 就是 `OEBPS/Text` 那一段），
+/// 只被一件事用到：把元素 `style="…"` 里的 `url(...)` 折成容器内路径 ——
+/// 样式表那一侧早就由 `content::format::absolutize_css_urls` 折过了，两边必须同一个形状，
+/// 判据写在 `apply::parse_inline_style` 的注释上。用不到那一件事的调用方传空串即可。
+pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle, base_dir: &str) -> StyledDom {
     let mut styles = vec![root_base.clone(); dom.nodes.len()];
     let mut ignored = 0usize;
 
@@ -932,7 +1137,7 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle) -> StyledD
         // 之前**，所以按 `important` 一刀切成两半，中间插入行内那两半，就是那个位置。
         let inline = dom
             .attr(id, "style")
-            .map(parse_inline_style)
+            .map(|text| parse_inline_style(text, base_dir))
             .unwrap_or_default();
         let mut ordered: Vec<&Declaration> = Vec::with_capacity(decls.len() + inline.len());
         ordered.extend(decls.iter().filter(|d| !d.important));

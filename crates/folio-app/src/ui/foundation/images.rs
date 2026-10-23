@@ -120,6 +120,28 @@ impl DecodeRequest {
     }
 }
 
+/// 手写两份：`loader` 是一条闭包，既派生不出 `Debug`，也**不该**参与比较。
+///
+/// 相等只看 `key`：那一条已经是「这本书的这一张图」的完整身份（书名 token + 容器路径，
+/// 见上面那段注释），所以同键就是同一张图，`tile_bytes` 只是估的名额、不参与身份。
+/// 为什么需要这两份：绘制侧那张 `BlockDecor` 带比较与打印（`view::scene` 里那几条测试
+/// 直接拿它断言），而它现在多了一格背景图层。
+impl PartialEq for DecodeRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl std::fmt::Debug for DecodeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 闭包打不出来，也不该打：测试失败时想看的是「哪张图、占多少」，不是链子地址。
+        f.debug_struct("DecodeRequest")
+            .field("key", &self.key)
+            .field("tile_bytes", &self.tile_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ImageEntry {
     /// 这张图**按索引里记着的固有尺寸**就编得进设备吗（= 不必缩小）。
     ///
@@ -422,6 +444,17 @@ impl ChapterImages {
         render: Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>,
     ) -> DecodeRequest {
         self.book.render_job(page, edge, width, height, render)
+    }
+
+    /// 这一章在容器里的目录（`dir_of(spine_href)`）。
+    ///
+    /// 递出去只为一件事：**把这一章自己带的 CSS 折算成容器内路径** —— 元素上的
+    /// `style="…"` 与章内那块 `<style>` 里的 `url(../Images/x.png)` 基准都是这一个目录，
+    /// 而外链样式表那一份按**它自己**的目录折（两处基准不同是有意的，见
+    /// `content::format::absolutize_css_urls` 那段）。层叠期拿不到路径，只能由这里递给
+    /// `cascade`，两边才可能折出同一个形状。
+    pub fn base_dir(&self) -> &str {
+        &self.base_dir
     }
 
     /// 一张图的**固有像素**尺寸（容器路径 → `(宽, 高)`），查不到给 `(0, 0)`。

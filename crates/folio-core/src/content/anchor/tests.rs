@@ -66,6 +66,7 @@ fn typeset(html: &str, css: &str, width: f32) -> Chapter {
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let root = body(&dom);
     let map = TextMap::build(&dom, root);

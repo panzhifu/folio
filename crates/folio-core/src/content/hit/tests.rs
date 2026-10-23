@@ -62,6 +62,7 @@ fn typeset(html: &str, css: &str, width: f32) -> Chapter {
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let root = body(&dom);
     let map = TextMap::build(&dom, root);
@@ -406,6 +407,7 @@ fn hitting_an_image_lands_after_the_previous_text() {
         &dom,
         &RuleSet::parse("", Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let root = body(&dom);
     let map = TextMap::build(&dom, root);

@@ -58,6 +58,9 @@ use crate::ui::features::reader::model::chrome::PageMode;
 /// 参照 `reference/gmpagecurl-ios` 的 `maxPhi = π/4 − 1°` 取的是 44°；这里故意收到 **38°**，
 /// 让「手指已经很斜」那一档的折痕也不至于被掰成四十多度的硬边。可见斜角还要再乘下面的
 /// [`TILT_FOLLOW`]：`atan(0.35 × tan 38°) ≈ 15.3°`，与静读天下的观感对齐。
+///
+/// 它是**起手那一刻**的上限：两支翻页各自把它往竖直收 —— 跟手那一趟走 [`tilt_ceiling`]，
+/// 点屏那一趟在 [`tap_roll`] 里直接按 `progress` 收。
 const MAX_TILT: f32 = 38.0 * std::f32::consts::PI / 180.0;
 
 /// 折线转角对手指角度的**跟随系数**。
@@ -82,7 +85,7 @@ pub(in crate::ui::features::reader) const TILT_FOLLOW: f32 = 0.35;
 /// 的阅读页上，`πR` 比一整页还宽，整页都落进「卷在柱面上」那一段：字被剪斜、页面像被掰弯。
 /// 真机截图量到的正是这个。再往前一版取 5.5%（约 21px）又小到没人看得出纸在卷。0.14 是
 /// 这两个读数中间的一个，还要不要再细，等下一张截图说话。
-pub(in crate::ui::features::reader) const ROLL: f32 = 0.14;
+pub(in crate::ui::features::reader) const ROLL: f32 = 0.04;
 
 /// 没有手指那一条路的折线（点屏 / 按键 / 滚轮）。
 ///
@@ -162,6 +165,21 @@ fn tap_roll(progress: f32, area: Area) -> Roll {
     (n, (n.0 * d, n.1 * d), radius)
 }
 
+/// 跟手那一趟的折线倾角上限：起手允许 [`MAX_TILT`]，横向往书脊每多走一个页宽就把它往竖直收，
+/// 走到一个页宽（`depth = 1`）收成 0。
+///
+/// 这条律抄的是 `reference/android-PageFlip` 的 `PageFlip.computeTanOfCurlAngle`（磁盘上那份在
+/// `PageFlip/src/main/java/com/eschao/android/widget/pageflip/PageFlip.java:1873`）：它按
+/// `dy / halfH` 把最大折角从 65° 线性退到 5°。[`tap_roll`] 里那句 `MAX_TILT * (1.0 - progress)`
+/// 是同一条律的时钟版，退让的理由也写在那一份里：静读天下逐帧读下来，折线起手就是斜 43°、落位时
+/// 已经转回竖直。跟手这一支从前只有 [`TILT_FOLLOW`] 那一层恒定阻尼，整趟不往竖直收，于是斜着划
+/// 到底的那一笔在落位那一刻还留着一条斜边。
+///
+/// 收 0 而不是收 5°：参照那一档是给「还能继续拖」的手指留的，我们落位那一刻要的就是竖直。
+fn tilt_ceiling(depth: f32) -> f32 {
+    MAX_TILT * (1.0 - depth.clamp(0.0, 1.0))
+}
+
 /// 这一帧圆柱的参数，全部在「正向 + 页局部」那一套坐标里给：页占 `u ∈ [0, 宽]`、自由边在
 /// `u = 宽`、书脊在 `u = 0`，`v` 从页顶往下。**进来的那个 `grip` 也得是这一套里的**（往回翻
 /// 由 [`cylinder_at`] 先映一次），它自己不看翻页方向。
@@ -206,8 +224,10 @@ fn curl_of(progress: f32, area: Area, grip: Option<Grip>) -> Option<Roll> {
     let dir_x = dir_x.min(0.0);
     // 倾角上限：竖着划那一笔不夹的话折线转成近水平，纸从页顶/页底卷走 —— 书没有那两条自由边。
     // 这一格是**故意偏离参照**的：harism 允许（它卷的是一张自由的纸），书不许。夹的是纵向**偏移
-    // 量**而不是角度，所以横向往复一格没动的竖划正好退化成「纸还没动」。
-    let limit = MAX_TILT.tan() * dir_x.abs();
+    // 量**而不是角度，所以横向往复一格没动的竖划正好退化成「纸还没动」。上限本身随这一笔往书脊
+    // 走过的距离退让（[`tilt_ceiling`]），所以斜划到底的那一笔在落位时折线已经转回竖直。
+    let ceiling = tilt_ceiling(dir_x.abs() / width);
+    let limit = ceiling.tan() * dir_x.abs();
     // 折线的转角只吃手指角度的 `TILT_FOLLOW` 那一半：斜划仍然斜折（跟手），但纸不会被掰成
     // 一条四十多度的斜边。上限在前、阻尼在后 —— 夹住的是「最斜能斜到哪」，阻尼管的是「平时
     // 斜多少」。
@@ -444,9 +464,12 @@ pub(in crate::ui::features::reader) fn revert_cylinder(
 /// 走 [`revert_cylinder`]，不走这里）。
 ///
 /// 参照里那句「animation source/target 都是手指位置，走的是同一条 `updateCurlPos`，所以输出与
-/// 用户真的一路拖过去完全相同」就是这个意思。只把这一笔拉长，方向一个字不改 —— 写死一个落点
-/// 的话，松手那一帧划动方向被硬掰，折线倾角跟着跳一下。朝向之所以能整条腿不改：律里那道倾角
-/// 夹法的上限是 `tan(MAX_TILT)·|dir_x|`，整条向量等比缩放时比值不变，所以它是齐次的。
+/// 用户真的一路拖过去完全相同」就是这个意思。只把这一笔拉长，**手指向量**一个字不改 —— 写死一个
+/// 落点的话，松手那一帧划动方向被硬掰，折线倾角跟着跳一下。
+///
+/// 折线自己在这一腿里是**会**转的，而且是设计：倾角上限随走量退让（[`tilt_ceiling`]），越往书脊
+/// 走越竖直，落位那一刻正好竖直（静读天下逐帧读下来就是这个读数）。它不构成跳变，因为退让对
+/// `|dir_x|` 连续，而 `u = 0` 那一帧的 `|dir_x|` 就是松手那一刻的值。
 ///
 /// `u` 是这一腿走了几成（[`super::release_clock`] 给），`0` = 松手那一刻。
 pub(in crate::ui::features::reader) fn release_grip(
@@ -586,6 +609,7 @@ mod tests {
     use crate::ui::features::reader::motion::turn_animation::curl::cylinder_at;
     use crate::ui::features::reader::motion::turn_animation::curl::cylinder_for;
     use crate::ui::features::reader::motion::turn_animation::curl::release_grip;
+    use crate::ui::features::reader::motion::turn_animation::curl::tilt_ceiling;
     use crate::ui::features::reader::motion::turn_animation::geometry::Grip;
     use crate::ui::features::reader::motion::turn_animation::geometry::Poly;
     use crate::ui::features::reader::motion::turn_animation::geometry::Pose;
@@ -793,8 +817,11 @@ mod tests {
     #[test]
     fn the_cone_radius_grows_from_the_spine_to_the_free_edge() {
         let area = page();
+        // 摆在这一笔**刚起步**的那一格（横向只走了 0.05 页宽）：这里 [`tilt_ceiling`] 还没把上限
+        // 收下来，折痕还是最斜的那一档，圆锥才长得出来。划深之后折线本来就该转回竖直、权重该归
+        // 0，那是下面 `vertical` 那一格量的事，不是这一格。
         let cylinder =
-            cylinder_at(0.2, true, area, Some(Grip::new((0.5, 0.5), (0.35, 0.4)))).expect("量得出");
+            cylinder_at(0.2, true, area, Some(Grip::new((0.9, 0.5), (0.85, 0.4)))).expect("量得出");
         assert!(
             cylinder.cone_weight > 0.1,
             "斜着拖该长出圆锥，实得权重 {}",
@@ -1201,8 +1228,8 @@ mod tests {
                     (at.1 - from.1) * area.height(),
                 );
                 let long = (vx * vx + vy * vy).sqrt();
-                // 期望的法向按同一条式子算一遍：先夹到 [`MAX_TILT`]，再乘跟随系数。
-                let limit = MAX_TILT.tan() * vx.abs();
+                // 期望的法向按同一条式子算一遍：先夹到随走量退让的上限，再乘跟随系数。
+                let limit = tilt_ceiling(vx.abs() / area.width()).tan() * vx.abs();
                 let ey = vy.clamp(-limit, limit) * TILT_FOLLOW;
                 let elen = (vx * vx + ey * ey).sqrt().max(1e-6);
                 let (want_nx, want_ny) = (-vx / elen, -ey / elen);
@@ -1277,6 +1304,51 @@ mod tests {
                 "手指从 {from:?} 划到 {at:?} 时折痕斜到 {slant:.1}°，超过了 {cap:.1}° 的上限"
             );
         }
+    }
+
+    /// 同一只手的方向，走得越深折线越竖直；横向往书脊走完一个页宽时折线正好竖直。
+    ///
+    /// 守的是 [`tilt_ceiling`] 那一步退让。把它的 `depth` 拿掉（上限恒等于 [`MAX_TILT`]，也就是
+    /// 2026-10-22 之前的行为）这一条就红：那一边斜着划到底的那一笔在落位那一刻还留着一条斜边，
+    /// 而静读天下逐帧读下来落位是竖直的。
+    #[test]
+    fn the_fold_flattens_toward_vertical_as_the_stroke_goes_deep() {
+        let area = page();
+        let slant = |from: (f32, f32), at: (f32, f32)| -> f32 {
+            let crease = crease_at(0.5, true, area, Some(Grip::new(from, at))).expect("量得出折线");
+            (crease.ny / crease.nx).abs()
+        };
+        // 按下点固定在自由边那一格，两条划动的**手指角度**同向（都是往左下 300 像素），
+        // 区别只在横向往书脊走了多远：0.1 页宽 vs 0.8 页宽。两笔都远过上限，所以量的就是上限本身。
+        let shallow = slant((1.0, 0.5), (0.9, 0.0));
+        let deep = slant((1.0, 0.5), (0.2, 0.0));
+        assert!(shallow > 1e-3, "起手那一笔本该还斜着折，实得 {shallow}");
+        assert!(
+            deep < shallow * 0.5,
+            "手指角度一样、走得更深的那一笔没有往竖直退让：{shallow:.4} → {deep:.4}"
+        );
+        // 走完一个页宽：上限收到 0，折线正好竖直。
+        let end = slant((1.0, 0.5), (0.0, 0.0));
+        assert!(end < 1e-6, "落位那一刻折线该竖直，实得斜率 {end}");
+        // 退让对走量连续、单调：中途不许回弹，也不许先直后斜。
+        let mut previous = f32::INFINITY;
+        for fraction in [0.1, 0.3, 0.5, 0.7, 0.9, 1.0] {
+            let s = slant((1.0, 0.5), (1.0 - fraction, 0.0));
+            assert!(
+                s <= previous + 1e-6,
+                "斜角在走深的过程中回弹了：{previous:.4} → {s:.4}"
+            );
+            previous = s;
+        }
+        // 退让只管「能斜到哪」，不许动「手指斜多少就折多少」那一层阻尼：一笔浅得碰不到上限的
+        // 斜划，折痕斜角该正好是手指斜角的 `TILT_FOLLOW` 那一成。
+        let finger = (0.5 - 0.49) * area.height() / ((0.9 - 0.5) * area.width());
+        let untouched = slant((0.9, 0.5), (0.5, 0.49));
+        assert!(
+            (untouched - finger * TILT_FOLLOW).abs() < 1e-6,
+            "浅的一笔被退让误伤了：手指比值 {finger:.4}，实得斜率 {untouched:.4}，该是 {:.4}",
+            finger * TILT_FOLLOW
+        );
     }
 
     /// 松手那一腿沿**同一方向**把这一笔推到走完，中途不改朝向。

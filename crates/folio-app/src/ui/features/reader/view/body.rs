@@ -61,7 +61,7 @@ use crate::ui::features::reader::model::session::{
 use crate::ui::features::reader::model::swipe::release_transition;
 use crate::ui::features::reader::motion::turn_animation::{self, Sheet, Tint};
 use crate::ui::features::reader::view::paint::{self, GlyphRun, GlyphsElement, Mark, shape};
-use crate::ui::features::reader::view::scene::{BlockDecor, Scene, VisibleImage};
+use crate::ui::features::reader::view::scene::{BlockDecor, BlockPicture, Scene, VisibleImage};
 use crate::ui::foundation::images::DecodeRequest;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::navigation::SizeClass;
@@ -689,7 +689,7 @@ impl Render for ReaderSession {
                         });
                         element.extend(scene.runs);
                         for decor in scene.decorations {
-                            column.extend(decoration_child(decor));
+                            column.extend(decoration_child(decor, &atlas, view, cx));
                         }
                         for image in scene.images {
                             let Some(rendered) = painted(&atlas, image.image.clone(), view, cx)
@@ -1021,7 +1021,21 @@ impl Render for ReaderSession {
                                             .max(600.0),
                                         scale_factor: 1.0,
                                         back_color: [paper.r, paper.g, paper.b, 1.0],
-                                        light_dir: [-0.35, -0.25, 1.0, 0.0],
+                                        // 光从**卷起那一侧**的斜上方来（`+n` 是已经卷走的那一半），
+                                        // 影子才会落在还平摊着的那半边（`-n` 一侧）上；固定一个
+                                        // 世界方向的 `[-0.35, -0.25, …]` 只对正向翻页成立，
+                                        // 往回翻时影子会落到已经卷走的那一边、屏上一片干净。
+                                        //
+                                        // 水平分量只给 0.10：影子的偏移量是 `水平分量 × 纸抬起来的
+                                        // 高度`，给到 0.25 时柱顶那一段的影还会从折痕外探出六十来
+                                        // 像素；0.10 只探出二十来像素 —— 影基本压在纸底下，只在
+                                        // 折痕那一线露出一点。竖直分量稍大一点，影往下方沉。
+                                        light_dir: [
+                                            cylinder.nx * 0.10,
+                                            cylinder.ny * 0.10 - 0.08,
+                                            1.0,
+                                            0.0,
+                                        ],
                                         cone_a: [
                                             cylinder.cone_apex_s,
                                             cylinder.cone_far_s,
@@ -1217,10 +1231,20 @@ impl Render for ReaderSession {
                             // 张纸上的色块好读。捕获层里那两份副本照单全收（不裁）。
                             for decor in scene.decorations {
                                 if capture_front {
-                                    front_decor.extend(decoration_child(decor.clone()));
+                                    front_decor.extend(decoration_child(
+                                        decor.clone(),
+                                        &atlas,
+                                        view,
+                                        cx,
+                                    ));
                                 }
                                 if to_back {
-                                    back_children.extend(decoration_child(decor.clone()));
+                                    back_children.extend(decoration_child(
+                                        decor.clone(),
+                                        &atlas,
+                                        view,
+                                        cx,
+                                    ));
                                 }
                                 if skip_main {
                                     continue;
@@ -1233,7 +1257,7 @@ impl Render for ReaderSession {
                                 }) {
                                     continue;
                                 }
-                                column.extend(decoration_child(decor));
+                                column.extend(decoration_child(decor, &atlas, view, cx));
                             }
                             // 两张栏的图都要摆进同一份 `overlays`；跨章滑动时目标章那几张
                             // 也按「这一帧在场」记账，帧末回收就不会把还在画的图放掉。
@@ -2552,6 +2576,40 @@ fn shape_runs(scene: &mut Scene, doc: &Document, window: &Window) {
     }
 }
 
+/// 一块背景图：外壳是那一块的边框盒、带矩形裁剪，里面按 `scene` 算好的格子摆图。
+///
+/// 为什么要外壳那一层 `overflow_hidden`：`cover` 折出来的格子**本来就比盒大**
+/// （缩到盖满，多出来的一截要裁掉），而 `repeat` 那一格会从定位那一点向两头溢出。
+/// gpui 的 `ContentMask` 只有矩形 —— 这里要的正好是矩形，够用。
+///
+/// 坐标：外壳落在 `decor.x/top`（章内量，平移已由 `place_decorations` 加过），
+/// 里面的格子相对外壳左上角，与 [`BlockPicture::tiles`] 的定义一致。
+fn background_child(
+    decor: &BlockDecor,
+    picture: &BlockPicture,
+    rendered: Arc<RenderImage>,
+) -> AnyElement {
+    div()
+        .absolute()
+        .left(px(decor.x))
+        .top(px(decor.top))
+        .w(px(decor.width))
+        .h(px(decor.height))
+        .overflow_hidden()
+        .children(picture.tiles.iter().map(|(left, top, width, height)| {
+            div()
+                .absolute()
+                .left(px(*left))
+                .top(px(*top))
+                .w(px(*width))
+                .h(px(*height))
+                // 格子已经是「按比例算好的那一个矩形」，所以这里要的是铺满而不是再保比例：
+                // 再套一层 `object_fit` 会在格子与比例对不上时**悄悄改小**，露出底色。
+                .child(img(rendered.clone()).size_full())
+        }))
+        .into_any_element()
+}
+
 /// 一块实心矩形（背景或一条边框）。
 fn fill_quad(x: f32, top: f32, width: f32, height: f32, color: Hsla) -> AnyElement {
     div()
@@ -2564,10 +2622,20 @@ fn fill_quad(x: f32, top: f32, width: f32, height: f32, color: Hsla) -> AnyEleme
         .into_any_element()
 }
 
-/// 一块盒子的块级装饰：背景一整块 + 四边边框各一条实心条。
+/// 一块盒子的块级装饰：背景一整块 + 背景图 + 四边边框各一条实心条。
 /// 几何与 [`image_child`] 同一坐标系；边条在角上互相压边，与 CSS 的 45° 拼角
 /// 差一个斜切，肉眼分不出来。
-fn decoration_child(decor: BlockDecor) -> Vec<AnyElement> {
+///
+/// **三段的先后就是 CSS 的层次**：底色在最下、图盖在底色上、边框再盖在图上
+/// （`background-clip` 我们一律按边框盒，所以那道边正好压在底图边上，与浏览器一致）。
+/// 图层倒着摆：`background-image` 列表里最后写的那一层垫底，而 gpui 的子元素是
+/// 「后入树的压在上面」，两个次序正好反。
+fn decoration_child(
+    decor: BlockDecor,
+    atlas: &Entity<ImageAtlas>,
+    view: EntityId,
+    cx: &mut App,
+) -> Vec<AnyElement> {
     let mut parts = Vec::new();
     if let Some(background) = decor.background {
         parts.push(fill_quad(
@@ -2577,6 +2645,14 @@ fn decoration_child(decor: BlockDecor) -> Vec<AnyElement> {
             decor.height,
             background,
         ));
+    }
+    for picture in decor.pictures.iter().rev() {
+        // 问一次 `painted` 就是替这一格记一笔「这一帧在场」，帧末的回收按这个数放人 ——
+        // 与正文插图同一本账，扉页那张底图不会被单独饿掉。
+        let Some(rendered) = painted(atlas, picture.image.clone(), view, cx) else {
+            continue;
+        };
+        parts.push(background_child(&decor, picture, rendered));
     }
     let [top, right, bottom, left] = decor.border;
     if top.0 > 0.0 {

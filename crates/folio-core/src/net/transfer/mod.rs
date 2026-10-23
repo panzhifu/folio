@@ -30,6 +30,7 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 
 use crate::infra::error::{Error, IoResultExt as _, Result};
+use crate::infra::paths;
 
 /// 上传页。内嵌而非资产：这页只有一个用途，跟着二进制走，部署永远不缺它。
 const UPLOAD_PAGE: &str = include_str!("transfer_page.html");
@@ -283,7 +284,7 @@ fn sanitize_file_name(raw: &str) -> Option<String> {
     let cleaned: String = last
         .chars()
         .map(|c| {
-            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+            if paths::is_unsafe_name_char(c) {
                 '_'
             } else {
                 c

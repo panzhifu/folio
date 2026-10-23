@@ -65,14 +65,14 @@ impl WatchService {
         config: WatchConfig,
         store: Arc<Store>,
         queue: Arc<TaskManager>,
-        dest_dir: PathBuf,
+        book_dir: PathBuf,
         on_event: Option<Arc<WatchEvents>>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
             .name("folio-watch".to_string())
-            .spawn(move || run(config, dest_dir, store, queue, thread_stop, on_event))
+            .spawn(move || run(config, book_dir, store, queue, thread_stop, on_event))
             .expect("起监听线程");
         Self {
             stop,
@@ -100,7 +100,7 @@ impl Drop for WatchService {
 
 fn run(
     config: WatchConfig,
-    dest_dir: PathBuf,
+    book_dir: PathBuf,
     store: Arc<Store>,
     queue: Arc<TaskManager>,
     stop: Arc<AtomicBool>,
@@ -114,7 +114,7 @@ fn run(
     };
     let initial = scan::find_with(
         std::slice::from_ref(&config.dir),
-        std::slice::from_ref(&dest_dir),
+        std::slice::from_ref(&book_dir),
         &[],
         limits,
         &StageCtx::detached(),
@@ -123,7 +123,7 @@ fn run(
         tracing::info!("watch: 初扫 {} 本", initial.candidates.len());
         submit_batch(
             &paths_of(&initial.candidates),
-            &dest_dir,
+            &book_dir,
             &store,
             &queue,
             on_event.as_ref(),
@@ -165,7 +165,7 @@ fn run(
         let batch = collector.tick();
         if !batch.is_empty() {
             tracing::info!("watch: 攒出一批 {} 本", batch.len());
-            submit_batch(&batch, &dest_dir, &store, &queue, on_event.as_ref());
+            submit_batch(&batch, &book_dir, &store, &queue, on_event.as_ref());
         }
     }
 }
@@ -181,12 +181,12 @@ fn paths_of(candidates: &[crate::ingest::import::Candidate]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// 把一批路径包成 Watch 语义的导入作业：库里已有就跳过，同名不同大小落 `-2`。
+/// 把一批路径包成 Watch 语义的导入作业，交进队列并接上事件口。
 ///
 /// `on_event` 是界面侧的读数口（见 [`WatchEvents`]）：日志先记，事件再交出所有权。
 fn submit_batch(
     paths: &[PathBuf],
-    dest_dir: &Path,
+    book_dir: &Path,
     store: &Arc<Store>,
     queue: &TaskManager,
     on_event: Option<&Arc<WatchEvents>>,
@@ -197,7 +197,7 @@ fn submit_batch(
     let handle = submit_import(
         queue,
         Box::new(source),
-        dest_dir.to_path_buf(),
+        book_dir.to_path_buf(),
         store.clone(),
     );
     let sink = on_event.cloned();

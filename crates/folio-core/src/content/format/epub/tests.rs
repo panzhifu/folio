@@ -184,6 +184,7 @@ fn the_books_own_css_reaches_the_elements() {
             font_size: 18.0,
             ..Default::default()
         },
+        "",
     );
     let p = dom
         .elements()
@@ -604,7 +605,7 @@ fn css_urls_are_absolutized_before_concatenation() {
         .find(|(_, n)| n.tag.as_ref().map(|t| t.local.to_string()) == Some("body".into()))
         .map(|(id, _)| id)
         .unwrap();
-    let styles = cascade(&dom, &rules, &ComputedStyle::default());
+    let styles = cascade(&dom, &rules, &ComputedStyle::default(), "");
     assert_eq!(styles.get(body).unwrap().font_family, "Book Body");
     assert!(crate::content::format::css::font_face_matches(
         &styles.get(body).unwrap().font_family,

@@ -85,7 +85,7 @@ impl BookDocument {
         );
         let (meta, content) = provider.index_with(path, budget)?;
         // 校验只写日志，不阻塞阅读。
-        crate::ingest::validate::check(&content, path);
+        crate::content::validate::check(&content, path);
         Ok(Self {
             provider: Some(provider),
             path: Some(path.to_path_buf()),
@@ -101,7 +101,7 @@ impl BookDocument {
     /// 正文齐全，但 `image_bytes` / `fonts` 回空。
     pub fn from_content(meta: DocMeta, content: Content) -> Self {
         // 校验只写日志，不阻塞阅读。路径用书名占位（没有文件）。
-        crate::ingest::validate::check(&content, Path::new(&meta.title));
+        crate::content::validate::check(&content, Path::new(&meta.title));
         Self {
             provider: None,
             path: None,

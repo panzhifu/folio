@@ -50,7 +50,7 @@ pub fn set_enabled(on: bool, cx: &App) {
         resident::services().set_transfer(None);
         return;
     };
-    let Some(dest_dir) = target_dir(&ConfigHolder::library(cx)) else {
+    let Some(book_dir) = target_dir(&ConfigHolder::library(cx)) else {
         tracing::error!("transfer: 书库位置没确认过，传书不开");
         resident::services().set_transfer(None);
         return;
@@ -58,7 +58,7 @@ pub fn set_enabled(on: bool, cx: &App) {
     let inbox_dir: PathBuf = folio_core::infra::paths::data_dir().join("inbox");
     let on_file = {
         let store = Arc::clone(&store);
-        let dest_dir = dest_dir.clone();
+        let book_dir = book_dir.clone();
         Arc::new(move |path: PathBuf| {
             // 人手传的文件只报「这是传书交的」：副本名由内容哈希定，所以没有
             // 「重名怎么办」这一问；库里已经有同内容的那一本会在判重那一步报 Duplicate。
@@ -66,7 +66,7 @@ pub fn set_enabled(on: bool, cx: &App) {
             let handle = folio_core::submit_import(
                 &resident::pool(),
                 Box::new(source),
-                dest_dir.clone(),
+                book_dir.clone(),
                 Arc::clone(&store),
             );
             forward_and_cleanup(handle, path);

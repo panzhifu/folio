@@ -9,7 +9,10 @@
 
 use std::ops::Range;
 
-use folio_core::content::format::css::computed::{BorderStyle, Color};
+use folio_core::content::format::css::computed::{
+    BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundRepeat, BackgroundSize,
+    BackgroundTile, BorderStyle, Color, Length,
+};
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::DecorSeed;
 use gpui_kit::{Hsla, SharedString};
@@ -17,6 +20,7 @@ use gpui_kit::{Hsla, SharedString};
 use crate::ui::features::reader::model::chapter_layout::{Document, RowFragment};
 use crate::ui::features::reader::model::measure::FontCache;
 use crate::ui::features::reader::view::paint::GlyphRun;
+use crate::ui::foundation::images::ChapterImages;
 use crate::ui::foundation::style::{run_color, run_color_link};
 
 /// 可见范围内一块盒子的块级装饰：背景色与四边边框（实心画）。
@@ -35,6 +39,201 @@ pub struct BlockDecor {
     /// `double` 两档：`double` 由绘制层拆成两条 1/3 细线，其余（`dotted` / `groove` …）
     /// 在解析期就没接住，到不了这里（见 `css::value::parse_border_style`）。
     pub border: [(f32, Hsla, BorderStyle); 4],
+    /// `background-image` 的那些层，按 CSS 书写顺序（**先画的在屏幕上更靠上**，
+    /// 所以绘制侧要倒着摆）。空 = 这一块没有背景图。
+    ///
+    /// 位置是**相对这一块自己的边框盒左上角**，与 `x`/`top` 同一套平移已经在外层加过，
+    /// 所以竖排那条路上的 `slide` 不用在这里再算一次。
+    pub pictures: Vec<BlockPicture>,
+}
+
+/// 一块背景图在这一块里要画的几张像素：哪张图 + 摆在哪儿。
+///
+/// **像素不在这里**，与 [`VisibleImage`] 同一条理由：解没解好由图集答，摆位与字节无关。
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockPicture {
+    /// 这一张图的活儿（按容器路径向图片索引现取）。
+    pub image: crate::ui::foundation::images::DecodeRequest,
+    /// 一格 `(左, 上, 宽, 高)`，相对这一块边框盒左上角。`repeat` 一族才会多于一个数。
+    pub tiles: Vec<(f32, f32, f32, f32)>,
+}
+
+/// 一块背景图最多摆多少格。
+///
+/// 铺法那一族在数学上是无界的：一块 4×4 的纹理盖在 600×4000 的长条上是一万五千格，
+/// 而连续滚动那一档一章就是一根长条。封顶之后**退化成只摆定位那一格**
+/// （`no-repeat`），因为多出来的那一整片元素会把一帧的绘制预算吃光 ——
+/// 画少几格是看得出的糙，卡成个位数帧是全书都读不下去。
+/// 这一档在本仓库的真实语料上从没碰到过（哈利波特那 23 处最多 15×30 = 450 格），
+/// 它是护栏，不是路径。
+const MAX_BACKGROUND_TILES: usize = 1024;
+
+/// 一块背景图在这个盒里要摆的那些格子（相对盒左上角）。
+///
+/// 三个入参全是这一帧已经拿得到的数：盒的边框盒尺寸来自排版，固有尺寸每帧现问图片索引
+/// （`natural` 取不到就是 `(0, 0)`），CSS 侧的摆法来自层叠。
+///
+/// **拿不到固有尺寸就一条都不摆**：`cover` / `contain` 与「一条只写了百分比」的尺寸
+/// 都要按比例反算另一轴，没有那个比例就只能猜一个 —— 猜错的表现是扉页那张底图被拉成
+/// 一个怪形状，比那块空着更难查。`background-size: 50px` 这种两轴里至少有一条写死的，
+/// 走的是另一条路（写死那轴不需要比例）。
+fn background_tiles(
+    box_w: f32,
+    box_h: f32,
+    natural: (f32, f32),
+    size: &BackgroundSize,
+    position: &BackgroundPosition,
+    repeat: &BackgroundRepeat,
+) -> Vec<(f32, f32, f32, f32)> {
+    if box_w <= 0.0 || box_h <= 0.0 {
+        return Vec::new();
+    }
+    let Some((tile_w, tile_h)) = background_tile_size(box_w, box_h, natural, size) else {
+        return Vec::new();
+    };
+    if tile_w <= 0.0 || tile_h <= 0.0 {
+        return Vec::new();
+    }
+    // 定位：先按「不铺」算出那一格落在哪儿，铺的时候以它为相位。
+    let origin = (
+        axis_offset(box_w, tile_w, &position.x),
+        axis_offset(box_h, tile_h, &position.y),
+    );
+    let rows = axis_span(box_h, tile_h, repeat.y, origin.1);
+    let cols = axis_span(box_w, tile_w, repeat.x, origin.0);
+    if rows.len() * cols.len() > MAX_BACKGROUND_TILES {
+        // 只摆定位那一格：丢的是「铺出去的那一整片」，保的是「这一块有底」——
+        // 与整块画空相比，那是更接近作者意图的那一半。
+        tracing::warn!(
+            "背景图铺满要 {}×{} = {} 格，超过 {MAX_BACKGROUND_TILES} 的护栏（盒 \
+             {box_w:.0}×{box_h:.0}、图 {tile_w:.0}×{tile_h:.0}），只摆定位那一格",
+            cols.len(),
+            rows.len(),
+            cols.len() * rows.len(),
+        );
+        return vec![(origin.0, origin.1, tile_w, tile_h)];
+    }
+    let mut out = Vec::with_capacity(rows.len() * cols.len());
+    for (top, height) in &rows {
+        for (left, width) in &cols {
+            out.push((*left, *top, *width, *height));
+        }
+    }
+    out
+}
+
+/// 一轴上要摆的那些格子，给的已经是**这一轴上的绝对位置** `(起点, 长)`。
+///
+/// 只列与 `[0, side)` 真的相交的那些。从前按 ±`ceil(side/tile)+1` 对称铺开，
+/// 一块 40×40 的纹理盖满 600 宽的版心会算出 33 列，两轴一乘 1089 格，
+/// **在完全正当的写法上**撞上护栏然后退化成一张 —— 护栏是给 pathological 那种情况的，
+/// 不该被正常书写撞响。按相交范围收，同一张图是 15 列。
+///
+/// `space` 与 `round` 会改步进或改图的大小，这正是这两档的关键：
+/// - `space`：装得下几张就摆几张，剩下的余量**均摊成隙**（图不缩放、边缘不裁）；
+///   装不下一张时 CSS 就是画一张、溢出裁掉，所以张数至少 1。
+/// - `round`：按能装下的张数取整，然后**把图缩放到整除**，于是没有缝也没有裁切。
+fn axis_span(side: f32, tile: f32, mode: BackgroundTile, origin: f32) -> Vec<(f32, f32)> {
+    match mode {
+        BackgroundTile::NoRepeat => vec![(origin, tile)],
+        BackgroundTile::Repeat => {
+            // 要摆的那些格：起点 < side 且 终点 > 0。图比这一轴还宽时 `first` 就是 0，
+            // 也就是只画定位那一格（它自己已经溢出，溢出的一截由外壳裁掉）。
+            let first = (-origin / tile).floor() as i32;
+            let last = ((side - origin) / tile).ceil() as i32 - 1;
+            (first..=last.max(first))
+                .map(|k| (origin + k as f32 * tile, tile))
+                .collect()
+        }
+        BackgroundTile::Space => {
+            let count = ((side / tile).floor() as i32).max(1);
+            let gap = if count > 1 {
+                (side - count as f32 * tile) / (count - 1) as f32
+            } else {
+                0.0
+            };
+            (0..count)
+                .map(|k| (origin + k as f32 * (tile + gap), tile))
+                .collect()
+        }
+        BackgroundTile::Round => {
+            let count = ((side / tile).round() as i32).max(1);
+            let each = side / count as f32;
+            (0..count)
+                .map(|k| (origin + k as f32 * each, each))
+                .collect()
+        }
+    }
+}
+
+/// 一张图在这个盒里画多大。`None` = 算不出来（见 [`background_tiles`] 里那条理由）。
+fn background_tile_size(
+    box_w: f32,
+    box_h: f32,
+    natural: (f32, f32),
+    size: &BackgroundSize,
+) -> Option<(f32, f32)> {
+    let (nw, nh) = natural;
+    let has_ratio = nw > 0.0 && nh > 0.0;
+    match size {
+        BackgroundSize::Auto => has_ratio.then_some((nw, nh)),
+        BackgroundSize::Cover => has_ratio.then(|| {
+            (
+                nw * (box_w / nw).max(box_h / nh),
+                nh * (box_w / nw).max(box_h / nh),
+            )
+        }),
+        BackgroundSize::Contain => has_ratio.then(|| {
+            (
+                nw * (box_w / nw).min(box_h / nh),
+                nh * (box_w / nw).min(box_h / nh),
+            )
+        }),
+        BackgroundSize::Explicit { width, height } => {
+            let w = width.and_then(|l| fold_length(l, box_w));
+            let h = height.and_then(|l| fold_length(l, box_h));
+            match (w, h) {
+                (Some(w), Some(h)) => Some((w, h)),
+                // 只写了有一条轴：另一轴按固有纵横比反算 —— 与 `layout::ports::image_size`
+                // 给 `<img>` 折的那一条**同一个式子**，两处不许各有各的定义。
+                (Some(w), None) => (has_ratio && w > 0.0).then(|| (w, w * (nh / nw))),
+                (None, Some(h)) => (has_ratio && h > 0.0).then(|| (h * (nw / nh), h)),
+                // 两轴都是 `auto`：那其实就是 `BackgroundSize::Auto` 那一档。
+                (None, None) => has_ratio.then_some((nw, nh)),
+            }
+        }
+    }
+}
+
+/// 把一条 `Length` 折成 px。`Percent` 按**这一块对应轴**的长折。
+/// `em` / `rem` / `vw` / `vh` 在解析期就没接（见 `css::value::size_axis`），到不了这里。
+fn fold_length(length: Length, basis: f32) -> Option<f32> {
+    match length {
+        Length::Px(v) => Some(v),
+        Length::Percent(p) => Some(p * basis),
+        Length::Auto => None,
+    }
+}
+
+/// 一轴上的落点：从盒的起始边数过去多少 px。
+///
+/// 百分比那一档的基准是**余量（盒 − 图）**，不是盒长 —— CSS 就这么定的：
+/// `background-position: 100%` 要的是「图的右边贴盒的右边」，按盒长折就会把整张图
+/// 推出可视区（图比盒大时更是直接看不见）。
+fn axis_offset(side: f32, tile: f32, axis: &BackgroundAxis) -> f32 {
+    let free = side - tile;
+    match axis {
+        BackgroundAxis::Length(length) => fold_length(*length, free).unwrap_or(0.0),
+        BackgroundAxis::Fraction(p) => free * p,
+        BackgroundAxis::Edge(edge, offset) => {
+            let push = offset.and_then(|l| fold_length(l, free)).unwrap_or(0.0);
+            match edge {
+                BackgroundEdge::Start => push,
+                BackgroundEdge::Center => free / 2.0 + push,
+                BackgroundEdge::End => free - push,
+            }
+        }
+    }
 }
 
 /// 可见范围内的一张图：位置与尺寸已由排版算好，这里只负责把「画在哪儿」记下来。
@@ -129,6 +328,7 @@ impl Scene {
             x,
             top,
             foreground,
+            document.images(),
         );
         let __decor = __t.ns();
         crate::ui::features::reader::model::perf::add(|frame| frame.decor_ns += __decor);
@@ -267,15 +467,17 @@ impl Scene {
 /// 表是 `Layout::decor_seeds` 在每次拿到新一代排版结果时折一次的（`Document::apply_typeset`），
 /// 所以这里**不再走整章的块表** —— 那一趟从前是每帧、链上每个进链的章各一次
 /// （`plans/阅读管线.md` §十一 第 12 条，一份语料一章 160 块、长章 600+）。
-/// 剩下来的这三件事确实必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、
-/// 主题色（主题不许烘进表 —— `plans/阅读管线.md` §九 那四条硬约束的第 2 条）。
+/// 剩下来的这四件事确实必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、
+/// 主题色（主题不许烘进表 —— `plans/阅读管线.md` §九 那四条硬约束的第 2 条），以及
+/// **背景图的固有尺寸**（它随图片索引变，`set_images` 会 bump `images_rev`，烘进
+/// `Layout::decor_seeds` 那张表就是第二个真相 —— 与 `RowImage` 只存 `href` 同一条理由）。
 ///
 /// 相交判据与原式逐字一致（横排那条是 `y + height < start || y > end`，竖排换成物理 x），
 /// 而且**只能整表扫**：块是嵌套的，父盒的 `y + height` 远大于紧随其后的子盒，所以
 /// 「与一条带相交的那些块是连续下标区间」这个前提在块上不成立 —— `Layout::stacked`
 /// 那一格是为行盒量的，搬过来会悄悄漏画底色。这张表短（只有真带装饰的块），
 /// 短是它的代价低，不是它被二分了 —— 漏了这条前提的活证据就是下面那条高盒测试。
-#[allow(clippy::too_many_arguments)] // 八个都是「这一帧」的输入，包成结构体只是换个地方摆
+#[allow(clippy::too_many_arguments)] // 九个都是「这一帧」的输入，包成结构体只是换个地方摆
 fn place_decorations(
     seeds: &[DecorSeed],
     // 可见带，已经折到**盒子自己那一条被裁的轴**上：横排是 y 的一段，竖排是物理 x 的一段
@@ -287,6 +489,8 @@ fn place_decorations(
     x: f32,
     top: f32,
     foreground: Hsla,
+    // 背景图的固有尺寸与字节都从这里现问（与 `<img>` 那条同一个来路）。
+    images: &ChapterImages,
 ) -> Vec<BlockDecor> {
     let mut out = Vec::new();
     for seed in seeds {
@@ -305,6 +509,30 @@ fn place_decorations(
         let edge = |(width, color, style): (f32, Option<Color>, BorderStyle)| {
             (width, run_color(color, foreground), style)
         };
+        // 背景图：一张都取不到字节就整条跳过 —— 「这一块没有底」与「底还在解」在
+        // 屏幕上与从前一样，都是空着，但别拿着一个假的 `DecodeRequest` 去登记图集，
+        // 那会让回收那一账记在一张根本不存在的图上。
+        let mut pictures = Vec::new();
+        for picture in &seed.pictures {
+            let Some(request) = images.decode_request(&picture.href) else {
+                continue;
+            };
+            let tiles = background_tiles(
+                seed.width,
+                seed.height,
+                images.natural_size(&picture.href),
+                &picture.size,
+                &picture.position,
+                &picture.repeat,
+            );
+            if tiles.is_empty() {
+                continue;
+            }
+            pictures.push(BlockPicture {
+                image: request,
+                tiles,
+            });
+        }
         out.push(BlockDecor {
             x: if vertical {
                 x + seed.x + slide
@@ -327,6 +555,7 @@ fn place_decorations(
                 edge(seed.border[2]),
                 edge(seed.border[3]),
             ],
+            pictures,
         });
     }
     out
@@ -339,10 +568,18 @@ mod tests {
     //! 「哪些块带装饰、色走 currentColor 折成什么」不在这里测了 —— 那是
     //! `Layout::decor_seeds` 的职责，2026-10-15 从这一层挪进引擎层，
     //! 对应用例在 `layout::tests::index`（拿接线前那趟每帧全表扫描当参照实现比的）。
-    //! 这一层剩下的三件事必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、主题色。
+    //! 这一层剩下的几件事必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、主题色，
+    //! 以及背景图的固有尺寸与字节。
 
     use super::DecorSeed;
     use super::place_decorations;
+    use crate::ui::foundation::images::ChapterImages;
+
+    /// 一本「一张图都没有」的书：`place_decorations` 现在要拿它现问固有尺寸与字节，
+    /// 而这几条测试只管底色、边框与裁剔，背景图那一格一律走「取不到就跳过」那一条。
+    fn images() -> ChapterImages {
+        ChapterImages::empty()
+    }
     use crate::ui::foundation::style::run_color;
     use folio_core::content::format::css::computed::{BorderStyle, Color};
     use gpui_kit::black;
@@ -361,6 +598,7 @@ mod tests {
                 (2.0, None, BorderStyle::Double),
                 (2.0, Some(Color(12, 34, 56)), BorderStyle::Solid),
             ],
+            pictures: Vec::new(),
         }
     }
 
@@ -377,6 +615,7 @@ mod tests {
             20.0,
             60.0,
             black(),
+            &images(),
         );
         assert_eq!(decor.len(), 1);
         let decor = &decor[0];
@@ -416,6 +655,7 @@ mod tests {
             0.0,
             0.0,
             black(),
+            &images(),
         );
         assert_eq!(decor.len(), 1, "900 那条在窗外：{decor:?}");
     }
@@ -436,16 +676,240 @@ mod tests {
             0.0,
             0.0,
             black(),
+            &images(),
         );
         assert_eq!(decor.len(), 1, "父盒跨着整条带，必须画：{decor:?}");
         assert_eq!(decor[0].height, 5000.0);
+    }
+
+    /// `cover` / `contain` 的格子里落下的是**按比例算出的那一个矩形**，不是拉伸过的。
+    /// 数抄的是哈利波特第一册扉页的真值：底图 792×1400，版心按 600×900 排。
+    #[test]
+    fn cover_and_contain_keep_the_aspect_and_only_the_right_axis_overflows() {
+        use super::background_tiles;
+        use folio_core::content::format::css::computed::{
+            BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundRepeat, BackgroundSize,
+        };
+        // `no-repeat center` 就是那七张扉页原文写的那一档。**注意 CSS 的初值是 `0% 0%`
+        // （左上）而不是 center** —— 这里要的是居中那一档，所以逐字写出来，
+        // 不让 `BackgroundPosition::default()` 替我决定测试的语义。
+        let center = BackgroundPosition {
+            x: BackgroundAxis::Edge(BackgroundEdge::Center, None),
+            y: BackgroundAxis::Edge(BackgroundEdge::Center, None),
+        };
+        let none = BackgroundRepeat {
+            x: folio_core::content::format::css::computed::BackgroundTile::NoRepeat,
+            y: folio_core::content::format::css::computed::BackgroundTile::NoRepeat,
+        };
+        let (bw, bh) = (600.0, 900.0);
+        let natural = (792.0, 1400.0);
+
+        let cover = background_tiles(bw, bh, natural, &BackgroundSize::Cover, &center, &none);
+        assert_eq!(cover.len(), 1, "不铺就该只有一格");
+        let (left, top, w, h) = cover[0];
+        assert!(w >= bw && h >= bh, "cover 要盖满两轴：{w}×{h}");
+        assert!(
+            (w / h - natural.0 / natural.1).abs() < 0.01,
+            "纵横比不许改：{w}×{h} vs 源 {natural:?}"
+        );
+        // 横轴正好贴住（600/792 是那个更大的比值），所以 x 不溢出；溢出只发生在纵轴。
+        assert!((w - bw).abs() < 0.01, "横轴该刚好贴住：{w}");
+        assert!(left <= 0.0 && left + w >= bw, "居中的那一格要盖住整轴");
+        assert!(top < 0.0 && top + h > bh, "纵轴两头各溢出一截：{top}+{h}");
+
+        let contain = background_tiles(bw, bh, natural, &BackgroundSize::Contain, &center, &none);
+        let (left, top, w, h) = contain[0];
+        assert!(w <= bw && h <= bh, "contain 不许溢出：{w}×{h}");
+        assert!(
+            (w / h - natural.0 / natural.1).abs() < 0.01,
+            "纵横比不许改：{w}×{h}"
+        );
+        // contain 折出来是「贴住一轴、另一轴留白」，那一轴就是 900（源比例更瘦长）。
+        assert!((h - bh).abs() < 0.01, "纵轴该贴住：{h}");
+        assert!(left > 0.0, "横轴两头留白：{left}");
+        assert!(
+            (left - ((bw - w) / 2.0)).abs() < 0.01,
+            "居中的留白要两头均分"
+        );
+        assert!(top.abs() < 0.01, "贴住那一轴不该有位移：{top}");
+    }
+
+    /// **拿不到固有尺寸就一条都不摆**。这不是偷懒，是不猜：`cover` 与「只写了一条百分比」
+    /// 的尺寸都要按源比例反算另一轴，没有那个比例就只能编一个数 ——
+    /// 编错的形状比那块空着难查得多（空着至少像「这本书没图」）。
+    #[test]
+    fn a_picture_without_a_known_ratio_draws_nothing() {
+        use super::background_tiles;
+        use folio_core::content::format::css::computed::{
+            BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
+        };
+        let none = BackgroundRepeat {
+            x: BackgroundTile::NoRepeat,
+            y: BackgroundTile::NoRepeat,
+        };
+        let center = BackgroundPosition::default();
+        for size in [
+            BackgroundSize::Auto,
+            BackgroundSize::Cover,
+            BackgroundSize::Contain,
+        ] {
+            assert!(
+                background_tiles(600.0, 900.0, (0.0, 0.0), &size, &center, &none).is_empty(),
+                "{size:?} 都要读源比例，不知道就不摆"
+            );
+        }
+        // 写死了其中一轴就不需要比例：那一轴按写的来，另一轴没比例时也不摆（CSS 的 auto
+        // 在源比例未知时是「按固有尺寸」，而固有尺寸正是不知道的那个）。
+        let only_width = BackgroundSize::Explicit {
+            width: Some(folio_core::content::format::css::computed::Length::Px(
+                200.0,
+            )),
+            height: None,
+        };
+        assert!(background_tiles(600.0, 900.0, (0.0, 0.0), &only_width, &center, &none).is_empty());
+        let both = BackgroundSize::Explicit {
+            width: Some(folio_core::content::format::css::computed::Length::Px(
+                200.0,
+            )),
+            height: Some(folio_core::content::format::css::computed::Length::Px(
+                100.0,
+            )),
+        };
+        assert_eq!(
+            background_tiles(600.0, 900.0, (0.0, 0.0), &both, &center, &none),
+            vec![(0.0, 0.0, 200.0, 100.0)],
+            "两轴都写死时不需要比例"
+        );
+    }
+
+    /// `repeat` 那一族的格数。这里钉的是**别把护栏算响**：一块 40×40 的纹理（哈利波特
+    /// `.oval` 用的就是 `pat.png` 40×40）铺满 600 宽的版心是 15×15 = 225 格，
+    /// 而不是按 ±对称铺开出来的 33×33 = 1089 格 —— 后者会在完全正当的写法上
+    /// 撞上 1024 的护栏然后退化成一张，症状是纹理底只剩左上那一块。
+    #[test]
+    fn repeat_tiles_only_what_intersects_the_box() {
+        use super::background_tiles;
+        use folio_core::content::format::css::computed::{
+            BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
+        };
+        let tiles = background_tiles(
+            600.0,
+            400.0,
+            (40.0, 40.0),
+            &BackgroundSize::Auto,
+            &BackgroundPosition::default(),
+            &BackgroundRepeat {
+                x: BackgroundTile::Repeat,
+                y: BackgroundTile::Repeat,
+            },
+        );
+        assert_eq!(
+            tiles.len(),
+            15 * 10,
+            "两轴各按相交的那几格数：{}",
+            tiles.len()
+        );
+        // 每一格都要真的与这条轴有关。
+        assert!(
+            tiles.iter().all(|(l, t, _, _)| *l < 600.0 && *t < 400.0),
+            "铺到轴外面去的格不该进表"
+        );
+
+        // 图比这一轴还宽：只画定位那一格，溢出的一截由外壳裁。
+        let one = background_tiles(
+            600.0,
+            900.0,
+            (792.0, 1400.0),
+            &BackgroundSize::Cover,
+            &BackgroundPosition::default(),
+            &BackgroundRepeat {
+                x: BackgroundTile::Repeat,
+                y: BackgroundTile::Repeat,
+            },
+        );
+        assert_eq!(one.len(), 1, "cover 折出来的格两轴都溢出，一格就够");
+    }
+
+    /// 百分比那一档的基准是**余量（盒 − 图）**，不是盒长。写错成盒长时，图比盒大会被
+    /// 整个推出可视区：屏幕上那一块是空的，而 CSS 与图片索引两边一切正常。
+    #[test]
+    fn a_position_percentage_scales_the_leftover_not_the_box() {
+        use super::background_tiles;
+        use folio_core::content::format::css::computed::{
+            BackgroundAxis, BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
+        };
+        let at = |p: f32| BackgroundPosition {
+            x: BackgroundAxis::Fraction(p),
+            y: BackgroundAxis::Fraction(0.0),
+        };
+        let none = BackgroundRepeat {
+            x: BackgroundTile::NoRepeat,
+            y: BackgroundTile::NoRepeat,
+        };
+        let box_w = 600.0;
+        let tile = 400.0;
+        for (p, want) in [(0.0, 0.0), (0.5, 100.0), (1.0, 200.0)] {
+            let got = background_tiles(
+                box_w,
+                900.0,
+                (tile, 100.0),
+                &BackgroundSize::Auto,
+                &at(p),
+                &none,
+            );
+            assert!(
+                (got[0].0 - want).abs() < 0.01,
+                "{p} 该落在 {want}，实得 {:?}",
+                got[0].0
+            );
+        }
+        // 关键字那三档与上面那条是同一句话的三种写法：`left` = 0%、`center` = 50%、
+        // `right` = 100%。漂了一档就是扉页那张底图歪着贴。
+        for (edge, want) in [
+            (
+                folio_core::content::format::css::computed::BackgroundEdge::Start,
+                0.0,
+            ),
+            (
+                folio_core::content::format::css::computed::BackgroundEdge::Center,
+                100.0,
+            ),
+            (
+                folio_core::content::format::css::computed::BackgroundEdge::End,
+                200.0,
+            ),
+        ] {
+            let got = background_tiles(
+                box_w,
+                900.0,
+                (tile, 100.0),
+                &BackgroundSize::Auto,
+                &BackgroundPosition {
+                    x: BackgroundAxis::Edge(edge, None),
+                    y: BackgroundAxis::Fraction(0.0),
+                },
+                &none,
+            );
+            assert!((got[0].0 - want).abs() < 0.01, "{edge:?} 该落在 {want}");
+        }
     }
 
     /// 空表（这一章没有一处带装饰）必须给空，而不是给出一条零尺寸的东西。
     #[test]
     fn an_empty_table_paints_nothing() {
         assert!(
-            place_decorations(&[], (0.0, 700.0), 0.0, false, 0.0, 0.0, 0.0, black()).is_empty()
+            place_decorations(
+                &[],
+                (0.0, 700.0),
+                0.0,
+                false,
+                0.0,
+                0.0,
+                0.0,
+                black(),
+                &images(),
+            )
+            .is_empty()
         );
     }
 }

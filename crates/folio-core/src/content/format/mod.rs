@@ -1273,7 +1273,13 @@ pub(crate) fn percent_decode(input: &str) -> String {
 ///
 /// 输出**一律带引号**：解出来的路径常含空格（真书里的 `body italic.otf`），
 /// 不加引号那是非法 CSS，解析器会在空格处断开。
-pub(crate) fn absolutize_css_urls(css: &str, base_dir: &str) -> String {
+///
+/// **公开是刻意的**：同一句话有三种写法位置 —— 外链样式表、章内那块 `<style>`、
+/// 元素上的 `style="…"`。三者必须折成**同一个形状**，否则图片索引与字体表按容器路径
+/// 精确查时，只有一路查得到（哈利波特的七张册扉页正是断在第三种上：
+/// `<body style="background: url(../Images/v2.jpg)">`）。既然只允许一个答案，
+/// 就只允许一个函数，宿主与引擎各折一遍迟早会漂。
+pub fn absolutize_css_urls(css: &str, base_dir: &str) -> String {
     // 先清注释：注释里的 `url(x)` 不是声明，改写它等于往 CSS 里塞假路径。
     let text = crate::content::format::css::strip_comments(css);
     let mut out = String::with_capacity(text.len());

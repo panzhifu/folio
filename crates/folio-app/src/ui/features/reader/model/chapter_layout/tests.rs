@@ -60,20 +60,23 @@ fn a_justified_line_pushes_an_inline_image_with_its_text() {
 
 /// 章里写的 `<style>` 也要进层叠：样式表**文件**按清单回容器取，而写在章里的
 /// 那一份随正文到达 —— 作者把样式写在哪一份里，层叠结果都不该有差别。
+///
+/// 顺带钉住这一条路上的 `url(...)` 折算：基准是**这一章自己的目录**，与元素上那句
+/// `style="…"` 同一个数（都由 `ChapterImages::base_dir` 递进来）。漏折的表现与漏接
+/// `background-image` 一模一样 —— 图片索引按容器路径精确查，查不到就白底，
+/// 而屏上看不出「是没接住」还是「折错了层」。
 #[test]
 fn a_chapters_own_style_block_reaches_the_cascade() {
-    use folio_core::content::format::css::computed::{Color, cascade};
-    let source = "<html><head><style>p { color: #C0392B }</style></head>\
+    use folio_core::content::format::css::computed::{Color, ComputedStyle, cascade};
+    let source = "<html><head><style>p { color: #C0392B }\n\
+                      body { background: url(../Images/back.jpg) no-repeat center } }</style></head>\
                       <body><p>字</p></body></html>";
     let dom = folio_core::content::dom::Dom::parse(source.as_bytes());
-    let rules = Document::chapter_style_rules(&dom);
-    assert_eq!(rules.rules.len(), 1, "章里就一条规则：{:?}", rules.rules);
+    let base_dir = folio_core::content::format::dir_of("OEBPS/Text/v2.xhtml");
+    let rules = Document::chapter_style_rules(&dom, &base_dir);
+    assert_eq!(rules.rules.len(), 2, "章里就两条规则：{:?}", rules.rules);
 
-    let styles = cascade(
-        &dom,
-        &rules,
-        &folio_core::content::format::css::computed::ComputedStyle::default(),
-    );
+    let styles = cascade(&dom, &rules, &ComputedStyle::default(), &base_dir);
     let p = dom
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("p"))
@@ -83,6 +86,15 @@ fn a_chapters_own_style_block_reaches_the_cascade() {
         styles.get(p).unwrap().color,
         Some(Color(0xC0, 0x39, 0x2B)),
         "章内 <style> 的颜色要落到 p 上"
+    );
+    let backdrop = styles
+        .iter()
+        .find_map(|(_, style)| style.background_pictures().next())
+        .expect("章内 <style> 的那张底图该折出一层");
+    assert_eq!(
+        backdrop.image.as_deref(),
+        Some("OEBPS/Images/back.jpg"),
+        "按这一章的目录折；少一层就是「有样式、没底色」"
     );
 }
 

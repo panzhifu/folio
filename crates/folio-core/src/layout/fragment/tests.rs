@@ -95,6 +95,7 @@ fn styled(html: &str, css: &str, width: f32) -> (Layout, StyledDom) {
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let laid = layout(
         &dom,
@@ -376,6 +377,7 @@ fn break_properties_follow_css_inheritance_rules() {
             Origin::Author,
         ),
         &ComputedStyle::default(),
+        "",
     );
     let div = styles.get(find(&dom, "div")).expect("div 的样式");
     let p = styles.get(find(&dom, "p")).expect("p 的样式");
@@ -402,6 +404,7 @@ fn a_broken_value_is_counted_rather_than_guessed() {
             Origin::Author,
         ),
         &ComputedStyle::default(),
+        "",
     );
     let p = styles.get(find(&dom, "p")).expect("p 的样式");
     assert_eq!(

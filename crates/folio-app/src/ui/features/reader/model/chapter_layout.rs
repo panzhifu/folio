@@ -469,12 +469,21 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
     };
     // 深拷贝从 UI 线程挪到这里：作业跑在排版队列上，而章里的 `<style>` 与读者层
     // 要往这份表里追加，所以只能在作业里改副本。
+    //
+    // 基准目录只有一个来源：`ChapterImages` 手里那一个（= 这一章在容器里的目录）。
+    // 章内那块 `<style>` 与元素上的 `style="…"` 都按它折，两处不许各拿一份路径。
+    let base_dir = input.images.base_dir().to_string();
     let mut rules = (*input.rules).clone();
-    rules.extend(Document::chapter_style_rules(&artifacts.dom));
+    rules.extend(Document::chapter_style_rules(&artifacts.dom, &base_dir));
     // 读者层的段间距。放在这里而不是 `Document::new`：那一份 `rules` 跟着作者 CSS 存，
     // 偏好一改就会让「章的样式」看起来也变了。
     rules.extend(Document::reader_rules(&input.prefs));
-    let styles = cascade(&artifacts.dom, &rules, &Document::root_base(&input.prefs));
+    let styles = cascade(
+        &artifacts.dom,
+        &rules,
+        &Document::root_base(&input.prefs),
+        &base_dir,
+    );
     let measure = GpuiMeasure::new(
         input.texts,
         input.window_texts,
@@ -675,19 +684,24 @@ impl Document {
     /// 样式表**文件**按位置清单回容器取（见 `folio_core::content::document::Document::stylesheet`），
     /// 而**写在章里的** `<style>` 随正文一起到达 —— 解析 DOM 时就地收进来，作者把
     /// 样式写在哪一份里，层叠结果都不该有差别（EasyPub 之类工具的封面页就是这么写的）。
-    fn chapter_style_rules(dom: &Dom) -> RuleSet {
+    fn chapter_style_rules(dom: &Dom, base_dir: &str) -> RuleSet {
         let mut css = String::new();
         for (id, _) in dom.elements() {
             if dom.tag_name(id) != Some("style") {
                 continue;
             }
-            for &child in &dom.get(id).children {
+            for &child in dom.get(id).children.iter() {
                 css.push_str(&dom.get(child).text);
                 css.push('\n');
             }
         }
         let mut rules = RuleSet::default();
         if !css.trim().is_empty() {
+            // 与元素上的 `style="…"` 同一步：章内这块 `<style>` 的基准也是**这一章的目录**
+            // （外链那份样式表的基准是它自己的目录，两者本来就不同）。不折的表现是
+            // 图在图层表里躺着一条 `../Images/x.png`，图片索引按容器路径精确查查不到，
+            // 屏上「有样式、没底色」，而 CSS 那侧一切正常。
+            let css = folio_core::content::format::absolutize_css_urls(&css, base_dir);
             rules.extend(RuleSet::parse(&css, Origin::Author));
         }
         rules

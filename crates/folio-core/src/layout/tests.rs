@@ -48,7 +48,7 @@ impl Measure for Mono {
 fn parse(html: &str, css: &str) -> (Dom, Vec<ComputedStyle>) {
     let dom = Dom::parse(html.as_bytes());
     let rules = RuleSet::parse(css, Origin::Author);
-    let styles = cascade(&dom, &rules, &ComputedStyle::default());
+    let styles = cascade(&dom, &rules, &ComputedStyle::default(), "");
     (dom, styles.styles.clone())
 }
 
@@ -69,6 +69,7 @@ fn typeset_with(measure: &dyn Measure, html: &str, css: &str, width: f32) -> (Do
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let laid = layout(
         &dom,
@@ -746,6 +747,7 @@ fn a_written_height_holds_the_box_and_the_next_sibling_starts_below_it() {
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let laid = layout(
         &dom,
@@ -877,6 +879,7 @@ fn the_min_sizing_clamps_agree_between_full_and_light() {
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let body = find(&dom, "body");
     let run = |light: bool| {
@@ -1136,6 +1139,7 @@ fn the_root_elements_own_background_reaches_the_decor_table() {
         &dom,
         &RuleSet::parse(".page { background-color: #c4aa87 }", Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let laid = layout(
         &dom,
@@ -1167,6 +1171,7 @@ fn a_double_border_reaches_the_decor_table_with_its_style() {
             Origin::Author,
         ),
         &ComputedStyle::default(),
+        "",
     );
     let laid = layout(
         &dom,
@@ -1353,6 +1358,7 @@ fn typeset_images(html: &str, css: &str, width: f32, images: &dyn ImageProvider)
         &dom,
         &RuleSet::parse(css, Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let laid = layout(
         &dom,
@@ -1729,7 +1735,7 @@ fn decorations_reach_the_run_without_changing_geometry() {
 #[test]
 fn light_mode_produces_no_lines() {
     let dom = Dom::parse("<p>一段足够长的中文正文，用来验证轻量模式只算高不断行。</p>".as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let body = dom
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))
@@ -1757,7 +1763,7 @@ fn light_mode_produces_no_lines() {
 #[test]
 fn light_mode_height_matches_full_within_tolerance() {
     let dom = Dom::parse("<p>第一段正文。</p><p>第二段正文。</p><p>第三段正文。</p>".as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let body = dom
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))
@@ -1827,7 +1833,7 @@ fn two_stage_corpus() -> (Dom, NodeId, LayoutOptions) {
 #[test]
 fn two_stage_matches_full_layout() {
     let (dom, body, opts) = two_stage_corpus();
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
 
     let full = layout(&dom, &styles, body, opts, &Mono, &NoImages);
     let map = measure_chapter(&dom, &styles, body, opts, &Mono, &NoImages);
@@ -1853,7 +1859,7 @@ fn two_stage_matches_full_layout() {
 #[test]
 fn render_window_only_covers_the_visible_blocks() {
     let (dom, body, opts) = two_stage_corpus();
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let full = layout(&dom, &styles, body, opts, &Mono, &NoImages);
     let map = measure_chapter(&dom, &styles, body, opts, &Mono, &NoImages);
 
@@ -1929,7 +1935,7 @@ fn style_arena_distinguishes_float_fields() {
 fn one_paragraph_shares_one_style() {
     let html = "<p>一段<b>粗体</b>与<i>斜体</i>混排的正文。</p>";
     let dom = Dom::parse(html.as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let body = dom
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))
@@ -1955,7 +1961,7 @@ fn one_paragraph_shares_one_style() {
 #[test]
 fn the_width_table_covers_every_character() {
     let dom = Dom::parse("<p>abc汉字</p>".as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let body = dom
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))
@@ -1976,7 +1982,7 @@ fn the_width_table_covers_every_character() {
 #[test]
 fn the_batch_width_matches_per_char_measurement() {
     let dom = Dom::parse("<p>混排 Latin 与汉字。</p>".as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
     let body = dom
         .elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))

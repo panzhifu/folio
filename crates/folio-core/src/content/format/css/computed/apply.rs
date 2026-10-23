@@ -4,16 +4,19 @@
 //! 入口留在父模块，这里的东西只对整个 `css` 内部开放，不属于对外公开面。
 
 use super::{
-    BorderEdge, BorderStyle, BoxSizing, ComputedStyle, Direction, Display, Hyphens,
+    BackgroundLayer, BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
+    BorderEdge, BorderStyle, BoxSizing, Color, ComputedStyle, Direction, Display, Hyphens,
     KNOWN_UNIMPLEMENTED, TextAlign, TextJustify,
 };
 use crate::content::format::css::Declaration;
 use crate::content::format::css::value::{
     BorderElement, border_target, border_width_px, box_side_px, box_sides, four_of,
-    parse_baseline_shift, parse_border_style, parse_break_when, parse_clear, parse_color,
-    parse_count, parse_decoration, parse_float, parse_font_family_list, parse_font_size,
-    parse_font_weight, parse_line_height, parse_list_style, parse_writing_mode, relative_weight,
-    set_edge, set_length, set_margin, set_min_length, set_px,
+    parse_background_image_layer, parse_background_position, parse_background_repeat,
+    parse_background_size, parse_baseline_shift, parse_border_style, parse_break_when, parse_clear,
+    parse_color, parse_count, parse_decoration, parse_float, parse_font_family_list,
+    parse_font_size, parse_font_weight, parse_line_height, parse_list_style, parse_url_token,
+    parse_writing_mode, relative_weight, set_edge, set_length, set_margin, set_min_length, set_px,
+    split_value_tokens,
 };
 
 /// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
@@ -51,8 +54,17 @@ pub(super) fn apply_in_cascade_order(
 /// 单条声明也复用 `css::parse_declaration` —— 行内写法与样式表写法对 `!important`、
 /// 大小写、空值的处理必须一字不差，否则同一句话写在两处结果不同。
 /// 认不出的整条丢掉，由调用方在 `apply` 那一步按「不认识」计数。
-pub(super) fn parse_inline_style(text: &str) -> Vec<Declaration> {
-    crate::content::format::css::selector::split_top_level(text, ';')
+///
+/// `base_dir` 是**这一章文档**在容器里的目录（`ChapterImages` 手里那一个），进来先走一遍
+/// `absolutize_css_urls`。这一折不是可有可无的整洁：样式表里那句 `url(../Images/x.png)`
+/// 在拼进层叠之前就按 CSS 自己的目录折成了容器内路径，而行内那一份从前**没人折过**，
+/// 于是同一张图在两处是两个形状。症状写在 `layout::tests::index` 那一条真书门上 ——
+/// 哈利波特的七张册扉页写的正是 `<body style="background: url(../Images/v2.jpg)">`：
+/// 图层表里躺着一条 `../Images/v2.jpg`，图片索引按容器路径精确查，查不到，
+/// 屏上仍是「白底上一片看不见的淡金字」，而 CSS 那一侧一切正常、`css-gap` 也报不出问题。
+pub(super) fn parse_inline_style(text: &str, base_dir: &str) -> Vec<Declaration> {
+    let text = crate::content::format::absolutize_css_urls(text, base_dir);
+    crate::content::format::css::selector::split_top_level(&text, ';')
         .into_iter()
         .filter_map(|decl| crate::content::format::css::parse_declaration(&decl))
         .collect()
@@ -176,6 +188,216 @@ fn apply_font_shorthand(
     style.font_family = first;
     style.font_families = list;
     true
+}
+
+/// 一条背景长手属性（`background-size` 那一族）的**图层列表**：按顶层逗号切，
+/// 每层各解一次。`url(a,b)` 里那个逗号在括号内，`split_top_level` 切不进去。
+/// 任何一层解不出就整条判不认识 —— 把六层里的第三层悄悄丢掉，屏上看不出原因。
+fn background_layer_list<T>(value: &str, parse: impl Fn(&str) -> Option<T>) -> Option<Vec<T>> {
+    let parts = crate::content::format::css::selector::split_top_level(value, ',');
+    if parts.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(parts.len());
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        out.push(parse(part)?);
+    }
+    Some(out)
+}
+
+fn parse_background_image_list(value: &str) -> Option<Vec<Option<String>>> {
+    background_layer_list(value, |part| {
+        // 一层只有一个图源 token；`url(a) url(b)` 那种多写是非法值。
+        let tokens = split_value_tokens(part);
+        if tokens.len() != 1 {
+            return None;
+        }
+        parse_background_image_layer(&tokens[0])
+    })
+}
+
+fn parse_background_size_list(value: &str) -> Option<Vec<BackgroundSize>> {
+    background_layer_list(value, parse_background_size)
+}
+
+fn parse_background_position_list(value: &str) -> Option<Vec<BackgroundPosition>> {
+    background_layer_list(value, parse_background_position)
+}
+
+fn parse_background_repeat_list(value: &str) -> Option<Vec<BackgroundRepeat>> {
+    background_layer_list(value, parse_background_repeat)
+}
+
+/// 把一条**长手**列表铺到图层表上：图层数取历史值与这条列表长度的较大者，
+/// 短的那一条从头循环。
+///
+/// 循环是规范定的，不是顺手写的：`background-image: url(a), url(b)` 配
+/// `background-repeat: no-repeat`（只有一个值），CSS 要的是两层都不重复。
+/// 只把值给第一层、第二层落回初值 `repeat`，症状是第二张图在扉页上铺成一片马赛克。
+fn for_each_layer(
+    style: &mut ComputedStyle,
+    count: usize,
+    mut set: impl FnMut(&mut BackgroundLayer, usize),
+) {
+    while style.background_layers.len() < count {
+        style.background_layers.push(BackgroundLayer::default());
+    }
+    for (index, layer) in style.background_layers.iter_mut().enumerate() {
+        set(layer, index % count);
+    }
+}
+
+/// `background` 简写切出来的**一层**：摆法三件 + 这一层里那条颜色（可无）。
+struct BackgroundLayerSpec {
+    layer: BackgroundLayer,
+    color: Option<Color>,
+}
+
+/// 解简写的一层。语法是 `<'bg-image'> || <'bg-position'> [/ <'bg-size'>] || <repeat-style>
+/// || <'bg-clip'> || <'box'> || <'color'>`，各项次序随意。
+///
+/// 认不出的走法：**只把这一层判失败**，由调用方让整条声明作废。分类靠「这个 token
+/// 是不是某种已知值」而不是靠位置，因为出版书里两种次序都见得到
+/// （`background: #f4f7f1 url(p0.png) no-repeat bottom right` 色在前，
+/// `background: url(x) repeat center` 色也在前，而 `background: center url(x)` 图在后）。
+fn parse_background_layer_spec(text: &str) -> Option<BackgroundLayerSpec> {
+    if text.is_empty() || text.eq_ignore_ascii_case("initial") || text.eq_ignore_ascii_case("unset")
+    {
+        return None;
+    }
+    // 尺寸挂在第一个顶层 `/` 后面：`center / cover`、`0 0/50% auto`。
+    // 「顶层」= 跳过引号与括号，所以路径里那一串斜杠（`OEBPS/Images/v1.jpg`）不会被当成分隔符。
+    let (main, size_part) = split_first_top_level(text, '/');
+    let mut layer = BackgroundLayer::default();
+    let mut color = None;
+    let mut position: Vec<String> = Vec::new();
+    let mut image_seen = false;
+    for token in split_value_tokens(main) {
+        let low = token.to_ascii_lowercase();
+        if low == "none" {
+            // 作者明确「这一层不要图」：`image` 留在 `None`，但这一层算已经写过图。
+            if image_seen {
+                return None;
+            }
+            image_seen = true;
+            continue;
+        }
+        if let Some(path) = parse_url_token(&token) {
+            if image_seen {
+                // 一层里两个图源（`url(a) url(b)`）是非法值。
+                return None;
+            }
+            layer.image = Some(path);
+            image_seen = true;
+            continue;
+        }
+        if let Some((x, y)) = repeat_keyword_pair(&low) {
+            layer.repeat.x = x;
+            layer.repeat.y = y;
+            continue;
+        }
+        // attachment 与 clip / origin：认得这些写法，但都按最常用那一档摆，
+        // 判据写在 `apply` 里那两臂的注释上。这里只负责**吃掉那个 token**，
+        // 不让它掉进「剩下的都是位置」那一桶里被解成一条非法坐标。
+        if matches!(
+            low.as_str(),
+            "scroll" | "fixed" | "local" | "border-box" | "padding-box" | "content-box"
+        ) {
+            continue;
+        }
+        if let Some(rgba) = parse_color(&low) {
+            color = Some(rgba);
+            continue;
+        }
+        position.push(low);
+    }
+    if !position.is_empty() {
+        layer.position = parse_background_position(&position.join(" "))?;
+    }
+    layer.size = match size_part {
+        Some(part) => parse_background_size(part)?,
+        None => BackgroundSize::default(),
+    };
+    Some(BackgroundLayerSpec { layer, color })
+}
+
+/// 在第一个**顶层**分隔符处把值切成两半（尺寸那一截可能是空串，但存在）。
+///
+/// 不复用 `split_top_level` 再拼回去：那条只管切、不给字节位，靠「先切再拿 `find` 找回原串」
+/// 定位，分隔符本身出现在值里（路径的斜杠、引号内的空格）就会指到错的那一处。
+fn split_first_top_level(text: &str, sep: char) -> (&str, Option<&str>) {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for (index, ch) in text.char_indices() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            c if c == sep && depth <= 0 => {
+                let head = text[..index].trim();
+                let tail = text[index + c.len_utf8()..].trim();
+                return (head, Some(tail));
+            }
+            _ => {}
+        }
+    }
+    (text.trim(), None)
+}
+
+/// `background` 简写：一层一条，全表重建。
+fn apply_background_shorthand(style: &mut ComputedStyle, value: &str) -> bool {
+    let parts = crate::content::format::css::selector::split_top_level(value, ',');
+    if parts.is_empty() {
+        return false;
+    }
+    // 先把每一层解完，**全解得开才动手改表**。反过来的后果是这条声明明明被 judged
+    // 不认识、计进了 ignored，却已经顺手把上一轮的底色与图层抹了个干净 ——
+    // 「作废的声明不许有副作用」是层叠的一条硬规矩，`apply_font_shorthand` 也是这么写的。
+    let mut parsed = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let Some(spec) = parse_background_layer_spec(part.trim()) else {
+            return false;
+        };
+        parsed.push(spec);
+    }
+    // 简写先把每一条长手拉回初值（CSS 明文）。不重置的后果很具体：
+    // 转换器常写的 `.a{background:url(x) center/cover}` 后面再跟一条 `.a{background:#fff}`，
+    // 不重置就是白底**叠在图上**、扉页那张底图变成灰蒙蒙一片。
+    style.background_color = None;
+    style.background_layers.clear();
+    // 颜色归最底那一层（= 书写顺序的最后一条）。写在中间层上的色在浏览器里就是这个下场。
+    let mut color = None;
+    for BackgroundLayerSpec { layer, color: c } in parsed {
+        if c.is_some() {
+            color = c;
+        }
+        style.background_layers.push(layer);
+    }
+    style.background_color = color;
+    true
+}
+
+/// 一个铺法关键字当成「两轴一起写」的那一档；`repeat-x` / `repeat-y` 只能这么出现。
+fn repeat_keyword_pair(low: &str) -> Option<(BackgroundTile, BackgroundTile)> {
+    match low {
+        "repeat" => Some((BackgroundTile::Repeat, BackgroundTile::Repeat)),
+        "no-repeat" => Some((BackgroundTile::NoRepeat, BackgroundTile::NoRepeat)),
+        "repeat-x" => Some((BackgroundTile::Repeat, BackgroundTile::NoRepeat)),
+        "repeat-y" => Some((BackgroundTile::NoRepeat, BackgroundTile::Repeat)),
+        "space" => Some((BackgroundTile::Space, BackgroundTile::Space)),
+        "round" => Some((BackgroundTile::Round, BackgroundTile::Round)),
+        _ => None,
+    }
 }
 
 /// 返回 false 表示这条声明不认识（或值解析失败），由调用方计入 ignored。
@@ -456,32 +678,8 @@ pub(super) fn apply(
             }
             None => false,
         },
-        // 背景色。`transparent` 是「有这条声明、但不画」，与「书里没写过」在层叠上
+        // 背景一族。`transparent` 是「有这条声明、但不画」，与「书里没写过」在层叠上
         // 是两件事（后者可能被更高 specificity 的一条颜色盖住），所以两条都要认。
-        // `background` 简写：只接它里面的**颜色**那一项。
-        //
-        // 这一条不是锦上添花：出版书里「深色底块 + 白字标题」用的是
-        // `background: #b71c1c; color: #ffffff`，只认 `background-color` 的话，
-        // 底色不画、白字照画 —— 标题变成白纸上的白字，整条消失（《罗生门》每一章的
-        // 标题正是这么没的）。简写里的图（`url(...)`）、重复方式、定位一律忽略：
-        // 图的绘制还没做，认下来只会把「没做」记成「做了」。
-        "background" => {
-            let mut recognized = false;
-            for part in crate::content::format::css::selector::split_top_level(value, ' ') {
-                let part = part.trim();
-                if part.is_empty() {
-                    continue;
-                }
-                if part.eq_ignore_ascii_case("transparent") {
-                    style.background_color = None;
-                    recognized = true;
-                } else if let Some(color) = parse_color(part) {
-                    style.background_color = Some(color);
-                    recognized = true;
-                }
-            }
-            recognized
-        }
         "background-color" => {
             if value.eq_ignore_ascii_case("transparent") {
                 style.background_color = None;
@@ -495,6 +693,56 @@ pub(super) fn apply(
                 None => false,
             }
         }
+        "background-image" => match parse_background_image_list(value) {
+            Some(list) => {
+                let count = list.len();
+                for_each_layer(style, count, |layer, i| layer.image = list[i].clone());
+                true
+            }
+            None => false,
+        },
+        "background-size" => match parse_background_size_list(value) {
+            Some(list) => {
+                let count = list.len();
+                for_each_layer(style, count, |layer, i| layer.size = list[i]);
+                true
+            }
+            None => false,
+        },
+        "background-position" => match parse_background_position_list(value) {
+            Some(list) => {
+                let count = list.len();
+                for_each_layer(style, count, |layer, i| layer.position = list[i]);
+                true
+            }
+            None => false,
+        },
+        "background-repeat" => match parse_background_repeat_list(value) {
+            Some(list) => {
+                let count = list.len();
+                for_each_layer(style, count, |layer, i| layer.repeat = list[i]);
+                true
+            }
+            None => false,
+        },
+        // 铺法之外的三条不在这里接：`background-attachment` / `-clip` / `-origin` 走
+        // `KNOWN_UNIMPLEMENTED` 那一档（认得、不生效）。为什么简写里仍然**吃掉**那些词：
+        // `background: url(x) no-repeat fixed center` 里的 `fixed` 是真语法，不认下来
+        // 整条简写就作废，底色与图一起消失 —— 那是比「fixed 没生效」大得多的错。
+        // 而长手单写那三条时屏上确实没有任何变化，所以缺口量具必须说真话。
+        //
+        // `background` 简写：颜色、图、铺法、位置、尺寸一条全写。
+        //
+        // 接住里面的**颜色**那一项是 2026-10-14 那一刀，理由仍然成立：出版书里「深色底块 +
+        // 白字标题」用的是 `background: #b71c1c; color: #ffffff`，只认 `background-color`
+        // 的话底色不画、白字照画 —— 标题变成白纸上的白字，整条消失（《罗生门》每一章的
+        // 标题正是这么没的）。2026-10-23 这一轮把图那一截也接上了：哈利波特的七张册扉页
+        // 整页背景是一张 792×1400 的照片，上面压的两张 PNG 全带透明通道，
+        // 底图一丢就成「白底上一片看不见的淡金字」。
+        //
+        // **简写没写到的子属性要拉回初值**，这是 CSS 明文；为什么必须整表重置，
+        // 判据写在 `apply_background_shorthand` 里面那条注释上。
+        "background" => apply_background_shorthand(style, value),
         // 边框一族（`border` / `border-top` / `border-left-width` / `border-color` …）
         // 用一条前缀分支收：三要素 × 四边写开是二十个 match 臂，而解析规则只有一条。
         name if name.starts_with("border") => apply_border(style, name, value, own, root_px),

@@ -116,6 +116,7 @@ fn setup(html: &str) -> (Dom, StyledDom, NodeId) {
         &dom,
         &RuleSet::parse("", Origin::Author),
         &ComputedStyle::default(),
+        "",
     );
     let root = dom
         .elements()
@@ -387,6 +388,7 @@ fn main() {
             &dom_b,
             &RuleSet::parse(".hot { font-size: 24px }", Origin::Author),
             &ComputedStyle::default(),
+            "",
         );
         let opts = LayoutOptions {
             width: WIDTH,

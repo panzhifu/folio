@@ -338,6 +338,32 @@ impl ReaderSession {
         (dist > 0.0).then(|| (style.axis(), dist, rtl))
     }
 
+    /// 跨章那一笔的落点：目标章**已经排好版并切好页**才给得出页号，否则 `None`。
+    ///
+    /// 往后翻落在第 0 页、往回翻落在它末页 —— 与 `view::body` 里起跨章滑动那一句同一个取法，
+    /// 两处各数一遍「目标章第几页」迟早有一处走样。`None` 只有一种读法：那一章还没排版完，
+    /// 这一笔不跟手（不是不翻 —— 松手仍交给 `turn()` 那条等排版的路）。
+    pub(in crate::ui::features::reader) fn chapter_landing(&self, delta: isize) -> Option<PageRef> {
+        let target = self.chapter_index() as isize + delta;
+        let book = self.book()?;
+        if target < 0 || target as usize >= book.chapter_count() {
+            return None;
+        }
+        let doc = book.span_doc(target as usize)?;
+        if !doc.is_current() {
+            return None;
+        }
+        let page = if delta > 0 {
+            0
+        } else {
+            doc.page_count().saturating_sub(1)
+        };
+        Some(PageRef {
+            chapter: target as usize,
+            page,
+        })
+    }
+
     /// 把一个**窗口坐标**下的落点折成 [`ReaderSession::page_area`] 里的归一化位置。
     ///
     /// `origin` 是挂监听那一栏在窗口里的原点：`page_area` 记的是这一栏自己的坐标，两头差着
@@ -535,11 +561,31 @@ impl ReaderSession {
         }
         // 手指之前攒下的那一截滚动增量作废：不然松手后它还会再多翻一页。
         self.wheel_accum = 0.0;
-        let TurnPlan::Page { to } = plan else {
-            // 章界：这一趟仍归翻页管，但目标章还没排版 —— 到松手那一刻交给 `turn()`。
-            return Claim::Claimed;
+        let chapter = self.chapter_index();
+        // 页号**不动**：`leaving` 是眼下这一页（权威），`arriving` 是松手后可能去的那一页。
+        let leaving = PageRef {
+            chapter,
+            page: self.page(),
         };
-        if to == self.page() {
+        // 这一笔要揭到哪一页去：章内是邻页，跨章是目标章的首页 / 末页。
+        //
+        // 跨章从前在这一格直接放弃跟手（理由写成「目标章还没排版」），于是**整章只有一页**
+        // 的那种插页 —— 一本书里每张整页照片各自成一章 —— 每一划都不跟手，要等抬手由
+        // `turn()` 补一趟自动动画，读者读到的就是「划不动、松手才翻」。可邻章预排版每帧都
+        // 在做（`view::body` 里那两句 `ensure_paged_span` + `ensure_viewport`），目标章当场
+        // 就在手上了，所以这里先问它一句：排好了就照常起跟手。
+        let arriving = match plan {
+            TurnPlan::Page { to } => PageRef { chapter, page: to },
+            TurnPlan::Chapter { delta } => match self.chapter_landing(delta) {
+                Some(to) => to,
+                // 真还没排好（刚进书、大章的第一帧）：这一笔仍归翻页认领（不落到滚动那条），
+                // 但不跟手，松手交给 `turn()` 走原来那条等排版的路。
+                None => return Claim::Claimed,
+            },
+            // 上面 530 那一句已经把这两类挡回去了；这里只为穷尽。
+            TurnPlan::None | TurnPlan::Scroll { .. } => return Claim::Refused,
+        };
+        if arriving == leaving {
             return Claim::Claimed;
         }
         // 旧页捕获还没完整落地时不让这一笔起跟手翻页。否则兜底会退回 CPU 裁页，两张正常
@@ -551,13 +597,6 @@ impl ReaderSession {
             self.pending_turn = Some(intent);
             return Claim::Claimed;
         }
-        let chapter = self.chapter_index();
-        // 页号**不动**：`leaving` 是眼下这一页（权威），`arriving` 是松手后可能去的那一页。
-        let leaving = PageRef {
-            chapter,
-            page: self.page(),
-        };
-        let arriving = PageRef { chapter, page: to };
         let mode = self.laid_out.mode;
         start_turn(
             &mut self.turn,
@@ -615,13 +654,14 @@ impl ReaderSession {
         // 这一腿还要走多远（dp）：走完 = 剩下那一截页宽，弹回 = 已经走过那一截。
         let remaining = (if revert { from } else { 1.0 - from }) * dist;
         let over = release_duration(remaining, speed, turn_duration(cx));
-        let target = self
-            .turn
-            .and_then(|turn| turn.arriving)
-            .map(|page| page.page)
-            .unwrap_or(self.page());
-        if !revert {
+        let arriving = self.turn.and_then(|turn| turn.arriving);
+        if !revert && arriving.is_some_and(|to| to.chapter == self.chapter_index()) {
             // 先翻页再补完剩下的那半截 —— 与点屏那条同一顺序，落库、清选中都跟着走。
+            //
+            // 跨章那一趟**不在这里换页号**：`set_page` 只动当前章的页号，把「下一章第一页」
+            // 落成「本章第一页」。换锚章由动画走到 1.0 那一刻的 `finish_chapter_turn` 接手
+            // （`turn.run.lands()` 那一条），位置落库也在它里面。
+            let target = arriving.map_or(self.page(), |to| to.page);
             self.set_page(target, cx);
         }
         // 换一把时钟键：松手这一腿是从 `from` 起跑的新的一趟，复用旧键会把跟手期间

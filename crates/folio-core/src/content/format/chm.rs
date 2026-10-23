@@ -717,7 +717,7 @@ mod tests {
 
         // 层叠层：按章序拼才有末章赢 —— 这一条是「顺序」唯一的证据。
         let dom = Dom::parse("<body><h1>题</h1><p>文</p></body>".as_bytes());
-        let styled = cascade(&dom, &rules, &ComputedStyle::default());
+        let styled = cascade(&dom, &rules, &ComputedStyle::default(), "");
         let find = |want: &str| {
             dom.elements()
                 .find(|(id, _)| dom.tag_name(*id) == Some(want))

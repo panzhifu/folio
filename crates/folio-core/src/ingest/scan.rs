@@ -251,9 +251,9 @@ impl Source for ScanSource {
         ImportKind::Scan
     }
 
-    fn candidates(&self, dest_dir: &Path, ctx: &StageCtx) -> Result<Vec<Candidate>> {
+    fn candidates(&self, book_dir: &Path, ctx: &StageCtx) -> Result<Vec<Candidate>> {
         let mut exclude = self.exclude.clone();
-        exclude.push(dest_dir.to_path_buf());
+        exclude.push(book_dir.to_path_buf());
         Ok(find(&self.roots, &exclude, &self.noise_exempt, ctx).candidates)
     }
 
