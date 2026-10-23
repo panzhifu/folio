@@ -266,6 +266,7 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::mobi::MobiAdapter),
         Box::new(super::pdf::PdfAdapter),
         Box::new(super::docx::DocxAdapter),
+        Box::new(super::doc::DocAdapter),
         Box::new(super::odt::OdtAdapter),
         Box::new(super::pdb::PdbAdapter),
         Box::new(super::azw4::Azw4Adapter),
@@ -274,6 +275,7 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::cbt::CbtAdapter),
         Box::new(super::djvu::DjvuAdapter),
         Box::new(super::htmlz::HtmlzAdapter),
+        Box::new(super::mhtml::MhtmlAdapter),
     ]
 }
 
@@ -302,8 +304,8 @@ pub fn provider_for(path: &Path) -> Option<Box<dyn DocumentProvider>> {
 pub fn supported_extensions() -> &'static [&'static str] {
     &[
         "epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "rtf", "cbz", "chm",
-        "mobi", "azw", "azw3", "prc", "pdf", "docx", "odt", "pdb", "azw4", "cb7", "cbr", "cbt",
-        "djvu", "djv", "htmlz",
+        "mobi", "azw", "azw3", "prc", "pdf", "docx", "doc", "dot", "odt", "pdb", "azw4", "cb7",
+        "cbr", "cbt", "djvu", "djv", "htmlz", "mhtml", "mht",
     ]
 }
 
@@ -447,6 +449,8 @@ mod tests {
             ("a.azw3", Format::Mobi),
             ("a.pdf", Format::Pdf),
             ("a.docx", Format::Docx),
+            ("a.doc", Format::Doc),
+            ("a.dot", Format::Doc),
             ("a.odt", Format::Odt),
             ("a.pdb", Format::Pdb),
             ("a.azw4", Format::Azw4),
@@ -456,13 +460,15 @@ mod tests {
             ("a.djvu", Format::Djvu),
             ("a.djv", Format::Djvu),
             ("a.htmlz", Format::Htmlz),
+            ("a.mhtml", Format::Mhtml),
+            ("a.mht", Format::Mhtml),
         ] {
             let provider =
                 provider_for(Path::new(name)).unwrap_or_else(|| panic!("{name} 该有 provider"));
             assert_eq!(provider.format(), want, "{name}");
         }
         assert!(provider_for(Path::new("a.lit")).is_none(), "没注册就是不认");
-        assert_eq!(providers().len(), 19);
+        assert_eq!(providers().len(), 21);
     }
 
     /// 粗筛那一道门的**名字那一半**：注册表清单里的每一个仍然过，认不出的名字不过。
@@ -477,6 +483,10 @@ mod tests {
             let probe = Path::new("/x/a").with_extension(ext);
             assert!(looks_like_a_book(&probe), "清单里的 .{ext} 该继续过筛");
         }
+        assert!(
+            looks_like_a_book(Path::new("/x/网页.mht")),
+            "网页存档按名字就该过粗筛：它是文本，没有「开个容器看看」那一步"
+        );
         assert!(!looks_like_a_book(Path::new("/x/报告.lit")));
         assert!(!looks_like_a_book(Path::new("/x/无扩展名")));
         assert!(

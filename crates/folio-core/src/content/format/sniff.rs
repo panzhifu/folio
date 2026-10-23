@@ -142,10 +142,36 @@ pub(crate) fn identify(display_name: &str, path: &Path) -> Verdict {
     if head.starts_with(b"ITSF") {
         return chm(path);
     }
+    // OLE2 那一族更宽：`.doc` / `.xls` / `.ppt` / `.lit` 共用同一只容器，头八字节点不出
+    // 来是哪一本，所以要开目录看那条 `WordDocument` 流（下面 `ole2` 那一层）。
+    if head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        return ole2(path);
+    }
     if head.starts_with(b"PK\x03\x04") {
         return container(path);
     }
+    // MHTML 是一个**文本**存档：没有魔数，判据是「头部那些行说得出 `multipart/*` 与
+    // `boundary=`，而文件里切得出至少一份 HTML」。先在 head 上问「像不像信封」，像才读
+    // 全本 —— 不然每一个走到这一层的候选都要多读一遍文件。
+    if declares_multipart(&head) {
+        return match super::mhtml::probe(path) {
+            super::mhtml::Probe::Book => Verdict::Readable(Format::Mhtml),
+            // 边界说得出而一个部分都切不出来：截断或与实际不符，与「这不是书」分开。
+            super::mhtml::Probe::Corrupt => Verdict::CorruptContainer,
+            // 一封纯文本邮件长得也是这个样子，但它没有 HTML 正文 —— 那不是「这本读不动」。
+            super::mhtml::Probe::NotMhtml => Verdict::NotABook,
+        };
+    }
     bare_file(display_name, &head)
+}
+
+/// 头部那一段里有没有「我是个 multipart 存档」这句话。
+///
+/// 名字的大小写都认（Outlook 真写 `Content-type:`），值里的引号不管：这一问只决定
+/// **要不要往下读全本**，裁决在 [`super::mhtml::probe`]。
+fn declares_multipart(head: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(head).to_ascii_lowercase();
+    text.contains("multipart/") && text.contains("boundary=")
 }
 
 /// POSIX/GNU tar 的 `ustar` 魔数在偏移 257；不用扩展名当判据。
@@ -198,6 +224,25 @@ fn chm(path: &Path) -> Verdict {
         Ok(entries) if !entries.is_empty() => Verdict::Readable(Format::Chm),
         Ok(_) => Verdict::NotABook,
         Err(_) => Verdict::CorruptContainer,
+    }
+}
+
+/// 第三层（OLE2 那一支）：目录里有没有一条 `WordDocument` 流，而它的 FIB 是不是 Word。
+///
+/// 判据住在 [`super::doc::ole2_shape`] 而不是这里，两个理由：① 那一族不止 `.doc` 一个格式
+/// （`.xls` / `.ppt` / `.lit` 同壳），容器那一层的知识属于容器；② 它必须与 provider 认的
+/// 是**同一条** `wIdent`，两处各判一次迟早会在某一代 Word 上分叉。
+///
+/// 这一问只读目录与流开头两个字节，**不把正文解一遍**（`rwml` 的 `open` 只吃整份字节，
+/// 拿它判一次等于每本候选先解一遍 —— 账写在 `ole2_shape` 那条注释上）。
+fn ole2(path: &Path) -> Verdict {
+    use super::doc::Ole2;
+    match super::doc::ole2_shape(path) {
+        Ole2::Word => Verdict::Readable(Format::Doc),
+        // 一只好好的 `.xls` 在这一档：那不是「这本坏了」也不是「这种书还不支持」，
+        // 是「它不是书」—— 与 `.doc` 同壳这件事不改变读者的下一步动作（换个文件）。
+        Ole2::NotWord => Verdict::NotABook,
+        Ole2::Corrupt => Verdict::CorruptContainer,
     }
 }
 
@@ -914,6 +959,51 @@ mod tests {
             Verdict::NotABook,
             "没有容器的 `.chm` 不收：替它猜一个格式等于多一本坏书"
         );
+    }
+
+    /// MHTML 那一支：判据是**信封 + 切得出至少一份 HTML**，名字不参与裁决；而三种拒绝
+    /// 各说一句不同的话（一个都没切出来是「坏了」，切出来却没有 HTML 是「这不是书」）。
+    #[test]
+    fn an_mhtml_is_decided_by_its_envelope_not_by_its_name() {
+        let tmp = dir("mhtml");
+        let book = file_at(
+            tmp.path(),
+            "网页.mht",
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n--x\r\nContent-Location: file:///a/doc.htm\r\nContent-Type: text/html\r\n\r\n<html><body><p>正文</p></body></html>\r\n--x--\r\n"
+                .as_bytes(),
+        );
+        for name in ["网页.mht", "网页.bin", "没扩展名"] {
+            assert_eq!(
+                identify(name, &book),
+                Verdict::Readable(Format::Mhtml),
+                "{name}：信封说话，名字不参与"
+            );
+        }
+        let no_parts = file_at(
+            tmp.path(),
+            "空壳.mht",
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n再没有别的东西了\r\n".as_bytes(),
+        );
+        assert_eq!(
+            identify("空壳.mht", &no_parts),
+            Verdict::CorruptContainer,
+            "边界说得出而一个部分都切不出来：要说「这本坏了」"
+        );
+        let no_html = file_at(
+            tmp.path(),
+            "邮件.mht",
+            "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nContent-Type: text/plain\r\n\r\n正文\r\n--x--\r\n"
+                .as_bytes(),
+        );
+        assert_eq!(
+            identify("邮件.mht", &no_html),
+            Verdict::NotABook,
+            "一封纯文本邮件不是「读不动的书」，是「这不是书」"
+        );
+        // 穿着 `.mht` 的裸文本：没有信封就走裸文件那一支，而那一支的扩展名清单里
+        // **故意没有** mht —— 它按定义就是容器，替它猜一个格式等于多一本坏书。
+        let bare = file_at(tmp.path(), "假.mht", "其实是一段纯文本\n".as_bytes());
+        assert_eq!(identify("假.mht", &bare), Verdict::NotABook);
     }
 
     /// DOCX：`[Content_Types].xml` + `word/document.xml` 就是形状，名字不参与。

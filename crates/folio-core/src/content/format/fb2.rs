@@ -10,13 +10,12 @@
 
 use std::path::Path;
 
-use base64::Engine as _;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
 use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
-    image_dims, shrink_image, stem_of,
+    decode_base64, image_dims, shrink_image, stem_of,
 };
 use crate::Result;
 
@@ -458,15 +457,6 @@ fn parse_metadata(xml: &str) -> Parsed {
     out
 }
 
-/// `<binary>` 里的 base64。FB2 常按 76 列折行，所以先把所有空白去掉再解；
-/// 解不出（截断、混进了非 base64 字符）就当没有这张图，不让它带崩整本书。
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(compact)
-        .ok()
-}
-
 /// 正文：每个顶层 `<section>` 一章，嵌套 section 的内容并进父章。
 fn parse_chapters(xml: &str) -> Vec<Chapter> {
     let mut reader = Reader::from_str(xml);
@@ -707,6 +697,9 @@ mod tests {
 
     use std::path::Path;
 
+    // 测试里要**写** base64（夹具），而 `encode` 是 trait 方法。
+    use base64::Engine as _;
+
     use super::Fb2Adapter;
     use crate::content::format::{Content, DocumentProvider, Format};
 
@@ -771,7 +764,6 @@ mod tests {
     }
 
     fn b64(bytes: &[u8]) -> String {
-        use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 

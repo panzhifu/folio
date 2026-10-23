@@ -72,6 +72,13 @@ rars.workspace = true
 tar.workspace = true
 # DjVu：纯 Rust 解码/渲染（MIT，无 GPL）。
 djvu-rs.workspace = true
+# `.doc`（Word 97-2003，[MS-DOC]）：piece table / FIB / PAPX-CHPX 那套二进制表不自己读，
+# 理由与「为什么关掉 docx 那一半的 feature」「净新增 3 个包」那笔账写在根 Cargo.toml。
+# 它只管**解码字节**成 docx.rs 同形状的东西（`DocModel`：段落 + run 的粗斜体 + 列表 + 表格 +
+# 图片字节 + OLE2 元数据），归约成引擎就绪的 XHTML 仍然是我们这一层的事，见 `format::doc`。
+rwml = { workspace = true }
+# OLE2 目录：判定层认「这是不是一本 Word」（见根 Cargo.toml 那条与 `format::doc::is_word`）。
+cfb = { workspace = true }
 rust-i18n.workspace = true
 # 日志：core 这边只管「说了什么」——`tracing` 的宏与 span，配置在 `Config::logging`，
 # 装配 subscriber 的入口在 `src/logging.rs`。（不依赖 gpui 这条边界照旧成立：
@@ -104,5 +111,6 @@ tts.workspace = true
 tempfile = "3"
 # 测试里合成 CBR 夹具；生产只用读，不开 write。
 rars = { workspace = true, features = ["write"] }
+# 测试里合成「OLE2 但不是 Word」的负样本，用的就是普通依赖那一份 `cfb`。
 # `rust-i18n` 不再单列：文案表那几条断言搬进 `src/i18n.rs` 之后就是本 crate 的代码，
 # 而它本来就是普通依赖 —— 集成测试时代的那条 dev-dependency 到此作废。

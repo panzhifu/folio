@@ -17,7 +17,7 @@
 //! `text:continue-numbering`（第二个列表接着前一个的号往下数）不读：归约产物里每一个
 //! `<ol>` 都从头数，代价是那种「接上一串号」的列表屏上是 1、2、3 而纸上是 4、5、6。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use quick_xml::Reader;
@@ -28,6 +28,9 @@ use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
     ListWriter, Marker, image_dims, media_type_of, resolve_href, stem_of,
 };
+// 归约产物的转义与「本章引用了哪几张登记过的图」只有一份实现（见 `super::escape_text`
+// 与 `super::chapter_images` 那两条注释）。
+use super::{chapter_images, escape_attr, escape_into};
 use crate::Result;
 
 pub struct OdtAdapter;
@@ -688,15 +691,6 @@ impl Builder {
     }
 }
 
-fn chapter_images(body: &str, known: &[ImageRes]) -> Vec<crate::content::scan::ImageUse> {
-    let known: HashSet<&str> = known.iter().map(|image| image.href.as_str()).collect();
-    crate::content::scan::chapter_summary(body)
-        .images
-        .into_iter()
-        .filter(|image| known.contains(image.src.as_str()))
-        .collect()
-}
-
 fn local_name(name: &str) -> String {
     name.rsplit(':').next().unwrap_or(name).to_string()
 }
@@ -713,27 +707,6 @@ fn attr(start: &BytesStart<'_>, want: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn escape_text(text: &str) -> String {
-    let mut out = String::new();
-    escape_into(&mut out, text);
-    out
-}
-
-fn escape_into(out: &mut String, text: &str) {
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-}
-
-fn escape_attr(text: &str) -> String {
-    escape_text(text).replace('"', "&quot;")
 }
 
 fn unsupported(path: &Path, why: &str) -> crate::Error {

@@ -42,6 +42,10 @@ cargo test -p folio-core --lib -- --ignored the_real_word_documents
 - `oss/minimal-zh.epub` —— 合成中文书，4.7 KB。故意布成会出错的形状：
   manifest 顺序与 spine 顺序不同、文件名里有空格（href 写成 `%20`）、
   nav 条目带 `#fragment`、两份 CSS 需要按声明顺序拼接、第三章没有 `<h1>`（测标题回退）。
+- `oss/doc/` —— 三份 Word 97-2003 的最小书（LibreOffice 按 `MS Word 97` 导出，取自 `rwml`
+  0.1.5 自带的公开语料，MIT）。它们**入库**而不是放 `local/`：`.doc` 的二进制那一层合成不出来
+  （FIB 与 piece table 不是照着形状就能写的东西），而「容器 → 模型 → 归约」这一整条链的门
+  必须拿别人生产的文件钉。取法、许可与这三份没覆盖的形状见 `oss/doc/README.md`。
 - `local/shejie-mauriac.epub` —— calibre 导出的 EPUB 2.0（无 nav，只有 `toc.ncx`），
   28 章 / 25 条目录 / 一份 2.4 KB 的 CSS。它抓到了合成样本抓不到的两个真 bug：
   **NCX 的元素名是大小写敏感的 `navMap` / `navPoint`**（目标写在 `<content src="…"/>` 里，
@@ -149,6 +153,19 @@ cargo test -p folio-core --lib -- --ignored the_real_word_documents
   `.meta` 文件里，所以书目那一格的门改用**上游编码器**（`djvu_mut::set_metadata`）往真样本上
   加一块再读回来（`the_shared_metadata_block_lands_on_the_shelf_fields`）：钉的是映射，
   不是那一块的字节形状。
+
+- **`.doc` —— 三份**（`oss/doc/`）：量出来两条。① FIB 开头的 `wIdent` 是 `0xA5EC`
+  （不是 Word 6/95 那一代的 `0x0170`），判定层因此与 `rwml` 自己的 FIB 检查共用这一条判据；
+  而判定层**不能**拿 `Document::open` 的成败当判据 —— 那一问只接受整份字节，判一次等于
+  先把正文解一遍（实测一份 9 KB 的最小书 283 µs，带图的 `.doc` 是几十 MB 量级）。
+  ② 带字形的浮动形状与那两格表格字都在 `DocModel::regions` 的**别的区**里：`.doc` 交出的是
+  子文档区域而不是「这条注挂在正文哪个字上」，所以归约只吃 `Main`，注体宁可少那一段
+  （摆一个接不上锚的注是错的注，不是少个字）。这两条的门是
+  `doc::tests::the_ole2_branch_tells_word_from_the_rest_of_the_family` 与
+  `…::the_real_word_documents_open_and_keep_their_text` /
+  `…::the_real_word_documents_index_without_the_text`。
+  这三份没带标题层级、列表、图片，也没带中文（`codepage` 报 1252）—— 那些形状由手搭的
+  `DocModel` 钉，**带那些形状的真 `.doc` 还没撞到过**。
 
 ## 合成样本才是自动化测试的主力
 

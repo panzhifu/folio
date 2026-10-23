@@ -30,6 +30,12 @@ pub mod cover;
 pub mod css;
 /// DjVu：定版式扫描书/漫画，页是既定的画布（纯 Rust `djvu-rs`）。
 pub mod djvu;
+/// Word 97-2003（`.doc`）：一个 OLE2 复合文件里的 `WordDocument` 流。
+///
+/// 与 [`docx`](super::docx) 是**同一个格式的两代容器**（OOXML 与 [MS-DOC]），所以两边
+/// 归约到的形状、章的切法、表格摊平那一条口径都得住在一处 —— 见 [`Marker`] 与那三个
+/// `escape_*`（它们从前在两个 provider 里各有一份逐字相同的副本）。
+pub mod doc;
 /// WordprocessingML（`.docx`）：一个 ZIP 里的 `word/document.xml`。
 pub mod docx;
 pub mod epub;
@@ -38,6 +44,11 @@ pub mod html;
 /// Calibre HTMLZ：一个 ZIP 里装着 index.html、章节 HTML 与图片。
 pub mod htmlz;
 pub mod markdown;
+/// MHTML（`.mht` / `.mhtml`，RFC 2557）：一个 MIME 存档里的一段 HTML 与它自己带的资源。
+///
+/// 与 [`htmlz`](super::htmlz) 同一套坐标（几份 HTML + 一堆字节），差别只在容器：那边是
+/// ZIP 的条目名，这边是 `Content-Location` 折出来的键。
+pub mod mhtml;
 pub(crate) mod mobi;
 /// 纯文本（`.txt`）小说的分章与书目提取：规则表 + 引擎两份，见 `novel` 的模块说明。
 pub mod novel;
@@ -109,6 +120,11 @@ pub enum Format {
     Pdf,
     /// WordprocessingML（`.docx`）：ZIP + `word/document.xml`。可重排。
     Docx,
+    /// Word 97-2003（`.doc`）：OLE2 复合文件 + `WordDocument` 流。可重排。
+    ///
+    /// 与 [`Format::Docx`] 是同一族的两代容器：那边的正文是 XML，这边的正文是
+    /// 「字符流 + piece table 把它映射到字节区间」。归约到的形状是同一串 XHTML。
+    Doc,
     /// OpenDocument Text（`.odt`）：ZIP + `content.xml`。可重排。
     Odt,
     /// PalmDoc 纯文本（`.pdb`）：PalmDB 容器里的压缩文本记录。可重排。
@@ -128,6 +144,11 @@ pub enum Format {
     Djvu,
     /// Calibre HTMLZ：一个 ZIP，里面是 `index.html`、章节 HTML 与图片。可重排。
     Htmlz,
+    /// MHTML（`.mht` / `.mhtml`）：一个 MIME 存档里的一段 HTML 与它带的图片、样式。可重排。
+    ///
+    /// 与 [`Format::Htmlz`] 同一族（几份 HTML + 一堆字节），容器换成了「文本存档里几段
+    /// 带头的部分」，所以键要从 `Content-Location` 折出来而不是取自条目名。
+    Mhtml,
 }
 
 impl Format {
@@ -144,6 +165,7 @@ impl Format {
             Format::Mobi => "mobi",
             Format::Pdf => "pdf",
             Format::Docx => "docx",
+            Format::Doc => "doc",
             Format::Odt => "odt",
             Format::Pdb => "pdb",
             Format::Azw4 => "azw4",
@@ -152,6 +174,7 @@ impl Format {
             Format::Cbt => "cbt",
             Format::Djvu => "djvu",
             Format::Htmlz => "htmlz",
+            Format::Mhtml => "mhtml",
         }
     }
 
@@ -165,7 +188,7 @@ impl Format {
     ///
     /// 认法：拿注册表全部被认领的扩展名逐个探，取第一个「provider 认下它，且它
     /// 报出的格式就是自己」的那个。剩下没有命中的（例如还没写 provider 的格式）
-    /// 退回 `as_str`，让日志里至少有个说得清的名字（**注册表里 19 种格式都有 provider，
+    /// 退回 `as_str`，让日志里至少有个说得清的名字（**注册表里 21 种格式都有 provider，
     /// 所以这一档现在只兜「忘了往 `supported_extensions` 里加」这种漂移**）。
     pub fn copy_extension(self) -> &'static str {
         crate::content::format::provider::supported_extensions()
@@ -203,6 +226,9 @@ impl Format {
             Format::Docx => {
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             }
+            // `.doc` 与 `.dot`（模板）在分享面板里是同一个类型：Windows 登记的就是这一条，
+            // 而对面按它挑收件应用 —— 报一条认不出的 MIME，症状是收件列表整个空掉。
+            Format::Doc => "application/msword",
             Format::Odt => "application/vnd.oasis.opendocument.text",
             Format::Pdb => "application/vnd.palm",
             // AZW4 在系统分享面板里仍是 Kindle 那一族；它不是 PDF 文件本身。
@@ -213,6 +239,9 @@ impl Format {
             // IANA 注册的是 image/vnd.djvu；`image/x-djvu` 是历史别名，不另报。
             Format::Djvu => "image/vnd.djvu",
             Format::Htmlz => "application/zip",
+            // 对面按它筛收件应用：`message/rfc822` 那一族会被邮件客户端抢走，
+            // 而 `multipart/related` 才是这一族自己声明的形状。
+            Format::Mhtml => "multipart/related",
         }
     }
 
@@ -229,6 +258,7 @@ impl Format {
             "mobi" => Some(Format::Mobi),
             "pdf" => Some(Format::Pdf),
             "docx" => Some(Format::Docx),
+            "doc" => Some(Format::Doc),
             "odt" => Some(Format::Odt),
             "pdb" => Some(Format::Pdb),
             "azw4" => Some(Format::Azw4),
@@ -237,6 +267,7 @@ impl Format {
             "cbt" => Some(Format::Cbt),
             "djvu" => Some(Format::Djvu),
             "htmlz" => Some(Format::Htmlz),
+            "mhtml" => Some(Format::Mhtml),
             _ => None,
         }
     }
@@ -672,7 +703,9 @@ pub fn locator_for(format: Format, chapter: &Chapter, index: usize) -> ChapterLo
         return at.clone();
     }
     match format {
-        Format::Epub | Format::Chm | Format::Htmlz if !chapter.spine_href.is_empty() => {
+        Format::Epub | Format::Chm | Format::Htmlz | Format::Mhtml
+            if !chapter.spine_href.is_empty() =>
+        {
             ChapterLocator::Entry(chapter.spine_href.clone())
         }
         Format::Text
@@ -682,6 +715,7 @@ pub fn locator_for(format: Format, chapter: &Chapter, index: usize) -> ChapterLo
         | Format::Rtf
         | Format::Mobi
         | Format::Docx
+        | Format::Doc
         | Format::Odt
         | Format::Pdb => ChapterLocator::Section(index),
         // 没有可寻址的位置（EPUB 少了 href、定版式那几族、测试替身）：只能说正文在手上。
@@ -890,6 +924,38 @@ pub(crate) fn xml_unescape(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
+/// 把**文档格式自己的字**写成 XHTML 的文本那一截。
+///
+/// 与 [`xml_unescape`] 是相反的一刀：那边把源文件里的实体折成字符，这一族把字符折成
+/// 实体。住在 `mod.rs` 而不是各 provider 里，是因为**归约产物只有一个形状**：Word 两代
+/// 容器（[`docx`](super::docx) 与 [`doc`](super::doc)）、ODF（[`odt`](super::odt)）都要把
+/// 「一段不带标记的正文」包成 `<p>`，而 `&` 少折一次的症状是那一章从此解析不成 DOM
+/// —— 字数、锚点、进度全部偏，且屏上看不出原因。三处各有一份逐字相同的副本已经漂过一次
+/// 的教训不必再付一遍。
+pub(crate) fn escape_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    escape_into(&mut out, text);
+    out
+}
+
+pub(crate) fn escape_into(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+/// 属性那一截：文本那三条再加一个引号。
+pub(crate) fn escape_attr(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    escape_into(&mut out, text);
+    out.replace('"', "&quot;")
+}
+
 /// 列表该画的那一个号。
 ///
 /// 它与 `css::computed::ListStyle` 不是同一件事：那一格是作者写在 CSS 里的词，这一格是
@@ -1052,6 +1118,34 @@ impl ListWriter {
         out.push_str("<li>");
         out.push_str(html);
     }
+}
+
+/// 本章正文里**登记过**的图片引用（`index()` 那一趟要落进 `chapters.images_json` 的那一份）。
+///
+/// 过滤而不是照单全收：`<img src>` 解出来的一条引用可能指向**没登记上**的那一张（字节读不到、
+/// 或这一版没有解码器）。留在清单里的症状不是「少一张图」而是「图片查看器里那一列多出一个
+/// 点不开的格子」。`docx` / `odt` / `doc` 三个 provider 从前各有一份逐字相同的实现。
+pub(crate) fn chapter_images(
+    body: &str,
+    known: &[ImageRes],
+) -> Vec<crate::content::scan::ImageUse> {
+    let known: std::collections::HashSet<&str> =
+        known.iter().map(|image| image.href.as_str()).collect();
+    crate::content::scan::chapter_summary(body)
+        .images
+        .into_iter()
+        .filter(|image| known.contains(image.src.as_str()))
+        .collect()
+}
+
+/// 一段 base64 文本 → 字节。折行与空白一律跳过，解不出就是 `None`。
+///
+/// 存在的理由：`<binary>`（FB2）与 MHTML 的部分体都是「折成 76 列的 base64」，而解法里
+/// 那条「先去掉所有空白再解」是要紧的一半 —— 不去掉，`STANDARD` 会在第一个换行处报错，
+/// 症状是**每一张图都没有**。两处各写一遍迟早有一处忘了那一半。
+pub(crate) fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &compact).ok()
 }
 
 /// 扩展名的小写形式（不带点）。认不出返回 `None`。

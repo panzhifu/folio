@@ -34,6 +34,9 @@ use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
     ListWriter, Marker, image_dims, media_type_of, resolve_href, stem_of,
 };
+// 归约产物的转义与「本章引用了哪几张登记过的图」只有一份实现（见 `super::escape_text`
+// 与 `super::chapter_images` 那两条注释）。
+use super::{chapter_images, escape_attr, escape_into, escape_text};
 use crate::Result;
 
 pub struct DocxAdapter;
@@ -926,15 +929,6 @@ impl Builder {
     }
 }
 
-fn chapter_images(body: &str, known: &[ImageRes]) -> Vec<crate::content::scan::ImageUse> {
-    let known: HashSet<&str> = known.iter().map(|image| image.href.as_str()).collect();
-    crate::content::scan::chapter_summary(body)
-        .images
-        .into_iter()
-        .filter(|image| known.contains(image.src.as_str()))
-        .collect()
-}
-
 fn resolve_rel(target: &str) -> String {
     let target = target.trim();
     if target.starts_with('/') {
@@ -980,29 +974,6 @@ fn heading_level(style: &str) -> Option<usize> {
     let lower = style.to_ascii_lowercase();
     let digits = lower.strip_prefix("heading")?.trim();
     digits.parse().ok()
-}
-
-fn escape_text(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    escape_into(&mut out, text);
-    out
-}
-
-fn escape_into(out: &mut String, text: &str) {
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-}
-
-fn escape_attr(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    escape_into(&mut out, text);
-    out.replace('"', "&quot;")
 }
 
 fn unsupported(path: &Path, why: &str) -> crate::Error {

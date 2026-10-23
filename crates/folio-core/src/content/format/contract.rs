@@ -153,6 +153,19 @@ fn htmlz(dir: &Path) -> PathBuf {
     path
 }
 
+/// 一份最小的 MHTML：信封 + 一段 `8bit` 的 HTML 部分（形状照 Chrome 另存的写法）。
+fn mhtml(dir: &Path) -> PathBuf {
+    let path = dir.join("a.mht");
+    std::fs::write(
+        &path,
+        "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n\
+         --x\r\nContent-Location: file:///a/doc.htm\r\nContent-Type: text/html\r\n\r\n\
+         <html><body><h1>标题</h1><p>正文</p></body></html>\r\n--x--\r\n",
+    )
+    .unwrap();
+    path
+}
+
 /// 可重排的每一种 provider：产物必须能直接进引擎。
 ///
 /// 断言是「能解析 + body 里有可见文本」，不是「标签在白名单里」—— 引擎对不认识的
@@ -186,6 +199,7 @@ fn every_reflow_provider_hands_the_engine_parseable_xhtml() {
         ("odt", odt(dir.path())),
         ("pdb", pdb(dir.path())),
         ("htmlz", htmlz(dir.path())),
+        ("mhtml", mhtml(dir.path())),
     ];
 
     for (name, path) in cases {

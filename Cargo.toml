@@ -192,6 +192,29 @@ tar = "0.4"
 # DjVu：纯 Rust 的 DjVu 解码/渲染（MIT，无 GPL），只开 std（默认），
 # 不带到 PDF/EPUB/CBZ 导出、OCR、并行等可选 feature。MSRV 1.88。
 djvu-rs = "0.43"
+# `.doc`（Word 97-2003，[MS-DOC] 那一族）：纯 Rust 的 `rwml`，**`default-features = false`**。
+#
+# 为什么这一条不自己写：旧 Word 的正文不在一个地方 —— `WordDocument` 流装字符流与 FIB，
+# 而 FIB 说 CLX 在 `0Table`/`1Table` 哪一段；piece table 把**字符位**映射到（哪条流、字节偏移、
+# fCompressed），压缩那一支按 FIB 的语言 id 选码页（简体 `0x0804` → cp936/GBK、繁体 → cp950、
+# 日 → cp932、韩 → cp949），段落与字符样式是 PAPX/CHPX 那两套**按 piece 分段生效**的二进制表，
+# 其中还夹着 PRM 字段码元。手写等于重做一遍 LibreOffice 的 ww8 导入。
+#
+# 为什么不开 default：那条 feature 是 `docx`（OOXML）那一半，我们已经有 `.docx` 的自研解析，
+# 而它会把**第二个** `quick-xml`（它要 0.41，图上是 0.42）与第二个 `zip` 搬进来。关掉之后
+# 在这一份锁上实测：**`Cargo.lock` 只多两条包名**（`rwml` 自身 + 它的容器 `cfb`），
+# 而 `cfb` 带的 `fnv` / `byteorder` / `uuid` 与 `rwml` 带的 `encoding_rs` / `thiserror`
+# **一条都没新增** —— 五样早就在锁里（`fnv` 此前只是没被编过）。`wasm-bindgen` 那一支只在
+# `cfg(target_arch = "wasm32")` 上，我们两个平台都不吃。
+# `#![forbid(unsafe_code)]`，MSRV 1.88（工作区 1.90）。
+rwml = { version = "0.1.5", default-features = false }
+# OLE2 / CFB（[MS-CFB] 复合文件）那一层容器：`.doc` 的壳，与 `.xls` / `.ppt` / `.lit` 同一家族。
+# 判定层要认的是「这一族的目录里有没有一条 `WordDocument` 流、它的 FIB 是不是 Word」，而
+# `rwml::Document::open` 只有「整本字节交给你、解一遍」那一问 —— 拿它当判据等于每本候选书
+# 先解一次正文（实测一份 9 KB 的最小书 283 µs，一本 20 MB 的书就说不准了）。
+# **这不是新增的一条依赖边**：`cfb` 本来就是 `rwml` 的依赖（同一个 0.10 版、锁里同一条），
+# 这里只是把那条传递边写成显式的，`Cargo.lock` 一条包名都不动。
+cfb = "0.10"
 # 纯文本小说的章标记、编号体系与书目字段别名（书名/著者/作者/by…）是一族**存在外部数据里的
 # 模式串**：规则表要能按语言换一套、要能被读者整份替换，而字符串模式只有正则引擎吃得下 ——
 # 手写扫描器等于替每条模式各写一遍解析，那些解析从此没人复核。

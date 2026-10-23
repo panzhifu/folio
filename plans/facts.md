@@ -224,8 +224,36 @@
   base64 内联**（`having-images.docx` 一份 50 KB）、书目写成 Markdown 顶上的一行 HTML 注释，
   而产出是 MD 不是 XHTML —— 与「字节不入库」和「provider 交引擎就绪的 XHTML」两条都顶，
   所以结论是**不换**：它适合当对照实现与夹具发生器，不适合当我们的 reader。
-  顺带一条与格式表有关的：`rwml` 0.1.5（MIT，纯 Rust 的**旧 .doc / Word 97-2003** 读写）净新增
-  只有 **3 个包**（`cfb` / `fnv` / 自身），而 `.doc` 是我们现在整个缺的那一族。
+  顺带一条与格式表有关的：`rwml` 0.1.5（MIT，纯 Rust 的**旧 .doc / Word 97-2003** 读写）
+  在仓库外量过一次是「净新增 3 个包」，**接进来以后按这一份锁重量的数是 2 条包名** —— 见下面那一条。
+
+- **`.doc`（Word 97-2003）接进来之时量过的五条**（依赖账按 `Cargo.lock` 的包名相减，
+  时间账按同一份 9 KB 的最小书交替跑 7 轮）：
+  - **`default-features = false` 是这一条依赖能进图的前提**：那条默认 feature 叫 `docx`
+    （OOXML 那一半，我们已经有自研的 `.docx`），开着它会把**第二个** `quick-xml`（它要 0.41，
+    图上是 0.42）与第二个 `zip`（9.0）搬进来。关掉之后 `Cargo.lock` 只多两条包名：`rwml` 自身
+    与它的容器 `cfb`；`cfb` 带的 `fnv` / `byteorder` / `uuid` 与 `rwml` 带的 `encoding_rs` /
+    `thiserror` **一条都没新增**（`fnv` 此前只在锁里、从没被编过，所以 `cargo check` 那一趟
+    看着是三个 crate 在编，账要按锁的包名算）。`wasm-bindgen` 那一支只在
+    `cfg(target_arch = "wasm32")`，桌面与 Android 都不吃。
+  - **FIB 的 `wIdent` 是 `0xA5EC`，不是 `0x0170`**（Word 6/95 那一代写后者）。那三份
+    LibreOffice 按 `MS Word 97` 导出的真样本开头就是 `EC A5`，而 `rwml` 的 `fib::parse`
+    只认 `0xA5EC` —— 所以判定层与 provider 用同一条判据（`format::doc::ole2_shape`），
+    Word 6/95 那一代两边都不认，症状是一次说得清的拒绝。
+  - **判定层不能拿 `Document::open` 的成败当判据**（CHM 那一支可以，那一问只读头）：
+    `rwml` 的 `open` 只接受**整份字节**，判一次等于先把正文解一遍。实测 9 KB 的最小书
+    `open` 283 µs、`model()` 再 83 µs，而一份「OLE2 但不是 Word」的容器 329 µs 就报
+    `MissingStream("WordDocument")` —— 快慢都不是问题，问题是带图的 `.doc` 是几十 MB 量级，
+    而判定排在哈希那一趟之前。开目录读流名 + 那两个字节是 O(1)。
+  - **`rwml` 不读 `SummaryInformation`**（全 crate grep 一处都没有）：`.doc` 的 Title /
+    Author / Keywords 就存在那一格，所以它的 `core_properties()` 交回全空（那三份真样本实测）。
+    书名只能回文件名、作者那一行不显示。要补就得自己读那一格属性集（[MS-PROPSET]），
+    而那三份样本里没有一条填好的作者可钉 —— 记在「后置」，不是「已知能读」。
+  - **`.doc` 的正文不止一块**：`DocModel::regions` 按子文档分区（`Main` / `Footnote` /
+    `HeaderFooter` / `Annotation` / `Endnote` / `TextBox`），页眉页脚被 promote 进 `setup`，
+    **其余还在 `blocks` 里**。整份照读的症状不是少字而是**顺序错**：注体与文本框的字插在
+    正文中间，而 `chapters.char_len` 与 `Locator::offset` 数的都是这一串。注的**引用位置**
+    它交不出（它自己的注释写着 `.doc` 那一支的 note id 是合成的），所以锚接不上。
 
 ## 支撑「自研排版」的三条实测结论
 

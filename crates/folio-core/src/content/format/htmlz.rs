@@ -48,9 +48,9 @@ impl DocumentProvider for HtmlzAdapter {
                 continue;
             };
             let raw = super::charset::decode(&bytes, None);
-            let title = document_title(&raw)
-                .or_else(|| first_heading(&raw))
-                .unwrap_or_else(|| file_stem(entry));
+            // 书名那一问与单文件 HTML 同一份实现（`<title>` 优先、退到第一个非空 `<h1>`）：
+            // 从前这里抄了两份，两份在「谁算书名」上迟早分叉。
+            let title = super::html::document_title(&raw).unwrap_or_else(|| file_stem(entry));
             let (chapter_css, chapter_images) = styles_and_images(&raw, entry, &mut zip);
             if seen_css.insert(entry.clone()) {
                 css.push_str(&chapter_css);
@@ -145,39 +145,7 @@ fn file_stem(entry: &str) -> String {
 
 fn document_title_of(entry: &str, zip: &mut Zip) -> Option<String> {
     let bytes = zip.read(entry)?;
-    document_title(&super::charset::decode(&bytes, None))
-}
-
-/// `<title>` 优先，退到第一个非空 `<h1>`。
-fn document_title(raw: &str) -> Option<String> {
-    let dom = Dom::parse(raw.as_bytes());
-    let mut fallback = None;
-    for (id, _) in dom.elements() {
-        match dom.tag_name(id) {
-            Some("title") => {
-                let text = raw_text(&dom, id).trim().to_string();
-                if !text.is_empty() {
-                    return Some(text);
-                }
-            }
-            Some("h1") if fallback.is_none() => {
-                let text = raw_text(&dom, id).trim().to_string();
-                if !text.is_empty() {
-                    fallback = Some(text);
-                }
-            }
-            _ => {}
-        }
-    }
-    fallback
-}
-
-fn first_heading(raw: &str) -> Option<String> {
-    let dom = Dom::parse(raw.as_bytes());
-    dom.elements()
-        .find(|(id, _)| dom.tag_name(*id) == Some("h1"))
-        .map(|(id, _)| raw_text(&dom, id).trim().to_string())
-        .filter(|text| !text.is_empty())
+    super::html::document_title(&super::charset::decode(&bytes, None))
 }
 
 /// 一份 HTML 里的 `<style>` 与 `<link rel="stylesheet">`；外链 CSS 从 ZIP 读并按它自己的
