@@ -271,6 +271,13 @@ pub(crate) struct CompactSettings {
     /// （它的 `Drop` 直接调 `unsubscribe`），绑成局部变量等于没订阅 —— 少了它，后台扫完那一趟
     /// 永远不会让这一屏重画，读者看到的是一句「还没统计」。
     _storage_watch: Subscription,
+    /// 对「检查更新」状态实体的订阅，同上一条的理由：GitHub 那次往返在后台线程上结束，
+    /// 「正在检查…」要变成结果只能靠实体 `notify` 唤醒这一屏。手机上那一屏停住的样子
+    /// 与桌面完全一样，所以两条订阅一处都不能只写一半。
+    _update_watch: Subscription,
+    /// 对「反馈日志」状态实体的订阅。同上一条：读盘与拼快照在后台线程上跑，
+    /// 那一格要从「正在整理日志…」变成结果，只能靠实体 notify 唤醒这一屏。
+    _feedback_watch: Subscription,
 }
 
 impl CompactSettings {
@@ -284,9 +291,15 @@ impl CompactSettings {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         let storage = storage::entity(cx);
         let watch = cx.observe(&storage, |_, _, cx| cx.notify());
+        let update = crate::ui::services::update::entity(cx);
+        let update_watch = cx.observe(&update, |_, _, cx| cx.notify());
+        let feedback = crate::ui::services::feedback::entity(cx);
+        let feedback_watch = cx.observe(&feedback, |_, _, cx| cx.notify());
         Self {
             screen: Screen::Root,
             _storage_watch: watch,
+            _update_watch: update_watch,
+            _feedback_watch: feedback_watch,
         }
     }
 

@@ -107,7 +107,7 @@ pub trait Host: 'static {
     ///
     /// 移动端有系统级分享；桌面没有这一档，实现里安静 no-op。图片查看器那一层的
     /// 「分享」按钮走它（字节在 `bytes`，文件名 `name` 带扩展名，`mime` 是媒体类型）。
-    fn share_image(&self, bytes: &[u8], mime: &str, name: &str);
+    fn share_file(&self, bytes: &[u8], mime: &str, name: &str);
     /// 把一张图的字节存进系统相册（移动端）/ 下载目录（桌面）。
     fn save_image(&self, bytes: &[u8], mime: &str, name: &str);
 }
@@ -216,10 +216,19 @@ pub fn picked_files_are_temporary(cx: &App) -> bool {
 
 /// 把一张图的字节交给系统分享面板。没装平台服务（宿主测试里）时什么都不做 ——
 /// 测试要钉的是「按了分享按钮有没有把字节递出去」，而递出去那一步在真机上才看得见。
-pub fn share_image(bytes: &[u8], mime: &str, name: &str, cx: &App) {
+pub fn share_file(bytes: &[u8], mime: &str, name: &str, cx: &App) {
     if let Some(services) = cx.try_global::<HostServices>() {
-        services.0.share_image(bytes, mime, name);
+        services.0.share_file(bytes, mime, name);
     }
+}
+
+/// 桌面才有的一条：把一份字节放到读者找得到的地方，并把**落到的路径**交回去。
+///
+/// 与 [`share_file`] 的区别只在返回值：分享面板那条不需要知道落在哪儿，而日志反馈要把这串
+/// 字写给读者看 —— `mailto:` 带不了附件，他得自己去那个位置把文件取出来附上。
+#[cfg(not(mobile))]
+pub fn save_copy(bytes: &[u8], name: &str) -> Option<std::path::PathBuf> {
+    desktop::write_to_downloads(bytes, name)
 }
 
 /// 把一张图的字节存进系统相册 / 下载目录。没装平台服务时什么都不做（同上）。

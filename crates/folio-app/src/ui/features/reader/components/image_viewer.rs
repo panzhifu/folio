@@ -589,7 +589,7 @@ impl ReaderSession {
 
     /// 「分享这一张」：把原图字节递给系统的分享面板。
     pub fn share_image(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.export_image(index, cx, crate::ui::host::share_image);
+        self.export_image(index, cx, crate::ui::host::share_file);
     }
 
     /// 「下载这一张」：把原图字节存进系统相册（桌面落到下载目录）。

@@ -100,7 +100,7 @@ pub(in crate::ui::features::reader) fn present(
             cx,
         );
         let Some(bytes) = bytes else { return };
-        cx.update(|cx| crate::ui::host::share_image(&bytes, "image/png", &name, cx));
+        cx.update(|cx| crate::ui::host::share_file(&bytes, "image/png", &name, cx));
     })
     .detach();
 }

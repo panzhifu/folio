@@ -1,4 +1,7 @@
-use super::{Directive, LogFile, build, log_file, purge_rotated, subscriber};
+use super::{
+    Directive, LogFile, build, feedback_snapshot, log_file, purge_rotated, snapshot_name,
+    subscriber,
+};
 use crate::infra::config::Logging;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -442,4 +445,70 @@ fn purge_rotated_removes_only_the_rotated_siblings() {
     // 没有轮转目录可删时（`logging.dir` 指到不存在的地方）安静回零，不 panic。
     let missing = dir.path().join("没有这里");
     assert_eq!(purge_rotated(&missing.join("folio.log")), (0, 0));
+}
+
+/// 反馈快照：头部那几样事实必须在，尾部必须是**结尾**那一截。
+#[test]
+fn a_snapshot_carries_the_facts_and_keeps_the_end_of_the_log() {
+    let dir = std::env::temp_dir().join(format!("folio-snap-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("folio.log");
+    // 60 行、每行 7 字节（`line00` + 换行），共 420 字节；只留 100 字节时该看到的是最后十四行。
+    let body: String = (0..60).map(|n| format!("line{n:02}\n")).collect();
+    std::fs::write(&file, body.as_bytes()).unwrap();
+
+    let snap = feedback_snapshot(1_760_000_000, &file, 100).unwrap();
+    let text = String::from_utf8(snap).unwrap();
+    for fact in [
+        "version:",
+        "platform:",
+        "locale:",
+        "config_dir:",
+        "data_dir:",
+        "log_file:",
+        "taken:",
+    ] {
+        assert!(text.contains(fact), "快照头部少了 {fact} 那一行：\n{text}");
+    }
+    assert!(text.contains("line59"), "尾部没留住最后一行");
+    assert!(!text.contains("line00"), "截尾留的是结尾，开头那行不该还在");
+    // 说清了「一共多少、留了多少」，读者才知道自己递出去的是不是一份。
+    assert!(text.contains("420 bytes, last 100 kept"), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_short_log_is_kept_whole() {
+    let dir = std::env::temp_dir().join(format!("folio-snap-short-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("folio.log");
+    std::fs::write(&file, b"short log\n").unwrap();
+    let text = String::from_utf8(feedback_snapshot(0, &file, 1024).unwrap()).unwrap();
+    assert!(
+        text.ends_with("short log\n"),
+        "比上限短的日志不该被切掉尾巴：\n{text}"
+    );
+    assert!(text.contains("last 10 kept"), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_missing_log_file_is_an_error_not_an_empty_snapshot() {
+    // 「日志没开」与「日志是空的」是两件事：递一份只有头部的空快照给作者，
+    // 两边都以为对方拿到了东西。
+    let dir = std::env::temp_dir().join(format!("folio-snap-none-{}", std::process::id()));
+    let err = feedback_snapshot(0, &dir.join("nope.log"), 1024).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+fn the_snapshot_name_is_sortable_and_names_the_platform() {
+    let early = snapshot_name(1_760_000_000);
+    let late = snapshot_name(1_760_003_600);
+    assert!(early.starts_with("folio-log-"), "{early}");
+    assert!(early.ends_with(".txt"), "{early}");
+    assert!(early.contains(std::env::consts::OS), "{early}");
+    // 字典序即时间序：作者收到一堆同名前缀的文件时，排一下就是按时间排。
+    assert!(early < late, "{early} 该排在 {late} 前面");
+    assert_ne!(early, late);
 }

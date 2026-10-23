@@ -589,7 +589,9 @@ fn confirm_body(job: Job, cx: &App, bytes: u64) -> String {
 ///
 /// 路径留在行上而不是只留一颗钮：手机上那一颗是尽力而为（没有应用认领这个目录就什么都不
 /// 发生，[`open_folder_button`] 那头只记一条 warn），那时这一串字是读者唯一拿得到的东西。
-/// 形状抄「关于」那页「配置文件在哪儿」那一格。
+/// 这一格从此是**桌面上唯一一处把目录路径写在界面上的地方** —— 「关于」那页的「配置文件
+/// 在哪儿」那一格已撤（撤的理由与代价记在 `pages/about.rs` 顶部；配置根的路径改由日志快照
+/// 头部交出，那里连数据根一起给）。
 fn location_rows(cx: &App) -> Vec<Row> {
     let areas = storage::areas(cx);
     let mut rows = vec![path_row(cx, "field.app_dir", areas.data.clone())];

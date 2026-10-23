@@ -16,20 +16,105 @@
 //   cd example/android_app/gradle
 //   gradle assembleDebug --offline
 
+import java.util.Properties
+
 plugins {
     id("com.android.application")
+}
+
+// ---- release 签名 ----
+//
+// 找到 keystore 就签，找不到就按环境分两种结局，这差别是有意的：
+//
+// - **本地开发**退回 debug 签名并 warn 一句。私钥只在两处离线备份里，不该要求每个工作副本
+//   都持有它才能跑 `assembleRelease` 试打包形状。
+// - **CI 里硬失败**。静默产出一个 debug 签名的 release 包并发出去，等于亲手触发那条不可逆
+//   事故：系统按签名判「是不是同一个应用」，发出去的包永远换不了签名，届时所有已装用户
+//   只能卸载重装。宁可红在这里。
+//
+// 配置的两个来源，按顺序取第一个能用的：
+//   1. 一份 properties 文件：`$FOLIO_KEYSTORE_PROPERTIES` 指哪儿读哪儿 → 否则试
+//      `~/.local/share/folio-keystore/keystore.properties`（本机的默认位置，**在仓库之外**）→
+//      否则试本目录的 `keystore.properties`（已被 .gitignore 收）。
+//   2. 环境变量（CI 那一侧的路子，secret 不进文件系统配置）：`FOLIO_KEYSTORE_FILE` /
+//      `FOLIO_KEYSTORE_PASSWORD` / `FOLIO_KEY_ALIAS` / `FOLIO_KEY_PASSWORD`。
+// 文件里那几个键名与环境变量名各管各的，两边都填时**文件优先**。
+//
+// keystore 本身（`.p12`）永不进版本库，也不在 CI 里解到 workspace —— 解到 workspace 有被
+// `upload-artifact` 顺手传出去的风险，那等于把私钥发到公网。CI 请解到 `$RUNNER_TEMP`。
+val keystorePropsFile = listOfNotNull(
+    System.getenv("FOLIO_KEYSTORE_PROPERTIES"),
+    System.getProperty("user.home")?.let { "$it/.local/share/folio-keystore/keystore.properties" },
+    "keystore.properties",
+).map(::File).firstOrNull { it.isFile }
+
+val keystoreProps = Properties().also { p ->
+    keystorePropsFile?.let { f -> f.inputStream().use { p.load(it) } }
+}
+
+fun signValue(key: String, env: String): String? =
+    keystoreProps.getProperty(key)?.takeIf { it.isNotBlank() }
+        ?: System.getenv(env)?.takeIf { it.isNotBlank() }
+
+val releaseStoreFile = signValue("storeFile", "FOLIO_KEYSTORE_FILE")
+val releaseStorePassword = signValue("storePassword", "FOLIO_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signValue("keyAlias", "FOLIO_KEY_ALIAS")
+val releaseKeyPassword = signValue("keyPassword", "FOLIO_KEY_PASSWORD")
+
+val releaseSigningReady =
+    listOf(releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword)
+        .all { it != null }
+
+val runningInCi = System.getenv("GITHUB_ACTIONS") == "true" ||
+    System.getenv("CI").orEmpty().equals("true", ignoreCase = true)
+
+if (!releaseSigningReady) {
+    val missing = buildString {
+        append("storeFile / storePassword / keyAlias / keyPassword 里至少一项没拿到")
+        keystorePropsFile?.let { append("（试过的配置文件：$it）") } ?: append("（没找到任何 keystore.properties）")
+    }
+    if (runningInCi) {
+        throw GradleException(
+            "release 签名配置缺失：$missing。CI 里这四枚 secret 要到位：" +
+                "FOLIO_KEYSTORE_FILE / FOLIO_KEYSTORE_PASSWORD / FOLIO_KEY_ALIAS / FOLIO_KEY_PASSWORD。" +
+                "**不能退回 debug 签名** —— 发出去的包一旦是 debug 签的，以后换不了签名。",
+        )
+    }
+    logger.warn(
+        "folio: 没有 release 签名配置，$missing；`assembleRelease` 这次会退回 **debug 签名**。" +
+            "本地试打包形状没问题，但**这种包绝不要发布**（详见 app/build.gradle.kts 顶部那段）。" +
+            "要接上真签名：把 keystore.properties 放到 ~/.local/share/folio-keystore/，" +
+            "或设 FOLIO_KEYSTORE_PROPERTIES 指到别处。",
+    )
 }
 
 android {
     namespace = "dev.folio.reader"
     compileSdk = 34
 
+    signingConfigs {
+        if (releaseSigningReady) {
+            create("folioRelease") {
+                // 路径来自配置文件或环境变量，所以这里**不写死绝对路径** —— 写死的那一份
+                // 在别人机器上与 CI 上都必然不存在，症状是「配置读到了却签不上」。
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                storeType = "PKCS12"
+            }
+        }
+    }
+
     defaultConfig {
         applicationId = "dev.folio.reader"
         minSdk = 26          // Vulkan 1.0 is mandatory from API 26+
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        // versionCode 每次发版都要 +1：系统按它判「这个包能不能覆盖上一个」，不递增的症状是安装器
+        // 拒绝覆盖安装，看着像自动更新坏了。Cargo 版本与 tag 那两处有 CI 一致性校验，只有这一处
+        // 没人管，所以单独留一行提醒。发版配方见 README「发版」那一节。
+        versionCode = 2
+        versionName = "0.1.1"
 
         // Tell NativeActivity which .so to load.
         // This must match the cdylib / example output name.
@@ -43,6 +128,12 @@ android {
 
     buildTypes {
         release {
+            // 拿到配置就签正式包，本地拿不到退回 debug（上面已经 warn 过），CI 拿不到直接失败。
+            signingConfig = if (releaseSigningReady) {
+                signingConfigs.getByName("folioRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

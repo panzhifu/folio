@@ -25,6 +25,14 @@
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <!--
+      In-app updates: after Folio downloads an APK and checks its SHA-256, it hands the
+      file to the system installer. That needs this permission; the actual install is
+      still confirmed by the reader in the system dialog. Not required to *launch* the
+      installer page (openInstallPermissionSettings) — that one works without it.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
       整机扫描（书架上的「扫描」）要读共享存储里的书。请求走 permission_handler
       的 MANAGE_EXTERNAL_STORAGE（「所有文件访问」，fork gpui-pre-mobile 29f19d3
       暴露的 API）：它不是运行时权限，而是带读者去系统设置页开开关。没授权时

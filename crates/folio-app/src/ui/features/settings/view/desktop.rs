@@ -31,6 +31,13 @@ pub struct SettingsView {
     /// 退订（`impl Drop for Subscription` 里直接调 `unsubscribe`），绑成局部变量等于没订阅。
     /// 少了它，后台扫完那一趟永远不会让这一屏重画。
     _storage_watch: Subscription,
+    /// 对「检查更新」状态实体的订阅，理由与上面那条一模一样：一次 GitHub 往返在**后台线程**
+    /// 上结束，那一格要从「正在检查…」变成结果，只能靠实体 `notify` 唤醒这一屏。
+    /// 少了这条订阅，症状是按钮按下去就永远停在「正在检查…」，而日志里那次检查是成功的。
+    _update_watch: Subscription,
+    /// 对「反馈日志」状态实体的订阅。同上一条：读盘与拼快照在后台线程上跑，
+    /// 那一格要从「正在整理日志…」变成结果，只能靠实体 notify 唤醒这一屏。
+    _feedback_watch: Subscription,
     /// 要定位到的那一页。**只在第一次渲染时取用** —— 组件的选择状态挂在
     /// `window.use_keyed_state(id)` 上，之后再传 `default_selected_index` 也没用，
     /// 所以取走之后就置 `None`，屏内换页由组件自己管。
@@ -38,14 +45,20 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    /// `cx` 只为一条订阅：「存储」那一页的每一格现读读数实体，而静态设置页拿不住 `Task`
-    /// —— 后台扫完那一趟要靠实体 `notify` 唤醒这一屏。理由与 [`CompactSettings::new`] 同一份，
-    /// 两边都不等外壳先装句柄：`storage::entity` 没有就建。
+    /// `cx` 只为两条订阅：「存储」那一页的每一格现读读数实体，「关于」那一格现读更新状态 ——
+    /// 静态设置页拿不住 `Task`，后台跑完的那一趟要靠实体 `notify` 唤醒这一屏。理由与
+    /// [`CompactSettings::new`] 同一份，两边都不等外壳先装句柄：`entity` 没有就建。
     pub fn new(page: SettingsPage, cx: &mut Context<Self>) -> Self {
         let storage = crate::ui::services::storage::entity(cx);
         let watch = cx.observe(&storage, |_, _, cx| cx.notify());
+        let update = crate::ui::services::update::entity(cx);
+        let update_watch = cx.observe(&update, |_, _, cx| cx.notify());
+        let feedback = crate::ui::services::feedback::entity(cx);
+        let feedback_watch = cx.observe(&feedback, |_, _, cx| cx.notify());
         Self {
             _storage_watch: watch,
+            _update_watch: update_watch,
+            _feedback_watch: feedback_watch,
             initial: Some(page.index()),
         }
     }

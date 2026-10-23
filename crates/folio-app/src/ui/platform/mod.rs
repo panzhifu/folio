@@ -116,23 +116,61 @@ pub(crate) fn send_task_to_back() {}
 
 /// 这一端有没有**系统级的分享面板**可递。书架卡片菜单据此决定摆不摆「分享」那一条。
 ///
-/// 判据只写在这一处（[`RENDERS_SHARE_CARDS`] 是同一个理由）：[`share_image`] 那三条臂里，
+/// 判据只写在这一处（[`RENDERS_SHARE_CARDS`] 是同一个理由）：[`share_file`] 那三条臂里，
 /// 桌面是把字节写进下载目录 —— 那是「下载」不是「分享」；iOS / HarmonyOS 安静 no-op；
 /// 只有 Android 真弹出一个让读者挑应用的面板。摆一条按下去什么都不弹出的条目，
 /// 读者读到的是「这个应用的分享坏了」。
+/// 这一端能不能走「在应用里下载并安装」那条路。
+///
+/// 只有 Android：iOS 与 HarmonyOS 没有这种口子（它们的更新只能走商店），桌面这一版
+/// 刻意不做（替换正在运行的二进制不是一个阅读器该自作主张的事，见 README「发版」）。
+/// 判据只写在这一处，与 [`HAS_SHARE_SHEET`] 同一条理由：摆一颗按下去什么都不会发生的按钮，
+/// 读者读到的是「这个应用的更新坏了」。
+pub(crate) const HAS_SELF_INSTALL: bool = cfg!(target_os = "android");
+
+/// 系统有没有给本应用开「请求安装应用」的权限。非 Android 恒为 `false`（那条 UI 不出现）。
+#[cfg(target_os = "android")]
+pub(crate) fn can_request_installs() -> bool {
+    android::can_request_installs()
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn can_request_installs() -> bool {
+    false
+}
+
+/// 把读者送到系统那一页自己去开权限。开了之后**不自动续跑**下载：
+/// 那件事的完成时刻由读者决定，自动续跑会撞上「权限还没生效」那一档，看起来像坏了。
+#[cfg(target_os = "android")]
+pub(crate) fn open_install_permission_settings() {
+    android::open_install_permission_settings();
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn open_install_permission_settings() {}
+
+/// 把下好的 APK 交给系统安装器（真正的安装确认在系统那一屏，不在本应用里）。
+#[cfg(target_os = "android")]
+pub(crate) fn install_apk(path: &std::path::Path) {
+    android::install_apk(path);
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn install_apk(_path: &std::path::Path) {}
+
 pub(crate) const HAS_SHARE_SHEET: bool = cfg!(target_os = "android");
 
 /// 把一张图的字节交给系统分享面板。图片查看器那一层的「分享」按钮走它。
 ///
 /// - **Android**：递给 `GpuiSystemUi.shareImage`，那边落进 `cache/share/` 再用
-///   FileProvider 发 `ACTION_SEND`（见 [`android::share_image`]）。
+///   FileProvider 发 `ACTION_SEND`（见 [`android::share_file`]）。
 /// - **iOS / HarmonyOS**：还没有这一档，安静 no-op。
 ///
 /// 桌面端不经这条路：它由 `host::desktop` 直接落到下载目录（没有系统分享面板）。
 #[cfg(mobile)]
-pub(crate) fn share_image(bytes: &[u8], mime: &str, name: &str) {
+pub(crate) fn share_file(bytes: &[u8], mime: &str, name: &str) {
     #[cfg(target_os = "android")]
-    android::share_image(bytes, mime, name);
+    android::share_file(bytes, mime, name);
     #[cfg(not(target_os = "android"))]
     let _ = (bytes, mime, name);
 }
@@ -154,7 +192,7 @@ pub(crate) fn save_image(bytes: &[u8], mime: &str, name: &str) {
 /// - **桌面**：起一个 `xdg-open`（Linux）/ `open`（macOS）/ `explorer`（Windows），
 ///   进程起来了就算 `true` —— 桌面环境那头开没开窗，这一层看不到。
 /// - **Android / iOS**：递一条 `ACTION_VIEW` 给系统挑应用（fork 的 `url_launcher`，
-///   走 JNI，所以和 [`share_image`] 一样只能在界面线程上调）。这一条是尽力而为：没有
+///   走 JNI，所以和 [`share_file`] 一样只能在界面线程上调）。这一条是尽力而为：没有
 ///   应用认领这个 URI、或系统不肯收 `file://`（Android 7 起 StrictMode 对它有感）时
 ///   返回 `false`，界面上那一格仍留着路径本身，读者不至于什么也拿不到。
 /// - **HarmonyOS**：没有这条路，`false`。
@@ -192,6 +230,55 @@ pub(crate) fn open_folder(path: &std::path::Path) -> bool {
 
 #[cfg(all(mobile, not(target_os = "android")))]
 pub(crate) fn open_folder(_path: &std::path::Path) -> bool {
+    false
+}
+
+/// 打开一个 **http(s) 链接**：交给系统的浏览器。
+///
+/// 与 [`open_folder`] 同一条形状、同一份「返回的是有没有人接手，不是读者一定看见了」的语义，
+/// 但它是**另一个函数**而不是同一个的 URL/路径分支：两者的判据不一样 —— 目录那条要拼
+/// `file://`，链接那条绝不能拼；把它们混进一个入口，症状是浏览器收到 `file://https://…`。
+///
+/// 用在哪：发现新版本时那颗「打开下载页」，以及检查失败时「去发布页看一眼」那一句。
+/// 返回 `false` 时界面仍留着**链接本身**可复制 —— 与 [`open_folder`] 那一格同样的兜底理由。
+#[cfg(not(mobile))]
+pub(crate) fn open_url(url: &str) -> bool {
+    use std::process::Command;
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        // Windows 上没有 `xdg-open` 那种通用口；`cmd /c start` 才是交给默认浏览器的那一条，
+        // 而 `start` 的第一个实参是一个**窗口标题占位**，空串不能省 —— 省了会把 URL 当成标题。
+        return Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .is_ok();
+    } else {
+        "xdg-open"
+    };
+    match Command::new(opener).arg(url).spawn() {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!("open_url: {opener} 起不来：{error}");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn open_url(url: &str) -> bool {
+    use gpui_mobile::packages::url_launcher;
+    match url_launcher::launch_url(url) {
+        Ok(launched) => launched,
+        Err(error) => {
+            tracing::warn!("open_url: {error}");
+            false
+        }
+    }
+}
+
+#[cfg(all(mobile, not(target_os = "android")))]
+pub(crate) fn open_url(_url: &str) -> bool {
     false
 }
 

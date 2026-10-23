@@ -1168,7 +1168,7 @@ impl ShelfView {
                 tracing::warn!("分享: 读不出 {} 的字节", logged.display());
                 return;
             };
-            let _ = this.update(cx, |_, cx| host::share_image(&bytes, mime, &name, cx));
+            let _ = this.update(cx, |_, cx| host::share_file(&bytes, mime, &name, cx));
         })
         .detach();
     }

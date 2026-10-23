@@ -44,7 +44,7 @@ impl Host for DesktopHost {
         false
     }
 
-    fn share_image(&self, bytes: &[u8], _mime: &str, name: &str) {
+    fn share_file(&self, bytes: &[u8], _mime: &str, name: &str) {
         // 桌面没有系统级分享面板：落到下载目录并写一行日志，读者自己去取。
         write_to_downloads(bytes, name);
     }
@@ -66,11 +66,14 @@ impl Host for DesktopHost {
     }
 }
 
-/// 桌面版「分享 / 下载」的落点：`~/Downloads`（拿不到就退到系统临时目录）。
+/// 桌面版「分享 / 下载 / 日志副本」的落点：`~/Downloads`（拿不到就退到系统临时目录）。
 ///
 /// 桌面没有系统分享面板，「分享」与「下载」因此是同一件事 —— 把文件放一个读者找得到的
 /// 地方。失败只写日志：一次分享没落盘不该把阅读页拖退。
-fn write_to_downloads(bytes: &[u8], name: &str) {
+///
+/// 返回落到的路径（失败 `None`）：反馈那一屏要把这串字**写给读者看**（他得知道去哪找那个
+/// 文件来附到邮件上），所以这里不能只留一行日志。
+pub(crate) fn write_to_downloads(bytes: &[u8], name: &str) -> Option<std::path::PathBuf> {
     let dir = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .map(|home| home.join("Downloads"))
@@ -78,7 +81,14 @@ fn write_to_downloads(bytes: &[u8], name: &str) {
         .unwrap_or_else(std::env::temp_dir);
     let path = dir.join(name);
     match std::fs::write(&path, bytes) {
-        Ok(()) => tracing::info!("图片已写到 {}", path.display()),
-        Err(err) => tracing::warn!("写 {} 失败：{err}", path.display()),
+        // 文案不写「图片」：这一条现在也收日志文件。
+        Ok(()) => {
+            tracing::info!("已写到 {}", path.display());
+            Some(path)
+        }
+        Err(err) => {
+            tracing::warn!("写 {} 失败：{err}", path.display());
+            None
+        }
     }
 }

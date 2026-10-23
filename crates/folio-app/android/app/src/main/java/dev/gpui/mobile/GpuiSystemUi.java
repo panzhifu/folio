@@ -257,4 +257,72 @@ public final class GpuiSystemUi {
         }
         decor.setSystemUiVisibility(flags);
     }
+
+    /**
+     * Whether this app is allowed to ask the system to install APKs.
+     *
+     * That is a per-app grant on Android 8+ (Settings > Install unknown apps), and
+     * {@link android.content.pm.PackageManager#canRequestPackageInstalls} is the only
+     * way to read it. minSdk is 26, so no version guard is needed here.
+     */
+    public static boolean canRequestInstalls(Activity activity) {
+        if (activity == null) return false;
+        try {
+            return activity.getPackageManager().canRequestPackageInstalls();
+        } catch (Exception e) {
+            android.util.Log.e("GpuiSystemUi", "canRequestInstalls failed", e);
+            return false;
+        }
+    }
+
+    /**
+     * Open the system page where the reader grants that permission to Folio.
+     *
+     * We do not poll for the result: the page is outside this process, and coming back
+     * is a deliberate act by the reader, so the UI asks them to tap "check for updates"
+     * once more rather than us resuming a download they may never finish approving.
+     */
+    public static void openInstallPermissionSettings(Activity activity) {
+        if (activity == null) return;
+        try {
+            Intent intent = new Intent(
+                    android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + activity.getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            activity.startActivity(intent);
+        } catch (Exception e) {
+            android.util.Log.e("GpuiSystemUi", "openInstallPermissionSettings failed", e);
+        }
+    }
+
+    /**
+     * Hand a downloaded APK to the system installer.
+     *
+     * {@code absolutePath} must live under a root declared in res/xml/file_paths.xml —
+     * Folio writes it to {@code <filesDir>/folio/data/apk/}, which is the "apk" entry
+     * there. A path outside those roots makes FileProvider throw IllegalArgumentException,
+     * which is by design: it is what stops us exposing arbitrary files to the installer.
+     *
+     * The installer runs in another process, hence the read grant. FLAG_ACTIVITY_NEW_TASK
+     * is required because we may be called from outside an activity context.
+     */
+    public static void installApk(Activity activity, String absolutePath) {
+        if (activity == null || absolutePath == null || absolutePath.isEmpty()) return;
+        try {
+            File apk = new File(absolutePath);
+            if (!apk.isFile()) {
+                android.util.Log.e("GpuiSystemUi", "installApk: no such file " + absolutePath);
+                return;
+            }
+            Uri uri = FileProvider.getUriForFile(
+                    activity, activity.getPackageName() + ".fileprovider", apk);
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            activity.startActivity(intent);
+        } catch (Exception e) {
+            android.util.Log.e("GpuiSystemUi", "installApk failed", e);
+        }
+    }
 }

@@ -509,5 +509,71 @@ impl<'a> MakeWriter<'a> for LogFile {
     }
 }
 
+/// 反馈用的日志快照：头部几行事实 + 日志的**尾部**。
+///
+/// 为什么要头部那几行：一条「打不开书」的反馈，缺这几样就得来回问 —— 版本号、平台、界面语言、
+/// 两个目录（桌面上配置根与数据根是**两个地方**，读者报一个另一个就够误导）、日志本身在哪。
+/// 其中两条目录正是「关于」那一屏撤掉「配置文件在哪儿」之后，读者还能拿到它们的唯一去处
+/// （见 `folio-app` 的 `settings/view/pages/about.rs` 顶部）。
+///
+/// 为什么只给尾部：日志会一直长（上限是配置里的 `max_bytes`，写满停手，旧的轮转成 `.1`/`.2`），
+/// 而出事总在最后。整本递给作者等于把读者**从头到尾看过的书名**一起递过去 ——
+/// `import:` 那些行是带书名与落盘路径的。截尾既是最有用的那一段，也顺带少带一截历史。
+///
+/// 时间戳用 **UTC**：日志行本身不带时间戳（`Targets` 那层没开 timer），这一串只是给文件名
+/// 一个能排序、能防撞的形状，不是给读者对时刻用的。
+pub fn feedback_snapshot(now: i64, log_path: &Path, tail: u64) -> std::io::Result<Vec<u8>> {
+    let bytes = std::fs::read(log_path)?;
+    let kept = if tail > 0 && (bytes.len() as u64) > tail {
+        &bytes[bytes.len() - tail as usize..]
+    } else {
+        &bytes[..]
+    };
+    let stamp = format_stamp(now);
+    let mut out = Vec::with_capacity(kept.len() + 512);
+    let header = format!(
+        "folio 反馈日志\nversion: {}\nplatform: {} {}\nlocale: {}\nconfig_dir: {}\ndata_dir: {}\nlog_file: {} ({} bytes, last {} kept)\ntaken: {} UTC\n----\n",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        crate::infra::i18n::current().code(),
+        crate::infra::paths::config_dir().display(),
+        crate::infra::paths::data_dir().display(),
+        log_path.display(),
+        bytes.len(),
+        kept.len(),
+        stamp,
+    );
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(kept);
+    Ok(out)
+}
+
+/// 快照的文件名：`folio-log-<版本>-<平台>-<YYYYMMDD>-<HHMM>.txt`。
+///
+/// 名字里带版本与平台是省一轮问答：邮件里读者常忘了说自己在装什么，而这两个恰好是
+/// 看日志之前就要知道的事。
+pub fn snapshot_name(now: i64) -> String {
+    let stamp = format_stamp(now);
+    format!(
+        "folio-log-{}-{}-{}.txt",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        stamp.replace(['-', ':'], "")
+    )
+}
+
+/// `now`（unix 秒）→ `2026-10-24 13:30`，UTC。
+fn format_stamp(now: i64) -> String {
+    let day = now.div_euclid(86_400);
+    let secs = now.rem_euclid(86_400);
+    format!(
+        "{} {:02}:{:02}",
+        crate::infra::time::civil_date(day),
+        secs / 3_600,
+        (secs % 3_600) / 60,
+    )
+}
+
 #[cfg(test)]
 mod tests;

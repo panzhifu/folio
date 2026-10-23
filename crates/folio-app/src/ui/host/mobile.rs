@@ -56,8 +56,8 @@ impl Host for MobileHost {
         true
     }
 
-    fn share_image(&self, bytes: &[u8], mime: &str, name: &str) {
-        crate::ui::platform::share_image(bytes, mime, name);
+    fn share_file(&self, bytes: &[u8], mime: &str, name: &str) {
+        crate::ui::platform::share_file(bytes, mime, name);
     }
 
     fn save_image(&self, bytes: &[u8], mime: &str, name: &str) {

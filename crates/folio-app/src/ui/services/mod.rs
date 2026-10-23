@@ -8,10 +8,12 @@
 
 pub mod app_store;
 pub mod config;
+pub mod feedback;
 pub mod import_queue;
 pub mod l10n;
 pub mod library;
 pub mod resident;
 pub mod storage;
 pub mod transfer;
+pub mod update;
 pub mod watch;

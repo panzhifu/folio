@@ -269,7 +269,80 @@ pub(crate) fn adjust_volume(up: bool) {
 /// 字节从这边过去而不是递一个文件路径：图存在容器里（EPUB 是 zip），Reader 手上本来
 /// 就没有盘上的文件；那边收下字节自己落进 `cache/share/` 再用 FileProvider 发出去。
 /// 形状照 [`set_immersive`]：递给 Java、它自己切回 UI 线程，失败只写日志。
-pub(crate) fn share_image(bytes: &[u8], mime: &str, name: &str) {
+/// 这台设备有没有允许本应用「请求安装应用」。
+///
+/// 读的是 `PackageManager.canRequestPackageInstalls()`（API 26+，minSdk 就是 26，不用版本门）。
+/// 返回 `false` 时**不去猜**读者会不会同意，直接把他送到系统那一页自己去开。
+pub(crate) fn can_request_installs() -> bool {
+    use ::jni::objects::{JValue, JValueOwned};
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        match env.call_static_method(
+            &cls,
+            ::jni::jni_str!("canRequestInstalls"),
+            ::jni::jni_sig!("(Landroid/app/Activity;)Z"),
+            &[JValue::Object(&act)],
+        ) {
+            // 返回值是 `JValueOwned`（调用方持有），不是传参用的 `JValue`；
+            // 而这版 jni 的 Bool 变体装的是 Rust bool，不是 u8。两处都不是能猜的。
+            Ok(JValueOwned::Bool(v)) => Ok(v),
+            Ok(other) => Err(format!("canRequestInstalls 回了个非布尔：{other:?}")),
+            Err(err) => Err(err.to_string()),
+        }
+    })
+    .unwrap_or_else(|err| {
+        // 问不到就当没授权：症状是多跳一次系统设置页，而不是拿着一个装不上的包去撞安装器。
+        tracing::warn!("can_request_installs: {err}");
+        false
+    })
+}
+
+/// 打开系统那一页（「允许安装未知应用」），让读者自己授权。
+pub(crate) fn open_install_permission_settings() {
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    let _ = with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("openInstallPermissionSettings"),
+            ::jni::jni_sig!("(Landroid/app/Activity;)V"),
+            &[JValue::Object(&act)],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    });
+}
+
+/// 把下好的 APK 交给系统安装器。
+///
+/// `path` 必须落在 `res/xml/file_paths.xml` 声明过的那个根里（`folio/data/apk/`），
+/// 否则 Java 那头 `FileProvider` 抛 `IllegalArgumentException` —— 那是安全设计，不是 bug，
+/// 所以这里不试图绕过去（比如换个目录再试）。
+pub(crate) fn install_apk(path: &std::path::Path) {
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    let _ = with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        let arg = env
+            .new_string(path.display().to_string())
+            .map_err(|e| e.to_string())?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("installApk"),
+            ::jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;)V"),
+            &[JValue::Object(&act), JValue::Object(&arg)],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    });
+}
+
+pub(crate) fn share_file(bytes: &[u8], mime: &str, name: &str) {
     use ::jni::objects::JValue;
     use gpui_mobile::android::jni::{activity, find_app_class, with_env};
     match with_env(|env| {
@@ -294,8 +367,8 @@ pub(crate) fn share_image(bytes: &[u8], mime: &str, name: &str) {
         .map(|_| ())
         .map_err(|err| err.to_string())
     }) {
-        Ok(()) => tracing::debug!("share_image: 已递给系统"),
-        Err(err) => tracing::warn!("share_image: {err}"),
+        Ok(()) => tracing::debug!("share_file: 已递给系统"),
+        Err(err) => tracing::warn!("share_file: {err}"),
     }
 }
 

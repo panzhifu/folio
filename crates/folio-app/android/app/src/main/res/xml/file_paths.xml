@@ -3,4 +3,14 @@
      reader image into cache/share/, so this must cover exactly that directory. -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="share" path="share/" />
+
+    <!--
+      In-app updates. The downloaded APK lives under the app's *files* root
+      (<filesDir>/folio/data/apk/), not the cache root the entry above covers, because
+      that is where the Rust side's data directory actually is — see
+      ui/platform/android.rs (set_app_dirs). Declaring a root here is the whole
+      difference between exposing one directory to the installer and exposing anything
+      the path string happens to name.
+    -->
+    <files-path name="apk" path="folio/data/apk/" />
 </paths>
