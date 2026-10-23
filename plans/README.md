@@ -1,6 +1,9 @@
 # Folio 开发计划
 
-基于 gpui-kit 的中文电子书阅读器，桌面（Wayland）与 Android 两端一份实现。支持哪些格式**以 provider 注册表为准**（`content/format/provider.rs` 的 `providers()`，现在 21 个），这份文档不抄第二张表。
+基于 gpui-kit 的中文电子书阅读器，桌面（Wayland）与 Android 两端一份实现 —— **一份实现，对外发四端**：
+Linux / macOS / Windows / Android 的包由发布 workflow 各出一格，但**量过行为、跑过真机的只有
+桌面 Wayland 与 Android 那两格**（macOS 与 Windows 是 v0.1.1 新加的，形状与限制记在
+[更新与发布.md](更新与发布.md) §四 与 README 的「发版」那一节）。支持哪些格式**以 provider 注册表为准**（`content/format/provider.rs` 的 `providers()`，现在 21 个），这份文档不抄第二张表。
 
 ## 文档索引
 
@@ -16,6 +19,7 @@
 | [M5-refactor.md](M5-refactor.md) | 架构重构（KOReader 式模块化）+ 绘制层简化 + 引擎查询接口 |
 | [M6-selection.md](M6-selection.md) | 选中一期：长按选词、拖动扩展、复制 |
 | [M7-annotations.md](M7-annotations.md) | 批注二期设计：TextAnchor 落库、回显、侧栏 |
+| [更新与发布.md](更新与发布.md) | v0.1.1 四件事 + 一处减法 + 三项发布配套：双仓发布（源码私有 / 软件公开）、安卓下载校验装、更新日志卡片、日志反馈、CI 出四端安装包，关于页删配置文件那一组；license 转私有、安卓 keystore、CHANGELOG；含前置凭证、Windows 批次 0 与四条未决 |
 | [images-lazy.md](images-lazy.md) | 图片不落字节：学 KOReader 从容器按需读（images 表只剩元数据） |
 | [text-out-of-db.md](text-out-of-db.md) | 正文出库：库里只存「怎么加载」（`chapters.locator`），打开时回容器取 |
 | [background-pipeline.md](background-pipeline.md) | 后台任务管线（`task`）：可取消、可报进度的后台作业 |

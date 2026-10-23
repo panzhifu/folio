@@ -1,6 +1,6 @@
 ---
 name: codeing tool
-description: This repo commits and pushes through jj (Jujutsu, colocated with .git) and searches code with rg / rga / ast-grep. Use when describing, splitting, squashing, undoing or pushing changes here, when reading jj status/log or moving the main bookmark, when tempted to use git add/commit/checkout/stash in this repo, when looking for a symbol, signature, or text across the Rust sources, plans docs, or EPUB fixtures, and when using this machine's CLI setup (mold wired for the host triple, just without a justfile, scrcpy for on-device measurement).
+description: This repo commits and pushes through jj (Jujutsu, colocated with .git), tags releases with git tag in the colocated repo, and searches code with rg / rga / ast-grep. Use when describing, splitting, squashing, undoing or pushing changes here, when reading jj status/log or moving the main bookmark, when cutting a version tag or a release build, when tempted to use git add/commit/checkout/stash in this repo, when looking for a symbol, signature, or text across the Rust sources, plans docs, or EPUB fixtures, and when using this machine's CLI setup (mold wired for the host triple, just without a justfile, scrcpy for on-device measurement).
 ---
 
 ## 概述
@@ -43,6 +43,24 @@ jj new                          # 起下一个 change；不写这句，下一次
   `jj abandon`（丢掉一个 change）。
 - `main*` 结尾的星号 = 这个 bookmark 还没推到远端；`main@origin` 是远端那份的位置。
 - **推的时机由用户点头**，不要在同一轮修复里顺手推；`git rm`、删产物这类也单独确认。
+
+### 打 tag 与发版
+
+本机 jj 0.46.0 实测：**colocated 仓里 `git tag` 建出来的 tag jj 认** —— `jj tag list` 列得出，
+`jj git push` 接得住（上一条「别用 git 写入」讲的是 commit/checkout/stash 那些会动 HEAD 与
+index 的命令，tag 不在这之列：它只是一个 ref，jj 下一次快照会 import 进来）。
+
+```bash
+jj bookmark set main -r @        # 先把 main 挪到要发的那个 change
+git tag v0.1.1                   # 打 tag
+jj tag list                      # 确认列出的就是那一个（顺手留下的第二个会一起被推上去）
+jj git push --dry-run            # 应报出「tag: v0.1.1 [add to <sha>]」这一行
+jj git push                      # 真推 —— 这一步会触发发布 workflow，要用户明确点头
+```
+
+`--dry-run` 与 `jj tag list` 那两行不是仪式：**推 tag = 往公网发不可撤销的正式包**，而发出去的
+Android 包永远换不了签名（换 keystore 等于所有已装用户卸载重装）。发版流程与四端的限制清单在
+`README.md` 的「发版」那一节，删除测试 tag 用 `git tag -d <名>`。
 
 ### 提交信息
 

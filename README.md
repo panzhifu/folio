@@ -150,6 +150,53 @@ CARGO_TARGET_DIR=~/.cache/folio-mobile-android \
 推之前要显式把 `main` 挪到要推的 change 上（`@` 前进不带 bookmark 一起走）；jj 会把**未被 ignore**
 的文件当成待提交改动收进工作副本，本机 scratch 先进 ignore 名单再落提交。
 
+## 发版
+
+一份实现，**四端出包**：Linux（`.tar.xz` / `.deb` / `.rpm`）、macOS、Windows、
+Android（`arm64-v8a`）。包与更新日志发布在公开的 `panzhifu/folio-releases`，本仓库继续私有
+（形状见上面的 License 那一节）。
+
+各端要知道的限制，发版时逐条抄进 release 正文，别只留一个绿色对勾：
+
+- **macOS 未签名、未公证**：没有开发者证书，读者首次打开要在「隐私与安全性」里允许一次。
+- **Windows 未经真机验证**：CI 那侧编得过、出得到包，但没有人在一台 Windows 机器上装过它。
+- **Android 只出 `arm64-v8a`**，要求 Android 8.0（API 26）以上的 64 位设备；CI 那条
+  `aarch64-linux-android26-clang` 就是这一档的依据（`libnativewindow.so` 只在 API 26+ 的
+  sysroot 里）。
+- **HarmonyOS 与 iOS 不发**：`crates/folio-app/ohos/` 是完整的宿主工程，iOS 那侧的
+  staticlib 也连着，但这两个不在发布矩阵里 —— 说清这一条是为了没人来问「是不是漏发了」。
+- **听书只有 Linux 与 Android**：`tts` 那条依赖门在 `crates/folio-core/Cargo.toml:107`，
+  macOS 与 Windows 上那一格不出现。
+
+### 版本号与 tag
+
+三处必须一致：**`Cargo.toml` 的 workspace `version`**、**`android/app/build.gradle.kts`
+的 `versionName`**、**tag 名**（`v<版本>`）。`crates/*/Cargo.toml` 用 `license.workspace`
+那样继承版本，代码里那串 `env!("CARGO_PKG_VERSION")` 就是从 workspace 来的，所以只有
+前两处需要人管。
+
+**`versionCode` 每次发版都要 +1**，而它不在上面那三处里 —— 一致性校验查不出「忘了递增」，
+忘了的结果是系统安装器拒绝覆盖安装，症状长得像自动更新坏了。这是这一条单独写一行的原因。
+
+流程：`CHANGELOG.md` 平时把改动记在 `[Unreleased]` 段下；发版那天把那段改名成
+`[<版本>] - <日期>`、在它下面开一个新的空 `[Unreleased]`，然后打 tag。CI 取最新一段搬进
+release 正文，应用内「设置 → 关于 → 更新日志」显示的就是它。
+
+tag 的配方（本机 jj 0.46.0 实测：colocated 仓里 `git tag` 建出来的 tag **jj 认**，
+`jj tag list` 列得出，`jj git push` 也接得住）：
+
+```bash
+jj bookmark set main -r @        # 先把 main 挪到要发的那个 change 上
+git tag v0.1.1                   # 打 tag（jj 会自己 import 过来）
+jj git push --dry-run            # 看清「哪个 bookmark 前进 + 哪个 tag 要新增」
+jj tag list                      # 确认列出的就是那一个，不是顺手留下的第二个
+jj git push                      # 真推：bookmark 与 tag 一起出去
+```
+
+**最后那一步是不可逆的**：推 tag 会触发发布 workflow，往公网发出正式包，而发布出去的
+Android 包**永远换不了签名** —— 换 keystore 等于所有已装用户必须卸载重装。所以推之前
+`--dry-run` 与 `jj tag list` 那两行不是仪式，是闸门。
+
 ## 日志
 
 日志是**后端的一部分**，不是界面的一条附属功能：`folio-core` 里那些最容易出错的地方
@@ -238,7 +285,24 @@ cargo run -p folio-core --example css-gap -- x.epub # 或任意一本
 - [`plans/M5-refactor.md`](plans/M5-refactor.md) —— 架构重构 + 绘制简化 + 引擎查询接口
 - [`plans/M6-selection.md`](plans/M6-selection.md) —— 选中一期
 - [`plans/M7-annotations.md`](plans/M7-annotations.md) —— 批注二期设计
+- [`plans/更新与发布.md`](plans/更新与发布.md) —— v0.1.1：自动更新、更新日志、日志反馈、四端出包与发布形状
 
 ## License
 
-MIT
+MIT。声明写在 `Cargo.toml` 的 `license` 字段上，两个 crate 由 `license.workspace = true` 继承，
+本文件与 `crates/*/Cargo.toml` 的 `publish = false` 一起，就是这一版的许可形状。
+
+**一句要说清的现状**：这一版**源码不公开**（本仓库私有），公开的是**安装包** —— 每个版本的
+四端包、校验和与更新日志都在 [`panzhifu/folio-releases`](https://github.com/panzhifu/folio-releases)
+的 release 上。所以「挂着 MIT 却拿不到源码」不是漏了一环：`publish = false` 加上仓库可见性
+决定了外部读不到那份 `Cargo.toml`，而真正发出去的是二进制。哪天要把源码放出去，改的是这一节
+与那两个字段，不是把安装包撤掉。
+
+folio 用到的第三方库的版权与许可文本随**每一个安装包**发布（`THIRD-PARTY-NOTICES.txt`），
+应用内「设置 → 关于」也能在**不联网**的情况下读到它们 —— 这一条与上面那纸 MIT 无关，
+是那些依赖自己的许可证在二进制分发下的要求，不因本软件是否开源而免除。
+
+**`reference/` 那一目录永远不入库**（`.gitignore` 里那条 `/reference/`）。里面是借鉴用的上游
+整份克隆，含 AGPL-3.0 的项目（KOReader、readest）。它们是**参考实现，不是依赖**：一行代码都不
+从那儿来，构建也不读那儿。这个边界在只发二进制的现在比开源时更要紧 —— 把任何一份 AGPL 参考
+实现提交进来，等于自己把发布形状弄脏。要拉取方式见 `reference/README.md`。

@@ -66,6 +66,33 @@
 - 验证卫生：`screencap` 整帧 md5 必变（状态栏时钟），比对要裁状态栏数内容区差异像素；
   判断输入行为前先 `am force-stop` + `am start` 取基线（出现过幽灵触摸）。
 
+### debug 编出的 `.so` 里**没有图标**，而且不报错
+
+`cargo ndk … build --lib`（不带 `--release`）装到机器上，症状是**文字全正常、图标一个都不见**：
+底栏四个、搜索镜、菜单三点、设置页每一格的图标，全是空白。没有 panic，没有 logcat 报错，
+`folio.log` 里也一个字都没有。
+
+原因不在 folio：`gpui-kit` 的 `crates/assets/Cargo.toml:28` 用 `rust-embed = "8.7.2"`，
+**没开 `debug-embed`**。rust-embed 的默认行为是「debug 构建下不嵌字节，运行时按编译期记下的
+**绝对路径**去读盘」，那个路径是构建机上的 `~/.cargo/git/checkouts/gpui-kit-…/assets/icons`。
+桌面上 debug 跑没事（那条路径就在这台机器上，实测存在），手机上它不存在，于是每一次
+`Assets::get()` 都落空 —— 而组件对「取不到图标」的处理是**什么都不画**，所以连一句错都没有。
+
+两条实测的分辨方法，比看症状快：
+
+```bash
+strings -a android/app/src/main/jniLibs/arm64-v8a/libfolio_app.so | grep -c '<svg'
+#   release：1830        debug：0
+```
+
+所以：**上机验证一律 `--release` 编 `.so`**（README 那条配方就是这么来的，`gradle assembleDebug`
+只决定 APK 的签名，不影响图标）。想在 debug 下也嵌，得给 `rust-embed` 开 `debug-embed`，
+那是上游的 feature，不在本仓库能改的范围里。
+
+顺带一条同源的坑：debug 的 `libfolio_app.so` 带全量 DWARF，实测 **1.4 GB**；
+`llvm-strip` 之后 139 MB。release 是 36 MB，不用剥。
+
+
 ## 语料与格式
 
 - Markdown 适配器按 `#`/`##` 分章：以标题开头的语料 chapter 0 只有标题，看起来像
