@@ -114,6 +114,7 @@ compact = "Compacte"
 comfortable = "Confortable"
 
 [page]
+storage = "Stockage"
 typography = "Texte"
 layout = "Mise en page"
 fonts = "Polices"
@@ -125,6 +126,8 @@ toc = "Sommaire"
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
 [group]
+usage = "Utilisation"
+cleanup = "Nettoyage"
 body = "Corps du texte"
 paragraph = "Paragraphe"
 page_turn = "Pagination"
@@ -139,6 +142,8 @@ rows = "Lignes"
 marking = "Marquages"
 
 [field]
+app_dir = "Dossier de données de l'app"
+log_dir = "Dossier des journaux"
 font_size = "Taille du texte"
 "font_size.desc" = "Taille du corps du texte, en pixels."
 line_height = "Interligne"
@@ -246,46 +251,37 @@ notes = "Aucune annotation pour l’instant"
 # - 「今天还没读」与「读不到书库」是两句话：前者是真实读数 0，后者是功能没数据源。
 # - 时间范围是这一屏内的筛选，不是三个页面，所以措辞是「近 N 天」而不是名词化的标签。
 [stats]
-today = "Aujourd’hui"
-today_none = "Rien de lu aujourd’hui"
-streak = "Jour %{days} d’affilée"
-streak_none = "Aucune série en cours"
-range_7 = "7 derniers jours"
-range_14 = "14 derniers jours"
-range_30 = "30 derniers jours"
-trend = "Tendance"
-# 结论写成一句话摆在图下面：移动端浮层点不住，tooltip 不能是唯一那条读数通路，
-# 而「今天那根」也不该只靠颜色认（Design Guides：不许只用颜色传义）。
-trend_note = "%{total} lus en %{days} jours, %{avg} par jour"
+
+# 统计那一屏只剩一张热力图（一格一天）。键因此只剩三类：窗口与结论那一句话、
+# 图例两端、以及轴上的星期几与月份。旧的档位/趋势/时段/雷达/榜单那十几条随界面一起删了。
+# 结论摆在图下面：移动端浮层点不住，读数通路不能只剩 tooltip，而深浅也不许是唯一那条线索。
+
+# 时长读数那四句与星期名沿用旧表（措辞各语言自己定过，这里不重翻一遍）。
 duration_hours_minutes = "%{hours} h %{minutes} min"
 duration_hours = "%{hours} h"
 duration_minutes = "%{minutes} min"
 duration_seconds = "%{seconds} s"
-minutes_unit = "min"
-total = "Depuis le début"
-total_time = "Durée totale"
-total_days = "Jours de lecture"
-total_books = "Livres lus"
-total_notes = "Annotations"
-top = "Où est passé le temps"
-hours = "Quand vous lisez"
-hours_peak = "Vous lisez surtout vers %{hour} h"
-# 轴上只有那个裸钟点（24 格排 24 个「21 点」会叠成一团），tooltip 的标题才是这一句。
-hour_cell = "%{hour} h"
-# 星期几名只有七个、且是界面自己排的一圈轴，所以留在这里而不是 core 的日期层。
-weekday = "Quels jours de la semaine"
-weekday_note = "Le %{day} est votre plus forte journée, %{avg} en moyenne"
+
+# 轴上只标一、三、五这三行，标签要短到能塞进一列车道的宽度。
 weekday_mon = "lun."
-weekday_tue = "mar."
 weekday_wed = "mer."
-weekday_thu = "jeu."
 weekday_fri = "ven."
-weekday_sat = "sam."
-weekday_sun = "dim."
+
+# 「读不到书库」与「还没有阅读记录」是两句话，别并成一句「暂无数据」。
 no_store = "Bibliothèque inaccessible"
 no_store_hint = "Les statistiques lisent la bibliothèque locale. Vérifiez que son dossier est accessible."
 
-# 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
+# 眉标说的是窗口，不是目的地名（导航那条已经点亮了「统计」）。
+window_year = "12 derniers mois"
+
+# 一月那一列画的是年份而不是「1 月」：横看一年，最容易读错的正是「这是哪一年」。
+month = "%{month}"
+
+heatmap_note = "Lu %{days} jours, %{total} au total, meilleure série %{streak} jours"
+none_yet = "Aucune lecture enregistrée"
+
+legend_less = "Moins"
+legend_more = "Plus"
 [mobile.tab]
 shelf = "Étagère"
 stats = "Stats"
@@ -408,3 +404,54 @@ version_desc = "La version dont ce programme en cours d’exécution a été con
 title = "Bienvenue dans Folio"
 pick = "Choisir le dossier de la bibliothèque…"
 use_default = "Utiliser l’emplacement par défaut"
+
+# L'écran Stockage : quelle place prend cette application sur cet appareil, où vont
+# ces octets, et quels caches peuvent être jetés.
+[area]
+books = "Fichiers des livres"
+covers = "Couvertures"
+thumbnails = "Cache des vignettes"
+staging = "Imports inachevés"
+database = "Base de données"
+logs = "Journal"
+rotated_logs = "Anciens journaux"
+comics = "Cache de décompression BD"
+inbox = "Boîte de réception"
+config = "Configuration"
+other = "Autres"
+
+[usage]
+not_yet = "Pas encore mesuré"
+empty = "Rien n'a encore été écrit sur cet appareil"
+total = "Utilisé"
+unreadable = "%{n} emplacements illisibles, ce chiffre est donc un minimum"
+failed = "Mesure interrompue : %{reason}"
+library_unconfirmed = "Dossier de bibliothèque non confirmé"
+logging_off = "Les journaux ne sont pas écrits sur le disque"
+nothing_to_clean = "Rien à nettoyer pour l'instant"
+
+[action]
+rescan = "Recalculer"
+clear = "Vider"
+clear_thumbs = "Cache des vignettes"
+"clear_thumbs.desc" = "Les petites images de couverture de l'étagère ; elles sont recréées au besoin"
+clear_comics = "Cache de décompression BD"
+"clear_comics.desc" = "Les pages extraites des CBR/CBZ ; elles sont ré-extraites à la prochaine ouverture"
+clear_partials = "Imports inachevés"
+"clear_partials.desc" = "Les fichiers .part laissés par un import interrompu ; la bibliothèque ne les connaît pas"
+clear_logs = "Anciens journaux"
+"clear_logs.desc" = "Les journaux tournants des exécutions précédentes. Celui en cours est conservé."
+vacuum = "Réorganiser la base"
+"vacuum.desc" = "Rend les pages inutilisées au disque et supprime la fragmentation"
+
+[confirm]
+"thumbs.title" = "Vider le cache des vignettes ?"
+"comics.title" = "Vider le cache de décompression BD ?"
+"partials.title" = "Vider les imports inachevés ?"
+"logs.title" = "Vider les anciens journaux ?"
+"vacuum.title" = "Réorganiser la base de données ?"
+"thumbs.body" = "Vide %{bytes}. Les vignettes seront recréées à la prochaine ouverture de l'étagère."
+"comics.body" = "Vide %{bytes}. La prochaine ouverture de cette BD ré-extrait ses pages — plus lent, pas cassé."
+"partials.body" = "Vide %{bytes}. Ce sont des fichiers d'imports jamais terminés ; la bibliothèque n'en fait rien."
+"logs.body" = "Vide %{bytes}. Vous perdez la trace des exécutions précédentes ; le journal en cours est conservé."
+"vacuum.body" = "Réécrit le fichier de bibliothèque, environ %{bytes} récupérés. Prend quelques secondes et réclame la place d'une copie."

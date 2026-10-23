@@ -114,6 +114,7 @@ compact = "Kompakt"
 comfortable = "Komfortabel"
 
 [page]
+storage = "Speicher"
 typography = "Text"
 layout = "Layout"
 fonts = "Schriften"
@@ -125,6 +126,8 @@ toc = "Verzeichnis"
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
 [group]
+usage = "Belegung"
+cleanup = "Aufräumen"
 body = "Fließtext"
 paragraph = "Absatz"
 page_turn = "Seitenwechsel"
@@ -139,6 +142,8 @@ rows = "Einträge"
 marking = "Markierungen"
 
 [field]
+app_dir = "App-Datenordner"
+log_dir = "Protokollordner"
 font_size = "Schriftgröße"
 "font_size.desc" = "Größe des Fließtexts in Pixeln."
 line_height = "Zeilenhöhe"
@@ -246,46 +251,37 @@ notes = "Noch keine Anmerkungen"
 # - 「今天还没读」与「读不到书库」是两句话：前者是真实读数 0，后者是功能没数据源。
 # - 时间范围是这一屏内的筛选，不是三个页面，所以措辞是「近 N 天」而不是名词化的标签。
 [stats]
-today = "Heute"
-today_none = "Heute noch nichts gelesen"
-streak = "Tag %{days} in Folge"
-streak_none = "Noch keine Serie"
-range_7 = "Letzte 7 Tage"
-range_14 = "Letzte 14 Tage"
-range_30 = "Letzte 30 Tage"
-trend = "Verlauf"
-# 结论写成一句话摆在图下面：移动端浮层点不住，tooltip 不能是唯一那条读数通路，
-# 而「今天那根」也不该只靠颜色认（Design Guides：不许只用颜色传义）。
-trend_note = "%{total} in %{days} Tagen gelesen, %{avg} pro Tag"
+
+# 统计那一屏只剩一张热力图（一格一天）。键因此只剩三类：窗口与结论那一句话、
+# 图例两端、以及轴上的星期几与月份。旧的档位/趋势/时段/雷达/榜单那十几条随界面一起删了。
+# 结论摆在图下面：移动端浮层点不住，读数通路不能只剩 tooltip，而深浅也不许是唯一那条线索。
+
+# 时长读数那四句与星期名沿用旧表（措辞各语言自己定过，这里不重翻一遍）。
 duration_hours_minutes = "%{hours} Std. %{minutes} Min."
 duration_hours = "%{hours} Std."
 duration_minutes = "%{minutes} Min."
 duration_seconds = "%{seconds} S."
-minutes_unit = "Min."
-total = "Insgesamt"
-total_time = "Gesamtzeit"
-total_days = "Gelesene Tage"
-total_books = "Gelesene Bücher"
-total_notes = "Anmerkungen"
-top = "Wohin die Zeit ging"
-hours = "Wann du liest"
-hours_peak = "Du liest meist gegen %{hour} Uhr"
-# 轴上只有那个裸钟点（24 格排 24 个「21 点」会叠成一团），tooltip 的标题才是这一句。
-hour_cell = "%{hour} Uhr"
-# 星期几名只有七个、且是界面自己排的一圈轴，所以留在这里而不是 core 的日期层。
-weekday = "Welche Wochentage"
-weekday_note = "Am %{day} liest du am meisten, im Schnitt %{avg}"
+
+# 轴上只标一、三、五这三行，标签要短到能塞进一列车道的宽度。
 weekday_mon = "Mo"
-weekday_tue = "Di"
 weekday_wed = "Mi"
-weekday_thu = "Do"
 weekday_fri = "Fr"
-weekday_sat = "Sa"
-weekday_sun = "So"
+
+# 「读不到书库」与「还没有阅读记录」是两句话，别并成一句「暂无数据」。
 no_store = "Bibliothek nicht lesbar"
 no_store_hint = "Die Statistik liest die lokale Bibliothek. Prüfe, ob ihr Ordner zugänglich ist."
 
-# 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
+# 眉标说的是窗口，不是目的地名（导航那条已经点亮了「统计」）。
+window_year = "Letzte 12 Monate"
+
+# 一月那一列画的是年份而不是「1 月」：横看一年，最容易读错的正是「这是哪一年」。
+month = "%{month}"
+
+heatmap_note = "An %{days} Tagen gelesen, insgesamt %{total}, längste Serie %{streak} Tage"
+none_yet = "Noch nichts gelesen"
+
+legend_less = "Weniger"
+legend_more = "Mehr"
 [mobile.tab]
 shelf = "Regal"
 stats = "Statistik"
@@ -408,3 +404,54 @@ version_desc = "Aus welcher Version dieses laufende Programm gebaut wurde."
 title = "Willkommen bei Folio"
 pick = "Bibliotheksordner wählen…"
 use_default = "Standardort verwenden"
+
+# Der Bildschirm „Speicher": wie viel diese App auf diesem Gerät belegt, wo diese Bytes
+# liegen und welche Caches weggeworfen werden können.
+[area]
+books = "Bücherdateien"
+covers = "Cover"
+thumbnails = "Vorschaubild-Cache"
+staging = "Unfertige Importe"
+database = "Datenbank"
+logs = "Protokoll"
+rotated_logs = "Alte Protokolle"
+comics = "Comic-Entpack-Cache"
+inbox = "Posteingang"
+config = "Konfiguration"
+other = "Sonstiges"
+
+[usage]
+not_yet = "Noch nicht gemessen"
+empty = "Auf diesem Gerät ist noch nichts geschrieben"
+total = "Belegt"
+unreadable = "%{n} Orte waren nicht lesbar, der Wert ist also eine Untergrenze"
+failed = "Messung fehlgeschlagen: %{reason}"
+library_unconfirmed = "Bibliotheksordner noch nicht bestätigt"
+logging_off = "Protokolle werden nicht auf die Festplatte geschrieben"
+nothing_to_clean = "Es gibt gerade nichts zu leeren"
+
+[action]
+rescan = "Nochmal messen"
+clear = "Leeren"
+clear_thumbs = "Vorschaubild-Cache"
+"clear_thumbs.desc" = "Die kleinen Coverbilder im Regal; sie werden bei Bedarf neu erzeugt"
+clear_comics = "Comic-Entpack-Cache"
+"clear_comics.desc" = "Aus CBR/CBZ auf die Festplatte gepackte Seiten; beim nächsten Öffnen erneut gepackt"
+clear_partials = "Unfertige Importe"
+"clear_partials.desc" = ".part-Dateien abgebrochener Importe; in der Bibliothek sind sie nicht verzeichnet"
+clear_logs = "Alte Protokolle"
+"clear_logs.desc" = "Rotierte Protokolle früherer Läufe. Das gerade geschriebene bleibt."
+vacuum = "Datenbank aufräumen"
+"vacuum.desc" = "Gibt ungenutzte Seiten an die Festplatte zurück und beseitigt Fragmentierung"
+
+[confirm]
+"thumbs.title" = "Vorschaubild-Cache leeren?"
+"comics.title" = "Entpack-Cache der Comics leeren?"
+"partials.title" = "Unfertige Importe leeren?"
+"logs.title" = "Alte Protokolle leeren?"
+"vacuum.title" = "Datenbank aufräumen?"
+"thumbs.body" = "Leert %{bytes}. Vorschaubilder entstehen beim nächsten Öffnen des Regals neu."
+"comics.body" = "Leert %{bytes}. Beim nächsten Öffnen dieses Comics werden die Seiten erneut gepackt — langsamer, nicht fehlerhaft."
+"partials.body" = "Leert %{bytes}. Das sind Dateien unvollendeter Importe; die Bibliothek kennt sie nicht."
+"logs.body" = "Leert %{bytes}. Die Protokolle früherer Läufe gehen verloren; das gerade geschriebene bleibt."
+"vacuum.body" = "Schreibt die Bibliotheksdatei neu, erwartet zurück %{bytes}. Dauert einige Sekunden und braucht vorübergehend Platz für eine Kopie."

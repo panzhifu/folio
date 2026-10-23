@@ -1,6 +1,6 @@
-//! 「统计」那一屏的数据：把库里的阅读会话折成一份快照。
+//! 「统计」那一屏的数据：把库里的阅读会话折成一张热力图。
 //!
 //! 纯计算，不碰元素树 —— 那一屏只在进来时取一次快照（见 `AppShell::go`），
 //! 所以这一层同时是「什么时候查库」的答案：不在这里查。
 
-pub(in crate::ui::features::stats) mod report;
+pub(in crate::ui::features::stats) mod heatmap;

@@ -117,22 +117,30 @@ impl Enter {
 }
 
 /// 一张卡片：库行摊平到界面直接用的样子 —— 封面已解码，作者已并成一行。
+///
+/// `opened_at` 带着的是这条库行的 `last_opened_at`：整架那条流要把组卡与书卡按**同一把尺**
+/// 并起来（`grid::merge_cells`），而那一格画面上用不到它。
 pub(in crate::ui::features::shelf) struct Card {
     pub(in crate::ui::features::shelf) id: i64,
     pub(in crate::ui::features::shelf) title: SharedString,
     pub(in crate::ui::features::shelf) authors: SharedString,
     pub(in crate::ui::features::shelf) cover: Option<Arc<Image>>,
+    pub(in crate::ui::features::shelf) opened_at: Option<i64>,
 }
 
 /// 一张组卡：一个组摊到架面那一格上的样子。
 ///
 /// `covers` 是这个组摆在卡上的那几本封面（至多 [`TILE_SLOTS`] 张，缺封面的那本占一格但什么都不画），
 /// `count` 是组里**一共**几本 —— 卡上画不下全部，那一行数字才是答案。
+///
+/// `opened_at` 是**这一组最近被翻开的那一刻**（组里各书的最大值，见 `ShelfView::tile_cards`
+/// 那里为什么取头一本），与 [`Card::opened_at`] 同一把尺。
 pub(in crate::ui::features::shelf) struct GroupCard {
     pub(in crate::ui::features::shelf) id: i64,
     pub(in crate::ui::features::shelf) name: SharedString,
     pub(in crate::ui::features::shelf) count: usize,
     pub(in crate::ui::features::shelf) covers: Vec<Option<Arc<Image>>>,
+    pub(in crate::ui::features::shelf) opened_at: Option<i64>,
 }
 
 /// 组卡里封面马赛克的格数：两行两列。
@@ -209,6 +217,7 @@ impl ShelfView {
     ) -> Card {
         Card {
             id: item.id,
+            opened_at: item.last_opened_at,
             title: item.title.into(),
             authors: item.authors.join(AUTHOR_SEP).into(),
             cover,

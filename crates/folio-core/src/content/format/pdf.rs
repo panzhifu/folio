@@ -25,6 +25,23 @@
 //! 要记的另一笔是**峰值驻留**：画一页时内存里同时有整本字节、一块 pixmap、一段 PNG。
 //! `sample.pdf` 连画三页测得峰值 276 MB（桌面）。图多的书在手机上先撞这一格，处置是把
 //! `RENDER_EDGE` 往下调（一个常数、跟着 `INDEX_VERSION` 走），而不是再加一层缓存。
+//!
+//! ## 图片页按源图自己的密度封顶
+//!
+//! `RENDER_EDGE` 是**上限**，不是每一页的档位。扫描本书（画面就是几张 JPEG 铺满一页）
+//! 按 2048 画，多出来的像素全是插值：`hugG.pdf`（13.9 MB、43 页、A4、每页 3–4 张
+//! 120 ppi 的 JPEG，`Microsoft: Print To PDF` 生产）实测**每页 816–932 ms**、PNG 平均
+//! 3.6 MB、解成位图 11.3 MB。按源图封顶（这一本 1232）之后**每页中位 106 ms**（含每次
+//! 重开文档；留住句柄那一趟 93 ms），全书 37 s → 4.3 s，单页位图 4.1 MB —— 图集那
+//! 24 MB 的封顶从「两页」变成「五页」。
+//!
+//! 档位在下标那一趟就算好（`page_image_handles` 只读结构不解码）并落进页表，所以读的
+//! 每一页不必重新问一次；界面那一侧按页表的长边现画（`reader::model::fixed_book`），
+//! 不是按常数。入库那一趟因此从 83 ms 到 110 ms —— 买的正是上面那几个数。
+//!
+//! **宁慢勿错的三条**：转过的页（图的盒在未转空间里，长边却按转过的方向换过）、
+//! 图盖不满页的（剩下的面积是矢量画的）、图柄读不出的 —— 都按上限画，不封顶。
+//! 判断写在 [`native_edge`]。
 
 use std::path::Path;
 
@@ -52,6 +69,9 @@ use crate::Result;
 ///
 /// **改这个数要跟着 bump `INDEX_VERSION`**：页表里存的宽高就是按它算的（`raster_size`），
 /// 而缓存键里也带着这一档。
+///
+/// 它现在是**上限**，不是每一页实际用的档位：图片页按源图自己的像素密度封顶
+/// （[`native_edge`]），页表里存的是封顶之后的尺寸。矢量页仍然是这一档。
 pub const RENDER_EDGE: u32 = 2048;
 
 /// 封面栅格的长边，与 EPUB / FB2 / CBZ 那条 `COVER_MAX_EDGE` 同一口径。
@@ -59,6 +79,27 @@ pub const RENDER_EDGE: u32 = 2048;
 /// 单独一个数而不是「按 `RENDER_EDGE` 画完再缩」：封面只有首页，直接按目标尺寸画少一块
 /// pixmap、也少一次重编码。
 const COVER_EDGE: u32 = 512;
+
+/// 图片页封顶时留的那几成余量。
+///
+/// **不能取 1.0，也不能贴着 0.9**：引擎在「输出比源图小一成左右」那一档有一条快路，
+/// 卡在阈值上时四舍五入会翻过去 —— `hugG.pdf` 实测输出 885 px 宽（源图 984）89 ms，
+/// 891 px 宽 147 ms，差的正是这一格。所以按 0.88 封，离阈值留 2% 的余量。
+const NATIVE_EDGE_RATIO: f32 = 0.88;
+
+/// 封顶的下限（像素）。
+///
+/// 一页源图比这还糊（几十 ppi 的缩略图铺满一页）时，再低就只剩马赛克，而放大那一层
+/// 与手机上的小字号都要有最低一档可看。360 与 `pdf-probe` 量「快路上限」那一臂的
+/// 地板同一条。
+const MIN_RENDER_EDGE: u32 = 360;
+
+/// 一页上的图要盖住可见框的多少，才把这一页当「图片页」按源图密度封顶。
+///
+/// 低于它说明页面还有一大块是矢量画的（正文、表格、线条）—— 那些没有「源像素」，
+/// 按图封顶会把它们一起画糊。0.85 留给扫描件常见的白边：扫描图通常连白边一起扫进去，
+/// 占面接近 100%；而 Word / LaTeX 那种「一张插图 + 正文」页通常到不了这一档。
+const IMAGE_PAGE_COVERAGE: f32 = 0.85;
 
 pub struct PdfAdapter;
 
@@ -91,8 +132,9 @@ impl DocumentProvider for PdfAdapter {
 
     /// 画第 `page` 页，交回 PNG 字节。
     ///
-    /// `edge` 是长边上限，页比这一档小也照样**放大**到它 —— 1 点 = 1 像素（72 DPI）在手机
-    /// 上是一屏马赛克，而 PDF 的页本来是矢量的，不画满白不画。
+    /// `edge` 是长边**上限**：页比这一档小也照样放大到它（1 点 = 1 像素在手机上一屏
+    /// 马赛克），而图片页按源图自己的密度封到更低一档（[`native_edge`]）—— 与页表
+    /// 里存的尺寸是同一句判断，见 [`render_edge`]。
     ///
     /// 读不到一律 `None`（与 [`DocumentProvider::image_bytes`] 同一立场）：「这一页坏了」与
     /// 「这一页不在书里」在屏幕上都是那块地方空着。
@@ -241,6 +283,8 @@ pub(crate) fn read_pdf(
 
     let mut table = Vec::with_capacity(pages);
     for page in 0..pages {
+        // 宽高是**封顶之后**的像素（`render_edge`）：扫描件那一页按源图密度算，
+        // 矢量页仍是 `RENDER_EDGE`。栅格化那一趟读同一句，两边因此永远同一个数。
         let (width, height) = raster_size(document, page, RENDER_EDGE);
         table.push(FixedPage {
             source: PageSource::Render { index: page as u32 },
@@ -417,15 +461,72 @@ impl PageBoxes {
 /// 「长短边各一个」的固定顺序 —— 一本横竖混排的画册会被全部摆成竖的，而屏幕上是字压字。
 /// 读不出框的那一页给 `(0, 0)`：那是「不知道」的哨兵值，绘制侧按视口比例兜底，
 /// 与 CBZ 里「位图头读不出来」那一支同一条降级。
+///
+/// `edge` 是**上限**：图片页按源图自己的密度封到更低的一档（[`native_edge`]），
+/// 其余页照 `edge` 画。
 fn raster_size(document: &PdfDocument, page: usize, edge: u32) -> (u32, u32) {
     let Some(boxes) = page_boxes(document, page) else {
         return (0, 0);
     };
+    let edge = render_edge(document, page, &boxes, edge);
     let scale = boxes.scale(edge);
     (
         (boxes.visible_width * scale).round().max(1.0) as u32,
         (boxes.visible_height * scale).round().max(1.0) as u32,
     )
+}
+
+/// 这一页实际按哪一档画：`edge` 是上限，图片页被源图密度压到更低一档。
+///
+/// 页表（[`raster_size`]）与栅格化（[`fit_box`]）问的是**同一句**，所以「页表说的尺寸」
+/// 与「画出来的像素」不会一处封一处不封 —— 两处分头写，症状是图集按 2048 记账而图只有
+/// 1232，一张页虚报掉两页的名额。
+///
+/// 下限夹在 `edge` 以内：调用方要 256 那一档（契约测试、封面）时不该被抬到 360。
+fn render_edge(document: &PdfDocument, page: usize, boxes: &PageBoxes, edge: u32) -> u32 {
+    native_edge(document, page, boxes)
+        .map(|cap| cap.clamp(MIN_RENDER_EDGE.min(edge), edge))
+        .unwrap_or(edge)
+}
+
+/// 这一页的图**最多承载多少像素** → 栅格长边的上限；不是图片页给 `None`。
+///
+/// 算式：页长边 `L` pt、源图长边 `p` px 印在 `b` pt 上时，图上 1 pt 有 `p / b` 个源像素，
+/// 而输出要的是 `edge / L` 个像素每 pt。让输出不超过源图的 [`NATIVE_EDGE_RATIO`] 倍，
+/// 就得到 `edge ≤ 0.88 × L × (p / b)`。一页几张图时取**最密的那张**（更疏的只会更早
+/// 落在它下面），而「这一页是不是图片页」由覆盖率说（[`IMAGE_PAGE_COVERAGE`]）。
+///
+/// 与 [`fit_box`] 那条「按可见框反推」同一立场：源图的 bbox 是页上真正印出来的大小，
+/// 用 MediaBox 或页宽去除都会在被裁过的页上算偏。
+fn native_edge(document: &PdfDocument, page: usize, boxes: &PageBoxes) -> Option<u32> {
+    // 转过的页：`page_image_handles` 的 bbox 在**未转**的用户空间里，而这里的可见长边
+    // 已经按 `/Rotate` 换过方向 —— 拿它们相除会把 90 度的那一页算成另一个密度
+    // （高比宽、宽比高），而错的档位在屏上是糊掉的一页，不是少一个字符。宁可不封。
+    if boxes.rotate != 0 {
+        return None;
+    }
+    let handles = document.page_image_handles(page).ok()?;
+    let page_area = boxes.visible_width * boxes.visible_height;
+    if page_area <= 0.0 {
+        return None;
+    }
+    let mut covered = 0.0_f32;
+    let mut density = 0.0_f32;
+    for handle in &handles {
+        let (width, height) = (handle.bbox.width.abs(), handle.bbox.height.abs());
+        if width <= 0.0 || height <= 0.0 {
+            continue;
+        }
+        // 印在页上的原生密度（ppi）：两个方向取更密的那个，非等比缩放的图不吃亏。
+        density =
+            density.max((handle.width as f32 / width).max(handle.height as f32 / height) * 72.0);
+        covered += (width * height / page_area).min(1.0);
+    }
+    if density <= 0.0 || covered < IMAGE_PAGE_COVERAGE {
+        return None;
+    }
+    let long_pt = boxes.visible_width.max(boxes.visible_height);
+    Some((NATIVE_EDGE_RATIO * long_pt * density / 72.0).round() as u32)
 }
 
 /// 喂给 `render_page_fit` 的目标框：**按 MediaBox 写、但比例按可见框反推**。
@@ -434,10 +535,14 @@ fn raster_size(document: &PdfDocument, page: usize, edge: u32) -> (u32, u32) {
 /// 裁，所以要让可见长边正好等于 `edge`，框就得填成 `MediaBox × (edge / 可见长边)`。
 /// MediaBox 与可见框重合的常规页（几乎每一本公版书）算回来就是 `edge × edge` 上下，
 /// 与从前直接交 `edge × edge` 一模一样 —— 这一格真正服务的是被裁过的那一类。
+///
+/// `edge` 在这里再过一次 [`render_edge`]：图片页按源图密度封顶之后，目标框也按那一档反推
+/// （否则 1232 的图配 2048 的框，引擎按 2048 的比例缩放，出来仍是 1447 宽）。
 fn fit_box(document: &PdfDocument, page: usize, edge: u32) -> (u32, u32) {
     let Some(boxes) = page_boxes(document, page) else {
         return (edge, edge);
     };
+    let edge = render_edge(document, page, &boxes, edge);
     let scale = boxes.scale(edge);
     (
         (boxes.media_width * scale).round().max(1.0) as u32,
@@ -587,6 +692,15 @@ mod tests {
         /// （原点左下、y 朝上）。文字层那三条门要的是「我知道这行字印在哪儿」，
         /// 而这个数只有写的人知道 —— 拷来的真书反倒说不清。
         text: Vec<(i32, i32, f32, &'static str)>,
+        /// 这一页铺的图（扫描件那一形状）：像素数 + 印在页上的框。
+        image: Option<Placed>,
+    }
+
+    /// 一张铺在页上的图：`width × height` 个源像素，印在 `bbox`（pt，PDF 坐标）里。
+    struct Placed {
+        width: u32,
+        height: u32,
+        bbox: [i32; 4],
     }
 
     impl Page {
@@ -597,7 +711,18 @@ mod tests {
                 rotate: 0,
                 inherit: false,
                 text: Vec::new(),
+                image: None,
             }
+        }
+
+        /// 铺一张图。看不清扫描件与正文页的分别，全看它盖住多少（`IMAGE_PAGE_COVERAGE`）。
+        fn image(mut self, width: u32, height: u32, bbox: [i32; 4]) -> Self {
+            self.image = Some(Placed {
+                width,
+                height,
+                bbox,
+            });
+            self
         }
 
         /// 加一行字（基线在 `(x, y)`，单位 pt、原点左下）。
@@ -751,10 +876,26 @@ mod tests {
             Some(file.reserve())
         };
         let bookmark_ids: Vec<usize> = bookmarks.iter().map(|_| file.reserve()).collect();
+        // 每页铺的那张图是一个 XObject（`/Subtype /Image`），页的 `/Resources` 指它。
+        let image_ids: Vec<Option<usize>> = pages
+            .iter()
+            .map(|page| page.image.as_ref().map(|_| file.reserve()))
+            .collect();
 
-        // 内容流：一个灰矩形，位置每页不同 —— 两页的 PNG 不许长得一样。
+        // 内容流：一个灰矩形，位置每页不同 —— 两页的 PNG 不许长得一样；有图的页再把
+        // 那张图按 bbox 铺上去（扫描件就是这一形状：图盖满整页，页上一根字都没有）。
         for (index, id) in content_ids.iter().enumerate() {
             let mut data = format!("0.85 0.85 0.90 rg\n{} 72 300 500 re f\n", 60 + index * 12);
+            if let Some(placed) = &pages[index].image {
+                let [x, y, right, top] = placed.bbox;
+                data.push_str(&format!(
+                    "q {} 0 0 {} {} {} cm /Im1 Do Q\n",
+                    right - x,
+                    top - y,
+                    x,
+                    y
+                ));
+            }
             if !pages[index].text.is_empty() {
                 data.push_str("BT\n");
                 for (x, y, size, text) in &pages[index].text {
@@ -785,11 +926,41 @@ mod tests {
             if page.rotate != 0 {
                 parts.push(format!("/Rotate {}", page.rotate));
             }
+            // 一份 `/Resources` 里两类都塞进去（两个键分开写会让解析器按后一个覆盖前一个，
+            // 一份带字又带图的页就会丢掉字体那一半）。
+            let mut resources = Vec::new();
             if let Some(font) = font {
-                parts.push(format!("/Resources << /Font << /F1 {font} 0 R >> >>"));
+                resources.push(format!("/Font << /F1 {font} 0 R >>"));
+            }
+            if let Some(Some(image)) = image_ids.get(index) {
+                resources.push(format!("/XObject << /Im1 {image} 0 R >>"));
+            }
+            if !resources.is_empty() {
+                parts.push(format!("/Resources << {} >>", resources.join(" ")));
             }
             parts.push(format!("/Contents {} 0 R", content_ids[index]));
             file.set(page_ids[index], format!("<< {} >>", parts.join(" ")));
+        }
+        // 图本身：**不压缩**的 8 位灰度（`/DeviceGray`）。这一格要验的是「页上有几张
+        // 多少像素的图、印在多大一块上」，与滤镜无关；而 JPEG / Flate 都要另带一段
+        // 编码器或一份二进制样本，那会把夹具的重点从页框挪到字节上。
+        for (index, id) in image_ids.iter().enumerate() {
+            let Some(id) = id else { continue };
+            let placed = pages[index].image.as_ref().unwrap();
+            let mut pixels = vec![0u8; (placed.width * placed.height) as usize];
+            for (at, px) in pixels.iter_mut().enumerate() {
+                *px = (at as u32 % placed.width) as u8;
+            }
+            let mut body = format!(
+                "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\nstream\n",
+                placed.width,
+                placed.height,
+                pixels.len()
+            )
+            .into_bytes();
+            body.extend_from_slice(&pixels);
+            body.extend_from_slice(b"\nendstream");
+            file.set(*id, body);
         }
         let kids = page_ids
             .iter()
@@ -890,6 +1061,29 @@ mod tests {
         )
     }
 
+    /// 一本「扫描件 + 一张小图 + 转过的一页」的合成书：图片页封顶的三条路各一页。
+    ///
+    /// 页框取 `300 × 424 pt`（半个 A4），图取同尺寸的 `300 × 424 px` —— 72 ppi 恰好是
+    /// 「1 点 1 像素」那一档，算得清。图不压缩（`/DeviceGray`），夹具因此只有 127 KB。
+    fn scanned(dir: &Path) -> PathBuf {
+        write_fixture(
+            dir,
+            "扫描件的三种页.pdf",
+            &[
+                // 铺满整页：扫描件，按源图 72 ppi 封顶。
+                Page::new([0, 0, 300, 424]).image(300, 424, [0, 0, 300, 424]),
+                // 只盖住下面三成：上面那块是矢量画的，不封。
+                Page::new([0, 0, 300, 424]).image(300, 120, [0, 0, 300, 120]),
+                // 铺满但转了 90 度：图的盒在未转空间里，不封。
+                Page::new([0, 0, 300, 424])
+                    .image(300, 424, [0, 0, 300, 424])
+                    .rotate(90),
+            ],
+            &[],
+            &[("Title", "扫描件的三种页")],
+        )
+    }
+
     fn fixed(path: &Path) -> (DocMeta, FixedDoc) {
         let (meta, content) = PdfAdapter
             .index(path)
@@ -953,6 +1147,56 @@ mod tests {
         );
     }
 
+    /// 图片页按**源图自己的密度**封顶：一页铺满的扫描件按 2048 画，多出来的像素全是
+    /// 插值（`hugG.pdf`：单页 816 ms → 106 ms，全书 37 s → 4.3 s）。
+    ///
+    /// 三条**不封**的路也在这里：图只盖住一块（剩下的面积是矢量画的）、转过的页、
+    /// 没有图的页（最后那条由 `pages_are_raster_sized_and_keep_their_orientation` 钉着）。
+    #[test]
+    fn an_image_page_is_rastered_at_its_own_density() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = scanned(dir.path());
+        let (_, fixed) = fixed(&path);
+        let sizes: Vec<(u32, u32)> = fixed.pages.iter().map(|p| (p.width, p.height)).collect();
+        assert_eq!(
+            sizes,
+            vec![(264, 373), (1449, 2048), (2048, 1449)],
+            "铺满的一页封到 0.88 × 424 px = 373；图只占三成的、转过的都按 2048 那一档"
+        );
+
+        // 页表说的尺寸与画出来的像素必须**同一句判断**（`render_edge`）：两处各写一个
+        // 「这一页画多大」，症状是图集按 2048 记账而图只有 373，一张页虚报掉三个名额。
+        let png = PdfAdapter
+            .render_page(&path, 0, RENDER_EDGE)
+            .expect("扫描页该画得出来");
+        let image = image::load_from_memory(&png).expect("交回的该是 PNG");
+        assert!(
+            image.width().abs_diff(fixed.pages[0].width) <= 2
+                && image.height().abs_diff(fixed.pages[0].height) <= 2,
+            "页表说 {}×{}，画出来 {}×{}",
+            fixed.pages[0].width,
+            fixed.pages[0].height,
+            image.width(),
+            image.height()
+        );
+    }
+
+    /// 封顶是**上限之内**的事：调用方要更低的一档（封面、契约测试）时照旧听它的。
+    #[test]
+    fn a_lower_ceiling_still_wins_over_the_source_density() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = scanned(dir.path());
+        let png = PdfAdapter
+            .render_page(&path, 0, 128)
+            .expect("这一档也该画得出来");
+        let image = image::load_from_memory(&png).expect("交回的该是 PNG");
+        assert!(
+            image.height().abs_diff(128) <= 2,
+            "要 128 那一档，画出来 {}",
+            image.height()
+        );
+    }
+
     #[test]
     fn it_claims_pdf_by_extension_and_reports_the_format() {
         assert_eq!(PdfAdapter.format(), Format::Pdf);
@@ -964,10 +1208,12 @@ mod tests {
 
     /// 页表：**顺序是页树顺序**，每页带自己算出来的栅格尺寸，而落点是引擎的页号。
     ///
-    /// 尺寸是这一条真正要钉的：长边 = `RENDER_EDGE`（2048），短边按比例。A4 竖页
-    /// `595 × 842 pt` → `1447 × 2048`；被裁成 `300 × 500 pt` 的那页 → `1229 × 2048`；
-    /// 转了 90 度的信纸 → **宽长**（`2048 × 1583`）。最后这一条防的是「把长短边折成
-    /// 一个固定顺序」—— 那样横页会被摆成竖的，屏幕上就是字压字。
+    /// 尺寸是这一条真正要钉的：这三页都是矢量画的（没有一张图），长边 = `RENDER_EDGE`
+    /// （2048），短边按比例。A4 竖页 `595 × 842 pt` → `1447 × 2048`；被裁成
+    /// `300 × 500 pt` 的那页 → `1229 × 2048`；转了 90 度的信纸 → **宽长**
+    /// （`2048 × 1583`）。最后这一条防的是「把长短边折成一个固定顺序」—— 那样横页会被
+    /// 摆成竖的，屏幕上就是字压字。图片页按源图封顶那一条见
+    /// `an_image_page_is_rastered_at_its_own_density`。
     #[test]
     fn pages_are_raster_sized_and_keep_their_orientation() {
         let dir = tempfile::tempdir().unwrap();

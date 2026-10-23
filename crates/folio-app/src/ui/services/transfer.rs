@@ -55,7 +55,8 @@ pub fn set_enabled(on: bool, cx: &App) {
         resident::services().set_transfer(None);
         return;
     };
-    let inbox_dir: PathBuf = folio_core::infra::paths::data_dir().join("inbox");
+    // 收件箱那一个目录名归 `paths`（Wi-Fi 传书与文件夹监听落的是同一处，见 `inbox_dir`）。
+    let inbox_dir: PathBuf = folio_core::infra::paths::inbox_dir();
     let on_file = {
         let store = Arc::clone(&store);
         let book_dir = book_dir.clone();

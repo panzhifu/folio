@@ -85,7 +85,7 @@ pub(in crate::ui::features::reader) const TILT_FOLLOW: f32 = 0.35;
 /// 的阅读页上，`πR` 比一整页还宽，整页都落进「卷在柱面上」那一段：字被剪斜、页面像被掰弯。
 /// 真机截图量到的正是这个。再往前一版取 5.5%（约 21px）又小到没人看得出纸在卷。0.14 是
 /// 这两个读数中间的一个，还要不要再细，等下一张截图说话。
-pub(in crate::ui::features::reader) const ROLL: f32 = 0.04;
+pub(in crate::ui::features::reader) const ROLL: f32 = 0.14;
 
 /// 没有手指那一条路的折线（点屏 / 按键 / 滚轮）。
 ///

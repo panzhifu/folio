@@ -145,10 +145,10 @@ pub fn choose_dir(cx: &mut App, picked: impl Fn(&mut App, &std::path::Path) + 's
     })
 }
 
-/// 监听的默认去处：`<数据根>/inbox`。开关打开时没选过目录就落在这里 ——
-/// 一个独立于书库的「收件箱」，往里丢书就自动入库。
+/// 监听的默认去处：`<数据根>/inbox`（[`folio_core::infra::paths::inbox_dir`]）。开关打开时
+/// 没选过目录就落在这里 —— 一个独立于书库的「收件箱」，往里丢书就自动入库。
 pub fn suggested_watch_dir() -> PathBuf {
-    folio_core::infra::paths::data_dir().join("inbox")
+    folio_core::infra::paths::inbox_dir()
 }
 
 /// 启动时投一趟「补齐」的后台作业：给没有内容身份的行算哈希，并把书库里的旧名字

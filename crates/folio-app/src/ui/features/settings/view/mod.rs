@@ -38,8 +38,8 @@ pub(in crate::ui::features::settings) use crate::ui::services::config::ConfigHol
 pub(in crate::ui::features::settings) use crate::ui::services::l10n::{tf, tr};
 
 // 那颗「打开所在文件夹」的按钮要用的几样（页面文件通过 `super::` 拿到它本身）。
-use gpui_kit::IntoElement;
 use gpui_kit::component::button::Button;
+use gpui_kit::{ElementId, IntoElement};
 use std::path::PathBuf;
 
 use crate::ui::platform;
@@ -50,6 +50,7 @@ use pages::appearance::appearance_page;
 use pages::fonts::fonts_page;
 use pages::layout::layout_page;
 use pages::library::library_page;
+use pages::storage::storage_page;
 use pages::toc::toc_page;
 use pages::typography::typography_page;
 
@@ -59,7 +60,7 @@ use pages::typography::typography_page;
 /// 打不开时**不弹任何东西**：那一行本身还留着路径，读者能自己抄；摆一个报错弹窗只是把
 /// 「这台设备的文件管理器不认领这个 URI」变成读者的问题。
 pub(in crate::ui::features::settings) fn open_folder_button(
-    id: &'static str,
+    id: impl Into<ElementId>,
     path: PathBuf,
     cx: &App,
 ) -> impl IntoElement {
@@ -73,28 +74,38 @@ pub(in crate::ui::features::settings) fn open_folder_button(
 }
 
 /// 各设置页。变体顺序就是 `Settings` 侧栏里从上到下的顺序，
-/// [`SettingsPage::index`] 靠它定位，所以**新增变体只能加在末尾**。
+/// [`SettingsPage::index`] 靠它现算，所以新增变体插在导航里该在的位置，
+/// 并与 [`ALL`](Self::ALL)、[`spec_pages`] 一起动。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsPage {
-    About,
     Appearance,
     Typography,
     Layout,
     Fonts,
     Library,
     Toc,
+    Storage,
+    About,
 }
 
 impl SettingsPage {
     /// 全部页面，按导航顺序。
-    pub const ALL: [SettingsPage; 7] = [
-        SettingsPage::About,
+    ///
+    /// `About` 排在末尾是刻意的：这一页不改任何东西，是读者**办完事顺手看一眼**的东西，
+    /// 摆在最上面等于让每天要调的那几页往下挪一格。
+    ///
+    /// 变体顺序就是侧栏顺序，而深链靠 [`index`](Self::index) 现算 —— 挪位置不会指错页，
+    /// 但会让「第 N 页」这句话在别处（测试、日志、旧截图）对不上，所以三处顺序
+    /// （本枚举、`ALL`、[`spec_pages`]）必须一起动。
+    pub const ALL: [SettingsPage; 8] = [
         SettingsPage::Appearance,
         SettingsPage::Typography,
         SettingsPage::Layout,
         SettingsPage::Fonts,
         SettingsPage::Library,
         SettingsPage::Toc,
+        SettingsPage::Storage,
+        SettingsPage::About,
     ];
 
     /// 在 `Settings` 组件里的页序下标。必须与 [`spec_pages`] 的组装顺序一致 ——
@@ -107,13 +118,14 @@ impl SettingsPage {
 /// 两端共用的页面规格。手机（[`compact`]）直接渲染这一份，桌面经 [`pages`] 映射。
 pub(in crate::ui::features::settings) fn spec_pages(cx: &App) -> Vec<spec::Page> {
     vec![
-        about_page(cx),
         appearance_page(cx),
         typography_page(cx),
         layout_page(cx),
         fonts_page(cx),
         library_page(cx),
         toc_page(cx),
+        storage_page(cx),
+        about_page(cx),
     ]
 }
 

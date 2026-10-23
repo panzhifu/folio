@@ -3,7 +3,8 @@
 //! 桌面的 `Settings` 组件是「侧栏 + 正文」两栏，塞不进一块 360dp 的小屏；这里吃
 //! 同一份 [`spec_pages`]，渲染成「页列表 → 全屏子页 → 选项子页」三层：
 //!
-//! - 根屏一个大标题 + 一张内嵌分组，一行一页，末尾只留一枚进去的箭头。右端**不挂这一页的
+//! - 根屏一张内嵌分组，一行一页，末尾只留一枚进去的箭头。**顶上不再摆一个大标题**：这一屏
+//!   在底栏里就叫「我的」，再写一句「设置」是同一个入口的两个名字。右端也**不挂这一页的
 //!   当前值**：入口列表那一行管的是「去哪儿」，不是「现在是多少」，而一页几十行里只能挑一个
 //!   数当代表（「文字」那页从前露字号、看不到行距），念不准还看着像已经调过了；
 //! - 子页顶部一条 [`TopBar`]（返回 + 页名），下面按规格里的组各成一张分组卡，组名当节头，
@@ -32,14 +33,15 @@
 //! | 横向内缩 16（UIKit 观测） | `px_4`（1rem） | 正好同值，走 rem |
 //! | 图标槽 29、图标到文字 12（观测） | `size_7`（28）、`gap_3`（12） | 29 不在阶上，取 28 |
 //! | 组与组的缝 35（观测） | `mt_8`（32） | 35 不在阶上，取最近那一档 |
+//! | 顶栏到第一张卡 | `mt_2`（8） | Material 的列表贴着顶栏那一档；分隔线去掉后由这段留白换段 |
 //! | 正文 17（HIG body） | `text_base`（16） | 字号阶是 12/14/16/18/20 |
-//! | 大标题 34（HIG large title） | `text_3xl`（30）加粗 | 阶上最大就这一档 |
 //! | 节头与尾注 13（HIG footnote） | `text_sm`（14） | 同上，取最近那一档 |
 //! | 分组卡圆角 10（观测） | `theme.radius_lg`（8） | 规范：圆角只从主题那几档里挑 |
+//! | 分组卡那圈描边 | `border_1` + `theme.border` | 规范：区域靠背景与分隔线定，不靠填色分层 |
 //! | 开关 51×31（UIKit 固定尺寸） | `Switch::large()`（44×24） | 规范：保组件家族的几何，不手搓外框 |
 //!
-//! 颜色一支都不定义：两层表面只取主题的角色名（见 [`surfaces`]），这个应用不往界面里塞
-//! 色值（`ui/shared/theme.rs` 那条规矩）。
+//! 颜色一支都不定义：整屏一层表面（`background`）加卡片那一圈 `border`，取的都是主题的角色名，
+//! 这个应用不往界面里塞色值（`ui/shared/theme.rs` 那条规矩）。
 
 use gpui_kit::Anchor;
 use gpui_kit::assets::IconName;
@@ -48,17 +50,19 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, ThemeMode, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Div, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window, div, px, rems,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, InteractiveElement as _,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, TestSupportExt as _, Window, div, px, rems,
 };
 
+use super::SettingsPage;
 use super::spec::{self, RowKind};
 use super::spec_pages;
-use crate::ui::components::{TopBar, hairline};
+use crate::ui::components::TopBar;
 use crate::ui::services::l10n::tr;
+use crate::ui::services::storage::{self, Job};
 
 /// 一行的可命中高度。Apple HIG 明文那条 44×44；规范点名的 `px` 例外之一就是
 /// 「最小命中容差」，所以这一格不跟着 rem 走。
@@ -77,21 +81,13 @@ fn separator(rem: f32, cx: &App) -> impl IntoElement {
         .bg(cx.theme().border)
 }
 
-/// 分组列表的两层表面：Apple 那一对的关系是**卡片比页面亮一档**。
+/// 一张分组卡：圆角取主题那几档里最大的 `radius_lg`，外框由卡这一层画、卡内的行不再画边。
 ///
-/// 浅色里 `background` 是白、`muted` 是灰，所以页面垫 `muted`、卡片是 `background`；
-/// 深色正好反过来，最低那一档是 `background`，`muted` 是抬起来的那一层。同一个方向要在
-/// 两套外观里都成立，才需要按 `mode` 分这一刀。这条不靠注释自证：测试
-/// `the_grouped_surfaces_stay_elevated_in_both_appearances` 现算两套外观的相对亮度。
-fn surfaces(cx: &App) -> (Hsla, Hsla) {
-    let theme = cx.theme();
-    match theme.mode {
-        ThemeMode::Light => (theme.muted, theme.background),
-        ThemeMode::Dark => (theme.background, theme.muted),
-    }
-}
-
-/// 一张分组卡：圆角取主题那几档里最大的 `radius_lg`，卡内的行自己不再画边。
+/// **卡片靠描边立住，不靠填色**：整屏只有一层表面（`theme().background`），区域由分隔线与留白
+/// 来定 —— 规范那两条：「先尺寸、字重、留白与分隔线，再考虑加颜色或容器」与「基面是平的，
+/// 区域由分隔线与背景对比定义」。从前这里分两层：页面垫 `muted`、卡片吃 `background`，浅深
+/// 两侧还得各判一次谁亮；而手机那一屏的底色比外壳涂在状态栏那一条 `safe.top` 下面的那一档
+/// 深一档，屏幕顶就是两道色。
 ///
 /// GPUI 不保证圆角的父容器裁掉孩子，所以这里显式裁：悬停与选中的底色长在行那一层，
 /// 不裁就会在卡角外头露出方角（规范那条「一个圆角要管住整张可见表面」）。
@@ -100,7 +96,8 @@ fn card(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
         .w_full()
         .rounded(cx.theme().radius_lg)
         .overflow_hidden()
-        .bg(surfaces(cx).1)
+        .border_1()
+        .border_color(cx.theme().border)
         .children(rows)
         .into_any_element()
 }
@@ -270,18 +267,37 @@ enum Screen {
 
 pub(crate) struct CompactSettings {
     screen: Screen,
+    /// 对「存储」那一屏读数实体的订阅。**必须是个字段**：gpui 的 `Subscription` 一掉就退订
+    /// （它的 `Drop` 直接调 `unsubscribe`），绑成局部变量等于没订阅 —— 少了它，后台扫完那一趟
+    /// 永远不会让这一屏重画，读者看到的是一句「还没统计」。
+    _storage_watch: Subscription,
 }
 
 impl CompactSettings {
     /// 由外壳（「我的」目的地）与阅读页各建一屏，所以是 `pub(crate)` 而不是 `pub(in crate::ui::features::settings)`。
-    pub(crate) fn new() -> Self {
+    ///
+    /// 这里要 `cx` 只为一件事：**观察存储那一屏的读数实体**。「存储」那一页的每一格是现读
+    /// 实体（见 `pages/storage.rs` 的模块说明），而静态设置页自己拿不住 `Task` —— 后台扫完
+    /// 那一趟只能靠实体 `notify`、这一屏跟着重画，读者才看见新的数。句柄在这里就地取（没有
+    /// 就建），所以不必等外壳先装过；`_storage_watch` 这个空绑定是**要留着的**：句柄掉了，
+    /// 订阅就断了，那一屏会永远停在旧账上。
+    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        let storage = storage::entity(cx);
+        let watch = cx.observe(&storage, |_, _, cx| cx.notify());
         Self {
             screen: Screen::Root,
+            _storage_watch: watch,
         }
     }
 
     fn open(&mut self, page_ix: usize, cx: &mut Context<Self>) {
         self.screen = Screen::Page(page_ix);
+        // 钻进「存储」那一页就是起一次统计的时刻：那一屏的数只能是**现在**的数，而静态
+        // 设置页没有一个「进来查一眼」的地方可以放这件事。统计在飞时这一句是空转
+        // （[`storage::request`] 那头拦），所以反复进出同一页不会叠出第二条线。
+        if page_ix == SettingsPage::Storage.index() {
+            storage::request(cx, Job::Rescan);
+        }
         cx.notify();
     }
 
@@ -339,19 +355,11 @@ impl CompactSettings {
                 cx,
             ));
         }
+        // 大标题不摆了：这一屏在底部导航里就叫「我的」，顶上再写一句「设置」是同一个入口
+        // 的两个名字，读者先看见的是那句和底栏对不上的字。卡片自己就是这一屏。
         v_flex()
             .w_full()
-            .child(
-                div()
-                    .w_full()
-                    .px_4()
-                    .pt_6()
-                    .pb_2()
-                    .text_3xl()
-                    .font_weight(FontWeight::BOLD)
-                    .child(tr(cx, "account.settings")),
-            )
-            .child(div().w_full().px_4().mt_8().child(card(rows, cx)))
+            .child(div().w_full().px_4().mt_2().child(card(rows, cx)))
             .into_any_element()
     }
 
@@ -413,21 +421,27 @@ impl CompactSettings {
                 }
                 rows.push(self.row(page_ix, group_ix, row_ix, row, window, cx));
             }
-            body = body.child(
-                v_flex()
-                    .w_full()
-                    .mt_8()
-                    .child(
-                        div()
-                            .w_full()
-                            .px_4()
-                            .pb_1()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(group.title.clone()),
-                    )
-                    .child(div().w_full().px_4().child(card(rows, cx))),
-            );
+            // 第一张卡与顶栏只留 8（Material 的列表贴着顶栏的那一档），组与组之间仍是 32
+            // 那一道缝。分隔线去掉以后，这两段留白就是「换了一块」唯一说话的地方。
+            let mut section = if group_ix == 0 {
+                v_flex().w_full().mt_2()
+            } else {
+                v_flex().w_full().mt_8()
+            };
+            // 节头是**可去的一格**：储存那一页整屏只留卡片（`Page::no_group_titles`），
+            // 其余各页照旧靠这一行小灰字把几十行切成几段。
+            if page.show_group_titles {
+                section = section.child(
+                    div()
+                        .w_full()
+                        .px_4()
+                        .pb_1()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(group.title.clone()),
+                );
+            }
+            body = body.child(section.child(div().w_full().px_4().child(card(rows, cx))));
         }
         Self::scrollable(body)
     }
@@ -475,7 +489,7 @@ impl CompactSettings {
                 cx,
             ));
         }
-        Self::scrollable(div().w_full().mt_8().px_4().child(card(rows, cx)))
+        Self::scrollable(div().w_full().mt_2().px_4().child(card(rows, cx)))
     }
 
     /// 一个字段行。控件的种类决定右端摆什么（或整行摆什么）。
@@ -734,18 +748,22 @@ impl CompactSettings {
 impl Render for CompactSettings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 宿主测试按这一格确认「我的」那一个目的地画的是分组列表（同 `SettingsView`）。
+        // 底色与外壳涂在状态栏那一条 `safe.top` 下面的那一档**同一个角色**：这一屏比它深一档
+        // 时，屏幕顶就是一道色（理由写在 `card` 那段）。
         let mut root = v_flex()
             .id("settings-compact")
             .size_full()
-            .bg(surfaces(cx).0)
+            .bg(cx.theme().background)
             .test_support();
         match self.screen {
             Screen::Root => root = root.child(self.root_screen(cx)),
             Screen::Page(page_ix) => {
                 let page = spec_pages(cx).swap_remove(page_ix);
+                // 顶栏底下**不画分隔线**：Material 3 的顶栏不带 divider，容器色一滚起来才变。
+                // 线与它下面那一段留白说的是同一件事（「这里换了一块」），留白已经在，那条
+                // 0.5 就把一屏切成两截 —— 卡片自己那圈描边是这一屏唯一的边界。
                 root = root
                     .child(self.header(&page.title, cx))
-                    .child(hairline(cx))
                     .child(self.page_screen(page_ix, &page, window, cx));
             }
             Screen::Pick {
@@ -757,7 +775,6 @@ impl Render for CompactSettings {
                 let title = page.groups[group].rows[row].title.clone();
                 root = root
                     .child(self.pick_header(&title, page_ix, cx))
-                    .child(hairline(cx))
                     .child(self.pick_screen(page_ix, group, row, &page, cx));
             }
         }
@@ -767,8 +784,7 @@ impl Render for CompactSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompactSettings, Hsla, Screen, ThemeMode, surfaces};
-    use gpui_kit::component::Theme;
+    use super::{CompactSettings, Screen, SettingsPage, spec_pages};
     use gpui_kit::{AppContext as _, Entity, TestAppContext};
 
     /// 返回键一层一层往外退：选项屏退回它来的那一页，那一页退回根屏，根屏那一次让给
@@ -779,7 +795,7 @@ mod tests {
     #[gpui_kit::test]
     async fn back_steps_out_one_layer_at_a_time(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let view: Entity<CompactSettings> = cx.update(|cx| cx.new(|_| CompactSettings::new()));
+        let view: Entity<CompactSettings> = cx.update(|cx| cx.new(CompactSettings::new));
         let press =
             |cx: &mut TestAppContext| cx.update(|cx| view.update(cx, |this, cx| this.go_back(cx)));
         let shown = |cx: &mut TestAppContext| cx.read(|cx| view.read(cx).screen);
@@ -810,7 +826,7 @@ mod tests {
     #[gpui_kit::test]
     async fn the_drilled_screen_reports_that_it_occupies_the_window(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let view: Entity<CompactSettings> = cx.update(|cx| cx.new(|_| CompactSettings::new()));
+        let view: Entity<CompactSettings> = cx.update(|cx| cx.new(CompactSettings::new));
         let pushed = |cx: &mut TestAppContext| cx.read(|cx| view.read(cx).pushed());
         let back =
             |cx: &mut TestAppContext| cx.update(|cx| view.update(cx, |this, cx| this.go_back(cx)));
@@ -836,63 +852,28 @@ mod tests {
         assert!(!pushed(cx), "回到根屏，底栏跟着回来");
     }
 
-    /// 两层表面那一对的方向：卡片必须比页面亮一档，浅深两套外观都得成立。
-    ///
-    /// 这条不靠注释说「我按 Apple 分了层」：把两支角色的相对亮度现算一遍比大小。谁把
-    /// [`super::surfaces`] 指反（深色里让页面去吃 `muted`）当场红。判顺序不判比值 ——
-    /// 那两层灰本来就过不了非文字对比 3.0 那条门槛，那条管的是控件边界。
+    /// 节头那一格只有储存页去掉：其余各页还靠那一行小灰字把几十行切成几段，而桌面那头从不
+    /// 看这一格（组标题同时是侧栏子项）。判据住在规格里（`Page::show_group_titles`），渲染
+    /// 那一头只读它 —— 写反时屏幕上不是少了字就是多了字，一眼是一整屏的错。
     #[gpui_kit::test]
-    async fn the_grouped_surfaces_stay_elevated_in_both_appearances(cx: &mut TestAppContext) {
+    fn only_the_storage_page_drops_its_section_titles(cx: &mut TestAppContext) {
+        use crate::ui::services::config::ConfigHolder;
+        use folio_core::Config;
+
         cx.update(gpui_kit::init);
-        cx.update(crate::ui::foundation::theme::register_builtin_themes);
-        for mode in [ThemeMode::Light, ThemeMode::Dark] {
-            cx.update(|app| {
-                Theme::change(mode, None, app);
-                let (page, card) = relative_luminance_pair(app);
-                assert!(
-                    card > page,
-                    "{mode:?} 下两层表面翻反了：页面 {page:.4}，卡片 {card:.4}"
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            let storage = SettingsPage::Storage.index();
+            let pages = spec_pages(cx);
+            assert_eq!(pages.len(), SettingsPage::ALL.len(), "页数与导航那份对不上");
+            for (ix, page) in pages.iter().enumerate() {
+                assert_eq!(
+                    page.show_group_titles,
+                    ix != storage,
+                    "第 {ix} 页的节头该{}摆",
+                    if ix == storage { "不" } else { "" }
                 );
-            });
-        }
-    }
-
-    /// 把 [`super::surfaces`] 那两支角色读出来并算成相对亮度。
-    ///
-    /// 公式是 WCAG 那一条（先线性化再加权和），与线框板「视觉闸」那一屏同一个口径，
-    /// 两处不该各有一套数。`Hsla` 给的是 h/s/l，所以先解回 r/g/b。
-    fn relative_luminance_pair(app: &gpui_kit::App) -> (f32, f32) {
-        let (page, card) = surfaces(app);
-        (luminance(page), luminance(card))
-    }
-
-    fn luminance(color: Hsla) -> f32 {
-        let [r, g, b] = hsl_to_rgb(color);
-        let linear = |v: f32| {
-            if v <= 0.040_45 {
-                v / 12.92
-            } else {
-                ((v + 0.055) / 1.055).powf(2.4)
             }
-        };
-        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
-    }
-
-    fn hsl_to_rgb(color: Hsla) -> [f32; 3] {
-        let h = color.h.fract().mul_add(360.0, 0.0).rem_euclid(360.0);
-        let s = color.s.clamp(0.0, 1.0);
-        let l = color.l.clamp(0.0, 1.0);
-        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-        let x = c * (1.0 - ((h / 60.0).fract() * 2.0 - 1.0).abs());
-        let m = l - c / 2.0;
-        let (r, g, b) = match h {
-            0.0..=60.0 => (c, x, 0.0),
-            60.0..=120.0 => (x, c, 0.0),
-            120.0..=180.0 => (0.0, c, x),
-            180.0..=240.0 => (0.0, x, c),
-            240.0..=300.0 => (x, 0.0, c),
-            _ => (c, 0.0, x),
-        };
-        [r + m, g + m, b + m]
+        });
     }
 }

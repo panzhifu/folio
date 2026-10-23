@@ -11,6 +11,7 @@
 
 use std::fmt::Display;
 
+use ely_gpui_component::typography::format::{self, Separators};
 use folio_core::infra::i18n::{self, Locale};
 use gpui_kit::{App, SharedString};
 
@@ -41,6 +42,53 @@ pub fn book_count(cx: &App, count: usize) -> String {
     i18n::t_in(locale, &key, &[("count", &count)])
 }
 
+/// 每一门语言的**数字分隔符**：千位分隔与小数点。
+///
+/// 「句子怎么翻」在 `locales/*.toml`，「数字怎么写」不在那里：表里的 `%{n}` 只管插值，
+/// 插进来的是不是 `1 234` 还是 `1,234` 得由界面这一层决定。这份表只有九个字符对，
+/// 其中四门与 Ely 组件库那张逐字对得上（`de-DE`/`fr-FR`/`ja-JP`/`zh-CN`），
+/// 另外五门按 CLDR 的常用值给。「九门一条不缺」由 `match` 的**穷尽性**钉住：加一门语言时
+/// 这里编不过，而不是静默沿用某一门的写法；[`tests::separators_are_never_the_same_character`]
+/// 钉的是另一件会静默的事 —— 某一门的分组符与小数点撞成同一个字符（德语手滑写成两个点），
+/// 屏幕上就是「1.000.5」这种没人写得出来的数。
+fn separators(locale: Locale) -> Separators {
+    match locale {
+        // 中英日韩：千位逗号、小数点。
+        Locale::ZhHans | Locale::ZhHant | Locale::En | Locale::Ja | Locale::Ko => Separators {
+            group: ',',
+            decimal: '.',
+        },
+        // 法语：CLDR 现行的是窄不换行空格（U+202F），不是普通空格。
+        Locale::Fr => Separators {
+            group: '\u{202f}',
+            decimal: ',',
+        },
+        // 德语与西语：点分组、逗号小数。
+        Locale::De | Locale::Es => Separators {
+            group: '.',
+            decimal: ',',
+        },
+        // 俄语：不换行空格分组、逗号小数。
+        Locale::Ru => Separators {
+            group: '\u{a0}',
+            decimal: ',',
+        },
+    }
+}
+
+/// 按当前语言写一个数：`decimals` 位小数，千位按这一门分组。
+///
+/// 走的是 Ely 组件库里那两个**纯函数**（`typography::format`）：不碰它的主题、不需要它的
+/// `init`，所以这一层引过来的只有分组算法本身。
+pub fn number(cx: &App, value: f64, decimals: usize) -> String {
+    format::number(value, decimals, separators(locale(cx)))
+}
+
+/// 按当前语言写一个整数（计数那一类：俄语的「2 831 个文件」中间是硬空格，不是逗号）。
+pub fn integer(cx: &App, value: u64) -> String {
+    format::group_digits(&value.to_string(), separators(locale(cx)).group)
+}
+
 #[cfg(test)]
 mod tests {
     //! 界面里写下的每一个文案键，都必须真的存在于每一份语言表里。
@@ -63,6 +111,7 @@ mod tests {
     use std::fmt::Write as _;
     use std::path::{Path, PathBuf};
 
+    use super::separators;
     use folio_core::infra::i18n::Locale;
 
     /// 收集 `src/` 下所有 `.rs` 里以字面量出现的文案键。
@@ -99,6 +148,31 @@ mod tests {
             } else if path.extension().is_some_and(|ext| ext == "rs") {
                 out.push(path);
             }
+        }
+    }
+
+    /// 每一门的分组符与小数点不许是同一个字符。
+    ///
+    /// `match` 的穷尽性保证「九门都有值」，保证不了「值没写撞」：把德语那一对写成
+    /// `('.', '.')` 编译与测试都全绿，而屏幕上会出现「1.000.5 MB」这种谁也没写过的数。
+    #[test]
+    fn separators_are_never_the_same_character() {
+        for locale in Locale::ALL {
+            let marks = separators(*locale);
+            assert_ne!(
+                marks.group,
+                marks.decimal,
+                "{} 的千位分隔与小数点撞成同一个字符 {:?}",
+                locale.code(),
+                marks.group
+            );
+            // 小数点必须是能看的标点（那两门空格分组容易顺手把小数点也敲成空格）。
+            assert!(
+                marks.decimal.is_ascii_punctuation(),
+                "{} 的小数点不是一位标点：{:?}",
+                locale.code(),
+                marks.decimal
+            );
         }
     }
 

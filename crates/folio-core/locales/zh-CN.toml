@@ -118,6 +118,7 @@ compact = "紧凑"
 comfortable = "宽松"
 
 [page]
+storage = "存储"
 typography = "文字"
 layout = "版面"
 fonts = "字体"
@@ -129,6 +130,8 @@ toc = "目录"
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
 [group]
+usage = "占用"
+cleanup = "清理"
 body = "正文"
 paragraph = "段落"
 page_turn = "翻页"
@@ -143,6 +146,8 @@ rows = "条目"
 marking = "划线"
 
 [field]
+app_dir = "软件数据目录"
+log_dir = "日志目录"
 font_size = "字号"
 "font_size.desc" = "正文的像素字号。"
 line_height = "行距"
@@ -250,46 +255,37 @@ notes = "还没有添加过批注"
 # - 「今天还没读」与「读不到书库」是两句话：前者是真实读数 0，后者是功能没数据源。
 # - 时间范围是这一屏内的筛选，不是三个页面，所以措辞是「近 N 天」而不是名词化的标签。
 [stats]
-today = "今天"
-today_none = "今天还没开始读"
-streak = "连续第 %{days} 天"
-streak_none = "还没有连续记录"
-range_7 = "近 7 天"
-range_14 = "近 14 天"
-range_30 = "近 30 天"
-trend = "趋势"
-# 结论写成一句话摆在图下面：移动端浮层点不住，tooltip 不能是唯一那条读数通路，
-# 而「今天那根」也不该只靠颜色认（Design Guides：不许只用颜色传义）。
-trend_note = "%{days} 天里读了 %{total}，日均 %{avg}"
+
+# 统计那一屏只剩一张热力图（一格一天）。键因此只剩三类：窗口与结论那一句话、
+# 图例两端、以及轴上的星期几与月份。旧的档位/趋势/时段/雷达/榜单那十几条随界面一起删了。
+# 结论摆在图下面：移动端浮层点不住，读数通路不能只剩 tooltip，而深浅也不许是唯一那条线索。
+
+# 时长读数那四句与星期名沿用旧表（措辞各语言自己定过，这里不重翻一遍）。
 duration_hours_minutes = "%{hours} 小时 %{minutes} 分钟"
 duration_hours = "%{hours} 小时"
 duration_minutes = "%{minutes} 分钟"
 duration_seconds = "%{seconds} 秒"
-minutes_unit = "分钟"
-total = "累计"
-total_time = "总时长"
-total_days = "读过天数"
-total_books = "读过的书"
-total_notes = "批注条数"
-top = "时间花在哪些书上"
-hours = "一般几点读"
-hours_peak = "最常在读 %{hour} 点前后"
-# 轴上只有那个裸钟点（24 格排 24 个「21 点」会叠成一团），tooltip 的标题才是这一句。
-hour_cell = "%{hour} 点"
-# 星期几名只有七个、且是界面自己排的一圈轴，所以留在这里而不是 core 的日期层。
-weekday = "一周里哪天读得多"
-weekday_note = "%{day} 读得最多，平均 %{avg}"
+
+# 轴上只标一、三、五这三行，标签要短到能塞进一列车道的宽度。
 weekday_mon = "周一"
-weekday_tue = "周二"
 weekday_wed = "周三"
-weekday_thu = "周四"
 weekday_fri = "周五"
-weekday_sat = "周六"
-weekday_sun = "周日"
+
+# 「读不到书库」与「还没有阅读记录」是两句话，别并成一句「暂无数据」。
 no_store = "读不到书库"
 no_store_hint = "统计读的是本地书库，请确认书库目录能打开。"
 
-# 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
+# 眉标说的是窗口，不是目的地名（导航那条已经点亮了「统计」）。
+window_year = "近 12 个月"
+
+# 一月那一列画的是年份而不是「1 月」：横看一年，最容易读错的正是「这是哪一年」。
+month = "%{month} 月"
+
+heatmap_note = "读了 %{days} 天，一共 %{total}，最长连续 %{streak} 天"
+none_yet = "还没有阅读记录"
+
+legend_less = "少"
+legend_more = "多"
 [mobile.tab]
 shelf = "书架"
 stats = "统计"
@@ -412,3 +408,60 @@ version_desc = "现在跑着的这一份二进制编译自哪个版本。"
 title = "欢迎使用 Folio"
 pick = "选择书库文件夹…"
 use_default = "使用默认位置"
+
+# 存储那一屏：本应用在这台设备上占了多大、分别占在哪些去处、能清掉哪几档。
+# 类别名同时是环上那片与明细那一行，所以每一类都得念得出来。
+[area]
+books = "书籍文件"
+covers = "封面"
+thumbnails = "缩略图缓存"
+staging = "导入没走完的文件"
+database = "数据库"
+logs = "日志"
+rotated_logs = "旧日志"
+comics = "漫画解压缓存"
+inbox = "收件箱"
+config = "配置"
+other = "其它"
+
+# 读数那几句。`unreadable` 与 `failed` 是给「这数不完整」留的两句实话，
+# 不是错误弹窗：屏幕上仍然有账，只是那一本账是下界或上一趟的。
+[usage]
+not_yet = "还没统计过"
+empty = "这台设备上还没写下东西"
+total = "占用"
+unreadable = "有 %{n} 处没能读到，上面的数是下界"
+failed = "统计没跑成：%{reason}"
+library_unconfirmed = "书库位置还没确认"
+logging_off = "日志不落盘"
+nothing_to_clean = "现在没什么可清的"
+
+# 那几颗按钮与行下面那句说明。按钮只写两三字：这一组四行排下来，长的动词短语会把
+# 右端那格字节挤掉。
+[action]
+rescan = "重新统计"
+clear = "清掉"
+clear_thumbs = "缩略图缓存"
+"clear_thumbs.desc" = "书架上那些封面小图，下次要的时候自己重生成"
+clear_comics = "漫画解压缓存"
+"clear_comics.desc" = "CBR/CBZ 解在磁盘上的那些页，下次打开那本会重解"
+clear_partials = "导入没走完的文件"
+"clear_partials.desc" = "导入中断留下的 .part，库里没有它们"
+clear_logs = "旧日志"
+"clear_logs.desc" = "轮转出来的前几轮现场；正在写的这一份不动"
+vacuum = "整理数据库"
+"vacuum.desc" = "把没人用的页还给磁盘，顺带清掉碎片"
+
+# 删之前那一句。四档缓存与整库重写**各写一条整句**：它们丢东西的程度不一样，
+# 拼成「通用一句 + 后果片段」等于用中文的语序去装配其余八门语言。
+[confirm]
+"thumbs.title" = "清掉缩略图缓存？"
+"comics.title" = "清掉漫画解压缓存？"
+"partials.title" = "清掉没导完的文件？"
+"logs.title" = "清掉旧日志？"
+"vacuum.title" = "整理数据库？"
+"thumbs.body" = "清掉 %{bytes}。缩略图会在下次打开书架时重新生成一遍。"
+"comics.body" = "清掉 %{bytes}。下次打开那本漫画要重新解一遍，慢一点，不是出错。"
+"partials.body" = "清掉 %{bytes}。这些都是没导完的文件，库里没有它们。"
+"logs.body" = "清掉 %{bytes}。丢掉的是前几轮运行的现场，正在写的这一份留着。"
+"vacuum.body" = "重写库文件，预计还回 %{bytes}。要花几秒，过程中会临时多占一份。"

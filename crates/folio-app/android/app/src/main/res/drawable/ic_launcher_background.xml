@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+  应用图标的背景层（adaptive 的第二层）：自上而下的墨绿渐变。
+
+  矢量而不是位图，是因为 adaptive 图标要求各层满幅 108x108dp 且能被启动器按任意形状
+  裁（圆角方、圆、水滴…）—— 位图一裁就露边。渐变两端是设计稿定下的 #376E66 → #1E3E39，
+  纸白前景对这两端的对比度分别是 5.9 与 6.2，都过 WCAG 非文字那条 3.0 的线。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0 h108 v108 h-108 z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="0"
+                android:endY="108"
+                android:startX="0"
+                android:startY="0"
+                android:type="linear">
+                <item
+                    android:color="#FF376E66"
+                    android:offset="0" />
+                <item
+                    android:color="#FF1E3E39"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

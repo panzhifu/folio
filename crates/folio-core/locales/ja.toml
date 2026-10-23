@@ -117,6 +117,7 @@ compact = "詰める"
 comfortable = "ゆったり"
 
 [page]
+storage = "保存領域"
 typography = "文字"
 layout = "レイアウト"
 fonts = "フォント"
@@ -128,6 +129,8 @@ toc = "目次"
 # 設定ページ内のグループ見出し。1 ページに 2 つ以上あるとサイドバーの項目として
 # 出てくるので、それぞれの字段に何の共通点があるかを名前で示す。
 [group]
+usage = "使用量"
+cleanup = "クリーンアップ"
 body = "本文"
 paragraph = "段落"
 page_turn = "ページめくり"
@@ -142,6 +145,8 @@ rows = "行"
 marking = "マーキング"
 
 [field]
+app_dir = "アプリのデータフォルダー"
+log_dir = "ログフォルダー"
 font_size = "文字サイズ"
 "font_size.desc" = "本文のピクセルサイズ。"
 line_height = "行送り"
@@ -246,43 +251,37 @@ notes = "注釈はまだ追加されていません"
 # 这一门的读数紧凑到 `時間` / `分` 两个假名单位，而不足一小时要整段省掉 `時間`，
 # 所以单位与句式留在这里，代码只交给 `folio_core::time::duration_parts` 拆数。
 [stats]
-today = "今日"
-today_none = "今日はまだ読んでいません"
-streak = "%{days} 日連続"
-streak_none = "連続記録はまだありません"
-range_7 = "直近 7 日間"
-range_14 = "直近 14 日間"
-range_30 = "直近 30 日間"
-trend = "推移"
-trend_note = "%{days} 日間で %{total}、1 日平均 %{avg}"
+
+# 统计那一屏只剩一张热力图（一格一天）。键因此只剩三类：窗口与结论那一句话、
+# 图例两端、以及轴上的星期几与月份。旧的档位/趋势/时段/雷达/榜单那十几条随界面一起删了。
+# 结论摆在图下面：移动端浮层点不住，读数通路不能只剩 tooltip，而深浅也不许是唯一那条线索。
+
+# 时长读数那四句与星期名沿用旧表（措辞各语言自己定过，这里不重翻一遍）。
 duration_hours_minutes = "%{hours} 時間 %{minutes} 分"
 duration_hours = "%{hours} 時間"
 duration_minutes = "%{minutes} 分"
 duration_seconds = "%{seconds} 秒"
-minutes_unit = "分"
-total = "累計"
-total_time = "総読書時間"
-total_days = "読んだ日数"
-total_books = "読んだ冊数"
-total_notes = "注釈の数"
-top = "どの本に時間を使ったか"
-hours = "いつ読むか"
-hours_peak = "よく読むのは %{hour} 時ごろ"
-# 軸には素の数字だけ（24 枠に「21 時」を並べると潰れる）。ツールチップの見出しがこれ。
-hour_cell = "%{hour} 時"
-weekday = "曜日ごとの読書量"
-weekday_note = "%{day} が最も読み、平均 %{avg}"
+
+# 轴上只标一、三、五这三行，标签要短到能塞进一列车道的宽度。
 weekday_mon = "月曜"
-weekday_tue = "火曜"
 weekday_wed = "水曜"
-weekday_thu = "木曜"
 weekday_fri = "金曜"
-weekday_sat = "土曜"
-weekday_sun = "日曜"
+
+# 「读不到书库」与「还没有阅读记录」是两句话，别并成一句「暂无数据」。
 no_store = "書庫を開けません"
 no_store_hint = "統計はローカルの書庫を読みます。書庫フォルダが開けるか確認してください。"
 
-# 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
+# 眉标说的是窗口，不是目的地名（导航那条已经点亮了「统计」）。
+window_year = "直近 12 か月"
+
+# 一月那一列画的是年份而不是「1 月」：横看一年，最容易读错的正是「这是哪一年」。
+month = "%{month}月"
+
+heatmap_note = "%{days} 日に読み、合計 %{total}、最長連続 %{streak} 日"
+none_yet = "まだ読書記録がありません"
+
+legend_less = "少ない"
+legend_more = "多い"
 [mobile.tab]
 shelf = "本棚"
 stats = "統計"
@@ -408,3 +407,54 @@ version_desc = "現在起動中のバイナリがビルドされたバージョ�
 title = "Folio へようこそ"
 pick = "書庫フォルダを選択…"
 use_default = "既定の場所を使う"
+
+# 保存領域の画面：このアプリがこの機器でどれだけの領域を使い、それがどこにあり、
+# どのキャッシュを消せるかを一覧にする。
+[area]
+books = "書籍ファイル"
+covers = "表紙画像"
+thumbnails = "サムネイルキャッシュ"
+staging = "取り込みの途中ファイル"
+database = "データベース"
+logs = "ログ"
+rotated_logs = "古いログ"
+comics = "漫画解凍キャッシュ"
+inbox = "受信箱"
+config = "設定"
+other = "その他"
+
+[usage]
+not_yet = "まだ集計していません"
+empty = "このデバイスにはまだ何も書き込まれていません"
+total = "使用量"
+unreadable = "%{n} か所を読めなかったため、この数は下限です"
+failed = "集計できませんでした：%{reason}"
+library_unconfirmed = "本棚のフォルダーがまだ未確定です"
+logging_off = "ログはディスクに書き込まれません"
+nothing_to_clean = "今、消せるものはありません"
+
+[action]
+rescan = "もう一度集計"
+clear = "消去"
+clear_thumbs = "サムネイルキャッシュ"
+"clear_thumbs.desc" = "本棚にある表紙の縮小画像です。次に必要になったときに作り直します"
+clear_comics = "漫画解凍キャッシュ"
+"clear_comics.desc" = "CBR/CBZ からディスクに展開したページです。次に開いたときもう一度展開します"
+clear_partials = "取り込みの途中ファイル"
+"clear_partials.desc" = "取り込みが途中で止まったときに残る .part で、ライブラリには入っていません"
+clear_logs = "古いログ"
+"clear_logs.desc" = "ローテーション済みの前回までのログです。書き込み中の一份は残ります"
+vacuum = "データベースを整理"
+"vacuum.desc" = "使われていないページをディスクに戻し、断片化も整えます"
+
+[confirm]
+"thumbs.title" = "サムネイルキャッシュを消しますか？"
+"comics.title" = "漫画解凍キャッシュを消しますか？"
+"partials.title" = "取り込みの途中ファイルを消しますか？"
+"logs.title" = "古いログを消しますか？"
+"vacuum.title" = "データベースを整理しますか？"
+"thumbs.body" = "%{bytes} を消去します。サムネイルは本棚を次に開くときにもう一度生成されます。"
+"comics.body" = "%{bytes} を消去します。その漫画を次に開くときはもう一度展開するので少し時間がかかります。"
+"partials.body" = "%{bytes} を消去します。これらは取り込みが終わっていないファイルで、ライブラリには入っていません。"
+"logs.body" = "%{bytes} を消去します。過去の実行分の記録は失われますが、書き込み中の一份は残ります。"
+"vacuum.body" = "ライブラリファイルを書き直し、%{bytes} ほど戻る見込みです。数秒かかり、途中でもう一份分の余裕が必要です。"

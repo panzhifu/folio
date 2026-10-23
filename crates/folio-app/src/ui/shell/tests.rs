@@ -1413,8 +1413,8 @@ mod booted {
 
     /// 回归门：切进「统计」应当拿到一份快照并把它画出来。
     ///
-    /// 钉的是这三处接线的存在：`go(Stats)` 叫一次 `refresh`、快照拿到了才有一排档位
-    /// 按钮、内容区与滚动层各自挂在元素 id 上。空库也算拿到了 —— 那一屏要说的是
+    /// 钉的是这三处接线的存在：`go(Stats)` 叫一次 `refresh`、快照拿到了才画那张图、
+    /// 内容区与滚动层各自挂在元素 id 上。空库也算拿到了 —— 那一屏要说的是
     /// 「还没读」，不是「这里空着」。
     #[gpui_kit::test]
     fn the_stats_destination_reads_the_library_it_was_given(cx: &mut TestAppContext) {
@@ -1425,13 +1425,13 @@ mod booted {
                 window.render_frame(cx);
                 (
                     window.try_find("folio-stats").is_some(),
-                    window.try_find("stats-ranges").is_some(),
-                    shell.read(cx).stats.read(cx).has_report(),
+                    window.try_find("stats-heatmap").is_some(),
+                    shell.read(cx).stats.read(cx).has_heatmap(),
                 )
             })
             .expect("窗口应能渲染");
         assert!(drawn.0, "统计那一格应画出自己的根");
-        assert!(drawn.1, "拿到快照就该有那排档位按钮（默认档是近 14 天）");
+        assert!(drawn.1, "拿到快照就该画出那张热力图");
         assert!(drawn.2, "切进来就要拿到一份快照，等下一帧再去查库就晚了");
     }
 
@@ -1440,37 +1440,6 @@ mod booted {
     /// 源文件不在了的那本**连数据一起删**（那是它对「书从架上消失」的正确处置），
     /// 后面那条会话就插不进外键了。
     const NOT_A_BOOK: i64 = 9_999;
-
-    /// 回归门：统计的榜单那一行点开一本书 = 与书架同一个动作。
-    ///
-    /// 走的是外壳已有的 `open_reading`（把那一层盖上来），所以这条同时钉住两件事：那一层
-    /// 挂上了，而**目的地没被切走** —— 书盖的是读者当前看着的那一屏，退完场他就回到榜单上。
-    /// 上一版把书压进架面那条栈，从统计点进去时栈与目的地各说一套，是一个没人报过的错位。
-    #[gpui_kit::test]
-    fn a_stats_row_opens_the_book_over_the_report(cx: &mut TestAppContext) {
-        let (_handle, shell) = boot(cx, false);
-        let stack = shell.read_with(cx, |this, _| {
-            this.stacks[Destination::Shelf.index()].clone()
-        });
-        assert_eq!(stack.read_with(cx, |state, _| state.depth()), 1);
-
-        let stats = shell.read_with(cx, |this, _| this.stats.clone());
-        cx.update(|cx| {
-            stats.update(cx, |_, cx| {
-                cx.emit(crate::ui::features::stats::StatsEvent::Open(7))
-            })
-        });
-
-        assert!(
-            shell.read_with(cx, |this, _| this.reading_open()),
-            "那一层要盖上来了：返回时靠它把位置与时长一起结掉"
-        );
-        assert_eq!(
-            stack.read_with(cx, |state, _| state.depth()),
-            1,
-            "从统计点开一本书不该去动架面那条栈"
-        );
-    }
 
     /// 回归门：关掉一本书之后统计要跟上，不必等读者再切一次目的地。
     ///
@@ -1486,13 +1455,13 @@ mod booted {
                 this.stats.update(cx, |stats, cx| stats.refresh(cx));
             })
         });
-        let before = shell.read_with(cx, |this, cx| this.stats.read(cx).window_sessions());
+        let before = shell.read_with(cx, |this, cx| this.stats.read(cx).active_days());
         assert_eq!(before, Some(0), "内存库里此刻还没有一段阅读");
 
         // 那一行必须挂在库里真的存在的 `book_id` 上（外键），所以先登记一本。
         // 而**盖上来的那一层**故意用一个读不出来的 id：`open_book` 认不出库里的行
         // 就只写日志、不动别的，收层时那次重取照样发生 —— 这条门钉的是「收层会叫重取」，
-        // 不是「书真能打开」。时间戳取现在附近：`reading_summary(14)` 只看最近两周。
+        // 不是「书真能打开」。时间戳取现在附近：热力图看的是最近一年。
         let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
         let book = store
             .add_book(
@@ -1511,8 +1480,8 @@ mod booted {
         store.record_session(book, now - 600, now, 0).unwrap();
         shell.update(cx, |this, cx| this.close_reading(cx));
 
-        let after = shell.read_with(cx, |this, cx| this.stats.read(cx).window_sessions());
-        assert_eq!(after, Some(1), "弹掉阅读页那次重取要把新的一段带上来");
+        let after = shell.read_with(cx, |this, cx| this.stats.read(cx).active_days());
+        assert_eq!(after, Some(1), "弹掉阅读页那次重取要把今天那一格带上来");
     }
 
     /// 回归门：读者在「信息」那一页改掉书名，架上那张卡要跟着变。

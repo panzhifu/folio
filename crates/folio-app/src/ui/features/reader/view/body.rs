@@ -1163,13 +1163,8 @@ impl Render for ReaderSession {
                             if skip_main && !to_back {
                                 continue;
                             }
-                            // C 方案：进场页整张画，裁剪交给 GPU 网格的平面/卷曲面。
-                            // 双页的 CPU 兜底只裁 leaf 那一栏；静态页（另一半）不裁。
-                            let cut = if gpu_curl_mesh.is_some() || (spread_curl && !is_leaf) {
-                                None
-                            } else {
-                                at.cut
-                            };
+                            // 这一栏的字按哪一条折线裁（判据与它的理由在 [`column_cut`]）。
+                            let cut = column_cut(spread_curl, is_leaf, &at);
                             let x = self.prefs.margin_x
                                 + column_offset(column_width, gap, slice.column)
                                 + shift_x;
@@ -1952,6 +1947,33 @@ fn in_viewport(rect: Bounds<Pixels>, viewport: (f32, f32)) -> bool {
         && f32::from(rect.origin.y) >= 0.0
         && f32::from(rect.origin.x) + f32::from(rect.size.width) <= viewport.0
         && f32::from(rect.origin.y) + f32::from(rect.size.height) <= viewport.1
+}
+
+/// 这一栏的字按哪一条折线裁。
+///
+/// 唯一不裁的是双页里**静态**那一栏（当前跨页没被揭起来的另一半）：那条折线是 leaf 那半块
+/// 的折线，拿它去裁静态那一栏，等于把读者正在读的另一半整栏抹掉。
+///
+/// 从前这里还跟着 `gpu_curl_mesh` 一起关掉裁剪 —— 「进场页整张画，遮挡交给网格」。那一刀
+/// 押错了对象：网格是**渲染器那一趟**画的，它缺捕获纹理时会静默跳过整趟（fork 里
+/// `page_curl.rs` 那两句 `缺…捕获纹理，这一帧不画卷曲网格`），而应用这侧的 `capture_valid`
+/// 只量得出正面那块。跳过的那一帧，未裁的新页字就整屏铺在卷起来的纸该在的地方 ——
+/// 读者读到的是「下一页的字闪一下又没了」。
+///
+/// 留着这一刀不需要网格让路：它与网格的覆盖边界是**同一条线** —— 两边都从
+/// [`turn_animation::cylinder_for`] 出来（`crease_for` 就是那个圆柱的轴，见 `curl.rs`
+/// 那句「圆柱的轴**就是**那条折线」）。所以网格在的时候裁掉的正是被压住的那些字，一格不少；
+/// 网格不在的时候，它是唯一还挡住那一屏字的东西。
+fn column_cut(
+    spread_curl: bool,
+    is_leaf: bool,
+    sheet: &turn_animation::Sheet,
+) -> Option<turn_animation::Cut> {
+    if spread_curl && !is_leaf {
+        None
+    } else {
+        sheet.cut
+    }
 }
 
 /// 这一帧这张图画得出来吗 —— 顺手把「这一帧在场」记进图集（帧末的回收按这个数放人）。

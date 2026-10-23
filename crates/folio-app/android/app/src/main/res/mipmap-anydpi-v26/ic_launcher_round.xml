@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+  圆形那颗：adaptive 时代不需要另一套画稿 —— 形状是启动器的遮罩决定的，不是资源决定的，
+  所以三层与 ic_launcher.xml 完全同一份。这条存在的理由只是 `android:roundIcon` 得有个东西可指
+  （以及个别只问 roundIcon 的启动器）。真正圆的是 mipmap-*dpi/ic_launcher_round.png 那几张兜底位图。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+</adaptive-icon>

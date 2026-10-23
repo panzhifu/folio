@@ -128,6 +128,7 @@ compact = "Compact"
 comfortable = "Comfortable"
 
 [page]
+storage = "Storage"
 typography = "Text"
 layout = "Page"
 fonts = "Fonts"
@@ -140,6 +141,8 @@ toc = "Contents"
 # also show up as that page's sub-entries in the sidebar, so each one has to name
 # what its fields have in common.
 [group]
+usage = "Usage"
+cleanup = "Cleanup"
 body = "Body text"
 paragraph = "Paragraph"
 page_turn = "Page turn"
@@ -154,6 +157,8 @@ rows = "Rows"
 marking = "Marking"
 
 [field]
+app_dir = "App data folder"
+log_dir = "Log folder"
 font_size = "Font size"
 "font_size.desc" = "Body text size in pixels."
 line_height = "Line height"
@@ -262,45 +267,37 @@ notes = "No annotations added yet"
 # `duration_hours_minutes` 之所以是模板而不是代码里一句 `format!("{h}h {m}m")`：这一门语言要
 # 的是紧凑写法，中英各自要自己的单位，而不足一小时的读数要整段去掉小时 —— 三条规则各不一样。
 [stats]
-today = "Today"
-today_none = "Nothing read yet today"
-streak = "Day %{days} in a row"
-streak_none = "No streak yet"
-range_7 = "Last 7 days"
-range_14 = "Last 14 days"
-range_30 = "Last 30 days"
-trend = "Trend"
-# Spelled out under the chart on purpose: tooltips are not tappable on mobile, so a
-# reading must not live only in one — and "which bar is today" cannot rely on colour alone.
-trend_note = "%{total} read in %{days} days, %{avg} a day"
+
+# 统计那一屏只剩一张热力图（一格一天）。键因此只剩三类：窗口与结论那一句话、
+# 图例两端、以及轴上的星期几与月份。旧的档位/趋势/时段/雷达/榜单那十几条随界面一起删了。
+# 结论摆在图下面：移动端浮层点不住，读数通路不能只剩 tooltip，而深浅也不许是唯一那条线索。
+
+# 时长读数那四句与星期名沿用旧表（措辞各语言自己定过，这里不重翻一遍）。
 duration_hours_minutes = "%{hours}h %{minutes}m"
 duration_hours = "%{hours}h"
 duration_minutes = "%{minutes} min"
 duration_seconds = "%{seconds} sec"
-minutes_unit = "min"
-total = "All time"
-total_time = "Total time"
-total_days = "Days read"
-total_books = "Books read"
-total_notes = "Annotations"
-top = "Where the time went"
-hours = "When you read"
-hours_peak = "Most reading happens around %{hour}:00"
-# The axis carries the bare hour only; a tooltip title gets this fuller form.
-hour_cell = "%{hour}:00"
-weekday = "Which days of the week"
-weekday_note = "%{day} is your biggest day, %{avg} on average"
+
+# 轴上只标一、三、五这三行，标签要短到能塞进一列车道的宽度。
 weekday_mon = "Mon"
-weekday_tue = "Tue"
 weekday_wed = "Wed"
-weekday_thu = "Thu"
 weekday_fri = "Fri"
-weekday_sat = "Sat"
-weekday_sun = "Sun"
+
+# 「读不到书库」与「还没有阅读记录」是两句话，别并成一句「暂无数据」。
 no_store = "Couldn't open the library"
 no_store_hint = "Stats read the local library. Check that its folder is accessible."
 
-# 移动端外壳的四个目的地（迁移中，等外壳合并后删除）。
+# 眉标说的是窗口，不是目的地名（导航那条已经点亮了「统计」）。
+window_year = "Last 12 months"
+
+# 一月那一列画的是年份而不是「1 月」：横看一年，最容易读错的正是「这是哪一年」。
+month = "%{month}"
+
+heatmap_note = "Read on %{days} days, %{total} in all, longest streak %{streak} days"
+none_yet = "No reading recorded yet"
+
+legend_less = "Less"
+legend_more = "More"
 [mobile.tab]
 shelf = "Shelf"
 stats = "Stats"
@@ -431,3 +428,60 @@ version_desc = "The version this running binary was built from."
 title = "Welcome to Folio"
 pick = "Choose library folder…"
 use_default = "Use the default location"
+
+# The Storage screen: how much this app occupies on this device, where those bytes
+# live, and which of the four caches can be thrown away.
+[area]
+books = "Book files"
+covers = "Covers"
+thumbnails = "Thumbnail cache"
+staging = "Unfinished imports"
+database = "Database"
+logs = "Log"
+rotated_logs = "Old logs"
+comics = "Comic unpack cache"
+inbox = "Inbox"
+config = "Configuration"
+other = "Other"
+
+# The two honesty lines: `unreadable` and `failed` say the ledger is a floor or a
+# previous pass, rather than popping an error dialog over numbers that are still useful.
+[usage]
+not_yet = "Not measured yet"
+empty = "Nothing has been written on this device yet"
+total = "Used"
+unreadable = "%{n} locations couldn't be read, so this is a floor"
+failed = "Couldn't finish measuring: %{reason}"
+library_unconfirmed = "No library folder confirmed yet"
+logging_off = "Logs aren't written to disk"
+nothing_to_clean = "Nothing to clear right now"
+
+# Button labels stay to two or three words: four of these rows stack up, and a long
+# verb phrase would push the byte figure off the right edge.
+[action]
+rescan = "Measure again"
+clear = "Clear"
+clear_thumbs = "Thumbnail cache"
+"clear_thumbs.desc" = "The small cover images on the shelf; they come back when next needed"
+clear_comics = "Comic unpack cache"
+"clear_comics.desc" = "Pages unpacked from CBR/CBZ on disk; the next opening unpacks them again"
+clear_partials = "Unfinished imports"
+"clear_partials.desc" = ".part files left by an interrupted import; none of these are in the library"
+clear_logs = "Old logs"
+"clear_logs.desc" = "Rotated logs from previous runs. The one being written now stays."
+vacuum = "Rebuild database"
+"vacuum.desc" = "Returns unused pages to the disk and clears fragmentation"
+
+# One whole sentence per action: the four caches and the rewrite lose different things,
+# and a shared stem plus a fragment would force English word order onto eight other languages.
+[confirm]
+"thumbs.title" = "Clear the thumbnail cache?"
+"comics.title" = "Clear the comic unpack cache?"
+"partials.title" = "Clear the unfinished imports?"
+"logs.title" = "Clear the old logs?"
+"vacuum.title" = "Rebuild the database?"
+"thumbs.body" = "Clears %{bytes}. Thumbnails are generated again the next time the shelf needs them."
+"comics.body" = "Clears %{bytes}. The next time you open that comic it is unpacked again — slower, not broken."
+"partials.body" = "Clears %{bytes}. These are files from imports that never finished; the library doesn't reference them."
+"logs.body" = "Clears %{bytes}. You lose the record of previous runs; the log being written now is kept."
+"vacuum.body" = "Rewrites the library file, expecting about %{bytes} back. Takes a few seconds and temporarily needs room for a copy."

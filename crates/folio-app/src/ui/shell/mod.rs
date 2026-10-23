@@ -33,11 +33,12 @@ use crate::ui::features::notes::NotesView;
 use crate::ui::features::reader::{Arrow, ReadingPage, Reserve};
 use crate::ui::features::settings::{CompactSettings, SettingsPage, SettingsView};
 use crate::ui::features::shelf::{ShelfEvent, ShelfView};
-use crate::ui::features::stats::{StatsEvent, StatsView};
+use crate::ui::features::stats::StatsView;
 use crate::ui::features::welcome::WelcomeView;
 use crate::ui::foundation::theme;
 use crate::ui::host;
 use crate::ui::services::config::ConfigHolder;
+use crate::ui::services::storage;
 use navigation::{Destination, SizeClass, navigation};
 
 #[cfg(not(mobile))]
@@ -351,8 +352,8 @@ pub struct AppShell {
     account: Option<gpui_kit::Entity<CompactSettings>>,
     /// 盖在窗口上的那一本打开的书（两端单本）。`None` = 没有在读书。
     reading: Option<ReadingLayer>,
-    /// 「统计」那一格的视图。外壳留着它有两个理由：榜单那一行点开的订阅要挂在它上面，
-    /// 而**关掉一本书之后要叫它重取一次**（读者读的那几分钟不进账，那一屏就还是旧数）。
+    /// 「统计」那一格的视图。外壳留着它只有一个理由：**关掉一本书之后要叫它重取一次**
+    /// （读者读的那几分钟不进账，那一屏就还是旧数）。
     stats: gpui_kit::Entity<StatsView>,
     /// 书架那一格的视图。外壳留着它只有一个理由：**关掉一本书之后要叫架面重查一次**。
     /// 开书会把这一本的 `last_opened_at` 顶到最前（`Store::touch_opened`），架面不重查就
@@ -369,8 +370,6 @@ pub struct AppShell {
     _config_watch: Subscription,
     /// 书架「打开一本书」的订阅。
     _shelf_watch: Subscription,
-    /// 统计榜单「打开一本书」的订阅。与 `_shelf_watch` 走的是同一个 `open_reading`。
-    _stats_watch: Subscription,
     /// 书架栈的 `Popped` 订阅：pop 出阅读页时把位置落库。
     _stack_watch: Subscription,
     /// 系统深浅翻面的订阅。`Window::appearance()` 是 gpui 里的缓存，只由平台回调刷新，
@@ -475,14 +474,15 @@ impl AppShell {
         let stats = cx.new(|_| StatsView::new());
         let notes = cx.new(|_| NotesView::new());
         // 「我的」这一格两端画的不一样：桌面直接画整页字段（[`SettingsView`]，
-        // 落点是「关于」那一页），手机画钻入式的紧凑列表（[`CompactSettings`]）——
+        // 落在侧栏第一页「外观」——「关于」已经挪到侧栏末尾，它是办完事顺手看一眼的东西，
+        // 不该是这一格开门的那一页），手机画钻入式的紧凑列表（[`CompactSettings`]）——
         // 两份界面吃的是同一份页面规格。「这一端塞不塞得下两栏」问 host，不写 `cfg(mobile)`。
         let (account, account_root): (Option<gpui_kit::Entity<CompactSettings>>, AnyView) =
             if host::supports_overlay_controls(cx) {
-                let settings = cx.new(|_| SettingsView::new(SettingsPage::About));
+                let settings = cx.new(|cx| SettingsView::new(SettingsPage::Appearance, cx));
                 (None, settings.into())
             } else {
-                let view = cx.new(|_| CompactSettings::new());
+                let view = cx.new(CompactSettings::new);
                 let root: AnyView = view.clone().into();
                 (Some(view), root)
             };
@@ -563,15 +563,6 @@ impl AppShell {
                 this._chrome_release = None;
             }
             _ => {}
-        });
-
-        // 统计的榜单点开一本书 = 与书架同一动作、同一条路（把那一层盖上来）。
-        // 目的地不用切：这一层盖的是**当前那一屏**，退完场读者就回到他点进去之前看着的那页。
-        let _stats_watch = cx.subscribe(&stats, move |this, _, event, cx| {
-            // 只有一种事件，所以这一下不必判（写成 `if let` 会是个永真的模式匹配，
-            // 编译器也会说它 irrefutable）。将来统计页多出别的动作，这里再换回 `match`。
-            let StatsEvent::Open(book_id) = event;
-            this.open_reading(*book_id, cx);
         });
 
         // 配置改一次就落盘并重画这一屏（重涂主题在渲染那一帧做）。
@@ -673,7 +664,6 @@ impl AppShell {
             onboarding,
             _config_watch,
             _shelf_watch,
-            _stats_watch,
             _stack_watch,
             _appearance_watch,
             applied: None,
@@ -892,6 +882,15 @@ impl AppShell {
         // 每次都取而不是「只在第一次进来时取」：读者会读一读、切回架面、再切回来看数。
         if destination == Destination::Stats {
             self.stats.update(cx, |stats, cx| stats.refresh(cx));
+        }
+        // 进「我的」起一次统计，但**只在桌面那一头**起。桌面画的是整页字段（[`SettingsView`]），
+        // 换到「存储」那一页由 `Settings` 组件自己在侧栏里办，界面这层拿不到那个回调；手机那
+        // 一头有落点（`CompactSettings::open` 按页序判），而且根屏一个数都不摆 —— 在那儿起一趟
+        // 几百毫秒的目录遍历是为了一屏看不见的东西。
+        //
+        // 「这一端塞不塞得下两栏」仍然问 host，与上面建两屏时同一个判据，不写 `cfg(mobile)`。
+        if destination == Destination::Account && host::supports_overlay_controls(cx) {
+            storage::request(cx, storage::Job::Rescan);
         }
         self.destination = destination;
         cx.notify();

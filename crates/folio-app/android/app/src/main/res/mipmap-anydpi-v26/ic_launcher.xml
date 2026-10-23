@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+  Folio 的 adaptive 图标：底（墨绿渐变）+ 形（摊开的书与琥珀书签）+ 主题层（单色负形）。
+
+  分层的意义是启动器说了算：圆角方、圆、水滴、方形各家的遮罩不同，两层各自满幅，
+  裁到哪都还剩完整的形。minSdk 26，所以这颗在所有支持的机器上都是首选，
+  mipmap-*dpi/ 里那几张位图只是启动器不去问 adaptive 时的兜底。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+</adaptive-icon>

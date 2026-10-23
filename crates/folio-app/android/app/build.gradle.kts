@@ -94,7 +94,28 @@ android {
             // grep 不到 "libtts" 这个串。所以它打进 APK 纯属死重。
             // `JNI_OnLoad` 与五条 `Java_rs_tts_Bridge_*` 在 libfolio_app.so 自己的导出表里
             // （llvm-readelf --dyn-syms 查到），不靠那个 .so。
-            excludes += listOf("**/libgpui_mobile*.so", "**/libtts*.so")
+            //
+            // 第三次发生是格式那一路（2026-10-23 实测）：`pdf_oxide` / `office_oxide` /
+            // `djvu_rs` / `sevenz_rust2` 四个包都声明 `crate-type = ["cdylib", "rlib", …]`，
+            // 链进主库的是 rlib 那一份，cargo-ndk 却把 cdylib 那一份也拷进 jniLibs，于是 APK 里
+            // 多出 20,313,904 B（15.96 + 2.42 + 0.71 + 0.28 MiB，全部 stored 不压缩）—— 占整包
+            // 70.07 MB 的 29%。判据与前两条同形、三条都过：`libfolio_app.so` 的 NEEDED 只有
+            // liblog/libandroid/libdl/libm/libc；整库 `strings` 里搜 `libpdf_oxide` /
+            // `liboffice_oxide` / `libdjvu_rs` / `libsevenz_rust2` 全 0 命中（同一个管道搜裸名
+            // `pdf_oxide` 命中 286 行，证明不是搜索失灵而是真没有）；这四个包自己 `src/` 里没有
+            // `libloading`/`dlopen`，我们图里那份 `libloading` 是 `ash` 载 Vulkan 驱动用的。
+            //
+            // 这一格会自己复发：每加一个「cdylib + rlib 双形」的依赖就多一份副本，而它不出现在
+            // 任何编译错误里，只出现在包体积上。判据是 `unzip -l` 里 `lib/` 那一段有没有带
+            // `-[0-9a-f]{16}` 哈希后缀的名字 —— 那种名字就是 cargo-ndk 拷进来的副本。
+            excludes += listOf(
+                "**/libgpui_mobile*.so",
+                "**/libtts*.so",
+                "**/libpdf_oxide*.so",
+                "**/liboffice_oxide*.so",
+                "**/libdjvu_rs*.so",
+                "**/libsevenz_rust2*.so",
+            )
             keepDebugSymbols += listOf(
                 "*/arm64-v8a/libfolio_app.so",
                 "*/armeabi-v7a/libfolio_app.so",

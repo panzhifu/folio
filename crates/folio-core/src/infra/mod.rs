@@ -13,6 +13,7 @@
 //! - [`diagnostics`] —— 诊断 dump（`FOLIO_DUMP`）。
 //! - [`i18n`] —— 文案表的语言标签与占位符校验（表在 crate 根的 `locales/`）。
 //! - [`time`] —— 日历换算：Unix 秒 ↔ 本地日 ↔ `YYYY-MM-DD`。**其余地方不许自己除 86400。**
+//! - [`usage`] —— 磁盘占用按去处分类数一遍（设置里「存储」那一屏的量具）。
 //!
 //! 这一区**不依赖 [`crate::store`]**（[`services`] 收的是调用方给的句柄），
 //! 也不依赖 [`crate::layout`]：它服务所有人，所以谁都不许反过来要求它懂业务。
@@ -28,3 +29,4 @@ pub mod paths;
 pub mod services;
 pub mod task;
 pub mod time;
+pub mod usage;

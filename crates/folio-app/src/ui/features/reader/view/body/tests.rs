@@ -32,9 +32,11 @@ use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::swipe::{FLING_SPEED, SNAP_FRACTION, fling_floor};
 use crate::ui::features::reader::model::turn::TurnIntent;
-use crate::ui::features::reader::motion::turn_animation::Axis;
+use crate::ui::features::reader::motion::turn_animation::{Axis, Crease, Cut, Sheet};
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::{NAV_TRANSITION, turn_duration};
+
+use super::column_cut;
 
 /// 一段足够长的中文，保证它会折行 —— 不折行的话「缩进改变了布局」这种断言无从成立。
 const PARA: &str = "于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。";
@@ -933,6 +935,41 @@ fn a_curl_turn_waits_for_the_capture_instead_of_being_dropped(cx: &mut TestAppCo
         view.read_with(cx, |v, _| v.page()),
         before + 1,
         "门一开就该把排队那一趟补上"
+    );
+}
+
+/// 折页那一趟里**每一栏该按哪条折线裁**，包括 GPU 网格开着的那些帧。
+///
+/// 这一条钉的是「下一页的字闪一下又没了」：网格是渲染器那一趟画的，它缺捕获纹理时只写一行
+/// 日志、静默不画整趟（fork 的 `page_curl.rs`），而应用这侧的 `capture_valid` 只量得出正面
+/// 那块。被跳过的那一帧，未裁的新页字就整屏铺在卷起来的纸该在的地方。从前 `column_cut`
+/// 跟着 `gpu_curl_mesh` 一起关掉，等于把遮挡全押在「网格一定画得出来」上。
+#[test]
+fn the_curl_clips_every_column_even_while_the_mesh_is_on() {
+    let crease = Crease {
+        nx: 1.0,
+        ny: 0.0,
+        d: 200.0,
+    };
+    let sheet = Sheet {
+        offset: (0.0, 0.0),
+        z: 0,
+        cut: Some(Cut::new(crease, true)),
+    };
+    assert_eq!(
+        column_cut(false, false, &sheet),
+        sheet.cut,
+        "单页折页里这一栏的字该按折线裁 —— 网格在不在都一样"
+    );
+    assert_eq!(
+        column_cut(true, true, &sheet),
+        sheet.cut,
+        "双页 leaf 那一栏同样裁"
+    );
+    assert_eq!(
+        column_cut(true, false, &sheet),
+        None,
+        "双页静态那一栏不裁：那条折线是 leaf 半块的，裁它会抹掉读者正在读的另一半"
     );
 }
 

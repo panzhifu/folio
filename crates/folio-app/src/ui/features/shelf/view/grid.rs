@@ -79,3 +79,100 @@ pub fn columns_for(width: f32, size: SizeClass) -> u16 {
     let fitted = ((available_width(width, size) + GAP) / (MIN_CARD + GAP)).floor() as u16;
     fitted.max(1)
 }
+
+/// 一条流里的第 `ix` 格是组卡还是书，以及它是那一份里的第几个。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::ui::features::shelf) enum Cell {
+    Tile(usize),
+    Book(usize),
+}
+
+/// 把已经各自排好的两段并成架面那一条流：`tiles` / `books` 给的是两段的
+/// `last_opened_at`（库里两条查询同用 `SHELF_ORDER`，所以传进来就是**降序、None 在尾**），
+/// 回的是每一格该从哪一段取。
+///
+/// 尺只有一把：**谁最近被翻开，谁的卡就在先**。点开一本没分组的书，它顶到第 1 格；
+/// 点开某一分组里的书，那本书并不在整架那一片（`Store::shelf_ungrouped` 收掉了它），
+/// 顶到第 1 格的就是那张组卡 —— 读者退架要找的是「我刚碰过的那一格」，至于是书还是组，
+/// 不该由架面替他分档。
+///
+/// 两段内部不动：这里只做归并，不重排，所以库里那条序（含 `added_at` / `id` 那两个
+/// 终结符）原样带过来。
+pub(in crate::ui::features::shelf) fn merge_cells(
+    tiles: &[Option<i64>],
+    books: &[Option<i64>],
+) -> Vec<Cell> {
+    let mut cells = Vec::with_capacity(tiles.len() + books.len());
+    let (mut t, mut b) = (0, 0);
+    while t < tiles.len() || b < books.len() {
+        // `Option<i64>` 自己的序就够用：`None`（没翻开过）小于任何 `Some`，于是两段的
+        // 空白尾巴都自然沉到最后。并列时取书 —— 同一秒里读者要找的那本比一张组卡更好认。
+        let book_first = match (tiles.get(t), books.get(b)) {
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (None, None) => false,
+            (Some(t), Some(b)) => b >= t,
+        };
+        if book_first {
+            cells.push(Cell::Book(b));
+            b += 1;
+        } else {
+            cells.push(Cell::Tile(t));
+            t += 1;
+        }
+    }
+    cells
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cell, merge_cells};
+
+    /// 谁最近被翻开谁在先：书顶到第 1 格，被翻开过的那一组也一样。
+    #[test]
+    fn the_most_recently_opened_card_leads_whether_book_or_group() {
+        // 一张组卡（组里那本刚翻开）+ 两本书（一本更早、一本没翻开过）。
+        assert_eq!(
+            merge_cells(&[Some(30)], &[Some(20), None]),
+            vec![Cell::Tile(0), Cell::Book(0), Cell::Book(1)],
+            "点开组里那本 → 那张组卡领头，没翻开过的书垫底"
+        );
+        assert_eq!(
+            merge_cells(&[Some(10)], &[Some(20), None]),
+            vec![Cell::Book(0), Cell::Tile(0), Cell::Book(1)],
+            "点开一本没分组的书 → 它顶到第 1 格，组卡跟在后面"
+        );
+    }
+
+    /// 两段各自的序不许被归并打乱，并列时让书在前，两端的退化照常。
+    #[test]
+    fn the_merge_keeps_each_run_in_its_own_order() {
+        assert_eq!(
+            merge_cells(&[Some(30), Some(20), Some(10)], &[Some(25), Some(15)]),
+            vec![
+                Cell::Tile(0),
+                Cell::Book(0),
+                Cell::Tile(1),
+                Cell::Book(1),
+                Cell::Tile(2),
+            ],
+            "交错着并，两段各自还是降序"
+        );
+        assert_eq!(
+            merge_cells(&[Some(20)], &[Some(20)]),
+            vec![Cell::Book(0), Cell::Tile(0)],
+            "同一秒：书在前"
+        );
+        assert_eq!(
+            merge_cells(&[], &[Some(5), None]),
+            vec![Cell::Book(0), Cell::Book(1)],
+            "某一组那一页与带搜索词的整架没有组卡"
+        );
+        assert_eq!(
+            merge_cells(&[None, None], &[None]),
+            vec![Cell::Book(0), Cell::Tile(0), Cell::Tile(1)],
+            "谁都没翻开过时，书那段在前、组卡按库里的序接上"
+        );
+        assert_eq!(merge_cells(&[], &[]), Vec::<Cell>::new(), "空架");
+    }
+}

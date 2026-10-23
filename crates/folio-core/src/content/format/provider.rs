@@ -191,6 +191,10 @@ pub trait DocumentProvider: Send + Sync {
     /// 摆多大），而「按多大画」是个要进缓存键的事实，两处都让界面自己说清（见
     /// `content::format::pdf::RENDER_EDGE` 那条「改它要 bump `INDEX_VERSION`」）。
     ///
+    /// 「上限」是**字面意思**：PDF / AZW4 那一族会把图片页按源图自己的密度封到更低一档
+    /// （`format::pdf::native_edge`），所以交回的 PNG 可能比 `edge` 小 —— 页表里存的
+    /// 尺寸与它是同一句判断，按页表摆位的那一侧不会因此画歪。
+    ///
     /// 与取图字节同一立场：读不到是 `None` 而不是 `Err` —— 那一页空着，页的摆位不变。
     fn render_page(&self, _path: &Path, _page: usize, _edge: u32) -> Option<Vec<u8>> {
         None

@@ -44,12 +44,17 @@ enum Container {
     Tar,
 }
 
-fn cache_root() -> PathBuf {
+/// 整棵解压缓存在哪儿：`<数据根>/cache/comics`。
+///
+/// 名字的**所有权**在 [`crate::infra::paths::comics_cache_dir`]（别处不许拼路径），这里只
+/// 保留测试那一层：把整棵缓存指到一个临时目录，好让「解一遍 → 再清掉」能在同一条用例里跑完。
+/// 设置里「存储」那一屏报的字节、那颗「清掉」按钮，认的都是这一个目录。
+pub fn cache_dir() -> PathBuf {
     #[cfg(test)]
     if let Some(path) = TEST_ROOT.with(|root| root.borrow().clone()) {
         return path;
     }
-    crate::infra::paths::data_dir().join("cache").join("comics")
+    crate::infra::paths::comics_cache_dir()
 }
 
 /// 缓存目录的键：路径 + 长度 + mtime。内容哈希在导入时算过，但 provider 拿不到它，
@@ -74,7 +79,7 @@ fn key_for(path: &Path) -> String {
 
 /// 这本漫画的缓存目录（不保证已经解好）。
 pub(crate) fn dir_for(path: &Path) -> PathBuf {
-    cache_root().join(key_for(path))
+    cache_dir().join(key_for(path))
 }
 
 /// 确保 7z 里的图片已经解到缓存，返回缓存目录。
@@ -175,6 +180,32 @@ pub fn drop_for(path: &Path) {
     }
 }
 
+/// 清掉**整棵**解压缓存，返回删掉的目录数。设置里「存储」那一屏那颗「清掉」走这里。
+///
+/// 与 [`drop_for`] 同一条纪律：删不掉的只记一行 warn 并继续 —— 这是可丢弃的缓存，最坏的
+/// 结果是多占一点空间，而下一次 [`ensure`] 会发现标记没了、重解一遍。
+///
+/// **正在读的那一本没有豁免**：与 [`prune`] 一样的代价，那一本再取页会拿到空，重新打开时
+/// 重解。读者是主动按了那颗钮，所以这一句由界面上那句确认话说清楚，而不是在这里拦下来。
+pub fn purge_all() -> usize {
+    let root = cache_dir();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => removed += 1,
+            Err(err) => tracing::warn!("comic: {} 没清掉：{err}", dir.display()),
+        }
+    }
+    removed
+}
+
 /// 把整棵缓存压回 [`MAX_CACHED_BYTES`]。
 ///
 /// 两步，各自管一种「不该留」：**源文件已经不在了**的目录（改名前留下的孤儿、被读者
@@ -188,7 +219,7 @@ pub fn drop_for(path: &Path) {
 /// （[`MAX_CACHED_BYTES`]）就是为了让这一种组合尽量不发生；真要让「同时开着几本」也豁免，
 /// 得给这一层加一个「谁开着」的注册表，那是另一轮的事。
 pub(crate) fn prune() {
-    let root = cache_root();
+    let root = cache_dir();
     let Ok(entries) = std::fs::read_dir(&root) else {
         return;
     };
@@ -490,8 +521,8 @@ mod tests {
     use std::io::Write as _;
 
     use super::{
-        CacheGuard, DONE, dir_for, ensure_rar, ensure_sevenz, ensure_tar, pages, read_page,
-        sanitize_relative,
+        CacheGuard, DONE, cache_dir, dir_for, ensure_rar, ensure_sevenz, ensure_tar, pages,
+        purge_all, read_page, sanitize_relative,
     };
 
     fn png(width: u32, height: u32) -> Vec<u8> {
@@ -695,5 +726,37 @@ mod tests {
             !dir_for(&broken).exists(),
             "半本缓存下次会被当成解好的那一份"
         );
+    }
+
+    /// 「清掉解压缓存」那颗按钮的落点：每一本都走，缓存根留着，没什么可清时安静回零。
+    ///
+    /// 认的是「根下面那一层一个目录 = 一本」这个形状（[`dir_for`] 就是这么摆的）。根上直接
+    /// 躺着的文件不属于任何一本，不碰 —— 那是别人放的东西，这颗按钮只管自己那一份缓存。
+    #[test]
+    fn purge_all_takes_every_unpack_and_leaves_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("comics");
+        let _guard = CacheGuard::new(root.clone());
+        for name in ["aaa", "bbb"] {
+            let unpacked = root.join(name);
+            std::fs::create_dir_all(&unpacked).unwrap();
+            std::fs::write(unpacked.join("page-001.png"), b"png").unwrap();
+            std::fs::write(unpacked.join(DONE), "2\t\n").unwrap();
+        }
+        std::fs::write(root.join("不是缓存.txt"), b"keep").unwrap();
+
+        assert_eq!(purge_all(), 2, "两本的解压产物都该走");
+        assert!(
+            root.exists() && cache_dir() == root,
+            "根要留着：下一次 ensure 直接往里写"
+        );
+        assert!(
+            root.join("不是缓存.txt").exists(),
+            "根上别人的文件不该被带走"
+        );
+        assert_eq!(purge_all(), 0, "再点一次没东西可清，也不该报错");
+        // 根还没被建出来时（一次漫画都没读过）同样回零。
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(purge_all(), 0);
     }
 }

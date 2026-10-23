@@ -9,6 +9,8 @@
 //! 底下仍是 gpui-kit 的 [`Button`]，这里只定四件事：
 //!
 //! * **返回那颗永远在最左
+//! * **内容行贴这一条的上沿**：带高（[`HEIGHT`]）管命中与布局，行管眼睛看到的位置 ——
+//!   在带子里居中会把标题往下推半行高，手机上那半行堆在状态栏与字之间，读起来是「字压得低」
 //! * **`overlay` 那一档把压在内容之上的三条规矩一起给**：表面、只圆下角、
 //!   `block_mouse_except_scroll`。最后这一条不能省 —— 正文的 hitbox 是整屏的，
 //!   gpui 的一击会发给**每一个** hitbox 含按下点的 handler（不是沿祖先链冒泡），
@@ -21,12 +23,22 @@ use gpui_kit::component::{ActiveTheme, Sizable, StyledExt as _, ThemeStyled as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, Corners, ElementId, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, SharedString, Styled, Window, div, hsla, px,
+    ParentElement, RenderOnce, SharedString, Styled, Window, div, hsla, px, rems,
 };
 
-/// 这一条的高：44 是拇指稳定命中的下限，三处用同一个数（原来一处按内容撑、一处 44、
+/// 这一条的带高：44 是拇指稳定命中的下限，三处用同一个数（原来一处按内容撑、一处 44、
 /// 一处吸顶那条 44 —— 同一个应用里同一条东西三种高）。
+///
+/// **带高管命中与布局，不管字摆在哪儿**：内容行贴这一条的**上沿**排，剩下那点空落到行下面
+/// （见 [`RenderOnce`] 那句 `items_start`）。按 Material 的紧凑顶栏读法，标题是跟着状态栏
+/// 下沿走的那一格，而不是在一条 44 的带子里居中 —— 居中会把整行往下推 `(带高 - 行高)/2`，
+/// 手机上那半行高正好堆在状态栏与字之间，读起来就是「标题压得低」。
 const HEIGHT: f32 = 44.0;
+/// 内容那一行的高：返回那颗（图标档 = `size_8`，32 逻辑像素）撑出来的那一档，全应用同一条。
+///
+/// 定死而不是让行按最高的孩子自己撑：后者会让带 24 的小按钮那几条与带 32 的那几条落在
+/// 两个不同的 `y` 上 —— 同一个应用里同一条顶栏两种标题高度，正是这个组件要收掉的东西。
+const ROW: f32 = 2.0;
 /// 默认左右内缩，与底栏那一排入口的 `px_3` 同一档。
 const PAD_X: f32 = 12.0;
 /// `overlay` 那一档的内缩：阅读页底栏用的是 `px_4`，两条要对齐。
@@ -175,7 +187,32 @@ impl RenderOnce for TopBar {
         let back = self.on_back;
         // 表面向上长回的那一段：只算给 `overlay` 那一档，在流里的那一条没这回事。
         let raised = if self.overlay { self.overlay_top } else { 0.0 };
-        let mut bar = h_flex()
+        // 内容那一行：返回、标题、副题、右端那几颗共用一条基线，行高是 [`ROW`] 那一个数
+        // （不是按最高的孩子自己撑 —— 那样带小按钮的那几条会把标题摆在另一个 `y` 上）。
+        let mut row = h_flex()
+            .w_full()
+            .h(rems(ROW))
+            .items_center()
+            .gap_2()
+            .child(back_button(
+                self.back_tooltip,
+                self.show_back_label,
+                self.back_small,
+                back,
+            ))
+            .child(title_cell(self.strong, self.title));
+        if !self.subtitle.is_empty() {
+            row = row.child(
+                div()
+                    .min_w_0()
+                    .max_w(px(SUBTITLE_MAX))
+                    .truncate()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.subtitle),
+            );
+        }
+        h_flex()
             .id(self.id)
             .when(self.overlay, |this| {
                 // `block_mouse_except_scroll` 要挂在有 id 的那一个之上（它是
@@ -203,31 +240,14 @@ impl RenderOnce for TopBar {
             // `left_0` + `right_0`（与 `bands::band` 同一套）—— 同时给两套，等于让
             // 宽度和两条边各说一次话，改哪一头都会静默不一致。
             .when(!self.overlay, |this| this.w_full())
-            // 长高的那一段用 `pt` 让给表面，内容仍然在原来那 `height` 里居中。
+            // 长高的那一段用 `pt` 让给系统，内容行从让完之后那条边起。
             .when(raised > 0.0, |this| this.pt(px(raised)))
             .h(px(self.height + raised))
-            .items_center()
-            .gap_2()
+            // 内容行贴上沿，不是居中（为什么，见 [`HEIGHT`]）。
+            .items_start()
             .px(px(self.pad_x))
-            .child(back_button(
-                self.back_tooltip,
-                self.show_back_label,
-                self.back_small,
-                back,
-            ))
-            .child(title_cell(self.strong, self.title));
-        if !self.subtitle.is_empty() {
-            bar = bar.child(
-                div()
-                    .min_w_0()
-                    .max_w(px(SUBTITLE_MAX))
-                    .truncate()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.subtitle),
-            );
-        }
-        bar.children(self.trailing).into_any_element()
+            .child(row.children(self.trailing))
+            .into_any_element()
     }
 }
 

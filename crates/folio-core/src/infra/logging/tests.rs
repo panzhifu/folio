@@ -1,4 +1,4 @@
-use super::{Directive, LogFile, build, log_file, subscriber};
+use super::{Directive, LogFile, build, log_file, purge_rotated, subscriber};
 use crate::infra::config::Logging;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -406,4 +406,40 @@ fn the_built_subscriber_filters_the_dependency_noise() {
         "warn 的下限没管住依赖的 TRACE：{text}"
     );
     assert!(text.contains("这行该进"), "该留的那行也没留下：{text}");
+}
+
+/// 「清掉旧日志」那一颗按钮的落点：只删轮转出来的那几份，当前那份与不像轮转形状的都留着。
+///
+/// 为什么当前那份不给删（`LogFile` 还攥着 fd，删名之后字节继续写进一个没人看的 inode，症状
+/// 是日志从此静默）在 [`purge_rotated`] 的文档里，这里钉的是**判据**：`<本名>.<纯数字>`。
+/// 读者自己改出来的 `folio.log.old` 与同名的目录都不在那个形状里，动它们就是替读者做决定。
+#[test]
+fn purge_rotated_removes_only_the_rotated_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let written = |name: &str, size: usize| {
+        std::fs::write(dir.path().join(name), vec![b'x'; size]).unwrap();
+    };
+    written("folio.log", 40);
+    written("folio.log.1", 100);
+    written("folio.log.2", 200);
+    written("folio.log.old", 7);
+    written("folio.logx", 7);
+    std::fs::create_dir(dir.path().join("folio.log.9")).unwrap();
+
+    let active = dir.path().join("folio.log");
+    let (removed, bytes) = purge_rotated(&active);
+    assert_eq!((removed, bytes), (2, 300), "只该收走 .1 与 .2 这两份");
+    assert!(active.exists(), "当前那一份必须还在");
+    assert_eq!(std::fs::metadata(&active).unwrap().len(), 40);
+    assert!(
+        dir.path().join("folio.log.old").exists(),
+        "读者自己改的名不在轮转形状里"
+    );
+    assert!(
+        dir.path().join("folio.log.9").is_dir(),
+        "同名的目录不是一份旧日志"
+    );
+    // 没有轮转目录可删时（`logging.dir` 指到不存在的地方）安静回零，不 panic。
+    let missing = dir.path().join("没有这里");
+    assert_eq!(purge_rotated(&missing.join("folio.log")), (0, 0));
 }

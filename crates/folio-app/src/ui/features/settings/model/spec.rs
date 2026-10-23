@@ -242,6 +242,20 @@ pub(crate) struct Page {
     pub title: SharedString,
     pub icon: IconName,
     pub groups: Vec<Group>,
+    /// 手机那一档在卡片上方画不画节头。
+    ///
+    /// **桌面对这一格无感**：那边的组标题同时是侧栏里的子项（见 `view/mod.rs` 里 `setting_page`
+    /// 那句「分组必须带标题」），那边去掉等于那一组从导航里消失，所以只在规格里说「手机那一屏
+    /// 不摆」，把两边各自的处理留在各自的渲染里。
+    pub show_group_titles: bool,
+}
+
+impl Page {
+    /// 这一页在手机那一档不摆节头，整屏只剩卡片。
+    pub(in crate::ui::features::settings) fn no_group_titles(mut self) -> Self {
+        self.show_group_titles = false;
+        self
+    }
 }
 
 /// 一组设置行的快捷构造：标题 + 行。
@@ -252,12 +266,13 @@ pub(crate) fn group(title: impl Into<SharedString>, rows: Vec<Row>) -> Group {
     }
 }
 
-/// 一页的快捷构造：标题 + 图标 + 组。
+/// 一页的快捷构造：标题 + 图标 + 组。节头默认摆，不摆的那一页自己说。
 pub(crate) fn page(title: impl Into<SharedString>, icon: IconName, groups: Vec<Group>) -> Page {
     Page {
         title: title.into(),
         icon,
         groups,
+        show_group_titles: true,
     }
 }
 

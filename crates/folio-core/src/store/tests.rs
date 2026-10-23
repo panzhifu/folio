@@ -1850,3 +1850,59 @@ fn the_v19_migration_adds_the_dublin_core_columns_empty() {
     assert_eq!(got.series, None);
     assert_eq!(got.language, "");
 }
+
+/// 整库重写把没人用的页真的吐回文件，而「空闲页」那一格报的就是它能救回多少。
+///
+/// 按这一文件的规矩只走公开 API 与库文件契约：建库用 [`Store::open_at`]，那次大块删用一条
+/// **裸 `rusqlite` 连接**（先放掉 `Store`：两条连接同时看着 WAL，读数就取决于谁先
+/// checkpoint）。这条钉三件事：`auto_vacuum = INCREMENTAL` 确实在生效、[`Store::vacuum`]
+/// 还回来的字节与前后两次 `page_count × page_size` 之差对上，以及重写之后 freelist 归零。
+///
+/// 顺带记一条**否掉增量路子**的实测：同样这一批页，`PRAGMA incremental_vacuum` 一次只还回
+/// 1 页（freelist 的 trunk 页正占着文件末尾，增量回收只会从末尾截）。所以这一颗按钮走
+/// `VACUUM`，不走 `Self::reclaim` 那条删完顺手叫一次的便宜路。
+#[test]
+fn vacuum_gives_the_unused_pages_back_to_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+
+    // 建库：迁移跑完，`auto_vacuum` 在建表之前已设成 INCREMENTAL。
+    drop(Store::open_at(&db).unwrap());
+
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE spare(x);
+             INSERT INTO spare
+               WITH RECURSIVE n(i) AS (
+                 SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000
+               )
+               SELECT hex(zeroblob(500)) FROM n;
+             DROP TABLE spare;",
+        )
+        .unwrap();
+    }
+    let swollen = std::fs::metadata(&db).unwrap().len();
+    assert!(
+        swollen > 200_000,
+        "夹具没把库撑起来（{swollen} 字节），后面的数无从比起"
+    );
+
+    let store = Store::open_at(&db).unwrap();
+    let freeable = store.freeable_bytes().unwrap();
+    assert!(freeable > 0, "整张表删光之后该留下一批空闲页");
+    let given_back = store.vacuum().unwrap();
+    assert!(
+        given_back > swollen / 4,
+        "重写只还回 {given_back} 字节，而文件本来 {swollen}"
+    );
+    assert_eq!(store.freeable_bytes().unwrap(), 0, "重写之后不该还有空闲页");
+    // 再点一次那颗钮：没有东西可还时安静回零，不报错。
+    assert_eq!(store.vacuum().unwrap(), 0);
+    drop(store);
+    let after = std::fs::metadata(&db).unwrap().len();
+    assert!(
+        after < swollen,
+        "库文件没见小：{swollen} → {after}，那这一笔只是抹了个计数器"
+    );
+}

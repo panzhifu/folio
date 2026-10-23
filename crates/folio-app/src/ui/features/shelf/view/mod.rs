@@ -12,13 +12,15 @@
 //! 一片格子怎么排（几列、格间距、整片滚动）在 `grid`；一格长什么样在
 //! [`super::book_card`] —— 包括「没有封面的书也要照样占住一格」那一条。
 //!
-//! 组只有一个入口：架面顶部那几张组卡。点下去是**在架面这条栈上压一整页**
+//! 组只有一个入口：架面那几张组卡。组卡与书排在**同一条流**上，尺只有一把 —— 谁最近被
+//! 翻开谁的卡就在先，所以点开分组里的书时顶到第 1 格的是那张组卡（那本书本身不在整架
+//! 那一片，见下）。并法在 [`grid::merge_cells`]。点下去是**在架面这条栈上压一整页**
 //! （`open_page`）：那一页用的是同一份架面，只是查的是另一片书（`ShelfScope`）。压成
 //! 「一页」买到的正是返回那一头 —— 系统返回键把它弹掉就回到书架，而身后那一片连滚动
 //! 位置都没动过。
 //!
 //! 组是**去处**也是**收纳**：一本书一旦挂进某个组，它就不在整架那一片出现了（`Store::shelf_ungrouped`），
-//! 只有走进那一组才看得见；顶部那几张组卡就是它去的去处。「未分组」不是一条筛选、也不是
+//! 只有走进那一组才看得见；那几张组卡就是它去的去处。「未分组」不是一条筛选、也不是
 //! 一个入口，它就是整架那一片本身。
 //!
 //! 顶部那颗搜索框是这一条的例外：词非空时查的是**全库**（`Store::shelf`）。某一组那一页
@@ -66,7 +68,7 @@ use crate::ui::services::l10n::{book_count, tf, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::services::resident;
 use crate::ui::shell::navigation::SizeClass;
-use grid::{GUTTER, GridSpec, grid_spec};
+use grid::{Cell, GUTTER, GridSpec, grid_spec, merge_cells};
 use scan::ScanPhase;
 
 /// 出网共用的那一份传输（`ureq` + rustls）。一个进程一个连接池就够 ——
@@ -88,7 +90,8 @@ fn url_transport() -> Arc<dyn Transport> {
 /// 架面这一屏摆的是哪一片书。**一块架面一个片**，在建成那一刻就定死 —— 不是同一块
 /// 架面上来回换的筛选。
 ///
-/// `Shelf` 摆的是**还没进任何组的那些书**加上领头那几张组卡。这一片不是库里存的某个组，
+/// `Shelf` 摆的是**还没进任何组的那些书**加上那几张组卡，两段按「谁最近被翻开」并成
+/// 一条流（前者出自 [`Store::shelf_ungrouped`]，插在哪由 [`Self::cells`] 定）。这一片不是库里存的某个组，
 /// 它就是「不在任何 `collection_books` 行里」那一批（`Store::shelf_ungrouped`）—— 所以
 /// 「未分组」不再单独有一页。唯一的例外是搜索：词非空时整架改查全库（`Store::shelf`），
 /// 进了组的书照样搜得出来（见模块头那一段）。
@@ -98,7 +101,7 @@ fn url_transport() -> Arc<dyn Transport> {
 /// 自己收起 —— 这两件事都是「一页」买来的，不必各自再维护一遍。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::ui::features::shelf) enum ShelfScope {
-    /// 整架：组卡 + 还没进任何组的那些书（带搜索词时是命中的全部书）。
+    /// 整架：还没进任何组的那些书 + 那几张组卡，按最近打开并成一条流（带搜索词时是命中的全部书）。
     Shelf,
     /// 某一个组里的书。
     Collection(i64),
@@ -135,11 +138,11 @@ pub struct ShelfView {
     /// 弱句柄：栈是外壳的东西，架面不该反过来把它拽住不让它退。
     pub(in crate::ui::features::shelf) stack: WeakEntity<NavStackState>,
     items: Vec<Card>,
-    /// 架面最前面那几张组卡。只在「整架 + 没搜词」时非空，其余时候是空的。
+    /// 架面那几张组卡。只在「整架 + 没搜词」时非空，其余时候是空的。
     ///
     /// 与 [`Self::items`] 分开放而不是并成一个列表：`items` 的格数有好几处按「几本」来读
     /// （回归门数的是书，不是格子），混在一起会让那个数悄悄变成「书 + 组」。
-    /// 排格子时两组才接成一条下标（见 [`Self::grid`]）。
+    /// 排格子时才接成一条下标（[`Self::cells`]），尺是那两段的 `opened_at`。
     tiles: Vec<GroupCard>,
     /// 架面那片虚拟格子滚到哪儿了。
     ///
@@ -447,18 +450,18 @@ impl ShelfView {
         }
     }
 
-    /// 架面顶部那几张组卡：每个组一张，卡上是这个组最后丢进去的那几本的封面。
+    /// 架面那几张组卡：每个组一张，卡上是这个组最后丢进去的那几本的封面。
     ///
     /// 封面走的是 [`Self::resolve_cover`] 那一条，与书卡同一份缓存：组卡与下面那片书
     /// 十有八九是同一批封面，解两遍是白解。
     ///
-    /// 查不动就是一片空的：架面顶部少一排卡看着像「还没建组」，比摆几张假卡或整屏报错好。
+    /// 查不动就是一片空的：架面少一排卡看着像「还没建组」，比摆几张假卡或整屏报错好。
     fn tile_cards(&mut self) -> Vec<GroupCard> {
         let Some(store) = &self.store else {
             return Vec::new();
         };
         let Ok(tiles) = store.collection_tiles(TILE_SLOTS) else {
-            tracing::error!("ShelfView: 查组卡失败，架面顶部那一排是空的");
+            tracing::error!("ShelfView: 查组卡失败，架面那一排卡是空的");
             return Vec::new();
         };
         tiles
@@ -469,10 +472,26 @@ impl ShelfView {
                     id: collection.id,
                     name: collection.name.into(),
                     count: collection.book_count,
+                    // 这一组的「最近被翻开」取它自己那条序的头一本：`collection_tiles` 里
+                    // 那一串走的就是 `SHELF_ORDER`（最近在先），头一本的 `last_opened_at`
+                    // 就是库给组卡排序用的那个 `MAX(last_opened_at)` —— 同一把尺，不是近似。
+                    opened_at: items.first().and_then(|item| item.last_opened_at),
                     covers,
                 }
             })
             .collect()
+    }
+
+    /// 架面那一条流的格子顺序：第 `ix` 格该从 `tiles` 还是 `items` 取。
+    ///
+    /// 两段的先后各自归库（整架那条 `SHELF_ORDER`，组卡那条 `MAX(last_opened_at)`），
+    /// 这里只把它们**按同一把尺并起来**：谁最近被翻开，谁的卡就在先 —— 点开分组里的书时
+    /// 那本书不在整架那一片，顶到第 1 格的就是那张组卡。并法与它的三条断言在
+    /// [`grid::merge_cells`]。
+    fn cells(&self) -> Vec<Cell> {
+        let tiles: Vec<Option<i64>> = self.tiles.iter().map(|tile| tile.opened_at).collect();
+        let books: Vec<Option<i64>> = self.items.iter().map(|card| card.opened_at).collect();
+        merge_cells(&tiles, &books)
     }
 
     /// 把焦点放进搜索框。
@@ -663,7 +682,7 @@ impl ShelfView {
         self.items.get(ix).map(|card| card.title.clone())
     }
 
-    /// 喂一条「点开某一组」的命令。真实入口是架面顶部那几张组卡，
+    /// 喂一条「点开某一组」的命令。真实入口是架面那几张组卡，
     /// 而测试窗口里没有「点到这一块元素」的定位法 —— 与 [`Self::feed_import_event`] 同一取舍。
     ///
     /// 收的是组的主键而不是 [`ShelfScope`]：那个枚举归架面模块自己用，外壳那侧的门不该为了
@@ -678,7 +697,7 @@ impl ShelfView {
         self.open_page(ShelfScope::Collection(group), window, cx);
     }
 
-    /// 架面顶部此刻摆着几张组卡。只给回归门读，理由同 [`Self::card_count`]。
+    /// 架面此刻摆着几张组卡。只给回归门读，理由同 [`Self::card_count`]。
     #[cfg(all(test, not(mobile)))]
     pub(crate) fn tile_count(&self) -> usize {
         self.tiles.len()
@@ -688,6 +707,19 @@ impl ShelfView {
     #[cfg(all(test, not(mobile)))]
     pub(crate) fn tile_at(&self, ix: usize) -> Option<(i64, SharedString, usize)> {
         self.tiles.get(ix).map(|t| (t.id, t.name.clone(), t.count))
+    }
+
+    /// 第 `ix` **格**摆的是哪一张：组卡回组名、书回书名。只给回归门读 —— 门要钉的是
+    /// 「刚翻开的那一格有没有顶到前面」，而读格子这件事不该成为公开接口。
+    ///
+    /// 与 [`Self::card_title`] 的区别正是这一格的全部意义：那一行读的是库里那一段的序，
+    /// 这一行读的是两段并完之后读者真正看见的序。
+    #[cfg(all(test, not(mobile)))]
+    pub(crate) fn cell_label(&self, ix: usize) -> Option<SharedString> {
+        match *self.cells().get(ix)? {
+            Cell::Tile(at) => Some(self.tiles[at].name.clone()),
+            Cell::Book(at) => Some(self.items[at].title.clone()),
+        }
     }
 
     /// 后端导入管线的一条事件 → 架面的一次变化。
@@ -1212,8 +1244,9 @@ impl ShelfView {
         let labels = book_menu::Labels::resolve(cx);
         let columns = spec.columns as usize;
         // 一横排算一项；不满一排的尾巴也算一排，不然最后那几本会画不出来。
-        // 数的是**格子**：组卡占的那几格与书占的那几格排在同一条下标上。
-        let rows = (self.tiles.len() + self.items.len()).div_ceil(columns);
+        // 数的是**格子**：组卡与书并成的那一条流（[`Self::cells`]），一张卡占一格。
+        let cells = self.cells();
+        let rows = cells.len().div_ceil(columns);
         let shelf = cx.entity().clone();
         let scroll = self.grid_scroll.clone();
         let cover_height = spec.cover_height;
@@ -1221,14 +1254,13 @@ impl ShelfView {
             range
                 .map(|row| {
                     let from = row * columns;
-                    // 句柄只在这一排真要画的时候读那几行数据：整片 `items` 不 clone。
+                    let to = (from + columns).min(cells.len());
+                    // 句柄只在这一排真要画的时候读那几行数据：整片 `items` 不 clone，
+                    // 跟着这一屏走的只有那串格子下标。
                     shelf.update(cx, |this, cx| {
-                        let tiles = this.tiles.len();
-                        let total = tiles + this.items.len();
-                        let to = (from + columns).min(total);
                         // 落定的时钟先取，再借 `items`：进度是这一片格子共用的一个
                         // 数，逐格只是起步早晚不同。
-                        let enter = this.enter_clock(total, window, cx);
+                        let enter = this.enter_clock(cells.len(), window, cx);
                         div()
                             .w_full()
                             .grid()
@@ -1237,27 +1269,25 @@ impl ShelfView {
                             // 左右留白仍归每一排自己：滚轴贴的是这块区域真正的边。
                             .px(px(GUTTER))
                             .py_1()
-                            .children((from..to).map(|ix| {
-                                // 前面那几格是组卡，往后才是书 —— 与 [`Self::tiles`] /
-                                // [`Self::items`] 那两个数的分界是同一条。
-                                if ix < tiles {
-                                    this.group_cell_element(
-                                        &this.tiles[ix],
-                                        cover_height,
-                                        &enter,
-                                        ix,
-                                        cx,
-                                    )
-                                } else {
-                                    this.card_element(
-                                        &this.items[ix - tiles],
-                                        &labels,
-                                        cover_height,
-                                        &enter,
-                                        ix,
-                                        cx,
-                                    )
-                                }
+                            .children((from..to).map(|ix| match cells[ix] {
+                                // 这一格是组卡还是书只在那一条流里定一次（[`Self::cells`]），
+                                // 这里只按它取那一份 vec。`ix` 传的是**格子**下标 —— 落定的
+                                // 早晚按眼睛扫的顺序，不按两段 vec 各自的位置。
+                                Cell::Tile(at) => this.group_cell_element(
+                                    &this.tiles[at],
+                                    cover_height,
+                                    &enter,
+                                    ix,
+                                    cx,
+                                ),
+                                Cell::Book(at) => this.card_element(
+                                    &this.items[at],
+                                    &labels,
+                                    cover_height,
+                                    &enter,
+                                    ix,
+                                    cx,
+                                ),
                             }))
                             .into_any_element()
                     })
@@ -1677,18 +1707,62 @@ mod tests {
         assert_eq!(
             shelf.read_with(cx, |this, _| this.tile_count()),
             1,
-            "而它的去处就是顶部那一张组卡"
+            "而它的去处就是那一张组卡"
         );
     }
 
-    /// 组卡只在「整架 + 没搜词」那一屏领头，而那一屏的书格子只有还没进组的；点一张组卡 =
-    /// 在架面那条栈上**压一整页**，身后那一片原样不动。
+    /// 点开**分组里**的那本书：那本书不在整架那一片（`Store::shelf_ungrouped` 收掉了它），
+    /// 所以顶到第 1 格的必须是它所在的那张组卡；再点开一本没分组的书，它自己回到第 1 格，
+    /// 那张组卡退到第 2 格而不是掉回末尾。尺只有一把 —— 谁最近被翻开谁的卡就在先，
+    /// 与它是书还是组无关（读者报的「点了组里的书，组没排到最前面」正是这一处）。
+    #[gpui_kit::test]
+    fn the_cell_that_leads_is_whatever_was_opened_last(cx: &mut TestAppContext) {
+        let (shelf, _, store, _) = boot_shelf(cx);
+        let grouped = add(&store, "组里");
+        let loose = add(&store, "散着");
+        let team = store.create_collection("想读").expect("建组");
+        store.add_to_collection(team, grouped).expect("挂进去");
+        let misc = store.create_collection("杂项").expect("建组");
+        store
+            .add_to_collection(misc, add(&store, "另一组"))
+            .expect("挂进去");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.cell_label(0)),
+            Some("散着".into()),
+            "谁都没翻开过：整架那一片有书，组卡只能跟在后面"
+        );
+
+        store.touch_opened(grouped).expect("翻开组里那本");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.cell_label(0)),
+            Some("想读".into()),
+            "点开的是组里那本 → 顶到第 1 格的是那张组卡"
+        );
+
+        store.touch_opened(loose).expect("再翻开散着那本");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.cell_label(0)),
+            Some("散着".into()),
+            "再点开一本没分组的书 → 它自己回到第 1 格"
+        );
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.cell_label(1)),
+            Some("想读".into()),
+            "刚才那张组卡退到第 2 格，而不是掉回末尾"
+        );
+    }
+
+    /// 组卡只在「整架 + 没搜词」那一屏出现（插在流里的哪一格看谁最近被翻开），而那一屏
+    /// 的书格子只有还没进组的；点一张组卡 = 在架面那条栈上**压一整页**，身后那一片原样不动。
     ///
     /// 三条各自都能单独坏掉而编译照样绿：某一组那一页还摆一排组卡，等于把读者刚走进去的那层
     /// 又摊回他面前；带着搜索词还摆，卡上那几本封面与搜索结果毫无关系，读起来就是「这几本
     /// 匹配」；而 `reload` 的去重按「词没变且架子非空」判，换片不重排的话那一排卡会留在原地。
     #[gpui_kit::test]
-    fn the_group_tiles_lead_the_shelf_and_step_aside(cx: &mut TestAppContext) {
+    fn the_group_tiles_share_the_shelf_line_and_step_aside(cx: &mut TestAppContext) {
         let (shelf, handle, store, stack) = boot_shelf(cx);
         let a = add(&store, "甲");
         let b = add(&store, "乙");
@@ -1704,9 +1778,9 @@ mod tests {
         assert_eq!(
             shelf.read_with(cx, |this, _| this.tile_count()),
             2,
-            "整架那一屏顶部两张组卡"
+            "整架那一屏两张组卡"
         );
-        // 组卡在前、书在后，所以「第 0 格」与「第 0 本」不是一回事：`items` 只数书，
+        // 组卡与书各一份 vec，所以「第 0 格」与「第 0 本」不是一回事（并法在 [`merge_cells`]）：`items` 只数书，
         // 而这一片只数**还没进组的**那些本 —— 甲乙丙三本都收在组里了。
         assert_eq!(
             shelf.read_with(cx, |this, _| this.card_count()),

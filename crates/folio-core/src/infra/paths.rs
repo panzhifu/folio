@@ -200,6 +200,23 @@ pub fn thumb_dir(root: &Path, px: u32) -> PathBuf {
     thumbs_dir(root).join(px.to_string())
 }
 
+/// 收件箱：`<数据根>/inbox`。文件夹监听与 Wi-Fi 传书都往这里落（`ingest::watch`、
+/// `net::transfer`），导入管线再从这儿把它收进书库。
+///
+/// 以前这两个服务各拼一次 `data_dir().join("inbox")`，第三处（占用统计）就是第三份副本。
+pub fn inbox_dir() -> PathBuf {
+    data_dir().join("inbox")
+}
+
+/// 漫画解压缓存：`<数据根>/cache/comics`。整目录删掉只需重解一次 ——
+/// 它是缓存，不是数据，与 [`thumbs_dir`] 同一档。
+///
+/// 路径的**名字**归这里（与 `logs`、`books` 同一条规矩：别处不许拼路径），而
+/// [`crate::content::format::comic_cache`] 仍管它在测试里被指到哪儿。
+pub fn comics_cache_dir() -> PathBuf {
+    data_dir().join("cache").join("comics")
+}
+
 /// 书架卡片那一档的宽（像素）。
 pub const THUMB_CARD_PX: u32 = 400;
 
@@ -209,8 +226,9 @@ pub const THUMB_LIST_PX: u32 = 96;
 #[cfg(test)]
 mod tests {
     use super::{
-        APP_DIR, THUMB_CARD_PX, THUMB_LIST_PX, config_dir, config_path, covers_dir, data_dir,
-        db_path, resolved, root, staging_dir, themes_dir, thumb_dir, thumbs_dir,
+        APP_DIR, THUMB_CARD_PX, THUMB_LIST_PX, comics_cache_dir, config_dir, config_path,
+        covers_dir, data_dir, db_path, inbox_dir, log_dir, resolved, root, staging_dir, themes_dir,
+        thumb_dir, thumbs_dir,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -270,6 +288,32 @@ mod tests {
         assert_eq!(config_path(), config_dir().join("config.json"));
         assert_eq!(themes_dir(), config_dir().join("themes"));
         assert_eq!(db_path(), data_dir().join("folio.db"));
+        // 日志、收件箱、漫画解压缓存三处都挂在数据根底下，且**互不嵌套**。`infra::usage` 那本
+        // 账完全靠这几条前缀认领字节：一旦有一处挪进另一处里面（比如把 logs 放进 inbox），
+        // 分类就只能靠判序侥幸，而那种嵌套界面上看不出来，只会少算或多算一类。
+        let data = data_dir();
+        let areas = [
+            ("logs", log_dir()),
+            ("inbox", inbox_dir()),
+            ("comics", comics_cache_dir()),
+        ];
+        for (name, path) in &areas {
+            assert!(
+                path.starts_with(&data),
+                "{name} 该落在数据根里：{}",
+                path.display()
+            );
+        }
+        for (first_name, first) in &areas {
+            for (second_name, second) in &areas {
+                if first_name != second_name {
+                    assert!(
+                        !first.starts_with(second) && !second.starts_with(first),
+                        "{first_name} 与 {second_name} 不该互相嵌套"
+                    );
+                }
+            }
+        }
     }
 
     /// 空串按「没设」处理，否则 `FOLIO_CONFIG_DIR=` 会把配置指到当前目录。

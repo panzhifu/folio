@@ -546,7 +546,7 @@ impl ReadingPage {
     /// 压的是**这一层自己的**那条栈而不是架面那条：这一层盖在整窗上，架面的栈在它下面，
     /// 压那边的话这一屏会被自己盖住。
     pub(in crate::ui::features::reader) fn open_settings(&mut self, cx: &mut Context<Self>) {
-        let settings = cx.new(|_| CompactSettings::new());
+        let settings = cx.new(CompactSettings::new);
         let _ = self.stack.update(cx, |state, cx| {
             state.push(settings, NavMotion::Animated, cx)
         });

@@ -195,6 +195,61 @@ pub fn log_file(logging: &Logging) -> Option<PathBuf> {
     })
 }
 
+/// 删掉轮转出来的**旧**日志（`folio.log.1`、`.2`……），当前正在写的那一份不动。
+/// 返回删掉几份，并把还回去的字节一起交出，好让界面在重扫之前就能说一句「清掉了多少」。
+///
+/// 为什么当前那一份不给删：[`LogFile`] 攥着它的 fd，删掉名字之后字节仍继续写进一个没人看的
+/// inode，症状是日志从此静默 —— 而那正是出事时最需要的东西。轮转出来的那些已经没有 fd
+/// 指着，删掉只是清磁盘，所以这一颗按钮只碰它们。
+///
+/// 认「哪几份是旧的」按 [`LogFile::numbered`] 那个形状（`<本名>.<数字>`）在目录里挑，
+/// 不数到 `keep` 为止：配置可以改小，改小之后多出来的那几份仍然该认得出来。
+pub fn purge_rotated(active: &Path) -> (usize, u64) {
+    let Some(dir) = active.parent() else {
+        return (0, 0);
+    };
+    let Some(name) = active.file_name().and_then(|name| name.to_str()) else {
+        return (0, 0);
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let prefix = format!("{name}.");
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(tail) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(&prefix))
+        else {
+            continue;
+        };
+        // 尾巴必须是纯数字：`folio.log.old` 那种是读者自己改的名，不在这一档里。
+        if tail.is_empty() || !tail.chars().all(|digit| digit.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        // 同名的目录（`folio.log.9/`）不是「一份旧日志」，不碰。
+        if !meta.is_file() {
+            continue;
+        }
+        let size = meta.len();
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                removed += 1;
+                bytes += size;
+            }
+            // 删不掉（权限、别的过程正拿着）不算错：这是清理，不是记账。
+            Err(err) => tracing::warn!("logging: {} 没删掉：{err}", path.display()),
+        }
+    }
+    (removed, bytes)
+}
+
 /// 把配置里的三层加平台那一层，拼成一个 subscriber。
 ///
 /// 形状是「一条 `.with` 链」而不是 `Vec<Box<dyn Layer>>`，这不是审美：`Vec` 的层实现

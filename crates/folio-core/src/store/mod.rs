@@ -220,4 +220,51 @@ impl Store {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
+
+    /// 库里**空闲着没人用**的那几页折成字节（`freelist_count × page_size`）。
+    ///
+    /// `auto_vacuum = INCREMENTAL` 之下删书与重导入只把页标成空闲，所以库文件可以占着几百
+    /// MB 而其中一行都没有。设置里「存储」那一格「其中空闲」报的就是这个数。
+    ///
+    /// 它**不等于** [`Self::vacuum`] 能拿回来的量，也只当「增量回收值不值」这一格用：
+    /// 实测一次 `DROP` 掉 500 页之后 `PRAGMA incremental_vacuum` 只还回 1 页（freelist 的
+    /// trunk 页正好占着文件末尾，而增量回收只会从末尾截），所以要真还回去得整库重写。
+    pub fn freeable_bytes(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Self::freeable_in(&conn)
+    }
+
+    /// 整库重写（`VACUUM`）：没人用的页与碎片一起吐掉，返回**实际**少掉的字节数。
+    ///
+    /// 走这一条而不是 [`Self::reclaim`] 那条增量路子，理由写在 [`Self::freeable_bytes`] 里。
+    ///
+    /// 两条代价要说给界面：它**不能在事务里跑**（与 `VACUUM` 系列一样），而且过程要在同
+    /// 一个目录里写一份临时副本 —— 库多大就临时多占多少，跑完才收回去。所以它属于「点一下
+    /// 等几秒」那一类动作，得跑在后台线程上，确认话里要提那一截临时占用。
+    pub fn vacuum(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let before = Self::file_bytes(&conn)?;
+        conn.execute_batch("VACUUM")?;
+        let after = Self::file_bytes(&conn)?;
+        Ok(before.saturating_sub(after))
+    }
+
+    /// freelist 折成字节。私有助手：只接 `&Connection`，自己不上锁（那条纪律见模块头）。
+    fn freeable_in(conn: &Connection) -> Result<u64> {
+        let pages: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        Ok(pages.max(0) as u64 * Self::page_size(conn)? as u64)
+    }
+
+    /// 库文件按页算出来的大小（`page_count × page_size`）。
+    ///
+    /// 用它而不是 `fs::metadata`：`Store` 不知道自己被开在哪个路径上（`open_at` 收路径而
+    /// 不记），而这一份大小与文件字节在 WAL  checkpoint 之后就是同一个数。
+    fn file_bytes(conn: &Connection) -> Result<u64> {
+        let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        Ok(pages.max(0) as u64 * Self::page_size(conn)? as u64)
+    }
+
+    fn page_size(conn: &Connection) -> Result<i64> {
+        Ok(conn.query_row("PRAGMA page_size", [], |r| r.get(0))?)
+    }
 }
