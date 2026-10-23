@@ -43,3 +43,12 @@ crates/folio-app/android/local.properties
 # 提交进来就是第二真相源，而且每次跑测试都可能换一张。
 /tests/fixtures/oss/covers/
 /tests/fixtures/oss/.thumbs/
+
+# 签 release APK 用的 keystore 与它的口令文件绝不入库。
+# 这两样一旦进版本库，任何拿到仓库副本的人都能**以 folio 的名义发更新**，而且这件事换不掉：
+# 换 keystore 等于所有已装用户必须卸载重装（系统按签名判「是不是同一个应用」，签名对不上就不给
+# 覆盖安装）。真正的防线是把它们放在仓库之外，这三条只是防手滑的兜底。
+# 本机的存放位置与备份约定见 `plans/更新与发布.md` §六。
+*.keystore
+*.jks
+keystore.properties

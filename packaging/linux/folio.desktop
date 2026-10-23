@@ -1,0 +1,26 @@
+# folio 的 Linux 桌面条目。`@VERSION@` 由 workflow 替换（其实这一行不需要版本，留着是为了
+# 与 control.template / folio.spec 同一套流程：所有打包元数据只有一处替换规则）。
+#
+# **这里故意没有 `StartupWMClass`**。它要匹配的是窗口自己报的 WM_CLASS，而 gpui 在 X11 上
+# 报什么没有量过 —— 写一个猜出来的值，症状不是报错而是**分组坏掉**：任务栏里出现第二个
+# 「Folio」、点图标不聚焦已有窗口。宁可少这一行，等真机量过再补。
+#
+# MimeType 那一行只列**这一版真能打开的族**（provider 注册表里在的那几个，不是全部）：
+# 装完包之后系统会拿 folio 去填这些类型的「打开方式」，多写一族就是给读者一个打不开的选项。
+
+[Desktop Entry]
+Type=Application
+Name=Folio
+GenericName=Ebook reader
+GenericName[zh_CN]=电子书阅读器
+GenericName[zh_TW]=電子書閱讀器
+GenericName[ja]=電子書籍リーダー
+Comment=Read EPUB, PDF, MOBI and comics with a native GPU renderer
+Comment[zh_CN]=用原生 GPU 渲染引擎读 EPUB、PDF、MOBI 与漫画
+Exec=folio %u
+Terminal=false
+Icon=folio
+Categories=Office;Viewer;Documentation;
+MimeType=application/epub+zip;application/pdf;application/x-mobipocket-ebook;text/plain;text/markdown;text/html;
+Keywords=book;ebook;reader;epub;pdf;comic;阅读;电子书;书;漫画;
+StartupNotify=true

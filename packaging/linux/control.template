@@ -1,0 +1,18 @@
+Package: folio
+Version: @VERSION@
+Section: text
+Priority: optional
+Architecture: @ARCH@
+Maintainer: panzhifu <noke601508@outlook.com>
+Homepage: https://github.com/panzhifu/folio-releases
+Standards-Version: 4.6.2
+Depends: @DEPENDS@
+Description: native GPU ebook reader
+ Read EPUB, PDF, MOBI/AZW3, DOCX/ODT, DjVu and comic archives with a
+ layout engine written from scratch: first-line indent, centred titles,
+ per-run styles, inline and block images, CJK line breaking. No embedded
+ browser, no WebView.
+ .
+ The binary is built from a private source repository; releases and their
+ checksums live at https://github.com/panzhifu/folio-releases. Third-party
+ licence texts ship in /usr/share/doc/folio.

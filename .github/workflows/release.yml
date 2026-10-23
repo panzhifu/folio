@@ -1,0 +1,475 @@
+# 发版：四端出包 + 推到公开的发布仓库。
+#
+# 这道 workflow 与 `ci.yml` 是两件事，所以是两个文件：`ci.yml` 是**每一版都要过的门**，
+# 它刻意不产出任何可分发的东西（只 check/clippy/test）；这里做的是把编好的东西变成
+# 读者能下载、能校验、能读到更新日志的包。
+#
+# **两种触发方式的行为不一样，这是有意的**：
+#
+# - `push: tags: v*` → 构建 + **发布**（往 `panzhifu/folio-releases` 写 release 与资产）。
+#   这一步不可逆：包一旦发出去，Android 那一份就永远换不了签名（换 keystore 等于所有已装
+#   用户卸载重装），所以版本号三处一致是硬门，不满足就直接红。
+# - `workflow_dispatch` → **只构建不发布**。产物留在 Actions 的 artifacts 里，四端的打包形状
+#   当场能验，公网什么都收不到。第一次把这条改对之前，先跑这一种。
+#
+# 三处版本号的关系：根 `Cargo.toml` 的 workspace `version` 是唯一真相，tag 必须是 `v<它>`，
+# `android/app/build.gradle.kts` 的 `versionName` 必须等于它。`versionCode` **不在**这道门上
+# （它只单调递增，与版本字符串无关），所以那条要人记 —— 见 README「发版」。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # 发版中途被 cancel 会留下一个「有 release 没资产」或「资产一半」的半成品，
+  # 那比慢一点糟得多，所以这里明确不取消。
+  cancel-in-progress: false
+
+env:
+  # 公开的发布仓库：源码在这道 workflow 里编，包与更新日志写到那边去。
+  RELEASE_REPO: panzhifu/folio-releases
+  # 签 release APK 的那张证书的 SHA-256（`keystore` 的公钥指纹，不是私钥）。
+  # 钉在这儿是为了让「不小心用了 debug keystore / 换错了 keystore」在 CI 里就红，
+  # 而不是等读者装不上更新才发现。值来自 `plans/更新与发布.md` §六 那次实测。
+  APK_SIGNER_SHA256: 3d8091b0b9fbc2449e0249f60167df2f8ae0e04b837bed02129fe249280594b2
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---- 版本号：三处一致，否则后面全是白编 ----
+  version:
+    name: 版本号一致性
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: check
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          cargo_ver=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          gradle_ver=$(sed -n 's/^[[:space:]]*versionName = "\([^"]*\)"/\1/p' \
+            crates/folio-app/android/app/build.gradle.kts | head -1)
+          gradle_code=$(sed -n 's/^[[:space:]]*versionCode = \([0-9]*\)/\1/p' \
+            crates/folio-app/android/app/build.gradle.kts | head -1)
+
+          if [ -z "$cargo_ver" ] || [ -z "$gradle_ver" ] || [ -z "$gradle_code" ]; then
+            echo "::error::从 Cargo.toml / build.gradle.kts 里读不出版本号，是那两个字段被挪了吗"
+            exit 1
+          fi
+          # 版本号会进文件名、进 sed 的替换串、进 `gh release create` 的参数，所以它的**形状**
+          # 要在这儿钉死。这不是防攻击 —— tag 只有仓库协作者推得动 —— 是防一个手滑写成的
+          # `0.1.1 ` 或 `v0.1.1` 流到六条 job 里各自炸一遍，症状还都不一样。
+          if ! printf '%s' "$cargo_ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+            echo "::error::Cargo 版本 $cargo_ver 不像一个版本号（要 主.次.修订，可带 -rc1 这种后缀）"
+            exit 1
+          fi
+          if [ "$cargo_ver" != "$gradle_ver" ]; then
+            echo "::error::版本不一致：Cargo=$cargo_ver 而 Android versionName=$gradle_ver"
+            exit 1
+          fi
+
+          # 用 shell 变量而不是 `${{ steps.check.outputs.publish }}`：在**写这个输出的那一步
+          # 自己**里读它，拿到的永远是空串 —— 摘要里那一格会安静地显示「发布：」后面什么都没有。
+          if [ "$EVENT_NAME" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+            if [ "v$cargo_ver" != "$tag" ]; then
+              echo "::error::tag 是 $tag 而 Cargo 版本是 $cargo_ver —— 发出去的东西与仓库对不上"
+              exit 1
+            fi
+            publish=true
+          else
+            # 手动跑：没有 tag，就以 Cargo 版本为准，且**不发布**。
+            tag="v$cargo_ver"
+            publish=false
+          fi
+
+          echo "version=$cargo_ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          {
+            echo "### 版本"
+            echo ""
+            echo "- Cargo workspace：\`$cargo_ver\`"
+            echo "- Android：\`versionName=$gradle_ver\` / \`versionCode=$gradle_code\`"
+            echo "- tag：\`$tag\`（发布：$publish）"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---- 第三方许可声明：签在仓库里，这里只查它有没有漂 ----
+  #
+  # 生成表这件事在**本地**做（`cargo about generate` 一次、把结果签进来），CI 只做漂移检查。
+  # 理由有两条：这份表的内容是法务上要随包分发的东西，它应该走 code review 而不是每次构建
+  # 现编一遍；而 CI 每次现装 `cargo-about` 会把这条门变成一次几分钟的编译。
+  notices:
+    name: 第三方声明没漂
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-about
+        run: cargo install cargo-about --locked
+
+      - name: Regenerate and diff against the checked-in copy
+        run: |
+          set -euo pipefail
+          if [ ! -f THIRD-PARTY-NOTICES.txt ]; then
+            # 三条构建 job 都要 cp 这个文件，缺了它们会各自报一次看不懂的错。
+            # 所以在这儿先说清：这份表要**本地生成一次并签进来**（见 packaging/README.md 与
+            # plans/更新与发布.md §五），不在 CI 里现编。
+            echo "::error::仓库里还没有 THIRD-PARTY-NOTICES.txt。本地跑：cargo about generate --locked packaging/about.hbs > THIRD-PARTY-NOTICES.txt"
+            exit 1
+          fi
+          cargo about generate --locked packaging/about.hbs > /tmp/notices.txt
+          if ! diff -u THIRD-PARTY-NOTICES.txt /tmp/notices.txt; then
+            cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+            ### 第三方声明与依赖图不一致
+            依赖变了但 `THIRD-PARTY-NOTICES.txt` 没重生成。本地跑这一条再提交：
+            ```
+            cargo about generate --locked packaging/about.hbs > THIRD-PARTY-NOTICES.txt
+            ```
+            如果 `cargo-about` 是**报错**而不是报差异，那是撞上了没在 `about.toml`
+            名单里的许可证 —— 那件事要先看条款再决定，别为了让 CI 绿就加进去。
+            EOF
+            echo "::error::THIRD-PARTY-NOTICES.txt 与 Cargo.lock 现生成的不一致"
+            exit 1
+          fi
+
+  # ---- Linux：tar.xz + deb + rpm ----
+  linux:
+    name: Linux
+    needs: version
+    runs-on: ubuntu-24.04
+    env:
+      # 版本号一律走环境变量进 shell，不 `${{ }}` 直插 —— 见 version 那一条 job 里对形状的检查。
+      FOLIO_VERSION: ${{ needs.version.outputs.version }}
+      # 与 ci.yml 同一套理由：只缓存下载与 git 依赖，不缓存 target/。
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # 这份清单与 ci.yml 里那一列同源（每一个都对应图里一个真要在链接期找到系统库的
+          # -sys crate，外加 liblzma/zstd 那几个 zip 变体）。
+          sudo apt-get install -y \
+            libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libxcb1-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libdrm-dev \
+            libspeechd-dev libclang-dev \
+            liblzma-dev zstd libzstd-dev rpm
+          # rpm 那一包提供 rpmbuild；dpkg-deb 与 dpkg-shlibdeps 是 ubuntu runner 自带的。
+
+      - name: Build
+        run: cargo build --release -p folio-app
+
+      - name: Stage the unix layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$FOLIO_VERSION"
+          root=staging/folio-$v
+          mkdir -p "$root/bin" "$root/share/applications" \
+                   "$root/share/icons/hicolor/192x192/apps" "$root/share/doc/folio"
+          cp target/release/folio "$root/bin/"
+          cp packaging/linux/folio.desktop "$root/share/applications/"
+          cp packaging/icons/folio.png "$root/share/icons/hicolor/192x192/apps/folio.png"
+          cp THIRD-PARTY-NOTICES.txt "$root/share/doc/folio/"
+          tar -cJf "folio-$v-linux-x86_64.tar.xz" -C staging "folio-$v"
+
+      - name: Build the .deb
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$FOLIO_VERSION"
+          deb=deb-root
+          cp -a staging/folio-$v/. "$deb"/ 2>/dev/null || { mkdir -p "$deb"; cp -a staging/folio-$v/. "$deb"/; }
+          # Depends 由 dpkg-shlibdeps 现算，不手写：手写那份与 NEEDED 列表之间的漂移
+          # 不会报错，只会在读者机器上变成「装上了但起不来」。
+          if ! depends=$(dpkg-shlibdeps -O -tdeb "$deb/usr/bin/folio" 2>/dev/null \
+                        | sed 's/^shlibs:Depends=//'); then
+            echo "::error::dpkg-shlibdeps 没跑通，宁可红也不发一份猜出来的 Depends"
+            exit 1
+          fi
+          mkdir -p "$deb/DEBIAN"
+          sed -e "s/@VERSION@/$v/g" -e "s/@ARCH@/amd64/g" -e "s|@DEPENDS@|$depends|g" \
+            packaging/linux/control.template > "$deb/DEBIAN/control"
+          # 文档目录那一格 deb 要的是 <pkg>.<arch> 形状，与 tar 里那份不同，所以单独放。
+          mkdir -p "$deb/usr/share/doc/folio"
+          cp THIRD-PARTY-NOTICES.txt "$deb/usr/share/doc/folio/"
+          gzip -9nc "$deb/usr/share/doc/folio/THIRD-PARTY-NOTICES.txt" \
+            > "$deb/usr/share/doc/folio/THIRD-PARTY-NOTICES.txt.gz"
+          rm "$deb/usr/share/doc/folio/THIRD-PARTY-NOTICES.txt"
+          dpkg-deb --root-owner-group -Zxz -b "$deb" "folio_${v}_amd64.deb"
+
+      - name: Build the .rpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$FOLIO_VERSION"
+          # rpmbuild 要的是「一个 tarball + 一份 spec」，所以复用上面那条 tar.xz 而不是再造一份树。
+          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          cp "folio-$v-linux-x86_64.tar.xz" ~/rpmbuild/SOURCES/
+          sed "s/@VERSION@/$v/g" packaging/linux/folio.spec > ~/rpmbuild/SPECS/folio.spec
+          rpmbuild -bb --define "_target_os linux" ~/rpmbuild/SPECS/folio.spec
+          mv ~/rpmbuild/RPMS/x86_64/"folio-$v"-1.x86_64.rpm "folio-$v-x86_64.rpm"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            folio-*-linux-x86_64.tar.xz
+            folio_*.deb
+            folio-*.rpm
+
+  # ---- macOS：.app + zip ----
+  macos:
+    name: macOS
+    needs: version
+    runs-on: macos-14
+    env:
+      FOLIO_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Build
+        run: cargo build --release -p folio-app
+
+      - name: Bundle Folio.app
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$FOLIO_VERSION"
+          app=Folio.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/folio "$app/Contents/MacOS/folio"
+          cp packaging/icons/folio.png "$app/Contents/Resources/folio.png"
+          cp THIRD-PARTY-NOTICES.txt "$app/Contents/Resources/"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>folio</string>
+            <key>CFBundleIdentifier</key><string>dev.folio.reader</string>
+            <key>CFBundleName</key><string>Folio</string>
+            <key>CFBundleShortVersionString</key><string>$v</string>
+            <key>CFBundleVersion</key><string>$v</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleIconFile</key><string>folio.png</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>CFBundleDocumentTypes</key><array><dict>
+              <key>CFBundleTypeName</key><string>Ebook</string>
+              <key>LSItemContentTypes</key><array>
+                <string>org.idpf.epub-container</string><string>com.adobe.pdf</string>
+              </array>
+              <key>CFBundleRole</key><string>Viewer</string>
+            </dict></array>
+          </dict></plist>
+          PLIST
+          # **没有 codesign / notarize 这一步**：没有开发者证书。症状是读者首次打开要
+          # 在「隐私与安全性」里允许一次 —— 这条已写进 CHANGELOG 的已知限制。
+          ditto -c -k --sequesterRsrc "$app" "folio-$v-macos-arm64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: folio-*-macos-arm64.zip
+
+  # ---- Windows：exe + zip + NSIS 安装器 ----
+  windows:
+    name: Windows
+    needs: version
+    runs-on: windows-latest
+    env:
+      FOLIO_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # 这一格是整条 workflow 里唯一**从没跑过**的一端：仓库里 Windows 只有
+      # `platform/desktop.rs:7` 那处 windows_subsystem 配置，本地也跨编不了
+      # （MSVC 的 C 依赖要 SDK 头文件）。所以第一次跑它请当成一次测量，而不是走流程。
+      - name: Build
+        run: cargo build --release -p folio-app --target x86_64-pc-windows-msvc
+
+      - name: Install NSIS
+        run: choco install nsis --no-progress -y
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$FOLIO_VERSION"
+          exe=target/x86_64-pc-windows-msvc/release/folio.exe
+          mkdir -p stage out
+          cp "$exe" stage/
+          cp THIRD-PARTY-NOTICES.txt stage/
+          # 便携版：与安装器内容一致，只是不解包。有人就是不想装。
+          7z a -tzip "out/folio-$v-windows-x64.zip" stage/folio.exe stage/THIRD-PARTY-NOTICES.txt
+          "/c/Program Files (x86)/NSIS/makensis" \
+            /DVERSION="$v" /DSRCDIR=stage /DICONDIR=packaging/icons /DOUTDIR=out \
+            packaging/windows/folio.nsi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/*
+
+  # ---- Android：cargo ndk + gradle + 签名 ----
+  android:
+    name: Android
+    needs: version
+    runs-on: ubuntu-24.04
+    env:
+      FOLIO_VERSION: ${{ needs.version.outputs.version }}
+      # 与本机不同：CI 上没有 local.properties，SDK 与 NDK 由 runner 镜像给。
+      # 这里**不写死任何 build-tools 版本号**，apksigner 用 PATH 里那个。
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target-android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk2 --locked
+
+      - name: Build the native library
+        working-directory: crates/folio-app
+        run: |
+          set -euo pipefail
+          export RUST_FONTCONFIG_DLOPEN=on
+          cargo ndk -t arm64-v8a -P 26 -o android/app/src/main/jniLibs build --release --lib
+
+      - name: Decode the release keystore into RUNNER_TEMP
+        shell: bash
+        env:
+          # 四枚 secret 缺一枚都在这里立刻失败 —— **不能让 gradle 静默退回 debug 签名**：
+          # 发出去的包一旦是 debug 签的，以后换不了签名，所有已装用户只能卸载重装。
+          # 口令一律从 env 走，不写进 run 文本：`${{ }}` 直插到 shell 里时，一次
+          # `set -x` 或一条失败的 echo 就能把它打进公开日志。
+          B64: ${{ secrets.FOLIO_KEYSTORE_B64 }}
+          PW: ${{ secrets.FOLIO_KEYSTORE_PASSWORD }}
+          ALIAS: ${{ secrets.FOLIO_KEY_ALIAS }}
+          KEY_PW: ${{ secrets.FOLIO_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${B64:-}" ]; then
+            echo "::error::缺 FOLIO_KEYSTORE_B64。宁可红在这里，也不发一个 debug 签名的 release 包。"
+            exit 1
+          fi
+          # 让 Actions 把这两串值在**任何**日志输出里涂掉，包括将来谁在这一步之后加了 set -x。
+          [ -z "${PW:-}" ] || echo "::add-mask::$PW"
+          [ -z "${KEY_PW:-}" ] || echo "::add-mask::$KEY_PW"
+          printf '%s' "$B64" | base64 -d > "$RUNNER_TEMP/folio-release.p12"
+          {
+            echo "FOLIO_KEYSTORE_FILE=$RUNNER_TEMP/folio-release.p12"
+            echo "FOLIO_KEYSTORE_PASSWORD=$PW"
+            echo "FOLIO_KEY_ALIAS=$ALIAS"
+            echo "FOLIO_KEY_PASSWORD=$KEY_PW"
+          } >> "$GITHUB_ENV"
+          # 注意 keystore 落在 RUNNER_TEMP 而不是 workspace：解进 workspace 有被
+          # upload-artifact 顺手传出去的风险，那等于把私钥发到公网。
+
+      - name: Assemble and sign the APK
+        working-directory: crates/folio-app/android
+        run: |
+          set -euo pipefail
+          gradle :app:assembleRelease
+          v="$FOLIO_VERSION"
+          mv app/build/outputs/apk/release/app-release.apk "folio-$v-arm64-v8a.apk"
+
+      - name: Verify the signature is the pinned one
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$FOLIO_VERSION"
+          apk="crates/folio-app/android/folio-$v-arm64-v8a.apk"
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+          got=$("$APKSIGNER" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr 'A-F' 'a-f')
+          echo "包里的签名指纹：$got"
+          if [ "$got" != "$APK_SIGNER_SHA256" ]; then
+            echo "::error::签名与钉住的那张证书不一致（用了别的 keystore？）。不发。"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: crates/folio-app/android/folio-*-arm64-v8a.apk
+
+  # ---- 发布 ----
+  publish:
+    name: 发布到 folio-releases
+    needs: [version, notices, linux, macos, windows, android]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      FOLIO_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 校验和清单（应用内自动更新据此验包）
+        working-directory: dist
+        run: sha256sum folio-* > sha256sums.txt && cat sha256sums.txt
+
+      - name: 取 CHANGELOG 里对应那一段当 release 正文
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 packaging/changelog_section.py \
+            --version "$FOLIO_VERSION" \
+            --out body.md CHANGELOG.md
+          # 正文末尾自动挂上校验和：读者手工下载时那串字就在同一页上。
+          {
+            echo ""
+            echo "### 校验和（\`sha256sums.txt\`）"
+            echo ""
+            echo '```'
+            cat dist/sha256sums.txt
+            echo '```'
+          } >> body.md
+
+      - name: 建 release 并上传资产
+        env:
+          # 跨仓库发布：默认 GITHUB_TOKEN 碰不到 folio-releases，所以这里用一把只授权
+          # 那个仓库 contents:write 的 fine-grained PAT。
+          GH_TOKEN: ${{ secrets.FOLIO_RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          gh release create "v$FOLIO_VERSION" \
+            --repo "$RELEASE_REPO" \
+            --title "Folio v$FOLIO_VERSION" \
+            --notes-file body.md \
+            --latest \
+            dist/*

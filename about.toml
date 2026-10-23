@@ -1,0 +1,40 @@
+# cargo-about 的配置：从 Cargo.lock 现生成第三方许可声明表。
+#
+# 这份表**不是可选项**：folio 挂 MIT 与否、源码开不公开，都跟它无关 —— 那些依赖自己的许可证
+# 在二进制分发下要求发行物附带版权声明与许可文本。所以它是发布闸门（`release.yml` 里那一步
+# 红了就发不出去），不是备注。
+#
+# `accepted` 这一列是**故意留窄**的：撞上一条不在名单里的许可证，cargo-about 就以非零退出，
+# 于是「新引了一个 copyleft 依赖」这件事在 CI 里是一次失败，而不是安静地进包。
+# 名单里的每一项都是先量过当前依赖图才写进来的（生成表里能看到它们各自覆盖哪些 crate）；
+# 出现新名字时要**先看条款再决定加不加**，不要为了让 CI 绿而加。
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "BSD-2-Clause-FreeBSD",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+    "curl",
+]
+
+# 只算真正会被链进去的那些 target；dev-dependencies 不进包，也就不进声明。
+ignore-dev-dependencies = true
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-linux-android",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+# 本仓库自己（publish = false）不必给自己出一条声明。
+[workspace]
+exclude = []
