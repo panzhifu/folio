@@ -4,7 +4,7 @@ default-members = ["crates/folio-app"]
 members = ["crates/folio-core", "crates/folio-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
