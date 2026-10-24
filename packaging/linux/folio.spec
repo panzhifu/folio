@@ -35,7 +35,9 @@ install -m 755 bin/folio %{buildroot}%{_bindir}/folio
 install -m 644 share/applications/folio.desktop %{buildroot}%{_datadir}/applications/
 install -m 644 share/icons/hicolor/192x192/apps/folio.png \
   %{buildroot}%{_datadir}/icons/hicolor/192x192/apps/folio.png
-install -m 644 THIRD-PARTY-NOTICES.txt %{buildroot}%{_docdir}/folio/
+# %install 在解开的 tarball（暂存布局）里跑：声明表在 share/doc/folio/ 下面，
+# 不在根上 —— 0.1.1 的 run 6 就红在根上那份不存在。
+install -m 644 share/doc/folio/THIRD-PARTY-NOTICES.txt %{buildroot}%{_docdir}/folio/
 install -m 644 LICENSE %{buildroot}%{_docdir}/folio/ 2>/dev/null || :
 
 %files
