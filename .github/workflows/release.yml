@@ -612,6 +612,10 @@ jobs:
           } >> body.md
 
       - name: 建 release 并上传资产
+        # GH_TOKEN 不给，gh CLI 在 Actions 里一步都跑不动 —— 0.1.1 的 run 7 四端
+        # 出包全绿，最后倒在这一句上。
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # 不带 --repo：本仓库就是发布仓，用这次 run 自带的 GITHUB_TOKEN（上面那条
