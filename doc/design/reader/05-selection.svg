@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="384" height="853" viewBox="0 0 384 853">
 <title>Folio 阅读 · 浅色 · Default Light</title>
-<desc>划选浮条：上排画法三格与颜色五枚圆点、下排五格动作条；不是模态，没有遮罩也没有底栏</desc>
+<desc>划选浮条：三条各自带底各自投影的胶囊（没有白卡），上排画法三格与颜色五枚、下排六格动作条（新加「从这句念」）；这一屏画的是落在已有划线上的那一档，所以第二格是取消划线、画法与颜色各打一个标记。不是模态，没有遮罩也没有底栏</desc>
 <rect width="384" height="853" fill="#ffffff"/>
 <rect x="0" y="0" width="384" height="28" fill="#ffffff"/>
 <text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
@@ -39,21 +39,25 @@
 <text x="58.0" y="431.53" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">划桨的手不需要想。想的是另一件事：</text>
 <text x="24.0" y="461.28" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">这一年读过的书，有多少是读第一遍时真在</text>
 <text x="24.0" y="491.03" font-family="Noto Sans CJK SC" font-size="17.0" font-weight="400" fill="#0a0a0a" text-anchor="start">读，有多少只是眼睛从字上走了一遍。眼睛</text>
-<rect x="62.0" y="313.5" width="260.0" height="94.0" rx="6" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
-<path d="M 184.0 407.5 h16 l-8 8 z" fill="#ffffff"/>
-<g transform="translate(79.50,325.03) scale(0.70833)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></g>
-<g transform="translate(107.50,325.03) scale(0.70833)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 21h8"/><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/></g>
-<g transform="translate(135.50,325.03) scale(0.70833)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"/><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/></g>
-<circle cx="196.0" cy="333.53" r="10" fill="#ef4444"/>
-<circle cx="224.0" cy="333.53" r="10" fill="#d946ef"/>
-<circle cx="252.0" cy="333.53" r="10" fill="#06b6d4"/>
-<circle cx="280.0" cy="333.53" r="10" fill="#84cc16"/>
-<circle cx="308.0" cy="333.53" r="10" fill="#eab308" stroke="#0a0a0a" stroke-width="1.5"/>
-<rect x="62.0" y="355.5" width="208" height="48" rx="14" fill="#f5f5f5"/>
-<g transform="translate(75.50,369.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
-<rect x="106.0" y="359.5" width="40" height="40" rx="9" fill="#ffffff"/>
-<g transform="translate(115.50,369.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></g>
-<g transform="translate(155.50,369.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 9a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 15 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2z"/><path d="M15 3v5a1 1 0 0 0 1 1h5"/></g>
-<g transform="translate(195.50,369.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.59 13.51L15.42 17.49"/><path d="M15.41 6.51L8.59 10.49"/><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/></g>
-<g transform="translate(235.50,369.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+<defs><filter id="float" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000000" flood-opacity="0.18"/></filter></defs>
+<rect x="62.0" y="313.5" width="96.0" height="32.0" rx="16.0" fill="#f5f5f5" filter="url(#float)"/>
+<rect x="68.0" y="313.5" width="28.0" height="32.0" rx="16.0" fill="#e5e5e5"/>
+<g transform="translate(73.50,321.03) scale(0.70833)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></g>
+<g transform="translate(101.50,321.03) scale(0.70833)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4v6a6 6 0 0 0 12 0V4"/><path d="M4 20h16"/></g>
+<g transform="translate(129.50,321.03) scale(0.70833)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12q2.5 2 5 0t5 0 5 0 5 0"/><path d="M2 19q2.5 2 5 0t5 0 5 0 5 0"/><path d="M2 5q2.5 2 5 0t5 0 5 0 5 0"/></g>
+<rect x="170.0" y="313.5" width="152.0" height="32.0" rx="16.0" fill="#f5f5f5" filter="url(#float)"/>
+<circle cx="190.0" cy="329.5" r="10.0" fill="#ef4444"/>
+<circle cx="218.0" cy="329.5" r="10.0" fill="#d946ef"/>
+<circle cx="246.0" cy="329.5" r="10.0" fill="#06b6d4"/>
+<circle cx="274.0" cy="329.5" r="10.0" fill="#84cc16"/>
+<circle cx="302.0" cy="329.5" r="10.0" fill="#eab308"/>
+<g transform="translate(295.50,323.03) scale(0.54167)" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></g>
+<rect x="68.0" y="351.5" width="248.0" height="48.0" rx="14" fill="#f5f5f5" filter="url(#float)"/>
+<g transform="translate(81.50,365.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
+<g transform="translate(121.50,365.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></g>
+<g transform="translate(161.50,365.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 9a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 15 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2z"/><path d="M15 3v5a1 1 0 0 0 1 1h5"/></g>
+<g transform="translate(201.50,365.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/><path d="M8 12v-2a4 4 0 0 1 8 0v2"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="12" r="1"/></g>
+<g transform="translate(241.50,365.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.59 13.51L15.42 17.49"/><path d="M15.41 6.51L8.59 10.49"/><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/></g>
+<g transform="translate(281.50,365.03) scale(0.87500)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+<path d="M 184.0 399.5 h16 l-8 8 z" fill="#f5f5f5"/>
 </svg>

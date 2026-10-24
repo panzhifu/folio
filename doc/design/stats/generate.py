@@ -47,8 +47,15 @@ LEGEND_SQ = 14.0     # 图例那五枚方块用 CELL_MAX
 
 TODAY = date(2026, 10, 24)
 GRID_X = GUTTER + LABEL_LANE
+# 时长条那一排：条子沿用热力图一格的 8×3，行高 40（比 44 那一档矮，因为这一屏没有可点
+# 的行 —— 榜单只是读，不回答「按下去会怎样」）。条子左界给书名留 132，右界离分钟数 12。
+BAR_X0, BAR_W, ROW_H = GUTTER + 144.0, 96.0, 40.0
+CHART_SOLID = "#2563eb"          # `chart_3`：`ramp` 最重那一档与时长条同一枚颜色
 # 一格当帧的分钟数由档位反推一个代表值 —— 稿子只需要让深浅摆在对的位置上。
 LEVEL_MINUTES = {1: 8, 2: 20, 3: 40, 4: 75}
+# 榜单五本的权重（合计 0.86，剩下那 0.14 是榜外的书）。稿子里的数必须与格子那一份
+# 总量对得上：先按权重切总时长，再让条子按最长那本铺满 —— 不许各编各的。
+TOP_WEIGHTS = [0.31, 0.21, 0.16, 0.11, 0.07]
 
 
 def start_monday():
@@ -66,7 +73,7 @@ def level_of(minutes):
 
 def ramp(T):
     """五档颜色：0 档 `muted.background`，1..4 档同一个 `chart_3` 递进不透明度。"""
-    solid = "#2563eb"
+    solid = CHART_SOLID
     return [T["muted_bg"], f"{solid}|0.30", f"{solid}|0.55", f"{solid}|0.80", solid]
 
 
@@ -135,8 +142,15 @@ def legend(T, y):
     return e, y + LEGEND_SQ
 
 
-def stats_screen(T, grid, line, name, note):
-    """整屏骨架：状态栏 → 眉标 → 图 → 图例 → 结论 → 底栏。"""
+def hours_minutes(minutes):
+    """把分钟数念成一句人话。与 `model/heatmap.rs:48-61` 的 `duration()` 同一口径：
+    够一小时就说「几小时几分」，不够就只说分钟 —— 榜单那五行不许出现「1975 分钟」。"""
+    h, m = divmod(int(round(minutes)), 60)
+    return f"{h} 小时 {m} 分" if h else f"{m} 分"
+
+
+def stats_screen(T, grid, line, name, note, avg=None, top=None):
+    """整屏骨架：状态栏 → 眉标 → 图 → 图例 → 结论 →（有数才摆）平均与榜单 → 底栏。"""
     e = status_bar(T)
     y = STATUS + 8
     e.append(text(GUTTER, y + 11, "近 12 个月", 14, T["muted"]))
@@ -146,6 +160,33 @@ def stats_screen(T, grid, line, name, note):
     part, y = legend(T, y + 8)
     e += part
     e.append(text(GUTTER, y + 8 + 11, line, 14, T["muted"]))
+    y += 8 + 14
+    if avg:
+        # 第二行结论：同一个「活跃天平均」也是 14 次要色，不另起一张卡 —— 它回答的还是
+        # 「这一年读成什么样」，与上面那句同一段话。
+        e.append(text(GUTTER, y + 20, avg, 14, T["muted"]))
+        y += 20 + 14
+    if top:
+        # 榜单：眉标一行 + 五行「书名 | 时长条 | 时长」。条子的高与圆角直接沿用热力图
+        # 那一格的数（`CELL` 8、`CELL_R` 3），颜色沿用 `ramp` 最重那一档 —— 同一屏里
+        # 出现第二种条子尺就是自造样式。时长是次要信息，14 号次要色，右缘对齐。
+        y += 26
+        e.append(text(GUTTER, y, "读得最多的 5 本", 14, T["muted"]))
+        y += 14
+        widest = max(m for _, m in top) or 1
+        for title, minutes in top:
+            row_y = y + ROW_H / 2
+            label = hours_minutes(minutes)
+            assert tw(label, 14) <= W - GUTTER - (BAR_X0 + BAR_W) - 12, \
+                f"时长那串字放不下：{label} 要 {tw(label, 14):.0f}"
+            e.append(text(GUTTER, row_y + 6, truncate(title, 16, BAR_X0 - GUTTER - 12), 16, T["fg"]))
+            e.append(f'<rect x="{BAR_X0}" y="{row_y - CELL / 2:.1f}" width="{BAR_W}" '
+                     f'height="{CELL}" rx="{CELL_R}" fill="{T["muted_bg"]}"/>')
+            e.append(f'<rect x="{BAR_X0}" y="{row_y - CELL / 2:.1f}" '
+                     f'width="{BAR_W * minutes / widest:.1f}" height="{CELL}" rx="{CELL_R}" '
+                     f'fill="{CHART_SOLID}"/>')
+            e.append(text(W - GUTTER, row_y + 5, label, 14, T["muted"], anchor="end"))
+            y += ROW_H
     # 内容宽 580 超出画布，右缘那一列是被裁掉的：淡出一点，说明还能往右滚。
     e.append(f'<rect x="{W - 26}" y="{STATUS}" width="26" height="{H - STATUS - BAR}" '
              f'fill="{T["bg"]}" fill-opacity="0.55"/>')
@@ -164,9 +205,14 @@ def empty_store_screen(T):
                "统计·读不到书库：两行字，热力图整块不摆", T, area="统计")
 
 
+def minutes_of(grid):
+    """格子 → 「哪天读了多少分钟」。结论那三句、平均那一行与榜单全部从这一份念出来。"""
+    return {(c, r): LEVEL_MINUTES[lv] for c, r, lv in grid if lv}
+
+
 def readout(grid):
     """结论那三个数由同一份格子念出来：天数、总时长、最长连续。"""
-    minutes = {(c, r): LEVEL_MINUTES[lv] for c, r, lv in grid if lv}
+    minutes = minutes_of(grid)
     read = sum(minutes.values())
     hours, mins = divmod(read, 60)
     streak = best = 0
@@ -182,22 +228,53 @@ def readout(grid):
     return f"读了 {len(minutes)} 天，一共 {hours} 小时 {mins} 分钟，最长连续 {best} 天"
 
 
+def avg_line(grid):
+    """「平均每个活跃天」—— 与上面那句同一个分子分母，不另取一份数。
+
+    实现里这一格不用新埋点：`ReadingSummary::average_per_active_day`
+    （`folio-core/src/store/types.rs:284`）算的就是总秒数除以活跃天数。
+    """
+    minutes = minutes_of(grid)
+    if not minutes:
+        return ""
+    return f"平均每个活跃天 {round(sum(minutes.values()) / len(minutes))} 分钟"
+
+
+def top_books(grid):
+    """榜单五本：把格子里的总时长按权重切给 `SHELF` 的前五本（书名取自那一份样例书库）。
+
+    同样零新埋点 —— `Store::top_books`（`folio-core/src/store/reading.rs:214-240`）
+    按 `reading_sessions` 分组求和，早就写好了，只是这一屏从没调过它。
+    """
+    total = sum(minutes_of(grid).values())
+    if not total:
+        return []
+    books = [(title, round(total * w)) for (title, _, _), w in zip(SHELF, TOP_WEIGHTS)]
+    return [(title, minutes) for title, minutes in books if minutes > 0]
+
+
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     grid = cells(random.Random(20261024))
-    line = readout(grid)
+    line, avg, top = readout(grid), avg_line(grid), top_books(grid)
     out = {
         "01-stats-year.svg": stats_screen(
             LIGHT, grid, line, "01-stats-year",
-            "统计·近 12 个月：热力图 + 图例 + 一句结论，横向要滚"),
+            "统计·近 12 个月：热力图 + 图例 + 两句结论 + 榜单五本，横向要滚",
+            avg=avg, top=top),
+        # 一年没读：满网格照画、全 0 档，但**平均与榜单都不摆** —— 分母是零，
+        # 而「读得最多的 5 本：无」不是一句需要占一屏的话。
         "02-stats-none.svg": stats_screen(
             LIGHT, [], "还没有阅读记录", "02-stats-none",
-            "统计·一年没读：满网格照画、全 0 档，只把结论换成那一句"),
+            "统计·一年没读：满网格照画、全 0 档，只把结论换成那一句，平均与榜单都不摆"),
         "03-stats-no-store.svg": empty_store_screen(LIGHT),
         "04-stats-year-dark.svg": stats_screen(
-            DARK, grid, line, "04-stats-year-dark", "统计·近 12 个月的深色对照"),
+            DARK, grid, line, "04-stats-year-dark", "统计·近 12 个月的深色对照",
+            avg=avg, top=top),
     }
     for name, body in out.items():
         (OUT / name).write_text(body, encoding="utf-8")
     print("done:", len(out), "screens")
+    print("     结论：", line, "|", avg)
+    print("     榜单：", top)
     render_pngs(OUT)

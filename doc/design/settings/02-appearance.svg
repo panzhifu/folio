@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="384" height="853" viewBox="0 0 384 853">
 <title>Folio 设置 · 浅色 · Default Light</title>
-<desc>外观：浅深与两侧主题，主题目录</desc>
+<desc>外观：浅深与两侧主题、亮度、主题目录</desc>
 <rect width="384" height="853" fill="#ffffff"/>
 <rect x="0" y="0" width="384" height="28" fill="#ffffff"/>
 <text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
@@ -12,12 +12,14 @@
 <rect x="363.5" y="11" width="2" height="4" rx="1" fill="#0a0a0a"/>
 <g transform="translate(22.00,34.00) scale(0.83333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></g>
 <text x="56" y="49.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="600" fill="#0a0a0a" text-anchor="start">外观</text>
-<rect x="16" y="80" width="352" height="133.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<rect x="16" y="80" width="352" height="203.5" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
 <g transform="translate(0,80.00)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">浅深</text><rect x="252" y="8.0" width="100.0" height="28" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/><text x="264" y="26.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">跟随系统</text><g transform="translate(326.00,15.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></g></g>
 <rect x="33" y="124.5" width="334" height="0.5" fill="#e5e5e5"/>
 <g transform="translate(0,124.50)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">浅色主题</text><rect x="206.07999999999998" y="8.0" width="145.9" height="28" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/><text x="218.07999999999998" y="26.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">Default Light</text><g transform="translate(326.00,15.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></g></g>
 <rect x="33" y="169.0" width="334" height="0.5" fill="#e5e5e5"/>
 <g transform="translate(0,169.00)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">深色主题</text><rect x="213.92" y="8.0" width="138.1" height="28" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/><text x="225.92" y="26.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">Default Dark</text><g transform="translate(326.00,15.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></g></g>
-<rect x="16" y="245.5" width="352" height="70.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
-<g transform="translate(0,245.50)"><text x="32" y="24" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">主题目录</text><g transform="translate(32,34.0)"><text x="0" y="18.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">~/.config/folio/themes</text><rect x="202" y="0" width="118.0" height="28" rx="6" fill="#f5f5f5"/><text x="212" y="18.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">打开所在文件夹</text></g></g>
+<rect x="33" y="213.5" width="334" height="0.5" fill="#e5e5e5"/>
+<g transform="translate(0,213.50)"><text x="32" y="24" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">亮度</text><text x="336" y="24" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#737373" text-anchor="end">80%</text><rect x="32" y="46.0" width="304.0" height="4.0" rx="2.0" fill="#f5f5f5"/><rect x="32" y="46.0" width="243.2" height="4.0" rx="2.0" fill="#171717"/><circle cx="275.2" cy="48.0" r="9.0" fill="#171717"/></g>
+<rect x="16" y="316.0" width="352" height="70.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<g transform="translate(0,316.00)"><text x="32" y="24" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">主题目录</text><g transform="translate(32,34.0)"><text x="0" y="18.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">~/.config/folio/themes</text><rect x="202" y="0" width="118.0" height="28" rx="6" fill="#f5f5f5"/><text x="212" y="18.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">打开所在文件夹</text></g></g>
 </svg>

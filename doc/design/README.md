@@ -5,14 +5,15 @@
 
 | 目录 | 内容 | 屏数 |
 | --- | --- | --- |
-| [`settings/`](settings/README.md) | 设置：根屏、八页、选项屏、深浅对照 | 11 |
+| [`settings/`](settings/README.md) | 设置：根屏、九页、选项屏、听书与日志、深浅对照 | 13 |
 | [`shelf/`](shelf/README.md) | 书架：架面、搜索、组、书信息、扫描、两套菜单、深色对照 | 8 |
 | [`reader/`](reader/README.md) | 阅读页：正文、浮层、设置面板、目录、划选、笔记、图片、分享卡 | 9 |
+| [`notes/`](notes/README.md) | 笔记：全库一条流、搜索有结果、深色对照（**整档稿先到**） | 3 |
 | [`stats/`](stats/README.md) | 统计：热力图有数据 / 一年没读 / 读不到书库 / 深色对照 | 4 |
 | [`welcome/`](welcome/README.md) | 首次启动，与「还没有内容」那四屏 | 6 |
 | [`tablet/`](tablet/README.md) | **平板档两朝向**：侧栏导航、两栏设置、四/五列架面、双页正文、目录抽屉、居中浮层 | 13 |
 
-手机那五档共用 384 × 853 一块画布（魅族 20）；平板档是 800 × 1280 与 1280 × 800 两块
+手机那六档共用 384 × 853 一块画布（魅族 20）；平板档是 800 × 1280 与 1280 × 800 两块
 （小米平板 5 的两个朝向，分别落进 `SizeClass` 的 Medium 与 Expanded）。
 
 ## 共用的那一份尺
@@ -21,14 +22,14 @@
 两份 token、Lucide 图标表、遮罩与弹层与按钮与输入框与封面格这些屏级构件、行构造器、卡片装配。
 每条 `generate.py` 只写自己那几屏摆哪几行。
 
-**一个数不许在两份文件里各写一遍。** 行高从 44 改成 48，改 `_kit.py` 一处，38 张图跟着动；
+**一个数不许在两份文件里各写一遍。** 行高从 44 改成 48，改 `_kit.py` 一处，43 张手机稿跟着动；
 分文件复制常量迟早分叉，而分叉在设计稿里是静默的错 —— 两张图差 4 没人看得出来哪张是对的。
 
 ## 重出
 
 ```bash
 python3 _kit.py            # 什么都不做，只确认这份能 import
-for d in settings shelf reader stats welcome tablet; do (cd $d && python3 generate.py); done
+for d in settings shelf reader notes stats welcome tablet; do (cd $d && python3 generate.py); done
 ```
 
 PNG 渲染走 `rsvg-convert`（librsvg），机器上没有它时只出 SVG 并提示。每张 SVG 旁边摆着一张
@@ -59,6 +60,9 @@ PNG 渲染走 `rsvg-convert`（librsvg），机器上没有它时只出 SVG 并�
   那边不许去。
 - 服务状态字（Wi-Fi 传书没开时的那句、检查更新的「还没查过」）是**行的内容**而不是注释，
   保留灰色。
+- **折行不许把句号孤零零甩到下一行开头**：`_kit.wrap_cjk` 带一组行首禁则（`NO_LINE_START`），
+  撞上就让上一行超宽那一个字把它带着走 —— 真机的排版也是超宽那一个。稿子里出现
+  「一行只有一个。」这种断口，读者看见的是破口不是内容。
 
 ## 出稿过程中量出来的不符
 
@@ -77,3 +81,15 @@ PNG 渲染走 `rsvg-convert`（librsvg），机器上没有它时只出 SVG 并�
    钻入式列表，只是被撑到 752 / 1020 宽。（`tablet/README.md`）
 5. **横屏关掉双页会铺到 72 字一行**：`max_measure` 默认 0 是「不夹」的哨兵值，1280 宽下
    版心 1232。双页默认开着所以平时看不见，读者手动切回单页就会撞上。（`tablet/README.md`）
+6. **划词浮条那张稿以前画错了两处**（2026-10-25 对着 `selection.rs` 重核时撞出来的）：
+   稿上那张白卡加描边在屏上并不存在（实现是三条各自带底各自投影的胶囊，容器没有底），
+   而画法那三格摆的 `pen-line` / `type` 不是实现真用的 `Underline` / `WavesHorizontal`。
+   两处都改在稿上。（`reader/README.md`）
+7. **存储「清理」那五档每行下的灰色说明是实现偏离稿**，不是稿要改：`storage.rs:433-440`
+   那条 `action_hint` 违反本目录「行内不摆灰色说明文字」那条定稿，而稿子里 `clean_row`
+   从来只有「名字 | 字节 | 静默钮」三件。（`settings/README.md`）
+8. **一批已经在存的东西界面上进不去**，稿子这一轮把它们摆上桌当「稿先到」：笔记那一整格
+   （`annotations` 表已有，`NotesView` 只有空状态）、日志那一整节（`config.rs:716-736`
+   注释原话「界面上没有这一页」）、`mono_font_family`（全 UI 零入口）、
+   `brightness` 与 `turn_duration`（只有阅读面板能调）、`annotation_count`（算好了没人调）、
+   统计那 8 条零调用点的查询。（`notes/README.md`、`settings/README.md`、`stats/README.md`）

@@ -18,8 +18,8 @@
 | 浮层底栏卡片 | `px_4` `pt_3`=12 `pb`=8、缝 12、只圆上两角 8 | `reader/view/regions.rs:83-105` |
 | 目录弹层 | 0.85 档高、头部行 44、行高 46（默认宽松）、当前章左标记条 2.9 距左 2.1 | `toc_panel.rs:83,742-795`、`config.rs:258-262`、`toc_panel.rs:62-64,68` |
 | 目录文字 | 左界 31、每级缩进 11.4、标题 2 行、14 号 | `toc_panel.rs:70,75,1243,1318` |
-| 划选卡 | 260×94 = 4 + 32（胶囊行）+ 6 + 48（动作条 40 + p4×2）+ 4 | `reader/components/selection.rs:981-1023,1050-1052` |
-| 划选胶囊 | 画法 3 格 ×28、颜色 5 枚 20 圆点、格宽 28 | 同上 |
+| 划选卡 | 宽 = 顶端那一行（96 + 12 + 152 = 260）与动作条（40×6 + 8 = 248）的**较宽者**；高 94 = 32 + 6 + 48 + 8（尾巴） | `reader/components/selection.rs:981-1052` 那组常量、`card_width()` / `card_height()` |
+| 划选胶囊 | 画法三格与颜色五枚**同宽一格 28**、同高 32；画法那三条没有底，颜色那五枚同住一条圆角胶囊 | 同上：`STYLE_CELL == SWATCH_CELL` 那句注释 |
 | 痕迹三档 | 高亮＝整行盒压 0.35 / 实线＝盒底 2 / 波浪＝高 3.2 波长 7 振幅 1.6 描边 1.6 | `view/body.rs:2476-2530`、`view/paint.rs:242-250` |
 | 笔记便签 | 顶 56、`max_w` 420、内缩 16、圆角 16、缝 12、输入区 128、引文区 ≤58 两行左边框 2 | `note_editor.rs:74-78,88-160` |
 | 图片查看器 | 纯黑全屏、控制格 52×44、图标 20、标签 10、计数 14 | `image_viewer.rs:204-219,811-887` |
@@ -58,9 +58,7 @@ PER_LINE = int(BODY_W / FS)      # 19
 BODY_TOP = STATUS + BAND
 BODY_BOTTOM = H - BAND
 
-# 五档标注色（顺序 = ANNOTATION_COLORS）
-INK_COLORS = ["#ef4444", "#d946ef", "#06b6d4", "#84cc16", "#eab308"]
-DEFAULT_INK = INK_COLORS[4]      # amber
+# 五档标注色与默认档在 [`../_kit.py`](../_kit.py)（笔记那一屏的左缘色条问的是同一件事）。
 
 
 def body_line(T, x, y, s, justify):
@@ -330,32 +328,76 @@ def selection_screen(T):
                  f'fill="{DEFAULT_INK}" fill-opacity="0.35"/>')
     for x, yy, line, first, last in sel_lines:
         e.append(body_line(T, x, yy, line, not last))
-    # 浮条：压在选区上方，离 6。
-    card_w, card_h = 260.0, 94.0
+    # 浮条：压在选区上方，离 6。数全部对齐 `selection.rs:981-1052` 那一组常量，
+    # 不挑顺眼的那一档 —— 整块的宽 = 顶端那一行与动作条的**较宽者**（`card_width` 的原话）。
+    #
+    # **这一层没有一张白卡包着**：实现里那个容器只有 `absolute` 与 `items_center`
+    # （`selection.rs:1226-1240`），三条各自带底、各自投影，底色同为一枚 `theme().muted`
+    # （`schema.rs:458-460` 写明 `muted` 就是 `muted.background`，即这把尺里的 `muted_bg`）。
+    # 稿子从前画的那张白卡加一圈描边是画出来的东西，屏上没有。
+    ACTION_CELL, ACTION_ICON = 40.0, 21.0        # 一格的可点边长 / 图标本身
+    BAR_PAD, BAR_GAP, MENU_GAP = 4.0, 6.0, 6.0   # 动作条内缩 / 两行之间的缝 / 菜单与选区的缝
+    SWATCH_PAD, SWATCH_CELL, SWATCH_DOT = 6.0, 28.0, 20.0
+    STYLE_CELL, STYLE_ICON, MARK_GAP = 28.0, 17.0, 12.0
+    SWATCH_CHECK, MENU_TAIL, MENU_TAIL_WIDTH = 13.0, 8.0, 16.0
+    N_STYLE, N_COLORS = 3, 5                      # AnnotationStyle::ALL / ANNOTATION_COLORS
+    # 这一屏讲的故事是「长按落在一条已有的琥珀划线上面」：选区下面那条痕迹在库里，
+    # 于是第二格换做「取消划线」（`Trash`，`selection.rs:1123-1136`），画法那一档与颜色
+    # 那一枚都跟着打标记。普通选区（没划过）第二格是 `Highlighter`，两条胶囊不打标记。
+    actions = ["copy", "trash", "sticky-note", "book-headphones", "share-2", "x"]
+    style_pill = SWATCH_PAD * 2 + STYLE_CELL * N_STYLE            # 96
+    swatch_pill = SWATCH_PAD * 2 + SWATCH_CELL * N_COLORS         # 152
+    mark_row = style_pill + MARK_GAP + swatch_pill                # 260 —— 今天是最宽那一行
+    bar_h = ACTION_CELL + BAR_PAD * 2                             # 48
+    bar_w = ACTION_CELL * len(actions) + BAR_PAD * 2              # 248
+    swatch_bar = SWATCH_DOT + SWATCH_PAD * 2                      # 32
+    card_w = max(bar_w, mark_row)
+    card_h = swatch_bar + BAR_GAP + bar_h + MENU_TAIL             # 32+6+48+8 = 94
     cx = (W - card_w) / 2
-    cy = sel_lines[0][1] - 18 - 6 - card_h
-    e.append(f'<rect x="{cx:.1f}" y="{cy:.1f}" width="{card_w}" height="{card_h}" '
-             f'rx="{RADIUS}" fill="{T["popover"]}" stroke="{T["border"]}" stroke-width="1"/>')
-    e.append(f'<path d="M {cx + card_w / 2 - 8:.1f} {cy + card_h:.1f} h16 l-8 8 z" '
-             f'fill="{T["popover"]}"/>')
-    ry = cy + 4
-    for i, ic in enumerate(("highlighter", "pen-line", "type")):
-        e.append(icon(ic, cx + 12 + i * 28 + 5.5, ry + 7.5, 17, T["fg"]))
+    cy = sel_lines[0][1] - 18 - MENU_GAP - card_h
+    # `floating_shadow()` = 偏移 (0, 2)、模糊 8、黑色 18%（`selection.rs:1466-1469`）。
+    # SVG 的 `stdDeviation` 约等于模糊半径的一半，所以是 4。
+    e.append('<defs><filter id="float" x="-50%" y="-50%" width="200%" height="200%">'
+             '<feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000000" '
+             'flood-opacity="0.18"/></filter></defs>')
+    # 顶端那一行：两条胶囊 `justify_between` 顶到整块的左右两端，同高 32、圆角 16。
+    e.append(f'<rect x="{cx:.1f}" y="{cy:.1f}" width="{style_pill:.1f}" height="{swatch_bar:.1f}" '
+             f'rx="{swatch_bar / 2:.1f}" fill="{T["muted_bg"]}" filter="url(#float)"/>')
+    # 当下那一档画法打亮：`.when(active, |cell| cell.bg(hover))`，`hover` 就是 `border`。
+    e.append(f'<rect x="{cx + SWATCH_PAD:.1f}" y="{cy:.1f}" width="{STYLE_CELL:.1f}" '
+             f'height="{swatch_bar:.1f}" rx="{swatch_bar / 2:.1f}" fill="{T["border"]}"/>')
+    for i, ic in enumerate(("highlighter", "underline", "waves-horizontal")):
+        e.append(icon(ic, cx + SWATCH_PAD + i * STYLE_CELL + (STYLE_CELL - STYLE_ICON) / 2,
+                      cy + (swatch_bar - STYLE_ICON) / 2, STYLE_ICON, T["fg"]))
+    sx = cx + style_pill + MARK_GAP
+    e.append(f'<rect x="{sx:.1f}" y="{cy:.1f}" width="{swatch_pill:.1f}" '
+             f'height="{swatch_bar:.1f}" rx="{swatch_bar / 2:.1f}" fill="{T["muted_bg"]}" '
+             f'filter="url(#float)"/>')
     for i, color in enumerate(INK_COLORS):
-        ring = f' stroke="{T["fg"]}" stroke-width="1.5"' if i == 4 else ""
-        e.append(f'<circle cx="{cx + 96 + 12 + 12 + i * 28 + 14:.1f}" cy="{ry + 16}" r="10" '
-                 f'fill="{color}"{ring}/>')
-    ay = ry + 32 + 6
-    e.append(f'<rect x="{cx:.1f}" y="{ay:.1f}" width="208" height="48" rx="14" '
+        ccx = sx + SWATCH_PAD + i * SWATCH_CELL + SWATCH_CELL / 2
+        ccy = cy + swatch_bar / 2
+        e.append(f'<circle cx="{ccx:.1f}" cy="{ccy:.1f}" r="{SWATCH_DOT / 2}" fill="{color}"/>')
+        if i == 4:    # 那条划线的颜色：勾压在圆点上，取页面底色（`check` 那一句的理由）
+            e.append(icon("check", ccx - SWATCH_CHECK / 2, ccy - SWATCH_CHECK / 2,
+                          SWATCH_CHECK, T["bg"]))
+    # 动作条：居中在那一行下面（`bars` 那一条 `items_center`）。
+    ay = cy + swatch_bar + BAR_GAP
+    bx0 = cx + (card_w - bar_w) / 2
+    e.append(f'<rect x="{bx0:.1f}" y="{ay:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" '
+             f'rx="14" fill="{T["muted_bg"]}" filter="url(#float)"/>')
+    for i, ic in enumerate(actions):
+        bx = bx0 + BAR_PAD + i * ACTION_CELL
+        e.append(icon(ic, bx + (ACTION_CELL - ACTION_ICON) / 2,
+                      ay + BAR_PAD + (ACTION_CELL - ACTION_ICON) / 2, ACTION_ICON, T["fg"]))
+    # 尾巴：菜单在选区上方，所以尖朝下，贴在动作条底下、压在整块高度的最后 8 像素里。
+    e.append(f'<path d="M {cx + card_w / 2 - MENU_TAIL_WIDTH / 2:.1f} {ay + bar_h:.1f} '
+             f'h{MENU_TAIL_WIDTH:.0f} l-{MENU_TAIL_WIDTH / 2:.0f} {MENU_TAIL:.0f} z" '
              f'fill="{T["muted_bg"]}"/>')
-    for i, ic in enumerate(("copy", "highlighter", "sticky-note", "share-2", "x")):
-        bx = cx + 4 + i * 40
-        if i == 1:
-            e.append(f'<rect x="{bx:.1f}" y="{ay + 4:.1f}" width="40" height="40" rx="9" '
-                     f'fill="{T["popover"]}"/>')
-        e.append(icon(ic, bx + 9.5, ay + 13.5, 21, T["fg"]))
     return svg("05-selection", e, T["label"],
-               "划选浮条：上排画法三格与颜色五枚圆点、下排五格动作条；不是模态，没有遮罩也没有底栏", T, area="阅读")
+               "划选浮条：三条各自带底各自投影的胶囊（没有白卡），上排画法三格与颜色五枚、"
+               "下排六格动作条（新加「从这句念」）；这一屏画的是落在已有划线上的那一档，"
+               "所以第二格是取消划线、画法与颜色各打一个标记。不是模态，没有遮罩也没有底栏",
+               T, area="阅读")
 
 
 def note_screen(T):

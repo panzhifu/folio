@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="384" height="853" viewBox="0 0 384 853">
 <title>Folio 统计 · 浅色 · Default Light</title>
-<desc>统计·近 12 个月：热力图 + 图例 + 一句结论，横向要滚</desc>
+<desc>统计·近 12 个月：热力图 + 图例 + 两句结论 + 榜单五本，横向要滚</desc>
 <rect width="384" height="853" fill="#ffffff"/>
 <rect x="0" y="0" width="384" height="28" fill="#ffffff"/>
 <text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
@@ -218,6 +218,28 @@
 <rect x="344.0" y="164.0" width="14.0" height="14.0" rx="3.0" fill="#2563eb"/>
 <text x="362.0" y="176.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">多</text>
 <text x="12.0" y="197.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">读了 182 天，一共 106 小时 11 分钟，最长连续 9 天</text>
+<text x="12.0" y="220.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">平均每个活跃天 35 分钟</text>
+<text x="12.0" y="260.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">读得最多的 5 本</text>
+<text x="12.0" y="300.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">百年孤独</text>
+<rect x="156.0" y="290.0" width="96.0" height="8.0" rx="3.0" fill="#f5f5f5"/>
+<rect x="156.0" y="290.0" width="96.0" height="8.0" rx="3.0" fill="#2563eb"/>
+<text x="372.0" y="299.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="end">32 小时 55 分</text>
+<text x="12.0" y="340.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">瓦尔登湖</text>
+<rect x="156.0" y="330.0" width="96.0" height="8.0" rx="3.0" fill="#f5f5f5"/>
+<rect x="156.0" y="330.0" width="65.0" height="8.0" rx="3.0" fill="#2563eb"/>
+<text x="372.0" y="339.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="end">22 小时 18 分</text>
+<text x="12.0" y="380.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">卡拉马佐夫兄弟</text>
+<rect x="156.0" y="370.0" width="96.0" height="8.0" rx="3.0" fill="#f5f5f5"/>
+<rect x="156.0" y="370.0" width="49.5" height="8.0" rx="3.0" fill="#2563eb"/>
+<text x="372.0" y="379.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="end">16 小时 59 分</text>
+<text x="12.0" y="420.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">雪国</text>
+<rect x="156.0" y="410.0" width="96.0" height="8.0" rx="3.0" fill="#f5f5f5"/>
+<rect x="156.0" y="410.0" width="34.1" height="8.0" rx="3.0" fill="#2563eb"/>
+<text x="372.0" y="419.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="end">11 小时 41 分</text>
+<text x="12.0" y="460.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">平沙落雁</text>
+<rect x="156.0" y="450.0" width="96.0" height="8.0" rx="3.0" fill="#f5f5f5"/>
+<rect x="156.0" y="450.0" width="21.7" height="8.0" rx="3.0" fill="#2563eb"/>
+<text x="372.0" y="459.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="end">7 小时 26 分</text>
 <rect x="358" y="28" width="26" height="769" fill="#ffffff" fill-opacity="0.55"/>
 <rect x="0" y="797" width="384" height="56" fill="#ffffff"/>
 <g transform="translate(37.00,804.00) scale(0.91667)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/></g>

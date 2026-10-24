@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="384" height="853" viewBox="0 0 384 853">
 <title>Folio 设置 · 浅色 · Default Light</title>
-<desc>文字：字号行距段距、缩进对齐、翻页、划线</desc>
+<desc>文字：字号行距段距、缩进对齐、翻页与时长、划线</desc>
 <rect width="384" height="853" fill="#ffffff"/>
 <rect x="0" y="0" width="384" height="28" fill="#ffffff"/>
 <text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
@@ -22,8 +22,10 @@
 <g transform="translate(0,245.50)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">首行缩进</text><text x="272" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="end">2.00</text><g transform="translate(286.00,12.00) scale(0.83333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></g><g transform="translate(326.00,12.00) scale(0.83333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></g></g>
 <rect x="33" y="290.0" width="334" height="0.5" fill="#e5e5e5"/>
 <g transform="translate(0,290.00)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">两端对齐</text><rect x="308" y="10.0" width="44" height="24" rx="12" fill="#171717"/><circle cx="340" cy="22.0" r="9" fill="#fafafa"/></g>
-<rect x="16" y="366.5" width="352" height="44.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<rect x="16" y="366.5" width="352" height="88.5" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
 <g transform="translate(0,366.50)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">翻页动画</text><text x="326" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#737373" text-anchor="end">左右平移</text><g transform="translate(338.00,15.00) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g></g>
-<rect x="16" y="443.0" width="352" height="44.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
-<g transform="translate(0,443.00)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">划线方式</text><text x="326" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#737373" text-anchor="end">高亮</text><g transform="translate(338.00,15.00) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g></g>
+<rect x="33" y="411.0" width="334" height="0.5" fill="#e5e5e5"/>
+<g transform="translate(0,411.00)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">翻页时长</text><text x="272" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="end">280 ms</text><g transform="translate(286.00,12.00) scale(0.83333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></g><g transform="translate(326.00,12.00) scale(0.83333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></g></g>
+<rect x="16" y="487.5" width="352" height="44.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<g transform="translate(0,487.50)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">划线方式</text><text x="326" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#737373" text-anchor="end">高亮</text><g transform="translate(338.00,15.00) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g></g>
 </svg>

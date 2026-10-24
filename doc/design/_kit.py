@@ -81,6 +81,34 @@ DARK = {
     "label": "深色 · Default Dark",
 }
 
+# ── 标注那五档色（阅读页划词、笔记那一支的左缘色条共用） ─────────────────────────
+#
+# 五档来自主题的 `red / magenta / cyan / green / yellow`（`reader/model/annotations.rs:652-658`），
+# 顺序对上 `ANNOTATION_COLORS` 的 `ruby / rose / sky / lime / amber`；这里写的是那五档在
+# shadcn 调色板上的 500 阶。换主题时这一排跟着动，默认档（`amber`）不变。
+# 放在这一份里而不是 `reader/generate.py`：笔记那一屏的左缘色条问的是同一件事
+# （这一条划成哪档），两处各抄一遍就会分叉。
+INK_COLORS = ["#ef4444", "#d946ef", "#06b6d4", "#84cc16", "#eab308"]
+DEFAULT_INK = INK_COLORS[4]      # amber —— `AnnotationStyle` 之外的那一格默认色
+
+# ── 一份样例书库（书架 / 空状态 / 统计的榜单 / 笔记都读这一份） ────────────────────
+#
+# 五屏共用同一批书名与作者：换一本书记得只换这里，否则「书架上那本《瓦尔登湖》」与
+# 「笔记里那条出自《瓦尔登湖》」会在两份文件里各自漂移。第三格是「有没有封面图」，
+# False 那一档画的是实现本来的样子（格内书名、居中、次要前景色）。
+SHELF = [
+    ("百年孤独", "加西亚·马尔克斯", True),
+    ("瓦尔登湖", "亨利·戴维·梭罗", True),
+    ("卡拉马佐夫兄弟", "陀思妥耶夫斯基", True),
+    ("雪国", "川端康成", True),
+    ("平沙落雁", None, False),
+    ("人类简史", "尤瓦尔·赫拉利", True),
+    ("庄子的蝴蝶", "佚名", False),
+    ("长夜难明", "紫金陈", True),
+    ("城南旧事", "林海音", True),
+]
+GROUPS = [("梭罗", 6), ("民国书信", 3)]
+
 # ── Lucide 图标（抄自 gpui-kit-assets 0.7.1，24 网格，stroke 2） ───────────────
 ICONS = {
     "palette": {"p": ['M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z'],
@@ -144,6 +172,30 @@ ICONS = {
               "circles": [(9, 9, 2)]},
     "circle-check": {"p": ['m16 9-5.5 5.5L8 12'], "circles": [(12, 12, 10)]},
     "wifi-off": {"p": ['M12 20h.01', 'M8.5 16.429a5 5 0 0 1 7 0', 'M5 12.859a10 10 0 0 1 5.17-2.69', 'M19 12.859a10 10 0 0 0-2.007-1.523', 'M2 8.82a15 15 0 0 1 4.177-2.643', 'M22 8.82a15 15 0 0 0-11.288-3.764', 'm2 2 20 20']},
+    # ── 听书（合成朗读）那一支。`book-headphones` 是实现真在用的那枚
+    #    （`IconName::BookHeadphones`：`settings/view/pages/speech.rs:21` 的页图标，
+    #    `reader/view/regions.rs:331` 的入口图标），所以稿子里「听书」只许说这一枚，
+    #    不再另找一颗「更像喇叭」的图标把同一个功能拆成两个词汇。
+    #    `audio-lines` 与 `logs` 同样取自 `gpui-kit-assets/assets/icons/`（24 网格、stroke 2），
+    #    枚举 `IconName` 由 build.rs 按这些文件名生成，故 `AudioLines` / `Logs` 都取得到。
+    "book-headphones": {"p": ['M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20',
+                              'M8 12v-2a4 4 0 0 1 8 0v2'],
+                        "circles": [(15, 12, 1), (9, 12, 1)]},
+    "audio-lines": {"p": ['M2 10v3', 'M6 6v11', 'M10 3v18', 'M14 8v7', 'M18 5v13', 'M22 10v3']},
+    # 画法那三格在实现里是 `Highlighter` / `Underline` / `WavesHorizontal`
+    # （`selection.rs:1374-1386` 的 `style_cells`）。稿子从前拿的是 `pen-line` 与 `type`，
+    # 那是「看着像」的两枚，不是应用真用的那两枚 —— 换过来之后这一排才对得上屏。
+    # `underline.svg` 的第二条元素是 `<line x1=4 x2=20 y1=20 y2=20>`，这里写成等价的
+    # `M4 20h16`：形状逐字照抄，只是换了 SVG 的写法（`icon()` 只发 path）。
+    "underline": {"p": ['M6 4v6a6 6 0 0 0 12 0V4', 'M4 20h16']},
+    "waves-horizontal": {"p": ['M2 12q2.5 2 5 0t5 0 5 0 5 0', 'M2 19q2.5 2 5 0t5 0 5 0 5 0',
+                               'M2 5q2.5 2 5 0t5 0 5 0 5 0']},
+    # 笔记那一格有两枚：`StickyNote` 与「这一条已经有话了」的 `StickyNoteCheck`
+    # （`selection.rs:1142-1146`）。
+    "sticky-note-check": {"p": ['m15 19 2 2 4-4', 'M15 3v5a1 1 0 0 0 1 1h5',
+                                'M21 13V9a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 15 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6.5']},
+    "logs": {"p": ['M3 5h1', 'M3 12h1', 'M3 19h1', 'M8 5h1', 'M8 12h1', 'M8 19h1',
+                   'M13 5h8', 'M13 12h8', 'M13 19h8']},
 }
 
 
@@ -218,7 +270,14 @@ def card(x, y, w, h, T):
             f'fill="{T["bg"]}" stroke="{T["border"]}" stroke-width="1"/>')
 
 
-def bottom_bar(T, active="我的"):
+def bottom_bar(T, active="我的", count=None):
+    """底部导航栏。`count` 是**稿先到**的那一格：给「笔记」那一枚带条数。
+
+    实现里还没有徽标 —— `Store::annotation_count`（`annotations.rs:176`）算好了但全 App
+    零调用点，所以这几个数没有出处可抄，只能自己定并写清是自定的：胶囊高 14、圆角 7、
+    横向内缩 4、字 10（比 tab 标签那 12 号小一档，它不该盖过标签）、底 `primary`、
+    字 `primary_fg`；压在图标右上角，右缘比图标右缘再出去 7。
+    """
     tabs = [("library", "书架"), ("chart-column", "统计"), ("notebook-pen", "笔记"), ("circle-user", "我的")]
     e = [f'<rect x="0" y="{H - BAR}" width="{W}" height="{BAR}" fill="{T["bg"]}"/>']
     for i, (ic, label) in enumerate(tabs):
@@ -227,6 +286,12 @@ def bottom_bar(T, active="我的"):
         ink = T["primary"] if on else T["muted"]
         e.append(icon(ic, cx - 11, H - BAR + 7, 22, ink))
         e.append(text(cx, H - BAR + 44, label, 12, ink, anchor="middle"))
+        if label == "笔记" and count:
+            bw = max(14.0, 8.0 + tw(str(count), 10))
+            bx, by = cx + 11 + 7 - bw, H - BAR + 1
+            e.append(f'<rect x="{bx:.1f}" y="{by}" width="{bw:.1f}" height="14" rx="7" '
+                     f'fill="{T["primary"]}"/>')
+            e.append(text(bx + bw / 2, by + 10.5, str(count), 10, T["primary_fg"], anchor="middle"))
     return e
 
 
@@ -315,11 +380,27 @@ HANDLE_BAND = 36     # 弹层顶部可拖那一条带（components/bottom_sheet.
 HANDLE_W, HANDLE_H = 32.0, 4.0
 
 
+# 不许出现在一行之首的标点（行首禁则）。中日韩排版里这些符号压到下一行开头就是「一个
+# 句号孤零零吊着」，读者一眼看见的是破口而不是内容。
+NO_LINE_START = "。，、；：？！）］》」』…—·"
+
+
 def wrap_cjk(s, size, max_w, max_lines=99):
-    """按字宽贪心折行。中日韩没有空格可断，实现里也是逐字量的，这里同形。"""
+    """按字宽贪心折行。中日韩没有空格可断，实现里也是逐字量的，这里同形。
+
+    唯一的例外是上面那组禁则：断完发现下一行以它们开头，就让这一行**多出那一个字**
+    把它们带着走 —— 真机的排版也是超宽那一个，而不是把句号单独摆到下一行。
+    """
     lines, cur = [], ""
     for ch in s:
         if cur and tw(cur + ch, size) > max_w:
+            if ch in NO_LINE_START:
+                cur += ch            # 让这一行超宽那一个字，把句号带着走
+                lines.append(cur)
+                cur = ""
+                if len(lines) == max_lines:
+                    return lines
+                continue
             lines.append(cur)
             cur = ch
             if len(lines) == max_lines:
@@ -583,6 +664,43 @@ def titled_row(title, content):
     return e, 34 + 28 + 8
 
 
+# 连续数值那一格的轨道：数抄阅读面板那两条滑条（字号与亮度），不在这里另挑一档。
+SLIDER_TRACK_H, SLIDER_TRACK_R = 4.0, 2.0
+SLIDER_KNOB_R = 9.0
+SLIDER_TRACK_Y, SLIDER_KNOB_CY = 46.0, 48.0
+
+
+def slider_row(title, value, frac):
+    """连续值滑条那一格：标题在左、当前值在右、轨道铺满内容宽。70 高（[`titled_row`] 同族）。
+
+    为什么设置里会出现滑条：`appearance.brightness` 在阅读面板上本来就是一条滑条
+    （`reader/view/regions.rs:365-393`），同一个配置项在两处出现两种控件，读者就得学
+    两套操作 —— 所以这一格照抄面板那三条数（轨道高 4、圆角 2、旋钮半径 9，进度色
+    `primary`、空档 `muted.background`）。
+
+    反过来，**语速 / 音高不是滑条**：它们在实现里走 `NumberSpec`，compact 那一档渲染成
+    带「− 值 +」的步进阶梯（`compact.rs:610-639`，步长 0.05），所以「听书」那一页用
+    [`stepper_row`]。判据是「实现里那颗是什么」，不是「哪种画出来好看」。
+
+    内容左右界在**函数体里**问 `PAD` / `RIGHT`，不写成模块常量：`set_canvas` 换过画布之后
+    `RIGHT` 跟着动，冻在定义那一刻会让平板那一档拿到一条按手机宽度画的轨道（与
+    [`scrim`] 的 `y1` 同一课）。`frac` 是 0..1 的行程比例，旋钮按它落在轨道两端之内。
+    """
+    x0, x1 = PAD + PAD, RIGHT - PAD          # 内容宽 304，与 titled_row 同一条带
+    span = x1 - x0
+    knob = x0 + span * frac
+    filled = max(0.0, span * frac)
+    return [
+        text(x0, 24, title, 16, "__FG__"),
+        text(x1, 24, value, 16, "__MUTED__", anchor="end"),
+        f'<rect x="{x0}" y="{SLIDER_TRACK_Y}" width="{span:.1f}" '
+        f'height="{SLIDER_TRACK_H}" rx="{SLIDER_TRACK_R}" fill="__MUTED_BG__"/>',
+        f'<rect x="{x0}" y="{SLIDER_TRACK_Y}" width="{filled:.1f}" '
+        f'height="{SLIDER_TRACK_H}" rx="{SLIDER_TRACK_R}" fill="__PRIMARY__"/>',
+        f'<circle cx="{knob:.1f}" cy="{SLIDER_KNOB_CY}" r="{SLIDER_KNOB_R}" fill="__PRIMARY__"/>',
+    ], 70
+
+
 def content_path_button(path):
     """titled_row 的内容：灰色路径（放不下截成省略号）+ 「打开所在文件夹」静默钮。"""
     bw = 20 + tw("打开所在文件夹", 14)
@@ -629,7 +747,8 @@ def switch_medium(T, x, y, on):
 
 TOKENS = ("__FG__", "fg", "__MUTED__", "muted", "__BORDER__", "border", "__PRIMARY__", "primary",
           "__SW_OFF__", "switch_off", "__KNOB_ON__", "knob_on", "__KNOB_OFF__", "knob_off",
-          "__BTN_BG__", "btn_bg", "__PRIMARY_FG__", "primary_fg")
+          "__BTN_BG__", "btn_bg", "__PRIMARY_FG__", "primary_fg",
+          "__MUTED_BG__", "muted_bg")
 
 
 def resolve(els, T):

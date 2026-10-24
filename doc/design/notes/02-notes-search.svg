@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="384" height="853" viewBox="0 0 384 853">
+<title>Folio 笔记 · 浅色 · Default Light</title>
+<desc>笔记·搜索有结果：框里有词就出清除钮，眉标跟着换成命中数；搜的是批注原文与书名，不是正文 —— 正文那一套在目录那屏的「全文」tab 里</desc>
+<rect width="384" height="853" fill="#ffffff"/>
+<rect x="0" y="0" width="384" height="28" fill="#ffffff"/>
+<text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
+<circle cx="192.0" cy="14" r="5.5" fill="#000" stroke="#d4d4d4" stroke-width="1"/>
+<g transform="translate(308.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/></g>
+<g transform="translate(328.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h.01"/><path d="M7 20v-4"/><path d="M12 20v-8"/><path d="M17 20V8"/></g>
+<rect x="344" y="8" width="18" height="10" rx="2.5" fill="none" stroke="#0a0a0a" stroke-width="1.6"/>
+<rect x="346" y="10" width="12" height="6" rx="1" fill="#0a0a0a"/>
+<rect x="363.5" y="11" width="2" height="4" rx="1" fill="#0a0a0a"/>
+<rect x="16" y="38" width="352" height="32.0" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<g transform="translate(26.00,47.00) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></g>
+<g transform="translate(342.00,48.00) scale(0.50000)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+<text x="46.0" y="59.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">湖</text>
+<text x="16" y="93" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">2 条 · 出自 1 本</text>
+<rect x="16" y="112" width="352" height="134.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<rect x="18.0" y="124.0" width="3.0" height="110.0" rx="1.5" fill="#eab308"/>
+<text x="32" y="140.0" font-family="Noto Sans CJK SC" font-size="16.0" font-weight="400" fill="#0a0a0a" text-anchor="start">划桨的手不需要想。想的是另一件事：水把船</text>
+<text x="32" y="168.0" font-family="Noto Sans CJK SC" font-size="16.0" font-weight="400" fill="#0a0a0a" text-anchor="start">托住，船才认得方向。</text>
+<text x="32" y="190.0" font-family="Noto Sans CJK SC" font-size="14.0" font-weight="400" fill="#737373" text-anchor="start">这一句和上一章「冰下的水」是同一件事的两头。</text>
+<text x="32" y="232.0" font-family="Noto Sans CJK SC" font-size="12.0" font-weight="400" fill="#737373" text-anchor="start">《瓦尔登湖》</text>
+<text x="352" y="232.0" font-family="Noto Sans CJK SC" font-size="12.0" font-weight="400" fill="#737373" text-anchor="end">10 月 24 日</text>
+<rect x="16" y="258.0" width="352" height="78.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<rect x="18.0" y="270.0" width="3.0" height="54.0" rx="1.5" fill="#d946ef"/>
+<text x="32" y="286.0" font-family="Noto Sans CJK SC" font-size="16.0" font-weight="400" fill="#0a0a0a" text-anchor="start">湖是风景中最活泼、最伸展的。</text>
+<text x="32" y="322.0" font-family="Noto Sans CJK SC" font-size="12.0" font-weight="400" fill="#737373" text-anchor="start">《瓦尔登湖》</text>
+<text x="352" y="322.0" font-family="Noto Sans CJK SC" font-size="12.0" font-weight="400" fill="#737373" text-anchor="end">10 月 23 日</text>
+<rect x="0" y="797" width="384" height="56" fill="#ffffff"/>
+<g transform="translate(37.00,804.00) scale(0.91667)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/></g>
+<text x="48.0" y="841" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="middle">书架</text>
+<g transform="translate(133.00,804.00) scale(0.91667)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></g>
+<text x="144.0" y="841" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="middle">统计</text>
+<g transform="translate(229.00,804.00) scale(0.91667)" fill="none" stroke="#171717" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z"/></g>
+<text x="240.0" y="841" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#171717" text-anchor="middle">笔记</text>
+<g transform="translate(325.00,804.00) scale(0.91667)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/></g>
+<text x="336.0" y="841" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="middle">我的</text>
+</svg>
