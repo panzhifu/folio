@@ -108,7 +108,6 @@ secret 在不在（三十秒红完，不烧构建机时），然后 Linux / macO
    取 `## [<版本>] - <日期>` 那一段当 release 正文，应用内「设置 → 关于 → 更新日志」
    显示的就是它；找不到段非零退出，那一步直接红。平时把改动记在 `[Unreleased]` 下，
    发版那天改名成 `[<版本>] - <日期>` 并另开一个空 `[Unreleased]`。
-   **当前仓库里还没有这个文件** —— 首次发版前先建。
 2. **`THIRD-PARTY-NOTICES.txt` 签进仓库根**。`notices` job 用钉死的 cargo-about
    0.9.2 重新生成并与仓库里那份逐字节比对，不一致就红 —— 所以依赖变了要本地重跑
    一起提交：
@@ -122,7 +121,6 @@ secret 在不在（三十秒红完，不烧构建机时），然后 Linux / macO
    红的地方落在下一句 `no such command: about`；不钉版本，上游改了模板吃的结构体
    形状就会出现与依赖无关的假漂移。生成器撞到名单外的许可证会非零退出 —— 那是
    刻意的，先读条款再决定加不加进 `about.toml` 的 `accepted`。
-   **当前仓库里还没有这个文件** —— 首次发版前先生成并提交。
 3. **Android 签名的四个 secret**（Settings → Secrets and variables → Actions）：
    `FOLIO_KEYSTORE_B64`（`base64 -w0` 出来的一整行）、`FOLIO_KEYSTORE_PASSWORD`、
    `FOLIO_KEY_ALIAS`、`FOLIO_KEY_PASSWORD`。`preflight` 只测在不在，内容一个字不进
