@@ -48,6 +48,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 这一条 job 是 main 上最近一次红的那一条，红因不是代码：`failed to build archive
+      # at .../libfolio_app.a: No space left on device`。folio-app 一个 crate 同时 emit
+      # rlib + cdylib + staticlib 三份，`--all-targets` 那一遍还要再来一份 test 版，
+      # ubuntu runner 的根分区撑不住。删掉的都是这一条用不到的预装物 —— 注意
+      # `/usr/local/lib/android` 只有下面那条 Android cross-check 要，所以那条里**不能**删它。
+      # 前后各打一次 `df`，让这一步自己报它腾出多少。
+      - name: 腾出磁盘
+        run: |
+          set -euo pipefail
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h / | tail -1
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.0
         with:

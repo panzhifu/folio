@@ -24,17 +24,34 @@ accepted = [
     "Unicode-DFS-2016",
     "OpenSSL",
     "curl",
+    # 下面三条是 0.1.1 第一次真跑 `cargo about generate` 时撞出来的，逐条读过条款：
+    # 0BSD —— enum-iterator / enum-iterator-derive（gpui-kit 那条链上）。原文只有一句
+    #   「permission to use, copy, modify, and/or distribute … for any purpose」，
+    #   连附随声明都不要求，随包带文本纯是多余的保险。
+    "0BSD",
+    # bzip2-1.0.6 —— libbz2-rs-sys（sevenz-rust2 → bzip2，CB7 里那一支）。这条不是
+    #   OSI 批准的标准 SPDX 名，是 libbzip2 自己那份：要求分发的每一份副本带上本许可文本，
+    #   且**改过的源码版本必须标注**。我们没有改它，所以触发的是前一条，正好由声明表满足。
+    #   它那几条「善意付款请求」（给作者 / ACM / EFF）原文自己写明不具法律约束力。
+    "bzip2-1.0.6",
+    # CDLA-Permissive-2.0 —— webpki-roots 0.26.11 与它转身的 1.0.9（ureq 用它们验 TLS，
+    #   「检查更新」那条链）。这条管的是**数据**不是代码：那一份根证书清单。再分发这份数据
+    #   时要附许可声明，若改动了要写「改了什么的说明」与日期 —— 我们原样带，所以只欠声明。
+    "CDLA-Permissive-2.0",
 ]
 
 # 只算真正会被链进去的那些 target；dev-dependencies 不进包，也就不进声明。
+# 这一列必须与 release.yml 实际出包的那四端对齐：macOS 那条 job 跑在 macos-14（Apple
+# Silicon）且不带 --target，编出来是 aarch64-apple-darwin，写 x86_64 会漏掉只有 arm64
+# 那一份的依赖。
 ignore-dev-dependencies = true
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-linux-android",
-    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
 ]
 
-# 本仓库自己（publish = false）不必给自己出一条声明。
-[workspace]
-exclude = []
+# 本仓库自己（两个 crate 都是 publish = false）不出声明：cargo-about 只列工作区根的
+# **依赖**，工作区成员本来就不在这张表的生成路径上，所以这里不需要额外排除。
+# （0.9.2 的 Config 结构体里没有 `workspace` 这个键，写了会以反序列化失败退出。）
