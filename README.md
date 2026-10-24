@@ -166,10 +166,11 @@ Android（`arm64-v8a`）。包与更新日志发布在公开的 `panzhifu/folio-
    默认那个 `GITHUB_TOKEN` 碰不到别的仓库，所以跨仓发布只能靠它。缺了它红的样子：workflow 里
    `发布仓 README 与跨仓权限` 那一条 job 三十秒内红（就是为了让它在这儿红，不要在四条构建全跑完
    之后才在 `publish` 里红）。
-2. **`THIRD-PARTY-NOTICES.txt` 签在仓库根**。生成它要带 `--features cli`：
+2. **`THIRD-PARTY-NOTICES.txt` 签在仓库根**。生成它要带 `--features cli`，版本要钉住 —— 与
+   `release.yml` 里 `notices` 那条 job 装的同一版：
 
    ```bash
-   cargo install cargo-about --locked --features cli
+   cargo install cargo-about --version 0.9.2 --locked --features cli
    cargo about generate --locked packaging/about.hbs > THIRD-PARTY-NOTICES.txt
    ```
 

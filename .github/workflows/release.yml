@@ -119,13 +119,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install cargo-about
-        # `--features cli` 不是可选的：0.9.2 把 `[[bin]]` 挂在 `required-features = ["cli"]`
-        # 上，而它的 `[features]` 里没有 `default`，所以 `cargo install cargo-about --locked`
-        # **编完什么也不装**（只留一句 `none of the package's binaries are available for install
-        # using the selected features` 的 warning，退出码照样 0），下一步 `cargo about generate`
-        # 才报 `no such command: about`。本机 2026-10-24 实测两遍：不带那个 flag 装完
-        # `~/.cargo/bin` 里一个 about 都没有。
-        run: cargo install cargo-about --locked --features cli
+        # 两个 flag 都不是装饰：
+        # `--features cli` —— 0.9.2 把 `[[bin]]` 挂在 `required-features = ["cli"]` 上，而它的
+        #   `[features]` 里没有 `default`，所以 `cargo install cargo-about --locked` **编完什么也不
+        #   装**（只留一句 `none of the package's binaries are available for install using the
+        #   selected features` 的 warning，退出码照样 0），红的地方落在下一步 `no such command: about`。
+        # `--version 0.9.2` —— 这道门是**逐字节**比对的，而模板吃的是 0.9.2 那个结构体的形状
+        #   （`used_by[].crate.name`、`{{len}}`）。上游哪天发 0.10 并改形状，仓库里签着的那一份
+        #   就会与「装到的最新版现生成的」不一致 —— 那是一条与依赖无关的红，所以钉住，升级时由人
+        #   本地重跑一遍生成再一起提交。
+        run: cargo install cargo-about --version 0.9.2 --locked --features cli
 
       - name: Regenerate and diff against the checked-in copy
         run: |
