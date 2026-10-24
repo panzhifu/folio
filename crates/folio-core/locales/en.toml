@@ -113,6 +113,7 @@ style_highlight = "Highlight"
 style_line = "Underline"
 style_wavy = "Wavy line"
 
+tts = "Listen"
 [toast]
 font_size = "Font size %{size}px"
 theme = "Theme: %{name}"
@@ -140,6 +141,7 @@ toc = "Contents"
 # Group titles inside a settings page. With more than one group on a page these
 # also show up as that page's sub-entries in the sidebar, so each one has to name
 # what its fields have in common.
+speech = "Read aloud"
 [group]
 usage = "Usage"
 cleanup = "Cleanup"
@@ -156,6 +158,8 @@ transfer = "Wi-Fi transfer"
 rows = "Rows"
 marking = "Marking"
 
+speech_voice = "Voice"
+speech_reading = "While reading"
 [field]
 app_dir = "App data folder"
 log_dir = "Log folder"
@@ -212,6 +216,12 @@ highlight_style = "Highlight style"
 "highlight_style.desc" = "Which mark a new highlight leaves in the text: a colour band behind the glyphs, a straight line under them, or a wavy one. Marks already in the book keep whichever they were drawn with, and changing this re-typesets nothing."
 
 # Labels for the four page-turn styles. The value written back to config is `PageTurn::as_str()`.
+speech_rate = "Rate"
+"speech_rate.desc" = "How fast it reads. 1.0 is normal."
+speech_pitch = "Pitch"
+"speech_pitch.desc" = "The tone of the voice. 1.0 is normal."
+speech_auto_scroll = "Follow along"
+"speech_auto_scroll.desc" = "Turn to the paragraph being read. Off keeps the page where you left it."
 [page_turn]
 slide = "Slide sideways"
 slide_up = "Slide up and down"

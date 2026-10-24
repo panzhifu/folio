@@ -20,7 +20,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use folio_core::{Appearance, Config, Env, Language, Library, Provenance, Reader, Resolved};
+use folio_core::{
+    Appearance, Config, Env, Language, Library, Provenance, Reader, Resolved, Speech,
+};
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
 use crate::ui::foundation::error::{Context as _, report};
@@ -122,6 +124,11 @@ impl ConfigHolder {
         Self::snapshot(cx).library.clone()
     }
 
+    /// 听书那一节。会话每开一段念之前读一次（语速/音高随改随生效，不用另发命令）。
+    pub fn speech(cx: &App) -> Speech {
+        Self::snapshot(cx).speech.clone()
+    }
+
     /// 每一项的配置来自哪一层（§2.1）。诊断 dump 用。
     pub fn provenance(cx: &App) -> Provenance {
         Self::entity(cx).read(cx).provenance.clone()
@@ -166,6 +173,10 @@ impl ConfigHolder {
 
     pub fn edit_library(cx: &mut App, f: impl FnOnce(&mut Library)) {
         Self::edit(cx, |config| f(&mut config.library));
+    }
+
+    pub fn edit_speech(cx: &mut App, f: impl FnOnce(&mut Speech)) {
+        Self::edit(cx, |config| f(&mut config.speech));
     }
 
     /// 落盘。`path` 为 `None`（测试）时跳过；写失败只打日志，不让 UI 崩。

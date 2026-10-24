@@ -99,6 +99,7 @@ style_highlight = "하이라이트"
 style_line = "실선"
 style_wavy = "물결선"
 
+tts = "들려주기"
 [toast]
 font_size = "글자 크기 %{size}px"
 theme = "테마: %{name}"
@@ -125,6 +126,7 @@ toc = "목차"
 
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
+speech = "소리 내어 읽기"
 [group]
 usage = "사용량"
 cleanup = "정리"
@@ -141,6 +143,8 @@ transfer = "Wi-Fi 전송"
 rows = "항목"
 marking = "표시"
 
+speech_voice = "목소리"
+speech_reading = "읽는 동안"
 [field]
 app_dir = "앱 데이터 폴더"
 log_dir = "기록 폴더"
@@ -197,6 +201,12 @@ highlight_style = "줄 종류"
 "highlight_style.desc" = "새로 그은 표시가 본문에 어떤 흔적을 남기는지: 글자 뒤에 색 띠, 글자 아래 실선, 또는 물결선. 이미 책에 있는 표시는 그었을 때 그대로 유지되고, 여기 바꿔도 재정판하지 않습니다."
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
+speech_rate = "속도"
+"speech_rate.desc" = "읽는 속도입니다. 1.0이 보통입니다."
+speech_pitch = "높이"
+"speech_pitch.desc" = "목소리의 높이입니다. 1.0이 보통입니다."
+speech_auto_scroll = "읽는 곳으로 넘기기"
+"speech_auto_scroll.desc" = "읽고 있는 단락으로 화면을 옮깁니다. 끄면 화면이 그대로 있습니다."
 [page_turn]
 slide = "좌우로 밀기"
 slide_up = "위로 밀기"

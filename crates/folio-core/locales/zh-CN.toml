@@ -103,6 +103,8 @@ style_highlight = "高亮"
 style_line = "实线"
 style_wavy = "波浪线"
 
+# 听书（合成朗读）底栏那颗入口的气泡与无障碍标签；播放中换成「暂停」那一格的图标。
+tts = "听书"
 [toast]
 font_size = "字号 %{size}px"
 theme = "主题：%{name}"
@@ -129,6 +131,7 @@ toc = "目录"
 
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
+speech = "听书"
 [group]
 usage = "占用"
 cleanup = "清理"
@@ -145,6 +148,8 @@ transfer = "Wi-Fi 传书"
 rows = "条目"
 marking = "划线"
 
+speech_voice = "声音"
+speech_reading = "朗读时"
 [field]
 app_dir = "软件数据目录"
 log_dir = "日志目录"
@@ -201,6 +206,13 @@ highlight_style = "划线方式"
 "highlight_style.desc" = "新划的一条在正文上留哪种痕迹：字底一块颜色、字下一条实线、或一条波浪。已经留在书上的那几条各照自己当初那一档画，不动。改这一格不重排。"
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
+# 听书那三格。语速/音高是语义档（常速 1.0），换算成引擎那一档在 folio_core::speech。
+speech_rate = "语速"
+"speech_rate.desc" = "念得多快。1.0 是正常速度。"
+speech_pitch = "音高"
+"speech_pitch.desc" = "念出来的调子。1.0 是正常音高。"
+speech_auto_scroll = "念到哪翻到哪"
+"speech_auto_scroll.desc" = "听书时屏幕跟着正在念的那一段走。关掉就是「念它的，我翻我的」。"
 [page_turn]
 slide = "左右平移"
 slide_up = "上下平移"

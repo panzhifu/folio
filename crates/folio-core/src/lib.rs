@@ -31,6 +31,7 @@ pub mod layout;
 pub mod net;
 pub mod position;
 pub mod search;
+pub mod speech;
 pub mod store;
 
 pub use content::anchor::{
@@ -49,7 +50,7 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
     Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, LOG_OFF_ENV, Language, Layer,
-    Library, Logging, Mode, PageTurn, Provenance, Reader, Resolved, TocDensity,
+    Library, Logging, Mode, PageTurn, Provenance, Reader, Resolved, Speech, TocDensity,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
@@ -66,6 +67,7 @@ pub use ingest::import::{
 };
 pub use ingest::scan::{ScanReport, ScanSource, find};
 pub use position::{LOCATOR_FORMAT_VERSION, Locator};
+pub use speech::{Command, Engine, Event};
 pub use store::StaleReason;
 pub use store::{
     ANNOTATION_COLORS, Annotation, AnnotationStyle, BookReading, Collection, DailyReading,

@@ -345,6 +345,11 @@ pub struct ReaderSession {
     /// 那条每来一次就问「到点结了没有」的时钟。换书时它已经挂着就不重挂；
     /// 关书时把它 drop 掉（`Task` 一 drop，计时就取消）。
     pub(in crate::ui::features::reader) reading_clock: Option<Task<()>>,
+
+    // ---- 听书（合成朗读）：状态在这里，读写在 model/speech.rs ----
+    /// 引擎句柄、可用性与播放状态。引擎本身是进程级单例（`folio_core::speech::engine`），
+    /// 这里持的是它的克隆；开书时 `speech_attach` 挂上，离开阅读页时 `Drop` 停掉。
+    pub(in crate::ui::features::reader) speech: crate::ui::features::reader::model::speech::Speech,
 }
 
 /// 按章缓存的解锚结果：章下标 →（这批结果出自哪一代排版，区间表）。
@@ -497,6 +502,7 @@ impl ReaderSession {
             reading_segment_start: 0,
             reading_last_activity: 0,
             reading_clock: None,
+            speech: crate::ui::features::reader::model::speech::Speech::default(),
         }
     }
 
@@ -630,6 +636,7 @@ impl ReaderSession {
             reading_segment_start: 0,
             reading_last_activity: 0,
             reading_clock: None,
+            speech: crate::ui::features::reader::model::speech::Speech::default(),
         };
         // 屏上要有读者划过的痕迹，就得先知道库里有哪些。开书这一条路（`with_document`）
         // 与换书那一条（`open_book`）都要过一遍，漏一处就是「重开书批注不见了」。
@@ -717,6 +724,9 @@ impl ReaderSession {
         let doc: std::sync::Arc<dyn OpenedDocument> = std::sync::Arc::from(
             folio_core::content::document::with_container(meta, content, Path::new(&path)),
         );
+        // 上一本还在念的话先停掉：听书的会话跟着「那一屏」走，不跟着进程走，
+        // 换书就是换了一屏。位置按停那一刻的段落落库（`stop_speech`）。
+        self.stop_speech();
         // 定版式（CBZ / 逐页 SVG 漫画）与可重排走两条完全不同的阅读链：前者没有章、
         // 没有排版，页是既定的（见 `content::format::Content` 的两族划分）。
         self.source = if doc.is_fixed() {
@@ -763,6 +773,9 @@ impl ReaderSession {
         // 章内偏移还是要等第一帧排版做完才能落地。连续模式哪怕偏移是 0 也挂请求：
         // 落点是全局 y，章首未必拼在 0 的位置。
         self.pend_restore((self.mode.is_continuous() || locator.offset > 0).then_some(locator));
+        // 听书：引擎进程级只有一份，这里挂的是事件循环（幂等；探测在引擎线程里做，
+        // 界面线程不被 Android 那至多 500 ms 的初始化阻塞）。
+        self.speech_attach(cx);
         cx.notify();
     }
 

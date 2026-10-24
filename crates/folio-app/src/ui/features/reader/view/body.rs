@@ -302,6 +302,10 @@ impl Render for ReaderSession {
         // 批注划线只有那五种（`ANNOTATION_COLORS`），一次取好，逐条画时查表。
         let palette = Palette::of(cx.theme());
         let family = self.family.clone();
+        // 听书正在念的那一段（哪一章的哪个字符区间）。要在 `font_cache` 的可变借用
+        // 与 `match &mut self.source` 之前解出来：进了那两道门 `self` 都借不出，
+        // 而 `speech_range()` 是个 `&self` 方法。
+        let speech_span = self.speech_range();
         // 两章之间的缝：拼接坐标用它隔开相邻的章（口径在 `Book::chapter_gap`）。
         let chapter_gap = Book::chapter_gap(&self.prefs);
         // 等宽偏好整帧取一次：兜底那一行与正文的 run 都要它。
@@ -727,6 +731,22 @@ impl Render for ReaderSession {
                             (band.start - placed.base_y)..(band.end - placed.base_y),
                             // 连续滚动这一臂只摆一张纸（翻页就是补间那一个 y），没有要裁的
                             // 另一张 ⇒ 不裁。
+                            None,
+                        );
+                        speech_fill(
+                            &mut element,
+                            doc,
+                            window,
+                            cx,
+                            speech_span
+                                .as_ref()
+                                .filter(|(chapter, _)| *chapter == placed.index)
+                                .map(|(_, range)| range.clone()),
+                            self.prefs.margin_x,
+                            band.start - placed.base_y,
+                            band.end - band.start,
+                            self.header_reserve,
+                            (band.start - placed.base_y)..(band.end - placed.base_y),
                             None,
                         );
                         let __fills = __fills.ns();
@@ -1326,6 +1346,22 @@ impl Render for ReaderSession {
                                     slice.origin_y..(slice.origin_y + slice.height + 1.0),
                                     cut,
                                 );
+                                speech_fill(
+                                    &mut element,
+                                    doc,
+                                    window,
+                                    cx,
+                                    speech_span
+                                        .as_ref()
+                                        .filter(|(chapter, _)| *chapter == page_ref.chapter)
+                                        .map(|(_, range)| range.clone()),
+                                    x,
+                                    slice.origin_y,
+                                    slice.height,
+                                    top,
+                                    slice.origin_y..(slice.origin_y + slice.height + 1.0),
+                                    cut,
+                                );
                             }
                             if to_back {
                                 annotation_fills(
@@ -1337,6 +1373,22 @@ impl Render for ReaderSession {
                                     &self.annotations,
                                     &palette,
                                     page_ref.chapter,
+                                    x,
+                                    slice.origin_y,
+                                    slice.height,
+                                    top,
+                                    slice.origin_y..(slice.origin_y + slice.height + 1.0),
+                                    None,
+                                );
+                                speech_fill(
+                                    &mut back_element,
+                                    doc,
+                                    window,
+                                    cx,
+                                    speech_span
+                                        .as_ref()
+                                        .filter(|(chapter, _)| *chapter == page_ref.chapter)
+                                        .map(|(_, range)| range.clone()),
                                     x,
                                     slice.origin_y,
                                     slice.height,
@@ -2427,6 +2479,53 @@ fn annotation_fills(
                 Mark::Quad(line, color)
             });
         }
+    }
+}
+
+/// 听书这一段底色的透明度。比选区（[`HIGHLIGHT_ALPHA`]）淡：它是背景里的一条
+/// 「机器念到这儿了」，不该与读者亲手挑出来的痕迹抢眼。
+const SPEECH_ALPHA: f32 = 0.2;
+
+/// 听书正在念的那一段：**整段**一块底色，画在字形之下。
+///
+/// 数据源是会话的播放状态（`speech_range`），调用点在 `match &mut self.source` 之前
+/// 解好、按章号滤进来 —— 念哪段亮哪段；段内逐句高亮没有数据源（Android 没有
+/// `onRangeStart`，按时钟估的那条路线第一版不做，见 `model/speech.rs` 的模块文档）。
+/// 换算与批注底色带共用 [`highlight_rects`]（同一套「这一栏摆在哪、可见带是哪一段」），
+/// 颜色用主题的 `primary` 而不是 `selection`：前者念出来是「在念这里」，后者是
+/// 「人挑了这里」，两种意思不该同色。`cut` 与批注同一条规矩：中心落在被裁掉那一侧
+/// 的矩形不画，别让底色浮在已经折走的那半张纸上。
+#[allow(clippy::too_many_arguments)]
+fn speech_fill(
+    element: &mut GlyphsElement,
+    doc: &Document,
+    window: &Window,
+    cx: &App,
+    speaking: Option<Range<usize>>,
+    x: f32,
+    origin_y: f32,
+    flow_len: f32,
+    header: f32,
+    band: Range<f32>,
+    cut: Option<crate::ui::features::reader::motion::turn_animation::Cut>,
+) {
+    let Some(sub) = speaking else {
+        return;
+    };
+    if band.start >= band.end {
+        return;
+    }
+    let mut rects = Vec::new();
+    highlight_rects(
+        doc, window, cx, sub, x, origin_y, flow_len, header, band, &mut rects,
+    );
+    let color = cx.theme().primary.opacity(SPEECH_ALPHA);
+    for rect in rects {
+        let center = rect.center();
+        if cut.is_some_and(|cut| !cut.keeps(f32::from(center.x), f32::from(center.y))) {
+            continue;
+        }
+        element.mark(Mark::Quad(rect, color));
     }
 }
 

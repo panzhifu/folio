@@ -50,6 +50,7 @@ use pages::appearance::appearance_page;
 use pages::fonts::fonts_page;
 use pages::layout::layout_page;
 use pages::library::library_page;
+use pages::speech::speech_page;
 use pages::storage::storage_page;
 use pages::toc::toc_page;
 use pages::typography::typography_page;
@@ -82,6 +83,7 @@ pub enum SettingsPage {
     Typography,
     Layout,
     Fonts,
+    Speech,
     Library,
     Toc,
     Storage,
@@ -97,11 +99,12 @@ impl SettingsPage {
     /// 变体顺序就是侧栏顺序，而深链靠 [`index`](Self::index) 现算 —— 挪位置不会指错页，
     /// 但会让「第 N 页」这句话在别处（测试、日志、旧截图）对不上，所以三处顺序
     /// （本枚举、`ALL`、[`spec_pages`]）必须一起动。
-    pub const ALL: [SettingsPage; 8] = [
+    pub const ALL: [SettingsPage; 9] = [
         SettingsPage::Appearance,
         SettingsPage::Typography,
         SettingsPage::Layout,
         SettingsPage::Fonts,
+        SettingsPage::Speech,
         SettingsPage::Library,
         SettingsPage::Toc,
         SettingsPage::Storage,
@@ -122,6 +125,7 @@ pub(in crate::ui::features::settings) fn spec_pages(cx: &App) -> Vec<spec::Page>
         typography_page(cx),
         layout_page(cx),
         fonts_page(cx),
+        speech_page(cx),
         library_page(cx),
         toc_page(cx),
         storage_page(cx),

@@ -27,6 +27,13 @@
 # 里面放什么、怎么重新拉取见 reference/README.md。
 /reference/
 
+# 设计稿目录只留本机（9fa3354 起从仓库移除，有意不再跟踪）。
+# 代码注释里引用的 plans/听书.md、plans/facts.md 等以本机这份为准；
+# 新克隆要整目录找回：`git show 9fa3354^:plans` 或 `git archive 9fa3354^ plans | tar -x`。
+# 它必须留在 ignore 里：jj 会把未被 ignore 的文件全收进当前 change，规则一撤，
+# 整目录就被卷进下一笔提交。
+/plans/
+
 # Android 产物一律不入库。
 # jniLibs/*.so 是 cargo-ndk 每次构建重新生成的（debug 版单份就有 400M+），
 # gradle 的 build/ 与 .gradle/ 是它的缓存，local.properties 里写的是本机的 SDK 绝对路径 ——

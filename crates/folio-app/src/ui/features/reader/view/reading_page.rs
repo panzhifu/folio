@@ -521,6 +521,13 @@ impl ReadingPage {
             .update(cx, |reader, cx| reader.set_mode(next, cx));
     }
 
+    /// 听书那一下：没念 → 从视口当前段开口；念着 → 暂停；暂停 → 这一段从头再念。
+    /// 状态机全在会话里（`model/speech.rs`），这一屏只把那一击递过去。
+    pub(in crate::ui::features::reader) fn toggle_speech(&mut self, cx: &mut Context<Self>) {
+        self.reader
+            .update(cx, |reader, cx| reader.toggle_speech(cx));
+    }
+
     /// 浅深一键。
     ///
     /// 判据是**解析出来的**那一档（`cx.theme().mode`），不是配置里写的 `system`：

@@ -99,6 +99,7 @@ style_highlight = "高亮"
 style_line = "實線"
 style_wavy = "波浪線"
 
+tts = "聽書"
 [toast]
 font_size = "字型大小 %{size}px"
 theme = "主題：%{name}"
@@ -125,6 +126,7 @@ toc = "目錄"
 
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
+speech = "聽書"
 [group]
 usage = "佔用"
 cleanup = "清理"
@@ -141,6 +143,8 @@ transfer = "Wi-Fi 傳輸"
 rows = "條目"
 marking = "劃線"
 
+speech_voice = "聲音"
+speech_reading = "朗讀時"
 [field]
 app_dir = "軟體資料目錄"
 log_dir = "記錄目錄"
@@ -197,6 +201,12 @@ highlight_style = "劃線方式"
 "highlight_style.desc" = "新劃的一條在正文上留哪種痕跡：字底一塊顏色、字下一條實線、或一條波浪。已經留在書上的那幾條各照自己當初那一檔畫，不動。改這一格不重排。"
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
+speech_rate = "語速"
+"speech_rate.desc" = "唸得多快。1.0 是正常速度。"
+speech_pitch = "音高"
+"speech_pitch.desc" = "唸出來的調子。1.0 是正常音高。"
+speech_auto_scroll = "唸到哪翻到哪"
+"speech_auto_scroll.desc" = "聽書時螢幕跟著正在唸的那一段走。關掉就是「唸它的，我翻我的」。"
 [page_turn]
 slide = "左右平移"
 slide_up = "上下平移"

@@ -102,6 +102,7 @@ style_highlight = "ハイライト"
 style_line = "下線"
 style_wavy = "波線"
 
+tts = "読み上げ"
 [toast]
 font_size = "文字サイズ %{size}px"
 theme = "テーマ：%{name}"
@@ -128,6 +129,7 @@ toc = "目次"
 
 # 設定ページ内のグループ見出し。1 ページに 2 つ以上あるとサイドバーの項目として
 # 出てくるので、それぞれの字段に何の共通点があるかを名前で示す。
+speech = "読み上げ"
 [group]
 usage = "使用量"
 cleanup = "クリーンアップ"
@@ -144,6 +146,8 @@ transfer = "Wi-Fi 転送"
 rows = "行"
 marking = "マーキング"
 
+speech_voice = "声"
+speech_reading = "読書中"
 [field]
 app_dir = "アプリのデータフォルダー"
 log_dir = "ログフォルダー"
@@ -200,6 +204,12 @@ highlight_style = "線の種類"
 "highlight_style.desc" = "新しく引いたマーカーが本文にどんな形の痕跡を残すか：文字の後ろに色の帯、文字の下に直線、または波線。すでに本にある線はそれぞれ引いた時の形で描かれ、変わりません。ここを変えても組版はやり直ししません。"
 
 # ページめくり四通りのラベル。設定に書き戻す値は `PageTurn::as_str()`。
+speech_rate = "速さ"
+"speech_rate.desc" = "読み上げる速さ。1.0 が標準です。"
+speech_pitch = "高さ"
+"speech_pitch.desc" = "声の高さ。1.0 が標準です。"
+speech_auto_scroll = "追従してめくる"
+"speech_auto_scroll.desc" = "読み上げ中、読んでいる段落に画面を合わせます。オフなら画面はそのままです。"
 [page_turn]
 slide = "左右に滑る"
 slide_up = "上下に滑る"

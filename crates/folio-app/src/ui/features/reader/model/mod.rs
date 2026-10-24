@@ -21,6 +21,7 @@ pub(in crate::ui::features::reader) mod perf;
 pub(in crate::ui::features::reader) mod position;
 pub(in crate::ui::features::reader) mod reading_time;
 pub(in crate::ui::features::reader) mod session;
+pub(in crate::ui::features::reader) mod speech;
 pub(in crate::ui::features::reader) mod swipe;
 pub(in crate::ui::features::reader) mod toc;
 pub(in crate::ui::features::reader) mod toc_tree;

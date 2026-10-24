@@ -217,6 +217,11 @@ impl ReadingPage {
         let page_night = cx.entity().clone();
         let page_spread = cx.entity().clone();
         let page_settings = cx.entity().clone();
+        let page_speech = cx.entity().clone();
+        // 听书这一格摆不摆、念没念着，判据都在会话侧（`model/speech.rs`）：
+        // 引擎不可用 / 定版式书 / 还没探到 → 不摆；念着 → 图标换暂停 + selected。
+        let speech_playing = self.reader.read(cx).speech_playing();
+        let speech_visible = self.reader.read(cx).speech_entry_visible();
         let night_label = tr(cx, if dark { "reader.day" } else { "reader.night" });
         let spread_label = tr(cx, "reader.mode_spread");
         let zoom_label = tr(cx, "reader.zoom_page");
@@ -307,6 +312,31 @@ impl ReadingPage {
                         page_spread.update(cx, |this, cx| this.toggle_spread(cx))
                     }),
             )
+            // 听书这一格只给图标（与「双页」同一条理由：一排入口各带两个字，
+            // 手机上每格会被挤到点不准）。念着的时候图标换成暂停、底色吃 selected
+            // —— 播放状态必须看得见。引擎不可用或定版式书，这一格整个不摆
+            // （判据 `speech_entry_visible`），不摆一颗按下去没反应的键。
+            .when(speech_visible, |row| {
+                let speech_label = tr(cx, "reader.tts");
+                row.child(
+                    Button::new("entry-speech")
+                        .ghost()
+                        .small()
+                        .flex_1()
+                        .justify_center()
+                        .selected(speech_playing)
+                        .icon(if speech_playing {
+                            IconName::Pause
+                        } else {
+                            IconName::BookHeadphones
+                        })
+                        .tooltip(speech_label.clone().to_string())
+                        .accessibility_label(speech_label)
+                        .on_click(move |_, _, cx| {
+                            page_speech.update(cx, |this, cx| this.toggle_speech(cx))
+                        }),
+                )
+            })
             .child(
                 Button::new("entry-night")
                     .ghost()

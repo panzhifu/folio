@@ -28,6 +28,11 @@ footnotes, vertical writing.
 - **Three reading modes** — continuous scroll, paged, and two-page spread (it steps
   down automatically when the window is too narrow). Fixed-layout books get a
   page-by-page mode with zoom, share and save.
+- **Read aloud** — one button in the reading bar: it starts from the paragraph you
+  are looking at, keeps going paragraph by paragraph, turns to the paragraph it is
+  reading and highlights it, with adjustable rate and pitch (Linux and Android;
+  the entry stays hidden when no speech engine is available, and macOS / Windows
+  have no backend in this version).
 - **A library that remembers** — shelf groups, per-book progress, reading
   statistics, and full-text search inside a book.
 - **9 interface languages** — 简体中文 · 繁體中文 · English · 日本語 · 한국어 ·
@@ -85,9 +90,7 @@ Directions, not promises:
 1. **Notes & annotations UI** — wire the existing backend to the screen.
 2. **A text layer for PDF / AZW4 / DjVu** — selection, annotations and search
    inside fixed-layout documents.
-3. **Read-aloud (TTS)** — the backend dependencies are already in place for Linux
-   and Android; the engine itself is not written yet.
-4. **iOS and HarmonyOS hosts**, once they enter the release matrix.
+3. **iOS and HarmonyOS hosts**, once they enter the release matrix.
 
 ## Building from source
 
@@ -97,8 +100,11 @@ cargo test --workspace --lib   # the fast, complete test loop
 ```
 
 Linux needs the development packages for fontconfig, Wayland and xkbcommon, plus a
-working Vulkan driver. Android cross-compilation, packaging, logging configuration
-and the release process are described in the developer handbook:
+working Vulkan driver. Building from source also needs two compile-time
+dependencies for the read-aloud feature: **libclang** (used by bindgen) and the
+**libspeechd development headers** (`libspeechd-dev` on Debian/Ubuntu,
+`speech-dispatcher` on Arch). Android cross-compilation, packaging, logging
+configuration and the release process are described in the developer handbook:
 **[doc/development.md](doc/development.md)** (中文).
 
 ## Under the hood

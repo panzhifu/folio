@@ -99,6 +99,7 @@ style_highlight = "Textmarker"
 style_line = "Unterstreichen"
 style_wavy = "Wellenlinie"
 
+tts = "Vorlesen"
 [toast]
 font_size = "Schriftgröße %{size} px"
 theme = "Theme: %{name}"
@@ -125,6 +126,7 @@ toc = "Verzeichnis"
 
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
+speech = "Vorlesen"
 [group]
 usage = "Belegung"
 cleanup = "Aufräumen"
@@ -141,6 +143,8 @@ transfer = "Übertragung per WLAN"
 rows = "Einträge"
 marking = "Markierungen"
 
+speech_voice = "Stimme"
+speech_reading = "Beim Lesen"
 [field]
 app_dir = "App-Datenordner"
 log_dir = "Protokollordner"
@@ -197,6 +201,12 @@ highlight_style = "Markierungsstil"
 "highlight_style.desc" = "Welche Spur eine neue Markierung im Text hinterlässt: ein Farbband hinter den Glyphen, eine gerade Linie darunter oder eine Wellenlinie. Markierungen im Buch behalten ihren eigenen Stil; hier zu ändern setzt nichts neu."
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
+speech_rate = "Geschwindigkeit"
+"speech_rate.desc" = "Wie schnell vorgelesen wird. 1.0 ist normal."
+speech_pitch = "Tonhöhe"
+"speech_pitch.desc" = "Die Tonlage der Stimme. 1.0 ist normal."
+speech_auto_scroll = "Automatisch folgen"
+"speech_auto_scroll.desc" = "Zum vorgelesenen Absatz blättern. Aus: die Seite bleibt, wo sie ist."
 [page_turn]
 slide = "Zur Seite wischen"
 slide_up = "Nach oben wischen"

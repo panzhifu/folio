@@ -1,10 +1,12 @@
 //! 应用配置：软件里所有「用户能改、改完要记住」的东西都在这一个模块里。
 //!
-//! 分成五节，前四节各自对应设置界面里的一类，第五节是给调试用的、界面上没有：
+//! 分成六节，前五节各自对应设置界面里的一类（或排版引擎的输入），第六节是给调试用的、
+//! 界面上没有：
 //! - [`Reader`] —— 排版输入（字号、行距、缩进、版心、字体），排版引擎只认这一节；
 //! - [`Appearance`] —— 浅深三态和两侧各用哪套主题，属于界面外观而不是排版输入；
 //! - [`Library`] —— 书库目录；
 //! - [`Language`] —— 界面语言；
+//! - [`Speech`] —— 听书（合成朗读）的语速、音高与自动翻页；
 //! - [`Logging`] —— 日志落到哪儿、说到多细（改完重启生效，界面上没有这一页）。
 //!
 //! 落盘位置由 [`crate::infra::paths`] 决定（`~/.config/folio/config.json`）。
@@ -15,6 +17,7 @@
 //! 两边不重叠。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -509,6 +512,69 @@ impl Default for Appearance {
     }
 }
 
+/// 听书（合成朗读）的偏好。
+///
+/// 语速与音高存**语义值**（常速 1.0），换算到各引擎那一档住在 `crate::speech`：
+/// Android 0.1–10.0 恒等、Linux Speech Dispatcher −100–100 线性（`speech::gate`
+/// 里那对换算函数）。区间不问引擎 —— `Tts` 的 `min_*`/`max_*` 那一族没有
+/// `Features` 闸门，Android 的 `min_volume` 是 `todo!()`，问了就崩，所以上下限
+/// 在这里自己定、界面直接引用，不抄第二份。
+///
+/// 没有音色（`voice`）这一格：Android 上 `voices()` 直接回 `Err`，桌面那份清单在
+/// 手机上没有对应物 —— 第一版不选音色，配置里就不留空挂的字段。
+///
+/// 只 `PartialEq` 而不带 `Eq`：浮点字段与 [`Config`] 那条同一口径。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Speech {
+    /// 语速，常速 1.0。
+    pub rate: f32,
+    /// 音高，常速 1.0。
+    pub pitch: f32,
+    /// 念到哪一段就翻到哪一段。关掉是「念它的，我翻我的」—— 屏上的高亮仍跟着
+    /// 念的那段走，只是不动页。
+    pub auto_scroll: bool,
+}
+
+impl Speech {
+    /// 常速原点，也是归一里非有限值的退路。
+    pub const NORMAL: f32 = 1.0;
+    /// 语速的语义区间。设置页那条滑条直接引用，两端共用同一份。
+    pub const RATE_RANGE: RangeInclusive<f32> = 0.5..=2.0;
+    /// 音高的语义区间，与语速同一档。
+    pub const PITCH_RANGE: RangeInclusive<f32> = 0.5..=2.0;
+
+    /// 非有限值退回**常速**而不是夹到端点：手改成 `inf`/坏出来的 `NaN` 被读成
+    /// 「最快」等于把坏数据当成一个选择（与 [`Appearance::normalized`] 里
+    /// `turn_duration` 那条同一口径）；区间两端照常夹住。
+    pub fn normalized(mut self) -> Self {
+        self.rate = clamp_semantic(self.rate, &Self::RATE_RANGE);
+        self.pitch = clamp_semantic(self.pitch, &Self::PITCH_RANGE);
+        self
+    }
+}
+
+/// 手写而不是 derive（与各节同一条规矩）：`rate`/`pitch` 的默认是**常速 1.0**，
+/// 不是浮点的零值 —— derive 出来的那份会把听书念成引擎档的最慢速。
+impl Default for Speech {
+    fn default() -> Self {
+        Self {
+            rate: Self::NORMAL,
+            pitch: Self::NORMAL,
+            auto_scroll: true,
+        }
+    }
+}
+
+/// 语义值（0.5–2.0）的归一：非有限退常速，其余夹进区间。
+fn clamp_semantic(value: f32, range: &RangeInclusive<f32>) -> f32 {
+    if !value.is_finite() {
+        Speech::NORMAL
+    } else {
+        value.clamp(*range.start(), *range.end())
+    }
+}
+
 /// 排版输入。全部是纯数据、不含任何 UI 类型，因此同一份配置既能在桌面端用，
 /// 也能给移动端宿主用。
 ///
@@ -731,6 +797,7 @@ pub struct Config {
     pub appearance: Appearance,
     pub library: Library,
     pub language: Language,
+    pub speech: Speech,
     pub logging: Logging,
 }
 
@@ -744,6 +811,7 @@ impl Default for Config {
             appearance: Appearance::default(),
             library: Library::default(),
             language: Language::default(),
+            speech: Speech::default(),
             logging: Logging::default(),
         }
     }
@@ -758,6 +826,7 @@ impl Config {
     pub fn normalized(mut self) -> Self {
         self.reader = self.reader.clamped();
         self.appearance = self.appearance.normalized();
+        self.speech = self.speech.normalized();
         // 书库位置去掉首尾空白：填成 "  /x  " 会让 `is_confirmed` 说「确认过」，
         // 而后面按这个串去找目录会找不到。
         self.library.dir = self.library.dir.trim().to_string();
@@ -923,6 +992,9 @@ fn salvage(value: &serde_json::Value) -> Config {
     if let Some(language) = section(value, "language") {
         config.language = language;
     }
+    if let Some(speech) = section(value, "speech") {
+        config.speech = speech;
+    }
     if let Some(logging) = section(value, "logging") {
         config.logging = logging;
     }
@@ -936,7 +1008,14 @@ fn warn_missing_sections(value: &serde_json::Value) {
     let Some(object) = value.as_object() else {
         return;
     };
-    const SECTIONS: [&str; 5] = ["reader", "appearance", "library", "language", "logging"];
+    const SECTIONS: [&str; 6] = [
+        "reader",
+        "appearance",
+        "library",
+        "language",
+        "speech",
+        "logging",
+    ];
     let missing: Vec<&str> = SECTIONS
         .into_iter()
         .filter(|key| !object.contains_key(*key))
@@ -1494,5 +1573,30 @@ mod tests {
         let path = dir.path().join("deep/nested/config.json");
         Config::default().save_to(&path).unwrap();
         assert!(path.exists());
+    }
+
+    /// 听书那一节：越界值夹回语义区间、缺节用默认（老配置文件没有这一节），
+    /// 关掉的 auto_scroll 原样读回。
+    #[test]
+    fn the_speech_section_clamps_and_falls_back_to_defaults() {
+        let got = load(r#"{"speech":{"rate":9.0,"pitch":0.1,"auto_scroll":false}}"#);
+        assert_eq!(
+            got.speech.rate, 2.0,
+            "语速上限是语义区间的 2.0，不是引擎档的 10.0"
+        );
+        assert_eq!(got.speech.pitch, 0.5);
+        assert!(!got.speech.auto_scroll);
+
+        let missing = load(r#"{"reader":{"font_size":21.0}}"#);
+        assert_eq!(
+            missing.speech,
+            crate::Speech::default(),
+            "老文件没有这一节，整节退默认"
+        );
+
+        // 整节类型不对（手滑写成字符串）：整节退默认，其余各节照旧。
+        let broken = load(r#"{"speech":"快一点"}"#);
+        assert_eq!(broken.speech, crate::Speech::default());
+        assert!(broken.speech.auto_scroll, "退默认时自动翻页是开着的");
     }
 }

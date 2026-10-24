@@ -8,7 +8,7 @@ use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{ComputedStyle, cascade};
 use crate::content::format::css::{Origin, RuleSet};
 use crate::content::hit::{
-    Hit, hit_test, paragraph_range, rects_for_range, rects_for_range_in, snap_word,
+    Hit, hit_test, paragraph_after, paragraph_range, rects_for_range, rects_for_range_in, snap_word,
 };
 use crate::layout::{Layout, LayoutOptions, LineMetrics, Measure, NoImages, layout};
 
@@ -472,6 +472,37 @@ fn paragraph_range_covers_the_whole_block_and_nothing_else() {
         paragraph_range(&chapter.layout, &chapter.dom, &chapter.map, 125).expect("第二段应可解");
     assert_eq!(chapter.map.slice(second_start.clone()), "乙段只在第二段。");
     assert!(second_start.start >= 120, "不该吃进第一段的字");
+}
+
+/// 听书的逐段推进：`paragraph_after` 从上一段的末尾走到下一段，段间空白、段尾空白
+/// 与章尾都停得住。少跳一步，念出来的就是同一段念两遍。
+#[test]
+fn paragraph_after_walks_paragraph_by_paragraph() {
+    let chapter = typeset(
+        &format!(
+            "<p>{}</p><p>乙段只在第二段。</p><p>丙段收尾。</p>",
+            cjk(120)
+        ),
+        "",
+        200.0,
+    );
+
+    let first =
+        paragraph_range(&chapter.layout, &chapter.dom, &chapter.map, 0).expect("首段应可解");
+    assert_eq!(chapter.map.slice(first.clone()), cjk(120));
+
+    let second =
+        paragraph_after(&chapter.layout, &chapter.dom, &chapter.map, first).expect("第二段应可解");
+    assert_eq!(chapter.map.slice(second.clone()), "乙段只在第二段。");
+
+    let third =
+        paragraph_after(&chapter.layout, &chapter.dom, &chapter.map, second).expect("第三段应可解");
+    assert_eq!(chapter.map.slice(third.clone()), "丙段收尾。");
+
+    assert!(
+        paragraph_after(&chapter.layout, &chapter.dom, &chapter.map, third).is_none(),
+        "章尾之后再无段"
+    );
 }
 
 /// 批注回显与选区的那条快路：**结果与整章扫逐条相同**。

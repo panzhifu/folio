@@ -99,6 +99,7 @@ style_highlight = "Surlignage"
 style_line = "Soulignement"
 style_wavy = "Trait ondulé"
 
+tts = "Écouter"
 [toast]
 font_size = "Taille du texte %{size} px"
 theme = "Thème : %{name}"
@@ -125,6 +126,7 @@ toc = "Sommaire"
 
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
+speech = "Lecture à voix haute"
 [group]
 usage = "Utilisation"
 cleanup = "Nettoyage"
@@ -141,6 +143,8 @@ transfer = "Transfert Wi-Fi"
 rows = "Lignes"
 marking = "Marquages"
 
+speech_voice = "Voix"
+speech_reading = "Pendant la lecture"
 [field]
 app_dir = "Dossier de données de l'app"
 log_dir = "Dossier des journaux"
@@ -197,6 +201,12 @@ highlight_style = "Style de marquage"
 "highlight_style.desc" = "Quelle trace laisse un nouveau marquage dans le texte : un bandeau de couleur derrière les glyphes, une ligne droite dessous, ou un trait ondulé. Les marquages déjà dans le livre gardent le leur ; changer ceci ne recompose rien."
 
 # 翻页动画那四档的标签。值是写回配置的形态（`PageTurn::as_str()`），标签是显示文字。
+speech_rate = "Vitesse"
+"speech_rate.desc" = "Vitesse de lecture. 1.0 est la valeur normale."
+speech_pitch = "Hauteur"
+"speech_pitch.desc" = "La hauteur de la voix. 1.0 est la valeur normale."
+speech_auto_scroll = "Suivre la lecture"
+"speech_auto_scroll.desc" = "Aller au paragraphe en cours de lecture. Désactivé : la page reste en place."
 [page_turn]
 slide = "Glissement latéral"
 slide_up = "Glissement vertical"

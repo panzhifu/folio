@@ -24,6 +24,9 @@ DOM → CSS 子集 → 排版的流水线，踩在 GPUI 的文本原语（shapin
 - **21 种格式、30 个扩展名** —— 见下面那张表。
 - **三种阅读模式** —— 连续滚动、分页、双页对开（窗口不够宽时自动退回单页）；
   定版式的书走逐页模式，能放大、能分享、能保存。
+- **听书** —— 底栏一颗键，从你正在看的那一段念起：念完自动接下一段、翻到那一屏，
+  念哪段亮哪段，语速音高可调（Linux 与 Android；引擎不可用时入口不出现，
+  macOS 与 Windows 这一版还没有）。
 - **记得住的书架** —— 书架分组、每本书的进度、阅读统计，以及书内全文搜索。
 - **9 种界面语言** —— 简体中文 · 繁體中文 · English · 日本語 · 한국어 ·
   Français · Deutsch · Español · Русский.
@@ -72,8 +75,7 @@ DOM → CSS 子集 → 排版的流水线，踩在 GPUI 的文本原语（shapin
 
 1. **批注与笔记的界面** —— 把已有的后端接上屏。
 2. **PDF / AZW4 / DjVu 的文字层** —— 定版式文档里的选中、批注与搜索。
-3. **听书（TTS）** —— Linux 与 Android 的后端依赖已经就位，引擎本身还没写。
-4. **iOS 与 HarmonyOS 宿主**，等它们进发布矩阵。
+3. **iOS 与 HarmonyOS 宿主**，等它们进发布矩阵。
 
 ## 从源码构建
 
@@ -82,7 +84,10 @@ cargo run                      # 桌面窗口（Linux / macOS / Windows）
 cargo test --workspace --lib   # 日常这条，快而且是全集
 ```
 
-Linux 需要 fontconfig、Wayland、xkbcommon 的开发包与可用的 Vulkan 驱动。
+Linux 需要 fontconfig、Wayland、xkbcommon 的开发包与可用的 Vulkan 驱动；
+从源码构建还差两样听书那格的编译依赖：**libclang**（bindgen 要它）与
+**libspeechd 的开发头文件**（Debian/Ubuntu 是 `libspeechd-dev`，Arch 是
+`speech-dispatcher`）。
 Android 交叉编译、打包、日志配置与发版流程写在开发者手册里：
 **[doc/development.md](./development.md)**。
 

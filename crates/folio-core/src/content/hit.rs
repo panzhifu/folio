@@ -175,6 +175,29 @@ pub fn paragraph_range(
     Some(start..end.max(start))
 }
 
+/// `from` 之后的第一段：起点严格晚于 `from.start` 的第一个段落区间。
+///
+/// 听书逐段推进用它（`folio_app` 的阅读会话每念完一段问一次）。段与段之间的空白
+/// （pretty-print 的换行缩进也是文本节点）不进任何段区间，[`paragraph_range`] 对它
+/// 回 `None`；段尾若带着空白，对 `from.end` 一问也可能回 `from` 自己 —— 两种都要
+/// 跳过去，所以是向前走的循环而不是一问。
+pub fn paragraph_after(
+    layout: &Layout,
+    dom: &Dom,
+    map: &TextMap,
+    from: Range<usize>,
+) -> Option<Range<usize>> {
+    let mut probe = from.end;
+    while probe < map.chars() {
+        match paragraph_range(layout, dom, map, probe) {
+            Some(range) if range.start > from.start => return Some(range),
+            Some(range) => probe = range.end.max(probe + 1),
+            None => probe += 1,
+        }
+    }
+    None
+}
+
 /// `orig` 区间起点 + run 内字节偏移 → node.text 里的绝对字节位置。
 fn orig_at(orig_start: usize, bytes: usize) -> Range<usize> {
     let at = orig_start + bytes;
