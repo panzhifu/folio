@@ -24,6 +24,18 @@
       "sourceType": "github",
       "skillPath": "skills/productivity/grilling/SKILL.md",
       "computedHash": "ef1641a2047b71b60f1942cd35efb47d3afc9d584dff5a0b01f8c7db923aaa08"
+    },
+    "oil-ui": {
+      "source": "oil-oil/oil-ui",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "802caccd5d19358a126ba1606ad94320deeae48df69d57251e3f935855d63359"
+    },
+    "refactoring-ui": {
+      "source": "s0xDk/refactoring-ui-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "d412d972e4e2786c7cf74a3fcd817d637adc746fd096bef8a5fd00fecdacb6a1"
     }
   }
 }
