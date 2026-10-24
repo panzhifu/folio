@@ -37,6 +37,16 @@ public class GpuiActivity extends GpuiInputActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // 启动方向策略赶在**一切**之前：manifest 的 locked 让启动窗口按「启动那一刻系统
+        // 的当前方向」出生（竖进竖、横进横，第一帧没有翻转可走），这里再把方向按设备
+        // 分档落定 —— 最小边 ≥ 600dp 放宽成 FULL_USER 跟随读者的旋转设定，更小的设备
+        // 钉回竖屏。此刻原生线程还没起，真有一次转向（握着横屏启动的手机）也落在系统
+        // 最闲的时刻。全链条的理由与退路见 AndroidManifest.xml 里 screenOrientation 的
+        // 注释与 GpuiSystemUi.applyStartupOrientation。
+        // （在 super.onCreate 之前调是安全的：attach 已由 ActivityThread 完成，
+        // getResources 与 setRequestedOrientation 都已可用。）
+        GpuiSystemUi.applyStartupOrientation(this);
+
         // Install the splash screen BEFORE calling super.onCreate().
         // This is required by the AndroidX SplashScreen API.
         SplashScreen splash = SplashScreen.installSplashScreen(this);

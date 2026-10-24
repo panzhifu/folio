@@ -5,6 +5,7 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
@@ -71,6 +72,51 @@ public final class GpuiSystemUi {
     public static void moveTaskToBack(Activity activity, boolean nonRoot) {
         if (activity == null) return;
         activity.runOnUiThread(() -> activity.moveTaskToBack(nonRoot));
+    }
+
+    /**
+     * Pin the startup orientation per device class: tablets and foldables follow the
+     * user's rotation setting, phones are pinned back to portrait.
+     *
+     * <p>The manifest declares {@code screenOrientation="locked"}, so the starting window
+     * (splash + icon) is born in whatever orientation the system currently is — no entry
+     * rotation on any device. This method then resolves the tier: smallest screen width
+     * ≥ 600dp (the standard tablet divider) relaxes the lock to
+     * {@link ActivityInfo#SCREEN_ORIENTATION_FULL_USER} — the user's rotation setting rules
+     * from there on (locked: stay as the system currently is; unlocked: follow the sensor).
+     * Below that, the phone tier is pinned to {@code SCREEN_ORIENTATION_PORTRAIT}: it has
+     * one portrait layout, and a landscape phone (853dp wide) crosses the 840dp
+     * {@code Expanded} threshold and crushes the desktop layout onto it. A phone launched
+     * while held landscape gets one landscape splash frame, re-pinned the same instant.</p>
+     *
+     * <p>Since the manifest no longer declares the window rotatable from birth, the measured
+     * Meizu 20 / Android 16 side effect (the system silently flipping the user's
+     * {@code accelerometer_rotation} to {@code 1} while the app is foreground) should have
+     * no trigger left; the escape hatch, should some ROM reopen it, is the previous
+     * arrangement — portrait in the manifest, relaxed at runtime — which is in git
+     * history. See the {@code screenOrientation} comment in AndroidManifest.xml.</p>
+     *
+     * <p>Called once per process from {@code GpuiActivity.onCreate}, before
+     * {@code super.onCreate()} — the earliest moment in the process, while the native thread
+     * and the GPU init have not started yet. An activity recreation re-runs it.</p>
+     *
+     * <p>Called by the activity on the UI thread, but it hops through
+     * {@code runOnUiThread} like everything else here, so any thread may call it.</p>
+     */
+    public static void applyStartupOrientation(Activity activity) {
+        if (activity == null) return;
+        activity.runOnUiThread(() -> {
+            int smallest = activity.getResources().getConfiguration().smallestScreenWidthDp;
+            if (smallest >= 600) {
+                // locked 解析出的「启动那一刻的当前方向」与 FULL_USER 的落点一致
+                // （读者的旋转设定正是系统当前方向的来源），这次改请求不产生可见转向。
+                activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
+            } else {
+                // 手机这一档只有竖屏一套版式；locked 下握着横屏启动的那一瞬横屏
+                // splash 在这里当帧钉回。
+                activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+            }
+        });
     }
 
     /**

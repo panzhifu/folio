@@ -128,20 +128,28 @@
              OnBackInvokedDispatcher callback to fire on Android 13+. Without it
              the edge-swipe back gesture never reaches the app.
 
-             `screenOrientation="portrait"`：不是「不让界面转」这一条审美选择，是拔掉一个
-             系统副作用。原先的 `unspecified` 等于告诉系统「这个窗口两种方向都吃」，而
-             MEIZU 20 / Android 16 实测：folio 一到前台（冷启动、热恢复都算），系统就把
-             `system/accelerometer_rotation` 写成 1 —— 读者的「自动旋转」被应用替他打开了，
-             而 folio 自己拿不到 `WRITE_SECURE_SETTINGS`，那一笔不是它写的。锁成 portrait 后
-             窗口不再声明可转，那个开关就没人碰。手机这一档本来也只有竖屏一套版式：横屏
-             宽度 853dp 会跨过 SizeClass 的 Expanded 阈值 840dp，整套桌面版式压到手机上，
-             正文还要整章重排。 -->
+             `screenOrientation="locked"`：启动窗口（splash + 图标）的朝向取自这一条，
+             locked 解析成「启动那一刻系统的当前方向」—— 竖着进来就是竖、横着进来就是横，
+             第一帧没有任何翻转可走（此前 portrait + 运行时放开的方案，进应用那一瞬间
+             总有一次竖转横的翻转，2018 年的平板上它还撞着 GPU 初始化，肉眼可见地卡）。
+             locked 同时**不再**声明「两种方向都吃」，当年那个副作用的触发条件按理不再
+             成立：MEIZU 20 / Android 16 实测 `unspecified` 一下，系统就在 folio 到前台时
+             把 `system/accelerometer_rotation` 写成 1 —— 读者的自动旋转被应用替他打开，
+             而 folio 拿不到 WRITE_SECURE_SETTINGS，那一笔不是它写的。若实测某个 ROM 对
+             locked 也开闸，退路是回到 portrait + 运行时放开（git 历史里有整段）。
+
+             分档在运行时办（GpuiActivity.onCreate 第一行 →
+             GpuiSystemUi.applyStartupOrientation）：最小边 ≥ 600dp 放宽成 FULL_USER，
+             跟随读者的旋转设定 —— 平板横过来本来就该走进 SizeClass 的 Medium / Expanded
+             两档；更小的设备钉回 PORTRAIT —— 手机这一档只有竖屏一套版式：横屏宽度
+             853dp 会跨过 Expanded 阈值 840dp，整套桌面版式压到手机上，正文还要整章重排
+             （握着横屏启动的手机会有一瞬横屏 splash，onCreate 当帧钉回竖屏）。 -->
         <activity
             android:name="dev.gpui.mobile.GpuiActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density"
             android:exported="true"
             android:launchMode="singleTask"
-            android:screenOrientation="portrait"
+            android:screenOrientation="locked"
             android:theme="@style/GpuiSplashTheme"
             android:windowSoftInputMode="adjustNothing"
         >
