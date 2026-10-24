@@ -237,6 +237,21 @@ jobs:
           # 不会报错，只会在读者机器上变成「装上了但起不来」。
           # stderr 落到文件再摆出来：0.1.1 的第一发就是它红、原因被 2>/dev/null 吞了，
           # 对着一面白墙猜不出缺哪个库的依赖信息。
+          # dpkg-shlibdeps 是个 debian 包构建工具：先读到 debian/control 才肯干活，
+          # 否则 `cannot read debian/control` —— 0.1.1 的前三轮 run 都红在这一句，
+          # stderr 被 2>/dev/null 吞了两轮，第三轮诊断三件套把它捞了出来。
+          # 给一份最小 stub，Depends 照样从 NEEDED 现算，不手写。
+          mkdir -p debian
+          printf '%s\n' \
+            'Source: folio' \
+            'Section: utils' \
+            'Priority: optional' \
+            'Standards-Version: 4.6.2' \
+            '' \
+            'Package: folio' \
+            'Architecture: any' \
+            'Description: native GPU e-book reader' \
+            > debian/control
           if ! depends=$(dpkg-shlibdeps -O -tdeb "$deb/usr/bin/folio" 2>/tmp/dpkg-shlibdeps.err \
                         | sed 's/^shlibs:Depends=//'); then
             echo "::error::dpkg-shlibdeps 没跑通，宁可红也不发一份猜出来的 Depends"
