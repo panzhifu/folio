@@ -384,7 +384,9 @@ jobs:
           targets: aarch64-linux-android
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk2 --locked
+        # 钉 4.1.2：与本机实测过的那份一致（`cargo ndk -t/-P/-o` 的口径是它验的）。
+        # 上游发新版改了口径时，由人本地重跑一遍 Android 构建再一起改这里。
+        run: cargo install cargo-ndk --locked --version 4.1.2
 
       - name: Build the native library
         working-directory: crates/folio-app
