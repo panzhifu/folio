@@ -156,9 +156,37 @@ CARGO_TARGET_DIR=~/.cache/folio-mobile-android \
 Android（`arm64-v8a`）。包与更新日志发布在公开的 `panzhifu/folio-releases`，本仓库继续私有
 （形状见上面的 License 那一节）。
 
+### 发版之前要有的那三样
+
+2026-10-24 第一次照着 `release.yml` 走之前逐条量过，三条都缺过一次，每一条红的样子都写在后面，
+免得下次从红的那一步往回猜：
+
+1. **`secrets.FOLIO_RELEASE_PAT`**（源码仓库的 Settings → Secrets and variables → Actions）。
+   一把 fine-grained PAT，只授权 `panzhifu/folio-releases` 一个仓库、权限 `contents:write`。
+   默认那个 `GITHUB_TOKEN` 碰不到别的仓库，所以跨仓发布只能靠它。缺了它红的样子：workflow 里
+   `发布仓 README 与跨仓权限` 那一条 job 三十秒内红（就是为了让它在这儿红，不要在四条构建全跑完
+   之后才在 `publish` 里红）。
+2. **`THIRD-PARTY-NOTICES.txt` 签在仓库根**。生成它要带 `--features cli`：
+
+   ```bash
+   cargo install cargo-about --locked --features cli
+   cargo about generate --locked packaging/about.hbs > THIRD-PARTY-NOTICES.txt
+   ```
+
+   不带那个 flag 是**装不上任何东西**却退出码 0（0.9.2 把 `[[bin]]` 挂在 `required-features` 上，
+   `[features]` 里又没有 `default`），红的地方落在下一句 `no such command: about`。生成器撞新的
+   许可证名字时以非零退出 —— 那是刻意的，先读条款再决定加不加进 `about.toml` 的 `accepted`。
+3. **发布仓不能是一个空仓**。`gh release create` 在没有提交的仓库里建不出 release（没有 commit 可指）。
+   `release.yml` 的 `readme` 那条 job 因此在建 release 之前先把 `packaging/releases-README.md`
+   PUT 过去 —— 那份文件就是发布仓根 README 的**唯一真相**，改动走这里，在发布仓上手改的那一份
+   会被下一次发版覆盖。
+
 各端要知道的限制，发版时逐条抄进 release 正文，别只留一个绿色对勾：
 
 - **macOS 未签名、未公证**：没有开发者证书，读者首次打开要在「隐私与安全性」里允许一次。
+- **Android 的包没带第三方许可文本**，应用内也还没有读它的那一格（`about.rs` 那一屏没有许可证
+  那一组）。桌面三端都随包给了，位置见 `packaging/releases-README.md`。这一条要发进 release 的
+  已知限制里，别让手机上的读者以为是自己机器的问题。
 - **Windows 未经真机验证**：CI 那侧编得过、出得到包，但没有人在一台 Windows 机器上装过它。
 - **Android 只出 `arm64-v8a`**，要求 Android 8.0（API 26）以上的 64 位设备；CI 那条
   `aarch64-linux-android26-clang` 就是这一档的依据（`libnativewindow.so` 只在 API 26+ 的
