@@ -225,7 +225,14 @@ jobs:
           set -euo pipefail
           v="$FOLIO_VERSION"
           deb=deb-root
-          cp -a staging/folio-$v/. "$deb"/ 2>/dev/null || { mkdir -p "$deb"; cp -a staging/folio-$v/. "$deb"/; }
+          # 暂存布局是 tar 的形状（bin/folio），deb 要 FHS（usr/bin/folio）——0.1.1 的第一次
+          # 运行就红在 deb-root 里根本没有 usr/bin/folio。这里按 FHS 摆，不整棵 cp。
+          mkdir -p "$deb/usr/bin" "$deb/usr/share/applications" \
+                   "$deb/usr/share/icons/hicolor/192x192/apps"
+          cp staging/folio-$v/bin/folio "$deb/usr/bin/"
+          cp staging/folio-$v/share/applications/folio.desktop "$deb/usr/share/applications/"
+          cp staging/folio-$v/share/icons/hicolor/192x192/apps/folio.png \
+             "$deb/usr/share/icons/hicolor/192x192/apps/"
           # Depends 由 dpkg-shlibdeps 现算，不手写：手写那份与 NEEDED 列表之间的漂移
           # 不会报错，只会在读者机器上变成「装上了但起不来」。
           # stderr 落到文件再摆出来：0.1.1 的第一发就是它红、原因被 2>/dev/null 吞了，
@@ -363,7 +370,10 @@ jobs:
           cp THIRD-PARTY-NOTICES.txt stage/
           # 便携版：与安装器内容一致，只是不解包。有人就是不想装。
           7z a -tzip "out/folio-$v-windows-x64.zip" stage/folio.exe stage/THIRD-PARTY-NOTICES.txt
-          "/c/Program Files (x86)/NSIS/makensis" \
+          # Git Bash 的 MSYS 参数改写会把 `/DVERSION=0.1.1` 当成 POSIX 路径，加上
+          # `C:/Program Files/Git` 前缀——NSIS 收到的四个 /D 定义全部失踪，报
+          # Can't open script。这条调用单独关掉改写。
+          MSYS2_ARG_CONV_EXCL="*" "/c/Program Files (x86)/NSIS/makensis" \
             /DVERSION="$v" /DSRCDIR=stage /DICONDIR=packaging/icons /DOUTDIR=out \
             packaging/windows/folio.nsi
 
@@ -450,7 +460,10 @@ jobs:
             echo "::error::找不到 $apk —— assemble 那步挪出来的包名与这里对不上？"
             exit 1
           fi
-          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+          # r37 起 certs 行首从「Signer #1 certificate …」改成「V2 Signer: certificate …」，
+          # 而 runner 上 tail -1 挑中的就是最新版 —— 提取正则两代通吃；apksigner 按版本序
+          # 挑（字符串序会把 9.0.0 排到 37.0.0 后面）。
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           # certs 连 stderr 一起拿：apksigner 哪个版本开始把 certs 写去 stderr，
           # 这一行照样提得到 —— 0.1.1 的第一次运行就是 stdout 里提不到、
           # 原始输出又一行都看不见，只能对着一面白墙。
@@ -459,10 +472,12 @@ jobs:
             printf '%s\n' "$certs" | head -20
             exit 1
           fi
-          got=$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+          got=$(printf '%s\n' "$certs" | sed -n 's/^.*certificate SHA-256 digest: //p' \
                 | head -1 | tr 'A-F' 'a-f')
           echo "包里的签名指纹：$got"
           if [ "$got" != "$APK_SIGNER_SHA256" ]; then
+            echo '--- apksigner 完整输出 ---'
+            printf '%s\n' "$certs" | head -30
             {
               echo "### 签名指纹对不上（apksigner 完整输出，诊断用）"
               echo '```'
