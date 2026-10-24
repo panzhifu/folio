@@ -228,9 +228,16 @@ jobs:
           cp -a staging/folio-$v/. "$deb"/ 2>/dev/null || { mkdir -p "$deb"; cp -a staging/folio-$v/. "$deb"/; }
           # Depends 由 dpkg-shlibdeps 现算，不手写：手写那份与 NEEDED 列表之间的漂移
           # 不会报错，只会在读者机器上变成「装上了但起不来」。
-          if ! depends=$(dpkg-shlibdeps -O -tdeb "$deb/usr/bin/folio" 2>/dev/null \
+          # stderr 落到文件再摆出来：0.1.1 的第一发就是它红、原因被 2>/dev/null 吞了，
+          # 对着一面白墙猜不出缺哪个库的依赖信息。
+          if ! depends=$(dpkg-shlibdeps -O -tdeb "$deb/usr/bin/folio" 2>/tmp/dpkg-shlibdeps.err \
                         | sed 's/^shlibs:Depends=//'); then
             echo "::error::dpkg-shlibdeps 没跑通，宁可红也不发一份猜出来的 Depends"
+            echo "### dpkg-shlibdeps 的原话" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            head -20 /tmp/dpkg-shlibdeps.err >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            objdump -p "$deb/usr/bin/folio" | grep NEEDED
             exit 1
           fi
           mkdir -p "$deb/DEBIAN"
@@ -439,10 +446,29 @@ jobs:
           set -euo pipefail
           v="$FOLIO_VERSION"
           apk="crates/folio-app/android/folio-$v-arm64-v8a.apk"
+          if [ ! -f "$apk" ]; then
+            echo "::error::找不到 $apk —— assemble 那步挪出来的包名与这里对不上？"
+            exit 1
+          fi
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
-          got=$("$APKSIGNER" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr 'A-F' 'a-f')
+          # certs 连 stderr 一起拿：apksigner 哪个版本开始把 certs 写去 stderr，
+          # 这一行照样提得到 —— 0.1.1 的第一次运行就是 stdout 里提不到、
+          # 原始输出又一行都看不见，只能对着一面白墙。
+          if ! certs=$("$APKSIGNER" verify --print-certs "$apk" 2>&1); then
+            echo "::error::apksigner verify 没通过，原话："
+            printf '%s\n' "$certs" | head -20
+            exit 1
+          fi
+          got=$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+                | head -1 | tr 'A-F' 'a-f')
           echo "包里的签名指纹：$got"
           if [ "$got" != "$APK_SIGNER_SHA256" ]; then
+            {
+              echo "### 签名指纹对不上（apksigner 完整输出，诊断用）"
+              echo '```'
+              printf '%s\n' "$certs" | head -30
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::签名与钉住的那张证书不一致（用了别的 keystore？）。不发。"
             exit 1
           fi
