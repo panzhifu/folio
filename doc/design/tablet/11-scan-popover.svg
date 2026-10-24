@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800.0" height="1280.0" viewBox="0 0 800.0 1280.0">
+<title>Folio 平板 · 浅色 · Default Light</title>
+<desc>扫描·平板：居中浮层 460×460 定高，替掉手机那一档的底部弹层</desc>
+<rect width="800.0" height="1280.0" fill="#ffffff"/>
+<rect x="0" y="0" width="800.0" height="28" fill="#ffffff"/>
+<text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
+<circle cx="400.0" cy="14" r="5.5" fill="#000" stroke="#d4d4d4" stroke-width="1"/>
+<g transform="translate(724.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/></g>
+<g transform="translate(744.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h.01"/><path d="M7 20v-4"/><path d="M12 20v-8"/><path d="M17 20V8"/></g>
+<rect x="760.0" y="8" width="18" height="10" rx="2.5" fill="none" stroke="#0a0a0a" stroke-width="1.6"/>
+<rect x="762.0" y="10" width="12" height="6" rx="1" fill="#0a0a0a"/>
+<rect x="779.5" y="11" width="2" height="4" rx="1" fill="#0a0a0a"/>
+<rect x="0" y="28" width="48.0" height="1252.0" fill="#fafafa"/>
+<rect x="47.0" y="28" width="1" height="1252.0" fill="#e5e5e5"/>
+<rect x="8.0" y="48.0" width="32.0" height="30.0" rx="6" fill="#e5e5e5"/>
+<g transform="translate(17.00,56.00) scale(0.58333)" fill="none" stroke="#171717" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/></g>
+<g transform="translate(17.00,94.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></g>
+<g transform="translate(17.00,132.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z"/></g>
+<g transform="translate(17.00,170.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/></g>
+<rect x="500.0" y="36.0" width="256.0" height="24.0" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<g transform="translate(508.00,41.00) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></g>
+<text x="526.0" y="53.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">搜索书名或作者</text>
+<g transform="translate(769.00,41.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1" fill="#0a0a0a" stroke="none"/><circle cx="12" cy="5" r="1" fill="#0a0a0a" stroke="none"/><circle cx="12" cy="19" r="1" fill="#0a0a0a" stroke="none"/></g>
+<g transform="translate(60.00,72.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><rect x="0.5" y="0.5" width="175.0" height="263.0" rx="5.5" fill="#d4d4d4" fill-opacity="0.35"/><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">百年孤独</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">加西亚·马尔克斯</text></g>
+<g transform="translate(244.00,72.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><rect x="0.5" y="0.5" width="175.0" height="263.0" rx="5.5" fill="#d4d4d4" fill-opacity="0.35"/><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">瓦尔登湖</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">亨利·戴维·梭罗</text></g>
+<g transform="translate(428.00,72.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><rect x="0.5" y="0.5" width="175.0" height="263.0" rx="5.5" fill="#d4d4d4" fill-opacity="0.35"/><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">卡拉马佐夫兄弟</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">陀思妥耶夫斯基</text></g>
+<g transform="translate(612.00,72.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><rect x="0.5" y="0.5" width="175.0" height="263.0" rx="5.5" fill="#d4d4d4" fill-opacity="0.35"/><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">雪国</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">川端康成</text></g>
+<g transform="translate(60.00,387.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><text x="88.0" y="137.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#737373" text-anchor="middle">平沙落雁</text><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">平沙落雁</text></g>
+<g transform="translate(244.00,387.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><rect x="0.5" y="0.5" width="175.0" height="263.0" rx="5.5" fill="#d4d4d4" fill-opacity="0.35"/><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">人类简史</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">尤瓦尔·赫拉利</text></g>
+<g transform="translate(428.00,387.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><text x="88.0" y="137.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#737373" text-anchor="middle">庄子的蝴蝶</text><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">庄子的蝴蝶</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">佚名</text></g>
+<g transform="translate(612.00,387.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><rect x="0.5" y="0.5" width="175.0" height="263.0" rx="5.5" fill="#d4d4d4" fill-opacity="0.35"/><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">长夜难明</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">紫金陈</text></g>
+<g transform="translate(60.00,702.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><rect x="0.5" y="0.5" width="175.0" height="263.0" rx="5.5" fill="#d4d4d4" fill-opacity="0.35"/><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">城南旧事</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">林海音</text></g>
+<g transform="translate(244.00,702.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><rect x="0.5" y="0.5" width="175.0" height="263.0" rx="5.5" fill="#d4d4d4" fill-opacity="0.35"/><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">沙乡年鉴</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">奥尔多·利奥波德</text></g>
+<g transform="translate(428.00,702.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><rect x="0.5" y="0.5" width="175.0" height="263.0" rx="5.5" fill="#d4d4d4" fill-opacity="0.35"/><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">夜航西飞</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">柏瑞尔·马卡姆</text></g>
+<g transform="translate(612.00,702.00)"><rect x="0.00" y="0.00" width="176.00" height="264.00" rx="6" fill="#f5f5f5"/><text x="88.0" y="137.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#737373" text-anchor="middle">两京十五日</text><text x="0" y="283.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">两京十五日</text><text x="0" y="304.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">马伯庸</text></g>
+<rect x="0" y="0.0" width="800.0" height="1280.0" fill="#000000" fill-opacity="0.051"/>
+<rect x="170.0" y="398.0" width="460.0" height="484.0" rx="6" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<text x="186.0" y="442.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="600" fill="#0a0a0a" text-anchor="start">在设备里找书</text>
+<text x="186.0" y="464.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">找到 12 本，勾选后导入</text>
+<rect x="170.0" y="478.0" width="460.0" height="0.5" fill="#e5e5e5"/>
+<text x="214.0" y="502.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">沙乡年鉴.epub</text>
+<text x="614.0" y="502.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="end">1.2 MB</text>
+<rect x="186.0" y="488.0" width="16" height="16" rx="3" fill="#171717"/>
+<text x="214.0" y="538.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">夜航西飞.epub</text>
+<text x="614.0" y="538.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="end">860 KB</text>
+<rect x="186.0" y="524.0" width="16" height="16" rx="3" fill="#171717"/>
+<text x="214.0" y="574.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">缓慢的河流.pdf</text>
+<text x="614.0" y="574.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="end">4.4 MB</text>
+<rect x="186.0" y="560.0" width="16" height="16" rx="3" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<text x="214.0" y="610.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">给青年诗人的信.txt</text>
+<text x="614.0" y="610.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="end">22 KB</text>
+<rect x="186.0" y="596.0" width="16" height="16" rx="3" fill="#171717"/>
+<text x="214.0" y="646.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">湖岸船坞.md</text>
+<text x="614.0" y="646.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="end">9 KB</text>
+<rect x="186.0" y="632.0" width="16" height="16" rx="3" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<text x="214.0" y="682.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">月光下的裁缝.epub</text>
+<text x="614.0" y="682.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="end">2.7 MB</text>
+<rect x="186.0" y="668.0" width="16" height="16" rx="3" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<text x="214.0" y="718.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">两京十五日.epub</text>
+<text x="614.0" y="718.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="end">5.1 MB</text>
+<rect x="186.0" y="704.0" width="16" height="16" rx="3" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<text x="214.0" y="754.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">瓦尔登湖.epub</text>
+<text x="614.0" y="754.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="end">1.8 MB</text>
+<rect x="186.0" y="740.0" width="16" height="16" rx="3" fill="#171717"/>
+<rect x="170.0" y="767.0" width="460.0" height="0.5" fill="#e5e5e5"/>
+<rect x="186.00" y="779.0" width="52.00" height="32" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<text x="196.0" y="800.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">全选</text>
+<rect x="246.00" y="779.0" width="52.00" height="32" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<text x="256.0" y="800.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">清除</text>
+<rect x="306.00" y="779.0" width="126.88" height="32" rx="6" fill="#171717"/>
+<text x="316.0" y="800.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#fafafa" text-anchor="start">导入所选 4 本</text>
+<!-- 平板上这三块是居中浮层（shelf/view/mod.rs:1374-1398 走 popover 那一支），卡 460×460 定高、整张往上抬半张（overlay/mod.rs:103-125） -->
+</svg>

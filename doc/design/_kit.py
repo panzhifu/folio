@@ -57,6 +57,10 @@ LIGHT = {
     # muted.background（neutral-100）—— 书卡占位格、当前项整行底色都取它。
     # 注意与上面那格 `muted` 不是一回事：那一个是 muted.foreground，是**文字**色。
     "muted_bg": "#f5f5f5", "popover": "#ffffff",
+    # 侧栏那一支的四个角色（default-theme.json 的 sidebar.*）与 group box 的 Fill 档底色。
+    "sidebar_bg": "#fafafa", "sidebar_border": "#e5e5e5",
+    "sidebar_accent": "#e5e5e5", "sidebar_accent_fg": "#171717",
+    "group_box_bg": "#f5f5f5",
     # theme().overlay = #0000000d ⇒ alpha 13/255。满档弹层时 scrim_alpha 是 1.0，
     # 所以浅侧那层遮罩真的只有 5% 黑 —— 这是量出来的，不是画漏了。
     "scrim_a": "0.051",
@@ -69,6 +73,9 @@ DARK = {
     "switch_off": "#262626", "knob_off": "#a3a3a3", "knob_on": "#171717",
     "btn_bg": "#262626", "punch_ring": "#262626",
     "muted_bg": "#262626", "popover": "#0a0a0a",
+    "sidebar_bg": "#0a0a0a", "sidebar_border": "#262626",
+    "sidebar_accent": "#262626", "sidebar_accent_fg": "#f5f5f5",
+    "group_box_bg": "#0a0a0a",
     "scrim_a": "0.2",  # theme().overlay = #00000033 ⇒ alpha 51/255
     "charts": ["#93c5fd", "#3b82f6", "#2563eb", "#1d4ed8", "#1e40af"],
     "label": "深色 · Default Dark",
@@ -223,6 +230,79 @@ def bottom_bar(T, active="我的"):
     return e
 
 
+def set_canvas(w, h, px_w, px_h):
+    """换一块画布。手机稿不动用它，平板两档各调一次。
+
+    为什么是**改模块全局**而不是给每个函数加一个 `canvas` 参数：这些构件里几乎每一条线
+    都要问「屏幕多宽」，加参数会把 `_kit` 变成一屏全是 `w=` 的调用现场，而分叉就发生在
+    那些被人懒得传的地方。改了全局，`push_row` 那一类在**调用时**才解析 `W` / `RIGHT`，
+    所以一把尺跟着画布走。
+
+    代价要说清：手机那些脚本是 `from _kit import *`，W / H / RIGHT 在导入那一刻就被**复制**
+    进了它们自己的命名空间 —— 它们读不到后来的改动。这正是想要的：平板脚本调了
+    `set_canvas` 也不会把手机稿带跑。因此**平板脚本一律 `import _kit as k`**，
+    每次都经 `k.` 现问，不许 `import *`。
+    """
+    global W, H, RIGHT, PX_W, PX_H
+    W, H = float(w), float(h)
+    PX_W, PX_H = px_w, px_h
+    RIGHT = W - PAD - PAD
+
+
+# ── 侧栏导航（平板与桌面那一支）────────────────────────────────────────────────
+#
+# 手机是底栏，平板与桌面是侧栏，两档宽度不同：Medium 走 rail（常驻折叠），Expanded 走
+# sidebar。出处 `shell/navigation/mod.rs:22-24`（两个死数，folio 覆盖了框架的 255/48 兜底，
+# 可调范围在 folio 侧不存在）与 `:132-136`（Medium→collapsed=true）。
+
+SIDEBAR_W = 260.0
+RAIL_W = 48.0
+NAV_ICON = 14.0        # 图标没给 size ⇒ 继承 text_sm 的 14（icon.rs:177-186）
+NAV_ITEM_H = 44.0      # p_2(8) + h_7(28) + p_2(8)（sidebar/menu.rs:305-307,329）
+NAV_ITEM_H_RAIL = 30.0  # rail 那一档不走 h_7 那支：p_2 + 14 + p_2
+NAV_GAP = 8.0          # 同级项之间 gap_2（menu.rs:75）
+NAV_INSET = 12.0       # 展开档内容层 px_3；rail 是 p_2 = 8
+
+NAV_TABS = [("library", "书架"), ("chart-column", "统计"),
+            ("notebook-pen", "笔记"), ("circle-user", "我的")]
+
+
+def side_nav(T, current, collapsed, height, top=0.0):
+    """应用自己的侧栏导航一整条。
+
+    `top` 给状态栏那一格：外壳的内容列是 `.pt(safe.top)`（`shell/mod.rs:1193-1212`），
+    所以侧栏也从安全区下面起画，不钻到时钟后面去。
+
+    **选中那一格只换底色与前景色再加 `font_medium`** —— 没有左标记条，文字也不另变色
+    （`sidebar/menu.rs:316-320`）。这条与手机底栏同一处理：换页的提示只有一处。
+    品牌头「Folio」只在展开档有；rail 那一档顶部留空，图标项自己带 tooltip（`:230-232`）。
+    """
+    w = RAIL_W if collapsed else SIDEBAR_W
+    e = [f'<rect x="0" y="{top}" width="{w}" height="{height}" fill="{T["sidebar_bg"]}"/>',
+         f'<rect x="{w - 1}" y="{top}" width="1" height="{height}" '
+         f'fill="{T["sidebar_border"]}"/>']
+    inset = 8.0 if collapsed else NAV_INSET
+    item_h = NAV_ITEM_H_RAIL if collapsed else NAV_ITEM_H
+    y = top + 12.0 + inset                     # 首组 pt_3 + 外层内缩
+    if not collapsed:
+        # 品牌头：包层 pt_3 px_3，内容 px_2 py_1 + 半粗 14。它占掉的那一段就是 y 的起点。
+        e.append(text(inset + 8, top + 12 + 4 + 15, "Folio", 14, T["fg"], 600))
+        y = top + 12 + 28 + 12 + 12
+    for ic, label in NAV_TABS:
+        on = label == current
+        if on:
+            e.append(f'<rect x="{inset}" y="{y:.1f}" width="{w - 2 * inset:.1f}" '
+                     f'height="{item_h}" rx="{RADIUS}" fill="{T["sidebar_accent"]}"/>')
+        ink = T["sidebar_accent_fg"] if on else T["fg"]
+        e.append(icon(ic, (w - NAV_ICON) / 2 if collapsed else inset + 8,
+                      y + (item_h - NAV_ICON) / 2, NAV_ICON, ink))
+        if not collapsed:
+            e.append(text(inset + 8 + NAV_ICON + 8, y + item_h / 2 + 5, label, 14, ink,
+                          500 if on else 400))
+        y += item_h + NAV_GAP
+    return e
+
+
 # ── 屏级构件：遮罩、弹层、按钮、输入框、封面格 ─────────────────────────────────
 #
 # 这一批的数全部来自实现，出处写在各自的注释里；只有设置那一档用得着的行构造器
@@ -251,9 +331,15 @@ def wrap_cjk(s, size, max_w, max_lines=99):
     return lines[:max_lines]
 
 
-def scrim(T, y0=0.0, y1=H):
+def scrim(T, y0=0.0, y1=None):
     """弹层背后那一层：theme().overlay 的 alpha × scrim_alpha（满档时是 1.0）。
-    浅侧只有 5% 黑 —— 这是量出来的，不是画漏了。"""
+    浅侧只有 5% 黑 —— 这是量出来的，不是画漏了。
+
+    `y1` 的默认必须在**函数体里**问 `H`，不能写成 `y1=H`：默认值在定义那一刻就冻住了，
+    换过画布的屏会得到一条按手机高度裁的遮罩。
+    """
+    if y1 is None:
+        y1 = H
     return (f'<rect x="0" y="{y0}" width="{W}" height="{y1 - y0}" '
             f'fill="#000000" fill-opacity="{T["scrim_a"]}"/>')
 
@@ -329,38 +415,42 @@ def input_box(T, x, y, w, value="", placeholder=None, h=BUTTON_H):
     return e
 
 
-def search_box(T, x, y, w, value="", placeholder=None):
+# Input 的两档：Medium 是手机那条满幅框，Small 是平板与桌面工具栏里那颗定宽框。
+# 数来自 sizing.rs:147-155（input_px）、:225-233（input_text_size）、:261-268（input_h）
+# 与 input.rs:512-516（gap_x）。字号两档同为 text_sm 14，变的只是高、内缩与缝。
+INPUT_SIZES = {"medium": (32.0, 10.0, 6.0), "small": (24.0, 8.0, 4.0)}
+
+
+def search_box(T, x, y, w, value="", placeholder=None, size="medium"):
     """带放大镜前缀的搜索框，**框里有词时右端多一枚清除钮**。
 
     三处的数都来自组件本身，不是挑了个顺眼的：
 
-    - 前缀 `Icon::Search.small()` = 12 档里的 `size_3p5` = **14**，落在容器左内缩
-      `input_px()` = **10**（Medium 那一档，`sizing.rs:147-155`）处；
-    - 前缀与文字之间是 `gap_x` = **6**（Medium，`input.rs:512-516`），所以文字从
-      `x + 10 + 14 + 6 = x + 30` 起排；
+    - 前缀 `Icon::Search.small()` = `size_3p5` = **14**，落在容器左内缩 `input_px()` 处；
+    - 前缀与文字之间是 `gap_x`（Medium 6 / Small 4），所以文字从 `x + px + 14 + gap` 起排；
     - 清除钮是 `clear_button()` = `Button.xsmall()` 包一枚 `IconName::Close`
       （`input/clear_button.rs:9-15`）。XSmall 那一档钮高 `h_5` = **20**、内缩 `px_1` = 4，
       图标 `size_3` = **12**（`icon.rs:183`）⇒ 钮盒 4+12+4 = 20 宽；整条 suffix 挂在
-      `pr(input_px())` 上，所以**钮的右缘落在 `x + w − 10`**。
+      `pr(input_px())` 上，所以**钮的右缘落在 `x + w − px`**。
 
     这颗钮只在 `state.text(cx).len() > 0` 时才在（`input.rs:531-535`）—— 空框不摆，
     所以它同时也是「这一屏正在搜索」的标记。点它走 `state.clean()` 再把焦点放回框里，
     词清空后书架跟着回到满架那一片。
     """
-    e = [f'<rect x="{x}" y="{y}" width="{w}" height="{BUTTON_H}" rx="{RADIUS}" fill="none" '
+    h, px, gap = INPUT_SIZES[size]
+    e = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{RADIUS}" fill="none" '
          f'stroke="{T["border"]}" stroke-width="1"/>',
-         icon("search", x + 10, y + 9, 14, T["muted"])]
+         icon("search", x + px, y + (h - 14) / 2, 14, T["muted"])]
     body = value or placeholder or ""
-    right = x + w - 10
+    right = x + w - px
     if value:
-        # 清除钮：20 宽的钮盒贴右内缩，12 的 x 居中在盒里。
         bx = right - 20
-        e.append(icon("x", bx + 4, y + BUTTON_H / 2 - 6, 12, T["muted"]))
-        right = bx - 6          # 文字在钮左侧 6 那一条缝前截住
+        e.append(icon("x", bx + 4, y + (h - 12) / 2, 12, T["muted"]))
+        right = bx - gap
     if body:
         ink = T["fg"] if value else T["muted"]
-        e.append(text(x + 30, y + BUTTON_H / 2 + 5, truncate(body, 14, right - (x + 30)),
-                      14, ink))
+        tx = x + px + 14 + gap
+        e.append(text(tx, y + h / 2 + 5, truncate(body, 14, right - tx), 14, ink))
     return e
 
 
@@ -521,6 +611,20 @@ def content_button_leading(label):
              text(PAD + PAD + 10, 26.5, label, 14, "__FG__")], 44)
 
 
+def switch_medium(T, x, y, on):
+    """桌面/平板那一档的 `Switch`：**36×20**，旋钮 16、内缩 2。
+
+    与手机上那颗 44×24 的 `Switch::large()` 不是同一档 —— 两栏设置里用的是默认档
+    （`gpui-component` 的 `switch.rs:195-205` 与 `setting/fields/bool.rs:44-51`）。
+    `x, y` 是左上角。
+    """
+    track = T["primary"] if on else T["switch_off"]
+    knob = T["knob_on"] if on else T["knob_off"]
+    kx = x + 36 - 2 - 8 if on else x + 2 + 8
+    return (f'<rect x="{x}" y="{y}" width="36" height="20" rx="10" fill="{track}"/>'
+            f'<circle cx="{kx}" cy="{y + 10}" r="8" fill="{knob}"/>')
+
+
 # ── 卡片装配 ──────────────────────────────────────────────────────────────────
 
 TOKENS = ("__FG__", "fg", "__MUTED__", "muted", "__BORDER__", "border", "__PRIMARY__", "primary",
@@ -571,13 +675,23 @@ def svg(name, body, label, note, T, area="设置"):
     return head + "\n".join(body) + "\n</svg>\n"
 
 
-def render_pngs(out):
+def render_png(out, name, px_w, px_h):
+    """重出一张 PNG。尺寸由调用方给 —— 一块画布一个朝向时不能共用一个数。"""
     tool = shutil.which("rsvg-convert")
     if not tool:
         print("rsvg-convert 不在 PATH，PNG 跳过（装 librsvg 后重跑可补）")
-        return
+        return False
+    svg_path = Path(out) / name
+    subprocess.run([tool, "-w", str(px_w), "-h", str(px_h), str(svg_path),
+                    "-o", str(svg_path.with_suffix(".png"))], check=True)
+    return True
+
+
+def render_pngs(out):
+    """整目录重出，按 `_kit` 当前的画布尺寸。"""
+    made = 0
     for svg_path in sorted(Path(out).glob("*.svg")):
-        png = svg_path.with_suffix(".png")
-        subprocess.run([tool, "-w", str(PX_W), "-h", str(PX_H), str(svg_path), "-o", str(png)],
-                       check=True)
-        print("png :", png.name)
+        if render_png(out, svg_path.name, PX_W, PX_H):
+            made += 1
+            print("png :", svg_path.name)
+    return made

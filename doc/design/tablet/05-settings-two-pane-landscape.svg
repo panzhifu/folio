@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280.0" height="800.0" viewBox="0 0 1280.0 800.0">
+<title>Folio 平板 · 浅色 · Default Light</title>
+<desc>设置·两栏横屏：选中「版面」这一页 —— 它只有一组，侧栏因此不列子项</desc>
+<rect width="1280.0" height="800.0" fill="#ffffff"/>
+<rect x="0" y="0" width="1280.0" height="28" fill="#ffffff"/>
+<text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
+<circle cx="640.0" cy="14" r="5.5" fill="#000" stroke="#d4d4d4" stroke-width="1"/>
+<g transform="translate(1204.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/></g>
+<g transform="translate(1224.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h.01"/><path d="M7 20v-4"/><path d="M12 20v-8"/><path d="M17 20V8"/></g>
+<rect x="1240.0" y="8" width="18" height="10" rx="2.5" fill="none" stroke="#0a0a0a" stroke-width="1.6"/>
+<rect x="1242.0" y="10" width="12" height="6" rx="1" fill="#0a0a0a"/>
+<rect x="1259.5" y="11" width="2" height="4" rx="1" fill="#0a0a0a"/>
+<rect x="0" y="28" width="260.0" height="772.0" fill="#fafafa"/>
+<rect x="259.0" y="28" width="1" height="772.0" fill="#e5e5e5"/>
+<text x="20.0" y="59" font-family="Noto Sans CJK SC" font-size="14" font-weight="600" fill="#0a0a0a" text-anchor="start">Folio</text>
+<g transform="translate(20.00,107.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/></g>
+<text x="42.0" y="119.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">书架</text>
+<g transform="translate(20.00,159.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></g>
+<text x="42.0" y="171.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">统计</text>
+<g transform="translate(20.00,211.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z"/></g>
+<text x="42.0" y="223.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">笔记</text>
+<rect x="12.0" y="248.0" width="236.0" height="44.0" rx="6" fill="#e5e5e5"/>
+<g transform="translate(20.00,263.00) scale(0.58333)" fill="none" stroke="#171717" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/></g>
+<text x="42.0" y="275.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="500" fill="#171717" text-anchor="start">我的</text>
+<rect x="260.0" y="28" width="170.0" height="772.0" fill="#fafafa"/>
+<rect x="429.0" y="28" width="1" height="772.0" fill="#e5e5e5"/>
+<rect x="272.0" y="40.0" width="146.0" height="32.0" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<g transform="translate(282.00,49.00) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></g>
+<text x="302.0" y="61.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">搜索设置项</text>
+<g transform="translate(280.00,99.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z"/><circle cx="13.5" cy="6.5" r="1" fill="#0a0a0a" stroke="none"/><circle cx="17.5" cy="10.5" r="1" fill="#0a0a0a" stroke="none"/><circle cx="6.5" cy="12.5" r="1" fill="#0a0a0a" stroke="none"/><circle cx="8.5" cy="7.5" r="1" fill="#0a0a0a" stroke="none"/></g>
+<text x="302.0" y="111.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">外观</text>
+<g transform="translate(398.00,100.00) scale(0.50000)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<g transform="translate(280.00,151.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"/><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/></g>
+<text x="302.0" y="163.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">文字</text>
+<g transform="translate(398.00,152.00) scale(0.50000)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<rect x="272.0" y="188.0" width="146.0" height="44.0" rx="6" fill="#e5e5e5"/>
+<g transform="translate(280.00,203.00) scale(0.58333)" fill="none" stroke="#171717" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/><path d="M15 3v18"/></g>
+<text x="302.0" y="215.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="500" fill="#171717" text-anchor="start">版面</text>
+<g transform="translate(280.00,255.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 16 2.536-7.328a1.02 1.02 1 0 1 1.928 0L22 16"/><path d="M15.697 14h5.606"/><path d="m2 16 4.039-9.69a.5.5 0 0 1 .923 0L11 16"/><path d="M3.304 13h6.392"/></g>
+<text x="302.0" y="267.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">字体</text>
+<g transform="translate(280.00,307.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></g>
+<text x="302.0" y="319.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">书库</text>
+<g transform="translate(398.00,308.00) scale(0.50000)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<g transform="translate(280.00,359.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5h13"/><path d="M13 12h8"/><path d="M13 19h8"/><path d="M3 10a2 2 0 0 0 2 2h3"/><path d="M3 5v12a2 2 0 0 0 2 2h3"/></g>
+<text x="302.0" y="371.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">目录</text>
+<g transform="translate(280.00,411.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 16h.01"/><path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M21.946 12.013H2.054"/><path d="M6 16h.01"/></g>
+<text x="302.0" y="423.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">存储</text>
+<g transform="translate(398.00,412.00) scale(0.50000)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<g transform="translate(280.00,463.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16v-4"/><path d="M12 8h.01"/><circle cx="12" cy="12" r="10"/></g>
+<text x="302.0" y="475.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">关于</text>
+<g transform="translate(398.00,464.00) scale(0.50000)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<rect x="430.0" y="28" width="9.0" height="772.0" fill="#ffffff"/>
+<text x="455.0" y="65" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">版面</text>
+<rect x="439.0" y="84.0" width="841.0" height="0.5" fill="#e5e5e5"/>
+<rect x="455.0" y="101.0" width="809.0" height="226" rx="6" fill="#f5f5f5"/>
+<text x="471.0" y="130.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">版心</text>
+<text x="471.0" y="162.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">最大行长</text>
+<text x="471.0" y="180.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">0 表示随窗口铺满</text>
+<rect x="1120.0" y="153.0" width="128.0" height="32" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<text x="1130.0" y="174.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">0</text>
+<text x="471.0" y="222.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">左右页边距</text>
+<rect x="1120.0" y="213.0" width="128.0" height="32" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/>
+<text x="1130.0" y="234.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">24</text>
+<text x="471.0" y="282.0" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">两端对齐</text>
+<rect x="1212.0" y="279.0" width="36" height="20" rx="10" fill="#171717"/><circle cx="1238.0" cy="289.0" r="8" fill="#fafafa"/>
+<!-- 正文宽 841 > STACKED_LAYOUT_MAX_WIDTH 480 ⇒ 走一行一项的横排；标题列最多 60%（setting/item.rs:276-313） -->
+</svg>

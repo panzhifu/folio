@@ -10,6 +10,10 @@
 | [`reader/`](reader/README.md) | 阅读页：正文、浮层、设置面板、目录、划选、笔记、图片、分享卡 | 9 |
 | [`stats/`](stats/README.md) | 统计：热力图有数据 / 一年没读 / 读不到书库 / 深色对照 | 4 |
 | [`welcome/`](welcome/README.md) | 首次启动，与「还没有内容」那四屏 | 6 |
+| [`tablet/`](tablet/README.md) | **平板档两朝向**：侧栏导航、两栏设置、四/五列架面、双页正文、目录抽屉、居中浮层 | 13 |
+
+手机那五档共用 384 × 853 一块画布（魅族 20）；平板档是 800 × 1280 与 1280 × 800 两块
+（小米平板 5 的两个朝向，分别落进 `SizeClass` 的 Medium 与 Expanded）。
 
 ## 共用的那一份尺
 
@@ -24,11 +28,11 @@
 
 ```bash
 python3 _kit.py            # 什么都不做，只确认这份能 import
-for d in settings shelf reader stats welcome; do (cd $d && python3 generate.py); done
+for d in settings shelf reader stats welcome tablet; do (cd $d && python3 generate.py); done
 ```
 
 PNG 渲染走 `rsvg-convert`（librsvg），机器上没有它时只出 SVG 并提示。每张 SVG 旁边摆着一张
-同名的真机分辨率 PNG（1080×2400），直接点开就能看。
+同名的真机分辨率 PNG（手机 1080×2400、平板 1600×2560 / 2560×1600），直接点开就能看。
 
 ## 数字与颜色的来源
 
@@ -68,3 +72,8 @@ PNG 渲染走 `rsvg-convert`（librsvg），机器上没有它时只出 SVG 并�
 3. 统计那一屏在手机上**必须横向滚**：53 列 × pitch 11 = 580 的内容宽塞不进 332 的可用宽，
    而格子不缩到 `CELL_MIN` 以下。初始停在最早那几周，今天落在最后一列不滚看不见。
    （`stats/README.md`）
+4. **两栏设置在 Android 平板上根本不成立**：那道门是 `host::supports_overlay_controls`
+   而不是 `SizeClass`，Android 宿主返回 `false`，所以真机平板上「我的」仍是手机那份
+   钻入式列表，只是被撑到 752 / 1020 宽。（`tablet/README.md`）
+5. **横屏关掉双页会铺到 72 字一行**：`max_measure` 默认 0 是「不夹」的哨兵值，1280 宽下
+   版心 1232。双页默认开着所以平时看不见，读者手动切回单页就会撞上。（`tablet/README.md`）
