@@ -14,13 +14,10 @@ use folio_core::infra::logging::BoxedLayer;
 /// 由 `android-activity` 在专用原生线程调用。
 #[unsafe(no_mangle)]
 fn android_main(app: android_activity::AndroidApp) {
-    // 先装 logcat 那一份 —— 它是 `log` facade 的后端，也是这个进程里唯一**在配置读到之前**
-    // 就能看见的输出口。必须抢在 `logging::init` 之前：`tracing-subscriber` 装的时候会把
-    // `log` 的全局位置让给 LogTracer，而我们的 logcat 那层正是通过这个 facade 落地的，
-    // 两者反过来接就成了自己转发给自己。
+    // 安装 logcat
     install_logcat_logger();
 
-    // panic 也进 logcat，而不是默默 abort。
+    //　logcat　panic
     jni::install_panic_hook();
 
     log::info!("android_main: entered");
@@ -29,8 +26,7 @@ fn android_main(app: android_activity::AndroidApp) {
     log::info!("android_main: platform initialised");
 
     // 应用专属内部目录（`/data/user/0/<包名>/files`）：属主是本应用，
-    // 不需要存储权限，进程被杀也还在。拿不到就维持原样 —— 读写会失败，
-    // 但界面仍然能起来，这条日志说明为什么偏好没保住。
+
     match app.internal_data_path() {
         Some(root) => {
             let files = root.join("files");
