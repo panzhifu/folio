@@ -158,7 +158,7 @@ jobs:
   # ---- Linux：tar.xz + deb + rpm ----
   linux:
     name: Linux
-    needs: version
+    needs: [version, readme]
     runs-on: ubuntu-24.04
     env:
       # 版本号一律走环境变量进 shell，不 `${{ }}` 直插 —— 见 version 那一条 job 里对形状的检查。
@@ -263,7 +263,7 @@ jobs:
   # ---- macOS：.app + zip ----
   macos:
     name: macOS
-    needs: version
+    needs: [version, readme]
     runs-on: macos-14
     env:
       FOLIO_VERSION: ${{ needs.version.outputs.version }}
@@ -320,7 +320,7 @@ jobs:
   # ---- Windows：exe + zip + NSIS 安装器 ----
   windows:
     name: Windows
-    needs: version
+    needs: [version, readme]
     runs-on: windows-latest
     env:
       FOLIO_VERSION: ${{ needs.version.outputs.version }}
@@ -364,7 +364,7 @@ jobs:
   # ---- Android：cargo ndk + gradle + 签名 ----
   android:
     name: Android
-    needs: version
+    needs: [version, readme]
     runs-on: ubuntu-24.04
     env:
       FOLIO_VERSION: ${{ needs.version.outputs.version }}
@@ -470,8 +470,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::secrets.FOLIO_RELEASE_PAT 是空的。要一把 fine-grained PAT，只授权 panzhifu/folio-releases 这一个仓库、权限 contents:write，然后在源码仓库 Settings → Secrets and variables → Actions 里建叫 FOLIO_RELEASE_PAT 的那一条。"
-            exit 1
+            if [ "${PUBLISH:-false}" = "true" ]; then
+              echo "::error::secrets.FOLIO_RELEASE_PAT 是空的。要一把 fine-grained PAT，只授权 panzhifu/folio-releases 这一个仓库、权限 contents:write，然后在源码仓库 Settings → Secrets and variables → Actions 里建一条名为 FOLIO_RELEASE_PAT 的 secret。四条构建都 needs 这一格，所以红在这里只花三十秒，不是四端各烧十几分钟。"
+              exit 1
+            fi
+            # 手动预跑（workflow_dispatch）本来就不写发布仓，所以缺 token 只报一句就过 ——
+            # 否则「先验四端出包的形状」这件事被一把与构建无关的 token 挡住。
+            echo "没配 FOLIO_RELEASE_PAT：这一趟是手动预跑，不往发布仓写任何东西，只验四端出包。"
+            exit 0
           fi
           # 读一次，顺带把「那边现在有没有提交」打在摘要里：这一条 job 红了还是绿了，排查时
           # 第一眼要的正是这个。
@@ -494,6 +500,37 @@ jobs:
               -f message="$msg" -f content="$content" \
               --jq '"那边原来没有 README，这一笔是它的：\(.commit.sha // "内容本来就一样，没落新提交")"'
           fi
+
+      - name: Android 签名那四格在不在
+        # 这四格缺了的话，红的地方本来在 android 那条 job 里「把 keystore 解到 RUNNER_TEMP」
+        # 那一步 —— 而那一步排在 `cargo ndk` 把整个依赖图编完之后，等于白烧十几分钟才发现。
+        # 这里只测**有没有**，内容一个字都不打印：把 secret 写进日志就是把它公开。
+        env:
+          FOLIO_KEYSTORE_B64: ${{ secrets.FOLIO_KEYSTORE_B64 }}
+          FOLIO_KEYSTORE_PASSWORD: ${{ secrets.FOLIO_KEYSTORE_PASSWORD }}
+          FOLIO_KEY_ALIAS: ${{ secrets.FOLIO_KEY_ALIAS }}
+          FOLIO_KEY_PASSWORD: ${{ secrets.FOLIO_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in FOLIO_KEYSTORE_B64 FOLIO_KEYSTORE_PASSWORD FOLIO_KEY_ALIAS FOLIO_KEY_PASSWORD; do
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            {
+              echo "### Android 签名的 secret 缺这几格"
+              echo
+              printf -- '- `%s`（格内为空）\n' "${missing[@]}"
+              echo
+              echo 'keystore 的存放与备份约定见 `plans/更新与发布.md` §六。`FOLIO_KEYSTORE_B64`'
+              echo '那一格是 `base64 -w0` 出来的**一整行**（换行会让后面那步解码失败）。签出去的'
+              echo '包永远换不了签名（换 keystore 等于所有已装用户卸载重装），所以这一格不能拿'
+              echo 'debug keystore 顶 —— workflow 里那条 `APK_SIGNER_SHA256` 钉的就是正式那把的指纹。'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::缺 ${missing[*]} —— android 那条 job 编到链接原生库之后照样红，先在这儿说清。"
+            exit 1
+          fi
+          echo "四格都在（只测了有没有，内容没有打印）。"
 
   # ---- 发布 ----
   publish:
