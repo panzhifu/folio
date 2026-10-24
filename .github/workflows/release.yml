@@ -240,10 +240,18 @@ jobs:
           if ! depends=$(dpkg-shlibdeps -O -tdeb "$deb/usr/bin/folio" 2>/tmp/dpkg-shlibdeps.err \
                         | sed 's/^shlibs:Depends=//'); then
             echo "::error::dpkg-shlibdeps 没跑通，宁可红也不发一份猜出来的 Depends"
-            echo "### dpkg-shlibdeps 的原话" >> "$GITHUB_STEP_SUMMARY"
+            echo '### dpkg-shlibdeps 的原话' >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             head -20 /tmp/dpkg-shlibdeps.err >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
+            # 三件套直接进日志：stderr 原话、dpkg 数据库里这几个包装没装、
+            # ldconfig 缓存里这几个库在不在 —— 根因无论落在哪一格都无处可藏。
+            echo '--- dpkg-shlibdeps stderr ---'
+            head -20 /tmp/dpkg-shlibdeps.err
+            echo '--- dpkg -l ---'
+            dpkg -l | grep -E 'libxcb1|libxkbcommon|libgcc-s1|libc6 ' || true
+            echo '--- ldconfig -p ---'
+            ldconfig -p | grep -E 'libxcb\.so|libxkbcommon' || true
             objdump -p "$deb/usr/bin/folio" | grep NEEDED
             exit 1
           fi
