@@ -25,9 +25,9 @@ test = false
 [dependencies]
 folio-core.workspace = true
 # 仿真翻页那一档的页面网格与 uniform 的纯 CPU 定义：这里只拿数据，不拿 GPU 类型。
-# 它住在 `panzhifu/gpui-folio` 那个 workspace 里（四个成员之一），rev 必须跟根
-# `[patch.crates-io]` 那三条同一个数 —— 一份 fork 四个成员，钉成两个 rev 就是两份代码。
-folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "bbc20f209104a3e8c9a7201b813aa88e75de68e2" }
+# 它住在 `panzhifu/gpui-folio` 那个 workspace 里，rev 必须跟根
+# `[patch.crates-io]` 那五条同一个数 —— 一份 fork 六个成员，钉成两个 rev 就是两份代码。
+folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "666506ffe47c5dc021f02913d40522acffe974cd" }
 gpui-kit.workspace = true
 # Ely 那一整族（fork 在 `panzhifu/Ely-GPUI-Components`，钉 rev 与上面几条同一写法）。
 # 它与 gpui-kit 同吃 `gpui-pre =0.3.9` 那一颗快照，所以是一棵 gpui、不是第二份框架；

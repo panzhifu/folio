@@ -106,6 +106,7 @@ pub(in crate::ui::features::reader) fn of(turn: PageTurn) -> &'static dyn PageTu
     static SLIDE: Slide = Slide;
     static SLIDE_UP: SlideUp = SlideUp;
     static COVER: Cover = Cover;
+    #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
     static CURL: Curl = Curl;
     static SCROLL: Scroll = Scroll;
     static IMMEDIATE: Immediate = Immediate;
@@ -113,6 +114,11 @@ pub(in crate::ui::features::reader) fn of(turn: PageTurn) -> &'static dyn PageTu
         PageTurn::Slide => &SLIDE,
         PageTurn::SlideUp => &SLIDE_UP,
         PageTurn::Cover => &COVER,
+        // Metal 与 DirectX 两条渲染路径还没实现 page_curl 的绘制（渲染器收到该批次
+        // 只会跳过），这两个平台上把卷页落到滑动 —— 真实现进 fork 时拆掉这条 cfg。
+        #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+        PageTurn::Curl => &SLIDE,
+        #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
         PageTurn::Curl => &CURL,
         PageTurn::Scroll => &SCROLL,
         PageTurn::None => &IMMEDIATE,

@@ -403,9 +403,14 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 # 内容与闸本身可能落在不同的 deferred 条目里，上一条目留下的层号会把别的屏的浮层一并排进捕获段：
 # 主 pass 不画它、捕获 pass 却画它，屏上就是「别的屏的字跟着这一页一起卷」。重放（`reuse_paint`）
 # 的那一段因此也带着自己那两道闸。同一笔还换了背面受墨与平摊页那道贴折痕的软带。
-gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "bbc20f209104a3e8c9a7201b813aa88e75de68e2" }
-gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "bbc20f209104a3e8c9a7201b813aa88e75de68e2" }
-gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "bbc20f209104a3e8c9a7201b813aa88e75de68e2" }
+gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "666506ffe47c5dc021f02913d40522acffe974cd" }
+gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "666506ffe47c5dc021f02913d40522acffe974cd" }
+gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "666506ffe47c5dc021f02913d40522acffe974cd" }
+# apple / windows 两条渲染器是从 crates.io 的 0.3.9 发布包收进 fork 的（zed@93d7456 快照），
+# 各带一条 PageCurlMeshes 的跳过臂 —— 注册表那份不知道 fork 加的这个变体，macOS / Windows
+# 的构建在 exhaustive match 上必红。真正移植 page_curl 之前这两条 patch 不能撤。
+gpui-pre-apple = { git = "https://github.com/panzhifu/gpui-folio", rev = "666506ffe47c5dc021f02913d40522acffe974cd" }
+gpui-pre-windows = { git = "https://github.com/panzhifu/gpui-folio", rev = "666506ffe47c5dc021f02913d40522acffe974cd" }
 
 # 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
 # opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；
