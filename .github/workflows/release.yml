@@ -380,10 +380,14 @@ jobs:
           7z a -tzip "out/folio-$v-windows-x64.zip" stage/folio.exe stage/THIRD-PARTY-NOTICES.txt
           # Git Bash 的 MSYS 参数改写会把 `/DVERSION=0.1.1` 当成 POSIX 路径，加上
           # `C:/Program Files/Git` 前缀——NSIS 收到的四个 /D 定义全部失踪，报
-          # Can't open script。这条调用单独关掉改写。
+          # Can't open script。这条调用单独关掉改写。而 NSIS 自己解析脚本里的
+          # 相对路径也不按调用时的 CWD 来（0.1.1 的 run 4 红在 `packaging/icons\folio.ico`
+          # can't open file —— 文件明明签在仓库里），三个目录一律给 Windows 形式的
+          # 绝对路径（cygpath -m = 正斜杠，Windows API 直接收）。
+          WINROOT="$(cygpath -m "$PWD")"
           MSYS2_ARG_CONV_EXCL="*" "/c/Program Files (x86)/NSIS/makensis" \
-            /DVERSION="$v" /DSRCDIR=stage /DICONDIR=packaging/icons /DOUTDIR=out \
-            packaging/windows/folio.nsi
+            /DVERSION="$v" /DSRCDIR="$WINROOT/stage" /DICONDIR="$WINROOT/packaging/icons" \
+            /DOUTDIR="$WINROOT/out" packaging/windows/folio.nsi
 
       - uses: actions/upload-artifact@v4
         with:
