@@ -76,7 +76,7 @@ Section "Folio"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "Folio"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "Publisher" "panzhifu"
-  WriteRegStr HKLM "${UNINSTALL_KEY}" "URLInfoAbout" "https://github.com/panzhifu/folio-releases"
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "URLInfoAbout" "https://github.com/panzhifu/folio"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\folio.exe"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKLM "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"

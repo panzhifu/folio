@@ -11,7 +11,7 @@ Version:        @VERSION@
 Release:        1
 Summary:        Native GPU ebook reader with a layout engine written from scratch
 License:        MIT
-URL:            https://github.com/panzhifu/folio-releases
+URL:            https://github.com/panzhifu/folio
 Source0:        folio-@VERSION@-linux-x86_64.tar.xz
 
 %description

@@ -4,13 +4,13 @@
 //! 下载、校验之后的落地、拉起安装器都不在这儿 —— 那些要么要文件系统与线程，要么要 JNI，
 //! 全都不是 core 能碰的（core 不许依赖 gpui，见 `lib.rs` 顶部）。
 //!
-//! ## 为什么问的是另一个仓库
+//! ## 问的是本仓库的 release
 //!
-//! 源码在私有的 `panzhifu/folio`，安装包发在公开的 `panzhifu/folio-releases`。GitHub 没有
-//! 「仓库私有但 release 公开」这一档 —— 私有仓库的 release 对未登录请求同样 404（实测：
-//! `api.github.com/repos/panzhifu/folio` 直接回 404）。所以这里问的是**发布仓**那一个，
-//! 而它匿名可读，限流按读者自己的 IP 计（60 次/小时），不需要也不许内置任何 token：
-//! 客户端里的密钥人人能提出来，那等于把发布权限发给所有读者。
+//! 源码与安装包现在在同一个公开仓库 `panzhifu/folio` 上（2026-10-24 起；此前源码私有、包发在
+//! 另一个公开仓，那需要一个读者提不出、CI 又写得动的第二份凭据，代价比它解决的问题多）。
+//! 这一问**匿名可读**，限流按读者自己的 IP 计（60 次/小时），不需要也不许内置任何 token：
+//! 客户端里的密钥人人能提出来，那等于把发布权限发给所有读者 —— 下面那条
+//! `the_request_...` 测试钉的就是这一条，不只是 URL 长什么样。
 //!
 //! ## 为什么用同步 `Transport`
 //!
@@ -34,18 +34,17 @@ use sha2::{Digest as _, Sha256};
 use super::remote::{Cancel, Error as TransportError, Method, Request, Sink, Transport};
 
 /// 最新发布版那条 release 的 API 地址。
-pub const LATEST_API: &str = "https://api.github.com/repos/panzhifu/folio-releases/releases/latest";
+pub const LATEST_API: &str = "https://api.github.com/repos/panzhifu/folio/releases/latest";
 
 /// 按 tag 取**某一条指定** release 的地址模板（`{tag}` 由 [`release_by_tag`] 填）。
 ///
 /// 要这一问而不是只用 `latest`，是因为「更新日志」那一格显示的是**手上这一版**改了什么：
 /// 装了 0.1.1 而最新是 0.2.0 时，`latest` 的正文讲的是 0.2.0，把它当「你这版的说明」给读者
 /// 看是一句假话。
-pub const RELEASE_BY_TAG_API: &str =
-    "https://api.github.com/repos/panzhifu/folio-releases/releases/tags/";
+pub const RELEASE_BY_TAG_API: &str = "https://api.github.com/repos/panzhifu/folio/releases/tags/";
 
 /// 给读者在浏览器里打开的那一页（检查失败时也要有个地方可去）。
-pub const RELEASES_PAGE: &str = "https://github.com/panzhifu/folio-releases/releases/latest";
+pub const RELEASES_PAGE: &str = "https://github.com/panzhifu/folio/releases/latest";
 
 /// 一次检查的结论。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -719,8 +718,19 @@ mod tests {
         let req = mock.last();
         assert_eq!(req.url, LATEST_API);
         assert!(
-            !req.url.contains("panzhifu/folio/"),
-            "问的必须是发布仓：私有源码仓对匿名请求是 404"
+            req.url
+                .starts_with("https://api.github.com/repos/panzhifu/folio/releases"),
+            "问的必须是这个公开仓库的 release；URL 里残留任何别的仓库名（例如已删掉的 \
+             folio-releases）都会让读者那边永远「取不到」"
+        );
+        // 这一条比 URL 那条要紧：客户端里的密钥人人能提出来，带上任何凭据就等于把发布权限
+        // 发给所有读者。WebDAV 那条链确实会写 Authorization（`net/remote/dav.rs`），所以
+        // 「这一条链不该有」不是显然的事，得钉住。
+        assert!(
+            !req.headers
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case("authorization")),
+            "检查更新必须匿名可读，不许带任何凭据"
         );
         assert!(
             req.headers

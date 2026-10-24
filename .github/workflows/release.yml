@@ -1,4 +1,4 @@
-# 发版：四端出包 + 推到公开的发布仓库。
+# 发版：四端出包 + 把包与更新日志发成**本仓库**的 GitHub release。
 #
 # 这道 workflow 与 `ci.yml` 是两件事，所以是两个文件：`ci.yml` 是**每一版都要过的门**，
 # 它刻意不产出任何可分发的东西（只 check/clippy/test）；这里做的是把编好的东西变成
@@ -6,7 +6,8 @@
 #
 # **两种触发方式的行为不一样，这是有意的**：
 #
-# - `push: tags: v*` → 构建 + **发布**（往 `panzhifu/folio-releases` 写 release 与资产）。
+# - `push: tags: v*` → 构建 + **发布**（在本仓库建 release 并挂上资产）。
+#   仓库本身是公开的，所以这一步用这次 run 自带的 GITHUB_TOKEN 就够，不需要第二份凭据。
 #   这一步不可逆：包一旦发出去，Android 那一份就永远换不了签名（换 keystore 等于所有已装
 #   用户卸载重装），所以版本号三处一致是硬门，不满足就直接红。
 # - `workflow_dispatch` → **只构建不发布**。产物留在 Actions 的 artifacts 里，四端的打包形状
@@ -33,8 +34,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # 公开的发布仓库：源码在这道 workflow 里编，包与更新日志写到那边去。
-  RELEASE_REPO: panzhifu/folio-releases
   # 签 release APK 的那张证书的 SHA-256（`keystore` 的公钥指纹，不是私钥）。
   # 钉在这儿是为了让「不小心用了 debug keystore / 换错了 keystore」在 CI 里就红，
   # 而不是等读者装不上更新才发现。值来自 `plans/更新与发布.md` §六 那次实测。
@@ -142,15 +141,20 @@ jobs:
           fi
           cargo about generate --locked packaging/about.hbs > /tmp/notices.txt
           if ! diff -u THIRD-PARTY-NOTICES.txt /tmp/notices.txt; then
+            # 这段 heredoc 与 `set -euo pipefail` **同一列**不是排版洁癖：`run: |` 这个块 scal
+            # 的基准缩进由它第一行决定（这里是 10 格），多缩进去的那两格会原样进 shell —— 于是
+            # 结束符成了「两个空格 + EOF」，bash 不认它（`<<-` 只剥 TAB，不剥空格），整段脚本
+            # 在**解析期**就炸：`syntax error: unexpected end of file`，一句 diff 都没跑出来。
+            # 2026-10-24 第一次真跑这一格就是这样红的。
             cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-            ### 第三方声明与依赖图不一致
-            依赖变了但 `THIRD-PARTY-NOTICES.txt` 没重生成。本地跑这一条再提交：
-            ```
-            cargo about generate --locked packaging/about.hbs > THIRD-PARTY-NOTICES.txt
-            ```
-            如果 `cargo-about` 是**报错**而不是报差异，那是撞上了没在 `about.toml`
-            名单里的许可证 —— 那件事要先看条款再决定，别为了让 CI 绿就加进去。
-            EOF
+          ### 第三方声明与依赖图不一致
+          依赖变了但 `THIRD-PARTY-NOTICES.txt` 没重生成。本地跑这一条再提交：
+          ```
+          cargo about generate --locked packaging/about.hbs > THIRD-PARTY-NOTICES.txt
+          ```
+          如果 `cargo-about` 是**报错**而不是报差异，那是撞上了没在 `about.toml`
+          名单里的许可证 —— 那件事要先看条款再决定，别为了让 CI 绿就加进去。
+          EOF
             echo "::error::THIRD-PARTY-NOTICES.txt 与 Cargo.lock 现生成的不一致"
             exit 1
           fi
@@ -158,7 +162,7 @@ jobs:
   # ---- Linux：tar.xz + deb + rpm ----
   linux:
     name: Linux
-    needs: [version, readme]
+    needs: [version, preflight]
     runs-on: ubuntu-24.04
     env:
       # 版本号一律走环境变量进 shell，不 `${{ }}` 直插 —— 见 version 那一条 job 里对形状的检查。
@@ -263,7 +267,7 @@ jobs:
   # ---- macOS：.app + zip ----
   macos:
     name: macOS
-    needs: [version, readme]
+    needs: [version, preflight]
     runs-on: macos-14
     env:
       FOLIO_VERSION: ${{ needs.version.outputs.version }}
@@ -320,7 +324,7 @@ jobs:
   # ---- Windows：exe + zip + NSIS 安装器 ----
   windows:
     name: Windows
-    needs: [version, readme]
+    needs: [version, preflight]
     runs-on: windows-latest
     env:
       FOLIO_VERSION: ${{ needs.version.outputs.version }}
@@ -364,7 +368,7 @@ jobs:
   # ---- Android：cargo ndk + gradle + 签名 ----
   android:
     name: Android
-    needs: [version, readme]
+    needs: [version, preflight]
     runs-on: ubuntu-24.04
     env:
       FOLIO_VERSION: ${{ needs.version.outputs.version }}
@@ -446,60 +450,21 @@ jobs:
           name: android
           path: crates/folio-app/android/folio-*-arm64-v8a.apk
 
-  # ---- 发布仓根的那份 README（真相在 packaging/releases-README.md）----
+  # ---- 发版前置：四格签名 secret 在不在 ----
   #
-  # 单独一条 job、只 needs version，为的是**早失败**：publish 排在四条构建后面，要是那把
-  # 跨仓库的 PAT 没配、或者对 folio-releases 没有写权限，得等四端全编完（三十几分钟）才看得见。
-  # 这一条三十秒内就说清那把 token 能不能用。
+  # 单独一条 job、只 needs version，为的是**早失败**：这四格真正被用到的地方在 android 那条 job
+  # 的「把 keystore 解到 RUNNER_TEMP」那一步，而它排在 `cargo ndk` 把整张依赖图链完之后 —— 缺了
+  # 它的红长得很像构建坏了，实际是十几分钟编译换一句 base64 解码失败。四条构建都 needs 这一格。
   #
-  # 它同时是空仓的那一步：`gh release create` 在一个**还没有任何提交**的仓库里建不出 release
-  # （没有 commit 可指），而 folio-releases 现在就是空的。这一笔 PUT 给它落第一笔提交。
-  readme:
-    name: 发布仓 README 与跨仓权限
+  # 2026-10-24 之前这一格还兼着往另一个仓库 PUT 一份 README（那时源码私有、包发在公开仓 ——
+  # GitHub 没有「仓库私有但 release 公开」这一档）。仓库转公开之后那一半整个不要了：release 就建在
+  # 本仓库上，用 workflow 自带的 GITHUB_TOKEN 就够。那把跨仓库的 fine-grained PAT 存在的唯一理由
+  # 是造一份「读者提不出来、CI 又写得动」的凭据，现在不需要第二种凭据了。
+  preflight:
+    name: 发版前置检查
     needs: version
     runs-on: ubuntu-24.04
-    env:
-      FOLIO_VERSION: ${{ needs.version.outputs.version }}
-      PUBLISH: ${{ needs.version.outputs.publish }}
-      # 与 publish 用同一把：fine-grained PAT，只授权 folio-releases 一个仓库的 contents:write。
-      GH_TOKEN: ${{ secrets.FOLIO_RELEASE_PAT }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: 同步 README
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            if [ "${PUBLISH:-false}" = "true" ]; then
-              echo "::error::secrets.FOLIO_RELEASE_PAT 是空的。要一把 fine-grained PAT，只授权 panzhifu/folio-releases 这一个仓库、权限 contents:write，然后在源码仓库 Settings → Secrets and variables → Actions 里建一条名为 FOLIO_RELEASE_PAT 的 secret。四条构建都 needs 这一格，所以红在这里只花三十秒，不是四端各烧十几分钟。"
-              exit 1
-            fi
-            # 手动预跑（workflow_dispatch）本来就不写发布仓，所以缺 token 只报一句就过 ——
-            # 否则「先验四端出包的形状」这件事被一把与构建无关的 token 挡住。
-            echo "没配 FOLIO_RELEASE_PAT：这一趟是手动预跑，不往发布仓写任何东西，只验四端出包。"
-            exit 0
-          fi
-          # 读一次，顺带把「那边现在有没有提交」打在摘要里：这一条 job 红了还是绿了，排查时
-          # 第一眼要的正是这个。
-          gh api "repos/$RELEASE_REPO" \
-            --jq '"发布仓：\(.full_name)，默认分支：\(.default_branch // "（还没有，第一笔提交由这一步落）")"' >> "$GITHUB_STEP_SUMMARY"
-          if [ "$PUBLISH" != "true" ]; then
-            echo "手动跑（workflow_dispatch）：验到读这一层就停，不往发布仓写任何东西。"
-            exit 0
-          fi
-          content=$(base64 -w0 packaging/releases-README.md)
-          msg="同步 README：由 Release workflow 在发 v$FOLIO_VERSION 时从源码仓的 packaging/releases-README.md 搬过来"
-          # 更新要给旧文件的 sha，创建不给 —— 两种都要写，因为第一次发版时那边什么都还没有。
-          sha=$(gh api "repos/$RELEASE_REPO/contents/README.md" --jq .sha 2>/dev/null || true)
-          if [ -n "$sha" ]; then
-            gh api -X PUT "repos/$RELEASE_REPO/contents/README.md" \
-              -f message="$msg" -f content="$content" -f sha="$sha" \
-              --jq '"更新，提交：" + .commit.sha'
-          else
-            gh api -X PUT "repos/$RELEASE_REPO/contents/README.md" \
-              -f message="$msg" -f content="$content" \
-              --jq '"那边原来没有 README，这一笔是它的：\(.commit.sha // "内容本来就一样，没落新提交")"'
-          fi
 
       - name: Android 签名那四格在不在
         # 这四格缺了的话，红的地方本来在 android 那条 job 里「把 keystore 解到 RUNNER_TEMP」
@@ -534,10 +499,14 @@ jobs:
 
   # ---- 发布 ----
   publish:
-    name: 发布到 folio-releases
-    needs: [version, notices, readme, linux, macos, windows, android]
+    name: 发布本仓库的 release
+    needs: [version, notices, preflight, linux, macos, windows, android]
     if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      # 发在本仓库上，所以用的是**这次 run 自带的** GITHUB_TOKEN，只需要这一条写权限；
+      # 它不能被读者提出来（每次 run 临时签发、过期即废），这正是当初要另建一把跨仓库 PAT 的原因。
+      contents: write
     env:
       FOLIO_VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -573,14 +542,11 @@ jobs:
           } >> body.md
 
       - name: 建 release 并上传资产
-        env:
-          # 跨仓库发布：默认 GITHUB_TOKEN 碰不到 folio-releases，所以这里用一把只授权
-          # 那个仓库 contents:write 的 fine-grained PAT。
-          GH_TOKEN: ${{ secrets.FOLIO_RELEASE_PAT }}
         run: |
           set -euo pipefail
+          # 不带 --repo：本仓库就是发布仓，用这次 run 自带的 GITHUB_TOKEN（上面那条
+          # `permissions: contents: write` 是给它的，不是给某个人的密钥）。
           gh release create "v$FOLIO_VERSION" \
-            --repo "$RELEASE_REPO" \
             --title "Folio v$FOLIO_VERSION" \
             --notes-file body.md \
             --latest \

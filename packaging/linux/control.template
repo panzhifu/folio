@@ -4,7 +4,7 @@ Section: text
 Priority: optional
 Architecture: @ARCH@
 Maintainer: panzhifu <noke601508@outlook.com>
-Homepage: https://github.com/panzhifu/folio-releases
+Homepage: https://github.com/panzhifu/folio
 Standards-Version: 4.6.2
 Depends: @DEPENDS@
 Description: native GPU ebook reader
@@ -13,6 +13,6 @@ Description: native GPU ebook reader
  per-run styles, inline and block images, CJK line breaking. No embedded
  browser, no WebView.
  .
- The binary is built from a private source repository; releases and their
- checksums live at https://github.com/panzhifu/folio-releases. Third-party
- licence texts ship in /usr/share/doc/folio.
+ Releases, their checksums and the sources this binary is built from all
+ live at https://github.com/panzhifu/folio. Third-party licence texts ship
+ in /usr/share/doc/folio.
