@@ -63,9 +63,16 @@ index 的命令，tag 不在这之列：它只是一个 ref，jj 下一次快照
 jj bookmark set main -r @        # 先把 main 挪到要发的那个 change
 git tag v0.1.1                   # 打 tag
 jj tag list                      # 确认列出的就是那一个（顺手留下的第二个会一起被推上去）
+jj tag track v0.1.1              # 新 tag 必须先 track，见下面那条
 jj git push --dry-run            # 应报出「tag: v0.1.1 [add to <sha>]」这一行
 jj git push                      # 真推 —— 这一步会触发发布 workflow，要用户明确点头
 ```
+
+**本机 jj 0.46.0 实测：新 tag 不 `track` 就推不动**，症状是 `jj git push --dry-run` 只报
+`Refusing to create new remote tag v0.1.1@origin` + 一句 `Run jj tag track v0.1.1@origin`，
+而 dry-run 的「Changes to push」里**只有 bookmark、没有 tag 那一行** —— 不盯这一眼就会以为 tag
+已经跟着上去了。`jj tag track <名>` 之后 dry-run 才报得出 `[add to <sha>]`。（与 bookmark 首推
+要 `-b`/`--allow-new` 是同一类「新 ref 要显式认领」的设计，不是 bug。）
 
 `--dry-run` 与 `jj tag list` 那两行不是仪式：**推 tag = 往公网发不可撤销的正式包**，而发出去的
 Android 包永远换不了签名（换 keystore 等于所有已装用户卸载重装）。发版流程与四端的限制清单在
