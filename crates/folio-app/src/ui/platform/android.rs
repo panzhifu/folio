@@ -1,5 +1,4 @@
-//! Android 入口：`android-activity` 载入 `libfolio_app.so` 后在专用原生线程调用
-//! `android_main`，它不返回，直到可以退出。
+//! Android 入口
 
 use gpui_kit::{App, Application};
 use gpui_mobile::android::jni;

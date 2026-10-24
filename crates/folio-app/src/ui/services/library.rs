@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use folio_core::Library;
 use folio_core::Store;
-use gpui_kit::{App, PathPromptOptions, Task};
+use gpui_kit::{App, AppContext as _, PathPromptOptions, Task};
 
 use super::config::ConfigHolder;
 use crate::ui::foundation::error::{Context as _, Result};
@@ -92,8 +92,10 @@ pub const PACKAGE: &str = "dev.folio.reader";
 /// 这是「默认建议」与「没装文件选择器时」的兜底；读者也可以直接用系统文件夹选择器
 /// 挑任意目录（[`pick_dir`]）——`gpui-mobile` 的 `prompt_for_paths{directories: true}`
 /// 现在走 `ACTION_OPEN_DOCUMENT_TREE`：本地卷（内部存储 / SD 卡）会尽量解析回真实文件
-/// 路径，所以 `std::fs` 拷副本这条路走得通；解析不出真实路径的提供方（云盘等）退回
-/// tree URI，那种位置拷不了，会在导入时报错而不是静默失败。
+/// 路径。但「解析得出路径」不等于「`std::fs` 写得进」—— 后者取决于「所有文件访问」
+/// 那档授权在不在手，[`choose_dir`] 开选择器之前会先把这道门要一遍；要不到时只有
+/// 本列表这几处（与应用外部目录、Download / Documents）仍有得写。解析不出真实路径的
+/// 提供方（云盘等）退回 tree URI，那种位置拷不了，会在导入时报错而不是静默失败。
 ///
 /// 外部那条排在前面：它在系统文件管理器和 `adb push` 里都看得见，读者既能自己放书，
 /// 也能自己核对拷过去的是什么。内部那条就是 [`suggested_dir`]。
@@ -122,14 +124,35 @@ pub fn pick_dir(cx: &mut App) -> Task<()> {
 
 /// 打开系统文件夹选择器，选中把目录交给 `picked`（在界面线程上执行）。
 /// 取消与出错只记日志 —— 读者点「取消」不该清掉任何东西。
+///
+/// Android 上先在**后台线程**把「所有文件访问」（[`crate::ui::platform`]::
+/// request_storage_access）这道门走完，再开选择器。为什么要这道门：选择器交回的是
+/// fork 解析出来的**真实路径**（`GpuiPathPicker.resolveTreeUri`），而后面往里拷书走的是
+/// `std::fs` —— 没有这一档授权，共享存储里挑出来的目录（应用自己的外部目录与
+/// Download / Documents 这几个系统放行的除外）建得了目录、建不了文件，导入会在暂存
+/// 那一格被 `EPERM` 拒掉。2026-10-24 Meizu 20 / Android 16 实测：书库指在
+/// `/storage/emulated/0/folio` 时，选完书整批以「读不动」收场，界面上书架纹丝不动，
+/// 而 logcat 里 MediaProvider 报 `Primary directory folio not allowed … allowed
+/// directories are [Download, Documents]`。请求本身是阻塞的（把调用线程停在闩上，
+/// 直到读者从系统设置页回来），所以照书架「扫描」那道门（`start_scan`）的规矩只能
+/// 丢给后台线程；要不到授权也照开选择器 —— 退化路径仍有写得进的位置可挑，
+/// 与扫描同一条立场。
 pub fn choose_dir(cx: &mut App, picked: impl Fn(&mut App, &std::path::Path) + 'static) -> Task<()> {
-    let receiver = cx.prompt_for_paths(PathPromptOptions {
-        files: false,
-        directories: true,
-        multiple: false,
-        prompt: None,
-    });
+    // 授权尘埃落定之后才开选择器：读者可能先去系统设置页绕一圈，选择器不该抢在那前面。
+    let requested =
+        cx.background_spawn(async move { crate::ui::platform::request_storage_access() });
     cx.spawn(async move |cx| {
+        let granted = requested.await;
+        tracing::info!("choose_dir: 存储授权 = {granted}");
+        // 这一版的 `AsyncApp::update` 直接把闭包的值交回来（不包 `Result`）。
+        let receiver = cx.update(|cx| {
+            cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: None,
+            })
+        });
         let picked_dir = match receiver.await {
             Ok(Ok(Some(mut paths))) => paths.pop(),
             Ok(Ok(None)) => None,

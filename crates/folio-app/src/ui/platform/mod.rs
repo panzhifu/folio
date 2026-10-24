@@ -38,7 +38,9 @@ use crate::ui::host;
 #[cfg(mobile)]
 use crate::ui::services::config::{ConfigHolder, ConfigPath};
 
-/// 整机扫描前的存储授权：拿到了「所有文件访问」（或旧设备的读存储）没有。
+/// 存储授权：拿到了「所有文件访问」（或旧设备的读存储）没有。两个调用方都要在
+/// 动手之前过这道门：书架的整机扫描（`start_scan`，扫不到就把 roots 缩回应用目录），
+/// 以及挑选书库 / 监听目录（`choose_dir`，选出来的位置要用 `std::fs` 写）。
 ///
 /// **阻塞调用** —— Android 上会把调用线程停在闩上，直到读者从系统设置页回来
 /// （fork `gpui-pre-mobile` 29f19d3 的 permission_handler 是同步契约），所以只能在
