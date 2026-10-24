@@ -10,6 +10,8 @@ Folio：Rust + [gpui-kit](https://gpui-kit.com) 写的原生 GPU 阅读器，覆
 
 - [README.md](README.md)（英文，读者向）/ [doc/README_zh.md](doc/README_zh.md)（中文）
 - [doc/development.md](doc/development.md) —— 构建、测试、Android 交叉编译、日志、发版配方
+- [doc/design/README.md](doc/design/README.md) —— 手机那一档的 SVG 设计稿（38 屏）与共用的那份
+  尺 `_kit.py`；**SVG 是真相源，改版式改生成器再重出**
 - [packaging/README.md](packaging/README.md) —— 安装包里非代码资产（图标、desktop 条目）的真相源
 
 ## 仓库布局

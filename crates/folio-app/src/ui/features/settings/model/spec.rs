@@ -33,6 +33,11 @@ pub(crate) struct NumberSpec {
 /// 一行设置项：标题 + 说明 + 搜索关键词 + 一种控件（[`RowKind`]）。
 pub(crate) struct Row {
     pub title: SharedString,
+    /// 这一格「干什么用、取值范围是什么意思」那句话。
+    ///
+    /// **只有桌面渲染它**（见 `view/mod.rs` 的 `setting_item`）。手机那一档按 2026-10-24
+    /// 的定稿行内不摆灰色说明 —— 每行只有标题与控件，44 一行 —— 但这句话在窄屏上没了落点
+    /// 不等于在宽屏上也不该有：「最大行长 0 表示随窗口铺满」这类约定只有这一处解释。
     pub desc: Option<SharedString>,
     pub keywords: &'static [&'static str],
     pub kind: RowKind,
@@ -242,20 +247,6 @@ pub(crate) struct Page {
     pub title: SharedString,
     pub icon: IconName,
     pub groups: Vec<Group>,
-    /// 手机那一档在卡片上方画不画节头。
-    ///
-    /// **桌面对这一格无感**：那边的组标题同时是侧栏里的子项（见 `view/mod.rs` 里 `setting_page`
-    /// 那句「分组必须带标题」），那边去掉等于那一组从导航里消失，所以只在规格里说「手机那一屏
-    /// 不摆」，把两边各自的处理留在各自的渲染里。
-    pub show_group_titles: bool,
-}
-
-impl Page {
-    /// 这一页在手机那一档不摆节头，整屏只剩卡片。
-    pub(in crate::ui::features::settings) fn no_group_titles(mut self) -> Self {
-        self.show_group_titles = false;
-        self
-    }
 }
 
 /// 一组设置行的快捷构造：标题 + 行。
@@ -266,13 +257,16 @@ pub(crate) fn group(title: impl Into<SharedString>, rows: Vec<Row>) -> Group {
     }
 }
 
-/// 一页的快捷构造：标题 + 图标 + 组。节头默认摆，不摆的那一页自己说。
+/// 一页的快捷构造：标题 + 图标 + 组。
+///
+/// 组标题**桌面的侧栏要用它当子项**（见 `view/mod.rs` 里 `setting_page` 那句「分组必须带
+/// 标题」），所以这一格不许省；手机那一档则整屏只留卡片，组与组靠 32 的缝分开 —— 两边各自
+/// 怎么用这一份数据，写在各自的渲染里。
 pub(crate) fn page(title: impl Into<SharedString>, icon: IconName, groups: Vec<Group>) -> Page {
     Page {
         title: title.into(),
         icon,
         groups,
-        show_group_titles: true,
     }
 }
 

@@ -52,3 +52,7 @@ crates/folio-app/android/local.properties
 *.keystore
 *.jks
 keystore.properties
+
+# doc/design 的设计稿生成器一跑就留下这份字节码缓存（generate.py import _kit.py 的产物）。
+# 源文件在库里、缓存随时由解释器再生，入库只是一份随时可能与源不同步的噪音。
+__pycache__/

@@ -67,9 +67,6 @@ struct Slice {
 
 /// 这一页。
 pub(in crate::ui::features::settings) fn storage_page(cx: &App) -> Page {
-    // 手机端不摆三行节头：这一页的三张卡各自说得出自己是什么（大读数、带标题的清理行、
-    // 带路径的位置行），上方那行小灰字只是把同一个词再念一遍。桌面照旧摆 —— 那边的组
-    // 标题同时是侧栏子项。
     page(
         tr(cx, "page.storage"),
         IconName::HardDrive,
@@ -79,7 +76,6 @@ pub(in crate::ui::features::settings) fn storage_page(cx: &App) -> Page {
             group(tr(cx, "group.location"), location_rows(cx)),
         ],
     )
-    .no_group_titles()
 }
 
 /// 一类去处念成什么。键名**写成字面量**交给取文案的函数：`services/l10n.rs` 那道门扫的

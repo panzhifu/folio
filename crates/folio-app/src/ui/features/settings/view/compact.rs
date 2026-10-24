@@ -7,9 +7,15 @@
 //!   在底栏里就叫「我的」，再写一句「设置」是同一个入口的两个名字。右端也**不挂这一页的
 //!   当前值**：入口列表那一行管的是「去哪儿」，不是「现在是多少」，而一页几十行里只能挑一个
 //!   数当代表（「文字」那页从前露字号、看不到行距），念不准还看着像已经调过了；
-//! - 子页顶部一条 [`TopBar`]（返回 + 页名），下面按规格里的组各成一张分组卡，组名当节头，
-//!   节头下面才摆行。钻进子页（以及它的选项屏）时**整窗都是它**：底下那条应用导航栏由外壳
-//!   收起，判据是 [`CompactSettings::pushed`]，退回根屏那一趟它自己回来；
+//! - 子页顶部一条 [`TopBar`]（返回 + 页名），下面按规格里的组各成一张分组卡，**卡上方不摆
+//!   节头**：组与组只靠 32 那一道缝分开，整页是一串光卡。钻进子页（以及它的选项屏）时**整窗
+//!   都是它**：底下那条应用导航栏由外壳收起，判据是 [`CompactSettings::pushed`]，退回根屏
+//!   那一趟它自己回来；
+//! - **行内不摆灰色说明**：每行只有标题与控件，44 一行。规格里那句「这一格干什么用、取值范围
+//!   是什么意思」（[`spec::Row::desc`]）只有桌面渲染 —— 代价是「最大行长 0 表示随窗口铺满」
+//!   这类约定在这一屏没有界面内的解释，靠各控件自己的语义兜住。服务状态字（Wi-Fi 传书没开时
+//!   那句、检查更新的「还没查过」）不受这一条影响：那是**行的内容**而不是注释，走
+//!   [`RowKind::Custom`]，灰色照旧；
 //! - 多选一（浅深、翻页方式、排列密度…）**推一屏勾选**，不再开内联下拉：七项的下拉在
 //!   393dp 那块屏上要盖掉半屏，而推入式的每一行都能整行命中 44；
 //! - 开关用 `Switch`（受控值：回调给的就是要写进去的新值），数值用 −/+ 步进行：拖动滑条
@@ -35,7 +41,6 @@
 //! | 组与组的缝 35（观测） | `mt_8`（32） | 35 不在阶上，取最近那一档 |
 //! | 顶栏到第一张卡 | `mt_2`（8） | Material 的列表贴着顶栏那一档；分隔线去掉后由这段留白换段 |
 //! | 正文 17（HIG body） | `text_base`（16） | 字号阶是 12/14/16/18/20 |
-//! | 节头与尾注 13（HIG footnote） | `text_sm`（14） | 同上，取最近那一档 |
 //! | 分组卡圆角 10（观测） | `theme.radius_lg`（8） | 规范：圆角只从主题那几档里挑 |
 //! | 分组卡那圈描边 | `border_1` + `theme.border` | 规范：区域靠背景与分隔线定，不靠填色分层 |
 //! | 开关 51×31（UIKit 固定尺寸） | `Switch::large()`（44×24） | 规范：保组件家族的几何，不手搓外框 |
@@ -114,24 +119,16 @@ fn icon_slot(icon: IconName, cx: &App) -> impl IntoElement {
         .child(Icon::new(icon).small())
 }
 
-/// 标题 + 可选的次要说明。行左侧共用的那半边。
+/// 标题。行左侧共用的那半边。
+///
+/// 只有标题一格：规格里那句次要说明（[`spec::Row::desc`]）归桌面，这一屏行内不摆灰色说明
+/// （理由写在文件头那条定稿里）。
 ///
 /// 返回具体的 `Div` 而不是 `impl IntoElement`：调用方还要往这块上接 `flex_1()` 与
 /// `min_w_0()`，而 `Styled` 那一整套方法只长在具体类型上 —— 擦成 `impl IntoElement`
 /// 之后调用方就再也加不了样式。
-fn label_block(title: SharedString, desc: Option<SharedString>, cx: &App) -> Div {
-    let mut col = v_flex()
-        .gap_0p5()
-        .child(div().text_base().text_ellipsis().child(title));
-    if let Some(desc) = desc {
-        col = col.child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(desc),
-        );
-    }
-    col
+fn label_block(title: SharedString) -> Div {
+    div().text_base().text_ellipsis().child(title)
 }
 
 /// 右端那一格「当前值」：与标题同字号、取次要文字色、右对齐（Apple 的 value1 就是
@@ -171,7 +168,7 @@ fn list_row(
         .into_any_element()
 }
 
-/// 「进去还有一屏」那一类行：图标位（可空）+ 标题（+说明）+ 可选的当前值 + 一枚箭头。
+/// 「进去还有一屏」那一类行：图标位（可空）+ 标题 + 可选的当前值 + 一枚箭头。
 ///
 /// 右端没有值就只留箭头：根屏每一行都不挂值（那里的一行是「去哪儿」），而子页里「多选一」
 /// 那一行要挂 —— 那一行的当前值就是它自己，点进去之前读者得先看得见现在用的是哪一档。
@@ -179,7 +176,6 @@ fn push_cell(
     id: SharedString,
     icon: Option<IconName>,
     title: SharedString,
-    desc: Option<SharedString>,
     value: Option<SharedString>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
@@ -189,12 +185,7 @@ fn push_cell(
     if let Some(icon) = icon {
         parts.push(icon_slot(icon, cx).into_any_element());
     }
-    parts.push(
-        label_block(title, desc, cx)
-            .flex_1()
-            .min_w_0()
-            .into_any_element(),
-    );
+    parts.push(label_block(title).flex_1().min_w_0().into_any_element());
     if let Some(value) = value {
         parts.push(value_text(value, cx).into_any_element());
     }
@@ -217,12 +208,8 @@ fn choice_cell(
     cx: &App,
 ) -> AnyElement {
     let name = title.clone();
-    let mut parts: Vec<AnyElement> = vec![
-        label_block(title, None, cx)
-            .flex_1()
-            .min_w_0()
-            .into_any_element(),
-    ];
+    let mut parts: Vec<AnyElement> =
+        vec![label_block(title).flex_1().min_w_0().into_any_element()];
     if checked {
         parts.push(
             Icon::new(IconName::Check)
@@ -363,7 +350,6 @@ impl CompactSettings {
                 Some(page.icon),
                 page.title.clone(),
                 None,
-                None,
                 move |_, _, app| entity.update(app, |this, cx| this.open(ix, cx)),
                 cx,
             ));
@@ -417,7 +403,10 @@ impl CompactSettings {
             })
     }
 
-    /// 子页正文：规格里的每个组各成一节 —— 节头在上，分组卡在下。
+    /// 子页正文：规格里的每个组各成一张卡，卡上方不摆节头 —— 整页是一串光卡。
+    ///
+    /// 组标题在这一屏**不被读**：它归桌面的侧栏当子项（见 `view/mod.rs` 的 `setting_page`），
+    /// 而这边一行小灰字换成 32 的缝之后，「换了一块」由留白自己说。
     fn page_screen(
         &self,
         page_ix: usize,
@@ -436,25 +425,12 @@ impl CompactSettings {
             }
             // 第一张卡与顶栏只留 8（Material 的列表贴着顶栏的那一档），组与组之间仍是 32
             // 那一道缝。分隔线去掉以后，这两段留白就是「换了一块」唯一说话的地方。
-            let mut section = if group_ix == 0 {
+            let gap = if group_ix == 0 {
                 v_flex().w_full().mt_2()
             } else {
                 v_flex().w_full().mt_8()
             };
-            // 节头是**可去的一格**：储存那一页整屏只留卡片（`Page::no_group_titles`），
-            // 其余各页照旧靠这一行小灰字把几十行切成几段。
-            if page.show_group_titles {
-                section = section.child(
-                    div()
-                        .w_full()
-                        .px_4()
-                        .pb_1()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(group.title.clone()),
-                );
-            }
-            body = body.child(section.child(div().w_full().px_4().child(card(rows, cx))));
+            body = body.child(gap.child(div().w_full().px_4().child(card(rows, cx))));
         }
         Self::scrollable(body)
     }
@@ -528,7 +504,7 @@ impl CompactSettings {
                         .items_center()
                         .gap_3()
                         .child(
-                            label_block(row.title.clone(), row.desc.clone(), cx)
+                            label_block(row.title.clone())
                                 .flex_1()
                                 .min_w_0(),
                         )
@@ -565,7 +541,6 @@ impl CompactSettings {
                         id("dropdown"),
                         None,
                         row.title.clone(),
-                        row.desc.clone(),
                         Some(label),
                         move |_, _, app| {
                             entity.update(app, |this, cx| {
@@ -591,7 +566,7 @@ impl CompactSettings {
                         .items_center()
                         .gap_3()
                         .child(
-                            label_block(row.title.clone(), row.desc.clone(), cx)
+                            label_block(row.title.clone())
                                 .flex_1()
                                 .min_w_0(),
                         )
@@ -639,7 +614,7 @@ impl CompactSettings {
                         .items_center()
                         .gap_2()
                         .child(
-                            label_block(row.title.clone(), row.desc.clone(), cx)
+                            label_block(row.title.clone())
                                 .flex_1()
                                 .min_w_0(),
                         )
@@ -700,7 +675,7 @@ impl CompactSettings {
                     v_flex()
                         .w_full()
                         .gap_1()
-                        .child(label_block(row.title.clone(), row.desc.clone(), cx))
+                        .child(label_block(row.title.clone()))
                         .child(Input::new(input).w_full()),
                 )
             }
@@ -797,7 +772,7 @@ impl Render for CompactSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompactSettings, Screen, SettingsPage, spec_pages};
+    use super::{CompactSettings, Screen};
     use gpui_kit::{AppContext as _, Entity, TestAppContext};
 
     /// 返回键一层一层往外退：选项屏退回它来的那一页，那一页退回根屏，根屏那一次让给
@@ -863,30 +838,5 @@ mod tests {
         assert!(pushed(cx), "退回的是那一页，还在详情里，底栏不该当场回来");
         assert!(back(cx), "那一页再往外弹一层");
         assert!(!pushed(cx), "回到根屏，底栏跟着回来");
-    }
-
-    /// 节头那一格只有储存页去掉：其余各页还靠那一行小灰字把几十行切成几段，而桌面那头从不
-    /// 看这一格（组标题同时是侧栏子项）。判据住在规格里（`Page::show_group_titles`），渲染
-    /// 那一头只读它 —— 写反时屏幕上不是少了字就是多了字，一眼是一整屏的错。
-    #[gpui_kit::test]
-    fn only_the_storage_page_drops_its_section_titles(cx: &mut TestAppContext) {
-        use crate::ui::services::config::ConfigHolder;
-        use folio_core::Config;
-
-        cx.update(gpui_kit::init);
-        cx.update(|cx| {
-            ConfigHolder::install(Config::default(), cx);
-            let storage = SettingsPage::Storage.index();
-            let pages = spec_pages(cx);
-            assert_eq!(pages.len(), SettingsPage::ALL.len(), "页数与导航那份对不上");
-            for (ix, page) in pages.iter().enumerate() {
-                assert_eq!(
-                    page.show_group_titles,
-                    ix != storage,
-                    "第 {ix} 页的节头该{}摆",
-                    if ix == storage { "不" } else { "" }
-                );
-            }
-        });
     }
 }

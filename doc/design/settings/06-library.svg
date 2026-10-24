@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="384" height="853" viewBox="0 0 384 853">
+<title>Folio 设置 · 浅色 · Default Light</title>
+<desc>书库：位置、文件夹监听、Wi-Fi 传书</desc>
+<rect width="384" height="853" fill="#ffffff"/>
+<rect x="0" y="0" width="384" height="28" fill="#ffffff"/>
+<text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
+<circle cx="192.0" cy="14" r="5.5" fill="#000" stroke="#d4d4d4" stroke-width="1"/>
+<g transform="translate(308.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/></g>
+<g transform="translate(328.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h.01"/><path d="M7 20v-4"/><path d="M12 20v-8"/><path d="M17 20V8"/></g>
+<rect x="344" y="8" width="18" height="10" rx="2.5" fill="none" stroke="#0a0a0a" stroke-width="1.6"/>
+<rect x="346" y="10" width="12" height="6" rx="1" fill="#0a0a0a"/>
+<rect x="363.5" y="11" width="2" height="4" rx="1" fill="#0a0a0a"/>
+<g transform="translate(22.00,34.00) scale(0.83333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></g>
+<text x="56" y="49.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="600" fill="#0a0a0a" text-anchor="start">书库</text>
+<rect x="16" y="80" width="352" height="187.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<g transform="translate(0,80.00)"><text x="32" y="24" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">书库位置</text><rect x="32" y="34" width="320" height="36" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/></g>
+<rect x="33" y="158.5" width="334" height="0.5" fill="#e5e5e5"/>
+<g transform="translate(0,158.50)"><rect x="32" y="8" width="97.8" height="28" rx="6" fill="#f5f5f5"/><text x="42" y="26.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">选择文件夹…</text></g>
+<rect x="33" y="203.0" width="334" height="0.5" fill="#e5e5e5"/>
+<g transform="translate(0,203.00)"><text x="32" y="22" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">建议位置</text><text x="32" y="48" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">/storage/emulated/0/Documents/Folio</text></g>
+<rect x="16" y="299.5" width="352" height="153.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<g transform="translate(0,299.50)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">监听文件夹</text><rect x="308" y="10.0" width="44" height="24" rx="12" fill="#e5e5e5"/><circle cx="320" cy="22.0" r="9" fill="#ffffff"/></g>
+<rect x="33" y="344.0" width="334" height="0.5" fill="#e5e5e5"/>
+<g transform="translate(0,344.00)"><rect x="32" y="8" width="97.8" height="28" rx="6" fill="#f5f5f5"/><text x="42" y="26.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">选监听目录…</text></g>
+<rect x="33" y="388.5" width="334" height="0.5" fill="#e5e5e5"/>
+<g transform="translate(0,388.50)"><text x="32" y="22" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">建议的收件箱</text><text x="32" y="48" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">/storage/emulated/0/Documents/Foli…</text></g>
+<rect x="16" y="485.0" width="352" height="88.5" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<g transform="translate(0,485.00)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">Wi-Fi 传书</text><rect x="308" y="10.0" width="44" height="24" rx="12" fill="#e5e5e5"/><circle cx="320" cy="22.0" r="9" fill="#ffffff"/></g>
+<rect x="33" y="529.5" width="334" height="0.5" fill="#e5e5e5"/>
+<g transform="translate(0,529.50)"><text x="32" y="26.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">开关打开后，这里会显示能打开的地址与配对码。</text></g>
+</svg>

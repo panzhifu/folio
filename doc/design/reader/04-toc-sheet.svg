@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="384" height="853" viewBox="0 0 384 853">
+<title>Folio 阅读 · 浅色 · Default Light</title>
+<desc>目录弹层：0.85 档高，书头 + 头部行 + 条目（当前章整行底色加左标记条，已读降成次要色）</desc>
+<rect width="384" height="853" fill="#ffffff"/>
+<rect x="0" y="0" width="384" height="28" fill="#ffffff"/>
+<text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
+<circle cx="192.0" cy="14" r="5.5" fill="#000" stroke="#d4d4d4" stroke-width="1"/>
+<g transform="translate(308.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/></g>
+<g transform="translate(328.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h.01"/><path d="M7 20v-4"/><path d="M12 20v-8"/><path d="M17 20V8"/></g>
+<rect x="344" y="8" width="18" height="10" rx="2.5" fill="none" stroke="#0a0a0a" stroke-width="1.6"/>
+<rect x="346" y="10" width="12" height="6" rx="1" fill="#0a0a0a"/>
+<rect x="363.5" y="11" width="2" height="4" rx="1" fill="#0a0a0a"/>
+<text x="24.0" y="115.5" font-family="Noto Sans CJK SC" font-size="34" font-weight="700" fill="#0a0a0a" text-anchor="start">湖上</text>
+<text x="58.0" y="168.03" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">清晨我划到湖心去，雾还没散。水面没</text>
+<text x="24.0" y="197.78" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">有一点风，船头推开的地方起一圈圈细纹，</text>
+<text x="24.0" y="227.53" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">细纹走到雾里就没了。我停下来听，四周只</text>
+<text x="24.0" y="257.28" font-family="Noto Sans CJK SC" font-size="17.0" font-weight="400" fill="#0a0a0a" text-anchor="start">有水拍船底那一下一下。</text>
+<text x="58.0" y="299.78" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">松林在雾里只剩一条深色的边。岸上的</text>
+<text x="24.0" y="329.53" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">颜色比水浅，比天深，说不清是哪一种绿。</text>
+<text x="24.0" y="359.28" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">我认得这一条边——从远处看它一直在，走近</text>
+<text x="24.0" y="389.03" font-family="Noto Sans CJK SC" font-size="17.0" font-weight="400" fill="#0a0a0a" text-anchor="start">了才发现它是由一棵一棵树站出来的。</text>
+<text x="58.0" y="431.53" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">划桨的手不需要想。想的是另一件事：</text>
+<text x="24.0" y="461.28" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">这一年读过的书，有多少是读第一遍时真在</text>
+<text x="24.0" y="491.03" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">读，有多少只是眼睛从字上走了一遍。眼睛</text>
+<text x="24.0" y="520.78" font-family="Noto Sans CJK SC" font-size="17.0" font-weight="400" fill="#0a0a0a" text-anchor="start">走得很快，快得什么也没留下。</text>
+<text x="58.0" y="563.28" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">雾散的时候太阳已经高了。湖面重新变</text>
+<text x="24.0" y="593.03" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">成一件东西，而不是一片光。我把船靠到那</text>
+<text x="24.0" y="622.78" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">块旧石头上，石头上有水痕，一道一道，是</text>
+<text x="24.0" y="652.53" font-family="Noto Sans CJK SC" font-size="17.0" font-weight="400" fill="#0a0a0a" text-anchor="start">这些年水位留下的。</text>
+<text x="58.0" y="695.03" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">回去的路上经过一片浅滩，水草在脚边</text>
+<text x="24.0" y="724.78" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">那么深的地方立着。我停下来看了一会儿。</text>
+<text x="24.0" y="754.53" font-family="Noto Sans CJK SC" font-size="17.0" fill="#0a0a0a" textLength="336.0" lengthAdjust="spacing">它们不急着往哪儿去，也不因为有人看就长</text>
+<text x="24.0" y="784.28" font-family="Noto Sans CJK SC" font-size="17.0" font-weight="400" fill="#0a0a0a" text-anchor="start">得更快些。</text>
+<rect x="0" y="28" width="384" height="28.0" fill="#ffffff"/>
+<text x="16.0" y="47.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">湖上</text>
+<rect x="0" y="825.0" width="384" height="28.0" fill="#ffffff"/>
+<text x="16.0" y="843.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="start">第 47 / 218 页</text>
+<text x="368.0" y="843.0" font-family="Noto Sans CJK SC" font-size="12" font-weight="400" fill="#737373" text-anchor="end">22%</text>
+<rect x="0" y="0.0" width="384" height="853.0" fill="#000000" fill-opacity="0.051"/>
+<rect x="0" y="127.95" width="384" height="725.05" rx="8" fill="#ffffff"/>
+<rect x="0" y="135.95" width="384" height="717.04" fill="#ffffff"/>
+<rect x="176.00" y="143.95" width="32.0" height="4.0" rx="2.0" fill="#e5e5e5"/>
+<rect x="15" y="175.95000000000005" width="48" height="72" rx="6" fill="#f5f5f5"/>
+<text x="75" y="191.95000000000005" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">瓦尔登湖</text>
+<text x="75" y="213.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">亨利·戴维·梭罗</text>
+<text x="75" y="235.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">读到 22% · EPUB · 1.8 MB</text>
+<rect x="0" y="255.95000000000005" width="384" height="0.5" fill="#e5e5e5"/>
+<text x="15" y="282.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">已读 6 / 18 章</text>
+<g transform="translate(333.00,269.95) scale(0.66667)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></g>
+<g transform="translate(353.00,269.95) scale(0.66667)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1" fill="#0a0a0a" stroke="none"/><circle cx="19" cy="12" r="1" fill="#0a0a0a" stroke="none"/><circle cx="5" cy="12" r="1" fill="#0a0a0a" stroke="none"/></g>
+<text x="273" y="282.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">全文</text>
+<rect x="217.0" y="265.95000000000005" width="44.0" height="24" rx="6" fill="#f5f5f5"/>
+<text x="225" y="282.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">目录</text>
+<text x="31.0" y="327.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">经济状</text>
+<g transform="translate(354.70,315.95) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<rect x="0" y="345.95000000000005" width="384" height="46.0" fill="#f5f5f5"/>
+<rect x="2.1" y="355.95000000000005" width="2.9" height="26.0" rx="1.5" fill="#171717"/>
+<text x="31.0" y="373.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="600" fill="#0a0a0a" text-anchor="start">我生活的地方；我为何生活</text>
+<text x="42.4" y="419.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">读</text>
+<text x="42.4" y="465.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">声音</text>
+<text x="31.0" y="511.95000000000005" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">湖</text>
+<g transform="translate(354.70,499.95) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<text x="42.4" y="557.95" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">湖的岸线</text>
+<text x="42.4" y="603.95" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">瓦尔登湖的宝藏</text>
+<text x="31.0" y="649.95" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">贝克斯菲尔德的来访者</text>
+<g transform="translate(354.70,637.95) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<text x="31.0" y="695.95" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">种豆</text>
+<g transform="translate(354.70,683.95) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<text x="31.0" y="741.95" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">镇</text>
+<g transform="translate(354.70,729.95) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+<text x="31.0" y="787.95" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">湖的访客</text>
+<g transform="translate(354.70,775.95) scale(0.58333)" fill="none" stroke="#737373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></g>
+</svg>
