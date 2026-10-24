@@ -104,6 +104,4 @@ crates/folio-app/    应用壳：自适应导航、阅读、书架、设置、�
 
 ## 许可
 
-MIT。第三方许可文本随每一个桌面安装包发布（`THIRD-PARTY-NOTICES.txt` ——
-各端放在哪儿见 `packaging/README.md`）。`reference/` 目录是借鉴用的上游只读克隆
-（含 AGPL 项目），整目录不入库，也不参与构建。
+MIT。

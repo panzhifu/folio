@@ -122,8 +122,4 @@ Two rules keep this honest:
 
 ## License
 
-MIT. The third-party license texts ship inside every desktop package
-(`THIRD-PARTY-NOTICES.txt` — where each platform puts it is described in
-`packaging/README.md`). The `reference/` directory — read-only upstream clones
-used for design study, some of them AGPL — is gitignored and takes no part in the
-build.
+MIT.
