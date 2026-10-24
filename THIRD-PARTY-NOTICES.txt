@@ -2555,9 +2555,10 @@ Apache License 2.0
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - gpui-pre-wgpu 0.3.9
-  - gpui-pre 0.3.9
   - gpui-pre-apple 0.3.9
+  - gpui-pre-wgpu 0.3.9
+  - gpui-pre-windows 0.3.9
+  - gpui-pre 0.3.9
   - gpui-pre-collections 0.3.9
   - gpui-pre-derive-refineable 0.3.9
   - gpui-pre-http-client 0.3.9
@@ -2569,7 +2570,6 @@ Apache License 2.0
   - gpui-pre-shared-string 0.3.9
   - gpui-pre-sum-tree 0.3.9
   - gpui-pre-util 0.3.9
-  - gpui-pre-windows 0.3.9
   - gpui-pre-ztracing-macro 0.3.9
   - gpui-pre-ztracing 0.3.9
 
@@ -13448,7 +13448,7 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（137 个）
+（138 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
@@ -13566,6 +13566,7 @@ MIT License
   - windows-strings 0.5.1
   - windows-sys 0.45.0
   - windows-sys 0.48.0
+  - windows-sys 0.52.0
   - windows-sys 0.59.0
   - windows-sys 0.60.2
   - windows-sys 0.61.2
