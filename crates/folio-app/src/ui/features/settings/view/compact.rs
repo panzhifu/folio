@@ -208,8 +208,7 @@ fn choice_cell(
     cx: &App,
 ) -> AnyElement {
     let name = title.clone();
-    let mut parts: Vec<AnyElement> =
-        vec![label_block(title).flex_1().min_w_0().into_any_element()];
+    let mut parts: Vec<AnyElement> = vec![label_block(title).flex_1().min_w_0().into_any_element()];
     if checked {
         parts.push(
             Icon::new(IconName::Check)
@@ -503,11 +502,7 @@ impl CompactSettings {
                         .w_full()
                         .items_center()
                         .gap_3()
-                        .child(
-                            label_block(row.title.clone())
-                                .flex_1()
-                                .min_w_0(),
-                        )
+                        .child(label_block(row.title.clone()).flex_1().min_w_0())
                         .child(
                             // `large` 那一档是组件家族给拇指准备的框（44×24），字号与内缩
                             // 跟着一起放大；不手搓一个只改外框的尺寸。
@@ -565,11 +560,7 @@ impl CompactSettings {
                         .w_full()
                         .items_center()
                         .gap_3()
-                        .child(
-                            label_block(row.title.clone())
-                                .flex_1()
-                                .min_w_0(),
-                        )
+                        .child(label_block(row.title.clone()).flex_1().min_w_0())
                         .child(
                             Button::new(id("dropdown-menu"))
                                 .outline()
@@ -613,11 +604,7 @@ impl CompactSettings {
                         .w_full()
                         .items_center()
                         .gap_2()
-                        .child(
-                            label_block(row.title.clone())
-                                .flex_1()
-                                .min_w_0(),
-                        )
+                        .child(label_block(row.title.clone()).flex_1().min_w_0())
                         .child(div().min_w(px(40.0)).text_base().child(shown))
                         .child(
                             Button::new(id("number-minus"))
