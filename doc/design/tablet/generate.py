@@ -13,7 +13,7 @@
 | 侧栏宽 | rail **48** / sidebar **260** | `navigation/mod.rs:22-24`（folio 覆盖框架的 255/48，可调范围在 folio 侧不存在） |
 | 侧栏项 | 展开 44（p_2+h_7+p_2）/ rail 30；图标 14、label 14、缝 8、圆角 6 | `sidebar/menu.rs:305-307,329`、`:75` |
 | 选中态 | 只换底色 `sidebar_accent` + 前景 + `font_medium`，**无左条无另变色** | `menu.rs:316-320` |
-| 品牌头 | 「Folio」14 半粗，**只在展开档** | `side_nav.rs:50-59` |
+| 品牌头 | **两档都不给**（应用名在桌面归自绘标题栏）；首项起点 = 首组 `pt_3` 12，rail 外层另有 `p_2` 8 | `navigation/side_nav.rs`、`sidebar/mod.rs:474` |
 | 内容宽 | 800−48=**752** / 1280−260=**1020** | `shell/mod.rs:1193-1212` |
 | 书架列数 | Medium **4 列**（card 176 / cover 264）· Expanded **5 列**（192.8 / 289.2） | `shelf/view/grid.rs:43-50,79,56-59` |
 | 平板顶行 | `justify_end`、搜索框定宽 **256**、Small 档（h24 px8 gap4）、右侧只有三点钮 | `toolbar.rs:30-41`、`view/mod.rs:296-300` |
@@ -673,7 +673,7 @@ SCREENS = [
      "书架·竖屏（Medium）：rail 48、四列一排，顶行是定宽 256 的搜索框加一颗三点钮"),
     ("02-shelf-landscape", LANDSCAPE, LIGHT,
      lambda T, cv: shelf_screen(T, cv, False),
-     "书架·横屏（Expanded）：sidebar 260 带品牌头，五列一排"),
+     "书架·横屏（Expanded）：sidebar 260、五列一排"),
     ("03-settings-compact-in-wide", PORTRAIT, LIGHT,
      lambda T, cv: settings_compact_screen(T, cv, True),
      "设置·Android 平板的现状：两栏的门是 host 不是档位，所以这里仍是手机那份钻入式列表"),

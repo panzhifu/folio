@@ -340,7 +340,9 @@ def side_nav(T, current, collapsed, height, top=0.0):
 
     **选中那一格只换底色与前景色再加 `font_medium`** —— 没有左标记条，文字也不另变色
     （`sidebar/menu.rs:316-320`）。这条与手机底栏同一处理：换页的提示只有一处。
-    品牌头「Folio」只在展开档有；rail 那一档顶部留空，图标项自己带 tooltip（`:230-232`）。
+    两档**都不画品牌头**（2026-10-25 撤掉：应用名在桌面归自绘标题栏，侧栏是导航不是
+    标牌），rail 那一档图标项自己带 tooltip（`:230-232`）。第一项的起点因此是 `is_first`
+    那支 `pt_3`（`sidebar/mod.rs:474`），rail 的外层另有 `p_2`。
     """
     w = RAIL_W if collapsed else SIDEBAR_W
     e = [f'<rect x="0" y="{top}" width="{w}" height="{height}" fill="{T["sidebar_bg"]}"/>',
@@ -348,11 +350,7 @@ def side_nav(T, current, collapsed, height, top=0.0):
          f'fill="{T["sidebar_border"]}"/>']
     inset = 8.0 if collapsed else NAV_INSET
     item_h = NAV_ITEM_H_RAIL if collapsed else NAV_ITEM_H
-    y = top + 12.0 + inset                     # 首组 pt_3 + 外层内缩
-    if not collapsed:
-        # 品牌头：包层 pt_3 px_3，内容 px_2 py_1 + 半粗 14。它占掉的那一段就是 y 的起点。
-        e.append(text(inset + 8, top + 12 + 4 + 15, "Folio", 14, T["fg"], 600))
-        y = top + 12 + 28 + 12 + 12
+    y = top + 12.0 + (inset if collapsed else 0.0)   # 首组 pt_3；只有 rail 的外层再给 p_2
     for ic, label in NAV_TABS:
         on = label == current
         if on:

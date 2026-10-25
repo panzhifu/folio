@@ -47,7 +47,7 @@
 | 文件 | 内容 |
 | --- | --- |
 | `01-shelf-portrait` | 书架·竖屏：rail 48、四列一排、顶行定宽 256 搜索框 + 三点钮 |
-| `02-shelf-landscape` | 书架·横屏：sidebar 260 带品牌头、五列一排 |
+| `02-shelf-landscape` | 书架·横屏：sidebar 260、五列一排 |
 | `03-settings-compact-in-wide` | **Android 平板的现状**：「我的」仍是手机那份钻入式列表 |
 | `04-settings-two-pane-portrait` | 设置·两栏（桌面宿主拉到 800 宽）：侧栏 170 + 正文 573 |
 | `05-settings-two-pane-landscape` | 设置·两栏横屏：选中「版面」—— 单组页因此不列子项 |

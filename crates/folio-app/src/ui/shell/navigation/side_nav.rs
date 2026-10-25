@@ -4,7 +4,7 @@
 //! 图标态（Medium）折到 48px 只剩图标 —— 也就是 Material 的 navigation rail。
 
 use gpui_kit::component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
-use gpui_kit::{App, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui_kit::{App, IntoElement, Styled, Window, px};
 
 use super::{Destination, RAIL_WIDTH, SIDEBAR_WIDTH};
 use crate::ui::services::l10n::tr;
@@ -41,22 +41,11 @@ where
         (SIDEBAR_WIDTH, SidebarCollapsible::None)
     };
 
-    let mut sidebar = Sidebar::new("folio-nav")
+    // 两档都不给品牌头：应用名在桌面由自绘标题栏承担（`shell/mod.rs` 的 `TitleBar`），
+    // 侧栏是导航，不是放标的地方。
+    Sidebar::new("folio-nav")
         .w(px(width))
         .collapsed(collapsed)
-        .collapsible(collapsible);
-
-    // 展开态给一个品牌头；折叠态只有 48px，放不下文字，留空。
-    if !collapsed {
-        sidebar = sidebar.header(
-            div()
-                .w_full()
-                .px_2()
-                .py_1()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child("Folio"),
-        );
-    }
-
-    sidebar.child(menu)
+        .collapsible(collapsible)
+        .child(menu)
 }
