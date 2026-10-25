@@ -1642,9 +1642,9 @@ fn a_relative_url_in_an_inline_style_folds_like_a_stylesheet() {
         "写在 class 里有底、写在 style 里没底，就是这两处形状漂了"
     );
 
-    // 章内那块 `<style>` 由**宿主**收进规则表（`chapter_style_rules`），层叠这一侧
-    // 根本不读 DOM 里的 `<style>` 元素 —— 这一点也顺手钉住：两边都收会收两次，
-    // 两边都折会折两次。那条路的落点在 `folio-app` 的 `chapter_layout/tests.rs`。
+    // 章内那块 `<style>` 由 `css::chapter_style_rules` 收进规则表（排版那一趟与量 CSS
+    // 缺口的工具都读它），层叠这一侧根本不读 DOM 里的 `<style>` 元素 —— 这一点也顺手
+    // 钉住：两边都收会收两次，两边都折会折两次。那条路的测试在同目录的 `css/tests.rs`。
     let style_block = page_in_dir(
         "<style>body { background-image: url(../Images/p.png) }</style><p>正文</p>",
         "",
@@ -1655,7 +1655,7 @@ fn a_relative_url_in_an_inline_style_folds_like_a_stylesheet() {
             .styled
             .iter()
             .all(|(_, style)| style.background_layers.is_empty()),
-        "层叠不该自己去读章内 `<style>` —— 那是宿主那一层唯一的收口"
+        "层叠不该自己去读章内 `<style>` —— 那是 `css::chapter_style_rules` 唯一的收口"
     );
 }
 

@@ -320,12 +320,13 @@ pub enum PageTurn {
     /// 动的是旧页，新页平躺在它下面被一点点露出来；折线的倾角由起折点那一个常数给出，
     /// 随行程自己变直（几何与阴影见 `reader::turn_animation::Curl`）。
     Curl,
-    /// 上下滚动：不摆第二张纸，翻页就是画出来的位置补间过去。只有连续滚动摆法成立
-    /// （见 `reader::turn_animation::applies` 那一格怎么筛选项）。
+    /// 上下滚动：不摆第二张纸，翻页就是画出来的位置补间过去。这一档同时决定摆法 ——
+    /// 选中它，界面那一层会把这本书带进连续滚动；选任何一张纸的走法则把它带回分页 /
+    /// 双页（见 `reader::chrome::reconcile`）。
     Scroll,
-    /// 不走动画：当场落定，也就不必为这一帧多摆一张纸。**初始默认是这一档** —— 与初始
-    /// 摆法「上下滚动」（[`default_mode`] 那一处）配成一对：一本没动过设置的书就是从上往下
-    /// 读，不摆第二张纸。动画是读者加上去的东西，不是我们替他先选好的东西。
+    /// 不走动画：当场落定，也就不必为这一帧多摆一张纸。**初始默认是这一档** ——
+    /// 一本没动过设置的书就是左右翻页、当场落定，不摆第二张纸。动画与连续滚动都是
+    /// 读者加上去的东西，不是我们替他先选好的东西。
     #[default]
     None,
 }
@@ -633,16 +634,48 @@ impl Default for Reader {
 }
 
 impl Reader {
+    /// 字号的合法区间。排版拿到超出这一段的数要么算出零高一行、要么把一栏撑到没有字，
+    /// 所以入库前夹住（[`Reader::clamped`]），而界面那头读的是同一对数：设置屏的数字框
+    /// 与阅读卡片里的滑条都不该再抄第二份「最小/最大字号」。
+    pub const FONT_SIZE_MIN: f32 = 9.0;
+    pub const FONT_SIZE_MAX: f32 = 72.0;
+    /// 行高 = 字号 × 这一倍数。下界 1.0 是「行挨行」，再小字就互相压住；上界 4.0 一屏
+    /// 只剩两行，已经不是一种读法。
+    pub const LINE_HEIGHT_MIN: f32 = 1.0;
+    pub const LINE_HEIGHT_MAX: f32 = 4.0;
+    /// 段间距，单位是字号倍。`0` 是合法档（不空行，靠首行缩进分段）。
+    pub const PARAGRAPH_GAP_MIN: f32 = 0.0;
+    pub const PARAGRAPH_GAP_MAX: f32 = 4.0;
+    /// 首行缩进，单位是字符。`0` 是合法档（不缩进）。
+    pub const INDENT_MIN: f32 = 0.0;
+    pub const INDENT_MAX: f32 = 6.0;
+    /// 正文栏最大宽度（像素）。`0` 是「随窗口铺满」那个约定值，所以下界就是 0；上界之外
+    /// 的宽窗口本来也被窗口自己限住了，写更大只是骗读者说这格能调。
+    pub const MAX_MEASURE_MIN: f32 = 0.0;
+    pub const MAX_MEASURE_MAX: f32 = 4000.0;
+    /// 两侧留白（像素，左右各一份）。上界那一档在手机上已经把正文压成一条，摆到更宽只会
+    /// 让读者以为版心还在。
+    pub const MARGIN_X_MIN: f32 = 0.0;
+    pub const MARGIN_X_MAX: f32 = 400.0;
+
     /// 从磁盘读回来的值不可信（手改过、旧版本、别的机器同步来的），
     /// 越界值会让排版算出零高或无限宽，所以入库前一律夹住。
     pub fn clamped(mut self) -> Self {
-        self.font_size = self.font_size.clamp(9.0, 72.0);
-        self.line_height = self.line_height.clamp(1.0, 4.0);
-        self.paragraph_gap_em = self.paragraph_gap_em.clamp(0.0, 4.0);
-        self.indent_em = self.indent_em.clamp(0.0, 6.0);
+        self.font_size = self
+            .font_size
+            .clamp(Self::FONT_SIZE_MIN, Self::FONT_SIZE_MAX);
+        self.line_height = self
+            .line_height
+            .clamp(Self::LINE_HEIGHT_MIN, Self::LINE_HEIGHT_MAX);
+        self.paragraph_gap_em = self
+            .paragraph_gap_em
+            .clamp(Self::PARAGRAPH_GAP_MIN, Self::PARAGRAPH_GAP_MAX);
+        self.indent_em = self.indent_em.clamp(Self::INDENT_MIN, Self::INDENT_MAX);
         // 0 是合法的「铺满」，所以下界就是 0。
-        self.max_measure = self.max_measure.clamp(0.0, 4000.0);
-        self.margin_x = self.margin_x.clamp(0.0, 400.0);
+        self.max_measure = self
+            .max_measure
+            .clamp(Self::MAX_MEASURE_MIN, Self::MAX_MEASURE_MAX);
+        self.margin_x = self.margin_x.clamp(Self::MARGIN_X_MIN, Self::MARGIN_X_MAX);
         if self.font_family.trim().is_empty() {
             self.font_family = Reader::default().font_family;
         }

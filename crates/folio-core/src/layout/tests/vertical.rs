@@ -34,6 +34,7 @@ fn typeset_kept(html: &str, css: &str, wrap: f32) -> (Dom, StyledDom, Layout) {
             width: wrap,
             light: false,
             allow_vertical: true,
+            page_height: None,
         },
         &Mono,
         &NoImages,
@@ -301,6 +302,7 @@ fn light_layout_agrees_with_the_full_one_on_the_flow_extent() {
         width: 240.0,
         light,
         allow_vertical: true,
+        page_height: None,
     };
     let full = layout(&dom, &styles, root, opts(false), &Mono, &NoImages);
     let light = layout(&dom, &styles, root, opts(true), &Mono, &NoImages);

@@ -2,8 +2,9 @@
 //!
 //! 形态照 Reeden 的阅读界面量出来（1080×2400 @3.0）：干净态只剩左上角一行章名与底部
 //! 一行进度；点正文中间才浮出顶栏（返回 + 书名）与底栏（进度条 + 一排入口）。
-//! 入口就地换面板，**不弹浮层** —— 浮层在 Android 上现在点不住（同 `shelf` 里
-//! 「书要拷到哪儿」那块面板记的那条事实），而目录点不动等于没有目录。
+//! 那一排入口里带档位的两块 —— 目录与阅读设置 —— 各是盖住整屏的底部弹层，自己的状态住在
+//! 自己的实体里（见 [`TocPanel`] 与 [`ReadingSheet`]）：底栏常驻只有那三行，不跟着
+//! 展开的内容一起长高。
 //!
 //! 这一屏两端**共用一份**：桌面上原来的工具条 + 状态栏那套常驻 chrome 换成了这个形态，
 //! 因为「以手机那一版为准」不只是挑一套皮肤 —— 两套 chrome 意味着每个新功能要落两次地，
@@ -13,15 +14,15 @@
 //! 顶栏与底栏**压在正文之上**，不推动正文重排：读者点一下屏幕，字不该跳走。
 //! 正文只让出干净态那两条带的高度，那两个数住在 [`chrome`] 里，布局与视口算法共用它。
 //!
-//! 点击分区、面板档位、模式退档都在 [`chrome`] 里判：那里是纯函数，宿主的 `cargo test`
+//! 点击分区、浮层开合、模式退档都在 [`chrome`] 里判：那里是纯函数，宿主的 `cargo test`
 //! 直接跑，这一屏只把结果落成动作。
 
-use folio_core::infra::config::{Mode, PageTurn};
+use folio_core::infra::config::Mode;
 use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::{ActiveTheme, ThemeMode, h_flex, v_flex};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
+use gpui_kit::component::{ActiveTheme, ThemeMode};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Hsla,
@@ -30,11 +31,9 @@ use gpui_kit::{
 };
 
 use crate::ui::features::reader::components::image_viewer::{self, ImageViewer};
+use crate::ui::features::reader::components::reading_sheet::ReadingSheet;
 use crate::ui::features::reader::components::toc_panel::{TocEvent, TocPanel};
-use crate::ui::features::reader::model::chrome::{
-    self, BRIGHTNESS_RANGE, Chrome, Effect, FONT_SIZE_RANGE, Panel, Reserve, TURN_DURATION_RANGE,
-    zone,
-};
+use crate::ui::features::reader::model::chrome::{self, Chrome, Effect, Reserve, zone};
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::view::bands;
 use crate::ui::features::settings::CompactSettings;
@@ -82,19 +81,14 @@ pub struct ReadingPage {
     /// 拿着这一层的外壳（同样是弱句柄：外壳攥着这一层，这一层不该反过来攥着外壳）。
     /// 顶栏那颗返回要请它收起这一层 —— 收层是外壳的事，正文这一屏不知道自己盖在谁上面。
     pub(in crate::ui::features::reader) shell: WeakEntity<AppShell>,
-    /// 浮层的开合与面板档位。见 [`chrome`]。
+    /// 浮层（顶栏与底栏这一层）的开合。见 [`chrome`]。
     pub(in crate::ui::features::reader) chrome: Chrome,
-    /// 进度滑条。`Slider` 是有状态组件，句柄必须跨帧持有 —— 每帧新建会把拖动打断。
+    /// 进度滑条，底栏那一格。`Slider` 是有状态组件，句柄必须跨帧持有 —— 每帧新建会把拖动打断。
     pub(in crate::ui::features::reader) progress: Entity<SliderState>,
-    pub(in crate::ui::features::reader) font_size: Entity<SliderState>,
-    /// 亮度滑条。它写的是 `appearance.brightness` 那一格（不在 `Reader` 里：压暗不该让任何
-    /// 一章重排）；把这一格递给平台的是外壳每一帧那一次问（`AppShell::reading_brightness`），
-    /// 这一屏只管教滑条自己。
-    pub(in crate::ui::features::reader) brightness: Entity<SliderState>,
-    /// 翻页时长滑条。它写的也是 `appearance` 那一节（`turn_duration`）：一张纸走多久与一行字
-    /// 折在哪里无关，改它不该让任何一章重排。管到的是点屏 / 按键那一趟，以及松手那一腿的
-    /// 时长上限 —— 跟手那一截 1:1 跟着手指，没有时长可言。
-    pub(in crate::ui::features::reader) turn_duration: Entity<SliderState>,
+    /// 阅读设置那一屏。七条滑条、那颗翻页下拉、那只字体输入框与弹层档位都装在它自己
+    /// 那个实体里（见 [`ReadingSheet`]），这一屏只留一个句柄：开合状态要报给会话
+    /// （身上压着东西时正文的手势让位），元素要挂在最后（谁在上面由入树顺序定）。
+    pub(in crate::ui::features::reader) settings: Entity<ReadingSheet>,
     /// 目录那一屏。整棵树、折叠集、搜索、弹层档位、书头都装在它自己那个实体里
     /// （见 [`TocPanel`]），这一屏只留一个句柄：开合状态要报给会话（身上压着东西时
     /// 正文的手势让位），元素要挂在最后（谁在上面由入树顺序定）。
@@ -117,13 +111,6 @@ impl ReadingPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let reader = cx.new(|cx| ReaderSession::boot(cx));
-        // 四条滑条的初值先取出来：`cx.new` 要 `&mut cx`，而把 `cx` 再关进构造闭包里就是
-        // 同一个 `Context` 的二次可变借用。
-        let prefs = ConfigHolder::reader(cx);
-        let appearance = ConfigHolder::appearance(cx);
-        // 「跟随系统」在滑条上就是推到顶：配置里那一格是 `None`，滑条上得有个能显示的数。
-        let brightness = appearance.brightness.unwrap_or(BRIGHTNESS_RANGE.1);
-        let turn_duration = appearance.turn_duration;
         let progress = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
@@ -131,69 +118,19 @@ impl ReadingPage {
                 .step(0.001)
                 .default_value(0.0)
         });
-        let font_size = cx.new(|_| {
-            SliderState::new()
-                .min(FONT_SIZE_RANGE.0)
-                .max(FONT_SIZE_RANGE.1)
-                .step(0.5)
-                .default_value(prefs.font_size)
-        });
-        let brightness_state = cx.new(|_| {
-            SliderState::new()
-                .min(BRIGHTNESS_RANGE.0)
-                .max(BRIGHTNESS_RANGE.1)
-                .step(0.01)
-                .default_value(brightness)
-        });
-        // 步长 10 ms：一整条滑条 58 个刻度，手指一次划动能停稳的刻度比这少，再细则是在
-        // 骗读者说这格能调准 —— 两三百毫秒的差别肉眼分不出 5 ms。
-        //
-        // `max` 必须写在 `min` 前面：`SliderState::new()` 的默认区间是 0..**100**，而每一步
-        // setter 都会拿当前区间去 `clamp` 已有的值。这条的下限是 120，先写 `min` 就是
-        // `clamp(120.0, 100.0)` —— 当场 panic（实测炸在 `ReadingPage::new` 那一格）。
-        let turn_duration_state = cx.new(|_| {
-            SliderState::new()
-                .max(TURN_DURATION_RANGE.1)
-                .min(TURN_DURATION_RANGE.0)
-                .step(10.0)
-                .default_value(turn_duration)
-        });
-        // 四条滑条各订阅一次：拖动当场生效（正文滚到那一处 / 换字号重排 / 换背光 /
-        // 下一趟翻页走多久），所以这里没有「应用」按钮，也没有改了不生效的中间态。
-        let mut watches = vec![
-            cx.subscribe(&progress, |this: &mut Self, _, event, cx| {
-                if let SliderEvent::Change(value) = event {
-                    this.reader
-                        .update(cx, |reader, cx| reader.seek_ratio(value.end(), cx));
-                }
-            }),
-            cx.subscribe(&font_size, |_, _, event, cx| {
-                if let SliderEvent::Change(value) = event {
-                    let value = value.end();
-                    ConfigHolder::edit_reader(cx, |prefs| prefs.font_size = value);
-                }
-            }),
-            cx.subscribe(&brightness_state, |_, _, event, cx| {
-                if let SliderEvent::Change(value) = event {
-                    // 顶格归成 `None`：配置里于是只有「跟随系统」一个写法，滑条与文件不会是
-                    // 两套「最大亮度」（同 `Appearance::normalized` 那一条）。
-                    let value = value.end();
-                    ConfigHolder::edit_appearance(cx, |prefs| {
-                        prefs.brightness = if value >= BRIGHTNESS_RANGE.1 {
-                            None
-                        } else {
-                            Some(value)
-                        }
-                    });
-                }
-            }),
-            cx.subscribe(&turn_duration_state, |_, _, event, cx| {
-                if let SliderEvent::Change(value) = event {
-                    let value = value.end();
-                    ConfigHolder::edit_appearance(cx, |prefs| prefs.turn_duration = value);
-                }
-            }),
-        ];
+        // 进度这一条订阅一次：拖动当场把正文滚到那一处。设置卡片里那七条滑条各自的
+        // 订阅归它自己那一屏（见 [`ReadingSheet::new`]），拖动即写配置、即重排 ——
+        // 两端都没有「应用」按钮，也没有改了不生效的中间态。
+        let mut watches = vec![cx.subscribe(&progress, |this: &mut Self, _, event, cx| {
+            if let SliderEvent::Change(value) = event {
+                this.reader
+                    .update(cx, |reader, cx| reader.seek_ratio(value.end(), cx));
+            }
+        })];
+        // 阅读设置那一屏自己的实体：弹层的开合与换档都要重画这一屏（`layers_up` 那个数
+        // 与底栏那一格的选中态读的是它），所以观察一道，与目录同一形状。
+        let settings = cx.new(ReadingSheet::new);
+        watches.push(cx.observe(&settings, |_, _, cx| cx.notify()));
         // 目录那一屏自己的实体：它要观察它（弹层的开合与换档都得重画这一屏，
         // `layers_up` 那个数与顶栏底栏的挂载都读它），也要听它报回来的两件事。
         let toc = cx.new(|cx| TocPanel::new(reader.clone(), cx));
@@ -231,9 +168,7 @@ impl ReadingPage {
             shell,
             chrome: Chrome::default(),
             progress,
-            font_size,
-            brightness: brightness_state,
-            turn_duration: turn_duration_state,
+            settings,
             toc,
             image_viewer,
             image_viewer_focus,
@@ -312,7 +247,7 @@ impl ReadingPage {
     /// 返回 `true` 表示这次返回已被浮层消费，调用方不该再往下走。
     ///
     /// 收的顺序与摆的顺序相反：图片放大那一层在最上面，先收它；再收笔记便签、脚注、
-    /// 目录，最后才是顶栏底栏。
+    /// 阅读设置那块卡片、目录那块弹层，最后才是顶栏底栏。
     /// 焦点的归还不在这里做 —— 这条路上没有 `&mut Window`（`App::on_action` 的派发里窗口是
     /// 借着的），弹层自己在下一帧的 `render` 里还。
     pub fn dismiss_chrome(&mut self, cx: &mut Context<Self>) -> bool {
@@ -334,6 +269,11 @@ impl ReadingPage {
         if self.reader.read(cx).footnote().is_some() {
             self.reader
                 .update(cx, |reader, cx| reader.dismiss_footnote(cx));
+            cx.notify();
+            return true;
+        }
+        if self.settings.read(cx).is_open(cx) {
+            self.settings.update(cx, |sheet, cx| sheet.hide(cx));
             cx.notify();
             return true;
         }
@@ -467,8 +407,10 @@ impl ReadingPage {
         }
     }
 
-    /// 把「别处也改得动」的数推回滑条：正文滚了要挪进度滑块，设置页改了字号要挪字号滑块，
-    /// 而亮度那一格在「跟随系统」时没有数 —— 滑条上把它显示成顶格，配置里它是 `None`。
+    /// 把「别处也改得动」的数推回底栏那条进度滑块：正文滚了要挪它。
+    ///
+    /// 设置卡片里那七条滑条不归这里 —— 它们对齐的是配置而不是正文，各自住在
+    /// [`ReadingSheet::sync`] 里。
     ///
     /// 带阈值比较：拖动的时候滑条自己就是权威，每帧再按正文读回来的数写回去，
     /// 就是拿手指算出来的值和滚动算出来的值互相追。
@@ -477,37 +419,32 @@ impl ReadingPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let progress = self.reader.read(cx).progress();
-        let prefs = ConfigHolder::reader(cx);
-        let appearance = ConfigHolder::appearance(cx);
-        let brightness = appearance.brightness.unwrap_or(BRIGHTNESS_RANGE.1);
-        let wanted = [
-            (&self.progress, progress),
-            (&self.font_size, prefs.font_size),
-            (&self.brightness, brightness),
-            (&self.turn_duration, appearance.turn_duration),
-        ];
-        for (state, value) in wanted {
-            if (state.read(cx).value().end() - value).abs() > 0.005 {
-                state.update(cx, |state, cx| state.set_value(value, window, cx));
-            }
+        // 算不出全书量时滑条停在 0：它是**控件**不是读数，那一格的读数由 `percent_label`
+        // 空着表达。拖它没有后果 —— `seek_ratio` 在同一个 `None` 上直接返回。
+        let progress = self.reader.read(cx).progress().unwrap_or(0.0);
+        if (self.progress.read(cx).value().end() - progress).abs() > 0.005 {
+            self.progress
+                .update(cx, |state, cx| state.set_value(progress, window, cx));
         }
     }
 
-    /// 底栏那排入口里的面板档位切换（现在只剩「阅读设置」一块，目录已经换成弹层）。
-    /// 整层保持露出 —— 切面板不该让顶栏闪一下。
-    pub(in crate::ui::features::reader) fn pick(&mut self, panel: Panel, cx: &mut Context<Self>) {
-        self.chrome.select(panel);
+    /// 阅读设置那张卡片：开 or 关。九格的内容、弹层停在哪一档与那七条滑条都装在它自己
+    /// 那个实体里（见 [`ReadingSheet`]）；这一屏只多管一件事 —— 目录那块弹层同时收掉：
+    /// 两块都是盖住整屏的模态层，叠着抬起来就是同一片遮罩底下两层东西。
+    pub(in crate::ui::features::reader) fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.read(cx).is_open(cx) && self.toc.read(cx).is_open(cx) {
+            self.toc.update(cx, |panel, cx| panel.hide(cx));
+        }
+        self.settings.update(cx, |sheet, cx| sheet.toggle(cx));
         cx.notify();
     }
 
     /// 目录弹层：开 or 关。树跟着阅读位置重建、搜索框与「⋯」一并收掉、书头跟着重查，
-    /// 那些都在 [`TocPanel::toggle`] 里；这一屏只多管一件事 —— 设置那块面板同时收掉，
-    /// 弹层升起来之后卡片还压在它下面，等于两层东西说同一件事。
+    /// 那些都在 [`TocPanel::toggle`] 里；这一屏只多管一件事 —— 设置那张卡片同时收掉，
+    /// 理由与反过来那一条相同（两块模态层不许同时在场）。
     pub(in crate::ui::features::reader) fn toggle_toc(&mut self, cx: &mut Context<Self>) {
-        if !self.toc.read(cx).is_open(cx) {
-            // 设置那块面板同时收掉 —— 弹层升起来之后卡片还压在它下面，等于两层东西说同一件事。
-            self.chrome.select(Panel::None);
+        if !self.toc.read(cx).is_open(cx) && self.settings.read(cx).is_open(cx) {
+            self.settings.update(cx, |sheet, cx| sheet.hide(cx));
         }
         self.toc.update(cx, |panel, cx| panel.toggle(cx));
         cx.notify();
@@ -539,11 +476,9 @@ impl ReadingPage {
         });
     }
 
-    /// 「更多设置」= 往正文这条子栈里再压一屏钻入式设置。
-    ///
-    /// 入口不在底栏那颗「设置」上了（那一颗现在就地展开亮度 / 字号 / 翻页方式那块面板），
-    /// 而是这一屏右下角那一格，加上目录那屏的 ⋯ —— 完整那一屏（行距、段距、版心、字体家族）
-    /// 得有个看得见的位置，不该只剩一条藏起来的键。
+    /// 往正文这条子栈里再压一屏钻入式设置 —— 现在只剩一个入口：目录那屏右上角「⋯」里
+    /// 那颗「目录样式」（阅读设置自己那张卡片已经装了行距、段距、版心、字体家族，
+    /// 底栏不再有「更多设置」那一格）。
     ///
     /// 手机上没有独立设置窗口（两栏的整页字段塞不进这块小屏），压进栈的这屏吃的是
     /// 与桌面同一份页面规格。压进栈而不是切目的地：系统返回 pop 它就回到刚才那
@@ -626,44 +561,6 @@ impl ReadingPage {
                 .into_any_element(),
         )
     }
-
-    /// 翻页方式写回 `appearance` 那一节：它不是排版失效键，换它不该让任何一章重排
-    /// （见 `folio_core::infra::config::PageTurn` 为什么这一格不在 `Reader` 里）。
-    pub(in crate::ui::features::reader) fn set_page_turn(
-        &mut self,
-        turn: PageTurn,
-        cx: &mut Context<Self>,
-    ) {
-        ConfigHolder::edit_appearance(cx, |appearance| appearance.page_turn = turn);
-        cx.notify();
-    }
-
-    pub(in crate::ui::features::reader) fn slider_row(
-        &self,
-        label: String,
-        value: String,
-        state: &Entity<SliderState>,
-        cx: &App,
-    ) -> AnyElement {
-        v_flex()
-            .w_full()
-            .gap_1()
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(label),
-                    )
-                    .child(div().text_sm().child(value)),
-            )
-            .child(Slider::new(state).w_full())
-            .into_any_element()
-    }
 }
 
 impl Render for ReadingPage {
@@ -672,13 +569,16 @@ impl Render for ReadingPage {
         // 「身上压着东西」也报给会话：那一刻正文的手势让位 —— 那一击的语义是收浮层，
         // 而按住一张图不该同时在底下选中字。报的是**有没有**，不是哪一层。
         //
-        // 目录两种表面（手机的底部弹层、平板与桌面的左侧抽屉）都**压在正文之上**：
-        // 抽屉不再占宽，正文因此一寸不让，点字照常选得中 —— 遮罩会先把那一击收掉。
+        // 目录与阅读设置两块卡片，两种表面（手机的底部弹层、平板与桌面的左侧抽屉）都
+        // **压在正文之上**：抽屉不再占宽，正文因此一寸不让，点字照常选得中 ——
+        // 遮罩会先把那一击收掉。
         let size = SizeClass::of(window);
         let wide = !size.is_compact();
         let toc_open = self.toc.read(cx).is_open(cx);
+        let settings_open = self.settings.read(cx).is_open(cx);
         let layers_up = self.chrome.is_open()
             || toc_open
+            || settings_open
             || self.toc.read(cx).menu_open()
             || self.reader.read(cx).footnote().is_some()
             || self.reader.read(cx).note_editor_open()
@@ -753,6 +653,10 @@ impl Render for ReadingPage {
         // `TocPanel::render` 与 `widgets::bottom_sheet` 那段模块注释）。右上角「⋯」那条
         // 菜单是 gpui-kit 自己的 `PopupMenu`，由那颗按钮按下时挂进它自己的浮层。
         root = root.child(self.toc.clone());
+        // 阅读设置那张卡片挂在目录之后：两块弹层由底栏那两颗入口互斥地打开（见
+        // [`ReadingPage::toggle_settings`] 与 [`ReadingPage::toggle_toc`]），真叠到一处时
+        // 卡片在上面，返回键那一下也先收它 —— 与 `dismiss_chrome` 里那个顺序同一份读法。
+        root = root.child(self.settings.clone());
         // 抬上来的顶栏：还是原来那一颗条，只是挂在目录之后。包一层绝对定位容器，
         // 几何就不变（正文现在整窗铺开，没有栏要让）。
         if toc_up {

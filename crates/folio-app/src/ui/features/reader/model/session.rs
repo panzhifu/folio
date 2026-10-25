@@ -27,7 +27,7 @@ use gpui_kit::{App, Bounds, Context, Entity, Pixels, Point, SharedString, Task};
 
 use crate::ui::features::reader::components::note_editor::NoteEditor;
 use crate::ui::features::reader::model::book::Book;
-use crate::ui::features::reader::model::chrome::{PageMode, Reserve};
+use crate::ui::features::reader::model::chrome::{PageMode, Reserve, reconcile};
 use crate::ui::features::reader::model::fixed_book::FixedBook;
 use crate::ui::features::reader::model::measure::FontCache;
 use crate::ui::features::reader::model::turn::TurnIntent;
@@ -555,7 +555,7 @@ impl ReaderSession {
         let mut effective = prefs.clone();
         effective.font_family = family.clone();
         // 库里存过档位就用读者的选择。没存过（第一次读这本书，或读了但从没换过档）
-        // 先按连续滚动摆着，等渲染帧量到窗口宽再定默认档 —— 构造时手上没有窗口，
+        // 先按默认档摆着，等渲染帧量到窗口宽再定 —— 构造时手上没有窗口，
         // 而「装不装得下两栏」只有量出来的宽能回答。
         let stored_mode = book_id
             .and_then(|id| store.as_ref()?.position(id).ok().flatten())
@@ -564,7 +564,17 @@ impl ReaderSession {
         let wanted_mode = stored_mode
             .as_deref()
             .map(PageMode::from_storage_name)
-            .unwrap_or(PageMode::Continuous);
+            .unwrap_or_default();
+        // 「上下滚动」这一档在**建会话之前**就得认下来。进度恢复发生在构造里，而摆法
+        // 当时只有「手上没有窗口宽」这一个借口 —— 等第一帧再去解那条耦合，恢复已经在
+        // 分页那一档下跑过一遍，落点被重置回章首，读出来的是「换个翻页方式位置就丢」。
+        // `by_width` 这里交回 `wanted_mode` 自己：只有宽度答得了的那一格（单页还是双页）
+        // 留给渲染帧定，这一层只回答「是不是连续」。
+        let wanted_mode = reconcile(
+            ConfigHolder::appearance(cx).page_turn,
+            wanted_mode,
+            wanted_mode,
+        );
         let book = Book::new(doc, effective.clone(), locator, cx);
         let mut session = Self {
             source: Source::Book(Box::new(book)),
@@ -939,45 +949,27 @@ impl ReaderSession {
         (self.content_height - self.laid_out.viewport).max(0.0)
     }
 
-    /// 本章已读比例。进度条与页脚都念它。
+    /// 全书已读比例。进度条与页脚都念它。
     ///
-    /// 连续滚动读**视口顶那一章**的章内比例：进度条是那一章的刻度，跨章滚动时
-    /// 每进一章归零重来。落库存的「第几个字」与此无关，两种口径互不干扰。
-    pub fn progress(&self) -> f32 {
-        // 定版式的进度按页号走（与可重排「第几个字」是两套口径，见 `LocatorKind::Page`）。
+    /// 口径是「前面各章字数之和 + 章内偏移 ÷ 全书总字数」（[`Book::progress_at`]），
+    /// 与架上卡片同一式子、同一份 `char_len`，而且**不经过排版**。回 `None` = 这一本
+    /// 有章的字数还没算过，界面上那一格就该空着 —— 与架上那一条同一个决定，不在这里
+    /// 退化成「章内比例」再念一个像样的百分数（那种数看着正常，其实是错的）。
+    ///
+    /// 从前这一格读的是视口顶那一章的章内比例：连续滚动里每进一章归零重来，分页 /
+    /// 双页里 `pages` 也是**本章**页数，同样每章归零。
+    pub fn progress(&self) -> Option<f32> {
+        // 定版式没有「第几个字」这套坐标（`LocatorKind::Page` 那条口径），进度仍按页号走。
         if let Some(fixed) = self.fixed() {
             let last = fixed.page_count().saturating_sub(1);
-            return if last == 0 {
+            return Some(if last == 0 {
                 0.0
             } else {
                 (fixed.page() as f32 / last as f32).clamp(0.0, 1.0)
-            };
+            });
         }
-        if self.laid_out.mode.is_continuous() {
-            let Some(book) = self.book() else {
-                return 0.0;
-            };
-            let gap = crate::ui::features::reader::model::book::Book::chapter_gap(&self.prefs);
-            let Some(chapter) = book.chapter_at_y(self.scroll_y, gap) else {
-                return 0.0;
-            };
-            let base = book.base_of(chapter, gap).unwrap_or(0.0);
-            let height = book
-                .span_doc(chapter)
-                .map(|doc| doc.height())
-                .unwrap_or(0.0);
-            let local_max = (height - self.laid_out.viewport).max(0.0);
-            if local_max <= 0.0 {
-                return 0.0;
-            }
-            return ((self.scroll_y - base) / local_max).clamp(0.0, 1.0);
-        }
-        let last = self.laid_out.pages.saturating_sub(1);
-        if last == 0 {
-            0.0
-        } else {
-            (self.page as f32 / last as f32).clamp(0.0, 1.0)
-        }
+        let (chapter, offset) = self.resolve_position()?;
+        self.book()?.progress_at(chapter, offset)
     }
 
     // ---- 给状态栏与宿主测试读的排版结果 ----

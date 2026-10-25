@@ -95,6 +95,13 @@ pub(super) struct BlockKey {
     /// （`value::edge_px` 的注释里已经预告过），同一个 `width` 就能配着不同的父容器宽
     /// 出现，而 `padding` / `text-indent` 的百分比恰恰折自后者。
     pub(super) basis: u32,
+    /// 包含块的高（`layout::collect::block` 的那个 `cb_h`），按位存，`None` = 父块没明确
+    /// 写过 `height`，这一块的百分比高整族按 `auto`。
+    ///
+    /// 与上面 `basis` 同一类理由：`height: 50%` 折出来是多少**只**由这一格决定，同一块
+    /// 换一个父块就会换高，键里少了它就是「命中了一份用错基准的排版」。留 `Option` 而不是
+    /// 直接存位，是因为 `Some(0.0)` 与 `None` 是两件事（`.container { height: 0 }` 真写 0）。
+    pub(super) cb_h: Option<u32>,
     /// 旁边站着哪些浮动盒 —— `layout::collect::Ctx::float_key` 按**相对这一块的偏移**
     /// 折出来的一个数。
     ///

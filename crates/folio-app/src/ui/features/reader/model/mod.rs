@@ -19,6 +19,7 @@ pub(in crate::ui::features::reader) mod measure;
 pub(in crate::ui::features::reader) mod paging;
 pub(in crate::ui::features::reader) mod perf;
 pub(in crate::ui::features::reader) mod position;
+pub(in crate::ui::features::reader) mod prefetch;
 pub(in crate::ui::features::reader) mod reading_time;
 pub(in crate::ui::features::reader) mod session;
 pub(in crate::ui::features::reader) mod speech;

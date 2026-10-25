@@ -94,6 +94,13 @@ pub struct LayoutKey {
     /// 一页几栏。与 `width` 两格都在，是因为「两栏各 300 px」与「单栏 300 px」
     /// 排出来的行盒相同、切片却不同 —— 切片那一级要区分它们。
     pub columns: u8,
+    /// 竖轴基准（`LayoutOptions::page_height`），量化后。`None` = 这一档没有既定高。
+    ///
+    /// 必须进键：`height: NN%` 那一族折出来是多少**只**由它决定，而它在翻页模式里就是
+    /// 「一页多高」—— 转一次屏、下拉一次状态栏，页高变了而栏宽没变，只靠 `width` 那一格
+    /// 是问不出来的，症状是排版留着旧楔块的高度、切片按新页高切，封面那类垂直居中的页
+    /// 会整幅偏出一截。与 `width` 同批量化，两边用的必须是同一个数。
+    pub page_height: Option<u32>,
     /// 本章图片索引的版本。`<img>` 的固有尺寸是排版输入，换索引就可能换几何；
     /// 而它既不在章文本里也不在样式里，只能单独一格。
     pub images_rev: u32,
@@ -170,6 +177,7 @@ impl LayoutKey {
         chapter: u64,
         width: f32,
         columns: usize,
+        page_height: Option<f32>,
         images_rev: u32,
         fonts_rev: u32,
     ) -> Self {
@@ -179,6 +187,7 @@ impl LayoutKey {
             prefs_hash: inputs.prefs_hash,
             width: quantize_px(width),
             columns: u8::try_from(columns).unwrap_or(u8::MAX),
+            page_height: page_height.map(quantize_px),
             images_rev,
             fonts_rev,
             metrics_rev: METRICS_REV,

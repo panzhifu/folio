@@ -331,17 +331,31 @@ impl<'a> Ctx<'a> {
         &self.dom.get(node).children
     }
 
-    /// 作者写了尺寸就用它，没写给 `None`。`height` 那一族只认 px：百分比折自包含块的
-    /// **高**，而流式排版里父块的高是由内容算出来的，CSS 在同一条规则下也判 `auto`，
-    /// 所以「没写过」与「写了 `50%`」在这里是同一个数。
+    /// 作者写了尺寸就用它，没写给 `None`。`height` 那一族认 px 与**有基准的**百分比：
+    /// 百分比折自包含块的**高**，而流式排版里父块的高常由内容算出来 —— CSS 在同一条
+    /// 规则下也判 `auto`，所以「没写过」与「写了 `50%` 而上游没有既定高」是同一个数。
+    /// 基准从 [`LayoutOptions::page_height`] 一路传下来，判据写在那一格的注释上。
     ///
     /// 只给流内块级盒用。替换元素（`<img>` / `<svg>`）走
     /// [`super::ports::image_size`]，那条路里百分比折得动（基准是图的可用宽）。
-    fn definite(length: Option<Length>) -> Option<f32> {
+    pub(super) fn definite(length: Option<Length>, cb_h: Option<f32>) -> Option<f32> {
         match length {
             Some(Length::Px(v)) => Some(v.max(0.0)),
+            Some(Length::Percent(p)) => cb_h.map(|basis| (p * basis).max(0.0)),
             _ => None,
         }
+    }
+
+    /// 相邻两个竖外边距折叠成一段净空（CSS 2.1 §10.3.4）。
+    ///
+    /// 规范那三档合成一个式子就够了：**最大正数 + 最小负数**。两个正数得较大值
+    /// （段间距不显松靠的就是这一档），一正一负得两者之和，两个负数得较负的那个。
+    ///
+    /// `0` 是这个式子的恒等元，所以调用点用 `prev_bottom = 0.0` 起手就等价于
+    /// 「前面没有兄弟」；从前这里写的是 `if prev_bottom > 0.0`，负下边距会同时踩中
+    /// 「没有前驱」和「夹回 0」两个坑 —— 换成一趟加法就没这两件事了。
+    pub(super) fn collapse_margins(top: f32, bottom: f32) -> f32 {
+        top.max(bottom).max(0.0) + top.min(bottom).min(0.0)
     }
 
     /// 流内块级盒的横向求解（CSS 2.1 §10.3.3），返回 `(左边距, 边框盒宽)`。
@@ -372,8 +386,14 @@ impl<'a> Ctx<'a> {
         let auto_left = style.margin_left.is_auto();
         let auto_right = style.margin_right.is_auto();
         // `resolve` 给 `auto` 回 0，所以这两格先按「不占位」收着，余量最后再分回左边距。
-        let ml_set = style.margin_left.resolve(avail).max(0.0);
-        let mr_set = style.margin_right.resolve(avail).max(0.0);
+        // **负数照算不夹**：§10.3.3 那条等式里外边距就是带符号的一项，`margin-left:
+        // -20px` 配 `width: auto` 得的是「块左移 20px 且宽出 20px」这一解，浏览器同解。
+        // 从前这里夹过 0，取值层已经把负数存进 `Length::Px` 了、排版期又归零，于是
+        // 这条声明在 `examples/css-gap` 那张表上报「接住了」而屏上纹丝不动 ——
+        // 《斗战狂潮》目录那 1223 个 `dt.tocl2` 的悬挂缩进就是这么丢的。
+        // 内边距仍夹 0：CSS 里负 `padding` 本就是非法值，不属这一族。
+        let ml_set = style.margin_left.resolve(avail);
+        let mr_set = style.margin_right.resolve(avail);
         let room = (avail - ml_set - mr_set - bl - br).max(0.0);
         // 作者写的三个数先按 `box-sizing` 折成**内容宽**（式子只有一份，见
         // [`ComputedStyle::content_size`]）；`width: auto` 那一档不折 —— `room` 本来就是
@@ -413,19 +433,39 @@ impl<'a> Ctx<'a> {
     ///
     /// 只给非替换的流内块用；替换元素的高由
     /// [`super::ports::image_size`] 从图的固有尺寸折。
-    fn used_content_height(style: &ComputedStyle, inner: f32, pad_border: f32) -> f32 {
+    fn used_content_height(
+        style: &ComputedStyle,
+        inner: f32,
+        pad_border: f32,
+        cb_h: Option<f32>,
+    ) -> f32 {
         // 作者写的三个数都先过 [`ComputedStyle::content_size`]：`box-sizing: border-box`
         // 时那一格里已经含上下的边框与内边距。`pad_border` 就是调用点那一对 `pt + pb`，
         // 由调用方传进来 —— 这一格自己不算边距，是为了不与「哪几条边算进去」再有一份定义。
         let fold = |px: f32| style.content_size(px, pad_border);
-        let mut h = Self::definite(style.height).map_or(inner, fold);
-        if let Some(max_h) = Self::definite(style.max_height) {
+        let mut h = Self::definite(style.height, cb_h).map_or(inner, fold);
+        if let Some(max_h) = Self::definite(style.max_height, cb_h) {
             h = h.min(fold(max_h));
         }
-        if let Some(min_h) = Self::definite(style.min_height) {
+        if let Some(min_h) = Self::definite(style.min_height, cb_h) {
             h = h.max(fold(min_h));
         }
         h
+    }
+
+    /// 这一块的**子节点**折百分比高时用的那个数。
+    ///
+    /// 只有作者明确写了 `height` 才算得出：CSS 那条规则是「包含块的高没明确给定（由内容
+    /// 撑出来）时，百分比高按 `auto`」，所以内容撑出来的高不进这一档，哪怕它是个正数。
+    ///
+    /// `max-height` / `min-height` 夹出来的那一档刻意也不进：夹子在子节点排完才落地，
+    /// 反过来要子节点的百分比等这个数就是循环定义。浏览器同样按作者写的那个 `height` 折。
+    pub(super) fn child_height_basis(
+        style: &ComputedStyle,
+        cb_h: Option<f32>,
+        pad_border: f32,
+    ) -> Option<f32> {
+        Self::definite(style.height, cb_h).map(|px| style.content_size(px, pad_border))
     }
 
     /// 摆放 `container` 的流内子内容。`x`/`y` 是其内容盒左上角（绝对），返回内容高度。
@@ -433,9 +473,20 @@ impl<'a> Ctx<'a> {
     /// `width` 就是 `container` 的内容宽，因此它同时是子节点那一族百分比
     /// （`margin` / `padding` / `text-indent`）的**折算基准** —— CSS 规定这一族折自
     /// 包含块的内容宽，不是折自盒子自己的宽。
-    pub(super) fn children(&mut self, container: NodeId, x: f32, y: f32, width: f32) -> f32 {
+    ///
+    /// `container_h` 是同一件事在竖轴上的那一份：`container` 的内容高，**仅在作者明确
+    /// 给定过时**是 `Some`（判据见 [`Self::child_height_basis`]）。子节点的 `height: NN%`
+    /// 折它，`None` 时那一族按 `auto`。
+    pub(super) fn children(
+        &mut self,
+        container: NodeId,
+        x: f32,
+        y: f32,
+        width: f32,
+        container_h: Option<f32>,
+    ) -> f32 {
         if self.light {
-            return self.children_light(container, x, y, width);
+            return self.children_light(container, x, y, width, container_h);
         }
         let container_style = self.style_of(container);
         let mut cursor = y;
@@ -480,34 +531,33 @@ impl<'a> Ctx<'a> {
             if is_item {
                 ordinal = attr_count(self.dom, child, "value").unwrap_or(ordinal + 1);
             }
-            let mt = style.margin_top.resolve(width).max(0.0);
-            // 兄弟之间折叠取较大值而不是相加：这是段间距不显松的唯一原因。
-            cursor += if prev_bottom > 0.0 {
-                mt.max(prev_bottom)
-            } else {
-                mt
-            };
+            let mt = style.margin_top.resolve(width);
+            // 兄弟之间折叠取较大值而不是相加：这是段间距不显松的唯一原因。负数那
+            // 三档（一正一负求和、两负取较负）见 [`Self::collapse_margins`]，`0` 是
+            // 它的恒等元，所以「前面没有兄弟」这一档不必再单独判。
+            cursor += Self::collapse_margins(mt, prev_bottom);
             // `clear` 把这一块整块推到那一侧浮动盒的下缘之下。净空算的是**边框**的位置，
             // 所以推完之后前面那段折叠的右边距不再起作用。
-            let clear_to = self.clear_bottom(style.clear);
-            if clear_to > cursor {
-                cursor = clear_to;
+            if let Some(clear_to) = self.clear_bottom(style.clear) {
+                cursor = cursor.max(clear_to);
             }
             // 浮动盒：离开常规流。摆在当前游标那一档的侧边，**不**推进 `cursor`，
             // 于是后面每一段都从同一处起排、只是行带被它折窄。认不出宽度就落回常规流。
-            if style.float != Float::None && self.place_float(child, style, x, cursor, width) {
+            if style.float != Float::None
+                && self.place_float(child, style, x, cursor, width, container_h)
+            {
                 continue;
             }
             // 横向那两个数一起解：`width` 写了就按作者的数收窄盒子，`margin: auto`
             // 因此第一次有东西可均分（判据见 [`Self::solve_block_width`]）。
             let (ml, box_width) = self.solve_block_width(style, width);
             let lines_start = self.lines.len();
-            cursor += self.block(child, x + ml, cursor, box_width, width);
+            cursor += self.block(child, x + ml, cursor, box_width, width, container_h);
             // 标记贴在 `block()` **之后**：见 [`Self::attach_marker`] 那三条口径。
             if is_item {
                 self.attach_marker(child, style, ordinal.max(1) as usize, lines_start);
             }
-            prev_bottom = style.margin_bottom.resolve(width).max(0.0);
+            prev_bottom = style.margin_bottom.resolve(width);
         }
         if !pending.is_empty() {
             let line_px = (container_style.font_size * container_style.line_height).max(1.0);
@@ -594,9 +644,14 @@ impl<'a> Ctx<'a> {
     ///
     /// 左右分别算，不是都按 `both` 处理：`clear: right` 写在「左边还有空」的段上，
     /// 折成 `both` 会白白多挪一段。
-    fn clear_bottom(&self, clear: Clear) -> f32 {
+    /// 这一侧浮动盒的下缘 —— **`None` = 这一句 `clear` 没有东西可让**。
+    ///
+    /// 返回 `Option` 而不是「没有就给 0」：调用点要的是「把游标推到那下面」，
+    /// 而负的相邻外边距现在能把游标推到容器顶之上（<0），那时 0 不是「没有净空」
+    /// 而是「净空到 0」，会把刚折叠出来的负数整个抹平。
+    fn clear_bottom(&self, clear: Clear) -> Option<f32> {
         if clear == Clear::None {
-            return 0.0;
+            return None;
         }
         self.floats
             .iter()
@@ -606,21 +661,23 @@ impl<'a> Ctx<'a> {
                 _ => true,
             })
             .map(|f| f.bottom())
-            .fold(0.0f32, f32::max)
+            .reduce(f32::max)
     }
 
     /// 浮动块的**边框盒宽**（外边距由调用方加，因为让位的那一圈是外边距盒）。
     ///
-    /// 认两档，都不猜：
+    /// 认三档，都不猜：
     ///
     /// - 作者自己写了 `width`（《哈利·波特》的 `.muen .left { width: 20%; float: left }`）：
     ///   那一档本来就是既定值，不必收缩，按内容盒折出宽再加边框与内边距。
     ///   只有 `max-width` 没写 `width` 时**不走这一档** —— 那等于把「不超过」当成
     ///   「就是」，满宽的浮动盒会把后面每一行的可用宽压成 0，正文直接消失。
+    /// - 块里**一个流内子节点都没有**（封面页那个空楔块）：空内容的 shrink-to-fit 恒等于
+    ///   0，宽就只剩它自己的内边距与边框那一圈。落点与症状写在下面那一臂的注释上。
     /// - 「整块内容就是一张图」（《哈利·波特》那 78 个 `div.img1` / `div.img2` 都是
     ///   `<div><img width="20%"></div>`）：按图的尺寸折。
     ///
-    /// 两档都对不上时返回 `None`，按**不浮动**处理并留一条 `debug!`。真正的
+    /// 三档都对不上时返回 `None`，按**不浮动**处理并留一条 `debug!`。真正的
     /// shrink-to-fit 要 max-content，等于再跑一趟排版；猜一个宽度会把整页正文挤成
     /// 一条窄柱，那比插图不绕文糟得多。
     fn float_box_width(&self, node: NodeId, style: &ComputedStyle, basis: f32) -> Option<f32> {
@@ -644,6 +701,20 @@ impl<'a> Ctx<'a> {
             }
             return Some((content + d_bl + d_br).max(1.0));
         }
+        // 空内容的浮动盒：宽就是它的内边距与边框那一圈。这不是猜 —— 一个字都没有的块
+        // 的 shrink-to-fit 恒等于 0，而这一档在书里有真用途：`.wedge { float:left;
+        // height:50%; margin-bottom:-360px }` 那种**空楔块**是靠高与负边距干活的。
+        // 从前这里认不出宽，楔块就落回常规流：它自己吃掉 50% 那一截高，负下边距再把
+        // 后面的容器拉到**页面顶之上**（页比内容矮时是个负数，切片窗口从 0 起，那截
+        // 内容就再也滚不到）。浏览器那边浮动盒不吃垂直高，而 `clear` 只往下推不往回拉，
+        // 容器贴在 0 —— 认下这一档才是同一条形状。
+        if !self
+            .children_of(node)
+            .iter()
+            .any(|&c| self.style_of(c).display != Display::None)
+        {
+            return Some(d_bl + d_br);
+        }
         let img = single_image(self.dom, node)?;
         let img_style = self.style_of(img);
         let src = self.dom.attr(img, "src")?;
@@ -664,9 +735,12 @@ impl<'a> Ctx<'a> {
             + i_border_right
             + img_style.padding_left.resolve(basis).max(0.0)
             + img_style.padding_right.resolve(basis).max(0.0)
-            + img_style.margin_left.resolve(basis).max(0.0)
-            + img_style.margin_right.resolve(basis).max(0.0);
-        Some(inner + d_bl + d_br)
+            + img_style.margin_left.resolve(basis)
+            + img_style.margin_right.resolve(basis);
+        // 地板与上面 `width` 那一档同一个数：这一族现在把带符号的外边距算进来了，
+        // `margin: -200px` 那种写法能把边距盒折到零以下，而负宽的盒会让折行那一趟
+        // 拿不到可写的宽。
+        Some((inner + d_bl + d_br).max(1.0))
     }
 
     /// 摆一个浮动盒：算出它的边框盒宽、摆在所属侧、排它自己的内容，然后记进浮动表。
@@ -682,6 +756,7 @@ impl<'a> Ctx<'a> {
         x: f32,
         y: f32,
         width: f32,
+        cb_h: Option<f32>,
     ) -> bool {
         let basis = width;
         let Some(box_width) = self.float_box_width(node, style, basis) else {
@@ -691,10 +766,10 @@ impl<'a> Ctx<'a> {
             );
             return false;
         };
-        let ml = style.margin_left.resolve(basis).max(0.0);
-        let mr = style.margin_right.resolve(basis).max(0.0);
-        let mt = style.margin_top.resolve(basis).max(0.0);
-        let mb = style.margin_bottom.resolve(basis).max(0.0);
+        let ml = style.margin_left.resolve(basis);
+        let mr = style.margin_right.resolve(basis);
+        let mt = style.margin_top.resolve(basis);
+        let mb = style.margin_bottom.resolve(basis);
         let right = style.float == Float::Right;
         // 靠左的贴左缘（含它自己的左边距），靠右的贴右缘 —— 让位的那一圈是外边距盒。
         let box_x = if right {
@@ -703,7 +778,7 @@ impl<'a> Ctx<'a> {
             x + ml
         };
         let saved = std::mem::take(&mut self.floats);
-        let height = self.block(node, box_x, y + mt, box_width, basis);
+        let height = self.block(node, box_x, y + mt, box_width, basis, cb_h);
         self.floats = saved;
         self.floats.push(PlacedFloat {
             right,
@@ -773,7 +848,18 @@ impl<'a> Ctx<'a> {
     /// `clear` 那一段净空要照算 —— 这两项是量高表与实际排版差别的主体（一张浮动的
     /// 插图今天按常规流吃掉一整段高）。每行让宽那一项不进估计，与首字下沉在轻量模式
     /// 里同样被略过是同一个口径：都是「按总宽除以版心宽」这一档近似本来就没有的项。
-    fn children_light(&mut self, container: NodeId, x: f32, y: f32, width: f32) -> f32 {
+    ///
+    /// `container_h` 与 `children` 那一条同义（子节点折百分比高的基准，判据见
+    /// [`Self::child_height_basis`]）：**两趟必须吃同一个基准**，否则量出来的高与
+    /// 实排的高不是一个数，症状是滚动位置与块对不上。
+    fn children_light(
+        &mut self,
+        container: NodeId,
+        x: f32,
+        y: f32,
+        width: f32,
+        container_h: Option<f32>,
+    ) -> f32 {
         let mut cursor = y;
         let mut prev_bottom = 0f32;
 
@@ -782,18 +868,15 @@ impl<'a> Ctx<'a> {
             if style.display == Display::None {
                 continue;
             }
-            let ml = style.margin_left.resolve(width).max(0.0);
-            let mr = style.margin_right.resolve(width).max(0.0);
-            let mt = style.margin_top.resolve(width).max(0.0);
-            let mb = style.margin_bottom.resolve(width).max(0.0);
-            cursor += if prev_bottom > 0.0 {
-                mt.max(prev_bottom)
-            } else {
-                mt
-            };
-            let clear_to = self.clear_bottom(style.clear);
-            if clear_to > cursor {
-                cursor = clear_to;
+            // 外边距一律带符号照算，与 `children` 同一条口径（判据见
+            // [`Self::solve_block_width`] 那一段）。
+            let ml = style.margin_left.resolve(width);
+            let mr = style.margin_right.resolve(width);
+            let mt = style.margin_top.resolve(width);
+            let mb = style.margin_bottom.resolve(width);
+            cursor += Self::collapse_margins(mt, prev_bottom);
+            if let Some(clear_to) = self.clear_bottom(style.clear) {
+                cursor = cursor.max(clear_to);
             }
 
             // 浮动盒：量它的高（里面看不见外面的浮动表），但**不推进** `cursor`。
@@ -808,7 +891,7 @@ impl<'a> Ctx<'a> {
                         x + ml
                     };
                     let saved = std::mem::take(&mut self.floats);
-                    let height = self.block_light(child, box_width, width);
+                    let height = self.block_light(child, box_width, width, container_h);
                     self.floats = saved;
                     self.floats.push(PlacedFloat {
                         right,
@@ -823,7 +906,7 @@ impl<'a> Ctx<'a> {
 
             // 流内块：横向与 `children` 同一条求解式（定宽收窄 + `auto` 均分）。
             let (used_ml, box_width) = self.solve_block_width(style, width);
-            let height = self.block_light(child, box_width, width);
+            let height = self.block_light(child, box_width, width, container_h);
 
             // 记录块（无行盒）。`x` 与宽都取求解后的那两个数 —— 与 `children` 那条路
             // 逐字同源，两阶段排版的「量高」与「实排」才给出同一个盒子。
@@ -864,9 +947,21 @@ impl<'a> Ctx<'a> {
     /// CSS 的 `<margin>` / `<padding>` / `<text-indent>` 百分比全部折算自它，
     /// 不是折自 `width`。它必须进缓存键 —— 同一 `width` 配不同 `basis`，
     /// 同一个盒子会折出不同的内边距。
-    pub(super) fn block(&mut self, node: NodeId, x: f32, y: f32, width: f32, basis: f32) -> f32 {
-        let Some(key) = self.block_key(node, width, basis, x, y) else {
-            return self.block_uncached(node, x, y, width, basis);
+    ///
+    /// `cb_h` 是竖轴上同一件事的那一份：包含块的高，仅在父块**明确写过** `height` 时
+    /// 是 `Some`（判据见 [`Self::child_height_basis`]）。它同样进缓存键 —— 同一块在
+    /// 「父块写了高」与「父块由内容撑高」两种容器里折出的高不是一个数。
+    pub(super) fn block(
+        &mut self,
+        node: NodeId,
+        x: f32,
+        y: f32,
+        width: f32,
+        basis: f32,
+        cb_h: Option<f32>,
+    ) -> f32 {
+        let Some(key) = self.block_key(node, width, basis, cb_h, x, y) else {
+            return self.block_uncached(node, x, y, width, basis, cb_h);
         };
         if let Some(height) = self.reuse_block(key, x, y) {
             return height;
@@ -874,13 +969,21 @@ impl<'a> Ctx<'a> {
         let lines_start = self.lines.len();
         let blocks_start = self.blocks.len();
         let floats_start = self.floats.len();
-        let height = self.block_uncached(node, x, y, width, basis);
+        let height = self.block_uncached(node, x, y, width, basis, cb_h);
         self.stash_block(key, lines_start, blocks_start, floats_start, x, y, height);
         height
     }
 
     /// 这一块的缓存键；没开缓存时给 `None`（直接走实排）。
-    fn block_key(&self, node: NodeId, width: f32, basis: f32, x: f32, y: f32) -> Option<BlockKey> {
+    fn block_key(
+        &self,
+        node: NodeId,
+        width: f32,
+        basis: f32,
+        cb_h: Option<f32>,
+        x: f32,
+        y: f32,
+    ) -> Option<BlockKey> {
         self.cache.as_ref()?;
         let style_hash = self.style_hash?.get(node as usize).copied().unwrap_or(0);
         Some(BlockKey {
@@ -888,6 +991,9 @@ impl<'a> Ctx<'a> {
             style_hash,
             width: width.to_bits(),
             basis: basis.to_bits(),
+            // `None` 与 `Some(0.0)` 不是同一个数（`.container{height:0}` 真会写出 0），
+            // 所以这一格存的是 `Option` 的位，不是直接 `to_bits`。
+            cb_h: cb_h.map(|h| h.to_bits()),
             floats: self.float_key(x, y),
         })
     }
@@ -983,8 +1089,18 @@ impl<'a> Ctx<'a> {
         );
     }
 
-    /// 摆放一个块级元素（不做块级缓存），返回边框盒高度。`basis` 见 [`Self::block`]。
-    fn block_uncached(&mut self, node: NodeId, x: f32, y: f32, width: f32, basis: f32) -> f32 {
+    /// 摆放一个块级元素（不做块级缓存），返回边框盒高度。`basis` 与 `cb_h` 见
+    /// [`Self::block`]：两个都是**这一块的包含块**的尺寸，一个折横向那族百分比，
+    /// 一个折 `height` 那一族。
+    fn block_uncached(
+        &mut self,
+        node: NodeId,
+        x: f32,
+        y: f32,
+        width: f32,
+        basis: f32,
+        cb_h: Option<f32>,
+    ) -> f32 {
         let style = self.style_of(node);
         // 盒模型从外到内一次算清：边框与内边距一起从可用宽里扣掉，正文与折行都在内容盒里
         // 算；外层那条 `push_block` 记的仍是**边框盒**（绘制背景与边框要用它）。
@@ -1040,10 +1156,13 @@ impl<'a> Ctx<'a> {
         }
 
         let content_width = (width - pl - pr).max(1.0);
+        // 子节点折 `height: NN%` 用的基准。这一块**明确写过** `height` 才给得出，
+        // 由内容撑出来的高不算（两条理由都在 [`Self::child_height_basis`] 上）。
+        let child_h = Self::child_height_basis(style, cb_h, pt + pb);
         let index = self.push_block(node, x, y, width, String::new(), true);
         let line_px = (style.font_size * style.line_height).max(1.0);
         let inner = if self.has_block_children(node) {
-            self.children(node, x + pl, y + pt, content_width)
+            self.children(node, x + pl, y + pt, content_width, child_h)
         } else {
             // 纯行内内容：先问一次「这一块旁边有没有浮动盒」。没有就是 `None`，
             // 折行照旧吃定宽，一次查表都不付。
@@ -1064,14 +1183,20 @@ impl<'a> Ctx<'a> {
         };
         self.close_block(
             index,
-            pt + Self::used_content_height(style, inner, pt + pb) + pb,
+            pt + Self::used_content_height(style, inner, pt + pb, cb_h) + pb,
         )
     }
 
     /// 轻量模式：算一个块的高，不断行。`basis` 见 [`Self::block`] —— 这一条必须与
     /// [`Self::block_uncached`] 用同一个基准折百分比，否则两阶段排版的「量高」与
     /// 「实排」会给出两个不同的高，可见块就错位。
-    pub(super) fn block_light(&mut self, node: NodeId, width: f32, basis: f32) -> f32 {
+    pub(super) fn block_light(
+        &mut self,
+        node: NodeId,
+        width: f32,
+        basis: f32,
+        cb_h: Option<f32>,
+    ) -> f32 {
         let style = self.style_of(node);
         let [bt, br, bb, bl] = style.border_drawn();
         let pl = bl + style.padding_left.resolve(basis).max(0.0);
@@ -1094,9 +1219,11 @@ impl<'a> Ctx<'a> {
         }
 
         let content_width = (width - pl - pr).max(1.0);
+        // 与 `block_uncached` 同一个基准：这一趟量高，那一趟实排，两边不许各拿一个数。
+        let child_h = Self::child_height_basis(style, cb_h, pt + pb);
         let inner = if self.has_block_children(node) {
             // 有块级子节点：递归。
-            self.children_light(node, 0.0, 0.0, content_width)
+            self.children_light(node, 0.0, 0.0, content_width, child_h)
         } else {
             // 纯文本块：按**估算总宽**除以版心宽估行数。用总宽（连续量）而不是「每行字数」
             // 的离散近似 —— 两阶段排版据此定位可见块，行数偏一行就会错位。
@@ -1105,7 +1232,7 @@ impl<'a> Ctx<'a> {
             let lines = (est / content_width).ceil().max(1.0);
             lines * line_px
         };
-        pt + Self::used_content_height(style, inner, pt + pb) + pb
+        pt + Self::used_content_height(style, inner, pt + pb, cb_h) + pb
     }
 
     /// 估算一个节点下文本的总宽，单位是 em（用于轻量模式 / 两阶段量高）。

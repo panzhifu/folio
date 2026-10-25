@@ -12,12 +12,19 @@
 //!
 //! 判定用的是层叠那一份逻辑（`css::computed::declaration_status`，内部就是 `apply`），
 //! 所以这张表和实际渲染行为不会分叉。统计口径：
+//! - **每一章的规则表 = 清单里那几份样式表 + 这一章自己写的 `<style>`**，与排版那一趟
+//!   逐字同一条（`folio-app` 的 `typeset_job` 也是 `clone` 书级表再 `extend`
+//!   `css::chapter_style_rules`）。从前这里只喂 `Document::stylesheet()` 那一份，于是
+//!   写在章里的样式整块不进这张表：《斗战狂潮》封面页那句 `position: relative` 明明
+//!   在屏上没生效，表上却报「全部接住」—— 量具读的样式集与渲染用的不是同一份，
+//!   这张表说的就只是「清单里那几份接住了」，而不是「这本书接住了」。
 //! - 每个元素取**层叠胜出**的那条声明（`matching_declarations` 已按优先级从低到高排好，
 //!   同一属性取最后一条），所以「写了但被更高 specificity 覆盖」的声明不算落差；
 //! - `Inert` = 属性名认得但一期不生效（`KNOWN_UNIMPLEMENTED`）；
 //! - `Unparsed` = 属性名或值不认识，会进 `StyledDom.ignored`；
 //! - 样式表里连规则都解析不出来的部分（选择器不认识、`@import` 之类）单独报一行，
-//!   它落在 `RuleSet.ignored` 里，不在上面两栏。
+//!   它落在 `RuleSet.ignored` 里，不在上面两栏；章内那块 `<style>` 拼不出来的同样
+//!   计进去（两边都算才是这本书的真实数）。
 //!
 //! 栏宽、分栏这类**视口**参数与作者的块级多栏是两件事，这里只统计声明本身。
 
@@ -30,7 +37,7 @@ use folio_core::content::format::FlowDoc;
 use folio_core::content::format::css::computed::{
     ComputedStyle, DeclStatus, cascade, declaration_status, inline_declarations,
 };
-use folio_core::content::format::css::{Origin, RuleSet};
+use folio_core::content::format::css::{Origin, RuleSet, chapter_style_rules};
 
 /// 一个属性的落地面。`elements` 是**这个属性上有任何一条胜出且没接住的声明**的元素数。
 #[derive(Debug, Default)]
@@ -106,12 +113,18 @@ fn survey(path: &Path) -> Result<String, String> {
     // 索引路径（懒加载）下 `FlowDoc` 里只有位置清单、正文与样式表都不在手上，
     // 这两处才按清单回容器取。工具若读 `flow.css`，对正经导入的书一律是空串。
     let css = doc.stylesheet();
-    if css.trim().is_empty() {
-        out.push_str("**这本书没有作者样式表**，落差为零不是因为接住了，是因为没东西可接。\n");
-        return Ok(out);
-    }
     let rules = RuleSet::parse(&css, Origin::Author);
     let stats = measure(doc.as_ref(), flow, &rules);
+    // 「没东西可接」有两种：清单里一份样式表都没有，和样式表写了但没落到任何元素上。
+    // 两种都不该被读成「全部接住」，所以判据放到数完之后 —— 章内 `<style>` 也算作者
+    // 样式，只按 `css` 那一份判会把第二种漏掉。
+    if stats.declarations == 0 {
+        out.push_str(
+            "**这本书没有落到任何元素上的作者声明**（清单里那几份样式表与章内 `<style>` \
+             都算上），落差为零不是因为接住了，是因为没东西可接。\n",
+        );
+        return Ok(out);
+    }
 
     let mut rows: Vec<(&String, &Gap)> = stats.gaps.iter().collect();
     // 先按影响的元素数，再按声明数；完全同名时按属性名字典序，保证输出可复现。
@@ -124,7 +137,7 @@ fn survey(path: &Path) -> Result<String, String> {
 
     out.push_str(&format!(
         "声明总数 {} 条；元素 {} 个，其中 **{} 个**（{:.1}%）身上至少有一条胜出却没接住的声明。\n\
-         按状态分：接住 {}、认得但不生效 {}、不认识 {}。样式表里连规则都拼不出来的块：{} 处。\n\n",
+         按状态分：接住 {}、认得但不生效 {}、不认识 {}。样式表与章内 `<style>` 里连规则都拼不出来的块：{} 处。\n\n",
         stats.declarations,
         stats.elements,
         stats.elements_hit,
@@ -136,7 +149,7 @@ fn survey(path: &Path) -> Result<String, String> {
         stats.applied,
         stats.inert,
         stats.unparsed,
-        rules.ignored,
+        stats.ignored,
     ));
     out.push_str("| 属性 | 受影响元素 | 胜出声明 | 状态 | 书里的写法 |\n|---|---|---|---|---|\n");
     for (name, gap) in &rows {
@@ -168,12 +181,19 @@ struct Totals {
     unparsed: usize,
     elements: usize,
     elements_hit: usize,
+    /// 连规则都拼不出来的块：清单里那几份算一次，每一章自己那块 `<style>` 各算一次。
+    ignored: usize,
 }
 
-/// 逐章逐元素地数。样式表只解析一次，全书共用 —— 与真实排版路径一致
-/// （`ui/shared/document.rs` 也是把 `flow.css` 当文档级数据）。
+/// 逐章逐元素地数。清单里那几份样式表只解析一次、全书共用，但**每一章**还要并入它自己
+/// 写的 `<style>` —— 排版那一趟就是这么拼的（`folio-app` 的 `typeset_job`：`clone` 书级
+/// 表再 `extend` `css::chapter_style_rules`）。量具少并这一刀，报的就只是「清单里那几份
+/// 接住了」，写在章里的样式整个不在秤上，表尾那句「全部接住」就成了假话。
 fn measure(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> Totals {
-    let mut tot = Totals::default();
+    let mut tot = Totals {
+        ignored: rules.ignored,
+        ..Default::default()
+    };
     let base = ComputedStyle::default();
     let root_px = base.font_size;
     for (index, chapter) in flow.chapters.iter().enumerate() {
@@ -183,7 +203,11 @@ fn measure(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> Totals {
         let dom = Dom::parse(source.as_bytes());
         // 内联那一份的基准目录：与界面递给 `cascade` 的同一个数（`ChapterImages` 手里那一个）。
         let base_dir = folio_core::content::format::dir_of(&chapter.spine_href);
-        let styled = cascade(&dom, rules, &base, &base_dir);
+        let own = chapter_style_rules(&dom, &base_dir);
+        tot.ignored += own.ignored;
+        let mut used = rules.clone();
+        used.extend(own);
+        let styled = cascade(&dom, &used, &base, &base_dir);
         for (id, _) in dom.elements() {
             tot.elements += 1;
             let Some(own) = styled.get(id) else {
@@ -198,7 +222,7 @@ fn measure(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> Totals {
             // `authorhis` 那一族）一条也没记，表上只剩 `.oval` 那一处样式表写法，
             // 读表的人会以为这条属性已经见底 —— 量具漏计一个形状，比引擎少接一个属性更坏。
             // 次序照抄 `cascade` 那一刀：作者普通 < 内联普通 < 内联 `!important` < 作者 `!important`。
-            let decls = rules.matching_declarations(&dom, id);
+            let decls = used.matching_declarations(&dom, id);
             let inline = dom
                 .attr(id, "style")
                 .map(|text| inline_declarations(text, &base_dir))
@@ -341,13 +365,20 @@ fn without_unsupported(rules: &RuleSet) -> RuleSet {
 /// 把**全书每一章**都排一遍，返回
 /// （行盒总数，正文总高之和，行盒左缘的平均值，行盒墨迹宽的平均值）。
 ///
+/// `strip` = 把没接住的声明整条丢掉再排，等价于「这些属性还没做时」那一臂。
+///
 /// 为什么累加而不是只取第一章：EPUB 的第一章常常是封面页或扉页（只有图，甚至没有文本），
 /// 那种页量出来的「差」是 0，看不出任何事。全书累加才是这本书的排版差。
 ///
 /// **最后一格（墨迹宽）是两端对齐唯一看得见的地方**：它不改行数、不改高、不改左缘
 /// （`Justify` 的偏移是 0），只把字在行内摊开 —— 所以量 `ink_width`（撑开的墨迹宽）
 /// 才量得到它。没有这一格，`text-align: justify` 在这张表里永远是「差 0」。
-fn geometry(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> (usize, f32, f32, f32) {
+fn geometry(
+    doc: &dyn Document,
+    flow: &FlowDoc,
+    rules: &RuleSet,
+    strip: bool,
+) -> (usize, f32, f32, f32) {
     use folio_core::content::dom::Dom;
     use folio_core::content::format::css::computed::ComputedStyle;
     use folio_core::layout::{LayoutOptions, layout};
@@ -355,12 +386,24 @@ fn geometry(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> (usize, f32,
     let mut height = 0.0f32;
     let mut left_sum = 0.0f32;
     let mut ink_sum = 0.0f32;
-    for (index, _chapter) in flow.chapters.iter().enumerate() {
+    for (index, chapter) in flow.chapters.iter().enumerate() {
         let Ok(source) = doc.chapter_source(index) else {
             continue;
         };
         let dom = Dom::parse(source.as_bytes());
-        let styles = cascade(&dom, rules, &ComputedStyle::default(), "");
+        // 基准目录与 `measure`、与界面递给 `cascade` 的那一个同数：章内那块 `<style>`
+        // 里的 `url(...)` 按这一章的目录折，递空串就等于没折。
+        let base_dir = folio_core::content::format::dir_of(&chapter.spine_href);
+        let mut used = rules.clone();
+        used.extend(chapter_style_rules(&dom, &base_dir));
+        // 「这些属性还没做」那一臂要把没接住的声明从**并好章内样式的那一份**里丢，
+        // 只丢书级那一份的话，章内写的落差声明会两臂都留着，排版差量就成了 0。
+        let used = if strip {
+            without_unsupported(&used)
+        } else {
+            used
+        };
+        let styles = cascade(&dom, &used, &ComputedStyle::default(), &base_dir);
         // 没有 `<body>` 的章（手写得很野的老书）从文档根节点排，行为与 app 侧一致。
         let body = dom
             .elements()
@@ -375,6 +418,7 @@ fn geometry(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> (usize, f32,
                 width: 600.0,
                 light: false,
                 allow_vertical: false,
+                page_height: None,
             },
             &Mock,
             &folio_core::layout::NoImages,
@@ -398,9 +442,8 @@ fn geometry(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> (usize, f32,
 
 /// 把两份排版的差打成一行字，附在统计表后面。
 fn impact(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> String {
-    let (lines_now, height_now, left_now, ink_now) = geometry(doc, flow, rules);
-    let dropped = without_unsupported(rules);
-    let (lines_then, height_then, left_then, ink_then) = geometry(doc, flow, &dropped);
+    let (lines_now, height_now, left_now, ink_now) = geometry(doc, flow, rules, false);
+    let (lines_then, height_then, left_then, ink_then) = geometry(doc, flow, rules, true);
     let page = 900.0;
     let pages_now = (height_now / page).ceil() as usize;
     let pages_then = (height_then / page).ceil() as usize;

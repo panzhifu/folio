@@ -64,6 +64,19 @@ fn typeset(html: &str, css: &str, width: f32) -> (Dom, Layout) {
 }
 
 fn typeset_with(measure: &dyn Measure, html: &str, css: &str, width: f32) -> (Dom, Layout) {
+    typeset_in(measure, html, css, width, None)
+}
+
+/// 同上，多给一格竖轴基准（`LayoutOptions::page_height`）—— `height: NN%` 那一族
+/// 只有在这一格是 `Some` 时才折得出数。谁递它、以及竖排那一档为什么还递 `None`，
+/// 判据都写在 `geometry.rs` 那一格的注释上。
+fn typeset_in(
+    measure: &dyn Measure,
+    html: &str,
+    css: &str,
+    width: f32,
+    page_height: Option<f32>,
+) -> (Dom, Layout) {
     let dom = Dom::parse(html.as_bytes());
     let styles = cascade(
         &dom,
@@ -80,6 +93,7 @@ fn typeset_with(measure: &dyn Measure, html: &str, css: &str, width: f32) -> (Do
             light: false,
             // 夹具里会写 `writing-mode`，所以这两条排版入口都让书的 CSS 说了算。
             allow_vertical: true,
+            page_height,
         },
         measure,
         &NoImages,
@@ -402,6 +416,203 @@ fn a_percent_margin_folds_against_the_parent_content_width() {
     );
 }
 
+/// 负的左外边距进 §10.3.3 那条求解式：`width: auto` 的块因此**变宽**并整体左移，
+/// 而不是被夹回 0。
+///
+/// 这一条是《斗战狂潮》全书目录那 1223 个 `<dt class="tocl2">` 的落点 —— 作者写
+/// `margin-left: -20px` 要的就是那 20px 悬挂。取值层认得它、也存得下 `Px(-20)`，
+/// 从前在排版期每个解析点被 `.max(0.0)` 归零，于是这条声明在 `css-gap` 那张表上
+/// 报「接住了」，屏上却一个字都没挪。
+#[test]
+fn a_negative_margin_shifts_the_block_out_and_widens_it() {
+    let html = format!("<p>{}</p>", "字".repeat(40));
+    let (_, layout) = typeset(&html, "p { margin: 0; margin-left: -20px }", 200.0);
+    assert_eq!(layout.lines[0].x, -20.0, "整块左移 20px");
+    assert_eq!(
+        texts(&layout)[0].chars().count(),
+        13,
+        "200 + 20 = 220px 宽、容 13 字（夹回 0 那一档是 200px、12 字）"
+    );
+}
+
+/// 相邻竖外边距的折叠规则带负数那两档（CSS 2.1 §10.3.4）：一正一负取「最大正数 +
+/// 最小负数」，两个都负取最负的那一个。
+///
+/// 第三条是**守住旧行为**的那一条：两个正数仍取较大值。段间距不显松靠的就是它，
+/// 把折叠式换成相加会让全书每一段都多出一截空。
+#[test]
+fn negative_vertical_margins_collapse_by_the_css_rule() {
+    let html = "<p class=a>甲</p><p class=b>乙</p>";
+    let gap = |css: &str| {
+        let (_, layout) = typeset(html, css, 200.0);
+        let paras: Vec<&BlockBox> = layout
+            .blocks
+            .iter()
+            .filter(|b| !b.text.is_empty())
+            .collect();
+        assert_eq!(paras.len(), 2, "夹具该排出一前一后两段");
+        paras[1].y - (paras[0].y + paras[0].height)
+    };
+    assert_eq!(
+        gap("p { margin: 0 } .a { margin-bottom: -10px } .b { margin-top: 20px }"),
+        10.0,
+        "正 20 与负 10 折叠成 10"
+    );
+    assert_eq!(
+        gap("p { margin: 0 } .a { margin-bottom: -30px } .b { margin-top: -10px }"),
+        -30.0,
+        "两个都负取最负那一个：后一段被提到前一段的底下 30px"
+    );
+    assert_eq!(
+        gap("p { margin: 0 } .a { margin-bottom: 12px } .b { margin-top: 20px }"),
+        20.0,
+        "两个正数仍取较大，不相加"
+    );
+}
+
+/// 只量高的那张表（`measure_chapter` → `children_light`）必须跟实排同一条式子。
+///
+/// 两条路各写一套边距的话，症状不是「哪儿偏了」而是滚动位置与块对不上 —— 所以
+/// 这里钉的是同一组数，而不是「两边都别是 0」。
+#[test]
+fn the_light_measure_folds_negative_margins_like_the_real_layout() {
+    let html = "<p class=a>甲</p><p class=b>乙</p>";
+    let css = "p { margin: 0 } .a { margin-bottom: -10px; margin-left: -20px } \
+               .b { margin-top: 20px }";
+    let dom = Dom::parse(html.as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(css, Origin::Author),
+        &ComputedStyle::default(),
+        "",
+    );
+    let map = measure_chapter(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions {
+            width: 200.0,
+            light: true,
+            allow_vertical: false,
+            page_height: None,
+        },
+        &Mono,
+        &NoImages,
+    );
+    assert!(map.simple, "两段纯块该走得动轻量那条路");
+    assert_eq!(map.units.len(), 2);
+    assert_eq!(map.units[0].x, -20.0, "轻量表也要把负左边距算进 x");
+    assert_eq!(
+        map.units[1].y - (map.units[0].y + map.units[0].height),
+        10.0,
+        "与实排同一档折叠：正 20 + 负 10"
+    );
+}
+
+/// 竖百分比高：`page_height` 给得出，`html,body { height:100% }` 这一族才落得出数。
+///
+/// 这一条钉的是《斗战狂潮》封面页那一整套「浮动楔块 + 负下边距」的垂直居中写法：楔块
+/// 拿到页高的一半，减掉自己那 360px 的负下边距，`clear` 把后面的容器推到那一格**之下**。
+/// 页不够高（一半不足 360）时 `clear` 不往回推，图就贴在顶上 —— 浏览器同一条规则，
+/// 不是我们这侧的降级，所以两档都钉住。
+///
+/// 它同时是这一整条链唯一的证据：`50%` 折自 `body` 的 100%，`body` 的 100% 折自
+/// `page_height`。少传一层，楔块就退回 `auto`（第三档）。
+#[test]
+fn a_float_wedge_gets_half_the_page_and_pushes_the_cleared_block_down() {
+    let css = "html,body { height:100%; margin:0; padding:0 }\n\
+               .wedge { float:left; height:50%; margin-bottom:-360px }\n\
+               .container { clear:both; height:0em }";
+    let html = "<div class=wedge></div><div class=container>封面</div>";
+    let top = |page: Option<f32>| {
+        let (_, laid) = typeset_in(&Mono, html, css, 600.0, page);
+        laid.blocks
+            .iter()
+            .find(|b| b.text == "封面")
+            .map(|b| b.y)
+            .expect("容器里那一行该有块")
+    };
+    assert_eq!(top(Some(1200.0)), 240.0, "1200 的一半 600 减掉 360");
+    assert_eq!(
+        top(Some(640.0)),
+        0.0,
+        "页比内容矮时 `clear` 不往回推，容器留在流的原位"
+    );
+    assert_eq!(
+        top(None),
+        0.0,
+        "没有竖轴基准时楔块按 auto —— 与这一格出现之前逐字相同"
+    );
+}
+
+/// 百分比高的链**只在父块明确写过 `height` 时**才往下一层传（CSS §10.5）。
+///
+/// 外层写 `height: 200px`，里层 `height: 50%` 得 100；外层不写而由内容撑高时，里层那个
+/// 百分比没有可折的数，按 `auto` 走内容高（假度量下一行 28）。两档都要钉：只钉前一档
+/// 的话，「父块由内容撑高也把自己的高传下去」这种看着更聪明的写法能悄悄过关，
+/// 而那是改整本书的分页形状 —— 一章里每个段落的百分比高都会跟着变。
+#[test]
+fn a_percent_height_needs_an_explicit_parent_height() {
+    let html = "<div class=a><div class=b>字</div><div class=c>后</div></div>";
+    let top = |css: &str| {
+        let (_, laid) = typeset_in(&Mono, html, css, 600.0, None);
+        laid.blocks
+            .iter()
+            .find(|b| b.text == "后")
+            .map(|b| b.y)
+            .expect("后一块该有行")
+    };
+    assert_eq!(
+        top(".a { height: 200px } .b { height: 50% } .c { height: 0 }"),
+        100.0,
+        "父块写了 200，里层 50% 折成 100"
+    );
+    assert_eq!(
+        top(".b { height: 50% } .c { height: 0 }"),
+        28.0,
+        "父块没写：里层的百分比按 auto，回到一行的高"
+    );
+}
+
+/// 《斗战狂潮》封面页那一整套写法，按这本书真实的那一份排一遍。
+///
+/// CSS 逐字取自它的 `cover.html` 章内那块 `<style>`，`table` 那一族也照抄（包括作者
+/// 漏掉的 `td`）。这条要钉的**不是**「表格布局做好了」—— 这里没有表格盒，`table` 与
+/// `tr` 就是两个套着的普通块 —— 而是「封面居中本来就不靠表格盒」：楔块拿到页高的一半，
+/// 减掉自己那 360px 的负下边距，`clear` 把容器推到那一格之下，720 高的图正好落在页中间。
+///
+/// 三档一起钉，是因为只有中间那一档会看错：页比图矮时浏览器也不往回拉（`clear` 只往下推），
+/// 而滚动那一档没有竖轴基准 —— 那一档要是也跟着变，症状就是同一本书在两种读法下版式不同。
+#[test]
+fn the_cover_page_wedge_centers_the_image_only_when_the_page_is_tall_enough() {
+    let css = "html,body {height:100%; margin:0; padding:0;}\n\
+               .wedge {float:left; height:50%; margin-bottom: -360px;}\n\
+               .container {clear:both; height:0em; position: relative;}\n\
+               table, tr, th {height: 720px; width:100%; text-align:center;}";
+    let html = "<div class=\"wedge\"></div><div class=\"container\"><table><tr><td>\
+                <img src=\"cover.jpg\" alt=\"封面\" /></td></tr></table></div>";
+    let images = MockImages(vec![("cover.jpg", 538.0, 720.0)]);
+    let top_of_image = |page: Option<f32>| {
+        let (_, laid) = typeset_images_page(html, css, 600.0, page, &images);
+        laid.lines
+            .iter()
+            .find(|line| matches!(line.fragments.first(), Some(LineFragment::Image(_))))
+            .map(|line| line.y)
+            .expect("封面那张图该排出一行")
+    };
+    assert_eq!(
+        top_of_image(Some(1200.0)),
+        240.0,
+        "1200 的一半 600 减 360；图本身 720 高，正好铺满 240–960 那一格"
+    );
+    assert_eq!(
+        top_of_image(Some(640.0)),
+        0.0,
+        "页只有 640 高：往回拉会把图切到页外，浏览器也不这么排"
+    );
+    assert_eq!(top_of_image(None), 0.0, "滚动档没有竖轴基准，按 auto");
+}
+
 /// 内边距的百分比折自包含块宽，不是盒子自己的宽（CSS 规定 `padding` 的百分比分母
 /// 是**行内轴**的包含块尺寸）。
 #[test]
@@ -602,6 +813,28 @@ fn clear_both_drops_the_block_below_the_float() {
     assert_eq!(texts(&cleared)[2].chars().count(), 12, "整幅宽十二字");
 }
 
+/// 浮动盒的负外边距同样进让位那一圈：`PlacedFloat` 的边距盒宽是 `box_width + ml + mr`。
+///
+/// 上面那条钉的是 `margin-right: 20px` → 让到 120；这一条钉反号 → 让到 80。
+/// 只有负号那一档会走到「夹回 0」与「照算」的分岔上。
+#[test]
+fn a_negative_float_margin_shrinks_the_clearance() {
+    let html = format!("<div class=i><img src=a></div><p>{}</p>", "字".repeat(12));
+    let images = MockImages(vec![("a", 200.0, 100.0)]);
+    let (_, laid) = typeset_images(
+        &html,
+        ".i { float: left; margin-right: -20px } img { width: 100px }",
+        200.0,
+        &images,
+    );
+    assert_eq!(laid.lines[1].x, 80.0, "图宽 100 减去那 20px 负边距");
+    assert_eq!(
+        texts(&laid)[1].chars().count(),
+        7,
+        "让位圈窄了一档，压在图旁边的这行反而多容一字（夹回 0 那一档是六字）"
+    );
+}
+
 /// 中文转换本的章首下沉写法：`<span class="first">这</span>` 上写的是 `float: left`，
 /// 不是 `::first-letter`。《哈利·波特》301 章里有 199 章是它，所以这一种必须认。
 ///
@@ -757,6 +990,7 @@ fn a_written_height_holds_the_box_and_the_next_sibling_starts_below_it() {
             width: 200.0,
             light: false,
             allow_vertical: false,
+            page_height: None,
         },
         &Mono,
         &NoImages,
@@ -891,6 +1125,7 @@ fn the_min_sizing_clamps_agree_between_full_and_light() {
                 width: 200.0,
                 light,
                 allow_vertical: false,
+                page_height: None,
             },
             &Mono,
             &NoImages,
@@ -1353,6 +1588,17 @@ impl ImageProvider for MockImages {
 }
 
 fn typeset_images(html: &str, css: &str, width: f32, images: &dyn ImageProvider) -> (Dom, Layout) {
+    typeset_images_page(html, css, width, None, images)
+}
+
+/// 同上，多给一格竖轴基准（`LayoutOptions::page_height`），理由见 [`typeset_in`]。
+fn typeset_images_page(
+    html: &str,
+    css: &str,
+    width: f32,
+    page_height: Option<f32>,
+    images: &dyn ImageProvider,
+) -> (Dom, Layout) {
     let dom = Dom::parse(html.as_bytes());
     let styles = cascade(
         &dom,
@@ -1369,6 +1615,7 @@ fn typeset_images(html: &str, css: &str, width: f32, images: &dyn ImageProvider)
             light: false,
             // 夹具里会写 `writing-mode`，所以这两条排版入口都让书的 CSS 说了算。
             allow_vertical: true,
+            page_height,
         },
         &Mono,
         images,
@@ -1386,6 +1633,30 @@ fn typeset_images(html: &str, css: &str, width: f32, images: &dyn ImageProvider)
 ///
 /// 宽按 `width="100%"` 铺满版心、高按 `viewBox` 的比例 —— 这两个数是 SVG 的属性而不是
 /// CSS，样式表里查不到，只能从元素上直接读。
+/// 整页 `<img>` 裹在一个 `height:0` 的容器里：根盒是 0，图排到盒子外面。
+///
+/// 《斗战狂潮》（骷髅精灵）的封面页就是这个形状（EasyPub 导出的 `cover.html`：
+/// `.container { height: 0em }` 里塞一张 538×720 的整页图）。它钉的是比「认不认
+/// `<img>`」更深的一层：行盒明明排出来了，`Layout::height` 却跟着根盒停在 0 ——
+/// 而全仓只有这一个数回答「这一章有多长」，于是这一章在滚动链里不存在
+/// （`Book::placements` 的 `height() > 0.0`），读者从目录章往回滑，滑到顶是目录章
+/// 自己的头，「滑不到封面」。浏览器把溢出算进 `scrollHeight`，这里跟同一条。
+#[test]
+fn an_image_overflowing_a_zero_height_container_still_counts_as_height() {
+    let html = "<div class=\"container\"><img src=\"cover.jpg\" alt=\"封面\"/></div>";
+    let imgs = MockImages(vec![("cover.jpg", 538.0, 720.0)]);
+    let (_, layout) = typeset_images(html, ".container { height: 0 }", 370.0, &imgs);
+
+    assert_eq!(layout.lines.len(), 1, "整页就这一张图，一行");
+    let img = layout.lines[0].images().next().expect("要有图片片段");
+    assert!((img.width - 370.0).abs() < 1.0, "宽度铺满版心");
+    assert!(
+        layout.height > 400.0,
+        "溢出的那页要算进章高，实得 {}（根盒 0 不是答案）",
+        layout.height
+    );
+}
+
 #[test]
 fn a_calibre_svg_cover_page_lays_out_as_one_picture() {
     let html = "<div><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" \
@@ -1750,6 +2021,7 @@ fn light_mode_produces_no_lines() {
             width: 600.0,
             light: true,
             allow_vertical: false,
+            page_height: None,
         },
         &Mono,
         &NoImages,
@@ -1778,6 +2050,7 @@ fn light_mode_height_matches_full_within_tolerance() {
             width: 600.0,
             light: false,
             allow_vertical: false,
+            page_height: None,
         },
         &Mono,
         &NoImages,
@@ -1790,6 +2063,7 @@ fn light_mode_height_matches_full_within_tolerance() {
             width: 600.0,
             light: true,
             allow_vertical: false,
+            page_height: None,
         },
         &Mono,
         &NoImages,
@@ -1825,6 +2099,7 @@ fn two_stage_corpus() -> (Dom, NodeId, LayoutOptions) {
             width: 320.0,
             light: false,
             allow_vertical: false,
+            page_height: None,
         },
     )
 }

@@ -63,11 +63,12 @@ toc = "Sommaire"
 night = "Nuit"
 day = "Jour"
 progress = "Progression"
-# 阅读面板那两格：亮度滑条的标签，与面板右下角把完整设置压进来的那颗。
-# 字号、翻页、跟随系统都复用既有的词（`field.*` 与 `appearance.follow_system`）。
+# 阅读设置那张卡片里的读数：亮度那格的标签、版心推到最左那一格念的那句、翻页时长的标签。
+# 字号、行距、段距、留白、版心、字体、翻页动画都复用设置屏那套词（`field.*`），
+# 只有「跟随系统」与「铺满」两句是卡片自己的（`appearance.follow_system` 与本节这一格）。
 brightness = "Luminosité"
 turn_duration = "Durée du changement de page"
-more_settings = "Plus de réglages"
+measure_fill = "Pleine largeur"
 # 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
 page_position = "Page %{index} sur %{total}"
 # 底栏那一格：一页两栏的对开。窄窗口按不下去时自动退回单页，名字不必跟着改。
@@ -196,7 +197,7 @@ toc_max_lines = "Lignes par titre"
 toc_dim_read = "Estomper les chapitres lus"
 "toc_dim_read.desc" = "Les chapitres déjà ouverts sont dessinés estompés dans le sommaire."
 page_turn = "Animation de page"
-"page_turn.desc" = "Le mouvement de la feuille quand on tourne la page : glissement, recouvrement, ou aucun. La pagination et le deux-pages disposent deux feuilles selon ce réglage ; le défilement continu ne demande que s’il y a une animation. Le changer ne recompose aucun chapitre."
+"page_turn.desc" = "Le mouvement de la feuille quand on tourne la page : glissement, recouvrement ou aucun. « Défilement vertical » fait passer ce livre en défilement continu ; toute animation de papier le ramène en pagination ou en double page. Le changer ne recompose aucun chapitre."
 highlight_style = "Style de marquage"
 "highlight_style.desc" = "Quelle trace laisse un nouveau marquage dans le texte : un bandeau de couleur derrière les glyphes, une ligne droite dessous, ou un trait ondulé. Les marquages déjà dans le livre gardent le leur ; changer ceci ne recompose rien."
 

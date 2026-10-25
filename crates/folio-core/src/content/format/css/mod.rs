@@ -14,6 +14,7 @@ pub mod selector;
 pub mod ua;
 pub(crate) mod value;
 
+use crate::content::dom::{Dom, NodeId};
 use selector::Selector;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,6 +244,62 @@ impl RuleSet {
         }
         out
     }
+}
+
+/// 这个元素若是 `<style>`，给出它的正文；空正文与非 `<style>` 都给 `None`。
+///
+/// 取子树的**原始**文本：`Dom::text_of_subtree` 为锚点坐标系服务，故意剔掉 `style`
+/// 这一族；这里要的恰恰是它们的字本身。
+///
+/// 出口按**单个元素**给，而不是只给「整份文档拼好」那一条：调用点必须保持文档序，
+/// `<link>` 与 `<style>` 在一份书里会交错出现，先把所有 `<style>` 收完再接所有外链，
+/// 等于把两边 specificity 打平时的那一刀反着落。
+pub fn style_text_of(dom: &Dom, id: NodeId) -> Option<String> {
+    if dom.tag_name(id) != Some("style") {
+        return None;
+    }
+    let text = dom.raw_text_of_subtree(id);
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// 一份文档里所有 `<style>` 的正文，按文档顺序拼好。**不含** `<link>` 那一份 ——
+/// 外链的正文要按它自己的目录折 `url(...)`，那是调用方的事。
+///
+/// 宿主排版时给「章自己带样式」那一档建的规则表与量缺口的工具走这一条；
+/// `format::html` / `format::htmlz` 在同一趟里还要收 `<link>` 与 `<img>`，逐元素走
+/// [`style_text_of`]。从前这件事在 `format::html`、`format::htmlz` 与宿主各有一份
+/// 近乎同款的写法，于是「量 CSS 缺口的工具只读清单里那几份样式表、排版却连章内那块
+/// 一起读」这种分叉没人拦得住：报表会说「这本书全部接住」，而屏上真正生效的规则表里
+/// 明明有它没读到的那一块。
+pub fn style_tag_text(dom: &Dom) -> String {
+    let mut css = String::new();
+    for (id, _) in dom.elements() {
+        if let Some(text) = style_text_of(dom, id) {
+            css.push_str(&text);
+            css.push('\n');
+        }
+    }
+    css
+}
+
+/// 一章自己写的 `<style>` → 作者层规则表。`base_dir` 是**这一章**在容器里的目录。
+///
+/// 样式表**文件**按位置清单回容器现取（见 `content::document::Document::stylesheet`），
+/// 而写在章里的这一份随正文一起到达 —— 作者把样式写在哪一份里，层叠结果都不该有差别
+/// （EasyPub 那一族工具的封面页就是这么写的）。
+///
+/// 基准目录与元素上那句 `style="…"` 同一个数；外链那份的基准是它自己的目录，两者本来
+/// 就不同。漏折的表现是 `url(...)` 在图层表里躺着一条 `../Images/x.png`，图片索引按
+/// 容器路径精确查查不到 —— 屏上「有样式、没底色」，而 CSS 那侧一切正常。
+pub fn chapter_style_rules(dom: &Dom, base_dir: &str) -> RuleSet {
+    let css = style_tag_text(dom);
+    if css.trim().is_empty() {
+        return RuleSet::default();
+    }
+    RuleSet::parse(
+        &crate::content::format::absolutize_css_urls(&css, base_dir),
+        Origin::Author,
+    )
 }
 
 /// `@font-face` 的块体 → face 清单。

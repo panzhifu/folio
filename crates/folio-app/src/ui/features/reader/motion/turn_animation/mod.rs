@@ -125,23 +125,6 @@ pub(in crate::ui::features::reader) fn of(turn: PageTurn) -> &'static dyn PageTu
     }
 }
 
-/// 这一档在当前摆法下讲不讲得通。底栏那一格按它筛选项，**摆法归属先于档位**：
-/// 连续滚动里没有「翻页」这个动作（一步是视口挪九成的滚动补间，见决策层 Continuous
-/// 策略），四档纸面动画摆出来就是让人选一个永远不出场的档 —— 手机窄屏默认连续，
-/// 从前 `animates` 无条件 `true` 把它们全放进了菜单，读者选了仿真翻页却什么都不变；
-/// 分页/双页里没有可滚的东西，「上下滚动」讲不通。过了这一道，才轮得到那一档自己的
-/// 「走不走一趟」（[`PageTurnStyle::animates`]）。
-pub(in crate::ui::features::reader) fn applies(turn: PageTurn, mode: PageMode) -> bool {
-    match (turn, mode.is_continuous()) {
-        // 「不走动画」在任何摆法都是一个答案，不算「不适用于此摆法」。
-        (PageTurn::None, _) => true,
-        (PageTurn::Scroll, true) => true,
-        (PageTurn::Scroll, false) => false,
-        (PageTurn::Slide | PageTurn::SlideUp | PageTurn::Cover | PageTurn::Curl, true) => false,
-        (turn, false) => of(turn).animates(mode),
-    }
-}
-
 /// 松手那一腿自己走了几成：`0` = 松手那一刻那一格，`1` = 这一腿到底（走完或退回按下点）。
 ///
 /// 两条腿的尺**不是同一个**，因为 `progress` 走的方向相反：走完那一腿从 `from` 涨到 `1`，
@@ -183,7 +166,7 @@ mod tests {
     use crate::ui::features::reader::motion::turn_animation::slide::Slide;
     use crate::ui::features::reader::motion::turn_animation::slide_up::SlideUp;
     use crate::ui::features::reader::motion::turn_animation::testing::page;
-    use crate::ui::features::reader::motion::turn_animation::{applies, of, release_clock};
+    use crate::ui::features::reader::motion::turn_animation::{of, release_clock};
     use folio_core::PageTurn;
 
     /// 翻页的轴**归动画档**，不归手指。这两问的答案就是那条判据的全部：
@@ -203,7 +186,8 @@ mod tests {
             (PageTurn::Cover, Horizontal),
             (PageTurn::Curl, Horizontal),
             (PageTurn::SlideUp, Vertical),
-            // 「上下滚动」在分页里本就不成立（`applies` 会把它从选项里筛掉），真落进来按竖轴；
+            // 「上下滚动」在分页里本就不成立（那条列表会先把摆法带去连续，见
+            // `chrome::reconcile`），真落进来按竖轴；
             // 「不走动画」没有一趟要走，那一格不被读到，给个确定答案就够了。
             (PageTurn::Scroll, Vertical),
             (PageTurn::None, Horizontal),
@@ -247,41 +231,6 @@ mod tests {
                 Scroll.animates(mode),
                 mode.is_continuous(),
                 "{mode:?} 里上下滚动该不该走算错了"
-            );
-        }
-    }
-    /// 每个摆法都至少留下一档可选 —— 全筛掉的话底栏那颗按钮点开是空的。
-    #[test]
-    fn some_style_always_applies() {
-        for mode in [PageMode::Continuous, PageMode::Paged, PageMode::Spread] {
-            let kept: Vec<_> = PageTurn::ALL
-                .iter()
-                .copied()
-                .filter(|turn| applies(*turn, mode))
-                .collect();
-            assert!(!kept.is_empty(), "{mode:?} 里一档都不剩");
-        }
-    }
-    /// 选项资格**按摆法答**：连续里只剩「上下滚动」与「不走动画」——那里没有「翻页」
-    /// 这个动作，纸面动画摆出来就是让人选一个永远不出场的档；分页/双页里「上下滚动」
-    /// 讲不通，其余各档都要摆。从前 `animates` 无条件 `true` 把四档纸面动画也放进了
-    /// 连续的菜单，手机上选了仿真翻页读到的却是「什么都不变」。
-    #[test]
-    fn the_menu_offers_what_the_mode_can_run() {
-        for mode in [PageMode::Paged, PageMode::Spread] {
-            for turn in PageTurn::ALL.iter().copied() {
-                assert_eq!(
-                    applies(turn, mode),
-                    turn != PageTurn::Scroll,
-                    "{mode:?} 里 {turn:?} 该不该摆在选项里"
-                );
-            }
-        }
-        for turn in PageTurn::ALL.iter().copied() {
-            assert_eq!(
-                applies(turn, PageMode::Continuous),
-                matches!(turn, PageTurn::Scroll | PageTurn::None),
-                "连续里 {turn:?} 该不该摆在选项里"
             );
         }
     }

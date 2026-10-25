@@ -1,7 +1,11 @@
 //! CSS 子集：规则装配、层叠与 specificity。只依赖公开 API。
 
 use crate::content::dom::{Dom, NodeId};
-use crate::content::format::css::{Origin, RuleSet};
+use crate::content::format::css::computed::{Color, ComputedStyle, cascade};
+use crate::content::format::css::{
+    Origin, RuleSet, chapter_style_rules, style_tag_text, style_text_of,
+};
+use crate::content::format::dir_of;
 
 fn rules(text: &str) -> RuleSet {
     RuleSet::parse(text, Origin::Author)
@@ -294,4 +298,69 @@ fn equal_specificity_later_rule_wins() {
     let dom = Dom::parse(b"<p>x</p>");
     let set = rules("p { color: one } p { color: two }");
     assert_eq!(winner(&dom, &set, "color"), "two");
+}
+
+/// 写在章里的 `<style>` 也要能变成规则表：样式表**文件**按位置清单回容器取，而这一份
+/// 随正文一起到达 —— 作者把样式写在哪一份里，层叠结果都不该有差别（EasyPub 那一族工具
+/// 的封面页就是这么写的）。排版那一侧与量 CSS 缺口的工具读的都是这一个出口。
+///
+/// 顺带钉住这条路上的 `url(...)` 折算：基准是**这一章自己的目录**，与元素上那句
+/// `style="…"` 同一个数。漏折的表现与漏接 `background-image` 一模一样 —— 图片索引按
+/// 容器路径精确查，查不到就白底，而屏上看不出「是没接住」还是「折错了层」。
+#[test]
+fn a_chapters_own_style_block_becomes_author_rules() {
+    let source = "<html><head><style>p { color: #C0392B }\n\
+                      body { background: url(../Images/back.jpg) no-repeat center } }</style></head>\
+                      <body><p>字</p></body></html>";
+    let dom = Dom::parse(source.as_bytes());
+    let base_dir = dir_of("OEBPS/Text/v2.xhtml");
+    let rules = chapter_style_rules(&dom, &base_dir);
+    assert_eq!(rules.rules.len(), 2, "章里就两条规则：{:?}", rules.rules);
+
+    let styles = cascade(&dom, &rules, &ComputedStyle::default(), &base_dir);
+    let p = first_p(&dom);
+    assert_eq!(
+        styles.get(p).unwrap().color,
+        Some(Color(0xC0, 0x39, 0x2B)),
+        "章内 <style> 的颜色要落到 p 上"
+    );
+    let backdrop = styles
+        .iter()
+        .find_map(|(_, style)| style.background_pictures().next())
+        .expect("章内 <style> 的那张底图该折出一层");
+    assert_eq!(
+        backdrop.image.as_deref(),
+        Some("OEBPS/Images/back.jpg"),
+        "按这一章的目录折；少一层就是「有样式、没底色」"
+    );
+}
+
+/// 章内 `<style>` 与外链 `<link>` 在同一份文档里**交错**出现时，收进规则表的次序
+/// 必须是文档序。先把所有 `<style>` 收完再接所有外链，等于把 specificity 打平时
+/// 那一刀反着落 —— 这条钉住 `format::html` 那一族逐元素收的写法。
+#[test]
+fn style_text_of_returns_only_the_style_tags_text_in_document_order() {
+    let dom = Dom::parse(
+        b"<html><head><style>p { color: red }</style><link rel=stylesheet href=a.css>\
+           <style>h1 { color: blue }</style></head><body><p>x</p></body></html>",
+    );
+    let mut collected = Vec::new();
+    for (id, _) in dom.elements() {
+        if let Some(text) = style_text_of(&dom, id) {
+            collected.push(text.trim().to_string());
+        }
+    }
+    assert_eq!(
+        collected,
+        vec![
+            "p { color: red }".to_string(),
+            "h1 { color: blue }".to_string()
+        ],
+        "两块 <style> 按文档序各给一条，`<link>` 不从这里走"
+    );
+    assert_eq!(
+        style_tag_text(&dom).trim(),
+        "p { color: red }\nh1 { color: blue }",
+        "整份拼接的就是这两块"
+    );
 }

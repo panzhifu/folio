@@ -58,46 +58,6 @@ fn a_justified_line_pushes_an_inline_image_with_its_text() {
     assert_eq!(inline_image_x(100.0, 2.0, None, 3), 102.0);
 }
 
-/// 章里写的 `<style>` 也要进层叠：样式表**文件**按清单回容器取，而写在章里的
-/// 那一份随正文到达 —— 作者把样式写在哪一份里，层叠结果都不该有差别。
-///
-/// 顺带钉住这一条路上的 `url(...)` 折算：基准是**这一章自己的目录**，与元素上那句
-/// `style="…"` 同一个数（都由 `ChapterImages::base_dir` 递进来）。漏折的表现与漏接
-/// `background-image` 一模一样 —— 图片索引按容器路径精确查，查不到就白底，
-/// 而屏上看不出「是没接住」还是「折错了层」。
-#[test]
-fn a_chapters_own_style_block_reaches_the_cascade() {
-    use folio_core::content::format::css::computed::{Color, ComputedStyle, cascade};
-    let source = "<html><head><style>p { color: #C0392B }\n\
-                      body { background: url(../Images/back.jpg) no-repeat center } }</style></head>\
-                      <body><p>字</p></body></html>";
-    let dom = folio_core::content::dom::Dom::parse(source.as_bytes());
-    let base_dir = folio_core::content::format::dir_of("OEBPS/Text/v2.xhtml");
-    let rules = Document::chapter_style_rules(&dom, &base_dir);
-    assert_eq!(rules.rules.len(), 2, "章里就两条规则：{:?}", rules.rules);
-
-    let styles = cascade(&dom, &rules, &ComputedStyle::default(), &base_dir);
-    let p = dom
-        .elements()
-        .find(|(id, _)| dom.tag_name(*id) == Some("p"))
-        .map(|(id, _)| id)
-        .expect("该有 p");
-    assert_eq!(
-        styles.get(p).unwrap().color,
-        Some(Color(0xC0, 0x39, 0x2B)),
-        "章内 <style> 的颜色要落到 p 上"
-    );
-    let backdrop = styles
-        .iter()
-        .find_map(|(_, style)| style.background_pictures().next())
-        .expect("章内 <style> 的那张底图该折出一层");
-    assert_eq!(
-        backdrop.image.as_deref(),
-        Some("OEBPS/Images/back.jpg"),
-        "按这一章的目录折；少一层就是「有样式、没底色」"
-    );
-}
-
 /// 一段足够长的中文，保证它会折行 —— 不折行的话「缩进改变了布局」这种断言无从成立。
 const LONG: &str = "于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。";
 
@@ -543,14 +503,21 @@ fn the_layout_key_is_composed_in_one_place(cx: &mut TestAppContext) {
     );
 
     assert_eq!(
-        document.layout_key(600.0, 1),
-        document.layout_key(600.0, 1),
+        document.layout_key(600.0, 1, None),
+        document.layout_key(600.0, 1, None),
         "同一代内问两次必须给出同一把键"
     );
-    assert_eq!(document.layout_key(600.4, 1).width, 600, "栏宽量化到 1px");
+    assert_eq!(
+        document.layout_key(600.4, 1, None).width,
+        600,
+        "栏宽量化到 1px"
+    );
 
     // 改字号：换键，但不换复用范围。
-    let (a, b) = (document.layout_key(600.0, 1), document.layout_key(600.0, 2));
+    let (a, b) = (
+        document.layout_key(600.0, 1, None),
+        document.layout_key(600.0, 2, None),
+    );
     assert_ne!(a, b, "一页两栏与单栏不是同一份产物（切片要区分）");
     assert_eq!(
         a.context_rev(),
@@ -565,9 +532,9 @@ fn the_layout_key_is_composed_in_one_place(cx: &mut TestAppContext) {
         Arc::new(ChapterImages::empty()),
         Arc::new(BookFonts::empty()),
     );
-    let before = document.layout_key(600.0, 1);
+    let before = document.layout_key(600.0, 1, None);
     document.set_prefs(bigger);
-    let after = document.layout_key(600.0, 1);
+    let after = document.layout_key(600.0, 1, None);
     assert_ne!(before, after, "改字号必须换键");
     assert_eq!(
         before.context_rev(),
@@ -579,7 +546,7 @@ fn the_layout_key_is_composed_in_one_place(cx: &mut TestAppContext) {
     document.set_images(Arc::new(ChapterImages::empty()));
     assert_ne!(
         before.context_rev(),
-        document.layout_key(600.0, 1).context_rev(),
+        document.layout_key(600.0, 1, None).context_rev(),
         "换了图片索引还复用旧块，行高就是按上一批图片算的"
     );
 
@@ -587,7 +554,7 @@ fn the_layout_key_is_composed_in_one_place(cx: &mut TestAppContext) {
     document.set_chapter(ChapterSource::text("<p>下一章</p>"));
     assert_ne!(
         before.chapter,
-        document.layout_key(600.0, 1).chapter,
+        document.layout_key(600.0, 1, None).chapter,
         "换章必须换章身份（块缓存的复用范围跟着清）"
     );
 
@@ -600,8 +567,8 @@ fn the_layout_key_is_composed_in_one_place(cx: &mut TestAppContext) {
         Arc::new(BookFonts::empty()),
     );
     assert_ne!(
-        document.layout_key(600.0, 1).author_css_hash,
-        with_css.layout_key(600.0, 1).author_css_hash,
+        document.layout_key(600.0, 1, None).author_css_hash,
+        with_css.layout_key(600.0, 1, None).author_css_hash,
         "作者样式进键"
     );
 }
@@ -621,7 +588,7 @@ fn the_font_revision_of_a_book_that_registered_faces_moves_the_key() {
             Arc::new(ChapterImages::empty()),
             faces,
         )
-        .layout_key(600.0, 1)
+        .layout_key(600.0, 1, None)
     };
     let empty_a = make(Arc::new(BookFonts::empty()));
     let empty_b = make(Arc::new(BookFonts::empty()));
@@ -1041,7 +1008,7 @@ fn the_key_and_the_fetched_chapter_are_the_same_chapter(cx: &mut TestAppContext)
         "第 0 章的来路必须排回第 0 章的正文，实际是：{first}"
     );
     assert_eq!(
-        document.layout_key(600.0, 1).chapter,
+        document.layout_key(600.0, 1, None).chapter,
         0,
         "按位置取的那一路，键里的身份就是章号（内容哈希活在产物上，不在键里）"
     );
@@ -1054,7 +1021,7 @@ fn the_key_and_the_fetched_chapter_are_the_same_chapter(cx: &mut TestAppContext)
     .expect("窗口应当可排版");
     let second = document.line_texts().concat();
     assert_eq!(
-        document.layout_key(600.0, 1).chapter,
+        document.layout_key(600.0, 1, None).chapter,
         1,
         "换章之后键里的身份要跟着换成第 1 章"
     );
@@ -1088,7 +1055,7 @@ fn asking_for_the_key_never_rehashes_the_inputs(cx: &mut TestAppContext) {
     take_local(Metric::LayoutInputHashes);
 
     for _ in 0..300 {
-        let _ = document.layout_key(600.0, 1);
+        let _ = document.layout_key(600.0, 1, None);
     }
     assert_eq!(
         take_local(Metric::LayoutInputHashes),
@@ -1097,7 +1064,7 @@ fn asking_for_the_key_never_rehashes_the_inputs(cx: &mut TestAppContext) {
     );
 
     // 而偏好真的换了，那一格必须刷新（省掉刷新与每帧重算一样糟，只是坏得看不出来）。
-    let before = document.layout_key(600.0, 1);
+    let before = document.layout_key(600.0, 1, None);
     let mut bigger = bare_prefs();
     bigger.font_size += 4.0;
     document.set_prefs(bigger);
@@ -1108,7 +1075,7 @@ fn asking_for_the_key_never_rehashes_the_inputs(cx: &mut TestAppContext) {
     );
     assert_ne!(
         before.prefs_hash,
-        document.layout_key(600.0, 1).prefs_hash,
+        document.layout_key(600.0, 1, None).prefs_hash,
         "换了字号键里的偏好那一格必须跟着变"
     );
 }

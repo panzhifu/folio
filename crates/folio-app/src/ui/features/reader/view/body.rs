@@ -54,6 +54,8 @@ use crate::ui::features::reader::model::book_fonts::BookFonts;
 use crate::ui::features::reader::model::chapter_layout::{Document, Viewport};
 use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::image_atlas::ImageAtlas;
+use crate::ui::features::reader::model::paging::PrefetchSide;
+use crate::ui::features::reader::model::prefetch;
 use crate::ui::features::reader::model::session::{
     AnnotationSpans, CurlMesh, PageRef, ReaderSession, Source, Turn, TurnRun, land_at_anchor,
     start_turn,
@@ -64,7 +66,6 @@ use crate::ui::features::reader::view::paint::{self, GlyphRun, GlyphsElement, Ma
 use crate::ui::features::reader::view::scene::{BlockDecor, BlockPicture, Scene, VisibleImage};
 use crate::ui::foundation::images::DecodeRequest;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::shell::navigation::SizeClass;
 use crate::ui::shell::{turn_duration, turn_transition};
 
 /// 一次翻页动画在这一帧的样子。时钟已经采完、方向与档位都在里面，两臂各自折成位移。
@@ -224,18 +225,27 @@ impl Render for ReaderSession {
         let gap = chrome::spread_gap(self.prefs.margin_x);
         // 退档判据与排版必须量同一个版心宽，所以用 `Document` 的那个式子算，不在这里另定一套。
         let usable = Document::content_width(window, &self.prefs, self.reserve.width);
-        if self.mode_undecided && !SizeClass::of(window).is_compact() {
-            // 读者没选过档，且这是平板 / 桌面的窗口宽度档：每一帧按当前宽重算默认档。
-            // 手机档（Compact）不参与 —— 那里连续滚动是习惯本身，两条窄柱子不是体验。
-            // 每帧重算而不是定一次：窗口从 1200 收到 700，双页就该退回连续滚动，
-            // 不该把「第一次打开时是横屏平板」那一刻钉死。
-            let before = self.mode;
-            self.mode = chrome::default_mode(usable, gap);
-            if self.mode != before {
-                // 默认档自己换了摆法（平板第一次打开从连续切双页）：捕获纹理同样作废。
-                self.capture_dirty = true;
-            }
-        }
+        // 摆法这一帧有两个来源，按顺序解：读者为这本书选过档就用他那一档，没选过
+        // （第一次读、或读了但从没换过档）才按宽度给默认档；然后「翻页方式」里那一档
+        // 有**否决权** —— 选了「上下滚动」就必须是连续，选了任何一张纸的走法就不该还
+        // 站在连续里。这条耦合放在渲染帧而不是写配置那一头，是因为设置屏改的是全局
+        // `appearance.page_turn`、而摆法按书存在会话里，两头隔着一条边界
+        // （判据本身在 `chrome::reconcile`）。
+        //
+        // 从前这里有一条 `!is_compact()` 的闸：手机档不参与按宽度重算，因为装不下两栏时
+        // 默认档就是连续滚动 —— 那正是「在手机上选了仿真翻页却什么都不变」的成因。
+        // 默认档不再回连续之后，那条闸要的东西没有了。
+        //
+        // 换档统一走 `adopt_mode`：它把「第几个字」从旧摆法的坐标搬到新摆法里。
+        // 这里直接赋 `self.mode` 会让连续 → 分页那一趟丢掉章内位置 —— 读者在
+        // 第 40% 处换回纸面动画，落到的却是这一章的章首。
+        let by_width = chrome::default_mode(usable, gap);
+        let wanted = if self.mode_undecided {
+            by_width
+        } else {
+            self.mode
+        };
+        self.adopt_mode(chrome::reconcile(page_turn, wanted, by_width), cx);
         let mode = self.mode.effective(usable, gap);
         let columns = mode.columns();
 
@@ -260,6 +270,13 @@ impl Render for ReaderSession {
         // 这里只决定「这一帧要不要烘」。真正发请求要等到那块 canvas 的绘制回调（见下面
         // `capture_region` 那一格）：只有在那里才知道这一栏在窗口里的真实原点，而那个原点
         // 必须与网格取 uv 用的那一块是同一个数。
+        //
+        // 还有一条条件不在这里的「页号」里：**这一章的排版得已经落地**。进书第一帧的排版
+        // 是这一帧才丢进后台队列的（`ensure_viewport`），当帧元素树里一个字都没有；那时
+        // 烘下来的是一张纸色纹理，而它一旦被记成「已烘」，排版回来既不动 `captured_page`
+        // 也不置 `capture_dirty`（`apply_typeset` 只管行盒与分片），于是这张白纸会一直
+        // 留着 —— 真机上第一次仿真翻页整页白，翻完一页页号变了才自己好。判据在
+        // [`capture_wanted`]。
         let page_key = (self.chapter_index(), self.page);
         // 窗口尺寸变了 ⇒ 那张纹理作废：它里面被写过的只有**当时**那一块，而网格按今天的窗口归一
         // 取 uv，差出来的那一截采到没被写过的地方（读成黑）。页号在这时候不动，所以它进不了
@@ -276,9 +293,16 @@ impl Render for ReaderSession {
         if self.capture_dirty {
             self.captured_back = None;
         }
-        let capture_needed = turn.is_none()
-            && !mode.is_continuous()
-            && (self.capture_dirty || self.captured_page != Some(page_key));
+        // 定版式那一族没有排版可等（页是既定的位图），所以那一族恒算「已落地」。
+        let content_ready =
+            self.is_fixed() || self.book().is_none_or(|book| book.document().is_current());
+        let capture_needed = capture_wanted(
+            turn.is_some(),
+            mode.is_continuous(),
+            content_ready,
+            self.capture_dirty,
+            self.captured_page == Some(page_key),
+        );
         // 捕获层 1（正面）这一帧要不要画一份副本。只有可重排那一族要：定版式那一族不出卷曲
         // 网格（它的页面本来就是整张位图），连续滚动那一档根本不烘（上面那条已经挡掉）。
         // 副本必须自己画一份 —— 主 pass 只画 `order < CAPTURE_ORDER_BASE`，层里的东西不上屏，
@@ -358,6 +382,10 @@ impl Render for ReaderSession {
         let mut spoken: Vec<SharedString> = Vec::new();
         // `&mut self.source` 只借用这一个字段，所以臂里写 `self.content_height`、
         // 读 `self.scroll_y` 都不冲突（前提是别把 `self` 整个传进函数）。
+        let mut prefetch_side: Option<PrefetchSide> = None;
+        // 这一帧主场景与捕获副本真正交给图集碰过的那些图（容器路径）。预解那一步要跳过它们 ——
+        // 「还没进图集」只能这样知道：`painted` 已经把「在场」记上了。
+        let mut painted_keys: Vec<String> = Vec::new();
         match &mut self.source {
             Source::Sample(text) => {
                 let font = font_cache.resolve(
@@ -636,6 +664,13 @@ impl Render for ReaderSession {
                         None => self.scroll_y,
                     };
                     self.scroll_painted = painted_y;
+                    // 连续滚动里「下一张纸」是下面那一屏：只要这一章还没滚到底，就往下预解；
+                    // 滚到底之后往回看上一屏。判据只看坐标链的两端，不看章 —— 章界那一头
+                    // 由 `prefetch::scroll_targets` 按全局带换到邻章去。
+                    prefetch_side = prefetch::side_for_scroll(
+                        self.scroll_y,
+                        (self.content_height - viewport_height).max(0.0),
+                    );
                     let __spine = __spine.ns();
                     crate::ui::features::reader::model::perf::add(|frame| {
                         frame.spine_ns += __spine
@@ -696,6 +731,7 @@ impl Render for ReaderSession {
                             column.extend(decoration_child(decor, &atlas, view, cx));
                         }
                         for image in scene.images {
+                            painted_keys.push(image.image.key.clone());
                             let Some(rendered) = painted(&atlas, image.image.clone(), view, cx)
                             else {
                                 continue;
@@ -794,6 +830,15 @@ impl Render for ReaderSession {
                         self.pending_chapter_turn = None;
                     }
                     self.page = self.page.min(pages.saturating_sub(1));
+                    // 图预解：这一屏上下紧挨着的那一张纸（章末那一头换到邻章去，见
+                    // `prefetch::paged_targets`）。`pages` 双页时是张数，这里不与它挂钩：
+                    // 预解只关心「还有没有下一次翻页」。
+                    prefetch_side = prefetch::side_for_paged(
+                        self.page,
+                        pages,
+                        book.chapter_index(),
+                        book.chapter_count(),
+                    );
 
                     // 邻章预排版：跨章滑动要两张纸同时上屏，目标章必须先有排版与切页。
                     // 当前章排完才铺邻章，避免刚换章时把三章的重排一起压进队列。
@@ -875,6 +920,7 @@ impl Render for ReaderSession {
                     let mut count = 1usize;
                     let mut cross_chapter = false;
                     // 折页这一趟的逐栏取舍要在 `if let Some(frame)` 之外读，先把这几格提出来。
+                    let mut leaf_turn = false;
                     let mut spread_curl = false;
                     let mut leaf_column = 0usize;
                     let mut other_column = 1usize;
@@ -887,10 +933,10 @@ impl Render for ReaderSession {
                         let free_right =
                             turn_animation::Pose::free_edge_right(frame.forward, frame.rtl);
                         // 双页只揭**一张 leaf**：书脊在中缝，不是整屏左缘。单页仍是整块版心。
-                        // 这一块也是捕获纹理/网格/手指归一化共用的那一把尺。
-                        let spread_leaf = (frame.style == PageTurn::Curl
-                            && mode == chrome::PageMode::Spread)
-                            .then(|| area.leaf(free_right));
+                        // 这一把尺**四档纸面动画共用** —— 从前只有折页拿得到，于是平移/覆盖在
+                        // 双页里是整块版心一起拖着走，连书脊那条缝都跟着动。
+                        let spread_leaf =
+                            (mode == chrome::PageMode::Spread).then(|| area.leaf(free_right));
                         let curl_area = spread_leaf.unwrap_or(area);
                         if frame.style == PageTurn::Curl {
                             curl_leaf = Some(curl_area);
@@ -1084,9 +1130,10 @@ impl Render for ReaderSession {
                         // 同一张纸既当出场又当进场时不拆栏：正常走不到（`turn()` 只按
                         // `TurnPlan` 里真会换页那几支起趟），但真走到了，拆栏会把两栏都判给
                         // 捕获层，主场景一片空白。
-                        spread_curl = frame.style == PageTurn::Curl
-                            && mode == chrome::PageMode::Spread
-                            && leaving_ref != arriving_ref;
+                        // 这一趟是不是「双页里揭一张 leaf」。四档纸面动画都算 —— 它管的是
+                        // **哪一栏在纸上**；捕获纹理与背面那一套仍只归折页（`spread_curl`）。
+                        leaf_turn = mode == chrome::PageMode::Spread && leaving_ref != arriving_ref;
+                        spread_curl = leaf_turn && frame.style == PageTurn::Curl;
                         leaf_column = if free_right { 1 } else { 0 };
                         other_column = 1 - leaf_column;
                         turn_leaving = Some(leaving_ref);
@@ -1153,7 +1200,6 @@ impl Render for ReaderSession {
                             continue;
                         };
                         let slices = doc.slices();
-                        let (shift_x, shift_y) = at.offset;
                         for index in 0..columns {
                             let Some(slice) = slices.get(page_ref.page * columns + index) else {
                                 continue;
@@ -1163,8 +1209,16 @@ impl Render for ReaderSession {
                             }
                             // 这一栏在**物理**上靠左还是靠右：判据一律读 `slice.column`，不读
                             // `index` —— RTL 的书 `slices()` 按逻辑栏序给，两者是反的。
-                            let is_leaf = spread_curl && slice.column == leaf_column;
+                            let is_leaf = leaf_turn && slice.column == leaf_column;
+                            let is_other = leaf_turn && slice.column == other_column;
                             let is_back = spread_curl && slice.column == other_column;
+                            // 双页里新跨页的**另一半**这一趟不画：那是被揭起来的叶子落下去之后
+                            // 才出现的一面。折页靠背面那张纹理演这一格（它把那一栏烘进层 2，
+                            // 所以主场景本来就不画它）；平移/覆盖没有背面，只能靠这里不画它 ——
+                            // 否则左半页会在趟刚开始就跳成新的，读者读到「左边先变、右边再滑」。
+                            if is_other && !spread_curl && turn_arriving == Some(page_ref) {
+                                continue;
+                            }
                             // 折页那一趟这一栏归谁：
                             //  - 揭起来那张纸的正面（leaf 那一栏）在 GPU 路径由网格从捕获纹理里
                             //    取，主场景不再画它；CPU 兜底（纹理不可用那一帧）仍画，按折线裁字。
@@ -1184,7 +1238,10 @@ impl Render for ReaderSession {
                                 continue;
                             }
                             // 这一栏的字按哪一条折线裁（判据与它的理由在 [`column_cut`]）。
-                            let cut = column_cut(spread_curl, is_leaf, &at);
+                            let cut = column_cut(leaf_turn, is_leaf, &at);
+                            // 停在原地的那半页**不带位移**：双页里只有 leaf 那一栏在纸上走，
+                            // 另一栏是读者的「还没翻到的那一页」，位置就是它的最终位置。
+                            let (shift_x, shift_y) = if is_other { (0.0, 0.0) } else { at.offset };
                             let x = self.prefs.margin_x
                                 + column_offset(column_width, gap, slice.column)
                                 + shift_x;
@@ -1288,6 +1345,7 @@ impl Render for ReaderSession {
                                         image.top + image.height * 0.5,
                                     )
                                 });
+                                painted_keys.push(image.image.key.clone());
                                 let Some(rendered) = painted(&atlas, image.image.clone(), view, cx)
                                 else {
                                     continue;
@@ -1804,6 +1862,34 @@ impl Render for ReaderSession {
                 .inset_0(),
             );
         }
+        // 预解下一次翻页要用的那几张图。**必须在 `end_frame` 之前**：那一趟按「离场满几帧」
+        // 放格子，而预解进来的那一格这一帧还算不上「在场」—— 晚一步，它落地后的第一帧
+        // 就被收走了。
+        //
+        // 只在静止帧做：动画期间场景里已经多了一张纸，此时预解的是正在被翻走/翻来的那一页，
+        // 而它们下一帧本来就上屏；两趟解压在 24 MiB 的封顶下还会把读者眼前那几张挤出去。
+        if let (Some(side), None) = (prefetch_side, turn)
+            && let Some(book) = self.book()
+        {
+            // 「还没进图集」只能这么知道：`painted` 那一问已经把「在场」记上了。
+            let targets = if mode.is_continuous() {
+                prefetch::scroll_targets(
+                    &book.placements(chapter_gap),
+                    self.scroll_painted..(self.scroll_painted + viewport_height),
+                    viewport_height,
+                    side,
+                )
+            } else {
+                prefetch::paged_targets(book, self.page, self.laid_out.pages, columns, side)
+            };
+            let picked = prefetch::first_unseen(book, &targets, |href| {
+                painted_keys.iter().any(|k| k == href)
+            });
+            if let Some(request) = picked {
+                self.atlas
+                    .update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
+            }
+        }
         // 帧末回收图集。**必须**在这一帧的元素树全部搭完之后：中途放掉的格子会被同一帧
         // 里的 `img` 重新传回去，白花一趟上传（`image_atlas::end_frame` 那两条不动的规矩）。
         self.atlas
@@ -1981,6 +2067,29 @@ fn plain_image(
         .into_any_element()
 }
 
+/// 这一帧要不要（重新）烘那张旧页纹理。
+///
+/// 五个输入各自挡掉一种情况的：
+///
+/// - `animating`：动画期间场景里已经多了一张新页，烘出来的就不是正在被翻的那张。
+/// - `continuous`：连续滚动根本不是「一页」，也没有卷起来的那张纸要采它。
+/// - `content_ready`：**这一章的排版已经是当前键那一代**（`Document::is_current`）。
+///   没排完时画出来的只有纸色，而那张纸色一旦被记成「已烘」就不会再烘第二次 ——
+///   第一次进书划那一下仿真翻页整页白，就是这一格缺着（见 `view/body` 里 `page_key`
+///   那一段注释）。它与 `dirty` 是**并列**的两条：`dirty` 说「手里那张过期了」，
+///   这一条说「手里那张（或马上要烘的那张）根本不会有内容」。
+/// - `dirty` / `captured`：偏好、主题、尺寸、摆法变了要重烘；同一页且不脏就不重复跑
+///   整趟捕获 pass。
+fn capture_wanted(
+    animating: bool,
+    continuous: bool,
+    content_ready: bool,
+    dirty: bool,
+    captured: bool,
+) -> bool {
+    !animating && !continuous && content_ready && (dirty || !captured)
+}
+
 /// 捕获矩形（**元素局部**坐标）：`area` 那一块，横向抵消掉外壳进场那一段的横移。
 ///
 /// 副本画在最终位置、矩形也按最终位置取，于是进书那 280 ms 里就能烘：页框滑出窗口的那一截
@@ -2017,11 +2126,11 @@ fn in_viewport(rect: Bounds<Pixels>, viewport: (f32, f32)) -> bool {
 /// 那句「圆柱的轴**就是**那条折线」）。所以网格在的时候裁掉的正是被压住的那些字，一格不少；
 /// 网格不在的时候，它是唯一还挡住那一屏字的东西。
 fn column_cut(
-    spread_curl: bool,
+    leaf_turn: bool,
     is_leaf: bool,
     sheet: &turn_animation::Sheet,
 ) -> Option<turn_animation::Cut> {
-    if spread_curl && !is_leaf {
+    if leaf_turn && !is_leaf {
         None
     } else {
         sheet.cut

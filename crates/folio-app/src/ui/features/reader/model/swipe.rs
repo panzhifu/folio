@@ -325,11 +325,11 @@ impl ReaderSession {
             return None;
         }
         // 归一化与判轴用的是同一块版心：[`ReaderSession::page_area`]，与折线、捕获纹理同一把尺。
-        // 双页折页的「一屏」是**一张 leaf**，不是整张跨页：从右侧划到中缝就该走满，不是走一半。
+        // 双页的「一屏」是**一张 leaf**，不是整张跨页：从右侧划到中缝就该走满，不是走一半。
+        // 这一条从前只认折页，于是双页里选平移时手指按整块版心归一、纸却只走半块 ——
+        // 拖到一半纸就落定了，而「走过大半屏才翻页」那一条判据还在按整块量。
         let rtl = self.progression_rtl();
-        let dist = if ConfigHolder::appearance(cx).page_turn == PageTurn::Curl
-            && self.laid_out.mode == PageMode::Spread
-        {
+        let dist = if self.laid_out.mode == PageMode::Spread {
             let free_right = intent.is_none_or(|intent| (intent == TurnIntent::Next) != rtl);
             self.page_area.leaf(free_right).distance(style.axis())
         } else {
@@ -397,6 +397,18 @@ impl ReaderSession {
     ) -> SwipeStep {
         if wheel {
             self.swipe_sealed = false;
+        }
+        // 连续滚动里没有「翻页这一屏」：`swipe_geometry` 对这一档给的是 `None`（那一格自己
+        // 写着「连续滚动（手指就是滚）」），可下面 `claim_swipe` 把 `None` 一律读成
+        // `Refused`，随后整笔 `Swallow` —— 于是手指走过 `SLOP` 之后一个一个增量都被吞掉，
+        // `scroll_y` 再也不动。读者看到的是「选了上下滚动，往下滑没反应」。
+        //
+        // 这一档必须在跟踪态建起来之前就交还给滚动层：手指的每一段增量就是滚，翻页层一步
+        // 也不认领。滚轮不走这条（它没有跟踪态，本来就不会被认领），照旧往下走去分页 / 定
+        // 版式那两条路。
+        if !wheel && self.laid_out.mode.is_continuous() {
+            self.swipe = None;
+            return SwipeStep::Ignore;
         }
         match phase {
             // 一笔的开头。识别器要走过它自己的 `touch_slop` 才发这一条，且带来的那一段

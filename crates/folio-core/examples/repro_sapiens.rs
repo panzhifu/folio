@@ -51,6 +51,7 @@ fn main() {
                 width: 370.0,
                 light: false,
                 allow_vertical: false,
+                page_height: None,
             },
             &StdMeasure,
             &NoImages,

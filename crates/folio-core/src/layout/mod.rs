@@ -140,9 +140,35 @@ fn layout_inner(
     // 从前这里直接排 `children`，根自己从不登记 ⇒ 真书《人类简史》第一部分那页
     // `<body class="brownll">`（`background-color: #c4aa87`）的整幅棕底凭空消失。
     // 盒子取整个视口宽、从 (0, 0) 起，高度与 [`Layout::height`] 同一个数，两者自洽。
+    // 根的包含块高 = `options.page_height`（视口 / 一页的高）。`html,body{height:100%}`
+    // 那一族只有在这一格才折得出数，而它是封面页那套「浮动楔块 + 负下边距」垂直居中
+    // 写法的唯一基准（判据见 `LayoutOptions::page_height`）。
+    //
+    // **只拿它当子节点的基准，不拿它当根盒的高**：根的高仍按内容算（下面那一行）。
+    // 把 `body{height:100%}` 兑成「这一章正好一页高」会改掉每一章的分页与滚动链，
+    // 而这一格要的只是让 `height:50%` 有个数可折 —— 两件事别顺手一起做。
+    let child_h = Ctx::child_height_basis(style, options.page_height, pt + pb);
     let index = ctx.push_block(root, 0.0, 0.0, options.width, String::new(), true);
-    let content = ctx.children(root, pl, pt, content_width);
-    let height = ctx.close_block(index, pt + content + pb);
+    let content = ctx.children(root, pl, pt, content_width, child_h);
+    let mut height = ctx.close_block(index, pt + content + pb);
+    // **溢出的内容也算这一章的高**。作者把整页图裹在 `height:0` 的容器里是常见写法
+    // （《斗战狂潮》的封面页：`.container { height: 0em }` 里塞一张整页 `<img>`），
+    // 根盒算出来是 0，而行盒实际排到了 551px 外面。浏览器的 scrollHeight 含溢出，
+    // 而 `Layout::height` 是全仓唯一的「这一章有多长」：只认根盒的话，这一章在滚动链
+    // 里就是 0 高（`Book::placements` 那道 `height() > 0.0` 的筛子）—— 症状正是读者
+    // 说的「上下滚动滑不到封面」，分页那一侧则是切出 0 片。
+    //
+    // 根块自己的盒子跟着长高：背景与边框按它画，两处不一致就是「底色只铺一半」。
+    let overflow = ctx
+        .lines
+        .iter()
+        .map(|line| line.y + line.height)
+        .chain(ctx.blocks.iter().map(|block| block.y + block.height))
+        .fold(0.0, f32::max);
+    if overflow > height + 0.5 {
+        height = overflow;
+        ctx.blocks[index].height = height;
+    }
     // 轴取**根样式**那一格：整章一根轴。混排（这一章里既有一竖排段又有一横排表格）
     // 明确不支持 —— 那样切片、进度、命中都得按块各问一次轴，而分片器只会切一根轴。
     // `allow_vertical` 是界面那一侧的门（竖排现在只在分页那一档落地），判据与理由
@@ -180,6 +206,13 @@ pub struct ChapterMeasure {
     units: Vec<RenderUnit>,
     /// 顶层是不是「纯块级」。有匿名行内内容时为 `false`（见 [`render_window`]）。
     simple: bool,
+    /// 测量时的竖轴基准（[`LayoutOptions::page_height`]）。退化整章重排要照着它再排一遍，
+    /// 少了这一格就会用 `None` 重排，与量高那一趟给出两个数。
+    page_height: Option<f32>,
+    /// 顶层单元折百分比高用的那一个基准（= 根的内容高，仅当根明确写过 `height`）。
+    /// 与 `child_h` 在 `measure_chapter` 里算一次存下来，是为了让回放那一趟不必重做
+    /// 根的内边距算术 —— 那一套算式只许有一份。
+    child_h: Option<f32>,
 }
 
 /// 一个顶层渲染单元：一个块级子节点及其在章内的位置与（估算）高。
@@ -232,6 +265,8 @@ pub fn measure_chapter(
     let pb = style.padding_bottom.resolve(options.width).max(0.0);
     let content_width =
         (options.width - pl - style.padding_right.resolve(options.width).max(0.0)).max(1.0);
+    // 与 `layout_inner` 同一个基准：量高这一趟与实排那一趟不许各拿一个数。
+    let child_h = Ctx::child_height_basis(style, options.page_height, pt + pb);
 
     let mut units = Vec::new();
     let mut cursor = pt;
@@ -247,17 +282,15 @@ pub fn measure_chapter(
             simple = false;
             break;
         }
-        let mt = s.margin_top.resolve(content_width).max(0.0);
-        // 与 `children_light` 同一条外边距折叠：兄弟间取较大值，不叠加。
-        cursor += if prev_bottom > 0.0 {
-            mt.max(prev_bottom)
-        } else {
-            mt
-        };
+        let mt = s.margin_top.resolve(content_width);
+        // 与 `children_light` 同一条外边距折叠：兄弟间取较大值不叠加，负数那两档
+        // 由 `collect::Ctx::collapse_margins` 那一个式子给（两条路必须同解，
+        // 否则这张量高表与实排对不上，滚动位置就飘）。
+        cursor += Ctx::collapse_margins(mt, prev_bottom);
         // 横向也走同一条求解式（`layout::collect::solve_block_width`）：这一张表要是
         // 少算一处，作者写了定宽的块就会「量出来满宽、排出来定宽」，窗口对不上。
         let (ml, cw) = ctx.solve_block_width(s, content_width);
-        let height = ctx.block_light(child, cw, content_width);
+        let height = ctx.block_light(child, cw, content_width, child_h);
         units.push(RenderUnit {
             node: child,
             x: pl + ml,
@@ -266,7 +299,7 @@ pub fn measure_chapter(
             height,
         });
         cursor += height;
-        prev_bottom = s.margin_bottom.resolve(content_width).max(0.0);
+        prev_bottom = s.margin_bottom.resolve(content_width);
     }
     if !simple {
         units.clear();
@@ -278,6 +311,8 @@ pub fn measure_chapter(
         height: if simple { cursor + pb } else { 0.0 },
         units,
         simple,
+        page_height: options.page_height,
+        child_h,
     }
 }
 
@@ -308,6 +343,8 @@ pub fn render_window(
                 light: false,
                 // 两阶段那条路整个按「单元沿 y 排」建着，竖排接不上（见 `render_window` 尾）。
                 allow_vertical: false,
+                // 照测量那一趟的数重排，不然同一个根用两个基准折百分比高。
+                page_height: chapter.page_height,
             },
             measure,
             images,
@@ -340,8 +377,16 @@ pub fn render_window(
             Some(p) => bottom + (unit.y - (p.y + p.height)),
         };
         // `basis` 用章的版心宽：这些单元是顶层块，它们的包含块就是根的内容盒，
-        // 与 `measure_chapter` 里算 `unit.width` 时折边距用的同一个数。
-        let h = ctx.block(unit.node, unit.x, top, unit.width, chapter.width);
+        // 与 `measure_chapter` 里算 `unit.width` 时折边距用的同一个数。竖轴那一份
+        // (`child_h`) 同理，是测量那一趟算好存下来的，回放不许另算一个。
+        let h = ctx.block(
+            unit.node,
+            unit.x,
+            top,
+            unit.width,
+            chapter.width,
+            chapter.child_h,
+        );
         bottom = top + h;
         prev = Some(unit);
     }

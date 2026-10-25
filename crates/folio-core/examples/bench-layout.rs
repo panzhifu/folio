@@ -185,6 +185,7 @@ fn main() {
             width: WIDTH,
             light: false,
             allow_vertical: false,
+            page_height: None,
         },
     );
     report("完整排版", full, &format!("{lines} 行"));
@@ -196,6 +197,7 @@ fn main() {
             width: WIDTH,
             light: true,
             allow_vertical: false,
+            page_height: None,
         },
     );
     report(
@@ -212,6 +214,7 @@ fn main() {
                 width: WIDTH,
                 light: false,
                 allow_vertical: false,
+                page_height: None,
             },
             &Mock,
             &NoImages,
@@ -225,6 +228,7 @@ fn main() {
                 width: WIDTH,
                 light: true,
                 allow_vertical: false,
+                page_height: None,
             },
             &Mock,
             &NoImages,
@@ -243,6 +247,7 @@ fn main() {
             width: WIDTH,
             light: false,
             allow_vertical: false,
+            page_height: None,
         };
         // 阶段一：整章量高（不建行盒）。
         let mut t = Duration::MAX;
@@ -296,6 +301,7 @@ fn main() {
             width: WIDTH,
             light: false,
             allow_vertical: false,
+            page_height: None,
         },
     );
     report("完整排版（拉丁）", latin, &format!("{ll} 行"));
@@ -312,6 +318,7 @@ fn main() {
             width: WIDTH,
             light: false,
             allow_vertical: false,
+            page_height: None,
         },
     );
     report("完整排版（混排）", mixed_t, &format!("{ml} 行"));
@@ -324,6 +331,7 @@ fn main() {
         content_hash(&src),
         WIDTH,
         1,
+        None,
         0,
         0,
     );
@@ -340,6 +348,7 @@ fn main() {
                 width: WIDTH,
                 light: false,
                 allow_vertical: false,
+                page_height: None,
             },
             &Mock,
             &NoImages,
@@ -359,6 +368,7 @@ fn main() {
                         width: WIDTH,
                         light: false,
                         allow_vertical: false,
+                        page_height: None,
                     },
                     &Mock,
                     &NoImages,
@@ -394,12 +404,14 @@ fn main() {
             width: WIDTH,
             light: false,
             allow_vertical: false,
+            page_height: None,
         };
         let key_b = LayoutKey::compose(
             LayoutInputs::compute("", &Reader::default()),
             content_hash(&src_b),
             WIDTH,
             1,
+            None,
             0,
             0,
         );

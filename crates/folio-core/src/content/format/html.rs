@@ -150,8 +150,9 @@ fn styles_and_images(raw: &str, path: &Path) -> (String, Vec<ImageRes>) {
     for (id, _) in dom.elements() {
         match dom.tag_name(id) {
             Some("style") => {
-                let text = raw_text(&dom, id);
-                if !text.trim().is_empty() {
+                // 「这一份 `<style>` 的正文」只有 [`super::css::style_text_of`] 一份，
+                // 宿主排版与量 CSS 缺口的工具都读它，三处不许各长一个样。
+                if let Some(text) = super::css::style_text_of(&dom, id) {
                     css.push_str(&text);
                     css.push('\n');
                 }

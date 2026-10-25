@@ -17,7 +17,7 @@ use super::{
     image_dims, media_type_of, resolve_href, stem_of,
 };
 use crate::Result;
-use crate::content::dom::{Dom, NodeId};
+use crate::content::dom::Dom;
 
 pub struct HtmlzAdapter;
 
@@ -160,8 +160,8 @@ fn styles_and_images(raw: &str, entry: &str, zip: &mut Zip) -> (String, Vec<Imag
     for (id, _) in dom.elements() {
         match dom.tag_name(id) {
             Some("style") => {
-                let text = raw_text(&dom, id);
-                if !text.trim().is_empty() {
+                // 与 `html.rs`、宿主排版、量缺口的工具同一份出口（见 `css::style_text_of`）。
+                if let Some(text) = super::css::style_text_of(&dom, id) {
                     css.push_str(&absolutize_css_urls(&text, &base));
                     css.push('\n');
                 }
@@ -229,11 +229,6 @@ fn image_uses(raw: &str, entry: &str) -> Vec<crate::content::scan::ImageUse> {
             offset: image.offset,
         })
         .collect()
-}
-
-/// 某个元素子树里的原始文本（与 `html.rs` 同一条，跳过 `script` / `style` 不是这里的事）。
-fn raw_text(dom: &Dom, root: NodeId) -> String {
-    dom.raw_text_of_subtree(root)
 }
 
 fn unsupported(path: &Path, why: &str) -> crate::Error {

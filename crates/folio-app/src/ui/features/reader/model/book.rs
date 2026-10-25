@@ -522,6 +522,60 @@ impl Book {
             .map(|span| &span.doc)
     }
 
+    /// 全书可见字数的**前缀和**：`before[i]` = 第 `i` 章之前所有章的字数，第二格 = 全书总字数。
+    ///
+    /// 只要有一章的 `char_len` 是 `None` 就整本回 `None`。`None` 是「这一章的字数还没算过」，
+    /// 不是 0 —— 当成 0 会让分母偏小、百分比偏大，而那种偏差在屏上**看不出来**（页脚照样
+    /// 是一个像样的百分数）。为什么把「不知道」与「这一章真的是空的」分成两格，见
+    /// [`Chapter::char_len`]。
+    pub(in crate::ui::features::reader) fn char_measure(&self) -> Option<(Vec<usize>, usize)> {
+        let mut before = Vec::with_capacity(self.chapters.len());
+        let mut total = 0usize;
+        for chapter in &self.chapters {
+            before.push(total);
+            total += chapter.char_len?;
+        }
+        (total > 0).then_some((before, total))
+    }
+
+    /// 全书进度：`(前面各章字数之和 + 章内偏移) ÷ 全书总字数`。
+    ///
+    /// 与架上卡片那一格（`store::books::progress_of`）**同一个式子、同一份 `char_len`**：
+    /// 那一格从库里存的定位串算，这一格从读者眼前这一屏算。两处必须同式，否则
+    /// 「架上写着 37%、点开页脚写 12%」就是两条各自成立的真相。
+    ///
+    /// 这一格不经过排版，所以换字号、改页边距、双页退单页都不动它 —— 从前那版读的是
+    /// 「视口顶那一章的章内比例」，于是每进一章归零重来，读者拖完一整本看到的是十个
+    /// 0%→100%。
+    pub(in crate::ui::features::reader) fn progress_at(
+        &self,
+        chapter: usize,
+        offset: usize,
+    ) -> Option<f32> {
+        let (before, total) = self.char_measure()?;
+        let len = *self.chapters.get(chapter)?.char_len.as_ref()?;
+        let read = before.get(chapter)? + offset.min(len);
+        Some((read as f32 / total as f32).clamp(0.0, 1.0))
+    }
+
+    /// 全书进度的反函数：比例 → 落点 `(哪一章, 章内第几个字)`。进度条那一拖走它。
+    ///
+    /// 落在哪一章由前缀和二分定，章内偏移按比例折算 —— 与正函数同一条口径，所以拖到
+    /// 73% 再松手，页脚念回来的还是 73%（差一个字的舍入以内）。
+    pub(in crate::ui::features::reader) fn locate_progress(
+        &self,
+        ratio: f32,
+    ) -> Option<(usize, usize)> {
+        let (before, total) = self.char_measure()?;
+        let want = (ratio.clamp(0.0, 1.0) * total as f32) as usize;
+        // 第一个「严格大于 want」的前缀就是目标章的下一章。
+        let chapter = before
+            .partition_point(|base| *base <= want)
+            .saturating_sub(1);
+        let len = *self.chapters.get(chapter)?.char_len.as_ref()?;
+        Some((chapter, (want - before[chapter]).min(len)))
+    }
+
     /// 「第 `offset` 个字（`chapter` 章内坐标）」的全局行顶。恢复落点用。
     pub(in crate::ui::features::reader) fn global_y_of_offset(
         &self,

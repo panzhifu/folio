@@ -63,11 +63,12 @@ toc = "Índice"
 night = "Noche"
 day = "Día"
 progress = "Progreso"
-# 阅读面板那两格：亮度滑条的标签，与面板右下角把完整设置压进来的那颗。
-# 字号、翻页、跟随系统都复用既有的词（`field.*` 与 `appearance.follow_system`）。
+# 阅读设置那张卡片里的读数：亮度那格的标签、版心推到最左那一格念的那句、翻页时长的标签。
+# 字号、行距、段距、留白、版心、字体、翻页动画都复用设置屏那套词（`field.*`），
+# 只有「跟随系统」与「铺满」两句是卡片自己的（`appearance.follow_system` 与本节这一格）。
 brightness = "Brillo"
 turn_duration = "Duración al pasar de página"
-more_settings = "Más ajustes"
+measure_fill = "Ancho completo"
 # 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
 page_position = "Página %{index} de %{total}"
 # 底栏那一格：一页两栏的对开。窄窗口按不下去时自动退回单页，名字不必跟着改。
@@ -196,7 +197,7 @@ toc_max_lines = "Líneas por título"
 toc_dim_read = "Atenuar capítulos leídos"
 "toc_dim_read.desc" = "Los capítulos que ya abriste se dibujan apagados en el índice."
 page_turn = "Animación de cambio"
-"page_turn.desc" = "Cómo se mueve la hoja al pasarla: deslizar, cubrir o nada. Por páginas y a doble página colocan dos hojas según este valor; el desplazamiento continuo solo pregunta si hay animación. Cambiarlo no recompone ningún capítulo."
+"page_turn.desc" = "Cómo se mueve la hoja al pasarla: deslizar, cubrir o nada. «Desplazar hacia abajo» cambia este libro a desplazamiento continuo; cualquier animación de papel lo devuelve a paginado o doble página. Cambiarlo no recompone ningún capítulo."
 highlight_style = "Estilo de marca"
 "highlight_style.desc" = "Qué huella deja en el texto una marca nueva: una banda de color detrás de los glifos, una línea recta debajo o una línea ondulada. Las marcas que ya están en el libro conservan la suya; cambiar esto no vuelve a componer nada."
 

@@ -63,11 +63,12 @@ toc = "Verzeichnis"
 night = "Nacht"
 day = "Tag"
 progress = "Fortschritt"
-# 阅读面板那两格：亮度滑条的标签，与面板右下角把完整设置压进来的那颗。
-# 字号、翻页、跟随系统都复用既有的词（`field.*` 与 `appearance.follow_system`）。
+# 阅读设置那张卡片里的读数：亮度那格的标签、版心推到最左那一格念的那句、翻页时长的标签。
+# 字号、行距、段距、留白、版心、字体、翻页动画都复用设置屏那套词（`field.*`），
+# 只有「跟随系统」与「铺满」两句是卡片自己的（`appearance.follow_system` 与本节这一格）。
 brightness = "Helligkeit"
 turn_duration = "Dauer des Umblätterns"
-more_settings = "Weitere Einstellungen"
+measure_fill = "Volle Breite"
 # 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
 page_position = "Seite %{index} von %{total}"
 # 底栏那一格：一页两栏的对开。窄窗口按不下去时自动退回单页，名字不必跟着改。
@@ -196,7 +197,7 @@ toc_max_lines = "Zeilen pro Titel"
 toc_dim_read = "Gelesene Kapitel abdunkeln"
 "toc_dim_read.desc" = "Kapitel, die du schon aufgeschlagen hast, werden im Verzeichnis blasser gezeichnet."
 page_turn = "Blätteranimation"
-"page_turn.desc" = "Wie das Blatt beim Umblättern wandert: wischen, überdecken, oder gar nicht. Seitenweise und Zwei-Seiten legen nach diesem Wert zwei Blätter aus; fortlaufendes Scrollen fragt nur, ob es eine Animation gibt. Der Wechsel setzt kein Kapitel neu."
+"page_turn.desc" = "Wie das Blatt beim Umblättern wandert: wischen, überdecken oder gar nicht. „Nach unten scrollen“ schaltet dieses Buch auf fortlaufendes Scrollen um; jede Papieranimation schaltet es zurück auf seitenweise oder doppelseitig. Der Wechsel setzt kein Kapitel neu."
 highlight_style = "Markierungsstil"
 "highlight_style.desc" = "Welche Spur eine neue Markierung im Text hinterlässt: ein Farbband hinter den Glyphen, eine gerade Linie darunter oder eine Wellenlinie. Markierungen im Buch behalten ihren eigenen Stil; hier zu ändern setzt nichts neu."
 

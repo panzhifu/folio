@@ -73,12 +73,13 @@ toc = "Contents"
 night = "Night"
 day = "Day"
 progress = "Progress"
-# The two reading-panel slots: the brightness slider's label, and the button that
-# pushes the full settings screen over the reader. Font size, page turn and
-# "follow the system" reuse the existing words (`field.*`, `appearance.follow_system`).
+# Readouts inside the reading-settings card: the brightness row label, what the line-width
+# row says when it is pushed to the far left, and the page-turn duration label. Font size,
+# line height, paragraph gap, margins, line width, font family and page turn all reuse the
+# settings words (field.*); only 'follow the system' and this row are the card's own.
 brightness = "Brightness"
 turn_duration = "Page turn duration"
-more_settings = "More settings"
+measure_fill = "Full width"
 # The scale for paged / spread; continuous scroll reads "section" instead.
 page_position = "Page %{index} of %{total}"
 # The bottom-bar entry: two pages side by side. Narrow windows fall back to one
@@ -211,7 +212,7 @@ toc_max_lines = "Title lines"
 toc_dim_read = "Dim chapters you have read"
 "toc_dim_read.desc" = "Chapters you have opened are drawn faded in the contents list."
 page_turn = "Page-turn animation"
-"page_turn.desc" = "How the page moves when you turn it: slide, cover, or not at all. Paged and two-column spreads lay two sheets out according to this; continuous scrolling only asks whether there is an animation. Changing it never re-typesets a chapter."
+"page_turn.desc" = "How the page moves when you turn it: slide, cover, or not at all. Choosing “scroll” switches this book to continuous scrolling; choosing any paper animation switches it back to paged or spread. Changing it never re-typesets a chapter."
 highlight_style = "Highlight style"
 "highlight_style.desc" = "Which mark a new highlight leaves in the text: a colour band behind the glyphs, a straight line under them, or a wavy one. Marks already in the book keep whichever they were drawn with, and changing this re-typesets nothing."
 

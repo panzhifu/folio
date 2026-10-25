@@ -23,7 +23,7 @@ use folio_core::content::dom::{Dom, NodeId};
 use folio_core::content::format::css::computed::{
     Color, ComputedStyle, Length, StyledDom, TextAlign, WritingMode, cascade,
 };
-use folio_core::content::format::css::{Origin, RuleSet};
+use folio_core::content::format::css::{Origin, RuleSet, chapter_style_rules};
 use folio_core::content::hit::Hit;
 use folio_core::infra::metrics::Metric;
 use folio_core::infra::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
@@ -169,7 +169,7 @@ pub struct Document {
     ///
     /// 从前这里存的是 `author_css: String`，而它存在的唯一理由就是每帧给它算一次哈希 ——
     /// 现在存算好的那两个数，原文就不必留着了（解析出来的规则在 [`Self::rules`] 里，
-    /// 章内 `<style>` 由作业解析 DOM 时就地收，见 [`Document::chapter_style_rules`]）。
+    /// 章内 `<style>` 由作业解析 DOM 时就地收，见 `folio_core::content::format::css::chapter_style_rules`）。
     ///
     /// `prefs` 那一格也在里面，所以 [`Self::set_prefs`] 是它唯一的重算时机。
     inputs: LayoutInputs,
@@ -474,7 +474,7 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
     // 章内那块 `<style>` 与元素上的 `style="…"` 都按它折，两处不许各拿一份路径。
     let base_dir = input.images.base_dir().to_string();
     let mut rules = (*input.rules).clone();
-    rules.extend(Document::chapter_style_rules(&artifacts.dom, &base_dir));
+    rules.extend(chapter_style_rules(&artifacts.dom, &base_dir));
     // 读者层的段间距。放在这里而不是 `Document::new`：那一份 `rules` 跟着作者 CSS 存，
     // 偏好一改就会让「章的样式」看起来也变了。
     rules.extend(Document::reader_rules(&input.prefs));
@@ -504,6 +504,8 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
             light: false,
             // 与键里的 `width` 同批决定：竖排那一档喂的是列长，见 `ensure_viewport`。
             allow_vertical: input.allow_vertical,
+            // 竖轴基准从键里取 —— 页高变了而排版不重做，楔块就会留着旧的一半。
+            page_height: input.key.page_height.map(|h| h as f32),
         },
         &measure,
         input.images.as_ref(),
@@ -679,34 +681,6 @@ impl Document {
         &self.faces
     }
 
-    /// 章节自己的 `<style>` 块 → 作者层规则。
-    ///
-    /// 样式表**文件**按位置清单回容器取（见 `folio_core::content::document::Document::stylesheet`），
-    /// 而**写在章里的** `<style>` 随正文一起到达 —— 解析 DOM 时就地收进来，作者把
-    /// 样式写在哪一份里，层叠结果都不该有差别（EasyPub 之类工具的封面页就是这么写的）。
-    fn chapter_style_rules(dom: &Dom, base_dir: &str) -> RuleSet {
-        let mut css = String::new();
-        for (id, _) in dom.elements() {
-            if dom.tag_name(id) != Some("style") {
-                continue;
-            }
-            for &child in dom.get(id).children.iter() {
-                css.push_str(&dom.get(child).text);
-                css.push('\n');
-            }
-        }
-        let mut rules = RuleSet::default();
-        if !css.trim().is_empty() {
-            // 与元素上的 `style="…"` 同一步：章内这块 `<style>` 的基准也是**这一章的目录**
-            // （外链那份样式表的基准是它自己的目录，两者本来就不同）。不折的表现是
-            // 图在图层表里躺着一条 `../Images/x.png`，图片索引按容器路径精确查查不到，
-            // 屏上「有样式、没底色」，而 CSS 那侧一切正常。
-            let css = folio_core::content::format::absolutize_css_urls(&css, base_dir);
-            rules.extend(RuleSet::parse(&css, Origin::Author));
-        }
-        rules
-    }
-
     /// 读者偏好里**只能用 CSS 表达**的那几项 → 读者层规则。
     ///
     /// 段间距走这一层而不是根样式：`margin` 不是继承属性，挂在根上穿不到 `<p>`。
@@ -789,12 +763,13 @@ impl Document {
     /// 这一格**每帧每个进链的章各调一次**，所以它不做任何哈希：样式与偏好的哈希在
     /// [`LayoutInputs`] 里算好（建章与 `set_prefs` 时），章身份在 `self.chapter` 里算好
     /// （换章时）。这里只搬那几个数与一次量化。
-    pub fn layout_key(&self, width: f32, columns: usize) -> LayoutKey {
+    pub fn layout_key(&self, width: f32, columns: usize, page_height: Option<f32>) -> LayoutKey {
         LayoutKey::compose(
             self.inputs,
             self.chapter,
             width,
             columns,
+            page_height,
             self.images_rev,
             self.faces.revision(),
         )
@@ -1236,8 +1211,19 @@ impl Document {
                 viewport.height,
             )
         };
+        // 竖轴基准只有**横排 + 分页**那一档给得出：一片的高就是浏览器里 `body` 的那个
+        // 包含块高，`html,body { height:100% }` 加空楔块那一族垂直居中写法靠它落数
+        // （判据与为什么不顺手把根盒也定高，见 `LayoutOptions::page_height`）。
+        // 滚动那一档 `viewport.height` 本身就是 0（上面 `paged` 就是照它判的）；竖排那一档
+        // 转轴后百分比高对应的是列长，那条映射还没做 —— 两边都给 `None`，
+        // 行为与这一格出现之前逐字相同。
+        let page_height = if paged && !vertical {
+            Some(slice)
+        } else {
+            None
+        };
         // 键在这里算，算是「这一帧想要什么」的唯一表述：排版、切片、绘制三级都从它出发。
-        let key = self.layout_key(wrap, columns);
+        let key = self.layout_key(wrap, columns, page_height);
         let width = key.width as f32;
         // 片长同样量化一档，且**切片用的就是量化后的那个数**：排版按 A 宽折行、切片按 B 高切、
         // 绘制按 C 摆，三方都以为自己对，其实是三方各对（`quantize_px` 那条纪律的另一半）。

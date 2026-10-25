@@ -36,7 +36,7 @@ use crate::ui::features::reader::motion::turn_animation::{Axis, Crease, Cut, She
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::{NAV_TRANSITION, turn_duration};
 
-use super::column_cut;
+use super::{capture_wanted, column_cut};
 
 /// 一段足够长的中文，保证它会折行 —— 不折行的话「缩进改变了布局」这种断言无从成立。
 const PARA: &str = "于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。";
@@ -191,6 +191,70 @@ fn open(
     open_with_store(cx, flow, format, prefs, locator, width, None, None)
 }
 
+/// [`open`] 的上下滚动版：摆法在建会话之前就位。理由同 [`open_scroll_with_store`]。
+fn open_scroll(
+    cx: &mut TestAppContext,
+    flow: &FlowDoc,
+    format: &str,
+    prefs: Reader,
+    locator: Locator,
+    width: f32,
+) -> (Entity<ReaderSession>, AnyWindowHandle) {
+    build_with_store(
+        cx,
+        flow,
+        format,
+        prefs,
+        locator,
+        width,
+        None,
+        None,
+        PageTurn::Scroll,
+    )
+}
+
+/// 把这一屏的「翻页方式」改成「上下滚动」，也就是摆法进连续。
+///
+/// 这一格存在是因为摆法**不再能直接 `set_mode(Continuous)` 拿到**：那一档现在只有
+/// 「翻页方式」这一条列表进得去（`chrome::reconcile` 每帧按 `page_turn` 解一次摆法，
+/// 选了纸面动画就把这本书带出连续）。测试若绕过那个口去摆 `Continuous`，测的就是一个
+/// 界面上到不了的状态 —— 那种门绿了也不代表读者能走到。
+fn scroll_mode(cx: &mut TestAppContext, handle: AnyWindowHandle) {
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Scroll);
+    });
+    settle(cx, handle);
+}
+
+/// 与 [`open_with_store`] 同一条路，但「翻页方式」在**建会话之前**就摆成上下滚动。
+///
+/// 不能像别的档那样「装好之后再改 ConfigHolder」：进度恢复吃的是第一帧那一刻的摆法。
+/// 先以平移建好、再改成上下滚动，中间那次 settle 已经用分页把位置落了一遍，之后切连续
+/// 只是把视口挪回锚章章首 —— 那样测出来的是「换档丢位置」，不是它想测的那件事。
+#[allow(clippy::too_many_arguments)]
+fn open_scroll_with_store(
+    cx: &mut TestAppContext,
+    flow: &FlowDoc,
+    format: &str,
+    prefs: Reader,
+    locator: Locator,
+    width: f32,
+    store: Option<Arc<Store>>,
+    book_id: Option<i64>,
+) -> (Entity<ReaderSession>, AnyWindowHandle) {
+    build_with_store(
+        cx,
+        flow,
+        format,
+        prefs,
+        locator,
+        width,
+        store,
+        book_id,
+        PageTurn::Scroll,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn open_with_store(
     cx: &mut TestAppContext,
@@ -202,6 +266,31 @@ fn open_with_store(
     store: Option<Arc<Store>>,
     book_id: Option<i64>,
 ) -> (Entity<ReaderSession>, AnyWindowHandle) {
+    build_with_store(
+        cx,
+        flow,
+        format,
+        prefs,
+        locator,
+        width,
+        store,
+        book_id,
+        PageTurn::Slide,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_with_store(
+    cx: &mut TestAppContext,
+    flow: &FlowDoc,
+    format: &str,
+    prefs: Reader,
+    locator: Locator,
+    width: f32,
+    store: Option<Arc<Store>>,
+    book_id: Option<i64>,
+    turn: PageTurn,
+) -> (Entity<ReaderSession>, AnyWindowHandle) {
     let meta = meta(format);
     // 不开文件地造一本书：`from_content` 把章节收进统一文档接口，没有容器
     // （图片与内嵌字体都不来，与「容器丢了」同一个表现）。
@@ -209,7 +298,7 @@ fn open_with_store(
         meta,
         Content::Reflow(flow.clone()),
     ));
-    open_with_document(cx, doc, prefs, locator, width, store, book_id)
+    build_with_document(cx, doc, prefs, locator, width, store, book_id, turn)
 }
 
 /// 直接拿一份已经造好的文档开一屏。给「容器在、正文不在手上」那类测试用 ——
@@ -224,6 +313,29 @@ fn open_with_document(
     store: Option<Arc<Store>>,
     book_id: Option<i64>,
 ) -> (Entity<ReaderSession>, AnyWindowHandle) {
+    build_with_document(
+        cx,
+        doc,
+        prefs,
+        locator,
+        width,
+        store,
+        book_id,
+        PageTurn::Slide,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_with_document(
+    cx: &mut TestAppContext,
+    doc: Arc<dyn Document>,
+    prefs: Reader,
+    locator: Locator,
+    width: f32,
+    store: Option<Arc<Store>>,
+    book_id: Option<i64>,
+    turn: PageTurn,
+) -> (Entity<ReaderSession>, AnyWindowHandle) {
     let mut view = None;
     let handle = cx.open_window(size(px(width), px(520.)), |window, cx| {
         // 偏好必须**装进配置**而不是只交给构造函数：会话每帧从 `ConfigHolder`
@@ -231,11 +343,12 @@ fn open_with_document(
         // `prefs` 当场冲掉 —— 而画面照样出得来，只有几何不对，最难查的那种红。
         let config = Config {
             reader: prefs.clone(),
-            // 测试台给一档**有动画**的翻页。软件初始默认是「不走动画」，而这一批门测的就是
-            // 那两张纸怎么走 —— 没有动画，`page_shift` 恒为零，那些断言就全成了空话。
-            // 要测别的档自己在装好之后改 `ConfigHolder`（竖轴、覆盖、折页那几条就是这么做的）。
+            // 测试台默认给一档**有动画**的翻页。软件初始默认是「不走动画」，而这一批门
+            // 测的就是那两张纸怎么走 —— 没有动画，`page_shift` 恒为零，那些断言就全成了
+            // 空话。要测别的档自己在装好之后改 `ConfigHolder`（竖轴、覆盖、折页那几条就是
+            // 这么做的）；只有上下滚动例外，它得在建会话之前摆好，见 [`open_scroll_with_store`]。
             appearance: Appearance {
-                page_turn: PageTurn::Slide,
+                page_turn: turn,
                 ..Default::default()
             },
             ..Default::default()
@@ -285,8 +398,14 @@ fn wheel_lines(cx: &mut TestAppContext, handle: AnyWindowHandle, lines: f32) {
     cx.run_until_parked();
 }
 
+/// 会话现在念的是**全书**比例，算不出来（有章的字数还没算过）就是夹具的问题。
+/// 这里当场说清楚而不是回 0.0 —— 回 0 会让 `progress_of(..) > 0.0` 那几条断言
+/// 静默读到零、以「没进度」的样子假绿。
 fn progress_of(view: &Entity<ReaderSession>, cx: &mut TestAppContext) -> f32 {
-    view.read_with(cx, |v, _| v.progress())
+    view.read_with(cx, |v, _| {
+        v.progress()
+            .expect("这份夹具每章的字数都该算得出，否则进度那一格是空的")
+    })
 }
 
 fn offset_of(view: &Entity<ReaderSession>, cx: &mut TestAppContext) -> usize {
@@ -803,6 +922,7 @@ fn a_stored_mode_beats_the_wide_screen_default(cx: &mut TestAppContext) {
         Some(store),
         Some(id),
     );
+    scroll_mode(cx, handle);
     settle(cx, handle);
     assert_eq!(
         view.read_with(cx, |v, _| v.mode()),
@@ -854,36 +974,46 @@ fn a_spread_is_two_contiguous_columns_of_one_sheet(cx: &mut TestAppContext) {
     assert!(after > before, "翻一张纸该往前走，实际 {before} → {after}");
 }
 
-/// 双页折页的「一屏」是**一张 leaf**，不是整张跨页：从右缘划到中缝就该走满。
+/// 双页里「一屏」是**一张 leaf**，四档纸面动画一律如此：从右缘划到中缝就该走满。
 ///
-/// 取错的话，读者拖过整屏才翻一张纸，而前一半只是把折痕推到中缝 —— 真机上读成
-/// 「拖了半天不翻」。
+/// 取错的那两种读法都不体面：按整块量、纸只走半块 → 「纸走半屏就落定，手指还在整屏里划」；
+/// 反过来按半块量、纸走整块 → 「拖了半天不翻」。折页那一档早就按 leaf 量，另外三档从前
+/// 钉在同一道 `== Curl` 的门上，双页里就是这两种读法之一。
 #[gpui_kit::test]
-fn a_spread_curl_measures_one_leaf_not_the_whole_spread(cx: &mut TestAppContext) {
+fn a_spread_turn_measures_one_leaf_for_every_paper_style(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let flow = flow();
     let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 1200.0);
-    cx.update(|app| {
-        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
-    });
-    settle(cx, handle);
-    assert_eq!(
-        view.read_with(cx, |v, _| v.mode()),
-        PageMode::Spread,
-        "1200 宽该立起双页"
-    );
-    let width = view.read_with(cx, |v, _| v.page_area.width());
-    for intent in [TurnIntent::Next, TurnIntent::Previous] {
-        let (_, dist, _) = view
-            .read_with(cx, |v, cx| {
-                v.swipe_geometry(cx, Axis::Horizontal, Some(intent))
-            })
-            .expect("双页折页该有几何");
-        assert!(
-            (dist - width * 0.5).abs() < 1.0,
-            "{intent:?} 的一屏该是半张 leaf（{}），实得 {dist}",
-            width * 0.5
+    view.update(cx, |v, cx| v.set_mode(PageMode::Spread, cx));
+    for (turn, axis) in [
+        (PageTurn::Slide, Axis::Horizontal),
+        (PageTurn::SlideUp, Axis::Vertical),
+        (PageTurn::Cover, Axis::Horizontal),
+        (PageTurn::Curl, Axis::Horizontal),
+    ] {
+        cx.update(|app| {
+            ConfigHolder::edit_appearance(app, |a| a.page_turn = turn);
+        });
+        settle(cx, handle);
+        assert_eq!(
+            view.read_with(cx, |v, _| v.mode()),
+            PageMode::Spread,
+            "{turn:?} 这一趟里摆法被改走了"
         );
+        let area = view.read_with(cx, |v, _| v.page_area);
+        let block = area.distance(axis);
+        assert!(block > 0.0, "夹具量不出版心，这条测不到东西");
+        // 这本是 LTR：往前翻自由边在右，往回翻在左。
+        for (intent, right) in [(TurnIntent::Next, true), (TurnIntent::Previous, false)] {
+            let (_, dist, _) = view
+                .read_with(cx, |v, cx| v.swipe_geometry(cx, axis, Some(intent)))
+                .unwrap_or_else(|| panic!("{turn:?} 接不住自己那根轴（{axis:?}）上的划动"));
+            let leaf = area.leaf(right).distance(axis);
+            assert!(
+                (dist - leaf).abs() < 1.0,
+                "{turn:?} 的 {intent:?} 一屏该是一张 leaf（{leaf}），实得 {dist}；整块版心是 {block}"
+            );
+        }
     }
 }
 
@@ -970,6 +1100,205 @@ fn the_curl_clips_every_column_even_while_the_mesh_is_on() {
         column_cut(true, false, &sheet),
         None,
         "双页静态那一栏不裁：那条折线是 leaf 半块的，裁它会抹掉读者正在读的另一半"
+    );
+}
+
+/// 捕获门的真值表。
+///
+/// 这一格存在的理由是 `content_ready` 那一条：进书第一帧的排版还在后台（`ensure_viewport`
+/// 是这一帧才把作业丢出去的），此时烘下来的纹理只有纸色；而它一旦被记成「已烘」，
+/// 排版回来既不动 `captured_page` 也不置 `capture_dirty` —— 那张白纸就留到下一次换页。
+/// 真机上读到的就是「第一次进书划一页整页白，等它翻完自己好了」。
+#[test]
+fn a_page_whose_typesetting_has_not_landed_is_never_baked() {
+    // 稳态：这一页还脏着，该烘。
+    assert!(capture_wanted(false, false, true, true, false));
+    // 同一页烘过、又不脏：不重复跑整趟捕获 pass。
+    assert!(!capture_wanted(false, false, true, false, true));
+    // 动画在飞：场景里已经有新页，烘出来不是正在翻的那张。
+    assert!(!capture_wanted(true, false, true, true, false));
+    // 连续滚动没有「页」。
+    assert!(!capture_wanted(false, true, true, true, false));
+    // **这一条是主角**：排版没落地时，脏与不脏都不烘 —— 烘出来的只有纸色。
+    for dirty in [true, false] {
+        for captured in [true, false] {
+            assert!(
+                !capture_wanted(false, false, false, dirty, captured),
+                "排版没落地时不该烘（dirty={dirty} captured={captured}）"
+            );
+        }
+    }
+}
+
+/// 进书之后**最终**一定要烘到那一张：上面那条门不许把捕获彻底掐死。
+///
+/// 若把 `content_ready` 判成恒假（比如拿错了「排完了没有」的那个问句），第一条门绿了、
+/// 这一条红 —— 读者见到的就是「仿真翻页一直不出场，退成一张硬片」。
+#[gpui_kit::test]
+fn the_first_page_is_baked_once_the_typesetting_lands(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    settle(cx, handle);
+    let current = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    assert!(
+        view.read_with(cx, |v, _| v
+            .book()
+            .is_some_and(|b| b.document().is_current())),
+        "前置：排版该已经落地，否则这一条测的是「没排完」那一格"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some(current),
+        "排版落地之后这一页该烘好 —— 门不许把捕获掐死"
+    );
+    assert!(
+        !view.read_with(cx, |v, _| v.capture_dirty),
+        "烘好之后不该还挂着脏标记"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.curl_capture_ready()),
+        "门开着，第一划才能起跟手"
+    );
+}
+
+/// 静止帧把**下一张纸**上的图先解掉：翻过去时那张图已经在上屏的那一帧里。
+///
+/// 从前正文只走 `painted`（这一帧要用才问），翻到带图的一页时先空一格、等后台解完再补。
+/// 这条钉的是接上之后「翻过去那一帧，图集里已经有那一格」。
+///
+/// 夹具：两章，第一章两屏且第二屏整屏是那张 300×300 的 PNG；读者停在第一章第一屏。
+/// 这一屏上没有它（`painted` 没碰过），所以只能由预取把它解出来。
+#[gpui_kit::test]
+fn the_next_page_image_is_decoded_before_the_reader_turns_to_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    // 一张 300×300 的 PNG：尺寸写进 `ImageRes`，字节由容器那条 `ByteSource` 现给。
+    // 摆出来的框是「版心宽 × 同高」，所以它独占一整屏 —— 它是第二屏的全部内容。
+    let png = {
+        use image::ImageEncoder as _;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                &vec![200u8; 300 * 300 * 3],
+                300,
+                300,
+                image::ExtendedColorType::Rgb8,
+            )
+            .expect("夹具 PNG 该编得出来");
+        bytes
+    };
+    let href = "Images/plate.png".to_string();
+    let mut first = String::new();
+    for i in 0..3 {
+        first.push_str(&format!("<p>{PARA}（第 {i} 段）</p>"));
+    }
+    // 那张图靠作者的强制断点单独起一屏。为什么不用「数够几段文字正好填满第一屏」来摆：
+    // 那种摆法把落点绑在行高上，行高一变图就漂去第三屏，而红出来的样子是「预取没解出图」
+    // —— 看着像预取坏了（就这么红过一次，下面那条前置断言钉的是它）。
+    first.push_str(&format!("<p class=\"plate\"><img src=\"{href}\" /></p>"));
+    // 「最后一张图」必须有：`Book` 发现容器里一张图都没有时会把图片索引换成空的
+    // （容器丢了那个降级），而这一条测的正是索引里有图。
+    let tail = "<p><img src=\"Images/tail.png\" /></p>".to_string();
+    let flow = FlowDoc {
+        chapters: vec![
+            Chapter::inline("第一章", first).with_spine_href("c0.xhtml"),
+            Chapter::inline("第二章", format!("<p>{PARA}</p>{tail}")).with_spine_href("c1.xhtml"),
+        ],
+        css: ".plate { break-before: page; }".to_string(),
+        ..Default::default()
+    };
+    // 清单单独留着：`from_content` 造出来的书没有容器，`Book::new` 会把图片索引换成空表
+    // （「容器丢了」那条降级），所以下面在图建好之后再把这一份补进去。
+    let images = vec![
+        folio_core::content::format::ImageRes {
+            href: "Images/plate.png".to_string(),
+            source: "Images/plate.png".to_string(),
+            media_type: "image/png".to_string(),
+            width: 300,
+            height: 300,
+        },
+        folio_core::content::format::ImageRes {
+            href: "Images/tail.png".to_string(),
+            source: "Images/tail.png".to_string(),
+            media_type: "image/png".to_string(),
+            width: 300,
+            height: 300,
+        },
+    ];
+    let meta = meta("markdown");
+    let doc: Arc<dyn Document> = Arc::from(folio_core::content::document::from_content(
+        meta,
+        Content::Reflow(flow),
+    ));
+    let bytes: crate::ui::foundation::images::ByteSource = {
+        let png = png.clone();
+        std::sync::Arc::new(move |_href: &str| Some(png.clone()))
+    };
+    let (view, handle) = build_with_document(
+        cx,
+        doc,
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        None,
+        None,
+        PageTurn::Slide,
+    );
+    // `from_content` 造出来的书没有容器，`Book::new` 会把图片索引换成空表（「容器丢了」
+    // 那条降级）。这里把真清单与内存字节补进去 —— 补的正是生产上 EPUB 那一份。
+    view.update(cx, |v, _| {
+        let book = match &mut v.source {
+            crate::ui::features::reader::model::session::Source::Book(book) => book,
+            _ => panic!("前置：这一本该是可重排那一族"),
+        };
+        let index = std::sync::Arc::new(crate::ui::foundation::images::BookImages::new(
+            &images, bytes,
+        ));
+        book.document_mut().set_images(std::sync::Arc::new(
+            crate::ui::foundation::images::ChapterImages::new(index, "c0.xhtml"),
+        ));
+    });
+    // 那一屏上没有任何图可画 —— 所以先确认图集里是空的：下面那个非零只可能来自预取。
+    let before = cx.update(|app| view.read_with(app, |v, cx| v.atlas.read(cx).resident_bytes()));
+    settle(cx, handle);
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.page_count()) > 1,
+        "前置：这一章要至少两屏，否则「下一张纸」就是它自己"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        0,
+        "前置：读者停在第一屏"
+    );
+    // 前置：那张图必须在**下一张纸**上、且不在当前这一张上。这一条不成立时下面红的是
+    // 「预取没解出图」，看起来像预取坏了，其实是夹具的图漂去了别的屏 —— 所以在这里说清楚。
+    let image_pages = view.read_with(cx, |v, _| {
+        let doc = v.book().expect("有书").document();
+        doc.layout()
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.images().next().is_some())
+            .map(|(line, _)| doc.page_of_line(line))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        image_pages.first(),
+        Some(&1),
+        "前置：第一章那张图要在第 2 屏（读者在第 1 屏），实际这几屏上有它：{image_pages:?}"
+    );
+    // 图集里的键是「这本书的 token + 容器路径」。测试拿不到 token，所以问占用字节：
+    // 只有真解过一张图才非零 —— 而这一屏上没有任何图可画，那是预取解出来的。
+    let decoded = cx.update(|app| view.read_with(app, |v, cx| v.atlas.read(cx).resident_bytes()));
+    assert!(
+        decoded > before,
+        "下一屏那张图该已经解好在图集里（预取接上了），实际占用 {decoded} 字节（之前 {before}）"
     );
 }
 
@@ -1181,22 +1510,34 @@ fn a_narrow_window_falls_back_from_spread_to_one_column(cx: &mut TestAppContext)
 
 /// 换摆法不换位置：连续滚到某个字，切双页（宽窗）再切回来，还在同一个字上。
 /// 进度是「第几个字」，模式只是它的读数方式 —— 这条要是红了，读者的位置就会在
-/// 点一下「双页」时飘掉。
+/// 换「翻页方式」时飘掉。
+///
+/// 两条换档入口都必须走它：读者亲手选的那一档（`set_mode` / 双页那颗）与渲染帧按
+/// 宽度 / 翻页方式解出来的那一档（`adopt_mode`）走同一条位置换算。从前渲染帧直接
+/// 赋 `self.mode`，于是「上下滚动读到一半换回仿真翻页」落在章首 —— 这条测的就是
+/// 那一段。
 #[gpui_kit::test]
 fn switching_modes_keeps_the_same_character(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let flow = flow();
-    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 1200.0);
-    // 这条测的是「换档不丢字」，起点得自己钉住：1200 宽的默认档已经是双页了。
-    view.update(cx, |v, cx| v.set_mode(PageMode::Continuous, cx));
+    // 起点是**上下滚动**：这一档现在只有「翻页方式」进得去，所以建会话时就得摆好。
+    let (view, handle) = open_scroll(cx, &flow, "markdown", prefs(16.0), Locator::start(), 1200.0);
     settle(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.mode()), PageMode::Continuous);
     scroll_down(cx, handle, 1200.0);
     let wanted = offset_of(&view, cx);
     assert!(wanted > 0, "先滚到一个字上，实际 {wanted}");
 
-    view.update(cx, |v, cx| v.set_mode(PageMode::Spread, cx));
+    // 选一张纸的走法：渲染帧的 `reconcile` 把摆法带到按宽度该长的双页。
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Slide);
+    });
     settle(cx, handle);
-    assert_eq!(view.read_with(cx, |v, _| v.mode()), PageMode::Spread);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.mode()),
+        PageMode::Spread,
+        "1200 宽选纸面动画该立起双页"
+    );
     let in_spread = offset_of(&view, cx);
     // 落点是「覆盖那个字的那张纸的开头」，所以它只能等于或早于原位置，
     // 且不能早过一页之内的距离。
@@ -1204,9 +1545,11 @@ fn switching_modes_keeps_the_same_character(cx: &mut TestAppContext) {
         in_spread <= wanted,
         "落位不该越过原来那一行：{wanted} → {in_spread}"
     );
+    assert!(in_spread > 0, "换档不该把位置丢回章首");
 
-    view.update(cx, |v, cx| v.set_mode(PageMode::Continuous, cx));
-    settle(cx, handle);
+    // 切回上下滚动：`reconcile` 把摆法带回连续，落点仍是双页那一屏的开头那个字。
+    scroll_mode(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.mode()), PageMode::Continuous);
     assert_eq!(
         offset_of(&view, cx),
         in_spread,
@@ -1449,6 +1792,7 @@ fn a_long_press_snaps_to_the_word_and_opens_the_menu(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
 
     // 第 0 行的首字符「H」内取点：拉丁字宽约半个 em，1/4 em 处稳落第一字。
     let at = view.read_with(cx, |v, _| {
@@ -1676,6 +2020,7 @@ fn a_note_lands_on_the_highlight_and_edits_the_same_one(cx: &mut TestAppContext)
         Some(store.clone()),
         Some(id),
     );
+    scroll_mode(cx, handle);
     let (start, end) = highlight_then_tap_it_back(cx, &view, handle);
 
     // 打开便签：菜单让位，输入框拿到焦点。
@@ -1785,6 +2130,7 @@ fn a_tap_on_a_highlight_selects_it_again(cx: &mut TestAppContext) {
         Some(store),
         Some(id),
     );
+    scroll_mode(cx, handle);
     let (start, end) = highlight_then_tap_it_back(cx, &view, handle);
     let (range, menu, marked) = view.read_with(cx, |v, _| {
         (
@@ -1901,6 +2247,7 @@ fn the_reselected_highlight_can_be_removed(cx: &mut TestAppContext) {
         Some(store.clone()),
         Some(id),
     );
+    scroll_mode(cx, handle);
     highlight_then_tap_it_back(cx, &view, handle);
     assert!(
         view.read_with(cx, |v, _| v.selection_annotation().is_some()),
@@ -1935,6 +2282,7 @@ fn recoloring_a_highlight_moves_nothing(cx: &mut TestAppContext) {
         Some(store.clone()),
         Some(id),
     );
+    scroll_mode(cx, handle);
     let (start, end) = highlight_then_tap_it_back(cx, &view, handle);
 
     view.update(cx, |v, cx| v.set_highlight_color("sky", cx));
@@ -2010,6 +2358,7 @@ fn re_styling_an_existing_row_moves_only_the_style(cx: &mut TestAppContext) {
         Some(store.clone()),
         Some(id),
     );
+    scroll_mode(cx, handle);
     // 划一条、再点回那一条：手里挑中的正是库里那一行（菜单第二格已是「取消划线」）。
     let (start, end) = highlight_then_tap_it_back(cx, &view, handle);
     // 先把颜色换成**不是默认那档**的一格：留着默认黄的话，「换画法时把颜色写回默认」
@@ -2218,9 +2567,10 @@ fn a_page_turn_and_a_mode_switch_clear_the_selection(cx: &mut TestAppContext) {
     // 选不出字来。这不是选中坏了，是这一帧的字确实还不在那儿。
     turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
 
-    // 换摆法：清。
+    // 换摆法：清。走「翻页方式」这条真实入口 —— 渲染帧解出来的那一档与读者亲手选的
+    // 一样，都要经过 `adopt_mode` 里那次 `clear_selection`。
     drag_select(cx, &view, handle);
-    view.update(cx, |v, cx| v.set_mode(PageMode::Continuous, cx));
+    scroll_mode(cx, handle);
     assert!(
         view.read_with(cx, |v, _| v.selection().is_none()),
         "换摆法即清"
@@ -2241,6 +2591,7 @@ fn scrolling_past_the_chapter_end_flows_into_the_next_one(cx: &mut TestAppContex
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 0);
 
     // 100px 一步：章界是按像素判定的，步子太大可能一步迈过整章的可滚区间，
@@ -2283,6 +2634,7 @@ fn scrolling_back_up_reaches_the_previous_chapter(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     for _ in 0..40 {
         scroll_down(cx, handle, 400.0);
         settle(cx, handle);
@@ -2311,6 +2663,44 @@ fn scrolling_back_up_reaches_the_previous_chapter(cx: &mut TestAppContext) {
     );
 }
 
+/// 进度是**全书**的量：一路滚到底它单调不减、跨章不回落，末了明显往前走。
+///
+/// 从前这一格读视口顶那一章的章内比例，于是每进一章归零重来 —— 读者拖完一本三章的书
+/// 看到的是三个 0%→100%。这条钉的就是「归零」这个形状：任何一次回落都当场红，
+/// 而旧的章内口径在第一次跨章那一格必红（上一章末 ≈1.0 → 本章初 ≈0.0）。
+#[gpui_kit::test]
+fn progress_never_resets_when_the_scroll_crosses_a_chapter(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = chapters_flow(3);
+    let (view, handle) = open_scroll(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    assert_eq!(progress_of(&view, cx), 0.0, "第一章章首该是 0%");
+
+    let mut last = 0.0;
+    let mut crossed = false;
+    for _ in 0..200 {
+        scroll_down(cx, handle, 400.0);
+        settle(cx, handle);
+        let now = progress_of(&view, cx);
+        assert!(
+            now + 1e-3 >= last,
+            "进度回落了：{last} → {now}（跨章时按章内比例念就会是这个形状）"
+        );
+        last = now;
+        crossed |= view.read_with(cx, |v, _| v.chapter_index()) >= 1;
+    }
+    assert!(crossed, "这本夹具至少要有两章，否则这条测不到跨章");
+    assert!(last > 0.5, "滚到底进度该明显往前走，实得 {last}");
+
+    // 反函数那一头：拖到 50%，念回来还是 50%（± 半屏的字，因为落点按行取整）。
+    view.update(cx, |v, cx| v.seek_ratio(0.5, cx));
+    settle(cx, handle);
+    let back = progress_of(&view, cx);
+    assert!(
+        (back - 0.5).abs() < 0.06,
+        "拖到 50% 之后进度念回 {back}：`progress` 与 `seek_ratio` 不是同一条口径"
+    );
+}
+
 /// 进度存在中间章，重开：落点是那一章的章首（全局坐标 = 章基线），
 /// 向上滚能接回上一章 —— 拼接坐标对恢复进度是透明的。
 #[gpui_kit::test]
@@ -2333,7 +2723,7 @@ fn a_locator_in_a_middle_chapter_restores_into_the_spine(cx: &mut TestAppContext
         .set_position(id, PageMode::Continuous.storage_name(), &locator)
         .expect("写入进度");
 
-    let (view, handle) = open_with_store(
+    let (view, handle) = open_scroll_with_store(
         cx,
         &flow,
         "markdown",
@@ -2374,6 +2764,7 @@ fn the_spine_window_stays_pinned_to_the_anchor(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     assert_eq!(
         view.read_with(cx, |v, _| v.span_window()),
         vec![0, 1, 2],
@@ -2512,6 +2903,7 @@ fn a_toc_jump_with_an_anchor_lands_on_that_paragraph(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
 
     view.update(cx, |v, cx| v.goto_entry(2, Some("mid2".to_string()), cx));
     settle(cx, handle);
@@ -2549,7 +2941,7 @@ fn a_toc_jump_with_an_anchor_lands_on_that_paragraph(cx: &mut TestAppContext) {
 fn an_anchor_in_the_chapter_you_are_in_still_moves_the_landing(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     // 起点就在第 1 章的章首。
-    let (view, handle) = open(
+    let (view, handle) = open_scroll(
         cx,
         &anchored_flow(4),
         "epub",
@@ -2628,6 +3020,7 @@ fn a_pref_change_reflows_the_whole_spine_without_losing_the_chapter(cx: &mut Tes
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     for _ in 0..40 {
         scroll_down(cx, handle, 400.0);
         settle(cx, handle);
@@ -3070,6 +3463,7 @@ fn locating_a_picture_closes_the_layer_and_lands_on_its_line(cx: &mut TestAppCon
         Some(store.clone()),
         Some(id),
     );
+    scroll_mode(cx, handle);
     let viewer = cx.update(|app| app.new(|_| ImageViewer::default()));
     cx.update(|app| view.update(app, |session, _| session.set_image_viewer(viewer.clone())));
     settle(cx, handle);
@@ -3157,6 +3551,7 @@ fn tapping_a_link_in_the_body_text_jumps_to_its_target(cx: &mut TestAppContext) 
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     // 前置：目录页那一行真有字，否则根本没有可点的目标。
     let first_line: String = view.read_with(cx, |v, _| v.line_texts().join(""));
     assert!(
@@ -3205,6 +3600,7 @@ fn tapping_a_footnote_ref_raises_the_note(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     // 第一行是「正文开头1，正文结尾。」，第 5 个字（下标 4）就是那个上标「1」。
     let at = char_point(&view, cx, 0, 4);
     let consumed = cx
@@ -3236,6 +3632,7 @@ fn the_footnote_anchor_is_the_marker_not_the_finger(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     let marker = char_point(&view, cx, 0, 4);
     // 那一行的下缘与它的横向范围（窗口坐标）：小纸片该贴在这一行的下缘起笔，横向不许跑出
     // 这一行去。`char_point` 是按字号估的落点，标记本身是个窄上标，所以这里不拿它当尺量 x。
@@ -3309,6 +3706,7 @@ fn scrolling_advances_through_short_chapters(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 0);
     for _ in 0..2000 {
         scroll_down(cx, handle, 40.0);
@@ -3393,6 +3791,7 @@ fn a_long_chapter_with_a_short_tail_still_scrolls_on(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
 
     // 语料的前提（也就是真机上卡死的那条几何）：尾巴两章连缝比一屏还短。
     // 少了这一条，哪天语料被改高了，这条用例会绿着却什么都没测。
@@ -4230,6 +4629,47 @@ fn a_curl_swipe_in_an_rtl_book_rolls_from_the_left_edge(cx: &mut TestAppContext)
     );
 }
 
+/// 上下滚动（连续模式）里竖着拖：手指走多远，正文就滚多远。
+///
+/// 这一档从前整笔被跟手翻页层吞掉：`swipe_geometry` 对连续模式给 `None`（它没有「一屏」
+/// 可归一），而 `claim_swipe` 把 `None` 读成 `Refused` → `Swallow`，走过 16px（`SLOP`）
+/// 之后每一个增量都不再落到 `scroll_y` 上。读者看到的是「选了上下滚动，往下滑没反应」——
+/// 设置里拿得到的一档，手上完全用不了。
+///
+/// 走真机那条路（原始触摸 → 识别器 → 滚动事件），不直发 `window.scroll`：后者没有
+/// `Started` 那一格，`swipe` 一直是 `None`，正好绕开要测的这一段。
+#[gpui_kit::test]
+fn a_vertical_drag_scrolls_in_continuous_mode(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open_scroll(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    settle(cx, handle);
+    let before = view.read_with(cx, |v, _| v.scroll_y);
+
+    // 往上拖两格，一共 200px（远过 `SLOP`）：读书顺序里就是往后滚。
+    raw_touch_at(cx, handle, TouchPhase::Started, point(px(200.0), px(400.0)));
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(300.0)));
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(200.0)));
+    let mid = view.read_with(cx, |v, _| v.scroll_y);
+    assert!(
+        mid > before + 1.0,
+        "往上拖 200px 正文该跟着滚：{before:.1} → {mid:.1}"
+    );
+
+    raw_touch_at(cx, handle, TouchPhase::Ended, point(px(200.0), px(200.0)));
+    let after = view.read_with(cx, |v, _| v.scroll_y);
+    assert!(
+        after >= mid,
+        "松手只该继续往前走，不该把位置退回来：{mid:.1} → {after:.1}"
+    );
+}
+
 /// 选了「上下平移」之后，竖着拖的那一趟也得跟着手指走。
 ///
 /// 从前这一档在手指上永远不成立：跟手那一层只认横轴，竖的那一趟整个被 `on_scroll` 的
@@ -4750,6 +5190,7 @@ fn a_continuous_turn_tweens_the_painted_position(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     settle(cx, handle);
     let start = view.read_with(cx, |v, _| v.scroll_y);
 
@@ -4798,6 +5239,7 @@ fn a_wheel_event_cancels_a_scroll_tween(cx: &mut TestAppContext) {
         Locator::start(),
         460.0,
     );
+    scroll_mode(cx, handle);
     settle(cx, handle);
     view.update(cx, |v, cx| v.scroll_page(1, cx));
     turn_frame(cx, handle, Duration::from_millis(60));

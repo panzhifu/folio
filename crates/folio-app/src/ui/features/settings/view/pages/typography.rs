@@ -30,8 +30,8 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             title: "field.font_size",
                             description: "field.font_size.desc",
                             keywords: &["font", "size", "字号"],
-                            min: 9.0,
-                            max: 72.0,
+                            min: Reader::FONT_SIZE_MIN,
+                            max: Reader::FONT_SIZE_MAX,
                             step: 1.0,
                         },
                         |cx| ConfigHolder::reader(cx).font_size,
@@ -43,8 +43,8 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             title: "field.line_height",
                             description: "field.line_height.desc",
                             keywords: &["line-height", "行距", "行高"],
-                            min: 1.0,
-                            max: 4.0,
+                            min: Reader::LINE_HEIGHT_MIN,
+                            max: Reader::LINE_HEIGHT_MAX,
                             step: 0.05,
                         },
                         |cx| ConfigHolder::reader(cx).line_height,
@@ -56,8 +56,8 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             title: "field.paragraph_gap",
                             description: "field.paragraph_gap.desc",
                             keywords: &["paragraph", "段距", "段间距"],
-                            min: 0.0,
-                            max: 4.0,
+                            min: Reader::PARAGRAPH_GAP_MIN,
+                            max: Reader::PARAGRAPH_GAP_MAX,
                             step: 0.05,
                         },
                         |cx| ConfigHolder::reader(cx).paragraph_gap_em,
@@ -74,8 +74,8 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             title: "field.indent",
                             description: "field.indent.desc",
                             keywords: &["indent", "缩进"],
-                            min: 0.0,
-                            max: 6.0,
+                            min: Reader::INDENT_MIN,
+                            max: Reader::INDENT_MAX,
                             step: 0.25,
                         },
                         |cx| ConfigHolder::reader(cx).indent_em,
@@ -99,9 +99,10 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             .iter()
                             .copied()
                             .map(|turn| {
-                                // 这一屏不知道当前是什么摆法（模式挂在会话而不是配置），
-                                // 所以不按 `applies` 筛：「上下滚动」在这里也摆出来，由
-                                // 上面那条说明讲清它什么时候才有效。
+                                // 六档全摆，与底栏那一格同一个可选集。这一屏不知道当前
+                                // 摆法也不需要知道：摆法由这一档自己带过去
+                                // （`chrome::reconcile` 在渲染帧里解），不存在「选到一个
+                                // 当场不出场的档」那种组合了。
                                 (
                                     SharedString::from(turn.as_str()),
                                     match turn {

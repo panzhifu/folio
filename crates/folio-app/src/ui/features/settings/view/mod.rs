@@ -28,7 +28,7 @@ pub(in crate::ui::features::settings) use crate::ui::features::settings::model::
 pub(in crate::ui::features::settings) use crate::ui::features::settings::model::spec::{
     Group, NumberSpec, Page, Row, group, number, page,
 };
-pub(in crate::ui::features::settings) use folio_core::{Mode, PageTurn};
+pub(in crate::ui::features::settings) use folio_core::{Mode, PageTurn, Reader};
 pub(in crate::ui::features::settings) use gpui_kit::assets::IconName;
 pub(in crate::ui::features::settings) use gpui_kit::component::ThemeMode;
 pub(in crate::ui::features::settings) use gpui_kit::{App, SharedString};

@@ -6,7 +6,6 @@
 use folio_core::{Locator, PageTurn};
 use gpui_kit::{App, Context, ScrollDelta, ScrollWheelEvent};
 
-use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
 use crate::ui::features::reader::model::session::{
     PageRef, ReaderSession, Source, Turn, TurnRun, start_turn,
@@ -20,6 +19,25 @@ impl ReaderSession {
     /// 换成另一种摆法。位置**不丢**：进度存的是「第几个字」，所以先把当前字偏移取下来，
     /// 等下一帧按它在新模式里落位。落库的模式名跟着走。
     pub fn set_mode(&mut self, mode: PageMode, cx: &mut Context<Self>) {
+        self.change_mode(mode, true, cx);
+    }
+
+    /// 渲染帧按窗口宽或「翻页方式」解出来的摆法。位置迁移与 [`Self::set_mode`] 同一条，
+    /// 但**不**替读者落「已经选过档」那面旗：跟着宽度变不是一次选择，落下去之后
+    /// 窗口再变宽就再也长不回双页了。
+    ///
+    /// 摆法换档必须走这里，不能在渲染帧里直接赋 `self.mode`：连续那一档的位置是全局
+    /// `scroll_y`，分页那一档是页号，两者之间要经过 `resolve_position` + `pend_restore`
+    /// 才换算得过去。直接赋值会让「选了上下滚动再选回仿真翻页」在章首重新开始。
+    pub(in crate::ui::features::reader) fn adopt_mode(
+        &mut self,
+        mode: PageMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.change_mode(mode, false, cx);
+    }
+
+    fn change_mode(&mut self, mode: PageMode, chosen: bool, cx: &mut Context<Self>) {
         if mode == self.mode {
             return;
         }
@@ -27,19 +45,29 @@ impl ReaderSession {
         // 单页/双页的捕获纹理不是同一块：一页一栏 vs 一页两栏。不重烘就按旧布局取 uv，
         // 双页的右半张会采到单页那张纹理的空白/邻区。摆法一换就作废。
         self.capture_dirty = true;
-        // 这一下是读者选的：默认档那面旗落下，之后落库就写他选的这一档。
-        self.mode_undecided = false;
+        // 读者亲手选的这一档要落下那面旗，之后落库就写他选的；跟着宽度 / 翻页方式
+        // 解出来的那一档不算选择（判据在 [`Self::adopt_mode`]）。
+        if chosen {
+            self.mode_undecided = false;
+        }
         // 摆法换了，同一句话会挪到另一处坐标位置；选中跟着字走虽不至于指错，
         // 但「换摆法」在读者心里是一次新动作，留着一个旧高亮只会碍事。
         self.clear_selection();
         // 连续模式的落点是**全局 y**（章基线 + 章内行顶），基线未必是 0 ——
         // 上一章可能正拼在上方，所以哪怕偏移是 0 也挂恢复请求，让渲染帧把它
         // 摆到正确的那一像素。分页落到页号，偏移 0 就是第 0 页，不需要请求。
-        let (chapter, offset) = self.resolve_position().unwrap_or((self.chapter_index(), 0));
-        self.pend_restore((mode.is_continuous() || offset > 0).then_some(Locator {
-            chapter: chapter as u32,
-            offset,
-        }));
+        //
+        // 已经挂着一份恢复请求（刚换书 / 刚跳目录）时不许用当前屏幕上的坐标覆盖它：
+        // 那份请求是**目标**，而此刻的 `scroll_y` / `page` 还停在旧摆法的起点或尚未
+        // 落位。进书第一帧恰好两件事撞在一起 —— 排版还没回来，`resolve_position`
+        // 读出来是章首，覆盖掉恢复请求就会把重启后的位置从第 1250 个字丢回 0。
+        if self.pending_restore.is_none() {
+            let (chapter, offset) = self.resolve_position().unwrap_or((self.chapter_index(), 0));
+            self.pend_restore((mode.is_continuous() || offset > 0).then_some(Locator {
+                chapter: chapter as u32,
+                offset,
+            }));
+        }
         self.scroll_y = 0.0;
         self.page = 0;
         self.wheel_accum = 0.0;
@@ -276,10 +304,14 @@ impl ReaderSession {
                 .is_some_and(|turn| matches!(turn.run, TurnRun::Following { .. }))
     }
 
-    /// 跳到本章的某个比例处（进度条）。
+    /// 跳到全书的某个比例处（进度条）。
     ///
-    /// 连续模式里进度条是**视口顶那一章**的章内刻度（与 `progress()` 同一口径），
-    /// 拖到 1.0 就是把这一章的末屏摆上来。
+    /// 与 `progress()` 互为反函数：拖到 73% 松手，页脚念回来的还是 73%。从前这一格落在
+    /// **视口顶那一章**的章内刻度上，于是进度条是「本章的条」—— 读者把它拖到最右，到的
+    /// 是本章末屏，而不是这本书的末尾。
+    ///
+    /// 落点走 [`ReaderSession::goto_offset`]（目录跳转那一条），连续与分页两种摆法它都
+    /// 认，进度条因此不必自己再算一遍「章内偏移怎么变成 scroll_y」。
     pub fn seek_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {
         // 进度条那一拖的意思是「跳到哪儿」，不是「翻一页」：位移可以大到跨越整章，
         // 播一张出场页的平移只会把读者甩进一段他没法预期的滑行里。
@@ -289,28 +321,13 @@ impl ReaderSession {
             self.set_page((ratio.clamp(0.0, 1.0) * last as f32).round() as usize, cx);
             return;
         }
-        if self.laid_out.mode.is_continuous() {
-            let target = {
-                let Some(book) = self.book() else {
-                    return;
-                };
-                let gap = Book::chapter_gap(&self.prefs);
-                let chapter = book
-                    .chapter_at_y(self.scroll_y, gap)
-                    .unwrap_or_else(|| book.chapter_index());
-                let base = book.base_of(chapter, gap).unwrap_or(0.0);
-                let height = book
-                    .span_doc(chapter)
-                    .map(|doc| doc.height())
-                    .unwrap_or(0.0);
-                let local_max = (height - self.laid_out.viewport).max(0.0);
-                base + ratio.clamp(0.0, 1.0) * local_max
-            };
-            self.set_scroll_y(target, cx);
-        } else {
-            let last = self.laid_out.pages.saturating_sub(1);
-            self.set_page((ratio.clamp(0.0, 1.0) * last as f32).round() as usize, cx);
-        }
+        let Some((chapter, offset)) = self.book().and_then(|book| book.locate_progress(ratio))
+        else {
+            // 有章的字数还没算过：这一格没有可信的全书落点，什么都不做 —— 与
+            // `progress()` 回 `None` 同一个决定，不拿章内比例凑一个像样的落点。
+            return;
+        };
+        self.goto_offset(chapter, offset, cx);
     }
 
     /// 两条滚动入口共用的落点：夹进范围、落库、重画。
@@ -552,5 +569,59 @@ fn phase_code(phase: gpui_kit::TouchPhase) -> u8 {
         gpui_kit::TouchPhase::Moved => 1,
         gpui_kit::TouchPhase::Ended => 2,
         gpui_kit::TouchPhase::Cancelled => 3,
+    }
+}
+
+/// 静止帧该替哪一张纸预解图：下一张，还是上一张。
+///
+/// 为什么要有「上一张」这一档：读者只往前读，但往回翻那一下与往前翻一样会露出整页图，
+/// 而回翻走的那条路（`TurnIntent::Previous`）与往前翻完全对称 —— 只预热下一张，回翻时
+/// 图还是要等后台解完才补上来。
+///
+/// 取哪一头按两条判据：
+///
+/// - 这一页**上面**还有内容（`has_above`）才回看。首页回看是负页号，跨章那一头由调用方
+///   用 `cross_prev` 表达（上一章的末页）。
+/// - 这一页**下面**还有内容（`has_below`）才往前看。末页同理。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::ui::features::reader) enum PrefetchSide {
+    Ahead,
+    Behind,
+}
+
+/// 静止帧预解哪一侧的图。两侧都可预解时只给**下一张**：`24 MiB` 的图集封顶那一档
+/// （`image_atlas::MAX_RESIDENT_BYTES`）经不起两个方向的图同时在手，而往后读是绝大多数。
+/// 两侧都没有内容时回 `None` —— 这一章只有一页且前后都没有邻章。
+pub(in crate::ui::features::reader) fn prefetch_side(
+    has_above: bool,
+    has_below: bool,
+) -> Option<PrefetchSide> {
+    match (has_above, has_below) {
+        (_, true) => Some(PrefetchSide::Ahead),
+        (true, false) => Some(PrefetchSide::Behind),
+        (false, false) => None,
+    }
+}
+
+#[cfg(test)]
+mod prefetch_tests {
+    //! 只钉选边那一条。真机上它没接住时的症状是「翻到带图的那一页图晚一帧才出来」，
+    //! 与「没预取」长得一样，区别只在帧数 —— 所以这里只保证两个方向都**选得到**。
+    use super::{PrefetchSide, prefetch_side};
+
+    #[test]
+    fn the_resting_frame_looks_one_page_ahead_when_there_is_one() {
+        assert_eq!(prefetch_side(true, true), Some(PrefetchSide::Ahead));
+        assert_eq!(prefetch_side(false, true), Some(PrefetchSide::Ahead));
+        assert_eq!(
+            prefetch_side(true, false),
+            Some(PrefetchSide::Behind),
+            "末页只能回看"
+        );
+        assert_eq!(
+            prefetch_side(false, false),
+            None,
+            "单页一章且前后都没有邻章：没有可预解的那一张"
+        );
     }
 }

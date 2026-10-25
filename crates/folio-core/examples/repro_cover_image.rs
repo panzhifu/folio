@@ -182,7 +182,10 @@ fn main() {
         &flow.css,
         folio_core::content::format::css::Origin::Author,
     );
-    let dom = folio_core::content::dom::Dom::parse(chapter.source().as_bytes());
+    // `flow()` 是**索引**（正文按位置回容器取），`chapter.source()` 在这里是空的；
+    // 排版要的是真正那一章的字节。
+    let text = doc.chapter_source(0).expect("封面章正文应能取回");
+    let dom = folio_core::content::dom::Dom::parse(text.as_bytes());
     let styles =
         folio_core::content::format::css::computed::cascade(&dom, &css, &Default::default(), "");
     let root = dom
@@ -198,6 +201,7 @@ fn main() {
             width: 370.0,
             light: false,
             allow_vertical: false,
+            page_height: None,
         },
         &StdMeasure,
         &provider,

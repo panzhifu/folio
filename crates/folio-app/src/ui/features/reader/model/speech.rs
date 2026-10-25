@@ -216,12 +216,20 @@ impl ReaderSession {
         }
     }
 
-    /// 念一段。`auto_scroll` 开着就把那一屏摆过来（锚章上才跳：跨章的那一段由
-    /// 章首恢复请求落地）；语速/音高每段随发 —— 设置页改了配置，下一段自然生效，
-    /// 不需要另开一条命令通路。
+    /// 念一段。`auto_scroll` 开着就把那一屏摆过来：同一章里是就地滚到那一段，
+    /// 跨了章就换锚章（走目录跳转那条落点）。语速/音高每段随发 —— 设置页改了配置，
+    /// 下一段自然生效，不需要另开一条命令通路。
     fn speak_paragraph(&mut self, chapter: usize, range: Range<usize>, cx: &mut Context<Self>) {
-        if ConfigHolder::speech(cx).auto_scroll && self.chapter_index() == chapter {
-            self.jump_to_offset(range.start, cx);
+        if ConfigHolder::speech(cx).auto_scroll {
+            if self.chapter_index() == chapter {
+                self.jump_to_offset(range.start, cx);
+            } else {
+                // 锚章已经不在这一章了：跨章那一帧里恢复请求与锚章迁移可能把书留在
+                // 上一章。从前这里**直接不摆屏**（判据是 `chapter_index() == chapter`），
+                // 于是音频往前念、画面留在前一章，读者听到/看到的就是「跨章时往回跳」。
+                // 走目录跳转同一条落点：换锚章 → 挂恢复请求 → 落库，位置只有一个真相。
+                self.goto_offset(chapter, range.start, cx);
+            }
         }
         let text = self
             .book()
@@ -497,6 +505,60 @@ mod tests {
                     .unwrap_or_default(),
             )
         })
+    }
+
+    /// 上下滚动里，朗读跨到别的章：屏要跟过去，不能停在上一章。
+    ///
+    /// 从前的判据是「锚章 == 正在念的章才摆屏」。跨章那一帧里恢复请求与锚章迁移
+    /// 有先后，锚章可能还留在上一章 —— 于是音频继续念下一章，画面却停在原地，
+    /// 读者看到的就是「跨章时往回跳」。这一条把状态直接摆成「audio 在第二章、
+    /// 锚章还停在第一章」，再问一次 `speak_paragraph`：锚章必须被带过去。
+    #[gpui_kit::test]
+    fn speaking_a_paragraph_in_another_chapter_brings_the_view_along(cx: &mut TestAppContext) {
+        use crate::ui::features::reader::model::chrome::PageMode;
+        use folio_core::infra::config::PageTurn;
+
+        cx.update(gpui_kit::init);
+        // 两章都撑得比一屏高：短章会被「滚到底」夹回 0，锚章归谁就测不出来了。
+        let body = "<p>这是一段用来把章节撑过一屏的正文，重复许多次。</p>".repeat(30);
+        let flow = FlowDoc {
+            chapters: vec![
+                Chapter::inline("第一章", &body),
+                Chapter::inline("第二章", &body),
+            ],
+            ..Default::default()
+        };
+        let (view, handle) = open(cx, &flow, None);
+        cx.update(|app| {
+            ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Scroll);
+        });
+        settle(cx, handle);
+        assert!(
+            view.read_with(cx, |session, _| session.mode() == PageMode::Continuous),
+            "前置：这一屏该已经站在连续滚动里"
+        );
+        assert_eq!(
+            view.read_with(cx, |session, _| session.chapter_index()),
+            0,
+            "前置：锚章还在第一章"
+        );
+
+        let first = paragraph(&view, 1, 0, cx);
+        view.update(cx, |session, cx| {
+            session.speech.available = Some(true);
+            session.speak_paragraph(1, first.clone(), cx);
+        });
+        settle(cx, handle);
+
+        assert_eq!(
+            view.read_with(cx, |session, _| session.chapter_index()),
+            1,
+            "念到第二章时锚章该跟过去"
+        );
+        assert!(
+            view.read_with(cx, |session, _| session.scroll_y) > 0.0,
+            "视口该落在第二章的章首，而不是留在第一章"
+        );
     }
 
     /// 逐段推进 + 跨章续读 + 念完整本书停下。`Done` 是唯一的推进事件，

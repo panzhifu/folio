@@ -760,6 +760,20 @@ pub struct LayoutOptions {
     /// 也不要在滚动里把列往 y 上叠。判据与症状都记在
     /// `ui::features::reader::model::chapter_layout` 的 `vertical` 那一格上。
     pub allow_vertical: bool,
+    /// 竖轴上「包含块的高」这一格 —— `height: NN%` 那一族的折算基准。
+    ///
+    /// `None` = 没有既定高，百分比高整族按 `auto`。这一档就是它出现之前的一切行为，
+    /// 也是竖排那一档现在唯一的取值（转轴后该拿屏幕的**宽**，而那个数还没走到这一层）。
+    ///
+    /// 为什么要它：`html,body { height:100% }` + `.wedge { float:left; height:50%;
+    /// margin-bottom:-360px }` + `.container { clear:both; height:0 }` 是把封面图**垂直
+    /// 居中**的老写法（EasyPub 那族工具给封面页就写这套，《斗战狂潮》是现成样本）。
+    /// 它的居中不靠表格盒，靠的是那个浮动块拿到「页高的一半」这个数；没有基准就折不出
+    /// 那一半，整条链退化成 auto，图贴在顶上、下面空一整页。
+    ///
+    /// 谁递这个数：分页档递**一片的高**，滚动档递**视口高** —— 两个都对应浏览器里
+    /// `body` 的包含块（打印时是页盒，屏幕上是视口），不是新造的一档取舍。
+    pub page_height: Option<f32>,
 }
 
 impl LayoutOptions {
@@ -768,6 +782,7 @@ impl LayoutOptions {
         width: 0.0,
         light: false,
         allow_vertical: false,
+        page_height: None,
     };
 
     /// 轻量排版（只算高）。
@@ -775,6 +790,7 @@ impl LayoutOptions {
         width: 0.0,
         light: true,
         allow_vertical: false,
+        page_height: None,
     };
 
     /// 指定宽度的完整排版。
@@ -783,6 +799,7 @@ impl LayoutOptions {
             width,
             light: false,
             allow_vertical: false,
+            page_height: None,
         }
     }
 }
