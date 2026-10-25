@@ -1,7 +1,8 @@
 //! 导航栏三档共用的两样东西：**表面**与**入口格**。
 //!
 //! 表面只差两件事：浮起来的圆角胶囊 / 嵌入的整列。视觉上其余全部一致 —— 三档统一
-//! 说的就是这个：同一种底色、同一种描边、同一种选中胶囊、同一种字号。
+//! 说的就是这个：同一种底色、同一种描边、同一种字号；选中的表达按形状来（底栏换色，
+//! 侧栏再洗一层）。
 //!
 //! 这里的「磨砂」在走 wgpu 渲染器的那两端（Android / Linux 桌面）是**真**背景模糊：
 //! `.backdrop_blur()` 让渲染器把玻璃矩形底下那一块从屏幕上拷走、降采样、两趟可分离高斯，
@@ -29,9 +30,6 @@ const ICON: f32 = 24.0;
 const BLUR_RADIUS: f32 = 28.0;
 /// tint 的不透明度。有模糊兜着才敢压到 0.90 以下；再往下 12px 的标签就开始吃底下的对比度。
 const GLASS_TINT: f32 = 0.62;
-/// 选中胶囊的尺寸（只在底栏那一档画）。
-const PILL_W: f32 = 40.0;
-const PILL_H: f32 = 28.0;
 /// 侧栏那一格的尺寸。
 const TILE_W: f32 = 80.0;
 const TILE_H: f32 = 56.0;
@@ -76,15 +74,16 @@ pub(super) fn embedded(cx: &App) -> Div {
 /// 入口格两种形状。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Shape {
-    /// 底栏那一格：占满一份 `flex_1`，选中时图标后浮一颗小胶囊。
-    Capsule,
+    /// 底栏那一格：占满一份 `flex_1`；选中只换图标与文字的颜色，不画底。
+    Tab,
     /// 侧栏那一格：80 × 56 的方块，选中时整格洗一层主色。
     Tile,
 }
 
 /// 一个入口：图标在上、文案在下。`on_select` 在点击时收到这个目的地。
 ///
-/// 换页的提示只有一处：颜色 + 那一层洗色。不额外画标记条 —— 那会打破整片表面。
+/// 换页的提示都用**颜色**表达：底栏只换图标与文字的色，侧栏那一档再洗一层主色。
+/// 不额外画标记条 —— 那会打破整片表面。
 pub(super) fn nav_item<F>(
     cx: &App,
     destination: Destination,
@@ -116,27 +115,39 @@ where
         .gap(px(2.0))
         .cursor_pointer();
 
+    // 一格的「图标 + 文字」：两种形状都要它，只是外面那层高亮不一样。
+    let cell = |glyph: AnyElement| {
+        v_flex()
+            .items_center()
+            .justify_center()
+            .gap(px(2.0))
+            .child(glyph)
+            .child(
+                div()
+                    .text_xs()
+                    .whitespace_nowrap()
+                    .text_color(ink)
+                    .child(label.clone()),
+            )
+    };
+
     item = match shape {
-        Shape::Capsule => item.flex_1().h_full().child(
-            div()
-                .h(px(PILL_H))
-                .w(px(PILL_W))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(active, |el| el.bg(wash))
-                .child(glyph),
-        ),
+        // 选中只换颜色：不画底色、不加标记条。底色一圈会把「选中」从颜色变成一块形状，
+        // 中文两字那一格宽一点就会读成一颗圆 —— Anx Reader 的底栏也是只换颜色。
+        Shape::Tab => item.flex_1().h_full().child(cell(glyph.into_any_element())),
         Shape::Tile => item
             .w(px(TILE_W))
             .h(px(TILE_H))
             .rounded(px(16.0))
             .when(active, |el| el.bg(wash))
-            .child(glyph),
+            .child(cell(glyph.into_any_element())),
     };
 
-    item.child(div().text_xs().text_color(ink).child(label))
+    item
+        // 底栏没有 hover，按下态是手指按到那一格唯一的即时反馈；侧栏有 hover，不再叠一层。
+        .when(shape == Shape::Tab, |el| {
+            el.active(|style| style.opacity(0.75))
+        })
         // hover 只给侧栏那一档：底栏是手指的界面，指针划过不该有东西亮起来；
         // 而桌面上侧栏是鼠标每天要扫过的列，不给反馈会读成「这一格不能点」。
         .when(shape == Shape::Tile && !active, |el| {

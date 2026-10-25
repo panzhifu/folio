@@ -31,7 +31,7 @@ where
                 cx,
                 destination,
                 current == destination,
-                Shape::Capsule,
+                Shape::Tab,
                 on_select.clone(),
             )
             .into_any_element()
