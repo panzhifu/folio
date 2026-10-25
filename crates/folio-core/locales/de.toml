@@ -27,6 +27,10 @@ account = "Konto"
 [reader]
 empty_hint = "Wähle links ein Buch oder benutze „Buch importieren“ im Kopf des Seitenbereichs"
 no_book = "Kein Buch offen"
+# Die drei Abschnitte oben in der Lese-Einstellungen-Karte.
+tab_appearance = "Darstellung"
+tab_font = "Schrift"
+tab_layout = "Layout"
 chapter_position = "Abschnitt %{index} von %{total}"
 prev_chapter = "Zurück"
 next_chapter = "Weiter"

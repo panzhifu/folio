@@ -65,6 +65,23 @@ pub(in crate::ui::features::reader) fn side_for_paged(
     )
 }
 
+/// 定版式：这一页之后该预解哪一页。
+///
+/// 定版式没有章，页序就是阅读序；与分页那一档同一条取舍 —— 后面还有内容就往后，
+/// 到书尾才回头看上一页。整本书只有一页时没有可预解的下一张。
+pub(in crate::ui::features::reader) fn fixed_target(page: usize, pages: usize) -> Option<usize> {
+    if page >= pages {
+        return None;
+    }
+    if page + 1 < pages {
+        Some(page + 1)
+    } else if page > 0 {
+        Some(page - 1)
+    } else {
+        None
+    }
+}
+
 /// 一张带着图的纸：哪一章、多高的一条带（**章内排版坐标**）。
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::ui::features::reader) struct PrefetchTarget {
@@ -214,7 +231,7 @@ mod tests {
     //! 这一层能在宿主上测到的只有选带那一半（`scroll_targets` 的两个方向与越界、两条
     //! 「选哪一侧」）。「那几行里有没有图、问没问到图集」要真书与窗口，走 `view/body/tests.rs`。
 
-    use super::{PrefetchTarget, scroll_targets, side_for_paged, side_for_scroll};
+    use super::{PrefetchTarget, fixed_target, scroll_targets, side_for_paged, side_for_scroll};
     use crate::ui::features::reader::model::book::Placement;
     use crate::ui::features::reader::model::paging::PrefetchSide;
 
@@ -277,5 +294,15 @@ mod tests {
         );
         assert_eq!(side_for_paged(4, 5, 9, 10), Some(PrefetchSide::Behind));
         assert_eq!(side_for_paged(0, 1, 0, 1), None, "一本书一页");
+    }
+
+    /// 定版式没有章：后面的页优先，书尾回看上一页，单页书没有目标。
+    #[test]
+    fn a_fixed_page_looks_one_page_ahead_until_the_end() {
+        assert_eq!(fixed_target(0, 3), Some(1));
+        assert_eq!(fixed_target(1, 3), Some(2));
+        assert_eq!(fixed_target(2, 3), Some(1), "书尾回看上一页");
+        assert_eq!(fixed_target(0, 1), None, "单页书没有可预解的下一张");
+        assert_eq!(fixed_target(7, 3), None, "越界页不乱给目标");
     }
 }

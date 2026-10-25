@@ -291,18 +291,19 @@ pub struct ReaderSession {
     /// 本帧两端把手的命中区（窗口坐标，那份尺寸见 `selection.rs` 引的 `TouchHandle`）。
     /// paint 每帧写入，事件时读。
     pub(in crate::ui::features::reader) handle_hits: HandleHits,
-    /// 定版式：**本帧画在屏上的那一格带文字层的页**（第几页 + 它在版心里的矩形）。
+    /// 定版式：**本帧画在屏上的每一格带文字层的页**（第几页 + 它在版心里的矩形）。
     ///
     /// 可重排那一族里「屏幕点 ↔ 章内字序」的换算住在 [`ReaderSession::to_layout`]，
     /// 它读的是排版产物（片原点、栏宽、章基线）。定版式没有排版，那一把尺只有一处
     /// 来源：**这一页的像素这一帧摆在哪、多大**。所以由定版式那一臂每帧写入，
-    /// 命中换算与色块两处读同一个数 —— 与 `page_shift` 那条立场相同：绘制烘进坐标的
+    /// 命中换算与色块两处读同一份 —— 与 `page_shift` 那条立场相同：绘制烘进坐标的
     /// 位移，命中必须减掉同一个数，否则色块与手指各按一把尺。
     ///
-    /// 带着**页号**一起写：翻页动画走完之前那一帧摆的还是上一页，只记矩形不记页号，
-    /// 长按就会按着新一页的字序去解上一页的盒子（症状是色块整片偏到别处）。
-    /// `None` = 这一帧没有带文字层的页（漫画、EPUB 的定版式、扫描页），那一页选不出字。
-    pub(in crate::ui::features::reader) fixed_text_box: Rc<Cell<FixedTextBox>>,
+    /// 是一张表而不是一格：连续竖滚里视口可能同时压着两页带字的 PDF 页，只记一页
+    /// 会让另一页的拖选按到隔壁的盒子上。带着**页号**一起写：翻页动画走完之前那一帧
+    /// 摆的还是上一页，只记矩形不记页号，长按就会按着新一页的字序去解上一页的盒子。
+    /// 空表 = 这一帧没有带文字层的页（漫画、EPUB 的定版式、扫描页），选不出字。
+    pub(in crate::ui::features::reader) fixed_text_boxes: Rc<RefCell<FixedTextBoxes>>,
     /// 本帧菜单条的位置（窗口坐标）。视图每帧写入；压在它上面的一击属于菜单，
     /// 不算「点别处清除」。
     pub(in crate::ui::features::reader) menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -393,9 +394,10 @@ pub struct Footnote {
 /// 把手命中区：`(哪一端, 命中盒)` 的每帧快照。paint 每帧整表重写，事件侧只读。
 type HandleHits = Rc<RefCell<Vec<(SelectionEdge, Bounds<Pixels>)>>>;
 
-/// 定版式那一族「屏幕点 ↔ 页内字序」那把尺的每帧快照：`(哪一页, 那一格在版心里的矩形)`。
-/// 外层 `None` = 这一帧没有带文字层的页（漫画、EPUB 的定版式、扫描页），那一页选不出字。
-type FixedTextBox = Option<(usize, Bounds<Pixels>)>;
+/// 定版式那一族「屏幕点 ↔ 页内字序」那把尺的每帧快照：每一页一条
+/// `(哪一页, 那一格在版心里的矩形)`。空表 = 这一帧没有带文字层的页（漫画、EPUB 的
+/// 定版式、扫描页），这一屏选不出字。
+pub(in crate::ui::features::reader) type FixedTextBoxes = Vec<(usize, Bounds<Pixels>)>;
 
 /// 拖选成立要越过的位移（逻辑像素）。更小的位移是手抖，不是选择——
 /// 普通点击（含触摸合成的按下/抬起）不该留下高亮。
@@ -489,7 +491,7 @@ impl ReaderSession {
             overlay_open: false,
             content_bounds: Rc::default(),
             handle_hits: Rc::default(),
-            fixed_text_box: Rc::default(),
+            fixed_text_boxes: Rc::default(),
             menu_bounds: Rc::default(),
             image_viewer: None,
             image_sequence:
@@ -633,7 +635,7 @@ impl ReaderSession {
             overlay_open: false,
             content_bounds: Rc::default(),
             handle_hits: Rc::default(),
-            fixed_text_box: Rc::default(),
+            fixed_text_boxes: Rc::default(),
             menu_bounds: Rc::default(),
             image_viewer: None,
             image_sequence:

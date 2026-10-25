@@ -27,6 +27,10 @@ account = "Account"
 [reader]
 empty_hint = "Pick a book on the left, or use “Import book” in the sidebar header"
 no_book = "No book open"
+# The three segments at the top of the reading-settings card.
+tab_appearance = "Appearance"
+tab_font = "Font"
+tab_layout = "Layout"
 chapter_position = "Section %{index} of %{total}"
 prev_chapter = "Previous"
 next_chapter = "Next"

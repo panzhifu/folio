@@ -376,9 +376,8 @@ impl<'a> Ctx<'a> {
     /// - 装不下（`width` + 两边 > `avail`）时按溢出排，不缩作者写的数：over-constrained
     ///   那一档规范改的也是右边距。
     ///
-    /// 为什么这一格只有一份：流内摆放有三条路都要问它 —— [`Self::children`]（实排）、
-    /// [`Self::children_light`]（只量高）与 `layout::measure_chapter`（顶层单元表）。
-    /// 抄三遍迟早漂，症状是滚动位置与屏幕上的块对不上。
+    /// 为什么这一格只有一份：流内摆放有两条路都要问它 —— [`Self::children`]（实排）与
+    /// [`Self::children_light`]（只量高）。抄两遍迟早漂，症状是滚动位置与屏幕上的块对不上。
     pub(super) fn solve_block_width(&self, style: &ComputedStyle, avail: f32) -> (f32, f32) {
         let [_, border_right, _, border_left] = style.border_drawn();
         let bl = border_left + style.padding_left.resolve(avail).max(0.0);
@@ -909,7 +908,7 @@ impl<'a> Ctx<'a> {
             let height = self.block_light(child, box_width, width, container_h);
 
             // 记录块（无行盒）。`x` 与宽都取求解后的那两个数 —— 与 `children` 那条路
-            // 逐字同源，两阶段排版的「量高」与「实排」才给出同一个盒子。
+            // 逐字同源，轻量档的「量高」与「实排」才给出同一个盒子。
             self.blocks.push(BlockBox {
                 node: child,
                 x: x + used_ml,
@@ -1188,8 +1187,8 @@ impl<'a> Ctx<'a> {
     }
 
     /// 轻量模式：算一个块的高，不断行。`basis` 见 [`Self::block`] —— 这一条必须与
-    /// [`Self::block_uncached`] 用同一个基准折百分比，否则两阶段排版的「量高」与
-    /// 「实排」会给出两个不同的高，可见块就错位。
+    /// [`Self::block_uncached`] 用同一个基准折百分比，否则轻量档的「量高」与「实排」
+    /// 会给出两个不同的高。
     pub(super) fn block_light(
         &mut self,
         node: NodeId,
@@ -1205,8 +1204,8 @@ impl<'a> Ctx<'a> {
         let pb = bb + style.padding_bottom.resolve(basis).max(0.0);
 
         // 替换元素（图片）：按固有尺寸算高。认的那一族与高的来源见 [`picture_src`]、
-        // [`svg_aspect`] —— 这一格必须与 `block_uncached` 同口径，否则两阶段的
-        // 高度与实际排版不一致，滚动位置会错位。
+        // [`svg_aspect`] —— 这一格必须与 `block_uncached` 同口径，否则轻量档的
+        // 高度与实际排版不一致。
         if let Some(src) = picture_src(self.dom, node) {
             let content_width = (width - pl - pr).max(1.0);
             let img = self.images.resolve(&src);
@@ -1226,7 +1225,7 @@ impl<'a> Ctx<'a> {
             self.children_light(node, 0.0, 0.0, content_width, child_h)
         } else {
             // 纯文本块：按**估算总宽**除以版心宽估行数。用总宽（连续量）而不是「每行字数」
-            // 的离散近似 —— 两阶段排版据此定位可见块，行数偏一行就会错位。
+            // 的离散近似 —— 轻量档据此估高，行数偏一行就差一行高。
             let est = self.text_est_em(node) * style.font_size;
             let line_px = (style.font_size * style.line_height).max(1.0);
             let lines = (est / content_width).ceil().max(1.0);
@@ -1235,12 +1234,12 @@ impl<'a> Ctx<'a> {
         pt + Self::used_content_height(style, inner, pt + pb, cb_h) + pb
     }
 
-    /// 估算一个节点下文本的总宽，单位是 em（用于轻量模式 / 两阶段量高）。
+    /// 估算一个节点下文本的总宽，单位是 em（用于轻量模式量高）。
     ///
     /// 逐**字节**给一个近似宽：ASCII 空格 0.25 em、其余 ASCII 0.5 em、3 字节字符（CJK 等）
     /// 1 em、2 字节字符 0.5 em、续字节不计。以 0.25 em 为单位**整数**累计，比逐字符解码 +
     /// 浮点求和便宜（一章 0.3 ms 量级）。不是真字体度量，但比「一字 1 em」准得多 ——
-    /// 后者会把纯拉丁段估宽一倍、行数翻番，两阶段据此定位可见块就会错位。
+    /// 后者会把纯拉丁段估宽一倍、行数翻番，轻量档据此估高就会差一整行。
     fn text_est_em(&self, node: NodeId) -> f32 {
         let dom_node = self.dom.get(node);
         if dom_node.kind == NodeKind::Text {

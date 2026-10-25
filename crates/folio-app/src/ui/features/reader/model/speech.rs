@@ -23,13 +23,11 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use folio_core::content::dom::Dom;
-use folio_core::content::hit::{paragraph_after, paragraph_range};
-use folio_core::layout::Layout;
 use folio_core::speech::{Command, Event};
-use folio_core::{Engine, Locator, TextMap};
+use folio_core::{Engine, Locator};
 use gpui_kit::{Context, Task};
 
+use crate::ui::features::reader::model::chapter_layout::Document;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
 
@@ -198,7 +196,7 @@ impl ReaderSession {
         };
         let found = book
             .span_doc(chapter)
-            .and_then(|doc| paragraph_from(doc.layout(), doc.dom(), doc.text_map(), offset));
+            .and_then(|doc| paragraph_from(doc, offset));
         let Some(range) = found else {
             return;
         };
@@ -253,7 +251,7 @@ impl ReaderSession {
         let next = self
             .book()
             .and_then(|book| book.span_doc(chapter))
-            .and_then(|doc| next_paragraph(doc.layout(), doc.dom(), doc.text_map(), after));
+            .and_then(|doc| next_paragraph(doc, after));
         match next {
             Some(range) => self.speak_paragraph(chapter, range, cx),
             None => {
@@ -320,7 +318,7 @@ impl ReaderSession {
         let found = self
             .book()
             .and_then(|book| book.span_doc(chapter))
-            .and_then(|doc| paragraph_from(doc.layout(), doc.dom(), doc.text_map(), offset));
+            .and_then(|doc| paragraph_from(doc, offset));
         let Some(range) = found else {
             return;
         };
@@ -338,17 +336,12 @@ impl Drop for ReaderSession {
 /// 从 `offset` 起（含）的第一个**非空**段。纯文本空白段（pretty-print 的换行缩进
 /// 是文本节点，自己就能成「段」）跳过 —— 念它出来的是一段静默。`None` = 这一章
 /// 从这里往后没有可念的了。
-fn paragraph_from(
-    layout: &Layout,
-    dom: &Dom,
-    map: &TextMap,
-    offset: usize,
-) -> Option<Range<usize>> {
+fn paragraph_from(doc: &Document, offset: usize) -> Option<Range<usize>> {
     let mut probe = offset;
-    while probe < map.chars() {
-        match paragraph_range(layout, dom, map, probe) {
+    while probe < doc.text_map().chars() {
+        match doc.paragraph_range(probe) {
             Some(range) => {
-                if map.slice(range.clone()).trim().is_empty() {
+                if doc.text_map().slice(range.clone()).trim().is_empty() {
                     probe = range.end.max(probe + 1);
                 } else {
                     return Some(range);
@@ -361,15 +354,10 @@ fn paragraph_from(
 }
 
 /// [`paragraph_from`] 的「下一段」版：从刚念完的那一段往后找。空段连环跳。
-fn next_paragraph(
-    layout: &Layout,
-    dom: &Dom,
-    map: &TextMap,
-    after: Range<usize>,
-) -> Option<Range<usize>> {
+fn next_paragraph(doc: &Document, after: Range<usize>) -> Option<Range<usize>> {
     let mut cursor = after;
-    while let Some(range) = paragraph_after(layout, dom, map, cursor.clone()) {
-        if !map.slice(range.clone()).trim().is_empty() {
+    while let Some(range) = doc.paragraph_after(cursor.clone()) {
+        if !doc.text_map().slice(range.clone()).trim().is_empty() {
             return Some(range);
         }
         cursor = range;
@@ -485,10 +473,9 @@ mod tests {
                 .book()
                 .and_then(|book| book.span_doc(chapter))
                 .expect("这一章应该在拼接窗口里");
-            let (layout, dom, map) = (doc.layout(), doc.dom(), doc.text_map());
-            let mut found = super::paragraph_from(layout, dom, map, 0).expect("至少应有一段");
+            let mut found = super::paragraph_from(doc, 0).expect("至少应有一段");
             for _ in 0..index {
-                found = super::next_paragraph(layout, dom, map, found).expect("段应存在");
+                found = super::next_paragraph(doc, found).expect("段应存在");
             }
             found
         })
@@ -743,18 +730,13 @@ mod tests {
                 .book()
                 .and_then(|book| book.span_doc(0))
                 .expect("应有一章");
-            let (layout, dom, map) = (doc.layout(), doc.dom(), doc.text_map());
+            let first = paragraph_from(doc, 0).expect("首段应可解");
+            assert_eq!(doc.text_map().slice(first.clone()), "有字的一段。");
 
-            let first = paragraph_from(layout, dom, map, 0).expect("首段应可解");
-            assert_eq!(map.slice(first.clone()), "有字的一段。");
+            let second = next_paragraph(doc, first).expect("下一段应跳过空白段");
+            assert_eq!(doc.text_map().slice(second.clone()), "收尾。");
 
-            let second = next_paragraph(layout, dom, map, first).expect("下一段应跳过空白段");
-            assert_eq!(map.slice(second.clone()), "收尾。");
-
-            assert!(
-                next_paragraph(layout, dom, map, second).is_none(),
-                "章尾停住"
-            );
+            assert!(next_paragraph(doc, second).is_none(), "章尾停住");
         });
     }
 }

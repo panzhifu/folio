@@ -252,24 +252,32 @@ impl ReaderSession {
         book: &FixedBook,
         at: Point<Pixels>,
     ) -> Option<(usize, Range<usize>, i64)> {
-        let (page, box_) = self.fixed_text_box.get()?;
-        let local = at - self.content_bounds.get().origin;
-        if !box_.contains(&local) || self.annotations.is_empty() {
+        if self.annotations.is_empty() {
             return None;
         }
-        let text = book.page_text(page)?;
-        let key = book.page_text_key(page)?;
-        let map = text.text_map();
-        let spans = resolved_for(&self.annotation_spans, &self.annotations, page, key, &map);
-        spans
-            .iter()
-            .filter(|span| !span.is_stale())
-            .find(|span| {
-                selection::page_boxes(&text, span.start..span.end, box_)
+        let boxes = self.fixed_text_boxes.borrow();
+        let local = at - self.content_bounds.get().origin;
+        for (page, box_) in boxes.iter() {
+            if !box_.contains(&local) {
+                continue;
+            }
+            let Some(text) = book.page_text(*page) else {
+                continue;
+            };
+            let Some(key) = book.page_text_key(*page) else {
+                continue;
+            };
+            let map = text.text_map();
+            let spans = resolved_for(&self.annotation_spans, &self.annotations, *page, key, &map);
+            if let Some(span) = spans.iter().filter(|span| !span.is_stale()).find(|span| {
+                selection::page_boxes(&text, span.start..span.end, *box_)
                     .iter()
                     .any(|rect| rect.contains(&local))
-            })
-            .map(|span| (page, span.start..span.end, span.id))
+            }) {
+                return Some((*page, span.start..span.end, span.id));
+            }
+        }
+        None
     }
 
     /// 点在一条已有的划线上：把那一条重新选中，菜单条跟着回来。

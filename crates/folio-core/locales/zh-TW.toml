@@ -27,6 +27,10 @@ account = "帳號"
 [reader]
 empty_hint = "從左側書架選一本書，或用側欄標題列的「匯入書籍」"
 no_book = "沒有開啟的書"
+# 閱讀設定卡片頂部那三段。
+tab_appearance = "外觀"
+tab_font = "字體"
+tab_layout = "排版"
 chapter_position = "第 %{index} / %{total} 節"
 prev_chapter = "上一章"
 next_chapter = "下一章"

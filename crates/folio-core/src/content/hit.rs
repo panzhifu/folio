@@ -17,7 +17,9 @@
 
 use std::ops::Range;
 
-use crate::content::anchor::{TextMap, line_at_y, line_chars, line_offset};
+use crate::content::anchor::{
+    CharLines, TextMap, line_at_offset_indexed, line_at_y, line_chars, line_offset,
+};
 use crate::content::dom::{Dom, NodeId};
 use crate::infra::metrics::Metric;
 use crate::layout::{Layout, LineFragment, Measure};
@@ -166,7 +168,22 @@ pub fn paragraph_range(
     map: &TextMap,
     offset: usize,
 ) -> Option<Range<usize>> {
-    let line = crate::content::anchor::line_at_offset(layout, dom, map, offset);
+    paragraph_range_indexed(layout, dom, map, offset, None)
+}
+
+/// [`paragraph_range`] 的窄化版：有 [`CharLines`] 时用二分找行，没有就整表扫。
+///
+/// 听书逐段推进一帧要问好几趟；整表扫在长章上是 O(段数 × 行数)。索引与
+/// `Document::line_at_offset` 走的是同一个 [`line_at_offset_indexed`]，两条口径由同一个
+/// 函数保证 —— 这里只是把索引递进去，不另写一套「段落边界」的判据。
+pub fn paragraph_range_indexed(
+    layout: &Layout,
+    dom: &Dom,
+    map: &TextMap,
+    offset: usize,
+    index: Option<&CharLines>,
+) -> Option<Range<usize>> {
+    let line = line_at_offset_indexed(layout, dom, map, offset, index);
     let block = layout.block_of_line(line)?;
     let first = block.lines.start;
     let last = block.lines.end.saturating_sub(1);
@@ -187,9 +204,20 @@ pub fn paragraph_after(
     map: &TextMap,
     from: Range<usize>,
 ) -> Option<Range<usize>> {
+    paragraph_after_indexed(layout, dom, map, from, None)
+}
+
+/// [`paragraph_after`] 的窄化版：每一问都走 [`paragraph_range_indexed`]。
+pub fn paragraph_after_indexed(
+    layout: &Layout,
+    dom: &Dom,
+    map: &TextMap,
+    from: Range<usize>,
+    index: Option<&CharLines>,
+) -> Option<Range<usize>> {
     let mut probe = from.end;
     while probe < map.chars() {
-        match paragraph_range(layout, dom, map, probe) {
+        match paragraph_range_indexed(layout, dom, map, probe, index) {
             Some(range) if range.start > from.start => return Some(range),
             Some(range) => probe = range.end.max(probe + 1),
             None => probe += 1,

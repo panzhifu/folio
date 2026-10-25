@@ -215,13 +215,15 @@ impl ReadingPage {
         // 滚动时这一格整个不摆：摆一颗按下去只会把书从滚动里踢回分页的键，读起来是两
         // 个控件在抢同一件事。
         let spread_mode = self.reader.read(cx).wanted_mode();
-        let spread_shown = spread_mode != PageMode::Continuous;
-        // 选中态读**读者选的那一档**而不是生效档：手机上按下去会先亮双页再被宽度退成
-        // 分页，读按钮的人要看到自己按着了。
-        let spread = spread_mode == PageMode::Spread;
         // 「放大整页」那一格**只在定版式那一族摆**：那一族才有「这一页就是一张图」这件
         // 事，可重排那一族的插图另有入口（按宽度退档那一格在正文里，不在这一排）。
         let fixed = self.reader.read(cx).fixed().is_some();
+        // 定版式没有「一屏两页」：它的页是既定的一张位图，双页档对它是无意义的。
+        // 连续竖滚那一档由「翻页方式 → 上下滚动」进入，这一格同样不摆。
+        let spread_shown = spread_mode != PageMode::Continuous && !fixed;
+        // 选中态读**读者选的那一档**而不是生效档：手机上按下去会先亮双页再被宽度退成
+        // 分页，读按钮的人要看到自己按着了。
+        let spread = spread_mode == PageMode::Spread;
         let page_toc = cx.entity().clone();
         let page_night = cx.entity().clone();
         let page_spread = cx.entity().clone();

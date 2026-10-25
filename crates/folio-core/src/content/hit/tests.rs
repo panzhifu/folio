@@ -8,7 +8,8 @@ use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{ComputedStyle, cascade};
 use crate::content::format::css::{Origin, RuleSet};
 use crate::content::hit::{
-    Hit, hit_test, paragraph_after, paragraph_range, rects_for_range, rects_for_range_in, snap_word,
+    Hit, hit_test, paragraph_after, paragraph_after_indexed, paragraph_range,
+    paragraph_range_indexed, rects_for_range, rects_for_range_in, snap_word,
 };
 use crate::layout::{Layout, LayoutOptions, LineMetrics, Measure, NoImages, layout};
 
@@ -505,6 +506,56 @@ fn paragraph_after_walks_paragraph_by_paragraph() {
         paragraph_after(&chapter.layout, &chapter.dom, &chapter.map, third).is_none(),
         "章尾之后再无段"
     );
+}
+
+/// 带上 `CharLines` 的那条路与整表扫**逐段同解**：听书逐段推进现在走索引，
+/// 少一行就会把同一段念两遍或漏掉一段。偏移取遍整章（含段间空白与章尾），
+/// 两种段落遍历方式一起比。
+#[test]
+fn indexed_paragraph_walk_matches_the_full_scan() {
+    let chapter = typeset(
+        &format!(
+            "<p>{}</p><p>乙段只在第二段。</p><p>{}</p><p>丁段收尾。</p>",
+            cjk(120),
+            cjk(90)
+        ),
+        "",
+        200.0,
+    );
+    let index = CharLines::build(&chapter.layout, &chapter.dom, &chapter.map);
+    assert!(index.is_ordered(), "夹具该是一份单调的排版");
+
+    for offset in (0..chapter.map.chars()).step_by(5) {
+        assert_eq!(
+            paragraph_range_indexed(
+                &chapter.layout,
+                &chapter.dom,
+                &chapter.map,
+                offset,
+                Some(&index),
+            ),
+            paragraph_range(&chapter.layout, &chapter.dom, &chapter.map, offset),
+            "偏移 {offset} 上两条路给出的段落不一致"
+        );
+    }
+
+    let mut full =
+        paragraph_range(&chapter.layout, &chapter.dom, &chapter.map, 0).expect("首段应可解");
+    loop {
+        let indexed = paragraph_after_indexed(
+            &chapter.layout,
+            &chapter.dom,
+            &chapter.map,
+            full.clone(),
+            Some(&index),
+        );
+        let scanned = paragraph_after(&chapter.layout, &chapter.dom, &chapter.map, full.clone());
+        assert_eq!(indexed, scanned, "从 {full:?} 往后找的下一段不一致");
+        match scanned {
+            Some(next) => full = next,
+            None => break,
+        }
+    }
 }
 
 /// 批注回显与选区的那条快路：**结果与整章扫逐条相同**。

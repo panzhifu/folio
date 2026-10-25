@@ -27,6 +27,10 @@ account = "账号"
 [reader]
 empty_hint = "从左侧书架选一本书，或用侧栏标题栏的「导入书籍」"
 no_book = "没有打开的书"
+# 阅读设置卡片顶部那三段。
+tab_appearance = "外观"
+tab_font = "字体"
+tab_layout = "排版"
 chapter_position = "第 %{index} / %{total} 节"
 prev_chapter = "上一章"
 next_chapter = "下一章"

@@ -36,6 +36,12 @@
       "sourceType": "github",
       "skillPath": "SKILL.md",
       "computedHash": "d412d972e4e2786c7cf74a3fcd817d637adc746fd096bef8a5fd00fecdacb6a1"
+    },
+    "scrcpy-android": {
+      "source": "./.agents/skills/scrcpy-android",
+      "sourceType": "local",
+      "skillPath": "SKILL.md",
+      "computedHash": "98fd98320e2db6b1a73faff169b3c6bd8f376f784907bb6f06d9f7b0b1c5d585"
     }
   }
 }

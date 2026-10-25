@@ -90,7 +90,8 @@ pub(in crate::ui::features::reader) trait PagingStrategy:
     fn plan(&self, facts: &PagingFacts, intent: TurnIntent) -> TurnPlan;
 }
 
-/// 连续滚动：一步 = 视口高的 90%，夹在拼接链的可滚范围内。
+/// 连续滚动：一步 = 视口高的 90%，夹在可滚范围内。可重排读的是章拼接链，
+/// 定版式读的是页栈 —— 两者对这一步只暴露 `scroll` / `max_scroll` / `viewport`。
 pub(in crate::ui::features::reader) struct Continuous;
 
 impl PagingStrategy for Continuous {
@@ -140,7 +141,8 @@ impl PagingStrategy for Paged {
 }
 
 impl PageMode {
-    /// 这套摆法用哪套决策。定版式走 `Paged`（章界被 `fixed` + `can_*_chapter` 挡住）。
+    /// 这套摆法用哪套决策。定版式整页翻走 `Paged`（章界被 `fixed` + `can_*_chapter`
+    /// 挡住），连续竖滚与流式一样走 `Continuous`。
     pub(in crate::ui::features::reader) fn paging(self) -> &'static dyn PagingStrategy {
         static CONTINUOUS: Continuous = Continuous;
         static PAGED: Paged = Paged;

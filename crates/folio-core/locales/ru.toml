@@ -27,6 +27,10 @@ account = "Аккаунт"
 [reader]
 empty_hint = "Выберите книгу слева или нажмите «Импорт книги» в заголовке боковой панели"
 no_book = "Книга не открыта"
+# Три раздела в верхней части карточки настроек чтения.
+tab_appearance = "Оформление"
+tab_font = "Шрифт"
+tab_layout = "Вёрстка"
 chapter_position = "Раздел %{index} из %{total}"
 prev_chapter = "Назад"
 next_chapter = "Вперёд"

@@ -27,6 +27,10 @@ account = "계정"
 [reader]
 empty_hint = "왼쪽에서 책을 고르거나 사이드바 위에 있는 「책 가져오기」를 사용하세요"
 no_book = "열린 책 없음"
+# 읽기 설정 카드 위쪽의 세 구역.
+tab_appearance = "외관"
+tab_font = "글꼴"
+tab_layout = "조판"
 chapter_position = "%{index} / %{total} 장"
 prev_chapter = "이전 장"
 next_chapter = "다음 장"

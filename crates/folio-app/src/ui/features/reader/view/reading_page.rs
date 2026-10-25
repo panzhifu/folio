@@ -128,8 +128,12 @@ impl ReadingPage {
             }
         })];
         // 阅读设置那一屏自己的实体：弹层的开合与换档都要重画这一屏（`layers_up` 那个数
-        // 与底栏那一格的选中态读的是它），所以观察一道，与目录同一形状。
-        let settings = cx.new(ReadingSheet::new);
+        // 与底栏那一格的选中态读的是它），所以观察一道，与目录同一形状。会话句柄递给它
+        // 只为一件事：定版式上把折页从「翻页动画」里筛掉。
+        let settings = {
+            let reader = reader.clone();
+            cx.new(move |cx| ReadingSheet::new(reader, cx))
+        };
         watches.push(cx.observe(&settings, |_, _, cx| cx.notify()));
         // 目录那一屏自己的实体：它要观察它（弹层的开合与换档都得重画这一屏，
         // `layers_up` 那个数与顶栏底栏的挂载都读它），也要听它报回来的两件事。

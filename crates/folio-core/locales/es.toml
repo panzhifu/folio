@@ -27,6 +27,10 @@ account = "Cuenta"
 [reader]
 empty_hint = "Elige un libro a la izquierda o usa «Importar libro» en la cabecera del panel lateral"
 no_book = "Ningún libro abierto"
+# Los tres segmentos de la tarjeta de ajustes de lectura.
+tab_appearance = "Apariencia"
+tab_font = "Fuente"
+tab_layout = "Maquetación"
 chapter_position = "Sección %{index} de %{total}"
 prev_chapter = "Anterior"
 next_chapter = "Siguiente"

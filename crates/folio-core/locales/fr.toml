@@ -27,6 +27,10 @@ account = "Compte"
 [reader]
 empty_hint = "Choisissez un livre à gauche, ou utilisez « Importer un livre » dans l’en-tête du panneau latéral"
 no_book = "Aucun livre ouvert"
+# Les trois sections de la carte des réglages de lecture.
+tab_appearance = "Apparence"
+tab_font = "Police"
+tab_layout = "Mise en page"
 chapter_position = "Chapitre %{index} sur %{total}"
 prev_chapter = "Précédent"
 next_chapter = "Suivant"

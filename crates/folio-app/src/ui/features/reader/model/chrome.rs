@@ -49,6 +49,12 @@ pub const PARAGRAPH_GAP_RANGE: (f32, f32) = (
     folio_core::infra::config::Reader::PARAGRAPH_GAP_MAX,
 );
 
+/// 首行缩进滑条的两端，单位是字符。`0` 是合法档：不缩进。
+pub const INDENT_RANGE: (f32, f32) = (
+    folio_core::infra::config::Reader::INDENT_MIN,
+    folio_core::infra::config::Reader::INDENT_MAX,
+);
+
 /// 版心（正文栏最大宽度）滑条的两端，单位像素。下界那个 `0` 是「随窗口铺满」的约定值，
 /// 不是「栏宽 0 像素」—— 滑条走到顶就是把这一格关掉，与设置屏输入框填 0 同一件事。
 pub const MAX_MEASURE_RANGE: (f32, f32) = (
@@ -201,6 +207,24 @@ pub fn default_mode(total: f32, gap: f32) -> PageMode {
         PageMode::Spread
     } else {
         PageMode::Paged
+    }
+}
+
+/// 定版式能选哪几张纸。仿真折页要一张**排版页**的捕获纹理（定版式那一页是位图，
+/// 没有那条捕获链），所以仍然筛掉；其余四档（平移 / 上下平移 / 覆盖 / 上下滚动）
+/// 与「不走动画」都讲得通 —— 「上下滚动」在定版式上也真的有一条纵向页栈可滚。
+pub fn fixed_turn_applies(turn: folio_core::PageTurn) -> bool {
+    turn != folio_core::PageTurn::Curl
+}
+
+/// 定版式实际按哪一档走。读者全局选的是折页时，定版式退到平移 ——
+/// 不是「什么都不做」：同一本书换成流式阅读时那一档照旧生效，这里只换一个当场
+/// 讲得通的形状。
+pub fn fixed_turn_style(turn: folio_core::PageTurn) -> folio_core::PageTurn {
+    if fixed_turn_applies(turn) {
+        turn
+    } else {
+        folio_core::PageTurn::Slide
     }
 }
 
@@ -407,10 +431,10 @@ mod tests {
     //! 应该先在这里红过一次。
 
     use super::{
-        Arrow, BRIGHTNESS_RANGE, Chrome, Effect, LINE_HEIGHT_RANGE, MARGIN_X_RANGE,
+        Arrow, BRIGHTNESS_RANGE, Chrome, Effect, INDENT_RANGE, LINE_HEIGHT_RANGE, MARGIN_X_RANGE,
         MAX_MEASURE_RANGE, MIN_COLUMN_WIDTH, PARAGRAPH_GAP_RANGE, PageMode, TURN_DURATION_RANGE,
-        Zone, default_mode, dim_alpha, percent_label, reconcile, spread_fits, spread_gap, tween,
-        zone,
+        Zone, default_mode, dim_alpha, fixed_turn_applies, fixed_turn_style, percent_label,
+        reconcile, spread_fits, spread_gap, tween, zone,
     };
     use folio_core::PageTurn;
     use folio_core::infra::config::{Appearance, Reader};
@@ -594,6 +618,30 @@ mod tests {
         assert_eq!(PageMode::from_storage_name("paginated"), PageMode::Paged);
     }
 
+    /// 定版式只排除折页；读者选中的折页退到平移，界面上两个可选集与 `turn()` 实际
+    /// 用的那一档因此同源。上下滚动是**真的可走**的一档（连续竖滚）。
+    #[test]
+    fn a_fixed_book_never_takes_a_curl_but_takes_a_scroll() {
+        for turn in PageTurn::ALL.iter().copied() {
+            let wanted = turn != PageTurn::Curl;
+            assert_eq!(
+                fixed_turn_applies(turn),
+                wanted,
+                "{turn:?} 在定版式上该不该出现"
+            );
+            let used = fixed_turn_style(turn);
+            assert!(
+                fixed_turn_applies(used),
+                "{turn:?} 退到了 {used:?}，仍然不是定版式能走的档"
+            );
+            if wanted {
+                assert_eq!(used, turn, "讲得通的档不该被换掉");
+            } else {
+                assert_eq!(used, PageTurn::Slide, "{turn:?} 该退到平移");
+            }
+        }
+    }
+
     #[test]
     fn the_progress_label_distinguishes_nobody_from_a_little() {
         assert_eq!(percent_label(Some(0.0)), "0%", "没读与读了一点点是两件事");
@@ -659,6 +707,7 @@ mod tests {
         let top = Reader {
             line_height: LINE_HEIGHT_RANGE.1 + 1.0,
             paragraph_gap_em: PARAGRAPH_GAP_RANGE.1 + 1.0,
+            indent_em: INDENT_RANGE.1 + 1.0,
             max_measure: MAX_MEASURE_RANGE.1 + 1.0,
             margin_x: MARGIN_X_RANGE.1 + 1.0,
             ..Reader::default()
@@ -669,6 +718,7 @@ mod tests {
             "行距滑条顶不到配置的上界"
         );
         assert_eq!(top.paragraph_gap_em, PARAGRAPH_GAP_RANGE.1);
+        assert_eq!(top.indent_em, INDENT_RANGE.1);
         assert_eq!(top.max_measure, MAX_MEASURE_RANGE.1);
         assert_eq!(top.margin_x, MARGIN_X_RANGE.1);
         // 下界同理。版心那一格故意填负数：那个 `0` 是「随窗口铺满」的约定值，夹完还得是 0，
@@ -676,6 +726,7 @@ mod tests {
         let bottom = Reader {
             line_height: LINE_HEIGHT_RANGE.0 - 1.0,
             paragraph_gap_em: PARAGRAPH_GAP_RANGE.0 - 1.0,
+            indent_em: INDENT_RANGE.0 - 1.0,
             max_measure: -1.0,
             margin_x: MARGIN_X_RANGE.0 - 1.0,
             ..Reader::default()
@@ -683,6 +734,7 @@ mod tests {
         .clamped();
         assert_eq!(bottom.line_height, LINE_HEIGHT_RANGE.0);
         assert_eq!(bottom.paragraph_gap_em, PARAGRAPH_GAP_RANGE.0);
+        assert_eq!(bottom.indent_em, INDENT_RANGE.0);
         assert_eq!(bottom.max_measure, MAX_MEASURE_RANGE.0);
         assert_eq!(bottom.margin_x, MARGIN_X_RANGE.0);
         // 翻页时长同理：两端引用配置的常数，界面不许有第二套「最慢/最快」。

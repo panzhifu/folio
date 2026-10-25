@@ -19,9 +19,8 @@ use folio_core::content::format::css::computed::{ComputedStyle, StyledDom, casca
 use folio_core::content::format::css::{Origin, RuleSet};
 use folio_core::infra::config::Reader;
 use folio_core::layout::{
-    BlockCache, FontKey, LayoutCache, LayoutInputs, LayoutKey, LayoutOptions, LineMetrics, Measure,
-    NoImages, content_hash, layout, layout_cached, layout_with_blocks, measure_chapter,
-    render_window,
+    BlockCache, FontKey, LayoutInputs, LayoutKey, LayoutOptions, LineMetrics, Measure, NoImages,
+    content_hash, layout, layout_with_blocks,
 };
 
 /// 每批跑多少次。批内取平均，摊平单次中断。
@@ -241,55 +240,6 @@ fn main() {
         );
     }
 
-    // ---- 两阶段排版：整章只量高 + 只排首屏 ----
-    {
-        let opts = LayoutOptions {
-            width: WIDTH,
-            light: false,
-            allow_vertical: false,
-            page_height: None,
-        };
-        // 阶段一：整章量高（不建行盒）。
-        let mut t = Duration::MAX;
-        let mut map = None;
-        for _ in 0..50 {
-            let started = Instant::now();
-            let m = measure_chapter(&dom, &styles, root, opts, &Mock, &NoImages);
-            std::hint::black_box(m.height);
-            t = t.min(started.elapsed());
-            map = Some(m);
-        }
-        let map = map.expect("至少跑一次");
-        report("两阶段 · 整章量高", t, &format!("整章高 {:.0}", map.height));
-
-        // 阶段二：只排首屏（视口 800px）。
-        let mut t = Duration::MAX;
-        for _ in 0..50 {
-            let started = Instant::now();
-            let win = render_window(&map, &dom, &styles, &Mock, &NoImages, 0.0, 800.0);
-            std::hint::black_box(win.lines.len());
-            t = t.min(started.elapsed());
-        }
-        report("两阶段 · 首屏渲染", t, "首屏 ~800px");
-
-        // **滚动一格**：这是两阶段相对「全量排版一次、之后靠二分窗口滚动」唯一
-        // 可能更贵的那条路 —— 每滚一屏都要重排那一条带。整章 379200px 高、
-        // 一次滚 800px（约 1/474），所以这里的数乘以屏数才是「滚完整章的总开销」。
-        //
-        // 量它的理由：决定「要不要把生产路径换成两阶段」的那个人需要这个数，
-        // 而不是需要一句「两阶段更快」（两阶段的 6.3+0.4 是**开章**的钱，
-        // 滚动是另一笔账）。
-        let mut t = Duration::MAX;
-        for i in 0..200 {
-            let from = (i as f32 * 800.0) % 300_000.0;
-            let started = Instant::now();
-            let win = render_window(&map, &dom, &styles, &Mock, &NoImages, from, from + 800.0);
-            std::hint::black_box(win.lines.len());
-            t = t.min(started.elapsed());
-        }
-        report("两阶段 · 滚动一条带", t, "每条带 ~800px");
-    }
-
     // ---- 拉丁：断点稀疏，走「回退到词边界」那一支 ----
     let (dom_l, styles_l, root_l) = setup(&latin_chapter(300, 400));
     println!("\n拉丁章：{} 节点", dom_l.nodes.len());
@@ -323,70 +273,9 @@ fn main() {
     );
     report("完整排版（混排）", mixed_t, &format!("{ml} 行"));
 
-    // ---- 缓存命中 ----
-    let reader = Reader::default();
-    // 键按公开构造点来 —— 与生产路径（`folio-app` 的排版作业）同一把键的形状。
-    let key = LayoutKey::compose(
-        LayoutInputs::compute("", &reader),
-        content_hash(&src),
-        WIDTH,
-        1,
-        None,
-        0,
-        0,
-    );
-    let mut cache = LayoutCache::new();
-    println!();
-    let hit = {
-        let first = layout_cached(
-            &mut cache,
-            &key,
-            &dom,
-            &styles,
-            root,
-            LayoutOptions {
-                width: WIDTH,
-                light: false,
-                allow_vertical: false,
-                page_height: None,
-            },
-            &Mock,
-            &NoImages,
-        );
-        std::hint::black_box(first.height);
-        let mut fastest = Duration::MAX;
-        for _ in 0..BATCHES {
-            let t = Instant::now();
-            for _ in 0..BATCH {
-                let out = layout_cached(
-                    &mut cache,
-                    &key,
-                    &dom,
-                    &styles,
-                    root,
-                    LayoutOptions {
-                        width: WIDTH,
-                        light: false,
-                        allow_vertical: false,
-                        page_height: None,
-                    },
-                    &Mock,
-                    &NoImages,
-                );
-                std::hint::black_box(out.height);
-            }
-            let d = t.elapsed() / BATCH as u32;
-            if d < fastest {
-                fastest = d;
-            }
-        }
-        fastest
-    };
-    report("缓存命中", hit, "");
-
     // ---- 块级缓存：改一段的样式，只重排那一段 ----
     //
-    // 上半是「无块缓存」：改一段的样式，整章的 `LayoutCache` 键都变了 → 整章重排。
+    // 上半是「无块缓存」：改一段的样式，整章的键都变了 → 整章重排。
     // 下半是「有块缓存」：把缓存填成「改之前」的样子，再排改之后的版本 —— 只有那一段
     // 重排，其余块命中复用（复用会按新落点平移，所以下面几段整体下移也不影响命中）。
     // 打印的「重排 N 块 / 命中 M 块」就是这套机制是否生效的直接证据。

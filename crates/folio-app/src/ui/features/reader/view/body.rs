@@ -53,6 +53,7 @@ use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::book_fonts::BookFonts;
 use crate::ui::features::reader::model::chapter_layout::{Document, Viewport};
 use crate::ui::features::reader::model::chrome;
+use crate::ui::features::reader::model::fixed_book::{FixedBook, PageTile};
 use crate::ui::features::reader::model::image_atlas::ImageAtlas;
 use crate::ui::features::reader::model::paging::PrefetchSide;
 use crate::ui::features::reader::model::prefetch;
@@ -145,7 +146,9 @@ impl ReaderSession {
         };
         if walked {
             // 弹回那一趟不落地：它「走完」的意思是回到出发那一张，页号与锚章一个字都不动。
+            // 定版式没有章可跨（`chapter` 是页号），也不走 `finish_chapter_turn`。
             if turn.run.lands()
+                && !self.is_fixed()
                 && let Some(to) = turn.arriving
                 && to.chapter != self.chapter_index()
             {
@@ -239,12 +242,23 @@ impl Render for ReaderSession {
         // 换档统一走 `adopt_mode`：它把「第几个字」从旧摆法的坐标搬到新摆法里。
         // 这里直接赋 `self.mode` 会让连续 → 分页那一趟丢掉章内位置 —— 读者在
         // 第 40% 处换回纸面动画，落到的却是这一章的章首。
-        let by_width = chrome::default_mode(usable, gap);
-        let wanted = if self.mode_undecided {
+        // 定版式没有「两栏」这回事：它的页是既定的一张位图，按宽度分成两条窄柱子只会
+        // 把同一页砍成两半。所以这一族的默认档恒为整页翻，读者手动塞进来的双页也按
+        // 分页走；「上下滚动」照旧由 `reconcile` 带进连续。
+        let fixed_layout = self.is_fixed();
+        let by_width = if fixed_layout {
+            chrome::PageMode::Paged
+        } else {
+            chrome::default_mode(usable, gap)
+        };
+        let mut wanted = if self.mode_undecided {
             by_width
         } else {
             self.mode
         };
+        if fixed_layout && wanted == chrome::PageMode::Spread {
+            wanted = chrome::PageMode::Paged;
+        }
         self.adopt_mode(chrome::reconcile(page_turn, wanted, by_width), cx);
         let mode = self.mode.effective(usable, gap);
         let columns = mode.columns();
@@ -417,75 +431,114 @@ impl Render for ReaderSession {
                 }
             }
             Source::Fixed(book) => {
-                // 定版式：页是既定的，没有排版链。摆当前页，等比缩进视口、居中。
+                // 定版式：页是既定的，没有排版链。两档共用同一张页表：
+                //
+                // - 连续竖滚：页按版心宽铺开、纵向排成一条栈，位置是栈上的像素；
+                // - 整页翻：一屏一页，位置是页号。
+                //
+                // 连续那一档的做法与可重排那一族的「拼接链」同源：`scroll_y` 是权威坐标，
+                // 页号只是「视口顶落在哪一页」的读数。
                 let pages = book.page_count();
-                self.laid_out = crate::ui::features::reader::model::session::LaidOut {
-                    mode: chrome::PageMode::Paged,
-                    columns: 1,
-                    pages,
-                    viewport: viewport_height,
-                };
-                // 恢复落点：定版式的 `locator.chapter` 就是页号。
-                if let Some(locator) = self.pending_restore.take() {
-                    book.set_page(locator.chapter as usize);
-                }
-                self.page = book.page();
-                self.content_height = 0.0;
-                let current = book.page();
-                // 一页可能摆好几格（多图页 / 对开跨页，或渲染型的一整页）：按**共享高度**
-                // 横成一行，整体居中。一格时这条式子退化成「等比缩进视口」，与普通漫画的
-                // 旧表现逐像素相同。
-                let tiles = book.page_tiles(current);
-                // 尺寸未知（0）时按视口那一格的宽高比补：一格时等于「铺满」，正是
-                // 原来那条兜底；多格共享高度则必须有个比例，视口比例是最不失真的猜。
-                let box_aspect = usable / viewport_height;
-                let aspect = |w: u32, h: u32| {
-                    if w == 0 || h == 0 {
-                        box_aspect
-                    } else {
-                        w as f32 / h as f32
+                let fallback_aspect = usable / viewport_height.max(1.0);
+                if mode.is_continuous() {
+                    // 宽度变了要重建页栈。重建之前先把「读者眼前是第几页、页内几成」
+                    // 记下来，建完按新页高搬回同一处 —— 否则转屏 / 分屏会让屏上跳一页。
+                    // 挂着一份恢复请求时不算：那一份才是目标，旧坐标属于上一本书 / 上一档。
+                    let anchor = self
+                        .pending_restore
+                        .is_none()
+                        .then(|| {
+                            book.stack()
+                                .and_then(|s| s.page_and_fraction(self.scroll_y))
+                        })
+                        .flatten();
+                    if book.ensure_stack(usable, FIXED_PAGE_GAP, fallback_aspect)
+                        && let Some((page, fraction)) = anchor
+                        && let Some(fresh) = book.stack()
+                    {
+                        let top = fresh.top_of(page).unwrap_or(0.0);
+                        let height = fresh.height_of(page).unwrap_or(0.0);
+                        self.scroll_y = top + fraction * height;
                     }
-                };
-                let row_aspect: f32 = tiles
-                    .iter()
-                    .map(|tile| aspect(tile.width, tile.height))
-                    .sum();
-                // 这一页有没有字：PDF / AZW4 / DjVu 那一族才有（漫画的一页就是一张图，
-                // EPUB 的定版式字在 XHTML 里而不在页上）。问一次用三处 —— 长按归谁、
-                // 命中那把尺记不记、上面那两层画不画 —— 而每一次问的都是会话里那份
-                // 按页备忘（`FixedBook::page_text`），不在这一帧里回引擎第二趟。
-                let text = book.page_text(current);
-                let text_key = book.page_text_key(current);
-                let mut placed: Option<Bounds<Pixels>> = None;
-                if row_aspect > 0.0 {
-                    let height = viewport_height.min(usable / row_aspect);
-                    let y = self.header_reserve + (viewport_height - height).max(0.0) / 2.0;
-                    // 整行居中：先从左边把行宽的余量让出一半，再逐格往右推进。
-                    let mut x = (usable - row_aspect * height) / 2.0;
-                    for tile in tiles {
-                        let width = aspect(tile.width, tile.height) * height;
-                        // 解不出像素的那一格空着，但仍然占位：多图页的排版不该因为
-                        // 少一张图就把剩下的往左挤。
-                        if let Some(request) = tile.request {
+                    let total = book.stack().map_or(0.0, |stack| stack.total());
+                    self.laid_out = crate::ui::features::reader::model::session::LaidOut {
+                        mode,
+                        columns: 1,
+                        pages,
+                        viewport: viewport_height,
+                    };
+                    self.content_height = total;
+                    // 恢复落点：定版式的 `locator.chapter` 就是页号，落在那一页的页首。
+                    if let Some(locator) = self.pending_restore.take() {
+                        book.set_page(locator.chapter as usize);
+                        self.scroll_y = book.stack_top_of(book.page()).unwrap_or(0.0);
+                    }
+                    let max_scroll = (total - viewport_height).max(0.0);
+                    self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
+                    // 画出来的位置：点屏 / 方向键那一趟在补间，手指与滚轮那一趟直接跟
+                    // `scroll_y`。命中与绘制都读这一个数（与可重排连续那一臂同一条规矩）。
+                    let painted_y = match turn {
+                        Some(frame) => frame.scroll.map_or(self.scroll_y, |(from, to)| {
+                            chrome::tween(from, to, frame.progress)
+                        }),
+                        None => self.scroll_y,
+                    };
+                    self.scroll_painted = painted_y.clamp(0.0, max_scroll);
+                    // 页号由**输入**那一头改写（滚轮 / 落页 / 恢复），渲染帧只把它抄回来：
+                    // 在这里再按 `scroll_y` 推一次，会把「目录跳到最后一页」那个被夹到
+                    // `max_scroll` 的落点读回成上一页 —— 最后一页常常比一屏矮，页首永远
+                    // 到不了视口顶。
+                    self.page = book.page();
+                    // 这一帧要画的页：按页栈切出可见区间，先抄成一个小表再画 ——
+                    // `stack()` 借着 `book`，抄完就放开，下面还要问字层与图集。
+                    let rows: Vec<(usize, f32, f32)> = book
+                        .stack()
+                        .map(|stack| {
+                            stack
+                                .visible(self.scroll_painted, viewport_height)
+                                .filter_map(|page| {
+                                    Some((page, stack.top_of(page)?, stack.height_of(page)?))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let mut boxes: Vec<(usize, Bounds<Pixels>)> = Vec::new();
+                    let mut visible_pages: Vec<usize> = Vec::with_capacity(rows.len());
+                    let mut selection_visual = None;
+                    for (page, top, height) in rows {
+                        visible_pages.push(page);
+                        let page_tiles = book.page_tiles(page);
+                        let has_text = page_tiles.iter().any(|tile| tile.renders);
+                        // 页栈已经把这一页的高度算好了（按版心宽与宽高比），这里只把
+                        // 每一格按同一高度横排；顶边是栈坐标减掉画出来的滚动量。
+                        let (tiles, placed) = fixed_page_tiles_at(
+                            page_tiles,
+                            usable,
+                            height,
+                            self.header_reserve + top - self.scroll_painted,
+                            fallback_aspect,
+                            has_text,
+                        );
+                        let text = if has_text { book.page_text(page) } else { None };
+                        let text_key = if text.is_some() {
+                            book.page_text_key(page)
+                        } else {
+                            None
+                        };
+                        for at in tiles {
+                            // 解不出像素的那一格空着，但仍然占位：多图页的排版不该因为
+                            // 少一张图就把剩下的往左挤。
+                            let Some(request) = at.tile.request else {
+                                continue;
+                            };
                             let key = request.key.clone();
                             let Some(image) = painted(&atlas, request, view, cx) else {
                                 continue;
                             };
-                            // 带字的那一格才有选中：它的矩形就是「屏幕点 ↔ 页内字序」
-                            // 那一把尺唯一该记的地方。
-                            let selected = text.is_some() && tile.renders;
-                            if selected {
-                                placed = Some(Bounds::new(
-                                    point(px(x), px(y)),
-                                    size(px(width), px(height)),
-                                ));
-                            }
-                            // 「看大图」那一格在这一族里按端分岔（`page_image` 顶上写着）：
-                            // 手机上它吃的是**长按**，而那正是选中要的手势 —— 于是有字的
-                            // 那一页不再挂它（入口挪进浮层那颗按钮），没字的页照旧。
-                            // 桌面那一端挂的是**单击**，与拖选不打架（拖过阈值那一下的合成
-                            // 点击由 `open_on_tap` 里那一条吃掉），所以原样留着。
-                            let no_entry = None;
+                            let selected = text.is_some() && at.tile.renders;
+                            // 与整页翻那一臂同一条分岔：手机上「看大图」吃长按，
+                            // 有字的那一页把长按留给选中（入口在浮层与底栏）。
+                            let no_entry: Option<Entity<ImageViewer>> = None;
                             let entry = if selected && long_press {
                                 &no_entry
                             } else {
@@ -493,10 +546,10 @@ impl Render for ReaderSession {
                             };
                             let index = overlays.len();
                             overlays.push(page_image(
-                                x,
-                                y,
-                                width,
-                                height,
+                                at.x,
+                                at.y,
+                                at.width,
+                                at.height,
                                 image,
                                 key,
                                 entry,
@@ -505,55 +558,269 @@ impl Render for ReaderSession {
                                 &reader_weak,
                             ));
                         }
-                        x += width;
-                    }
-                }
-                // 命中换算读的那一把尺，与上面摆出去的那一格同源。每一帧都写：
-                // 没有字的那一页必须把它清干净，否则留着上一页的矩形，长按会按新页的
-                // 字序去解旧页的盒子 —— 症状是色块整片画在别处。
-                self.fixed_text_box.set(placed.map(|at| (current, at)));
-                // 一屏就是一页：选区挂在别的页上就是「翻走了」，按分页那一族同一条规矩
-                // 收掉（那里的选区也必须落在锚章）。不收会留着一份屏上看不见的选中 ——
-                // 菜单条还开着，而它锚的那一段字已经不在这一帧里了。
-                if self
-                    .selection
-                    .as_ref()
-                    .is_some_and(|selected| selected.chapter != current)
-                {
-                    self.clear_selection();
-                }
-                // 留在书上的那几条痕迹，与这一帧挑中的那一块。这两层在定版式上必须
-                // **盖在页图之上**：这一族的字就在那张栅格出来的图里，压在它下面等于没画
-                // （可重排那一族正相反 —— 高亮压在字形之下才不吃掉笔画）。
-                if let (Some(text), Some(at)) = (&text, placed) {
-                    let marks = fixed_marks(
-                        &self.annotation_spans,
-                        &self.annotations,
-                        current,
-                        text_key.unwrap_or(0),
-                        text,
-                        at,
-                        &palette,
-                    );
-                    if !marks.is_empty() {
-                        overlays.push(marks_above(marks));
-                    }
-                    // 选中的那一块：选区挂在它自己那一页上，翻到别页就不再画。
-                    let visual = self
-                        .selection
-                        .clone()
-                        .filter(|selected| selected.chapter == current)
-                        .map(|selected| {
-                            selection::page_visual(
+                        if let (Some(text), Some(at)) = (&text, placed) {
+                            // 命中用的尺每页各记一条：连续竖滚里屏上可能同时有两页带字，
+                            // 只记一页会让另一页的拖选按到隔壁的盒子上。
+                            boxes.push((page, at));
+                            let marks = fixed_marks(
+                                &self.annotation_spans,
+                                &self.annotations,
+                                page,
+                                text_key.unwrap_or(0),
                                 text,
-                                selected.range,
                                 at,
-                                cx.theme().selection,
-                                cx.theme().selection.opacity(HIGHLIGHT_ALPHA),
-                            )
-                        })
-                        .unwrap_or_default();
-                    overlays.push(selection::overlay(visual, &reader_weak));
+                                &palette,
+                            );
+                            if !marks.is_empty() {
+                                overlays.push(marks_above(marks));
+                            }
+                            if let Some(selected) = self
+                                .selection
+                                .as_ref()
+                                .filter(|selected| selected.chapter == page)
+                            {
+                                selection_visual = Some(selection::page_visual(
+                                    text,
+                                    selected.range.clone(),
+                                    at,
+                                    cx.theme().selection,
+                                    cx.theme().selection.opacity(HIGHLIGHT_ALPHA),
+                                ));
+                            }
+                        }
+                    }
+                    *self.fixed_text_boxes.borrow_mut() = boxes;
+                    // 下一页先解好（PDF 要栅格化、CBZ 要读字节），取**可见页的后一页**：
+                    // 连续竖滚一屏可能压着两页，从视口顶那一页往后数会把它漏掉。
+                    if turn.is_none()
+                        && let Some(target) = visible_pages
+                            .last()
+                            .copied()
+                            .and_then(|last| prefetch::fixed_target(last, pages))
+                    {
+                        for tile in book.page_tiles(target) {
+                            if let Some(request) = tile.request {
+                                atlas.update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
+                            }
+                        }
+                    }
+                    // 选中件只摆一份（它铺满整块版心，监听也只该挂一份）；但「能不能从
+                    // 这一页起手选」由上面那张多页表回答。没有带字的页就整层不摆。
+                    if !self.fixed_text_boxes.borrow().is_empty() {
+                        overlays.push(selection::overlay(
+                            selection_visual.unwrap_or_default(),
+                            &reader_weak,
+                        ));
+                    }
+                    // 选区挂的页滚出可见区间就是「翻走了」：与分页那一族同一条规矩。
+                    // 这一问放在所有 `book` 借用之后，才能调 `&mut self` 的方法。
+                    if self
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selected| !visible_pages.contains(&selected.chapter))
+                    {
+                        self.clear_selection();
+                    }
+                } else {
+                    self.laid_out = crate::ui::features::reader::model::session::LaidOut {
+                        mode: chrome::PageMode::Paged,
+                        columns: 1,
+                        pages,
+                        viewport: viewport_height,
+                    };
+                    // 恢复落点：定版式的 `locator.chapter` 就是页号。
+                    if let Some(locator) = self.pending_restore.take() {
+                        book.set_page(locator.chapter as usize);
+                    }
+                    self.page = book.page();
+                    self.content_height = 0.0;
+                    let current = book.page();
+                    // 定版式的下一页先解好：PDF 的一页要回引擎栅格化、CBZ 的一页要读字节 +
+                    // 解码，从前都要等读者翻过去那一下才开始。静止帧里每帧 prepare 一次，
+                    // 图集按「这一帧碰过」留住那一格；翻页动画期间不抢这笔活儿。
+                    if turn.is_none()
+                        && let Some(target) = prefetch::fixed_target(current, pages)
+                    {
+                        for tile in book.page_tiles(target) {
+                            if let Some(request) = tile.request {
+                                atlas.update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
+                            }
+                        }
+                    }
+                    // 这一页有没有字：PDF / AZW4 / DjVu 那一族才有（漫画的一页就是一张图，
+                    // EPUB 的定版式字在 XHTML 里而不在页上）。问一次用三处 —— 长按归谁、
+                    // 命中那把尺记不记、上面那两层画不画 —— 而每一次问的都是会话里那份
+                    // 按页备忘（`FixedBook::page_text`），不在这一帧里回引擎第二趟。
+                    let text = book.page_text(current);
+                    let text_key = book.page_text_key(current);
+                    // 定版式的翻页动画与流式共用同一套纸面位移；折页在 `begin_turn` 里
+                    // 已经换成平移，这里再收一次口，配置从别处带进来的怪值也不会去卷一张位图。
+                    let mut incoming_shift = (0.0, 0.0);
+                    let mut outgoing_page = None;
+                    if let Some(frame) = turn {
+                        let style = chrome::fixed_turn_style(frame.style);
+                        if style != PageTurn::None {
+                            let pose = turn_animation::Pose {
+                                forward: frame.forward,
+                                rtl: frame.rtl,
+                                grip: None,
+                                revert: None,
+                            };
+                            let [incoming, outgoing] =
+                                turn_animation::of(style).sheets_at(frame.progress, area, pose);
+                            incoming_shift = incoming.offset;
+                            if let Some(leaving) = frame.leaving {
+                                outgoing_page = Some((leaving.page, outgoing.offset));
+                            }
+                        }
+                    }
+                    // 出场页先入树、进场页后入树：覆盖档靠后画的那张压住停着的旧页，
+                    // 平移 / 上下平移两张不重叠，顺序无所谓。出场那一页只画像素，不挂
+                    // 选中 / 痕迹 / 放大入口 —— 它正在离开，那三样都属于目标页。
+                    if let Some((page, shift)) = outgoing_page {
+                        let (tiles, _) = fixed_page_tiles(
+                            book,
+                            page,
+                            usable,
+                            viewport_height,
+                            self.header_reserve,
+                            false,
+                        );
+                        let no_viewer: Option<Entity<ImageViewer>> = None;
+                        for at in tiles {
+                            let Some(request) = at.tile.request else {
+                                continue;
+                            };
+                            let key = request.key.clone();
+                            let Some(image) = painted(&atlas, request, view, cx) else {
+                                continue;
+                            };
+                            let index = overlays.len();
+                            overlays.push(page_image(
+                                at.x + shift.0,
+                                at.y + shift.1,
+                                at.width,
+                                at.height,
+                                image,
+                                key,
+                                &no_viewer,
+                                long_press,
+                                index,
+                                &reader_weak,
+                            ));
+                        }
+                    }
+                    // 一页可能摆好几格（多图页 / 对开跨页，或渲染型的一整页）：按**共享高度**
+                    // 横成一行，整体居中。一格时这条式子退化成「等比缩进视口」，与普通漫画的
+                    // 旧表现逐像素相同。
+                    let (tiles, placed) = fixed_page_tiles(
+                        book,
+                        current,
+                        usable,
+                        viewport_height,
+                        self.header_reserve,
+                        text.is_some(),
+                    );
+                    // 带字的那一格才有选中：它的矩形就是「屏幕点 ↔ 页内字序」那一把尺
+                    // 唯一该记的地方。`placed` 是**最终位置**（不含动画位移）：动画期间
+                    // 手势让位，落定后位移正好归零，命中永远读这一份。
+                    for at in tiles {
+                        // 解不出像素的那一格空着，但仍然占位：多图页的排版不该因为
+                        // 少一张图就把剩下的往左挤。
+                        let Some(request) = at.tile.request else {
+                            continue;
+                        };
+                        let key = request.key.clone();
+                        let Some(image) = painted(&atlas, request, view, cx) else {
+                            continue;
+                        };
+                        let selected = text.is_some() && at.tile.renders;
+                        // 「看大图」那一格在这一族里按端分岔（`page_image` 顶上写着）：
+                        // 手机上它吃的是**长按**，而那正是选中要的手势 —— 于是有字的
+                        // 那一页不再挂它（入口挪进浮层那颗按钮），没字的页照旧。
+                        // 桌面那一端挂的是**单击**，与拖选不打架（拖过阈值那一下的合成
+                        // 点击由 `open_on_tap` 里那一条吃掉），所以原样留着。
+                        let no_entry = None;
+                        let entry = if selected && long_press {
+                            &no_entry
+                        } else {
+                            &viewer
+                        };
+                        let index = overlays.len();
+                        overlays.push(page_image(
+                            at.x + incoming_shift.0,
+                            at.y + incoming_shift.1,
+                            at.width,
+                            at.height,
+                            image,
+                            key,
+                            entry,
+                            long_press,
+                            index,
+                            &reader_weak,
+                        ));
+                    }
+                    // 命中换算读的那一把尺，与上面摆出去的那一格同源。每一帧都写：
+                    // 没有字的那一页必须把它清干净，否则留着上一页的矩形，长按会按新页的
+                    // 字序去解旧页的盒子 —— 症状是色块整片画在别处。
+                    *self.fixed_text_boxes.borrow_mut() =
+                        placed.map(|at| (current, at)).into_iter().collect();
+                    // 一屏就是一页：选区挂在别的页上就是「翻走了」，按分页那一族同一条规矩
+                    // 收掉（那里的选区也必须落在锚章）。不收会留着一份屏上看不见的选中 ——
+                    // 菜单条还开着，而它锚的那一段字已经不在这一帧里了。
+                    if self
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selected| selected.chapter != current)
+                    {
+                        self.clear_selection();
+                    }
+                    // 留在书上的那几条痕迹，与这一帧挑中的那一块。这两层在定版式上必须
+                    // **盖在页图之上**：这一族的字就在那张栅格出来的图里，压在它下面等于没画
+                    // （可重排那一族正相反 —— 高亮压在字形之下才不吃掉笔画）。
+                    //
+                    // 动画期间痕迹跟着**进场页**一起走：页图在滑，痕迹停在终点就会读成
+                    // 「色块浮在纸外面」。`fixed_text_boxes` 仍记最终位置，手势在动画期间让位，
+                    // 落定后位移归零，两边自然重合。
+                    let drawn_at = placed.map(|at| {
+                        Bounds::new(
+                            point(
+                                at.origin.x + px(incoming_shift.0),
+                                at.origin.y + px(incoming_shift.1),
+                            ),
+                            at.size,
+                        )
+                    });
+                    if let (Some(text), Some(at)) = (&text, drawn_at) {
+                        let marks = fixed_marks(
+                            &self.annotation_spans,
+                            &self.annotations,
+                            current,
+                            text_key.unwrap_or(0),
+                            text,
+                            at,
+                            &palette,
+                        );
+                        if !marks.is_empty() {
+                            overlays.push(marks_above(marks));
+                        }
+                        // 选中的那一块：选区挂在它自己那一页上，翻到别页就不再画。
+                        let visual = self
+                            .selection
+                            .clone()
+                            .filter(|selected| selected.chapter == current)
+                            .map(|selected| {
+                                selection::page_visual(
+                                    text,
+                                    selected.range,
+                                    at,
+                                    cx.theme().selection,
+                                    cx.theme().selection.opacity(HIGHLIGHT_ALPHA),
+                                )
+                            })
+                            .unwrap_or_default();
+                        overlays.push(selection::overlay(visual, &reader_weak));
+                    }
                 }
             }
             Source::Book(book) => {
@@ -2652,6 +2919,100 @@ fn speech_fill(
 /// 没有「基线」这一格可问，引擎给的盒就是那一段字的全部占位，盒底也就是墨迹之下
 /// 最近的一条线。差的那几个像素在屏上是「线离字更近了一点」，不是画到别处去。
 #[allow(clippy::too_many_arguments)]
+/// 定版式一页里的一格：像素活儿 + 它在这一页里的最终摆位（不含动画位移）。
+struct FixedTileAt {
+    tile: PageTile,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+/// 连续竖滚里两页之间的缝（逻辑像素）。
+///
+/// 取间距阶里的 md（12）：页与页是同一本书里的两组内容，既要读得出页界，又不能在
+/// 连续阅读里变成一片空白。这条缝不参与页高 —— 页高只由版心宽与页面自己的宽高比决定。
+const FIXED_PAGE_GAP: f32 = 12.0;
+
+/// 把一页的每一格摆成一条共享高度的横排，整体居中。返回每格的最终位置，以及
+/// 「带字那一格」的矩形（页内字序那把尺记在它上面）。
+///
+/// 一页可能摆好几格（多图页 / 对开跨页，或渲染型的一整页）：一格时这条式子退化成
+/// 「等比缩进视口」，与普通漫画的旧表现逐像素相同。尺寸未知（0）时按视口那一格的
+/// 宽高比补 —— 一格等于铺满，多格共享高度则必须有个比例，视口比例是最不失真的猜。
+fn fixed_page_tiles(
+    book: &FixedBook,
+    page: usize,
+    usable: f32,
+    viewport_height: f32,
+    header_reserve: f32,
+    has_text: bool,
+) -> (Vec<FixedTileAt>, Option<Bounds<Pixels>>) {
+    let tiles = book.page_tiles(page);
+    let box_aspect = usable / viewport_height.max(1.0);
+    let row_aspect = fixed_row_aspect(&tiles, box_aspect);
+    if row_aspect <= 0.0 {
+        return (Vec::new(), None);
+    }
+    let height = viewport_height.min(usable / row_aspect);
+    let top = header_reserve + (viewport_height - height).max(0.0) / 2.0;
+    fixed_page_tiles_at(tiles, usable, height, top, box_aspect, has_text)
+}
+
+/// 一条页栈里的一页：高度已经由 [`crate::ui::features::reader::model::fixed_book::FixedStack`]
+/// 按版心宽算好，这里只把每一格按同一高度横排、摆到 `top` 上。
+fn fixed_page_tiles_at(
+    tiles: Vec<PageTile>,
+    usable: f32,
+    height: f32,
+    top: f32,
+    fallback_aspect: f32,
+    has_text: bool,
+) -> (Vec<FixedTileAt>, Option<Bounds<Pixels>>) {
+    let row_aspect = fixed_row_aspect(&tiles, fallback_aspect);
+    if row_aspect <= 0.0 {
+        return (Vec::new(), None);
+    }
+    // 整行居中：先从左边把行宽的余量让出一半，再逐格往右推进。页栈那一档
+    // `row_aspect * height` 正好等于版心宽，这里退化成从 0 开始。
+    let mut x = (usable - row_aspect * height) / 2.0;
+    let mut placed = None;
+    let mut out = Vec::with_capacity(tiles.len());
+    for tile in tiles {
+        let width = fixed_tile_aspect(&tile, fallback_aspect) * height;
+        if has_text && tile.renders && tile.request.is_some() {
+            placed = Some(Bounds::new(
+                point(px(x), px(top)),
+                size(px(width), px(height)),
+            ));
+        }
+        out.push(FixedTileAt {
+            tile,
+            x,
+            y: top,
+            width,
+            height,
+        });
+        x += width;
+    }
+    (out, placed)
+}
+
+fn fixed_tile_aspect(tile: &PageTile, fallback: f32) -> f32 {
+    if tile.width == 0 || tile.height == 0 {
+        fallback
+    } else {
+        tile.width as f32 / tile.height as f32
+    }
+}
+
+fn fixed_row_aspect(tiles: &[PageTile], fallback: f32) -> f32 {
+    tiles
+        .iter()
+        .map(|tile| fixed_tile_aspect(tile, fallback))
+        .sum()
+}
+
 fn fixed_marks(
     cache: &RefCell<AnnotationSpans>,
     stored: &[Annotation],

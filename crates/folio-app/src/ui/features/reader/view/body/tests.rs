@@ -5714,10 +5714,11 @@ fn a_bookmark_in_a_pdf_moves_the_screen_to_that_page(cx: &mut TestAppContext) {
 
 /// 第 `index` 个字在屏上的落点（窗口坐标），`along` 是压在这个字的哪一分之几处。
 ///
-/// 一个像素都不硬编码：落点由**这一帧记下的那一格**（`fixed_text_box`）与那一页自己的
-/// 字层折回来，与 `selection::page_units` 互为逆运算。换窗口宽、换 `RENDER_EDGE` 那一档、
-/// 换一页的尺寸，这条式子都不用改 —— 而它同时也是「绘制摆的那一格」与「命中折回去的那
-/// 一格」是同一格的证据：两处各算一把尺的话，这一条会红在色块与手指错开上。
+/// 一个像素都不硬编码：落点由**这一帧记下的那张表**（`fixed_text_boxes`）里当前页的
+/// 那一格与那一页自己的字层折回来，与 `selection::page_units` 互为逆运算。换窗口宽、
+/// 换 `RENDER_EDGE` 那一档、换一页的尺寸，这条式子都不用改 —— 而它同时也是「绘制摆的
+/// 那一格」与「命中折回去的那一格」是同一格的证据：两处各算一把尺的话，这一条会红在
+/// 色块与手指错开上。
 fn pdf_char(
     view: &Entity<ReaderSession>,
     cx: &TestAppContext,
@@ -5725,7 +5726,14 @@ fn pdf_char(
     along: f32,
 ) -> Point<Pixels> {
     view.read_with(cx, |v, _| {
-        let (page, box_) = v.fixed_text_box.get().expect("那一格该被量出来了");
+        let current = v.page();
+        let boxes = v.fixed_text_boxes.borrow();
+        let (page, box_) = boxes
+            .iter()
+            .copied()
+            .find(|(page, _)| *page == current)
+            .or_else(|| boxes.first().copied())
+            .expect("那一格该被量出来了");
         let text = v
             .fixed()
             .and_then(|book| book.page_text(page))
@@ -5752,6 +5760,18 @@ fn open_fixed_pdf(
     cx: &mut TestAppContext,
     name: &str,
 ) -> (Entity<ReaderSession>, AnyWindowHandle, Arc<Store>, i64) {
+    open_fixed_pdf_with_turn(cx, name, PageTurn::Slide)
+}
+
+/// 同上，但「翻页方式」在 `open_book` 之前就摆好。
+///
+/// 连续竖滚必须这么开：摆法在渲染帧里由 `page_turn` 解出来，先开成整页翻再改配置
+/// 也能到，但这里要测的正是「一打开就是连续」那条生产路。
+fn open_fixed_pdf_with_turn(
+    cx: &mut TestAppContext,
+    name: &str,
+    turn: PageTurn,
+) -> (Entity<ReaderSession>, AnyWindowHandle, Arc<Store>, i64) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
     let (meta, content) = folio_core::content::format::provider_for(&path)
         .expect("PDF 该有 provider")
@@ -5772,9 +5792,320 @@ fn open_fixed_pdf(
         Some(store.clone()),
         Some(id),
     );
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |appearance| appearance.page_turn = turn);
+    });
     view.update(cx, |v, cx| v.open_book(id, cx));
     settle(cx, handle);
     (view, handle, store, id)
+}
+
+/// 定版式的下一页在读者翻过去之前就解好：PDF 的一页要回引擎栅格化，从前那一笔
+/// 要等翻页那一下才付。这里用三页 PDF，停在第一页，断言第二页的键已经在图集里。
+///
+/// 这一条不直调 `ImageAtlas::prepare` —— 它测的正是「定版式那一支有没有把下一页
+/// 递过去」。载荷是后台线程，所以等一小会儿；超过两秒还没好就是没接上。
+#[gpui_kit::test]
+fn the_next_pdf_page_is_decoded_before_the_reader_turns(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let next_key = view.read_with(cx, |v, _| {
+        let book = v.fixed().expect("这一本该走定版式");
+        assert_eq!(book.page(), 0, "前置：读者停在第 1 页");
+        book.page_tiles(1)
+            .into_iter()
+            .find_map(|tile| tile.request)
+            .map(|request| request.key)
+            .expect("第 2 页该有一条像素活儿")
+    });
+    let mut ready = false;
+    for _ in 0..100 {
+        settle(cx, handle);
+        ready = view.read_with(cx, |v, cx| v.atlas.read(cx).peek(&next_key).is_some());
+        if ready {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        ready,
+        "第 2 页该在翻过去之前就解好在图集里（键 {next_key}）"
+    );
+}
+
+/// 定版式的「上下滚动」：页按版心宽纵向排开，滚轮挪的是栈上的像素，视口顶那一页
+/// 跟着改写页号 —— 页脚、进度、落库都读这一个数。
+#[gpui_kit::test]
+fn a_fixed_book_scrolls_continuously_and_tracks_the_page_under_the_viewport(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        PageTurn::Scroll,
+    );
+    let top1 = view.read_with(cx, |v, _| {
+        assert!(v.is_fixed(), "前置：这一本该走定版式");
+        assert_eq!(
+            v.mode(),
+            PageMode::Continuous,
+            "「上下滚动」要把定版式带进连续竖滚"
+        );
+        assert_eq!(v.page_count(), 3);
+        assert_eq!(v.page(), 0);
+        assert!(v.scroll_y.abs() < 0.5, "一打开在页栈顶上");
+        assert!(
+            v.content_height > v.laid_out.viewport,
+            "三页排成的栈要比一屏高：{} vs {}",
+            v.content_height,
+            v.laid_out.viewport
+        );
+        let stack = v.fixed().expect("定版式").stack().expect("连续档该建页栈");
+        assert_eq!(stack.len(), 3);
+        let top = stack.top_of(1).expect("第二页该在栈上");
+        assert!(
+            top > v.laid_out.viewport,
+            "第二页的页首该在第一屏之外：{top}"
+        );
+        top
+    });
+
+    // 真滚轮事件走到第二页页首（不走内部赋值，测的就是事件那条路）。
+    scroll_down(cx, handle, top1 + 1.0);
+    settle(cx, handle);
+    view.read_with(cx, |v, _| {
+        assert!(
+            v.scroll_y >= top1,
+            "滚过第二页页首之后坐标该在它附近：{} vs {top1}",
+            v.scroll_y
+        );
+        assert_eq!(v.page(), 1, "视口顶那一页要跟着滚动改写");
+        assert!(
+            v.progress().is_some_and(|progress| progress > 0.0),
+            "页号进了第二页，全书进度不该还停在 0"
+        );
+    });
+}
+
+/// 连续竖滚里点一下 / 按方向键仍然是「滚一屏 90%」，而且走的是与流式连续同一套补间：
+/// 权威位置当场到终点，画出来的位置从起点追过去。
+#[gpui_kit::test]
+fn a_fixed_tap_turn_tweens_the_stack(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        PageTurn::Scroll,
+    );
+    let start = view.read_with(cx, |v, _| v.scroll_y);
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    let (target, turn) = view.read_with(cx, |v, _| (v.scroll_y, v.turn));
+    assert!(target > start, "点一下要往前走：{start} → {target}");
+    let turn = turn.expect("离散翻页该起一趟补间");
+    assert_eq!(turn.style, PageTurn::Scroll, "这一档就是上下滚动");
+    assert_eq!(
+        turn.scroll,
+        Some((start, target)),
+        "补间的两端是画出来的起点与权威终点"
+    );
+
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let painted = view.read_with(cx, |v, _| v.scroll_painted);
+    assert!(
+        (painted - start).abs() < 1.0,
+        "起步该还画在起点上：{painted} vs {start}"
+    );
+    turn_frame(cx, handle, Duration::from_millis(140));
+    let half = view.read_with(cx, |v, _| v.scroll_painted);
+    assert!(
+        half > start && half < target,
+        "走到一半该落在两点之间：{start} < {half} < {target}"
+    );
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    let (painted, settled) = view.read_with(cx, |v, _| (v.scroll_painted, v.turn));
+    assert!(settled.is_none(), "走完要把补间收掉");
+    assert!(
+        (painted - target).abs() < 1.0,
+        "定住后画的位置就是权威位置：{painted} vs {target}"
+    );
+}
+
+/// 从连续竖滚换回整页翻：页号与读到的那一页不丢，滚动坐标归零。
+#[gpui_kit::test]
+fn a_fixed_book_keeps_its_page_when_scroll_mode_is_turned_off(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        PageTurn::Scroll,
+    );
+    let top1 = view.read_with(cx, |v, _| {
+        v.fixed().expect("定版式").stack().expect("页栈").top_of(1)
+    });
+    let top1 = top1.expect("第二页该在栈上");
+    scroll_down(cx, handle, top1 + 1.0);
+    settle(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.page()), 1);
+
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |appearance| appearance.page_turn = PageTurn::Slide);
+    });
+    settle(cx, handle);
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.mode(), PageMode::Paged, "选回纸面动画就回整页翻");
+        assert_eq!(v.page(), 1, "换档不丢读到的那一页");
+        assert!(v.scroll_y.abs() < 0.5, "整页翻没有滚动坐标：{}", v.scroll_y);
+    });
+}
+
+/// 连续竖滚里页被滚上去一截之后，字还选得中：命中表记的是**这一帧摆出去的位置**
+/// （已经减掉滚动量），不是页在栈上的静止坐标。
+#[gpui_kit::test]
+fn a_fixed_text_page_still_selects_after_the_stack_scrolls(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/wps-paper.pdf",
+        PageTurn::Scroll,
+    );
+    scroll_down(cx, handle, 40.0);
+    settle(cx, handle);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        0,
+        "滚一点点还停在第 1 页"
+    );
+
+    let from = pdf_char(&view, cx, 0, 0.25);
+    let to = pdf_char(&view, cx, 4, 0.75);
+    drag_select_between(cx, handle, from, to);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.selected_text()),
+        Some("TITLE".to_string()),
+        "滚动之后的落点仍该按这一帧的页框折回字序"
+    );
+}
+
+/// 从同一份库、同一本书再开一屏：`open_book` 读回的是上一次落的位置。
+fn reopen_fixed_pdf(
+    cx: &mut TestAppContext,
+    name: &str,
+    store: Arc<Store>,
+    id: i64,
+    turn: PageTurn,
+) -> (Entity<ReaderSession>, AnyWindowHandle) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+    let (meta, content) = folio_core::content::format::provider_for(&path)
+        .expect("PDF 该有 provider")
+        .index(&path)
+        .expect("入库的那份真样本该读得开");
+    let document = folio_core::content::document::with_container(meta, content, &path);
+    let locator = store
+        .position(id)
+        .ok()
+        .flatten()
+        .map(|(_, locator)| locator)
+        .unwrap_or_default();
+    let (view, handle) = open_with_document(
+        cx,
+        Arc::from(document),
+        prefs(16.0),
+        locator,
+        460.0,
+        Some(store),
+        Some(id),
+    );
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |appearance| appearance.page_turn = turn);
+    });
+    view.update(cx, |v, cx| v.open_book(id, cx));
+    settle(cx, handle);
+    (view, handle)
+}
+
+/// 连续竖滚里读到第三页再离开：重启之后还在第三页的页首。
+///
+/// 位置按页落库（定版式的 `locator.chapter` 就是页号）。库里存的那一档可能是空串
+/// （摆法是渲染帧按「翻页方式」解出来的，不是读者在这本书上选过档），所以重开时
+/// 还要靠 `page_turn = scroll` 把它重新带进连续 —— 这条路径正是最容易把位置丢在
+/// 第一帧的那一种。
+#[gpui_kit::test]
+fn a_fixed_scroll_position_reopens_on_the_same_page(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, store, id) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        PageTurn::Scroll,
+    );
+    view.update(cx, |v, cx| v.set_page(2, cx));
+    settle(cx, handle);
+    let bottom = view.read_with(cx, |v, _| {
+        assert_eq!(v.page(), 2, "先站到第三页");
+        let bottom = v.max_scroll();
+        assert!(
+            (v.scroll_y - bottom).abs() < 0.5,
+            "最后一页比一屏矮，落页夹在全书末尾：{} vs {bottom}",
+            v.scroll_y
+        );
+        assert_eq!(
+            v.fixed()
+                .expect("定版式")
+                .page_at_scroll(v.scroll_y, v.laid_out.viewport),
+            Some(2),
+            "滚到书尾时页号归最后一页，哪怕它的页首到不了视口顶"
+        );
+        bottom
+    });
+    view.update(cx, |v, _| v.persist_position());
+    assert_eq!(
+        store.position(id).expect("读库").expect("该存过").1.chapter,
+        2,
+        "页号就是落库的位置"
+    );
+
+    let (again, _) = reopen_fixed_pdf(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        store,
+        id,
+        PageTurn::Scroll,
+    );
+    again.read_with(cx, |v, _| {
+        assert_eq!(v.mode(), PageMode::Continuous, "重开仍是连续竖滚");
+        assert_eq!(v.page(), 2, "位置还在第三页");
+        assert!(
+            (v.scroll_y - bottom).abs() < 0.5,
+            "重开落回全书末尾：{} vs {bottom}",
+            v.scroll_y
+        );
+    });
+}
+
+/// 定版式翻页走流式那一套纸面动画，但**不接仿真折页**：全局选的是折页时，定版式
+/// 退到平移。这里同时钉住「起了一趟动画」与「用的不是折页」，并画一帧确认出场页
+/// 那条绘制路径不炸。
+#[gpui_kit::test]
+fn a_fixed_page_turn_animates_with_slide_instead_of_curl(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    assert_eq!(view.read_with(cx, |v, _| v.page()), 1, "先翻到第 2 页");
+    let style = view.read_with(cx, |v, _| v.turn.map(|turn| turn.style));
+    assert_eq!(
+        style,
+        Some(PageTurn::Slide),
+        "定版式把折页换成平移，而不是去卷一张位图"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_some()),
+        "这一趟该真的在走"
+    );
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .expect("定版式翻页那一帧该画得出来");
 }
 
 /// 拖过 `TITLE` 那五个字：选区成立、复制到手的是那一串、划下去真进了库，
@@ -5891,7 +6222,7 @@ fn a_pdf_page_selects_copies_marks_and_points_back(cx: &mut TestAppContext) {
     );
     // 第二页也有文字层（一本真书不会只有首页读得出字），那一格该重新量出来。
     assert!(
-        view.read_with(cx, |v, _| v.fixed_text_box.get().is_some()),
+        view.read_with(cx, |v, _| !v.fixed_text_boxes.borrow().is_empty()),
         "换页之后那一格要重新记上，否则新一页选不中"
     );
     let second = pdf_char(&view, cx, 0, 0.25);
@@ -5930,7 +6261,7 @@ fn a_pdf_page_without_a_text_layer_selects_nothing(cx: &mut TestAppContext) {
         "没有字的一页不该成立选区"
     );
     assert!(
-        view.read_with(cx, |v, _| v.fixed_text_box.get().is_none()),
+        view.read_with(cx, |v, _| v.fixed_text_boxes.borrow().is_empty()),
         "没有文字层的那一页不该记下那一格"
     );
 }

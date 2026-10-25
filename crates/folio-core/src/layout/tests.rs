@@ -9,9 +9,9 @@ use crate::content::format::css::computed::{
 use crate::content::format::css::{Origin, RuleSet};
 use crate::layout::wrap::collect;
 use crate::layout::{
-    BlockBox, BlockCache, FontKey, ImageProvider, Layout, LayoutCache, LayoutKey, LayoutOptions,
-    LineFragment, LineMetrics, METRICS_REV, Measure, NoImages, ResolvedImage, RunStyle, StyleArena,
-    layout, layout_cached, layout_with_blocks, measure_chapter, render_window,
+    BlockBox, BlockCache, FontKey, ImageProvider, Layout, LayoutKey, LayoutOptions, LineFragment,
+    LineMetrics, Measure, NoImages, ResolvedImage, RunStyle, StyleArena, layout,
+    layout_with_blocks,
 };
 
 /// 断行规则：空格后优先，CJK 逐字可断（硬断）。
@@ -467,45 +467,6 @@ fn negative_vertical_margins_collapse_by_the_css_rule() {
         gap("p { margin: 0 } .a { margin-bottom: 12px } .b { margin-top: 20px }"),
         20.0,
         "两个正数仍取较大，不相加"
-    );
-}
-
-/// 只量高的那张表（`measure_chapter` → `children_light`）必须跟实排同一条式子。
-///
-/// 两条路各写一套边距的话，症状不是「哪儿偏了」而是滚动位置与块对不上 —— 所以
-/// 这里钉的是同一组数，而不是「两边都别是 0」。
-#[test]
-fn the_light_measure_folds_negative_margins_like_the_real_layout() {
-    let html = "<p class=a>甲</p><p class=b>乙</p>";
-    let css = "p { margin: 0 } .a { margin-bottom: -10px; margin-left: -20px } \
-               .b { margin-top: 20px }";
-    let dom = Dom::parse(html.as_bytes());
-    let styles = cascade(
-        &dom,
-        &RuleSet::parse(css, Origin::Author),
-        &ComputedStyle::default(),
-        "",
-    );
-    let map = measure_chapter(
-        &dom,
-        &styles,
-        find(&dom, "body"),
-        LayoutOptions {
-            width: 200.0,
-            light: true,
-            allow_vertical: false,
-            page_height: None,
-        },
-        &Mono,
-        &NoImages,
-    );
-    assert!(map.simple, "两段纯块该走得动轻量那条路");
-    assert_eq!(map.units.len(), 2);
-    assert_eq!(map.units[0].x, -20.0, "轻量表也要把负左边距算进 x");
-    assert_eq!(
-        map.units[1].y - (map.units[0].y + map.units[0].height),
-        10.0,
-        "与实排同一档折叠：正 20 + 负 10"
     );
 }
 
@@ -2079,86 +2040,6 @@ fn light_mode_height_matches_full_within_tolerance() {
     );
 }
 
-// ---- 两阶段排版 ----
-
-/// 语料：30 段纯汉字，段长递增（40..=69），字号整除版心 → 轻量估高与真实折行逐字对上。
-fn two_stage_corpus() -> (Dom, NodeId, LayoutOptions) {
-    let html: String = (0..30)
-        .map(|i| format!("<p>{}</p>", "文".repeat(40 + i)))
-        .collect();
-    let dom = Dom::parse(html.as_bytes());
-    let body = dom
-        .elements()
-        .find(|(id, _)| dom.tag_name(*id) == Some("body"))
-        .map(|(id, _)| id)
-        .unwrap_or(dom.document);
-    (
-        dom,
-        body,
-        LayoutOptions {
-            width: 320.0,
-            light: false,
-            allow_vertical: false,
-            page_height: None,
-        },
-    )
-}
-
-/// `measure_chapter` 的高、以及整窗口 `render_window` 的行，都应与一次性完整排版一致。
-#[test]
-fn two_stage_matches_full_layout() {
-    let (dom, body, opts) = two_stage_corpus();
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
-
-    let full = layout(&dom, &styles, body, opts, &Mono, &NoImages);
-    let map = measure_chapter(&dom, &styles, body, opts, &Mono, &NoImages);
-    assert!(
-        (map.height - full.height).abs() < 0.5,
-        "轻量估高应与完整排版一致：light={} full={}",
-        map.height,
-        full.height
-    );
-
-    let all = render_window(&map, &dom, &styles, &Mono, &NoImages, 0.0, map.height + 1.0);
-    assert_eq!(
-        all.lines.len(),
-        full.lines.len(),
-        "整窗口的行数应与完整排版一致"
-    );
-    for (a, b) in all.lines.iter().zip(&full.lines) {
-        assert_eq!((a.x, a.y, a.width, a.height), (b.x, b.y, b.width, b.height));
-    }
-}
-
-/// `render_window` 只排可见窗口：行是完整排版里对应那一段的**原样**，且远少于整章。
-#[test]
-fn render_window_only_covers_the_visible_blocks() {
-    let (dom, body, opts) = two_stage_corpus();
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
-    let full = layout(&dom, &styles, body, opts, &Mono, &NoImages);
-    let map = measure_chapter(&dom, &styles, body, opts, &Mono, &NoImages);
-
-    let from = map.height * 0.5;
-    let win = render_window(&map, &dom, &styles, &Mono, &NoImages, from, from + 200.0);
-    assert!(!win.lines.is_empty(), "窗口里该有行");
-    assert!(win.lines.len() < full.lines.len(), "窗口的行应远少于整章");
-
-    // 窗口的首行能在完整排版里找到；其后应与完整排版逐行一致（锚定后 y 不变）。
-    let base = full
-        .lines
-        .iter()
-        .position(|l| (l.y - win.lines[0].y).abs() < 0.01)
-        .expect("窗口首行应出现在完整排版里");
-    assert!(base + win.lines.len() <= full.lines.len());
-    for (k, wl) in win.lines.iter().enumerate() {
-        let fl = &full.lines[base + k];
-        assert_eq!(
-            (wl.x, wl.y, wl.width, wl.height),
-            (fl.x, fl.y, fl.width, fl.height)
-        );
-    }
-}
-
 // ---- StyleArena ----
 
 /// 相同的样式只占一格 —— 这是去重存在的理由。
@@ -2280,7 +2161,7 @@ fn the_batch_width_matches_per_char_measurement() {
 
 // ---- 缓存与失效键 ----
 //
-// 那一大片（`LayoutKey` / `LayoutCache` / `BlockCache`）挪到了同目录的 `tests/cache.rs`：
+// 那一大片（`LayoutKey` / `BlockCache`）挪到了同目录的 `tests/cache.rs`：
 // 三块连着写一份文件读不完，而它们钉的是同一件事——「输入没变就别重算」。
 mod cache;
 // 排版结果上两张索引（行 → 块、按推进轴二分）与接线前线性扫的逐行对照。

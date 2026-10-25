@@ -715,14 +715,16 @@ impl ReaderSession {
 
     /// 屏幕点 → `(哪一页, 那一页字序里的插入点)`。
     ///
-    /// 尺只有两把：那一格的页这一帧摆在版心里哪一块（[`ReaderSession::fixed_text_box`]，
+    /// 尺只有两把：那一格的页这一帧摆在版心里哪一块（[`ReaderSession::fixed_text_boxes`]，
     /// 由定版式那一臂每帧写入），以及那一页自己的可见框多大（`PageText` 带着）。
     /// 两把尺之间只差一个等比缩放，所以这里不做「猜比例」那一类兜底：量不出比例
     /// 就是这一页选不出字，而不是把色块画到别处。
     fn fixed_offset_at(&self, book: &FixedBook, at: Point<Pixels>) -> Option<(usize, usize)> {
-        let (page, box_) = self.fixed_text_box.get()?;
+        let boxes = self.fixed_text_boxes.borrow();
+        let local = at - self.content_bounds.get().origin;
+        let (page, box_) = *boxes.iter().find(|(_, box_)| box_.contains(&local))?;
         let text = book.page_text(page)?;
-        let (x, y) = page_units(&text, box_, at - self.content_bounds.get().origin)?;
+        let (x, y) = page_units(&text, box_, local)?;
         text.hit(x, y).map(|index| (page, index))
     }
 

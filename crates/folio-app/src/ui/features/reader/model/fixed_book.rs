@@ -11,9 +11,10 @@
 //! 位置坐标与可重排共用 [`folio_core::Locator`]：定版式里 `chapter` 就是**页号**、
 //! `offset` 恒为 0（`LocatorKind::Page` 那条口径，见 `content::document`）。
 
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -60,13 +61,159 @@ pub struct PageTile {
     pub renders: bool,
 }
 
-/// 那一格按页的文字层备忘：`(哪一页, 那一页的字层, 那一份串的哈希)`。
+/// 文字层备忘的一条：`(哪一页, 那一页的字层, 那一份串的哈希)`。
 ///
 /// 内层是 `Option`，因为「这一页没有字」也是一份**答案**，而它必须被记下来 —— 不记的
-/// 那一版每帧都回引擎重开一次容器（一份扫描版 PDF 实测重开一趟 61–374 ms）。外层 `None`
-/// 才是「还没问过」。类型收成这一个名字是因为 `RefCell<Option<(usize, Option<Rc<..>>, u64)>>`
-/// 那种写法读起来像一叠括号，而这几层每一层都有含义。
-type PageTextMemo = Option<(usize, Option<Rc<PageText>>, u64)>;
+/// 那一版每帧都回引擎重开一次容器（一份扫描版 PDF 实测重开一趟 61–374 ms）。
+type PageTextMemo = (usize, Option<Rc<PageText>>, u64);
+
+/// 文字层备忘能留几页。
+///
+/// 分页时屏上只有一页，从前只留一格。连续竖滚里屏上常常同时有一页半 —— 上游那一条
+/// 还在视口里露着、下一条已经进来 —— 只留一格就会在两页之间每帧来回重开容器
+/// （PDF 一页 61–374 ms）。四格足够盖住一次翻页前后看得见的那几张，又不会把整本书
+/// 的字层攒在内存里。
+const PAGE_TEXT_CACHE: usize = 4;
+
+/// 定版式的纵向页栈：在**某个版心宽**下，每页多高、从哪开始、整本多高。
+///
+/// 连续竖滚把它当成一条拼接链读：`scroll_y` 是栈上的像素，页号只是「视口里占得最多的
+/// 那一页」的读数。与可重排那一族的章基线同一个角色，只是这里不必排版 —— 页的宽高比
+/// 在页表里。
+#[derive(Clone, Debug, Default)]
+pub(in crate::ui::features::reader) struct FixedStack {
+    /// 建这条栈时的版心宽与页缝。宽度变了整条作废（见 [`FixedBook::ensure_stack`]）。
+    width: f32,
+    gap: f32,
+    /// 每页的高度与顶边（栈坐标，第一页顶边是 0）。
+    heights: Vec<f32>,
+    tops: Vec<f32>,
+    /// 最后一页底边，也就是整条栈的总高。
+    total: f32,
+}
+
+impl FixedStack {
+    /// 按页表建一条栈。`fallback_aspect` 给「页表没说宽高」的那几格兜底：
+    /// 用版心宽除以视口高，退化成一个铺满视口的页，而不是零面积。
+    fn build(pages: &[FixedPage], width: f32, gap: f32, fallback_aspect: f32) -> Self {
+        let width = width.max(1.0);
+        let fallback = if fallback_aspect > 0.0 {
+            fallback_aspect
+        } else {
+            1.0
+        };
+        let mut heights = Vec::with_capacity(pages.len());
+        let mut tops = Vec::with_capacity(pages.len());
+        let mut y = 0.0;
+        for (index, page) in pages.iter().enumerate() {
+            if index > 0 {
+                y += gap.max(0.0);
+            }
+            let aspect = page
+                .extra_images
+                .iter()
+                .fold(aspect(page.width, page.height, fallback), |sum, image| {
+                    sum + aspect(image.width, image.height, fallback)
+                });
+            let height = (width / aspect.max(0.001)).max(1.0);
+            tops.push(y);
+            heights.push(height);
+            y += height;
+        }
+        Self {
+            width,
+            gap: gap.max(0.0),
+            heights,
+            tops,
+            total: y,
+        }
+    }
+
+    pub(in crate::ui::features::reader) fn len(&self) -> usize {
+        self.tops.len()
+    }
+
+    pub(in crate::ui::features::reader) fn is_empty(&self) -> bool {
+        self.tops.is_empty()
+    }
+
+    pub(in crate::ui::features::reader) fn total(&self) -> f32 {
+        self.total
+    }
+
+    pub(in crate::ui::features::reader) fn height_of(&self, page: usize) -> Option<f32> {
+        self.heights.get(page).copied()
+    }
+
+    pub(in crate::ui::features::reader) fn top_of(&self, page: usize) -> Option<f32> {
+        self.tops.get(page).copied()
+    }
+
+    /// 栈坐标 `y` 落在哪一页。落在页缝里时按「离哪一页更近」归给前/后一页 —— 页缝
+    /// 只是视觉上的呼吸，不该让页号在正中间空出一个「没有页」的区间。
+    pub(in crate::ui::features::reader) fn page_at_y(&self, y: f32) -> Option<usize> {
+        if self.is_empty() {
+            return None;
+        }
+        let y = y.max(0.0);
+        let index = self
+            .tops
+            .partition_point(|top| *top <= y)
+            .saturating_sub(1)
+            .min(self.len() - 1);
+        let bottom = self.tops[index] + self.heights[index];
+        if y >= bottom + self.gap * 0.5 && index + 1 < self.len() {
+            Some(index + 1)
+        } else {
+            Some(index)
+        }
+    }
+
+    /// 栈坐标 `y` 在它那一页里的比例（0..1）。宽度变化后按它把位置搬回新栈。
+    pub(in crate::ui::features::reader) fn page_and_fraction(
+        &self,
+        y: f32,
+    ) -> Option<(usize, f32)> {
+        let page = self.page_at_y(y)?;
+        let top = self.tops[page];
+        let height = self.heights[page];
+        let fraction = if height > 0.0 {
+            ((y.max(0.0) - top) / height).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Some((page, fraction))
+    }
+
+    /// 视口 `[top, top + viewport)` 盖到的页区间。
+    ///
+    /// 起点要往回收一页：`page_at_y` 在页缝里会归给下一页，而上一页的末尾还露在视口里。
+    /// 长页可以比视口高得多，所以不能假设「一屏最多两页」—— 只能按顶边扫到视口底。
+    pub(in crate::ui::features::reader) fn visible(&self, top: f32, viewport: f32) -> Range<usize> {
+        if self.is_empty() {
+            return 0..0;
+        }
+        let first = self.page_at_y(top).unwrap_or(0);
+        let mut start = first;
+        while start > 0 && self.tops[start] > top {
+            start -= 1;
+        }
+        let bottom = top + viewport.max(0.0);
+        let mut end = start;
+        while end < self.len() && self.tops[end] < bottom {
+            end += 1;
+        }
+        start..end
+    }
+}
+
+fn aspect(width: u32, height: u32, fallback: f32) -> f32 {
+    if width == 0 || height == 0 {
+        fallback
+    } else {
+        width as f32 / height as f32
+    }
+}
 
 /// 一本打开着的定版式书。
 pub struct FixedBook {
@@ -79,24 +226,25 @@ pub struct FixedBook {
     /// 留住文档：字节要按 `href` 现取，渲染型的页要按页号现画，只有它知道容器怎么开。
     doc: Arc<dyn OpenedDocument>,
     page: usize,
-    /// 那一页的文字层（选中、色块、批注回显都问它），连同它属于第几页与那一份串的哈希。
+    /// 最近问过的几页文字层（选中、色块、批注回显都问它），连同页号与那份串的哈希。
     ///
     /// **必须留一份备忘**：`Document::page_text` 那一头每次问都要重开一次容器 —— PDF
     /// 实测一份 3.6 MB、45 页的书重开一趟 374 ms（`format::pdf` 模块头那笔账）。
     /// 而选中这一套在一帧里要问好几趟（命中、吸词、色块、落批注、回显），手指拖着走
     /// 就是每来一个事件一趟。一页的字层只有一副样子，重开第二次买不到任何新信息。
     ///
-    /// 只留**一页**而不是整本：这与 core 那边「文字层不入库、按页现取」是同一条立场
-    /// （`format::provider::DocumentProvider::page_text` 写的理由），一次阅读真正用得上
-    /// 的就是看得着的那一两页。翻页之后第一次长按会重付一次取字层，那一趟不在绘制
-    /// 热路径上，也不在读者手底下连发的第二、第三帧上。
+    /// 只留最近几页而不是整本：这与 core 那边「文字层不入库、按页现取」是同一条立场
+    /// （`format::provider::DocumentProvider::page_text` 写的理由）。连续竖滚里视口
+    /// 可能同时压着两页，所以容量见 [`PAGE_TEXT_CACHE`]；翻走之后第一次回来会重付一趟，
+    /// 那一趟不在绘制热路径上。
     ///
-    /// 那个哈希是**批注回显那一份缓存的键**（`annotations::resolved_for` 要一把尺问
-    /// 「这一页的字还是刚才那些字吗」）：算一次存在这里，而不是每帧把整页的字重数一遍。
-    /// 那一页的文字层（选中、色块、批注回显都问它），连同它属于第几页、那一份串、
-    /// 以及那份串的哈希。内层 `None` = **问过引擎，这一页没有字**（那也是一份答案，
-    /// 见 [`Self::cached_page_text`]）。
-    text: RefCell<PageTextMemo>,
+    /// 内层 `None` = **问过引擎，这一页没有字**（那也是一份答案，见
+    /// [`Self::cached_page_text`]）。那个哈希是**批注回显那一份缓存的键**
+    /// （`annotations::resolved_for` 要一把尺问「这一页的字还是刚才那些字吗」）：
+    /// 算一次存在这里，而不是每帧把整页的字重数一遍。
+    text: RefCell<Vec<PageTextMemo>>,
+    /// 连续竖滚的页栈。`None` = 还没量到版心宽，或者这本书此刻走的是整页翻。
+    stack: RefCell<Option<FixedStack>>,
 }
 
 impl FixedBook {
@@ -117,7 +265,8 @@ impl FixedBook {
             images,
             doc,
             page,
-            text: RefCell::new(None),
+            text: RefCell::new(Vec::new()),
+            stack: RefCell::new(None),
         }
     }
 
@@ -136,6 +285,72 @@ impl FixedBook {
     /// 翻到第 `page` 页（越界夹到最后一页）。
     pub fn set_page(&mut self, page: usize) {
         self.page = page.min(self.pages.len().saturating_sub(1));
+    }
+
+    /// 保证页栈按当前版心宽建好；宽度或页缝变了才重建（返回 `true`）。
+    ///
+    /// 页栈只在渲染帧里建 —— 它是「这一屏多宽」的函数，而窗口宽只有渲染帧手上有。
+    /// 事件那一头（滚轮、落页）只读已经建好的那条，读到 `None` 就什么都不做：
+    /// 第一帧还没画出来时本来也没有可滚的像素。
+    pub(in crate::ui::features::reader) fn ensure_stack(
+        &self,
+        width: f32,
+        gap: f32,
+        fallback_aspect: f32,
+    ) -> bool {
+        let mut slot = self.stack.borrow_mut();
+        if let Some(stack) = slot.as_ref()
+            && (stack.width - width).abs() < 0.5
+            && (stack.gap - gap).abs() < 0.5
+        {
+            return false;
+        }
+        *slot = Some(FixedStack::build(&self.pages, width, gap, fallback_aspect));
+        true
+    }
+
+    /// 这一帧的页栈。还没建过（第一帧、整页翻那一档）时 `None`。
+    pub(in crate::ui::features::reader) fn stack(&self) -> Option<Ref<'_, FixedStack>> {
+        let stack = self.stack.borrow();
+        Ref::filter_map(stack, Option::as_ref).ok()
+    }
+
+    /// 第 `page` 页在栈上的顶边。页栈还没建时 `None`。
+    pub(in crate::ui::features::reader) fn stack_top_of(&self, page: usize) -> Option<f32> {
+        self.stack()?.top_of(page)
+    }
+
+    /// 连续竖滚里「读者读到第几页」：**视口里占得最多**的那一页。
+    ///
+    /// 为什么不是「视口顶那一页」：最后一页常常比一屏矮，页首永远滚不到视口顶 ——
+    /// 只按顶边算，读者已经看到全书末尾，页号与进度却停在倒数第二页；而在书尾往回
+    /// 滚，页号又会在第一个像素上从末页跳回上一页。按可见面积取最大，换页落在两页
+    /// 各露一半的位置，页脚与进度的读数跟屏上看到的一致。
+    ///
+    /// 面积相等时归前面那一页；整本一屏装得下时因此仍从第 0 页读起。
+    pub(in crate::ui::features::reader) fn page_at_scroll(
+        &self,
+        y: f32,
+        viewport: f32,
+    ) -> Option<usize> {
+        let stack = self.stack()?;
+        if stack.is_empty() {
+            return None;
+        }
+        let top = y.max(0.0);
+        let bottom = top + viewport.max(1.0);
+        let mut best = None;
+        let mut best_overlap = 0.0;
+        for page in stack.visible(top, viewport) {
+            let page_top = stack.top_of(page)?;
+            let page_bottom = page_top + stack.height_of(page)?;
+            let overlap = page_bottom.min(bottom) - page_top.max(top);
+            if overlap > best_overlap + 0.5 {
+                best = Some(page);
+                best_overlap = overlap;
+            }
+        }
+        best.or_else(|| stack.page_at_y(top))
     }
 
     /// 按 href 取这张图的活儿（多图页逐张取）。索引里没有这条路径才给 `None`。
@@ -263,20 +478,23 @@ impl FixedBook {
         self.cached_page_text(page).map(|(_, hash)| hash)
     }
 
-    /// 备忘的那一格本身：命中就直接给，换了页才回引擎取一次。
+    /// 备忘的那几页本身：命中就直接给，没问过才回引擎取一次。
     ///
     /// **「这一页没有字」也要记下来**。不记的话那一族每帧都回引擎重开一次容器：一份
     /// 扫描版 PDF 实测重开一趟 61–374 ms（`format::pdf` 模块头那笔账），画十帧就是半秒，
     /// 而那本书本来一个字也选不中、屏上什么都不该变 —— 付的完全是冤枉钱。缓存里那一格
     /// 因此是 `Option`：`None` 是一份**答案**，不是「还没问过」。
+    ///
+    /// 留 [`PAGE_TEXT_CACHE`] 页而不是一页：连续竖滚里视口同时压着两页时，一页的缓存
+    /// 会让两页每帧互相挤掉对方。命中把那一页挪到末尾，淘汰只从最旧那一头收。
     fn cached_page_text(&self, page: usize) -> Option<(Rc<PageText>, u64)> {
-        let cached = self.text.borrow();
-        if let Some((at, text, hash)) = cached.as_ref()
-            && *at == page
-        {
-            return text.as_ref().map(|text| (text.clone(), *hash));
+        let mut cache = self.text.borrow_mut();
+        if let Some(index) = cache.iter().position(|(at, _, _)| *at == page) {
+            let entry = cache.remove(index);
+            let out = entry.1.as_ref().map(|text| (text.clone(), entry.2));
+            cache.push(entry);
+            return out;
         }
-        drop(cached);
         let (text, hash) = match self.doc.page_text(page) {
             Some(taken) => {
                 let hash = page_text_hash(&taken);
@@ -286,7 +504,10 @@ impl FixedBook {
             // 所以那个数在这一档没有读者。
             None => (None, 0),
         };
-        *self.text.borrow_mut() = Some((page, text.clone(), hash));
+        cache.push((page, text.clone(), hash));
+        if cache.len() > PAGE_TEXT_CACHE {
+            cache.remove(0);
+        }
         text.map(|text| (text, hash))
     }
 
@@ -377,7 +598,7 @@ mod tests {
         PageText,
     };
 
-    use super::FixedBook;
+    use super::{FixedBook, PAGE_TEXT_CACHE};
 
     fn book_with(pages: Vec<FixedPage>) -> FixedBook {
         let fixed = FixedDoc {
@@ -840,20 +1061,147 @@ mod tests {
             2,
             "同一页上问键不该再回引擎"
         );
-        // 换页才重取：只留**一页**是刻意的（与 core 那边「文字层不入库、按页现取」
-        // 同一条立场），翻回第 0 页就是第三趟 —— 那是那份立场明码标出的代价，
-        // 不是一处漏缓存。换回去之后同一页再问，仍然拿备忘。
+        // 连续竖滚里两页同时在屏：前一页的字层不能被后一页挤掉，回问仍然拿备忘。
         assert!(
             book.page_text_key(0).is_some(),
             "有字的那一页该给得出缓存的键"
         );
-        assert_eq!(doc.asks.lock().unwrap().len(), 3, "换页才重取一趟");
-        assert!(book.page_text(0).is_some());
         assert_eq!(
             doc.asks.lock().unwrap().len(),
-            3,
-            "回到同一页的第二次问还是拿备忘"
+            2,
+            "两页同时在屏时不该来回重开容器"
         );
+        // 容量是 [`PAGE_TEXT_CACHE`]：多翻几页之后，最旧的那一页才被淘汰。
+        for page in 2..PAGE_TEXT_CACHE {
+            assert!(book.page_text(page).is_none(), "第 {page} 页没字");
+        }
+        let asked = doc.asks.lock().unwrap().len();
+        assert!(book.page_text(0).is_some(), "四格之内的页还留着");
+        assert_eq!(
+            doc.asks.lock().unwrap().len(),
+            asked,
+            "四格之内的页不该被挤出去"
+        );
+        // 第 0 页刚被问过键、排在最新一头：再翻满一整格才不会把它挤出去。
+        for page in PAGE_TEXT_CACHE..PAGE_TEXT_CACHE * 2 {
+            assert!(book.page_text(page).is_none(), "第 {page} 页没字");
+        }
+        let asked = doc.asks.lock().unwrap().len();
+        assert!(book.page_text(0).is_some(), "被挤出去的那页要回引擎重取");
+        assert_eq!(doc.asks.lock().unwrap().len(), asked + 1);
+    }
+
+    /// 连续竖滚的页栈：页高按版心宽与页面宽高比算，页缝只占位置、不算进页高；
+    /// 视口顶落在哪一页、视口盖住哪几页、宽度变了怎么把位置搬回去，都从这一条栈读。
+    #[test]
+    fn the_fixed_stack_lays_pages_out_by_width_and_maps_y_back_to_pages() {
+        let book = book_with(vec![
+            FixedPage {
+                source: PageSource::Image {
+                    href: "tall.png".into(),
+                },
+                width: 100,
+                height: 200,
+                extra_images: Vec::new(),
+            },
+            FixedPage {
+                source: PageSource::Image {
+                    href: "wide.png".into(),
+                },
+                width: 200,
+                height: 100,
+                extra_images: Vec::new(),
+            },
+            FixedPage {
+                source: PageSource::Image {
+                    href: "square.png".into(),
+                },
+                width: 100,
+                height: 100,
+                extra_images: Vec::new(),
+            },
+        ]);
+        assert!(book.ensure_stack(300.0, 10.0, 0.5), "第一次要建栈");
+        assert!(!book.ensure_stack(300.0, 10.0, 0.5), "同一把尺不重建");
+        assert!(book.ensure_stack(200.0, 10.0, 0.5), "宽度变了要重建");
+        assert!(book.ensure_stack(300.0, 10.0, 0.5), "搬回去也要重建");
+
+        let stack = book.stack().expect("刚建过");
+        assert_eq!(stack.len(), 3);
+        assert_eq!(stack.height_of(0), Some(600.0), "300 宽 ÷ 0.5 = 600 高");
+        assert_eq!(stack.height_of(1), Some(150.0));
+        assert_eq!(stack.height_of(2), Some(300.0));
+        assert_eq!(stack.top_of(1), Some(610.0), "页缝 10");
+        assert_eq!(stack.top_of(2), Some(770.0));
+        assert_eq!(stack.total(), 1070.0);
+        assert_eq!(book.stack_top_of(1), Some(610.0));
+
+        // 视口顶：页内归本页，页缝一半以前归上一页、之后归下一页。
+        assert_eq!(stack.page_at_y(0.0), Some(0));
+        assert_eq!(stack.page_at_y(604.0), Some(0));
+        assert_eq!(stack.page_at_y(606.0), Some(1));
+        assert_eq!(stack.page_at_y(650.0), Some(1));
+        assert_eq!(stack.page_at_y(5000.0), Some(2), "越过书尾夹在最后一页");
+        assert_eq!(stack.page_and_fraction(300.0), Some((0, 0.5)));
+        assert_eq!(
+            stack.page_and_fraction(610.0),
+            Some((1, 0.0)),
+            "页缝里归下一页时从页首算"
+        );
+
+        // 视口盖住的页：长页可以一页占满一屏，起点要能收到上一页。
+        assert_eq!(stack.visible(0.0, 700.0), 0..2);
+        assert_eq!(stack.visible(600.0, 700.0), 0..3);
+        assert_eq!(stack.visible(770.0, 100.0), 2..3);
+        assert_eq!(stack.visible(1070.0, 100.0), 2..3, "滚到底仍停在最后一页");
+    }
+
+    /// 整本装得下一屏时没有「滚到底」：页号仍按视口顶读，不从第一页直接跳成最后一页。
+    #[test]
+    fn a_book_that_fits_one_screen_keeps_reading_from_the_top_page() {
+        let book = book_with(vec![
+            FixedPage {
+                source: PageSource::Image {
+                    href: "a.png".into(),
+                },
+                width: 100,
+                height: 100,
+                extra_images: Vec::new(),
+            },
+            FixedPage {
+                source: PageSource::Image {
+                    href: "b.png".into(),
+                },
+                width: 100,
+                height: 100,
+                extra_images: Vec::new(),
+            },
+        ]);
+        book.ensure_stack(100.0, 12.0, 0.5);
+        let stack = book.stack().expect("该有栈");
+        assert_eq!(stack.total(), 212.0, "两页加一条缝");
+        assert_eq!(
+            book.page_at_scroll(0.0, 800.0),
+            Some(0),
+            "一屏装得下时，视口顶是第 0 页"
+        );
+    }
+
+    /// 页表没说宽高的那几格按视口比例兜底：整页铺满宽，而不是零面积。
+    #[test]
+    fn an_unknown_page_size_falls_back_to_the_viewport_aspect() {
+        let book = book_with(vec![FixedPage {
+            source: PageSource::Image {
+                href: "unknown.png".into(),
+            },
+            width: 0,
+            height: 0,
+            extra_images: Vec::new(),
+        }]);
+        book.ensure_stack(400.0, 12.0, 400.0 / 800.0);
+        let stack = book.stack().expect("该有栈");
+        assert_eq!(stack.height_of(0), Some(800.0), "兜底成一屏高");
+        assert_eq!(stack.total(), 800.0);
     }
 
     /// 底栏那颗「放大整页」用的身份：**当前在读的那一页**那一格，而不是第一格。

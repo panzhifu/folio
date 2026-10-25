@@ -1,4 +1,4 @@
-//! 增量排版的缓存与键：整章的 `LayoutCache`、块级的 `BlockCache`，以及 DOM 内容哈希。
+//! 增量排版的缓存与键：块级的 `BlockCache`，以及给块键用的子树样式哈希。
 //!
 //! 从 `layout` 主模块切出来只为了一个文件能一次读完；跨文件的条目用
 //! `pub(super)`，即**只对 `layout` 内部开放**，不属于对外公开面。
@@ -9,69 +9,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use super::collect::DEFAULT_STYLE;
-use super::geometry::{BlockBox, Layout, LayoutOptions, LineBox};
-use super::key::LayoutKey;
-use super::layout;
-use super::ports::{ImageProvider, Measure};
+use super::geometry::{BlockBox, LineBox};
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::StyledDom;
-
-/// 排版结果缓存 —— 「输入一模一样就什么都不用算」那一层，对应 KOReader 的
-/// `checkRenderContext()`。
-///
-/// 键就是 [`LayoutKey`]（外加 `light` 那一档：轻量排版只算高、不产行盒，与完整排版
-/// 是两个产物）。它与 [`BlockCache`] 互补：这一层问「整章要不要重排」，那一级问
-/// 「这一块要不要重排」。
-pub struct LayoutCache {
-    cached: Option<CacheEntry>,
-}
-
-struct CacheEntry {
-    key: LayoutKey,
-    /// 轻量 / 完整：同一把键下两份产物不能互用。
-    light: bool,
-    layout: Layout,
-}
-
-impl LayoutCache {
-    pub fn new() -> Self {
-        Self { cached: None }
-    }
-
-    /// 检查缓存是否存在（不返回引用，避免借用冲突）。
-    pub fn has(&self, key: &LayoutKey, light: bool) -> bool {
-        self.cached
-            .as_ref()
-            .is_some_and(|entry| entry.key == *key && entry.light == light)
-    }
-
-    /// 取缓存。键不变时直接复用。
-    pub fn get(&self, key: &LayoutKey, light: bool) -> Option<&Layout> {
-        self.cached.as_ref().and_then(|entry| {
-            if entry.key == *key && entry.light == light {
-                Some(&entry.layout)
-            } else {
-                None
-            }
-        })
-    }
-
-    /// 存缓存。
-    pub fn put(&mut self, key: LayoutKey, light: bool, layout: Layout) {
-        self.cached = Some(CacheEntry { key, light, layout });
-    }
-
-    /// 失效（换章、改样式时调用）。
-    pub fn invalidate(&mut self) {
-        self.cached = None;
-    }
-}
-
-impl Default for LayoutCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// 块级排版缓存的键：**块节点 + 该块子树的样式哈希 + 宽度**。
 ///
@@ -129,8 +69,7 @@ pub(super) struct CachedBlock {
 
 /// 块级排版缓存。对应 KOReader 的 `_renderedBlockCache`。
 ///
-/// 与整章粒度的 [`LayoutCache`] 互补：整章缓存「什么都变了就全重排」，这一层
-/// 「只有某些块的样式变了就只重排那些块」。批注高亮（改一个块的样式）就是它的主场。
+/// 批注高亮（改一个块的样式）就是它的主场：只有某些块的样式变了，就只重排那些块。
 ///
 /// **默认不限容量**（换章时 [`clear`](Self::clear) 整清，所以上限就是一章的块数）。
 /// 这里刻意不照搬 KOReader 的「256 条 LRU」：一次整章重排是**顺序扫过所有块**，只要
@@ -142,7 +81,7 @@ pub struct BlockCache {
     order: VecDeque<BlockKey>,
     /// `None` = 不限容量。
     cap: Option<usize>,
-    /// 这份缓存是为哪个**复用范围**建的（[`LayoutKey::context_rev`]）；对不上就整清。
+    /// 这份缓存是为哪个**复用范围**建的（[`LayoutKey::context_rev`](super::LayoutKey::context_rev)）；对不上就整清。
     /// 复用范围 = 章文本 + 图片索引 + 字体集 + 度量版本，见 [`BlockKey`] 的说明。
     context: Option<u64>,
     /// 命中 / 未命中次数，测试与基准用来核对「只重排了一块」。
@@ -276,26 +215,4 @@ pub(super) fn subtree_style_hash(dom: &Dom, styles: &StyledDom) -> Vec<u64> {
         out[node as usize] = hasher.finish();
     }
     out
-}
-
-/// 带缓存的排版入口：整章粒度的「输入没变就什么都不算」。
-///
-/// 键是传进来的 [`LayoutKey`]，不是这里现算的几个哈希 —— 各级缓存共用同一把键，
-/// 才不会出现「块缓存认为没变、整章缓存认为变了」那种两处各答一遍的漂。
-#[allow(clippy::too_many_arguments)]
-pub fn layout_cached<'a>(
-    cache: &'a mut LayoutCache,
-    key: &LayoutKey,
-    dom: &Dom,
-    styles: &StyledDom,
-    root: NodeId,
-    options: LayoutOptions,
-    measure: &dyn Measure,
-    images: &dyn ImageProvider,
-) -> &'a Layout {
-    if !cache.has(key, options.light) {
-        let layout = layout(dom, styles, root, options, measure, images);
-        cache.put(*key, options.light, layout);
-    }
-    cache.get(key, options.light).expect("just put")
 }

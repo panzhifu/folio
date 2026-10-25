@@ -27,6 +27,10 @@ account = "アカウント"
 [reader]
 empty_hint = "左の棚から本を選ぶか、サイドバー上部の「本を追加」から追加してください"
 no_book = "開いている本がありません"
+# 読書設定カード上部の三つのセクション。
+tab_appearance = "外観"
+tab_font = "フォント"
+tab_layout = "組版"
 chapter_position = "第%{index} / %{total} 節"
 prev_chapter = "前の章"
 next_chapter = "次の章"

@@ -66,6 +66,7 @@ Linux 需要 fontconfig / Wayland / xkbcommon 开发包与可用 Vulkan 驱动�
 | `grill-me` | `mattpocock/skills` | grilling 的入口，只负责把它调起来 |
 | `refactoring-ui` | `s0xDk/refactoring-ui-skill` | Refactoring UI 那套具体规则：受限的间距/字号/颜色/阴影阶、靠 weight 与 color 做层次、靠模拟光照做深度 |
 | `oil-ui` | `oil-oil/oil-ui` | 设计方向探索与评审：出多风格同屏对比页、按真实截图打磨层级。**会驱动 agent 跑脚本**，见下 |
+| `scrcpy-android` | 本仓库（`sourceType: local`） | 用 scrcpy 虚拟显示在 Android 上截图 / 点击 / 滑动 / 录像，不占用手机主屏 |
 
 三条设计类技能在「间距阶、颜色、层次」上**重叠**：动 GPUI 界面时仍以
 `gpui-kit-design-guides` 为准（那是本仓库依赖的框架规范），另两条只作通用设计原则的补充。

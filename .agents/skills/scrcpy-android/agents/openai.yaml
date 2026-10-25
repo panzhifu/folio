@@ -1,0 +1,3 @@
+interface:
+  display_name: "Scrcpy Android"
+  short_description: "Drive an Android app on a scrcpy virtual display"

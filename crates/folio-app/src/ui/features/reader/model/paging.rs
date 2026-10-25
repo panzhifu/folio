@@ -6,7 +6,7 @@
 use folio_core::{Locator, PageTurn};
 use gpui_kit::{App, Context, ScrollDelta, ScrollWheelEvent};
 
-use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
+use crate::ui::features::reader::model::chrome::{Arrow, PageMode, fixed_turn_style};
 use crate::ui::features::reader::model::session::{
     PageRef, ReaderSession, Source, Turn, TurnRun, start_turn,
 };
@@ -162,9 +162,9 @@ impl ReaderSession {
             TurnPlan::Page { to } => {
                 let before = self.page();
                 self.set_page(to, cx);
-                // 定版式那一臂不播：它的「一页」是一整张图，摆图那条代码路与正文的切片
-                // 是两套（`view.rs` 的 `Source::Fixed` 臂），平移要在那边另接一处。
-                if !self.is_fixed() && self.page() != before {
+                // 定版式与流式走同一条纸面动画；折页在 `begin_turn` 里换成平移
+                // （定版式没有可卷的排版纹理）。
+                if self.page() != before {
                     let chapter = self.chapter_index();
                     self.begin_turn(
                         cx,
@@ -271,10 +271,19 @@ impl ReaderSession {
     /// 走的也是同一句。两处各写一遍，就是从前那个「第二次跨章不滑」的成因。
     pub(in crate::ui::features::reader) fn begin_turn(&mut self, cx: &App, turn: Turn) {
         let mode = self.laid_out.mode;
+        let configured = ConfigHolder::appearance(cx).page_turn;
+        // 定版式：折页换成平移（定版式没有可卷的排版纹理）。界面上那一档也已经被
+        // `fixed_turn_applies` 筛掉，这里再收一次口，配置是手改的 / 从流式那一本
+        // 带过来的也不会去卷一张位图。上下滚动是连续竖滚，走的是补间那条路。
+        let style = if self.is_fixed() {
+            fixed_turn_style(configured)
+        } else {
+            configured
+        };
         start_turn(
             &mut self.turn,
             &mut self.turn_seq,
-            ConfigHolder::appearance(cx).page_turn,
+            style,
             turn_duration(cx),
             mode,
             turn,
@@ -295,6 +304,11 @@ impl ReaderSession {
     /// 命中坐标只可能属于其中一套；让位比猜错强。
     pub(in crate::ui::features::reader) fn turn_in_flight(&self) -> bool {
         self.pending_chapter_turn.is_some()
+            // 定版式整页翻那一档的页是位图，动画期间没有 `page_shift` 那条命中补偿；
+            // 手势直接让位到这一趟走完，别拿最终位置的文字层去接一张正在滑的纸。
+            // 连续竖滚不在此列：那一趟滚的是内容本身的 y，与可重排连续滚动同一条路，
+            // 跟手与连续点按都该照常接住。
+            || (self.is_fixed() && !self.laid_out.mode.is_continuous() && self.turn.is_some())
             || self
                 .turn
                 .and_then(|turn| turn.arriving)
@@ -341,8 +355,33 @@ impl ReaderSession {
             return;
         }
         self.scroll_y = clamped;
+        // 定版式的页号是「视口里占得最多的那一页」，滚动之后要跟着改写；
+        // 可重排那一族由 `resolve_position` 当场反解，不必存第二份。
+        if self.is_fixed() {
+            self.sync_fixed_page();
+        }
         self.persist_if_moved();
         cx.notify();
+    }
+
+    /// 连续竖滚：把「视口里占得最多的那一页」写回页表。页号变了才清选中 ——
+    /// 高亮还指得上字，但那一页已经整体滚出去了。
+    fn sync_fixed_page(&mut self) {
+        let viewport = self.laid_out.viewport;
+        let Some(page) = self
+            .fixed()
+            .and_then(|book| book.page_at_scroll(self.scroll_y, viewport))
+        else {
+            return;
+        };
+        if self.page() == page {
+            return;
+        }
+        if let Some(book) = self.fixed_mut() {
+            book.set_page(page);
+        }
+        self.page = page;
+        self.clear_selection();
     }
 
     /// 翻到第 `target` 页（越界夹到最后一页）。页号变了才落库、才重画。
@@ -353,17 +392,35 @@ impl ReaderSession {
         cx: &mut Context<Self>,
     ) {
         // 定版式：页号由页表持有，翻页即改它（进度、恢复都按 `locator.chapter = 页号`）。
+        // 连续竖滚里页号只是读数，落页要同时把 `scroll_y` 摆到那一页的页首 ——
+        // 目录、进度条、图片定位都从这里走，三处因此都落在「那一页的开头」。
+        let continuous = self.laid_out.mode.is_continuous();
         let fixed = self.fixed_mut().map(|book| {
             let before = book.page();
             book.set_page(target);
-            (before, book.page(), book.page_count())
+            let now = book.page();
+            let count = book.page_count();
+            let top = continuous.then(|| book.stack_top_of(now)).flatten();
+            (before, now, count, top)
         });
-        if let Some((before, now, count)) = fixed {
-            if now == before {
-                return;
-            }
+        if let Some((before, now, count, top)) = fixed {
             self.page = now;
             self.laid_out.pages = count;
+            let mut scrolled = false;
+            if let Some(top) = top {
+                let top = top.clamp(0.0, self.max_scroll());
+                if (self.scroll_y - top).abs() >= 0.5 {
+                    self.scroll_y = top;
+                    self.scroll_painted = top;
+                    scrolled = true;
+                }
+            }
+            if now == before {
+                if scrolled {
+                    cx.notify();
+                }
+                return;
+            }
             self.clear_selection();
             self.wheel_accum = 0.0;
             self.persist_if_moved();
@@ -487,7 +544,7 @@ impl ReaderSession {
         // （位置没变就不 notify），省下的是一整帧的场景重建。
         let before = (self.scroll_y, self.page);
         let mut boundary = None;
-        if !self.is_fixed() && self.laid_out.mode.is_continuous() {
+        if self.laid_out.mode.is_continuous() {
             // 手已经在直接控制这一屏了，补间不该追在手指后面：正在走的那一趟当场落定。
             // 落定之后画出来的位置由渲染帧按「没有动画」那一条重新对齐到 `scroll_y`。
             //
@@ -496,6 +553,11 @@ impl ReaderSession {
             self.cancel_turn();
             let max = self.max_scroll();
             self.scroll_y = (self.scroll_y - dy).clamp(0.0, max);
+            // 定版式：滚动要带着页号走。可重排那一族的位置由 `resolve_position` 现解，
+            // 这里只把定版式的「视口顶那一页」写回页表。
+            if self.is_fixed() {
+                self.sync_fixed_page();
+            }
         } else {
             // 分页 / 双页 / 定版式：这里不「滚」，它翻页。两种来源分两种算法：
             //

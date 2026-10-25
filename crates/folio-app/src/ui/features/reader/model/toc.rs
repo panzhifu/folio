@@ -99,7 +99,17 @@ impl ReaderSession {
     }
 
     /// 「第几节 / 共几节」，比整本书名短得多。顶部那条章导航用它。
+    ///
+    /// 定版式没有章表，同一句读数改成「第几页 / 共几页」—— 连续竖滚与整页翻都念它。
+    /// 不这么分的话，定版式选了上下滚动之后页脚会念出一整格空白。
     pub fn chapter_position(&self, cx: &App) -> String {
+        if self.fixed().is_some() {
+            return tf(
+                cx,
+                "reader.page_position",
+                &[("index", &(self.page() + 1)), ("total", &self.page_count())],
+            );
+        }
         let Some(book) = self.book() else {
             return String::new();
         };
