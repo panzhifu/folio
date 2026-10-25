@@ -546,6 +546,13 @@ impl ReaderSession {
     /// 松手照样翻一页 —— 于是选了横向动画，竖着划也翻。现在**只有读者选的那一档那根轴
     /// 上的拖动才算翻页**，另一根轴的手势归滚动那一路（连续）或者干脆不动（分页）。
     fn claim_swipe(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) -> Claim {
+        // 浮层（顶栏底栏 / 脚注小纸片）压着的时候，跟手翻页一步不认领：工具栏露头之后
+        // 正文让位 —— 划动的语义是操作浮层或等它收走，不是翻页（与 `overlay_open` 让
+        // 长按、拖选让位是同一条读法）。连续滚动不在这一格：那一路在 `swipe_scroll`
+        // 里更早就交还给滚动层了，手指带着内容走是「读」，不是「翻」。
+        if self.overlay_open {
+            return Claim::Refused;
+        }
         if !passed(dx, dy) {
             return Claim::NotYet;
         }

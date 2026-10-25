@@ -40,6 +40,27 @@ impl ReadingPage {
         let title = self.reader.read(cx).title();
         let chapter: SharedString = self.reader.read(cx).chapter_title().into();
         let page = cx.entity().clone();
+        // 书签开关两端都在：钉的是「正在读的这一处」，与目录、设置那类入口不同类 ——
+        // 它是有状态的开关（钉着 / 没钉），所以吃 `selected`。判据在会话里
+        // （`position_bookmarked`：当前位置落在某枚书签的区间里就算钉着）。
+        let bookmarked = self.reader.read(cx).position_bookmarked();
+        let bookmark_page = cx.entity().clone();
+        let bookmark_label = tr(cx, "reader.bookmark");
+        let bookmark = Button::new("bookmark-toggle")
+            .ghost()
+            .small()
+            .selected(bookmarked)
+            .icon(if bookmarked {
+                IconName::BookmarkCheck
+            } else {
+                IconName::Bookmark
+            })
+            .tooltip(bookmark_label.clone().to_string())
+            .accessibility_label(bookmark_label)
+            .on_click(move |_, _, cx| {
+                bookmark_page.update(cx, |this, cx| this.toggle_bookmark(cx))
+            })
+            .into_any_element();
         // 宽档上目录开关长在顶栏：底栏浮层收起时读者常驻看见的是这一条，而抽屉本身
         // 也带一颗关闭 —— 开的关的两个入口都在这块屏上。
         let toggle = wide.then(|| {
@@ -68,6 +89,7 @@ impl ReadingPage {
                 page.update(cx, |this, cx| this.pop(cx));
             })
             .children(toggle)
+            .child(bookmark)
             .into_any_element()
     }
 

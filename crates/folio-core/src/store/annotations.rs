@@ -4,7 +4,7 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use super::types::{ANNOTATION_COLORS, Annotation, AnnotationStyle};
+use super::types::{ANNOTATION_COLORS, Annotation, AnnotationCard, AnnotationStyle};
 use super::{Store, now};
 use crate::Result;
 use crate::content::anchor::TextAnchor;
@@ -181,6 +181,84 @@ impl Store {
     pub fn delete_annotation(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// 全书库的批注，跨书带书名，按创建时间倒序 —— 「笔记」那一屏最上面该是最近的。
+    ///
+    /// 与 [`Store::annotations`] 同一条坏数据口径：解不出锚点的行静默跳过。
+    pub fn all_annotations(&self) -> Result<Vec<AnnotationCard>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT a.id, a.book_id, a.anchor_json, a.note, a.color, a.style, a.stale,
+                    a.created_at, a.updated_at, b.title
+             FROM annotations a JOIN books b ON b.id = a.book_id
+             ORDER BY a.created_at DESC, a.id DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, i64>(6)? != 0,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, String>(9)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, book_id, json, note, color, style, stale, created_at, updated_at, book_title) =
+                row?;
+            let Some(anchor) = TextAnchor::from_json(&json) else {
+                continue;
+            };
+            out.push(AnnotationCard {
+                annotation: Annotation {
+                    id,
+                    book_id,
+                    chapter: anchor.chapter,
+                    anchor,
+                    note,
+                    color,
+                    style: AnnotationStyle::parse(&style),
+                    stale,
+                    created_at,
+                    updated_at,
+                },
+                book_title,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 撤销删除：按原样插回 —— id、时间戳、stale 都用库里那条原来的值。
+    ///
+    /// 撤销要还原的是「删之前的那一条」，不是「现在新划的一条」：id 变了，撤销槽之外
+    /// 引着它的界面状态就会指空。`INSERT OR REPLACE` 兜的是那个几乎不会发生的边角：
+    /// 删掉最大 id 的行之后立刻新划一条，SQLite 的 rowid 可能复用被删的那个号 ——
+    /// 那一刻「恢复原行」压过「占住新行」是正确的小败。
+    pub fn restore_annotation(&self, row: &Annotation) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR REPLACE INTO annotations
+             (id, book_id, anchor_json, note, color, style, stale, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                row.id,
+                row.book_id,
+                row.anchor.to_json(),
+                row.note,
+                row.color,
+                row.style.as_str(),
+                row.stale as i64,
+                row.created_at,
+                row.updated_at
+            ],
+        )?;
         Ok(())
     }
 }
@@ -628,5 +706,66 @@ mod tests {
             1,
             "别人的批注一根手指都不能碰"
         );
+    }
+
+    /// 「笔记」那一屏的入口：跨书、带书名、按创建时间倒序。
+    #[test]
+    fn the_cross_book_entry_lists_every_annotation_with_its_title_newest_first() {
+        let (_dir, store) = store();
+        let a = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
+        let b = store.add_book(&path("b.epub"), &meta("书乙")).unwrap();
+        store
+            .add_annotation(a, &anchor(0, 0, 4), "早的", "amber", AnnotationStyle::default())
+            .unwrap();
+        // 同秒创建按 id 定序（ORDER BY created_at DESC, id DESC）。
+        store
+            .add_annotation(b, &anchor(0, 0, 4), "晚一", "rose", AnnotationStyle::default())
+            .unwrap();
+        store
+            .add_annotation(b, &anchor(1, 0, 4), "晚二", "sky", AnnotationStyle::default())
+            .unwrap();
+
+        let cards = store.all_annotations().unwrap();
+        let notes: Vec<&str> = cards.iter().map(|c| c.annotation.note.as_str()).collect();
+        assert_eq!(notes, vec!["晚二", "晚一", "早的"], "新的在最前，同秒按 id 倒序");
+        let titles: Vec<&str> = cards.iter().map(|c| c.book_title.as_str()).collect();
+        assert_eq!(titles, vec!["书乙", "书乙", "书甲"], "书名跟着每一条走");
+    }
+
+    /// 撤销删除 = 原行插回：id、笔记、时间戳、stale 都照旧，列表顺序不因一次拔插而变。
+    #[test]
+    fn restoring_puts_the_very_row_back() {
+        let (_dir, store) = store();
+        let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
+        let first = store
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "第一条",
+                "amber",
+                AnnotationStyle::Highlight,
+            )
+            .unwrap();
+        let second = store
+            .add_annotation(
+                book,
+                &anchor(0, 10, 14),
+                "第二条",
+                "rose",
+                AnnotationStyle::default(),
+            )
+            .unwrap();
+        store.set_annotation_stale(first, true).unwrap();
+
+        let row = store.annotation(first).unwrap().unwrap();
+        store.delete_annotation(first).unwrap();
+        assert!(store.annotation(first).unwrap().is_none());
+
+        store.restore_annotation(&row).unwrap();
+        let back = store.annotation(first).unwrap().expect("原 id 要回来");
+        assert_eq!(back, row, "整行照原样回来：笔记、颜色、画法、stale、时间戳");
+        assert!(back.stale);
+        let ids: Vec<i64> = store.annotations(book).unwrap().iter().map(|a| a.id).collect();
+        assert_eq!(ids, vec![first, second]);
     }
 }

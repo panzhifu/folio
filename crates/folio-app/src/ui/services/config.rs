@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use folio_core::{
-    Appearance, Config, Env, Language, Library, Provenance, Reader, Resolved, Speech,
+    Appearance, Config, Env, Language, Library, Provenance, Reader, Resolved, Speech, Translation,
 };
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
@@ -119,6 +119,11 @@ impl ConfigHolder {
         Self::snapshot(cx).language.clone()
     }
 
+    /// 翻译那一节。会话开翻译弹层、换目标语言时读它。
+    pub fn translation(cx: &App) -> Translation {
+        Self::snapshot(cx).translation.clone()
+    }
+
     /// 书库位置那一节。导入前要先问它确认过没有（见 `library::target_dir`）。
     pub fn library(cx: &App) -> Library {
         Self::snapshot(cx).library.clone()
@@ -169,6 +174,10 @@ impl ConfigHolder {
 
     pub fn edit_language(cx: &mut App, f: impl FnOnce(&mut Language)) {
         Self::edit(cx, |config| f(&mut config.language));
+    }
+
+    pub fn edit_translation(cx: &mut App, f: impl FnOnce(&mut Translation)) {
+        Self::edit(cx, |config| f(&mut config.translation));
     }
 
     pub fn edit_library(cx: &mut App, f: impl FnOnce(&mut Library)) {

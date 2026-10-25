@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use folio_core::content::annotation::ResolvedAnnotation;
 use folio_core::content::document::Document as OpenedDocument;
-use folio_core::store::{Annotation, Store};
+use folio_core::store::{Annotation, Bookmark, Store};
 use folio_core::{DocMeta, Format, Locator, PageTurn, Reader, StaleReason};
 use gpui_kit::base::SelectionEdge;
 use gpui_kit::{App, Bounds, Context, Entity, Pixels, Point, SharedString, Task};
@@ -337,6 +337,18 @@ pub struct ReaderSession {
     /// 缓存键里那个代数是必需的：解锚读的是「这一章的可见文本坐标」，换章、改字号、
     /// 换窗口宽都会让它进位，而进位之后旧区间指的就是别的字了。
     pub(in crate::ui::features::reader) annotation_spans: RefCell<AnnotationSpans>,
+    /// 这本书的书签（书内清单；跨书的在「笔记」目的地）。读写在 `modules/bookmarks.rs`。
+    pub(in crate::ui::features::reader) bookmarks: Vec<Bookmark>,
+    /// 最近一次删除的撤销槽。`None` = 屏上没有胶囊。
+    pub(in crate::ui::features::reader) undo:
+        Option<crate::ui::features::reader::model::undo::UndoSlot>,
+    /// 撤销槽的计数：每颗胶囊一个号，到点的计时器只收自己那一号。
+    pub(in crate::ui::features::reader) undo_seq: u64,
+    /// 选区翻译的弹层状态。状态与命令在 `modules/translation.rs`。
+    pub(in crate::ui::features::reader) translation:
+        Option<crate::ui::features::reader::model::translation::TranslationState>,
+    /// 翻译的计数：每开一次弹层一个号，晚到的旧结果在事件入口按号丢弃。
+    pub(in crate::ui::features::reader) translation_seq: u64,
 
     // ---- 阅读时长（统计页的数据源）：状态在这里，判断在 modules/reading_time.rs ----
     /// 这一段还没结账的阅读从哪一刻起算（Unix 秒）。0 = 此刻没在读任何书。
@@ -499,6 +511,11 @@ impl ReaderSession {
             footnote: None,
             annotations: Vec::new(),
             annotation_spans: RefCell::default(),
+            bookmarks: Vec::new(),
+            undo: None,
+            undo_seq: 0,
+            translation: None,
+            translation_seq: 0,
             // 时长不在这里起算：构造的那一刻读者还没真的翻开任何东西。
             // 起点由 `open_book` 里的 `begin_reading` 定，兜底那一屏则永远不进账。
             reading_segment_start: 0,
@@ -643,6 +660,11 @@ impl ReaderSession {
             footnote: None,
             annotations: Vec::new(),
             annotation_spans: RefCell::default(),
+            bookmarks: Vec::new(),
+            undo: None,
+            undo_seq: 0,
+            translation: None,
+            translation_seq: 0,
             // 时长不在这里起算：构造的那一刻读者还没真的翻开任何东西。
             // 起点由 `open_book` 里的 `begin_reading` 定，兜底那一屏则永远不进账。
             reading_segment_start: 0,
@@ -771,6 +793,12 @@ impl ReaderSession {
         self.begin_reading(cx);
         // 换了一本书，屏上的划线也得跟着换：批注是按 `book_id` 存的。
         self.load_annotations();
+        self.load_bookmarks();
+        // 换书那一刻，上一本的撤销胶囊跟着过期：那一槽攥的是上一本书库里的行，
+        // 挂在这本书的屏上只会指向别的东西。
+        self.undo = None;
+        // 译文弹层同理：锚点是上一本屏上的像素，答案跟的也是上一本里选中的字。
+        self.translation = None;
         // 换书时那一层若还开着，先关掉：查看器手里带的是**上一本**折出来的那一列，
         // 留着它就能继续左右滑到上一本的图上去 —— 计数、分享、定位原文全指着别人的书。
         self.close_image_viewer(cx);

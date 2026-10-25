@@ -25,7 +25,7 @@ use std::sync::Arc;
 use folio_core::Priority;
 use folio_core::infra::task::{Cancel, TaskEvent, TaskHandle};
 use folio_core::search::{Found, Hit, Options, Query, scan};
-use folio_core::store::BookRow;
+use folio_core::store::{Annotation, BookRow};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -43,6 +43,7 @@ use gpui_kit::{
 };
 
 use crate::ui::components::{BottomSheet, BottomSheetState, SearchBox, SearchBoxEvent};
+use crate::ui::features::reader::model::annotations::Palette;
 use crate::ui::features::reader::model::chrome::percent_label;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::toc_tree::TocView;
@@ -101,7 +102,10 @@ const TOC_BOTTOM_SPACE: f32 = 24.0;
 /// 这一屏没有参照可比。它比目录那两档（38 / 46）高出一截是应当的，因为多一行字；真机上
 /// 要核对的是这一行高与「一句上下文摆得下几个字」之间的关系（那由核心那两档裁切决定）。
 const SEARCH_ROW: f32 = 52.0;
-/// 这一屏顶上那两格：目录树，还是正文全文。
+/// 「批注」那一格每一行的高：与全文那一档同一族的两行字（原文/笔记一行，出处一行）。
+/// 同样没有参照可比 —— 它随批注闭环一起进来，真机上要一起核。
+const MARK_ROW: f32 = 56.0;
+/// 这一屏顶上那三格：目录树，还是正文全文，还是书签与批注。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum Screen {
     /// 目录树（默认那一格）。
@@ -109,6 +113,8 @@ enum Screen {
     Toc,
     /// 正文里搜出来的那几处。
     Search,
+    /// 书签与批注：本内的清单，点行跳回去，行尾可删。
+    Marks,
 }
 
 /// 正文全文那一档的状态：在跑的那一趟、摆出来的命中、进度读数。
@@ -192,6 +198,24 @@ impl Search {
     }
 }
 
+/// 「批注」那一格的一行。书签与批注各占一行，字段是两族的并集：书签没有颜色与
+/// 笔记，批注没有「书签」这个身份。原文那句（`quote`）取自锚点里存的 `exact`，
+/// 与导出同一条口径 —— 不开排版也有得显。
+struct MarkRow {
+    is_bookmark: bool,
+    id: i64,
+    /// 跳转落点：哪一章（定版式即哪一页）+ 章内第几个字。
+    chapter: usize,
+    offset: usize,
+    /// 出处那句（会话给：章名，定版式是「第几页」）。
+    place: String,
+    quote: String,
+    note: String,
+    color: Option<String>,
+    /// 库里的 stale 标记。本次解没解得回要到正文里才答得出来，这一格只转述存档的结论。
+    stale: bool,
+}
+
 /// 这一屏那四块，装配一次、两种容器各摆各的（见 [`TocPanel::pieces`]）。
 struct Pieces {
     /// 钉住的那一行：「已读 N / M」+ 搜索 + ⋯（抽屉那一档再多一颗关闭）。
@@ -238,6 +262,9 @@ pub(in crate::ui::features::reader) struct TocPanel {
     screen: Screen,
     /// 正文全文那一档的状态。
     search: Search,
+    /// 「批注」那一格的行表。每帧在 [`Self::marks_pieces`] 里重建一次 —— 书签与批注
+    /// 都是几十条的量级，重建比「记得哪一格脏了」便宜，也不会有忘了失效的缓存。
+    marks: Vec<MarkRow>,
     /// 搜索框开没开。框自己的状态由 `window.use_keyed_state` 按这一屏的键持有，
     /// 所以这里只存一个开关。
     search_open: bool,
@@ -282,6 +309,7 @@ impl TocPanel {
             tree: None,
             screen: Screen::default(),
             search: Search::new(),
+            marks: Vec::new(),
             search_open: false,
             sizes: Rc::new(Vec::new()),
             list_len: 0,
@@ -412,6 +440,7 @@ impl TocPanel {
         match self.screen {
             Screen::Toc => self.toc_pieces(window, width, drawer, cx),
             Screen::Search => self.fulltext_pieces(window, width, drawer, cx),
+            Screen::Marks => self.marks_pieces(window, width, drawer, cx),
         }
     }
 
@@ -487,6 +516,225 @@ impl TocPanel {
             search_row: Some(self.fulltext_row(&boxed, cx)),
             list: self.hit_list(cx),
         }
+    }
+
+    /// 「批注」那一格：书签与批注的清单。书签在前（钉下的顺序），批注在后（按章序、
+    /// 同章按钉下的顺序）—— 前者回答「我夹过哪几页」，后者回答「我写过哪几句」。
+    ///
+    /// 行表每帧重建：会话手里的两份清单就是权威，这里不做第二份账。
+    fn marks_pieces(
+        &mut self,
+        _window: &mut Window,
+        width: f32,
+        drawer: bool,
+        cx: &mut Context<Self>,
+    ) -> Pieces {
+        self.marks = self.build_marks(cx);
+        self.set_sizes(self.marks.len(), MARK_ROW, width);
+        Pieces {
+            head: self.book_head(cx),
+            header: self.header_row(drawer, cx),
+            search_row: None,
+            list: self.marks_list(cx),
+        }
+    }
+
+    /// 从会话手里折出行表。书签的落点是行首（锚住的就是那一行），批注的落点是锚点的
+    /// 起始偏移 —— 目标章多半还没排版，落点交给 `goto_offset` 挂恢复请求。
+    fn build_marks(&self, cx: &App) -> Vec<MarkRow> {
+        let reader = self.reader.read(cx);
+        let mut rows = Vec::with_capacity(reader.bookmarks.len() + reader.annotations.len());
+        for b in &reader.bookmarks {
+            rows.push(MarkRow {
+                is_bookmark: true,
+                id: b.id,
+                chapter: b.chapter as usize,
+                offset: b.anchor.start,
+                place: reader.hit_place_at(b.chapter as usize, cx),
+                quote: snippet(&b.anchor.exact),
+                note: String::new(),
+                color: None,
+                stale: false,
+            });
+        }
+        // 按章序排（同章保持创建序）：扫批注的人认的是「第几章里写了什么」，
+        // 与目录、导出同一份读法。
+        let mut annotations: Vec<&Annotation> = reader.annotations.iter().collect();
+        annotations.sort_by_key(|a| (a.chapter, a.created_at, a.id));
+        for a in annotations {
+            rows.push(MarkRow {
+                is_bookmark: false,
+                id: a.id,
+                chapter: a.chapter as usize,
+                offset: a.anchor.start,
+                place: reader.hit_place_at(a.chapter as usize, cx),
+                quote: snippet(&a.anchor.exact),
+                note: a.note.trim().to_string(),
+                color: Some(a.color.clone()),
+                stale: a.stale,
+            });
+        }
+        rows
+    }
+
+    /// 「批注」那一格的列表。空态一句实话：这一屏两样都还没有。
+    fn marks_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.marks.is_empty() {
+            return div()
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(TOC_GUTTER))
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr(cx, "reader.marks.none"))
+                .into_any_element();
+        }
+        let view = cx.entity().clone();
+        div()
+            .flex_1()
+            .min_h_0()
+            .pb(px(TOC_BOTTOM_SPACE))
+            .child(
+                v_virtual_list(
+                    view,
+                    "reader-marks",
+                    self.sizes.clone(),
+                    |panel, range, _, cx| panel.mark_rows(range, cx),
+                )
+                .track_scroll(&self.scroll),
+            )
+            .into_any_element()
+    }
+
+    /// `[range.start, range.end)` 那几行：左侧颜色点或书签图标，原文/笔记一行，
+    /// 出处与提醒一行，行尾一颗删除。
+    fn mark_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let end = range.end.min(self.marks.len());
+        let palette = Palette::of(cx.theme());
+        let (foreground, muted) = (cx.theme().foreground, cx.theme().muted_foreground);
+        let panel = cx.entity().clone();
+        let mut out = Vec::new();
+        for ix in range.start..end {
+            let row = &self.marks[ix];
+            let MarkRow {
+                is_bookmark,
+                id,
+                chapter,
+                offset,
+                place,
+                quote,
+                note,
+                color,
+                stale,
+            } = row;
+            // 行首那枚识别物：书签是图标，批注是那一条颜色（认不出的名字由
+            // `Palette` 兜回默认那枚，与正文回显同一口径）。
+            let badge = if *is_bookmark {
+                Icon::new(IconName::Bookmark)
+                    .small()
+                    .text_color(muted)
+                    .into_any_element()
+            } else {
+                div()
+                    .flex_none()
+                    .w(px(8.0))
+                    .h(px(8.0))
+                    .rounded_full()
+                    .bg(palette.color(color.as_deref().unwrap_or_default()))
+                    .into_any_element()
+            };
+            let second: SharedString = if *stale {
+                tf(cx, "reader.marks.stale", &[("place", place)]).into()
+            } else if note.is_empty() {
+                place.clone().into()
+            } else {
+                format!("{place} · {note}").into()
+            };
+            let (panel_delete, panel_jump) = (panel.clone(), panel.clone());
+            let (is_bookmark, id) = (*is_bookmark, *id);
+            let (chapter, offset) = (*chapter, *offset);
+            let quote = quote.clone();
+            let place = place.clone();
+            out.push(
+                div()
+                    .id(ElementId::named_usize("reader-mark-row", ix))
+                    .w_full()
+                    .h(px(MARK_ROW))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px(px(TOC_GUTTER))
+                    .overflow_hidden()
+                    .child(badge)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .text_sm()
+                                    .text_color(foreground)
+                                    .truncate()
+                                    .child(if quote.is_empty() { place } else { quote }),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .truncate()
+                                    .child(second),
+                            ),
+                    )
+                    .child(
+                        Button::new("mark-delete")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Trash)
+                            .on_click(move |_, _, cx| {
+                                panel_delete
+                                    .update(cx, |this, cx| this.remove_mark(is_bookmark, id, cx))
+                            }),
+                    )
+                    .on_click(move |_, _, cx| {
+                        panel_jump.update(cx, |this, cx| this.jump_to_hit(chapter, offset, cx))
+                    })
+                    .into_any_element(),
+            );
+        }
+        out
+    }
+
+    /// 删一行：书签与批注各派各的命令，撤销走同一条路（胶囊由阅读页渲染）。
+    /// 列表下一帧按会话手里的清单重建，这里不用自己摘行。
+    fn remove_mark(&mut self, is_bookmark: bool, id: i64, cx: &mut Context<Self>) {
+        if is_bookmark {
+            self.reader.update(cx, |reader, cx| reader.remove_bookmark(id, cx));
+        } else {
+            self.reader
+                .update(cx, |reader, cx| reader.remove_annotation(id, cx));
+        }
+        cx.notify();
+    }
+
+    /// 顶上那句读数（「批注」那一格）：书签几枚、批注几条。
+    fn marks_label(&self, cx: &App) -> SharedString {
+        let reader = self.reader.read(cx);
+        let bookmarks = reader.bookmarks.len();
+        let notes = reader.annotations.len();
+        tf(
+            cx,
+            "reader.marks.count",
+            &[("bookmarks", &bookmarks), ("notes", &notes)],
+        )
+        .into()
     }
 
     /// 行数（折展、搜索、命中会改）、行高（设置里换了密度）、或**换了哪一格**，三者之一变了
@@ -702,20 +950,25 @@ impl TocPanel {
             .map(|toc| toc.read_count(toc.current_ix(current)))
             .unwrap_or((0, 0));
         let read_label = tf(cx, "reader.toc.read", &[("read", &read), ("total", &total)]);
-        // 顶上那一句读数跟着那一格换：目录那一格答「来过几章」，全文那一格答「命中几处 /
-        // 扫到第几章」。同一个位置摆两句就是两屏挤成一屏，而读者要的从来只是当下那一格的答案。
+        // 顶上那几句读数跟着那一格换：目录那一格答「来过几章」，全文那一格答「命中几处 /
+        // 扫到第几章」，批注那一格答「书签几枚 · 批注几条」。同一个位置摆几句就是几屏挤成
+        // 一屏，而读者要的从来只是当下那一格的答案。
         let label: SharedString = match self.screen {
             Screen::Toc => read_label.into(),
             Screen::Search => self.search.label(cx),
+            Screen::Marks => self.marks_label(cx),
         };
         let search_panel = cx.entity().clone();
         let search_label = tr(cx, "reader.toc.search");
         let toc_panel = cx.entity().clone();
         let fulltext_panel = cx.entity().clone();
+        let marks_panel = cx.entity().clone();
         let toc_screen_label = tr(cx, "reader.toc");
         let fulltext_screen_label = tr(cx, "reader.search.label");
+        let marks_screen_label = tr(cx, "reader.toc.marks");
         let on_toc = self.screen == Screen::Toc;
         let on_search = self.screen == Screen::Search;
+        let on_marks = self.screen == Screen::Marks;
         // 「⋯」里那四件事全是目录树自己的（展开 / 逆向 / 样式 / 清除已读痕迹）。全文那一格
         // 摆着它等于摆四个点了没反应的空位，所以整颗连同样那颗筛标题的放大镜一起收掉。
         let filter = on_toc.then(|| {
@@ -750,8 +1003,8 @@ impl TocPanel {
                     .text_color(cx.theme().muted_foreground)
                     .child(label),
             )
-            // 顶上那两格：目录 / 全文。定版式（CBZ、逐页 SVG 的漫画）与兜底那一行没有
-            // 正文可搜，于是只摆一格、也不摆那颗点不动的空位。
+            // 顶上那三格：目录 / 全文 / 批注。定版式（CBZ、逐页 SVG 的漫画）与兜底那一行
+            // 没有正文可搜，「全文」那一格于是不摆；「批注」没有这样的前提，永远摆。
             .child(
                 Button::new("toc-screen-toc")
                     .ghost()
@@ -777,6 +1030,19 @@ impl TocPanel {
                         }),
                 )
             })
+            // 「批注」那一格三端都在：书签两族（可重排与定版式）都钉得上，批注至少
+            // 列得出 —— 不像「全文」那一格要看这本书有没有正文可搜。
+            .child(
+                Button::new("toc-screen-marks")
+                    .ghost()
+                    .small()
+                    .selected(on_marks)
+                    .label(marks_screen_label.to_string())
+                    .accessibility_label(marks_screen_label)
+                    .on_click(move |_, _, cx| {
+                        marks_panel.update(cx, |this, cx| this.set_screen(Screen::Marks, cx))
+                    }),
+            )
             .children(filter)
             .children(more)
             // 抽屉这一档没有「往下划」这回事，虽然遮罩可点，但抽屉自己的右上角也该有
@@ -1382,6 +1648,20 @@ impl Render for TocPanel {
 
 /// 这一屏与阅读页之间那两道通知。订阅方是 [`crate::ui::features::reader::view::body::reading_page::ReadingPage`]（见它的 `_watches`）。
 impl EventEmitter<TocEvent> for TocPanel {}
+
+/// 一句原文在列表里显多长。`exact` 是可见文本、可能带着排版换行，先折空白再截 ——
+/// 与导出那条 `collapse` 同一件事的界面侧版本，太长的那半本来就被行 truncate 掉了。
+fn snippet(exact: &str) -> String {
+    let folded: String = exact
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out: String = folded.chars().take(48).collect();
+    if folded.chars().count() > 48 {
+        out.push('…');
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {

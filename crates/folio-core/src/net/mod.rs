@@ -2,6 +2,8 @@
 //!
 //! - [`remote`] —— 远端传输的**协议与编排**（WebDAV 的 PROPFIND / GET / PUT 规则，
 //!   以及一个同步 `Transport` 抽象）。协议规则与实现分开，所以它们离线可测。
+//! - [`translate`] —— 选区翻译：引擎 trait 与 Google 免 key 档的请求/响应解析。
+//!   走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测（假传输 + fixture）。
 //! - [`update`] —— 检查更新：问发布仓要「最新那版」，比版本、挑这一端的包、验摘要。
 //!   走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测（假传输 + fixture JSON）。
 //! - [`transfer`] —— **Wi-Fi 传书**：设备起一个 HTTP 服务器，局域网浏览器上传书。
@@ -13,4 +15,5 @@
 
 pub mod remote;
 pub mod transfer;
+pub mod translate;
 pub mod update;

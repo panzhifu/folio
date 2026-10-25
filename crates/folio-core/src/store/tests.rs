@@ -102,6 +102,29 @@ fn migrations_are_idempotent_across_reopen() {
     );
 }
 
+/// 章标题表按章号对齐：导出那一头要按 `[chapter]` 下标取标题，错一位后面全部指错章。
+#[test]
+fn chapter_titles_align_with_chapter_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_at(&dir.path().join("folio.db")).unwrap();
+    let id = store.add_book(&path("a.md"), &meta("书")).unwrap();
+    store
+        .save_flow(
+            id,
+            &flow(&[("一", "a"), ("二", "b"), ("三", "c")]),
+            Format::Markdown,
+        )
+        .unwrap();
+
+    let titles = store.chapter_titles(id).unwrap();
+    assert_eq!(titles.len(), 3, "一章一格，按章号排");
+    assert_eq!(titles[2].title, "三");
+
+    // 没落过正文的书：空表 —— 导出那头的兜底（「第 N 章」）接着答。
+    let bare = store.add_book(&path("b.md"), &meta("空书")).unwrap();
+    assert!(store.chapter_titles(bare).unwrap().is_empty());
+}
+
 /// v5 迁移：旧库（v4，`images.bytes` 还在）升上来时，字节要被丢掉、元数据留下。
 ///
 /// 这条不是形式主义 —— 已经装过的 `folio.db` 就是 v4 形状，

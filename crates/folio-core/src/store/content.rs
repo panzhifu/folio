@@ -337,6 +337,30 @@ impl Store {
         Ok(Self::load_fixed_in(&conn, book_id)?.map(Content::Fixed))
     }
 
+    /// 一本书的章标题，按章号对齐成一份可按 `[chapter]` 下标取用的表。
+    ///
+    /// 导出要用：导出的时机往往没有排版、甚至书已经不在这台机器上，标题却还在库里。
+    /// 缺号（索引残了的老库）与空标题都补成 [`Chapter::inline`] 的空行 —— 标题真值
+    /// 由导出那一头的兜底（「第 N 章」）接着答，这里不猜。
+    pub fn chapter_titles(&self, book_id: i64) -> Result<Vec<Chapter>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare("SELECT idx, title FROM chapters WHERE book_id = ?1 ORDER BY idx")?;
+        let rows = stmt
+            .query_map(params![book_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut out = Vec::new();
+        for (idx, title) in rows {
+            // 中间缺号补空章：下标必须与章号对齐，错一位后面全部指错章。
+            while out.len() < idx as usize {
+                out.push(Chapter::inline("", ""));
+            }
+            out.push(Chapter::inline(title, ""));
+        }
+        Ok(out)
+    }
+
     /// [`Store::save_fixed`] 的不上锁版本；只由已经持了锁的一方调用。
     fn save_fixed_in(conn: &Connection, book_id: i64, doc: &FixedDoc) -> Result<()> {
         let pages = serde_json::to_string(&doc.pages)?;

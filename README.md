@@ -45,7 +45,7 @@ footnotes, vertical writing.
 |---|---|
 | Reflowable, fully readable | EPUB (incl. fixed-layout), MOBI / AZW / AZW3 / PRC (KF7 & KF8, incl. hybrid files), FB2, TXT, Markdown, HTML / MHTML / HTMLZ, RTF, DOCX, legacy DOC, ODT, PDB / PalmDoc, CHM |
 | Fixed-layout, page-by-page | PDF, AZW4 (PalmDB-embedded PDF), DjVu (pure-Rust decoder, both container shapes; NAVM bookmarks become the TOC), CBZ / CB7 / CBR / CBT (CBR via a pure-Rust RAR reader) |
-| Partial | PDF / AZW4 / DjVu have **no text layer yet** — selection, annotations and search do not apply inside them. Word lists driven by styles (and per-section restart numbering) and ODT `text:continue-numbering` are not followed |
+| Partial | PDF / AZW4 / DjVu carry a text layer when the file has one — selection, annotations and search work inside them. A page with no text (a scan without OCR, or a PDF page whose `/Rotate` is not 0) has nothing to select. Word lists driven by styles (and per-section restart numbering) and ODT `text:continue-numbering` are not followed |
 | Not supported | DRM-protected books (a DRM-flagged PDB is detected and reported, not decrypted), encrypted RAR archives |
 
 Notes:
@@ -55,6 +55,9 @@ Notes:
   `cover.jpg` is treated as the **cover**, not as a phantom first page.
 - Word / ODT: lists follow the spec's numbering, footnotes and endnotes render as
   tappable superscripts with the note body back in the chapter that cites them.
+- DjVu: the text layer is the OCR product already stored in the file. A page without
+  one is image-only; where it exists, per-character boxes are split evenly from the
+  word box, so selecting part of a word can be off by up to one character width.
 
 ## Download
 
@@ -77,7 +80,6 @@ version. The app can also check that page for updates from inside
   first install as a test.
 - Android ships `arm64-v8a` only, and the APK does not bundle the third-party
   license texts (every desktop package does).
-- No text layer in PDF / AZW4 / DjVu (see the formats table).
 - The Notes screen is an explicit empty state: the annotation backend and the
   highlight write-path have landed; the interface has not.
 - HarmonyOS and iOS host projects live in the tree, but are not part of the
@@ -88,9 +90,7 @@ version. The app can also check that page for updates from inside
 Directions, not promises:
 
 1. **Notes & annotations UI** — wire the existing backend to the screen.
-2. **A text layer for PDF / AZW4 / DjVu** — selection, annotations and search
-   inside fixed-layout documents.
-3. **iOS and HarmonyOS hosts**, once they enter the release matrix.
+2. **iOS and HarmonyOS hosts**, once they enter the release matrix.
 
 ## Building from source
 

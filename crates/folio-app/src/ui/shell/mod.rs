@@ -28,7 +28,7 @@ use gpui_kit::{
     Window, actions, div, px,
 };
 
-use crate::ui::features::notes::NotesView;
+use crate::ui::features::notes::{NotesEvent, NotesView};
 use crate::ui::features::reader::{Arrow, ReadingPage, Reserve};
 use crate::ui::features::settings::{CompactSettings, SettingsPage, SettingsView};
 use crate::ui::features::shelf::{ShelfEvent, ShelfView};
@@ -360,6 +360,10 @@ pub struct AppShell {
     /// 词没变、架非空就不重查，见 `ShelfView::reload`）。与 [`stats`](Self::stats) 同一条
     /// 理由、同一个调用点（[`AppShell::dismiss_reading`]）。
     shelf: gpui_kit::Entity<ShelfView>,
+    /// 「笔记」那一格的视图。与统计同一条理由：批注与书签在阅读页里写，而那一屏
+    /// 不在 `render` 里查库 —— 切进这一格、关掉一本书这两个时刻由外壳叫它重取；
+    /// 「点了某一条」的回执也归外壳（开书与落点都在它手里）。
+    notes: gpui_kit::Entity<NotesView>,
     /// 首次启动的欢迎页。书库位置没确认前，外壳画的是它而不是主界面。
     welcome: gpui_kit::Entity<WelcomeView>,
     /// 现在是不是停在欢迎页。启动时由「书库位置确认过没有」决定（见 [`AppShell::boot`]），
@@ -369,6 +373,8 @@ pub struct AppShell {
     _config_watch: Subscription,
     /// 书架「打开一本书」的订阅。
     _shelf_watch: Subscription,
+    /// 「笔记」那一屏「点开某一条」的订阅：开书并把落点递进去。
+    _notes_watch: Subscription,
     /// 书架栈的 `Popped` 订阅：pop 出阅读页时把位置落库。
     _stack_watch: Subscription,
     /// 系统深浅翻面的订阅。`Window::appearance()` 是 gpui 里的缓存，只由平台回调刷新，
@@ -471,6 +477,19 @@ impl AppShell {
         let shelf = cx.new(|cx| ShelfView::boot(window, cx, shelf_stack.downgrade()));
         let stats = cx.new(|_| StatsView::new());
         let notes = cx.new(|_| NotesView::new());
+        // 「笔记」的第一份快照在启动这一刻就取好：目的地那扇门（`go`）只在**切进**那一格
+        // 时叫重取，读者若从不切走就永远等不到那一次。
+        notes.update(cx, |notes, cx| notes.refresh(cx));
+        // 点了一条 = 开那本书、落到那一处。落点递进阅读页那句 `goto`：目标章多半还没
+        // 排过版，会话挂恢复请求，排版做完那一帧落地 —— 与目录跳转同一条路。
+        let _notes_watch = cx.subscribe(&notes, |this, _, event: &NotesEvent, cx| {
+            let NotesEvent::Open { book_id, jump } = event;
+            this.open_reading(*book_id, cx);
+            let (chapter, offset) = *jump;
+            if let Some(layer) = this.reading.as_ref() {
+                layer.page.update(cx, |page, cx| page.goto(chapter, offset, cx));
+            }
+        });
         // 「我的」这一格两端画的不一样：桌面直接画整页字段（[`SettingsView`]，
         // 落在侧栏第一页「外观」——「关于」已经挪到侧栏末尾，它是办完事顺手看一眼的东西，
         // 不该是这一格开门的那一页），手机画钻入式的紧凑列表（[`CompactSettings`]）——
@@ -658,10 +677,12 @@ impl AppShell {
             reading: None,
             stats,
             shelf,
+            notes,
             welcome,
             onboarding,
             _config_watch,
             _shelf_watch,
+            _notes_watch,
             _stack_watch,
             _appearance_watch,
             applied: None,
@@ -788,6 +809,8 @@ impl AppShell {
         // 位置刚落库，而架面查库有去重（词没变、架非空就不重查）—— 不在这儿推它一把，
         // 读者读完退回来看到的还是开书前的旧顺序，「最近阅读」排不到前面。
         self.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+        // 「笔记」也刚过时了：读者在书里划的线、钉的签，都要等这一下才进那一屏。
+        self.notes.update(cx, |notes, cx| notes.refresh(cx));
         cx.notify();
     }
 
@@ -880,6 +903,10 @@ impl AppShell {
         // 每次都取而不是「只在第一次进来时取」：读者会读一读、切回架面、再切回来看数。
         if destination == Destination::Stats {
             self.stats.update(cx, |stats, cx| stats.refresh(cx));
+        }
+        // 「笔记」同一条：批注与书签都在阅读页里写，切进这一格就是它该重取的时刻。
+        if destination == Destination::Notes {
+            self.notes.update(cx, |notes, cx| notes.refresh(cx));
         }
         // 进「我的」起一次统计，但**只在桌面那一头**起。桌面画的是整页字段（[`SettingsView`]），
         // 换到「存储」那一页由 `Settings` 组件自己在侧栏里办，界面这层拿不到那个回调；手机那

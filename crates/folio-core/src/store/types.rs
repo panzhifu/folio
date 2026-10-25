@@ -178,6 +178,40 @@ pub struct Annotation {
     pub updated_at: i64,
 }
 
+/// 一条书签：某一章里的一个位置。独立于 [`Annotation`] —— 批注锚的是「选中的那段字」，
+/// 书签锚的是「正在读的那一行」；它没有颜色、画法与笔记，生存方式只有钉下、跳回、拔掉。
+///
+/// `anchor` 与批注同一把尺（[`TextAnchor`]）：可重排书锚住当时那一行（带指纹，重排、
+/// 改字号之后找得回）；定版式那一族是点锚点 —— [`Bookmark::chapter`] 就是页号，
+/// 它自己就是完整的地址。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bookmark {
+    pub id: i64,
+    pub book_id: i64,
+    /// 章在 `FlowDoc::chapters` 里的下标；定版式那一族是页号。表里没有第二个地方记它，
+    /// 与批注同一条口径（v13 摘掉 `chapter_id` 的理由）。
+    pub chapter: u32,
+    pub anchor: TextAnchor,
+    pub created_at: i64,
+}
+
+/// 跨书列表里的一行批注：批注本体 + 它属于哪本书的书名。
+///
+/// 带着书名而不是只给 `book_id` 让界面再查一次：「笔记」那一屏按书分组，这一列本来
+/// 就在这条 `JOIN books` 里，多一次往返只是白费（与 [`ReadingRank::title`] 同一条理由）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationCard {
+    pub annotation: Annotation,
+    pub book_title: String,
+}
+
+/// 跨书列表里的一行书签。与 [`AnnotationCard`] 同一条理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookmarkCard {
+    pub bookmark: Bookmark,
+    pub book_title: String,
+}
+
 /// 一个集合（分组）。名字是用户输入的、跨书存在的东西，所以它跟着库走而不是配置。
 ///
 /// `book_count` 是列表页要显示的那个数。带上它而不是让调用方为每个集合再查一次，

@@ -38,7 +38,7 @@ DOM → CSS 子集 → 排版的流水线，踩在 GPUI 的文本原语（shapin
 |---|---|
 | 可重排，完整可读 | EPUB（含定版式）、MOBI / AZW / AZW3 / PRC（KF7 + KF8，含 hybrid）、FB2、TXT、Markdown、HTML / MHTML / HTMLZ、RTF、DOCX、老 DOC、ODT、PDB / PalmDoc、CHM |
 | 定版式，逐页 | PDF、AZW4（PalmDB 内嵌 PDF）、DjVu（纯 Rust 解码，两种容器形状都读；NAVM 书签上屏当目录）、CBZ / CB7 / CBR / CBT（CBR 走纯 Rust 的 RAR 读取） |
-| 部分支持 | PDF / AZW4 / DjVu **暂无文字层** —— 里面不能选中、不能批注、搜不到。Word 靠样式间接触发的编号与每节从头再数的编号、ODT 的 `text:continue-numbering` 暂不跟随 |
+| 部分支持 | PDF / AZW4 / DjVu 在文件自带文字层时能选中、能批注、能搜到；没有字的那一页（扫描件没带 OCR，或 PDF 页的 `/Rotate` 不为 0）选不出东西。Word 靠样式间接触发的编号与每节从头再数的编号、ODT 的 `text:continue-numbering` 暂不跟随 |
 | 不支持 | 加 DRM 的书（DRM 标记的 PDB 会认出来并报告，不解密）、加密 RAR |
 
 几点说明：
@@ -47,6 +47,8 @@ DOM → CSS 子集 → 排版的流水线，踩在 GPUI 的文本原语（shapin
   系列与期号、制作人员、简介；包里的 `folder.jpg` / `cover.jpg` 认成**封面**，
   不会凭空多出一页。
 - Word / ODT：列表编号按规范走，脚注尾注落成可点的上标，注体摆回引用它的那一章。
+- DjVu：文字层就是文件里自带的 OCR 产物。没有那一层的页只有图；有那一层时逐字盒是
+  按词盒均分的，选一个词的一部分时色块最多差一个字宽。
 
 ## 下载
 
@@ -65,7 +67,6 @@ DOM → CSS 子集 → 排版的流水线，踩在 GPUI 的文本原语（shapin
 - macOS 包未签名、未公证（没有开发者证书）。
 - Windows 包还没在任何一台真 Windows 机器上装过 —— 第一次装请当成一次测试。
 - Android 只出 `arm64-v8a`，且 APK 不带第三方许可文本（桌面三端的包都带）。
-- PDF / AZW4 / DjVu 没有文字层（见格式表）。
 - 「笔记」一屏是有意的空状态：批注后端与划线写入口已落地，界面还没接。
 - HarmonyOS 与 iOS 的宿主工程在树里，但不在发布矩阵里。
 
@@ -74,8 +75,7 @@ DOM → CSS 子集 → 排版的流水线，踩在 GPUI 的文本原语（shapin
 方向，不是承诺：
 
 1. **批注与笔记的界面** —— 把已有的后端接上屏。
-2. **PDF / AZW4 / DjVu 的文字层** —— 定版式文档里的选中、批注与搜索。
-3. **iOS 与 HarmonyOS 宿主**，等它们进发布矩阵。
+2. **iOS 与 HarmonyOS 宿主**，等它们进发布矩阵。
 
 ## 从源码构建
 

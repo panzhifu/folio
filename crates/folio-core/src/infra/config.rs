@@ -576,6 +576,37 @@ fn clamp_semantic(value: f32, range: &RangeInclusive<f32>) -> f32 {
     }
 }
 
+/// 翻译：选区翻译那一格的行为。
+///
+/// 第一版只有一项（译成哪种语言）；引擎选择与其余参数随第 2 期进来。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Translation {
+    /// 译成哪种语言（BCP-47 码，如 `zh-CN`）。**空串 = 跟随界面语言** —— 「跟随」
+    /// 是一个选择，不是「还没选」：写死某个默认语等于替读者决定他没说的偏好，
+    /// 而空串交给 app 侧在用的时候按 `Locale` 现解析（core 不认识「界面」）。
+    pub target_lang: String,
+}
+
+impl Default for Translation {
+    fn default() -> Self {
+        Self {
+            target_lang: String::new(),
+        }
+    }
+}
+
+/// 手写而不是 derive（与各节同一条规矩）：空串是「跟随界面语言」，
+/// 不是任何一种语言的代码。
+impl Translation {
+    /// 归一：首尾空白去掉。语言码本身信不过的写法（大小写错位）在引擎那头都能
+    /// 容忍，这里不做第二处「纠正」。
+    pub fn normalized(mut self) -> Self {
+        self.target_lang = self.target_lang.trim().to_string();
+        self
+    }
+}
+
 /// 排版输入。全部是纯数据、不含任何 UI 类型，因此同一份配置既能在桌面端用，
 /// 也能给移动端宿主用。
 ///
@@ -831,6 +862,7 @@ pub struct Config {
     pub library: Library,
     pub language: Language,
     pub speech: Speech,
+    pub translation: Translation,
     pub logging: Logging,
 }
 
@@ -845,6 +877,7 @@ impl Default for Config {
             library: Library::default(),
             language: Language::default(),
             speech: Speech::default(),
+            translation: Translation::default(),
             logging: Logging::default(),
         }
     }
@@ -860,6 +893,7 @@ impl Config {
         self.reader = self.reader.clamped();
         self.appearance = self.appearance.normalized();
         self.speech = self.speech.normalized();
+        self.translation = self.translation.normalized();
         // 书库位置去掉首尾空白：填成 "  /x  " 会让 `is_confirmed` 说「确认过」，
         // 而后面按这个串去找目录会找不到。
         self.library.dir = self.library.dir.trim().to_string();

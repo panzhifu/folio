@@ -308,6 +308,8 @@ impl ReaderSession {
             offset: 0,
         }));
         self.clear_selection();
+        // 译文的锚点是上一章屏上的一个像素：跳走了就没有它挂的地方，整层收掉。
+        self.translation = None;
     }
 
     /// 拼进坐标窗口的章（含锚章）。测试读：窗口必须钉在锚章 ± 邻章半窗宽。

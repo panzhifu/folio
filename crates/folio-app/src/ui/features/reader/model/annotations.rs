@@ -374,25 +374,16 @@ impl ReaderSession {
 
     /// 取消划线：把选区对应的那一条从库里删掉，画出来的那条划线随它消失。
     ///
-    /// 删完把选区收掉：屏上已经没东西可挑中了，留着一段「选中」只会让读者以为还能再删一次。
+    /// 删除本体在 [`ReaderSession::remove_annotation`]（列表屏的删除命令与这里是
+    /// 同一条路，撤销也在那条路上）；这里只多管选区：删成了就收掉 —— 屏上已经
+    /// 没东西可挑中了，留着一段「选中」只会让读者以为还能再删一次。
     pub fn delete_highlight(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.selection_annotation() else {
             return;
         };
-        let id = row.id;
         self.selection_menu_open = false;
-        let Some(store) = self.store.as_ref() else {
-            tracing::warn!(annotation_id = id, "划线: 书库没装，那一条删不掉");
-            cx.notify();
-            return;
-        };
-        match store.delete_annotation(id) {
-            Ok(()) => {
-                tracing::info!(annotation_id = id, "划线: 取消一条批注");
-                self.load_annotations();
-                self.clear_selection();
-            }
-            Err(err) => tracing::error!(annotation_id = id, error = %err, "划线: 删库失败"),
+        if self.remove_annotation(row.id, cx) {
+            self.clear_selection();
         }
         cx.notify();
     }

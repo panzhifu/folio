@@ -80,6 +80,73 @@ pub fn annotations_by_chapter(annotations: &[Annotation]) -> Vec<(u32, Vec<&Anno
     groups.into_iter().collect()
 }
 
+/// 批注导出成哪种文本。三种都是**人读的**：导出是拿去分享或备份的，不是给程序
+/// 互相导入的格式（那一条是批注互通，另立门户）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnotationExportFormat {
+    /// 纯文本：没有标记语言，任何编辑器都能打开。
+    Text,
+    /// Markdown：引用块 + 笔记，往笔记软件里贴最顺。
+    Markdown,
+    /// 独立网页：自带 charset 与最少的样式，浏览器直接打开。
+    Html,
+}
+
+impl AnnotationExportFormat {
+    /// 导出文件的扩展名（不带点）。
+    pub fn ext(self) -> &'static str {
+        match self {
+            Self::Text => "txt",
+            Self::Markdown => "md",
+            Self::Html => "html",
+        }
+    }
+
+    /// 交给系统分享面板时的 MIME。
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Text => "text/plain; charset=utf-8",
+            Self::Markdown => "text/markdown; charset=utf-8",
+            Self::Html => "text/html; charset=utf-8",
+        }
+    }
+}
+
+/// 批注导出的统一入口：三种格式共用同一份分组与兜底，只换外壳。
+pub fn annotations_export(
+    format: AnnotationExportFormat,
+    meta: &DocMeta,
+    chapters: &[Chapter],
+    annotations: &[Annotation],
+) -> String {
+    match format {
+        AnnotationExportFormat::Text => annotations_text(meta, chapters, annotations),
+        AnnotationExportFormat::Markdown => annotations_markdown(meta, chapters, annotations),
+        AnnotationExportFormat::Html => annotations_html(meta, chapters, annotations),
+    }
+}
+
+/// 书名兜底：空串（书自己没说）写「未命名」，不写《》套空串。
+fn display_title(meta: &DocMeta) -> &str {
+    let title = meta.title.trim();
+    if title.is_empty() {
+        "未命名"
+    } else {
+        title
+    }
+}
+
+/// 章标题兜底：库里没有那一行、或标题是空串时写「第 N 章」。章号是 0 起的下标，
+/// 读者数的是 1 起。
+fn chapter_heading(chapters: &[Chapter], chapter: u32) -> String {
+    chapters
+        .get(chapter as usize)
+        .map(|c| c.title.trim())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("第 {} 章", chapter + 1))
+}
+
 /// 批注导出成 Markdown。纯函数，不碰磁盘 —— 写哪个文件是界面的事。
 ///
 /// 正文用锚点里存的 `exact` 原文，而不是按坐标回切片：导出的时机往往是没有排版、
@@ -92,8 +159,7 @@ pub fn annotations_markdown(
     chapters: &[Chapter],
     annotations: &[Annotation],
 ) -> String {
-    let title = meta.title.trim();
-    let title = if title.is_empty() { "未命名" } else { title };
+    let title = display_title(meta);
     let mut out = format!("# 《{title}》批注\n\n");
     if !meta.authors.is_empty() {
         out.push_str(&format!("作者：{}\n\n", meta.authors.join("、")));
@@ -105,13 +171,11 @@ pub fn annotations_markdown(
     out.push_str(&format!("共 {} 条批注。\n", annotations.len()));
 
     for (chapter, group) in annotations_by_chapter(annotations) {
-        let heading = chapters
-            .get(chapter as usize)
-            .map(|c| c.title.trim())
-            .filter(|t| !t.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("第 {} 章", chapter + 1));
-        out.push_str(&format!("\n## {}. {heading}\n", chapter + 1));
+        out.push_str(&format!(
+            "\n## {}. {}\n",
+            chapter + 1,
+            chapter_heading(chapters, chapter)
+        ));
 
         for a in group {
             out.push('\n');
@@ -134,6 +198,127 @@ pub fn annotations_markdown(
         }
     }
     out
+}
+
+/// 批注导出成纯文本。与 Markdown 同一份骨架，只把标记换成缩进 —— 分组、引文、
+/// stale 标注与「没有批注」那句话都走同一条路，三种格式不会各说各话。
+pub fn annotations_text(
+    meta: &DocMeta,
+    chapters: &[Chapter],
+    annotations: &[Annotation],
+) -> String {
+    let title = display_title(meta);
+    let mut out = format!("《{title}》批注\n");
+    if !meta.authors.is_empty() {
+        out.push_str(&format!("作者：{}\n", meta.authors.join("、")));
+    }
+    if annotations.is_empty() {
+        out.push_str("\n还没有批注。\n");
+        return out;
+    }
+    out.push_str(&format!("\n共 {} 条批注\n", annotations.len()));
+
+    for (chapter, group) in annotations_by_chapter(annotations) {
+        out.push_str(&format!(
+            "\n{}. {}\n",
+            chapter + 1,
+            chapter_heading(chapters, chapter)
+        ));
+        for a in group {
+            out.push('\n');
+            let quote = collapse(&a.anchor.exact);
+            if quote.is_empty() {
+                out.push_str("（只有位置，没有选中的文字）\n");
+            } else {
+                out.push_str(&format!("{quote}\n"));
+            }
+            if a.stale {
+                out.push_str("⚠️ 位置已失效，导出的原文来自记录时的快照。\n");
+            }
+            let note = a.note.trim();
+            if !note.is_empty() {
+                out.push_str(&format!("{note}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// 批注导出成一份独立的网页。样式内联在 `<style>` 里：这一个文件自己就是全部，
+/// 不依赖外面任何东西 —— 收到的人双击打开就要能读。
+pub fn annotations_html(
+    meta: &DocMeta,
+    chapters: &[Chapter],
+    annotations: &[Annotation],
+) -> String {
+    let title = display_title(meta);
+    let mut out = format!(
+        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>《{title}》批注</title>\n\
+         <style>body{{max-width:42rem;margin:0 auto;padding:0 1rem 3rem;\
+         font:16px/1.7 sans-serif;color:#1f2328;background:#fff}}\
+         h1{{font-size:1.4rem}}h2{{font-size:1.05rem;margin-top:2rem;\
+         border-bottom:1px solid #d0d7de;padding-bottom:.3rem}}\
+         blockquote{{margin:.8rem 0 0;padding:.2rem 1rem;\
+         border-left:3px solid #d0d7de;color:#59636e}}\
+         .note{{margin:.4rem 0 1.2rem}}\
+         .stale{{color:#9a6700;font-size:.85rem;margin:.3rem 0 0}}\
+         .count{{color:#59636e}}</style>\n</head>\n<body>\n"
+    );
+    out.push_str(&format!("<h1>《{title}》批注</h1>\n"));
+    if !meta.authors.is_empty() {
+        out.push_str(&format!(
+            "<p>作者：{}</p>\n",
+            escape_html(&meta.authors.join("、"))
+        ));
+    }
+    if annotations.is_empty() {
+        out.push_str("<p>还没有批注。</p>\n</body>\n</html>\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "<p class=\"count\">共 {} 条批注。</p>\n",
+        annotations.len()
+    ));
+
+    for (chapter, group) in annotations_by_chapter(annotations) {
+        out.push_str(&format!(
+            "<h2>{}. {}</h2>\n",
+            chapter + 1,
+            escape_html(&chapter_heading(chapters, chapter))
+        ));
+        for a in group {
+            out.push_str("<blockquote>");
+            let quote = collapse(&a.anchor.exact);
+            if quote.is_empty() {
+                out.push_str("（只有位置，没有选中的文字）");
+            } else {
+                out.push_str(&escape_html(&quote));
+            }
+            out.push_str("</blockquote>\n");
+            if a.stale {
+                out.push_str(
+                    "<p class=\"stale\">⚠️ 位置已失效，导出的原文来自记录时的快照。</p>\n",
+                );
+            }
+            let note = a.note.trim();
+            if !note.is_empty() {
+                out.push_str(&format!("<p class=\"note\">{}</p>\n", escape_html(note)));
+            }
+        }
+    }
+    out.push_str("</body>\n</html>\n");
+    out
+}
+
+/// 文本进 HTML 的四个保留字符。属性里不带它，引号可以不转，但转了也无害 ——
+/// 四个一起换是最好记的那套口诀。
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// 把任意空白（含换行）折成一个空格。`exact` 是可见文本，可能带着排版换行，
@@ -162,7 +347,8 @@ mod tests {
 
     use crate::content::anchor::{Confidence, TextAnchor, TextMap};
     use crate::content::annotation::{
-        annotations_by_chapter, annotations_markdown, resolve_annotations,
+        AnnotationExportFormat, annotations_by_chapter, annotations_export, annotations_html,
+        annotations_markdown, annotations_text, resolve_annotations,
     };
     use crate::content::dom::Dom;
     use crate::content::format::{Chapter, DocMeta, Format};
@@ -329,5 +515,63 @@ mod tests {
         assert!(md.contains("只有位置，没有选中的文字"), "{md}");
         assert!(md.contains("这里记一笔"), "{md}");
         let _ = map;
+    }
+
+    /// 纯文本那一档：同一份骨架，没有标记符号。stale 同样要标。
+    #[test]
+    fn text_export_has_the_same_skeleton_without_markup() {
+        let map = map_of("<body><p>甲乙丙丁戊己</p></body>");
+        let first = annotation(1, 0, TextAnchor::new(&map, 0, 0, 2), "第一段的笔记", false);
+        let second = annotation(2, 1, TextAnchor::new(&map, 1, 2, 4), "", true);
+
+        let text = annotations_text(
+            &meta("蛇结"),
+            &[chapter("第一章"), chapter("第二章")],
+            &[first, second],
+        );
+        assert!(text.starts_with("《蛇结》批注\n"), "{text}");
+        assert!(text.contains("作者：作者甲、作者乙"), "{text}");
+        assert!(text.contains("共 2 条批注"), "{text}");
+        assert!(text.contains("1. 第一章"), "{text}");
+        assert!(text.contains("甲乙"), "{text}");
+        assert!(!text.contains("> "), "纯文本不该有引用块的标记：{text}");
+        assert!(text.contains("位置已失效"), "stale 三种格式都得标：{text}");
+    }
+
+    /// 网页那一档：独立文档、章节小标题、**笔记里的保留字符要转义** ——
+    /// 笔记是读者打的任意字，`<script>` 塞进去就成了一条注入。
+    #[test]
+    fn html_export_escapes_note_text_and_stands_alone() {
+        let map = map_of("<body><p>甲乙丙丁</p></body>");
+        let mut quoted = TextAnchor::new(&map, 0, 0, 2);
+        quoted.exact = "<引文> & \"引号\"".into();
+        let a = annotation(1, 0, quoted, "<b>加粗</b>不该生效", false);
+
+        let html = annotations_html(&meta("书"), &[chapter("一")], &[a]);
+        assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
+        assert!(html.contains("<meta charset=\"utf-8\">"), "独立文档自带 charset：{html}");
+        assert!(html.contains("&lt;b&gt;加粗&lt;/b&gt;不该生效"), "笔记要转义：{html}");
+        assert!(html.contains("&lt;引文&gt; &amp; &quot;引号&quot;"), "引文同样要转义：{html}");
+        assert!(!html.contains("<b>"), "转义之后正文里不该有裸标签：{html}");
+        assert!(html.contains("<h2>1. 一</h2>"), "{html}");
+    }
+
+    /// 三档共用同一份分组与「还没有批注」那句实话；统一入口把三档分派到各自那一条。
+    #[test]
+    fn all_export_formats_agree_on_the_empty_book() {
+        let meta = meta("空书");
+        for format in [
+            AnnotationExportFormat::Text,
+            AnnotationExportFormat::Markdown,
+            AnnotationExportFormat::Html,
+        ] {
+            let text = annotations_export(format, &meta, &[chapter("一")], &[]);
+            assert!(text.contains("还没有批注"), "{text}");
+        }
+        assert_eq!(AnnotationExportFormat::Markdown.ext(), "md");
+        assert_eq!(
+            AnnotationExportFormat::Html.mime(),
+            "text/html; charset=utf-8"
+        );
     }
 }

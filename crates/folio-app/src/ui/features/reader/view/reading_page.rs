@@ -18,16 +18,21 @@
 //! 直接跑，这一屏只把结果落成动作。
 
 use folio_core::infra::config::Mode;
+use gpui_kit::assets::IconName;
 use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::popover::Popover;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::popover::{Popover, PopoverState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
-use gpui_kit::component::{ActiveTheme, ThemeMode};
+use gpui_kit::component::{
+    ActiveTheme, Sizable as _, ThemeMode, ThemeStyled as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, StatefulInteractiveElement,
-    Styled, Subscription, WeakEntity, Window, div, px,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
 };
 
 use crate::ui::features::reader::components::image_viewer::{self, ImageViewer};
@@ -35,10 +40,12 @@ use crate::ui::features::reader::components::reading_sheet::ReadingSheet;
 use crate::ui::features::reader::components::toc_panel::{TocEvent, TocPanel};
 use crate::ui::features::reader::model::chrome::{self, Chrome, Effect, Reserve, zone};
 use crate::ui::features::reader::model::session::ReaderSession;
+use crate::ui::features::reader::model::translation::{self, TranslationStatus};
 use crate::ui::features::reader::view::bands;
 use crate::ui::features::settings::CompactSettings;
 use crate::ui::platform;
 use crate::ui::services::config::ConfigHolder;
+use crate::ui::services::l10n::{tf, tr};
 use crate::ui::shell::AppShell;
 use crate::ui::shell::navigation::SizeClass;
 
@@ -50,6 +57,9 @@ const FOOTNOTE_PAD: Pixels = px(12.);
 const FOOTNOTE_EDGE: Pixels = px(8.);
 /// 标记下缘与卡片之间的缝。
 const FOOTNOTE_GAP: Pixels = px(10.);
+/// 翻译弹层那张卡的宽：引文与译文都按「一句到一段」估，320 装得下中英两栏
+/// 各约 20 字 —— 与脚注那张同一族的尺寸。
+const TRANSLATION_CARD_W: Pixels = px(320.);
 
 pub struct ReadingPage {
     pub(in crate::ui::features::reader) reader: Entity<ReaderSession>,
@@ -260,10 +270,17 @@ impl ReadingPage {
             cx.notify();
             return true;
         }
-        // 笔记便签排在最上面那一档：它自带遮罩，先收它，再轮到脚注与目录。
+        // 笔记便签排在最上面那一档：它自带遮罩，先收它；翻译弹层同为「就地升起的
+        // 一张卡」，紧随其后；再轮到脚注与目录。
         if self.reader.read(cx).note_editor_open() {
             self.reader
                 .update(cx, |reader, cx| reader.cancel_note_editor(cx));
+            cx.notify();
+            return true;
+        }
+        if self.reader.read(cx).translation_open() {
+            self.reader
+                .update(cx, |reader, cx| reader.close_translation(cx));
             cx.notify();
             return true;
         }
@@ -469,6 +486,128 @@ impl ReadingPage {
             .update(cx, |reader, cx| reader.toggle_speech(cx));
     }
 
+    /// 书签那一下：钉 / 拔当前位置。状态机在会话里（`model/bookmarks.rs`），
+    /// 这一屏只把那一击递过去 —— 顶栏那颗开关的选中态由会话答。
+    pub(in crate::ui::features::reader) fn toggle_bookmark(&mut self, cx: &mut Context<Self>) {
+        self.reader
+            .update(cx, |reader, cx| reader.toggle_bookmark(cx));
+    }
+
+    /// 跳到某一章的第几个字。「笔记」目的地跳批注 / 书签的那条路：外壳开完书把落点
+    /// 递过来，会话那句 `goto_offset` 自己处理「目标章还没排版」（挂恢复请求，
+    /// 排版做完那一帧落地）。
+    pub fn goto(&mut self, chapter: usize, offset: usize, cx: &mut Context<Self>) {
+        self.reader
+            .update(cx, |reader, cx| reader.goto_offset(chapter, offset, cx));
+    }
+
+    /// 翻译弹层：从选区菜单那格「翻译」升起的一张卡，锚在菜单落地的那一处
+    /// （菜单先收，坐标由会话在升起那一刻拍下）。形状与 [`Self::footnote_popover`]
+    /// 同一套：零尺寸触发器 + `open(true)`，点外面 / 按返回由 `on_open_change`
+    /// 收回会话；区别只在内容 —— 译文可能长过一屏，所以滚动区只包住引文与译文，
+    /// 头部钉住：换语言的那颗下拉在哪儿都够得着。
+    fn translation_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let reader = self.reader.clone();
+        let anchor = self.reader.read(cx).translation.as_ref()?.anchor;
+        // 卡宽给足引文与译文；左右夹屏边，竖直方向照菜单原位往下长 —— 菜单本身
+        // 已经在视口内，往下多半还有地方；贴到底时那半截也比「飘到屏幕中央」可辨认。
+        let width = px(f32::from(window.viewport_size().width).max(1.0));
+        let (left, top) = match anchor {
+            Some(at) => (
+                at.x.clamp(px(8.0), (width - TRANSLATION_CARD_W - px(8.0)).max(px(8.0))),
+                at.y,
+            ),
+            None => ((width - TRANSLATION_CARD_W) / 2.0, px(72.0)),
+        };
+        Some(
+            div()
+                .absolute()
+                .left(left)
+                .top(top)
+                .child(
+                    Popover::new("reader-translation")
+                        .anchor(Anchor::TopLeft)
+                        .open(true)
+                        .on_open_change({
+                            let reader = reader.clone();
+                            move |open, _, cx| {
+                                if !*open {
+                                    reader.update(cx, |reader, cx| reader.close_translation(cx));
+                                }
+                            }
+                        })
+                        .trigger(
+                            Button::new("reader-translation-trigger")
+                                .ghost()
+                                .p_0()
+                                .w(px(0.))
+                                .h(px(0.))
+                                .min_w(px(0.))
+                                .min_h(px(0.)),
+                        )
+                        // 内容**每帧现建**：Pending → Done 的变化不需要有人敲这一层，
+                        // 会话一 notify 重画自然带过来；元素也不是 Clone，闭包里重建
+                        // 是唯一不撒谎的写法。
+                        .content(move |_, _, cx| translation_card(&reader, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 撤销胶囊：最近一次删除（划线、书签）的原样恢复。状态与计时都在会话里
+    /// （`model/undo.rs`），这一屏只画它、把「撤销」那一击递回去。
+    /// 摆在正文之上、底栏之下：chrome 开着时悬在底栏卡片上方（右侧让开听书那颗圆钮），
+    /// 收着时贴着手势条上方 —— 它是临时的一层，不该推动正文，也不该盖住弹层。
+    fn undo_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (label, action) = {
+            let reader = self.reader.read(cx);
+            let slot = reader.undo.as_ref()?;
+            (slot.label.clone(), tr(cx, "reader.undo.action"))
+        };
+        let bottom = if self.chrome.is_open() {
+            150.0
+        } else {
+            24.0 + self.bottom_inset
+        };
+        let page = cx.entity().clone();
+        Some(
+            h_flex()
+                .occlude()
+                .absolute()
+                .left(px(24.0))
+                .right(px(80.0))
+                .bottom(px(bottom))
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .px_4()
+                .py_2()
+                .popover_style(cx)
+                .rounded_full()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(cx.theme().popover_foreground)
+                        .child(label),
+                )
+                .child(
+                    Button::new("reader-undo")
+                        .ghost()
+                        .small()
+                        .label(action.to_string())
+                        .accessibility_label(action)
+                        .on_click(move |_, _, cx| {
+                            page.update(cx, |this, cx| {
+                                this.reader.update(cx, |reader, cx| reader.undo_delete(cx))
+                            })
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// 浅深一键。
     ///
     /// 判据是**解析出来的**那一档（`cx.theme().mode`），不是配置里写的 `system`：
@@ -586,6 +725,7 @@ impl Render for ReadingPage {
             || self.toc.read(cx).menu_open()
             || self.reader.read(cx).footnote().is_some()
             || self.reader.read(cx).note_editor_open()
+            || self.reader.read(cx).translation_open()
             || self.image_viewer.read(cx).is_open();
         self.reader.update(cx, |reader, cx| {
             reader.set_reserve(self.reserve, cx);
@@ -676,6 +816,12 @@ impl Render for ReadingPage {
         // 脚注弹层压在目录之上、图片查看器之下：它是「从正文里抬起来的一张小纸」，
         // 盖住目录那种整屏弹层是对的，而放大看图时读者要的是图。
         root = root.children(self.footnote_popover(window, cx));
+        // 翻译弹层压在脚注之上：两者都是「从正文里升起的一张卡」，同一时刻只该有
+        // 一张在场（开翻译时菜单先收、脚注按各自的路径收）。
+        root = root.children(self.translation_popover(window, cx));
+        // 撤销胶囊压在脚注之上：它是「刚删了什么」的回执，比一条注文更要紧；
+        // 图片查看器照旧最上面。
+        root = root.children(self.undo_pill(cx));
         // 查看器最后挂：它盖住的正是顶栏、底栏与弹层，所以谁都不该浮在它上面。
         // 没开着时这一格是空的，一个节点都不多。
         //
@@ -716,3 +862,154 @@ impl Render for ReadingPage {
         root.children(scrim)
     }
 }
+
+/// 翻译弹层的卡片本体。弹层开着时**每帧现建**：状态（待译 / 到手 / 失败）从会话
+/// 现读，目标语言从配置现读 —— 换语言那一下只写配置并重发请求，这里自然跟上。
+/// 引擎名照实摆着：gtx 是非合同接口，读者该知道这份译文出自谁。
+fn translation_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverState>) -> AnyElement {
+    let current_lang = translation::target_lang(cx);
+    let language_label: SharedString = translation::LANGUAGES
+        .iter()
+        .find(|(code, _)| *code == current_lang)
+        .map(|(_, label)| (*label).into())
+        .unwrap_or_else(|| current_lang.clone().into());
+    let close_label = tr(cx, "reader.translation.dismiss");
+    // 语言下拉的选中态在菜单每次打开时重建（builder 是 `Fn`），当前码从配置现读；
+    // 换一档 = 写配置 + 源文原样重译，命令在会话里（`set_translation_lang`）。
+    let lang_reader = reader.clone();
+    let lang_menu = move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
+        let current = translation::target_lang(cx);
+        let mut menu = menu.min_w(px(180.));
+        for (code, label) in translation::LANGUAGES {
+            let (item_reader, item_code) = (lang_reader.clone(), *code);
+            menu = menu.item(
+                PopupMenuItem::new(*label)
+                    .checked(*code == current)
+                    .on_click(move |_, _, cx| {
+                        item_reader.update(cx, |reader, cx| {
+                            reader.set_translation_lang(item_code, cx)
+                        })
+                    }),
+            );
+        }
+        menu
+    };
+    let Some(translation) = reader.read(cx).translation.as_ref() else {
+        // 弹层开着而状态没了（返回键刚收掉的那一帧）：画一张空卡比 panic 诚实。
+        return div().into_any_element();
+    };
+    let excerpt: SharedString = {
+        let mut head: String = translation.source.chars().take(120).collect();
+        if translation.source.chars().count() > 120 {
+            head.push('…');
+        }
+        head.into()
+    };
+    let body = match &translation.status {
+        TranslationStatus::Pending => div()
+            .py_3()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(tr(cx, "reader.translation.pending")),
+        TranslationStatus::Done {
+            text,
+            detected,
+            cached,
+        } => v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().foreground)
+                    .child(text.clone()),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(match detected {
+                                Some(code) => tf(cx, "reader.translation.detected", &[("lang", &code)]),
+                                None => translation::ENGINE_LABEL.into(),
+                            }),
+                    )
+                    .when(*cached, |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr(cx, "reader.translation.cached")),
+                        )
+                    }),
+            ),
+        TranslationStatus::Failed(reason) => div()
+            .py_3()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(tf(cx, "reader.translation.failed", &[("reason", reason)])),
+    };
+    let close_reader = reader.clone();
+    v_flex()
+        .w(TRANSLATION_CARD_W)
+        .gap_2()
+        .p_3()
+        .popover_style(cx)
+        .rounded_lg()
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_1()
+                .child(
+                    Button::new("translation-lang")
+                        .ghost()
+                        .small()
+                        .label(language_label.to_string())
+                        .accessibility_label(language_label)
+                        .dropdown_menu_with_anchor(Anchor::TopLeft, lang_menu),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(translation::ENGINE_LABEL),
+                )
+                .child(
+                    Button::new("translation-close")
+                        .ghost()
+                        .small()
+                        .icon(IconName::X)
+                        .tooltip(close_label.clone().to_string())
+                        .accessibility_label(close_label)
+                        .on_click(move |_, _, cx| {
+                            close_reader.update(cx, |reader, cx| reader.close_translation(cx))
+                        }),
+                ),
+        )
+        .child(
+            // 引文与译文同住一条滚动区，头部钉在它外面：换语言的那颗下拉在哪儿都够得着。
+            div()
+                .id("reader-translation-scroll")
+                .max_h(px(280.0))
+                .overflow_y_scrollbar()
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_clamp(2)
+                                .text_color(cx.theme().muted_foreground)
+                                .child(excerpt),
+                        )
+                        .child(body),
+                ),
+        )
+        .into_any_element()
+}
+

@@ -430,4 +430,54 @@ ALTER TABLE annotations ADD COLUMN style TEXT NOT NULL DEFAULT 'line';
     r#"
 ALTER TABLE books ADD COLUMN rules_hash TEXT;
 "#,
+    // v23：**书签**（`bookmarks`）。批注闭环的最后一格之一：读者要能把「读到这儿」
+    // 钉成一个可跳回的位置，而不必为它划一段字。
+    //
+    // 为什么单开一张表而不是往 `annotations` 里塞一条「没有选区的批注」：两者的生存
+    // 方式不同 —— 批注有颜色、画法、笔记与 stale 回写，书签只有位置；混一张表的话，
+    // 「列出全部批注」的每一条查询都要顺手滤书签，绘制侧也得防着一条没有选区的
+    // 「批注」混进回显，漏滤一次就是列表里多一行幽灵。分表之后两边各自成立。
+    //
+    // 锚点与批注同一把尺（`TextAnchor` 的 JSON）：可重排书锚住当时那一行（带指纹，
+    // 重排、改字号之后找得回）；定版式那一族是点锚点 —— `chapter` 就是页号，它自己
+    // 就是完整的地址。**没有** `chapter_id` 外键：v13 给批注摘掉它的理由（重扫级联删）
+    // 这里原样成立，章只活在 `anchor_json` 里。
+    //
+    // 只有 `created_at` 没有 `updated_at`：书签不被编辑（钉下、跳回、拔掉），没有
+    // 「最近改动」可排序。
+    r#"
+CREATE TABLE bookmarks (
+    id          INTEGER PRIMARY KEY,
+    book_id     INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    anchor_json TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX idx_bookmarks_book ON bookmarks(book_id);
+"#,
+    // v24：**翻译缓存**（`translations`）。选区翻译那一格每划一次就是一次出网请求，
+    // 而同一段字、同一对语言、同一个引擎的答案不会变 —— 不落缓存的话，读者来回看
+    // 一段译文就是来回打 Google 的门，撞上 429（非浏览器客户端被限流）只是时间问题。
+    //
+    // 键是四元组的 UNIQUE：引擎名（换引擎等于换答案，不许混）、源语、目标语、
+    // **源文哈希**（SHA-256，`ingest::identity` 同一个函数）。源文本身不进库 ——
+    // 调用方手里就有，库里只留钥匙与答案，缓存表不随读书量膨胀。
+    //
+    // 没有 `book_id`、没有任何外键：译文只跟文本走，跟「哪本书里划的」无关 ——
+    // 同一句摘录在两本书里出现，第二次就该命中。
+    //
+    // **只加不删的 INSERT OR REPLACE + 超额修剪**（`save_translation` 里那句）：
+    // 缓存是有上限的资源，超过 [`crate::store::TRANSLATIONS_MAX`] 条时把最旧的挤出去，
+    // 语义与 LRU 的「最旧先用」同一条，只是用 `created_at` 近似。
+    r#"
+CREATE TABLE translations (
+    id          INTEGER PRIMARY KEY,
+    provider    TEXT    NOT NULL,
+    source_lang TEXT    NOT NULL,
+    target_lang TEXT    NOT NULL,
+    source_hash TEXT    NOT NULL,
+    target_text TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL,
+    UNIQUE (provider, source_lang, target_lang, source_hash)
+);
+"#,
 ];

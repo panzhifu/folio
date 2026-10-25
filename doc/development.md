@@ -157,7 +157,7 @@ secret 在不在（三十秒红完，不烧构建机时），然后 Linux / macO
 - macOS 未签名、未公证：首次打开要在「隐私与安全性」里允许一次。
 - Windows 未经真机验证。
 - Android 只出 `arm64-v8a`（API 26+ 的 64 位设备），且 APK 不带第三方许可文本。
-- PDF / AZW4 / DjVu 无文字层；「笔记」一屏是空状态。
+- PDF / AZW4 / DjVu 里没有字的那一页选不出东西（扫描件没带 OCR）；「笔记」一屏是空状态。
 - HarmonyOS 与 iOS 不在发布矩阵里。
 
 ## 提交：用 jj

@@ -1564,9 +1564,10 @@ fn is_resource(media_type: &str) -> bool {
 ///
 /// EPUB3 让作者给「读者不一定解得动的那一份」挂一条降级路，主流那一个用法就是 SVG：
 /// 正文里 `<img src="chart.svg">`，manifest 上 `href="chart.svg" media-type="image/svg+xml"
-/// fallback="chart_png"`，而 `chart_png` 是同一张图的 PNG。我们这一版没有 SVG 栅格化器，
-/// 所以这条链是那些图**唯一**画得出来的路 —— 不走它，读者看到的是一块空白，而字节明明
-/// 就躺在同一个容器里。
+/// fallback="chart_png"`，而 `chart_png` 是同一张图的 PNG。SVG 现在由 [`svg`](super::svg)
+/// 在真要画的时候栅格化，没有降级路也画得出来；这条链仍然先走 —— 位图是容器里现成的
+/// 一份，媒体类型与尺寸都自报，而可重排这一支登记 SVG 时尺寸是 0（见 [`parse_image`]），
+/// 排版只能降级。
 ///
 /// 原条目自己就解得动时回 `None`（= 照原条目读），调用方因此不必区分「没有挂链」与
 /// 「链上什么都没有」，那两种是同一件事。三档畸形各给一条说法：

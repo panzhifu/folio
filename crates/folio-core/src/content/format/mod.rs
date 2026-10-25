@@ -1212,8 +1212,10 @@ const DECODABLE_BITMAPS: [(image::ImageFormat, &str); 6] = [
 /// 声明。参数串（`image/jpeg;charset=`）与大小写都归到表那一边 —— 出版书里 `IMAGE/PNG`
 /// 与带参数的写法都真的存在。
 ///
-/// **`false` 不等于「这本书坏了」**：SVG 是完全合法的图，只是我们这一版没有栅格化器，
-/// 所以调用方拿它去找作者备好的那一份，找不到就照旧留一块空。
+/// **`false` 不等于「这本书坏了」**：它只说明 `image` 这一层没有解码器 —— SVG 就落在
+/// 这一格里，而它由 [`svg`] 在真要画的时候栅格化，所以 EPUB 只是拿它决定「要不要沿
+/// `fallback` 找一份位图」；找不到时那张 SVG 照样登记、照样画得出。拿它当登记门槛的
+/// 地方（MHTML 那一条）会把声明成 SVG 的图跳过。
 pub(crate) fn is_decodable_bitmap(media_type: &str) -> bool {
     let mime = media_type
         .split(';')

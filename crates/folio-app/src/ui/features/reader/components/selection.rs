@@ -1010,11 +1010,11 @@ const MENU_GAP: f32 = 6.0;
 /// 叠在圆点上的那枚勾的字号（`Icon` 取当前文字号）。
 const SWATCH_CHECK: f32 = 13.0;
 
-/// 动作条的格子数：复制、划线（或取消）、笔记、清除，加上**只有能离屏渲染那一端才有**的
+/// 动作条的格子数：复制、划线（或取消）、笔记、翻译、清除，加上**只有能离屏渲染那一端才有**的
 /// 「分享卡片」。判据在 [`crate::ui::platform::RENDERS_SHARE_CARDS`]，只写一次：桌面上
 /// 那一按渲不出字节，摆出来就是一个坏按钮。
 fn action_cells(share: bool) -> f32 {
-    if share { 5.0 } else { 4.0 }
+    if share { 6.0 } else { 5.0 }
 }
 
 /// 整块菜单占的高（含尾巴）：摆位与「放不下就翻面」都按这个数算。
@@ -1042,7 +1042,7 @@ fn mark_row_width() -> f32 {
 
 /// 整块菜单的宽 = 顶端那一行与动作条里的**较宽者**。
 ///
-/// 为什么不写死其中一个：动作条的宽跟着「摆不摆分享卡片那一格」变（168 / 208），
+/// 为什么不写死其中一个：动作条的宽跟着「摆不摆分享卡片那一格」变（208 / 248），
 /// 而那一行的宽跟着「几档画法、几档颜色」变。今天那一行更宽，于是摆位与夹边按它算，
 /// 动作条居中在它下面；哪天颜色减到三枚而画法只留两格，那条关系就反过来 —— 写死任何
 /// 一边都会让另一顶出屏幕或摆歪。
@@ -1178,6 +1178,17 @@ impl ReaderSession {
                 hover,
                 reader.clone(),
                 |r, window, cx| r.open_note_editor(window, cx),
+            ))
+            // 翻译：把选区交给外部引擎，弹层锚在菜单落地的那一处（菜单先收）。
+            // 与笔记那格同一类「就地做一件事」的入口，所以排在它旁边。
+            .child(action_cell(
+                "selection-translate",
+                IconName::Languages,
+                tr(cx, "reader.translate"),
+                foreground,
+                hover,
+                reader.clone(),
+                |r, _, cx| r.open_translation(cx),
             ))
             // 渲不出图的那一端这一格直接缺席（见 [`crate::ui::platform::RENDERS_SHARE_CARDS`]），
             // 所以它是 `children(Option)` 而不是一个禁用的按钮。

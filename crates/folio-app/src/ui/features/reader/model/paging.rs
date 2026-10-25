@@ -522,6 +522,14 @@ impl ReaderSession {
         if self.turn_in_flight() {
             return false;
         }
+        // 浮层（顶栏底栏 / 脚注小纸片）压着的时候，分页那两条「滚一下翻一页」的路让位：
+        // 滚轮一格一页、触摸板的像素增量攒半屏一页，走的都是翻页，与 `claim_swipe` 那条
+        // 跟手翻页的让位是同一条规矩 —— 工具栏露头之后正文上的输入只表达「收浮层」。
+        // 连续滚动不在此列：那一路没有「翻页」这个动作，手指与滚轮滚的就是正文本身，
+        // 挡了它，读者开着浮层就再也读不下去半行。
+        if self.overlay_open && !self.laid_out.mode.is_continuous() {
+            return false;
+        }
         if dy == 0.0 {
             // 零增量也是样本：惯性尾巴上「这一帧该走的距离被上一帧走过了」就是它。
             crate::ui::features::reader::model::perf::scroll_end(

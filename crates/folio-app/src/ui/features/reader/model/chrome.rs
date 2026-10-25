@@ -372,23 +372,24 @@ impl Chrome {
 
     /// 正文上的一次点击。
     ///
-    /// 浮层开着的时候**只有中间那一区收浮层**：左右两侧照常翻屏，浮层留着不动。
-    /// 工具栏不是模态框 —— 读者开着它把字号调好、接着点右边往下读，是最常见的一串
-    /// 动作。从前这里「任何一区都只收浮层」，工具栏一露头，左右两下就全变成「关工具栏」，
-    /// 读起来就是「点了工具栏之后就翻不动了」（2026-10-25 真机）。
+    /// 浮层开着的时候，正文上的任何一击都只**收浮层**：左右两区不翻页。工具栏露头的那一刻
+    /// 这一层就是模态的 —— 与压在它上面的图片查看器、两块弹层同一套读法（会话侧的
+    /// `overlay_open` 也正是照这个语义让长按与拖选让位的：那一击的意思是「收浮层」，
+    /// 不是「操作正文」）。左右两区照旧翻页的话，读者点中间想收浮层、点偏了一点却翻过
+    /// 一页，工具栏还压在新的那一页上 —— 两种结果混在一根手指上，界限只有三分之一屏宽。
+    /// 要继续读，收了浮层再点，一下就回正轨；这条边界靠「中间一区」划不清楚，就干脆不划。
     pub fn handle_body_tap(&mut self, zone: Zone) -> Effect {
+        if self.open {
+            self.dismiss();
+            return Effect::DismissChrome;
+        }
         match zone {
+            Zone::ToggleChrome => {
+                self.open = true;
+                Effect::OpenChrome
+            }
             Zone::PrevPage => Effect::PrevPage,
             Zone::NextPage => Effect::NextPage,
-            Zone::ToggleChrome => {
-                if self.open {
-                    self.dismiss();
-                    Effect::DismissChrome
-                } else {
-                    self.open = true;
-                    Effect::OpenChrome
-                }
-            }
         }
     }
 
@@ -473,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn side_taps_still_page_while_the_overlay_is_up() {
+    fn a_body_tap_while_the_overlay_is_up_only_dismisses_it() {
         let mut chrome = Chrome::default();
         // 干净态：点中间开浮层，点两边翻屏。
         assert_eq!(
@@ -481,19 +482,24 @@ mod tests {
             Effect::OpenChrome
         );
         assert!(chrome.is_open());
-        // 浮层开着时左右两区照常翻屏，浮层留着不动 —— 「开着工具栏就翻不动」那条
-        // 真机毛病的正面。
-        assert_eq!(chrome.handle_body_tap(Zone::PrevPage), Effect::PrevPage);
-        assert!(chrome.is_open(), "翻一页不该把工具栏收掉");
-        assert_eq!(chrome.handle_body_tap(Zone::NextPage), Effect::NextPage);
-        assert!(chrome.is_open());
-        // 只有中间那一区是「收」。
+        // 浮层开着时三区都是「收」：左右两区不翻页 —— 工具栏露头之后这一层是模态的，
+        // 否则「想收浮层、点偏了一点翻过一页」两种结果混在同一根手指上。
         assert_eq!(
-            chrome.handle_body_tap(Zone::ToggleChrome),
+            chrome.handle_body_tap(Zone::PrevPage),
             Effect::DismissChrome
         );
-        assert!(!chrome.is_open(), "中间那一区该把整层收掉");
-        // 收干净之后中间那一区回到「开浮层」。
+        assert!(!chrome.is_open(), "左右那一区也该把整层收掉");
+        chrome.handle_body_tap(Zone::ToggleChrome);
+        assert!(chrome.is_open());
+        assert_eq!(
+            chrome.handle_body_tap(Zone::NextPage),
+            Effect::DismissChrome
+        );
+        assert!(!chrome.is_open());
+        // 收干净之后回到干净态的规则：两边翻屏、中间开浮层。
+        assert_eq!(chrome.handle_body_tap(Zone::PrevPage), Effect::PrevPage);
+        assert!(!chrome.is_open(), "翻页不该顺手把浮层打开");
+        assert_eq!(chrome.handle_body_tap(Zone::NextPage), Effect::NextPage);
         assert_eq!(
             chrome.handle_body_tap(Zone::ToggleChrome),
             Effect::OpenChrome

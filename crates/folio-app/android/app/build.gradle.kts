@@ -196,6 +196,12 @@ android {
             // `pdf_oxide` 命中 286 行，证明不是搜索失灵而是真没有）；这四个包自己 `src/` 里没有
             // `libloading`/`dlopen`，我们图里那份 `libloading` 是 `ash` 载 Vulkan 驱动用的。
             //
+            // 第四次是 `.doc` 那一路（2026-10-26 实测）：`rwml` 0.1.5 同样声明
+            // `crate-type = ["rlib", "cdylib"]`，APK 里于是多出两份（12,444,520 + 298,672
+            // = 12,743,192 B，stored 不压缩），占 62.5 MB 那包的 20%。判据三条同形且都过：
+            // NEEDED 只有 liblog/libandroid/libdl/libm/libc；整库 `strings` 搜 `librwml`
+            // 0 命中；rwml 的 `src/` 里也没有 `dlopen`/`libloading`。
+            //
             // 这一格会自己复发：每加一个「cdylib + rlib 双形」的依赖就多一份副本，而它不出现在
             // 任何编译错误里，只出现在包体积上。判据是 `unzip -l` 里 `lib/` 那一段有没有带
             // `-[0-9a-f]{16}` 哈希后缀的名字 —— 那种名字就是 cargo-ndk 拷进来的副本。
@@ -206,6 +212,7 @@ android {
                 "**/liboffice_oxide*.so",
                 "**/libdjvu_rs*.so",
                 "**/libsevenz_rust2*.so",
+                "**/librwml*.so",
             )
             keepDebugSymbols += listOf(
                 "*/arm64-v8a/libfolio_app.so",

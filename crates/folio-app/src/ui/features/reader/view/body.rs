@@ -3331,3 +3331,73 @@ fn push_border(
 
 #[cfg(test)]
 mod tests;
+
+/// `column_cut` 与 `capture_wanted` 的真值表。这两个判定是纯函数，用不着窗口，
+/// 按仓库约定内联在被测文件底下 —— 不占宿主套件里一个带窗测试的名额。
+#[cfg(test)]
+mod truth_tables {
+    use super::{capture_wanted, column_cut};
+    use crate::ui::features::reader::motion::turn_animation::{Crease, Cut, Sheet};
+
+    /// 折页那一趟里**每一栏该按哪条折线裁**，包括 GPU 网格开着的那些帧。
+    ///
+    /// 这一条钉的是「下一页的字闪一下又没了」：网格是渲染器那一趟画的，它缺捕获纹理时只写一行
+    /// 日志、静默不画整趟（fork 的 `page_curl.rs`），而应用这侧的 `capture_valid` 只量得出正面
+    /// 那块。被跳过的那一帧，未裁的新页字就整屏铺在卷起来的纸该在的地方。从前 `column_cut`
+    /// 跟着 `gpu_curl_mesh` 一起关掉，等于把遮挡全押在「网格一定画得出来」上。
+    #[test]
+    fn the_curl_clips_every_column_even_while_the_mesh_is_on() {
+        let crease = Crease {
+            nx: 1.0,
+            ny: 0.0,
+            d: 200.0,
+        };
+        let sheet = Sheet {
+            offset: (0.0, 0.0),
+            z: 0,
+            cut: Some(Cut::new(crease, true)),
+        };
+        assert_eq!(
+            column_cut(false, false, &sheet),
+            sheet.cut,
+            "单页折页里这一栏的字该按折线裁 —— 网格在不在都一样"
+        );
+        assert_eq!(
+            column_cut(true, true, &sheet),
+            sheet.cut,
+            "双页 leaf 那一栏同样裁"
+        );
+        assert_eq!(
+            column_cut(true, false, &sheet),
+            None,
+            "双页静态那一栏不裁：那条折线是 leaf 半块的，裁它会抹掉读者正在读的另一半"
+        );
+    }
+
+    /// 捕获门的真值表。
+    ///
+    /// 这一格存在的理由是 `content_ready` 那一条：进书第一帧的排版还在后台（`ensure_viewport`
+    /// 是这一帧才把作业丢出去的），此时烘下来的纹理只有纸色；而它一旦被记成「已烘」，
+    /// 排版回来既不动 `captured_page` 也不置 `capture_dirty` —— 那张白纸就留到下一次换页。
+    /// 真机上读到的就是「第一次进书划一页整页白，等它翻完自己好了」。
+    #[test]
+    fn a_page_whose_typesetting_has_not_landed_is_never_baked() {
+        // 稳态：这一页还脏着，该烘。
+        assert!(capture_wanted(false, false, true, true, false));
+        // 同一页烘过、又不脏：不重复跑整趟捕获 pass。
+        assert!(!capture_wanted(false, false, true, false, true));
+        // 动画在飞：场景里已经有新页，烘出来不是正在翻的那张。
+        assert!(!capture_wanted(true, false, true, true, false));
+        // 连续滚动没有「页」。
+        assert!(!capture_wanted(false, true, true, true, false));
+        // **这一条是主角**：排版没落地时，脏与不脏都不烘 —— 烘出来的只有纸色。
+        for dirty in [true, false] {
+            for captured in [true, false] {
+                assert!(
+                    !capture_wanted(false, false, false, dirty, captured),
+                    "排版没落地时不该烘（dirty={dirty} captured={captured}）"
+                );
+            }
+        }
+    }
+}

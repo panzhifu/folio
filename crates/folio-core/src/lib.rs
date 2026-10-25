@@ -39,7 +39,8 @@ pub use content::anchor::{
     relocate,
 };
 pub use content::annotation::{
-    ResolvedAnnotation, annotations_by_chapter, annotations_markdown, resolve_annotations,
+    AnnotationExportFormat, ResolvedAnnotation, annotations_by_chapter, annotations_export,
+    annotations_markdown, resolve_annotations,
 };
 pub use content::document::{BookDocument, ContentRef, Document, LocatorKind};
 pub use content::format::{
@@ -51,6 +52,7 @@ pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
     Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, LOG_OFF_ENV, Language, Layer,
     Library, Logging, Mode, PageTurn, Provenance, Reader, Resolved, Speech, TocDensity,
+    Translation,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
