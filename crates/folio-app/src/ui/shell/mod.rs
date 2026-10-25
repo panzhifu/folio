@@ -1039,9 +1039,15 @@ impl AppShell {
     }
 
     /// 当前档位的导航栏：点击即切目的地。
-    fn nav(&self, size: SizeClass, cx: &mut Context<Self>) -> impl IntoElement {
+    fn nav(
+        &self,
+        size: SizeClass,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let entity = cx.entity().clone();
         navigation(
+            window,
             cx,
             self.destination,
             size,
@@ -1182,7 +1188,7 @@ impl Render for AppShell {
                 // 底栏连同它上面那条发丝线一起收起；底部的留白是系统安全区，不是应用
                 // chrome，收起导航栏也不动它，否则正文会滑进手势条下面。
                 if !nav_gone {
-                    column = column.child(hairline(cx)).child(self.nav(size, cx));
+                    column = column.child(hairline(cx)).child(self.nav(size, window, cx));
                 }
                 column
                     .child(div().w_full().h(px(safe.bottom)))
@@ -1195,7 +1201,7 @@ impl Render for AppShell {
                     .bg(cx.theme().background)
                     .text_color(cx.theme().foreground);
                 if !nav_gone {
-                    row = row.child(self.nav(size, cx));
+                    row = row.child(self.nav(size, window, cx));
                 }
                 row.child(
                     div()

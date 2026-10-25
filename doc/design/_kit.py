@@ -327,6 +327,7 @@ NAV_ITEM_H = 44.0      # p_2(8) + h_7(28) + p_2(8)（sidebar/menu.rs:305-307,329
 NAV_ITEM_H_RAIL = 30.0  # rail 那一档不走 h_7 那支：p_2 + 14 + p_2
 NAV_GAP = 8.0          # 同级项之间 gap_2（menu.rs:75）
 NAV_INSET = 12.0       # 展开档内容层 px_3；rail 是 p_2 = 8
+NAV_FOOTER_PB = 12.0   # 整组走 footer 槽，那一格自带 pb_3（sidebar/mod.rs:488）
 
 NAV_TABS = [("library", "书架"), ("chart-column", "统计"),
             ("notebook-pen", "笔记"), ("circle-user", "我的")]
@@ -335,14 +336,16 @@ NAV_TABS = [("library", "书架"), ("chart-column", "统计"),
 def side_nav(T, current, collapsed, height, top=0.0):
     """应用自己的侧栏导航一整条。
 
-    `top` 给状态栏那一格：外壳的内容列是 `.pt(safe.top)`（`shell/mod.rs:1193-1212`），
-    所以侧栏也从安全区下面起画，不钻到时钟后面去。
+    `top` 给状态栏那一格：外壳的**正文**列是 `.pt(safe.top)`（`shell/mod.rs:1200-1211`），
+    侧栏整列没有那条顶边距 —— 稿子按安全区下面起画，实现按 y=0 起画。两档都不画品牌头、
+    整组又沉到底部之后，这一段差的只是空白，不再压到任何可点的东西上。
 
     **选中那一格只换底色与前景色再加 `font_medium`** —— 没有左标记条，文字也不另变色
     （`sidebar/menu.rs:316-320`）。这条与手机底栏同一处理：换页的提示只有一处。
     两档**都不画品牌头**（2026-10-25 撤掉：应用名在桌面归自绘标题栏，侧栏是导航不是
-    标牌），rail 那一档图标项自己带 tooltip（`:230-232`）。第一项的起点因此是 `is_first`
-    那支 `pt_3`（`sidebar/mod.rs:474`），rail 的外层另有 `p_2`。
+    标牌），rail 那一档图标项自己带 tooltip（`:230-232`）。
+    **整组贴底**（同日定）：走 kit 的 `footer` 槽，四格从侧栏底边往上排，最后一格下沿
+    距底边 `pb_3` 12；rail 那一档 footer 另加 `pt_2`，只影响它自己上面那条缝。
     """
     w = RAIL_W if collapsed else SIDEBAR_W
     e = [f'<rect x="0" y="{top}" width="{w}" height="{height}" fill="{T["sidebar_bg"]}"/>',
@@ -350,7 +353,8 @@ def side_nav(T, current, collapsed, height, top=0.0):
          f'fill="{T["sidebar_border"]}"/>']
     inset = 8.0 if collapsed else NAV_INSET
     item_h = NAV_ITEM_H_RAIL if collapsed else NAV_ITEM_H
-    y = top + 12.0 + (inset if collapsed else 0.0)   # 首组 pt_3；只有 rail 的外层再给 p_2
+    group_h = len(NAV_TABS) * item_h + (len(NAV_TABS) - 1) * NAV_GAP
+    y = top + height - NAV_FOOTER_PB - group_h   # 贴底：footer 之下只有那 12
     for ic, label in NAV_TABS:
         on = label == current
         if on:

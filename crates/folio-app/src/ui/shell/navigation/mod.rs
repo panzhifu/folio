@@ -121,7 +121,8 @@ impl SizeClass {
 /// 返回的元素会撑满它在布局里拿到的盒子（side nav 自带宽度；bottom bar 高度由
 /// [`bottom_bar::BAR_HEIGHT`] 定），调用方在外层决定它占哪条边。
 pub fn navigation<F>(
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
     current: Destination,
     size: SizeClass,
     on_select: F,
@@ -131,7 +132,7 @@ where
 {
     match size {
         SizeClass::Compact => bottom_bar::bottom_bar(cx, current, on_select).into_any_element(),
-        SizeClass::Medium => side_nav(cx, current, true, on_select).into_any_element(),
-        SizeClass::Expanded => side_nav(cx, current, false, on_select).into_any_element(),
+        SizeClass::Medium => side_nav(window, cx, current, true, on_select).into_any_element(),
+        SizeClass::Expanded => side_nav(window, cx, current, false, on_select).into_any_element(),
     }
 }
