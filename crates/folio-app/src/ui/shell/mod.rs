@@ -28,7 +28,6 @@ use gpui_kit::{
     Window, actions, div, px,
 };
 
-use crate::ui::components::hairline;
 use crate::ui::features::notes::NotesView;
 use crate::ui::features::reader::{Arrow, ReadingPage, Reserve};
 use crate::ui::features::settings::{CompactSettings, SettingsPage, SettingsView};
@@ -406,8 +405,7 @@ pub struct AppShell {
     ///
     /// 为什么要冻：`NavStackState::pop` 一调，栈深**当场**就变了，而出场那一页还要挂满整个
     /// 转场（进度就是靠它每帧采样出来的）。于是导航栏在动画第 0 帧就回来，把正文容器挤掉
-    /// 一段 —— Android 上是状态栏还原后 `safe.top` 那一截再加 56 那条底栏，桌面上是侧栏那
-    /// 260 宽。凡是把东西贴在容器边上的界面都会跟着跳一下。
+    /// 一段 —— 桌面上是侧栏那 96 宽。凡是把东西贴在容器边上的界面都会跟着跳一下。
     ///
     /// 冻到转场结束，动画期间容器尺寸不变，导航栏的回来落在「出场页已经不在了」那一帧。
     /// 代价说清楚：进场那一页在动画这 280 毫秒里停在改变前的位置上。
@@ -1038,19 +1036,20 @@ impl AppShell {
         self.page_pushed(cx) || self.settings_pushed(cx)
     }
 
-    /// 当前档位的导航栏：点击即切目的地。
+    /// 当前档位的导航栏：点击即切目的地。`safe` 是系统 inset —— Compact 档靠底那一条
+    /// 让底栏离开手势条，侧栏两档靠顶那一条让开状态栏 / 挖孔。
     fn nav(
         &self,
         size: SizeClass,
-        window: &mut Window,
+        safe: &host::Insets,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let entity = cx.entity().clone();
         navigation(
-            window,
             cx,
             self.destination,
             size,
+            safe,
             move |destination, window, cx| {
                 entity.update(cx, |this, cx| this.go(destination, window, cx))
             },
@@ -1179,29 +1178,30 @@ impl Render for AppShell {
         } else {
             let content = self.content(cx).into_any_element();
             if size.is_compact() {
-                let mut column = v_flex()
+                // 底栏是**浮**的：它不吃布局行，内容铺满整窗、自己带尾部留白
+                // （`navigation::clearance`，加在各目的地滚动内容里），于是滚动时从栏底下
+                // 穿过去。`safe.bottom` 也**不**在这里垫 —— 它已经算进那段留白与栏位偏移，
+                // 这里再垫一次，内容就永远到不了栏下面。
+                let mut page = div()
+                    .relative()
                     .size_full()
                     .bg(cx.theme().background)
                     .text_color(cx.theme().foreground)
                     .pt(px(safe.top))
-                    .child(div().flex_1().min_h_0().overflow_hidden().child(content));
-                // 底栏连同它上面那条发丝线一起收起；底部的留白是系统安全区，不是应用
-                // chrome，收起导航栏也不动它，否则正文会滑进手势条下面。
+                    .child(div().size_full().min_h_0().overflow_hidden().child(content));
                 if !nav_gone {
-                    column = column.child(hairline(cx)).child(self.nav(size, window, cx));
+                    page = page.child(self.nav(size, &safe, cx));
                 }
-                column
-                    .child(div().w_full().h(px(safe.bottom)))
-                    .into_any_element()
+                page.into_any_element()
             } else {
-                // 阅读页在最上面时这条侧栏整条不画（不是留个空位）：它占的那 260
-                // 逻辑像素要还给正文，双页才摆得开。
+                // 阅读页在最上面时这条侧栏整条不画（不是留个空位）：它占的那段宽
+                // 要还给正文，双页才摆得开。
                 let mut row = h_flex()
                     .size_full()
                     .bg(cx.theme().background)
                     .text_color(cx.theme().foreground);
                 if !nav_gone {
-                    row = row.child(self.nav(size, window, cx));
+                    row = row.child(self.nav(size, &safe, cx));
                 }
                 row.child(
                     div()
@@ -1212,7 +1212,10 @@ impl Render for AppShell {
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
+                        // 顶让状态栏 / 挖孔，底让手势条。侧栏两档是嵌入的，内容不从栏下
+                        // 穿过，所以这两条由这一格自己让，与 Compact 档那条浮栏不同。
                         .pt(px(safe.top))
+                        .pb(px(safe.bottom))
                         .child(content),
                 )
                 .into_any_element()

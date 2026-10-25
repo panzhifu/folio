@@ -35,7 +35,7 @@ use super::model::heatmap::{Heatmap, ROWS, WEEKS, duration};
 use crate::ui::components::muted_label;
 use crate::ui::services::app_store;
 use crate::ui::services::l10n::{tf, tr};
-use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
+use crate::ui::shell::navigation::{self, SizeClass, reserved_width};
 
 /// 内容列的最大宽度（逻辑像素）。报告类内容拉到 1600 宽会把格子拉成一片沙漠。
 const COLUMN_MAX: f32 = 720.0;
@@ -81,13 +81,8 @@ fn ramp(cx: &App) -> [Hsla; 5] {
 /// （GitHub 在手机上是同一处置）。窄屏硬缩到 5 像素的结果是整张图糊成一块色面，
 /// 那不如能滚。
 fn cell_size(width: f32, size: SizeClass) -> f32 {
-    let nav = match size {
-        SizeClass::Compact => 0.0,
-        SizeClass::Medium => RAIL_WIDTH,
-        SizeClass::Expanded => SIDEBAR_WIDTH,
-    };
     let inset = GUTTER * 2.0 + LABEL_LANE;
-    let room = (width - nav - inset).max(0.0);
+    let room = (width - reserved_width(size) - inset).max(0.0);
     // 宽屏那一列被 `COLUMN_MAX` 夹住，格子也就按夹住后的宽度算。
     let room = match size {
         SizeClass::Expanded => room.min(COLUMN_MAX - inset),
@@ -137,6 +132,13 @@ impl Render for StatsView {
         let size = SizeClass::of(window);
         let wide = size == SizeClass::Expanded;
         let cell = cell_size(f32::from(window.viewport_size().width), size);
+        // Compact 档那条底栏是浮的：内容自己把栏底下那一段空出来，滚动时才从栏下穿过
+        // （与书架 grid 的 `tail` 同一条）。侧栏两档嵌入占位，外壳已经让过底边。
+        let tail = if size.is_compact() {
+            navigation::clearance(crate::ui::host::safe_area(window, cx).bottom)
+        } else {
+            0.0
+        };
         let body: AnyElement = match &self.heatmap {
             None => self.unavailable(cx),
             Some(heatmap) => self.block(heatmap, cell, cx),
@@ -145,7 +147,7 @@ impl Render for StatsView {
             .w_full()
             .when(wide, |el| el.max_w(px(COLUMN_MAX)))
             .px(px(GUTTER))
-            .pb(px(GUTTER))
+            .pb(px(GUTTER + tail))
             .child(body);
         v_flex()
             .id("folio-stats")

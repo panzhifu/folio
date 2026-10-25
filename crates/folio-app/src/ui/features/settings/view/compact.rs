@@ -68,6 +68,7 @@ use super::spec_pages;
 use crate::ui::components::TopBar;
 use crate::ui::services::l10n::tr;
 use crate::ui::services::storage::{self, Job};
+use crate::ui::shell::navigation;
 
 /// 一行的可命中高度。Apple HIG 明文那条 44×44；规范点名的 `px` 例外之一就是
 /// 「最小命中容差」，所以这一格不跟着 rem 走。
@@ -725,9 +726,18 @@ impl Render for CompactSettings {
         // 宿主测试按这一格确认「我的」那一个目的地画的是分组列表（同 `SettingsView`）。
         // 底色与外壳涂在状态栏那一条 `safe.top` 下面的那一档**同一个角色**：这一屏比它深一档
         // 时，屏幕顶就是一道色（理由写在 `card` 那段）。
+        // 根屏底下那条导航栏是浮的（Compact 档），这一屏又**不滚动** —— 不在这里让出
+        // 那一段，最后一行会压到胶囊底下。钻进来的子页反而要让满整窗（导航栏这时由外壳
+        // 收起），所以只有根屏加。
+        let tail = if matches!(self.screen, Screen::Root) {
+            navigation::clearance(crate::ui::host::safe_area(window, cx).bottom)
+        } else {
+            0.0
+        };
         let mut root = v_flex()
             .id("settings-compact")
             .size_full()
+            .pb(px(tail))
             .bg(cx.theme().background)
             .test_support();
         match self.screen {

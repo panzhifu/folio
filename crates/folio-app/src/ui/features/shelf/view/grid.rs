@@ -5,7 +5,7 @@
 //! 所以它们能单独被断言（见 `columns_for` 的那三条）。
 
 use super::super::components::book_card::COVER_RATIO;
-use crate::ui::shell::navigation::{RAIL_WIDTH, SIDEBAR_WIDTH, SizeClass};
+use crate::ui::shell::navigation::{SizeClass, reserved_width};
 
 pub(in crate::ui::features::shelf) const COLUMNS: u16 = 3;
 
@@ -36,17 +36,13 @@ pub(in crate::ui::features::shelf) struct GridSpec {
     pub(in crate::ui::features::shelf) cover_height: f32,
 }
 
-/// 网格真正能用到的宽度：扣掉导航栏与两侧留白。
+/// 网格真正能用到的宽度：扣掉导航栏占的那一条与两侧留白。
 ///
 /// `columns_for` 与 [`grid_spec`] 都从这一个式子取数：两处各算一份的话，改一侧忘另一侧
-/// 会表现为「列数对了但每格宽得莫名其妙」。
+/// 会表现为「列数对了但每格宽得莫名其妙」。导航栏那一条由 `shell::navigation` 给 ——
+/// 三档里只有 Medium 与 Expanded 占位，Compact 那条底栏是浮的（占 0）。
 pub(in crate::ui::features::shelf) fn available_width(width: f32, size: SizeClass) -> f32 {
-    let nav = match size {
-        SizeClass::Compact => 0.0,
-        SizeClass::Medium => RAIL_WIDTH,
-        SizeClass::Expanded => SIDEBAR_WIDTH,
-    };
-    (width - nav - GUTTER * 2.0).max(0.0)
+    (width - reserved_width(size) - GUTTER * 2.0).max(0.0)
 }
 
 /// 一横排该排成什么样：列数按 [`columns_for`]，封面高按那个列数均出来的格宽。

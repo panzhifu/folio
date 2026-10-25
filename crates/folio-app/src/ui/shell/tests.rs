@@ -26,7 +26,7 @@ fn the_book_does_not_ask_the_nav_bar_to_move() {
     assert!(!immersive_nav(SizeClass::Compact, false));
     assert!(!immersive_nav(SizeClass::Expanded, false));
 
-    // 而报给正文的那一条**永远不含导航栏**：宽恒为 0。底栏那 56 与侧栏那 260 都还在
+    // 而报给正文的那一条**永远不含导航栏**：宽恒为 0。底栏那 56 与侧栏那 96 都还在
     // 原地画着，只是被这一层盖住 —— 报错了轴的那一步正是上一版让两端各扣错一条边的地方。
     let safe = Insets {
         top: 41.0,
@@ -40,6 +40,130 @@ fn the_book_does_not_ask_the_nav_bar_to_move() {
             height: 41.0 + 25.0
         },
         "宽恒为 0（导航栏由这一层盖住，不再向正文报），高是顶上与底下两条安全区"
+    );
+}
+
+/// 三档的占位宽与底栏那两条数：**只有嵌入的两档占宽**，底栏浮在内容上。
+///
+/// 这是「三档统一」里最容易被改歪的一格：底栏一旦顺手也占一条布局行，内容就再也
+/// 到不了它底下（悬浮感当场没有）；侧栏两档一旦不占宽，书架第一列就永远压在卡片下面
+/// （看着像丢了一列书）。两个方向都只在这一处判。
+#[test]
+fn the_nav_bar_reserves_width_only_where_it_is_docked() {
+    use super::SizeClass;
+    use super::navigation::{
+        BAR_HEIGHT, NAV_MARGIN, NAV_WIDTH, bar_offset, clearance, reserved_width,
+    };
+
+    assert_eq!(
+        reserved_width(SizeClass::Compact),
+        0.0,
+        "底栏是浮的：内容铺满整窗，只靠尾部留白让开"
+    );
+    assert_eq!(
+        reserved_width(SizeClass::Medium),
+        NAV_WIDTH + NAV_MARGIN * 2.0,
+        "悬浮侧栏：卡片 96，左右各 12 的列归它"
+    );
+    assert_eq!(
+        reserved_width(SizeClass::Expanded),
+        NAV_WIDTH,
+        "嵌入侧栏：贴边，只吃 96"
+    );
+
+    // 手势条那一条算两次：底栏自己让一次（`bar_offset`），内容尾部留白再让一次
+    // （`clearance`），否则滚到底那一排会压在胶囊下面。
+    assert_eq!(bar_offset(25.0), NAV_MARGIN + 25.0);
+    assert_eq!(clearance(25.0), BAR_HEIGHT + NAV_MARGIN * 2.0 + 25.0);
+    assert_eq!(
+        clearance(0.0) - bar_offset(0.0),
+        BAR_HEIGHT + NAV_MARGIN,
+        "留白比栏位偏移多出一条栏高再多一圈：多出来的那圈是栏顶到内容的呼吸"
+    );
+}
+
+/// 回归门：Compact 档的底栏是**浮**的 —— 它不吃布局行，且离手势条正好一圈。
+///
+/// 宿主进不到这一档（[`SizeClass::of`] 在桌面把窄窗口夹到 `Medium`），所以这里直接问
+/// `navigation`：560×640 的窗口、25 的手势条，胶囊应当宽 536、高 56、下沿落在 603。
+/// 内容那一格仍然铺满整窗 —— 它一旦被挤短一行，内容就再也到不了栏底下（悬浮感当场没有），
+/// 这正是把「底栏」写成布局行的代价。
+#[gpui_kit::test]
+fn the_floating_bar_sits_above_the_gesture_strip_without_taking_a_row(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use crate::ui::host::Insets;
+    use crate::ui::shell::navigation::{Destination, SizeClass, navigation};
+    use gpui_kit::component::Root;
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{
+        AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement, Render,
+        Styled, TestSupportExt as _, Window, div, px, size,
+    };
+
+    struct Page;
+    impl Render for Page {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let safe = Insets {
+                bottom: 25.0,
+                ..Default::default()
+            };
+            div()
+                .relative()
+                .size_full()
+                .child(div().id("page-body").size_full().test_support())
+                .child(navigation(
+                    cx,
+                    Destination::Shelf,
+                    SizeClass::Compact,
+                    &safe,
+                    |_, _, _| {},
+                ))
+        }
+    }
+
+    // 导航栏要读文案（`tr` 走配置里的语言）与主题色，两样都得先装上。
+    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        crate::ui::services::config::ConfigHolder::install(folio_core::Config::default(), cx)
+    });
+
+    let handle = cx
+        .open_window(size(px(560.), px(640.)), |window, cx| {
+            let page = cx.new(|_| Page);
+            Root::new(page, window, cx)
+        })
+        .into();
+    let (page, bar) = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window.try_find("page-body").map(|snap| snap.bounds()),
+                window.try_find("folio-bar").map(|snap| snap.bounds()),
+            )
+        })
+        .expect("窗口应能渲染");
+
+    let page = page.expect("内容那一格应在视图树里");
+    let bar = bar.expect("Compact 档该画出浮栏");
+    assert_eq!(
+        f32::from(page.size.height),
+        640.0,
+        "内容铺满整窗：底栏不吃布局行"
+    );
+    assert_eq!(
+        f32::from(bar.size.width),
+        560.0 - crate::ui::shell::navigation::NAV_MARGIN * 2.0,
+        "左右各留一圈"
+    );
+    assert_eq!(
+        f32::from(bar.size.height),
+        crate::ui::shell::navigation::BAR_HEIGHT
+    );
+    assert_eq!(
+        f32::from(bar.origin.y + bar.size.height),
+        640.0 - 25.0 - 12.0,
+        "下沿离手势条那一条还有一圈"
     );
 }
 
@@ -335,6 +459,30 @@ mod booted {
             })
             .expect("窗口应能渲染");
         assert!(present, "标题栏里的应用标题应出现在视图树中");
+    }
+
+    /// 回归门：≥840 时导航栏是**嵌入**的那一列，宽就是 96（三档统一之后不再是 260）。
+    ///
+    /// 测试窗口开在 900×600，落在 Expanded 档。那 260 宽的老侧栏一旦回来，这条当场红；
+    /// 而 96 是华为「侧边页签」控件那一格，也是书架 `reserved_width` 里同一个数 ——
+    /// 两处各写一份的话，改一侧忘另一侧只会表现为「格子宽得莫名其妙」。
+    #[gpui_kit::test]
+    fn the_nav_bar_docks_its_ninety_six_column_when_wide(cx: &mut TestAppContext) {
+        let handle = open_app(cx);
+        let nav = cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window
+                    .try_find("folio-nav")
+                    .map(|snap| f32::from(snap.bounds().size.width))
+            })
+            .expect("窗口应能渲染");
+
+        assert_eq!(
+            nav,
+            Some(crate::ui::shell::navigation::NAV_WIDTH),
+            "嵌入侧栏宽就是 96，不该再是 260"
+        );
     }
 
     /// 回归门：首次启动（书库位置没确认过）时停在欢迎页，不进主界面；选完位置就放行。

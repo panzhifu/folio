@@ -67,7 +67,7 @@ use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{book_count, tf, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::services::resident;
-use crate::ui::shell::navigation::SizeClass;
+use crate::ui::shell::navigation::{self, SizeClass};
 use grid::{Cell, GUTTER, GridSpec, grid_spec, merge_cells};
 use scan::ScanPhase;
 
@@ -1206,12 +1206,12 @@ impl ShelfView {
     /// 建组 / 链接导入 / 扫描那三块**不在这里**：它们是浮在架面之上的浮层与弹层，
     /// 架面照旧画在底下（见 [`Self::overlays`]）。只有「书库位置」那一屏还是就地换掉整片
     /// —— 它是导入的前置而不是「答一句话」，答完之前那片格子没有意义。
-    fn body(&self, cx: &mut Context<Self>, spec: GridSpec) -> AnyElement {
+    fn body(&self, cx: &mut Context<Self>, spec: GridSpec, tail: f32) -> AnyElement {
         if self.confirming {
             return self.confirm_panel(cx);
         }
         if !self.items.is_empty() || !self.tiles.is_empty() {
-            return self.grid(cx, spec).into_any_element();
+            return self.grid(cx, spec, tail).into_any_element();
         }
         // 空架要说「导一本书进来」，有书但都不匹配要说「换个词」，某一组那一页空了要说
         // 「这一片还没有书」：三件事写成一句，读者会以为自己把书弄丢了。
@@ -1238,7 +1238,12 @@ impl ShelfView {
     ///
     /// 排间距烘进每一项（`.py_1()`）而不是靠容器的 `gap`：虚拟列表不在项之间插空隙，
     /// 上下各 4 就是原来 `gap_2` 那 8 的节律，头一排与尾一排也各留一点边。
-    fn grid(&self, cx: &mut Context<Self>, spec: GridSpec) -> impl IntoElement {
+    ///
+    /// `tail` 是悬浮底栏要的那一段（Compact 档，见 `navigation::clearance`）。它加在
+    /// list **自己的 padding** 上而不是外壳的容器上：`uniform_list` 的裁剪按 `bounds`
+    /// 算、滚动上限按扣掉 padding 的 `padded_bounds` 算，于是滚动途中格子会画进栏底下，
+    /// 滚到底时最后一排正好停在栏的上沿 —— 两头都对。
+    fn grid(&self, cx: &mut Context<Self>, spec: GridSpec, tail: f32) -> impl IntoElement {
         // 卡片管理菜单的两条文案：整个架面取一次，逐卡 clone 进菜单。条目本身
         // （哪几条、什么图标、点了派给谁）在 [`book_menu`]。
         let labels = book_menu::Labels::resolve(cx);
@@ -1295,7 +1300,8 @@ impl ShelfView {
                 .collect()
         })
         .track_scroll(&scroll)
-        .size_full();
+        .size_full()
+        .pb(px(tail));
 
         div()
             .relative()
@@ -1332,6 +1338,14 @@ impl Render for ShelfView {
             _ => self.page_bar(cx),
         };
         let spec = grid_spec(f32::from(window.viewport_size().width), size);
+        // 悬浮底栏压在内容上（Compact 档），滚动内容得自己空出那一段 —— 加在容器的
+        // 留白上会把视口切短，格子就再也到不了栏底下。侧栏两档是嵌入的、由外壳让位，
+        // 这里不再加。
+        let tail = if size.is_compact() {
+            navigation::clearance(crate::ui::host::safe_area(window, cx).bottom)
+        } else {
+            0.0
+        };
         // 导入进行中的那一句读数摆在命令行与架面之间：这几秒里架面是不动的，读者要确认
         // 的是「它还在干活」，而不是又看见一片和点导入之前一模一样的格子。
         // `total == 0` 是不定进度（刚提交、第一条读数还没上来），那句不带数字。
@@ -1404,7 +1418,7 @@ impl Render for ShelfView {
             .size_full()
             .child(top)
             .children(status)
-            .child(self.body(cx, spec))
+            .child(self.body(cx, spec, tail))
             .children(overlays)
     }
 }
@@ -1442,11 +1456,13 @@ mod tests {
         assert_eq!(columns_for(390.0, SizeClass::Compact), 3);
         assert_eq!(columns_for(430.0, SizeClass::Compact), 3);
 
-        // 桌面最小窗口（图标栏档）：两格，宁可小也不许没有。
+        // 桌面最小窗口（悬浮侧栏档）：两格，宁可小也不许没有。
         assert_eq!(columns_for(520.0, SizeClass::Medium), 2);
         // 每格都不窄于 168：再加一列就要挤破这个下限时，宁可少一列。
-        assert_eq!(columns_for(776.0, SizeClass::Medium), 4);
-        assert_eq!(columns_for(1600.0, SizeClass::Expanded), 7);
+        // 侧栏占位宽从 48（图标栏）换成 120（96 卡片 + 两侧 12）之后，776 上由 4 列落到 3。
+        assert_eq!(columns_for(776.0, SizeClass::Medium), 3);
+        // 嵌入侧栏从 260 收到 96：1600 上反而多出一列。
+        assert_eq!(columns_for(1600.0, SizeClass::Expanded), 8);
 
         // 同一档内加宽不会反而少一列。
         for (width, size) in [
