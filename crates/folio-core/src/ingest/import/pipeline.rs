@@ -474,18 +474,19 @@ impl Drop for Hold {
     }
 }
 
-/// 一个候选的完整旅程。**一个 ZIP 候选可能是几本**：里面每一条像书的条目各走一遍
+/// 一个候选的完整旅程。**一个归档候选可能是几本**：里面每一条像书的条目各走一遍
 /// [`import_one`]，各得一条结论。交回的是 `(书名, 结果)` 的清单，非包的那一族就是一条。
 ///
 /// 为什么要退那一层，而且退在**算身份之前**：身份、判定、落地全都算在解出来的那一份字节上，
 /// 于是同一本书裸着送来与打包着送来是同一本（判重命中），而书库里躺着的那一份**永远能直接
 /// 打开** —— provider 那一边不需要认识容器，`Format` 也不用为「躺在 zip 里」多立一档。
-/// EPUB 与 CBZ 自己就是书，[`sniff::zip_shape`] 给的是 `Book`，不退（把 EPUB 的条目挨个
-/// 抽出来，那本书就散了）。
+/// EPUB 与 CBZ 自己就是书，[`sniff::archive_shape`] 给的是 `Book`，不退（把 EPUB 的条目
+/// 挨个抽出来，那本书就散了）。
 ///
-/// **只退一层**，且只按内容退：解出来的那一份不再退一次 —— 里面是 EPUB 的话它自己就是
-/// 容器（上面那条），里面再套一个 `合集.zip` 的话就当不是书拒掉，不替读者猜他想要的
-/// 是哪一本。名字在这整步里没有任何作用：`x.zip` 与 `书.fb2.zip` 走的是同一条路。
+/// **四种归档共用这一条退层的路**：ZIP、RAR、7z、tar。**只退一层**，且只按内容退：
+/// 解出来的那一份不再退一次 —— 里面是 EPUB 的话它自己就是容器（上面那条），里面再套一个
+/// `合集.zip` 的话就当不是书拒掉，不替读者猜他想要的是哪一本。名字在这整步里没有任何
+/// 作用：`x.zip`、`书.fb2.zip`、`合集.rar` 走的是同一条路。
 fn import_candidate(
     source: &dyn Source,
     candidate: &Candidate,
@@ -515,9 +516,9 @@ fn import_candidate(
         )];
     }
 
-    // 步 2 后半：是包就退一层，逐条各算一本。不是包（或开不出中央目录、或里面没有像书的
+    // 步 2 后半：是包就退一层，逐条各算一本。不是包（或开不出目录、或里面没有像书的
     // 条目）就原样走下去 —— 「坏包」与「这不是书」那两句话由判定层说，不在这里编第三套。
-    let sniff::ZipShape::Holds(books) = sniff::zip_shape(&staged) else {
+    let sniff::ArchiveShape::Holds(books) = sniff::archive_shape(&staged) else {
         let one = import_one(&name, staged, book_dir, staging, store, per_book);
         return vec![(name, one)];
     };
@@ -535,7 +536,7 @@ fn import_candidate(
         }
         let shown = book.name;
         let part = staging.join(staged_name(&shown));
-        match extract_entry(&staged, &book.entry, &part) {
+        match extract_entry(&staged, book.family, &book.entry, &part) {
             Ok(written) => {
                 // 局部变量别叫 `display`：tracing 的消息模板里那会把宏自己的辅助函数
                 // 遮掉，报出来是一条看不懂的 `doesn't implement std::fmt::Display`。
@@ -567,24 +568,26 @@ fn import_candidate(
 
 /// 从包里抽出一本时允许写下的最大字节数（解压**后**）。
 ///
-/// 必须有这么一个数，因为来路是读者机器上任意一个 zip（整机扫描、传书、监听都交得出），
-/// 而中央目录里声明的解压长度会说谎。取 512 MiB 是拍的：真书里最宽的那一族（一个包里
-/// 装着整本漫画 CBZ）量不到更高，而它同时是磁盘与内存的上限。超过就当场拒那一条，
+/// 必须有这么一个数，因为来路是读者机器上任意一个归档（整机扫描、传书、监听都交得出），
+/// 而目录里声明的解压长度会说谎。取 512 MiB 是拍的：真书里最宽的那一族（一个包里
+/// 装着整本漫画）量不到更高，而它同时是磁盘与内存的上限。超过就当场拒那一条，
 /// 不猜它是炸弹还是大书 —— 两者对读者的动作是同一件事（把这个包自己解开再导）。
 const MAX_UNWRAP_BYTES: u64 = 512 << 20;
 
 /// 从包里抽出一本：写进暂存区，交回写了几个字节。失败是 `(String)` —— 那句给人看的话,
 /// 由调用方包成一次带类别的拒绝，而不是在这里猜该算哪一类。
 ///
-/// 上限封的是**实际写出的字节数**，不是中央目录声明的那一个：声明值正是会说谎的那一格
-/// （zip 炸弹写 0、解出几个 GB），而整机扫描会把读者机器上任意一个 zip 交给我们。
-/// 走的是流式（`io::copy` 一块一块写），所以这个数同时是磁盘与内存的上限 —— 一批最多四本
-/// 在飞，每本各有一份这样的缓冲。
-fn extract_entry(pack: &Path, entry: &str, dest: &Path) -> std::result::Result<u64, String> {
-    let mut zip = crate::content::format::zip::Zip::open(pack)
-        .map_err(|err| format!("包读不出来：{err:#}"))?;
-    zip.extract_to(entry, dest, MAX_UNWRAP_BYTES)
-        .ok_or_else(|| format!("那一条读不出来，或解压后超过 {} MB", MAX_UNWRAP_BYTES >> 20))
+/// 上限封的是**实际写出的字节数**，不是目录声明的那一个：声明值正是会说谎的那一格
+/// （zip 炸弹写 0、解出几个 GB），而整机扫描会把读者机器上任意一个归档交给我们。
+/// 四种容器都由 [`crate::content::format::archive::extract_to`] 走流式（一块一块写），
+/// 所以这个数同时是磁盘与内存的上限 —— 一批最多四本在飞，每本各有一份这样的缓冲。
+fn extract_entry(
+    pack: &Path,
+    family: crate::content::format::archive::Family,
+    entry: &str,
+    dest: &Path,
+) -> std::result::Result<u64, String> {
+    crate::content::format::archive::extract_to(pack, family, entry, dest, MAX_UNWRAP_BYTES)
 }
 
 /// 一本书的完整旅程，就是 §一 那张图 —— 而**那道分界在这里是两次调用**：[`ingest`]

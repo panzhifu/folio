@@ -118,6 +118,16 @@ impl Container {
     pub fn read(&self, href: &str) -> Option<Vec<u8>> {
         match self.address(href) {
             Found::Range(range) => EntryReader::open(&self.path)?.read(&range),
+            // 非 stored/deflate 的条目走 zip-rs：它要中央目录，而那份索引就在锁里。
+            // 这条支路只服务 bzip2 / LZMA / XZ / PPMd / Deflate64 这几族（真书里是少数），
+            // 所以宁可在这几族上把锁按在解压上，也不为每张图重开一次容器、重建一遍索引。
+            Found::ZipRead(name) => {
+                let mut family = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
+                let Family::Zip(zip) = &mut *family else {
+                    return None;
+                };
+                zip.read(&name)
+            }
             // ITSF 那一族拆不开：libchm 自己持有解码状态，只能在锁内读。
             Found::Itsf => {
                 let mut family = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
@@ -150,6 +160,14 @@ impl Container {
     pub fn read_text(&self, href: &str) -> Option<String> {
         match self.address(href) {
             Found::Range(range) => EntryReader::open(&self.path)?.read_text(&range),
+            // 与 `read` 的 ZipRead 同一档：非 stored/deflate 的文本条目交给 zip-rs。
+            Found::ZipRead(name) => {
+                let mut family = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
+                let Family::Zip(zip) = &mut *family else {
+                    return None;
+                };
+                zip.read_text(&name)
+            }
             Found::Itsf | Found::Extracted(_) | Found::Absent => None,
         }
     }
@@ -161,7 +179,12 @@ impl Container {
         };
         let mut family = slot.lock().unwrap_or_else(|e| e.into_inner());
         match &mut *family {
-            Family::Zip(zip) => zip.range_at(href).map_or(Found::Absent, Found::Range),
+            Family::Zip(zip) => match zip.range_at(href) {
+                Some(range) if range.is_inline() => Found::Range(range),
+                // 这几族的解码器在 zip-rs 里，按区间自己 inflate 的快路不认识它们。
+                Some(_) => Found::ZipRead(href.to_string()),
+                None => Found::Absent,
+            },
             Family::Itsf(_) => Found::Itsf,
             Family::Extracted(dir) => Found::Extracted(dir.clone()),
         }
@@ -172,6 +195,8 @@ impl Container {
 enum Found {
     /// ZIP 一族：压缩区间拿到了，读在锁外用自己的句柄做。
     Range(EntryRange),
+    /// ZIP 一族里非 stored/deflate 的条目：解压要 zip-rs 的中央目录，只能回锁内读。
+    ZipRead(String),
     /// ITSF 一族：libchm 自己持有解码状态，只能在锁内读。
     Itsf,
     /// 已解到磁盘的漫画页：按缓存目录里的相对路径读。
@@ -191,30 +216,34 @@ fn family_for(path: &Path) -> Option<Family> {
     let mut file = std::fs::File::open(path).ok()?;
     let read = file.read(&mut head).ok()?;
     let head = &head[..read];
-    if head.starts_with(b"PK\x03\x04") {
-        // `Zip::open` 自己记 `ContainerOpens`（一次打开 = 一次计数）。
-        return Some(Family::Zip(Zip::open(path).ok()?));
+    // 归档魔数只认一份（`format::archive::Family`），判定层、粗筛与本层共用。
+    match super::archive::Family::of(head) {
+        Some(super::archive::Family::Zip) => {
+            // `Zip::open` 自己记 `ContainerOpens`（一次打开 = 一次计数）。
+            return Some(Family::Zip(Zip::open(path).ok()?));
+        }
+        Some(super::archive::Family::SevenZ) => {
+            let dir = super::comic_cache::ensure_sevenz(path).ok()?;
+            Metric::ContainerOpens.count();
+            return Some(Family::Extracted(dir));
+        }
+        Some(super::archive::Family::Rar) => {
+            let dir = super::comic_cache::ensure_rar(path).ok()?;
+            Metric::ContainerOpens.count();
+            return Some(Family::Extracted(dir));
+        }
+        Some(super::archive::Family::Tar) => {
+            let dir = super::comic_cache::ensure_tar(path).ok()?;
+            Metric::ContainerOpens.count();
+            return Some(Family::Extracted(dir));
+        }
+        None => {}
     }
     if head.starts_with(b"ITSF") {
         let opened = ChmFile::open(path).ok()?;
         // libchm 不替我们记这一笔，而「读一本书该只开一次容器」那条断言数的是它。
         Metric::ContainerOpens.count();
         return Some(Family::Itsf(opened));
-    }
-    if head.starts_with(b"7z\xBC\xAF\x27\x1C") {
-        let dir = super::comic_cache::ensure_sevenz(path).ok()?;
-        Metric::ContainerOpens.count();
-        return Some(Family::Extracted(dir));
-    }
-    if head.starts_with(b"Rar!\x1A\x07") {
-        let dir = super::comic_cache::ensure_rar(path).ok()?;
-        Metric::ContainerOpens.count();
-        return Some(Family::Extracted(dir));
-    }
-    if head.len() >= 262 && &head[257..262] == b"ustar" {
-        let dir = super::comic_cache::ensure_tar(path).ok()?;
-        Metric::ContainerOpens.count();
-        return Some(Family::Extracted(dir));
     }
     None
 }
@@ -239,6 +268,53 @@ mod tests {
         }
         zip.finish().unwrap();
         dir
+    }
+
+    /// 同上，但条目用 bzip2 压 —— 这一档走 `Found::ZipRead` 那条锁内路径。
+    fn archive_with_bzip2(entries: &[(&str, &[u8])]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::File::create(dir.path().join("case.zip")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Bzip2);
+        for (name, data) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+        dir
+    }
+
+    /// 非 stored/deflate 的条目不能因为快路不认就消失：`read` 与 `read_text` 都要走
+    /// zip-rs 回退路，且仍然只开一次容器。
+    #[test]
+    fn bzip2_entries_are_read_through_the_same_container() {
+        let dir = archive_with_bzip2(&[
+            ("OEBPS/Images/a.png", b"png-bytes"),
+            ("OEBPS/Text/ch1.xhtml", b"<html>abc</html>"),
+        ]);
+        let path = dir.path().join("case.zip");
+        let container = Container::new(&path);
+        assert!(!container.is_open(), "构造时不该开容器");
+        take_local(Metric::ContainerOpens);
+
+        for _ in 0..10 {
+            assert_eq!(
+                container.read("OEBPS/Images/a.png").as_deref(),
+                Some(&b"png-bytes"[..]),
+                "bzip2 条目要读得出"
+            );
+            assert_eq!(
+                container.read_text("OEBPS/Text/ch1.xhtml").as_deref(),
+                Some("<html>abc</html>")
+            );
+        }
+        assert_eq!(
+            take_local(Metric::ContainerOpens),
+            1,
+            "二十次取字节只开一次"
+        );
+        assert!(container.read("OEBPS/Images/nope.png").is_none());
     }
 
     /// **这一层存在的全部理由**：反复取字节只开一次容器。

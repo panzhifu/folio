@@ -6,10 +6,11 @@
 //!
 //! ```text
 //! 扩展名   粗筛（批量导入时排掉杂物，省掉无谓的哈希）—— 不当最终裁决
-//! 魔数     PDF、PalmDB（偏移 60 处 `BOOKMOBI`）在这里就定了；ZIP 与 ITSF 只定到
-//!          「是个容器」
-//! 容器     打开来读条目：EPUB 认第一个条目，CBZ 认「条目全是图」，
-//!          否则认「里面躺着哪几条书」—— 那一个包是**几本书**，逐条各走一遍管线
+//! 魔数     PDF、PalmDB（偏移 60 处 `BOOKMOBI`）在这里就定了；ZIP / RAR / 7z / tar
+//!          与 ITSF 只定到「是个容器」
+//! 容器     打开来读条目：ZIP 里认 EPUB / ODT / DOCX / HTMLZ / CBZ（自己就是书），
+//!          四种归档都认「条目全是图」（漫画）或「里面躺着哪几条书」—— 后者那个包是
+//!          **几本书**，逐条各走一遍管线
 //! ```
 //!
 //! **裁决以内容为准，不以名字为准**：一个叫 `书.epub` 的纯文本不会被评为 EPUB
@@ -25,7 +26,9 @@ use std::path::Path;
 use libchm::{ChmFile, EntrySel};
 
 use super::Format;
+use super::archive::{self, Family};
 use super::cbz::{is_container_noise, is_page_image};
+use super::comicinfo::is_comic_info;
 use super::zip::Zip;
 
 /// 读多少字节起判。PalmDB 的签名在偏移 60，ZIP 的中央目录在文件**末尾**（所以容器
@@ -118,19 +121,17 @@ pub(crate) fn identify(display_name: &str, path: &Path) -> Verdict {
     if let Some(verdict) = magic(&head) {
         return verdict;
     }
-    // RAR 与 7z 的壳只能说「这是个压缩包」：是不是「条目全是图」由 provider 去确认。
-    // 两者都不许落到「这不是书」——那对读者是另一句话。
-    if head.starts_with(b"Rar!\x1A\x07") {
-        return Verdict::Readable(Format::Cbr);
-    }
-    if head.starts_with(b"7z\xBC\xAF\x27\x1C") {
-        return Verdict::Readable(Format::Cb7);
+    // 压缩包的四族：壳只说得出「这是个包」。ZIP 里还可能是 EPUB / ODT / DOCX /
+    // HTMLZ（自己就是书），RAR / 7z / tar 里只可能是「漫画页」或「装着几本书」——
+    // 两边的分流都在下面那层，**不按扩展名**。
+    if let Some(family) = Family::of(&head) {
+        return match family {
+            Family::Zip => container(path),
+            family => sequential_container(path, family),
+        };
     }
     if head.starts_with(b"AT&TFORM") {
         return Verdict::Readable(Format::Djvu);
-    }
-    if is_tar(&head) {
-        return Verdict::Readable(Format::Cbt);
     }
     // PalmDB 的数据库类型在偏移 60：`TEXt`/`REAd` 是 PalmDoc 文本，`BOOKMOBI` 是
     // MOBI 家族。后者里还藏着 AZW4（PalmDB 内嵌 PDF），要开记录看。
@@ -146,9 +147,6 @@ pub(crate) fn identify(display_name: &str, path: &Path) -> Verdict {
     // 来是哪一本，所以要开目录看那条 `WordDocument` 流（下面 `ole2` 那一层）。
     if head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
         return ole2(path);
-    }
-    if head.starts_with(b"PK\x03\x04") {
-        return container(path);
     }
     // MHTML 是一个**文本**存档：没有魔数，判据是「头部那些行说得出 `multipart/*` 与
     // `boundary=`，而文件里切得出至少一份 HTML」。先在 head 上问「像不像信封」，像才读
@@ -172,11 +170,6 @@ pub(crate) fn identify(display_name: &str, path: &Path) -> Verdict {
 fn declares_multipart(head: &[u8]) -> bool {
     let text = String::from_utf8_lossy(head).to_ascii_lowercase();
     text.contains("multipart/") && text.contains("boundary=")
-}
-
-/// POSIX/GNU tar 的 `ustar` 魔数在偏移 257；不用扩展名当判据。
-fn is_tar(head: &[u8]) -> bool {
-    head.len() >= 262 && &head[257..262] == b"ustar"
 }
 
 /// PalmDB 的三类书：MOBI 家族（`BOOKMOBI`）、PalmDoc 文本（`TEXt` 或 `BOOK`+`REAd`）。
@@ -299,19 +292,27 @@ fn starts_with_rtf(head: &[u8]) -> bool {
 /// 一个包里躺着的那一本书。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Inner {
+    /// 容器家族：退层时按它分派抽取（ZIP 走 `by_name`，其余三种顺序解压）。
+    pub(crate) family: Family,
     /// **容器里的原始条目名**：取字节要的就是这一串（归一化名回不去反斜杠那一族）。
     pub(crate) entry: String,
+    /// 归一化后的容器路径（分隔符统一 `/`）。判「像不像书 / 是不是图」用它。
+    pub(crate) path: String,
     /// 它的文件名。判定与书名要用的是这一个扩展名线索 —— 外层那一个 `.zip`
     /// 在退开之后已经说不清任何事了。
     pub(crate) name: String,
 }
 
-/// 一个 ZIP 在「该不该退那一层」这一问上的样子。
+/// 一个归档在「该不该退那一层」这一问上的样子。
+///
+/// **四种容器共用这一份答案**：判定层、导入管线退那一层、扫描粗筛三处都问它；
+/// 各数一遍条目的结果迟早会在同一个包上分叉（同一本书一会儿算候选、一会儿算
+/// 「不是书」，而两边都看起来是对的）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ZipShape {
-    /// 头四字节不是 `PK\x03\x04`：谈不上容器。
-    NotAZip,
-    /// 是 ZIP 而中央目录读不出来（截断、坏包）。
+pub(crate) enum ArchiveShape {
+    /// 头几个字节不是认得的归档魔数：谈不上容器。
+    NotAnArchive,
+    /// 是归档而目录读不出来（截断、坏包）。
     Corrupt,
     /// 容器自己**就是**一本书（EPUB：第一个条目是 `mimetype`；CBZ：条目全是图）。
     /// **不许退**：把 EPUB 的条目一个个抽出来，那本书就散了。
@@ -322,21 +323,33 @@ pub(crate) enum ZipShape {
     Nothing,
 }
 
-/// 认一个 ZIP。**判定层、导入管线退那一层、扫描粗筛三处共用这一份答案**：
-/// 各数一遍条目的结果迟早会在同一个包上分叉（同一本书一会儿算候选、一会儿算「不是书」，
-/// 而两边都看起来是对的）。
-pub(crate) fn zip_shape(path: &Path) -> ZipShape {
+/// 认一个归档：按头部魔数分派到 ZIP 那一支或顺序解压那一支。
+pub(crate) fn archive_shape(path: &Path) -> ArchiveShape {
+    let Some(head) = read_head(path) else {
+        // 连头都读不到：谈不上「是个包」，也谈不上不是 —— 按坏文件说。
+        return ArchiveShape::Corrupt;
+    };
+    match Family::of(&head) {
+        Some(Family::Zip) => zip_shape(path),
+        Some(family) => sequential_shape(path, family),
+        None => ArchiveShape::NotAnArchive,
+    }
+}
+
+/// 认一个 ZIP：它可能自己就是一本书（EPUB / ODT / DOCX / HTMLZ / CBZ），
+/// 也可能是装着书的包。
+pub(crate) fn zip_shape(path: &Path) -> ArchiveShape {
     let head = match read_head(path) {
         Some(head) => head,
         // 连头都读不到：谈不上「是个包」，也谈不上不是 —— 按坏文件说。
-        None => return ZipShape::Corrupt,
+        None => return ArchiveShape::Corrupt,
     };
     if !head.starts_with(b"PK\x03\x04") {
-        return ZipShape::NotAZip;
+        return ArchiveShape::NotAnArchive;
     }
     let mut zip = match Zip::open(path) {
         Ok(zip) => zip,
-        Err(_) => return ZipShape::Corrupt,
+        Err(_) => return ArchiveShape::Corrupt,
     };
     // EPUB 的正解：第一个条目必须是 `mimetype`，内容是 `application/epub+zip`。
     // 规范还要求它「存而不压缩」（所以硬读偏移 38 那 20 个字节就能判）；这里走的是
@@ -350,7 +363,7 @@ pub(crate) fn zip_shape(path: &Path) -> ZipShape {
         })
     });
     if mimetype.as_deref() == Some("application/epub+zip") {
-        return ZipShape::Book(Format::Epub);
+        return ArchiveShape::Book(Format::Epub);
     }
     let names = zip.names();
     let has = |want: &str| names.iter().any(|name| name.eq_ignore_ascii_case(want));
@@ -359,11 +372,11 @@ pub(crate) fn zip_shape(path: &Path) -> ZipShape {
     if mimetype.as_deref() == Some("application/vnd.oasis.opendocument.text")
         || (has("content.xml") && has("META-INF/manifest.xml"))
     {
-        return ZipShape::Book(Format::Odt);
+        return ArchiveShape::Book(Format::Odt);
     }
     // DOCX 没有 mimetype 条目：`[Content_Types].xml` + `word/document.xml` 就是它的形状。
     if has("[Content_Types].xml") && has("word/document.xml") {
-        return ZipShape::Book(Format::Docx);
+        return ArchiveShape::Book(Format::Docx);
     }
     // 噪音条目（目录、`.DS_Store`、`__MACOSX/`）不参与判断——它们既不是页，
     // 也不该让一个正常包被评成「不是漫画包」。
@@ -375,7 +388,7 @@ pub(crate) fn zip_shape(path: &Path) -> ZipShape {
     // CBZ：剩下的条目**全部**是图片，而且至少有一张。判据用的是
     // `cbz::is_page_image` 那一份，不再写第二份。
     if !entries.is_empty() && entries.iter().all(|name| is_page_image(name)) {
-        return ZipShape::Book(Format::Cbz);
+        return ArchiveShape::Book(Format::Cbz);
     }
     // HTMLZ：一个装着网页书的包。根下有 `index.html` 就是它；没有索引页时，
     // 「至少一份 HTML + 至少一张图」也按它收 —— 这样的包退层只带走 HTML、会把图丢掉。
@@ -385,38 +398,76 @@ pub(crate) fn zip_shape(path: &Path) -> ZipShape {
     });
     let has_image = entries.iter().any(|name| is_page_image(name));
     if html_count > 0 && (root_index || has_image) {
-        return ZipShape::Book(Format::Htmlz);
+        return ArchiveShape::Book(Format::Htmlz);
     }
-    // 剩下的那一族：把**每一条像书的条目**都交出去，一条算一本书。
-    //
-    // 「像书」只看扩展名有没有 provider 认领，所以图片不算 —— 一个 `书.fb2.zip`
-    // 里那十几张图是**正文的外链资源**，退一层只带走正文那一份，图跟着丢
-    // （管线那一格记一条 warn）。反过来，一个「几十张图 + 一个 `info.txt`」的包
-    // 会得出一本 `info.txt` 那样的小书：这是「逐条各判一次」这条规则的正面代价，
-    // 而它出现在扫描的候选清单上时读者一眼看得见。
-    let mut held: Vec<Inner> = Vec::new();
-    for name in entries {
-        let Some(ext) = extension_of(name) else {
-            continue;
-        };
-        if !super::supported_extensions()
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(&ext))
-        {
-            continue;
-        }
-        let Some(entry) = zip.locate(name) else {
-            continue;
-        };
-        held.push(Inner {
-            entry,
-            name: file_name(name).to_string(),
-        });
+    let candidates: Vec<Inner> = entries
+        .into_iter()
+        .filter(|name| !is_comic_info(name))
+        .filter_map(|name| {
+            Some(Inner {
+                family: Family::Zip,
+                entry: zip.locate(name)?,
+                name: file_name(name).to_string(),
+                path: name.to_string(),
+            })
+        })
+        .collect();
+    loose_shape(Format::Cbz, candidates)
+}
+
+/// RAR / 7z / tar：只有「漫画页」与「装着书」两种可能。
+fn sequential_shape(path: &Path, family: Family) -> ArchiveShape {
+    let Some(names) = archive::names(path, family) else {
+        return ArchiveShape::Corrupt;
+    };
+    // `comic_format` 对四种容器各给一档；这一支只会拿到 ZIP 之外的那三种。
+    let comic = family.comic_format();
+    let candidates = names
+        .into_iter()
+        .filter(|name| !is_container_noise(name) && !is_comic_info(name))
+        .map(|path| Inner {
+            family,
+            entry: path.clone(),
+            name: file_name(&path).to_string(),
+            path,
+        })
+        .collect();
+    loose_shape(comic, candidates)
+}
+
+/// 包里的条目怎么分流：全是图就是漫画；否则逐条交出像书的条目；都没有就 `Nothing`。
+///
+/// 四种容器共用这一条规则，差别只在 [`Format`] 那一格。**`ComicInfo.xml` 已经在
+/// 调用方滤掉**：它是书目便条，不是页，也不该让一本正常漫画被拆成「一本 xml 书」。
+///
+/// 「像书」只看扩展名有没有 provider 认领，所以图片不算 —— 一个 `书.fb2.zip`
+/// 里那十几张图是**正文的外链资源**，退一层只带走正文那一份，图跟着丢
+/// （管线那一格记一条 warn）。反过来，一个「几十张图 + 一个 `info.txt`」的包
+/// 会得出一本 `info.txt` 那样的小书：这是「逐条各判一次」这条规则的正面代价，
+/// 而它出现在扫描的候选清单上时读者一眼看得见。
+fn loose_shape(comic: Format, entries: Vec<Inner>) -> ArchiveShape {
+    let images = entries
+        .iter()
+        .filter(|entry| is_page_image(&entry.path))
+        .count();
+    if !entries.is_empty() && images == entries.len() {
+        return ArchiveShape::Book(comic);
     }
+    let held: Vec<Inner> = entries
+        .into_iter()
+        .filter(|entry| !is_page_image(&entry.path))
+        .filter(|entry| {
+            extension_of(&entry.path).is_some_and(|ext| {
+                super::supported_extensions()
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(&ext))
+            })
+        })
+        .collect();
     if held.is_empty() {
-        return ZipShape::Nothing;
+        return ArchiveShape::Nothing;
     }
-    ZipShape::Holds(held)
+    ArchiveShape::Holds(held)
 }
 
 /// 条目名里的文件部分（容器里的路径分隔符两种都认）。
@@ -435,15 +486,25 @@ fn is_html_entry(name: &str) -> bool {
 /// 第三层：ZIP 家族。判据全在 [`zip_shape`]，这一格只把那份答案换成判定面那四种说法。
 fn container(path: &Path) -> Verdict {
     match zip_shape(path) {
-        ZipShape::Book(format) => Verdict::Readable(format),
+        ArchiveShape::Book(format) => Verdict::Readable(format),
         // 走到这一格意味着管线没能替它退开（抽那一条时读挂了，或有人直接拿一个
         // 没解开的包来问判定）。**不许报成「这不是书」**：里面确实有一本书。
-        ZipShape::Holds(_) => Verdict::Known("压缩包里装着书（要先逐条抽出来）"),
-        ZipShape::Corrupt => Verdict::CorruptContainer,
+        ArchiveShape::Holds(_) => Verdict::Known("压缩包里装着书（要先逐条抽出来）"),
         // 头四字节不是 ZIP 却走到了这一层 = 调用方那道 `PK` 检查与这里读的不是同一份
         // 字节（文件在两次读之间被换掉或删掉了）。那一档与「坏包」是同一句话。
-        ZipShape::NotAZip => Verdict::CorruptContainer,
-        ZipShape::Nothing => Verdict::NotABook,
+        ArchiveShape::Corrupt | ArchiveShape::NotAnArchive => Verdict::CorruptContainer,
+        ArchiveShape::Nothing => Verdict::NotABook,
+    }
+}
+
+/// 第三层：RAR / 7z / tar。对照表与 [`container`] 相同，只是这三种没有
+/// 「容器自己就是书」的额外形状（EPUB 只能躺在 ZIP 上）。
+fn sequential_container(path: &Path, family: Family) -> Verdict {
+    match sequential_shape(path, family) {
+        ArchiveShape::Book(format) => Verdict::Readable(format),
+        ArchiveShape::Holds(_) => Verdict::Known("压缩包里装着书（要先逐条抽出来）"),
+        ArchiveShape::Corrupt | ArchiveShape::NotAnArchive => Verdict::CorruptContainer,
+        ArchiveShape::Nothing => Verdict::NotABook,
     }
 }
 
@@ -533,7 +594,9 @@ mod tests {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
 
-    use super::{Verdict, ZipShape, extension_of, identify, utf8_prefix, zip_shape};
+    use super::{
+        ArchiveShape, Verdict, archive_shape, extension_of, identify, utf8_prefix, zip_shape,
+    };
     use crate::content::format::Format;
 
     /// 一个临时目录。`tag` 只是让读的人知道这一格在测哪一层，不参与路径。
@@ -564,6 +627,54 @@ mod tests {
     fn file_at(dir: &Path, name: &str, body: &[u8]) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// 合成一个 tar。条目名与字节都由调用方给，**不经过文件系统** —— 判定看的是名字，
+    /// 与解出来的目录形状无关。
+    fn tar_at(dir: &Path, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+        let path = dir.join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        let mut builder = tar::Builder::new(file);
+        for (entry, body) in entries {
+            let mut header = tar::Header::new_ustar();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, entry, std::io::Cursor::new(body))
+                .unwrap();
+        }
+        builder.finish().unwrap();
+        path
+    }
+
+    /// 合成一个 RAR。写入口只在测试里开着（`rars` 的 `write` feature）。
+    fn rar_at(dir: &Path, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+        let path = dir.join(name);
+        let mut builder = rars::Builder::new(rars::ArchiveVersion::Rar50);
+        for (entry, body) in entries {
+            builder
+                .add_bytes(entry.as_bytes().to_vec(), body.to_vec(), None, None)
+                .unwrap();
+        }
+        builder.write_to_path(&path, None).unwrap();
+        path
+    }
+
+    /// 合成一个 7z。压缩器的入口是「把目录压进去」，所以先在临时目录里摆一份。
+    fn sevenz_at(dir: &Path, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+        let src = dir.join(format!("{name}-src"));
+        std::fs::create_dir_all(&src).unwrap();
+        for (entry, body) in entries {
+            let path = src.join(entry);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, body).unwrap();
+        }
+        let path = dir.join(name);
+        sevenz_rust2::compress_to_path(&src, &path).unwrap();
         path
     }
 
@@ -629,9 +740,9 @@ mod tests {
 
     /// 「这个包列出了哪几本」按名字读出来，比逐条 `match` 好看。
     /// 不是 `Holds` 就直接红 —— 这几条门要问的都是「列出了什么」，形状不对没什么可比的。
-    fn names_of(shape: &ZipShape) -> Vec<&str> {
+    fn names_of(shape: &ArchiveShape) -> Vec<&str> {
         match shape {
-            ZipShape::Holds(inner) => inner.iter().map(|b| b.name.as_str()).collect(),
+            ArchiveShape::Holds(inner) => inner.iter().map(|b| b.name.as_str()).collect(),
             other => panic!("该是 Holds，实际 {other:?}"),
         }
     }
@@ -853,7 +964,7 @@ mod tests {
                 ("notes/", b"", true),
             ],
         );
-        assert_eq!(zip_shape(&path), ZipShape::Nothing);
+        assert_eq!(zip_shape(&path), ArchiveShape::Nothing);
         assert_eq!(identify("备份.zip", &path), Verdict::NotABook);
     }
 
@@ -862,7 +973,7 @@ mod tests {
     fn a_container_that_is_itself_a_book_is_never_split() {
         let tmp = dir("pack-keep");
         let epub = zip_at(tmp.path(), "a.epub", EPUB_ENTRIES);
-        assert_eq!(zip_shape(&epub), ZipShape::Book(Format::Epub));
+        assert_eq!(zip_shape(&epub), ArchiveShape::Book(Format::Epub));
         let cbz = zip_at(
             tmp.path(),
             "b.cbz",
@@ -871,7 +982,7 @@ mod tests {
                 ("002.png", b"\x89PNG", true),
             ],
         );
-        assert_eq!(zip_shape(&cbz), ZipShape::Book(Format::Cbz));
+        assert_eq!(zip_shape(&cbz), ArchiveShape::Book(Format::Cbz));
     }
 
     /// 不是 zip 的东西在这一问上就是「谈不上容器」，不占任何一趟容器读。
@@ -879,7 +990,7 @@ mod tests {
     fn a_bare_file_is_not_a_pack() {
         let tmp = dir("pack-bare");
         let path = file_at(tmp.path(), "a.fb2", FB2_ENTRY.as_bytes());
-        assert_eq!(zip_shape(&path), ZipShape::NotAZip);
+        assert_eq!(zip_shape(&path), ArchiveShape::NotAnArchive);
     }
 
     /// 扫描粗筛的**包那一半**：判据是里面有什么，不是外面叫什么。
@@ -906,6 +1017,24 @@ mod tests {
         assert!(
             !crate::content::format::looks_like_a_book(&junk),
             "普通压缩包不进：粗筛省的就是它那一趟哈希"
+        );
+
+        // 扩展名不认的 `.rar` / `.7z` / `.tar` 走同一条：开容器看里面，不靠名字。
+        let books: &[(&str, &[u8])] = &[("书.fb2", FB2_ENTRY.as_bytes())];
+        for (name, path) in [
+            ("书.rar", rar_at(tmp.path(), "书.rar", books)),
+            ("书.7z", sevenz_at(tmp.path(), "书.7z", books)),
+            ("书.tar", tar_at(tmp.path(), "书.tar", books)),
+        ] {
+            assert!(
+                crate::content::format::looks_like_a_book(&path),
+                "{name}：装书的顺序归档也要进候选"
+            );
+        }
+        let junk_rar = rar_at(tmp.path(), "杂物.rar", &[("data.json", b"{}")]);
+        assert!(
+            !crate::content::format::looks_like_a_book(&junk_rar),
+            "没有书的 rar 同样不进"
         );
     }
 
@@ -1074,20 +1203,94 @@ mod tests {
         assert_eq!(identify("书.pdb", &path), Verdict::Readable(Format::Pdb));
     }
 
-    /// CBR：RAR 魔数先收下，条目是不是图由 provider 确认。
+    /// RAR / 7z / tar 的「漫画」判据与 ZIP 同一条：条目**全是图**。而且必须真的开得进去
+    /// —— 只有魔数、目录读不出来的包是坏包，不是漫画。
     #[test]
-    fn a_rar_magic_is_cbr() {
-        let tmp = dir("cbr");
-        let path = file_at(tmp.path(), "书.cbr", b"Rar!\x1A\x07\x00rest");
-        assert_eq!(identify("书.cbr", &path), Verdict::Readable(Format::Cbr));
+    fn rar_7z_and_tar_of_pages_are_comics() {
+        let tmp = dir("comics-seq");
+        let pages: &[(&str, &[u8])] = &[("001.png", b"\x89PNG"), ("002.jpg", b"\xff\xd8\xff")];
+        let cbr = rar_at(tmp.path(), "书.cbr", pages);
+        assert_eq!(identify("书.cbr", &cbr), Verdict::Readable(Format::Cbr));
+        let cb7 = sevenz_at(tmp.path(), "书.cb7", pages);
+        assert_eq!(identify("书.cb7", &cb7), Verdict::Readable(Format::Cb7));
+        let cbt = tar_at(tmp.path(), "书.cbt", pages);
+        assert_eq!(identify("书.cbt", &cbt), Verdict::Readable(Format::Cbt));
     }
 
-    /// 7z 魔数：CB7 由 provider 去确认条目是不是图，判定层先收下。
+    /// 同一个壳里装的是书：三条都要**逐条列出来**，判定层说的是「要先抽出来」，
+    /// 不是「这是漫画」。这一条是「更多压缩格式」的主断言。
     #[test]
-    fn a_7z_magic_is_cb7() {
-        let tmp = dir("cb7");
-        let path = file_at(tmp.path(), "书.cb7", b"7z\xBC\xAF\x27\x1Crest");
-        assert_eq!(identify("书.cb7", &path), Verdict::Readable(Format::Cb7));
+    fn rar_7z_and_tar_of_books_are_packs() {
+        let tmp = dir("packs-seq");
+        let books: &[(&str, &[u8])] = &[
+            ("01-上卷.fb2", FB2_ENTRY.as_bytes()),
+            ("02-下卷.fb2", FB2_ENTRY.as_bytes()),
+        ];
+        let cases = [
+            ("合集.rar", rar_at(tmp.path(), "合集.rar", books)),
+            ("全集.7z", sevenz_at(tmp.path(), "全集.7z", books)),
+            ("全集.tar", tar_at(tmp.path(), "全集.tar", books)),
+        ];
+        for (name, path) in cases {
+            assert_eq!(
+                identify(name, &path),
+                Verdict::Known("压缩包里装着书（要先逐条抽出来）"),
+                "{name} 装的是书，不是漫画"
+            );
+            // 顺序由容器自己定：7z 的压缩器会把目录反过来写，顺序不是这一层的承诺。
+            let shape = archive_shape(&path);
+            let mut got = names_of(&shape);
+            got.sort_unstable();
+            assert_eq!(
+                got,
+                vec!["01-上卷.fb2", "02-下卷.fb2"],
+                "{name} 里两条书都要列出来"
+            );
+        }
+    }
+
+    /// 只有魔数、目录读不出来：坏包，不是「这不是书」。
+    #[test]
+    fn a_sequential_archive_that_does_not_open_is_corrupt() {
+        let tmp = dir("corrupt-seq");
+        for (name, magic) in [
+            ("坏.cbr", &b"Rar!\x1A\x07\x00rest"[..]),
+            ("坏.cb7", &b"7z\xBC\xAF\x27\x1Crest"[..]),
+        ] {
+            let path = file_at(tmp.path(), name, magic);
+            assert_eq!(identify(name, &path), Verdict::CorruptContainer, "{name}");
+        }
+        // tar 的 `ustar` 在偏移 257：拼一个头出来，校验和是 0，条目读不出来。
+        let mut head = vec![0u8; 512];
+        head[257..262].copy_from_slice(b"ustar");
+        let tar = file_at(tmp.path(), "坏.cbt", &head);
+        assert_eq!(identify("坏.cbt", &tar), Verdict::CorruptContainer);
+    }
+
+    /// `ComicInfo.xml` 是书目便条，不是页 —— 它不该把一本漫画判成「一本 xml 书」。
+    /// 四种容器共用同一条规则。
+    #[test]
+    fn a_comic_info_note_does_not_turn_a_comic_into_a_book() {
+        let tmp = dir("comicinfo");
+        let with_note: &[(&str, &[u8])] =
+            &[("001.png", b"\x89PNG"), ("ComicInfo.xml", b"<ComicInfo/>")];
+        let cbz = zip_at(
+            tmp.path(),
+            "a.cbz",
+            &[
+                ("001.png", b"\x89PNG", true),
+                ("ComicInfo.xml", b"<ComicInfo/>", true),
+            ],
+        );
+        assert_eq!(
+            identify("a.cbz", &cbz),
+            Verdict::Readable(Format::Cbz),
+            "便条不参与「条目全是图」的判断"
+        );
+        let cbr = rar_at(tmp.path(), "b.cbr", with_note);
+        assert_eq!(identify("b.cbr", &cbr), Verdict::Readable(Format::Cbr));
+        let cb7 = sevenz_at(tmp.path(), "c.cb7", with_note);
+        assert_eq!(identify("c.cb7", &cb7), Verdict::Readable(Format::Cb7));
     }
 
     /// 裸文件按扩展名定，TXT 与 Markdown 分不出来是**格式本身没有魔数**，不是实现偷懒。

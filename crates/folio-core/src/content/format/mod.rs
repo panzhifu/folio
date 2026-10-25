@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::scan::ImageUse;
 
+/// RAR / 7z / tar 的共同读取层：列条目、按名抽一条。ZIP 的随机寻址仍在 [`zip`]。
+pub(crate) mod archive;
 /// AZW4：PalmDB 容器里装着一份 PDF（Kindle Print Replica）。
 pub mod azw4;
 /// 7z 漫画包：与 CBZ 同一族（定版式、逐页图片），只是容器换成了 7z。

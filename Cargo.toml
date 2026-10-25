@@ -55,7 +55,23 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # 会像 `sha2` 那条坑一样把**第三条**拉进来。默认 feature（含 `system-fonts`）跟着
 # gpui 那一份走；`usvg::Options::default()` 的 fontdb 本就是空的，不会去扫系统字体。
 resvg = { version = "=0.46.0" }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+# ZIP 的压缩方法。**只开纯 Rust 的那几族**：deflate（flate2/zlib-rs + zopfli）、
+# bzip2（bzip2 0.6 的默认后端是 libbz2-rs-sys）、lzma / xz（lzma-rust2）、
+# ppmd（ppmd-rust）、deflate64（纯 Rust 解码器）。7-Zip / WinRAR 做的这几类 zip
+# 因此读得动，而交叉编译不用多一个 C 工具链变量 —— 与上面 sha2 / chardetng 同一条口径。
+# 锁上实测**只多 `deflate64` 一条包**：bzip2 / libbz2-rs-sys / lzma-rust2 / ppmd-rust
+# 本来就在图上（sevenz-rust2 那条链带着），这里只是把已有的一份转成 zip 的 feature。
+#
+# **zstd 不开**：zip 的 zstd feature 指向 zstd-sys（cc）。撞到 zstd 条目时那一条读不出来；
+# 整本都是 zstd 的漫画会以「一页图片都读不出来」收场，而不是悄悄给一本空书。
+zip = { version = "8", default-features = false, features = [
+    "deflate",
+    "bzip2",
+    "lzma",
+    "xz",
+    "ppmd",
+    "deflate64",
+] }
 # EPUB 里的 WOFF1 是「sfnt 逐表 zlib 压缩」。`zip` 已经带进 flate2（锁里 1.1.10），
 # 这里只是把它转成 folio-core 的直接依赖，不新增依赖树。
 flate2 = "1"

@@ -96,17 +96,33 @@ impl Zip {
     /// 两件事都在这里钉死：**不物化整条**（`io::copy` 走 8 KB 一块，不抱几个 GB 的
     /// `Vec`），**上限按实际写出的字节数判**（声明值那一格正是会撒谎的那一个）。
     ///
-    /// `None` = 条目读不到、是目录、超出上限、或写盘挂了。`None` 时 `dest` 可能已经
-    /// 留下半份文件，**删它是调用方的事**（它才知道那份半成品在暂存区的哪一个名字上）。
-    /// 多取一位（`max + 1`）就够分辨「正好 `max`」与「超过 `max`」。
-    pub(crate) fn extract_to(&mut self, name: &str, dest: &Path, max: u64) -> Option<u64> {
-        let mut entry = self.archive.by_name(name).ok()?;
+    /// `Err` 是给人看的那一句：条目读不到、是目录、超出上限、或写盘挂了。失败时
+    /// `dest` 可能留下半份文件，**删它是调用方的事**（它才知道那份半成品在暂存区的
+    /// 哪一个名字上）。多取一位（`max + 1`）就够分辨「正好 `max`」与「超过 `max`」。
+    ///
+    /// **压缩方法不支持时要说人话**：`zip` 只开了纯 Rust 的那几族（见根 `Cargo.toml`），
+    /// 撞到 zstd 那一类会给出一句通用的 `Unsupported compression method`，直接报给读者
+    /// 等于什么都没说 —— 所以这里把那一类统一换成「这一版不支持这个条目用的压缩方法」。
+    pub(crate) fn extract_to(
+        &mut self,
+        name: &str,
+        dest: &Path,
+        max: u64,
+    ) -> std::result::Result<u64, String> {
+        let mut entry = self
+            .archive
+            .by_name(name)
+            .map_err(|err| codec_reason(&err.to_string()))?;
         if entry.is_dir() {
-            return None;
+            return Err("容器里那一条是目录".to_string());
         }
-        let mut file = std::fs::File::create(dest).ok()?;
-        let written = std::io::copy(&mut entry.by_ref().take(max + 1), &mut file).ok()?;
-        (written <= max).then_some(written)
+        let mut file = std::fs::File::create(dest).map_err(|err| format!("写不进暂存区：{err}"))?;
+        let written = std::io::copy(&mut entry.by_ref().take(max + 1), &mut file)
+            .map_err(|err| codec_reason(&err.to_string()))?;
+        if written > max {
+            return Err(format!("解压后超过 {} MB", max >> 20));
+        }
+        Ok(written)
     }
 
     /// 条目文本。合法 UTF-8 时**不复制**：直接吃掉那个 `Vec<u8>`。
@@ -158,10 +174,11 @@ impl Zip {
             return None;
         }
         Some(EntryRange {
+            index: at,
             at: file.data_start()?,
             comp_len: file.compressed_size(),
             raw_len: file.size(),
-            stored: file.compression() == zip::CompressionMethod::Stored,
+            method: file.compression(),
             crc: file.crc32(),
         })
     }
@@ -200,16 +217,32 @@ impl Zip {
 /// 名字只有主线程要（清单里写的是路径），worker 要的从来就是「在哪儿、多长、怎么压的」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EntryRange {
+    /// 中央目录里的下标。只有非 stored/deflate 的回退路要用它（zip-rs 的 `by_index`）。
+    index: usize,
     /// 压缩载荷在容器文件里的起点。
     at: u64,
     /// 压缩后的长度。
     comp_len: u64,
     /// 解压后的长度：整条读的预分配、流式读的「读完了没」都看它。
     raw_len: u64,
-    /// 「存而不压缩」：没有 inflate，也就没有那趟 Huffman 解码。
-    stored: bool,
+    /// 压缩方法。stored / deflate 走本模块的快路，其余交给 zip-rs 的解码器。
+    method: zip::CompressionMethod,
     /// 中央目录记的 CRC32。整条读要在末尾校它；前缀读不校（读不到流末尾，也没得校）。
     crc: u32,
+}
+
+impl EntryRange {
+    /// 这条能不能走「自己按偏移 inflate」的快路。
+    ///
+    /// 快路只认 stored 与 deflate：它们是真书里的绝大多数，而 bzip2 / LZMA / XZ / PPMd /
+    /// Deflate64 在本仓库的语料里是少数。为少数方法把 inflate 的零拷贝路径改复杂不划算，
+    /// 所以那一档回落到 zip-rs（代价是要重新打开一次中央目录，见 [`EntryReader::pump_zip`]）。
+    pub(crate) fn is_inline(&self) -> bool {
+        matches!(
+            self.method,
+            zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated
+        )
+    }
 }
 
 /// 一块解压产物的交付大小。
@@ -231,12 +264,16 @@ const CHUNK: usize = 32 * 1024;
 /// 「may not allocate memory, though, and attempts to reuse any previously existing
 /// resources」，所以逐条目重置会话、不新建会话。
 pub(crate) struct EntryReader {
+    /// 回退路要按名字重开容器；快路只用一个 `File`，不碰它。
+    path: std::path::PathBuf,
     file: std::fs::File,
     /// 压缩侧缓冲：一次 `read_at` 灌满，逐块喂给 inflate。
     src: Vec<u8>,
     /// 解压产物缓冲。
     chunk: Vec<u8>,
     decompress: flate2::Decompress,
+    /// 非 stored/deflate 条目回落用的 zip-rs 容器。**懒开**，开一次之后本条通道复用。
+    slow: Option<zip::ZipArchive<BufReader<std::fs::File>>>,
 }
 
 /// 从 `at` 起、最多 `left` 字节的位置读适配器。
@@ -277,10 +314,12 @@ impl EntryReader {
     /// 只要一个句柄：不读中央目录、不建表。两块缓冲与会话各拨一次，之后逐条复用。
     pub(crate) fn open(path: &Path) -> Option<Self> {
         Some(Self {
+            path: path.to_path_buf(),
             file: std::fs::File::open(path).ok()?,
             src: vec![0u8; READ_BUFFER],
             chunk: vec![0u8; CHUNK],
             decompress: flate2::Decompress::new(false),
+            slow: None,
         })
     }
 
@@ -302,12 +341,16 @@ impl EntryReader {
         limit: Option<usize>,
         with: &mut dyn FnMut(&[u8]) -> bool,
     ) -> Option<(u64, bool)> {
+        if !range.is_inline() {
+            return self.pump_zip(range, limit, with);
+        }
         // 四个字段分开借出：`pump` 要同时用句柄、缓冲和会话，整体 `&mut self` 传不进去。
         let Self {
             file,
             src,
             chunk,
             decompress,
+            ..
         } = self;
         let mut input = At {
             file,
@@ -341,7 +384,7 @@ impl EntryReader {
                 }
             }
             let out = &mut chunk[..room];
-            let (done, wrote, ate) = if range.stored {
+            let (done, wrote, ate) = if matches!(range.method, zip::CompressionMethod::Stored) {
                 // 存而不压缩：没有 inflate，也就没有流末尾，压缩块喂完就算走完。
                 let got = room.min(filled - held);
                 out[..got].copy_from_slice(&src[held..held + got]);
@@ -377,6 +420,48 @@ impl EntryReader {
             ended = done;
         }
         Some((produced, ended))
+    }
+
+    /// 非 stored/deflate 的条目：交给 zip-rs 自己的解码器。
+    ///
+    /// 这条支路要重新打开一次容器（中央目录），所以只在 `EntryRange::is_inline` 为假时
+    /// 才会发生。真书里这几族是少数，为它们重写 inflate 的零拷贝路径不划算；同一条通道
+    /// 解过多条之后 `slow` 复用，不再重开。
+    ///
+    /// CRC 与长度仍由调用方（[`EntryReader::read`] / [`EntryReader::stream`]）校，
+    /// 这里只负责把解压产物一块块交出去。
+    fn pump_zip(
+        &mut self,
+        range: &EntryRange,
+        limit: Option<usize>,
+        with: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Option<(u64, bool)> {
+        let Self {
+            path, chunk, slow, ..
+        } = self;
+        if slow.is_none() {
+            let file = std::fs::File::open(path.as_path()).ok()?;
+            *slow = Some(zip::ZipArchive::new(BufReader::with_capacity(READ_BUFFER, file)).ok()?);
+        }
+        let mut entry = slow.as_mut()?.by_index(range.index).ok()?;
+        let mut produced = 0u64;
+        loop {
+            let room = match limit {
+                Some(max) if produced >= max as u64 => return Some((produced, false)),
+                Some(max) => chunk
+                    .len()
+                    .min((max as u64).saturating_sub(produced) as usize),
+                None => chunk.len(),
+            };
+            let got = entry.read(&mut chunk[..room]).ok()?;
+            if got == 0 {
+                return Some((produced, true));
+            }
+            produced += got as u64;
+            if !with(&chunk[..got]) {
+                return Some((produced, false));
+            }
+        }
     }
 
     /// 整条读出来，末尾校 CRC。长度对不上、CRC 不对、读挂 —— 都回 `None`，
@@ -477,6 +562,22 @@ fn crc_ok(want: u32, bytes: &[u8]) -> bool {
     false
 }
 
+/// zip-rs 的压缩方法错误 → 给人看的那一句。
+///
+/// 这一版只开纯 Rust 的几族（见根 `Cargo.toml`），zstd 一类会给出
+/// `Unsupported compression method`。原样报给读者等于什么都没说，所以统一换成
+/// 一句能指向「换个工具重打包」的话。
+fn codec_reason(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("encrypt") || lower.contains("password") {
+        "这一版不支持加密的压缩包".to_string()
+    } else if lower.contains("unsupported compression") || lower.contains("unsupportedarchive") {
+        "这一版不支持这个条目用的压缩方法（zstd 等）".to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
 fn normalize(name: &str) -> String {
     name.replace('\\', "/")
 }
@@ -484,8 +585,9 @@ fn normalize(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::path::Path;
 
-    use crate::content::format::zip::{EntryReader, Zip};
+    use crate::content::format::zip::{EntryReader, Zip, codec_reason};
     use crate::infra::metrics::{Metric, take_local};
 
     /// 合成一个 zip 并交回它的临时目录（目录活得比测试久，所以并行测试不会互相覆盖
@@ -703,6 +805,139 @@ mod tests {
             reader.read_head(&range, 8).as_deref(),
             Some(&[7u8; 8][..]),
             "前缀读不校 CRC，头部完好就该给"
+        );
+    }
+
+    /// 合成一个用指定压缩方法的 zip（LZMA / XZ / PPMd / bzip2 都靠它）。
+    fn archive_with_codecs(entries: &[(&str, &[u8], zip::CompressionMethod)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::File::create(dir.path().join("case.zip")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, data, method) in entries {
+            let options = zip::write::SimpleFileOptions::default().compression_method(*method);
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+        dir
+    }
+
+    /// bzip2 / XZ / PPMd 这一档走 zip-rs 的回退路：整条读、流式读、前缀读
+    /// 三样都要与 `Zip::read` 逐字节相同。LZMA 的写入口在 zip-rs 里是明确不支持
+    /// （`LZMA isn't supported for compression`），所以它跟 Deflate64 一样用夹具，
+    /// 见下面那条。
+    ///
+    /// 这一条守的是「开了 feature 但快路不认」这件事：`EntryRange::is_inline` 为假时
+    /// 若没有人接住，症状是这几族压缩的整本书所有条目都读不出来 —— 而判定层、页表、
+    /// 封面又都还在，屏幕上是「书在、内容空」。
+    #[test]
+    fn bzip2_xz_and_ppmd_take_the_same_three_paths() {
+        let text = "<h1>章</h1><p>正文</p>".repeat(4000).into_bytes();
+        let dir = archive_with_codecs(&[
+            ("bzip2.xhtml", &text, zip::CompressionMethod::Bzip2),
+            ("xz.xhtml", &text, zip::CompressionMethod::Xz),
+            ("ppmd.xhtml", &text, zip::CompressionMethod::Ppmd),
+        ]);
+        let path = dir.path().join("case.zip");
+        let mut zip = Zip::open(&path).unwrap();
+        let mut reader = EntryReader::open(&path).expect("连句柄都开不出来");
+
+        for name in ["bzip2.xhtml", "xz.xhtml", "ppmd.xhtml"] {
+            let range = zip.range_at(name).expect("区间");
+            assert!(!range.is_inline(), "{name} 不该被快路认成 stored/deflate");
+            let want = zip.read(name).expect("zip-rs 那一路该给出字节");
+            assert_eq!(
+                want, text,
+                "{name} 合成时写进去的字节要先自己兑现（否则下面三条是空转）"
+            );
+
+            assert_eq!(
+                reader.read(&range).as_deref(),
+                Some(want.as_slice()),
+                "{name} 整条读"
+            );
+
+            let mut got: Vec<u8> = Vec::new();
+            assert_eq!(
+                reader.stream(&range, &mut |chunk| {
+                    got.extend_from_slice(chunk);
+                    true
+                }),
+                Some(()),
+                "{name} 流式读到末尾并校 CRC"
+            );
+            assert_eq!(got, want, "{name} 流式的字节必须与整条读逐字节相同");
+
+            assert_eq!(
+                reader.read_head(&range, 3).as_deref(),
+                Some(&want[..3]),
+                "{name} 前缀读"
+            );
+        }
+    }
+
+    /// 一条写不出来的方法（或 7-Zip 最省事的那一种）：夹具是 7-Zip 生成的，
+    /// 生成命令见 `tests/fixtures/oss/zip-codecs/README.md`。它同样走回退路。
+    fn assert_fixture_round_trips(file: &str, name: &str, len: usize, needle: &[u8]) {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/zip-codecs/");
+        let path = path.join(file);
+        let mut zip = Zip::open(&path).expect("夹具该打得开");
+        let range = zip.range_at(name).expect("区间");
+        assert!(!range.is_inline(), "{file} 不是快路认的方法");
+        let want = zip.read(name).expect("zip-rs 该解得出夹具");
+        assert_eq!(want.len(), len, "夹具的解压长度（README 里记的数）");
+        assert!(
+            want.windows(needle.len()).any(|window| window == needle),
+            "解出来的必须是夹具里那段正文"
+        );
+
+        let mut reader = EntryReader::open(&path).expect("连句柄都开不出来");
+        assert_eq!(
+            reader.read(&range).as_deref(),
+            Some(want.as_slice()),
+            "整条读"
+        );
+        let mut got: Vec<u8> = Vec::new();
+        assert_eq!(
+            reader.stream(&range, &mut |chunk| {
+                got.extend_from_slice(chunk);
+                true
+            }),
+            Some(())
+        );
+        assert_eq!(got, want);
+        assert_eq!(
+            reader.read_head(&range, 8).as_deref(),
+            Some(&want[..8]),
+            "前缀读"
+        );
+    }
+
+    #[test]
+    fn deflate64_entries_use_the_zip_rs_fallback() {
+        assert_fixture_round_trips("deflate64.zip", "page.xhtml", 8627, b"deflate64 fixture");
+    }
+
+    /// zip-rs 的写入口对 LZMA 明确说不（`LZMA isn't supported for compression`），
+    /// 所以这一族也只能摆一份 7-Zip 写出来的字节。
+    #[test]
+    fn lzma_entries_use_the_zip_rs_fallback() {
+        assert_fixture_round_trips("lzma.zip", "page.xhtml", 7627, b"lzma fixture");
+    }
+
+    /// zip-rs 的压缩方法错误要换成一句读者看得懂的话；其余错误原样留着
+    /// （CRC、截断那些本来就说得清）。
+    #[test]
+    fn unsupported_codec_errors_say_so_in_plain_words() {
+        assert_eq!(
+            codec_reason("UnsupportedArchive(\"Unsupported compression method 93\")"),
+            "这一版不支持这个条目用的压缩方法（zstd 等）"
+        );
+        assert_eq!(codec_reason("CRC mismatch"), "CRC mismatch");
+        assert_eq!(
+            codec_reason("UnsupportedArchive(\"AES encryption is not supported\")"),
+            "这一版不支持加密的压缩包"
         );
     }
 }

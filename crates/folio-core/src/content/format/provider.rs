@@ -318,16 +318,16 @@ pub fn supports_extension(ext: &str) -> bool {
 
 /// 粗筛：这个文件值不值得哈希一趟、走一遍三层判定。
 ///
-/// 两条判据：**扩展名有 provider 认领**，或者**它是一个装得下书的 ZIP**。
-/// 后一条是真的开容器看条目（[`super::sniff::zip_shape`]），不看文件名 ——
-/// `书.fb2.zip`、`书.txt.zip`、`书.epub.zip` 都算，`报告.docx`、`备份.zip` 都不算，
+/// 两条判据：**扩展名有 provider 认领**，或者**它是一个装得下书的归档**——ZIP、RAR、
+/// 7z、tar 四种都认（[`super::sniff::archive_shape`]），不看文件名：
+/// `书.fb2.zip`、`书.txt.zip`、`合集.rar`、`全集.7z` 都算，`报告.docx`、`备份.zip` 都不算，
 /// 而且对名字完全不敏感：一个叫 `x.zip` 的真 EPUB 照样进候选。
 ///
-/// 为什么开容器不算贵：ZIP 的中央目录在文件**末尾**，读它是一趟 seek 加条目表，
-/// 与「哈希整个文件」不是同一个量级 —— 而粗筛存在的全部理由正是省掉后者
-/// （`plans/导入管线.md` §五：5000 个文件里排掉 4000 个杂物）。反过来，按扩展名把每个
-/// zip 都收进来，会叫读者机器上的备份包、微信下载、docx 各排一趟 SHA-256，
-/// 还得逐条跟他解释「这不是书」。
+/// 为什么开容器不算贵：这是「读目录」而不是「哈希整个文件」的量级 —— ZIP 的中央目录
+/// 在文件**末尾**，RAR / 7z 的索引在头尾，tar 也是按 512 字节的头逐条跳（文件体不读）。
+/// 而粗筛存在的全部理由正是省掉后者（`plans/导入管线.md` §五：5000 个文件里排掉
+/// 4000 个杂物）。反过来，按扩展名把每个归档都收进来，会叫读者机器上的备份包、
+/// 微信下载、docx 各排一趟 SHA-256，还得逐条跟他解释「这不是书」。
 ///
 /// 仍然**不是裁决**：这一问只决定要不要往下走，最终格式由内容那三层定
 /// （`format::sniff::identify`）。
@@ -341,8 +341,8 @@ pub fn looks_like_a_book(path: &Path) -> bool {
     }
     // 只有扩展名不认的那一族才值得开容器，所以这一问排在后面。
     matches!(
-        super::sniff::zip_shape(path),
-        super::sniff::ZipShape::Book(_) | super::sniff::ZipShape::Holds(_)
+        super::sniff::archive_shape(path),
+        super::sniff::ArchiveShape::Book(_) | super::sniff::ArchiveShape::Holds(_)
     )
 }
 

@@ -573,7 +573,7 @@ fn unsupported(path: &Path, why: &str) -> crate::Error {
 
 /// OLE2 那一支的判定结果。
 ///
-/// 与 [`super::sniff::ZipShape`] 同一个形状、同一个理由：**「开不出容器」与「这不是书」
+/// 与 [`super::sniff::ArchiveShape`] 同一个形状、同一个理由：**「开不出容器」与「这不是书」
 /// 对读者是两句话**（后者建议换个文件，前者值得把文件留下来查），并成一个 `bool` 就说不清。
 pub(crate) enum Ole2 {
     /// 目录里有 `WordDocument`，而它的 `wIdent` 是 Word 97-2003 那一条。

@@ -1030,6 +1030,161 @@ fn pack(dir: &Path, name: &str, entries: &[(&str, &str)]) -> PathBuf {
     path
 }
 
+/// 一个真 RAR：`(条目名, 内容)`。写入口只在测试里开着。
+fn pack_rar(dir: &Path, name: &str, entries: &[(&str, &str)]) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    let mut builder = rars::Builder::new(rars::ArchiveVersion::Rar50);
+    for (entry, body) in entries {
+        builder
+            .add_bytes(
+                entry.as_bytes().to_vec(),
+                body.as_bytes().to_vec(),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    builder.write_to_path(&path, None).unwrap();
+    path
+}
+
+/// 一个真 7z：压缩器的入口是「把目录压进去」，所以先在临时目录里摆一份。
+fn pack_sevenz(dir: &Path, name: &str, entries: &[(&str, &str)]) -> PathBuf {
+    let src = dir.join(format!("{name}-src"));
+    std::fs::create_dir_all(&src).unwrap();
+    for (entry, body) in entries {
+        std::fs::write(src.join(entry), body).unwrap();
+    }
+    let path = dir.join(name);
+    sevenz_rust2::compress_to_path(&src, &path).unwrap();
+    path
+}
+
+/// 一个真 tar：条目名与字节都由调用方给。
+fn pack_tar(dir: &Path, name: &str, entries: &[(&str, &str)]) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    let file = std::fs::File::create(&path).unwrap();
+    let mut builder = tar::Builder::new(file);
+    for (entry, body) in entries {
+        let mut header = tar::Header::new_ustar();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, entry, std::io::Cursor::new(body.as_bytes()))
+            .unwrap();
+    }
+    builder.finish().unwrap();
+    path
+}
+
+/// ZIP 之外的三种归档走同一条退层的路：一个候选交回两本书，副本是解出来的 FB2。
+#[test]
+fn rar_7z_and_tar_bundles_land_every_book_they_hold() {
+    type Packer = fn(&Path, &str, &[(&str, &str)]) -> PathBuf;
+    let packers: [(&str, Packer); 3] = [
+        ("合集.rar", pack_rar),
+        ("全集.7z", pack_sevenz),
+        ("全集.tar", pack_tar),
+    ];
+    for (name, build) in packers {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("books");
+        let store = Store::in_memory().unwrap();
+        let path = build(
+            &tmp.path().join("原处"),
+            name,
+            &[
+                ("01-上卷.fb2", &fb2_xml("上卷")),
+                ("02-下卷.fb2", &fb2_xml("下卷")),
+            ],
+        );
+
+        let outcomes = import_from(
+            &PathsSource::picked(vec![path]),
+            &lib,
+            &store,
+            &StageCtx::detached(),
+        );
+        let report = ImportReport::tally(&outcomes);
+        assert_eq!(
+            report.added,
+            2,
+            "{name} 里的两本都要落地：{:?}",
+            outcomes.iter().map(|o| &o.result).collect::<Vec<_>>()
+        );
+        assert_eq!(staged(&lib), Vec::<String>::new(), "{name}：暂存区要结清");
+
+        let names = copies(&lib);
+        assert_eq!(names.len(), 2, "{name}：书库根上两份副本：{names:?}");
+        for copy_name in names {
+            assert!(
+                copy_name.ends_with(".fb2"),
+                "{name}：副本的扩展名来自判定，不是外层那个归档：{copy_name}"
+            );
+            let copy = lib.join(&copy_name);
+            assert!(
+                !std::fs::read(&copy).unwrap().starts_with(b"PK\x03\x04"),
+                "{name}：副本 {copy_name} 还是外层那个包"
+            );
+        }
+    }
+}
+
+/// ZIP 里的条目用 bzip2 压：整条路（退层 → 落地 → 再判定）都要通。
+/// 这一条把 Cargo feature 与 `archive::extract_to` 的 ZIP 那一支串起来。
+#[test]
+fn a_zip_bundle_with_bzip2_entries_lands_and_still_opens() {
+    use std::io::Write as _;
+
+    use crate::content::format::{Content, Format, provider_for, sniff};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let picked = tmp.path().join("原处");
+    std::fs::create_dir_all(&picked).unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let path = picked.join("合集.zip");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Bzip2);
+    zip.start_file("一本.fb2", opts).unwrap();
+    zip.write_all(fb2_xml("bzip2 包着的一本").as_bytes())
+        .unwrap();
+    zip.finish().unwrap();
+
+    let outcomes = import_from(
+        &PathsSource::picked(vec![path]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    );
+    let report = ImportReport::tally(&outcomes);
+    assert_eq!(
+        report.added,
+        1,
+        "bzip2 条目要抽得出来：{:?}",
+        outcomes.iter().map(|o| &o.result).collect::<Vec<_>>()
+    );
+    assert_eq!(staged(&lib), Vec::<String>::new(), "暂存区要结清");
+
+    let names = copies(&lib);
+    assert_eq!(names.len(), 1);
+    let copy = lib.join(&names[0]);
+    assert_eq!(
+        sniff::identify(&names[0], &copy).format(),
+        Some(Format::Fb2)
+    );
+    let provider = provider_for(&copy).expect("副本该有 provider 认领");
+    let (meta, content) = provider.read(&copy).expect("副本要读得开");
+    assert_eq!(meta.title, "bzip2 包着的一本");
+    assert!(matches!(content, Content::Reflow(_)));
+}
+
 /// 一个装着两条正文的包：**一个候选交回两本书**，各带自己那一个名字。
 ///
 /// 这是「逐条各判一次」那条规则的门 —— 报表与架面都要按本数说话，而不是按候选数。
