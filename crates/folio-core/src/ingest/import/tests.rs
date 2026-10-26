@@ -2500,3 +2500,42 @@ fn a_panicking_book_only_fails_itself() {
         );
     }
 }
+
+/// OPDS 书源的下载要带 Basic 认证头：头只活在这个源对象里，不写进 Origin、不进日志。
+#[test]
+fn a_url_source_carries_its_headers_to_the_transport() {
+    use crate::net::remote::{Cancel, Error as RemoteError, Request, Response, Sink, Transport};
+
+    struct Capture(Mutex<Option<Request>>);
+    impl Transport for Capture {
+        fn request(&self, _req: Request) -> crate::net::remote::Result<Response> {
+            Ok(Response::new(200, Vec::new()))
+        }
+        fn download(
+            &self,
+            req: Request,
+            sink: &mut dyn Sink,
+            _cancel: &Cancel,
+        ) -> crate::net::remote::Result<u64> {
+            *self.0.lock().unwrap() = Some(req);
+            sink.write(b"book").map_err(RemoteError::Io)?;
+            sink.finish().map_err(RemoteError::Io)?;
+            Ok(5)
+        }
+    }
+
+    let capture = Arc::new(Capture(Mutex::new(None)));
+    let source = super::UrlSource::new("https://catalog.test/books/1.epub".into(), capture.clone())
+        .with_headers(vec![("Authorization".into(), "Basic dXNlcjpwYXNz".into())]);
+    let ctx = StageCtx::detached();
+    let candidates = source.candidates(Path::new("."), &ctx).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    source.stage(&candidates[0], tmp.path(), &ctx).unwrap();
+    let req = capture.0.lock().unwrap().take().unwrap();
+    assert_eq!(req.url, "https://catalog.test/books/1.epub");
+    assert!(
+        req.headers
+            .iter()
+            .any(|(name, value)| name == "Authorization" && value == "Basic dXNlcjpwYXNz")
+    );
+}

@@ -52,8 +52,8 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
     Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, LOG_OFF_ENV, Language, Layer,
-    Library, Logging, Mode, PageTurn, Provenance, Reader, Resolved, Speech, Sync, TextDirection,
-    TocDensity, Translation, TranslationEngine,
+    Library, Logging, Mode, Opds, OpdsCatalog, PageTurn, Provenance, Reader, Resolved, Speech,
+    Sync, TextDirection, TocDensity, Translation, TranslationEngine,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;

@@ -39,6 +39,9 @@ notify = "8"
 # 出网方向的同步 HTTP 客户端（URL 下载、将来的 WebDAV）：同步 API 对上「一个请求流
 # 到底」的管线形状，rustls + webpki-roots（打包根证书，Android 上没有 /etc/ssl 可靠）。
 ureq = "2"
+# OPDS 的相对链接要按 feed 地址解析。锁里已有 2.5.8（ureq 那条链），这里把既有的一份
+# 转成直接依赖，不新增依赖树。
+url = "2.5"
 # 只给 `folio-core::transfer`（Wi-Fi 传书服务器）用：长驻、多连接并发的 HTTP 服务
 # 与现成的 multipart 流式解析。tokio 被 transfer 模块关在自己家里，core 其余部分
 # 照旧是同步形状，公共签名不漏 Future。

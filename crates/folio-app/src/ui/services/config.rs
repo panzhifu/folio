@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use folio_core::{
-    Appearance, Config, Env, Language, Library, Provenance, Reader, Resolved, Speech, Sync,
+    Appearance, Config, Env, Language, Library, Opds, Provenance, Reader, Resolved, Speech, Sync,
     Translation,
 };
 use gpui_kit::{App, AppContext as _, Entity, Global};
@@ -140,6 +140,11 @@ impl ConfigHolder {
         Self::snapshot(cx).sync.clone()
     }
 
+    /// OPDS 书源列表。浏览页建屏时读一次。
+    pub fn opds(cx: &App) -> Opds {
+        Self::snapshot(cx).opds.clone()
+    }
+
     /// 每一项的配置来自哪一层（§2.1）。诊断 dump 用。
     pub fn provenance(cx: &App) -> Provenance {
         Self::entity(cx).read(cx).provenance.clone()
@@ -188,6 +193,10 @@ impl ConfigHolder {
 
     pub fn edit_sync(cx: &mut App, f: impl FnOnce(&mut Sync)) {
         Self::edit(cx, |config| f(&mut config.sync));
+    }
+
+    pub fn edit_opds(cx: &mut App, f: impl FnOnce(&mut Opds)) {
+        Self::edit(cx, |config| f(&mut config.opds));
     }
 
     pub fn edit_library(cx: &mut App, f: impl FnOnce(&mut Library)) {

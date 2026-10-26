@@ -28,7 +28,7 @@
 |---|---|
 | 总体 | **阅读内核已站进第一梯队，差距集中在外向生态。** |
 | 领先 / 独有 | 格式矩阵最宽（21 provider 全纯 Rust）；自研排版引擎、零 WebView；双页自动退档、仿真卷页、Wi-Fi 传书（局域网 + PIN）、字符偏移 Locator（换字号换窗口不漂移）、**听读一体**（五家里只有 Folio 与 Readest 有朗读，且只有 Folio 把听书计入统计） |
-| 差距（按补齐划算程度） | ① **批注闭环** —— 列表屏（书内「批注」格 + 跨书「笔记」屏）、导出（txt/MD/HTML）、书签、删除撤销**已补齐**；剩批注导入互通；② **同步** —— WebDAV 手动版已接（进度 / 批注 / 书签）；书文件与自动同步未做；③ **OPDS 书源**；④ **TTS** 补平台与句级；⑤ **AI 与词典** —— 选区翻译弹窗（Google 免 key / OpenAI 兼容 / DeepL 三档）**第 2 期已补**，本地词典与 AI 是战略级选择，暂缓不动摇内核 |
+| 差距（按补齐划算程度） | ① **批注闭环** —— 列表屏（书内「批注」格 + 跨书「笔记」屏）、导出（txt/MD/HTML）、书签、删除撤销**已补齐**；剩批注导入互通；② **同步** —— WebDAV 手动版已接（进度 / 批注 / 书签）；书文件与自动同步未做；③ **OPDS 书源** —— 1.x Atom + 2.0 JSON 的浏览与下载已接，搜索 / OPDS-PSE 未做；④ **TTS** 补平台与句级；⑤ **AI 与词典** —— 选区翻译弹窗（Google 免 key / OpenAI 兼容 / DeepL 三档）**第 2 期已补**，本地词典与 AI 是战略级选择，暂缓不动摇内核 |
 | 不追 | Okular 的表单 / 签名 / 打印 / 演示模式是文档查看器的物种能力；KOReader 的 Kindle/Kobo/ReMarkable 那一串墨水屏宿主是它物种的一部分 —— 都与 Folio 的定位无关，不进 roadmap |
 
 ## 功能矩阵
@@ -106,7 +106,7 @@
 
 | 功能 | **Folio** | Okular | Foliate | Readest | Anx Reader | KOReader |
 |---|---|---|---|---|---|---|
-| OPDS 书源 | ❌ | ❌ | ✅ 1.x + 2.0 | ✅ 全家桶 + OPDS-PSE（流式阅读） | ❌ | ✅ 1.x + 2.0 + OPDS-PSE |
+| OPDS 书源 | ✅ 1.x Atom + 2.0 JSON；浏览 / 封面 / 下载入书库 / 翻页；Basic 认证；无搜索与 PSE | ❌ | ✅ 1.x + 2.0 | ✅ 全家桶 + OPDS-PSE（流式阅读） | ❌ | ✅ 1.x + 2.0 + OPDS-PSE |
 | 网页剪藏 | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ Wallabag |
 | RSS / 新闻下载 | ❌ | ❌ | ❌ | — | ❌ | ✅ feed → EPUB |
 | Calibre 无线 | ❌ | ❌ | ❌ | — | ❌ | ✅ 元数据搜索 + 无线传书 |
@@ -162,7 +162,7 @@
 | 1 | ~~**批注闭环**：列表屏、导出、书签、删除撤销~~ **已补（2026-10-26）**：书内「批注」格 + 跨书「笔记」屏、txt/MD/HTML 三档导出、顶栏书签开关、6 秒撤销胶囊 | 后端原样（5 色 3 画法 + SQLite + 版本化锚点），UI 四件套已接 | ✅ 已完成 | 列表照 Okular、导出照 Foliate、撤销照 Okular 命令层 | Okular `part/side_reviews.cpp`、`core/documentcommands_p.h`；Foliate `annotations.js` |
 | 2 | **批注导入互通**（Moon+ Reader / ReadEra / JSON） | 无 | ❌ 未做 | Readest 已趟出格式兼容的面；KOReader 的 `.annotations.lua` 是「文件级搬家 + 合并」的另一条路 | Readest 的 Moon+ / ReadEra 导入；KOReader `.annotations.lua`（路径待盘点） |
 | 3 | ~~**同步**：接线 WebDAV，做进度 + 批注整库同步~~ **手动版已补（2026-10-26）**：进度 / 批注 / 书签，每设备一份快照，按记录更新时间合并；书文件与自动同步未接 | `net/remote/dav.rs` + `sync.rs`；设置页可测试连接 / 立即同步 | ⚠️ 部分：手动已接，书文件 / 自动未做 | 形态照 Anx 的整库同步 | 自家 `folio-core/src/net/remote/dav.rs`、`sync.rs`；第二步 KOSync（KOReader 生态事实标准） |
-| 4 | **OPDS 书源** | 无 | ❌ 未做 | Foliate（1.x + 2.0 一并支持）；KOReader 连 PSE 都有 | Foliate `src/opds/`；KOReader `plugins/opds.koplugin/`；Readest 的 OPDS-PSE |
+| 4 | ~~**OPDS 书源**~~ **已补（2026-10-26）**：1.x Atom + 2.0 JSON，书源管理 / 封面 / 下载入书库 / 翻页，Basic 认证；搜索与 OPDS-PSE 未做 | 架面「⋮」→ OPDS 书源；core `net/opds.rs` | ⚠️ 部分：浏览与下载已接，搜索 / PSE 未做 | Foliate（1.x + 2.0 一并支持）；KOReader 连 PSE 都有 | Foliate `src/opds/`；KOReader `plugins/opds.koplugin/`；Readest 的 OPDS-PSE |
 | 5 | **TTS**：段级 → 句级高亮，补 macOS / Windows 后端 | 段级 utterance，仅 Linux / Android | ⚠️ 部分：段级已做，句级 / macOS / Windows 未做 | Foliate 的句级高亮 | folio-core 的行盒已在手；之后补 EPUB 3 Media Overlays |
 | 6 | ~~**选区翻译**：Google 免 key / OpenAI 兼容 / DeepL 三档 + v24 缓存 + 弹层内换语 + 设置页配引擎~~ **已补（2026-10-26）**；剩 **本地词典**、**AI 陪读** | 翻译三引擎已接；词典 / AI 仍无 | ⚠️ 部分：翻译完成，词典 / AI 未做 | 翻译照 Foliate / Readest，端点照 KOReader；词典照 KOReader 的 Stardict + sdcv；AI 陪读照 Readest 的防剧透 RAG | `net/translate/`、`store/translations.rs`；KOReader `frontend/ui/translator.lua`；Readest `services/translators/`（词典 / AI 上游路径待盘点） |
 

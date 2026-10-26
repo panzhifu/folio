@@ -802,6 +802,36 @@ impl Sync {
     }
 }
 
+/// OPDS 书源列表。与 `Sync` 同一条：密码住在 0600 的 `config.json` 里，
+/// 不单开秘密文件。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Opds {
+    pub catalogs: Vec<OpdsCatalog>,
+}
+
+impl Opds {
+    /// 名称、地址、用户名去掉误带空白；密码原样保留。地址不改写（feed 的相对链接
+    /// 要按它解析，擅自补斜杠会让 `../` 的基准变一格）。
+    pub fn normalized(mut self) -> Self {
+        for catalog in &mut self.catalogs {
+            catalog.name = catalog.name.trim().to_string();
+            catalog.url = catalog.url.trim().to_string();
+            catalog.username = catalog.username.trim().to_string();
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpdsCatalog {
+    pub name: String,
+    pub url: String,
+    pub username: String,
+    pub password: String,
+}
+
 /// 排版输入。全部是纯数据、不含任何 UI 类型，因此同一份配置既能在桌面端用，
 /// 也能给移动端宿主用。
 ///
@@ -1109,6 +1139,7 @@ pub struct Config {
     pub speech: Speech,
     pub translation: Translation,
     pub sync: Sync,
+    pub opds: Opds,
     pub logging: Logging,
 }
 
@@ -1125,6 +1156,7 @@ impl Default for Config {
             speech: Speech::default(),
             translation: Translation::default(),
             sync: Sync::default(),
+            opds: Opds::default(),
             logging: Logging::default(),
         }
     }
@@ -1142,6 +1174,7 @@ impl Config {
         self.speech = self.speech.normalized();
         self.translation = self.translation.normalized();
         self.sync = self.sync.normalized();
+        self.opds = self.opds.normalized();
         // 书库位置去掉首尾空白：填成 "  /x  " 会让 `is_confirmed` 说「确认过」，
         // 而后面按这个串去找目录会找不到。
         self.library.dir = self.library.dir.trim().to_string();
@@ -2071,5 +2104,31 @@ mod sync_config_tests {
         let text = serde_json::to_string(&config).unwrap();
         let back: Config = serde_json::from_str(&text).unwrap();
         assert_eq!(back.sync, config.sync);
+    }
+}
+
+#[cfg(test)]
+mod opds_config_tests {
+    use super::{Config, Opds, OpdsCatalog};
+
+    #[test]
+    fn opds_catalogs_trim_fields_but_keep_the_password() {
+        let config = Config {
+            opds: Opds {
+                catalogs: vec![OpdsCatalog {
+                    name: "  我的书源  ".into(),
+                    url: "  https://catalog.test/opds/  ".into(),
+                    username: "  reader  ".into(),
+                    password: "  pass with spaces  ".into(),
+                }],
+            },
+            ..Config::default()
+        }
+        .normalized();
+        let catalog = &config.opds.catalogs[0];
+        assert_eq!(catalog.name, "我的书源");
+        assert_eq!(catalog.url, "https://catalog.test/opds/");
+        assert_eq!(catalog.username, "reader");
+        assert_eq!(catalog.password, "  pass with spaces  ");
     }
 }

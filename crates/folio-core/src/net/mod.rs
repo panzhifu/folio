@@ -14,6 +14,7 @@
 //! 现成流式解析，才把它关在这一个模块内。这条边界写在 [`transfer`] 的模块文档里，
 //! 并由本模块的文档再钉一次。
 
+pub mod opds;
 pub mod remote;
 pub mod transfer;
 pub mod translate;

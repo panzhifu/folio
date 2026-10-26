@@ -330,11 +330,23 @@ fn now_secs() -> u64 {
 pub struct UrlSource {
     url: String,
     transport: Arc<dyn Transport>,
+    headers: Vec<(String, String)>,
 }
 
 impl UrlSource {
     pub fn new(url: String, transport: Arc<dyn Transport>) -> Self {
-        Self { url, transport }
+        Self {
+            url,
+            transport,
+            headers: Vec::new(),
+        }
+    }
+
+    /// 带请求头（OPDS 书源常要求 Basic 认证）。头只活在这个源对象里，不写进
+    /// `Origin` / 日志 —— 下载结束或取消时随对象一起丢。
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers = headers;
+        self
     }
 }
 
@@ -370,7 +382,10 @@ impl Source for UrlSource {
         // 暂存区里的这一份，再由管线第 5 步 rename 进根 —— 全程书库根看不到半成品。
         let dest = staging_dir.join(staged_name(&candidate.name));
         let mut sink = FileSink::start(dest.clone())?;
-        let req = Request::new(Method::Get, url.clone());
+        let mut req = Request::new(Method::Get, url.clone());
+        for (name, value) in &self.headers {
+            req = req.header(name.clone(), value.clone());
+        }
         let total = self.transport.download(req, &mut sink, ctx.cancel())?;
         ctx.bytes(total, Some(total), &candidate.name);
         Ok(dest)

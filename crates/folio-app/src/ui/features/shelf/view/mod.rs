@@ -60,6 +60,7 @@ use super::components::book_menu;
 use crate::ui::components::{
     BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, TopBar, empty_state, muted_label,
 };
+use crate::ui::features::opds::{OpdsEvent, OpdsView};
 use crate::ui::foundation::error::{Context as _, report};
 use crate::ui::foundation::file_stem::title_stem;
 use crate::ui::host;
@@ -236,6 +237,8 @@ pub struct ShelfView {
     /// 只要一条：那一页写回书名作者之后报一声，架面重查 —— 那一行字就是这张卡上的。
     /// 每压一页换掉它，上一页的订阅跟着 drop（`Subscription` 一没就退订）。
     pub(in crate::ui::features::shelf) _info_watch: Option<Subscription>,
+    /// OPDS 浏览器那一页的导入事件：有书进了库，架面要重查。
+    _opds_watch: Option<Subscription>,
     /// 「书要拷到哪儿」那块面板里，系统文件夹选择器那条异步链。与 `_import` 同理，要活到选完。
     _pick: Option<Task<()>>,
     /// 导入完成后的**下一帧兜底重查**。选择器把应用切到后台，恢复前台的那一帧上
@@ -360,6 +363,7 @@ impl ShelfView {
             _sheet_watches,
             _group_watch: None,
             _info_watch: None,
+            _opds_watch: None,
             _pick: None,
             pending_reload: false,
             enter_at: None,
@@ -429,6 +433,27 @@ impl ShelfView {
             }
         }
         cx.notify();
+    }
+
+    /// 架面「⋮」菜单里的 OPDS 书源：把浏览器压成一整页。
+    ///
+    /// 与「信息」页同一条栈：系统返回键弹掉整页；浏览器内部的子目录由它自己的顶栏退。
+    /// 它下载成功时往外报一条 [`OpdsEvent::Imported`]，架面收到就重查一次。
+    pub(in crate::ui::features::shelf) fn open_opds(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page = cx.new(|cx| OpdsView::new(self.stack.clone(), cx));
+        self._opds_watch = Some(cx.subscribe(&page, |this, _, event, cx| {
+            if matches!(event, OpdsEvent::Imported) {
+                this.force_reload(cx);
+                this.pending_reload = true;
+            }
+        }));
+        let _ = self
+            .stack
+            .update(cx, |state, cx| state.push(page, NavMotion::Animated, cx));
     }
 
     /// 按当前搜索词**强制**重查一遍架面。

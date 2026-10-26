@@ -5,6 +5,7 @@
 //! 现在两端共用逐字形那一份，见 [`reader`]。
 
 pub mod notes;
+pub mod opds;
 pub mod reader;
 pub mod settings;
 pub mod shelf;

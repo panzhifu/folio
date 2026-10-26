@@ -39,6 +39,7 @@ libchm.workspace = true
 notify.workspace = true
 # 同步 HTTP（`remote::ureq`）。
 ureq.workspace = true
+url.workspace = true
 # Wi-Fi 传书服务器（`transfer`）。tokio 只许在这个模块里用 —— 见模块文档的边界。
 tokio.workspace = true
 axum.workspace = true

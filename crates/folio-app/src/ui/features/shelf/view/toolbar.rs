@@ -78,9 +78,11 @@ impl ShelfView {
         let entity = cx.entity().clone();
         let url_entity = entity.clone();
         let scan_entity = entity.clone();
+        let opds_entity = entity.clone();
         let import_label = tr(cx, "shelf.import");
         let scan_label = tr(cx, "shelf.scan");
         let url_label = tr(cx, "shelf.url_import");
+        let opds_label = tr(cx, "shelf.opds");
         let more_label = tr(cx, "shelf.more");
         Button::new("shelf-more")
             .ghost()
@@ -92,6 +94,7 @@ impl ShelfView {
                 let entity = entity.clone();
                 let url_entity = url_entity.clone();
                 let scan_entity = scan_entity.clone();
+                let opds_entity = opds_entity.clone();
                 menu.min_w(px(book_menu::MIN_WIDTH))
                     .item(
                         PopupMenuItem::new(import_label.clone())
@@ -112,6 +115,13 @@ impl ShelfView {
                             .icon(IconName::ScanSearch)
                             .on_click(move |_, _, cx| {
                                 scan_entity.update(cx, |this, cx| this.start_scan(cx))
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(opds_label.clone())
+                            .icon(IconName::BookOpen)
+                            .on_click(move |_, window, cx| {
+                                opds_entity.update(cx, |this, cx| this.open_opds(window, cx))
                             }),
                     )
             })
