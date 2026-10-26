@@ -49,6 +49,12 @@ pub enum Layer {
     File,
     /// 环境变量覆盖。
     Env,
+    /// 当前挂着的那本书自己的差量（[`BookSettings`](crate::BookSettings)），最高一档。
+    ///
+    /// 它必须在这一表里有名字：诊断 dump 打的是**生效值**，而「我在设置屏改了字号怎么
+    /// 这本书没变」正是这张表存在的理由 —— 少了这一档，那一格会被报成来自 `file`，
+    /// 而那恰好是错的。
+    Book,
 }
 
 impl Layer {
@@ -58,6 +64,7 @@ impl Layer {
             Self::Default => "default",
             Self::File => "file",
             Self::Env => "env",
+            Self::Book => "book",
         }
     }
 }
@@ -89,7 +96,12 @@ impl Provenance {
         self.layers.is_empty()
     }
 
-    fn mark(&mut self, key: impl Into<String>, layer: Layer) {
+    /// 记一项来自哪一层。
+    ///
+    /// 公开是因为**第四层住在 UI 那边**：一本书的差量是开书那一刻由阅读会话叠上去的
+    /// （见 `folio_app::ui::services::ConfigHolder`），core 的读盘那一路看不见它。
+    /// 键仍是点分路径，与诊断 dump 里那份生效值 JSON 对得上。
+    pub fn mark(&mut self, key: impl Into<String>, layer: Layer) {
         self.layers.insert(key.into(), layer);
     }
 }
@@ -1420,7 +1432,7 @@ mod tests {
 
     use crate::infra::config::{Config, Env, Layer, TranslationEngine, WatchDir};
     use crate::infra::i18n::Locale;
-    use crate::{AnnotationStyle, Appearance, Language, Library, Mode, PageTurn, Reader};
+    use crate::{AnnotationStyle, Appearance, Language, Library, Mode, PageTurn, Provenance, Reader};
     use serde_json::json;
 
     fn load(text: &str) -> Config {
@@ -2000,6 +2012,24 @@ mod tests {
             Some("Gruvbox"),
             "一个坏掉的阅读浅深不该把同一节的主题名一起吃掉"
         );
+    }
+
+    /// 四层各自有名字，而**被一本书盖过的那一格要在来源表里念 `book`**。
+    ///
+    /// 这一档不是装饰：诊断 dump 打的是生效值，而「我在设置屏改了字号、这本书怎么不动」
+    /// 是这张表要回答的那类事故。少了 `book`，那一格会被报成来自 `file` —— 恰好是错的。
+    #[test]
+    fn a_book_override_is_attributable_in_the_provenance_table() {
+        let mut provenance = Provenance::default();
+        provenance.mark("reader.font_size", Layer::File);
+        provenance.mark("reader.font_size", Layer::Book);
+        assert_eq!(provenance.layer_of("reader.font_size"), Layer::Book);
+        assert_eq!(
+            provenance.entries().collect::<Vec<_>>(),
+            vec![("reader.font_size", Layer::Book)],
+            "同一格被两层盖过时，表里只留最高那一档"
+        );
+        assert_eq!(Layer::Book.as_str(), "book");
     }
 
     #[test]

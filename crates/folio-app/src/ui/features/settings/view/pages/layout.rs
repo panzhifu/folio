@@ -26,7 +26,7 @@ pub(in crate::ui::features::settings) fn layout_page(cx: &App) -> Page {
                             max: Reader::MAX_MEASURE_MAX,
                             step: 20.0,
                         },
-                        |cx| ConfigHolder::reader(cx).max_measure,
+                        |cx| ConfigHolder::default_reader(cx).max_measure,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.max_measure = v),
                     ),
                     number(
@@ -39,7 +39,7 @@ pub(in crate::ui::features::settings) fn layout_page(cx: &App) -> Page {
                             max: Reader::MARGIN_X_MAX,
                             step: 8.0,
                         },
-                        |cx| ConfigHolder::reader(cx).margin_x,
+                        |cx| ConfigHolder::default_reader(cx).margin_x,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.margin_x = v),
                     ),
                     number(
@@ -52,7 +52,7 @@ pub(in crate::ui::features::settings) fn layout_page(cx: &App) -> Page {
                             max: Reader::MARGIN_Y_MAX,
                             step: 8.0,
                         },
-                        |cx| ConfigHolder::reader(cx).margin_y,
+                        |cx| ConfigHolder::default_reader(cx).margin_y,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.margin_y = v),
                     ),
                 ],
@@ -82,7 +82,7 @@ pub(in crate::ui::features::settings) fn layout_page(cx: &App) -> Page {
                             .collect(),
                         false,
                         |cx: &App| {
-                            SharedString::from(ConfigHolder::reader(cx).text_direction.as_str())
+                            SharedString::from(ConfigHolder::default_reader(cx).text_direction.as_str())
                         },
                         |val: SharedString, cx| {
                             ConfigHolder::edit_reader(cx, |p| {

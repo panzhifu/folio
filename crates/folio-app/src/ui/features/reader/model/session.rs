@@ -22,7 +22,7 @@ use folio_core::content::annotation::ResolvedAnnotation;
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::format::css::PageMargins;
 use folio_core::store::{Annotation, Bookmark, Store};
-use folio_core::{DocMeta, Format, Locator, PageTurn, Reader, StaleReason};
+use folio_core::{BookSettings, DocMeta, Format, Locator, PageTurn, Reader, StaleReason};
 use gpui_kit::base::SelectionEdge;
 use gpui_kit::{App, Bounds, Context, Entity, Pixels, Point, SharedString, Task};
 
@@ -119,6 +119,11 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) family: SharedString,
     /// 上次读到的偏好家族名。挑设备字体要枚举全部字族，只在名字真变了时做。
     pub(in crate::ui::features::reader) wanted_family: String,
+    /// 上一次抄进库里的那一本的差量是第几次换的（见 [`ConfigHolder::book_rev`]）。
+    ///
+    /// 会话只记这个数而不是差量本身：比较一个 `u64` 不要克隆两张 map，而差量的真相
+    /// 本来就住在生效层与库里那一列，抄的时候现取。
+    pub(in crate::ui::features::reader) book_settings_rev: u64,
     /// 读者**选**的那一档。装不下双页时实际生效的是分页，见 [`ReaderSession::mode`]。
     pub(in crate::ui::features::reader) mode: PageMode,
     /// 这一档**不是**读者选的：库里那本书没存过模式（第一次读它，或从没换过档）。
@@ -454,6 +459,7 @@ impl ReaderSession {
         Self {
             source: Source::Sample(SAMPLE_LINE.into()),
             wanted_family: prefs.font_family.clone(),
+            book_settings_rev: ConfigHolder::book_rev(cx),
             prefs: effective,
             family: family.into(),
             mode: PageMode::default(),
@@ -571,6 +577,18 @@ impl ReaderSession {
         locator: Locator,
         cx: &mut App,
     ) -> Self {
+        // 这一本自己的阅读设置先叠上：叠在调用方给的偏好之上，并把生效层也换成叠过的那份
+        // —— 与 [`Self::open_book`] 同一条顺序规矩，`Book::new` 就在下面，拿旧偏好开出来的
+        // 书会被下一帧的 `sync_prefs` 整章重排。没有 `book_id`（测试直接递一份文档）时
+        // 这一格是空差量，一切照旧。
+        let patch = match (book_id, store.as_ref()) {
+            (Some(book_id), Some(store)) => store.book_settings(book_id).unwrap_or_default(),
+            _ => BookSettings::default(),
+        };
+        if book_id.is_some() {
+            ConfigHolder::set_book(cx, Some(patch.clone()));
+        }
+        let prefs = patch.effective_reader(&prefs);
         let family = device_family(&prefs.font_family, cx);
         let mut effective = prefs.clone();
         effective.font_family = family.clone();
@@ -599,6 +617,7 @@ impl ReaderSession {
         let mut session = Self {
             source: Source::Book(Box::new(book)),
             wanted_family: prefs.font_family.clone(),
+            book_settings_rev: ConfigHolder::book_rev(cx),
             prefs: effective,
             family: family.into(),
             mode: wanted_mode,
@@ -762,6 +781,8 @@ impl ReaderSession {
         // 上一本还在念的话先停掉：听书的会话跟着「那一屏」走，不跟着进程走，
         // 换书就是换了一屏。位置按停那一刻的段落落库（`stop_speech`）。
         self.stop_speech();
+        // 这一本自己的阅读设置先叠上（连排版输入一起重算），理由见 [`Self::apply_book_settings`]。
+        self.apply_book_settings(book_id, cx);
         // 定版式（CBZ / 逐页 SVG 漫画）与可重排走两条完全不同的阅读链：前者没有章、
         // 没有排版，页是既定的（见 `content::format::Content` 的两族划分）。
         self.source = if doc.is_fixed() {
@@ -1109,7 +1130,12 @@ impl ReaderSession {
     ///
     /// 每帧读一次 Global 再比较，比给这个会话挂一条订阅更合适：偏好本来就是每帧都要用
     /// 的输入，而订阅者一多，就容易出现「在 `render` 里改状态」那一类被禁止的写法。
+    ///
+    /// 读到的**是这一本的生效值**（默认层 ⊕ 这一本的差量，见
+    /// [`crate::ui::services::config::ConfigHolder`]）—— 排版那一头不需要知道差量存在，
+    /// 它只看这一格数。
     pub(in crate::ui::features::reader) fn sync_prefs(&mut self, cx: &App) {
+        self.sync_book_settings(cx);
         let wanted = ConfigHolder::reader(cx);
         if wanted.font_family != self.wanted_family {
             // 偏好换了家族名：重挑一次设备真能解析出来的那一个。
@@ -1130,6 +1156,53 @@ impl ReaderSession {
                 // 拼接窗口里的每一章都吃同一份偏好：一起作废，一起重排。
                 book.set_prefs_on_all(effective);
             }
+        }
+    }
+
+    /// 开书时把这一本自己的阅读设置差量从库里读出来、叠到生效层上。
+    ///
+    /// **必须在 `Book::new` 之前**：叠差量改的是生效值，而排版读的是 `self.prefs`，
+    /// 顺序写反了就用上一本的偏好开这一本，下一帧 `sync_prefs` 再把整章重排一遍 ——
+    /// 换每一本书都白排一次，而排版是这条链上最贵的那一步。
+    ///
+    /// 读库失败（没有句柄、那一行不在）当成「这一本没单独设过」：差量为空、正文照读，
+    /// 与 [`Store::book_settings`] 自己的口径一致。
+    pub(in crate::ui::features::reader) fn apply_book_settings(
+        &mut self,
+        book_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let patch = self
+            .store
+            .as_ref()
+            .and_then(|store| store.book_settings(book_id).ok())
+            .unwrap_or_default();
+        ConfigHolder::set_book(cx, Some(patch));
+        self.book_settings_rev = ConfigHolder::book_rev(cx);
+        self.sync_prefs(cx);
+    }
+
+    /// 把生效层上的差量抄进库里那一列（弹层每改一格换一次号）。
+    ///
+    /// 与 [`sync_prefs`](Self::sync_prefs) 同一趟、同一个理由：比较一个数，不挂订阅。
+    /// 落不了盘只写日志 —— 「这一屏当场的效果」与「下次开书还在不在」是两件事，
+    /// 后者失败不该把读者的手指下一次拖动挡下来。
+    fn sync_book_settings(&mut self, cx: &App) {
+        let rev = ConfigHolder::book_rev(cx);
+        if rev == self.book_settings_rev {
+            return;
+        }
+        self.book_settings_rev = rev;
+        let Some(patch) = ConfigHolder::book(cx) else {
+            // 关书之后：生效层撤回了「没有书挂着」，没有东西要落。
+            return;
+        };
+        let (Some(store), Some(book_id)) = (self.store.as_ref(), self.book_id) else {
+            tracing::debug!("ReaderSession: 这一本的差量没处落盘（占位那一屏）");
+            return;
+        };
+        if let Err(err) = store.set_book_settings(book_id, &patch) {
+            tracing::error!(book_id, error = %err, "ReaderSession: 落这一本的阅读设置失败");
         }
     }
 }

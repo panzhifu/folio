@@ -177,7 +177,7 @@ impl ReadingSheet {
             Self::watch(&brightness, cx, |value, cx| {
                 // 顶格归成 `None`：配置里于是只有「跟随系统」一个写法，滑条与文件不会是
                 // 两套「最大亮度」（同 `Appearance::normalized` 那一条）。
-                ConfigHolder::edit_appearance(cx, |appearance| {
+                ConfigHolder::edit_book_appearance(cx, |appearance| {
                     appearance.brightness = if value >= BRIGHTNESS_RANGE.1 {
                         None
                     } else {
@@ -186,31 +186,31 @@ impl ReadingSheet {
                 });
             }),
             Self::watch(&font_size, cx, |value, cx| {
-                ConfigHolder::edit_reader(cx, |prefs| prefs.font_size = value);
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.font_size = value);
             }),
             Self::watch(&line_height, cx, |value, cx| {
-                ConfigHolder::edit_reader(cx, |prefs| prefs.line_height = value);
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.line_height = value);
             }),
             Self::watch(&letter_spacing, cx, |value, cx| {
-                ConfigHolder::edit_reader(cx, |prefs| prefs.letter_spacing_em = value);
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.letter_spacing_em = value);
             }),
             Self::watch(&paragraph_gap, cx, |value, cx| {
-                ConfigHolder::edit_reader(cx, |prefs| prefs.paragraph_gap_em = value);
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.paragraph_gap_em = value);
             }),
             Self::watch(&indent, cx, |value, cx| {
-                ConfigHolder::edit_reader(cx, |prefs| prefs.indent_em = value);
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.indent_em = value);
             }),
             Self::watch(&max_measure, cx, |value, cx| {
-                ConfigHolder::edit_reader(cx, |prefs| prefs.max_measure = value);
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.max_measure = value);
             }),
             Self::watch(&margin_x, cx, |value, cx| {
-                ConfigHolder::edit_reader(cx, |prefs| prefs.margin_x = value);
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.margin_x = value);
             }),
             Self::watch(&margin_y, cx, |value, cx| {
-                ConfigHolder::edit_reader(cx, |prefs| prefs.margin_y = value);
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.margin_y = value);
             }),
             Self::watch(&turn_duration, cx, |value, cx| {
-                ConfigHolder::edit_appearance(cx, |appearance| appearance.turn_duration = value);
+                ConfigHolder::edit_book_appearance(cx, |appearance| appearance.turn_duration = value);
             }),
         ];
         Self {
@@ -328,21 +328,29 @@ impl ReadingSheet {
             .into_any_element()
     }
 
-    /// 「浅深」那一格：跟随系统 / 浅色 / 深色。它是全局外观，不是这一本书的排版，
-    /// 所以与亮度、翻页动画同住「外观」这一组，改完当场换主题。
+    /// 「阅读浅深」那一格：跟随软件 / 跟随系统 / 浅色 / 深色，**按下的这一格是这一本书的**。
+    ///
+    /// 与设置屏那一屏的「外观」分文不远但各管各的：那一格定的是整个应用（书架、弹窗、
+    /// 下一次开书之前），这一格只定阅读页 —— 关掉书，屏上回到那一格选的样子。
+    /// 「跟随软件」就是这一本没单独设过：那一档在差量里不落字。
     fn mode_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode = ConfigHolder::appearance(cx).mode;
-        let label_of = |mode| match mode {
-            Mode::System => tr(cx, "appearance.follow_system"),
-            Mode::Light => tr(cx, "appearance.light"),
-            Mode::Dark => tr(cx, "appearance.dark"),
+        let current = ConfigHolder::appearance(cx).reading_mode;
+        let label_of = |value: Option<Mode>| match value {
+            None => tr(cx, "appearance.follow_app"),
+            Some(Mode::System) => tr(cx, "appearance.follow_system"),
+            Some(Mode::Light) => tr(cx, "appearance.light"),
+            Some(Mode::Dark) => tr(cx, "appearance.dark"),
         };
-        let items: Vec<(Mode, SharedString)> = [Mode::System, Mode::Light, Mode::Dark]
-            .into_iter()
-            .map(|value| (value, label_of(value)))
-            .collect();
-        let current = label_of(mode);
-        let title = tr(cx, "field.appearance_mode");
+        let items: Vec<(Option<Mode>, SharedString)> = [
+            None,
+            Some(Mode::System),
+            Some(Mode::Light),
+            Some(Mode::Dark),
+        ]
+        .into_iter()
+        .map(|value| (value, label_of(value)))
+        .collect();
+        let title = tr(cx, "field.reading_mode");
         let sheet = cx.entity().clone();
         h_flex()
             .w_full()
@@ -350,21 +358,21 @@ impl ReadingSheet {
             .gap_3()
             .child(div().flex_1().min_w_0().text_base().child(title.clone()))
             .child(
-                Button::new("reader-appearance-mode")
+                Button::new("reader-reading-mode")
                     .outline()
                     .small()
-                    .label(current.to_string())
+                    .label(label_of(current).to_string())
                     .dropdown_caret(true)
                     .accessibility_label(title)
                     .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                         items.iter().fold(menu, |menu, (value, label)| {
-                            let checked = *value == mode;
+                            let checked = *value == current;
                             let value = *value;
                             // 菜单闭包是 `Fn`，每一项的回调要各自一份句柄（`Entity` 不 `Copy`）。
                             let sheet = sheet.clone();
                             menu.item(PopupMenuItem::new(label.clone()).checked(checked).on_click(
                                 move |_, _, cx| {
-                                    sheet.update(cx, |this, cx| this.set_mode(value, cx))
+                                    sheet.update(cx, |this, cx| this.set_reading_mode(value, cx))
                                 },
                             ))
                         })
@@ -373,8 +381,9 @@ impl ReadingSheet {
             .into_any_element()
     }
 
-    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
-        ConfigHolder::edit_appearance(cx, |appearance| appearance.mode = mode);
+    /// 这一本的阅读浅深。`None` = 跟随软件外观，那一档**不落进差量**（与默认同值）。
+    fn set_reading_mode(&mut self, reading: Option<Mode>, cx: &mut Context<Self>) {
+        ConfigHolder::edit_book_appearance(cx, |appearance| appearance.reading_mode = reading);
         cx.notify();
     }
 
@@ -447,7 +456,7 @@ impl ReadingSheet {
     /// 「翻页动画」写回 `appearance` 那一节：它不是排版失效键，换它不该让任何一章重排
     /// （见 `folio_core::infra::config::PageTurn` 为什么这一格不在 `Reader` 里）。
     fn set_page_turn(&mut self, turn: PageTurn, cx: &mut Context<Self>) {
-        ConfigHolder::edit_appearance(cx, |appearance| appearance.page_turn = turn);
+        ConfigHolder::edit_book_appearance(cx, |appearance| appearance.page_turn = turn);
         cx.notify();
     }
 
@@ -501,7 +510,7 @@ impl ReadingSheet {
     }
 
     fn set_font_weight(&mut self, weight: u16, cx: &mut Context<Self>) {
-        ConfigHolder::edit_reader(cx, |prefs| prefs.font_weight = weight);
+        ConfigHolder::edit_book_reader(cx, |prefs| prefs.font_weight = weight);
         cx.notify();
     }
 
@@ -554,7 +563,7 @@ impl ReadingSheet {
     }
 
     fn set_text_direction(&mut self, direction: TextDirection, cx: &mut Context<Self>) {
-        ConfigHolder::edit_reader(cx, |prefs| prefs.text_direction = direction);
+        ConfigHolder::edit_book_reader(cx, |prefs| prefs.text_direction = direction);
         cx.notify();
     }
 
@@ -568,7 +577,7 @@ impl ReadingSheet {
             let get: Rc<dyn Fn(&App) -> String> =
                 Rc::new(|cx: &App| ConfigHolder::reader(cx).font_family.clone());
             let set: FontFamilySetter = Rc::new(|value: String, cx: &mut App| {
-                ConfigHolder::edit_reader(cx, |prefs| prefs.font_family = value);
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.font_family = value);
             });
             move |window, cx| FontPicker::new(get, set, window, cx)
         });
@@ -712,7 +721,7 @@ impl ReadingSheet {
                             .checked(prefs.justify)
                             .accessibility_label(justify_label)
                             .on_click(move |value, _, cx| {
-                                ConfigHolder::edit_reader(cx, |prefs| prefs.justify = *value);
+                                ConfigHolder::edit_book_reader(cx, |prefs| prefs.justify = *value);
                                 sheet.update(cx, |_, cx| cx.notify());
                             }),
                     ),

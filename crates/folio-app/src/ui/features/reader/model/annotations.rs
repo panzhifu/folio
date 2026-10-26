@@ -118,7 +118,7 @@ impl ReaderSession {
             self.set_highlight_style(style, cx);
             return;
         }
-        ConfigHolder::edit_appearance(cx, |appearance| appearance.highlight_style = style);
+        ConfigHolder::edit_book_appearance(cx, |appearance| appearance.highlight_style = style);
         self.add_highlight_as(DEFAULT_COLOR, style, cx);
     }
 

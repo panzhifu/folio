@@ -1090,9 +1090,19 @@ impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 外观一改（或第一帧还没涂过）就重涂一次。用 `repaint` 而非 `apply`：
         // 这一帧本来就要重画，再刷所有窗口是自己触发自己。
-        let appearance = ConfigHolder::appearance(cx);
+        let mut appearance = ConfigHolder::appearance(cx);
         // 亮度那一格先抠出来：下面整个 `appearance` 要挪进 `applied`，而这一帧后面还要用它。
         let brightness_pref = appearance.brightness;
+        // 阅读页的浅深**只在阅读层挂着时**顶掉软件外观那一档，之后重涂走的还是这一个
+        // `appearance`（`theme::repaint` 自己解析 `mode`，所以决定要在传给它之前做完）。
+        // 关书之后书架、设置与下一次开书之前都还是读者在设置屏选的 `mode` ——
+        // 背光对 [`reading_brightness`] 做的是同一件事。
+        // 这一本自己选过夜里时，`reading_mode` 已经在生效层里了（见 `services::config`）。
+        if self.reading_mounted()
+            && let Some(reading) = appearance.reading_mode
+        {
+            appearance.mode = reading;
+        }
         // 比较的是「配置 + 它解析出来的浅深」那一对：偏好一个字没动、只有系统翻了面，
         // 变的就只有后面那一格。
         let resolved = theme::resolve_mode(appearance.mode, window.appearance());
@@ -1135,6 +1145,11 @@ impl Render for AppShell {
         });
         if reading_sample.is_some_and(|sample| !sample.should_render()) {
             self.reading = None;
+            // 撤掉这一本书的差量：从这一刻起屏幕上没有那一本了，生效层回到默认层。
+            // 撤在**退场走完**这一帧而不是 [`AppShell::close_reading`] 那一刻 —— 书还在
+            // 往外滑的时候把架面换成白天，读者看到的是两层各种颜色。
+            // 差量的真相在库里，这里只撤内存里那一份，不需要落盘。
+            ConfigHolder::set_book(cx, None);
         }
         // 报给正文的那一条是顶上那一条（层自己让）加底下那一条（底栏与页脚自己让，见
         // `reader::page` 的 `bottom_inset`）。同一个数还要给摆层用（[`reading_top_inset`]）。

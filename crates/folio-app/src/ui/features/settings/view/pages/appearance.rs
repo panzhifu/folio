@@ -38,7 +38,7 @@ fn mode_group(cx: &App) -> Group {
                 tr(cx, "field.appearance_mode"),
                 options,
                 false,
-                |cx: &App| SharedString::from(ConfigHolder::appearance(cx).mode.as_str()),
+                |cx: &App| SharedString::from(ConfigHolder::default_appearance(cx).mode.as_str()),
                 |val: SharedString, cx| {
                     ConfigHolder::edit_appearance(cx, |a| a.mode = Mode::parse(&val))
                 },
@@ -96,7 +96,7 @@ fn theme_item(cx: &App, mode: ThemeMode, title: &str, hint: &str) -> Row {
         options,
         true,
         move |cx: &App| {
-            let appearance = ConfigHolder::appearance(cx);
+            let appearance = ConfigHolder::default_appearance(cx);
             // 没选过（或选的那套已被删掉）就显示框架默认那套的名字，
             // 而不是留一个空白选项。
             let stored = if dark {
