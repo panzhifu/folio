@@ -240,6 +240,27 @@ impl Mode {
             _ => Self::System,
         }
     }
+
+    /// 「这一档没被单独选过、跟随上一层」在界面选项里的写法。
+    ///
+    /// 下拉与菜单的选项值只有字符串一种形状，而 [`Appearance::reading_mode`] 是
+    /// `Option<Mode>` —— `None` 需要一个自己的键名，否则「跟随软件」在界面上就没处放。
+    /// 这个名字**不与配置文件的 JSON 值混用**：落盘那一侧 `None` 就是不写这一格。
+    pub const FOLLOW_APP: &'static str = "follow_app";
+
+    /// 界面选项的值 → 阅读浅深那一格。`Self::FOLLOW_APP` 以外都按 [`parse`](Self::parse)
+    /// 解释（认不出的落到 `Some(System)`，与配置文件那一侧同一口径）。
+    pub fn parse_reading(value: &str) -> Option<Self> {
+        (value != Self::FOLLOW_APP).then(|| Self::parse(value))
+    }
+
+    /// 阅读浅深那一格 → 界面选项的值。与 [`parse_reading`](Self::parse_reading) 互为逆。
+    pub fn reading_value(mode: Option<Self>) -> &'static str {
+        match mode {
+            None => Self::FOLLOW_APP,
+            Some(mode) => mode.as_str(),
+        }
+    }
 }
 
 /// 自己实现序列化而不是 derive：derive 遇到 `"mode":"anything"` 会直接报错，而报错的
@@ -1428,6 +1449,7 @@ mod tests {
     //! 这些测试盯的是「用户手改这个 JSON 之后程序会怎样」，所以全部从 JSON 文本出发，
     //! 不去直接改结构体 —— 结构体改不出坏输入。
 
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     use crate::infra::config::{Config, Env, Layer, TranslationEngine, WatchDir};
@@ -2030,6 +2052,38 @@ mod tests {
             "同一格被两层盖过时，表里只留最高那一档"
         );
         assert_eq!(Layer::Book.as_str(), "book");
+    }
+
+    /// 「跟随软件」那一档在**界面值与 `Option<Mode>`** 之间往返，四档互不相同。
+    ///
+    /// 下拉与菜单的选项只有字符串一种形状，而配置里 `None` 表示「没选过」—— 这一对
+    /// 函数是两者之间唯一的翻译。翻错的症状是「选了跟随软件，落盘却钉成跟随系统」。
+    #[test]
+    fn the_reading_mode_round_trips_through_its_interface_value() {
+        assert_eq!(Mode::reading_value(None), Mode::FOLLOW_APP);
+        assert_eq!(Mode::parse_reading(Mode::FOLLOW_APP), None);
+        for mode in [Mode::System, Mode::Light, Mode::Dark] {
+            assert_eq!(
+                Mode::parse_reading(Mode::reading_value(Some(mode))),
+                Some(mode),
+                "{mode:?} 那一档过不去"
+            );
+        }
+        // 认不出的值与配置文件同一口径：落到「跟随系统」，不许变成「跟随软件」。
+        assert_eq!(Mode::parse_reading("sepia"), Some(Mode::System));
+        // 四档的界面值互不相同，否则下拉里会有两行指向同一个选择。
+        let values = [
+            None,
+            Some(Mode::System),
+            Some(Mode::Light),
+            Some(Mode::Dark),
+        ]
+        .map(Mode::reading_value);
+        assert_eq!(
+            values.iter().collect::<BTreeSet<_>>().len(),
+            4,
+            "界面值撞了：{values:?}"
+        );
     }
 
     #[test]

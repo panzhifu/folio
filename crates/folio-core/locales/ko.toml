@@ -25,6 +25,7 @@ import = "책 가져오기"
 account = "계정"
 
 [reader]
+reset_defaults = "이 책 기본값으로"
 empty_hint = "왼쪽에서 책을 고르거나 사이드바 위에 있는 「책 가져오기」를 사용하세요"
 no_book = "열린 책 없음"
 # 읽기 설정 카드 위쪽의 세 구역.
@@ -124,6 +125,7 @@ font_size = "글자 크기 %{size}px"
 theme = "테마: %{name}"
 
 [appearance]
+follow_app = "앱 설정 따르기"
 follow_system = "시스템 설정 따르기"
 light = "라이트"
 dark = "다크"
@@ -213,6 +215,8 @@ font_family = "본문 글꼴"
 "font_family.desc" = "이 기기에 설치된 글꼴 중에서 고릅니다."
 appearance_mode = "라이트/다크"
 "appearance_mode.desc" = "시스템을 따르거나 라이트·다크 중 하나로 고정합니다."
+reading_mode = "읽기 모드"
+"reading_mode.desc" = "읽는 화면만의 명암입니다. 개별 설정하지 않은 책은 이 값을 따르고, 책마다 정하면 그 책이 우선합니다."
 theme_light = "라이트 테마"
 "theme_light.desc" = "라이트로 해석될 때 쓰는 색상 조합입니다."
 theme_dark = "다크 테마"

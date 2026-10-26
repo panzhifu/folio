@@ -25,6 +25,7 @@ import = "匯入書籍"
 account = "帳號"
 
 [reader]
+reset_defaults = "恢復本書預設"
 empty_hint = "從左側書架選一本書，或用側欄標題列的「匯入書籍」"
 no_book = "沒有開啟的書"
 # 閱讀設定卡片頂部那三段。
@@ -124,6 +125,7 @@ font_size = "字型大小 %{size}px"
 theme = "主題：%{name}"
 
 [appearance]
+follow_app = "跟隨軟體"
 follow_system = "跟隨系統"
 light = "淺色"
 dark = "深色"
@@ -213,6 +215,8 @@ font_family = "正文字型"
 "font_family.desc" = "從這台裝置已安裝的字型中選擇。"
 appearance_mode = "淺深"
 "appearance_mode.desc" = "跟著系統走，或者固定淺色 / 深色。"
+reading_mode = "閱讀深淺"
+"reading_mode.desc" = "閱讀頁自己的深淺。沒單獨設過的書依這一檔；在某一本裡設過之後，那一本蓋掉它。"
 theme_light = "淺色主題"
 "theme_light.desc" = "解析成淺色時用的那一套配色。"
 theme_dark = "深色主題"

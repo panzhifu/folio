@@ -1,5 +1,5 @@
-//! 外观：浅深怎么选（跟随系统 / 钉死浅 / 钉死深），解析到浅、深时各用哪套主题，
-//! 以及往哪儿放读者自己的配色。
+//! 外观：浅深怎么选（跟随系统 / 钉死浅 / 钉死深），阅读页另有一档，解析到浅、深时各用
+//! 哪套主题，以及往哪儿放读者自己的配色。
 //!
 //! 主题**名**是这里的选项，主题**本身**不在这里定义：候选来自 UI 框架的主题集
 //! 加上读者自己放进 `themes/` 的 JSON（见 `ui/shared/theme.rs`）。每一侧都记名字，
@@ -20,7 +20,10 @@ pub(in crate::ui::features::settings) fn appearance_page(cx: &App) -> Page {
     )
 }
 
-/// 第一组只管一件事：浅深由谁定。
+/// 浅深由谁定：软件整体一档，阅读页另有一档。
+///
+/// 阅读页那一格是**默认档** —— 某一本书在自己那一行上设过之后，那一本盖住这里
+/// （见 `folio_core::BookSettings`）；没单独设过的书跟着这一档走。
 fn mode_group(cx: &App) -> Group {
     let options: Vec<(SharedString, SharedString)> = [
         (Mode::System, tr(cx, "appearance.follow_system")),
@@ -29,6 +32,21 @@ fn mode_group(cx: &App) -> Group {
     ]
     .into_iter()
     .map(|(mode, label)| (SharedString::from(mode.as_str()), label))
+    .collect();
+    // 阅读页那一档多一个「跟随软件」：`reading_mode` 是 `Option<Mode>`，而选项值只有
+    // 字符串一种形状，`None` 需要一个自己的写法（`Mode::reading_value` 与
+    // `Mode::parse_reading` 是这一对唯一的翻译处）。
+    let reading_options: Vec<(SharedString, SharedString)> = [
+        (None, tr(cx, "appearance.follow_app")),
+        (
+            Some(Mode::System),
+            tr(cx, "appearance.follow_system"),
+        ),
+        (Some(Mode::Light), tr(cx, "appearance.light")),
+        (Some(Mode::Dark), tr(cx, "appearance.dark")),
+    ]
+    .into_iter()
+    .map(|(mode, label)| (SharedString::from(Mode::reading_value(mode)), label))
     .collect();
 
     group(
@@ -51,6 +69,30 @@ fn mode_group(cx: &App) -> Group {
                 "light",
                 "外观",
                 "浅深",
+                "深色",
+            ]),
+            Row::dropdown(
+                tr(cx, "field.reading_mode"),
+                reading_options,
+                false,
+                |cx: &App| {
+                    SharedString::from(Mode::reading_value(
+                        ConfigHolder::default_appearance(cx).reading_mode,
+                    ))
+                },
+                |val: SharedString, cx| {
+                    ConfigHolder::edit_appearance(cx, |a| {
+                        a.reading_mode = Mode::parse_reading(&val)
+                    })
+                },
+            )
+            .description(tr(cx, "field.reading_mode.desc"))
+            .keywords(&[
+                "reading",
+                "night",
+                "阅读",
+                "阅读浅深",
+                "夜里",
                 "深色",
             ]),
         ],

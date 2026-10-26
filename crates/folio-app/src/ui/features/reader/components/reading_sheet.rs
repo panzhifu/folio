@@ -42,7 +42,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render,
     SharedString, Styled, Subscription, Window, div,
@@ -626,6 +626,31 @@ impl ReadingSheet {
 
     /// 当前这一段的内容。三组各自只装自己那几格，切组不新建滑条 —— 句柄都在
     /// `self` 上跨帧活着，拖到一半切走再切回来不会跳回旧值。
+    /// 「恢复本书默认」那一格：抹掉这一本书的全部差量，每一格回到设置屏那个默认档。
+    ///
+    /// 摆在整张卡片的最底下而不是各段里 —— 它清的是这一本的**全部**，塞进某一段会被
+    /// 读成只管那一段。按下去之后各条滑条当场跳回默认位置：滑条读的就是生效值。
+    ///
+    /// 这一本没被单独设过时那颗钮是灰的 —— 反馈走禁用态，不在旁边补一行灰字（与这屏
+    /// 其余各格同一条规矩）。
+    fn reset_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let label = tr(cx, "reader.reset_defaults");
+        let untouched = ConfigHolder::book(cx).is_none_or(|patch| patch.is_empty());
+        div()
+            .w_full()
+            .child(
+                Button::new("reader-reset-defaults")
+                    .outline()
+                    .small()
+                    .w_full()
+                    .disabled(untouched)
+                    .label(label.clone())
+                    .accessibility_label(label)
+                    .on_click(|_, _, cx| ConfigHolder::clear_book(cx)),
+            )
+            .into_any_element()
+    }
+
     fn section_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.tab {
             SheetTab::Appearance => self.appearance_rows(cx),
@@ -788,7 +813,8 @@ impl Render for ReadingSheet {
         // 不用再滚回顶上去换组。内容那一格自己滚，与目录那一屏同一条形状。
         let tabs = self.tab_bar(cx);
         let rows = self.section_rows(window, cx);
-        sheet.header(tabs).child(rows).into_any_element()
+        // 各段的行在下面，整张卡片最底下那一格是「恢复本书默认」（它管的不是某一段）。
+        sheet.header(tabs).child(rows).child(self.reset_row(cx)).into_any_element()
     }
 }
 

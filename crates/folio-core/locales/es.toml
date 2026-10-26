@@ -25,6 +25,7 @@ import = "Importar libro"
 account = "Cuenta"
 
 [reader]
+reset_defaults = "Restablecer este libro"
 empty_hint = "Elige un libro a la izquierda o usa «Importar libro» en la cabecera del panel lateral"
 no_book = "Ningún libro abierto"
 # Los tres segmentos de la tarjeta de ajustes de lectura.
@@ -124,6 +125,7 @@ font_size = "Tamaño de texto %{size} px"
 theme = "Tema: %{name}"
 
 [appearance]
+follow_app = "Como la app"
 follow_system = "Igual que el sistema"
 light = "Claro"
 dark = "Oscuro"
@@ -213,6 +215,8 @@ font_family = "Fuente del texto"
 "font_family.desc" = "Elige entre las fuentes instaladas en este dispositivo."
 appearance_mode = "Modo"
 "appearance_mode.desc" = "Seguir al sistema, o fijar claro u oscuro."
+reading_mode = "Modo de lectura"
+"reading_mode.desc" = "Claridad solo de la página de lectura. Los libros sin ajuste propio siguen esta opción; el ajuste del libro manda."
 theme_light = "Tema claro"
 "theme_light.desc" = "El tema que se usa cuando el modo se resuelve como claro."
 theme_dark = "Tema oscuro"

@@ -25,6 +25,7 @@ import = "Import book"
 account = "Account"
 
 [reader]
+reset_defaults = "Reset this book"
 empty_hint = "Pick a book on the left, or use “Import book” in the sidebar header"
 no_book = "No book open"
 # The three segments at the top of the reading-settings card.
@@ -140,6 +141,7 @@ font_size = "Font size %{size}px"
 theme = "Theme: %{name}"
 
 [appearance]
+follow_app = "Match app"
 follow_system = "Follow system"
 light = "Light"
 dark = "Dark"
@@ -230,6 +232,8 @@ font_family = "Body font"
 "font_family.desc" = "Choose from the fonts installed on this device."
 appearance_mode = "Mode"
 "appearance_mode.desc" = "Follow the system, or pin light or dark."
+reading_mode = "Reader mode"
+"reading_mode.desc" = "Light or dark on the reading page. Books you haven't set individually follow this; a book's own choice overrides it."
 theme_light = "Light theme"
 "theme_light.desc" = "The theme used when the mode resolves to light."
 theme_dark = "Dark theme"

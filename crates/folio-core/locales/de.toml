@@ -25,6 +25,7 @@ import = "Buch importieren"
 account = "Konto"
 
 [reader]
+reset_defaults = "Buch zurücksetzen"
 empty_hint = "Wähle links ein Buch oder benutze „Buch importieren“ im Kopf des Seitenbereichs"
 no_book = "Kein Buch offen"
 # Die drei Abschnitte oben in der Lese-Einstellungen-Karte.
@@ -124,6 +125,7 @@ font_size = "Schriftgröße %{size} px"
 theme = "Theme: %{name}"
 
 [appearance]
+follow_app = "Wie die App"
 follow_system = "System folgen"
 light = "Hell"
 dark = "Dunkel"
@@ -213,6 +215,8 @@ font_family = "Textschrift"
 "font_family.desc" = "Aus den auf diesem Gerät installierten Schriftarten wählen."
 appearance_mode = "Modus"
 "appearance_mode.desc" = "Dem System folgen, oder hell bzw. dunkel festlegen."
+reading_mode = "Lesemodus"
+"reading_mode.desc" = "Hell oder Dunkel nur auf der Leseseite. Bücher ohne eigene Einstellung folgen diesem Wert; die Einstellung des Buches gewinnt."
 theme_light = "Helles Theme"
 "theme_light.desc" = "Das Theme, wenn der Modus als hell aufgelöst wird."
 theme_dark = "Dunkles Theme"

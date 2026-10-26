@@ -190,6 +190,27 @@ impl ConfigHolder {
         });
     }
 
+    /// 抹掉**这一本书**的差量 —— 弹层底部那一格「恢复本书默认」走的就是这里。
+    ///
+    /// 只清内存里那一份并把号往后推：落库由会话每帧那一次比较去做（同一头，改一格与
+    /// 清整份走的是一条路，不在这里再开一处直接写库的口子）。本来就是默认时不动、
+    /// 不 notify —— 空转一次会让外壳重画、让落盘那条重新排队。
+    pub fn clear_book(cx: &mut App) {
+        Self::entity(cx).update(cx, |state, cx| {
+            let Some(patch) = &mut state.book else {
+                tracing::warn!("ConfigHolder: 没有书挂着却要恢复本书默认，已忽略");
+                return;
+            };
+            if patch.is_empty() {
+                return;
+            }
+            patch.clear();
+            state.book_rev += 1;
+            recompute(state);
+            cx.notify();
+        });
+    }
+
     /// 改**这一本书**的排版输入 —— 阅读弹层那一屏走这一条，不走
     /// [`edit_reader`](Self::edit_reader)（那一条改的是默认层）。
     ///

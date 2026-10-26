@@ -25,6 +25,7 @@ import = "导入书籍"
 account = "账号"
 
 [reader]
+reset_defaults = "恢复本书默认"
 empty_hint = "从左侧书架选一本书，或用侧栏标题栏的「导入书籍」"
 no_book = "没有打开的书"
 # 阅读设置卡片顶部那三段。
@@ -131,6 +132,7 @@ font_size = "字号 %{size}px"
 theme = "主题：%{name}"
 
 [appearance]
+follow_app = "跟随软件"
 follow_system = "跟随系统"
 light = "浅色"
 dark = "深色"
@@ -220,6 +222,8 @@ font_family = "正文字体"
 "font_family.desc" = "从这台设备已装的字体中选择。"
 appearance_mode = "浅深"
 "appearance_mode.desc" = "跟着系统走，或者钉死浅色 / 深色。"
+reading_mode = "阅读浅深"
+"reading_mode.desc" = "阅读页自己的浅深。没单独设过的书按这一档；在某一本里设过之后，那一本盖住它。"
 theme_light = "浅色主题"
 "theme_light.desc" = "解析成浅色时用的那一套配色。"
 theme_dark = "深色主题"

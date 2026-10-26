@@ -205,6 +205,101 @@ fn a_books_night_setting_stays_off_the_app_mode(cx: &mut TestAppContext) {
     );
 }
 
+/// 把一份外观选择记成差量。
+fn appearance_patch(set: impl FnOnce(&mut Appearance)) -> BookSettings {
+    let base = Appearance::default();
+    let mut wanted = base.clone();
+    set(&mut wanted);
+    let mut patch = BookSettings::default();
+    patch.record_appearance(&base, &wanted);
+    patch
+}
+
+/// 画一帧：会话在这一帧里比较 `book_rev` 并把差量抄进库。
+fn draw(cx: &mut TestAppContext, handle: gpui_kit::AnyWindowHandle) {
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+    })
+    .expect("这一屏该画得出来");
+}
+
+/// 「恢复本书默认」那一格抹掉整份差量，并把空差量落回库里那一列。
+///
+/// 走的是与改一格同一条路（生效层换一下、会话每帧抄一次），所以这里同时验「清得干净」
+/// 与「清这件事也落盘了」—— 只清内存的症状是重开书又全都回来。
+#[gpui_kit::test]
+fn clearing_a_book_returns_it_to_the_defaults(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (store, id) = store_with_book("甲本");
+    let handle = open(cx, store.clone(), id);
+    cx.update(|cx| {
+        ConfigHolder::edit_book_reader(cx, |p| p.font_size = 26.0);
+        ConfigHolder::edit_book_appearance(cx, |a| a.reading_mode = Some(Mode::Dark));
+    });
+    draw(cx, handle);
+    assert!(
+        !store.book_settings(id).expect("这一本的差量").is_empty(),
+        "前置：那两格改动该已经落库"
+    );
+
+    cx.update(ConfigHolder::clear_book);
+    draw(cx, handle);
+
+    assert!(
+        store.book_settings(id).expect("这一本的差量").is_empty(),
+        "那一格该被抹干净"
+    );
+    cx.update(|cx| {
+        assert_eq!(
+            ConfigHolder::reader(cx).font_size,
+            Reader::default().font_size,
+            "生效值该回到默认档"
+        );
+        assert_eq!(ConfigHolder::appearance(cx).reading_mode, None);
+    });
+}
+
+/// 设置屏那一档**传到没单独设过的书**，而设过的那一本盖住它。
+///
+/// 这一条是「只存差量」而不是「第一次改动就快照整份」要买到的东西：快照那一版写出来，
+/// 老书从此不再跟默认走，而读者看不出为什么。
+#[gpui_kit::test]
+fn the_default_reading_mode_reaches_books_that_never_set_their_own(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let store = Arc::new(Store::in_memory().expect("内存库"));
+    let mut meta_a = meta("epub");
+    meta_a.title = "甲本".into();
+    let mut meta_b = meta("epub");
+    meta_b.title = "乙本".into();
+    let a = store
+        .add_book(std::path::Path::new("/books/a.epub"), &meta_a)
+        .unwrap();
+    let b = store
+        .add_book(std::path::Path::new("/books/b.epub"), &meta_b)
+        .unwrap();
+    // 甲本自己钉了浅色；乙本那一列是空的。
+    store
+        .set_book_settings(a, &appearance_patch(|x| x.reading_mode = Some(Mode::Light)))
+        .unwrap();
+
+    open(cx, store.clone(), b);
+    cx.update(|cx| {
+        ConfigHolder::edit_appearance(cx, |a| a.reading_mode = Some(Mode::Dark));
+    });
+    assert_eq!(
+        cx.update(|cx| ConfigHolder::appearance(cx).reading_mode),
+        Some(Mode::Dark),
+        "乙本没单独设过，该跟着设置屏那一档"
+    );
+
+    open(cx, store, a);
+    assert_eq!(
+        cx.update(|cx| ConfigHolder::appearance(cx).reading_mode),
+        Some(Mode::Light),
+        "甲本自己钉过浅色，默认档改成夜里也不该跟着翻"
+    );
+}
+
 /// 没有书挂着时这条写入路什么都不动（连默认层也不动）。
 ///
 /// 弹层那些控件只存在于阅读层里，真走到这里说明调用点错了；把它降级成「改默认」会让

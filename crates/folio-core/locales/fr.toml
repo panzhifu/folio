@@ -25,6 +25,7 @@ import = "Importer un livre"
 account = "Compte"
 
 [reader]
+reset_defaults = "Réinitialiser ce livre"
 empty_hint = "Choisissez un livre à gauche, ou utilisez « Importer un livre » dans l’en-tête du panneau latéral"
 no_book = "Aucun livre ouvert"
 # Les trois sections de la carte des réglages de lecture.
@@ -124,6 +125,7 @@ font_size = "Taille du texte %{size} px"
 theme = "Thème : %{name}"
 
 [appearance]
+follow_app = "Comme l'application"
 follow_system = "Suivre le système"
 light = "Claire"
 dark = "Sombre"
@@ -213,6 +215,8 @@ font_family = "Police du texte"
 "font_family.desc" = "Choisissez parmi les polices installées sur cet appareil."
 appearance_mode = "Mode"
 "appearance_mode.desc" = "Suivre le système, ou imposer clair ou sombre."
+reading_mode = "Mode de lecture"
+"reading_mode.desc" = "La clarté de la page de lecture. Les livres non réglés suivent ce choix ; le réglage d'un livre prime."
 theme_light = "Thème clair"
 "theme_light.desc" = "Le thème utilisé quand le mode se résout à clair."
 theme_dark = "Thème sombre"
