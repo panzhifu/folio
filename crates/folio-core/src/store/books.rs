@@ -556,11 +556,17 @@ impl Store {
     /// **每改一格就写一次**，不攒：这一条 UPDATE 按主键动一行，而攒着的那一份在
     /// 进程被系统杀掉（手机上读着读着被回收是常态）时会连刚调完的那一格一起丢 ——
     /// 那是读者手上的东西，比省几次写贵。
+    ///
+    /// 每一次写都盖一个本机时间（`settings_updated_at`，v27）：跨设备合并按**整本差量**
+    /// 取新的那一份，所以「恢复本书默认」那一次空写入也必须有时间戳 —— 少了它，另一台
+    /// 设备上那份旧差量会盖回来，读者看到的是「我明明清过了」。
     pub fn set_book_settings(&self, id: i64, settings: &BookSettings) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let rows = conn.execute(
-            "UPDATE books SET settings_json = ?2 WHERE id = ?1",
-            params![id, settings.to_column()],
+            "UPDATE books
+                SET settings_json = ?2, settings_updated_at = ?3
+              WHERE id = ?1",
+            params![id, settings.to_column(), now()],
         )?;
         if rows == 0 {
             tracing::warn!("store: 改第 {id} 本的阅读设置，但没有这一行");

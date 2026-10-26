@@ -1993,7 +1993,11 @@ fn settings_for_an_unknown_book_read_as_unset() {
         .unwrap();
 }
 
-/// 已发布的 v25 库要能升到 v26，而且老行读成「没单独设过」。
+/// 已发布的 v25 库要能升到最新，而且老行读成「没单独设过」。
+///
+/// 起点取 `len() - 2` 而不是 `len() - 1`：阅读设置占了两条迁移（v26 那一列 + v27 那个
+/// 时间戳），只退一条的话这一条门测的是「加时间戳对老行的影响」，而 v26 那一列的升级
+/// 从此没人测 —— 名字还写着「设置列升级」，最容易骗人。
 ///
 /// 上一版本用 `MIGRATIONS.len() - 1` 而不是写死一个数：这一条测的是**最后一条迁移**
 /// 对老行的行为，写死数字的话下一次加迁移它就悄悄变成「测了一段无关的历史」。
@@ -2001,7 +2005,7 @@ fn settings_for_an_unknown_book_read_as_unset() {
 fn a_row_written_before_the_settings_column_reads_as_unset() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("folio.db");
-    let previous = MIGRATIONS.len() - 1;
+    let previous = MIGRATIONS.len() - 2;
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
         for sql in &MIGRATIONS[..previous] {

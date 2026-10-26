@@ -530,4 +530,15 @@ CREATE INDEX idx_sync_tombstones_book ON sync_tombstones(book_hash);
     r#"
 ALTER TABLE books ADD COLUMN settings_json TEXT NOT NULL DEFAULT '';
 "#,
+    // v27：**这一本的设置改于何时**（跨设备合并用的那一个数）。
+    //
+    // 差量按整本 last-write-wins，所以需要每本书一个时间戳：两台设备各自改过同一本书时，
+    // 新的那一份赢。0 = 这台设备从来没为它写过差量 —— 那种书在快照里干脆不带设置那一格
+    // （它没话说，而不是它说「是默认」）。
+    //
+    // 老行留 0 就够：v26 那一列在老行上本来就是空串，「没设过」与「没写过」在这里是同
+    // 一件事，回填不出历史时间。
+    r#"
+ALTER TABLE books ADD COLUMN settings_updated_at INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
