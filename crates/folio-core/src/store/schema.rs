@@ -516,4 +516,18 @@ CREATE TABLE sync_tombstones (
 );
 CREATE INDEX idx_sync_tombstones_book ON sync_tombstones(book_hash);
 "#,
+    // v26：**每本书一份的阅读设置差量**。
+    //
+    // 阅读弹层里调的格子从前一律写进全局 `config.json`，于是「这一本字太小」会变成
+    // 「往后每本都小」；照片插页的书与纯文字书要的版心、翻页方式、夜里读不读，
+    // 本来就不该是同一档。存的**不是整份设置**而是「与全局默认不同的那几格」，
+    // 为什么是差量、怎么换算回生效值见 [`crate::infra::book_settings`]。
+    //
+    // 默认空串 = 这一本完全跟随默认，与 `css` / `toc_json` 那几列「没有内容就留空」
+    // 同一口径，所以老行一行都不用回填。选库里而不是 `config.json` 的理由只有一条：
+    // 删掉一本书那一行跟着就没，而按 id 存进配置文件的话，那份 map 会随删书留下
+    // 没人清的条目。
+    r#"
+ALTER TABLE books ADD COLUMN settings_json TEXT NOT NULL DEFAULT '';
+"#,
 ];

@@ -3,7 +3,8 @@
 //! 分成六节，前五节各自对应设置界面里的一类（或排版引擎的输入），第六节是给调试用的、
 //! 界面上没有：
 //! - [`Reader`] —— 排版输入（字号、行距、缩进、版心、字体），排版引擎只认这一节；
-//! - [`Appearance`] —— 浅深三态和两侧各用哪套主题，属于界面外观而不是排版输入；
+//! - [`Appearance`] —— 软件浅深、阅读页单独的浅深，以及两侧各用哪套主题；
+//!   属于界面外观而不是排版输入；
 //! - [`Library`] —— 书库目录；
 //! - [`Language`] —— 界面语言；
 //! - [`Speech`] —— 听书（合成朗读）的语速、音高与自动翻页；
@@ -13,8 +14,11 @@
 //!
 //! 为什么是配置文件而不是继续放 SQLite：配置是**应用级**数据、跨书存在，
 //! 放成一个可读可备份的小 JSON 比塞进书库数据库更符合直觉，也方便用户手改。
-//! 反过来说，一切需要「按书存」的东西（进度、标注、缓存的章节）都在 `store` 里，
-//! 两边不重叠。
+//! 反过来说，一切需要「按书存」的东西（进度、标注、缓存的章节，以及每本书自己的
+//! 阅读设置差量 [`crate::BookSettings`]）都在 `store` 里，两边不重叠。
+//!
+//! 这里每一节都是**默认值**：一本书可以只盖掉其中几格，见
+//! [`crate::BookSettings`] 那一条「默认 + 差量 → 生效值」的口径。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
@@ -403,6 +407,20 @@ impl<'de> Deserialize<'de> for PageTurn {
 #[serde(default)]
 pub struct Appearance {
     pub mode: Mode,
+    /// 阅读页的浅深，**全局默认那一档**：没单独设过的书在阅读层挂着时按它走。
+    ///
+    /// `None` = 跟随软件外观 [`mode`](Self::mode)（默认）；`Some(System)` = 阅读页跟着
+    /// 系统走；`Some(Light)` / `Some(Dark)` = 钉死一档。它存在这一节而不是 [`Reader`]：
+    /// `Reader` 整份是排版失效键，而换浅深不该让任何一章重排（与
+    /// [`page_turn`](Self::page_turn) 同一条理由）。
+    ///
+    /// 阅读页盖满整窗，所以「只在阅读时覆盖」在画面上与全局换肤几乎一样；区别在
+    /// **关书之后**：书架、设置、下一次开书之前都还是读者在设置里选的
+    /// [`mode`](Self::mode)。
+    ///
+    /// 单本书可以盖掉这一格（[`BookSettings`](crate::BookSettings) 的 `appearance` 差量），
+    /// 盖掉之后**也不碰 [`mode`](Self::mode)**：那一格只归软件。
+    pub reading_mode: Option<Mode>,
     /// 解析到浅色时用的主题名。
     pub light: Option<String>,
     /// 解析到深色时用的主题名。
@@ -503,6 +521,7 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             mode: Mode::default(),
+            reading_mode: None,
             light: None,
             dark: None,
             page_turn: PageTurn::default(),
@@ -1609,6 +1628,8 @@ mod tests {
             },
             appearance: Appearance {
                 mode: Mode::Light,
+                // 这一格默认是 `None`，写个 `Some` 才算测到「Optional<Mode> 真写出去读回来」。
+                reading_mode: Some(Mode::Dark),
                 light: Some("Gruvbox".into()),
                 dark: Some("Molokai".into()),
                 // 故意不是默认值：这一趟要把新键真写出去再读回来，填默认值等于没测到它。
@@ -1949,6 +1970,36 @@ mod tests {
         let old = load(r#"{"appearance":{"light":"Gruvbox"}}"#);
         assert_eq!(old.appearance.highlight_style, AnnotationStyle::default());
         assert_eq!(old.appearance.light.as_deref(), Some("Gruvbox"));
+    }
+
+    /// 阅读页的浅深是**独立一格**：缺省是「跟随软件外观」，写了它也不许改到全局 `mode`。
+    ///
+    /// 这条门存在是因为这一格与 `mode` 长得太像 —— 一旦实现图省事把夜间写回 `mode`，
+    /// 症状是「读完书关掉，整个应用的浅深跟着变了，而且下次开书之前还是那样」。
+    /// 认不出的值按 `Mode::parse` 回落「跟随系统」，同一节里的主题名仍要留着。
+    #[test]
+    fn the_reader_mode_is_optional_and_never_touches_the_app_mode() {
+        let old = load(r#"{"appearance":{"mode":"light"}}"#);
+        assert_eq!(
+            old.appearance.reading_mode, None,
+            "旧配置没有这一格时该跟软件外观走"
+        );
+
+        let pinned = load(r#"{"appearance":{"mode":"light","reading_mode":"dark"}}"#);
+        assert_eq!(pinned.appearance.reading_mode, Some(Mode::Dark));
+        assert_eq!(
+            pinned.appearance.mode,
+            Mode::Light,
+            "阅读页那一格不该改到全局浅深"
+        );
+
+        let broken = load(r#"{"appearance":{"light":"Gruvbox","reading_mode":"sepia"}}"#);
+        assert_eq!(broken.appearance.reading_mode, Some(Mode::System));
+        assert_eq!(
+            broken.appearance.light.as_deref(),
+            Some("Gruvbox"),
+            "一个坏掉的阅读浅深不该把同一节的主题名一起吃掉"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! 横切基础设施：不解决任何业务问题，但每一条业务线都要用。
 //!
 //! - [`config`] —— 三层来源（内置默认 < 用户文件 < 环境变量）字段级合并 + provenance。
+//! - [`book_settings`] —— 每本书一份的阅读设置**差量**：默认 + 差量 → 生效值。
 //! - [`logging`] —— `tracing` subscriber 的装配：文件 / stderr / 宿主三处出口。
 //! - [`paths`] —— **唯一的路径来源**：数据根、库文件、日志目录、封面与缩略图目录。
 //!   别处不许拼路径（`plans/基础设施.md` §2.7）。
@@ -18,6 +19,7 @@
 //! 这一区**不依赖 [`crate::store`]**（[`services`] 收的是调用方给的句柄），
 //! 也不依赖 [`crate::layout`]：它服务所有人，所以谁都不许反过来要求它懂业务。
 
+pub mod book_settings;
 pub mod budget;
 pub mod config;
 pub mod diagnostics;
