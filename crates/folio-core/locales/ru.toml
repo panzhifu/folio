@@ -146,6 +146,8 @@ toc = "Оглавление"
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
 speech = "Чтение вслух"
+
+translation = "Перевод"
 [group]
 usage = "Занято"
 cleanup = "Очистка"
@@ -161,9 +163,14 @@ watch = "Слежение за папкой"
 transfer = "Передача по Wi-Fi"
 rows = "Записи"
 marking = "Пометки"
+direction = "Направление"
 
 speech_voice = "Голос"
 speech_reading = "Во время чтения"
+
+translation_output = "Перевод"
+translation_openai = "Совместимо с OpenAI"
+translation_deepl = "DeepL"
 [field]
 app_dir = "Каталог данных приложения"
 log_dir = "Папка журналов"
@@ -181,8 +188,16 @@ max_measure = "Максимальная ширина строки"
 "max_measure.desc" = "Наибольшая ширина текстовой колонки в пикселях. 0 — растянуть по окну."
 margin_x = "Боковые поля"
 "margin_x.desc" = "Поля по обеим сторонам текстовой колонки, в пикселях."
+letter_spacing = "Межбуквенный интервал"
+"letter_spacing.desc" = "Дополнительный интервал между символами, в em. Отрицательные значения сжимают; 0 — по умолчанию."
+margin_y = "Верхнее и нижнее поля"
+"margin_y.desc" = "Поля над и под текстовой колонкой, в пикселях. Меняют число строк на странице, но не места переноса."
+font_weight = "Насыщенность"
+"font_weight.desc" = "Насыщенность текста. Если на устройстве нет такого начертания, берётся ближайшее; от 600 добавляется синтетическая жирность."
+text_direction = "Направление текста"
+"text_direction.desc" = "Как в книге, вертикально или горизонтально. Вертикально работает только при постраничном режиме в одну колонку; при прокрутке остаётся горизонтально."
 font_family = "Шрифт текста"
-"font_family.desc" = "Имя семейства шрифтов, например LXGW WenKai или Noto Serif CJK SC."
+"font_family.desc" = "Выберите шрифт, установленный на этом устройстве."
 appearance_mode = "Режим"
 "appearance_mode.desc" = "Следовать системе или закрепить светлое / тёмное."
 theme_light = "Светлая тема"
@@ -226,6 +241,19 @@ speech_pitch = "Высота"
 "speech_pitch.desc" = "Высота голоса. 1.0 — обычная."
 speech_auto_scroll = "Следить за чтением"
 "speech_auto_scroll.desc" = "Перелистывать к читаемому абзацу. Выключено — страница остаётся на месте."
+
+translation_target_lang = "Перевести на"
+"translation_target_lang.desc" = "Язык, на который переводится выделенный текст. «Как язык интерфейса» следует за интерфейсом."
+translation_engine = "Движок"
+"translation_engine.desc" = "Кто выполняет перевод. Google работает без ключа, совместимые с OpenAI сервисы охватывают облака и локальные модели, а DeepL требует ключ API."
+translation_openai_base = "Адрес сервиса"
+"translation_openai_base.desc" = "Корень API, например https://api.openai.com/v1. Локальный Ollama обычно использует http://localhost:11434/v1."
+translation_openai_model = "Модель"
+"translation_openai_model.desc" = "Имя модели, которое ожидает сервис, например gpt-4o-mini или qwen2.5:7b."
+translation_openai_key = "Ключ API"
+"translation_openai_key.desc" = "Хранится только в config.json этого устройства. Оставьте пустым, если сервису ключ не нужен."
+translation_deepl_key = "Ключ API"
+"translation_deepl_key.desc" = "Ключ DeepL. Ключи бесплатного тарифа заканчиваются на :fx и автоматически используют бесплатную точку входа."
 [page_turn]
 slide = "Сдвиг вбок"
 slide_up = "Сдвиг вверх"
@@ -238,6 +266,16 @@ none = "Без анимации"
 highlight = "Выделение"
 line = "Подчёркивание"
 wavy = "Волнистая"
+
+[font_weight]
+light = "Тонкий"
+regular = "Обычный"
+bold = "Полужирный"
+
+[text_direction]
+auto = "Как в книге"
+vertical = "Вертикально"
+horizontal = "Горизонтально"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
@@ -547,3 +585,12 @@ stale = "⚠️ %{place} · позиция потеряна"
 undo = "Отменить"
 deleted_annotation = "Выделение удалено"
 deleted_bookmark = "Закладка удалена"
+
+[font_picker]
+search = "Поиск шрифтов"
+
+[translation]
+follow_ui = "Как язык интерфейса"
+engine_google = "Google (без ключа)"
+engine_openai = "Совместимо с OpenAI"
+engine_deepl = "DeepL"

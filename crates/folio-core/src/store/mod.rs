@@ -27,8 +27,8 @@ use rusqlite::{Connection, params};
 use crate::Result;
 
 mod annotations;
-mod books;
 mod bookmarks;
+mod books;
 mod collections;
 mod content;
 mod reading;

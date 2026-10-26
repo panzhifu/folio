@@ -25,9 +25,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::{Popover, PopoverState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
-use gpui_kit::component::{
-    ActiveTheme, Sizable as _, ThemeMode, ThemeStyled as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme, Sizable as _, ThemeMode, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Hsla,
@@ -727,9 +725,19 @@ impl Render for ReadingPage {
             || self.reader.read(cx).note_editor_open()
             || self.reader.read(cx).translation_open()
             || self.image_viewer.read(cx).is_open();
+        // 上下页边距的默认值来自书的 `@page`；读者的「上下页边距」滑条离开 0 就整个
+        // 覆盖它（见 `chrome::effective_page_margins`）。带子自己的高与正文让出的高必须
+        // 是同一对数，否则滚动时那半行字会从缝里露出来。
+        let (header_margin, footer_margin) = chrome::effective_page_margins(
+            ConfigHolder::reader(cx).margin_y,
+            self.reader.read(cx).page_margins(),
+            f32::from(window.viewport_size().width),
+        );
+        let (header_band, footer_band) =
+            chrome::bands_with_vertical_margins(header_margin, footer_margin);
         self.reader.update(cx, |reader, cx| {
             reader.set_reserve(self.reserve, cx);
-            reader.set_chrome_bands(chrome::HEADER_HEIGHT, chrome::FOOTER_HEIGHT, cx);
+            reader.set_chrome_bands(header_band, footer_band, cx);
             reader.set_overlay_open(layers_up, cx);
             reader.enter_shift = self.enter_shift;
         });
@@ -781,8 +789,13 @@ impl Render for ReadingPage {
                 this.child(self.bottom_bar(cx))
             })
             .when(!self.chrome.is_open(), |this| {
-                this.child(bands::header(&self.reader, cx))
-                    .child(bands::footer(&self.reader, self.bottom_inset, cx))
+                this.child(bands::header(&self.reader, header_margin, cx))
+                    .child(bands::footer(
+                        &self.reader,
+                        self.bottom_inset,
+                        footer_margin,
+                        cx,
+                    ))
             });
         let mut root = div()
             .id("reader-page")
@@ -886,9 +899,8 @@ fn translation_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverStat
                 PopupMenuItem::new(*label)
                     .checked(*code == current)
                     .on_click(move |_, _, cx| {
-                        item_reader.update(cx, |reader, cx| {
-                            reader.set_translation_lang(item_code, cx)
-                        })
+                        item_reader
+                            .update(cx, |reader, cx| reader.set_translation_lang(item_code, cx))
                     }),
             );
         }
@@ -931,8 +943,10 @@ fn translation_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverStat
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(match detected {
-                                Some(code) => tf(cx, "reader.translation.detected", &[("lang", &code)]),
-                                None => translation::ENGINE_LABEL.into(),
+                                Some(code) => {
+                                    tf(cx, "reader.translation.detected", &[("lang", &code)])
+                                }
+                                None => translation.engine.clone(),
                             }),
                     )
                     .when(*cached, |row| {
@@ -977,7 +991,7 @@ fn translation_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverStat
                         .truncate()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(translation::ENGINE_LABEL),
+                        .child(translation.engine.clone()),
                 )
                 .child(
                     Button::new("translation-close")
@@ -1012,4 +1026,3 @@ fn translation_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverStat
         )
         .into_any_element()
 }
-

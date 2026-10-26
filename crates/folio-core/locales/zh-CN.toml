@@ -153,6 +153,8 @@ toc = "目录"
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
 speech = "听书"
+
+translation = "翻译"
 [group]
 usage = "占用"
 cleanup = "清理"
@@ -168,9 +170,14 @@ watch = "文件夹监听"
 transfer = "Wi-Fi 传书"
 rows = "条目"
 marking = "划线"
+direction = "方向"
 
 speech_voice = "声音"
 speech_reading = "朗读时"
+
+translation_output = "译文"
+translation_openai = "OpenAI 兼容"
+translation_deepl = "DeepL"
 [field]
 app_dir = "软件数据目录"
 log_dir = "日志目录"
@@ -188,8 +195,16 @@ max_measure = "最大行长"
 "max_measure.desc" = "正文栏的最大宽度（像素）。0 表示随窗口铺满。"
 margin_x = "左右页边距"
 "margin_x.desc" = "正文栏两侧留白（像素）。"
+letter_spacing = "字距"
+"letter_spacing.desc" = "字与字之间额外的空隙，单位是字号倍。负值收紧，0 是默认。"
+margin_y = "上下页边距"
+"margin_y.desc" = "正文栏上下的留白（像素）。它不改折行，只改一页装多少行。"
+font_weight = "字重"
+"font_weight.desc" = "正文的粗细。设备上没有对应字面时，排版层会挑最接近的一面；600 以上还会叠一遍合成粗体。"
+text_direction = "文字方向"
+"text_direction.desc" = "按书原样、竖排或横排。竖排只在分页、单栏时生效；上下滚动仍按横排排。"
 font_family = "正文字体"
-"font_family.desc" = "填字体家族名，例如 LXGW WenKai、Noto Serif CJK SC。"
+"font_family.desc" = "从这台设备已装的字体中选择。"
 appearance_mode = "浅深"
 "appearance_mode.desc" = "跟着系统走，或者钉死浅色 / 深色。"
 theme_light = "浅色主题"
@@ -234,6 +249,19 @@ speech_pitch = "音高"
 "speech_pitch.desc" = "念出来的调子。1.0 是正常音高。"
 speech_auto_scroll = "念到哪翻到哪"
 "speech_auto_scroll.desc" = "听书时屏幕跟着正在念的那一段走。关掉就是「念它的，我翻我的」。"
+
+translation_target_lang = "译成"
+"translation_target_lang.desc" = "选区翻译译成哪种语言。选「跟随界面语言」就随界面切。"
+translation_engine = "引擎"
+"translation_engine.desc" = "由谁来译。Google 免 key 零配置可用；OpenAI 兼容覆盖各家云服务与本地模型；DeepL 需要 API Key。"
+translation_openai_base = "服务地址"
+"translation_openai_base.desc" = "API 根地址，例如 https://api.openai.com/v1；本地 Ollama 常用 http://localhost:11434/v1。"
+translation_openai_model = "模型"
+"translation_openai_model.desc" = "服务端认的模型名，例如 gpt-4o-mini 或 qwen2.5:7b。"
+translation_openai_key = "API Key"
+"translation_openai_key.desc" = "只存在本机的 config.json 里。本地服务不需要就留空。"
+translation_deepl_key = "API Key"
+"translation_deepl_key.desc" = "DeepL 的密钥。免费档以 :fx 结尾，会自动走免费端点。"
 [page_turn]
 slide = "左右平移"
 slide_up = "上下平移"
@@ -246,6 +274,17 @@ none = "不走动画"
 highlight = "高亮"
 line = "实线"
 wavy = "波浪线"
+
+# 字重那三档与文字方向那三档的标签。值是写回配置的形态，标签是显示文字。
+[font_weight]
+light = "细"
+regular = "常规"
+bold = "加粗"
+
+[text_direction]
+auto = "按书原样"
+vertical = "竖排"
+horizontal = "横排"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
@@ -561,3 +600,12 @@ stale = "⚠️ %{place} · 位置已失效"
 undo = "撤销"
 deleted_annotation = "已删除一条批注"
 deleted_bookmark = "已删除一枚书签"
+
+[font_picker]
+search = "搜索字体"
+
+[translation]
+follow_ui = "跟随界面语言"
+engine_google = "Google 免 key"
+engine_openai = "OpenAI 兼容"
+engine_deepl = "DeepL"

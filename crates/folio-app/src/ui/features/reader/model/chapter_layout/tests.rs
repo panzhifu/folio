@@ -573,6 +573,25 @@ fn the_layout_key_is_composed_in_one_place(cx: &mut TestAppContext) {
     );
 }
 
+/// 书级 `@page` 从样式表一路到 `Document`：阅读页读的就是这一份。百分比留给排版层
+/// 按页框宽折，所以这里原样存着。
+#[test]
+fn a_book_page_rule_reaches_the_document() {
+    use folio_core::content::format::css::computed::Length;
+
+    let document = Document::new(
+        "<p>页边距</p>".to_string(),
+        "@page { margin-top: 12px; margin-bottom: 2% }",
+        bare_prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    let margins = document.page_margins();
+    assert_eq!(margins.top, Some(Length::Px(12.0)));
+    assert_eq!(margins.bottom, Some(Length::Percent(0.02)));
+    assert_eq!(margins.left, None, "没写的边不能被补成 0");
+}
+
 /// 字体表版本进键：注册过内嵌字体的那本书，与一本没字体的书不能共用同一格版本。
 ///
 /// 这一格是块级缓存接线前那个「键里不含设备字体表」的缺口。它数的是**注册事件**，
@@ -627,7 +646,7 @@ enum PrefClass {
 /// 「动一下某项偏好」的写法 + 它的归属。名字必须与 `Reader` 的字段名一模一样。
 type PrefTweak = (&'static str, fn(&mut Reader), PrefClass);
 
-const PREFS: [PrefTweak; 12] = [
+const PREFS: [PrefTweak; 16] = [
     ("font_size", |p| p.font_size += 2.0, PrefClass::Layout),
     ("line_height", |p| p.line_height += 0.3, PrefClass::Layout),
     (
@@ -636,7 +655,19 @@ const PREFS: [PrefTweak; 12] = [
         PrefClass::Layout,
     ),
     ("indent_em", |p| p.indent_em += 1.0, PrefClass::Layout),
+    (
+        "letter_spacing_em",
+        |p| p.letter_spacing_em += 0.02,
+        PrefClass::Layout,
+    ),
     ("margin_x", |p| p.margin_x += 60.0, PrefClass::Layout),
+    // 上下边距不改折行，只改一页装多少行；合成点见
+    // `chrome::book_page_margins_are_the_default_and_the_reader_overrides_them`。
+    (
+        "margin_y",
+        |p| p.margin_y += 40.0,
+        PrefClass::PinnedElsewhere,
+    ),
     ("max_measure", |p| p.max_measure = 300.0, PrefClass::Layout),
     (
         "font_family",
@@ -652,6 +683,12 @@ const PREFS: [PrefTweak; 12] = [
     // 宽度把余量摊到行内的隙上（`layout::collect::justify_plan`）。分类跟着从
     // `NotWired` 提到 `Layout`。
     ("justify", |p| p.justify = !p.justify, PrefClass::Layout),
+    ("font_weight", |p| p.font_weight = 700, PrefClass::RootStyle),
+    (
+        "text_direction",
+        |p| p.text_direction = folio_core::TextDirection::Vertical,
+        PrefClass::PinnedElsewhere,
+    ),
     (
         "toc_density",
         |p| p.toc_density = folio_core::infra::config::TocDensity::Compact,
@@ -680,9 +717,13 @@ fn every_preference_is_classified() {
         line_height,
         paragraph_gap_em,
         indent_em,
+        letter_spacing_em,
         max_measure,
         margin_x,
+        margin_y,
         justify,
+        font_weight,
+        text_direction,
         font_family,
         mono_font_family,
         toc_density,
@@ -695,9 +736,13 @@ fn every_preference_is_classified() {
         line_height,
         paragraph_gap_em,
         indent_em,
+        letter_spacing_em,
         max_measure,
         margin_x,
+        margin_y,
         justify,
+        font_weight,
+        text_direction,
         font_family,
         mono_font_family,
         toc_density,
@@ -705,14 +750,18 @@ fn every_preference_is_classified() {
         toc_dim_read,
     );
 
-    const NAMES: [&str; 12] = [
+    const NAMES: [&str; 16] = [
         "font_size",
         "line_height",
         "paragraph_gap_em",
         "indent_em",
+        "letter_spacing_em",
         "max_measure",
         "margin_x",
+        "margin_y",
         "justify",
+        "font_weight",
+        "text_direction",
         "font_family",
         "mono_font_family",
         "toc_density",
@@ -780,10 +829,7 @@ fn a_layout_preference_change_moves_the_geometry(cx: &mut TestAppContext) {
             PrefClass::Toc => assert!(!changed, "偏好 {name} 是目录那一屏的字段，不该动到正文版式"),
             PrefClass::RootStyle => {
                 let (before, after) = (Document::root_base(&base), Document::root_base(&prefs));
-                assert_ne!(
-                    before.font_family, after.font_family,
-                    "偏好 {name} 该走进根样式，实际没走"
-                );
+                assert_ne!(before, after, "偏好 {name} 该走进根样式，实际没走");
             }
             // 等宽族名由 `measure.rs` 的 `monospace_generic_uses_the_mono_preference` 钉住：
             // 它的落点是「泛族名换成哪个家族」，在度量映射里，不在这条断言的视野里。
@@ -792,8 +838,41 @@ fn a_layout_preference_change_moves_the_geometry(cx: &mut TestAppContext) {
     }
 }
 
-// ---- 脚注：条引用 → 注文（`Document::footnote_note_for_node` 一族） ----
+/// 文字方向那三档：`Auto` 听书自己写的 `writing-mode`；另外两档是读者层用
+/// `!important` 压过书上的声明 —— 连书在 `body` 上直接写的那一条也要压掉
+/// （继承打不过元素自己的声明，所以规则必须同时落在 `html` 与 `body` 上）。
+#[gpui_kit::test]
+fn the_text_direction_preference_beats_the_books_own_writing_mode(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let wants_vertical = |cx: &mut TestAppContext, book_mode: &str, direction| {
+        let mut prefs = prefs();
+        prefs.text_direction = direction;
+        let xhtml =
+            format!(r#"<html><body style="writing-mode: {book_mode}"><p>方向</p></body></html>"#);
+        layout_of(cx, &xhtml, &prefs, 600.0).wants_vertical
+    };
+    use folio_core::TextDirection::{Auto, Horizontal, Vertical};
+    let horizontal_book = "horizontal-tb";
+    let vertical_book = "vertical-rl";
+    assert!(
+        wants_vertical(cx, vertical_book, Auto),
+        "Auto 该听书的：书说竖排就是竖排"
+    );
+    assert!(
+        !wants_vertical(cx, horizontal_book, Auto),
+        "Auto 该听书的：书说横排就是横排"
+    );
+    assert!(
+        wants_vertical(cx, horizontal_book, Vertical),
+        "读者选竖排要压过书上写的横排"
+    );
+    assert!(
+        !wants_vertical(cx, vertical_book, Horizontal),
+        "读者选横排要压过书上写的竖排"
+    );
+}
 
+// ---- 脚注：条引用 → 注文（`Document::footnote_note_for_node` 一族） ----
 /// `蛇结` 那种形状：标记是一张「注」图（外面套 `<a epub:type="noteref">`），
 /// 注文在同一个文件的 `<aside epub:type="footnote">` 里。目标元素的文本优先于 `alt`。
 #[test]

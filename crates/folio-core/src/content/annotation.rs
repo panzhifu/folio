@@ -129,11 +129,7 @@ pub fn annotations_export(
 /// 书名兜底：空串（书自己没说）写「未命名」，不写《》套空串。
 fn display_title(meta: &DocMeta) -> &str {
     let title = meta.title.trim();
-    if title.is_empty() {
-        "未命名"
-    } else {
-        title
-    }
+    if title.is_empty() { "未命名" } else { title }
 }
 
 /// 章标题兜底：库里没有那一行、或标题是空串时写「第 N 章」。章号是 0 起的下标，
@@ -549,9 +545,18 @@ mod tests {
 
         let html = annotations_html(&meta("书"), &[chapter("一")], &[a]);
         assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
-        assert!(html.contains("<meta charset=\"utf-8\">"), "独立文档自带 charset：{html}");
-        assert!(html.contains("&lt;b&gt;加粗&lt;/b&gt;不该生效"), "笔记要转义：{html}");
-        assert!(html.contains("&lt;引文&gt; &amp; &quot;引号&quot;"), "引文同样要转义：{html}");
+        assert!(
+            html.contains("<meta charset=\"utf-8\">"),
+            "独立文档自带 charset：{html}"
+        );
+        assert!(
+            html.contains("&lt;b&gt;加粗&lt;/b&gt;不该生效"),
+            "笔记要转义：{html}"
+        );
+        assert!(
+            html.contains("&lt;引文&gt; &amp; &quot;引号&quot;"),
+            "引文同样要转义：{html}"
+        );
         assert!(!html.contains("<b>"), "转义之后正文里不该有裸标签：{html}");
         assert!(html.contains("<h2>1. 一</h2>"), "{html}");
     }

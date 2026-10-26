@@ -146,6 +146,8 @@ toc = "Índice"
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
 speech = "Lectura en voz alta"
+
+translation = "Traducción"
 [group]
 usage = "Uso"
 cleanup = "Limpieza"
@@ -161,9 +163,14 @@ watch = "Vigilancia de carpeta"
 transfer = "Transferencia por Wi-Fi"
 rows = "Entradas"
 marking = "Marcas"
+direction = "Dirección"
 
 speech_voice = "Voz"
 speech_reading = "Durante la lectura"
+
+translation_output = "Traducción"
+translation_openai = "Compatible con OpenAI"
+translation_deepl = "DeepL"
 [field]
 app_dir = "Carpeta de datos de la app"
 log_dir = "Carpeta de registros"
@@ -181,8 +188,16 @@ max_measure = "Ancho máximo de línea"
 "max_measure.desc" = "El ancho mayor que puede tomar la columna de texto, en píxeles. 0 la extiende a la ventana."
 margin_x = "Márgenes laterales"
 "margin_x.desc" = "Espacio en blanco a ambos lados de la columna de texto, en píxeles."
+letter_spacing = "Espaciado entre letras"
+"letter_spacing.desc" = "Espacio adicional entre caracteres, en em. Los valores negativos aprietan; 0 es el valor predeterminado."
+margin_y = "Márgenes superior e inferior"
+"margin_y.desc" = "Espacio en blanco sobre y bajo la columna de texto, en píxeles. Cambia cuántas líneas caben en una página, no dónde se cortan."
+font_weight = "Grosor"
+"font_weight.desc" = "Grosor del texto. Si el dispositivo no tiene ese grosor, se usa el más cercano; desde 600 se añade negrita sintética."
+text_direction = "Dirección del texto"
+"text_direction.desc" = "Como el libro, vertical u horizontal. La vertical solo se aplica a la paginación de una columna; al desplazarse sigue siendo horizontal."
 font_family = "Fuente del texto"
-"font_family.desc" = "Un nombre de familia de fuentes, por ejemplo LXGW WenKai o Noto Serif CJK SC."
+"font_family.desc" = "Elige entre las fuentes instaladas en este dispositivo."
 appearance_mode = "Modo"
 "appearance_mode.desc" = "Seguir al sistema, o fijar claro u oscuro."
 theme_light = "Tema claro"
@@ -226,6 +241,19 @@ speech_pitch = "Tono"
 "speech_pitch.desc" = "El tono de la voz. 1.0 es lo normal."
 speech_auto_scroll = "Seguir la lectura"
 "speech_auto_scroll.desc" = "Pasar al párrafo que se está leyendo. Desactivado: la página se queda donde está."
+
+translation_target_lang = "Traducir a"
+"translation_target_lang.desc" = "Idioma al que se traduce la selección. «Seguir el idioma de la interfaz» cambia con la interfaz."
+translation_engine = "Motor"
+"translation_engine.desc" = "Quién proporciona la traducción. Google funciona sin clave, compatible con OpenAI cubre servicios en la nube y modelos locales, y DeepL necesita una clave API."
+translation_openai_base = "URL del servicio"
+"translation_openai_base.desc" = "Raíz de la API, por ejemplo https://api.openai.com/v1. Ollama local suele usar http://localhost:11434/v1."
+translation_openai_model = "Modelo"
+"translation_openai_model.desc" = "Nombre del modelo que espera el servicio, por ejemplo gpt-4o-mini o qwen2.5:7b."
+translation_openai_key = "Clave API"
+"translation_openai_key.desc" = "Solo se guarda en el config.json de este dispositivo. Déjala vacía si el servicio no necesita clave."
+translation_deepl_key = "Clave API"
+"translation_deepl_key.desc" = "Clave de DeepL. Las claves gratuitas terminan en :fx y usan automáticamente el punto de acceso gratuito."
 [page_turn]
 slide = "Deslizar a los lados"
 slide_up = "Deslizar hacia arriba"
@@ -238,6 +266,16 @@ none = "Sin animación"
 highlight = "Resaltado"
 line = "Subrayado"
 wavy = "Ondulada"
+
+[font_weight]
+light = "Fina"
+regular = "Normal"
+bold = "Negrita"
+
+[text_direction]
+auto = "Como el libro"
+vertical = "Vertical"
+horizontal = "Horizontal"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
@@ -547,3 +585,12 @@ stale = "⚠️ %{place} · posición perdida"
 undo = "Deshacer"
 deleted_annotation = "Subrayado eliminado"
 deleted_bookmark = "Marcador eliminado"
+
+[font_picker]
+search = "Buscar fuentes"
+
+[translation]
+follow_ui = "Seguir el idioma de la interfaz"
+engine_google = "Google (sin clave)"
+engine_openai = "Compatible con OpenAI"
+engine_deepl = "DeepL"

@@ -715,19 +715,41 @@ mod tests {
         let a = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
         let b = store.add_book(&path("b.epub"), &meta("书乙")).unwrap();
         store
-            .add_annotation(a, &anchor(0, 0, 4), "早的", "amber", AnnotationStyle::default())
+            .add_annotation(
+                a,
+                &anchor(0, 0, 4),
+                "早的",
+                "amber",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         // 同秒创建按 id 定序（ORDER BY created_at DESC, id DESC）。
         store
-            .add_annotation(b, &anchor(0, 0, 4), "晚一", "rose", AnnotationStyle::default())
+            .add_annotation(
+                b,
+                &anchor(0, 0, 4),
+                "晚一",
+                "rose",
+                AnnotationStyle::default(),
+            )
             .unwrap();
         store
-            .add_annotation(b, &anchor(1, 0, 4), "晚二", "sky", AnnotationStyle::default())
+            .add_annotation(
+                b,
+                &anchor(1, 0, 4),
+                "晚二",
+                "sky",
+                AnnotationStyle::default(),
+            )
             .unwrap();
 
         let cards = store.all_annotations().unwrap();
         let notes: Vec<&str> = cards.iter().map(|c| c.annotation.note.as_str()).collect();
-        assert_eq!(notes, vec!["晚二", "晚一", "早的"], "新的在最前，同秒按 id 倒序");
+        assert_eq!(
+            notes,
+            vec!["晚二", "晚一", "早的"],
+            "新的在最前，同秒按 id 倒序"
+        );
         let titles: Vec<&str> = cards.iter().map(|c| c.book_title.as_str()).collect();
         assert_eq!(titles, vec!["书乙", "书乙", "书甲"], "书名跟着每一条走");
     }
@@ -765,7 +787,12 @@ mod tests {
         let back = store.annotation(first).unwrap().expect("原 id 要回来");
         assert_eq!(back, row, "整行照原样回来：笔记、颜色、画法、stale、时间戳");
         assert!(back.stale);
-        let ids: Vec<i64> = store.annotations(book).unwrap().iter().map(|a| a.id).collect();
+        let ids: Vec<i64> = store
+            .annotations(book)
+            .unwrap()
+            .iter()
+            .map(|a| a.id)
+            .collect();
         assert_eq!(ids, vec![first, second]);
     }
 }

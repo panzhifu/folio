@@ -57,9 +57,7 @@ impl ReadingPage {
             })
             .tooltip(bookmark_label.clone().to_string())
             .accessibility_label(bookmark_label)
-            .on_click(move |_, _, cx| {
-                bookmark_page.update(cx, |this, cx| this.toggle_bookmark(cx))
-            })
+            .on_click(move |_, _, cx| bookmark_page.update(cx, |this, cx| this.toggle_bookmark(cx)))
             .into_any_element();
         // 宽档上目录开关长在顶栏：底栏浮层收起时读者常驻看见的是这一条，而抽屉本身
         // 也带一颗关闭 —— 开的关的两个入口都在这块屏上。

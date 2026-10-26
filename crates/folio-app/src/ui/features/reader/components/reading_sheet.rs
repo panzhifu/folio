@@ -15,8 +15,9 @@
 //! ## 三组，按读者此刻要调的东西分开
 //!
 //! 卡片顶上是「外观 / 字体 / 排版」三段，照读者实际改字的顺序分：亮度与翻页那两张纸
-//! 是环境；字体家族与字号是字的身份；行距、段距、缩进、对齐、版心与留白是版面。三组
-//! 各自装在一页里，切换即时完成（内容早已在手上，不等加载），换页不会把弹层收起。
+//! 是环境；字体家族、字重与字号是字的身份；行距、字距、段距、缩进、对齐、版心、
+//! 上下左右留白与文字方向是版面。三组各自装在一页里，切换即时完成（内容早已在手上，
+//! 不等加载），换页不会把弹层收起。
 //!
 //! ## 每格只摆「标题 + 控件」
 //!
@@ -33,9 +34,10 @@
 //! 下一帧又缩回来。`chrome::FONT_SIZE_RANGE` 那一档是**故意**比配置窄的（阅读时顺手调只
 //! 铺常用的一段），那种例外写在它自己的注释里，并由 `model/chrome.rs` 的量程那条门钉住。
 
+use std::rc::Rc;
+
 use gpui_kit::Anchor;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
@@ -46,12 +48,12 @@ use gpui_kit::{
     SharedString, Styled, Subscription, Window, div,
 };
 
-use folio_core::{Mode, PageTurn};
+use folio_core::{Mode, PageTurn, Reader, TextDirection};
 
-use crate::ui::components::{BottomSheet, BottomSheetState};
+use crate::ui::components::{BottomSheet, BottomSheetState, FontFamilySetter, FontPicker};
 use crate::ui::features::reader::model::chrome::{
-    self, BRIGHTNESS_RANGE, FONT_SIZE_RANGE, INDENT_RANGE, LINE_HEIGHT_RANGE, MARGIN_X_RANGE,
-    MAX_MEASURE_RANGE, PARAGRAPH_GAP_RANGE, TURN_DURATION_RANGE,
+    self, BRIGHTNESS_RANGE, FONT_SIZE_RANGE, INDENT_RANGE, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE,
+    MARGIN_X_RANGE, MARGIN_Y_RANGE, MAX_MEASURE_RANGE, PARAGRAPH_GAP_RANGE, TURN_DURATION_RANGE,
 };
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
@@ -90,7 +92,7 @@ impl SheetTab {
     }
 }
 
-/// 卡片能停的最高那一档：窗口高的 62%。三组分开之后最长的那组（排版六格）到这一档
+/// 卡片能停的最高那一档：窗口高的 62%。三组分开之后最长的那组（排版九格）到这一档
 /// 也装得下，同时上方还留出近四成正文 —— 调行距、段距时读者要看的就是那几行字。
 /// 从前九格挤在一块，最高档只能开到 85%；分组之后把那截高度还给正文。
 const SHEET_EXPANDED: f32 = 0.62;
@@ -134,16 +136,18 @@ pub(in crate::ui::features::reader) struct ReadingSheet {
     brightness: Entity<SliderState>,
     font_size: Entity<SliderState>,
     line_height: Entity<SliderState>,
+    letter_spacing: Entity<SliderState>,
     paragraph_gap: Entity<SliderState>,
     indent: Entity<SliderState>,
     max_measure: Entity<SliderState>,
     margin_x: Entity<SliderState>,
+    margin_y: Entity<SliderState>,
     turn_duration: Entity<SliderState>,
     _watches: Vec<Subscription>,
 }
 
 impl ReadingSheet {
-    /// 建这一屏。八条滑条各订阅一次：拖动当场生效（换字号重排 / 换背光 / 下一趟翻页走多久），
+    /// 建这一屏。十条滑条各订阅一次：拖动当场生效（换字号重排 / 换背光 / 下一趟翻页走多久），
     /// 所以这里没有「应用」按钮，也没有改了不生效的中间态。
     pub(in crate::ui::features::reader) fn new(
         reader: Entity<ReaderSession>,
@@ -156,10 +160,12 @@ impl ReadingSheet {
         let brightness = slider(BRIGHTNESS_RANGE, 0.01, brightness, cx);
         let font_size = slider(FONT_SIZE_RANGE, 0.5, prefs.font_size, cx);
         let line_height = slider(LINE_HEIGHT_RANGE, 0.05, prefs.line_height, cx);
+        let letter_spacing = slider(LETTER_SPACING_RANGE, 0.01, prefs.letter_spacing_em, cx);
         let paragraph_gap = slider(PARAGRAPH_GAP_RANGE, 0.05, prefs.paragraph_gap_em, cx);
         let indent = slider(INDENT_RANGE, 0.25, prefs.indent_em, cx);
         let max_measure = slider(MAX_MEASURE_RANGE, 20.0, prefs.max_measure, cx);
         let margin_x = slider(MARGIN_X_RANGE, 8.0, prefs.margin_x, cx);
+        let margin_y = slider(MARGIN_Y_RANGE, 8.0, prefs.margin_y, cx);
         // 步长 10 ms：一整条滑条 58 个刻度，手指一次划动能停稳的刻度比这少，再细则是在
         // 骗读者说这格能调准 —— 两三百毫秒的差别肉眼分不出 5 ms。
         let turn_duration = slider(TURN_DURATION_RANGE, 10.0, appearance.turn_duration, cx);
@@ -185,6 +191,9 @@ impl ReadingSheet {
             Self::watch(&line_height, cx, |value, cx| {
                 ConfigHolder::edit_reader(cx, |prefs| prefs.line_height = value);
             }),
+            Self::watch(&letter_spacing, cx, |value, cx| {
+                ConfigHolder::edit_reader(cx, |prefs| prefs.letter_spacing_em = value);
+            }),
             Self::watch(&paragraph_gap, cx, |value, cx| {
                 ConfigHolder::edit_reader(cx, |prefs| prefs.paragraph_gap_em = value);
             }),
@@ -197,6 +206,9 @@ impl ReadingSheet {
             Self::watch(&margin_x, cx, |value, cx| {
                 ConfigHolder::edit_reader(cx, |prefs| prefs.margin_x = value);
             }),
+            Self::watch(&margin_y, cx, |value, cx| {
+                ConfigHolder::edit_reader(cx, |prefs| prefs.margin_y = value);
+            }),
             Self::watch(&turn_duration, cx, |value, cx| {
                 ConfigHolder::edit_appearance(cx, |appearance| appearance.turn_duration = value);
             }),
@@ -208,10 +220,12 @@ impl ReadingSheet {
             brightness,
             font_size,
             line_height,
+            letter_spacing,
             paragraph_gap,
             indent,
             max_measure,
             margin_x,
+            margin_y,
             turn_duration,
             _watches: watches,
         }
@@ -219,7 +233,7 @@ impl ReadingSheet {
 
     /// 一条滑条订阅一次：把拖出来的那个数交给写入口。
     ///
-    /// 写成关联函数而不是 `self` 方法：八条路唯一的差别是往哪一格写，而订阅句柄要由
+    /// 写成关联函数而不是 `self` 方法：这些路唯一的差别是往哪一格写，而订阅句柄要由
     /// 调用方存进字段 —— 方法里 `self._watches.push(...)` 与同时借着 `self.xxx` 那条句柄
     /// 是同一块的两个借用，编译不过。
     fn watch(
@@ -269,10 +283,12 @@ impl ReadingSheet {
             (&self.brightness, brightness),
             (&self.font_size, prefs.font_size),
             (&self.line_height, prefs.line_height),
+            (&self.letter_spacing, prefs.letter_spacing_em),
             (&self.paragraph_gap, prefs.paragraph_gap_em),
             (&self.indent, prefs.indent_em),
             (&self.max_measure, prefs.max_measure),
             (&self.margin_x, prefs.margin_x),
+            (&self.margin_y, prefs.margin_y),
             (&self.turn_duration, appearance.turn_duration),
         ];
         for (state, value) in wanted {
@@ -435,49 +451,132 @@ impl ReadingSheet {
         cx.notify();
     }
 
-    /// 「正文字体」那一格：一个行内输入框，家族名填进去就当场生效。
+    /// 「字重」那一格：三档里选一档，写回 `Reader`（字重会改变字形，必须重排）。
     ///
-    /// 不列本机字体清单：这台设备上不存在的那个家族名，排版层会退回设备能解析的名字
-    /// （见 `ui/shared/measure.rs` 的泛族名处理）而不是把字画成方框，而清单反而会把
-    /// 没装的也列出来 —— 与完整设置那一屏「字体」同一判据，两处不该给读者两种说法。
+    /// 配到档位之间的数（手改配置）在按钮上落回最近的一档，见
+    /// [`Reader::nearest_font_weight`]；菜单里选一档就把它写实。
+    fn weight_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let weight = Reader::nearest_font_weight(ConfigHolder::reader(cx).font_weight);
+        let label_of = |weight: u16| match weight {
+            300 => tr(cx, "font_weight.light"),
+            700 => tr(cx, "font_weight.bold"),
+            _ => tr(cx, "font_weight.regular"),
+        };
+        // 菜单闭包是 `'static`：标签先在这里按当前 locale 译好，闭包里只搬已译好的串。
+        let items: Vec<(u16, SharedString)> = Reader::FONT_WEIGHT_PRESETS
+            .iter()
+            .copied()
+            .map(|preset| (preset, label_of(preset)))
+            .collect();
+        let current = label_of(weight);
+        let title = tr(cx, "field.font_weight");
+        let sheet = cx.entity().clone();
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .child(div().flex_1().min_w_0().text_base().child(title.clone()))
+            .child(
+                Button::new("reader-font-weight")
+                    .outline()
+                    .small()
+                    .label(current.to_string())
+                    .dropdown_caret(true)
+                    .accessibility_label(title)
+                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                        items.iter().fold(menu, |menu, (preset, label)| {
+                            let checked = *preset == weight;
+                            let preset = *preset;
+                            // 菜单闭包是 `Fn`，每一项的回调要各自一份句柄（`Entity` 不 `Copy`）。
+                            let sheet = sheet.clone();
+                            menu.item(PopupMenuItem::new(label.clone()).checked(checked).on_click(
+                                move |_, _, cx| {
+                                    sheet.update(cx, |this, cx| this.set_font_weight(preset, cx))
+                                },
+                            ))
+                        })
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn set_font_weight(&mut self, weight: u16, cx: &mut Context<Self>) {
+        ConfigHolder::edit_reader(cx, |prefs| prefs.font_weight = weight);
+        cx.notify();
+    }
+
+    /// 「文字方向」那一格：按书原样 / 竖排 / 横排。
     ///
-    /// 输入框的状态按元素键跨帧持有（框架自己的 Input 字段就是这么干的），所以输入到
-    /// 一半的一次重画不会把已打的字扔掉。
+    /// 竖排只在分页单栏那一档落地（见 `folio_core::layout::LayoutOptions::allow_vertical`）；
+    /// 卡片里不摆那句解释 —— 这一屏的每格都只有标题与控件，长解释在完整设置屏那一格。
+    fn direction_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let direction = ConfigHolder::reader(cx).text_direction;
+        let label_of = |direction| match direction {
+            TextDirection::Auto => tr(cx, "text_direction.auto"),
+            TextDirection::Vertical => tr(cx, "text_direction.vertical"),
+            TextDirection::Horizontal => tr(cx, "text_direction.horizontal"),
+        };
+        // 菜单闭包是 `'static`：标签先在这里按当前 locale 译好，闭包里只搬已译好的串。
+        let items: Vec<(TextDirection, SharedString)> = TextDirection::ALL
+            .iter()
+            .copied()
+            .map(|value| (value, label_of(value)))
+            .collect();
+        let current = label_of(direction);
+        let title = tr(cx, "field.text_direction");
+        let sheet = cx.entity().clone();
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .child(div().flex_1().min_w_0().text_base().child(title.clone()))
+            .child(
+                Button::new("reader-text-direction")
+                    .outline()
+                    .small()
+                    .label(current.to_string())
+                    .dropdown_caret(true)
+                    .accessibility_label(title)
+                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                        items.iter().fold(menu, |menu, (value, label)| {
+                            let checked = *value == direction;
+                            let value = *value;
+                            let sheet = sheet.clone();
+                            menu.item(PopupMenuItem::new(label.clone()).checked(checked).on_click(
+                                move |_, _, cx| {
+                                    sheet.update(cx, |this, cx| this.set_text_direction(value, cx))
+                                },
+                            ))
+                        })
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn set_text_direction(&mut self, direction: TextDirection, cx: &mut Context<Self>) {
+        ConfigHolder::edit_reader(cx, |prefs| prefs.text_direction = direction);
+        cx.notify();
+    }
+
+    /// 「正文字体」那一格：这台设备装着的字体家族，可搜索。
+    ///
+    /// 列表来自 `TextSystem::all_font_names()`（含随包字体与这本书注册进来的内嵌字体），
+    /// 不再让读者手打一个可能不存在的家族名 —— 打错的名字在排版层会静默退回读者的字体，
+    /// 而读者以为自己改成功了。
     fn font_row(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let family: SharedString = ConfigHolder::reader(cx).font_family.clone().into();
-        let state = window.use_keyed_state("reader-font-family", cx, {
-            let value = family.clone();
-            move |window, cx| {
-                let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
-                // 输入即写配置：外壳那份订阅会落盘并重排。订阅句柄必须跟着状态一起活，
-                // 掉了事件就断。
-                let watch = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
-                    if let InputEvent::Change = event {
-                        let value = input.read(cx).value();
-                        // 空串不改：清空输入框不该把正文换成 gpui 的默认家族，
-                        // 那是个没有汉字的拉丁字体。
-                        if !value.trim().is_empty() {
-                            ConfigHolder::edit_reader(cx, |prefs| {
-                                prefs.font_family = value.to_string()
-                            });
-                        }
-                    }
-                });
-                (input, watch)
-            }
+        let picker = window.use_keyed_state("reader-font-picker", cx, {
+            let get: Rc<dyn Fn(&App) -> String> =
+                Rc::new(|cx: &App| ConfigHolder::reader(cx).font_family.clone());
+            let set: FontFamilySetter = Rc::new(|value: String, cx: &mut App| {
+                ConfigHolder::edit_reader(cx, |prefs| prefs.font_family = value);
+            });
+            move |window, cx| FontPicker::new(get, set, window, cx)
         });
-        // 配置在他处被改（完整设置那一屏、未来的同步）时把显示拉回来。
-        state.update(cx, |(input, _), cx| {
-            if input.read(cx).value() != family {
-                input.update(cx, |input, cx| input.set_value(family.clone(), window, cx));
-            }
-        });
-        let (input, _) = state.read(cx);
         v_flex()
             .w_full()
             .gap_1()
             .child(div().text_base().child(tr(cx, "field.font_family")))
-            .child(Input::new(input).w_full())
+            .child(picker.clone())
             .into_any_element()
     }
 
@@ -557,7 +656,7 @@ impl ReadingSheet {
             .into_any_element()
     }
 
-    /// 字体：家族名要打字，放在字号前面 —— 先认这一本书用的字，再调大小。
+    /// 字体：家族名要打字，放在字号前面 —— 先认这一本书用的字，再调大小与粗细。
     fn font_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let prefs = ConfigHolder::reader(cx);
         v_flex()
@@ -573,13 +672,15 @@ impl ReadingSheet {
                 &self.font_size,
                 cx,
             ))
+            .child(self.weight_row(cx))
             .into_any_element()
     }
 
-    /// 排版：对齐与缩进定段落形状，行距 / 段距 / 版心 / 留白定整页密度。
+    /// 排版：对齐与缩进定段落形状，行距 / 字距 / 段距 / 版心 / 留白定整页密度，
+    /// 文字方向排最后 —— 它换的是整页那根轴。
     ///
     /// 顺序照读者扫一页的目光：先看两端怎么收、首行怎么起，再往下看行与段之间的空，
-    /// 最后才是版心与页边的整体宽度。
+    /// 最后才是版心、页边与整页方向。
     fn layout_rows(&self, cx: &mut Context<Self>) -> AnyElement {
         let prefs = ConfigHolder::reader(cx);
         // 版心推到最左就是 `0`，而 `0` 不是「栏宽 0 像素」，是「不设上限」。那一格没有
@@ -629,6 +730,12 @@ impl ReadingSheet {
                 cx,
             ))
             .child(self.slider_row(
+                tr(cx, "field.letter_spacing"),
+                format!("{:.2}", prefs.letter_spacing_em),
+                &self.letter_spacing,
+                cx,
+            ))
+            .child(self.slider_row(
                 tr(cx, "field.paragraph_gap"),
                 format!("{:.2}", prefs.paragraph_gap_em),
                 &self.paragraph_gap,
@@ -646,6 +753,13 @@ impl ReadingSheet {
                 &self.margin_x,
                 cx,
             ))
+            .child(self.slider_row(
+                tr(cx, "field.margin_y"),
+                format!("{:.0} px", prefs.margin_y),
+                &self.margin_y,
+                cx,
+            ))
+            .child(self.direction_row(cx))
             .into_any_element()
     }
 }
@@ -671,7 +785,7 @@ impl Render for ReadingSheet {
 
 #[cfg(test)]
 mod tests {
-    //! 这一屏能在宿主上跑完的部分：开合、三段各画一帧不炸，以及「八条滑条各接哪一格
+    //! 这一屏能在宿主上跑完的部分：开合、三段各画一帧不炸，以及「十条滑条各接哪一格
     //! 配置」那两条接线（初值接错、别处改了不跟）。摆出来的样子 —— 每格多高、卡片停在
     //! 哪一档 —— 只有真机量得出来。
     //!
@@ -764,9 +878,11 @@ mod tests {
         sheet.read_with(cx, |sheet, cx| {
             assert_eq!(thumb(&sheet.font_size, cx), prefs.font_size);
             assert_eq!(thumb(&sheet.line_height, cx), prefs.line_height);
+            assert_eq!(thumb(&sheet.letter_spacing, cx), prefs.letter_spacing_em);
             assert_eq!(thumb(&sheet.paragraph_gap, cx), prefs.paragraph_gap_em);
             assert_eq!(thumb(&sheet.indent, cx), prefs.indent_em);
             assert_eq!(thumb(&sheet.margin_x, cx), prefs.margin_x);
+            assert_eq!(thumb(&sheet.margin_y, cx), prefs.margin_y);
             assert_eq!(thumb(&sheet.max_measure, cx), prefs.max_measure);
             assert_eq!(thumb(&sheet.turn_duration, cx), turn_duration);
             // 「跟随系统」在配置里是 `None`，滑条上得有个能显示的数 —— 顶格。

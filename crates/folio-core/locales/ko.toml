@@ -146,6 +146,8 @@ toc = "목차"
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
 speech = "소리 내어 읽기"
+
+translation = "번역"
 [group]
 usage = "사용량"
 cleanup = "정리"
@@ -161,9 +163,14 @@ watch = "폴더 감시"
 transfer = "Wi-Fi 전송"
 rows = "항목"
 marking = "표시"
+direction = "방향"
 
 speech_voice = "목소리"
 speech_reading = "읽는 동안"
+
+translation_output = "번역문"
+translation_openai = "OpenAI 호환"
+translation_deepl = "DeepL"
 [field]
 app_dir = "앱 데이터 폴더"
 log_dir = "기록 폴더"
@@ -181,8 +188,16 @@ max_measure = "본문 최대 폭"
 "max_measure.desc" = "본문 기둥의 최대 너비(픽셀). 0이면 창 너비까지 씁니다."
 margin_x = "좌우 여백"
 "margin_x.desc" = "본문 기둥 양쪽에 남기는 여백(픽셀)입니다."
+letter_spacing = "자간"
+"letter_spacing.desc" = "글자 사이에 더하는 간격(em)입니다. 음수는 좁히고 0이 기본입니다."
+margin_y = "위아래 여백"
+"margin_y.desc" = "본문 기둥 위아래에 남기는 여백(픽셀)입니다. 줄바꿈은 바꾸지 않고 한 페이지에 들어가는 줄 수만 바뀝니다."
+font_weight = "글자 굵기"
+"font_weight.desc" = "본문의 굵기입니다. 기기에 해당 굵기가 없으면 가장 가까운 자면을 쓰고, 600 이상은 합성 볼드도 겹쳐 그립니다."
+text_direction = "텍스트 방향"
+"text_direction.desc" = "책과 같음·세로쓰기·가로쓰기. 세로쓰기는 한 열 페이지 넘김에서만 적용되고, 스크롤에서는 가로쓰기로 남습니다."
 font_family = "본문 글꼴"
-"font_family.desc" = "글꼴 이름을 적습니다. 예: LXGW WenKai, Noto Serif CJK SC."
+"font_family.desc" = "이 기기에 설치된 글꼴 중에서 고릅니다."
 appearance_mode = "라이트/다크"
 "appearance_mode.desc" = "시스템을 따르거나 라이트·다크 중 하나로 고정합니다."
 theme_light = "라이트 테마"
@@ -226,6 +241,19 @@ speech_pitch = "높이"
 "speech_pitch.desc" = "목소리의 높이입니다. 1.0이 보통입니다."
 speech_auto_scroll = "읽는 곳으로 넘기기"
 "speech_auto_scroll.desc" = "읽고 있는 단락으로 화면을 옮깁니다. 끄면 화면이 그대로 있습니다."
+
+translation_target_lang = "번역 대상"
+"translation_target_lang.desc" = "선택한 텍스트를 어떤 언어로 번역할지 정합니다. '인터페이스 언어 따르기'는 UI 언어를 그대로 씁니다."
+translation_engine = "엔진"
+"translation_engine.desc" = "번역을 제공할 서비스입니다. Google은 키 없이 바로 쓸 수 있고, OpenAI 호환은 여러 클라우드와 로컬 모델을 아우르며, DeepL은 API 키가 필요합니다."
+translation_openai_base = "서비스 주소"
+"translation_openai_base.desc" = "API 루트 주소입니다. 예: https://api.openai.com/v1. 로컬 Ollama는 보통 http://localhost:11434/v1을 씁니다."
+translation_openai_model = "모델"
+"translation_openai_model.desc" = "서비스가 인식하는 모델 이름입니다. 예: gpt-4o-mini, qwen2.5:7b."
+translation_openai_key = "API 키"
+"translation_openai_key.desc" = "이 기기의 config.json에만 저장됩니다. 키가 필요 없는 서비스라면 비워 두세요."
+translation_deepl_key = "API 키"
+"translation_deepl_key.desc" = "DeepL 키입니다. 무료 요금제 키는 :fx로 끝나며 자동으로 무료 엔드포인트를 씁니다."
 [page_turn]
 slide = "좌우로 밀기"
 slide_up = "위로 밀기"
@@ -238,6 +266,16 @@ none = "효과 없음"
 highlight = "하이라이트"
 line = "실선"
 wavy = "물결선"
+
+[font_weight]
+light = "얇게"
+regular = "보통"
+bold = "굵게"
+
+[text_direction]
+auto = "책과 같음"
+vertical = "세로쓰기"
+horizontal = "가로쓰기"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
@@ -547,3 +585,12 @@ stale = "⚠️ %{place} · 위치를 찾을 수 없음"
 undo = "실행 취소"
 deleted_annotation = "하이라이트가 삭제되었습니다"
 deleted_bookmark = "책갈피가 삭제되었습니다"
+
+[font_picker]
+search = "글꼴 검색"
+
+[translation]
+follow_ui = "인터페이스 언어 따르기"
+engine_google = "Google(키 불필요)"
+engine_openai = "OpenAI 호환"
+engine_deepl = "DeepL"

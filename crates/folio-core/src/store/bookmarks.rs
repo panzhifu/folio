@@ -149,9 +149,9 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
+    use crate::Store;
     use crate::content::anchor::TextAnchor;
     use crate::content::format::{DocMeta, Format};
-    use crate::Store;
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {
@@ -260,7 +260,12 @@ mod tests {
         store.restore_bookmark(&row).unwrap();
         let back = store.bookmark(first).unwrap().expect("原 id 要回来");
         assert_eq!(back, row, "整行照原样回来，连 id 带时间戳");
-        let ids: Vec<i64> = store.bookmarks(book).unwrap().iter().map(|b| b.id).collect();
+        let ids: Vec<i64> = store
+            .bookmarks(book)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect();
         assert_eq!(ids, vec![first, second], "顺序不因一次拔插而变");
     }
 

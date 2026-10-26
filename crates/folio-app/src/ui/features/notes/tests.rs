@@ -104,13 +104,7 @@ fn the_group_with_the_latest_activity_comes_first() {
     // 不够稳，直接按创建条数把先后写死：给乙的那条是第二批，created_at >= 甲的那条。
     std::thread::sleep(std::time::Duration::from_millis(1100));
     store
-        .add_annotation(
-            b,
-            &anchor(0, 0),
-            "晚的",
-            "rose",
-            AnnotationStyle::default(),
-        )
+        .add_annotation(b, &anchor(0, 0), "晚的", "rose", AnnotationStyle::default())
         .unwrap();
 
     let groups = load_groups(&store).unwrap();

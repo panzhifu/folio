@@ -151,6 +151,13 @@ fn survey(path: &Path) -> Result<String, String> {
         stats.unparsed,
         stats.ignored,
     ));
+    if rules.page_margins.top.is_some() || rules.page_margins.bottom.is_some() {
+        let (top, bottom) = rules.page_margins.vertical_px(900.0);
+        out.push_str(&format!(
+            "书级 `@page` 页边距：上 {top:.0}px / 下 {bottom:.0}px（百分比按 900px 页框宽折）。\
+             阅读器拿它当页边距默认值，读者的「上下页边距」拖离 0 就覆盖它。\n\n"
+        ));
+    }
     out.push_str("| 属性 | 受影响元素 | 胜出声明 | 状态 | 书里的写法 |\n|---|---|---|---|---|\n");
     for (name, gap) in &rows {
         let status = match (gap.inert, gap.unparsed) {
@@ -358,6 +365,8 @@ fn without_unsupported(rules: &RuleSet) -> RuleSet {
         // 内嵌字体清单不参与这份对比：它不落在任何元素上，「丢掉没接住的声明」这一步
         // 与它无关，照原样带过去只会让两份数据的字体数看着有出入。
         font_faces: Vec::new(),
+        // 页边距同样不落在元素上；这一臂量的是元素级声明的排版差，照原样带过去。
+        page_margins: rules.page_margins,
         ignored: rules.ignored,
     }
 }

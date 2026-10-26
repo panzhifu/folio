@@ -44,7 +44,7 @@ const GENERIC_FAMILIES: &[&str] = &[
 /// 以前它和 `serif` 走同一条回落，结果代码块用的是正文那一份，等宽整个丢掉。
 const MONO_FAMILIES: &[&str] = &["monospace", "ui-monospace"];
 
-fn is_generic(family: &str) -> bool {
+pub(super) fn is_generic(family: &str) -> bool {
     GENERIC_FAMILIES
         .iter()
         .any(|g| family.eq_ignore_ascii_case(g))

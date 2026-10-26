@@ -578,33 +578,179 @@ fn clamp_semantic(value: f32, range: &RangeInclusive<f32>) -> f32 {
 
 /// 翻译：选区翻译那一格的行为。
 ///
-/// 第一版只有一项（译成哪种语言）；引擎选择与其余参数随第 2 期进来。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// 语言管「译成什么」，引擎管「谁译」。三档引擎的私有参数各占一节，而不是摊成同一层：
+/// `openai.base_url` 与 `deepl.api_key` 互不相干，摊平之后每一格都得在注释里解释
+/// 「这格只对谁有用」，读配置的人还得自己记。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Translation {
     /// 译成哪种语言（BCP-47 码，如 `zh-CN`）。**空串 = 跟随界面语言** —— 「跟随」
     /// 是一个选择，不是「还没选」：写死某个默认语等于替读者决定他没说的偏好，
     /// 而空串交给 app 侧在用的时候按 `Locale` 现解析（core 不认识「界面」）。
     pub target_lang: String,
+    /// 用哪只引擎。默认 Google 免 key 档 —— 新装的机器不填任何东西也能翻译。
+    pub engine: TranslationEngine,
+    pub openai: OpenAi,
+    pub deepl: DeepL,
 }
 
-impl Default for Translation {
-    fn default() -> Self {
-        Self {
-            target_lang: String::new(),
+impl Translation {
+    /// 归一：首尾空白去掉。语言码本身信不过的写法（大小写错位）在引擎那头都能
+    /// 容忍，这里不做第二处「纠正」。
+    ///
+    /// 地址 / 模型清空时**不**在这里补默认值：设置页的文本行边打边存，补默认值会把
+    /// 读者刚删空的那一格当场填回去。空值该不该有默认由引擎在发请求前判。
+    pub fn normalized(mut self) -> Self {
+        self.target_lang = self.target_lang.trim().to_string();
+        self.openai.base_url = self.openai.base_url.trim().to_string();
+        self.openai.model = self.openai.model.trim().to_string();
+        self.openai.api_key = self.openai.api_key.trim().to_string();
+        self.deepl.api_key = self.deepl.api_key.trim().to_string();
+        self
+    }
+}
+
+/// 正文按哪根轴排。
+///
+/// `Auto` 认书自己的 `writing-mode`，是默认那档；另两档由读者层用
+/// `!important` 盖过作者声明（落点在 `folio_app::...::chapter_layout::Document::reader_rules`）。
+/// 竖排**只在分页单栏那一档落地**：连续滚动整条坐标链都按「沿 y 走」建着，
+/// 转轴等于重做一遍（见 `folio_core::layout::LayoutOptions::allow_vertical`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextDirection {
+    /// 书怎么写就怎么排。
+    #[default]
+    Auto,
+    /// 强制竖排（分页单栏时生效，滚动退回横排）。
+    Vertical,
+    /// 强制横排，书的竖排声明也压掉。
+    Horizontal,
+}
+
+impl TextDirection {
+    /// 全部档位，按设置界面该出现的顺序。
+    pub const ALL: &'static [Self] = &[Self::Auto, Self::Vertical, Self::Horizontal];
+
+    /// 配置文件与设置界面用的键名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Vertical => "vertical",
+            Self::Horizontal => "horizontal",
+        }
+    }
+
+    /// 认不出的值回落 `Auto`：手改坏一个键不该让整节 `Reader` 退回默认。
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "vertical" => Self::Vertical,
+            "horizontal" => Self::Horizontal,
+            _ => Self::Auto,
         }
     }
 }
 
-/// 手写而不是 derive（与各节同一条规矩）：空串是「跟随界面语言」，
-/// 不是任何一种语言的代码。
-impl Translation {
-    /// 归一：首尾空白去掉。语言码本身信不过的写法（大小写错位）在引擎那头都能
-    /// 容忍，这里不做第二处「纠正」。
-    pub fn normalized(mut self) -> Self {
-        self.target_lang = self.target_lang.trim().to_string();
-        self
+/// 自己实现序列化，理由与 [`Mode`] 那条一样：derive 碰到认不出的字符串会报错，
+/// 而报错的代价是**整节** `Reader` 退回默认 —— 字号、行距、字体家族会跟着一起没。
+impl Serialize for TextDirection {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
     }
+}
+
+impl<'de> Deserialize<'de> for TextDirection {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(Self::parse(&text))
+    }
+}
+
+/// 翻译引擎。
+///
+/// 序列化名与 [`Self::as_str`] 同一形态：设置页下拉的值、`config.json` 里的写法、
+/// 缓存表 `provider` 列的前缀都从这一处来 —— 三处各写一份就会各自漂移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TranslationEngine {
+    /// 免 key 的 Google 公开端点（`client=gtx`）。零配置可用，但它是非合同接口。
+    #[default]
+    Google,
+    /// 任何说 OpenAI `chat/completions` 协议的服务：官方、DeepSeek、火山 ARK、
+    /// 本地 Ollama / LM Studio。地址与模型都由读者填。
+    OpenAi,
+    /// DeepL 官方 API。免费档的 key 以 `:fx` 结尾，端点据此现选。
+    DeepL,
+}
+
+impl TranslationEngine {
+    /// 全部档位，按设置页该出现的顺序。
+    pub const ALL: &'static [Self] = &[Self::Google, Self::OpenAi, Self::DeepL];
+
+    /// 配置文件与设置界面用的键名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::OpenAi => "openai",
+            Self::DeepL => "deepl",
+        }
+    }
+
+    /// 认不出的值回落 Google：免 key 档是唯一不需要读者再补参数的引擎。
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "openai" => Self::OpenAi,
+            "deepl" => Self::DeepL,
+            _ => Self::Google,
+        }
+    }
+}
+
+/// 自己实现序列化，理由与 [`Mode`]、[`PageTurn`] 那几条一样：derive 碰到认不出的
+/// 引擎名会报错，而报错的代价是**整节** `Translation` 退回默认 —— 读者填好的地址、
+/// 模型与密钥会跟着一起没，而那只是这一格写坏了。
+impl Serialize for TranslationEngine {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TranslationEngine {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(Self::parse(&text))
+    }
+}
+
+/// OpenAI 兼容服务的参数。
+///
+/// key 允许为空：本地 Ollama / LM Studio 不认 `Authorization`，而官方与各家云服务
+/// 非填不可。空 key 时请求不带头，由引擎自己回 401 —— 比在界面层猜「这只引擎要不要
+/// key」诚实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenAi {
+    /// API 根地址（如 `https://api.openai.com/v1`）。请求时补 `/chat/completions`；
+    /// 已经写到 `/chat/completions` 的也认。
+    pub base_url: String,
+    /// 模型名（如 `gpt-4o-mini`、`qwen2.5:7b`）。
+    pub model: String,
+    pub api_key: String,
+}
+
+impl Default for OpenAi {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-4o-mini".into(),
+            api_key: String::new(),
+        }
+    }
+}
+
+/// DeepL 官方 API 的参数。免费 / 付费档只看 key 的后缀（`:fx`），不单列开关。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeepL {
+    pub api_key: String,
 }
 
 /// 排版输入。全部是纯数据、不含任何 UI 类型，因此同一份配置既能在桌面端用，
@@ -621,6 +767,9 @@ pub struct Reader {
     pub line_height: f32,
     pub paragraph_gap_em: f32,
     pub indent_em: f32,
+    /// 字与字之间额外的空隙，单位是字号倍（排版时折成 `字号 × 这一格` 像素）。
+    /// 负值收紧，`0` 是不加不减。
+    pub letter_spacing_em: f32,
     /// 正文栏最大宽度（像素）。**`0` 表示不设上限、随窗口铺满**，
     /// 所以拿到 `0` 时**不能**当成「宽度上限是 0」去夹任何东西。
     pub max_measure: f32,
@@ -630,7 +779,17 @@ pub struct Reader {
     /// 一行只剩十几个字，读起来像窄栏报纸；24 留 12% 上下，边到字仍够拇指按不到。
     /// 桌面上这一条只是最小留白，行长由 `max_measure` 管，所以这个数变小不影响宽窗口。
     pub margin_x: f32,
+    /// 正文栏上下留白（像素），顶、底各一份。
+    ///
+    /// **`0` 表示跟随书的 `@page` 页边距**（没写就是 0）；一旦离开 0，读者的值整个覆盖
+    /// 书里那一条。它不改折行，只改一页能装多少行（分页切片高与滚动可视带各让出这么多）。
+    pub margin_y: f32,
     pub justify: bool,
+    /// 正文的字重（100–900 的 CSS 数值）。设备上没有对应字面时排版层按最接近的一面挑，
+    /// 600 以上还会叠一遍合成粗体（见 `reader/view/paint.rs` 的 `needs_synthetic_bold`）。
+    pub font_weight: u16,
+    /// 正文按哪根轴排（见 [`TextDirection`]）。进 `Reader` 是因为它会改变行盒几何。
+    pub text_direction: TextDirection,
     pub font_family: String,
     pub mono_font_family: String,
     /// 目录那一屏的行高档位。只影响目录，不影响正文 —— 正文的松紧是 `line_height`。
@@ -651,10 +810,14 @@ impl Default for Reader {
             line_height: 1.75,
             paragraph_gap_em: 0.75,
             indent_em: 2.0,
+            letter_spacing_em: 0.0,
             // 0 = 随窗口铺满（全屏时正文栏跟着变宽）。
             max_measure: 0.0,
             margin_x: 24.0,
+            margin_y: 0.0,
             justify: true,
+            font_weight: 400,
+            text_direction: TextDirection::Auto,
             font_family: "LXGW WenKai".into(),
             mono_font_family: "monospace".into(),
             toc_density: TocDensity::default(),
@@ -680,6 +843,10 @@ impl Reader {
     /// 首行缩进，单位是字符。`0` 是合法档（不缩进）。
     pub const INDENT_MIN: f32 = 0.0;
     pub const INDENT_MAX: f32 = 6.0;
+    /// 字距，单位是字号倍。下界留住一点收紧的余地（负字距排版层本来就支持），
+    /// 上界再大就成了一行散沙。
+    pub const LETTER_SPACING_MIN: f32 = -0.05;
+    pub const LETTER_SPACING_MAX: f32 = 0.2;
     /// 正文栏最大宽度（像素）。`0` 是「随窗口铺满」那个约定值，所以下界就是 0；上界之外
     /// 的宽窗口本来也被窗口自己限住了，写更大只是骗读者说这格能调。
     pub const MAX_MEASURE_MIN: f32 = 0.0;
@@ -688,6 +855,28 @@ impl Reader {
     /// 让读者以为版心还在。
     pub const MARGIN_X_MIN: f32 = 0.0;
     pub const MARGIN_X_MAX: f32 = 400.0;
+    /// 上下留白（像素，顶底各一份）。与左右同一段：再宽正文就被压没了。
+    ///
+    /// 下界 `0` 是「跟随书的 `@page`」，不是「没有留白」。
+    pub const MARGIN_Y_MIN: f32 = 0.0;
+    pub const MARGIN_Y_MAX: f32 = 400.0;
+    /// 字重的合法区间。CSS 的 100–900，但只取整百（字体匹配本来就没有更细的档）。
+    pub const FONT_WEIGHT_MIN: u16 = 100;
+    pub const FONT_WEIGHT_MAX: u16 = 900;
+    /// 设置界面摆出来的字重档位。三档而不是 100–900 铺满：字体匹配只认「同族里最接近
+    /// 的那一面」，档位再密，落到屏幕上还是这几个。
+    pub const FONT_WEIGHT_PRESETS: [u16; 3] = [300, 400, 700];
+
+    /// 配置里存的字重 → 界面上该选中哪一档。
+    ///
+    /// 配置可以是手改出来的任何 100–900（[`Reader::clamped`] 只管区间），下拉里却只有三档；
+    /// 取最接近的那一档，按钮念的就是这一刻实际会走的那一档。
+    pub fn nearest_font_weight(weight: u16) -> u16 {
+        Self::FONT_WEIGHT_PRESETS
+            .into_iter()
+            .min_by_key(|preset| preset.abs_diff(weight))
+            .unwrap_or(400)
+    }
 
     /// 从磁盘读回来的值不可信（手改过、旧版本、别的机器同步来的），
     /// 越界值会让排版算出零高或无限宽，所以入库前一律夹住。
@@ -702,11 +891,18 @@ impl Reader {
             .paragraph_gap_em
             .clamp(Self::PARAGRAPH_GAP_MIN, Self::PARAGRAPH_GAP_MAX);
         self.indent_em = self.indent_em.clamp(Self::INDENT_MIN, Self::INDENT_MAX);
+        self.letter_spacing_em = self
+            .letter_spacing_em
+            .clamp(Self::LETTER_SPACING_MIN, Self::LETTER_SPACING_MAX);
         // 0 是合法的「铺满」，所以下界就是 0。
         self.max_measure = self
             .max_measure
             .clamp(Self::MAX_MEASURE_MIN, Self::MAX_MEASURE_MAX);
         self.margin_x = self.margin_x.clamp(Self::MARGIN_X_MIN, Self::MARGIN_X_MAX);
+        self.margin_y = self.margin_y.clamp(Self::MARGIN_Y_MIN, Self::MARGIN_Y_MAX);
+        self.font_weight = self
+            .font_weight
+            .clamp(Self::FONT_WEIGHT_MIN, Self::FONT_WEIGHT_MAX);
         if self.font_family.trim().is_empty() {
             self.font_family = Reader::default().font_family;
         }
@@ -1027,6 +1223,14 @@ impl Config {
         let json = serde_json::to_string_pretty(self)?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, &json).io_path(&tmp)?;
+        // 这份 JSON 里住着翻译引擎的 API Key。默认 umask 下新建文件是 0644，
+        // 同机其他用户能读走密钥 —— 落盘这一刻就收到 0600，rename 保留权限位。
+        // Android 上配置本来就在应用私有目录里，这一档没有副作用。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).io_path(&tmp)?;
+        }
         std::fs::rename(&tmp, path).io_path(path)
     }
 }
@@ -1110,7 +1314,7 @@ mod tests {
 
     use std::path::Path;
 
-    use crate::infra::config::{Config, Env, Layer, WatchDir};
+    use crate::infra::config::{Config, Env, Layer, TranslationEngine, WatchDir};
     use crate::infra::i18n::Locale;
     use crate::{AnnotationStyle, Appearance, Language, Library, Mode, PageTurn, Reader};
     use serde_json::json;
@@ -1150,6 +1354,80 @@ mod tests {
             Config::load_from(&path).version,
             crate::infra::config::CONFIG_VERSION
         );
+    }
+
+    /// 引擎与它的私有参数要读得回来，且各格的首尾空白在归一里去掉 ——
+    /// 手抄地址时多带一个空格，拼出来的 URL 就是另一种东西。
+    #[test]
+    fn translation_engine_and_its_private_fields_round_trip() {
+        let got = load(
+            r#"{"translation":{
+                "target_lang":" ja ",
+                "engine":"openai",
+                "openai":{"base_url":" https://example.test/v1 ","model":" qwen2.5:7b ","api_key":" sk-1 "},
+                "deepl":{"api_key":" fx-1 "}
+            }}"#,
+        );
+        assert_eq!(got.translation.target_lang, "ja");
+        assert_eq!(got.translation.engine, TranslationEngine::OpenAi);
+        assert_eq!(got.translation.openai.base_url, "https://example.test/v1");
+        assert_eq!(got.translation.openai.model, "qwen2.5:7b");
+        assert_eq!(got.translation.openai.api_key, "sk-1");
+        assert_eq!(got.translation.deepl.api_key, "fx-1");
+    }
+
+    /// 老配置里只有 `target_lang`：缺的两节各自取自己的默认值，引擎落到免 key 档。
+    #[test]
+    fn a_first_phase_config_gains_the_engine_defaults() {
+        let got = load(r#"{"translation":{"target_lang":"en"}}"#);
+        assert_eq!(got.translation.engine, TranslationEngine::Google);
+        assert_eq!(
+            got.translation.openai.base_url,
+            crate::infra::config::OpenAi::default().base_url
+        );
+        assert!(got.translation.openai.api_key.is_empty());
+        assert!(got.translation.deepl.api_key.is_empty());
+    }
+
+    /// 认不出的引擎名回落 Google，**不连累同一节里的地址、模型与密钥**：
+    /// 手改坏一个字符串的代价不该是整份翻译配置归零。
+    #[test]
+    fn an_unknown_engine_name_falls_back_without_taking_the_section_with_it() {
+        let got = load(
+            r#"{"translation":{
+                "target_lang":"ja",
+                "engine":"polyglot",
+                "deepl":{"api_key":" k "}
+            }}"#,
+        );
+        assert_eq!(got.translation.engine, TranslationEngine::Google);
+        assert_eq!(
+            got.translation.target_lang, "ja",
+            "写坏引擎名不该带走别的格"
+        );
+        assert_eq!(got.translation.deepl.api_key, "k");
+    }
+
+    /// 清空地址 / 模型**不能**在归一里被默认值填回去：设置页边打边存，
+    /// 填回去等于读者删不空这一格。空值该不该有默认由引擎发请求前判。
+    #[test]
+    fn clearing_openai_fields_keeps_them_empty() {
+        let got = load(r#"{"translation":{"openai":{"base_url":"","model":""}}}"#);
+        assert!(got.translation.openai.base_url.is_empty());
+        assert!(got.translation.openai.model.is_empty());
+    }
+
+    /// 配置文件里住着 API Key：默认 umask 下新建文件是 0644，落盘必须收到 0600。
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_config_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        Config::default().save_to(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "配置文件带着 API Key，权限该是 0600");
     }
 
     /// §2.1：文件里写了的项记成 `File`，没写的是 `Default`。
@@ -1381,12 +1659,15 @@ mod tests {
     #[test]
     fn out_of_range_values_are_clamped_on_load() {
         let got = load(
-            r#"{"reader":{"font_size":9000,"line_height":0,"indent_em":-5,"margin_x":1e9},"language":{"locale":"ja"}}"#,
+            r#"{"reader":{"font_size":9000,"line_height":0,"indent_em":-5,"margin_x":1e9,"letter_spacing_em":5,"margin_y":-20,"font_weight":9999},"language":{"locale":"ja"}}"#,
         );
         assert_eq!(got.reader.font_size, 72.0);
         assert_eq!(got.reader.line_height, 1.0);
         assert_eq!(got.reader.indent_em, 0.0);
         assert_eq!(got.reader.margin_x, 400.0);
+        assert_eq!(got.reader.letter_spacing_em, Reader::LETTER_SPACING_MAX);
+        assert_eq!(got.reader.margin_y, 0.0);
+        assert_eq!(got.reader.font_weight, 900);
         assert_eq!(
             got.language.locale,
             Locale::Ja,
@@ -1405,6 +1686,24 @@ mod tests {
         );
         assert_eq!(got.appearance.dark.as_deref(), Some("Molokai"));
         assert_eq!(got.reader.max_measure, 0.0, "0 = 随窗口铺满");
+    }
+
+    /// 手改进配置的字重（100–900 之间任何数）在设置界面要落回最近的一档，
+    /// 否则下拉按钮上没有可念的字。
+    #[test]
+    fn a_hand_edited_weight_snaps_to_the_nearest_preset() {
+        assert_eq!(Reader::nearest_font_weight(400), 400);
+        assert_eq!(Reader::nearest_font_weight(600), 700, "600 离加粗更近");
+        assert_eq!(
+            Reader::nearest_font_weight(100),
+            300,
+            "比最细还细的落到最细"
+        );
+        assert_eq!(
+            Reader::nearest_font_weight(900),
+            700,
+            "比最粗还粗的落到最粗"
+        );
     }
 
     /// 亮度这一格只有「不接管」一个顶格写法，而越界的数夹住而不是整格丢掉。

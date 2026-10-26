@@ -10,4 +10,5 @@ pub(in crate::ui::features::settings) mod library;
 pub(in crate::ui::features::settings) mod speech;
 pub(in crate::ui::features::settings) mod storage;
 pub(in crate::ui::features::settings) mod toc;
+pub(in crate::ui::features::settings) mod translation;
 pub(in crate::ui::features::settings) mod typography;

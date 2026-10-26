@@ -7,11 +7,13 @@
 //! 这里的一切都不许 `use crate::ui::features::…`：组件不知道有哪几个功能。
 
 mod bottom_sheet;
+mod font_picker;
 mod primitives;
 mod search_box;
 mod top_bar;
 
 pub use bottom_sheet::{BottomSheet, BottomSheetEvent, BottomSheetState};
+pub use font_picker::{FontFamilySetter, FontPicker};
 pub use primitives::{empty_state, hairline, muted_label};
 pub use search_box::{SearchBox, SearchBoxEvent};
 pub use top_bar::TopBar;

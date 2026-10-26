@@ -16,14 +16,13 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use folio_core::Reader;
 use folio_core::content::anchor::{CharLines, TextMap};
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::dom::{Dom, NodeId};
 use folio_core::content::format::css::computed::{
     Color, ComputedStyle, Length, StyledDom, TextAlign, WritingMode, cascade,
 };
-use folio_core::content::format::css::{Origin, RuleSet, chapter_style_rules};
+use folio_core::content::format::css::{Origin, PageMargins, RuleSet, chapter_style_rules};
 use folio_core::content::hit::{Hit, paragraph_after_indexed, paragraph_range_indexed};
 use folio_core::infra::metrics::Metric;
 use folio_core::infra::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
@@ -32,6 +31,7 @@ use folio_core::layout::{
     BlockCache, DecorSeed, FontKey, Justify, Layout, LayoutInputs, LayoutKey, LayoutOptions,
     LineBox, LineFragment, content_hash, layout_with_blocks, quantize_px,
 };
+use folio_core::{Reader, TextDirection};
 use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window, WindowTextSystem};
 
 use crate::ui::features::reader::model::book_fonts::BookFonts;
@@ -691,21 +691,29 @@ impl Document {
     /// 它与章文本无关，所以**不进 `ChapterArtifacts`**（那一份按内容哈希复用，
     /// 掺进偏好就等于把偏好烘进了缓存），每次作业现拼一条。
     ///
-    /// 竖排那一格现在不从读者偏好来：`writing-mode` 只认书自己写的（层叠已接住，
-    /// 排版层还没读，见 `css::computed::WritingMode`）。将来要读者强制竖排，落点是
-    /// 这一层而不是 [`root_base`](Self::root_base) —— 根样式只是继承的种子，书在
-    /// `<html>` 上写一条 `writing-mode: horizontal-tb` 就能把它压掉；读者层要赢过作者声明
-    /// 得带 `!important`（`(Origin::Reader, true)` 折成 `CascadeLevel::ReaderImportant`，
-    /// 那一档排在作者普通层之上，见 `css::mod` 的层叠级别表）。缓存那一级
-    /// 不用动：`prefs_hash` 折的是**整份** `Reader`，加一格偏好自动换键。
+    /// 竖排那一格：`Auto` 只认书自己写的 `writing-mode`；另两档要读者说了算，
+    /// 落点就是这一层而不是 [`root_base`](Self::root_base) —— 根样式只是继承的种子，
+    /// 书在 `<html>` / `<body>` 上写一条 `writing-mode` 就能把它压掉；读者层要赢过作者
+    /// 声明得带 `!important`（`(Origin::Reader, true)` 折成 `CascadeLevel::ReaderImportant`，
+    /// 那一档排在作者普通层之上，见 `css::mod` 的层叠级别表）。缓存那一级不用动：
+    /// `prefs_hash` 折的是**整份** `Reader`，加一格偏好自动换键。
     fn reader_rules(prefs: &Reader) -> RuleSet {
         let gap = prefs.paragraph_gap_em;
         // 固定三位小数：滑条的步长到不了第四位，而写全精度会让同一段距在不同机器上
         // 拼出两条字面不同的串（键里的作者样式哈希不管这一格，但日志与调试要对得上）。
-        RuleSet::parse(
-            &format!("p {{ margin-top: {gap:.3}em; margin-bottom: {gap:.3}em }}"),
-            Origin::Reader,
-        )
+        let mut css = format!("p {{ margin-top: {gap:.3}em; margin-bottom: {gap:.3}em }}");
+        match prefs.text_direction {
+            TextDirection::Auto => {}
+            // `html` 与 `body` 都写：只写 `html` 的话，书在 `body` 上自己声明的那一条
+            // 会在 `body` 这一层直接生效 —— 继承打不过元素自己的声明，层级高也没用。
+            TextDirection::Vertical => {
+                css.push_str(" html, body { writing-mode: vertical-rl !important }");
+            }
+            TextDirection::Horizontal => {
+                css.push_str(" html, body { writing-mode: horizontal-tb !important }");
+            }
+        }
+        RuleSet::parse(&css, Origin::Reader)
     }
 
     /// 换读者的偏好。**这里不推进任何代数**：下一帧 [`Self::ensure_viewport`] 一算键就发现
@@ -998,6 +1006,12 @@ impl Document {
             .collect()
     }
 
+    /// 书级 `@page` 的页边距。整本书共用开书时解析的那一份 `rules`，章内 `<style>`
+    /// 里的 `@page` 不会改它 —— 一章换页边距没有意义。
+    pub fn page_margins(&self) -> PageMargins {
+        self.rules.page_margins
+    }
+
     /// 整章的内容总高（像素），滚动范围由它算。
     pub fn height(&self) -> f32 {
         // 沿**推进轴**的整章长度：横排就是 `layout.height`（一行行往下叠），竖排是
@@ -1037,6 +1051,9 @@ impl Document {
             font_size: prefs.font_size,
             line_height: prefs.line_height,
             font_family: prefs.font_family.clone(),
+            // 字距在 CSS 里是像素；读者那一格按字号倍存，换字号时它跟着比例变。
+            letter_spacing: prefs.font_size * prefs.letter_spacing_em,
+            font_weight: prefs.font_weight,
             text_align: if prefs.justify {
                 TextAlign::Justify
             } else {
@@ -1193,11 +1210,18 @@ impl Document {
         viewport: Viewport,
     ) -> f32 {
         let paged = viewport.height > 0.0;
-        // 竖排要三样同时成立：书自己声明了（那一格是排完才知道的）、读者在用分页、
-        // 而且是**单栏**。双页对开那一档这里不当竖排：切片按 `columns=1` 切、界面按
+        // 竖排要三样同时成立：读者没关掉竖排、这一章排出来是竖的（`Auto` 时那一格是
+        // 排完才知道的）、读者在用分页，而且是**单栏**。读者强制的那两档在这里先说话：
+        // `Vertical` 直接算竖、`Horizontal` 直接算横，`Auto` 才看书自己排出来的那一次。
+        // 双页对开那一档这里不当竖排：切片按 `columns=1` 切、界面按
         // `columns=2` 取片会互相取错页，而「一页两栏各装几列」本来就是竖排没接的那件事。
         // 连续滚动不转轴的理由记在 `LayoutOptions::allow_vertical`。
-        let vertical = paged && viewport.columns.max(1) == 1 && self.wants_vertical;
+        let wants = match self.prefs.text_direction {
+            TextDirection::Auto => self.wants_vertical,
+            TextDirection::Vertical => true,
+            TextDirection::Horizontal => false,
+        };
+        let vertical = paged && viewport.columns.max(1) == 1 && wants;
         let columns = if vertical { 1 } else { viewport.columns.max(1) };
         let total = Self::content_width(window, &self.prefs, viewport.reserve);
         // 折行永远发生在**内联轴**上，切片永远沿**推进轴**切，两根轴在竖排里对调：

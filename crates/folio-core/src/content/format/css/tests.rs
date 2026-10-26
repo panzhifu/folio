@@ -77,8 +77,15 @@ fn media_queries_are_inlined_and_other_at_rules_dropped() {
     assert_eq!(set.rules.len(), 1, "只有 @media 里的规则该被收进来");
     assert_eq!(set.rules[0].declarations[0].property, "color");
     assert_eq!(
-        set.ignored, 1,
-        "@page 计一条；@font-face 有去处，不算被忽略"
+        set.ignored, 0,
+        "@page 的页边距与 @font-face 都有去处，不算被忽略"
+    );
+    assert_eq!(
+        set.page_margins.top,
+        Some(crate::content::format::css::computed::Length::Px(
+            96.0 / 2.54
+        )),
+        "1cm 按 96 dpi 折成像素"
     );
     assert_eq!(
         set.font_faces.len(),
@@ -86,6 +93,53 @@ fn media_queries_are_inlined_and_other_at_rules_dropped() {
         "@font-face 是「这本书带了字体」的唯一线索，丢了就等于对内嵌字体装看不见"
     );
     assert_eq!(set.font_faces[0].family, "X");
+}
+
+/// `@page` 的边距是整本书的默认页边距：简写按 CSS 的四值规则展开，没出现的边保持
+/// `None`（后一份样式表才能只覆盖自己写的那几条）。认不出的页属性逐条计 ignored。
+#[test]
+fn page_margins_are_parsed_for_the_reader() {
+    use crate::content::format::css::computed::Length;
+
+    let set = rules("@page { margin: 1px 2% 3px 4px; padding: 0 }");
+    assert_eq!(set.page_margins.top, Some(Length::Px(1.0)));
+    assert_eq!(set.page_margins.right, Some(Length::Percent(0.02)));
+    assert_eq!(set.page_margins.bottom, Some(Length::Px(3.0)));
+    assert_eq!(set.page_margins.left, Some(Length::Px(4.0)));
+    assert_eq!(set.ignored, 1, "@page 里的 padding 没有去处");
+
+    let sides = rules("@page { margin-top: 12px; margin-bottom: 0 }");
+    assert_eq!(sides.page_margins.top, Some(Length::Px(12.0)));
+    assert_eq!(sides.page_margins.bottom, Some(Length::Px(0.0)));
+    assert_eq!(sides.page_margins.left, None, "没写的边不能被补成 0");
+    assert_eq!(sides.ignored, 0);
+
+    // 百分比边距由阅读器按页框宽折；没声明的边折出来是 0。
+    let (top, bottom) = sides.page_margins.vertical_px(600.0);
+    assert_eq!((top, bottom), (12.0, 0.0));
+    let percent = rules("@page { margin-top: 10% }");
+    assert_eq!(percent.page_margins.top, Some(Length::Percent(0.1)));
+    assert_eq!(
+        percent.page_margins.vertical_px(600.0),
+        (60.0, 0.0),
+        "百分比按页框宽折"
+    );
+}
+
+/// 多份样式表按出现顺序拼接：后一份的 `@page` 只覆盖它写出来的边，没写的边保留前一份。
+#[test]
+fn a_later_page_rule_only_overrides_the_sides_it_writes() {
+    let mut first = rules("@page { margin-top: 10px; margin-bottom: 20px }");
+    first.extend(rules("@page { margin-top: 30px }"));
+    assert_eq!(
+        first.page_margins.top,
+        Some(crate::content::format::css::computed::Length::Px(30.0))
+    );
+    assert_eq!(
+        first.page_margins.bottom,
+        Some(crate::content::format::css::computed::Length::Px(20.0)),
+        "后一份没写 bottom，前一份的值要留着"
+    );
 }
 
 /// `src` 的写法比我们能用的多：`format()` 与 `tech()` 是修饰前一个来源的函数，
@@ -123,6 +177,28 @@ fn remote_src_is_dropped_but_local_ones_survive() {
             crate::content::format::css::FontSrc::Url("y.otf".into()),
         ],
         "带协议的三条被丢；盘符开头的不是协议，得留着"
+    );
+}
+
+/// `res://` / `file://` / 绝对路径指的是**设备上的字体文件**，不是容器里的资源：
+/// 留下来交给平台层按文件名找系统家族；http(s) 仍然丢掉。
+#[test]
+fn device_font_sources_are_kept_as_system_references() {
+    let set = rules(
+        "@font-face { font-family: Body; src: url(res:///system/fonts/DroidSansFallback.ttf), \
+             url(file:///usr/share/fonts/x.otf), url(/system/fonts/y.ttc), \
+             url(https://x/z.otf), url(//host/w.otf) }",
+    );
+    assert_eq!(
+        set.font_faces[0].src,
+        vec![
+            crate::content::format::css::FontSrc::System(
+                "res:///system/fonts/DroidSansFallback.ttf".into()
+            ),
+            crate::content::format::css::FontSrc::System("file:///usr/share/fonts/x.otf".into()),
+            crate::content::format::css::FontSrc::System("/system/fonts/y.ttc".into()),
+        ],
+        "设备字体来源要保住书写顺序；远程那两条仍然丢"
     );
 }
 

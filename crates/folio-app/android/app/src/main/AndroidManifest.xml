@@ -21,6 +21,13 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      出网：选区翻译（Google / OpenAI 兼容 / DeepL）、检查更新、WebDAV 都要它。
+      INTERNET 管的是整个 inet 组 —— 缺了这一条，Android 上连监听 Wi-Fi 传书那种
+      入站 socket 也创建不了，不只是 outbound。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Vibration permission -->
     <uses-permission android:name="android.permission.VIBRATE" />
 

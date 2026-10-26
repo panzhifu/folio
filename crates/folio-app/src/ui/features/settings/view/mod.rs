@@ -28,7 +28,7 @@ pub(in crate::ui::features::settings) use crate::ui::features::settings::model::
 pub(in crate::ui::features::settings) use crate::ui::features::settings::model::spec::{
     Group, NumberSpec, Page, Row, group, number, page,
 };
-pub(in crate::ui::features::settings) use folio_core::{Mode, PageTurn, Reader};
+pub(in crate::ui::features::settings) use folio_core::{Mode, PageTurn, Reader, TextDirection};
 pub(in crate::ui::features::settings) use gpui_kit::assets::IconName;
 pub(in crate::ui::features::settings) use gpui_kit::component::ThemeMode;
 pub(in crate::ui::features::settings) use gpui_kit::{App, SharedString};
@@ -41,7 +41,9 @@ pub(in crate::ui::features::settings) use crate::ui::services::l10n::{tf, tr};
 use gpui_kit::component::button::Button;
 use gpui_kit::{ElementId, IntoElement};
 use std::path::PathBuf;
+use std::rc::Rc;
 
+use crate::ui::components::FontPicker;
 use crate::ui::platform;
 
 // 每一页的构造函数只在 [`spec_pages`] 里用，所以是私有导入而不是再导出。
@@ -53,6 +55,7 @@ use pages::library::library_page;
 use pages::speech::speech_page;
 use pages::storage::storage_page;
 use pages::toc::toc_page;
+use pages::translation::translation_page;
 use pages::typography::typography_page;
 
 /// 「打开所在文件夹」那颗按钮：设置页两格共用（配置文件在哪儿、自定义主题往哪个目录放
@@ -84,6 +87,7 @@ pub enum SettingsPage {
     Layout,
     Fonts,
     Speech,
+    Translation,
     Library,
     Toc,
     Storage,
@@ -99,12 +103,13 @@ impl SettingsPage {
     /// 变体顺序就是侧栏顺序，而深链靠 [`index`](Self::index) 现算 —— 挪位置不会指错页，
     /// 但会让「第 N 页」这句话在别处（测试、日志、旧截图）对不上，所以三处顺序
     /// （本枚举、`ALL`、[`spec_pages`]）必须一起动。
-    pub const ALL: [SettingsPage; 9] = [
+    pub const ALL: [SettingsPage; 10] = [
         SettingsPage::Appearance,
         SettingsPage::Typography,
         SettingsPage::Layout,
         SettingsPage::Fonts,
         SettingsPage::Speech,
+        SettingsPage::Translation,
         SettingsPage::Library,
         SettingsPage::Toc,
         SettingsPage::Storage,
@@ -126,6 +131,7 @@ pub(in crate::ui::features::settings) fn spec_pages(cx: &App) -> Vec<spec::Page>
         layout_page(cx),
         fonts_page(cx),
         speech_page(cx),
+        translation_page(cx),
         library_page(cx),
         toc_page(cx),
         storage_page(cx),
@@ -219,6 +225,33 @@ fn setting_item(row: &spec::Row) -> SettingItem {
                 ),
             )
         }
+        RowKind::Font { get, set } => {
+            let (get, set) = (get.clone(), set.clone());
+            SettingItem::new(
+                row.title.clone(),
+                SettingField::render(move |_, window, cx| {
+                    let get = get.clone();
+                    let set = set.clone();
+                    let picker =
+                        window.use_keyed_state("settings-font-picker", cx, move |window, cx| {
+                            let get_value = get.clone();
+                            let set_value = set.clone();
+                            FontPicker::new(
+                                Rc::new(move |cx: &App| get_value(cx).to_string()),
+                                Rc::new(move |value: String, cx: &mut App| {
+                                    set_value(SharedString::from(value), cx)
+                                }),
+                                window,
+                                cx,
+                            )
+                        });
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .child(div().w_64().child(picker.clone()))
+                }),
+            )
+        }
         RowKind::Text { get, set } => {
             let (get, set) = (get.clone(), set.clone());
             SettingItem::new(
@@ -280,6 +313,41 @@ mod tests {
                 SettingsPage::ALL.len(),
                 "`pages` 组出来的页数与 `SettingsPage::ALL` 对不上"
             );
+        });
+    }
+
+    /// 翻译页只在选中那一档时摆引擎私有参数：Google 免 key 没有可填的，切到
+    /// OpenAI / DeepL 各多出一组。组排在最后，前面两行的下标不随引擎切换而变。
+    #[gpui_kit::test]
+    fn the_translation_page_reveals_only_the_selected_engines_settings(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            let index = SettingsPage::Translation.index();
+
+            let google = spec_pages(cx);
+            let page = &google[index];
+            assert_eq!(page.title, tr(cx, "page.translation"));
+            assert_eq!(page.groups.len(), 1, "Google 免 key 没有私有参数");
+            assert_eq!(page.groups[0].rows.len(), 2, "译成 + 引擎");
+
+            ConfigHolder::edit_translation(cx, |translation| {
+                translation.engine = folio_core::TranslationEngine::OpenAi
+            });
+            let openai = spec_pages(cx);
+            let page = &openai[index];
+            assert_eq!(page.groups.len(), 2);
+            assert_eq!(page.groups[1].title, tr(cx, "group.translation_openai"));
+            assert_eq!(page.groups[1].rows.len(), 3, "地址 / 模型 / Key");
+
+            ConfigHolder::edit_translation(cx, |translation| {
+                translation.engine = folio_core::TranslationEngine::DeepL
+            });
+            let deepl = spec_pages(cx);
+            let page = &deepl[index];
+            assert_eq!(page.groups.len(), 2);
+            assert_eq!(page.groups[1].title, tr(cx, "group.translation_deepl"));
+            assert_eq!(page.groups[1].rows.len(), 1, "只有 Key");
         });
     }
 }

@@ -8,40 +8,30 @@
 //!   [`ReaderSession::translate_source`] —— 源文以弹层里那份为准（选区在弹层
 //!   升起那一刻就收掉了，换语言时手里只有它自己存的那份）。
 //! - **缓存先行**：同一段字、同一对语言、同一个引擎（`folio_core::store` 的
-//!   `translations` 表，v24）命中就不出网 —— 这是对 gtx 非官方端点 429 的第一道
-//!   对冲，也是「来回看同一段译文」的零延迟路。书库没装时缓存整条跳过，翻译照常。
-//! - **一趟只有一个请求**：新的翻译把 seq 顶上去，晚到的旧结果在事件入口被丢掉
-//!   （与撤销胶囊同一套 seq 守卫）。并发 1 是对 429 的第二道对冲 —— 上游
-//!   （Readest 的 Google provider）实测非浏览器客户端不限并发就是被封。
+//!   `translations` 表，v24）命中就不出网 —— 这是对付费引擎配额与非官方端点 429 的
+//!   第一道对冲，也是「来回看同一段译文」的零延迟路。书库没装时缓存整条跳过，翻译照常。
+//! - **新一趟顶掉旧一趟的结果**：每次翻译把 seq 顶上去，晚到的旧结果在事件入口被丢掉
+//!   （与撤销胶囊同一套 seq 守卫）。守卫管的是「屏幕上只摆最新那份」，并不取消已经
+//!   发出的请求 —— 共用池有两条 worker，连着点两次就有两发同时在飞。对 429 真正的
+//!   对冲是缓存先行与读者的操作节奏；要严格的串行车道得另立一条优先级。
 //!
 //! 出网纪律与全仓同一条：同步 [`Transport`] + `resident` 池 + 事件通道回界面，
-//! 与 `toc_panel` 那条搜索链同一个形状。Google 免 key 档的请求/响应规则都在
-//! `folio_core::net::translate`，这里只管「什么时候问、答案摆哪儿」。
+//! 与 `toc_panel` 那条搜索链同一个形状。三只引擎（Google 免 key、OpenAI 兼容、
+//! DeepL）的请求/响应规则都在 `folio_core::net::translate`，这里只管「按配置挑哪只、
+//! 什么时候问、答案摆哪儿」。
 
 use folio_core::infra::task::{Priority, TaskEvent, TaskHandle};
-use folio_core::net::translate::{GoogleTranslator, Translator, source_hash};
-use gpui_kit::{App, AppContext as _, Context, Point, Pixels};
+use folio_core::net::translate::{configured, source_hash};
+use folio_core::{Translation, TranslationEngine};
+use gpui_kit::{App, AppContext as _, Context, Pixels, Point};
 
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::resident;
 
-/// 一个翻译引擎的展示名。第 2 期多引擎时它跟着列表走；现在只有一个。
-pub(in crate::ui::features::reader) const ENGINE_LABEL: &str = "Google";
-
-/// 弹层里给的那份语言短清单。端名自己标自己（中文 / English / …），不需要翻译；
-/// 全量语言清单随第 2 期引擎选择一起进设置页。
-pub(in crate::ui::features::reader) const LANGUAGES: &[(&str, &str)] = &[
-    ("zh-CN", "简体中文"),
-    ("zh-TW", "繁體中文"),
-    ("en", "English"),
-    ("ja", "日本語"),
-    ("ko", "한국어"),
-    ("de", "Deutsch"),
-    ("fr", "Français"),
-    ("es", "Español"),
-    ("ru", "Русский"),
-];
+/// 弹层里给的那份语言短清单。端名自己标自己（中文 / English / …），不需要翻译，
+/// 所以清单住在 core（`net::translate::TARGET_LANGUAGES`）—— 设置页读的也是同一份。
+pub(in crate::ui::features::reader) use folio_core::net::translate::TARGET_LANGUAGES as LANGUAGES;
 
 /// 翻译弹层的一格状态。`source` 是弹层自己的权威 —— 选区在升起那一刻就收了，
 /// 换语言时手里只有这一份。
@@ -50,6 +40,11 @@ pub(in crate::ui::features::reader) struct TranslationState {
     pub(in crate::ui::features::reader) source: String,
     /// 弹层锚点（窗口坐标）：菜单落地位置的原点，升起那一刻拍下来的快照。
     pub(in crate::ui::features::reader) anchor: Option<Point<Pixels>>,
+    /// 这一趟用的引擎在缓存表里的键。落答案时用它，不读当时的配置 ——
+    /// 请求发出之后读者可能已经在设置里换了引擎。
+    pub(in crate::ui::features::reader) provider: String,
+    /// 弹层头部那行引擎名。与 `provider` 分开：前者给人看，后者给缓存认。
+    pub(in crate::ui::features::reader) engine: String,
     pub(in crate::ui::features::reader) status: TranslationStatus,
 }
 
@@ -114,19 +109,24 @@ impl ReaderSession {
     }
 
     /// 把一份源文送出去（或从缓存取回）。开弹与换语两个入口汇到这里，
-    /// 所以「seq 顶号、缓存先行、挂后台一趟」只写一遍。
+    /// 所以「按配置挑引擎、seq 顶号、缓存先行、挂后台一趟」只写一遍。
     fn translate_source(
         &mut self,
         source: String,
         anchor: Option<Point<Pixels>>,
         cx: &mut Context<Self>,
     ) {
+        // 引擎按当前配置现建，整只搬进后台作业：请求发出之后配置再改，这一趟用的
+        // 仍是出发时那份。缓存键也由它给（OpenAI 兼容那档带模型与地址指纹）。
+        let config = ConfigHolder::translation(cx);
+        let translator = configured(&config);
+        let provider = translator.cache_key();
+        let engine = engine_label(&config);
         let to = target_lang(cx);
         let hash = source_hash(&source);
         // 缓存先行。读不出缓存当没缓存 —— 缓存坏了不该把翻译整个挡住。
         if let Some(store) = self.store.as_ref()
-            && let Ok(Some(text)) =
-                store.cached_translation(GoogleTranslator::NAME, FROM, &to, &hash)
+            && let Ok(Some(text)) = store.cached_translation(&provider, FROM, &to, &hash)
         {
             tracing::debug!("翻译: 缓存命中（{} 字符）", source.chars().count());
             self.translation_seq += 1;
@@ -134,6 +134,8 @@ impl ReaderSession {
                 seq: self.translation_seq,
                 source,
                 anchor,
+                provider,
+                engine,
                 status: TranslationStatus::Done {
                     text,
                     detected: None,
@@ -150,6 +152,8 @@ impl ReaderSession {
             seq,
             source: source.clone(),
             anchor,
+            provider,
+            engine,
             status: TranslationStatus::Pending,
         });
         let http = folio_core::net::remote::ureq::shared();
@@ -157,7 +161,6 @@ impl ReaderSession {
         // 直接装进 Box<dyn Error>，TaskEvent::Finished 里携带的就是它。
         let handle: TaskHandle<TranslationOutcome> =
             resident::pool().submit_with(Priority::Interactive, move |_| {
-                let translator = GoogleTranslator;
                 let got = translator.translate(&*http, &source, FROM, &to)?;
                 Ok((got.text, got.detected))
             });
@@ -206,7 +209,7 @@ impl ReaderSession {
                     let to = target_lang(cx);
                     let hash = source_hash(&state.source);
                     if let Err(err) =
-                        store.save_translation(GoogleTranslator::NAME, FROM, &to, &hash, &text)
+                        store.save_translation(&state.provider, FROM, &to, &hash, &text)
                     {
                         tracing::warn!(error = %err, "翻译: 落缓存失败");
                     }
@@ -243,4 +246,15 @@ pub(in crate::ui::features::reader) fn target_lang(cx: &App) -> String {
         return configured;
     }
     ConfigHolder::language(cx).locale.code().to_string()
+}
+
+/// 弹层头部那行引擎名。品牌名不翻；OpenAI 兼容那档带上模型 —— 同一个地址换模型
+/// 就是另一份译文，读者该看得见当前用的是哪一只。
+pub(in crate::ui::features::reader) fn engine_label(config: &Translation) -> String {
+    match config.engine {
+        TranslationEngine::Google => "Google".to_string(),
+        TranslationEngine::OpenAi if config.openai.model.is_empty() => "OpenAI".to_string(),
+        TranslationEngine::OpenAi => format!("OpenAI · {}", config.openai.model),
+        TranslationEngine::DeepL => "DeepL".to_string(),
+    }
 }

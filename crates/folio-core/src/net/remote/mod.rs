@@ -81,6 +81,7 @@ pub enum Error {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
+    Post,
     Put,
     Propfind,
     Mkcol,
@@ -91,6 +92,7 @@ impl Method {
     pub fn as_str(&self) -> &'static str {
         match self {
             Method::Get => "GET",
+            Method::Post => "POST",
             Method::Put => "PUT",
             // WebDAV 的方法名不在 HTTP 标准方法里，得原样发出去。
             Method::Propfind => "PROPFIND",

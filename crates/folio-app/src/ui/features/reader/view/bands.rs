@@ -87,12 +87,16 @@ fn band(height: f32, at_top: bool, cx: &App) -> Div {
 }
 
 /// 页眉：只有章名。空章名不占字，摆出来是一块干净的空白。
+///
+/// `margin_y` 是这一边上边距（像素）：带子的**不透明底色**要跟着长高，盖住正文让出的
+/// 那一段。只把正文往下推而不把带子长高，滚动时跨在边上的半行字就会从那条缝里露出来。
 pub(in crate::ui::features::reader) fn header(
     reader: &Entity<ReaderSession>,
+    margin_y: f32,
     cx: &App,
 ) -> AnyElement {
     let chapter = readouts(reader, cx).chapter;
-    band(chrome::HEADER_HEIGHT, true, cx)
+    band(chrome::HEADER_HEIGHT + margin_y.max(0.0), true, cx)
         .child(
             div()
                 .text_xs()
@@ -111,6 +115,7 @@ pub(in crate::ui::features::reader) fn header(
 pub(in crate::ui::features::reader) fn footer(
     reader: &Entity<ReaderSession>,
     bottom_inset: f32,
+    margin_y: f32,
     cx: &App,
 ) -> AnyElement {
     let Readouts {
@@ -124,9 +129,16 @@ pub(in crate::ui::features::reader) fn footer(
             .child(text)
             .into_any_element()
     };
-    // `h_flex` 默认交叉轴居中；先靠 `pb` 把内容盒压回 `FOOTER_HEIGHT` 那一段，
-    // 再让居中在这个内容盒里生效。
-    band(chrome::FOOTER_HEIGHT + bottom_inset, false, cx)
+    // 带子随上下页边距长高：它不透明，长出来的那一截负责盖住正文让出的空白，
+    // 不然滚动时半行字会从那条缝里露出来。
+    //
+    // 读数**不许跟着长高走**：`pt(margin)` 把页边距从内容盒顶上让出去、`pb(inset)`
+    // 让出手势条，内容盒于是仍是原来那 FOOTER 高的一行 —— `h_flex` 的居中只在这
+    // 一截里生效，进度那行于是钉在离屏幕底固定的位置。反过来把页边距塞进 `pb`，
+    // 内容盒会被顶到带子顶上，读者拖上下边距时进度条就跟着上下跑。
+    let margin = margin_y.max(0.0);
+    band(chrome::FOOTER_HEIGHT + margin + bottom_inset, false, cx)
+        .when(margin > 0.0, |band| band.pt(px(margin)))
         .when(bottom_inset > 0.0, |band| band.pb(px(bottom_inset)))
         .child(label(position))
         .child(label(percent))

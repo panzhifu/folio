@@ -62,10 +62,12 @@ use gpui_kit::{
     Subscription, TestSupportExt as _, Window, div, px, rems,
 };
 
+use std::rc::Rc;
+
 use super::SettingsPage;
 use super::spec::{self, RowKind};
 use super::spec_pages;
-use crate::ui::components::TopBar;
+use crate::ui::components::{FontPicker, TopBar};
 use crate::ui::services::l10n::tr;
 use crate::ui::services::storage::{self, Job};
 use crate::ui::shell::navigation;
@@ -665,6 +667,29 @@ impl CompactSettings {
                         .gap_1()
                         .child(label_block(row.title.clone()))
                         .child(Input::new(input).w_full()),
+                )
+            }
+            RowKind::Font { get, set } => {
+                let (get, set) = (get.clone(), set.clone());
+                let picker = window.use_keyed_state(id("font-picker"), cx, move |window, cx| {
+                    let get_value = get.clone();
+                    let set_value = set.clone();
+                    FontPicker::new(
+                        Rc::new(move |cx: &App| get_value(cx).to_string()),
+                        Rc::new(move |value: String, cx: &mut App| {
+                            set_value(SharedString::from(value), cx)
+                        }),
+                        window,
+                        cx,
+                    )
+                });
+                control_cell(
+                    id("font-row"),
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(label_block(row.title.clone()))
+                        .child(picker.clone()),
                 )
             }
             RowKind::Info { value } => control_cell(

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use folio_core::content::annotation::ResolvedAnnotation;
 use folio_core::content::document::Document as OpenedDocument;
+use folio_core::content::format::css::PageMargins;
 use folio_core::store::{Annotation, Bookmark, Store};
 use folio_core::{DocMeta, Format, Locator, PageTurn, Reader, StaleReason};
 use gpui_kit::base::SelectionEdge;
@@ -945,6 +946,17 @@ impl ReaderSession {
             self.header_reserve = header;
             self.footer_reserve = footer;
             cx.notify();
+        }
+    }
+
+    /// 当前这本书的 `@page` 页边距。样本与定版式没有可重排的 CSS，给默认值。
+    ///
+    /// 书的这一份只是**默认值**：读者把「上下页边距」拖离 0 时整份作废
+    /// （合成点在 [`chrome::effective_page_margins`]）。
+    pub fn page_margins(&self) -> PageMargins {
+        match &self.source {
+            Source::Book(book) => book.document().page_margins(),
+            Source::Sample(_) | Source::Fixed(_) => PageMargins::default(),
         }
     }
 

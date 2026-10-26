@@ -163,6 +163,8 @@ toc = "Contents"
 # also show up as that page's sub-entries in the sidebar, so each one has to name
 # what its fields have in common.
 speech = "Read aloud"
+
+translation = "Translation"
 [group]
 usage = "Usage"
 cleanup = "Cleanup"
@@ -178,9 +180,14 @@ watch = "Folder watching"
 transfer = "Wi-Fi transfer"
 rows = "Rows"
 marking = "Marking"
+direction = "Direction"
 
 speech_voice = "Voice"
 speech_reading = "While reading"
+
+translation_output = "Translation"
+translation_openai = "OpenAI compatible"
+translation_deepl = "DeepL"
 [field]
 app_dir = "App data folder"
 log_dir = "Log folder"
@@ -198,8 +205,16 @@ max_measure = "Maximum line width"
 "max_measure.desc" = "Widest the text column may get, in pixels. 0 fills the window."
 margin_x = "Side margins"
 "margin_x.desc" = "Whitespace on both sides of the text column, in pixels."
+letter_spacing = "Letter spacing"
+"letter_spacing.desc" = "Extra space between characters, in em. Negative values tighten; 0 is the default."
+margin_y = "Top and bottom margins"
+"margin_y.desc" = "Whitespace above and below the text column, in pixels. It changes how many lines fit on a page, not where lines break."
+font_weight = "Weight"
+"font_weight.desc" = "Stroke weight of body text. If the device lacks that face, the nearest one is used; 600 and above also get synthetic bold."
+text_direction = "Text direction"
+"text_direction.desc" = "As in book, vertical, or horizontal. Vertical applies only to single-column paging; scrolling stays horizontal."
 font_family = "Body font"
-"font_family.desc" = "A font family name, e.g. LXGW WenKai or Noto Serif CJK SC."
+"font_family.desc" = "Choose from the fonts installed on this device."
 appearance_mode = "Mode"
 "appearance_mode.desc" = "Follow the system, or pin light or dark."
 theme_light = "Light theme"
@@ -243,6 +258,19 @@ speech_pitch = "Pitch"
 "speech_pitch.desc" = "The tone of the voice. 1.0 is normal."
 speech_auto_scroll = "Follow along"
 "speech_auto_scroll.desc" = "Turn to the paragraph being read. Off keeps the page where you left it."
+
+translation_target_lang = "Translate into"
+"translation_target_lang.desc" = "Which language selection translation produces. Follow the interface language to switch with the UI."
+translation_engine = "Engine"
+"translation_engine.desc" = "Who provides the translation. Google works with no key; OpenAI-compatible covers cloud services and local models; DeepL needs an API key."
+translation_openai_base = "Service URL"
+"translation_openai_base.desc" = "API root, e.g. https://api.openai.com/v1. Local Ollama usually uses http://localhost:11434/v1."
+translation_openai_model = "Model"
+"translation_openai_model.desc" = "The model name the service expects, e.g. gpt-4o-mini or qwen2.5:7b."
+translation_openai_key = "API Key"
+"translation_openai_key.desc" = "Stored only in this device's config.json. Leave empty if the service needs no key."
+translation_deepl_key = "API Key"
+"translation_deepl_key.desc" = "Your DeepL key. Free keys end with :fx and automatically use the free endpoint."
 [page_turn]
 slide = "Slide sideways"
 slide_up = "Slide up and down"
@@ -255,6 +283,16 @@ none = "No animation"
 highlight = "Highlight"
 line = "Underline"
 wavy = "Wavy"
+
+[font_weight]
+light = "Light"
+regular = "Regular"
+bold = "Bold"
+
+[text_direction]
+auto = "As in book"
+vertical = "Vertical"
+horizontal = "Horizontal"
 
 [account]
 settings = "Settings"
@@ -580,3 +618,12 @@ stale = "⚠️ %{place} · position lost"
 undo = "Undo"
 deleted_annotation = "Highlight deleted"
 deleted_bookmark = "Bookmark removed"
+
+[font_picker]
+search = "Search fonts"
+
+[translation]
+follow_ui = "Follow interface language"
+engine_google = "Google (no key)"
+engine_openai = "OpenAI compatible"
+engine_deepl = "DeepL"

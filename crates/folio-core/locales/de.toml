@@ -146,6 +146,8 @@ toc = "Verzeichnis"
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
 speech = "Vorlesen"
+
+translation = "Übersetzung"
 [group]
 usage = "Belegung"
 cleanup = "Aufräumen"
@@ -161,9 +163,14 @@ watch = "Ordnerüberwachung"
 transfer = "Übertragung per WLAN"
 rows = "Einträge"
 marking = "Markierungen"
+direction = "Richtung"
 
 speech_voice = "Stimme"
 speech_reading = "Beim Lesen"
+
+translation_output = "Übersetzung"
+translation_openai = "OpenAI-kompatibel"
+translation_deepl = "DeepL"
 [field]
 app_dir = "App-Datenordner"
 log_dir = "Protokollordner"
@@ -181,8 +188,16 @@ max_measure = "Maximale Zeilenbreite"
 "max_measure.desc" = "Breitest mögliche Textspalte in Pixeln. 0 füllt das Fenster."
 margin_x = "Seitliche Ränder"
 "margin_x.desc" = "Leerraum links und rechts der Textspalte, in Pixeln."
+letter_spacing = "Buchstabenabstand"
+"letter_spacing.desc" = "Zusätzlicher Abstand zwischen Zeichen, in em. Negative Werte verdichten; 0 ist der Standard."
+margin_y = "Obere und untere Ränder"
+"margin_y.desc" = "Leerraum über und unter der Textspalte, in Pixeln. Er ändert, wie viele Zeilen auf eine Seite passen, nicht den Zeilenumbruch."
+font_weight = "Schriftstärke"
+"font_weight.desc" = "Stärke des Textes. Fehlt der Schnitt auf dem Gerät, wird der nächstliegende verwendet; ab 600 kommt synthetisches Fett dazu."
+text_direction = "Textrichtung"
+"text_direction.desc" = "Wie im Buch, vertikal oder horizontal. Vertikal gilt nur beim einspaltigen Blättern; beim Scrollen bleibt es horizontal."
 font_family = "Textschrift"
-"font_family.desc" = "Ein Schriftfamilienname, z. B. LXGW WenKai oder Noto Serif CJK SC."
+"font_family.desc" = "Aus den auf diesem Gerät installierten Schriftarten wählen."
 appearance_mode = "Modus"
 "appearance_mode.desc" = "Dem System folgen, oder hell bzw. dunkel festlegen."
 theme_light = "Helles Theme"
@@ -226,6 +241,19 @@ speech_pitch = "Tonhöhe"
 "speech_pitch.desc" = "Die Tonlage der Stimme. 1.0 ist normal."
 speech_auto_scroll = "Automatisch folgen"
 "speech_auto_scroll.desc" = "Zum vorgelesenen Absatz blättern. Aus: die Seite bleibt, wo sie ist."
+
+translation_target_lang = "Übersetzen nach"
+"translation_target_lang.desc" = "In welche Sprache die Auswahl übersetzt wird. „Sprache der Oberfläche folgen“ wechselt mit der Oberfläche."
+translation_engine = "Dienst"
+"translation_engine.desc" = "Wer die Übersetzung liefert. Google braucht keinen Schlüssel, OpenAI-kompatibel deckt Cloud-Dienste und lokale Modelle ab, DeepL verlangt einen API-Schlüssel."
+translation_openai_base = "Dienst-URL"
+"translation_openai_base.desc" = "API-Wurzel, z. B. https://api.openai.com/v1. Lokales Ollama nutzt meist http://localhost:11434/v1."
+translation_openai_model = "Modell"
+"translation_openai_model.desc" = "Modellname, den der Dienst erwartet, z. B. gpt-4o-mini oder qwen2.5:7b."
+translation_openai_key = "API-Schlüssel"
+"translation_openai_key.desc" = "Wird nur in der config.json dieses Geräts gespeichert. Leer lassen, wenn der Dienst keinen Schlüssel braucht."
+translation_deepl_key = "API-Schlüssel"
+"translation_deepl_key.desc" = "DeepL-Schlüssel. Kostenlose Schlüssel enden auf :fx und nutzen automatisch den kostenlosen Endpunkt."
 [page_turn]
 slide = "Zur Seite wischen"
 slide_up = "Nach oben wischen"
@@ -238,6 +266,16 @@ none = "Ohne Animation"
 highlight = "Textmarker"
 line = "Unterstreichen"
 wavy = "Wellenlinie"
+
+[font_weight]
+light = "Dünn"
+regular = "Normal"
+bold = "Fett"
+
+[text_direction]
+auto = "Wie im Buch"
+vertical = "Vertikal"
+horizontal = "Horizontal"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
@@ -547,3 +585,12 @@ stale = "⚠️ %{place} · Position verloren"
 undo = "Rückgängig"
 deleted_annotation = "Markierung gelöscht"
 deleted_bookmark = "Lesezeichen entfernt"
+
+[font_picker]
+search = "Schriftarten suchen"
+
+[translation]
+follow_ui = "Sprache der Oberfläche folgen"
+engine_google = "Google (ohne Schlüssel)"
+engine_openai = "OpenAI-kompatibel"
+engine_deepl = "DeepL"

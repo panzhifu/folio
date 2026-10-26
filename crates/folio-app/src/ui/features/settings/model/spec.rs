@@ -82,8 +82,13 @@ pub(crate) enum RowKind {
         get: Rc<dyn Fn(&App) -> f32>,
         set: Setter<f32>,
     },
-    /// 自由文本（字体家族、书库位置）。
+    /// 自由文本（书库位置）。
     Text {
+        get: Rc<dyn Fn(&App) -> SharedString>,
+        set: Setter<SharedString>,
+    },
+    /// 系统字体：这台设备注册的家族，可搜索。两端的落点都是同一份家族名。
+    Font {
         get: Rc<dyn Fn(&App) -> SharedString>,
         set: Setter<SharedString>,
     },
@@ -170,6 +175,23 @@ impl Row {
             desc: None,
             keywords: &[],
             kind: RowKind::Text {
+                get: Rc::new(get),
+                set: Rc::new(set),
+            },
+        }
+    }
+
+    /// 一行业系统字体：值就是家族名。
+    pub(in crate::ui::features::settings) fn font(
+        title: SharedString,
+        get: impl Fn(&App) -> SharedString + 'static,
+        set: impl Fn(SharedString, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            title,
+            desc: None,
+            keywords: &[],
+            kind: RowKind::Font {
                 get: Rc::new(get),
                 set: Rc::new(set),
             },

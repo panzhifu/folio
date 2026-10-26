@@ -19,7 +19,7 @@ use folio_core::content::anchor::{TextAnchor, line_at_offset, line_chars, reloca
 use gpui_kit::{Context, SharedString};
 
 use crate::ui::features::reader::model::session::ReaderSession;
-use crate::ui::features::reader::model::undo::{DeletedRow, UndoSlot, UNDO_TTL};
+use crate::ui::features::reader::model::undo::{DeletedRow, UNDO_TTL, UndoSlot};
 use crate::ui::services::l10n::tr;
 
 impl ReaderSession {

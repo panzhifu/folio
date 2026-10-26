@@ -1,4 +1,4 @@
-//! 「文字」页：字号、行距、段距、首行缩进、两端对齐，加上翻页沿哪根轴走、
+//! 「文字」页：字号、行距、字距、段距、首行缩进、两端对齐，加上翻页沿哪根轴走、
 //! 新划的一条留哪种痕迹。
 //!
 //! 各项都是**即时生效**的：写入即规整、即落盘，正文各项即让所有已打开的书重排，
@@ -49,6 +49,19 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                         },
                         |cx| ConfigHolder::reader(cx).line_height,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.line_height = v),
+                    ),
+                    number(
+                        cx,
+                        NumberSpec {
+                            title: "field.letter_spacing",
+                            description: "field.letter_spacing.desc",
+                            keywords: &["letter-spacing", "字距", "字间"],
+                            min: Reader::LETTER_SPACING_MIN,
+                            max: Reader::LETTER_SPACING_MAX,
+                            step: 0.01,
+                        },
+                        |cx| ConfigHolder::reader(cx).letter_spacing_em,
+                        |v, cx| ConfigHolder::edit_reader(cx, |p| p.letter_spacing_em = v),
                     ),
                     number(
                         cx,

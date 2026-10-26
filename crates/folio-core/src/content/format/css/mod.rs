@@ -15,6 +15,7 @@ pub mod ua;
 pub(crate) mod value;
 
 use crate::content::dom::{Dom, NodeId};
+use computed::Length;
 use selector::Selector;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,11 @@ pub enum FontSrc {
     Url(String),
     /// 设备上已装的字体名：只查注册名单，不注册字节。
     Local(String),
+    /// 设备上的字体文件（`res://…` / `file://…` / `/system/fonts/…`）。
+    ///
+    /// 字节不随书来，也读不到：只拿文件名去设备已注册的家族里找同一张脸
+    /// （见 `BookFonts::for_document`）。http(s) 之类的来源仍然整条丢掉。
+    System(String),
 }
 
 /// 层叠级别，从低到高。
@@ -95,12 +101,58 @@ impl Rule {
     }
 }
 
+/// `@page` 声明的四边页边距。`None` = 这本书没声明这一边（不是「0」）。
+///
+/// 它不落在任何元素上，所以不进层叠；`RuleSet` 只把**最后一次声明**带到排版层。
+/// 阅读器拿它当页边距的默认值，读者的「上下页边距」滑条一旦离开 0 就整个盖掉它。
+///
+/// 只认 `margin` 简写与四条 `margin-*`：`size` / `padding` / 页眉页脚子规则都是打印
+/// 排版的事，落到 `ignored`。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PageMargins {
+    pub top: Option<Length>,
+    pub right: Option<Length>,
+    pub bottom: Option<Length>,
+    pub left: Option<Length>,
+}
+
+impl PageMargins {
+    /// 上下两边折成像素。百分比按 `basis_width`（页框宽）折 —— CSS 的百分比外边距
+    /// 一律以包含块宽为基准，上下边也一样；没声明的边是 0。
+    pub fn vertical_px(self, basis_width: f32) -> (f32, f32) {
+        (
+            self.top.map_or(0.0, |length| length.resolve(basis_width)),
+            self.bottom
+                .map_or(0.0, |length| length.resolve(basis_width)),
+        )
+    }
+
+    /// 后出现的 `@page` 只覆盖它写出来的那几条边。
+    fn merge(&mut self, other: Self) {
+        if other.top.is_some() {
+            self.top = other.top;
+        }
+        if other.right.is_some() {
+            self.right = other.right;
+        }
+        if other.bottom.is_some() {
+            self.bottom = other.bottom;
+        }
+        if other.left.is_some() {
+            self.left = other.left;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuleSet {
     pub rules: Vec<Rule>,
     /// 这本书声明的内嵌字体，按出现顺序。它不参与层叠（没有选择器可言），
     /// 是**给平台层看的清单**：谁去注册字节、注册成哪个名字。
     pub font_faces: Vec<FontFaceRule>,
+    /// 文档级 `@page` 的页边距。章内 `<style>` 里的 `@page` 也照收（诊断口径与
+    /// 排版同一条规则表），但阅读器只读**书级**那一份：一章改页边距没有意义。
+    pub page_margins: PageMargins,
     /// 被丢弃的声明数，用于「这本书有多少样式我们不支持」的诊断与文档。
     pub ignored: usize,
 }
@@ -123,6 +175,7 @@ impl RuleSet {
         // 字体清单同样靠后出现者胜：两份 CSS 声明同一个 `font-family` 时，
         // 后那份才是作者要的（与规则层的 `order` 一个道理）。
         self.font_faces.append(&mut other.font_faces);
+        self.page_margins.merge(other.page_margins);
         self.ignored += other.ignored;
     }
 
@@ -163,7 +216,15 @@ impl RuleSet {
                         self.font_faces.extend(faces);
                         self.ignored += dropped;
                     }
-                    // @page / @keyframes 的声明确实没有去处。
+                    // @page 的页边距是读者页边距的默认值：它不落在元素上，由阅读器读
+                    // `RuleSet::page_margins`。其余页属性（size / padding / 页眉页脚子规则）
+                    // 没有去处，逐条计 ignored。
+                    "page" => {
+                        let (margins, dropped) = parse_page(body);
+                        self.page_margins.merge(margins);
+                        self.ignored += dropped;
+                    }
+                    // @keyframes 之类的声明确实没有去处。
                     _ => self.ignored += 1,
                 }
                 continue;
@@ -302,6 +363,59 @@ pub fn chapter_style_rules(dom: &Dom, base_dir: &str) -> RuleSet {
     )
 }
 
+/// `@page` 的块体 → 四边页边距。
+///
+/// `em` / `rem` 按**初始字号**折（页面上下文没有父元素可继承）；百分比留成
+/// [`Length::Percent`]，由阅读器按页框宽折算。没出现的边保持 `None`，后一份样式表
+/// 才能只覆盖它自己写了的那几条。
+fn parse_page(body: &str) -> (PageMargins, usize) {
+    let root_px = computed::ComputedStyle::default().font_size;
+    let mut margins = PageMargins::default();
+    let mut ignored = 0usize;
+    for decl in split_top_level(body, ';') {
+        let Some(declaration) = parse_declaration(&decl) else {
+            if !is_blank_declaration(&decl) {
+                ignored += 1;
+            }
+            continue;
+        };
+        match declaration.property.as_str() {
+            "margin" => match value::box_sides(&declaration.value, root_px, root_px, true) {
+                Some([top, right, bottom, left]) => {
+                    margins.top = Some(top);
+                    margins.right = Some(right);
+                    margins.bottom = Some(bottom);
+                    margins.left = Some(left);
+                }
+                None => ignored += 1,
+            },
+            "margin-top" => match value::edge_length(&declaration.value, root_px, root_px, true) {
+                Some(length) => margins.top = Some(length),
+                None => ignored += 1,
+            },
+            "margin-right" => {
+                match value::edge_length(&declaration.value, root_px, root_px, true) {
+                    Some(length) => margins.right = Some(length),
+                    None => ignored += 1,
+                }
+            }
+            "margin-bottom" => match value::edge_length(&declaration.value, root_px, root_px, true)
+            {
+                Some(length) => margins.bottom = Some(length),
+                None => ignored += 1,
+            },
+            "margin-left" => match value::edge_length(&declaration.value, root_px, root_px, true) {
+                Some(length) => margins.left = Some(length),
+                None => ignored += 1,
+            },
+            // 页选择器子规则（`@top-center` 之类）与 `size` / `padding` 都是打印排版，
+            // 阅读器没有对应物；按「认得、没有去处」计。
+            _ => ignored += 1,
+        }
+    }
+    (margins, ignored)
+}
+
 /// `@font-face` 的块体 → face 清单。
 ///
 /// `font-family` 写逗号列表时**每个名字出一条**（CSS 就是这个语义：同一份字体数据
@@ -375,9 +489,12 @@ fn parse_font_face(body: &str) -> (Vec<FontFaceRule>, usize) {
 
 /// `src: url(a.otf) format("opentype"), local("Book Serif")` → 来源列表。
 ///
-/// `format()` / `tech()` 是修饰**前一个**来源的，认得就跳过；`url()` 里协议开头的
-/// 一律丢（远程字体一期不取，也不该让读者以为取了）。引号与空格都清掉，
-/// 因为下游拿这个串直接当容器路径查表。
+/// `format()` / `tech()` 是修饰**前一个**来源的，认得就跳过。`url()` 分三档：
+/// - 容器相对路径 → [`FontSrc::Url`]，下游按容器查字节；
+/// - `res://` / `file://` / `/system/…` → [`FontSrc::System`]，按文件名映射到设备字体；
+/// - http(s)、`//host/…`、`data:` 之类的远程来源整条丢掉（不取，也不假装取了）。
+///
+/// 引号与空格都清掉，因为下游拿这个串直接当路径键。
 fn parse_font_src(value: &str) -> Vec<FontSrc> {
     let mut out = Vec::new();
     for part in split_top_level(value, ',') {
@@ -387,7 +504,15 @@ fn parse_font_src(value: &str) -> Vec<FontSrc> {
         let inner = rest.trim().trim_matches(|c| c == '"' || c == '\'');
         match head.to_ascii_lowercase().as_str() {
             "url" => {
-                if !is_remote(inner) {
+                let lowered = inner.to_ascii_lowercase();
+                let remote = is_remote(inner);
+                if lowered.starts_with("res:") || lowered.starts_with("file:") {
+                    out.push(FontSrc::System(inner.to_string()));
+                } else if !remote && inner.starts_with('/') {
+                    // 绝对设备路径（`/system/fonts/…`）：容器里不可能有这个名字。
+                    // `//host/…` 也是 `is_remote`，排在上一档之外，仍然丢掉。
+                    out.push(FontSrc::System(inner.to_string()));
+                } else if !remote {
                     out.push(FontSrc::Url(inner.to_string()));
                 }
             }

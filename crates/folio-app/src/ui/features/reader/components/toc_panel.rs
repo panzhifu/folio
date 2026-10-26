@@ -716,7 +716,8 @@ impl TocPanel {
     /// 列表下一帧按会话手里的清单重建，这里不用自己摘行。
     fn remove_mark(&mut self, is_bookmark: bool, id: i64, cx: &mut Context<Self>) {
         if is_bookmark {
-            self.reader.update(cx, |reader, cx| reader.remove_bookmark(id, cx));
+            self.reader
+                .update(cx, |reader, cx| reader.remove_bookmark(id, cx));
         } else {
             self.reader
                 .update(cx, |reader, cx| reader.remove_annotation(id, cx));
@@ -1652,10 +1653,7 @@ impl EventEmitter<TocEvent> for TocPanel {}
 /// 一句原文在列表里显多长。`exact` 是可见文本、可能带着排版换行，先折空白再截 ——
 /// 与导出那条 `collapse` 同一件事的界面侧版本，太长的那半本来就被行 truncate 掉了。
 fn snippet(exact: &str) -> String {
-    let folded: String = exact
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let folded: String = exact.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out: String = folded.chars().take(48).collect();
     if folded.chars().count() > 48 {
         out.push('…');

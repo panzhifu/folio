@@ -148,6 +148,8 @@ toc = "目次"
 # 設定ページ内のグループ見出し。1 ページに 2 つ以上あるとサイドバーの項目として
 # 出てくるので、それぞれの字段に何の共通点があるかを名前で示す。
 speech = "読み上げ"
+
+translation = "翻訳"
 [group]
 usage = "使用量"
 cleanup = "クリーンアップ"
@@ -163,9 +165,14 @@ watch = "フォルダ監視"
 transfer = "Wi-Fi 転送"
 rows = "行"
 marking = "マーキング"
+direction = "方向"
 
 speech_voice = "声"
 speech_reading = "読書中"
+
+translation_output = "訳文"
+translation_openai = "OpenAI 互換"
+translation_deepl = "DeepL"
 [field]
 app_dir = "アプリのデータフォルダー"
 log_dir = "ログフォルダー"
@@ -183,8 +190,16 @@ max_measure = "行長の上限"
 "max_measure.desc" = "本文欄の最大幅（ピクセル）。0 で窓幅いっぱい。"
 margin_x = "左右の余白"
 "margin_x.desc" = "本文欄の左右の余白（ピクセル）。"
+letter_spacing = "字間"
+"letter_spacing.desc" = "文字同士の追加のすき間（em）。負の値で詰まり、0 が既定です。"
+margin_y = "上下の余白"
+"margin_y.desc" = "本文欄の上下の余白（ピクセル）。改行位置は変えず、1 ページに入る行数だけが変わります。"
+font_weight = "文字の太さ"
+"font_weight.desc" = "本文の太さ。端末にそのウェイトがなければ最も近いものが使われ、600 以上では合成の太字も重ねます。"
+text_direction = "文字方向"
+"text_direction.desc" = "本文どおり・縦書き・横書き。縦書きはページ送りの単一列のときだけ有効で、スクロールでは横書きのままです。"
 font_family = "本文フォント"
-"font_family.desc" = "ファミリー名を入力（例：Noto Serif CJK JP）。"
+"font_family.desc" = "この端末にインストールされているフォントから選びます。"
 appearance_mode = "明暗"
 "appearance_mode.desc" = "システムに従うか、明または暗に固定するか。"
 theme_light = "浅色テーマ"
@@ -228,6 +243,19 @@ speech_pitch = "高さ"
 "speech_pitch.desc" = "声の高さ。1.0 が標準です。"
 speech_auto_scroll = "追従してめくる"
 "speech_auto_scroll.desc" = "読み上げ中、読んでいる段落に画面を合わせます。オフなら画面はそのままです。"
+
+translation_target_lang = "訳先"
+"translation_target_lang.desc" = "選択範囲の翻訳をどの言語にするか。「インターフェース言語に合わせる」なら UI の言語に従います。"
+translation_engine = "エンジン"
+"translation_engine.desc" = "翻訳を提供するサービス。Google はキー不要ですぐ使えます。OpenAI 互換は各クラウドとローカルモデルに対応し、DeepL は API キーが必要です。"
+translation_openai_base = "サービス URL"
+"translation_openai_base.desc" = "API のルート URL。例: https://api.openai.com/v1。ローカルの Ollama は通常 http://localhost:11434/v1 です。"
+translation_openai_model = "モデル"
+"translation_openai_model.desc" = "サービスが認識するモデル名。例: gpt-4o-mini、qwen2.5:7b。"
+translation_openai_key = "API キー"
+"translation_openai_key.desc" = "この端末の config.json にのみ保存されます。キーが不要なサービスなら空のままにします。"
+translation_deepl_key = "API キー"
+"translation_deepl_key.desc" = "DeepL のキー。無料版のキーは :fx で終わり、自動的に無料エンドポイントを使います。"
 [page_turn]
 slide = "左右に滑る"
 slide_up = "上下に滑る"
@@ -240,6 +268,16 @@ none = "動きなし"
 highlight = "ハイライト"
 line = "下線"
 wavy = "波線"
+
+[font_weight]
+light = "細字"
+regular = "標準"
+bold = "太字"
+
+[text_direction]
+auto = "本文どおり"
+vertical = "縦書き"
+horizontal = "横書き"
 
 [account]
 settings = "設定"
@@ -549,3 +587,12 @@ stale = "⚠️ %{place} · 位置を見失いました"
 undo = "元に戻す"
 deleted_annotation = "ハイライトを削除しました"
 deleted_bookmark = "しおりを削除しました"
+
+[font_picker]
+search = "フォントを検索"
+
+[translation]
+follow_ui = "インターフェース言語に合わせる"
+engine_google = "Google（キー不要）"
+engine_openai = "OpenAI 互換"
+engine_deepl = "DeepL"

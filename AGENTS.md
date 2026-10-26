@@ -39,6 +39,16 @@ Linux 需要 fontconfig / Wayland / xkbcommon 开发包与可用 Vulkan 驱动�
 测试内联在被测文件底部、点名导入（不用 `use super::*`，`gpui_kit` 根有个名叫
 `test` 的属性宏会把 `#[test]` 递归展开成它）、只引 `pub` 项。
 
+## 测试：只跑新加的，全量等推送，真机走 scrcpy
+
+- **迭代时只跑这一轮新加 / 改到的那几条测试**（按名字过滤，通常一两秒）；
+  **全量**（`cargo test --workspace --lib` 或 CI 同款）等用户说「推送」时再统一跑。
+- **不主动看手机。** 真机查看（截图、点按）用户点名才做，且一律走 `scrcpy-android`
+  技能的 scrcpy 虚拟显示（`.agents/skills/scrcpy-android`）截图、点击、滑动、录像；
+  不许用 `adb shell input`、`adb exec-out screencap` 之类直接驱动或截取用户正在用的
+  那块屏 —— 那会把手机抢走。
+- 打包装机（`adb install -r`）不算测试，交付新包时可以做；但装完**不许顺手启动、点按**。
+
 ## 版本控制：jj（colocated）
 
 仓库是 jj/git colocated（`.jj/` 与 `.git/` 并存），CI 与 `cargo ndk` 不受影响。三条硬规矩：

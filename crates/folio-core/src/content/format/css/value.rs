@@ -526,23 +526,39 @@ pub(super) fn relative_weight(parent: u16, bolder: bool) -> u16 {
     }
 }
 
-/// 支持 px / em / rem / pt / 裸数字。`%` 不在这一条里：要留百分比的族走
-/// [`edge_length`] 与 [`parse_length`]，它们把 `%` 存成 `Length::Percent` 等排版期按
+/// 支持 px / pt / pc / in / cm / mm / em / rem / 裸数字。`%` 不在这一条里：要留百分比的
+/// 族走 [`edge_length`] 与 [`parse_length`]，它们把 `%` 存成 `Length::Percent` 等排版期按
 /// **包含块宽**折算，层叠期猜不出那个数。`auto` / `calc()` 在这里一律判为不支持
 /// （计入 ignored，值保持默认）。
+///
+/// 绝对单位按 CSS 的 96 dpi 口径折：`@page` 的边距最常写成 `1.5cm` / `0.5in`。
 pub(super) fn length_px(value: &str, font_size: f32, root_font_size: f32) -> Option<f32> {
     let v = value.trim().to_ascii_lowercase();
     if v.is_empty() || v == "auto" || v.starts_with("calc(") || v.ends_with('%') {
         return None;
     }
-    let (number, unit) = [("rem", "rem"), ("px", "px"), ("pt", "pt"), ("em", "em")]
-        .into_iter()
-        .find_map(|(suffix, unit)| v.strip_suffix(suffix).map(|n| (n, unit)))
-        .unwrap_or((v.as_str(), "none"));
+    // `rem` 必须排在 `em` 前面，否则 `1rem` 会被当成 `1r` + `em` 的后缀。
+    let (number, unit) = [
+        ("rem", "rem"),
+        ("px", "px"),
+        ("pt", "pt"),
+        ("pc", "pc"),
+        ("in", "in"),
+        ("cm", "cm"),
+        ("mm", "mm"),
+        ("em", "em"),
+    ]
+    .into_iter()
+    .find_map(|(suffix, unit)| v.strip_suffix(suffix).map(|n| (n, unit)))
+    .unwrap_or((v.as_str(), "none"));
     let n: f32 = number.trim().parse().ok()?;
     Some(match unit {
         "px" | "none" => n,
         "pt" => n * 96.0 / 72.0,
+        "pc" => n * 16.0,
+        "in" => n * 96.0,
+        "cm" => n * 96.0 / 2.54,
+        "mm" => n * 96.0 / 25.4,
         "em" => n * font_size,
         "rem" => n * root_font_size,
         _ => return None,

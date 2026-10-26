@@ -1,18 +1,28 @@
-//! 「字体」页：正文家族。
+//! 「字体」页：正文家族与字重。
 //!
-//! 只有一个自由文本框，因为「装了哪些字体」是操作系统的事：这台设备上不存在的那个
-//! 家族名，排版层会退回设备能解析的名字（见 `ui/shared/measure.rs` 的泛族名处理），
-//! 而不是把字画成方框。列一个「本机字体清单」反而会把没装的也列出来。
+//! 家族不再是自由文本：列的是**这台设备此刻真注册着的**家族（`TextSystem::all_font_names()`
+//! 现算，含随包字体与打开这本书时注册的内嵌字体）。手打一个不存在的名字不会报错，排版层
+//! 只会静默退回读者的字体 —— 读者以为自己改成功了，这正是表单不该给的那条路。
+//!
+//! 字重是三档下拉：档位住在 `Reader::FONT_WEIGHT_PRESETS`，与阅读页那张卡片共用一份。
 
 use super::super::*;
 
+/// 一档字重在界面上的名字。档位之间的数（手改配置）按下拉里实际会选中的那一档念，
+/// 判据是 [`Reader::nearest_font_weight`]。
+fn weight_label(cx: &App, weight: u16) -> SharedString {
+    match Reader::nearest_font_weight(weight) {
+        300 => tr(cx, "font_weight.light"),
+        700 => tr(cx, "font_weight.bold"),
+        _ => tr(cx, "font_weight.regular"),
+    }
+}
+
 pub(in crate::ui::features::settings) fn fonts_page(cx: &App) -> Page {
-    let family = Row::text(
+    let family = Row::font(
         tr(cx, "field.font_family"),
         |cx: &App| SharedString::from(ConfigHolder::reader(cx).font_family),
         |val: SharedString, cx| {
-            // 空串不改：清空输入框不该把正文换成 gpui 的默认家族，
-            // 那是个没有汉字的拉丁字体。
             if !val.trim().is_empty() {
                 ConfigHolder::edit_reader(cx, |p| p.font_family = val.to_string());
             }
@@ -21,9 +31,36 @@ pub(in crate::ui::features::settings) fn fonts_page(cx: &App) -> Page {
     .description(tr(cx, "field.font_family.desc"))
     .keywords(&["font", "family", "字体"]);
 
+    let weight = Row::dropdown(
+        tr(cx, "field.font_weight"),
+        Reader::FONT_WEIGHT_PRESETS
+            .iter()
+            .copied()
+            .map(|weight| {
+                (
+                    SharedString::from(weight.to_string()),
+                    weight_label(cx, weight),
+                )
+            })
+            .collect(),
+        false,
+        |cx: &App| {
+            SharedString::from(
+                Reader::nearest_font_weight(ConfigHolder::reader(cx).font_weight).to_string(),
+            )
+        },
+        |val: SharedString, cx| {
+            if let Ok(weight) = val.parse::<u16>() {
+                ConfigHolder::edit_reader(cx, |p| p.font_weight = weight);
+            }
+        },
+    )
+    .description(tr(cx, "field.font_weight.desc"))
+    .keywords(&["weight", "bold", "字重", "粗细", "加粗"]);
+
     page(
         tr(cx, "page.fonts"),
         IconName::ALargeSmall,
-        vec![group(tr(cx, "group.family"), vec![family])],
+        vec![group(tr(cx, "group.family"), vec![family, weight])],
     )
 }

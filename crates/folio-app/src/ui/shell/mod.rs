@@ -487,7 +487,9 @@ impl AppShell {
             this.open_reading(*book_id, cx);
             let (chapter, offset) = *jump;
             if let Some(layer) = this.reading.as_ref() {
-                layer.page.update(cx, |page, cx| page.goto(chapter, offset, cx));
+                layer
+                    .page
+                    .update(cx, |page, cx| page.goto(chapter, offset, cx));
             }
         });
         // 「我的」这一格两端画的不一样：桌面直接画整页字段（[`SettingsView`]，

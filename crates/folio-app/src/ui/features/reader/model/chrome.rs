@@ -6,6 +6,7 @@
 //! 顶栏与底栏是**压在正文上**的浮层，不推动正文重排：读者点一下屏幕，字不该跳走。
 //! 正文让出的只有干净态那两行小字的高度（[`HEADER_HEIGHT`] / [`FOOTER_HEIGHT`]）。
 
+use folio_core::content::format::css::PageMargins;
 use folio_core::layout::fragment::column_width;
 
 /// 顶栏高（逻辑像素，不含系统状态栏）。
@@ -14,6 +15,41 @@ pub const TOP_BAR_HEIGHT: f32 = 44.0;
 pub const HEADER_HEIGHT: f32 = 28.0;
 /// 干净态页脚那一行小字的高度。
 pub const FOOTER_HEIGHT: f32 = 28.0;
+
+/// 读者页边距与书的 `@page` 合成后的上下边距（像素）。
+///
+/// 读者的「上下页边距」拖离 0 就是覆盖：上下两个值都用读者的那个，书里写多少都不再
+/// 影响。滑条为 0 时用书的 `@page`（没写就是 0）。百分比按 `basis_width`（页框宽）折，
+/// 与 CSS 的百分比外边距同一条基准。
+///
+/// 两端都夹进 `Reader::MARGIN_Y_MIN..=MARGIN_Y_MAX`：手改配置与坏书都可能写出把整页
+/// 吃掉的值。
+pub fn effective_page_margins(
+    reader_margin_y: f32,
+    book: PageMargins,
+    basis_width: f32,
+) -> (f32, f32) {
+    use folio_core::infra::config::Reader;
+    let clamp = |value: f32| value.clamp(Reader::MARGIN_Y_MIN, Reader::MARGIN_Y_MAX);
+    if reader_margin_y > 0.0 {
+        let margin = clamp(reader_margin_y);
+        (margin, margin)
+    } else {
+        let (top, bottom) = book.vertical_px(basis_width);
+        (clamp(top), clamp(bottom))
+    }
+}
+
+/// 页眉 / 页脚两条带在页边距之后的高度。上下可以不同：`@page` 允许只写一边。
+///
+/// 正文让出的高与带子自己的高必须由这一个函数算出来 —— 两处各算一次，读者把边距调大
+/// 之后两者会差一截，滚动时那半行字就从缝里露出来。
+pub fn bands_with_vertical_margins(top: f32, bottom: f32) -> (f32, f32) {
+    (
+        HEADER_HEIGHT + top.max(0.0),
+        FOOTER_HEIGHT + bottom.max(0.0),
+    )
+}
 
 /// 设置卡片里字号滑条的范围。
 ///
@@ -67,6 +103,18 @@ pub const MAX_MEASURE_RANGE: (f32, f32) = (
 pub const MARGIN_X_RANGE: (f32, f32) = (
     folio_core::infra::config::Reader::MARGIN_X_MIN,
     folio_core::infra::config::Reader::MARGIN_X_MAX,
+);
+
+/// 上下页边距滑条的两端，单位像素。它不改折行，只改一页装多少行。
+pub const MARGIN_Y_RANGE: (f32, f32) = (
+    folio_core::infra::config::Reader::MARGIN_Y_MIN,
+    folio_core::infra::config::Reader::MARGIN_Y_MAX,
+);
+
+/// 字距滑条的两端，单位是字号倍。下界留一点负值：排版层本来就支持收紧。
+pub const LETTER_SPACING_RANGE: (f32, f32) = (
+    folio_core::infra::config::Reader::LETTER_SPACING_MIN,
+    folio_core::infra::config::Reader::LETTER_SPACING_MAX,
 );
 
 /// 桌面上「压暗那一层」的透明度。`None`（跟随系统）与顶格都是 0 —— 不压。
@@ -432,12 +480,16 @@ mod tests {
     //! 应该先在这里红过一次。
 
     use super::{
-        Arrow, BRIGHTNESS_RANGE, Chrome, Effect, INDENT_RANGE, LINE_HEIGHT_RANGE, MARGIN_X_RANGE,
-        MAX_MEASURE_RANGE, MIN_COLUMN_WIDTH, PARAGRAPH_GAP_RANGE, PageMode, TURN_DURATION_RANGE,
-        Zone, default_mode, dim_alpha, fixed_turn_applies, fixed_turn_style, percent_label,
-        reconcile, spread_fits, spread_gap, tween, zone,
+        Arrow, BRIGHTNESS_RANGE, Chrome, Effect, FOOTER_HEIGHT, HEADER_HEIGHT, INDENT_RANGE,
+        LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MARGIN_X_RANGE, MARGIN_Y_RANGE, MAX_MEASURE_RANGE,
+        MIN_COLUMN_WIDTH, PARAGRAPH_GAP_RANGE, PageMode, TURN_DURATION_RANGE, Zone,
+        bands_with_vertical_margins, default_mode, dim_alpha, effective_page_margins,
+        fixed_turn_applies, fixed_turn_style, percent_label, reconcile, spread_fits, spread_gap,
+        tween, zone,
     };
     use folio_core::PageTurn;
+    use folio_core::content::format::css::PageMargins;
+    use folio_core::content::format::css::computed::Length;
     use folio_core::infra::config::{Appearance, Reader};
 
     /// 方向键：左右跟整本的翻页方向换手，上下不换。
@@ -714,8 +766,10 @@ mod tests {
             line_height: LINE_HEIGHT_RANGE.1 + 1.0,
             paragraph_gap_em: PARAGRAPH_GAP_RANGE.1 + 1.0,
             indent_em: INDENT_RANGE.1 + 1.0,
+            letter_spacing_em: LETTER_SPACING_RANGE.1 + 1.0,
             max_measure: MAX_MEASURE_RANGE.1 + 1.0,
             margin_x: MARGIN_X_RANGE.1 + 1.0,
+            margin_y: MARGIN_Y_RANGE.1 + 1.0,
             ..Reader::default()
         }
         .clamped();
@@ -725,24 +779,30 @@ mod tests {
         );
         assert_eq!(top.paragraph_gap_em, PARAGRAPH_GAP_RANGE.1);
         assert_eq!(top.indent_em, INDENT_RANGE.1);
+        assert_eq!(top.letter_spacing_em, LETTER_SPACING_RANGE.1);
         assert_eq!(top.max_measure, MAX_MEASURE_RANGE.1);
         assert_eq!(top.margin_x, MARGIN_X_RANGE.1);
+        assert_eq!(top.margin_y, MARGIN_Y_RANGE.1);
         // 下界同理。版心那一格故意填负数：那个 `0` 是「随窗口铺满」的约定值，夹完还得是 0，
         // 而不是被哪一条「至少留一点」的顺手夹挤成一像素。
         let bottom = Reader {
             line_height: LINE_HEIGHT_RANGE.0 - 1.0,
             paragraph_gap_em: PARAGRAPH_GAP_RANGE.0 - 1.0,
             indent_em: INDENT_RANGE.0 - 1.0,
+            letter_spacing_em: LETTER_SPACING_RANGE.0 - 1.0,
             max_measure: -1.0,
             margin_x: MARGIN_X_RANGE.0 - 1.0,
+            margin_y: MARGIN_Y_RANGE.0 - 1.0,
             ..Reader::default()
         }
         .clamped();
         assert_eq!(bottom.line_height, LINE_HEIGHT_RANGE.0);
         assert_eq!(bottom.paragraph_gap_em, PARAGRAPH_GAP_RANGE.0);
         assert_eq!(bottom.indent_em, INDENT_RANGE.0);
+        assert_eq!(bottom.letter_spacing_em, LETTER_SPACING_RANGE.0);
         assert_eq!(bottom.max_measure, MAX_MEASURE_RANGE.0);
         assert_eq!(bottom.margin_x, MARGIN_X_RANGE.0);
+        assert_eq!(bottom.margin_y, MARGIN_Y_RANGE.0);
         // 翻页时长同理：两端引用配置的常数，界面不许有第二套「最慢/最快」。
         let slow = Appearance {
             turn_duration: TURN_DURATION_RANGE.1 + 1.0,
@@ -756,5 +816,52 @@ mod tests {
         }
         .normalized();
         assert_eq!(fast.turn_duration, TURN_DURATION_RANGE.0);
+    }
+
+    /// 书的 `@page` 是默认值；读者把「上下页边距」拖离 0 就整个覆盖，上下两边都用
+    /// 读者那一个数。没书（TXT / 定版式）时与这一格出现之前一样。
+    #[test]
+    fn book_page_margins_are_the_default_and_the_reader_overrides_them() {
+        let book = PageMargins {
+            top: Some(Length::Px(12.0)),
+            bottom: Some(Length::Px(6.0)),
+            ..PageMargins::default()
+        };
+        assert_eq!(effective_page_margins(0.0, book, 600.0), (12.0, 6.0));
+        assert_eq!(
+            bands_with_vertical_margins(12.0, 6.0),
+            (HEADER_HEIGHT + 12.0, FOOTER_HEIGHT + 6.0),
+            "两条带按各自那一边长高"
+        );
+        assert_eq!(
+            effective_page_margins(30.0, book, 600.0),
+            (30.0, 30.0),
+            "读者一拖，书里那两条都不再影响"
+        );
+        assert_eq!(
+            effective_page_margins(0.0, PageMargins::default(), 600.0),
+            (0.0, 0.0),
+            "没写 @page 的书不凭空多出边距"
+        );
+
+        let percent = PageMargins {
+            top: Some(Length::Percent(0.1)),
+            bottom: Some(Length::Px(999.0)),
+            ..PageMargins::default()
+        };
+        assert_eq!(
+            effective_page_margins(0.0, percent, 600.0),
+            (60.0, Reader::MARGIN_Y_MAX),
+            "百分比按页框宽折；越界值夹到配置上界"
+        );
+        assert_eq!(
+            effective_page_margins(-5.0, book, 600.0),
+            (12.0, 6.0),
+            "负的读者值等于没设，仍然跟书"
+        );
+        assert_eq!(
+            effective_page_margins(999.0, book, 600.0),
+            (Reader::MARGIN_Y_MAX, Reader::MARGIN_Y_MAX)
+        );
     }
 }

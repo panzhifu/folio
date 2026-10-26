@@ -19,7 +19,7 @@ mod reflow;
 mod scroll;
 mod selection;
 mod speech;
-mod translation;
 mod swipe;
 mod toc;
+mod translation;
 mod turn;

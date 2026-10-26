@@ -75,14 +75,20 @@ type PrefTweak = (&'static str, fn(&mut crate::infra::config::Reader));
 
 /// 每项读者偏好的「动一下它」写法。清单与 `Reader` 的字段表一一对应
 /// （下面那条断言守着），加字段时照着补一行。
-const PREF_TWEAKS: [PrefTweak; 12] = [
+const PREF_TWEAKS: [PrefTweak; 16] = [
     ("font_size", |p| p.font_size += 1.0),
     ("line_height", |p| p.line_height += 0.1),
     ("paragraph_gap_em", |p| p.paragraph_gap_em += 0.1),
     ("indent_em", |p| p.indent_em += 0.5),
+    ("letter_spacing_em", |p| p.letter_spacing_em += 0.01),
     ("max_measure", |p| p.max_measure += 10.0),
     ("margin_x", |p| p.margin_x += 4.0),
+    ("margin_y", |p| p.margin_y += 4.0),
     ("justify", |p| p.justify = !p.justify),
+    ("font_weight", |p| p.font_weight += 100),
+    ("text_direction", |p| {
+        p.text_direction = crate::infra::config::TextDirection::Vertical
+    }),
     ("font_family", |p| p.font_family = "serif".into()),
     ("mono_font_family", |p| p.mono_font_family = "mono2".into()),
     ("toc_density", |p| {

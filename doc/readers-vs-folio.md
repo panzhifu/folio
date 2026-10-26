@@ -28,7 +28,7 @@
 |---|---|
 | 总体 | **阅读内核已站进第一梯队，差距集中在外向生态。** |
 | 领先 / 独有 | 格式矩阵最宽（21 provider 全纯 Rust）；自研排版引擎、零 WebView；双页自动退档、仿真卷页、Wi-Fi 传书（局域网 + PIN）、字符偏移 Locator（换字号换窗口不漂移）、**听读一体**（五家里只有 Folio 与 Readest 有朗读，且只有 Folio 把听书计入统计） |
-| 差距（按补齐划算程度） | ① **批注闭环** —— 列表屏（书内「批注」格 + 跨书「笔记」屏）、导出（txt/MD/HTML）、书签、删除撤销**已补齐**；剩批注导入互通；② **同步** —— WebDAV 协议层已写好但零接线；③ **OPDS 书源**；④ **TTS** 补平台与句级；⑤ **AI 与词典** —— 选区翻译弹窗（Google 免 key + 缓存）**第 1 期已补**，本地词典与 AI 是战略级选择，暂缓不动摇内核 |
+| 差距（按补齐划算程度） | ① **批注闭环** —— 列表屏（书内「批注」格 + 跨书「笔记」屏）、导出（txt/MD/HTML）、书签、删除撤销**已补齐**；剩批注导入互通；② **同步** —— WebDAV 协议层已写好但零接线；③ **OPDS 书源**；④ **TTS** 补平台与句级；⑤ **AI 与词典** —— 选区翻译弹窗（Google 免 key / OpenAI 兼容 / DeepL 三档）**第 2 期已补**，本地词典与 AI 是战略级选择，暂缓不动摇内核 |
 | 不追 | Okular 的表单 / 签名 / 打印 / 演示模式是文档查看器的物种能力；KOReader 的 Kindle/Kobo/ReMarkable 那一串墨水屏宿主是它物种的一部分 —— 都与 Folio 的定位无关，不进 roadmap |
 
 ## 功能矩阵
@@ -95,8 +95,8 @@
 | 功能 | **Folio** | Okular | Foliate | Readest | Anx Reader | KOReader |
 |---|---|---|---|---|---|---|
 | 本地词典 | ❌ | ❌ | ❌ | ✅（词典生态） | ❌ | ✅ Stardict + sdcv |
-| 选区翻译弹窗 | ✅ Google 免 key + SQLite 缓存 + 弹层内换语言 | ❌ | ✅ | ✅ 多引擎可配 | ❌ | ✅ 翻译仅 Google 一个引擎 |
-| 翻译引擎可配 / 自定义 | ⚠️ 第 2 期（trait 已立，缓存键带引擎名） | ❌ | ❌ | ✅ 4 内置 + 自定义 OpenAI 兼容 | ✅ 6 种 provider | ⚠️ 服务器可换，仅 Google 系 |
+| 选区翻译弹窗 | ✅ 三引擎可配 + SQLite 缓存 + 弹层内换语言 | ❌ | ✅ | ✅ 多引擎可配 | ❌ | ✅ 翻译仅 Google 一个引擎 |
+| 翻译引擎可配 / 自定义 | ✅ Google 免 key、OpenAI 兼容（自填地址 / 模型 / Key）、DeepL；缓存键带引擎与模型指纹 | ❌ | ❌ | ✅ 4 内置 + 自定义 OpenAI 兼容 | ✅ 6 种 provider | ⚠️ 服务器可换，仅 Google 系 |
 | AI 陪读（防剧透 RAG，只许讨论已读页码） | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 | AI 多 provider + agent 工具 | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
 | 全书双语翻译 | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
@@ -163,7 +163,7 @@
 | 3 | **同步**：接线 WebDAV，做进度 + 批注整库同步 | `net/remote/dav.rs` 协议层零调用 | 形态照 Anx 的整库同步 | 自家 `folio-core/src/net/remote/dav.rs`；第二步 KOSync（KOReader 生态事实标准） |
 | 4 | **OPDS 书源** | 无 | Foliate（1.x + 2.0 一并支持）；KOReader 连 PSE 都有 | Foliate `src/opds/`；KOReader `plugins/opds.koplugin/`；Readest 的 OPDS-PSE |
 | 5 | **TTS**：段级 → 句级高亮，补 macOS / Windows 后端 | 段级 utterance，仅 Linux / Android | Foliate 的句级高亮 | folio-core 的行盒已在手；之后补 EPUB 3 Media Overlays |
-| 6 | **AI / 词典 / 翻译** —— 选区翻译弹窗（Google 免 key + v24 缓存 + 弹层内换语）**第 1 期已补**；剩：引擎可配（OpenAI 兼容 / DeepL，trait 与缓存键已按多引擎立好）、本地词典、AI 陪读 | 弹窗 + 缓存 + 短语言清单已接 | 弹窗照 Foliate/Readest；引擎抽象照 Readest `TranslationProvider`；端点照 KOReader `translator.lua`（`client=gtx`） | `net/translate/`、`store/translations.rs`；上游参照 Readest `services/translators/`、KOReader `frontend/ui/translator.lua`、Foliate `selection-tools/translate.html` |
+| 6 | **AI / 词典 / 翻译** —— 选区翻译弹窗（Google 免 key / OpenAI 兼容 / DeepL 三档 + v24 缓存 + 弹层内换语 + 设置页配引擎）**第 2 期已补**；剩：本地词典、AI 陪读 | 弹窗 + 缓存 + 短语言清单 + 三引擎设置页已接 | 弹窗照 Foliate/Readest；引擎抽象照 Readest `TranslationProvider`；端点照 KOReader `translator.lua`（`client=gtx`） | `net/translate/`、`store/translations.rs`；上游参照 Readest `services/translators/`、KOReader `frontend/ui/translator.lua`、Foliate `selection-tools/translate.html` |
 
 ## Folio 已经领先的地方（保持住）
 

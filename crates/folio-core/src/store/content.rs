@@ -344,7 +344,8 @@ impl Store {
     /// 由导出那一头的兜底（「第 N 章」）接着答，这里不猜。
     pub fn chapter_titles(&self, book_id: i64) -> Result<Vec<Chapter>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = conn.prepare("SELECT idx, title FROM chapters WHERE book_id = ?1 ORDER BY idx")?;
+        let mut stmt =
+            conn.prepare("SELECT idx, title FROM chapters WHERE book_id = ?1 ORDER BY idx")?;
         let rows = stmt
             .query_map(params![book_id], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))

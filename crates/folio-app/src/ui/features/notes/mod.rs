@@ -24,14 +24,12 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{
-    ActiveTheme, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, Context, ElementId, EventEmitter, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt as _, Task, Window, div, px,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Task,
+    TestSupportExt as _, Window, div, px,
 };
 
 use crate::ui::components::empty_state;
@@ -135,13 +133,7 @@ impl NotesView {
     }
 
     /// 点了一条：报给外壳（开书 + 落点都在它手里）。
-    fn open_entry(
-        &mut self,
-        book_id: i64,
-        chapter: usize,
-        offset: usize,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_entry(&mut self, book_id: i64, chapter: usize, offset: usize, cx: &mut Context<Self>) {
         cx.emit(NotesEvent::Open {
             book_id,
             jump: (chapter, offset),
@@ -250,7 +242,12 @@ impl NotesView {
             &export_file_name(&meta.title, format),
             cx,
         );
-        tracing::info!(book_id, format = format.ext(), count = annotations.len(), "笔记: 导出批注");
+        tracing::info!(
+            book_id,
+            format = format.ext(),
+            count = annotations.len(),
+            "笔记: 导出批注"
+        );
     }
 
     /// 读不到书库。这一句与「还没有批注」必须分得开 —— 与统计那一屏同一条规矩。
@@ -305,74 +302,59 @@ impl NotesView {
                     .text_color(cx.theme().muted_foreground)
                     .child(counts),
             )
-                .child(
-                    Button::new("notes-export")
-                        .ghost()
-                        .small()
-                        .icon(IconName::CircleEllipsis)
-                        .tooltip(export_label.clone().to_string())
-                        .accessibility_label(export_label)
-                        .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, cx| {
-                            let (md_panel, txt_panel, html_panel) = (
-                                export_panel.clone(),
-                                export_panel.clone(),
-                                export_panel.clone(),
-                            );
-                            let txt_label = tr(cx, "notes.export_text");
-                            let md_label = tr(cx, "notes.export_markdown");
-                            let html_label = tr(cx, "notes.export_html");
-                            menu.min_w(px(200.))
-                                .item(
-                                    PopupMenuItem::new(txt_label).on_click(move |_, _, cx| {
-                                        txt_panel.update(cx, |this, cx| {
-                                            this.export_group(
-                                                export_book,
-                                                AnnotationExportFormat::Text,
-                                                cx,
-                                            )
-                                        })
-                                    }),
-                                )
-                                .item(
-                                    PopupMenuItem::new(md_label).on_click(move |_, _, cx| {
-                                        md_panel.update(cx, |this, cx| {
-                                            this.export_group(
-                                                export_book,
-                                                AnnotationExportFormat::Markdown,
-                                                cx,
-                                            )
-                                        })
-                                    }),
-                                )
-                                .item(
-                                    PopupMenuItem::new(html_label).on_click(move |_, _, cx| {
-                                        html_panel.update(cx, |this, cx| {
-                                            this.export_group(
-                                                export_book,
-                                                AnnotationExportFormat::Html,
-                                                cx,
-                                            )
-                                        })
-                                    }),
-                                )
-                        }),
-                );
+            .child(
+                Button::new("notes-export")
+                    .ghost()
+                    .small()
+                    .icon(IconName::CircleEllipsis)
+                    .tooltip(export_label.clone().to_string())
+                    .accessibility_label(export_label)
+                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, cx| {
+                        let (md_panel, txt_panel, html_panel) = (
+                            export_panel.clone(),
+                            export_panel.clone(),
+                            export_panel.clone(),
+                        );
+                        let txt_label = tr(cx, "notes.export_text");
+                        let md_label = tr(cx, "notes.export_markdown");
+                        let html_label = tr(cx, "notes.export_html");
+                        menu.min_w(px(200.))
+                            .item(PopupMenuItem::new(txt_label).on_click(move |_, _, cx| {
+                                txt_panel.update(cx, |this, cx| {
+                                    this.export_group(export_book, AnnotationExportFormat::Text, cx)
+                                })
+                            }))
+                            .item(PopupMenuItem::new(md_label).on_click(move |_, _, cx| {
+                                md_panel.update(cx, |this, cx| {
+                                    this.export_group(
+                                        export_book,
+                                        AnnotationExportFormat::Markdown,
+                                        cx,
+                                    )
+                                })
+                            }))
+                            .item(PopupMenuItem::new(html_label).on_click(move |_, _, cx| {
+                                html_panel.update(cx, |this, cx| {
+                                    this.export_group(export_book, AnnotationExportFormat::Html, cx)
+                                })
+                            }))
+                    }),
+            );
         let rows: Vec<AnyElement> = group
             .marks
             .iter()
             .map(|entry| self.mark_row(group, entry, cx))
             .collect();
-        v_flex().w_full().child(header).children(rows).into_any_element()
+        v_flex()
+            .w_full()
+            .child(header)
+            .children(rows)
+            .into_any_element()
     }
 
     /// 一行：识别物（书签图标 / 颜色点）+ 引文一行 + 出处与笔记一行 + 行尾删除。
     /// 点行本身 = 跳回原文。
-    fn mark_row(
-        &self,
-        group: &BookGroup,
-        entry: &MarkEntry,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn mark_row(&self, group: &BookGroup, entry: &MarkEntry, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let badge = if entry.is_bookmark {
             Icon::new(IconName::Bookmark)
@@ -386,10 +368,16 @@ impl NotesView {
                 .iter()
                 .position(|name| Some(*name) == entry.color.as_deref())
                 .unwrap_or(0);
-            let color = [theme.red, theme.magenta, theme.cyan, theme.green, theme.yellow]
-                .get(index)
-                .copied()
-                .unwrap_or(theme.red);
+            let color = [
+                theme.red,
+                theme.magenta,
+                theme.cyan,
+                theme.green,
+                theme.yellow,
+            ]
+            .get(index)
+            .copied()
+            .unwrap_or(theme.red);
             div()
                 .flex_none()
                 .w(px(8.0))
@@ -467,8 +455,7 @@ impl NotesView {
                     .small()
                     .icon(IconName::Trash)
                     .on_click(move |_, _, cx| {
-                        delete_view
-                            .update(cx, |this, cx| this.remove_entry(is_bookmark, id, cx))
+                        delete_view.update(cx, |this, cx| this.remove_entry(is_bookmark, id, cx))
                     }),
             )
             .on_click(move |_, _, cx| {
@@ -522,20 +509,15 @@ impl Render for NotesView {
                         .small()
                         .label(action.to_string())
                         .accessibility_label(action)
-                        .on_click(move |_, _, cx| {
-                            view.update(cx, |this, cx| this.undo_delete(cx))
-                        }),
+                        .on_click(move |_, _, cx| view.update(cx, |this, cx| this.undo_delete(cx))),
                 )
                 .into_any_element()
         });
         let body: AnyElement = match (&self.data, self.store_missing) {
             (_, true) => self.unavailable(cx),
-            (Some(groups), false) if groups.is_empty() => empty_state(
-                tr(cx, "nav.notes"),
-                tr(cx, "nav.pending.notes"),
-                cx,
-            )
-            .into_any_element(),
+            (Some(groups), false) if groups.is_empty() => {
+                empty_state(tr(cx, "nav.notes"), tr(cx, "nav.pending.notes"), cx).into_any_element()
+            }
             (Some(groups), false) => {
                 let mut sections: Vec<AnyElement> = Vec::with_capacity(groups.len());
                 for group in groups {
@@ -543,8 +525,9 @@ impl Render for NotesView {
                 }
                 v_flex().w_full().children(sections).into_any_element()
             }
-            (None, false) => empty_state(tr(cx, "nav.notes"), tr(cx, "nav.pending.notes"), cx)
-                .into_any_element(),
+            (None, false) => {
+                empty_state(tr(cx, "nav.notes"), tr(cx, "nav.pending.notes"), cx).into_any_element()
+            }
         };
         let column = v_flex()
             .w_full()
@@ -588,7 +571,11 @@ fn export_file_name(title: &str, format: AnnotationExportFormat) -> String {
         })
         .collect();
     let cleaned = cleaned.trim();
-    let cleaned = if cleaned.is_empty() { "批注" } else { cleaned };
+    let cleaned = if cleaned.is_empty() {
+        "批注"
+    } else {
+        cleaned
+    };
     format!("《{cleaned}》批注.{}", format.ext())
 }
 
@@ -598,12 +585,14 @@ fn load_groups(store: &folio_core::Store) -> folio_core::Result<Vec<BookGroup>> 
     let mut groups: HashMap<i64, BookGroup> = HashMap::new();
     for card in store.all_annotations()? {
         let annotation = &card.annotation;
-        let group = groups.entry(annotation.book_id).or_insert_with(|| BookGroup {
-            book_id: annotation.book_id,
-            title: card.book_title.clone(),
-            latest: annotation.created_at,
-            marks: Vec::new(),
-        });
+        let group = groups
+            .entry(annotation.book_id)
+            .or_insert_with(|| BookGroup {
+                book_id: annotation.book_id,
+                title: card.book_title.clone(),
+                latest: annotation.created_at,
+                marks: Vec::new(),
+            });
         group.latest = group.latest.max(annotation.created_at);
         group.marks.push(MarkEntry {
             is_bookmark: false,

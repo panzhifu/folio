@@ -55,7 +55,14 @@ impl Store {
             "INSERT OR REPLACE INTO translations
              (provider, source_lang, target_lang, source_hash, target_text, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![provider, source_lang, target_lang, source_hash, target_text, now()],
+            params![
+                provider,
+                source_lang,
+                target_lang,
+                source_hash,
+                target_text,
+                now()
+            ],
         )?;
         // 修剪放在写的那一趟而不是后台作业：这张表只在翻译落笔时才长，就地清一次
         // 是一条小 DELETE，省掉一套定时任务的复杂度。

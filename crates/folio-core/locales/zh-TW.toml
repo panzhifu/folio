@@ -146,6 +146,8 @@ toc = "目錄"
 # 设置页里的分组标题。一页多组时它们会作为侧栏那一页下的子项出现，
 # 所以每个都得是一个名词，而不是「其它」「更多」。
 speech = "聽書"
+
+translation = "翻譯"
 [group]
 usage = "佔用"
 cleanup = "清理"
@@ -161,9 +163,14 @@ watch = "資料夾監聽"
 transfer = "Wi-Fi 傳輸"
 rows = "條目"
 marking = "劃線"
+direction = "方向"
 
 speech_voice = "聲音"
 speech_reading = "朗讀時"
+
+translation_output = "譯文"
+translation_openai = "OpenAI 相容"
+translation_deepl = "DeepL"
 [field]
 app_dir = "軟體資料目錄"
 log_dir = "記錄目錄"
@@ -181,8 +188,16 @@ max_measure = "最大行長"
 "max_measure.desc" = "正文欄的最大寬度（像素）。0 表示隨視窗鋪滿。"
 margin_x = "左右頁邊距"
 "margin_x.desc" = "正文欄兩側留白（像素）。"
+letter_spacing = "字距"
+"letter_spacing.desc" = "字與字之間多留的空隙，單位是字號倍。負值收緊，0 是預設。"
+margin_y = "上下頁邊距"
+"margin_y.desc" = "正文欄上下的留白（像素）。它不改折行，只改一頁裝多少行。"
+font_weight = "字重"
+"font_weight.desc" = "正文的粗細。裝置上沒有對應字面時，排版層會挑最接近的一面；600 以上還會疊一遍合成粗體。"
+text_direction = "文字方向"
+"text_direction.desc" = "依書本、直排或橫排。直排只在分頁、單欄時生效；上下捲動仍按橫排排。"
 font_family = "正文字型"
-"font_family.desc" = "填字型家族名，例如 LXGW WenKai、Noto Serif CJK SC。"
+"font_family.desc" = "從這台裝置已安裝的字型中選擇。"
 appearance_mode = "淺深"
 "appearance_mode.desc" = "跟著系統走，或者固定淺色 / 深色。"
 theme_light = "淺色主題"
@@ -226,6 +241,19 @@ speech_pitch = "音高"
 "speech_pitch.desc" = "唸出來的調子。1.0 是正常音高。"
 speech_auto_scroll = "唸到哪翻到哪"
 "speech_auto_scroll.desc" = "聽書時螢幕跟著正在唸的那一段走。關掉就是「唸它的，我翻我的」。"
+
+translation_target_lang = "譯成"
+"translation_target_lang.desc" = "選區翻譯譯成哪種語言。選「跟隨介面語言」就隨介面切。"
+translation_engine = "引擎"
+"translation_engine.desc" = "由誰來譯。Google 免 key 零設定可用；OpenAI 相容涵蓋各家雲端服務與本地模型；DeepL 需要 API Key。"
+translation_openai_base = "服務位址"
+"translation_openai_base.desc" = "API 根位址，例如 https://api.openai.com/v1；本地 Ollama 常用 http://localhost:11434/v1。"
+translation_openai_model = "模型"
+"translation_openai_model.desc" = "服務端認的模型名稱，例如 gpt-4o-mini 或 qwen2.5:7b。"
+translation_openai_key = "API Key"
+"translation_openai_key.desc" = "只存在本機的 config.json 裡。本地服務不需要就留空。"
+translation_deepl_key = "API Key"
+"translation_deepl_key.desc" = "DeepL 的金鑰。免費方案以 :fx 結尾，會自動走免費端點。"
 [page_turn]
 slide = "左右平移"
 slide_up = "上下平移"
@@ -238,6 +266,16 @@ none = "不走動畫"
 highlight = "高亮"
 line = "實線"
 wavy = "波浪線"
+
+[font_weight]
+light = "細"
+regular = "標準"
+bold = "粗體"
+
+[text_direction]
+auto = "依書本"
+vertical = "直排"
+horizontal = "橫排"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
@@ -546,3 +584,12 @@ stale = "⚠️ %{place} · 位置已失效"
 undo = "復原"
 deleted_annotation = "已刪除一條劃線"
 deleted_bookmark = "已刪除一枚書籤"
+
+[font_picker]
+search = "搜尋字型"
+
+[translation]
+follow_ui = "跟隨介面語言"
+engine_google = "Google 免 key"
+engine_openai = "OpenAI 相容"
+engine_deepl = "DeepL"
