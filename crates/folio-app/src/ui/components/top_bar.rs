@@ -70,7 +70,7 @@ pub struct TopBar {
     /// 返回那颗的说明：tooltip 与无障碍标签都用它（图标按钮不能没有名字）。
     back_tooltip: SharedString,
     /// 文案要不要也画出来。手机上画（读者认「返回」比认箭头快），阅读页那一条不画 ——
-    /// 它右边还要摆当前章名，带文字的返回会把书名挤成三个字。
+    /// 它与右侧书签、目录开关共用一条，返回保持最窄。
     show_back_label: bool,
     /// 返回那颗走 `small` 档（与同一排里的其它小按钮同高）。
     back_small: bool,

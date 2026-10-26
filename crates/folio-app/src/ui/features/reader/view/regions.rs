@@ -18,18 +18,18 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Corners, InteractiveElement, IntoElement, ParentElement, SharedString,
-    Styled, TestSupportExt as _, div, px,
+    AnyElement, Context, Corners, InteractiveElement, IntoElement, ParentElement, Styled,
+    TestSupportExt as _, div, px,
 };
 
 use super::reading_page::ReadingPage;
 
 impl ReadingPage {
-    /// 顶栏：返回 + 书名，右边是这一章的章名。那条本身的样子（高、内缩、popover 表面、
-    /// 只圆下角、拦住落在它空隙里的一击）都在 [`TopBar`] 里，与书信息页、紧凑设置那一屏
-    /// 共用一份；高从 [`chrome::TOP_BAR_HEIGHT`] 递进去，那个数同时管布局与画面。
+    /// 顶栏：返回在左，右侧是书签与宽档的目录开关。
     ///
-    /// 右边不摆页码 —— 底栏那条状态行已经念过一遍，而「读到哪一章了」是两栏都想一眼看到的。
+    /// 书名与章名不摆在这一条上 —— 阅读时它们不改变下一步动作，只占掉返回与右侧开关
+    /// 之间的宽度。章名在干净态页眉那条小字里仍然念得到（`bands::header`）。
+    ///
     /// `wide` 决定目录开关长不长在这一条上：手机档的目录是底部弹层，入口在底栏；平板 / PC
     /// 档的目录是盖在正文上的抽屉，没有常驻的栏可以挂关闭键，开关就长在这里。
     pub(in crate::ui::features::reader) fn top_bar(
@@ -37,8 +37,6 @@ impl ReadingPage {
         wide: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let title = self.reader.read(cx).title();
-        let chapter: SharedString = self.reader.read(cx).chapter_title().into();
         let page = cx.entity().clone();
         // 书签开关两端都在：钉的是「正在读的这一处」，与目录、设置那类入口不同类 ——
         // 它是有状态的开关（钉着 / 没钉），所以吃 `selected`。判据在会话里
@@ -80,8 +78,6 @@ impl ReadingPage {
         TopBar::new("reader-top-bar")
             .overlay(self.top_inset)
             .height(chrome::TOP_BAR_HEIGHT)
-            .title(title)
-            .subtitle(chapter)
             .back_tooltip(tr(cx, "shelf.back"))
             .on_back(move |_, cx| {
                 page.update(cx, |this, cx| this.pop(cx));
@@ -265,19 +261,6 @@ impl ReadingPage {
                     .label(tr(cx, "reader.toc").to_string())
                     .on_click(move |_, _, cx| page_toc.update(cx, |this, cx| this.toggle_toc(cx))),
             )
-            .child(
-                Button::new("entry-settings")
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .justify_center()
-                    .selected(settings_open)
-                    .icon(IconName::Settings)
-                    .label(tr(cx, "account.settings").to_string())
-                    .on_click(move |_, _, cx| {
-                        page_settings.update(cx, |this, cx| this.toggle_settings(cx))
-                    }),
-            )
             // 「放大整页」只在定版式那一族摆（判据在上面那一格 `fixed`）。
             //
             // 为什么这一格现在才需要：那一族的「看大图」原先挂在**长按**上，而那一族的
@@ -357,12 +340,26 @@ impl ReadingPage {
                         page_night.update(cx, |this, cx| this.toggle_night(cx))
                     }),
             )
+            // 设置放最右：翻页、夜间这些当场生效的开关留在中间，设置单独占一端。
+            .child(
+                Button::new("entry-settings")
+                    .ghost()
+                    .small()
+                    .flex_1()
+                    .justify_center()
+                    .selected(settings_open)
+                    .icon(IconName::Settings)
+                    .label(tr(cx, "account.settings").to_string())
+                    .on_click(move |_, _, cx| {
+                        page_settings.update(cx, |this, cx| this.toggle_settings(cx))
+                    }),
+            )
             .into_any_element()
     }
 
     /// 听书那颗圆钮：浮在底栏卡片**上方的右端**。
     ///
-    /// 原来它只是入口排里的一格图标。那一排现在有四格（目录 / 设置 / 双页 / 夜间），
+    /// 原来它只是入口排里的一格图标。那一排现在有四格（目录 / 双页 / 夜间 / 设置），
     /// 再挤一格在手机上每格就被挤到按不准；而听书与它们不同类 —— 它是有状态的开关
     /// （念着 / 停了），圆钮比一排里的图标更像开关。位置贴着底栏右缘、压在卡片上方的
     /// 正文上：拇指从右下角自然够得到，也不占卡片里已经排满的那一行。
