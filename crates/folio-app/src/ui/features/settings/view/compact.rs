@@ -267,6 +267,9 @@ pub(crate) struct CompactSettings {
     /// 对「反馈日志」状态实体的订阅。同上一条：读盘与拼快照在后台线程上跑，
     /// 那一格要从「正在整理日志…」变成结果，只能靠实体 notify 唤醒这一屏。
     _feedback_watch: Subscription,
+    /// 对「WebDAV 同步」状态实体的订阅。同步那趟在后台线程上结束，状态与计数靠
+    /// 实体 notify 才能出现在设置页上。
+    _sync_watch: Subscription,
 }
 
 impl CompactSettings {
@@ -284,11 +287,14 @@ impl CompactSettings {
         let update_watch = cx.observe(&update, |_, _, cx| cx.notify());
         let feedback = crate::ui::services::feedback::entity(cx);
         let feedback_watch = cx.observe(&feedback, |_, _, cx| cx.notify());
+        let sync = crate::ui::services::sync::entity(cx);
+        let sync_watch = cx.observe(&sync, |_, _, cx| cx.notify());
         Self {
             screen: Screen::Root,
             _storage_watch: watch,
             _update_watch: update_watch,
             _feedback_watch: feedback_watch,
+            _sync_watch: sync_watch,
         }
     }
 

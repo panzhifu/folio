@@ -33,6 +33,7 @@ mod collections;
 mod content;
 mod reading;
 mod schema;
+mod sync;
 mod translations;
 mod types;
 

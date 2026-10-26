@@ -370,6 +370,7 @@ mod tests {
     ) -> Annotation {
         Annotation {
             id,
+            uid: format!("uid-{id}"),
             book_id: 1,
             chapter,
             anchor,

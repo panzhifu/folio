@@ -21,7 +21,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use folio_core::{
-    Appearance, Config, Env, Language, Library, Provenance, Reader, Resolved, Speech, Translation,
+    Appearance, Config, Env, Language, Library, Provenance, Reader, Resolved, Speech, Sync,
+    Translation,
 };
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
@@ -134,6 +135,11 @@ impl ConfigHolder {
         Self::snapshot(cx).speech.clone()
     }
 
+    /// WebDAV 同步那一节。同步服务每次点击时读一次。
+    pub fn sync(cx: &App) -> Sync {
+        Self::snapshot(cx).sync.clone()
+    }
+
     /// 每一项的配置来自哪一层（§2.1）。诊断 dump 用。
     pub fn provenance(cx: &App) -> Provenance {
         Self::entity(cx).read(cx).provenance.clone()
@@ -178,6 +184,10 @@ impl ConfigHolder {
 
     pub fn edit_translation(cx: &mut App, f: impl FnOnce(&mut Translation)) {
         Self::edit(cx, |config| f(&mut config.translation));
+    }
+
+    pub fn edit_sync(cx: &mut App, f: impl FnOnce(&mut Sync)) {
+        Self::edit(cx, |config| f(&mut config.sync));
     }
 
     pub fn edit_library(cx: &mut App, f: impl FnOnce(&mut Library)) {

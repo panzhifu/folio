@@ -480,4 +480,40 @@ CREATE TABLE translations (
     UNIQUE (provider, source_lang, target_lang, source_hash)
 );
 "#,
+    // v25：**跨设备同步的稳定身份与删除墓碑**。
+    //
+    // 批注 / 书签原来的主键是本地自增 id —— 两台设备各自从 1 数起，同一条批注在两边
+    // 可能是不同的号。同步要认「这是不是同一条」，所以给两张表各补一格 `uid`
+    // （随机 16 字节的十六进制）；老行在这里就地回填，新行走插入时 `randomblob`。
+    // `uid` 可空只是 SQLite 不能给已有表加 NOT NULL 列，回填之后每一行都会有值。
+    //
+    // 书签此前只有 `created_at`（「钉下、跳回、拔掉」，不编辑）。恢复一条被拔掉的书签
+    // 需要一个新的时间戳压过远端墓碑，否则下一次同步会把它再删一次 —— 所以补一格
+    // `updated_at`，老行等于 `created_at`。
+    //
+    // **墓碑单独一张表**而不是给两张业务表加 `deleted_at`：那会把「列全部批注」的每条
+    // 查询都变成「还要记得过滤已删」，漏一处就是列表里多一行幽灵。删除时把
+    // `(kind, book_hash, uid, deleted_at)` 记在这里，读路径一行都不用改；撤销删除时
+    // 再把对应墓碑删掉。`book_hash` 让远端知道这条删除属于哪本书 —— 书本身从库中
+    // 移除时不写墓碑（那是「本机不再有这本书」，不是「读者删了这条批注」）。
+    r#"
+ALTER TABLE annotations ADD COLUMN uid TEXT;
+UPDATE annotations SET uid = lower(hex(randomblob(16))) WHERE uid IS NULL;
+CREATE UNIQUE INDEX idx_annotations_uid ON annotations(uid);
+
+ALTER TABLE bookmarks ADD COLUMN uid TEXT;
+ALTER TABLE bookmarks ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE bookmarks SET uid = lower(hex(randomblob(16))) WHERE uid IS NULL;
+UPDATE bookmarks SET updated_at = created_at WHERE updated_at = 0;
+CREATE UNIQUE INDEX idx_bookmarks_uid ON bookmarks(uid);
+
+CREATE TABLE sync_tombstones (
+    kind       TEXT    NOT NULL CHECK (kind IN ('annotation', 'bookmark')),
+    book_hash  TEXT    NOT NULL,
+    uid        TEXT    NOT NULL,
+    deleted_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, uid)
+);
+CREATE INDEX idx_sync_tombstones_book ON sync_tombstones(book_hash);
+"#,
 ];

@@ -14,6 +14,7 @@ pub mod l10n;
 pub mod library;
 pub mod resident;
 pub mod storage;
+pub mod sync;
 pub mod transfer;
 pub mod update;
 pub mod watch;

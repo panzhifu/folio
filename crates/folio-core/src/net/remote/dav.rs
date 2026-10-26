@@ -125,7 +125,7 @@ impl Client {
             .request(propfind_request(&self.endpoint, path))?;
         check_status(&resp, &[207, 200])?;
         let raw = parse_multistatus(&String::from_utf8_lossy(&resp.body))?;
-        let entries = children(&self.endpoint, &raw);
+        let entries = children(&self.endpoint, path, &raw);
         tracing::debug!(
             "dav: 列出 {:?} → 服务器回 {} 条，收成 {} 条",
             path,
@@ -389,8 +389,14 @@ fn parse_multistatus(xml: &str) -> Result<Vec<Raw>> {
 }
 
 /// 把原始条目收成「这一层的内容」：反解 `href`、扔掉查不到的、砍掉深层的。
-fn children(endpoint: &Endpoint, raw: &[Raw]) -> Vec<Entry> {
+/// 只留**被查询那一层**的内容。
+///
+/// `Entry.path` 始终是相对 Base 的完整路径（上层拿它去 GET / PUT），但收哪些、不收哪些
+/// 要看查询的是哪一层：根目录是「一段」，子目录是「以 `listed/` 开头且后面再没有斜杠」。
+/// `Depth: 1` 不被尊重时整棵树都会回来，按段数裁比按条数或时间猜可靠。
+fn children(endpoint: &Endpoint, listed: &str, raw: &[Raw]) -> Vec<Entry> {
     let prefix = endpoint.path_prefix();
+    let listed = listed.trim_matches('/');
     let mut out = Vec::new();
     for r in raw {
         if let Some(code) = r.status
@@ -410,8 +416,14 @@ fn children(endpoint: &Endpoint, raw: &[Raw]) -> Vec<Entry> {
         if path.is_empty() {
             continue;
         }
-        // 只留一层。`Depth: 1` 不被尊重时整棵树都会回来，按段数裁比按条数或时间猜可靠。
-        if path.split('/').count() > 1 {
+        let direct_child = if listed.is_empty() {
+            path.split('/').count() == 1
+        } else {
+            path.strip_prefix(listed)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+        };
+        if !direct_child {
             continue;
         }
         let name = match (r.display.trim().is_empty(), path.split('/').next_back()) {

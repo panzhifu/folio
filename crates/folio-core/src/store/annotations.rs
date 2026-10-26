@@ -10,12 +10,22 @@ use crate::Result;
 use crate::content::anchor::TextAnchor;
 
 /// [`Store::annotation`] 一次从库里读回来的形状：
-/// `(锚点 JSON, 书 id, stale, 创建, 更新, 笔记, 颜色, 画法)`。
+/// `(uid, 锚点 JSON, 书 id, stale, 创建, 更新, 笔记, 颜色, 画法)`。
 ///
 /// 起这个名字是因为「画法」那一格加上来之后，第八元素让 clippy 的
 /// `type_complexity` 直接报错。而它报得对：裸的八个元组在这里既读不出哪一格是什么，
 /// 换一次 `SELECT` 的顺序也不会被编译器抓住 —— 颜色与画法同为 `String`，错位照样编得过。
-type AnnotationRow = (String, i64, i64, i64, i64, String, String, String);
+type AnnotationRow = (
+    Option<String>,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    String,
+    String,
+    String,
+);
 
 impl Store {
     /// 记一条标注。`anchor` 是调用方从可见文本坐标建好的（见 `crate::content::anchor`），
@@ -40,8 +50,9 @@ impl Store {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let stamp = now();
         conn.execute(
-            "INSERT INTO annotations (book_id, anchor_json, note, color, style, stale, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+            "INSERT INTO annotations
+             (uid, book_id, anchor_json, note, color, style, stale, created_at, updated_at)
+             VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
             params![
                 book_id,
                 anchor.to_json(),
@@ -61,30 +72,32 @@ impl Store {
     pub fn annotations(&self, book_id: i64) -> Result<Vec<Annotation>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT id, book_id, anchor_json, note, color, style, stale, created_at, updated_at
+            "SELECT id, uid, book_id, anchor_json, note, color, style, stale, created_at, updated_at
              FROM annotations WHERE book_id = ?1 ORDER BY created_at, id",
         )?;
         let rows = stmt.query_map(params![book_id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
-                r.get::<_, i64>(6)? != 0,
-                r.get::<_, i64>(7)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)? != 0,
                 r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, book, json, note, color, style, stale, created_at, updated_at) = row?;
+            let (id, uid, book, json, note, color, style, stale, created_at, updated_at) = row?;
             let Some(anchor) = TextAnchor::from_json(&json) else {
                 continue;
             };
             out.push(Annotation {
                 id,
+                uid: uid.unwrap_or_default(),
                 book_id: book,
                 chapter: anchor.chapter,
                 anchor,
@@ -103,7 +116,7 @@ impl Store {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let row: Option<AnnotationRow> = conn
             .query_row(
-                "SELECT anchor_json, book_id, stale, created_at, updated_at, note, color, style
+                "SELECT uid, anchor_json, book_id, stale, created_at, updated_at, note, color, style
                  FROM annotations WHERE id = ?1",
                 params![id],
                 |r| {
@@ -111,19 +124,21 @@ impl Store {
                         r.get(0)?,
                         r.get(1)?,
                         r.get::<_, i64>(2)?,
-                        r.get(3)?,
+                        r.get::<_, i64>(3)?,
                         r.get(4)?,
                         r.get(5)?,
                         r.get(6)?,
                         r.get(7)?,
+                        r.get(8)?,
                     ))
                 },
             )
             .optional()?;
         Ok(row.and_then(
-            |(json, book_id, stale, created_at, updated_at, note, color, style)| {
+            |(uid, json, book_id, stale, created_at, updated_at, note, color, style)| {
                 TextAnchor::from_json(&json).map(|anchor| Annotation {
                     id,
+                    uid: uid.unwrap_or_default(),
                     book_id,
                     chapter: anchor.chapter,
                     anchor,
@@ -178,9 +193,38 @@ impl Store {
         Ok(conn.query_row("SELECT count(*) FROM annotations", [], |r| r.get(0))?)
     }
 
+    /// 删一条批注。删的同时记一条同步墓碑 —— 别的设备靠它知道「这条是读者删的」，
+    /// 而不是「这台设备还没收到」。
+    ///
+    /// `uid` 或书的 `content_hash` 为空时只删不记墓碑：没有跨设备身份或没有可对上的
+    /// 书，这条删除传不到任何地方。
     pub fn delete_annotation(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT a.uid, b.content_hash
+                 FROM annotations a JOIN books b ON b.id = a.book_id
+                 WHERE a.id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((uid, hash)) = row else {
+            return Ok(());
+        };
         conn.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
+        if let (Some(uid), Some(hash)) = (uid, hash)
+            && !uid.is_empty()
+            && !hash.is_empty()
+        {
+            conn.execute(
+                "INSERT INTO sync_tombstones (kind, book_hash, uid, deleted_at)
+                 VALUES ('annotation', ?2, ?1, ?3)
+                 ON CONFLICT(kind, uid) DO UPDATE SET
+                   book_hash = excluded.book_hash, deleted_at = excluded.deleted_at",
+                params![uid, hash, now()],
+            )?;
+        }
         Ok(())
     }
 
@@ -190,7 +234,7 @@ impl Store {
     pub fn all_annotations(&self) -> Result<Vec<AnnotationCard>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT a.id, a.book_id, a.anchor_json, a.note, a.color, a.style, a.stale,
+            "SELECT a.id, a.uid, a.book_id, a.anchor_json, a.note, a.color, a.style, a.stale,
                     a.created_at, a.updated_at, b.title
              FROM annotations a JOIN books b ON b.id = a.book_id
              ORDER BY a.created_at DESC, a.id DESC",
@@ -198,27 +242,40 @@ impl Store {
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
-                r.get::<_, i64>(6)? != 0,
-                r.get::<_, i64>(7)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)? != 0,
                 r.get::<_, i64>(8)?,
-                r.get::<_, String>(9)?,
+                r.get::<_, i64>(9)?,
+                r.get::<_, String>(10)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, book_id, json, note, color, style, stale, created_at, updated_at, book_title) =
-                row?;
+            let (
+                id,
+                uid,
+                book_id,
+                json,
+                note,
+                color,
+                style,
+                stale,
+                created_at,
+                updated_at,
+                book_title,
+            ) = row?;
             let Some(anchor) = TextAnchor::from_json(&json) else {
                 continue;
             };
             out.push(AnnotationCard {
                 annotation: Annotation {
                     id,
+                    uid: uid.unwrap_or_default(),
                     book_id,
                     chapter: anchor.chapter,
                     anchor,
@@ -235,20 +292,27 @@ impl Store {
         Ok(out)
     }
 
-    /// 撤销删除：按原样插回 —— id、时间戳、stale 都用库里那条原来的值。
+    /// 撤销删除：按原行插回，`id`、`uid`、`created_at` 都不变。
     ///
-    /// 撤销要还原的是「删之前的那一条」，不是「现在新划的一条」：id 变了，撤销槽之外
-    /// 引着它的界面状态就会指空。`INSERT OR REPLACE` 兜的是那个几乎不会发生的边角：
-    /// 删掉最大 id 的行之后立刻新划一条，SQLite 的 rowid 可能复用被删的那个号 ——
-    /// 那一刻「恢复原行」压过「占住新行」是正确的小败。
+    /// `updated_at` 抬到**现在**而不是照抄原值：撤销发生在删除之后，而删除可能已经同步到
+    /// 别的设备（那里有一条 `deleted_at` 比原 `updated_at` 新的墓碑）。照抄原时间戳的话，
+    /// 下一次同步会认为远端墓碑更新，把这条刚恢复的批注再删一次。抬到现在才让「撤销」
+    /// 在合并里赢过那次删除。`created_at` 仍不动，列表里的位置和「什么时候划的」不受影响。
+    ///
+    /// 同一条语句里把对应墓碑清掉 —— 否则本机下一次导出的快照里仍带着「已删」。
+    ///
+    /// `INSERT OR REPLACE` 兜的是那个几乎不会发生的边角：删掉最大 id 的行之后立刻新划
+    /// 一条，SQLite 的 rowid 可能复用被删的那个号 —— 那一刻「恢复原行」压过「占住新行」
+    /// 是正确的小败。
     pub fn restore_annotation(&self, row: &Annotation) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO annotations
-             (id, book_id, anchor_json, note, color, style, stale, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, uid, book_id, anchor_json, note, color, style, stale, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 row.id,
+                row.uid,
                 row.book_id,
                 row.anchor.to_json(),
                 row.note,
@@ -256,15 +320,19 @@ impl Store {
                 row.style.as_str(),
                 row.stale as i64,
                 row.created_at,
-                row.updated_at
+                now()
             ],
+        )?;
+        conn.execute(
+            "DELETE FROM sync_tombstones WHERE kind = 'annotation' AND uid = ?1",
+            params![row.uid],
         )?;
         Ok(())
     }
 }
 
-/// 颜色的规范化：小写、去空白，不在清单里的用默认值。
-fn color_of(input: &str) -> String {
+/// 颜色的规范化：小写、去空白，不在清单里的用默认值。同步写入远端记录时也走这一条。
+pub(super) fn color_of(input: &str) -> String {
     let key = input.trim().to_ascii_lowercase();
     if ANNOTATION_COLORS.contains(&key.as_str()) {
         key
@@ -785,8 +853,17 @@ mod tests {
 
         store.restore_annotation(&row).unwrap();
         let back = store.annotation(first).unwrap().expect("原 id 要回来");
-        assert_eq!(back, row, "整行照原样回来：笔记、颜色、画法、stale、时间戳");
+        assert_eq!(back.id, row.id);
+        assert_eq!(back.uid, row.uid, "撤销要沿用跨设备身份");
+        assert_eq!(back.created_at, row.created_at, "创建时间不动");
+        assert_eq!(back.note, row.note);
+        assert_eq!(back.color, row.color);
+        assert_eq!(back.style, row.style);
         assert!(back.stale);
+        assert!(
+            back.updated_at >= row.updated_at,
+            "撤销要把 updated_at 抬到现在，下一次同步才压得过远端墓碑"
+        );
         let ids: Vec<i64> = store
             .annotations(book)
             .unwrap()

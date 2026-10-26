@@ -33,6 +33,7 @@ pub mod position;
 pub mod search;
 pub mod speech;
 pub mod store;
+pub mod sync;
 
 pub use content::anchor::{
     Confidence, Relocated, TextAnchor, TextMap, line_at_offset, line_at_y, line_chars, line_offset,
@@ -51,7 +52,7 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
     Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, LOG_OFF_ENV, Language, Layer,
-    Library, Logging, Mode, PageTurn, Provenance, Reader, Resolved, Speech, TextDirection,
+    Library, Logging, Mode, PageTurn, Provenance, Reader, Resolved, Speech, Sync, TextDirection,
     TocDensity, Translation, TranslationEngine,
 };
 pub use infra::error::{Error, ImportReject, Result};

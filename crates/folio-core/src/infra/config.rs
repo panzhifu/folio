@@ -753,6 +753,55 @@ pub struct DeepL {
     pub api_key: String,
 }
 
+/// WebDAV 同步。只同步**进度 / 批注 / 书签**，不传书文件，也不碰这份配置本身。
+///
+/// 密码与翻译 key 同住 `config.json`：落盘已经收在 0600（见 [`Config::save_to`]），
+/// 再拆一个秘密文件只会让「备份/恢复」多一处要记得的地方。`device_id` 由 app 在第一次
+/// 同步时生成（见 `folio_core::sync::new_device_id`），它不是读者要填的东西。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sync {
+    pub enabled: bool,
+    /// WebDAV 入口根地址（建议 https）。同步文件挂在它下面的 `remote_dir`。
+    pub url: String,
+    pub username: String,
+    pub password: String,
+    /// 远端目录，默认 `folio-sync`；空串表示直接写在根下。
+    pub remote_dir: String,
+    /// 这台安装的稳定 id，也是它在远端那份快照的文件名（`<device_id>.json`）。
+    pub device_id: String,
+}
+
+impl Default for Sync {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            username: String::new(),
+            password: String::new(),
+            remote_dir: "folio-sync".into(),
+            device_id: String::new(),
+        }
+    }
+}
+
+impl Sync {
+    /// 与其它节同一条：手改过的值先去掉误带的首尾空白。**密码除外** —— 空格可能是密码
+    /// 的一部分；远端目录去掉两端斜杠，拼路径时只由同步层补一次。
+    pub fn normalized(mut self) -> Self {
+        self.url = self.url.trim().to_string();
+        self.username = self.username.trim().to_string();
+        self.remote_dir = self.remote_dir.trim().trim_matches('/').to_string();
+        self.device_id = self.device_id.trim().to_string();
+        self
+    }
+
+    /// 有地址且打开了开关，才谈得上同步。
+    pub fn configured(&self) -> bool {
+        self.enabled && !self.url.is_empty()
+    }
+}
+
 /// 排版输入。全部是纯数据、不含任何 UI 类型，因此同一份配置既能在桌面端用，
 /// 也能给移动端宿主用。
 ///
@@ -1059,6 +1108,7 @@ pub struct Config {
     pub language: Language,
     pub speech: Speech,
     pub translation: Translation,
+    pub sync: Sync,
     pub logging: Logging,
 }
 
@@ -1074,6 +1124,7 @@ impl Default for Config {
             language: Language::default(),
             speech: Speech::default(),
             translation: Translation::default(),
+            sync: Sync::default(),
             logging: Logging::default(),
         }
     }
@@ -1090,6 +1141,7 @@ impl Config {
         self.appearance = self.appearance.normalized();
         self.speech = self.speech.normalized();
         self.translation = self.translation.normalized();
+        self.sync = self.sync.normalized();
         // 书库位置去掉首尾空白：填成 "  /x  " 会让 `is_confirmed` 说「确认过」，
         // 而后面按这个串去找目录会找不到。
         self.library.dir = self.library.dir.trim().to_string();
@@ -1964,5 +2016,60 @@ mod tests {
         let broken = load(r#"{"speech":"快一点"}"#);
         assert_eq!(broken.speech, crate::Speech::default());
         assert!(broken.speech.auto_scroll, "退默认时自动翻页是开着的");
+    }
+}
+
+#[cfg(test)]
+mod sync_config_tests {
+    use super::{Config, Sync};
+
+    #[test]
+    fn sync_trims_the_address_and_dir_but_not_the_password() {
+        let config = Config {
+            sync: Sync {
+                enabled: true,
+                url: "  https://dav.example/dav/  ".into(),
+                username: "  reader  ".into(),
+                password: "  pass with spaces  ".into(),
+                remote_dir: "  /folio/sync/  ".into(),
+                device_id: "  dev-1  ".into(),
+            },
+            ..Config::default()
+        }
+        .normalized();
+        assert_eq!(config.sync.url, "https://dav.example/dav/");
+        assert_eq!(config.sync.username, "reader");
+        assert_eq!(config.sync.password, "  pass with spaces  ");
+        assert_eq!(config.sync.remote_dir, "folio/sync");
+        assert_eq!(config.sync.device_id, "dev-1");
+        assert!(config.sync.configured());
+    }
+
+    #[test]
+    fn sync_requires_both_the_switch_and_an_address() {
+        let mut sync = Sync::default();
+        assert!(!sync.configured());
+        sync.enabled = true;
+        assert!(!sync.configured(), "有开关没地址不算配置好");
+        sync.url = "https://example.test/".into();
+        assert!(sync.configured());
+    }
+
+    #[test]
+    fn a_sync_section_round_trips_through_json() {
+        let config = Config {
+            sync: Sync {
+                enabled: true,
+                url: "https://dav.example/".into(),
+                username: "u".into(),
+                password: "p".into(),
+                remote_dir: "folio".into(),
+                device_id: "dev".into(),
+            },
+            ..Config::default()
+        };
+        let text = serde_json::to_string(&config).unwrap();
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.sync, config.sync);
     }
 }

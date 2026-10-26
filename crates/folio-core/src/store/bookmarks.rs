@@ -19,9 +19,11 @@ impl Store {
     /// 存储层不参与坐标换算 —— 与 [`Store::add_annotation`] 同一条分工。
     pub fn add_bookmark(&self, book_id: i64, anchor: &TextAnchor) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let stamp = now();
         conn.execute(
-            "INSERT INTO bookmarks (book_id, anchor_json, created_at) VALUES (?1, ?2, ?3)",
-            params![book_id, anchor.to_json(), now()],
+            "INSERT INTO bookmarks (uid, book_id, anchor_json, created_at, updated_at)
+             VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?3)",
+            params![book_id, anchor.to_json(), stamp],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -30,29 +32,33 @@ impl Store {
     pub fn bookmarks(&self, book_id: i64) -> Result<Vec<Bookmark>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT id, book_id, anchor_json, created_at
+            "SELECT id, uid, book_id, anchor_json, created_at, updated_at
              FROM bookmarks WHERE book_id = ?1 ORDER BY created_at, id",
         )?;
         let rows = stmt.query_map(params![book_id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, book_id, json, created_at) = row?;
+            let (id, uid, book_id, json, created_at, updated_at) = row?;
             let Some(anchor) = TextAnchor::from_json(&json) else {
                 continue;
             };
             out.push(Bookmark {
                 id,
+                uid: uid.unwrap_or_default(),
                 book_id,
                 chapter: anchor.chapter,
                 anchor,
                 created_at,
+                updated_at,
             });
         }
         Ok(out)
@@ -62,32 +68,36 @@ impl Store {
     pub fn all_bookmarks(&self) -> Result<Vec<BookmarkCard>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.book_id, s.anchor_json, s.created_at, b.title
+            "SELECT s.id, s.uid, s.book_id, s.anchor_json, s.created_at, s.updated_at, b.title
              FROM bookmarks s JOIN books b ON b.id = s.book_id
              ORDER BY s.created_at DESC, s.id DESC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, book_id, json, created_at, book_title) = row?;
+            let (id, uid, book_id, json, created_at, updated_at, book_title) = row?;
             let Some(anchor) = TextAnchor::from_json(&json) else {
                 continue;
             };
             out.push(BookmarkCard {
                 bookmark: Bookmark {
                     id,
+                    uid: uid.unwrap_or_default(),
                     book_id,
                     chapter: anchor.chapter,
                     anchor,
                     created_at,
+                    updated_at,
                 },
                 book_title,
             });
@@ -95,25 +105,58 @@ impl Store {
         Ok(out)
     }
 
-    /// 拔一枚书签。
+    /// 拔一枚书签，并记一条同步墓碑（理由与 [`Store::delete_annotation`] 同）。
     pub fn delete_bookmark(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT s.uid, b.content_hash
+                 FROM bookmarks s JOIN books b ON b.id = s.book_id
+                 WHERE s.id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((uid, hash)) = row else {
+            return Ok(());
+        };
         conn.execute("DELETE FROM bookmarks WHERE id = ?1", params![id])?;
+        if let (Some(uid), Some(hash)) = (uid, hash)
+            && !uid.is_empty()
+            && !hash.is_empty()
+        {
+            conn.execute(
+                "INSERT INTO sync_tombstones (kind, book_hash, uid, deleted_at)
+                 VALUES ('bookmark', ?2, ?1, ?3)
+                 ON CONFLICT(kind, uid) DO UPDATE SET
+                   book_hash = excluded.book_hash, deleted_at = excluded.deleted_at",
+                params![uid, hash, now()],
+            )?;
+        }
         Ok(())
     }
 
-    /// 撤销拔除：按原样插回 —— id 与时间戳都用原来那一行的值。
+    /// 撤销拔除：按原行插回，`id`、`uid`、`created_at` 都不变。
     ///
-    /// 撤销要还原的是「拔之前的那一枚」，不是「现在新钉的一枚」：id 变了，撤销槽之外
-    /// 引着它的界面状态就会指空。`INSERT OR REPLACE` 兜的是那个几乎不会发生的边角：
-    /// 拔掉最大 id 的行之后立刻新钉一枚，SQLite 的 rowid 可能复用被拔的那个号 ——
-    /// 那一刻「恢复原行」压过「占住新行」是正确的小败。
+    /// `updated_at` 抬到现在并清掉墓碑 —— 与 [`Store::restore_annotation`] 同一条理由：
+    /// 删除可能已经同步出去，照抄旧时间戳会让下一次同步又把这一枚拔掉。
     pub fn restore_bookmark(&self, row: &Bookmark) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
-            "INSERT OR REPLACE INTO bookmarks (id, book_id, anchor_json, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![row.id, row.book_id, row.anchor.to_json(), row.created_at],
+            "INSERT OR REPLACE INTO bookmarks (id, uid, book_id, anchor_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                row.id,
+                row.uid,
+                row.book_id,
+                row.anchor.to_json(),
+                row.created_at,
+                now()
+            ],
+        )?;
+        conn.execute(
+            "DELETE FROM sync_tombstones WHERE kind = 'bookmark' AND uid = ?1",
+            params![row.uid],
         )?;
         Ok(())
     }
@@ -123,22 +166,27 @@ impl Store {
     /// 判据在调用方那头 —— 这一层不知道排版，只有库里那一行的原样。
     pub fn bookmark(&self, id: i64) -> Result<Option<Bookmark>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let row: Option<(i64, i64, String, i64)> = conn
+        let row: Option<(Option<String>, i64, String, i64, i64)> = conn
             .query_row(
-                "SELECT id, book_id, anchor_json, created_at FROM bookmarks WHERE id = ?1",
+                "SELECT uid, book_id, anchor_json, created_at, updated_at
+                 FROM bookmarks WHERE id = ?1",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        Ok(row.and_then(|(id, book_id, json, created_at)| {
-            TextAnchor::from_json(&json).map(|anchor| Bookmark {
-                id,
-                book_id,
-                chapter: anchor.chapter,
-                anchor,
-                created_at,
-            })
-        }))
+        Ok(
+            row.and_then(|(uid, book_id, json, created_at, updated_at)| {
+                TextAnchor::from_json(&json).map(|anchor| Bookmark {
+                    id,
+                    uid: uid.unwrap_or_default(),
+                    book_id,
+                    chapter: anchor.chapter,
+                    anchor,
+                    created_at,
+                    updated_at,
+                })
+            }),
+        )
     }
 }
 
@@ -259,7 +307,14 @@ mod tests {
 
         store.restore_bookmark(&row).unwrap();
         let back = store.bookmark(first).unwrap().expect("原 id 要回来");
-        assert_eq!(back, row, "整行照原样回来，连 id 带时间戳");
+        assert_eq!(back.id, row.id);
+        assert_eq!(back.uid, row.uid, "撤销要沿用跨设备身份");
+        assert_eq!(back.created_at, row.created_at, "钉下的时间不动");
+        assert_eq!(back.anchor, row.anchor);
+        assert!(
+            back.updated_at >= row.updated_at,
+            "撤销要把 updated_at 抬到现在，下一次同步才压得过远端墓碑"
+        );
         let ids: Vec<i64> = store
             .bookmarks(book)
             .unwrap()

@@ -622,7 +622,26 @@ impl Store {
 
     pub fn remove_book(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // 书从库里消失不是「读者删了某条批注」：它的批注/书签随外键级删，
+        // 但不该给别的设备发删除墓碑（别的设备可能还留着这本书）。把这本书名下的
+        // 历史墓碑一并清掉，免得以后同名同哈希的书回来时被旧删除误伤。
+        let hash: Option<String> = conn
+            .query_row(
+                "SELECT content_hash FROM books WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
         let rows = conn.execute("DELETE FROM books WHERE id = ?1", params![id])?;
+        if let Some(hash) = hash
+            && !hash.is_empty()
+        {
+            conn.execute(
+                "DELETE FROM sync_tombstones WHERE book_hash = ?1",
+                params![hash],
+            )?;
+        }
         // 删掉 0 行只有两种可能：那本书本来就不在，或者调用方拿错了 id。
         // 两种都表现为「界面上按了删除但书还在」，所以这里要说一句。
         if rows == 0 {
@@ -645,6 +664,19 @@ impl Store {
     }
 
     pub fn set_position(&self, book_id: i64, mode: &str, locator: &Locator) -> Result<()> {
+        self.set_position_at(book_id, mode, locator, now())
+    }
+
+    /// 写入进度，但用调用方给的时间戳。**只给同步用**：把远端那份原样搬进来时要保留
+    /// 它的时间，否则「本机刚应用了远端一条较早的进度」会被记成现在，下一次合并反过来
+    /// 压掉另一台设备更新的进度。
+    pub fn set_position_at(
+        &self,
+        book_id: i64,
+        mode: &str,
+        locator: &Locator,
+        updated_at: i64,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO positions (book_id, mode, locator_json, updated_at)
@@ -652,9 +684,22 @@ impl Store {
              ON CONFLICT(book_id) DO UPDATE SET
                mode = excluded.mode, locator_json = excluded.locator_json,
                updated_at = excluded.updated_at",
-            params![book_id, mode, locator.to_json(), now()],
+            params![book_id, mode, locator.to_json(), updated_at],
         )?;
         Ok(())
+    }
+
+    /// 进度连同它的时间戳。同步合并要比较「谁更新」，普通的 [`Store::position`] 不带这一格。
+    pub fn position_with_time(&self, book_id: i64) -> Result<Option<(String, Locator, i64)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(conn
+            .query_row(
+                "SELECT mode, locator_json, updated_at FROM positions WHERE book_id = ?1",
+                params![book_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .map(|(mode, json, updated_at)| (mode, Locator::from_json(&json), updated_at)))
     }
 
     pub fn position(&self, book_id: i64) -> Result<Option<(String, Locator)>> {

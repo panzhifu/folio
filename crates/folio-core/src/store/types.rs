@@ -162,6 +162,9 @@ impl<'de> Deserialize<'de> for AnnotationStyle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Annotation {
     pub id: i64,
+    /// 跨设备的稳定身份（16 字节随机数的十六进制）。本地 id 在另一台设备上可能指向
+    /// 另一条批注，同步只认这一格；界面不显示它。
+    pub uid: String,
     pub book_id: i64,
     /// 章在 `FlowDoc::chapters` 里的下标。表里另有 `chapter_id` 外键，但那是索引与
     /// 级删用的；**坐标属于哪一章以这里为准**，因为它和锚点是一起写进去的。
@@ -187,12 +190,17 @@ pub struct Annotation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bookmark {
     pub id: i64,
+    /// 跨设备的稳定身份，与 [`Annotation::uid`] 同一套。
+    pub uid: String,
     pub book_id: i64,
     /// 章在 `FlowDoc::chapters` 里的下标；定版式那一族是页号。表里没有第二个地方记它，
     /// 与批注同一条口径（v13 摘掉 `chapter_id` 的理由）。
     pub chapter: u32,
     pub anchor: TextAnchor,
     pub created_at: i64,
+    /// 书签不编辑，这一格只为同步存在：撤销拔除时要抬到「现在」，否则远端那条删除墓碑
+    /// 的时间戳还压着它，下一次同步会再删一次。新建时等于 `created_at`。
+    pub updated_at: i64,
 }
 
 /// 跨书列表里的一行批注：批注本体 + 它属于哪本书的书名。

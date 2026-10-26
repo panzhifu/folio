@@ -397,3 +397,29 @@ fn endpoint_normalizes_the_base_and_exposes_the_path_prefix() {
         "根挂载点也要有个能比对的前缀"
     );
 }
+
+/// 列子目录时只收**那一层**的直接孩子，`Entry.path` 仍是相对 Base 的完整路径 ——
+/// 同步的远端目录（`folio-sync/`）就在子目录里，符号错了会一条都收不到。
+#[test]
+fn listing_a_subdirectory_keeps_its_direct_children_with_full_paths() {
+    const SUB: &str = r#"<?xml version="1.0"?>
+        <d:multistatus xmlns:d="DAV:">
+          <d:response><d:href>/dav/books/folio/</d:href>
+            <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat>
+          </d:response>
+          <d:response><d:href>/dav/books/folio/dev-a.json</d:href>
+            <d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat>
+          </d:response>
+          <d:response><d:href>/dav/books/folio/nested/ignore.json</d:href>
+            <d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat>
+          </d:response>
+          <d:response><d:href>/dav/books/other.json</d:href>
+            <d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat>
+          </d:response>
+        </d:multistatus>"#;
+    let (client, _mock) = client(vec![ok207(SUB)]);
+    let entries = client.list("folio").unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "folio/dev-a.json");
+    assert_eq!(entries[0].name, "dev-a.json");
+}
