@@ -20,10 +20,11 @@
 
 use folio_core::infra::i18n::Locale;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, ClipboardItem, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement as _, Styled, div, px,
+    AnyElement, App, ClipboardItem, Entity, InteractiveElement as _, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement as _, Styled, div,
 };
 
 use crate::ui::components::muted_label;
@@ -33,11 +34,15 @@ use crate::ui::services::update::{self, Status};
 
 use super::super::*;
 
-pub(in crate::ui::features::settings) fn about_page(cx: &App) -> Page {
+pub(in crate::ui::features::settings) fn about_page(cx: &App, notes: &Entity<NotesSheet>) -> Page {
     page(
         tr(cx, "page.about"),
         IconName::Info,
-        vec![version_group(cx), update_group(cx), language_group(cx)],
+        vec![
+            version_group(cx),
+            update_group(cx, notes),
+            language_group(cx),
+        ],
     )
 }
 
@@ -152,14 +157,24 @@ fn language_options() -> Vec<(SharedString, SharedString)> {
 
 /// 「更新」这一组：一颗检查按钮，与它念出来的那句状态。
 ///
-/// 发现新版本时这一格**就地**摊开一块面板（版本号、正文、两颗按钮），不弹层。理由不是省事：
-/// 设置那两屏没有挂任何弹层宿主 —— `BottomSheet` 的现有用法是「功能自己持有实体、在自己的
-/// `render` 里挂」（`shelf/view/mod.rs:221-327` 与 `:1375-1381`），为一块面板去桌面与紧凑
-/// 两屏各加一层宿主不划算。形状抄同目录 `storage.rs` 的 `confirm_panel`：也是就地换内容。
+/// 发现新版本时这一格**就地**摊开一块面板（版本号、这一端有没有包、正文、两颗按钮）。面板
+/// 不挪进弹层：读者按下的就是这一格，「有没有新版、这一端能不能下」那一眼的答案该出现在
+/// 他视线停留的地方，而不是藏在另一层里。正文那一段现在按 Markdown 排 —— 与「更新日志」
+/// 那张卡片同一件元素，不再手写「认三样」的降级版。
+///
+/// 「更新日志」那一格开的是 [`NotesSheet`]（一块从底边升起来的卡片，整篇正文摊在里面）。
+/// 卡片要宿主，桌面与紧凑两屏因此**各挂了一份**：`BottomSheet` 的用法是「功能自己持有实体、
+/// 在自己的 `render` 里挂」（`shelf/view/mod.rs:221-327` 与 `:1375-1381`），句柄由建它的那一屏
+/// 经 [`spec_pages`](super::super::spec_pages) 交给这一页的规格，而不是全进程共用一份 ——
+/// 两屏可以同时活着（「我的」那一个目的地的根 + 从阅读页压进来的那一屏），共用一份时读者
+/// 关掉的是头顶那一屏，沉下去的却是底下那一屏的内容。
 ///
 /// 状态读的是 `services::update` 那个实体，所以这一格会自己重绘 —— 观察者挂在
 /// `settings/view/desktop.rs` 与 `compact.rs` 的构造上（那条链的所以然写在服务层顶部）。
-fn update_group(cx: &App) -> Group {
+fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
+    // 「更新日志」那一格要按下的正是**挂这一屏的**那一张卡片，所以句柄在这里落成一份拥有权
+    // 交给规格的闭包（闭包要 `'static`，借用带不进去）。
+    let card = notes.clone();
     group(
         tr(cx, "update.group"),
         vec![
@@ -211,6 +226,9 @@ fn update_group(cx: &App) -> Group {
             // 什么」，那件事不需要先跑一次版本比较。正文按 `v{当前版本}` 那条 tag 取，
             // 所以装了 0.1.1 而最新是 0.2.0 时，这里讲的仍是 0.1.1。
             Row::custom_titled(tr(cx, "update.notes"), move |cx| {
+                // 规格里那两层的闭包都要 `'static`，所以借用在这一格就换成一份拥有权；
+                // 每一帧一份、每一次点击一份，`Entity` 的 clone 只是一次引用计数。
+                let card = card.clone();
                 h_flex()
                     .w_full()
                     .items_center()
@@ -226,35 +244,15 @@ fn update_group(cx: &App) -> Group {
                             .label(tr(cx, "update.view").to_string())
                             .ghost()
                             .small()
-                            .on_click(|_, window, cx| {
-                                update::with_notes(window, cx, |text, window, cx| {
-                                    // 卡片是**拿到正文之后**才开的（`with_notes` 里那三条分支），
-                                    // 不先开一张空卡片赌它会不会自己重画。
-                                    window.open_dialog(cx, move |dialog, _window, cx| {
-                                        dialog
-                                            .title(tr(cx, "update.notes"))
-                                            .width(px(560.))
-                                            .child(
-                                                div()
-                                                    .id("folio-notes-scroll")
-                                                    .w_full()
-                                                    .max_h_96()
-                                                    .overflow_y_scroll()
-                                                    .child(match &text {
-                                                        update::Notes::Ready(body) => {
-                                                            notes_body(Some(body.clone()), cx)
-                                                        }
-                                                        // 取不到时念的是**为什么**取不到
-                                                        // （连不上 / 被限流 / 没发过版），
-                                                        // 不是一句「没有留下更新日志」。
-                                                        update::Notes::Failed(why) => {
-                                                            muted_label(why.to_string(), cx)
-                                                                .into_any_element()
-                                                        }
-                                                    }),
-                                            )
-                                            .footer(notes_footer(cx))
-                                    });
+                            .on_click(move |_, window, cx| {
+                                // 一颗按钮可以按很多次，而 `with_notes` 收的是 `FnOnce`。
+                                let card = card.clone();
+                                update::with_notes(window, cx, move |payload, _window, cx| {
+                                    // 卡片是**拿到正文之后**才抬起来的（`with_notes` 里那三条
+                                    // 分支），不先开一张空卡片赌它会不会自己重画。抬的是
+                                    // **挂这一屏的那一份**，不是全进程那一份 —— 理由写在
+                                    // `notes_sheet` 顶部。
+                                    card.update(cx, |card, cx| card.open(payload, cx));
                                 })
                             }),
                     )
@@ -362,14 +360,16 @@ fn newer_panel(cx: &App) -> AnyElement {
                 .w_full()
                 .max_h_48()
                 .overflow_y_scroll()
-                .child(muted_label(
-                    if notes.is_empty() {
-                        tr(cx, "update.notes_missing").to_string()
-                    } else {
-                        notes
-                    },
-                    cx,
-                )),
+                // 正文交给框架的富文本元素排：标题、粗体、嵌套的项目符号都认得。手写那一版
+                // 只认三样，屏上就把 `**听书（合成朗读）。**` 那两串星号原样摆出来，而
+                // `CHANGELOG.md` 里每条重点都是这个形状。与「更新日志」那张卡片同一件元素。
+                .child(if notes.is_empty() {
+                    muted_label(tr(cx, "update.notes_missing").to_string(), cx).into_any_element()
+                } else {
+                    TextView::markdown("about-update-notes-body", notes)
+                        .w_full()
+                        .into_any_element()
+                }),
         )
         // 只有 Android 摆这颗：桌面这一版刻意不自动替换正在运行的二进制（README「发版」），
         // 而 iOS / HarmonyOS 没有这个口子。判据在 `platform::HAS_SELF_INSTALL`，只写那一处。
@@ -401,54 +401,6 @@ fn newer_panel(cx: &App) -> AnyElement {
                         }),
                 ),
         )
-        .into_any_element()
-}
-
-/// 卡片正文：release 那段 Markdown，按**三档**落版 —— 标题、项目符号、普通段落。
-///
-/// 只认这三样是刻意的：`CHANGELOG.md` 里就写这三样，而认得越多意味着越多的东西可能认不出来。
-/// 认不出来的（表格、链接、代码块）**原样成一行文字**，读者看得见内容，只是没有样式 ——
-/// 这比「遇到不认识的语法就整段丢掉」要好，也比为一块弹面去接一套渲染器便宜。
-/// 真要接，`content::format::markdown` 已在依赖图里，那是下一步的事。
-fn notes_body(text: Option<String>, cx: &App) -> AnyElement {
-    let Some(body) = text
-        .map(|text| text.trim().to_owned())
-        .filter(|text| !text.is_empty())
-    else {
-        // 取不到（离线、限流、这一版没发过）：说哪一句都比摆一张空卡片好。
-        return muted_label(tr(cx, "update.notes_missing").to_string(), cx).into_any_element();
-    };
-    v_flex()
-        .w_full()
-        .gap_1()
-        .children(body.lines().filter_map(|line| {
-            let line = line.trim_end();
-            if line.is_empty() {
-                return None;
-            }
-            if let Some(head) = line.strip_prefix('#') {
-                let head = head.trim_start_matches('#').trim();
-                if !head.is_empty() {
-                    return Some(
-                        div()
-                            .pt_2()
-                            .font_weight(FontWeight::BOLD)
-                            .child(head.to_owned())
-                            .into_any_element(),
-                    );
-                }
-            }
-            if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-                return Some(
-                    h_flex()
-                        .gap_2()
-                        .child("•")
-                        .child(item.trim().to_owned())
-                        .into_any_element(),
-                );
-            }
-            Some(div().child(line.to_owned()).into_any_element())
-        }))
         .into_any_element()
 }
 
@@ -504,32 +456,6 @@ fn when_self_install(download: &update::Download, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// 卡片底下那两颗：去发布页（离线时那是唯一还能拿到正文的路），与关掉。
-fn notes_footer(cx: &App) -> AnyElement {
-    h_flex()
-        .gap_2()
-        .child(
-            Button::new("about-notes-open-releases")
-                .label(tr(cx, "update.open_page").to_string())
-                .ghost()
-                .small()
-                .on_click(|_, _, _| {
-                    let url = folio_core::net::update::RELEASES_PAGE;
-                    if !platform::open_url(url) {
-                        tracing::warn!("打不开发布页：{url}");
-                    }
-                }),
-        )
-        .child(
-            Button::new("about-notes-close")
-                .label(tr(cx, "update.close").to_string())
-                .ghost()
-                .small()
-                .on_click(|_, window, cx| window.close_dialog(cx)),
-        )
-        .into_any_element()
-}
-
 #[cfg(test)]
 mod tests {
     //! 下拉框的选项是一份 (值, 标签) 的表格，写错顺序不会有任何编译期或运行期报错
@@ -537,6 +463,8 @@ mod tests {
     //! 这里把「值必须认得回来、标签必须是语言自己的名字」钉成会失败的测试。
 
     use super::*;
+
+    use std::time::Duration;
 
     // 下面那条「把这一屏画一帧」的测试要的东西。**在模块顶层导入而不是函数体里**：
     // 函数签名的 `&mut TestAppContext` 是在模块作用域里解析的。
@@ -599,8 +527,9 @@ mod tests {
     /// 把「关于」那一屏真画一帧，问三颗按钮在不在。
     ///
     /// 为什么值得单开一条：编译过不等于**渲染得出来**。这三格里有 `with_notes` 那条异步链、
-    /// 一个 `open_dialog` 的构造闭包、还有一个只在 `Newer` 时才出现的面板 —— 而设置页的
-    /// 取值闭包是**渲染时**才跑的，不画一帧就一行都没执行过。
+    /// 一颗要把**本屏那份** `NotesSheet` 句柄 clone 进回调的按钮、还有一个只在 `Newer` 时
+    /// 才出现的面板（面板里那一栏 Markdown 也是渲染时才建的）—— 而设置页的取值闭包是
+    /// **渲染时**才跑的，不画一帧就一行都没执行过。
     #[gpui_kit::test]
     fn the_about_page_grows_its_three_action_rows(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -633,6 +562,58 @@ mod tests {
             assert!(
                 window.try_find("about-open-releases").is_none(),
                 "什么都没查过就不该有「打开下载页」—— 那一颗只属于发现新版本之后的那块面板"
+            );
+        })
+        .expect("窗口应能渲染");
+    }
+
+    /// 按下「查看」该抬起**这一屏自己挂着的那张卡片**，里面交的是正文。
+    ///
+    /// 为什么值得钉这一条：句柄是从规格里 clone 进回调的，接错（抬了另一屏那一份、或者
+    /// 根本没抬）的症状是「按了没反应」，而编译与上面那条「三颗按钮在不在」都照旧绿。
+    /// 取数走 `with_notes` 的**已缓存**那一条分支（[`update::seed_notes`] 预装正文），
+    /// 这一条因此不发任何请求。
+    #[gpui_kit::test]
+    fn the_notes_button_raises_the_card_this_screen_mounts(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            update::seed_notes("### 新增\n- **听书（合成朗读）。**", cx);
+        });
+        let handle = cx
+            .open_window(size(px(900.), px(600.)), |window, cx| {
+                let view = cx.new(|cx| SettingsView::new(SettingsPage::About, cx));
+                Root::new(view, window, cx)
+            })
+            .into();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("about-show-notes", cx);
+        })
+        .expect("窗口应能渲染");
+        // 弹簧按测试钟计步：不推开钟它永远停在 0，卡片看着就像「没升起来」。
+        for _ in 0..40 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("渲染应成功");
+        }
+        cx.update_window(handle, |_, window, _cx| {
+            let surface = window
+                .try_find("bottom-sheet-surface")
+                .expect("按下「查看」该把更新日志那张卡片抬起来");
+            // 卡片要占到整屏的大部分：正文区从前写死 384 逻辑像素（Dialog 里的 `max_h_96`），
+            // `CHANGELOG.md` 0.1.1 那一节要滚七八趟才算读完。判成比例而不是绝对数，
+            // 因为窗口多高是宿主的事。
+            let height = f32::from(surface.bounds().size.height);
+            let viewport = f32::from(window.viewport_size().height);
+            assert!(
+                height > viewport * 0.7,
+                "展开那一档该是视口高的 85%，实测 {height} / {viewport}"
+            );
+            assert!(
+                window.try_find("update-notes-body").is_some(),
+                "抬起来时要把正文交给 Markdown 那一栏"
             );
         })
         .expect("窗口应能渲染");

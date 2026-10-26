@@ -352,6 +352,13 @@ impl Element for GlyphsElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // 捕获层里的副本只在层里画。它和上屏那一份共用一套坐标、字色也一样，只要有一帧
+        // 落进主场景，画面上就是同一页逐字重合地印了两遍（不是两页错位，是笔画发胖、边缘
+        // 发虚）。壳（`body::CaptureLayer`）已经保证「切层与画子树同一趟」，这里再挡一道：
+        // 哪天有人把副本挂在壳外面，也不至于叠字。
+        if self.capture && window.capture_layer() == 0 {
+            return;
+        }
         let __paint = crate::ui::features::reader::model::perf::Timer::start();
         // 绘制层级（自下而上）：块级装饰（更早入树的兄弟）→ 批注痕迹 → 选中高亮 →
         // 字形 → 把手。痕迹与高亮都在字形之前画，字形之后再补就把字盖住了。

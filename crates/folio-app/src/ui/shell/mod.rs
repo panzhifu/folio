@@ -115,6 +115,20 @@ pub fn reading_brightness(reading_mounted: bool, prefs: Option<f32>) -> Option<f
     reading_mounted.then_some(prefs).flatten()
 }
 
+/// 这一帧要涂哪一档浅深：书挂着时读**阅读页自己**那一格，书收了就回到软件外观。
+///
+/// 阅读页盖满整窗，换肤仍是应用级的一次切换；所以只在交出去的那份副本上把 `mode`
+/// 换成阅读页的档位，配置里的全局 `mode` 一个字节都不动 —— 关书后架面与设置还是
+/// 读者在设置里选的那一档。
+///
+/// 与 [`reading_brightness`] 同一条口径：只在层挂着（含退场）时接管，不在时交还。
+pub(crate) fn themed_appearance(mut appearance: Appearance, reading_mounted: bool) -> Appearance {
+    if reading_mounted {
+        appearance.mode = appearance.reading_mode.unwrap_or(appearance.mode);
+    }
+    appearance
+}
+
 /// 阅读层自己要避开的那一条边：**顶上那条系统状态栏 / 挖孔**（逻辑像素）。层是不透明的整屏，
 /// 却把子元素从这里往下推 —— 顶栏、干净态那行章名、正文与目录那几屏都从这里起算。
 ///
@@ -1091,8 +1105,10 @@ impl Render for AppShell {
         // 外观一改（或第一帧还没涂过）就重涂一次。用 `repaint` 而非 `apply`：
         // 这一帧本来就要重画，再刷所有窗口是自己触发自己。
         let appearance = ConfigHolder::appearance(cx);
-        // 亮度那一格先抠出来：下面整个 `appearance` 要挪进 `applied`，而这一帧后面还要用它。
+        // 亮度那一格先抠出来：下面整个 `appearance` 要按阅读层解析、再挪进 `applied`。
         let brightness_pref = appearance.brightness;
+        // 书挂着时用阅读页自己的浅深，书收了回到软件外观（见 [`themed_appearance`]）。
+        let appearance = themed_appearance(appearance, self.reading_mounted());
         // 比较的是「配置 + 它解析出来的浅深」那一对：偏好一个字没动、只有系统翻了面，
         // 变的就只有后面那一格。
         let resolved = theme::resolve_mode(appearance.mode, window.appearance());

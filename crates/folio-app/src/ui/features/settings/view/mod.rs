@@ -15,6 +15,7 @@
 
 mod compact;
 mod desktop;
+mod notes_sheet;
 mod pages;
 
 // 「我的」目的地的两端视图。桌面画一整页字段（[`SettingsView`]），
@@ -22,6 +23,10 @@ mod pages;
 // 两份界面只是同一个配置的两个面子。
 pub(crate) use compact::CompactSettings;
 pub use desktop::SettingsView;
+
+// 「更新日志」那张卡片：页面规格里的那颗按钮要拿它的句柄，两屏各自持有一份并挂在自己的
+// `render` 里（一份宿主而不是全进程共用一份，理由写在 `notes_sheet` 顶部）。
+pub(in crate::ui::features::settings) use notes_sheet::NotesSheet;
 
 // 页面文件之间共用的前言：规格构造器、主题、配置入口与文案函数。
 pub(in crate::ui::features::settings) use crate::ui::features::settings::model::spec;
@@ -31,7 +36,7 @@ pub(in crate::ui::features::settings) use crate::ui::features::settings::model::
 pub(in crate::ui::features::settings) use folio_core::{Mode, PageTurn, Reader, TextDirection};
 pub(in crate::ui::features::settings) use gpui_kit::assets::IconName;
 pub(in crate::ui::features::settings) use gpui_kit::component::ThemeMode;
-pub(in crate::ui::features::settings) use gpui_kit::{App, SharedString};
+pub(in crate::ui::features::settings) use gpui_kit::{App, Entity, SharedString};
 
 pub(in crate::ui::features::settings) use crate::ui::foundation::theme;
 pub(in crate::ui::features::settings) use crate::ui::services::config::ConfigHolder;
@@ -127,7 +132,13 @@ impl SettingsPage {
 }
 
 /// 两端共用的页面规格。手机（[`compact`]）直接渲染这一份，桌面经 [`pages`] 映射。
-pub(in crate::ui::features::settings) fn spec_pages(cx: &App) -> Vec<spec::Page> {
+///
+/// `notes` 是**调用那一屏自己的**「更新日志」卡片句柄：只有「关于」那一页用它，而那一页的
+/// 每一格是在渲染时才跑取值闭包的，规格里没法事后去找「我挂在哪一屏上」。
+pub(in crate::ui::features::settings) fn spec_pages(
+    cx: &App,
+    notes: &Entity<NotesSheet>,
+) -> Vec<spec::Page> {
     vec![
         appearance_page(cx),
         typography_page(cx),
@@ -139,13 +150,16 @@ pub(in crate::ui::features::settings) fn spec_pages(cx: &App) -> Vec<spec::Page>
         library_page(cx),
         toc_page(cx),
         storage_page(cx),
-        about_page(cx),
+        about_page(cx, notes),
     ]
 }
 
 /// 桌面的整页字段：把规格映射回 `Settings` 组件的数据形状。
-pub(in crate::ui::features::settings) fn pages(cx: &App) -> Vec<SettingPage> {
-    spec_pages(cx).iter().map(setting_page).collect()
+pub(in crate::ui::features::settings) fn pages(
+    cx: &App,
+    notes: &Entity<NotesSheet>,
+) -> Vec<SettingPage> {
+    spec_pages(cx, notes).iter().map(setting_page).collect()
 }
 
 use gpui_kit::component::h_flex;
@@ -303,7 +317,13 @@ mod tests {
 
     use super::*;
     use folio_core::Config;
-    use gpui_kit::TestAppContext;
+    use gpui_kit::{AppContext as _, TestAppContext};
+
+    /// 「关于」那一页要一张「更新日志」卡片的句柄：测试里不挂窗，只组规格，所以就地建一份
+    /// 拿着当参数（每屏自己那一份由各视图在构造时建）。
+    fn card(cx: &mut App) -> Entity<NotesSheet> {
+        cx.new(NotesSheet::new)
+    }
 
     /// 回归门：加一页时只动了页面文件、忘了在 [`SettingsPage`] 里补变体，
     /// 侧栏就会多出一格没有下标可指的页 —— 深链会跳到别处去。两份数量必须相等。
@@ -312,8 +332,9 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
             ConfigHolder::install(Config::default(), cx);
+            let notes = card(cx);
             assert_eq!(
-                pages(cx).len(),
+                pages(cx, &notes).len(),
                 SettingsPage::ALL.len(),
                 "`pages` 组出来的页数与 `SettingsPage::ALL` 对不上"
             );
@@ -328,8 +349,9 @@ mod tests {
         cx.update(|cx| {
             ConfigHolder::install(Config::default(), cx);
             let index = SettingsPage::Translation.index();
+            let notes = card(cx);
 
-            let google = spec_pages(cx);
+            let google = spec_pages(cx, &notes);
             let page = &google[index];
             assert_eq!(page.title, tr(cx, "page.translation"));
             assert_eq!(page.groups.len(), 1, "Google 免 key 没有私有参数");
@@ -338,7 +360,7 @@ mod tests {
             ConfigHolder::edit_translation(cx, |translation| {
                 translation.engine = folio_core::TranslationEngine::OpenAi
             });
-            let openai = spec_pages(cx);
+            let openai = spec_pages(cx, &notes);
             let page = &openai[index];
             assert_eq!(page.groups.len(), 2);
             assert_eq!(page.groups[1].title, tr(cx, "group.translation_openai"));
@@ -347,7 +369,7 @@ mod tests {
             ConfigHolder::edit_translation(cx, |translation| {
                 translation.engine = folio_core::TranslationEngine::DeepL
             });
-            let deepl = spec_pages(cx);
+            let deepl = spec_pages(cx, &notes);
             let page = &deepl[index];
             assert_eq!(page.groups.len(), 2);
             assert_eq!(page.groups[1].title, tr(cx, "group.translation_deepl"));

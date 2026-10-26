@@ -14,8 +14,8 @@
 //!
 //! ## 三组，按读者此刻要调的东西分开
 //!
-//! 卡片顶上是「外观 / 字体 / 排版」三段，照读者实际改字的顺序分：亮度与翻页那两张纸
-//! 是环境；字体家族、字重与字号是字的身份；行距、字距、段距、缩进、对齐、版心、
+//! 卡片顶上是「外观 / 字体 / 排版」三段，照读者实际改字的顺序分：浅深、亮度与翻页
+//! 那两张纸是环境；字体家族、字重与字号是字的身份；行距、字距、段距、缩进、对齐、版心、
 //! 上下左右留白与文字方向是版面。三组各自装在一页里，切换即时完成（内容早已在手上，
 //! 不等加载），换页不会把弹层收起。
 //!
@@ -328,21 +328,30 @@ impl ReadingSheet {
             .into_any_element()
     }
 
-    /// 「浅深」那一格：跟随系统 / 浅色 / 深色。它是全局外观，不是这一本书的排版，
-    /// 所以与亮度、翻页动画同住「外观」这一组，改完当场换主题。
-    fn mode_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode = ConfigHolder::appearance(cx).mode;
-        let label_of = |mode| match mode {
-            Mode::System => tr(cx, "appearance.follow_system"),
-            Mode::Light => tr(cx, "appearance.light"),
-            Mode::Dark => tr(cx, "appearance.dark"),
+    /// 「阅读浅深」那一格：跟随软件 / 跟随系统 / 浅色 / 深色。
+    ///
+    /// 改的是**阅读页自己**那一格（`Appearance::reading_mode`），不是软件外观：关书之后
+    /// 架面与设置还是读者在完整设置里选的那一档。它住在「外观」这组是因为换浅深当场生效，
+    /// 与排版无关（不做排版失效键，见 `folio_core::infra::config::Appearance`）。
+    fn reading_mode_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mode = ConfigHolder::appearance(cx).reading_mode;
+        let label_of = |mode: Option<Mode>| match mode {
+            None => tr(cx, "appearance.follow_app"),
+            Some(Mode::System) => tr(cx, "appearance.follow_system"),
+            Some(Mode::Light) => tr(cx, "appearance.light"),
+            Some(Mode::Dark) => tr(cx, "appearance.dark"),
         };
-        let items: Vec<(Mode, SharedString)> = [Mode::System, Mode::Light, Mode::Dark]
-            .into_iter()
-            .map(|value| (value, label_of(value)))
-            .collect();
+        let items: Vec<(Option<Mode>, SharedString)> = [
+            None,
+            Some(Mode::System),
+            Some(Mode::Light),
+            Some(Mode::Dark),
+        ]
+        .into_iter()
+        .map(|value| (value, label_of(value)))
+        .collect();
         let current = label_of(mode);
-        let title = tr(cx, "field.appearance_mode");
+        let title = tr(cx, "field.reading_mode");
         let sheet = cx.entity().clone();
         h_flex()
             .w_full()
@@ -350,7 +359,7 @@ impl ReadingSheet {
             .gap_3()
             .child(div().flex_1().min_w_0().text_base().child(title.clone()))
             .child(
-                Button::new("reader-appearance-mode")
+                Button::new("reader-reading-mode")
                     .outline()
                     .small()
                     .label(current.to_string())
@@ -364,7 +373,7 @@ impl ReadingSheet {
                             let sheet = sheet.clone();
                             menu.item(PopupMenuItem::new(label.clone()).checked(checked).on_click(
                                 move |_, _, cx| {
-                                    sheet.update(cx, |this, cx| this.set_mode(value, cx))
+                                    sheet.update(cx, |this, cx| this.set_reading_mode(value, cx))
                                 },
                             ))
                         })
@@ -373,8 +382,8 @@ impl ReadingSheet {
             .into_any_element()
     }
 
-    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
-        ConfigHolder::edit_appearance(cx, |appearance| appearance.mode = mode);
+    fn set_reading_mode(&mut self, mode: Option<Mode>, cx: &mut Context<Self>) {
+        ConfigHolder::edit_appearance(cx, |appearance| appearance.reading_mode = mode);
         cx.notify();
     }
 
@@ -625,7 +634,7 @@ impl ReadingSheet {
         }
     }
 
-    /// 外观：浅深跟着环境走；亮度跟着光线走；翻页那两张纸怎么走、走多久，
+    /// 外观：阅读页自己的浅深；亮度跟着光线走；翻页那两张纸怎么走、走多久，
     /// 是钉下来就不常碰的一对。
     fn appearance_rows(&self, cx: &mut Context<Self>) -> AnyElement {
         // 「跟随系统」念成一句话而不是「100%」：那一档应用确实什么都没接管。
@@ -639,7 +648,7 @@ impl ReadingSheet {
             .px_4()
             .pt_1()
             .pb_6()
-            .child(self.mode_row(cx))
+            .child(self.reading_mode_row(cx))
             .child(self.slider_row(
                 tr(cx, "reader.brightness"),
                 brightness_label,
@@ -919,5 +928,37 @@ mod tests {
                 "挪行距那一条不该把段距也带过去"
             );
         });
+    }
+
+    /// 阅读设置里那一格浅深只写**阅读页自己**：全局 `mode` 一个字节都不许动。
+    ///
+    /// 这条钉的是读者报过的那件事：在书里点一下夜间，退出之后整个软件都黑着。
+    #[gpui_kit::test]
+    fn the_reader_mode_row_does_not_rewrite_the_app_appearance(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (sheet, _handle) = open_sheet(cx);
+        cx.update(|cx| {
+            ConfigHolder::edit_appearance(cx, |appearance| {
+                appearance.mode = folio_core::Mode::Light
+            })
+        });
+
+        sheet.update(cx, |sheet, cx| {
+            sheet.set_reading_mode(Some(folio_core::Mode::Dark), cx)
+        });
+        let appearance = cx.update(|cx| ConfigHolder::appearance(cx));
+        assert_eq!(appearance.reading_mode, Some(folio_core::Mode::Dark));
+        assert_eq!(
+            appearance.mode,
+            folio_core::Mode::Light,
+            "阅读页那一格不该改到全局浅深"
+        );
+
+        sheet.update(cx, |sheet, cx| sheet.set_reading_mode(None, cx));
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::appearance(cx)).reading_mode,
+            None,
+            "「跟随软件」在配置里只有一个写法：None"
+        );
     }
 }

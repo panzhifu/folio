@@ -189,6 +189,50 @@ fn the_brightness_follows_the_book_and_hands_back_when_it_closes() {
     );
 }
 
+/// 阅读页的浅深只在**书挂着**时覆盖软件外观；关书之后一个字节都不许带走。
+///
+/// 失败的样子与背光那条同族：读着夜读的书退回架面，整屏还是黑的，而软件外观明明选的
+/// 是浅色 —— 读者只会以为设置没生效。这条也钉在自由函数上：外壳那一帧在测试里摸不到
+/// `Window::appearance()` 的系统档位。
+#[test]
+fn the_reader_mode_only_wins_while_the_book_is_mounted() {
+    use super::themed_appearance;
+    use folio_core::infra::config::{Appearance, Mode};
+
+    let mut appearance = Appearance {
+        mode: Mode::Light,
+        ..Appearance::default()
+    };
+    assert_eq!(
+        themed_appearance(appearance.clone(), false).mode,
+        Mode::Light,
+        "没有书时软件外观说了算，哪怕配置里记着一档阅读浅深"
+    );
+
+    appearance.reading_mode = Some(Mode::Dark);
+    assert_eq!(
+        themed_appearance(appearance.clone(), true).mode,
+        Mode::Dark,
+        "书挂着时阅读页自己那一档覆盖软件外观"
+    );
+    assert_eq!(
+        themed_appearance(appearance, false).mode,
+        Mode::Light,
+        "关书后回到软件外观"
+    );
+
+    let inherited = Appearance {
+        mode: Mode::Light,
+        reading_mode: None,
+        ..Appearance::default()
+    };
+    assert_eq!(
+        themed_appearance(inherited, true).mode,
+        Mode::Light,
+        "阅读页没选过时跟软件外观走"
+    );
+}
+
 /// 回归门：音量键只在阅读页翻页，别处必须把这一按还给系统。
 ///
 /// 这条分流是整个功能唯一的判据，而两头的失败都安静：阅读页里不翻页＝键按下去没反应，

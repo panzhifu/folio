@@ -331,8 +331,8 @@ fn percentile(values: &[u64], ratio: f64) -> u64 {
 /// 顺带把「帧间隔」那一栏灌进两趟绘制之间那几微秒的假间隙 —— 慢帧报告读起来像「翻页时有一帧
 /// 什么都没干」。
 ///
-/// 前提是副本**先**画、上屏那一份**后**画（`view/body.rs` 里那两道 `capture_gate` 就排在字形
-/// 元素之前）：`log_paint` 会 `take()` 走这一份账，晚了就并不进同一帧，只会脏了下一帧。
+/// 前提是副本**先**画、上屏那一份**后**画（`view/body.rs` 里那两份副本都装在 `CaptureLayer`
+/// 壳里、排在字形元素之前）：`log_paint` 会 `take()` 走这一份账，晚了就并不进同一帧，只会脏了下一帧。
 pub fn log_capture_paint(paint_ns: u64, shape_ns: u64, glyphs: u32) {
     add(|frame| {
         frame.paint_ns += paint_ns;

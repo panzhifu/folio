@@ -38,12 +38,13 @@ use folio_core::store::{Annotation, AnnotationStyle};
 use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    A11ySubtreeBuilder, AnyElement, App, Background, Bounds, ClickEvent, Context, Div, ElementId,
-    Entity, EntityId, Hsla, InteractiveElement as _, IntoElement, LongPressEvent, PageCurlMesh,
-    PageCurlUniforms, PageCurlVertex, ParentElement, PathBuilder, Pixels, Point, Render,
-    RenderImage, Role, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled,
-    TestSupportExt as _, TouchEvent, TouchPhase, WeakEntity, Window, accesskit, canvas, div, hsla,
-    img, linear_color_stop, linear_gradient, point, px, size,
+    A11ySubtreeBuilder, AnyElement, App, Background, Bounds, ClickEvent, Context, Div, Element,
+    ElementId, Entity, EntityId, GlobalElementId, Hsla, InspectorElementId,
+    InteractiveElement as _, IntoElement, LayoutId, LongPressEvent, PageCurlMesh, PageCurlUniforms,
+    PageCurlVertex, ParentElement, PathBuilder, Pixels, Point, Render, RenderImage, Role,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _,
+    TouchEvent, TouchPhase, WeakEntity, Window, accesskit, canvas, div, hsla, img,
+    linear_color_stop, linear_gradient, point, px, size,
 };
 
 use crate::ui::features::reader::components::image_viewer::ImageViewer;
@@ -310,6 +311,12 @@ impl Render for ReaderSession {
         // 定版式那一族没有排版可等（页是既定的位图），所以那一族恒算「已落地」。
         let content_ready =
             self.is_fixed() || self.book().is_none_or(|book| book.document().is_current());
+        // 进场那 280 ms 里整层在横移：副本按**最终位置**画、上屏那一份按 `+enter_shift` 画
+        // （见下面 `capture_region` 那一段）。两条路径画的是同一页字，**只有副本落进主 pass**
+        // 才会错开一截印两遍，所以「进场期间不烘」那是临时闸，不是根因的修法：层壳
+        // （[`capture_layer`]）实测已经把副本的 primitive 全排进 `CAPTURE_ORDER_BASE` 之上
+        // （quad `order = 10010000xx`、字形 `capture_layer() == 1`），主 pass 取不到它。
+        // 闸拆掉，进场这一段照常烘，读者一进书就翻页不必再多等一帧。
         let capture_needed = capture_wanted(
             turn.is_some(),
             mode.is_continuous(),
@@ -319,8 +326,7 @@ impl Render for ReaderSession {
         );
         // 捕获层 1（正面）这一帧要不要画一份副本。只有可重排那一族要：定版式那一族不出卷曲
         // 网格（它的页面本来就是整张位图），连续滚动那一档根本不烘（上面那条已经挡掉）。
-        // 副本必须自己画一份 —— 主 pass 只画 `order < CAPTURE_ORDER_BASE`，层里的东西不上屏，
-        // 而这一帧上屏的那一份又正在跟着外壳横移（见下面 `-enter_shift` 那一段）。
+        // 副本必须自己画一份 —— 主 pass 只画 `order < CAPTURE_ORDER_BASE`，层里的东西不上屏。
         let capture_front = capture_needed && !self.is_fixed();
         // 日志里要摆的是「烘那一张时」的两组数，与今天这帧的比一眼就能看出差在哪。`Option` 进不了
         // tracing 的字段，所以摊成数：哨兵 = 还没烘过（那一格正是要盯的状态）。
@@ -516,6 +522,7 @@ impl Render for ReaderSession {
                             usable,
                             height,
                             self.header_reserve + top - self.scroll_painted,
+                            self.prefs.margin_x,
                             fallback_aspect,
                             has_text,
                         );
@@ -684,6 +691,7 @@ impl Render for ReaderSession {
                             usable,
                             viewport_height,
                             self.header_reserve,
+                            self.prefs.margin_x,
                             false,
                         );
                         let no_viewer: Option<Entity<ImageViewer>> = None;
@@ -719,6 +727,7 @@ impl Render for ReaderSession {
                         usable,
                         viewport_height,
                         self.header_reserve,
+                        self.prefs.margin_x,
                         text.is_some(),
                     );
                     // 带字的那一格才有选中：它的矩形就是「屏幕点 ↔ 页内字序」那一把尺
@@ -1875,9 +1884,14 @@ impl Render for ReaderSession {
         // 入树必须排在字形元素**之前**：`log_paint` 会把本帧那一份账 `take()` 走，副本晚了就
         // 并进下一帧去（见 `perf::log_capture_paint`）。两份也不会同帧出现 —— 正面只在定住
         // 那一帧烘，背面只在动画在飞且目标还没烘过时烘。
+        //
+        // 两份都走 [`capture_layer`]：切层与画子树在同一个元素的那一趟 `paint` 里，**不靠
+        // 兄弟元素的绘制顺序**。从前这里是「闸 → 内容 → 闸」三个兄弟，闸那一步只要被跳过
+        // （`canvas` 没上屏、重放把 `SetCaptureLayer` 丢了），副本就落进主 pass，与正文逐字
+        // 重合地再画一遍 —— 读起来就是「整页字印了两遍」。
         if let Some(copy) = front_copy {
-            column = column.child(capture_gate(1));
-            column = column.child(
+            column = column.child(capture_layer(
+                1,
                 div()
                     .absolute()
                     .left(px(-enter_shift))
@@ -1886,12 +1900,11 @@ impl Render for ReaderSession {
                     .children(front_decor)
                     .child(copy)
                     .children(front_images),
-            );
-            column = column.child(capture_gate(0));
+            ));
         }
         if back_key.is_some() && curl_leaf.is_some() {
-            column = column.child(capture_gate(2));
-            column = column.child(
+            column = column.child(capture_layer(
+                2,
                 div()
                     .absolute()
                     .left(px(back_dx - enter_shift))
@@ -1899,8 +1912,7 @@ impl Render for ReaderSession {
                     .size_full()
                     .children(back_children)
                     .child(back_element.capture()),
-            );
-            column = column.child(capture_gate(0));
+            ));
         }
         element = element.selection(visual);
         if matches!(self.source, Source::Book(_)) {
@@ -2289,27 +2301,95 @@ fn paint_fold(
     }
 }
 
-/// 捕获层的那道闸：在绘制回调里把场景切进 `layer`（`0` = 切回主场景）。
+/// 把一整棵子树只画进捕获层 `layer`（1 = 旧页正面，2 = 旧页背面）的壳。
 ///
-/// 用法是把要进层的内容夹在 `capture_gate(n)` 与 `capture_gate(0)` 之间，而且**中间不许有
-/// 别的东西画**：那一段里画的每个 primitive 都按层号排到 `CAPTURE_ORDER_BASE` 之上，主 pass
-/// 一律跳过。夹错了一处不报错，只是屏上少一块内容。
-fn capture_gate(layer: u8) -> AnyElement {
-    canvas(
-        |_, _, _| {},
-        move |_, _, window, _| {
-            // 进出这道闸各有一条不该破的规矩：进层之前必须停在主场景，切回主场景之前必须还在层里。
-            // 夹错一处不会报错，只会让后面所有内容都排进捕获那一段、主 pass 一个都不画。
-            let before = window.capture_layer();
-            debug_assert!(
-                if layer == 0 { before != 0 } else { before == 0 },
-                "捕获层夹错了：切到 {layer} 之前场景在 {before}"
-            );
-            window.set_capture_layer(layer)
-        },
-    )
-    .absolute()
-    .inset_0()
+/// 从前这是三个兄弟元素：`canvas` 闸 → 内容 → `canvas` 闸，靠**绘制顺序**保证「内容在层里」。
+/// 那条不变量只要有一处被跳过（闸那个 `canvas` 没上屏、重放时把 `SetCaptureLayer` 丢了），
+/// 内容就落进主 pass：克隆出来的那一页字形与正文逐字重合地再画一遍 —— 读起来是「整页字印了
+/// 两遍」，而它只在「这一页还没烘好」的那几帧出现（见 [`capture_wanted`]），所以是「有的页面
+/// 有、有的页面没有」。
+///
+/// 做成一个元素之后，切层与画子树在**同一趟 `paint`** 里：不存在「层切了但内容没画」或
+/// 「内容画了但层没切」的姿势，层号也不可能从这一帧漏进主场景。
+struct CaptureLayer {
+    layer: u8,
+    child: AnyElement,
+}
+
+impl Element for CaptureLayer {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        // 壳没有自己的状态，也没有自己的布局盒：`request_layout` 直接把子树那一格交出去。
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // 进层之前必须停在主场景：层里再套一层，外层那一段会整块丢字。
+        let before = window.capture_layer();
+        debug_assert_eq!(
+            before, 0,
+            "捕获层套层了：切到 {} 之前场景在 {before}",
+            self.layer
+        );
+        window.set_capture_layer(self.layer);
+        self.child.paint(window, cx);
+        // 无论子树画了什么都切回来：漏了这一步，后面所有内容都会排进捕获段、主 pass 一个都不画。
+        window.set_capture_layer(0);
+    }
+}
+
+impl IntoElement for CaptureLayer {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+/// [`CaptureLayer`] 的构造口。`layer` 只能是 1 或 2 —— 0 是主场景，没有要夹的东西。
+fn capture_layer(layer: u8, child: impl IntoElement) -> AnyElement {
+    debug_assert!(layer != 0, "capture_layer(0) 没有意义：主场景不需要壳");
+    CaptureLayer {
+        layer,
+        child: child.into_any_element(),
+    }
     .into_any_element()
 }
 
@@ -2930,9 +3010,10 @@ struct FixedTileAt {
 
 /// 连续竖滚里两页之间的缝（逻辑像素）。
 ///
-/// 取间距阶里的 md（12）：页与页是同一本书里的两组内容，既要读得出页界，又不能在
-/// 连续阅读里变成一片空白。这条缝不参与页高 —— 页高只由版心宽与页面自己的宽高比决定。
-const FIXED_PAGE_GAP: f32 = 12.0;
+/// **`0`**：PDF / 漫画的页要连成一条，页界由页面自己的白边给出；再垫一条 12 的空隙，
+/// 一屏里就会出现两道黑带（上下各一页时尤其明显）。缝仍参与页栈的坐标 —— 调它只改
+/// 页与页的距离，不改每页的高度（页高只由版心宽与页面自己的宽高比决定）。
+const FIXED_PAGE_GAP: f32 = 0.0;
 
 /// 把一页的每一格摆成一条共享高度的横排，整体居中。返回每格的最终位置，以及
 /// 「带字那一格」的矩形（页内字序那把尺记在它上面）。
@@ -2946,6 +3027,7 @@ fn fixed_page_tiles(
     usable: f32,
     viewport_height: f32,
     header_reserve: f32,
+    left: f32,
     has_text: bool,
 ) -> (Vec<FixedTileAt>, Option<Bounds<Pixels>>) {
     let tiles = book.page_tiles(page);
@@ -2956,7 +3038,7 @@ fn fixed_page_tiles(
     }
     let height = viewport_height.min(usable / row_aspect);
     let top = header_reserve + (viewport_height - height).max(0.0) / 2.0;
-    fixed_page_tiles_at(tiles, usable, height, top, box_aspect, has_text)
+    fixed_page_tiles_at(tiles, usable, height, top, left, box_aspect, has_text)
 }
 
 /// 一条页栈里的一页：高度已经由 [`crate::ui::features::reader::model::fixed_book::FixedStack`]
@@ -2966,6 +3048,7 @@ fn fixed_page_tiles_at(
     usable: f32,
     height: f32,
     top: f32,
+    left: f32,
     fallback_aspect: f32,
     has_text: bool,
 ) -> (Vec<FixedTileAt>, Option<Bounds<Pixels>>) {
@@ -2973,9 +3056,10 @@ fn fixed_page_tiles_at(
     if row_aspect <= 0.0 {
         return (Vec::new(), None);
     }
-    // 整行居中：先从左边把行宽的余量让出一半，再逐格往右推进。页栈那一档
-    // `row_aspect * height` 正好等于版心宽，这里退化成从 0 开始。
-    let mut x = (usable - row_aspect * height) / 2.0;
+    // 整行在**版心**里居中：版心左缘是 `left`（页边距），不是窗口的 0。页栈那一档
+    // `row_aspect * height` 正好等于版心宽，这里退化成从 `left` 开始 —— 右边因此与
+    // 左边留下同一个页边距，而不是把整条行贴在窗口左缘、把两倍页边距全丢在右边。
+    let mut x = left + (usable - row_aspect * height) / 2.0;
     let mut placed = None;
     let mut out = Vec::with_capacity(tiles.len());
     for tile in tiles {

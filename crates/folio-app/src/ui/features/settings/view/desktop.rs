@@ -14,11 +14,11 @@ use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::setting::{SelectIndex, Settings};
 use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::{
-    Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render, Styled,
-    Subscription, TestSupportExt, Window, px,
+    AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
+    Render, Styled, Subscription, TestSupportExt, Window, px,
 };
 
-use super::{SettingsPage, pages};
+use super::{NotesSheet, SettingsPage, pages};
 
 /// 页面导航那一栏的宽与可调范围。
 const SIDEBAR_WIDTH: f32 = 170.0;
@@ -41,6 +41,9 @@ pub struct SettingsView {
     /// 对「WebDAV 同步」状态实体的订阅。同步那趟在后台线程上结束，状态与计数靠
     /// 实体 notify 才能出现在设置页上。
     _sync_watch: Subscription,
+    /// 「更新日志」那张卡片。**本屏一份**：关于那一页的按钮拿的是这一个句柄，挂的也是这一屏，
+    /// 所以从阅读页压进来的那一屏关掉卡片时，不会把底下那一屏的退场动画一起接管过去。
+    notes: Entity<NotesSheet>,
     /// 要定位到的那一页。**只在第一次渲染时取用** —— 组件的选择状态挂在
     /// `window.use_keyed_state(id)` 上，之后再传 `default_selected_index` 也没用，
     /// 所以取走之后就置 `None`，屏内换页由组件自己管。
@@ -48,9 +51,10 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    /// `cx` 只为两条订阅：「存储」那一页的每一格现读读数实体，「关于」那一格现读更新状态 ——
-    /// 静态设置页拿不住 `Task`，后台跑完的那一趟要靠实体 `notify` 唤醒这一屏。理由与
-    /// [`CompactSettings::new`] 同一份，两边都不等外壳先装句柄：`entity` 没有就建。
+    /// `cx` 只为两件事：几条订阅（「存储」那一页现读读数实体、「关于」那一格现读更新状态 ——
+    /// 静态设置页拿不住 `Task`，后台跑完的那一趟要靠实体 `notify` 唤醒这一屏），以及建本屏那
+    /// 一张「更新日志」卡片。理由与 [`CompactSettings::new`] 同一份，两边都不等外壳先装句柄：
+    /// `entity` 没有就建。
     pub fn new(page: SettingsPage, cx: &mut Context<Self>) -> Self {
         let storage = crate::ui::services::storage::entity(cx);
         let watch = cx.observe(&storage, |_, _, cx| cx.notify());
@@ -60,11 +64,13 @@ impl SettingsView {
         let feedback_watch = cx.observe(&feedback, |_, _, cx| cx.notify());
         let sync = crate::ui::services::sync::entity(cx);
         let sync_watch = cx.observe(&sync, |_, _, cx| cx.notify());
+        let notes = cx.new(NotesSheet::new);
         Self {
             _storage_watch: watch,
             _update_watch: update_watch,
             _feedback_watch: feedback_watch,
             _sync_watch: sync_watch,
+            notes,
             initial: Some(page.index()),
         }
     }
@@ -79,7 +85,7 @@ impl Render for SettingsView {
             .with_group_variant(GroupBoxVariant::Fill)
             .sidebar_width(px(SIDEBAR_WIDTH))
             .sidebar_size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
-            .pages(pages(cx));
+            .pages(pages(cx, &self.notes));
         // `take` 一次：第二帧起这一页的选择就交给组件里的 keyed state。
         let settings = match self.initial.take() {
             Some(page_ix) => settings.default_selected_index(SelectIndex {
@@ -90,12 +96,16 @@ impl Render for SettingsView {
         };
         v_flex()
             .id("folio-settings")
+            // 「更新日志」那张卡片是绝对定位的一层，要有一个能落位的父盒子；与架面那三块同一形状。
+            .relative()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             // 宿主测试按这一格确认「我的」那一个目的地画的确实是设置整页。
             .test_support()
             .child(settings)
+            // 卡片每帧都要交元素（弹簧的采样在里面），收稳的那一程它自己不给内容。
+            .child(self.notes.clone())
     }
 }
 

@@ -57,7 +57,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Div, InteractiveElement as _,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _,
     IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
     Subscription, TestSupportExt as _, Window, div, px, rems,
 };
@@ -66,7 +66,7 @@ use std::rc::Rc;
 
 use super::SettingsPage;
 use super::spec::{self, RowKind};
-use super::spec_pages;
+use super::{NotesSheet, spec_pages};
 use crate::ui::components::{FontPicker, TopBar};
 use crate::ui::services::l10n::tr;
 use crate::ui::services::storage::{self, Job};
@@ -270,6 +270,9 @@ pub(crate) struct CompactSettings {
     /// 对「WebDAV 同步」状态实体的订阅。同步那趟在后台线程上结束，状态与计数靠
     /// 实体 notify 才能出现在设置页上。
     _sync_watch: Subscription,
+    /// 「更新日志」那张卡片。**本屏一份**：与桌面那一屏同一个形状 —— 关于那一页的按钮拿的是
+    /// 这一个句柄，挂的也是这一屏，所以两屏同时活着时各收各的（理由写在 `notes_sheet` 顶部）。
+    notes: Entity<NotesSheet>,
 }
 
 impl CompactSettings {
@@ -289,12 +292,14 @@ impl CompactSettings {
         let feedback_watch = cx.observe(&feedback, |_, _, cx| cx.notify());
         let sync = crate::ui::services::sync::entity(cx);
         let sync_watch = cx.observe(&sync, |_, _, cx| cx.notify());
+        let notes = cx.new(NotesSheet::new);
         Self {
             screen: Screen::Root,
             _storage_watch: watch,
             _update_watch: update_watch,
             _feedback_watch: feedback_watch,
             _sync_watch: sync_watch,
+            notes,
         }
     }
 
@@ -313,7 +318,15 @@ impl CompactSettings {
     ///
     /// 已经在入口列表时返回 `false`，让外壳接着决定（最终是退出应用）—— 这一屏不该
     /// 自己吞掉返回。选项屏退回它来的那一页，而不是直接跳回根屏。
+    ///
+    /// 「更新日志」那张卡片压在这一屏上面时，返回键**只收卡片**：与阅读页那几块弹层同一条
+    /// 次序（先最上面那一层，再往外退），否则一按就把底下的子页也弹掉了。
     pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.notes.read(cx).is_open(cx) {
+            self.notes.update(cx, |card, cx| card.hide(cx));
+            cx.notify();
+            return true;
+        }
         let next = match self.screen {
             Screen::Root => return false,
             Screen::Page(_) => Screen::Root,
@@ -346,7 +359,7 @@ impl CompactSettings {
     /// 根屏：大标题 + 一张分组卡，一行一页，右端只留那枚进去的箭头。
     fn root_screen(&self, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity().clone();
-        let pages = spec_pages(cx);
+        let pages = spec_pages(cx, &self.notes);
         let mut rows: Vec<AnyElement> = Vec::new();
         for (ix, page) in pages.iter().enumerate() {
             if ix > 0 {
@@ -767,6 +780,8 @@ impl Render for CompactSettings {
         };
         let mut root = v_flex()
             .id("settings-compact")
+            // 卡片那一层是绝对定位的，要有一个能落位的父盒子（与架面那三块同一形状）。
+            .relative()
             .size_full()
             .pb(px(tail))
             .bg(cx.theme().background)
@@ -774,7 +789,7 @@ impl Render for CompactSettings {
         match self.screen {
             Screen::Root => root = root.child(self.root_screen(cx)),
             Screen::Page(page_ix) => {
-                let page = spec_pages(cx).swap_remove(page_ix);
+                let page = spec_pages(cx, &self.notes).swap_remove(page_ix);
                 // 顶栏底下**不画分隔线**：Material 3 的顶栏不带 divider，容器色一滚起来才变。
                 // 线与它下面那一段留白说的是同一件事（「这里换了一块」），留白已经在，那条
                 // 0.5 就把一屏切成两截 —— 卡片自己那圈描边是这一屏唯一的边界。
@@ -787,21 +802,32 @@ impl Render for CompactSettings {
                 group,
                 row,
             } => {
-                let page = spec_pages(cx).swap_remove(page_ix);
+                let page = spec_pages(cx, &self.notes).swap_remove(page_ix);
                 let title = page.groups[group].rows[row].title.clone();
                 root = root
                     .child(self.pick_header(&title, page_ix, cx))
                     .child(self.pick_screen(page_ix, group, row, &page, cx));
             }
         }
-        root
+        // 「更新日志」那张卡片挂在**这一屏的根**上，不挂在某一格里：读者从子页钻进来时
+        // 卡片是子页的、退回根屏那一程它还在往下沉，两处都得有它落位的地方。
+        // 元素每帧都交（弹簧的采样在里面），收稳的那一程它自己不给内容。
+        root.child(self.notes.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CompactSettings, Screen};
-    use gpui_kit::{AppContext as _, Entity, TestAppContext};
+    use std::time::Duration;
+
+    use folio_core::Config;
+    use gpui_kit::component::Root;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
+
+    use super::{CompactSettings, Screen, SettingsPage};
+    use crate::ui::services::config::ConfigHolder;
+    use crate::ui::services::update::Notes;
 
     /// 返回键一层一层往外退：选项屏退回它来的那一页，那一页退回根屏，根屏那一次让给
     /// 外壳（最终是退出应用）。
@@ -866,5 +892,89 @@ mod tests {
         assert!(pushed(cx), "退回的是那一页，还在详情里，底栏不该当场回来");
         assert!(back(cx), "那一页再往外弹一层");
         assert!(!pushed(cx), "回到根屏，底栏跟着回来");
+    }
+
+    /// 卡片开着时那一按**只收卡片**，不吃层级。
+    ///
+    /// 少这一档的症状在真机上是一按两用：卡片沉下去的同时子页也退回根屏，读者以为自己按错了。
+    /// 层级那一条上面已经钉过，这条钉的是「压在最上面的那一层先收」那一步次序。
+    #[gpui_kit::test]
+    fn the_back_key_only_folds_the_card_while_it_is_up(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            cx.new(CompactSettings::new)
+        });
+        let card_up =
+            |cx: &TestAppContext| view.read_with(cx, |this, cx| this.notes.read(cx).is_open(cx));
+
+        cx.update(|app| {
+            view.update(app, |this, cx| {
+                this.open(SettingsPage::About.index(), cx);
+                this.notes.update(cx, |card, cx| {
+                    card.open(Notes::Ready("### 新增".into()), cx)
+                })
+            })
+        });
+        assert!(card_up(cx), "前置：卡片该是开着的");
+
+        let eaten = view.update(cx, |this, cx| this.go_back(cx));
+        assert!(eaten, "开着卡片时那一按该被卡片吃掉");
+        assert!(!card_up(cx), "返回键收掉的是卡片");
+        assert!(
+            view.read_with(cx, |this, _| this.pushed()),
+            "子页该还压在那儿，不该被顺手弹掉"
+        );
+    }
+
+    /// 手机那一屏**也**挂着「更新日志」那张卡片：抬起来时这一屏得有落位的地方。
+    ///
+    /// 桌面那一头的同一条写在 `pages::about` 的测试里（那条从按下按钮走完整条链）。这里只钉
+    /// 挂载这一半，因为少挂一格的症状是「按了没反应」而编译照旧过 —— 两端各钉一次，
+    /// 哪一头漏挂都会红。
+    #[gpui_kit::test]
+    fn the_compact_screen_mounts_the_same_notes_card(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut built = None;
+        let handle: AnyWindowHandle = cx
+            .open_window(size(px(390.), px(844.)), |window, cx| {
+                ConfigHolder::install(Config::default(), cx);
+                let view = cx.new(CompactSettings::new);
+                built = Some(view.clone());
+                Root::new(view, window, cx)
+            })
+            .into();
+        let view = built.expect("这一屏该建起来");
+
+        let raised = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.try_find("bottom-sheet-surface").is_some()
+            })
+            .expect("渲染应成功")
+        };
+        assert!(!raised(cx), "没抬起来之前不该有这块弹层");
+
+        cx.update(|app| {
+            view.update(app, |this, cx| {
+                this.notes.update(cx, |card, cx| {
+                    card.open(
+                        Notes::Ready("### 新增\n- **听书（合成朗读）。**".into()),
+                        cx,
+                    )
+                })
+            })
+        });
+        // 弹簧按测试钟计步：不推开钟它永远停在 0，卡片看着就像「没升起来」。
+        for _ in 0..40 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("渲染应成功");
+        }
+        assert!(
+            raised(cx),
+            "手机那一屏也要挂上这张卡片，不然抬起来没有落位的地方"
+        );
     }
 }

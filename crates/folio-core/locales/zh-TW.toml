@@ -124,6 +124,7 @@ font_size = "字型大小 %{size}px"
 theme = "主題：%{name}"
 
 [appearance]
+follow_app = "跟隨軟體"
 follow_system = "跟隨系統"
 light = "淺色"
 dark = "深色"
@@ -212,6 +213,7 @@ text_direction = "文字方向"
 font_family = "正文字型"
 "font_family.desc" = "從這台裝置已安裝的字型中選擇。"
 appearance_mode = "淺深"
+reading_mode = "閱讀深淺"
 "appearance_mode.desc" = "跟著系統走，或者固定淺色 / 深色。"
 theme_light = "淺色主題"
 "theme_light.desc" = "解析成淺色時用的那一套配色。"
@@ -561,7 +563,6 @@ notes = "更新日誌"
 notes_hint = "看這一版改了什麼"
 "notes.desc" = "正文來自這一版在發布倉庫裡那條說明；沒聯網時取不到。"
 view = "檢視"
-close = "關閉"
 
 # 日志反馈那一格。`privacy` 那句必须摆在**按下之前**而不是之后：日志里带《书名》与
 # 落盘路径（`import:` 那些行写的就是它们），事后告知等于没告知。

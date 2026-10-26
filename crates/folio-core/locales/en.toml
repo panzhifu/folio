@@ -140,6 +140,7 @@ font_size = "Font size %{size}px"
 theme = "Theme: %{name}"
 
 [appearance]
+follow_app = "Match app"
 follow_system = "Follow system"
 light = "Light"
 dark = "Dark"
@@ -229,6 +230,7 @@ text_direction = "Text direction"
 font_family = "Body font"
 "font_family.desc" = "Choose from the fonts installed on this device."
 appearance_mode = "Mode"
+reading_mode = "Reader mode"
 "appearance_mode.desc" = "Follow the system, or pin light or dark."
 theme_light = "Light theme"
 "theme_light.desc" = "The theme used when the mode resolves to light."
@@ -594,7 +596,6 @@ notes = "Release notes"
 notes_hint = "What changed in this version"
 "notes.desc" = "The text comes from this version's entry in the release repository; it can't be fetched while offline."
 view = "View"
-close = "Close"
 
 # 日志反馈那一格。`privacy` 那句必须摆在**按下之前**而不是之后：日志里带《书名》与
 # 落盘路径（`import:` 那些行写的就是它们），事后告知等于没告知。

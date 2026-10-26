@@ -131,6 +131,7 @@ font_size = "字号 %{size}px"
 theme = "主题：%{name}"
 
 [appearance]
+follow_app = "跟随软件"
 follow_system = "跟随系统"
 light = "浅色"
 dark = "深色"
@@ -219,6 +220,7 @@ text_direction = "文字方向"
 font_family = "正文字体"
 "font_family.desc" = "从这台设备已装的字体中选择。"
 appearance_mode = "浅深"
+reading_mode = "阅读浅深"
 "appearance_mode.desc" = "跟着系统走，或者钉死浅色 / 深色。"
 theme_light = "浅色主题"
 "theme_light.desc" = "解析成浅色时用的那一套配色。"
@@ -577,7 +579,6 @@ notes = "更新日志"
 notes_hint = "看这一版改了什么"
 "notes.desc" = "正文来自这一版在发布仓库里那条说明；没联网时取不到。"
 view = "查看"
-close = "关闭"
 
 # 日志反馈那一格。`privacy` 那句必须摆在**按下之前**而不是之后：日志里带《书名》与
 # 落盘路径（`import:` 那些行写的就是它们），事后告知等于没告知。

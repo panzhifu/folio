@@ -308,6 +308,65 @@ fn a_fixed_book_scrolls_continuously_and_tracks_the_page_under_the_viewport(
     });
 }
 
+/// 定版式的一页在**版心**里居中，而且页与页之间不留缝。
+///
+/// 从前 `fixed_page_tiles_at` 从窗口 x=0 起算，版心左右各 24 的页边距只有左边那一份
+/// 真的用上：整条行贴左，右边攒着两倍页边距。PDF 因此右边永远黑一条，读者报的就是这个。
+#[test]
+fn a_fixed_page_row_is_centred_inside_the_reader_margin() {
+    use crate::ui::features::reader::model::fixed_book::PageTile;
+    use crate::ui::features::reader::view::body::fixed_page_tiles_at;
+    use crate::ui::foundation::images::no_images;
+
+    let tile = |width: u32, height: u32| PageTile {
+        request: None,
+        width,
+        height,
+        href: String::new(),
+        mime: String::new(),
+        export: no_images(),
+        renders: false,
+    };
+
+    // 版心 300、左边距 24 ⇒ 窗口宽 348。400×600 的一页按高 300 摆成 200 宽：
+    // 行首该在 24 + (300-200)/2 = 74，行尾 274，右边同样空 74。
+    let (tiles, _) = fixed_page_tiles_at(vec![tile(400, 600)], 300.0, 300.0, 0.0, 24.0, 0.5, false);
+    assert_eq!(tiles.len(), 1);
+    let left = tiles[0].x;
+    let right = 348.0 - (left + tiles[0].width);
+    assert!(
+        (left - right).abs() < 0.5,
+        "左右页边距该相等：left={left} right={right} width={}",
+        tiles[0].width
+    );
+    assert!(left >= 24.0, "不许钻到左边距里面：{left}");
+
+    // 铺满版心的那一档从头就贴着左边距，不是贴着窗口。
+    let (tiles, _) = fixed_page_tiles_at(vec![tile(300, 300)], 300.0, 300.0, 0.0, 24.0, 1.0, false);
+    assert!(
+        (tiles[0].x - 24.0).abs() < 0.5,
+        "铺满时该从左边距起：{}",
+        tiles[0].x
+    );
+    assert!((tiles[0].width - 300.0).abs() < 0.5);
+}
+
+/// 连续档里两页之间不留缝：第二页的页首就是第一页的页底。
+#[gpui_kit::test]
+fn fixed_pages_touch_in_continuous_mode(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _handle, _, _) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        PageTurn::Scroll,
+    );
+    let gap = view.read_with(cx, |v, _| {
+        let stack = v.fixed().expect("定版式").stack().expect("连续档该建页栈");
+        stack.top_of(1).expect("第二页") - stack.height_of(0).expect("第一页高")
+    });
+    assert!(gap.abs() < 0.5, "页与页之间不留缝，实得 {gap}");
+}
+
 /// 连续竖滚里点一下 / 按方向键仍然是「滚一屏 90%」，而且走的是与流式连续同一套补间：
 /// 权威位置当场到终点，画出来的位置从起点追过去。
 #[gpui_kit::test]

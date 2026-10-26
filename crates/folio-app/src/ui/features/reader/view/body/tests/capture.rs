@@ -8,7 +8,12 @@ use crate::ui::shell::NAV_TRANSITION;
 use folio_core::content::document::Document;
 use folio_core::{Chapter, Content, FlowDoc, Locator, PageTurn};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{AppContext as _, TestAppContext};
+use gpui_kit::{
+    AnyWindowHandle, AppContext as _, Context, IntoElement, ParentElement, Render, Styled,
+    TestAppContext, Window, canvas, div, px, size,
+};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -333,10 +338,11 @@ fn a_single_page_curl_bakes_the_arriving_page_on_its_back(cx: &mut TestAppContex
 
 /// 捕获矩形按**最终位置**取：横向抵消外壳进场那一段的横移（[`super::super::capture_region`]）。
 ///
-/// 测试台没有外壳，横移不会真的把内容推走，所以这里只能把两半分开钉：
+/// 测试台没有外壳，横移不会真的把内容推走，所以这里把两半分开钉：
 /// - 纯函数那一半钉**符号**（往回减，不是往前加）；
-/// - 会话那一半钉「正文真把 `enter_shift` 喂进了那一格」——shift 非零时矩形整块滑出窗口，
-///   那一帧就该拒烘。真机上是内容同样偏着、两边一起动，重合回窗口内才烘得成完整的一张。
+/// - 会话那一半钉「窗口外就拒烘」。这一条**不是**「进场期间不烘」：副本只进捕获层、主 pass
+///   取不到它（层隔离由 `a_capture_layer_wraps_its_whole_subtree_and_pops_back` 钉），
+///   所以横移在真机上不影响能不能烘 —— 那里内容跟着一起偏，矩形仍在窗口内。
 #[gpui_kit::test]
 fn the_capture_rect_is_taken_at_the_resting_position(cx: &mut TestAppContext) {
     use crate::ui::features::reader::motion::turn_animation::Area;
@@ -376,6 +382,13 @@ fn the_capture_rect_is_taken_at_the_resting_position(cx: &mut TestAppContext) {
         view.read_with(cx, |v, _| v.captured_page),
         None,
         "偏移没对上时那一格在窗口外，该拒烘"
+    );
+    view.update(cx, |v, _| v.enter_shift = 0.0);
+    settle(cx, handle);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some(key),
+        "落定后该把没收成的那一张补烘上"
     );
 }
 
@@ -429,4 +442,63 @@ fn a_stale_captured_size_forces_a_recapture(cx: &mut TestAppContext) {
     );
     assert!(!now.1, "重烘之后脏标记该落下，实得 {now:?}");
     assert_eq!(now.2, fresh.2, "重烘不改页号");
+}
+
+/// 捕获副本的壳：切层、画子树、切回主场景，三步必须在**同一趟 `paint`** 里。
+///
+/// 这一条钉的是「整页字印了两遍」。副本与上屏那一份共用坐标、共用字色，只要有一帧落进
+/// 主 pass，屏上就是同一页逐字重合地再画一遍 —— 而它只在这一页「还没烘好」的那几帧才画
+/// （[`super::super::capture_wanted`]），所以读起来是「有的页面有、有的页面没有」。
+///
+/// 从前这里是「`canvas` 闸 → 内容 → `canvas` 闸」三个兄弟元素，靠绘制顺序保证内容在层里；
+/// 闸那一步一旦被跳过（`canvas` 没上屏、重放把 `SetCaptureLayer` 丢了），内容就漏到主场景。
+/// 现在壳把三步收在一次 `paint` 里，这条门读的就是那三个位置：**壳前 0、壳里 1、壳后 0**。
+/// 三个读数缺哪个都会红 —— 尤其是最后那个：漏了切回去，后面整页内容都会排进捕获段。
+struct LayerProbe {
+    seen: Rc<RefCell<[u8; 3]>>,
+}
+
+impl Render for LayerProbe {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let before = self.seen.clone();
+        let inside = self.seen.clone();
+        let after = self.seen.clone();
+        div()
+            .size_full()
+            .child(canvas(
+                |_, _, _| {},
+                move |_, _, window, _| before.borrow_mut()[0] = window.capture_layer(),
+            ))
+            .child(super::super::capture_layer(
+                1,
+                div().size_full().child(canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| inside.borrow_mut()[1] = window.capture_layer(),
+                )),
+            ))
+            .child(canvas(
+                |_, _, _| {},
+                move |_, _, window, _| after.borrow_mut()[2] = window.capture_layer(),
+            ))
+    }
+}
+
+#[gpui_kit::test]
+fn a_capture_layer_wraps_its_whole_subtree_and_pops_back(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let seen = Rc::new(RefCell::new([9u8, 9, 9]));
+    let probe = seen.clone();
+    let window = cx.open_window(size(px(200.0), px(120.0)), move |_, _| LayerProbe {
+        seen: probe,
+    });
+    let handle: AnyWindowHandle = window.into();
+    // `open_window` 自己画了一帧；再显式走一趟，读数取的是真正调过绘制回调的那一帧。
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .expect("渲染应成功");
+    let seen = *seen.borrow();
+    assert_eq!(
+        seen,
+        [0, 1, 0],
+        "壳的三个读数该是「主场景 → 捕获层 1 → 主场景」，实得 {seen:?}"
+    );
 }

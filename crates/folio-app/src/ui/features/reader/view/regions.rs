@@ -376,20 +376,28 @@ impl ReadingPage {
         let playing = self.reader.read(cx).speech_playing();
         let label = tr(cx, "reader.tts");
         let page = cx.entity().clone();
-        let (popover, foreground, accent, radius) = {
+        // 圆卡的面用 `button_secondary` 那一档，不用 `popover`。
+        //
+        // 原因是量出来的：夜读的正文底与底栏卡片都是 `neutral-950`（(10,10,10)），
+        // 而 `popover` 在这套主题里**也是那个值** —— 第一版拿它做钮面，真机上圆钮
+        // 整颗看不见，只剩正文右缘那片空白（截图里钮所在的那 52×52 一格与页边距
+        // 同一个颜色）。`button_secondary` 是 `neutral-800` 量级，浅色主题下同样
+        // 比正文底深一档，两套主题都看得见，且它自带前景 / hover / active 三档。
+        let (surface, foreground, hover, active, radius) = {
             let theme = cx.theme();
             (
-                theme.popover,
-                theme.popover_foreground,
-                theme.accent,
+                theme.button_secondary,
+                theme.button_secondary_foreground,
+                theme.button_secondary_hover,
+                theme.button_secondary_active,
                 theme.radius_full(),
             )
         };
         let style = ButtonCustomVariant::new(cx)
-            .color(popover)
+            .color(surface)
             .foreground(foreground)
-            .hover(accent)
-            .active(accent)
+            .hover(hover)
+            .active(active)
             .shadow(true);
         Some(
             div()
