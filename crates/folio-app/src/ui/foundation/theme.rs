@@ -1,4 +1,6 @@
-//! 主题：用 UI 框架自己的主题系统选配色，本应用**不定义任何颜色值**。
+//! 主题：用 UI 框架自己的主题系统选配色，本应用**不定义任何颜色值**。唯一的例外是滚动条那一条
+//! 的**浓度**（`SCROLLBAR_TINT` 那三个 alpha）：色相照样从当下生效那本主题的 `foreground` 现取，
+//! 这里只答「墨压到纸上是几成」，所以浅深两套与读者自己 `themes/` 里那几本 JSON 都跟着走。
 //!
 //! 模型和 gpui-kit 一致，分两层：
 //!
@@ -100,6 +102,40 @@ pub fn set_application_font(family: &str, cx: &mut App) {
     Theme::global_mut(cx).font_family = family.into();
 }
 
+/// 滚动条那一条淡到什么程度 —— 静止 / 指针压上去与正在拖，两档各是当前主题墨色的几成。
+///
+/// 框架那一格默认拿的是主题的 `accent`，而且是**满强度**（`component/theme/schema.rs` 里那句
+/// `apply_background_color!(scrollbar_thumb, fallback = tokens.accent)`）：一条品牌色竖条压在
+/// 正文边上，比正文还抢眼。轨道那一条本来就铺 `background`，看不出来，所以显眼的只有这一根。
+/// 这里换成「当下生效那本主题的 `foreground` 压薄」：静止 0.12 与纸面已经差不到一档灰度，
+/// 伸手时回到 0.28 ——「看得见自己在哪儿」交还给那一下动作。
+///
+/// 只给两档不是省事：框架把 hover 与 active 投影成同一个色（`base_theme()` 里两处都读
+/// `scrollbar_thumb_hover`），第三格没有地方落。
+///
+/// **写的是 alpha，不是颜色**：色相每次换肤从 `colors.foreground` 现取（见
+/// [`apply_scrollbar_tint`]），浅深两套与读者自己 `themes/` 里那几本 JSON 都跟着走。
+const SCROLLBAR_TINT: (f32, f32) = (0.12, 0.28);
+
+/// 把 [`SCROLLBAR_TINT`] 按当前主题的墨色装进主题自己那两格。
+///
+/// 挂在换肤那一步**之后**，不在启动时装一次就走：`Theme::change` 里会 `apply_config` 把主题
+/// 文件那一套色重新铺一遍（它自己的注释就写着「closure 之后编辑的东西会被文件里的值盖回去」），
+/// 只在启动时改一次，下一次翻面就没了。
+///
+/// 走 [`Theme::update`] 而不是直接摸 `global_mut`：那条写路径把 `colors` 与 `tokens` 两侧对齐
+/// （投影给底层滚动条的是 `tokens.scrollbar_thumb`，只改 `colors` 那一侧对不上），再 `sync_base`
+/// 推下去。调用方 [`repaint`] 只在「配置或解析出的浅深真的变了」那一帧走（`shell` 那侧比过一对
+/// 值才调），所以这里多出来的那一次 `sync_base` 不是每帧的开销，也不会自己触发重画。
+fn apply_scrollbar_tint(cx: &mut App) {
+    let (rest, touch) = SCROLLBAR_TINT;
+    Theme::update(cx, |theme| {
+        let ink = theme.colors.foreground;
+        theme.colors.scrollbar_thumb = ink.alpha(rest);
+        theme.colors.scrollbar_thumb_hover = ink.alpha(touch);
+    });
+}
+
 /// 存下来的浅深选择，配上操作系统的当前外观，实际解析成哪一档。
 pub fn resolve_mode(appearance: Mode, os: WindowAppearance) -> ThemeMode {
     match appearance {
@@ -158,6 +194,8 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
     }
 
     Theme::change(mode, window, cx);
+    // 滚动条那一格跟着同一档现取：`Theme::change` 之后 `cx.theme()` 才是这一屏真正生效的那本。
+    apply_scrollbar_tint(cx);
     // 状态栏图标跟着刚定下的这一档翻。挂在换肤这里而不是某个屏幕上：浅深是应用级的，
     // 而图标色只有**一处**真相，跟着 `mode` 走就不会出现「界面切了、图标没切」。
     crate::ui::platform::set_status_bar_icons(matches!(mode, ThemeMode::Light));
@@ -166,10 +204,13 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_DARK, DEFAULT_LIGHT, register_builtin_themes, resolve_mode, theme_names};
+    use super::{
+        DEFAULT_DARK, DEFAULT_LIGHT, SCROLLBAR_TINT, register_builtin_themes, repaint,
+        resolve_mode, theme_names,
+    };
     use folio_core::infra::config::Mode;
-    use gpui_kit::component::ThemeMode;
-    use gpui_kit::{TestAppContext, WindowAppearance};
+    use gpui_kit::component::{Theme, ThemeMode};
+    use gpui_kit::{Background, TestAppContext, WindowAppearance};
 
     /// registry 是用这两个名字播种的；上游改了名字，这里必须跟着改，
     /// 否则每一次查找回落都静默命中「查不到」，读者选的主题就不再生效。
@@ -177,6 +218,64 @@ mod tests {
     fn the_default_names_match_the_framework() {
         assert_eq!(DEFAULT_LIGHT, "Default Light");
         assert_eq!(DEFAULT_DARK, "Default Dark");
+    }
+
+    /// 滚动条那一根淡到静止不太看得见、伸手才回来，而且**色相跟着当下那一本主题**。
+    ///
+    /// 钉四件事，每一件都是这一格真会犯错的：① 装完之后静止档确实比框架那份默认
+    /// （主题的 `accent`，满强度）淡；② 浅深两套各取自己那本的 `foreground`，不是把某一家的
+    /// 墨写死 —— 只在浅档验一遍，深档那条品牌色还留在屏上也测不出来；③ 投影给底层滚动条读的
+    /// 是 `tokens` 那一侧（`base_theme()` 里写 `self.tokens.scrollbar_thumb`），只改 `colors`
+    /// 而 `reconcile` 没跟上，屏上一点变化都没有；④ 伸手那一档必须比重，否则「淡」连自己也
+    /// 找不到了。
+    #[gpui_kit::test]
+    fn the_scrollbar_bar_is_quiet_and_follows_the_active_theme(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut inks = vec![];
+        for mode in [Mode::Light, Mode::Dark] {
+            cx.update(|app| {
+                let mut appearance = folio_core::Config::default().appearance;
+                appearance.mode = mode;
+                // 走生产那一条钩子（`repaint`）而不是直接调那一格：它的**落点**是这一格的
+                // 一半 —— 少了换肤之后的那一句，屏上还是主题那根品牌色。
+                repaint(&appearance, None, app);
+                let theme = Theme::global(app);
+                let ink = theme.colors.foreground;
+                inks.push(ink);
+                assert_eq!(
+                    theme.colors.scrollbar_thumb,
+                    ink.alpha(SCROLLBAR_TINT.0),
+                    "{mode:?} 静止档不是当下那本墨色压薄的那一档"
+                );
+                assert_eq!(
+                    theme.colors.scrollbar_thumb_hover,
+                    ink.alpha(SCROLLBAR_TINT.1),
+                    "{mode:?} 伸手档"
+                );
+                assert!(
+                    SCROLLBAR_TINT.0 < SCROLLBAR_TINT.1,
+                    "伸手比静止还淡，那一根就永远摸不着了"
+                );
+                // 这一格默认拿的是 accent（主题文件没写它），满强度。
+                assert!(
+                    theme.colors.scrollbar_thumb.a < theme.colors.accent.a,
+                    "装完不比这一本主题原本的色淡"
+                );
+                // 底层的滚动条拿的是这一侧，两个数都得跟上。
+                assert_eq!(
+                    *theme.tokens.scrollbar_thumb,
+                    ink.alpha(SCROLLBAR_TINT.0),
+                    "{mode:?} 只改了 colors，tokens 那一侧没对齐 —— 屏上不会有变化"
+                );
+                assert_eq!(
+                    theme.tokens.scrollbar_thumb.background,
+                    Background::from(ink.alpha(SCROLLBAR_TINT.0)),
+                    "{mode:?} tokens 的 background 那一格没跟上"
+                );
+            });
+        }
+        // 两套的墨本来就不同；相同的话上面那几条断言就只是一句空话。
+        assert_ne!(inks[0], inks[1], "夹具里浅深两本的 foreground 是同一个色");
     }
 
     #[test]
