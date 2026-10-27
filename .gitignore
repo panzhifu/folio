@@ -9,6 +9,19 @@
 # 本机专属的 agent 权限设置，不该跟着仓库走。
 .qoder/settings.local.json
 
+# skills CLI 每装一条技能都会给它能认的每个 agent 目录各做一份 symlink，指向
+# .agents/skills/ 里那份真身。读取路径只有那一份（见 AGENTS.md 的技能一节），
+# 这些副本进了版本库就是第二真相源，而且指的还是别的机器上的相对路径。
+/.claude/
+/.qoder/skills/
+
+# `impeccable` 自带的那份字体索引：1,100,013 字节，正卡在 jj 快照新文件的 1 MiB
+# 上限之外，`jj status` 一直在拒绝收它（要收就得提 `snapshot.max-new-file-size`，
+# 那是改仓库行为来迁就一个第三方技能的资产）。它不是代码也不是本仓库的判断 ——
+# 技能重装一次就自己回到盘上（`npx skills add pbakaus/impeccable`），所以让它留在
+# 本机。代价写清楚：新克隆里这一格是缺的，跑 impeccable 自己的脚本要先重装一次技能。
+/.agents/skills/impeccable/scripts/data/font-index.json
+
 # spike 证据截图是整张桌面抓取，含其他窗口内容，只留在本机。
 /docs/assets-*.png
 
