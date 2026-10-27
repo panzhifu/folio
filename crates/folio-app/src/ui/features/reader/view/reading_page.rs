@@ -606,17 +606,17 @@ impl ReadingPage {
         )
     }
 
-    /// 浅深一键。
+    /// 浅深一键，按的仍是**这一本书**。
     ///
     /// 判据是**解析出来的**那一档（`cx.theme().mode`），不是配置里写的 `system`：
     /// 跟着系统走的读者点这一下要落到系统此刻的反面，而不是在 `system` 上原地打转。
     ///
-    /// 落点只写**阅读页自己**那一格：`appearance.mode` 是软件外观，关书之后架面与设置
-    /// 还按它走。这一层盖满整窗，所以阅读时看上去与全局换肤一样；区别只在退出之后。
+    /// 写的是**这一本**的 `reading_mode` 差量，不是软件外观的 `mode`：夜里读这一本不该
+    /// 把书架与设置也一起拧黑，而关掉书之后那一档要还在设置屏选的位置上。
     pub(in crate::ui::features::reader) fn toggle_night(&mut self, cx: &mut Context<Self>) {
         let dark = cx.theme().mode == ThemeMode::Dark;
-        ConfigHolder::edit_appearance(cx, |appearance| {
-            appearance.reading_mode = Some(if dark { Mode::Light } else { Mode::Dark })
+        ConfigHolder::edit_book_appearance(cx, |appearance| {
+            appearance.reading_mode = if dark { Some(Mode::Light) } else { Some(Mode::Dark) }
         });
     }
 

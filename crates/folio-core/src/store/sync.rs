@@ -11,10 +11,11 @@ use super::annotations::color_of;
 use super::{AnnotationStyle, Store};
 use crate::Result;
 use crate::content::anchor::TextAnchor;
+use crate::infra::book_settings::BookSettings;
 use crate::position::Locator;
 use crate::sync::{
     AnnotationRecord, BookSnapshot, BookmarkRecord, LocalSnapshot, Plan, PositionRecord,
-    SNAPSHOT_VERSION, Snapshot, Tombstone, TombstoneKind,
+    SNAPSHOT_VERSION, SettingsRecord, Snapshot, Tombstone, TombstoneKind,
 };
 
 impl Store {
@@ -82,6 +83,24 @@ impl Store {
                     mode,
                     locator: Locator::from_json(&json),
                     updated_at,
+                });
+            }
+
+            // 这一本的阅读设置差量。从来没写过（时间戳 0）就不带这一格 —— 它在快照里
+            // 没话说；写过之后哪怕差量已经空了也要带，那说的是「这一本恢复过默认」，
+            // 不带的另一台设备会拿着旧差量继续赢。
+            let written: Option<(String, i64)> = conn
+                .query_row(
+                    "SELECT settings_json, settings_updated_at FROM books WHERE id = ?1",
+                    params![book_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .filter(|(_, at)| *at > 0);
+            if let Some((json, updated_at)) = written {
+                book.settings = Some(SettingsRecord {
+                    updated_at,
+                    settings: BookSettings::from_column(&json),
                 });
             }
 
@@ -162,6 +181,7 @@ impl Store {
                 || !book.annotations.is_empty()
                 || !book.bookmarks.is_empty()
                 || !book.tombstones.is_empty()
+                || book.settings.is_some()
             {
                 books.insert(hash, book);
             }
@@ -202,6 +222,20 @@ impl Store {
                     record.locator.to_json(),
                     record.updated_at
                 ],
+            )?;
+        }
+
+        for (hash, record) in &plan.settings {
+            let Some(book_id) = book_id(&tx, hash)? else {
+                tracing::warn!("store: 同步阅读设置找不到本地书 {hash}，跳过");
+                continue;
+            };
+            // 时间守卫与进度、批注那几条同一写法：更旧的那一份不该盖掉更新的。
+            tx.execute(
+                "UPDATE books
+                    SET settings_json = ?2, settings_updated_at = ?3
+                  WHERE id = ?1 AND ?3 > settings_updated_at",
+                params![book_id, record.settings.to_column(), record.updated_at],
             )?;
         }
 
@@ -348,8 +382,20 @@ mod tests {
     use crate::position::Locator;
     use crate::store::{AnnotationStyle, Store};
     use crate::sync::{
-        AnnotationRecord, BookmarkRecord, DeleteRecord, Plan, PositionRecord, TombstoneKind,
+        AnnotationRecord, BookmarkRecord, DeleteRecord, Plan, PositionRecord, SettingsRecord,
+        TombstoneKind,
     };
+    use crate::{BookSettings, Reader};
+
+    /// 一份只盖了字号的差量。用生产的 `record_reader` 造，不在测试里手抄 JSON。
+    fn font_patch(font_size: f32) -> BookSettings {
+        let base = Reader::default();
+        let mut wanted = base.clone();
+        wanted.font_size = font_size;
+        let mut settings = BookSettings::default();
+        settings.record_reader(&base, &wanted);
+        settings
+    }
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {
@@ -477,8 +523,39 @@ mod tests {
                 },
             )],
             bookmark_deletes: Vec::new(),
+            settings: vec![(
+                "hash-a".into(),
+                SettingsRecord {
+                    updated_at: future,
+                    settings: font_patch(26.0),
+                },
+            )],
         };
         store.apply_sync(&plan).unwrap();
+
+        assert_eq!(
+            store.book_settings(book).unwrap().reader.get("font_size").cloned(),
+            Some(serde_json::json!(26.0)),
+            "同步来的整本差量该落进这一本的行"
+        );
+        // 更旧的那一份不许盖回来（时间守卫与进度、批注那几条同一写法）。
+        store
+            .apply_sync(&Plan {
+                settings: vec![(
+                    "hash-a".into(),
+                    SettingsRecord {
+                        updated_at: 1,
+                        settings: font_patch(12.0),
+                    },
+                )],
+                ..Plan::default()
+            })
+            .unwrap();
+        assert_eq!(
+            store.book_settings(book).unwrap().reader.get("font_size").cloned(),
+            Some(serde_json::json!(26.0)),
+            "更旧的同步结果不该把更新的盖掉"
+        );
 
         let (mode, locator, updated_at) = store.position_with_time(book).unwrap().unwrap();
         assert_eq!(mode, "scroll");

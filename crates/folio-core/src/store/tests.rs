@@ -6,6 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::AnnotationStyle;
+use crate::BookSettings;
+use crate::Reader;
 use crate::Store;
 use crate::content::format::{
     Chapter, ChapterLocator, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
@@ -1927,5 +1929,103 @@ fn vacuum_gives_the_unused_pages_back_to_the_file() {
     assert!(
         after < swollen,
         "库文件没见小：{swollen} → {after}，那这一笔只是抹了个计数器"
+    );
+}
+
+/// v26 那一列：写进去的差量重开库还在，没单独设过的书读成空差量。
+///
+/// 这一条测的是**存储**那一半 —— 差量本身怎么算由 `infra::book_settings` 那 12 条盯，
+/// 这里只保证「落库、取回、抹掉」三步在 SQLite 这一头没走样。
+#[test]
+fn the_book_settings_column_round_trips_across_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let store = Store::open_at(&db).unwrap();
+    let id = store.add_book(&path("a.md"), &meta("A")).unwrap();
+
+    // 刚入库的书没有差量 —— 空差量而不是报错，也不是一堆默认值的抄本。
+    assert!(
+        store.book_settings(id).unwrap().is_empty(),
+        "新书该读成「完全跟随默认」"
+    );
+
+    let base = Reader::default();
+    let mut wanted = base.clone();
+    wanted.font_size = 22.0;
+    wanted.margin_x = 40.0;
+    let mut settings = BookSettings::default();
+    settings.record_reader(&base, &wanted);
+    store.set_book_settings(id, &settings).unwrap();
+    drop(store);
+
+    let again = Store::open_at(&db).unwrap();
+    let got = again.book_settings(id).unwrap();
+    assert_eq!(got, settings, "差量原样回来，一格不多一格不少");
+    assert_eq!(got.effective_reader(&base).font_size, 22.0);
+    assert_eq!(got.effective_reader(&base).margin_x, 40.0);
+
+    // 「恢复本书默认」= 写回空差量，而空差量在 SQL 里是空串（不是 `null`、不是 `{}`）。
+    again.set_book_settings(id, &BookSettings::default()).unwrap();
+    let raw: String = {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.query_row(
+            "SELECT settings_json FROM books WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(raw.is_empty(), "抹掉之后那一列该是空串，实际是 {raw:?}");
+    drop(again);
+    assert!(Store::open_at(&db).unwrap().book_settings(id).unwrap().is_empty());
+}
+
+/// 那一行不存在时**不报错**、交回空差量，但日志留一句：调用方（阅读层）不该因为
+/// 「这一本被删了」而挂掉，而「按错 id」与「这一本没设过」必须能在日志里分开。
+#[test]
+fn settings_for_an_unknown_book_read_as_unset() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_at(&dir.path().join("folio.db")).unwrap();
+    assert!(store.book_settings(404).unwrap().is_empty());
+    // 写一个不存在的 id 也只是没写成，不该把调用方（滑条每拖一格就写一次）崩掉。
+    store
+        .set_book_settings(404, &BookSettings::default())
+        .unwrap();
+}
+
+/// 已发布的 v25 库要能升到最新，而且老行读成「没单独设过」。
+///
+/// 起点取 `len() - 2` 而不是 `len() - 1`：阅读设置占了两条迁移（v26 那一列 + v27 那个
+/// 时间戳），只退一条的话这一条门测的是「加时间戳对老行的影响」，而 v26 那一列的升级
+/// 从此没人测 —— 名字还写着「设置列升级」，最容易骗人。
+///
+/// 上一版本用 `MIGRATIONS.len() - 1` 而不是写死一个数：这一条测的是**最后一条迁移**
+/// 对老行的行为，写死数字的话下一次加迁移它就悄悄变成「测了一段无关的历史」。
+#[test]
+fn a_row_written_before_the_settings_column_reads_as_unset() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let previous = MIGRATIONS.len() - 2;
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for sql in &MIGRATIONS[..previous] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", previous as i64)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO books (path, title, authors, format, size, added_at)
+             VALUES ('a.epub', 'A', '', 'epub', 0, 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let store = Store::open_at(&db).unwrap();
+    assert_eq!(store.user_version().unwrap(), MIGRATIONS.len() as i64);
+    assert_eq!(store.book(1).unwrap().unwrap().title, "A", "老行一本不能少");
+    assert!(
+        store.book_settings(1).unwrap().is_empty(),
+        "升级上来的老行该是「没单独设过」，而不是被读成垃圾"
     );
 }

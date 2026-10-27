@@ -22,7 +22,7 @@ pub(in crate::ui::features::settings) fn toc_page(cx: &App) -> Page {
                     tr(cx, "field.toc_density"),
                     density_options(cx),
                     false,
-                    |cx: &App| SharedString::from(ConfigHolder::reader(cx).toc_density.as_str()),
+                    |cx: &App| SharedString::from(ConfigHolder::default_reader(cx).toc_density.as_str()),
                     |val: SharedString, cx| {
                         ConfigHolder::edit_reader(cx, |prefs| {
                             prefs.toc_density = TocDensity::parse(&val)
@@ -41,7 +41,7 @@ pub(in crate::ui::features::settings) fn toc_page(cx: &App) -> Page {
                         max: 3.0,
                         step: 1.0,
                     },
-                    |cx| f32::from(ConfigHolder::reader(cx).toc_max_title_lines),
+                    |cx| f32::from(ConfigHolder::default_reader(cx).toc_max_title_lines),
                     |v, cx| {
                         ConfigHolder::edit_reader(cx, |prefs| {
                             prefs.toc_max_title_lines = v.round().clamp(1.0, 3.0) as u8
@@ -50,7 +50,7 @@ pub(in crate::ui::features::settings) fn toc_page(cx: &App) -> Page {
                 ),
                 Row::toggle(
                     tr(cx, "field.toc_dim_read"),
-                    |cx: &App| ConfigHolder::reader(cx).toc_dim_read,
+                    |cx: &App| ConfigHolder::default_reader(cx).toc_dim_read,
                     |val: bool, cx| ConfigHolder::edit_reader(cx, |prefs| prefs.toc_dim_read = val),
                 )
                 .description(tr(cx, "field.toc_dim_read.desc"))
@@ -89,7 +89,7 @@ mod tests {
         cx.update(|cx| {
             ConfigHolder::install(Config::default(), cx);
             let options = density_options(cx);
-            let stored = SharedString::from(ConfigHolder::reader(cx).toc_density.as_str());
+            let stored = SharedString::from(ConfigHolder::default_reader(cx).toc_density.as_str());
             assert!(
                 options.iter().any(|(value, _)| *value == stored),
                 "当前档位 {stored:?} 必须是某个选项值，否则下拉框只能显示裸代码"
@@ -99,7 +99,7 @@ mod tests {
                 // 认不出的值会回落，所以这一句真正在测的是「值拼错了」：
                 // parse(错值) 回落 Comfortable，与 Compact 的键不同 → 红。
                 ConfigHolder::edit_reader(cx, |prefs| prefs.toc_density = TocDensity::parse(value));
-                let back = ConfigHolder::reader(cx).toc_density;
+                let back = ConfigHolder::default_reader(cx).toc_density;
                 assert_eq!(
                     back.as_str(),
                     value.as_ref(),

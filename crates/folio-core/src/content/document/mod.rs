@@ -16,8 +16,8 @@ use std::path::Path;
 
 use crate::Result;
 use crate::content::format::{
-    Content, ContentKind, DocMeta, FixedDoc, FlowDoc, FontBytes, Format, ImageRes, ParseBudget,
-    TocEntry,
+    Content, ContentKind, DocMeta, FixedDoc, FlowDoc, FontBytes, FontRef, Format, ImageRes,
+    ParseBudget, TocEntry,
 };
 
 /// 阅读位置的坐标系。可重排是「章 + 字符偏移」，定版式是「页码」。
@@ -103,6 +103,19 @@ pub trait Document: Send + Sync {
     /// `@font-face` 要的那几份内嵌字体。默认没有。
     fn fonts(&self, _wanted: &[String]) -> Vec<FontBytes> {
         Vec::new()
+    }
+
+    /// 字体身份（`crc32 + raw_len`）与容器路径，**不读字节**。
+    ///
+    /// 默认 `None` = 这个 provider 没有现成元数据，调用方退回 [`Self::fonts`] 一次读全。
+    /// EPUB 覆盖它：从中央目录拿范围，别名缓存命中时一次解压都不做。
+    fn font_refs(&self, _wanted: &[String]) -> Option<Vec<FontRef>> {
+        None
+    }
+
+    /// 按 [`Self::font_refs`] 给的身份读一份字节。默认 `None` = 走 [`Self::fonts`]。
+    fn read_font(&self, _font: &FontRef) -> Option<Vec<u8>> {
+        None
     }
 
     fn format(&self) -> Format {

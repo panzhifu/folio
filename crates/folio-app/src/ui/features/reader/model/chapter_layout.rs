@@ -34,7 +34,7 @@ use folio_core::layout::{
 use folio_core::{Reader, TextDirection};
 use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window, WindowTextSystem};
 
-use crate::ui::features::reader::model::book_fonts::BookFonts;
+use crate::ui::features::reader::model::book_fonts::{BookFonts, FontLoadJob};
 use crate::ui::features::reader::model::measure::GpuiMeasure;
 use crate::ui::foundation::images::ChapterImages;
 
@@ -190,6 +190,11 @@ pub struct Document {
     /// 整本书的内嵌字体（别名表 + 已经注册进设备的家族名）。换章不换这一份，
     /// 所以由 `Book` 建好灌进来，而不是每章自己注册一遍。
     faces: Arc<BookFonts>,
+    /// 首趟排版作业要做的字体准备。只在开书时第一份 `Document` 上挂一次；作业带回
+    /// 新 `BookFonts` 后清空。后续章节直接拿 `Book::faces`，不再挂任务。
+    font_job: Option<Arc<FontLoadJob>>,
+    /// 字体准备是否还没在作业里落地。`false` 时 `apply_typeset` 可以同步 `Book` 的 faces。
+    fonts_pending: bool,
     /// 块级排版缓存，随排版作业移进移出（队列单线程、在飞作业至多一个，所以不需要锁）。
     ///
     /// 它的键是「块节点 + 该块子树的样式哈希 + 宽度」，所以改字号只重排样式真的变了的那些块；
@@ -399,6 +404,8 @@ struct Typeset {
     artifacts: Arc<ChapterArtifacts>,
     styles: StyledDom,
     layout: Layout,
+    /// 首趟作业顺带装好的字体表。之后的章走 `None`，直接用 `Book::faces`。
+    fonts: Option<Arc<BookFonts>>,
 }
 
 /// 作业的输入。度量要的两份文本系统以 `Arc` 搬进后台线程 —— spike① 验证过
@@ -430,6 +437,8 @@ struct TypesetInput {
     body_family: String,
     mono_family: String,
     faces: Arc<BookFonts>,
+    /// 首趟作业的字体准备；`None` = 这本书的字体已经落地（或本来就没有）。
+    font_job: Option<Arc<FontLoadJob>>,
 }
 
 /// 后台排版队列：整个进程一份、一条线程，与导入池同款
@@ -484,6 +493,15 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
         &Document::root_base(&input.prefs),
         &base_dir,
     );
+    // 首趟作业顺带把内嵌字体读回来并注册；必须在 `GpuiMeasure::new` 之前 ——
+    // 那一趟要按新的设备字体表量宽度。作业跑完把新表随 `Typeset` 带回 UI。
+    let mut loaded_fonts = None;
+    if let Some(job) = input.font_job.take() {
+        let (fonts, _stats) = job.run(&input.texts);
+        input.key.fonts_rev = fonts.revision();
+        input.faces = fonts.clone();
+        loaded_fonts = Some(fonts);
+    }
     let measure = GpuiMeasure::new(
         input.texts,
         input.window_texts,
@@ -516,6 +534,7 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
         artifacts,
         styles,
         layout,
+        fonts: loaded_fonts,
     })
 }
 
@@ -658,6 +677,8 @@ impl Document {
             images,
             images_rev: 0,
             faces,
+            font_job: None,
+            fonts_pending: false,
             blocks: BlockCache::default(),
             applied: None,
             desired: None,
@@ -679,6 +700,29 @@ impl Document {
     /// 这本书的内嵌字体。绘制路径与度量共用它，两边不可能拿不同的别名表。
     pub fn fonts(&self) -> &BookFonts {
         &self.faces
+    }
+
+    /// 字体表那一份 `Arc`：`Book` 要把作业换回来的新表灌给后续章。
+    pub fn faces(&self) -> &Arc<BookFonts> {
+        &self.faces
+    }
+
+    /// 字体准备是否还在等首趟作业。`Book` 用它决定要不要把 `font_job` 继续传下去。
+    pub fn fonts_pending(&self) -> bool {
+        self.fonts_pending
+    }
+
+    /// 字体表版本（`LayoutKey::fonts_rev` 那一格）。`ReaderSession` 用它决定何时 reset
+    /// `FontCache`：字体表变宽之后，按旧表解析出的 `Font` 不能再命中。
+    pub fn fonts_revision(&self) -> u32 {
+        self.faces.revision()
+    }
+
+    /// 把首趟作业要做的字体准备挂上。只有开书第一份 `Document` 与它在窗口里的邻居会走到；
+    /// 作业跑完（或 `Book` 已经拿到新表）后由 `apply_typeset` 清空。
+    pub fn set_font_job(&mut self, job: Arc<FontLoadJob>) {
+        self.font_job = Some(job);
+        self.fonts_pending = true;
     }
 
     /// 读者偏好里**只能用 CSS 表达**的那几项 → 读者层规则。
@@ -1100,10 +1144,14 @@ impl Document {
             body_family: self.prefs.font_family.clone(),
             mono_family: self.prefs.mono_font_family.clone(),
             faces: self.faces.clone(),
+            font_job: self.font_job.clone(),
         };
         if cfg!(test) {
             match typeset_job(input) {
-                Ok(out) => self.apply_typeset(out),
+                Ok(out) => {
+                    self.desired = Some(out.key);
+                    self.apply_typeset(out);
+                }
                 Err(err) => tracing::error!(
                     chapter_id = key.chapter,
                     width = key.width,
@@ -1120,10 +1168,11 @@ impl Document {
     /// 收后台排版的结果（渲染帧经 [`Self::ensure_viewport`] 间接调用）。
     /// 只有**仍然想要**的那把键的结果才采纳；这期间章、偏好、宽度又变了，这一份就陈旧，
     /// 丢掉即可 —— 新的作业已经排在后面。
-    fn poll_typeset(&mut self) {
-        let Some((key, handle)) = self.pending.as_ref() else {
-            return;
-        };
+    ///
+    /// 返回**采纳后真正生效的键**：首趟作业会把 `fonts_rev` 换成注册完的版本，所以
+    /// 调用方不能继续拿派活前那把旧键去比对 / 再派活。
+    fn poll_typeset(&mut self) -> Option<LayoutKey> {
+        let (key, handle) = self.pending.as_ref()?;
         // 键是 Copy 的小结构，抄一份出来，后面要改 `self.pending`。
         let key = *key;
         let mut outcome: Option<Result<Typeset, TaskError>> = None;
@@ -1139,28 +1188,47 @@ impl Document {
             }
         }
         if !done {
-            return;
+            return None;
         }
         self.pending = None;
         match outcome {
             Some(Ok(out)) => {
-                if out.key == key && self.desired == Some(key) {
+                // 这一趟可能刚把字体注册好，`key.fonts_rev` 从旧值变成了新值；其余格
+                // 必须与派活时完全一致，才说明它仍是「这一屏想要的」。
+                let mut expected = out.key;
+                expected.fonts_rev = key.fonts_rev;
+                if expected == key && self.desired == Some(key) {
+                    let out_key = out.key;
+                    self.desired = Some(out_key);
                     self.apply_typeset(out);
+                    return Some(out_key);
                 }
+                None
             }
-            Some(Err(err)) => tracing::error!(
-                chapter_id = key.chapter,
-                width = key.width,
-                error = %err,
-                "typeset: 后台排版失败"
-            ),
-            None => {}
+            Some(Err(err)) => {
+                tracing::error!(
+                    chapter_id = key.chapter,
+                    width = key.width,
+                    error = %err,
+                    "typeset: 后台排版失败"
+                );
+                None
+            }
+            None => None,
         }
     }
 
     /// 把一份后台产出换进来。行盒换了，切点也就换了 —— 切片必须跟着作废，
     /// 否则分页翻到的是上一页的行；重切在同一帧的 `ensure_viewport` 里同步做。
     fn apply_typeset(&mut self, out: Typeset) {
+        // 首趟作业把字体表带回来了：换掉 faces，清掉待办，并让度量器按新表重建。
+        // 度量器是 `OnceLock`，旧的那一份是拿空 faces 建的，不能留着。
+        if let Some(fonts) = out.fonts {
+            self.faces = fonts;
+            self.font_job = None;
+            self.fonts_pending = false;
+            self.measure = OnceLock::new();
+        }
         // 缓存不论这一份结果采不采纳都要收回来：它是可再生的中间物，
         // 留着比扔掉省一次整章重排，而复用范围（章 / 字体 / 度量）变了它自己会清。
         self.blocks = out.blocks;
@@ -1247,7 +1315,7 @@ impl Document {
             None
         };
         // 键在这里算，算是「这一帧想要什么」的唯一表述：排版、切片、绘制三级都从它出发。
-        let key = self.layout_key(wrap, columns, page_height);
+        let mut key = self.layout_key(wrap, columns, page_height);
         let width = key.width as f32;
         // 片长同样量化一档，且**切片用的就是量化后的那个数**：排版按 A 宽折行、切片按 B 高切、
         // 绘制按 C 摆，三方都以为自己对，其实是三方各对（`quantize_px` 那条纪律的另一半）。
@@ -1255,7 +1323,10 @@ impl Document {
         let height = slice_height as f32;
         self.desired = Some(key);
         // 先收上一帧的作业成果，再看要不要派新活 —— 顺序反了会把刚回来的结果当旧的丢掉。
-        self.poll_typeset();
+        // 首趟字体作业会把 `fonts_rev` 换掉，所以本地这把键要跟着换，不能拿旧键再派一趟。
+        if let Some(applied) = self.poll_typeset() {
+            key = applied;
+        }
         self.request_typeset(
             key,
             vertical,

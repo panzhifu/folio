@@ -796,6 +796,42 @@ pub struct FontBytes {
     /// 所以 `bytes` 一律是 TTF/OTF 那一层的字节）。
     pub media_type: String,
     pub bytes: Vec<u8>,
+    /// 容器中央目录记的解压后长度（WOFF 是解回 sfnt **之前**那一层的长度）。
+    ///
+    /// 与 `crc32` 一起当字体身份用：别名缓存不能拿 `href` 当键，否则两本书的
+    /// `Fonts/kt.ttf` 会互相认错。EPUB 从 `Zip::range_at` 的现成元数据取，不读字节；
+    /// MOBI 没有 ZIP 区间，只能对已读出的字节算。
+    pub raw_len: u64,
+    /// 容器中央目录记的 CRC32（MOBI 是对字节现算的）。见 [`Self::raw_len`]。
+    pub crc32: u32,
+}
+
+/// 一份字体的**身份与位置**，不含字节。
+///
+/// EPUB 的 `font_refs` 从中央目录直接拿 `crc32 + raw_len`，于是别名缓存可以
+/// 「先按身份查，命中就不解压」；`read_font` 只在未命中时读字节。没有 ZIP 区间的
+/// provider 返回 `None`，调用方退回 [`FontBytes`] 那条一次读全的老路。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FontRef {
+    /// 容器内的规范路径。
+    pub href: String,
+    /// manifest 声明的 media-type。
+    pub media_type: String,
+    /// 解压后长度（WOFF 是解回 sfnt 之前的长度）。
+    pub raw_len: u64,
+    /// 中央目录记的 CRC32。
+    pub crc32: u32,
+}
+
+impl FontRef {
+    pub fn from_bytes(font: &FontBytes) -> Self {
+        Self {
+            href: font.href.clone(),
+            media_type: font.media_type.clone(),
+            raw_len: font.raw_len,
+            crc32: font.crc32,
+        }
+    }
 }
 
 /// 从字节头猜一张图的 mime。

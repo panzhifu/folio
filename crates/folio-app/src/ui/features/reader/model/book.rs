@@ -27,11 +27,12 @@ use folio_core::content::format::css::RuleSet;
 use folio_core::content::format::{TocEntry, dir_of, fragment_of, resolve_href};
 use folio_core::layout::ImageProvider;
 use folio_core::{Chapter, Locator, Reader};
-use gpui_kit::{App, SharedString};
+use gpui_kit::SharedString;
 
 use crate::ui::features::reader::components::image_viewer::{ImageSlot, Place, file_name};
-use crate::ui::features::reader::model::book_fonts::BookFonts;
+use crate::ui::features::reader::model::book_fonts::{BookFonts, FontLoadJob, FontRequest};
 use crate::ui::features::reader::model::chapter_layout::{ChapterSource, Document, author_rules};
+use crate::ui::features::reader::model::perf;
 use crate::ui::features::reader::model::toc_tree::{self, TocRow};
 use crate::ui::foundation::images::{BookImages, ChapterImages, document_source};
 
@@ -122,6 +123,8 @@ pub struct Book {
     /// 整本书的内嵌字体（别名表 + 已经注册进设备的家族名）。各章共用一份，
     /// 注册进设备只有一次，所以由 `Book` 持有，而不是每章自己注册一遍。
     faces: Arc<BookFonts>,
+    /// 首趟排版作业的字体准备。作业带回新表后清空；之后新章直接用 `faces`。
+    font_job: Option<Arc<FontLoadJob>>,
     /// 打开着的这份文档。正文不在库里，只存位置（`ChapterLocator`），所以要留着它
     /// 才能按位置回容器取。
     ///
@@ -136,8 +139,9 @@ pub struct Book {
 impl Book {
     /// 从一份已打开的文档建出一本书，定位到 `locator` 那一章。
     ///
-    /// `cx` 用于注册内嵌字体（进程级文本系统），所以这一步要有 `App`。
-    pub fn new(doc: Arc<dyn OpenedDocument>, prefs: Reader, locator: Locator, cx: &App) -> Self {
+    /// **字体不在这一趟读**：`BookFonts::empty()` 先顶上，`FontLoadJob` 随首趟排版作业
+    /// 进后台，注册完把新表带回 `Document`，下一帧 `sync_fonts` 再灌给邻居章。
+    pub fn new(doc: Arc<dyn OpenedDocument>, prefs: Reader, locator: Locator) -> Self {
         // 章节表只对可重排文档有意义。定版式（CBZ）目前没有正文排版链，
         // 落到这里就是「没有章节」—— 界面照起，只是这一屏空着，不 panic。
         let chapters = match doc.flow() {
@@ -145,7 +149,9 @@ impl Book {
             None => Vec::new(),
         };
         // 样式表按位置清单回容器现取（索引路径下库/文档里只有清单）。
+        let walk = perf::Timer::start();
         let css = doc.stylesheet();
+        let walk_ns = walk.ns();
         let chapter = (locator.chapter as usize).min(chapters.len().saturating_sub(1));
 
         // 图片索引与内嵌字体别名表都从这份文档建一次；字节按需现取（`ByteSource` 持一份
@@ -156,12 +162,21 @@ impl Book {
             "Book::new: 建索引"
         );
         let book_images = Arc::new(BookImages::new(doc.images(), document_source(doc.clone())));
-        let fonts = BookFonts::for_document(doc.as_ref(), &css, cx);
+        // 字体读字节与注册都留给首趟排版作业；这里只造一份空表与待办。
+        let fonts = Arc::new(BookFonts::empty());
         // 整本书的作者层规则只解析这一次，之后每一章的 `Document` 分同一份 `Arc`。
+        let rules_timer = perf::Timer::start();
         let rules = author_rules(&css);
+        let rules_ns = rules_timer.ns();
+        // `@font-face` 也只在这一份规则上折一次；worker 不再解析 CSS。
+        let font_job = Arc::new(FontLoadJob::new(
+            doc.clone(),
+            FontRequest::from_rules(&rules),
+        ));
+        perf::log_book_open(walk_ns, rules_ns, true);
         // 锚章的排版状态按**位置**建，正文由排版作业自己去取。图片索引这里先给空的：
         // 紧跟着的 `set_anchor` 会按本章目录重建它。
-        let document = Document::fetching_with_rules(
+        let mut document = Document::fetching_with_rules(
             doc.clone(),
             chapter,
             &css,
@@ -170,6 +185,7 @@ impl Book {
             Arc::new(ChapterImages::empty()),
             fonts.clone(),
         );
+        document.set_font_job(font_job.clone());
         let mut this = Self {
             title: doc.meta().title.clone().into(),
             chapters,
@@ -183,6 +199,7 @@ impl Book {
             css,
             rules,
             faces: fonts,
+            font_job: Some(font_job),
             doc,
         };
         this.set_anchor(chapter, &prefs);
@@ -251,6 +268,7 @@ impl Book {
     /// `relayout_spine` / `migrate_spine` 的事；调用方（跳章、恢复）要么随后挂
     /// 恢复请求，要么自己带着快照去补。
     pub(in crate::ui::features::reader) fn set_anchor(&mut self, index: usize, prefs: &Reader) {
+        self.sync_fonts();
         if index >= self.chapters.len() {
             return;
         }
@@ -261,7 +279,7 @@ impl Book {
         // 顺序反了会把正要复用的那份排版当垃圾扔掉，锚章也会跟着来回打转。
         let reused = self.take_span(index);
         if old_index != index {
-            let vacant = Document::new_with_rules(
+            let mut vacant = Document::new_with_rules(
                 String::new(),
                 &self.css,
                 self.rules.clone(),
@@ -269,6 +287,9 @@ impl Book {
                 Arc::new(ChapterImages::empty()),
                 self.faces.clone(),
             );
+            if let Some(job) = &self.font_job {
+                vacant.set_font_job(job.clone());
+            }
             let previous = std::mem::replace(&mut self.document, vacant);
             self.spans.push(Span {
                 index: old_index,
@@ -320,6 +341,7 @@ impl Book {
         viewport_height: f32,
         viewport_top: f32,
     ) {
+        self.sync_fonts();
         self.window_px = viewport_height.max(1.0);
         let gap = Self::chapter_gap(prefs);
         let (lo, hi) = self.window_range(gap, viewport_top);
@@ -422,7 +444,7 @@ impl Book {
             })
             .unwrap_or_else(|| Arc::new(ChapterImages::empty()));
         // 正文按位置交给排版作业去取：这一趟连一次解压都不做，更不克隆一整章。
-        let doc = Document::fetching_with_rules(
+        let mut doc = Document::fetching_with_rules(
             self.doc.clone(),
             index,
             &self.css,
@@ -431,6 +453,9 @@ impl Book {
             images,
             self.faces.clone(),
         );
+        if let Some(job) = &self.font_job {
+            doc.set_font_job(job.clone());
+        }
         Span { index, doc }
     }
 
@@ -816,6 +841,21 @@ impl Book {
         &mut self.document
     }
 
+    /// 锚章当前的字体表版本。`ReaderSession` 用它决定何时 reset `FontCache`。
+    pub(in crate::ui::features::reader) fn fonts_revision(&self) -> u32 {
+        self.document.fonts_revision()
+    }
+
+    /// 首趟排版作业把字体表带回来了：锚章 `Document` 的 faces 已经是新的，`Book` 跟上，
+    /// 之后新章不再挂字体任务。邻居章若在字体落地前就已建好，它们共享同一个
+    /// `FontLoadJob`，各自作业会拿到同一份结果。
+    fn sync_fonts(&mut self) {
+        if !self.document.fonts_pending() {
+            self.faces = self.document.faces().clone();
+            self.font_job = None;
+        }
+    }
+
     /// 打开着的这份文档。正文不在库里，只存位置，所以「把整本书读一遍」的活儿
     /// （全文检索那一趟）要拿着它去后台线程 —— `content::document::Document: Send + Sync`
     /// 正是那一趟能出界面线程的前提，与排版作业带的同一份、同一条理由。
@@ -833,6 +873,7 @@ impl Book {
         index: usize,
         prefs: &Reader,
     ) {
+        self.sync_fonts();
         if index >= self.chapters.len() || index == self.chapter {
             return;
         }

@@ -314,6 +314,52 @@ impl Timer {
     }
 }
 
+/// 开书那一段的一次性计时。
+///
+/// **不要用 `reset` / `add` 那套帧账**：`Book::new` 不在 `ReaderSession::render` 里，
+/// 下一次 render 开头的 `reset()` 会把这里刚记的数清掉。开书只在 `folio_app::perf`
+/// 开到 DEBUG 时打一条；`info` 下只多一次 `enabled!` 查询。
+pub fn log_book_open(walk_ns: u64, rules_ns: u64, deferred: bool) {
+    if tracing::enabled!(target: "folio_app::perf", tracing::Level::DEBUG) {
+        tracing::debug!(
+            target: "folio_app::perf",
+            walk_us = walk_ns / 1000,
+            rules_us = rules_ns / 1000,
+            font_deferred = deferred,
+            "book_open"
+        );
+    }
+}
+
+/// 字体准备那一段（`FontLoadJob` 在排版 worker 上跑）。与 `book_open` 分开两条日志：
+/// 开书只在 UI 线程记走路与规则，字体字节/注册在作业里落地。
+#[allow(clippy::too_many_arguments)]
+pub fn log_font_load(
+    parse_ns: u64,
+    bytes_ns: u64,
+    register_ns: u64,
+    faces: usize,
+    cache_hits: usize,
+    bytes_read: usize,
+    failed: usize,
+    empty_diff: usize,
+) {
+    if tracing::enabled!(target: "folio_app::perf", tracing::Level::DEBUG) {
+        tracing::debug!(
+            target: "folio_app::perf",
+            font_parse_us = parse_ns / 1000,
+            font_bytes_us = bytes_ns / 1000,
+            font_register_us = register_ns / 1000,
+            faces,
+            font_cache_hits = cache_hits,
+            font_bytes_read = bytes_read,
+            font_failures = failed,
+            font_empty_diffs = empty_diff,
+            "font_load"
+        );
+    }
+}
+
 fn percentile(values: &[u64], ratio: f64) -> u64 {
     if values.is_empty() {
         return 0;

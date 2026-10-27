@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::content::anchor::TextAnchor;
+use crate::infra::book_settings::BookSettings;
 use crate::net::remote::{self, dav};
 use crate::position::Locator;
 use crate::store::Store;
@@ -60,6 +61,19 @@ pub struct BookSnapshot {
     pub bookmarks: Vec<BookmarkRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tombstones: Vec<Tombstone>,
+    /// 这一本的阅读设置差量。`None` = 这台设备从来没为它写过差量（没话说），
+    /// `Some(空差量)` = 写过并且清干净了（说的就是「跟默认」）—— 两件事必须分得开，
+    /// 否则「恢复本书默认」同步过去会变成「另一台设备上那份旧差量又回来了」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<SettingsRecord>,
+}
+
+/// 差量连同「这台设备什么时候写的」。合并按整本差量比这一个时间取新的那一份 ——
+/// 差量本身没有逐格时间，逐格合并要先给每一格配一个钟，那一层这次不做。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsRecord {
+    pub updated_at: i64,
+    pub settings: BookSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,6 +133,8 @@ pub struct Plan {
     pub annotation_deletes: Vec<DeleteRecord>,
     pub bookmark_upserts: Vec<(String, BookmarkRecord)>,
     pub bookmark_deletes: Vec<DeleteRecord>,
+    /// 该写回本机的差量（整本一份，按 `content_hash` 定位那一行）。
+    pub settings: Vec<(String, SettingsRecord)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,11 +151,13 @@ pub struct Stats {
     pub bookmarks: usize,
     pub annotations_deleted: usize,
     pub bookmarks_deleted: usize,
+    /// 写回本机的那一本书的差量（整本算一次，不逐格数）。
+    pub settings: usize,
 }
 
 impl Stats {
     pub fn applied(&self) -> usize {
-        self.positions + self.annotations + self.bookmarks
+        self.positions + self.annotations + self.bookmarks + self.settings
     }
 }
 
@@ -255,6 +273,34 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
                 stats.positions += 1;
             }
             out_book.position = Some(winner.clone());
+        }
+
+        // 阅读设置：**整本差量**比时间，新的赢；同时间本机优先（与进度那一条同一口径）。
+        // 不做逐格合并 —— 差量里每一格没有自己的钟，要逐格就得先给每一格配一个时间，
+        // 那一层这一轮不买。
+        let mut best_settings = local_book.settings.clone().map(|s| (s, Source::Local));
+        for remote in &remote_books {
+            let Some(candidate) = &remote.settings else {
+                continue;
+            };
+            let replace = match &best_settings {
+                None => true,
+                Some((current, _)) => candidate.updated_at > current.updated_at,
+            };
+            if replace {
+                best_settings = Some((candidate.clone(), Source::Remote));
+            }
+        }
+        if let Some((winner, source)) = &best_settings {
+            let changed = local_book
+                .settings
+                .as_ref()
+                .is_none_or(|local| local.settings != winner.settings);
+            if !source.is_local() && changed {
+                plan.settings.push((hash.clone(), winner.clone()));
+                stats.settings += 1;
+            }
+            out_book.settings = Some(winner.clone());
         }
 
         // 批注：活跃记录与墓碑放进同一张表按 uid 比时间。
@@ -431,6 +477,7 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
             || !out_book.annotations.is_empty()
             || !out_book.bookmarks.is_empty()
             || !out_book.tombstones.is_empty()
+            || out_book.settings.is_some()
         {
             out.books.insert(hash.clone(), out_book);
         }
@@ -628,9 +675,10 @@ mod tests {
     use crate::content::anchor::TextAnchor;
     use crate::position::Locator;
     use crate::sync::{
-        AnnotationRecord, BookSnapshot, BookmarkRecord, Snapshot, Tombstone, TombstoneKind, merge,
-        new_device_id, normalize_remote_dir, valid_device_id,
+        AnnotationRecord, BookSnapshot, BookmarkRecord, SettingsRecord, Snapshot, Tombstone,
+        TombstoneKind, merge, new_device_id, normalize_remote_dir, valid_device_id,
     };
+    use crate::{BookSettings, Reader};
 
     fn annotation(uid: &str, at: i64) -> AnnotationRecord {
         AnnotationRecord {
@@ -658,6 +706,30 @@ mod tests {
             kind,
             uid: uid.into(),
             deleted_at: at,
+        }
+    }
+
+    /// 一份只盖了字号的差量，连同「这台设备什么时候写的」。
+    ///
+    /// 用真的 `record_reader` 造而不是手抄 JSON：同步带的是整本差量，样件走的就是
+    /// 生产那一条换算，差量算法改坏时这里跟着红。
+    fn settings(at: i64, font_size: f32) -> SettingsRecord {
+        let base = Reader::default();
+        let mut wanted = base.clone();
+        wanted.font_size = font_size;
+        let mut patch = BookSettings::default();
+        patch.record_reader(&base, &wanted);
+        SettingsRecord {
+            updated_at: at,
+            settings: patch,
+        }
+    }
+
+    /// 一份「已经清干净」的差量（`Some(空)`，不是 `None`）。
+    fn cleared(at: i64) -> SettingsRecord {
+        SettingsRecord {
+            updated_at: at,
+            settings: BookSettings::default(),
         }
     }
 
@@ -885,12 +957,100 @@ mod tests {
                 annotations: vec![annotation("a", 10)],
                 bookmarks: vec![bookmark("b", 10)],
                 tombstones: vec![tombstone(TombstoneKind::Annotation, "c", 10)],
+                // 新字段也要真走一遍 JSON：不填它等于没测到它写得出去读得回来。
+                settings: Some(settings(10, 26.0)),
             },
         );
         let bytes = serde_json::to_vec(&snapshot).unwrap();
         let back: Snapshot = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back, snapshot);
         assert!(bytes.len() < 4096);
+    }
+
+    /// 阅读设置按**整本差量**比时间：远端更新的写回本机，远端更旧的留着本机那份。
+    #[test]
+    fn newer_remote_settings_win_whole_patch_while_older_ones_are_dropped() {
+        let local = with_book(
+            Snapshot::new("dev-local", 10),
+            "hash",
+            BookSnapshot {
+                settings: Some(settings(20, 19.0)),
+                ..BookSnapshot::default()
+            },
+        );
+        let newer = with_book(
+            Snapshot::new("dev-remote", 20),
+            "hash",
+            BookSnapshot {
+                settings: Some(settings(30, 26.0)),
+                ..BookSnapshot::default()
+            },
+        );
+        let merged = merge(&local, std::slice::from_ref(&newer), 40);
+        assert_eq!(merged.plan.settings.len(), 1, "更新的远端差量该写回本机");
+        assert_eq!(merged.stats.settings, 1);
+        assert_eq!(
+            merged.snapshot.books["hash"]
+                .settings
+                .as_ref()
+                .unwrap()
+                .settings,
+            settings(30, 26.0).settings,
+            "上传的那份该是赢了的那个"
+        );
+
+        let older = with_book(
+            Snapshot::new("dev-remote", 20),
+            "hash",
+            BookSnapshot {
+                settings: Some(settings(5, 17.0)),
+                ..BookSnapshot::default()
+            },
+        );
+        let merged = merge(&local, std::slice::from_ref(&older), 40);
+        assert!(merged.plan.settings.is_empty(), "更旧的远端差量不该盖本机");
+        assert_eq!(
+            merged.snapshot.books["hash"]
+                .settings
+                .as_ref()
+                .unwrap()
+                .settings,
+            settings(20, 19.0).settings,
+            "本机那份该留着"
+        );
+    }
+
+    /// 「恢复本书默认」同步得出去：`Some(空差量)` 带着更新的时间要盖掉旧的差量。
+    ///
+    /// 这一条盯 `Option<SettingsRecord>` 的两义性 —— `None` 是「这台设备没话说」，
+    /// `Some(空)` 是「这台设备把它清干净了」。把后者当没话说丢掉，症状是读者在另一台
+    /// 设备上看到「我明明清过了，那套设置又回来了」。
+    #[test]
+    fn a_cleared_patch_beats_an_older_non_empty_one() {
+        let local = with_book(
+            Snapshot::new("dev-local", 10),
+            "hash",
+            BookSnapshot {
+                settings: Some(cleared(30)),
+                ..BookSnapshot::default()
+            },
+        );
+        let remote = with_book(
+            Snapshot::new("dev-remote", 20),
+            "hash",
+            BookSnapshot {
+                settings: Some(settings(10, 26.0)),
+                ..BookSnapshot::default()
+            },
+        );
+        let merged = merge(&local, std::slice::from_ref(&remote), 40);
+        assert!(merged.plan.settings.is_empty(), "远端更旧，不该往本机写");
+        let uploaded = merged.snapshot.books["hash"].settings.clone().unwrap();
+        assert!(
+            uploaded.settings.is_empty(),
+            "上传的那份该是「已经清干净」，而不是把那两格又带回去"
+        );
+        assert_eq!(uploaded.updated_at, 30);
     }
 
     #[test]

@@ -19,6 +19,7 @@ use super::{Store, now};
 use crate::Result;
 use crate::content::format::{DocMeta, Format, Series};
 use crate::group::{GroupBy, ShelfGroup, UNGROUPED, group_shelf};
+use crate::infra::book_settings::BookSettings;
 use crate::position::Locator;
 
 /// 多值的那几格（作者、贡献者、主题词）在库里是**换行拼接**的一列。
@@ -518,6 +519,57 @@ impl Store {
         )?;
         if rows == 0 {
             tracing::warn!("store: 改第 {id} 本的书名作者，但没有这一行");
+        }
+        Ok(())
+    }
+
+    /// 这一本的阅读设置**差量**（v26 那一列）。库里那一行不在时交回空差量 ——
+    /// 空差量与「这本书完全跟随默认」是同一件事，但**日志必须留一句**：否则「按错了
+    /// id」与「这一本确实没单独设过」在调用方那边长得一模一样。
+    ///
+    /// 为什么单独一条查询而不挂在 [`BookRow`] 上：`BookRow` 被桌面端整库握在手里当
+    /// 标签页列表用（与 [`Store::book_cover`] 同一个理由），而这一格只有阅读层在开书
+    /// 那一刻要一次。
+    pub fn book_settings(&self, id: i64) -> Result<BookSettings> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT settings_json FROM books WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match raw {
+            Some(raw) => Ok(BookSettings::from_column(&raw)),
+            None => {
+                tracing::warn!("store: 读第 {id} 本的阅读设置，但没有这一行");
+                Ok(BookSettings::default())
+            }
+        }
+    }
+
+    /// 整份替换那一本的差量；空差量落成空串。
+    ///
+    /// 不做「读出来改一格再写回」：调用方手上本来就有整份生效值，
+    /// [`BookSettings::record_reader`] 一次算完差量，比在 SQL 里逐格合并少一套口径。
+    ///
+    /// **每改一格就写一次**，不攒：这一条 UPDATE 按主键动一行，而攒着的那一份在
+    /// 进程被系统杀掉（手机上读着读着被回收是常态）时会连刚调完的那一格一起丢 ——
+    /// 那是读者手上的东西，比省几次写贵。
+    ///
+    /// 每一次写都盖一个本机时间（`settings_updated_at`，v27）：跨设备合并按**整本差量**
+    /// 取新的那一份，所以「恢复本书默认」那一次空写入也必须有时间戳 —— 少了它，另一台
+    /// 设备上那份旧差量会盖回来，读者看到的是「我明明清过了」。
+    pub fn set_book_settings(&self, id: i64, settings: &BookSettings) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let rows = conn.execute(
+            "UPDATE books
+                SET settings_json = ?2, settings_updated_at = ?3
+              WHERE id = ?1",
+            params![id, settings.to_column(), now()],
+        )?;
+        if rows == 0 {
+            tracing::warn!("store: 改第 {id} 本的阅读设置，但没有这一行");
         }
         Ok(())
     }

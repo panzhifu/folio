@@ -17,7 +17,7 @@ use quick_xml::events::Event;
 use super::zip::{EntryRange, EntryReader, Zip};
 use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FixedDoc, FixedPage, FlowDoc,
-    FontBytes, Format, ImageRes, PageImage, PageSource, ParseBudget, Series, TocEntry,
+    FontBytes, FontRef, Format, ImageRes, PageImage, PageSource, ParseBudget, Series, TocEntry,
 };
 use super::{
     HeadDims, dir_of, extension_of, fragment_of, image_dims, image_dims_from_head,
@@ -79,6 +79,16 @@ impl DocumentProvider for EpubAdapter {
     /// `@font-face` 声明的那几个路径 → 字节。回空而不是报错的理由见 [`FontBytes`]。
     fn fonts(&self, path: &Path, wanted: &[String]) -> Vec<FontBytes> {
         font_bytes(path, wanted)
+    }
+
+    /// 字体身份；EPUB 有中央目录，读元数据不解压。
+    fn font_refs(&self, path: &Path, wanted: &[String]) -> Option<Vec<FontRef>> {
+        Some(font_refs(path, wanted))
+    }
+
+    /// 按身份读一份字体；未命中别名缓存时才走到这里。
+    fn read_font(&self, path: &Path, font: &FontRef) -> Option<Vec<u8>> {
+        read_font(path, font)
     }
 
     /// 容器绝对路径 → 图片字节。每次调用重开容器，见 [`crate::content::format::ImageRes`]。
@@ -165,35 +175,33 @@ fn font_kind(media_type: &str) -> FontKind {
     }
 }
 
+/// 打开容器并只解析一遍 OPF，给字体那几条路共用。
+fn open_font_manifest(path: &Path) -> Option<(Zip, Vec<Item>, String)> {
+    let mut zip = Zip::open(path).ok()?;
+    let opf_path = zip
+        .locate("META-INF/container.xml")
+        .and_then(|n| zip.read_text(&n))
+        .and_then(|c| container_path(&c))?;
+    let opf_text = zip
+        .read_text(&opf_path)
+        .or_else(|| zip.locate(&opf_path).and_then(|n| zip.read_text(&n)))?;
+    let opf = parse_opf(&opf_text);
+    Some((zip, opf.items, dir_of(&opf_path)))
+}
+
 /// 容器路径 → 字体字节。
 ///
 /// 与 [`read`] 走同一条定位链（container.xml → OPF → manifest），因为 `src` 里那个路径
 /// 是**相对 OPF 目录**解出来的，只有再读一遍 manifest 才能把它对上 zip 里的条目名。
 /// 这一步只在开书时做一次，几个小文件，不值当为它加一层缓存。
 fn font_bytes(path: &Path, wanted: &[String]) -> Vec<FontBytes> {
-    let mut zip = match Zip::open(path) {
-        Ok(zip) => zip,
-        Err(_) => return Vec::new(),
-    };
-    let Some(opf_path) = zip
-        .locate("META-INF/container.xml")
-        .and_then(|n| zip.read_text(&n))
-        .and_then(|c| container_path(&c))
-    else {
+    let Some((mut zip, items, base_dir)) = open_font_manifest(path) else {
         return Vec::new();
     };
-    let Some(opf_text) = zip
-        .read_text(&opf_path)
-        .or_else(|| zip.locate(&opf_path).and_then(|n| zip.read_text(&n)))
-    else {
-        return Vec::new();
-    };
-    let opf = parse_opf(&opf_text);
-    let base_dir = dir_of(&opf_path);
 
     let mut out = Vec::new();
     let mut total = 0usize;
-    for item in &opf.items {
+    for item in &items {
         let kind = font_kind(&item.media_type);
         if matches!(kind, FontKind::Other | FontKind::Woff2) {
             continue;
@@ -202,6 +210,17 @@ fn font_bytes(path: &Path, wanted: &[String]) -> Vec<FontBytes> {
         // 两边同形才能直接比。
         let name = resolve(&base_dir, &item.href);
         if !wanted.iter().any(|w| w == &name) {
+            continue;
+        }
+        let Some(range) = zip.range_at(&name) else {
+            continue;
+        };
+        // 中央目录里的长度先挡一道：超过单份上限的字体不必解压。
+        if range.raw_len() > MAX_ONE as u64 {
+            tracing::debug!(
+                "epub: 字体 {name} 有 {} 字节，超过单份上限，丢掉",
+                range.raw_len()
+            );
             continue;
         }
         let Some(bytes) = zip.locate(&name).and_then(|n| zip.read(&n)) else {
@@ -236,9 +255,71 @@ fn font_bytes(path: &Path, wanted: &[String]) -> Vec<FontBytes> {
             href: name,
             media_type: item.media_type.clone(),
             bytes,
+            raw_len: range.raw_len(),
+            crc32: range.crc(),
         });
     }
     out
+}
+
+/// 字体身份：只读中央目录，不解压。
+fn font_refs(path: &Path, wanted: &[String]) -> Vec<FontRef> {
+    let Some((mut zip, items, base_dir)) = open_font_manifest(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut total = 0u64;
+    for item in &items {
+        let kind = font_kind(&item.media_type);
+        if matches!(kind, FontKind::Other | FontKind::Woff2) {
+            continue;
+        }
+        let name = resolve(&base_dir, &item.href);
+        if !wanted.iter().any(|w| w == &name) {
+            continue;
+        }
+        let Some(range) = zip.range_at(&name) else {
+            continue;
+        };
+        if range.raw_len() > MAX_ONE as u64 {
+            tracing::debug!(
+                "epub: 字体 {name} 有 {} 字节，超过单份上限，丢掉",
+                range.raw_len()
+            );
+            continue;
+        }
+        if out.len() >= MAX_FACES || total + range.raw_len() > MAX_TOTAL as u64 {
+            tracing::debug!(
+                "epub: 内嵌字体到量（已取 {} 份 / {total} 字节），剩下的不读了",
+                out.len()
+            );
+            break;
+        }
+        total += range.raw_len();
+        out.push(FontRef {
+            href: name,
+            media_type: item.media_type.clone(),
+            raw_len: range.raw_len(),
+            crc32: range.crc(),
+        });
+    }
+    out
+}
+
+/// 按身份读一份字体（WOFF 解回 sfnt）；未命中别名缓存时才走这里。
+fn read_font(path: &Path, font: &FontRef) -> Option<Vec<u8>> {
+    let mut zip = Zip::open(path).ok()?;
+    let name = zip.locate(&font.href)?;
+    let bytes = zip.read(&name)?;
+    if bytes.len() > MAX_ONE {
+        return None;
+    }
+    let bytes = match font_kind(&font.media_type) {
+        FontKind::Sfnt => Some(bytes),
+        FontKind::Woff => crate::content::format::woff::decode(&bytes),
+        FontKind::Woff2 | FontKind::Other => None,
+    }?;
+    (bytes.len() <= MAX_ONE).then_some(bytes)
 }
 
 #[derive(Debug, Default)]

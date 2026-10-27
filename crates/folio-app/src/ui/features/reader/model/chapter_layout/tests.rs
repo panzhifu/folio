@@ -1585,7 +1585,7 @@ fn the_author_stylesheet_is_parsed_once_per_book(cx: &mut TestAppContext) {
     let prefs = bare_prefs();
 
     take_local(Metric::RuleSetParses);
-    let mut book = cx.update(|app| Book::new(doc, prefs.clone(), Locator::start(), app));
+    let mut book = cx.update(|_app| Book::new(doc, prefs.clone(), Locator::start()));
     assert_eq!(
         take_local(Metric::RuleSetParses),
         1,
@@ -1615,6 +1615,119 @@ fn the_author_stylesheet_is_parsed_once_per_book(cx: &mut TestAppContext) {
         take_local(Metric::RuleSetParses),
         0,
         "改偏好把作者层重解析了一遍"
+    );
+}
+
+/// 开书先挂 `FontLoadJob`，首趟作业（测试里同步跑）把它清掉并换上新的 faces。
+///
+/// 这条钉的是「字体不在 UI 线程读」那条链的**状态转移**：`Book::new` 不该把
+/// `fonts_pending` 留在 `false`（那等于永远不读字体），作业落地后也不该留 `true`
+/// （那等于每个新章都再挂一次任务）。真实注册还要真机；这里只钉任务交接。
+#[gpui_kit::test]
+fn the_first_typeset_clears_the_font_job(cx: &mut TestAppContext) {
+    use folio_core::Locator;
+
+    use crate::ui::features::reader::model::book::Book;
+    use crate::ui::features::reader::model::chapter_layout::Viewport;
+
+    cx.update(gpui_kit::init);
+    let flow = FlowDoc {
+        chapters: vec![Chapter::inline("第0章", "<p>正文</p>")],
+        ..Default::default()
+    };
+    let doc: Arc<dyn OpenedDocument> = Arc::from(folio_core::content::document::from_content(
+        DocMeta {
+            title: "一章".into(),
+            authors: Vec::new(),
+            format: Format::Epub,
+            size: 0,
+            ..DocMeta::default()
+        },
+        Content::Reflow(flow),
+    ));
+    let mut book = cx.update(|_app| Book::new(doc, bare_prefs(), Locator::start()));
+    assert!(book.document().fonts_pending(), "开书时应挂着首趟字体任务");
+    let handle = window(cx, 600.0, 800.0);
+    let page = || Viewport {
+        reserve: 0.0,
+        columns: 1,
+        height: 700.0,
+        gap: 0.0,
+    };
+    cx.update_window(handle, |_, win, cx| {
+        book.document_mut().ensure_viewport(win, cx, page());
+    })
+    .expect("窗口应当可排版");
+    assert!(!book.document().fonts_pending(), "首趟作业该把字体任务清掉");
+    assert!(
+        book.document().fonts().families_for("hanyi").is_none(),
+        "这本没有内嵌字体，别名表不该凭空有项"
+    );
+}
+
+/// 真书 HP 走一遍首趟作业：读字节、注册、`fonts_rev` 换代、`Book` 同步。
+///
+/// 忽略：真书只在 `tests/fixtures/local/`，不入库。手动跑：
+/// `cargo test -p folio-app --lib -- --ignored --nocapture the_first_typeset_warms_hp_fonts`
+#[ignore = "真书 HP 不在仓库；手动跑"]
+#[gpui_kit::test]
+fn the_first_typeset_warms_hp_fonts(cx: &mut TestAppContext) {
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    use folio_core::Locator;
+
+    use crate::ui::features::reader::model::book::Book;
+    use crate::ui::features::reader::model::chapter_layout::Viewport;
+
+    cx.update(gpui_kit::init);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/local/hali-bote-quanji.epub");
+    if !path.is_file() {
+        eprintln!("{} 不在，跳过", path.display());
+        return;
+    }
+    let doc = folio_core::content::document::open(&path).expect("打开 HP");
+    let doc: Arc<dyn OpenedDocument> = Arc::from(doc);
+    let book_started = Instant::now();
+    let mut book = cx.update(|_app| Book::new(doc, bare_prefs(), Locator::start()));
+    println!(
+        "Book::new（UI 线程这一段）耗时 {:.1} ms",
+        book_started.elapsed().as_secs_f64() * 1000.0
+    );
+    let before = book.fonts_revision();
+    assert!(
+        book.document().fonts_pending(),
+        "HP 带内嵌字体，开书时应挂着首趟字体任务"
+    );
+    let handle = window(cx, 600.0, 800.0);
+    let page = || Viewport {
+        reserve: 0.0,
+        columns: 1,
+        height: 700.0,
+        gap: 0.0,
+    };
+    let started = Instant::now();
+    cx.update_window(handle, |_, win, cx| {
+        book.document_mut().ensure_viewport(win, cx, page());
+    })
+    .expect("窗口应当可排版");
+    println!(
+        "首次排版（含字体作业）耗时 {:.1} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    assert!(!book.document().fonts_pending(), "首趟作业该把字体任务清掉");
+    assert_ne!(
+        book.fonts_revision(),
+        before,
+        "字体注册事件应让 LayoutKey::fonts_rev 前进"
+    );
+    // 窗口铺邻居时会 sync_fonts：Book 的 faces 必须跟上锚章那份新表。
+    book.ensure_window_spans(&bare_prefs(), 800.0, 0.0);
+    assert_eq!(
+        book.fonts_revision(),
+        book.document().fonts_revision(),
+        "Book::sync_fonts 没把锚章的新字体表接过来"
     );
 }
 

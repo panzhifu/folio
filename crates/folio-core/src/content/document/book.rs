@@ -290,6 +290,16 @@ impl Document for BookDocument {
         }
     }
 
+    fn font_refs(&self, wanted: &[String]) -> Option<Vec<crate::content::format::FontRef>> {
+        let (provider, path) = self.container()?;
+        provider.font_refs(path, wanted)
+    }
+
+    fn read_font(&self, font: &crate::content::format::FontRef) -> Option<Vec<u8>> {
+        let (provider, path) = self.container()?;
+        provider.read_font(path, font)
+    }
+
     fn chapter_source(&self, index: usize) -> Result<String> {
         let ContentRef::Reflow(flow) = self.content() else {
             // 定版式没有「章」，也没有正文要取 —— 页面自己就是内容。

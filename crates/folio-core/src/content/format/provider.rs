@@ -18,7 +18,9 @@
 
 use std::path::Path;
 
-use super::{Chapter, ChapterLocator, ChapterText, Content, DocMeta, FlowDoc, FontBytes, Format};
+use super::{
+    Chapter, ChapterLocator, ChapterText, Content, DocMeta, FlowDoc, FontBytes, FontRef, Format,
+};
 use crate::Result;
 
 /// 一本书内部**最多起几路**解析 worker —— 两层并行共用一份预算时，由上面那一层分给它。
@@ -173,6 +175,16 @@ pub trait DocumentProvider: Send + Sync {
     /// 「那本书的字体坏了」，两者在屏幕上本来就是同一个表现。
     fn fonts(&self, _path: &Path, _wanted: &[String]) -> Vec<FontBytes> {
         Vec::new()
+    }
+
+    /// 字体身份与容器路径，不读字节。默认 `None` = 没有现成元数据，走 [`Self::fonts`]。
+    fn font_refs(&self, _path: &Path, _wanted: &[String]) -> Option<Vec<FontRef>> {
+        None
+    }
+
+    /// 按 [`Self::font_refs`] 给的身份读一份字节。默认 `None` = 走 [`Self::fonts`]。
+    fn read_font(&self, _path: &Path, _font: &FontRef) -> Option<Vec<u8>> {
+        None
     }
 
     /// 容器内某个路径的图片字节。读不到一律 `None`：

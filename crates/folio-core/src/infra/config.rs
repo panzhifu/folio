@@ -3,7 +3,7 @@
 //! 分成六节，前五节各自对应设置界面里的一类（或排版引擎的输入），第六节是给调试用的、
 //! 界面上没有：
 //! - [`Reader`] —— 排版输入（字号、行距、缩进、版心、字体），排版引擎只认这一节；
-//! - [`Appearance`] —— 软件浅深、阅读页单独的浅深覆盖，以及两侧各用哪套主题；
+//! - [`Appearance`] —— 软件浅深、阅读页单独的浅深，以及两侧各用哪套主题；
 //!   属于界面外观而不是排版输入；
 //! - [`Library`] —— 书库目录；
 //! - [`Language`] —— 界面语言；
@@ -14,8 +14,11 @@
 //!
 //! 为什么是配置文件而不是继续放 SQLite：配置是**应用级**数据、跨书存在，
 //! 放成一个可读可备份的小 JSON 比塞进书库数据库更符合直觉，也方便用户手改。
-//! 反过来说，一切需要「按书存」的东西（进度、标注、缓存的章节）都在 `store` 里，
-//! 两边不重叠。
+//! 反过来说，一切需要「按书存」的东西（进度、标注、缓存的章节，以及每本书自己的
+//! 阅读设置差量 [`crate::BookSettings`]）都在 `store` 里，两边不重叠。
+//!
+//! 这里每一节都是**默认值**：一本书可以只盖掉其中几格，见
+//! [`crate::BookSettings`] 那一条「默认 + 差量 → 生效值」的口径。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
@@ -46,6 +49,12 @@ pub enum Layer {
     File,
     /// 环境变量覆盖。
     Env,
+    /// 当前挂着的那本书自己的差量（[`BookSettings`](crate::BookSettings)），最高一档。
+    ///
+    /// 它必须在这一表里有名字：诊断 dump 打的是**生效值**，而「我在设置屏改了字号怎么
+    /// 这本书没变」正是这张表存在的理由 —— 少了这一档，那一格会被报成来自 `file`，
+    /// 而那恰好是错的。
+    Book,
 }
 
 impl Layer {
@@ -55,6 +64,7 @@ impl Layer {
             Self::Default => "default",
             Self::File => "file",
             Self::Env => "env",
+            Self::Book => "book",
         }
     }
 }
@@ -86,7 +96,12 @@ impl Provenance {
         self.layers.is_empty()
     }
 
-    fn mark(&mut self, key: impl Into<String>, layer: Layer) {
+    /// 记一项来自哪一层。
+    ///
+    /// 公开是因为**第四层住在 UI 那边**：一本书的差量是开书那一刻由阅读会话叠上去的
+    /// （见 `folio_app::ui::services::ConfigHolder`），core 的读盘那一路看不见它。
+    /// 键仍是点分路径，与诊断 dump 里那份生效值 JSON 对得上。
+    pub fn mark(&mut self, key: impl Into<String>, layer: Layer) {
         self.layers.insert(key.into(), layer);
     }
 }
@@ -223,6 +238,27 @@ impl Mode {
             "light" => Self::Light,
             "dark" => Self::Dark,
             _ => Self::System,
+        }
+    }
+
+    /// 「这一档没被单独选过、跟随上一层」在界面选项里的写法。
+    ///
+    /// 下拉与菜单的选项值只有字符串一种形状，而 [`Appearance::reading_mode`] 是
+    /// `Option<Mode>` —— `None` 需要一个自己的键名，否则「跟随软件」在界面上就没处放。
+    /// 这个名字**不与配置文件的 JSON 值混用**：落盘那一侧 `None` 就是不写这一格。
+    pub const FOLLOW_APP: &'static str = "follow_app";
+
+    /// 界面选项的值 → 阅读浅深那一格。`Self::FOLLOW_APP` 以外都按 [`parse`](Self::parse)
+    /// 解释（认不出的落到 `Some(System)`，与配置文件那一侧同一口径）。
+    pub fn parse_reading(value: &str) -> Option<Self> {
+        (value != Self::FOLLOW_APP).then(|| Self::parse(value))
+    }
+
+    /// 阅读浅深那一格 → 界面选项的值。与 [`parse_reading`](Self::parse_reading) 互为逆。
+    pub fn reading_value(mode: Option<Self>) -> &'static str {
+        match mode {
+            None => Self::FOLLOW_APP,
+            Some(mode) => mode.as_str(),
         }
     }
 }
@@ -404,15 +440,19 @@ impl<'de> Deserialize<'de> for PageTurn {
 #[serde(default)]
 pub struct Appearance {
     pub mode: Mode,
-    /// 阅读页自己的浅深，**只在阅读层挂着时覆盖 [`mode`](Self::mode)**。
+    /// 阅读页的浅深，**全局默认那一档**：没单独设过的书在阅读层挂着时按它走。
     ///
-    /// `None` = 跟随软件外观（默认）；`Some(System)` = 阅读页跟着系统走，
-    /// `Some(Light)` / `Some(Dark)` = 钉死一档。它存在这一节而不是 [`Reader`]：
+    /// `None` = 跟随软件外观 [`mode`](Self::mode)（默认）；`Some(System)` = 阅读页跟着
+    /// 系统走；`Some(Light)` / `Some(Dark)` = 钉死一档。它存在这一节而不是 [`Reader`]：
     /// `Reader` 整份是排版失效键，而换浅深不该让任何一章重排（与
     /// [`page_turn`](Self::page_turn) 同一条理由）。
     ///
     /// 阅读页盖满整窗，所以「只在阅读时覆盖」在画面上与全局换肤几乎一样；区别在
-    /// **关书之后**：书架、设置、下一次开书之前都还是读者在设置里选的 [`mode`](Self::mode)。
+    /// **关书之后**：书架、设置、下一次开书之前都还是读者在设置里选的
+    /// [`mode`](Self::mode)。
+    ///
+    /// 单本书可以盖掉这一格（[`BookSettings`](crate::BookSettings) 的 `appearance` 差量），
+    /// 盖掉之后**也不碰 [`mode`](Self::mode)**：那一格只归软件。
     pub reading_mode: Option<Mode>,
     /// 解析到浅色时用的主题名。
     pub light: Option<String>,
@@ -1409,11 +1449,12 @@ mod tests {
     //! 这些测试盯的是「用户手改这个 JSON 之后程序会怎样」，所以全部从 JSON 文本出发，
     //! 不去直接改结构体 —— 结构体改不出坏输入。
 
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     use crate::infra::config::{Config, Env, Layer, TranslationEngine, WatchDir};
     use crate::infra::i18n::Locale;
-    use crate::{AnnotationStyle, Appearance, Language, Library, Mode, PageTurn, Reader};
+    use crate::{AnnotationStyle, Appearance, Language, Library, Mode, PageTurn, Provenance, Reader};
     use serde_json::json;
 
     fn load(text: &str) -> Config {
@@ -1621,6 +1662,7 @@ mod tests {
             },
             appearance: Appearance {
                 mode: Mode::Light,
+                // 这一格默认是 `None`，写个 `Some` 才算测到「Optional<Mode> 真写出去读回来」。
                 reading_mode: Some(Mode::Dark),
                 light: Some("Gruvbox".into()),
                 dark: Some("Molokai".into()),
@@ -1964,7 +2006,10 @@ mod tests {
         assert_eq!(old.appearance.light.as_deref(), Some("Gruvbox"));
     }
 
-    /// 阅读页的浅深是**独立一格**：缺省是「跟随软件」，写了它也不许改到全局 `mode`。
+    /// 阅读页的浅深是**独立一格**：缺省是「跟随软件外观」，写了它也不许改到全局 `mode`。
+    ///
+    /// 这条门存在是因为这一格与 `mode` 长得太像 —— 一旦实现图省事把夜间写回 `mode`，
+    /// 症状是「读完书关掉，整个应用的浅深跟着变了，而且下次开书之前还是那样」。
     /// 认不出的值按 `Mode::parse` 回落「跟随系统」，同一节里的主题名仍要留着。
     #[test]
     fn the_reader_mode_is_optional_and_never_touches_the_app_mode() {
@@ -1988,6 +2033,56 @@ mod tests {
             broken.appearance.light.as_deref(),
             Some("Gruvbox"),
             "一个坏掉的阅读浅深不该把同一节的主题名一起吃掉"
+        );
+    }
+
+    /// 四层各自有名字，而**被一本书盖过的那一格要在来源表里念 `book`**。
+    ///
+    /// 这一档不是装饰：诊断 dump 打的是生效值，而「我在设置屏改了字号、这本书怎么不动」
+    /// 是这张表要回答的那类事故。少了 `book`，那一格会被报成来自 `file` —— 恰好是错的。
+    #[test]
+    fn a_book_override_is_attributable_in_the_provenance_table() {
+        let mut provenance = Provenance::default();
+        provenance.mark("reader.font_size", Layer::File);
+        provenance.mark("reader.font_size", Layer::Book);
+        assert_eq!(provenance.layer_of("reader.font_size"), Layer::Book);
+        assert_eq!(
+            provenance.entries().collect::<Vec<_>>(),
+            vec![("reader.font_size", Layer::Book)],
+            "同一格被两层盖过时，表里只留最高那一档"
+        );
+        assert_eq!(Layer::Book.as_str(), "book");
+    }
+
+    /// 「跟随软件」那一档在**界面值与 `Option<Mode>`** 之间往返，四档互不相同。
+    ///
+    /// 下拉与菜单的选项只有字符串一种形状，而配置里 `None` 表示「没选过」—— 这一对
+    /// 函数是两者之间唯一的翻译。翻错的症状是「选了跟随软件，落盘却钉成跟随系统」。
+    #[test]
+    fn the_reading_mode_round_trips_through_its_interface_value() {
+        assert_eq!(Mode::reading_value(None), Mode::FOLLOW_APP);
+        assert_eq!(Mode::parse_reading(Mode::FOLLOW_APP), None);
+        for mode in [Mode::System, Mode::Light, Mode::Dark] {
+            assert_eq!(
+                Mode::parse_reading(Mode::reading_value(Some(mode))),
+                Some(mode),
+                "{mode:?} 那一档过不去"
+            );
+        }
+        // 认不出的值与配置文件同一口径：落到「跟随系统」，不许变成「跟随软件」。
+        assert_eq!(Mode::parse_reading("sepia"), Some(Mode::System));
+        // 四档的界面值互不相同，否则下拉里会有两行指向同一个选择。
+        let values = [
+            None,
+            Some(Mode::System),
+            Some(Mode::Light),
+            Some(Mode::Dark),
+        ]
+        .map(Mode::reading_value);
+        assert_eq!(
+            values.iter().collect::<BTreeSet<_>>().len(),
+            4,
+            "界面值撞了：{values:?}"
         );
     }
 

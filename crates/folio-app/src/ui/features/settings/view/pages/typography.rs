@@ -34,7 +34,7 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             max: Reader::FONT_SIZE_MAX,
                             step: 1.0,
                         },
-                        |cx| ConfigHolder::reader(cx).font_size,
+                        |cx| ConfigHolder::default_reader(cx).font_size,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.font_size = v),
                     ),
                     number(
@@ -47,7 +47,7 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             max: Reader::LINE_HEIGHT_MAX,
                             step: 0.05,
                         },
-                        |cx| ConfigHolder::reader(cx).line_height,
+                        |cx| ConfigHolder::default_reader(cx).line_height,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.line_height = v),
                     ),
                     number(
@@ -60,7 +60,7 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             max: Reader::LETTER_SPACING_MAX,
                             step: 0.01,
                         },
-                        |cx| ConfigHolder::reader(cx).letter_spacing_em,
+                        |cx| ConfigHolder::default_reader(cx).letter_spacing_em,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.letter_spacing_em = v),
                     ),
                     number(
@@ -73,7 +73,7 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             max: Reader::PARAGRAPH_GAP_MAX,
                             step: 0.05,
                         },
-                        |cx| ConfigHolder::reader(cx).paragraph_gap_em,
+                        |cx| ConfigHolder::default_reader(cx).paragraph_gap_em,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.paragraph_gap_em = v),
                     ),
                 ],
@@ -91,12 +91,12 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             max: Reader::INDENT_MAX,
                             step: 0.25,
                         },
-                        |cx| ConfigHolder::reader(cx).indent_em,
+                        |cx| ConfigHolder::default_reader(cx).indent_em,
                         |v, cx| ConfigHolder::edit_reader(cx, |p| p.indent_em = v),
                     ),
                     Row::toggle(
                         tr(cx, "field.justify"),
-                        |cx: &App| ConfigHolder::reader(cx).justify,
+                        |cx: &App| ConfigHolder::default_reader(cx).justify,
                         |val: bool, cx| ConfigHolder::edit_reader(cx, |p| p.justify = val),
                     )
                     .description(tr(cx, "field.justify.desc"))
@@ -131,7 +131,7 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             .collect(),
                         false,
                         |cx: &App| {
-                            SharedString::from(ConfigHolder::appearance(cx).page_turn.as_str())
+                            SharedString::from(ConfigHolder::default_appearance(cx).page_turn.as_str())
                         },
                         |val: SharedString, cx| {
                             ConfigHolder::edit_appearance(cx, |a| {
@@ -177,7 +177,7 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                         false,
                         |cx: &App| {
                             SharedString::from(
-                                ConfigHolder::appearance(cx).highlight_style.as_str(),
+                                ConfigHolder::default_appearance(cx).highlight_style.as_str(),
                             )
                         },
                         |val: SharedString, cx| {

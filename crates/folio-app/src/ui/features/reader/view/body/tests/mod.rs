@@ -15,6 +15,7 @@ mod layout;
 mod library;
 mod media;
 mod mode;
+mod per_book;
 mod reflow;
 mod scroll;
 mod selection;

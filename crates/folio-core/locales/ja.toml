@@ -25,6 +25,7 @@ import = "本を追加"
 account = "アカウント"
 
 [reader]
+reset_defaults = "この本を初期設定に"
 empty_hint = "左の棚から本を選ぶか、サイドバー上部の「本を追加」から追加してください"
 no_book = "開いている本がありません"
 # 読書設定カード上部の三つのセクション。
@@ -215,8 +216,9 @@ text_direction = "文字方向"
 font_family = "本文フォント"
 "font_family.desc" = "この端末にインストールされているフォントから選びます。"
 appearance_mode = "明暗"
-reading_mode = "読書の明暗"
 "appearance_mode.desc" = "システムに従うか、明または暗に固定するか。"
+reading_mode = "読書の明暗"
+"reading_mode.desc" = "読書ページだけの明暗。個別に設定していない本はこの設定に従い、本ごとに選べばそれが優先します。"
 theme_light = "浅色テーマ"
 "theme_light.desc" = "明に解決されたときに使う配色。"
 theme_dark = "暗色テーマ"

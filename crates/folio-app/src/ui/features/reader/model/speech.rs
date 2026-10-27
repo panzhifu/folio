@@ -515,9 +515,12 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (view, handle) = open(cx, &flow, None);
+        // 翻页方式现在按书存，「听书把这本带进滚动」写的就是这一本 —— 所以这一条要带
+        // 一个真有 id 的库行：`None` 那一档没有书挂着，按书的写入会被忽略。
+        let (store, book_id) = store_with_book(&flow);
+        let (view, handle) = open(cx, &flow, Some((store, book_id)));
         cx.update(|app| {
-            ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Scroll);
+            ConfigHolder::edit_book_appearance(app, |a| a.page_turn = PageTurn::Scroll);
         });
         settle(cx, handle);
         assert!(

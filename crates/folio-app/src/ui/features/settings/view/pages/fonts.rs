@@ -21,7 +21,7 @@ fn weight_label(cx: &App, weight: u16) -> SharedString {
 pub(in crate::ui::features::settings) fn fonts_page(cx: &App) -> Page {
     let family = Row::font(
         tr(cx, "field.font_family"),
-        |cx: &App| SharedString::from(ConfigHolder::reader(cx).font_family),
+        |cx: &App| SharedString::from(ConfigHolder::default_reader(cx).font_family),
         |val: SharedString, cx| {
             if !val.trim().is_empty() {
                 ConfigHolder::edit_reader(cx, |p| p.font_family = val.to_string());
@@ -46,7 +46,7 @@ pub(in crate::ui::features::settings) fn fonts_page(cx: &App) -> Page {
         false,
         |cx: &App| {
             SharedString::from(
-                Reader::nearest_font_weight(ConfigHolder::reader(cx).font_weight).to_string(),
+                Reader::nearest_font_weight(ConfigHolder::default_reader(cx).font_weight).to_string(),
             )
         },
         |val: SharedString, cx| {

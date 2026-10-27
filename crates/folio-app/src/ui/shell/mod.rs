@@ -117,6 +117,9 @@ pub fn reading_brightness(reading_mounted: bool, prefs: Option<f32>) -> Option<f
 
 /// 这一帧要涂哪一档浅深：书挂着时读**阅读页自己**那一格，书收了就回到软件外观。
 ///
+/// 交进来的那份是**生效值**，所以「这一本单独选过夜里」已经折在 `reading_mode` 里了
+/// （见 `services::config` 那两层怎么叠）。
+///
 /// 阅读页盖满整窗，换肤仍是应用级的一次切换；所以只在交出去的那份副本上把 `mode`
 /// 换成阅读页的档位，配置里的全局 `mode` 一个字节都不动 —— 关书后架面与设置还是
 /// 读者在设置里选的那一档。
@@ -1108,6 +1111,7 @@ impl Render for AppShell {
         // 亮度那一格先抠出来：下面整个 `appearance` 要按阅读层解析、再挪进 `applied`。
         let brightness_pref = appearance.brightness;
         // 书挂着时用阅读页自己的浅深，书收了回到软件外观（见 [`themed_appearance`]）。
+        // 这一本自己选过夜里时，`reading_mode` 已经在生效层里了（见 `services::config`）。
         let appearance = themed_appearance(appearance, self.reading_mounted());
         // 比较的是「配置 + 它解析出来的浅深」那一对：偏好一个字没动、只有系统翻了面，
         // 变的就只有后面那一格。
@@ -1151,6 +1155,11 @@ impl Render for AppShell {
         });
         if reading_sample.is_some_and(|sample| !sample.should_render()) {
             self.reading = None;
+            // 撤掉这一本书的差量：从这一刻起屏幕上没有那一本了，生效层回到默认层。
+            // 撤在**退场走完**这一帧而不是 [`AppShell::close_reading`] 那一刻 —— 书还在
+            // 往外滑的时候把架面换成白天，读者看到的是两层各种颜色。
+            // 差量的真相在库里，这里只撤内存里那一份，不需要落盘。
+            ConfigHolder::set_book(cx, None);
         }
         // 报给正文的那一条是顶上那一条（层自己让）加底下那一条（底栏与页脚自己让，见
         // `reader::page` 的 `bottom_inset`）。同一个数还要给摆层用（[`reading_top_inset`]）。

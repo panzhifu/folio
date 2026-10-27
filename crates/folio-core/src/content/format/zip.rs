@@ -232,6 +232,16 @@ pub(crate) struct EntryRange {
 }
 
 impl EntryRange {
+    /// 中央目录记的解压后长度。字体身份用它是为了不读字节就能分区。
+    pub(crate) fn raw_len(&self) -> u64 {
+        self.raw_len
+    }
+
+    /// 中央目录记的 CRC32。字体身份用它是为了不读字节就能分区。
+    pub(crate) fn crc(&self) -> u32 {
+        self.crc
+    }
+
     /// 这条能不能走「自己按偏移 inflate」的快路。
     ///
     /// 快路只认 stored 与 deflate：它们是真书里的绝大多数，而 bzip2 / LZMA / XZ / PPMd /

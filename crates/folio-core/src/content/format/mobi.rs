@@ -226,6 +226,8 @@ impl DocumentProvider for MobiAdapter {
                 Some(FontBytes {
                     href,
                     media_type: "application/x-font".to_string(),
+                    crc32: crc32fast::hash(&bytes),
+                    raw_len: bytes.len() as u64,
                     bytes,
                 })
             })
