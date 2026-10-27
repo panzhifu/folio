@@ -1965,7 +1965,9 @@ fn the_book_settings_column_round_trips_across_a_reopen() {
     assert_eq!(got.effective_reader(&base).margin_x, 40.0);
 
     // 「恢复本书默认」= 写回空差量，而空差量在 SQL 里是空串（不是 `null`、不是 `{}`）。
-    again.set_book_settings(id, &BookSettings::default()).unwrap();
+    again
+        .set_book_settings(id, &BookSettings::default())
+        .unwrap();
     let raw: String = {
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.query_row(
@@ -1977,7 +1979,13 @@ fn the_book_settings_column_round_trips_across_a_reopen() {
     };
     assert!(raw.is_empty(), "抹掉之后那一列该是空串，实际是 {raw:?}");
     drop(again);
-    assert!(Store::open_at(&db).unwrap().book_settings(id).unwrap().is_empty());
+    assert!(
+        Store::open_at(&db)
+            .unwrap()
+            .book_settings(id)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// 那一行不存在时**不报错**、交回空差量，但日志留一句：调用方（阅读层）不该因为

@@ -12,7 +12,9 @@ mod primitives;
 mod search_box;
 mod top_bar;
 
-pub use bottom_sheet::{BottomSheet, BottomSheetEvent, BottomSheetState};
+pub use bottom_sheet::{
+    BottomSheet, BottomSheetEvent, BottomSheetState, any_sheet_open, dismiss_top,
+};
 pub use font_picker::{FontFamilySetter, FontPicker};
 pub use primitives::{empty_state, hairline, muted_label};
 pub use search_box::{SearchBox, SearchBoxEvent};

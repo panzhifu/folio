@@ -46,7 +46,8 @@ pub(in crate::ui::features::settings) fn fonts_page(cx: &App) -> Page {
         false,
         |cx: &App| {
             SharedString::from(
-                Reader::nearest_font_weight(ConfigHolder::default_reader(cx).font_weight).to_string(),
+                Reader::nearest_font_weight(ConfigHolder::default_reader(cx).font_weight)
+                    .to_string(),
             )
         },
         |val: SharedString, cx| {

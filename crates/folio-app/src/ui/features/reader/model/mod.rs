@@ -13,6 +13,7 @@ pub(in crate::ui::features::reader) mod bookmarks;
 pub(in crate::ui::features::reader) mod chapter_layout;
 pub(in crate::ui::features::reader) mod chrome;
 pub(in crate::ui::features::reader) mod fixed_book;
+pub(in crate::ui::features::reader) mod fixed_zoom;
 pub(in crate::ui::features::reader) mod footnotes;
 pub(in crate::ui::features::reader) mod image_atlas;
 pub(in crate::ui::features::reader) mod links;

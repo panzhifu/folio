@@ -82,7 +82,9 @@ pub(in crate::ui::features::settings) fn layout_page(cx: &App) -> Page {
                             .collect(),
                         false,
                         |cx: &App| {
-                            SharedString::from(ConfigHolder::default_reader(cx).text_direction.as_str())
+                            SharedString::from(
+                                ConfigHolder::default_reader(cx).text_direction.as_str(),
+                            )
                         },
                         |val: SharedString, cx| {
                             ConfigHolder::edit_reader(cx, |p| {

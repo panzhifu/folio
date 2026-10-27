@@ -534,7 +534,12 @@ mod tests {
         store.apply_sync(&plan).unwrap();
 
         assert_eq!(
-            store.book_settings(book).unwrap().reader.get("font_size").cloned(),
+            store
+                .book_settings(book)
+                .unwrap()
+                .reader
+                .get("font_size")
+                .cloned(),
             Some(serde_json::json!(26.0)),
             "同步来的整本差量该落进这一本的行"
         );
@@ -552,7 +557,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            store.book_settings(book).unwrap().reader.get("font_size").cloned(),
+            store
+                .book_settings(book)
+                .unwrap()
+                .reader
+                .get("font_size")
+                .cloned(),
             Some(serde_json::json!(26.0)),
             "更旧的同步结果不该把更新的盖掉"
         );

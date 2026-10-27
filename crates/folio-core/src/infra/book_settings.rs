@@ -61,8 +61,7 @@ impl BookSettings {
     /// 夹这一刀不能省：差量可能来自手改的库、旧版本或别的设备，越界值会让排版算出
     /// 零高一行或无限宽版心 —— 与磁盘上读回来的全局值走的是同一个入口。
     pub fn effective_reader(&self, base: &Reader) -> Reader {
-        overlay(base, &self.reader, &[])
-            .map_or_else(|| base.clone(), Reader::clamped)
+        overlay(base, &self.reader, &[]).map_or_else(|| base.clone(), Reader::clamped)
     }
 
     /// 这一本的外观输入：同上，按 [`Appearance::normalized`] 归一遍。
@@ -199,10 +198,10 @@ fn into_object<T: Serialize>(value: &T) -> Option<Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::infra::book_settings::{into_object, APPEARANCE_GLOBAL_ONLY, BookSettings};
+    use crate::infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings, into_object};
     use crate::infra::config::{Appearance, Mode, PageTurn, Reader, TextDirection, TocDensity};
     use crate::store::AnnotationStyle;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
 
     /// 一份**每一格都不是默认值**的 `Reader`，用来逐格验证「这一格真的能被单本书覆盖」。
@@ -274,10 +273,7 @@ mod tests {
         }
         for (name, value) in base_obj {
             if !patch.contains_key(name) {
-                assert_eq!(
-                    &effective_obj[name], value,
-                    "{name} 不在差量里却偏离了默认"
-                );
+                assert_eq!(&effective_obj[name], value, "{name} 不在差量里却偏离了默认");
             }
         }
     }
@@ -292,7 +288,11 @@ mod tests {
         settings.record_appearance(&Appearance::default(), &sample_appearance());
 
         let effective_reader = settings.effective_reader(&Reader::default());
-        assert_eq!(effective_reader, sample_reader(), "排版那一节整份都该盖回去");
+        assert_eq!(
+            effective_reader,
+            sample_reader(),
+            "排版那一节整份都该盖回去"
+        );
         assert_patch_lands(
             &object(&Reader::default()),
             &object(&effective_reader),
@@ -311,8 +311,7 @@ mod tests {
             into_object(&Reader::default()).unwrap().len(),
             "样件每一格都该进排版差量"
         );
-        let overridden: BTreeSet<&str> =
-            settings.appearance.keys().map(String::as_str).collect();
+        let overridden: BTreeSet<&str> = settings.appearance.keys().map(String::as_str).collect();
         assert_eq!(
             overridden,
             BTreeSet::from([
@@ -342,7 +341,8 @@ mod tests {
             };
             let effective = settings.effective_reader(&Reader::default());
             assert_ne!(
-                object(&effective)[name], reader_defaults[name],
+                object(&effective)[name],
+                reader_defaults[name],
                 "盖了 {name} 而生效值没变 —— 这一格落不进单本书的差量"
             );
 
@@ -366,13 +366,15 @@ mod tests {
 
             if APPEARANCE_GLOBAL_ONLY.contains(&name.as_str()) {
                 assert_eq!(
-                    object(&effective)[name], appearance_defaults[name],
+                    object(&effective)[name],
+                    appearance_defaults[name],
                     "{name} 只归软件，一本书的差量不该改到它"
                 );
                 continue;
             }
             assert_ne!(
-                object(&effective)[name], appearance_defaults[name],
+                object(&effective)[name],
+                appearance_defaults[name],
                 "盖了 {name} 而生效值没变 —— 这一格落不进单本书的差量"
             );
             let mut recorder = BookSettings::default();
@@ -427,7 +429,8 @@ mod tests {
         assert_eq!(effective.light, base.light);
         assert_eq!(effective.dark, base.dark);
         assert_eq!(
-            effective.reading_mode, Some(Mode::Light),
+            effective.reading_mode,
+            Some(Mode::Light),
             "那三格坏值不该把同节里可覆盖的那一格一起吃掉"
         );
     }
@@ -465,9 +468,7 @@ mod tests {
 
         // 认不出的名字也只是没作用，不该把整节吃掉。
         let mut with_stray = settings.clone();
-        with_stray
-            .reader
-            .insert("font_color".into(), json!("#fff"));
+        with_stray.reader.insert("font_color".into(), json!("#fff"));
         assert_eq!(
             with_stray.effective_reader(&base).line_height,
             2.5,

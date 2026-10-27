@@ -1454,7 +1454,9 @@ mod tests {
 
     use crate::infra::config::{Config, Env, Layer, TranslationEngine, WatchDir};
     use crate::infra::i18n::Locale;
-    use crate::{AnnotationStyle, Appearance, Language, Library, Mode, PageTurn, Provenance, Reader};
+    use crate::{
+        AnnotationStyle, Appearance, Language, Library, Mode, PageTurn, Provenance, Reader,
+    };
     use serde_json::json;
 
     fn load(text: &str) -> Config {

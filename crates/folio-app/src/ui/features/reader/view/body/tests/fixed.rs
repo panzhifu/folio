@@ -1,7 +1,8 @@
 //! 定版式（PDF）：页栈、滚动、选中、搜索与缩放入口。
 
 use super::harness::{
-    drag_select_between, open_with_document, prefs, scroll_down, settle, turn_frame,
+    dispatch, drag_select_between, open_with_document, prefs, raw_touch_at, scroll_down, settle,
+    turn_frame,
 };
 use crate::ui::features::reader::model::chrome::PageMode;
 use crate::ui::features::reader::model::session::ReaderSession;
@@ -12,7 +13,8 @@ use folio_core::store::Store;
 use folio_core::{Content, Format, Locator, PageTurn};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Entity, Pixels, Point, TestAppContext, point, px,
+    AnyWindowHandle, AppContext as _, Entity, InputEvent as _, PinchEvent, Pixels, Point,
+    TestAppContext, TouchPhase, point, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -840,5 +842,162 @@ fn a_pdf_book_searches_and_a_hit_jumps_to_its_page(cx: &mut TestAppContext) {
             offset: 0
         },
         "页号就是定版式的位置：命中的页内偏移不许进库"
+    );
+}
+
+// ---- 双指缩放：整页翻与上下滚动两档，PDF 与漫画同一套 ----
+//
+// 漫画（CBZ / 图片页）与 PDF 走的是**同一条**定版式绘制臂，只是前者没有字层；
+// 缩放映射在字层之外，所以这几条用 PDF 夹具钉住几何，漫画那一族由「共用同一条臂」
+// 保证 —— 需要单独看漫画的时候，把 `open_fixed_pdf` 换成 CBZ 的打开方式即可。
+
+/// 屏上那一页的 `(x, 宽, y, 高)`，取自**命中那一把尺**（`fixed_text_boxes`）：
+/// 它与摆出去的那张图是同一份矩形（同一帧、同一个映射），而且是带字的 PDF 页
+/// 唯一那份可以直接问出来的账。找不到给一串 `-1`。
+fn page_rect(cx: &TestAppContext, view: &Entity<ReaderSession>) -> (f32, f32, f32, f32) {
+    view.read_with(cx, |v, _| {
+        v.fixed_text_boxes
+            .borrow()
+            .first()
+            .map(|(_, at)| {
+                (
+                    f32::from(at.origin.x),
+                    f32::from(at.size.width),
+                    f32::from(at.origin.y),
+                    f32::from(at.size.height),
+                )
+            })
+            .unwrap_or((-1.0, -1.0, -1.0, -1.0))
+    })
+}
+
+/// 一记捏合（`PinchEvent` 的相位固定 `Moved`，与真机逐帧派发的那一截一致）。
+fn pinch(cx: &mut TestAppContext, handle: AnyWindowHandle, delta: f32, at: Point<Pixels>) {
+    dispatch(
+        cx,
+        handle,
+        PinchEvent {
+            position: at,
+            delta,
+            phase: TouchPhase::Moved,
+            ..Default::default()
+        }
+        .to_platform_input(),
+    );
+}
+
+/// 双指捏合把一整页放大：图真的变大、倍率写回会话，且夹取把纸留在视口里。
+#[gpui_kit::test]
+fn pinching_scales_the_fixed_page(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/wps-paper.pdf");
+    let (x0, w0, _, h0) = page_rect(cx, &view);
+    assert!(w0 > 50.0 && h0 > 50.0, "前置：这一页该画出来了 {w0}×{h0}");
+
+    // 手指落在页心。
+    pinch(cx, handle, 1.0, point(px(x0 + w0 / 2.0), px(260.0)));
+    settle(cx, handle);
+
+    let (x1, w1, _, h1) = page_rect(cx, &view);
+    let scale = view.read_with(cx, |v, _| v.fixed_zoom.scale());
+    assert!((scale - 2.0).abs() < 1e-2, "放大一倍该落到 2：{scale}");
+    assert!(
+        w1 > w0 * 1.5 && h1 > h0 * 1.5,
+        "图该跟着放大：{w0}×{h0} → {w1}×{h1}"
+    );
+    assert!(
+        (x1 + w1 / 2.0 - (x0 + w0 / 2.0)).abs() < 2.0,
+        "手指在页心：放大之后这一页仍该居中"
+    );
+}
+
+/// 放大着的时候一根手指拖的是纸，不是页：图跟着手走，页号一动不动。
+#[gpui_kit::test]
+fn dragging_pans_the_zoomed_page_without_turning_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/wps-paper.pdf");
+    let (x0, w0, _, _) = page_rect(cx, &view);
+    pinch(cx, handle, 1.5, point(px(x0 + w0 / 2.0), px(260.0)));
+    settle(cx, handle);
+    let (before_x, bwx, before_y, _) = page_rect(cx, &view);
+    let page_before = view.read_with(cx, |v, _| v.page());
+    assert!(bwx > w0, "前置：该已经放大了");
+
+    let start = point(px(before_x + bwx / 2.0), px(260.0));
+    let moved = point(px(before_x + bwx / 2.0 - 60.0), px(200.0));
+    raw_touch_at(cx, handle, TouchPhase::Started, start);
+    raw_touch_at(cx, handle, TouchPhase::Moved, moved);
+    raw_touch_at(cx, handle, TouchPhase::Ended, moved);
+    settle(cx, handle);
+
+    let (after_x, _, after_y, _) = page_rect(cx, &view);
+    assert!(
+        (after_x - before_x).abs() > 20.0 || (after_y - before_y).abs() > 20.0,
+        "纸该跟着手走：({before_x}, {before_y}) → ({after_x}, {after_y})"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        page_before,
+        "放大着拖动的是纸，不该顺手翻页"
+    );
+}
+
+/// 翻页回到铺满：读者按的是「看下一页」，不是「在新的一页上接着看这个角」。
+#[gpui_kit::test]
+fn turning_a_page_drops_the_zoom_back_to_fit(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/wps-paper.pdf");
+    let (_, fit0, _, _) = page_rect(cx, &view);
+    assert!(fit0 > 50.0, "前置：这一页该画出来了 {fit0}");
+    pinch(cx, handle, 1.5, point(px(200.0), px(260.0)));
+    settle(cx, handle);
+    assert!(view.read_with(cx, |v, _| v.fixed_zoom.scale()) > 1.2);
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    settle(cx, handle);
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+
+    assert_eq!(
+        view.read_with(cx, |v, _| v.fixed_zoom.scale()),
+        1.0,
+        "翻页之后该回到铺满"
+    );
+    let (_, w1, _, _) = page_rect(cx, &view);
+    let fit = view.read_with(cx, |v, _| v.fixed_frame.page.0);
+    assert!(
+        (w1 - fit).abs() < 1.5,
+        "新一页该按铺满摆（这一页自己的铺满宽）：{w1} vs {fit}"
+    );
+}
+
+/// 上下滚动那一档：捏合前后，手指下那一段内容停在原处（页栈还是 1x 坐标，
+/// 变的只是画出来的倍率与滚动量）。
+#[gpui_kit::test]
+fn pinching_in_continuous_mode_holds_the_point_under_the_fingers(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        PageTurn::Scroll,
+    );
+    scroll_down(cx, handle, 120.0);
+    settle(cx, handle);
+
+    let focal_y = 300.0_f32;
+    let (scroll_before, pivot) = view.read_with(cx, |v, _| (v.scroll_y, v.fixed_frame.origin.1));
+    assert!(scroll_before > 0.0, "前置：该已经滚下去一点");
+
+    pinch(cx, handle, 0.5, point(px(230.0), px(focal_y)));
+    settle(cx, handle);
+
+    let (scroll_after, scale, pivot_after) = view.read_with(cx, |v, _| {
+        (v.scroll_y, v.fixed_zoom.scale(), v.fixed_frame.origin.1)
+    });
+    assert!((scale - 1.5).abs() < 1e-2, "该放大到 1.5：{scale}");
+    let content_before = scroll_before + (focal_y - pivot) / 1.0;
+    let content_after = scroll_after + (focal_y - pivot_after) / scale;
+    assert!(
+        (content_before - content_after).abs() < 2.0,
+        "手指下那一段该停在原处：{content_before} vs {content_after}"
     );
 }

@@ -343,3 +343,13 @@ pub struct ReadingRank {
     pub seconds: i64,
     pub sessions: i64,
 }
+
+/// 一条带书名的原始会话。统计屏要在同一批行上同时算「按天」「按书」「按小时」
+/// 和那几个最值，逐条带书名比按 `book_id` 再回表省一次往返。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadingRecord {
+    pub book_id: i64,
+    pub title: String,
+    pub started_at: i64,
+    pub seconds: i64,
+}

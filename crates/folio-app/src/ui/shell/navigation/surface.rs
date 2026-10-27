@@ -7,7 +7,7 @@
 //! 这里的「磨砂」在走 wgpu 渲染器的那两端（Android / Linux 桌面）是**真**背景模糊：
 //! `.backdrop_blur()` 让渲染器把玻璃矩形底下那一块从屏幕上拷走、降采样、两趟可分离高斯，
 //! 再采回来；tint 是压在玻璃上的另一层，所以「糊多少」与「透多少」各自可调。Metal 与
-//! DirectX 没有这条路径，那两端的表面退回「半透明 + 描边 + 投影」的近似。
+//! DirectX 没有这条路径，那两端的表面退回「半透明 + 描边」的近似。
 //!
 //! 入口格**手绘**而不是用 gpui-kit 的 `Button` / `SidebarMenuItem`：前者把内容排成一条
 //! 横的 `h_flex` 并强制 `h_6`，后者是横排图标 + 文字、只有 48 / 260 两档宽。两种都塞不进
@@ -16,8 +16,8 @@
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, BoxShadow, Div, Hsla, InteractiveElement as _, IntoElement, ParentElement,
-    StatefulInteractiveElement as _, Styled, Window, div, hsla, px,
+    AnyElement, App, Div, Hsla, InteractiveElement as _, IntoElement, ParentElement,
+    StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 
 use super::{Destination, NAV_RADIUS};
@@ -36,7 +36,7 @@ const TILE_H: f32 = 56.0;
 /// 卡片内缩：四项上下各留 8，左右那 8 让 80 宽的格子居中到 96 里。
 const CARD_PAD: f32 = 8.0;
 
-/// 悬浮档的表面：圆角、**真背景模糊**、半透明 tint、描边、一层柔影。
+/// 悬浮档的表面：圆角、**真背景模糊**、半透明 tint、描边。
 ///
 /// 调用方自己给宽高与定位 —— 底栏是「左右拉满、56 高」，侧栏是「96 宽、内容高」。
 ///
@@ -46,7 +46,12 @@ const CARD_PAD: f32 = 8.0;
 /// 就会在封面图上糊成一片。
 ///
 /// 只有走 wgpu 渲染器的那两端（Android 与 Linux 桌面）真做模糊；Metal 与 DirectX 跳过
-/// 玻璃那一层，屏幕上退回「半透明 + 描边 + 投影」的近似，也就是这一格改动之前的样子。
+/// 玻璃那一层，屏幕上退回「半透明 + 描边」的近似，也就是这一格改动之前的样子。
+///
+/// **不投阴影**。原先这里有一层 `0 4 12 @16%` 的柔影，撤掉的理由是读者报的那一眼：
+/// 书架的书封会从胶囊底下滚过去，投影洒在亮色封面上就是一圈很重的黑边，而栏本身已经
+/// 靠模糊、tint 与描边立住了 —— 「同一种表面一套写法」也要求侧栏两档与它一致，
+/// 留着投影只是给浮起来的那两档凭空加一层不解释任何堆叠的暗。
 pub(super) fn floating(cx: &App) -> Div {
     div()
         .rounded(px(NAV_RADIUS))
@@ -54,10 +59,6 @@ pub(super) fn floating(cx: &App) -> Div {
         .bg(cx.theme().sidebar.opacity(GLASS_TINT))
         .border_1()
         .border_color(cx.theme().sidebar_border)
-        .shadow(vec![
-            BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., 0.16)).blur_radius(px(12.)),
-            BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.06)).blur_radius(px(2.)),
-        ])
 }
 
 /// 嵌入档的表面：整列不透明，右边一条发丝线把它与内容分开。

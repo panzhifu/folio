@@ -38,10 +38,7 @@ fn mode_group(cx: &App) -> Group {
     // `Mode::parse_reading` 是这一对唯一的翻译处）。
     let reading_options: Vec<(SharedString, SharedString)> = [
         (None, tr(cx, "appearance.follow_app")),
-        (
-            Some(Mode::System),
-            tr(cx, "appearance.follow_system"),
-        ),
+        (Some(Mode::System), tr(cx, "appearance.follow_system")),
         (Some(Mode::Light), tr(cx, "appearance.light")),
         (Some(Mode::Dark), tr(cx, "appearance.dark")),
     ]
@@ -87,14 +84,7 @@ fn mode_group(cx: &App) -> Group {
                 },
             )
             .description(tr(cx, "field.reading_mode.desc"))
-            .keywords(&[
-                "reading",
-                "night",
-                "阅读",
-                "阅读浅深",
-                "夜里",
-                "深色",
-            ]),
+            .keywords(&["reading", "night", "阅读", "阅读浅深", "夜里", "深色"]),
         ],
     )
 }

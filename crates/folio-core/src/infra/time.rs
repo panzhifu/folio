@@ -76,10 +76,20 @@ pub fn day_start(day: i64, tz_offset_secs: i64) -> i64 {
     day * DAY - tz_offset_secs
 }
 
-/// 日序号 → `YYYY-MM-DD`（公历，Hinnant `civil_from_days`）。
+/// 公历年月日。日序号先转成它，界面才能说「2026 年 10 月」而不是一串 ISO。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CivilDate {
+    pub year: i32,
+    /// 1..=12。
+    pub month: u32,
+    /// 1..=31。
+    pub day: u32,
+}
+
+/// 日序号 → 公历年月日（Hinnant `civil_from_days`）。
 ///
 /// 不处理儒略历：Unix 时间戳的用途里没有 1582 年以前的书。
-pub fn civil_date(epoch_day: i64) -> String {
+pub fn civil_from_days(epoch_day: i64) -> CivilDate {
     // 把纪元挪到 0000-03-01，让闰日落在年末，后面的除法才是齐的。
     let z = epoch_day + 719_468;
     let era = z.div_euclid(146_097);
@@ -91,14 +101,59 @@ pub fn civil_date(epoch_day: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
+    CivilDate {
+        year: y as i32,
+        month: m as u32,
+        day: d as u32,
+    }
+}
+
+/// 公历年月日 → 日序号。年份按**天文纪年**写（0 年是公元前 1 年），
+/// 与 [`civil_from_days`] 是同一套算术的两半。
+pub fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let y = i64::from(year) - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400); // [0, 399]
+    let m = i64::from(month);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+pub fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// 这个月有几天。`month` 超出 1..=12 时按最接近的那一端夹住 —— 调用方会自己
+/// 做月份的进位，这里只负责月长。
+pub fn days_in_month(year: i32, month: u32) -> u32 {
+    match month.clamp(1, 12) {
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// 日序号是星期几。0 = 周一 … 6 = 周日（1970-01-01 是周四，所以偏 3）。
+pub fn weekday_monday0(epoch_day: i64) -> usize {
+    (epoch_day + 3).rem_euclid(7) as usize
+}
+
+/// 日序号 → `YYYY-MM-DD`。
+pub fn civil_date(epoch_day: i64) -> String {
+    let date = civil_from_days(epoch_day);
+    format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
 }
 
 #[cfg(test)]
 mod tests {
     //! 日历换算：已知日期、闰年、以及 1970 年前后的负日序号。
 
-    use crate::infra::time::{DAY, civil_date, day_start, duration_parts, local_day, local_hour};
+    use crate::infra::time::{
+        DAY, civil_date, civil_from_days, day_start, days_from_civil, days_in_month,
+        duration_parts, local_day, local_hour, weekday_monday0,
+    };
 
     #[test]
     fn known_days_round_trip_to_the_right_date() {
@@ -109,6 +164,43 @@ mod tests {
         assert_eq!(civil_date(19_723), "2024-01-01");
         assert_eq!(civil_date(19_782), "2024-02-29", "2024 是闰年");
         assert_eq!(civil_date(-1), "1969-12-31", "负日序号也要对");
+    }
+
+    /// 两半算术必须互逆：界面用它算月份边界，差一天就是「这个月多/少了一格」。
+    #[test]
+    fn civil_days_and_dates_are_inverses() {
+        for epoch_day in [-1_000_000, -1, 0, 1, 19_723, 19_782, 293_289] {
+            let date = civil_from_days(epoch_day);
+            assert_eq!(
+                days_from_civil(date.year, date.month, date.day),
+                epoch_day,
+                "{date:?}"
+            );
+        }
+        // 每个月的最后一天都要能落回该月的月长。
+        for year in [1900, 2000, 2024, 2026] {
+            for month in 1..=12 {
+                let last = days_in_month(year, month);
+                let epoch_day = days_from_civil(year, month, last);
+                assert_eq!(civil_from_days(epoch_day).day, last);
+                assert_eq!(
+                    days_from_civil(year, month, last + 1) - epoch_day,
+                    1,
+                    "月末的下一天是下个月"
+                );
+            }
+        }
+    }
+
+    /// 星期几按周一起算，1970-01-01 是周四；跨年与闰日都从同一条式子出来。
+    #[test]
+    fn weekdays_start_on_monday() {
+        assert_eq!(weekday_monday0(0), 3, "1970-01-01 是周四");
+        assert_eq!(weekday_monday0(19_723), 0, "2024-01-01 是周一");
+        assert_eq!(weekday_monday0(19_727), 4, "2024-01-05 是周五");
+        for day in 0..400 {
+            assert!(weekday_monday0(day) < 7);
+        }
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub(in crate::ui::features::shelf) mod sheets;
 pub(in crate::ui::features::shelf) mod toolbar;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -52,10 +53,11 @@ use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Image, InteractiveElement,
     IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
-    Task, TestSupportExt as _, UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
+    Task, TestSupportExt as _, UniformListScrollHandle, WeakEntity, Window, canvas, div, px,
+    uniform_list,
 };
 
-use super::components::book_card::{Card, GroupCard, TILE_SLOTS};
+use super::components::book_card::{Card, Enter, GroupCard, TILE_SLOTS};
 use super::components::book_menu;
 use crate::ui::components::{
     BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, TopBar, empty_state, muted_label,
@@ -210,6 +212,10 @@ pub struct ShelfView {
     pub(in crate::ui::features::shelf) scan: Option<ScanPhase>,
     /// 扫描那条异步链（事件桥）。与 `_import` 同理，要活到整轮结束。
     pub(in crate::ui::features::shelf) _scan: Option<Task<()>>,
+    /// 清单出来之后那一路「一本一本开容器取真书名与封面」的作业。`None` = 没有在跑。
+    /// 关掉那一屏、导入起走、换新一批结果都要停它（见 [`super::scan`] 里那个
+    /// `stop_peeks`）—— 一路不停就是白烧核。
+    pub(in crate::ui::features::shelf) peek: Option<scan::PeekRun>,
     /// 自动导入（监听 / 传书）事件的订阅链。这些批次不是这个视图提交的，
     /// 靠共享事件通道流回来 —— 处理与手工导入同一套（读数、重查架面）。
     _auto_import: Option<Task<()>>,
@@ -245,6 +251,12 @@ pub struct ShelfView {
     /// 后台期间发的 notify 可能丢（真机实测：导入后卡片要重新进书架才出现），
     /// render 里见到这面旗就强制重查一次 —— 代价只是多查一遍库。
     pending_reload: bool,
+    /// 格子流（组卡与书卡并成的一条）。**重查那一趟拼一次**，不每帧拼：
+    /// `uniform_list` 的可见排每帧重造，而这条流只随 `items` / `tiles` 变。
+    /// 用 `Rc` 是为了把它交给列表闭包时不整份复制（闭包要 `'static`）。
+    pub(in crate::ui::features::shelf) flow: Rc<[Cell]>,
+    /// 上面那条流该重拼了。
+    pub(in crate::ui::features::shelf) flow_dirty: bool,
     /// 格子「落定」那段动画的起算时刻，第一次真画出格子时才记。
     ///
     /// 只为**第一次**上屏留的，之后不再重放（理由见 [`super::book_card::Enter`]）。
@@ -312,9 +324,9 @@ impl ShelfView {
         // 三块弹层各订阅一次「读者自己把它关掉了」：下拉过头、点遮罩、按返回都只报这一条。
         // 不据此清架面那一侧的状态的话，下一帧 [`Self::sync_sheet`] 看着「面板还开着」
         // 又把弹层抬起来 —— 在读者手里就成了「这层关不掉」。
-        let group_sheet = cx.new(|cx| BottomSheetState::closed(cx));
-        let url_sheet = cx.new(|cx| BottomSheetState::closed(cx));
-        let scan_sheet = cx.new(|cx| BottomSheetState::closed(cx));
+        let group_sheet = cx.new(BottomSheetState::closed);
+        let url_sheet = cx.new(BottomSheetState::closed);
+        let scan_sheet = cx.new(BottomSheetState::closed);
         let _sheet_watches = vec![
             cx.subscribe(&group_sheet, |this, _, event, _| {
                 if matches!(event, BottomSheetEvent::Dismissed) {
@@ -354,6 +366,7 @@ impl ShelfView {
             scan: None,
             scan_open: false,
             _scan: None,
+            peek: None,
             _auto_import: None,
             url_entry: None,
             url_open: false,
@@ -366,6 +379,8 @@ impl ShelfView {
             _opds_watch: None,
             _pick: None,
             pending_reload: false,
+            flow: Rc::from(Vec::new()),
+            flow_dirty: true,
             enter_at: None,
         };
         this.reload(&SharedString::default(), cx);
@@ -413,6 +428,8 @@ impl ShelfView {
             }
             ShelfScope::Collection(id) => store.shelf_in_collection(id, query),
         });
+        // 这一趟换没换内容都要重拼一次流：`tiles` 与 `items` 刚才都被重写过了。
+        self.flow_dirty = true;
         match queried {
             Some(Ok(items)) => {
                 self.query = query.into();
@@ -495,6 +512,8 @@ impl ShelfView {
                 let covers = items.iter().map(|item| self.resolve_cover(item)).collect();
                 GroupCard {
                     id: collection.id,
+                    group: format!("shelf-tile-{}", collection.id).into(),
+                    face_id: format!("shelf-tile-face-{}", collection.id).into(),
                     name: collection.name.into(),
                     count: collection.book_count,
                     // 这一组的「最近被翻开」取它自己那条序的头一本：`collection_tiles` 里
@@ -517,6 +536,15 @@ impl ShelfView {
         let tiles: Vec<Option<i64>> = self.tiles.iter().map(|tile| tile.opened_at).collect();
         let books: Vec<Option<i64>> = self.items.iter().map(|card| card.opened_at).collect();
         merge_cells(&tiles, &books)
+    }
+
+    /// 这一帧的格子流。脏了才重拼 —— 那两段 `Option<i64>` 与 `merge_cells` 的分配
+    /// 从前是**每一帧**付一次，架上有几百本时它就是滚动帧预算里一项白花的钱。
+    fn ensure_flow(&mut self) {
+        if self.flow_dirty {
+            self.flow = self.cells().into();
+            self.flow_dirty = false;
+        }
     }
 
     /// 把焦点放进搜索框。
@@ -1231,12 +1259,19 @@ impl ShelfView {
     /// 建组 / 链接导入 / 扫描那三块**不在这里**：它们是浮在架面之上的浮层与弹层，
     /// 架面照旧画在底下（见 [`Self::overlays`]）。只有「书库位置」那一屏还是就地换掉整片
     /// —— 它是导入的前置而不是「答一句话」，答完之前那片格子没有意义。
-    fn body(&self, cx: &mut Context<Self>, spec: GridSpec, tail: f32) -> AnyElement {
+    fn body(
+        &self,
+        flow: Rc<[Cell]>,
+        enter: Enter,
+        cx: &mut Context<Self>,
+        spec: GridSpec,
+        tail: f32,
+    ) -> AnyElement {
         if self.confirming {
             return self.confirm_panel(cx);
         }
         if !self.items.is_empty() || !self.tiles.is_empty() {
-            return self.grid(cx, spec, tail).into_any_element();
+            return self.grid(flow, enter, cx, spec, tail).into_any_element();
         }
         // 空架要说「导一本书进来」，有书但都不匹配要说「换个词」，某一组那一页空了要说
         // 「这一片还没有书」：三件事写成一句，读者会以为自己把书弄丢了。
@@ -1268,29 +1303,38 @@ impl ShelfView {
     /// list **自己的 padding** 上而不是外壳的容器上：`uniform_list` 的裁剪按 `bounds`
     /// 算、滚动上限按扣掉 padding 的 `padded_bounds` 算，于是滚动途中格子会画进栏底下，
     /// 滚到底时最后一排正好停在栏的上沿 —— 两头都对。
-    fn grid(&self, cx: &mut Context<Self>, spec: GridSpec, tail: f32) -> impl IntoElement {
+    fn grid(
+        &self,
+        flow: Rc<[Cell]>,
+        enter: Enter,
+        cx: &mut Context<Self>,
+        spec: GridSpec,
+        tail: f32,
+    ) -> impl IntoElement {
         // 卡片管理菜单的两条文案：整个架面取一次，逐卡 clone 进菜单。条目本身
         // （哪几条、什么图标、点了派给谁）在 [`book_menu`]。
         let labels = book_menu::Labels::resolve(cx);
         let columns = spec.columns as usize;
         // 一横排算一项；不满一排的尾巴也算一排，不然最后那几本会画不出来。
-        // 数的是**格子**：组卡与书并成的那一条流（[`Self::cells`]），一张卡占一格。
-        let cells = self.cells();
+        // 数的是**格子**：组卡与书并成的那一条流（[`Self::ensure_flow`]），一张卡占一格。
+        let cells = flow;
         let rows = cells.len().div_ceil(columns);
         let shelf = cx.entity().clone();
         let scroll = self.grid_scroll.clone();
         let cover_height = spec.cover_height;
-        let list = uniform_list("shelf-grid", rows, move |range, window, cx| {
+        let list = uniform_list("shelf-grid", rows, move |range, _window, cx| {
             range
                 .map(|row| {
+                    let row_started = Instant::now();
                     let from = row * columns;
                     let to = (from + columns).min(cells.len());
                     // 句柄只在这一排真要画的时候读那几行数据：整片 `items` 不 clone，
                     // 跟着这一屏走的只有那串格子下标。
-                    shelf.update(cx, |this, cx| {
-                        // 落定的时钟先取，再借 `items`：进度是这一片格子共用的一个
-                        // 数，逐格只是起步早晚不同。
-                        let enter = this.enter_clock(cells.len(), window, cx);
+                    let el = shelf.update(cx, |this, cx| {
+                        // 落定的时钟**一帧取一次**（在 `render` 里），这里只按格取进度：
+                        // 从前是在每个可见排的 item 闭包里各取一次，`Instant::now` 与
+                        // 「还有没有在动」那一问就每排每帧各付一遍。
+                        let _ = &enter;
                         div()
                             .w_full()
                             .grid()
@@ -1320,7 +1364,9 @@ impl ShelfView {
                                 ),
                             }))
                             .into_any_element()
-                    })
+                    });
+                    crate::ui::features::shelf::perf::note_item(row_started.elapsed());
+                    el
                 })
                 .collect()
         })
@@ -1347,6 +1393,12 @@ impl Render for ShelfView {
             self.pending_reload = false;
             self.force_reload(cx);
         }
+        let render_started = Instant::now();
+        // 这一帧的格子流与入场时钟各取一次：两者从前都住在每个可见排的 item 闭包里，
+        // 一排一份 —— 滚动时每帧要付「重拼整条流 / 每排各取一次时钟」两笔白账。
+        self.ensure_flow();
+        let enter = self.enter_clock(self.flow.len(), window, cx);
+        let flow = self.flow.clone();
         // 顶部那一行按窗口档位换：手机上满幅的搜索框是「先搜再翻」，桌面上同一颗框
         // 拉到整片内容宽就成了一块空白，所以那边是定宽搜索框 + 导入的工具栏。
         let size = SizeClass::of(window);
@@ -1435,7 +1487,7 @@ impl Render for ShelfView {
             }
             overlays
         };
-        v_flex()
+        let tree = v_flex()
             .id("folio-shelf")
             // 那几张居中的浮层要有一个「内容区」可以居中，而这一格就是内容区：
             // 导航栏在它的左边、不在它里面。
@@ -1443,8 +1495,20 @@ impl Render for ShelfView {
             .size_full()
             .child(top)
             .children(status)
-            .child(self.body(cx, spec, tail))
+            .child(self.body(flow, enter, cx, spec, tail))
             .children(overlays)
+            // 帧探针：这一格排在最后，绘制回调跑在别的孩子之后，两条回调之间的间隔
+            // 就是读者感觉到的帧间隔（见 `shelf::perf` 的模块头）。
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    |_, _, _, _| crate::ui::features::shelf::perf::note_paint(),
+                )
+                .absolute()
+                .inset_0(),
+            );
+        crate::ui::features::shelf::perf::note_render(render_started.elapsed());
+        tree
     }
 }
 

@@ -616,7 +616,11 @@ impl ReadingPage {
     pub(in crate::ui::features::reader) fn toggle_night(&mut self, cx: &mut Context<Self>) {
         let dark = cx.theme().mode == ThemeMode::Dark;
         ConfigHolder::edit_book_appearance(cx, |appearance| {
-            appearance.reading_mode = if dark { Some(Mode::Light) } else { Some(Mode::Dark) }
+            appearance.reading_mode = if dark {
+                Some(Mode::Light)
+            } else {
+                Some(Mode::Dark)
+            }
         });
     }
 

@@ -93,13 +93,15 @@ fn a_spread_is_two_contiguous_columns_of_one_sheet(cx: &mut TestAppContext) {
     assert!(after > before, "翻一张纸该往前走，实际 {before} → {after}");
 }
 
-/// 双页里「一屏」是**一张 leaf**，四档纸面动画一律如此：从右缘划到中缝就该走满。
+/// 双页里「一屏」有多长**按档分**：只有仿真折页量靠手指那一张 leaf，平移 / 上下平移 / 覆盖量
+/// 整块版心。
 ///
-/// 取错的那两种读法都不体面：按整块量、纸只走半块 → 「纸走半屏就落定，手指还在整屏里划」；
-/// 反过来按半块量、纸走整块 → 「拖了半天不翻」。折页那一档早就按 leaf 量，另外三档从前
-/// 钉在同一道 `== Curl` 的门上，双页里就是这两种读法之一。
+/// 判据与它的理由在 [`turn_animation::paper_area`]：翻一趟要换掉的是**两栏**的字，而单面的一张纸
+/// 只带得动一栏 —— 所以那三档在双页里整屏一起走。取错的两种读法都不体面：折页按整块量 → 「纸走
+/// 半屏就落定，手指还在整屏里划」；平移/覆盖按半块量 → 「拖到一半纸才走一半」，而另一半原地跳变
+/// （读者那句「左右覆盖只能覆盖双页其中一页」量的就是这个）。
 #[gpui_kit::test]
-fn a_spread_turn_measures_one_leaf_for_every_paper_style(cx: &mut TestAppContext) {
+fn only_the_curl_measures_one_leaf_in_a_spread(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let flow = flow();
     let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 1200.0);
@@ -124,13 +126,22 @@ fn a_spread_turn_measures_one_leaf_for_every_paper_style(cx: &mut TestAppContext
         assert!(block > 0.0, "夹具量不出版心，这条测不到东西");
         // 这本是 LTR：往前翻自由边在右，往回翻在左。
         for (intent, right) in [(TurnIntent::Next, true), (TurnIntent::Previous, false)] {
+            let leaf = area.leaf(right).distance(axis);
+            // 横轴上两种读法必须量得出差别，否则这一条对那一档是空转的（上下平移沿纵轴，
+            // leaf 与整块同高 —— 那一档的答案由 `paper_area` 自己的表钉）。
+            if axis == Axis::Horizontal {
+                assert!(
+                    leaf > 0.0 && block - leaf > 1.0,
+                    "夹具里 leaf（{leaf}）与整块（{block}）分不开，这一档测不到东西"
+                );
+            }
+            let want = if turn == PageTurn::Curl { leaf } else { block };
             let (_, dist, _) = view
                 .read_with(cx, |v, cx| v.swipe_geometry(cx, axis, Some(intent)))
                 .unwrap_or_else(|| panic!("{turn:?} 接不住自己那根轴（{axis:?}）上的划动"));
-            let leaf = area.leaf(right).distance(axis);
             assert!(
-                (dist - leaf).abs() < 1.0,
-                "{turn:?} 的 {intent:?} 一屏该是一张 leaf（{leaf}），实得 {dist}；整块版心是 {block}"
+                (dist - want).abs() < 1.0,
+                "{turn:?} 的 {intent:?} 一屏该是 {want}（leaf {leaf} / 整块 {block}），实得 {dist}"
             );
         }
     }

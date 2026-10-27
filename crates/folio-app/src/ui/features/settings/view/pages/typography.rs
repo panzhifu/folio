@@ -131,7 +131,9 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                             .collect(),
                         false,
                         |cx: &App| {
-                            SharedString::from(ConfigHolder::default_appearance(cx).page_turn.as_str())
+                            SharedString::from(
+                                ConfigHolder::default_appearance(cx).page_turn.as_str(),
+                            )
                         },
                         |val: SharedString, cx| {
                             ConfigHolder::edit_appearance(cx, |a| {
@@ -177,7 +179,9 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                         false,
                         |cx: &App| {
                             SharedString::from(
-                                ConfigHolder::default_appearance(cx).highlight_style.as_str(),
+                                ConfigHolder::default_appearance(cx)
+                                    .highlight_style
+                                    .as_str(),
                             )
                         },
                         |val: SharedString, cx| {

@@ -8,7 +8,7 @@
 //!
 //! 两档都**占位**（[`super::reserved_width`]）：卡片压上去会挡住书架第一列，而华为的
 //! 悬浮侧栏本来还能滑出收起 —— 我们没做那个手势，就不该拿内容去换那点浮起来的错觉。
-//! 浮起来这件事由表面自己说清（圆角、描边、投影）。
+//! 浮起来这件事由表面自己说清（圆角、描边、模糊）。
 
 use gpui_kit::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement, Styled,

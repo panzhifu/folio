@@ -171,7 +171,7 @@ impl ReadingSheet {
         let turn_duration = slider(TURN_DURATION_RANGE, 10.0, appearance.turn_duration, cx);
         // 弹层自己也要观察：它不是这一屏的子视图，`notify` 只有观察方才收得到，
         // 而开合、换档、读者一把下拉关掉全靠随后那一次重画。
-        let sheet = cx.new(|cx| BottomSheetState::closed(cx));
+        let sheet = cx.new(BottomSheetState::closed);
         let watches = vec![
             cx.observe(&sheet, |_, _, cx| cx.notify()),
             Self::watch(&brightness, cx, |value, cx| {
@@ -210,7 +210,9 @@ impl ReadingSheet {
                 ConfigHolder::edit_book_reader(cx, |prefs| prefs.margin_y = value);
             }),
             Self::watch(&turn_duration, cx, |value, cx| {
-                ConfigHolder::edit_book_appearance(cx, |appearance| appearance.turn_duration = value);
+                ConfigHolder::edit_book_appearance(cx, |appearance| {
+                    appearance.turn_duration = value
+                });
             }),
         ];
         Self {
@@ -815,7 +817,11 @@ impl Render for ReadingSheet {
         let tabs = self.tab_bar(cx);
         let rows = self.section_rows(window, cx);
         // 各段的行在下面，整张卡片最底下那一格是「恢复本书默认」（它管的不是某一段）。
-        sheet.header(tabs).child(rows).child(self.reset_row(cx)).into_any_element()
+        sheet
+            .header(tabs)
+            .child(rows)
+            .child(self.reset_row(cx))
+            .into_any_element()
     }
 }
 
@@ -986,7 +992,8 @@ mod tests {
             "阅读页那一格不该改到全局浅深"
         );
         assert_eq!(
-            cx.update(|cx| ConfigHolder::default_appearance(cx)).reading_mode,
+            cx.update(|cx| ConfigHolder::default_appearance(cx))
+                .reading_mode,
             None,
             "按下去只动这一本：设置屏那个全局默认要还空着"
         );

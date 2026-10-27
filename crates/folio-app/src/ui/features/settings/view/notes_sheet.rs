@@ -62,7 +62,7 @@ pub(in crate::ui::features::settings) struct NotesSheet {
 impl NotesSheet {
     pub(in crate::ui::features::settings) fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            sheet: cx.new(|cx| BottomSheetState::closed(cx)),
+            sheet: cx.new(BottomSheetState::closed),
             payload: None,
         }
     }

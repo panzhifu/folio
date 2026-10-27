@@ -10,6 +10,7 @@
 
 mod components;
 mod overlay;
+mod perf;
 mod view;
 
 pub use view::book_info::{BookInfoEvent, BookInfoView};

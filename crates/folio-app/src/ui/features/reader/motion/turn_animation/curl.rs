@@ -10,7 +10,8 @@
 //! 夹一道上限（[`MAX_TILT`]）。
 //!
 //! 这一律**以手指为时钟**，所以只在跟手时成话。点屏 / 按键 / 滚轮那一趟没有手指，走 [`tap_roll`]
-//! 那一条：折线自己从**右下角**扫到书脊之外一个卷径，卷径全程不收。把前一条律拿去做那一趟的
+//! 那一条：折线自己从**右下角**扫到书脊之外一个卷径（单页那张纸要出画；双页那张 leaf 停在书脊，
+//! 见那一格的第 4 条），卷径全程不收。把前一条律拿去做那一趟的
 //! 补间，读出来是「首帧跨 8.8% 页宽、第 11 帧一帧走掉页宽三成七、最后 5 帧钉死」—— 2026-10-19
 //! 在 Meizu 20 上按应用自己那行 `folio_app::perf` 读数量到的，两处根因都写在那一格的注释里。
 //!
@@ -151,6 +152,11 @@ type Roll = ((f32, f32), (f32, f32), f32);
 ///    恰好是落位那一刻 —— 纸在最该像纸的地方先塌成一张硬片。
 /// 3. **轴走到书脊之外一个卷径才收工**（`end = −卷径`）：平摊那一段的投影最远到 `轴 + 卷径`，
 ///    所以差一个卷径就是「纸还在画里却被删掉」，那一帧的弹跳就是「要不翻」。
+/// 4. 但**双页那张 leaf 不落在这里**：它翻完是平摊在另一半页上，绕自己的书脊边转，落点就是书脊
+///    本身（`end = 0`）。多推那一个卷径在单页上是画外的一截，看不出来；在双页上是 `2 × 卷径`
+///    = 页宽的 `2·ROLL` 那一整条错位（按 `ROLL = 0.14` 算，页宽 640 那档是 179 逻辑像素）—— 翻过去的纸压过左半页
+///    的左缘、靠中缝那一截留在画外，落定那一刻整片往左闪。跟手那一趟本来就停在书脊（见
+///    [`release_grip`] 那句「平拖时轴正好停在书脊」），这一条把两条路的落点对齐。
 ///
 /// 时钟不在这格里 —— 进来的是已经缓动过的 `progress`，`EaseInOut` 那条 S 形正好把折线速度
 /// 铺成一个单峰。同一把尺量到的改后读数：首帧 0.0%、峰值 59.3 dp/帧、末尾零帧死图。
@@ -161,7 +167,9 @@ fn tap_roll(progress: f32, area: Area) -> Roll {
     let n = (tilt.cos(), tilt.sin());
     // 过页的右下角那一格的支撑值：轴停在这里时一个角都还没折走。
     let reach = n.0 * width + n.1 * height;
-    let d = reach + (-radius - reach) * progress;
+    // 落点：单页出画（推到书脊之外一个卷径），双页那张 leaf 停在书脊（见上面第 4 条）。
+    let end = if area.spread_leaf { 0.0 } else { -radius };
+    let d = reach + (end - reach) * progress;
     (n, (n.0 * d, n.1 * d), radius)
 }
 
@@ -538,6 +546,13 @@ impl PageTurnStyle for Curl {
     }
 
     fn animates(&self, _: PageMode) -> bool {
+        true
+    }
+
+    /// 双页里这一档揭靠手指那半张 leaf —— 它是唯一真有背面的一档，那张叶子翻过去就是下一跨页的
+    /// 另一半（背面烘在捕获层 2）。其余各档在双页里按整块版心走，见
+    /// [`PageTurnStyle::turns_one_leaf`]。
+    fn turns_one_leaf(&self) -> bool {
         true
     }
 
@@ -1095,6 +1110,41 @@ mod tests {
             "落位时轴停在 d = {}，卷径 {}：纸还压在页里就被删掉",
             end.d,
             end.radius
+        );
+    }
+
+    /// 双页那张 leaf **落在书脊上**，而点屏那一趟与跟手走完那一腿落在同一个数上。
+    ///
+    /// 单页那张纸翻完要出画，所以点屏那一趟把轴多推一个卷径（上面那条门的最后一段）；双页那张翻完
+    /// 是平摊在另一半页上，轴多推的那一个卷径把**纸**镜像到书脊之外两个卷径 —— 门里那张 leaf 宽
+    /// 200，轴停在 `-28` 而书脊在 `0`，纸落位偏 56（页宽的 28%）；平板横屏那张 leaf 宽 640，就是
+    /// 偏 179。摆在读者眼前是「纸压过左半页的左缘，而靠中缝那一截还留在画外」。跟手那一趟本来就
+    /// 停在书脊（[`release_grip`] 那句「平拖时轴正好停在书脊」），这一条把两条路的落点钉成一个。
+    ///
+    /// 落点按 `d / nx` 读 —— 那是折线在 `v = 0` 那一行的横坐标（页局部）：右 leaf 的书脊在它的
+    /// `0`，左 leaf 的书脊在它的页宽。
+    #[test]
+    fn a_spread_leaf_lands_on_the_spine_whichever_way_the_turn_finished() {
+        for right in [true, false] {
+            let leaf = page().leaf(right);
+            assert!(leaf.spread_leaf, "leaf 那一格该由 `Area::leaf` 打上");
+            let spine = if right { 0.0 } else { leaf.width() };
+            let tap = cylinder_at(1.0, right, leaf, None).expect("走完量得出圆柱");
+            assert!(
+                (tap.d / tap.nx - spine).abs() < 1.0,
+                "点屏那一趟在双页里该把轴停在书脊 {spine}，实得 {:.1}（free_right={right}）",
+                tap.d / tap.nx
+            );
+        }
+        // 跟手那一趟：拖到一半松手、由走完那一腿推到底，落点与上面那条逐字相同。
+        let leaf = page().leaf(true);
+        let grip = Grip::new((0.9, 0.5), (0.5, 0.5));
+        let landed = release_grip(grip, 1.0, true, leaf);
+        let drag = cylinder_at(1.0, true, leaf, Some(landed)).expect("同上");
+        assert!(
+            drag.d.abs() < 1.0,
+            "跟手走完该停在书脊 0，实得 {:.1}",
+            drag.d
         );
     }
 

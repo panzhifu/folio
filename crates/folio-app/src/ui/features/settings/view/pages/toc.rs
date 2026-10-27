@@ -22,7 +22,9 @@ pub(in crate::ui::features::settings) fn toc_page(cx: &App) -> Page {
                     tr(cx, "field.toc_density"),
                     density_options(cx),
                     false,
-                    |cx: &App| SharedString::from(ConfigHolder::default_reader(cx).toc_density.as_str()),
+                    |cx: &App| {
+                        SharedString::from(ConfigHolder::default_reader(cx).toc_density.as_str())
+                    },
                     |val: SharedString, cx| {
                         ConfigHolder::edit_reader(cx, |prefs| {
                             prefs.toc_density = TocDensity::parse(&val)

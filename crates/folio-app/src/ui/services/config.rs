@@ -295,10 +295,7 @@ impl ConfigHolder {
             return state.provenance.clone();
         };
         let mut provenance = state.provenance.clone();
-        for (section, keys) in [
-            ("reader", &book.reader),
-            ("appearance", &book.appearance),
-        ] {
+        for (section, keys) in [("reader", &book.reader), ("appearance", &book.appearance)] {
             for key in keys.keys() {
                 provenance.mark(format!("{section}.{key}"), Layer::Book);
             }
@@ -535,7 +532,12 @@ mod tests {
             effective.1.mode, base_appearance.mode,
             "一本书不许改到软件外观的浅深"
         );
-        let defaults = cx.update(|cx| (ConfigHolder::default_reader(cx), ConfigHolder::default_appearance(cx)));
+        let defaults = cx.update(|cx| {
+            (
+                ConfigHolder::default_reader(cx),
+                ConfigHolder::default_appearance(cx),
+            )
+        });
         assert_eq!(defaults.0, base_reader, "默认层该原样");
         assert_eq!(defaults.1, base_appearance, "默认层该原样");
 

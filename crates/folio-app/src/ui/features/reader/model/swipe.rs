@@ -39,7 +39,6 @@ use folio_core::PageTurn;
 use gpui_kit::base::motion::{Easing, Transition};
 use gpui_kit::{App, Context, Pixels, Point, TouchPhase};
 
-use crate::ui::features::reader::model::chrome::PageMode;
 use crate::ui::features::reader::model::session::{
     PageRef, ReaderSession, SwipeTrack, Turn, TurnRun, start_turn,
 };
@@ -325,16 +324,14 @@ impl ReaderSession {
             return None;
         }
         // 归一化与判轴用的是同一块版心：[`ReaderSession::page_area`]，与折线、捕获纹理同一把尺。
-        // 双页的「一屏」是**一张 leaf**，不是整张跨页：从右侧划到中缝就该走满，不是走一半。
-        // 这一条从前只认折页，于是双页里选平移时手指按整块版心归一、纸却只走半块 ——
-        // 拖到一半纸就落定了，而「走过大半屏才翻页」那一条判据还在按整块量。
+        // 「一屏有多长」按档答（[`turn_animation::paper_area`]）：双页里只有仿真折页量一张 leaf
+        // （从右缘划到中缝就走满，因为纸也只走到中缝），其余几档量整块版心 —— 它们的纸要盖过
+        // 整屏，按半屏归一就会「拖到一半纸才走了一半」。
         let rtl = self.progression_rtl();
-        let dist = if self.laid_out.mode == PageMode::Spread {
-            let free_right = intent.is_none_or(|intent| (intent == TurnIntent::Next) != rtl);
-            self.page_area.leaf(free_right).distance(style.axis())
-        } else {
-            self.page_area.distance(style.axis())
-        };
+        let free_right = intent.is_none_or(|intent| (intent == TurnIntent::Next) != rtl);
+        let paper =
+            turn_animation::paper_area(style, self.laid_out.mode, self.page_area, free_right);
+        let dist = paper.distance(style.axis());
         (dist > 0.0).then(|| (style.axis(), dist, rtl))
     }
 

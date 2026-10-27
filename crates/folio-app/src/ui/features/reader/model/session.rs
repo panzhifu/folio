@@ -30,6 +30,9 @@ use crate::ui::features::reader::components::note_editor::NoteEditor;
 use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chrome::{PageMode, Reserve, reconcile};
 use crate::ui::features::reader::model::fixed_book::FixedBook;
+use crate::ui::features::reader::model::fixed_zoom::{
+    FixedFrame, FixedZoom, anchor_pan, anchor_scroll,
+};
 use crate::ui::features::reader::model::measure::FontCache;
 use crate::ui::features::reader::model::turn::TurnIntent;
 use crate::ui::features::reader::motion::turn_animation::Area;
@@ -313,6 +316,17 @@ pub struct ReaderSession {
     /// 摆的还是上一页，只记矩形不记页号，长按就会按着新一页的字序去解上一页的盒子。
     /// 空表 = 这一帧没有带文字层的页（漫画、EPUB 的定版式、扫描页），选不出字。
     pub(in crate::ui::features::reader) fixed_text_boxes: Rc<RefCell<FixedTextBoxes>>,
+    /// 定版式这一屏的显示缩放。**只影响画在屏上的那一块**：页栈、`scroll_y` 与位置落库
+    /// 都还是 1x 坐标，所以它不参与任何持久化，翻页/换档/换书都清回 1x。
+    pub(in crate::ui::features::reader) fixed_zoom: FixedZoom,
+    /// 定版式这一帧的缩放几何（铺满那一页在哪多大、上限几倍、滚动档那一行的宽）。
+    /// 渲染帧写、事件帧读 —— 捏合与拖动发生在事件里，而几何只有绘制那一帧量得出来。
+    pub(in crate::ui::features::reader) fixed_frame: FixedFrame,
+    /// 放大后正按在屏上做平移的那根手指：编号 + 上一次的位置。
+    ///
+    /// 与 `finger` 分开记：那一根是折页动画的，只在可重排那一族用；两者同屏不会同时存在，
+    /// 但语义不同（一个折纸、一个挪图），共用一个槽会让折页的收尾把平移一起清掉。
+    pub(in crate::ui::features::reader) fixed_pan_finger: Option<(gpui_kit::TouchId, (f32, f32))>,
     /// 本帧菜单条的位置（窗口坐标）。视图每帧写入；压在它上面的一击属于菜单，
     /// 不算「点别处清除」。
     pub(in crate::ui::features::reader) menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -515,6 +529,9 @@ impl ReaderSession {
             content_bounds: Rc::default(),
             handle_hits: Rc::default(),
             fixed_text_boxes: Rc::default(),
+            fixed_zoom: FixedZoom::default(),
+            fixed_frame: FixedFrame::default(),
+            fixed_pan_finger: None,
             menu_bounds: Rc::default(),
             image_viewer: None,
             image_sequence:
@@ -679,6 +696,9 @@ impl ReaderSession {
             content_bounds: Rc::default(),
             handle_hits: Rc::default(),
             fixed_text_boxes: Rc::default(),
+            fixed_zoom: FixedZoom::default(),
+            fixed_frame: FixedFrame::default(),
+            fixed_pan_finger: None,
             menu_bounds: Rc::default(),
             image_viewer: None,
             image_sequence:
@@ -815,6 +835,8 @@ impl ReaderSession {
         // 交给渲染帧按窗口宽定默认档。
         self.mode = PageMode::from_storage_name(&mode);
         self.mode_undecided = mode.is_empty();
+        // 换书就是换参照系：上一本放大到哪儿与这一本毫无关系。
+        self.reset_fixed_zoom();
         // 上一本那一段必须先结账：`settle_reading` 按 `self.book_id` 归属，
         // 顺序写反了就会把上一本读的时间记到这一本头上（两本的账一起错）。
         self.settle_reading();
@@ -908,6 +930,122 @@ impl ReaderSession {
     /// 这一屏是不是定版式（页是既定的，翻页不走排版链）。
     pub(in crate::ui::features::reader) fn is_fixed(&self) -> bool {
         matches!(self.source, Source::Fixed(_))
+    }
+
+    /// 现在是不是放大了。`on_scroll` 拿它判「这一笔该平移还是该翻页」。
+    pub(in crate::ui::features::reader) fn fixed_zoomed(&self) -> bool {
+        self.is_fixed() && self.fixed_zoom.is_zoomed()
+    }
+
+    /// 回到铺满。翻页、换档、换书都走这一句。
+    pub(in crate::ui::features::reader) fn reset_fixed_zoom(&mut self) {
+        self.fixed_zoom.reset();
+        self.fixed_pan_finger = None;
+    }
+
+    /// 双指捏合一步。`focal` 是**元素坐标**里两根手指的中点，`delta` 是比例增量。
+    ///
+    /// 两档共用一条「绕手指那一点缩放」，只是纵向归谁不同：
+    ///
+    /// - 整页翻：两个轴都算平移；
+    /// - 上下滚动：纵向交给 `scroll_y`（它在 1x 内容坐标里），横向才算平移。
+    ///
+    /// 锚点要用**旧的**倍率与旧平移算，所以先算后落地。
+    pub(in crate::ui::features::reader) fn pinch_fixed(
+        &mut self,
+        delta: f32,
+        focal: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        // 翻页动画在飞的时候不接：那一趟两张纸的位置是按旧的倍率摆的，中途改倍率
+        // 会让它们各按一把尺。
+        if !self.is_fixed() || self.turn_in_flight() {
+            return;
+        }
+        let frame = self.fixed_frame;
+        let from = self.fixed_zoom.scale();
+        let to = self.fixed_zoom.next_scale(delta, frame.max);
+        if (to - from).abs() < 1e-4 {
+            return;
+        }
+        let pan = self.fixed_zoom.pan();
+        let next_pan = if frame.continuous {
+            // 纵向不存平移：`anchor_scroll` 算的是新的 `scroll_y`。横向照旧绕锚点。
+            (anchor_pan(focal.0, frame.pivot.0, pan.0, from, to), 0.0)
+        } else {
+            (
+                anchor_pan(focal.0, frame.pivot.0, pan.0, from, to),
+                anchor_pan(focal.1, frame.pivot.1, pan.1, from, to),
+            )
+        };
+        let next_scroll = frame
+            .continuous
+            .then(|| anchor_scroll(self.scroll_y, focal.1, frame.origin.1, from, to));
+        self.fixed_zoom.set_scale(to, frame.max);
+        self.fixed_zoom.set_pan(frame.clamp_pan(next_pan, to));
+        if let Some(scroll) = next_scroll {
+            self.set_scroll_y(scroll, cx);
+        }
+        cx.notify();
+    }
+
+    /// 放大着的时候，一根手指拖一段（屏上像素）。没放大时什么都不做并返回 `false`。
+    pub(in crate::ui::features::reader) fn pan_fixed(
+        &mut self,
+        delta: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.fixed_zoomed() {
+            return false;
+        }
+        let frame = self.fixed_frame;
+        self.fixed_zoom.pan_by(delta);
+        let pan = self.fixed_zoom.pan();
+        let scale = self.fixed_zoom.scale();
+        self.fixed_zoom.set_pan(frame.clamp_pan(pan, scale));
+        cx.notify();
+        true
+    }
+
+    /// 原始触摸起手：**放大着**、且落在版心里才认这一根。
+    ///
+    /// 不 `prevent_default`：这一趟既可能是平移，也可能只是一次点击（点屏幕左右翻页），
+    /// 归属要等位移越过 gpui 自己那道阈值才看得出。平移按原始增量走，识别器折出来的
+    /// 那一笔在 `on_scroll` 里让掉即可。
+    pub(in crate::ui::features::reader) fn fixed_pan_start(
+        &mut self,
+        id: gpui_kit::TouchId,
+        at: (f32, f32),
+        inside: bool,
+    ) {
+        if inside && self.fixed_zoomed() {
+            self.fixed_pan_finger = Some((id, at));
+        }
+    }
+
+    pub(in crate::ui::features::reader) fn fixed_pan_move(
+        &mut self,
+        id: gpui_kit::TouchId,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((finger, last)) = self.fixed_pan_finger else {
+            return false;
+        };
+        if finger != id {
+            return false;
+        }
+        self.fixed_pan_finger = Some((id, at));
+        self.pan_fixed((at.0 - last.0, at.1 - last.1), cx)
+    }
+
+    pub(in crate::ui::features::reader) fn fixed_pan_end(&mut self, id: gpui_kit::TouchId) {
+        if self
+            .fixed_pan_finger
+            .is_some_and(|(finger, _)| finger == id)
+        {
+            self.fixed_pan_finger = None;
+        }
     }
 
     /// 全文检索那一趟要的东西：打开着的这份文档。
@@ -1016,8 +1154,16 @@ impl ReaderSession {
     }
 
     /// 本章还能往下滚多少像素。视口还没量过（第一帧之前）时是 0。
+    ///
+    /// 定版式放大着时视口在**内容坐标**里只占 `viewport / scale`：页栈是按 1x 铺的，
+    /// 放大之后一屏压着的字变少了，能滚到的最远处也跟着变远。
     pub(in crate::ui::features::reader) fn max_scroll(&self) -> f32 {
-        (self.content_height - self.laid_out.viewport).max(0.0)
+        let viewport = if self.is_fixed() {
+            self.laid_out.viewport / self.fixed_zoom.scale().max(1.0)
+        } else {
+            self.laid_out.viewport
+        };
+        (self.content_height - viewport).max(0.0)
     }
 
     /// 全书已读比例。进度条与页脚都念它。

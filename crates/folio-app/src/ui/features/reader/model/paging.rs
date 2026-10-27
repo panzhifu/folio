@@ -42,6 +42,9 @@ impl ReaderSession {
             return;
         }
         self.mode = mode;
+        // 摆法换档也是换参照系：定版式整页翻的平移与上下滚动那档的页宽不是一回事，
+        // 带着上一档的倍率过去会读成「一进这一档就歪着」。
+        self.reset_fixed_zoom();
         // 单页/双页的捕获纹理不是同一块：一页一栏 vs 一页两栏。不重烘就按旧布局取 uv，
         // 双页的右半张会采到单页那张纹理的空白/邻区。摆法一换就作废。
         self.capture_dirty = true;
@@ -144,6 +147,11 @@ impl ReaderSession {
         }
         // 这一趟已经能走了：之前排队的那一趟作废，别在动画走完后又补一页。
         self.pending_turn = None;
+        // 定版式翻页回到铺满：读者按的是「看下一页」，不是「在新的一页上接着看这个角」。
+        // 连续滚动那一档（`Scroll`）不在此列 —— 那里挪的是正文自己，缩放该留着。
+        if self.is_fixed() && matches!(plan, TurnPlan::Page { .. } | TurnPlan::Chapter { .. }) {
+            self.reset_fixed_zoom();
+        }
         match plan {
             TurnPlan::None => {}
             TurnPlan::Scroll { to } => {
@@ -367,7 +375,9 @@ impl ReaderSession {
     /// 连续竖滚：把「视口里占得最多的那一页」写回页表。页号变了才清选中 ——
     /// 高亮还指得上字，但那一页已经整体滚出去了。
     fn sync_fixed_page(&mut self) {
-        let viewport = self.laid_out.viewport;
+        // 放大着时视口在 1x 内容坐标里只占 `viewport / scale`（页栈按 1x 铺）。
+        // 不除这一下，放大之后「占得最多的那一页」会按整屏算，页号跟着偏。
+        let viewport = self.laid_out.viewport / self.fixed_zoom.scale().max(1.0);
         let Some(page) = self
             .fixed()
             .and_then(|book| book.page_at_scroll(self.scroll_y, viewport))
@@ -422,6 +432,9 @@ impl ReaderSession {
                 return;
             }
             self.clear_selection();
+            // 跳到别的页（目录、书签、进度条、搜索命中）与翻一页同一件事：
+            // 新的一页从铺满看起，不把上一页的倍率与角度带过去。
+            self.reset_fixed_zoom();
             self.wheel_accum = 0.0;
             self.persist_if_moved();
             cx.notify();
@@ -479,6 +492,14 @@ impl ReaderSession {
         // 滚轮不是手势：增量按「行」给。它一到就把上一笔的惯性闸门放下 —— 触屏设备上
         // 拖完一次之后，第一格滚轮不该被当成惯性吃掉。
         let wheel = matches!(event.delta, ScrollDelta::Lines(_));
+        // 放大着的时候，手指那一趟归**平移**：平移本身由原始触摸流那一格做掉了
+        // （识别器把另一轴抹成 0，两轴同时拖只有原始触摸给得全），这里把折出来的这一笔
+        // 直接让掉 —— 不让的话横向拖动会被判成翻页，而读者只是在挪着看细节。
+        //
+        // 滚轮不在此列：它是按键不是手指，桌面放大着时滚一格换一页正好用。
+        if self.fixed_zoomed() && !wheel {
+            return false;
+        }
         // 手指按在版心的哪个位置（按 `page_area` 归一化，与折线、捕获矩形同一把尺）。
         // 折页那一档按它挑**从哪个角起折**：落在下半屏就从下面卷起来。
         // 版心还没量出来时给 `None`，那一档退回上缘。

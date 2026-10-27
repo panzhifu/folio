@@ -301,7 +301,7 @@ impl TocPanel {
         reader: Entity<ReaderSession>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let sheet = cx.new(|cx| BottomSheetState::closed(cx));
+        let sheet = cx.new(BottomSheetState::closed);
         let watches = vec![cx.observe(&sheet, |_, _, cx| cx.notify())];
         Self {
             reader,

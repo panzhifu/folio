@@ -91,6 +91,7 @@ fn hover_shadow() -> Vec<BoxShadow> {
 ///
 /// 动的是不透明度，不是排距：格子的位置一开始就是对的，淡到位不会让任何一行推离
 /// 它那条对齐脊线。
+#[derive(Clone, Copy)]
 pub(in crate::ui::features::shelf) struct Enter {
     /// 从第一次画出格子起算过去了多久。`None` = 预算已经花完，或者系统要求减少
     /// 动态效果：两种都是每一格直接画成到位的样子。
@@ -126,6 +127,11 @@ pub(in crate::ui::features::shelf) struct Card {
     pub(in crate::ui::features::shelf) authors: SharedString,
     pub(in crate::ui::features::shelf) cover: Option<Arc<Image>>,
     pub(in crate::ui::features::shelf) opened_at: Option<i64>,
+    /// 这一格的元素 id 与 group 键。**重查那一趟拼一次**，不在每帧的 item 闭包里
+    /// `format!`：`uniform_list` 每帧都会把可见的那几排重造一遍。
+    pub(in crate::ui::features::shelf) group: SharedString,
+    /// 封面那一格的元素 id（宿主门按它定位；见 `card_element` 顶上）。
+    pub(in crate::ui::features::shelf) cover_id: SharedString,
 }
 
 /// 一张组卡：一个组摊到架面那一格上的样子。
@@ -141,6 +147,10 @@ pub(in crate::ui::features::shelf) struct GroupCard {
     pub(in crate::ui::features::shelf) count: usize,
     pub(in crate::ui::features::shelf) covers: Vec<Option<Arc<Image>>>,
     pub(in crate::ui::features::shelf) opened_at: Option<i64>,
+    /// 元素 id 与 group 键（口径同 [`Card::group`]）。
+    pub(in crate::ui::features::shelf) group: SharedString,
+    /// 马赛克那一格的元素 id。
+    pub(in crate::ui::features::shelf) face_id: SharedString,
 }
 
 /// 组卡里封面马赛克的格数：两行两列。
@@ -221,6 +231,8 @@ impl ShelfView {
             title: item.title.into(),
             authors: item.authors.join(AUTHOR_SEP).into(),
             cover,
+            group: format!("shelf-card-{}", item.id).into(),
+            cover_id: format!("shelf-cover-{}", item.id).into(),
         }
     }
 
@@ -302,8 +314,9 @@ impl ShelfView {
         // 菜单每次打开都重建一遍，闭包要一份自己的文案拷贝。
         let labels = labels.clone();
         // 组名与元素 id 用同一个串：指着的是整张卡，抬起来的却只有封面那一格，
-        // 两者得认同一格，不然指书名那一行时封面毫无反应。
-        let group: SharedString = format!("shelf-card-{book_id}").into();
+        // 两者得认同一格，不然指书名那一行时封面毫无反应。串在重查那一趟就拼好了
+        // （`Card::group`），这里只 clone。
+        let group: SharedString = card.group.clone();
         div()
             // 元素 id 用书库主键而不是标题：重新查库它不变，而标题会随导入更新，
             // 拿标题当键会让一张卡片每次改名都丢掉自己的按下态。
@@ -325,7 +338,7 @@ impl ShelfView {
                 div()
                     // 宿主门按封面这一格的真实坐标点下去，就能钉住「阅读层盖着时
                     // 这一击到不了书架」。生产构建里 `test_support` 原样返回元素。
-                    .id(format!("shelf-cover-{book_id}"))
+                    .id(card.cover_id.clone())
                     .test_support()
                     .w_full()
                     .h(px(cover_height))
@@ -413,7 +426,7 @@ impl ShelfView {
         let muted_fg = cx.theme().muted_foreground;
         let ring = cx.theme().border;
         let tapped = cx.entity().clone();
-        let group: SharedString = format!("shelf-tile-{id}").into();
+        let group: SharedString = tile.group.clone();
         let cell = tile_height(cover_height);
         div()
             .id(group.clone())
@@ -432,7 +445,7 @@ impl ShelfView {
             })
             .child(
                 div()
-                    .id(format!("shelf-tile-face-{id}"))
+                    .id(tile.face_id.clone())
                     .test_support()
                     .w_full()
                     .h(px(cover_height))

@@ -37,7 +37,7 @@ use gpui_kit::{
     AnyElement, App, Bounds, Context, Corners, Entity, EventEmitter, FocusHandle,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, RenderOnce, SharedString, StyleRefinement, Styled,
-    TestSupportExt as _, TouchDragEvent, TouchPhase, Window, canvas, div, px, size,
+    TestSupportExt as _, TouchDragEvent, TouchPhase, WeakEntity, Window, canvas, div, px, size,
 };
 
 /// 把手那条带的高（含上下留白）：手指落在这一条里才拖得动面板。
@@ -175,6 +175,101 @@ pub enum BottomSheetEvent {
     Dismissed,
 }
 
+/// 本应用上下文里**活着**的底部弹层，一条弱引用一块。
+///
+/// 它存在的唯一理由：手机上那一条浮的底栏是外壳在目的地**之后**画的，所以任何一块模态
+/// 弹层都会被它压住 —— 而模态那一层本该盖住导航栏。外壳画那一帧时要问一句「现在有没有
+/// 一层浮在上面」，而握答案的人不止一个（架面三块、笔记一块、更新日志一块、书里两块），
+/// 逐个目的地开口问就成了「加一屏要记得改外壳」的那类漂移。登记在这里，外壳只问一句。
+///
+/// 存的是 `WeakEntity` 而不是一个计数：**弹层随它那一屏一起消失时没人记得来减一次**。
+/// 计数漏一次，底栏就永久关在外面 —— 那种坏法只在读者关掉某屏之后才看得见。弱引用自己
+/// 会失效，问的时候跳过就是。
+#[derive(Default)]
+struct OpenSheets {
+    sheets: Vec<WeakEntity<BottomSheetState>>,
+    /// 下一次「抬起来」的序号。判「哪一块在最上面」用它，不用登记顺序：登记发生在
+    /// `cx.new(BottomSheetState::closed)` 那一刻（全应用八块，启动时一起建好），而读者
+    /// 反复开合的次序与建的先后毫无关系。
+    next_order: u64,
+}
+
+/// 给这次「抬起来」发一个递增的序号。`register` 保证这一格一定在。
+fn next_order(cx: &mut App) -> u64 {
+    if cx.try_global::<OpenSheets>().is_none() {
+        return 0;
+    }
+    let global = cx.global_mut::<OpenSheets>();
+    global.next_order += 1;
+    global.next_order
+}
+
+impl gpui_kit::Global for OpenSheets {}
+
+/// 建一块弹层时登记一条弱引用。这张清单只随「建起过几块弹层」长 —— 全应用一共八块，
+/// 都在启动时建好，所以它不需要清理那一趟。
+fn register(cx: &mut Context<BottomSheetState>) {
+    let weak = cx.entity().downgrade();
+    if cx.try_global::<OpenSheets>().is_none() {
+        cx.set_global(OpenSheets {
+            sheets: vec![weak],
+            next_order: 0,
+        });
+    } else {
+        cx.global_mut::<OpenSheets>().sheets.push(weak);
+    }
+}
+
+/// 现在有没有一块底部弹层正开着。外壳拿它判底栏收不收（见 `AppShell::nav_gone`）。
+pub fn any_sheet_open(cx: &App) -> bool {
+    cx.try_global::<OpenSheets>().is_some_and(|global| {
+        global
+            .sheets
+            .iter()
+            .any(|weak| weak.upgrade().is_some_and(|sheet| sheet.read(cx).open))
+    })
+}
+
+/// 系统返回（返回键与边缘滑动是同一件事）该收的那一块：开着的、最后被抬起来的那一块。
+///
+/// 收掉了返回 `true`，外壳据此把这一按吃掉、不再往导航栈上走。
+///
+/// **为什么不是弹层自己接这一键**：gpui-kit 的 `base::Sheet` 在 `"Sheet"` 上下文里绑了
+/// `escape → Cancel`，而外壳在 `AppShell::boot` 里无上下文地绑了 `escape → Back`。gpui
+/// 把无上下文的绑键算成**最深那一档**（`Keymap::binding_enabled`：`contexts.len()`），
+/// 同深度再按登记先后比 —— 外壳那条后绑，于是永远排在前面。`base::Sheet` 的 Cancel 一次
+/// 都轮不到（它自己那份宿主测试直接 `dispatch_action(Cancel)`，绕过了键位解析，所以看着是好的）。
+/// 弹层的键位再怎么往下钻也赢不了，只能由外壳在 `back()` 里主动问一句。
+///
+/// 挑「最后抬起来」而不是「登记最早」：同屏可以有好几块（架面上三块各握一份状态），
+/// 读者关掉的必须是**他刚看见的那一块**。
+pub fn dismiss_top(cx: &mut App) -> bool {
+    let Some(top) = top_open(cx) else {
+        return false;
+    };
+    top.update(cx, |state, cx| state.dismiss(cx));
+    true
+}
+
+/// 开着的弹层里 `order` 最大的那一块。
+fn top_open(cx: &App) -> Option<Entity<BottomSheetState>> {
+    let global = cx.try_global::<OpenSheets>()?;
+    let mut top: Option<(u64, Entity<BottomSheetState>)> = None;
+    for weak in &global.sheets {
+        let Some(sheet) = weak.upgrade() else {
+            continue;
+        };
+        let state = sheet.read(cx);
+        if !state.open {
+            continue;
+        }
+        if top.as_ref().is_none_or(|(order, _)| state.order >= *order) {
+            top = Some((state.order, sheet));
+        }
+    }
+    top.map(|(_, sheet)| sheet)
+}
+
 /// 一次起手的记录。
 #[derive(Clone, Copy)]
 struct Grab {
@@ -194,6 +289,8 @@ pub struct BottomSheetState {
     open: bool,
     /// 松手之后停在哪一档（`anchors` 的下标）。开着且没在拖时，这一档就是弹簧的目标。
     anchor: usize,
+    /// 这一次「抬起来」的序号，用来判同屏好几块里哪一块在最上面（见 [`dismiss_top`]）。
+    order: u64,
     dragging: bool,
     grab: Option<Grab>,
     /// 拖动期间手指给的露出高；只有 `dragging` 为真时才是弹簧的目标。
@@ -217,10 +314,16 @@ pub struct BottomSheetState {
 
 impl BottomSheetState {
     /// 起始是收着的：第一次 [`Self::show`] 才把弹簧从 0 抬到最高那档。
-    pub fn closed(cx: &mut App) -> Self {
+    ///
+    /// 建起来就登记进 [`OpenSheets`]（那一格为什么存在写在它自己头上）。登记要拿自己的
+    /// `Entity`，所以这一条收 `&mut Context<Self>` 而不是 `&mut App` —— 六处调用点都是在
+    /// `cx.new(|cx| …)` 里递进来的那一份，签名一改它们一字不动。
+    pub fn closed(cx: &mut Context<Self>) -> Self {
+        register(cx);
         Self {
             open: false,
             anchor: 0,
+            order: 0,
             dragging: false,
             grab: None,
             shown: 0.0,
@@ -263,6 +366,7 @@ impl BottomSheetState {
     pub fn show(&mut self, cx: &mut Context<Self>) {
         self.open = true;
         self.anchor = 0;
+        self.order = next_order(cx);
         self.claim_focus = true;
         self.reset_gesture();
         cx.notify();
@@ -271,6 +375,15 @@ impl BottomSheetState {
     /// 收下去 —— 调用方主动关的，不发 [`BottomSheetEvent::Dismissed`]。
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.close(cx, false);
+    }
+
+    /// 系统返回 / 边缘滑动收这一层：**算读者关的**，发 [`BottomSheetEvent::Dismissed`]。
+    ///
+    /// 与 [`Self::hide`] 的差别只在那一发事件：调用方靠它把「这一屏的意图」清掉
+    /// （架面三块、笔记那一块都订阅着）。不清的话下一次渲染 `sync_sheet` 看见意图还在，
+    /// 会当场把刚收掉的卡再抬起来一次。
+    pub fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.close(cx, true);
     }
 
     /// 关这一层：`by_user` 那条路（下拉过头、向下甩、点遮罩、返回键）额外发事件。
@@ -861,8 +974,11 @@ mod view_tests {
     //! `try_find` 看得见元素在不在树里、量得到顶边在哪一像素，`TouchDragEvent` 走的是
     //! 与真机同一条 `dispatch_event` 入口。
     //!
-    //! 返回键那一下**不在这儿钉**：它要键映射把 `base::Sheet` 那条 `"Sheet"` 上下文绑定
-    //! 排在全局 escape→`Back` 之前，本机分不出这个先后，得到 Android 上真按一次才算数。
+    //! 返回键那一下不在这里钉：它归外壳（`AppShell::back` → [`dismiss_top`]），
+    //! 因为弹层自己那条 `base::Sheet` 的 `"Sheet"` 上下文绑定**赢不了**外壳那条无上下文
+    //! 的 `escape → Back`（实测：只挂 Cancel 时这一键能关上弹层；再挂一条无上下文的
+    //! escape，Cancel 一次都轮不到）。收哪一块的判据（最后抬起来的先收）钉在
+    //! `back_takes_the_sheet_that_was_raised_last`。
 
     use std::cell::Cell;
     use std::rc::Rc;
@@ -880,7 +996,7 @@ mod view_tests {
         TouchPhase, Window, div, point, px, size,
     };
 
-    use super::{BottomSheet, BottomSheetEvent, BottomSheetState};
+    use super::{BottomSheet, BottomSheetEvent, BottomSheetState, dismiss_top};
 
     /// 视口 400×600、`expanded 0.9 / peek 0.45`：全屏档顶边在 60（露出 540），
     /// 半屏档顶边在 330（露出 270）。把手是面板顶上那 36 像素。
@@ -905,7 +1021,7 @@ mod view_tests {
 
     impl SheetHost {
         fn boot(cx: &mut Context<Self>) -> Self {
-            let sheet = cx.new(|cx| BottomSheetState::closed(cx));
+            let sheet = cx.new(BottomSheetState::closed);
             let dismissals: Rc<Cell<usize>> = Rc::default();
             let body_taps: Rc<Cell<usize>> = Rc::default();
             let sink = dismissals.clone();
@@ -1463,5 +1579,49 @@ mod view_tests {
         set_open(cx, &host, false);
         assert_eq!(dismissals(cx, &host), 0);
         assert!(!is_open(cx, &host));
+    }
+
+    /// 返回键收的是**最后抬起来**的那一块，不是先登记的那一块。
+    ///
+    /// 同屏可以有好几块弹层各握一份状态（架面上建组 / 导入 / 扫描三块，启动时一起登记），
+    /// 读者关掉的必须是他刚看见的那一块。挑「登记最早」会收掉一块读者看不见的，
+    /// 而屏幕上那一块纹丝不动 —— 表现为「按返回没反应」。
+    #[gpui_kit::test]
+    fn back_takes_the_sheet_that_was_raised_last(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (_handle, host) = boot(cx);
+        let first = host.read_with(cx, |this, _| this.sheet.clone());
+        let second = cx.update(|cx| cx.new(BottomSheetState::closed));
+        let second_dismissals = Rc::new(Cell::new(0));
+        let sink = second_dismissals.clone();
+        let _watch = cx.update(|cx| {
+            cx.subscribe(&second, move |_, _: &BottomSheetEvent, _| {
+                sink.set(sink.get() + 1)
+            })
+        });
+
+        cx.update(|cx| first.update(cx, |sheet, cx| sheet.show(cx)));
+        cx.update(|cx| second.update(cx, |sheet, cx| sheet.show(cx)));
+
+        assert!(cx.update(dismiss_top), "开着一块，返回就该收它");
+        assert!(
+            !second.read_with(cx, |sheet, _| sheet.is_open()),
+            "最后抬起来的那一块先收"
+        );
+        assert!(
+            first.read_with(cx, |sheet, _| sheet.is_open()),
+            "先抬起来的那一块还在底下，不该跟着一起收"
+        );
+        assert_eq!(
+            second_dismissals.get(),
+            1,
+            "收的是读者按的那一下：要发 Dismissed"
+        );
+
+        assert!(cx.update(dismiss_top), "再按一次收底下那一块");
+        assert!(!first.read_with(cx, |sheet, _| sheet.is_open()));
+        assert!(!cx.update(dismiss_top), "一块都不开时不许空报");
     }
 }

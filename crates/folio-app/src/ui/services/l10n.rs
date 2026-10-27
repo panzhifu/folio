@@ -1,4 +1,4 @@
-//! 视图侧取文案的三个函数。
+//! 视图侧取文案的那几个函数。
 //!
 //! 文案表在 `folio-core` 的 `locales/<语言标签>.toml`（一门语言一份），由 `rust-i18n` 在编译期嵌进来；
 //! 这里只多做一件事：**把当前语言从配置实体里读出来**再交给库。
@@ -12,6 +12,7 @@
 use std::fmt::Display;
 
 use ely_gpui_component::typography::format::{self, Separators};
+use folio_core::duration_parts;
 use folio_core::infra::i18n::{self, Locale};
 use gpui_kit::{App, SharedString};
 
@@ -40,6 +41,28 @@ pub fn book_count(cx: &App, count: usize) -> String {
     let locale = locale(cx);
     let key = format!("reader.book_count_{}", locale.plural(count).key_suffix());
     i18n::t_in(locale, &key, &[("count", &count)])
+}
+
+/// 一段时长的读数，按语言的形状挑句式。
+///
+/// 数由 `folio_core::duration_parts` 拆，这里只决定说哪一句：整点不提分钟、
+/// 不足一小时不提小时、不足一分钟才说秒。三条规则各语言自己写在 TOML 里
+/// （`stats.duration_*` 那四条），所以这一段一次都没拼「小时」两个字
+/// （`plans/基础设施.md` §五.4）。住在这一层而不是统计屏内部，是因为「笔记」那一屏
+/// 的卡片也要说同一句话 —— 两处各挑一次句式，改日就会说出两种口径。
+pub fn duration(cx: &App, secs: i64) -> SharedString {
+    let parts = duration_parts(secs);
+    let text = match parts.hours {
+        0 if parts.sub_minute => tf(cx, "stats.duration_seconds", &[("seconds", &parts.seconds)]),
+        0 => tf(cx, "stats.duration_minutes", &[("minutes", &parts.minutes)]),
+        hours if parts.minutes == 0 => tf(cx, "stats.duration_hours", &[("hours", &hours)]),
+        hours => tf(
+            cx,
+            "stats.duration_hours_minutes",
+            &[("hours", &hours), ("minutes", &parts.minutes)],
+        ),
+    };
+    text.into()
 }
 
 /// 每一门语言的**数字分隔符**：千位分隔与小数点。
@@ -111,8 +134,12 @@ mod tests {
     use std::fmt::Write as _;
     use std::path::{Path, PathBuf};
 
-    use super::separators;
+    use super::{duration, separators, tf};
     use folio_core::infra::i18n::Locale;
+    use folio_core::{Config, Language};
+    use gpui_kit::App;
+
+    use crate::ui::services::config::ConfigHolder;
 
     /// 收集 `src/` 下所有 `.rs` 里以字面量出现的文案键。
     fn keys_in_source() -> BTreeSet<String> {
@@ -211,5 +238,34 @@ mod tests {
             broken.is_empty(),
             "这些键在某门语言的表里根本没有（回落成英文，界面会半英半韩）：\n{broken}"
         );
+    }
+
+    /// 把界面语言装进这个上下文（[`duration`] 要说哪门语言的句子由配置实体决定，
+    /// 不是由进程全局决定 —— 并发跑测试时那一份会被别人改掉）。
+    fn set_locale(cx: &mut gpui_kit::TestAppContext, locale: Locale) {
+        cx.update(|cx: &mut App| {
+            ConfigHolder::install(
+                Config {
+                    language: Language { locale },
+                    ..Default::default()
+                },
+                cx,
+            );
+        });
+    }
+
+    /// 时长那句按语言换形状（函数从统计屏的 `heatmap` 搬了过来，规矩没变）。
+    #[gpui_kit::test]
+    fn the_duration_sentence_changes_shape_with_the_language(cx: &mut gpui_kit::TestAppContext) {
+        set_locale(cx, Locale::ZhHans);
+        assert_eq!(cx.read(|cx| duration(cx, 5_040)).as_str(), "1 小时 24 分钟");
+        assert_eq!(cx.read(|cx| duration(cx, 45)).as_str(), "45 秒");
+        assert_eq!(cx.read(|cx| duration(cx, 7_200)).as_str(), "2 小时");
+
+        set_locale(cx, Locale::En);
+        assert_eq!(cx.read(|cx| duration(cx, 5_040)).as_str(), "1h 24m");
+        // 月标签那一行：中文带「月」，英文就是那个数字（一年十二个数排成一排，
+        // 顺序已经把「这是月份」说清了）。
+        assert_eq!(cx.read(|cx| tf(cx, "stats.month", &[("month", &3)])), "3");
     }
 }

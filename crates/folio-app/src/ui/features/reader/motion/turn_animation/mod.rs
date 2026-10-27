@@ -6,7 +6,8 @@
 //! 能在宿主的 `cargo test` 里表驱动钉住；gpui 的 `TestWindow` 看不到绘制场景，位移只在
 //! 这一层摸得到。
 //!
-//! 这一层给得出的东西有**两样**：位移，和「这一张纸被折线裁到哪一侧」。量距离按轴：横轴
+//! 这一层给得出的东西有**三样**：位移、「这一张纸被折线裁到哪一侧」，和「一屏有多宽」
+//! （[`paper_area`] —— 双页里只有仿真折页答半张 leaf，其余各档答整块版心）。量距离按轴：横轴
 //! 取视口宽，竖轴取视口高。位移是**烘进字形坐标**的（`view.rs` 把它当 `Scene::build` 的两
 //! 个入参，正文没有 `div` 包着），裁剪则是逐字形绘制前的那一次剔除（`paint.rs`）—— 纸与纸
 //! 之间没有可插入的绘制层，所以影子与折面只能作为盖在两者之上的一组形状来画（见 [`geometry::Shades`]）。
@@ -86,6 +87,20 @@ pub(in crate::ui::features::reader) trait PageTurnStyle:
         axis == self.axis()
     }
 
+    /// 双页（一页两栏）里，这一档揭的是**靠手指那半张 leaf** 还是整块版心。
+    ///
+    /// 只有仿真折页答 `true`，因为只有它真有**背面**：翻一趟要换掉的是两栏的字，新跨页右栏 = 叶子
+    /// 底下露出来那一面，新跨页左栏 = 那张叶子的背面，而背面这一格已经烘进捕获层 2（`view::body`
+    /// 的 `back_key`）。其余各档是单面的一张纸，一张 leaf 宽的纸只带得动一栏，另一栏必然在某一帧
+    /// 原地跳变 —— 读者那句「左右覆盖只能覆盖双页其中一页」量的就是这个。所以那几档在双页里按
+    /// 整块版心走，两栏作为同一张纸一起动。
+    ///
+    /// 答在**档**上而不是配置上：Metal / DirectX 那两条路把折页落到滑动（见 [`of`]），跟着配置判
+    /// 就会给一份滑动用的几何套上 leaf 那把尺。
+    fn turns_one_leaf(&self) -> bool {
+        false
+    }
+
     /// `t` ∈ [0,1] —— 已经过完缓动，0 是刚起步、1 是走完；`forward` = 沿读书顺序往后。
     /// 给回 `[进场, 出场]` 两张纸。
     fn sheets(&self, t: f32, forward: bool, area: Area) -> [Sheet; 2];
@@ -125,6 +140,30 @@ pub(in crate::ui::features::reader) fn of(turn: PageTurn) -> &'static dyn PageTu
     }
 }
 
+/// 这一档在这一屏的摆法下，「一屏」是哪块矩形。
+///
+/// 纸的位移、手指那笔的归一化、逐栏谁在纸上、网格的裁剪框，**四件事必须同一把尺**，所以这一格
+/// 只在这里答一次（判据本身在 [`PageTurnStyle::turns_one_leaf`]）：
+///
+/// - 双页 + 折页 → 靠手指那半张 leaf（书脊落在整屏中线）。按整块量的两种读法都不体面：整块量、
+///   纸只走半块 ⇒ 「纸走半屏就落定，手指还在整屏里划」；半块量、纸走整块 ⇒ 「拖了半天不翻」。
+/// - 其余 → 整块版心。单页本来就是整块；双页那几档是单面纸，带不动两栏的新内容（见上面那条判据
+///   的理由）。
+///
+/// 连续滚动不走这里（那一档没有「一屏」可言，划动就是滚）。
+pub(in crate::ui::features::reader) fn paper_area(
+    style: &dyn PageTurnStyle,
+    mode: PageMode,
+    area: Area,
+    free_right: bool,
+) -> Area {
+    if mode == PageMode::Spread && style.turns_one_leaf() {
+        area.leaf(free_right)
+    } else {
+        area
+    }
+}
+
 /// 松手那一腿自己走了几成：`0` = 松手那一刻那一格，`1` = 这一腿到底（走完或退回按下点）。
 ///
 /// 两条腿的尺**不是同一个**，因为 `progress` 走的方向相反：走完那一腿从 `from` 涨到 `1`，
@@ -156,7 +195,7 @@ mod tests {
     //! 搬自摆位层那一份：一挡的门跟着那一档走，共用的尺在 `testing.rs`。
 
     use crate::ui::features::reader::model::chrome::PageMode;
-    use crate::ui::features::reader::motion::turn_animation::PageTurnStyle as _;
+    use crate::ui::features::reader::motion::turn_animation::PageTurnStyle;
     use crate::ui::features::reader::motion::turn_animation::cover::Cover;
     use crate::ui::features::reader::motion::turn_animation::curl::Curl;
     use crate::ui::features::reader::motion::turn_animation::curl::crease_of;
@@ -166,7 +205,7 @@ mod tests {
     use crate::ui::features::reader::motion::turn_animation::slide::Slide;
     use crate::ui::features::reader::motion::turn_animation::slide_up::SlideUp;
     use crate::ui::features::reader::motion::turn_animation::testing::page;
-    use crate::ui::features::reader::motion::turn_animation::{of, release_clock};
+    use crate::ui::features::reader::motion::turn_animation::{of, paper_area, release_clock};
     use folio_core::PageTurn;
 
     /// 翻页的轴**归动画档**，不归手指。这两问的答案就是那条判据的全部：
@@ -233,6 +272,54 @@ mod tests {
                 "{mode:?} 里上下滚动该不该走算错了"
             );
         }
+    }
+
+    /// 双页里哪一档揭「靠手指那半张 leaf」、哪一档按整块版心走 —— 一张表钉住这两个答案。
+    ///
+    /// 这两问的答案决定了四件事（纸的位移、手的归一化、逐栏谁在纸上、网格的裁剪框）用哪把尺，
+    /// 串一档就是「双页里只有一半在动」。按具体的档问，不按 [`of`] 的映射问：Metal / DirectX
+    /// 那两条路把折页落到滑动，用配置值来问会在那两个平台上得到一个自相矛盾的答案。
+    #[test]
+    fn in_a_spread_only_the_curl_turns_one_leaf() {
+        use PageMode::{Continuous, Paged, Spread};
+        let area = page();
+        assert!(
+            Curl.turns_one_leaf(),
+            "仿真折页有背面，双页里该只揭那一张 leaf"
+        );
+        for (name, style) in [
+            ("平移", &Slide as &dyn PageTurnStyle),
+            ("上下平移", &SlideUp),
+            ("覆盖", &Cover),
+            ("上下滚动", &Scroll),
+            ("不走动画", &Immediate),
+        ] {
+            assert!(
+                !style.turns_one_leaf(),
+                "{name} 是单面的一张纸，双页里该两栏一起走"
+            );
+        }
+        // 一张 leaf 就是半块版心，并且带上「书脊那一侧还有另一半可落」那一格。
+        let leaf = paper_area(&Curl, Spread, area, true);
+        assert_eq!(leaf, area.leaf(true));
+        assert!(leaf.spread_leaf, "leaf 那一块要让落点那一档认得出来");
+        // 其余组合一律是整块版心，而且不带那一格。
+        for (mode, name) in [(Paged, "单页"), (Continuous, "连续"), (Spread, "双页")] {
+            for (label, style) in [
+                ("平移", &Slide as &dyn PageTurnStyle),
+                ("覆盖", &Cover),
+                ("上下平移", &SlideUp),
+            ] {
+                assert_eq!(
+                    paper_area(style, mode, area, true),
+                    area,
+                    "{name} 里{label}的「一屏」该是整块版心"
+                );
+            }
+        }
+        // 单页的折页也是整块 —— 那一格只属于双页。
+        assert_eq!(paper_area(&Curl, Paged, area, true), area);
+        assert!(!paper_area(&Curl, Paged, area, true).spread_leaf);
     }
     /// 每一档都接得上，而且轴与「走不走」这两条对外承诺不会串档。加一档忘了在
     /// [`of`] 里接是编译错误，这条守的是接错那一半。

@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, HashSet};
 use rusqlite::params;
 
 use super::types::{
-    BookReading, DailyReading, ReadingRank, ReadingSession, ReadingSummary, ReadingTotals,
+    BookReading, DailyReading, ReadingRank, ReadingRecord, ReadingSession, ReadingSummary,
+    ReadingTotals,
 };
 use super::{Store, now};
 use crate::Result;
@@ -189,6 +190,33 @@ impl Store {
         })
     }
 
+    /// 全部阅读会话，按开始时间从早到晚，**带书名**。
+    ///
+    /// 统计屏要在一批行上同时算按天 / 按书 / 按小时 / 最值，而这几样必须来自同一批行
+    /// （理由见 [`ReadingSummary`]）。分成几条按窗口的 SQL 也能算，但「切到上个月」
+    /// 只是换一个切片，没必要为每一屏重打一次库。
+    ///
+    /// `seconds <= 0` 的行不返回：那几条是旧版本可能写进来的空段，
+    /// 它们对任何一个读数都没有贡献，只会把会话数与书数抬高。
+    pub fn reading_history(&self) -> Result<Vec<ReadingRecord>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT s.book_id, b.title, s.started_at, s.seconds
+             FROM reading_sessions s JOIN books b ON b.id = s.book_id
+             WHERE s.seconds > 0
+             ORDER BY s.started_at, s.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ReadingRecord {
+                book_id: r.get(0)?,
+                title: r.get(1)?,
+                started_at: r.get(2)?,
+                seconds: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// 窗口内按**本地小时**分桶的时长，24 个一格（「一般几点读」）。
     ///
     /// 记的是会话**开始**那一刻的小时，不是把会话摊到它覆盖的每一格里：摊开需要按分钟
@@ -345,6 +373,26 @@ mod tests {
         let book = store.add_book(&path("a.epub"), &meta("A")).unwrap();
         store.record_session(book, 1_000, 900, 0).unwrap();
         assert_eq!(store.sessions(book, 10).unwrap()[0].seconds, 0);
+    }
+
+    /// 历史行按时间从早到晚、带书名，零长的那几条不进来。
+    #[test]
+    fn reading_history_carries_titles_and_skips_empty_segments() {
+        let store = Store::in_memory().unwrap();
+        let a = store.add_book(&path("a.epub"), &meta("A")).unwrap();
+        let b = store.add_book(&path("b.epub"), &meta("B")).unwrap();
+        store.record_session(b, 500, 800, 0).unwrap();
+        store.record_session(a, 100, 160, 0).unwrap();
+        store.record_session(a, 900, 900, 0).unwrap();
+
+        let history = store.reading_history().unwrap();
+        assert_eq!(history.len(), 2, "零长会话不算阅读");
+        assert_eq!(history[0].title, "A");
+        assert_eq!(history[0].book_id, a);
+        assert_eq!(history[0].started_at, 100);
+        assert_eq!(history[1].title, "B");
+        assert_eq!(history[1].book_id, b);
+        assert_eq!(history[1].seconds, 300);
     }
 
     #[test]

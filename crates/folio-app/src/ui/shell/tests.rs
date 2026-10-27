@@ -405,6 +405,7 @@ fn the_layer_reads_presence_and_writes_distance_apart() {
 
 #[cfg(not(mobile))]
 mod booted {
+    use crate::ui::components::BottomSheetState;
     use crate::ui::features::shelf::ShelfView;
     use crate::ui::services::config::ConfigHolder;
     use crate::ui::shell::AppShell;
@@ -826,6 +827,79 @@ mod booted {
         .expect("窗口应能渲染");
     }
 
+    /// 回归门：点卡面那一下**净**勾上一本，不是勾上又取消。
+    ///
+    /// 勾选框必须是卡面的**兄弟**而不是孩子：gpui 把一次点击发给每一个 hitbox 含按下点的
+    /// handler（不沿祖先链冒泡），嵌在里面的话同一下会触发两次 `set_row_checked` —— 屏幕上
+    /// 就是「这张卡按了没反应」，而源码只差一层嵌套，是最难查的一种坏法。
+    #[gpui_kit::test]
+    fn tapping_the_card_face_checks_it_once(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("下载");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "第一本\n").unwrap();
+        let report = ScanReport {
+            candidates: vec![Candidate {
+                origin: folio_core::Origin::Local(dir.join("a.txt")),
+                name: "a.txt".into(),
+                size: Some(8),
+            }],
+            skipped: 0,
+            truncated: false,
+        };
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let shelf = stack
+                .read(cx)
+                .current()
+                .cloned()
+                .and_then(|top| top.downcast::<ShelfView>().ok())
+                .expect("书架栈底就是架面本身");
+            shelf.update(cx, |shelf, cx| {
+                shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
+            });
+            // 多画几帧：浮层那一张卡要先量一次触发器，虚拟列表要先有一次实测的视口才排得出行。
+            for _ in 0..4 {
+                window.render_frame(cx);
+            }
+            assert!(
+                window.try_find("shelf-scan-panel").is_some(),
+                "结果到手面板要出现"
+            );
+            assert!(
+                window.try_find("shelf-scan-pick-0").is_some(),
+                "候选要画成一张卡（封面 + 三行 + 勾选框）"
+            );
+
+            window.click("shelf-scan-pick-0", cx);
+            assert_eq!(
+                shelf.read(cx).checked_rows_for_test(),
+                1,
+                "点卡面该净勾上一本；这里是 0 就是同一下被勾上又取消掉了"
+            );
+            window.click("shelf-scan-pick-0", cx);
+            assert_eq!(shelf.read(cx).checked_rows_for_test(), 0, "再点一下该取消");
+
+            // 真正吃得住的那一下是点在**勾选框上**：它若是卡面的孩子，这同一次点击会同时
+            // 命中内外两层 handler（gpui 的点击发给每个含按下点的 hitbox），净结果回到 0 ——
+            // 屏幕上就是「按了框没反应」。兄弟关系只有这一头量得出来。
+            window.click("shelf-scan-check-0", cx);
+            assert_eq!(
+                shelf.read(cx).checked_rows_for_test(),
+                1,
+                "点勾选框该净勾上一本；这里是 0 就说明框嵌在卡面里、被双重触发了"
+            );
+            window.click("shelf-scan-check-0", cx);
+            assert_eq!(shelf.read(cx).checked_rows_for_test(), 0, "再点一下该取消");
+        })
+        .expect("窗口应能渲染");
+    }
+
     /// 回归门：切目的地时输入框的编辑态要跟着退。
     ///
     /// 每条导航栈都常驻，切去别的页面只是不画书架了，输入框实体还活着 ——
@@ -1141,6 +1215,64 @@ mod booted {
             stack.read_with(cx, |state, _| state.depth()),
             1,
             "收书不该去动架面那条栈"
+        );
+    }
+
+    /// 回归门：底部弹层开着时，返回先收那一层，绝不到「退出应用」那一步去。
+    ///
+    /// 读者报的是「笔记卡片开着，一下返回就回到系统主界面」。根因不是这一层没有键位，
+    /// 而是键位排不上：gpui 把**无上下文**的绑键算成最深那一档，外壳后绑的
+    /// `escape → Back` 永远压在 gpui-kit `base::Sheet` 的 `Cancel` 前面（见
+    /// `components::dismiss_top` 的注释）。所以外壳在 `back()` 里自己问一句最上面是哪块浮层。
+    #[gpui_kit::test]
+    fn back_closes_the_open_sheet_before_it_reaches_the_root(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        use crate::ui::components::BottomSheetEvent;
+
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        // 一块真弹层，与架面那三块走同一条登记路（`BottomSheetState::closed` 登记进全局）。
+        // 这条门要钉的是「返回先问浮层」这一句，不是某一屏的摆法。
+        let sheet = cx.update(|cx| cx.new(BottomSheetState::closed));
+        let dismissals = Rc::new(Cell::new(0));
+        let sink = dismissals.clone();
+        let _watch = cx.update(|cx| {
+            cx.subscribe(&sheet, move |_, _: &BottomSheetEvent, _| {
+                sink.set(sink.get() + 1)
+            })
+        });
+        cx.update(|cx| sheet.update(cx, |sheet, cx| sheet.show(cx)));
+        assert!(
+            sheet.read_with(cx, |sheet, _| sheet.is_open()),
+            "前置：浮层该开着"
+        );
+
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        cx.simulate_keystrokes(handle, "escape");
+
+        assert!(
+            !sheet.read_with(cx, |sheet, _| sheet.is_open()),
+            "返回该收掉浮层，而不是穿到栈底去（手机上那一步就是退出应用）"
+        );
+        assert_eq!(
+            dismissals.get(),
+            1,
+            "这一下是读者按的：订阅方要收到 Dismissed，才能把「这一屏开着」的意图清掉"
+        );
+        assert_eq!(
+            stack.read_with(cx, |state, _| state.depth()),
+            1,
+            "收浮层那一按不该顺手弹栈"
+        );
+        assert_eq!(
+            shell.read_with(cx, |this, _| this.destination),
+            Destination::Shelf,
+            "也不该换目的地"
         );
     }
 
@@ -1513,7 +1645,7 @@ mod booted {
             .read_with(cx, |this, _| this.account.clone())
             .expect("Compact 档的「我的」装的就是钻入式列表");
 
-        let at = |cx: &mut TestAppContext| shell.read_with(cx, |this, cx| this.nav_gone(cx));
+        let at = |cx: &mut TestAppContext| shell.read_with(cx, |this, cx| this.nav_gone(true, cx));
         cx.update_window(handle, |_, window, cx| {
             shell.update(cx, |this, cx| this.go(Destination::Account, window, cx));
             window.render_frame(cx);
@@ -1556,6 +1688,36 @@ mod booted {
         })
         .expect("窗口应能渲染");
         assert!(!at(cx), "「我的」停在详情里不该把书架的底栏也收掉");
+    }
+
+    /// 回归门：任何一块底部弹层开着，Compact 档那条**浮**栏整条收起 —— 模态那一层该盖住
+    /// 导航栏，而不是被它压住下沿（外壳画完目的地才画那条栏）。
+    ///
+    /// 两个方向各防一种写反：判据里漏掉这一问 → 扫描清单升起来时底下那一条 56 还浮在它上面；
+    /// 不先问档位 → 桌面上弹层一开侧栏就没了、整页横向抖一下（那两档的栏占布局行，本来不重叠）。
+    /// 「光建起来不算」防的是第三种：登记了但没 `show`，读者还没看到任何一层，栏不该凭空消失。
+    #[gpui_kit::test]
+    fn an_open_bottom_sheet_takes_the_floating_bar_with_it(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let at = |compact: bool, cx: &mut TestAppContext| {
+            shell.read_with(cx, move |this, cx| this.nav_gone(compact, cx))
+        };
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert!(!at(true, cx), "没有弹层时那条栏该在");
+
+        let sheet = cx.update(|cx| cx.new(BottomSheetState::closed));
+        assert!(!at(true, cx), "光建起来不算开着");
+
+        cx.update(|cx| sheet.update(cx, |sheet, cx| sheet.show(cx)));
+        assert!(at(true, cx), "手机上弹层开着，那条浮栏该整条收起");
+        assert!(
+            !at(false, cx),
+            "桌面与平板那两档的侧栏不与弹层重叠，不该被这一问收掉"
+        );
+
+        cx.update(|cx| sheet.update(cx, |sheet, cx| sheet.hide(cx)));
+        assert!(!at(true, cx), "关掉之后栏要跟着回来");
     }
 
     /// 多语言的验收：导航栏的文案由配置里的语言驱动，改偏好后视图能重画到新语言。
@@ -1674,6 +1836,56 @@ mod booted {
 
         let after = shell.read_with(cx, |this, cx| this.stats.read(cx).active_days());
         assert_eq!(after, Some(1), "弹掉阅读页那次重取要把今天那一格带上来");
+    }
+
+    /// 五个区间都要真的画得出来。
+    ///
+    /// 「总」与「年」各带图表，空库时那几张图没数据就很容易在比例尺上空转；
+    /// 这里塞两段真会话（今天 + 41 天前）然后逐档渲染，钉的是「有数据时也不 panic」，
+    /// 以及月 / 周 / 年三档确实把热力图挂上了屏（外壳那扇回归门只看了默认那一档）。
+    #[gpui_kit::test]
+    fn every_stats_range_renders_with_data(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
+        let book = store
+            .add_book(
+                std::path::Path::new("/books/stats.epub"),
+                &folio_core::DocMeta {
+                    title: "Stats".into(),
+                    authors: vec!["作者甲".into()],
+                    format: folio_core::Format::Epub,
+                    size: 1,
+                    ..folio_core::content::format::DocMeta::default()
+                },
+            )
+            .unwrap();
+        let at = folio_core::infra::time::now();
+        store.record_session(book, at - 3_000, at, 0).unwrap();
+        store
+            .record_session(book, at - 41 * 86_400 - 1_200, at - 41 * 86_400, 0)
+            .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            shell.update(cx, |this, cx| this.go(Destination::Stats, window, cx));
+            for index in 0..5 {
+                shell.update(cx, |this, cx| {
+                    this.stats
+                        .update(cx, |stats, cx| stats.show_range_for_test(index, cx));
+                });
+                window.render_frame(cx);
+                assert!(
+                    window.try_find("folio-stats").is_some(),
+                    "第 {index} 档应画出统计屏"
+                );
+                if index >= 2 {
+                    assert!(
+                        window.try_find("stats-heatmap").is_some(),
+                        "第 {index} 档应画出热力图"
+                    );
+                }
+            }
+        })
+        .expect("五档都应渲染成功");
     }
 
     /// 回归门：读者在「信息」那一页改掉书名，架上那张卡要跟着变。

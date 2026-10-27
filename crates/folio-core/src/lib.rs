@@ -62,7 +62,8 @@ pub use infra::paths::{config_dir, config_path, data_dir, db_path, log_dir, them
 pub use infra::services::Services;
 pub use infra::task::{ByteProgress, Cancel, Priority, StageCtx, TaskEvent, TaskId, TaskManager};
 pub use infra::time::{
-    DurationParts, civil_date, day_start, duration_parts, local_day, local_hour,
+    CivilDate, DurationParts, civil_date, civil_from_days, day_start, days_from_civil,
+    days_in_month, duration_parts, local_day, local_hour, weekday_monday0,
 };
 pub use ingest::import::{
     BackfillReport, Candidate, ImportKind, ImportOutcome, ImportReport, Imported, Origin,

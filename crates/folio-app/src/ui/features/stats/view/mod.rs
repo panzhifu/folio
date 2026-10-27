@@ -1,165 +1,157 @@
-//! 「统计」目的地：这一年什么时候读了书、读得有多密。
+//! 「统计」目的地：读了多少、什么时候读、时间花在哪些书上。
 //!
-//! 整屏只有一张图 —— 一格一天、按日历排开的热力图（GitHub 贡献图那个形状）。
-//! 按 `Design Guides` 的「Guidance for AI-generated interfaces」先把四件事说清楚：
+//! 这一屏照的是阅读器 Readingo 的统计页：顶上一排区间（总 / 日 / 周 / 月 / 年），
+//! 下面按区间换几块卡片 —— 总览、时间分析、热力图 / 日历、行为分析、毅力成就、排行。
+//! 仿的是**信息的层次**，不是那一屏的填色：Folio 的卡片靠描边与留白立住
+//! （`gpui-kit-design-guides` 的「先尺寸、字重、留白与分隔线，再考虑加颜色或容器」），
+//! 所以这里没有 Readingo 那种整块浅紫底。
 //!
-//! - **主任务**：读者要的是「我的习惯长什么样」，那是**形状**而不是某个数，所以图占整屏，
-//!   眉标、图例、结论各一行小字围着它，不并列第二块内容。
-//! - **状态归谁**：快照归 [`StatsView`]，取数只在 [`StatsView::refresh`] 里（切进这一屏、
-//!   关掉一本书那两处，由外壳叫），`render` 一律不碰库。
-//! - **组件构成**：`component::chart` 那几张是柱、线、雷达，没有按日历排的网格，所以这是
-//!   一块**只用 div 的组合**（一列车标 + 一排月标签 + 53 列 × 7 行格子 + 图例）。
-//!   不自定义 `Element`：这里没有需要一次画完的东西，交给布局引擎反而能保证那些格子
-//!   与车道是真的对齐的。
-//! - **键盘通路**：这一屏没有任何动作（旧版榜单那一行「点开一本书」随榜单一起没了），
-//!   所以不需要键盘路径，能滚就行。
+//! 状态归 [`StatsView`]：快照在 [`StatsView::refresh`]（切进这一屏、关掉一本书、切区间、
+//! 翻页）里取，`render` 一律不碰库。区间由用户选，翻页只改锚点日。
 //!
-//! 三条从旧屏继承下来、并且仍然成立的规矩：
+//! 三条仍然成立的规矩：
 //!
-//! 1. **图的下面永远跟一句 muted 的结论**。移动端的浮层点不住（`shelf` 里记过的那条事实），
-//!    读数通路不能只剩 tooltip —— 这一屏连 tooltip 都没有，那一句就是唯一的数。
-//! 2. **不许只靠颜色传义**：深浅之外，「读了多少天、累计多久、最长连续几天」由结论那一行说。
-//! 3. **页面标题不写「统计」二字**：侧栏 / 底栏那条导航已经把这格点亮了，在内容区再重复一遍
-//!    是 `Let context carry context` 点名要避免的废话。眉标写的是**窗口**（看回去多远），
-//!    那才是导航没说的那半句。
+//! 1. **每个数字都要有话说**。图下面跟一句结论，不把读数只交给 tooltip —— 移动端
+//!    点不住浮层，而这一屏的几张图本来就没有 tooltip。
+//! 2. **不许只靠颜色传义**。热力图的深浅之外，日历格子还写着时长，图例写着档位；
+//!    排行的名次是数字不是色块。
+//! 3. **没有的指标不编**。库里只有会话时长，没有逐页翻页数、没有已读字数，所以这一屏
+//!    不摆「翻页次数 / 字数」；对应位置换成真实的「阅读次数 / 阅读天数」。
+//!
+//! 图的下面永远跟一句 muted 的结论；页面标题不写「统计」二字 —— 导航已经点亮了这一格。
 
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::chart::{AreaChart, BarChart};
+use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
+use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle};
+use gpui_kit::component::group_box::{GroupBox, GroupBoxVariant, GroupBoxVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::table::{Table, TableBody, TableCaption, TableCell, TableRow};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, Sizable, StyledExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
-    SharedString, Styled, TestSupportExt as _, Window, div, px,
+    AnyElement, App, Background, Context, InteractiveElement as _, IntoElement, ParentElement,
+    Render, SharedString, Styled, TestSupportExt as _, Window, div, linear_color_stop,
+    linear_gradient, px,
 };
 
-use super::model::heatmap::{Heatmap, ROWS, WEEKS, duration};
+use super::model::{Bucket, DayStat, Range, Snapshot};
 use crate::ui::components::muted_label;
 use crate::ui::services::app_store;
-use crate::ui::services::l10n::{tf, tr};
-use crate::ui::shell::navigation::{self, SizeClass, reserved_width};
+use crate::ui::services::l10n::{duration, tf, tr};
+use crate::ui::shell::navigation::{self, SizeClass};
 
-/// 内容列的最大宽度（逻辑像素）。报告类内容拉到 1600 宽会把格子拉成一片沙漠。
-const COLUMN_MAX: f32 = 720.0;
+/// 内容列的最大宽度。统计是报表面，拉太宽只会让数字之间隔出一片海。
+const COLUMN_MAX: f32 = 760.0;
 /// 左右留白，与书架共用同一个数：切目的地时那条对齐脊线不该跳。
-const GUTTER: f32 = 12.0;
-/// 一格边长的下限。再小就看不出是一格一格的了（371 格糊成一片色面）。
-const CELL_MIN: f32 = 8.0;
-/// 一格边长的上限。一年 53 列，宽到某个点再放大只是让方块变大，读不出更多信息，
-/// 所以封顶在一颗舒适的方块上，多出来的宽度还给两侧的留白。
-const CELL_MAX: f32 = 14.0;
-/// 格与格的缝。
-const CELL_GAP: f32 = 3.0;
-/// 左边那列车标（周一 / 周三 / 周五）的车道宽。
-const LABEL_LANE: f32 = 28.0;
-/// 月标签那一行的车道高：一行 `text_xs` 的字，加上下各一点余量。
-const MONTH_LANE: f32 = 18.0;
-/// 只标这三行星期几（GitHub 同一处置）。七行全标会把车道撑成图的一半宽。
-const ROW_LABELS: [(usize, &str); 3] = [
-    (0, "stats.weekday_mon"),
-    (2, "stats.weekday_wed"),
-    (4, "stats.weekday_fri"),
-];
-
-/// 五档的颜色。
-///
-/// 0 档取 `muted`（那是这一屏「没有内容」的颜色，旧版榜单那条占比栏的轨道同一个色），
-/// 1..4 档是**同一个**图表色递进不透明度，而不是 `chart_1..chart_4`：那四个是分类色板，
-/// 摆在一起读出来是四种东西，不是一件事的四个程度。
-fn ramp(cx: &App) -> [Hsla; 5] {
-    let solid = cx.theme().chart_3;
-    [
-        cx.theme().muted,
-        solid.opacity(0.30),
-        solid.opacity(0.55),
-        solid.opacity(0.80),
-        solid,
-    ]
-}
-
-/// 一格该多大：把可用的宽度均给 53 列，再夹进 [`CELL_MIN`]..=[`CELL_MAX`]。
-///
-/// 均出来小于下限时**不缩了**，那一格按 `CELL_MIN` 画，多出来的部分横向滚
-/// （GitHub 在手机上是同一处置）。窄屏硬缩到 5 像素的结果是整张图糊成一块色面，
-/// 那不如能滚。
-fn cell_size(width: f32, size: SizeClass) -> f32 {
-    let inset = GUTTER * 2.0 + LABEL_LANE;
-    let room = (width - reserved_width(size) - inset).max(0.0);
-    // 宽屏那一列被 `COLUMN_MAX` 夹住，格子也就按夹住后的宽度算。
-    let room = match size {
-        SizeClass::Expanded => room.min(COLUMN_MAX - inset),
-        _ => room,
-    };
-    let pitch = ((room + CELL_GAP) / WEEKS as f32).floor();
-    (pitch - CELL_GAP).clamp(CELL_MIN, CELL_MAX)
-}
+const GUTTER: f32 = 16.0;
+/// 卡片之间的呼吸。
+const CARD_GAP: f32 = 12.0;
+/// 热力图五档的分界（秒）：<30m、30–60m、1–3h、>3h。与图例一字不差。
+const HEAT_STEPS: [i64; 3] = [1_800, 3_600, 10_800];
 
 #[derive(Default)]
 pub struct StatsView {
     /// `None` = 书库读不出来（没装上，或那条查询失败）。
-    /// 这一格要说的是「读不到」，与「库里没有阅读记录」是两句话，别混。
-    heatmap: Option<Heatmap>,
+    snapshot: Option<Snapshot>,
+    /// 当前区间。默认「月」：翻开统计最常问的是「这个月读了多少」。
+    range: Range,
+    /// 窗口里的锚点日（本地日序号）。`0` = 还没初始化，`refresh` 会填成今天。
+    anchor: i64,
 }
 
 impl StatsView {
     pub fn new() -> Self {
-        Self { heatmap: None }
+        Self {
+            snapshot: None,
+            range: Range::Month,
+            anchor: 0,
+        }
     }
 
-    /// 重取一次快照。切进这一屏、关掉一本书都走这里。
+    /// 重取一次快照。切进这一屏、关掉一本书、切区间、翻页都走这里。
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let tz = crate::ui::host::local_offset_secs();
+        let today = folio_core::local_day(folio_core::infra::time::now(), tz);
+        if self.anchor == 0 || self.anchor > today {
+            self.anchor = today;
+        }
         let Some(store) = app_store::handle(cx) else {
-            self.heatmap = None;
+            self.snapshot = None;
             cx.notify();
             return;
         };
-        self.heatmap = Some(Heatmap::load(&store, crate::ui::host::local_offset_secs()));
+        self.snapshot = Some(Snapshot::load(&store, self.range, self.anchor, tz));
         cx.notify();
     }
 
     /// 现在手上有没有一份快照。外壳那扇回归门用它钉「切进这一屏确实取到了一次」。
     pub fn has_heatmap(&self) -> bool {
-        self.heatmap.is_some()
+        self.snapshot.is_some()
     }
 
     /// 窗口内有读的天数；没有快照时是 `None`（那表示「还没去看」，不是「库里是零」）。
-    /// 外壳那条「关掉一本书之后统计要跟上」的门钉的是这个数变了。
     pub fn active_days(&self) -> Option<usize> {
-        self.heatmap.as_ref().map(|map| map.active_days)
+        self.snapshot.as_ref().map(|snapshot| snapshot.active_days)
+    }
+
+    /// 测试用：按索引切一档区间。真机上的入口是顶上那排 `TabBar`。
+    #[cfg(test)]
+    pub(crate) fn show_range_for_test(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.range = Range::from_index(index);
+        self.anchor = 0;
+        self.refresh(cx);
+    }
+
+    fn select_range(&mut self, range: Range, cx: &mut Context<Self>) {
+        if self.range == range {
+            return;
+        }
+        self.range = range;
+        self.anchor = 0;
+        self.refresh(cx);
+    }
+
+    fn shift(&mut self, step: i64, cx: &mut Context<Self>) {
+        if self.range.is_total() {
+            return;
+        }
+        self.anchor = self.range.shift(self.anchor, step);
+        self.refresh(cx);
     }
 }
 
 impl Render for StatsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = SizeClass::of(window);
-        let wide = size == SizeClass::Expanded;
-        let cell = cell_size(f32::from(window.viewport_size().width), size);
-        // Compact 档那条底栏是浮的：内容自己把栏底下那一段空出来，滚动时才从栏下穿过
-        // （与书架 grid 的 `tail` 同一条）。侧栏两档嵌入占位，外壳已经让过底边。
+        // Compact 档那条底栏是浮的：内容自己把栏底下那一段空出来。
         let tail = if size.is_compact() {
             navigation::clearance(crate::ui::host::safe_area(window, cx).bottom)
         } else {
             0.0
         };
-        let body: AnyElement = match &self.heatmap {
-            None => self.unavailable(cx),
-            Some(heatmap) => self.block(heatmap, cell, cx),
-        };
-        let column = v_flex()
-            .w_full()
-            .when(wide, |el| el.max_w(px(COLUMN_MAX)))
-            .px(px(GUTTER))
-            .pb(px(GUTTER + tail))
-            .child(body);
+
+        let mut sections = vec![self.range_tabs(cx)];
+        if let Some(snapshot) = &self.snapshot {
+            if !snapshot.range.is_total() {
+                sections.push(self.period_bar(snapshot, cx));
+            }
+            sections.extend(self.report(snapshot, size, cx));
+        } else {
+            sections.push(self.unavailable(cx));
+        }
+
         v_flex()
             .id("folio-stats")
-            // 外壳那扇回归门要按 id 认出这一屏画没画出来。非 `test-support` 构建里
-            // 这一层是透明的（`Observed` 原样转交内部元素），真机不多花一个节点。
             .test_support()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
-                // 滚动这一层归组件（与 `shelf::grid` 同一条理由）：它拿住 ScrollHandle、
-                // 把滚轴画在这块区域真正的边沿上。里面的那一层只负责居中。
                 div()
                     .id("stats-scroll")
                     .test_support()
@@ -167,190 +159,1341 @@ impl Render for StatsView {
                     .min_h_0()
                     .w_full()
                     .overflow_y_scrollbar()
-                    .child(v_flex().w_full().items_center().child(column)),
+                    .child(
+                        v_flex().w_full().items_center().child(
+                            v_flex()
+                                .w_full()
+                                .max_w(px(COLUMN_MAX))
+                                .px(px(GUTTER))
+                                .pt(px(8.0))
+                                .pb(px(GUTTER + tail))
+                                .gap(px(CARD_GAP))
+                                .children(sections),
+                        ),
+                    ),
             )
             .into_any_element()
     }
 }
 
 impl StatsView {
-    /// 一张图，上面一个说清窗口的眉标，下面图例与结论各一行。
-    ///
-    /// 交回 `AnyElement` 而不是 `impl IntoElement`：那个不透明类型会把 `cx` 的可变借用
-    /// 一直带在类型里，后面每一处 `cx.theme()` 都撞在它上面（旧版 `range_bar` 那处
-    /// 记过同一个坑）。
-    fn block(&self, map: &Heatmap, cell: f32, cx: &mut Context<Self>) -> AnyElement {
-        let fills = ramp(cx);
+    /// 顶上的区间开关。`TabBar` 负责选中块、滑动指示器与键盘焦点。
+    fn range_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let me = cx.entity().clone();
+        let mut bar = TabBar::new("stats-range-tabs")
+            .segmented()
+            .small()
+            .w_full()
+            .selected_index(self.range.index())
+            .on_click(move |index, _, cx| {
+                let range = Range::from_index(*index);
+                me.update(cx, |this, cx| this.select_range(range, cx));
+            });
+        for range in Range::ALL {
+            bar = bar.child(Tab::new().label(tr(cx, range.label_key())).flex_1());
+        }
+        div().w_full().child(bar).into_any_element()
+    }
+
+    /// 周期导航：`‹ 2026-10 ›`。当前周期及未来的人不往前翻。
+    fn period_bar(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let me = cx.entity().clone();
+        let can_forward = snapshot.end < snapshot.today;
+        let label = period_label(snapshot, cx);
         v_flex()
             .w_full()
-            .gap_2()
-            .pt_2()
-            .child(muted_label(tr(cx, "stats.window_year"), cx))
-            .child(grid(map, cell, &fills, cx))
-            .child(legend(&fills, cx))
-            .child(note(map, cx))
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .px(px(6.0))
+            .py(px(4.0))
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .child({
+                        let label = tr(cx, "stats.previous_period");
+                        Button::new("stats-period-prev")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ChevronLeft)
+                            .accessibility_label(label)
+                            .on_click(move |_, _, cx| {
+                                me.update(cx, |this, cx| this.shift(-1, cx));
+                            })
+                    })
+                    .child(div().text_lg().font_semibold().child(label))
+                    .child({
+                        let me = cx.entity().clone();
+                        let label = tr(cx, "stats.next_period");
+                        Button::new("stats-period-next")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ChevronRight)
+                            .disabled(!can_forward)
+                            .accessibility_label(label)
+                            .on_click(move |_, _, cx| {
+                                me.update(cx, |this, cx| this.shift(1, cx));
+                            })
+                    }),
+            )
             .into_any_element()
     }
 
-    /// 读不到书库。这一句与「还没有阅读记录」必须分得开：前者是这台设备上取不到数据源，
-    /// 后者是读者真的还没读 —— 并成一句「暂无数据」，读者会以为是自己把书读空了
-    /// （`components::empty_state` 顶上立的就是这条规矩）。
+    fn report(
+        &self,
+        snapshot: &Snapshot,
+        size: SizeClass,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        match snapshot.range {
+            Range::Total => self.total_report(snapshot, cx),
+            Range::Day => self.day_report(snapshot, cx),
+            Range::Week | Range::Month | Range::Year => self.period_report(snapshot, size, cx),
+        }
+    }
+
+    /// 「总」：相识天数、四个大数、最近 10/30 天、单次时长分布、时长排行。
+    fn total_report(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        vec![
+            self.since_first(snapshot, cx),
+            self.total_overview(snapshot, cx),
+            self.recent_area(snapshot, cx),
+            self.recent_grid(snapshot, cx),
+            self.session_histogram(snapshot, cx),
+            self.ranking(snapshot, 10, cx),
+        ]
+    }
+
+    /// 「日」：当日总览、效率指标、当日之最、当日书目。
+    fn day_report(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        vec![
+            self.day_overview(snapshot, cx),
+            self.efficiency(snapshot, cx),
+            self.day_best(snapshot, cx),
+            self.ranking(snapshot, 10, cx),
+        ]
+    }
+
+    /// 「周 / 月 / 年」：总览、时间分析、热力图、行为、毅力、排行；「年」多两块。
+    fn period_report(
+        &self,
+        snapshot: &Snapshot,
+        size: SizeClass,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        out.push(self.period_overview(snapshot, size, cx));
+        out.push(self.time_analysis(snapshot, cx));
+        out.push(match snapshot.range {
+            Range::Year => self.year_heatmap(snapshot, cx),
+            Range::Week => self.week_calendar(snapshot, cx),
+            _ => self.month_calendar(snapshot, cx),
+        });
+        if snapshot.range == Range::Year {
+            out.push(self.monthly_read(snapshot, cx));
+            out.push(self.hour_chart(snapshot, cx));
+            out.push(self.year_records(snapshot, cx));
+        }
+        out.push(self.behavior(snapshot, cx));
+        out.push(self.persistence(snapshot, cx));
+        out.push(self.ranking(snapshot, 10, cx));
+        out
+    }
+
     fn unavailable(&self, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .w_full()
-            .gap_1()
-            .pt_2()
-            .child(div().child(tr(cx, "stats.no_store")))
-            .child(muted_label(tr(cx, "stats.no_store_hint"), cx))
+        // 整屏的空状态交给 `Empty`：图标位、标题与说明的层次是它自己的事，
+        // 这一屏不再用一行 muted 字假装那里「本来就有内容」。
+        card_plain()
+            .child(
+                Empty::new().border_0().p(px(8.0)).header(
+                    EmptyHeader::new()
+                        .media(
+                            EmptyMedia::new().child(
+                                Icon::new(IconName::ChartColumn)
+                                    .large()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                        )
+                        .title(EmptyTitle::new().child(tr(cx, "stats.no_store")))
+                        .description(EmptyDescription::new().child(tr(cx, "stats.no_store_hint"))),
+                ),
+            )
             .into_any_element()
+    }
+
+    /// 「我们相识的第 N 天」。没有记录时说的是另一句话。
+    fn since_first(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let body: AnyElement = match snapshot.days_since_first() {
+            Some(days) => h_flex()
+                .w_full()
+                .items_baseline()
+                .gap_1()
+                .child(div().text_lg().text_color(cx.theme().foreground).child({
+                    // 「我们相识的第 %{days} 天」在九门语言里语序不同，整句交给词表。
+                    SharedString::from(tf(cx, "stats.since_first", &[("days", &days)]))
+                }))
+                .into_any_element(),
+            None => v_flex()
+                .gap_1()
+                .child(div().child(tr(cx, "stats.empty_period")))
+                .child(muted_label(tr(cx, "stats.start_reading"), cx))
+                .into_any_element(),
+        };
+        card_plain().child(body).into_any_element()
+    }
+
+    fn total_overview(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let cells = [
+            (
+                tr(cx, "stats.total_time"),
+                duration(cx, snapshot.lifetime_seconds),
+            ),
+            (
+                tr(cx, "stats.read_days"),
+                count_text(snapshot.lifetime_days, "stats.count_days", cx),
+            ),
+            (
+                tr(cx, "stats.books_read"),
+                count_text(snapshot.lifetime_books, "stats.count_books", cx),
+            ),
+            (
+                tr(cx, "stats.read_sessions"),
+                count_text(snapshot.lifetime_sessions, "stats.count_sessions", cx),
+            ),
+        ];
+        grid(2)
+            .w_full()
+            .children(cells.into_iter().map(|(label, value)| {
+                v_flex()
+                    .gap_1()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(muted_label(label, cx))
+                    .child(div().text_xl().font_semibold().child(value))
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    fn recent_area(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let points: Vec<ChartPoint> = snapshot
+            .recent_slice(10)
+            .iter()
+            .map(|day| ChartPoint {
+                label: weekday_label(day.day, cx),
+                value: day.seconds as f64 / 60.0,
+            })
+            .collect();
+        let max = points.iter().map(|p| p.value).fold(1.0_f64, f64::max);
+        let solid = cx.theme().chart_3;
+        let chart = AreaChart::new(points)
+            .x(|point| point.label.clone())
+            .y(|point| point.value as f32)
+            .stroke(solid)
+            .fill(area_gradient(solid))
+            .y_domain(0.0, max as f32 * 1.15)
+            .y_tick_count(3)
+            .tick_margin(0)
+            .x_tick_count(10)
+            .grid_dashed(true)
+            .id("stats-recent-area");
+        card(cx, tr(cx, "stats.recent_10"), tr(cx, "stats.daily_minutes"))
+            .child(div().w_full().h(px(170.0)).child(chart))
+            .child(muted_label(
+                SharedString::from(tf(
+                    cx,
+                    "stats.recent_note",
+                    &[(
+                        "total",
+                        &duration(
+                            cx,
+                            snapshot
+                                .recent_slice(10)
+                                .iter()
+                                .map(|d| d.seconds)
+                                .sum::<i64>(),
+                        )
+                        .to_string(),
+                    )],
+                )),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn recent_grid(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let fills = heat_ramp(cx);
+        let radius = cx.theme().radius_tokens().sm;
+        card(cx, tr(cx, "stats.recent_30"), tr(cx, "stats.daily_hours"))
+            .child(
+                grid(15)
+                    .w_full()
+                    .gap_1()
+                    .children(snapshot.recent.iter().map(|day| {
+                        div()
+                            .h(px(14.0))
+                            .rounded(radius)
+                            .bg(fills[heat_level(day.seconds)])
+                            .into_any_element()
+                    })),
+            )
+            .child(heat_legend(&fills, cx))
+            .into_any_element()
+    }
+
+    fn session_histogram(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let labels = [
+            tr(cx, "stats.session_under_5"),
+            tr(cx, "stats.session_5_15"),
+            tr(cx, "stats.session_15_30"),
+            tr(cx, "stats.session_30_60"),
+            tr(cx, "stats.session_over_60"),
+        ];
+        let points: Vec<ChartPoint> = snapshot
+            .session_hist
+            .iter()
+            .zip(labels)
+            .map(|(count, label)| ChartPoint {
+                label,
+                value: *count as f64,
+            })
+            .collect();
+        let solid = cx.theme().chart_3;
+        let chart = BarChart::new(points)
+            .band(|point| point.label.clone())
+            .value(|point| point.value as f32)
+            .fill(move |_, _, _, _| solid)
+            .label(|point| SharedString::from(format!("{}", point.value as i64)))
+            .label_axis(true)
+            .value_axis(false)
+            .grid(false)
+            .band_tick_count(5)
+            .corner_radii(bar_caps())
+            .id("stats-session-hist");
+        let body = if snapshot.lifetime_sessions == 0 {
+            empty_inline(tr(cx, "stats.empty_period"), cx)
+        } else {
+            div().w_full().h(px(150.0)).child(chart).into_any_element()
+        };
+        card(
+            cx,
+            tr(cx, "stats.session_rhythm"),
+            tr(cx, "stats.session_rhythm_hint"),
+        )
+        .child(body)
+        .into_any_element()
+    }
+
+    fn day_overview(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let headline: AnyElement = if snapshot.is_empty() {
+            div()
+                .text_3xl()
+                .font_semibold()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr(cx, "stats.no_reading_day"))
+                .into_any_element()
+        } else {
+            div()
+                .text_3xl()
+                .font_semibold()
+                .child(duration(cx, snapshot.seconds))
+                .into_any_element()
+        };
+        let cells = [
+            (
+                tr(cx, "stats.day_books"),
+                count_text(snapshot.books, "stats.count_books", cx),
+            ),
+            (
+                tr(cx, "stats.day_sessions"),
+                count_text(snapshot.sessions, "stats.count_sessions", cx),
+            ),
+            (
+                tr(cx, "stats.day_longest"),
+                snapshot
+                    .longest_session
+                    .as_ref()
+                    .map(|moment| duration(cx, moment.seconds))
+                    .unwrap_or_else(|| SharedString::from("—")),
+            ),
+        ];
+        card(cx, tr(cx, "stats.day_overview"), SharedString::default())
+            .child(v_flex().items_center().w_full().gap_1().child(headline))
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_around()
+                    .children(cells.into_iter().map(|(label, value)| {
+                        v_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().text_lg().font_semibold().child(value))
+                            .child(muted_label(label, cx))
+                            .into_any_element()
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn efficiency(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let cells = [
+            (
+                tr(cx, "stats.avg_session"),
+                duration(cx, snapshot.average_session()),
+                tr(cx, "stats.per_session"),
+            ),
+            (
+                tr(cx, "stats.day_longest"),
+                snapshot
+                    .longest_session
+                    .as_ref()
+                    .map(|moment| duration(cx, moment.seconds))
+                    .unwrap_or_else(|| SharedString::from("—")),
+                tr(cx, "stats.per_session"),
+            ),
+            (
+                tr(cx, "stats.first_open"),
+                snapshot
+                    .earliest
+                    .as_ref()
+                    .map(|moment| clock_label(moment.at))
+                    .unwrap_or_else(|| SharedString::from("—")),
+                tr(cx, "stats.first_session"),
+            ),
+            (
+                tr(cx, "stats.last_open"),
+                snapshot
+                    .latest
+                    .as_ref()
+                    .map(|moment| clock_label(moment.at))
+                    .unwrap_or_else(|| SharedString::from("—")),
+                tr(cx, "stats.last_session"),
+            ),
+        ];
+        card(
+            cx,
+            tr(cx, "stats.efficiency"),
+            tr(cx, "stats.efficiency_hint"),
+        )
+        .child(
+            grid(2)
+                .w_full()
+                .gap_2()
+                .children(cells.into_iter().map(|(label, value, hint)| {
+                    v_flex()
+                        .gap_1()
+                        .p_3()
+                        .rounded(cx.theme().radius_tokens().md)
+                        .bg(cx.theme().muted)
+                        .child(muted_label(label, cx))
+                        .child(div().text_xl().font_semibold().child(value))
+                        .child(muted_label(hint, cx))
+                        .into_any_element()
+                })),
+        )
+        .into_any_element()
+    }
+
+    fn day_best(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let rows = [
+            (
+                tr(cx, "stats.most_time"),
+                snapshot.top_book().map(|book| {
+                    (
+                        SharedString::from(book.title.clone()),
+                        duration(cx, book.seconds),
+                    )
+                }),
+            ),
+            (
+                tr(cx, "stats.most_sessions"),
+                snapshot.most_sessions_book().map(|book| {
+                    (
+                        SharedString::from(book.title.clone()),
+                        count_text(book.sessions, "stats.count_sessions", cx),
+                    )
+                }),
+            ),
+        ];
+        card(cx, tr(cx, "stats.day_best"), tr(cx, "stats.day_best_hint"))
+            .child(report_rows(
+                rows.into_iter().map(|(label, value)| {
+                    let (detail, right): (SharedString, SharedString) = value
+                        .unwrap_or_else(|| (tr(cx, "stats.empty_period"), SharedString::from("—")));
+                    (label, detail, right)
+                }),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn period_overview(
+        &self,
+        snapshot: &Snapshot,
+        size: SizeClass,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cells = [
+            (
+                IconName::Clock,
+                duration(cx, snapshot.seconds),
+                tr(cx, "stats.total_time"),
+            ),
+            (
+                IconName::BookOpen,
+                count_text(snapshot.books, "stats.count_books", cx),
+                tr(cx, "stats.books_read"),
+            ),
+            (
+                IconName::Activity,
+                count_text(snapshot.sessions, "stats.count_sessions", cx),
+                tr(cx, "stats.read_sessions"),
+            ),
+            (
+                IconName::CalendarDays,
+                count_text(snapshot.active_days, "stats.count_days", cx),
+                tr(cx, "stats.read_days"),
+            ),
+            (
+                IconName::Timer,
+                duration(cx, snapshot.average_active_day()),
+                tr(cx, "stats.avg_duration"),
+            ),
+            (
+                IconName::Flame,
+                count_text(snapshot.longest_streak, "stats.count_days", cx),
+                tr(cx, "stats.longest_streak"),
+            ),
+        ];
+        let columns = if size == SizeClass::Expanded { 3 } else { 2 };
+        card(
+            cx,
+            SharedString::from(tf(
+                cx,
+                "stats.overview",
+                &[("range", &tr(cx, snapshot.range.label_key()))],
+            )),
+            tr(cx, "stats.overview_hint"),
+        )
+        .child(
+            grid(columns)
+                .w_full()
+                .gap_3()
+                .children(cells.into_iter().map(|(icon, value, label)| {
+                    v_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(icon)
+                                .small()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(div().text_xl().font_semibold().child(value))
+                        .child(muted_label(label, cx))
+                        .into_any_element()
+                })),
+        )
+        .into_any_element()
+    }
+
+    fn time_analysis(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let leads = [
+            (
+                duration(cx, snapshot.average_active_day()),
+                tr(cx, "stats.avg_duration"),
+            ),
+            (
+                SharedString::from(format!("{:.1}", snapshot.average_books_per_active_day())),
+                tr(cx, "stats.avg_books"),
+            ),
+        ];
+        card(
+            cx,
+            tr(cx, "stats.time_analysis"),
+            tr(cx, "stats.time_analysis_hint"),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .py_2()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .gap_1()
+                        .child(div().text_xl().font_semibold().child(leads[0].0.clone()))
+                        .child(muted_label(leads[0].1.clone(), cx)),
+                )
+                .child(div().w(px(1.0)).h(px(44.0)).bg(cx.theme().border))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .gap_1()
+                        .child(div().text_xl().font_semibold().child(leads[1].0.clone()))
+                        .child(muted_label(leads[1].1.clone(), cx)),
+                ),
+        )
+        .child(
+            grid(2).w_full().gap_2().children(
+                snapshot
+                    .buckets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, bucket)| bucket_card(index, bucket, cx)),
+            ),
+        )
+        .into_any_element()
+    }
+
+    fn month_calendar(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let fills = heat_ramp(cx);
+        let radius = cx.theme().radius_tokens().sm;
+        let offset = snapshot
+            .days
+            .first()
+            .map_or(0, |day| folio_core::weekday_monday0(day.day));
+        let mut slots: Vec<AnyElement> = Vec::new();
+        for _ in 0..offset {
+            slots.push(div().h(px(48.0)).into_any_element());
+        }
+        for day in &snapshot.days {
+            slots.push(calendar_cell(day, &fills, radius, cx));
+        }
+        while !slots.len().is_multiple_of(7) {
+            slots.push(div().h(px(48.0)).into_any_element());
+        }
+        card(cx, tr(cx, "stats.activity"), tr(cx, "stats.activity_hint"))
+            .child(grid(7).w_full().gap_1().children((0..7).map(|index| {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(weekday_name(index, cx))
+                    .into_any_element()
+            })))
+            // 外壳那些回归门按这个名字问「热力图那一块画没画出来」。
+            .child(
+                grid(7)
+                    .id("stats-heatmap")
+                    .test_support()
+                    .w_full()
+                    .gap_1()
+                    .children(slots),
+            )
+            .child(heat_legend(&fills, cx))
+            .into_any_element()
+    }
+
+    fn week_calendar(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let fills = heat_ramp(cx);
+        let radius = cx.theme().radius_tokens().sm;
+        card(cx, tr(cx, "stats.activity"), tr(cx, "stats.activity_hint"))
+            .child(grid(7).w_full().gap_1().children((0..7).map(|index| {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(weekday_name(index, cx))
+                    .into_any_element()
+            })))
+            .child(
+                grid(7)
+                    .id("stats-heatmap")
+                    .test_support()
+                    .w_full()
+                    .gap_1()
+                    .children(
+                        snapshot
+                            .days
+                            .iter()
+                            .map(|day| calendar_cell(day, &fills, radius, cx)),
+                    ),
+            )
+            .child(heat_legend(&fills, cx))
+            .into_any_element()
+    }
+
+    fn year_heatmap(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let fills = heat_ramp(cx);
+        let radius = cx.theme().radius_tokens().sm;
+        let year = folio_core::civil_from_days(snapshot.anchor).year;
+        let mut months: [[i64; 31]; 12] = [[0; 31]; 12];
+        for day in &snapshot.days {
+            let date = folio_core::civil_from_days(day.day);
+            let month = (date.month as usize).clamp(1, 12) - 1;
+            let index = (date.day as usize).clamp(1, 31) - 1;
+            months[month][index] = day.seconds;
+        }
+        let lengths: Vec<u32> = (1..=12)
+            .map(|month| folio_core::days_in_month(year, month))
+            .collect();
+        card(
+            cx,
+            tr(cx, "stats.year_activity"),
+            tr(cx, "stats.activity_hint"),
+        )
+        .child(
+            v_flex()
+                .id("stats-heatmap")
+                .test_support()
+                .w_full()
+                .gap(px(3.0))
+                .children(months.iter().enumerate().map(|(month, days)| {
+                    let length = lengths[month] as usize;
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(30.0))
+                                .flex_none()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(tf(
+                                    cx,
+                                    "stats.month_short",
+                                    &[("month", &(month + 1))],
+                                ))),
+                        )
+                        .child(grid(31).flex_1().min_w_0().gap(px(2.0)).children(
+                            days.iter().enumerate().map(|(index, seconds)| {
+                                // 小月的第 31 格不是「没读」，是这一天不存在。
+                                let fill = if index < length {
+                                    fills[heat_level(*seconds)]
+                                } else {
+                                    cx.theme().transparent
+                                };
+                                div().h(px(8.0)).rounded(radius).bg(fill).into_any_element()
+                            }),
+                        ))
+                        .into_any_element()
+                })),
+        )
+        .child(heat_legend(&fills, cx))
+        .into_any_element()
+    }
+
+    /// 十二个月的柱状图。
+    ///
+    /// 与「单次时长」「24 小时」那两张共用 `BarChart`：轴、网格、柱宽与入场动画都交给
+    /// 组件，这里只把每个月折成分钟数。空月份就是一根 0 高的柱子 —— 留一块灰底反而要
+    /// 读者去分辨「这个月没读」与「这个月的数据没取到」。
+    fn monthly_read(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let mut totals = [0i64; 12];
+        for day in &snapshot.days {
+            let month = folio_core::civil_from_days(day.day).month as usize;
+            totals[month.clamp(1, 12) - 1] += day.seconds;
+        }
+        let points: Vec<ChartPoint> = totals
+            .iter()
+            .enumerate()
+            .map(|(index, seconds)| ChartPoint {
+                label: SharedString::from((index + 1).to_string()),
+                value: *seconds as f64 / 60.0,
+            })
+            .collect();
+        let solid = cx.theme().chart_3;
+        let chart = BarChart::new(points)
+            .band(|point| point.label.clone())
+            .value(|point| point.value as f32)
+            .fill(move |_, _, _, _| solid)
+            .value_axis(false)
+            .grid(false)
+            .band_tick_count(12)
+            .corner_radii(bar_caps())
+            .id("stats-monthly-chart");
+        card(
+            cx,
+            tr(cx, "stats.monthly_reading"),
+            tr(cx, "stats.monthly_reading_hint"),
+        )
+        .child(div().w_full().h(px(150.0)).child(chart))
+        .into_any_element()
+    }
+
+    fn hour_chart(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let points: Vec<ChartPoint> = snapshot
+            .hours
+            .iter()
+            .enumerate()
+            .map(|(hour, seconds)| ChartPoint {
+                label: SharedString::from(format!("{hour:02}")),
+                value: *seconds as f64 / 60.0,
+            })
+            .collect();
+        let solid = cx.theme().chart_3;
+        let chart = BarChart::new(points)
+            .band(|point| point.label.clone())
+            .value(|point| point.value as f32)
+            .fill(move |_, _, _, _| solid)
+            .value_axis(false)
+            .grid(false)
+            .band_tick_count(8)
+            .corner_radii(bar_caps())
+            .id("stats-hour-chart");
+        let body = if snapshot.seconds == 0 {
+            empty_inline(tr(cx, "stats.empty_period"), cx)
+        } else {
+            div().w_full().h(px(150.0)).child(chart).into_any_element()
+        };
+        card(cx, tr(cx, "stats.hourly"), tr(cx, "stats.hourly_hint"))
+            .child(body)
+            .into_any_element()
+    }
+
+    fn behavior(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let rows = [
+            (
+                tr(cx, "stats.most_engaged"),
+                snapshot.top_book().map(|book| {
+                    (
+                        SharedString::from(book.title.clone()),
+                        duration(cx, book.seconds),
+                    )
+                }),
+            ),
+            (
+                tr(cx, "stats.busiest_day"),
+                snapshot.busiest_day.as_ref().map(|day| {
+                    (
+                        short_date(day.day),
+                        count_text(day.books, "stats.count_books", cx),
+                    )
+                }),
+            ),
+            (
+                tr(cx, "stats.longest_companion"),
+                snapshot.most_days_book().map(|book| {
+                    (
+                        SharedString::from(book.title.clone()),
+                        count_text(book.days, "stats.count_days", cx),
+                    )
+                }),
+            ),
+        ];
+        card(cx, tr(cx, "stats.behavior"), tr(cx, "stats.behavior_hint"))
+            .child(report_rows(
+                rows.into_iter().map(|(label, value)| {
+                    let (detail, right) = value
+                        .unwrap_or_else(|| (tr(cx, "stats.empty_period"), SharedString::from("—")));
+                    (label, detail, right)
+                }),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn persistence(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let streak_detail = snapshot
+            .longest_run
+            .map(|(start, end)| {
+                SharedString::from(format!("{} ~ {}", short_date(start), short_date(end)))
+            })
+            .unwrap_or_else(|| SharedString::from("—"));
+        let today_in_window = snapshot.start <= snapshot.today && snapshot.today <= snapshot.end;
+        let rows = [
+            (
+                tr(cx, "stats.longest_streak"),
+                (
+                    streak_detail,
+                    count_text(snapshot.longest_streak, "stats.count_days", cx),
+                ),
+            ),
+            (
+                tr(cx, "stats.current_streak"),
+                (
+                    SharedString::default(),
+                    if today_in_window {
+                        count_text(snapshot.current_streak, "stats.count_days", cx)
+                    } else {
+                        SharedString::from("—")
+                    },
+                ),
+            ),
+            (
+                tr(cx, "stats.best_day"),
+                snapshot
+                    .best_day
+                    .as_ref()
+                    .map(|day| (short_date(day.day), duration(cx, day.seconds)))
+                    .unwrap_or_else(|| (SharedString::from("—"), SharedString::from("—"))),
+            ),
+        ];
+        card(
+            cx,
+            tr(cx, "stats.persistence"),
+            tr(cx, "stats.persistence_hint"),
+        )
+        .child(report_rows(
+            rows.into_iter()
+                .map(|(label, (detail, right))| (label, detail, right)),
+            cx,
+        ))
+        .into_any_element()
+    }
+
+    fn year_records(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let rows = [
+            (
+                tr(cx, "stats.most_readable_day"),
+                snapshot
+                    .best_day
+                    .as_ref()
+                    .map(|day| (short_date(day.day), duration(cx, day.seconds))),
+            ),
+            (
+                tr(cx, "stats.most_varied_day"),
+                snapshot.busiest_day.as_ref().map(|day| {
+                    (
+                        short_date(day.day),
+                        count_text(day.books, "stats.count_books", cx),
+                    )
+                }),
+            ),
+        ];
+        card(
+            cx,
+            tr(cx, "stats.year_records"),
+            tr(cx, "stats.year_records_hint"),
+        )
+        .child(report_rows(
+            rows.into_iter().map(|(label, value)| {
+                let (detail, right) =
+                    value.unwrap_or_else(|| (SharedString::from("—"), SharedString::from("—")));
+                (label, detail, right)
+            }),
+            cx,
+        ))
+        .into_any_element()
+    }
+
+    /// 排行榜：按时长取前 `limit` 本，超出时在末尾补一句还差几本。
+    ///
+    /// 三列交给 `Table`（名次 / 书名 / 时长），行分隔线、单元格内边距与右侧对齐都由
+    /// 组件给。前三名的浅色底保留 —— 但名次仍然由数字说，颜色只是第二层。
+    fn ranking(&self, snapshot: &Snapshot, limit: usize, cx: &mut Context<Self>) -> AnyElement {
+        let card = card(cx, tr(cx, "stats.ranking"), tr(cx, "stats.ranking_hint"));
+        if snapshot.book_stats.is_empty() {
+            return card
+                .child(empty_inline(tr(cx, "stats.empty_period"), cx))
+                .into_any_element();
+        }
+        let mut body = TableBody::new();
+        for (index, book) in snapshot.book_stats.iter().take(limit).enumerate() {
+            // 前三名给一层很浅的图表色，名次仍由数字说 —— 不许只靠颜色传义。
+            let (badge, ink) = if index < 3 {
+                (cx.theme().chart_3.opacity(0.16), cx.theme().foreground)
+            } else {
+                (cx.theme().muted, cx.theme().muted_foreground)
+            };
+            body = body.child(
+                TableRow::new()
+                    .child(
+                        TableCell::new().child(
+                            div()
+                                .size(px(24.0))
+                                .rounded(cx.theme().radius_tokens().full)
+                                .bg(badge)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                .text_color(ink)
+                                .child((index + 1).to_string()),
+                        ),
+                    )
+                    .child(
+                        TableCell::new().col_span(5).child(
+                            v_flex()
+                                .min_w_0()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_semibold()
+                                        .line_clamp(2)
+                                        .child(book.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .truncate()
+                                        .child(SharedString::from(format!(
+                                            "{} · {}",
+                                            tf(cx, "stats.book_days", &[("days", &book.days)]),
+                                            tf(
+                                                cx,
+                                                "stats.book_sessions",
+                                                &[("sessions", &book.sessions)]
+                                            ),
+                                        ))),
+                                ),
+                        ),
+                    )
+                    .child(
+                        TableCell::new()
+                            .col_span(3)
+                            .text_right()
+                            .child(div().font_semibold().child(duration(cx, book.seconds))),
+                    ),
+            );
+        }
+        let more = snapshot.book_stats.len().saturating_sub(limit);
+        card.child(
+            Table::new()
+                .accessibility_label(tr(cx, "stats.ranking"))
+                .child(body)
+                .when(more > 0, |table| {
+                    table.child(TableCaption::new().child(SharedString::from(tf(
+                        cx,
+                        "stats.ranking_more",
+                        &[("count", &more)],
+                    ))))
+                }),
+        )
+        .into_any_element()
     }
 }
 
-/// 网格本体：左边那列车标固定不动，右边那 53 列放不下时横向滚。
+/// 一张卡片：`GroupBox` 的描边变体，标题槽里是「粗体标题 + 可选副题」。
 ///
-/// 月标签用**绝对定位**摆在同一根 pitch 上，而不是排成一行 div：一列只有十来像素，
-/// 标签比那一格宽就会被自己的车道切掉；而 `left = 列号 × pitch` 与下面那些格子是同一个
-/// 算式 —— 对齐因此是算出来的，不是碰巧排上的。
-fn grid(map: &Heatmap, cell: f32, fills: &[Hsla; 5], cx: &App) -> AnyElement {
-    let pitch = cell + CELL_GAP;
-    let radius = cx.theme().radius_tokens().sm;
-    let labels = map.months.iter().map(|label| {
+/// 容器本身（圆角、内边距、标题与内容之间的间距、描边）交给组件，这一屏不再自己拼
+/// 「一张带边框的 v_flex + 一段标题」。标题的字重仍由这里给：`GroupBox` 的标题槽
+/// 默认是 muted 小字，而统计每一块要的是一个说得清「这块是什么」的标题。
+fn card(cx: &App, title: SharedString, hint: SharedString) -> GroupBox {
+    let mut head = v_flex().gap_1().child(
         div()
-            .absolute()
-            .top_0()
-            .left(px(label.column as f32 * pitch))
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(month_label(label.month, label.year, cx))
-            .into_any_element()
-    });
-    let rows = (0..ROWS).map(|row| {
-        h_flex()
-            .gap(px(CELL_GAP))
-            .children(
-                map.columns
-                    .iter()
-                    .map(|column| cell_box(&column[row], cell, radius, fills)),
-            )
-            .into_any_element()
-    });
-    h_flex()
-        .id("stats-heatmap")
-        // 外壳那扇回归门按这个 id 认「图真的画出来了」，而不只是「那一屏的根在」。
-        .test_support()
-        .w_full()
-        .items_start()
-        .gap_2()
-        .child(row_labels(cell, cx))
+            .text_base()
+            .font_semibold()
+            .text_color(cx.theme().foreground)
+            .child(title),
+    );
+    if !hint.is_empty() {
+        head = head.child(muted_label(hint, cx));
+    }
+    GroupBox::new()
+        .with_variant(GroupBoxVariant::Outline)
+        .title(head)
+}
+
+/// 没有标题的卡片（「我们相识的第 N 天」那一张本来就是一句话）。
+fn card_plain() -> GroupBox {
+    GroupBox::new().with_variant(GroupBoxVariant::Outline)
+}
+
+/// 卡内「这一段没有数据」：`Empty` 去掉虚线边、收紧内边距，高度与原来那一句持平。
+fn empty_inline(text: SharedString, cx: &App) -> AnyElement {
+    Empty::new()
+        .border_0()
+        .p(px(12.0))
         .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(div().relative().w_full().h(px(MONTH_LANE)).children(labels))
-                .child(
-                    div().w_full().overflow_x_scrollbar().child(
-                        v_flex().gap(px(CELL_GAP)).child(
-                            // 内容宽度按 53 列的 pitch 给死：横向滚的那一层要知道自己
-                            // 比窗口宽，而 `w_full` 在这里只会跟着窗口走。
-                            div()
-                                .w(px(map.columns.len() as f32 * pitch - CELL_GAP))
-                                .flex()
-                                .flex_col()
-                                .gap(px(CELL_GAP))
-                                .children(rows),
-                        ),
-                    ),
-                ),
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(text),
         )
         .into_any_element()
 }
 
-/// 一格。窗口外的那几格不画底色：它们是补来对齐星期几的，不是数据。
-fn cell_box(
-    cell: &super::model::heatmap::Cell,
-    size: f32,
-    radius: Pixels,
-    fills: &[Hsla; 5],
+/// 一块「报表行」：标签 / 明细 / 读数。
+///
+/// 用 `DescriptionList` 的描边排列替掉原先每条一张 muted 小卡：行与行之间由组件自己的
+/// 分隔线分开，标签列宽固定，读数在右端对齐 —— 三块读数的「账」看上去才是一张表。
+fn report_rows(
+    rows: impl IntoIterator<Item = (SharedString, SharedString, SharedString)>,
+    cx: &App,
 ) -> AnyElement {
-    let slot = div().size(px(size)).rounded(radius);
-    if cell.filled {
-        slot.bg(fills[cell.level.min(4)]).into_any_element()
+    let items: Vec<DescriptionItem> = rows
+        .into_iter()
+        .map(|(label, detail, right)| {
+            let value = h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(detail),
+                )
+                .child(div().flex_none().font_semibold().child(right));
+            DescriptionItem::new(label).value(value.into_any_element())
+        })
+        .collect();
+    DescriptionList::new()
+        .bordered(true)
+        .label_width(px(96.0))
+        .small()
+        .children(items)
+        .into_any_element()
+}
+
+/// 日历里的一格：日期在上、时长在下。没有读的那天只留日期与 0，不画色块。
+fn calendar_cell(
+    day: &DayStat,
+    fills: &[gpui_kit::Hsla; 5],
+    radius: gpui_kit::Pixels,
+    cx: &App,
+) -> AnyElement {
+    let level = heat_level(day.seconds);
+    let muted = cx.theme().muted_foreground;
+    // 深档是实色块，字要取与背景相反的那一档；浅档仍用次要文字色。
+    let ink = if level >= 3 {
+        cx.theme().background
     } else {
-        slot.into_any_element()
+        muted
+    };
+    v_flex()
+        .h(px(48.0))
+        .justify_between()
+        .p(px(6.0))
+        .rounded(radius)
+        .bg(fills[level])
+        .child(
+            div()
+                .text_xs()
+                .text_color(ink)
+                .child(folio_core::civil_from_days(day.day).day.to_string()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(ink)
+                .child(hours_text(day.seconds)),
+        )
+        .into_any_element()
+}
+
+fn bucket_card(index: usize, bucket: &Bucket, cx: &App) -> AnyElement {
+    let label = match index {
+        0 => tr(cx, "stats.bucket_night"),
+        1 => tr(cx, "stats.bucket_morning"),
+        2 => tr(cx, "stats.bucket_afternoon"),
+        _ => tr(cx, "stats.bucket_evening"),
+    };
+    let mut body = v_flex()
+        .gap_1()
+        .p_3()
+        .rounded(cx.theme().radius_tokens().md)
+        .bg(cx.theme().muted)
+        .child(muted_label(label, cx))
+        .child(
+            div()
+                .text_sm()
+                .font_semibold()
+                .child(duration(cx, bucket.seconds)),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(count_text(bucket.books, "stats.count_books", cx)),
+        );
+    if let Some(book) = &bucket.top {
+        body = body
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr(cx, "stats.most_time")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .truncate()
+                    .child(book.title.clone()),
+            );
+    }
+    body.into_any_element()
+}
+
+fn heat_legend(fills: &[gpui_kit::Hsla; 5], cx: &App) -> AnyElement {
+    let radius = cx.theme().radius_tokens().sm;
+    let labels = [
+        tr(cx, "stats.unread"),
+        tr(cx, "stats.level_under_30"),
+        tr(cx, "stats.level_30_60"),
+        tr(cx, "stats.level_1_3h"),
+        tr(cx, "stats.level_over_3h"),
+    ];
+    h_flex()
+        .w_full()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .children(fills.iter().zip(labels).map(|(fill, label)| {
+            h_flex()
+                .items_center()
+                .gap_1()
+                .child(div().size(px(10.0)).rounded(radius).bg(*fill))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label),
+                )
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
+fn count_text(count: usize, key: &str, cx: &App) -> SharedString {
+    SharedString::from(tf(cx, key, &[("count", &count)]))
+}
+
+fn weekday_name(index: usize, cx: &App) -> SharedString {
+    let key = match index {
+        0 => "stats.weekday_mon",
+        1 => "stats.weekday_tue",
+        2 => "stats.weekday_wed",
+        3 => "stats.weekday_thu",
+        4 => "stats.weekday_fri",
+        5 => "stats.weekday_sat",
+        _ => "stats.weekday_sun",
+    };
+    tr(cx, key)
+}
+
+fn weekday_label(day: i64, cx: &App) -> SharedString {
+    weekday_name(folio_core::weekday_monday0(day), cx)
+}
+
+fn short_date(day: i64) -> SharedString {
+    let date = folio_core::civil_from_days(day);
+    SharedString::from(format!("{:02}-{:02}", date.month, date.day))
+}
+
+fn period_label(snapshot: &Snapshot, cx: &App) -> SharedString {
+    let date = folio_core::civil_from_days(snapshot.anchor);
+    match snapshot.range {
+        Range::Day => SharedString::from(folio_core::civil_date(snapshot.anchor)),
+        Range::Week => {
+            let from = folio_core::civil_from_days(snapshot.start);
+            let to = folio_core::civil_from_days(snapshot.end);
+            SharedString::from(tf(
+                cx,
+                "stats.week_range",
+                &[
+                    ("from", &format!("{:02}-{:02}", from.month, from.day)),
+                    ("to", &format!("{:02}-{:02}", to.month, to.day)),
+                ],
+            ))
+        }
+        Range::Month => SharedString::from(tf(
+            cx,
+            "stats.period_month",
+            &[
+                ("year", &date.year),
+                ("month", &format!("{:02}", date.month)),
+            ],
+        )),
+        Range::Year => SharedString::from(tf(cx, "stats.period_year", &[("year", &date.year)])),
+        Range::Total => SharedString::default(),
     }
 }
 
-/// 左边那列车标。行高与格子的 pitch 对齐（`cell + CELL_GAP`），否则第三行的字会
-/// 慢慢爬到第四行的格子身上。
-fn row_labels(cell: f32, cx: &App) -> AnyElement {
-    v_flex()
-        .w(px(LABEL_LANE))
-        .pt(px(MONTH_LANE))
-        .gap(px(CELL_GAP))
-        .children((0..ROWS).map(|row| {
-            let key = ROW_LABELS
-                .iter()
-                .find(|(at, _)| *at == row)
-                .map(|(_, key)| *key);
-            div()
-                .flex()
-                .items_center()
-                .h(px(cell + CELL_GAP))
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(key.map(|key| tr(cx, key)).unwrap_or_default())
-                .into_any_element()
-        }))
-        .into_any_element()
+fn clock_label(unix_secs: i64) -> SharedString {
+    let tz = crate::ui::host::local_offset_secs();
+    let local = (unix_secs + tz).rem_euclid(86_400);
+    SharedString::from(format!("{:02}:{:02}", local / 3_600, local % 3_600 / 60))
 }
 
-/// 图例：五档方块 + 两端那两个字，右对齐（它是图的注，不是一行内容）。
-///
-/// 摆「少 / 多」而不是给每档写一个分钟数：五档各带一个数会把这一行变成第二张图，
-/// 而读者要问的只是「深的比浅的多」。真正那个数在结论那一行里。
-fn legend(fills: &[Hsla; 5], cx: &App) -> AnyElement {
-    let radius = cx.theme().radius_tokens().sm;
-    h_flex()
-        .w_full()
-        .justify_end()
-        .items_center()
-        .gap_1()
-        .child(muted_label(tr(cx, "stats.legend_less"), cx))
-        .children(fills.iter().map(|color| {
-            div()
-                .size(px(CELL_MAX))
-                .rounded(radius)
-                .bg(*color)
-                .into_any_element()
-        }))
-        .child(muted_label(tr(cx, "stats.legend_more"), cx))
-        .into_any_element()
-}
-
-/// 图下面那一句结论。全零时说的是另一句话。
-fn note(map: &Heatmap, cx: &App) -> AnyElement {
-    let text = if map.is_empty() {
-        tr(cx, "stats.none_yet")
+/// 热度分档。分界是绝对值而不是分位数：同一格深浅不随读者的习惯漂。
+fn heat_level(seconds: i64) -> usize {
+    if seconds <= 0 {
+        0
+    } else if seconds < HEAT_STEPS[0] {
+        1
+    } else if seconds < HEAT_STEPS[1] {
+        2
+    } else if seconds < HEAT_STEPS[2] {
+        3
     } else {
-        SharedString::from(tf(
-            cx,
-            "stats.heatmap_note",
-            &[
-                ("days", &map.active_days),
-                ("total", &duration(cx, map.seconds).to_string()),
-                ("streak", &map.longest_streak),
-            ],
-        ))
-    };
-    muted_label(text, cx).into_any_element()
+        4
+    }
 }
 
-/// 月标签的文字。一月那一列报**年**而不是报「1 月」：这张图横看一年，跨年处最容易
-/// 读错的正是「这是哪一年」。
-fn month_label(month: i32, year: i32, cx: &App) -> SharedString {
-    if month == 1 {
-        SharedString::from(year.to_string())
+fn heat_ramp(cx: &App) -> [gpui_kit::Hsla; 5] {
+    let solid = cx.theme().chart_3;
+    [
+        cx.theme().muted,
+        solid.opacity(0.18),
+        solid.opacity(0.38),
+        solid.opacity(0.62),
+        solid,
+    ]
+}
+
+fn hours_text(seconds: i64) -> String {
+    if seconds <= 0 {
+        "0h".to_string()
+    } else if seconds < 3_600 {
+        format!("{}m", (seconds / 60).max(1))
     } else {
-        SharedString::from(tf(cx, "stats.month", &[("month", &month)]))
+        format!("{:.1}h", seconds as f64 / 3_600.0)
+    }
+}
+
+fn area_gradient(color: gpui_kit::Hsla) -> Background {
+    linear_gradient(
+        0.,
+        linear_color_stop(color.opacity(0.45), 1.),
+        linear_color_stop(color.opacity(0.), 0.),
+    )
+}
+
+fn bar_caps() -> gpui_kit::Corners<gpui_kit::Pixels> {
+    gpui_kit::Corners {
+        top_left: px(4.0),
+        top_right: px(4.0),
+        bottom_left: px(0.0),
+        bottom_right: px(0.0),
+    }
+}
+
+fn grid(columns: usize) -> gpui_kit::Div {
+    div().grid().grid_cols(columns as u16)
+}
+
+/// 图表要的数据点：标签与值。图表的闭包要 `'static`，所以标签在进图之前就拼好。
+struct ChartPoint {
+    label: SharedString,
+    value: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{heat_level, hours_text};
+
+    /// 五档的分界就是图例上那几句话；改档位时图例必须跟着改，所以钉在这里。
+    #[test]
+    fn the_heat_levels_match_the_legend() {
+        assert_eq!(heat_level(0), 0, "没读");
+        assert_eq!(heat_level(1), 1, "读了一秒也算 <30m");
+        assert_eq!(heat_level(1_799), 1);
+        assert_eq!(heat_level(1_800), 2, "30 分钟");
+        assert_eq!(heat_level(3_599), 2);
+        assert_eq!(heat_level(3_600), 3, "1 小时");
+        assert_eq!(heat_level(10_799), 3);
+        assert_eq!(heat_level(10_800), 4, "3 小时");
+    }
+
+    /// 格子里的时长要短到塞得进一格，同时不能把「读了几分钟」读成 0。
+    #[test]
+    fn the_cell_reading_stays_short_and_never_rounds_to_zero() {
+        assert_eq!(hours_text(0), "0h");
+        assert_eq!(hours_text(59), "1m", "不足一分钟也要说 1 分钟，不能是 0");
+        assert_eq!(hours_text(600), "10m");
+        assert_eq!(hours_text(3_600), "1.0h");
+        assert_eq!(hours_text(5_400), "1.5h");
     }
 }

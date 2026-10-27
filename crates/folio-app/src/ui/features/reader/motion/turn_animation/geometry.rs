@@ -100,6 +100,15 @@ pub(in crate::ui::features::reader) struct Area {
     pub top: f32,
     pub right: f32,
     pub bottom: f32,
+    /// 这一块是不是双页里的那一张 leaf —— 也就是**书脊那一侧还有另一半可落**。
+    ///
+    /// 只有折页那一档读它，读的是落点：单页那张纸翻完要**出画**，所以点屏 / 按键那一趟把轴推到
+    /// 书脊之外一个卷径才收工（`curl.rs` 里 `tap_roll` 的第 3 条）；双页那张纸翻完
+    /// 是**平摊在另一半页上**，绕着自己的书脊边转过去，落点就是书脊本身。两档差 `2 × ROLL × 页宽`
+    /// —— 页宽 640 时是 179 逻辑像素，单页上那一段落在画外看不出来，双页上就摆在读者眼前。
+    ///
+    /// 由 [`Self::leaf`] 打上：[`Area::new`] 给的那一块永远是 `false`。
+    pub spread_leaf: bool,
 }
 
 impl Area {
@@ -114,6 +123,7 @@ impl Area {
             top,
             right,
             bottom,
+            spread_leaf: false,
         }
     }
 
@@ -127,12 +137,18 @@ impl Area {
 
     /// 双页里靠右/靠左的那半张纸。书脊落在整屏中线；`right = true` 时自由边在右，
     /// 那一趟揭起来的是右半张。
+    ///
+    /// 打上新块 `spread_leaf`：这张纸翻完是落在另一半页上，不是翻出画去（见那个字段）。
     pub(in crate::ui::features::reader) fn leaf(self, right: bool) -> Self {
         let middle = self.left + self.width() * 0.5;
-        if right {
+        let half = if right {
             Self::new(middle, self.top, self.right, self.bottom)
         } else {
             Self::new(self.left, self.top, middle, self.bottom)
+        };
+        Self {
+            spread_leaf: true,
+            ..half
         }
     }
 

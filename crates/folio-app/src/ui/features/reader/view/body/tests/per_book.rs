@@ -7,9 +7,7 @@
 use super::harness::{flow, meta, open_with_store};
 use crate::ui::services::config::ConfigHolder;
 use folio_core::store::Store;
-use folio_core::{
-    Appearance, BookSettings, Locator, Mode, Reader,
-};
+use folio_core::{Appearance, BookSettings, Locator, Mode, Reader};
 #[allow(unused_imports)] // `#[gpui_kit::test]` 展开要它，unused 分析看不见宏里的使用
 use gpui_kit::test::TestWindowExt;
 #[allow(unused_imports)] // 同上：`AppContext` 给 `cx.update` 用
@@ -41,11 +39,7 @@ fn reader_patch(set: impl FnOnce(&mut Reader)) -> BookSettings {
 }
 
 /// 用这批夹具开一屏（默认层就是 `Reader::default()`，好处是断言能直接比默认值）。
-fn open(
-    cx: &mut TestAppContext,
-    store: Arc<Store>,
-    book_id: i64,
-) -> gpui_kit::AnyWindowHandle {
+fn open(cx: &mut TestAppContext, store: Arc<Store>, book_id: i64) -> gpui_kit::AnyWindowHandle {
     let (_session, handle) = open_with_store(
         cx,
         &flow(),

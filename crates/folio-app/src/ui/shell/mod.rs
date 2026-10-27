@@ -493,7 +493,7 @@ impl AppShell {
         let shelf_stack = cx.new(|_| NavStackState::new());
         let shelf = cx.new(|cx| ShelfView::boot(window, cx, shelf_stack.downgrade()));
         let stats = cx.new(|_| StatsView::new());
-        let notes = cx.new(|_| NotesView::new());
+        let notes = cx.new(|cx| NotesView::boot(window, cx));
         // 「笔记」的第一份快照在启动这一刻就取好：目的地那扇门（`go`）只在**切进**那一格
         // 时叫重取，读者若从不切走就永远等不到那一次。
         notes.update(cx, |notes, cx| notes.refresh(cx));
@@ -878,6 +878,16 @@ impl AppShell {
             // 更别在书还看着的时候把应用退掉。
             return;
         }
+        // 底部弹层（架面建组 / 导入 / 扫描、笔记那一本、更新日志）是此刻最上面那一层：
+        // 返回先收它，别让这一按穿到栈上 —— 手机上栈底那一档就是丢回后台 / 退出，
+        // 读者看到的正是「笔记卡片开着，一下返回就回到系统主界面」。
+        //
+        // 阅读页那几块弹层不走这里：它们由上面的 `dismiss_chrome` 收，各有各的收尾
+        // （目录那一层的搜索要作废、设置那一层要回落）。这一句排在那一支**之后**，
+        // 正是为了别把那条路绕过去。
+        if crate::ui::components::dismiss_top(cx) {
+            return;
+        }
         let stack = self.stacks[self.destination.index()].clone();
         if stack.read(cx).depth() > 1 {
             stack.update(cx, |state, cx| {
@@ -1073,13 +1083,21 @@ impl AppShell {
                 .is_some_and(|account| account.read(cx).pushed())
     }
 
-    /// 这一帧该不该把应用导航栏整条收起：当前目的地的栈上压了页，或「我的」那屏钻进了详情。
+    /// 这一帧该不该把应用导航栏整条收起：当前目的地的栈上压了页、「我的」那屏钻进了详情，
+    /// 或**有一块底部弹层正开着**。
+    ///
+    /// 第三条只跟着 Compact 档那一格（`compact` 由调用方按当帧档位递进来）：那一档的底栏是
+    /// **浮**在内容上的 —— 外壳画完目的地才画它，于是模态那一层的下沿被一条栏压着。模态层
+    /// 该盖住导航栏，不是被它盖住。桌面与平板两档的侧栏是**占布局行**的兄弟、不与弹层重叠，
+    /// 收掉它只会让整页在弹层开着时横向抖一下，所以那两档不参与这一问。
     ///
     /// 摆成方法而不是留在 `render` 里就地算：宿主到不了 Compact 档（`SizeClass::of` 在桌面把
     /// 窄窗口夹到 `Medium`，底栏只在真机长出来），判据得能被测试问一句才红得起来 ——
     /// 与 [`immersive_nav`] 抽成自由函数同一条理由。
-    fn nav_gone(&self, cx: &App) -> bool {
-        self.page_pushed(cx) || self.settings_pushed(cx)
+    fn nav_gone(&self, compact: bool, cx: &App) -> bool {
+        self.page_pushed(cx)
+            || self.settings_pushed(cx)
+            || (compact && crate::ui::components::any_sheet_open(cx))
     }
 
     /// 当前档位的导航栏：点击即切目的地。`safe` 是系统 inset —— Compact 档靠底那一条
@@ -1134,7 +1152,7 @@ impl Render for AppShell {
         // 系统级那一层（真全屏、藏状态栏）只跟着书：一页表单不该把状态栏也藏掉。
         // 应用内的导航栏不再跟着书 —— 那一层盖在它上面，收它只会挤动架面（见 [`ReadingLayer`]）。
         let wanted = ChromeState {
-            nav_gone: self.nav_gone(cx),
+            nav_gone: self.nav_gone(size.is_compact(), cx),
             immersive: immersive_nav(size, self.reading_mounted()),
         };
         // 转场在跑的时候画面上还是**改变之前**那一对，理由见 [`AppShell::chrome_frozen`]。
