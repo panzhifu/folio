@@ -17,5 +17,5 @@ pub use bottom_sheet::{
 };
 pub use font_picker::{FontFamilySetter, FontPicker};
 pub use primitives::{empty_state, hairline, muted_label};
-pub use search_box::{SearchBox, SearchBoxEvent};
+pub use search_box::{SEARCH_SETTLE_FRAMES, SearchBox, SearchBoxEvent, SearchDebounce};
 pub use top_bar::TopBar;

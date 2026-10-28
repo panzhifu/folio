@@ -156,6 +156,12 @@ impl StageCtx {
 }
 
 impl StageCtx {
+    /// [`Self::detached`] 的公开版本：给「不在作业池里跑、但作业体要求一个读数口」
+    /// 的调用方（界面那一侧就地跑一个作业时）。
+    pub fn detached_for_tests() -> Self {
+        Self::detached()
+    }
+
     /// 造一个**没有接收端**、取消未置位的读数口（发出去的静默丢弃）。给两类
     /// 调用方：测试里直接测管线本体，以及「没人看进度」的后台驱动（监听的初扫）。
     pub(crate) fn detached() -> Self {

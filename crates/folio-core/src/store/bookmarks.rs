@@ -120,19 +120,19 @@ impl Store {
         let Some((uid, hash)) = row else {
             return Ok(());
         };
-        conn.execute("DELETE FROM bookmarks WHERE id = ?1", params![id])?;
-        if let (Some(uid), Some(hash)) = (uid, hash)
-            && !uid.is_empty()
-            && !hash.is_empty()
-        {
-            conn.execute(
-                "INSERT INTO sync_tombstones (kind, book_hash, uid, deleted_at)
-                 VALUES ('bookmark', ?2, ?1, ?3)
-                 ON CONFLICT(kind, uid) DO UPDATE SET
-                   book_hash = excluded.book_hash, deleted_at = excluded.deleted_at",
-                params![uid, hash, now()],
+        // 同 [`Store::delete_annotation`]：两写一账，必须一笔事务。
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM bookmarks WHERE id = ?1", params![id])?;
+        if let (Some(uid), Some(hash)) = (uid, hash) {
+            super::sync::record_tombstone(
+                &tx,
+                crate::sync::TombstoneKind::Bookmark,
+                &uid,
+                &hash,
+                now(),
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -142,7 +142,9 @@ impl Store {
     /// 删除可能已经同步出去，照抄旧时间戳会让下一次同步又把这一枚拔掉。
     pub fn restore_bookmark(&self, row: &Bookmark) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
+        // 同 [`Store::restore_annotation`]：插回与撤墓碑一笔事务。
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT OR REPLACE INTO bookmarks (id, uid, book_id, anchor_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -154,10 +156,11 @@ impl Store {
                 now()
             ],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM sync_tombstones WHERE kind = 'bookmark' AND uid = ?1",
             params![row.uid],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

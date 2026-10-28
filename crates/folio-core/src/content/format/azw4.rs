@@ -1,8 +1,7 @@
 //! AZW4（Kindle Print Replica）：PalmDB 容器里装着一份 PDF。
 //!
 //! 它不是第四种 PDF 引擎，而是「PDF 字节从哪儿来」的第二种答案：普通 `.pdf` 从文件
-//! 打开，`.azw4` 先从 PalmDB 的记录里把 PDF 取出来，再交给同一个
-//! [`PdfDocument`](pdf_oxide::document::PdfDocument)。
+//! 打开，`.azw4` 先从 PalmDB 的记录里把 PDF 取出来，再交给同一个 [`Pdf`](hayro::hayro_syntax::Pdf)。
 //!
 //! 判据只看**记录内容**：找一条以 `%PDF-` 开头的记录。不靠文件扩展名，也不靠
 //! Mobipocket 头的版本号 —— 后者在真书之间并不一致。
@@ -11,15 +10,41 @@
 //! 与「把格式报成 Azw4」。
 
 use std::path::Path;
+use std::sync::OnceLock;
 
-use pdf_oxide::document::PdfDocument;
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_syntax::Pdf;
 
 use super::palmdb::PalmDb;
 use super::pdf::{failure, page_text, read_pdf, render_png};
 use super::{Content, DocMeta, DocumentProvider, Format, PageText, stem_of};
 use crate::Result;
 
-pub struct Azw4Adapter;
+pub struct Azw4Adapter {
+    /// 这一本书的解析句柄，与 [`super::pdf::PdfAdapter`] 同形：`None` = 打不开。
+    ///
+    /// 从前这一族每问一次都重新从 PalmDB 里拷一遍 payload 再解一遍结构，理由是「hayro 要
+    /// 一份独立的整本字节，导入时为一张封面多拷一份不值」。换成一台引擎之后这条理由不成立
+    /// 了 —— 一次打开就是一份句柄，之后取页、抽字、封面都共用它，峰值驻留反而只有一份。
+    document: OnceLock<Option<Pdf>>,
+    /// 与 `document` 配套的解释器设置（克隆只是几条 `Arc`）。
+    settings: InterpreterSettings,
+}
+
+impl Default for Azw4Adapter {
+    fn default() -> Self {
+        Self {
+            document: OnceLock::new(),
+            settings: InterpreterSettings::default(),
+        }
+    }
+}
+
+impl Azw4Adapter {
+    fn document(&self, path: &Path) -> Option<&Pdf> {
+        self.document.get_or_init(|| open(path).ok()).as_ref()
+    }
+}
 
 impl DocumentProvider for Azw4Adapter {
     fn format(&self) -> Format {
@@ -31,8 +56,26 @@ impl DocumentProvider for Azw4Adapter {
     }
 
     fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        let (db, bytes) = pdf_payload(path)?;
-        let document = PdfDocument::from_bytes(bytes).map_err(|err| failure(path, err))?;
+        let (db, _) = pdf_payload(path)?;
+        // 与 `.pdf` 那边同一条：失败记下来（`None`），别每帧重试。
+        if self.document.get().is_none() {
+            match open(path) {
+                Ok(document) => {
+                    let _ = self.document.set(Some(document));
+                }
+                Err(err) => {
+                    let _ = self.document.set(None);
+                    return Err(err);
+                }
+            }
+        }
+        // `index` 是第一次问、句柄刚刚放进去，所以 `get_or_init` 不会落进 `open` 那一支。
+        let document = self
+            .document(path)
+            .ok_or_else(|| crate::Error::UnsupportedFormat(format!(
+                "{}：结构读不出来，PalmDB 里那份 PDF 可能被截断过",
+                file_name(path)
+            )))?;
         let title = if db.db_name().trim().is_empty() {
             stem_of(path)
         } else {
@@ -40,43 +83,34 @@ impl DocumentProvider for Azw4Adapter {
         };
         read_pdf(
             path,
-            &document,
+            document,
             Format::Azw4,
             title,
             std::fs::metadata(path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
+            // 封面这一趟只在导入时跑一次。封面与阅读页走同一条链（`render_png`），
+            // 字节也共用同一份句柄 —— 不再有「另一台引擎要独立字节」那一笔。
+            render_png(document, 0, super::pdf::COVER_EDGE, &self.settings),
         )
     }
 
+    /// 取页：与 `.pdf` 同一个句柄、同一条栅格化。
     fn render_page(&self, path: &Path, page: usize, edge: u32) -> Option<Vec<u8>> {
-        let (_, bytes) = pdf_payload(path).ok()?;
-        let document = PdfDocument::from_bytes(bytes).ok()?;
-        render_png(&document, page, edge)
+        render_png(self.document(path)?, page, edge, &self.settings)
     }
 
     /// 文字层同一份：Kindle 印刷版里那份 PDF 与普通 `.pdf` 只差字节从哪儿来。
     fn page_text(&self, path: &Path, page: usize) -> Option<PageText> {
-        let (_, bytes) = pdf_payload(path).ok()?;
-        let document = PdfDocument::from_bytes(bytes).ok()?;
-        page_text(&document, page)
+        page_text(self.document(path)?, page, &self.settings)
     }
 
-    /// 整本一次：**PalmDB 开一趟、那份 PDF 的字节解一趟**，然后逐页抽字。
-    ///
-    /// 比逐页问多省的还不止容器那一次：这一族每次问都要先把整份 PDF 从记录里
-    /// 拷出来再解一遍结构（`pdf_payload` 交回的是 `Vec<u8>`）。搜索那一趟走的必须是这一条。
+    /// 整本一次：句柄开一趟，然后逐页抽字。搜索那一趟走的必须是这一条。
     fn page_texts(&self, path: &Path) -> Option<Vec<String>> {
-        let (_, bytes) = pdf_payload(path).ok()?;
-        let document = PdfDocument::from_bytes(bytes).ok()?;
-        let pages = document.page_count().ok()?;
+        let document = self.document(path)?;
         Some(
-            (0..pages)
-                .map(|page| {
-                    page_text(&document, page)
-                        .map(|text| text.text())
-                        .unwrap_or_default()
-                })
+            (0..document.pages().len())
+                .map(|page| super::pdf::page_texts_one(document, page, &self.settings))
                 .collect(),
         )
     }
@@ -85,6 +119,12 @@ impl DocumentProvider for Azw4Adapter {
 /// 记录里那条 PDF 的起始记录号；判定层与本适配器共用。
 pub(crate) fn pdf_record(db: &PalmDb) -> Option<usize> {
     db.find_record_starting_with(b"%PDF-")
+}
+
+/// 从 PalmDB 里取出那份 PDF 并打开。
+fn open(path: &Path) -> Result<Pdf> {
+    let (_, bytes) = pdf_payload(path)?;
+    Pdf::new(bytes).map_err(|err| failure(path, err))
 }
 
 /// 打开容器并取出 PDF 记录。
@@ -162,7 +202,7 @@ mod tests {
         let db = PalmDb::open(&path).unwrap();
         assert_eq!(super::pdf_record(&db), Some(1));
 
-        let (meta, content) = Azw4Adapter.read(&path).unwrap();
+        let (meta, content) = Azw4Adapter::default().read(&path).unwrap();
         assert_eq!(meta.format, Format::Azw4);
         // PDF 自己的 `/Title` 优先于 PalmDB 名；夹具里写的是「测试合成本」。
         assert_eq!(meta.title, "测试合成本");
@@ -186,6 +226,6 @@ mod tests {
             "没有 PDF",
             &[b"MOBI-HEADER", b"not a pdf"],
         );
-        assert!(Azw4Adapter.read(&path).is_err());
+        assert!(Azw4Adapter::default().read(&path).is_err());
     }
 }

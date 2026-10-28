@@ -208,7 +208,39 @@ pub trait DocumentProvider: Send + Sync {
     /// 尺寸与它是同一句判断，按页表摆位的那一侧不会因此画歪。
     ///
     /// 与取图字节同一立场：读不到是 `None` 而不是 `Err` —— 那一页空着，页的摆位不变。
+    /// 预热（可选）：把 provider 私有的解析句柄先建起来。界面在打开书时后台调一次。
+    /// 默认什么都不做 —— 多数格式按需现开，没有可预热的东西。
+    fn warm(&self, _path: &Path) {}
+
     fn render_page(&self, _path: &Path, _page: usize, _edge: u32) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// 定版式那一页的**一块矩形**按 `width × height` 重画，交回 PNG（放大那一档）。
+    ///
+    /// 默认 `None`：只有「像素是算出来的」那一族给得出东西（PDF / AZW4）。漫画与 EPUB
+    /// 的定版式一页本来就是容器里的一张图，重画只是把同一批源像素摊开 —— 那条路要走
+    /// [`DocumentProvider::image_bytes`] 拿原图，不是这里。
+    ///
+    /// **要不要问这一句由页表说**：[`super::PageSource::Render::vector`] 那一格就是
+    /// 「重画补不补得出细节」（判据是 `format::pdf::native_edge` 给不给 `None`）。
+    /// 这一问自己不判值不值得 —— 两处各判一次，屏上就是「捏到 6 倍什么也没变清楚」。
+    ///
+    /// `region` 的单位是**这一页整页栅格出来那张图的像素**（与页表里存的宽高同一把尺，
+    /// 见 [`super::PageRegion`]）。`width`/`height` 是输出要的像素，长边由调用方夹在
+    /// `format::pdf::REGION_EDGE` 以内：那一档一张是 47 MB 原始像素，所以这一档
+    /// **只画看得见的那一块**。
+    ///
+    /// 与 [`DocumentProvider::render_page`] 同一立场：画不出来是 `None` 而不是 `Err`
+    /// —— 那一格保持现有像素不动，读者的放大视图不会因此黑一下。
+    fn render_page_region(
+        &self,
+        _path: &Path,
+        _page: usize,
+        _region: super::PageRegion,
+        _width: u32,
+        _height: u32,
+    ) -> Option<Vec<u8>> {
         None
     }
 
@@ -263,8 +295,9 @@ pub trait DocumentProvider: Send + Sync {
 
 /// 全部已注册的 provider。顺序 = 注册顺序 = 同权重时的优先级。
 ///
-/// 每次调用现造一遍而不是存一张全局表：这些 provider 都是零字段的 ZST，
-/// 造一个等于造一个注释，换来的是没有全局可变状态。
+/// 每次调用现造一遍而不是存一张全局表，换来的是没有全局可变状态。多数 provider 是
+/// 零字段的 ZST；`PdfAdapter` 带一格「这一本的解析句柄」（随 `Doc` 活、随书释放），
+/// 所以这里现造的每一份就是一本私有的，不共享。
 pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
     vec![
         Box::new(super::epub::EpubAdapter),
@@ -276,12 +309,12 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
         Box::new(super::cbz::CbzAdapter),
         Box::new(super::chm::ChmAdapter),
         Box::new(super::mobi::MobiAdapter),
-        Box::new(super::pdf::PdfAdapter),
+        Box::new(super::pdf::PdfAdapter::default()),
         Box::new(super::docx::DocxAdapter),
         Box::new(super::doc::DocAdapter),
         Box::new(super::odt::OdtAdapter),
         Box::new(super::pdb::PdbAdapter),
-        Box::new(super::azw4::Azw4Adapter),
+        Box::new(super::azw4::Azw4Adapter::default()),
         Box::new(super::cb7::Cb7Adapter),
         Box::new(super::cbr::CbrAdapter),
         Box::new(super::cbt::CbtAdapter),

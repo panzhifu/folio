@@ -212,19 +212,21 @@ impl Store {
         let Some((uid, hash)) = row else {
             return Ok(());
         };
-        conn.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
-        if let (Some(uid), Some(hash)) = (uid, hash)
-            && !uid.is_empty()
-            && !hash.is_empty()
-        {
-            conn.execute(
-                "INSERT INTO sync_tombstones (kind, book_hash, uid, deleted_at)
-                 VALUES ('annotation', ?2, ?1, ?3)
-                 ON CONFLICT(kind, uid) DO UPDATE SET
-                   book_hash = excluded.book_hash, deleted_at = excluded.deleted_at",
-                params![uid, hash, now()],
+        // 一笔事务：删掉那一行与记下墓碑必须同生同死。分两条裸语句中间被杀（Android
+        // 直接杀进程），下次同步就没有任何东西说「这条删过」，于是它在别的设备上活着回来
+        // —— 而读者已经看不见它了（`plans/基础设施.md` §1.3 那条「两写一账」）。
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
+        if let (Some(uid), Some(hash)) = (uid, hash) {
+            super::sync::record_tombstone(
+                &tx,
+                crate::sync::TombstoneKind::Annotation,
+                &uid,
+                &hash,
+                now(),
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -306,7 +308,10 @@ impl Store {
     /// 是正确的小败。
     pub fn restore_annotation(&self, row: &Annotation) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
+        // 「把行插回」与「把墓碑撤掉」是一笔：中间被杀就留下「行回来了但本机仍报已删」
+        // 那一半，下一次同步又把它删走（与 [`Self::delete_annotation`] 同一条两写一账）。
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT OR REPLACE INTO annotations
              (id, uid, book_id, anchor_json, note, color, style, stale, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -323,10 +328,11 @@ impl Store {
                 now()
             ],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM sync_tombstones WHERE kind = 'annotation' AND uid = ?1",
             params![row.uid],
         )?;
+        tx.commit()?;
         Ok(())
     }
 }

@@ -25,11 +25,12 @@
 //! `folio-reader` 那一句 `.role()` + `.a11y_synthetic_children()` 入树）。这份收集只在
 //! `Window::is_a11y_active()` 为真时跑 —— 没有读屏连着就一个节点都不建，也不为它分配。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::sync::Arc;
 
 use folio_core::PageTurn;
+use folio_core::content::format::{PageRegion, pdf::RENDER_EDGE};
 use folio_core::content::anchor::line_at_y;
 use folio_core::content::format::css::computed::BorderStyle;
 use folio_core::layout::FontKey;
@@ -38,7 +39,8 @@ use folio_core::store::{Annotation, AnnotationStyle};
 use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    A11ySubtreeBuilder, AnyElement, App, Background, Bounds, ClickEvent, Context, Div, Element,
+    A11ySubtreeBuilder, AnyElement, App, AppContext as _, Background, Bounds, ClickEvent, Context,
+    Div, Element,
     ElementId, Entity, EntityId, GlobalElementId, Hsla, InspectorElementId,
     InteractiveElement as _, IntoElement, LayoutId, LongPressEvent, PageCurlMesh, PageCurlUniforms,
     PageCurlVertex, ParentElement, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
@@ -55,21 +57,30 @@ use crate::ui::features::reader::model::book_fonts::BookFonts;
 use crate::ui::features::reader::model::chapter_layout::{Document, Viewport};
 use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::fixed_book::{FixedBook, PageTile};
-use crate::ui::features::reader::model::fixed_zoom::{FixedFrame, max_scale};
+use crate::ui::features::reader::model::fixed_zoom::{
+    FixedFrame, FixedZoom, max_scale, region_output, visible_region,
+};
 use crate::ui::features::reader::model::image_atlas::ImageAtlas;
 use crate::ui::features::reader::model::paging::PrefetchSide;
 use crate::ui::features::reader::model::prefetch;
 use crate::ui::features::reader::model::session::{
-    AnnotationSpans, CurlMesh, PageRef, ReaderSession, Source, Turn, TurnRun, land_at_anchor,
-    start_turn,
+    AnnotationSpans, CurlMesh, PageRef, PinnedRegion, ReaderSession, REGION_SETTLE, Source, Turn,
+    TurnRun, land_at_anchor, start_turn,
 };
-use crate::ui::features::reader::model::swipe::release_transition;
+use crate::ui::features::reader::model::swipe::{release_easing, release_transition};
 use crate::ui::features::reader::motion::turn_animation::{self, Sheet, Tint};
 use crate::ui::features::reader::view::paint::{self, GlyphRun, GlyphsElement, Mark, shape};
 use crate::ui::features::reader::view::scene::{BlockDecor, BlockPicture, Scene, VisibleImage};
 use crate::ui::foundation::images::DecodeRequest;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::{turn_duration, turn_transition};
+
+/// 定版式预取几页。
+///
+/// 两张是「读者手上这一页 + 下一张」的量：720 档预览一页约 2 MB，两页叠在 24 MB 的
+/// 手机预算里还够；一张的话快速滑动时读者到那一页它往往还在画（手机上栅格化一页是
+/// 几十到几百 ms）。再多就不再给了 —— 内存先炸，而滑得更快的读者本来也看不清。
+const PREFETCH_RADIUS: usize = 2;
 
 /// 一次翻页动画在这一帧的样子。时钟已经采完、方向与档位都在里面，两臂各自折成位移。
 #[derive(Clone, Copy)]
@@ -117,7 +128,7 @@ impl ReaderSession {
         // 在手指上，两头一起动就是画面在拉扯。
         let (progress, walked) = match turn.run {
             TurnRun::Following { t } => (t, false),
-            _ => {
+            run => {
                 // `present` 给 `true`：这一趟只需要「进场」那半 —— 走了多少就是 `progress`，
                 // 出场那一页由同一个数反着算（`turn_animation::slide::slide_shifts` 那两个返回值），
                 // 所以不必再为出场页单独挂一把 `Presence`。
@@ -126,24 +137,42 @@ impl ReaderSession {
                 // 两端速度都是 0，接手就是「手一抬纸先停死」。点屏 / 按键那一趟用的是读者
                 // 那一格的快照（`Turn::over`）—— 它没有前一段速度要接，但也**不能**每帧现读：
                 // 拖那条滑条每一帧都在写配置，现读等于给正在走的时钟每帧重新瞄准。
-                let transition = match turn.run {
+                let transition = match run {
                     TurnRun::Released { over, .. } => release_transition(over),
                     _ => turn_transition(turn.over, cx),
                 };
                 let id = TransitionId::from(ElementId::from(("reader-turn", turn.seq)));
-                let clock = Presence::new(id, true)
+                // 这一采管两件事：按这一趟的时长自己续帧，以及系统的减弱动态效果直接给终值。
+                let sampled = Presence::new(id, true)
                     .transition(transition)
-                    .sample(window, cx)
-                    .progress;
-                // 松手那一腿不是从 0 走的：从手指那一点接着走完或走回，否则读者会看见
-                // 自己握过的那一截被重放一遍。
-                let progress = match turn.run {
-                    TurnRun::Released { from, revert, .. } => {
-                        chrome::tween(from, if revert { 0.0 } else { 1.0 }, clock)
+                    .sample(window, cx);
+                match run {
+                    TurnRun::Released {
+                        from,
+                        revert,
+                        over,
+                        since,
+                    } => {
+                        // 从**松手那一刻**起算，不是从这一帧起算：抬手到第一帧之间那一截
+                        // 本来就是这一腿走过的时间。把它当成 0，纸会先停死一帧、下一帧再
+                        // 一下跳出剩余行程的一成多 —— 读者读到的是「手一抬卡一下」。
+                        let elapsed = cx
+                            .background_executor()
+                            .now()
+                            .saturating_duration_since(since);
+                        let eased = if cx.reduce_motion() {
+                            1.0
+                        } else {
+                            let t = elapsed.as_secs_f32() / over.as_secs_f32().max(1e-6);
+                            release_easing().sample(t.clamp(0.0, 1.0))
+                        };
+                        // 松手那一腿不是从 0 走的：从手指那一点接着走完或走回，否则读者会
+                        // 看见自己握过的那一截被重放一遍。
+                        let progress = chrome::tween(from, if revert { 0.0 } else { 1.0 }, eased);
+                        (progress, cx.reduce_motion() || elapsed >= over)
                     }
-                    _ => clock,
-                };
-                (progress, clock >= 1.0)
+                    _ => (sampled.progress, sampled.progress >= 1.0),
+                }
             }
         };
         if walked {
@@ -351,6 +380,18 @@ impl Render for ReaderSession {
         // 与 `match &mut self.source` 之前解出来：进了那两道门 `self` 都借不出，
         // 而 `speech_range()` 是个 `&self` 方法。
         let speech_span = self.speech_range();
+        // 这一帧读者还在不在快速滑动、往哪边滑。只喂给「排哪一档」与预取方向：
+        // 滑动中只铺 720 预览，停下那一帧才排高清。判据在 `ReaderSession::mark_scroll`。
+        //
+        // 放在 `font_cache` 那个可变借用**之前**：进了 `match &mut self.source` 与
+        // 那几个 `&mut self.xxx` 之后 `self` 整体借不出，`&mut self` 的方法就调不了。
+        let now = std::time::Instant::now();
+        let motion = self.mark_scroll(now, viewport_height);
+        // 图集的内存档位要按设备分（手机 24 MB / 平板 48 / 桌面 128），而设备那一格
+        // 只有窗口量得出来：每帧推一次逻辑宽度，档位随窗口变化也跟着走。
+        crate::ui::features::reader::model::image_atlas::set_screen_width(
+            f32::from(viewport_size.width),
+        );
         // 两章之间的缝：拼接坐标用它隔开相邻的章（口径在 `Book::chapter_gap`）。
         let chapter_gap = Book::chapter_gap(&self.prefs);
         // 等宽偏好整帧取一次：兜底那一行与正文的 run 都要它。
@@ -404,6 +445,10 @@ impl Render for ReaderSession {
         // `&mut self.source` 只借用这一个字段，所以臂里写 `self.content_height`、
         // 读 `self.scroll_y` 都不冲突（前提是别把 `self` 整个传进函数）。
         let mut prefetch_side: Option<PrefetchSide> = None;
+        // 章界那一笔落在哪：只有「这一档在这种摆法下不挂时钟」（不走动画）时才会有值。
+        // 真换锚要等这一帧的元素树搭完（与 `drain_pending_turn` 同一处），中途换会让
+        // 同一帧上下半截按两章画。
+        let mut land_chapter: Option<PageRef> = None;
         // 这一帧主场景与捕获副本真正交给图集碰过的那些图（容器路径）。预解那一步要跳过它们 ——
         // 「还没进图集」只能这样知道：`painted` 已经把「在场」记上了。
         let mut painted_keys: Vec<String> = Vec::new();
@@ -491,11 +536,7 @@ impl Render for ReaderSession {
                         .stack()
                         .and_then(|stack| stack.height_of(current))
                         .unwrap_or(0.0);
-                    let source_width: f32 = book
-                        .page_tiles(current)
-                        .iter()
-                        .map(|tile| tile.width as f32)
-                        .sum();
+                    let source_width = zoom_source_width(book.page_tiles(current).iter());
                     self.fixed_frame = FixedFrame {
                         origin: (0.0, self.header_reserve),
                         pivot: (0.0, self.header_reserve),
@@ -551,6 +592,9 @@ impl Render for ReaderSession {
                     let mut boxes: Vec<(usize, Bounds<Pixels>)> = Vec::new();
                     let mut visible_pages: Vec<usize> = Vec::with_capacity(rows.len());
                     let mut selection_visual = None;
+                    // 字层还没取到的页：这一帧先不画，循环走完统一交给后台
+                    // （见 `request_page_texts` 与 `FixedBook::page_text_cached`）。
+                    let mut pending_text: Vec<usize> = Vec::new();
                     for (page, top, height) in rows {
                         visible_pages.push(page);
                         let page_tiles = book.page_tiles(page);
@@ -566,11 +610,22 @@ impl Render for ReaderSession {
                             fallback_aspect,
                             has_text,
                         );
-                        let text = if has_text { book.page_text(page) } else { None };
-                        let text_key = if text.is_some() {
-                            book.page_text_key(page)
+                        // 只查缓存：PDF 一页字层桌面要 1.5 s，在绘制帧里同步取就是
+                        // 打开书卡十秒（见 `FixedBook::page_text_cached` 那一段）。
+                        // 没到的页记下来，循环走完丢给后台，取回来重画。
+                        let (text, text_key) = if has_text {
+                            match book.page_text_cached(page) {
+                                Some((text, hash)) => {
+                                    let key = text.as_ref().map(|_| hash);
+                                    (text, key)
+                                }
+                                None => {
+                                    pending_text.push(page);
+                                    (None, None)
+                                }
+                            }
                         } else {
-                            None
+                            (None, None)
                         };
                         // 页格仍然按 1x 算，再映射到屏上：轴心是版心左上角，所以放大看
                         // 起来是「从版心顶长出来」，纵向那一段由 `scroll_painted` 先减掉。
@@ -579,11 +634,11 @@ impl Render for ReaderSession {
                         for at in tiles {
                             // 解不出像素的那一格空着，但仍然占位：多图页的排版不该因为
                             // 少一张图就把剩下的往左挤。
-                            let Some(request) = at.tile.request else {
+                            let Some(request) = at.tile.request.as_ref() else {
                                 continue;
                             };
                             let key = request.key.clone();
-                            let Some(image) = painted(&atlas, request, view, cx) else {
+                            let Some(image) = painted_tile(&atlas, &at.tile, view, cx, motion.scrolling) else {
                                 continue;
                             };
                             let rect = zoom.map(
@@ -615,6 +670,53 @@ impl Render for ReaderSession {
                                 index,
                                 &reader_weak,
                             ));
+// 放大停稳那一档：看得见的那一块按 `REGION_EDGE` 重画，叠在这一页那一张上面。
+                            let block = pinned_region(
+                                RegionAsk {
+                                    book,
+                                    atlas: &atlas,
+                                    page,
+                                    tile: &at.tile,
+                                    rect: (at.x, at.y, at.width, at.height),
+                                    pivot: (0.0, self.header_reserve),
+                                    viewport: (
+                                        0.0,
+                                        self.header_reserve,
+                                        f32::from(viewport_size.width),
+                                        viewport_height,
+                                    ),
+                                    zoom: self.fixed_zoom,
+                                    now,
+                                },
+                                &self.region_moved_at,
+                                &self.region_pinned,
+                                view,
+                                cx,
+                            );
+                            if let Some(pin) = block {
+                                let key = pin.request.key.clone();
+                                if let Some(image) = painted(&atlas, pin.request, view, cx) {
+                                    let zoomed = self.fixed_zoom.map(
+                                        Bounds::new(
+                                            point(px(pin.rect.0), px(pin.rect.1)),
+                                            size(px(pin.rect.2), px(pin.rect.3)),
+                                        ),
+                                        (0.0, self.header_reserve),
+                                    );
+                                    overlays.push(page_image(
+                                        f32::from(zoomed.origin.x),
+                                        f32::from(zoomed.origin.y),
+                                        f32::from(zoomed.size.width),
+                                        f32::from(zoomed.size.height),
+                                        image,
+                                        key,
+                                        &no_entry,
+                                        long_press,
+                                        overlays.len(),
+                                        &reader_weak,
+                                    ));
+                                }
+                            }
                         }
                         if let (Some(text), Some(at)) = (&text, placed) {
                             let at = self.fixed_zoom.map(at, (0.0, self.header_reserve));
@@ -649,17 +751,24 @@ impl Render for ReaderSession {
                         }
                     }
                     *self.fixed_text_boxes.borrow_mut() = boxes;
+                    // 字层没到的那几页：这一帧先空着（页图照画），后台取回来再重画。
+                    request_page_texts(book, pending_text, &reader_weak, cx);
                     // 下一页先解好（PDF 要栅格化、CBZ 要读字节），取**可见页的后一页**：
                     // 连续竖滚一屏可能压着两页，从视口顶那一页往后数会把它漏掉。
+                    // 预取：往读者滑的那边取两页（停下那一帧仍是「后一页优先」，
+                    // 由 `fixed_target` 决定）。滑动中只排预览 —— 见 `prepare_tile`。
                     if turn.is_none()
-                        && let Some(target) = visible_pages
-                            .last()
-                            .copied()
-                            .and_then(|last| prefetch::fixed_target(last, pages))
+                        && let Some(last) = visible_pages.last().copied()
                     {
-                        for tile in book.page_tiles(target) {
-                            if let Some(request) = tile.request {
-                                atlas.update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
+                        let targets = match motion.direction {
+                            Some(direction) => {
+                                prefetch::fixed_targets(last, pages, direction, PREFETCH_RADIUS)
+                            }
+                            None => prefetch::fixed_target(last, pages).into_iter().collect(),
+                        };
+                        for target in targets {
+                            for tile in book.page_tiles(target) {
+                                prepare_tile(&atlas, &tile, view, cx);
                             }
                         }
                     }
@@ -697,21 +806,39 @@ impl Render for ReaderSession {
                     // 定版式的下一页先解好：PDF 的一页要回引擎栅格化、CBZ 的一页要读字节 +
                     // 解码，从前都要等读者翻过去那一下才开始。静止帧里每帧 prepare 一次，
                     // 图集按「这一帧碰过」留住那一格；翻页动画期间不抢这笔活儿。
-                    if turn.is_none()
-                        && let Some(target) = prefetch::fixed_target(current, pages)
-                    {
-                        for tile in book.page_tiles(target) {
-                            if let Some(request) = tile.request {
-                                atlas.update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
+                    if turn.is_none() {
+                        let targets = match motion.direction {
+                            Some(direction) => {
+                                prefetch::fixed_targets(current, pages, direction, PREFETCH_RADIUS)
+                            }
+                            None => prefetch::fixed_target(current, pages).into_iter().collect(),
+                        };
+                        for target in targets {
+                            for tile in book.page_tiles(target) {
+                                prepare_tile(&atlas, &tile, view, cx);
                             }
                         }
                     }
                     // 这一页有没有字：PDF / AZW4 / DjVu 那一族才有（漫画的一页就是一张图，
-                    // EPUB 的定版式字在 XHTML 里而不在页上）。问一次用三处 —— 长按归谁、
-                    // 命中那把尺记不记、上面那两层画不画 —— 而每一次问的都是会话里那份
-                    // 按页备忘（`FixedBook::page_text`），不在这一帧里回引擎第二趟。
-                    let text = book.page_text(current);
-                    let text_key = book.page_text_key(current);
+                    // EPUB 的定版式字在 XHTML 里而不在页上）。字层只查缓存，没到就先不画、
+                    // 交给后台（理由与竖滚那一臂同一条：绘制帧里同步取一页就是 1.5 s）。
+                    let has_text = book.page_tiles(current).iter().any(|tile| tile.renders);
+                    let cached_text = if has_text {
+                        book.page_text_cached(current)
+                    } else {
+                        None
+                    };
+                    let text_pending = has_text && cached_text.is_none();
+                    let (text, text_key) = match cached_text {
+                        Some((text, hash)) => {
+                            let key = text.as_ref().map(|_| hash);
+                            (text, key)
+                        }
+                        None => (None, None),
+                    };
+                    if text_pending {
+                        request_page_texts(book, [current], &reader_weak, cx);
+                    }
                     // 定版式的翻页动画与流式共用同一套纸面位移；折页在 `begin_turn` 里
                     // 已经换成平移，这里再收一次口，配置从别处带进来的怪值也不会去卷一张位图。
                     let mut incoming_shift = (0.0, 0.0);
@@ -748,11 +875,11 @@ impl Render for ReaderSession {
                         );
                         let no_viewer: Option<Entity<ImageViewer>> = None;
                         for at in tiles {
-                            let Some(request) = at.tile.request else {
+                            let Some(request) = at.tile.request.as_ref() else {
                                 continue;
                             };
                             let key = request.key.clone();
-                            let Some(image) = painted(&atlas, request, view, cx) else {
+                            let Some(image) = painted_tile(&atlas, &at.tile, view, cx, motion.scrolling) else {
                                 continue;
                             };
                             let index = overlays.len();
@@ -773,6 +900,9 @@ impl Render for ReaderSession {
                     // 一页可能摆好几格（多图页 / 对开跨页，或渲染型的一整页）：按**共享高度**
                     // 横成一行，整体居中。一格时这条式子退化成「等比缩进视口」，与普通漫画的
                     // 旧表现逐像素相同。
+                    // 命中那把尺只在**字层真的取到**时记：字层还没回来与这一页没字
+                    // 在屏上是两件事 —— 前者等后台到货后重画这一帧再记，后者永远不记
+                    // （没有字就选不出东西，记了只会让长按落到一块空盒上）。
                     let (tiles, placed) = fixed_page_tiles(
                         book,
                         current,
@@ -786,7 +916,7 @@ impl Render for ReaderSession {
                     // 翻页动画在飞的时候倍率已经在 `turn()` 里清回 1x，所以下面两张纸
                     // 都按铺满画；动画之外才真按手指给的倍率映射。
                     let fit = fixed_row_bounds(&tiles);
-                    let source_width: f32 = tiles.iter().map(|at| at.tile.width as f32).sum();
+                    let source_width = zoom_source_width(tiles.iter().map(|at| &at.tile));
                     self.fixed_frame = FixedFrame {
                         origin: (0.0, self.header_reserve),
                         pivot: fit.map_or((0.0, self.header_reserve), |(origin, _)| origin),
@@ -814,11 +944,11 @@ impl Render for ReaderSession {
                     for at in tiles {
                         // 解不出像素的那一格空着，但仍然占位：多图页的排版不该因为
                         // 少一张图就把剩下的往左挤。
-                        let Some(request) = at.tile.request else {
+                        let Some(request) = at.tile.request.as_ref() else {
                             continue;
                         };
                         let key = request.key.clone();
-                        let Some(image) = painted(&atlas, request, view, cx) else {
+                        let Some(image) = painted_tile(&atlas, &at.tile, view, cx, motion.scrolling) else {
                             continue;
                         };
                         let rect = zoom.map(
@@ -853,6 +983,53 @@ impl Render for ReaderSession {
                             index,
                             &reader_weak,
                         ));
+// 放大停稳那一档：看得见的那一块按 `REGION_EDGE` 重画，叠在这一页那一张上面。
+                        let block = pinned_region(
+                            RegionAsk {
+                                book,
+                                atlas: &atlas,
+                                page: current,
+                                tile: &at.tile,
+                                rect: (at.x, at.y, at.width, at.height),
+                                pivot,
+                                viewport: (
+                                    0.0,
+                                    self.header_reserve,
+                                    f32::from(viewport_size.width),
+                                    viewport_height,
+                                ),
+                                zoom: self.fixed_zoom,
+                                now,
+                            },
+                            &self.region_moved_at,
+                            &self.region_pinned,
+                            view,
+                            cx,
+                        );
+                        if let Some(pin) = block {
+                            let key = pin.request.key.clone();
+                            if let Some(image) = painted(&atlas, pin.request, view, cx) {
+                                let zoomed = self.fixed_zoom.map(
+                                    Bounds::new(
+                                        point(px(pin.rect.0), px(pin.rect.1)),
+                                        size(px(pin.rect.2), px(pin.rect.3)),
+                                    ),
+                                    pivot,
+                                );
+                                overlays.push(page_image(
+                                    f32::from(zoomed.origin.x),
+                                    f32::from(zoomed.origin.y),
+                                    f32::from(zoomed.size.width),
+                                    f32::from(zoomed.size.height),
+                                    image,
+                                    key,
+                                    &no_entry,
+                                    long_press,
+                                    overlays.len(),
+                                    &reader_weak,
+                                ));
+                            }
+                        }
                     }
                     // 命中换算读的那一把尺，与上面摆出去的那一格同源。每一帧都写：
                     // 没有字的那一页必须把它清干净，否则留着上一页的矩形，长按会按新页的
@@ -1244,7 +1421,11 @@ impl Render for ReaderSession {
                             // —— 第二次跨章时那把键上还挂着上一趟「已经走完」的状态，
                             // `Presence` 第一帧就给回 1.0，章当场落定。
                             self.pending_chapter_turn = None;
-                            start_turn(
+                            let arriving = PageRef {
+                                chapter: target,
+                                page: target_page,
+                            };
+                            let started = start_turn(
                                 &mut self.turn,
                                 &mut self.turn_seq,
                                 page_turn,
@@ -1255,14 +1436,17 @@ impl Render for ReaderSession {
                                         chapter: current,
                                         page: self.page,
                                     }),
-                                    arriving: Some(PageRef {
-                                        chapter: target,
-                                        page: target_page,
-                                    }),
+                                    arriving: Some(arriving),
                                     forward: delta > 0,
                                     ..Default::default()
                                 },
                             );
+                            // 这一档不挂时钟（「不走动画」就是它）：换章只能当场落。没有这一句，
+                            // pending 已经清掉、又没有动画走完那一帧去调 `finish_chapter_turn`
+                            // —— 这一步就静默丢了，读者读到的是「章末点两侧没反应」。
+                            if !started {
+                                land_chapter = Some(arriving);
+                            }
                             // 这一帧的 `turn` 已经在上面采过样了；再要一帧才轮到这次滑动。
                             window.request_animation_frame();
                         }
@@ -2256,8 +2440,14 @@ impl Render for ReaderSession {
         }
         // 帧末回收图集。**必须**在这一帧的元素树全部搭完之后：中途放掉的格子会被同一帧
         // 里的 `img` 重新传回去，白花一趟上传（`image_atlas::end_frame` 那两条不动的规矩）。
-        self.atlas
-            .update(cx, |atlas, cx| atlas.end_frame(window, cx));
+        //
+        // 焦点页是挤出顺序的第一个键（离它最远的先走）：快速滑动时一屏能压住两三页，
+        // 按「最久没在场」会把刚滑过去的那一页先扔掉，往回一滑就得重画。
+        let focus = Some(self.page);
+        self.atlas.update(cx, |atlas, cx| {
+            atlas.set_focus(focus);
+            atlas.end_frame(window, cx);
+        });
         // 选中菜单（M6）：摆位是 `selection::slot` 那条纯判断，元素本体在
         // `selection.rs` 里。浮层点不住的教训见 page.rs 模块注释，所以它是压在正文
         // 之上的真按钮；拖动期间收起，松手即回。
@@ -2289,6 +2479,12 @@ impl Render for ReaderSession {
         // 这一格**之外** —— 那部分落在 `gap_us` 里，这一层量不到。
         let __total = __render.ns();
         crate::ui::features::reader::model::perf::add(|frame| frame.render_ns = __total);
+        // 「不走动画」那一档的章界：目标章排好后当场落章。放在元素树搭完之后、
+        // 与 `drain_pending_turn` 同一处、同一个理由 —— 换锚会让同一帧上下半截按两章画。
+        if let Some(to) = land_chapter {
+            self.finish_chapter_turn(to);
+            cx.notify();
+        }
         // 进书横移那 280 ms 里被旧页纹理门拒掉的那一趟，到这里再补。放在元素树搭完
         // 之后：`turn()` 会改页号与 `laid_out`，中途调会让同一帧上下半截按两页画。
         self.drain_pending_turn(cx);
@@ -2584,6 +2780,184 @@ fn painted(
     let __image = __t.ns();
     crate::ui::features::reader::model::perf::add(|frame| frame.image_ns += __image);
     image
+}
+
+/// 一格的像素：先画低清预览，高清到了再换。
+///
+/// 两档**不同时起**：高清那一趟的回开容器 + 栅格化要几秒，先起它会把低清挤在同一批
+/// 核上（实测手机上低清也跟着拖到三四秒才出来）。这里按顺序排：预览先到先画，
+/// 预览在手之后才排高清 —— 首图从「等一整趟 2048」变成「等一趟 720」。
+///
+/// 替换时排版不动：两张图的声明尺寸相同，只有像素变了。低清那格在高清到货后不再被
+/// 问，两帧后由图集回收。
+fn painted_tile(
+    atlas: &Entity<ImageAtlas>,
+    tile: &PageTile,
+    view: EntityId,
+    cx: &mut App,
+    scrolling: bool,
+) -> Option<Arc<RenderImage>> {
+    if let Some(preview) = tile.preview.as_ref() {
+        if let Some(low) = painted(atlas, preview.clone(), view, cx) {
+            // **快速滑动时只要高清已经在手就换，但不去起它。** 高清那一趟是几十到几百
+            // ms 的栅格化，滑动中起它等于把「下一帧」的钱挪到「这一帧」上 —— 读者看见
+            // 的是滑动卡顿，而他要的那张图本来也还在下面好几屏外。停下 150 ms 之后
+            // 那一帧 `scrolling` 为假，这里才排高清（`atlas.prepare` 自己会去重）。
+            let high = tile.request.as_ref();
+            if scrolling && !high.is_some_and(|request| atlas.read_with(cx, |atlas, _| atlas.ready(&request.key))) {
+                return Some(low);
+            }
+            if let Some(image) = tile
+                .request
+                .as_ref()
+                .and_then(|request| painted(atlas, request.clone(), view, cx))
+            {
+                return Some(image);
+            }
+            return Some(low);
+        }
+        // 预览解不出来（坏页）就退回高清；还只是没到就继续等，**不碰高清**（理由见上）。
+        if !atlas.read_with(cx, |atlas, _| atlas.failed(&preview.key)) {
+            return None;
+        }
+    }
+    // 没有预览的格子（容器里本来就有图）：直接走它自己那一趟。
+    tile.request
+        .as_ref()
+        .and_then(|request| painted(atlas, request.clone(), view, cx))
+}
+
+/// 预取一格：只排**预览**那一趟，而且排进 [`Priority::Prewarm`] 档。
+///
+/// 高清是翻到那一页时才值得花的钱 —— 预取高清会把下一趟翻页的首帧又拖回几百毫秒
+/// （手机上是几秒），而预取低清足够让那一页先出来。
+///
+/// 档位降一档是为了**池子里的取活顺序**：读者手上这一页的预览/高清是 `Interactive`，
+/// 预取两页是 `Prewarm`，于是「翻过去那一下」不会被排在两页预取后面（见
+/// `folio_core::Priority` 的档序）。
+fn prepare_tile(atlas: &Entity<ImageAtlas>, tile: &PageTile, view: EntityId, cx: &mut App) {
+    if let Some(request) = tile.preview.as_ref().or(tile.request.as_ref()) {
+        let request = request.clone().with_priority(folio_core::Priority::Prewarm);
+        atlas.update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
+    }
+}
+
+/// 放大上限要的「源宽」。
+///
+/// **矢量页不按手里这一张算**：那种页捏稳之后会把看得见的那一块按 `REGION_EDGE`
+/// 重画一遍，细节上限是 `RENDER_EDGE → REGION_EDGE` 那一倍，所以宽也按那一倍报给
+/// [`max_scale`]。扫描件与容器图那一族手里这一张就是全部 —— 按它们自己的宽度封顶，
+/// 于是「放到 8 倍」对那一族仍然是糊的，而那正是源图的极限（计划 §六 写明的限制）。
+fn zoom_source_width<'a>(tiles: impl IntoIterator<Item = &'a PageTile>) -> f32 {
+    let tiles: Vec<&PageTile> = tiles.into_iter().collect();
+    let base: f32 = tiles.iter().map(|tile| tile.width as f32).sum();
+    let boost = if tiles.iter().any(|tile| tile.vector) {
+        folio_core::content::format::pdf::REGION_EDGE as f32 / RENDER_EDGE as f32
+    } else {
+        1.0
+    };
+    base * boost
+}
+
+/// 页表像素那一块 → **1x 内容坐标**里的那一块（同一张纸的同一个地方，两把尺）。
+fn region_rect(
+    tile: (f32, f32, f32, f32),
+    region: PageRegion,
+    source: (u32, u32),
+) -> (f32, f32, f32, f32) {
+    let (tx, ty, tw, th) = tile;
+    let frac = |from: u32, span: u32| from as f32 / span.max(1) as f32;
+    let (x0, y0) = (frac(region.x0, source.0), frac(region.y0, source.1));
+    let (x1, y1) = (frac(region.x1, source.0), frac(region.y1, source.1));
+    (tx + x0 * tw, ty + y0 * th, (x1 - x0) * tw, (y1 - y0) * th)
+}
+
+/// 一次「放大停稳了没有、该重画哪一块」的输入。
+///
+/// 合成一个结构而不是十三个参数：连续竖滚与整页翻两臂递的是同一组量，摊成名字之后
+/// 调用点自己说清「哪一格、哪一块屏、哪一个轴心、哪一刻」。
+struct RegionAsk<'a> {
+    book: &'a FixedBook,
+    atlas: &'a Entity<ImageAtlas>,
+    page: usize,
+    tile: &'a PageTile,
+    /// 那一格在 **1x 内容坐标**里的矩形（dp）。
+    rect: (f32, f32, f32, f32),
+    /// 缩放轴心（dp）：两臂不同 —— 连续滚是版心左上角，整页翻是铺满那一页的左上角。
+    pivot: (f32, f32),
+    viewport: (f32, f32, f32, f32),
+    zoom: FixedZoom,
+    now: std::time::Instant,
+}
+
+/// 放大那一档：这一帧该不该排「看得见的那一块按 `REGION_EDGE` 重画」，以及钉着的那一张
+/// 该叠在哪。交回 `Some(PinnedRegion)` 只表示**这一帧该去问图集要那一块的像素**
+/// （还没到货时 `painted` 给 `None`，那一页就只画它手里那张 2048 —— 叠层是加细节，
+/// 永远不该让屏上出现空洞）。
+///
+/// 三条规矩：
+/// - 只有**矢量的渲染页**问得出东西（`FixedBook::region_request` 对扫描件与容器图回
+///   `None`，那一趟栅格化根本不会起）；
+/// - 只有**停稳** [`REGION_SETTLE`] 之后才排：手在动就一帧帧把表推后（与「滑动中只铺
+///   预览」同一条理由 —— 那一趟是几百 ms 的活，边滑边排等于把下一帧的钱花在这一帧）；
+/// - 叠层画在**它自己那一刻**的矩形上：读者随后平移，那一张跟着自己的矩形走，
+///   新的那一块要等下一次停稳。这就是 [`PinnedRegion`] 存在的唯一理由。
+fn pinned_region(
+    ask: RegionAsk<'_>,
+    moved_at: &Cell<Option<std::time::Instant>>,
+    pinned: &RefCell<Option<PinnedRegion>>,
+    view: EntityId,
+    cx: &mut App,
+) -> Option<PinnedRegion> {
+    let RegionAsk {
+        book,
+        atlas,
+        page,
+        tile,
+        rect,
+        pivot,
+        viewport,
+        zoom,
+        now,
+    } = ask;
+    if !tile.vector || !zoom.is_zoomed() {
+        // 撤大回铺满：钉着的那一张不再属于这一屏（它占的图集名额由帧末回收按「没在场」放掉）。
+        moved_at.set(None);
+        pinned.borrow_mut().take();
+        return None;
+    }
+    let source = (tile.width, tile.height);
+    let region = visible_region(zoom, pivot, rect, source, viewport)?;
+    let scale = zoom.scale();
+    // 这一块已经钉住了而且倍率没变：一帧一趟都不多排。
+    if let Some(pin) = pinned.borrow().as_ref()
+        && pin.region == region
+        && (pin.scale - scale).abs() < 0.01
+    {
+        return Some(pin.clone());
+    }
+    let Some(last_moved) = moved_at.get() else {
+        // 第一次看见放大后的这一屏：起表，这一帧不排。
+        moved_at.set(Some(now));
+        return None;
+    };
+    if now.duration_since(last_moved).as_millis() < REGION_SETTLE {
+        // 还在动（或刚停下）：把表推后，旧的那一张继续按它自己的矩形画。
+        moved_at.set(Some(now));
+        return pinned.borrow().clone();
+    }
+    // 停够了：算输出尺寸 → 排进图集（`Interactive`：读者正看着这一块）→ 钉住。
+    let (width, height) = region_output(region, source)?;
+    let request = book.region_request(page, region, width, height)?;
+    atlas.update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
+    let pin = PinnedRegion {
+        region,
+        scale,
+        rect: region_rect(rect, region, source),
+        request,
+    };
+    *pinned.borrow_mut() = Some(pin.clone());
+    Some(pin)
 }
 
 /// 一片里的一张图：绝对摆位交给 gpui 的 `img`，外加「点一下摊开看」。
@@ -3167,6 +3541,42 @@ const FIXED_PAGE_GAP: f32 = 0.0;
 /// 一页可能摆好几格（多图页 / 对开跨页，或渲染型的一整页）：一格时这条式子退化成
 /// 「等比缩进视口」，与普通漫画的旧表现逐像素相同。尺寸未知（0）时按视口那一格的
 /// 宽高比补 —— 一格等于铺满，多格共享高度则必须有个比例，视口比例是最不失真的猜。
+/// 字层没到的那几页丢给后台，取回来写进会话并重画一帧。
+///
+/// 为什么不在绘制帧里等：PDF 一页字层要重开一次文档再抽整页字（桌面实测 1.5 s/页，
+/// 手机上 3–5 s），打开一本 210 页的 PDF 时那几页串起来就是界面卡住十秒
+/// （见 `model::fixed_book` 的 `text` 那一栏）。这一帧先空着字层 —— 页图照画 ——
+/// 后台取回来再补，观感是「页先出来，选中与批注痕迹晚几帧」。
+fn request_page_texts(
+    book: &FixedBook,
+    pages: impl IntoIterator<Item = usize>,
+    reader: &WeakEntity<ReaderSession>,
+    cx: &mut Context<ReaderSession>,
+) {
+    for page in pages {
+        // 缓存已有 / 已在飞 / 页号越界时 `request_page_text` 给 `None`，这一帧不重复排活儿。
+        let Some(doc) = book.request_page_text(page) else {
+            continue;
+        };
+        let fetch = {
+            let doc = doc.clone();
+            cx.background_spawn(async move { doc.page_text(page) })
+        };
+        let reader = reader.clone();
+        cx.spawn(async move |_, cx| {
+            let text = fetch.await;
+            let _ = reader.update(cx, |session, cx| {
+                // `doc` 已经不是当前这本（期间换过书）时 `store_page_text` 回 false，
+                // 这一帧不必为旧书重画。
+                if session.accept_page_text(&doc, page, text) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+}
+
 fn fixed_page_tiles(
     book: &FixedBook,
     page: usize,

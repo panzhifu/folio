@@ -10,6 +10,9 @@
 //! 悬浮侧栏本来还能滑出收起 —— 我们没做那个手势，就不该拿内容去换那点浮起来的错觉。
 //! 浮起来这件事由表面自己说清（圆角、描边、模糊）。
 
+use std::time::Duration;
+
+use gpui_kit::base::motion::{Transition, transition};
 use gpui_kit::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement, Styled,
     TestSupportExt as _, Window, div, px,
@@ -21,11 +24,16 @@ use super::{Destination, NAV_MARGIN, NAV_WIDTH};
 /// 嵌入列里第一格离状态栏的那点空：与卡片的内缩同一档。
 const TOP_GAP: f32 = 8.0;
 
+/// 卡片收起/放回的那一程（与底栏同一档缓动）。
+const FOLD_DURATION: Duration = Duration::from_millis(240);
+
 pub(super) fn side_nav<F>(
-    cx: &App,
+    cx: &mut App,
     current: Destination,
     card: bool,
     safe_top: f32,
+    folded: bool,
+    window: &mut Window,
     on_select: F,
 ) -> impl IntoElement
 where
@@ -46,6 +54,20 @@ where
         .collect();
 
     if card {
+        // 收起 = 卡片整张滑到列外左侧。占位列**不动**：滚动中改列宽会让右侧内容每帧
+        // 重排，而这里买的正是「内容获得更多视线」，不是「内容重新排版」。
+        let target = if folded {
+            -(NAV_WIDTH + NAV_MARGIN * 2.0)
+        } else {
+            0.0
+        };
+        let shift = transition(
+            "folio-nav-fold-card",
+            target,
+            Transition::new(FOLD_DURATION),
+            window,
+            cx,
+        );
         // 列比卡片宽两倍 margin：卡片左右居中落在列里，整列的高度归内容让出来。
         div()
             .id("folio-nav")
@@ -54,7 +76,13 @@ where
             .flex()
             .items_center()
             .justify_center()
-            .child(floating(cx).w(px(NAV_WIDTH)).child(nav_stack(items)))
+            .child(
+                floating(cx)
+                    .relative()
+                    .left(px(shift))
+                    .w(px(NAV_WIDTH))
+                    .child(nav_stack(items)),
+            )
             .test_support()
     } else {
         embedded(cx)

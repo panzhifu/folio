@@ -651,7 +651,7 @@ mod tests {
         let book = store.add_book(&path("d.pdf"), &meta("PDF")).unwrap();
         let doc = FixedDoc {
             pages: vec![FixedPage {
-                source: PageSource::Render { index: 0 },
+                source: PageSource::Render { index: 0, vector: false },
                 width: 595,
                 height: 842,
                 extra_images: Vec::new(),

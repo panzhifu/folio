@@ -23,14 +23,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use folio_core::store::ShelfItem;
-use gpui_kit::base::motion::{Easing, Stagger, StaggerOrigin, Timing};
+use gpui_kit::base::motion::{Easing, Spring, Stagger, StaggerOrigin, Timing, spring};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::h_flex;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, BoxShadow, Context, Image, InteractiveElement, IntoElement, ObjectFit,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage,
+    AnyElement, App, BoxShadow, Context, Image, InteractiveElement, IntoElement, MouseButton,
+    ObjectFit, ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage,
     TestSupportExt as _, Window, div, hsla, img, px,
 };
 
@@ -292,6 +292,7 @@ impl ShelfView {
     ///
     /// `enter` 与 `index` 一起管这一格的落定：`index` 是它在这面架上的第几格（横排
     /// 从左往右、从上往下数），落定的先后由它定，进度由那一片共同的那条时钟算。
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::ui::features::shelf) fn card_element(
         &self,
         card: &Card,
@@ -299,9 +300,23 @@ impl ShelfView {
         cover_height: f32,
         enter: &Enter,
         index: usize,
+        scroll_scale: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let book_id = card.id;
+        // 按住的封面收一档、松开弹回：指针按下即回执，弹簧从当前值接着走（可打断）。
+        // 与滚动那一档相乘 —— 一张卡同一时刻只该有一个缩放值。
+        let pressed = self.pressed_card == Some(book_id);
+        let press_scale = spring(
+            SharedString::from(format!("shelf-card-press/{book_id}")),
+            if pressed { 0.97 } else { 1.0 },
+            Spring::new(Duration::from_millis(140)).with_epsilon(0.002),
+            window,
+            cx,
+        );
+        let cover_scale = press_scale * scroll_scale;
+        let cover_width = cover_height * COVER_RATIO;
         let title = card.title.clone();
         let authors = card.authors.clone();
         let cover = card.cover.clone();
@@ -311,6 +326,9 @@ impl ShelfView {
         let ring_hover = cx.theme().border;
         let tapped = cx.entity().clone();
         let menu_entity = cx.entity().clone();
+        let press_in = cx.entity().clone();
+        let press_out = cx.entity().clone();
+        let press_away = cx.entity().clone();
         // 菜单每次打开都重建一遍，闭包要一份自己的文案拷贝。
         let labels = labels.clone();
         // 组名与元素 id 用同一个串：指着的是整张卡，抬起来的却只有封面那一格，
@@ -333,6 +351,33 @@ impl ShelfView {
             // 高亮比没有高亮更容易指错。
             .active(|style| style.opacity(0.75))
             .opacity(enter.progress(index))
+            // 按下记「哪一张被按住了」，抬起或按到别处就清 —— 封面靠这一格收一档。
+            // 移动端的轻点会合成成 MouseDown/MouseUp（`plans/facts.md`），两端都吃得到。
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                press_in.update(cx, |this, cx| {
+                    if this.pressed_card != Some(book_id) {
+                        this.pressed_card = Some(book_id);
+                        cx.notify();
+                    }
+                });
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                press_out.update(cx, |this, cx| {
+                    if this.pressed_card == Some(book_id) {
+                        this.pressed_card = None;
+                        cx.notify();
+                    }
+                });
+            })
+            // 按下后拖走（滚动、按下别处）也要松开：不兜这一条，那张卡会一直缩着。
+            .on_mouse_down_out(move |_, _, cx| {
+                press_away.update(cx, |this, cx| {
+                    if this.pressed_card == Some(book_id) {
+                        this.pressed_card = None;
+                        cx.notify();
+                    }
+                });
+            })
             .on_click(move |_, _, cx| tapped.update(cx, |_, cx| cx.emit(ShelfEvent::Open(book_id))))
             .child(
                 div()
@@ -342,18 +387,28 @@ impl ShelfView {
                     .test_support()
                     .w_full()
                     .h(px(cover_height))
+                    // 图片按缩放值收在容器里、居中：容器尺寸不变，所以缩放不碰整排的
+                    // 排距（这个框架的 div 没有 transform，缩放只能落在图自己的尺寸上）。
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     // 描边常驻，只是平时透明：悬停时改的是颜色，不是这一格占多宽。
                     // 留着这一像素位才不会一指过去整排封面就抖一下。
                     .border_1()
                     .border_color(cx.theme().transparent)
                     .rounded_md()
                     .overflow_hidden()
-                    .bg(placeholder_bg)
+                    .when(!has_cover, |this| this.bg(placeholder_bg))
                     .group_hover(group, |style| {
                         style.border_color(ring_hover).shadow(hover_shadow())
                     })
                     .when_some(cover, |this, image| {
-                        this.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                        this.child(
+                            img(image)
+                                .w(px(cover_width * cover_scale))
+                                .h(px(cover_height * cover_scale))
+                                .object_fit(ObjectFit::Cover),
+                        )
                     })
                     // 没封面的那格把书名当封面画：一整格空白看起来像这本坏了，
                     // 而它只是没有图。

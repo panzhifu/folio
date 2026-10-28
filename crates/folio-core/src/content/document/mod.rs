@@ -43,6 +43,13 @@ pub enum ContentRef<'a> {
 pub trait Document: Send + Sync {
     fn meta(&self) -> &DocMeta;
 
+    /// 预热：把「这一本要解析一遍才拿得到的东西」在后台先备好。
+    ///
+    /// 界面在打开书时于后台调一次，与首帧的排版/取页并行。今天只有 PDF 用得上
+    /// （`PdfDocument::open` 把整本读进内存再懒解结构，一本 64 MB 的书在手机上要
+    /// 一两秒）。默认什么都不做 —— 多数格式的容器按需现开，预热反而不划算。
+    fn warm(&self) {}
+
     /// 内容家族。界面靠它分流：可重排走排版引擎，定版式走页面绘制。
     fn kind(&self) -> ContentKind;
 
@@ -65,6 +72,25 @@ pub trait Document: Send + Sync {
     /// 默认 `None`：可重排的书没有「一页」这个事实，从书库读回、没有容器的合成文档
     /// 也拿不到字节（与图片缺失同一表现：那块地方空着）。
     fn render_page(&self, _page: usize, _edge: u32) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// 定版式那一页的**一块矩形**按 `width × height` 重画（放大那一档）。
+    ///
+    /// 与 [`render_page`](Document::render_page) 的分别是「画整页」与「画看得见的那一块」：
+    /// 前者按页表那把尺出一张，后者要的是「手里那张 2048 的图里，屏幕上剩这一块，
+    /// 请按 4096 那一档重来」。单位因此仍是页表那把尺的像素（见 `content::format::PageRegion`）。
+    ///
+    /// 默认 `None`：只有栅格化引擎在那儿的那一族给得出（PDF / AZW4）；漫画与可重排的书
+    /// 没有「按更高档重画」这回事。这一问不判值不值得 —— 那一格在页表的
+    /// `PageSource::Render::vector` 里，由界面照着决定要不要问。
+    fn render_page_region(
+        &self,
+        _page: usize,
+        _region: crate::content::format::PageRegion,
+        _width: u32,
+        _height: u32,
+    ) -> Option<Vec<u8>> {
         None
     }
 

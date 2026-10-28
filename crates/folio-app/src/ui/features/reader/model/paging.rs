@@ -681,7 +681,7 @@ pub(in crate::ui::features::reader) enum PrefetchSide {
 }
 
 /// 静止帧预解哪一侧的图。两侧都可预解时只给**下一张**：`24 MiB` 的图集封顶那一档
-/// （`image_atlas::MAX_RESIDENT_BYTES`）经不起两个方向的图同时在手，而往后读是绝大多数。
+/// （`image_atlas::soft_limit`）经不起两个方向的图同时在手，而往后读是绝大多数。
 /// 两侧都没有内容时回 `None` —— 这一章只有一页且前后都没有邻章。
 pub(in crate::ui::features::reader) fn prefetch_side(
     has_above: bool,

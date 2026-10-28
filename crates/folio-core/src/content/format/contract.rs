@@ -432,7 +432,7 @@ fn the_rendered_member_of_the_fixed_family_has_no_hrefs() {
             "渲染型的一页没有容器路径，第 {index} 页却有"
         );
         assert!(
-            matches!(page.source, crate::content::format::PageSource::Render { index: at } if at as usize == index),
+            matches!(page.source, crate::content::format::PageSource::Render { index: at, .. } if at as usize == index),
             "第 {index} 页的落点该是自己的页号"
         );
     }

@@ -27,6 +27,52 @@ use gpui_kit::{
     IntoElement, ParentElement as _, Render, SharedString, Styled, Subscription, Window, div,
 };
 
+/// 搜索的去抖：**数渲染帧，不按墙上时间**。两颗搜索框（书架、书内全文）共用这一份，
+/// 所以「安静多久」只有一个定义。
+///
+/// 为什么要去抖：书架那一趟是整库查询加逐本解封面，书内那一趟是整本扫描（最坏实测
+/// 274 ms，那张表在 `folio_core::search` 的模块头），而一次输入是十几个字 —— 逐字提交
+/// 就是每字扫一遍，而且旧的一趟还没跑完新的一趟又排上。
+///
+/// 为什么按**帧**而不是 `timer`：`background_executor().timer` 不吃测试那把假钟
+/// （`TestAppContext::advance_clock` 推不动它），于是那一档**没法有门** —— 配置落盘的
+/// `shell::SAVE_DEBOUNCE` 就是这么一条至今没有门的代码。按帧的话，测试画几帧就是过几帧。
+/// 代价是「停手之后一帧都不画」就不搜：读者正盯着那颗输入框，改动本身就逼出一帧。
+#[derive(Default)]
+pub struct SearchDebounce {
+    /// 等着去搜的那个词，与已经安静了几帧。`None` = 没有欠着的搜索。
+    pending: Option<(SharedString, u32)>,
+}
+
+/// 安静多少帧才去搜：15 帧约 250 ms，与配置落盘那一档同一量级 —— 再短挡不住一次连击，
+/// 再长读者会觉得「打了字没反应」。
+pub const SEARCH_SETTLE_FRAMES: u32 = 15;
+
+impl SearchDebounce {
+    /// 读者改了词。回 `Some(词)` = 当场就去搜；`None` = 还没到点，调用方只要 `notify`
+    /// 让自己再画一帧。
+    ///
+    /// 空词**不 delay**：他要的是立刻回到整份列表，而那一趟本来也是最便宜的（无词=不查）。
+    pub fn typed(&mut self, word: &str) -> Option<SharedString> {
+        if word.is_empty() {
+            self.pending = None;
+            return Some(word.into());
+        }
+        self.pending = Some((word.into(), 0));
+        None
+    }
+
+    /// 每一渲染帧问一次：安静满了就交出该去搜的那个词并清账（没满就继续等）。
+    pub fn due(&mut self) -> Option<SharedString> {
+        let (word, waited) = self.pending.take()?;
+        if waited + 1 < SEARCH_SETTLE_FRAMES {
+            self.pending = Some((word, waited + 1));
+            return None;
+        }
+        Some(word)
+    }
+}
+
 /// 搜索框向外报的事。
 pub enum SearchBoxEvent {
     /// 查询词变了。清空（框上的 × 或全删）也走这一条，词就是空串。
@@ -111,6 +157,8 @@ mod tests {
 
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    use super::{SEARCH_SETTLE_FRAMES, SearchDebounce};
 
     use gpui_kit::component::{Root, v_flex};
     use gpui_kit::test::TestWindowExt as _;
@@ -251,5 +299,40 @@ mod tests {
         );
         let value = host.read_with(cx, |host, cx| host.search.read(cx).value(cx));
         assert_eq!(value, "ab", "value() 应读出框里当前的词");
+    }
+
+    /// 连打三字：每一帧都不许到点，而到点交出的是**最后一个**词。
+    #[test]
+    fn a_typed_word_is_held_until_the_frames_settle() {
+        let mut debounce = SearchDebounce::default();
+        for word in ["一", "一章", "第一章的"] {
+            assert_eq!(debounce.typed(word), None, "改词当场就去搜：去抖等于没做");
+        }
+        for frame in 0..SEARCH_SETTLE_FRAMES - 1 {
+            assert_eq!(
+                debounce.due(),
+                None,
+                "才安静 {frame} 帧就去搜（这一档是 {SEARCH_SETTLE_FRAMES}）"
+            );
+        }
+        assert_eq!(
+            debounce.due().map(|word| word.to_string()),
+            Some("第一章的".into()),
+            "到点该交最后一个词，而且只交一次"
+        );
+        assert_eq!(debounce.due(), None, "同一笔不许重复触发");
+    }
+
+    /// 清空不等：那是「立刻回到整份列表」，而最坏情况也只是多查一次空。
+    #[test]
+    fn an_emptied_box_searches_immediately() {
+        let mut debounce = SearchDebounce::default();
+        debounce.typed("一章");
+        assert_eq!(
+            debounce.typed("").map(|word| word.to_string()),
+            Some(String::new()),
+            "清空被去抖挡住了"
+        );
+        assert_eq!(debounce.due(), None, "清空的账要一起结掉");
     }
 }

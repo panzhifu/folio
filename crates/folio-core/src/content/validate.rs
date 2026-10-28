@@ -318,7 +318,7 @@ mod tests {
 
         let fixed = FixedDoc {
             pages: vec![FixedPage {
-                source: PageSource::Render { index: 0 },
+                source: PageSource::Render { index: 0, vector: false },
                 width: 0,
                 height: 0,
                 extra_images: Vec::new(),

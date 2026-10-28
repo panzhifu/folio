@@ -117,6 +117,8 @@ fn the_floating_bar_sits_above_the_gesture_strip_without_taking_a_row(
                     Destination::Shelf,
                     SizeClass::Compact,
                     &safe,
+                    false,
+                    _window,
                     |_, _, _| {},
                 ))
         }

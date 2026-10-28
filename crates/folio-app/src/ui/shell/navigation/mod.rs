@@ -181,22 +181,36 @@ impl SizeClass {
 /// 返回的元素会撑满它在布局里拿到的盒子（侧栏自带宽度；底栏是绝对定位的胶囊，不吃行高），
 /// 调用方在外层决定它占哪条边。`safe` 是宿主的系统 inset：底栏靠 `bottom` 那一条离开
 /// 手势条，嵌入侧栏靠 `top` 那一条让开状态栏 / 挖孔。
+///
+/// `folded` = 内容正在往下读、导航该让开。浮起来的那两档（Compact 底栏、Medium 卡片）
+/// 各自用弹簧把位移做出来；Expanded（桌面）不参与 —— 那是常驻导航，鼠标滚轮又频繁。
 pub fn navigation<F>(
     cx: &mut App,
     current: Destination,
     size: SizeClass,
     safe: &host::Insets,
+    folded: bool,
+    window: &mut Window,
     on_select: F,
 ) -> impl IntoElement
 where
     F: Fn(Destination, &mut Window, &mut App) + Clone + 'static,
 {
     match size {
-        SizeClass::Compact => {
-            bottom_bar::bottom_bar(cx, current, bar_offset(safe.bottom), on_select)
-                .into_any_element()
+        SizeClass::Compact => bottom_bar::bottom_bar(
+            cx,
+            current,
+            bar_offset(safe.bottom),
+            folded,
+            window,
+            on_select,
+        )
+        .into_any_element(),
+        SizeClass::Medium => {
+            side_nav(cx, current, true, safe.top, folded, window, on_select).into_any_element()
         }
-        SizeClass::Medium => side_nav(cx, current, true, safe.top, on_select).into_any_element(),
-        SizeClass::Expanded => side_nav(cx, current, false, safe.top, on_select).into_any_element(),
+        SizeClass::Expanded => {
+            side_nav(cx, current, false, safe.top, false, window, on_select).into_any_element()
+        }
     }
 }

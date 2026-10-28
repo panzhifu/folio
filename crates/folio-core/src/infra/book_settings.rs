@@ -228,6 +228,9 @@ mod tests {
             toc_density: TocDensity::Compact,
             toc_max_title_lines: 3,
             toc_dim_read: false,
+            // 图集字节上限也允许一本书单独压一档（扫描本那类「一页就是 12 MB」的想让
+            // 眼前这一页装得下时，不必把整机的预算抬上去）。默认是 0 = 跟随设备。
+            image_cache_bytes: 64 * 1024 * 1024,
         }
     }
 

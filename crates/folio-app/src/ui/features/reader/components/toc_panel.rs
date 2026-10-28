@@ -22,6 +22,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
+
 use folio_core::Priority;
 use folio_core::infra::task::{Cancel, TaskEvent, TaskHandle};
 use folio_core::search::{Found, Hit, Options, Query, scan};
@@ -42,7 +43,9 @@ use gpui_kit::{
     Subscription, Task, WeakEntity, Window, div, hsla, img, px, size,
 };
 
-use crate::ui::components::{BottomSheet, BottomSheetState, SearchBox, SearchBoxEvent};
+use crate::ui::components::{
+    BottomSheet, BottomSheetState, SearchBox, SearchBoxEvent, SearchDebounce,
+};
 use crate::ui::features::reader::model::annotations::Palette;
 use crate::ui::features::reader::model::chrome::percent_label;
 use crate::ui::features::reader::model::session::ReaderSession;
@@ -262,6 +265,8 @@ pub(in crate::ui::features::reader) struct TocPanel {
     screen: Screen,
     /// 正文全文那一档的状态。
     search: Search,
+    /// 还没到期的那一次整本扫描（每敲一个字重新起表，安静满那一档才交）。
+    search_debounce: SearchDebounce,
     /// 「批注」那一格的行表。每帧在 [`Self::marks_pieces`] 里重建一次 —— 书签与批注
     /// 都是几十条的量级，重建比「记得哪一格脏了」便宜，也不会有忘了失效的缓存。
     marks: Vec<MarkRow>,
@@ -309,6 +314,7 @@ impl TocPanel {
             tree: None,
             screen: Screen::default(),
             search: Search::new(),
+            search_debounce: SearchDebounce::default(),
             marks: Vec::new(),
             search_open: false,
             sizes: Rc::new(Vec::new()),
@@ -497,7 +503,7 @@ impl TocPanel {
             let watch = cx.subscribe(&boxed, move |_, _, event: &SearchBoxEvent, cx| {
                 let SearchBoxEvent::Change(value) = event;
                 let value = value.clone();
-                panel.update(cx, |this, cx| this.submit(&value, cx));
+                panel.update(cx, |this, cx| this.search_soon(&value, cx));
             });
             (boxed, watch)
         });
@@ -1351,6 +1357,21 @@ impl TocPanel {
     /// 判据与 `plans/阅读管线.md` §10.3 合并那一档同一条：读者连打五个字会产出五趟请求，
     /// 排队的结果是列表停在第一个字的那两百处上，而那早已不是他要看的了。让在跑的那趟自己
     /// 看见旗标收手（协作式取消，不在半章中间打断），列表由回来的那一趟整个换掉。
+    /// 搜索框每变一次都走这里：**先不扫**。那一趟最坏实测 274 ms（那张表在
+    /// `folio_core::search` 的模块头），而一次输入是十几个字 —— 逐字提交就是每字扫一遍
+    /// 全书，而且旧的那一趟还没跑完新的一趟又开始了。安静满这一档才真的提交。
+    ///
+    /// 清空（空词）不 delay：那一条本来就走 `submit` 里的「没词就不跑」那支，
+    /// 当场把上一次的清掉才是读者要的。
+    fn search_soon(&mut self, raw: &str, cx: &mut Context<Self>) {
+        if let Some(word) = self.search_debounce.typed(raw) {
+            self.submit(&word, cx);
+            return;
+        }
+        // 没到点：画一帧，去抖在 `render` 里按帧结算。
+        cx.notify();
+    }
+
     fn submit(&mut self, raw: &str, cx: &mut Context<Self>) {
         self.search.reset();
         let (Some(query), Some(doc)) = (Query::parse(raw), self.reader.read(cx).searchable())
@@ -1637,6 +1658,10 @@ impl Render for TocPanel {
     /// 左边一张带遮罩的抽屉（正文一寸不让）。哪些行看得见、折了哪几枝、搜的是什么词、
     /// 跳到哪一条 —— 全部只有一份，两种摆法读的是同一个 `TocView`。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 欠着的那一次扫描在这里结算（按帧，理由见 `SearchDebounce`）。
+        if let Some(word) = self.search_debounce.due() {
+            self.submit(&word, cx);
+        }
         if SizeClass::of(window).is_compact() {
             // 弹层**每帧都构造**，收着时也构造 —— 弹簧的采样在里面，只在开着时构造会把
             // 退场动画连状态一起丢（见 `widgets::bottom_sheet` 那段模块注释）。
@@ -1696,6 +1721,7 @@ mod tests {
         Subscription, TestAppContext, point, px, size,
     };
 
+    use crate::ui::components::SEARCH_SETTLE_FRAMES;
     use super::{SEARCH_ROW, Screen, TOC_DRAWER, TOC_DRAWER_INSET, TocEvent, TocPanel};
     use crate::ui::features::reader::model::session::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
@@ -1987,6 +2013,49 @@ mod tests {
     ///
     /// 判据取自 `plans/阅读管线.md` §10.3 合并那一档：只丢请求、让在跑的那趟自己收手。
     /// 这里断的是**同步**那一半（旗标置位、新的一趟接手），回来的结果由上一条验。
+    /// 打一个字不扫一遍全书：那一趟要等安静满 `SEARCH_DEBOUNCE` 才起（SR-1）。
+    ///
+    /// 钉的是入口 `search_soon`（搜索框那颗 `SearchBoxEvent::Change` 只做转发）。三个
+    /// 方向各一格：① 连打三字都不许已经开扫；② 时钟过那一档之后要真的开扫；③ 清空
+    /// 不等 —— 当场就交（空词走「没词就不跑」那一支，所以看的是旗标落下）。
+    ///
+    /// 把去抖拿掉（`search_soon` 直接 `submit`）第 ① 格当场红；到点那一趟丢了
+    /// （`timer` 之后什么都不做）第 ② 格红 —— 两个方向各有东西守着。
+    #[gpui_kit::test]
+    fn a_typed_word_waits_for_the_quiet_window_before_it_scans(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_session, panel, handle, _events, _watch) = open_panel(cx, 460.);
+        panel.update(cx, |panel, cx| {
+            panel.toggle(cx);
+            panel.set_screen(Screen::Search, cx);
+        });
+        for word in ["一", "一章", "第一章的"] {
+            panel.update(cx, |panel, cx| panel.search_soon(word, cx));
+            assert!(
+                !panel.update(cx, |panel, _| panel.search.running),
+                "每敲一个字就扫一遍全书：才打了 {word:?} 就已经开扫"
+            );
+        }
+
+        // 到点：画满那 15 帧（去抖按渲染帧数，理由见 `SearchDebounce`）。
+        for _ in 0..SEARCH_SETTLE_FRAMES {
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+            })
+            .expect("这一屏该画得出来");
+        }
+        assert!(
+            panel.update(cx, |panel, _| panel.search.running),
+            "安静满了也没去扫：到点那一趟被整个跳过了"
+        );
+
+        panel.update(cx, |panel, cx| panel.search_soon("", cx));
+        assert!(
+            !panel.update(cx, |panel, _| panel.search.running),
+            "空词该立刻收上一趟，不等安静那一档"
+        );
+    }
+
     #[gpui_kit::test]
     fn a_newer_query_voids_the_scan_in_flight(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);

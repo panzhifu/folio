@@ -66,6 +66,8 @@ impl DocumentProvider for DjvuAdapter {
             table.push(FixedPage {
                 source: PageSource::Render {
                     index: index as u32,
+                    // DjVu 的一页是拍出来的：源图就是它的像素上限，重画补不出细节。
+                    vector: false,
                 },
                 width: page.display_width(),
                 height: page.display_height(),
@@ -483,7 +485,7 @@ mod tests {
         assert!(fixed.pages[0].width > 0 && fixed.pages[0].height > 0);
         assert!(matches!(
             fixed.pages[0].source,
-            PageSource::Render { index: 0 }
+            PageSource::Render { index: 0, .. }
         ));
         assert!(fixed.cover.is_some(), "首页该栅格化成封面");
     }

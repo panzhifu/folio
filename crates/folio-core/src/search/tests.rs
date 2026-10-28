@@ -466,6 +466,42 @@ fn wps() -> (PathBuf, Box<dyn Document>) {
     (path, doc)
 }
 
+/// 带拉丁字母的那一条查询**对空白不敏感**——PDF 把词缝补错了，搜索这一侧要兜得住。
+///
+/// 钉四件事，每一件都对应一种会静默错法：
+/// 1. 打 `COPYRIGHT` 找得到屏上写的 `COP YRIGHT`（`content::format::pdf::text_layer`
+///    那条几何判据补出来的空格，量过的两组数是 3.29 pt 词内 vs 2.49 pt 真缝，分不开）；
+/// 2. 报出来的字符区间**盖住**那一个空格 —— 少盖一格，跳过去选中的是前半截；
+/// 3. 查询自己写的空白不算数：`THE  PAPER`（两个空格）与正文的 `THEPAPER` 同样找得着；
+/// 4. 中文那一条快路**不改口径**（它走按字节的 `match_indices`，正文里也没有需要跳的
+///    词缝空格）——「第一 段」里打「第一段」照旧找不到，这一条写在这里是为了让下一次
+///    有人把两条路一起改的时候先看见这个决定。
+#[test]
+fn a_latin_query_ignores_the_spaces_pdf_inserted() {
+    let taken = |text: &str, raw: &str| {
+        let query = Query::parse(raw).expect("查询不该是空的");
+        let mut hits = Vec::new();
+        assert!(
+            !scan_chapter(0, text, &query, &Options::default(), &mut hits),
+            "这么短的样本不该撞到命中上限"
+        );
+        hits.iter()
+            .map(|hit| (hit.start, hit.end, chars(text, hit.start, hit.end)))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        taken("10. COP YRIGHT FORMS", "COPYRIGHT"),
+        vec![(4, 14, "COP YRIGHT".into())],
+        "补错的那一个空格要被盖进命中区间，否则跳过去只选中前半截"
+    );
+    assert_eq!(taken("THE  PAPER", "the paper").len(), 1, "查询里多打一个空格不该找不着");
+    assert_eq!(taken("THEPAPER", "THE PAPER").len(), 1, "正文里丢了空格也该找得着");
+    assert_eq!(taken("Title Case", "title").len(), 1, "折叠那一条不许因为这次改动退化");
+    assert!(taken("第一 段", "第一段").is_empty(), "中文那条快路故意不跳空白（见门头的第 4 条）");
+    assert_eq!(taken("第一段正文", "第一").len(), 1, "而正常中文查询不受影响");
+}
+
 /// 那一列字的第 `from..to` 个（按**字符**数，与 `Hit.start` / `Hit.end` 同一把尺）。
 fn chars(text: &str, from: usize, to: usize) -> String {
     text.chars()

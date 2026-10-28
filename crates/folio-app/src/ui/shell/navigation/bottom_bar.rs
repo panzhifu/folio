@@ -6,7 +6,14 @@
 //!
 //! 一格的内容、选中态、hover 全在 [`super::surface::nav_item`]；这里只管把四格摆进胶囊。
 //! 换页的提示只有颜色那一处（与三档一致），不额外画标记条 —— 那会打破整片表面。
+//!
+//! 内容往下读时整条**滑进屏幕下沿**（`folded`），往回拨或回到顶上再滑回来。位移走
+//! `gpui_kit::base::motion::spring`：按元素 id 存状态，反向拨动会从当前值接着走，
+//! 而不是重头再来；减小动态效果时它自己退化为直接到位。
 
+use std::time::Duration;
+
+use gpui_kit::base::motion::{Transition, transition};
 use gpui_kit::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement, Styled,
     TestSupportExt as _, Window, px,
@@ -15,10 +22,18 @@ use gpui_kit::{
 use super::surface::{Shape, floating, nav_item};
 use super::{BAR_HEIGHT, Destination, NAV_MARGIN};
 
+/// 收起/放回的那一程。
+///
+/// 用定时缓动（`Transition` 默认的 ease-out-cubic）而不是弹簧：这一条是**跟手滚动**
+/// 触发的，弹簧的减速段在回滚到底时会被读成「又弹了一下」；定时曲线到点即停，干脆。
+const FOLD_DURATION: Duration = Duration::from_millis(240);
+
 pub(super) fn bottom_bar<F>(
-    cx: &App,
+    cx: &mut App,
     current: Destination,
     bottom: f32,
+    folded: bool,
+    window: &mut Window,
     on_select: F,
 ) -> impl IntoElement
 where
@@ -37,6 +52,22 @@ where
             .into_any_element()
         })
         .collect();
+
+    // 收起 = 整条滑到屏幕下沿之外：`bottom` 是**距下沿的距离**，变负才往下走
+    // （变大是往上抬）。栏顶边越过屏幕下沿需要 `bottom = -BAR_HEIGHT`，再退一圈留白
+    // 让圆角不挂在边上 —— 不能拿 `bottom` 去减，它里面已经含了手势条那段。
+    let target = if folded {
+        -(BAR_HEIGHT + NAV_MARGIN)
+    } else {
+        bottom
+    };
+    let bottom = transition(
+        "folio-nav-fold-bar",
+        target,
+        Transition::new(FOLD_DURATION),
+        window,
+        cx,
+    );
 
     floating(cx)
         .id("folio-bar")

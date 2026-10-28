@@ -27,6 +27,35 @@ cargo test --workspace         # CI 同款：慢几分钟，买的是
   `gpui_kit` 根有个名叫 `test` 的属性宏，glob 进来会让 `#[test]` 递归展开成它。
 - **只引 `pub` 项**。想测私有实现，先想它为什么不是公开的。
 
+## PDF 那三档数：栅格、内存、后台线程
+
+每个数都只有一份定义，这里只写**在哪儿**与**为什么是那个量级**，不在文档里抄第二遍
+（抄的那一份会先过期）。
+
+| 那一格 | 定义在 | 一句话理由 |
+|---|---|---|
+| 整页栅格的长边上限 | `content::format::pdf::RENDER_EDGE` | 让整页那一张不超过 GLES 常见的纹理上限；改它要 bump `INDEX_VERSION`（页表存的宽高按它算） |
+| 放大重画的长边上限 | `content::format::pdf::REGION_EDGE` | 区域图必须超过整页那一档才有意义；不进页表、不进 `INDEX_VERSION`，因为它只活在缓存键里 |
+| 图集攒多少像素 | `ui::features::reader::model::image_atlas::soft_limit` | 按设备分三档；软顶装不下眼前这一页时涨到两倍（`hard_of`），在屏上的格子永远不挤。`reader.image_cache_bytes` 可覆盖 |
+| 后台作业池几条线程 | `ui::services::resident::pool_workers` | 手机那档被**峰值内存**限住（并行画几页就同时有几份画布），桌面那档给的是「交互封顶 + 导入/扫描」 |
+
+量它们的两条臂（都是干净进程一条一趟，`VmHWM` 是进程级峰值）：
+
+```sh
+# 页间到底并不并行：同时画 1/2/3/4 页的墙钟 + 并行度（1.0× = 完全没并行）
+cargo run --release -p folio-core --example pdf-probe -- \
+  tests/fixtures/local/pdf/hugG.pdf parallel 4
+# 放大那一档值多少钱：整页 2048 / 整页 4096 / 四分之一块 4096 三条并排
+cargo run --release -p folio-core --example pdf-probe -- \
+  tests/fixtures/local/pdf/hugG.pdf region 4
+```
+
+**「解码那一截要不要也搬进池」是量出来的，不是猜的**：`folio_app::perf` 那一条
+`PERF decode` 记录每张 PNG 在 gpui `to_image_data` 上花的微秒与解出的像素数
+（`perf::note_image_decode`，按 `folio_app::perf=debug` 出声）。判据是手机上过不过 8 ms：
+过了才去改 `gpui-folio` 把那份解码入口暴露出来复用，**不在 folio 里写第二份解码**
+（EXIF 与动图那两套口径会分叉）。
+
 ## Android 交叉编译
 
 ```bash

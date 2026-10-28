@@ -646,7 +646,7 @@ enum PrefClass {
 /// 「动一下某项偏好」的写法 + 它的归属。名字必须与 `Reader` 的字段名一模一样。
 type PrefTweak = (&'static str, fn(&mut Reader), PrefClass);
 
-const PREFS: [PrefTweak; 16] = [
+const PREFS: [PrefTweak; 17] = [
     ("font_size", |p| p.font_size += 2.0, PrefClass::Layout),
     ("line_height", |p| p.line_height += 0.3, PrefClass::Layout),
     (
@@ -704,6 +704,13 @@ const PREFS: [PrefTweak; 16] = [
         |p| p.toc_dim_read = !p.toc_dim_read,
         PrefClass::Toc,
     ),
+    // 图集的字节上限：几何一律不动，消费它在 `model::image_atlas`（`end_frame` 那一档
+    // 封顶），那里由 `the_configured_cache_bytes_overrides_the_device_tier` 钉住。
+    (
+        "image_cache_bytes",
+        |p| p.image_cache_bytes += 1,
+        PrefClass::PinnedElsewhere,
+    ),
 ];
 
 /// 每一项偏好都归了类，一类都不许漏。
@@ -729,6 +736,7 @@ fn every_preference_is_classified() {
         toc_density,
         toc_max_title_lines,
         toc_dim_read,
+        image_cache_bytes,
     } = Reader::default();
     // 解构出来的值本身没要用：这一份的存在只是让「新增偏好字段」变成编译错误。
     let _ = (
@@ -748,9 +756,10 @@ fn every_preference_is_classified() {
         toc_density,
         toc_max_title_lines,
         toc_dim_read,
+        image_cache_bytes,
     );
 
-    const NAMES: [&str; 16] = [
+    const NAMES: [&str; 17] = [
         "font_size",
         "line_height",
         "paragraph_gap_em",
@@ -767,6 +776,7 @@ fn every_preference_is_classified() {
         "toc_density",
         "toc_max_title_lines",
         "toc_dim_read",
+        "image_cache_bytes",
     ];
     for name in NAMES {
         assert!(

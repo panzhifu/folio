@@ -969,11 +969,12 @@ Apache License 2.0
 
 --------------------------------------------------------------------------------
 Apache License 2.0
-（2 个）
+（3 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - moxcms 0.8.1
+  - pic-scale 0.7.12
   - pxfm 0.1.30
 
                                  Apache License
@@ -3462,11 +3463,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
 BSD 3-Clause "New" or "Revised" License
-（2 个）
+（4 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
+  - alloc-no-stdlib 2.0.4
   - alloc-no-stdlib 3.0.0
+  - brotli 8.0.4
   - brotli 9.0.0
 
 Copyright (c) 2016 Dropbox, Inc.
@@ -3597,10 +3600,11 @@ USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
 BSD 3-Clause "New" or "Revised" License
-（3 个）
+（4 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
+  - alloc-stdlib 0.2.4
   - alloc-stdlib 0.3.0
   - exr 1.74.2
   - sha1_smol 1.0.1
@@ -5717,10 +5721,11 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（1 个）
+（2 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
+  - brotli 8.0.4
   - brotli 9.0.0
 
 Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
@@ -8656,12 +8661,15 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（3 个）
+（6 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
+  - fearless_simd 0.7.0
+  - fearless_simd 1.2.0
   - kurbo 0.11.3
   - kurbo 0.13.1
+  - peniko 0.6.1
   - polycool 0.4.0
 
 Copyright (c) 2018 Raph Levien
@@ -9284,12 +9292,13 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（2 个）
+（3 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - font-types 0.12.6
   - read-fonts 0.43.3
+  - skrifa 0.46.2
 
 Copyright (c) 2019 Fontations Developers
 
@@ -11068,13 +11077,18 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（3 个）
+（8 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - hayro-ccitt 0.4.0
+  - hayro-cmap 0.1.0
+  - hayro-interpret 0.8.0
   - hayro-jbig2 0.3.1
   - hayro-jpeg2000 0.4.1
+  - hayro-postscript 0.1.0
+  - hayro-syntax 0.8.0
+  - hayro 0.8.0
 
 Copyright (c) The Hayro Authors
 
@@ -11439,6 +11453,42 @@ MIT License
   - x11rb 0.13.2
 
 Copyright 2019 x11rb Contributers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+MIT License
+（2 个）
+--------------------------------------------------------------------------------
+
+用到这一份的：
+  - vello_common 0.3.0
+  - vello_cpu 0.3.0
+
+Copyright 2020 the Vello Authors
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -13464,6 +13514,7 @@ MIT License
   - accesskit_windows 0.34.0
   - block2 0.6.2
   - block 0.1.6
+  - brotli-decompressor 5.0.3
   - brotli-decompressor 6.0.1
   - cesu8 1.1.0
   - chrono 0.4.45
@@ -13566,7 +13617,6 @@ MIT License
   - windows-strings 0.5.1
   - windows-sys 0.45.0
   - windows-sys 0.48.0
-  - windows-sys 0.52.0
   - windows-sys 0.59.0
   - windows-sys 0.60.2
   - windows-sys 0.61.2
@@ -13905,11 +13955,12 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（5 个）
+（6 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - android-activity 0.6.1
+  - color 0.3.3
   - half 2.7.1
   - linebender_resource_handle 0.1.1
   - str_indices 0.4.4
@@ -14523,6 +14574,40 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+MIT License
+（1 个）
+--------------------------------------------------------------------------------
+
+用到这一份的：
+  - deflate64 0.1.12
+
+The MIT License (MIT)
+
+Copyright (c) .NET Foundation and Contributors
+Copyright (c) anatawa12 2023
+
+All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 
 --------------------------------------------------------------------------------
@@ -15556,6 +15641,36 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+MIT License
+（1 个）
+--------------------------------------------------------------------------------
+
+用到这一份的：
+  - guillotiere 0.7.0
+
+The MIT License (MIT)
+
+Copyright (c) 2019 Nicolas Silva
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 --------------------------------------------------------------------------------

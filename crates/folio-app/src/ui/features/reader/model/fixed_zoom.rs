@@ -20,11 +20,15 @@ use gpui_kit::{Bounds, Pixels, point, px, size};
 /// 不缩到比「铺满」更小。要看得更小是一屏摆两页的事（那一档定版式没有），不是缩放的事。
 pub const MIN_SCALE: f32 = 1.0;
 
-/// 最多放大到 4 倍。源图像素不够时按 [`max_scale`] 先封顶。
+/// 最多放大到 8 倍。源图像素不够时按 [`max_scale`] 先封顶。
 ///
-/// 4 这个数管的是「别把一张 600 像素宽的扫描页摊满整屏」那种不成样子的放大；
-/// 它不承诺清晰度 —— 清晰度由源图与 PDF 的栅格档位（`RENDER_EDGE`）决定。
-pub const MAX_SCALE: f32 = 4.0;
+/// 从前是 4，那一档的理由是「再往上只是把同一批像素摊开」。定版式的**矢量页**打破了
+/// 这个前提：那种页的像素是算出来的，捏开放大后看得见的那一块会按 `REGION_EDGE`
+/// （4096）重画一遍，细节跟着翻倍，所以上限也跟着抬。
+///
+/// 抬到 8 **不会**让扫描件与漫画页糊成一团：那一族仍然被 `max_scale` 的第一句按
+/// 源像素封顶（`源图宽 / 铺满宽`），8 只是绝对天花板，够不着它就轮不到它说话。
+pub const MAX_SCALE: f32 = 8.0;
 
 /// 定版式阅读页的显示变换。`Default` 就是「铺满、没有平移」。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -114,6 +118,83 @@ pub(in crate::ui::features::reader) fn max_scale(source_width: f32, drawn_width:
         return MIN_SCALE;
     }
     (source_width / drawn_width).clamp(MIN_SCALE, MAX_SCALE)
+}
+
+/// 「屏幕上看得见的那一块」换算回**页表那把尺**的像素矩形 —— 放大重画那一档的输入。
+///
+/// 三个坐标层在这一次换算里都要过一遍，所以名字写死在这里：
+/// - **1x 内容坐标**（dp）：这一格排版出来的 `(x, y, w, h)`，与页栈算出来的是同一份；
+/// - **屏幕坐标**（dp）：[`FixedZoom::map`] 之后的那块 = `pivot + (x − pivot)·scale + pan`；
+/// - **页表像素**：`source`，与 `FixedPage::width/height` 同一把尺（core 那边
+///   `PageRegion` 要的就是这一把，换算不留给调用方）。
+///
+/// 三种交 `None`，每一条都是「这一趟不该花钱」：
+/// - 没放大：手里那一档已经比屏幕要的还细，重画只是白付一趟栅格化；
+/// - 那一格整个滚出可视区：交集是空的；
+/// - 源尺寸是 0（页表读不出框的那一页，摆位本来就走兜底）。
+pub(in crate::ui::features::reader) fn visible_region(
+    zoom: FixedZoom,
+    pivot: (f32, f32),
+    tile: (f32, f32, f32, f32),
+    source: (u32, u32),
+    viewport: (f32, f32, f32, f32),
+) -> Option<folio_core::content::format::PageRegion> {
+    let (tx, ty, tw, th) = tile;
+    let (vx, vy, vw, vh) = viewport;
+    if !zoom.is_zoomed() || tw <= 0.0 || th <= 0.0 || source.0 == 0 || source.1 == 0 {
+        return None;
+    }
+    let (pan_x, pan_y) = zoom.pan();
+    let scale = zoom.scale();
+    // 那一格在屏幕上的矩形（缩放与平移之后）。
+    let drawn = (
+        pivot.0 + (tx - pivot.0) * scale + pan_x,
+        pivot.1 + (ty - pivot.1) * scale + pan_y,
+        tw * scale,
+        th * scale,
+    );
+    let x0 = drawn.0.max(vx);
+    let y0 = drawn.1.max(vy);
+    let x1 = (drawn.0 + drawn.2).min(vx + vw);
+    let y1 = (drawn.1 + drawn.3).min(vy + vh);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    // 屏幕上这一块占那一格的几分之几 → 同一个分率乘页表像素。分率而不是绝对 dp：
+    // 页表那把尺与 dp 之间没有固定比例（一页铺满多宽由版心定），只有「占这页的多少」
+    // 是两边都认的数。
+    let to_px = |frac: f32, span: u32| {
+        (frac * span as f32)
+            .round()
+            .clamp(0.0, span as f32) as u32
+    };
+    let region = folio_core::content::format::PageRegion {
+        x0: to_px((x0 - drawn.0) / drawn.2, source.0),
+        y0: to_px((y0 - drawn.1) / drawn.3, source.1),
+        x1: to_px((x1 - drawn.0) / drawn.2, source.0),
+        y1: to_px((y1 - drawn.1) / drawn.3, source.1),
+    };
+    // 夹完是空的（放大到极窄的一条、两个分率都落到同一个整数）就别去画。
+    region.size().is_some().then_some(region)
+}
+
+/// 那一块要按多大输出（像素）。规则一句话：**整页的长边折到 `REGION_EDGE` 那一档**。
+///
+/// 为什么不是「屏幕上这一块占多少 dp 就要多少像素」：那要把设备像素比算进来，而这一层
+/// 手里没有它；而「整页按 4096 那一档画，取这一块」是一个只依赖页表的数 —— 比例是
+/// `REGION_EDGE / 页的长边`，与窗口、与 DPR、与读者捏到几倍都无关。于是缓存键里的
+/// `@4096` 说的就是这件事，而它是**细节翻倍**（`RENDER_EDGE` 的那一档是 2048）。
+pub(in crate::ui::features::reader) fn region_output(
+    region: folio_core::content::format::PageRegion,
+    source: (u32, u32),
+) -> Option<(u32, u32)> {
+    let (w, h) = region.size()?;
+    let long = source.0.max(source.1).max(1) as f32;
+    let k = folio_core::content::format::pdf::REGION_EDGE as f32 / long;
+    Some((
+        (w as f32 * k).round().max(1.0) as u32,
+        (h as f32 * k).round().max(1.0) as u32,
+    ))
 }
 
 /// 一根轴上「绕 `screen` 这一点从 `from` 倍变到 `to` 倍」之后的平移量。
@@ -259,6 +340,7 @@ mod tests {
 
     use super::{
         FixedZoom, MAX_SCALE, MIN_SCALE, anchor_pan, anchor_scroll, clamp_axis, max_scale,
+        region_output, visible_region,
     };
 
     /// `delta` 是乘法：两趟 10% 等于一趟 21%。
@@ -281,13 +363,71 @@ mod tests {
         assert_eq!(zoom.scale(), MAX_SCALE);
     }
 
-    /// 上限按源图像素算，再按 4 倍封顶；源图比铺满窄时不给放大。
+    /// 上限按源图像素算，再按 [`MAX_SCALE`] 那一档封顶；源图比铺满窄时不给放大。
     #[test]
     fn the_ceiling_follows_the_source_pixels() {
         assert_eq!(max_scale(2000.0, 1000.0), 2.0);
         assert_eq!(max_scale(100_000.0, 1000.0), MAX_SCALE);
         assert_eq!(max_scale(600.0, 1000.0), MIN_SCALE);
         assert_eq!(max_scale(0.0, 0.0), MIN_SCALE, "还没量到尺寸时不放大");
+        // 天花板抬到 8 是给**矢量页重画**那一档用的，不是让窄源图硬放的：
+        // 600 px 的扫描页铺满 1000 dp 仍然放不大（第一句就封顶），这条不许跟着常数一起松。
+        assert_eq!(MAX_SCALE, 8.0);
+    }
+
+    /// 放大后看得见的那一块 → 页表像素矩形。数全是手算的：
+    /// 页 1000×2000 px 铺在 500×1000 dp 上，捏到 2 倍 ⇒ 屏幕上那一格是 1000×2000 dp。
+    #[test]
+    fn the_visible_block_maps_back_to_page_pixels() {
+        let source = (1000u32, 2000u32);
+        let tile = (0.0f32, 0.0, 500.0, 1000.0);
+        let mut zoom = FixedZoom::default();
+        zoom.set_scale(2.0, MAX_SCALE);
+        // 视口只露出屏幕左上那 500×500 dp：占那一格的一半宽、四分之一高。
+        let region = visible_region(zoom, (0.0, 0.0), tile, source, (0.0, 0.0, 500.0, 500.0))
+            .expect("放大且看得见，就该给出一块");
+        assert_eq!(
+            (region.x0, region.y0, region.x1, region.y1),
+            (0, 0, 500, 500),
+            "半宽 = 500 px、四分之一高 = 500 px"
+        );
+        // 输出那一档：长边折到 `REGION_EDGE` ⇒ 比例 4096/2000，与页表那把尺同乘。
+        let (w, h) = region_output(region, source).expect("非空的块要有输出尺寸");
+        assert_eq!((w, h), (1024, 1024), "500 × 4096/2000 = 1024");
+
+        // 往上平移 1000 dp（手指把页面上推）：露出来的是页面中段那一条。
+        zoom.set_pan((0.0, -1000.0));
+        let panned = visible_region(zoom, (0.0, 0.0), tile, source, (0.0, 0.0, 500.0, 500.0))
+            .expect("平移后仍然看得见");
+        assert_eq!(
+            (panned.x0, panned.y0, panned.x1, panned.y1),
+            (0, 1000, 500, 1500),
+            "屏幕顶那一条对应页面上 1/2 到 3/4 那一段"
+        );
+    }
+
+    /// 三种「不该花钱」的路都交 `None`：没放大、滚出可视区、页表读不出尺寸。
+    #[test]
+    fn an_unzoomed_or_empty_view_asks_for_no_region() {
+        let source = (1000u32, 2000u32);
+        let tile = (0.0f32, 0.0, 500.0, 1000.0);
+        let zoom = FixedZoom::default();
+        assert!(
+            visible_region(zoom, (0.0, 0.0), tile, source, (0.0, 0.0, 500.0, 500.0)).is_none(),
+            "铺满那一档手里已经够细，不该去排一趟 4096"
+        );
+        let mut zoomed = FixedZoom::default();
+        zoomed.set_scale(2.0, MAX_SCALE);
+        // 那一格整个滚到视口上面去了（平移 5000 dp 向上）。
+        zoomed.set_pan((0.0, -5000.0));
+        assert!(
+            visible_region(zoomed, (0.0, 0.0), tile, source, (0.0, 0.0, 500.0, 500.0)).is_none(),
+            "看不见就不该画"
+        );
+        assert!(
+            visible_region(zoomed, (0.0, 0.0), tile, (0, 0), (0.0, 0.0, 500.0, 500.0)).is_none(),
+            "页表读不出尺寸的那一页没有可用的尺"
+        );
     }
 
     /// 绕手指那一点缩放：屏幕上的锚点前后对应同一个内容点（解出来的平移回代验算）。

@@ -78,8 +78,7 @@ pub enum Error {
     ///
     /// 单独立一条而不是混进 `Io`，是因为它的后果是「这次没有诊断输出」而不是「某个文件
     /// 读不到」—— 调用方（入口）对此只需要做一件事：照常启动，把原因说给还能看见的地方。
-    /// 装的是 `try_init` 那个错误（它除了 subscriber 冲突，还可能带上 `log` facade 那一条），
-    /// 原文留在链上，别压掉。
+    /// 装的是 `set_global_default` 那个错误（subscriber 已被别处占住），原文留在链上。
     #[error("日志装不上：这个进程里只有一个 subscriber 的位置（{0}）")]
     Logging(#[source] Source),
 
@@ -129,8 +128,8 @@ impl Error {
     }
 }
 
-impl From<tracing_subscriber::util::TryInitError> for Error {
-    fn from(err: tracing_subscriber::util::TryInitError) -> Self {
+impl From<tracing::subscriber::SetGlobalDefaultError> for Error {
+    fn from(err: tracing::subscriber::SetGlobalDefaultError) -> Self {
         Self::Logging(Box::new(err))
     }
 }

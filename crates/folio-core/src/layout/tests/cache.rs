@@ -75,7 +75,7 @@ type PrefTweak = (&'static str, fn(&mut crate::infra::config::Reader));
 
 /// 每项读者偏好的「动一下它」写法。清单与 `Reader` 的字段表一一对应
 /// （下面那条断言守着），加字段时照着补一行。
-const PREF_TWEAKS: [PrefTweak; 16] = [
+const PREF_TWEAKS: [PrefTweak; 17] = [
     ("font_size", |p| p.font_size += 1.0),
     ("line_height", |p| p.line_height += 0.1),
     ("paragraph_gap_em", |p| p.paragraph_gap_em += 0.1),
@@ -96,6 +96,10 @@ const PREF_TWEAKS: [PrefTweak; 16] = [
     }),
     ("toc_max_title_lines", |p| p.toc_max_title_lines += 1),
     ("toc_dim_read", |p| p.toc_dim_read = !p.toc_dim_read),
+    // 图集的字节上限：它不改一行几何，但**跟着整份 `Reader` 进键**（这一格的口径是
+    // 「序列化整份取哈希」，没有逐字段豁免）。消费它的代码在 `ui::features::reader::
+    // model::image_atlas`，那里有一条测试钉住覆盖生效。
+    ("image_cache_bytes", |p| p.image_cache_bytes += 1),
 ];
 
 /// 每一项读者偏好都得进键：漏一项就是「改了设置版式不动」，而屏幕上看不出来。

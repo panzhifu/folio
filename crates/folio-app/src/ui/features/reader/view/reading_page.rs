@@ -195,11 +195,14 @@ impl ReadingPage {
 
     /// 落库。外壳在 pop 之前调它。
     pub fn close(&mut self, cx: &mut Context<Self>) {
-        self.reader.update(cx, |reader, _cx| {
+        self.reader.update(cx, |reader, cx| {
             // 先把挂着的那一趟翻页放下。退场那几百毫秒里这一层的时钟不再续帧，`turn` 会冻在
             // 松手前那一刻 —— 于是仿真翻页那张网格把一片纸背留在书架上（2026-10-19 真机撞见）。
             reader.turn = None;
             reader.persist_position();
+            // 差量那一笔与位置同一次离席要结：它平时等安静 24 帧（去抖，见
+            // `sync_book_settings`），而「拖完最后一格就按返回」不会等到那一档。
+            reader.flush_book_settings(cx);
             // 位置与时长是同一次离席要结的两笔账：漏掉后一笔，这一段就只能靠
             // 那条时钟在五分钟之内结掉，而读者往往在五分钟之内就再没回来过。
             reader.end_reading();
@@ -210,8 +213,11 @@ impl ReadingPage {
     /// 随时可能被回收，那是最后一个可靠的机会）。时长那一笔不结 —— 它有自己的 60 秒
     /// 时钟，把一段还没走完的段落在这里结掉只会把它切碎。
     pub fn flush_position(&mut self, cx: &mut Context<Self>) {
-        self.reader
-            .update(cx, |reader, _cx| reader.persist_position());
+        self.reader.update(cx, |reader, cx| {
+            reader.persist_position();
+            // 同上：失焦是 Android 切后台之前最后一个可靠的机会，两笔账一起结。
+            reader.flush_book_settings(cx);
+        });
     }
 
     pub fn book_id(&self, cx: &App) -> Option<i64> {

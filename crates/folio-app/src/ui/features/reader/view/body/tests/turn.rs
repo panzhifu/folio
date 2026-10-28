@@ -759,3 +759,116 @@ fn a_wheel_notch_turns_exactly_one_page(cx: &mut TestAppContext) {
         "三格三页：不该攒着，也不该一次跳两页"
     );
 }
+
+/// 「不走动画」那一档在章界：页号与锚章都得当场落过去，不能静默丢掉。
+///
+/// 这一档不挂时钟（`start_turn` 返回 false），而换章只在动画走完那一帧由
+/// `finish_chapter_turn` 做 —— 从前这条路上没有任何人补这一下，读者按到的是
+/// 「章末点两侧没反应」。两向各钉一次：往后落在下一章首页，往回落在上一章末页。
+#[gpui_kit::test]
+fn the_disabled_style_still_crosses_a_chapter(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &two_chapter_flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::None);
+    });
+    let last = view.read_with(cx, |v, _| v.page_count().saturating_sub(1));
+    assert!(last > 0, "前置：第一章该切成多页");
+    view.update(cx, |v, cx| v.set_page(last, cx));
+    settle(cx, handle);
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    for _ in 0..4 {
+        settle(cx, handle);
+    }
+    assert_eq!(
+        view.read_with(cx, |v, _| (v.chapter_index(), v.page())),
+        (1, 0),
+        "章末按下一页该落在第二章首页"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_none()
+            && v.pending_chapter_turn.is_none()),
+        "不走动画那一档不该留下动画或 pending"
+    );
+
+    view.update(cx, |v, cx| v.scroll_page(-1, cx));
+    for _ in 0..4 {
+        settle(cx, handle);
+    }
+    assert_eq!(
+        view.read_with(cx, |v, _| (v.chapter_index(), v.page())),
+        (0, last),
+        "章首按上一页该落在第一章末页"
+    );
+}
+
+/// 松手那一腿的时钟从**抬手那一刻**起算，不是从第一帧起算。
+///
+/// 夹具在事件当刻就会渲一帧（`TestWindow` 在 `update_window` 里就画），真机上那一帧
+/// 要到下一个 vsync 才来 —— 这一截正是旧行为吞掉的那一帧。所以这条不发射手事件，
+/// 直接把「抬手发生在 16 ms 前」写进状态：第一帧就该按 16 ms 走，而不是停在原地。
+#[gpui_kit::test]
+fn the_release_leg_clock_starts_at_the_release_not_the_first_frame(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::session::TurnRun;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Slide);
+    });
+
+    // 一笔往左拖到过半屏之前：跟手起来，页号还没动。
+    raw_touch(cx, handle, TouchPhase::Started, 300.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 120.0);
+    let (held, turn) = view.read_with(cx, |v, _| (v.page_shift, v.turn));
+    let TurnRun::Following { t } = turn.expect("过阈值该起跟手").run else {
+        panic!("跟手那一趟该在 Following");
+    };
+    assert_ne!(held, (0.0, 0.0), "前置：跟手那一刻纸该带着位移");
+
+    // 抬手发生在这一刻；第一帧要到 16 ms 之后才来。
+    let released_at = cx.update(|cx| cx.background_executor().now());
+    cx.executor().advance_clock(Duration::from_millis(16));
+    view.update(cx, |v, _| {
+        let mut turn = v.turn.expect("该还在跟手");
+        v.turn_seq += 1;
+        turn.seq = v.turn_seq;
+        turn.run = TurnRun::Released {
+            from: t,
+            revert: false,
+            over: Duration::from_millis(280),
+            since: released_at,
+        };
+        v.turn = Some(turn);
+    });
+
+    turn_frame(cx, handle, Duration::ZERO);
+    let moved = view.read_with(cx, |v, _| v.page_shift);
+    assert_ne!(
+        moved, held,
+        "抬手后的第一帧就该按 16 ms 走，实得仍停在 {held:?}"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.turn).is_some(),
+        "16 ms 远没到落定"
+    );
+}

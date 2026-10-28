@@ -360,6 +360,25 @@ pub fn scan_chapter(
 ///
 /// 两条路都只报**不重叠**的命中，和 `str::match_indices` 的既有行为一致：
 /// 「aa」在「aaa」里是一处而不是两处。
+///
+/// ## 带拉丁字母的那一条对**空白不敏感**
+///
+/// PDF 那一族的字序是几何算出来的（`content::format::pdf::text_layer`：两格之间的缝超过
+/// 字高四分之一就补一个空格）。**这一补有时是错的**，而且是量出来的错：
+/// `tests/fixtures/oss/pdf/wps-paper.pdf` 第 1 页那一行 `TITLE OF THE PAPER` 里，
+/// `I`→`T` 那个**词内**的缝是 3.29 pt（0.41 倍字高），而 `THE|PAPER` 那个**真词缝**
+/// 只有 2.49 pt（0.31 倍字高）。两者在同一段里就是重叠的 ⇒ 没有任何一个倍数能把它们
+/// 分开（判据换成别的几何量也一样：那一页 WPS 是把 `TLE` 当第二个文本对象写的，
+/// 前 40 个字形里一个无墨空格都没有，而 poppler 靠的就是那个空格字符）。
+///
+/// 所以那一族照旧补空格（**宁可在排宽的标题里多补一个，也不把正文的词粘在一起** ——
+/// 后者会让每一段都变成一个长词，糟得多），而搜索这一侧不认空白：读者打 `COPYRIGHT`
+/// 找得到屏上写的 `COP YRIGHT`，打 `THE PAPER` 也找得到 `THEPAPER`。
+/// 命中交回的还是**原文的字符区间**（含那一个补出来的空格），所以选中、批注锚点、
+/// 片段那三处的下标一个都不挪。
+///
+/// 中文那一条快路（查询里没有有大小写之分的字）**不动**：它走按字节的 `match_indices`
+/// （SIMD，实测 12.8 MB 正文 6 ms），而正文里本来就没有需要跳过的词缝空格。
 fn each_hit(text: &str, query: &Query, on: &mut dyn FnMut(usize, usize, usize) -> bool) {
     if !query.folds {
         let needle = query.text.as_str();
@@ -380,7 +399,18 @@ fn each_hit(text: &str, query: &Query, on: &mut dyn FnMut(usize, usize, usize) -
         }
         return;
     }
-    let needle: Vec<char> = query.text.chars().map(fold).collect();
+    // 查询自己写的空白也丢掉：`THE  PAPER`（两个空格）与 `THEPAPER` 要同样找得着。
+    let needle: Vec<char> = query
+        .text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(fold)
+        .collect();
+    if needle.is_empty() {
+        // 整串都是空白：`parse` 去过两头，走不到这里；走到了也不该把「空」当成
+        // 「处处命中」—— 那会把每一格都报成命中。
+        return;
+    }
     let mut chars = 0usize;
     let mut after = 0usize;
     for (at, first) in text.char_indices() {
@@ -388,7 +418,8 @@ fn each_hit(text: &str, query: &Query, on: &mut dyn FnMut(usize, usize, usize) -
             chars += 1;
             continue;
         }
-        if fold(first) == needle[0]
+        if !first.is_whitespace()
+            && fold(first) == needle[0]
             && let Some(end) = match_folded(text, at, &needle)
         {
             if !on(at, end, chars) {
@@ -400,15 +431,24 @@ fn each_hit(text: &str, query: &Query, on: &mut dyn FnMut(usize, usize, usize) -
     }
 }
 
-/// 从 `byte` 起，`needle`（已折叠）能不能逐字对上。对上了给命中的**末字节**。
+/// 从 `byte` 起，`needle`（已折过、已去掉空白）能不能逐字对上。对上了给命中的**末字节**。
+///
+/// **正文里的空白直接跨过**：每比一个 needle 字之前先把挨着的空白吃掉（见
+/// [`each_hit`] 那一节量的那两组数）。末字节停在**最后一个对上的字之后**，所以命中
+/// 尾巴上那些空白不算进命中区间；中间跨过去的空白算（下标要能盖住屏上那几个字）。
 fn match_folded(text: &str, byte: usize, needle: &[char]) -> Option<usize> {
     let mut at = byte;
     for want in needle {
-        let found = text[at..].chars().next()?;
-        if fold(found) != *want {
-            return None;
+        loop {
+            let found = text[at..].chars().next()?;
+            at += found.len_utf8();
+            if !found.is_whitespace() {
+                if fold(found) != *want {
+                    return None;
+                }
+                break;
+            }
         }
-        at += found.len_utf8();
     }
     Some(at)
 }

@@ -358,17 +358,33 @@ fn write_tombstone(
     kind: TombstoneKind,
     delete: &crate::sync::DeleteRecord,
 ) -> Result<()> {
+    record_tombstone(conn, kind, &delete.uid, &delete.book_hash, delete.deleted_at)
+}
+
+/// 记一条墓碑。**写它的有三处**（删批注、删书签、同步合并带进来的删除），全走这一个
+/// 函数：分头写就会有一处先漏掉下面那条「迟到的墓碑不许把删除时间改早」。
+pub(crate) fn record_tombstone(
+    conn: &rusqlite::Connection,
+    kind: TombstoneKind,
+    uid: &str,
+    book_hash: &str,
+    deleted_at: i64,
+) -> Result<()> {
+    if uid.is_empty() || book_hash.is_empty() {
+        // 没有 `uid` 或没有内容哈希的行**传不到任何地方**（跨设备靠这两样认身份），
+        // 记一条对不上号的墓碑只会让对端把「这里删过一件不存在的事」读成删除。
+        return Ok(());
+    }
+    // `WHERE excluded.deleted_at > 现有那条` 是 ST-3 那一刀：一条迟到的旧墓碑（另一台
+    // 设备离线时带的旧时间）把 `deleted_at` 改**早**之后，合并时那条更早的活跃记录就能
+    // 翻盘 —— 症状是读者删掉的东西过几天自己回来，而两处各自都还自洽。
     conn.execute(
         "INSERT INTO sync_tombstones (kind, book_hash, uid, deleted_at)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(kind, uid) DO UPDATE SET
-           book_hash = excluded.book_hash, deleted_at = excluded.deleted_at",
-        params![
-            tombstone_kind_str(kind),
-            delete.book_hash,
-            delete.uid,
-            delete.deleted_at
-        ],
+           book_hash = excluded.book_hash, deleted_at = excluded.deleted_at
+         WHERE excluded.deleted_at > sync_tombstones.deleted_at",
+        params![tombstone_kind_str(kind), book_hash, uid, deleted_at],
     )?;
     Ok(())
 }
@@ -639,5 +655,156 @@ mod tests {
         assert_eq!(local.skipped_books, 1);
         assert_eq!(local.snapshot.books.len(), 1);
         assert!(local.snapshot.books.contains_key("hash-a"));
+    }
+
+    /// ST-2：**那一行与那条墓碑同生同死**。
+    ///
+    /// 注入办法是 SQLite 的 `RAISE`：在 `sync_tombstones` 上装一枚 `BEFORE INSERT` 触发器，
+    /// 让墓碑那一写当场失败 —— 正好落在「DELETE 已成、墓碑还没记」的那一步。没有事务的
+    /// 那一版：批注行没了、墓碑没记上，跨设备那边永远不知道删过 ⇒ 下次同步它在另一台
+    /// 设备上活着回来，而读者的屏上早就没有这条了。
+    ///
+    /// 这里不用 `Store::in_memory`：内存库的 schema 只活在那一条连接里，注入用的触发器
+    /// 必须由**第二条连接**装到同一个库文件上才生效（`Store` 自己不暴露连接，走文件库）。
+    #[test]
+    fn a_failed_tombstone_write_rolls_back_the_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("folio.db");
+        let store = Store::open_at(&db).unwrap();
+        let book = store
+            .add_book(Path::new("/books/a.epub"), &meta("书甲"))
+            .unwrap();
+        store.set_content_hash(book, "hash-a", "sha256").unwrap();
+        let annotation = store
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "本机",
+                "amber",
+                AnnotationStyle::default(),
+            )
+            .unwrap();
+        let bookmark = store.add_bookmark(book, &anchor(0, 10, 10)).unwrap();
+
+        let injector = rusqlite::Connection::open(&db).unwrap();
+        injector
+            .execute_batch(
+                "CREATE TRIGGER inject_no_tombstone BEFORE INSERT ON sync_tombstones
+                 BEGIN SELECT RAISE(ABORT, '注入：墓碑写不下去'); END;",
+            )
+            .unwrap();
+
+        assert!(
+            store.delete_annotation(annotation).is_err(),
+            "注入没生效：墓碑那一写本该失败"
+        );
+        assert_eq!(
+            store.annotations(book).unwrap().len(),
+            1,
+            "墓碑记不上就不该把读者的批注删掉：那一行必须原地还在"
+        );
+        assert!(
+            store.delete_bookmark(bookmark).is_err(),
+            "注入没生效：书签那条也一样"
+        );
+        assert_eq!(
+            store.bookmarks(book).unwrap().len(),
+            1,
+            "删书签与记墓碑是同一笔：缺一笔就当没发生过"
+        );
+
+        // 拆掉注入之后，同一条删除要正常走通（挡住「事务包错了方向、什么时候都失败」）。
+        injector
+            .execute_batch("DROP TRIGGER inject_no_tombstone")
+            .unwrap();
+        drop(injector);
+        store.delete_annotation(annotation).unwrap();
+        assert!(store.annotations(book).unwrap().is_empty(), "撤了注入就该删得动");
+        assert_eq!(
+            store
+                .collect_sync("dev", i64::MAX)
+                .unwrap()
+                .snapshot
+                .books["hash-a"]
+                .tombstones
+                .len(),
+            1,
+            "删成的那一条要留下墓碑（另一台设备才知道要删）"
+        );
+    }
+
+    /// ST-3：**迟到的墓碑不许把删除时间改早**。
+    ///
+    /// 另一台设备离线时带的旧时间戳合并进来，如果无条件覆盖 `deleted_at`，删除时间被改早
+    /// 之后，合并就可能让一条**更旧的活跃记录**翻盘 —— 症状是读者删掉的东西过几天自己回来。
+    #[test]
+    fn a_late_tombstone_never_moves_the_deletion_back() {
+        let (store, book) = store_with_book();
+        let uid = store
+            .add_annotation(
+                book,
+                &anchor(0, 0, 4),
+                "本机",
+                "amber",
+                AnnotationStyle::default(),
+            )
+            .map(|_| ())
+            .and_then(|_| {
+                store
+                    .collect_sync("dev", i64::MAX)
+                    .map(|local| local.snapshot.books["hash-a"].annotations[0].uid.clone())
+            })
+            .unwrap();
+        store.delete_annotation(
+            store
+                .annotations(book)
+                .unwrap()
+                .first()
+                .map(|row| row.id)
+                .unwrap(),
+        )
+        .unwrap();
+        let kept = || {
+            store
+                .collect_sync("dev", i64::MAX)
+                .unwrap()
+                .snapshot
+                .books["hash-a"]
+                .tombstones
+                .iter()
+                .find(|tomb| tomb.uid == uid)
+                .map(|tomb| tomb.deleted_at)
+        };
+        let local = kept().expect("删成的那一条该有墓碑");
+
+        // 迟到的一条（时间更早）合并进来：不许动。
+        store
+            .apply_sync(&Plan {
+                annotation_deletes: vec![DeleteRecord {
+                    book_hash: "hash-a".into(),
+                    uid: uid.clone(),
+                    deleted_at: local - 50,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            kept(),
+            Some(local),
+            "迟到的旧墓碑把删除时间改早了：下一次合并会让那条更旧的活跃记录翻盘"
+        );
+
+        // 而更新的一条照常推进（不许把 WHERE 写成永远不成立）。
+        store
+            .apply_sync(&Plan {
+                annotation_deletes: vec![DeleteRecord {
+                    book_hash: "hash-a".into(),
+                    uid: uid.clone(),
+                    deleted_at: local + 50,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(kept(), Some(local + 50), "更新的一条该收下");
     }
 }

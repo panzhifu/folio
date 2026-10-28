@@ -272,6 +272,75 @@ fn the_v8_migration_drops_the_text_and_keeps_a_locator() {
 
 /// 定版式文档（CBZ 等）落库时也要盖 `index_version` —— 不然 `stale_reason` 永远说它旧，
 /// 每次开书都白重扫一遍。这是那个既存 bug 的回归门。
+/// ST-1：**一条迁移一笔事务** —— 崩在半路不许留下一套半的库。
+///
+/// 注入办法：给 `chapters` 装一枚 `BEFORE UPDATE` 触发器，让 v8 那半 Rust 回填写不下去，
+/// 失败点就正好落在「这一条的 DDL 已跑、回填没成」那一格。没有事务的那一版会留下
+/// `user_version = 8` + 正文已被删 + 位置没回填，而**下次开机直接跳到 v9**，谁都不会再
+/// 回来补那一截 —— 症状是隔了七个版本之后某一本书的章打不开。另一种半套（DDL 成了、
+/// 版本没写）更硬：重跑 `CREATE TABLE` 当场失败，库永远打不开。
+#[test]
+fn a_migration_that_fails_halfway_leaves_the_library_at_the_previous_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for sql in &MIGRATIONS[..7] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        conn.execute(
+            "INSERT INTO books (path, title, authors, format, size, added_at)
+             VALUES ('a.epub', 'A', '', 'epub', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chapters (book_id, idx, title, spine_href, char_len)
+             VALUES (1, 0, '第一章', 'OEBPS/c1.xhtml', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chapter_text (chapter_id, text) VALUES (1, '正文')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER inject_no_backfill BEFORE UPDATE ON chapters
+             BEGIN SELECT RAISE(ABORT, '注入：回填走不下去'); END;",
+        )
+        .unwrap();
+    }
+
+    assert!(
+        Store::open_at(&db).is_err(),
+        "注入没生效：v8 这一趟回填该失败"
+    );
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(
+        version, 7,
+        "半路失败的迁移不许把版本推上去：推上去就是叫下一次跳过这一条"
+    );
+    let kept: i64 = conn
+        .query_row("SELECT count(*) FROM chapter_text", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 1, "这一条的 DDL 也得跟着回滚：回填没成就不许已经把正文删了");
+    drop(conn);
+
+    // 撤掉注入之后同一本库要能**完整地**升上去：回滚的含义是「停在上一版」，不是弄坏库。
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("DROP TRIGGER inject_no_backfill").unwrap();
+    drop(conn);
+    let store = Store::open_at(&db).unwrap();
+    assert_eq!(store.user_version().unwrap(), MIGRATIONS.len() as i64, "重开该一路升到最新");
+    let flow = store.load_flow(1).unwrap().expect("章表该还在");
+    assert_eq!(flow.chapters.len(), 1, "那一章不许在回滚里丢掉");
+    assert_eq!(flow.chapters[0].title, "第一章");
+}
+
+
 #[test]
 fn a_fixed_document_is_not_perpetually_stale() {
     let dir = tempfile::tempdir().unwrap();

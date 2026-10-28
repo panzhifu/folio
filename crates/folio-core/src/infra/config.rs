@@ -932,6 +932,17 @@ pub struct Reader {
     pub toc_max_title_lines: u8,
     /// 到过的章在目录里画成浅色。关掉它，目录就只剩「当前在哪」一个信号。
     pub toc_dim_read: bool,
+    /// 一页的像素在**图集**里最多攒多少字节（软顶；装不下眼前那一页时允许涨到两倍）。
+    ///
+    /// **`0` = 跟随设备分档**（手机 24 MB / 平板 48 MB / 桌面 128 MB，判据与那三个数都在
+    /// `ui::features::reader::model::image_atlas::soft_limit`）。这里只交一个覆盖值，
+    /// 不在配置里重复那份分档 —— 两处各写一遍，改了设备判据时配置文件里那份会悄悄赢。
+    ///
+    /// 为什么在 `Reader` 而它又不参与排版：`Reader` 里早就有「只影响某一屏、不进排版」的
+    /// 格子（`toc_density` 那一族三条），口径一致；代价是同一条 —— 这一格也跟着整份
+    /// `Reader` 进 `LayoutKey::prefs_hash`，改它会触发一次重排，而那一次重排是白花的。
+    /// 只有手改配置文件的人才会碰到它（设置屏上没有这一格），所以不为它单开一条豁免。
+    pub image_cache_bytes: u64,
 }
 
 impl Default for Reader {
@@ -954,6 +965,8 @@ impl Default for Reader {
             toc_density: TocDensity::default(),
             toc_max_title_lines: 2,
             toc_dim_read: true,
+            // 0 = 按设备分档（见字段那条注释）。
+            image_cache_bytes: 0,
         }
     }
 }
@@ -997,6 +1010,9 @@ impl Reader {
     /// 设置界面摆出来的字重档位。三档而不是 100–900 铺满：字体匹配只认「同族里最接近
     /// 的那一面」，档位再密，落到屏幕上还是这几个。
     pub const FONT_WEIGHT_PRESETS: [u16; 3] = [300, 400, 700];
+    /// 图集字节上限覆盖的那一档的上界（1 GiB）。下界不用夹：`0` 就是「跟随设备分档」。
+    /// 写一个比这还大的数只会把显存吃穿，而这一格本来也不是给读者调的旋钮。
+    pub const IMAGE_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
     /// 配置里存的字重 → 界面上该选中哪一档。
     ///
@@ -1039,6 +1055,8 @@ impl Reader {
         }
         // 0 行是「什么都不画」，4 行会让一条目录占掉小半屏 —— 两头的错法都收进这一格。
         self.toc_max_title_lines = self.toc_max_title_lines.clamp(1, 3);
+        // 图集那一档只夹上界：`0` 是「跟随设备」那条约定，不是要抬起来的最小值。
+        self.image_cache_bytes = self.image_cache_bytes.min(Self::IMAGE_CACHE_MAX_BYTES);
         self
     }
 }

@@ -20,8 +20,12 @@ use std::sync::Arc;
 
 use folio_core::Locator;
 use folio_core::content::document::Document as OpenedDocument;
-use folio_core::content::format::pdf::RENDER_EDGE;
-use folio_core::content::format::{FixedPage, PageSource, PageText};
+use folio_core::content::format::pdf::{REGION_EDGE, RENDER_EDGE};
+
+/// 预览档的长边。它只是「先看一眼版式」的那一档，不是清晰度承诺：手机屏宽 1080
+/// 物理像素，720 已经盖得住整页轮廓；桌面会糊几百毫秒，然后换成高清。
+const PREVIEW_EDGE: u32 = 720;
+use folio_core::content::format::{FixedPage, PageRegion, PageSource, PageText};
 use gpui_kit::SharedString;
 
 use crate::ui::features::reader::components::image_viewer::{ImageSlot, Place, file_name};
@@ -43,6 +47,12 @@ use crate::ui::foundation::images::{
 /// 就会在多图页或渲染页上数得不一样。
 pub struct PageTile {
     pub request: Option<DecodeRequest>,
+    /// 同一页的**低清预览**那一趟：先画它，高清到了再换。`None` = 这一格不需要两段
+    /// （容器里本来就有一张图，解码不比栅格化慢）。
+    ///
+    /// 矢量页 720 档桌面 ~70 ms、2048 档 ~320 ms（PNG 编码在内）；手机上那一档的差
+    /// 是「一秒」与「好几秒」的差。读者先看见整页轮廓与版式，再等字变清。
+    pub preview: Option<DecodeRequest>,
     pub width: u32,
     pub height: u32,
     /// 这一张的地址：图源页是容器路径，渲染型的一页是 `render:<引擎页号>`
@@ -59,6 +69,12 @@ pub struct PageTile {
     /// 这一格摆出去的矩形上，而不是记在多图页的第一张上。用 `href` 的前缀猜这件事等于
     /// 把一种身份同时挂在两个地方。
     pub renders: bool,
+    /// 这一页是**矢量画的** ⇒ 放大时可以按看得见的那一块重画，补得出新细节。
+    ///
+    /// 数来自页表（`PageSource::Render::vector`，判据是 core 那句 `native_edge`）。
+    /// 绘制侧拿它做两件事：决定「要不要问那一块」（扫描件问了也白问），以及把放大上限
+    /// 按 `REGION_EDGE` 那一档而不是手里这一张的宽度来算。
+    pub vector: bool,
 }
 
 /// 文字层备忘的一条：`(哪一页, 那一页的字层, 那一份串的哈希)`。
@@ -243,6 +259,12 @@ pub struct FixedBook {
     /// （`annotations::resolved_for` 要一把尺问「这一页的字还是刚才那些字吗」）：
     /// 算一次存在这里，而不是每帧把整页的字重数一遍。
     text: RefCell<Vec<PageTextMemo>>,
+    /// 文字层正在后台取的那几页（`Self::request_page_text` 登记，取回来清掉）。
+    ///
+    /// 渲染帧只查缓存：没命中就登记一页、把活儿交给后台，这一帧先不画字层。
+    /// 没有这张表的话，同一页会在字层回来之前的每一帧各排一趟 —— 每一趟都是
+    /// 一份 PDF 重开 + 整页抽字（桌面实测 1.5 s/页，手机上更慢）。
+    text_inflight: RefCell<Vec<usize>>,
     /// 连续竖滚的页栈。`None` = 还没量到版心宽，或者这本书此刻走的是整页翻。
     stack: RefCell<Option<FixedStack>>,
 }
@@ -266,6 +288,7 @@ impl FixedBook {
             doc,
             page,
             text: RefCell::new(Vec::new()),
+            text_inflight: RefCell::new(Vec::new()),
             stack: RefCell::new(None),
         }
     }
@@ -380,14 +403,17 @@ impl FixedBook {
         match &entry.source {
             PageSource::Image { href } => out.push(PageTile {
                 request: self.image_request(href),
+                preview: None,
                 width: entry.width,
                 height: entry.height,
                 href: href.clone(),
                 mime: self.images.media_type(href).unwrap_or("").to_string(),
                 export: self.images.source(),
                 renders: false,
+                // 容器里现成的字节没有「按更高档重画」这条路。
+                vector: false,
             }),
-            PageSource::Render { index } => {
+            PageSource::Render { index, vector } => {
                 // 页号是**引擎那一侧**的号（页表里存的就是它），与阅读序一致由
                 // `format::pdf` 保证：那一本不跳页、不重排。
                 let index = *index as usize;
@@ -398,7 +424,16 @@ impl FixedBook {
                         RENDER_EDGE,
                         entry.width,
                         entry.height,
+                        None,
                         render.clone(),
+                    )),
+                    preview: Some(self.images.render_request(
+                        index,
+                        PREVIEW_EDGE,
+                        entry.width,
+                        entry.height,
+                        None,
+                        self.render_bytes_at(index, PREVIEW_EDGE),
                     )),
                     width: entry.width,
                     height: entry.height,
@@ -409,12 +444,14 @@ impl FixedBook {
                     // 那张 PNG —— 没有「容器里另存着一份更大的原图」这回事。
                     export: Arc::new(move |_| render()),
                     renders: true,
+                    vector: *vector,
                 });
             }
         }
         for image in &entry.extra_images {
             out.push(PageTile {
                 request: self.image_request(&image.href),
+                preview: None,
                 width: image.width,
                 height: image.height,
                 href: image.href.clone(),
@@ -425,6 +462,7 @@ impl FixedBook {
                     .to_string(),
                 export: self.images.source(),
                 renders: false,
+                vector: false,
             });
         }
         out
@@ -438,8 +476,57 @@ impl FixedBook {
     /// 摊开成一格而不是就地一个 `move ||`：绘制那条活儿与分享 / 下载那条要拿到的是
     /// **同一份**定义，两处各写一遍就会有一处先改掉档位。
     fn render_bytes(&self, index: usize) -> Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync> {
+        self.render_bytes_at(index, RENDER_EDGE)
+    }
+
+    /// 同一页按指定档位现画一张：预览与高清只差这一个数。
+    fn render_bytes_at(
+        &self,
+        index: usize,
+        edge: u32,
+    ) -> Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync> {
         let document = self.doc.clone();
-        Arc::new(move || document.render_page(index, RENDER_EDGE))
+        Arc::new(move || document.render_page(index, edge))
+    }
+
+    /// 放大那一档：把这一页**看得见的那一块**按 [`REGION_EDGE`] 重画一趟的活儿。
+    ///
+    /// 只有一种页给得出东西：**渲染型且矢量画的**（判据来自页表
+    /// `PageSource::Render::vector`，与 core 那句 `native_edge` 同一个定义）。扫描件
+    /// 重画补不出细节（源图就是它的上限），容器图那一族根本没有「重画」这条路 ——
+    /// 两种都在这里回 `None`，那一层保持现有像素不动，而不是黑一下。
+    ///
+    /// 页号是**引擎那一侧**的那个（`FixedPage.source` 里存的），与 [`render_bytes`]
+    /// 同一条口径；`region` 用的是页表那把尺（见 core 的 `PageRegion`），输出尺寸
+    /// 由调用方按 `region_output` 折，两者都不在这里再判一次。
+    pub(in crate::ui::features::reader) fn region_request(
+        &self,
+        page: usize,
+        region: PageRegion,
+        width: u32,
+        height: u32,
+    ) -> Option<DecodeRequest> {
+        let entry = self.pages.get(page)?;
+        let PageSource::Render {
+            index,
+            vector: true,
+        } = &entry.source
+        else {
+            return None;
+        };
+        let index = *index as usize;
+        let (block, w, h) = (region, width, height);
+        let document = self.doc.clone();
+        let render: Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync> =
+            Arc::new(move || document.render_page_region(index, block, w, h));
+        Some(self.images.render_request(
+            index,
+            REGION_EDGE,
+            width,
+            height,
+            Some(region),
+            render,
+        ))
     }
 
     /// 当前这一页在**整本书那一列图**里的身份（图集的键）。
@@ -488,27 +575,82 @@ impl FixedBook {
     /// 留 [`PAGE_TEXT_CACHE`] 页而不是一页：连续竖滚里视口同时压着两页时，一页的缓存
     /// 会让两页每帧互相挤掉对方。命中把那一页挪到末尾，淘汰只从最旧那一头收。
     fn cached_page_text(&self, page: usize) -> Option<(Rc<PageText>, u64)> {
+        if let Some((text, hash)) = self.page_text_cached(page) {
+            return text.map(|text| (text, hash));
+        }
+        // 缓存里没有：这一趟回引擎取（交互路径用，见 `Self::page_text`）。
+        let text = self.doc.page_text(page);
+        self.insert_page_text(page, text);
+        self.page_text_cached(page)
+            .and_then(|(text, hash)| text.map(|text| (text, hash)))
+    }
+
+    /// 只查缓存，**不回引擎**：`Some((字层, 哈希))` = 这一页问过；内层 `None` = 问过、
+    /// 这一页没有字。`None` = 还没问过。
+    ///
+    /// 渲染帧只认这一格。它不阻塞是硬要求：PDF 一页的字层要重开一次文档再抽整页
+    /// （桌面实测 1.5 s/页），以前在绘制帧里同步走这一趟，打开一本 210 页的 PDF
+    /// 就是界面卡住十秒 —— 而那一帧要的只是「字层到没到」。
+    /// 没到的那几页由 [`Self::request_page_text`] 交给后台，回来 [`Self::store_page_text`]。
+    pub(in crate::ui::features::reader) fn page_text_cached(
+        &self,
+        page: usize,
+    ) -> Option<(Option<Rc<PageText>>, u64)> {
+        let mut cache = self.text.borrow_mut();
+        let index = cache.iter().position(|(at, _, _)| *at == page)?;
+        let entry = cache.remove(index);
+        let out = (entry.1.clone(), entry.2);
+        cache.push(entry);
+        Some(out)
+    }
+
+    /// 渲染帧问「这一页的字层能不能现在给我」时走的那一格：缓存里没有、也不在飞，
+    /// 就登记一页并把后台那趟要的句柄交出去。`None` = 缓存已有 / 已在飞 / 页号越界
+    /// —— 三种情况这一帧都只需看着，不必再排活儿。
+    pub(in crate::ui::features::reader) fn request_page_text(
+        &self,
+        page: usize,
+    ) -> Option<Arc<dyn OpenedDocument>> {
+        if page >= self.pages.len() || self.page_text_cached(page).is_some() {
+            return None;
+        }
+        let mut inflight = self.text_inflight.borrow_mut();
+        if inflight.contains(&page) {
+            return None;
+        }
+        inflight.push(page);
+        Some(self.doc.clone())
+    }
+
+    /// 后台那一趟回来了：写进缓存、清在飞。`doc` 与当前这本不是同一份（期间换过书、
+    /// 或同一本重建过）就丢掉，交回 `false` —— 调用方不必重画一帧没变的屏。
+    pub(in crate::ui::features::reader) fn store_page_text(
+        &self,
+        doc: &Arc<dyn OpenedDocument>,
+        page: usize,
+        text: Option<PageText>,
+    ) -> bool {
+        if !Arc::ptr_eq(&self.doc, doc) || page >= self.pages.len() {
+            return false;
+        }
+        self.text_inflight.borrow_mut().retain(|at| *at != page);
+        self.insert_page_text(page, text);
+        true
+    }
+
+    /// 写一格备忘（同页替换），超容量从最旧那一头收。没字的那一页哈希记 0：它不参与
+    /// 批注回显那一份缓存（没有字就没有痕迹可解），所以那个数在这一档没有读者。
+    fn insert_page_text(&self, page: usize, text: Option<PageText>) {
+        let hash = text.as_ref().map_or(0, page_text_hash);
+        let entry = (page, text.map(Rc::new), hash);
         let mut cache = self.text.borrow_mut();
         if let Some(index) = cache.iter().position(|(at, _, _)| *at == page) {
-            let entry = cache.remove(index);
-            let out = entry.1.as_ref().map(|text| (text.clone(), entry.2));
-            cache.push(entry);
-            return out;
+            cache.remove(index);
         }
-        let (text, hash) = match self.doc.page_text(page) {
-            Some(taken) => {
-                let hash = page_text_hash(&taken);
-                (Some(Rc::new(taken)), hash)
-            }
-            // 没字的那一页哈希记 0：它不参与批注回显那一份缓存（没有字就没有痕迹可解），
-            // 所以那个数在这一档没有读者。
-            None => (None, 0),
-        };
-        cache.push((page, text.clone(), hash));
+        cache.push(entry);
         if cache.len() > PAGE_TEXT_CACHE {
             cache.remove(0);
         }
-        text.map(|text| (text, hash))
     }
 
     /// 留住的那份文档（页图要按 `href` 现取、渲染型的一页要按页号现画，都从它走）。
@@ -665,7 +807,7 @@ mod tests {
             page("p0.png", &["p0r.png"]),
             // 渲染型的一页（PDF 那一族）：页表里有这一页，图片表里没有这一条。
             FixedPage {
-                source: PageSource::Render { index: 1 },
+                source: PageSource::Render { index: 1, vector: true },
                 width: 100,
                 height: 200,
                 extra_images: Vec::new(),
@@ -747,7 +889,7 @@ mod tests {
                 },
                 Content::Fixed(FixedDoc {
                     pages: vec![FixedPage {
-                        source: PageSource::Render { index: 3 },
+                        source: PageSource::Render { index: 3, vector: false },
                         width: 1447,
                         height: 2048,
                         extra_images: Vec::new(),
@@ -997,7 +1139,10 @@ mod tests {
         let fixed = FixedDoc {
             pages: (0..pages)
                 .map(|i| FixedPage {
-                    source: PageSource::Render { index: i as u32 },
+                    source: PageSource::Render {
+                        index: i as u32,
+                        vector: true,
+                    },
                     width: 100,
                     height: 60,
                     extra_images: Vec::new(),
@@ -1089,6 +1234,62 @@ mod tests {
         let asked = doc.asks.lock().unwrap().len();
         assert!(book.page_text(0).is_some(), "被挤出去的那页要回引擎重取");
         assert_eq!(doc.asks.lock().unwrap().len(), asked + 1);
+    }
+
+    /// 渲染帧那条路（[`FixedBook::page_text_cached`] / [`FixedBook::request_page_text`] /
+    /// [`FixedBook::store_page_text`]）**一次都不回引擎**：没到时的答案是一份「还没有」，
+    /// 不是同步取一趟。
+    ///
+    /// 这一条钉的是「打开一本 PDF 卡十秒」：绘制帧里同步取一页字层桌面要 1.5 s、
+    /// 手机上 3–5 s，两页串起来界面就不动了。异步之后绘制帧只查缓存、后台取、
+    /// 到货重画（`view::body::request_page_texts`）。
+    #[test]
+    fn the_render_path_never_blocks_on_the_engine() {
+        let (doc, book) = counted(2, &[0]);
+        assert!(book.page_text_cached(0).is_none(), "还没取过");
+        assert!(doc.asks.lock().unwrap().is_empty(), "只查缓存，不该回引擎");
+
+        let handle = book.request_page_text(0).expect("第一帧该排一趟");
+        let current: Arc<dyn folio_core::content::document::Document> = doc.clone();
+        assert!(Arc::ptr_eq(&handle, &current), "交出去的该是这本书的文档");
+        assert!(
+            book.request_page_text(0).is_none(),
+            "同一页已经在飞，不排第二趟"
+        );
+        assert!(book.request_page_text(9).is_none(), "越界页不排");
+
+        // 后台那一趟回来：写进缓存。此后绘制帧查得到，而引擎从头到尾没被碰过。
+        let text = PageText {
+            width: 100.0,
+            height: 60.0,
+            chars: Vec::new(),
+        };
+        assert!(book.store_page_text(&handle, 0, Some(text)));
+        let (text, hash) = book.page_text_cached(0).expect("该命中了");
+        assert!(text.is_some(), "这一页有字");
+        assert_ne!(hash, 0, "有字的页有内容哈希");
+        assert!(
+            book.page_text_cached(1).is_none(),
+            "没取过的页仍然是「还没有」"
+        );
+        assert!(doc.asks.lock().unwrap().is_empty(), "全程没回引擎");
+    }
+
+    /// 换过书之后旧任务回来：结果丢掉，不能写进新书的缓存。
+    #[test]
+    fn a_text_layer_from_another_book_is_dropped() {
+        let (_, book) = counted(1, &[0]);
+        let (other, _) = counted(1, &[0]);
+        let other: Arc<dyn folio_core::content::document::Document> = other;
+        let handle = book.request_page_text(0).expect("排一趟");
+        let text = || PageText {
+            width: 100.0,
+            height: 60.0,
+            chars: Vec::new(),
+        };
+        assert!(!book.store_page_text(&other, 0, Some(text())), "不是这本的文档");
+        assert!(book.page_text_cached(0).is_none(), "丢掉的答案不进缓存");
+        assert!(book.store_page_text(&handle, 0, Some(text())), "自己那本照收");
     }
 
     /// 连续竖滚的页栈：页高按版心宽与页面宽高比算，页缝只占位置、不算进页高；

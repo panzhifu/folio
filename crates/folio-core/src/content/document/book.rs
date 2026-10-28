@@ -222,12 +222,31 @@ impl Document for BookDocument {
         provider.image_bytes(path, at)
     }
 
+    fn warm(&self) {
+        if let Some((provider, path)) = self.container() {
+            provider.warm(path);
+        }
+    }
+
     fn render_page(&self, page: usize, edge: u32) -> Option<Vec<u8>> {
         // 页号是**引擎那一侧**的号（`PageSource::Render { index }` 存的就是它），与阅读序
         // 是否一致由产出页表的那个 provider 定 —— 这一层不换算，与 `image_bytes` 交条目名
         // 同一立场：交出去的是「哪儿」，不是「第几页该是哪页」这件格式知识。
         let (provider, path) = self.container()?;
         provider.render_page(path, page, edge)
+    }
+
+    fn render_page_region(
+        &self,
+        page: usize,
+        region: crate::content::format::PageRegion,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<u8>> {
+        // 同一个页号口径（与 [`render_page`](Self::render_page) 一路），区域那三个数
+        // 是页表那把尺里的像素，换算成 pt 由 provider 自己做 —— 这一层不懂 pt。
+        let (provider, path) = self.container()?;
+        provider.render_page_region(path, page, region, width, height)
     }
 
     fn page_text(&self, page: usize) -> Option<crate::content::format::PageText> {

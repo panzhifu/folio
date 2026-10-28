@@ -49,6 +49,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util"] 
 axum = { version = "0.8", features = ["multipart"] }
 html5ever = "0.40"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
+# PNG 编码：只给 `content::format::pdf` 那条栅格化用（hayro 交回的是像素，页的契约是
+# PNG 字节）。**不新增任何包**：`image` 自己就依赖 png 0.18.1，这里面只有一条直接边。
+# 为什么不走 `image::codecs::png`：同一张 1810×2048 的页，这一层实测 10 ms / 566 KB，
+# 而 `image` 那层封装 169 ms / 568 KB —— 体积一样、慢 17 倍（它把 `Fast` 映射到了
+# 一个更慢的 deflate 档）。这一趟在首图的关键路径上，差 159 ms 是看得见的。
+png = "0.18"
 # SVG 栅格化：SVG 封面 / 逐页 SVG 漫画 / 正文内联 `<img src="x.svg">` 都要先画成位图。
 # **`resvg` 同样不是新依赖树**：它已经在图上且本来就在编译 —— `gpui-pre → gpui-base`
 # 用它画图标（`cargo tree -i resvg@0.46.0` 可验），这里只是把图上已有的一份转成
@@ -158,40 +164,41 @@ unicode-script = "0.5"
 # 复用。版本需求写 `"1"`，与它唯一的 1.0.0 对齐。
 # 纯 Rust、没有 `cc`，交叉到 Android 与鸿蒙不用加工具链变量 —— 与上面 `sha2` 那条同一理由。
 chardetng = "1"
-# PDF：`pdf_oxide`。这是**纯 Rust 那一族里唯一能真把页面画成位图的**（`lopdf` 只有对象模型、
-# 页树、内容流与文字抽取，画不出东西，M9 要的「栅格 + 文字层锚点 + LRU 页缓存」它只够地基）。
-# 排除掉的另三条也记在这：`printpdf` 36 个包还把整个 azul GUI 栈拖进来；`extractous` 的
-# `bzip2-sys` / `lzma-sys` 要 C；`oxpdf` 索引里 13 个版本**全部 yanked**，作者自己撤完的
-# 东西不进这个仓库。
+# PDF：`hayro`，走 **fork**（`panzhifu/hayro` 的 `main`）而不是 crates.io。
 #
-# **`features = ["rendering"]` 不是可选项，是这一格能不能画页的那一刀**：0.3.78 的
-# `default` 只有 `["icc", "legacy-crypto"]`，而整个 `rendering` 模块（tiny-skia 那条把一页
-# 画成位图的路，`render_page_fit` 住在里面）在 `#[cfg(feature = "rendering")]` 后面 ——
-# 只写 `pdf_oxide = "0.3"` 的那几版里，`folio-core` 连这个名字都不存在，「PDF 支持」其实是
-# 零行代码。这一条被记错过一次（当时看的是它的 normal deps 表，那张表列的是**所有**可选依赖）。
+# 一台引擎管完：解析（页表 / 书目 / 书签 / 文字层 / 加密判定）与画像素都在这里。从前是
+# 两台 —— `pdf_oxide` 管解析、`hayro` 只管画 —— 换的理由不是画得慢（画那一半本来就在
+# hayro 上），而是那一半解析要另付一整棵依赖树，还把 `chrono` / `regex` / `brotli` 那一串
+# 拖进 `.so`。
 #
-# 开这一档的代价，按提交里那份 `Cargo.lock` 与开了之后的锁相减实测：**9 个新包条目** ——
-# `fast_image_resize` 6.1.0、`tiny-skia` 0.12.0 + `tiny-skia-path` 0.12.0、`fontdb` 0.24.0、
-# `harfrust` 0.13.3 + `read-fonts` 0.43.3、`hayro-jbig2` 0.3.1、`hayro-jpeg2000` 0.4.1、
-# `hayro-ccitt` 0.4.0。其中 tiny-skia / fontdb / harfrust 是**与图上已有的并存的第二个版本**
-# （0.11.4 / 0.23.0 / 0.5.2，gpui 那一支在用），feature 统一没能把它们合到同一版 —— 那就是
-# 三份编译、两份进二进制。从前记在这个位置的「44 个新包」量的是**整个 `pdf_oxide` 子树 vs
-# 完全没有它**，不是这一档的增量，别拿那个数算这一格的账。
+# ## 为什么是 git 而不是版本号
 #
-# 仍然算纯 Rust：`pdfium-render` 只在 `table-ml` 那条 feature 后面（没开），没有 `cc`、
-# 没有 bindgen、没有任何 `*-sys`。唯一会拉进 C 的是 `icc-lcms2`（lcms2），这条也没开 ——
-# ICC 走的是默认那条 `icc-qcms`（纯 Rust）。Android 交叉编译实测过 `--lib` 那一道门。
+# hayro 0.8 的上游没有 folio 要的那三格，补在 fork 上（`folio-core/src/content/format/pdf.rs`
+# 的模块头逐条写了它们要什么）：
+#   - `hayro_interpret::text`：只记不画的 `Device`，逐字给 unicode、字符码与墨迹盒；
+#   - `Page::placed_images()`：页上每张图的原生像素数与它在页上的框；
+#   - `hayro_syntax::outline`：`/Outlines` 那条链 → 目录树与页号。
+# 三格都没进上游，所以这里钉 rev。上游收了这三格，把这一条换回 `version = "0.8"` 即可，
+# interface 那边一行不用动。
 #
-# 两个 CJK feature（`cjk-form-fonts` / `cjk-render-fallback`）**这一轮量过了，仍然不开**。
-# 它们各自 `include_bytes!` 一份 4.03 MB 的 `DroidSansFallbackFull.ttf` 进二进制（feature
-# 本身不带任何依赖，代价全在体积与驻留上）。实测三本真中文 PDF（`简历.pdf`、`main-zh.pdf`、
-# `sample.pdf`，长边 2048 那一档）：**开与不开的输出逐字节相同** —— PNG 字节数一样、像素
-# 校验和一样，因为这三本都把自己的字型内嵌进了文件（`/Type0` 带 CIDFont），不需要替换。
-# 代价那一头是 APK +4 MB 与峰值驻留 +10 MB（45.0 MB → 54.6 MB）。它真正管的是**字型没内嵌**、
-# 靠阅读器做字体替换的那一类 PDF（Word/Pages 导出、不少扫描流水线会出这种），而这批样本里
-# 没有那种 —— 所以这一格是「量过、知道边界、暂不开」，不是「没看就不开」。撞到那种书时
-# 按 APK +4 MB 这一格重新算账。
-pdf_oxide = { version = "0.3", features = ["rendering"] }
+# ## 为什么**不是**版本号 + 另补
+#
+# 在 folio 里自己写这三格做得到（`Device` 是 `pub`，`PositionedGlyph::transform()` 也是），
+# 但文字层的墨迹盒要 `OutlineFont`（`pub(crate)`）才拿得到字形轮廓，而图片放置与书签解析
+# 都要那几把内部锁（`XRef::root_id`、`Dict::obj_id`）。补在引擎里是一次性成本，补在应用里
+# 是每次升级都要重新对一遍的东西。
+#
+# ## 版本与平台
+#
+# 包名与版本维持 `0.8.0`（fork 没动版本号）。纯 Rust、crate 级 `#![forbid(unsafe_code)]`
+# （`hayro-syntax` 的 `unsafe` feature 是 gzip / jpeg 那条 SIMD 快路，不是 FFI），
+# MIT/Apache 双许可，整棵依赖树没有 C/C++（Android 交叉编译 `cargo ndk -t arm64-v8a -P 26`
+# 实测一次过）。
+#
+# 画一页的速度与没换之前一样（都是 hayro）：同一页 2048 那一档是画 202 ms + 编码 19 ms，
+# `opt-level = "z"`；`opt-level = 3` 下画只要 44 ms（4.6 倍），要再往下压就是给 hayro 那
+# 一支单独开 `opt-level = 3`，那笔账（.so 体积换 4.6 倍）还没量，先记在这里。
+hayro = { git = "https://github.com/panzhifu/hayro.git", rev = "c3d88c99" }
 # CB7（7z 漫画包）：纯 Rust 的 7z 解压。CBR（RAR）这一版不接 —— rarlab 的 unrar 是 C++，
 # Android NDK 那条构建线还没验，先让 `.cbr` 在判定层得到一句「这一版还读不动」。
 # **钉 0.20 而不是 0.24**：0.20.2 的 MSRV 是 1.85，工作区是 1.90；0.24 要 1.93。
@@ -327,6 +334,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "tracing-log",
 ] }
 log = "0.4"
+tracing-log = "0.2"
 
 # 合成朗读（听书）的后端，见 `plans/听书.md`。只挂在拿得到系统 TTS 的这两个平台上：
 # Linux 那一档连的是 **Speech Dispatcher**（不是直接 espeak），Android 那一档走

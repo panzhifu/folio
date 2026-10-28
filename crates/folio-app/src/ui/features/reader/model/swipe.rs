@@ -211,10 +211,15 @@ fn release_shape(x: f32) -> f32 {
     x * (2.0 - x)
 }
 
-/// 松手那一腿的**整条补间**：时长与曲线一处给全，渲染那头只管拿它去问时钟。
+/// 松手那一腿的**整条补间**：时长与曲线一处给全，渲染那头按这一条续帧、按 [`release_easing`]
+/// 自己算值。
 ///
 /// 两半分开挑的话，「按了速度算出时长」与「用了两端零速的曲线」会各自成立、合起来仍是「手一抬
 /// 纸先停死」—— 所以收在这一个出口里。
+///
+/// 值不走 `Presence` 的进度：那条时钟从**第一次采样**起算，而真机上第一帧比抬手晚一个帧间隔
+/// —— 那一截会被当成 0（`TurnRun::Released` 的 `since` 记的才是真的起点）。`Presence` 在这里
+/// 只剩续帧与「减弱动态效果直接给终值」两件事。
 pub(in crate::ui::features::reader) fn release_transition(over: Duration) -> Transition {
     Transition::new(over).easing(release_easing())
 }
@@ -665,7 +670,10 @@ impl ReaderSession {
         };
         let along = travel(toward(axis, rtl, track.dx, track.dy), intent);
         let from = progress(along, dist);
-        let speed = track.speed_along(axis, rtl, intent, cx.background_executor().now());
+        // 松手那一刻只取一次：速度的新鲜度与这一腿的时钟起点必须是同一个数，
+        // 否则「停了多久才算停手」在两条判据上会差出几毫秒。
+        let released_at = cx.background_executor().now();
+        let speed = track.speed_along(axis, rtl, intent, released_at);
         let revert = !snap(along, dist, speed);
         // 这一腿还要走多远（dp）：走完 = 剩下那一截页宽，弹回 = 已经走过那一截。
         let remaining = (if revert { from } else { 1.0 - from }) * dist;
@@ -685,7 +693,12 @@ impl ReaderSession {
         self.turn_seq += 1;
         if let Some(turn) = self.turn.as_mut() {
             turn.seq = self.turn_seq;
-            turn.run = TurnRun::Released { from, revert, over };
+            turn.run = TurnRun::Released {
+                from,
+                revert,
+                over,
+                since: released_at,
+            };
         }
         cx.notify();
         true

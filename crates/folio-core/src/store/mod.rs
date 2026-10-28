@@ -130,14 +130,24 @@ impl Store {
             // 每条迁移各自一句：`execute_batch` 中间失败时，日志里最后一条「完成」的就是
             // 该看的那条 —— 库停在 v3 还是 v4，决定的是后面怎么修。
             tracing::debug!("store: 应用迁移 v{target}");
-            conn.execute_batch(sql)?;
-            conn.pragma_update(None, "user_version", target)?;
-            tracing::info!("store: 迁移 v{target} 完成");
+            // **一条迁移 = 一笔事务**：DDL、v8 那半 Rust 回填、`user_version` 同生同死。
+            //
+            // 从前是 `execute_batch` 之后**另写**一次 `pragma user_version`，而 v8 还把版本
+            // 写在回填**之前** —— 中间被杀（Android 杀进程是日常，不是边角）留下两种半套：
+            // 表已建、版本没升 ⇒ 下次重跑 `CREATE TABLE` 当场失败，库**永远打不开**；
+            // 或版本已升、回填没跑 ⇒ 下次直接跳过这一条，缺一截数据的库被当好的接着用。
+            // 两种都比「停在上一版」难修：前者要人手工改库头，后者是一路读下去才发现。
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(sql)?;
             // v8 的 Rust 那半必须在 v9 之前跑：v9 要删掉 `chapters.spine_href`，
             // 而回填位置正是按它算的。
             if target == 8 {
-                Self::finish_v8(&conn)?;
+                Self::finish_v8(&tx)?;
             }
+            // 版本跟着这一笔走：`PRAGMA user_version` 写的是库头，提交才落地，回滚就当没发生。
+            tx.pragma_update(None, "user_version", target)?;
+            tx.commit()?;
+            tracing::info!("store: 迁移 v{target} 完成");
         }
         if was_auto_vacuum == 0 {
             // 改 `auto_vacuum` 要一次全量 VACUUM 才会生效，顺带把历史高水位压回去。

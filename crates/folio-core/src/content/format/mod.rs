@@ -80,7 +80,8 @@ pub mod xhtml;
 pub(crate) mod zip;
 
 pub use content::{
-    Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageChar, PageImage, PageRect, PageSource,
+    Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageChar, PageImage, PageRect, PageRegion,
+    PageSource,
     PageText,
 };
 pub use provider::{

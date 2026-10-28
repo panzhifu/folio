@@ -165,7 +165,45 @@ pub enum PageSource {
     /// 所以页表里没有容器路径可存，只有引擎那一侧的页号。取像素走
     /// [`crate::content::format::DocumentProvider::render_page`]，
     /// 画多大由调用方定档（见 `format::pdf::RENDER_EDGE`）。
-    Render { index: u32 },
+    ///
+    /// `vector` = 放大时**按可见区域重画**补得出细节吗。判据只有一句：这一页没有被
+    /// 源图自己的像素密度封过顶（`format::pdf::native_edge` 给 `None`）—— 那种页的像素
+    /// 全是算出来的，按更高的长边再画一次真的多出新细节；扫描件那一族画到源图那么大
+    /// 就到顶了，重画只是摊开同一批像素，白付一趟栅格化。
+    ///
+    /// `#[serde(default)]` 走 [`FixedPage::extra_images`] 同一条规矩：老库的 `fixed_json`
+    /// 里没有这一项，解出来是 `false`（= 不重画，与这一格加进来之前逐字节一致），
+    /// 不必整库重扫。
+    Render {
+        index: u32,
+        #[serde(default)]
+        vector: bool,
+    },
+}
+
+/// 一页里的一块矩形，要求按它**重画一张**（放大的那一档）。
+///
+/// 单位是「这一页整页栅格出来那张图的像素」，与页表里存的 `width` / `height` 同一把尺。
+/// 为什么不是 PDF 用户空间（pt）：问这一块的只有界面，而它手里只有那张图 —— 它摆的正是
+/// 页表说的那个大小的位图，捏合之后看得见的是那张图的一块。两处各说一种单位，中间那个
+/// 换算数就会有一处写错，症状是「放大以后偏一截」。core 自己按页表那一句
+/// （`format::pdf::raster_size`）折回 pt，同一句判断，因此只有一个定义。
+///
+/// `x1 > x0` 且 `y1 > y0` 才有意义；空矩形交回 `None`，**不**当成「画整页」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageRegion {
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+}
+
+impl PageRegion {
+    /// 那块矩形的宽与高（像素，页表那把尺）。空矩形给 `None`。
+    pub fn size(&self) -> Option<(u32, u32)> {
+        let (w, h) = (self.x1.checked_sub(self.x0)?, self.y1.checked_sub(self.y0)?);
+        (w > 0 && h > 0).then_some((w, h))
+    }
 }
 
 /// 页内的一个盒。**原点在这一页可见框的左上角、y 朝下**；单位是**这一页自己的那一套**
@@ -470,7 +508,7 @@ mod tests {
     fn a_page_knows_its_image_href() {
         assert_eq!(page("p/2.png").image_href(), Some("p/2.png"));
         let render = FixedPage {
-            source: PageSource::Render { index: 7 },
+            source: PageSource::Render { index: 7, vector: true },
             width: 0,
             height: 0,
             extra_images: Vec::new(),
@@ -484,7 +522,7 @@ mod tests {
         let pages = vec![
             page("a.jpg"),
             FixedPage {
-                source: PageSource::Render { index: 3 },
+                source: PageSource::Render { index: 3, vector: false },
                 width: 1024,
                 height: 768,
                 extra_images: vec![PageImage {

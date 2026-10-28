@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use folio_core::content::document::Document;
-use folio_core::content::format::{ImageRes, dir_of, guess_media_type, resolve_href, shrink_image};
+use folio_core::content::format::{
+    ImageRes, PageRegion, dir_of, guess_media_type, resolve_href, shrink_image,
+};
 use folio_core::layout::{ImageProvider, ResolvedImage};
 #[cfg(test)]
 use gpui_kit::RenderImage;
@@ -105,6 +107,12 @@ pub struct DecodeRequest {
     /// 是估的：SVG 与 manifest 没写尺寸的那些只能猜，而解好之后图集会按真的像素数换掉它。
     /// 估的用途只有一个 —— 还没解完的那几趟也占个名额，别让封顶那一档把它们当免费。
     pub tile_bytes: usize,
+    /// 这一趟在 core 作业池里的档位。
+    ///
+    /// 当前页要的（预览 / 高清 / 放大后的区域图）是 [`Priority::Interactive`]；
+    /// 预取进来的那几页是 [`Priority::Prewarm`] —— 池子按档取活，读者手上这一页
+    /// 不会被后面灌进来的几页预取压在后面。
+    priority: folio_core::Priority,
 }
 
 impl DecodeRequest {
@@ -112,6 +120,17 @@ impl DecodeRequest {
     /// 就是回到「每滚进一张图顿一下」那条老路。
     pub fn decode(&self) -> Option<Arc<Image>> {
         (self.loader)()
+    }
+
+    /// 这一趟的作业池档位（见 [`Self::priority`]）。
+    pub fn priority(&self) -> folio_core::Priority {
+        self.priority
+    }
+
+    /// 换一个档位：同一张图「预取」与「马上要看」是两条活，档位由调用点定。
+    pub fn with_priority(mut self, priority: folio_core::Priority) -> Self {
+        self.priority = priority;
+        self
     }
 
     /// 那条活儿本身（图集要在后台线程上拿着它跑，所以给的是链子而不是结果）。
@@ -242,6 +261,7 @@ impl ImageEntry {
             key: String::new(),
             loader,
             tile_bytes: self.tile_bytes(),
+            priority: folio_core::Priority::Interactive,
         }
     }
 }
@@ -329,12 +349,19 @@ impl BookImages {
     /// 键里带页号**和**那一档的长边：同一本书将来若改成按视口宽栅格，同一页会并存好几个
     /// 尺寸，撞键的后果是「按 1024 摆的那一格画出 2048 的像素」。token 前缀与图片那一族
     /// 同一条理由 —— 两本书的第 7 页可以长得一模一样。
+    ///
+    /// `region` 是放大那一档：同一页的**一块**按更高档重画，键再补一段斜杠
+    /// （`render/<page>@<edge>/<x0>,<y0>,<x1>,<y1>`）。不复用整页那个键是因为整数与像素
+    /// 都不同，同一键画出两种东西是最难查的那种错。图集排挤出顺序时只读
+    /// `render/<page>@` 那一段（`image_atlas::distance_of`），后面那截不影响 ——
+    /// 那里有一条门按这个形状钉着。
     pub fn render_job(
         &self,
         page: usize,
         edge: u32,
         width: u32,
         height: u32,
+        region: Option<PageRegion>,
         render: Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>,
     ) -> DecodeRequest {
         let loader: Arc<dyn Fn() -> Option<Arc<Image>> + Send + Sync> = Arc::new(move || {
@@ -348,10 +375,15 @@ impl BookImages {
         } else {
             width as usize * height as usize * 4
         };
+        let suffix = match region {
+            Some(block) => format!("/{},{},{},{}", block.x0, block.y0, block.x1, block.y1),
+            None => String::new(),
+        };
         DecodeRequest {
-            key: format!("{}/render/{page}@{edge}", self.token),
+            key: format!("{}/render/{page}@{edge}{suffix}", self.token),
             loader,
             tile_bytes,
+            priority: folio_core::Priority::Interactive,
         }
     }
 }
@@ -442,9 +474,11 @@ impl ChapterImages {
         edge: u32,
         width: u32,
         height: u32,
+        region: Option<PageRegion>,
         render: Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>,
     ) -> DecodeRequest {
-        self.book.render_job(page, edge, width, height, render)
+        self.book
+            .render_job(page, edge, width, height, region, render)
     }
 
     /// 这一章在容器里的目录（`dir_of(spine_href)`）。

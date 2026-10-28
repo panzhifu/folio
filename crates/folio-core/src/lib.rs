@@ -60,7 +60,9 @@ pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
 pub use infra::paths::{config_dir, config_path, data_dir, db_path, log_dir, themes_dir};
 pub use infra::services::Services;
-pub use infra::task::{ByteProgress, Cancel, Priority, StageCtx, TaskEvent, TaskId, TaskManager};
+pub use infra::task::{
+    ByteProgress, Cancel, Priority, StageCtx, TaskError, TaskEvent, TaskId, TaskHandle, TaskManager,
+};
 pub use infra::time::{
     CivilDate, DurationParts, civil_date, civil_from_days, day_start, days_from_civil,
     days_in_month, duration_parts, local_day, local_hour, weekday_monday0,

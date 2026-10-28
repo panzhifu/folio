@@ -529,6 +529,55 @@ fn report(tag: &str, frame: &Frame, total_ns: u64) {
     );
 }
 
+// ══ 图片解码那一截（量完才定「解码头要不要搬线程」）══
+
+/// 攒多少张出一条汇总。与滚动那一臂同一个理由：`LogFile` 是**同步**写的，
+/// 逐张一条会把 `write()` 那笔算进被量的这一段里。
+const DECODE_WINDOW: usize = 20;
+
+/// 攒下的解码样本：`(µs, 解出来的真像素字节)`。
+///
+/// 用进程级 `Mutex` 而不是本模块惯用的 `thread_local!`：解码头跑在 gpui 的后台执行器上，
+/// 线程局部会把同一批样本打散到各条 worker 上，出行的时机就随调度漂了。
+static DECODES: std::sync::Mutex<Vec<(u64, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// 图集那一截**解码**（gpui 的 `Image::to_image_data`）：解完一张记一笔。
+///
+/// 为什么不进 [`Frame`]：这一截跑在后台线程上，与「这一帧 `render`/`paint` 花了多久」
+/// 不是同一把尺 —— 记进 `Frame` 会把它的钱算到恰好在这一帧落地的读者头上，而它其实
+/// 谁也没挡住（页图先空着，解完自己逼出一帧）。
+///
+/// 它只回答一件事：**解码头要不要从 UI 侧搬进作业池**（计划 §二 A 留下的那个决定，
+/// 判据是「手机上 > 8 ms 就掉一帧」，所以 `over_8ms` 那一格才是结论，中位不是）。
+/// 搬的代价是改 `gpui-folio` 那个 patch、把 gpui 里的 `decode_static_image` 暴露出来复用，
+/// **不在 folio 里写第二份解码**（EXIF/GIF 的口径会分成两份，理由见计划 §零）。先有数，再动。
+pub fn note_image_decode(us: u64, bytes: usize) {
+    if !audible() {
+        return;
+    }
+    let mut samples = DECODES.lock().unwrap_or_else(|e| e.into_inner());
+    samples.push((us, bytes));
+    if samples.len() < DECODE_WINDOW {
+        return;
+    }
+    let times: Vec<u64> = samples.iter().map(|(us, _)| *us).collect();
+    let avg_mb = samples.iter().map(|(_, bytes)| *bytes as u64).sum::<u64>()
+        / samples.len() as u64
+        / 1024
+        / 1024;
+    tracing::debug!(
+        target: "folio_app::perf",
+        decodes = samples.len(),
+        mid_us = percentile(&times, 0.5),
+        p90_us = percentile(&times, 0.9),
+        max_us = times.iter().copied().max().unwrap_or(0),
+        over_8ms = times.iter().filter(|us| **us > 8_000).count(),
+        avg_mb,
+        "PERF decode（to_image_data 那一截）"
+    );
+    samples.clear();
+}
+
 // ══ 临时探针（量完整块摘掉，连同 navigation.rs 的两处、position.rs 的一处挂点）══
 //
 // 要判的事：读者说「停止滑动那一下发抖」。gpui 的惯性是**关于 elapsed time 的闭式曲线**

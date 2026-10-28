@@ -20,11 +20,14 @@ use std::time::{Duration, Instant};
 
 use folio_core::content::annotation::ResolvedAnnotation;
 use folio_core::content::document::Document as OpenedDocument;
+use folio_core::content::format::PageText;
 use folio_core::content::format::css::PageMargins;
 use folio_core::store::{Annotation, Bookmark, Store};
 use folio_core::{BookSettings, DocMeta, Format, Locator, PageTurn, Reader, StaleReason};
 use gpui_kit::base::SelectionEdge;
-use gpui_kit::{App, Bounds, Context, Entity, Pixels, Point, SharedString, Task};
+use gpui_kit::{
+    App, AppContext as _, Bounds, Context, Entity, Pixels, Point, SharedString, Task,
+};
 
 use crate::ui::features::reader::components::note_editor::NoteEditor;
 use crate::ui::features::reader::model::book::Book;
@@ -127,6 +130,12 @@ pub struct ReaderSession {
     /// 会话只记这个数而不是差量本身：比较一个 `u64` 不要克隆两张 map，而差量的真相
     /// 本来就住在生效层与库里那一列，抄的时候现取。
     pub(in crate::ui::features::reader) book_settings_rev: u64,
+    /// 还欠着落库的那一笔差量：`(号, 那一刻的差量, 已经安静了几帧)`。
+    ///
+    /// 弹层每拖一格都会换一次 `book_rev`，一次拖动就是几十格 —— 每格同步写一次 SQLite，
+    /// 而只有最后一次有意义（一次写摊上 WAL checkpoint 就没有上界，位置那一趟正是为此
+    /// 改成离席才结，见 `model/position.rs`）。所以号一动只**记账**，安静够久才写。
+    pub(in crate::ui::features::reader) settings_pending: Option<(u64, BookSettings, u32)>,
     /// 读者**选**的那一档。装不下双页时实际生效的是分页，见 [`ReaderSession::mode`]。
     pub(in crate::ui::features::reader) mode: PageMode,
     /// 这一档**不是**读者选的：库里那本书没存过模式（第一次读它，或从没换过档）。
@@ -209,6 +218,21 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) swipe_sealed: bool,
     /// 已滚过的像素（内容坐标，向下为正）。只在连续滚动里有意义。
     pub(in crate::ui::features::reader) scroll_y: f32,
+    /// 上一次渲染帧看见的 `scroll_y` 与那一刻，用来判「在滑 / 停住了」。
+    ///
+    /// 只影响**排哪一档**（详见 `view::body` 的 `scrolling`）：滑动中只铺 720 预览，
+    /// 停下再补高清。判据是「最近 150 ms 里挪了视口的 3% 以上」—— 见
+    /// [`ReaderSession::mark_scroll`]。
+    pub(in crate::ui::features::reader) scroll_probe: (f32, Option<std::time::Instant>),
+    /// 上一次见到的 `scroll_y`（`scroll_probe` 的上一帧那一半，判方向用）。
+    pub(in crate::ui::features::reader) scroll_last: f32,
+    /// 放大视图**最后一次挪动**的时刻（矩形或倍率变了就算挪）；`None` = 没在放大。
+    ///
+    /// 停够 [`REGION_SETTLE`] 才排那一趟 4096 的区域重画 —— 手在动的每一帧都排一次，
+    /// 等于把栅格化的钱花在读者的手指上（与「滑动中只铺预览」同一条理由）。
+    pub(in crate::ui::features::reader) region_moved_at: Cell<Option<Instant>>,
+    /// 此刻叠在放大视图上的那一块（见 [`PinnedRegion`]）。
+    pub(in crate::ui::features::reader) region_pinned: RefCell<Option<PinnedRegion>>,
     /// 这一帧**画在**哪一个全局 y。动画期间它落后于 [`ReaderSession::scroll_y`]，
     /// 而绘制与命中两处都必须读它而不是 `scroll_y`：用后者命中的话，补间走完之前
     /// 按在某个字上的手指会算到隔壁那一行去（起点也从这里取，见 [`Turn::scroll`]）。
@@ -438,8 +462,53 @@ pub(in crate::ui::features::reader) type FixedTextBoxes = Vec<(usize, Bounds<Pix
 /// 普通点击（含触摸合成的按下/抬起）不该留下高亮。
 pub(in crate::ui::features::reader) const DRAG_THRESHOLD_PX: f32 = 4.0;
 
+/// 差量落库之前要安静多少帧（约 400 ms 那一档）。
+///
+/// 按**帧**不按墙上时间：这一趟本来就只在渲染帧里被调（[`ReaderSession::sync_book_settings`]），
+/// 数帧它才是「读者停手之后紧接着的那几帧」；而按表钟的话，一条门要么睡 400 ms，
+/// 要么赌调度让它过去。代价是「停手之后一屏都没重画」就不写 —— 那条路由离席时
+/// [`ReaderSession::flush_book_settings`] 兜住。
+pub(in crate::ui::features::reader) const SETTINGS_SETTLE_FRAMES: u32 = 24;
+
 /// 兜底用的那行字。中英混排，顺带把 fallback 路径也验一遍。
 const SAMPLE_LINE: &str = "Folio — 中文正文与 Latin 混排的一行";
+
+/// 「读者还在滑」那一条判据的两个数（见 [`ReaderSession::mark_scroll`]）。
+const SCROLL_WINDOW: f32 = 0.15;
+const SCROLL_RATIO: f32 = 0.03;
+
+/// 这一帧的滚动状态：还在不在滑、往哪边滑。
+///
+/// `direction` 是**这一帧**的位移方向（不是窗口那个），给预取用：读者往哪边滑，
+/// 预取就该往哪边取（`prefetch::fixed_targets`）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::ui::features::reader) struct ScrollMotion {
+    pub scrolling: bool,
+    pub direction: Option<crate::ui::features::reader::model::prefetch::FixedDirection>,
+}
+
+/// 从「手不动」到「排那一趟区域重画」之间要等的那一段（毫秒）。
+///
+/// 200 ms 是计划里定的那一档：比一次捏合的两帧宽，比读者的耐心短。真正的判据不是这个数
+/// 而是「有没有再挪」—— 平移与继续捏合都会把它推回去，所以那一趟只在停稳时付一次。
+pub(in crate::ui::features::reader) const REGION_SETTLE: u128 = 200;
+
+/// 放大视图里**已经钉住的那一块**：请求了什么、画在哪、活儿是什么。
+///
+/// 为什么要存住而不是每帧现算一遍：请求记的是**那一刻**的那一块。读者随后平移，
+/// 旧的那一张仍画在它自己那一块地方（像素对得上），新的那一块要等下一次停稳才排 ——
+/// 「平移与继续捏合都不重画」这条规矩靠的就是这个钉住，而不是靠不去算。
+#[derive(Clone)]
+pub(in crate::ui::features::reader) struct PinnedRegion {
+    /// 请求时的矩形（页表那把尺的像素）。与下一帧算出来的那份**不等**就是「挪过了」。
+    pub region: folio_core::content::format::PageRegion,
+    /// 请求时的倍率：同一块矩形在 2x 与 4x 下不是同一块（要的细节不一样）。
+    pub scale: f32,
+    /// 那一块在 **1x 内容坐标**里的矩形；绘制侧再按缩放与平移映射到屏上。
+    pub rect: (f32, f32, f32, f32),
+    /// 那一趟活儿（图集的键 + 怎么画）。
+    pub request: crate::ui::foundation::images::DecodeRequest,
+}
 
 impl ReaderSession {
     /// 冷启动：只读偏好、挑设备字体，**自己不找书**。
@@ -477,12 +546,17 @@ impl ReaderSession {
             source: Source::Sample(SAMPLE_LINE.into()),
             wanted_family: prefs.font_family.clone(),
             book_settings_rev: ConfigHolder::book_rev(cx),
+            settings_pending: None,
             prefs: effective,
             family: family.into(),
             mode: PageMode::default(),
             mode_undecided: false,
             laid_out: LaidOut::default(),
             scroll_y: 0.0,
+            scroll_probe: (0.0, None),
+            scroll_last: 0.0,
+            region_moved_at: Cell::new(None),
+            region_pinned: RefCell::new(None),
             scroll_painted: 0.0,
             page_shift: (0.0, 0.0),
             turn: None,
@@ -640,6 +714,7 @@ impl ReaderSession {
             source: Source::Book(Box::new(book)),
             wanted_family: prefs.font_family.clone(),
             book_settings_rev: ConfigHolder::book_rev(cx),
+            settings_pending: None,
             book_fonts_rev,
             prefs: effective,
             family: family.into(),
@@ -647,6 +722,10 @@ impl ReaderSession {
             mode_undecided,
             laid_out: LaidOut::default(),
             scroll_y: 0.0,
+            scroll_probe: (0.0, None),
+            scroll_last: 0.0,
+            region_moved_at: Cell::new(None),
+            region_pinned: RefCell::new(None),
             scroll_painted: 0.0,
             page_shift: (0.0, 0.0),
             turn: None,
@@ -804,6 +883,10 @@ impl ReaderSession {
         let doc: std::sync::Arc<dyn OpenedDocument> = std::sync::Arc::from(
             folio_core::content::document::with_container(meta, content, Path::new(&path)),
         );
+        // 后台先把这一本的解析句柄备好（PDF 要读整本，手机上要一两秒）。它与首帧的
+        // 取页并行跑，首图不必再把那一趟算进去；别的格式 `warm` 是空的。
+        let warm = doc.clone();
+        cx.background_spawn(async move { warm.warm() }).detach();
         // 上一本还在念的话先停掉：听书的会话跟着「那一屏」走，不跟着进程走，
         // 换书就是换了一屏。位置按停那一刻的段落落库（`stop_speech`）。
         self.stop_speech();
@@ -876,6 +959,47 @@ impl ReaderSession {
     /// 除了带锚点的那一跳（`modules::toc::ReaderSession::restore_to_entry`，它俩必须
     /// 一起写）之外，这是**唯一**该写 [`Self::pending_restore`] 的地方：留着上一次
     /// 没落地的锚点，下一次恢复就会跳到那一跳的地方去。
+    /// 采一次滚动：读者还在滑吗？往哪边滑？
+    ///
+    /// 判据只有一条 —— **最近 [`SCROLL_WINDOW`] 里挪动过的量** 达到视口的 [`SCROLL_RATIO`]。
+    /// 用「一段时间里的位移」而不是「这一帧有没有位移」：一帧 8 ms 里挪 3 px 也算滑，
+    /// 但那种滑几乎察觉不到，没必要为它把高清那几趟压下去；而一次惯性滑动里每帧只有
+    /// 一两 px、累计却跨过半屏，判据必须看窗口。
+    ///
+    /// 这个数只喂给「排哪一档」（见 `view::body` 的 `fixed` 那一臂），**不参与排版**，
+    /// 也不进位置落库。
+    pub(in crate::ui::features::reader) fn mark_scroll(
+        &mut self,
+        now: std::time::Instant,
+        viewport: f32,
+    ) -> ScrollMotion {
+        let (anchor_y, anchor_at) = self.scroll_probe;
+        let direction = if self.scroll_y > self.scroll_last + 0.5 {
+            Some(crate::ui::features::reader::model::prefetch::FixedDirection::Ahead)
+        } else if self.scroll_y + 0.5 < self.scroll_last {
+            Some(crate::ui::features::reader::model::prefetch::FixedDirection::Behind)
+        } else {
+            None
+        };
+        let elapsed = anchor_at.map(|at| now.duration_since(at).as_secs_f32());
+        let moved = (self.scroll_y - anchor_y).abs();
+        let scrolling = match elapsed {
+            Some(elapsed) if elapsed <= SCROLL_WINDOW => {
+                moved >= viewport.max(1.0) * SCROLL_RATIO
+            }
+            // 窗口过完了还没挪够：这一帧算静止，窗口从这里重新起算（`anchor_y` 换成此刻）。
+            _ => false,
+        };
+        if elapsed.is_none_or(|elapsed| elapsed > SCROLL_WINDOW) {
+            self.scroll_probe = (self.scroll_y, Some(now));
+        }
+        self.scroll_last = self.scroll_y;
+        ScrollMotion {
+            scrolling,
+            direction,
+        }
+    }
+
     pub(in crate::ui::features::reader) fn pend_restore(&mut self, locator: Option<Locator>) {
         self.pending_anchor = None;
         self.pending_restore = locator;
@@ -925,6 +1049,19 @@ impl ReaderSession {
             Source::Fixed(book) => Some(book),
             _ => None,
         }
+    }
+
+    /// 后台取回的一页文字层：交给当前这本定版式书。期间换过书（或同一本被重建过）
+    /// 时不计入 —— 判据是文档身份，见 `FixedBook::store_page_text`。交回 `true`
+    /// 才算这一屏有新东西要画。
+    pub(in crate::ui::features::reader) fn accept_page_text(
+        &self,
+        doc: &Arc<dyn OpenedDocument>,
+        page: usize,
+        text: Option<PageText>,
+    ) -> bool {
+        self.fixed()
+            .is_some_and(|book| book.store_page_text(doc, page, text))
     }
 
     /// 这一屏是不是定版式（页是既定的，翻页不走排版链）。
@@ -1349,19 +1486,56 @@ impl ReaderSession {
     /// 后者失败不该把读者的手指下一次拖动挡下来。
     fn sync_book_settings(&mut self, cx: &App) {
         let rev = ConfigHolder::book_rev(cx);
-        if rev == self.book_settings_rev {
+        if rev != self.book_settings_rev {
+            self.book_settings_rev = rev;
+            // 只记账，不写库：从这一刻重新等安静。关书之后生效层撤成了「没有书挂着」，
+            // 那时没有东西要落，欠着的那一笔也一起作废（旧书的号不该写进新书的行）。
+            self.settings_pending = ConfigHolder::book(cx).map(|patch| (rev, patch, 0));
             return;
         }
-        self.book_settings_rev = rev;
-        let Some(patch) = ConfigHolder::book(cx) else {
-            // 关书之后：生效层撤回了「没有书挂着」，没有东西要落。
+        let Some((_, patch, waited)) = &mut self.settings_pending else {
             return;
         };
+        *waited += 1;
+        if *waited < SETTINGS_SETTLE_FRAMES {
+            return;
+        }
+        let patch = patch.clone();
+        self.settings_pending = None;
+        self.write_book_settings(&patch);
+    }
+
+    /// 把还欠着的那一笔立刻写掉。挂在**离席结账的那两处**（退出阅读、窗口失焦，
+    /// `view::reading_page`）：读者停手之后紧接着的那几帧本来就该写了，走到这里还没写
+    /// 只有一种情况 —— 他一直在拖，而此刻他正在离开这一本。
+    ///
+    /// 还要认「号刚换、一帧都还没画」那一种：那种时候 `settings_pending` 是空的，
+    /// 现场按号取一次差量（拖完立刻按返回键，就是这条路径）。
+    pub(in crate::ui::features::reader) fn flush_book_settings(&mut self, cx: &App) {
+        let patch = match self.settings_pending.take() {
+            Some((_, patch, _)) => patch,
+            None => {
+                let rev = ConfigHolder::book_rev(cx);
+                if rev == self.book_settings_rev {
+                    return;
+                }
+                self.book_settings_rev = rev;
+                match ConfigHolder::book(cx) {
+                    Some(patch) => patch,
+                    None => return,
+                }
+            }
+        };
+        self.write_book_settings(&patch);
+    }
+
+    /// 差量落库的那一趟（去抖之后与离席结账都走这里，所以只有一处写它）。
+    fn write_book_settings(&mut self, patch: &BookSettings) {
         let (Some(store), Some(book_id)) = (self.store.as_ref(), self.book_id) else {
             tracing::debug!("ReaderSession: 这一本的差量没处落盘（占位那一屏）");
             return;
         };
-        if let Err(err) = store.set_book_settings(book_id, &patch) {
+        if let Err(err) = store.set_book_settings(book_id, patch) {
             tracing::error!(book_id, error = %err, "ReaderSession: 落这一本的阅读设置失败");
         }
     }
@@ -1438,10 +1612,15 @@ pub(in crate::ui::features::reader) enum TurnRun {
     /// [`crate::ui::features::reader::model::swipe::release_duration`]），不是全仓共用的
     /// 那一个转场时长：纸此刻正跟着手指在动，用一条两端零速的 S 形接手，读者看见的是
     /// 手一抬纸先停死、再重新加速。
+    ///
+    /// `since` 是**松手那一刻**：这一腿的时钟从这里起算，不是从松手后第一帧起算。
+    /// 抬手到第一帧之间通常隔着一个帧间隔，那一截本来就是这一腿走过的时间 —— 把它当成 0，
+    /// 纸会先停死一帧再一下跳出剩余行程的一成多，也就是「手一抬卡一下」。
     Released {
         from: f32,
         revert: bool,
         over: Duration,
+        since: Instant,
     },
 }
 
@@ -1577,5 +1756,115 @@ pub(in crate::ui::features::reader) fn land_at_anchor(
     match book.document().id_offsets().get(&fragment).copied() {
         Some(offset) => Locator { offset, ..locator },
         None => locator,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 「在滑 / 静止」那一条判据的门（计划 §四：喂一串 `scroll_y`）。
+    //!
+    //! 时钟是**合成**的：[`ReaderSession::mark_scroll`] 收一个 `Instant`，测试就从
+    //! `Instant::now()` 往前推格，不真睡 150 ms —— 那会把一条两秒的测试变成一条 150 ms
+    //! 起跳、还被调度抖动的测试。
+    //!
+    //! 视口固定 1000 px，于是 [`SCROLL_RATIO`] 的阈值是 30 px，[`SCROLL_WINDOW`] 是 150 ms。
+
+    use std::time::{Duration, Instant};
+
+    use folio_core::infra::config::Config;
+    use gpui_kit::{App, TestAppContext};
+
+    use super::{ReaderSession, SCROLL_RATIO, SCROLL_WINDOW};
+    use crate::ui::features::reader::model::prefetch::FixedDirection;
+    use crate::ui::services::config::ConfigHolder;
+
+    const VIEWPORT: f32 = 1000.0;
+    /// 阈值那个数，写在测试里一份：判据改了这里立刻红，而不是静默换个口径。
+    const THRESHOLD: f32 = VIEWPORT * SCROLL_RATIO;
+
+    /// 一个没开书的会话（`boot` 进兜底那一屏）。这条判据只看会话里那三个滚动字段，
+    /// 手里有没有书不影响它。
+    fn session(cx: &mut App) -> ReaderSession {
+        ConfigHolder::install(Config::default(), cx);
+        ReaderSession::boot(cx)
+    }
+
+    #[gpui_kit::test]
+    fn the_scroll_verdict_is_a_displacement_inside_a_window(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut reader = cx.update(session);
+        let zero = Instant::now();
+        let at = |ms: u64| zero + Duration::from_millis(ms);
+        assert_eq!(THRESHOLD, 30.0, "阈值按视口 1000 与 {SCROLL_RATIO} 算，改了常数这里先红");
+
+        // 起表那一帧：窗口还没开始走，判静止。
+        reader.scroll_y = 0.0;
+        let first = reader.mark_scroll(at(0), VIEWPORT);
+        assert!(!first.scrolling, "刚起表还没有窗口，不该判成在滑");
+        assert_eq!(first.direction, None, "位置没动就不该有方向");
+
+        // 窗口内只挪了 5 px（阈值 30）：还不算在滑，窗口也不重新起表。
+        reader.scroll_y = 5.0;
+        assert!(
+            !reader.mark_scroll(at(50), VIEWPORT).scrolling,
+            "5 px 不到阈值，不该算在滑"
+        );
+
+        // 再两帧各挪 20 px：单帧都不到阈值，而**从锚点累计**已经过了 40 px —— 该判在滑。
+        // 这一格钉的是「锚点只在窗口走完之后才重起」：把它改成每帧重起，这里就红。
+        reader.scroll_y = 25.0;
+        assert!(
+            !reader.mark_scroll(at(70), VIEWPORT).scrolling,
+            "累计 25 px 还差 5 px 到阈值"
+        );
+        reader.scroll_y = 45.0;
+        assert!(
+            reader.mark_scroll(at(80), VIEWPORT).scrolling,
+            "窗口内累计 45 px 该判在滑 —— 按单帧看的话这两帧各 20 px 永远不算滑"
+        );
+
+        // 同一个窗口里累计到 100 px：判在滑，方向是往前。
+        reader.scroll_y = 100.0;
+        let moving = reader.mark_scroll(at(100), VIEWPORT);
+        assert!(moving.scrolling, "{SCROLL_WINDOW} 内挪过阈值就是还在滑");
+        assert_eq!(
+            moving.direction,
+            Some(FixedDirection::Ahead),
+            "往前挪要报 Ahead，预取才知道往哪边取两页"
+        );
+
+        // 位置停住、窗口过完：这一帧起算静止，窗口从这一刻重新起表。
+        assert!(
+            !reader.mark_scroll(at(400), VIEWPORT).scrolling,
+            "停住超过 {SCROLL_WINDOW} 秒该判静止 —— 高清那一档就是在这里才开始排"
+        );
+
+        // 往回滑：方向跟着**这一帧**的位移走，窗口用刚重起的那一格。
+        reader.scroll_y = 0.0;
+        let back = reader.mark_scroll(at(500), VIEWPORT);
+        assert!(back.scrolling, "从静止又挪过阈值，该重新判在滑");
+        assert_eq!(back.direction, Some(FixedDirection::Behind), "往回挪要报 Behind");
+    }
+
+    /// 慢拖：每帧只挪 2 px，单帧谁都看不出来，而窗口内累计过了阈值 —— 判据必须报在滑。
+    ///
+    /// 这条钉的是「看窗口不看单帧」那一半：反过来按单帧判的话，一帧 8 ms 挪 2 px 永远
+    /// 不算滑，读者拖着屏幕时高清那几趟就一直排在预览前面，正是这一档要避免的形状。
+    #[gpui_kit::test]
+    fn a_slow_drag_counting_only_in_cumulative_distance(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut reader = cx.update(session);
+        let zero = Instant::now();
+        reader.scroll_y = 0.0;
+        reader.mark_scroll(zero, VIEWPORT);
+        let mut saw_moving = false;
+        for frame in 1..20 {
+            reader.scroll_y = 2.0 * frame as f32;
+            saw_moving |= reader.mark_scroll(zero + Duration::from_millis(10 * frame), VIEWPORT).scrolling;
+        }
+        assert!(
+            saw_moving,
+            "每帧 2 px、累计到 38 px 都没被判过一次在滑：判据在按单帧看，不是按窗口"
+        );
     }
 }

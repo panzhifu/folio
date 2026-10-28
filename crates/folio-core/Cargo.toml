@@ -62,10 +62,14 @@ regex.workspace = true
 # `.md` 正文的标记 → XHTML。CommonMark 那台状态机不自己写（flanking 规则、围栏里的 `#`、
 # 缩进代码这类没试过的形状是坑），理由与「锁里已有、一条新包都不带」那组实测写在根 Cargo.toml。
 markdown.workspace = true
-# PDF（M9）。为什么是纯 Rust 的 `pdf_oxide`、`rendering` 那条 feature 为什么必须开、以及
-# 「两个 CJK feature 量过仍不开」的那笔账，全写在根 Cargo.toml 那条上。用它的只有
-# `content::format::pdf`：页表与书签读 `document` / `outline`，一页的 PNG 读 `rendering`。
-pdf_oxide.workspace = true
+# PDF（M9）：`hayro` 一台引擎管完，走根 `Cargo.toml` 那条 fork 依赖。解析那一半
+# （页表 / 书签 / 文字层 / 加密判定）与画像素那一半都在它身上，为什么从「两台引擎」换成
+# 「一台」、fork 上补的是哪三格，全写在根 `Cargo.toml` 的 `hayro` 那一条上。
+# 这一层只用它的三个入口：`Pdf::pages()` / `hayro_interpret::text` /
+# `hayro_syntax::outline`。
+hayro.workspace = true
+# 页的 PNG 编码（hayro 交像素、契约要 PNG）。为什么不用 `image` 那层封装见根 Cargo.toml。
+png.workspace = true
 # CB7：纯 Rust 的 7z 解压；CBR：纯 Rust 的 RAR（rars），两者都不带 C/C++。
 sevenz-rust2.workspace = true
 rars.workspace = true
@@ -86,6 +90,9 @@ rust-i18n.workspace = true
 # `tracing` 与 `tracing-subscriber` 里没有任何窗口相关的东西。）
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# `log` → `tracing` 的桥（桌面把依赖库的记录也收进同一份日志）。Android 上装不上：
+# 那边 `log` 的全局位给了 `android_logger`（见 `logging::init` 那段注释）。
+tracing-log = { workspace = true }
 
 # 听书引擎的两条管道（`src/speech.rs` 的 `Engine`）：命令与回调合走一条、事件走另一条，
 # 引擎线程用 blocking 两端收发，界面侧在 gpui 的 async 环境里 `recv().await` —— 所以

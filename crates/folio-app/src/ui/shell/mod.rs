@@ -442,6 +442,11 @@ pub struct AppShell {
     chrome_painted: ChromeState,
     /// 到点放开 `chrome_frozen` 的那个闹钟。`Task` 一 drop 就取消计时，所以要存着。
     _chrome_release: Option<Task<()>>,
+    /// 架面在往下读，导航栏暂时让开（`ShelfEvent::Fold` 报进来）。
+    ///
+    /// 只影响 Compact 的悬浮底栏与 Medium 的悬浮卡片：Expanded（桌面）的侧栏是常驻
+    /// 导航，不参与。真正的位移在 `navigation` 里由弹簧每帧求值 —— 这一格只是目标。
+    nav_folded: bool,
 }
 
 impl AppShell {
@@ -573,6 +578,13 @@ impl AppShell {
                     this.close_reading(cx);
                 }
             }
+            // 架面滚动换向：导航栏让开 / 放回来。只在状态真的变了时才会收到。
+            ShelfEvent::Fold(folded) => {
+                if this.nav_folded != *folded {
+                    this.nav_folded = *folded;
+                    cx.notify();
+                }
+            }
         });
 
         // 架面那条栈的形状变了 = 导航栏该不该收回来。压进去的是「信息」那一页与某一组
@@ -588,7 +600,11 @@ impl AppShell {
                 // 弹回整架这一刻重查一遍。在那一页里做的事改的是**库**：把最后一本移出
                 // 那个组、新建一个组 —— 而身后那块架面手上还是压页那一刻的组清单，不敲
                 // 这一下，读者回到整架看到的还是那个已经空了的组（它不该再摆出来了）。
-                this.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+                this.shelf.update(cx, |shelf, cx| {
+                    shelf.force_reload(cx);
+                    shelf.reset_fold(cx);
+                });
+                this.nav_folded = false;
                 // 导航栏画不画看栈上压了几页，所以栈一变这一帧就得重画 ——
                 // 不敲这一下，pop 回架面后那条底栏不会自己回来。
                 cx.notify();
@@ -721,6 +737,7 @@ impl AppShell {
                 immersive: false,
             },
             _chrome_release: None,
+            nav_folded: false,
         }
     }
 
@@ -827,7 +844,11 @@ impl AppShell {
         // 架面的顺序与进度同理：开书把这一本的 `last_opened_at` 顶到最前、退场那一刻
         // 位置刚落库，而架面查库有去重（词没变、架非空就不重查）—— 不在这儿推它一把，
         // 读者读完退回来看到的还是开书前的旧顺序，「最近阅读」排不到前面。
-        self.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+        self.shelf.update(cx, |shelf, cx| {
+            shelf.force_reload(cx);
+            shelf.reset_fold(cx);
+        });
+        self.nav_folded = false;
         // 「笔记」也刚过时了：读者在书里划的线、钉的签，都要等这一下才进那一屏。
         self.notes.update(cx, |notes, cx| notes.refresh(cx));
         cx.notify();
@@ -1102,10 +1123,15 @@ impl AppShell {
 
     /// 当前档位的导航栏：点击即切目的地。`safe` 是系统 inset —— Compact 档靠底那一条
     /// 让底栏离开手势条，侧栏两档靠顶那一条让开状态栏 / 挖孔。
+    ///
+    /// `folded` 是「架面正在往下读，导航让开」那一格；位移由 `navigation` 里的弹簧
+    /// 每帧求值，所以这里要窗口。
     fn nav(
         &self,
         size: SizeClass,
         safe: &host::Insets,
+        folded: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let entity = cx.entity().clone();
@@ -1114,6 +1140,8 @@ impl AppShell {
             self.destination,
             size,
             safe,
+            folded,
+            window,
             move |destination, window, cx| {
                 entity.update(cx, |this, cx| this.go(destination, window, cx))
             },
@@ -1262,7 +1290,7 @@ impl Render for AppShell {
                     .pt(px(safe.top))
                     .child(div().size_full().min_h_0().overflow_hidden().child(content));
                 if !nav_gone {
-                    page = page.child(self.nav(size, &safe, cx));
+                    page = page.child(self.nav(size, &safe, self.nav_folded, window, cx));
                 }
                 page.into_any_element()
             } else {
@@ -1273,7 +1301,7 @@ impl Render for AppShell {
                     .bg(cx.theme().background)
                     .text_color(cx.theme().foreground);
                 if !nav_gone {
-                    row = row.child(self.nav(size, &safe, cx));
+                    row = row.child(self.nav(size, &safe, self.nav_folded, window, cx));
                 }
                 row.child(
                     div()

@@ -10,7 +10,7 @@
 //!
 //! ## 为什么是「紧挨着的那一张纸」，不是「下一屏所有图」
 //!
-//! 图集的封顶是 24 MiB（`image_atlas::MAX_RESIDENT_BYTES`），而放掉一格的判据是「离场满
+//! 图集的封顶是手机上 24 MiB（`image_atlas::soft_limit`，桌面 128、平板 48），而放掉一格的判据是「离场满
 //! `HELD_AFTER_LEAVE` 帧」。预取进来的那一格要**每帧被碰到**才活得下来，被碰到的次数就是
 //! 它与当前屏的距离 —— 预取太远，还没翻到就被 `end_frame` 收走了，等于白解一趟。
 //! 所以这里只取紧挨着的下一次翻页，而且每帧至多起一趟（[`first_unseen`] 只回第一张）。
@@ -65,21 +65,65 @@ pub(in crate::ui::features::reader) fn side_for_paged(
     )
 }
 
-/// 定版式：这一页之后该预解哪一页。
+/// 定版式：这一页之后该预解哪一页（半径 1，向后）。
 ///
 /// 定版式没有章，页序就是阅读序；与分页那一档同一条取舍 —— 后面还有内容就往后，
 /// 到书尾才回头看上一页。整本书只有一页时没有可预解的下一张。
+///
+/// 保留这一条是因为「静态那一帧只想知道一张」的地方还在用它；带方向与半径的那一版
+/// 是 [`fixed_targets`]。
 pub(in crate::ui::features::reader) fn fixed_target(page: usize, pages: usize) -> Option<usize> {
     if page >= pages {
         return None;
     }
-    if page + 1 < pages {
-        Some(page + 1)
-    } else if page > 0 {
-        Some(page - 1)
-    } else {
-        None
+    fixed_targets(page, pages, FixedDirection::Ahead, 1)
+        .into_iter()
+        .next()
+        // 书尾往后没页了：回看上一页（定版式那一屏的「下一张」本来就该是它，
+        // 因为往回翻也是读者的下一步）。带半径的那一版**不做**这个回退，
+        // 它只负责「读者往哪边滑就取哪边」。
+        .or_else(|| page.checked_sub(1))
+}
+
+/// 定版式取页的方向。`Ahead` = 往后读（绝大多数），`Behind` = 往回翻。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::ui::features::reader) enum FixedDirection {
+    Ahead,
+    Behind,
+}
+
+/// 定版式：从 `page` 往外数、按 `direction` 的那几页，最多 `radius` 页。
+///
+/// 为什么要有方向：定版式一屏就是一页，快速滑动时读者往哪边滑，预取的页就该在哪边 ——
+/// 只看「page + 1」的话往回滑时一张预解好的都没有，得等停下才补。
+///
+/// 为什么有半径：原来只取一张，滑得比画得快时（手机上栅格化一页几十到几百 ms）
+/// 读者到那一页时它还在画。取两张让「下一张」有缓冲；再多就压不住内存了
+/// （每页预览在 720 档约 2 MB，见 `fixed_book::PREVIEW_EDGE`）。
+///
+/// 越界的那一侧自动少给，另一侧够了就不补（Ahead 到书尾时给的都是书尾之前那些）。
+pub(in crate::ui::features::reader) fn fixed_targets(
+    page: usize,
+    pages: usize,
+    direction: FixedDirection,
+    radius: usize,
+) -> Vec<usize> {
+    if page >= pages || radius == 0 {
+        return Vec::new();
     }
+    let mut out = Vec::with_capacity(radius);
+    for step in 1..=radius {
+        let ahead = page + step;
+        let behind = page as isize - step as isize;
+        // 那一头越界就**停**，不跨到另一头：读者往那边滑，另一头的页给了他也不会看。
+        let candidate = match direction {
+            FixedDirection::Ahead if ahead < pages => ahead,
+            FixedDirection::Behind if behind >= 0 => behind as usize,
+            FixedDirection::Ahead | FixedDirection::Behind => break,
+        };
+        out.push(candidate);
+    }
+    out
 }
 
 /// 一张带着图的纸：哪一章、多高的一条带（**章内排版坐标**）。
@@ -304,5 +348,39 @@ mod tests {
         assert_eq!(fixed_target(2, 3), Some(1), "书尾回看上一页");
         assert_eq!(fixed_target(0, 1), None, "单页书没有可预解的下一张");
         assert_eq!(fixed_target(7, 3), None, "越界页不乱给目标");
+    }
+
+    /// 带方向与半径的那一版：往哪边滑就取哪边，半径 2 时两页都取。
+    ///
+    /// 条数是重点：取的页数**就是读者到那一页之前能预解完的页数** —— 少取一张，
+    /// 快速滑动时就会看到空白页。
+    #[test]
+    fn a_fixed_page_prefetches_in_the_direction_the_reader_is_going() {
+        use super::{FixedDirection, fixed_targets};
+        assert_eq!(
+            fixed_targets(5, 10, FixedDirection::Ahead, 2),
+            vec![6, 7]
+        );
+        assert_eq!(
+            fixed_targets(5, 10, FixedDirection::Behind, 2),
+            vec![4, 3]
+        );
+        assert_eq!(
+            fixed_targets(8, 10, FixedDirection::Ahead, 2),
+            vec![9],
+            "书尾这一侧只剩一页，另一侧不补（读者没往回看）"
+        );
+        assert_eq!(
+            fixed_targets(1, 10, FixedDirection::Behind, 2),
+            vec![0],
+            "书首同理"
+        );
+        assert_eq!(
+            fixed_targets(9, 10, FixedDirection::Ahead, 2),
+            Vec::<usize>::new(),
+            "书尾往后没页了：不跨到另一头（读者没往回看）"
+        );
+        assert_eq!(fixed_targets(0, 1, FixedDirection::Ahead, 2), Vec::<usize>::new());
+        assert_eq!(fixed_targets(5, 10, FixedDirection::Ahead, 0), Vec::<usize>::new());
     }
 }

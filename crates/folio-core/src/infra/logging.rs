@@ -44,7 +44,6 @@ use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
-use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::infra::config::{Config, Logging, Resolved};
 use crate::infra::error::Result;
@@ -296,8 +295,22 @@ fn subscriber(
 ///
 /// `extra` 是平台自己那一层：Android 递一个把事件转给 logcat 的 `Layer` 进来，core 因此
 /// 不需要知道每个平台的控制台长什么样。
+///
+/// 用 `set_global_default` 而不是 `SubscriberInitExt::try_init`：后者在 `tracing-log`
+/// feature 下还会顺手装 `LogTracer`（`log` → `tracing` 的桥），而进程里已经有平台自己的
+/// `log` 后端了 —— Android 的 `android_logger` 就在这之前 `set_logger`，tracing-log 的
+/// 那一步必然失败，`try_init` 于是报错，尽管 subscriber 已经装上了（它是先装后桥）。
+/// 后果不只是多一条假警报：`init` 在 `report_startup` 之前返回，启动现场那几行没了。
+/// 我们**不**需要 `LogTracer`：Android 那层是反着走的（tracing 事件递进 `log::logger()`），
+/// 桌面的 stderr / 文件也不经过 `log` facade。
 pub fn init(logging: &Logging, extra: Option<BoxedLayer>) -> Result<()> {
-    subscriber(logging, extra).try_init()?;
+    tracing::subscriber::set_global_default(subscriber(logging, extra))?;
+    // `try_init` 原本会在这一步顺手装 `LogTracer`（`log` → `tracing` 的桥）——
+    // 桌面靠它把依赖库（wgpu / html5ever 那一串）通过 `log` facade 发的记录也收进同一份
+    // 日志。这里显式补回来，且**允许失败**：Android 的 `android_logger` 已经占了 `log`
+    // 的全局位，那一边不需要这条桥（tracing 的输出是反着递进 `log::logger()` 的，
+    // 见 `ui::platform::android`）。
+    let _ = tracing_log::LogTracer::init();
 
     // 从这里往后的日志才有去处，所以启动现场只能报在这里。
     report_startup(logging);

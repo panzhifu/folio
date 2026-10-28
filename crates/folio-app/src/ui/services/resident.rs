@@ -23,16 +23,46 @@ static SERVICES: OnceLock<Arc<Services>> = OnceLock::new();
 
 /// 进程级的常驻资源。第一次取用时惰性建好（只有作业池，没有服务/书库）——
 /// 没走 boot 的测试也能照常用池，不必先装一套全局。
-///
-/// 池给 **2 条** worker：导入（落库档，封顶 1）与整机扫描（预热档）能各占一条并行，
-/// 而导入之间仍靠「落库封顶 1」保持串行 —— 见 `TaskManager` 的分档与封顶（§1.1）。
 pub fn services() -> &'static Arc<Services> {
-    SERVICES.get_or_init(|| Arc::new(Services::new(Arc::new(TaskManager::new(2)))))
+    SERVICES.get_or_init(|| Arc::new(Services::new(Arc::new(TaskManager::new(pool_workers())))))
+}
+
+/// 作业池给几条 worker：**手机 3 条、桌面 6 条**（计划 §二 A「池规模」那一档）。
+///
+/// 从前是 2 条，那笔账是给导入算的（导入落库档封顶 1、整机扫描预热档各占一条就够）。
+/// 读者翻页的栅格化搬进这个池之后它就不够了：一页 PDF 是几十到几百 ms，2 条线程等于
+/// 「当前页 + 一页预取」把池占满，翻过去那一下照样排队 —— 而 [`Priority::cap`] 的
+/// 交互/预热各 4 那一档封顶，在只有 2 条 worker 的池里**恒为 2**，压根挡不出它想挡的形状。
+///
+/// - 桌面 6 = 交互封顶 4 + 导入、扫描各占 1 的量。
+/// - 手机 3：并行画几页，**峰值内存按并行数涨**（一页 2048×1448 的画布是 11.8 MB，
+///   三条同时在跑就是 35 MB 的瞬时量，而这台机器前台静置已经 151 MB）。三页并行已经
+///   盖住「当前页 + 前后各一页预取」，再多买不到响应、只买得到内存。
+///
+/// 计划里那一档「平板 4」没有单列：平板的判据是窗口逻辑宽 ≥ 1000 pt，而这个池在
+/// **开窗之前**就要建好（`resident::install(cx)` 排在 `open_window` 之前，见
+/// `platform::desktop` 的启动次序），那时窗口还不存在。宽窗口机器与桌面同档；
+/// 真正的并行度仍由 `Priority::cap` 那两张封顶卡住，多出来的 worker 只在导入/扫描
+/// 同时在跑时才占得上。
+fn pool_workers() -> usize {
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        3
+    } else {
+        6
+    }
 }
 
 /// 共用的作业池。导入 / 扫描 / watch / transfer 都取这一份（§1.1「一条队列」）。
 pub fn pool() -> Arc<TaskManager> {
     Arc::clone(services().pool())
+}
+
+/// 作业池；没装常驻资源时给 `None`（**不**惰性建一个）。
+///
+/// 读者翻页时的栅格化用它：有池就排队，没池（纯视图测试）就就地跑 —— 那种场景里
+/// 「起 6 条线程」比那一趟活本身还贵，而且测试结束时它们没人 join。
+pub fn pool_maybe() -> Option<Arc<TaskManager>> {
+    SERVICES.get().map(|services| Arc::clone(services.pool()))
 }
 
 /// 把当前书库句柄交给常驻资源：关停时由它放掉最后一份，库的关闭因此排在作业池之后。

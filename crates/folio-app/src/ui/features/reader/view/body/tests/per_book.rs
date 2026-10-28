@@ -92,10 +92,8 @@ fn the_sheet_writes_into_this_books_row(cx: &mut TestAppContext) {
     let handle = open(cx, store.clone(), id);
 
     cx.update(|cx| ConfigHolder::edit_book_reader(cx, |p| p.margin_x = 40.0));
-    cx.update_window(handle, |_, window, cx| {
-        window.render_frame(cx);
-    })
-    .expect("这一屏该画得出来");
+    // 差量要安静够那一档才落库（`SETTINGS_SETTLE_FRAMES`），所以画到第 24 帧。
+    frames(cx, handle, SETTLE_FRAMES);
 
     let saved = store.book_settings(id).expect("读回这一本的差量");
     assert_eq!(
@@ -111,6 +109,86 @@ fn the_sheet_writes_into_this_books_row(cx: &mut TestAppContext) {
             "配置文件那一层不该被这一本碰过"
         );
     });
+}
+
+/// 差量落库要安静的那一帧数（与 `session::SETTINGS_SETTLE_FRAMES` 同一个数，不抄第二份）。
+use crate::ui::features::reader::model::session::SETTINGS_SETTLE_FRAMES as SETTLE_FRAMES;
+
+/// 画 n 帧。差量那一趟挂在渲染帧上（`sync_book_settings` 每帧一次），不画帧就走不完。
+fn frames(cx: &mut TestAppContext, handle: gpui_kit::AnyWindowHandle, n: u32) {
+    for _ in 0..n {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .expect("这一屏该画得出来");
+    }
+}
+
+/// 只画一帧：那条去抖的门要的节奏是「每拖一格画一帧」，而 `draw` 是画到落库那一档。
+fn draw_one(cx: &mut TestAppContext, handle: gpui_kit::AnyWindowHandle) {
+    frames(cx, handle, 1);
+}
+
+/// 拖一格**不该写一次库**：差量攒到安静一档才落，离席那一步兜底。
+///
+/// 反过来的形状是实测过的疼：一次同步 SQLite 写摊上 WAL checkpoint 就没有上界
+/// （位置那一趟为此改成离席才结，`model/position.rs` 记着 34.75 ms 那一次），
+/// 而一次拖动要走几十格。这条门三个数都得对上：
+/// 一边拖一边画帧 ⇒ **一次都不写**；停手画满那一档 ⇒ **写一次，且是最后一格**；
+/// 没停手就走 ⇒ 离席那一步当场写掉。
+#[gpui_kit::test]
+fn a_drag_writes_the_books_row_once_instead_of_once_per_tick(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (store, id) = store_with_book("甲本");
+    let (session, handle) = open_with_store(
+        cx,
+        &flow(),
+        "epub",
+        Reader::default(),
+        Locator::start(),
+        390.0,
+        Some(store.clone()),
+        Some(id),
+    );
+
+    for tick in 0..40 {
+        cx.update(|cx| ConfigHolder::edit_book_reader(cx, move |p| p.margin_x = 24.0 + tick as f32));
+        draw_one(cx, handle);
+    }
+    assert!(
+        store
+            .book_settings(id)
+            .expect("读回那一列")
+            .is_empty(),
+        "每拖一格写一次库：40 帧里至少已经落过一笔"
+    );
+
+    // 停手：安静满那一档，落下的是**最后一格**那个值。
+    frames(cx, handle, SETTLE_FRAMES);
+    let saved = store.book_settings(id).expect("读回那一列");
+    assert_eq!(
+        saved.effective_reader(&Reader::default()).margin_x,
+        24.0 + 39.0,
+        "落库的该是最后一次那格，不是中途某一格"
+    );
+
+    // 没停手就走：离席结账那一步（与位置同一条路）当场把欠的写掉。
+    cx.update(|cx| {
+        ConfigHolder::edit_book_reader(cx, |p| p.margin_x = 8.0);
+        session.update(cx, |session, cx| {
+            session.persist_position();
+            session.flush_book_settings(cx);
+        });
+    });
+    assert_eq!(
+        store
+            .book_settings(id)
+            .expect("读回那一列")
+            .effective_reader(&Reader::default())
+            .margin_x,
+        8.0,
+        "离席还不结这一笔，进程被回收就是「改过又没了」"
+    );
 }
 
 /// 两本书各一份：甲本调过、乙本跟默认、回到甲本的选择还在库里。
@@ -131,8 +209,10 @@ fn two_books_keep_their_own_settings(cx: &mut TestAppContext) {
         .add_book(std::path::Path::new("/books/b.epub"), &meta_b)
         .unwrap();
 
-    open(cx, store.clone(), a);
+    let handle_a = open(cx, store.clone(), a);
     cx.update(|cx| ConfigHolder::edit_book_reader(cx, |p| p.line_height = 2.4));
+    // 落库要安静满那一档（见 `draw`），甲本这一格改完得画够才进得了那一行。
+    draw(cx, handle_a);
     assert_eq!(
         cx.update(|cx| ConfigHolder::reader(cx)).line_height,
         2.4,
@@ -209,12 +289,11 @@ fn appearance_patch(set: impl FnOnce(&mut Appearance)) -> BookSettings {
     patch
 }
 
-/// 画一帧：会话在这一帧里比较 `book_rev` 并把差量抄进库。
+/// 画到「差量该落库」那一档：会话每帧比较一次 `book_rev`，而停手之后要**安静满
+/// `SETTINGS_SETTLE_FRAMES` 帧**才把差量抄进库（弹层每拖一格换一次号，一次拖动几十格）。
+/// 所以这一组验落库的都得走满那一档，一帧不够。
 fn draw(cx: &mut TestAppContext, handle: gpui_kit::AnyWindowHandle) {
-    cx.update_window(handle, |_, window, cx| {
-        window.render_frame(cx);
-    })
-    .expect("这一屏该画得出来");
+    frames(cx, handle, SETTLE_FRAMES);
 }
 
 /// 「恢复本书默认」那一格抹掉整份差量，并把空差量落回库里那一列。
