@@ -467,10 +467,9 @@ fn a_fixed_text_page_still_selects_after_the_stack_scrolls(cx: &mut TestAppConte
     drag_select_between(cx, handle, from, to);
     assert_eq!(
         view.read_with(cx, |v, _| v.selected_text()),
-        // 拖的是第 0 到第 4 个字，而那五个字里第 3 格是补出来的空格 ⇒ `TI TL`。
-        // 这条盯的是「滚动之后落点还按这一帧的页框折回字序」，**不是**空格该不该有
-        // （那一件事记在 CT-11）。改成 `TITLE` 之前先把那条做完。
-        Some("TI TL".to_string()),
+        // 拖的是第 0 到第 4 个字，正好是 `TITLE` 五个字；落笔位置修好之后，
+        // 字序里不再有那个补出来的空格（从前是 `TI TL`）。
+        Some("TITLE".to_string()),
         "滚动之后的落点仍该按这一帧的页框折回字序"
     );
 }
@@ -590,8 +589,8 @@ fn a_pdf_page_selects_copies_marks_and_points_back(cx: &mut TestAppContext) {
     );
     assert_eq!(
         view.read_with(cx, |v, _| v.selected_text()),
-        // 同上一条：拖过的那五个字里含一个补出来的空格（判据的事记在 CT-11）。
-        Some("TI TL".to_string()),
+        // 拖过的那五个字就是 `TITLE`；落笔位置修好后字序里不再有假空格。
+        Some("TITLE".to_string()),
         "复制那一格取的该是选中的那几个字"
     );
 
@@ -601,9 +600,9 @@ fn a_pdf_page_selects_copies_marks_and_points_back(cx: &mut TestAppContext) {
     assert_eq!(rows.len(), 1, "划下去该有一条批注");
     let anchor = &rows[0].anchor;
     assert_eq!((anchor.chapter, anchor.start, anchor.end), (0, 0, 5));
-    // 快照存的就是字序那一串 ⇒ 含那一个补出来的空格（与 `selected_text` 同一份，
-    // 「翻回原文」那一步比的也是这一串；判据的事记在 CT-11）。
-    assert_eq!(anchor.exact, "TI TL", "快照存的是字序那一串");
+    // 快照存的就是字序那一串（与 `selected_text` 同一份，「翻回原文」那一步比的也是
+    // 这一串）。
+    assert_eq!(anchor.exact, "TITLE", "快照存的是字序那一串");
     assert!(
         anchor.path.is_empty(),
         "定版式没有 DOM 路径可指：{}",

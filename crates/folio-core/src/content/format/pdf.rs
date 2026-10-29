@@ -2333,12 +2333,12 @@ mod tests {
         assert_eq!((text.width, text.height), (612.0, 792.0), "框就是可见框");
         let first = text.chars[0];
         assert_eq!(first.ch, 'H');
-        // **盒是墨，不是 em 方框**：夹具的字形是 `(100, 0)–(500, 700)` 的方块（upem
-        // 1000），基线在 `x = 72`、`y = 700`，于是 24pt 的字里这一块墨落在
-        // `x = 72 + 2.4`、`y = 792 − 700 − 16.8 = 75.2`，大小 `9.6 × 16.8`。
+        // **盒是墨，不是 em 方框**：夹具的字形墨宽 9.6、高 16.8（upem 1000），基线在
+        // `x = 72`、`y = 700`；翻 y 之后墨顶在 `792 − 700 − 16.8 = 75.2`。
+        // 落笔顺序修好之后，第一个字的左沿就是基线 `x = 72`（从前被推进一格，量到 96）。
         assert!(
-            (first.rect.x - 96.0).abs() < 0.1,
-            "左沿({})落在基线(72)+侧边距(2.4)+字距(24)上 —— 每个字的前进宽是 1000/1000 em",
+            (first.rect.x - 72.0).abs() < 0.1,
+            "第一个字的左沿该落在基线 x=72 上：{}",
             first.rect.x
         );
         assert!(
@@ -2386,7 +2386,7 @@ mod tests {
             0..text.chars.iter().position(|item| item.line == 1).unwrap();
         let rects = text.rects(line_zero);
         assert_eq!(rects.len(), 1, "一行一条色块：{rects:?}");
-        assert!((rects[0].x - 96.0).abs() < 0.1, "{:?}", rects[0]);
+        assert!((rects[0].x - 72.0).abs() < 0.1, "{:?}", rects[0]);
         assert!((rects[0].y - 75.2).abs() < 0.1, "{:?}", rects[0]);
         assert!(rects[0].width > 100.0, "一行应有长度：{rects:?}");
     }
@@ -2412,8 +2412,8 @@ mod tests {
         let first = text.chars[0];
         assert_eq!(first.ch, 'i');
         assert!(
-            (first.rect.x - 52.0).abs() < 0.1,
-            "左沿要按裁掉的 100 收进来（40 + 2.4 + 9.6）：{}",
+            (first.rect.x - 40.0).abs() < 0.1,
+            "CropBox 左沿 100，字写在 x=140 ⇒ 可见框里的落笔点 x=40；第一个字的左沿跟着它：{}",
             first.rect.x
         );
         assert!(
@@ -2497,14 +2497,12 @@ mod tests {
             "顶该落在 poppler 那一行里：{}",
             first.rect.y
         );
-        // **这里要读清楚，否则会把一个错当成标准**：`TITLE` 五个字是 content stream
-        // 里的第 1–5 个，而我们交出的第 4 格是 `text_layer` 补出来的**假空格**（`I`→`T`
-        // 的缝 3.29 pt > 阈值 0.25 × 字高 1.98），所以第 5 格才是 `L`、第 6 格是 `E`。
-        // poppler 那一侧没有这个空格（它 `pdftotext -raw` 交的是 `TITLE`）。
-        // 这条门校的是**盒的坐标与行号**，不是空格该不该有 —— 整页对账的数是
-        // 「我们 1529 词 vs poppler 931 词」，判据要按行内 em 重做，记在
+        // `TITLE` 五个字是 content stream 里的第 1–5 个，落笔位置修好之后字序里
+        // 不再凭空多出 `TI TLE` 那个假空格 —— 第 5 格 `E` 就是这个词的末字。
+        // poppler 那一侧也没有这个空格（它 `pdftotext -raw` 交的是 `TITLE`）。
+        // 这条门校的是**盒的坐标与行号**；整页词数对账仍按行内 em 重做，记在
         // `doc/优化计划.md` 的 CT-11。搜索那一侧已经不认空白（`search::each_hit`）。
-        let title_end = text.chars[5];
+        let title_end = text.chars[4];
         assert_eq!(title_end.ch, 'E');
         assert!(
             (title_end.rect.x + title_end.rect.width - 280.211).abs() < 10.0,
@@ -2532,13 +2530,11 @@ mod tests {
         // pdf_oxide 按词聚类就交回 `OFTHE`。现在引擎把**笔的前进量**交出来（含 `TJ` 的
         // 调整），缝是几何上真有的东西，所以那两个空格回来了。
         //
-        // 还剩一处**多出来的**空格：`T` 与 `I`、`L` 与 `E` 之间（`TI TLE`）。那两格里两笔
-        // 都不占边（`T` 的横只到起笔点右边 7pt，而 `I` 的竖线落在正中），几何上确实空出了
-        // 四分之一个字高 —— 与真词缝分不开。这一条只钉「词与词之间的缝回来了」，逐字的
-        // 盒是墨迹、不是字形原点，那一层差要另立一条（引擎得交字形原点才校得动）。
+        // `T` 与 `I`、`L` 与 `E` 之间从前还会多出一格：落笔顺序错的时候每个字画在下一个
+        // 字的位置，墨盒之间露出假缝，被阈值当成词缝。落笔修好之后这条也一起消失。
         let flat = text.text();
         assert!(
-            flat.starts_with("TI TLE OF THE PAPER"),
+            flat.starts_with("TITLE OF THE PAPER"),
             "词与词之间的缝要回到字序里：{}",
             flat.chars().take(40).collect::<String>()
         );

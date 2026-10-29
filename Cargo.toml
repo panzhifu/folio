@@ -198,7 +198,7 @@ chardetng = "1"
 # 画一页的速度与没换之前一样（都是 hayro）：同一页 2048 那一档是画 202 ms + 编码 19 ms，
 # `opt-level = "z"`；`opt-level = 3` 下画只要 44 ms（4.6 倍），要再往下压就是给 hayro 那
 # 一支单独开 `opt-level = 3`，那笔账（.so 体积换 4.6 倍）还没量，先记在这里。
-hayro = { git = "https://github.com/panzhifu/hayro.git", rev = "c3d88c99" }
+hayro = { git = "https://github.com/panzhifu/hayro.git", rev = "cbfe8651" }
 # CB7（7z 漫画包）：纯 Rust 的 7z 解压。CBR（RAR）这一版不接 —— rarlab 的 unrar 是 C++，
 # Android NDK 那条构建线还没验，先让 `.cbr` 在判定层得到一句「这一版还读不动」。
 # **钉 0.20 而不是 0.24**：0.20.2 的 MSRV 是 1.85，工作区是 1.90；0.24 要 1.93。

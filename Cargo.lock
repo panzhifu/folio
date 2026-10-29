@@ -4004,7 +4004,7 @@ dependencies = [
 [[package]]
 name = "hayro"
 version = "0.8.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=c3d88c99#c3d88c9921d090d9af35c76e26fed261dca35bc7"
+source = "git+https://github.com/panzhifu/hayro.git?rev=cbfe8651#cbfe86515e5992a13fc23f8261adce582aae0611"
 dependencies = [
  "bytemuck",
  "fearless_simd 1.2.0",
@@ -4019,12 +4019,12 @@ dependencies = [
 [[package]]
 name = "hayro-ccitt"
 version = "0.4.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=c3d88c99#c3d88c9921d090d9af35c76e26fed261dca35bc7"
+source = "git+https://github.com/panzhifu/hayro.git?rev=cbfe8651#cbfe86515e5992a13fc23f8261adce582aae0611"
 
 [[package]]
 name = "hayro-cmap"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=c3d88c99#c3d88c9921d090d9af35c76e26fed261dca35bc7"
+source = "git+https://github.com/panzhifu/hayro.git?rev=cbfe8651#cbfe86515e5992a13fc23f8261adce582aae0611"
 dependencies = [
  "brotli",
  "hayro-postscript",
@@ -4033,7 +4033,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.8.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=c3d88c99#c3d88c9921d090d9af35c76e26fed261dca35bc7"
+source = "git+https://github.com/panzhifu/hayro.git?rev=cbfe8651#cbfe86515e5992a13fc23f8261adce582aae0611"
 dependencies = [
  "bitflags 2.13.2",
  "hayro-cmap",
@@ -4051,7 +4051,7 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.1"
-source = "git+https://github.com/panzhifu/hayro.git?rev=c3d88c99#c3d88c9921d090d9af35c76e26fed261dca35bc7"
+source = "git+https://github.com/panzhifu/hayro.git?rev=cbfe8651#cbfe86515e5992a13fc23f8261adce582aae0611"
 dependencies = [
  "fearless_simd 1.2.0",
  "hayro-ccitt",
@@ -4060,7 +4060,7 @@ dependencies = [
 [[package]]
 name = "hayro-jpeg2000"
 version = "0.4.1"
-source = "git+https://github.com/panzhifu/hayro.git?rev=c3d88c99#c3d88c9921d090d9af35c76e26fed261dca35bc7"
+source = "git+https://github.com/panzhifu/hayro.git?rev=cbfe8651#cbfe86515e5992a13fc23f8261adce582aae0611"
 dependencies = [
  "fearless_simd 1.2.0",
 ]
@@ -4068,12 +4068,12 @@ dependencies = [
 [[package]]
 name = "hayro-postscript"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=c3d88c99#c3d88c9921d090d9af35c76e26fed261dca35bc7"
+source = "git+https://github.com/panzhifu/hayro.git?rev=cbfe8651#cbfe86515e5992a13fc23f8261adce582aae0611"
 
 [[package]]
 name = "hayro-syntax"
 version = "0.8.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=c3d88c99#c3d88c9921d090d9af35c76e26fed261dca35bc7"
+source = "git+https://github.com/panzhifu/hayro.git?rev=cbfe8651#cbfe86515e5992a13fc23f8261adce582aae0611"
 dependencies = [
  "flate2",
  "hayro-ccitt",
