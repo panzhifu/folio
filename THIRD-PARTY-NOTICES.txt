@@ -3420,14 +3420,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
 BSD 3-Clause "New" or "Revised" License
-（4 个）
+（2 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - tiny-skia-path 0.11.4
-  - tiny-skia-path 0.12.0
   - tiny-skia 0.11.4
-  - tiny-skia 0.12.0
 
 Copyright (c) 2011 Google Inc. All rights reserved.
 Copyright (c) 2020 Yevhenii Reizner All rights reserved.
@@ -3463,14 +3461,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
 BSD 3-Clause "New" or "Revised" License
-（4 个）
+（2 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - alloc-no-stdlib 2.0.4
-  - alloc-no-stdlib 3.0.0
   - brotli 8.0.4
-  - brotli 9.0.0
 
 Copyright (c) 2016 Dropbox, Inc.
 All rights reserved.
@@ -3600,12 +3596,11 @@ USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
 BSD 3-Clause "New" or "Revised" License
-（4 个）
+（3 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - alloc-stdlib 0.2.4
-  - alloc-stdlib 0.3.0
   - exr 1.74.2
   - sha1_smol 1.0.1
 
@@ -5721,12 +5716,11 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（2 个）
+（1 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - brotli 8.0.4
-  - brotli 9.0.0
 
 Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
 
@@ -7333,11 +7327,10 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（2 个）
+（1 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - utf8parse 0.2.2
   - vte 0.15.0
 
 Copyright (c) 2016 Joe Wilm
@@ -7830,42 +7823,6 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - cipher 0.5.2
-
-Copyright (c) 2016-2025 RustCrypto Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（2 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - md-5 0.11.0
   - sha2 0.11.0
 
 Copyright (c) 2016-2026 The RustCrypto Project Developers
@@ -8257,35 +8214,6 @@ MIT License
   - foreign-types 0.5.0
 
 Copyright (c) 2017 The foreign-types Developers
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - stringprep 0.1.5
-
-Copyright (c) 2017 The rust-stringprep Developers
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -8901,50 +8829,13 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（2 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - cbc 0.1.2
-  - cbc 0.2.1
-
-Copyright (c) 2018-2022 RustCrypto Developers
-Copyright (c) 2018 Artyom Pavlov
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
 （1 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - aes 0.9.3
+  - cbc 0.1.2
 
-Copyright (c) 2018-2024 The RustCrypto Project Developers
+Copyright (c) 2018-2022 RustCrypto Developers
 Copyright (c) 2018 Artyom Pavlov
 
 Permission is hereby granted, free of charge, to any
@@ -9010,12 +8901,11 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（2 个）
+（1 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - block-buffer 0.12.1
-  - block-padding 0.4.2
 
 Copyright (c) 2018-2025 The RustCrypto Project Developers
 
@@ -9188,7 +9078,7 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（6 个）
+（5 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
@@ -9197,7 +9087,6 @@ MIT License
   - read-fonts 0.39.2
   - skrifa 0.40.0
   - skrifa 0.42.1
-  - write-fonts 0.48.1
 
 Copyright (c) 2019 Colin Rothfels
 
@@ -10138,41 +10027,6 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - atoi_simd 0.18.1
-
-Copyright (c) 2022 Dmitry Rodionov
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
   - renderdoc-sys 1.1.0
 
 Copyright (c) 2022 Eyal Kalderon
@@ -10360,42 +10214,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - inout 0.2.5
-
-Copyright (c) 2022-2025 The RustCrypto Project Developers
-Copyright (c) 2022 Artyom Pavlov
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
 
 
 --------------------------------------------------------------------------------
@@ -10661,41 +10479,6 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - cpubits 0.1.1
-
-Copyright (c) 2023-2026 The RustCrypto Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
   - deranged 0.5.8
 
 Copyright (c) 2024 Jacob Pratt et al.
@@ -10765,114 +10548,9 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - debug_unsafe 0.1.4
-
-Copyright (c) 2025 Dmitry Rodionov
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - pdf_oxide 0.3.78
-
-Copyright (c) 2025-present Yury Fedoseev
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
   - bit-set 0.9.1
 
 Copyright (c) 2026 The Rust Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - office_oxide 0.1.15
-
-Copyright (c) 2026 Yury Fedoseev
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -10966,22 +10644,13 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（23 个）
+（14 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - annotate-snippets 0.12.16
-  - anstream 1.0.0
-  - anstyle-parse 1.0.0
-  - anstyle-query 1.1.5
-  - anstyle-wincon 3.0.11
   - anstyle 1.0.14
-  - colorchoice 1.0.5
   - env_filter 0.1.4
-  - env_filter 2.0.0
-  - env_logger 0.11.11
-  - is_terminal_polyfill 1.70.2
-  - once_cell_polyfill 1.70.2
   - serde_spanned 0.6.9
   - serde_spanned 1.1.2
   - toml 0.8.23
@@ -11689,12 +11358,11 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 
 --------------------------------------------------------------------------------
 MIT License
-（2 个）
+（1 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - fax 0.2.7
-  - fax 0.3.0
 
 Copyright © 2021 The pdf-rs contributers.
 
@@ -11734,37 +11402,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - jpeg-decoder 0.3.2
-
-MIT License
-
-Copyright (c) 2016 The jpeg-decoder Developers
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
 
 --------------------------------------------------------------------------------
 MIT License
@@ -12819,37 +12456,6 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - fast_image_resize 6.1.0
-
-MIT License
-
-Copyright (c) 2021 Kirill Kuzminykh
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
   - rust-i18n 4.2.4
 
 MIT License
@@ -13498,13 +13104,13 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（138 个）
+（135 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - folio-curl 0.1.0
-  - folio-app 0.1.1
-  - folio-core 0.1.1
+  - folio-app 0.1.2
+  - folio-core 0.1.2
   - accesskit 0.24.1
   - accesskit_android 0.7.5
   - accesskit_atspi_common 0.19.1
@@ -13515,7 +13121,6 @@ MIT License
   - block2 0.6.2
   - block 0.1.6
   - brotli-decompressor 5.0.3
-  - brotli-decompressor 6.0.1
   - cesu8 1.1.0
   - chrono 0.4.45
   - dispatch2 0.3.1
@@ -13575,7 +13180,6 @@ MIT License
   - profiling-procmacros 1.0.18
   - profiling 1.0.18
   - pulp-wasm-simd-flag 0.1.1
-  - qcms 0.3.0
   - ratex-font-loader 0.1.15
   - ratex-font 0.1.15
   - ratex-katex-fonts 0.1.15
@@ -13593,7 +13197,6 @@ MIT License
   - speech-dispatcher 0.16.0
   - svg_fmt 0.4.5
   - taffy 0.13.0
-  - taffy 0.14.0
   - tauri-winrt-notification 0.8.1
   - tts 0.26.3
   - webview2-com-macros 0.8.1
@@ -13955,7 +13558,7 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（6 个）
+（5 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
@@ -13964,7 +13567,6 @@ MIT License
   - half 2.7.1
   - linebender_resource_handle 0.1.1
   - str_indices 0.4.4
-  - subsetter 0.2.6
 
 MIT License
 
@@ -14243,7 +13845,7 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（86 个）
+（85 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
@@ -14270,7 +13872,6 @@ MIT License
   - erased-serde 0.4.10
   - event-listener-strategy 0.5.4
   - event-listener 5.4.2
-  - fast-float2 0.2.4
   - fastrand 2.5.0
   - futures-lite 2.6.1
   - home 0.5.12
@@ -14673,13 +14274,12 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（3 个）
+（2 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - tracing-core 0.1.36
   - zip 8.6.0
-  - zip 9.0.5
 
 The MIT License (MIT)
 
@@ -14896,37 +14496,6 @@ MIT License
 The MIT License (MIT)
 
 Copyright (c) 2015 Andrew Gallant
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - nix 0.31.3
-
-The MIT License (MIT)
-
-Copyright (c) 2015 Carl Lerche + nix-rust Authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -15809,12 +15378,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（4 个）
+（3 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - fontdb 0.23.0
-  - fontdb 0.24.0
   - unicode-bidi-mirroring 0.4.0
   - unicode-ccc 0.4.0
 
@@ -15936,11 +15504,10 @@ THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（2 个）
+（1 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - harfrust 0.13.3
   - rustybuzz 0.20.1
 
 The MIT License (MIT)
@@ -15969,12 +15536,11 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（2 个）
+（1 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - weezl 0.1.12
-  - weezl 0.2.1
 
 The MIT License (MIT)
 

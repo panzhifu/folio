@@ -113,8 +113,8 @@ android {
         // versionCode 每次发版都要 +1：系统按它判「这个包能不能覆盖上一个」，不递增的症状是安装器
         // 拒绝覆盖安装，看着像自动更新坏了。Cargo 版本与 tag 那两处有 CI 一致性校验，只有这一处
         // 没人管，所以单独留一行提醒。发版配方见 README「发版」那一节。
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.1.2"
 
         // Tell NativeActivity which .so to load.
         // This must match the cdylib / example output name.
