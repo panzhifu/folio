@@ -404,6 +404,34 @@ fn secret_ok(given: &str, want: &str) -> bool {
     diff == 0
 }
 
+/// 拒绝一个上传之前最多读掉多少请求体。
+///
+/// 读掉是为了让服务端 `close()` 时接收队列是空的 —— 队列里还压着没读的字节时，
+/// 内核回的是 RST 而不是 FIN，客户端那边还在写，于是它看到的是 `broken pipe`
+/// 而不是那句 403（测试里偶发的红就是它）。上限是给「拿着 1 GB 文件敲错码」兜底的：
+/// 超过它就随连接一起丢掉，那种量级本来也不该为了一句 403 再读一遍。
+const REFUSAL_DRAIN: u64 = 8 * 1024 * 1024;
+
+/// 把请求体读掉（最多 `limit` 字节），只为让连接能干净地关。
+///
+/// 读失败（身体是坏的）就停 —— 反正接下来要回的是拒绝。
+async fn drain_at_most(multipart: &mut Multipart, limit: u64) {
+    let mut left = limit;
+    loop {
+        let Ok(Some(mut field)) = multipart.next_field().await else {
+            return;
+        };
+        // 读失败（身体坏了）就停 —— 反正接下来要回的是拒绝。
+        while let Ok(Some(chunk)) = field.chunk().await {
+            let len = chunk.len() as u64;
+            if len >= left {
+                return;
+            }
+            left -= len;
+        }
+    }
+}
+
 /// 上传页：配对码对、而且这个地址没在罚期里，才给得出这一页。
 async fn upload_page(
     State(state): State<Arc<TransferState>>,
@@ -428,6 +456,9 @@ async fn upload(
     mut multipart: Multipart,
 ) -> Response {
     if let Err(refusal) = authorize(&state, peer.ip(), query.pin.as_deref()) {
+        // 拒绝之前先把请求体读掉（见 [`REFUSAL_DRAIN`]）：不读就答，连接会被 RST 掉，
+        // 客户端拿不到这句 403、只看到 broken pipe。
+        drain_at_most(&mut multipart, REFUSAL_DRAIN).await;
         return refusal.into_response();
     }
     match collect_upload(&state, &mut multipart).await {
@@ -684,6 +715,60 @@ mod tests {
                 .unwrap()
                 .contains("input"),
             "上传页是一张带文件选择的表单"
+        );
+        server.stop();
+    }
+
+    /// 错配对码时**几 MB 的身体**也要拿到 403，而不是被连接重置。
+    ///
+    /// 服务端不读请求体就回答时，`close()` 那一下接收队列里还压着没读的字节，内核回的是
+    /// RST 而不是 FIN —— 客户端还在写，看到的就是 `broken pipe`。小身体（那张 100 字节
+    /// 的假 epub）碰运气，全量并行跑时偶发；这里几 MB 每次都能撞上，所以它是这条口径
+    /// 的稳定闸门。
+    #[test]
+    fn a_large_upload_with_a_wrong_pin_still_gets_the_403_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox = tmp.path().join("inbox");
+        let server = TransferServer::start(
+            TransferConfig {
+                port: 0,
+                pin: "2468".into(),
+                inbox_dir: inbox.clone(),
+            },
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let base = format!("http://{}", server.addr());
+        let client = ureq::AgentBuilder::new().build();
+        let boundary = "----folioBigBody";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.bin\"\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.resize(body.len() + 4 * 1024 * 1024, b'x');
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let status = match client
+            .post(&format!("{base}/upload?pin=0000"))
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
+            .send(&body[..])
+        {
+            Ok(resp) => resp.status(),
+            Err(ureq::Error::Status(code, _)) => code,
+            Err(other) => {
+                panic!("大身体 + 错配对码不该走到传输错误（服务端先关了连接）：{other}")
+            }
+        };
+        assert_eq!(status, 403);
+        assert!(
+            std::fs::read_dir(&inbox).unwrap().next().is_none(),
+            "错配对码一个字节都不该落进收件箱"
         );
         server.stop();
     }
@@ -991,12 +1076,29 @@ mod tests {
     /// 用 `set_default`（线程局部），不碰进程级 subscriber：并发用例互不影响，
     /// 也不会把日志格式层抢走。
     fn captured(probes: impl FnOnce()) -> Vec<String> {
-        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(Echo(seen.clone()));
-        {
-            let _guard = tracing::subscriber::set_default(subscriber);
-            probes();
-        }
+        // 订阅者**在进程级只装一次**，不用线程局部的 `set_default`。
+        //
+        // 线程局部那版在这套测试里会偶发丢行：并行跑时别的测试也在装上/摘掉自己的
+        // 局部订阅者，而 `tracing` 的「这个调用点要不要派发」是一张**全局**兴趣缓存，
+        // 局部订阅者计数回到 0 时会被重建 —— 于是同一线程上的两个 `info!` 调用点可能
+        // 一个派发、一个被判成 never。实测症状：`stop` 那行收得到、`start` 那行收不到；
+        // 模块内并行 60 次红 13 次，串行 20 次全绿。全局只装一次就没有这场赛跑。
+        static SEEN: std::sync::OnceLock<Arc<Mutex<Vec<String>>>> = std::sync::OnceLock::new();
+        let seen = SEEN.get_or_init(|| {
+            let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = Registry::default().with(Echo(seen.clone()));
+            // 已经有全局订阅者（别处装过）就沿用它 —— 那时下面「对照组」那条断言会红，
+            // 红得明白，比静默放行好。
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            tracing::callsite::rebuild_interest_cache();
+            seen
+        });
+        // 只取本趟窗口里的行。别的测试并发打进来的日志也落在这条链上，所以下面的断言
+        // 一律按**内容**过滤（这几个配对码是本条测试独有的）。
+        seen.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        probes();
         std::mem::take(
             &mut *seen
                 .lock()
