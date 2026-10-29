@@ -60,8 +60,8 @@ use hayro::hayro_interpret::{
     Context as InterpretContext, InterpreterCache, InterpreterSettings, interpret_page,
 };
 use hayro::hayro_syntax::object::Rect;
-use hayro::hayro_syntax::page::{Page as PdfPage, Rotation};
 use hayro::hayro_syntax::outline::Dest;
+use hayro::hayro_syntax::page::{Page as PdfPage, Rotation};
 use hayro::hayro_syntax::{LoadPdfError, Pdf as RasterPdf};
 use hayro::kurbo::{Affine, Rect as KurboRect};
 use hayro::vello_cpu::color::palette::css::WHITE;
@@ -69,8 +69,8 @@ use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources, Tar
 use hayro::{RenderCache, RenderSettings, render_into};
 
 use super::{
-    Content, DocMeta, DocumentProvider, FixedDoc, FixedPage, Format, PageChar, PageRect, PageRegion,
-    PageSource, PageText, TocEntry, extension_of, stem_of,
+    Content, DocMeta, DocumentProvider, FixedDoc, FixedPage, Format, PageChar, PageRect,
+    PageRegion, PageSource, PageText, TocEntry, extension_of, stem_of,
 };
 use crate::Result;
 
@@ -348,7 +348,10 @@ fn page_boxes<'a>(page: &'a PdfPage<'a>) -> Option<PageBoxes<'a>> {
         page.rotation(),
         Rotation::Horizontal | Rotation::FlippedHorizontal
     );
-    let (crop_w, crop_h) = ((crop.x1 - crop.x0).abs() as f32, (crop.y1 - crop.y0).abs() as f32);
+    let (crop_w, crop_h) = (
+        (crop.x1 - crop.x0).abs() as f32,
+        (crop.y1 - crop.y0).abs() as f32,
+    );
     let (visible_width, visible_height) = if swap {
         (crop_h, crop_w)
     } else {
@@ -437,7 +440,10 @@ fn native_edge(page: &PdfPage<'_>, _index: usize, boxes: &PageBoxes<'_>) -> Opti
     let mut covered = 0.0_f32;
     let mut density = 0.0_f32;
     for handle in &handles {
-        let (width, height) = ((handle.bbox.x1 - handle.bbox.x0) as f32, (handle.bbox.y1 - handle.bbox.y0) as f32);
+        let (width, height) = (
+            (handle.bbox.x1 - handle.bbox.x0) as f32,
+            (handle.bbox.y1 - handle.bbox.y0) as f32,
+        );
         if width <= 0.0 || height <= 0.0 {
             continue;
         }
@@ -575,8 +581,8 @@ pub(crate) fn read_pdf(
 /// 口令加密的 PDF 到这一步就会报错（`LoadPdfError::Decryption`），所以 `Encrypted` 这一条
 /// 只从这里冒出来；[`failure`] 是唯一的分档口，报表里那一栏不会从加密滑进读不动。
 fn open_document(path: &Path) -> Result<RasterPdf> {
-    let bytes = std::fs::read(path)
-        .map_err(|err| unsupported(path, &format!("文件读不出来（{err}）")))?;
+    let bytes =
+        std::fs::read(path).map_err(|err| unsupported(path, &format!("文件读不出来（{err}）")))?;
     PdfAdapter::from_bytes(bytes).map_err(|err| failure(path, err))
 }
 
@@ -814,9 +820,7 @@ fn text_layer(
             last_top = Some(top);
             pen_right = None;
         }
-        if spaced
-            && let Some(previous) = pen_right
-        {
+        if spaced && let Some(previous) = pen_right {
             chars.push(PageChar {
                 ch: ' ',
                 rect: PageRect {
@@ -864,7 +868,13 @@ fn extract_page_text(
 ) -> hayro::hayro_interpret::text::ExtractedText {
     let cache = InterpreterCache::new();
     let area = hayro::kurbo::Rect::new(0.0, 0.0, 16384.0, 16384.0);
-    let mut context = InterpretContext::new(Affine::IDENTITY, area, &cache, page.xref(), settings.clone());
+    let mut context = InterpretContext::new(
+        Affine::IDENTITY,
+        area,
+        &cache,
+        page.xref(),
+        settings.clone(),
+    );
     let mut recorder = TextLayerRecorder::new();
     interpret_page(page, &mut context, &mut recorder);
     recorder.into_text()
@@ -1111,9 +1121,8 @@ fn unpremultiply(premultiplied: &[u8]) -> Vec<u8> {
             straight.extend_from_slice(&[0, 0, 0, 0]);
         } else {
             let alpha32 = u32::from(alpha);
-            let un = |channel: u8| {
-                ((u32::from(channel) * 255 + alpha32 / 2) / alpha32).min(255) as u8
-            };
+            let un =
+                |channel: u8| ((u32::from(channel) * 255 + alpha32 / 2) / alpha32).min(255) as u8;
             straight.extend_from_slice(&[un(pixel[0]), un(pixel[1]), un(pixel[2]), alpha]);
         }
     }
@@ -1528,7 +1537,9 @@ mod tests {
         for code in 32u16..=126 {
             out.push_str(&format!("<{code:02X}> <{code:04X}>\n"));
         }
-        out.push_str("endbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+        out.push_str(
+            "endbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n",
+        );
         out
     }
 
@@ -1606,9 +1617,12 @@ mod tests {
                 ),
             );
             let ttf = synthetic_truetype();
-            let mut body =
-                format!("<< /Length {} /Length1 {} >>\nstream\n", ttf.len(), ttf.len())
-                    .into_bytes();
+            let mut body = format!(
+                "<< /Length {} /Length1 {} >>\nstream\n",
+                ttf.len(),
+                ttf.len()
+            )
+            .into_bytes();
             body.extend_from_slice(&ttf);
             body.extend_from_slice(b"\nendstream");
             file.set(font_file, body);
@@ -2208,7 +2222,10 @@ mod tests {
         );
         let path = dir.path().join("零页.pdf");
         std::fs::write(&path, file.finish(catalog, None)).unwrap();
-        assert!(PdfAdapter::default().index(&path).is_err(), "页树里没有一页，就该说不");
+        assert!(
+            PdfAdapter::default().index(&path).is_err(),
+            "页树里没有一页，就该说不"
+        );
     }
 
     /// 头是 `%PDF` 而后面什么结构都没有：说「读不动」，不说「没有这本书」。
@@ -2221,7 +2238,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("只有一个头.pdf");
         std::fs::write(&path, "%PDF-1.7 这一版还读不动\n%%EOF\n").unwrap();
-        let err = PdfAdapter::default().index(&path).expect_err("只有一个头的文件该失败");
+        let err = PdfAdapter::default()
+            .index(&path)
+            .expect_err("只有一个头的文件该失败");
         assert!(
             matches!(err, crate::Error::UnsupportedFormat(_)),
             "该是「读不动」那一档，实际 {err:?}"
@@ -2230,7 +2249,11 @@ mod tests {
         let empty = dir.path().join("空.pdf");
         std::fs::write(&empty, b"").unwrap();
         assert!(PdfAdapter::default().index(&empty).is_err());
-        assert!(PdfAdapter::default().index(&dir.path().join("不在.pdf")).is_err());
+        assert!(
+            PdfAdapter::default()
+                .index(&dir.path().join("不在.pdf"))
+                .is_err()
+        );
         // 取字节那一侧同一条立场：读不到是 `None`，不是 panic。
         assert!(PdfAdapter::default().render_page(&path, 0, 512).is_none());
     }
@@ -2248,7 +2271,12 @@ mod tests {
         let path = Path::new("/x/有口令.pdf");
         assert!(
             matches!(
-                failure(path, LoadPdfError::Decryption(hayro::hayro_syntax::DecryptionError::PasswordProtected)),
+                failure(
+                    path,
+                    LoadPdfError::Decryption(
+                        hayro::hayro_syntax::DecryptionError::PasswordProtected
+                    )
+                ),
                 crate::Error::Encrypted { .. }
             ),
             "加密要落进加密那一档"
@@ -2301,7 +2329,9 @@ mod tests {
         let page = &doc.pages[0];
         // 可见框 400×300 pt 转 90 度 → 300×400，长边折到 2048 → `1536 × 2048`（竖）。
         assert_eq!((page.width, page.height), (1536, 2048), "{page:?}");
-        let bytes = PdfAdapter::default().render_page(&path, 0, 1024).expect("画得出来");
+        let bytes = PdfAdapter::default()
+            .render_page(&path, 0, 1024)
+            .expect("画得出来");
         let image = image::load_from_memory(&bytes).unwrap();
         assert_eq!(
             image.width().max(image.height()),
@@ -2329,7 +2359,8 @@ mod tests {
             .line(72, 660, 12.0, "body beta");
         let path = write_fixture(dir.path(), "文字.pdf", &[page], &[], &[]);
         let document = PdfAdapter::from_bytes(std::fs::read(&path).unwrap()).unwrap();
-        let text = page_text(&document, 0, &InterpreterSettings::default()).expect("这一页写着两行字");
+        let text =
+            page_text(&document, 0, &InterpreterSettings::default()).expect("这一页写着两行字");
         assert_eq!((text.width, text.height), (612.0, 792.0), "框就是可见框");
         let first = text.chars[0];
         assert_eq!(first.ch, 'H');
@@ -2380,7 +2411,11 @@ mod tests {
             "第二行（12pt）的墨顶：{}",
             second.rect.y
         );
-        assert!((second.rect.height - 8.4).abs() < 0.1, "{}", second.rect.height);
+        assert!(
+            (second.rect.height - 8.4).abs() < 0.1,
+            "{}",
+            second.rect.height
+        );
         // 选中一行 = 一个色块（那一行里的字并起来），不是十来个。
         let line_zero: std::ops::Range<usize> =
             0..text.chars.iter().position(|item| item.line == 1).unwrap();
@@ -2407,7 +2442,8 @@ mod tests {
         );
         let path = write_fixture(dir.path(), "裁过的.pdf", &[page], &[], &[]);
         let document = PdfAdapter::from_bytes(std::fs::read(&path).unwrap()).unwrap();
-        let text = page_text(&document, 0, &InterpreterSettings::default()).expect("裁完还留着这一行");
+        let text =
+            page_text(&document, 0, &InterpreterSettings::default()).expect("裁完还留着这一行");
         assert_eq!((text.width, text.height), (512.0, 692.0));
         let first = text.chars[0];
         assert_eq!(first.ch, 'i');
@@ -2421,7 +2457,11 @@ mod tests {
             "顶上沿：{}",
             first.rect.y
         );
-        assert!((first.rect.height - 8.4).abs() < 0.1, "{}", first.rect.height);
+        assert!(
+            (first.rect.height - 8.4).abs() < 0.1,
+            "{}",
+            first.rect.height
+        );
     }
 
     /// **`/Rotate` 不为 0 的那一页故意交 `None`**。
@@ -2439,7 +2479,10 @@ mod tests {
             .line(72, 700, 24.0, "Heading alpha");
         let path = write_fixture(dir.path(), "转过的.pdf", &[straight, turned], &[], &[]);
         let document = PdfAdapter::from_bytes(std::fs::read(&path).unwrap()).unwrap();
-        assert!(page_text(&document, 0, &InterpreterSettings::default()).is_some(), "没转的那一页读得出字");
+        assert!(
+            page_text(&document, 0, &InterpreterSettings::default()).is_some(),
+            "没转的那一页读得出字"
+        );
         assert!(
             page_text(&document, 1, &InterpreterSettings::default()).is_none(),
             "转 90 的那一页不许交出一套会画歪的盒",
@@ -2545,7 +2588,10 @@ mod tests {
             text.char_count()
         );
         // 第二页同样读得出字（一本真书不会只有首页有文字层）。
-        assert!(page_text(&document, 1, &InterpreterSettings::default()).is_some(), "第二页也该有文字层");
+        assert!(
+            page_text(&document, 1, &InterpreterSettings::default()).is_some(),
+            "第二页也该有文字层"
+        );
     }
 
     /// 没有文字层的一页就是「画得出但读不出」：交 `None`，与从前一样只是图。
@@ -2555,9 +2601,15 @@ mod tests {
         // 本仓库那套三页夹具只有灰矩形，一个字符都没有。
         let path = three_pages(dir.path());
         let document = PdfAdapter::from_bytes(std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(page_text(&document, 0, &InterpreterSettings::default()), None);
+        assert_eq!(
+            page_text(&document, 0, &InterpreterSettings::default()),
+            None
+        );
         // 页号不在书里也是 `None`，不是 panic。
-        assert_eq!(page_text(&document, 404, &InterpreterSettings::default()), None);
+        assert_eq!(
+            page_text(&document, 404, &InterpreterSettings::default()),
+            None
+        );
     }
 
     /// 框不必写在自己身上：`/MediaBox` 挂在 `/Pages` 上时也要读得出（规范里它是可继承属性）。
@@ -2727,13 +2779,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_, vector) = fixed(&three_pages(dir.path()));
         assert!(
-            vector.pages.iter().all(|page| matches!(
-                page.source,
-                PageSource::Render {
-                    vector: true,
-                    ..
-                }
-            )),
+            vector
+                .pages
+                .iter()
+                .all(|page| matches!(page.source, PageSource::Render { vector: true, .. })),
             "合成书那三页一页图都没有，全是矢量画的 —— 每一页都该值得重画"
         );
         let (_, scanned) = fixed(&scanned(dir.path()));

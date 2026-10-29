@@ -81,8 +81,7 @@ pub(crate) mod zip;
 
 pub use content::{
     Content, ContentKind, FixedDoc, FixedPage, FlowDoc, PageChar, PageImage, PageRect, PageRegion,
-    PageSource,
-    PageText,
+    PageSource, PageText,
 };
 pub use provider::{
     DocumentProvider, ParseBudget, looks_like_a_book, provider_for, providers,

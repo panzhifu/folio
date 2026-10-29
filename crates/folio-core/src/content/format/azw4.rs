@@ -70,12 +70,12 @@ impl DocumentProvider for Azw4Adapter {
             }
         }
         // `index` 是第一次问、句柄刚刚放进去，所以 `get_or_init` 不会落进 `open` 那一支。
-        let document = self
-            .document(path)
-            .ok_or_else(|| crate::Error::UnsupportedFormat(format!(
+        let document = self.document(path).ok_or_else(|| {
+            crate::Error::UnsupportedFormat(format!(
                 "{}：结构读不出来，PalmDB 里那份 PDF 可能被截断过",
                 file_name(path)
-            )))?;
+            ))
+        })?;
         let title = if db.db_name().trim().is_empty() {
             stem_of(path)
         } else {

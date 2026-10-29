@@ -1426,7 +1426,8 @@ impl ShelfView {
         let previous = self.scroll_seen.replace(y);
         let moved = previous.is_some_and(|previous| (y - previous).abs() >= 0.5);
         let was = self.folded;
-        let (folded, anchor) = fold_after(previous, self.fold_anchor, self.folded, y, reduce_motion);
+        let (folded, anchor) =
+            fold_after(previous, self.fold_anchor, self.folded, y, reduce_motion);
         self.folded = folded;
         self.fold_anchor = anchor;
         // 滚起来了就说明那一下不是「按住封面」：桌面上按下之后滚轮一滚，抬起事件
@@ -1594,8 +1595,7 @@ impl Render for ShelfView {
         // 滚动方向决定顶栏与外壳导航栏让不让位。Expanded（桌面）不参与：那里侧栏是
         // 常驻导航，鼠标滚轮也频繁，收起只会让人找不着北。组页也不参与：它压着导航栏，
         // 顶上那一行是页标题而不是搜索框，没有可收的东西。
-        let fold_capable =
-            !matches!(size, SizeClass::Expanded) && self.scope == ShelfScope::Shelf;
+        let fold_capable = !matches!(size, SizeClass::Expanded) && self.scope == ShelfScope::Shelf;
         if fold_capable {
             let y = self.scroll_offset();
             if self.fold_after_scroll(y, cx.reduce_motion()) {
@@ -1838,9 +1838,8 @@ mod tests {
     #[test]
     fn bottom_overscroll_does_not_toggle_fold() {
         let max = 713.0;
-        let bounded = |raw: f32| {
-            scroll_without_viewport_change(raw, Some(866.0), 866.0).clamp(0.0, max)
-        };
+        let bounded =
+            |raw: f32| scroll_without_viewport_change(raw, Some(866.0), 866.0).clamp(0.0, max);
         // 越过底部 35px：夹回 713，仍保持收起。
         assert_eq!(bounded(748.0), max);
         let (folded, anchor) = fold_after(Some(max), max, true, bounded(748.0), false);

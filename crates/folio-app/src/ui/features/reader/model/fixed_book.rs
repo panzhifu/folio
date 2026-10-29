@@ -519,14 +519,10 @@ impl FixedBook {
         let document = self.doc.clone();
         let render: Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync> =
             Arc::new(move || document.render_page_region(index, block, w, h));
-        Some(self.images.render_request(
-            index,
-            REGION_EDGE,
-            width,
-            height,
-            Some(region),
-            render,
-        ))
+        Some(
+            self.images
+                .render_request(index, REGION_EDGE, width, height, Some(region), render),
+        )
     }
 
     /// 当前这一页在**整本书那一列图**里的身份（图集的键）。
@@ -807,7 +803,10 @@ mod tests {
             page("p0.png", &["p0r.png"]),
             // 渲染型的一页（PDF 那一族）：页表里有这一页，图片表里没有这一条。
             FixedPage {
-                source: PageSource::Render { index: 1, vector: true },
+                source: PageSource::Render {
+                    index: 1,
+                    vector: true,
+                },
                 width: 100,
                 height: 200,
                 extra_images: Vec::new(),
@@ -889,7 +888,10 @@ mod tests {
                 },
                 Content::Fixed(FixedDoc {
                     pages: vec![FixedPage {
-                        source: PageSource::Render { index: 3, vector: false },
+                        source: PageSource::Render {
+                            index: 3,
+                            vector: false,
+                        },
                         width: 1447,
                         height: 2048,
                         extra_images: Vec::new(),
@@ -1287,9 +1289,15 @@ mod tests {
             height: 60.0,
             chars: Vec::new(),
         };
-        assert!(!book.store_page_text(&other, 0, Some(text())), "不是这本的文档");
+        assert!(
+            !book.store_page_text(&other, 0, Some(text())),
+            "不是这本的文档"
+        );
         assert!(book.page_text_cached(0).is_none(), "丢掉的答案不进缓存");
-        assert!(book.store_page_text(&handle, 0, Some(text())), "自己那本照收");
+        assert!(
+            book.store_page_text(&handle, 0, Some(text())),
+            "自己那本照收"
+        );
     }
 
     /// 连续竖滚的页栈：页高按版心宽与页面宽高比算，页缝只占位置、不算进页高；

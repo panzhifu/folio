@@ -508,7 +508,10 @@ mod tests {
     fn a_page_knows_its_image_href() {
         assert_eq!(page("p/2.png").image_href(), Some("p/2.png"));
         let render = FixedPage {
-            source: PageSource::Render { index: 7, vector: true },
+            source: PageSource::Render {
+                index: 7,
+                vector: true,
+            },
             width: 0,
             height: 0,
             extra_images: Vec::new(),
@@ -522,7 +525,10 @@ mod tests {
         let pages = vec![
             page("a.jpg"),
             FixedPage {
-                source: PageSource::Render { index: 3, vector: false },
+                source: PageSource::Render {
+                    index: 3,
+                    vector: false,
+                },
                 width: 1024,
                 height: 768,
                 extra_images: vec![PageImage {

@@ -22,7 +22,6 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-
 use folio_core::Priority;
 use folio_core::infra::task::{Cancel, TaskEvent, TaskHandle};
 use folio_core::search::{Found, Hit, Options, Query, scan};
@@ -1721,8 +1720,8 @@ mod tests {
         Subscription, TestAppContext, point, px, size,
     };
 
-    use crate::ui::components::SEARCH_SETTLE_FRAMES;
     use super::{SEARCH_ROW, Screen, TOC_DRAWER, TOC_DRAWER_INSET, TocEvent, TocPanel};
+    use crate::ui::components::SEARCH_SETTLE_FRAMES;
     use crate::ui::features::reader::model::session::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
 

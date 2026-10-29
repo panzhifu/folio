@@ -207,11 +207,14 @@ fn serve(
             tokio::net::TcpListener::from_std(listener).expect("listener 迁进 tokio 不该失败");
         // 限速按**对端地址**记，所以要把 connect info 接进服务里 —— 没有这一层，
         // 处理器只拿得到 URL，而 URL 里的配对码正是攻击者要猜的东西。
-        let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-            .with_graceful_shutdown(async move {
-                let _ = notify.await;
-            })
-            .await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = notify.await;
+        })
+        .await;
     });
 }
 
@@ -265,7 +268,12 @@ impl PinGuard {
         };
         match penalty(account.wrong) {
             // `last + 罚期` 在未来才叫还锁着；`checked_add` 挡住的是测试里注入的钟。
-            Some(penalty) if account.last.checked_add(penalty).is_some_and(|until| until > now) => {
+            Some(penalty)
+                if account
+                    .last
+                    .checked_add(penalty)
+                    .is_some_and(|until| until > now) =>
+            {
                 let until = account.last + penalty;
                 Gate::Locked(until.saturating_duration_since(now))
             }
@@ -300,7 +308,13 @@ impl PinGuard {
                 account.last = now;
             }
             None => {
-                accounts.insert(from, Account { wrong: 1, last: now });
+                accounts.insert(
+                    from,
+                    Account {
+                        wrong: 1,
+                        last: now,
+                    },
+                );
             }
         }
     }
@@ -521,7 +535,11 @@ fn generate_pin() -> String {
     hasher.write_u128(!nanos ^ u128::from(std::process::id()));
     // 取模的偏置在 2^64 → 10^8 这一档是亿分之一的量级，不值得为它换一套算法。
     let space = 10u64.checked_pow(PIN_DIGITS).unwrap_or(u64::MAX);
-    format!("{:0width$}", hasher.finish() % space, width = PIN_DIGITS as usize)
+    format!(
+        "{:0width$}",
+        hasher.finish() % space,
+        width = PIN_DIGITS as usize
+    )
 }
 
 /// 探测局域网里能访问本机的地址：往公共 DNS 发一次 **UDP connect**（不发包，
@@ -709,11 +727,17 @@ mod tests {
             guard.note_wrong(from, t0);
         }
         assert!(
-            matches!(guard.gate(from, t0 + FIRST_LOCK - Duration::from_millis(1)), Gate::Locked(_)),
+            matches!(
+                guard.gate(from, t0 + FIRST_LOCK - Duration::from_millis(1)),
+                Gate::Locked(_)
+            ),
             "差一毫秒还在锁里"
         );
         assert!(
-            matches!(guard.gate(from, t0 + FIRST_LOCK + Duration::from_millis(1)), Gate::Proceed),
+            matches!(
+                guard.gate(from, t0 + FIRST_LOCK + Duration::from_millis(1)),
+                Gate::Proceed
+            ),
             "罚期一过要放行"
         );
         let again = t0 + FIRST_LOCK + Duration::from_millis(1);
@@ -881,7 +905,10 @@ mod tests {
             compared <= (FREE_MISTAKES as usize) + 3,
             "真的去比配对码的次数要有封顶，实际 {compared} 趟：{codes:?}"
         );
-        assert!(locked >= 10, "20 趟里大半该被锁掉，实际 {locked} 趟：{codes:?}");
+        assert!(
+            locked >= 10,
+            "20 趟里大半该被锁掉，实际 {locked} 趟：{codes:?}"
+        );
         // 上传那一趟挂的是同一个限速，不能只挡页面。
         codes.push(code(
             client
@@ -949,7 +976,10 @@ mod tests {
                 PIN_DIGITS as usize,
                 "位数是界面上能手打的那几格：{code}"
             );
-            assert!(code.bytes().all(|byte| byte.is_ascii_digit()), "只出数字：{code}");
+            assert!(
+                code.bytes().all(|byte| byte.is_ascii_digit()),
+                "只出数字：{code}"
+            );
         }
         codes.sort();
         codes.dedup();

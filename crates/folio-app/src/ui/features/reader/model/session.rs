@@ -25,9 +25,7 @@ use folio_core::content::format::css::PageMargins;
 use folio_core::store::{Annotation, Bookmark, Store};
 use folio_core::{BookSettings, DocMeta, Format, Locator, PageTurn, Reader, StaleReason};
 use gpui_kit::base::SelectionEdge;
-use gpui_kit::{
-    App, AppContext as _, Bounds, Context, Entity, Pixels, Point, SharedString, Task,
-};
+use gpui_kit::{App, AppContext as _, Bounds, Context, Entity, Pixels, Point, SharedString, Task};
 
 use crate::ui::features::reader::components::note_editor::NoteEditor;
 use crate::ui::features::reader::model::book::Book;
@@ -984,9 +982,7 @@ impl ReaderSession {
         let elapsed = anchor_at.map(|at| now.duration_since(at).as_secs_f32());
         let moved = (self.scroll_y - anchor_y).abs();
         let scrolling = match elapsed {
-            Some(elapsed) if elapsed <= SCROLL_WINDOW => {
-                moved >= viewport.max(1.0) * SCROLL_RATIO
-            }
+            Some(elapsed) if elapsed <= SCROLL_WINDOW => moved >= viewport.max(1.0) * SCROLL_RATIO,
             // 窗口过完了还没挪够：这一帧算静止，窗口从这里重新起算（`anchor_y` 换成此刻）。
             _ => false,
         };
@@ -1795,7 +1791,10 @@ mod tests {
         let mut reader = cx.update(session);
         let zero = Instant::now();
         let at = |ms: u64| zero + Duration::from_millis(ms);
-        assert_eq!(THRESHOLD, 30.0, "阈值按视口 1000 与 {SCROLL_RATIO} 算，改了常数这里先红");
+        assert_eq!(
+            THRESHOLD, 30.0,
+            "阈值按视口 1000 与 {SCROLL_RATIO} 算，改了常数这里先红"
+        );
 
         // 起表那一帧：窗口还没开始走，判静止。
         reader.scroll_y = 0.0;
@@ -1843,7 +1842,11 @@ mod tests {
         reader.scroll_y = 0.0;
         let back = reader.mark_scroll(at(500), VIEWPORT);
         assert!(back.scrolling, "从静止又挪过阈值，该重新判在滑");
-        assert_eq!(back.direction, Some(FixedDirection::Behind), "往回挪要报 Behind");
+        assert_eq!(
+            back.direction,
+            Some(FixedDirection::Behind),
+            "往回挪要报 Behind"
+        );
     }
 
     /// 慢拖：每帧只挪 2 px，单帧谁都看不出来，而窗口内累计过了阈值 —— 判据必须报在滑。
@@ -1860,7 +1863,9 @@ mod tests {
         let mut saw_moving = false;
         for frame in 1..20 {
             reader.scroll_y = 2.0 * frame as f32;
-            saw_moving |= reader.mark_scroll(zero + Duration::from_millis(10 * frame), VIEWPORT).scrolling;
+            saw_moving |= reader
+                .mark_scroll(zero + Duration::from_millis(10 * frame), VIEWPORT)
+                .scrolling;
         }
         assert!(
             saw_moving,

@@ -318,7 +318,9 @@ fn a_migration_that_fails_halfway_leaves_the_library_at_the_previous_version() {
         "注入没生效：v8 这一趟回填该失败"
     );
     let conn = rusqlite::Connection::open(&db).unwrap();
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(
         version, 7,
         "半路失败的迁移不许把版本推上去：推上去就是叫下一次跳过这一条"
@@ -326,20 +328,27 @@ fn a_migration_that_fails_halfway_leaves_the_library_at_the_previous_version() {
     let kept: i64 = conn
         .query_row("SELECT count(*) FROM chapter_text", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(kept, 1, "这一条的 DDL 也得跟着回滚：回填没成就不许已经把正文删了");
+    assert_eq!(
+        kept, 1,
+        "这一条的 DDL 也得跟着回滚：回填没成就不许已经把正文删了"
+    );
     drop(conn);
 
     // 撤掉注入之后同一本库要能**完整地**升上去：回滚的含义是「停在上一版」，不是弄坏库。
     let conn = rusqlite::Connection::open(&db).unwrap();
-    conn.execute_batch("DROP TRIGGER inject_no_backfill").unwrap();
+    conn.execute_batch("DROP TRIGGER inject_no_backfill")
+        .unwrap();
     drop(conn);
     let store = Store::open_at(&db).unwrap();
-    assert_eq!(store.user_version().unwrap(), MIGRATIONS.len() as i64, "重开该一路升到最新");
+    assert_eq!(
+        store.user_version().unwrap(),
+        MIGRATIONS.len() as i64,
+        "重开该一路升到最新"
+    );
     let flow = store.load_flow(1).unwrap().expect("章表该还在");
     assert_eq!(flow.chapters.len(), 1, "那一章不许在回滚里丢掉");
     assert_eq!(flow.chapters[0].title, "第一章");
 }
-
 
 #[test]
 fn a_fixed_document_is_not_perpetually_stale() {

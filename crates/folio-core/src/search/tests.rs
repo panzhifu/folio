@@ -495,11 +495,30 @@ fn a_latin_query_ignores_the_spaces_pdf_inserted() {
         vec![(4, 14, "COP YRIGHT".into())],
         "补错的那一个空格要被盖进命中区间，否则跳过去只选中前半截"
     );
-    assert_eq!(taken("THE  PAPER", "the paper").len(), 1, "查询里多打一个空格不该找不着");
-    assert_eq!(taken("THEPAPER", "THE PAPER").len(), 1, "正文里丢了空格也该找得着");
-    assert_eq!(taken("Title Case", "title").len(), 1, "折叠那一条不许因为这次改动退化");
-    assert!(taken("第一 段", "第一段").is_empty(), "中文那条快路故意不跳空白（见门头的第 4 条）");
-    assert_eq!(taken("第一段正文", "第一").len(), 1, "而正常中文查询不受影响");
+    assert_eq!(
+        taken("THE  PAPER", "the paper").len(),
+        1,
+        "查询里多打一个空格不该找不着"
+    );
+    assert_eq!(
+        taken("THEPAPER", "THE PAPER").len(),
+        1,
+        "正文里丢了空格也该找得着"
+    );
+    assert_eq!(
+        taken("Title Case", "title").len(),
+        1,
+        "折叠那一条不许因为这次改动退化"
+    );
+    assert!(
+        taken("第一 段", "第一段").is_empty(),
+        "中文那条快路故意不跳空白（见门头的第 4 条）"
+    );
+    assert_eq!(
+        taken("第一段正文", "第一").len(),
+        1,
+        "而正常中文查询不受影响"
+    );
 }
 
 /// 那一列字的第 `from..to` 个（按**字符**数，与 `Hit.start` / `Hit.end` 同一把尺）。

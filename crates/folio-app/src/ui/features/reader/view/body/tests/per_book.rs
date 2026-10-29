@@ -152,14 +152,13 @@ fn a_drag_writes_the_books_row_once_instead_of_once_per_tick(cx: &mut TestAppCon
     );
 
     for tick in 0..40 {
-        cx.update(|cx| ConfigHolder::edit_book_reader(cx, move |p| p.margin_x = 24.0 + tick as f32));
+        cx.update(|cx| {
+            ConfigHolder::edit_book_reader(cx, move |p| p.margin_x = 24.0 + tick as f32)
+        });
         draw_one(cx, handle);
     }
     assert!(
-        store
-            .book_settings(id)
-            .expect("读回那一列")
-            .is_empty(),
+        store.book_settings(id).expect("读回那一列").is_empty(),
         "每拖一格写一次库：40 帧里至少已经落过一笔"
     );
 

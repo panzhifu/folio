@@ -559,8 +559,7 @@ impl ImageAtlas {
             .slots
             .iter()
             .filter_map(|(key, slot)| match slot {
-                Slot::Held { seen, .. } if !on_screen.contains(key.as_str()) =>
-                {
+                Slot::Held { seen, .. } if !on_screen.contains(key.as_str()) => {
                     Some((distance_of(key, focus), *seen, key.clone()))
                 }
                 _ => None,
@@ -580,7 +579,11 @@ impl ImageAtlas {
             .map(|(_, bytes)| bytes)
             .sum();
         let soft = self.soft_cap();
-        let limit = if focus_bytes > soft { hard_of(soft) } else { soft };
+        let limit = if focus_bytes > soft {
+            hard_of(soft)
+        } else {
+            soft
+        };
         for (_, _, key) in oldest {
             if self.bytes.saturating_sub(freed) <= limit {
                 break;
@@ -887,9 +890,7 @@ mod tests {
         };
         screen
             .update(cx, |screen, _, cx| {
-                screen
-                    .atlas
-                    .read_with(cx, |atlas, _| atlas.outstanding())
+                screen.atlas.read_with(cx, |atlas, _| atlas.outstanding())
             })
             .unwrap_or(false)
     }

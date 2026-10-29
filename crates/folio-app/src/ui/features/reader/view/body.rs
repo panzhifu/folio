@@ -30,9 +30,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use folio_core::PageTurn;
-use folio_core::content::format::{PageRegion, pdf::RENDER_EDGE};
 use folio_core::content::anchor::line_at_y;
 use folio_core::content::format::css::computed::BorderStyle;
+use folio_core::content::format::{PageRegion, pdf::RENDER_EDGE};
 use folio_core::layout::FontKey;
 use folio_core::layout::fragment::column_offset;
 use folio_core::store::{Annotation, AnnotationStyle};
@@ -64,7 +64,7 @@ use crate::ui::features::reader::model::image_atlas::ImageAtlas;
 use crate::ui::features::reader::model::paging::PrefetchSide;
 use crate::ui::features::reader::model::prefetch;
 use crate::ui::features::reader::model::session::{
-    AnnotationSpans, CurlMesh, PageRef, PinnedRegion, ReaderSession, REGION_SETTLE, Source, Turn,
+    AnnotationSpans, CurlMesh, PageRef, PinnedRegion, REGION_SETTLE, ReaderSession, Source, Turn,
     TurnRun, land_at_anchor, start_turn,
 };
 use crate::ui::features::reader::model::swipe::{release_easing, release_transition};
@@ -389,9 +389,9 @@ impl Render for ReaderSession {
         let motion = self.mark_scroll(now, viewport_height);
         // 图集的内存档位要按设备分（手机 24 MB / 平板 48 / 桌面 128），而设备那一格
         // 只有窗口量得出来：每帧推一次逻辑宽度，档位随窗口变化也跟着走。
-        crate::ui::features::reader::model::image_atlas::set_screen_width(
-            f32::from(viewport_size.width),
-        );
+        crate::ui::features::reader::model::image_atlas::set_screen_width(f32::from(
+            viewport_size.width,
+        ));
         // 两章之间的缝：拼接坐标用它隔开相邻的章（口径在 `Book::chapter_gap`）。
         let chapter_gap = Book::chapter_gap(&self.prefs);
         // 等宽偏好整帧取一次：兜底那一行与正文的 run 都要它。
@@ -638,7 +638,9 @@ impl Render for ReaderSession {
                                 continue;
                             };
                             let key = request.key.clone();
-                            let Some(image) = painted_tile(&atlas, &at.tile, view, cx, motion.scrolling) else {
+                            let Some(image) =
+                                painted_tile(&atlas, &at.tile, view, cx, motion.scrolling)
+                            else {
                                 continue;
                             };
                             let rect = zoom.map(
@@ -670,7 +672,7 @@ impl Render for ReaderSession {
                                 index,
                                 &reader_weak,
                             ));
-// 放大停稳那一档：看得见的那一块按 `REGION_EDGE` 重画，叠在这一页那一张上面。
+                            // 放大停稳那一档：看得见的那一块按 `REGION_EDGE` 重画，叠在这一页那一张上面。
                             let block = pinned_region(
                                 RegionAsk {
                                     book,
@@ -879,7 +881,9 @@ impl Render for ReaderSession {
                                 continue;
                             };
                             let key = request.key.clone();
-                            let Some(image) = painted_tile(&atlas, &at.tile, view, cx, motion.scrolling) else {
+                            let Some(image) =
+                                painted_tile(&atlas, &at.tile, view, cx, motion.scrolling)
+                            else {
                                 continue;
                             };
                             let index = overlays.len();
@@ -948,7 +952,9 @@ impl Render for ReaderSession {
                             continue;
                         };
                         let key = request.key.clone();
-                        let Some(image) = painted_tile(&atlas, &at.tile, view, cx, motion.scrolling) else {
+                        let Some(image) =
+                            painted_tile(&atlas, &at.tile, view, cx, motion.scrolling)
+                        else {
                             continue;
                         };
                         let rect = zoom.map(
@@ -983,7 +989,7 @@ impl Render for ReaderSession {
                             index,
                             &reader_weak,
                         ));
-// 放大停稳那一档：看得见的那一块按 `REGION_EDGE` 重画，叠在这一页那一张上面。
+                        // 放大停稳那一档：看得见的那一块按 `REGION_EDGE` 重画，叠在这一页那一张上面。
                         let block = pinned_region(
                             RegionAsk {
                                 book,
@@ -2804,7 +2810,11 @@ fn painted_tile(
             // 的是滑动卡顿，而他要的那张图本来也还在下面好几屏外。停下 150 ms 之后
             // 那一帧 `scrolling` 为假，这里才排高清（`atlas.prepare` 自己会去重）。
             let high = tile.request.as_ref();
-            if scrolling && !high.is_some_and(|request| atlas.read_with(cx, |atlas, _| atlas.ready(&request.key))) {
+            if scrolling
+                && !high.is_some_and(|request| {
+                    atlas.read_with(cx, |atlas, _| atlas.ready(&request.key))
+                })
+            {
                 return Some(low);
             }
             if let Some(image) = tile

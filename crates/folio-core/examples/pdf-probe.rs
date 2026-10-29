@@ -32,8 +32,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use folio_core::content::format::DocumentProvider;
-use folio_core::content::format::pdf::{PdfAdapter, REGION_EDGE, RENDER_EDGE};
 use folio_core::content::format::PageRegion;
+use folio_core::content::format::pdf::{PdfAdapter, REGION_EDGE, RENDER_EDGE};
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf as RasterPdf;
 
@@ -87,12 +87,7 @@ fn report(label: &str, times: &[f64], bytes: &[usize]) {
 }
 
 /// 按生产那条路画一页（`PdfAdapter::render_page` 的同一份实现）。
-fn paint(
-    document: &RasterPdf,
-    page: usize,
-    edge: u32,
-    settings: &InterpreterSettings,
-) -> Vec<u8> {
+fn paint(document: &RasterPdf, page: usize, edge: u32, settings: &InterpreterSettings) -> Vec<u8> {
     folio_core::content::format::pdf::render_probe(document, page, edge, settings)
         .expect("画得出来")
 }
@@ -111,7 +106,10 @@ fn fit_box(document: &RasterPdf, page: usize, edge: u32) -> (u32, u32) {
         hayro::hayro_syntax::page::Rotation::Horizontal
             | hayro::hayro_syntax::page::Rotation::FlippedHorizontal
     );
-    let (cw, ch) = ((crop.x1 - crop.x0).abs() as f32, (crop.y1 - crop.y0).abs() as f32);
+    let (cw, ch) = (
+        (crop.x1 - crop.x0).abs() as f32,
+        (crop.y1 - crop.y0).abs() as f32,
+    );
     let (vw, vh) = if swap { (ch, cw) } else { (cw, ch) };
     let long_pt = vw.max(vh);
     let edge = native_cap(document, page, long_pt)
@@ -139,7 +137,10 @@ fn native_cap(document: &RasterPdf, page: usize, long_pt: f32) -> Option<u32> {
     let mut covered = 0.0f32;
     let mut density = 0.0f32;
     for handle in &target.placed_images() {
-        let (w, h) = ((handle.bbox.x1 - handle.bbox.x0) as f32, (handle.bbox.y1 - handle.bbox.y0) as f32);
+        let (w, h) = (
+            (handle.bbox.x1 - handle.bbox.x0) as f32,
+            (handle.bbox.y1 - handle.bbox.y0) as f32,
+        );
         if w <= 0.0 || h <= 0.0 {
             continue;
         }
@@ -331,7 +332,9 @@ fn main() {
                 .expect("区域画得出来");
                 quarter_bytes.push(png.len());
                 quarter.push(at.elapsed().as_millis() as f64);
-                println!("  第 {page} 页：整页 {table_w}x{table_h} -> 那块 {w}x{h}（按 {REGION_EDGE} 折算）");
+                println!(
+                    "  第 {page} 页：整页 {table_w}x{table_h} -> 那块 {w}x{h}（按 {REGION_EDGE} 折算）"
+                );
             }
             report("整页 @2048（现状）", &full_2048, &[]);
             report("整页 @4096（假想）", &full_4096, &[]);
@@ -347,7 +350,12 @@ fn main() {
                 .iter()
                 .map(|page| {
                     let at = Instant::now();
-                    paint(&document, *page, RENDER_EDGE, &InterpreterSettings::default());
+                    paint(
+                        &document,
+                        *page,
+                        RENDER_EDGE,
+                        &InterpreterSettings::default(),
+                    );
                     at.elapsed().as_millis() as f64
                 })
                 .collect();
@@ -359,7 +367,12 @@ fn main() {
                     for page in batch {
                         let document = &document;
                         scope.spawn(move || {
-                            paint(document, *page, RENDER_EDGE, &InterpreterSettings::default());
+                            paint(
+                                document,
+                                *page,
+                                RENDER_EDGE,
+                                &InterpreterSettings::default(),
+                            );
                         });
                     }
                 });
@@ -374,7 +387,8 @@ fn main() {
         }
         "all" => {
             for a in [
-                "index", "reopen", "keep", "scale", "capped", "decode", "parallel", "region", "text",
+                "index", "reopen", "keep", "scale", "capped", "decode", "parallel", "region",
+                "text",
             ] {
                 println!("--- arm {a} 需要独立进程，见文件头的跑法");
             }

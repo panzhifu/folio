@@ -358,7 +358,13 @@ fn write_tombstone(
     kind: TombstoneKind,
     delete: &crate::sync::DeleteRecord,
 ) -> Result<()> {
-    record_tombstone(conn, kind, &delete.uid, &delete.book_hash, delete.deleted_at)
+    record_tombstone(
+        conn,
+        kind,
+        &delete.uid,
+        &delete.book_hash,
+        delete.deleted_at,
+    )
 }
 
 /// 记一条墓碑。**写它的有三处**（删批注、删书签、同步合并带进来的删除），全走这一个
@@ -719,13 +725,12 @@ mod tests {
             .unwrap();
         drop(injector);
         store.delete_annotation(annotation).unwrap();
-        assert!(store.annotations(book).unwrap().is_empty(), "撤了注入就该删得动");
+        assert!(
+            store.annotations(book).unwrap().is_empty(),
+            "撤了注入就该删得动"
+        );
         assert_eq!(
-            store
-                .collect_sync("dev", i64::MAX)
-                .unwrap()
-                .snapshot
-                .books["hash-a"]
+            store.collect_sync("dev", i64::MAX).unwrap().snapshot.books["hash-a"]
                 .tombstones
                 .len(),
             1,
@@ -755,21 +760,18 @@ mod tests {
                     .map(|local| local.snapshot.books["hash-a"].annotations[0].uid.clone())
             })
             .unwrap();
-        store.delete_annotation(
-            store
-                .annotations(book)
-                .unwrap()
-                .first()
-                .map(|row| row.id)
-                .unwrap(),
-        )
-        .unwrap();
+        store
+            .delete_annotation(
+                store
+                    .annotations(book)
+                    .unwrap()
+                    .first()
+                    .map(|row| row.id)
+                    .unwrap(),
+            )
+            .unwrap();
         let kept = || {
-            store
-                .collect_sync("dev", i64::MAX)
-                .unwrap()
-                .snapshot
-                .books["hash-a"]
+            store.collect_sync("dev", i64::MAX).unwrap().snapshot.books["hash-a"]
                 .tombstones
                 .iter()
                 .find(|tomb| tomb.uid == uid)

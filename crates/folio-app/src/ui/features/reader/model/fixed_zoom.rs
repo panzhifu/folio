@@ -163,11 +163,7 @@ pub(in crate::ui::features::reader) fn visible_region(
     // 屏幕上这一块占那一格的几分之几 → 同一个分率乘页表像素。分率而不是绝对 dp：
     // 页表那把尺与 dp 之间没有固定比例（一页铺满多宽由版心定），只有「占这页的多少」
     // 是两边都认的数。
-    let to_px = |frac: f32, span: u32| {
-        (frac * span as f32)
-            .round()
-            .clamp(0.0, span as f32) as u32
-    };
+    let to_px = |frac: f32, span: u32| (frac * span as f32).round().clamp(0.0, span as f32) as u32;
     let region = folio_core::content::format::PageRegion {
         x0: to_px((x0 - drawn.0) / drawn.2, source.0),
         y0: to_px((y0 - drawn.1) / drawn.3, source.1),

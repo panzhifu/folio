@@ -357,14 +357,8 @@ mod tests {
     #[test]
     fn a_fixed_page_prefetches_in_the_direction_the_reader_is_going() {
         use super::{FixedDirection, fixed_targets};
-        assert_eq!(
-            fixed_targets(5, 10, FixedDirection::Ahead, 2),
-            vec![6, 7]
-        );
-        assert_eq!(
-            fixed_targets(5, 10, FixedDirection::Behind, 2),
-            vec![4, 3]
-        );
+        assert_eq!(fixed_targets(5, 10, FixedDirection::Ahead, 2), vec![6, 7]);
+        assert_eq!(fixed_targets(5, 10, FixedDirection::Behind, 2), vec![4, 3]);
         assert_eq!(
             fixed_targets(8, 10, FixedDirection::Ahead, 2),
             vec![9],
@@ -380,7 +374,13 @@ mod tests {
             Vec::<usize>::new(),
             "书尾往后没页了：不跨到另一头（读者没往回看）"
         );
-        assert_eq!(fixed_targets(0, 1, FixedDirection::Ahead, 2), Vec::<usize>::new());
-        assert_eq!(fixed_targets(5, 10, FixedDirection::Ahead, 0), Vec::<usize>::new());
+        assert_eq!(
+            fixed_targets(0, 1, FixedDirection::Ahead, 2),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            fixed_targets(5, 10, FixedDirection::Ahead, 0),
+            Vec::<usize>::new()
+        );
     }
 }
