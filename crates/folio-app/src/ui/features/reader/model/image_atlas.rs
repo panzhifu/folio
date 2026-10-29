@@ -35,7 +35,8 @@ use std::sync::Arc;
 
 use folio_core::infra::metrics::Metric;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EntityId, RenderImage, Task, WeakEntity, Window,
+    App, AppContext as _, Context, Entity, EntityId, ImageFormat, RenderImage, Task, WeakEntity,
+    Window,
 };
 
 use crate::ui::foundation::images::DecodeRequest;
@@ -138,7 +139,9 @@ enum Load {
     NoBytes,
     /// 池子跑完了，但作业报错（栅格化失败那类）。
     Missing,
-    Bytes(Vec<u8>),
+    /// 字节连同**它的真实格式**一起交回来：正文里 JPEG / WebP / GIF 都有，
+    /// 解码头不能替它们猜成 PNG（见 `touch` 里解码头那一支的 `Image::from_bytes`）。
+    Bytes(ImageFormat, Vec<u8>),
 }
 
 /// 这一格离焦点页多远（越大越先被挤出）。键里带着页号，见 `foundation::images` 的
@@ -364,7 +367,10 @@ impl ImageAtlas {
                 .spawn(move || {
                     // 交回 `Option`：`None` 就是「这一趟没人要了 / 容器里没这张图」，
                     // 与「作业整体失败」分得开（那种落在 `Err`，走 `Load::Missing`）。
-                    let job = move |_: &folio_core::StageCtx| -> std::result::Result<Option<Vec<u8>>, folio_core::TaskError> {
+                    let job = move |_: &folio_core::StageCtx| -> std::result::Result<
+                        Option<(ImageFormat, Vec<u8>)>,
+                        folio_core::TaskError,
+                    > {
                         // 协作式取消的检查点：取到活的那一刻。读者快滑过去的那一页此时可能
                         // 还排在队里，而它的栅格化是几十到几百 ms 的真活儿 —— 画完了也没人看。
                         // 一趟只画一页，页内没有第二个检查点（`hayro` 画到一半停不下来），
@@ -372,7 +378,7 @@ impl ImageAtlas {
                         if job_cancel.triggered() {
                             return Ok(None);
                         }
-                        Ok(loader().map(|image| image.bytes().to_vec()))
+                        Ok(loader().map(|image| (image.format, image.bytes().to_vec())))
                     };
                     let outcome = match crate::ui::services::resident::pool_maybe() {
                         Some(pool) => {
@@ -391,7 +397,7 @@ impl ImageAtlas {
                         ),
                     };
                     let load = match outcome {
-                        Some(Ok(Some(bytes))) => Load::Bytes(bytes),
+                        Some(Ok(Some((format, bytes)))) => Load::Bytes(format, bytes),
                         Some(Ok(None)) => Load::NoBytes,
                         Some(Err(_)) | None => Load::Missing,
                     };
@@ -420,14 +426,14 @@ impl ImageAtlas {
             // （[`super::perf::note_image_decode`]）—— 那一截要不要也搬走，看的是这条数。
             match raw.await {
                 Load::Missing | Load::NoBytes => Decoded::NoBytes,
-                Load::Bytes(bytes) => {
+                Load::Bytes(format, bytes) => {
                     // 字节到手到解码之间再查一次旗：栅格化那几秒里读者可能已经翻走了，
                     // 而解码是 UI 侧那条链上的几十 ms，不必为一个没人看的格子付。
                     if decode_cancel.triggered() {
                         return Decoded::NoBytes;
                     }
                     let at = std::time::Instant::now();
-                    let image = gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, bytes);
+                    let image = gpui_kit::Image::from_bytes(format, bytes);
                     match image.to_image_data(renderer) {
                         Ok(pixels) => {
                             // 记的是**解出来之后**的真像素数（不是请求里那份估的），与图集
@@ -739,7 +745,9 @@ mod tests {
     };
 
     use super::ImageAtlas;
-    use crate::ui::foundation::images::{BookImages, ChapterImages, DecodeRequest, TINY_PNG};
+    use crate::ui::foundation::images::{
+        BookImages, ByteSource, ChapterImages, DecodeRequest, TINY_PNG,
+    };
 
     /// 走满 [`super::HELD_AFTER_LEAVE`] 那一档缓冲要画几帧。
     ///
@@ -1479,6 +1487,58 @@ mod tests {
         assert_ne!(
             a.key, b.key,
             "两本书的同名容器路径用了同一个键：回收与字节来源都会串到别的本上去"
+        );
+    }
+
+    /// 正文里的 JPEG 必须按它自己的格式交给 gpui。
+    ///
+    /// 取字节那一截从作业池回到异步链时只带字节；解码头若写死 `ImageFormat::Png`，
+    /// EPUB / CBZ 里占多数的 JPEG 插图会静默解不出来，而测试里清一色 PNG 夹具
+    /// 看不见这件事。这条用一张真 JPEG 走完整条路。
+    #[gpui_kit::test]
+    fn a_jpeg_image_keeps_its_own_format_into_gpui(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let jpeg = {
+            let buffer = image::RgbImage::from_pixel(4, 4, image::Rgb([10, 20, 30]));
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgb8(buffer)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut out),
+                    image::ImageFormat::Jpeg,
+                )
+                .expect("测试里的 JPEG 应当编得出来");
+            out
+        };
+        let (atlas, table, key) = cx.update(|cx| {
+            let images = vec![ImageRes {
+                href: "pic-0.jpg".into(),
+                source: "pic-0.jpg".into(),
+                media_type: "image/jpeg".into(),
+                width: 4,
+                height: 4,
+            }];
+            let bytes: ByteSource =
+                Arc::new(move |href: &str| (href == "pic-0.jpg").then(|| jpeg.clone()));
+            let chapter =
+                ChapterImages::new(Arc::new(BookImages::new(&images, bytes)), "Text/chap.xhtml");
+            let request = chapter.decode_request("pic-0.jpg").expect("表里有这张图");
+            let key = request.key.clone();
+            let table = Rc::new(HashMap::from([("pic-0.jpg".to_string(), request)]));
+            (ImageAtlas::entity(cx), table, key)
+        });
+        let window = cx.open_window(size(px(64.0), px(64.0)), {
+            let atlas = atlas.clone();
+            move |_, _| Screen {
+                atlas,
+                table,
+                showing: vec!["pic-0.jpg".into()],
+            }
+        });
+        let handle: AnyWindowHandle = window.into();
+        settle(handle, cx);
+        assert!(
+            held(&atlas, &key, cx).is_some(),
+            "JPEG 插图必须解得出来；解码头写死 PNG 时这一句会红"
         );
     }
 }
