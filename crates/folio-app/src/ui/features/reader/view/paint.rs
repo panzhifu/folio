@@ -210,6 +210,9 @@ pub(in crate::ui::features::reader) enum Mark {
     /// 一条波浪线。`bounds` 是它的**外盒**：左端、中线所在的 y、长，高 = 峰峰值
     /// （上下各一半）。起伏怎么排归这一层（见 [`wave_half_waves`]），落点归几何那一层。
     Wave(Bounds<Pixels>, Hsla),
+    /// 带文字笔记那一条的**便签图标**：落在划线末尾，表明这一段下面还有读者的笔记。
+    /// `bounds` 是图标的外盒，颜色取那条批注的实色（不压透明度）。
+    Note(Bounds<Pixels>, Hsla),
 }
 
 /// 画一条痕迹。`origin` 是承载它的那块元素在窗口里的原点 —— 矩形是元素局部坐标，
@@ -227,6 +230,38 @@ pub(in crate::ui::features::reader) fn paint_mark(
     match mark {
         Mark::Quad(rect, color) => window.paint_quad(fill(*rect + origin, *color)),
         Mark::Wave(rect, color) => paint_wave(*rect + origin, *color, window),
+        Mark::Note(rect, color) => paint_note(*rect + origin, *color, window),
+    }
+}
+
+/// 一枚小小的「便签纸」：方框、右上折角、两条字线。**纯矢量**，不依赖字体里有没有
+/// 那个符号；底色压得很淡，压在字或页图上时不抢眼，但一眼能认出「这里带笔记」。
+fn paint_note(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
+    let x = f32::from(bounds.origin.x);
+    let y = f32::from(bounds.origin.y);
+    let w = f32::from(bounds.size.width);
+    let h = f32::from(bounds.size.height);
+    window.paint_quad(fill(bounds, color.opacity(0.14)));
+    let pad = 1.6;
+    let fold = (w * 0.32).max(2.0);
+    let mut path = PathBuilder::stroke(px(1.2));
+    path.move_to(point(px(x + pad), px(y + pad)));
+    path.line_to(point(px(x + w - fold), px(y + pad)));
+    path.line_to(point(px(x + w - pad), px(y + fold)));
+    path.line_to(point(px(x + w - pad), px(y + h - pad)));
+    path.line_to(point(px(x + pad), px(y + h - pad)));
+    path.close();
+    // 折角的两笔：从折点往下、再折回纸内。
+    path.move_to(point(px(x + w - fold), px(y + pad)));
+    path.line_to(point(px(x + w - fold), px(y + fold)));
+    path.line_to(point(px(x + w - pad), px(y + fold)));
+    for at in [0.52, 0.72] {
+        let line_y = y + h * at;
+        path.move_to(point(px(x + pad + 1.8), px(line_y)));
+        path.line_to(point(px(x + w - pad - 1.8), px(line_y)));
+    }
+    if let Ok(built) = path.build() {
+        window.paint_path(built, color);
     }
 }
 
@@ -304,6 +339,9 @@ pub struct GlyphsElement {
     /// 与选中高亮分开两份：前者是读者留在书上的东西，一屏里同时可以有几十条；
     /// 后者是这一次挑中的那一段，还要长出把手。
     marks: Vec<Mark>,
+    /// 压在**字形之上**的那几枚（当前只有「这段带笔记」的便签图标）：它要压在字的上面
+    /// 才不会被紧跟着的后一个字盖住，而划线那一批必须压在字下（见上）。
+    notes: Vec<Mark>,
     /// 选中件（M6）。空的高亮 = 这一屏没有选中。画法与命中都在 [`selection`]。
     selection: SelectionVisual,
     /// 会话的弱引用：paint 时回写内容边界与把手命中区、注册手势监听。
@@ -406,6 +444,11 @@ impl Element for GlyphsElement {
                 __shape_ns.set(__shape_ns.get() + __t.ns());
             }
         });
+        // 笔记图标压在字形**之上**：它落在划线末尾，紧跟着的可能就是下一行的字或
+        // 行内下一个字，压在字下会被笔画盖掉一半。
+        for note in &self.notes {
+            paint_mark(note, bounds.origin, window);
+        }
         if self.capture {
             // 副本那一趟并进本帧那一份账，不另发一条 `render_ns = 0` 的记录。
             crate::ui::features::reader::model::perf::log_capture_paint(
@@ -437,6 +480,7 @@ impl GlyphsElement {
         Self {
             runs: Vec::new(),
             marks: Vec::new(),
+            notes: Vec::new(),
             selection: SelectionVisual::default(),
             reader: None,
             capture: false,
@@ -447,6 +491,11 @@ impl GlyphsElement {
     /// 波浪差的是形状），坐标与 `runs` 同一套：元素局部，paint 里统一加元素原点。
     pub fn mark(&mut self, mark: Mark) {
         self.marks.push(mark);
+    }
+
+    /// 添一枚压在字形**之上**的痕迹（笔记图标）。与 [`Self::mark`] 同一套局部坐标。
+    pub fn note(&mut self, mark: Mark) {
+        self.notes.push(mark);
     }
 
     /// 这一屏的选中件。没有选中时传默认值即可（空高亮、无把手）。
@@ -478,6 +527,7 @@ impl GlyphsElement {
         Self {
             runs: self.runs.clone(),
             marks: self.marks.clone(),
+            notes: self.notes.clone(),
             selection: SelectionVisual::default(),
             reader: None,
             capture: true,

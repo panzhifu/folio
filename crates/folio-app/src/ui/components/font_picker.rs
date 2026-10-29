@@ -38,7 +38,12 @@ impl FontPicker {
         cx: &mut App,
     ) -> Self {
         let current = get(cx);
-        let families = with_current(cx.text_system().all_font_names(), &current);
+        // 随书字体里没有拉丁 `m` 的那几张（gpui 的 `load_family` 会剔掉，剔空就 panic）
+        // 不进选择器：选中它也排不出来，只会让读者以为设置没生效。
+        let families = with_current(
+            crate::ui::foundation::font_primary::usable_names(cx.text_system().all_font_names()),
+            &current,
+        );
         let items = SearchableVec::new(families.clone());
         let selected = items.position(&current).into_iter().collect::<Vec<_>>();
         let state = cx.new(|cx| ComboboxState::new(items, selected, window, cx).searchable(true));

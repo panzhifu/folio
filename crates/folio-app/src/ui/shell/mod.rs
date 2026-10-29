@@ -860,6 +860,69 @@ impl AppShell {
         self.reading.is_some()
     }
 
+    /// [`reading_mounted`](Self::reading_mounted) 给回归门看的那一面：那一屏是私有的，
+    /// 而「退场走完了没有」是外壳测试唯一能观察到的那个时刻。
+    #[cfg(test)]
+    pub(crate) fn reading_mounted_for_test(&self) -> bool {
+        self.reading_mounted()
+    }
+
+    /// 按生产那条路开书，只是正文由测试递进来。
+    ///
+    /// 真入口（点架上一张卡）要从书库里把正文与容器一起取出来，而回归门要验的是
+    /// 「退出之后谁重渲染架面」—— 链子上解 ZIP 那一环与它无关。这里替掉的只有
+    /// `page.open(book_id)` 那一步，层怎么盖、退场怎么走全是 [open_reading](Self::open_reading)
+    /// 那一份；会话也走生产那一个构造（`with_document`）。
+    #[cfg(test)]
+    pub(crate) fn open_reading_for_test(
+        &mut self,
+        doc: std::sync::Arc<dyn folio_core::content::document::Document>,
+        prefs: folio_core::Reader,
+        locator: folio_core::Locator,
+        cx: &mut Context<Self>,
+    ) {
+        let stack = cx.new(|_| NavStackState::new());
+        let shell = cx.entity().downgrade();
+        let page = cx.new(|cx| ReadingPage::new(stack.downgrade(), shell, cx));
+        stack.update(cx, |state, cx| {
+            state.push(page.clone(), NavMotion::Immediate, cx)
+        });
+        let _stack_watch = cx.subscribe(&stack, |_, _, _, cx| cx.notify());
+        page.update(cx, |page, cx| page.open_document(doc, prefs, locator, cx));
+        self.reading = Some(ReadingLayer {
+            page,
+            stack,
+            _stack_watch,
+            closing: false,
+        });
+        cx.notify();
+    }
+
+    /// 退场走完了就把那一层放掉，并把这一本书的差量撤下来；返回这一次有没有撤。
+    ///
+    /// 时刻由 [`Presence`] 的采样决定：`closing` 把目标翻成「不在」，它自己走完退场，走到
+    /// `Absent` 那一帧 `should_render()` 才是假。**必须在架面渲染之前**问 —— 见 `render` 里
+    /// 调用点那段注释：这一层盖着时架面那条栈不画，缓存里留的是读书之前的外观。
+    /// 落库与统计早在 [`AppShell::close_reading`] 记过了，这里不记第二笔。
+    fn release_reading_if_done(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(layer) = self.reading.as_ref() else {
+            return false;
+        };
+        let sample = Presence::new(reading_layer_id(&layer.page), !layer.closing)
+            .transition(nav_transition(cx))
+            .sample(window, cx);
+        if sample.should_render() {
+            return false;
+        }
+        self.reading = None;
+        // 撤掉这一本书的差量：从这一刻起屏幕上没有那一本了，生效层回到默认层。
+        // 撤在**退场走完**这一帧而不是 [`AppShell::close_reading`] 那一刻 —— 书还在
+        // 往外滑的时候把架面换成白天，读者看到的是两层各种颜色。
+        // 差量的真相在库里，这里只撤内存里那一份，不需要落盘。
+        ConfigHolder::set_book(cx, None);
+        true
+    }
+
     /// 是不是正在读书（挂着、且没在退场）。音量键那一条按它分流：翻正文的页，还是把这一按
     /// 还给系统。
     fn reading_open(&self) -> bool {
@@ -1025,9 +1088,14 @@ impl AppShell {
             PresencePhase::Entering => shift,
             _ => 0.0,
         };
-        layer
-            .page
-            .update(cx, |page, _| page.set_enter_shift(enter_shift));
+        // 顶上这一条与 `pt` 是**同一套**数：层把整页推下去多少，正文就把那一段记在
+        // `top_inset` 里多少。捕获矩形是按「阅读页坐标」量的（`view::body` 的
+        // `sheet_area_in_page`），外壳绕过去直接写会话字段的话，正文那屏下一次重画时本页
+        // 记着的旧数又把会话覆盖回去，纸就会比窗口高出一截。
+        layer.page.update(cx, |page, cx| {
+            page.set_enter_shift(enter_shift);
+            page.set_top_inset(top_inset, cx);
+        });
         div()
             .absolute()
             .inset_0()
@@ -1153,9 +1221,22 @@ impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 外观一改（或第一帧还没涂过）就重涂一次。用 `repaint` 而非 `apply`：
         // 这一帧本来就要重画，再刷所有窗口是自己触发自己。
-        let appearance = ConfigHolder::appearance(cx);
         // 亮度那一格先抠出来：下面整个 `appearance` 要按阅读层解析、再挪进 `applied`。
+        let mut appearance = ConfigHolder::appearance(cx);
         let brightness_pref = appearance.brightness;
+        // **书要在算外观之前撤掉**。这一层盖在架面上时不画架面那条栈（见 `content` 的调用点），
+        // 而栈底下那一屏的渲染缓存还停在书上屏**之前**的外观上（书一落下，主题就不是架面那一档）：
+        // `view.rs` 的 `prepaint_view` 命中缓存时只看尺寸、`content_mask`、`text_style` 与
+        // 「脏了没有」，而那一屏在读书期间从没进过脏表。于是退场走完的第一帧只要没有东西
+        // 替它重渲染，屏上露出来的就是那张旧图 —— 真机上读成「退出阅读后书架还是深色，
+        // 点一下才变回来」。撤在这一帧的最前面，架面就是**这一帧自己渲染**的，读的一定是
+        // 下面这份刚换好的外观。
+        //
+        // 撤掉差量会在**这一次 `render` 里**就换掉生效层，所以那份外观要重新取一次
+        // （通知要等这一帧画完才送到，不能指望有人替我们重画）。
+        if self.release_reading_if_done(window, cx) {
+            appearance = ConfigHolder::appearance(cx);
+        }
         // 书挂着时用阅读页自己的浅深，书收了回到软件外观（见 [`themed_appearance`]）。
         // 这一本自己选过夜里时，`reading_mode` 已经在生效层里了（见 `services::config`）。
         let appearance = themed_appearance(appearance, self.reading_mounted());
@@ -1200,12 +1281,10 @@ impl Render for AppShell {
                 .sample(window, cx)
         });
         if reading_sample.is_some_and(|sample| !sample.should_render()) {
-            self.reading = None;
-            // 撤掉这一本书的差量：从这一刻起屏幕上没有那一本了，生效层回到默认层。
-            // 撤在**退场走完**这一帧而不是 [`AppShell::close_reading`] 那一刻 —— 书还在
-            // 往外滑的时候把架面换成白天，读者看到的是两层各种颜色。
-            // 差量的真相在库里，这里只撤内存里那一份，不需要落盘。
-            ConfigHolder::set_book(cx, None);
+            // 平时不会走到这里：那一层在 `render` 的最前面就撤了（见 `release_reading_if_done`
+            // 与上面那段注释）。留着是给采样**迟到**的那一帧兜底 —— 那时这一帧还没画出
+            // 架面，撤掉差量重画一遍比让屏幕多停一帧旧主题便宜。
+            self.release_reading_if_done(window, cx);
         }
         // 报给正文的那一条是顶上那一条（层自己让）加底下那一条（底栏与页脚自己让，见
         // `reader::page` 的 `bottom_inset`）。同一个数还要给摆层用（[`reading_top_inset`]）。

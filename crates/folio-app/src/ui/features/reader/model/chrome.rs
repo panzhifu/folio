@@ -117,6 +117,76 @@ pub const LETTER_SPACING_RANGE: (f32, f32) = (
     folio_core::infra::config::Reader::LETTER_SPACING_MAX,
 );
 
+/// 一格的两个步长。`slide` 是滑条自己的落档（手指拖到哪就停在这一格的倍数上），
+/// `nudge` 是 `−` / `+` 一颗按下去走的跨度。
+///
+/// 两者必须差一个量级：按 `slide` 走满程要划 56–200 下，那是在骗读者说这格能调准；
+/// 而 ± 只走 `slide` 就是把滑条的细档当成按钮该干的活。这一族定的原则是**全量程靠 ±
+/// 落在 10–30 下**，细的那一档仍然留给滑条。
+///
+/// `nudge` 必须是 `slide` 的整数倍：不然按钮会把值停在格子之外，随后一次拖动先「跳」
+/// 一下才回到格上。步长是数据，写在量程旁边而不是渲染代码里 —— 与上面那族 `*_RANGE`
+/// 同一条立场（抄第二份就有了第二个「一档多大」）。
+#[derive(Clone, Copy, Debug)]
+pub struct SliderSteps {
+    /// 滑条自身的落档。
+    pub slide: f32,
+    /// `−` / `+` 一颗按下去走的跨度。
+    pub nudge: f32,
+}
+
+/// 字号：常用的一段里 ± 一档一像素，满程 28 下。
+pub const FONT_SIZE_STEPS: SliderSteps = SliderSteps {
+    slide: 0.5,
+    nudge: 1.0,
+};
+/// 行距：± 一档 0.1 倍字号；按能用的那一段（1.2–2.2）算只有 10 下。
+pub const LINE_HEIGHT_STEPS: SliderSteps = SliderSteps {
+    slide: 0.05,
+    nudge: 0.1,
+};
+/// 段距：± 一档 0.2 个字号倍。
+pub const PARAGRAPH_GAP_STEPS: SliderSteps = SliderSteps {
+    slide: 0.05,
+    nudge: 0.2,
+};
+/// 字距：满程本来就短（0.25 的范围），± 一档 0.02。
+pub const LETTER_SPACING_STEPS: SliderSteps = SliderSteps {
+    slide: 0.01,
+    nudge: 0.02,
+};
+/// 首行缩进：± 一档半字符，满程 12 下。
+pub const INDENT_STEPS: SliderSteps = SliderSteps {
+    slide: 0.25,
+    nudge: 0.5,
+};
+/// 版心：这一格满程 200 档，± 已经走到 100 像素一档仍要 40 下 —— 量程本身偏大，
+/// 见 `doc/排版设置操控.md` §三 那一条（它该改成档而不是像素）。
+pub const MAX_MEASURE_STEPS: SliderSteps = SliderSteps {
+    slide: 20.0,
+    nudge: 100.0,
+};
+/// 左右页边距：± 一档 16 像素。
+pub const MARGIN_X_STEPS: SliderSteps = SliderSteps {
+    slide: 8.0,
+    nudge: 16.0,
+};
+/// 上下页边距：与左右同一档。
+pub const MARGIN_Y_STEPS: SliderSteps = SliderSteps {
+    slide: 8.0,
+    nudge: 16.0,
+};
+/// 翻页时长：两三百毫秒的差别肉眼分不出 5 ms，± 一档 50 ms。
+pub const TURN_DURATION_STEPS: SliderSteps = SliderSteps {
+    slide: 10.0,
+    nudge: 50.0,
+};
+/// 背光：满程 95 个细档，± 一档十分之一屏亮度。
+pub const BRIGHTNESS_STEPS: SliderSteps = SliderSteps {
+    slide: 0.01,
+    nudge: 0.1,
+};
+
 /// 桌面上「压暗那一层」的透明度。`None`（跟随系统）与顶格都是 0 —— 不压。
 ///
 /// 为什么桌面上要有这一层：背光不是窗口能改的东西（那是显示器的地盘，gpui 没有这个口），

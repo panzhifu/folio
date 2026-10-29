@@ -46,7 +46,10 @@ use self::cache::subtree_style_hash;
 // 而 `tests.rs` 用 `use super::*` 拿符号，所以这里显式把函数名也导入进来。
 use self::collect::Ctx;
 use crate::content::dom::{Dom, NodeId};
-use crate::content::format::css::computed::{StyledDom, WritingMode};
+use crate::content::format::css::computed::{
+    BackgroundAttachment, BackgroundSize, BackgroundTile, ComputedStyle, Length, StyledDom,
+    WritingMode,
+};
 
 pub use cache::BlockCache;
 pub use font::{FontKey, RunStyle, StyleArena, StyleRef};
@@ -118,6 +121,11 @@ fn layout_inner(
         measure,
         images,
         light: options.light,
+        screen: match (options.screen_width, options.screen_height) {
+            (Some(w), Some(h)) => Some((w, h)),
+            _ => None,
+        },
+        page_height: options.page_height,
         blocks: Vec::new(),
         lines: Vec::new(),
         cache,
@@ -171,21 +179,85 @@ fn layout_inner(
         height = overflow;
         ctx.blocks[index].height = height;
     }
+    // **整页画的两兄弟把这一章撑到至少一屏。**
+    //
+    // 一是根上的 `background-attachment: fixed` 底图：浏览器里 body 的底图铺在视口
+    // 画布上，一个 spine 文档就算只有一行字，画布也占满视口。卷首/扉页正是照这个口径
+    // 写的：`body { background-image: …; background-size: cover; background-attachment:
+    // fixed }` 加一句空段（或一小段标题字）。只按内容定高，这一章就只有一行 / 半屏高，
+    // `cover` 会把整幅竖图裁成一条横带 —— 真机上读成「图片显示不完整」，而排版没有
+    // 报错可查。
+    //
+    // 二是「整章只有一张满宽图」：Calibre 封面页那种 `<svg><image/></svg>` 独占一章，
+    // 排版高就是那张图的高（4:3 的封面在手机上只有半屏）。阅读器把它当一整页画，
+    // 所以这一章至少要占**一个视口**（滚动档是内容区高、分页档是一页高）：判据见
+    // [`is_single_picture_page`]。这一档不撑到整窗 —— 图是阅读器贴在窗口上的，
+    // 撑出窗口高只会让分页档把它切成两页。
+    //
+    // 没有这两条时（普通章的底色、铺满的纹理、正文里的小图）章节高仍按内容算，
+    // 否则每章末尾都会凭空多出一屏空白。长章本来高过一屏，这一条对它们没有影响。
+    //
+    // 底图那一档撑到**窗口**高而不是内容区高（没有窗口高才退回页盒高）：这类扉页的
+    // 正文按窗口坐标画（见阅读器的整页画那一格），章高得装得下那一整页 —— 差的那一条
+    // 安全区会落到下一章头上。分页档里这一章于是比一页略高，多出来的那一截落到下一页：
+    // 宁可多翻一页，也不把整幅扉页裁掉。
+    let fixed_background = style
+        .background_layers
+        .iter()
+        .any(|layer| layer.attachment == BackgroundAttachment::Fixed && layer.image.is_some());
+    // 第三种整页画：整幅 `cover` 底图 + 作者声明满页 + 章里没有正文（判据见
+    // [`is_cover_page`]）。杜坎那族工具导出的封面章就是这个形状 —— 它不写 `fixed`，
+    // 从前于是掉进「版心里的块装饰」，`cover` 把整幅竖图裁成一条横带。
+    let cover_background = is_cover_page(style, options, &ctx.blocks);
+    if fixed_background || cover_background {
+        if let Some(canvas) = options.screen_height.or(options.page_height)
+            && height + 0.5 < canvas
+        {
+            height = canvas;
+            ctx.blocks[index].height = height;
+        }
+    } else if let Some(page) = options.page_height
+        && height + 0.5 < page
+        && is_single_picture_page(&ctx.lines, content_width)
+    {
+        height = page;
+        ctx.blocks[index].height = height;
+    }
     // 轴取**根样式**那一格：整章一根轴。混排（这一章里既有一竖排段又有一横排表格）
     // 明确不支持 —— 那样切片、进度、命中都得按块各问一次轴，而分片器只会切一根轴。
     // `allow_vertical` 是界面那一侧的门（竖排现在只在分页那一档落地），判据与理由
     // 写在 [`LayoutOptions::allow_vertical`]。
     // 绝对定位的盒在**这一章的高定下来之后**才摆：`top` / `bottom` 的百分比基准是包含块高。
     // 它们不撑高（`height` 已经在上面收口），所以放在这一步不影响分页。
+    //
+    // 纵向的包含块在 CSS 里是**页盒**（分页档一页的高，滚动档内容区的高），不是整章
+    // 内容高：标题页那句 `<div class="chubanshe">中信出版社</div>` 配着
+    // `position:absolute; bottom:12%`，按章高折会把出版社压在作者行上（真机实测），
+    // 按页高才落回页面底部。界面量不出内容区高（`page_height: None`）或竖排时
+    // 退回章高 —— 那是这一格出现之前的唯一口径。
     if !options.light {
-        ctx.place_absolutes(options.width, height);
+        let bottom = ctx.place_absolutes(options.width, options.page_height, height);
+        // 绝对定位不撑开**祖先**的高，但它进**滚动溢出**：滚动档的章高就是滚动链上的
+        // 那一段，不算上它，页面底部的出版社/页脚就会压到下一章的字上（《未来简史》
+        // 扉页真机）。分页档封顶在页盒高，正常页内的绝对盒不会因此多切一页；
+        // 没有页盒的旧口径（`page_height: None`）行为不变。
+        if let Some(page) = options.page_height {
+            let bottom = bottom.min(page);
+            if bottom > height + 0.5 {
+                height = bottom;
+                ctx.blocks[index].height = height;
+            }
+        }
     }
     let flow = if options.allow_vertical {
         style.writing_mode
     } else {
         WritingMode::HorizontalTb
     };
-    let out = Layout::assemble(ctx.blocks, ctx.lines, content_width, height, flow);
+    let mut out = Layout::assemble(ctx.blocks, ctx.lines, content_width, height, flow);
+    // 绘制侧只认 `DecorSeed::full_bleed`；`fixed` 底图在 `decor_seeds` 里按 attachment
+    // 现认，封面这一档由排版把结论带过去。
+    out.root_full_bleed = cover_background;
     // 块数与行数是一章排版结果的体检指标：0 行意味着 DOM 或样式空了，而不是「这一章短」。
     tracing::debug!(
         "layout: {} 块 / {} 行，版心 {}，高 {}",
@@ -195,6 +267,57 @@ fn layout_inner(
         out.height
     );
     out
+}
+
+/// 这一章是不是「一张满宽图、没有正文」—— Calibre 封面页、整页插图章。
+///
+/// 阅读器把这种章按**整窗一页**画（图铺满屏、读数带浮在上面），所以它至少要占一屏高
+/// （判据在 [`layout_inner`] 的整页画那一格）。判据本体只有一份，在
+/// [`fragment::picture_page_hrefs`]：那里按**一片**问一次（一页一图那一档），这里按
+/// **整章**问一次（章高至少要撑到一屏）。两档同一条规矩，写两处迟早漂成分叉 ——
+/// 绘制层从前自己扫整章那份就是这么漂出来的（`doc/图片呈现.md` §一）。
+fn is_single_picture_page(lines: &[LineBox], content_width: f32) -> bool {
+    fragment::picture_page_hrefs(lines, 0..lines.len(), content_width).len() == 1
+}
+
+/// 这一章是不是「整幅底图封面」—— 根上是 `cover` + `no-repeat` 的整幅底图，作者用
+/// `height` / `min-height: 100%` 要它铺满一屏，而章里没有一行可见正文。
+///
+/// 三条缺一不可：
+/// - **只看整幅那两格**：`background-size: cover` + 两轴 `no-repeat`。`repeat` 的纹理
+///   底色不是封面，`auto` 的原始尺寸图也不是「一整页」；
+/// - **作者自己说了要满页**：`height` / `min-height` 折出来 ≥ 一页。浏览器里
+///   `html,body{height:100%}` + `.cover{min-height:100%}` 折出来的正是这句；
+/// - **没有正文**：块文本全是空白（`&nbsp;` 也算空白）。有字的一章不抢整窗，
+///   哪怕底图铺满。
+///
+/// 命中后与 `background-attachment: fixed` 底图同一条出口：撑到一窗高，并由
+/// `Layout::decor_seeds` 把根种子标成 `full_bleed`，阅读器就把这张图贴到窗口上
+/// （否则 `cover` 只能铺进版心里那个空段落的高度，整幅封面被裁成一条横带）。
+fn is_cover_page(style: &ComputedStyle, options: LayoutOptions, blocks: &[BlockBox]) -> bool {
+    // 没有竖轴基准就折不出 `100%`，这一档整族按 `auto` —— 与没有这一条时逐字相同。
+    let Some(page) = options.page_height else {
+        return false;
+    };
+    let wants_page =
+        |length: Option<Length>| Ctx::definite(length, Some(page)).is_some_and(|h| h + 0.5 >= page);
+    if !wants_page(style.height) && !wants_page(style.min_height) {
+        return false;
+    }
+    let full_background = style.background_layers.iter().any(|layer| {
+        layer.image.is_some()
+            && matches!(layer.size, BackgroundSize::Cover)
+            && matches!(layer.repeat.x, BackgroundTile::NoRepeat)
+            && matches!(layer.repeat.y, BackgroundTile::NoRepeat)
+    });
+    if !full_background {
+        return false;
+    }
+    // 有字就不是封面。`BlockBox::text` 是这一块自己的行内文本（含图片的哨兵字符），
+    // 容器块是空串 —— 根那一块不是唯一带字的地方，逐块都要看。
+    blocks
+        .iter()
+        .all(|block| block.text.chars().all(char::is_whitespace))
 }
 
 #[cfg(test)]

@@ -123,7 +123,17 @@ impl ImageProvider for NoImages {
 /// `max-width` 的插图也不该被裁掉，所以一张 `min-width: 900px` 的图在 600px 版心里
 /// 就是 600 宽，而不是溢出到版心外（流内块那一侧不夹这一刀，两者行为不同是有意的，
 /// 溢出的一块矩形会被滚动链带出去，一张图则是直接切掉）。
-pub(super) fn image_size(style: &ComputedStyle, iw: f32, ih: f32, container_w: f32) -> (f32, f32) {
+///
+/// `screen_w` 是**屏幕宽**（界面给的）。它只在一处起作用：一张图按作者 CSS 算完比栏宽还宽
+/// 时，把上限从栏宽换成屏幕宽 —— 读者要的是「大图铺满屏幕」，不是缩在页边距里
+/// （2026-10-30）。`bleed` 是同一件事的显式写法（多看的 `duokan-bleed`），也走这一格。
+pub(super) fn image_size(
+    style: &ComputedStyle,
+    iw: f32,
+    ih: f32,
+    container_w: f32,
+    screen_w: Option<f32>,
+) -> (f32, f32) {
     let basis = container_w.max(1.0);
     let has_intrinsic = iw > 0.0 && ih > 0.0;
     // `box-sizing: border-box` 时作者写的数已经含边框与内边距。横向与纵向各自扣自己那一对，
@@ -198,12 +208,22 @@ pub(super) fn image_size(style: &ComputedStyle, iw: f32, ih: f32, container_w: f
         }
         h = min_h;
     }
-    // 绝不溢出容器：书里没写 max-width 的插图也不该被裁掉（口径见函数文档）。
-    if w > basis {
+    // 绝不溢出**屏幕**：书里没写 max-width 的插图也不该被裁掉（口径见函数文档）。
+    // 上限取 `max(栏宽, 屏幕宽)` —— 屏幕宽只松不紧：一张原本就窄于栏宽的图不受影响，
+    // 而按作者 CSS 算出来宽于栏宽的图铺到屏幕上（「大图铺满屏幕」）。
+    // 上限按读者那一档「图片缩放」定（`ImageScale`，由界面从偏好注进样式）：
+    // - 跟书 / 铺满：绝不溢出**屏幕**，屏比版心窄时（桌面窗口拖窄）取版心 —— 只松不紧。
+    // - 原始尺寸：不替作者把图缩到栏里，只在**超出屏幕**时等比缩回来（屏幕装不下就会被
+    //   切掉，那一截谁也没法读）。量不出屏宽时退回旧口径，「原始」在那一档没有意义。
+    let ceiling = match style.image_scale {
+        crate::infra::config::ImageScale::Original => screen_w.unwrap_or(basis),
+        _ => screen_w.map_or(basis, |screen| screen.max(basis)),
+    };
+    if w > ceiling {
         if w > 0.0 {
-            h *= basis / w;
+            h *= ceiling / w;
         }
-        w = basis;
+        w = ceiling;
     }
     (w, h)
 }

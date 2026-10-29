@@ -336,6 +336,8 @@ pub fn log_book_open(walk_ns: u64, rules_ns: u64, deferred: bool) {
 #[allow(clippy::too_many_arguments)]
 pub fn log_font_load(
     parse_ns: u64,
+    refs_ns: u64,
+    subset_ns: u64,
     bytes_ns: u64,
     register_ns: u64,
     faces: usize,
@@ -343,11 +345,16 @@ pub fn log_font_load(
     bytes_read: usize,
     failed: usize,
     empty_diff: usize,
+    subset_before: usize,
+    subset_after: usize,
+    subset_failures: usize,
 ) {
     if tracing::enabled!(target: "folio_app::perf", tracing::Level::DEBUG) {
         tracing::debug!(
             target: "folio_app::perf",
             font_parse_us = parse_ns / 1000,
+            font_refs_us = refs_ns / 1000,
+            font_subset_us = subset_ns / 1000,
             font_bytes_us = bytes_ns / 1000,
             font_register_us = register_ns / 1000,
             faces,
@@ -355,6 +362,9 @@ pub fn log_font_load(
             font_bytes_read = bytes_read,
             font_failures = failed,
             font_empty_diffs = empty_diff,
+            font_subset_before = subset_before,
+            font_subset_after = subset_after,
+            font_subset_failures = subset_failures,
             "font_load"
         );
     }

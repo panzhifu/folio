@@ -43,7 +43,11 @@ pub enum Error {
     /// 这个格式的 provider」，写完了就能读；DRM 不会因为我们多写代码就变得能读，
     /// 读者的动作也不是等版本，是换一本无加密的文件。`method` 是那个算法 URI，
     /// 它决定的是开发者能不能一眼认出是哪一家 DRM。
-    #[error("这本书带 DRM 加密（{method}），读不了：{name}")]
+    ///
+    /// `method` 只进 `Debug`（`{name}` 那句才是读者看的）：那一串是
+    /// `http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p` 这种形状，摆给读者既读不懂
+    /// 也换不来动作，而日志里 `{:?}` 照样取得到。
+    #[error("《{name}》带 DRM 加密，读不了：换一本没有加密的文件")]
     Encrypted { name: String, method: String },
 
     #[error("没有这本书：{0}")]
@@ -171,6 +175,36 @@ mod tests {
                 .expect("就是那条 io::Error")
                 .kind(),
             ErrorKind::PermissionDenied
+        );
+    }
+
+    /// DRM 那一句：**读者看到的文案里没有算法 URI**，而日志要的 `Debug` 里还得有。
+    ///
+    /// 从前 `Display` 直接摆 `{method}`，屏幕上就是一串
+    /// `http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p` —— 读者读不懂，也不改变他要做的
+    /// 动作（换一本没加密的）。URI 撤进 `Debug` 之后这一条还分得开是哪一家 DRM。
+    #[test]
+    fn the_drm_message_reads_to_a_person_while_the_log_keeps_the_algorithm() {
+        let err = super::Error::Encrypted {
+            name: "书甲".to_string(),
+            method: "http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p".to_string(),
+        };
+        let shown = format!("{err}");
+        assert!(shown.contains("书甲"), "书名要在：{shown}");
+        assert!(
+            !shown.contains("xmlenc"),
+            "算法 URI 不该出现在读者那句话里：{shown}"
+        );
+        assert!(shown.contains("DRM"), "要说清楚是加密：{shown}");
+        assert!(
+            format!("{err:?}").contains("rsa-oaep-mgf1p"),
+            "日志里要还认得出是哪一家 DRM"
+        );
+        // 分类不看文案，改措辞不该把批量报表的分组改散。
+        assert_eq!(
+            err.import_reject(),
+            Some(super::ImportReject::Encrypted),
+            "类别仍是「加密」"
         );
     }
 }

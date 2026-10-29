@@ -77,6 +77,7 @@ mod rawml;
 
 pub(crate) use encoding::decode_text;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use header::{
@@ -89,8 +90,8 @@ use rawml::Records;
 use super::epub::IMAGE_HEAD_BYTES;
 use super::palmdb::PalmDb;
 use super::{
-    Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, FontBytes, Format,
-    HeadDims, ImageRes, image_dims, image_dims_from_head, shrink_image, stem_of,
+    Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, FontBytes, FontRef,
+    Format, HeadDims, ImageRes, image_dims, image_dims_from_head, shrink_image, stem_of,
 };
 use crate::Result;
 
@@ -233,6 +234,55 @@ impl DocumentProvider for MobiAdapter {
             })
             .collect()
     }
+
+    /// 内嵌字体的身份：只读 FONT 记录的**原始字节**，不解压、不碰 fontdb。
+    ///
+    /// MOBI 没有 ZIP 中央目录，`raw_len + crc32` 只能从字节现算。这里算的是原始记录
+    /// （可能是 zlib 压缩的那一层）：它稳定、能区分两本书里同号的记录；解压后的 sfnt
+    /// 身份要等 [`Self::read_font`]，命中别名缓存时那一趟不必付。
+    fn font_refs(&self, path: &Path, wanted: &[String]) -> Option<Vec<FontRef>> {
+        if wanted.is_empty() {
+            return Some(Vec::new());
+        }
+        let opened = open(path).ok()?;
+        if opened.header.encryption_type != 0 {
+            return Some(Vec::new());
+        }
+        let heads = rawml::palm_heads(&opened.db);
+        let resources = rawml::list_resources(&heads, opened.first_resource);
+        let mut out = Vec::new();
+        for resource in resources
+            .iter()
+            .filter(|r| r.kind == rawml::ResourceKind::Font)
+        {
+            let href = format!("{FONT_PREFIX}{}", resource.record);
+            if !wanted.iter().any(|want| want == &href) {
+                continue;
+            }
+            // 命中缓存时也要有身份，但不必解压：解压那一趟留给 `read_font`。
+            let Some(raw) = opened.db.read(resource.record) else {
+                continue;
+            };
+            out.push(FontRef {
+                href,
+                media_type: resource.media_type.to_string(),
+                raw_len: raw.len() as u64,
+                crc32: crc32fast::hash(&raw),
+            });
+        }
+        Some(out)
+    }
+
+    /// 按 [`Self::font_refs`] 给的身份读一份字体：解 FONT 记录（去混淆 + zlib）。
+    fn read_font(&self, path: &Path, font: &FontRef) -> Option<Vec<u8>> {
+        let opened = open(path).ok()?;
+        if opened.header.encryption_type != 0 {
+            return None;
+        }
+        let record = font.href.strip_prefix(FONT_PREFIX)?.parse::<usize>().ok()?;
+        let raw = opened.db.read(record)?;
+        decode_font(&raw)
+    }
 }
 
 /// 开一本书：容器 + 选定的头（hybrid 时是 KF8 半边）+ 偏移 + 首个资源记录号。
@@ -371,8 +421,15 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
     //   与空标签的壳，**文字节点一格都不动**，所以两条路的字数逐章相同（对拍见
     //   `the_index_pass_counts_the_same_visible_chars`）—— 省下的是 2.7 MB 那本实测
     //   6.8 ms 的改写 + 一章一次 `String` 分配。
+    let mut font_charset: BTreeSet<u32> = BTreeSet::new();
     let mut chapters: Vec<Chapter> = if with_text {
-        rewrite_chapters(parts, first_resource, is_kf8)
+        // 全文那一趟的正文会被改写，字符集仍按**改写过的那份**扫一遍；改写只动标签
+        // 与 href，文字节点一格不动，两条路的字符集因此相同。
+        let rewritten = rewrite_chapters(parts, first_resource, is_kf8);
+        for source in &rewritten {
+            font_charset.extend(crate::content::scan::chapter_summary(source).charset);
+        }
+        rewritten
             .into_iter()
             .enumerate()
             .map(|(i, source)| Chapter::inline(title_at(titles, i), source))
@@ -383,6 +440,7 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
             .enumerate()
             .map(|(i, part)| {
                 let summary = crate::content::scan::chapter_summary(part);
+                font_charset.extend(summary.charset);
                 Chapter::section(title_at(titles, i), i).with_char_len(Some(summary.visible_chars))
             })
             .collect()
@@ -463,6 +521,7 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
         toc: Vec::new(),
         cover,
         images,
+        font_charset: font_charset.into_iter().collect(),
         progression_rtl: false,
         cover_ref: None,
     };
@@ -1352,6 +1411,43 @@ mod tests {
             "给的顺序跟着记录，不跟着 `wanted`"
         );
         assert_eq!(both[1].bytes, b"FONT-B");
+    }
+
+    /// `font_refs` 只回点名的记录、身份取**原始记录**（不解压）；`read_font` 才解码。
+    /// 这样命中别名缓存时不会为了拿身份把字体解一遍。
+    #[test]
+    fn font_refs_gives_the_named_records_and_read_font_decodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = two_fonts(dir.path());
+
+        let wanted = vec!["mobi-font/2".to_string()];
+        let refs = MobiAdapter.font_refs(&path, &wanted).unwrap();
+        assert_eq!(refs.len(), 1, "只回点名的那一份");
+        assert_eq!(refs[0].href, "mobi-font/2");
+        let raw = font_record(b"FONT-A-PAYLOAD");
+        assert_eq!(refs[0].raw_len, raw.len() as u64, "身份是原始记录长度");
+        assert_eq!(refs[0].crc32, crc32fast::hash(&raw));
+        assert_eq!(
+            MobiAdapter.read_font(&path, &refs[0]),
+            Some(b"FONT-A-PAYLOAD".to_vec()),
+            "read_font 交回解码后的负载"
+        );
+
+        assert!(
+            MobiAdapter.font_refs(&path, &[]).unwrap().is_empty(),
+            "没人点名就一条都不读"
+        );
+        let both = MobiAdapter
+            .font_refs(
+                &path,
+                &["mobi-font/3".to_string(), "mobi-font/2".to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            both.iter().map(|r| r.href.as_str()).collect::<Vec<_>>(),
+            vec!["mobi-font/2", "mobi-font/3"],
+            "顺序跟着记录，不跟着 wanted"
+        );
     }
 
     #[test]
@@ -2454,6 +2550,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 真样本总门：libmobi 语料里每一本**没加密**的都要开得了，加密的那两本要说「有 DRM」。
+    ///
+    /// 跑法：`cargo test -p folio-core --lib -- --ignored every_non_drm_libmobi_sample`
+    ///
+    /// 这条门是为 HUFF/CDIC 那一本立的：它的正文解压从前解到半本就整体判失败
+    /// （`codec::HuffCdic::decompress` 拿「整条缓冲已解出多少」去比「这一帧的剩余额度」），
+    /// 屏幕上整本读不动，而失败点之前与上游 `mobitool` 的导出**逐字节一致** ——
+    /// 合成夹具只有几十字节，够不到那一格，所以这里用真样本，并且不依赖上游二进制：
+    /// 语料里同一本书有两份（`sample-unicode-huffdic` 一份 HUFF 压、
+    /// `sample-unicode-uncompressed` 一份不压），两本的逐章字数必须一致 ——
+    /// 「解到一半停下来」的那一份会先在这里露出来，而不是在书架上。
+    #[test]
+    #[ignore = "真书语料门：reference/ 不在仓库里"]
+    fn every_non_drm_libmobi_sample_opens_and_the_huff_twin_agrees() {
+        use crate::content::document::{ContentRef, open as open_doc};
+
+        let mut readable = 0usize;
+        let mut drm = 0usize;
+        let mut huff: Option<Vec<usize>> = None;
+        let mut plain: Option<Vec<usize>> = None;
+        for path in stage_corpus() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let doc = match open_doc(&path) {
+                Ok(doc) => doc,
+                Err(err) => {
+                    assert!(
+                        matches!(&err, crate::Error::Encrypted { .. }),
+                        "{name} 开不了：{err}"
+                    );
+                    drm += 1;
+                    continue;
+                }
+            };
+            let ContentRef::Reflow(flow) = doc.content() else {
+                panic!("{name} 该是可重排的一族");
+            };
+            let lens: Vec<usize> = flow
+                .chapters
+                .iter()
+                .map(|c| c.char_len().unwrap_or(0))
+                .collect();
+            assert!(!lens.is_empty(), "{name} 开着却没有一章");
+            assert!(
+                lens.iter().sum::<usize>() > 0,
+                "{name} 有章表却全书 0 字（解压没跑通就是这个形状）"
+            );
+            readable += 1;
+            if name.contains("huffdic") {
+                huff = Some(lens);
+            } else if name.contains("unicode-uncompressed") {
+                plain = Some(lens);
+            }
+        }
+        // 数量门：一本都没扫到时上面那些断言全在真空里过。
+        assert!(
+            readable >= 9,
+            "只开了 {readable} 本，语料没扫到（reference/ 不在？）"
+        );
+        assert_eq!(
+            drm, 2,
+            "语料里加密的那两本都要落到「有 DRM」，不能多也不能少"
+        );
+        let (Some(huff), Some(plain)) = (huff, plain) else {
+            panic!("语料里没有 HUFF / 不压那一对同书样本");
+        };
+        assert_eq!(
+            huff, plain,
+            "同一本书的两种压缩，逐章字数该一致（HUFF 那份解到一半停下来就是这个形状）"
+        );
     }
 
     /// 同上，跑在真书上（语料不在仓库里，所以这条默认不跑）。

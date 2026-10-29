@@ -83,6 +83,15 @@ fn main() {
         "| `doc.font_refs`（元数据，不解压） | {:.2} | {:.2} | {:.2} | {} 份 |",
         refs_times.0, refs_times.1, refs_times.2, refs_len
     );
+    // 真正开书时：`stylesheet` 在 UI 打开共享容器，worker 的 `font_refs_in` 复用它。
+    // 对照是旧路 `font_refs` 自己再开一个 ZIP。先确保共享容器开着（上面 stylesheet 已做）。
+    let (in_times, in_refs) = bench(reps, || {
+        doc.font_refs_in(&wanted).map_or(0, |refs| refs.len())
+    });
+    println!(
+        "| `doc.font_refs_in`（复用已开容器，worker） | {:.2} | {:.2} | {:.2} | {} 份 |",
+        in_times.0, in_times.1, in_times.2, in_refs
+    );
     let (font_times, font_bytes) = bench(reps, || {
         doc.fonts(&wanted)
             .iter()
@@ -99,7 +108,7 @@ fn main() {
     );
     println!();
     println!(
-        "注：`doc.fonts` 仍一次读全；`BookFonts::for_request` 命中身份缓存时只走 `font_refs`（本例约 17.6 ms），不读字节。"
+        "注：`doc.fonts` 仍一次读全；`BookFonts::for_request` 命中身份缓存时只走 `font_refs_in`（复用 UI 已打开的容器）或 `font_refs`（自己开容器），不读字体字节。"
     );
 }
 

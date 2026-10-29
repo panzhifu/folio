@@ -236,18 +236,26 @@ impl HuffCdic {
             return Some(());
         }
         let before = out.len();
-        self.decode(input, limit, out, 0)?;
+        // 上限折成**绝对**的那一条线（这一帧结束时 `out` 最多长到哪儿）再交给 `decode`：
+        // `decode` 循环里比的是 `out.len()`，那是整条缓冲的当前长度，不是「本帧已吐多少」。
+        // 从前直接把剩余额度递进去，于是「已解出 > 声明长度的一半」那一格起每一帧都失败 ——
+        // 真样本实测：108,331 字节的 HUFF 书停在 55,232 字节，而前面每一段与上游
+        // `mobitool` 的导出逐字节相同（合成夹具只有几十字节，够不到那一格）。
+        let ceiling = before.checked_add(limit)?;
+        self.decode(input, ceiling, out, 0)?;
         (out.len() - before <= limit).then_some(())
     }
 
-    fn decode(&self, input: &[u8], limit: usize, out: &mut Vec<u8>, depth: usize) -> Option<()> {
+    /// 解一帧码流。`ceiling` 是 `out` 这一趟的**绝对**上限（见 [`Self::decompress`]）：
+    /// 递归进来的那一帧往同一条缓冲里追加，所以比的也是同一条线。
+    fn decode(&self, input: &[u8], ceiling: usize, out: &mut Vec<u8>, depth: usize) -> Option<()> {
         if depth > MAX_DEPTH {
             return None;
         }
         let total_bits = input.len() * 8;
         let mut bitpos = 0usize;
         while bitpos < total_bits {
-            if out.len() > limit {
+            if out.len() > ceiling {
                 return None;
             }
             let code = window32(input, bitpos);
@@ -303,7 +311,7 @@ impl HuffCdic {
             if is_plain {
                 out.extend_from_slice(symbol);
             } else {
-                self.decode(symbol, limit, out, depth + 1)?;
+                self.decode(symbol, ceiling, out, depth + 1)?;
             }
         }
         Some(())
@@ -663,5 +671,41 @@ mod tests {
         assert_eq!(extras_len(&[0x01, 0x02, 0x03], 1 << 15), None);
         // 段长声明得比记录还长。
         assert_eq!(extras_len(&[0x00, 0xf0], 0b10), None);
+    }
+
+    /// 连续几帧解进**同一条缓冲**：上限是整条缓冲的那一条线，不是「本帧还能吐多少」。
+    ///
+    /// 装正文是一帧一帧追加的，所以「已解出的总长」必然一路涨到声明的 `text_length`。
+    /// 从前 `decode` 拿它去比**剩余额度**，于是过了半本起每一帧一进来就失败：
+    /// 真样本 `sample-unicode-huffdic` 实测停在 55,232 字节（声明 108,331，正好过半），
+    /// 而 55,232 字节之前与上游 `mobitool` 的导出逐字节一致 —— 症状是「整本 HUFF 书读不动」，
+    /// 合成夹具每趟只有几十字节，够不到那一格，所以这条门专门钉「第二帧比第一帧晚到一半」。
+    #[test]
+    fn later_frames_are_measured_against_the_same_buffer_ceiling() {
+        let (huff, cdics) = huffcdic(true);
+        let refs: Vec<&[u8]> = cdics.iter().map(Vec::as_slice).collect();
+        let table = HuffCdic::build(&huff, &refs).expect("夹具的表该建得起来");
+        // 一帧两个码字 = 符号 1 + 符号 0 = "b"(1 B) + "甲"(3 B) = 4 B。
+        let frame = [0x01u8, 0x02];
+        let declared = 12usize;
+        let mut out = Vec::new();
+        for i in 0..3 {
+            // 调用方那一头的口径：额度 = 声明长度 − 已解出。
+            let remaining = declared - out.len();
+            assert!(
+                table.decompress(&frame, remaining, &mut out).is_some(),
+                "第 {i} 帧解不动：已解出 {} B，剩余额度 {remaining} B",
+                out.len()
+            );
+        }
+        assert_eq!(out, "b甲b甲b甲".as_bytes());
+        // 超出声明长度的那一帧仍要判失败：上限不是装饰。
+        let mut overflow = out.clone();
+        assert!(
+            table
+                .decompress(&frame, declared - overflow.len(), &mut overflow)
+                .is_none_or(|_| overflow.len() > declared),
+            "多吐的一截不该被当成正文交回去"
+        );
     }
 }

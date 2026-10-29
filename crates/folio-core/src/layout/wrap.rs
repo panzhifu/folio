@@ -11,7 +11,15 @@ use super::font::{RunStyle, StyleArena, StyleRef};
 use super::geometry::{ImageRun, LineFragment, LineRun};
 use super::ports::{ImageProvider, Measure, image_size};
 use crate::content::dom::{Dom, NodeId, NodeKind};
-use crate::content::format::css::computed::{Hyphens, StyledDom};
+use crate::content::format::css::computed::{Hyphens, RubyPosition, StyledDom};
+
+/// 注音与基字之间的缝，按容器自己的字号折算。
+///
+/// 这是**我们定的常数**，不是规范给的数：CSS 把 ruby 的注音间距留给实现，浏览器给的是
+/// 一两个 px 级别的空隙。0.08 em 在 16 px 正文 + 半号注音那一档是 1.3 px —— 再小就会让
+/// 注音的下沿咬到基字的上沿，再大就变成两行之间凭空多一条缝。列表标记与正文之间那道缝
+/// （`collect.rs` 的 `MARKER_GAP_EM`）是同一个立场：留白由实现定，取「贴字」那一档。
+const RUBY_GAP_EM: f32 = 0.08;
 
 /// 一行在版心里的落位：行带左缘 `x`、行顶 `y`、整幅宽 `width`，加上这一行让出去的
 /// 四段宽（[`RowInsets`]，四段各是什么、为什么要分成四段写在那一条上）。
@@ -201,6 +209,8 @@ impl LineAcc {
                 width,
                 ascent,
                 descent,
+                // ruby 注音那一族 piece 带的横向落点；正文恒为 0。
+                x_offset: piece.x_offset,
             }));
         }
     }
@@ -221,6 +231,7 @@ impl LineAcc {
             advance: img.advance,
             x_offset: img.x_offset,
             baseline_shift: img.baseline_shift,
+            fit: img.fit,
         }));
     }
 }
@@ -478,6 +489,27 @@ pub(super) fn hard_lines(text: &str) -> Vec<Range<usize>> {
     out
 }
 
+/// 折一趟行内内容要用的三个**尺寸基准**。
+///
+/// 并成一个结构体的理由不是「参数太多想收拢一下」，而是这三个数**同源同批**：
+/// 都由调用方从 `LayoutOptions` 与这一块的可用宽一起给出，少给一个就换一档口径 ——
+/// `screen_width` 是 `None` 就是「界面没报屏」那一档（图片退回按栏宽算，见
+/// [`super::collect::Ctx::screen` 的文档]），`page_height` 是 `None` 时「够不够大」
+/// 只按宽判。拆成三个散参数时 `collect` 的实参涨到了 clippy 的七格上限之外，
+/// 而那就是「这三位本来是一个东西」的信号。
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Sizes {
+    /// 段落可用宽：图片百分比宽度与折行的基准。
+    pub width: f32,
+    /// 屏幕宽（`None` = 界面没给）。判「大图铺满」用。
+    pub screen_width: Option<f32>,
+    /// 一页（一屏）的高，判「这张图是不是大到该铺满」用。
+    pub page_height: Option<f32>,
+    /// 屏幕高（`None` = 界面没给）。连续滚动那一档没有页高，判「够不够大」时
+    /// 由它顶上 —— 两档同一条判据，见 [`super::collect::fills_the_screen`]。
+    pub screen_height: Option<f32>,
+}
+
 /// 把若干兄弟子树展平成一段文本，同时记下每个来源节点的区间与其元素样式。
 /// `width` 是段落的可用宽度，用来折算图片的百分比宽度。
 ///
@@ -490,20 +522,35 @@ pub(super) fn collect(
     pre: bool,
     images: &dyn ImageProvider,
     measure: &dyn Measure,
-    width: f32,
+    sizes: Sizes,
 ) -> Collected {
+    let Sizes {
+        width,
+        screen_width,
+        page_height,
+        screen_height,
+    } = sizes;
     let mut out = Collector {
         text: String::new(),
         widths: Vec::new(),
         pieces: Vec::new(),
         images: Vec::new(),
+        rubies: Vec::new(),
         arena: StyleArena::new(),
         pending_space: false,
+        in_note: false,
+        ruby_depth: 0,
+        note_width: 0.0,
         dom,
         styles,
         provider: images,
         measure,
         width,
+        screen_width,
+        page_height,
+        screen_height,
+        alone_in_paragraph: pieces.len() == 1
+            && super::collect::picture_src(dom, pieces[0]).is_some(),
     };
     for node in pieces {
         let style = out.intern_style(*node);
@@ -513,6 +560,7 @@ pub(super) fn collect(
         text: out.text,
         pieces: out.pieces,
         images: out.images,
+        rubies: out.rubies,
         styles: out.arena,
         widths: out.widths,
     }
@@ -524,17 +572,45 @@ struct Collector<'a> {
     widths: Vec<f32>,
     pieces: Vec<Piece>,
     images: Vec<ImageAtom>,
+    /// ruby 容器在 `text` 里占的段（基字 + 注音），按起点升序。见 [`Collector::push_ruby`]。
+    rubies: Vec<Range<usize>>,
     /// 这一段用到的样式的去重表。
     arena: StyleArena,
     /// 折叠空白是**跨节点**的：上一段尾巴上的空白与下一段开头的空白是同一次折叠，
     /// 谁先落地谁占位，所以这个状态挂在收集器上。
     pending_space: bool,
+    /// 现在正在收注音（`<rt>`）子树。为真时 [`Self::push_widths`] 把前进量**记走、不落表** ——
+    /// 容器要让的那一段宽已在基字那头一次结清（见 [`Collector::push_ruby`]）。
+    ///
+    /// 它只在一个容器的注音那一趟里为真：更里面的 `<ruby>` 被下面的 [`ruby_depth`] 挡回普通
+    /// 行内递归，所以这里不需要栈，`note_width` 也就只需要一个累加器。
+    in_note: bool,
+    /// 现在在某个 ruby 容器的子树里吗。>0 时更里面的 `<ruby>` **不再当容器**，照普通行内收：
+    /// 嵌套 ruby（注音上面还有注音）本机语料 0 处，为它维护一层栈不如退回行内。
+    ruby_depth: u32,
+    /// 当前这一趟注音子树的真实宽度总和（`in_note` 期间累加，容器用它定前进量）。
+    note_width: f32,
     dom: &'a Dom,
     styles: &'a StyledDom,
     provider: &'a dyn ImageProvider,
     measure: &'a dyn Measure,
     /// 段落可用宽度，图片百分比宽度的基准。
     width: f32,
+    /// 屏幕宽（`None` = 界面没给）。见 `Ctx::screen`。
+    screen_width: Option<f32>,
+    /// 一页（一屏）的高，用来判「这张图是不是大到该铺满」。`None` 时退回
+    /// [`Self::screen_height`]，两者都没有才只按宽判。
+    page_height: Option<f32>,
+    /// 屏幕高（`None` = 界面没给）。见 [`Sizes::screen_height`]。
+    screen_height: Option<f32>,
+    /// 这一趟的行内内容**只有一张图**（`<p><img></p>` 那种独占一段的插图）。
+    ///
+    /// 书里的插图绝大多数是这么写的：`<img>` 在 UA 表里天生 inline，于是它不会走
+    /// 块级那条路，而被收成一个「只有一张图」的匿名段。读者那一档「铺满屏幕」说的
+    /// 是「整块的图铺到屏幕边」—— 独占一段就是那个「整块」，所以这一格让行内臂
+    /// 也有资格按屏幕宽排；夹在字中间的那种（同段还有别的 piece）仍然不放大，
+    /// 否则一张图标会把整段顶走。
+    alone_in_paragraph: bool,
 }
 
 impl<'a> Collector<'a> {
@@ -573,6 +649,13 @@ impl<'a> Collector<'a> {
             if ch == ' ' {
                 w += word_spacing;
             }
+            if self.in_note {
+                // 注音那一趟：宽度**记走**（容器要让的那一段靠它），表里留 0.0 ——
+                // `resize` 已经填过 0，所以这里只是不落数。断行与行宽因此看不见注音，
+                // 而绘制与命中按 `RunStyle::advance` 逐字走，注音自己的字还是正常间距。
+                self.note_width += w;
+                continue;
+            }
             self.widths[base + offset] = w;
         }
     }
@@ -601,6 +684,7 @@ impl<'a> Collector<'a> {
                     norm: norm_start..self.text.len(),
                     orig,
                     style,
+                    x_offset: 0.0,
                 });
             }
             return;
@@ -619,11 +703,165 @@ impl<'a> Collector<'a> {
             self.push_image(node);
             return;
         }
+        // ruby 容器：注音抬到基字上方（或下方）、不吃前进量。认不出那一种形状就返回
+        // `false`，落到下面那条普通行内递归 —— 与这一格改之前逐字相同。
+        // `ruby_depth > 0` 时不当容器：嵌套 ruby 的几何不猜，见 `Collector::ruby_depth`。
+        if self.ruby_depth == 0 && self.dom.is_element(node, "ruby") && self.push_ruby(node, pre) {
+            return;
+        }
         // 文本继承的是**它所在元素**的样式，所以往下走要换成元素自己的样式。
         let own = self.intern_style(node);
         for child in dom_node.children.clone() {
             self.push_node(child, pre, own);
         }
+    }
+
+    /// `<ruby>` 容器：基字照常规流行内走，注音（`<rt>`）排在它上方或下方。
+    ///
+    /// 只认「基字在前、注音在后」那一种形状 —— 本机唯一带真 ruby 的书（《诡秘之主》，
+    /// 40 章 552 组）写的就是 `<ruby>愚者<rt>The Fool</rt></ruby>`。三种情况返回 `false`
+    /// 交回普通行内递归：没有注音、没有可见的基字、注音后面还站着别的内容（HTML 规范
+    /// 那种 `<rp>(</rp>` 括号形态正好落在这一档，见 `ua::INLINE_TAGS` 那条注释）。
+    ///
+    /// **三个数在这一趟里算清，全部折进既有的那几张表，不新开一条几何通道**：
+    ///
+    /// 1. **容器前进量** = max(基字宽, 注音宽)。差值补给基字最后一个字符在宽度表里的
+    ///    那一格，于是断行、行宽、对齐、命中吃的还是同一份表 —— 这个引擎的纪律是「换一处
+    ///    就要改三处」，另开一条前进量来源就是第二个真相。
+    /// 2. **抬升量** = 基字上沿 + 一道缝 + 注音下沿（`ruby-position: under` 时符号相反、
+    ///    换成两条下沿）。它写进注音子树每一条样式的 `baseline_shift`：`LineAcc::push_text`
+    ///    本来就把这一格算进 `ascent`，所以行盒自己长高、分片跟着走，绘制那一路早就认它。
+    ///    注音的上下 extent 要等它落进表里才量得出，而 `baseline_shift` 得在推之前就知道 ——
+    ///    所以先按零位移铺进去，再逐 piece 换成带位移的那一份样式（一章的注音是几十到
+    ///    几百个 piece，不是正文那种一万量级，这一趟换样式不贵）。
+    /// 3. **横向落点** = `ruby-align` 折出来的偏移。注音在流动里排在**容器末尾**（它前面的
+    ///    基字已经让过 container 宽），要挪回的那一段就是 `container − flow_offset`。
+    ///
+    /// 注音的字符在宽度表里是 0，但 `RunStyle::advance` 照自己的字号走 —— 所以注音内部的字
+    /// 距与选中矩形都正常，只有它对**容器之外**的流动不贡献前进量。
+    fn push_ruby(&mut self, node: NodeId, pre: bool) -> bool {
+        let children = self.dom.get(node).children.clone();
+        let mut bases: Vec<NodeId> = Vec::new();
+        let mut notes: Vec<NodeId> = Vec::new();
+        for child in children {
+            if self.dom.is_element(child, "rt") {
+                notes.push(child);
+            } else if notes.is_empty() {
+                bases.push(child);
+            } else {
+                // 注音之后还有内容：不是这一档形状，整棵子树退回普通行内。
+                return false;
+            }
+        }
+        if notes.is_empty() {
+            return false;
+        }
+        // 基字得有可见内容：注音要有东西可依附，全空白就当普通行内。
+        // 这一条必须在**任何改动之前**判掉，否则递归过一次基字就退不回去了。
+        if !bases
+            .iter()
+            .any(|child| !self.dom.text_of_subtree(*child).trim().is_empty())
+        {
+            return false;
+        }
+        // 容器的这几格决定这一趟怎么折；`intern_style` 走的是同一份样式表。
+        let (align, under, rtl, gap) = {
+            let container = self.styles.get(node).unwrap_or(&DEFAULT_STYLE);
+            (
+                container.ruby_align,
+                container.ruby_position == RubyPosition::Under,
+                container.direction.is_rtl(),
+                container.font_size * RUBY_GAP_EM,
+            )
+        };
+        let own = self.intern_style(node);
+        self.ruby_depth += 1;
+
+        let base_start = self.text.len();
+        let base_pieces = self.pieces.len();
+        for child in &bases {
+            self.push_node(*child, pre, own);
+        }
+        let base_end = self.text.len();
+
+        let note_pieces = self.pieces.len();
+        self.in_note = true;
+        for child in &notes {
+            self.push_node(*child, pre, own);
+        }
+        self.in_note = false;
+        let note_width = std::mem::take(&mut self.note_width);
+        let note_end = self.text.len();
+        self.ruby_depth -= 1;
+
+        // 两条 extent：基字那一头要的是**上沿**（它决定注音排多高），注音那一头要的是
+        // 自己的下沿（它决定抬升量再加多少）。位移也叠进去 —— 基字在 `<sup>` 里时本来就抬着。
+        let (mut base_top, mut base_bottom) = (0.0f32, 0.0f32);
+        for piece in &self.pieces[base_pieces..note_pieces] {
+            let Some(run) = self.arena.get(piece.style) else {
+                continue;
+            };
+            let (ascent, descent) = self.measure.font_extents(
+                &self.text[piece.norm.start..piece.norm.end],
+                &run.font,
+                run.font_size,
+            );
+            base_top = base_top.max(ascent + run.baseline_shift);
+            base_bottom = base_bottom.max(descent - run.baseline_shift);
+        }
+        let (mut note_top, mut note_bottom) = (0.0f32, 0.0f32);
+        for piece in &self.pieces[note_pieces..] {
+            let Some(run) = self.arena.get(piece.style) else {
+                continue;
+            };
+            let (ascent, descent) = self.measure.font_extents(
+                &self.text[piece.norm.start..piece.norm.end],
+                &run.font,
+                run.font_size,
+            );
+            note_top = note_top.max(ascent + run.baseline_shift);
+            note_bottom = note_bottom.max(descent - run.baseline_shift);
+        }
+        // 抬升量按「注音的下沿落在基字上沿之上、中间留一道缝」定：这样两头的字形都不咬。
+        let rise = if under {
+            -(base_bottom + gap + note_top)
+        } else {
+            base_top + gap + note_bottom
+        };
+
+        // 前进量：容器取较宽那一条，差值挂在基字末字上（表里的数只有这一处动）。
+        let base_width: f32 = self
+            .widths
+            .get(base_start..base_end)
+            .map_or(0.0, |slice| slice.iter().sum());
+        let container = base_width.max(note_width);
+        let extra = container - base_width;
+        if extra > 0.0
+            && let Some(last) = self.text[base_start..base_end].char_indices().next_back()
+        {
+            self.widths[base_start + last.0] += extra;
+        }
+
+        // 注音 piece：换成带位移的那一份样式，并把横向落点记上。
+        //
+        // `back` 是「沿字轴往回流走多少」，而 `Piece::x_offset` 与列表标记那一格同一口径 ——
+        // **物理**左偏移：横排往左是负，RTL 的流动本身从右往左，往回流就是往右（正）。
+        // 居中那一档两头同号同一个数，所以这一支只影响 `start` / `end` 两档。
+        let back = container - align.flow_offset(container, note_width);
+        let offset = if rtl { back } else { -back };
+        let end = self.pieces.len();
+        for index in note_pieces..end {
+            let Some(mut shifted) = self.arena.get(self.pieces[index].style).cloned() else {
+                continue;
+            };
+            shifted.baseline_shift += rise;
+            let style = self.arena.intern(shifted);
+            let piece = &mut self.pieces[index];
+            piece.style = style;
+            piece.x_offset = offset;
+        }
+        self.rubies.push(base_start..note_end);
+        true
     }
 
     /// 行内图片：写一个哨兵占位并记下尺寸。
@@ -640,11 +878,93 @@ impl<'a> Collector<'a> {
         let aspect = super::collect::svg_aspect(self.dom, node);
         let resolved = self.provider.resolve(&src);
         let style = self.styles.get(node).unwrap_or(&DEFAULT_STYLE);
+        // 作者写了 `duokan-bleed`（本节点或包它的任意一层）就是把这块的可用宽**改成屏幕宽**：
+        // `width:100%` 因此折成满屏而不是满栏。读者那一档「原始尺寸」压掉它 ——
+        // 那一档说的就是「别替我改这张图」，作者的话也不例外。
+        //
+        // 读者选了「铺满屏幕」时同样换成屏幕宽：那一档说的就是「图铺到屏幕边上」，
+        // 与作者有没有出血无关。两档共用下面这一个 `wide` —— 基准宽与「够不够大」
+        // 的判据必须同源，否则「基准换了、判据没换」会让同一张图在两处得到不同的宽。
+        let bleed = super::collect::bleeds_wide(self.dom, self.styles, node)
+            && !matches!(
+                style.image_scale,
+                crate::infra::config::ImageScale::Original
+            );
+        // 「铺满屏幕」这一档对**独占一段**的图生效：书里的插图几乎都是 `<p><img></p>`
+        // 那个形状（`<img>` 天生 inline），按它才算「整块的图」。
+        let wide = bleed
+            || (self.alone_in_paragraph
+                && matches!(style.image_scale, crate::infra::config::ImageScale::Screen));
+        // 基准：要铺到屏幕上的那一张换成屏幕宽（比栏宽窄时仍取栏宽，不许把图缩进栏里）。
+        let basis = if wide {
+            self.screen_width
+                .map_or(self.width, |screen| screen.max(self.width))
+        } else {
+            self.width
+        };
         let (mut w, mut h) = match (&resolved, aspect) {
-            (_, Some(ratio)) => (self.width, self.width * ratio),
-            (Some(img), None) => image_size(style, img.width, img.height, self.width),
+            (_, Some(ratio)) => (basis, basis * ratio),
+            (Some(img), None) => image_size(style, img.width, img.height, basis, self.screen_width),
             (None, None) => return,
         };
+        // 大图铺满屏幕（读者 2026-10-30 定的口径）：**够大**的图按屏幕宽等比放大，
+        // 而不是缩在页边距里。判据是 CSS 里的 `object-fit` —— 作者写了它就是在说
+        // 「这张图要盖住一块区域」，而 `width:100%` 已经把盒子定成栏宽；`cover` 与
+        // 大尺寸的 `contain` 都按屏幕宽重算一遍宽高。只放大不改小：一张小图标不该被
+        // 拉成满屏（`scale-down` 与 `fill` 保持原样）。
+        if let Some(screen) = self.screen_width
+            && matches!(
+                style.image_scale,
+                crate::infra::config::ImageScale::Follow | crate::infra::config::ImageScale::Screen
+            )
+            && (bleed
+                || matches!(
+                    style.object_fit,
+                    crate::content::format::css::computed::ObjectFit::Cover
+                        | crate::content::format::css::computed::ObjectFit::Contain
+                ))
+            && w < screen
+            && resolved.is_some()
+        {
+            // `contain` 还要求「本来就不小」：宽至少是栏宽的八成，或高至少是**一屏**的
+            // 八成（一张页内的插图不该被撑满整屏）。`cover` 是作者显式要盖满，不再加这一条。
+            //
+            // 页高那一格分页/仿真有、连续滚动没有（滚动档 `page_height` 传 `None`），
+            // 所以它必须退回**屏高**：只按页高判会让同一张图在滚动里被放大、切到仿真又
+            // 缩回去 —— 读者报的「切到仿真图变小」正是这一条。判据只留一处，见
+            // [`super::collect::fills_the_screen`]。
+            // 行内那一臂传 `bleed` 而不是 `wide`：读者那一档「铺满屏幕」只管整块独占的图，
+            // 夹在字里的一张图标被拉成满屏等于把整段顶走（这一条由 `the_fills_the_screen_rule`
+            // 那条门钉住）。作者的 `duokan-bleed` 照旧算数。
+            //
+            // 但「够不够大」这一条**两档共用同一份输入**：页高缺省时退回屏高。从前这里
+            // 只认页高，连续滚动（`page_height: None`）里 `contain` 恒不放大，切到分页
+            // 又放大 —— 读者报的「切到仿真图变小」正是这一条。
+            let big_enough = super::collect::fills_the_screen(
+                wide || matches!(
+                    style.object_fit,
+                    crate::content::format::css::computed::ObjectFit::Contain
+                ),
+                style,
+                w,
+                h,
+                self.width,
+                self.page_height,
+                self.screen_height,
+            );
+            if big_enough {
+                h *= screen / w.max(1.0);
+                w = screen;
+            }
+        }
+        // 页高是硬上限：这一行图会被分片器整个放进一页，超过的那一截没有下一页接。
+        if let Some(page_h) = self.page_height {
+            let page_h = page_h.max(1.0);
+            if h > page_h && h > 0.0 {
+                w *= page_h / h;
+                h = page_h;
+            }
+        }
         // 上标里的标记图：书里的 `sup img { height: 1em; width: auto }` 常常被
         // 作者样式表漏掉；没有这一道上限时，36×48 的「注」图会按固有尺寸顶出整行。
         // 上限取最近那个 `<sup>` 的字号 —— 那是上标本身那一档，不是父块的正文字号。
@@ -666,7 +986,18 @@ impl<'a> Collector<'a> {
         }
         // 标记图与前后字之间留一道缝。浏览器里 `sup` 边缘贴着前者是常态，可
         // 读者看到的是「圆圈盖在字上」；这道留白只加前进量，不拉伸图片。
-        let x_offset = sup_font.map_or(0.0, |cap| (cap * 0.18).max(1.5));
+        // 出血的那一张比这一栏宽，左右各摊一半溢出（负的 `x_offset` 把画的那一格往左推）：
+        // 它因此盖在页边距上，而**居中在这块的内容盒**（左右页边距对称时就是屏幕居中）。
+        // 行宽按同一个式子算 —— `advance = w + 2·x_offset`，摊掉的那一截正好把行折回栏宽，
+        // 所以一张满屏图不会把这一行顶宽，断行与命中吃的仍是这个数。
+        // 判据与上面那一格同源：用 `wide` 而不是 `bleed`，否则「铺满屏幕」那一档的图
+        // 会靠右溢出（只往右长），而不是居中盖在左右页边距上。
+        let overflow = if wide {
+            ((w - self.width) / 2.0).max(0.0)
+        } else {
+            0.0
+        };
+        let x_offset = sup_font.map_or(0.0, |cap| (cap * 0.18).max(1.5)) - overflow;
         let advance = w + x_offset * 2.0;
         // `vertical-align` 不继承，但图片在 `sup` 里面时，那个上标位移属于它所在的行内盒。
         // 逐级把祖先的基线偏移加回来，`<sup><a><img></a></sup>` 这条链才不会丢。
@@ -697,6 +1028,7 @@ impl<'a> Collector<'a> {
             x_offset,
             baseline_shift,
             at,
+            fit: style.object_fit,
         });
         self.pending_space = false;
     }

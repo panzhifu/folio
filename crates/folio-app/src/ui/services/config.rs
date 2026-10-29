@@ -27,8 +27,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use folio_core::{
-    Appearance, BookSettings, Config, Env, Language, Layer, Library, Opds, Provenance, Reader,
-    Resolved, Speech, Sync, Translation,
+    Appearance, BookSettings, Config, Env, Language, Layer, Library, Membership, Opds, Provenance,
+    Reader, Resolved, Speech, Sync, Translation,
 };
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
@@ -284,6 +284,13 @@ impl ConfigHolder {
         Self::snapshot(cx).opds.clone()
     }
 
+    /// 会员那一节。**只有本机这一份**：等级由这里的 `until_day` 与今天比出来，
+    /// 界面上没有第二个来源（见 `folio_core::Membership`）。`Membership` 是 `Copy`，
+    /// 所以不必像别的节那样 `clone` 一个 `Vec` 或 `String` 出来。
+    pub fn membership(cx: &App) -> Membership {
+        Self::snapshot(cx).membership
+    }
+
     /// 每一项的配置来自哪一层（§2.1）。诊断 dump 用。
     ///
     /// 当前那本书盖掉的格子在这里念 [`Layer::Book`]：dump 打的是**生效值**，而那一格
@@ -353,6 +360,12 @@ impl ConfigHolder {
 
     pub fn edit_opds(cx: &mut App, f: impl FnOnce(&mut Opds)) {
         Self::edit(cx, |config| f(&mut config.opds));
+    }
+
+    /// 会员那一节的写入口。与其它节同一条：写的是**用户层**，`edit` 收尾 `notify`，
+    /// 落盘由外壳那份观察者接手（不在这里直接写文件）。
+    pub fn edit_membership(cx: &mut App, f: impl FnOnce(&mut Membership)) {
+        Self::edit(cx, |config| f(&mut config.membership));
     }
 
     pub fn edit_library(cx: &mut App, f: impl FnOnce(&mut Library)) {

@@ -56,6 +56,15 @@ pub struct Container {
     open: OnceLock<Mutex<Family>>,
 }
 
+/// [`Container::entry_meta`] 交回的两格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntryMeta {
+    /// 解压后的长度（中央目录记的那一格）。
+    pub raw_len: u64,
+    /// 中央目录记的 CRC32。
+    pub crc32: u32,
+}
+
 impl std::fmt::Debug for Container {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Container")
@@ -144,6 +153,23 @@ impl Container {
             Found::Extracted(dir) => super::comic_cache::read_page(&dir, href),
             Found::Absent => None,
         }
+    }
+
+    /// 条目在中央目录里的**长度与 CRC32**，不解压。
+    ///
+    /// 只给 ZIP 一族：字体身份（`crc32 + raw_len`）要的就是这两格，EPUB 的
+    /// `font_refs` 因此不必为「这本书有没有这个字体」把 8 MB 的字节读回来。
+    /// CHM / 已解到磁盘的漫画没有中央目录，回 `None`，调用方退回按名字取字节。
+    pub fn entry_meta(&self, href: &str) -> Option<EntryMeta> {
+        let mut family = self.get()?.lock().unwrap_or_else(|e| e.into_inner());
+        let Family::Zip(zip) = &mut *family else {
+            return None;
+        };
+        let range = zip.range_at(href)?;
+        Some(EntryMeta {
+            raw_len: range.raw_len(),
+            crc32: range.crc(),
+        })
     }
 
     /// [`Container::read`] 的文本版。

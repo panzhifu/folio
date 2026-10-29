@@ -253,15 +253,30 @@ pub fn local_offset_secs() -> i64 {
     i64::from(chrono::Local::now().offset().local_minus_utc())
 }
 
+/// 这个家族名能不能真的解析出一张带拉丁 `m` 的脸。
+///
+/// 名字在册不等于 `load_family` 会留下它：没有 `m` 的脸会被剔掉，剔空之后
+/// `resolve_font` 在 Android 上直接 abort。字体系统有设备字体的字节，所以这里
+/// **真解析**（解析家族 → 加载 face → 查 cmap），不再按名字假设。
+pub(crate) fn family_has_m(cx: &App, name: &str) -> bool {
+    let font = gpui_kit::Font {
+        family: name.to_string().into(),
+        ..Default::default()
+    };
+    cx.text_system().font_has_glyph(&font, 'm')
+}
+
 /// 按名字比：先看偏好要的那个，再依次试 [`CJK_PREFERRED`]。
 ///
-/// 手上只有 `all_font_names()` 这一个公开判据（真正的 `font_id` 是私有的），所以只能按名字。
+/// 候选要同时过两道：进程登记表里不是「随书字体没有 `m`」的那一类，以及
+/// [`family_has_m`] 真解析得出一张带 `m` 的脸。
 pub(crate) fn find_family(wanted: &str, cx: &App) -> Option<String> {
-    let names = cx.text_system().all_font_names();
+    let names =
+        crate::ui::foundation::font_primary::usable_names(cx.text_system().all_font_names());
     let find = |want: &str| {
         names
             .iter()
-            .find(|name| name.eq_ignore_ascii_case(want))
+            .find(|name| name.eq_ignore_ascii_case(want) && family_has_m(cx, name))
             .cloned()
     };
     find(wanted).or_else(|| CJK_PREFERRED.iter().find_map(|want| find(want)))

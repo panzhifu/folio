@@ -17,7 +17,7 @@ use super::marker::marker_text;
 use super::ports::{ImageProvider, Measure, image_size};
 use super::table;
 use super::wrap::{
-    DropCap, Insets, LineAcc, LinePlace, LinePlan, collect, hard_lines, hyphen_break_banned,
+    DropCap, Insets, LineAcc, LinePlace, LinePlan, Sizes, collect, hard_lines, hyphen_break_banned,
     orig_of, scan_by_char, scan_by_word, trim_end_spaces,
 };
 use crate::content::dom::{Dom, NodeId, NodeKind};
@@ -35,6 +35,19 @@ pub(super) static DEFAULT_STYLE: LazyLock<ComputedStyle> = LazyLock::new(Compute
 /// （浏览器大致空一个空格宽）。0.25 em 在 16px 下是 4px，比空格窄一点 ——
 /// 中文书面「圆点贴字」的那种紧凑感靠它，而 `ul` 的 2.5em 左内边距本来就为它留了位置。
 const MARKER_GAP_EM: f32 = 0.25;
+
+/// 同一小节里**相邻的整块插图**叠起来时，后一张只占前一张高的这一成。
+///
+/// 读者要的是画册/相册那种观感：同一个小节里连着三张插图，不必一张占一屏、串成
+/// 一条长长的竖带，而是叠成一堆 —— 后一张盖住前一张的大部分，只露出上缘那一条，
+/// 读者一眼看得出「下面还有图」。
+///
+/// 取 **1/3**：再小就成了「只露一道边」，读者分不清有几张；再大（1/2）则叠不出层叠感，
+/// 看着只是「间距变小」。这个数是手感口径，与 `curl::ROLL` 那个同类。
+///
+/// 只对**相邻**的两张生效，而且离开这一串之后正文从最后一张的**底边**接着排 ——
+/// 叠图只改插图之间的那一截，不把后面的正文拉到图上去。
+pub(super) const STACK_STEP: f32 = 1.0 / 3.0;
 
 /// HTML 的 `start` / `value` 属性 → 整数。属性缺失、空串、非数字都给 `None`。
 ///
@@ -72,6 +85,12 @@ pub(super) struct Ctx<'a> {
     pub(super) cache: Option<&'a mut BlockCache>,
     /// 每节点的子树样式哈希，与 `cache` 同生共死（见 [`subtree_style_hash`]）。
     pub(super) style_hash: Option<&'a [u64]>,
+    /// 屏幕（窗口）的宽与高，逻辑像素。只给图片用：超过屏幕的图按屏幕宽缩（「大图铺满
+    /// 屏幕」）。`None` = 界面没给，行为与从前一样（按栏宽夹）。
+    pub(super) screen: Option<(f32, f32)>,
+    /// 一页内容区的高（分页是页高，滚动是视口内容高）。图片的盒高不许超过它：
+    /// 分片器把一行图整个放进一页，超出的那一截没有下一页接，页底就是裁切。
+    pub(super) page_height: Option<f32>,
     /// 当前块格式上下文里已经摆出去的浮动盒。`children()` 一路把它们递给后面的兄弟块，
     /// 直到某个块写了 `clear`。
     ///
@@ -80,9 +99,10 @@ pub(super) struct Ctx<'a> {
     /// 唯一地方是 `children`（摆一个进去）与浮动盒自己的内容（换一张空表），
     /// 后者用 `std::mem::take` 走完再换回来。
     pub(super) floats: Vec<PlacedFloat>,
-    /// 脱流的绝对定位盒（`position: absolute` / `fixed`）。它们在 `children` 里被跳过、
+    /// 脱流的绝对定位盒（`position: absolute` / `fixed`）与它**不脱流时的起点** `y`。
+    /// 它们在 `children` 里被跳过、
     /// 只收在这里，等整章的 `height` 定下来再摆 —— `top` / `bottom` 的百分比基准是包含块高。
-    pub(super) absolute: Vec<NodeId>,
+    pub(super) absolute: Vec<(NodeId, f32)>,
 }
 
 /// 一个已经摆出去的浮动盒。坐标是章内的**绝对值**，而且记的是**外边距盒** ——
@@ -191,6 +211,61 @@ pub(super) fn picture_src(dom: &Dom, node: NodeId) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 这一张图该不该**横向出血**到屏幕宽（多看 / 掌阅的 `duokan-bleed`）。
+///
+/// 查的是**本节点与它的每一层祖先**：真书里这一条写在包图的那个块上，不写在 `<img>`
+/// 自己身上 ——《诡秘之主》的三个类全是 `div`（`fmdG1` / `textdA1` / `textdE1`），
+/// 《基督山伯爵》同理。只查本节点样式的写法等于整条没接（而落差表会说「接住了」，
+/// 正是本仓库那条「Applied 不等于排版层读了」要挡的形状）。
+///
+/// 只认横向那两条边（`left` / `right`）。纵向出血要的是「这张图盖住页顶/页底」，
+/// 那得改分片边界，不是改一张图的盒尺寸 —— 现在没人消费，所以 `top` / `bottom`
+/// 单独置位时这里回 `false`（它确实什么都不改，与没写同一表现）。
+pub(super) fn bleeds_wide(dom: &Dom, styles: &StyledDom, node: NodeId) -> bool {
+    dom.ancestors_including_self(node)
+        .any(|id| styles.get(id).is_some_and(|style| style.bleed.horizontal()))
+}
+
+/// 这张图该不该按**屏幕宽**铺开：块级与行内两处共用这一条。
+///
+/// 「该铺」由两件事决定，缺一条都不铺：
+///
+/// - **要不要铺**（`wide`）：作者写了 `duokan-bleed`，或读者那一档是「铺满屏幕」。
+///   `wide` 由调用方先算好（`bleed` 要先被「原始尺寸」那一档压掉），这里不再重判。
+/// - **够不够大**（`big_enough`）：一块 24px 的徽标独占一段也不该被拉成满屏。判据是
+///   宽 ≥ 版心八成、或高 ≥ **一屏**八成；`object-fit: cover` 是作者显式要盖满，免这一条。
+///
+/// 「一屏」= 页高，没有页高（连续滚动那一档 `page_height` 传 `None`）就用屏高。
+/// 从前这里只认页高，于是同一张图在滚动里被放大、切到分页/仿真又缩回去 ——
+/// 读者报的「切到仿真图变小」就是这一条在两端各判了一次的结果。
+pub(super) fn fills_the_screen(
+    wide: bool,
+    style: &ComputedStyle,
+    w: f32,
+    h: f32,
+    column_width: f32,
+    page_height: Option<f32>,
+    screen_height: Option<f32>,
+) -> bool {
+    // `object-fit: cover` 是作者**显式**说「这张图要盖住一块区域」，与读者的档位、
+    // 与出血属性都无关：它一直是铺到屏幕宽的那一档。所以这一条排在最前面。
+    if matches!(
+        style.object_fit,
+        crate::content::format::css::computed::ObjectFit::Cover
+    ) {
+        return true;
+    }
+    // 其余情形都要先「该铺」：作者出血，或读者选了「铺满屏幕」（只有块级那一臂会把它
+    // 并进 `wide`；行内那一臂传 `bleed` —— 把一枚夹在字里的图标拉成满屏等于整段顶走）。
+    if !wide {
+        return false;
+    }
+    // 「够不够大」：一张页内的插图不该被撑满整屏。一屏 = 页高，没有页高（连续滚动）
+    // 就用屏高 —— 两档同一条判据。
+    let one_screen = page_height.or(screen_height).unwrap_or(f32::INFINITY);
+    w >= column_width * 0.8 || h >= one_screen * 0.8
+}
+
 /// `<svg>` 这一格的高宽比，来自它的 `viewBox`（属性名同样已转小写）。不是 svg、或 viewBox
 /// 读不出正数时给 `None`。
 ///
@@ -220,6 +295,11 @@ pub(super) struct Collected {
     pub(super) pieces: Vec<Piece>,
     /// 文本流里的图片占位。`at` 指向 `text` 里那个哨兵字符的字节起点。
     pub(super) images: Vec<ImageAtom>,
+    /// ruby 容器占的那一段（基字 + 注音的并集），按起点升序 —— 收集器只会往后追加。
+    ///
+    /// 它唯一的用处是给断行禁则查「这个断点是不是落在容器内部」（[`Self::breaks_ruby`]）：
+    /// 一个容器不许拆开排到两行上，否则注音会跟着自己的基字分家。
+    pub(super) rubies: Vec<Range<usize>>,
     /// 这一段用到的所有 run 样式，按值去重。`Piece::style` 是它的下标。
     pub(super) styles: StyleArena,
     /// 每个字符的前进量，按 `text` 的**字节下标**索引（非字符起点的字节是 0）。
@@ -240,6 +320,15 @@ pub(super) struct Piece {
     /// 以前这里是 `Rc<RunStyle>`（一份样式一个堆分配 + 每次克隆一次引用计数）；
     /// 去重后同一样式只存一次，片段只占 4 字节。
     pub(super) style: StyleRef,
+    /// 沿字轴额外挪的 px，口径与 [`MarkerRun::offset`] 同一份：**物理**左偏移，
+    /// 普通正文恒为 0（只有 ruby 注音那一族 piece 带非零值）。
+    ///
+    /// 注音不吃前进量（它的字符在宽度表里是 0），流动把它排在容器末尾，而 `ruby-align`
+    /// 要的那一段在容器里头，所以折 [`LineRun`] 时原样带过去，绘制与命中各加一次同一个数。
+    ///
+    /// [`MarkerRun::offset`]: super::geometry::MarkerRun::offset
+    /// [`LineRun`]: super::geometry::LineRun
+    pub(super) x_offset: f32,
 }
 
 /// 段落里一张图片：锚定在文本流某个位置，宽度已按 CSS 与内在尺寸算好。
@@ -258,6 +347,8 @@ pub(super) struct ImageAtom {
     pub(super) baseline_shift: f32,
     /// 哨兵在 `Collected::text` 里的字节起点。
     pub(super) at: usize,
+    /// 这张图怎么在盒里摆（CSS 的 `object-fit`）。
+    pub(super) fit: crate::content::format::css::computed::ObjectFit,
 }
 
 /// 行内图片在文本流里的占位字符。用它而不是另建 atom 流，是为了复用既有的
@@ -288,6 +379,18 @@ impl Collected {
     /// 表在 [`collect`] 那一趟里已经填好了（见 [`Collector::push_widths`]），这里只读。
     pub(super) fn width_at(&self, at: usize) -> f32 {
         self.widths.get(at).copied().unwrap_or(0.0)
+    }
+
+    /// 断点 `at` 落在某个 ruby 容器**内部**吗。
+    ///
+    /// 容器不许拆开排到两行上：注音得跟着自己的基字，拆开了就是上一行留基字、下一行留注音。
+    /// 落在容器起止两边都算合法断点（`at == start` 是「容器整体挪到下一行」，
+    /// `at == end` 是容器之后的正常断行），只有夹在中间才否掉。
+    ///
+    /// 表按起点升序（收集器只会往后追加），所以二分找最后一个起点早于 `at` 的容器。
+    pub(super) fn breaks_ruby(&self, at: usize) -> bool {
+        let idx = self.rubies.partition_point(|span| span.start < at);
+        idx > 0 && at < self.rubies[idx - 1].end
     }
 
     /// 正好落在 `at` 上的图片。
@@ -383,7 +486,12 @@ impl<'a> Ctx<'a> {
     ///
     /// 为什么这一格只有一份：流内摆放有两条路都要问它 —— [`Self::children`]（实排）与
     /// [`Self::children_light`]（只量高）。抄两遍迟早漂，症状是滚动位置与屏幕上的块对不上。
-    pub(super) fn solve_block_width(&self, style: &ComputedStyle, avail: f32) -> (f32, f32) {
+    pub(super) fn solve_block_width(
+        &self,
+        style: &ComputedStyle,
+        avail: f32,
+        parent_x: f32,
+    ) -> (f32, f32) {
         let [_, border_right, _, border_left] = style.border_drawn();
         let bl = border_left + style.padding_left.resolve(avail).max(0.0);
         let br = border_right + style.padding_right.resolve(avail).max(0.0);
@@ -412,7 +520,7 @@ impl<'a> Ctx<'a> {
         if let Some(min_w) = style.min_width {
             content = content.max(fold(min_w));
         }
-        let box_width = (content + bl + br).max(1.0);
+        let mut box_width = (content + bl + br).max(1.0);
         let mut ml = ml_set;
         let spare = avail - ml_set - mr_set - box_width;
         if spare > 0.0 && auto_left {
@@ -421,6 +529,19 @@ impl<'a> Ctx<'a> {
             ml += if auto_right { spare / 2.0 } else { spare };
         } else if spare < 0.0 && auto_left {
             ml = 0.0;
+        }
+        // **负边距把块推出页面左缘时收回到缘上。** 浏览器里这种溢出就留在屏幕外
+        // （LTR 往左没有滚动），而阅读器的正文没有横向滚动条：《诡秘之主》角色页
+        // `p.tt1 { margin: 1.5em 0 1em -1em }` 的「简介」「尊名」两格因此被屏缘切掉半字。
+        // `width: auto` 的块负边距是**加在宽上**的（room 那一项），收回左缘就把那一截
+        // 宽原样扣回，退回满幅；写了 `width` 的只挪不缩 —— 作者要的宽留着，
+        // 右缘照浏览器溢出裁切。
+        let off = (parent_x + ml).min(0.0);
+        if off < 0.0 {
+            ml -= off;
+            if style.width.is_none() {
+                box_width = (box_width + off).max(1.0);
+            }
         }
         (ml, box_width)
     }
@@ -481,6 +602,16 @@ impl<'a> Ctx<'a> {
     /// `container_h` 是同一件事在竖轴上的那一份：`container` 的内容高，**仅在作者明确
     /// 给定过时**是 `Some`（判据见 [`Self::child_height_basis`]）。子节点的 `height: NN%`
     /// 折它，`None` 时那一族按 `auto`。
+    /// 这一块是不是标题（`<h1>`–`<h6>`）。叠图按「同一个小节」生效，而小节的边界就是
+    /// 标题 —— 跨过一条标题就不再叠，读者的「上一节三张图 / 新一节另一组图」不会被
+    /// 连成一堆。
+    fn is_heading(&self, node: NodeId) -> bool {
+        matches!(
+            self.dom.tag_name(node),
+            Some("h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+        )
+    }
+
     pub(super) fn children(
         &mut self,
         container: NodeId,
@@ -496,21 +627,35 @@ impl<'a> Ctx<'a> {
         let mut cursor = y;
         let mut prev_bottom = 0f32;
         let mut pending: Vec<NodeId> = Vec::new();
+        // 叠图那一串里**最后一张的底边**（绝对 y）。正文/别的块摆放前先夹到它之下：
+        // 叠图只许插图和插图重叠，绝不让后面的正文压到图上（判据见 [`STACK_STEP`]）。
+        let mut stacked_bottom = f32::NEG_INFINITY;
+        let kids: Vec<NodeId> = self.children_of(container).to_vec();
         // 列表序号。CSS 的列表计数器就是「同层 `display: list-item` 的兄弟按文档序」，
         // `<ol start>` 挪起点（所以先减 1，第一项 ++ 之后正好落回 `start`），
         // `<li value>` 挪这一项并把续值接在它后面。
         let mut ordinal: i64 =
             attr_count(self.dom, container, "start").map_or(0, |start| start - 1);
 
-        for &child in self.children_of(container) {
+        for (at, &child) in kids.iter().enumerate() {
             let style = self.style_of(child);
             if style.display == Display::None {
                 continue;
             }
+            // 这一块与**下一个非空兄弟**是不是「连续的整块插图」——叠图只在这一串里生效。
+            // 判据用 `single_image`：`<p><img></p>` 那种一块内容就是一张图的盒子。
+            let stack_with_next = single_image(self.dom, child).is_some()
+                && !self.is_heading(child)
+                && kids[at + 1..]
+                    .iter()
+                    .find(|c| self.style_of(**c).display != Display::None)
+                    .is_some_and(|next| {
+                        single_image(self.dom, *next).is_some() && !self.is_heading(*next)
+                    });
             // 绝对定位：脱流，收起来等整章排完再摆。**排在行内判断之前** ——
             // `<span style="position:absolute">` 也是脱流的，不能当行内内容攒进段落。
             if matches!(style.position, Positioning::Absolute | Positioning::Fixed) {
-                self.absolute.push(child);
+                self.absolute.push((child, cursor));
                 continue;
             }
             if self.is_inline_flow(child, style) {
@@ -560,12 +705,27 @@ impl<'a> Ctx<'a> {
             }
             // 横向那两个数一起解：`width` 写了就按作者的数收窄盒子，`margin: auto`
             // 因此第一次有东西可均分（判据见 [`Self::solve_block_width`]）。
-            let (ml, box_width) = self.solve_block_width(style, width);
+            let (ml, box_width) = self.solve_block_width(style, width, x);
+            // 不是插图（正文、标题、别的块）就别踩进上面那一串叠图里：从那一串的**底边**
+            // 起排。叠图只改「图与图之间」的那一截，不允许正文压到图上。
+            if single_image(self.dom, child).is_none() {
+                cursor = cursor.max(stacked_bottom);
+            }
             let lines_start = self.lines.len();
-            cursor += if style.display == Display::Table {
+            let placed_y = cursor;
+            let block_h = if style.display == Display::Table {
                 self.table(child, x + ml, cursor, box_width, width, container_h)
             } else {
                 self.block(child, x + ml, cursor, box_width, width, container_h)
+            };
+            // 相邻插图叠起来：这一块画在自己的 `placed_y`（整张图），但游标只往下走一个
+            // [`STACK_STEP`]，于是下一张压在上头。**串的底边**取最大的那一张 —— 离开这一串
+            // 之后正文从那儿接着排。
+            cursor = if stack_with_next {
+                stacked_bottom = stacked_bottom.max(placed_y + block_h);
+                placed_y + block_h * STACK_STEP
+            } else {
+                placed_y + block_h
             };
             // 标记贴在 `block()` **之后**：见 [`Self::attach_marker`] 那三条口径。
             if is_item {
@@ -735,11 +895,36 @@ impl<'a> Ctx<'a> {
         let image = self.images.resolve(src)?;
         // 图的百分比宽折自**这个浮动盒的内容宽**，不是折自版心：`.img1` 那类
         // 带内边距的插图框里 `<img width="100%">` 要铺满的是框里面那一圈。
+        //
+        // 但「浮动盒自己多宽」这一趟不能解百分比 —— 盒宽还没定，拿它当基准是循环
+        // 定义。CSS 的 shrink-to-fit 在算内禀宽时把百分比当 auto：先按图的固有宽
+        // 收缩，之后图在盒内再按百分比落位。浏览器实测（434×500 的图 +
+        // `width="40%"`）：可用宽 1000 时盒宽 434、图 173.6；可用宽 288 时盒宽被
+        // 夹到 288、图 114.9。`image_size` 末尾那刀「绝不溢出容器」正好给出同一种夹法。
+        let percentage = matches!(img_style.width, Some(Length::Percent(_)))
+            || matches!(img_style.height, Some(Length::Percent(_)));
+        let intrinsic;
+        let sizing_style = if percentage {
+            intrinsic = {
+                let mut style = img_style.clone();
+                if matches!(style.width, Some(Length::Percent(_))) {
+                    style.width = None;
+                }
+                if matches!(style.height, Some(Length::Percent(_))) {
+                    style.height = None;
+                }
+                style
+            };
+            &intrinsic
+        } else {
+            img_style
+        };
         let (w, _) = image_size(
-            img_style,
+            sizing_style,
             image.width,
             image.height,
             (basis - d_bl - d_br).max(1.0),
+            self.screen.map(|(w, _)| w),
         );
         // 图自己的左右外边距、边框与内边距都要算进来：`.img1` 里那句
         // `margin-right: .8em` 正是靠这一步变成图与字之间的那条缝。
@@ -784,6 +969,14 @@ impl<'a> Ctx<'a> {
         let mr = style.margin_right.resolve(basis);
         let mt = style.margin_top.resolve(basis);
         let mb = style.margin_bottom.resolve(basis);
+        // 外边距盒不比版心窄的浮动盒旁边一个字都写不下。浏览器会把这一段的第一行
+        // 整体下移到图之下（CSS 2.1 §9.5），结局与「不浮动、按常规流走」一样；
+        // 这里直接落回常规流 —— 否则后面的正文会被挤成一条宽 1px 的单字柱，字还
+        // 溢到版心之外。《哈利·波特》作者简介页在手机宽度上就是这一档：图的固有宽
+        // 434 比版心还宽，`width="40%"` 的浮动盒因此铺满整幅。
+        if box_width + ml + mr >= width {
+            return false;
+        }
         let right = style.float == Float::Right;
         // 靠左的贴左缘（含它自己的左边距），靠右的贴右缘 —— 让位的那一圈是外边距盒。
         let box_x = if right {
@@ -902,7 +1095,9 @@ impl<'a> Ctx<'a> {
             // 且它的宽是收缩的而不是填满余量，与流内块是两条式子。
             if style.float != Float::None {
                 let right = style.float == Float::Right;
-                if let Some(box_width) = self.float_box_width(child, style, width) {
+                if let Some(box_width) = self.float_box_width(child, style, width)
+                    && box_width + ml + mr < width
+                {
                     let box_x = if right {
                         x + width - mr - box_width
                     } else {
@@ -920,10 +1115,12 @@ impl<'a> Ctx<'a> {
                     });
                     continue;
                 }
+                // 与 [`Self::place_float`] 同一条「满幅浮动盒落回常规流」的判据：
+                // 两趟必须同进同退，否则量出来的高与实排的高差一整张图。
             }
 
             // 流内块：横向与 `children` 同一条求解式（定宽收窄 + `auto` 均分）。
-            let (used_ml, box_width) = self.solve_block_width(style, width);
+            let (used_ml, box_width) = self.solve_block_width(style, width, x);
             // 表格自己记块（它要逐格记），所以这条分支不能落到下面统一 `push_block` 那一句。
             if style.display == Display::Table {
                 let height = self.table(child, x + used_ml, cursor, box_width, width, container_h);
@@ -1017,7 +1214,7 @@ impl<'a> Ctx<'a> {
                 columns.iter().map(|c| c.max.max(1.0)).sum::<f32>() + gaps_x + pl + pr;
             box_width = natural.min(width);
             if box_width < width {
-                let (had_ml, _) = self.solve_block_width(style, width);
+                let (had_ml, _) = self.solve_block_width(style, width, x);
                 let ml = match (
                     style.margin_left == Length::Auto,
                     style.margin_right == Length::Auto,
@@ -1190,13 +1387,18 @@ impl<'a> Ctx<'a> {
     /// 落点：`left` / `top` 定位的是**外边距盒**的外缘，所以 `margin` 加在偏移上 ——
     /// 封面那套 `left:50%; margin-left:-9.5em; width:19em` 的居中写法靠的正是它。
     /// 没写 `width` 时铺满包含块（没有 shrink-to-fit，见模块文档）。
-    pub(super) fn place_absolutes(&mut self, cb_w: f32, cb_h: f32) {
+    ///
+    /// 返回摆出来的所有盒的下缘（章内坐标）：它们不进祖先的高度，但进**滚动溢出**，
+    /// 调用方据此把章高补到能装下它们（见 `layout_inner` 的调用点）。
+    pub(super) fn place_absolutes(&mut self, cb_w: f32, page: Option<f32>, content_h: f32) -> f32 {
+        let cb_h = page.unwrap_or(content_h);
+        let mut placed_bottom = 0.0f32;
         // 嵌套的绝对定位盒会在这趟里被收进来，所以循环到收干净；上限防病态文档。
         let mut rounds = 0;
         while !self.absolute.is_empty() && rounds < 64 {
             rounds += 1;
             let nodes = std::mem::take(&mut self.absolute);
-            for node in nodes {
+            for (node, static_y) in nodes {
                 let style = self.style_of(node);
                 let ml = style.margin_left.resolve(cb_w);
                 let mr = style.margin_right.resolve(cb_w);
@@ -1226,7 +1428,18 @@ impl<'a> Ctx<'a> {
                 let height = self.block(node, x, y0, width, cb_w, None);
                 let y = match (top, bottom) {
                     (Some(t), _) => t + mt,
-                    (None, Some(b)) => (cb_h - b - mb - height).max(0.0),
+                    (None, Some(b)) => {
+                        let target = (cb_h - b - mb - height).max(0.0);
+                        // 有页盒时，**底锚定**的盒不许上移进正文：页脚（出版社 / `.dibu`）
+                        // 在正文比一页还高的时候按页底摆会压住末行（《未来简史》真机），
+                        // 夹到它不脱流时的起点 + 上外边距，最多落在正文之后。
+                        // 没有页盒（滚动档旧口径 / 竖排）保持原样。
+                        if page.is_some() {
+                            target.max(static_y + mt)
+                        } else {
+                            target
+                        }
+                    }
                     _ => mt,
                 };
                 let dy = y - y0;
@@ -1240,8 +1453,15 @@ impl<'a> Ctx<'a> {
                         block.y += dy;
                     }
                 }
+                for block in &self.blocks[blocks_start..] {
+                    placed_bottom = placed_bottom.max(block.y + block.height);
+                }
+                for line in &self.lines[lines_start..] {
+                    placed_bottom = placed_bottom.max(line.y + line.height);
+                }
             }
         }
+        placed_bottom
     }
 
     /// 一格的两条固有宽（都含这一格左右边框与内边距）：`max` 是一整行不折的宽，
@@ -1266,7 +1486,12 @@ impl<'a> Ctx<'a> {
             style.white_space_pre,
             self.images,
             self.measure,
-            table_width,
+            Sizes {
+                width: table_width,
+                screen_width: self.screen.map(|(w, _)| w),
+                page_height: self.page_height,
+                screen_height: self.screen.map(|(_, h)| h),
+            },
         );
         let widths = &collected.widths;
         let max: f32 = widths.iter().sum();
@@ -1488,12 +1713,73 @@ impl<'a> Ctx<'a> {
             let content_width = (width - pl - pr).max(1.0);
             let img = self.images.resolve(&src);
             let aspect = svg_aspect(self.dom, node);
-            let (w, h) = match (&img, aspect) {
-                // 有 viewBox 的那一档：宽铺满版心、高按比例，与图解没解出来无关。
-                (_, Some(ratio)) => (content_width, content_width * ratio),
-                (Some(img), None) => image_size(style, img.width, img.height, content_width),
+            // 出血（`duokan-bleed`，写在本节点或包它的任意一层）把这一块的可用宽换成
+            // 屏幕宽；「原始尺寸」那一档压掉它（与 `wrap::push_image` 同一口径）。
+            let bleed = bleeds_wide(self.dom, self.styles, node)
+                && !matches!(
+                    style.image_scale,
+                    crate::infra::config::ImageScale::Original
+                );
+            // 读者选了「铺满屏幕」：与作者出血同一口径，基准直接换成屏幕宽。
+            let wide =
+                bleed || matches!(style.image_scale, crate::infra::config::ImageScale::Screen);
+            let basis_w = if wide {
+                self.screen
+                    .map_or(content_width, |(screen, _)| screen.max(content_width))
+            } else {
+                content_width
+            };
+            let (mut w, mut h) = match (&img, aspect) {
+                // 有 viewBox 的那一档：宽铺满版心（出血时铺满屏）、高按比例，与图解没解出来无关。
+                (_, Some(ratio)) => (basis_w, basis_w * ratio),
+                (Some(img), None) => image_size(
+                    style,
+                    img.width,
+                    img.height,
+                    basis_w,
+                    self.screen.map(|(w, _)| w),
+                ),
                 (None, None) => return 0.0, // 图取不到就整块不留痕，不塌成空盒子
             };
+            // 大图铺满屏幕（与 `wrap::push_image` 那一段同一条口径）：`object-fit` 说
+            // 「这张图要盖住一块区域」、而且它本来就不小，就按**屏幕宽**重算宽高，
+            // 越过左右页边距铺到边上。块级图片是满版图的绝大多数写法（`p > img` 单独一段）。
+            if let Some(screen) = self.screen.map(|(w, _)| w)
+                && !matches!(
+                    style.image_scale,
+                    crate::infra::config::ImageScale::Original
+                )
+                && (bleed
+                    || matches!(style.image_scale, crate::infra::config::ImageScale::Screen)
+                    || matches!(
+                        style.object_fit,
+                        crate::content::format::css::computed::ObjectFit::Cover
+                            | crate::content::format::css::computed::ObjectFit::Contain
+                    ))
+                && w < screen
+                && h > 0.0
+            {
+                // 「铺满」那一档不看 `object-fit`（读者已经说了要大图），但仍要求**本来就不小**：
+                // 一块只有 24px 的徽标独占一段时也不该被拉成满屏，那不是大图而是排版坏了。
+                // 判据与行内那一支共用 [`fills_the_screen`]：页高缺省时退回屏高，
+                // 两档才量得一样。
+                let big_enough = fills_the_screen(
+                    wide,
+                    style,
+                    w,
+                    h,
+                    content_width,
+                    self.page_height,
+                    self.screen.map(|(_, h)| h),
+                );
+                if big_enough {
+                    h *= screen / w;
+                    w = screen;
+                }
+            }
+            // 页高是硬上限：分片器不会把一张图切成两页。
+            let (w, h) = self.fit_image_height(w, h, pt + pb);
+            let fit = style.object_fit;
             let index = self.push_block(node, x, y, width, String::new(), true);
             let Some(img) = img else {
                 // 格子留着、这一格不画：图还没解出来时，这一页也得滑得进来。
@@ -1501,9 +1787,18 @@ impl<'a> Ctx<'a> {
             };
             // 块级图片的对齐：`start`/`end` 先按这一块的 `direction` 折成物理左右，
             // 再算让出多少（`TextAlign::offset_in` 是全仓唯一一处这份算术）。
-            let offset = style
-                .text_align
-                .offset_in(style.direction, content_width, w);
+            // 出血的那一张比这一块宽：左右各摊一半溢出，画出去的那一截盖在页边距上，
+            // 而整张**居中在这块的内容盒**（左右页边距对称时就是屏幕居中）。作者另写了
+            // `text-align: left/right` 时不抢它的话 —— 出血说的是「铺到边上」，
+            // 贴边摆会让一半图掉到屏外。
+            let overflow = ((w - content_width) / 2.0).max(0.0);
+            let offset = if wide && overflow > 0.0 {
+                -overflow
+            } else {
+                style
+                    .text_align
+                    .offset_in(style.direction, content_width, w)
+            };
             self.lines.push(LineBox {
                 owner: node,
                 fragments: vec![LineFragment::Image(ImageRun {
@@ -1514,6 +1809,7 @@ impl<'a> Ctx<'a> {
                     advance: w,
                     x_offset: 0.0,
                     baseline_shift: 0.0,
+                    fit,
                 })],
                 x: x + pl + offset,
                 y: y + pt,
@@ -1559,6 +1855,23 @@ impl<'a> Ctx<'a> {
         )
     }
 
+    /// 把一张图的盒高夹进一页：超过页高按比例缩宽，绝不把页底切掉。
+    ///
+    /// 分片器把一行图**整个**放进一页（`fragment.rs` 的「一行比一页高是常事」），
+    /// 超出的那一截没有下一页可接。`extra` 是图片所在块的上下边框/内边距：
+    /// 图片行画在内容盒里，块本身还要装下这一圈。
+    fn fit_image_height(&self, w: f32, h: f32, extra: f32) -> (f32, f32) {
+        let Some(max_h) = self.page_height else {
+            return (w, h);
+        };
+        let max_h = (max_h - extra).max(1.0);
+        if h > max_h && h > 0.0 {
+            (w * max_h / h, max_h)
+        } else {
+            (w, h)
+        }
+    }
+
     /// 轻量模式：算一个块的高，不断行。`basis` 见 [`Self::block`] —— 这一条必须与
     /// [`Self::block_uncached`] 用同一个基准折百分比，否则轻量档的「量高」与「实排」
     /// 会给出两个不同的高。
@@ -1584,9 +1897,19 @@ impl<'a> Ctx<'a> {
             let img = self.images.resolve(&src);
             let h = match (img, svg_aspect(self.dom, node)) {
                 (_, Some(ratio)) => content_width * ratio,
-                (Some(img), None) => image_size(style, img.width, img.height, content_width).1,
+                (Some(img), None) => {
+                    image_size(
+                        style,
+                        img.width,
+                        img.height,
+                        content_width,
+                        self.screen.map(|(w, _)| w),
+                    )
+                    .1
+                }
                 (None, None) => return 0.0,
             };
+            let (_, h) = self.fit_image_height(content_width, h, pt + pb);
             return pt + h + pb;
         }
 
@@ -1658,7 +1981,12 @@ impl<'a> Ctx<'a> {
             style.white_space_pre,
             self.images,
             self.measure,
-            width,
+            Sizes {
+                width,
+                screen_width: self.screen.map(|(w, _)| w),
+                page_height: self.page_height,
+                screen_height: self.screen.map(|(_, h)| h),
+            },
         );
         let index = self.push_block(owner, x, y, width, collected.text.clone(), false);
         let height = self.wrap_lines(owner, &collected, slot, insets, style);
@@ -1725,7 +2053,7 @@ impl<'a> Ctx<'a> {
         for hard in hard_lines(&collected.text) {
             let slice = collected.text.get(hard.clone()).unwrap_or("");
             // UAX #14：给出的下标是「下一行可以从这里开始」。
-            let breaks: Vec<usize> = if style.word_break == WordBreak::BreakAll {
+            let mut breaks: Vec<usize> = if style.word_break == WordBreak::BreakAll {
                 // `word-break: break-all`：**任意两个字符之间**都能断。不走 UAX #14 的
                 // 词边界（那正是这一档要放开的东西），也不再摘连字符断点。
                 slice
@@ -1741,6 +2069,11 @@ impl<'a> Ctx<'a> {
                     .filter(|at| !hyphen_break_banned(&collected.text, *at, style.hyphens))
                     .collect()
             };
+            // ruby 容器不许拆开排到两行上：落在容器**内部**的断点全部摘掉，起止两边留着
+            //（起点那一格是「整个容器挪到下一行」，终点那一格是容器之后的正常断行）。
+            // `word-break: break-all` 那一档同样要摘：它放开的是正文的断行机会，
+            // 不是把注音与它的基字分家 —— 那样上一行只剩基字、下一行只剩注音。
+            breaks.retain(|at| !collected.breaks_ruby(*at));
             // `cap` 在整段里都不变，先把「有没有」问一次，别每字符问。
             let cap_norm = cap.as_ref().map(|dc| dc.norm.clone());
             // 断点把硬行切成若干「词」（两个断点之间的连续段）：拉丁文里≈单词，
@@ -1929,6 +2262,8 @@ impl<'a> Ctx<'a> {
                     width: dc.width,
                     ascent: dc.ascent,
                     descent: dc.descent,
+                    // 下沉的首字符就是它自己那一格，不额外挪。
+                    x_offset: 0.0,
                 }),
             );
         }

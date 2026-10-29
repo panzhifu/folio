@@ -120,6 +120,8 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
         progression_rtl: false,
         cover,
         images,
+        // FB2 的正文扫描没有收字符集：子集化对这类书退回整份字体。
+        font_charset: Vec::new(),
         // 同上：落盘之后由管线填。
         cover_ref: None,
     };

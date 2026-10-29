@@ -98,7 +98,7 @@ use crate::ui::services::l10n::tr;
 /// 一屏里选中的全部绘制信息，元素局部坐标（逻辑像素）。
 ///
 /// 由 `view.rs` 按「排版矩形 → 屏幕矩形」换算好整批传入；绘制与命中都不再碰排版层。
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(in crate::ui::features::reader) struct SelectionVisual {
     /// 每行一条的高亮矩形，压在字形之下。
     pub highlights: Vec<Bounds<Pixels>>,
@@ -766,9 +766,16 @@ impl ReaderSession {
             let gap = Book::chapter_gap(prefs);
             // 读**画出来的**那一个 y（`scroll_painted`）而不是 `scroll_y`：平移补间在走的
             // 那两百多毫秒里，屏上的字按画出来的位置摆，命中也按它算才对得上一个字段。
-            let global_y = f32::from(local.y) - self.header_reserve + self.scroll_painted;
+            let mut global_y = f32::from(local.y) - self.header_reserve + self.scroll_painted;
             let chapter = book.chapter_at_y(global_y, gap)?;
             let base = book.base_of(chapter, gap).unwrap_or(0.0);
+            // 整页画那一章按窗口坐标画（见 `view::body` 的整页画那一格）：反算时把
+            // 「页眉 + 安全区」那一段加回去，命中的才是眼睛看到的那一行。
+            if let Some(doc) = book.span_doc(chapter)
+                && crate::ui::features::reader::view::body::chapter_is_picture_page(doc)
+            {
+                global_y += self.header_reserve + self.top_inset;
+            }
             return Some((
                 chapter,
                 f32::from(local.x) - prefs.margin_x,

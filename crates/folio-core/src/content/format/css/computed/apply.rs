@@ -4,17 +4,18 @@
 //! 入口留在父模块，这里的东西只对整个 `css` 内部开放，不属于对外公开面。
 
 use super::{
-    BackgroundLayer, BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
-    BorderEdge, BorderStyle, BoxSizing, CellVAlign, Color, ComputedStyle, Direction, Display,
-    Hyphens, KNOWN_UNIMPLEMENTED, Positioning, TextAlign, TextJustify, WordBreak,
+    BackgroundAttachment, BackgroundLayer, BackgroundPosition, BackgroundRepeat, BackgroundSize,
+    BackgroundTile, BorderEdge, BorderStyle, BoxSizing, CellVAlign, Color, ComputedStyle,
+    Direction, Display, Hyphens, KNOWN_UNIMPLEMENTED, ObjectFit, Positioning, RubyAlign,
+    RubyPosition, TextAlign, TextJustify, WordBreak,
 };
 use crate::content::format::css::Declaration;
 use crate::content::format::css::value::{
     BorderElement, border_target, border_width_px, box_side_px, box_sides, four_of,
     parse_background_image_layer, parse_background_position, parse_background_repeat,
-    parse_background_size, parse_baseline_shift, parse_border_radius, parse_border_style,
-    parse_break_when, parse_clear, parse_color, parse_count, parse_decoration, parse_float,
-    parse_font_family_list, parse_font_size, parse_font_weight, parse_line_height,
+    parse_background_size, parse_baseline_shift, parse_bleed, parse_border_radius,
+    parse_border_style, parse_break_when, parse_clear, parse_color, parse_count, parse_decoration,
+    parse_float, parse_font_family_list, parse_font_size, parse_font_weight, parse_line_height,
     parse_list_style, parse_text_shadow, parse_url_token, parse_writing_mode, relative_weight,
     set_edge, set_length, set_margin, set_min_length, set_px, split_value_tokens,
 };
@@ -92,6 +93,7 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         // `text-justify` 在 CSS 里可继承：书里在 `<body>` 上写一次 `inter-ideograph`
         // 就管全书，靠的正是这一行。
         text_justify: parent.text_justify,
+        image_scale: parent.image_scale,
         // `direction` 在 CSS 里可继承，而且它是 `start`/`end` 折边的唯一依据，
         // 所以继承断了就等于整棵子树回到左起 —— RTL 书通常在 `<html>` 或 `<body>`
         // 上写一次，靠的就是这一行。
@@ -109,6 +111,10 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         letter_spacing: parent.letter_spacing,
         // `word-break` 在 CSS 里可继承：书里在 `<body>` 上写一次就管全书。
         word_break: parent.word_break,
+        // ruby 两条在 CSS 里都可继承：写在 `<ruby>` 上管到里面的 `<rt>`，写在 `<body>`
+        // 上就管全书。落点读的是容器自己那一份，继承断了等于初值兜场。
+        ruby_align: parent.ruby_align,
+        ruby_position: parent.ruby_position,
         // `border-collapse` 在 CSS 里可继承：写在 `<table>` 上就管到每个格子，
         // 而合并要**按格**逐边判（见 `Layout::decor_seeds`），所以它得跟着继承下来。
         border_collapse: parent.border_collapse,
@@ -247,6 +253,15 @@ fn parse_background_repeat_list(value: &str) -> Option<Vec<BackgroundRepeat>> {
     background_layer_list(value, parse_background_repeat)
 }
 
+fn parse_background_attachment_list(value: &str) -> Option<Vec<BackgroundAttachment>> {
+    background_layer_list(value, |part| match part.to_ascii_lowercase().as_str() {
+        "scroll" => Some(BackgroundAttachment::Scroll),
+        "fixed" => Some(BackgroundAttachment::Fixed),
+        "local" => Some(BackgroundAttachment::Local),
+        _ => None,
+    })
+}
+
 /// 把一条**长手**列表铺到图层表上：图层数取历史值与这条列表长度的较大者，
 /// 短的那一条从头循环。
 ///
@@ -315,13 +330,18 @@ fn parse_background_layer_spec(text: &str) -> Option<BackgroundLayerSpec> {
             layer.repeat.y = y;
             continue;
         }
-        // attachment 与 clip / origin：认得这些写法，但都按最常用那一档摆，
-        // 判据写在 `apply` 里那两臂的注释上。这里只负责**吃掉那个 token**，
-        // 不让它掉进「剩下的都是位置」那一桶里被解成一条非法坐标。
-        if matches!(
-            low.as_str(),
-            "scroll" | "fixed" | "local" | "border-box" | "padding-box" | "content-box"
-        ) {
+        // attachment 与 clip / origin：都收下来（clip / origin 只按边框盒摆，见
+        // `apply` 那一臂的注释）。这里负责**吃掉那个 token**，不让它掉进
+        // 「剩下的都是位置」那一桶里被解成一条非法坐标。
+        if matches!(low.as_str(), "scroll" | "fixed" | "local") {
+            layer.attachment = match low.as_str() {
+                "fixed" => BackgroundAttachment::Fixed,
+                "local" => BackgroundAttachment::Local,
+                _ => BackgroundAttachment::Scroll,
+            };
+            continue;
+        }
+        if matches!(low.as_str(), "border-box" | "padding-box" | "content-box") {
             continue;
         }
         if let Some(rgba) = parse_color(&low) {
@@ -639,7 +659,54 @@ pub(super) fn apply(
                 None => false,
             },
         },
-        "text-decoration" | "text-decoration-line" => match parse_decoration(value) {
+        // ruby 一族：注音排在基字的哪一侧（`ruby-position`）与横向贴哪一段（`ruby-align`）。
+        // 收下来的值由 `layout::wrap` 折 ruby 容器那一段消费，所以这两条不是「记成接住」。
+        // EPUB 与 WebKit 的前缀写法折成同一个数 —— 转换器两种都写，分成两条属性就是让
+        // 同一本书的注音在两种前缀下走两条路。
+        "ruby-position" | "-epub-ruby-position" | "-webkit-ruby-position" => {
+            match value.to_ascii_lowercase().as_str() {
+                "over" => {
+                    style.ruby_position = RubyPosition::Over;
+                    true
+                }
+                "under" => {
+                    style.ruby_position = RubyPosition::Under;
+                    true
+                }
+                // `inter-character` 要的是「沿字轴错开半格」的另一套几何，不收。
+                _ => false,
+            }
+        }
+        "ruby-align" | "-epub-ruby-align" | "-webkit-ruby-align" => {
+            match value.to_ascii_lowercase().as_str() {
+                "auto" => {
+                    style.ruby_align = RubyAlign::Auto;
+                    true
+                }
+                "start" => {
+                    style.ruby_align = RubyAlign::Start;
+                    true
+                }
+                "center" => {
+                    style.ruby_align = RubyAlign::Center;
+                    true
+                }
+                "end" => {
+                    style.ruby_align = RubyAlign::End;
+                    true
+                }
+                // `justify` / `distribute` / `space-between` / `space-around` 改的是注音自己
+                // 逐字之间的字距，判不认识（理由写在 [`RubyAlign`] 的文档上）。
+                _ => false,
+            }
+        }
+        // `-webkit-` 前缀那两条是同一个属性的旧拼法（Kindle 与多看导出时都写它）。读客那
+        // 几本书每个块上都写一遍 `-webkit-text-decoration: none`，不认它们等于把 660 个
+        // 元素记成「落差」。
+        "text-decoration"
+        | "text-decoration-line"
+        | "-webkit-text-decoration"
+        | "-webkit-text-decoration-line" => match parse_decoration(value) {
             Some((underline, line_through)) => {
                 style.underline = underline;
                 style.line_through = line_through;
@@ -648,6 +715,49 @@ pub(super) fn apply(
             None => false,
         },
         "font" => apply_font_shorthand(style, parent, root_px, value),
+        // `object-fit`：只影响绘制那一层怎么把图采样进盒里（见 [`ObjectFit`]）。
+        // 排版期不用它 —— 盒子大小是 `image_size` 定的，与这张图怎么被摆进盒无关。
+        // `duokan-bleed`：多看与掌阅的**出血**扩展（`leftright` / `lefttopright` 这类）。
+        // 它说的不是 CSS 里任何一种盒模型，而是「这张图要铺到屏幕边上去、不要页边距」。
+        // 落成 [`ComputedStyle::bleed`]，由排版期把那张图放到**屏幕宽**（与「大图铺满」
+        // 同一套尺，见 `layout::ports::image_size`）。词表可以连写、也可以有空格。
+        //
+        // 诡秘那本 1,518 个元素、基督山 121 个 —— 不认它那些满版图就全缩在栏里。
+        "duokan-bleed" => match parse_bleed(value) {
+            Some(edge) => {
+                style.bleed = edge;
+                true
+            }
+            None => false,
+        },
+        "object-fit" => match value.trim().to_ascii_lowercase().as_str() {
+            "fill" => {
+                style.object_fit = ObjectFit::Fill;
+                true
+            }
+            "contain" => {
+                style.object_fit = ObjectFit::Contain;
+                true
+            }
+            "cover" => {
+                style.object_fit = ObjectFit::Cover;
+                true
+            }
+            "none" => {
+                style.object_fit = ObjectFit::None;
+                true
+            }
+            "scale-down" => {
+                style.object_fit = ObjectFit::ScaleDown;
+                true
+            }
+            _ => false,
+        },
+        // `box-shadow: none` 是**初值**，认它等于什么都不做 —— 但「什么都不做」与「不认识」
+        // 在落差表上是两栏：读客那几本书在 664 个元素上写了一遍 `none`（还有 `-webkit-`
+        // 那份），不认就凭空多出 664 条「落差」。真阴影这一版不画（它不进 `ComputedStyle`），
+        // 所以非 `none` 的值判不认识，交给 [`super::KNOWN_UNIMPLEMENTED`] 之外的统计。
+        "box-shadow" | "-webkit-box-shadow" if value.trim().eq_ignore_ascii_case("none") => true,
         "break-before" | "page-break-before" => match parse_break_when(value) {
             Some(when) => {
                 style.break_before = when;
@@ -774,11 +884,23 @@ pub(super) fn apply(
             }
             None => false,
         },
-        // 铺法之外的三条不在这里接：`background-attachment` / `-clip` / `-origin` 走
-        // `KNOWN_UNIMPLEMENTED` 那一档（认得、不生效）。为什么简写里仍然**吃掉**那些词：
+        // `background-attachment`：`fixed` 只对**章节根**有排版含义（整页底图至少一屏高，
+        // 见 `layout::layout_inner`），其余元素上它与 `scroll` 同效；`local` 要的是
+        // 「按这一块的内容盒滚动」，而流式块没有自己的滚动区。这里照样收下：
+        // 记成「不生效」会把根上那一条真正生效的声明也一起埋掉。
+        "background-attachment" => match parse_background_attachment_list(value) {
+            Some(list) => {
+                let count = list.len();
+                for_each_layer(style, count, |layer, i| layer.attachment = list[i]);
+                true
+            }
+            None => false,
+        },
+        // `background-clip` / `background-origin` 不走这里：它们按边框盒画就够用了，
+        // 判据写在 `KNOWN_UNIMPLEMENTED` 那一格。为什么简写里仍然**吃掉**那些词：
         // `background: url(x) no-repeat fixed center` 里的 `fixed` 是真语法，不认下来
         // 整条简写就作废，底色与图一起消失 —— 那是比「fixed 没生效」大得多的错。
-        // 而长手单写那三条时屏上确实没有任何变化，所以缺口量具必须说真话。
+        // 而长手单写那两条时屏上确实没有任何变化，所以缺口量具必须说真话。
         //
         // `background` 简写：颜色、图、铺法、位置、尺寸一条全写。
         //
@@ -920,6 +1042,14 @@ pub(super) fn apply(
                 style.display = Display::None;
                 true
             }
+            // `display: flex` / `inline-flex` / `grid` 这些**容器**档：排版层没有它们，
+            // 但「按块摆」正是书里写它们想要的那件事（居中的一块、图与字上下摞）。
+            // 认成块而不是丢掉，屏上比整条作废更接近作者的意思；真要不要做布局，
+            // 是另一次开工。
+            "flex" | "inline-flex" | "grid" | "inline-grid" | "contents" => {
+                style.display = Display::Block;
+                true
+            }
             _ => false,
         },
         // `color: currentColor` 就是 `inherit`（自引用按继承折，CSS 明文）。
@@ -1055,10 +1185,14 @@ fn apply_border(
     let Some((side, element)) = border_target(property) else {
         return false;
     };
-    let parts: Vec<&str> = value.split_whitespace().collect();
+    // 按**函数与括号外**的空白切：`border: 1px solid rgba(0, 0, 0, 0.8)` 里的空格属于
+    // 颜色函数，`split_whitespace` 会把它切成 `rgba(0,` / `0,` / `0,` —— `rgba` 那种写法
+    // 于是整条判不认识（诡秘那本 37 个元素）。与样式表解析用的是同一把切法。
+    let parts = crate::content::format::css::value::split_value_tokens(value);
     if parts.is_empty() {
         return false;
     }
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
     // `border-top-width: 1px 2px` 这种是错的：边已经定死一条，值只能有一个。
     if side.is_some() && element != BorderElement::All && parts.len() != 1 {
         return false;

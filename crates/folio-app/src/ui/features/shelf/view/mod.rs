@@ -69,7 +69,7 @@ use crate::ui::foundation::error::{Context as _, report};
 use crate::ui::foundation::file_stem::title_stem;
 use crate::ui::host;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::services::l10n::{book_count, tf, tr};
+use crate::ui::services::l10n::{book_count, locale, tf, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::services::resident;
 use crate::ui::shell::navigation::{self, SizeClass};
@@ -299,6 +299,13 @@ pub struct ShelfView {
     /// 读数行旁那颗「取消」按钮置位它；管线在两本书之间看见，已落库的那些是真的
     /// （`Cancelled` 事件来了重查一次架面就有）。
     import_cancel: Option<Cancel>,
+    /// 上一批导入「几本没进来、为什么」那一句，来自
+    /// [`ImportReport::rejection_line`](folio_core::ImportReport::rejection_line)。
+    /// `None` = 没有要交代的失败。
+    ///
+    /// 画在导入读数那一行的**同一个格子**里（见 `Render` 那一段），所以新的一批一提交
+    /// 就被顶掉。它是这一批的交代，不是常驻状态：逐本的名字仍然只在日志里。
+    import_note: Option<SharedString>,
     /// 整机扫描那一屏的意图（内容在 [`Self::scan`]）。见 [`Self::group_open`] 那一段为什么分两半。
     pub(in crate::ui::features::shelf) scan_open: bool,
     /// 整机扫描那一屏的状态：正在扫 / 已出清单。`None` = 这一屏没东西可画了。
@@ -463,6 +470,7 @@ impl ShelfView {
             _import: None,
             importing: None,
             import_cancel: None,
+            import_note: None,
             scan: None,
             scan_open: false,
             _scan: None,
@@ -786,6 +794,8 @@ impl ShelfView {
         let cancel = handle.cancel.clone();
         self.importing = Some((0, 0));
         self.import_cancel = Some(cancel);
+        // 上一批那句话让位给这一批的读数：同一个格子，两句话不该叠着说。
+        self.import_note = None;
         cx.notify();
 
         // 管线交回的是 `std::sync::mpsc` 的接收端：它只会阻塞读它的那条线程，
@@ -960,15 +970,17 @@ impl ShelfView {
                 }
             }
         }
-        // 一句分类总结（`plans/基础设施.md` §3.2：批量作业要能聚合报表）。界面上那张
-        // 可折叠的作业卡片还是待决（`plans/导入管线.md` §十一 待决第 7 条），但数已经
-        // 先落进日志了 —— 读者问「我少了哪三本」时，这一行加上上面那几条指名道姓的
-        // `Err`，就是全部证据。
+        // 一句分类总结（`plans/基础设施.md` §3.2：批量作业要能聚合报表）。逐本的指名道姓
+        // 在日志里（上面那几条 `Err`），界面上只报「几本、为什么」那一句 ——
+        // 可折叠的作业卡片仍是待决（`plans/导入管线.md` §十一 待决第 7 条）。
+        let report = ImportReport::tally(&outcomes);
         tracing::info!(
             "ShelfView: 一批 {} 本结清 —— {}",
             outcomes.len(),
-            ImportReport::tally(&outcomes).summary()
+            report.summary()
         );
+        // 全批成功时这一格清空：上一批的失败不该挂在下一批后面说。
+        self.import_note = report.rejection_line(locale(cx)).map(SharedString::from);
         // 新入库的书要立刻上架，但搜索词得留着：读者可能正搜到一半。走 `force_reload`
         // 那一手（清空逼它重查，顺带敲一下压着的那一页 —— 监听目录与传书那几本只有根实例
         // 接得到事件，压着的那一页要由这一手带着重查）。
@@ -1685,6 +1697,21 @@ impl Render for ShelfView {
                         }),
                 )
                 .into_any_element()
+        });
+        // 没在导入、而上一批有几本没进来时，同一格接着说那一句。不带「取消」那颗：
+        // 事已经过去，这一行只是交代，读者下一次导入或搜索时它就让位。
+        let status = status.or_else(|| {
+            let note = self.import_note.clone()?;
+            Some(
+                div()
+                    .id("shelf-import-note")
+                    // 与上面那一行同一口径：外壳那扇回归门按 id 认这一行画没画出来。
+                    .test_support()
+                    .px(px(GUTTER))
+                    .pb_1()
+                    .child(muted_label(note, cx))
+                    .into_any_element(),
+            )
         });
         // 那三块「答一句话」的面板：桌面是一张浮层，手机是同一份内容压进底部弹层。
         self.sync_panels(size.is_compact(), cx);

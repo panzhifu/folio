@@ -7,7 +7,7 @@
 //! 正文图片只存元数据（`href` + 固有尺寸），字节按容器路径现取，见
 //! `Document::image_bytes` 那条路；封面例外，缩成缩略图后入库，见 [`COVER_MAX_EDGE`]。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -84,6 +84,21 @@ impl DocumentProvider for EpubAdapter {
     /// 字体身份；EPUB 有中央目录，读元数据不解压。
     fn font_refs(&self, path: &Path, wanted: &[String]) -> Option<Vec<FontRef>> {
         Some(font_refs(path, wanted))
+    }
+
+    /// 同 [`Self::font_refs`]，但复用已经打开的 `Container`：开书时读 CSS 那一趟
+    /// 已经把 ZIP 打开，这里只补一遍 `container.xml`/OPF，不再 `Zip::open`。
+    fn font_refs_in(
+        &self,
+        _path: &Path,
+        container: &super::container::Container,
+        wanted: &[String],
+    ) -> Option<Vec<FontRef>> {
+        let (items, base_dir) = manifest_in(container)?;
+        Some(select_font_refs(
+            &collect_font_refs_in(container, &items, &base_dir),
+            wanted,
+        ))
     }
 
     /// 按身份读一份字体；未命中别名缓存时才走到这里。
@@ -267,35 +282,22 @@ fn font_refs(path: &Path, wanted: &[String]) -> Vec<FontRef> {
     let Some((mut zip, items, base_dir)) = open_font_manifest(path) else {
         return Vec::new();
     };
+    select_font_refs(&collect_font_refs(&mut zip, &items, &base_dir), wanted)
+}
+
+/// 清单里的全部字体条目 → 身份。**不按 `@font-face` 过滤、不解压**：一次走查先把
+/// 它们全收下，等 CSS 折出 `wanted` 之后由 [`select_font_refs`] 筛。
+fn collect_font_refs(zip: &mut Zip, items: &[Item], base_dir: &str) -> Vec<FontRef> {
     let mut out = Vec::new();
-    let mut total = 0u64;
-    for item in &items {
+    for item in items {
         let kind = font_kind(&item.media_type);
         if matches!(kind, FontKind::Other | FontKind::Woff2) {
             continue;
         }
-        let name = resolve(&base_dir, &item.href);
-        if !wanted.iter().any(|w| w == &name) {
-            continue;
-        }
+        let name = resolve(base_dir, &item.href);
         let Some(range) = zip.range_at(&name) else {
             continue;
         };
-        if range.raw_len() > MAX_ONE as u64 {
-            tracing::debug!(
-                "epub: 字体 {name} 有 {} 字节，超过单份上限，丢掉",
-                range.raw_len()
-            );
-            continue;
-        }
-        if out.len() >= MAX_FACES || total + range.raw_len() > MAX_TOTAL as u64 {
-            tracing::debug!(
-                "epub: 内嵌字体到量（已取 {} 份 / {total} 字节），剩下的不读了",
-                out.len()
-            );
-            break;
-        }
-        total += range.raw_len();
         out.push(FontRef {
             href: name,
             media_type: item.media_type.clone(),
@@ -304,6 +306,74 @@ fn font_refs(path: &Path, wanted: &[String]) -> Vec<FontRef> {
         });
     }
     out
+}
+
+/// 同一个清单 → 身份，但走**已经打开的** [`Container`](super::container::Container)。
+fn collect_font_refs_in(
+    container: &super::container::Container,
+    items: &[Item],
+    base_dir: &str,
+) -> Vec<FontRef> {
+    let mut out = Vec::new();
+    for item in items {
+        let kind = font_kind(&item.media_type);
+        if matches!(kind, FontKind::Other | FontKind::Woff2) {
+            continue;
+        }
+        let name = resolve(base_dir, &item.href);
+        let Some(meta) = container.entry_meta(&name) else {
+            continue;
+        };
+        out.push(FontRef {
+            href: name,
+            media_type: item.media_type.clone(),
+            raw_len: meta.raw_len,
+            crc32: meta.crc32,
+        });
+    }
+    out
+}
+
+/// 按 `wanted` 过滤，并套上单份 / 份数 / 总量三道闸。
+///
+/// `font_refs` 与 `font_refs_in` 两条入口共用：一次走查先收全、后按 CSS 筛，先后两步
+/// 必须共用同一份筛选规则，否则两条路会给出不同的字体表。
+fn select_font_refs(all: &[FontRef], wanted: &[String]) -> Vec<FontRef> {
+    let mut out = Vec::new();
+    let mut total = 0u64;
+    for font in all {
+        if !wanted.iter().any(|w| w == &font.href) {
+            continue;
+        }
+        if font.raw_len > MAX_ONE as u64 {
+            tracing::debug!(
+                "epub: 字体 {} 有 {} 字节，超过单份上限，丢掉",
+                font.href,
+                font.raw_len
+            );
+            continue;
+        }
+        if out.len() >= MAX_FACES || total + font.raw_len > MAX_TOTAL as u64 {
+            tracing::debug!(
+                "epub: 内嵌字体到量（已取 {} 份 / {total} 字节），剩下的不读了",
+                out.len()
+            );
+            break;
+        }
+        total += font.raw_len;
+        out.push(font.clone());
+    }
+    out
+}
+
+/// 共享容器上的 `container.xml` + OPF 解析；与 [`open_font_manifest`] 同一份结构，
+/// 只是不自己开 ZIP。
+fn manifest_in(container: &super::container::Container) -> Option<(Vec<Item>, String)> {
+    let container_xml = container.read_text("META-INF/container.xml")?;
+    let opf_path = container_path(&container_xml)?;
+    let opf_text = container.read_text(&opf_path)?;
+    let opf = parse_opf(&opf_text);
+    Some((opf.items, dir_of(&opf_path)))
 }
 
 /// 按身份读一份字体（WOFF 解回 sfnt）；未命中别名缓存时才走这里。
@@ -1280,6 +1350,8 @@ struct ParsedEntries {
     /// 封面那一件的产物。队列里最多一个 `Job::Cover`，且每个下标只会被一个 worker 领走，
     /// 所以这里不会有两个 worker 各写一份。
     cover: Option<Vec<u8>>,
+    /// 这一路 worker 扫到的可见字符（各章取并集，排序在收尾时做）。
+    charset: BTreeSet<u32>,
 }
 
 /// 一本书索引里最多并行几路。
@@ -1360,6 +1432,7 @@ fn parse_entries(
         chapters: Vec::with_capacity(ctx.chapters.len()),
         images: Vec::with_capacity(ctx.images.len()),
         cover: None,
+        charset: BTreeSet::new(),
     };
     while let Some(at) = ctx.jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
         match *at {
@@ -1368,10 +1441,10 @@ fn parse_entries(
                 out.cover = parse_cover(reader, ctx.cover.expect("队列里有 Cover 就该有活"))
             }
             Job::Chapter(n) => {
-                out.chapters.push((
-                    n,
-                    parse_chapter(reader, &ctx.chapters[n], ctx.toc, with_text),
-                ));
+                let (chapter, charset) =
+                    parse_chapter(reader, &ctx.chapters[n], ctx.toc, with_text);
+                out.charset.extend(charset);
+                out.chapters.push((n, chapter));
             }
             Job::Image(n) => {
                 if let Some(image) = parse_image(reader, &ctx.images[n]) {
@@ -1479,7 +1552,7 @@ fn parse_chapter(
     job: &ChapterJob,
     toc: &TocIndex<'_>,
     with_text: bool,
-) -> Chapter {
+) -> (Chapter, Vec<u32>) {
     // 正文这一趟一定要解出来一次：`char_len` 是全局字符进度的分母，必须在导入时
     // 算准（`plans/导入管线.md` §八第 3 条）。留下来与否只看 `with_text`。
     // 两条读法按「正文本身是不是产物」分开：
@@ -1500,6 +1573,11 @@ fn parse_chapter(
         (None, read.map(|()| scan.finish()))
     };
     let char_len = summary.as_ref().map(|s| s.visible_chars);
+    // 这一章可见文本的字符集；与字数同一趟扫出来，子集化不必再读书。
+    let charset = summary
+        .as_ref()
+        .map(|s| s.charset.clone())
+        .unwrap_or_default();
     // 图片清单与字数出自**同一趟**扫描，因此一起带走。`with_text=false` 那一档
     // （导入走的就是这一档）整章字符串不进内存，这一份清单就是那一章的图
     // 在这本书里留下的唯一痕迹 —— 图片查看器那一列靠它，不靠排版。
@@ -1515,7 +1593,7 @@ fn parse_chapter(
         .or_else(|| summary.and_then(|s| s.heading))
         .unwrap_or_else(|| format!("第 {} 节", job.spine + 1));
     let source = if with_text { text } else { None };
-    match source {
+    let chapter = match source {
         Some(text) => Chapter::inline(title, text)
             .with_spine_href(job.href.clone())
             .with_char_len(char_len),
@@ -1523,7 +1601,8 @@ fn parse_chapter(
         None => Chapter::entry(title, job.href.clone())
             .with_char_len(char_len)
             .with_images(images),
-    }
+    };
+    (chapter, charset)
 }
 
 /// 一批作业跑完的产物，已经按队列下标排回原序。
@@ -1531,6 +1610,8 @@ struct ParsedDoc {
     chapters: Vec<Chapter>,
     images: Vec<ImageRes>,
     cover: Option<Vec<u8>>,
+    /// 全书可见字符（各 worker 的并集，升序）。
+    charset: Vec<u32>,
 }
 
 /// 并行跑一批解析作业；任何一个 worker 连容器都开不出来时回 `None`，
@@ -1545,6 +1626,7 @@ fn parse_entries_parallel(
     let mut chapters_out = Vec::with_capacity(ctx.chapters.len());
     let mut images_out = Vec::with_capacity(ctx.images.len());
     let mut cover_out = None;
+    let mut charset_out = BTreeSet::new();
     let mut opened_all = true;
 
     std::thread::scope(|scope| {
@@ -1568,6 +1650,7 @@ fn parse_entries_parallel(
                     opened_all &= opened;
                     chapters_out.extend(parsed.chapters);
                     images_out.extend(parsed.images);
+                    charset_out.extend(parsed.charset);
                     // 封面只有一个下标、只会被一个 worker 领走，所以这里是「填上」而不是「合并」。
                     if parsed.cover.is_some() {
                         cover_out = parsed.cover;
@@ -1587,6 +1670,7 @@ fn parse_entries_parallel(
         chapters: ordered(chapters_out),
         images: ordered(images_out),
         cover: cover_out,
+        charset: charset_out.into_iter().collect(),
     })
 }
 
@@ -1602,6 +1686,7 @@ fn parse_entries_sequential(
         chapters: ordered(parsed.chapters),
         images: ordered(parsed.images),
         cover: parsed.cover,
+        charset: parsed.charset.into_iter().collect(),
     }
 }
 
@@ -1997,6 +2082,7 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         chapters: parsed_chapters,
         images,
         cover: cover_bytes,
+        charset,
     } = parsed;
     // 真空壳与真章合成一条阅读顺序，按 **spine 下标**排。分两处算会让「第几章」这一格漂：
     // `ordered` 排的是队列下标，而队列里没有那些空壳。
@@ -2039,6 +2125,7 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         progression_rtl: opf.progression_rtl,
         cover: cover_bytes,
         images,
+        font_charset: charset,
         // 封面落盘是导入管线的事：provider 只交字节，不知道书库在哪儿。
         cover_ref: None,
     };

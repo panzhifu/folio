@@ -102,6 +102,41 @@ pub(in crate::ui::features::settings) fn layout_page(cx: &App) -> Page {
                     ]),
                 ],
             ),
+            group(
+                tr(cx, "group.images"),
+                vec![
+                    Row::dropdown(
+                        tr(cx, "field.image_scale"),
+                        ImageScale::ALL
+                            .iter()
+                            .copied()
+                            .map(|scale| {
+                                (
+                                    SharedString::from(scale.as_str()),
+                                    match scale {
+                                        ImageScale::Follow => tr(cx, "image_scale.follow"),
+                                        ImageScale::Screen => tr(cx, "image_scale.screen"),
+                                        ImageScale::Original => tr(cx, "image_scale.original"),
+                                    },
+                                )
+                            })
+                            .collect(),
+                        false,
+                        |cx: &App| {
+                            SharedString::from(
+                                ConfigHolder::default_reader(cx).image_scale.as_str(),
+                            )
+                        },
+                        |val: SharedString, cx| {
+                            ConfigHolder::edit_reader(cx, |p| {
+                                p.image_scale = ImageScale::parse(&val)
+                            })
+                        },
+                    )
+                    .description(tr(cx, "field.image_scale.desc"))
+                    .keywords(&["image", "图片", "缩放", "铺满", "出血"]),
+                ],
+            ),
         ],
     )
 }

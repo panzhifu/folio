@@ -43,6 +43,11 @@ book_count_many = "%{count} books"
 book_count_other = "%{count} books"
 zoom_in = "Increase font size"
 zoom_out = "Decrease font size"
+# The accessible names of the `−` / `+` buttons next to every numeric row on the
+# reading-settings card. An icon alone is unreadable to TalkBack, so the name carries
+# the row's own label through `%{field}`.
+nudge_up = "Increase %{field}"
+nudge_down = "Decrease %{field}"
 # The bottom-bar entry for a fixed-layout book: hand this page to the zoom layer.
 # It lives there because on the touch end a long press now belongs to text selection
 # whenever the page has a text layer (PDF / AZW4 / DjVu), and that gesture used to be
@@ -168,6 +173,7 @@ toc = "Contents"
 speech = "Read aloud"
 
 translation = "Translation"
+membership = "Premium"
 [group]
 sync_server = "WebDAV"
 sync_state = "Sync status"
@@ -186,6 +192,7 @@ transfer = "Wi-Fi transfer"
 rows = "Rows"
 marking = "Marking"
 direction = "Direction"
+images = "Images"
 
 speech_voice = "Voice"
 speech_reading = "While reading"
@@ -193,6 +200,8 @@ speech_reading = "While reading"
 translation_output = "Translation"
 translation_openai = "OpenAI compatible"
 translation_deepl = "DeepL"
+membership_state = "Status"
+membership_benefits = "Benefits"
 [field]
 sync_enabled = "Enable sync"
 "sync_enabled.desc" = "Progress, annotations and bookmarks only. Book files never leave this device."
@@ -228,6 +237,8 @@ font_weight = "Weight"
 "font_weight.desc" = "Stroke weight of body text. If the device lacks that face, the nearest one is used; 600 and above also get synthetic bold."
 text_direction = "Text direction"
 "text_direction.desc" = "As in book, vertical, or horizontal. Vertical applies only to single-column paging; scrolling stays horizontal."
+image_scale = "Image scaling"
+"image_scale.desc" = "Follow the book: only images the author marked to fill grow to the screen width. Fill screen: an image alone in its block spreads edge to edge. Original size: never enlarged, only shrunk when it is wider than the screen."
 font_family = "Body font"
 "font_family.desc" = "Choose from the fonts installed on this device."
 appearance_mode = "Mode"
@@ -288,6 +299,8 @@ translation_openai_key = "API Key"
 "translation_openai_key.desc" = "Stored only in this device's config.json. Leave empty if the service needs no key."
 translation_deepl_key = "API Key"
 "translation_deepl_key.desc" = "Your DeepL key. Free keys end with :fx and automatically use the free endpoint."
+membership_tier = "Membership"
+membership_expiry = "Valid until"
 [page_turn]
 slide = "Slide sideways"
 slide_up = "Slide up and down"
@@ -310,6 +323,11 @@ bold = "Bold"
 auto = "As in book"
 vertical = "Vertical"
 horizontal = "Horizontal"
+
+[image_scale]
+follow = "Follow the book"
+screen = "Fill screen"
+original = "Original size"
 
 [account]
 settings = "Settings"
@@ -492,6 +510,29 @@ import = "Import"
 # 不知道，那一句不带数字。
 importing = "Importing…"
 importing_of = "Importing %{done}/%{total}"
+# The line shown after a batch: how many books did not land, and why.
+# `_few` / `_many` never get picked in English; they repeat `_other` so every
+# language file carries the same key set.
+import_rejected_one = "%{count} book was not imported"
+import_rejected_few = "%{count} books were not imported"
+import_rejected_many = "%{count} books were not imported"
+import_rejected_other = "%{count} books were not imported"
+reject_encrypted_one = "%{count} has DRM protection"
+reject_encrypted_few = "%{count} have DRM protection"
+reject_encrypted_many = "%{count} have DRM protection"
+reject_encrypted_other = "%{count} have DRM protection"
+reject_corrupt_one = "%{count} file is damaged"
+reject_corrupt_few = "%{count} files are damaged"
+reject_corrupt_many = "%{count} files are damaged"
+reject_corrupt_other = "%{count} files are damaged"
+reject_unsupported_one = "%{count} format is not supported yet"
+reject_unsupported_few = "%{count} formats are not supported yet"
+reject_unsupported_many = "%{count} formats are not supported yet"
+reject_unsupported_other = "%{count} formats are not supported yet"
+reject_unreadable_one = "%{count} could not be read"
+reject_unreadable_few = "%{count} could not be read"
+reject_unreadable_many = "%{count} could not be read"
+reject_unreadable_other = "%{count} could not be read"
 # Device-wide scan. Scan only finds: candidates land on a checklist, the reader
 # picks and imports (checking = hand-picked, same name means update).
 cancel = "Cancel"
@@ -646,6 +687,8 @@ vacuum = "Rebuild database"
 
 # One whole sentence per action: the four caches and the rewrite lose different things,
 # and a shared stem plus a fragment would force English word order onto eight other languages.
+membership_trial = "Try for %{days} days"
+membership_cancel = "Cancel membership"
 [confirm]
 "thumbs.title" = "Clear the thumbnail cache?"
 "comics.title" = "Clear the comic unpack cache?"
@@ -779,3 +822,16 @@ import_duplicate = "Already in your library"
 import_failed = "Import failed"
 import_cancelled = "Import cancelled"
 library_missing = "Confirm the library folder first"
+
+# Membership: the only local record is an expiry day; the tier is derived from it.
+[membership]
+"never" = "Not activated"
+"tier_premium" = "Premium"
+"tier_standard" = "Standard"
+"expires" = "Active until %{date}"
+"expired" = "Expired on %{date}"
+"benefit_sync" = "Sync progress, annotations and bookmarks across devices"
+"benefit_translate" = "Translate a selection"
+"benefit_speech" = "Read aloud with automatic page turn"
+"benefit_pdf" = "Read PDFs and scanned books"
+"benefit_opds" = "Download from an OPDS catalogue"

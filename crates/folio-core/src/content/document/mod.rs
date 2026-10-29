@@ -126,6 +126,14 @@ pub trait Document: Send + Sync {
     /// 立场：少一份样式，正文照排。调用方（阅读会话）每书取一次。
     fn stylesheet(&self) -> String;
 
+    /// 全书可见字符集（码点，升序去重）；空 = 不知道（老库 / 非 EPUB provider）。
+    ///
+    /// 导入扫描顺手收的那一列；开书给内嵌字体做子集化时用它，不能为同一件事再把
+    /// 整本书读一遍。空表时子集化退回整份字体。
+    fn font_charset(&self) -> &[u32] {
+        &[]
+    }
+
     /// `@font-face` 要的那几份内嵌字体。默认没有。
     fn fonts(&self, _wanted: &[String]) -> Vec<FontBytes> {
         Vec::new()
@@ -136,6 +144,15 @@ pub trait Document: Send + Sync {
     /// 默认 `None` = 这个 provider 没有现成元数据，调用方退回 [`Self::fonts`] 一次读全。
     /// EPUB 覆盖它：从中央目录拿范围，别名缓存命中时一次解压都不做。
     fn font_refs(&self, _wanted: &[String]) -> Option<Vec<FontRef>> {
+        None
+    }
+
+    /// 同 [`Self::font_refs`]，但复用那个开书时读 CSS 已经打开的容器。
+    ///
+    /// 默认 `None` = 这份文档没有共享容器这条路（没有文件、非 ZIP 容器，或 provider
+    /// 不实现），调用方退回 [`Self::font_refs`]。EPUB 覆盖它：同一个 `Container`
+    /// 打开一次，CSS 与字体身份都从它取，worker 不再开第二个 ZIP。
+    fn font_refs_in(&self, _wanted: &[String]) -> Option<Vec<FontRef>> {
         None
     }
 

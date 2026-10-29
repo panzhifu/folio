@@ -39,7 +39,6 @@ use crate::ui::features::reader::components::toc_panel::{TocEvent, TocPanel};
 use crate::ui::features::reader::model::chrome::{self, Chrome, Effect, Reserve, zone};
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::translation::{self, TranslationStatus};
-use crate::ui::features::reader::view::bands;
 use crate::ui::features::settings::CompactSettings;
 use crate::ui::platform;
 use crate::ui::services::config::ConfigHolder;
@@ -193,6 +192,35 @@ impl ReadingPage {
             .update(cx, |reader, cx| reader.open_book(book_id, cx));
     }
 
+    /// 把**已经造好**的一份文档开进这一屏（只有回归门用）。
+    ///
+    /// 生产那条路是 [`ReadingPage::open`]：按主键去书库把正文与容器一起取出来。回归门要
+    /// 验的是「退出之后谁重渲染架面」，解 ZIP 那一环与它无关，所以只替掉取正文这一步 ——
+    /// 会话走的仍是生产那一个构造（`ReaderSession::with_document`）。
+    #[cfg(test)]
+    pub(crate) fn open_document(
+        &mut self,
+        doc: std::sync::Arc<dyn folio_core::content::document::Document>,
+        prefs: folio_core::Reader,
+        locator: folio_core::Locator,
+        cx: &mut Context<Self>,
+    ) {
+        let session = crate::ui::features::reader::ReaderSession::with_document(
+            doc, prefs, None, None, locator, cx,
+        );
+        let reading = cx.new(|_| session);
+        *self = Self::new(self.stack.clone(), self.shell.clone(), cx);
+        self.reader = reading;
+        // `new` 订阅的是它自己刚建的那份会话；换过来之后观察要挪到这一份上，
+        // 会话那一侧的重画才转得到这一屏（见 `new` 里那条 `observe`）。
+        self._watches
+            .push(cx.observe(&self.reader, |_, _, cx| cx.notify()));
+        self.reader.update(cx, |reader, _| {
+            reader.set_image_viewer(self.image_viewer.clone())
+        });
+        cx.notify();
+    }
+
     /// 落库。外壳在 pop 之前调它。
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.reader.update(cx, |reader, cx| {
@@ -235,6 +263,10 @@ impl ReadingPage {
     ///
     /// 变化时重画：顶栏表面向上长的那一段读它。
     pub fn set_top_inset(&mut self, top: f32, cx: &mut Context<Self>) {
+        // 会话里那一格跟着一起换，而且**从这里**换：这一屏每帧都会把本页记着的数再推一遍
+        // 给会话（`render` 里 `set_chrome_bands` 那一串），两边不同步时那一次推送就把外壳
+        // 刚写进去的值覆盖回去。判据只放在「变了才通知」那一层，会话那边无条件写。
+        self.reader.update(cx, |reader, _| reader.top_inset = top);
         if (self.top_inset - top).abs() > 0.5 {
             self.top_inset = top;
             cx.notify();
@@ -245,6 +277,8 @@ impl ReadingPage {
     ///
     /// 变化时重画：底栏卡片的内缩与干净态页脚的高度都读它。
     pub fn set_bottom_inset(&mut self, bottom: f32, cx: &mut Context<Self>) {
+        self.reader
+            .update(cx, |reader, _| reader.bottom_inset = bottom);
         if (self.bottom_inset - bottom).abs() > 0.5 {
             self.bottom_inset = bottom;
             cx.notify();
@@ -750,9 +784,18 @@ impl Render for ReadingPage {
             chrome::bands_with_vertical_margins(header_margin, footer_margin);
         self.reader.update(cx, |reader, cx| {
             reader.set_reserve(self.reserve, cx);
-            reader.set_chrome_bands(header_band, footer_band, cx);
+            reader.set_chrome_bands(
+                header_band,
+                footer_band,
+                self.bottom_inset,
+                !self.chrome.is_open(),
+                cx,
+            );
             reader.set_overlay_open(layers_up, cx);
             reader.enter_shift = self.enter_shift;
+            // 折页那张纸的顶边要贴屏幕顶（读者 2026-10-30 要的「整屏一张纸」）：
+            // 版面不让它，只有这一格用它，见 `view::body` 的 `sheet_area`。
+            reader.top_inset = self.top_inset;
         });
         self.sync_sliders(window, cx);
         let tap = cx.listener(
@@ -790,7 +833,7 @@ impl Render for ReadingPage {
                     .on_click(tap)
                     .child(self.reader.clone()),
             )
-            // 干净态那两行与浮层是同一片地方的两种样子，永远只画一套。
+            // 干净态那两条读数带在会话里画（折页时它们是纸的一部分），这里只管浮层那两条。
             //
             // 顶栏在目录那一层开着时不在这里画 —— 抬到遮罩之上去了（见下面
             // `toc_up` 那一段）。底栏照旧压在遮罩下。
@@ -800,15 +843,6 @@ impl Render for ReadingPage {
             })
             .when(self.chrome.is_open() && toc_up, |this| {
                 this.child(self.bottom_bar(cx))
-            })
-            .when(!self.chrome.is_open(), |this| {
-                this.child(bands::header(&self.reader, header_margin, cx))
-                    .child(bands::footer(
-                        &self.reader,
-                        self.bottom_inset,
-                        footer_margin,
-                        cx,
-                    ))
             });
         let mut root = div()
             .id("reader-page")

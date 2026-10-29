@@ -5,10 +5,10 @@
 
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{
-    BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundSize, BackgroundTile, BorderEdge,
-    BorderStyle, BoxSizing, BreakWhen, Clear, Color, ComputedStyle, DeclStatus, Direction, Display,
-    Float, Hyphens, Length, ListStyle, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode,
-    cascade, declaration_status,
+    BackgroundAttachment, BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundSize,
+    BackgroundTile, BorderEdge, BorderStyle, BoxSizing, BreakWhen, Clear, Color, ComputedStyle,
+    DeclStatus, Direction, Display, Float, Hyphens, Length, ListStyle, RubyAlign, RubyPosition,
+    StyledDom, TextAlign, TextJustify, WordBreak, WritingMode, cascade, declaration_status,
 };
 use crate::content::format::css::{Declaration, Origin, RuleSet};
 
@@ -199,6 +199,58 @@ fn text_align_and_indent_survive_several_levels() {
     assert_eq!(px(p.text_indent), 32.0, "缩进继承下来但已在根元素折算成 px");
 }
 
+/// 居中不缩：`text-indent` 只缩首行，居中时它把整行推离中线（半个缩进）。
+/// 读者注入的（扉页出版社）与作者内联写的（同页副标题 `text-indent:2em`）都归零；
+/// 不居中的块照旧保留缩进。
+#[test]
+fn centered_blocks_drop_the_first_line_indent() {
+    let dom = Dom::parse("<div class=c>出版社</div>".as_bytes());
+    let root = ComputedStyle {
+        text_indent: Length::Px(34.0),
+        ..ComputedStyle::default()
+    };
+    let div = dom
+        .elements()
+        .find(|(id, _)| dom.classes(*id).any(|class| class == "c"))
+        .map(|(id, _)| id)
+        .expect("应有 .c");
+
+    let rules = RuleSet::parse("", Origin::Author);
+    let styled = cascade(&dom, &rules, &root, "");
+    assert_eq!(
+        styled.get(div).unwrap().text_indent,
+        Length::Px(34.0),
+        "不居中的块照旧继承读者的缩进"
+    );
+
+    let rules = RuleSet::parse(".c { text-align: center }", Origin::Author);
+    let styled = cascade(&dom, &rules, &root, "");
+    assert_eq!(
+        styled.get(div).unwrap().text_indent,
+        Length::ZERO,
+        "居中 + 读者注入的缩进 → 归零"
+    );
+
+    let rules = RuleSet::parse(
+        ".c { text-align: center; text-indent: 2em }",
+        Origin::Author,
+    );
+    let styled = cascade(&dom, &rules, &root, "");
+    assert_eq!(
+        styled.get(div).unwrap().text_indent,
+        Length::ZERO,
+        "居中 + 作者写的缩进 → 也归零（居中优先）"
+    );
+
+    let rules = RuleSet::parse(".c { text-indent: 2em }", Origin::Author);
+    let styled = cascade(&dom, &rules, &root, "");
+    assert_eq!(
+        px(styled.get(div).unwrap().text_indent),
+        32.0,
+        "不居中的作者缩进照旧生效"
+    );
+}
+
 #[test]
 fn display_none_is_recorded_not_dropped() {
     let page = author("<p>隐</p>", "p { display: none }");
@@ -290,6 +342,11 @@ fn auto_margin_survives_the_cascade() {
 
 /// `auto` 只许出现在 `margin` 这一族：CSS 里 `padding: auto` 与 `text-indent: auto`
 /// 都是非法值。认下来就等于把一条写坏的声明显示成「已处理」。
+///
+/// `padding` 简写里的 `auto` 是个例外（2026-10-30）：诡秘那本书在 36 个元素上写了
+/// `padding: 10px auto 10px auto`，整条作废会把**上下内边距一起丢掉**。横向 `auto`
+/// 在 CSS 里本来就等于 0，所以按 0 收下比丢掉更接近作者的意思；`text-indent` 与
+/// `max-width` 仍然整条作废（它们认 `auto` 没有任何等价的落点）。
 #[test]
 fn auto_is_not_a_padding_or_indent_value() {
     let page = author(
@@ -297,12 +354,13 @@ fn auto_is_not_a_padding_or_indent_value() {
         "p { padding: 4px auto; text-indent: auto; max-width: auto }",
     );
     let p = style(&page, tag(&page, "p"));
-    assert_eq!(px(p.padding_top), 0.0, "整条作废，不该留下半个 4px");
+    assert_eq!(px(p.padding_top), 4.0, "上下那两格要留下");
+    assert_eq!(px(p.padding_right), 0.0, "横向的 `auto` 按 0 收");
     assert_eq!(px(p.text_indent), 0.0);
     assert_eq!(p.max_width, None, "`max-width: auto` 与「没写过」同解");
     assert_eq!(
-        page.styled.ignored, 2,
-        "`padding: auto` 与 `text-indent: auto` 各计一条不认识"
+        page.styled.ignored, 1,
+        "`text-indent: auto` 计一条不认识（`max-width: auto` 与「没写过」同解，本来就不计）"
     );
 }
 
@@ -364,7 +422,7 @@ fn the_margin_shorthand_expands_one_to_four_values() {
 
 /// `padding` 简写走同一份展开，但**不**吃 `auto`：CSS 里 `padding: auto` 是非法值。
 #[test]
-fn the_padding_shorthand_expands_without_auto() {
+fn the_padding_shorthand_expands_and_takes_auto_as_zero() {
     let page = author(
         "<div class=\"a\"></div><div class=\"b\"></div>",
         ".a { padding: 0 1em } .b { padding: 4px auto }",
@@ -382,10 +440,10 @@ fn the_padding_shorthand_expands_without_auto() {
     let b = style(&page, class(&page, "b"));
     assert_eq!(
         (px(b.padding_top), px(b.padding_right)),
-        (0.0, 0.0),
-        "`padding: auto` 非法，整条作废而不是半信半疑"
+        (4.0, 0.0),
+        "上下那两格要留下，`auto` 那一格按 0 收"
     );
-    assert_eq!(page.styled.ignored, 1, "只有那一条该计 ignored");
+    assert_eq!(page.styled.ignored, 0, "这一条不再算不认识");
 }
 
 /// `float` / `clear`：认得的写法接住并生效，认不出的整条计进 `ignored`。
@@ -1575,19 +1633,24 @@ fn the_background_layers_change_the_style_hash() {
         of(".t { background-image: url(b.png); background-size: cover }"),
         "换一张图更要换哈希"
     );
+    assert_ne!(
+        of(base),
+        of(
+            ".t { background-image: url(a.png); background-size: cover; background-attachment: fixed }"
+        ),
+        "只改连接方式也要换哈希（根上的 fixed 撑一屏，排版键得跟着变）"
+    );
 }
 
-/// 「认得、不生效」与「接住了」是两件事，缺口量具必须说得出这一层差别。
+/// 「接住了」与「认得、不生效」的分界：`background-attachment` 现在真被排版层读
+/// （根上的 `fixed` 把章节撑到一屏，见 `layout_inner`），`background-clip` /
+/// `-origin` 仍按边框盒画、没有去处。
 ///
-/// `background-attachment: fixed` 单写时屏上确实没有任何变化（流式排版里没有对应物，
-/// 判据写在 `KNOWN_UNIMPLEMENTED` 那一格），所以它只能记 `Inert`。真在 `apply` 里给那条
-/// 写一个 `=> true` 的臂，`examples/css-gap` 就会报「这个属性我们做完了」——
-/// 那是把「没做」记成「做了」，比少接一条属性更坏。
 /// 反过来，同一句话**写在简写里**时必须被吃掉而不作废整条声明：
 /// `background: url(x) no-repeat fixed center` 里那个 `fixed` 要是不认，
 /// 底色与图会一起消失，症状比「fixed 没生效」大一个量级。
 #[test]
-fn attachment_is_known_but_inert_while_the_shorthand_still_eats_it() {
+fn attachment_is_applied_while_clip_and_origin_stay_inert() {
     let page = author(
         "<p class=t>正文</p>",
         ".t { background-image: url(a.png); background-attachment: fixed; background-clip: padding-box }",
@@ -1596,30 +1659,31 @@ fn attachment_is_known_but_inert_while_the_shorthand_still_eats_it() {
     assert_eq!(own.background_pictures().count(), 1, "图那条照常接住");
     assert_eq!(
         page.styled.ignored, 0,
-        "两条认得的长手不该计进 ignored，它们是「不生效」不是「不认识」"
+        "认得的长手不该计进 ignored，clip 只是「不生效」不是「不认识」"
     );
-    for name in [
-        "background-attachment",
-        "background-clip",
-        "background-origin",
-    ] {
-        let decl = Declaration {
-            property: name.to_string(),
-            value: if name == "background-attachment" {
-                "fixed".to_string()
-            } else {
-                "padding-box".to_string()
-            },
-            important: false,
-        };
+    let decl = |name: &str, value: &str| Declaration {
+        property: name.to_string(),
+        value: value.to_string(),
+        important: false,
+    };
+    assert_eq!(
+        declaration_status(&decl("background-attachment", "fixed"), own, own.font_size),
+        DeclStatus::Applied,
+        "attachment 进了样式、排版层会读它，不能再报「不生效」"
+    );
+    for name in ["background-clip", "background-origin"] {
         assert_eq!(
-            declaration_status(&decl, own, own.font_size),
+            declaration_status(&decl(name, "padding-box"), own, own.font_size),
             DeclStatus::Inert,
             "{name} 该报「认得，不生效」"
         );
     }
+    assert_eq!(
+        own.background_layers[0].attachment,
+        BackgroundAttachment::Fixed
+    );
 
-    // 同一句话挪进简写：不许作废整条声明。
+    // 同一句话挪进简写：不许作废整条声明，连接方式也要落到图层上。
     let page = author(
         "<p class=t>正文</p>",
         ".t { background: url(a.png) no-repeat fixed center }",
@@ -1632,6 +1696,7 @@ fn attachment_is_known_but_inert_while_the_shorthand_still_eats_it() {
         .expect("简写里的 fixed 不该让整条作废");
     assert_eq!(picture.image.as_deref(), Some("a.png"));
     assert_eq!(picture.repeat.x, BackgroundTile::NoRepeat);
+    assert_eq!(picture.attachment, BackgroundAttachment::Fixed);
 }
 
 /// 背景色与背景图层**都不继承**（CSS 规定）。扉页那张底图只属于 `<body>` 自己，
@@ -3307,4 +3372,177 @@ fn all_initial_resets_every_property() {
     // 认不出的写法（`all: unset` / `all: inherit`）判不认识。
     let bad = author("<p>x</p>", "p { all: unset }");
     assert_eq!(bad.styled.ignored, 1);
+}
+
+/// `rgba()` 与 `rgb()` 走同一支：第四个透明度只做校验，不参与取色。
+///
+/// 这一条是 2026-10-30 拿移动端两本书量出来的 —— 只认 `rgb(` 时《基督山伯爵》8 个、
+/// 诡秘 91 个元素上的 `background-color` / `border` 被判「不认识」，书里的半透明底块
+/// 与描边整条消失。四种常见写法都要接住。
+#[test]
+fn rgba_colors_land_on_the_three_channels() {
+    let page = author(
+        "<p>文</p>",
+        "p { background-color: rgba(247, 250, 249, 0.9); border: 1px solid rgba(80,70,86,0.7); \
+             color: rgb(10 20 30 / 50%) }",
+    );
+    let p = style(&page, tag(&page, "p"));
+    assert_eq!(p.background_color, Some(Color(247, 250, 249)));
+    assert_eq!(p.color, Some(Color(10, 20, 30)), "空格加斜杠的新写法");
+    assert_eq!(
+        p.border_drawn(),
+        [1.0, 1.0, 1.0, 1.0],
+        "边框那一条也该落下来（顺序 [上, 右, 下, 左]）"
+    );
+    assert_eq!(
+        p.border[0].color,
+        Some(Color(80, 70, 86)),
+        "`border: 1px solid rgba(80, 70, 86, 0.7)`：函数里那几个逗号后的空格不该把这条切开"
+    );
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// 前缀别名与「值合法但等于不做」的那几档：它们不该再算进「不认识」。
+///
+/// 落差表上这几条各占几百到上千个元素（读客的书 660 处 `-webkit-text-decoration: none`、
+/// 664 处 `box-shadow: none`），淹掉真正要关注的写法。
+#[test]
+fn prefixed_and_no_op_values_are_not_counted_as_unparsed() {
+    let page = author(
+        "<p class=\"a\">文</p><p class=\"b\">文</p><p class=\"c\">文</p>",
+        ".a { -webkit-text-decoration: none; -webkit-box-shadow: none } \
+         .b { float: center } \
+         .c { duokan-bleed: lefttopright; ruby-align: center; -webkit-font-smoothing: antialiased }",
+    );
+    assert_eq!(page.styled.ignored, 0, "这几条都不该再算不认识");
+    let base = ComputedStyle::default();
+    let decl = |property: &str, value: &str| Declaration {
+        property: property.into(),
+        value: value.into(),
+        important: false,
+    };
+    assert_eq!(
+        declaration_status(&decl("duokan-bleed", "leftright"), &base, 16.0),
+        DeclStatus::Applied,
+        "出血扩展接上了：`leftright` 要落成左右两条边"
+    );
+    let page = author("<p>图</p>", "p { duokan-bleed: lefttopright }");
+    let bleed = style(&page, tag(&page, "p")).bleed;
+    assert!(
+        bleed.left && bleed.right && bleed.top && !bleed.bottom,
+        "{bleed:?}"
+    );
+    let bad = author("<p>图</p>", "p { duokan-bleed: sideways }");
+    assert_eq!(bad.styled.ignored, 1, "认不出的词仍要算不认识");
+}
+
+/// `display: flex` 认成块：排版层没有 flex 容器，但「按块摆」正是书里想要的那件事，
+/// 整条丢掉会让那一块回到行内流里。
+#[test]
+fn display_flex_falls_back_to_a_block() {
+    let page = author(
+        "<div>块</div>",
+        "div { display: flex; align-items: center }",
+    );
+    assert_eq!(style(&page, tag(&page, "div")).display, Display::Block);
+    assert_eq!(page.styled.ignored, 0, "`align-items` 归「认得、不生效」");
+}
+
+// ---- ruby 注音（2026-10-31）----
+
+/// `ruby-align` / `ruby-position` 2026-10-31 起是**真生效**的属性：注音排在基字哪一侧、
+/// 横向贴哪一段，`layout::wrap` 折 ruby 容器那一段读的就是这两格。于是它们从
+/// 「认得、不生效」名单里移了出去。这一条门禁钉住两边：认得的值 `ignored` 必须为 0
+/// 才算真接住，认不出的值必须仍然计 1 —— 否则「整条属性没做」会被记成「做完了」。
+#[test]
+fn ruby_align_and_position_accept_only_the_values_the_layout_reads() {
+    let base = ComputedStyle::default();
+    let decl = |property: &str, value: &str| Declaration {
+        property: property.into(),
+        value: value.into(),
+        important: false,
+    };
+    for (property, value) in [
+        ("ruby-align", "auto"),
+        ("ruby-align", "start"),
+        ("ruby-align", "center"),
+        ("ruby-align", "end"),
+        ("-epub-ruby-align", "center"),
+        ("ruby-position", "over"),
+        ("ruby-position", "under"),
+        ("-epub-ruby-position", "over"),
+        ("-webkit-ruby-position", "under"),
+    ] {
+        assert_eq!(
+            declaration_status(&decl(property, value), &base, 16.0),
+            DeclStatus::Applied,
+            "`{property}: {value}` 该是接住的"
+        );
+    }
+    // `justify` / `distribute` 那一族要的是注音自己逐字摊开，`inter-character` 要的是
+    // 沿字轴错开半格 —— 两样排版层都没有对应物，不许半接不接。
+    for (property, value) in [
+        ("ruby-align", "justify"),
+        ("ruby-align", "distribute"),
+        ("ruby-align", "space-between"),
+        ("ruby-position", "inter-character"),
+        ("ruby-position", "left"),
+    ] {
+        assert_eq!(
+            declaration_status(&decl(property, value), &base, 16.0),
+            DeclStatus::Unparsed,
+            "`{property}: {value}` 不许报成接住了"
+        );
+    }
+}
+
+/// 两条都可继承（CSS 规定），EPUB 与 WebKit 的前缀写法折成同一个数；拒掉的值整条作废、
+/// 不改已有值。
+#[test]
+fn ruby_alignment_inherits_and_the_prefixed_aliases_fold_into_it() {
+    let page = author(
+        "<ruby><rt>音</rt></ruby>",
+        "ruby { ruby-align: center; -epub-ruby-position: under }",
+    );
+    let ruby = style(&page, tag(&page, "ruby"));
+    assert_eq!(ruby.ruby_align, RubyAlign::Center);
+    assert_eq!(ruby.ruby_position, RubyPosition::Under);
+    assert_eq!(page.styled.ignored, 0, "两条都认得，一条都不该计落差");
+    let rt = style(&page, tag(&page, "rt"));
+    assert_eq!(
+        rt.ruby_align,
+        RubyAlign::Center,
+        "写在容器上管到注音：这一格可继承"
+    );
+    assert_eq!(rt.ruby_position, RubyPosition::Under);
+
+    let bad = author("<ruby>愚</ruby>", "ruby { ruby-align: justify }");
+    assert_eq!(
+        style(&bad, tag(&bad, "ruby")).ruby_align,
+        RubyAlign::Auto,
+        "作废的声明不改已有值"
+    );
+    assert_eq!(bad.styled.ignored, 1, "`justify` 仍要计不认识");
+}
+
+/// UA 表给 `<rt>` **半号字**。作者常常自己再写一遍（《诡秘之主》那条
+/// `ruby > rt { font-size: 0.5em }`），没写的书靠这一条兜住 —— 注音与基字同大时，
+/// 排在上方就是两行一样粗的字叠在一起。
+#[test]
+fn the_ua_sheet_halves_the_ruby_annotation() {
+    let page = page("<p><ruby>愚者<rt>The Fool</rt></ruby></p>", &[]);
+    assert_eq!(
+        style(&page, tag(&page, "rt")).font_size,
+        8.0,
+        "16 px 正文的注音"
+    );
+    let authored = author(
+        "<p><ruby>愚者<rt>The Fool</rt></ruby></p>",
+        "p { font-size: 20px } rt { font-size: 0.4em }",
+    );
+    assert_eq!(
+        style(&authored, tag(&authored, "rt")).font_size,
+        8.0,
+        "作者写了就照作者的走（20 px 的 0.4 倍）"
+    );
 }

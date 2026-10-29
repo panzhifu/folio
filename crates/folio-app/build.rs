@@ -36,9 +36,11 @@ fn main() {
     // 文案表是 `rust_i18n::i18n!` 在编译期读的，cargo 自己不知道这件事：
     // 不写这一行，改了 `locales/*.toml` 也不会重编，旧文案会一直留在二进制里。
     println!("cargo:rerun-if-changed=../folio-core/locales");
-    // 关于页嵌的是 `docs/` 里那两份原文（见 `ui/shared/about.rs`），所以它们改了要重编，
-    // 否则二进制里留着旧的一份，而「实际情况」正是那一页唯一的存在理由。
-    println!("cargo:rerun-if-changed=../../docs");
+    // 这里**不要**再挂 `docs/`：那个目录在 2026-10-11 的「文档按里程碑重开一套 plans/」
+    // 那笔里整体退场，嵌它的关于页（`ui/shared/about.rs`）次日也删了；之后另起的 `doc/`
+    // 没有任何构建期消费者。而 cargo 对「rerun-if-changed 指向不存在的路径」的处理是
+    // **每一趟都判脏** —— 于是 folio-app 连同那份 1.5 GB 的测试可执行文件每次
+    // `cargo test` / `cargo run` / `cargo build` 都要重编、重链一遍。
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR 由 cargo 设好"));
     let mut generated = String::from(

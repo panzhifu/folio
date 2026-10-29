@@ -8,9 +8,10 @@ use std::ops::Range;
 use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
 use crate::content::dom::NodeId;
+use crate::content::format::css::computed::ObjectFit;
 use crate::content::format::css::computed::{
-    BackgroundPosition, BackgroundRepeat, BackgroundSize, BorderStyle, Color, ComputedStyle,
-    Display, StyledDom, TextAlign, WritingMode,
+    BackgroundAttachment, BackgroundPosition, BackgroundRepeat, BackgroundSize, BorderStyle, Color,
+    ComputedStyle, Display, StyledDom, TextAlign, WritingMode,
 };
 use crate::infra::metrics::Metric;
 
@@ -28,6 +29,19 @@ pub struct LineRun {
     pub width: f32,
     pub ascent: f32,
     pub descent: f32,
+    /// 沿字轴（横排是 x）额外挪的 px，口径与 [`MarkerRun::offset`] 同一份：**物理**左偏移，
+    /// 所以 RTL 那一路的符号在排版期就已折好。正文恒为 0。
+    ///
+    /// 唯一的用户是 ruby 注音：注音不吃前进量（它的字符在宽度表里是 0），流动把它放在
+    /// 容器末尾，而 `ruby-align` 要的那一段在容器里头 —— 差的就是这一格。竖直那一半不在
+    /// 这里：注音抬到基字上方走的是 [`RunStyle::baseline_shift`]，与 `vertical-align` 同一条
+    /// 既有通路，行盒因此跟着自己长高。
+    /// 绘制（`chapter_layout.rs` 的 `build_row`）与命中（`content::hit` 的两条片段循环）
+    /// **各加一次同一个数**，漏一侧就是「画在那儿、点上去选中别处」。
+    ///
+    /// [`MarkerRun::offset`]: MarkerRun::offset
+    /// [`RunStyle::baseline_shift`]: crate::layout::RunStyle::baseline_shift
+    pub x_offset: f32,
 }
 
 /// 行盒里的一段图片。`href` 是**解析后的容器绝对路径**，绘制层按它取字节解码。
@@ -44,6 +58,11 @@ pub struct ImageRun {
     pub x_offset: f32,
     /// `vertical-align` 折出来的基线偏移（正数往上）。与文本 run 的那一格同源。
     pub baseline_shift: f32,
+    /// 这张图怎么在 `width × height` 这个盒里摆（CSS 的 `object-fit`）。
+    ///
+    /// 排版期只定盒，绘制期按这一格决定「图按哪一块区域采样进盒」：`cover` 要裁、
+    /// `contain` 要留底、`fill` 拉伸。初值 `Fill` 与「以前直接画满盒」等价。
+    pub fit: ObjectFit,
 }
 
 /// 行盒里的一个列表标记（CSS 的 `::marker`）。
@@ -243,6 +262,12 @@ pub struct DecorSeed {
     /// 每帧现问 `ChapterImages` 才是对的，烘进这张表就是第二个真相。
     /// 摆位要的盒尺寸倒是已经在 `x/y/width/height` 里了。
     pub pictures: Vec<DecorPicture>,
+    /// 这是**章节根**的一块 `background-attachment: fixed` 底图：书要的是一整页的画。
+    ///
+    /// 阅读器把它当整窗背板画（贴在窗口上、不进版心），并把这条种子从常规块装饰里
+    /// 滤掉 —— 否则同一张画会在版心里再画一遍，位置还差着一个页眉与安全区。
+    /// 判据与「这一章至少一屏高」那条同源（见 `layout_inner`）。
+    pub full_bleed: bool,
 }
 
 /// 一块背景图的一层：哪张图 + 怎么摆。全是 CSS 侧的原始数，一个像素结果都不带。
@@ -268,6 +293,13 @@ pub struct Layout {
     pub lines: Vec<LineBox>,
     pub width: f32,
     pub height: f32,
+    /// 这一章是「整幅底图封面」：根上是 `cover` + 两轴 `no-repeat` 的整幅底图、作者用
+    /// `height` / `min-height` 要它满一页、章里又没有正文。
+    ///
+    /// 排版已经按整页画把这一章撑到一窗高（判据在 `super::layout_inner` 的
+    /// `is_cover_page`）；绘制侧据此把根底图贴到窗口上，而不是当版心里的块装饰画。
+    /// 只由排版入口在 [`Self::assemble`] 之后置位 —— 手工拼表的测试保持 `false`。
+    pub(super) root_full_bleed: bool,
     /// 这一份用的是哪根推进轴（CSS 的 `writing-mode`，取**根样式**那一格）。
     ///
     /// 竖排时 `blocks` / `lines` 里已经是**物理**坐标：[`assemble`](Self::assemble) 在折索引
@@ -402,6 +434,7 @@ impl Layout {
             flow,
             owner,
             stacked: false,
+            root_full_bleed: false,
         };
         // 叠放性最后才折：那条判据问的是「沿推进轴的底边」，而那两个入口是 `Layout` 的
         // 方法（竖排的起点要按长条总长翻面，那份信息在 `self` 上）。
@@ -670,11 +703,20 @@ impl Layout {
             {
                 continue;
             }
+            // 根块 + 整页底图 = 整页画。`fixed` 底图在这里现认；「整幅 cover 封面章」
+            // 那一档排版已经判过（`Layout::root_full_bleed`）。`decor_seeds` 的序就是
+            // 块表的先序，根永远是第 0 块。
+            let full_bleed = index == 0
+                && (self.root_full_bleed
+                    || style.background_layers.iter().any(|layer| {
+                        layer.attachment == BackgroundAttachment::Fixed && layer.image.is_some()
+                    }));
             out.push(DecorSeed {
                 x: block.x,
                 y: block.y,
                 width: block.width,
                 height: block.height,
+                full_bleed,
                 background: style.background_color,
                 radius: style.corner_radii(block.width, block.height),
                 border: [
@@ -838,6 +880,16 @@ pub struct LayoutOptions {
     /// 谁递这个数：分页档递**一片的高**，滚动档递**视口高** —— 两个都对应浏览器里
     /// `body` 的包含块（打印时是页盒，屏幕上是视口），不是新造的一档取舍。
     pub page_height: Option<f32>,
+    /// 屏幕（或窗口）的**宽**，逻辑像素。`None` = 界面没给，图片按栏宽算。
+    ///
+    /// 只给图片用：一张宽度超过屏幕的图，按屏幕宽等比缩（而不是按栏宽缩在页边距里）——
+    /// 2026-10-30 读者点名要的「大图铺满屏幕」。版心本身仍归 `width`，不归它。
+    pub screen_width: Option<f32>,
+    /// 屏幕（或窗口）的**高**，逻辑像素。`None` = 同「按一页高」。
+    ///
+    /// 与 `screen_width` 一起定「这张图是不是够大到成页」与「缩完多高」：竖图不能高过
+    /// 一屏，否则读者得滚动或翻到下一页才看得全。
+    pub screen_height: Option<f32>,
 }
 
 impl LayoutOptions {
@@ -847,6 +899,8 @@ impl LayoutOptions {
         light: false,
         allow_vertical: false,
         page_height: None,
+        screen_width: None,
+        screen_height: None,
     };
 
     /// 轻量排版（只算高）。
@@ -855,6 +909,8 @@ impl LayoutOptions {
         light: true,
         allow_vertical: false,
         page_height: None,
+        screen_width: None,
+        screen_height: None,
     };
 
     /// 指定宽度的完整排版。
@@ -864,6 +920,8 @@ impl LayoutOptions {
             light: false,
             allow_vertical: false,
             page_height: None,
+            screen_width: None,
+            screen_height: None,
         }
     }
 }

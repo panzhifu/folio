@@ -27,6 +27,11 @@ pub struct FlowDoc {
     pub cover: Option<Vec<u8>>,
     /// 全书图片，按容器路径索引。封面若也在 manifest 里会一并收录。
     pub images: Vec<ImageRes>,
+    /// 全书可见文本里出现过的字符（码点，升序去重）。
+    ///
+    /// 导入扫描顺手收的；开书给内嵌字体做子集化时用它，不要为同一件事再把整本书
+    /// 读一遍。旧库 / 非 EPUB provider 留空 —— 子集化那时退回整份字体。
+    pub font_charset: Vec<u32>,
     /// 整本的翻页方向：`true` = 从右往左翻（阿拉伯语、希伯来语、日文竖排那类）。
     ///
     /// 来源只有 EPUB 的 `<spine page-progression-direction="rtl">` —— 它说的是**翻书**，

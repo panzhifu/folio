@@ -49,7 +49,19 @@ use crate::infra::metrics::Metric;
 /// 字体的**拉丁度量折，汉字回退脸的高度从没进过行盒 —— 那不只是行高不对，`LineRun.ascent`
 /// 是选中矩形的高、也是绘制的基线，所以旧几何里那些行盒要按新口径重排。
 /// **没有这一格，块缓存会把旧行盒原样搬过来，看起来改了等于没改。**
-pub const METRICS_REV: u32 = 2;
+///
+/// v3（2026-10-31）：ruby 注音。**章文本与样式一个字都没动**而两件事同时变了，正是这一格
+/// 存在的理由：
+///
+/// - 断行规则：一个 `<ruby>` 容器内部不再许断点（`Collected::breaks_ruby`），以前「愚者」
+///   可以拆到两行上，现在整个容器连注音一起走；
+/// - 行盒算法：注音靠 `baseline_shift` 抬到基字上方，`LineAcc` 因此把它的上下 extent 算进
+///   `ascent`。假度量下 20 px 正文那一档实测：同一句去掉注音基线是 16.0，带注音是 27.6，
+///   长的一截全在基线之上（`layout::tests::the_line_grows_for_the_annotation_and_that_growth_is_the_whole_cost`）。
+///
+/// 只有带 ruby 的书会真重排（本机语料 40 章 / 552 组，其余书一行都不变），但旧行盒里那些
+/// 容器是拆开的、行高也少一截，留着就是「改了等于没改」。
+pub const METRICS_REV: u32 = 3;
 
 /// 长度量化：1 px 一档。选 1 px 是为了「跟手」（拖窗口时边拖边排），代价是多几次重排；
 /// 2–4 px 更省但会晚一拍（见 `plans/阅读管线.md` 待决第 2 条）。
@@ -101,6 +113,11 @@ pub struct LayoutKey {
     /// 是问不出来的，症状是排版留着旧楔块的高度、切片按新页高切，封面那类垂直居中的页
     /// 会整幅偏出一截。与 `width` 同批量化，两边用的必须是同一个数。
     pub page_height: Option<u32>,
+    /// 屏幕宽（`LayoutOptions::screen_width`），量化后。`None` = 界面没给。
+    ///
+    /// 进键的理由与 `page_height` 同一条：图片的缩小/铺满直接由它算出来，转一次屏
+    /// （横竖切换）栏宽可能不变而这一格变了，不进键就会拿着竖屏算好的图摆在横屏上。
+    pub screen_width: Option<u32>,
     /// 本章图片索引的版本。`<img>` 的固有尺寸是排版输入，换索引就可能换几何；
     /// 而它既不在章文本里也不在样式里，只能单独一格。
     pub images_rev: u32,
@@ -132,6 +149,13 @@ pub struct LayoutInputs {
     pub author_css_hash: u64,
     /// 整份读者偏好的哈希 —— 覆盖范围由 `serde` 的 derive 保证，不是一张手挑清单。
     pub prefs_hash: u64,
+    /// 屏幕（窗口）的宽与高，**量化后**（与 `LayoutKey::width` 同一把尺）。给图片用
+    /// （见 `LayoutOptions::screen_width`）：它会决定一张大图铺多满，也就决定了排版结果。
+    /// `None` = 界面没给。
+    ///
+    /// 放在「输入」里而不是每次 `compose` 单独给：界面只在转屏 / 拉窗口时变，
+    /// 而那一趟本来就要重排 —— 与 `prefs_hash` 同一条「输入变了才重算」的纪律。
+    pub screen: Option<(u32, u32)>,
 }
 
 impl LayoutInputs {
@@ -146,6 +170,7 @@ impl LayoutInputs {
         Self {
             author_css_hash: content_hash(author_css),
             prefs_hash: prefs_hash(prefs),
+            screen: None,
         }
     }
 
@@ -188,6 +213,7 @@ impl LayoutKey {
             width: quantize_px(width),
             columns: u8::try_from(columns).unwrap_or(u8::MAX),
             page_height: page_height.map(quantize_px),
+            screen_width: inputs.screen.map(|(w, _)| w),
             images_rev,
             fonts_rev,
             metrics_rev: METRICS_REV,

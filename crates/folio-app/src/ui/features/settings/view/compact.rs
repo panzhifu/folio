@@ -65,9 +65,10 @@ use gpui_kit::{
 use std::rc::Rc;
 
 use super::SettingsPage;
+use super::pages::membership::status_line;
 use super::spec::{self, RowKind};
 use super::{NotesSheet, spec_pages};
-use crate::ui::components::{FontPicker, TopBar};
+use crate::ui::components::{FontPicker, TopBar, muted_label};
 use crate::ui::services::l10n::tr;
 use crate::ui::services::storage::{self, Job};
 use crate::ui::shell::navigation;
@@ -356,13 +357,23 @@ impl CompactSettings {
         self.pushed()
     }
 
-    /// 根屏：大标题 + 一张分组卡，一行一页，右端只留那枚进去的箭头。
+    /// 根屏：一张会员卡 + 一张分组卡，一行一页，右端只留那枚进去的箭头。
+    ///
+    /// 会员那一格**不摆在入口列表里**，而是单独一张卡顶在列表上面：它要当场露出等级与
+    /// 到期日，而列表那一行按定稿是不挂当前值的（见文件头）。两处摆同一个目的地是噪声，
+    /// 所以列表里跳过它。
     fn root_screen(&self, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity().clone();
         let pages = spec_pages(cx, &self.notes);
+        let membership_ix = SettingsPage::Membership.index();
         let mut rows: Vec<AnyElement> = Vec::new();
         for (ix, page) in pages.iter().enumerate() {
-            if ix > 0 {
+            if ix == membership_ix {
+                continue;
+            }
+            // 分隔线按「前面有没有行」摆，而不是按页序：跳过会员那一格以后，
+            // 列表的第一行不再是从前那个 `ix == 0`。
+            if !rows.is_empty() {
                 rows.push(separator(3.5, cx).into_any_element());
             }
             let entity = entity.clone();
@@ -376,11 +387,52 @@ impl CompactSettings {
             ));
         }
         // 大标题不摆了：这一屏在底部导航里就叫「我的」，顶上再写一句「设置」是同一个入口
-        // 的两个名字，读者先看见的是那句和底栏对不上的字。卡片自己就是这一屏。
+        // 的两个名字，读者先看见的是那句和底栏对不上的字。两张卡各自就是这一屏。
+        // 卡与卡之间是组与组那一道 32 的缝，与子页里组间同一档。
         v_flex()
             .w_full()
-            .child(div().w_full().px_4().mt_2().child(card(rows, cx)))
+            .child(
+                div()
+                    .w_full()
+                    .px_4()
+                    .mt_2()
+                    .child(card(vec![self.membership_cell(cx)], cx)),
+            )
+            .child(div().w_full().px_4().mt_8().child(card(rows, cx)))
             .into_any_element()
+    }
+
+    /// 会员卡那一行：图标 + 两行字（页名，与「哪天到期 / 未开通」那一句）+ 一枚进去的箭头。
+    ///
+    /// 入口列表那些行不挂当前值，理由是「一行管的是去哪儿，不是现在是多少」；这一格是那条
+    /// 规矩上唯一的例外：会员要看的正是「我现在算哪一档、哪天到期」，把这句藏进下一屏
+    /// 等于这张卡白做。次要那一句走 [`muted_label`] —— 它是**行的内容**（状态），不是注释，
+    /// 与同步那格的状态字同一档。
+    ///
+    /// 命中高仍由 [`ROW_HIT`] 兜：`min_h` 而不是固定高，多一句字这一行长一点，44 那一档不缩。
+    fn membership_cell(&self, cx: &mut Context<Self>) -> AnyElement {
+        let page_ix = SettingsPage::Membership.index();
+        let entity = cx.entity().clone();
+        let title = tr(cx, "page.membership");
+        list_row(
+            SharedString::from("settings-membership-card"),
+            title.clone(),
+            vec![
+                icon_slot(IconName::Crown, cx).into_any_element(),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(label_block(title))
+                    .child(muted_label(status_line(cx), cx).into_any_element())
+                    .into_any_element(),
+                Icon::new(IconName::ChevronRight)
+                    .small()
+                    .text_color(cx.theme().muted_foreground)
+                    .into_any_element(),
+            ],
+            move |_, _, app| entity.update(app, |this, cx| this.open(page_ix, cx)),
+        )
     }
 
     /// 子页顶部那一条：返回 + 标题，与阅读页顶栏、书信息页同一条 [`TopBar`]。

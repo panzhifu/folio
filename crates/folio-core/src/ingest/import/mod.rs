@@ -67,6 +67,7 @@ use std::sync::Arc;
 
 use crate::infra::error::ImportReject;
 use crate::infra::error::Result;
+use crate::infra::i18n::Locale;
 use crate::infra::task::Priority;
 use crate::infra::task::StageCtx;
 use crate::infra::task::TaskEvent;
@@ -231,7 +232,7 @@ impl ImportReport {
         self.unsupported + self.encrypted + self.corrupt + self.unreadable
     }
 
-    /// 一句给人看的话（进日志；屏幕上那句要按 locale 组，core 的字符串只进日志）。
+    /// 一句给人看的话（进日志；屏幕上那句是 [`Self::rejection_line`]，按 locale 组）。
     pub fn summary(&self) -> String {
         format!(
             "成功 {} / 已存在 {} / 拒绝 {}（不支持 {}、加密 {}、坏包 {}、读不动 {}）",
@@ -244,6 +245,43 @@ impl ImportReport {
             self.unreadable
         )
     }
+
+    /// 屏幕上那一句「有几本没进来、为什么」。全批没有拒绝时是 `None` —— 没事不要说话。
+    ///
+    /// 形状是「总数 · 类别 · 类别」，只摆**非零**的那几格，顺序固定：
+    /// 加密 → 坏包 → 不支持 → 读不动。逐本的名字不在这里（那要在日志里，
+    /// `ShelfView: 导入《名字》失败`），屏幕上读者要的是「几本、为什么」。
+    ///
+    /// 四格与 [`Self`] 那四个类别一一对应，**加一类要同时加文案键**：漏一格的后果是
+    /// 这一类书被静默少算，而读者只会看见「少了几本」。
+    pub fn rejection_line(&self, locale: Locale) -> Option<String> {
+        let total = self.rejected();
+        if total == 0 {
+            return None;
+        }
+        let mut line = phrase(locale, "shelf.import_rejected", total);
+        for (key, count) in [
+            ("shelf.reject_encrypted", self.encrypted),
+            ("shelf.reject_corrupt", self.corrupt),
+            ("shelf.reject_unsupported", self.unsupported),
+            ("shelf.reject_unreadable", self.unreadable),
+        ] {
+            if count > 0 {
+                line.push_str(&format!(" · {}", phrase(locale, key, count)));
+            }
+        }
+        Some(line)
+    }
+}
+
+/// 取一头的复数文案：`{key}_{一臂}` 那四条臂按 `Locale::plural` 选一条，数塞进 `count`。
+///
+/// 为什么现拼键名而不是给一个 `count` 参数：`rust_i18n` 4 不做复数，「选哪一臂」这件事
+/// 本来就归 [`Locale::plural`]，而表里的四条臂是 CLDR 的那四类（用不到的臂照抄 `_other`，
+/// 由 `every_plural_key_has_all_four_arms_in_every_language` 钉着）。
+fn phrase(locale: Locale, key: &str, count: usize) -> String {
+    let arm = format!("{key}_{}", locale.plural(count).key_suffix());
+    crate::infra::i18n::t_in(locale, &arm, &[("count", &count)])
 }
 
 /// 把一个来源包成一个后台作业交给 `manager`。返回的 [`TaskHandle`] 就是这批导入的

@@ -717,6 +717,75 @@ impl<'de> Deserialize<'de> for TextDirection {
     }
 }
 
+/// 一张图往哪一块尺寸折。
+///
+/// 三档的差别只在「作者的话与读者的手谁说了算」：
+/// - [`Follow`](Self::Follow) 是**作者说了算**：写了 `object-fit` 才允许放大到屏幕宽
+///   （`cover` 直接放、够大的 `contain` 也放），多看的 `duokan-bleed` 在这一档生效 ——
+///   那本来就是作者说「这张图要铺到屏幕边上」。窄于版心的图不动。
+/// - [`Screen`](Self::Screen) 是**默认那一档**，读者主动要大图：**独占一块的图**不看
+///   `object-fit` 一律按屏幕宽铺（行内的小图与夹在字里的那张不在此列 —— 把它们拉成
+///   满屏会把整段顶走，那不是「大图」而是「排版坏了」）。出血仍生效。
+/// - [`Original`](Self::Original) 是「别替我改这张图」：不放大、不出血，
+///   只在**超出屏幕**时等比缩回来（不缩就会被切掉，屏幕装不下）。
+///
+/// 上限那一格在三档里都至少是版心宽：桌面窗口拖窄、外接屏那种「屏比栏还窄」的形状
+/// 由 [`crate::layout::ports::image_size`] 自己取 `max` 兜住。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageScale {
+    /// 跟书走：作者说铺满才铺满。
+    Follow,
+    /// 满屏：**默认那一档**。整块的图一律按屏幕宽铺（小图仍然不动，判据见
+    /// `layout::collect::fills_the_screen`）。
+    ///
+    /// 2026-10-31 从 `Follow` 换过来：读者要的是「书里的照片就该铺满」，而 `Follow`
+    /// 把这一格交给作者 —— 公版书与工具导出的 EPUB 绝大多数根本没写 `object-fit`，
+    /// 于是整屏照片在阅读器里只剩半屏。「铺满」这一档从来不动小图，换的只是默认值。
+    #[default]
+    Screen,
+    /// 原始尺寸：不放大、不出血，只保证不溢出屏幕。
+    Original,
+}
+
+impl ImageScale {
+    /// 全部档位，按设置界面该出现的顺序。
+    pub const ALL: &'static [Self] = &[Self::Follow, Self::Screen, Self::Original];
+
+    /// 配置文件与设置界面用的键名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Follow => "follow",
+            Self::Screen => "screen",
+            Self::Original => "original",
+        }
+    }
+
+    /// 认不出的值回落**初始那一档**（`Self::default()`，不写死第二份）：与
+    /// [`TextDirection::parse`] 同一条 —— 手改坏一个键不该让整节 `Reader` 退回默认。
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "follow" => Self::Follow,
+            "screen" => Self::Screen,
+            "original" => Self::Original,
+            _ => Self::default(),
+        }
+    }
+}
+
+/// 自己实现序列化，理由同 [`TextDirection`]：derive 碰到认不出的字符串会让**整节**退回默认。
+impl Serialize for ImageScale {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageScale {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(Self::parse(&text))
+    }
+}
+
 /// 翻译引擎。
 ///
 /// 序列化名与 [`Self::as_str`] 同一形态：设置页下拉的值、`config.json` 里的写法、
@@ -854,7 +923,61 @@ impl Sync {
     }
 }
 
-/// OPDS 书源列表。与 `Sync` 同一条：密码住在 0600 的 `config.json` 里，
+/// 会员身份。**只有本机这一份记录**：写进去的是一个到期日，等级是现算出来的。
+///
+/// 为什么存**本地日序号**而不是字符串或 Unix 秒：这一格唯一要回答的问题是「今天还算不算数」，
+/// 而把时刻折成「读者所在时区的那一天」正是 [`crate::infra::time::local_day`] 做的事
+/// （core 不读环境，偏移由 app 传进来）。存秒就得在比较前再折一次，存 `YYYY-MM-DD` 就得为
+/// 比较再解一遍串；日序号直接比大小。
+///
+/// 也不存「等级」那一格：它能由到期日算出来，存两份就会对上「高级会员 + 已过期」这种界面
+/// 上说不出来的组合。以后接真支付，写进的还是同一个字段。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Membership {
+    /// 还算数的最后那一天，本地日序号。`0` 就是从没开过 —— 1970-01-01 对任何今天都已是过去，
+    /// 所以这一档不需要单独的哨兵值。
+    pub until_day: i64,
+}
+
+/// 会员等级。**是派生值，不落盘**（见 [`Membership`] 的说明），所以没有 `Serialize`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MembershipTier {
+    /// 普通读者。
+    #[default]
+    Standard,
+    /// 高级会员，且在有效期内。
+    Premium,
+}
+
+impl Membership {
+    /// 本机试用给的天数。界面上那句「试用 N 天」与写进配置的到期日从同一个数来。
+    pub const TRIAL_DAYS: i64 = 30;
+
+    /// 从今天起一段试用，到期日该写什么：今天算第一天，所以是今天 + 天数 - 1。
+    ///
+    /// 这一格算术只写在这一处。写成 `today + TRIAL_DAYS` 实际给的是 31 天，
+    /// 而屏幕上那句「30 天」就成了假话 —— 差的那一天在界面上量不出来。
+    pub fn trial_until_day(today: i64) -> i64 {
+        today + Self::TRIAL_DAYS - 1
+    }
+
+    /// 在 `today`（本地日序号）这一天算哪一档。含当天。
+    pub fn tier_on(&self, today: i64) -> MembershipTier {
+        if today <= self.until_day {
+            MembershipTier::Premium
+        } else {
+            MembershipTier::Standard
+        }
+    }
+
+    /// 离到期还有几天（含当天）；已经过期或从没开过回 `None`。
+    pub fn days_left_on(&self, today: i64) -> Option<i64> {
+        matches!(self.tier_on(today), MembershipTier::Premium).then(|| self.until_day - today + 1)
+    }
+}
+
+/// OPDS 书源列表。与 `Sync` 同一条:密码住在 0600 的 `config.json` 里,
 /// 不单开秘密文件。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -921,6 +1044,9 @@ pub struct Reader {
     pub font_weight: u16,
     /// 正文按哪根轴排（见 [`TextDirection`]）。进 `Reader` 是因为它会改变行盒几何。
     pub text_direction: TextDirection,
+    /// 一张图往哪一块尺寸折（见 [`ImageScale`]）。进 `Reader` 是因为它改的是图的盒尺寸，
+    /// 也就是行盒本身 —— 与 `text_direction` 同一档「会改排版产物」的偏好。
+    pub image_scale: ImageScale,
     pub font_family: String,
     pub mono_font_family: String,
     /// 目录那一屏的行高档位。只影响目录，不影响正文 —— 正文的松紧是 `line_height`。
@@ -960,6 +1086,7 @@ impl Default for Reader {
             justify: true,
             font_weight: 400,
             text_direction: TextDirection::Auto,
+            image_scale: ImageScale::default(),
             font_family: "LXGW WenKai".into(),
             mono_font_family: "monospace".into(),
             toc_density: TocDensity::default(),
@@ -1210,6 +1337,7 @@ pub struct Config {
     pub translation: Translation,
     pub sync: Sync,
     pub opds: Opds,
+    pub membership: Membership,
     pub logging: Logging,
 }
 
@@ -1227,6 +1355,7 @@ impl Default for Config {
             translation: Translation::default(),
             sync: Sync::default(),
             opds: Opds::default(),
+            membership: Membership::default(),
             logging: Logging::default(),
         }
     }
@@ -1470,10 +1599,13 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::Path;
 
-    use crate::infra::config::{Config, Env, Layer, TranslationEngine, WatchDir};
+    use crate::infra::config::{
+        Config, Env, Layer, Membership, MembershipTier, TranslationEngine, WatchDir,
+    };
     use crate::infra::i18n::Locale;
     use crate::{
-        AnnotationStyle, Appearance, Language, Library, Mode, PageTurn, Provenance, Reader,
+        AnnotationStyle, Appearance, ImageScale, Language, Library, Mode, PageTurn, Provenance,
+        Reader,
     };
     use serde_json::json;
 
@@ -2204,6 +2336,97 @@ mod tests {
         let broken = load(r#"{"speech":"快一点"}"#);
         assert_eq!(broken.speech, crate::Speech::default());
         assert!(broken.speech.auto_scroll, "退默认时自动翻页是开着的");
+    }
+
+    /// 老配置里根本没有 `membership` 这一节：按「从没开过」读回来，而不是当成坏文件。
+    /// 靠 `#[serde(default)]` 兜住，所以缺节与缺字段都不该牵连别的节。
+    #[test]
+    fn a_config_without_the_membership_section_reads_as_never_activated() {
+        let got = load(r#"{}"#);
+        assert_eq!(got.membership, Membership::default());
+        assert_eq!(got.membership.until_day, 0);
+        assert_eq!(got.membership.tier_on(20_500), MembershipTier::Standard);
+        assert_eq!(
+            got.language.locale,
+            Locale::default(),
+            "缺 membership 不该把别的节一起抹掉"
+        );
+        // 节在而字段缺，同样逐格兜住。
+        assert_eq!(load(r#"{"membership":{}}"#).membership.until_day, 0);
+        // 这一句是上面两条的**对照**：值认得回来，才说明 `load` 没有在 JSON 读不进时
+        // 静默回落成默认值 —— 回落的样子与「从没开过」在屏上一模一样。
+        assert_eq!(
+            load(r#"{"membership":{"until_day":20500}}"#)
+                .membership
+                .until_day,
+            20_500
+        );
+    }
+
+    /// 到期日**含当天**：那一天还算会员，第二天就不算了。界面上那句「到期日」全靠这一条。
+    #[test]
+    fn the_expiry_day_still_counts_and_the_day_after_does_not() {
+        let member = Membership { until_day: 20_500 };
+        assert_eq!(member.tier_on(20_499), MembershipTier::Premium);
+        assert_eq!(
+            member.tier_on(20_500),
+            MembershipTier::Premium,
+            "最后一天仍算数"
+        );
+        assert_eq!(member.tier_on(20_501), MembershipTier::Standard);
+        // 手改出来的负数不当「永远有效」：那只是过去的一天。
+        assert_eq!(
+            Membership { until_day: -5 }.tier_on(0),
+            MembershipTier::Standard
+        );
+    }
+
+    /// 试用那 30 天**把今天算成第一天**：写 `+ 30` 就给成 31 天，而屏幕上那句
+    /// 「30 天」会说不清差的那一天。剩下的天数含到期日当天。
+    #[test]
+    fn the_trial_is_exactly_thirty_days_counting_today_as_the_first() {
+        let today = 20_500;
+        let until = Membership::trial_until_day(today);
+        assert_eq!(until, today + 29, "含今天正好 30 天");
+        let left = |day| Membership { until_day: until }.days_left_on(day);
+        assert_eq!(left(today), Some(30), "开通那天还剩整 30 天");
+        assert_eq!(left(until), Some(1), "到期那天还剩 1 天");
+        assert_eq!(left(until + 1), None, "过了一天就没有「还剩」可言");
+        assert_eq!(Membership::default().days_left_on(today), None);
+    }
+
+    /// 「图片缩放」那一格：三档各认自己的键，认不出的回落**初始那一档**，而**同一节里别的键
+    /// 一个都不许跟着没**。
+    ///
+    /// 这一格是自己实现 `Deserialize` 的（同 [`PageTurn`]、[`TextDirection`]）：derive 碰到
+    /// 拼错的字符串会让整节 `Reader` 退回默认 —— 字号、行距、字体家族就成了一个错键的代价。
+    #[test]
+    fn the_image_scale_tiers_round_trip_while_an_unknown_one_only_falls_back_for_itself() {
+        for (text, want) in [
+            ("follow", ImageScale::Follow),
+            ("screen", ImageScale::Screen),
+            ("original", ImageScale::Original),
+            // 认不出的一律落初始那一档（现在是「铺满」），不许把读者的别的偏好卷走。
+            ("fullscreen", ImageScale::default()),
+            ("", ImageScale::default()),
+        ] {
+            let got = load(&format!(r#"{{"reader":{{"image_scale":"{text}"}}}}"#));
+            assert_eq!(got.reader.image_scale, want, "写法 {text:?}");
+        }
+        let both = load(r#"{"reader":{"image_scale":"spin","font_size":22.0}}"#);
+        assert_eq!(both.reader.image_scale, ImageScale::default());
+        assert_eq!(
+            both.reader.font_size, 22.0,
+            "认不出的那一格不该把字号一起抹掉"
+        );
+        // 缺节 / 缺字段都按初始那一档读回来。
+        assert_eq!(load("{}").reader.image_scale, ImageScale::default());
+        // 写出去的形态与读回来的一致（配置文件里就是这三个词），初始那一档写的是 `screen`。
+        let text = serde_json::to_string(&Config::default().reader).unwrap();
+        assert!(
+            text.contains(r#""image_scale":"screen""#),
+            "写出的是 {text}"
+        );
     }
 }
 

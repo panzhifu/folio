@@ -14,8 +14,8 @@ use folio_core::content::format::css::computed::{
     BackgroundTile, BorderStyle, Color, Length,
 };
 use folio_core::infra::metrics::Metric;
-use folio_core::layout::DecorSeed;
-use gpui_kit::{Hsla, SharedString};
+use folio_core::layout::{DecorPicture, DecorSeed};
+use gpui_kit::{Hsla, SharedString, hsla};
 
 use crate::ui::features::reader::model::chapter_layout::{Document, RowFragment};
 use crate::ui::features::reader::model::measure::FontCache;
@@ -260,6 +260,12 @@ pub struct VisibleImage {
     /// `<a epub:type="noteref">`。文字命中碰不到这种标记（`<a>` 里没有一个可命中的
     /// 字符），所以注文在这里解好带出来，绘制层点它时直接抬弹层，不再去开图片查看器。
     pub footnote: Option<String>,
+    /// 这张图怎么在 `width × height` 这个盒里摆（CSS 的 `object-fit`）。
+    ///
+    /// 排版期只定盒；`cover` / `contain` 要的「按哪一块区域采样」在这一格。以前一条不认，
+    /// 修图书里 `width:100%; object-fit:cover` 的图会被拉成扁的（读者 2026-10-30 报的
+    /// 「图片显示效果」）。
+    pub fit: crate::ui::foundation::images::ObjectFit,
 }
 
 /// 一屏（或一栏）要画的全部单元。
@@ -297,6 +303,9 @@ impl Scene {
         // 主题的链接色。作者没写 `color` 而这一段在一条 `<a href>` 里时落到它，
         // 由调用方从当前主题取（引擎里不嵌任何色值）。
         link: Hsla,
+        // 章节根的整页底图由阅读器当整窗背板画（见 `body::page_art`），这里跳过它，
+        // 别在版心里再画一遍 —— 位置还差着一个页眉与安全区。
+        skip_full_bleed: bool,
     ) -> Self {
         // 等宽偏好与书的字体整份取一次：一个场景里所有 run 共用，别在逐 run 里克隆。
         let mono = SharedString::from(document.prefs().mono_font_family.clone());
@@ -334,6 +343,7 @@ impl Scene {
             top,
             foreground,
             document.images(),
+            skip_full_bleed,
         );
         let __decor = __t.ns();
         crate::ui::features::reader::model::perf::add(|frame| frame.decor_ns += __decor);
@@ -447,6 +457,9 @@ impl Scene {
                                 width: placed.width,
                                 height: placed.height,
                                 footnote: document.footnote_note_for_node(placed.node),
+                                // 这一格两侧同为 app 侧的 `ObjectFit`（core 那一层在
+                                // `chapter_layout` 摆位时已经折过来），不再 `into` 一次。
+                                fit: placed.fit,
                                 image,
                             });
                         }
@@ -499,9 +512,13 @@ fn place_decorations(
     foreground: Hsla,
     // 背景图的固有尺寸与字节都从这里现问（与 `<img>` 那条同一个来路）。
     images: &ChapterImages,
+    skip_full_bleed: bool,
 ) -> Vec<BlockDecor> {
     let mut out = Vec::new();
     for seed in seeds {
+        if skip_full_bleed && seed.full_bleed {
+            continue;
+        }
         let (start, thick) = if vertical {
             (seed.x, seed.width)
         } else {
@@ -570,6 +587,72 @@ fn place_decorations(
     out
 }
 
+/// 一整窗的背板：一层（或多层）背景图按**窗口尺寸**摆好，坐标就是阅读会话坐标。
+///
+/// 整页画章（`background-attachment: fixed` 底图 / 单图页）由阅读器把这张画贴在窗口上，
+/// 而不是画在版心里：画布是整扇窗，读数带浮在它上面。摆法仍走 CSS 的
+/// `background-size` / `-position` / `-repeat`（与块装饰同一个 [`background_tiles`]），
+/// 所以作者写的 `cover` + `bottom center` 在这里逐字生效。
+pub(in crate::ui::features::reader) fn backdrop_decor(
+    pictures: &[DecorPicture],
+    x: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    images: &ChapterImages,
+) -> Option<BlockDecor> {
+    let mut out = Vec::new();
+    for picture in pictures {
+        let Some(request) = images.decode_request(&picture.href) else {
+            continue;
+        };
+        let tiles = background_tiles(
+            width,
+            height,
+            images.natural_size(&picture.href),
+            &picture.size,
+            &picture.position,
+            &picture.repeat,
+        );
+        if tiles.is_empty() {
+            continue;
+        }
+        out.push(BlockPicture {
+            image: request,
+            tiles,
+        });
+    }
+    (!out.is_empty()).then(|| BlockDecor {
+        x,
+        top,
+        width,
+        height,
+        background: None,
+        radius: [0.0; 4],
+        border: [(0.0, hsla(0.0, 0.0, 0.0, 0.0), BorderStyle::None); 4],
+        pictures: out,
+    })
+}
+
+/// 单图页的背板图：一张图按 `cover` 铺满整窗（居中）。
+///
+/// 盘上的图已经按屏幕比例挑过（见 `body::full_screen_image_href`），所以这一档通常
+/// 不裁也不留边；挑不到整屏变体时才由它兜住「整窗一页」的形状。
+pub(in crate::ui::features::reader) fn full_cover_picture(href: &str) -> DecorPicture {
+    DecorPicture {
+        href: href.to_string(),
+        size: BackgroundSize::Cover,
+        position: BackgroundPosition {
+            x: BackgroundAxis::Fraction(0.5),
+            y: BackgroundAxis::Fraction(0.5),
+        },
+        repeat: BackgroundRepeat {
+            x: BackgroundTile::NoRepeat,
+            y: BackgroundTile::NoRepeat,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! 装饰短表的**每帧那一半**：按可见带裁、加三个平移数、落主题前景。
@@ -601,6 +684,7 @@ mod tests {
             width: 300.0,
             height,
             background: Some(Color(193, 204, 192)),
+            full_bleed: false,
             radius: [0.0; 4],
             border: [
                 (0.0, None, BorderStyle::None),
@@ -626,6 +710,7 @@ mod tests {
             60.0,
             black(),
             &images(),
+            false,
         );
         assert_eq!(decor.len(), 1);
         let decor = &decor[0];
@@ -666,6 +751,7 @@ mod tests {
             0.0,
             black(),
             &images(),
+            false,
         );
         assert_eq!(decor.len(), 1, "900 那条在窗外：{decor:?}");
     }
@@ -687,6 +773,7 @@ mod tests {
             0.0,
             black(),
             &images(),
+            false,
         );
         assert_eq!(decor.len(), 1, "父盒跨着整条带，必须画：{decor:?}");
         assert_eq!(decor[0].height, 5000.0);
@@ -918,6 +1005,7 @@ mod tests {
                 0.0,
                 black(),
                 &images(),
+                false,
             )
             .is_empty()
         );

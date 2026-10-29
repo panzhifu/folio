@@ -182,6 +182,22 @@ pub trait DocumentProvider: Send + Sync {
         None
     }
 
+    /// 同 [`Self::font_refs`]，但复用**已经打开的** [`Container`]。
+    ///
+    /// 开书时读 CSS 那一趟已经把容器打开（`BookDocument::stylesheet` 走共享 `Container`），
+    /// 这里再 `Zip::open` 一次就是白付一次中央目录与一遍 `container.xml`/OPF。默认
+    /// `None` = 这个 provider 没有共享容器这条快路，调用方退回 [`Self::font_refs`]。
+    ///
+    /// [`Container`]: crate::content::format::container::Container
+    fn font_refs_in(
+        &self,
+        _path: &Path,
+        _container: &crate::content::format::container::Container,
+        _wanted: &[String],
+    ) -> Option<Vec<FontRef>> {
+        None
+    }
+
     /// 按 [`Self::font_refs`] 给的身份读一份字节。默认 `None` = 走 [`Self::fonts`]。
     fn read_font(&self, _path: &Path, _font: &FontRef) -> Option<Vec<u8>> {
         None

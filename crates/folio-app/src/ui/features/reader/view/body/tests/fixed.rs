@@ -13,8 +13,8 @@ use folio_core::store::Store;
 use folio_core::{Content, Format, Locator, PageTurn};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Entity, InputEvent as _, PinchEvent, Pixels, Point,
-    TestAppContext, TouchPhase, point, px,
+    AnyWindowHandle, AppContext as _, Entity, InputEvent as _, LongPressEvent, PinchEvent, Pixels,
+    Point, TestAppContext, TouchPhase, point, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -1009,5 +1009,46 @@ fn pinching_in_continuous_mode_holds_the_point_under_the_fingers(cx: &mut TestAp
     assert!(
         (content_before - content_after).abs() < 2.0,
         "手指下那一段该停在原处：{content_before} vs {content_after}"
+    );
+}
+
+/// 定版式正文上的**长按**：与可重排同一套手势 —— 吸词、松手后菜单出来。
+///
+/// 手机上 PDF 没有拖选，长按是唯一的入口。这条与上面拖选那条互补：拖选走鼠标事件，
+/// 长按走手势识别器送来的 `LongPressEvent`，两条少一条，读者就少一半。
+#[gpui_kit::test]
+fn a_pdf_page_long_press_selects_and_opens_the_menu(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/wps-paper.pdf");
+    settle(cx, handle);
+    let at = pdf_char(&view, cx, 0, 0.25);
+    for phase in [TouchPhase::Started, TouchPhase::Ended] {
+        dispatch(
+            cx,
+            handle,
+            LongPressEvent {
+                phase,
+                start_position: at,
+                position: at,
+            }
+            .to_platform_input(),
+        );
+    }
+    let (selection, menu) = view.read_with(cx, |v, _| (v.selection(), v.selection_menu_open()));
+    assert!(selection.is_some(), "定版式长按应选中一个词");
+    assert!(menu, "定版式长按成选后菜单条应开着");
+    // 开着不等于摆得出来：定版式的高亮在另一层里算，菜单锚点必须也接到那一份，
+    // 否则 `slot` 判 Hidden，屏上就是「选区在、菜单不出现」。
+    settle(cx, handle);
+    let bounds = view
+        .read_with(cx, |v, _| v.menu_bounds.get())
+        .expect("定版式长按后菜单应真的上屏");
+    assert!(
+        f32::from(bounds.size.height) >= 88.0,
+        "菜单 bounds 太矮：{bounds:?}"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.taps_selection_ui(bounds.center())),
+        "落在菜单上的那一击必须先被选中这一套吃掉"
     );
 }

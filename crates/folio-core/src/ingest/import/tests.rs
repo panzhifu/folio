@@ -2539,3 +2539,93 @@ fn a_url_source_carries_its_headers_to_the_transport() {
             .any(|(name, value)| name == "Authorization" && value == "Basic dXNlcjpwYXNz")
     );
 }
+
+/// 屏幕上那句「几本没进来、为什么」：只摆非零的类别，顺序固定，全批成功时不说话。
+///
+/// 这条同时是「报表四格与文案四键一一对应」的门禁：加一类而漏了这里的键，
+/// 那一类就被静默少算 —— 读者只会看见「少了几本」。
+#[test]
+fn the_rejection_line_names_only_the_categories_that_are_not_zero() {
+    use crate::infra::i18n::Locale;
+
+    let empty = ImportReport {
+        added: 3,
+        ..Default::default()
+    };
+    assert_eq!(empty.rejection_line(Locale::En), None, "全批成功不该说话");
+
+    // 只有加密：总数与那一格，别的不出现。
+    let drm = ImportReport {
+        encrypted: 2,
+        ..Default::default()
+    };
+    let line = drm.rejection_line(Locale::ZhHans).unwrap();
+    assert_eq!(
+        line, "未导入 2 本 · 2 本带 DRM 加密",
+        "中文四臂同文：{line}"
+    );
+    assert!(!line.contains("已损坏"), "没发生的类别不该出现在句子里");
+
+    // 四类一起：顺序按「加密 → 坏包 → 不支持 → 读不动」，不是按数字大小。
+    let all = ImportReport {
+        added: 1,
+        duplicate: 4,
+        unsupported: 3,
+        encrypted: 5,
+        corrupt: 1,
+        unreadable: 2,
+    };
+    let line = all.rejection_line(Locale::ZhHans).unwrap();
+    assert_eq!(
+        line, "未导入 11 本 · 5 本带 DRM 加密 · 1 本文件已损坏 · 3 本格式暂不支持 · 2 本读不动",
+        "总数是四格之和（{line}）"
+    );
+}
+
+/// 复数那一档真的按语言选臂：英文 `1` 走 `_one`，俄文 21 走 `_one`、5 走 `_many`。
+///
+/// 表里四臂齐全由 `every_plural_key_has_all_four_arms_in_every_language` 兜，
+/// 这一条兜的是**选臂之后读出来的那句话**——臂选错时屏幕上是一串看着差不多的错字。
+#[test]
+fn the_rejection_line_picks_the_plural_arm_the_language_expects() {
+    use crate::infra::i18n::Locale;
+
+    let one = ImportReport {
+        encrypted: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        one.rejection_line(Locale::En).unwrap(),
+        "1 book was not imported · 1 has DRM protection"
+    );
+    let many = ImportReport {
+        encrypted: 3,
+        ..Default::default()
+    };
+    assert_eq!(
+        many.rejection_line(Locale::En).unwrap(),
+        "3 books were not imported · 3 have DRM protection"
+    );
+    // 俄语：21 → one，5 → many（`未导入`那一格跟着变，`带 DRM` 那格与数无关）。
+    let twenty_one = ImportReport {
+        encrypted: 21,
+        ..Default::default()
+    };
+    assert_eq!(
+        twenty_one.rejection_line(Locale::Ru).unwrap(),
+        "21 книга не импортирована · 21 с защитой DRM"
+    );
+    let five = ImportReport {
+        corrupt: 5,
+        ..Default::default()
+    };
+    assert_eq!(
+        five.rejection_line(Locale::Ru).unwrap(),
+        "5 книг не импортировано · 5 книг повреждено"
+    );
+    // 日语与中文一样只有 `_other` 一臂，但句子得是日语的。
+    assert_eq!(
+        five.rejection_line(Locale::Ja).unwrap(),
+        "5 冊を登録できませんでした · 5 冊はファイルが壊れています"
+    );
+}

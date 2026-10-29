@@ -169,6 +169,8 @@ fn read_with(path: &Path, with_text: bool) -> Result<(DocMeta, Content)> {
         css_hrefs: Vec::new(),
         // 目录由章表来（与 FB2 同一做法）。
         toc: Vec::new(),
+        // RTF 的正文扫描没有收字符集：子集化对这类书退回整份字体。
+        font_charset: Vec::new(),
         // 翻页方向只有 EPUB 的 spine 那一格读得出来，其余格式按左翻。
         progression_rtl: false,
         // RTF 没有「封面」这个结构：`\info` 里不含图，第一张插图也不猜成封面 ——

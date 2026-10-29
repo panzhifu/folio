@@ -428,6 +428,8 @@ fn geometry(
                 light: false,
                 allow_vertical: false,
                 page_height: None,
+                screen_width: None,
+                screen_height: None,
             },
             &Mock,
             &folio_core::layout::NoImages,

@@ -44,6 +44,7 @@ use crate::content::dom::NodeId;
 use crate::content::format::css::computed::{BreakWhen, ComputedStyle, StyledDom};
 
 use super::Layout;
+use super::geometry::{LineBox, LineFragment};
 
 /// 分片参数。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -110,6 +111,56 @@ pub struct Fragment {
     pub page: usize,
     /// 本片在所属页内的栏号（0 基）。`columns == 1` 时恒为 0。
     pub column: usize,
+    /// 这一片是不是**整页画**：那一页没有一行有宽度的正文，装的是恰好一张铺到版心
+    /// 八成以上的图。空 = 普通页；非空 = 那几张图的容器路径，按在片里出现的顺序。
+    ///
+    /// 三条口径，都是硬的：
+    ///
+    /// - **只给绘制方读，不回灌排版**。这一格不改片高、不改断行、不改页数，所以它
+    ///   不进 `LayoutKey`、也不许进样式哈希 —— 进了就等于每换一档模式重排整章。
+    ///   判据在 [`picture_page_hrefs`]，与界面从前自己扫一遍整章那一条同一套。
+    /// - **判据只看内容与结构，不看视口**。同一份 `Layout` 喂给连续滚动与分页，
+    ///   两档读到的旗**范围**可以不同（连续那一档一片装完整章，于是它的旗说的就是
+    ///   「整章只有这一张图」），但页数必须相同 —— 界面那条「切片不改断行」的不变量
+    ///   靠这一条守住。绘制层要按页铺满，就必须按页读旗，而不是自己再判一次章。
+    /// - 今天 `Vec` **恒为 0 或 1 个**。用 `Vec` 是给「一小节里连续几张照片折成一叠」
+    ///   那一档留口：那一叠在排版里只占一格，读出来就是几张（见
+    ///   `doc/图片呈现.md` §二）。
+    pub picture_page: Vec<String>,
+}
+
+/// 一段行区间里是不是「整页画」，是的话交出那几张图的容器路径。
+///
+/// 判据三条，缺一条就交空表：
+/// - 出现任何**有宽度**的文字 → 这一页有正文，不是整页画。空 run 是段落收尾留下的
+///   零宽片段，拿它把整页画判成正文页就等于整条规则不成立；
+/// - 任何一张图的绘制宽度**不到版心八成** → 不是整页画。一枚居中的小徽标独占一页
+///   被撑到整窗，只多出一片空白；
+/// - 剩下的交出去，由调用方决定「几张算一页一图」（今天的要求是恰好一张）。
+///
+/// `content_width` 取 [`Layout::width`]（版心宽）。那条八成线画在引擎里而不是界面里：
+/// 「什么算大图」是排版的判断，绘制层只该读结论。
+pub(crate) fn picture_page_hrefs(
+    lines: &[LineBox],
+    range: Range<usize>,
+    content_width: f32,
+) -> Vec<String> {
+    let mut hrefs: Vec<String> = Vec::new();
+    for line in range.filter_map(|index| lines.get(index)) {
+        for fragment in &line.fragments {
+            match fragment {
+                LineFragment::Image(run) => {
+                    if run.width < content_width * 0.8 {
+                        return Vec::new();
+                    }
+                    hrefs.push(run.href.clone());
+                }
+                LineFragment::Text(run) if run.width > 0.0 => return Vec::new(),
+                LineFragment::Text(_) | LineFragment::Marker(_) => {}
+            }
+        }
+    }
+    hrefs
 }
 
 impl Fragment {
@@ -358,6 +409,8 @@ impl<'a> Fragmentainer<'a> {
             empty: true,
             page: slot / columns,
             column: slot % columns,
+            // 空片没有内容，也就不是整页画。
+            picture_page: Vec::new(),
         }
     }
 
@@ -445,6 +498,10 @@ impl<'a> Fragmentainer<'a> {
         if end >= self.layout.lines.len() {
             self.done = true;
         }
+        // 「恰好一张」才当整页画：两张并排的一页该按版心画两张，不是按窗铺一张
+        // （图叠那一档会在排版之前就把它们折成一张，那时候这里读到的还是一格）。
+        let hrefs = picture_page_hrefs(&self.layout.lines, start..end, self.layout.width);
+        let picture_page = if hrefs.len() == 1 { hrefs } else { Vec::new() };
         Fragment {
             lines: start..end,
             origin_y,
@@ -453,6 +510,7 @@ impl<'a> Fragmentainer<'a> {
             empty: false,
             page: slot / columns,
             column: slot % columns,
+            picture_page,
         }
     }
 }

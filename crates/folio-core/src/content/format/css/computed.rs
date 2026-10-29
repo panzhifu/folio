@@ -33,6 +33,67 @@ pub enum TextAlign {
     Justify,
 }
 
+/// 一张图要「出血」到哪几条边（多看的 `duokan-bleed` 扩展）。
+///
+/// 它不是 CSS 的盒模型，而是「这张图铺到屏幕边上、不要页边距」这件事的最小表示。
+/// **横向那两条边（`left` / `right`）真被排版层消费**：判据与走法见
+/// `layout::collect::bleeds_wide` —— 图自己或它的任意一层祖先写了都算，因为真书把
+/// 这一条写在包图的那个块上（《诡秘之主》三个类全是 `div`）。基准因此换成屏幕宽，
+/// 于是 `width:100%` 折成满屏而不是满栏，行宽仍按栏宽折回。
+///
+/// `top` / `bottom` 存下来而**这一版没有对应动作**：纵向出血要的是「这张图盖住页顶/页底」，
+/// 那要改的是分片的边界而不是一张图的盒尺寸 —— 改分片等于把「一页多高」这件事重做一遍。
+/// 所以只置纵向那两条时，屏上与没写一模一样。为什么不把它记进 `KNOWN_UNIMPLEMENTED`：
+/// 那一名单是按属性名算的，而这条属性名**已经在生效**（横半）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Bleed {
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+    pub left: bool,
+}
+
+impl Bleed {
+    pub const NONE: Self = Self {
+        top: false,
+        right: false,
+        bottom: false,
+        left: false,
+    };
+
+    /// 有没有一条边出血（四条都没置等于没写）。
+    pub fn any(self) -> bool {
+        self.top || self.right || self.bottom || self.left
+    }
+
+    /// 横向出血：这张图的可用宽换成整屏宽。
+    pub fn horizontal(self) -> bool {
+        self.left || self.right
+    }
+}
+
+/// `object-fit`：一张图在它自己的盒里怎么摆。
+///
+/// 排版期只用到「盒子多大」，所以这一格**不影响排版**；绘制期拿它决定「图按哪一块区域
+/// 采样进这个盒」——`cover` 要裁、`contain` 要留底、`fill` 拉伸。
+///
+/// 以前这里一条都不认：修图书里常见的 `img { width: 100%; object-fit: cover }` 会把一张
+/// 扁图画成拉长的样子（《基督山伯爵》699 MB 那本 660 个元素写了 `contain`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ObjectFit {
+    /// 拉伸填满，不管比例。CSS 初值。
+    #[default]
+    Fill,
+    /// 保比例缩到盒内，留底。
+    Contain,
+    /// 保比例铺满盒，超出裁掉。
+    Cover,
+    /// 原尺寸，超出裁掉，不缩放。
+    None,
+    /// `cover` 与 `contain` 里**更小**的那一个（不放大）。
+    ScaleDown,
+}
+
 /// 一段文字的书写方向，即 CSS 的 `direction`。
 ///
 /// 这一版做到「块与行」这一层：它决定 `start` / `end` 落在物理的哪一边、`text-indent`
@@ -312,6 +373,22 @@ pub struct BackgroundLayer {
     pub size: BackgroundSize,
     pub position: BackgroundPosition,
     pub repeat: BackgroundRepeat,
+    /// `background-attachment`。绘制一律按 `scroll`（图跟着纸走），这一格只有
+    /// `fixed` 在**章节根**上被排版层读：浏览器里那是铺满视口画布的整页底图，
+    /// 所以这一章至少占一屏高（见 `layout::layout_inner`）。挂在普通块上的 `fixed`
+    /// 仍与 `scroll` 同效 —— 流式排版里没有「钉在视口」的对应物。
+    pub attachment: BackgroundAttachment,
+}
+
+/// `background-attachment`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum BackgroundAttachment {
+    #[default]
+    Scroll,
+    /// 只看根章节这一格：铺满视口的整页底图，章节至少一屏高。
+    Fixed,
+    /// 跟着块的滚动区走；流式块没有自己的滚动区，按 `scroll` 摆。
+    Local,
 }
 
 /// `background-size`。
@@ -638,6 +715,55 @@ pub enum CellVAlign {
     Bottom,
 }
 
+/// `ruby-align`：注音（`<rt>`）在它的基字上方横向摆在哪一段。
+///
+/// 容器的前进量取「基字宽 / 注音宽」较宽那一条，注音就在这一段里贴起始边、居中或贴末边。
+/// 三档的落点只是同一个数的三种取法（[`RubyAlign::flow_offset`]），所以三档都真兑现。
+///
+/// `auto` 是 CSS 的初值，规范让它「按基字与注音的长短自己定」，浏览器对单字与等长一律居中，
+/// 所以这里把它折成与 `center` 同一个画面 —— 而不是另猜一套分配规则。《诡秘之主》552 处
+/// 显式写的就是 `center`。
+///
+/// **不收** `justify` / `distribute` / `space-between` / `space-around`：那几档要改的是注音
+/// 自己逐字之间的字距（把注音摊到基字宽上），判不认识比猜一种摊法诚实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RubyAlign {
+    #[default]
+    Auto,
+    Start,
+    Center,
+    End,
+}
+
+impl RubyAlign {
+    /// 注音起点相对**容器起点**的横向偏移占「容器宽 − 注音宽」的几成。
+    ///
+    /// `Auto` 与 `Center` 同一数（见这一格的文档）。排版层只问这一个数，档位与像素的
+    /// 换算留在唯一一处，RTL 要反向时也只动调用点的那一个符号。
+    pub fn flow_offset(self, container: f32, annotation: f32) -> f32 {
+        let slack = (container - annotation).max(0.0);
+        match self {
+            Self::Start => 0.0,
+            Self::Auto | Self::Center => slack * 0.5,
+            Self::End => slack,
+        }
+    }
+}
+
+/// `ruby-position`：注音排在基字的哪一侧。
+///
+/// `over`（初值，中文/日文书里的常态）排在字上方，`under` 排在字下方 —— 两侧的行盒都照
+/// 同一式子长高，所以 `under` 的代价只是符号相反。
+///
+/// `inter-character`（竖排里排在字侧的上一格，用于假名注音的另一种摆法）不收：它要的是
+/// 「沿字轴错开半格」的另一套几何，本机语料 0 处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RubyPosition {
+    #[default]
+    Over,
+    Under,
+}
+
 /// `word-break`：拉丁词内部能不能断。
 ///
 /// 只两档：`normal`（初值，词只能在空格/连字符处断）与 `break-all`（任意字符之间都能断）。
@@ -705,6 +831,11 @@ pub struct ComputedStyle {
     pub text_align: TextAlign,
     /// `text-justify`：两端对齐时余量往哪种隙摊。见 [`TextJustify`]；CSS 里**可继承**。
     pub text_justify: TextJustify,
+    /// 读者那一档「图片按哪一块尺寸折」（见 [`crate::infra::config::ImageScale]`]）。
+    /// 它**不是书里的 CSS**，由界面从读者偏好注入根样式，再靠 `inherit_from` 一路带到
+    /// 每个元素 —— 与 `text_align` / `font_size` 这些读者覆盖同一通路。排版层在
+    /// `layout::ports::image_size` 与两张图的位置上读它。
+    pub image_scale: crate::infra::config::ImageScale,
     /// 首行缩进。百分比折算自**这一块的包含块宽**（父块的内容宽），与 `margin` 同一条
     /// 口径。读者那条「首行缩进（em）」从 `ui::features::reader::document` 注入时已是 px。
     pub text_indent: Length,
@@ -776,6 +907,16 @@ pub struct ComputedStyle {
     pub word_break: WordBreak,
     /// 表格格里内容的竖直对齐（`vertical-align` 的关键字那一面）。不继承。
     pub cell_valign: CellVAlign,
+    /// `ruby-align`：注音在容器里的横向对齐。CSS 里**可继承**。
+    ///
+    /// 消费它的是 `layout::wrap` 折 ruby 容器那一段 —— 注音排在基字上方哪一段、
+    /// 容器让出多宽，都在那里按这一格算。
+    pub ruby_align: RubyAlign,
+    /// `ruby-position`：注音排在基字上方还是下方。CSS 里**可继承**。
+    ///
+    /// `-epub-ruby-position` 是同一条属性的 EPUB 写法（`-webkit-` 那一族旧拼法也一并收），
+    /// 折成同一个数，所以《乌合之众》那 157 条 `over` 与《诡秘之主》的显式 `center` 走同一条路。
+    pub ruby_position: RubyPosition,
     /// 定位方式。不继承 —— 只有 `absolute` / `fixed` 会脱流。
     pub position: Positioning,
     /// 四条定位偏移。`%` 的基准是**包含块**：`left`/`right` 折自宽，`top`/`bottom` 折自高。
@@ -849,6 +990,10 @@ pub struct ComputedStyle {
     pub height: Option<Length>,
     pub min_height: Option<Length>,
     pub max_height: Option<Length>,
+    /// `object-fit`：替换元素（图片）在盒里怎么摆。不继承。
+    pub object_fit: ObjectFit,
+    /// 出血边（多看的 `duokan-bleed`）。不继承：它说的是**这一张图**怎么铺。
+    pub bleed: Bleed,
     /// `box-sizing`：上面那六格的数含不含边框与内边距。不继承（CSS 规定）。
     pub box_sizing: BoxSizing,
     /// 分片意图。见 `fragment` 模块：连续滚动 / 分页 / 双页对开共用同一套分片代码，
@@ -886,6 +1031,7 @@ impl Default for ComputedStyle {
             writing_mode: WritingMode::HorizontalTb,
             text_align: TextAlign::Start,
             text_justify: TextJustify::Auto,
+            image_scale: crate::infra::config::ImageScale::default(),
             text_indent: Length::ZERO,
             margin_top: Length::ZERO,
             margin_bottom: Length::ZERO,
@@ -908,6 +1054,8 @@ impl Default for ComputedStyle {
             border_radius: [Length::ZERO; 4],
             word_break: WordBreak::Normal,
             cell_valign: CellVAlign::Top,
+            ruby_align: RubyAlign::Auto,
+            ruby_position: RubyPosition::Over,
             position: Positioning::Static,
             left: None,
             right: None,
@@ -927,6 +1075,8 @@ impl Default for ComputedStyle {
             height: None,
             min_height: None,
             max_height: None,
+            object_fit: ObjectFit::default(),
+            bleed: Bleed::NONE,
             box_sizing: BoxSizing::default(),
             break_before: BreakWhen::Auto,
             break_after: BreakWhen::Auto,
@@ -1010,6 +1160,7 @@ impl std::hash::Hash for ComputedStyle {
         (self.writing_mode as u8).hash(h);
         (self.text_align as u8).hash(h);
         (self.text_justify as u8).hash(h);
+        (self.image_scale as u8).hash(h);
         len(&self.text_indent, h);
         len(&self.margin_top, h);
         len(&self.margin_bottom, h);
@@ -1045,6 +1196,7 @@ impl std::hash::Hash for ComputedStyle {
             axis(&layer.position.y, h);
             tile(&layer.repeat.x, h);
             tile(&layer.repeat.y, h);
+            (layer.attachment as u8).hash(h);
         }
         for edge in &self.border {
             f(edge.width, h);
@@ -1063,12 +1215,16 @@ impl std::hash::Hash for ComputedStyle {
         opt_len(&self.height, h);
         opt_len(&self.min_height, h);
         opt_len(&self.max_height, h);
+        self.object_fit.hash(h);
+        self.bleed.hash(h);
         self.box_sizing.hash(h);
         self.border_collapse.hash(h);
         f(self.border_spacing[0], h);
         f(self.border_spacing[1], h);
         self.word_break.hash(h);
         self.cell_valign.hash(h);
+        self.ruby_align.hash(h);
+        self.ruby_position.hash(h);
         self.position.hash(h);
         opt_len(&self.left, h);
         opt_len(&self.right, h);
@@ -1110,18 +1266,18 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 会让这种标题变成白纸上的白字、整条标题消失。2026-10-23 这一轮把 `url(...)`
     // 那一截也接上了，落在 [`ComputedStyle::background_layers`]。
     //
-    // 这一族里**只有三条**留在「认得、不生效」这一档，各有一条给不了的理由：
-    // - `background-attachment: fixed` —— 流式排版里没有对应物。这里的「视口」是一栏纸，
-    //   滚动时背景跟着纸走才是读者要的；真按 `fixed` 摆会让扉页那张底图钉在屏幕上、
-    //   正文从它底下漂过去。`local` 要的是「按这一块的内容盒滚动」，而流式块没有自己的
-    //   滚动区。两条都按初值 `scroll` 摆。
+    // 这一族里**只有两条**留在「认得、不生效」这一档：
     // - `background-clip` / `background-origin` —— 一律按**边框盒**，正是出版书里
     //   「底色盖到边框下面」那一大片的写法；`padding-box` / `content-box` 那一档
     //   要给的是内缩的矩形，本书语料里一次没出现过。
-    // 留在这份名单里而不是在 `apply` 里返回 `true`：单写这三条时长手确实什么都不改，
+    // 留在这份名单里而不是在 `apply` 里返回 `true`：单写这两条时长手确实什么都不改，
     // 报成「接住了」就是把「没做」记成「做了」，`examples/css-gap` 的表会跟着说谎。
     // 简写里的这些词仍然被**吃掉**（不作废整条），判据写在 `apply` 那一臂的注释上。
-    "background-attachment",
+    //
+    // `background-attachment` 2026-10-31 移了出去：`fixed` 挂在章节根上时，排版层
+    // 把这一章抬到至少一屏高（浏览器里那是铺满视口画布的整页底图，卷首/扉页正是这么
+    // 写的）。绘制仍跟着纸走、不钉在视口上 —— 那一半的降级写在
+    // [`BackgroundAttachment`] 上。它现在真会改屏上的东西，所以不能再记成「不生效」。
     "background-clip",
     "background-origin",
     // `min-height` 在这份名单里空转过（认得、不生效）：2026-10-21 与 `min-width` 一起
@@ -1171,20 +1327,39 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 5718 个元素上（《毛泽东选集》）只是转换器把网页样式原样带进来。所以记
     // 「认得、不生效」：落差表不再把它报成「我们听都没听过」，而它也确实不该动版面。
     "cursor",
-    // ruby：`ruby-position` / `-epub-ruby-position`（以及竖排里的 `-webkit-text-combine`）
-    // 是一族的。**本机 20 个 epub 里 `<ruby>` / `<rt>` / `<rp>` 元素各 0 个** —— 那 157 条
-    // `-epub-ruby-position: over` 是转换器带进来的死声明。既然 `<rt>` 现在按普通行内串在
-    // 字后，宣称「`over` 这一档接住了」就是撒谎；而真正的 ruby 布局（注音排在字上方、
-    // 不推进基线）要动行内收集与行盒高度，本机没有一本书能验证。所以记「认得、不生效」。
-    "ruby-position",
-    "-epub-ruby-position",
+    // 竖排里把两个数字并成一格那一档：注音排在字上方要动的行内收集与行盒高，
+    // 它比那一格大得多，留在名单里（`-webkit-text-combine` 单独一条属性，没人消费）。
     "-webkit-text-combine",
+    // `ruby-position` / `-epub-ruby-position` 与 `ruby-align` / `-epub-ruby-align`
+    // 2026-10-31 一起移了出去：注音排在基字上方/下方（[`RubyPosition`]）与横向贴哪一段
+    // （[`RubyAlign`]）都进了 `layout::wrap` 折 ruby 容器那一段，排版层真读这两格。
+    // 触发的是《诡秘之主》—— 它是本机第一本带真 `<ruby>`/`<rt>` 的书（552 组、40 章），
+    // 所以「没有一本书能验证」那句理由不再成立。`inter-character` 与 `justify` 那一族
+    // 仍判不认识，理由写在各自枚举的文档上。
     // 定位一族 2026-10-29 接上了（`position: absolute|fixed` 与四个偏移，见
     // [`Positioning`]）—— 落点是封面/标题页那几块装饰（`left:50%; margin-left:-9.5em`
     // 那套居中写法）。`relative` / `sticky` 判不认识。
     // `z-index` 留着：我们的绘制顺序是「相交即上抬」，不是 z 树，绝对定位盒的层序
     // 按文档序走。
     "z-index",
+    // 下面这一批是 2026-10-30 从《基督山伯爵》《诡秘之主》两本的落差表里捞出来的：
+    // 属性名认得、这一版**没有对应物**，于是单拎出来记「认得、不生效」，不再算进
+    // 「不认识」那一栏（两本书各几百到上千个元素，会把真正要关注的写法淹掉）。
+    //
+    // - `duokan-bleed` 2026-10-30 接上了（`ComputedStyle::bleed`），所以移了出去。
+    // - 栅格化与合成提示：前者归渲染后端，后两者要「把底下那一块糊掉」。
+    "-webkit-font-smoothing",
+    "text-rendering",
+    "backdrop-filter",
+    "-webkit-backdrop-filter",
+    // - flex 一族：排版引擎只做流式与表格，没有 flex 容器。`display: flex` 认成块
+    //   （见 `apply` 那一臂），其余几条挪不动任何东西。
+    "flex-direction",
+    "align-items",
+    "justify-content",
+    "align-self",
+    "flex-wrap",
+    "gap",
 ];
 
 #[derive(Debug, Default)]
@@ -1324,6 +1499,18 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle, base_dir: 
                 _ => {}
             }
         }
+        // `<img width="40%" height="300">` 与 `dir` 同属 HTML 的呈现提示：落在作者样式
+        // 之前，作者（或行内 `style`）真写了 `width` / `height` 就把它盖掉。老书给插图
+        // 定尺寸几乎全靠这两个属性，只认样式表等于整条丢掉（《哈利·波特》作者简介页
+        // 的 `<img width="40%">` 就是这么被无视、按固有宽顶满版心的）。
+        // 只认 `<img>`：SVG 的 `width` / `height` 是几何属性，走 `svg_aspect` 那条路。
+        if dom.is_element(id, "img") {
+            for (attr, field) in [("width", &mut style.width), ("height", &mut style.height)] {
+                if let Some(length) = dom.attr(id, attr).and_then(parse_dimension_attribute) {
+                    *field = Some(length);
+                }
+            }
+        }
         let decls = rules.matching_declarations(dom, id);
         // 元素的 `style="…"`。CSS 把它排在「作者普通声明」之上、`!important` 那两档之下：
         // 整份追加到最后会让行内普通声明盖掉书里的 `color: red !important`，
@@ -1341,6 +1528,15 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle, base_dir: 
         ordered.extend(decls.iter().filter(|d| d.important));
 
         ignored += apply_in_cascade_order(&mut style, &parent, root_base.font_size, &ordered);
+
+        // 居中不缩：`text-indent` 只缩首行，居中时它会把整行推离中线（半个缩进）。
+        // 无论是读者注入的（《未来简史》扉页的出版社，2em 让整行右偏 1em），还是
+        // 作者自己写在内联样式里的（同一页的副标题 `text-indent:2em`），结果都是
+        // 「看起来没居中」。居中是展示文字的决定，首行缩进是正文段落的，两者同时
+        // 出现几乎总是转换工具留下的，按居中优先处理。标题那一档在 UA seed 里也归零。
+        if style.text_align == TextAlign::Center {
+            style.text_indent = Length::ZERO;
+        }
 
         // `::first-letter`：首字符的盒要等这个元素自己算完才能起算（`3em` 的基准
         // 就是它），所以放在后面。一份都没命中时留 `None`，排版层因此完全不走下沉那条路。
@@ -1366,6 +1562,25 @@ fn document_order(dom: &Dom) -> Vec<NodeId> {
         stack.extend(children.iter().rev().copied());
     }
     out
+}
+
+/// HTML 尺寸属性（`<img width="40%" height="300">`）→ [`Length`]。
+///
+/// 不走 CSS 的长度表：这两个属性的值是「非负整数或百分比」，单位后缀按 HTML 的尺寸
+/// 解析规则被忽略 —— 浏览器实测 `width="400px"` 是 400px、`width="2em"` 是 2px。
+/// 百分比照收（HTML 3.2 起就这么写，浏览器一直认），进 [`Length::Percent`]，
+/// 等排版期按包含块宽折。
+fn parse_dimension_attribute(value: &str) -> Option<Length> {
+    let v = value.trim();
+    if let Some(percent) = v.strip_suffix('%') {
+        let n: f32 = percent.trim().parse().ok()?;
+        return Some(Length::Percent(n / 100.0));
+    }
+    let digits: String = v
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
+    digits.parse().ok().map(Length::Px)
 }
 
 #[cfg(test)]

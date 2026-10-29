@@ -75,6 +75,8 @@ fn flow(parts: &[(&str, &str)]) -> FlowDoc {
         // 封面**落盘之后**才有描述，而这一份是直接构造的（没有文件）——
         // 所以留 `None`，读那一侧退回 `cover` 那个 BLOB。这正是老库的形状。
         cover_ref: None,
+        // 字符集走 books 表的新列；取几个 ASCII + 汉字，漏写 JSON 往返就会红。
+        font_charset: vec![0x41, 0x6d, 0x4e00, 0x6c49],
     }
 }
 
@@ -1117,6 +1119,61 @@ fn opened_books_rank_before_never_opened_ones() {
     let books = store.list_books().unwrap();
     assert_eq!(books.len(), 2);
     assert_eq!(books[0].title, "A", "打开过的排最前，没打开过的垫后");
+}
+
+/// 刚导入的书排在最前 —— 哪怕架上的书都翻开过、而且都读在这一次导入之前。
+///
+/// 排序键是 `MAX(入库, 翻开)`（见 `store::books::SHELF_ORDER`）：导入本身也是一次动静，
+/// 所以新书压过之前任何一次阅读，读者导完退回书架第一眼就看见它。
+#[test]
+fn a_fresh_import_ranks_before_books_read_earlier() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let store = Store::open_at(&db).unwrap();
+    let old = store.add_book(&path("old.md"), &meta("旧书")).unwrap();
+    store.touch_opened(old).unwrap();
+    // 把这一本的「入库 + 翻开」一起挪到 100 秒前：它读过，而这次导入发生在之后。
+    // 秒级的 `store::now` 与 `touch_opened` 分不出先后，所以这里直接改库（文件库契约，
+    // 与上面 v5 那条测试同一种手法）。
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE books SET added_at = added_at - 100, last_opened_at = last_opened_at - 100",
+            [],
+        )
+        .unwrap();
+    }
+    let fresh = store.add_book(&path("fresh.md"), &meta("新书")).unwrap();
+    assert_eq!(
+        store
+            .list_books()
+            .unwrap()
+            .iter()
+            .map(|book| book.id)
+            .collect::<Vec<_>>(),
+        vec![fresh, old],
+        "刚导入的书排在读过的那本前面"
+    );
+    // 再翻开旧书：它的「最近动静」晚于新书入库那一刻，于是回到最前。
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE books SET added_at = added_at - 100 WHERE id = ?1",
+            [fresh],
+        )
+        .unwrap();
+    }
+    store.touch_opened(old).unwrap();
+    assert_eq!(
+        store
+            .list_books()
+            .unwrap()
+            .iter()
+            .map(|book| book.id)
+            .collect::<Vec<_>>(),
+        vec![old, fresh],
+        "翻开过的书压过更早的那一次导入"
+    );
 }
 
 /// 书架的一条：封面字节跟着书目一起回来，排序与 `list_books` 同一条规则。

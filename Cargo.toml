@@ -64,6 +64,11 @@ png = "0.18"
 # 会像 `sha2` 那条坑一样把**第三条**拉进来。默认 feature（含 `system-fonts`）跟着
 # gpui 那一份走；`usvg::Options::default()` 的 fontdb 本就是空的，不会去扫系统字体。
 resvg = { version = "=0.46.0" }
+# 读内嵌字体的 cmap：注册一本书的字体之后，要判它有没有拉丁 `m` 才敢交给 gpui
+# 当 primary（gpui 会把没有 `m` 的脸从候选里剔掉，剔空了 `resolve_font` 就 panic）。
+# **不是新依赖树**：锁里已有 0.25.1，`fontdb`（cosmic-text 那一链）与 resvg 都在用它，
+# 这里只是把图上已有的一份转成直接依赖。
+ttf-parser = "0.25"
 # ZIP 的压缩方法。**只开纯 Rust 的那几族**：deflate（flate2/zlib-rs + zopfli）、
 # bzip2（bzip2 0.6 的默认后端是 libbz2-rs-sys）、lzma / xz（lzma-rust2）、
 # ppmd（ppmd-rust）、deflate64（纯 Rust 解码器）。7-Zip / WinRAR 做的这几类 zip
@@ -435,14 +440,14 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 # 数组里区间外的 primitive 会被整批吞掉 —— 主 pass 最后一个 sprite 批次因此把捕获层 1 的
 # 副本字画上屏，与正文错开一截印两遍（修前 main `0..13`、修后 `0..10`）。探针是
 # `gpui-pre/examples/capture_order_probe.rs`，不跑图也能复现。
-gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "f10aa80fc965f6d9a55c4e44ed930566a47adc39" }
-gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "f10aa80fc965f6d9a55c4e44ed930566a47adc39" }
-gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "f10aa80fc965f6d9a55c4e44ed930566a47adc39" }
+gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "4a422e6b59c7387a6b4af346848cd466ad9b3c3d" }
+gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "4a422e6b59c7387a6b4af346848cd466ad9b3c3d" }
+gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "4a422e6b59c7387a6b4af346848cd466ad9b3c3d" }
 # apple / windows 两条渲染器是从 crates.io 的 0.3.9 发布包收进 fork 的（zed@93d7456 快照），
 # 各带一条 PageCurlMeshes 的跳过臂 —— 注册表那份不知道 fork 加的这个变体，macOS / Windows
 # 的构建在 exhaustive match 上必红。真正移植 page_curl 之前这两条 patch 不能撤。
-gpui-pre-apple = { git = "https://github.com/panzhifu/gpui-folio", rev = "f10aa80fc965f6d9a55c4e44ed930566a47adc39" }
-gpui-pre-windows = { git = "https://github.com/panzhifu/gpui-folio", rev = "f10aa80fc965f6d9a55c4e44ed930566a47adc39" }
+gpui-pre-apple = { git = "https://github.com/panzhifu/gpui-folio", rev = "4a422e6b59c7387a6b4af346848cd466ad9b3c3d" }
+gpui-pre-windows = { git = "https://github.com/panzhifu/gpui-folio", rev = "4a422e6b59c7387a6b4af346848cd466ad9b3c3d" }
 
 # 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
 # opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；

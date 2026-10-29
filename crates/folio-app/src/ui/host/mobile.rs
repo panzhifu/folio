@@ -120,9 +120,10 @@ fn read_insets(_: InsetsKind) -> Insets {
 /// 所以这里必须返回一个设备真报出来的名字——哪怕只是列表里的第一个。
 fn fallback_body_family(wanted: &str, cx: &App) -> String {
     log_no_family(cx);
-    cx.text_system()
-        .all_font_names()
+    // 没有拉丁 `m` 的随书字体会被 gpui 从 primary 里剔掉，不能拿来兜底；名字在册
+    // 之后还要真解析一遍（设备字体没有登记表可查）。
+    crate::ui::foundation::font_primary::usable_names(cx.text_system().all_font_names())
         .into_iter()
-        .next()
+        .find(|name| super::family_has_m(cx, name))
         .unwrap_or_else(|| wanted.to_string())
 }

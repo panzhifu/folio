@@ -115,6 +115,26 @@ impl Default for LaidOut {
     }
 }
 
+/// 一张**可拖动的插图**的命中区：读者按在它上面时，这一笔归「拖图」而不是「翻页」。
+///
+/// 只有「图比它的框大」的那些才登记（`slack` 是两边各能拖多远）：`object-fit: cover`
+/// 会把图按比例放大到盖满盒子、多出来的那一圈被裁掉 —— 那一圈就是读者想拖着看的。
+/// 图刚好装满框的那些没有必要接管手势，读者拖它们仍然翻页。
+#[derive(Clone, Debug)]
+pub(in crate::ui::features::reader) struct ImageHit {
+    /// 全书唯一的图片身份（`DecodeRequest::key`），拖动偏移按它存。
+    pub key: String,
+    /// 在**窗口**坐标里的框（画到哪儿就记到哪儿）。
+    pub rect: Bounds<Pixels>,
+    /// 横向 / 纵向各还能拖多远（正数，逻辑像素）。`(0, 0)` 的那张不会登记。
+    pub slack: (f32, f32),
+    /// 登记它的那一帧（`ReaderSession::image_hits_frame`）。
+    ///
+    /// 命中表**不每帧清空**：一次拖动的事件可能落在两帧之间，清掉了就整趟拖不动。
+    /// 所以按「最近几帧内登记过」筛（见 [`ReaderSession::image_hit_at`]），旧的自己过期。
+    pub frame: u64,
+}
+
 pub struct ReaderSession {
     pub(in crate::ui::features::reader) source: Source,
     /// 上一次同步下来的读者偏好。与 [`ConfigHolder`] 里的不一致就推给排版状态。
@@ -153,6 +173,13 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) pending_turn: Option<TurnIntent>,
     /// 页面捕获纹理的脏标记：偏好/主题/排版变了就置真，下一帧重烘。
     pub(in crate::ui::features::reader) capture_dirty: bool,
+    /// 纸张几何（页眉/页脚带、手势条、外壳占位）变了。
+    ///
+    /// 与 [`Self::capture_dirty`] 分开是因为时序：这些数由阅读页在**子视图 render 之前**
+    /// 报告，而子视图开头会收上一帧的捕获提交并把 `capture_dirty` 清掉 —— 只设那一个，
+    /// 这次换边就被上一帧的「烘好了」覆盖掉，卷起来还是旧纸张。渲染帧收完提交后把这一笔
+    /// 并进脏标记，提交盖不掉它。
+    pub(in crate::ui::features::reader) capture_box_dirty: bool,
     /// 上一次烘的是哪一页；页号/章号不变且不脏时不重复跑整页捕获 pass。
     pub(in crate::ui::features::reader) captured_page: Option<(usize, usize)>,
     /// 烘那一张时窗口有多大（逻辑像素）。网格取 uv 按**今天**的窗口归一，而那张纹理里被写过的
@@ -160,15 +187,20 @@ pub struct ReaderSession {
     /// 差出来的那一截采到没被写过的地方。页号与章号在这时候一个字都不动，所以这一格不能并进
     /// [`Self::captured_page`] 那个键，得单独比。
     pub(in crate::ui::features::reader) captured_size: Option<(f32, f32)>,
-    /// 翻页几何用的那一块版心（**窗口坐标**）。`render` 每帧写，手指坐标归一化读它。
+    /// 翻页几何用的那一块（**窗口坐标**）。`render` 每帧写，手指坐标归一化读它。
     ///
-    /// 折线、捕获矩形、手指归一这三处必须是同一个数：捕获纹理是整窗大小、只有这一块被写过，
-    /// 而网格按 `(页框原点 + 局部坐标) / 窗口` 取 uv。差一个页边距，卷起来那一片就采到横移的
-    /// 页面，读成「纸上的字与对不齐的那半页叠在一起」。
+    /// 单页仿真折页时是**整张纸**（从阅读页顶到屏幕底，含页眉/页脚两条读数带）；其余档位
+    /// 是正文版心。折线、捕获矩形、手指归一这三处必须是同一个数：捕获纹理是整窗大小、
+    /// 只有这一块被写过，而网格按 `(页框原点 + 局部坐标) / 窗口` 取 uv。差一个页边距，
+    /// 卷起来那一片就采到横移的页面，读成「纸上的字与对不齐的那半页叠在一起」。
     pub(in crate::ui::features::reader) page_area: Area,
     /// 外壳进场横移的当前位移（逻辑像素）。捕获层按 `-enter_shift` 抵消它，
     /// 于是进书 280 ms 期间也能按最终位置烘页，不必等层停稳。
     pub(in crate::ui::features::reader) enter_shift: f32,
+    /// 顶上那条系统状态栏 / 挖孔的高度（逻辑像素）。外壳每帧报，用于把「仿真折页那张纸」
+    /// 的顶边推到屏幕顶（见 `view::body` 的 `sheet_area`）。版面本身不让它 —— 正文盒仍从
+    /// 安全区之下起算。
+    pub(in crate::ui::features::reader) top_inset: f32,
     /// 页面网格的顶点与索引缓存。它们只由页宽页高决定，每帧重造那近 1 MB 是纯浪费。
     pub(in crate::ui::features::reader) curl_mesh: Option<CurlMesh>,
     /// 烘那张页纹理**那一刻**，页框左上角落在窗口里的哪儿（逻辑像素）。
@@ -256,6 +288,10 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) header_reserve: f32,
     /// 阅读页底部那行小字（进度）占掉的高度。与 `header_reserve` 同理。
     pub(in crate::ui::features::reader) footer_reserve: f32,
+    /// 底部系统手势条的高度。页脚带把底色铺到屏幕底，整张纸的底边也由它补齐。
+    pub(in crate::ui::features::reader) bottom_inset: f32,
+    /// 干净态那两条读数带此刻要不要画。chrome 收起时才画；折页时它们也是纸的一部分。
+    pub(in crate::ui::features::reader) bands_visible: bool,
     /// 还没落地的位置。恢复必须等排版做过一次才能做（坐标 → 行顶的映射要有行盒），
     /// 而构造时手上没有窗口，所以先记下来，第一帧渲染时取走。
     pub(in crate::ui::features::reader) pending_restore: Option<Locator>,
@@ -322,6 +358,20 @@ pub struct ReaderSession {
     /// 正文元素这一帧画在窗口里的位置。事件坐标 → 排版坐标的原点，
     /// 由 `GlyphsElement::paint` 每帧写入（gpui 事件只有窗口坐标）。
     pub(in crate::ui::features::reader) content_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 这一帧每张**可拖动的插图**在窗口里的命中矩形，以及它最多能拖多远（`slack`）。
+    ///
+    /// 每帧由 `view::body` 的图片层重填（画到哪儿就记到哪儿，与 `handle_hits` 同一条
+    /// 做法：`window.on_mouse_event` 只活到本帧，命中区也只能本帧现算）。手势那一侧
+    /// （`on_scroll`）按**按下点**查它：落在某张图上、而且那张图比它的框大，这一笔就归
+    /// 「拖图」而不是「翻页」。
+    pub(in crate::ui::features::reader) image_hits: Rc<RefCell<Vec<ImageHit>>>,
+    /// 每张被拖过的图当前的偏移（`key` → `(x, y)`，已夹在 `slack` 以内）。
+    ///
+    /// 与页面位置无关、也不落库：读者松手之后它就停在那儿，翻页回来还在 —— 这是他刚
+    /// 拖过的同一张图。换书/换章时不必清（`key` 是全书唯一的图片身份）。
+    pub(in crate::ui::features::reader) image_pans: std::collections::HashMap<String, (f32, f32)>,
+    /// 命中表那一份的帧号：每帧 `render` 进一格，`ImageHit::frame` 记的就是它。
+    pub(in crate::ui::features::reader) image_hits_frame: u64,
     /// 本帧两端把手的命中区（窗口坐标，那份尺寸见 `selection.rs` 引的 `TouchHandle`）。
     /// paint 每帧写入，事件时读。
     pub(in crate::ui::features::reader) handle_hits: HandleHits,
@@ -560,10 +610,12 @@ impl ReaderSession {
             turn: None,
             pending_turn: None,
             capture_dirty: true,
+            capture_box_dirty: false,
             captured_page: None,
             captured_size: None,
             page_area: Area::new(0.0, 0.0, 0.0, 0.0),
             enter_shift: 0.0,
+            top_inset: 0.0,
             curl_mesh: None,
             curl_bake_origin: Rc::new(Cell::new(None)),
             capture_committed: Rc::new(Cell::new(None)),
@@ -580,6 +632,8 @@ impl ReaderSession {
             reserve: Reserve::ZERO,
             header_reserve: 0.0,
             footer_reserve: 0.0,
+            bottom_inset: 0.0,
+            bands_visible: false,
             pending_restore: None,
             pending_anchor: None,
             read: HashSet::new(),
@@ -599,6 +653,9 @@ impl ReaderSession {
             suppress_tap: false,
             overlay_open: false,
             content_bounds: Rc::default(),
+            image_hits: Rc::default(),
+            image_pans: std::collections::HashMap::new(),
+            image_hits_frame: 0,
             handle_hits: Rc::default(),
             fixed_text_boxes: Rc::default(),
             fixed_zoom: FixedZoom::default(),
@@ -709,6 +766,7 @@ impl ReaderSession {
         let book = Book::new(doc, effective.clone(), locator);
         let book_fonts_rev = book.fonts_revision();
         let mut session = Self {
+            top_inset: 0.0,
             source: Source::Book(Box::new(book)),
             wanted_family: prefs.font_family.clone(),
             book_settings_rev: ConfigHolder::book_rev(cx),
@@ -729,6 +787,7 @@ impl ReaderSession {
             turn: None,
             pending_turn: None,
             capture_dirty: true,
+            capture_box_dirty: false,
             captured_page: None,
             captured_size: None,
             page_area: Area::new(0.0, 0.0, 0.0, 0.0),
@@ -749,6 +808,8 @@ impl ReaderSession {
             reserve: Reserve::ZERO,
             header_reserve: 0.0,
             footer_reserve: 0.0,
+            bottom_inset: 0.0,
+            bands_visible: false,
             // 章已经由 `Book::new` 定好了；章内偏移留到第一帧排版做完再落地。
             // 连续模式的落点是**全局 y**（章基线 + 章内行顶）：哪怕偏移是 0 也要挂
             // 请求，把「这一章的开头」摆到它拼出来的位置 —— 上一章可能正占着上方。
@@ -771,6 +832,9 @@ impl ReaderSession {
             suppress_tap: false,
             overlay_open: false,
             content_bounds: Rc::default(),
+            image_hits: Rc::default(),
+            image_pans: std::collections::HashMap::new(),
+            image_hits_frame: 0,
             handle_hits: Rc::default(),
             fixed_text_boxes: Rc::default(),
             fixed_zoom: FixedZoom::default(),
@@ -1231,20 +1295,44 @@ impl ReaderSession {
             || (self.reserve.height - reserve.height).abs() > 0.5
         {
             self.reserve = reserve;
+            // 可用的正文高变了 ⇒ 捕获纹理里那一页的尺寸与位置也变了。页号不动，光靠
+            // `captured_page` 拦不住这一格，所以与窗口尺寸变化同一条处置：作废重烘。
+            self.capture_dirty = true;
+            self.capture_box_dirty = true;
+            self.captured_back = None;
             cx.notify();
         }
     }
 
-    /// 告知阅读页自己那两条带子的高度（页眉的章名、页脚的进度）。
+    /// 告知阅读页自己那两条带子的高度（页眉的章名、页脚的进度）、底部手势条的高度，
+    /// 以及这两条带此刻要不要画。
     ///
     /// 与 [`ReaderSession::set_reserve`] 分成两个入口是因为**归属不同**：那条由外壳每帧报告
-    /// （导航栏收起时是 0），这两条由阅读页自己定。合成一个数的话，外壳那一句
+    /// （导航栏收起时是 0），这几项由阅读页自己定。合成一个数的话，外壳那一句
     /// 「现在导航栏占 0」会把阅读页自己让出来的两条带一起冲掉。
-    pub fn set_chrome_bands(&mut self, header: f32, footer: f32, cx: &mut Context<Self>) {
-        if (self.header_reserve - header).abs() > 0.5 || (self.footer_reserve - footer).abs() > 0.5
+    ///
+    /// 两条带折页时是纸的一部分：仿真卷曲的整页纹理与网格都按这几个数定边，任何一格变了
+    /// 都要重烘，否则卷起来的那张纸会缺一条边，或者把旧的空带一起卷上去。
+    pub fn set_chrome_bands(
+        &mut self,
+        header: f32,
+        footer: f32,
+        bottom_inset: f32,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if (self.header_reserve - header).abs() > 0.5
+            || (self.footer_reserve - footer).abs() > 0.5
+            || (self.bottom_inset - bottom_inset).abs() > 0.5
+            || self.bands_visible != visible
         {
             self.header_reserve = header;
             self.footer_reserve = footer;
+            self.bottom_inset = bottom_inset;
+            self.bands_visible = visible;
+            self.capture_dirty = true;
+            self.capture_box_dirty = true;
+            self.captured_back = None;
             cx.notify();
         }
     }
@@ -1366,22 +1454,59 @@ impl ReaderSession {
             .map(|slice| slice.lines.clone())
     }
 
+    /// 按**窗口坐标**查一张可拖动的插图：落在框里的那几张里取最后一张（后画的压在上面，
+    /// 与「后画者居上」的层级一致 —— 叠图那一串里读者按到的就是最上面那张）。
+    pub(in crate::ui::features::reader) fn image_hit_at(
+        &self,
+        at: Point<Pixels>,
+    ) -> Option<ImageHit> {
+        // 只认**最近几帧内**登记过的那几条：更早的属于上一次排版（换章、换字号），
+        // 它们的矩形早就对不上屏上的字了。留两帧的余量是因为一次拖动的事件可能夹在
+        // 两帧之间 —— 清得太快就整趟拖不动。
+        let fresh = self.image_hits_frame.saturating_sub(2);
+        self.image_hits
+            .borrow()
+            .iter()
+            .rev()
+            .find(|hit| hit.frame >= fresh && hit.rect.contains(&at))
+            .cloned()
+    }
+
+    /// 把一张图拖 `(dx, dy)`：偏移跟着手指走，夹在 `slack` 以内（图不能被拖出自己的内容）。
+    ///
+    /// 偏移与手指**同向**相加：`dx` / `dy` 是手指这一帧走的那一段（`on_scroll` 的
+    /// `ScrollDelta`，手指往右下为正），而图要跟着手指走 —— 手指往下拖，图上的内容也
+    /// 往下挪（偏移从 0 往正走，露出来的是上半截）。
+    pub(in crate::ui::features::reader) fn pan_image(
+        &mut self,
+        hit: &ImageHit,
+        dx: f32,
+        dy: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = self.image_pans.entry(hit.key.clone()).or_insert((0.0, 0.0));
+        let next = (
+            (offset.0 + dx).clamp(-hit.slack.0, 0.0),
+            (offset.1 + dy).clamp(-hit.slack.1, 0.0),
+        );
+        if (next.0 - offset.0).abs() < 0.01 && (next.1 - offset.1).abs() < 0.01 {
+            return;
+        }
+        *offset = next;
+        cx.notify();
+    }
+
     /// 仿真翻页这张网格要的那张旧页纹理是否已经完整烘好。
     ///
     /// 只在折页这一档用。进书那 280 ms 的整层横移里页框有一截在窗口外，捕获 pass 拿不到
     /// 那部分像素；此时若放行翻页，网格会按整页 UV 去采一张被裁过的纹理，右侧页边就是一条
     /// 黑带。所以这条件没满足前，翻页入口一律拒绝 —— 入场动画结束后重试烘好再放行。
     pub(in crate::ui::features::reader) fn curl_capture_ready(&self) -> bool {
-        let key = (self.chapter_index(), self.page);
-        // `capture_committed` 是绘制回调刚写好、下一次 `render` 才会落到 `captured_page` 的
-        // 那一份。静态页没有别的东西触发重绘时，它会一直等在那里；此时纹理其实已经在 GPU
-        // 上就绪，输入事件若只认 `captured_page`，读者进场后的第一划会被无故吞掉。
-        !self.capture_dirty
-            && (self.captured_page == Some(key)
-                || self
-                    .capture_committed
-                    .get()
-                    .is_some_and(|(pending, _)| pending == key))
+        // 只认**当前这一页**已经落进状态的那一张（`captured_page`）。`capture_committed`
+        // 里那一份是绘制回调刚写好的、下一次 `render` 才落定，它可能是「翻页之前那一页」
+        // 的纹理：拿它放行，卷起来的就是上一页的字。翻页落定那一刻 `turn_frame` 会补一发
+        // 重画（`presence` 的续帧只归时钟），这一页的纹理下一帧就烘上，不会卡住。
+        !self.capture_dirty && self.captured_page == Some((self.chapter_index(), self.page))
     }
 
     /// 把这一趟被旧页纹理门拒掉的翻页记下来，等门开了再补。

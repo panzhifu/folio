@@ -139,8 +139,11 @@ pub struct Book {
 impl Book {
     /// 从一份已打开的文档建出一本书，定位到 `locator` 那一章。
     ///
-    /// **字体不在这一趟读**：`BookFonts::empty()` 先顶上，`FontLoadJob` 随首趟排版作业
+    /// **字体字节不在这一趟读**：`BookFonts::empty()` 先顶上，`FontLoadJob` 随首趟排版作业
     /// 进后台，注册完把新表带回 `Document`，下一帧 `sync_fonts` 再灌给邻居章。
+    ///
+    /// 字体身份由 worker 的 `doc.font_refs_in` 取：`doc.stylesheet()` 在这一趟已经把
+    /// 共享容器打开，worker 复用它只补一遍 OPF，不再 `Zip::open` 第二个。
     pub fn new(doc: Arc<dyn OpenedDocument>, prefs: Reader, locator: Locator) -> Self {
         // 章节表只对可重排文档有意义。定版式（CBZ）目前没有正文排版链，
         // 落到这里就是「没有章节」—— 界面照起，只是这一屏空着，不 panic。

@@ -302,6 +302,10 @@ impl Document for BookDocument {
         css
     }
 
+    fn font_charset(&self) -> &[u32] {
+        self.flow().map_or(&[], |flow| flow.font_charset.as_slice())
+    }
+
     fn fonts(&self, wanted: &[String]) -> Vec<FontBytes> {
         match self.container() {
             Some((provider, path)) => provider.fonts(path, wanted),
@@ -312,6 +316,14 @@ impl Document for BookDocument {
     fn font_refs(&self, wanted: &[String]) -> Option<Vec<crate::content::format::FontRef>> {
         let (provider, path) = self.container()?;
         provider.font_refs(path, wanted)
+    }
+
+    fn font_refs_in(&self, wanted: &[String]) -> Option<Vec<crate::content::format::FontRef>> {
+        let (provider, path) = self.container()?;
+        // 这个句柄是懒开的：`stylesheet()` 若已经读过 CSS，它已经开着；没读过就由
+        // provider 的这一次读打开 —— 无论哪条，后面的章节/图片都复用它。
+        let container = self.shared()?;
+        provider.font_refs_in(path, container, wanted)
     }
 
     fn read_font(&self, font: &crate::content::format::FontRef) -> Option<Vec<u8>> {

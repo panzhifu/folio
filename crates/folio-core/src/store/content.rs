@@ -102,7 +102,7 @@ impl Store {
             "UPDATE books
                 SET css = ?2, toc_json = ?3, index_version = ?4,
                     cover_hash = ?5, cover_mime = ?6, progression_rtl = ?7,
-                    rules_hash = ?8
+                    rules_hash = ?8, font_charset = ?9
               WHERE id = ?1",
             params![
                 book_id,
@@ -116,6 +116,7 @@ impl Store {
                 // 切法写死在代码里，由 `index_version` 那一格管。判据只有一处定义
                 // （[`crate::content::format::rules_hash`]），这一趟不自己猜哪些格式看规则表。
                 crate::content::format::rules_hash(format),
+                serde_json::to_string(&doc.font_charset)?,
             ],
         )?;
         tx.commit()?;
@@ -204,21 +205,24 @@ impl Store {
             tracing::debug!("store: 第 {book_id} 本没有入库的章节，回 None");
             return Ok(None);
         }
-        let (css, toc_json, cover_hash, cover_mime, progression_rtl) = conn.query_row(
-            "SELECT css, toc_json, cover_hash, cover_mime, progression_rtl
-               FROM books WHERE id = ?1",
-            params![book_id],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    // v18 之前入库的行是 0，读回「按左翻」正是那一版唯一可能的答案。
-                    r.get::<_, i64>(4)?,
-                ))
-            },
-        )?;
+        let (css, toc_json, cover_hash, cover_mime, progression_rtl, font_charset_json) = conn
+            .query_row(
+                "SELECT css, toc_json, cover_hash, cover_mime, progression_rtl, font_charset
+                   FROM books WHERE id = ?1",
+                params![book_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        // v18 之前入库的行是 0，读回「按左翻」正是那一版唯一可能的答案。
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                },
+            )?;
+        let font_charset: Vec<u32> = serde_json::from_str(&font_charset_json).unwrap_or_default();
         // 两格要么都有（拼得出文件名），要么都没有。只剩一格说明那一列是手工改过的，
         // 拼不出路径 —— 当没有处理，退回 BLOB，别拿半个描述去猜路径。
         let cover_ref = match (cover_hash, cover_mime) {
@@ -277,6 +281,7 @@ impl Store {
             // 字节不在库里（v16）：封面只留描述，读那一侧按它去 `covers/` 取文件。
             cover: None,
             images,
+            font_charset,
             cover_ref,
             progression_rtl: progression_rtl != 0,
         }))

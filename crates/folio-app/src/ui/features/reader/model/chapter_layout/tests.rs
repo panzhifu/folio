@@ -646,7 +646,7 @@ enum PrefClass {
 /// 「动一下某项偏好」的写法 + 它的归属。名字必须与 `Reader` 的字段名一模一样。
 type PrefTweak = (&'static str, fn(&mut Reader), PrefClass);
 
-const PREFS: [PrefTweak; 17] = [
+const PREFS: [PrefTweak; 18] = [
     ("font_size", |p| p.font_size += 2.0, PrefClass::Layout),
     ("line_height", |p| p.line_height += 0.3, PrefClass::Layout),
     (
@@ -687,6 +687,17 @@ const PREFS: [PrefTweak; 17] = [
     (
         "text_direction",
         |p| p.text_direction = folio_core::TextDirection::Vertical,
+        PrefClass::PinnedElsewhere,
+    ),
+    // 图片缩放：根样式里的一格（界面从偏好注进 `root_base`，靠继承到每个元素），
+    // 消费它在 core 那三处 —— 图的上限、行内放大、块级放大，各有门钉着：
+    // `a_wide_image_is_capped_by_the_screen_rather_than_the_column`、
+    // `the_fills_the_screen_rule_keyed_on_object_fit_and_size`、
+    // `a_block_image_follows_the_readers_scale_tier`。这一份夹具里没有图，
+    // 所以不在这里断言几何（硬要断言就是一张空跑的红路）。
+    (
+        "image_scale",
+        |p| p.image_scale = folio_core::ImageScale::Screen,
         PrefClass::PinnedElsewhere,
     ),
     (
@@ -731,6 +742,7 @@ fn every_preference_is_classified() {
         justify,
         font_weight,
         text_direction,
+        image_scale,
         font_family,
         mono_font_family,
         toc_density,
@@ -751,6 +763,7 @@ fn every_preference_is_classified() {
         justify,
         font_weight,
         text_direction,
+        image_scale,
         font_family,
         mono_font_family,
         toc_density,
@@ -759,7 +772,7 @@ fn every_preference_is_classified() {
         image_cache_bytes,
     );
 
-    const NAMES: [&str; 17] = [
+    const NAMES: [&str; 18] = [
         "font_size",
         "line_height",
         "paragraph_gap_em",
@@ -771,6 +784,7 @@ fn every_preference_is_classified() {
         "justify",
         "font_weight",
         "text_direction",
+        "image_scale",
         "font_family",
         "mono_font_family",
         "toc_density",
@@ -1662,6 +1676,7 @@ fn the_first_typeset_clears_the_font_job(cx: &mut TestAppContext) {
         reserve: 0.0,
         columns: 1,
         height: 700.0,
+        viewport_height: 700.0,
         gap: 0.0,
     };
     cx.update_window(handle, |_, win, cx| {
@@ -1715,6 +1730,7 @@ fn the_first_typeset_warms_hp_fonts(cx: &mut TestAppContext) {
         reserve: 0.0,
         columns: 1,
         height: 700.0,
+        viewport_height: 700.0,
         gap: 0.0,
     };
     let started = Instant::now();
@@ -1773,6 +1789,7 @@ fn a_vertical_book_settles_on_the_vertical_axis(cx: &mut TestAppContext) {
         reserve: 0.0,
         columns: 1,
         height: 700.0,
+        viewport_height: 700.0,
         gap: 0.0,
     };
 
@@ -1860,4 +1877,77 @@ fn a_vertical_book_settles_on_the_vertical_axis(cx: &mut TestAppContext) {
 
     // 切片切的是列：一页装得下几列由列厚决定，而且片与片按列号首尾相接。
     assert!(doc.page_count() > 1, "这么长一章在 600 宽的页里该不止一页");
+}
+
+/// 界面那一格有没有真的把**屏幕尺寸**递进键里。
+///
+/// core 那两条门（`a_wide_image_is_capped_by_the_screen_rather_than_the_column`、
+/// `the_fills_the_screen_rule_keyed_on_object_fit_and_size`）问的是「给了屏宽怎么算」，
+/// 而它们当时的夹具**清一色 `screen_width: None`** —— 界面这一头也一直是 `None`，
+/// 于是「图片按屏幕缩 / 大图铺满」整条在真机一步都没跑到，两边各自绿，缝在中间。
+/// 这一条钉的就是中间那一格。
+///
+/// 宽取的是**阅读层那一块**（窗口宽减掉不属于阅读栏的侧栏），不是整窗：手机上侧栏是 0
+/// 所以等于屏宽，桌面上溢出去的那一截不该盖进侧栏里。高给整窗 —— 仿真折页那张纸
+/// 现在也从窗口顶铺到底（见 `view::body` 的 `sheet_area`），两边同一口径。
+#[gpui_kit::test]
+fn the_viewport_reports_the_screen_into_the_layout_key(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::chapter_layout::Viewport;
+
+    let handle = window(cx, 900.0, 800.0);
+    let mut doc = Document::new(
+        "<body><p>一段够读的话。</p></body>".to_string(),
+        "",
+        bare_prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    assert_eq!(
+        doc.layout_key(600.0, 1, None).screen_width,
+        None,
+        "前置：还没走过任何一帧，界面没报过屏宽"
+    );
+
+    cx.update_window(handle, |_, win, cx| {
+        doc.ensure_viewport(
+            win,
+            cx,
+            Viewport {
+                reserve: 60.0,
+                columns: 1,
+                height: 700.0,
+                viewport_height: 700.0,
+                gap: 0.0,
+            },
+        );
+    })
+    .expect("窗口应当可排版");
+    let key = doc.layout_key(600.0, 1, None);
+    assert_eq!(
+        key.screen_width,
+        Some(840),
+        "屏宽要落成「阅读层那块」（900 − 60 侧栏）"
+    );
+
+    // 换一扇窗（转屏那一档）：键跟着变，否则竖屏算好的大图会摆在横屏上。
+    let wide = window(cx, 1200.0, 600.0);
+    cx.update_window(wide, |_, win, cx| {
+        doc.ensure_viewport(
+            win,
+            cx,
+            Viewport {
+                reserve: 0.0,
+                columns: 1,
+                height: 500.0,
+                viewport_height: 500.0,
+                gap: 0.0,
+            },
+        );
+    })
+    .expect("窗口应当可排版");
+    assert_eq!(
+        doc.layout_key(600.0, 1, None).screen_width,
+        Some(1200),
+        "屏宽变了键必须跟着变"
+    );
 }

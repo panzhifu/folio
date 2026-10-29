@@ -369,6 +369,16 @@ pub struct RowImage {
     pub href: String,
     /// 所属 DOM 节点。脚注注文按它解（`Document::footnote_note_for_node`）。
     pub node: NodeId,
+    /// 这张图怎么在这个盒里摆（CSS 的 `object-fit`）。绘制层按它裁或留底。
+    pub fit: crate::ui::foundation::images::ObjectFit,
+}
+
+/// 屏幕尺寸的量化：与 [`quantize_px`] 同一把尺（1 px 一格），只是落到整数上。
+///
+/// 这一格要跟 `LayoutKey::screen_width`（`u32`）比，两处用同一个折法（`round`）才不会
+/// 「差 0.4 px 触发一次重排、又触发不回来」。
+fn quantize_screen(px: f32) -> u32 {
+    px.max(0.0).round() as u32
 }
 
 /// 界面交给排版与分片的两个轴。**三种模式只差这里的三个数**：
@@ -390,6 +400,11 @@ pub struct Viewport {
     pub columns: usize,
     /// 一栏可用的高（逻辑像素）。`0` = 不分片 = 连续滚动。
     pub height: f32,
+    /// 内容区的高（窗口高 − 外壳 − 页眉 − 页脚）。`height` 为 0（连续滚动、不分片）时
+    /// 这一格仍然有效：浏览器里一个 spine 文档就是一个**视口大**的容纳块，绝对定位的
+    /// `bottom: NN%` 与 `height: NN%` 都要拿它折（《未来简史》扉页的出版社就靠这条）。
+    /// `0` = 量不出来，退回章高。
+    pub viewport_height: f32,
     /// 栏间距，只在 `columns > 1` 时参与除法。
     pub gap: f32,
 }
@@ -419,6 +434,9 @@ struct TypesetInput {
     /// 这一趟要算的那把键；排版宽度取键里量化后的 `width`，别在传一个未量化的数进来，
     /// 那样「键相同而版心差半像素」的两次排版会互相复用缓存。
     key: LayoutKey,
+    /// 屏幕高（逻辑像素）。图片判「够不够大、要不要铺满一屏」要用它 —— 它不进键
+    /// （只有宽会影响图的宽高比换算），但排版期必须有这个数。
+    screen_height: Option<f32>,
     /// 允许按书声明的竖排排吗。界面给的分页档 + 那一章 CSS 的合取，
     /// 与键里的 `width` 必须同批决定（横排喂栏宽、竖排喂列长）——
     /// 见 `folio_core::layout::LayoutOptions::allow_vertical`。
@@ -527,6 +545,9 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
             allow_vertical: input.allow_vertical,
             // 竖轴基准从键里取 —— 页高变了而排版不重做，楔块就会留着旧的一半。
             page_height: input.key.page_height.map(|h| h as f32),
+            // 屏幕宽高：图片按它决定「铺满一屏」还是「缩在一栏里」，与版心宽是两回事。
+            screen_width: input.key.screen_width.map(|w| w as f32),
+            screen_height: input.screen_height,
         },
         &measure,
         input.images.as_ref(),
@@ -950,7 +971,10 @@ impl Document {
                             text: SharedString::new(text),
                             font: run.style.font.clone(),
                             font_size: run.style.font_size,
-                            x,
+                            // `x_offset` 只有 ruby 注音带非零值（正文恒为 0）：注音不吃前进量，
+                            // 流动把它排在容器末尾，画之前要挪回 `ruby-align` 要的那一段。
+                            // 命中那一路（`content::hit` 的两条片段循环）加的是同一个数。
+                            x: x + run.x_offset,
                             baseline_shift: run.style.baseline_shift,
                             box_height: run.style.box_height(),
                             underline: run.style.underline,
@@ -978,6 +1002,7 @@ impl Document {
                         baseline_shift: placed.baseline_shift,
                         href: placed.href.clone(),
                         node: placed.node,
+                        fit: placed.fit.into(),
                     }));
                     x += placed.advance;
                 }
@@ -1111,6 +1136,10 @@ impl Document {
                 TextAlign::Start
             },
             text_indent: Length::Px(prefs.font_size * prefs.indent_em.max(0.0)),
+            // 读者那一档「图片缩放」：不是书里的 CSS，注进根样式再靠继承一路到每个元素
+            // （与 `text_align` / `font_size` 同一条通路）。排版层在
+            // `folio_core::layout::ports::image_size` 与两张图的放大位置上读它。
+            image_scale: prefs.image_scale,
             ..ComputedStyle::default()
         }
     }
@@ -1138,6 +1167,7 @@ impl Document {
         let input = TypesetInput {
             blocks: std::mem::take(&mut self.blocks),
             key,
+            screen_height: self.inputs.screen.map(|(_, h)| h as f32),
             allow_vertical,
             source: self.source.clone(),
             artifacts: self.artifacts.clone(),
@@ -1265,6 +1295,7 @@ impl Document {
                 reserve: pane_reserve,
                 columns: 1,
                 height: 0.0,
+                viewport_height: 0.0,
                 gap: 0.0,
             },
         );
@@ -1308,18 +1339,36 @@ impl Document {
                 viewport.height,
             )
         };
-        // 竖轴基准只有**横排 + 分页**那一档给得出：一片的高就是浏览器里 `body` 的那个
-        // 包含块高，`html,body { height:100% }` 加空楔块那一族垂直居中写法靠它落数
-        // （判据与为什么不顺手把根盒也定高，见 `LayoutOptions::page_height`）。
-        // 滚动那一档 `viewport.height` 本身就是 0（上面 `paged` 就是照它判的）；竖排那一档
-        // 转轴后百分比高对应的是列长，那条映射还没做 —— 两边都给 `None`，
-        // 行为与这一格出现之前逐字相同。
-        let page_height = if paged && !vertical {
+        // 竖轴基准：分页档是一片的高，滚动档是**内容区的高**（浏览器里一个 spine
+        // 文档就是一个视口大的容纳块）。`html,body { height:100% }` 的空楔块与
+        // `position:absolute; bottom:12%` 的页脚都靠它落数（判据见
+        // `LayoutOptions::page_height`）。竖排转轴后百分比高对应的是列长，那条映射
+        // 还没做，仍给 `None`；滚动档量不出内容区高时也退回旧口径。
+        let page_height = if vertical {
+            None
+        } else if paged {
             Some(slice)
         } else {
-            None
+            (viewport.viewport_height > 0.0).then_some(viewport.viewport_height)
         };
         // 键在这里算，算是「这一帧想要什么」的唯一表述：排版、切片、绘制三级都从它出发。
+        //
+        // 屏幕的尺寸在**算键之前**存下来：图片判「铺满一屏」还是「缩进一栏」吃这两个数
+        // （`LayoutOptions::screen_width` / `screen_height`），而它属于**屏**不属于这一栏，
+        // 所以不从 `Viewport` 递、在这里现量。转屏那一栏宽常常不变而这一格变，不进键就会
+        // 拿着竖屏算好的大图摆在横屏上；量化用 [`quantize_screen`]，与键里那格同一把尺。
+        //
+        // 宽取的是**阅读层那一块的宽**（窗口宽减掉不属于阅读栏的侧栏），不是整窗：图上
+        // 溢出的那一截要盖在屏上，盖进侧栏里就是把字印到别人的地盘上。手机上侧栏是 0，
+        // 这一格就等于屏宽。高用整窗：纸现在也从窗口顶铺到底（见 `view::body` 的
+        // `sheet_area`），两边同一口径。页边距与 `max_measure` 都不参与 —— 这一格要的
+        // 正是「越过它们之后图能铺多宽」。
+        let window_size = window.viewport_size();
+        let screen_width = f32::from(window_size.width) - viewport.reserve;
+        self.inputs.screen = Some((
+            quantize_screen(screen_width.max(1.0)),
+            quantize_screen(f32::from(window_size.height)),
+        ));
         let mut key = self.layout_key(wrap, columns, page_height);
         let width = key.width as f32;
         // 片长同样量化一档，且**切片用的就是量化后的那个数**：排版按 A 宽折行、切片按 B 高切、

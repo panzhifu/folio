@@ -114,10 +114,39 @@ pub(crate) struct Header {
 }
 
 impl Header {
+    /// 只有 PalmDOC 头、没有 MOBI 头的老书：压缩方式、字数与记录数都在前 16 字节里，
+    /// 其余字段一律「没有」。正文按 cp1252 解（PalmDOC 时代的默认码页；UTF-8 的
+    /// 老书极少，而 `decode_text` 对非法 UTF-8 会整段走 lossy，不会崩）。
+    fn parse_palmdoc_only(compression: u16, rec0: &[u8]) -> Result<Self> {
+        Ok(Self {
+            compression,
+            text_length: u32_at(rec0, 4).unwrap_or(0),
+            text_record_count: u16_at(rec0, 8).unwrap_or(0),
+            text_record_size: u16_at(rec0, 10).unwrap_or(4096),
+            encryption_type: u16_at(rec0, 12).unwrap_or(0),
+            encoding: 1252,
+            version: 0,
+            exth_flags: 0,
+            extra_flags: 0,
+            image_index: NOTSET,
+            huff_rec_index: NOTSET,
+            huff_rec_count: NOTSET,
+            ncx_index: NOTSET,
+            fragment_index: NOTSET,
+            skeleton_index: NOTSET,
+            fdst_index: NOTSET,
+            fdst_section_count: 0,
+            guide_index: NOTSET,
+            full_name: String::new(),
+            exth: Vec::new(),
+        })
+    }
+
     /// 从录 0 的原始字节解出头。
     ///
-    /// 只在**结构真的不成**时返回 `Err`：录 0 太短、压缩方式不认得、MOBI magic 缺失。
-    /// 老书缺几个可选字段（图片索引、KF8 索引）不算错，那几格落成 `NOTSET`。
+    /// 只在**结构真的不成**时返回 `Err`：录 0 太短、压缩方式不认得。MOBI magic 缺失不是
+    /// 错（见 [`Self::parse_palmdoc_only`]）。老书缺几个可选字段（图片索引、KF8 索引）
+    /// 也不算错，那几格落成 `NOTSET`。
     pub(crate) fn parse(rec0: &[u8]) -> Result<Self> {
         if rec0.len() < PALMDOC_HEADER {
             return Err(crate::Error::UnsupportedFormat(
@@ -134,9 +163,10 @@ impl Header {
             )));
         }
         if rec0.get(MOBI_MAGIC_AT..MOBI_MAGIC_AT + 4) != Some(b"MOBI") {
-            return Err(crate::Error::UnsupportedFormat(
-                "MOBI 头缺失（录 0 偏移 16 不是 MOBI）".to_string(),
-            ));
+            // **没有 MOBI 头不是坏文件**：最早那批 PalmDOC / 老 .prc 只有 PalmDOC 头
+            // 加一串正文记录（libmobi 的 `sample-textread` 就是这样）。按「无 MOBI 头」
+            // 解出一份最小头，正文走 PalmDOC 那一支 —— 整本拒绝是这一族从前最大的缺口。
+            return Self::parse_palmdoc_only(compression, rec0);
         }
         let header_length = u32_at(rec0, 20).unwrap_or(0) as usize;
 
@@ -397,9 +427,11 @@ mod tests {
         let mut bad = record0();
         bad[0..2].copy_from_slice(&99u16.to_be_bytes());
         assert!(Header::parse(&bad).is_err());
-        // MOBI magic 缺失。
+        // 压缩方式不认得时，**没有 MOBI 头也不许走降级那一支**：否则「整本读不了」会变成
+        // 「解出一份最小头、交一屏乱码」，比拒绝更难查。
         let mut bad = record0();
-        bad[16..20].copy_from_slice(b"XXXX");
+        bad[0..2].copy_from_slice(&99u16.to_be_bytes());
+        bad[16..20].copy_from_slice(b"TEXt");
         assert!(Header::parse(&bad).is_err());
 
         // 可选字段缺失（老书短头 + 无 EXTH）：不算错，落 NOTSET / 空。
@@ -413,5 +445,39 @@ mod tests {
         assert_eq!(header.ncx_index, NOTSET);
         assert!(header.full_name.is_empty());
         assert!(!header.has_exth());
+    }
+
+    /// **没有 MOBI 头不是坏文件**：最早那批 PalmDOC / 老 `.prc` 只有前 16 字节那一段头，
+    /// 后面直接是一串正文记录（libmobi 的 `sample-textread` 就是这样）。从前这一族整本
+    /// 被 `UnsupportedFormat` 拒掉。
+    #[test]
+    fn a_record_without_the_mobi_header_reads_as_palmdoc_only() {
+        let mut rec = record0();
+        rec[16..20].copy_from_slice(b"TEXt");
+        let header = Header::parse(&rec).expect("只有 PalmDOC 头的书要解出最小头");
+        // PalmDOC 头里那四格照旧读出来。
+        assert_eq!(header.compression, COMPRESSION_PALMDOC);
+        assert_eq!(header.text_length, 1234);
+        assert_eq!(header.text_record_count, 7);
+        assert_eq!(header.text_record_size, 4096);
+        // 加密那一格也在 PalmDOC 头里：没有 MOBI 头照样要读得到，否则带 DRM 的
+        // PalmDOC 会解成「没加密」，交一屏乱码给读者。
+        assert_eq!(header.encryption_type, 0);
+        let mut drm = rec.clone();
+        drm[12..14].copy_from_slice(&1u16.to_be_bytes());
+        assert_eq!(Header::parse(&drm).unwrap().encryption_type, 1);
+        // 码页那一格在 MOBI 头里（偏移 28），读不到就按 PalmDOC 时代的默认码页。
+        assert_eq!(
+            header.encoding, 1252,
+            "夹具在偏移 28 写的 65001 属于 MOBI 头"
+        );
+        // MOBI 头里的索引一律「没有」，书目区与 EXTH 一个字节都不该被当目录读。
+        assert_eq!(header.version, 0);
+        assert!(!header.is_kf8());
+        assert_eq!(header.image_index, NOTSET);
+        assert_eq!(header.huff_rec_index, NOTSET);
+        assert_eq!(header.ncx_index, NOTSET);
+        assert!(header.exth.is_empty());
+        assert!(header.full_name.is_empty());
     }
 }

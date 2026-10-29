@@ -33,7 +33,9 @@ pub(in crate::ui::features::settings) use crate::ui::features::settings::model::
 pub(in crate::ui::features::settings) use crate::ui::features::settings::model::spec::{
     Group, NumberSpec, Page, Row, group, number, page,
 };
-pub(in crate::ui::features::settings) use folio_core::{Mode, PageTurn, Reader, TextDirection};
+pub(in crate::ui::features::settings) use folio_core::{
+    ImageScale, Mode, PageTurn, Reader, TextDirection,
+};
 pub(in crate::ui::features::settings) use gpui_kit::assets::IconName;
 pub(in crate::ui::features::settings) use gpui_kit::component::ThemeMode;
 pub(in crate::ui::features::settings) use gpui_kit::{App, Entity, SharedString};
@@ -57,6 +59,7 @@ use pages::appearance::appearance_page;
 use pages::fonts::fonts_page;
 use pages::layout::layout_page;
 use pages::library::library_page;
+use pages::membership::membership_page;
 use pages::speech::speech_page;
 use pages::storage::storage_page;
 use pages::sync::sync_page;
@@ -98,6 +101,7 @@ pub enum SettingsPage {
     Library,
     Toc,
     Storage,
+    Membership,
     About,
 }
 
@@ -105,12 +109,13 @@ impl SettingsPage {
     /// 全部页面，按导航顺序。
     ///
     /// `About` 排在末尾是刻意的：这一页不改任何东西，是读者**办完事顺手看一眼**的东西，
-    /// 摆在最上面等于让每天要调的那几页往下挪一格。
+    /// 摆在最上面等于让每天要调的那几页往下挪一格。`Membership` 紧挨着它，理由同一半：
+    /// 读者一天不会调两次会员，而手机上那一屏另有根屏那张卡片当入口（见 `compact.rs`）。
     ///
     /// 变体顺序就是侧栏顺序，而深链靠 [`index`](Self::index) 现算 —— 挪位置不会指错页，
     /// 但会让「第 N 页」这句话在别处（测试、日志、旧截图）对不上，所以三处顺序
     /// （本枚举、`ALL`、[`spec_pages`]）必须一起动。
-    pub const ALL: [SettingsPage; 11] = [
+    pub const ALL: [SettingsPage; 12] = [
         SettingsPage::Appearance,
         SettingsPage::Typography,
         SettingsPage::Layout,
@@ -121,6 +126,7 @@ impl SettingsPage {
         SettingsPage::Library,
         SettingsPage::Toc,
         SettingsPage::Storage,
+        SettingsPage::Membership,
         SettingsPage::About,
     ];
 
@@ -150,6 +156,7 @@ pub(in crate::ui::features::settings) fn spec_pages(
         library_page(cx),
         toc_page(cx),
         storage_page(cx),
+        membership_page(cx),
         about_page(cx, notes),
     ]
 }
@@ -337,6 +344,27 @@ mod tests {
                 pages(cx, &notes).len(),
                 SettingsPage::ALL.len(),
                 "`pages` 组出来的页数与 `SettingsPage::ALL` 对不上"
+            );
+        });
+    }
+
+    /// 「会员」那一页在两份顺序里必须是同一格。
+    ///
+    /// 手机端根屏那张卡片是按**序号**把会员从入口列表里跳掉的（`compact.rs` 的 `root_screen`），
+    /// 序号来自 [`SettingsPage::index`]，列表来自 [`spec_pages`] —— 两份一旦错开，跳掉的就是
+    /// 别的页，而会员同时在列表里出现两次。上面那条只数得出**数量**对不对。
+    #[gpui_kit::test]
+    fn the_membership_page_sits_where_its_index_points(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            let notes = card(cx);
+            let pages = spec_pages(cx, &notes);
+            let ix = SettingsPage::Membership.index();
+            assert_eq!(
+                pages[ix].title,
+                tr(cx, "page.membership"),
+                "`SettingsPage::ALL` 里会员的位置与 `spec_pages` 组装的顺序错开了"
             );
         });
     }

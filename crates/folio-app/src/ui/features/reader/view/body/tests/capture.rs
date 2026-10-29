@@ -1,7 +1,7 @@
 //! 折页捕获与烘焙：哪一帧该烘、烘哪一页、纹理何时作废。
 
 use super::harness::{PARA, build_with_document, flow, meta, open, prefs, settle, turn_frame};
-use crate::ui::features::reader::model::chrome::PageMode;
+use crate::ui::features::reader::model::chrome::{PageMode, Reserve};
 use crate::ui::features::reader::model::turn::TurnIntent;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::NAV_TRANSITION;
@@ -397,6 +397,68 @@ fn the_capture_rect_is_taken_at_the_resting_position(cx: &mut TestAppContext) {
 /// 「烘过哪一页」那个键拦不住这一格：分屏、折叠展开、surface 重建之后章号页号一个字都不动，而
 /// 纹理里被写过的只有**当时**那块矩形，网格取 uv 却按**今天**的窗口归一 —— 差出来的那一截采到没
 /// 被写过的地方，读出来就是黑。这里不去动测试平台的 resize（那一段不归这一档管），直接把
+/// 页眉/页脚变高（或显隐变了）时，上一帧那份捕获提交不能把这次改动盖掉。
+///
+/// 时序是：阅读页在子视图 `render` **之前**报带子的高度，而子视图开头会收上一帧的捕获
+/// 提交并把 `capture_dirty` 清掉。只设那一个标记，换带子之后仍会拿旧纹理去卷 ——
+/// 卷起来的纸缺一条边或带着旧的空带。这一条把「提交先落、几何后并」的顺序钉住。
+#[gpui_kit::test]
+fn a_band_geometry_change_survives_the_pending_capture_commit(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let (key, viewport) = view.read_with(cx, |v, _| {
+        (
+            (v.chapter_index(), v.page()),
+            v.captured_size.expect("定住的这一帧该已经烘过"),
+        )
+    });
+    assert!(
+        !view.read_with(cx, |v, _| v.capture_dirty),
+        "前置：定住之后纹理该是干净的"
+    );
+
+    // 两件事必须在**同一次渲染之前**摆好：上一帧的提交还在路上，父层这一帧又报告带子
+    // 变了。分开摆会让中间那次更新自己跑一帧，把提交先收掉，测的就不是这条时序了。
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| {
+            v.capture_committed.set(Some((key, viewport)));
+            v.set_chrome_bands(28.0, 28.0, 0.0, true, cx);
+        });
+        window.render_frame(cx)
+    })
+    .expect("渲染应成功");
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.header_reserve),
+        28.0,
+        "前置：这次 setter 该真的落下去"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.capture_dirty),
+        "带子变了，上一帧的提交不该把这笔脏标记清掉"
+    );
+
+    settle(cx, handle);
+    assert!(
+        !view.read_with(cx, |v, _| v.capture_dirty),
+        "重烘之后脏标记该落下"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some(key),
+        "重烘不改页号"
+    );
+}
+
 /// 「记下来的尺寸与今天不同」那一格状态摆出来，看下一帧认不认。
 #[gpui_kit::test]
 fn a_stale_captured_size_forces_a_recapture(cx: &mut TestAppContext) {
@@ -500,5 +562,89 @@ fn a_capture_layer_wraps_its_whole_subtree_and_pops_back(cx: &mut TestAppContext
         seen,
         [0, 1, 0],
         "壳的三个读数该是「主场景 → 捕获层 1 → 主场景」，实得 {seen:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn scratch_phone_insets_capture_commits(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    // 手机那一组数：状态栏 41 + 手势条 24 = reserve 65；读数带各 24。
+    view.update(cx, |v, cx| {
+        v.set_reserve(
+            Reserve {
+                width: 0.0,
+                height: 65.0,
+            },
+            cx,
+        );
+    });
+    view.update(cx, |v, _| {
+        v.top_inset = 41.0;
+        v.bottom_inset = 24.0;
+    });
+    view.update(cx, |v, cx| {
+        v.set_chrome_bands(24.0, 24.0, 24.0, true, cx);
+    });
+    settle(cx, handle);
+    let (cap, dirty, committed) = view.read_with(cx, |v, _| {
+        (v.captured_page, v.capture_dirty, v.capture_committed.get())
+    });
+    let key = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    println!("key={key:?} captured={cap:?} dirty={dirty} committed={committed:?}");
+    assert_eq!(
+        cap,
+        Some(key),
+        "手机内缩下捕获该照样提交，否则 curl 门永远不开"
+    );
+}
+
+/// 外壳把整页推过 `top_inset` 之后，捕获矩形**照样落在窗口里**。
+///
+/// 这条钉的是「仿真翻页点击没反应」那条链的根。捕获只在「动画不在飞」时烘，它的矩形从
+/// 纸面（`sheet_area`）长出来；而那块 canvas 的 `bounds.origin` 是**窗口**坐标 ——
+/// 外壳那层用 `pt(top_inset)` 把整页推到系统栏下面，所以原点是 `(0, top_inset)`。
+/// 从前局部矩形直接加上这个原点，下沿就成了 `top_inset + 窗口高`，`in_viewport` 每一帧
+/// 把它拒掉 ⇒ 纹理永不落地 ⇒ `curl_capture_ready()` 恒假 ⇒ 折页那一趟无限期排队，
+/// 点屏幕什么都不发生。真机读数（Meizu 20，384×853，状态栏 53.3）：
+/// `y=53.3 h=853.3 vh=853.3`。
+///
+/// 宿主这边的窗口**没有外壳那一层 padding**（测试台直接 `Root::new(会话)`），所以这一条
+/// 不靠窗口，直接量那条换算：局部矩形 + `bounds.origin = (0, top_inset)`。
+#[test]
+fn the_capture_rect_lands_in_the_window_after_the_safe_area_pushes_the_page_down() {
+    use gpui_kit::{Bounds, point, px};
+
+    use super::super::{capture_region, in_viewport, shape_in_window, sheet_area_in_page};
+
+    // 真机那一组数：屏 384×853，状态栏 53.33。
+    let viewport = (384.0f32, 853.33f32);
+    let top_inset = 53.33f32;
+    let sheet = sheet_area_in_page(viewport);
+    let local = capture_region(sheet, 0.0);
+    // 外壳那一层把整页推下去之后，那块 canvas 的原点是 (0, top_inset)。
+    let shaped = shape_in_window(point(px(0.0), px(top_inset)), (0.0, top_inset), local);
+    assert_eq!(
+        f32::from(shaped.origin.y),
+        0.0,
+        "还掉这一层自己的平移之后，纸面顶边该回到窗口顶，实得 {shaped:?}"
+    );
+    assert!(
+        in_viewport(shaped, viewport),
+        "捕获矩形必须整块落在窗口里，实得 {shaped:?}（窗口 {viewport:?}）"
+    );
+    // 反过来：不还这一份平移（旧写法），矩形下沿正好多出一个 `top_inset`，出窗。
+    let naive = Bounds::new(
+        point(px(0.0), px(top_inset + f32::from(local.origin.y))),
+        local.size,
+    );
+    assert!(
+        !in_viewport(naive, viewport),
+        "不还平移时矩形该出窗 —— 这正是真机上那条 warn"
     );
 }

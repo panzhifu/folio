@@ -88,6 +88,78 @@ fn split_columns(
     (styled.0, out)
 }
 
+/// 叠起来的插图**切片之后仍然一片不丢**。
+///
+/// 叠图把后面那张的 y 拉到前一张的底边之内（判据见 `layout::collect::STACK_STEP`），
+/// 于是行盒的 y 不再是单调递增的。分片器是按 `flow_start`（横排就是 `line.y`）与
+/// 「这一行到没到页底」判的 —— 一条**倒序**的 y 会让「能塞几行塞几行」提前停手，
+/// 后面那几张图就再没有页可进（读者读到「三张图只看见第一张」）。
+///
+/// 这条只钉「每张图都出现在某一页里」，不钉页数：叠图的页数本来就会比不叠少。
+#[test]
+fn stacked_illustrations_survive_pagination() {
+    struct Three;
+    impl crate::layout::ports::ImageProvider for Three {
+        fn resolve(&self, src: &str) -> Option<crate::layout::ports::ResolvedImage> {
+            matches!(src, "a" | "b" | "c").then(|| crate::layout::ports::ResolvedImage {
+                href: src.to_string(),
+                width: 600.0,
+                height: 300.0,
+            })
+        }
+    }
+
+    let dom =
+        Dom::parse("<p><img src=a></p><p><img src=b></p><p><img src=c></p><p>正文</p>".as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse("p { margin: 0 }", Origin::Author),
+        &ComputedStyle::default(),
+        "",
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions {
+            width: 600.0,
+            light: false,
+            allow_vertical: true,
+            page_height: Some(400.0),
+            screen_width: Some(600.0),
+            screen_height: Some(400.0),
+        },
+        &Mono,
+        &Three,
+    );
+    let pages = fragments(
+        &laid,
+        &styles,
+        FragmentOptions {
+            height: 400.0,
+            columns: 1,
+        },
+    );
+    let image_lines: Vec<usize> = laid
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.fragments.len() == 1
+                && matches!(line.fragments[0], crate::layout::LineFragment::Image(_))
+        })
+        .map(|(ix, _)| ix)
+        .collect();
+    assert_eq!(image_lines.len(), 3, "该排三张图");
+    for line in image_lines {
+        assert!(
+            pages.iter().any(|f| f.lines.contains(&line)),
+            "第 {line} 行（一张图）没有被任何一页收进去：{:?}",
+            pages.iter().map(|f| f.lines.clone()).collect::<Vec<_>>()
+        );
+    }
+}
+
 /// 排完版，连同样式表一起交出去（分片要读每个块的断点意图）。
 fn styled(html: &str, css: &str, width: f32) -> (Layout, StyledDom) {
     let dom = Dom::parse(html.as_bytes());
@@ -106,6 +178,8 @@ fn styled(html: &str, css: &str, width: f32) -> (Layout, StyledDom) {
             light: false,
             allow_vertical: false,
             page_height: None,
+            screen_width: None,
+            screen_height: None,
         },
         &Mono,
         &NoImages,
@@ -612,4 +686,108 @@ fn column_width_and_offset_are_the_numbers_the_layout_needs() {
     );
     // 间距为负按 0 算：读者设置里不该出现负数，但算式不能因此把栏推到左边去。
     assert_eq!(column_offset(145.0, -50.0, 1), 145.0);
+}
+
+/// 整页画那一格旗（[`Fragment::picture_page`]）：**这一页只有一张铺到版心八成以上的图，
+/// 而且那一页没有正文**。
+///
+/// 判据从「整章」搬到「一片」之后最容易被写错的正是这三档，各钉一条：
+/// - 独占一页的一张满版图 → 交出那条容器路径，绘制层据此把这一页铺到整窗；
+/// - 同一页还有正文 → 空表。正文页被撑成整窗不是「大图」，是排版坏了；
+/// - 独占一页但宽度**不到版心八成** → 空表。一枚居中的小徽标撑到整窗只多出一片空白。
+///
+/// 页高夹那一条要留意：块级图被 `collect::fit_image_height` 硬夹在页高里（分片器不该把
+/// 一张图切成两页），所以这里那张「满版图」取 600×150 —— 在 200 高的页里它不被夹，
+/// 宽度仍是版心满 600。夹过的那一档宽度会跟着缩到八成线以下，判据就该说不算。
+#[test]
+fn a_picture_only_page_carries_the_full_bleed_flag() {
+    struct Pic {
+        width: f32,
+        height: f32,
+    }
+    impl crate::layout::ports::ImageProvider for Pic {
+        fn resolve(&self, src: &str) -> Option<crate::layout::ports::ResolvedImage> {
+            (src == "a").then(|| crate::layout::ports::ResolvedImage {
+                href: src.to_string(),
+                width: self.width,
+                height: self.height,
+            })
+        }
+    }
+
+    let paged = |html: &str, pic: &Pic, page: f32| -> Vec<Fragment> {
+        let dom = Dom::parse(html.as_bytes());
+        let styles = cascade(
+            &dom,
+            &RuleSet::parse("p { margin: 0 }", Origin::Author),
+            &ComputedStyle::default(),
+            "",
+        );
+        let laid = layout(
+            &dom,
+            &styles,
+            find(&dom, "body"),
+            LayoutOptions {
+                width: 600.0,
+                light: false,
+                allow_vertical: true,
+                page_height: Some(page),
+                screen_width: Some(600.0),
+                screen_height: Some(page),
+            },
+            &Mono,
+            pic,
+        );
+        fragments(
+            &laid,
+            &styles,
+            FragmentOptions {
+                height: page,
+                columns: 1,
+            },
+        )
+    };
+
+    // 那一页只留图靠作者的强制断点：`break-before: page`。不加这一句，前面那行正文
+    // 与这张 150 高的图在同页高里塞得下，判据正确地不给旗 —— 那副样子量不出这一档。
+    let one_picture_page = "<p>正文</p><p style=\"break-before: page\"><img src=a></p>".to_string();
+    let wide = Pic {
+        width: 600.0,
+        height: 150.0,
+    };
+    let only = paged(&one_picture_page, &wide, 200.0);
+    let flagged: Vec<&Fragment> = only
+        .iter()
+        .filter(|slice| !slice.picture_page.is_empty())
+        .collect();
+    assert_eq!(
+        flagged.len(),
+        1,
+        "一页一图那一档要恰好标出一片，实得 {} 片里标了 {} 片",
+        only.len(),
+        flagged.len()
+    );
+    assert_eq!(
+        flagged[0].picture_page,
+        vec!["a".to_string()],
+        "交出的是那张图的容器路径"
+    );
+
+    // 同页有正文：页高放到 600，那行字与那张图落进同一片。
+    let mixed = paged("<p>正文</p><p><img src=a></p>", &wide, 600.0);
+    assert!(
+        mixed.iter().all(|slice| slice.picture_page.is_empty()),
+        "正文与图同页时不许交旗：那一页要按版心画，不是按窗铺"
+    );
+
+    // 小图独占一页：300 宽不到 600 的八成（480）。
+    let small = Pic {
+        width: 300.0,
+        height: 100.0,
+    };
+    let logo = paged(&one_picture_page, &small, 200.0);
+    assert!(
+        logo.iter().all(|slice| slice.picture_page.is_empty()),
+        "不到版心八成的图不当整页画，撑到整窗只会多出一片空白"
+    );
 }

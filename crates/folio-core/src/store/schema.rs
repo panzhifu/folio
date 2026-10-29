@@ -541,4 +541,12 @@ ALTER TABLE books ADD COLUMN settings_json TEXT NOT NULL DEFAULT '';
     r#"
 ALTER TABLE books ADD COLUMN settings_updated_at INTEGER NOT NULL DEFAULT 0;
 "#,
+    // v28：**整本书的可见字符集**（JSON 数组，升序码点）。
+    //
+    // 导入扫描本来就要把每一章解出来数字数；顺手收下这本的字符集，开书给内嵌字体
+    // 做子集化时就不必再读一遍全书。空数组 = 老行 / 非 EPUB provider：子集化那时
+    // 退回整份字体，与没有这个功能时逐字节同一条路。
+    r#"
+ALTER TABLE books ADD COLUMN font_charset TEXT NOT NULL DEFAULT '[]';
+"#,
 ];

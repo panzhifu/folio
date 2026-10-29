@@ -75,7 +75,7 @@ type PrefTweak = (&'static str, fn(&mut crate::infra::config::Reader));
 
 /// 每项读者偏好的「动一下它」写法。清单与 `Reader` 的字段表一一对应
 /// （下面那条断言守着），加字段时照着补一行。
-const PREF_TWEAKS: [PrefTweak; 17] = [
+const PREF_TWEAKS: [PrefTweak; 18] = [
     ("font_size", |p| p.font_size += 1.0),
     ("line_height", |p| p.line_height += 0.1),
     ("paragraph_gap_em", |p| p.paragraph_gap_em += 0.1),
@@ -100,6 +100,17 @@ const PREF_TWEAKS: [PrefTweak; 17] = [
     // 「序列化整份取哈希」，没有逐字段豁免）。消费它的代码在 `ui::features::reader::
     // model::image_atlas`，那里有一条测试钉住覆盖生效。
     ("image_cache_bytes", |p| p.image_cache_bytes += 1),
+    // 图片缩放：进键的理由与上面那条同一句（整份序列化取哈希，没有逐字段豁免）。
+    // 生效的判据不在这里 —— 那一头的三档各有各的门：
+    // `a_wide_image_is_capped_by_the_screen_rather_than_the_column`、
+    // `the_fills_the_screen_rule_keyed_on_object_fit_and_size`、
+    // `a_block_image_follows_the_readers_scale_tier`。
+    //
+    // 这一份必须挑**与默认不同**的那一档：默认是 `Screen`（铺满，2026-10-31 从 `Follow`
+    // 换过来），还写 `Screen` 就是拿默认当变化，这条门当场空转。
+    ("image_scale", |p| {
+        p.image_scale = crate::infra::config::ImageScale::Follow
+    }),
 ];
 
 /// 每一项读者偏好都得进键：漏一项就是「改了设置版式不动」，而屏幕上看不出来。
@@ -259,6 +270,8 @@ fn block_cache_reuses_and_matches_fresh_layout() {
         light: false,
         allow_vertical: false,
         page_height: None,
+        screen_width: None,
+        screen_height: None,
     };
     let key = key_for(FLAT_SOURCE, 300.0);
     let fresh = layout(&dom, &styles, body, opts, &Mono, &NoImages);
@@ -305,6 +318,8 @@ fn a_reused_block_replays_the_floats_it_placed() {
         light: false,
         allow_vertical: false,
         page_height: None,
+        screen_width: None,
+        screen_height: None,
     };
     let key = key_for(&html, 200.0);
     let fresh = layout(&dom, &styles, body, opts, &Mono, &images);
@@ -335,6 +350,8 @@ fn block_cache_only_relayouts_the_changed_block() {
         light: false,
         allow_vertical: false,
         page_height: None,
+        screen_width: None,
+        screen_height: None,
     };
     let key = key_for(FLAT_SOURCE, 300.0);
 
@@ -374,6 +391,8 @@ fn block_cache_clears_when_the_context_changes() {
         light: false,
         allow_vertical: false,
         page_height: None,
+        screen_width: None,
+        screen_height: None,
     };
     let base = key_for(FLAT_SOURCE, 300.0);
 
@@ -432,6 +451,8 @@ fn block_cache_survives_a_preference_change() {
         light: false,
         allow_vertical: false,
         page_height: None,
+        screen_width: None,
+        screen_height: None,
     };
     let plain_prefs = crate::infra::config::Reader::default();
     let plain = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
@@ -500,6 +521,8 @@ fn block_cache_evicts_over_capacity() {
         light: false,
         allow_vertical: false,
         page_height: None,
+        screen_width: None,
+        screen_height: None,
     };
     let mut cache = BlockCache::with_capacity(2);
     layout_with_blocks(

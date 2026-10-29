@@ -32,6 +32,7 @@
 //! 不等就红。改动 DOM 那侧的口径时，那边会立刻把这件事喊出来。
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use html5ever::tendril::StrTendril;
@@ -68,6 +69,12 @@ pub struct ChapterSummary {
     /// 百分号解码）与按本章目录解析都留给格式层做 —— 只有「算不算样式表」这一句判据
     /// 需要共用（[`is_stylesheet_rel`]）。
     pub stylesheets: Vec<String>,
+    /// 这一章可见文本里出现过的字符（码点，升序去重）。
+    ///
+    /// 导入那一趟本来就要把整章解出来数字数；顺手收这一列，后面给内嵌字体做子集化
+    /// 时不必再读一遍书。只收**可见文本**里的字符（与 `visible_chars` 同一片），
+    /// 标签、注释、`<style>` 里的文本都不算。
+    pub charset: Vec<u32>,
 }
 
 /// `<link rel="…">` 里算作者样式表的那一条判据：`rel` 按空白切词，**任一词**是
@@ -162,6 +169,8 @@ struct Scan {
     styles: RefCell<Vec<String>>,
     /// 文档序的 `<link rel=stylesheet>` 引用。
     sheets: RefCell<Vec<String>>,
+    /// 可见文本里出现过的字符；`finish` 时排成 `Vec<u32>`。
+    charset: RefCell<BTreeSet<u32>>,
 }
 
 impl Default for Scan {
@@ -179,6 +188,7 @@ impl Default for Scan {
             style_text: RefCell::new(String::new()),
             styles: RefCell::new(Vec::new()),
             sheets: RefCell::new(Vec::new()),
+            charset: RefCell::new(BTreeSet::new()),
         }
     }
 }
@@ -398,6 +408,10 @@ impl Scan {
         }
         if self.counting() {
             self.chars.set(self.chars.get() + text.chars().count());
+            let mut charset = self.charset.borrow_mut();
+            for ch in text.chars() {
+                charset.insert(ch as u32);
+            }
         }
         if self.heading_tag.borrow().is_some() && self.skip.borrow().is_empty() {
             self.heading_text.borrow_mut().push_str(text);
@@ -427,6 +441,9 @@ impl Scan {
                 blocks
             },
             stylesheets: std::mem::take(&mut self.sheets.borrow_mut()),
+            charset: std::mem::take(&mut *self.charset.borrow_mut())
+                .into_iter()
+                .collect(),
         }
     }
 }

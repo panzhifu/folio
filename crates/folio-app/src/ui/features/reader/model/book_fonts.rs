@@ -24,8 +24,13 @@ use folio_core::content::document::Document;
 use folio_core::content::format::css::{FontFaceRule, FontSrc, RuleSet};
 use folio_core::content::format::{FontBytes, FontRef};
 use gpui_kit::TextSystem;
+use read_fonts::TableProvider;
+use read_fonts::collections::IntSet;
+use read_fonts::types::{NameId, Tag};
+use skera::{DEFAULT_DROP_TABLES, DEFAULT_LAYOUT_FEATURES, Plan, SubsetFlags};
 
 use super::measure::is_generic;
+use crate::ui::foundation::font_primary;
 
 /// 进程级「字体注册事件」计数：每成功往文本系统里注册一批字体就 +1。
 ///
@@ -48,10 +53,38 @@ fn face_registered() {
 /// 声明名 → 设备家族名。`Send + Sync`：会在后台线程的度量里被拿着。
 pub struct BookFonts {
     /// 一个声明名可能对应多份内部家族（一份字体文件带好几个名字），
-    /// 第一个当 primary，其余留在补缺链上。
-    families: HashMap<String, Vec<String>>,
+    /// 第一个能当 primary 的当 primary，其余留在补缺链上。
+    families: HashMap<String, Vec<FaceName>>,
     /// 建这张表时的字体表版本，见 [`FACE_EVENTS`]。
     revision: u32,
+}
+
+/// 注册成功后设备报回来的一个内部家族名，以及它能不能当 gpui 的 **primary**。
+///
+/// 能不能当 primary 的判据只有一个：字体里有没有拉丁 `m` 的字形 —— gpui 的
+/// `CosmicTextSystem::load_family` 会把没有 `m` 的脸从 primary 候选里剔掉
+/// （gpui-pre-wgpu `cosmic_text_system.rs` 里那段 HACK，注释写着编辑器要量 `m` 的宽），
+/// 剔完候选为空时 `resolve_font` 直接 panic。桌面端那一 panic 会被 fontconfig 的回退表
+/// 接住，Android 上 gpui 的全局回退表（`.ZedMono`、Helvetica、Noto Sans…）一个都不存在，
+/// 于是整台进程 SIGABRT —— 2026-10-30《诡秘之主》的 `sy.ttf`（只有 18 个字形：
+/// 几个数字、方括号与十个汉字，没有拉丁 `m`）在 Meizu 20 上就是这么闪退的。
+///
+/// 判据必须与 gpui 那一句逐字同源（`charmap.map('m') == 0`）：我们放过去的家族它照剔，
+/// 它剔空的那个家族我们不能挑。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaceName {
+    pub name: String,
+    /// 字体里有拉丁 `m` 的字形。
+    pub latin: bool,
+}
+
+impl FaceName {
+    /// 设备字体：名字从 `all_font_names()` 里挑出来，`latin` 由调用方用
+    /// `TextSystem::font_has_glyph` 真解析后给（见 `device_family_has_m`），不再按
+    /// 进程登记表猜。
+    fn device(name: String, latin: bool) -> Self {
+        Self { name, latin }
+    }
 }
 
 impl Default for BookFonts {
@@ -65,17 +98,26 @@ impl Default for BookFonts {
     }
 }
 
-/// 开书那一段的一次性计时，随 [`BookFonts::for_document`] 一起交回 `Book::new`。
+/// 字体准备那一段的一次性计时，随 [`FontLoadJob::run`] 的返回值交给日志与探针。
 ///
 /// 与帧计时分开：`Book::new` 不在 `ReaderSession::render` 里，`perf::reset()` 会把
-/// 帧账清掉。这些数只在 `folio_app::perf` 开到 DEBUG 时才会被 `perf::log_book_open`
+/// 帧账清掉。这些数只在 `folio_app::perf` 开到 DEBUG 时才会被 `perf::log_font_load`
 /// 打出来。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FontLoadStats {
     /// `RuleSet::parse` 那一趟（`for_document` 自己的第一遍 CSS 解析）。
     pub parse_ns: u64,
+    /// 字体身份那一趟：`font_refs_in`（复用共享容器）或 `font_refs`（自己开容器）。
+    pub refs_ns: u64,
     /// `doc.fonts(&wanted)` 那一趟（含容器解压）。
     pub bytes_ns: u64,
+    /// 子集化（skera）与改名那一趟。
+    pub subset_ns: u64,
+    /// 子集前后字节数（只算真切出来的那几份）。
+    pub subset_bytes_before: usize,
+    pub subset_bytes_after: usize,
+    /// 想切但没切成的份数（TTC / skera 报错 / 改名失败）；这些走整份字体。
+    pub subset_failures: usize,
     /// 逐份 `add_fonts` + 前后两次 `all_font_names`，以及设备字体别名那一趟。
     pub register_ns: u64,
     /// `doc.fonts` 交回来的份数。
@@ -84,11 +126,12 @@ pub struct FontLoadStats {
     pub cache_hits: usize,
     /// 真正读了字节的份数。
     pub bytes_read: usize,
-    /// `add_fonts` 返回错误的份数（字体损坏 / fontdb 认不出）。
+    /// 读不到字节（`read_font` 回 `None`）或整批 `add_fonts` 失败的份数。
     pub failed: usize,
-    /// `add_fonts` 成功但 `all_font_names` 没有新增名字的份数。
+    /// 注册成功但没给这份字体找到任何一个 fontdb 报出来的家族名的份数。
     ///
-    /// 真机与桌面正常应为 0；测试文本系统可能整类忽略 `add_fonts`，这时它会等于份数。
+    /// 真机与桌面正常应为 0（name 表与 fontdb 应当同形）；测试文本系统整类忽略
+    /// `add_fonts` 时它会等于份数。
     pub empty_diff: usize,
 }
 
@@ -96,7 +139,7 @@ pub struct FontLoadStats {
 ///
 /// `href` 在两本不同的书里可以指向不同的字节（多看模板的 `Fonts/kt.ttf` 就是例子）；
 /// 进程级别名缓存拿它当键会让第二本书认到第一本的内部家族名。EPUB 从中央目录的
-/// `crc32 + raw_len` 取，MOBI 对已解出的字节现算。
+/// `crc32 + raw_len` 取，MOBI 对原始 FONT 记录现算（不解压，见 `mobi::font_refs`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct FontId {
     crc32: u32,
@@ -115,6 +158,30 @@ impl FontId {
         Self {
             crc32: font.crc32,
             raw_len: font.raw_len,
+        }
+    }
+}
+
+/// 别名缓存键：字体身份 + **子集标记**。
+///
+/// `subset == 0` 是整份字体；非 0 是「按这本书的字符集切出来的子集」的 hash。两张
+/// 表必须分开：子集字体带唯一家族名（见 [`rename_subset_family`]），拿整份字体的
+/// 缓存去填子集的声明名会让读者看到上一本书的缺字版本。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AliasKey {
+    font: FontId,
+    subset: u64,
+}
+
+impl AliasKey {
+    fn whole(font: FontId) -> Self {
+        Self { font, subset: 0 }
+    }
+
+    fn subset(font: FontId, subset: u64) -> Self {
+        Self {
+            font,
+            subset: subset | 1,
         }
     }
 }
@@ -188,6 +255,8 @@ impl FontLoadJob {
         let (fonts, stats) = BookFonts::for_request(texts, self.doc.as_ref(), &self.request);
         super::perf::log_font_load(
             stats.parse_ns,
+            stats.refs_ns,
+            stats.subset_ns,
             stats.bytes_ns,
             stats.register_ns,
             stats.faces,
@@ -195,6 +264,9 @@ impl FontLoadJob {
             stats.bytes_read,
             stats.failed,
             stats.empty_diff,
+            stats.subset_bytes_before,
+            stats.subset_bytes_after,
+            stats.subset_failures,
         );
         *result = Some((fonts.clone(), stats));
         (fonts, stats)
@@ -213,19 +285,41 @@ impl BookFonts {
     }
 
     /// 登记一条别名。同名重复登记不会重复条目，`@font-face` 的多条 `src` 归到同一个家族。
-    pub fn insert(&mut self, declared: String, families: Vec<String>) {
+    /// 同一个家族名带着不同的 `latin` 登记两次时取或：只要有一张脸带 `m`，这个家族就能用。
+    pub fn insert(&mut self, declared: String, families: Vec<FaceName>) {
         let entry = self.families.entry(declared).or_default();
-        for name in families {
-            if !entry.iter().any(|existing| existing == &name) {
-                entry.push(name);
+        for face in families {
+            match entry.iter_mut().find(|existing| existing.name == face.name) {
+                Some(existing) => existing.latin |= face.latin,
+                None => entry.push(face),
             }
         }
     }
 
     /// 某个声明名注册到的内部家族名（按注册顺序）；没登记过时是 `None`。返回借用而不是
     /// 克隆，度量与绘制每一条 run 都要问。
-    pub fn families_for(&self, name: &str) -> Option<&[String]> {
+    pub fn families_for(&self, name: &str) -> Option<&[FaceName]> {
         self.families.get(name).map(Vec::as_slice)
+    }
+
+    /// 这个家族名能不能交给 gpui 当 primary。
+    ///
+    /// 两条都要：进程登记表里没被标成「没有拉丁 `m`」，以及**这本书自己的表**里同名
+    /// 的脸至少有一张带 `m`（这张表可能是测试直接构造的，没走过注册登记）。
+    /// 名字不在这本书的表里时按「设备字体」处理，由登记表说话。
+    pub fn primary_usable(&self, name: &str) -> bool {
+        let mut shipped = false;
+        for face in self.families.values().flatten() {
+            if face.name.eq_ignore_ascii_case(name) {
+                shipped = true;
+                if face.latin {
+                    return true;
+                }
+            }
+        }
+        // 书里同名脸一张带 m 的都没有：不交。名字不在这本书的表里（设备字体）才问
+        // 进程登记表 —— 那条路要拿锁，别让每次排版都走它。
+        !shipped && font_primary::usable(name)
     }
 
     /// 只有测试在调（钉「空表读不出别名」那一格），生产这一侧没人问。
@@ -276,8 +370,10 @@ impl BookFonts {
     /// 用 UI 已经折好的 [`FontRequest`] 建别名表。worker 只做三件事：
     /// 按身份查别名缓存 → 未命中才读这一份字节 → 注册。
     ///
-    /// EPUB 走 `doc.font_refs`（中央目录元数据，不解压）；没有元数据入口的 provider
-    /// 返回 `None`，这里退回 `doc.fonts` 一次读全（仍按身份缓存）。
+    /// 身份先走 `doc.font_refs_in`：开书读 CSS 那一趟已经把共享容器打开，这一问
+    /// 复用同一个 ZIP、只补一遍 OPF；provider 没有共享容器这条路时退回
+    /// `doc.font_refs`（自己开容器），再没有元数据入口才退回 `doc.fonts` 一次读全
+    /// （仍按身份缓存）。
     pub fn for_request(
         texts: &TextSystem,
         doc: &dyn Document,
@@ -287,94 +383,143 @@ impl BookFonts {
         let mut register = None;
         let mut subtract_bytes = false;
         let mut fonts = Self::empty();
+        // 整本书的可见字符集（导入扫描顺手收的）。空 = 老库 / 非 EPUB：不切子集。
+        let book_charset = doc.font_charset();
+        let subset_charset = if book_charset.is_empty() {
+            Vec::new()
+        } else {
+            charset_with_ascii(book_charset)
+        };
+        let subset_key = if subset_charset.is_empty() {
+            0
+        } else {
+            charset_hash(&subset_charset)
+        };
         if !request.wanted.is_empty() {
-            if let Some(refs) = doc.font_refs(&request.wanted) {
+            let refs_timer = super::perf::Timer::start();
+            let refs = doc
+                .font_refs_in(&request.wanted)
+                .or_else(|| doc.font_refs(&request.wanted));
+            stats.refs_ns = refs_timer.ns();
+            if let Some(refs) = refs {
                 stats.faces = refs.len();
                 let timer = super::perf::Timer::start();
                 subtract_bytes = true;
+                let mut pending: Vec<PendingFace> = Vec::new();
                 for reference in refs {
                     let Some(declared) = request.declared_of.get(&reference.href).cloned() else {
                         continue;
                     };
                     let id = FontId::of_ref(&reference);
-                    let names = match cached_names(id) {
-                        Some(names) => {
-                            stats.cache_hits += 1;
-                            names
-                        }
-                        None => {
-                            let read = super::perf::Timer::start();
-                            let Some(bytes) = doc.read_font(&reference) else {
-                                stats.failed += 1;
-                                continue;
-                            };
-                            stats.bytes_ns += read.ns();
-                            stats.bytes_read += 1;
-                            let before = texts.all_font_names();
-                            // 注册失败（字体损坏 / fontdb 认不出）只丢这一份，不拦其余的。
-                            if texts.add_fonts(vec![Cow::Owned(bytes)]).is_err() {
-                                stats.failed += 1;
-                                continue;
-                            }
-                            // 字体表真的变宽了：让后续建的表都带上新版本。
-                            face_registered();
-                            let added: Vec<String> = texts
-                                .all_font_names()
-                                .into_iter()
-                                .filter(|name| !before.iter().any(|old| old == name))
-                                .collect();
-                            if added.is_empty() {
-                                stats.empty_diff += 1;
-                            }
-                            store_names(id, &added);
-                            added
-                        }
+                    let first_key = if subset_key != 0 {
+                        AliasKey::subset(id, subset_key)
+                    } else {
+                        AliasKey::whole(id)
                     };
-                    if !names.is_empty() {
-                        fonts.insert(declared, names);
+                    if let Some(names) = cached_names(first_key) {
+                        stats.cache_hits += 1;
+                        if !names.is_empty() {
+                            fonts.insert(declared, names);
+                        }
+                        continue;
                     }
+                    let read = super::perf::Timer::start();
+                    let Some(bytes) = doc.read_font(&reference) else {
+                        stats.failed += 1;
+                        continue;
+                    };
+                    stats.bytes_ns += read.ns();
+                    stats.bytes_read += 1;
+                    let (key, bytes) =
+                        prepare_face(id, bytes, subset_key, &subset_charset, &mut stats);
+                    // 子集没切成而整份字体已经在缓存里：别重复注册整份。
+                    if key.subset == 0
+                        && subset_key != 0
+                        && let Some(names) = cached_names(key)
+                    {
+                        stats.cache_hits += 1;
+                        if !names.is_empty() {
+                            fonts.insert(declared, names);
+                        }
+                        continue;
+                    }
+                    pending.push(PendingFace {
+                        key,
+                        declared,
+                        bytes,
+                    });
+                }
+                let pending_len = pending.len();
+                match register_batch(texts, pending) {
+                    Some(results) => {
+                        for (declared, names) in results {
+                            if names.is_empty() {
+                                stats.empty_diff += 1;
+                                continue;
+                            }
+                            fonts.insert(declared, names);
+                        }
+                    }
+                    // `add_fonts` 整批失败：这一批的读取都白付了，按份数记失败。
+                    None => stats.failed += pending_len,
                 }
                 register = Some(timer);
             } else {
-                // 没有元数据入口（MOBI 等）：退回一次读全，仍按身份缓存注册结果。
+                // 没有元数据入口的 provider（CBZ / PDF 等）：退回一次读全，仍按身份缓存注册结果。
                 let bytes = super::perf::Timer::start();
                 let faces = doc.fonts(&request.wanted);
                 stats.bytes_ns = bytes.ns();
                 stats.faces = faces.len();
                 stats.bytes_read = faces.len();
                 let timer = super::perf::Timer::start();
+                let mut pending: Vec<PendingFace> = Vec::new();
                 for face in faces {
                     let Some(declared) = request.declared_of.get(&face.href).cloned() else {
                         continue;
                     };
                     let id = FontId::of(&face);
-                    let names = match cached_names(id) {
-                        Some(names) => {
-                            stats.cache_hits += 1;
-                            names
+                    let first_key = if subset_key != 0 {
+                        AliasKey::subset(id, subset_key)
+                    } else {
+                        AliasKey::whole(id)
+                    };
+                    if let Some(names) = cached_names(first_key) {
+                        stats.cache_hits += 1;
+                        if !names.is_empty() {
+                            fonts.insert(declared, names);
                         }
-                        None => {
-                            let before = texts.all_font_names();
-                            if texts.add_fonts(vec![Cow::Owned(face.bytes)]).is_err() {
-                                stats.failed += 1;
+                        continue;
+                    }
+                    let (key, bytes) =
+                        prepare_face(id, face.bytes, subset_key, &subset_charset, &mut stats);
+                    if key.subset == 0
+                        && subset_key != 0
+                        && let Some(names) = cached_names(key)
+                    {
+                        stats.cache_hits += 1;
+                        if !names.is_empty() {
+                            fonts.insert(declared, names);
+                        }
+                        continue;
+                    }
+                    pending.push(PendingFace {
+                        key,
+                        declared,
+                        bytes,
+                    });
+                }
+                let pending_len = pending.len();
+                match register_batch(texts, pending) {
+                    Some(results) => {
+                        for (declared, names) in results {
+                            if names.is_empty() {
+                                stats.empty_diff += 1;
                                 continue;
                             }
-                            face_registered();
-                            let added: Vec<String> = texts
-                                .all_font_names()
-                                .into_iter()
-                                .filter(|name| !before.iter().any(|old| old == name))
-                                .collect();
-                            if added.is_empty() {
-                                stats.empty_diff += 1;
-                            }
-                            store_names(id, &added);
-                            added
+                            fonts.insert(declared, names);
                         }
-                    };
-                    if !names.is_empty() {
-                        fonts.insert(declared, names);
                     }
+                    None => stats.failed += pending_len,
                 }
                 register = Some(timer);
             }
@@ -395,7 +540,10 @@ impl BookFonts {
             let known = texts.all_font_names();
             for (declared, family) in system_aliases(&request.faces, &known) {
                 if fonts.families_for(&declared).is_none() {
-                    fonts.insert(declared, vec![family]);
+                    // 设备字体手上没有字节，但字体系统有：真解析一遍有没有 `m`，
+                    // 别再按名字假设它一定能当 primary。
+                    let latin = device_family_has_m(texts, &family);
+                    fonts.insert(declared, vec![FaceName::device(family, latin)]);
                 }
             }
         }
@@ -412,6 +560,18 @@ impl BookFonts {
         };
         (Arc::new(fonts), stats)
     }
+}
+
+/// 设备字体有没有拉丁 `m`：真正解析（解析家族 → 加载 face → 查 cmap），不靠名字假设。
+///
+/// 字体可能在 `all_font_names()` 里但被平台从 primary 候选里剔掉（没有 `m` 的脸 ——
+/// emoji / 符号字体），这一问答的就是「它能不能当 primary」。
+fn device_family_has_m(texts: &TextSystem, family: &str) -> bool {
+    let font = gpui_kit::Font {
+        family: family.to_string().into(),
+        ..Default::default()
+    };
+    texts.font_has_glyph(&font, 'm')
 }
 
 /// `@font-face` 里指向**设备字体**的那些声明 → 这台机器上真有的家族名。
@@ -576,7 +736,255 @@ fn normalize(name: &str) -> String {
         .collect()
 }
 
-/// 进程级登记表：字体内容身份 → 注册成功后设备新增的家族名。
+/// 读回来的一份字体：能切子集就用子集（带唯一家族名），切不动就交回整份。
+///
+/// `subset_key == 0` = 这本书没有字符集（老库 / 非 EPUB）或调用方不切；直接整份。
+fn prepare_face(
+    id: FontId,
+    bytes: Vec<u8>,
+    subset_key: u64,
+    charset: &[u32],
+    stats: &mut FontLoadStats,
+) -> (AliasKey, Vec<u8>) {
+    if subset_key == 0 {
+        return (AliasKey::whole(id), bytes);
+    }
+    let started = super::perf::Timer::start();
+    let subset = subset_font_bytes(&bytes, charset);
+    stats.subset_ns += started.ns();
+    if let Some(subset) = subset {
+        let started = super::perf::Timer::start();
+        let renamed = rename_subset_family(&subset, subset_family_tag(id, subset_key));
+        stats.subset_ns += started.ns();
+        if let Some(renamed) = renamed
+            && renamed.len() < bytes.len()
+        {
+            stats.subset_bytes_before += bytes.len();
+            stats.subset_bytes_after += renamed.len();
+            return (AliasKey::subset(id, subset_key), renamed);
+        }
+    }
+    stats.subset_failures += 1;
+    (AliasKey::whole(id), bytes)
+}
+
+/// 一份还没注册的字体：缓存键、声明名、字节。
+struct PendingFace {
+    key: AliasKey,
+    declared: String,
+    bytes: Vec<u8>,
+}
+
+/// 把**整批**未命中的字体一次注册进文本系统，交回每份的
+/// `(声明名, 家族名 + 能不能当 primary)`。
+///
+/// 为什么不是逐份 `add_fonts`：`all_font_names()` 是整张字体表的枚举 + 排序 + 去重，
+/// 逐份注册要付 `2 × 份数` 次；这一趟只付两次（`before`/`after`）。名字归属改用
+/// `latin_by_family` 已经解析出的 name 表，而不是靠「前后差集」—— 差集在批量里分不清
+/// 哪一份新增了哪个名字；name 表是每份字体自己的，天然分得清。
+///
+/// cmap/name 必须在 `add_fonts` **之前**读：那一步拿走字节的所有权。注册失败
+/// （`add_fonts` 的 `Err`）返回 `None`，由调用方把整批记 failed。
+fn register_batch(
+    texts: &TextSystem,
+    pending: Vec<PendingFace>,
+) -> Option<Vec<(String, Vec<FaceName>)>> {
+    if pending.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut meta: Vec<(AliasKey, String)> = Vec::with_capacity(pending.len());
+    let mut coverages: Vec<LatinCoverage> = Vec::with_capacity(pending.len());
+    let mut bytes: Vec<Cow<'static, [u8]>> = Vec::with_capacity(pending.len());
+    for face in pending {
+        meta.push((face.key, face.declared));
+        coverages.push(latin_by_family(&face.bytes));
+        bytes.push(Cow::Owned(face.bytes));
+    }
+    // 一次注册整批；wgpu 那侧直接从 fontdb 每条 `load_font_source` 交回的 face 里
+    // 读家族名，所以这里拿到的就是「哪份字体有哪些家族」，不需要前后差集，也不需要
+    // 拿 ttf-parser 的 name 表去猜 fontdb 报了哪一条。
+    let family_sets = texts.add_fonts_with_families(bytes).ok()?;
+    // 字体表真的变宽了：让后续建的表都带上新版本。一批只记一次事件。
+    face_registered();
+    Some(
+        meta.into_iter()
+            .zip(coverages)
+            .zip(family_sets)
+            .map(|(((id, declared), coverage), families)| {
+                let names: Vec<FaceName> = families
+                    .into_iter()
+                    .map(|name| FaceName {
+                        latin: coverage.covers(&name),
+                        name,
+                    })
+                    .collect();
+                store_names(id, &names);
+                for face in &names {
+                    font_primary::note_face(&face.name, face.latin);
+                }
+                (declared, names)
+            })
+            .collect(),
+    )
+}
+
+/// 子集化用的字符集：书的可见字符 + 可见 ASCII。
+///
+/// ASCII 必须无条件下进去：gpui 的 primary 过滤要求一张脸带 `m`，而「这本书恰好没有
+/// 英文/数字」不代表作者带来的字体要因此失去 primary 资格。
+fn charset_with_ascii(charset: &[u32]) -> Vec<u32> {
+    let mut out = charset.to_vec();
+    out.extend(0x20..=0x7e);
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// 子集身份：字符集（含 ASCII）的进程内 hash。只用来区分「同一个字体文件、不同书」
+/// 的子集，不必跨进程稳定。
+fn charset_hash(charset: &[u32]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "folio-font-subset-v1".hash(&mut hasher);
+    charset.hash(&mut hasher);
+    hasher.finish().max(1)
+}
+
+/// 子集家族名里的 tag：**字体身份 + 字符集**。两本不同的书用同一个字符集、但字体文件
+/// 不同（或多看模板的同一个 `Fonts/kt.ttf` 装着不同字节）时，家族名也必须分开。
+fn subset_family_tag(id: FontId, subset_hash: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "folio-font-family-v1".hash(&mut hasher);
+    id.hash(&mut hasher);
+    subset_hash.hash(&mut hasher);
+    hasher.finish().max(1)
+}
+
+/// skera 切一份字体到给定字符集。
+///
+/// `Plan` 用与 CLI 默认一致的选项：保留 GSUB/GPOS（含 `vert`/`vrt2`/`valt` 竖排
+/// 特性），保留 name 0..6 与英文记录。字体是 TTC / 解析不了 / skera 报错时回 `None`，
+/// 调用方退回整份字体。
+///
+/// **只切带 `glyf` 的字体**：skera 0.9 没有 CFF charstring 的子集路径，CFF 字体过一遍
+/// 会连 `CFF ` 表一起丢干净 —— 《诡秘之主》的 `llf.ttf`（方正飞凡体，CFF 轮廓）实测
+/// 子集 1952 字节、cmap 全在而轮廓全空，屏上 h2 整块隐形。没有 `glyf` 就整份放行。
+fn subset_font_bytes(bytes: &[u8], charset: &[u32]) -> Option<Vec<u8>> {
+    let font = read_fonts::FontRef::new(bytes).ok()?;
+    font.glyf().ok()?;
+    let mut unicodes = IntSet::<u32>::empty();
+    for cp in charset {
+        unicodes.insert(*cp);
+    }
+    let drop_tables: IntSet<Tag> = DEFAULT_DROP_TABLES.iter().copied().collect();
+    let layout_features: IntSet<Tag> = DEFAULT_LAYOUT_FEATURES.iter().copied().collect();
+    let name_ids: IntSet<NameId> = (0..=6).map(NameId::from).collect();
+    let name_languages: IntSet<u16> = [0x0409u16].into_iter().collect();
+    let plan = Plan::new(
+        &IntSet::empty(),
+        &unicodes,
+        &font,
+        SubsetFlags::default(),
+        &drop_tables,
+        &IntSet::all(),
+        &layout_features,
+        &name_ids,
+        &name_languages,
+    );
+    skera::subset_font(&font, &plan).ok()
+}
+
+/// 给子集字体里所有家族/全名/PostScript 名加上 `#folio<tag>`，让它在进程字体表里
+/// 与别的书的子集、以及整份字体本身分得开。
+///
+/// 进程字体表是全局的，而 `load_family` 只按家族名匹配；两个不同子集若同名，后注册
+/// 的那张脸会和先注册的混在一个家族里，`find_best_match` 按字重/斜体挑一张，缺字的
+/// 情况就落到读者眼前。改名是让「这本书的这张子集」有唯一身份的最小代价。
+fn rename_subset_family(bytes: &[u8], tag: u64) -> Option<Vec<u8>> {
+    let suffix = format!("{}{tag:016x}", font_primary::SUBSET_MARKER);
+    let font = read_fonts::FontRef::new(bytes).ok()?;
+    let name = font.name().ok()?;
+    let data = name.string_data();
+    let mut records = Vec::new();
+    let mut renamed_any = false;
+    for record in name.name_record() {
+        // 语言标签记录不搬；带 >0x8000 语言号的记录一起丢，免得写出没有标签表的坏表。
+        if record.language_id() >= 0x8000 {
+            continue;
+        }
+        let mut text = record.string(data).ok()?.to_string();
+        // 只改家族与全名；PostScript 名（6）有字符集限制，不塞 `#`。
+        if matches!(record.name_id().to_u16(), 1 | 4 | 16) {
+            text.push_str(&suffix);
+            renamed_any = true;
+        }
+        records.push(write_fonts::tables::name::NameRecord {
+            platform_id: record.platform_id(),
+            encoding_id: record.encoding_id(),
+            language_id: record.language_id(),
+            name_id: record.name_id(),
+            string: text.into(),
+        });
+    }
+    if !renamed_any {
+        return None;
+    }
+    records.sort_by_key(|r| (r.platform_id, r.encoding_id, r.language_id, r.name_id));
+    let name = write_fonts::tables::name::Name::new(records);
+    let mut builder = write_fonts::FontBuilder::new();
+    builder.add_table(&name).ok()?;
+    builder.copy_missing_tables(font);
+    Some(builder.build())
+}
+
+/// 一份字体字节里每个家族名带不带拉丁 `m`。
+///
+/// 名字按 name 表 1（family）与 16（typographic family）的记录找，**任何语言**都算 ——
+/// fontdb 报回来的可能是本地化那一条。一条都对不上时退回「这份字体里有没有任何一张脸
+/// 带 m」：比对失败不该把作者带来的字体整个丢掉，而单脸的字体（真书里的常态）两种问法
+/// 是同一个答案。
+struct LatinCoverage {
+    by_family: HashMap<String, bool>,
+    any: bool,
+}
+
+impl LatinCoverage {
+    fn covers(&self, family: &str) -> bool {
+        self.by_family.get(family).copied().unwrap_or(self.any)
+    }
+}
+
+fn latin_by_family(bytes: &[u8]) -> LatinCoverage {
+    let mut coverage = LatinCoverage {
+        by_family: HashMap::new(),
+        any: false,
+    };
+    let count = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
+    for index in 0..count {
+        let Ok(face) = ttf_parser::Face::parse(bytes, index) else {
+            continue;
+        };
+        let has_m = face.glyph_index('m').is_some();
+        coverage.any |= has_m;
+        for name in face.names() {
+            if !matches!(name.name_id, 1 | 16) {
+                continue;
+            }
+            let Some(text) = name.to_string() else {
+                continue;
+            };
+            coverage
+                .by_family
+                .entry(text)
+                .and_modify(|known| *known |= has_m)
+                .or_insert(has_m);
+        }
+    }
+    coverage
+}
+
+/// 进程级登记表：字体内容身份 → 注册成功后设备新增的家族名（带「能不能当 primary」）。
 ///
 /// 必需而非优化：`all_font_names()` 去重，同一份字体第二次注册拿不到增量，只靠 diff
 /// 会把「这本书带内嵌字体」误判成没有。进程内每份字体只算一次。
@@ -585,21 +993,21 @@ fn normalize(name: &str) -> String {
 /// 同一条 `OEBPS/Fonts/kt.ttf` 而装着不同字节；拿路径当键会让第二本书跳过注册，并把
 /// 第一本的内部家族名登记到第二本的声明名下。身份取中央目录的 `crc32 + raw_len`，
 /// 见 [`FontId`]；这是快筛，不是密码学哈希（碰撞概率极低，但不是零）。
-fn registered() -> &'static Mutex<HashMap<FontId, Vec<String>>> {
-    static CACHE: OnceLock<Mutex<HashMap<FontId, Vec<String>>>> = OnceLock::new();
+fn registered() -> &'static Mutex<HashMap<AliasKey, Vec<FaceName>>> {
+    static CACHE: OnceLock<Mutex<HashMap<AliasKey, Vec<FaceName>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn cached_names(id: FontId) -> Option<Vec<String>> {
+fn cached_names(key: AliasKey) -> Option<Vec<FaceName>> {
     registered()
         .lock()
         .ok()
-        .and_then(|cache| cache.get(&id).cloned())
+        .and_then(|cache| cache.get(&key).cloned())
 }
 
-fn store_names(id: FontId, names: &[String]) {
+fn store_names(key: AliasKey, names: &[FaceName]) {
     if let Ok(mut cache) = registered().lock() {
-        cache.insert(id, names.to_vec());
+        cache.insert(key, names.to_vec());
     }
 }
 
@@ -609,8 +1017,69 @@ mod tests {
     //! 归到集成那一档，不在这里假装测到。
 
     use super::{
-        BookFonts, FontId, FontRequest, cached_names, store_names, system_aliases, system_family,
+        AliasKey, BookFonts, FaceName, FontId, FontRequest, cached_names, charset_hash,
+        charset_with_ascii, latin_by_family, rename_subset_family, store_names, subset_family_tag,
+        subset_font_bytes, system_aliases, system_family,
     };
+
+    #[test]
+    #[ignore = "探针：读 /tmp/folio-css/llf.ttf（本机才有的样本），CI 机器上没那个目录"]
+    fn scratch_subset_llf_keeps_outlines() {
+        use read_fonts::TableProvider;
+        let bytes = std::fs::read("/tmp/folio-css/llf.ttf").expect("llf");
+        let chars: Vec<u32> = "塔罗会克莱恩·莫雷蒂0TheFool.愚者"
+            .chars()
+            .map(|c| c as u32)
+            .collect();
+        let charset = charset_with_ascii(&chars);
+        let subset = subset_font_bytes(&bytes, &charset).expect("子集成功");
+        let whole_glyf = read_fonts::FontRef::new(&bytes)
+            .unwrap()
+            .glyf()
+            .map(|g| g.offset_data().len())
+            .unwrap_or(0);
+        let sub_glyf = read_fonts::FontRef::new(&subset)
+            .unwrap()
+            .glyf()
+            .map(|g| g.offset_data().len())
+            .unwrap_or(0);
+        println!(
+            "before {} (glyf {whole_glyf}) → after {} (glyf {sub_glyf})",
+            bytes.len(),
+            subset.len()
+        );
+        std::fs::write("/tmp/folio-css/llf_subset.ttf", &subset).unwrap();
+        let face = ttf_parser::Face::parse(&subset, 0).expect("可解析");
+        for ch in ['塔', '罗', '会', '克', 'A', 'm'] {
+            let gid = face.glyph_index(ch);
+            let outline = gid.map(|g| {
+                let mut n = 0u32;
+                face.outline_glyph(g, &mut Counting(&mut n));
+                n
+            });
+            println!("{ch} gid={:?} outline_ops={:?}", gid.map(|g| g.0), outline);
+        }
+    }
+
+    struct Counting<'a>(&'a mut u32);
+    impl ttf_parser::OutlineBuilder for Counting<'_> {
+        fn move_to(&mut self, _: f32, _: f32) {
+            *self.0 += 1;
+        }
+        fn line_to(&mut self, _: f32, _: f32) {
+            *self.0 += 1;
+        }
+        fn quad_to(&mut self, _: f32, _: f32, _: f32, _: f32) {
+            *self.0 += 1;
+        }
+        fn curve_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {
+            *self.0 += 1;
+        }
+        fn close(&mut self) {
+            *self.0 += 1;
+        }
+    }
+    use crate::ui::foundation::font_primary::SUBSET_MARKER;
     use folio_core::content::format::FontBytes;
     use folio_core::content::format::css::{Origin, RuleSet};
 
@@ -698,27 +1167,51 @@ mod tests {
         assert!(fonts.is_empty());
         assert!(fonts.families_for("Book Body").is_none());
 
-        fonts.insert("Book Body".into(), vec!["Noto Serif".into()]);
+        fonts.insert("Book Body".into(), vec![named("Noto Serif", true)]);
         assert_eq!(
             fonts.families_for("Book Body").unwrap(),
-            &["Noto Serif".to_string()]
+            &[named("Noto Serif", true)]
         );
         assert!(fonts.families_for("serif").is_none(), "泛族名不该凭空有链");
     }
 
-    /// 同名重复登记（`@font-face` 的多条 `src`）不产生重复条目。
+    /// 同名重复登记（`@font-face` 的多条 `src`）不产生重复条目；
+    /// 同一个名字一次带 `m`、一次不带时算带 —— 只要有一张脸能用，这个家族就能用。
     #[test]
     fn repeated_inserts_do_not_duplicate_families() {
         let mut fonts = BookFonts::empty();
-        fonts.insert("Book Body".into(), vec!["Noto Serif".into()]);
+        fonts.insert("Book Body".into(), vec![named("Noto Serif", false)]);
         fonts.insert(
             "Book Body".into(),
-            vec!["Noto Serif".into(), "Noto Serif CJK".into()],
+            vec![named("Noto Serif CJK", true), named("Noto Serif", true)],
         );
         assert_eq!(
             fonts.families_for("Book Body").unwrap(),
-            &["Noto Serif".to_string(), "Noto Serif CJK".to_string()]
+            &[named("Noto Serif", true), named("Noto Serif CJK", true)]
         );
+    }
+
+    fn named(name: &str, latin: bool) -> FaceName {
+        FaceName {
+            name: name.to_string(),
+            latin,
+        }
+    }
+
+    /// 判据必须与 gpui 的 `charmap.map('m') == 0` 同源：随包的 emoji 字体没有 `m`
+    /// （有数字与 #、*，没有拉丁字母），所以它当不了 primary；名字对不上时按整份字体
+    /// 「有没有任何一张脸带 m」回答，不因为比对失败就把字体丢掉。
+    #[test]
+    fn a_font_without_latin_m_is_not_primary_material() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("android/app/src/main/assets/fonts/NotoColorEmoji.ttf");
+        let bytes = std::fs::read(&path).expect("随包的 emoji 字体在仓库里");
+        assert!(!latin_by_family(&bytes).covers("Noto Color Emoji"));
+        assert!(
+            !latin_by_family(&bytes).covers("A Family That Is Not In This Font"),
+            "名字对不上时退回整份字体：这份里一张带 m 的脸都没有"
+        );
+        assert!(!latin_by_family(b"not a font").any, "认不出的字节不 panic");
     }
 
     fn face(href: &str, crc32: u32, raw_len: u64) -> FontBytes {
@@ -746,13 +1239,11 @@ mod tests {
     fn the_alias_cache_does_not_share_names_across_identities() {
         let a = face("OEBPS/Fonts/kt.ttf", 0xAAAA_0001, 101);
         let b = face("OEBPS/Fonts/kt.ttf", 0xBBBB_0001, 101);
-        store_names(FontId::of(&a), &["Family A".to_string()]);
+        let a_key = AliasKey::whole(FontId::of(&a));
+        store_names(a_key, &[named("Family A", true)]);
+        assert_eq!(cached_names(a_key), Some(vec![named("Family A", true)]));
         assert_eq!(
-            cached_names(FontId::of(&a)),
-            Some(vec!["Family A".to_string()])
-        );
-        assert_eq!(
-            cached_names(FontId::of(&b)),
+            cached_names(AliasKey::whole(FontId::of(&b))),
             None,
             "另一份字节不能拿到第一本的家族名"
         );
@@ -805,6 +1296,148 @@ mod tests {
         assert_eq!(second.cache_hits, 2, "两份都该命中");
     }
 
+    /// worker 先问 `font_refs_in`（共享容器），只有它给不出时才退回自己开容器的
+    /// `font_refs`。这条门用一个「`font_refs_in` 有值、`font_refs` 一调就 panic」的
+    /// 文档钉住顺序 —— 反了就会在真实的 EPUB 上重开一次 ZIP、再解析一遍 OPF。
+    #[gpui_kit::test]
+    fn the_worker_prefers_the_shared_container_over_opening_its_own(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use folio_core::content::document::{ContentRef, Document as OpenedDocument};
+        use folio_core::content::format::{
+            Content, ContentKind, DocMeta, FlowDoc, FontRef, Format,
+        };
+
+        struct SharedOnly(Box<dyn OpenedDocument>);
+        impl OpenedDocument for SharedOnly {
+            fn meta(&self) -> &DocMeta {
+                self.0.meta()
+            }
+            fn kind(&self) -> ContentKind {
+                self.0.kind()
+            }
+            fn content(&self) -> ContentRef<'_> {
+                self.0.content()
+            }
+            fn image_bytes(&self, href: &str) -> Option<Vec<u8>> {
+                self.0.image_bytes(href)
+            }
+            fn stylesheet(&self) -> String {
+                self.0.stylesheet()
+            }
+            fn chapter_source(&self, index: usize) -> folio_core::Result<String> {
+                self.0.chapter_source(index)
+            }
+            fn font_refs_in(&self, _wanted: &[String]) -> Option<Vec<FontRef>> {
+                Some(vec![FontRef {
+                    href: "x".to_string(),
+                    media_type: "font/ttf".to_string(),
+                    raw_len: 1,
+                    crc32: 1,
+                }])
+            }
+            fn font_refs(&self, _wanted: &[String]) -> Option<Vec<FontRef>> {
+                panic!("共享容器已经给出身份，不该再开第二个 ZIP")
+            }
+        }
+
+        cx.update(gpui_kit::init);
+        let inner = folio_core::content::document::from_content(
+            DocMeta {
+                title: "共享容器".into(),
+                format: Format::Epub,
+                ..DocMeta::default()
+            },
+            Content::Reflow(FlowDoc::default()),
+        );
+        let doc = SharedOnly(inner);
+        let request = FontRequest {
+            wanted: vec!["x".to_string()],
+            declared_of: [("x".to_string(), "Fam".to_string())].into_iter().collect(),
+            faces: Vec::new(),
+        };
+        let (_, stats) = cx.update(|cx| BookFonts::for_request(cx.text_system(), &doc, &request));
+        assert_eq!(stats.faces, 1, "用的就是共享容器给的那一份");
+        assert_eq!(
+            stats.failed, 1,
+            "没有容器的测试文档读不到字节，只记一次失败"
+        );
+    }
+
+    /// 子集字符集永远带 ASCII（primary 要 `m`），hash 对同一份集合稳定。
+    #[test]
+    fn subset_charset_keeps_ascii_and_hashes_stably() {
+        let charset = charset_with_ascii(&[0x6c49]);
+        assert!(charset.contains(&('m' as u32)), "ASCII 必须无条件补进来");
+        assert!(charset.contains(&0x6c49));
+        assert_eq!(charset_hash(&charset), charset_hash(&charset.clone()));
+        assert_ne!(charset_hash(&charset), 0, "0 留给整份字体");
+    }
+
+    /// 真书 HP：导入收的整本字符集 → skera 子集 → 家族名加唯一后缀。
+    ///
+    /// 忽略：真书只在 `tests/fixtures/local/`，不入库。手动跑：
+    /// `cargo test -p folio-app --lib -- --ignored --nocapture hp_font_subset_is_renamed_and_smaller`
+    #[test]
+    #[ignore = "真书 HP 不在仓库；手动跑"]
+    fn hp_font_subset_is_renamed_and_smaller() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/local/hali-bote-quanji.epub");
+        if !path.is_file() {
+            eprintln!("{} 不在，跳过", path.display());
+            return;
+        }
+        let doc = folio_core::content::document::open(&path).expect("打开 HP");
+        let charset = charset_with_ascii(doc.font_charset());
+        assert!(
+            charset.len() > 1000,
+            "导入该收到整本字符集：{}",
+            charset.len()
+        );
+        let hash = charset_hash(&charset);
+        let css = doc.stylesheet();
+        let rules = RuleSet::parse(&css, folio_core::content::format::css::Origin::Author);
+        let request = FontRequest::from_rules(&rules);
+        let refs = doc.font_refs(&request.wanted).expect("EPUB 有身份");
+        assert_eq!(refs.len(), 2, "HP 有两份内嵌字体");
+
+        for reference in refs {
+            let id = FontId::of_ref(&reference);
+            let bytes = doc.read_font(&reference).expect("读一份");
+            let subset = subset_font_bytes(&bytes, &charset).expect("skera 该切得动");
+            assert!(
+                subset.len() < bytes.len(),
+                "{}: {} B 的子集不该比原字体大",
+                reference.href,
+                subset.len()
+            );
+            let renamed = rename_subset_family(&subset, subset_family_tag(id, hash)).expect("改名");
+            let coverage = latin_by_family(&renamed);
+            let names: Vec<String> = coverage.by_family.keys().cloned().collect();
+            assert!(
+                names.iter().all(|name| name.contains(SUBSET_MARKER)),
+                "子集家族名必须带唯一后缀：{names:?}"
+            );
+            assert!(
+                names.iter().any(|name| coverage.covers(name)),
+                "子集必须还带拉丁 m：{names:?}"
+            );
+            println!(
+                "{}: {} B -> {} B ({:.1}%), families={names:?}",
+                reference.href,
+                bytes.len(),
+                renamed.len(),
+                100.0 * renamed.len() as f64 / bytes.len() as f64,
+            );
+        }
+    }
+
+    /// 这条探针的输出里附一句「CSS 里是谁在点这份字体」——只用 `declared_of` 那一份映射。
+    fn declared_of_note(href: &str) -> String {
+        let _ = href;
+        String::new()
+    }
+
     /// 真实容器 + 真实文本系统的开书计时；只在手动读数字时跑。
     ///
     /// 跑法：
@@ -817,8 +1450,13 @@ mod tests {
         use std::time::Instant;
 
         cx.update(gpui_kit::init);
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/local/hali-bote-quanji.epub");
+        // 默认 HP；`FOLIO_FONT_BENCH=<路径>` 指任何一本在盘上的书（换大本读数字用）。
+        let path = std::env::var("FOLIO_FONT_BENCH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/local/hali-bote-quanji.epub")
+            });
         if !path.is_file() {
             eprintln!("{} 不在，跳过（真书不入库）", path.display());
             return;
@@ -839,30 +1477,55 @@ mod tests {
             }
         }
         let faces = doc.fonts(&wanted);
+        println!("wanted 条数={}", wanted.len());
+        for face in &faces {
+            // 每份字体：大小、CSS 里点它的声明名、它每一张脸带不带拉丁 `m`。
+            // 不带 `m` 的脸 gpui 会整张从 primary 里剔掉（判据见 [`FaceName`]），
+            // 所以这一列直接说明「作者带来的这份字体用得上用不上」。
+            let coverage = latin_by_family(&face.bytes);
+            let mut names: Vec<String> = coverage.by_family.keys().cloned().collect();
+            names.sort();
+            println!(
+                "  {:<28} {:>9} B  any_m={}  {}{}",
+                face.href,
+                face.bytes.len(),
+                coverage.any,
+                names
+                    .iter()
+                    .map(|name| format!("{name}={}", coverage.covers(name)))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                declared_of_note(&face.href),
+            );
+        }
+        let missing: Vec<&str> = wanted
+            .iter()
+            .map(String::as_str)
+            .filter(|href| !faces.iter().any(|face| face.href == *href))
+            .collect();
         println!(
-            "wanted={wanted:?}\nfaces={:?}",
-            faces
-                .iter()
-                .map(|face| (
-                    face.href.as_str(),
-                    face.bytes.len(),
-                    face.crc32,
-                    face.raw_len
-                ))
-                .collect::<Vec<_>>()
+            "CSS 点了 {} 条，容器里真有 {} 份，**对不到文件的 {} 条**：{missing:?}",
+            wanted.len(),
+            faces.len(),
+            missing.len()
         );
         for round in 1..=3 {
             let started = Instant::now();
             let (fonts, stats) = cx.update(|cx| BookFonts::for_document(doc.as_ref(), &css, cx));
             let total_us = started.elapsed().as_micros();
             println!(
-                "round {round}: total_us={total_us} parse_us={} bytes_us={} register_us={} faces={} failed={} empty_diff={} families={}",
+                "round {round}: total_us={total_us} parse_us={} refs_us={} subset_us={} bytes_us={} register_us={} faces={} failed={} empty_diff={} subset={}->{} subset_fail={} families={}",
                 stats.parse_ns / 1000,
+                stats.refs_ns / 1000,
+                stats.subset_ns / 1000,
                 stats.bytes_ns / 1000,
                 stats.register_ns / 1000,
                 stats.faces,
                 stats.failed,
                 stats.empty_diff,
+                stats.subset_bytes_before,
+                stats.subset_bytes_after,
+                stats.subset_failures,
                 fonts.families.len(),
             );
             // `TestAppContext` 的文本系统可能整类忽略 `add_fonts`（`families=0`、

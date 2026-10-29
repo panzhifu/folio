@@ -202,6 +202,8 @@ fn main() {
             light: false,
             allow_vertical: false,
             page_height: None,
+            screen_width: None,
+            screen_height: None,
         },
         &StdMeasure,
         &provider,

@@ -348,7 +348,7 @@ impl Format {
 /// 阈值不必 bump —— [`rules_hash`] 那一格会说「规则表换了」，老库在开书时逐本重扫，
 /// 不必为一套正则发一版。要 bump 的仍然是动那台引擎：四条否决门的编排、号怎么读、
 /// 切点怎么落（`novel::detect`），因为那是「同一份表算出什么」变了。
-pub const INDEX_VERSION: i64 = 12;
+pub const INDEX_VERSION: i64 = 13;
 
 /// 这一格式的索引算自哪一份小说规则表 —— 交出**此刻生效**那一份的内容哈希。
 ///
@@ -817,9 +817,10 @@ pub struct FontRef {
     pub href: String,
     /// manifest 声明的 media-type。
     pub media_type: String,
-    /// 解压后长度（WOFF 是解回 sfnt 之前的长度）。
+    /// 容器记的解压后长度（WOFF 是解回 sfnt 之前的长度）；MOBI 是原始 FONT
+    /// 记录的长度 —— 那边没有中央目录，身份只能对原始记录现算。
     pub raw_len: u64,
-    /// 中央目录记的 CRC32。
+    /// 容器记的 CRC32；MOBI 是对原始 FONT 记录现算的（不解压）。
     pub crc32: u32,
 }
 
@@ -875,7 +876,11 @@ pub fn shrink_image(bytes: &[u8], max_edge: u32) -> Option<(Vec<u8>, &'static st
     use image::ImageDecoder as _;
 
     // 这是一笔**贵**事（整份解码 + 重编码），所以数它一次：模块头那条纪律允许
-    // 「本身就贵的事件」进计数器，而这一格的口径是「阅读时不该发生」。
+    // 「本身就贵的事件」进计数器。口径 2026-10-31 起放宽了一格：除了「超过上限的图
+    // 进图集之前先缩小」，阅读时那一档**低清预览**也走这里
+    // （`folio_app::ui::foundation::images::DecodeRequest::preview`）—— 那一档的意义就是
+    // 花一次小的解码换「屏上不是白纸」，所以这一列不再是「阅读时不该发生」，
+    // 而是「每发生一次都值不值」。
     crate::infra::metrics::Metric::ImageShrinks.count();
 
     if max_edge == 0 {

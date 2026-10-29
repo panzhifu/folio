@@ -169,6 +169,8 @@ impl DocumentProvider for ChmAdapter {
             progression_rtl: false,
             cover: None,
             images,
+            // CHM 的正文扫描没有收字符集：子集化对这类书退回整份字体。
+            font_charset: Vec::new(),
             cover_ref: None,
         };
         tracing::debug!(

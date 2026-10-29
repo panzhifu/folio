@@ -135,18 +135,25 @@ const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, b
 
 /// 书架那套排序，几处查询共用一条常量。
 ///
+/// **「最近有动静」= `MAX(入库, 翻开)`**：刚导进来的书 `last_opened_at` 还是 NULL，
+/// 只按「翻开过没有」分层的话它会落在**所有**翻开过的书后面 —— 读者导完一本退回书架，
+/// 新书排在第二屏之外，看着就是「没导进来」。用两个时刻的最大值，导入本身就是一次
+/// 动静：新书排最前，翻开任意一本之后那本自然压过它。
+///
 /// **末尾的 `books.id DESC` 不是装饰，是必需的终结符**：入库时间戳是**秒**
 /// （`store::now`），一次批量导入的十几本会拿到同一个 `added_at`，于是 `added_at DESC`
 /// 全是并列 —— 并列之间 SQLite 不保证任何顺序，实测同一份数据能给出两种先后（本项目的
 /// `store::books::grouping::shelf_grouped_splits_by_author` 就是这么翻车的）。后果不只是
 /// 难看：整架那一片与某一组那一页在两次查询之间换序，读者的眼睛跟着丢一行。
 ///
-/// 按 `id DESC` 收尾 = 「同秒入库的，后落库的在先」，与 `added_at DESC` 同向。
+/// 按 `id DESC` 收尾 = 「同秒入库的，后落库的在先」，与入库时间倒序同向。
+/// 中间那对 `last_opened_at IS NULL, last_opened_at DESC` 只在两个时刻**并列**时
+/// 说话（同一秒里又导入又翻开）：翻开过的那本在前，其余仍交给行号。
 ///
 /// 整架、某一组那一页、还没进组的那一批三条查询共用这一条常量 —— 分组只回答「摆哪几本」，
 /// 「先看见哪一本」不归它管（见 [`Store::shelf_in_collection`]）。
-const SHELF_ORDER: &str =
-    "ORDER BY last_opened_at IS NULL, last_opened_at DESC, added_at DESC, books.id DESC";
+const SHELF_ORDER: &str = "ORDER BY MAX(added_at, COALESCE(last_opened_at, 0)) DESC, \
+     last_opened_at IS NULL, last_opened_at DESC, books.id DESC";
 
 /// 一本副本所在的书库根 —— 用于拼 `covers/` 的位置。
 ///
@@ -349,7 +356,7 @@ impl Store {
     }
 
     /// 书架：整架或按**书名 / 作者**过滤，排序与 [`Store::list_books`] 同一条
-    /// （最近在读在前，从没打开过的按导入时间倒序）。
+    /// （最近有动静的在前：刚导入的与最近翻开过的都算，见 [`SHELF_ORDER`]）。
     ///
     /// 空查询走 `?1 = ''` 那个短路分支而不是拼两条 SQL：一条语句两种绑定，
     /// 免得两处各写一遍排序而写歪。

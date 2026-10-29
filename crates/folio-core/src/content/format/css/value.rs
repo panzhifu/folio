@@ -47,9 +47,56 @@ pub(super) fn parse_list_style(value: &str) -> Option<ListStyle> {
 /// `float` 的取值。CSS 3 的 `inline-start` / `inline-end` / `float-inherit` 不接：
 /// 那一族要的是方向敏感的左右，而出版书里真正出现的写法（插图、章首下沉）都写死
 /// `left` / `right`。认不出就整条判不认识，不悄悄当 `none`。
+/// `duokan-bleed` 的取值：`leftright` / `lefttopright` / `top` 这几种。
+///
+/// 两个引擎都把它写成**连写**（没有短横线分隔），也有书里用空格或逗号分开写；
+/// 三种都按「出现了哪几个词」认。`none` 等于四条都不置 —— 与 `bleed: none` 同解。
+pub(super) fn parse_bleed(value: &str) -> Option<crate::content::format::css::computed::Bleed> {
+    use crate::content::format::css::computed::Bleed;
+    let mut bleed = Bleed::NONE;
+    let mut any = false;
+    let lowered = value.to_ascii_lowercase();
+    let tokens = lowered.split(|c: char| c == ',' || c == ';' || c.is_whitespace());
+    for token in tokens.flat_map(|t| t.split('-')).filter(|t| !t.is_empty()) {
+        // `leftright` 这类连写：按出现的词扫一遍，而不是精确匹配整串。
+        let mut rest = token;
+        loop {
+            let mut matched = false;
+            for (word, set) in [("left", 0u8), ("right", 1), ("top", 2), ("bottom", 3)] {
+                if let Some(stripped) = rest.strip_prefix(word) {
+                    match set {
+                        0 => bleed.left = true,
+                        1 => bleed.right = true,
+                        2 => bleed.top = true,
+                        _ => bleed.bottom = true,
+                    }
+                    rest = stripped;
+                    matched = true;
+                    any = true;
+                    break;
+                }
+            }
+            if !matched {
+                if rest.is_empty() {
+                    break;
+                }
+                if rest == "none" {
+                    return Some(Bleed::NONE);
+                }
+                return None;
+            }
+        }
+    }
+    any.then_some(bleed)
+}
+
 pub(super) fn parse_float(value: &str) -> Option<Float> {
     Some(match value.trim().to_ascii_lowercase().as_str() {
         "none" => Float::None,
+        // `center` / `inline-center` 不是 CSS 的取值，是多看与掌阅自己的扩展（图居中），
+        // 我们这一版没有「居中浮动」这回事 —— 按「不浮动」摆比整条丢掉更接近作者看到的
+        // 样子（正文照排、图不骑在行上）。诡秘那本书在 183 个元素上写了它。
+        "center" | "inline-center" => Float::None,
         "left" => Float::Left,
         "right" => Float::Right,
         _ => return None,
@@ -76,8 +123,8 @@ pub(super) fn parse_clear(value: &str) -> Option<Clear> {
 /// [`BreakWhen`] 的一个变体存进 `ComputedStyle`，于是 `examples/css-gap` 报 `Applied`
 /// （「这条接住了」），而排版层从来没有一处读它 —— `BreakWhen::is_forced` 明写
 /// 「`Avoid` 不是强制断」，`layout::fragment` 除了 `is_forced` 与 `parity` 没有第三个
-/// 消费者。那是把「没做」记成「做了」，与 `background-attachment` 留在
-/// `KNOWN_UNIMPLEMENTED` 而不是在 `apply` 里返回 `true` 同一个理由。
+/// 消费者。那是把「没做」记成「做了」，与 `background-clip` / `background-origin`
+/// 留在 `KNOWN_UNIMPLEMENTED` 而不是在 `apply` 里返回 `true` 同一个理由。
 /// 本机四本书（哈利·波特 294607 条、斗战狂潮 708826 条、蛇结 4963 条、合成书 31 条）
 /// 里 `break-before: avoid` 与 `break-after: avoid` 各 **0 处**，所以这一改动不会
 /// 让任何一本真书的落差数变坏；它只让那张表说实话。
@@ -368,6 +415,14 @@ pub(super) fn box_sides(
     }
     let mut parsed = Vec::with_capacity(parts.len());
     for part in parts {
+        // `auto` 不算合法值（CSS 里 `padding: auto` 非法），但真实书里见得到 ——
+        // 诡秘那本在 36 个元素上写了 `padding: 10px auto 10px auto`，整条作废等于
+        // 那一条 **上下内边距一起丢**。按 0 处理比整条丢掉更接近作者的意思（横向 auto
+        // 在 CSS 里本来就等于 0），与 `parse_float` 收 `center` 是同一个立场。
+        if !auto_ok && part.eq_ignore_ascii_case("auto") {
+            parsed.push(Length::Px(0.0));
+            continue;
+        }
         parsed.push(edge_length(part, font_size, root_font_size, auto_ok)?);
     }
     four_of(&parsed)
@@ -708,17 +763,34 @@ pub(super) fn parse_color(value: &str) -> Option<Color> {
             (parts[2] * scale) as u8,
         ));
     }
-    if let Some(inner) = v.strip_prefix("rgb(").and_then(|s| s.strip_suffix(')')) {
+    // `rgb()` 与 `rgba()` 走同一支：`Color` 是三通道的 `u8`（绘制那一层没有 alpha 通道），
+    // 第四格只做合法性校验、不参与取色 —— 与 `text-shadow` 里同一口径。
+    //
+    // 只认 `rgb(` 不认 `rgba(` 是 2026-10-30 之前的一个真错：`rgba(...)` 落进「不认识」
+    // 那一档，《基督山伯爵》8 个、诡秘 91 个元素上的 `background-color` / `border` 整条
+    // 被丢掉。出版书里半透明底遍地都是，所以这一格必须认。
+    if let Some(inner) = ["rgba(", "rgb("]
+        .iter()
+        .find_map(|head| v.strip_prefix(head))
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        // 现代写法 `rgb(0 0 0 / 50%)` 用斜杠分隔透明度，老写法逗号分隔，两种都先切成
+        // 同一条数字表 —— 只取前三格，其余丢掉。
+        let inner = inner.replace('/', " ");
         let parts: Vec<f32> = inner
             .split(|c: char| c == ',' || c.is_whitespace())
             .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse::<f32>().ok())
-            .collect();
-        return if parts.len() >= 3 {
-            Some(Color(parts[0] as u8, parts[1] as u8, parts[2] as u8))
-        } else {
-            None
-        };
+            .map(|s| {
+                s.strip_suffix('%')
+                    .and_then(|n| n.parse::<f32>().ok().map(|p| p * 255.0 / 100.0))
+                    .or_else(|| s.parse::<f32>().ok())
+            })
+            .collect::<Option<Vec<f32>>>()?;
+        if parts.len() < 3 {
+            return None;
+        }
+        let clamp = |v: f32| v.clamp(0.0, 255.0) as u8;
+        return Some(Color(clamp(parts[0]), clamp(parts[1]), clamp(parts[2])));
     }
     let named = match v.as_str() {
         "black" => (0, 0, 0),

@@ -174,3 +174,41 @@ fn images_flow_through_the_engine_as_fragments(cx: &mut TestAppContext) {
     assert_eq!(img.href, "OEBPS/Images/pic.png");
     assert_eq!((img.width, img.height), (40.0, 20.0));
 }
+
+#[gpui_kit::test]
+#[ignore = "探针：读 /tmp/folio-css/h2probe.epub（本机合成的那一份），CI 机器上没那个目录"]
+fn scratch_probe_h2_metrics(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let path = std::path::Path::new("/tmp/folio-css/h2probe.epub");
+    let doc = crate::ui::features::reader::model::chapter_layout::open(path).expect("probe 开得出");
+    let mut flow = doc.flow().expect("可重排").clone();
+    for (ix, chapter) in flow.chapters.iter_mut().enumerate() {
+        let text = doc.chapter_source(ix).expect("正文");
+        *chapter = folio_core::Chapter::inline(chapter.title.clone(), text)
+            .with_spine_href(chapter.spine_href.clone());
+    }
+    flow.css = doc.stylesheet();
+    let (view, handle) = super::harness::open(
+        cx,
+        &flow,
+        "epub",
+        super::harness::prefs(16.0),
+        folio_core::Locator::start(),
+        460.0,
+    );
+    super::harness::settle(cx, handle);
+    let lines = view.read_with(cx, |v, _| v.lines());
+    let texts = view.read_with(cx, |v, _| v.line_texts());
+    for (l, t) in lines.iter().zip(texts.iter()) {
+        println!(
+            "y={:.1} h={:.1} bl={:.1} size={:.1} asc={:.1} desc={:.1} text={}",
+            l.y,
+            l.height,
+            l.baseline,
+            l.dominant_font_size(),
+            l.text_runs().map(|r| r.ascent).fold(0.0f32, f32::max),
+            l.text_runs().map(|r| r.descent).fold(0.0f32, f32::max),
+            t
+        );
+    }
+}

@@ -492,6 +492,27 @@ impl ReaderSession {
         // 滚轮不是手势：增量按「行」给。它一到就把上一笔的惯性闸门放下 —— 触屏设备上
         // 拖完一次之后，第一格滚轮不该被当成惯性吃掉。
         let wheel = matches!(event.delta, ScrollDelta::Lines(_));
+        // 落在**可拖动的插图**上：这一笔归「拖图」，不翻页也不滚。
+        //
+        // 判据按**按下点**（`ScrollWheelEvent.position` 在一整趟拖动里恒等于按下点，
+        // 见 `SwipeTrack` 的注释），而命中区是上一帧画图时登记下来的窗口矩形 —— 两处
+        // 同一套坐标。只接管「图比框大」的那些（`slack > 0`，即 `object-fit: cover`
+        // 被裁掉的那一圈），图刚好装满框时读者拖它仍然翻页。
+        //
+        // 滚轮不在此列：它不是手指，`position` 是光标位置，转一格就拖动一张图没有道理。
+        if !wheel && let Some(hit) = self.image_hit_at(event.position) {
+            self.pan_image(&hit, dx, dy, cx);
+            crate::ui::features::reader::model::perf::scroll_end(
+                __gap_us,
+                (__start.elapsed().as_micros() as u64).max(1),
+                0,
+                dy,
+                0.0,
+                __y_before,
+                phase_code(event.touch_phase),
+            );
+            return true;
+        }
         // 放大着的时候，手指那一趟归**平移**：平移本身由原始触摸流那一格做掉了
         // （识别器把另一轴抹成 0，两轴同时拖只有原始触摸给得全），这里把折出来的这一笔
         // 直接让掉 —— 不让的话横向拖动会被判成翻页，而读者只是在挪着看细节。

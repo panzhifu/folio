@@ -676,6 +676,119 @@ fn woff2_is_skipped_and_an_oversized_font_only_costs_itself() {
     );
 }
 
+/// 开书那一趟的 CSS 与字体身份**共用同一个已打开的容器**：旧路 `stylesheet` 与
+/// `font_refs` 各开一次 ZIP，新路只开一次。字体身份必须与旧路逐格相同 —— 两条路
+/// 给出的 `raw_len`/`crc32` 一旦不同，别名缓存就会把同一份字体当成两份。
+#[test]
+fn one_open_container_serves_css_and_font_identity() {
+    use crate::infra::metrics::{Metric, take_local};
+
+    let dir = tempfile::tempdir().unwrap();
+    let epub = dir.path().join("one-walk.epub");
+    let css = "@font-face { font-family: \"Book Body\"; src: url(../Fonts/body.otf) }\n\
+               body { font-family: \"Book Body\" }\n";
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>一次走查</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="css" href="Styles/style.css" media-type="text/css"/>
+    <item id="f1" href="Fonts/body.otf" media-type="font/opentype"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+    write_epub(
+        &epub,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>正文</p></body></html>".as_bytes(),
+            ),
+            ("OEBPS/Styles/style.css", css.as_bytes()),
+            ("OEBPS/Fonts/body.otf", b"\x00\x01\x00\x00 fake sfnt"),
+        ],
+    );
+
+    let doc = doc_of(&epub);
+    take_local(Metric::ContainerOpens);
+    let css = doc.stylesheet();
+    assert!(
+        css.contains("url(\"OEBPS/Fonts/body.otf\")"),
+        "CSS 要先折成容器绝对路径：{css}"
+    );
+    let wanted = vec!["OEBPS/Fonts/body.otf".to_string()];
+    let refs = doc.font_refs_in(&wanted).expect("共享容器这条路该给得出来");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].href, "OEBPS/Fonts/body.otf");
+    assert_eq!(
+        take_local(Metric::ContainerOpens),
+        1,
+        "CSS 与字体身份只该开一次容器"
+    );
+
+    // 身份与「自己开容器」的旧路逐格相同：两条路必须给出同一份缓存键。
+    let old = doc_of(&epub).font_refs(&wanted).unwrap();
+    assert_eq!(refs, old, "共享容器与独立容器给出的身份必须相同");
+
+    // 对照：旧路 `stylesheet` + `font_refs` 各开一次，共两次。
+    let doc = doc_of(&epub);
+    take_local(Metric::ContainerOpens);
+    let _ = doc.stylesheet();
+    let _ = doc.font_refs(&wanted);
+    assert_eq!(
+        take_local(Metric::ContainerOpens),
+        2,
+        "旧路确实是两次 Zip::open"
+    );
+}
+
+/// 导入那一趟顺手收的可见字符集：只收正文里的字，不收标签/属性/样式文本。
+/// 这一列是子集化的输入，漏收会让字体子集缺字，多收只会让子集大一点。
+#[test]
+fn the_index_collects_the_visible_book_charset() {
+    let dir = tempfile::tempdir().unwrap();
+    let epub = dir.path().join("charset.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>字符集</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+    write_epub(
+        &epub,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>甲A乙</p><style>.x{content:'不进'}</style></body></html>"
+                    .as_bytes(),
+            ),
+        ],
+    );
+
+    let doc = doc_of(&epub);
+    let charset = doc.font_charset();
+    for ch in ['甲', 'A', '乙'] {
+        assert!(
+            charset.contains(&(ch as u32)),
+            "可见字符 {ch} 该进字符集：{charset:?}"
+        );
+    }
+    for ch in ['<', '>', '不', '进'] {
+        assert!(
+            !charset.contains(&(ch as u32)),
+            "标签/样式文本里的 {ch} 不该进字符集：{charset:?}"
+        );
+    }
+}
+
 /// 一本整书规模的容器读出来是什么样子：章数、正文、CSS、目录能不能对上 spine。
 ///
 /// 合成书里三章的小样本测的是**单个结构**，这一条测的是**规模**：几十条目录、

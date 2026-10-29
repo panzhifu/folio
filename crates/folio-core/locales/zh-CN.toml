@@ -41,6 +41,10 @@ book_count_many = "%{count} 本书"
 book_count_other = "%{count} 本书"
 zoom_in = "增大字号"
 zoom_out = "减小字号"
+# 阅读设置卡片上每一格数值两侧 `−` / `+` 的可读名：图标本身念不出来，名字要带上这一格
+# 自己的标签（`%{field}`）。
+nudge_up = "增大%{field}"
+nudge_down = "减小%{field}"
 # 定版式那一族底栏的入口：把这一页交给摊开看那一层。它搬到这里是因为手机上的长按
 # 现在归选中（那一页有字的时候），而那一手势原先是唯一的入口。
 zoom_page = "放大整页"
@@ -158,6 +162,7 @@ toc = "目录"
 speech = "听书"
 
 translation = "翻译"
+membership = "高级会员"
 [group]
 sync_server = "WebDAV"
 sync_state = "同步状态"
@@ -176,6 +181,7 @@ transfer = "Wi-Fi 传书"
 rows = "条目"
 marking = "划线"
 direction = "方向"
+images = "图片"
 
 speech_voice = "声音"
 speech_reading = "朗读时"
@@ -183,6 +189,8 @@ speech_reading = "朗读时"
 translation_output = "译文"
 translation_openai = "OpenAI 兼容"
 translation_deepl = "DeepL"
+membership_state = "当前状态"
+membership_benefits = "会员权益"
 [field]
 sync_enabled = "启用同步"
 "sync_enabled.desc" = "只同步进度、批注与书签；书文件不离开这台设备。"
@@ -218,6 +226,8 @@ font_weight = "字重"
 "font_weight.desc" = "正文的粗细。设备上没有对应字面时，排版层会挑最接近的一面；600 以上还会叠一遍合成粗体。"
 text_direction = "文字方向"
 "text_direction.desc" = "按书原样、竖排或横排。竖排只在分页、单栏时生效；上下滚动仍按横排排。"
+image_scale = "图片缩放"
+"image_scale.desc" = "跟书：只有作者写明要铺满的图才放大到屏幕宽。铺满屏幕：独占一块的图一律按屏幕宽铺。原始尺寸：不放大，只在超出屏幕时缩回来。"
 font_family = "正文字体"
 "font_family.desc" = "从这台设备已装的字体中选择。"
 appearance_mode = "浅深"
@@ -279,6 +289,8 @@ translation_openai_key = "API Key"
 "translation_openai_key.desc" = "只存在本机的 config.json 里。本地服务不需要就留空。"
 translation_deepl_key = "API Key"
 "translation_deepl_key.desc" = "DeepL 的密钥。免费档以 :fx 结尾，会自动走免费端点。"
+membership_tier = "等级"
+membership_expiry = "到期日"
 [page_turn]
 slide = "左右平移"
 slide_up = "上下平移"
@@ -302,6 +314,11 @@ bold = "加粗"
 auto = "按书原样"
 vertical = "竖排"
 horizontal = "横排"
+
+[image_scale]
+follow = "跟书"
+screen = "铺满屏幕"
+original = "原始尺寸"
 
 # 阅读页底栏那颗设置入口还在用这一条（与 page.* 复用既有的词，不再起第二个名字）。
 [account]
@@ -483,6 +500,27 @@ import = "导入"
 # 不知道，那一句不带数字。
 importing = "导入中…"
 importing_of = "导入中 %{done}/%{total}"
+# 导入结束后那一行「几本没进来、为什么」。中文四臂同文（这一门语言只有一臂）。
+import_rejected_one = "未导入 %{count} 本"
+import_rejected_few = "未导入 %{count} 本"
+import_rejected_many = "未导入 %{count} 本"
+import_rejected_other = "未导入 %{count} 本"
+reject_encrypted_one = "%{count} 本带 DRM 加密"
+reject_encrypted_few = "%{count} 本带 DRM 加密"
+reject_encrypted_many = "%{count} 本带 DRM 加密"
+reject_encrypted_other = "%{count} 本带 DRM 加密"
+reject_corrupt_one = "%{count} 本文件已损坏"
+reject_corrupt_few = "%{count} 本文件已损坏"
+reject_corrupt_many = "%{count} 本文件已损坏"
+reject_corrupt_other = "%{count} 本文件已损坏"
+reject_unsupported_one = "%{count} 本格式暂不支持"
+reject_unsupported_few = "%{count} 本格式暂不支持"
+reject_unsupported_many = "%{count} 本格式暂不支持"
+reject_unsupported_other = "%{count} 本格式暂不支持"
+reject_unreadable_one = "%{count} 本读不动"
+reject_unreadable_few = "%{count} 本读不动"
+reject_unreadable_many = "%{count} 本读不动"
+reject_unreadable_other = "%{count} 本读不动"
 # 整机扫描。扫描只找不导：找到的候选摆成清单，读者勾选再导（勾选 = 亲手挑的，
 # 重名算更新）。已在书架的那几条默认不勾并标出来。
 cancel = "取消"
@@ -629,6 +667,8 @@ vacuum = "整理数据库"
 
 # 删之前那一句。四档缓存与整库重写**各写一条整句**：它们丢东西的程度不一样，
 # 拼成「通用一句 + 后果片段」等于用中文的语序去装配其余八门语言。
+membership_trial = "试用 %{days} 天"
+membership_cancel = "取消会员"
 [confirm]
 "thumbs.title" = "清掉缩略图缓存？"
 "comics.title" = "清掉漫画解压缓存？"
@@ -761,3 +801,16 @@ import_duplicate = "书库已有这一本"
 import_failed = "导入失败"
 import_cancelled = "导入已取消"
 library_missing = "请先确认书库位置"
+
+# 会员：本机只记到期日那一天，等级由它现算，所以这里不存等级。
+[membership]
+"never" = "未开通"
+"tier_premium" = "高级会员"
+"tier_standard" = "普通"
+"expires" = "%{date} 到期"
+"expired" = "%{date} 已到期"
+"benefit_sync" = "跨设备同步进度、批注与书签"
+"benefit_translate" = "划词翻译"
+"benefit_speech" = "整本听书与自动翻页"
+"benefit_pdf" = "PDF 与扫描版文档"
+"benefit_opds" = "OPDS 书源直接下载入库"

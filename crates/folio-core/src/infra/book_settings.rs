@@ -199,7 +199,9 @@ fn into_object<T: Serialize>(value: &T) -> Option<Map<String, Value>> {
 #[cfg(test)]
 mod tests {
     use crate::infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings, into_object};
-    use crate::infra::config::{Appearance, Mode, PageTurn, Reader, TextDirection, TocDensity};
+    use crate::infra::config::{
+        Appearance, ImageScale, Mode, PageTurn, Reader, TextDirection, TocDensity,
+    };
     use crate::store::AnnotationStyle;
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
@@ -212,6 +214,9 @@ mod tests {
     /// 还没验过」不会被读成「已经验过了」。
     fn sample_reader() -> Reader {
         Reader {
+            // 「与默认不同」是这一份样件的立身之本：默认档现在是 `Screen`（铺满），
+            // 所以这一格取 `Follow`。底部那条门会盯着它。
+            image_scale: ImageScale::Follow,
             font_size: 21.0,
             line_height: 2.25,
             paragraph_gap_em: 1.5,

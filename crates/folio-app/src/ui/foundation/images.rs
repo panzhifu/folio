@@ -65,6 +65,18 @@ pub fn document_source(doc: Arc<dyn Document>) -> ByteSource {
 /// `reader::image_atlas`。
 const MAX_IMAGE_EDGE: u32 = 2048;
 
+/// 低清那一档的长边上限（图像原始像素）。
+///
+/// 360 是手机屏宽的三分之一。那一档画出来只是**先有个东西顶着**，糊不糊不重要，
+/// 重要的是它到手快、占得少：一张 360×270 的 RGBA 是 0.39 MB，而同一张图的高清
+/// （长边夹在 [`MAX_IMAGE_EDGE`]）是 12.6 MB —— 手机上那 24 MB 的高清封顶只装得下两页，
+/// 低清那一档却装得下二十来页。快滑时屏上因此不再是白纸
+/// （`reader::image_atlas::preview_limit` 是它的预算）。
+const PREVIEW_EDGE: u32 = 360;
+
+/// 低清那一格的记账上限（正方形那一档的像素数）。
+const PREVIEW_TILE_BYTES: usize = (PREVIEW_EDGE * PREVIEW_EDGE * 4) as usize;
+
 /// 每本开着的书一个身份，只用来给图集的键加前缀。
 static NEXT_BOOK_TOKEN: AtomicU64 = AtomicU64::new(0);
 
@@ -107,6 +119,13 @@ pub struct DecodeRequest {
     /// 是估的：SVG 与 manifest 没写尺寸的那些只能猜，而解好之后图集会按真的像素数换掉它。
     /// 估的用途只有一个 —— 还没解完的那几趟也占个名额，别让封顶那一档把它们当免费。
     pub tile_bytes: usize,
+    /// 那一格估计是基于**知道的**固有尺寸吗。
+    ///
+    /// `false` 就是 SVG 与 manifest 没写宽高那一族（它们的估计是
+    /// [`UNKNOWN_TILE_BYTES`] 那个哨兵值）。这一格不能靠「估计值等不等于哨兵」反推：
+    /// 一张恰好 1024×1024 的真图与「尺寸不知道」在字节上长得一模一样，而
+    /// [`Self::preview`] 那一道闸要分开的正是这两件事。
+    pub size_known: bool,
     /// 这一趟在 core 作业池里的档位。
     ///
     /// 当前页要的（预览 / 高清 / 放大后的区域图）是 [`Priority::Interactive`]；
@@ -136,6 +155,48 @@ impl DecodeRequest {
     /// 那条活儿本身（图集要在后台线程上拿着它跑，所以给的是链子而不是结果）。
     pub(crate) fn loader(&self) -> Arc<dyn Fn() -> Option<Arc<Image>> + Send + Sync> {
         Arc::clone(&self.loader)
+    }
+
+    /// 同一张图的**低清**那一档：键在末尾挂 `@preview`，活儿复用本请求那条取字节 +
+    /// 出图的链子，到手之后缩到 [`PREVIEW_EDGE`] 再重编。
+    ///
+    /// 给 `None` 的三种情况：
+    /// - 高清那一格本来就不大（估计值不到低清那一格的四倍）—— 小插图、图标、分隔条，
+    ///   为它们再排一趟活儿是纯亏；
+    /// - 尺寸**不知道**的那一族（[`DecodeRequest::size_known`] 为 `false`：SVG 与
+    ///   manifest 没写宽高的那些）。SVG 那条链子是「栅格化到 [`MAX_IMAGE_EDGE`] 再交出去」，
+    ///   包一层缩小就是**栅格化两趟**，低清省下的那点解码钱抵不过多画一遍；
+    /// - `shrink_image` 自己退回（动画 GIF、解不开、重编反而比原图大）。
+    ///
+    /// 这一句每帧都可能被问一次，所以前两个判断**排在克隆链子之前**：不相干的图一次
+    /// 分配也不发生。真要低清的图上一屏也就一三张，代价量在 `perf::image_ns` 那笔账里。
+    ///
+    /// 低清那一档不解 EXIF 之外的口径问题：`shrink_image` 自己应用方向、一律编成 JPEG
+    /// （带 alpha 的源会连它自己那份 RGB 一起编进去，与封面那一路同一个口径）。
+    pub fn preview(&self) -> Option<DecodeRequest> {
+        // 低清那一档只对「尺寸知道的图」排：`false` 那一族（SVG、manifest 没写宽高的）
+        // 包一层缩小就是栅格化两趟。判据用 `size_known` 而不是「估计值等于那个哨兵数」——
+        // 一张恰好 1024×1024 的真图与 `UNKNOWN_TILE_BYTES` 在字节上长得一样，
+        // 拿数当判据会把它们混成一件事（这条门里就摆着那样一张）。
+        if !self.size_known || self.tile_bytes < PREVIEW_TILE_BYTES * 4 {
+            return None;
+        }
+        let base = Arc::clone(&self.loader);
+        let loader: Arc<dyn Fn() -> Option<Arc<Image>> + Send + Sync> = Arc::new(move || {
+            let source = base()?;
+            let (small, mime) = shrink_image(source.bytes(), PREVIEW_EDGE)?;
+            let format = format_of_mime(mime)?;
+            Some(Arc::new(Image::from_bytes(format, small)))
+        });
+        Some(DecodeRequest {
+            key: format!("{}@preview", self.key),
+            loader,
+            tile_bytes: PREVIEW_TILE_BYTES,
+            // 低清那一格的数是按 `PREVIEW_EDGE` 那一档摆的，不是猜的：它自己不参与
+            // 再下一档（上面那道「不到四倍就不排」把它挡住了）。
+            size_known: true,
+            priority: self.priority,
+        })
     }
 }
 
@@ -261,6 +322,8 @@ impl ImageEntry {
             key: String::new(),
             loader,
             tile_bytes: self.tile_bytes(),
+            // 索引里那两个数是不是真的（`0` 是「manifest 没写」）。
+            size_known: self.width > 0.0 && self.height > 0.0,
             priority: folio_core::Priority::Interactive,
         }
     }
@@ -383,6 +446,8 @@ impl BookImages {
             key: format!("{}/render/{page}@{edge}{suffix}", self.token),
             loader,
             tile_bytes,
+            // 与上面那个分支同一判据：页表里那两个数是不是真的。
+            size_known: width != 0 && height != 0,
             priority: folio_core::Priority::Interactive,
         }
     }
@@ -912,5 +977,153 @@ mod tests {
             "图还在树上、又画了帧却没有补传 —— 那「必须先离开树再回收」这条约束是真的，\
              回收的时机就得跟着收紧"
         );
+    }
+
+    /// [`DecodeRequest::preview`] 的三道闸与它的键形状。
+    ///
+    /// 低清那一档是**排在高清之前**的那一趟活儿，所以「什么时候不给低清」必须可枚举：
+    /// 小图（再排一趟是纯亏）、尺寸没记在索引里的那一族（SVG 那条链要栅格化两趟），
+    /// 以及 `shrink_image` 自己退回的那些（动画 GIF、重编反而更大 —— 那一条要到
+    /// `reader::image_atlas` 里用真字节才跑得出来，这里先把前两道钉住）。
+    ///
+    /// 最后那一段是端到端：低清那一趟交出去的字节要**真解得开**、而且长边不超过那一档。
+    /// 这一句是整条链唯一能证明「把 `shrink_image` 包在链子上」没把图包坏的地方 ——
+    /// 包坏了的症状是那一格永远白着，而屏幕上看不出来。
+    #[test]
+    fn a_preview_request_exists_only_for_images_worth_a_second_pass() {
+        use folio_core::content::format::ImageRes;
+
+        use crate::ui::foundation::images::{BookImages, ByteSource, ChapterImages, TINY_PNG};
+
+        let entry = |href: &str, width: u32, height: u32| ImageRes {
+            href: href.into(),
+            source: href.into(),
+            media_type: "image/png".into(),
+            width,
+            height,
+        };
+        // 一张 1024×1024 的真 PNG（编得出也解得开）、一张 2×2、一张尺寸没记在索引里的。
+        let big = {
+            let buffer = image::RgbaImage::from_pixel(1024, 1024, image::Rgba([9, 8, 7, 255]));
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(buffer)
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .expect("测试里的 PNG 应当编得出来");
+            out
+        };
+        let bytes: ByteSource = std::sync::Arc::new(move |href: &str| {
+            if href == "small.png" {
+                Some(TINY_PNG.to_vec())
+            } else {
+                Some(big.clone())
+            }
+        });
+        let book = BookImages::new(
+            &[
+                entry("big.png", 1024, 1024),
+                entry("small.png", 2, 2),
+                entry("art.svg", 0, 0),
+            ],
+            bytes,
+        );
+        let chapter = ChapterImages::new(std::sync::Arc::new(book), "Text/chap.xhtml");
+
+        for href in ["small.png", "art.svg"] {
+            let request = chapter.decode_request(href).expect("索引里有这条");
+            assert!(
+                request.preview().is_none(),
+                "{href} 不该排一趟低清：小的是白花钱，尺寸不知道的那一族是栅格化两趟"
+            );
+        }
+
+        let request = chapter.decode_request("big.png").expect("索引里有这条");
+        let low = request.preview().expect("1024² 的图值得先来个顶着的低清");
+        assert!(
+            low.key.ends_with("@preview"),
+            "低清那一格的键要带图集认的那个后缀，实得 {}",
+            low.key
+        );
+        assert_ne!(low.key, request.key, "两档共用一格的话高清到货就画不出低清");
+        assert_eq!(
+            low.tile_bytes,
+            super::PREVIEW_TILE_BYTES,
+            "低清那一格要按低清的量占名额，不能按高清那一档记"
+        );
+        let image = low.decode().expect("低清那一趟该交得出图");
+        let decoded = image::ImageReader::new(std::io::Cursor::new(image.bytes().to_vec()))
+            .with_guessed_format()
+            .expect("认得出格式")
+            .decode()
+            .expect("低清那份字节要解得开");
+        assert!(
+            decoded.width().max(decoded.height()) <= super::PREVIEW_EDGE,
+            "低清解出来是 {}×{}，超过那一档的 {} 边",
+            decoded.width(),
+            decoded.height(),
+            super::PREVIEW_EDGE,
+        );
+    }
+}
+
+/// 一张图在它的盒里怎么摆（CSS 的 `object-fit`），绘制那一层用。
+///
+/// 与 `folio_core::content::format::css::computed::ObjectFit` 一一对应。在这里再落一份
+/// 是为了让绘制层不必透过 `folio_core` 的 CSS 模块去取名 —— 那是排版内部的面，界面这一侧
+/// 只该拿到「怎么画」这一格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObjectFit {
+    /// 拉伸填满，不管比例。CSS 初值，也是「以前直接画满盒」的行为。
+    #[default]
+    Fill,
+    /// 保比例缩到盒内，留底。
+    Contain,
+    /// 保比例铺满盒，超出裁掉。
+    Cover,
+    /// 原尺寸，超出裁掉。
+    None,
+    /// `cover` 与 `contain` 里更小的那一个（不放大）。
+    ScaleDown,
+}
+
+impl From<folio_core::content::format::css::computed::ObjectFit> for ObjectFit {
+    fn from(fit: folio_core::content::format::css::computed::ObjectFit) -> Self {
+        use folio_core::content::format::css::computed::ObjectFit as Core;
+        match fit {
+            Core::Fill => Self::Fill,
+            Core::Contain => Self::Contain,
+            Core::Cover => Self::Cover,
+            Core::None => Self::None,
+            Core::ScaleDown => Self::ScaleDown,
+        }
+    }
+}
+
+impl ObjectFit {
+    /// 把源图（`src_w × src_h`）按这一档摆进 `box_w × box_h` 的盒里，返回要画的矩形
+    /// 相对于盒的偏移与尺寸。
+    ///
+    /// `Fill` 直接铺满；`Contain` 保比例缩到能放下、居中；`Cover` 保比例铺满、居中后
+    /// **超出盒的那一圈由调用方裁**；`None` 原尺寸居中；`ScaleDown` 是 `None` 与
+    /// `Contain` 里不放大、只缩小的那一档。
+    ///
+    /// 源图尺寸拿不到（0）时全部退回铺满 —— 与「以前怎么画」等价，不会把图画成 0 大。
+    pub fn placement(self, src_w: f32, src_h: f32, box_w: f32, box_h: f32) -> (f32, f32, f32, f32) {
+        let fill = (0.0, 0.0, box_w, box_h);
+        if src_w <= 0.0 || src_h <= 0.0 || box_w <= 0.0 || box_h <= 0.0 {
+            return fill;
+        }
+        let contain = (box_w / src_w).min(box_h / src_h);
+        let cover = (box_w / src_w).max(box_h / src_h);
+        let (w, h) = match self {
+            Self::Fill => (box_w, box_h),
+            Self::Contain => (src_w * contain, src_h * contain),
+            Self::Cover => (src_w * cover, src_h * cover),
+            Self::None => (src_w, src_h),
+            Self::ScaleDown => {
+                let scale = contain.min(1.0);
+                (src_w * scale, src_h * scale)
+            }
+        };
+        ((box_w - w) / 2.0, (box_h - h) / 2.0, w, h)
     }
 }

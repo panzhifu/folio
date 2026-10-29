@@ -82,6 +82,48 @@ fn hard_of(soft: usize) -> usize {
     soft * 2
 }
 
+/// 低清那一档自己的额度。
+///
+/// 一张 360×270 的 RGBA 是 0.39 MB，所以手机这一档装得下**二十来页**的占位图，
+/// 而同一台机器的高清那一档只装得下两页（24 MB / 12.6 MB）。两档各记各的账是这一条
+/// 成立的前提：把低清跟高清塞进同一个帽子，要么低清先被挤光（白屏回来了），
+/// 要么帽子整体变大（内存回不到原样）。
+///
+/// 配置文件里那一格（`reader.image_cache_bytes`）**只覆盖高清那一档**，低清跟着设备分档
+/// —— 那一格是给「我显存大，多留几页高清」用的，不是给占位图用的。
+pub(in crate::ui::features::reader) fn preview_limit() -> usize {
+    match device_class() {
+        DeviceClass::Phone => 8 * 1024 * 1024,
+        DeviceClass::Tablet => 12 * 1024 * 1024,
+        DeviceClass::Desktop => 24 * 1024 * 1024,
+    }
+}
+
+/// 手里攒的像素分两档记：**高清**（真画到屏上那一份）与**低清**（先顶着的那一份糊的）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tier {
+    Full,
+    Preview,
+}
+
+/// 低清那一档的键长什么样：`<这本书的 token>/<容器路径>@preview`
+/// （拼法见 `foundation::images::DecodeRequest::preview`）。
+///
+/// 定版式那一路的预览键是 `render/<page>@720` 那一族，**不**带这个后缀，所以它照旧记在
+/// 高清那一档里 —— 那是它从前的口径，这一刀不动它（动了就会改变 PDF/CBZ 的挤出顺序，
+/// 而那一族本来就有两档）。
+fn is_preview(key: &str) -> bool {
+    key.ends_with("@preview")
+}
+
+fn tier_of(key: &str) -> Tier {
+    if is_preview(key) {
+        Tier::Preview
+    } else {
+        Tier::Full
+    }
+}
+
 /// 设备分档。判据只有屏幕宽一条：平板与手机的差别在「一页摆出来多大」，而那一格
 /// 就是逻辑宽度；桌面与移动平台的差别在显存预算，按目标平台分。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,8 +252,11 @@ enum Slot {
 #[derive(Default)]
 pub struct ImageAtlas {
     slots: HashMap<String, Slot>,
-    /// 攒下的字节总数（= 各 `Held` 那格的 `bytes` 之和）。
+    /// 攒下的**高清**像素总数（= 各 `Held` 且键不带 `@preview` 的那格 `bytes` 之和）。
     bytes: usize,
+    /// 攒下的**低清**像素总数。与上面那一格各记各的，回收时也各挤各的
+    /// （见 [`Tier`]）。
+    preview_bytes: usize,
     /// 帧号，每渲染一帧 +1（[`Self::end_frame`] 那一处加）。
     frame: u64,
     /// 这一帧读者在看哪一页（容器图没有页号，`None`）。挤出页缓存时排在最前的是
@@ -261,6 +306,7 @@ impl ImageAtlas {
                 }
             }
             atlas.bytes = 0;
+            atlas.preview_bytes = 0;
         })
         .detach();
         atlas
@@ -479,7 +525,10 @@ impl ImageAtlas {
         match decoded {
             Decoded::Pixels(image) => {
                 let bytes = tile_bytes(&image);
-                self.bytes += bytes;
+                match tier_of(key) {
+                    Tier::Full => self.bytes += bytes,
+                    Tier::Preview => self.preview_bytes += bytes,
+                }
                 self.slots.insert(
                     key.to_string(),
                     Slot::Held {
@@ -552,44 +601,46 @@ impl ImageAtlas {
         // 的那一页**排在前面 —— 往回一滑就得重画。距离把「眼前这几页」护住，
         // 而它同一时刻仍然只动离场的格子（在屏上的永远不碰，见上面那两条不动的规矩）。
         //
-        // 上限是**软顶 → 硬顶**两段：平时按软顶；软顶不够装下**焦点页自己**时就涨到
-        // 硬顶，涨了仍不够就不再涨（那一页本来就超出预算，不拿无界内存兜）。
+        // 两档各结算各的（见 [`Tier`]）：低清挤低清的离场格，高清挤高清的，谁也不替谁让路。
+        //
+        // **一边挑一边扣**。这一段从前读的是没有扣过的总数（`freed` 要到下面那趟放格子
+        // 时才涨），于是「挤到刚好不超」实际写成了「把离场的全挤光」—— 快滑之后再滑回来,
+        // 沿途每一页都要重付一趟取字节 + 解码。2026-10-31 报上来的「滑太快图上不来」里
+        // 最贵的一刀就是这一条，`a_capped_frame_frees_only_what_the_cap_needs` 钉着它。
         let focus = self.focus;
-        let mut oldest: Vec<(usize, u64, String)> = self
-            .slots
-            .iter()
-            .filter_map(|(key, slot)| match slot {
-                Slot::Held { seen, .. } if !on_screen.contains(key.as_str()) => {
-                    Some((distance_of(key, focus), *seen, key.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        oldest.sort_unstable();
-        let focus_bytes: usize = self
-            .slots
-            .iter()
-            .filter_map(|(key, slot)| match slot {
-                Slot::Held { bytes, .. } if on_screen.contains(key.as_str()) => {
-                    Some((distance_of(key, focus), *bytes))
-                }
-                _ => None,
-            })
-            .filter(|(distance, _)| *distance == 0)
-            .map(|(_, bytes)| bytes)
-            .sum();
-        let soft = self.soft_cap();
-        let limit = if focus_bytes > soft {
-            hard_of(soft)
-        } else {
-            soft
-        };
-        for (_, _, key) in oldest {
-            if self.bytes.saturating_sub(freed) <= limit {
-                break;
+        for tier in [Tier::Full, Tier::Preview] {
+            let limit = self.cap_of(tier, &on_screen, focus);
+            let mut spare = match tier {
+                Tier::Full => self.bytes,
+                Tier::Preview => self.preview_bytes,
+            };
+            if spare <= limit {
+                continue;
             }
-            if !stale.contains(&key) {
-                stale.push(key);
+            let mut ordered: Vec<(usize, u64, String)> = self
+                .slots
+                .iter()
+                .filter_map(|(key, slot)| match slot {
+                    Slot::Held { seen, .. }
+                        if !on_screen.contains(key.as_str()) && tier_of(key) == tier =>
+                    {
+                        Some((distance_of(key, focus), *seen, key.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            ordered.sort_unstable();
+            for (_, _, key) in ordered {
+                if spare <= limit {
+                    break;
+                }
+                let Some(Slot::Held { bytes, .. }) = self.slots.get(&key) else {
+                    continue;
+                };
+                spare = spare.saturating_sub(*bytes);
+                if !stale.contains(&key) {
+                    stale.push(key);
+                }
             }
         }
         for key in stale {
@@ -607,7 +658,10 @@ impl ImageAtlas {
                 ..
             }) = self.slots.remove(&key)
             {
-                self.bytes -= bytes;
+                match tier_of(&key) {
+                    Tier::Full => self.bytes -= bytes,
+                    Tier::Preview => self.preview_bytes -= bytes,
+                }
                 if uploaded {
                     // 放掉 GPU 那一格，再把像素一起扔。回屏时 `img` 自己会重传
                     // （`a_reclaimed_image_uploads_itself_again_on_the_next_frame` 钉的就是这句）。
@@ -619,9 +673,10 @@ impl ImageAtlas {
         }
         if freed > 0 {
             tracing::debug!(
-                "图集: 放掉 {} 字节，还剩 {} 字节 / {} 张",
+                "图集: 放掉 {} 字节，还剩 高清 {} / 低清 {} 字节 / {} 张",
                 freed,
                 self.bytes,
+                self.preview_bytes,
                 self.slots.len()
             );
         }
@@ -643,6 +698,42 @@ impl ImageAtlas {
     /// 装不下时仍可涨到两倍（[`hard_of`]），全部按这一格重算。
     fn soft_cap(&self) -> usize {
         self.cache_bytes.unwrap_or_else(soft_limit)
+    }
+
+    /// 这一档本轮能用多少字节。
+    ///
+    /// 高清那一档保留「软顶 → 硬顶」那两段：软顶不够装下**焦点页自己**时涨到两倍
+    /// （[`hard_of`]），涨了仍不够就不再涨（那一页本来就超出预算，不拿无界内存兜）。
+    /// 低清那一档不涨 —— 它的作用就是让屏上不是白纸，那份额度本来就是按「多留几页」定的。
+    fn cap_of(
+        &self,
+        tier: Tier,
+        on_screen: &std::collections::HashSet<String>,
+        focus: Option<usize>,
+    ) -> usize {
+        let Tier::Full = tier else {
+            return preview_limit();
+        };
+        let soft = self.soft_cap();
+        let focus_bytes: usize = self
+            .slots
+            .iter()
+            .filter_map(|(key, slot)| match slot {
+                Slot::Held { bytes, .. }
+                    if on_screen.contains(key.as_str()) && tier_of(key) == Tier::Full =>
+                {
+                    Some((distance_of(key, focus), *bytes))
+                }
+                _ => None,
+            })
+            .filter(|(distance, _)| *distance == 0)
+            .map(|(_, bytes)| bytes)
+            .sum();
+        if focus_bytes > soft {
+            hard_of(soft)
+        } else {
+            soft
+        }
     }
 
     /// 换一本书 / 退出阅读页：手里全部像素都放掉。
@@ -673,16 +764,23 @@ impl ImageAtlas {
             }
         }
         self.bytes = 0;
+        self.preview_bytes = 0;
         self.frame = 0;
     }
 
-    /// 手里攒了多少字节的像素。给测试问的（回收有没有在发生，看这一格的走势）。
+    /// 手里攒了多少字节的**高清**像素。给测试问的（回收有没有在发生，看这一格的走势）。
     ///
     /// 生产里这一格不用问：每次真放掉东西，[`Self::end_frame`] 自己会把剩下的量打进
     /// `debug` 那条日志（真机上按 `folio_app::perf=debug` 那一档开得出声）。
     #[cfg(test)]
     pub fn resident_bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// 手里攒了多少字节的**低清**像素（与上面那一格各记各的账）。
+    #[cfg(test)]
+    pub fn resident_preview_bytes(&self) -> usize {
+        self.preview_bytes
     }
 
     /// 这一格是不是正在重解（像素已放掉、活儿在排队）。
@@ -919,9 +1017,14 @@ mod tests {
         cx.update(|cx| atlas.update(cx, |atlas, _| f(atlas)))
     }
 
-    /// 图集手里现在攒了多少字节的像素。
+    /// 图集手里现在攒了多少字节的**高清**像素。
     fn resident(atlas: &Entity<ImageAtlas>, cx: &mut TestAppContext) -> usize {
         cx.update(|cx| atlas.update(cx, |atlas, _| atlas.resident_bytes()))
+    }
+
+    /// 图集手里现在攒了多少字节的**低清**像素（与上面那一格各记各的账）。
+    fn preview_resident(atlas: &Entity<ImageAtlas>, cx: &mut TestAppContext) -> usize {
+        cx.update(|cx| atlas.update(cx, |atlas, _| atlas.resident_preview_bytes()))
     }
 
     /// 这张图解好了的那一份像素（还没解好给 `None`）。
@@ -1330,6 +1433,131 @@ mod tests {
         assert!(
             after <= cap,
             "配置压到 {cap} 字节，离场后仍攒着 {after}：覆盖没走进封顶那一步"
+        );
+    }
+
+    /// 封顶那一档**只挤到刚好不超**，而不是把离场的全挤光。
+    ///
+    /// 这一条钉的是 2026-10-31 修掉的那处：挑选那一段读的是**没有扣过**的总数
+    /// （`freed` 要到下面真放格子时才涨），于是「超过软顶」与「把离场的那些全放掉」
+    /// 被写成了同一件事。快滑之后再滑回来时，沿途每一页都要重付一趟取字节 + 解码 ——
+    /// 报上来的「滑太快图上不来」里最贵的一刀就是它。
+    ///
+    /// 变异验红：把 `end_frame` 里那句 `spare = spare.saturating_sub(*bytes)` 拿掉，
+    /// 下面那句「残量正好停在帽子上」立刻红成「残量是 0」。
+    #[gpui_kit::test]
+    fn a_capped_frame_frees_only_what_the_cap_needs(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let cap = 8 * 1024 * 1024;
+        let mut config = folio_core::infra::config::Config::default();
+        config.reader.image_cache_bytes = cap as u64;
+        cx.update(|cx| crate::ui::services::config::ConfigHolder::install(config, cx));
+        // 十二张 1024² = 48 MB，帽子 8 MB：挤到刚好不剩就是两张的量。
+        let (atlas, table, _reads) = cx.update(|cx| book(cx, 12, 1024, 1024));
+        let all: Vec<String> = (0..12).map(|i| format!("pic-{i}.png")).collect();
+        let window = cx.open_window(size(px(256.0), px(256.0)), {
+            let atlas = atlas.clone();
+            move |_, _| Screen {
+                atlas,
+                table,
+                showing: all.clone(),
+            }
+        });
+        let handle: AnyWindowHandle = window.into();
+        paint(handle, cx);
+        settle(handle, cx);
+        assert_eq!(
+            resident(&atlas, cx),
+            12 * 1024 * 1024 * 4,
+            "前提：一屏十二张全在场、全记着账"
+        );
+
+        window
+            .update(cx, |view, _, _| view.showing.clear())
+            .expect("窗口应当可改");
+        paint(handle, cx);
+        let after = resident(&atlas, cx);
+        assert!(
+            after <= cap,
+            "没挤回帽子：离场一屏之后还剩 {after} 字节 > {cap}"
+        );
+        assert_eq!(
+            after, cap,
+            "离场那一屏被挤到只剩 {after} 字节：封顶要挤到**刚好**不超，\
+             而不是把整批离场的全放掉 —— 往回滑的那几页本来还该在手里"
+        );
+    }
+
+    /// 两档各记各的账：高清那一档见底时**不许**把低清挤掉。
+    ///
+    /// 低清存在的意义就是「快滑时屏上不是白纸」，而它一张只有高清的三十分之一 ——
+    /// 跟高清塞进同一个帽子，要么它先被挤光（白屏回来），要么帽子整体变大
+    /// （内存回不到原样）。
+    ///
+    /// 红路：把 `end_frame` 里那一趟「按档各结算」改回共享一个计数器与一个帽子，
+    /// 这里最后一句断言就红（低清那格跟着高清一起被挤走）。
+    #[gpui_kit::test]
+    fn the_full_cap_never_evicts_the_preview_tier(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        // 帽子压到一张 1024²：高清摆两张就超，而低清那一档远没到 [`super::preview_limit`]。
+        let cap = 4 * 1024 * 1024;
+        let mut config = folio_core::infra::config::Config::default();
+        config.reader.image_cache_bytes = cap as u64;
+        cx.update(|cx| crate::ui::services::config::ConfigHolder::install(config, cx));
+        let (atlas, mut table, _reads) = cx.update(|cx| book(cx, 2, 1024, 1024));
+        // 第三格是「同一张图的低清」：键挂上图集认的那个后缀（拼法见
+        // `foundation::images::DecodeRequest::preview`）。字节与高清共用一份来源，
+        // 所以这一格的 `bytes` 也是 4 MB —— 两档**大小**相同不是这条门要钉的东西，
+        // 各记各的账才是。
+        let mut low = table["pic-0.png"].clone();
+        low.key = format!("{}@preview", low.key);
+        Rc::get_mut(&mut table)
+            .expect("还没有别人握着这张表")
+            .insert("low-0".to_string(), low);
+        let showing = vec![
+            "pic-0.png".to_string(),
+            "pic-1.png".to_string(),
+            "low-0".to_string(),
+        ];
+        let window = cx.open_window(size(px(256.0), px(256.0)), {
+            let atlas = atlas.clone();
+            move |_, _| Screen {
+                atlas,
+                table,
+                showing: showing.clone(),
+            }
+        });
+        let handle: AnyWindowHandle = window.into();
+        paint(handle, cx);
+        settle(handle, cx);
+        assert_eq!(
+            resident(&atlas, cx),
+            2 * 1024 * 1024 * 4,
+            "前提：两格高清都在账上（{} 字节）",
+            resident(&atlas, cx)
+        );
+        assert_eq!(
+            preview_resident(&atlas, cx),
+            1024 * 1024 * 4,
+            "前提：低清那一格单独记一笔账"
+        );
+
+        window
+            .update(cx, |view, _, _| view.showing.clear())
+            .expect("窗口应当可改");
+        paint(handle, cx);
+        assert_eq!(
+            resident(&atlas, cx),
+            cap,
+            "高清那一档没挤到帽子上（剩 {} 字节）",
+            resident(&atlas, cx)
+        );
+        assert_eq!(
+            preview_resident(&atlas, cx),
+            1024 * 1024 * 4,
+            "低清被高清那一档挤走了（剩 {} 字节）：两档共用一个帽子的话，\
+             快滑时先没的正是顶在屏上的那一份",
+            preview_resident(&atlas, cx)
         );
     }
 

@@ -26,18 +26,33 @@
 //! 完整设置屏那一格，桌面那侧照样渲染 `desc`。卡片这边靠控件自己说话：滑条推着走，
 //! 正文当场重排，不需要一句话预告这件事会发生。
 //!
-//! ## 量程不在这里抄第二份
+//! ## 一格三个把手：`−` 滑条 `+`
+//!
+//! 数值那几格是「标题 + 读数」一行，下面一行 `−` 一颗钮、缩短居中的滑条、`+` 一颗钮。
+//! 通栏滑条从前是唯一的入口，于是两个端点都顶在屏幕边上，拇指要够到边框才调得到最小档；
+//! 而滑块本身只有那么大，精确停在一档全靠运气。两颗钮借完整设置屏那族 `−`/`+` 同一形态
+//! （`ghost` + `large` + 图标，见 `settings::view::compact` 的 `RowKind::Number`），
+//! 滑条留着负责粗跳。
+//!
+//! 按钮走的是**粗档**（`chrome::SliderSteps::nudge`），比滑条自己的落档粗一个量级：
+//! 按细档走满程要划 56–200 下，那不该是按钮的活。两条路都只改同一份 `SliderState`
+//! 与同一条写入口 [`Knob::apply`] —— 拖动与按钮各留一份落点迟早会飘成「按 + 改的是行距」
+//! 那种形状。
+//!
+//! ## 量程与步长不在这里抄第二份
 //!
 //! 每条滑条的两端引用 [`chrome`] 里那几对常数，而它们引用的是配置自己的上下限
 //! （`Reader::clamped` 与 `Appearance::normalized` 夹的就是同一对数）。界面里一旦写死
 //! 第二个「最大行距」，滑条就能拖到一个存不进配置的位置：屏幕上数变了，落盘那刻被夹回去，
 //! 下一帧又缩回来。`chrome::FONT_SIZE_RANGE` 那一档是**故意**比配置窄的（阅读时顺手调只
 //! 铺常用的一段），那种例外写在它自己的注释里，并由 `model/chrome.rs` 的量程那条门钉住。
+//! 步长同理：两档各住在 `chrome` 的 `*_STEPS` 里，不写在渲染代码上。
 
 use std::rc::Rc;
 
 use gpui_kit::Anchor;
-use gpui_kit::component::button::Button;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
@@ -48,16 +63,17 @@ use gpui_kit::{
     SharedString, Styled, Subscription, Window, div,
 };
 
-use folio_core::{Mode, PageTurn, Reader, TextDirection};
+use folio_core::{ImageScale, Mode, PageTurn, Reader, TextDirection};
 
 use crate::ui::components::{BottomSheet, BottomSheetState, FontFamilySetter, FontPicker};
 use crate::ui::features::reader::model::chrome::{
     self, BRIGHTNESS_RANGE, FONT_SIZE_RANGE, INDENT_RANGE, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE,
-    MARGIN_X_RANGE, MARGIN_Y_RANGE, MAX_MEASURE_RANGE, PARAGRAPH_GAP_RANGE, TURN_DURATION_RANGE,
+    MARGIN_X_RANGE, MARGIN_Y_RANGE, MAX_MEASURE_RANGE, PARAGRAPH_GAP_RANGE, SliderSteps,
+    TURN_DURATION_RANGE,
 };
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::services::l10n::tr;
+use crate::ui::services::l10n::{tf, tr};
 
 /// 卡片顶部那三段。顺序就是读者的动线：先看环境，再挑字，最后调版面。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -92,6 +108,164 @@ impl SheetTab {
     }
 }
 
+/// 这一屏上那十条「拖一下就走一值」的格。名字就是它写进配置的那一格。
+///
+/// 为什么要一张表而不是十个字段各接各的闭包：**滑条拖动、`−` / `+` 按钮、`sync` 从别处
+/// 读回来**这三条路必须落在同一个配置字段上。从前只有拖动那条路有落点（十条近乎相同的
+/// 闭排在 `new` 里），加按钮就是往第二份落点上添一次 —— 那正是「按 + 改的是段距」这种
+/// 形状的来源。有了这一张表，「漏了一条」在写第三条路时会直接编译不过。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Knob {
+    Brightness,
+    FontSize,
+    LineHeight,
+    LetterSpacing,
+    ParagraphGap,
+    Indent,
+    MaxMeasure,
+    MarginX,
+    MarginY,
+    TurnDuration,
+}
+
+/// `ReadingSheet::knobs` 那个数组的长度必须与 [`Knob::ALL`] 一致。
+const _: () = assert!(Knob::ALL.len() == 10);
+
+impl Knob {
+    /// 顺序就是 `knobs` 数组的顺序。
+    const ALL: [Self; 10] = [
+        Self::Brightness,
+        Self::FontSize,
+        Self::LineHeight,
+        Self::LetterSpacing,
+        Self::ParagraphGap,
+        Self::Indent,
+        Self::MaxMeasure,
+        Self::MarginX,
+        Self::MarginY,
+        Self::TurnDuration,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Brightness => 0,
+            Self::FontSize => 1,
+            Self::LineHeight => 2,
+            Self::LetterSpacing => 3,
+            Self::ParagraphGap => 4,
+            Self::Indent => 5,
+            Self::MaxMeasure => 6,
+            Self::MarginX => 7,
+            Self::MarginY => 8,
+            Self::TurnDuration => 9,
+        }
+    }
+
+    /// 两颗钮的元素 id 前缀。每一段里一个名字只出现一次，但拼上名字才不靠那个巧合。
+    fn key(self) -> &'static str {
+        match self {
+            Self::Brightness => "brightness",
+            Self::FontSize => "font-size",
+            Self::LineHeight => "line-height",
+            Self::LetterSpacing => "letter-spacing",
+            Self::ParagraphGap => "paragraph-gap",
+            Self::Indent => "indent",
+            Self::MaxMeasure => "max-measure",
+            Self::MarginX => "margin-x",
+            Self::MarginY => "margin-y",
+            Self::TurnDuration => "turn-duration",
+        }
+    }
+
+    /// 两端。引用 `chrome` 里那族常数 —— 文件头那条：不在这里抄第二份量程。
+    fn range(self) -> (f32, f32) {
+        match self {
+            Self::Brightness => BRIGHTNESS_RANGE,
+            Self::FontSize => FONT_SIZE_RANGE,
+            Self::LineHeight => LINE_HEIGHT_RANGE,
+            Self::LetterSpacing => LETTER_SPACING_RANGE,
+            Self::ParagraphGap => PARAGRAPH_GAP_RANGE,
+            Self::Indent => INDENT_RANGE,
+            Self::MaxMeasure => MAX_MEASURE_RANGE,
+            Self::MarginX => MARGIN_X_RANGE,
+            Self::MarginY => MARGIN_Y_RANGE,
+            Self::TurnDuration => TURN_DURATION_RANGE,
+        }
+    }
+
+    /// 两档步长：滑条的细档与 `±` 的粗档。
+    fn steps(self) -> SliderSteps {
+        match self {
+            Self::Brightness => chrome::BRIGHTNESS_STEPS,
+            Self::FontSize => chrome::FONT_SIZE_STEPS,
+            Self::LineHeight => chrome::LINE_HEIGHT_STEPS,
+            Self::LetterSpacing => chrome::LETTER_SPACING_STEPS,
+            Self::ParagraphGap => chrome::PARAGRAPH_GAP_STEPS,
+            Self::Indent => chrome::INDENT_STEPS,
+            Self::MaxMeasure => chrome::MAX_MEASURE_STEPS,
+            Self::MarginX => chrome::MARGIN_X_STEPS,
+            Self::MarginY => chrome::MARGIN_Y_STEPS,
+            Self::TurnDuration => chrome::TURN_DURATION_STEPS,
+        }
+    }
+
+    /// 这一本书**此刻在用的**那一格数：滑条初值与 `sync` 的权威都从这一条来。
+    ///
+    /// 亮度那一档特殊：配置里「跟随系统」是 `None`，而滑条上得有个能显示的数，于是摆顶格。
+    /// 这一条从前在「建滑条」和「每帧同步」两处各写一遍，合到这里只剩一份。
+    fn configured(self, cx: &App) -> f32 {
+        match self {
+            Self::Brightness => ConfigHolder::appearance(cx)
+                .brightness
+                .unwrap_or(BRIGHTNESS_RANGE.1),
+            Self::TurnDuration => ConfigHolder::appearance(cx).turn_duration,
+            Self::FontSize => ConfigHolder::reader(cx).font_size,
+            Self::LineHeight => ConfigHolder::reader(cx).line_height,
+            Self::LetterSpacing => ConfigHolder::reader(cx).letter_spacing_em,
+            Self::ParagraphGap => ConfigHolder::reader(cx).paragraph_gap_em,
+            Self::Indent => ConfigHolder::reader(cx).indent_em,
+            Self::MaxMeasure => ConfigHolder::reader(cx).max_measure,
+            Self::MarginX => ConfigHolder::reader(cx).margin_x,
+            Self::MarginY => ConfigHolder::reader(cx).margin_y,
+        }
+    }
+
+    /// 写回配置那一格。拖动与 `±` 两条路都走这扇门，所以「按哪一格改哪一格」只有一个地方
+    /// 可以说错。
+    fn apply(self, value: f32, cx: &mut App) {
+        match self {
+            Self::Brightness => ConfigHolder::edit_book_appearance(cx, |appearance| {
+                // 顶格归成 `None`：配置里于是只有「跟随系统」一个写法，滑条与文件不会是
+                // 两套「最大亮度」（同 `Appearance::normalized` 那一条）。
+                appearance.brightness = if value >= BRIGHTNESS_RANGE.1 {
+                    None
+                } else {
+                    Some(value)
+                }
+            }),
+            Self::TurnDuration => ConfigHolder::edit_book_appearance(cx, |appearance| {
+                appearance.turn_duration = value
+            }),
+            Self::FontSize => ConfigHolder::edit_book_reader(cx, |prefs| prefs.font_size = value),
+            Self::LineHeight => {
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.line_height = value)
+            }
+            Self::LetterSpacing => {
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.letter_spacing_em = value)
+            }
+            Self::ParagraphGap => {
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.paragraph_gap_em = value)
+            }
+            Self::Indent => ConfigHolder::edit_book_reader(cx, |prefs| prefs.indent_em = value),
+            Self::MaxMeasure => {
+                ConfigHolder::edit_book_reader(cx, |prefs| prefs.max_measure = value)
+            }
+            Self::MarginX => ConfigHolder::edit_book_reader(cx, |prefs| prefs.margin_x = value),
+            Self::MarginY => ConfigHolder::edit_book_reader(cx, |prefs| prefs.margin_y = value),
+        }
+    }
+}
+
 /// 卡片能停的最高那一档：窗口高的 62%。三组分开之后最长的那组（排版九格）到这一档
 /// 也装得下，同时上方还留出近四成正文 —— 调行距、段距时读者要看的就是那几行字。
 /// 从前九格挤在一块，最高档只能开到 85%；分组之后把那截高度还给正文。
@@ -101,23 +275,19 @@ const SHEET_EXPANDED: f32 = 0.62;
 /// [`crate::ui::components::bottom_sheet::anchors`]），那一档拖到哪都盖满正文。
 const SHEET_PEEK: f32 = 0.5;
 
-/// 一行的值与滑条之间那点步进的差别写在调用处，这里只负责把区间摆对。
+/// 建一条滑条：两端与细档来自 [`Knob`]，初值来自 [`Knob::configured`]。
 ///
 /// `max` 必须写在 `min` 前面：`SliderState::new()` 的默认区间是 0..**100**，而每一步
 /// setter 都会拿当前区间去 `clamp` 已有的值。翻页时长那一条的下限是 120，先写 `min`
 /// 就是 `clamp(120.0, 100.0)` —— 当场 panic（实测炸在 `ReadingPage::new` 那一格）。
-fn slider(
-    range: (f32, f32),
-    step: f32,
-    value: f32,
-    cx: &mut Context<ReadingSheet>,
-) -> Entity<SliderState> {
-    let value = value.clamp(range.0, range.1);
+fn slider(knob: Knob, cx: &mut Context<ReadingSheet>) -> Entity<SliderState> {
+    let (range, steps) = (knob.range(), knob.steps());
+    let value = knob.configured(cx).clamp(range.0, range.1);
     cx.new(|_| {
         SliderState::new()
             .max(range.1)
             .min(range.0)
-            .step(step)
+            .step(steps.slide)
             .default_value(value)
     })
 }
@@ -133,16 +303,10 @@ pub(in crate::ui::features::reader) struct ReadingSheet {
     reader: Entity<ReaderSession>,
     /// 顶上停在哪一组。跨帧留着：读者刚在排版里调完行距，收起再打开该还在排版。
     tab: SheetTab,
-    brightness: Entity<SliderState>,
-    font_size: Entity<SliderState>,
-    line_height: Entity<SliderState>,
-    letter_spacing: Entity<SliderState>,
-    paragraph_gap: Entity<SliderState>,
-    indent: Entity<SliderState>,
-    max_measure: Entity<SliderState>,
-    margin_x: Entity<SliderState>,
-    margin_y: Entity<SliderState>,
-    turn_duration: Entity<SliderState>,
+    /// 十条滑条的状态，按 [`Knob::ALL`] 的顺序摆，取用走 [`ReadingSheet::knob`]。
+    /// 这里刻意不留十个字段加十个各自的写入口：值只有一份，拖动、`−` / `+`、`sync`
+    /// 三条路都改同一格、都从同一扇门写回配置。
+    knobs: [Entity<SliderState>; 10],
     _watches: Vec<Subscription>,
 }
 
@@ -153,101 +317,53 @@ impl ReadingSheet {
         reader: Entity<ReaderSession>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let prefs = ConfigHolder::reader(cx);
-        let appearance = ConfigHolder::appearance(cx);
-        // 「跟随系统」在滑条上就是推到顶：配置里那一格是 `None`，滑条上得有个能显示的数。
-        let brightness = appearance.brightness.unwrap_or(BRIGHTNESS_RANGE.1);
-        let brightness = slider(BRIGHTNESS_RANGE, 0.01, brightness, cx);
-        let font_size = slider(FONT_SIZE_RANGE, 0.5, prefs.font_size, cx);
-        let line_height = slider(LINE_HEIGHT_RANGE, 0.05, prefs.line_height, cx);
-        let letter_spacing = slider(LETTER_SPACING_RANGE, 0.01, prefs.letter_spacing_em, cx);
-        let paragraph_gap = slider(PARAGRAPH_GAP_RANGE, 0.05, prefs.paragraph_gap_em, cx);
-        let indent = slider(INDENT_RANGE, 0.25, prefs.indent_em, cx);
-        let max_measure = slider(MAX_MEASURE_RANGE, 20.0, prefs.max_measure, cx);
-        let margin_x = slider(MARGIN_X_RANGE, 8.0, prefs.margin_x, cx);
-        let margin_y = slider(MARGIN_Y_RANGE, 8.0, prefs.margin_y, cx);
-        // 步长 10 ms：一整条滑条 58 个刻度，手指一次划动能停稳的刻度比这少，再细则是在
-        // 骗读者说这格能调准 —— 两三百毫秒的差别肉眼分不出 5 ms。
-        let turn_duration = slider(TURN_DURATION_RANGE, 10.0, appearance.turn_duration, cx);
+        // 十条滑条由 [`Knob`] 那一张表建出来：两端、细档、初值都在表里，这里不再逐格写数。
+        let knobs = Knob::ALL.map(|knob| slider(knob, cx));
         // 弹层自己也要观察：它不是这一屏的子视图，`notify` 只有观察方才收得到，
         // 而开合、换档、读者一把下拉关掉全靠随后那一次重画。
         let sheet = cx.new(BottomSheetState::closed);
-        let watches = vec![
-            cx.observe(&sheet, |_, _, cx| cx.notify()),
-            Self::watch(&brightness, cx, |value, cx| {
-                // 顶格归成 `None`：配置里于是只有「跟随系统」一个写法，滑条与文件不会是
-                // 两套「最大亮度」（同 `Appearance::normalized` 那一条）。
-                ConfigHolder::edit_book_appearance(cx, |appearance| {
-                    appearance.brightness = if value >= BRIGHTNESS_RANGE.1 {
-                        None
-                    } else {
-                        Some(value)
-                    }
-                });
-            }),
-            Self::watch(&font_size, cx, |value, cx| {
-                ConfigHolder::edit_book_reader(cx, |prefs| prefs.font_size = value);
-            }),
-            Self::watch(&line_height, cx, |value, cx| {
-                ConfigHolder::edit_book_reader(cx, |prefs| prefs.line_height = value);
-            }),
-            Self::watch(&letter_spacing, cx, |value, cx| {
-                ConfigHolder::edit_book_reader(cx, |prefs| prefs.letter_spacing_em = value);
-            }),
-            Self::watch(&paragraph_gap, cx, |value, cx| {
-                ConfigHolder::edit_book_reader(cx, |prefs| prefs.paragraph_gap_em = value);
-            }),
-            Self::watch(&indent, cx, |value, cx| {
-                ConfigHolder::edit_book_reader(cx, |prefs| prefs.indent_em = value);
-            }),
-            Self::watch(&max_measure, cx, |value, cx| {
-                ConfigHolder::edit_book_reader(cx, |prefs| prefs.max_measure = value);
-            }),
-            Self::watch(&margin_x, cx, |value, cx| {
-                ConfigHolder::edit_book_reader(cx, |prefs| prefs.margin_x = value);
-            }),
-            Self::watch(&margin_y, cx, |value, cx| {
-                ConfigHolder::edit_book_reader(cx, |prefs| prefs.margin_y = value);
-            }),
-            Self::watch(&turn_duration, cx, |value, cx| {
-                ConfigHolder::edit_book_appearance(cx, |appearance| {
-                    appearance.turn_duration = value
-                });
-            }),
-        ];
+        let mut watches = vec![cx.observe(&sheet, |_, _, cx| cx.notify())];
+        // 一条滑条订阅一次：拖出来的那个数交给 [`Knob::apply`] —— 与 `−` / `+` 同一扇门。
+        for (state, knob) in knobs.iter().zip(Knob::ALL) {
+            watches.push(cx.subscribe(state, move |_, _, event, cx| {
+                if let SliderEvent::Change(value) = event {
+                    knob.apply(value.end(), cx);
+                }
+            }));
+        }
         Self {
             sheet,
             reader,
             tab: SheetTab::default(),
-            brightness,
-            font_size,
-            line_height,
-            letter_spacing,
-            paragraph_gap,
-            indent,
-            max_measure,
-            margin_x,
-            margin_y,
-            turn_duration,
+            knobs,
             _watches: watches,
         }
     }
 
-    /// 一条滑条订阅一次：把拖出来的那个数交给写入口。
+    /// 某一格此刻的滑条状态。数组按 [`Knob::ALL`] 摆，索引由 [`Knob::index`] 给。
+    fn knob(&self, knob: Knob) -> &Entity<SliderState> {
+        &self.knobs[knob.index()]
+    }
+
+    /// 一颗 `−` / `+` 按下去走的那一档（粗档，见 [`Knob::steps`]）。
     ///
-    /// 写成关联函数而不是 `self` 方法：这些路唯一的差别是往哪一格写，而订阅句柄要由
-    /// 调用方存进字段 —— 方法里 `self._watches.push(...)` 与同时借着 `self.xxx` 那条句柄
-    /// 是同一块的两个借用，编译不过。
-    fn watch(
-        state: &Entity<SliderState>,
-        cx: &mut Context<Self>,
-        write: impl Fn(f32, &mut App) + 'static,
-    ) -> Subscription {
-        cx.subscribe(state, move |_, _, event, cx| {
-            if let SliderEvent::Change(value) = event {
-                write(value.end(), cx);
-            }
-        })
+    /// 先加粗档、再落回滑条自己的细格、最后夹进区间：顺序反了会在端点上留下一个格外的数
+    /// —— 亮度推到顶再加半档是 1.05，落盘时被配置夹回 1.0，而屏幕上还念着 1.05。
+    ///
+    /// **两条都要写**。`SliderState::set_value` 只 `notify`、**不发** `SliderEvent::Change`
+    /// （gpui-base 的 `slider.rs` 里只有拖动那一条路 `cx.emit`）。少写配置那一笔就是
+    /// 「钮按下去滑块动了、书里的字没变」；只写配置不写滑块是反过来的坏法：值最终对，
+    /// 但按钮那一下看着没反应，下一帧 `sync` 还会把滑块拽回旧值。
+    fn nudge(&mut self, knob: Knob, sign: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let steps = knob.steps();
+        let (min, max) = knob.range();
+        let at = self.knob(knob).read(cx).value().end();
+        let next = ((at + sign * steps.nudge) / steps.slide).round() * steps.slide;
+        let next = next.clamp(min, max);
+        let state = self.knob(knob).clone();
+        state.update(cx, |state, cx| state.set_value(next, window, cx));
+        knob.apply(next, cx);
+        cx.notify();
     }
 
     /// 卡片开着吗。阅读页拿它决定「身上压着东西」要不要报给会话（那一击的语义是收这一层，
@@ -273,43 +389,48 @@ impl ReadingSheet {
     }
 
     /// 把「别处也改得动」的数推回滑条：完整设置屏改了行距要挪这条滑条，而亮度那一格在
-    /// 「跟随系统」时没有数 —— 滑条上把它显示成顶格，配置里它是 `None`。
+    /// 「跟随系统」时没有数 —— 滑条上把它显示成顶格，配置里它是 `None`（那条换算住在
+    /// [`Knob::configured`]，与建滑条时用的是同一条权威，所以这里不可能漏掉某一条）。
     ///
     /// 带阈值比较：拖动的时候滑条自己就是权威，每帧再按配置读回来的数写回去，
     /// 就是拿手指算出来的值和落盘算出来的值互相追。
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let prefs = ConfigHolder::reader(cx);
-        let appearance = ConfigHolder::appearance(cx);
-        let brightness = appearance.brightness.unwrap_or(BRIGHTNESS_RANGE.1);
-        let wanted = [
-            (&self.brightness, brightness),
-            (&self.font_size, prefs.font_size),
-            (&self.line_height, prefs.line_height),
-            (&self.letter_spacing, prefs.letter_spacing_em),
-            (&self.paragraph_gap, prefs.paragraph_gap_em),
-            (&self.indent, prefs.indent_em),
-            (&self.max_measure, prefs.max_measure),
-            (&self.margin_x, prefs.margin_x),
-            (&self.margin_y, prefs.margin_y),
-            (&self.turn_duration, appearance.turn_duration),
-        ];
-        for (state, value) in wanted {
+        for (index, knob) in Knob::ALL.iter().enumerate() {
+            let value = knob.configured(cx);
+            let state = &self.knobs[index];
             if (state.read(cx).value().end() - value).abs() > 0.005 {
                 state.update(cx, |state, cx| state.set_value(value, window, cx));
             }
         }
     }
 
-    /// 一格滑条：标签在左、当前值在右、滑条在下面。
+    /// 一格的三个把手：上面一行「标签在左、当前值在右」，下面一行 `−` 滑条 `+`。
     ///
-    /// 竖着摆而不是横着排三样：手机上横排会让滑条只剩一半宽，调一档要划好几下。
-    fn slider_row(
+    /// 滑条从前是通栏的，于是两个端点都顶在屏幕边上，拇指够不着；滑块又只有那么大，
+    /// 精确停在一档全靠运气。现在滑条让出两端（`flex_1` + `min_w_0`，居中那一段），
+    /// 两端各一颗钮 —— 形态借完整设置屏那族 `−`/`+`（`settings::view::compact` 的
+    /// `RowKind::Number`：`ghost` + `large` + 图标），钮走的是**粗档**，满程按十几下到
+    /// 几十下算，细跳仍然交给滑条。
+    ///
+    /// 标签这一份文本三处要用（行首、两颗钮的可读名、滑条自己的可读名），所以先把三份
+    /// 名字取好再搭元素。
+    fn stepper_row(
         &self,
+        knob: Knob,
         label: SharedString,
         value: String,
-        state: &Entity<SliderState>,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
+        let (min, max) = knob.range();
+        let at = self.knob(knob).read(cx).value().end();
+        let state = self.knob(knob).clone();
+        // 两颗钮各要一个拥有者：点击闭包是 `'static` 的，同一份句柄不能移动两次
+        //（与 `settings::view::compact` 那族 `−` / `+` 同一写法）。
+        let down_sheet = cx.entity();
+        let up_sheet = cx.entity();
+        let down = tf(cx, "reader.nudge_down", &[("field", &label)]);
+        let up = tf(cx, "reader.nudge_up", &[("field", &label)]);
+        let track_label = label.clone();
         v_flex()
             .w_full()
             .gap_1()
@@ -318,7 +439,7 @@ impl ReadingSheet {
                     .w_full()
                     .items_center()
                     .justify_between()
-                    .child(div().text_base().child(label))
+                    .child(div().text_base().child(label.clone()))
                     .child(
                         div()
                             .text_base()
@@ -326,7 +447,46 @@ impl ReadingSheet {
                             .child(value),
                     ),
             )
-            .child(Slider::new(state).w_full())
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new(format!("{}-minus", knob.key()))
+                            .ghost()
+                            .large()
+                            // 推到端点就是禁用，而不是按下无反应：这一格到底到边了没有，
+                            // 读者要从控件本身读出来。
+                            .disabled(at <= min + 0.001)
+                            .icon(IconName::Minus)
+                            .accessibility_label(down)
+                            .on_click(move |_, window, app| {
+                                down_sheet.update(app, |this, cx| {
+                                    this.nudge(knob, -1.0, window, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        Slider::new(&state)
+                            .flex_1()
+                            .min_w_0()
+                            .accessibility_label(track_label),
+                    )
+                    .child(
+                        Button::new(format!("{}-plus", knob.key()))
+                            .ghost()
+                            .large()
+                            .disabled(at >= max - 0.001)
+                            .icon(IconName::Plus)
+                            .accessibility_label(up)
+                            .on_click(move |_, window, app| {
+                                up_sheet.update(app, |this, cx| {
+                                    this.nudge(knob, 1.0, window, cx);
+                                });
+                            }),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -570,6 +730,60 @@ impl ReadingSheet {
         cx.notify();
     }
 
+    /// 「图片缩放」那一格：跟书 / 铺满屏幕 / 原始尺寸。
+    ///
+    /// 三档各说的是什么、边界在哪（小图不许被撑大、原始只保证不溢出屏幕），判据写在
+    /// `folio_core::infra::config::ImageScale` 那一处；卡片里不摆解释 —— 这一屏每格
+    /// 只有标题与控件，长解释在完整设置屏那一格。
+    fn image_scale_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let scale = ConfigHolder::reader(cx).image_scale;
+        let label_of = |scale| match scale {
+            ImageScale::Follow => tr(cx, "image_scale.follow"),
+            ImageScale::Screen => tr(cx, "image_scale.screen"),
+            ImageScale::Original => tr(cx, "image_scale.original"),
+        };
+        // 菜单闭包是 `'static`：标签先在这里按当前 locale 译好，闭包里只搬已译好的串。
+        let items: Vec<(ImageScale, SharedString)> = ImageScale::ALL
+            .iter()
+            .copied()
+            .map(|value| (value, label_of(value)))
+            .collect();
+        let current = label_of(scale);
+        let title = tr(cx, "field.image_scale");
+        let sheet = cx.entity().clone();
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .child(div().flex_1().min_w_0().text_base().child(title.clone()))
+            .child(
+                Button::new("reader-image-scale")
+                    .outline()
+                    .small()
+                    .label(current.to_string())
+                    .dropdown_caret(true)
+                    .accessibility_label(title)
+                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                        items.iter().fold(menu, |menu, (value, label)| {
+                            let checked = *value == scale;
+                            let value = *value;
+                            let sheet = sheet.clone();
+                            menu.item(PopupMenuItem::new(label.clone()).checked(checked).on_click(
+                                move |_, _, cx| {
+                                    sheet.update(cx, |this, cx| this.set_image_scale(value, cx))
+                                },
+                            ))
+                        })
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn set_image_scale(&mut self, scale: ImageScale, cx: &mut Context<Self>) {
+        ConfigHolder::edit_book_reader(cx, |prefs| prefs.image_scale = scale);
+        cx.notify();
+    }
+
     /// 「正文字体」那一格：这台设备装着的字体家族，可搜索。
     ///
     /// 列表来自 `TextSystem::all_font_names()`（含随包字体与这本书注册进来的内嵌字体），
@@ -677,17 +891,17 @@ impl ReadingSheet {
             .pt_1()
             .pb_6()
             .child(self.reading_mode_row(cx))
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::Brightness,
                 tr(cx, "reader.brightness"),
                 brightness_label,
-                &self.brightness,
                 cx,
             ))
             .child(self.turn_row(cx))
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::TurnDuration,
                 tr(cx, "reader.turn_duration"),
                 format!("{:.0} ms", ConfigHolder::appearance(cx).turn_duration),
-                &self.turn_duration,
                 cx,
             ))
             .into_any_element()
@@ -703,10 +917,10 @@ impl ReadingSheet {
             .pt_1()
             .pb_6()
             .child(self.font_row(window, cx))
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::FontSize,
                 tr(cx, "field.font_size"),
                 format!("{:.1}", prefs.font_size),
-                &self.font_size,
                 cx,
             ))
             .child(self.weight_row(cx))
@@ -754,49 +968,50 @@ impl ReadingSheet {
                             }),
                     ),
             )
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::Indent,
                 tr(cx, "field.indent"),
                 format!("{:.2}", prefs.indent_em),
-                &self.indent,
                 cx,
             ))
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::LineHeight,
                 tr(cx, "field.line_height"),
                 format!("{:.2}", prefs.line_height),
-                &self.line_height,
                 cx,
             ))
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::LetterSpacing,
                 tr(cx, "field.letter_spacing"),
                 format!("{:.2}", prefs.letter_spacing_em),
-                &self.letter_spacing,
                 cx,
             ))
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::ParagraphGap,
                 tr(cx, "field.paragraph_gap"),
                 format!("{:.2}", prefs.paragraph_gap_em),
-                &self.paragraph_gap,
                 cx,
             ))
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::MaxMeasure,
                 tr(cx, "field.max_measure"),
                 measure_label,
-                &self.max_measure,
                 cx,
             ))
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::MarginX,
                 tr(cx, "field.margin_x"),
                 format!("{:.0} px", prefs.margin_x),
-                &self.margin_x,
                 cx,
             ))
-            .child(self.slider_row(
+            .child(self.stepper_row(
+                Knob::MarginY,
                 tr(cx, "field.margin_y"),
                 format!("{:.0} px", prefs.margin_y),
-                &self.margin_y,
                 cx,
             ))
             .child(self.direction_row(cx))
+            .child(self.image_scale_row(cx))
             .into_any_element()
     }
 }
@@ -834,13 +1049,13 @@ mod tests {
     //! 点名导入而不 `use super::*`：`gpui_kit` 根把 `gpui` 整个转了出来，里面有一个
     //! 叫 `test` 的属性宏，glob 会让下面的 `#[test]` 递归展开成它。
 
-    use folio_core::Config;
+    use folio_core::{Config, ImageScale};
     use gpui_kit::component::Root;
     use gpui_kit::component::slider::SliderState;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, TestAppContext, px, size};
 
-    use super::{ReadingSheet, SheetTab};
+    use super::{Knob, ReadingSheet, SheetTab};
     use crate::ui::features::reader::model::session::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
 
@@ -911,6 +1126,10 @@ mod tests {
     /// 每一条滑条的初值必须就是这一本书此刻用的那一格。
     ///
     /// 接错一条不会报错，只会让读者拖行距那一条时把段距改了 —— 而卡片上念的还是行距。
+    ///
+    /// **这一张表故意手写、不用 `Knob::ALL` 循环**：滑条初值走的正是 `Knob::configured`，
+    /// 拿同一个函数当期望值是自证（`configured` 里把 `LineHeight` 那臂写成读 `paragraph_gap_em`
+    /// 也照样绿）。这里每一份期望值都是独立取自配置结构体的那一格，才量得出接线。
     #[gpui_kit::test]
     fn each_slider_starts_on_the_value_the_book_is_using(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -918,18 +1137,28 @@ mod tests {
         let prefs = cx.update(|cx| ConfigHolder::reader(cx));
         let turn_duration = cx.update(|cx| ConfigHolder::appearance(cx).turn_duration);
         sheet.read_with(cx, |sheet, cx| {
-            assert_eq!(thumb(&sheet.font_size, cx), prefs.font_size);
-            assert_eq!(thumb(&sheet.line_height, cx), prefs.line_height);
-            assert_eq!(thumb(&sheet.letter_spacing, cx), prefs.letter_spacing_em);
-            assert_eq!(thumb(&sheet.paragraph_gap, cx), prefs.paragraph_gap_em);
-            assert_eq!(thumb(&sheet.indent, cx), prefs.indent_em);
-            assert_eq!(thumb(&sheet.margin_x, cx), prefs.margin_x);
-            assert_eq!(thumb(&sheet.margin_y, cx), prefs.margin_y);
-            assert_eq!(thumb(&sheet.max_measure, cx), prefs.max_measure);
-            assert_eq!(thumb(&sheet.turn_duration, cx), turn_duration);
+            assert_eq!(thumb(sheet.knob(Knob::FontSize), cx), prefs.font_size);
+            assert_eq!(thumb(sheet.knob(Knob::LineHeight), cx), prefs.line_height);
+            assert_eq!(
+                thumb(sheet.knob(Knob::LetterSpacing), cx),
+                prefs.letter_spacing_em
+            );
+            assert_eq!(
+                thumb(sheet.knob(Knob::ParagraphGap), cx),
+                prefs.paragraph_gap_em
+            );
+            assert_eq!(thumb(sheet.knob(Knob::Indent), cx), prefs.indent_em);
+            assert_eq!(thumb(sheet.knob(Knob::MarginX), cx), prefs.margin_x);
+            assert_eq!(thumb(sheet.knob(Knob::MarginY), cx), prefs.margin_y);
+            assert_eq!(thumb(sheet.knob(Knob::MaxMeasure), cx), prefs.max_measure);
+            assert_eq!(
+                thumb(sheet.knob(Knob::TurnDuration), cx),
+                turn_duration,
+                "翻页时长那条接的是 `appearance`，不是 `reader` 那一节"
+            );
             // 「跟随系统」在配置里是 `None`，滑条上得有个能显示的数 —— 顶格。
             assert_eq!(
-                thumb(&sheet.brightness, cx),
+                thumb(sheet.knob(Knob::Brightness), cx),
                 super::BRIGHTNESS_RANGE.1,
                 "亮度那一格在「跟随系统」时该停在顶格"
             );
@@ -951,16 +1180,90 @@ mod tests {
             .expect("这一屏该画得出来");
         sheet.read_with(cx, |sheet, cx| {
             assert_eq!(
-                thumb(&sheet.line_height, cx),
+                thumb(sheet.knob(Knob::LineHeight), cx),
                 target,
                 "设置屏改了行距，卡片那条滑条该跟着走"
             );
             assert_eq!(
-                thumb(&sheet.paragraph_gap, cx),
+                thumb(sheet.knob(Knob::ParagraphGap), cx),
                 before.paragraph_gap_em,
                 "挪行距那一条不该把段距也带过去"
             );
         });
+    }
+
+    /// `−` / `+` 那两颗钮：滑条、配置、以及滑条自己的细档格，三样必须同时对。
+    ///
+    /// 三条红路各是一条：`SliderState::set_value` **不发** `SliderEvent::Change`（只有拖动
+    /// 发），少了 [`Knob::apply`] 那一笔就是「滑块动了而书里的字没变」；反过来只写配置不写
+    /// 滑块，`sync` 下一帧把滑块拽回旧值，钮按下去看着没反应。第三件是格子对齐 ——
+    /// `nudge` 是粗档，按完必须是 `slide` 的整数倍，不然随后一次拖动会先「跳」一下才回格。
+    ///
+    /// 先挂一本书：这一屏写的是**这一本的差量**（`edit_book_reader`），没挂着时那一格只留
+    /// 一句 warn 就返回，于是滑块被 `sync` 拽回原值，看上去像按钮没使（与浅深那一格同一条门径）。
+    /// 顺序也有关：`open_sheet` 里那次 `ConfigHolder::install` 会换掉整份配置，书要在那之后挂。
+    #[gpui_kit::test]
+    fn a_nudge_moves_the_thumb_and_the_config_together(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (sheet, handle) = open_sheet(cx);
+        cx.update(|cx| ConfigHolder::set_book(cx, Some(folio_core::BookSettings::default())));
+        let steps = Knob::FontSize.steps();
+        let before = cx.update(|cx| ConfigHolder::reader(cx));
+        for _ in 0..10 {
+            cx.update_window(handle, |_, window, cx| {
+                sheet.update(cx, |sheet, cx| {
+                    sheet.nudge(Knob::FontSize, 1.0, window, cx);
+                });
+            })
+            .expect("这一屏该画得出来");
+        }
+        let wanted = before.font_size + 10.0 * steps.nudge;
+        let shown = sheet.read_with(cx, |sheet, cx| thumb(sheet.knob(Knob::FontSize), cx));
+        let stored = cx.update(|cx| ConfigHolder::reader(cx));
+        assert_eq!(shown, wanted, "连点十次该走十个粗档（滑块上的读数）");
+        assert_eq!(
+            stored.font_size, wanted,
+            "按出来的数必须落进配置，否则字不会变"
+        );
+        assert_eq!(
+            stored.line_height, before.line_height,
+            "按字号的 + 不该把行距一起带走"
+        );
+        let grid = shown / steps.slide;
+        assert!(
+            (grid - grid.round()).abs() < 1e-3,
+            "粗档按完必须落在滑条自己的细档格上，实测量到 {shown}"
+        );
+    }
+
+    /// 往一个方向按到底：夹在端点就停住，不许写出量程外的数。
+    ///
+    /// 禁用态在元素上（`at <= min` / `at >= max` 那两把闸），这里钉的是它依据的那两个数：
+    /// 端点之外没有值，`sync` 于是也不会反过来把滑块拽一下。
+    #[gpui_kit::test]
+    fn nudging_past_the_end_stops_at_the_end(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (sheet, handle) = open_sheet(cx);
+        cx.update(|cx| ConfigHolder::set_book(cx, Some(folio_core::BookSettings::default())));
+        let max = Knob::MarginX.range().1;
+        for _ in 0..60 {
+            cx.update_window(handle, |_, window, cx| {
+                sheet.update(cx, |sheet, cx| {
+                    sheet.nudge(Knob::MarginX, 1.0, window, cx);
+                });
+            })
+            .expect("这一屏该画得出来");
+        }
+        let shown = sheet.read_with(cx, |sheet, cx| thumb(sheet.knob(Knob::MarginX), cx));
+        assert_eq!(
+            shown, max,
+            "按过头要停在端点，而不是滑条上一个存不进配置的位置"
+        );
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::reader(cx)).margin_x,
+            max,
+            "端点那一格写进配置的也要是同一个数"
+        );
     }
 
     /// 阅读设置里那一格浅深只写**这一本书**：软件外观 `mode` 与全局默认都不许动。
@@ -1013,6 +1316,60 @@ mod tests {
             cx.update(|cx| ConfigHolder::book(cx))
                 .is_none_or(|patch| patch.is_empty()),
             "选回「跟随软件」后这本书该回到完全跟随默认，差量里不许留着残格"
+        );
+    }
+
+    /// 「图片缩放」那一格：三档都选得动，而落点只有**这一本书**。
+    ///
+    /// 两件事各自有红路：三档是从 `ImageScale::ALL` 铺的，少一份 locale 或漏一个臂，
+    /// `every_language_carries_the_same_keys` 与这里的标签断言分别红；落点必须是这一本的
+    /// 差量（与浅深那一格同一条规矩），不然在书里点一下「铺满屏幕」就把往后每一本都改了。
+    /// 默认那一档不落差量 —— 与默认同值时那一格要自己消失，否则退出这本书之后残格还挂着。
+    #[gpui_kit::test]
+    fn the_image_scale_row_writes_this_book_and_shows_its_three_tiers(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (sheet, handle) = open_sheet(cx);
+        // 这一格写的是「这一本」，所以得先有一本书挂着（同浅深那一格的门径）。
+        cx.update(|cx| ConfigHolder::set_book(cx, Some(folio_core::BookSettings::default())));
+
+        // 卡片开起来，三段各画一帧：这一格长在版式那一段里，不切过去就画不到，
+        // 「接了线但从没画出来」这种形状只有走一遍渲染路径才暴露。
+        sheet.update(cx, |sheet, cx| sheet.toggle(cx));
+        for tab in SheetTab::ALL {
+            sheet.update(cx, |sheet, cx| sheet.select_tab(tab, cx));
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("这一屏该画得出来");
+        }
+
+        for scale in [ImageScale::Follow, ImageScale::Screen, ImageScale::Original] {
+            sheet.update(cx, |sheet, cx| sheet.set_image_scale(scale, cx));
+            assert_eq!(
+                cx.update(|cx| ConfigHolder::reader(cx)).image_scale,
+                scale,
+                "按下去生效值该是 {} 那一档",
+                scale.as_str()
+            );
+            let patch = cx.update(|cx| ConfigHolder::book(cx));
+            let blank = patch.as_ref().is_none_or(|book| book.is_empty());
+            // 与**默认那一档**同值时不落差量。默认现在是 `Screen`（铺满），
+            // 从前这里是 `Follow` —— 这一格跟着默认走，写在下面那条形同「默认是铺满」的断言里。
+            if scale == ImageScale::default() {
+                assert!(
+                    blank,
+                    "默认档不落差量：与默认同值时这一格要消失，实得 {patch:?}"
+                );
+            } else {
+                assert!(
+                    !blank,
+                    "{} 那一档该落在这一本的差量里，实得 {patch:?}",
+                    scale.as_str()
+                );
+            }
+        }
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::default_reader(cx)).image_scale,
+            ImageScale::Screen,
+            "书里那一格不许改到全局默认；默认档是「铺满」（2026-10-31 从跟书换过来）"
         );
     }
 }

@@ -185,6 +185,8 @@ fn main() {
             light: false,
             allow_vertical: false,
             page_height: None,
+            screen_width: None,
+            screen_height: None,
         },
     );
     report("完整排版", full, &format!("{lines} 行"));
@@ -197,6 +199,8 @@ fn main() {
             light: true,
             allow_vertical: false,
             page_height: None,
+            screen_width: None,
+            screen_height: None,
         },
     );
     report(
@@ -214,6 +218,8 @@ fn main() {
                 light: false,
                 allow_vertical: false,
                 page_height: None,
+                screen_width: None,
+                screen_height: None,
             },
             &Mock,
             &NoImages,
@@ -228,6 +234,8 @@ fn main() {
                 light: true,
                 allow_vertical: false,
                 page_height: None,
+                screen_width: None,
+                screen_height: None,
             },
             &Mock,
             &NoImages,
@@ -252,6 +260,8 @@ fn main() {
             light: false,
             allow_vertical: false,
             page_height: None,
+            screen_width: None,
+            screen_height: None,
         },
     );
     report("完整排版（拉丁）", latin, &format!("{ll} 行"));
@@ -269,6 +279,8 @@ fn main() {
             light: false,
             allow_vertical: false,
             page_height: None,
+            screen_width: None,
+            screen_height: None,
         },
     );
     report("完整排版（混排）", mixed_t, &format!("{ml} 行"));
@@ -294,6 +306,8 @@ fn main() {
             light: false,
             allow_vertical: false,
             page_height: None,
+            screen_width: None,
+            screen_height: None,
         };
         let key_b = LayoutKey::compose(
             LayoutInputs::compute("", &Reader::default()),

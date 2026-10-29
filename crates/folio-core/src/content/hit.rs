@@ -89,9 +89,10 @@ pub fn hit_test(
     // 「最后一个字之后」的落点：走到行尾也没命中时就停在这里。
     let mut end_offset = line_range.end;
 
-    // run 的**起点**按排版的 run.width 累加 —— 绘制（`place_lines` → `paint_run`）
-    // 就是这么摆的；run **内部**的字位优先问 shaping（`byte_at_x`，kerning / 字体
-    // 回退都在里面），做不了 shaping 才退回 char_width 累加。三层同源，命中
+    // run 的**起点**按排版的 run.width 累加，再加这一格自己的横向落点（`x_offset`，
+    // ruby 注音用；正文恒为 0）—— 绘制（`chapter_layout.rs::build_row` 把同一个数折进
+    // `RowUnit::x`）就是这么摆的；run **内部**的字位优先问 shaping（`byte_at_x`，kerning /
+    // 字体回退都在里面），做不了 shaping 才退回 char_width 累加。三层同源，命中
     // 才贴得住画出来的字。**字距与两端对齐都会把字推开，而 shaping 的位置里没有它们** ——
     // 有任一时就不走 shaping 那条，落回逐字累加（advance 已含字距，间隙按同一句摊）。
     for fragment in &line.fragments {
@@ -103,7 +104,7 @@ pub fn hit_test(
             continue;
         };
         let text = block.text.get(run.norm.clone()).unwrap_or("");
-        let run_x = cursor;
+        let run_x = cursor + run.x_offset;
         // shaping 同源的 run 内定位（没有字距、也没有两端对齐时才成立）。
         if run.style.letter_spacing == 0.0
             && justify.is_none()
@@ -313,9 +314,9 @@ pub fn rects_for_range_in(
             let run_start = map
                 .chars_of_bytes(dom, run.node, run.orig.clone())
                 .map(|r| r.start);
-            // 与 hit_test 同一套三层：起点按 run.width，字缘优先 shaping（char_edges），
-            // 退路才用 char_width 累加 —— 矩形的边才贴得住画出来的字。
-            let run_x = cursor;
+            // 与 hit_test 同一套三层：起点按 run.width 再加 run.x_offset，字缘优先 shaping
+            // （char_edges），退路才用 char_width 累加 —— 矩形的边才贴得住画出来的字。
+            let run_x = cursor + run.x_offset;
             let edges = measure
                 .char_edges(text, &run.style.font, run.style.font_size)
                 .filter(|edges| edges.len() == text.chars().count() + 1);

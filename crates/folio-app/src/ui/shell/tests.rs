@@ -405,6 +405,152 @@ fn the_layer_reads_presence_and_writes_distance_apart() {
     }
 }
 
+/// 回归门：读夜里的书退出来，架面**当场**就是白天的。
+///
+/// 失败的样子读者报过（Android 真机）：书是黑夜模式，退出阅读后书架仍然一片深色，点一下
+/// 才变回来。成因不在判据 —— [`themed_appearance`] 那一头是对的 —— 而在**谁重渲染架面**：
+/// 阅读层盖着的时候架面那条栈整个不画，栈底下那一屏的渲染缓存停在上一次画它的外观上
+/// （读书之前）。退场走完那一帧撤掉差量、主题换回白天，可那一屏既没进脏表、尺寸与
+/// `text_style` 也没变，`prepaint_view` 就把旧图原样放回去 —— 要等下一次交互让某个视图
+/// 重新渲染，屏幕才跟着变。
+///
+/// 修法是把「撤差量、换肤」挪到 [`AppShell::render`] 的最前面（书放掉的那一帧，架面还没画）：
+/// 那一帧的架面是**这一帧自己渲染**的，读的一定是刚换好的外观。这一条钉的就是那个时刻：
+/// 书一放掉，差量与解析出来的浅深在**同一次渲染调用之内**就已经是白天，不必等下一次交互。
+#[cfg(not(mobile))]
+#[gpui_kit::test]
+fn leaving_a_night_book_repaints_the_shelf_in_the_app_mode(cx: &mut gpui_kit::TestAppContext) {
+    use crate::ui::services::config::ConfigHolder;
+    use crate::ui::shell::AppShell;
+    use folio_core::content::document::Document;
+    use folio_core::{
+        Appearance, BookSettings, Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator,
+        Mode, Reader,
+    };
+    use gpui_kit::AnyWindowHandle;
+    use gpui_kit::AppContext as _;
+    use gpui_kit::base::Theme as BaseTheme;
+    use gpui_kit::base::ThemeAppearance;
+    use gpui_kit::component::{Root, Theme, ThemeMode};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{px, size};
+    use std::sync::Arc;
+
+    cx.update(gpui_kit::init);
+    let store = folio_core::Store::in_memory().expect("内存库");
+    store
+        .add_book(
+            std::path::Path::new("/books/night.epub"),
+            &DocMeta {
+                title: "夜读".into(),
+                format: Format::Epub,
+                size: 1,
+                ..DocMeta::default()
+            },
+        )
+        .expect("入库");
+    let source = (0..20)
+        .map(|i| format!("<p>夜读的第 {i} 段。于是我们奋力向前，逆水行舟，被不断地向后推。</p>"))
+        .collect::<String>();
+    let content = Content::Reflow(FlowDoc {
+        chapters: vec![Chapter::inline("第一章", source)],
+        ..Default::default()
+    });
+    let doc: Arc<dyn Document> = Arc::from(folio_core::content::document::from_content(
+        DocMeta::default(),
+        content,
+    ));
+
+    let mut shell = None;
+    let handle: AnyWindowHandle = cx
+        .open_window(size(px(900.), px(600.)), |window, cx| {
+            crate::ui::services::app_store::install(store, cx);
+            ConfigHolder::install(
+                Config {
+                    library: folio_core::Library {
+                        dir: "/tmp/folio-books".into(),
+                        watch: None,
+                    },
+                    appearance: Appearance {
+                        mode: Mode::Light,
+                        ..Default::default()
+                    },
+                    ..Config::default()
+                },
+                cx,
+            );
+            let view = cx.new(|cx| AppShell::boot(window, cx));
+            shell = Some(view.clone());
+            Root::new(view, window, cx)
+        })
+        .into();
+    let shell = shell.expect("外壳应已建起");
+    cx.run_until_parked();
+
+    // 按生产那条路开书：会话建起来、把这一本挂进配置实体，再让外壳把那一层盖上。
+    cx.update_window(handle, |_, _, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_reading_for_test(doc, Reader::default(), Locator::start(), cx);
+        });
+    })
+    .expect("开书这一步该跑得起来");
+    // 生产那条路是会话建起来时就挂上差量；这里递进来的文档不带书库主键，补上那一挂。
+    cx.update(|cx| ConfigHolder::set_book(cx, Some(BookSettings::default())));
+    // 这一本单独选过夜里：与读者在弹层里点「夜里」写进去的是同一格。
+    cx.update(|cx| ConfigHolder::edit_book_appearance(cx, |a| a.reading_mode = Some(Mode::Dark)));
+    cx.run_until_parked();
+    // 画够几帧：层停稳之后架面那条栈**不再被画**，它的渲染缓存就停在此刻这一档上。
+    for _ in 0..8 {
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("开书那一屏该画得出来");
+        cx.run_until_parked();
+    }
+    let (mounted, reading_mode, theme_mode) = cx.update(|cx| {
+        (
+            shell.read(cx).reading_mounted_for_test(),
+            ConfigHolder::appearance(cx).reading_mode,
+            Theme::global(cx).mode,
+        )
+    });
+    assert!(mounted, "书该挂着");
+    assert_eq!(reading_mode, Some(Mode::Dark), "这一本该是夜里");
+    assert_eq!(theme_mode, ThemeMode::Dark, "书挂着的时候该是夜里");
+
+    // 读者按返回：退场开始，`Presence` 走完那一段才放手。
+    cx.update(|cx| shell.update(cx, |shell, cx| shell.close_reading(cx)));
+    cx.run_until_parked();
+    let park = std::time::Duration::from_millis(500);
+    for _ in 0..400 {
+        cx.executor().advance_clock(park);
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("退场那几帧该画得出来");
+        cx.run_until_parked();
+        if !cx.update(|cx| shell.read(cx).reading_mounted_for_test()) {
+            break;
+        }
+    }
+    assert!(
+        !cx.update(|cx| shell.read(cx).reading_mounted_for_test()),
+        "退场该在几秒之内走完"
+    );
+
+    // 放开的那一帧里，差量已经撤掉、解析出来的已经是白天 —— 架面就是这一帧画的。
+    assert!(
+        cx.update(|cx| ConfigHolder::book(cx)).is_none(),
+        "放开的那一帧就要撤掉这一本的差量"
+    );
+    assert_eq!(
+        cx.update(|cx| Theme::global(cx).mode),
+        ThemeMode::Light,
+        "退出之后回到软件外观（白天）"
+    );
+    assert_eq!(
+        cx.update(|cx| BaseTheme::global(cx).appearance),
+        ThemeAppearance::Light,
+        "底层滚动条那一份主题也要跟着换"
+    );
+}
+
 #[cfg(not(mobile))]
 mod booted {
     use crate::ui::components::BottomSheetState;
@@ -1185,6 +1331,74 @@ mod booted {
             .expect("窗口应能渲染"),
             "阅读层 occlude 之后，正文中心的一击仍该开底栏"
         );
+    }
+
+    /// 整屏一张纸的另一半：**顶上状态栏那一条与底下手势条那一条也在正文的命中面里**。
+    ///
+    /// 「整屏一张纸」改的是纸面几何（`page_area` 从正文盒扩到整窗，见 `view::body` 的
+    /// `sheet_area`，那一半的门在 `body/tests/swipe.rs` 的
+    /// `a_curl_sheet_includes_the_header_and_footer_bands`）；这一条改的是**命中面**：
+    /// 正文那一层从窗口顶铺到窗口底，所以两条带里的一击归正文，不归身后的架面。
+    /// 哪天阅读层重新为安全区让出顶部（从前那一格 `pt(safe.top)`），这两条带立刻
+    /// 不再是纸：点上去什么也不发生，屏幕上只留下「顶上那一条点不动」——
+    /// 不报错、不动画，最难发现的那一类。
+    ///
+    /// 这里点的是**中间那一档**（开合浮层），不点左右：翻页要真的切出多页，
+    /// 而「左三分之一 = 往回翻」这件事由 `chrome::zone` 自己那几条单元门钉，
+    /// 两边合起来才是完整的一条链。
+    #[gpui_kit::test]
+    fn a_tap_on_either_system_band_reaches_the_body(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
+        let frames = |cx: &mut TestAppContext| {
+            for _ in 0..3 {
+                cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                    .expect("窗口应能渲染");
+                cx.run_until_parked();
+            }
+        };
+        frames(cx);
+        let bar_open = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, _| {
+                window.try_find("reader-bottom-bar").is_some()
+            })
+            .expect("窗口应能渲染")
+        };
+        assert!(!bar_open(cx), "前置：刚开书时浮层还没出来");
+        let (width, height) = cx
+            .update_window(handle, |_, window, _| {
+                let size = window.viewport_size();
+                (f32::from(size.width), f32::from(size.height))
+            })
+            .expect("量窗口");
+
+        // 顶上那 2 像素（状态栏 / 挖孔那一条），横向取正中 → 浮层该开。
+        cx.update_window(handle, |_, window, cx| {
+            window.click_at("folio-reader", point(px(width * 0.5), px(2.0)), cx)
+        })
+        .expect("窗口应能渲染");
+        frames(cx);
+        assert!(bar_open(cx), "点状态栏那一条也要有反应：浮层该开起来");
+
+        // 先把浮层收回正文那一档（浮层开着时那一击的归属是浮层，不是正文）。
+        cx.update_window(handle, |_, window, cx| {
+            window.click_at("folio-reader", point(px(width * 0.5), px(height * 0.5)), cx)
+        })
+        .expect("窗口应能渲染");
+        frames(cx);
+        assert!(
+            !bar_open(cx),
+            "前置：中间那一击要把浮层收掉，底下那一条才轮到正文接"
+        );
+
+        // 底下那 2 像素（手势条那一条）：同一档反过来该把浮层再开起来 —— 两侧都是纸。
+        cx.update_window(handle, |_, window, cx| {
+            window.click_at("folio-reader", point(px(width * 0.5), px(height - 2.0)), cx)
+        })
+        .expect("窗口应能渲染");
+        frames(cx);
+        assert!(bar_open(cx), "点手势条那一条也要有反应：浮层该开起来");
     }
 
     /// 回归门：没有焦点时，返回键照常走到外壳的导航 —— 上面那一档只在真有异议时才吃掉这一键。

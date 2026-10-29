@@ -13,6 +13,12 @@ use super::value::{sub_shift, super_shift};
 
 /// 天生 inline 的标签。清单外的一律按 block 处理：
 /// 新出现的容器标签按 block 降级不会丢内容，反过来会把整段撑散。
+///
+/// `<rp>`（注音括号）留在这一列里，**没有**按浏览器那样 `display: none`：浏览器藏它是因为
+/// 那对括号只是给不支持 ruby 的阅读器的回退形态。本机 18 本 epub 里 `<rp>` 元素 0 个，
+/// 而把它彻底移出可见文本要动 [`SKIPPED_TAGS`] —— 那张名单同时喂着「字数」与锚点坐标系
+/// （`content::scan` 的口径文档就钉在这一条上），加一个标签等于给全库发一次重扫。
+/// 所以这一版让它照旧inline 排在字后，等真有带 `<rp>` 的书再一次改到位。
 const INLINE_TAGS: &[&str] = &[
     "a", "abbr", "b", "bdi", "bdo", "big", "cite", "code", "data", "dfn", "em", "font", "i", "ins",
     "kbd", "label", "mark", "nobr", "q", "rp", "rt", "ruby", "s", "samp", "small", "span",
@@ -124,6 +130,12 @@ pub fn seed(parent: &ComputedStyle, tag: &str) -> ComputedStyle {
         }
         "small" => {
             style.font_size = parent.font_size / 1.2;
+        }
+        // 注音天生是**半号字**。浏览器给 `<rt>` 的就是 50%，而作者十有八九还会自己写一遍
+        // （《诡秘之主》那条 `ruby > rt { font-size: 0.5em }` 就是同一件事）；没写的书靠
+        // 这一条兜住，否则注音与基字同大，排在上方就是两行一样粗的字压在一起。
+        "rt" => {
+            style.font_size = parent.font_size / 2.0;
         }
         "big" => {
             style.font_size = parent.font_size * 1.17;

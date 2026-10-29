@@ -593,6 +593,108 @@ fn a_curl_swipe_back_rolls_the_page(cx: &mut TestAppContext) {
     );
 }
 
+/// 单页仿真折页揭的是**整张纸**：页眉那行章名、页脚那行页码与正文一起卷。
+///
+/// `page_area` 能分开这两件事：正文版心从 `header_reserve` 开始、到页脚带上沿结束；
+/// 折页的纸面从阅读页顶（y=0）铺到窗口底。顺带钉住纸底下那一页的读数是**目标页**的。
+#[gpui_kit::test]
+fn a_curl_sheet_includes_the_header_and_footer_bands(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::view::bands;
+    use gpui_kit::AppContext as _;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| {
+        v.set_mode(PageMode::Paged, cx);
+        // 页眉/页脚各 28：正文版心因此从 28 开始、到窗口底减 28 结束；纸面两头都要越过它们。
+        v.set_chrome_bands(28.0, 28.0, 0.0, true, cx);
+    });
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    let window_h = cx
+        .update_window(handle, |_, window, _| {
+            f32::from(window.viewport_size().height)
+        })
+        .expect("量窗口");
+    let area = view.read_with(cx, |v, _| v.page_area);
+    assert_eq!(area.top, 0.0, "纸面该从阅读页顶开始，实得 {area:?}");
+    assert_eq!(
+        area.bottom, window_h,
+        "纸面该铺到窗口底（页脚带与手势条那一段都在纸上），实得 {area:?}"
+    );
+
+    // 折到一半时，纸底下露出来的是目标页：它的读数带要念目标页的页码。
+    let readouts = view.read_with(cx, |v, cx| bands::readouts_at(v, v.chapter_index(), 1, cx));
+    assert_eq!(readouts.chapter, "第一章");
+    assert!(
+        readouts.position.contains('2'),
+        "第 2 页的读数该是「2」，实得 {:?}",
+        readouts.position
+    );
+}
+
+/// 页眉那条带子只从**这一页的顶边**起算：系统那一条是阅读层让的，带子不再让第二次。
+///
+/// 外壳的阅读层（`shell::reading_overlay`）已经把整页往下推过 `top_inset`，带子的顶边
+/// 就是那一格的下沿。带子自己再加一次时，章名会再低一截，带子也会向下多盖 `top_inset`
+/// 那么高的正文 —— 真机上正是「页眉很低、顶上那截图片被切掉」。
+///
+/// 这里同时量两个数：字的上沿（贴带顶 2 像素）与带子的底边（必须正好停在正文让出的
+/// 那一格 `header_reserve` 上，不能再往下探）。
+#[gpui_kit::test]
+fn the_header_band_does_not_take_the_safe_area_twice(cx: &mut TestAppContext) {
+    use gpui_kit::{AppContext as _, test::TestWindowExt as _};
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| {
+        v.set_mode(PageMode::Paged, cx);
+        // 上下边距都取 0，只留页眉那一格：这一条门量的是安全区与带子的关系。
+        v.set_chrome_bands(28.0, 0.0, 0.0, true, cx);
+        // 外壳那一层在真机上已经按它把整页推下去了；这里只验证带子**不再**加一遍。
+        v.top_inset = 24.0;
+    });
+    settle(cx, handle);
+    let (label_top, band_bottom) = cx
+        .update_window(handle, |_, window, _| {
+            let label = window
+                .try_find("reader-header-chapter")
+                .expect("页眉那条章名该画出来");
+            let band = window
+                .try_find("reader-header-band")
+                .expect("页眉那条带子该画出来");
+            (
+                f32::from(label.bounds().origin.y),
+                f32::from(band.bounds().bottom()),
+            )
+        })
+        .expect("窗口应能渲染");
+    assert!(
+        (label_top - 2.0).abs() < 0.5,
+        "章名只该贴着带顶（2 像素），安全区由外壳让过；实得顶边 {label_top}"
+    );
+    assert!(
+        (band_bottom - 28.0).abs() < 0.5,
+        "带子底边该正好停在正文让出的那一格（28）；实得 {band_bottom}"
+    );
+}
+
 /// 从右往左读的那一本里走折页：往**右**划是「往后翻」，而纸揭的是**左**边那一窄条。
 ///
 /// 这条钉的是「阅读方向真的一路走到了几何」：会话读那本书的 `progression_rtl` → 动画帧带着它
@@ -926,5 +1028,177 @@ fn a_diagonal_swipe_moves_the_fold_on_both_axes(cx: &mut TestAppContext) {
         "斜着那一笔的折线只走了一根轴：按下 y = {}，此刻 y = {}",
         grip.from.1,
         grip.at.1
+    );
+}
+
+/// 仿真折页翻过一页之后，**下一趟要立刻接得上**：点右侧直接翻，不许再点一下才动。
+///
+/// 这条钉的是两件事连在一起的那个空档：捕获只在「动画不在飞」时烘（`capture_wanted`），
+/// 而落定那一帧场上既没有动效也没有别的通知 —— 下一帧不会来，这一页的纹理就要等读者
+/// 下一次碰屏幕；而折页的门读的恰恰是「这一页烘好没有」。`turn_frame` 在落定时补的那一发
+/// 重画就是填这个空档的。
+///
+/// 判据取「同一帧里页号真的动了」，不用 `pending_turn`：排进队也算「点了一下没翻」，
+/// 那正是读者报的症状。
+#[gpui_kit::test]
+fn a_curl_turn_recaptures_the_page_without_a_second_tap(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+    // 起点必须已经烘好，否则这里测的是「进书还没烘」那一格。
+    assert!(
+        view.read_with(cx, |v, _| v.curl_capture_ready()),
+        "前置：第一页的纹理该已经烘好"
+    );
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    let landed = view.read_with(cx, |v, _| v.page());
+    assert_eq!(landed, first + 1, "第一趟点屏该翻过去");
+
+    // 不补任何 settle：落定那一帧自己补的重画就该把这一页烘上。
+    turn_frame(cx, handle, Duration::from_millis(16));
+    assert!(
+        view.read_with(cx, |v, _| v.curl_capture_ready()),
+        "翻完一页之后这一页的纹理该已经烘好 —— 否则下一次点击又要排队"
+    );
+
+    let before = view.read_with(cx, |v, _| v.page());
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    let after = view.read_with(cx, |v, _| v.page());
+    assert_eq!(after, before + 1, "连着点右侧该连着翻，不许卡在等待里");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.pending_turn),
+        None,
+        "门开着时不该有排队的翻页"
+    );
+}
+
+/// 翻完一页、动画落定之后，这一页的纹理**紧接着那一帧就烘上**，不必等读者再碰屏幕。
+///
+/// 捕获只在「动画不在飞」时烘，而落定那一帧没有任何别的东西会请求重画 —— `Presence` 的
+/// 续帧只归时钟。全靠 `turn_frame` 在落定那一刻自己补的那一发 `notify` 才把下一帧要来；
+/// 少了它，纹理要等读者下一次触碰才有，而折页的门读的正是「这一页烘好没有」：连点两下
+/// 的第二下就卡在排队里不动。
+///
+/// 「紧接着那一帧」而不是「同一帧」：gpui 一帧出元素树、**下一帧**才 paint，捕获请求
+/// 排在 paint 那一趟里（`capture_region` 那块 canvas 的绘制回调）。落定帧出树、下一帧
+/// 请求捕获、提交在再下一帧的 `render` 开头落进 `captured_page` —— 所以这里的时间线是
+/// 「落定帧之后再过两帧」。真机与这里同一条链，没为测试放宽任何判据。
+#[gpui_kit::test]
+fn the_landed_page_is_baked_without_another_touch(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.curl_capture_ready()),
+        "前置：第一页该已经烘好"
+    );
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    // 落定那一刻：先把时钟推到动画结束，再按帧走 —— 一帧出树、一帧 paint 请求捕获、
+    // 提交在再下一帧的 `render` 开头落定。三帧恰好是这一条链的长度。
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    let key = view.read_with(cx, |v, _| (v.chapter_index(), v.page()));
+    assert_eq!(key.1, 1, "前置：这一趟该已经落在第二页");
+    turn_frame(cx, handle, Duration::ZERO);
+    turn_frame(cx, handle, Duration::ZERO);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some(key),
+        "翻稳之后这一页该已经烘上，不必等读者再碰一次屏幕；实得 {:?}",
+        view.read_with(cx, |v, _| v.captured_page)
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.curl_capture_ready()),
+        "门该在没人碰屏幕的情况下自己开"
+    );
+}
+
+/// 手指落在**可拖动的插图**上横扫：图跟着手指走，页号一个字不动。
+///
+/// 钉的是手势优先级：插图（`object-fit: cover` 被裁掉那一圈）接走这一笔，翻页层就得
+/// 让开 —— 不然读者想看图的下半截，结果翻了一页。命中区由画图那一趟登记（真机上就是
+/// 上一帧的绘制回调），这里直接放一条，走的是 `on_scroll` 那条真路。
+#[gpui_kit::test]
+fn dragging_an_image_pans_it_instead_of_turning_the_page(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::session::ImageHit;
+    use gpui_kit::{Bounds, point, px, size};
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let before = view.read_with(cx, |v, _| v.page());
+
+    // 一块盖在正文上的图框：纵向还能拖 120px（图比框高）。
+    view.update(cx, |v, _| {
+        v.image_hits.borrow_mut().push(ImageHit {
+            key: "img-1".into(),
+            rect: Bounds::new(point(px(0.0), px(100.0)), size(px(460.0), px(300.0))),
+            slack: (0.0, 120.0),
+            frame: u64::MAX,
+        });
+    });
+
+    // 竖着拖：识别器会在定轴那一刻把另一轴的增量抹成 0（`lock_delta_to_axis`），
+    // 所以想量纵向偏移就得竖着划 —— 斜着划在真机上同样是「只有一根轴有数」。
+    raw_touch_at(cx, handle, TouchPhase::Started, point(px(60.0), px(260.0)));
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(60.0), px(140.0)));
+    raw_touch_at(cx, handle, TouchPhase::Ended, point(px(60.0), px(140.0)));
+
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        before,
+        "在图上拖不该翻页"
+    );
+    let pan = view.read_with(cx, |v, _| v.image_pans.get("img-1").copied());
+    assert!(
+        pan.is_some_and(|(_, y)| y < 0.0),
+        "图该跟着手指动（手指往上拖 ⇒ 偏移为负 = 露出下面那截），实得 {pan:?}"
+    );
+    // 拖出 slack 也要停住：图不能被拖出自己的内容。
+    view.update(cx, |v, _| {
+        if let Some(offset) = v.image_pans.get_mut("img-1") {
+            offset.1 = -9999.0;
+        }
+    });
+    raw_touch_at(cx, handle, TouchPhase::Started, point(px(60.0), px(260.0)));
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(60.0), px(150.0)));
+    raw_touch_at(cx, handle, TouchPhase::Ended, point(px(60.0), px(150.0)));
+    let clamped = view.read_with(cx, |v, _| v.image_pans.get("img-1").copied().unwrap().1);
+    assert!(
+        (-120.0..=0.0).contains(&clamped),
+        "拖动偏移该夹在 slack 以内，实得 {clamped}"
     );
 }
