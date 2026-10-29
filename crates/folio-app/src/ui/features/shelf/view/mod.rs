@@ -193,6 +193,20 @@ fn fold_after(
     (folded, anchor)
 }
 
+/// 把「列表视口自己变高/变矮」带出来的那段 offset 剔掉。
+///
+/// 顶栏收起时列表视口跟着变高，底部 offset 会被布局夹回最多一个搜索带的高度；
+/// 直接拿它判方向会把这截当成读者往回滚（症状是滑到底时导航自己弹出来）。
+/// 视口变高多少就把 offset 加回多少：底部那一下恢复成「没动」，而读者真回拨时
+/// 视口不变、位移照旧算数。
+fn scroll_without_viewport_change(raw: f32, previous: Option<f32>, current: f32) -> f32 {
+    match previous {
+        // 第一帧 / 架面还没布局：视口从 0 量出来不是滚动，不能拿整屏高度当位移。
+        Some(previous) if previous > 0.0 && current > 0.0 => raw + (current - previous),
+        _ => raw,
+    }
+}
+
 pub struct ShelfView {
     /// 书库句柄，来自 [`crate::ui::services::app_store`]。放 `None` 时架面是空的，
     /// 但界面照常起得来。
@@ -219,6 +233,9 @@ pub struct ShelfView {
     grid_scroll: UniformListScrollHandle,
     /// 上一次采样到的滚动位移（逻辑像素）。`None` = 第一帧还没滚过。
     scroll_seen: Option<f32>,
+    /// 上一帧列表视口的高度（逻辑像素）。顶栏收起会把列表视口撑高，底部 offset 会被
+    /// 布局夹回一截 —— 那不是读者在滚，判据要把它从位移里剔掉。
+    scroll_viewport_seen: Option<f32>,
     /// 顶栏与外壳导航栏此刻是否收起。判据在 [`Self::fold_after_scroll`]：
     /// 往下读攒够一段就收，往回一拨就放，回顶一定放。
     folded: bool,
@@ -428,6 +445,7 @@ impl ShelfView {
             tiles: Vec::new(),
             grid_scroll: UniformListScrollHandle::new(),
             scroll_seen: None,
+            scroll_viewport_seen: None,
             folded: false,
             fold_anchor: 0.0,
             pressed_card: None,
@@ -1390,8 +1408,21 @@ impl ShelfView {
         -f32::from(self.grid_scroll.0.borrow().base_handle.offset().y)
     }
 
+    /// 列表**视口**的高度（逻辑像素）。判据拿它剔除顶栏收起/展开带来的布局位移；
+    /// 它不含内容高度，所以搜索、导入把名单变长变短时不会被误当成滚动。
+    fn scroll_viewport_height(&self) -> f32 {
+        f32::from(self.grid_scroll.0.borrow().base_handle.bounds().size.height)
+    }
+
     /// 按滚动方向决定「顶栏与外壳导航栏要不要让位」，返回这一刻状态变了没有。
     fn fold_after_scroll(&mut self, y: f32, reduce_motion: bool) -> bool {
+        let viewport = self.scroll_viewport_height();
+        let previous_viewport = self.scroll_viewport_seen.replace(viewport);
+        let y = scroll_without_viewport_change(y, previous_viewport, viewport);
+        // Android 的弹簧回弹会把 offset 推到 max 之外（实测 748 vs 713）；那一段是
+        // 边缘效果，不是内容移动。判据只看可滚区间内的位移，否则回弹会被读成回拨。
+        let max = f32::from(self.grid_scroll.0.borrow().base_handle.max_offset().y);
+        let y = y.clamp(0.0, max.max(0.0));
         let previous = self.scroll_seen.replace(y);
         let moved = previous.is_some_and(|previous| (y - previous).abs() >= 0.5);
         let was = self.folded;
@@ -1411,6 +1442,10 @@ impl ShelfView {
     /// 读者回到架面要的是导航，不是藏起来的那一条；滚动位移本身没变，不主动放的话
     /// 要等他先往回拨一下才看得见。
     pub(crate) fn reset_fold(&mut self, cx: &mut Context<Self>) {
+        // 回到架面时重新立一次基线：上一帧的位移与视口都可能属于离开前那一屏，
+        // 留着会把回来的第一帧读成一次滚动。
+        self.scroll_seen = None;
+        self.scroll_viewport_seen = None;
         self.fold_anchor = self.scroll_offset();
         if self.folded {
             self.folded = false;
@@ -1720,6 +1755,7 @@ mod tests {
     use super::ShelfView;
     use super::fold_after;
     use super::grid::{GAP, GUTTER, columns_for, grid_spec};
+    use super::scroll_without_viewport_change;
     use super::{ShelfScope, cover_scale, share_file_name};
 
     /// 封面缩放只认「这一排离视口中心多远」：正中不动，边缘收到 0.96。
@@ -1772,6 +1808,49 @@ mod tests {
         // 回到顶上：一定展开。
         let (folded, _) = fold_after(Some(55.0), 55.0, true, 0.0, false);
         assert!(!folded, "回顶不该还藏着导航");
+    }
+
+    /// 顶栏收起会把列表视口撑高，底部 offset 被布局夹回一截；那一段不是读者
+    /// 往回滚。补偿之后仍保持收起，真回拨才展开。
+    #[test]
+    fn a_viewport_that_grows_at_the_bottom_does_not_unfold() {
+        // 第一帧视口从 0 量出来：不是滚动。
+        assert_eq!(
+            scroll_without_viewport_change(0.0, Some(0.0), 800.0),
+            0.0,
+            "首帧布局不该把整屏高度当成向下滚"
+        );
+
+        // 上一帧视口 800、滚到 1000（底）；搜索行收起后视口 852，offset 被夹回 948。
+        let adjusted = scroll_without_viewport_change(948.0, Some(800.0), 852.0);
+        assert_eq!(adjusted, 1000.0, "视口长出来的 52px 要加回去");
+        let (folded, _) = fold_after(Some(1000.0), 1000.0, true, adjusted, false);
+        assert!(folded, "视口变高不是往回滚，导航不该弹出来");
+
+        // 真回拨 12px：视口不变，补偿是恒等，照旧展开。
+        let adjusted = scroll_without_viewport_change(988.0, Some(852.0), 852.0);
+        let (folded, _) = fold_after(Some(1000.0), 1000.0, true, adjusted, false);
+        assert!(!folded, "读者真回拨 12px 要放回导航");
+    }
+
+    /// Android 底部弹簧回弹会把 offset 推到 max 之外；那一段是边缘效果，
+    /// 夹回可滚区间后既不该触发收起，也不该触发展开。
+    #[test]
+    fn bottom_overscroll_does_not_toggle_fold() {
+        let max = 713.0;
+        let bounded = |raw: f32| {
+            scroll_without_viewport_change(raw, Some(866.0), 866.0).clamp(0.0, max)
+        };
+        // 越过底部 35px：夹回 713，仍保持收起。
+        assert_eq!(bounded(748.0), max);
+        let (folded, anchor) = fold_after(Some(max), max, true, bounded(748.0), false);
+        assert!(folded);
+        // 弹簧回弹到 730，仍在 max 之外：不该展开。
+        let (folded, anchor) = fold_after(Some(max), anchor, true, bounded(730.0), false);
+        assert!(folded, "回弹段不该把导航弹出来");
+        // 真回拨越过 max 之下 9px 才展开。
+        let (folded, _) = fold_after(Some(max), anchor, true, bounded(704.0), false);
+        assert!(!folded, "真回拨超过 UNFOLD_TRAVEL 才展开");
     }
 
     /// 系统要求减少动态效果时不收起：收起是空间变化，不是必须传达的信息。
