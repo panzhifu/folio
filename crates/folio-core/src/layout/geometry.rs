@@ -9,8 +9,8 @@ use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
 use crate::content::dom::NodeId;
 use crate::content::format::css::computed::{
-    BackgroundPosition, BackgroundRepeat, BackgroundSize, BorderStyle, Color, StyledDom, TextAlign,
-    WritingMode,
+    BackgroundPosition, BackgroundRepeat, BackgroundSize, BorderStyle, Color, ComputedStyle,
+    Display, StyledDom, TextAlign, WritingMode,
 };
 use crate::infra::metrics::Metric;
 
@@ -223,12 +223,20 @@ pub struct DecorSeed {
     /// `color`（`color` 可继承，所以那一色在层叠期不一定写在本元素上）。
     /// 剩下的只有「`None` 落主题前景」那一步 —— 那是主题，必须每帧现落，不许烘进这张表。
     ///
-    /// 画法只可能是 `Solid` / `Double`（[`BorderEdge::drawn`] 已经把 `none` 折成 0
-    /// 的边挡在外面）。`Double` 必须带出去：绘制层要把它拆成两条 1/3 细线，
-    /// 丢了画法就退化成一条实线（真书《人类简史》的章名 `.biaoti` 上下双线）。
+    /// 画法只可能是 `Solid` / `Double` / `Dotted` / `Dashed`（[`BorderEdge::drawn`] 已经把
+    /// `none` 折成 0 的边挡在外面）。画法必须带出去：`Double` 要拆成两条 1/3 细线、
+    /// `Dotted` / `Dashed` 要按段切开，丢了画法就退化成一条实线
+    /// （真书《人类简史》的章名 `.biaoti` 上下双线、哈利·波特 `.line` 那条点线）。
     ///
     /// [`BorderEdge::drawn`]: crate::content::format::css::computed::BorderEdge::drawn
     pub border: [(f32, Option<Color>, BorderStyle); 4],
+    /// 四个角的圆角半径（px），顺序 `[左上, 右上, 右下, 左下]`，由
+    /// [`ComputedStyle::corner_radii`] 按这一块的盒尺寸折好。
+    ///
+    /// 只作用于**底色**那一块四边形：边框仍是四条轴对齐的直条，所以圆角盒配粗边框时
+    /// 四角是直的（`ui::reader::view::body::decoration_child` 那一段）。
+    /// [`ComputedStyle::corner_radii`]: crate::content::format::css::computed::ComputedStyle::corner_radii
+    pub radius: [f32; 4],
     /// `background-image` 的那些层，按 CSS 书写顺序（先画的在屏幕上更靠上）。空 = 没图。
     ///
     /// **字节与固有尺寸不在这里**，与 `RowImage::href` 同一个口径：那两样随图片索引变，
@@ -330,6 +338,37 @@ fn transposed(
         })
         .collect();
     (blocks, lines, strip, width)
+}
+
+/// 同一张塌陷表里挨着我某一侧的邻格，`side` 按 `[上, 右, 下, 左]`。
+///
+/// 判据是**几何**的，不是 DOM 父子：`decor_seeds` 手上只有块表，而格子的边框盒在排版期
+/// 已按列宽、行高摆好 ——「右边那一格」就是 `x` 恰落在我 `x + width` 上、且与我同一行的那块。
+/// 用几何而不是 DOM，块缓存命中的那条路也对：缓存里存的就是块表。
+fn neighbour_cell<'a>(
+    blocks: &[BlockBox],
+    styles: &'a StyledDom,
+    index: usize,
+    side: usize,
+) -> Option<&'a ComputedStyle> {
+    const TOL: f32 = 0.5;
+    let me = &blocks[index];
+    blocks.iter().enumerate().find_map(|(other_index, other)| {
+        if other_index == index || !other.border_box {
+            return None;
+        }
+        let style = styles.get(other.node)?;
+        if style.display != Display::TableCell || !style.border_collapse {
+            return None;
+        }
+        let touches = match side {
+            0 => ((other.y + other.height) - me.y).abs() < TOL && (other.x - me.x).abs() < TOL,
+            1 => (other.x - (me.x + me.width)).abs() < TOL && (other.y - me.y).abs() < TOL,
+            2 => (other.y - (me.y + me.height)).abs() < TOL && (other.x - me.x).abs() < TOL,
+            _ => ((other.x + other.width) - me.x).abs() < TOL && (other.y - me.y).abs() < TOL,
+        };
+        touches.then_some(style)
+    })
 }
 
 impl Layout {
@@ -577,7 +616,7 @@ impl Layout {
     pub fn decor_seeds(&self, styles: &StyledDom) -> Vec<DecorSeed> {
         Metric::DecorRebuilds.count();
         let mut out = Vec::new();
-        for block in &self.blocks {
+        for (index, block) in self.blocks.iter().enumerate() {
             if !block.border_box || block.width <= 0.0 || block.height <= 0.0 {
                 continue;
             }
@@ -585,12 +624,37 @@ impl Layout {
                 continue;
             };
             // `drawn()` 已经把「有 width 但 style 是 none」那种不存在的边折成 0。
-            let drawn = [
+            let mut drawn = [
                 style.border[0].drawn(),
                 style.border[1].drawn(),
                 style.border[2].drawn(),
                 style.border[3].drawn(),
             ];
+            // 合并边框（`border-collapse: collapse`）：同一张塌陷表里相邻两格的公共边
+            // 只画一条 —— 逐边与邻格**对面那一侧**比一次，赢的留、输的抹。
+            // 几何不动：格子仍并排，那条线落在赢的那一格的边内侧（半个像素的偏移，
+            // 肉眼分不出）。判据与优先级在 [`super::table::collapse_side_wins`]。
+            if style.border_collapse && style.display == Display::TableCell {
+                const OPPOSITE: [usize; 4] = [2, 3, 0, 1];
+                // 打平算谁赢：右/下那一侧站着的人赢（CSS 里颜色取靠左 / 靠上的那格）。
+                const I_WIN_TIES: [bool; 4] = [false, true, true, false];
+                for side in 0..4 {
+                    if drawn[side] <= 0.0 {
+                        continue;
+                    }
+                    let Some(other) = neighbour_cell(&self.blocks, styles, index, side) else {
+                        continue;
+                    };
+                    let theirs = (
+                        other.border[OPPOSITE[side]].drawn(),
+                        other.border[OPPOSITE[side]].style,
+                    );
+                    let mine = (drawn[side], style.border[side].style);
+                    if !super::table::collapse_side_wins(mine, theirs, I_WIN_TIES[side]) {
+                        drawn[side] = 0.0;
+                    }
+                }
+            }
             let pictures: Vec<DecorPicture> = style
                 .background_pictures()
                 .map(|layer| DecorPicture {
@@ -612,6 +676,7 @@ impl Layout {
                 width: block.width,
                 height: block.height,
                 background: style.background_color,
+                radius: style.corner_radii(block.width, block.height),
                 border: [
                     (
                         drawn[0],

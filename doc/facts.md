@@ -52,9 +52,19 @@
 
 - Markdown 适配器按 `#`/`##` 分章：以标题开头的语料 chapter 0 只有标题，看起来像
   「正文没渲染」，不是 bug。测试语料把正文段落放在第一个标题之前。
-- CSS 子集是合同：`crates/folio-core/src/css/computed.rs` 顶部清单之外的一律忽略并记录，
-  不许临时加特例进引擎核心；要扩清单，先改清单（代码里那份）再写实现。
+- CSS 子集是合同：支持面 = `content/format/css/computed/apply.rs` 那条属性分发 match 收的
+  `(属性, 值)` 组合，加上 `content/format/css/computed.rs` 的 `KNOWN_UNIMPLEMENTED`
+  （认得、一期不生效）。清单之外的一律忽略并记录，不许临时加特例进引擎核心；要扩清单，
+  先改代码里那两处再写实现。逐条现状与实测数在 [css-没接住.md](css-没接住.md)。
+  （从前这里写的 `crates/folio-core/src/css/computed.rs` 与「顶部那份清单」都不存在 —— 2026-10-20
+  与 2026-10-29 两次核对确认，路径搬过、那份清单从来没有过。）
+- **`DeclStatus::Applied` 只说明「值存进了 `ComputedStyle`」，不说明排版层或绘制层读过它。**
+  2026-10-29 在**值**这一层抓到两条这样的假接住（`break-before/after: avoid` 与
+  `display: inline-block`：枚举变体除了解析器无处引用）。加一条值的判据：在
+  `crates/folio-core/src/layout/` 里搜得到那个变体被读。搜不到就判 `Unparsed`，
+  别在 `apply` 里返回 `true` —— 那等于把「没做」记成「做了」，落差表会说谎而屏幕上看不出异常。
 - `css-gap` example 的落差表口径：按元素排名的声明覆盖率，不含未实现属性的**几何**影响；
+  规则命中 0 个元素就不进表（哈利·波特那 8 条 `th` / `td` 规则是死样式，全书 0 个表格元素）。
   结论只用于排优先级，不是渲染保证。
 
 ## 支撑「自研排版」的三条实测结论

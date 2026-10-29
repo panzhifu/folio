@@ -20,7 +20,7 @@ use folio_core::content::anchor::{CharLines, TextMap};
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::dom::{Dom, NodeId};
 use folio_core::content::format::css::computed::{
-    Color, ComputedStyle, Length, StyledDom, TextAlign, WritingMode, cascade,
+    Color, ComputedStyle, Length, StyledDom, TextAlign, TextShadow, WritingMode, cascade,
 };
 use folio_core::content::format::css::{Origin, PageMargins, RuleSet, chapter_style_rules};
 use folio_core::content::hit::{Hit, paragraph_after_indexed, paragraph_range_indexed};
@@ -330,6 +330,9 @@ pub struct RowUnit {
     pub box_height: f32,
     pub underline: bool,
     pub line_through: bool,
+    /// `text-shadow` 与 `letter-spacing` 一样，是**逐 run** 的：CSS 里它可继承，
+    /// 所以通常在块上写一次，但一条子元素的声明要能盖掉它。绘制层拿它画偏移副本。
+    pub text_shadows: Arc<[TextShadow]>,
     /// CSS 声明的文字色。`None` = 书里没写，每帧落到主题前景。
     pub color: Option<Color>,
     /// 这一段在不在一条 `<a href>` 里（`ComputedStyle::link`）。`color` 为 `None` 时绘制层
@@ -952,6 +955,7 @@ impl Document {
                             box_height: run.style.box_height(),
                             underline: run.style.underline,
                             line_through: run.style.line_through,
+                            text_shadows: run.style.text_shadows.clone(),
                             color: run.style.color,
                             link: run.style.link,
                             letter_spacing: run.style.letter_spacing,
@@ -991,6 +995,7 @@ impl Document {
                             box_height: marker.style.box_height(),
                             underline: false,
                             line_through: false,
+                            text_shadows: marker.style.text_shadows.clone(),
                             color: marker.style.color,
                             // 列表标记不是链接的一部分：`<li><a>…` 里那个点/数字不该跟着染蓝。
                             link: false,

@@ -38,6 +38,7 @@ mod geometry;
 mod key;
 mod marker;
 mod ports;
+mod table;
 mod wrap;
 
 use self::cache::subtree_style_hash;
@@ -122,6 +123,7 @@ fn layout_inner(
         cache,
         style_hash: hashes.as_deref(),
         floats: Vec::new(),
+        absolute: Vec::new(),
     };
     let style = ctx.style_of(root);
     // 根的包含块就是视口（`options.width`）：根上那族百分比按它折，再往里每一层
@@ -173,6 +175,11 @@ fn layout_inner(
     // 明确不支持 —— 那样切片、进度、命中都得按块各问一次轴，而分片器只会切一根轴。
     // `allow_vertical` 是界面那一侧的门（竖排现在只在分页那一档落地），判据与理由
     // 写在 [`LayoutOptions::allow_vertical`]。
+    // 绝对定位的盒在**这一章的高定下来之后**才摆：`top` / `bottom` 的百分比基准是包含块高。
+    // 它们不撑高（`height` 已经在上面收口），所以放在这一步不影响分页。
+    if !options.light {
+        ctx.place_absolutes(options.width, height);
+    }
     let flow = if options.allow_vertical {
         style.writing_mode
     } else {

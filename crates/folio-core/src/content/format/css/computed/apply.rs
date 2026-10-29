@@ -5,18 +5,18 @@
 
 use super::{
     BackgroundLayer, BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
-    BorderEdge, BorderStyle, BoxSizing, Color, ComputedStyle, Direction, Display, Hyphens,
-    KNOWN_UNIMPLEMENTED, TextAlign, TextJustify,
+    BorderEdge, BorderStyle, BoxSizing, CellVAlign, Color, ComputedStyle, Direction, Display,
+    Hyphens, KNOWN_UNIMPLEMENTED, Positioning, TextAlign, TextJustify, WordBreak,
 };
 use crate::content::format::css::Declaration;
 use crate::content::format::css::value::{
     BorderElement, border_target, border_width_px, box_side_px, box_sides, four_of,
     parse_background_image_layer, parse_background_position, parse_background_repeat,
-    parse_background_size, parse_baseline_shift, parse_border_style, parse_break_when, parse_clear,
-    parse_color, parse_count, parse_decoration, parse_float, parse_font_family_list,
-    parse_font_size, parse_font_weight, parse_line_height, parse_list_style, parse_url_token,
-    parse_writing_mode, relative_weight, set_edge, set_length, set_margin, set_min_length, set_px,
-    split_value_tokens,
+    parse_background_size, parse_baseline_shift, parse_border_radius, parse_border_style,
+    parse_break_when, parse_clear, parse_color, parse_count, parse_decoration, parse_float,
+    parse_font_family_list, parse_font_size, parse_font_weight, parse_line_height,
+    parse_list_style, parse_text_shadow, parse_url_token, parse_writing_mode, relative_weight,
+    set_edge, set_length, set_margin, set_min_length, set_px, split_value_tokens,
 };
 
 /// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
@@ -31,14 +31,19 @@ pub(super) fn apply_in_cascade_order(
     decls: &[&Declaration],
 ) -> usize {
     let mut ignored = 0usize;
-    for group in 0..3 {
+    // 四批：font-size → line-height → `color` → 其余。
+    // `color` 单独一批是因为 `currentColor` 要拿它：`background-color: currentcolor` 写在
+    // `color` **前面**也得折对 —— 照书写顺序的话，先算的两句拿到的是上一轮的色。
+    for group in 0..4 {
         for decl in decls {
             let is_font_size = decl.property == "font-size";
             let is_line_height = decl.property == "line-height";
+            let is_color = decl.property == "color";
             let mine = match group {
                 0 => is_font_size,
                 1 => is_line_height,
-                _ => !is_font_size && !is_line_height,
+                2 => is_color,
+                _ => !is_font_size && !is_line_height && !is_color,
             };
             if mine && !apply(style, parent, root_px, decl) {
                 ignored += 1;
@@ -102,6 +107,16 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         word_spacing: parent.word_spacing,
         // 字距在 CSS 里可继承（`letter-spacing` 是 inheritable），书里常在 `<body>` 上写一次。
         letter_spacing: parent.letter_spacing,
+        // `word-break` 在 CSS 里可继承：书里在 `<body>` 上写一次就管全书。
+        word_break: parent.word_break,
+        // `border-collapse` 在 CSS 里可继承：写在 `<table>` 上就管到每个格子，
+        // 而合并要**按格**逐边判（见 `Layout::decor_seeds`），所以它得跟着继承下来。
+        border_collapse: parent.border_collapse,
+        // `border-spacing` 同样可继承（CSS 2.1 §17.6.1），且只在 `separate` 下生效。
+        border_spacing: parent.border_spacing,
+        // `text-shadow` 在 CSS 里可继承，书里一般在 `<body>` 或标题规则上写一次就管一片。
+        // 克隆的是一份 `Arc<[TextShadow]>`：没有影子的节点只加一次引用计数。
+        text_shadows: parent.text_shadows.clone(),
         // `list-style-type` 在 CSS 2.1 里可继承，`<ol>` 的十进制就是靠这一行才落到
         // 每一个 `<li>` 上的（浏览器 UA 表写的是 `ol { list-style-type: decimal }`）。
         list_style_type: parent.list_style_type,
@@ -551,7 +566,14 @@ pub(super) fn apply(
             }
             _ => false,
         },
-        "text-indent" => set_edge(value, own, root_px, &mut style.text_indent),
+        // `duokan-text-indent` 是多看转换器写在我们标准属性**旁边**的那一份副本：
+        // 《哈利·波特》全书 21 个规则块里它都与同一条规则的标准 `text-indent` 成对出现
+        // （20 块同值，1 块 `2em` vs `1em`）。收它不是为了新行为，是为了让
+        // `examples/css-gap` 不再把这 5,149 个元素报成落差 —— 那 91% 的「10.9%」本来
+        // 就是同一个数的两遍。与已经收下的 `-webkit-hyphens` / `-epub-*` 同类。
+        "text-indent" | "duokan-text-indent" => {
+            set_edge(value, own, root_px, &mut style.text_indent)
+        }
         // 词距：CSS 初值 `normal` 折成 0，其余按长度。它可继承（`inherit_from` 里带着）。
         "word-spacing" => {
             if value.eq_ignore_ascii_case("normal") {
@@ -589,12 +611,33 @@ pub(super) fn apply(
                 _ => false,
             }
         }
-        "vertical-align" => match parse_baseline_shift(value, own, root_px, style.line_height) {
-            Some(px) => {
-                style.baseline_shift = px;
+        // `vertical-align` 有两副面孔：关键字是**表格格**的贴边（这一格不继承），
+        // 长度 / 百分比 / `super` / `sub` 是行内盒相对基线的位移（`baseline_shift`）。
+        "vertical-align" => match value.to_ascii_lowercase().as_str() {
+            "top" => {
+                style.cell_valign = CellVAlign::Top;
                 true
             }
-            None => false,
+            "middle" => {
+                style.cell_valign = CellVAlign::Middle;
+                true
+            }
+            "bottom" => {
+                style.cell_valign = CellVAlign::Bottom;
+                true
+            }
+            "baseline" => {
+                style.cell_valign = CellVAlign::Top;
+                style.baseline_shift = 0.0;
+                true
+            }
+            _ => match parse_baseline_shift(value, own, root_px, style.line_height) {
+                Some(px) => {
+                    style.baseline_shift = px;
+                    true
+                }
+                None => false,
+            },
         },
         "text-decoration" | "text-decoration-line" => match parse_decoration(value) {
             Some((underline, line_through)) => {
@@ -681,6 +724,12 @@ pub(super) fn apply(
         // 背景一族。`transparent` 是「有这条声明、但不画」，与「书里没写过」在层叠上
         // 是两件事（后者可能被更高 specificity 的一条颜色盖住），所以两条都要认。
         "background-color" => {
+            // `currentColor` = 本元素自己的 `color`（没写就取继承来的那份）。`color` 那一批
+            // 已经先落地，所以这里折得出数 —— 与它写在 `color` 前面还是后面无关。
+            if value.eq_ignore_ascii_case("currentcolor") {
+                style.background_color = style.color.or(parent.color);
+                return true;
+            }
             if value.eq_ignore_ascii_case("transparent") {
                 style.background_color = None;
                 return true;
@@ -742,7 +791,89 @@ pub(super) fn apply(
         //
         // **简写没写到的子属性要拉回初值**，这是 CSS 明文；为什么必须整表重置，
         // 判据写在 `apply_background_shorthand` 里面那条注释上。
+        // CSS 的 `initial`：把这一个属性的每一格拉回初值。整条走通用那条路太大
+        // （每个属性都要知道自己的初值），这里只收**简写**这一档 —— 它出现的形态就是
+        // 重置块里的一句（The Riddle 那本书 5 个元素）。
+        "background" if value.eq_ignore_ascii_case("initial") => {
+            style.background_color = None;
+            style.background_layers.clear();
+            true
+        }
         "background" => apply_background_shorthand(style, value),
+        // 影子：整表重建，颜色写 `currentcolor`（或干脆不写）时存 `None`，绘制层落本 run
+        // 的文字色。落地程度写在 [`TextShadow`] 上 —— 模糊是偏移副本近似，不是高斯。
+        "text-shadow" => match parse_text_shadow(value, own, root_px) {
+            Some(list) => {
+                style.text_shadows = std::sync::Arc::from(list);
+                true
+            }
+            None => false,
+        },
+        // `all: initial`：把**每一个**属性拉回初值（含继承来的那些）。
+        //
+        // 近似一处：`ComputedStyle::default()` 的 `display` 是 `Block`，而 CSS 的初值
+        // 是 `inline` —— 对 `li` 这类靠 UA 表拿到 `list-item` 的元素，`all: initial`
+        // 在浏览器里会把标记也一起收掉，我们退回「块」。真书里这条只出现在
+        // Project Gutenberg 的页眉页脚重置里（`#pg-footer li { all: initial; display: block; … }`），
+        // 而那条规则自己就跟了 `display: block`，差不到屏上。
+        // `link` 不是 CSS 属性（是「这段在不在 `<a>` 里」），重置时留着。
+        "all" if value.eq_ignore_ascii_case("initial") => {
+            let link = style.link;
+            *style = ComputedStyle::default();
+            style.link = link;
+            true
+        }
+        // 定位。`static` 是初值；`absolute` / `fixed` 脱流并按四个偏移摆（见 [`Positioning`]）。
+        "position" => match value.to_ascii_lowercase().as_str() {
+            "static" => {
+                style.position = Positioning::Static;
+                true
+            }
+            "absolute" => {
+                style.position = Positioning::Absolute;
+                true
+            }
+            "fixed" => {
+                style.position = Positioning::Fixed;
+                true
+            }
+            _ => false,
+        },
+        "left" => set_length(value, own, root_px, &mut style.left),
+        "right" => set_length(value, own, root_px, &mut style.right),
+        "top" => set_length(value, own, root_px, &mut style.top),
+        "bottom" => set_length(value, own, root_px, &mut style.bottom),
+        // `border-spacing`：一到两个长度（横, 纵），不收百分比（CSS 也拒）。
+        "border-spacing" if value.split_whitespace().count() > 2 => false,
+        "border-spacing" => match box_side_px(value, own, root_px) {
+            Some([h, _, v, _]) => {
+                style.border_spacing = [h, v];
+                true
+            }
+            None => false,
+        },
+        // `border-collapse` 同样要排在 `border*` 前缀分支之前（`collapse` 既不是边名、
+        // 也不是 width/style/color 三要素）。两个值都收；`separate` 就是现在的默认行为。
+        "border-collapse" => match value.to_ascii_lowercase().as_str() {
+            "collapse" => {
+                style.border_collapse = true;
+                true
+            }
+            "separate" => {
+                style.border_collapse = false;
+                true
+            }
+            _ => false,
+        },
+        // `border-radius` 必须在 `border*` 那条前缀分支**之前**：否则它会被当作
+        // 「边名 + 要素名」的两段尾巴（`radius` 不是 width/style/color）判不认识。
+        "border-radius" => match parse_border_radius(value, own, root_px) {
+            Some(corners) => {
+                style.border_radius = corners;
+                true
+            }
+            None => false,
+        },
         // 边框一族（`border` / `border-top` / `border-left-width` / `border-color` …）
         // 用一条前缀分支收：三要素 × 四边写开是二十个 match 臂，而解析规则只有一条。
         name if name.starts_with("border") => apply_border(style, name, value, own, root_px),
@@ -755,8 +886,30 @@ pub(super) fn apply(
                 style.display = Display::Inline;
                 true
             }
-            "inline-block" => {
-                style.display = Display::InlineBlock;
+            // `inline-block` 落到下面的 `_ => false`（计入 ignored），是刻意的：排版层
+            // 只分「`None` 跳过 / `Inline` 走行内 / `ListItem` 画标记 / 其余按块」这四档
+            // （`layout::collect` 的 `is_inline_flow` 与它给 `is_item` 那一个判据），所以
+            // 从前存进去的 `InlineBlock` 没有人读 —— 屏上与 `display: block` 一模一样，而
+            // `examples/css-gap` 报 `Applied`。行内块要的是 shrink-to-fit 的宽与「占一行内
+            // 位置」两件事，那一档还没做（见 `doc/css-没接住.md` 里 max-content 那条），
+            // 所以这里宁可将它报成没接住。本机四本真书 `display: inline-block` 0 处。
+            //
+            // 表格四档 2026-10-29 接上：`layout::table` 抽网格、分列宽、摆格子。
+            // `inline-table` 仍不接（要的是行内块那一套 shrink-to-fit，同上）。
+            "table" => {
+                style.display = Display::Table;
+                true
+            }
+            "table-row" => {
+                style.display = Display::TableRow;
+                true
+            }
+            "table-cell" => {
+                style.display = Display::TableCell;
+                true
+            }
+            "table-row-group" | "table-header-group" | "table-footer-group" => {
+                style.display = Display::TableRowGroup;
                 true
             }
             "list-item" => {
@@ -769,12 +922,29 @@ pub(super) fn apply(
             }
             _ => false,
         },
+        // `color: currentColor` 就是 `inherit`（自引用按继承折，CSS 明文）。
+        "color" if value.eq_ignore_ascii_case("currentcolor") => {
+            style.color = parent.color;
+            true
+        }
         "color" => match parse_color(value) {
             Some(c) => {
                 style.color = Some(c);
                 true
             }
             None => false,
+        },
+        // `word-break`：只认 `normal` 与 `break-all`。`keep-all` 判不认识（见 [`WordBreak`]）。
+        "word-break" => match value.to_ascii_lowercase().as_str() {
+            "normal" => {
+                style.word_break = WordBreak::Normal;
+                true
+            }
+            "break-all" => {
+                style.word_break = WordBreak::BreakAll;
+                true
+            }
+            _ => false,
         },
         "white-space" => match value.to_ascii_lowercase().as_str() {
             "normal" => {
@@ -813,6 +983,20 @@ pub(super) fn apply(
             }
             _ => false,
         },
+        // 这两个属性我们**本来就按初值在做**：`list-style-image: none`（标记只有文字、
+        // 没有图源）与 `list-style-position: outside`（标记挂在流动之外）正是现在画的样子。
+        // 所以这两个值判「接住了」，其余值（`url(…)`、`inside`）判不认识 —— 与
+        // `background-clip: border-box` 那一档同一条规矩：值的效果等于默认行为才算接住。
+        // 《蛇结》51 个 `li` 写的正是这两个初值，从前被记成 102 条「认得不生效」。
+        // 字体特性那两档的**初值**就是我们做的事（不启用任何特性），所以只收 `normal`，
+        // 其余值判不认识 —— 与 `list-style` 的先例同一条规矩。
+        // 《乌合之众》157 个元素写的正是 `font-variant: normal`。
+        "font-variant" | "font-variant-caps" => value.eq_ignore_ascii_case("normal"),
+        // OEB 1.x 的栏数（`columns` 的前身）。`1` 就是不分栏 —— 正是我们的行为；
+        // 其余值要的是作者块级多栏，还没接。《西游记》2 个元素写的 `oeb-column-number: 1`。
+        "oeb-column-number" => value.trim() == "1",
+        "list-style-image" => value.eq_ignore_ascii_case("none"),
+        "list-style-position" => value.eq_ignore_ascii_case("outside"),
         "list-style-type" => match parse_list_style(value) {
             Some(kind) => {
                 style.list_style_type = kind;
@@ -898,7 +1082,14 @@ fn apply_border(
                     width = px;
                 } else if let Some(kind) = parse_border_style(part) {
                     line = kind;
-                } else if part.eq_ignore_ascii_case("transparent") {
+                } else if part.eq_ignore_ascii_case("transparent")
+                    || part.eq_ignore_ascii_case("currentcolor")
+                {
+                    // 两者在 `BorderEdge::color` 里是同一个记号 `None`（绘制层取这一块自己的
+                    // `color`）。`currentColor` 从前没被认，于是 `border-top: currentColor
+                    // none 0` 整条被丢掉 —— 《世界简史》5 个元素正是这么写的。
+                    // `transparent` 严格说该是「有边但不画」，这里也折进 `None`：
+                    // 边框色本来就没有 alpha 通道，画出来是实色，比丢掉整条更错。
                     color = None;
                 } else if let Some(parsed) = parse_color(part) {
                     color = Some(parsed);
@@ -945,7 +1136,9 @@ fn apply_border(
         BorderElement::Color => {
             let mut each = Vec::with_capacity(parts.len());
             for part in &parts {
-                if part.eq_ignore_ascii_case("transparent") {
+                if part.eq_ignore_ascii_case("transparent")
+                    || part.eq_ignore_ascii_case("currentcolor")
+                {
                     each.push(None);
                 } else {
                     match parse_color(part) {

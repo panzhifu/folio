@@ -38,10 +38,10 @@ use folio_core::layout::fragment::column_offset;
 use folio_core::store::{Annotation, AnnotationStyle};
 use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::StyledExt as _;
 use gpui_kit::{
     A11ySubtreeBuilder, AnyElement, App, AppContext as _, Background, Bounds, ClickEvent, Context,
-    Div, Element,
-    ElementId, Entity, EntityId, GlobalElementId, Hsla, InspectorElementId,
+    Corners, Div, Element, ElementId, Entity, EntityId, GlobalElementId, Hsla, InspectorElementId,
     InteractiveElement as _, IntoElement, LayoutId, LongPressEvent, PageCurlMesh, PageCurlUniforms,
     PageCurlVertex, ParentElement, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
     Role, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled,
@@ -3855,6 +3855,21 @@ fn background_child(
 
 /// 一块实心矩形（背景或一条边框）。
 fn fill_quad(x: f32, top: f32, width: f32, height: f32, color: Hsla) -> AnyElement {
+    fill_rounded_quad(x, top, width, height, color, [0.0; 4])
+}
+
+/// 同 [`fill_quad`]，多给四个圆角半径（`[左上, 右上, 右下, 左下]`，px）。
+///
+/// 圆角走 gpui 自己那条通道（`corner_radii`），不是自己拼路径：四边形是唯一轴对齐的图元，
+/// 而 `paint_quad` 的圆角与它同一份几何，自己拼一条圆角路径只会多一套对不齐的边。
+fn fill_rounded_quad(
+    x: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    color: Hsla,
+    radius: [f32; 4],
+) -> AnyElement {
     div()
         .absolute()
         .left(px(x))
@@ -3862,6 +3877,12 @@ fn fill_quad(x: f32, top: f32, width: f32, height: f32, color: Hsla) -> AnyEleme
         .w(px(width))
         .h(px(height))
         .bg(color)
+        .corner_radii(Corners {
+            top_left: px(radius[0]),
+            top_right: px(radius[1]),
+            bottom_right: px(radius[2]),
+            bottom_left: px(radius[3]),
+        })
         .into_any_element()
 }
 
@@ -3881,12 +3902,13 @@ fn decoration_child(
 ) -> Vec<AnyElement> {
     let mut parts = Vec::new();
     if let Some(background) = decor.background {
-        parts.push(fill_quad(
+        parts.push(fill_rounded_quad(
             decor.x,
             decor.top,
             decor.width,
             decor.height,
             background,
+            decor.radius,
         ));
     }
     for picture in decor.pictures.iter().rev() {
@@ -3907,7 +3929,7 @@ fn decoration_child(
             top.0,
             top.1,
             top.2,
-            true,
+            0,
         );
     }
     if bottom.0 > 0.0 {
@@ -3919,7 +3941,7 @@ fn decoration_child(
             bottom.0,
             bottom.1,
             bottom.2,
-            true,
+            2,
         );
     }
     if left.0 > 0.0 {
@@ -3931,7 +3953,7 @@ fn decoration_child(
             decor.height,
             left.1,
             left.2,
-            false,
+            3,
         );
     }
     if right.0 > 0.0 {
@@ -3943,17 +3965,78 @@ fn decoration_child(
             decor.height,
             right.1,
             right.2,
-            false,
+            1,
         );
     }
     parts
 }
 
-/// 把一条边框条推进 `parts`。
+/// 沿一条边框带子的长边切出「实、空、实…」，返回每段的 `(起点, 长度)`。
 ///
-/// `solid` 就是整段一块；`double` 按 CSS 的口径三段等分 —— 外线 1/3、缝 1/3、内线 1/3，
-/// 于是 3px 的双线画成两条 1px 细线。`split_y` 说明沿**纵**向拆（上/下边，条是横的）；
-/// 为假则沿**横**向拆（左/右边，条是竖的）。
+/// **不平分**：从起点按 `dash + gap` 一路铺，最后一段按剩余长度截短 —— CSS 的虚线本来
+/// 就是从一端铺到另一端、尾巴可能是半段，浏览器同样这么做。`dash` 非正或 `gap` 为负时
+/// 给空表，防止调用方给一个除零的线宽时把这一帧卡在这条循环里。
+fn dash_spans(length: f32, dash: f32, gap: f32) -> Vec<(f32, f32)> {
+    // 三个数都得是有限正数（`gap` 可以是 0，那是实线）：NaN 落进下面这条 `while`
+    // 会一直为真，所以先一次判完再进循环。
+    let usable = length > 0.0 && dash > 0.0 && gap >= 0.0 && length.is_finite();
+    if !usable {
+        return Vec::new();
+    }
+    let mut spans = Vec::new();
+    let mut at = 0.0f32;
+    while at < length {
+        let len = dash.min(length - at);
+        spans.push((at, len));
+        at += dash + gap;
+    }
+    spans
+}
+
+/// 3D 边框的亮/暗两档：从作者的边框色派生。
+///
+/// 浏览器在 HSL 空间里调明度；这里同一条思路，但两档都写成**朝目标补**而不是加减常数 ——
+/// 加减会把纯黑压成纯黑（亮档看不见）、把纯白顶成纯白。纯黑因此只能变亮、纯白只能变暗，
+/// 与浏览器观察到的行为一致。
+fn three_d_tone(color: Hsla, light: bool) -> Hsla {
+    let l = if light {
+        color.l + (1.0 - color.l) * 0.35
+    } else {
+        color.l * 0.7
+    };
+    Hsla { l, ..color }
+}
+
+/// 把一条边框带子沿**厚度**方向切成外、内两半 → `(外, 内)` 两个盒子。
+///
+/// 「外」= 离盒子外缘更近的那一半：上边与左边是前一半，下边与右边是后一半。
+fn split_outer_inner(x: f32, y: f32, width: f32, height: f32, side: usize) -> ([f32; 4], [f32; 4]) {
+    match side {
+        0 => (
+            [x, y, width, height / 2.0],
+            [x, y + height / 2.0, width, height / 2.0],
+        ),
+        2 => (
+            [x, y + height / 2.0, width, height / 2.0],
+            [x, y, width, height / 2.0],
+        ),
+        1 => (
+            [x + width / 2.0, y, width / 2.0, height],
+            [x, y, width / 2.0, height],
+        ),
+        _ => (
+            [x, y, width / 2.0, height],
+            [x + width / 2.0, y, width / 2.0, height],
+        ),
+    }
+}
+
+/// 一条边框带子。`side` 是 `[上, 右, 下, 左]` 的下标 —— 3D 那四档要靠它分「哪条边暗」，
+/// `dotted` / `dashed` 靠它分切段方向。
+///
+/// 各档画法：`solid` 一整条；`dotted` / `dashed` 按 [`dash_spans`] 切段；`double` 三段等分
+/// （外线 1/3、缝 1/3、内线 1/3）；`inset` / `outset` 上/左与下/右各一档明暗；
+/// `groove` / `ridge` 每条边再拆成外、内两半。
 #[allow(clippy::too_many_arguments)]
 fn push_border(
     parts: &mut Vec<AnyElement>,
@@ -3963,8 +4046,57 @@ fn push_border(
     height: f32,
     color: Hsla,
     style: BorderStyle,
-    split_y: bool,
+    side: usize,
 ) {
+    // 上/下边是横带子（沿纵向拆厚度），左/右边是竖带子。
+    let split_y = matches!(side, 0 | 2);
+    match style {
+        BorderStyle::Inset | BorderStyle::Outset => {
+            // `inset`：上/左暗、下/右亮；`outset` 相反。
+            let dark = (style == BorderStyle::Inset) == matches!(side, 0 | 3);
+            parts.push(fill_quad(x, y, width, height, three_d_tone(color, !dark)));
+            return;
+        }
+        BorderStyle::Groove | BorderStyle::Ridge => {
+            // `groove` 外暗内亮；`ridge` 相反。
+            let outer_light = style == BorderStyle::Ridge;
+            let (outer, inner) = split_outer_inner(x, y, width, height, side);
+            for (rect, light) in [(outer, outer_light), (inner, !outer_light)] {
+                parts.push(fill_quad(
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    three_d_tone(color, light),
+                ));
+            }
+            return;
+        }
+        _ => {}
+    }
+    if matches!(style, BorderStyle::Dotted | BorderStyle::Dashed) {
+        // 带子的**长边**按段切开：`dotted` 方点边长 = 线宽、隙 = 线宽；
+        // `dashed` 段 = 3×线宽、隙 = 3×线宽（浏览器那套比例，CSS 本身没规定）。
+        // 点是方的不是圆的：绘制原语只有轴对齐四边形，1px 的点在屏上分不出圆方。
+        let (long, thickness) = if split_y {
+            (width, height)
+        } else {
+            (height, width)
+        };
+        let (dash, gap) = if style == BorderStyle::Dotted {
+            (thickness, thickness)
+        } else {
+            (thickness * 3.0, thickness * 3.0)
+        };
+        for (at, len) in dash_spans(long, dash, gap) {
+            parts.push(if split_y {
+                fill_quad(x + at, y, len, thickness, color)
+            } else {
+                fill_quad(x, y + at, thickness, len, color)
+            });
+        }
+        return;
+    }
     if style != BorderStyle::Double {
         parts.push(fill_quad(x, y, width, height, color));
         return;
@@ -3988,7 +4120,7 @@ mod tests;
 /// 按仓库约定内联在被测文件底下 —— 不占宿主套件里一个带窗测试的名额。
 #[cfg(test)]
 mod truth_tables {
-    use super::{capture_wanted, column_cut};
+    use super::{capture_wanted, column_cut, dash_spans, three_d_tone};
     use crate::ui::features::reader::motion::turn_animation::{Crease, Cut, Sheet};
 
     /// 折页那一趟里**每一栏该按哪条折线裁**，包括 GPU 网格开着的那些帧。
@@ -4051,5 +4183,70 @@ mod truth_tables {
                 );
             }
         }
+    }
+
+    /// 虚线/点线边框的切段：从一端铺到另一端，尾巴**截短**而不是留空或平分。
+    ///
+    /// 平分（把余量摊到每一段）会让一条 1px 的虚线在两端各差半个像素；留空则最后
+    /// 一段消失。CSS 与浏览器都是「铺到铺不下为止」，这里钉住同一件事。
+    #[test]
+    fn dash_spans_run_from_one_end_and_cut_the_tail() {
+        // 30px 长、段 3、隙 3 → 起点 0/6/12/18/24，最后一段 24..27 后面只剩 3px 的隙。
+        let spans = dash_spans(30.0, 3.0, 3.0);
+        assert_eq!(
+            spans,
+            vec![
+                (0.0, 3.0),
+                (6.0, 3.0),
+                (12.0, 3.0),
+                (18.0, 3.0),
+                (24.0, 3.0)
+            ]
+        );
+        // 尾巴不够一段：8px、段 3、隙 3 → 第二段从 6 起只剩 2px，照样画。
+        assert_eq!(
+            dash_spans(8.0, 3.0, 3.0),
+            vec![(0.0, 3.0), (6.0, 2.0)],
+            "最后一段按剩余长度截短，不是整段丢掉"
+        );
+        // 尾巴只剩隙：10px 时第五段要 12 才起头，铺到这里就停 —— 尾部留 1px 的空。
+        assert_eq!(dash_spans(10.0, 3.0, 3.0), vec![(0.0, 3.0), (6.0, 3.0)]);
+        // 点线：段 = 隙 = 线宽（1px 的线就是 1px 实、1px 空）。
+        assert_eq!(dash_spans(4.0, 1.0, 1.0), vec![(0.0, 1.0), (2.0, 1.0)]);
+        // 退化输入给空表，不许死在循环里。
+        assert!(dash_spans(0.0, 3.0, 3.0).is_empty());
+        assert!(dash_spans(10.0, 0.0, 3.0).is_empty());
+        assert!(dash_spans(10.0, 3.0, -1.0).is_empty());
+    }
+
+    /// 3D 边框的两档明暗：亮档比原色亮、暗档比原色暗，纯黑纯白也各能推出一档。
+    ///
+    /// 用「朝目标补」而不是加减常数，就是为了纯黑 / 纯白这两头：加减会把纯黑压成纯黑，
+    /// 亮档就看不见了。
+    #[test]
+    fn three_d_tones_always_move_away_from_the_extremes() {
+        let mid = gpui_kit::Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.5,
+            a: 1.0,
+        };
+        assert!(three_d_tone(mid, true).l > mid.l, "亮档要亮");
+        assert!(three_d_tone(mid, false).l < mid.l, "暗档要暗");
+        let black = gpui_kit::Hsla { l: 0.0, ..mid };
+        assert!(
+            three_d_tone(black, true).l > 0.05,
+            "纯黑的亮档也得看得见：{}",
+            three_d_tone(black, true).l
+        );
+        assert_eq!(three_d_tone(black, false).l, 0.0, "纯黑没有更暗可去");
+        let white = gpui_kit::Hsla { l: 1.0, ..mid };
+        assert!(
+            three_d_tone(white, false).l < 0.95,
+            "纯白的暗档也得看得见：{}",
+            three_d_tone(white, false).l
+        );
+        assert_eq!(three_d_tone(white, true).l, 1.0, "纯白没有更亮可去");
+        assert_eq!(three_d_tone(mid, true).a, mid.a, "明暗只动明度，透明度原样");
     }
 }

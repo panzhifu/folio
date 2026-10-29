@@ -207,8 +207,26 @@ impl RuleSet {
             if let Some(at) = prelude.strip_prefix('@') {
                 let name = at.split_whitespace().next().unwrap_or("");
                 match name.to_ascii_lowercase().as_str() {
-                    // 一期不分屏幕/打印媒体查询，一律当普通规则收进来。
-                    "media" | "supports" => self.consume(body, origin),
+                    // `@media`：**只认「这条查询说的是不是纸」那一件事**。
+                    // `print` 独有的块整块丢掉 —— 那是给纸质排版的页眉页脚与分页，
+                    // 收进来就是错；含 `screen` 或 `all`、以及条件写不清的
+                    // （`(min-width: 800px)` 这类，我们的版心由读者设，判不了）照收。
+                    "media" => {
+                        let prelude = prelude.trim_start_matches('@').to_ascii_lowercase();
+                        let query = prelude.strip_prefix("media").unwrap_or("");
+                        let print_only = query.contains("print")
+                            && !query.contains("screen")
+                            && !query.contains("all");
+                        if print_only {
+                            // 丢掉一个块不算「一条声明没接住」，但也不是没看见 ——
+                            // 计一条，让 `css-gap` 的 ignored 说出这本书里有打印样式。
+                            self.ignored += 1;
+                        } else {
+                            self.consume(body, origin);
+                        }
+                    }
+                    // `@supports`：判不了特性支持，照旧把内容收进来（本机语料 0 处）。
+                    "supports" => self.consume(body, origin),
                     // @font-face 不属于任何元素，但**要留下来**：它是「这本书带了自己的字体」
                     // 的唯一线索，落到 ignored 就等于对着一份 30MB 的内嵌字体装看不见。
                     "font-face" => {

@@ -228,6 +228,38 @@ fn page_break_aliases_are_the_same_intent() {
     assert!(legacy.1[0].forced, "`page-break-after` 也该标成强制断点");
 }
 
+/// `break-after: always` 与 `page` 是同一档强制断 —— CSS 里两者的差别只在分页媒介
+/// （`always` 在连续媒介上也断），而我们只有「页」这一种媒介，所以同解。
+/// 这个值从前一次没写进测试：`is_forced` 那条 `matches!` 少列它，屏上就少一次断页，
+/// 而落差表什么也不会说（它已被判成接住了）。
+#[test]
+fn always_is_the_same_forced_break_as_page() {
+    let html = format!("<p class=stop>{}</p><p>{}</p>", cjk(10), cjk(10));
+    let always = paginated(html.as_str(), ".stop { break-after: always; }", 200.0, 60.0);
+    let page = paginated(html.as_str(), ".stop { break-after: page; }", 200.0, 60.0);
+    assert_eq!(
+        ranges(&always.1),
+        ranges(&page.1),
+        "`always` 与 `page` 同档"
+    );
+    assert!(
+        always.1[0].forced,
+        "`always` 是作者要的断点，不是塞满了才断"
+    );
+    let before = paginated(
+        html.as_str(),
+        ".stop { break-before: always; }",
+        200.0,
+        60.0,
+    );
+    let before_page = paginated(html.as_str(), ".stop { break-before: page; }", 200.0, 60.0);
+    assert_eq!(
+        ranges(&before.1),
+        ranges(&before_page.1),
+        "写在前面那一侧也一样"
+    );
+}
+
 #[test]
 fn break_inside_avoid_moves_the_whole_block_down() {
     let html = format!("<p>{}</p><p class=keep>{}</p>", cjk(10), cjk(24));

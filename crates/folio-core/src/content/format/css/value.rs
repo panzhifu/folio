@@ -16,7 +16,8 @@
 
 use super::computed::{
     BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundRepeat, BackgroundSize,
-    BackgroundTile, BorderStyle, BreakWhen, Clear, Color, Float, Length, ListStyle, WritingMode,
+    BackgroundTile, BorderStyle, BreakWhen, Clear, Color, Float, Length, ListStyle, TextShadow,
+    WritingMode,
 };
 
 /// `list-style-type` 的关键字表。认不出的关键字返回 `None`（计进 ignored），
@@ -70,10 +71,21 @@ pub(super) fn parse_clear(value: &str) -> Option<Clear> {
 ///
 /// `recto` / `verso` / `avoid-column` 这些变体一期不认：按不支持计数，而不是悄悄
 /// 当成 `auto` —— 后者会让作者写的意图静默消失，比不认识更难查。
+///
+/// `avoid` 也从这一条表里划掉，理由与上面几条不同，值得单独记：它从前被解成
+/// [`BreakWhen`] 的一个变体存进 `ComputedStyle`，于是 `examples/css-gap` 报 `Applied`
+/// （「这条接住了」），而排版层从来没有一处读它 —— `BreakWhen::is_forced` 明写
+/// 「`Avoid` 不是强制断」，`layout::fragment` 除了 `is_forced` 与 `parity` 没有第三个
+/// 消费者。那是把「没做」记成「做了」，与 `background-attachment` 留在
+/// `KNOWN_UNIMPLEMENTED` 而不是在 `apply` 里返回 `true` 同一个理由。
+/// 本机四本书（哈利·波特 294607 条、斗战狂潮 708826 条、蛇结 4963 条、合成书 31 条）
+/// 里 `break-before: avoid` 与 `break-after: avoid` 各 **0 处**，所以这一改动不会
+/// 让任何一本真书的落差数变坏；它只让那张表说实话。
+/// 注意 `break-inside: avoid` 是**另一条路**，它落在 `ComputedStyle::break_inside_avoid`
+/// 那个布尔上并真被分片器读，不受这里影响。
 pub(super) fn parse_break_when(value: &str) -> Option<BreakWhen> {
     match value.to_ascii_lowercase().as_str() {
         "auto" => Some(BreakWhen::Auto),
-        "avoid" => Some(BreakWhen::Avoid),
         "page" => Some(BreakWhen::Page),
         "left" => Some(BreakWhen::Left),
         "right" => Some(BreakWhen::Right),
@@ -385,12 +397,115 @@ pub(super) fn four_of<T: Copy>(values: &[T]) -> Option<[T; 4]> {
     Some([top, right, bottom, left])
 }
 
+/// `border-radius` 简写：1–4 个长度/百分比，展开后的四个格子按 **CSS 的角序**
+/// `[左上, 右上, 右下, 左下]` 解释。
+///
+/// 展开规则与 `padding` 共用 [`box_sides`]（1 值四角同、2 值对角同、3 值左下随右上、
+/// 4 值逐角），所以这里只补这一族自己的两条限制：
+/// - **负值整条作废**（CSS 里半径不许为负）；
+/// - **椭圆的斜杠写法整条作废**（`border-radius: 10px / 20px` 要给每个角存横纵两套半径，
+///   而 `[Length; 4]` 只有一套 —— 半接不接比不接更难查。本机四本语料 0 处）。
+///
+/// 四个长手（`border-top-left-radius` 等）暂时不收：它们会落进 `apply` 的 `border*`
+/// 前缀分支，`border_target` 认出三段尾巴就判不认识。
+pub(super) fn parse_border_radius(
+    value: &str,
+    font_size: f32,
+    root_font_size: f32,
+) -> Option<[Length; 4]> {
+    let corners = box_sides(value, font_size, root_font_size, false)?;
+    for corner in &corners {
+        match corner {
+            Length::Px(v) if *v < 0.0 => return None,
+            Length::Percent(p) if *p < 0.0 => return None,
+            Length::Auto => return None,
+            _ => {}
+        }
+    }
+    Some(corners)
+}
+
+/// `text-shadow`：逗号分隔的图层，每层 `<偏移x> <偏移y> [模糊半径] [颜色]`。
+///
+/// 颜色按 CSS 可以写在长度前后任意位置，所以这里不按位置切，而是逐 token 认：
+/// 能解成颜色就归颜色，否则当长度。两条边界：
+/// - `none` 给出**空表**（与「这条没写」在层叠上是两件事：前者要清掉继承来的影子）；
+/// - `currentcolor` 存成 `None`，绘制层落本 run 的文字色 —— 那正是 CSS 的语义，
+///   不需要一个哨兵值。
+///
+/// 模糊半径不许为负；`transparent` 这一档暂不收（[`Color`] 没有 alpha 通道，
+/// 存成不透明黑会把影子画成一块实心，比承认没接更难查）。
+pub(super) fn parse_text_shadow(
+    value: &str,
+    font_size: f32,
+    root_font_size: f32,
+) -> Option<Vec<TextShadow>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    let layers = crate::content::format::css::selector::split_top_level(value, ',');
+    if layers.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(layers.len());
+    for layer in layers {
+        let mut lengths: Vec<f32> = Vec::new();
+        let mut color = None;
+        let mut saw_color = false;
+        let tokens = split_value_tokens(layer.trim());
+        if tokens.is_empty() {
+            return None;
+        }
+        for token in tokens {
+            if token.eq_ignore_ascii_case("currentcolor") {
+                if saw_color {
+                    return None;
+                }
+                saw_color = true;
+                color = None;
+                continue;
+            }
+            if let Some(rgba) = parse_color(&token) {
+                if saw_color {
+                    return None;
+                }
+                saw_color = true;
+                color = Some(rgba);
+                continue;
+            }
+            lengths.push(length_px(&token, font_size, root_font_size)?);
+        }
+        if lengths.len() < 2 || lengths.len() > 3 {
+            return None;
+        }
+        let blur = lengths.get(2).copied().unwrap_or(0.0);
+        if blur < 0.0 {
+            return None;
+        }
+        out.push(TextShadow {
+            dx: lengths[0],
+            dy: lengths[1],
+            blur,
+            color,
+        });
+    }
+    Some(out)
+}
+
 /// `border-style` 的取值。见 [`BorderStyle`]：只认四种，其余按没接住计数。
+/// `border-style` 的取值。见 [`BorderStyle`]：只认六档，其余按没接住计数。
 pub(super) fn parse_border_style(value: &str) -> Option<BorderStyle> {
     match value.to_ascii_lowercase().as_str() {
         "none" | "hidden" => Some(BorderStyle::None),
         "solid" => Some(BorderStyle::Solid),
         "double" => Some(BorderStyle::Double),
+        "dotted" => Some(BorderStyle::Dotted),
+        "dashed" => Some(BorderStyle::Dashed),
+        "inset" => Some(BorderStyle::Inset),
+        "outset" => Some(BorderStyle::Outset),
+        "groove" => Some(BorderStyle::Groove),
+        "ridge" => Some(BorderStyle::Ridge),
         _ => None,
     }
 }
@@ -538,8 +653,10 @@ pub(super) fn length_px(value: &str, font_size: f32, root_font_size: f32) -> Opt
         return None;
     }
     // `rem` 必须排在 `em` 前面，否则 `1rem` 会被当成 `1r` + `em` 的后缀。
+    // `ex` 排在 `em` 前面同理（`1ex` 不能被当成 `1` + `x`）。`ch` / `q` 还不收（语料 0 处）。
     let (number, unit) = [
         ("rem", "rem"),
+        ("ex", "ex"),
         ("px", "px"),
         ("pt", "pt"),
         ("pc", "pc"),
@@ -561,6 +678,9 @@ pub(super) fn length_px(value: &str, font_size: f32, root_font_size: f32) -> Opt
         "mm" => n * 96.0 / 25.4,
         "em" => n * font_size,
         "rem" => n * root_font_size,
+        // `ex` 是当前字体的 x-height。拿不到真度量，按 `0.5em` 近似 —— 这也是
+        // 多数无衬线体的实测值（The Riddle 那本书用 `padding-left: 7.5ex` 缩进诗行）。
+        "ex" => n * font_size * 0.5,
         _ => return None,
     })
 }

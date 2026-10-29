@@ -6,8 +6,9 @@
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{
     BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundSize, BackgroundTile, BorderEdge,
-    BorderStyle, Color, ComputedStyle, DeclStatus, Direction, Display, Float, Hyphens, Length,
-    ListStyle, StyledDom, TextAlign, TextJustify, WritingMode, cascade, declaration_status,
+    BorderStyle, BoxSizing, BreakWhen, Clear, Color, ComputedStyle, DeclStatus, Direction, Display,
+    Float, Hyphens, Length, ListStyle, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode,
+    cascade, declaration_status,
 };
 use crate::content::format::css::{Declaration, Origin, RuleSet};
 
@@ -803,33 +804,68 @@ fn text_justify_is_recognized_and_inherited() {
     assert_eq!(p.text_justify, TextJustify::InterCharacter);
 }
 
-/// 定位一族记「认得，不生效」而不是「不认识」：不做绝对定位是明确的取舍，
-/// 但不该让 `css-gap` 把 `position` / `left` 报成「听都没听过」。
+/// 定位一族 2026-10-29 起真生效（绝对定位按这一章的盒摆），`z-index` 仍记
+/// 「认得、不生效」—— 我们的层序是文档序，不是 z 树。
 #[test]
-fn the_position_family_reports_inert_not_unknown() {
+fn the_position_family_is_applied_except_z_index() {
     use crate::content::format::css::Declaration;
     use crate::content::format::css::computed::{DeclStatus, declaration_status};
 
+    let status = |property: &str, value: &str| {
+        declaration_status(
+            &Declaration {
+                property: property.into(),
+                value: value.into(),
+                important: false,
+            },
+            &ComputedStyle::default(),
+            16.0,
+        )
+    };
     for (property, value) in [
         ("position", "absolute"),
+        ("position", "fixed"),
+        ("position", "static"),
         ("left", "0%"),
         ("bottom", "12%"),
-        ("z-index", "3"),
     ] {
         assert_eq!(
-            declaration_status(
-                &Declaration {
-                    property: property.into(),
-                    value: value.into(),
-                    important: false,
-                },
-                &ComputedStyle::default(),
-                16.0,
-            ),
-            DeclStatus::Inert,
-            "{property} 应记「认得，不生效」"
+            status(property, value),
+            DeclStatus::Applied,
+            "`{property}: {value}` 现在真摆盒子"
         );
     }
+    assert_eq!(
+        status("position", "relative"),
+        DeclStatus::Unparsed,
+        "`relative` 要不脱流地挪已排好的子树，还没做 —— 判不认识"
+    );
+    assert_eq!(
+        status("z-index", "3"),
+        DeclStatus::Inert,
+        "层序按文档序，不是 z 树"
+    );
+}
+
+/// `currentColor` 在背景色与 `color` 上同样成立：`color` 那一批先落地，所以
+/// `background-color: currentcolor` 写在它前面也折得对。
+#[test]
+fn current_color_works_for_background_and_color_itself() {
+    let page = author(
+        "<div><p class=a>甲</p><p class=b>乙</p></div>",
+        "div { color: #112233 }          .a { background-color: currentcolor; color: #445566 }          .b { color: currentcolor }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).background_color,
+        Some(Color(0x44, 0x55, 0x66)),
+        "背景跟的是同一元素自己的 `color`，与书写顺序无关"
+    );
+    assert_eq!(
+        style(&page, class(&page, "b")).color,
+        Some(Color(0x11, 0x22, 0x33)),
+        "`color: currentcolor` 就是继承"
+    );
+    assert_eq!(page.styled.ignored, 0);
 }
 
 /// 属性选择器的五种算子：`~=` 与 `*=` 是出版书里的真写法。
@@ -871,16 +907,29 @@ fn opentype_font_properties_report_inert_not_unknown() {
             16.0,
         )
     };
-    assert_eq!(status("font-variant", "small-caps"), DeclStatus::Inert);
-    assert_eq!(status("font-variant-caps", "small-caps"), DeclStatus::Inert);
+    // `font-stretch` / `font-kerning` / `font-feature-settings` 仍是整条「认得、不生效」：
+    // 值写什么都不改变这件事。
     assert_eq!(status("font-stretch", "condensed"), DeclStatus::Inert);
     assert_eq!(status("font-kerning", "none"), DeclStatus::Inert);
     assert_eq!(
         status("font-feature-settings", "\"liga\" 0"),
         DeclStatus::Inert
     );
-    // 值写什么都不改变「不生效」这件事，所以不认识的值也不该把它们打成 Unparsed。
-    assert_eq!(status("font-variant", "全角"), DeclStatus::Inert);
+    // `font-variant` 与 `font-variant-caps` 2026-10-29 改成只收初值：`normal` 就是
+    // 「不启用任何特性」，正是我们做的事；其余值（`small-caps` 这类）判不认识。
+    assert_eq!(status("font-variant", "normal"), DeclStatus::Applied);
+    assert_eq!(status("font-variant-caps", "normal"), DeclStatus::Applied);
+    assert_eq!(status("font-variant", "small-caps"), DeclStatus::Unparsed);
+    assert_eq!(
+        status("font-variant-caps", "small-caps"),
+        DeclStatus::Unparsed
+    );
+    assert_eq!(status("font-variant", "全角"), DeclStatus::Unparsed);
+    // OEB 1.x 的栏数：`1` 就是不分栏（我们的行为），其余值要作者多栏。
+    assert_eq!(status("oeb-column-number", "1"), DeclStatus::Applied);
+    assert_eq!(status("oeb-column-number", "2"), DeclStatus::Unparsed);
+    // `background: initial` 是重置块里的写法：清空图层与底色。
+    assert_eq!(status("background", "initial"), DeclStatus::Applied);
 }
 
 /// 端到端：读者的 `!important` 压过作者的 `!important`。
@@ -1038,14 +1087,18 @@ fn vertical_align_percent_is_against_own_line_height_and_unkowns_are_counted() {
         20.0,
         "50% × (20px × 2)"
     );
+    let middle = style(&page, class(&page, "b"));
+    assert_eq!(middle.baseline_shift, 0.0, "`middle` 不是基线上的偏移");
     assert_eq!(
-        style(&page, class(&page, "b")).baseline_shift,
-        0.0,
-        "`middle` 要的是行盒对齐，一期不折成偏移"
+        middle.cell_valign,
+        crate::content::format::css::computed::CellVAlign::Middle,
+        "`middle` 落到表格格那一格（格内竖直对齐），不收进 baseline_shift"
     );
+    assert_eq!(page.styled.ignored, 0, "`middle` 是认得的取值");
+    let bad = author("<p>x</p>", "p { vertical-align: 太上面了 }");
     assert_eq!(
-        page.styled.ignored, 1,
-        "不认的取值必须计 ignored，否则落差被静默吞掉"
+        bad.styled.ignored, 1,
+        "真不认的取值必须计 ignored，否则落差被静默吞掉"
     );
 }
 
@@ -1706,16 +1759,47 @@ fn single_side_longhand_touches_one_edge_only() {
     assert_eq!(wrong.styled.ignored, 1, "一条边只能给一个宽度");
 }
 
-/// 认不得的边框样式与属性按「没接住」计数，而不是悄悄画成实线。
+/// 边框的十档画法全部接住；认不得的值按「没接住」计数，而不是悄悄画成实线。
 #[test]
-fn unsupported_border_styles_count_as_the_gap() {
-    let dashed = author("<p>正文</p>", "p { border: 1px dashed black }");
+fn every_border_style_is_accepted_and_unknown_words_are_counted() {
+    for (value, want) in [
+        ("none", BorderStyle::None),
+        ("hidden", BorderStyle::None),
+        ("solid", BorderStyle::Solid),
+        ("double", BorderStyle::Double),
+        ("dotted", BorderStyle::Dotted),
+        ("dashed", BorderStyle::Dashed),
+        ("inset", BorderStyle::Inset),
+        ("outset", BorderStyle::Outset),
+        ("groove", BorderStyle::Groove),
+        ("ridge", BorderStyle::Ridge),
+    ] {
+        let page = author("<p>正文</p>", &format!("p {{ border: 2px {value} black }}"));
+        assert_eq!(
+            style(&page, tag(&page, "p")).border[0].style,
+            want,
+            "`border-style: {value}` 该接住"
+        );
+        assert_eq!(page.styled.ignored, 0, "`{value}` 不该算落差");
+    }
+    let unknown = author("<p>正文</p>", "p { border: 2px wavy black }");
     assert_eq!(
-        dashed.styled.ignored, 1,
-        "dashed 还没做，画成 solid 是另一回事"
+        unknown.styled.ignored, 1,
+        "`wavy` 不是边框画法 —— 判不认识，不悄悄当 solid"
     );
+    // 《西游记》那 101 个元素写的正是这条：颜色是 `currentColor`，画法是 `inset`。
+    let book = author("<p>正文</p>", "p { border: currentColor inset 1px }");
+    assert_eq!(book.styled.ignored, 0, "真书里那条写法该整条接住");
+    assert_eq!(
+        style(&book, tag(&book, "p")).border[0].style,
+        BorderStyle::Inset
+    );
+    // `border-radius` 2026-10-29 接住了（底色那一块的圆角），不再是落差；
+    // 仍不接的是单角长手，见 `border_radius_keeps_percent_and_rejects_bad_values`。
     let radius = author("<p>正文</p>", "p { border-radius: 4px }");
-    assert_eq!(radius.styled.ignored, 1, "border-radius 不在认得的名单里");
+    assert_eq!(radius.styled.ignored, 0, "圆角已经接住，不许再算成落差");
+    let corner_longhand = author("<p>正文</p>", "p { border-top-left-radius: 4px }");
+    assert_eq!(corner_longhand.styled.ignored, 1, "单角长手仍不接");
 }
 
 /// 背景色与边框都**不**继承（CSS 规定）；`transparent` 是「有这条声明、但不画」。
@@ -2359,4 +2443,868 @@ fn the_harry_potter_title_pages_carry_their_backdrop() {
         "这本书的 CSS-only 背景图应该至少 20 处（实测 23），只找到 {found} 处：\
          要么解析断了，要么样式表没读进来"
     );
+}
+
+// ---- 层叠期认得、但从没被写进任何一条测试的那些值 ----
+//
+// 这一段的来源是一次全量核对：把 `computed::apply` 每一条 match 臂接受的
+// (属性, 值) 组合列出来，再拿全部 152 个带测试的文件对（既对声明原文、也对关键字
+// 字面量，因为有几张表是 `for (keyword, want) in […]` 循环喂 `format!` 的，只搜声明
+// 原文会把它们误报成没测）。剩下 28 条两种都对不上的，逐条补在下面。
+
+/// `font-size` 那七个绝对关键字是 CSS 定死的一张比例表。从前只钉过 `large` 与
+/// `smaller` 两格，其余五格漂了没人发现。
+///
+/// 注意 `medium` 恰好等于根字号 16.0：**光断言数值是空过的**（表整个删掉它也过），
+/// 所以每一格同时钉 `ignored` 计数 —— 那条被判不认识时它会涨，这才是闸门。
+#[test]
+fn the_seven_absolute_font_size_keywords_are_the_css_table() {
+    for (keyword, want) in [
+        ("xx-small", 9.0),
+        ("x-small", 10.0),
+        ("small", 13.0),
+        ("medium", 16.0),
+        ("large", 18.0),
+        ("x-large", 24.0),
+        ("xx-large", 32.0),
+    ] {
+        let page = author("<p>x</p>", &format!("p {{ font-size: {keyword} }}"));
+        assert_eq!(
+            style(&page, tag(&page, "p")).font_size,
+            want,
+            "font-size: {keyword} 该是 {want}"
+        );
+        assert_eq!(page.styled.ignored, 0, "`font-size: {keyword}` 该被接住");
+    }
+}
+
+/// `larger` 按父字号放大一档。从前这张表只钉过 `smaller` 那一侧，
+/// 两侧共用一个 1.2 因子，只测一侧等于另一侧没闸门。
+#[test]
+fn larger_scales_the_parent_font_size_by_the_same_step_as_smaller() {
+    let page = author(
+        "<div><p>大</p><q>小</q></div>",
+        "div { font-size: 20px } p { font-size: larger } q { font-size: smaller }",
+    );
+    assert_eq!(style(&page, tag(&page, "p")).font_size, 20.0 * 1.2);
+    assert_eq!(style(&page, tag(&page, "q")).font_size, 20.0 / 1.2);
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// `line-height: normal` 是 1.2 倍，而**初值是 1.75**（读者的默认行距）。
+/// 两者不等，所以这一条不是空过的：写成 `1.75` 会被这里抓住。
+#[test]
+fn line_height_normal_is_the_css_multiple_not_the_reader_default() {
+    let page = author("<p>文</p>", "p { line-height: normal }");
+    assert_eq!(style(&page, tag(&page, "p")).line_height, 1.2);
+    assert_eq!(page.styled.ignored, 0);
+    assert_ne!(
+        ComputedStyle::default().line_height,
+        1.2,
+        "初值若也是 1.2，上面那条断言就空过了"
+    );
+}
+
+/// `font-weight` 的两个字面量与 `font-style: normal`：从前这张表只钉过
+/// `bolder` / `lighter` / `italic` 三格，`normal` 与 `bold` 一个都没写过声明。
+/// `font-weight: normal` 那一格要把继承来的 700 拉回 400，才看得出它真被读了。
+#[test]
+fn the_plain_weight_and_style_keywords_override_what_they_inherit() {
+    let page = author(
+        "<div><p class=a>粗</p><p class=b>正</p><q class=c>斜</q></div>",
+        "div { font-weight: 700; font-style: italic } \
+         .a { font-weight: bold } .b { font-weight: normal } .c { font-style: normal }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).font_weight,
+        700,
+        "`bold` 就是 700"
+    );
+    assert_eq!(
+        style(&page, class(&page, "b")).font_weight,
+        400,
+        "`normal` 该把继承来的 700 拉回 400"
+    );
+    assert!(!style(&page, class(&page, "c")).font_italic);
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// `text-justify` 六种写法折成三档。从前只钉过 `inter-ideograph` 一格。
+///
+/// 折法是刻意的：`inter-character` / `inter-ideograph` / `distribute` 都是「在字间摊」，
+/// 而 `auto` 与它们**不同档** —— `auto` 由实现决定，我们让排版层按「有空格拉空格、
+/// 没有才拉字间」走，与 `inter-character` 那一臂同路但仍是独立的一格。
+#[test]
+fn text_justify_folds_six_spellings_into_three_arms() {
+    for (keyword, want) in [
+        ("auto", TextJustify::Auto),
+        ("inter-word", TextJustify::InterWord),
+        ("inter-character", TextJustify::InterCharacter),
+        ("inter-ideograph", TextJustify::InterCharacter),
+        ("distribute", TextJustify::InterCharacter),
+        ("none", TextJustify::None),
+    ] {
+        let page = author("<p>x</p>", &format!("p {{ text-justify: {keyword} }}"));
+        assert_eq!(
+            style(&page, tag(&page, "p")).text_justify,
+            want,
+            "text-justify: {keyword}"
+        );
+        assert_eq!(page.styled.ignored, 0, "`{keyword}` 该被接住");
+    }
+}
+
+/// 厂商前缀那几条拼法与标准名是**同一条声明**：EPUB 3 风格规范点名的正是带前缀的写法，
+/// 只认标准名等于把按规范写的书丢掉。三条前缀从前一条都没进过测试。
+#[test]
+fn the_prefixed_spellings_reach_the_same_computed_value() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p><p class=c>三</p><p class=d>四</p>",
+        ".a { -webkit-hyphens: none } .b { -moz-hyphens: none } \
+         .c { -epub-hyphens: auto } .d { -epub-text-justify: inter-ideograph }",
+    );
+    let find = |c: &str| class(&page, c);
+    assert_eq!(style(&page, find("a")).hyphens, Hyphens::None);
+    assert_eq!(style(&page, find("b")).hyphens, Hyphens::None);
+    assert_eq!(style(&page, find("c")).hyphens, Hyphens::Auto);
+    assert_eq!(
+        style(&page, find("d")).text_justify,
+        TextJustify::InterCharacter
+    );
+    assert_eq!(
+        page.styled.ignored, 0,
+        "四条前缀写法都认得，一条都不该进落差表"
+    );
+}
+
+/// `hyphens: manual` 是 CSS 初值，与 `none` / `auto` 三档之一。光看数值会空过
+/// （初值本来就是 `Manual`），所以这里让它去**盖掉**父层继承来的 `none`。
+#[test]
+fn hyphens_manual_overrides_an_inherited_none() {
+    let page = author(
+        "<div><p>文</p></div>",
+        "div { hyphens: none } p { hyphens: manual }",
+    );
+    assert_eq!(
+        style(&page, tag(&page, "p")).hyphens,
+        Hyphens::Manual,
+        "`manual` 该把继承的 `none` 盖回去"
+    );
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// `letter-spacing` / `word-spacing` 的 `normal`：折成 0，且要能盖掉继承来的字距。
+/// 书里在 `<body>` 上写一次 `letter-spacing: 2px`、再在某一类元素上写 `normal` 复原，
+/// 靠的就是这一档。
+#[test]
+fn the_spacing_keywords_normal_reset_an_inherited_track() {
+    let page = author(
+        "<div><p class=a>一</p><p class=b>二</p></div>",
+        "div { letter-spacing: 3px; word-spacing: 4px } \
+         .a { letter-spacing: normal } .b { word-spacing: normal }",
+    );
+    assert_eq!(style(&page, class(&page, "a")).letter_spacing, 0.0);
+    assert_eq!(
+        style(&page, class(&page, "a")).word_spacing,
+        4.0,
+        "另一条不受牵连"
+    );
+    assert_eq!(style(&page, class(&page, "b")).word_spacing, 0.0);
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// `white-space`：`pre` 与 `pre-wrap` 在这一版共用同一个「保留换行」标记（折行与否
+/// 交给排版，不是这一档的事），`normal` 把它关掉。
+/// `nowrap` / `pre-line` 有意**不接**：四本真书实测 0 次，为它们把布尔换成五态枚举不值。
+#[test]
+fn white_space_pre_wrap_shares_the_pre_flag_and_normal_clears_it() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p><p class=c>三</p><p class=d>四</p>",
+        ".a { white-space: pre } .b { white-space: pre-wrap } \
+         .c { white-space: normal } .d { white-space: nowrap }",
+    );
+    let find = |c: &str| class(&page, c);
+    assert!(style(&page, find("a")).white_space_pre);
+    assert!(
+        style(&page, find("b")).white_space_pre,
+        "`pre-wrap` 与 `pre` 同一档"
+    );
+    assert!(
+        !style(&page, find("c")).white_space_pre,
+        "`normal` 要关掉它"
+    );
+    assert_eq!(
+        page.styled.ignored, 1,
+        "只有 `nowrap` 那一条算落差；它被接进来了说明五态那一档被顺手做了"
+    );
+}
+
+/// `display: list-item` 是「画标记」那一档的唯一入口（UA 只给 `<li>`），
+/// 所以在 `<p>` 上写它应当真的让这一段带上标记序号。从前这条声明一次没写过。
+#[test]
+fn display_list_item_is_recorded_on_a_plain_element() {
+    let page = author("<p>项</p>", "p { display: list-item }");
+    assert_eq!(style(&page, tag(&page, "p")).display, Display::ListItem);
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// `display: inline-block` 判**不认识**，不是「接住了」。
+///
+/// 排版层只分四档：`None` 跳过、`Inline` 走行内、`ListItem` 画标记、其余按块
+/// （`layout::collect` 的 `is_inline_flow` 与 `is_item` 那两个判据）。从前这里存进一个
+/// 谁都不读的 `InlineBlock`，屏上与 `display: block` 一字不差，而 `examples/css-gap`
+/// 报 `Applied` —— 那是把「没做」记成「做了」。行内块要的 shrink-to-fit 宽与「占一行内
+/// 位置」都还没做，所以这里明说没接住。本机四本真书这条写法 0 处。
+#[test]
+fn inline_block_is_not_accepted_as_a_display_value() {
+    let base = ComputedStyle::default();
+    let decl = |property: &str, value: &str| Declaration {
+        property: property.into(),
+        value: value.into(),
+        important: false,
+    };
+    assert_eq!(
+        declaration_status(&decl("display", "inline-block"), &base, 16.0),
+        DeclStatus::Unparsed,
+        "`display: inline-block` 不许报成接住了"
+    );
+    for value in ["block", "inline", "list-item", "none"] {
+        assert_eq!(
+            declaration_status(&decl("display", value), &base, 16.0),
+            DeclStatus::Applied,
+            "另外四档是真生效的，别跟着一起划掉"
+        );
+    }
+    let page = author(
+        "<div><p>x</p></div>",
+        "div { display: block } p { display: inline-block }",
+    );
+    let p = style(&page, tag(&page, "p"));
+    assert_eq!(page.styled.ignored, 1, "只有那条 inline-block 计落差");
+    assert_eq!(
+        p.display,
+        Display::Block,
+        "作废的声明不改已有值：这一格回到 CSS 初值，而不是留下一个没人读的记号"
+    );
+}
+
+/// `break-before` / `break-after` 的 `avoid` 判**不认识**，理由与上面那一条同形：
+/// 排版层除了 `is_forced` 与 `parity` 没有第三处读 `BreakWhen`，而 `is_forced` 明写
+/// 「不是强制断」，所以存进去的 `Avoid` 是一个谁都不看的记号。
+///
+/// 别和 `break-inside: avoid` 搞混 —— 那一条落在 `break_inside_avoid` 这个布尔上，
+/// 分片器真读，是真生效的。
+#[test]
+fn avoid_is_not_a_break_before_or_after_value_but_break_inside_avoid_is() {
+    let base = ComputedStyle::default();
+    let decl = |property: &str, value: &str| Declaration {
+        property: property.into(),
+        value: value.into(),
+        important: false,
+    };
+    for property in [
+        "break-before",
+        "break-after",
+        "page-break-before",
+        "page-break-after",
+    ] {
+        assert_eq!(
+            declaration_status(&decl(property, "avoid"), &base, 16.0),
+            DeclStatus::Unparsed,
+            "`{property}: avoid` 兑现不了，不该报成接住"
+        );
+    }
+    assert_eq!(
+        declaration_status(&decl("break-inside", "avoid"), &base, 16.0),
+        DeclStatus::Applied,
+        "`break-inside: avoid` 是另一条路，真的生效"
+    );
+    let page = author("<p>x</p>", "p { break-before: avoid }");
+    assert_eq!(page.styled.ignored, 1);
+    assert_eq!(style(&page, tag(&page, "p")).break_before, BreakWhen::Auto);
+}
+
+/// `break-before` / `break-after` 剩下的那几个值：`auto` 是**设定**而不是查询
+/// （同一份样式表里先 `page` 后 `auto` 是合法写法，要能把强制断取消掉），
+/// `always` 是与 `page` 同档的强制断（CSS 里 `always` 不带奇偶要求）。
+#[test]
+fn auto_cancels_a_forced_break_and_always_is_a_forced_break() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p><p class=c>三</p>",
+        ".a { break-before: page; break-after: page } \
+         .b { break-before: auto; break-after: always } \
+         .c { break-before: always; break-after: auto }",
+    );
+    let find = |c: &str| class(&page, c);
+    assert_eq!(style(&page, find("a")).break_before, BreakWhen::Page);
+    assert_eq!(
+        style(&page, find("b")).break_before,
+        BreakWhen::Auto,
+        "`auto` 写在同一元素的后一条，要把前面的强制断取消"
+    );
+    assert_eq!(style(&page, find("b")).break_after, BreakWhen::Always);
+    assert!(style(&page, find("b")).break_after.is_forced());
+    assert_eq!(style(&page, find("c")).break_before, BreakWhen::Always);
+    assert_eq!(page.styled.ignored, 0);
+    assert_eq!(
+        style(&page, find("c")).break_after.parity(),
+        None,
+        "`always` 不关心奇偶，与 `left` / `right` 有别"
+    );
+}
+
+/// CSS2.1 的 `page-break-*` 前缀版本与标准名走同一条解析。
+/// 老 EPUB 满地都是这一族写法。
+#[test]
+fn the_legacy_page_break_spellings_are_the_same_declaration() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p>",
+        ".a { page-break-before: page } .b { page-break-inside: avoid }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).break_before,
+        BreakWhen::Page,
+        "`page-break-before` 与 `break-before` 同一个数"
+    );
+    assert!(style(&page, class(&page, "b")).break_inside_avoid);
+    assert_eq!(page.styled.ignored, 0, "两条旧写法都认得");
+}
+
+/// `clear` 四个值：从前只钉过 `both`。左右两档是「只躲开那一侧的浮动」，
+/// 存错一边表现为浮动把行带挤到屏外。
+#[test]
+fn clear_takes_each_side_and_none() {
+    for (keyword, want) in [
+        ("none", Clear::None),
+        ("left", Clear::Left),
+        ("right", Clear::Right),
+        ("both", Clear::Both),
+    ] {
+        let page = author("<p>x</p>", &format!("p {{ clear: {keyword} }}"));
+        assert_eq!(
+            style(&page, tag(&page, "p")).clear,
+            want,
+            "clear: {keyword}"
+        );
+        assert_eq!(page.styled.ignored, 0);
+    }
+}
+
+/// `background-repeat` 六个关键字与两值写法。从前只钉过 `repeat-x` 一格。
+/// `repeat-x` / `repeat-y` 只能单独出现（CSS 规定），两值写法才是「横轴 纵轴」。
+#[test]
+fn background_repeat_sets_both_axes() {
+    use BackgroundTile::{NoRepeat, Repeat, Round, Space};
+    for (keyword, x, y) in [
+        ("repeat", Repeat, Repeat),
+        ("no-repeat", NoRepeat, NoRepeat),
+        ("repeat-x", Repeat, NoRepeat),
+        ("repeat-y", NoRepeat, Repeat),
+        ("space", Space, Space),
+        ("round", Round, Round),
+    ] {
+        let page = author("<p>x</p>", &format!("p {{ background-repeat: {keyword} }}"));
+        let repeat = style(&page, tag(&page, "p")).background_layers[0].repeat;
+        assert_eq!((repeat.x, repeat.y), (x, y), "background-repeat: {keyword}");
+        assert_eq!(page.styled.ignored, 0, "`{keyword}` 该被接住");
+    }
+    let page = author("<p>x</p>", "p { background-repeat: no-repeat repeat }");
+    let repeat = style(&page, tag(&page, "p")).background_layers[0].repeat;
+    assert_eq!(
+        (repeat.x, repeat.y),
+        (NoRepeat, Repeat),
+        "两值写法是「横轴 纵轴」"
+    );
+    assert_eq!(page.styled.ignored, 0);
+    let bad = author("<p>x</p>", "p { background-repeat: repeat-x repeat-y }");
+    assert_eq!(
+        bad.styled.ignored, 1,
+        "`repeat-x` 不能再当「只说横轴」，两值写法里它非法"
+    );
+}
+
+/// `background-position` 的三个单边关键字：只给一根轴时另一根取 `center`（CSS 明文），
+/// 而 CSS 初值是 `left top`（两轴都 `Start`），所以「关键字解错」与「这条没解」在数值上
+/// 分得开。从前 `top` / `left` 钉过，`bottom` / `right` / `center` 一格都没有。
+#[test]
+fn background_position_keywords_fill_the_other_axis_with_center() {
+    use BackgroundEdge::{Center, End, Start};
+    let edge = |a: BackgroundAxis| match a {
+        BackgroundAxis::Edge(edge, None) => Some(edge),
+        _ => None,
+    };
+    for (keyword, x, y) in [
+        ("center", Center, Center),
+        ("bottom", Center, End),
+        ("right", End, Center),
+        ("left", Start, Center),
+        ("top", Center, Start),
+        ("left bottom", Start, End),
+    ] {
+        let page = author(
+            "<p>x</p>",
+            &format!("p {{ background-position: {keyword} }}"),
+        );
+        let position = style(&page, tag(&page, "p")).background_layers[0].position;
+        assert_eq!(
+            (edge(position.x), edge(position.y)),
+            (Some(x), Some(y)),
+            "background-position: {keyword}"
+        );
+        assert_eq!(page.styled.ignored, 0);
+    }
+    assert_eq!(
+        BackgroundPosition::default(),
+        BackgroundPosition {
+            x: BackgroundAxis::Edge(Start, None),
+            y: BackgroundAxis::Edge(Start, None),
+        },
+        "初值是 CSS 那一条（`left top`），不是 center —— 上面那几格才分得开"
+    );
+}
+
+/// `text-decoration-line` 是简写的**长手别名**，从前一次没写过；
+/// 线型与厚度那几个 token（`solid` / `double` / `dashed`）认得但画法不变
+/// （一律 1px 实线、按当前文字色），`overline` 仍然整条不接。
+/// 这里钉的是「不作废」与「不假装接住了线型」两件事。
+#[test]
+fn the_decoration_line_alias_and_the_line_style_tokens() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p><p class=c>三</p>",
+        ".a { text-decoration-line: underline } \
+         .b { text-decoration: underline double } \
+         .c { text-decoration: line-through dashed }",
+    );
+    let find = |c: &str| class(&page, c);
+    assert!(style(&page, find("a")).underline);
+    assert!(style(&page, find("b")).underline, "`double` 不许把整条作废");
+    assert!(
+        !style(&page, find("b")).line_through,
+        "线型 token 不改线在哪"
+    );
+    assert!(style(&page, find("c")).line_through);
+    assert!(!style(&page, find("c")).underline);
+    assert_eq!(
+        page.styled.ignored, 0,
+        "长手别名与三种线型都认得：报成落差不对，报成接住了线型也不对"
+    );
+    let over = author("<p>x</p>", "p { text-decoration: overline }");
+    assert_eq!(
+        over.styled.ignored, 1,
+        "`overline` 画不出来，仍要整条判不认识"
+    );
+    assert!(
+        !style(&over, tag(&over, "p")).underline,
+        "作废的声明不许留下半个下划线"
+    );
+}
+
+/// `list-style-type: disc` 是 CSS 初值 —— 光断言值会空过，所以让它去**盖掉**父层的
+/// `circle`。`arabic-indic` 是有意不收的那一族（与 `hebrew` 同一个理由：本机没有
+/// 一本阿拉伯数字书可验记数规则），要落在落差表里而不是画出一个看着像的号。
+#[test]
+fn the_initial_marker_type_still_takes_and_arabic_indic_is_not_invented() {
+    let page = author(
+        "<ul><li class=a>一</li><li class=b>二</li></ul>",
+        "ul { list-style-type: circle } .a { list-style-type: disc } \
+         .b { list-style-type: arabic-indic }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).list_style_type,
+        ListStyle::Disc,
+        "`disc` 虽是初值，也要真把继承来的 `circle` 盖掉"
+    );
+    assert_eq!(
+        style(&page, class(&page, "b")).list_style_type,
+        ListStyle::Circle,
+        "认不出的类型回继承值，不降级成别的记数"
+    );
+    assert_eq!(page.styled.ignored, 1, "只有 `arabic-indic` 那一条算落差");
+}
+
+/// `box-sizing: content-box` 是 CSS 初值，与 `border-box` 相对。数值上它等于「没写」，
+/// 所以钉的是它能盖掉父层的 `border-box` 且不作废。
+#[test]
+fn box_sizing_content_box_takes_back_an_inherited_border_box() {
+    let page = author(
+        "<div><p>文</p></div>",
+        "div { box-sizing: border-box } p { box-sizing: content-box }",
+    );
+    assert_eq!(
+        style(&page, tag(&page, "p")).box_sizing,
+        BoxSizing::ContentBox
+    );
+    assert_eq!(page.styled.ignored, 0);
+    assert_eq!(
+        ComputedStyle::default().box_sizing,
+        BoxSizing::ContentBox,
+        "初值本身就是 content-box，所以上面那条靠的是继承被改回去"
+    );
+}
+
+// ---- 2026-10-29：text-shadow / border-radius / duokan 前缀 ----
+
+/// `text-shadow` 四段：位移、模糊半径、颜色；`em` 按**元素自己的**字号折，
+/// 不写颜色就是 CSS 的 `currentColor`（存 `None`，绘制层落本 run 的文字色）。
+#[test]
+fn text_shadow_parses_offset_blur_and_color() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p><p class=c>三</p>",
+        ".a { text-shadow: 0 1px 2px #112233 } \
+         .b { text-shadow: 0.2em 3px } \
+         .c { text-shadow: 1px 1px currentcolor }",
+    );
+    let a = &style(&page, class(&page, "a")).text_shadows;
+    assert_eq!(a.len(), 1);
+    assert_eq!((a[0].dx, a[0].dy, a[0].blur), (0.0, 1.0, 2.0));
+    assert_eq!(a[0].color, Some(Color(0x11, 0x22, 0x33)));
+    let b = &style(&page, class(&page, "b")).text_shadows;
+    assert_eq!(
+        (b[0].dx, b[0].dy),
+        (0.2 * 16.0, 3.0),
+        "`em` 按元素自己的字号折"
+    );
+    assert_eq!(b[0].blur, 0.0);
+    assert_eq!(b[0].color, None, "没写颜色就是 currentColor");
+    let c = &style(&page, class(&page, "c")).text_shadows;
+    assert_eq!(c[0].color, None, "`currentcolor` 与不写同一档");
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// `text-shadow` 可继承（书里在 `<body>` 或标题规则上写一次就管一片），
+/// 而 `none` 要能把继承来的那份**清掉** —— 两者在层叠上是两件事。
+#[test]
+fn text_shadow_inherits_and_none_clears_it() {
+    let page = author(
+        "<div><p class=a>一</p><p class=b>二</p></div>",
+        "div { text-shadow: 1px 2px 3px #000 } .b { text-shadow: none }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).text_shadows.len(),
+        1,
+        "子元素没写也带着继承来的影子"
+    );
+    assert!(
+        style(&page, class(&page, "b")).text_shadows.is_empty(),
+        "`none` 清掉继承值"
+    );
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// 逗号分层；写坏的层（少一个位移、负模糊半径）整条判不认识，而不是悄悄丢掉那一层。
+#[test]
+fn text_shadow_takes_a_list_and_rejects_broken_layers() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p><p class=c>三</p>",
+        ".a { text-shadow: 0 0 2px #000, 1px 1px #f00 } \
+         .b { text-shadow: 1px } \
+         .c { text-shadow: 1px 1px -2px #000 }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).text_shadows.len(),
+        2,
+        "逗号分隔的两层都要在"
+    );
+    assert!(style(&page, class(&page, "b")).text_shadows.is_empty());
+    assert!(style(&page, class(&page, "c")).text_shadows.is_empty());
+    assert_eq!(page.styled.ignored, 2, "少位移与负模糊半径各计一条");
+}
+
+/// 样式哈希要跟上新字段：漏了它，块级排版缓存会在改了影子之后仍读旧结果。
+#[test]
+fn the_style_hash_covers_text_shadows_and_border_radius() {
+    use std::hash::{Hash, Hasher};
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p>",
+        ".a { text-shadow: 0 1px 1px #000 } .b { border-radius: 4px }",
+    );
+    let hash = |s: &ComputedStyle| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    };
+    let base = hash(&ComputedStyle::default());
+    assert_ne!(
+        hash(style(&page, class(&page, "a"))),
+        base,
+        "影子必须进哈希"
+    );
+    assert_ne!(
+        hash(style(&page, class(&page, "b"))),
+        base,
+        "圆角必须进哈希"
+    );
+}
+
+/// `border-radius` 的 1/2/3/4 值展开，顺序是 CSS 的角序 `[左上, 右上, 右下, 左下]`。
+/// 2 值时第一个管对角、3 值时左下随右上 —— 与 `padding` 那套「上右下左」同名不同序，
+/// 抄错了的症状是「斜着的两个角才好、另两个角方」。
+#[test]
+fn border_radius_expands_one_to_four_values() {
+    for (value, want) in [
+        ("4px", [4.0, 4.0, 4.0, 4.0]),
+        ("4px 8px", [4.0, 8.0, 4.0, 8.0]),
+        ("1px 2px 3px", [1.0, 2.0, 3.0, 2.0]),
+        ("1px 2px 3px 4px", [1.0, 2.0, 3.0, 4.0]),
+    ] {
+        let page = author("<p>x</p>", &format!("p {{ border-radius: {value} }}"));
+        let got = style(&page, tag(&page, "p")).border_radius.map(px);
+        assert_eq!(got, want, "border-radius: {value}");
+        assert_eq!(page.styled.ignored, 0);
+    }
+}
+
+/// 百分比在层叠期**不折**（要等排版期拿到盒尺寸，与 `margin` 同一条口径）；
+/// 负值与椭圆的斜杠写法整条作废；四个长手还不在清单里，判不认识而不是半接。
+#[test]
+fn border_radius_keeps_percent_and_rejects_bad_values() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p><p class=c>三</p>",
+        ".a { border-radius: 50% } .b { border-radius: -4px } .c { border-radius: 10px / 20px }",
+    );
+    let a = style(&page, class(&page, "a")).border_radius;
+    assert!(
+        matches!(a[0], Length::Percent(p) if (p - 0.5).abs() < 1e-6),
+        "百分比要留到排版期折，实际 {:?}",
+        a[0]
+    );
+    assert_eq!(page.styled.ignored, 2, "负值与椭圆写法各计一条");
+    let longhand = author("<p>x</p>", "p { border-top-left-radius: 4px }");
+    assert_eq!(
+        longhand.styled.ignored, 1,
+        "单角长手不在清单里：不许把它算成接住了"
+    );
+}
+
+/// 折成 px：百分比按**盒宽**，每角封顶 `min(宽, 高) / 2`。
+#[test]
+fn corner_radii_resolve_against_the_box_and_clamp() {
+    let style = ComputedStyle {
+        border_radius: [
+            Length::Px(6.0),
+            Length::Percent(0.5),
+            Length::Px(999.0),
+            Length::Percent(0.1),
+        ],
+        ..ComputedStyle::default()
+    };
+    // 盒 100×40 → 封顶 20；`50%` 按宽折成 50 再被夹到 20。
+    assert_eq!(style.corner_radii(100.0, 40.0), [6.0, 20.0, 20.0, 10.0]);
+}
+
+/// `duokan-text-indent` 是多看转换器写在标准属性旁边的那一份副本
+/// （《哈利·波特》21 个规则块全部成对出现），收它就是同一个数。
+#[test]
+fn the_duokan_text_indent_prefix_is_the_same_declaration() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p>",
+        ".a { text-indent: 2em } .b { duokan-text-indent: 2em }",
+    );
+    assert_eq!(px(style(&page, class(&page, "a")).text_indent), 32.0);
+    assert_eq!(
+        px(style(&page, class(&page, "b")).text_indent),
+        32.0,
+        "两个拼法要给同一个数"
+    );
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// 影子列表进 `RunStyle` 之后仍要能去重：同值并成一格、不同值各占一格。
+#[test]
+fn the_run_style_carries_text_shadows_and_the_arena_tells_them_apart() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p>",
+        ".a { text-shadow: 0 1px 1px #000 } .b { text-shadow: 0 2px 1px #000 }",
+    );
+    let a = crate::layout::RunStyle::new(style(&page, class(&page, "a")));
+    let a_again = crate::layout::RunStyle::new(style(&page, class(&page, "a")));
+    let b = crate::layout::RunStyle::new(style(&page, class(&page, "b")));
+    assert_eq!(a.text_shadows.len(), 1);
+    assert_eq!(a, a_again, "同值要能并成一格（Hash + Eq 覆盖了新字段）");
+    assert_ne!(a, b, "位移不同就是不同样式");
+    let plain = crate::layout::RunStyle::new(&ComputedStyle::default());
+    assert!(plain.text_shadows.is_empty());
+    assert_ne!(a, plain);
+}
+
+/// `list-style-image` 与 `list-style-position` **按初值做就等于做对了**：标记只有文字、
+/// 挂在流动之外，正是 `none` 与 `outside` 的意思。所以收初值、拒其余值 ——
+/// 从前这两条整条记「认得不生效」，《蛇结》51 个 `li` 因此白挂 102 条 Inert。
+#[test]
+fn the_list_style_initials_are_applied_and_other_values_are_not() {
+    let base = ComputedStyle::default();
+    let decl = |property: &str, value: &str| Declaration {
+        property: property.into(),
+        value: value.into(),
+        important: false,
+    };
+    assert_eq!(
+        declaration_status(&decl("list-style-image", "none"), &base, 16.0),
+        DeclStatus::Applied,
+        "`none` 就是我们画标记的方式"
+    );
+    assert_eq!(
+        declaration_status(&decl("list-style-position", "outside"), &base, 16.0),
+        DeclStatus::Applied,
+        "`outside` 就是我们摆标记的位置"
+    );
+    assert_eq!(
+        declaration_status(&decl("list-style-image", "url(dot.png)"), &base, 16.0),
+        DeclStatus::Unparsed,
+        "图源还没做：判不认识，别报成接住"
+    );
+    assert_eq!(
+        declaration_status(&decl("list-style-position", "inside"), &base, 16.0),
+        DeclStatus::Unparsed,
+        "`inside` 要把标记塞进首行，还没做"
+    );
+    assert_eq!(
+        declaration_status(&decl("list-style-image", "none; x"), &base, 16.0),
+        DeclStatus::Unparsed,
+        "整条值里有别的 token 就不算初值"
+    );
+}
+
+/// `border-collapse` 两个值都收，且**可继承**（写在 `<table>` 上要管到每个格子 ——
+/// 合并是按格逐边判的，格子看不见它就没法判）。认不出的值计落差，不悄悄当 `separate`。
+#[test]
+fn border_collapse_parses_and_inherits_into_the_cells() {
+    let page = author(
+        "<table><tr><td>x</td></tr></table>",
+        "table { border-collapse: collapse }",
+    );
+    assert!(style(&page, tag(&page, "table")).border_collapse);
+    assert!(
+        style(&page, tag(&page, "td")).border_collapse,
+        "继承断在表格上，格子就判不了该不该画自己那条边"
+    );
+    assert_eq!(page.styled.ignored, 0);
+    let separate = author(
+        "<table><tr><td>x</td></tr></table>",
+        "table { border-collapse: separate }",
+    );
+    assert!(!style(&separate, tag(&separate, "table")).border_collapse);
+    assert_eq!(separate.styled.ignored, 0);
+    let bad = author("<p>x</p>", "p { border-collapse: 塌陷 }");
+    assert_eq!(bad.styled.ignored, 1, "认不出的值算落差");
+    use std::hash::{Hash, Hasher};
+    let hash = |s: &ComputedStyle| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    };
+    assert_ne!(
+        hash(style(&page, tag(&page, "td"))),
+        hash(&ComputedStyle::default()),
+        "这一格必须进样式哈希"
+    );
+}
+
+/// 边框颜色里的 `currentColor`：它就是我们 `BorderEdge::color: None` 那个记号
+/// （绘制层取这一块自己的 `color`）。从前它没被认，`border-top: currentColor none 0`
+/// 这种写法会把**整条**边框丢掉 —— 《世界简史》5 个元素正是这么写的。
+#[test]
+fn current_color_is_accepted_wherever_a_border_color_can_go() {
+    let page = author(
+        "<p class=a>一</p><p class=b>二</p><p class=c>三</p>",
+        ".a { border-top: currentColor none 0 } \
+         .b { border-top: currentColor solid 2px } \
+         .c { border-color: currentColor }",
+    );
+    let a = &style(&page, class(&page, "a")).border[0];
+    assert_eq!((a.width, a.style, a.color), (0.0, BorderStyle::None, None));
+    let b = &style(&page, class(&page, "b")).border[0];
+    assert_eq!((b.width, b.style, b.color), (2.0, BorderStyle::Solid, None));
+    assert_eq!(
+        style(&page, class(&page, "c")).border[0].color,
+        None,
+        "长手里的 currentColor 同一个记号"
+    );
+    assert_eq!(page.styled.ignored, 0, "三条都该接住");
+}
+
+/// `cursor` 是界面提示，不是排版属性 —— 记「认得、不生效」，不再报成「不认识」。
+#[test]
+fn cursor_is_known_but_inert() {
+    let base = ComputedStyle::default();
+    let decl = |property: &str, value: &str| Declaration {
+        property: property.into(),
+        value: value.into(),
+        important: false,
+    };
+    assert_eq!(
+        declaration_status(&decl("cursor", "pointer"), &base, 16.0),
+        DeclStatus::Inert
+    );
+    assert_eq!(
+        declaration_status(&decl("cursor", "眨眼"), &base, 16.0),
+        DeclStatus::Inert,
+        "名单里的属性不看值 —— 值怎么写在屏上都不生效，这是名单的语义"
+    );
+}
+
+/// `word-break` 只收 `normal` / `break-all` 两个值，且**可继承**（书里在 `<body>` 上写一次）。
+/// `keep-all` 判不认识 —— 它要的是「中文也不许逐字断」，与我们的断行模型相反。
+#[test]
+fn word_break_takes_two_values_and_inherits() {
+    let page = author("<div><p>x</p></div>", "div { word-break: break-all }");
+    assert_eq!(
+        style(&page, tag(&page, "p")).word_break,
+        WordBreak::BreakAll,
+        "可继承：段落没写也带着"
+    );
+    assert_eq!(page.styled.ignored, 0);
+    let keep = author("<p>x</p>", "p { word-break: keep-all }");
+    assert_eq!(keep.styled.ignored, 1, "`keep-all` 判不认识");
+    assert_eq!(
+        style(&keep, tag(&keep, "p")).word_break,
+        WordBreak::Normal,
+        "认不出的值不改已有值"
+    );
+    use std::hash::{Hash, Hasher};
+    let hash = |s: &ComputedStyle| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    };
+    assert_ne!(
+        hash(style(&page, tag(&page, "p"))),
+        hash(&ComputedStyle::default())
+    );
+}
+
+/// `ex` 单位：按 `0.5em` 近似（拿不到 x-height 真度量）。7.5ex × 16px = 60px。
+#[test]
+fn the_ex_unit_approximates_half_an_em() {
+    let page = author("<p>x</p>", "p { padding-left: 7.5ex; font-size: 20px }");
+    assert_eq!(
+        px(style(&page, tag(&page, "p")).padding_left),
+        75.0,
+        "7.5ex、字号 20 → 7.5 × 10"
+    );
+    assert_eq!(page.styled.ignored, 0);
+}
+
+/// `all: initial`：把**每一个**属性拉回初值（含继承来的），`link` 那个记号留着
+/// （它不是 CSS 属性，是「这段在不在 `<a>` 里」）。
+#[test]
+fn all_initial_resets_every_property() {
+    let page = author(
+        "<div><p class=a>甲</p><p class=b>乙</p></div>",
+        "div { color: #112233; font-size: 20px; text-align: center } \
+         .a { all: initial } .b { all: initial; text-align: center }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert_eq!(a.font_size, 16.0, "字号回到初值，不再继承 20");
+    assert_eq!(a.color, None, "颜色回到「没写过」");
+    assert_eq!(a.text_align, TextAlign::Start, "对齐回到 start");
+    assert_eq!(
+        style(&page, class(&page, "b")).text_align,
+        TextAlign::Center,
+        "同一块里 `all` 后面的声明照样盖过它"
+    );
+    assert_eq!(page.styled.ignored, 0);
+    // 认不出的写法（`all: unset` / `all: inherit`）判不认识。
+    let bad = author("<p>x</p>", "p { all: unset }");
+    assert_eq!(bad.styled.ignored, 1);
 }

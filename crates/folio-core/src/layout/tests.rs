@@ -9,8 +9,8 @@ use crate::content::format::css::computed::{
 use crate::content::format::css::{Origin, RuleSet};
 use crate::layout::wrap::collect;
 use crate::layout::{
-    BlockBox, BlockCache, FontKey, ImageProvider, Layout, LayoutKey, LayoutOptions, LineFragment,
-    LineMetrics, Measure, NoImages, ResolvedImage, RunStyle, StyleArena, layout,
+    BlockBox, BlockCache, FontKey, ImageProvider, JustifyMode, Layout, LayoutKey, LayoutOptions,
+    LineFragment, LineMetrics, Measure, NoImages, ResolvedImage, RunStyle, StyleArena, layout,
     layout_with_blocks,
 };
 
@@ -65,6 +65,22 @@ fn typeset(html: &str, css: &str, width: f32) -> (Dom, Layout) {
 
 fn typeset_with(measure: &dyn Measure, html: &str, css: &str, width: f32) -> (Dom, Layout) {
     typeset_in(measure, html, css, width, None)
+}
+
+/// 两端对齐那一族用例的样式表，中间可以再加一条声明。
+///
+/// 为什么要一个函数而不是拼字符串：`"…margin: 0 } ; text-justify: none"` 那种拼法
+/// 把后一条掉在规则块**外面**，层叠根本收不到它，于是 `text-justify` 的三档测试
+/// 全在比默认值 —— 红得毫无信息量。
+fn justify_css(extra: &str) -> String {
+    let mut css = String::from("p { text-align: justify; text-indent: 0; margin: 0");
+    if !extra.is_empty() {
+        css.push_str("; ");
+        css.push_str(extra);
+    }
+    css.push(' ');
+    css.push('}');
+    css
 }
 
 /// 同上，多给一格竖轴基准（`LayoutOptions::page_height`）—— `height: NN%` 那一族
@@ -2328,6 +2344,97 @@ fn a_line_ended_by_a_br_is_not_justified() {
     assert!(laid.lines[2].justify.is_none(), "`<br>` 之后那一行不对齐");
 }
 
+/// `text-justify: inter-word` 只拉空格，所以**没有空格的中文行一律不对齐**
+/// （`layout::collect::justify_plan` 里那一臂给 `(Spaces, 0)`，`gaps == 0` 就返回 `None`）。
+///
+/// 这一档从前一次没测过：中文书在 `<body>` 上写 `text-justify: inter-word` 的意图是
+/// 「别把我的汉字摊开」，而它折错的表现为每一行字间多一道缝 —— 与默认 `auto`
+/// 在屏上是两种不同的版式。这里拿 `auto` 当对照：同一份 HTML 与版心，
+/// `auto` 摊字间、`inter-word` 一行都不摊。
+#[test]
+fn inter_word_justification_leaves_a_spaceless_cjk_line_unstretched() {
+    let html = format!("<p>{}</p>", "汉".repeat(25));
+    // 16px/字、版心 170px → 每行 10 字（160px），余 10px 可摊；末行 5 字是段末，不对齐。
+    let (_, auto) = typeset(&html, &justify_css(""), 170.0);
+    let last = auto.lines.len() - 1;
+    let stretched = auto
+        .lines
+        .iter()
+        .take(last)
+        .filter(|line| matches!(line.justify, Some(j) if j.mode == JustifyMode::Chars))
+        .count();
+    assert!(
+        stretched >= 2,
+        "默认 `auto` 该把没有空格的行摊在字间，实际摊了 {stretched} 行"
+    );
+
+    let (_, word) = typeset(&html, &justify_css("text-justify: inter-word"), 170.0);
+    assert_eq!(word.lines.len(), auto.lines.len(), "摊不摊不该改行数");
+    for (i, line) in word.lines.iter().enumerate() {
+        assert!(
+            line.justify.is_none(),
+            "第 {i} 行没有空格，`inter-word` 不该产生任何隙"
+        );
+        assert!(
+            (line.ink_width() - line.width).abs() <= 0.01,
+            "不摊开的行，墨迹宽应等于未撑开的片段宽"
+        );
+    }
+}
+
+/// `inter-word` 的另一半：有空格时它照样摊空格，且只摊在空格上。
+/// 少了这一条对照，上面那个「一行都不摊」也可能只是「两端对齐整条断了」。
+#[test]
+fn inter_word_stretches_the_spaces_it_finds_and_only_those() {
+    // 「汉 」= 16 + 4 = 20px。20 个汉字 19 个空格 → 版心 170 时每行 8 字 7 隙（156px）。
+    let html = format!("<p>{}</p>", "汉 ".repeat(20).trim());
+    let (_, word) = typeset(&html, &justify_css("text-justify: inter-word"), 170.0);
+    assert!(
+        word.lines.len() >= 2,
+        "该折成至少两行，实际 {} 行",
+        word.lines.len()
+    );
+    let first = &word.lines[0];
+    let Some(justify) = first.justify else {
+        panic!(
+            "有空格的行该由 `inter-word` 摊开，实际没摊（行宽 {}，版心 170）",
+            first.width
+        );
+    };
+    assert_eq!(justify.mode, JustifyMode::Spaces, "只拉空格那一档");
+    assert_eq!(justify.gaps, 7, "一行 8 个字之间 7 处空格隙");
+    assert!((first.ink_width() - 170.0).abs() <= 0.5, "摊满版心");
+}
+
+/// `text-justify: none` 关掉摊余量，即使行里有空格。它是「这一处不要两端对齐」，
+/// 与 `text-align` 没有 `none` 这个值是两件事。
+#[test]
+fn text_justify_none_switches_off_the_stretch() {
+    let html = format!("<p>{}</p>", "汉 ".repeat(20).trim());
+    let (_, on) = typeset(&html, &justify_css(""), 170.0);
+    assert!(
+        on.lines[0].justify.is_some(),
+        "对照：默认该摊开，否则下面那条 `none` 是空过的"
+    );
+    let (_, off) = typeset(&html, &justify_css("text-justify: none"), 170.0);
+    assert!(off.lines[0].justify.is_none(), "`none` 要关掉摊余量");
+}
+
+/// 在不是 `<li>` 的元素上写 `display: list-item` 也要真画出标记 ——
+/// 这一档是标记的唯一入口，UA 表只给 `<li>`，所以除了这条声明没有别的路能到这里。
+#[test]
+fn display_list_item_on_a_paragraph_draws_a_marker() {
+    let (_, laid) = typeset("<p>项</p>", "p { display: list-item }", 200.0);
+    let LineFragment::Marker(marker) = &laid.lines[0].fragments[0] else {
+        panic!(
+            "<p> 写了 `display: list-item`，行首应是标记片段，实际是 {:?}",
+            laid.lines[0].fragments[0]
+        );
+    };
+    assert_eq!(marker.text, "•", "标记类型回 CSS 初值 disc");
+    assert_eq!(laid.line_text(0), "项", "标记不进文本");
+}
+
 /// 字距：每个字符都推宽，于是同样版心折得更早，run 宽也按字距加。
 #[test]
 fn letter_spacing_widens_each_character_and_breaks_earlier() {
@@ -2544,4 +2651,629 @@ fn image_size_folds_the_min_pair_and_the_box_sizing_pair() {
         (70.0, 35.0),
         "border-box：100 含左右各 15，内容只剩 70，高按比例算"
     );
+}
+
+/// `border-radius` 一路走到装饰表：四角半径在排版期按**这一块的盒尺寸**折成 px。
+/// 只有写进装饰表，绘制层才有圆角可画 —— 停在 `ComputedStyle` 里就是又一条「接住了但没画」。
+#[test]
+fn border_radius_reaches_the_decor_table_in_pixels() {
+    let dom = Dom::parse("<body class=\"page\"><p>正文</p></body>".as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(
+            ".page { background-color: #c4aa87; border-radius: 6px }",
+            Origin::Author,
+        ),
+        &ComputedStyle::default(),
+        "",
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions::with_width(300.0),
+        &Mono,
+        &NoImages,
+    );
+    let root = laid
+        .decor_seeds(&styles)
+        .into_iter()
+        .find(|s| s.x == 0.0 && s.width == 300.0)
+        .expect("根那一层要有一条装饰");
+    assert_eq!(
+        root.radius, [6.0; 4],
+        "六像素的圆角要原样带到装饰表（盒高远大于 12px，不会被封顶）"
+    );
+}
+
+/// 只写圆角、不写底色与边框的块不该因此多出装饰种子：圆角本身不画任何东西，
+/// 凭空多一条会让装饰表在每一屏都多走一遍。
+#[test]
+fn a_bare_border_radius_does_not_create_a_decor_seed() {
+    let dom = Dom::parse("<body><p>正文</p></body>".as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse("p { border-radius: 8px }", Origin::Author),
+        &ComputedStyle::default(),
+        "",
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions::with_width(300.0),
+        &Mono,
+        &NoImages,
+    );
+    assert!(
+        laid.decor_seeds(&styles).is_empty(),
+        "没有底色与边框的块不该进装饰表：{:?}",
+        laid.decor_seeds(&styles)
+    );
+}
+
+// ---- 表格（`display: table` 一族）----
+//
+// 度量桩：汉字 16px、空格 4px。列宽分配与 `layout::table::solve_columns` 同源，
+// 所以这里的数都是能笔算出来的，不是「跑一下看看」。
+
+/// 一格里没有别的东西时，格子的边框盒就是它自己的落点与尺寸。
+fn cells(dom: &Dom, laid: &Layout) -> Vec<(f32, f32, f32, f32)> {
+    laid.blocks
+        .iter()
+        .filter(|b| b.border_box && matches!(dom.tag_name(b.node), Some("td") | Some("th")))
+        .map(|b| (b.x, b.y, b.width, b.height))
+        .collect()
+}
+
+/// 两行两列：格子**并排**（不是一列串下来），第二行落在第一行的下缘。
+///
+/// 版心 200、四格的固有宽都是 32（两字），所以两列各得 100 —— 摊满可用宽。
+/// 一行一个字高 28（16 × 1.75），两行 56。
+#[test]
+fn a_two_by_two_table_puts_cells_side_by_side() {
+    let html = "<table><tr><td>甲乙</td><td>丙丁</td></tr>\
+                <tr><td>戊</td><td>己</td></tr></table>";
+    let (dom, laid) = typeset(html, "", 200.0);
+    assert_eq!(
+        cells(&dom, &laid),
+        vec![
+            (0.0, 0.0, 32.0, 28.0),
+            (32.0, 0.0, 32.0, 28.0),
+            (0.0, 28.0, 32.0, 28.0),
+            (32.0, 28.0, 32.0, 28.0),
+        ],
+        "每列 32（两字）宽、两行各 28 高"
+    );
+    // `width: auto` 的表**收缩到内容宽**（两列各 32 = 64），不铺满 200 的版心。
+    let table = laid
+        .blocks
+        .iter()
+        .find(|b| b.border_box && dom.tag_name(b.node) == Some("table"))
+        .expect("表自己也该有一条盒子（底色与边框画在它上面）");
+    assert_eq!((table.width, table.height), (64.0, 56.0));
+}
+
+/// 行高取**最高**那一格：矮格子把自己的盒子拉到行高，于是同一行的边框与底色齐平。
+///
+/// 表固定 100 宽：两列按 `min + (max-min)×t` 插值 —— 左边 84（10 个汉字折成两行）、
+/// 右边 16（一个字一行）。行高 = 56，右边那一格的盒子也要是 56，不是它自己的 28。
+#[test]
+fn a_short_cell_stretches_to_the_row_height() {
+    let html =
+        "<table style=\"width:100px\"><tr><td>甲乙丙丁戊己庚辛壬癸</td><td>短</td></tr></table>";
+    let (dom, laid) = typeset(html, "", 600.0);
+    assert_eq!(
+        cells(&dom, &laid),
+        vec![(0.0, 0.0, 84.0, 56.0), (84.0, 0.0, 16.0, 56.0)],
+        "矮的那一格被拉到行高 56"
+    );
+}
+
+/// 作者写在格子上的百分比宽直接决定列宽（HP 的 `th{width:25%}` / `td{width:75%}` 就是这一档）。
+#[test]
+fn cell_percentage_widths_become_the_column_widths() {
+    let html = "<table style=\"width:200px\"><tr>\
+                <th style=\"width:25%\">甲</th><td style=\"width:75%\">乙</td></tr></table>";
+    let (dom, laid) = typeset(html, "", 600.0);
+    let got: Vec<(f32, f32)> = cells(&dom, &laid)
+        .into_iter()
+        .map(|(x, _, w, _)| (x, w))
+        .collect();
+    assert_eq!(got, vec![(0.0, 50.0), (50.0, 150.0)], "25% / 75% 各就各位");
+}
+
+/// 表是一个普通的块：它后面的段落落在表的下缘之下（游标照常推进）。
+#[test]
+fn a_table_advances_the_cursor_like_any_block() {
+    let html = "<table><tr><td>甲</td></tr></table><p>后文</p>";
+    let (dom, laid) = typeset(html, "", 200.0);
+    let table_h = laid
+        .blocks
+        .iter()
+        .find(|b| b.border_box && dom.tag_name(b.node) == Some("table"))
+        .map(|b| b.height)
+        .expect("表盒子");
+    let p_y = laid
+        .blocks
+        .iter()
+        .find(|b| b.border_box && dom.tag_name(b.node) == Some("p"))
+        .map(|b| b.y)
+        .expect("段落盒子");
+    // 表的下边距 0、段落自己的 UA 上边距 1em（16px）：折叠后取较大者，于是从
+    // 「表的下缘 + 16」起排。这一条同时钉住「表格回到常规流」—— 它不是浮动盒。
+    assert_eq!(p_y, table_h + 16.0, "段落从表的下缘 + 自己的上边距起排");
+}
+
+/// 量高（light）与实排给出**同一个**表高：两路共用网格、列宽与行高，
+/// light 只把「每格怎么量」换成估算 —— 与普通块同一条容差（一个行高以内）。
+#[test]
+fn light_mode_measures_a_table_to_the_same_height() {
+    let html = "<table><tr><td>甲乙</td><td>丙丁</td></tr>\
+                <tr><td>戊</td><td>己</td></tr></table><p>后文</p>";
+    let dom = Dom::parse(html.as_bytes());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
+    let body = find(&dom, "body");
+    let full = layout(
+        &dom,
+        &styles,
+        body,
+        LayoutOptions::with_width(200.0),
+        &Mono,
+        &NoImages,
+    );
+    let light = layout(
+        &dom,
+        &styles,
+        body,
+        LayoutOptions {
+            width: 200.0,
+            light: true,
+            allow_vertical: false,
+            page_height: None,
+        },
+        &Mono,
+        &NoImages,
+    );
+    assert!(light.lines.is_empty(), "light 模式不该产出行盒");
+    let diff = (full.height - light.height).abs();
+    assert!(
+        diff <= 28.0,
+        "表高实排 {} vs 量高 {}，差 {diff}",
+        full.height,
+        light.height
+    );
+}
+
+/// 格子的盒子进装饰表：底色与边框才画得出来，而且铺的是**拉高之后**的盒子。
+#[test]
+fn a_cell_box_reaches_the_decor_table_at_the_row_height() {
+    // 表固定 100 宽：左边那格拿 84（10 个汉字折成两行），右边 16。
+    let html = "<table style=\"width:100px\"><tr>\
+                <td style=\"background-color:#123456\">甲乙丙丁戊己庚辛壬癸</td>\
+                <td style=\"background-color:#654321\">短</td></tr></table>";
+    let dom = Dom::parse(html.as_bytes());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions::with_width(200.0),
+        &Mono,
+        &NoImages,
+    );
+    let seeds = laid.decor_seeds(&styles);
+    let colored: Vec<(f32, f32, f32, f32)> = seeds
+        .iter()
+        .filter(|s| s.background.is_some())
+        .map(|s| (s.x, s.y, s.width, s.height))
+        .collect();
+    assert_eq!(colored.len(), 2, "两个格子各一条底色");
+    assert_eq!(
+        colored[0].3, colored[1].3,
+        "同一行的两条底色要一样高（都被拉到行高）"
+    );
+    assert!(
+        colored[0].3 > 28.0,
+        "左边那格折成两行，行高该大于一行：{:?}",
+        colored[0]
+    );
+}
+
+/// 真书门：哈利·波特那 5 张表要**并排**排出来（不是一列串下来）。
+///
+/// 合成夹具能钉住几何算式，钉不住「这本书的表格到底进没进这条路」—— 比如 UA 表没给
+/// `<table>` 四档 display，合成用例照样过，而真书上整本书的表格会退化成竖着堆的块。
+#[test]
+#[ignore = "开真书找表格章节"]
+fn the_harry_potter_tables_layout_side_by_side() {
+    let path = std::path::Path::new("../../tests/fixtures/local/hali-bote-quanji.epub");
+    if !path.is_file() {
+        println!("跳过：{} 不在", path.display());
+        return;
+    }
+    let doc = crate::content::document::open(path).expect("真书该打得开");
+    let flow = doc.flow().expect("这本是可重排");
+    let rules = RuleSet::parse(&doc.stylesheet(), Origin::Author);
+    let mut tables = 0usize;
+    let mut paired_rows = 0usize;
+    for index in 0..flow.chapters.len() {
+        let Ok(source) = doc.chapter_source(index) else {
+            continue;
+        };
+        if !source.contains("<table") {
+            continue;
+        }
+        let dom = Dom::parse(source.as_bytes());
+        let styles = cascade(&dom, &rules, &ComputedStyle::default(), "");
+        let laid = layout(
+            &dom,
+            &styles,
+            dom.document,
+            LayoutOptions::with_width(600.0),
+            &Mono,
+            &NoImages,
+        );
+        let table_boxes = laid
+            .blocks
+            .iter()
+            .filter(|b| b.border_box && dom.tag_name(b.node) == Some("table"))
+            .count();
+        tables += table_boxes;
+        // 同一行里出现两格（同 y、不同 x）才算「并排」。
+        let cells: Vec<(f32, f32)> = laid
+            .blocks
+            .iter()
+            .filter(|b| b.border_box && matches!(dom.tag_name(b.node), Some("td") | Some("th")))
+            .map(|b| (b.x, b.y))
+            .collect();
+        paired_rows += cells
+            .iter()
+            .filter(|(x, y)| {
+                cells
+                    .iter()
+                    .any(|(ox, oy)| (oy - y).abs() < 0.01 && (ox - x).abs() > 1.0)
+            })
+            .count();
+    }
+    // 门自己把量到的两个数打出来：绿了也要能看出「量到了几个」，
+    // 否则「表格没进这条路」与「这本书没表格」在输出上长得一样。
+    println!("表 {tables} 张，同排有邻格的格子 {paired_rows} 个");
+    assert!(tables >= 3, "这本书实测有 5 张表，只排出来 {tables} 张");
+    assert!(
+        paired_rows >= 4,
+        "表格的格子要并排：只找到 {paired_rows} 个「同排有邻格」的格子"
+    );
+}
+
+/// `border-collapse: collapse` 的合并：相邻两格的公共边只画**一条**。
+///
+/// 两格各写 2px solid，共用边两侧各画一条就是 4px（那是 `separate` 的默认行为）；
+/// 塌陷之后留赢的那条 2px。判据是「左格右边 + 右格左边」这两个数之和。
+#[test]
+fn collapsed_borders_draw_the_shared_edge_once() {
+    let html = "<table style=\"width:100px; border-collapse: collapse\"><tr>\
+                <td style=\"border:2px solid #000\">甲</td>\
+                <td style=\"border:2px solid #000\">乙</td></tr></table>";
+    let dom = Dom::parse(html.as_bytes());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions::with_width(200.0),
+        &Mono,
+        &NoImages,
+    );
+    let edges: Vec<[f32; 4]> = laid
+        .decor_seeds(&styles)
+        .iter()
+        .filter(|s| s.width > 0.0 && s.height > 0.0 && s.border.iter().any(|b| b.0 > 0.0))
+        .map(|s| [s.border[0].0, s.border[1].0, s.border[2].0, s.border[3].0])
+        .collect();
+    assert_eq!(edges.len(), 2, "两格各一条装饰：{edges:?}");
+    let shared = edges[0][1] + edges[1][3];
+    assert_eq!(
+        shared, 2.0,
+        "公共边只画一条 2px（两张加起来是 4px 就是没合并）"
+    );
+    assert_eq!(edges[0][3], 2.0, "外圈那条边不受影响");
+    assert_eq!(edges[1][1], 2.0, "外圈那条边不受影响");
+}
+
+/// 合并时**宽的那条赢**：左 1px、右 3px，共用边画 3px，左边那条被抹掉。
+#[test]
+fn the_wider_border_wins_the_shared_edge() {
+    let html = "<table style=\"width:100px; border-collapse: collapse\"><tr>\
+                <td style=\"border:1px solid #000\">甲</td>\
+                <td style=\"border:3px solid #000\">乙</td></tr></table>";
+    let dom = Dom::parse(html.as_bytes());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions::with_width(200.0),
+        &Mono,
+        &NoImages,
+    );
+    let edges: Vec<[f32; 4]> = laid
+        .decor_seeds(&styles)
+        .iter()
+        .filter(|s| s.width > 0.0 && s.height > 0.0 && s.border.iter().any(|b| b.0 > 0.0))
+        .map(|s| [s.border[0].0, s.border[1].0, s.border[2].0, s.border[3].0])
+        .collect();
+    assert_eq!(edges[0][1], 0.0, "左边那格窄，共用边让给右格");
+    assert_eq!(edges[1][3], 3.0, "宽的赢");
+}
+
+/// 没有 `border-collapse` 时保持 `separate`：两条边各画各的（合计 4px）。
+#[test]
+fn separate_borders_still_draw_both_sides() {
+    let html = "<table style=\"width:100px\"><tr>\
+                <td style=\"border:2px solid #000\">甲</td>\
+                <td style=\"border:2px solid #000\">乙</td></tr></table>";
+    let dom = Dom::parse(html.as_bytes());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions::with_width(200.0),
+        &Mono,
+        &NoImages,
+    );
+    let edges: Vec<[f32; 4]> = laid
+        .decor_seeds(&styles)
+        .iter()
+        .filter(|s| s.width > 0.0 && s.height > 0.0 && s.border.iter().any(|b| b.0 > 0.0))
+        .map(|s| [s.border[0].0, s.border[1].0, s.border[2].0, s.border[3].0])
+        .collect();
+    assert_eq!(edges.len(), 2);
+    assert_eq!(edges[0][1] + edges[1][3], 4.0, "默认 separate：两条边都画");
+}
+
+/// `word-break: break-all`：**词内部**也能断，于是同样的版心能少一行。
+///
+/// 度量桩：拉丁 8px/字、空格 4px。版心 100：
+/// - 默认（`normal`）：`aaa` 之后那个 20 字的词放不下剩余 72px，整词挪到下一行再硬切
+///   → 3 行（`aaa` / 前 12 字 / 后 8 字）。
+/// - `break-all`：词内到处能断，第一行 `aaa ` + 9 个字母正好 100px → 2 行。
+#[test]
+fn break_all_lets_a_long_word_split_to_fill_the_line() {
+    let html = "<p>aaa supercalifragilistic</p>";
+    let (_, normal) = typeset(html, "p { text-indent: 0; margin: 0 }", 100.0);
+    let (_, all) = typeset(
+        html,
+        "p { text-indent: 0; margin: 0; word-break: break-all }",
+        100.0,
+    );
+    let texts = |laid: &Layout| -> Vec<String> {
+        (0..laid.lines.len())
+            .map(|i| laid.line_text(i).to_string())
+            .collect()
+    };
+    assert_eq!(
+        texts(&normal),
+        vec!["aaa", "supercalifra", "gilistic"],
+        "默认：词只能整段挪到下一行再硬切"
+    );
+    assert_eq!(
+        texts(&all),
+        vec!["aaa supercali", "fragilistic"],
+        "break-all：词内断，第一行填满"
+    );
+    assert!(
+        (all.lines[0].width - 100.0).abs() < 0.01,
+        "第一行该正好填满版心，实际 {}",
+        all.lines[0].width
+    );
+}
+
+/// 表格里 `break-all` 的格子：最小宽从「整词」变成一个「字」，于是同样窄的表能排下内容。
+///
+/// 表固定 30px、格里是 10 个拉丁字的整词（80px）：
+/// - 默认：列的最小宽是整词 80（表溢出到 80），一行排完；
+/// - `break-all`：最小宽是一个字 8，列按可用宽 30 收住 → 每行 3 个字，共 4 行。
+#[test]
+fn break_all_shrinks_a_cells_minimum_width_to_one_character() {
+    let html = "<table style=\"width:30px\"><tr><td>abcdefghij</td></tr></table>";
+    let (dom, normal) = typeset(html, "", 200.0);
+    let (dom2, all) = typeset(html, "td { word-break: break-all }", 200.0);
+    let cell_w = |dom: &Dom, laid: &Layout| {
+        laid.blocks
+            .iter()
+            .find(|b| b.border_box && dom.tag_name(b.node) == Some("td"))
+            .map(|b| b.width)
+            .expect("格子盒子")
+    };
+    assert_eq!(cell_w(&dom, &normal), 80.0, "默认：列宽被整词顶到 80");
+    assert_eq!(cell_w(&dom2, &all), 30.0, "break-all：列收在可用宽 30");
+    let lines = |laid: &Layout| laid.lines.len();
+    assert_eq!(lines(&normal), 1, "80 宽正好一行排完 10 个字");
+    assert_eq!(lines(&all), 4, "30 宽每行 3 个字 → 4 行");
+}
+
+/// 格内 `vertical-align`：内容在行高里贴哪一边。行高取最高那一格（这里是 56，右边只有 28）。
+///
+/// `middle` 挪一半（14）、`bottom` 挪到底（28）、`top`（初值）不动。挪的是**内容**，
+/// 盒子本身始终拉满行高 —— 边框与底色因此仍铺满一行。
+#[test]
+fn a_table_cell_can_align_its_content_middle_or_bottom() {
+    let line_y = |valign: &str| -> (f32, f32) {
+        let html = format!(
+            "<table style=\"width:100px\"><tr><td>甲乙丙丁戊己庚辛壬癸</td>\
+             <td style=\"vertical-align: {valign}\">短</td></tr></table>"
+        );
+        let (dom, laid) = typeset(&html, "", 600.0);
+        let at = (0..laid.lines.len())
+            .find(|i| laid.line_text(*i) == "短")
+            .unwrap_or_else(|| panic!("右边那一格该有一行「短」"));
+        let cell_h = laid
+            .blocks
+            .iter()
+            .filter(|b| b.border_box && dom.tag_name(b.node) == Some("td"))
+            .map(|b| b.height)
+            .fold(0.0f32, f32::max);
+        (laid.lines[at].y, cell_h)
+    };
+    assert_eq!(line_y("top").0, 0.0, "默认贴行顶");
+    assert_eq!(line_y("middle").0, 14.0, "行高 56、内容 28 → 挪一半");
+    assert_eq!(line_y("bottom").0, 28.0, "贴行底");
+    for valign in ["top", "middle", "bottom"] {
+        let (_, cell_h) = line_y(valign);
+        assert_eq!(cell_h, 56.0, "盒子始终拉满行高（{valign}）");
+    }
+}
+
+/// `border-spacing`：列与列、行与行之间留缝，缝算在表盒里。
+///
+/// 两列各 32 宽、两行各 28 高、缝 10：表 74×66，第二列起点 42、第二行起点 38。
+/// 塌陷模式下这条被忽略（CSS 2.1 §17.6.1），于是又回到 64×56。
+#[test]
+fn border_spacing_opens_gaps_between_cells() {
+    let html = "<table style=\"border-spacing: 10px\"><tr><td>甲乙</td><td>丙丁</td></tr>\
+                <tr><td>戊</td><td>己</td></tr></table>";
+    let (dom, laid) = typeset(html, "", 200.0);
+    assert_eq!(
+        cells(&dom, &laid),
+        vec![
+            (0.0, 0.0, 32.0, 28.0),
+            (42.0, 0.0, 32.0, 28.0),
+            (0.0, 38.0, 32.0, 28.0),
+            (42.0, 38.0, 32.0, 28.0),
+        ],
+        "第二列 32+10、第二行 28+10"
+    );
+    let table = laid
+        .blocks
+        .iter()
+        .find(|b| b.border_box && dom.tag_name(b.node) == Some("table"))
+        .expect("表盒子");
+    assert_eq!((table.width, table.height), (74.0, 66.0), "缝算进表盒");
+
+    let collapsed = "<table style=\"border-spacing: 10px; border-collapse: collapse\"><tr>\
+                     <td>甲乙</td><td>丙丁</td></tr><tr><td>戊</td><td>己</td></tr></table>";
+    let (dom2, laid2) = typeset(collapsed, "", 200.0);
+    assert_eq!(
+        cells(&dom2, &laid2),
+        vec![
+            (0.0, 0.0, 32.0, 28.0),
+            (32.0, 0.0, 32.0, 28.0),
+            (0.0, 28.0, 32.0, 28.0),
+            (32.0, 28.0, 32.0, 28.0),
+        ],
+        "塌陷模式下 border-spacing 被忽略"
+    );
+}
+
+// ---- 绝对定位（封面 / 标题页那几块装饰）----
+
+/// 绝对定位的盒脱流：按 `left` / `bottom` 摆，**不推进游标、不撑高**这一章。
+///
+/// 版心 200。正文一段（上外边距 16 + 一行 28 + 下外边距 16）→ 这一章高 44。
+/// 装饰块 `bottom: 0; height: 20px` → 落在 y = 44 − 20 = 24，`width: 50%` → 100 宽。
+#[test]
+fn an_absolute_box_is_placed_against_the_chapter_and_does_not_push_the_flow() {
+    let html = "<p>正文</p>\
+                <div style=\"position:absolute; left:0; bottom:0; width:50%; height:20px; \
+                background-color:#123456\"></div>";
+    let (dom, laid) = typeset(html, "", 200.0);
+    let p_y = laid
+        .blocks
+        .iter()
+        .find(|b| b.border_box && dom.tag_name(b.node) == Some("p"))
+        .map(|b| b.y)
+        .expect("段落");
+    assert_eq!(p_y, 16.0, "绝对定位的兄弟不该把段落推走");
+    let div = laid
+        .blocks
+        .iter()
+        .find(|b| b.border_box && b.width > 0.0 && dom.tag_name(b.node) == Some("div"))
+        .expect("装饰块");
+    assert_eq!(
+        (div.x, div.y, div.width, div.height),
+        (0.0, 24.0, 100.0, 20.0),
+        "bottom:0 + height:20 → 贴本章底；width:50% → 100"
+    );
+    assert_eq!(laid.height, 44.0, "绝对定位不撑高这一章");
+}
+
+/// 封面那套居中写法：`left:50%; margin-left:-9.5em; top:45%; margin-top:-4em`。
+/// `left` / `top` 定位的是**外边距盒**外缘，所以负外边距把盒子往回拉半个自身尺寸。
+#[test]
+fn absolute_offsets_are_margin_edges_so_negative_margins_center_the_box() {
+    let html = "<p>正文</p>\
+                <div style=\"position:absolute; width:19em; height:8em; top:45%; left:50%; \
+                margin-left:-9.5em; margin-top:-4em\"></div>";
+    let (dom, laid) = typeset(html, "", 200.0);
+    // 本章高 60：top 45% = 19.8、margin-top -4em（-64）→ -44.2；left 50% = 100、margin-left -9.5em（-152）→ -52。
+    let div = laid
+        .blocks
+        .iter()
+        .find(|b| b.border_box && dom.tag_name(b.node) == Some("div") && b.width > 200.0)
+        .expect("装饰块");
+    assert_eq!((div.x, div.y), (-52.0, -44.2), "负外边距把盒子拉回中心");
+    assert_eq!((div.width, div.height), (304.0, 128.0), "19em × 8em");
+}
+
+/// `position: relative` 判不认识（它要不脱流地挪已排好的子树，命中与锚点都得跟着）；
+/// 认不出时整条作废、块照常留在流里。
+#[test]
+fn relative_positioning_is_still_rejected() {
+    let dom = Dom::parse("<p style=\"position: relative\">正文</p>".as_bytes());
+    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
+    assert_eq!(styles.ignored, 1, "`relative` 还没做，判不认识");
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions::with_width(200.0),
+        &Mono,
+        &NoImages,
+    );
+    assert_eq!(
+        laid.blocks
+            .iter()
+            .find(|b| b.border_box && dom.tag_name(b.node) == Some("p"))
+            .map(|b| b.y),
+        Some(16.0),
+        "作废的定位不改这一块的常规流位置"
+    );
+}
+
+/// `colspan`：跨列的格拿走那几列的总宽，下一行的格子仍按列对齐。
+#[test]
+fn a_colspan_cell_spans_its_columns_and_the_next_row_still_aligns() {
+    let html = "<table style=\"width:100px\"><tr><td colspan=\"2\">甲</td></tr>\
+                <tr><td>乙</td><td>丙</td></tr></table>";
+    let (dom, laid) = typeset(html, "", 600.0);
+    assert_eq!(
+        cells(&dom, &laid),
+        vec![
+            (0.0, 0.0, 100.0, 28.0),
+            (0.0, 28.0, 50.0, 28.0),
+            (50.0, 28.0, 50.0, 28.0),
+        ],
+        "表头那格跨满 100；下一行两格各 50"
+    );
+}
+
+/// `rowspan`：跨行的格高度取它跨过的那几行之和，下一行被挤到它右边那一列。
+#[test]
+fn a_rowspan_cell_takes_the_sum_of_its_rows() {
+    let html = "<table style=\"width:100px\"><tr><td rowspan=\"2\">甲</td><td>乙</td></tr>\
+                <tr><td>丙</td></tr></table>";
+    let (dom, laid) = typeset(html, "", 600.0);
+    assert_eq!(
+        cells(&dom, &laid),
+        vec![
+            (0.0, 0.0, 50.0, 56.0),
+            (50.0, 0.0, 50.0, 28.0),
+            (50.0, 28.0, 50.0, 28.0),
+        ],
+        "跨行格高 56（两行之和）；第二行那格落在第 1 列"
+    );
+    // 跨行格自己也只排一次：三格（不是四格）。
+    assert_eq!(cells(&dom, &laid).len(), 3);
 }

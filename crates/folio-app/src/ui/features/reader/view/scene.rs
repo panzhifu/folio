@@ -35,9 +35,14 @@ pub struct BlockDecor {
     pub height: f32,
     /// `background-color`。`None` = 书里没写这一条 —— 别拿不透明色去盖主题底色。
     pub background: Option<Hsla>,
-    /// `[上, 右, 下, 左]` 的 `(宽, 色, 画法)`，宽 0 不画。画法今天就 `solid` 与
-    /// `double` 两档：`double` 由绘制层拆成两条 1/3 细线，其余（`dotted` / `groove` …）
-    /// 在解析期就没接住，到不了这里（见 `css::value::parse_border_style`）。
+    /// 四个角的圆角半径（px），顺序 `[左上, 右上, 右下, 左下]`，由排版层按盒尺寸折好。
+    ///
+    /// 只作用于**底色**那一块四边形；边框仍是四条轴对齐的直条，所以圆角盒配粗边框时
+    /// 四角是直的（见 `body::decoration_child`）。
+    pub radius: [f32; 4],
+    /// `[上, 右, 下, 左]` 的 `(宽, 色, 画法)`，宽 0 不画。画法有四档：`solid` 一整条，
+    /// `double` 拆成两条 1/3 细线，`dotted` / `dashed` 按段切开；其余（`groove` / `ridge` /
+    /// `inset` / `outset`）在解析期就没接住，到不了这里（见 `css::value::parse_border_style`）。
     pub border: [(f32, Hsla, BorderStyle); 4],
     /// `background-image` 的那些层，按 CSS 书写顺序（**先画的在屏幕上更靠上**，
     /// 所以绘制侧要倒着摆）。空 = 这一块没有背景图。
@@ -389,6 +394,9 @@ impl Scene {
                             // （见 `paint::decoration_y`），它是样式给的数，shaping 里没有。
                             .in_box(unit.box_height)
                             .decorate(unit.underline, unit.line_through)
+                            // 影子与装饰线同一条来路：`RunStyle` → `RowUnit` → 这里。
+                            // 绘制层在影子非空时先铺一趟影子再画字（见 `paint::paint_run`）。
+                            .shadowed(unit.text_shadows.clone())
                             // 字距与两端对齐：绘制在 run 内按字符序号 / 隙序号逐字右推，
                             // 与 `hit`/选区同一句规则。
                             .spacing(
@@ -549,6 +557,7 @@ fn place_decorations(
             background: seed
                 .background
                 .map(|color| run_color(Some(color), foreground)),
+            radius: seed.radius,
             border: [
                 edge(seed.border[0]),
                 edge(seed.border[1]),
@@ -592,6 +601,7 @@ mod tests {
             width: 300.0,
             height,
             background: Some(Color(193, 204, 192)),
+            radius: [0.0; 4],
             border: [
                 (0.0, None, BorderStyle::None),
                 (0.0, None, BorderStyle::None),

@@ -440,3 +440,29 @@ fn style_text_of_returns_only_the_style_tags_text_in_document_order() {
         "整份拼接的就是这两块"
     );
 }
+
+/// `@media` 只认「这条查询说的是不是纸」：`print` 独有的块整块丢掉（纸质的页眉页脚与
+/// 分页收进来就是错），含 `screen` / `all`、以及判不了的条件照收。
+#[test]
+fn print_only_media_blocks_are_dropped_while_screen_ones_are_kept() {
+    let color_of = |css: &str| -> Option<Color> {
+        let dom = Dom::parse("<p>x</p>".as_bytes());
+        let styled = cascade(&dom, &rules(css), &ComputedStyle::default(), "");
+        styled.get(first_p(&dom)).and_then(|s| s.color)
+    };
+    assert_eq!(
+        color_of("@media print { p { color: #ff0000 } } p { color: #123456 }"),
+        Some(Color(0x12, 0x34, 0x56)),
+        "print 里那条不许生效"
+    );
+    assert_eq!(
+        color_of("@media screen and (min-width: 100px) { p { color: #111111 } }"),
+        Some(Color(0x11, 0x11, 0x11)),
+        "screen / 判不了的条件照收"
+    );
+    assert_eq!(
+        color_of("@media all and (max-width: 600px) { p { color: #222222 } }"),
+        Some(Color(0x22, 0x22, 0x22)),
+        "含 all 的照收"
+    );
+}

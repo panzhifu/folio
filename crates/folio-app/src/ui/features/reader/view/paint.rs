@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use folio_core::content::format::css::computed::WritingMode;
+use folio_core::content::format::css::computed::{TextShadow, WritingMode};
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode};
 use gpui_kit::{
@@ -51,6 +51,12 @@ pub struct GlyphRun {
     /// 那条样式方法的默认值一致 —— 两端各定一个数的话，同一本书在两处会画得不一样。
     pub underline: bool,
     pub line_through: bool,
+    /// `text-shadow` 的图层表（CSS 可继承、可多值）。空表是常态，克隆只加一次引用计数。
+    ///
+    /// 影子必须在**整条 run 的正文字画完之前**先铺完：逐字「先画影子再画字」时，
+    /// 后一个字的影子会盖住前一个字的笔画（偏移只有一两 px，字形本身就互相压边）。
+    /// 所以 [`paint_run`] 在影子非空时走两趟。
+    pub text_shadows: Arc<[TextShadow]>,
     /// 这个 run 的 inline box 高（`font_size × line-height`），只用来定装饰线的纵向落点。
     ///
     /// 为什么要单独带一份：gpui 的 `paint_line` 算基线在盒里的位置、算删除线的高度都要
@@ -106,6 +112,7 @@ impl GlyphRun {
             flow: WritingMode::HorizontalTb,
             underline: false,
             line_through: false,
+            text_shadows: Arc::default(),
             // 默认按字号一档（UA 的 `line-height: normal` 近似）。真排版会用
             // `RunStyle::box_height()` 覆盖它，见 [`GlyphRun::in_box`]。
             box_height: font_size,
@@ -158,6 +165,12 @@ impl GlyphRun {
     pub fn decorate(mut self, underline: bool, line_through: bool) -> Self {
         self.underline = underline;
         self.line_through = line_through;
+        self
+    }
+
+    /// `text-shadow` 的图层表，直接来自 `RunStyle`（场景层从 `RowUnit` 递过来）。
+    pub fn shadowed(mut self, shadows: Arc<[TextShadow]>) -> Self {
+        self.text_shadows = shadows;
         self
     }
 
@@ -582,6 +595,93 @@ fn wants_synthetic_bold(font: &Font) -> bool {
     font.weight.0 >= 600.0
 }
 
+/// 一层 `text-shadow` 要画几份、各偏移多少、各用多少不透明度（相对文字色的 alpha）。
+///
+/// 模糊半径没有对应的绘制原语（gpui 只有纯色四边形与字形），所以按半径摊成对角副本：
+/// `blur = 1px` 时是中心一份加四份 0.5px 的淡边，这个尺寸下与真高斯在屏上分不出来。
+/// 副本数封顶 5 份、半径封顶 3px —— 真书里这个值普遍是 1，作者写大了也只是多画几遍，
+/// 不会把一帧画成几十份。
+fn shadow_copies(shadow: TextShadow) -> Vec<(f32, f32, f32)> {
+    if shadow.blur < 0.5 {
+        return vec![(shadow.dx, shadow.dy, 1.0)];
+    }
+    let r = (shadow.blur / 2.0).min(3.0);
+    let alpha = 0.6;
+    vec![
+        (shadow.dx, shadow.dy, alpha),
+        (shadow.dx + r, shadow.dy + r, alpha),
+        (shadow.dx + r, shadow.dy - r, alpha),
+        (shadow.dx - r, shadow.dy + r, alpha),
+        (shadow.dx - r, shadow.dy - r, alpha),
+    ]
+}
+
+/// 走一遍这一条 run 的字形，按阅读序算好每个字的**物理位置**（相对元素原点），
+/// 对每个「折页之后还留着」的字调用 `emit`，返回画了几个字。
+///
+/// 抽成函数的唯一理由：`text-shadow` 要在正文字之前把**整条 run** 铺一遍影子，而两趟
+/// 必须用同一句逐字位移 —— 字距、两端对齐、RTL 的字符计数都在这句里。抄两遍迟早漂，
+/// 而漂的表现是影子与字错开一两像素，比没有影子更难查。
+fn for_each_glyph(
+    run: &GlyphRun,
+    shaped: &LineLayout,
+    mut emit: impl FnMut(f32, f32, &gpui_kit::ShapedRun, &gpui_kit::ShapedGlyph),
+) -> u32 {
+    let flow = run.flow;
+    let (run_inline, run_cross) = flow.project(run.x, run.baseline);
+    // 字距 / 两端对齐的右推：按字形在**阅读序**里的字符序号逐字累加。LTR 下字形的
+    // `index` 在视觉序里递增，走一遍即可；RTL 下它在视觉序里递减（一期不做字距/对齐的
+    // RTL 精确分布），跳过右推即可 —— 与 `hit`/选区的口径一致。
+    let first_two: Vec<usize> = shaped
+        .runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter())
+        .take(2)
+        .map(|g| g.index)
+        .collect();
+    let rtl = first_two.len() == 2 && first_two[1] < first_two[0];
+    let mut char_index = 0u32;
+    let mut spaces_before = 0u32;
+    let mut prev_index = 0usize;
+    let mut kept = 0u32;
+    for shaped_run in &shaped.runs {
+        for glyph in &shaped_run.glyphs {
+            let shift = if rtl {
+                0.0
+            } else {
+                if glyph.index >= prev_index
+                    && let Some(between) = run.text.get(prev_index..glyph.index)
+                {
+                    for ch in between.chars() {
+                        char_index += 1;
+                        if ch == ' ' {
+                            spaces_before += 1;
+                        }
+                    }
+                    prev_index = glyph.index;
+                }
+                run.glyph_shift(char_index, spaces_before)
+            };
+            // 折页：按这个字的**平面位置**判它还在不在这一张纸上。用的是元素局部坐标
+            // （`run.x` / `run.baseline` 那一套），与 `view.rs` 摆折面同一条折线、同一把尺。
+            // shaping 报的两个数永远是「沿字走了多少」与「离基线多远」—— 竖排不重做
+            // shaping，所以这里只是把它们经同一处投影折成物理位移。
+            let (dx, dy) = flow.project_delta(
+                f32::from(glyph.position.x) + shift,
+                f32::from(glyph.position.y),
+            );
+            let x = run_inline + dx;
+            let y = run_cross + dy;
+            if !run.keeps(x, y) {
+                continue;
+            }
+            kept += 1;
+            emit(x, y, shaped_run, glyph);
+        }
+    }
+    kept
+}
+
 fn paint_run(
     window: &mut Window,
     origin: Point<Pixels>,
@@ -604,73 +704,45 @@ fn paint_run(
     // 基线在侧轴上的位置），经 `project` 才知道各落在物理的哪根轴上。
     let flow = run.flow;
     let (run_inline, run_cross) = flow.project(run.x, run.baseline);
-    let mut glyphs = 0u32;
     let embolden = needs_synthetic_bold(window, &run.font, synthetic_bold);
-    // 字距 / 两端对齐的右推：按字形在**阅读序**里的字符序号逐字累加。LTR 下字形的
-    // `index` 在视觉序里递增，走一遍即可；RTL 下它在视觉序里递减（一期不做字距/对齐的
-    // RTL 精确分布），跳过右推即可 —— 与 `hit`/选区的口径一致。
-    let first_two: Vec<usize> = shaped
-        .runs
-        .iter()
-        .flat_map(|r| r.glyphs.iter())
-        .take(2)
-        .map(|g| g.index)
-        .collect();
-    let rtl = first_two.len() == 2 && first_two[1] < first_two[0];
-    let mut char_index = 0u32;
-    let mut spaces_before = 0u32;
-    let mut prev_index = 0usize;
     let __t_glyph = crate::ui::features::reader::model::perf::Timer::start();
-    for shaped_run in &shaped.runs {
-        for glyph in &shaped_run.glyphs {
-            let shift = if rtl {
-                0.0
-            } else {
-                if glyph.index >= prev_index
-                    && let Some(between) = run.text.get(prev_index..glyph.index)
-                {
-                    for ch in between.chars() {
-                        char_index += 1;
-                        if ch == ' ' {
-                            spaces_before += 1;
-                        }
-                    }
-                    prev_index = glyph.index;
-                }
-                run.glyph_shift(char_index, spaces_before)
+    // 影子先铺：整条 run 的影子必须都在正文字**之下**。逐字「先影子后字」的写法里，
+    // 后一个字的影子会压住前一个字的笔画 —— 偏移只有一两 px，而字形本来就互相压边。
+    for shadow in run.text_shadows.iter() {
+        let base = crate::ui::foundation::style::run_color(shadow.color, run.color);
+        for (dx, dy, alpha) in shadow_copies(*shadow) {
+            let shade = Hsla {
+                a: base.a * alpha,
+                ..base
             };
-            // 折页：按这个字的**平面位置**判它还在不在这一张纸上。用的是元素局部坐标
-            // （`run.x` / `run.baseline` 那一套），与 `view.rs` 摆折面同一条折线、同一把尺。
-            // 数过 `glyphs` 之后再裁，那个计数才真的是「这一帧画了几个字」。
-            // shaping 报的两个数永远是「沿字走了多少」与「离基线多远」—— 竖排不重做
-            // shaping，所以这里只是把它们经同一处投影折成物理位移。
-            let (dx, dy) = flow.project_delta(
-                f32::from(glyph.position.x) + shift,
-                f32::from(glyph.position.y),
-            );
-            let x = run_inline + dx;
-            let y = run_cross + dy;
-            if !run.keeps(x, y) {
-                continue;
-            }
-            glyphs += 1;
-            let at = point(origin.x + px(x), origin.y + px(y));
-            // 单个字形画不出去（缺字形、图集满）不该让整帧失败：与 gpui 自己的
-            // `paint_line` 一致，忽略即可。
-            let _ = window.paint_glyph(at, shaped_run.font_id, glyph.id, font_size, run.color);
-            if embolden {
-                // 没有粗体面时的假粗：同一字形再压一遍，水平错开 0.5px。
-                // 只动绘制，不动 shaping / 行宽，所以不会因为「加粗」触发重排。
+            for_each_glyph(run, &shaped, |x, y, shaped_run, glyph| {
                 let _ = window.paint_glyph(
-                    point(at.x + px(0.5), at.y),
+                    point(origin.x + px(x + dx), origin.y + px(y + dy)),
                     shaped_run.font_id,
                     glyph.id,
                     font_size,
-                    run.color,
+                    shade,
                 );
-            }
+            });
         }
     }
+    let glyphs = for_each_glyph(run, &shaped, |x, y, shaped_run, glyph| {
+        let at = point(origin.x + px(x), origin.y + px(y));
+        // 单个字形画不出去（缺字形、图集满）不该让整帧失败：与 gpui 自己的
+        // `paint_line` 一致，忽略即可。
+        let _ = window.paint_glyph(at, shaped_run.font_id, glyph.id, font_size, run.color);
+        if embolden {
+            // 没有粗体面时的假粗：同一字形再压一遍，水平错开 0.5px。
+            // 只动绘制，不动 shaping / 行宽，所以不会因为「加粗」触发重排。
+            let _ = window.paint_glyph(
+                point(at.x + px(0.5), at.y),
+                shaped_run.font_id,
+                glyph.id,
+                font_size,
+                run.color,
+            );
+        }
+    });
     crate::ui::features::reader::model::perf::add(|frame| frame.glyph_ns += __t_glyph.ns());
     // 装饰线。字形是我们自己一个个画的，gpui 的 `ShapedLine::paint` 里没有那一段，
     // 所以线也得自己画 —— 少这一段就是「`text-decoration` 解析了、传进 shaping 了、
@@ -751,7 +823,10 @@ mod tests {
     //!
     //! 点名导入而不是 `use super::*`：`gpui_kit` 转出整个 `gpui`，里面有个叫 `test` 的属性宏，
     //! glob 会让 `#[test]` 递归展开成它。
-    use super::{WAVE_LENGTH, decoration_y, wants_synthetic_bold_when, wave_half_waves};
+    use super::{
+        WAVE_LENGTH, decoration_y, shadow_copies, wants_synthetic_bold_when, wave_half_waves,
+    };
+    use folio_core::content::format::css::computed::TextShadow;
     use gpui_kit::{Font, FontWeight, Pixels, px};
 
     /// 波浪线的分段：永远是**偶数个半波**（整波），于是每条划线都起于中线、终于中线。
@@ -842,6 +917,55 @@ mod tests {
         assert!(
             underline > px(100.),
             "下划线该在基线之下，实际 {underline:?}"
+        );
+    }
+
+    /// 硬边影子只画一份；模糊半径摊成「中心 + 四份对角」，半径封顶 3px。
+    ///
+    /// 这不是真的高斯：gpui 只有纯色四边形与字形两条绘制原语，没有模糊。真书里这个值
+    /// 普遍是 1px（《哈利·波特》13 条规则全是 1），对角副本在这个尺寸下看不出区别；
+    /// 封顶是给「作者写了 20px」兜底 —— 不封会变成一份画几十遍的帧。
+    #[test]
+    fn shadow_copies_are_one_hard_copy_or_a_capped_diagonal_ring() {
+        let hard = TextShadow {
+            dx: 1.0,
+            dy: 2.0,
+            blur: 0.0,
+            color: None,
+        };
+        assert_eq!(shadow_copies(hard), vec![(1.0, 2.0, 1.0)]);
+
+        let soft = TextShadow {
+            dx: 0.0,
+            dy: 1.0,
+            blur: 2.0,
+            color: None,
+        };
+        let copies = shadow_copies(soft);
+        assert_eq!(copies.len(), 5, "中心一份 + 四份对角，封顶 5 份");
+        assert_eq!(copies[0], (0.0, 1.0, 0.6), "中心那份按 0.6 的不透明度叠");
+        let mut diag: Vec<(f32, f32)> = copies[1..].iter().map(|(x, y, _)| (*x, *y)).collect();
+        diag.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // blur = 2 → r = 1px，四份落在 (0,1) 的四个对角上。
+        assert_eq!(
+            diag,
+            vec![(-1.0, 0.0), (-1.0, 2.0), (1.0, 0.0), (1.0, 2.0)],
+            "四份对角副本"
+        );
+
+        let huge = TextShadow {
+            dx: 0.0,
+            dy: 0.0,
+            blur: 40.0,
+            color: None,
+        };
+        let capped = shadow_copies(huge);
+        assert_eq!(capped.len(), 5);
+        assert!(
+            capped[1..]
+                .iter()
+                .all(|(x, y, _)| x.abs() == 3.0 && y.abs() == 3.0),
+            "半径封顶 3px，实际 {capped:?}"
         );
     }
 }

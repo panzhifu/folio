@@ -69,6 +69,14 @@ pub fn seed(parent: &ComputedStyle, tag: &str) -> ComputedStyle {
         Display::Inline
     } else if tag == "li" {
         Display::ListItem
+    } else if tag == "table" {
+        Display::Table
+    } else if tag == "tr" {
+        Display::TableRow
+    } else if tag == "td" || tag == "th" {
+        Display::TableCell
+    } else if matches!(tag, "thead" | "tbody" | "tfoot") {
+        Display::TableRowGroup
     } else {
         Display::Block
     };

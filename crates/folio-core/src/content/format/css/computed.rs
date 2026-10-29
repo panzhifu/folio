@@ -8,6 +8,7 @@
 //! 是最糟的失败方式。
 
 use crate::content::dom::{Dom, NodeId, NodeKind};
+use std::sync::Arc;
 
 use super::{Declaration, RuleSet};
 
@@ -194,10 +195,17 @@ pub enum Display {
     #[default]
     Block,
     Inline,
-    InlineBlock,
     ListItem,
     /// `display: none`：排版层负责整块跳过。
     None,
+    /// CSS 的 `display: table`（`<table>`）。排版层走 `layout::table` 那一套（auto 布局）。
+    Table,
+    /// `display: table-row`（`<tr>`）。只有站在一张表里才按行排。
+    TableRow,
+    /// `display: table-cell`（`<td>` / `<th>`）。只有站在一行里才按格排。
+    TableCell,
+    /// `display: table-row-group`（`<thead>` / `<tbody>` / `<tfoot>`）；抽取网格时展开一层。
+    TableRowGroup,
 }
 
 /// `list-style-type` 的取值 —— 列表标记的内容，不是它的画法。
@@ -234,16 +242,35 @@ pub enum ListStyle {
     None,
 }
 
-/// 一条边的画法。CSS 的 `border-style` 有八种实线以外的样式；这里只接
-/// `none` / `hidden`（都不画）与 `solid` / `double` —— 出版书的章标题色带左边那道
-/// 双线就是 `double`，正文插图框是 `solid`。`dashed` / `dotted` / `groove` 这些
-/// 解析失败、按「没接住」计数：把它们悄悄画成实线，书里的虚线框就变成了另一回事。
+/// 一条边的画法。CSS 的 `border-style` 有八种实线以外的样式；这里接
+/// `none` / `hidden`（都不画）、`solid`、`double`、`dotted`、`dashed`。
+///
+/// 后两档 2026-10-29 接上：从前整条判不认识，而 `.line { border: dotted #A2906A;
+/// border-width: 1px 0 0 0 }` 那种「一条点线分隔条」在转换本里是常规写法
+/// （哈利·波特 `.line` 那 1 个元素）。绘制层把带子按段切开画（见
+/// `ui::reader::view::body::push_border`），**不是**画成实线。
+///
+/// `groove` / `ridge` / `inset` / `outset` 2026-10-29 接上：这四档要的是**明暗**，
+/// 由作者的边框色派生亮/暗两档（`ui::reader::view::body::three_d_tone`）——
+/// `inset` 上/左暗、下/右亮，`outset` 相反，`groove` 每条边外暗内亮，`ridge` 相反。
+/// 与浏览器那套斜角拼角差在角上（我们仍是四条轴对齐的带子互相压边）。
+/// 《西游记》101 个元素写的 `border: currentColor inset 1px` 正是这一档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BorderStyle {
     #[default]
     None,
     Solid,
     Double,
+    Dotted,
+    Dashed,
+    /// 左上暗、右下亮（像一个凹进去的框）。
+    Inset,
+    /// 左上亮、右下暗（像一个凸出来的框）。
+    Outset,
+    /// 每条边外半暗、内半亮。
+    Groove,
+    /// 每条边外半亮、内半暗。
+    Ridge,
 }
 
 /// 一条边的三要素。CSS 的 `border-style: none` 时宽度**按 0 参与盒模型**，
@@ -429,6 +456,26 @@ impl ComputedStyle {
         self.border.map(|edge| edge.drawn())
     }
 
+    /// 四个角的圆角半径折成 px，顺序 `[左上, 右上, 右下, 左下]`，交给绘制层。
+    ///
+    /// 百分比按**盒宽**折（CSS 里横半径按盒宽、纵半径按盒高，两者不等时是一个椭圆角；
+    /// gpui 的 `Corners` 只有圆角，所以这里取横半径那一份当代表）。
+    ///
+    /// 相邻两个角沿同一条边相加超过边长时，CSS 会把所有半径**等比缩小**；这里用
+    /// 「每个角不超过 `min(宽, 高) / 2`」这一条近似 —— 真书里的圆角是 `1em` 量级，
+    /// 离溢出差得远，等比缩放那一档只在作者写出荒唐数时才轮到。
+    pub fn corner_radii(&self, width: f32, height: f32) -> [f32; 4] {
+        let cap = (width.min(height) / 2.0).max(0.0);
+        self.border_radius.map(|radius| {
+            let px = match radius {
+                Length::Px(v) => v,
+                Length::Percent(p) => p * width,
+                Length::Auto => 0.0,
+            };
+            px.clamp(0.0, cap)
+        })
+    }
+
     /// 把作者写下的一个**尺寸**折成内容盒上的数（`box-sizing` 落在这一个式子里）。
     ///
     /// `pad_border` 交的是这一格该扣的那一对：横向是「左 + 右的边框与内边距」，纵向是
@@ -471,8 +518,6 @@ pub enum BreakWhen {
     /// 没有声明：由剩余可用高度决定。
     #[default]
     Auto,
-    /// 这里尽量不断（`break-after: avoid` 常见于标题，意思是别把标题孤零零留在页尾）。
-    Avoid,
     Page,
     Left,
     Right,
@@ -480,7 +525,10 @@ pub enum BreakWhen {
 }
 
 impl BreakWhen {
-    /// 是不是「强制断在这里」的意图。`Avoid` 与 `Auto` 都不是。
+    /// 是不是「强制断在这里」的意图。只有 `Auto` 不是。
+    ///
+    /// `avoid` 不在这里：它已经从 [`crate::content::format::css::value::parse_break_when`]
+    /// 的表里划掉，因为排版层没有任何一处能兑现「尽量别在这断」。
     pub fn is_forced(self) -> bool {
         matches!(self, Self::Page | Self::Left | Self::Right | Self::Always)
     }
@@ -554,6 +602,79 @@ impl ComputedStyle {
         self.background_layers
             .iter()
             .filter(|layer| layer.image.is_some())
+    }
+}
+
+/// `position`：只收 `static`（初值）与 `absolute` / `fixed`。
+///
+/// **落地范围**：绝对定位的盒脱流、按 `left` / `right` / `top` / `bottom`（`%` 折自
+/// **这一章的盒**）摆，`margin` 加在偏移上（封面那套 `left:50%; margin-left:-9.5em` 的居中
+/// 写法就是靠它）。**只认章级包含块**：CSS 的「最近的定位祖先」没做，所以嵌在别的定位盒
+/// 里的绝对定位元素仍然按这一章摆。`relative` / `sticky` 判不认识 —— 前者要不脱流地挪
+/// 已排好的子树（命中与锚点都得跟着），后者要滚动状态，两样都不是排版这一层的事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Positioning {
+    #[default]
+    Static,
+    Absolute,
+    Fixed,
+}
+
+/// `vertical-align` 的**表格格**那一档：格里的内容在行高里贴哪一边。
+///
+/// CSS 的 `vertical-align` 有两副面孔：对行内盒是「相对行盒抬多少」（我们落成
+/// [`ComputedStyle::baseline_shift`]），对表格格是「贴在行高的哪一边」（就是这一格）。
+/// 这一格**不继承**（CSS 规定），所以整行的 `vertical-align: middle` 不会漏到格子上 ——
+/// 浏览器同样如此（Calibre 转换的书要另写 `vertical-align: inherit` 才生效）。
+///
+/// 落地程度：`top`（初值，也就是我们一直以来的行为）、`middle`、`bottom` 三档；
+/// 行内盒上的 `top` / `middle` / `bottom`（相对行盒）**还没做**，收下这个值但在行内不产生
+/// 位移 —— 本机语料里这几种写法全落在 `display: table-row` 上，浏览器也不动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CellVAlign {
+    #[default]
+    Top,
+    Middle,
+    Bottom,
+}
+
+/// `word-break`：拉丁词内部能不能断。
+///
+/// 只两档：`normal`（初值，词只能在空格/连字符处断）与 `break-all`（任意字符之间都能断）。
+/// `keep-all`（不许在 CJK 之间断）没收 —— 中文书的正文靠逐字断行，那条是给韩文/混排用的，
+/// 本机语料 0 处，判不认识比猜错好。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum WordBreak {
+    #[default]
+    Normal,
+    BreakAll,
+}
+
+/// `text-shadow` 的一层影子：位移 + 模糊半径 + 颜色。
+///
+/// 位移与模糊半径在这一层就已经折成 px（`em` 按**元素自己的**字号折，与其余长度属性同一条
+/// 口径）。CSS 里 `text-shadow` **可继承**，并且可以写多值（逗号分隔的图层），所以
+/// `ComputedStyle` 里存的是一整条列表。
+///
+/// 落地程度要说清：绘制层逐字形再画一遍偏移副本，**模糊半径不是高斯**，是按半径摊出来的
+/// 几份偏移副本（见 `ui::reader::view::paint::shadow_copies`）。真书里这个值普遍是 1px，
+/// 两者在屏上分不出来；写大了会被副本数封顶，不会把一帧画糊。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextShadow {
+    pub dx: f32,
+    pub dy: f32,
+    /// 模糊半径，px。0 = 硬边影子。
+    pub blur: f32,
+    /// `None` = 没写颜色，绘制时取**本 run 的文字色**（CSS 的 `currentColor`）。
+    pub color: Option<Color>,
+}
+
+impl std::hash::Hash for TextShadow {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.dx.to_bits().hash(h);
+        self.dy.to_bits().hash(h);
+        self.blur.to_bits().hash(h);
+        self.color.hash(h);
     }
 }
 
@@ -632,6 +753,42 @@ pub struct ComputedStyle {
     /// 四边边框，顺序 `[上, 右, 下, 左]`（与 `box_sides` 同一套展开规则）。
     /// 布局拿它算盒宽与盒高，绘制拿它画线；不继承。
     pub border: [BorderEdge; 4],
+    /// `border-spacing` 的 `(横, 纵)` 缝宽（px）。CSS 里**可继承**，且只在
+    /// `border-collapse: separate`（初值）下生效 —— 塌陷模式里它被忽略。
+    pub border_spacing: [f32; 2],
+    /// `border-collapse: collapse`。CSS 里**可继承**，所以写在 `<table>` 上就管到每个格子。
+    ///
+    /// 落地程度：合并只影响**画哪一条边**（`layout::geometry::Layout::decor_seeds` 里逐边
+    /// 与邻格比一次，赢的那侧留、输的那侧抹掉）。几何**没有**做「相邻两格各让出半个边宽」，
+    /// 所以合并后那条线落在先画那一格的边上（半个像素的偏移，肉眼分不出），
+    /// 而表格自己的边框与最外圈格子边框仍是两条（CSS 里它们也会合并）。
+    pub border_collapse: bool,
+    /// 四个角的圆角半径，顺序 `[左上, 右上, 右下, 左下]`（CSS 的顺序）。
+    ///
+    /// 百分比在这里**不折**：`border-radius` 的百分比一是按盒宽（横半径）、盒高（纵半径）
+    /// 各折一次，而那要等排版期才知道盒有多大 —— 与 `margin` 一族同一条口径，
+    /// 折算点在 [`Self::corner_radii`]。不继承。
+    ///
+    /// 落地程度：只有**底色**那一块四边形带圆角。边框仍是四条轴对齐的直条
+    /// （见 `ui::reader::view::body::decoration_child`），圆角盒配粗边框时四角是直的。
+    pub border_radius: [Length; 4],
+    /// `word-break`。CSS 里**可继承**。
+    pub word_break: WordBreak,
+    /// 表格格里内容的竖直对齐（`vertical-align` 的关键字那一面）。不继承。
+    pub cell_valign: CellVAlign,
+    /// 定位方式。不继承 —— 只有 `absolute` / `fixed` 会脱流。
+    pub position: Positioning,
+    /// 四条定位偏移。`%` 的基准是**包含块**：`left`/`right` 折自宽，`top`/`bottom` 折自高。
+    /// 不继承。
+    pub left: Option<Length>,
+    pub right: Option<Length>,
+    pub top: Option<Length>,
+    pub bottom: Option<Length>,
+    /// `text-shadow` 的图层列表（CSS 可继承、可多值）。
+    ///
+    /// 用 `Arc<[TextShadow]>` 而不是 `Vec`：`ComputedStyle` 每个 DOM 节点都克隆一份，
+    /// 而绝大部分节点没有影子 —— 空表克隆只是一次引用计数；有影子时也是共享。
+    pub text_shadows: Arc<[TextShadow]>,
     /// 词间额外宽度（px）。CSS 初值 `normal` 折成 0；它叠在**每个空格之后**，
     /// 所以折行与行宽都要算它（见 `layout::run_width`）。
     pub word_spacing: f32,
@@ -746,6 +903,17 @@ impl Default for ComputedStyle {
             background_color: None,
             background_layers: Vec::new(),
             border: [BorderEdge::default(); 4],
+            border_collapse: false,
+            border_spacing: [0.0; 2],
+            border_radius: [Length::ZERO; 4],
+            word_break: WordBreak::Normal,
+            cell_valign: CellVAlign::Top,
+            position: Positioning::Static,
+            left: None,
+            right: None,
+            top: None,
+            bottom: None,
+            text_shadows: Arc::from(Vec::new()),
             word_spacing: 0.0,
             letter_spacing: 0.0,
             baseline_shift: 0.0,
@@ -896,6 +1064,25 @@ impl std::hash::Hash for ComputedStyle {
         opt_len(&self.min_height, h);
         opt_len(&self.max_height, h);
         self.box_sizing.hash(h);
+        self.border_collapse.hash(h);
+        f(self.border_spacing[0], h);
+        f(self.border_spacing[1], h);
+        self.word_break.hash(h);
+        self.cell_valign.hash(h);
+        self.position.hash(h);
+        opt_len(&self.left, h);
+        opt_len(&self.right, h);
+        opt_len(&self.top, h);
+        opt_len(&self.bottom, h);
+        for radius in &self.border_radius {
+            len(radius, h);
+        }
+        // 影子列表：先把条数进哈希，再逐条按值 —— 少了条数这一行，`[a, b]` 与 `[a, b, c]`
+        // 只靠逐条哈希还分得开，但空表与「一条全零影子」会撞在一起。
+        self.text_shadows.len().hash(h);
+        for shadow in self.text_shadows.iter() {
+            shadow.hash(h);
+        }
         (self.break_before as u8).hash(h);
         (self.break_after as u8).hash(h);
         self.break_inside_avoid.hash(h);
@@ -939,7 +1126,9 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "background-origin",
     // `min-height` 在这份名单里空转过（认得、不生效）：2026-10-21 与 `min-width` 一起
     // 接进 `used_content_height` / `solve_block_width` 那两夹，所以移了出去。
-    "text-shadow",
+    //
+    // `text-shadow` 2026-10-29 移了出去：绘制层逐字形再画一遍偏移副本（模糊半径按
+    // 几份偏移副本近似），`text_shadows` 字段进样式哈希，见 [`TextShadow`]。
     // `direction` 以前在这份名单里（「认得、接受、不生效」），2026-10-14 那一轮把它
     // 变成真生效的属性，所以移出去了。
     // `writing-mode` 同一条路，2026-10-19 那一轮移出去的，而且那一轮排版层真读到了它：
@@ -958,11 +1147,9 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "column-gap",
     // 列表标记 2026-10-15 起真的画了，所以 `list-style` 与 `list-style-type` 从这份
     // 名单里移了出去 —— 它们现在会改屏上的东西（`layout::marker`）。
-    // 留下的两条：`list-style-image` 没有图源可画（标记只有文字那一条路），
-    // `list-style-position` 则是 `inside` / `outside` 一律按 `outside` 摆 ——
-    // 听得出、也画得出标记，但作者要的那一处差别给不了。
-    "list-style-image",
-    "list-style-position",
+    // `list-style-image` 与 `list-style-position` 2026-10-29 也移了出去：它们不是
+    // 「认得不生效」，而是**按初值做就等于做对了**（没有图源、标记挂在流动之外），
+    // 所以只收初值、其余值判不认识（见 `apply` 里那两条臂）。
     // 它会改变字符本身，而锚点与进度都建立在**源文本字节偏移**上（`Locator` 的坐标系）：
     // `capitalize` / `ß → SS` 这类一改就让偏移对不上。要接就得连 M5 的锚点映射一起定，
     // 不是加一条 `to_uppercase()` 的事。
@@ -972,23 +1159,31 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 这四条以前**不在这份名单里**，于是被算成「不认识」，`examples/css-gap` 的表就会说
     // 「这些属性我们听都没听过」—— 事实是认得，但要的是 gpui 的 `FontFeatures` 通道
     // （见开发方案 §3.2），那是接字体文件那一层的事，不是层叠期能折出来的数。
-    "font-variant",
-    "font-variant-caps",
+    // `font-variant` 与 `font-variant-caps` 2026-10-29 移了出去：它们的**初值** `normal`
+    // 就是我们做的事，于是改成只收初值（见 `apply` 里那一条臂）。
     "font-stretch",
     "font-kerning",
     "font-feature-settings",
     // 字距 2026-10-16 起真的生效了（`letter-spacing` 已从这份名单移除），所以这里不再列。
     //
-    // 定位一族。**不做绝对定位**：`position: absolute|fixed` 要的是「脱离常规流、按包含块
-    // 换算偏移」那一整套，而我们的排版从头到尾假定块沿游标自上而下摆（`Layout::stacked`
-    // 那格成立的前提）。真接得上先动 `layout::collect` 的整条流动，代价远大于它在真书里的
-    // 收益 —— 本机四本书里带非 static 定位的元素是个位数。所以四个偏移属性与 `z-index`
-    // 一并记「认得，不生效」：书里那处写法不再被报成「我们听都没听过」。
-    "position",
-    "left",
-    "right",
-    "top",
-    "bottom",
+    // `cursor` 是**界面提示**，不是排版属性：它说的是「指针移到这儿该长什么样」。
+    // 阅读器里能兑现它的地方只有链接（桌面端本来就对链接给手形），而书里把它写在
+    // 5718 个元素上（《毛泽东选集》）只是转换器把网页样式原样带进来。所以记
+    // 「认得、不生效」：落差表不再把它报成「我们听都没听过」，而它也确实不该动版面。
+    "cursor",
+    // ruby：`ruby-position` / `-epub-ruby-position`（以及竖排里的 `-webkit-text-combine`）
+    // 是一族的。**本机 20 个 epub 里 `<ruby>` / `<rt>` / `<rp>` 元素各 0 个** —— 那 157 条
+    // `-epub-ruby-position: over` 是转换器带进来的死声明。既然 `<rt>` 现在按普通行内串在
+    // 字后，宣称「`over` 这一档接住了」就是撒谎；而真正的 ruby 布局（注音排在字上方、
+    // 不推进基线）要动行内收集与行盒高度，本机没有一本书能验证。所以记「认得、不生效」。
+    "ruby-position",
+    "-epub-ruby-position",
+    "-webkit-text-combine",
+    // 定位一族 2026-10-29 接上了（`position: absolute|fixed` 与四个偏移，见
+    // [`Positioning`]）—— 落点是封面/标题页那几块装饰（`left:50%; margin-left:-9.5em`
+    // 那套居中写法）。`relative` / `sticky` 判不认识。
+    // `z-index` 留着：我们的绘制顺序是「相交即上抬」，不是 z 树，绝对定位盒的层序
+    // 按文档序走。
     "z-index",
 ];
 
