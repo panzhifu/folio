@@ -3354,7 +3354,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=e29e509bae9d107ca6559964f7ed4617ff649a98#e29e509bae9d107ca6559964f7ed4617ff649a98"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=f10aa80fc965f6d9a55c4e44ed930566a47adc39#f10aa80fc965f6d9a55c4e44ed930566a47adc39"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3424,7 +3424,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-apple"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=e29e509bae9d107ca6559964f7ed4617ff649a98#e29e509bae9d107ca6559964f7ed4617ff649a98"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=f10aa80fc965f6d9a55c4e44ed930566a47adc39#f10aa80fc965f6d9a55c4e44ed930566a47adc39"
 dependencies = [
  "anyhow",
  "async-task",
@@ -3661,7 +3661,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=e29e509bae9d107ca6559964f7ed4617ff649a98#e29e509bae9d107ca6559964f7ed4617ff649a98"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=f10aa80fc965f6d9a55c4e44ed930566a47adc39#f10aa80fc965f6d9a55c4e44ed930566a47adc39"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3816,7 +3816,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=e29e509bae9d107ca6559964f7ed4617ff649a98#e29e509bae9d107ca6559964f7ed4617ff649a98"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=f10aa80fc965f6d9a55c4e44ed930566a47adc39#f10aa80fc965f6d9a55c4e44ed930566a47adc39"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3843,7 +3843,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=e29e509bae9d107ca6559964f7ed4617ff649a98#e29e509bae9d107ca6559964f7ed4617ff649a98"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=f10aa80fc965f6d9a55c4e44ed930566a47adc39#f10aa80fc965f6d9a55c4e44ed930566a47adc39"
 dependencies = [
  "accesskit",
  "accesskit_windows",
