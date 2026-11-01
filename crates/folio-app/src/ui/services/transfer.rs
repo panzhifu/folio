@@ -78,6 +78,9 @@ pub fn set_enabled(on: bool, cx: &App) {
             port: DEFAULT_PORT,
             pin: String::new(),
             inbox_dir,
+            // 局域网同步要另一把钥匙（账号密钥）与一个能读本机书架的角色，那两样还没接进
+            // 这一层的装配里 —— 接上之前这一格保持 `None`：传书照常开，那五条路由一概 404。
+            lan: None,
         },
         on_file,
     ) {

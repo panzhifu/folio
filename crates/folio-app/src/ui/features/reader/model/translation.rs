@@ -23,7 +23,7 @@
 use folio_core::infra::task::{Priority, TaskEvent, TaskHandle};
 use folio_core::net::translate::{configured, source_hash};
 use folio_core::{Translation, TranslationEngine};
-use gpui_kit::{App, AppContext as _, Context, Pixels, Point};
+use gpui_kit::{App, AppContext as _, Context, Pixels, Point, point};
 
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
@@ -38,7 +38,8 @@ pub(in crate::ui::features::reader) use folio_core::net::translate::TARGET_LANGU
 pub(in crate::ui::features::reader) struct TranslationState {
     pub(in crate::ui::features::reader) seq: u64,
     pub(in crate::ui::features::reader) source: String,
-    /// 弹层锚点（窗口坐标）：菜单落地位置的原点，升起那一刻拍下来的快照。
+    /// 弹层锚点（窗口坐标）：菜单**顶边中点** —— 菜单那条尾巴指的正是这一处，弹层
+    /// 挂在同一个点上、把尾巴接过去。升起那一刻拍下来的快照。
     pub(in crate::ui::features::reader) anchor: Option<Point<Pixels>>,
     /// 这一趟用的引擎在缓存表里的键。落答案时用它，不读当时的配置 ——
     /// 请求发出之后读者可能已经在设置里换了引擎。
@@ -82,9 +83,13 @@ impl ReaderSession {
         if text.is_empty() {
             return;
         }
-        // 弹层锚在菜单此刻落地的位置：菜单随后要收，坐标先拍下来。
+        // 弹层锚在菜单此刻落地的位置：菜单随后要收，坐标先拍下来。拍的是**顶边中点**
+        // —— 菜单的尾巴就从那儿指向选区，弹层接手同一个点，读者的眼睛不用重找。
         // 没量到（首帧还没画过）就给 `None`，渲染那头兜底摆在正文顶部。
-        let anchor = self.menu_bounds.get().map(|bounds| bounds.origin);
+        let anchor = self
+            .menu_bounds
+            .get()
+            .map(|bounds| point(bounds.center().x, bounds.top()));
         self.selection_menu_open = false;
         self.translate_source(text, anchor, cx);
     }

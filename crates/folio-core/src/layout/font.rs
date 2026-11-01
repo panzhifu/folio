@@ -202,3 +202,72 @@ impl RunStyle {
         w
     }
 }
+
+/// 中西文自动间距：CJ（汉字/假名）与西文字母、数字**直接相邻**时，在两者之间插入
+/// 0.25em 的间隙。量与相邻性规则照抄 Typst 的 `cjk-latin-spacing: auto`
+/// （`reference/typst/crates/typst-layout/src/inline/prepare.rs::add_cjk_latin_spacing`），
+/// 口径出处是 clreq §3.2.2（横排混排）。
+///
+/// 规则（与 Typst 逐条对齐）：
+/// - CJ 侧只认汉字与假名（**不含谚文** —— 韩文有空格分词，不需要帮它隔开）；
+/// - 西文侧认拉丁/希腊/西里尔字母、ASCII 数字与 `#$%&`；
+/// - 中间隔着空白（折叠后的空格）就不插 —— 空白自己已经是分隔；
+/// - CJ 标点不算 CJ —— `，` 紧挨西文时不插（标点字幅的处理归挤压那一刀）。
+///
+/// 间隙记在**边界前一个字符**的宽度表项上（`wrap::Collector::push_widths`）。两个方向
+/// 的可见结果都是「西文与 CJ 之间多出一段」：CJ→西文时前一个恰是 CJ，与 Typst 把间隙
+/// 记在 CJ 字形的 advance 上同位；西文→CJ 时前一个是西文，与 Typst 记在 CJ 字形的
+/// advance+offset 视觉等价。下游四处同源：断行与行宽直接读宽度表；命中（`content::hit`
+/// 两趟逐字累加）按同一句加回；绘制（app 侧 `paint.rs` 的字形右推）同句 —— 少一处就是
+/// 「按宽度表断行、按 advance 命中、按 shaping 绘制」的三处漂。
+pub fn cjk_latin_gap(prev: char, next: char, font_size: f32) -> f32 {
+    let boundary = (is_cj_script(prev) && is_letter_or_number(next))
+        || (is_letter_or_number(prev) && is_cj_script(next));
+    if boundary {
+        // 0.25em：clreq 的缺省值，Typst 同量。Typst 另给两端对齐留了 0.125em 的可收缩量；
+        // 我们的两端对齐按隙摊、没有收缩机制，v1 先给死值。
+        0.25 * font_size
+    } else {
+        0.0
+    }
+}
+
+/// 这一段文本里有没有中西文边界。`content::hit` 的 shaping 快路判据用：shaping 的
+/// 字位里没有这些间隙，有边界的 run 必须走逐字累加的退路，否则命中与绘制漂。
+pub fn has_cjk_latin_boundary(text: &str) -> bool {
+    let mut prev: Option<char> = None;
+    for ch in text.chars() {
+        if let Some(p) = prev
+            && cjk_latin_gap(p, ch, 1.0) > 0.0
+        {
+            return true;
+        }
+        prev = Some(ch);
+    }
+    false
+}
+
+/// CJ 侧：汉字与假名。Typst 特意不含谚文（韩文分词靠空格），照抄 —— 见
+/// `reference/typst/.../inline/shaping.rs::is_cj_script` 的注释。
+fn is_cj_script(c: char) -> bool {
+    use unicode_script::UnicodeScript;
+    matches!(
+        c.script(),
+        unicode_script::Script::Han
+            | unicode_script::Script::Hiragana
+            | unicode_script::Script::Katakana
+    ) || c == '\u{30FC}'
+}
+
+/// 西文侧：拉丁/希腊/西里尔字母、ASCII 数字与 `#$%&`。同上，照抄 Typst 的
+/// `is_letter_or_number`。
+fn is_letter_or_number(c: char) -> bool {
+    use unicode_script::UnicodeScript;
+    matches!(
+        c.script(),
+        unicode_script::Script::Latin
+            | unicode_script::Script::Greek
+            | unicode_script::Script::Cyrillic
+    ) || matches!(c, '#' | '$' | '%' | '&')
+        || c.is_ascii_digit()
+}

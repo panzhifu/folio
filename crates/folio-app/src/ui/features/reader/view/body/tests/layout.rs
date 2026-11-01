@@ -1,8 +1,9 @@
 //! 排版引擎经真实 EPUB provider 与字体栈的集成验收（M1–M3 的门）。
 
-use super::harness::{epub_flow, open};
+use super::harness::{epub_flow, open, prefs, settle};
 use folio_core::{Chapter, FlowDoc, Locator, Reader};
-use gpui_kit::TestAppContext;
+#[allow(unused_imports)] // `#[gpui_kit::test]` 展开要它，unused 分析看不见宏里的使用
+use gpui_kit::{AppContext as _, TestAppContext};
 
 /// M2 的验收门：中文排版基础三件事必须由排版引擎产出。上一版在桌面上这些是
 /// `TextView` 画的，测到的是框架的行为；现在两端都是自绘，测的是引擎自己的行盒。
@@ -104,29 +105,32 @@ fn inline_styles_survive_into_runs(cx: &mut TestAppContext) {
     );
     let lines = view.read_with(cx, |v, _| v.lines());
 
-    let rich = lines
-        .iter()
-        .find(|l| l.text_runs().count() >= 4)
-        .expect("带 em/strong/span 的那一行应被切成多个 run");
+    // 标点挤压会把收尾标点切成单独一段，run 不再按「一行一组」聚；这里按整屏的
+    // run 判三种局部样式都在，不再要求它们恰好落在同一条「≥4 run」的行上。
+    let all: Vec<_> = lines.iter().flat_map(|l| l.text_runs()).collect();
     assert!(
-        rich.text_runs().any(|r| r.style.font.weight >= 700),
+        all.iter().any(|r| r.style.font.weight >= 700),
         "strong 应带粗体"
     );
-    assert!(rich.text_runs().any(|r| r.style.font.italic), "em 应带斜体");
+    assert!(all.iter().any(|r| r.style.font.italic), "em 应带斜体");
     assert!(
-        rich.text_runs()
-            .any(|r| r.style.color == Some(Color(0xC0, 0x39, 0x2B))),
+        all.iter()
+            .any(|r| r.style.color == Some(Color(0xC0, 0x39, 0x2B, 255))),
         "span.red 的局部颜色要落到 run 上"
     );
     assert!(
-        rich.text_runs().all(|r| r.width > 0.0),
+        all.iter().all(|r| r.width > 0.0),
         "每个 run 都要有实际绘制宽度"
     );
-    let sum: f32 = rich.text_runs().map(|r| r.width).sum();
+    let line = lines
+        .iter()
+        .find(|l| l.text_runs().next().is_some())
+        .expect("至少有一行文本");
+    let sum: f32 = line.text_runs().map(|r| r.width).sum();
     assert!(
-        (sum - rich.width).abs() < 0.5,
+        (sum - line.width).abs() < 0.5,
         "行宽应是各 run 宽度之和：{sum} vs {}",
-        rich.width
+        line.width
     );
 }
 
@@ -211,4 +215,165 @@ fn scratch_probe_h2_metrics(cx: &mut TestAppContext) {
             t
         );
     }
+}
+
+/// 一叠三张图：一帧只画一张（角上有 `k/n`），切一张之后**不许重排**。
+///
+/// 「现在看第几张」住界面（`Document::stack_current`），它不进 `LayoutKey`、不进样式哈希 ——
+/// 那等于每划一下重排整章，分页档的页数还会跟着变 —— 那是硬约束。
+/// 这条门量的就是这一格：切图前后行数与页数一个数都不许动，而画出来的确实换了一张。
+#[gpui_kit::test]
+fn a_stack_draws_one_member_and_switches_without_relayout(cx: &mut TestAppContext) {
+    use crate::ui::foundation::images::{BookImages, ChapterImages};
+    use gpui_kit::test::TestWindowExt as _;
+
+    cx.update(gpui_kit::init);
+    let png: Vec<u8> = {
+        use image::ImageEncoder as _;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                &vec![200u8; 600 * 300 * 3],
+                600,
+                300,
+                image::ExtendedColorType::Rgb8,
+            )
+            .expect("夹具 PNG 该编得出来");
+        bytes
+    };
+    let image = |href: &str| folio_core::content::format::ImageRes {
+        href: href.into(),
+        source: href.into(),
+        media_type: "image/png".into(),
+        width: 600,
+        height: 300,
+    };
+    let images = vec![image("a.png"), image("b.png"), image("c.png")];
+    let flow = FlowDoc {
+        chapters: vec![Chapter::inline(
+            "画廊",
+            "<p><img src=a.png></p><p><img src=b.png></p><p><img src=c.png></p><p>正文</p>",
+        )],
+        images: images.clone(),
+        ..Default::default()
+    };
+    let meta = super::harness::meta("epub");
+    let doc: std::sync::Arc<dyn folio_core::content::document::Document> = std::sync::Arc::from(
+        folio_core::content::document::from_content(meta, folio_core::Content::Reflow(flow)),
+    );
+    let (view, handle) = super::harness::build_with_document(
+        cx,
+        doc,
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        None,
+        None,
+        folio_core::PageTurn::Slide,
+    );
+    // `from_content` 造出来的书没有容器，`Book::new` 会把图片索引换成空表 —— 补上真清单
+    // 与内存字节，走的是生产上 EPUB 那一条（同 `capture.rs` 那一族）。
+    view.update(cx, |v, _| {
+        let book = match &mut v.source {
+            crate::ui::features::reader::model::session::Source::Book(book) => book,
+            _ => panic!("前置：这一本该是可重排那一族"),
+        };
+        let bytes = png.clone();
+        let source: crate::ui::foundation::images::ByteSource =
+            std::sync::Arc::new(move |_href: &str| Some(bytes.clone()));
+        let index = std::sync::Arc::new(BookImages::new(&images, source));
+        book.document_mut()
+            .set_images(std::sync::Arc::new(ChapterImages::new(index, "c0.xhtml")));
+    });
+    settle(cx, handle);
+    let marks = view.read_with(cx, |v, _| {
+        v.book()
+            .expect("有书")
+            .document()
+            .layout()
+            .lines
+            .iter()
+            .filter_map(|line| line.stack)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(marks.len(), 3, "三张图都该带叠标记：{marks:?}");
+    assert!(
+        marks.iter().all(|m| m.count == 3 && m.id == marks[0].id),
+        "一叠三格：{marks:?}"
+    );
+    let badge = cx
+        .update_window(handle, |_, window, _| {
+            window.try_find("reader-stack-badge").is_some()
+        })
+        .expect("窗口应能渲染");
+    assert!(
+        badge,
+        "一叠只画一张：角标只该有一条，读者才知道这里还有两张"
+    );
+
+    let (lines, pages) = view.read_with(cx, |v, _| (v.lines().len(), v.page_count()));
+    let moved = view.update(cx, |v, _| {
+        let book = v.book().expect("有书");
+        let mark = book
+            .document()
+            .layout()
+            .lines
+            .iter()
+            .find_map(|line| line.stack)
+            .expect("上面刚数过有叠");
+        book.document().advance_stack(mark.id, 1, mark.count)
+    });
+    assert!(moved, "第 1 张 → 第 2 张该报「变了」");
+    settle(cx, handle);
+    let (lines_after, pages_after, current) = view.read_with(cx, |v, _| {
+        let book = v.book().expect("有书");
+        let mark = book
+            .document()
+            .layout()
+            .lines
+            .iter()
+            .find_map(|line| line.stack)
+            .expect("叠还在");
+        (
+            v.lines().len(),
+            v.page_count(),
+            book.document().stack_current(mark.id),
+        )
+    });
+    assert_eq!(current, 1, "切到了第 2 张");
+    assert_eq!(
+        (lines, pages),
+        (lines_after, pages_after),
+        "切图不许重排：行数与页数都不该动"
+    );
+    // 两头停住：回到第一张之后不许回绕，也不该再报「变了」。
+    let again = view.update(cx, |v, _| {
+        let doc = v.book().expect("有书").document();
+        (
+            doc.advance_stack(0, -1, 3),
+            doc.advance_stack(0, -1, 3),
+            doc.stack_current(0),
+        )
+    });
+    assert_eq!(again, (true, false, 0), "走到第一张就该停住，不回绕");
+
+    // 分页档也要那两条「还能滑」的提示。分页这一臂从前只画当前那张（角标有、卡片边
+    // 与小点没有），所以分页里叠起来的几张看起来就是一整张图，读者不知道还能横滑。
+    view.update(cx, |v, cx| {
+        v.set_mode(
+            crate::ui::features::reader::model::chrome::PageMode::Paged,
+            cx,
+        )
+    });
+    settle(cx, handle);
+    let (peek, dots) = cx
+        .update_window(handle, |_, window, _| {
+            (
+                window.try_find("reader-stack-peek").is_some(),
+                window.try_find("reader-stack-dots").is_some(),
+            )
+        })
+        .expect("窗口应能渲染");
+    assert!(peek, "分页档也该在图下露出「下一张」的卡片边");
+    assert!(dots, "分页档也该有这一叠的小点");
 }

@@ -26,6 +26,7 @@ fn line(owner: u32, y: f32, height: f32) -> LineBox {
         baseline: height,
         align: TextAlign::Left,
         justify: None,
+        stack: None,
     }
 }
 
@@ -399,7 +400,7 @@ fn decorated(by_node: &[(u32, ComputedStyle)]) -> StyledDom {
 #[test]
 fn the_decor_table_matches_the_per_frame_full_scan() {
     let bg = ComputedStyle {
-        background_color: Some(Color(193, 204, 192)),
+        background_color: Some(Color(193, 204, 192, 255)),
         ..ComputedStyle::default()
     };
     let mut bordered = ComputedStyle::default();
@@ -409,7 +410,7 @@ fn the_decor_table_matches_the_per_frame_full_scan() {
         style: BorderStyle::Double,
         color: None,
     };
-    bordered.color = Some(Color(12, 34, 56));
+    bordered.color = Some(Color(12, 34, 56, 255));
     // 节点 5 有样式但什么装饰都没写 —— 不该进表。
     let plain = ComputedStyle::default();
 
@@ -439,7 +440,7 @@ fn the_decor_table_matches_the_per_frame_full_scan() {
     // 画法 `double` 也必须原样带出去，丢了它就退化成一条实线。
     assert_eq!(
         got[1].border[2],
-        (3.0, Some(Color(12, 34, 56)), BorderStyle::Double)
+        (3.0, Some(Color(12, 34, 56, 255)), BorderStyle::Double)
     );
     // 主题色一格都没进表 —— 剩下的那步「None 落主题前景」是绘制侧每帧做的。
     assert_eq!(got[0].border[2], (0.0, None, BorderStyle::None));
@@ -450,7 +451,7 @@ fn the_decor_table_matches_the_per_frame_full_scan() {
 #[test]
 fn each_decor_filter_still_fires_on_its_own() {
     let bg = ComputedStyle {
-        background_color: Some(Color(1, 2, 3)),
+        background_color: Some(Color(1, 2, 3, 255)),
         ..ComputedStyle::default()
     };
     let one = |b: BlockBox| assemble(vec![b], Vec::new(), 336.0, 600.0);

@@ -153,16 +153,11 @@ pub fn reading_top_inset(safe: &host::Insets) -> f32 {
 /// 报给正文的「不属于它的那一段」。两个轴都带着：正文自己看哪一轴非零（目录改成浮层之后
 /// 宽那一轴恒为 0，只剩外壳自己的占位；见 `reader::page` 里把 `reserve` 递回去那一步）。
 ///
-/// 高 = 顶上那一条（[`reading_top_inset`]）+ 底下那一条。顶上那一条阅读层自己让（把子元素
-/// 整体推下去）；底下那一条**不让层** —— 底栏卡片与干净态那条页脚自己抬高内容、把底色铺到
-/// 屏幕底（见 `reader::page` 的 `bottom_inset`），这样手势条那一段不是一条空缝，颜色与卡片
-/// 保持一致。阅读页量的是**窗口**高，少扣一条它就会把正文盒算高几十逻辑像素，多出来的那一段
-/// 落在页脚带下面被裁掉，于是章尾那几行永远滚不进视野。
-pub fn reading_reserve(safe: &host::Insets) -> Reserve {
-    Reserve {
-        width: 0.0,
-        height: reading_top_inset(safe) + safe.bottom,
-    }
+/// 现在只剩**宽**：上下两条系统边由阅读页报给会话的 `PageInsets` 管（见
+/// [`reading_top_inset`] 与 `ReadingPage::set_bottom_inset`），不再从这里走一道“高度预留”。
+/// 桌面侧栏是压在正文上的浮层，所以这一格实际为 0；留着它是给真的让宽的侧栏。
+pub fn reading_reserve(_safe: &host::Insets) -> Reserve {
+    Reserve::ZERO
 }
 
 /// 一次 push / pop 走这么久。与底部弹层那根弹簧的响应时间同一档（`widgets::bottom_sheet`），
@@ -1096,10 +1091,10 @@ impl AppShell {
             page.set_enter_shift(enter_shift);
             page.set_top_inset(top_inset, cx);
         });
+        // 两种纸都从窗口 0 起：图与底色铺到系统边，正文/读数带在页内自己让。
         div()
             .absolute()
             .inset_0()
-            .pt(px(top_inset))
             .bg(cx.theme().background)
             .left(px(shift))
             .right(px(-shift))

@@ -32,12 +32,15 @@ impl ReaderSession {
             let gap = Book::chapter_gap(&self.prefs);
             let chapter = book.chapter_at_y(self.scroll_y, gap)?;
             let base = book.base_of(chapter, gap).unwrap_or(0.0);
+            // 章内排版坐标 = 全局 y − 章基线。**只减这一格**：绘制那条式子里
+            // `content_top` 是另加的一项，这里再减一次就是重复（见 `view::body` 的
+            // `local_band`，2026-11-01 真机「下边距变大」就是它）。
             let offset = book.span_doc(chapter)?.offset_at_y(self.scroll_y - base);
             return Some((chapter, offset));
         }
         let columns = self.laid_out.columns.max(1);
         for column in 0..columns {
-            let Some(slice) = book.document().slice_of(self.page, column, columns) else {
+            let Some(slice) = book.document().slice_of(self.page, column) else {
                 break;
             };
             if slice.empty {
@@ -164,8 +167,9 @@ impl ReaderSession {
         if self.laid_out.mode.is_continuous() {
             // 全局 y = 锚章基线 + 章内行顶。锚章还没进链（没排完）时基线是 0，
             // 与「排版没做过就回章首」的既有兜底一致。
-            let base = book.base_of(book.chapter_index(), gap).unwrap_or(0.0);
-            self.scroll_y = base + book.document().y_at_offset(offset);
+            self.scroll_y = book
+                .global_y_of_offset(book.chapter_index(), offset, gap)
+                .unwrap_or_else(|| book.document().y_at_offset(offset));
         } else {
             let line = book.document().line_at_offset(offset);
             self.page = book

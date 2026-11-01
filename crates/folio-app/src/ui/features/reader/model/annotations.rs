@@ -375,8 +375,8 @@ impl ReaderSession {
     /// 取消划线：把选区对应的那一条从库里删掉，画出来的那条划线随它消失。
     ///
     /// 删除本体在 [`ReaderSession::remove_annotation`]（列表屏的删除命令与这里是
-    /// 同一条路，撤销也在那条路上）；这里只多管选区：删成了就收掉 —— 屏上已经
-    /// 没东西可挑中了，留着一段「选中」只会让读者以为还能再删一次。
+    /// 同一条路，那条路**不给**撤销胶囊 —— 取消划线是真删）；这里只多管选区：删成了就
+    /// 收掉 —— 屏上已经没东西可挑中了，留着一段「选中」只会让读者以为还能再删一次。
     pub fn delete_highlight(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.selection_annotation() else {
             return;
@@ -502,10 +502,17 @@ impl ReaderSession {
         // 输入一变就重画这一层：保存键在「新笔记还空着」时是灰的，得跟着框里的字翻。
         let watch = cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify());
         input.update(cx, |input, cx| input.focus(window, cx));
+        // 便签卡的那枚小三角要对着选区：菜单随后要收，先把它此刻落地的中线拍下来
+        // （与翻译那格同一条路，见 `model/translation.rs` 的 `open_translation`）。
+        let anchor_x = self
+            .menu_bounds
+            .get()
+            .map(|bounds| f32::from(bounds.center().x));
         self.note_editor = Some(NoteEditor {
             input,
             annotation: existing,
             excerpt: excerpt.into(),
+            anchor_x,
             _watch: watch,
         });
         self.selection_menu_open = false;

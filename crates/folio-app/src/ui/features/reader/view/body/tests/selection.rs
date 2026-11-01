@@ -312,3 +312,47 @@ fn a_page_turn_and_a_mode_switch_clear_the_selection(cx: &mut TestAppContext) {
         "换摆法即清"
     );
 }
+
+/// 选中的底色贴着字，不跟着行盒长。
+///
+/// `handle_hits` 每帧由 `selection::register` 从插入符盒写进来，而插入符高就是首个/
+/// 末个高亮矩形的高（`TouchHandle::hit_bounds` 把它再加一圈指头余量）。所以从命中区
+/// 反推得到的是**这一帧真画出来的**选区高 —— 不用另开一份绘制探针。
+#[gpui_kit::test]
+fn the_selection_band_is_no_taller_than_the_text(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    drag_select(cx, &view, handle);
+    settle(cx, handle);
+    let (line_height, ink, caret_height) = view.read_with(cx, |v, _| {
+        let line = &v.lines()[1];
+        let (_, ink) = crate::ui::features::reader::view::body::text_ink_box(line)
+            .expect("这一行有字，该给字墨盒");
+        let hit = v
+            .handle_hits
+            .borrow()
+            .first()
+            .map(|(_, bounds)| f32::from(bounds.size.height))
+            .expect("选中之后该有把手");
+        (
+            line.height,
+            ink,
+            hit - f32::from(gpui_kit::base::TouchHandle::EXTENT),
+        )
+    });
+    assert!(
+        ink < line_height - 2.0,
+        "前置：默认行距下字墨该比行盒矮（{ink} vs {line_height}）"
+    );
+    assert!(
+        (caret_height - ink).abs() < 0.5,
+        "画出来的选区高该是字墨高 {ink}，实得 {caret_height}"
+    );
+}

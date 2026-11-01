@@ -335,7 +335,7 @@ impl ReaderSession {
         let rtl = self.progression_rtl();
         let free_right = intent.is_none_or(|intent| (intent == TurnIntent::Next) != rtl);
         let paper =
-            turn_animation::paper_area(style, self.laid_out.mode, self.page_area, free_right);
+            turn_animation::paper_area(style, self.laid_out.mode, self.page_area(), free_right);
         let dist = paper.distance(style.axis());
         (dist > 0.0).then(|| (style.axis(), dist, rtl))
     }
@@ -375,7 +375,7 @@ impl ReaderSession {
         at: Point<Pixels>,
         origin: Point<Pixels>,
     ) -> (f32, f32) {
-        let area = self.page_area;
+        let area = self.page_area();
         (
             (f32::from(at.x) - f32::from(origin.x) - area.left) / area.width().max(1.0),
             (f32::from(at.y) - f32::from(origin.y) - area.top) / area.height().max(1.0),
@@ -397,6 +397,53 @@ impl ReaderSession {
         at: Option<(f32, f32)>,
         cx: &mut Context<Self>,
     ) -> SwipeStep {
+        // 起手压在某一叠图上：这一笔先按「切图」走，翻页层与滚动层都不许认领它。
+        //
+        // 什么时候改判成「滚」：手指明显在**竖着**走（`|dy| > |dx|`）。画廊是一长串叠，
+        // 把竖着滚也吃掉就成了「在图上滑不动书」—— 那是比切不动更坏的坏。
+        // 门槛取「图宽的五分之一，且不小于 24 逻辑像素」：横向走过它才换一张，
+        // 没走过就松手 = 读者只是按了一下，图不动。
+        //
+        // 从前是三分之一：手机上那张图约 340 逻辑宽，三分之一 = 113，读者读成
+        // 「要拖很长才切一张」（2026-11-01 真机）。五分之一 ≈ 68，比一屏翻页的手感近，
+        // 又还留着「按一下不切」的余量。
+        if let Some(hit) = self.stack_grab {
+            match phase {
+                TouchPhase::Started => return SwipeStep::Swallow,
+                TouchPhase::Moved => {
+                    self.stack_dx += step_x;
+                    self.stack_dy += step_y;
+                    if self.stack_dy.abs() > self.stack_dx.abs().max(8.0) {
+                        self.stack_grab = None;
+                        return SwipeStep::Ignore;
+                    }
+                    return SwipeStep::Swallow;
+                }
+                TouchPhase::Ended | TouchPhase::Cancelled => {
+                    self.stack_grab = None;
+                    let dx = std::mem::take(&mut self.stack_dx);
+                    self.stack_dy = 0.0;
+                    let edge = (f32::from(hit.rect.size.width) / 5.0).max(24.0);
+                    if dx.abs() >= edge {
+                        // 手指往左 = 下一张；阿拉伯语那一族反过来（与翻页同一套读法）。
+                        let delta = if dx < 0.0 { 1 } else { -1 };
+                        let delta = if self.progression_rtl() {
+                            -delta
+                        } else {
+                            delta
+                        };
+                        // 到这一叠的两头就交回翻页层：否则整页大的图会把整屏吃住，
+                        // 读者再也划不到下一页。
+                        if !self.advance_stack(&hit, delta, cx)
+                            && let Some(intent) = TurnIntent::from_delta(delta as isize)
+                        {
+                            self.turn(intent, cx);
+                        }
+                    }
+                    return SwipeStep::Swallow;
+                }
+            }
+        }
         if wheel {
             self.swipe_sealed = false;
         }
@@ -474,7 +521,7 @@ impl ReaderSession {
     fn swipe_walk(&mut self, step_x: f32, step_y: f32, cx: &mut Context<Self>) -> SwipeStep {
         // 先取版心尺寸与这一格的时刻：下面 `self.swipe.as_mut()` 会把 `self` 的字段借走。
         let now = cx.background_executor().now();
-        let area = self.page_area;
+        let area = self.page_area();
         let width = area.width().max(1.0);
         let height = area.height().max(1.0);
         let Some(track) = self.swipe.as_mut() else {
@@ -600,8 +647,18 @@ impl ReaderSession {
             TurnPlan::Chapter { delta } => match self.chapter_landing(delta) {
                 Some(to) => to,
                 // 真还没排好（刚进书、大章的第一帧）：这一笔仍归翻页认领（不落到滚动那条），
-                // 但不跟手，松手交给 `turn()` 走原来那条等排版的路。
-                None => return Claim::Claimed,
+                // 但不跟手，松手交给 `turn()` 走原来那条等排版的路 —— 前提是把方向留下：
+                // 从前这里只 `return Claimed`，而 `swipe_release` 读的是 `track.claim`（这一格
+                // 恰恰没写上它），于是整划连「往哪翻」一起丢掉，读者读到的是「章末划一下，
+                // 什么也没发生，得再划一次」。留下的那一格由渲染帧末的 `drain_pending_turn`
+                // 补，邻章排版在飞时那条渲染帧本来就在走（`chapter_layout` 为在飞的作业要帧）。
+                //
+                // 这里**不** `cx.notify()`：认领却没定性的那一格，拖动里每一步都会重走进来
+                // （`track.claim` 一直是 `None`），一发通知就是一次整屏元素树重建，压在最热的那条路上。
+                None => {
+                    self.pending_turn = Some(intent);
+                    return Claim::Claimed;
+                }
             },
             // 上面 530 那一句已经把这两类挡回去了；这里只为穷尽。
             TurnPlan::None | TurnPlan::Scroll { .. } => return Claim::Refused,
@@ -615,6 +672,7 @@ impl ReaderSession {
         if style == PageTurn::Curl && !self.curl_capture_ready() {
             // 这一笔先不跟手，但**别吞掉**：方向记下来，松手时 `turn()` 会在门开的那一帧
             // 补一趟。返回 `Claimed` 让识别器把整笔归给翻页（不落到滚动），页号仍然不动。
+            // 与上面跨章那一格同一条：每一步都会重走到这里，所以这里只记数、不要帧。
             self.pending_turn = Some(intent);
             return Claim::Claimed;
         }

@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::collect::{Collected, DEFAULT_STYLE, IMAGE_GLYPH, ImageAtom, Piece};
-use super::font::{RunStyle, StyleArena, StyleRef};
+use super::font::{RunStyle, StyleArena, StyleRef, cjk_latin_gap};
 use super::geometry::{ImageRun, LineFragment, LineRun};
 use super::ports::{ImageProvider, Measure, image_size};
 use crate::content::dom::{Dom, NodeId, NodeKind};
@@ -311,7 +311,13 @@ pub(super) fn scan_by_char(
     let mut inset = line_inset(cap, insets, plans.len(), *first, indent);
     let mut avail = inset.avail(width);
     let slice = collected.text.get(from..hard_end).unwrap_or("");
-    for (i, _ch) in slice.char_indices() {
+    // 行尾悬挂：这一行末尾已经挂上去的收尾标点的结束字节。`None` = 没挂。
+    //
+    // 悬挂让标点**越过版心**留在本行，所以后面的字一律从下一行起；断点也要
+    // 跟着落到悬挂段之后，否则 UAX #14 的禁则会把前一个字连标点一起拉回下一行，
+    // 悬挂就白做了。
+    let mut hang_end: Option<usize> = None;
+    for (i, ch) in slice.char_indices() {
         let at = from + i;
         // 下沉的那一段不进这一行的累加宽度：它自己成一个片段摆在行首。
         if cap_norm.as_ref().is_some_and(|norm| norm.contains(&at)) {
@@ -320,7 +326,19 @@ pub(super) fn scan_by_char(
         // 宽度表按字节下标存，图片哨兵也已经写进去了。
         let w = collected.width_at(at);
         if at > line_start && used + w > avail {
-            let cut = last_break_before(breaks, at, line_start).unwrap_or(at);
+            // 悬挂段已经开始时，紧跟着的收尾标点继续挂（`。”`、`）】` 这类成对标点）；
+            // 第一次悬挂要求「扣掉这个标点之前的内容还装得下」，内容本身溢出时
+            // 挂它只会把标点推得更远。
+            let continuation = hang_end == Some(at);
+            if hangs_at_end(ch) && (continuation || (hang_end.is_none() && used <= avail)) {
+                used += w;
+                hang_end = Some(at + ch.len_utf8());
+                continue;
+            }
+            let mut cut = last_break_before(breaks, at, line_start).unwrap_or(at);
+            if let Some(end) = hang_end {
+                cut = cut.max(end);
+            }
             plans.push(plan_for(
                 line_start..cut,
                 cap,
@@ -331,12 +349,16 @@ pub(super) fn scan_by_char(
             ));
             line_start = cut;
             used = sum_widths(collected, cut..at) + w;
+            hang_end = None;
             *first = false;
             // 换了行 → 重算这一行让出去的宽。
             inset = line_inset(cap, insets, plans.len(), *first, indent);
             avail = inset.avail(width);
         } else {
             used += w;
+            // 这一行还在继续往后走，之前那个标点已经不在行尾了。行真的在这里收尾时，
+            // `emit_line` 会按末尾字符重新判悬挂，不靠这一格。
+            hang_end = None;
         }
     }
     finish_hard_line(
@@ -510,6 +532,68 @@ pub(super) struct Sizes {
     pub screen_height: Option<f32>,
 }
 
+/// 简化版标点挤压：只做**收尾标点后半格**。
+///
+/// 全角逗号/句号的 advance 是 1em，而字墨在左半边，右半边是空的；下一个字从 1em 处
+/// 起笔，读起来就离了半个字。这里把收尾标点自己的前进量减半，下一段自然从墨的右边
+/// 开始。只压「后一个字是汉字/假名/谚文」的情况，拉丁词前的空白可能是有意的。
+///
+/// 不做的（留给下一刀）：开引号/括号左侧的半格、相邻标点不重复压。
+/// 那几样要按上下文成对判断，已经不是「一行宽表」能收的了。行尾悬挂见
+/// [`hangs_at_end`] 与 [`hanging_width`]：它不压前进量，而是把标点留在行尾、
+/// 让它的字形伸进版心外的空白。
+const PUNCT_TRIM_EM: f32 = 0.5;
+
+/// 收尾标点：它们的字墨在左半，右半是空白。
+fn trims_after(ch: char) -> bool {
+    matches!(
+        ch,
+        '，' | '。' | '、' | '；' | '：' | '！' | '？' | '」' | '』' | '）' | '》' | '】' | '〕'
+    )
+}
+
+/// 行尾可以悬挂的标点：收尾标点，外加闭引号与全角右括号。
+///
+/// 这是 LaTeX xeCJK `PunctStyle=kaiming` 那一档「行尾标点悬挂」的同一口径：
+/// 标点的前进量不算进这一行该对齐到的版心宽，字形照旧画在行尾之外。它和
+/// [`PUNCT_TRIM_EM`] 的挤压不是一回事 —— 挤压改的是**行内**下一个字从哪儿起，
+/// 悬挂只在**行尾**把最后一个标点让到版心外。
+///
+/// 闭引号不在挤压表里：`”` / `’` 的排版宽度随字体不同，按全角假设去减半格会
+/// 在比例引号上压出负数。悬挂只借用它的前进量，不改宽度表。
+pub(super) fn hangs_at_end(ch: char) -> bool {
+    trims_after(ch) || matches!(ch, '”' | '’' | '〉' | '］' | '｝')
+}
+
+/// 行尾悬挂量：`end` 前面连续收尾标点的前进量之和。
+///
+/// `emit_line` 用它把对齐与两端对齐的基准宽从「含标点」改成「不含标点」：
+/// 内容因此仍贴着版心边缘，标点整格落在外面的留白里。`LineBox::width` 照旧
+/// 记含标点的片段宽之和 —— 命中、选区与墨迹宽要的是字真正画到哪儿。
+pub(super) fn hanging_width(collected: &Collected, end: usize) -> f32 {
+    let mut width = 0.0;
+    for (at, ch) in collected.text.get(..end).unwrap_or("").char_indices().rev() {
+        if !hangs_at_end(ch) {
+            break;
+        }
+        width += collected.width_at(at);
+    }
+    width
+}
+
+/// 只有后一个字是 CJK 时才压。拉丁词、数字、空白、另一个标点都保持原样。
+fn trims_before_text(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x3040..=0x30FF
+            | 0xAC00..=0xD7AF
+            | 0x20000..=0x2FA1F
+    )
+}
+
 /// 把若干兄弟子树展平成一段文本，同时记下每个来源节点的区间与其元素样式。
 /// `width` 是段落的可用宽度，用来折算图片的百分比宽度。
 ///
@@ -549,13 +633,12 @@ pub(super) fn collect(
         screen_width,
         page_height,
         screen_height,
-        alone_in_paragraph: pieces.len() == 1
-            && super::collect::picture_src(dom, pieces[0]).is_some(),
     };
     for node in pieces {
         let style = out.intern_style(*node);
         out.push_node(*node, pre, style);
     }
+    out.trim_punctuation();
     Collected {
         text: out.text,
         pieces: out.pieces,
@@ -603,14 +686,6 @@ struct Collector<'a> {
     page_height: Option<f32>,
     /// 屏幕高（`None` = 界面没给）。见 [`Sizes::screen_height`]。
     screen_height: Option<f32>,
-    /// 这一趟的行内内容**只有一张图**（`<p><img></p>` 那种独占一段的插图）。
-    ///
-    /// 书里的插图绝大多数是这么写的：`<img>` 在 UA 表里天生 inline，于是它不会走
-    /// 块级那条路，而被收成一个「只有一张图」的匿名段。读者那一档「铺满屏幕」说的
-    /// 是「整块的图铺到屏幕边」—— 独占一段就是那个「整块」，所以这一格让行内臂
-    /// 也有资格按屏幕宽排；夹在字中间的那种（同段还有别的 piece）仍然不放大，
-    /// 否则一张图标会把整段顶走。
-    alone_in_paragraph: bool,
 }
 
 impl<'a> Collector<'a> {
@@ -642,6 +717,18 @@ impl<'a> Collector<'a> {
         // 再按字符起点写进去。**不能逐字节 `push`**：CJK 一字符三字节，
         // push 三次（其中两次是 0）比一次 memset 填满慢得多（实测 +12%）。
         self.widths.resize(base + (self.text.len() - start), 0.0);
+        // 跨段边界的第一个字符：与上一段最后一个**落了表**的字符之间也可能有中西文
+        // 边界。上一段若是注音（宽度没落表，格上是 0.0），别把间隙记到空格上 ——
+        // 真字符的前进量恒 > 0，拿这一格当判据。
+        let mut prev: Option<(usize, char)> = None;
+        if start > 0
+            && let Some(pc) = self.text[..start].chars().last()
+        {
+            let prev_at = start - pc.len_utf8();
+            if self.widths[prev_at] != 0.0 {
+                prev = Some((prev_at, pc));
+            }
+        }
         for (i, (offset, ch)) in self.text[start..].char_indices().enumerate() {
             // 字距叠在**每个**字符上，词距再叠在空格上 —— 与 `RunStyle::advance` 逐字一致，
             // 否则会出现「按宽度表断行、按 advance 命中」两处漂。
@@ -656,7 +743,103 @@ impl<'a> Collector<'a> {
                 self.note_width += w;
                 continue;
             }
+            // 中西文间隙记在**边界前一个字符**的宽度表项上（规则与方向见
+            // `cjk_latin_gap` 的文档）。断行、行宽、justify 的 `acc.width` 全部从
+            // 这张表读，间隙一处落账处处生效；命中与绘制那两处按同一句加回。
+            if let Some((prev_at, prev_ch)) = prev {
+                let gap = cjk_latin_gap(prev_ch, ch, font_size);
+                if gap > 0.0 {
+                    self.widths[prev_at] += gap;
+                }
+            }
             self.widths[base + offset] = w;
+            prev = Some((base + offset, ch));
+        }
+    }
+
+    /// 把一段文本按收尾标点切成几个 `Piece`。
+    ///
+    /// 切开的理由只有一个：`LineRun` 的起点是**片段累计宽**。如果逗号还在一条长 run
+    /// 里，宽度表把它的前进量减半了，可 run 内部的字形仍按 shaping 的 1em 摆，下一段
+    /// 不会跟着前移。切成「标点单独一段 + 后面的文字另起一段」，绘制与命中才吃同一个
+    /// 累计宽。
+    ///
+    /// 空白折叠过的文本（`norm.len() != orig.len()`）不切：`orig` 无法逐段精确映射，
+    /// 切了会让选区/锚点漂；那一类文本也通常不是中文正文。
+    fn push_text_pieces(
+        &mut self,
+        node: NodeId,
+        norm: Range<usize>,
+        orig: Range<usize>,
+        style: StyleRef,
+    ) {
+        if norm.len() != orig.len() {
+            self.pieces.push(Piece {
+                node,
+                norm,
+                orig,
+                style,
+                x_offset: 0.0,
+            });
+            return;
+        }
+        let mut segments = Vec::new();
+        let mut start = norm.start;
+        for (offset, ch) in self.text[norm.clone()].char_indices() {
+            if !trims_after(ch) {
+                continue;
+            }
+            let at = norm.start + offset;
+            if at > start {
+                segments.push(start..at);
+            }
+            let end = at + ch.len_utf8();
+            segments.push(at..end);
+            start = end;
+        }
+        if start < norm.end {
+            segments.push(start..norm.end);
+        }
+        for segment in segments {
+            let base = orig.start + (segment.start - norm.start);
+            self.pieces.push(Piece {
+                node,
+                norm: segment.clone(),
+                orig: base..base + segment.len(),
+                style,
+                x_offset: 0.0,
+            });
+        }
+    }
+
+    /// 把收尾标点的前进量减掉半格（见 [`PUNCT_TRIM_EM`]）。
+    ///
+    /// 只压**单字符 piece**：切出来的标点才是一格一段；折叠文本没有切，保持原样。
+    fn trim_punctuation(&mut self) {
+        let mut trims = Vec::new();
+        for piece in &self.pieces {
+            let text = &self.text[piece.norm.clone()];
+            let mut chars = text.chars();
+            let Some(ch) = chars.next() else {
+                continue;
+            };
+            if chars.next().is_some() || !trims_after(ch) {
+                continue;
+            }
+            let at = piece.norm.start;
+            let next = self.text[at + ch.len_utf8()..].chars().next();
+            if !next.is_some_and(trims_before_text) {
+                continue;
+            }
+            let Some(run) = self.arena.get(piece.style) else {
+                continue;
+            };
+            trims.push((at, run.font_size * PUNCT_TRIM_EM));
+        }
+        for (at, trim) in trims {
+            if let Some(width) = self.widths.get_mut(at) {
+                *width = (*width - trim).max(0.0);
+            }
         }
     }
 
@@ -679,13 +862,7 @@ impl<'a> Collector<'a> {
             };
             if self.text.len() > norm_start {
                 self.push_widths(norm_start, style);
-                self.pieces.push(Piece {
-                    node,
-                    norm: norm_start..self.text.len(),
-                    orig,
-                    style,
-                    x_offset: 0.0,
-                });
+                self.push_text_pieces(node, norm_start..self.text.len(), orig, style);
             }
             return;
         }
@@ -885,16 +1062,10 @@ impl<'a> Collector<'a> {
         // 读者选了「铺满屏幕」时同样换成屏幕宽：那一档说的就是「图铺到屏幕边上」，
         // 与作者有没有出血无关。两档共用下面这一个 `wide` —— 基准宽与「够不够大」
         // 的判据必须同源，否则「基准换了、判据没换」会让同一张图在两处得到不同的宽。
-        let bleed = super::collect::bleeds_wide(self.dom, self.styles, node)
-            && !matches!(
-                style.image_scale,
-                crate::infra::config::ImageScale::Original
-            );
-        // 「铺满屏幕」这一档对**独占一段**的图生效：书里的插图几乎都是 `<p><img></p>`
-        // 那个形状（`<img>` 天生 inline），按它才算「整块的图」。
-        let wide = bleed
-            || (self.alone_in_paragraph
-                && matches!(style.image_scale, crate::infra::config::ImageScale::Screen));
+        let bleed = super::collect::bleeds_wide(self.dom, self.styles, node);
+        // **尺寸听 CSS**：只有作者显式写了出血（`duokan-bleed`）才把基准换成屏幕宽；
+        // 独立成段、`object-fit` 都不再自动铺满 —— 作者写 `width:60%` 就是 60%。
+        let wide = bleed;
         // 基准：要铺到屏幕上的那一张换成屏幕宽（比栏宽窄时仍取栏宽，不许把图缩进栏里）。
         let basis = if wide {
             self.screen_width
@@ -904,7 +1075,13 @@ impl<'a> Collector<'a> {
         };
         let (mut w, mut h) = match (&resolved, aspect) {
             (_, Some(ratio)) => (basis, basis * ratio),
-            (Some(img), None) => image_size(style, img.width, img.height, basis, self.screen_width),
+            (Some(img), None) => image_size(
+                style,
+                img.width,
+                img.height,
+                basis,
+                if wide { self.screen_width } else { None },
+            ),
             (None, None) => return,
         };
         // 大图铺满屏幕（读者 2026-10-30 定的口径）：**够大**的图按屏幕宽等比放大，
@@ -913,16 +1090,7 @@ impl<'a> Collector<'a> {
         // 大尺寸的 `contain` 都按屏幕宽重算一遍宽高。只放大不改小：一张小图标不该被
         // 拉成满屏（`scale-down` 与 `fill` 保持原样）。
         if let Some(screen) = self.screen_width
-            && matches!(
-                style.image_scale,
-                crate::infra::config::ImageScale::Follow | crate::infra::config::ImageScale::Screen
-            )
-            && (bleed
-                || matches!(
-                    style.object_fit,
-                    crate::content::format::css::computed::ObjectFit::Cover
-                        | crate::content::format::css::computed::ObjectFit::Contain
-                ))
+            // `object-fit: cover` / 出血那两张才放大；其余听 CSS。
             && w < screen
             && resolved.is_some()
         {
@@ -940,12 +1108,9 @@ impl<'a> Collector<'a> {
             // 但「够不够大」这一条**两档共用同一份输入**：页高缺省时退回屏高。从前这里
             // 只认页高，连续滚动（`page_height: None`）里 `contain` 恒不放大，切到分页
             // 又放大 —— 读者报的「切到仿真图变小」正是这一条。
+            // 「该铺」恒为真（读者那一档已撤掉）；「本来就不小」仍由宽/高八成挡着。
             let big_enough = super::collect::fills_the_screen(
-                wide || matches!(
-                    style.object_fit,
-                    crate::content::format::css::computed::ObjectFit::Contain
-                ),
-                style,
+                bleed,
                 w,
                 h,
                 self.width,

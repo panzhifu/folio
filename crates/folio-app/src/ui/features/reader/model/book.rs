@@ -63,10 +63,36 @@ pub(in crate::ui::features::reader) struct Span {
 }
 
 /// 一章在全局坐标里的摆位（只读投影）：起点、高度，都是排版像素。
+#[derive(Debug)]
 pub(in crate::ui::features::reader) struct Placement {
     pub(in crate::ui::features::reader) index: usize,
     pub(in crate::ui::features::reader) base_y: f32,
     pub(in crate::ui::features::reader) height: f32,
+}
+
+/// 把「章高 + 是不是整页画」按章号顺序叠成全局坐标。
+///
+/// **两条满版图之间不留缝**。章间距是一层底色，夹在两章中间给正文透气；而两张整页图
+/// 上下相接时，那一条底色就成了一道白/黑带（读者报的「图片之间有间隙」——《诡秘之主》
+/// 第 4、5 节的 `fm1.jpg` / `fmc1.jpg`）。两边都要成立：只有一侧是图时，缝隙仍留在
+/// 正文与图之间。
+fn stack(entries: Vec<(Placement, bool)>, gap: f32) -> Vec<Placement> {
+    let count = entries.len();
+    let picture: Vec<bool> = entries.iter().map(|(_, flag)| *flag).collect();
+    let mut out: Vec<Placement> = entries
+        .into_iter()
+        .map(|(placement, _)| placement)
+        .collect();
+    let mut y = 0.0;
+    for (i, placement) in out.iter_mut().enumerate() {
+        placement.base_y = y;
+        y += placement.height;
+        let seam = picture[i] && picture.get(i + 1).copied().unwrap_or(false);
+        if i + 1 < count && !seam {
+            y += gap;
+        }
+    }
+    out
 }
 
 /// 正文里一条 `<a href>` 的去向（[`Book::resolve_link`] 的结果）。
@@ -113,6 +139,17 @@ pub struct Book {
     /// 上一帧量到的视口高（逻辑像素）。拼接窗口按它折成「前后各铺几章」——
     /// 见 [`Self::window_range`]。默认给一屏常用值，第一帧之前也有个像样的窗口。
     window_px: f32,
+    /// 每一章盒子里、排在正文之前的那一段：页眉带 + 系统安全区（绘制侧叫
+    /// `content_top`，见 `view::body` 那一格）。
+    ///
+    /// 它的存在是因为**两套坐标**：排版坐标第一行顶 = 0，而绘制把每一章的字都往下
+    /// 让了这么一截。章盒量的是「这一章在链上占多长」，量的对象是**画出来的东西**，
+    /// 所以这一截必须算进 [`Self::placements`] 的 `height`。不算的后果是每章末尾都有
+    /// 一段字漏在盒外，下一章的整页底图按章基线铺过来，正好盖在这段字上
+    /// （2026-11-01《诡秘之主》第 3 节末段被第 4 节 `fm1.jpg` 压住）。
+    ///
+    /// 分页 / 双页不走这条链，界面在那儿把它置 0。
+    chapter_top: f32,
     /// 书自己的样式表。`LayoutInputs` 要按它算一次哈希，而规则表用的是下面那一格。
     css: String,
     /// 作者层规则：**整本书解析一次**，每一章的 `Document` 分同一个 `Arc`。
@@ -199,6 +236,7 @@ impl Book {
             spans: Vec::new(),
             // 第一帧 `ensure_window_spans` 就会用真实视口高盖掉它。
             window_px: 800.0,
+            chapter_top: 0.0,
             css,
             rules,
             faces: fonts,
@@ -262,6 +300,21 @@ impl Book {
     /// 下一章开始」的呼吸空隙，不是装饰条。
     pub(in crate::ui::features::reader) fn chapter_gap(prefs: &Reader) -> f32 {
         (prefs.font_size * 2.0).max(24.0)
+    }
+
+    /// 把绘制侧那一段「正文让给页眉与安全区」的高度报进来（见 [`Self::chapter_top`]）。
+    ///
+    /// 每帧报一次：它与窗口、字号、书自己的上下页边距都有关，任何一格变了章盒就该跟着变。
+    /// 值没变时什么都不做 —— 这条链每帧都要重算一遍，别为同一个数把滚动位置抖一下。
+    pub(in crate::ui::features::reader) fn set_chapter_top(&mut self, top: f32) {
+        self.chapter_top = top.max(0.0);
+    }
+
+    /// 每一章盒子里排在正文之前的那一截（页眉带 + 安全区）。宿主测试量章高用；
+    /// 渲染路径只读字段本身（`placements` 那一格），不经过这一问。
+    #[cfg(test)]
+    pub(in crate::ui::features::reader) fn chapter_top(&self) -> f32 {
+        self.chapter_top
     }
 
     /// 把锚章挪到 `index`。旧锚章降级为邻居（排版结果留着，`advance(±1)` 走到
@@ -481,30 +534,42 @@ impl Book {
     /// 回去体面。`set_prefs` 作废排版时行盒仍留着（上一份结果），链不会塌，
     /// 滚动位置在新结果回来前保持原值。
     pub(in crate::ui::features::reader) fn placements(&self, gap: f32) -> Vec<Placement> {
-        let mut out: Vec<Placement> = self
+        // 每一章在链上占多长，取**排版高**与**实际画到的底边**的较大者
+        // （[`Document::extent`]）。两者正常时是同一个数；分家的时候（章高停在某个内层
+        // 盒子的底边上、最后一段正文落在章高之外），链必须按「画出来的东西」算，
+        // 否则下一章的整页底图会从那一格起铺、压在上一章最后那段字上
+        // （《诡秘之主》第 3 节的 `</div>` 之后那段 `p.mulu2`，2026-11-01 真机）。
+        let mut entries: Vec<(Placement, bool)> = self
             .spans
             .iter()
             .filter(|span| span.doc.height() > 0.0)
-            .map(|span| Placement {
-                index: span.index,
-                base_y: 0.0,
-                height: span.doc.height(),
+            .map(|span| {
+                let doc = &span.doc;
+                (
+                    Placement {
+                        index: span.index,
+                        base_y: 0.0,
+                        // 章盒 = 正文让出的那一截（页眉带 + 安全区）+ 画出来的正文。
+                        // 两格都是链上的数，见 [`Self::chapter_top`]。
+                        height: self.chapter_top + doc.extent().max(doc.height()),
+                    },
+                    doc.is_picture_chapter(),
+                )
             })
             .collect();
         if self.document.height() > 0.0 {
-            out.push(Placement {
-                index: self.chapter,
-                base_y: 0.0,
-                height: self.document.height(),
-            });
+            let doc = &self.document;
+            entries.push((
+                Placement {
+                    index: self.chapter,
+                    base_y: 0.0,
+                    height: self.chapter_top + doc.extent().max(doc.height()),
+                },
+                doc.is_picture_chapter(),
+            ));
         }
-        out.sort_by_key(|placement| placement.index);
-        let mut y = 0.0;
-        for placement in &mut out {
-            placement.base_y = y;
-            y += placement.height + gap;
-        }
-        out
+        entries.sort_by_key(|(placement, _)| placement.index);
+        stack(entries, gap)
     }
     /// 全局 y 落在哪一章。两章之间的缝归**后一章**：视口顶进了缝，
     /// 前一章的最后一行已经在视口之上了。
@@ -605,6 +670,10 @@ impl Book {
     }
 
     /// 「第 `offset` 个字（`chapter` 章内坐标）」的全局行顶。恢复落点用。
+    ///
+    /// 只有 `章基线 + 行顶`：绘制那一侧是 `base + content_top + line.y − scroll`，
+    /// 让这一行落在内容区顶（屏上 `content_top`）解出来的就是 `base + line.y` ——
+    /// `content_top` 两边同时出现，这里不许再加一次。
     pub(in crate::ui::features::reader) fn global_y_of_offset(
         &self,
         chapter: usize,
@@ -900,5 +969,77 @@ impl Book {
             .iter_mut()
             .find(|span| span.index == index)
             .map(|span| &mut span.doc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Placement, stack};
+
+    fn placed(index: usize, height: f32) -> Placement {
+        Placement {
+            index,
+            base_y: 0.0,
+            height,
+        }
+    }
+
+    /// 中间那一对整页图相接、不留缝；图与正文之间照旧留。
+    #[test]
+    fn two_full_page_pictures_touch_and_the_others_keep_their_gap() {
+        let out = stack(
+            vec![
+                (placed(0, 100.0), false),
+                (placed(1, 500.0), true),
+                (placed(2, 500.0), true),
+                (placed(3, 100.0), false),
+            ],
+            40.0,
+        );
+        assert_eq!(
+            out.iter().map(|p| p.base_y).collect::<Vec<_>>(),
+            vec![0.0, 140.0, 640.0, 1180.0],
+            "图 1 与图 2 之间不留章间距，图与正文之间仍留"
+        );
+        assert_eq!(
+            out.last().map(|p| p.base_y + p.height),
+            Some(1280.0),
+            "整条链的末端跟着少掉那一格缝"
+        );
+    }
+
+    /// 一侧是图、另一侧是正文：缝隙仍在 —— 那一格底色是图与正文的分界。
+    #[test]
+    fn a_picture_next_to_text_keeps_its_seam() {
+        let out = stack(
+            vec![
+                (placed(0, 200.0), false),
+                (placed(1, 300.0), true),
+                (placed(2, 200.0), false),
+            ],
+            24.0,
+        );
+        assert_eq!(
+            out.iter().map(|p| p.base_y).collect::<Vec<_>>(),
+            vec![0.0, 224.0, 548.0],
+            "两张图的边界留缝、图与正文的边界也留缝"
+        );
+    }
+
+    /// 整条链都是图：每一处都不留缝，链就是一串紧挨着的画面。
+    #[test]
+    fn a_run_of_pictures_has_no_seam_anywhere() {
+        let out = stack(
+            vec![
+                (placed(0, 300.0), true),
+                (placed(1, 300.0), true),
+                (placed(2, 300.0), true),
+            ],
+            40.0,
+        );
+        assert_eq!(
+            out.iter().map(|p| p.base_y).collect::<Vec<_>>(),
+            vec![0.0, 300.0, 600.0]
+        );
     }
 }

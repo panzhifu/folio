@@ -761,21 +761,32 @@ impl ReaderSession {
         let origin = self.content_bounds.get().origin;
         let local = at - origin;
         let prefs = &self.prefs;
+        let content_top = self.page_box.content.y;
         if self.laid_out.mode.is_continuous() {
             let book = self.book()?;
             let gap = Book::chapter_gap(prefs);
-            // 读**画出来的**那一个 y（`scroll_painted`）而不是 `scroll_y`：平移补间在走的
-            // 那两百多毫秒里，屏上的字按画出来的位置摆，命中也按它算才对得上一个字段。
-            let mut global_y = f32::from(local.y) - self.header_reserve + self.scroll_painted;
+            let local_y = f32::from(local.y);
+            // 单图页（整章只有一张满宽图）在滚动档里按**窗口坐标**画：底图与正文都从
+            // 窗口顶起，不走 `content_top` 那一段。先问它自己这一章在屏上的带，
+            // 否则视口顶那一截会按「上一章的章尾」去命中 —— 手指落在图上，选中的
+            // 却是上一节看不到的几行。
+            let anchor = book.chapter_index();
+            if let Some(doc) = book.span_doc(anchor)
+                && doc.is_current()
+                && crate::ui::features::reader::view::body::chapter_is_picture_only_page(doc)
+                && let Some(base) = book.base_of(anchor, gap)
+            {
+                let in_chapter = local_y + self.scroll_painted - base;
+                if (0.0..doc.height().max(1.0)).contains(&in_chapter) {
+                    return Some((anchor, f32::from(local.x) - prefs.margin_x, in_chapter));
+                }
+            }
+            // 其余章按版心坐标画：读**画出来的**那一个 y（`scroll_painted`）而不是
+            // `scroll_y` —— 平移补间在走的那两百多毫秒里，屏上的字按画出来的位置摆，
+            // 命中也按它算才对得上一个字段。
+            let global_y = local_y - content_top + self.scroll_painted;
             let chapter = book.chapter_at_y(global_y, gap)?;
             let base = book.base_of(chapter, gap).unwrap_or(0.0);
-            // 整页画那一章按窗口坐标画（见 `view::body` 的整页画那一格）：反算时把
-            // 「页眉 + 安全区」那一段加回去，命中的才是眼睛看到的那一行。
-            if let Some(doc) = book.span_doc(chapter)
-                && crate::ui::features::reader::view::body::chapter_is_picture_page(doc)
-            {
-                global_y += self.header_reserve + self.top_inset;
-            }
             return Some((
                 chapter,
                 f32::from(local.x) - prefs.margin_x,
@@ -797,7 +808,7 @@ impl ReaderSession {
         };
         let book = self.book()?;
         let doc = book.document();
-        let slice = doc.slice_of(self.page, column, self.laid_out.columns)?;
+        let slice = doc.slice_of(self.page, column)?;
         let x = prefs.margin_x
             + folio_core::layout::fragment::column_offset(width, gap, slice.column)
             + shift_x;
@@ -809,13 +820,13 @@ impl ReaderSession {
             return Some((
                 book.chapter_index(),
                 f32::from(local.x) - x - slide,
-                f32::from(local.y) - self.header_reserve - shift_y,
+                f32::from(local.y) - content_top - shift_y,
             ));
         }
         Some((
             book.chapter_index(),
             f32::from(local.x) - x,
-            f32::from(local.y) - self.header_reserve - shift_y + slice.origin_y,
+            f32::from(local.y) - content_top - shift_y + slice.origin_y,
         ))
     }
 

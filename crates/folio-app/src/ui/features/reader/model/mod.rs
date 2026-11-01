@@ -18,6 +18,7 @@ pub(in crate::ui::features::reader) mod footnotes;
 pub(in crate::ui::features::reader) mod image_atlas;
 pub(in crate::ui::features::reader) mod links;
 pub(in crate::ui::features::reader) mod measure;
+pub(in crate::ui::features::reader) mod page_geometry;
 pub(in crate::ui::features::reader) mod paging;
 pub(in crate::ui::features::reader) mod perf;
 pub(in crate::ui::features::reader) mod position;

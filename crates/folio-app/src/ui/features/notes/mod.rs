@@ -17,8 +17,9 @@
 //! - **每行可跳**：点一条 = 开那本书落到那一处（锚点里带着章与偏移，目标章多半还没排版，
 //!   落点交给会话挂恢复请求）。跳之前先把弹层收掉：阅读层盖在整窗之上，两层遮罩叠着，
 //!   返回键与点击命中都得各判一次谁是顶。
-//! - **删除有撤销**：行尾那颗删除是即下的，后悔靠底部那颗 6 秒的胶囊（与阅读页同一套
-//!   语义，各屏各一颗：删除的现场在哪屏，胶囊就在哪屏）。
+//! - **拔书签有撤销，删批注没有**：行尾那颗删除是即下的；拔掉的那一枚靠底部那颗 6 秒的
+//!   胶囊带回（与阅读页同一套语义，各屏各一颗：删除的现场在哪屏，胶囊就在哪屏）。
+//!   批注不给这一窗 —— 取消划线是真删，反悔的路是重新划一次。
 //!
 //! 导出三档人读的格式（txt / Markdown / 网页），装配在 core 的纯函数
 //! （`annotations_export`），落盘走 [`host::share_file`] —— 桌面进下载目录，手机进系统
@@ -112,17 +113,11 @@ struct BookGroup {
     cover: Option<Arc<Image>>,
 }
 
-/// 本屏自己的撤销槽：删掉的那一行整份抄着，窗口内按原行插回。
+/// 本屏自己的撤销槽：拔掉的书签整份抄着，窗口内按原行插回。
 struct PendingUndo {
-    row: Deleted,
+    row: folio_core::store::Bookmark,
     seq: u64,
     _timer: Option<Task<()>>,
-}
-
-/// 删掉的那一行。批注与书签共用一颗胶囊，后删的顶掉先删的。
-enum Deleted {
-    Annotation(folio_core::store::Annotation),
-    Bookmark(folio_core::store::Bookmark),
 }
 
 pub struct NotesView {
@@ -251,7 +246,8 @@ impl NotesView {
             .collect()
     }
 
-    /// 删一行。删除是即下的，后悔靠 [`Self::undo_delete`] —— 与阅读页同一条语义。
+    /// 删一行。拔书签是即下的，后悔靠 [`Self::undo_delete`] —— 与阅读页同一条语义；
+    /// 删一条批注是**真删**，不弹胶囊（2026-11-02 读者的口径，与阅读页同一条决定）。
     fn remove_entry(&mut self, is_bookmark: bool, id: i64, cx: &mut Context<Self>) {
         let Some(store) = app_store::handle(cx) else {
             return;
@@ -262,25 +258,29 @@ impl NotesView {
                 .ok()
                 .flatten()
                 .and_then(|row| store.delete_bookmark(id).ok().map(|_| row))
-                .map(Deleted::Bookmark)
+        } else if store
+            .annotation(id)
+            .ok()
+            .flatten()
+            .is_some_and(|_| store.delete_annotation(id).is_ok())
+        {
+            // 批注不进撤销槽：删成了就直接重读列表。
+            tracing::info!(id, "笔记: 删一条批注");
+            self.refresh(cx);
+            return;
         } else {
-            store
-                .annotation(id)
-                .ok()
-                .flatten()
-                .and_then(|row| store.delete_annotation(id).ok().map(|_| row))
-                .map(Deleted::Annotation)
+            None
         };
         let Some(row) = deleted else {
             tracing::warn!(is_bookmark, id, "笔记: 那一条删不掉（读不到或写库失败）");
             return;
         };
-        tracing::info!(is_bookmark, id, "笔记: 删一条记录");
+        tracing::info!(is_bookmark, id, "笔记: 拔一枚书签");
         self.stash_undo(row, cx);
         self.refresh(cx);
     }
 
-    /// 撤销最近一次本屏删除：按原行插回（id 与时间戳都不变）。
+    /// 撤销最近一次拔掉的书签：按原行插回（id 与时间戳都不变）。
     fn undo_delete(&mut self, cx: &mut Context<Self>) {
         let Some(slot) = self.undo.take() else {
             return;
@@ -289,19 +289,15 @@ impl NotesView {
         let Some(store) = app_store::handle(cx) else {
             return;
         };
-        let ok = match &slot.row {
-            Deleted::Annotation(row) => store.restore_annotation(row).is_ok(),
-            Deleted::Bookmark(row) => store.restore_bookmark(row).is_ok(),
-        };
-        if ok {
-            tracing::info!("笔记: 撤销删除");
+        if store.restore_bookmark(&slot.row).is_ok() {
+            tracing::info!("笔记: 撤销拔书签");
         } else {
-            tracing::error!("笔记: 撤销写库失败，那一行没回来");
+            tracing::error!("笔记: 撤销写库失败，那一枚没回来");
         }
         self.refresh(cx);
     }
 
-    fn stash_undo(&mut self, row: Deleted, cx: &mut Context<Self>) {
+    fn stash_undo(&mut self, row: folio_core::store::Bookmark, cx: &mut Context<Self>) {
         self.undo_seq += 1;
         let seq = self.undo_seq;
         let timer = cx.spawn(async move |this, cx| {
@@ -689,13 +685,10 @@ impl Render for NotesView {
         } else {
             0.0
         };
-        let undo_pill = self.undo.as_ref().map(|slot| {
+        let undo_pill = self.undo.as_ref().map(|_| {
             let view = cx.entity().clone();
             let action = tr(cx, "notes.undo");
-            let label: SharedString = match &slot.row {
-                Deleted::Annotation(_) => tr(cx, "notes.deleted_annotation"),
-                Deleted::Bookmark(_) => tr(cx, "notes.deleted_bookmark"),
-            };
+            let label: SharedString = tr(cx, "notes.deleted_bookmark");
             h_flex()
                 .occlude()
                 .absolute()

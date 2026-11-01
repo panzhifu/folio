@@ -923,6 +923,35 @@ impl Sync {
     }
 }
 
+/// 局域网同步的账号：**本机自持的一把 128-bit 密钥**。
+///
+/// 没有服务器可问，所以这一格不是「注册出来的身份」：两台设备各存一份同样的密钥就是同一个
+/// 账号，判据与密钥怎么传到第二台都写在 [`crate::account`] 的模块文档里。它与 [`Sync`] 是两条
+/// 独立的路 —— WebDAV 走读者自己的存储服务器，这一条走同一局域网里的另一台设备，两边共用
+/// 同一份合并规则，但彼此不假设对方存在。
+///
+/// 密钥与 WebDAV 密码、翻译 key 同住 `config.json`：落盘已经收在 0600（见 [`Config::save_to`]）。
+/// **账号 id 与肉眼校验码都不落盘** —— 它们由密钥现算，存两份就会对上「密钥换了、id 还是旧的」
+/// 这种界面上说不出来的组合。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Account {
+    /// 这台设备参不参加局域网同步：既决定它肯不肯被同账号的设备读走书架与进度，
+    /// 也决定它会不会主动去连别人。关掉不会抹掉密钥，重新打开还是同一个账号。
+    pub enabled: bool,
+    /// 那把密钥的十六进制（32 个字符）。**空串或解不出 = 这台安装还没有账号**，
+    /// 判「有没有」要用 [`crate::account::AccountKey::from_hex`]，这里只存这一串。
+    pub key: String,
+}
+
+impl Account {
+    /// 与其它节同一条：手填或粘贴进来的密钥去掉误带的首尾空白。
+    pub fn normalized(mut self) -> Self {
+        self.key = self.key.trim().to_string();
+        self
+    }
+}
+
 /// 会员身份。**只有本机这一份记录**：写进去的是一个到期日，等级是现算出来的。
 ///
 /// 为什么存**本地日序号**而不是字符串或 Unix 秒：这一格唯一要回答的问题是「今天还算不算数」，
@@ -1336,6 +1365,7 @@ pub struct Config {
     pub speech: Speech,
     pub translation: Translation,
     pub sync: Sync,
+    pub account: Account,
     pub opds: Opds,
     pub membership: Membership,
     pub logging: Logging,
@@ -1354,6 +1384,7 @@ impl Default for Config {
             speech: Speech::default(),
             translation: Translation::default(),
             sync: Sync::default(),
+            account: Account::default(),
             opds: Opds::default(),
             membership: Membership::default(),
             logging: Logging::default(),
@@ -1373,6 +1404,7 @@ impl Config {
         self.speech = self.speech.normalized();
         self.translation = self.translation.normalized();
         self.sync = self.sync.normalized();
+        self.account = self.account.normalized();
         self.opds = self.opds.normalized();
         // 书库位置去掉首尾空白：填成 "  /x  " 会让 `is_confirmed` 说「确认过」，
         // 而后面按这个串去找目录会找不到。
@@ -2482,6 +2514,47 @@ mod sync_config_tests {
         let text = serde_json::to_string(&config).unwrap();
         let back: Config = serde_json::from_str(&text).unwrap();
         assert_eq!(back.sync, config.sync);
+    }
+}
+
+#[cfg(test)]
+mod account_config_tests {
+    use super::{Account, Config};
+
+    /// 这一段是后加的：老文件里根本没有它，读进来必须落成「没开、也没有密钥」，
+    /// 而不是把整份配置判成坏掉。
+    #[test]
+    fn an_older_config_without_the_account_section_reads_as_no_account() {
+        let config: Config = serde_json::from_str(r#"{"version":1}"#).unwrap();
+        assert!(!config.account.enabled);
+        assert!(config.account.key.is_empty());
+    }
+
+    #[test]
+    fn account_trims_the_key_it_stores() {
+        let config = Config {
+            account: Account {
+                enabled: true,
+                key: "  0123456789abcdef  ".into(),
+            },
+            ..Config::default()
+        }
+        .normalized();
+        assert_eq!(config.account.key, "0123456789abcdef");
+    }
+
+    #[test]
+    fn the_account_section_round_trips_through_json() {
+        let config = Config {
+            account: Account {
+                enabled: true,
+                key: "0123456789abcdef0123456789abcdef".into(),
+            },
+            ..Config::default()
+        };
+        let text = serde_json::to_string(&config).unwrap();
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.account, config.account);
     }
 }
 

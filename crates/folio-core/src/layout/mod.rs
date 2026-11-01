@@ -30,6 +30,7 @@
 //!   第 N+1 页开头。CSS 是两侧都留，这里选每页顶部稳定。
 
 pub mod fragment;
+pub mod page;
 
 mod cache;
 mod collect;
@@ -47,17 +48,17 @@ use self::cache::subtree_style_hash;
 use self::collect::Ctx;
 use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{
-    BackgroundAttachment, BackgroundSize, BackgroundTile, ComputedStyle, Length, StyledDom,
-    WritingMode,
+    BackgroundAttachment, BackgroundSize, BackgroundTile, ComputedStyle, StyledDom, WritingMode,
 };
 
 pub use cache::BlockCache;
-pub use font::{FontKey, RunStyle, StyleArena, StyleRef};
+pub use font::{FontKey, RunStyle, StyleArena, StyleRef, cjk_latin_gap, has_cjk_latin_boundary};
 pub use geometry::{
     BlockBox, DecorPicture, DecorSeed, ImageRun, Justify, JustifyMode, Layout, LayoutOptions,
-    LineBox, LineFragment, LineRun, MarkerRun,
+    LineBox, LineFragment, LineRun, MarkerRun, StackMark,
 };
 pub use key::{LayoutInputs, LayoutKey, METRICS_REV, content_hash, quantize_px};
+pub use page::{Page, PageList};
 pub use ports::{ImageProvider, LineMetrics, Measure, NoImages, ResolvedImage};
 
 /// 排版 `root` 的全部内容。`root` 通常是 `<body>`：它的 padding 生效，
@@ -132,6 +133,8 @@ fn layout_inner(
         style_hash: hashes.as_deref(),
         floats: Vec::new(),
         absolute: Vec::new(),
+        stack_seq: 0,
+        caption_last: None,
     };
     let style = ctx.style_of(root);
     // 根的包含块就是视口（`options.width`）：根上那族百分比按它折，再往里每一层
@@ -205,8 +208,9 @@ fn layout_inner(
         .background_layers
         .iter()
         .any(|layer| layer.attachment == BackgroundAttachment::Fixed && layer.image.is_some());
-    // 第三种整页画：整幅 `cover` 底图 + 作者声明满页 + 章里没有正文（判据见
-    // [`is_cover_page`]）。杜坎那族工具导出的封面章就是这个形状 —— 它不写 `fixed`，
+    // 第三种整页画：整幅 `cover` 底图 + 章里没有正文（判据见
+    // [`is_cover_page`]）。杜坎那族工具导出的封面章，以及《哈利·波特全集》`v1.xhtml`
+    // 那种只写了 `background:` 简写的扉页都是这一形状 —— 它不写 `fixed`，
     // 从前于是掉进「版心里的块装饰」，`cover` 把整幅竖图裁成一条横带。
     let cover_background = is_cover_page(style, options, &ctx.blocks);
     if fixed_background || cover_background {
@@ -275,33 +279,34 @@ fn layout_inner(
 /// （判据在 [`layout_inner`] 的整页画那一格）。判据本体只有一份，在
 /// [`fragment::picture_page_hrefs`]：那里按**一片**问一次（一页一图那一档），这里按
 /// **整章**问一次（章高至少要撑到一屏）。两档同一条规矩，写两处迟早漂成分叉 ——
-/// 绘制层从前自己扫整章那份就是这么漂出来的（`doc/图片呈现.md` §一）。
+/// 绘制层从前自己扫整章那份就是这么漂出来的。
 fn is_single_picture_page(lines: &[LineBox], content_width: f32) -> bool {
     fragment::picture_page_hrefs(lines, 0..lines.len(), content_width).len() == 1
 }
 
-/// 这一章是不是「整幅底图封面」—— 根上是 `cover` + `no-repeat` 的整幅底图，作者用
-/// `height` / `min-height: 100%` 要它铺满一屏，而章里没有一行可见正文。
+/// 这一章是不是「整幅底图封面」—— 根上是 `cover` + `no-repeat` 的整幅底图，而章里没有
+/// 一行可见正文。
 ///
-/// 三条缺一不可：
+/// 两条缺一不可：
 /// - **只看整幅那两格**：`background-size: cover` + 两轴 `no-repeat`。`repeat` 的纹理
 ///   底色不是封面，`auto` 的原始尺寸图也不是「一整页」；
-/// - **作者自己说了要满页**：`height` / `min-height` 折出来 ≥ 一页。浏览器里
-///   `html,body{height:100%}` + `.cover{min-height:100%}` 折出来的正是这句；
 /// - **没有正文**：块文本全是空白（`&nbsp;` 也算空白）。有字的一章不抢整窗，
 ///   哪怕底图铺满。
+///
+/// 从前这里还要求第三条「作者自己写了 `height` / `min-height: 100%`」，为的是别把带纹理
+/// 底色的短章撑出一屏空白。那道闸挡错了人：`background-size: cover` 本身就是「这张图要
+/// 盖满这一块」的显式声明，而《哈利·波特全集》`v1.xhtml` 那种扉页只写了
+/// `style="background: url(v1.jpg) no-repeat center; background-size: cover"`，一句 `height`
+/// 都没有 —— 于是章高只等于压在图上的两张标题图，阅读器按整窗贴底图、排版却给了个短盒，
+/// `cover` 把整幅竖图裁成一条横带（2026-11-02 真机「图片不完整」）。真正兜住误撑的是
+/// 「没有正文」那一条，不是作者的那句 `height`。
 ///
 /// 命中后与 `background-attachment: fixed` 底图同一条出口：撑到一窗高，并由
 /// `Layout::decor_seeds` 把根种子标成 `full_bleed`，阅读器就把这张图贴到窗口上
 /// （否则 `cover` 只能铺进版心里那个空段落的高度，整幅封面被裁成一条横带）。
 fn is_cover_page(style: &ComputedStyle, options: LayoutOptions, blocks: &[BlockBox]) -> bool {
-    // 没有竖轴基准就折不出 `100%`，这一档整族按 `auto` —— 与没有这一条时逐字相同。
-    let Some(page) = options.page_height else {
-        return false;
-    };
-    let wants_page =
-        |length: Option<Length>| Ctx::definite(length, Some(page)).is_some_and(|h| h + 0.5 >= page);
-    if !wants_page(style.height) && !wants_page(style.min_height) {
+    // 竖轴基准拿不到就不撑（`screen_height` 与 `page_height` 都没有），与没有这一条时逐字相同。
+    if options.page_height.is_none() && options.screen_height.is_none() {
         return false;
     }
     let full_background = style.background_layers.iter().any(|layer| {
@@ -315,9 +320,18 @@ fn is_cover_page(style: &ComputedStyle, options: LayoutOptions, blocks: &[BlockB
     }
     // 有字就不是封面。`BlockBox::text` 是这一块自己的行内文本（含图片的哨兵字符），
     // 容器块是空串 —— 根那一块不是唯一带字的地方，逐块都要看。
-    blocks
-        .iter()
-        .all(|block| block.text.chars().all(char::is_whitespace))
+    //
+    // 哨兵**不算字**：一张 `<img>` 在文本流里占的就是那一个 `\u{FFFC}`，把它读成正文，
+    // 「整幅底图 + 两张透明标题图、一个可读的字都没有」那一族扉页（《哈利·波特全集》
+    // `v1.xhtml`）就永远撑不到整窗，底图被 `cover` 裁成章高那一条 —— 而界面那一侧的
+    // `Document::has_text` 问的是行片段（图片是 `LineFragment::Image`，不是 Text），
+    // 两处因此各说各话。同一个问题只许有一个答案。
+    blocks.iter().all(|block| {
+        block
+            .text
+            .chars()
+            .all(|ch| ch.is_whitespace() || ch == collect::IMAGE_GLYPH)
+    })
 }
 
 #[cfg(test)]

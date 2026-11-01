@@ -121,7 +121,7 @@ fn only_the_curl_measures_one_leaf_in_a_spread(cx: &mut TestAppContext) {
             PageMode::Spread,
             "{turn:?} 这一趟里摆法被改走了"
         );
-        let area = view.read_with(cx, |v, _| v.page_area);
+        let area = view.read_with(cx, |v, _| v.page_area());
         let block = area.distance(axis);
         assert!(block > 0.0, "夹具量不出版心，这条测不到东西");
         // 这本是 LTR：往前翻自由边在右，往回翻在左。

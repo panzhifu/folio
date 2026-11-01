@@ -46,13 +46,9 @@ use crate::ui::services::l10n::{tf, tr};
 use crate::ui::shell::AppShell;
 use crate::ui::shell::navigation::SizeClass;
 
-/// 脚注小纸片的最宽那一条：内容的 `max_w` 与夹边算的是同一个数。
+/// 脚注小纸片的最宽那一条：内容的 `max_w`，短的一条按自己实际宽居中在标记上方。
 const FOOTNOTE_CARD_W: Pixels = px(300.);
-/// 弹层自己那层内边距的**上估**。算少了卡片会压到屏外，算多了只是偏进来一点 —— 宁可偏进来。
-const FOOTNOTE_PAD: Pixels = px(12.);
-/// 卡片离屏边最少留这么多。
-const FOOTNOTE_EDGE: Pixels = px(8.);
-/// 标记下缘与卡片之间的缝。
+/// 标记下缘与卡片之间的缝（三角长在缝里，尖正对着标记）。
 const FOOTNOTE_GAP: Pixels = px(10.);
 /// 翻译弹层那张卡的宽：引文与译文都按「一句到一段」估，320 装得下中英两栏
 /// 各约 20 字 —— 与脚注那张同一族的尺寸。
@@ -77,7 +73,7 @@ pub struct ReadingPage {
     ///
     /// 它**不拿去推整层**，只给底栏卡片与干净态页脚用：那两处把内容抬高 `bottom_inset`、
     /// 底色铺到屏幕底，所以卡片与屏幕底之间不是一条空缝（与读者那句「位于系统底部栏之上、
-    /// 颜色保持一致」同一条口径）。正文那边已经由 `reserve.height` 扣过它，不再重复扣。
+    /// 颜色保持一致」同一条口径）。正文那边已经由 `PageInsets` 让开它，不再重复扣。
     pub(in crate::ui::features::reader) bottom_inset: f32,
     /// 这一层自己的返回栈（弱句柄）。**正文是栈底**，从阅读页压进去的那一屏（设置）叠在
     /// 它上面 —— 借架面那条栈的话，压进来的那一屏会被这一层盖住。
@@ -266,7 +262,7 @@ impl ReadingPage {
         // 会话里那一格跟着一起换，而且**从这里**换：这一屏每帧都会把本页记着的数再推一遍
         // 给会话（`render` 里 `set_chrome_bands` 那一串），两边不同步时那一次推送就把外壳
         // 刚写进去的值覆盖回去。判据只放在「变了才通知」那一层，会话那边无条件写。
-        self.reader.update(cx, |reader, _| reader.top_inset = top);
+        self.reader.update(cx, |reader, _| reader.insets.top = top);
         if (self.top_inset - top).abs() > 0.5 {
             self.top_inset = top;
             cx.notify();
@@ -278,7 +274,7 @@ impl ReadingPage {
     /// 变化时重画：底栏卡片的内缩与干净态页脚的高度都读它。
     pub fn set_bottom_inset(&mut self, bottom: f32, cx: &mut Context<Self>) {
         self.reader
-            .update(cx, |reader, _| reader.bottom_inset = bottom);
+            .update(cx, |reader, _| reader.insets.bottom = bottom);
         if (self.bottom_inset - bottom).abs() > 0.5 {
             self.bottom_inset = bottom;
             cx.notify();
@@ -540,22 +536,20 @@ impl ReadingPage {
     }
 
     /// 翻译弹层：从选区菜单那格「翻译」升起的一张卡，锚在菜单落地的那一处
-    /// （菜单先收，坐标由会话在升起那一刻拍下）。形状与 [`Self::footnote_popover`]
-    /// 同一套：零尺寸触发器 + `open(true)`，点外面 / 按返回由 `on_open_change`
+    /// （菜单先收，坐标由会话在升起那一刻拍下 —— 拍的是菜单**顶边中点**，正是尾巴
+    /// 原来指的那一处）。形状与 [`Self::footnote_popover`] 同一套：零尺寸触发器 +
+    /// `open(true)` + `TopCenter` + `arrow(true)`，点外面 / 按返回由 `on_open_change`
     /// 收回会话；区别只在内容 —— 译文可能长过一屏，所以滚动区只包住引文与译文，
     /// 头部钉住：换语言的那颗下拉在哪儿都够得着。
     fn translation_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let reader = self.reader.clone();
         let anchor = self.reader.read(cx).translation.as_ref()?.anchor;
-        // 卡宽给足引文与译文；左右夹屏边，竖直方向照菜单原位往下长 —— 菜单本身
-        // 已经在视口内，往下多半还有地方；贴到底时那半截也比「飘到屏幕中央」可辨认。
+        // 卡宽给足引文与译文；夹边交给弹层自己（离屏边 8 像素），三角跟着锚点夹在卡的
+        // 范围之内，所以贴屏边时尖不会指到卡外去。
         let width = px(f32::from(window.viewport_size().width).max(1.0));
         let (left, top) = match anchor {
-            Some(at) => (
-                at.x.clamp(px(8.0), (width - TRANSLATION_CARD_W - px(8.0)).max(px(8.0))),
-                at.y,
-            ),
-            None => ((width - TRANSLATION_CARD_W) / 2.0, px(72.0)),
+            Some(at) => (at.x, at.y),
+            None => (width / 2.0, px(72.0)),
         };
         Some(
             div()
@@ -564,7 +558,8 @@ impl ReadingPage {
                 .top(top)
                 .child(
                     Popover::new("reader-translation")
-                        .anchor(Anchor::TopLeft)
+                        .anchor(Anchor::TopCenter)
+                        .arrow(true)
                         .open(true)
                         .on_open_change({
                             let reader = reader.clone();
@@ -592,8 +587,9 @@ impl ReadingPage {
         )
     }
 
-    /// 撤销胶囊：最近一次删除（划线、书签）的原样恢复。状态与计时都在会话里
-    /// （`model/undo.rs`），这一屏只画它、把「撤销」那一击递回去。
+    /// 撤销胶囊：最近一次**拔掉的书签**的原样恢复。取消划线不挂这一槽（真删，
+    /// 见 `model/undo.rs`），所以这颗只服务书签。状态与计时都在会话里（`model/undo.rs`），
+    /// 这一屏只画它、把「撤销」那一击递回去。
     /// 摆在正文之上、底栏之下：chrome 开着时悬在底栏卡片上方（右侧让开听书那颗圆钮），
     /// 收着时贴着手势条上方 —— 它是临时的一层，不该推动正文，也不该盖住弹层。
     fn undo_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -698,27 +694,26 @@ impl ReadingPage {
     /// 定位；开关由会话的状态控制（`open(true)`），点别处 / 按返回把状态清掉，这一格
     /// 下一帧自然消失。
     ///
+    /// 锚是 `TopCenter` 加 `arrow(true)`：卡片顶边居中挂在标记下缘，那枚小三角从顶边
+    /// 长出去、尖正对标记 —— 与划词那条浮条同一族（浮条的尾巴在 `selection::menu_tail`）。
+    /// 夹边交给弹层自己（离屏边 8 像素），所以短的一条注文真的居中在标记上方，而不是
+    /// 按最宽那一档偏到左边去。
+    ///
     /// 宽度给上限而不是铺满：一条注文常常只有一句，铺满整屏读起来像一屏正文。
-    fn footnote_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn footnote_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let note = self.reader.read(cx).footnote()?;
         let text = note.text.clone();
         let anchor = note.anchor;
-        // 小纸片按**最宽那一条**夹在屏内：靠右缘的标记不能再让卡片从那儿起笔，靠近左缘的
-        // 也不能。夹的是最宽值，所以内容窄于它时卡片会偏左一点 —— 偏一点看得见，飞出屏外
-        // 看不见，两害相权取其轻。
-        let card = FOOTNOTE_CARD_W + FOOTNOTE_PAD * 2.;
-        let edge = FOOTNOTE_EDGE;
-        let room = window.bounds().size.width - card - edge;
-        let left = (anchor.x - card * 0.5).clamp(edge, room.max(edge));
         let page = cx.entity().clone();
         Some(
             div()
                 .absolute()
-                .left(left)
+                .left(anchor.x)
                 .top(anchor.y)
                 .child(
                     Popover::new("reader-footnote")
-                        .anchor(Anchor::TopLeft)
+                        .anchor(Anchor::TopCenter)
+                        .arrow(true)
                         .offset(FOOTNOTE_GAP)
                         .open(true)
                         .on_open_change(move |open, _window, cx| {
@@ -784,18 +779,12 @@ impl Render for ReadingPage {
             chrome::bands_with_vertical_margins(header_margin, footer_margin);
         self.reader.update(cx, |reader, cx| {
             reader.set_reserve(self.reserve, cx);
-            reader.set_chrome_bands(
-                header_band,
-                footer_band,
-                self.bottom_inset,
-                !self.chrome.is_open(),
-                cx,
-            );
+            reader.set_chrome_bands(header_band, footer_band, self.bottom_inset, cx);
             reader.set_overlay_open(layers_up, cx);
             reader.enter_shift = self.enter_shift;
             // 折页那张纸的顶边要贴屏幕顶（读者 2026-10-30 要的「整屏一张纸」）：
             // 版面不让它，只有这一格用它，见 `view::body` 的 `sheet_area`。
-            reader.top_inset = self.top_inset;
+            reader.insets.top = self.top_inset;
         });
         self.sync_sliders(window, cx);
         let tap = cx.listener(
@@ -875,7 +864,7 @@ impl Render for ReadingPage {
         }
         // 脚注弹层压在目录之上、图片查看器之下：它是「从正文里抬起来的一张小纸」，
         // 盖住目录那种整屏弹层是对的，而放大看图时读者要的是图。
-        root = root.children(self.footnote_popover(window, cx));
+        root = root.children(self.footnote_popover(cx));
         // 翻译弹层压在脚注之上：两者都是「从正文里升起的一张卡」，同一时刻只该有
         // 一张在场（开翻译时菜单先收、脚注按各自的路径收）。
         root = root.children(self.translation_popover(window, cx));
@@ -889,12 +878,14 @@ impl Render for ReadingPage {
         // 所以这三样都递给它：图集那格解完了要喊**这一屏**重画（`view` 传的是本页的
         // 实体号，不是会话的 —— 喊会话还会绕一圈回到这里，多一趟元素树）。
         let atlas = self.reader.read(cx).atlas.clone();
+        let viewer_layer_top = 0.0;
         root = root.children(image_viewer::overlay(
             &self.image_viewer,
             &atlas,
             &self.reader,
             cx.entity().entity_id(),
             self.top_inset,
+            viewer_layer_top,
             &self.image_viewer_focus,
             window,
             cx,
@@ -1012,12 +1003,12 @@ fn translation_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverStat
             .child(tf(cx, "reader.translation.failed", &[("reason", reason)])),
     };
     let close_reader = reader.clone();
+    // 卡的表面（底色、描边、投影、12 内边距）由 `Popover` 的 `appearance` 给，这里不再
+    // 叠第二份 —— 从前这里也来一份 `popover_style` + `p_3`，于是「卡里还有一层卡」，
+    // 里外两圈投影与描边各画一遍，读起来像弹窗里又浮了一层。
     v_flex()
         .w(TRANSLATION_CARD_W)
         .gap_2()
-        .p_3()
-        .popover_style(cx)
-        .rounded_lg()
         .child(
             h_flex()
                 .w_full()

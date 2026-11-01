@@ -35,11 +35,8 @@ fn the_book_does_not_ask_the_nav_bar_to_move() {
     };
     assert_eq!(
         reading_reserve(&safe),
-        Reserve {
-            width: 0.0,
-            height: 41.0 + 25.0
-        },
-        "宽恒为 0（导航栏由这一层盖住，不再向正文报），高是顶上与底下两条安全区"
+        Reserve { width: 0.0 },
+        "宽恒为 0（导航栏由这一层盖住，不再向正文报），高走 PageInsets"
     );
 }
 
@@ -280,21 +277,11 @@ fn the_reading_page_is_told_about_the_safe_areas_too() {
         ..Default::default()
     };
 
-    // 正文盒上下两条都扣。
-    assert_eq!(
-        reading_reserve(&safe),
-        Reserve {
-            width: 0.0,
-            height: 41.0 + 25.0
-        }
-    );
+    // 两条系统边都由阅读页报给会话的 `PageInsets` 管，这里不再报高度。
+    assert_eq!(reading_reserve(&safe), Reserve::ZERO);
 
-    // 而摆层只把顶上那一条推下去：底下那一条留给底栏与页脚自己抬内容、铺底色。
+    // 摆层只把顶上那一条推下去：底下那一条留给底栏与页脚自己抬内容、铺底色。
     assert_eq!(reading_top_inset(&safe), 41.0);
-    assert_eq!(
-        reading_reserve(&safe).height,
-        reading_top_inset(&safe) + safe.bottom
-    );
 
     // 安全区全 0（桌面的真实值）就是零：不多让一个像素。
     assert_eq!(reading_reserve(&Insets::ZERO), Reserve::ZERO);

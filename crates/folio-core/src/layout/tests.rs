@@ -268,9 +268,18 @@ fn drop_cap_and_text_indent_stack() {
 fn no_cap_without_the_pseudo_element_rule() {
     let html = "<p>首字很大的一段话，这里没有声明。</p>";
     let (_, laid) = typeset(html, "p { font-size: 20px }", 200.0);
+    // 标点挤压会把收尾标点切成单独一段，所以不能按「一行一个片段」判下沉；
+    // 判据回到「没有哪一段的字号被放大」—— 那才是首字符盒存在的证据。
     assert!(
-        laid.lines.iter().all(|line| line.fragments.len() == 1),
-        "每行都该只有一个正文片段"
+        laid.lines
+            .iter()
+            .all(|line| line.fragments.iter().all(|fragment| {
+                match fragment {
+                    LineFragment::Text(run) => run.style.font_size == 20.0,
+                    LineFragment::Image(_) | LineFragment::Marker(_) => false,
+                }
+            })),
+        "没写 ::first-letter 就不该有放大的首字符片段"
     );
     assert!(laid.lines.iter().all(|line| line.x == 0.0));
 }
@@ -1662,7 +1671,7 @@ fn a_paragraph_keeps_per_run_size_weight_and_color() {
     assert_eq!(runs[0].style.font_size, 20.0);
     assert_eq!(runs[1].style.font_size, 12.0, "small 的小字号不该被拉平");
     assert_eq!(runs[2].style.font_size, 20.0);
-    assert_eq!(runs[1].style.color, Some(Color(128, 128, 128)));
+    assert_eq!(runs[1].style.color, Some(Color(128, 128, 128, 255)));
     assert_eq!(runs[0].style.color, None);
     // 行宽是各 run 实际绘制宽度之和：12px 的两个汉字只占 24px。
     assert_eq!(layout.lines[0].width, 20.0 * 4.0 + 12.0 * 2.0);
@@ -1752,7 +1761,7 @@ fn the_root_elements_own_background_reaches_the_decor_table() {
         .into_iter()
         .find(|s| s.x == 0.0 && s.width == 300.0)
         .expect("根那一层要有一条装饰，而不是整屏丢掉");
-    assert_eq!(root.background, Some(Color(0xc4, 0xaa, 0x87)));
+    assert_eq!(root.background, Some(Color(0xc4, 0xaa, 0x87, 255)));
     assert_eq!((root.x, root.y), (0.0, 0.0), "根铺满整个视口、从页首起");
     assert_eq!(root.height, laid.height, "根底色盖满整章");
 }
@@ -1805,6 +1814,123 @@ fn a_blank_cover_page_with_a_full_bleed_background_takes_one_screen() {
         (root.width, root.height),
         (384.0, 853.0),
         "根盒跟着撑满一窗"
+    );
+}
+
+/// `background-attachment: fixed` 挂在 `body` 上、章里还有正文：仍要标成整页画。
+///
+/// 浏览器里 fixed 底图贴的是视口，不是 `body` 的内容盒；不标这一格，阅读器就会
+/// 把它当块背景画在章高里，章界留白（《诡秘之主》的人物志就是这个形状）。
+#[test]
+fn a_fixed_body_background_is_full_bleed_even_with_text() {
+    let css = "html,body{margin:0;padding:0} \
+               body{background-image:url(fmc1.jpg);background-size:cover;\
+                    background-repeat:no-repeat;background-attachment:fixed;\
+                    background-position:bottom center}";
+    let dom = Dom::parse("<body><p>正文</p></body>".as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(css, Origin::Author),
+        &ComputedStyle::default(),
+        "",
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions {
+            width: 384.0,
+            light: false,
+            allow_vertical: false,
+            page_height: Some(720.0),
+            screen_width: Some(384.0),
+            screen_height: Some(853.0),
+        },
+        &Mono,
+        &NoImages,
+    );
+    assert!(
+        laid.decor_seeds(&styles).iter().any(|seed| seed.full_bleed),
+        "body 上的 fixed 底图要交给绘制层当整窗背板"
+    );
+}
+
+/// 正文中间那一块上的 fixed 底图**不是**整页画：它跟着正文流走、排在文字下面。
+///
+/// 浏览器里 `background-attachment: fixed` 贴的是视口，但**裁剪仍是这一块的框**；
+/// 把它升级成「铺满整窗、垫在文字底下的背板」，读者读到的就是「图片盖住了文字」
+/// （《诡秘之主》正文里那块 `context1` 底图，2026-11-01 真机）。
+#[test]
+fn a_fixed_background_on_a_mid_chapter_block_stays_in_the_flow() {
+    let css = "html,body{margin:0;padding:0} body{font-size:16px;line-height:1.5} \
+               p{margin:0} \
+               .pic{height:200px;background-image:url(fm1.jpg);background-size:cover;\
+                    background-repeat:no-repeat;background-attachment:fixed}";
+    let dom = Dom::parse("<body><p>正文</p><div class=pic></div><p>正文</p></body>".as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(css, Origin::Author),
+        &ComputedStyle::default(),
+        "",
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions {
+            width: 384.0,
+            light: false,
+            allow_vertical: false,
+            page_height: Some(720.0),
+            screen_width: Some(384.0),
+            screen_height: Some(853.0),
+        },
+        &Mono,
+        &NoImages,
+    );
+    let seeds = laid.decor_seeds(&styles);
+    assert!(
+        seeds.iter().any(|seed| !seed.pictures.is_empty()),
+        "那块底图的种子该在表里（按块背景画）"
+    );
+    assert!(
+        seeds.iter().all(|seed| !seed.full_bleed),
+        "正文中间那一块上的 fixed 底图不许升级成整页画"
+    );
+}
+
+/// 反过来：整章那一盒（从章首起、占满整章）上的 fixed 底图**仍是**整页画。
+#[test]
+fn a_fixed_background_on_the_page_box_is_still_full_bleed() {
+    let css = "html,body{margin:0;padding:0} body{font-size:16px;line-height:1.5} \
+               p{margin:0} \
+               .page{background-image:url(fm1.jpg);background-size:cover;\
+                     background-repeat:no-repeat;background-attachment:fixed}";
+    let dom = Dom::parse("<body><div class=page><p>正文</p><p>正文</p></div></body>".as_bytes());
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(css, Origin::Author),
+        &ComputedStyle::default(),
+        "",
+    );
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions {
+            width: 384.0,
+            light: false,
+            allow_vertical: false,
+            page_height: Some(720.0),
+            screen_width: Some(384.0),
+            screen_height: Some(853.0),
+        },
+        &Mono,
+        &NoImages,
+    );
+    assert!(
+        laid.decor_seeds(&styles).iter().any(|seed| seed.full_bleed),
+        "整章那一盒上的 fixed 底图照旧当整窗背板"
     );
 }
 
@@ -1903,11 +2029,11 @@ fn a_double_border_reaches_the_decor_table_with_its_style() {
         .expect("章名那块要有上下边框");
     assert_eq!(
         t.border[0],
-        (3.0, Some(Color(0, 0, 0)), BorderStyle::Double)
+        (3.0, Some(Color(0, 0, 0, 255)), BorderStyle::Double)
     );
     assert_eq!(
         t.border[2],
-        (3.0, Some(Color(0, 0, 0)), BorderStyle::Double)
+        (3.0, Some(Color(0, 0, 0, 255)), BorderStyle::Double)
     );
 }
 
@@ -1929,6 +2055,123 @@ fn kinsoku_keeps_punctuation_off_the_line_edges() {
         );
         assert!(!"「『（《".contains(last), "行尾出现了禁则标点：{line}");
     }
+}
+
+/// 中文收尾标点后面只留半格：全角逗号的字墨在左半，右半是空的。
+///
+/// 这一条钉的是「中文标点离右边的字远」那一刀：`，` 自己的前进量从 1em 压到 0.5em，
+/// 下一段文字从它墨的右边起。只压后一个字是汉字的情况；拉丁词前、段末、Another
+/// punctuation 前都保持原样。
+#[test]
+fn a_cjk_closing_punctuation_takes_half_an_em_before_the_next_han() {
+    let (_, layout) = typeset(
+        "<p>你好，世界</p>",
+        "p { font-size: 20px; margin: 0 }",
+        500.0,
+    );
+    let widths: Vec<f32> = layout.lines[0]
+        .fragments
+        .iter()
+        .filter_map(|fragment| match fragment {
+            LineFragment::Text(run) => Some(run.width),
+            LineFragment::Image(_) | LineFragment::Marker(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        widths,
+        vec![40.0, 10.0, 40.0],
+        "逗号该只占半格（10px），下一段从 50px 起"
+    );
+
+    let (_, latin) = typeset(
+        "<p>你好，world</p>",
+        "p { font-size: 20px; margin: 0 }",
+        500.0,
+    );
+    let latin_widths: Vec<f32> = latin.lines[0]
+        .fragments
+        .iter()
+        .filter_map(|fragment| match fragment {
+            LineFragment::Text(run) => Some(run.width),
+            LineFragment::Image(_) | LineFragment::Marker(_) => None,
+        })
+        .collect();
+    assert_eq!(latin_widths, vec![40.0, 20.0, 50.0], "拉丁词前的空格不压");
+
+    let (_, end) = typeset("<p>你好，</p>", "p { font-size: 20px; margin: 0 }", 500.0);
+    let end_widths: Vec<f32> = end.lines[0]
+        .fragments
+        .iter()
+        .filter_map(|fragment| match fragment {
+            LineFragment::Text(run) => Some(run.width),
+            LineFragment::Image(_) | LineFragment::Marker(_) => None,
+        })
+        .collect();
+    assert_eq!(end_widths, vec![40.0, 20.0], "段末没有下一个字，不该压");
+}
+
+/// 中文行尾悬挂：收尾标点允许越出版心一格，内容仍贴到版心右缘。
+///
+/// 20px 字号、80px 版心：四个汉字正好 80；逗号后面是「二」，按挤压规则只占半格
+/// （10px）。没有悬挂时这个逗号装不下，禁则会把前一个字一起推到下一行；悬挂之后
+/// 「一一一一，」留在一行，逗号整格落在 80..90 的留白里。
+///
+/// 参考 LaTeX xeCJK `PunctStyle=kaiming` 的口径：悬挂只把标点的前进量从**对齐宽**
+/// 里摘出去，不改宽度表、不改标点自己的字形。
+#[test]
+fn a_cjk_closing_punctuation_hangs_past_the_measure() {
+    let (_, layout) = typeset(
+        "<p>一一一一，二</p>",
+        "p { font-size: 20px; margin: 0 }",
+        80.0,
+    );
+    assert_eq!(texts(&layout), ["一一一一，", "二"], "逗号该留在第一行");
+    let line = &layout.lines[0];
+    assert_eq!(line.width, 90.0, "行盒仍记含标点的墨迹宽");
+    let widths: Vec<f32> = line
+        .fragments
+        .iter()
+        .filter_map(|fragment| match fragment {
+            LineFragment::Text(run) => Some(run.width),
+            LineFragment::Image(_) | LineFragment::Marker(_) => None,
+        })
+        .collect();
+    assert_eq!(widths, vec![80.0, 10.0], "四个汉字 + 半格逗号");
+    assert_eq!(line.x, 0.0);
+    assert_eq!(line.x + widths[0], 80.0, "逗号从版心右缘起笔，整格在版心外");
+    assert_eq!(
+        line.ink_width(),
+        90.0,
+        "这一行没有两端对齐，墨迹宽即片段宽之和"
+    );
+}
+
+/// 闭引号也在悬挂表里：它不在挤压表里（比例引号宽度随字体变），但行尾让位同一口径。
+#[test]
+fn a_closing_quote_hangs_past_the_measure_too() {
+    let (_, layout) = typeset(
+        "<p>一一一一”二</p>",
+        "p { font-size: 20px; margin: 0 }",
+        80.0,
+    );
+    assert_eq!(texts(&layout), ["一一一一”", "二"], "闭引号该留在第一行");
+    assert_eq!(layout.lines[0].width, 90.0, "四个汉字 + 半格引号");
+}
+
+/// 两端对齐时悬挂量不进余量：正文仍铺到版心右缘，标点整格在版心外。
+#[test]
+fn justification_does_not_stretch_the_hanging_punctuation() {
+    let (_, layout) = typeset(
+        "<p>一二三四，五六</p>",
+        "p { font-size: 20px; margin: 0; text-align: justify }",
+        85.0,
+    );
+    let line = &layout.lines[0];
+    assert_eq!(line.width, 90.0, "四个汉字 + 半格逗号");
+    let justify = line.justify.expect("这一行该两端对齐");
+    assert_eq!(justify.gaps, 4, "字间三处 + 标点前一处");
+    assert_eq!(justify.extra, 5.0 / 4.0, "版心 85 − 正文 80 = 5，摊到四处");
+    assert_eq!(line.ink_width(), 95.0, "墨迹宽 = 版心 + 悬挂量");
 }
 
 /// 回归门：行盒高就是作者给的 line-height，**不**被抬到字形的 content area。
@@ -2149,17 +2392,13 @@ fn image_row_ys(laid: &crate::layout::Layout) -> Vec<f32> {
         .collect()
 }
 
-/// 同一小节里**相邻的三张整块插图**叠成一堆：第 2、3 张只往下走一个 [`STACK_STEP`]，
-/// 而离开这一串之后正文从最后一张的**底边**接着排。
+/// 同一小节里**连续的三张整块插图**叠成**同一格**：三张的 y 相同，一叠只留一张的高。
 ///
-/// 这条钉的是两件事，缺一条都会坏：
-///
-/// - 叠得太狠（游标每张只走一点点，且**离开时也不补回来**）会把后面那段正文压到图上；
-///   所以第三个断言量的是「正文的 y ≥ 最后一张图的底边」。
-/// - 只在**同一串**里叠：中间夹一段正文的两张图不叠（第四段断言）；跨标题也不叠
-///   （第五条）。
+/// 从前这一档是「每张往下走 1/3 高」，于是游标停在图的中间，紧跟其后的正文被摆进图里
+/// （读者报的「字在图里」）。现在排版只说「你是这一叠的第几张、一共几张」，
+/// 「现在看第几张」住界面（改了不许重排）。
 #[test]
-fn adjacent_illustrations_in_one_section_stack_on_each_other() {
+fn a_run_of_illustrations_shares_one_slot() {
     let images = MockImages(vec![
         ("a", 600.0, 300.0),
         ("b", 600.0, 300.0),
@@ -2170,8 +2409,7 @@ fn adjacent_illustrations_in_one_section_stack_on_each_other() {
     // 段间距会叠在它下面（它自己另有一条折叠规则），混进来就分不清是谁挪的。
     let (_, laid) = typeset_images(html, "p { margin: 0 }", 600.0, &images);
 
-    // 只看「这一行是一张图」的行盒：`<p>` 自己的块与它的内容盒会各记一条，按块筛会数两遍。
-    let image_rows: Vec<&crate::layout::LineBox> = laid
+    let rows: Vec<&crate::layout::LineBox> = laid
         .lines
         .iter()
         .filter(|line| {
@@ -2179,29 +2417,273 @@ fn adjacent_illustrations_in_one_section_stack_on_each_other() {
                 && matches!(line.fragments[0], crate::layout::LineFragment::Image(_))
         })
         .collect();
-    assert_eq!(image_rows.len(), 3, "该有三张图，实得 {}", image_rows.len());
-
-    let step = 300.0 * super::collect::STACK_STEP;
-    let (first, second, third) = (image_rows[0].y, image_rows[1].y, image_rows[2].y);
-    assert!(
-        (second - (first + step)).abs() < 0.5,
-        "第 2 张该只往下走一个步长 {step}：{first} → {second}"
+    assert_eq!(rows.len(), 3, "该有三张图，实得 {}", rows.len());
+    let marks: Vec<Option<crate::layout::StackMark>> = rows.iter().map(|l| l.stack).collect();
+    assert_eq!(
+        marks,
+        vec![
+            Some(crate::layout::StackMark {
+                id: 0,
+                index: 0,
+                count: 3
+            }),
+            Some(crate::layout::StackMark {
+                id: 0,
+                index: 1,
+                count: 3
+            }),
+            Some(crate::layout::StackMark {
+                id: 0,
+                index: 2,
+                count: 3
+            }),
+        ],
+        "三张该是同一叠的三格"
     );
     assert!(
-        (third - (second + step)).abs() < 0.5,
-        "第 3 张同理：{second} → {third}"
+        rows[0].y == rows[1].y && rows[1].y == rows[2].y,
+        "叠起来就该在同一个 y：{:?}",
+        rows.iter().map(|l| l.y).collect::<Vec<_>>()
     );
-    // 正文不许压到图上：它必须落在最后一张的底边之下。
+    // 一叠只占一张的高：正文从这一格的底边接着排，不许落在格内。
     let text_block = laid
         .blocks
         .iter()
         .find(|b| b.text.contains("正文"))
         .expect("该有那一段正文");
     assert!(
-        text_block.y >= third + 300.0 - 0.5,
-        "正文该从最后一张的底边起排：正文 y = {}，最后一张底边 = {}",
+        text_block.y >= rows[0].y + 300.0 - 0.5,
+        "正文该从这一格的底边起排：正文 y = {}，格底 = {}",
         text_block.y,
-        third + 300.0
+        rows[0].y + 300.0
+    );
+}
+
+/// **显示尺寸不同**的两张相邻图不叠：矮的那张会在高的那张身上露出一道边，
+/// 读者看到的是排版坏了。这一条同时是「同尺寸」那道判据的变异门 ——
+/// 把比较去掉它就红。
+#[test]
+fn illustrations_of_different_sizes_are_not_stacked() {
+    let images = MockImages(vec![("a", 600.0, 300.0), ("b", 600.0, 200.0)]);
+    let html = "<p><img src=a></p><p><img src=b></p>";
+    let (_, laid) = typeset_images(html, "p { margin: 0 }", 600.0, &images);
+    let ys = image_row_ys(&laid);
+    assert_eq!(ys.len(), 2, "该有两张图，实得 {ys:?}");
+    assert!(
+        ys[1] >= ys[0] + 300.0 - 0.5,
+        "尺寸不同的两张不该叠在同一格：{ys:?}"
+    );
+    assert!(
+        laid.lines.iter().all(|l| l.stack.is_none()),
+        "没叠就不该有叠标记"
+    );
+}
+
+/// **占满一屏**的图也叠：画廊的每张人物图都可能接近一页高。
+#[test]
+fn a_full_screen_illustration_stacks_into_one_cell() {
+    let images = MockImages(vec![("a", 600.0, 500.0), ("b", 600.0, 500.0)]);
+    let html = "<p><img src=a></p><p><img src=b></p>";
+    // 页高 400：两张都被硬夹到 400，尺寸相同 → 同一格。
+    let (_, laid) = typeset_images_page(html, "p { margin: 0 }", 600.0, Some(400.0), &images);
+    let ys = image_row_ys(&laid);
+    assert_eq!(ys.len(), 2, "该有两张图，实得 {ys:?}");
+    assert!(
+        (ys[1] - ys[0]).abs() < 0.5,
+        "占满一屏的图也该叠到同一格：{ys:?}"
+    );
+    assert!(
+        laid.lines
+            .iter()
+            .filter(|line| line.stack.is_some())
+            .count()
+            >= 2,
+        "两张都该带叠标记"
+    );
+}
+
+/// 画廊 cell（`<img>` + 一段 `<p>` 图注）三连 → 一叠三格，**图注行也带同一个标记**。
+///
+/// 图注跟着它那张图走，界面切到第 k 张时图与注一起换。从前 `single_image` 认不出这种
+/// 「图旁边站着一段注」的块，多看/掌阅那族导出的画廊从来没叠过。
+#[test]
+fn a_gallery_cell_with_a_caption_stacks_and_tags_its_caption() {
+    let images = MockImages(vec![
+        ("a", 600.0, 300.0),
+        ("b", 600.0, 300.0),
+        ("c", 600.0, 300.0),
+    ]);
+    let cell = |src: &str, name: &str| {
+        format!("<div class=\"cell\"><img src={src}><p class=\"tpcrb\">{name}</p></div>")
+    };
+    let html = format!(
+        "{}{}{}",
+        cell("a", "灾祸之城"),
+        cell("b", "灰雾之上"),
+        cell("c", "源堡")
+    );
+    let (_, laid) = typeset_images(&html, ".cell { margin: 0 }", 600.0, &images);
+    let tagged: Vec<(u16, bool)> = laid
+        .lines
+        .iter()
+        .filter_map(|l| {
+            l.stack.map(|m| {
+                (
+                    m.index,
+                    l.fragments
+                        .iter()
+                        .any(|f| matches!(f, crate::layout::LineFragment::Image(_))),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        tagged.len(),
+        6,
+        "三张图 + 三条注都该带标记，实得 {tagged:?}"
+    );
+    assert!(
+        tagged.iter().any(|(_, image)| !image),
+        "图注行也要带叠标记，否则切图时注不换"
+    );
+    let counts: Vec<u16> = laid
+        .lines
+        .iter()
+        .filter_map(|l| l.stack.map(|m| m.count))
+        .collect();
+    assert!(counts.iter().all(|c| *c == 3), "一叠三格：{counts:?}");
+    // 三张图落在同一个 y（这才叫「一叠只占一格」），三条图注落在下面那一个 y。
+    let at = |image: bool| -> Vec<f32> {
+        laid.lines
+            .iter()
+            .filter(|l| l.stack.is_some())
+            .filter(|l| {
+                l.fragments
+                    .iter()
+                    .any(|f| matches!(f, crate::layout::LineFragment::Image(_)) == image)
+            })
+            .map(|l| l.y)
+            .collect()
+    };
+    let (images, captions) = (at(true), at(false));
+    assert_eq!(images.len(), 3, "三张图都该带标记：{images:?}");
+    assert_eq!(captions.len(), 3, "三条注都该带标记：{captions:?}");
+    assert!(
+        images.windows(2).all(|w| (w[0] - w[1]).abs() < 0.5),
+        "三张图该叠在同一个 y：{images:?}"
+    );
+    assert!(
+        captions.windows(2).all(|w| (w[0] - w[1]).abs() < 0.5),
+        "三条注该叠在同一个 y：{captions:?}"
+    );
+    assert!(
+        captions[0] > images[0],
+        "注在它那张图下面：图 {}，注 {}",
+        images[0],
+        captions[0]
+    );
+}
+
+/// 注写在**图前面**也认（《哈利·波特全集》`art.xhtml` 的画廊：
+/// `<p>美版系列封面</p><img>`）。
+///
+/// 位置不参与判定；摆的时候由 `Ctx::caption_last` 把它挪到这一叠的下面 —— 叠起来只剩
+/// 一张图，注是这一叠的说明。从前 `image_unit` 遇到「注在前」直接回 `None`，这族的
+/// 画廊一张都叠不起来。
+#[test]
+fn a_gallery_cell_with_the_caption_first_still_stacks_and_puts_it_below() {
+    let images = MockImages(vec![
+        ("a", 600.0, 300.0),
+        ("b", 600.0, 300.0),
+        ("c", 600.0, 300.0),
+    ]);
+    let cell = |src: &str| {
+        format!("<div class=\"cell\"><p class=\"tpcrb\">美版系列封面</p><img src={src}></div>")
+    };
+    let html = format!("{}{}{}", cell("a"), cell("b"), cell("c"));
+    let (_, laid) = typeset_images(&html, ".cell { margin: 0 }", 600.0, &images);
+    let tagged: Vec<(bool, f32)> = laid
+        .lines
+        .iter()
+        .filter_map(|l| {
+            l.stack.map(|_| {
+                (
+                    l.fragments
+                        .iter()
+                        .any(|f| matches!(f, crate::layout::LineFragment::Image(_))),
+                    l.y,
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        tagged.len(),
+        6,
+        "三张图 + 三条注都该带标记，实得 {tagged:?}"
+    );
+    let ys = |image: bool| -> Vec<f32> {
+        tagged
+            .iter()
+            .filter(|(is_image, _)| *is_image == image)
+            .map(|(_, y)| *y)
+            .collect()
+    };
+    let (image_ys, caption_ys) = (ys(true), ys(false));
+    assert_eq!(image_ys.len(), 3, "三张图都该带标记：{image_ys:?}");
+    assert!(
+        image_ys.windows(2).all(|w| (w[0] - w[1]).abs() < 0.5),
+        "注在前也不影响叠：三张图该在同一个 y：{image_ys:?}"
+    );
+    assert!(
+        caption_ys.iter().all(|y| *y > image_ys[0] + 300.0 - 0.5),
+        "注该摆在这一叠的**下面**：图 {image_ys:?}，注 {caption_ys:?}"
+    );
+}
+
+/// 真书在相邻两个 cell 之间夹着换行与缩进：**纯空白文本节点不许把一叠截断**。
+///
+/// 夹具从前一直写成 `format!("{}{}{}", cell(..), cell(..), cell(..))` —— 紧贴着写，
+/// 所以这条从来没被发现；《诡秘之主》与《哈利·波特全集》的 XHTML 都缩进过，于是
+/// 两本书的画廊一张都没叠过（读者 2026-11-01 报的「诡秘之主也不能叠」）。
+#[test]
+fn a_newline_between_gallery_cells_does_not_break_the_stack() {
+    let images = MockImages(vec![
+        ("a", 600.0, 300.0),
+        ("b", 600.0, 300.0),
+        ("c", 600.0, 300.0),
+    ]);
+    let cell = |src: &str| format!("<div class=\"cell\"><p>注</p><img src={src}></div>");
+    let html = format!("{}\n  {}\n  {}", cell("a"), cell("b"), cell("c"));
+    let (_, laid) = typeset_images(&html, ".cell { margin: 0 }", 600.0, &images);
+    let ys = image_row_ys(&laid);
+    assert_eq!(ys.len(), 3, "该有三张图，实得 {ys:?}");
+    assert!(
+        ys.windows(2).all(|w| (w[0] - w[1]).abs() < 0.5),
+        "夹了换行也该叠在同一格：{ys:?}"
+    );
+    let counts: Vec<u16> = laid
+        .lines
+        .iter()
+        .filter_map(|l| l.stack.map(|m| m.count))
+        .collect();
+    assert!(counts.iter().all(|c| *c == 3), "三格一叠：{counts:?}");
+}
+
+/// 「同尺寸」放宽一档：高差在 `STACK_SIZE_TOLERANCE` 以内仍算一叠。
+///
+/// 哈利波特美版那七张原图 1000×441 / 1000×460 / 1000×447 —— 铺到屏宽之后差十几像素，
+/// 按 0.5 像素比一张都叠不起来，而它们本来就是同一组。差得多的仍然挡掉
+/// （`illustrations_of_different_sizes_are_not_stacked` 钉的是这一半）。
+#[test]
+fn illustrations_a_hair_different_in_height_still_stack() {
+    let images = MockImages(vec![("a", 600.0, 300.0), ("b", 600.0, 310.0)]);
+    let html = "<p><img src=a></p><p><img src=b></p>";
+    let (_, laid) = typeset_images(html, "p { margin: 0 }", 600.0, &images);
+    let ys = image_row_ys(&laid);
+    assert_eq!(ys.len(), 2, "该有两张图，实得 {ys:?}");
+    assert!(
+        (ys[0] - ys[1]).abs() < 0.5,
+        "高差 3% 的两张该叠在同一格：{ys:?}"
     );
 }
 
@@ -2541,14 +3023,12 @@ fn max_width_clamps_and_scales_height() {
     assert!((img.height - 20.0).abs() < 0.01);
 }
 
-/// 块级那一张图（`display:block`，满版图的多数写法）在读者三档下各是什么形状。
+/// 块级那一张图：**尺寸听 CSS**。`width:100%` 就是栏宽，不再自动按屏宽铺。
 ///
-/// 与行内那一臂分开钉：`wrap::push_image` 只管夹在字里的图，那里**三档都看作者的
-/// `object-fit`**；整块的图才是「铺满屏幕」这一档放开手的地方。放开也只放开
-/// 「要不要 `object-fit`」这一条，「本来就不小」那条留着 —— 一枚 24px 的徽标独占一段
-/// 时也不该被拉成满屏，那不是大图而是排版坏了。
+/// 2026-11-02 读者改口径：只有作者显式写 `object-fit: cover` 或 `duokan-bleed`
+/// 才铺到屏幕宽；`contain` / `fill` / 不写一律按 CSS 的盒。
 #[test]
-fn a_block_image_follows_the_readers_scale_tier() {
+fn a_block_image_follows_css_not_the_scale_tier() {
     let big = MockImages(vec![("a", 1000.0, 500.0)]);
     let html = "<body><img src=a></body>";
     let run = |css: &str, scale: ImageScale, images: &MockImages| {
@@ -2562,25 +3042,25 @@ fn a_block_image_follows_the_readers_scale_tier() {
     };
     let block = "img { display: block; width: 100% }";
 
-    // 跟书：作者没写 `object-fit`，谁也不许替它决定盖满一块屏。
+    // 三档同一个结果：CSS 说 600 宽，就是 600 宽。
     assert_eq!(run(block, ImageScale::Follow, &big), (600.0, 300.0));
-    // 铺满：读者说了要大图，`object-fit` 这一条不再要求，而 600 已经不小 → 按屏宽重铺。
-    assert_eq!(run(block, ImageScale::Screen, &big), (900.0, 450.0));
-    // 原始：不放大，连 `cover` 也不放大。
+    assert_eq!(run(block, ImageScale::Screen, &big), (600.0, 300.0));
+    // `object-fit: cover` 只决定图在盒里怎么裁，不改盒子的宽：仍是 600。
     assert_eq!(
         run(
             "img { display: block; width: 100%; object-fit: cover }",
             ImageScale::Original,
             &big
         ),
-        (600.0, 300.0)
+        (600.0, 300.0),
+        "cover 只影响绘制，不改排版宽"
     );
-    // 铺满也不把小图撑大：100 宽远不到栏宽八成，屏高那一头同样不够。
+    // 小图不放大：一枚 100×50 的徽标按 CSS 的固有尺寸摆。
     let logo = MockImages(vec![("a", 100.0, 50.0)]);
     assert_eq!(
         run("img { display: block }", ImageScale::Screen, &logo),
         (100.0, 50.0),
-        "「铺满」放开的是 `object-fit`，不是「本来就不小」"
+        "没有显式铺满的大图不许被撑开"
     );
 }
 
@@ -2609,7 +3089,7 @@ fn a_bleeding_image_spreads_to_the_screen_and_centers_itself() {
         run(bleed_div, css, ImageScale::Follow, screen),
         (900.0, -150.0, 600.0)
     );
-    // 对照：同一份标记不写出血 → 逐字不变（600 宽、不偏移）。
+    // 不写出血、也没写 `cover`：听 CSS，停在栏宽。
     assert_eq!(
         run(bleed_div, "img { width: 100% }", ImageScale::Follow, screen),
         (600.0, 0.0, 600.0)
@@ -2634,11 +3114,10 @@ fn a_bleeding_image_spreads_to_the_screen_and_centers_itself() {
         ),
         (900.0, -150.0, 600.0)
     );
-    // 读者那一档「原始尺寸」压掉出血：作者的话也不例外。
+    // 「原始尺寸」那一档撤掉之后不再压掉出血：三档同一个结果。
     assert_eq!(
         run(bleed_div, css, ImageScale::Original, screen),
-        (600.0, 0.0, 600.0),
-        "「原始」那一档不许出血"
+        (900.0, -150.0, 600.0)
     );
     // 量不出屏宽时无处可铺：基准退回栏宽，不偏移也不报错。
     assert_eq!(
@@ -2678,7 +3157,7 @@ fn a_bleeding_block_image_spreads_and_stays_centered() {
         laid_of("img { display: block; width: 100%; duokan-bleed: leftright; text-align: left }");
     assert_eq!(left.x, -150.0, "出血的图不许被贴边摆推出屏幕");
 
-    // 对照：不写出血时逐字不变（600 宽、行盒从 0 起）。
+    // 不写出血：听 CSS，停在栏宽。
     let plain = laid_of("img { display: block; width: 100% }");
     assert_eq!(
         (plain.x, plain.images().next().unwrap().width),
@@ -3390,6 +3869,70 @@ fn letter_spacing_widens_each_character_and_breaks_earlier() {
     );
 }
 
+/// 中西文自动间距：汉字与西文字母直接相邻时插 0.25em 的间隙（clreq §3.2.2 口径，
+/// 与 Typst 的 `cjk-latin-spacing: auto` 同源同量），run 宽随之变大。
+///
+/// 四个判据各钉一条规则：
+/// - `汉A汉`：两个边界各 0.25em（16px 字号下 4px），run 宽 40 + 8 = 48；
+/// - `汉 A 汉`：空白隔开就不插 —— 48 里不再多出间隙（错了会是 56）；
+/// - `汉，AB`：CJ 标点不算 CJ，两侧都不插 —— 48（错了会是 52）；
+/// - 纯拉丁 `ABC`：无边界 —— 24。
+#[test]
+fn a_han_latin_boundary_gains_a_quarter_em() {
+    // 收尾标点会把行切成多个 piece（`，` 单独一段），所以量**整行**的文本宽，
+    // 不是第一个片段。
+    let width_of = |text: &str| {
+        let (_, laid) = typeset(
+            &format!("<p>{text}</p>"),
+            "p { text-indent: 0; margin: 0 }",
+            400.0,
+        );
+        laid.lines[0]
+            .fragments
+            .iter()
+            .map(|f| match f {
+                LineFragment::Text(run) => run.width,
+                LineFragment::Image(img) => img.advance,
+                LineFragment::Marker(marker) => marker.width,
+            })
+            .sum::<f32>()
+    };
+    assert!(
+        (width_of("汉A汉") - 48.0).abs() < 0.01,
+        "两个边界各 4px，实际 {}",
+        width_of("汉A汉")
+    );
+    assert!(
+        (width_of("汉 A 汉") - 48.0).abs() < 0.01,
+        "空白隔开不插间隙，实际 {}",
+        width_of("汉 A 汉")
+    );
+    assert!(
+        (width_of("汉，AB") - 48.0).abs() < 0.01,
+        "CJ 标点两侧不插，实际 {}",
+        width_of("汉，AB")
+    );
+    assert!(
+        (width_of("ABC") - 24.0).abs() < 0.01,
+        "纯拉丁无边界，实际 {}",
+        width_of("ABC")
+    );
+}
+
+/// 间隙参与断行：第 15 个汉字背上与 `A` 之间的 4px 之后，240 的版心装不下它，
+/// 首行从 15 字（无间隙的口径）退到 14 字，它跟 `A` 一起落到第二行。
+#[test]
+fn a_han_latin_gap_breaks_the_line_earlier() {
+    let html = format!("<p>{}A</p>", "汉".repeat(15));
+    let (_, laid) = typeset(&html, "p { text-indent: 0; margin: 0 }", 240.0);
+    assert_eq!(
+        laid.line_text(0).chars().count(),
+        14,
+        "首行 14 字：第 15 字带上 4px 间隙 = 20px，越界"
+    );
+    assert_eq!(laid.line_text(1), "汉A", "第二行以落难的汉字开头");
+}
+
 /// `box-sizing: border-box` 时作者写的数**已经含**边框与内边距：横向那一格。
 ///
 /// 两条断言钉两件不同的事，缺一条就是「看着对了」：盒宽只证明矩形折了，而**折行宽**
@@ -3655,12 +4198,11 @@ fn a_wide_image_is_capped_by_the_screen_rather_than_the_column() {
     );
 }
 
-/// 「够大的图按屏幕宽铺」那一档的**判据**：`object-fit` 说的才是作者要不要它盖满。
+/// 尺寸听 CSS：只有 `object-fit: cover` / `duokan-bleed` 才按屏幕宽铺。
 ///
 /// 这条与上面那条分开设：上面问的是「算完宽以后夹到哪」，这里问的是「该不该把它放大」。
 /// 判错方向的代价不对称 —— 把一枚 24px 的图标拉成满屏比让一张满版图缩在栏里难看得多，
-/// 所以 `contain` 要额外验「本来就不小」（宽至少八成栏宽，或高至少八成屏高），
-/// 而 `cover` 是作者显式说了盖满，不再加这一条。
+/// 所以只有作者显式说盖满（`cover` / 出血）才放大。
 #[test]
 fn the_fills_the_screen_rule_keyed_on_object_fit_and_size() {
     let html = format!("<img src=a><p>{}</p>", "字".repeat(20));
@@ -3680,18 +4222,18 @@ fn the_fills_the_screen_rule_keyed_on_object_fit_and_size() {
         (run.width, run.height)
     };
 
-    // `cover`：盒宽 600 直接按屏宽重铺，高按比例 450。
+    // `cover` 只影响绘制：盒宽仍是 CSS 的 600。
     let follow = ImageScale::Follow;
     assert_eq!(
         laid_width("img { width: 100%; object-fit: cover }", &big, follow),
-        (900.0, 450.0)
+        (600.0, 300.0)
     );
-    // 够大的 `contain`（600 ≥ 栏宽八成）同样铺到屏宽。
+    // 够大的 `contain` 也听 CSS：600 就是 600，不再铺到屏宽。
     assert_eq!(
         laid_width("img { width: 100%; object-fit: contain }", &big, follow),
-        (900.0, 450.0)
+        (600.0, 300.0)
     );
-    // `fill` 与不写：这一档说的是「拉伸到盒里」，不是「盖住一块屏」，所以盒不变。
+    // `fill` 与不写：同样听 CSS。
     assert_eq!(
         laid_width("img { width: 100%; object-fit: fill }", &big, follow),
         (600.0, 300.0)
@@ -3707,13 +4249,11 @@ fn the_fills_the_screen_rule_keyed_on_object_fit_and_size() {
         (100.0, 50.0),
         "窄于栏宽八成的图不许被撑满"
     );
-    // 「铺满屏幕」那一档对**独占一段**的图生效：`<img>` 在 UA 表里天生 inline，而书里的
-    // 插图几乎都写成 `<p><img></p>` 那个形状 —— 按「整块的图」处理才排得满屏。
-    // （从前这一格只认 `display:block`，于是这一档在真实 epub 上几乎什么都不做。）
+    // 「铺满屏幕」那一档不再替作者放大：仍然听 CSS。
     assert_eq!(
         laid_width("img { width: 100% }", &big, ImageScale::Screen),
-        (900.0, 450.0),
-        "独占一段的图在「铺满」下该铺到屏幕宽"
+        (600.0, 300.0),
+        "尺寸听 CSS"
     );
     // 反过来：同段还有字的那些**不放大** —— 把一枚夹在字里的图拉成满屏等于把整段顶走。
     {
@@ -3768,11 +4308,11 @@ fn the_fills_the_screen_rule_keyed_on_object_fit_and_size() {
             .expect("应排出一张图");
         assert_eq!(
             (run.width, run.height),
-            (900.0, 450.0),
-            "页高 = {page_h:?} 时 contain 大图的宽高该与另一档相同"
+            (600.0, 300.0),
+            "页高 = {page_h:?} 时 contain 图仍按 CSS 的 600"
         );
     }
-    // 「原始尺寸」：连作者显式要盖满的 `cover` 也不放大。
+    // 「原始尺寸」那一档也不会让 `cover` 改盒子宽：仍然 600。
     assert_eq!(
         laid_width(
             "img { width: 100%; object-fit: cover }",
@@ -3780,7 +4320,7 @@ fn the_fills_the_screen_rule_keyed_on_object_fit_and_size() {
             ImageScale::Original
         ),
         (600.0, 300.0),
-        "「原始」不许放大行内图"
+        "cover 不改盒子宽"
     );
     // 对照：界面没递屏宽时，`cover` 那张图逐字不变 —— 放大这一手只由屏宽触发。
     let (_, laid) = typeset_images_screen(
@@ -4866,5 +5406,24 @@ fn negative_margin_cannot_push_content_off_the_page() {
     assert_eq!(
         block.width, 300.0,
         "作者写的 `width` 不缩：只挪位置，右缘照浏览器溢出"
+    );
+}
+
+/// 只有一张图的块，负的 `margin-top` 夹成 0：图不许被顶进页眉带里。
+///
+/// 《哈利·波特全集》`v1.xhtml`：`<div style="margin:-15px 0 -10px 0"><img hptitle.png></div>`
+/// —— 作者想把标题图往上贴，可阅读器顶上那条页眉带不透明，图的顶边正好被切掉 15px。
+/// 正文块的负上边距不动（那是作者让它压在上一段上）。
+#[test]
+fn a_negative_top_margin_does_not_lift_a_lone_image() {
+    let images = MockImages(vec![("a", 600.0, 300.0)]);
+    let html = "<div style=\"margin-top:-15px\"><img src=a></div>";
+    let (_, laid) = typeset_images(html, "", 600.0, &images);
+    let ys = image_row_ys(&laid);
+    assert_eq!(ys.len(), 1, "该有一张图：{ys:?}");
+    assert!(
+        ys[0] >= -0.01,
+        "只有图的块不许被负上外边距顶到 0 以上：{}",
+        ys[0]
     );
 }

@@ -10,17 +10,43 @@ use folio_core::infra::metrics::{Metric, take_local};
 use folio_core::{Chapter, FlowDoc, Locator, PageTurn};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, ScrollDelta, TestAppContext, TouchPhase, point, px,
+    AnyWindowHandle, AppContext as _, ElementId, ScrollDelta, TestAppContext, TouchPhase, point, px,
 };
 use std::time::Duration;
 
-/// 这一帧重建了几次场景。分页且定住时应当是 1（一栏一份），动画在走时是 2
-/// （出场页 + 进场页各一份）—— 这是「两张纸真的都在树上」的唯一可测证据，
-/// 因为位移本身看不见，而少摆一张的画法在屏幕上只是「下一页没来」。
+/// 这一帧重建了几次场景。分页且定住时应当是 1（一栏一份）；翻页在走时是 0 ——
+/// 出场页与进场页**都**走静止帧烘好的平摊纹理（进场页那张 2026-11-02 起，烘焙帧
+/// 在 `rebuilds_this_frame` 采样之前就被通知 flush 画掉了，采样帧拿到的是稳态）。
+/// 这是「两张纸真的都上了纹理」的唯一可测证据，因为位移本身看不见，而少摆一张的
+/// 画法在屏幕上只是「下一页没来」。
 fn rebuilds_this_frame(cx: &mut TestAppContext, handle: AnyWindowHandle, wait: Duration) -> u64 {
     take_local(Metric::SceneRebuilds);
     turn_frame(cx, handle, wait);
     take_local(Metric::SceneRebuilds)
+}
+
+/// 出场页这一帧走的是烘好的整页纹理吗。
+///
+/// 左右平移 / 覆盖不再摆第二份场景，屏上那张旧纸是一个带 id 的 canvas；这一问就是
+/// 「纹理在不在」。与 `rebuilds_this_frame()` == 0 一起看：场景一份都不重建，两张纸
+/// 各是一张纹理。
+fn flat_capture_drawn(cx: &mut TestAppContext, handle: AnyWindowHandle) -> bool {
+    cx.update_window(handle, |_, window, _| {
+        window
+            .try_find(ElementId::from("reader-flat-capture"))
+            .is_some()
+    })
+    .expect("窗口应能渲染")
+}
+
+/// 进场页这一帧走的是烘好的平摊纹理吗（2026-11-02 起，与出场页同一套，方向相反）。
+fn flat_incoming_drawn(cx: &mut TestAppContext, handle: AnyWindowHandle) -> bool {
+    cx.update_window(handle, |_, window, _| {
+        window
+            .try_find(ElementId::from("reader-flat-incoming"))
+            .is_some()
+    })
+    .expect("窗口应能渲染")
 }
 
 /// 两章、每章都够长：跨章滑动要目标章真的切出页来，短到一页的语料测不出「滑到下一页」。
@@ -238,9 +264,20 @@ fn a_paged_chapter_boundary_slides_between_chapters(cx: &mut TestAppContext) {
         "动画没走完之前不能先换章"
     );
 
-    // 半程：两张纸都在树上（源章页 + 目标章页各一份场景）。
+    // 半程：源章页与目标章页**都**是烘好的平摊纹理 —— 两张纸仍在屏上，场景一份不重建。
     let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(140));
-    assert_eq!(rebuilds, 2, "跨章滑动要两张纸同时上屏，实得 {rebuilds}");
+    assert_eq!(
+        rebuilds, 0,
+        "跨章滑动的两张纸都该走平摊纹理，实得 {rebuilds}"
+    );
+    assert!(
+        flat_capture_drawn(cx, handle),
+        "跨章滑动该有源章页那张捕获纹理"
+    );
+    assert!(
+        flat_incoming_drawn(cx, handle),
+        "跨章滑动该有目标章页那张平摊纹理"
+    );
     assert_eq!(view.read_with(cx, |v, _| v.chapter_index()), 0);
 
     // 走完：锚章换成第二章，页号落到它的第一页。
@@ -330,11 +367,20 @@ fn a_paged_turn_draws_both_pages_until_the_slide_has_run(cx: &mut TestAppContext
     );
 
     view.update(cx, |v, cx| v.scroll_page(1, cx));
-    // 起步那一帧：时钟还没走，进场那张整页停在阅读方向的前方外，出场那张还占着屏。
+    // 起步那一帧把进场页实时画一份并烘进捕获层 3（烘焙帧在采样前就被 flush 画掉了）；
+    // 采样帧起两张纸都走平摊纹理，一份场景都不重建。
     let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(1));
     assert_eq!(
-        rebuilds, 2,
-        "翻页在走，出场页与进场页要各摆一份场景（拿到 {rebuilds} 份）"
+        rebuilds, 0,
+        "两张纸都该走平摊纹理，场景一份都不重建（拿到 {rebuilds} 份）"
+    );
+    assert!(
+        flat_capture_drawn(cx, handle),
+        "左右平移翻页时该有那张烘好的整页纹理"
+    );
+    assert!(
+        flat_incoming_drawn(cx, handle),
+        "进场页也该有那张烘好的平摊纹理"
     );
     let (turn, shift, chapter) =
         view.read_with(cx, |v, _| (v.turn, v.page_shift, v.chapter_index()));
@@ -367,6 +413,10 @@ fn a_paged_turn_draws_both_pages_until_the_slide_has_run(cx: &mut TestAppContext
     view.read_with(cx, |v, _| {
         assert!(v.turn.is_none(), "走完该把动画状态收掉");
         assert_eq!(v.page_shift, (0.0, 0.0), "定住后当前页不该带着位移");
+        assert!(
+            v.captured_incoming.is_none(),
+            "进场页那张纹理只服务这一趟，落定就该清掉"
+        );
     });
     assert_eq!(view.read_with(cx, |v, _| v.page()), first + 1);
 }
@@ -617,8 +667,16 @@ fn a_cover_draws_two_sheets_and_keeps_the_offset_on_the_arriving_one(cx: &mut Te
     view.update(cx, |v, cx| v.scroll_page(1, cx));
     let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(1));
     assert_eq!(
-        rebuilds, 2,
-        "覆盖档起步要两张纸同时上屏（拿到 {rebuilds} 份场景）"
+        rebuilds, 0,
+        "覆盖档的两张纸都走平摊纹理，场景一份不重建（拿到 {rebuilds} 份场景）"
+    );
+    assert!(
+        flat_capture_drawn(cx, handle),
+        "覆盖档该有那张烘好的旧页纹理"
+    );
+    assert!(
+        flat_incoming_drawn(cx, handle),
+        "覆盖档该有那张烘好的新页纹理"
     );
     let shift = view.read_with(cx, |v, _| v.page_shift);
     assert!(
@@ -630,6 +688,10 @@ fn a_cover_draws_two_sheets_and_keeps_the_offset_on_the_arriving_one(cx: &mut Te
     assert_eq!(
         rebuilds, 1,
         "走完不该再摆那张停着的旧页（拿到 {rebuilds} 份）"
+    );
+    assert!(
+        !flat_capture_drawn(cx, handle),
+        "落定之后捕获纹理不该还留着"
     );
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
 }

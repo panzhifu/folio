@@ -397,7 +397,7 @@ fn a_chapters_own_style_block_becomes_author_rules() {
     let p = first_p(&dom);
     assert_eq!(
         styles.get(p).unwrap().color,
-        Some(Color(0xC0, 0x39, 0x2B)),
+        Some(Color(0xC0, 0x39, 0x2B, 255)),
         "章内 <style> 的颜色要落到 p 上"
     );
     let backdrop = styles
@@ -452,17 +452,17 @@ fn print_only_media_blocks_are_dropped_while_screen_ones_are_kept() {
     };
     assert_eq!(
         color_of("@media print { p { color: #ff0000 } } p { color: #123456 }"),
-        Some(Color(0x12, 0x34, 0x56)),
+        Some(Color(0x12, 0x34, 0x56, 255)),
         "print 里那条不许生效"
     );
     assert_eq!(
         color_of("@media screen and (min-width: 100px) { p { color: #111111 } }"),
-        Some(Color(0x11, 0x11, 0x11)),
+        Some(Color(0x11, 0x11, 0x11, 255)),
         "screen / 判不了的条件照收"
     );
     assert_eq!(
         color_of("@media all and (max-width: 600px) { p { color: #222222 } }"),
-        Some(Color(0x22, 0x22, 0x22)),
+        Some(Color(0x22, 0x22, 0x22, 255)),
         "含 all 的照收"
     );
 }

@@ -659,6 +659,7 @@ pub fn overlay(
     reader: &Entity<ReaderSession>,
     view: EntityId,
     top_inset: f32,
+    layer_top: f32,
     focus: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
@@ -876,7 +877,7 @@ pub fn overlay(
             // 它下面起（外壳 `reading_overlay` 的 `pt`，见 `shell::reading_top_inset`），
             // 不向上长回去，那一条露出的就是书页的浅底色 —— 读者看到的是「最上面一条白」。
             // 与顶栏那条 `TopBar::overlay` 同一个写法（它也要长回窗口顶边）。
-            .top(px(-top_inset))
+            .top(px(-layer_top))
             .bottom_0()
             .left_0()
             .right_0()
@@ -1313,7 +1314,7 @@ mod view_tests {
                         .on_click(move |_, _, _| taps.set(taps.get() + 1)),
                 )
                 .children(overlay(
-                    &viewer, &atlas, &session, view, top_inset, &focus, window, cx,
+                    &viewer, &atlas, &session, view, top_inset, top_inset, &focus, window, cx,
                 ))
         }
     }

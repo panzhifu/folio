@@ -238,6 +238,33 @@ pub(crate) fn adjust_volume(up: bool) {
     }
 }
 
+/// 这台设备的 Android API 档位（`ro.build.version.sdk`），进程内读一次。
+///
+/// 「所有文件访问」这一档在 API 30 处断成两半，递权限的那一侧需要这个数才问得对
+/// （见 [`super::request_storage_access`]）。
+///
+/// 不用 `ndk_sys::android_get_device_api_level()`：那个符号 API 29 起才进 libc，而 Rust
+/// 没有 NDK 头里 `__INTRODUCED_IN` 那档守卫，对着更低的平台编出去仍然是**强**未定义引用 ——
+/// `.so` 在 API 26–28 上直接 dlopen 失败（fork 在 OPPO R11s / Android 8.1 上复现过，
+/// 而本应用的 minSdk 就是 26）。读系统属性自 API 1 就有，不引新符号。
+pub(crate) fn api_level() -> i32 {
+    static LEVEL: OnceLock<i32> = OnceLock::new();
+    *LEVEL.get_or_init(|| {
+        let mut value = [0u8; libc::PROP_VALUE_MAX as usize];
+        let len = unsafe {
+            libc::__system_property_get(c"ro.build.version.sdk".as_ptr(), value.as_mut_ptr().cast())
+        };
+        if len <= 0 {
+            // 读不到就报最低档：宁可少要一次授权，也不拿着一个高版本才存在的判据去撞低版本。
+            return 0;
+        }
+        std::str::from_utf8(&value[..len as usize])
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// 把一张图的字节交给系统分享面板（对面是 `GpuiSystemUi.shareImage`）。
 ///
 /// 字节从这边过去而不是递一个文件路径：图存在容器里（EPUB 是 zip），Reader 手上本来

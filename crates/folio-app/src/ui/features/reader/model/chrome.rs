@@ -210,22 +210,17 @@ pub const MIN_SPREAD_GAP: f32 = 24.0;
 
 /// 外壳在不属于正文的那一侧占掉多少（逻辑像素）。
 ///
-/// 分成两个轴是因为**导航栏在两端的对边不同**：手机上横躺着占高，桌面上竖着占宽。
-/// 合成一个数的话另一端就得拿它去扣错的那一轴 —— 以前正是这样：桌面把它当宽扣、
-/// 移动把它当高扣，同一个参数两种读法，读者看不出差别，但版心会少扣或多扣一条边。
+/// 只剩**宽**：上下两条系统边由 [`PageInsets`](crate::ui::features::reader::model::page_geometry::PageInsets)
+/// 管，`PageBox` 从那里算。桌面侧栏眼下是压在正文上的浮层，这一格实际为 0；留着它是
+/// 给“真的让宽的侧栏”一个口子。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Reserve {
     /// 左侧占掉的宽度（侧栏 / 图标栏）。
     pub width: f32,
-    /// 底部占掉的高度（导航栏）。
-    pub height: f32,
 }
 
 impl Reserve {
-    pub const ZERO: Self = Self {
-        width: 0.0,
-        height: 0.0,
-    };
+    pub const ZERO: Self = Self { width: 0.0 };
 }
 
 /// 正文的呈现模式。**三种模式是同一套分片代码的三个参数**，不是三条代码路

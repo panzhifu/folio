@@ -174,7 +174,7 @@ fn only_inheritable_properties_flow_down() {
          word-spacing: 2px; margin-bottom: 12px; padding-top: 8px; display: inline }",
     );
     let p = style(&page, tag(&page, "p"));
-    assert_eq!(p.color, Some(Color(255, 0, 0)));
+    assert_eq!(p.color, Some(Color(255, 0, 0, 255)));
     assert_eq!(p.text_align, TextAlign::Center);
     assert_eq!(p.font_weight, 700);
     assert!(p.font_italic);
@@ -279,10 +279,19 @@ fn color_forms() {
         ".a{color:#abc} .b{color:#112233} .c{color:rgb(10, 20, 30)} .d{color:Silver}",
     );
     let find = |c: &str| class(&page, c);
-    assert_eq!(style(&page, find("a")).color, Some(Color(0xAA, 0xBB, 0xCC)));
-    assert_eq!(style(&page, find("b")).color, Some(Color(0x11, 0x22, 0x33)));
-    assert_eq!(style(&page, find("c")).color, Some(Color(10, 20, 30)));
-    assert_eq!(style(&page, find("d")).color, Some(Color(192, 192, 192)));
+    assert_eq!(
+        style(&page, find("a")).color,
+        Some(Color(0xAA, 0xBB, 0xCC, 255))
+    );
+    assert_eq!(
+        style(&page, find("b")).color,
+        Some(Color(0x11, 0x22, 0x33, 255))
+    );
+    assert_eq!(style(&page, find("c")).color, Some(Color(10, 20, 30, 255)));
+    assert_eq!(
+        style(&page, find("d")).color,
+        Some(Color(192, 192, 192, 255))
+    );
     assert_eq!(page.styled.ignored, 0);
 }
 
@@ -600,7 +609,7 @@ fn inline_style_beats_author_normal_but_not_important() {
     let plain = author(r#"<p style="color: red">文</p>"#, "p { color: blue }");
     assert_eq!(
         style(&plain, tag(&plain, "p")).color,
-        Some(Color(255, 0, 0)),
+        Some(Color(255, 0, 0, 255)),
         "行内的普通声明该压过样式表的普通声明"
     );
 
@@ -610,7 +619,7 @@ fn inline_style_beats_author_normal_but_not_important() {
     );
     assert_eq!(
         style(&important, tag(&important, "p")).color,
-        Some(Color(0, 0, 255)),
+        Some(Color(0, 0, 255, 255)),
         "行内的普通声明不该盖掉作者的 !important"
     );
 
@@ -620,7 +629,7 @@ fn inline_style_beats_author_normal_but_not_important() {
     );
     assert_eq!(
         style(&both, tag(&both, "p")).color,
-        Some(Color(0, 0, 255)),
+        Some(Color(0, 0, 255, 255)),
         "两边都 !important 时仍是样式表那份赢"
     );
 }
@@ -662,7 +671,10 @@ fn unsupported_inline_declarations_are_counted_as_ignored() {
         r#"<p style="transform: rotate(3deg); color: green">文</p>"#,
         "",
     );
-    assert_eq!(style(&page, tag(&page, "p")).color, Some(Color(0, 128, 0)));
+    assert_eq!(
+        style(&page, tag(&page, "p")).color,
+        Some(Color(0, 128, 0, 255))
+    );
     assert_eq!(page.styled.ignored, 1, "transform 那条要留痕");
 }
 
@@ -673,7 +685,7 @@ fn semicolon_inside_quotes_is_not_a_declaration_separator() {
     let page = author(r#"<p style='content: "a;b"; color: green'>文</p>"#, "");
     assert_eq!(
         style(&page, tag(&page, "p")).color,
-        Some(Color(0, 128, 0)),
+        Some(Color(0, 128, 0, 255)),
         "引号里的分号不该把 color 切开"
     );
     assert_eq!(page.styled.ignored, 1, "只有 content 那一条是不认识的");
@@ -693,7 +705,7 @@ fn first_letter_declarations_land_on_the_cap_not_the_element() {
 
     let cap = p.first_letter.as_deref().expect("应有首字符那一份");
     assert_eq!(cap.font_size, 60.0, "3em 按元素自己的 20px 折");
-    assert_eq!(cap.color, Some(Color(255, 0, 0)));
+    assert_eq!(cap.color, Some(Color(255, 0, 0, 255)));
     assert_eq!(cap.font_weight, 400, "没写就沿用元素的值");
 
     // 没写 `::first-letter` 的元素必须是 `None` —— 排版层靠这一个判走不走下沉。
@@ -915,12 +927,12 @@ fn current_color_works_for_background_and_color_itself() {
     );
     assert_eq!(
         style(&page, class(&page, "a")).background_color,
-        Some(Color(0x44, 0x55, 0x66)),
+        Some(Color(0x44, 0x55, 0x66, 255)),
         "背景跟的是同一元素自己的 `color`，与书写顺序无关"
     );
     assert_eq!(
         style(&page, class(&page, "b")).color,
-        Some(Color(0x11, 0x22, 0x33)),
+        Some(Color(0x11, 0x22, 0x33, 255)),
         "`color: currentcolor` 就是继承"
     );
     assert_eq!(page.styled.ignored, 0);
@@ -935,12 +947,12 @@ fn attribute_selectors_with_operators_match() {
     );
     assert_eq!(
         style(&page, class(&page, "solid")).color,
-        Some(Color(1, 2, 3)),
+        Some(Color(1, 2, 3, 255)),
         "[class~=\"solid\"] 要命中 `a solid b`"
     );
     assert_eq!(
         style(&page, class(&page, "biaoti-1")).color,
-        Some(Color(4, 5, 6)),
+        Some(Color(4, 5, 6, 255)),
         "[class*=\"biaoti\"] 要命中 `biaoti-1`"
     );
 }
@@ -1387,8 +1399,8 @@ fn border_shorthand_fills_all_four_edges() {
     let style = style(&page, tag(&page, "p"));
     assert_eq!(style.border_drawn(), [2.0, 2.0, 2.0, 2.0]);
     assert_eq!(style.border[0].style, BorderStyle::Solid);
-    assert_eq!(style.border[0].color, Some(Color(88, 99, 87)));
-    assert_eq!(style.background_color, Some(Color(193, 204, 192)));
+    assert_eq!(style.border[0].color, Some(Color(88, 99, 87, 255)));
+    assert_eq!(style.background_color, Some(Color(193, 204, 192, 255)));
 }
 
 /// `background` 简写里的颜色要接住：出版书用「深色底块 + 白字标题」，
@@ -1400,8 +1412,8 @@ fn the_background_shorthand_yields_its_color() {
         ".t { background: #b71c1c; color: #ffffff }",
     );
     let styled = style(&page, class(&page, "t"));
-    assert_eq!(styled.background_color, Some(Color(0xb7, 0x1c, 0x1c)));
-    assert_eq!(styled.color, Some(Color(255, 255, 255)));
+    assert_eq!(styled.background_color, Some(Color(0xb7, 0x1c, 0x1c, 255)));
+    assert_eq!(styled.color, Some(Color(255, 255, 255, 255)));
 
     // 简写里带图时只取颜色；图（还没画）不影响这条声明被认下。
     let page = author(
@@ -1410,7 +1422,7 @@ fn the_background_shorthand_yields_its_color() {
     );
     assert_eq!(
         style(&page, class(&page, "t")).background_color,
-        Some(Color(255, 255, 255))
+        Some(Color(255, 255, 255, 255))
     );
 }
 
@@ -1446,7 +1458,7 @@ fn the_background_shorthand_yields_every_item_it_carries() {
                background-size: 55% auto }",
     );
     let style = style(&page, class(&page, "t"));
-    assert_eq!(style.background_color, Some(Color(0xf4, 0xf7, 0xf1)));
+    assert_eq!(style.background_color, Some(Color(0xf4, 0xf7, 0xf1, 255)));
     let layer = &style.background_layers[0];
     assert_eq!(layer.image.as_deref(), Some("OEBPS/Images/p0.png"));
     assert_eq!(layer.repeat.x, BackgroundTile::NoRepeat);
@@ -1487,7 +1499,7 @@ fn the_background_shorthand_clears_a_picture_it_does_not_mention() {
         0,
         "第二条简写没提图，就要把第一条那层图撤掉"
     );
-    assert_eq!(style.background_color, Some(Color(255, 255, 255)));
+    assert_eq!(style.background_color, Some(Color(255, 255, 255, 255)));
 }
 
 /// 百分比**不许在层叠期折算**。`background-position` 的百分比基准是「盒减图」那段余量，
@@ -1875,7 +1887,7 @@ fn background_and_border_are_not_inherited() {
         "div { background-color: #C1CCC0; border: 4px solid black } p { background-color: transparent }",
     );
     let div = style(&page, tag(&page, "div"));
-    assert_eq!(div.background_color, Some(Color(193, 204, 192)));
+    assert_eq!(div.background_color, Some(Color(193, 204, 192, 255)));
     assert_eq!(div.border_drawn(), [4.0; 4]);
     let p = style(&page, tag(&page, "p"));
     assert_eq!(p.background_color, None, "子元素不继承父元素的背景色");
@@ -2299,7 +2311,7 @@ fn an_author_color_on_a_link_beats_the_theme_slot() {
     assert!(styled.link, "在链接里这件事不变");
     assert_eq!(
         styled.color,
-        Some(Color(0, 255, 0)),
+        Some(Color(0, 255, 0, 255)),
         "作者写明了色，主题那一格让位"
     );
 }
@@ -3022,7 +3034,7 @@ fn text_shadow_parses_offset_blur_and_color() {
     let a = &style(&page, class(&page, "a")).text_shadows;
     assert_eq!(a.len(), 1);
     assert_eq!((a[0].dx, a[0].dy, a[0].blur), (0.0, 1.0, 2.0));
-    assert_eq!(a[0].color, Some(Color(0x11, 0x22, 0x33)));
+    assert_eq!(a[0].color, Some(Color(0x11, 0x22, 0x33, 255)));
     let b = &style(&page, class(&page, "b")).text_shadows;
     assert_eq!(
         (b[0].dx, b[0].dy),
@@ -3374,21 +3386,29 @@ fn all_initial_resets_every_property() {
     assert_eq!(bad.styled.ignored, 1);
 }
 
-/// `rgba()` 与 `rgb()` 走同一支：第四个透明度只做校验，不参与取色。
+/// `rgba()` 与 `rgb()` 走同一支：第四个透明度要落到 `Color` 的 alpha 上。
 ///
 /// 这一条是 2026-10-30 拿移动端两本书量出来的 —— 只认 `rgb(` 时《基督山伯爵》8 个、
 /// 诡秘 91 个元素上的 `background-color` / `border` 被判「不认识」，书里的半透明底块
-/// 与描边整条消失。四种常见写法都要接住。
+/// 与描边整条消失。四种常见写法都要接住；alpha 再丢掉，半透明框就会把底图盖死。
 #[test]
-fn rgba_colors_land_on_the_three_channels() {
+fn rgba_colors_keep_their_alpha() {
     let page = author(
         "<p>文</p>",
         "p { background-color: rgba(247, 250, 249, 0.9); border: 1px solid rgba(80,70,86,0.7); \
              color: rgb(10 20 30 / 50%) }",
     );
     let p = style(&page, tag(&page, "p"));
-    assert_eq!(p.background_color, Some(Color(247, 250, 249)));
-    assert_eq!(p.color, Some(Color(10, 20, 30)), "空格加斜杠的新写法");
+    assert_eq!(
+        p.background_color,
+        Some(Color(247, 250, 249, 230)),
+        "0.9 的 alpha 折成 230"
+    );
+    assert_eq!(
+        p.color,
+        Some(Color(10, 20, 30, 128)),
+        "空格加斜杠的新写法，50% 折成 128"
+    );
     assert_eq!(
         p.border_drawn(),
         [1.0, 1.0, 1.0, 1.0],
@@ -3396,8 +3416,8 @@ fn rgba_colors_land_on_the_three_channels() {
     );
     assert_eq!(
         p.border[0].color,
-        Some(Color(80, 70, 86)),
-        "`border: 1px solid rgba(80, 70, 86, 0.7)`：函数里那几个逗号后的空格不该把这条切开"
+        Some(Color(80, 70, 86, 179)),
+        "`border: 1px solid rgba(80, 70, 86, 0.7)`：alpha 179，函数里那几个逗号后的空格不该把这条切开"
     );
     assert_eq!(page.styled.ignored, 0);
 }

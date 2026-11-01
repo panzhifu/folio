@@ -244,7 +244,6 @@ impl ReaderSession {
         if to.chapter == self.chapter_index() {
             return;
         }
-        let columns = self.laid_out.columns.max(1);
         let prefs = self.prefs.clone();
         let (pages, offset) = {
             let Source::Book(book) = &mut self.source else {
@@ -253,7 +252,7 @@ impl ReaderSession {
             book.set_anchor(to.chapter, &prefs);
             let pages = book.document().page_count().max(1);
             let page = to.page.min(pages.saturating_sub(1));
-            let offset = book.document().offset_of_page(page, columns);
+            let offset = book.document().offset_of_page(page);
             (pages, offset)
         };
         self.page = to.page.min(pages.saturating_sub(1));
@@ -525,7 +524,7 @@ impl ReaderSession {
         // 折页那一档按它挑**从哪个角起折**：落在下半屏就从下面卷起来。
         // 版心还没量出来时给 `None`，那一档退回上缘。
         let at = {
-            let area = self.page_area;
+            let area = self.page_area();
             if area.width() <= 1.0 || area.height() <= 1.0 {
                 None
             } else {

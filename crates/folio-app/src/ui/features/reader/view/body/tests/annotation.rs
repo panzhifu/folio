@@ -426,7 +426,7 @@ fn a_tap_below_the_marked_line_selects_nothing(cx: &mut TestAppContext) {
         let box_ = &v.lines()[0];
         point(
             px(v.prefs.margin_x + box_.x + box_.dominant_font_size() * 1.5),
-            px(box_.y + box_.height + 6.0 - v.scroll_y + v.header_reserve),
+            px(box_.y + box_.height + 6.0 - v.scroll_y + v.bands.header),
         )
     });
     let consumed = cx
@@ -709,13 +709,13 @@ fn a_bookmark_toggles_on_and_off_the_current_line(cx: &mut TestAppContext) {
     );
 }
 
-/// 删除的撤销：列表那条 `remove_annotation`（与「取消划线」同一落点）删掉的行，
-/// 撤销后要**整行原样**回来 —— id、笔记、时间戳都不变。
+/// 取消划线是一次**真删**：不给撤销胶囊，也不留可撤销的那一槽。
 ///
-/// 拿掉 `restore_annotation` 里「按原 id 插回」那一格，撤销会变成「新划一条」，
-/// 这条红在 id 上。
+/// 2026-11-02 读者的口径。从前批注与书签共用一颗胶囊，删完屏底会飘一条「已删除一条
+/// 批注 / 撤销」；而点「取消划线」的那一下手里就带着选区，反悔的路是重新划一次，
+/// 不值得为它在正文与底栏之间再占一条横条。书签那一头照旧给（顶栏那颗星是盲按的）。
 #[gpui_kit::test]
-fn a_deleted_annotation_comes_back_with_its_row_intact(cx: &mut TestAppContext) {
+fn removing_a_highlight_gives_no_undo_pill(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let flow = flow();
     let (store, id) = store_with_book(&flow, "markdown");
@@ -739,16 +739,49 @@ fn a_deleted_annotation_comes_back_with_its_row_intact(cx: &mut TestAppContext) 
     });
     assert!(store.annotations(id).expect("读库").is_empty());
     assert!(
+        view.read_with(cx, |v, _| v.undo.is_none()),
+        "删一条划线不该挂出撤销胶囊"
+    );
+
+    // 槽是空的，按撤销也不能凭空造出一条划线来。
+    view.update(cx, |v, cx| v.undo_delete(cx));
+    assert!(store.annotations(id).expect("读库").is_empty());
+}
+
+/// 拔一枚书签仍给一窗后悔：胶囊挂着，按撤销整行**逐字段**原样回来。
+///
+/// [`a_bookmark_toggles_on_and_off_the_current_line`] 管的是钉/拔/撤销那条岔路走没走对，
+/// 这一条只管两件事：胶囊确实挂出来了，以及回来的那一行 id 与时间戳都没变 ——
+/// 拿掉 `restore_bookmark` 里「按原 id 插回」那一格，撤销会变成「新钉一枚」，这条红在 id 上。
+#[gpui_kit::test]
+fn a_removed_bookmark_comes_back_with_its_row_intact(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let flow = flow();
+    let (store, id) = store_with_book(&flow, "markdown");
+    let (view, _handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        Some(store.clone()),
+        Some(id),
+    );
+    view.update(cx, |v, cx| v.toggle_bookmark(cx));
+    let before = store.bookmarks(id).expect("读库");
+    assert_eq!(before.len(), 1);
+
+    view.update(cx, |v, cx| v.remove_bookmark(before[0].id, cx));
+    assert!(store.bookmarks(id).expect("读库").is_empty());
+    assert!(
         view.read_with(cx, |v, _| v.undo.is_some()),
-        "删完该有一颗撤销胶囊挂着"
+        "拔完书签该有一颗撤销胶囊挂着"
     );
 
     view.update(cx, |v, cx| v.undo_delete(cx));
-    let after = store.annotations(id).expect("撤销后读库");
-    assert_eq!(after.len(), 1, "撤销把那一条带回来");
-    assert_eq!(
-        after[0], before[0],
-        "整行原样回来：id、锚点、颜色、画法、时间戳都不变"
-    );
+    let after = store.bookmarks(id).expect("撤销后读库");
+    assert_eq!(after.len(), 1, "撤销把那一枚带回来");
+    assert_eq!(after[0], before[0], "整行原样回来：id 与时间戳都不变");
     assert!(view.read_with(cx, |v, _| v.undo.is_none()), "胶囊该收了");
 }

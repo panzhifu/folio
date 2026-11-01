@@ -26,7 +26,8 @@ use folio_core::content::format::css::{Origin, PageMargins, RuleSet, chapter_sty
 use folio_core::content::hit::{Hit, paragraph_after_indexed, paragraph_range_indexed};
 use folio_core::infra::metrics::Metric;
 use folio_core::infra::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
-use folio_core::layout::fragment::{Fragment, FragmentOptions, column_width, fragments};
+use folio_core::layout::fragment::{Fragment, FragmentOptions, fragments};
+use folio_core::layout::page::PageList;
 use folio_core::layout::{
     BlockCache, DecorSeed, FontKey, Justify, Layout, LayoutInputs, LayoutKey, LayoutOptions,
     LineBox, LineFragment, content_hash, layout_with_blocks, quantize_px,
@@ -232,11 +233,26 @@ pub struct Document {
     /// 第 12 条）。`set_prefs` / `set_chapter` / `set_images` 都不动它：那一代排版还没
     /// 回来之前，屏上摆的仍是旧行盒与新表**相配**的那一份，清了反而会让这一帧没有底色。
     decorated: Rc<Vec<DecorSeed>>,
+    /// 每一叠图「现在看第几张」。键是排版给的 `StackMark::id`，**只在这一份排版里作数**。
+    ///
+    /// 为什么住界面而不是住排版：那一格是读者翻到第几张，它变了不许重排整章，更不许
+    /// 改页数 —— 那是硬约束。为什么必须在换排版时清空（见
+    /// [`Self::apply_typeset`]）：`id` 是排版时按起叠的先后现编的，重排一次就从头再来，
+    /// 留着旧的那一格，读者改一次字号就看见了另一张图。
+    stack_current: RefCell<HashMap<u32, u16>>,
+    /// 这一章**实际画到**的底边（沿推进轴，见 [`Self::extent`]）。
+    ///
+    /// 与 `layout.height` 同一批换（[`Self::apply_typeset`]）：它是这份排版的函数，
+    /// 每帧重扫一遍行表没有必要 —— 拼链那道口子每帧要问好几次。
+    extent: f32,
     /// 上次分片时的 `(排版键, 一片高)`。排版键与切片之间唯一的差别就是那片高：
     /// 栏宽与栏数都已经在键里了，字号也在（换字号会改行数，行变了切点就变了）。
     fragmented: Option<(LayoutKey, u32)>,
-    /// 本章切出来的片。`Rc` 是因为渲染每帧都要拿一份而不必搬动整张表。
-    slices: Rc<Vec<Fragment>>,
+    /// 本章切出来的页表。`Rc` 是因为渲染每帧都要拿一份而不必搬动整张表。
+    ///
+    /// 分片器仍然逐栏吐 `Fragment`，这里按页聚合成 [`PageList`]：页号、行区间、
+    /// 页高都由引擎给，界面不再自己乘 `page * columns + column`。
+    pages: Rc<PageList>,
     /// **会话级复用的度量器**（`plans/阅读管线.md` §十一 差额表第 7 条）。
     ///
     /// 命中测试与选区矩形原来每次都现造一个 `GpuiMeasure`，而它的构造里有
@@ -381,7 +397,7 @@ fn quantize_screen(px: f32) -> u32 {
     px.max(0.0).round() as u32
 }
 
-/// 界面交给排版与分片的两个轴。**三种模式只差这里的三个数**：
+/// 界面交给排版与分片的轴。**三种模式只差这里的三个数**：
 ///
 /// | 模式 | `columns` | `height` |
 /// |---|---|---|
@@ -389,24 +405,22 @@ fn quantize_screen(px: f32) -> u32 {
 /// | 分页 | 1 | 一个视口高 |
 /// | 双页对开 | 2 | 一个视口高（一片 = 一栏 = 一页的一半） |
 ///
-/// 折行发生在**栏宽**上，所以 `columns` 与 `gap` 影响排版，`height` 只影响切点：
-/// 改页高不重排，改栏宽才重排。这两个数由同一份 [`Viewport`] 传进去，界面不可能
-/// 把「按两栏排的版」切成「每页一栏」。
+/// `width` 是**已经除好栏数**的一栏宽：折行发生在它上面，界面已经从 `PageBox` 算过一次，
+/// 这里不再拿总宽和栏距重除。`height` 只影响切点：改页高不重排，改栏宽才重排。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewport {
-    /// 外壳里不属于阅读栏的**宽度**（桌面的侧栏 / 图标栏；手机上没有侧栏，是 0）。
-    pub reserve: f32,
+    /// 一栏的宽（已经除好栏数）。折行发生在它上面。
+    pub width: f32,
+    /// 一页可用的高（逻辑像素）。`0` = 不分片 = 连续滚动。
+    pub height: f32,
+    /// 竖轴基准（`LayoutOptions::page_height`）。`None` = 这一档没有既定高。
+    ///
+    /// 分页传 `PageBox.content.h`（正文盒）；连续传**整窗高** —— 封面/扉页靠
+    /// `height:100%` 撑满一屏，按正文盒折会把满版图缩一截。竖排转轴后百分比高对应的
+    /// 是列长，那条映射还没做，仍给 `None`。
+    pub page_height: Option<f32>,
     /// 一页几栏。`0` 与 `1` 同义。
     pub columns: usize,
-    /// 一栏可用的高（逻辑像素）。`0` = 不分片 = 连续滚动。
-    pub height: f32,
-    /// 内容区的高（窗口高 − 外壳 − 页眉 − 页脚）。`height` 为 0（连续滚动、不分片）时
-    /// 这一格仍然有效：浏览器里一个 spine 文档就是一个**视口大**的容纳块，绝对定位的
-    /// `bottom: NN%` 与 `height: NN%` 都要拿它折（《未来简史》扉页的出版社就靠这条）。
-    /// `0` = 量不出来，退回章高。
-    pub viewport_height: f32,
-    /// 栏间距，只在 `columns > 1` 时参与除法。
-    pub gap: f32,
 }
 
 /// 一章的后台排版产出：层叠、行盒，一批算完一批换。
@@ -708,11 +722,13 @@ impl Document {
             desired: None,
             pending: None,
             layout: Layout::default(),
+            extent: 0.0,
             wants_vertical: false,
             styles: None,
             fragmented: None,
             decorated: Rc::new(Vec::new()),
-            slices: Rc::new(Vec::new()),
+            stack_current: RefCell::new(HashMap::new()),
+            pages: Rc::new(PageList::from_fragments(Vec::new(), 1)),
             // 第一次真要命中/求矩形时才造（那也是唯一需要它的时刻）。
             measure: OnceLock::new(),
             shaped: RefCell::new(HashMap::new()),
@@ -781,6 +797,14 @@ impl Document {
                 css.push_str(" html, body { writing-mode: horizontal-tb !important }");
             }
         }
+        // 多看/掌阅的整幅插图：`div.ctcenter` 的 2em 上下边距与 `img width="85%"` 是
+        // 给纸书排的；手机上留下的是「图前一道缝、图比版心窄」。整幅图按屏幕宽铺、
+        // 不给外边距 —— 这是读者层 `!important`，作者那几条压不住。
+        css.push_str(
+            " div.duokan-image-single, div.ctcenter { margin: 0 !important; \
+              duokan-bleed: leftright !important } \
+              div.duokan-image-single img, div.ctcenter img { display: block; width: 100% !important; height: auto !important; margin: 0 auto }",
+        );
         RuleSet::parse(&css, Origin::Reader)
     }
 
@@ -878,7 +902,7 @@ impl Document {
     /// 同一份旧 `layout`，与它配得上，不存在「新索引配旧行盒」那种错配。
     fn drop_fragments(&mut self) {
         self.fragmented = None;
-        self.slices = Rc::new(Vec::new());
+        self.pages = Rc::new(PageList::from_fragments(Vec::new(), 1));
         self.shaped.borrow_mut().clear();
         self.rows.borrow_mut().clear();
         *self.char_lines.borrow_mut() = None;
@@ -1058,6 +1082,87 @@ impl Document {
         &self.layout.lines
     }
 
+    /// 这一章有没有**可读的正文**：有一行非空白的字就算有。
+    ///
+    /// 「整页画章的读数带要不要透明」问的就是这一格（`view::body` 的 `bare_bands`）：
+    /// 纯图页让带子透明、有正文的章把内容夹在两条带子之间。2026-11-01 白天一度改成
+    /// 「不管有没有字都铺满」，当天深夜又按读者的口径改回来 —— 《诡秘之主》
+    /// `body.fm1` 那一族是固定底图 + 二十来屏人物志，全铺满就是章名压在正文上。
+    ///
+    /// 判据是「有没有一个非空白字符」，不是「有没有一个带宽度的 run」：卷首那类纯图页
+    /// 常摆一行 `&nbsp;` 把根撑开（`<body class="cover"><p>&#160;</p></body>`），
+    /// 那一格有宽度、却一个字都读不出来，算成正文就会把满屏卷首误判成文字页。
+    pub fn has_text(&self) -> bool {
+        self.layout.lines.iter().enumerate().any(|(index, line)| {
+            let Some(block) = self.layout.block_of_line(index) else {
+                return false;
+            };
+            line.fragments.iter().any(|fragment| match fragment {
+                LineFragment::Text(run) if run.width > 0.0 => block
+                    .text
+                    .get(run.norm.clone())
+                    .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace())),
+                _ => false,
+            })
+        })
+    }
+
+    /// 这一叠现在看第几张。没记过 = 0（第一张）。
+    pub fn stack_current(&self, id: u32) -> u16 {
+        self.stack_current.borrow().get(&id).copied().unwrap_or(0)
+    }
+
+    /// 把这一叠摆到第 `index` 张，夹进 `0..count`。回**变没变** —— 没变就不必重画。
+    pub fn set_stack_current(&self, id: u32, index: u16, count: u16) -> bool {
+        let target = index.min(count.saturating_sub(1));
+        let mut current = self.stack_current.borrow_mut();
+        current
+            .insert(id, target)
+            .is_none_or(|previous| previous != target)
+    }
+
+    /// 按 `delta` 走一格，两头**停住**（不回绕：读者在最后一张上再往左划，就该没反应，
+    /// 而不是跳回第一张 —— 回绕会把「翻到底了」这个信号吃掉）。回变没变。
+    pub fn advance_stack(&self, id: u32, delta: i32, count: u16) -> bool {
+        let now = self.stack_current(id) as i32;
+        let next = (now + delta).clamp(0, count.saturating_sub(1) as i32) as u16;
+        next != self.stack_current(id) && self.set_stack_current(id, next, count)
+    }
+
+    /// 这一章是不是「整页画」：根上一张 `fixed` 底图，或整章只有一张满宽图。
+    ///
+    /// 判据只有这一份。拼接坐标拿它决定「两章之间要不要留缝」（两条满版图之间留出
+    /// 一条底色就是读者报的「图片之间有间隙」）。**它不看有没有正文**：`body.fm7` 那种
+    /// 「底图 + 卷首字」也是整页画，两张底图相接时照样不许留缝。
+    pub fn is_picture_chapter(&self) -> bool {
+        self.decorated
+            .iter()
+            .any(|seed| seed.full_bleed && !seed.pictures.is_empty())
+            || self.is_picture_only_page()
+    }
+
+    /// 这一章是不是**整页只有一张图**（Calibre 封面 / 整幅插图章）。
+    ///
+    /// 与 [`Self::is_picture_chapter`] 分开是因为两件事要两个答案：
+    ///
+    /// - 章间距看的是「这一章有没有满版底图」，带字也算（上面那一条）；
+    /// - 命中换算看的是「这一章的正文按哪套坐标画」：单图页在滚动档里按**窗口坐标**
+    ///   画（`view::body` 的 `picture_only` 分支），固定底图章即使没有正文也仍按版心
+    ///   坐标画。两套坐标差着一个「页眉 + 安全区」，混用就是手指落在字上、选中的
+    ///   却是前面几行的字。
+    pub fn is_picture_only_page(&self) -> bool {
+        // 固定底图那一条在绘制侧先命中（`page_art_for_doc` 的第 1 档），那种章的正文
+        // 仍按版心坐标画，所以这一问要把它们排掉。
+        let backdrop = self
+            .decorated
+            .iter()
+            .any(|seed| seed.full_bleed && !seed.pictures.is_empty());
+        !backdrop
+            && self
+                .slice_of(0, 0)
+                .is_some_and(|slice| !slice.picture_page.is_empty())
+    }
+
     /// 可见带 `[from_y, to_y)` 里那些行的下标区间 —— 绘制那一帧只该遍历这一段。
     ///
     /// 把 `0..行数` 整个交给场景层再逐行比 y，等于每帧付一次「整章行数」的钱，而其中
@@ -1096,6 +1201,33 @@ impl Document {
         } else {
             self.layout.height
         }
+    }
+
+    /// 这一章**实际画到**的底边（像素，沿推进轴）。
+    ///
+    /// 与 [`Self::height`] 的差别只有一处，但那一处会出事：`height` 是排版收口时算的
+    /// 章高（根盒 + 溢出），本应 ≥ 每一行、每一块的底边；真出过分家的时候，章高停在
+    /// 某个内层盒子的底边，最后一段正文落在章高之外 —— 下一章的整页底图从那一格起铺，
+    /// 正好压在这段字上（《诡秘之主》第 3 节 `top002`：`.kuang2` 的 `</div>` 之后还有
+    /// 一段 `p.mulu2`，而第 4 节 `top003` 是 `body.context1` 的 `fm1.jpg` 整页底图）。
+    ///
+    /// 所以这一格把「画到哪儿」重新量一遍：排版高、最后一行、最后一个块的底边，三者取
+    /// 最大。滚动链用它（见 `Book::placements`），于是「章与章的接缝」永远落在**画出来
+    /// 的东西**之后，而不是落在排版自报的那个数上。
+    ///
+    /// 正常的一章三者一致，这里就等于 `height()`。
+    pub fn extent(&self) -> f32 {
+        if self.layout.vertical() {
+            // 竖排的推进轴是 x（往左叠）。这一族今天没人走连续拼接那一条，照 `height()`
+            // 的口径回它，别在这里另开一条轴。
+            return self.height();
+        }
+        // 排版还没落地（这一格是 0）时照 `height()` 走：那时行表还是上一代的，
+        // 拿它量出来的底边只会比真相更荒谬。
+        if self.extent <= 0.0 {
+            return self.height();
+        }
+        self.extent.max(self.height())
     }
 
     /// 版心宽度 = 视口宽 − `pane_reserve` − 左右页边距。
@@ -1280,6 +1412,19 @@ impl Document {
         self.wants_vertical = wants;
         self.styles = Some(out.styles);
         self.layout = out.layout;
+        // 这一章实际画到哪儿：与排版同批量一次（见 [`Self::extent`]）。
+        self.extent = {
+            let mut bottom = self.layout.height;
+            for line in &self.layout.lines {
+                bottom = bottom.max(line.y + line.height);
+            }
+            for block in &self.layout.blocks {
+                bottom = bottom.max(block.y + block.height);
+            }
+            bottom
+        };
+        // 叠的序号是这一代排版现编的，上一代那一份「看第几张」必须跟着作废。
+        self.stack_current.borrow_mut().clear();
         self.applied = Some(out.key);
         self.drop_fragments();
     }
@@ -1288,15 +1433,15 @@ impl Document {
     /// 这两个 `Arc` 在这里拿，随作业搬进后台线程；这一步本身不再阻塞帧。
     #[allow(dead_code)] // 面板与测试读；渲染路径走 `ensure_viewport`
     pub fn ensure_layout(&mut self, window: &mut Window, cx: &mut App, pane_reserve: f32) {
+        let width = Self::content_width(window, &self.prefs, pane_reserve);
         let _ = self.ensure_viewport(
             window,
             cx,
             Viewport {
-                reserve: pane_reserve,
-                columns: 1,
+                width,
                 height: 0.0,
-                viewport_height: 0.0,
-                gap: 0.0,
+                page_height: None,
+                columns: 1,
             },
         );
     }
@@ -1327,30 +1472,17 @@ impl Document {
         };
         let vertical = paged && viewport.columns.max(1) == 1 && wants;
         let columns = if vertical { 1 } else { viewport.columns.max(1) };
-        let total = Self::content_width(window, &self.prefs, viewport.reserve);
         // 折行永远发生在**内联轴**上，切片永远沿**推进轴**切，两根轴在竖排里对调：
         // 横排喂栏宽、切片量页高；竖排喂列长（= 可用高）、切片量页宽。而「一页几栏」在
         // 竖排里就是「一页几列」，那是分片器按列厚塞出来的，不是界面给的数 —— 所以给 1。
+        // 竖排时 `viewport.width` 就是那**一列**的宽（界面按单栏算的），正好当切片长度。
         let (wrap, slice) = if vertical {
-            (viewport.height.max(1.0), total)
+            (viewport.height.max(1.0), viewport.width.max(1.0))
         } else {
-            (
-                column_width(total, columns, viewport.gap).max(1.0),
-                viewport.height,
-            )
+            (viewport.width.max(1.0), viewport.height)
         };
-        // 竖轴基准：分页档是一片的高，滚动档是**内容区的高**（浏览器里一个 spine
-        // 文档就是一个视口大的容纳块）。`html,body { height:100% }` 的空楔块与
-        // `position:absolute; bottom:12%` 的页脚都靠它落数（判据见
-        // `LayoutOptions::page_height`）。竖排转轴后百分比高对应的是列长，那条映射
-        // 还没做，仍给 `None`；滚动档量不出内容区高时也退回旧口径。
-        let page_height = if vertical {
-            None
-        } else if paged {
-            Some(slice)
-        } else {
-            (viewport.viewport_height > 0.0).then_some(viewport.viewport_height)
-        };
+        // 竖轴基准由界面从 `PageBox` 给；竖排转轴后百分比高对应列长，那条映射还没做。
+        let page_height = if vertical { None } else { viewport.page_height };
         // 键在这里算，算是「这一帧想要什么」的唯一表述：排版、切片、绘制三级都从它出发。
         //
         // 屏幕的尺寸在**算键之前**存下来：图片判「铺满一屏」还是「缩进一栏」吃这两个数
@@ -1358,13 +1490,11 @@ impl Document {
         // 所以不从 `Viewport` 递、在这里现量。转屏那一栏宽常常不变而这一格变，不进键就会
         // 拿着竖屏算好的大图摆在横屏上；量化用 [`quantize_screen`]，与键里那格同一把尺。
         //
-        // 宽取的是**阅读层那一块的宽**（窗口宽减掉不属于阅读栏的侧栏），不是整窗：图上
-        // 溢出的那一截要盖在屏上，盖进侧栏里就是把字印到别人的地盘上。手机上侧栏是 0，
-        // 这一格就等于屏宽。高用整窗：纸现在也从窗口顶铺到底（见 `view::body` 的
-        // `sheet_area`），两边同一口径。页边距与 `max_measure` 都不参与 —— 这一格要的
-        // 正是「越过它们之后图能铺多宽」。
+        // 宽用**整窗**：桌面侧栏现在是压在正文上的浮层，不再从阅读栏里让宽；图铺满一屏
+        // 时按整窗算，才不会被一条并不存在的侧栏裁掉。高也用整窗：纸从窗口顶铺到底。
+        // 页边距与 `max_measure` 都不参与 —— 这一格要的正是「越过它们之后图能铺多宽」。
         let window_size = window.viewport_size();
-        let screen_width = f32::from(window_size.width) - viewport.reserve;
+        let screen_width = f32::from(window_size.width);
         self.inputs.screen = Some((
             quantize_screen(screen_width.max(1.0)),
             quantize_screen(f32::from(window_size.height)),
@@ -1402,46 +1532,43 @@ impl Document {
             return width;
         }
         let options = FragmentOptions { height, columns };
-        let slices = match &self.styles {
-            Some(styles) => fragments(&self.layout, styles, options),
+        let pages = match &self.styles {
+            Some(styles) => {
+                PageList::from_fragments(fragments(&self.layout, styles, options), columns)
+            }
             // 没排过版就没有行盒可切（第一帧之前）。
-            None => Vec::new(),
+            None => PageList::from_fragments(Vec::new(), columns),
         };
         self.fragmented = Some((key, slice_height));
-        self.slices = Rc::new(slices);
+        self.pages = Rc::new(pages);
         width
     }
 
-    /// 本章切出来的片，顺序是「页优先、页内按栏」。
-    pub fn slices(&self) -> Rc<Vec<Fragment>> {
-        self.slices.clone()
+    /// 本章切出来的页表，页序就是阅读序。
+    pub fn pages(&self) -> Rc<PageList> {
+        self.pages.clone()
     }
 
     /// 一共几页。没分过片时算 1 —— 空的一页也得让读者翻得动、进度条也才有分母。
     pub fn page_count(&self) -> usize {
-        self.slices.last().map_or(1, |last| last.page + 1)
+        self.pages.len().max(1)
     }
 
-    /// 第 `page` 页第 `column` 栏。`columns` 由调用方给（界面才知道现在几栏），
-    /// 越界返回 `None`：最后一页本来就可能不满。
-    pub fn slice_of(&self, page: usize, column: usize, columns: usize) -> Option<&Fragment> {
-        self.slices
-            .get(page.saturating_mul(columns.max(1)) + column)
+    /// 第 `page` 页第 `column` 栏。越界返回 `None`：最后一页本来就可能不满。
+    pub fn slice_of(&self, page: usize, column: usize) -> Option<&Fragment> {
+        self.pages.slice_of(page, column)
     }
 
     /// 第 `line` 行落在第几页。行号越界就给最后一页：恢复进度要的是「最接近的那一页」，
     /// 不是「翻不到的一页」。
     pub fn page_of_line(&self, line: usize) -> usize {
-        self.slices
-            .iter()
-            .find(|slice| !slice.empty && line < slice.lines.end)
-            .map_or_else(|| self.page_count() - 1, |slice| slice.page)
+        self.pages.page_of_line(line)
     }
 
     /// 第 `page` 页开头那一个可见字符的章内偏移。跨章滑动落地时用它落库；
     /// 页为空（还没切出来 / 末页之后）给 0。
-    pub fn offset_of_page(&self, page: usize, columns: usize) -> usize {
-        let Some(slice) = self.slice_of(page, 0, columns) else {
+    pub fn offset_of_page(&self, page: usize) -> usize {
+        let Some(slice) = self.pages.slice_of(page, 0) else {
             return 0;
         };
         self.coordinate_of_line(slice.lines.start)

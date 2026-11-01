@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use folio_core::content::format::css::computed::{TextShadow, WritingMode};
 use folio_core::infra::metrics::Metric;
-use folio_core::layout::{Justify, JustifyMode};
+use folio_core::layout::{Justify, JustifyMode, cjk_latin_gap};
 use gpui_kit::{
     App, Bounds, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, LayoutId, Length, LineLayout, PathBuilder, Pixels, Point, SharedString,
@@ -694,6 +694,11 @@ fn for_each_glyph(
     let mut spaces_before = 0u32;
     let mut prev_index = 0usize;
     let mut kept = 0u32;
+    // 中西文边界间隙的累计（px）：shaping 的字形位置里没有这些间隙，与字距同一套
+    // 右推补回（宽度表把它们记在边界前一个字符上，`gap_px` 是「当前字形左缘之前
+    // 已累计的那部分」，每跨过一个边界加一份）。
+    let mut gap_px = 0.0f32;
+    let mut prev_ch: Option<char> = None;
     for shaped_run in &shaped.runs {
         for glyph in &shaped_run.glyphs {
             let shift = if rtl {
@@ -707,10 +712,21 @@ fn for_each_glyph(
                         if ch == ' ' {
                             spaces_before += 1;
                         }
+                        if let Some(pc) = prev_ch {
+                            gap_px += cjk_latin_gap(pc, ch, run.font_size);
+                        }
+                        prev_ch = Some(ch);
                     }
                     prev_index = glyph.index;
                 }
-                run.glyph_shift(char_index, spaces_before)
+                // 这个字形自己的字符：它与前一字符之间的间隙右推的正是**这个**字形。
+                if let Some(gch) = run.text.get(glyph.index..).and_then(|s| s.chars().next()) {
+                    if let Some(pc) = prev_ch {
+                        gap_px += cjk_latin_gap(pc, gch, run.font_size);
+                    }
+                    prev_ch = Some(gch);
+                }
+                run.glyph_shift(char_index, spaces_before) + gap_px
             };
             // 折页：按这个字的**平面位置**判它还在不在这一张纸上。用的是元素局部坐标
             // （`run.x` / `run.baseline` 那一套），与 `view.rs` 摆折面同一条折线、同一把尺。

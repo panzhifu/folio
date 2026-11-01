@@ -29,6 +29,9 @@ crc32fast.workspace = true
 base64.workspace = true
 # 内容哈希（`identity`）：书的身份是它的内容，不是文件路径。
 sha2.workspace = true
+# 账号密钥（`account`）：HMAC-SHA256 与 OS 熵。为什么这里用 `ring` 而不是 `hmac`，
+# 连同 Android 编译图的实测一起写在根 Cargo.toml 那一条。
+ring.workspace = true
 # RTF 正文的码页解码（`\ansicpg936` 的 GBK 双字节 / cp1252 / UTF-8），见 `format::rtf`；
 # CHM 的 topic 与 `#SYSTEM` 字符串也走同一族判据（BOM / `<meta charset>` / 容器报的 LCID），
 # 见 `format::charset`。锁里已有这份且本来在编译 —— 见根 Cargo.toml 那条，不新增依赖树。
@@ -43,6 +46,8 @@ url.workspace = true
 # Wi-Fi 传书服务器（`transfer`）。tokio 只许在这个模块里用 —— 见模块文档的边界。
 tokio.workspace = true
 axum.workspace = true
+# 传书那台服务器上局域网同步的路由要流式送一本书（见根 Cargo.toml 为什么它不新增依赖树）。
+futures-util.workspace = true
 quick-xml.workspace = true
 cssparser.workspace = true
 selectors.workspace = true

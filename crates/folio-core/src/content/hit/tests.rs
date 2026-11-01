@@ -711,3 +711,49 @@ fn justification_moves_the_selection_rect_to_the_stretched_edge() {
     .expect("正文行应命中");
     assert_eq!(past_edge.offset, 10, "贴右缘是「最后一个字之后」的插入点");
 }
+
+/// 中西文间隙参与命中与选区：`汉A汉` 里 `A` 的左缘在 16+4=20（不是 16），第三个字
+/// 的左缘在 20+8+4=32。间隙记在宽度表里**本字符**的项上（它是与下一字符之间那段），
+/// 逐字累加向前看一个字符补回 —— 少补就是「画出来的字分了家、按下去命中旧位置」。
+#[test]
+fn a_hit_between_han_and_latin_respects_the_quarter_em_gap() {
+    let chapter = typeset("<p>汉A汉</p>", "p { text-indent: 0; margin: 0 }", 400.0);
+    let line = &chapter.layout.lines[0];
+    let y = line.y + line.height * 0.5;
+    let at = |dx: f32| {
+        hit_test(
+            &chapter.layout,
+            &chapter.dom,
+            &chapter.map,
+            &Mono,
+            line.x + dx,
+            y,
+        )
+        .unwrap_or_else(|| panic!("x = line.x + {dx} 应命中"))
+        .offset
+    };
+    // 间隙(16..20)记在「汉」的 advance 里（与字距同一条口径），中点在 10：
+    // 18 已过中点，命中的是「汉之后」的插入点 —— 间隙正是插在汉字与 A 之间的。
+    assert_eq!(at(9.0), 0, "汉的墨迹中点之前，命中它自己");
+    assert_eq!(
+        at(18.0),
+        1,
+        "18 落在间隙里：汉的 advance 含到 20，中点之后是插入点"
+    );
+    assert_eq!(at(21.0), 1, "A 的左缘是 20，不是 16");
+    assert_eq!(at(33.0), 2, "第三个字的左缘是 20 + 8 + 4 = 32");
+    // 选区矩形同源：包住 `A` 的矩形从 20 起，宽 = A 的前进量 8 + 它与下一个字之间
+    // 的间隙 4（与字距同一条口径：advance 含本字符之后的间隙）。
+    let rects = rects_for_range(&chapter.layout, &chapter.dom, &chapter.map, &Mono, 1..2);
+    assert_eq!(rects.len(), 1, "单字选中一行一条");
+    assert!(
+        (rects[0].x - (line.x + 20.0)).abs() < 0.01,
+        "A 的左缘 20，实际 {}",
+        rects[0].x
+    );
+    assert!(
+        (rects[0].width - 12.0).abs() < 0.01,
+        "A 的前进量 8 + 间隙 4，实际 {}",
+        rects[0].width
+    );
+}

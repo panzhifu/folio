@@ -748,49 +748,64 @@ pub(super) fn parse_color(value: &str) -> Option<Color> {
                 .chars()
                 .filter_map(|c| u32::from_str_radix(&c.to_string(), 16).ok())
                 .collect(),
-            6 => (0..3)
+            6 | 8 => (0..hex.len() / 2)
                 .filter_map(|i| u32::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
                 .collect(),
             _ => return None,
         };
-        if parts.len() != 3 {
+        let want = if hex.len() == 8 { 4 } else { 3 };
+        if parts.len() != want {
             return None;
         }
         let scale = if hex.len() == 3 { 17 } else { 1 };
+        let channel = |i: usize| (parts[i] * scale) as u8;
         return Some(Color(
-            (parts[0] * scale) as u8,
-            (parts[1] * scale) as u8,
-            (parts[2] * scale) as u8,
+            channel(0),
+            channel(1),
+            channel(2),
+            if want == 4 { channel(3) } else { 255 },
         ));
     }
-    // `rgb()` 与 `rgba()` 走同一支：`Color` 是三通道的 `u8`（绘制那一层没有 alpha 通道），
-    // 第四格只做合法性校验、不参与取色 —— 与 `text-shadow` 里同一口径。
+    // `rgb()` 与 `rgba()` 走同一支：前三格是 RGB，第四格（如果有）是 alpha。
     //
     // 只认 `rgb(` 不认 `rgba(` 是 2026-10-30 之前的一个真错：`rgba(...)` 落进「不认识」
     // 那一档，《基督山伯爵》8 个、诡秘 91 个元素上的 `background-color` / `border` 整条
-    // 被丢掉。出版书里半透明底遍地都是，所以这一格必须认。
+    // 被丢掉。出版书里半透明底遍地都是，所以这一格必须认；alpha 丢掉则会把底图盖死。
     if let Some(inner) = ["rgba(", "rgb("]
         .iter()
         .find_map(|head| v.strip_prefix(head))
         .and_then(|s| s.strip_suffix(')'))
     {
         // 现代写法 `rgb(0 0 0 / 50%)` 用斜杠分隔透明度，老写法逗号分隔，两种都先切成
-        // 同一条数字表 —— 只取前三格，其余丢掉。
+        // 同一条数字表。前三格 RGB（百分比按 255 折），第四格 alpha（百分比按 1 折）。
         let inner = inner.replace('/', " ");
-        let parts: Vec<f32> = inner
+        let tokens: Vec<&str> = inner
             .split(|c: char| c == ',' || c.is_whitespace())
             .filter(|s| !s.is_empty())
-            .map(|s| {
-                s.strip_suffix('%')
-                    .and_then(|n| n.parse::<f32>().ok().map(|p| p * 255.0 / 100.0))
-                    .or_else(|| s.parse::<f32>().ok())
-            })
-            .collect::<Option<Vec<f32>>>()?;
-        if parts.len() < 3 {
+            .collect();
+        if tokens.len() < 3 {
             return None;
         }
-        let clamp = |v: f32| v.clamp(0.0, 255.0) as u8;
-        return Some(Color(clamp(parts[0]), clamp(parts[1]), clamp(parts[2])));
+        let channel = |s: &str| -> Option<u8> {
+            let v = s.strip_suffix('%').map_or_else(
+                || s.parse::<f32>().ok(),
+                |n| n.parse::<f32>().ok().map(|p| p * 255.0 / 100.0),
+            )?;
+            Some(v.clamp(0.0, 255.0) as u8)
+        };
+        let alpha = tokens.get(3).map_or(Some(255), |s| {
+            let a = s.strip_suffix('%').map_or_else(
+                || s.parse::<f32>().ok(),
+                |n| n.parse::<f32>().ok().map(|p| p / 100.0),
+            )?;
+            Some((a.clamp(0.0, 1.0) * 255.0).round() as u8)
+        })?;
+        return Some(Color(
+            channel(tokens[0])?,
+            channel(tokens[1])?,
+            channel(tokens[2])?,
+            alpha,
+        ));
     }
     let named = match v.as_str() {
         "black" => (0, 0, 0),
@@ -803,7 +818,7 @@ pub(super) fn parse_color(value: &str) -> Option<Color> {
         "silver" => (192, 192, 192),
         _ => return None,
     };
-    Some(Color(named.0, named.1, named.2))
+    Some(Color(named.0, named.1, named.2, 255))
 }
 
 // ---------------------------------------------------------------------------

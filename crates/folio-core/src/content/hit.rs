@@ -22,7 +22,7 @@ use crate::content::anchor::{
 };
 use crate::content::dom::{Dom, NodeId};
 use crate::infra::metrics::Metric;
-use crate::layout::{Layout, LineFragment, Measure};
+use crate::layout::{Layout, LineFragment, Measure, cjk_latin_gap, has_cjk_latin_boundary};
 
 /// 命中结果：行盒下标 + 覆盖该位置的字符偏移。
 ///
@@ -105,9 +105,11 @@ pub fn hit_test(
         };
         let text = block.text.get(run.norm.clone()).unwrap_or("");
         let run_x = cursor + run.x_offset;
-        // shaping 同源的 run 内定位（没有字距、也没有两端对齐时才成立）。
+        // shaping 同源的 run 内定位（没有字距、没有两端对齐、也没有中西文间隙时才成立
+        // —— 后三者的字位偏移 shaping 的结果里都没有）。
         if run.style.letter_spacing == 0.0
             && justify.is_none()
+            && !has_cjk_latin_boundary(text)
             && let Some(bytes) =
                 measure.byte_at_x(text, &run.style.font, run.style.font_size, inline - run_x)
         {
@@ -126,8 +128,18 @@ pub fn hit_test(
         // 像素按 advance 累加，字节单独记 —— 两个计数器用途不同，混用就全错位。
         let (mut pixel, mut bytes_before) = (0.0f32, 0usize);
         let mut gap = gap_cursor;
+        let mut byte_at = 0usize;
         for ch in text.chars() {
-            let advance = run.style.advance(measure, ch);
+            // 中西文边界间隙记在宽度表里**本字符**的项上（它是本字符与下一字符之间
+            // 的那段），游标与 `run.width` 都从那张表来 —— 这里逐字加回同一份，向前
+            // 看一个字符。本 run 末字符与下一 run 之间的那份已由游标跨 run 的
+            // `run.width` 结清，末字符不再补（后面没有要摆的字了）。
+            let next_ch = text[byte_at + ch.len_utf8()..].chars().next();
+            byte_at += ch.len_utf8();
+            let mut advance = run.style.advance(measure, ch);
+            if let Some(nc) = next_ch {
+                advance += cjk_latin_gap(ch, nc, run.style.font_size);
+            }
             let shift = justify.map_or(0.0, |j| j.shift(gap));
             let char_x = run_x + pixel + shift;
             if inline < char_x + advance {
@@ -331,29 +343,50 @@ pub fn rects_for_range_in(
                 };
                 let ls = run.style.letter_spacing;
                 let mut gap = gap_cursor;
+                // 中西文边界间隙：shaping 的边表里没有它们，逐边加回。`script_px` 是
+                // 当前字符**左缘**的累计间隙（k-1→k 的边界进入这一轮前已加进）；右缘
+                // 再多算一份「k→k+1 的边界」，向前看一个字符现算。
+                let mut script_px = 0.0f32;
+                let mut byte_at = 0usize;
                 for (k, ch) in text.chars().enumerate() {
                     let at = base + k;
+                    let next_ch = text[byte_at + ch.len_utf8()..].chars().next();
+                    byte_at += ch.len_utf8();
+                    let next_gap =
+                        next_ch.map_or(0.0, |nc| cjk_latin_gap(ch, nc, run.style.font_size));
                     if at >= from && at < to {
                         // 一条边界表在 RTL 那一段上是**递减**的（`edges[k]` 的含义是
                         // 「这个字符在阅读方向上的起点」，见 `Measure::char_edges`），
                         // 所以取矩形要 min/max 两个都要 —— 只 `max` 那一头是以前默认
                         // 表递增留下的写法，方向一反就塌成零宽的一条。
                         let shift = justify.map_or(0.0, |j| j.shift(gap));
-                        let a = run_x + edges[k] + sign * ls * k as f32 + shift;
-                        let b = run_x + edges[k + 1] + sign * ls * (k + 1) as f32 + shift;
+                        let a = run_x + edges[k] + sign * (ls * k as f32 + script_px) + shift;
+                        let b = run_x
+                            + edges[k + 1]
+                            + sign * (ls * (k + 1) as f32 + script_px + next_gap)
+                            + shift;
                         let (cx0, cx1) = (a.min(b), a.max(b));
                         let (x0, x1) = rect.unwrap_or((cx0, cx0));
                         rect = Some((x0.min(cx0), x1.max(cx1)));
                     }
+                    script_px += next_gap;
                     gap += justify.map_or(0, |j| j.advance_cursor(ch));
                 }
                 gap_cursor = gap;
             } else {
                 let (mut pixel, mut chars_before) = (0.0f32, 0usize);
                 let mut gap = gap_cursor;
+                let mut byte_at = 0usize;
                 for ch in text.chars() {
-                    // `advance` 已含字距；两端对齐再按隙游标推一笔。
-                    let advance = run.style.advance(measure, ch);
+                    // `advance` 已含字距；中西文间隙记在本字符项上（与下一字符之间的
+                    // 那段），同 `hit_test` 的退路向前看一个字符加回；两端对齐再按隙
+                    // 游标推一笔。
+                    let next_ch = text[byte_at + ch.len_utf8()..].chars().next();
+                    byte_at += ch.len_utf8();
+                    let mut advance = run.style.advance(measure, ch);
+                    if let Some(nc) = next_ch {
+                        advance += cjk_latin_gap(ch, nc, run.style.font_size);
+                    }
                     if let Some(base) = run_start {
                         let at = base + chars_before;
                         if at >= from && at < to {

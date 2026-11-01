@@ -44,22 +44,34 @@ use crate::ui::services::config::{ConfigHolder, ConfigPath};
 ///
 /// **阻塞调用** —— Android 上会把调用线程停在闩上，直到读者从系统设置页回来
 /// （fork `gpui-pre-mobile` 29f19d3 的 permission_handler 是同步契约），所以只能在
-/// 后台线程上调，绝不能在界面线程上。API 30+ 看 MANAGE_EXTERNAL_STORAGE 的结果，
-/// 更旧的设备看 READ_EXTERNAL_STORAGE（那一档只有它）；请求一并发出，拿到的
-/// 任何一个都算数 —— 拿不到时扫描照跑，只是 roots 缩到应用自己的目录。
+/// 后台线程上调，绝不能在界面线程上。拿不到时扫描照跑，只是 roots 缩到应用自己的目录。
+///
+/// 按 API 档位**只问对的那一条**，两条一起问会出错也出噪音：
+///
+/// - **API 30 及以上只问 `MANAGE_EXTERNAL_STORAGE`**。它是 appop 型特殊权限，没有运行时
+///   弹窗，请求等于把读者送去系统设置页开开关。Android 11 起 `READ_EXTERNAL_STORAGE` 只放行
+///   媒体集合，对递归找书和用 `std::fs` 写拷进去的 `.epub` 都不顶用。旧版把「两条里任意一条
+///   granted」当成拿到了「所有文件访问」，按代码推出来的后果是：读者在设置页拒绝、却在弹出来
+///   的读存储窗上按了允许，`all_files` 就成了 `true`，扫描去撞 `/storage/emulated/0` 整根、
+///   读非媒体文件那一片该是成串 EACCES（清单页的「跳过 N 处」会跟着涨）—— 这条是读代码得出的，
+///   还没在真机上量过。API 33 起 `maxSdkVersion="32"` 已把这条权限从清单里摘掉，多问一次只是
+///   静默被拒；API 30–32 上多问一次是真弹窗。
+/// - **API 30 以下只问 `Storage`（`READ_EXTERNAL_STORAGE`）**。那一档根本没有
+///   「所有文件访问」这个授权；把 `android.permission.MANAGE_EXTERNAL_STORAGE` 这个字符串递进
+///   `Activity.requestPermissions()` 不会弹任何窗，系统只回一个 denied（`GpuiPermissions`
+///   批量请求那条路上专门把它摘出去，就是为了不去撞这一发）。
 #[cfg(target_os = "android")]
 pub(crate) fn request_storage_access() -> bool {
     use gpui_mobile::packages::permission_handler::{self, Permission};
-    match permission_handler::request_permissions(&[
-        Permission::ManageExternalStorage,
-        Permission::Storage,
-    ]) {
-        Ok(statuses) => statuses.iter().any(|(permission, status)| {
-            matches!(
-                permission,
-                Permission::ManageExternalStorage | Permission::Storage
-            ) && status.is_granted()
-        }),
+    let api = android::api_level();
+    let wanted = if api >= 30 {
+        Permission::ManageExternalStorage
+    } else {
+        Permission::Storage
+    };
+    tracing::info!("request_storage_access: API {api} 问 {wanted:?}");
+    match permission_handler::request_permissions(&[wanted]) {
+        Ok(statuses) => statuses.iter().any(|(_, status)| status.is_granted()),
         Err(err) => {
             tracing::warn!("request_storage_access: {err}");
             false

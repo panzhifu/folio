@@ -1,6 +1,8 @@
 //! 折页捕获与烘焙：哪一帧该烘、烘哪一页、纹理何时作废。
 
-use super::harness::{PARA, build_with_document, flow, meta, open, prefs, settle, turn_frame};
+use super::harness::{
+    PARA, app_frames, build_with_document, flow, meta, open, prefs, settle, turn_frame,
+};
 use crate::ui::features::reader::model::chrome::{PageMode, Reserve};
 use crate::ui::features::reader::model::turn::TurnIntent;
 use crate::ui::services::config::ConfigHolder;
@@ -431,14 +433,14 @@ fn a_band_geometry_change_survives_the_pending_capture_commit(cx: &mut TestAppCo
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |v, cx| {
             v.capture_committed.set(Some((key, viewport)));
-            v.set_chrome_bands(28.0, 28.0, 0.0, true, cx);
+            v.set_chrome_bands(28.0, 28.0, 0.0, cx);
         });
         window.render_frame(cx)
     })
     .expect("渲染应成功");
     cx.run_until_parked();
     assert_eq!(
-        view.read_with(cx, |v, _| v.header_reserve),
+        view.read_with(cx, |v, _| v.bands.header),
         28.0,
         "前置：这次 setter 该真的落下去"
     );
@@ -574,22 +576,16 @@ fn scratch_phone_insets_capture_commits(cx: &mut TestAppContext) {
     cx.update(|app| {
         ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
     });
-    // 手机那一组数：状态栏 41 + 手势条 24 = reserve 65；读数带各 24。
+    // 手机那一组数：状态栏 41 + 手势条 24 走 PageInsets；读数带各 24。
     view.update(cx, |v, cx| {
-        v.set_reserve(
-            Reserve {
-                width: 0.0,
-                height: 65.0,
-            },
-            cx,
-        );
+        v.set_reserve(Reserve { width: 0.0 }, cx);
     });
     view.update(cx, |v, _| {
-        v.top_inset = 41.0;
-        v.bottom_inset = 24.0;
+        v.insets.top = 41.0;
+        v.insets.bottom = 24.0;
     });
     view.update(cx, |v, cx| {
-        v.set_chrome_bands(24.0, 24.0, 24.0, true, cx);
+        v.set_chrome_bands(24.0, 24.0, 24.0, cx);
     });
     settle(cx, handle);
     let (cap, dirty, committed) = view.read_with(cx, |v, _| {
@@ -646,5 +642,56 @@ fn the_capture_rect_lands_in_the_window_after_the_safe_area_pushes_the_page_down
     assert!(
         !in_viewport(naive, viewport),
         "不还平移时矩形该出窗 —— 这正是真机上那条 warn"
+    );
+}
+
+/// 翻完一页之后，仿真折页那道门必须**只靠应用自己要的帧**开得起来。
+///
+/// 门读的是 `captured_page`，而它由**下一帧**的 `render` 从 `capture_committed` 里收：发出
+/// 捕获请求的那一帧（画在 `capture_region` 那块 canvas 的绘制回调里）自己不再 `notify`。
+/// 生产里要让下一帧发生，只有两条路 —— 有人 `notify`，或有人
+/// `request_animation_frame` 买票。落定帧那一发 `notify` 只买到「发出请求」的这一帧，
+/// 再往后两格都没有票，提交就一直挂着：门不开 ⇒ 读者的整划在 `claim_swipe` 里被吞成
+/// 「什么都不发生」，只留一个排队的方向等别的东西碰出一次重画。
+///
+/// 现有的捕获门抓不到它，因为它们走 `settle` / `turn_frame` —— 那两条用 `render_frame`，
+/// 头一句 `refresh()` 无条件把窗口弄脏再画，帧是测试白给的。这一条改用 [`app_frames`]：
+/// 只走应用自己买来的帧，买不到就停，与生产停在同一格。把 `body.rs` 里那句
+/// `request_animation_frame` 去掉，这条当场红。
+#[gpui_kit::test]
+fn the_curl_gate_reopens_on_frames_the_app_asked_for_itself(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.curl_capture_ready()),
+        "前置：第一页的纹理该已经烘好"
+    );
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    // 时钟一次推过整趟动画：之后应用自己要来的那一帧就是落定帧（它同时把捕获请求排进绘制）。
+    cx.executor()
+        .advance_clock(NAV_TRANSITION + Duration::from_millis(20));
+    let painted = app_frames(cx, handle, &view, 10);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        1,
+        "前置：这一趟该已经翻过去"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.curl_capture_ready()),
+        "翻完一页之后门该在应用自己要来的 {painted} 帧里开起来；\
+         还关着就是提交没人收 ⇒ 读者的下一划整趟被吞"
     );
 }

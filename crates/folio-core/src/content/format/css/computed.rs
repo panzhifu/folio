@@ -620,8 +620,12 @@ impl BreakWhen {
     }
 }
 
+/// 一个 CSS 颜色：RGBA 四通道。
+///
+/// 第四格是 alpha（0 = 全透明，255 = 不透明）。出版书里 `rgba(80, 70, 86, .7)`
+/// 这类半透明底色很常见（多看系的「人物志」框就是），丢掉 alpha 会把底图完全盖死。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Color(pub u8, pub u8, pub u8);
+pub struct Color(pub u8, pub u8, pub u8, pub u8);
 
 /// 一个尺寸值。`none` 用 `Option::None` 表示。百分比不在此刻折算 —— 它要按**包含块
 /// 的宽度**来算，那是排版期才知道的数，见 [`Length::resolve`]。

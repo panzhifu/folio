@@ -6,8 +6,8 @@
 //!   指纹才找得回（重排、改字号都不动它），列表里也有一句原文可显；定版式锚成点，
 //!   「哪一页」就是位置的完整地址，没有字层的页（扫描页、漫画页）照样钉得上。
 //! - **列表删除**：目录面板「批注」那一格与阅读侧的删除命令都汇到
-//!   [`ReaderSession::remove_annotation`] / [`ReaderSession::remove_bookmark`]，
-//!   两处共享同一条「删 → 暂存 → 给撤销」的路。
+//!   [`ReaderSession::remove_annotation`] / [`ReaderSession::remove_bookmark`]。
+//!   两条**不**共享撤销：拔书签给一窗后悔（顶栏那颗星是盲按的），取消划线是真删。
 //! - **撤销**：[`ReaderSession::undo_delete`]。胶囊本体由阅读页渲染（`regions.rs`
 //!   之外的一小块，挂在 `reading_page.rs`），状态与计时都在会话里 —— 会话是
 //!   「删」这个动作的唯一现场。
@@ -16,10 +16,11 @@
 //! 装饰是绘制那一层的另一个决定。
 
 use folio_core::content::anchor::{TextAnchor, line_at_offset, line_chars, relocate};
+use folio_core::store::Bookmark;
 use gpui_kit::{Context, SharedString};
 
 use crate::ui::features::reader::model::session::ReaderSession;
-use crate::ui::features::reader::model::undo::{DeletedRow, UNDO_TTL, UndoSlot};
+use crate::ui::features::reader::model::undo::{UNDO_TTL, UndoSlot};
 use crate::ui::services::l10n::tr;
 
 impl ReaderSession {
@@ -136,15 +137,16 @@ impl ReaderSession {
             cx.notify();
             return false;
         };
-        let Some(row) = store.annotation(id).ok().flatten() else {
+        if store.annotation(id).ok().flatten().is_none() {
             tracing::warn!(annotation_id = id, "划线: 那一条已经不在库里");
             return false;
-        };
+        }
         match store.delete_annotation(id) {
             Ok(()) => {
                 tracing::info!(annotation_id = id, "划线: 删一条批注");
-                let label = tr(cx, "reader.undo.annotation");
-                self.stash_undo(label, DeletedRow::Annotation(row), cx);
+                // 不给撤销胶囊：取消划线是一次**真删**，读者点它的时候手里就带着那条
+                // 选区，反悔的路是「重新划一次」，不是屏底再飘一条横条（2026-11-02 读者
+                // 要的口径）。书签照旧给 —— 顶栏那颗星是盲按的，拔错了看不见。
                 self.load_annotations();
                 cx.notify();
                 true
@@ -171,7 +173,7 @@ impl ReaderSession {
             Ok(()) => {
                 tracing::info!(bookmark_id = id, "书签: 拔一枚");
                 let label = tr(cx, "reader.undo.bookmark");
-                self.stash_undo(label, DeletedRow::Bookmark(row), cx);
+                self.stash_undo(label, row, cx);
                 self.load_bookmarks();
             }
             Err(err) => tracing::error!(bookmark_id = id, error = %err, "书签: 删库失败"),
@@ -179,7 +181,7 @@ impl ReaderSession {
         cx.notify();
     }
 
-    /// 撤销最近一次删除：按原行插回（id 与时间戳都不变），列表随之重读。
+    /// 撤销最近一次拔掉的书签：按原行插回（id 与时间戳都不变），列表随之重读。
     pub fn undo_delete(&mut self, cx: &mut Context<Self>) {
         let Some(slot) = self.undo.take() else {
             return;
@@ -188,32 +190,18 @@ impl ReaderSession {
         let Some(store) = self.store.clone() else {
             return;
         };
-        let outcome = match &slot.row {
-            DeletedRow::Annotation(row) => {
-                let ok = store.restore_annotation(row).is_ok();
-                if ok {
-                    self.load_annotations();
-                }
-                ok
-            }
-            DeletedRow::Bookmark(row) => {
-                let ok = store.restore_bookmark(row).is_ok();
-                if ok {
-                    self.load_bookmarks();
-                }
-                ok
-            }
-        };
-        if outcome {
-            tracing::info!("撤销: 恢复一条被删的记录");
+        let ok = store.restore_bookmark(&slot.row).is_ok();
+        if ok {
+            self.load_bookmarks();
+            tracing::info!("撤销: 恢复一枚被拔的书签");
         } else {
-            tracing::error!("撤销: 写库失败，那一行没回来");
+            tracing::error!("撤销: 写库失败，那一枚没回来");
         }
         cx.notify();
     }
 
     /// 把刚删的那一行暂存进胶囊，并起一趟到点自动收起的计时。
-    fn stash_undo(&mut self, label: SharedString, row: DeletedRow, cx: &mut Context<Self>) {
+    fn stash_undo(&mut self, label: SharedString, row: Bookmark, cx: &mut Context<Self>) {
         self.undo_seq += 1;
         let seq = self.undo_seq;
         let timer = cx.spawn(async move |this, cx| {

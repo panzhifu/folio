@@ -728,7 +728,7 @@ mod tests {
         };
         let p = styled.get(find("p")).unwrap();
         assert_eq!(p.text_indent, Length::Px(48.0), "末章的 3em 要赢序里的 2em");
-        assert_eq!(p.color, Some(Color(0x12, 0x34, 0x56)));
+        assert_eq!(p.color, Some(Color(0x12, 0x34, 0x56, 255)));
         assert_eq!(
             styled.get(find("h1")).unwrap().font_weight,
             900,

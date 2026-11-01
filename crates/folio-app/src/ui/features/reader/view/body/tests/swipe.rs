@@ -1,6 +1,8 @@
 //! 跟手翻页手势：认领、跟手、弹回、惯性与轴拒绝。
 
-use super::harness::{flow, open, prefs, raw_touch, raw_touch_at, settle, turn_frame, wheel_lines};
+use super::harness::{
+    backdrop_chapter, flow, open, prefs, raw_touch, raw_touch_at, settle, turn_frame, wheel_lines,
+};
 use crate::ui::features::reader::model::chrome::PageMode;
 use crate::ui::features::reader::model::swipe::{FLING_SPEED, SNAP_FRACTION, fling_floor};
 use crate::ui::features::reader::motion::turn_animation::Axis;
@@ -561,7 +563,7 @@ fn a_curl_swipe_back_rolls_the_page(cx: &mut TestAppContext) {
     assert!(!turn.forward, "往右横扫该被判成回上一页");
     assert!(t > 0.0, "进度那一步该跟着走，实得 {t}");
     let grip = turn.grip.expect("折页这一档，手是每一步都跟着写的");
-    let area = view.read_with(cx, |v, _| v.page_area);
+    let area = view.read_with(cx, |v, _| v.page_area());
 
     // 网格那头判「哪一段已经卷走」读的就是这一份 uniform：`n·x + n·y − d > 0` 那一侧离场。
     let cylinder = cylinder_at(t, turn.forward, area, Some(grip)).expect("量得出圆柱");
@@ -614,7 +616,7 @@ fn a_curl_sheet_includes_the_header_and_footer_bands(cx: &mut TestAppContext) {
     view.update(cx, |v, cx| {
         v.set_mode(PageMode::Paged, cx);
         // 页眉/页脚各 28：正文版心因此从 28 开始、到窗口底减 28 结束；纸面两头都要越过它们。
-        v.set_chrome_bands(28.0, 28.0, 0.0, true, cx);
+        v.set_chrome_bands(28.0, 28.0, 0.0, cx);
     });
     cx.update(|app| {
         ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
@@ -625,7 +627,7 @@ fn a_curl_sheet_includes_the_header_and_footer_bands(cx: &mut TestAppContext) {
             f32::from(window.viewport_size().height)
         })
         .expect("量窗口");
-    let area = view.read_with(cx, |v, _| v.page_area);
+    let area = view.read_with(cx, |v, _| v.page_area());
     assert_eq!(area.top, 0.0, "纸面该从阅读页顶开始，实得 {area:?}");
     assert_eq!(
         area.bottom, window_h,
@@ -642,14 +644,12 @@ fn a_curl_sheet_includes_the_header_and_footer_bands(cx: &mut TestAppContext) {
     );
 }
 
-/// 页眉那条带子只从**这一页的顶边**起算：系统那一条是阅读层让的，带子不再让第二次。
+/// 页眉那条带子只让**一次**安全区：可重排的页从窗口 0 起，带子自己落在 `top_inset`
+/// 那条线下面，不再让第二次。
 ///
-/// 外壳的阅读层（`shell::reading_overlay`）已经把整页往下推过 `top_inset`，带子的顶边
-/// 就是那一格的下沿。带子自己再加一次时，章名会再低一截，带子也会向下多盖 `top_inset`
+/// 带子顶边 = `top_inset`，章名贴着带顶 2 像素，带子底边 = `top_inset + header_reserve`；
+/// 正文从这条线往下。带子再让一次时，章名会再低一截、带子也会向下多盖 `top_inset`
 /// 那么高的正文 —— 真机上正是「页眉很低、顶上那截图片被切掉」。
-///
-/// 这里同时量两个数：字的上沿（贴带顶 2 像素）与带子的底边（必须正好停在正文让出的
-/// 那一格 `header_reserve` 上，不能再往下探）。
 #[gpui_kit::test]
 fn the_header_band_does_not_take_the_safe_area_twice(cx: &mut TestAppContext) {
     use gpui_kit::{AppContext as _, test::TestWindowExt as _};
@@ -666,9 +666,9 @@ fn the_header_band_does_not_take_the_safe_area_twice(cx: &mut TestAppContext) {
     view.update(cx, |v, cx| {
         v.set_mode(PageMode::Paged, cx);
         // 上下边距都取 0，只留页眉那一格：这一条门量的是安全区与带子的关系。
-        v.set_chrome_bands(28.0, 0.0, 0.0, true, cx);
-        // 外壳那一层在真机上已经按它把整页推下去了；这里只验证带子**不再**加一遍。
-        v.top_inset = 24.0;
+        v.set_chrome_bands(28.0, 0.0, 0.0, cx);
+        // 可重排的页从窗口 0 起：带子自己让 24，正文接着让。
+        v.insets.top = 24.0;
     });
     settle(cx, handle);
     let (label_top, band_bottom) = cx
@@ -686,12 +686,138 @@ fn the_header_band_does_not_take_the_safe_area_twice(cx: &mut TestAppContext) {
         })
         .expect("窗口应能渲染");
     assert!(
-        (label_top - 2.0).abs() < 0.5,
-        "章名只该贴着带顶（2 像素），安全区由外壳让过；实得顶边 {label_top}"
+        (label_top - (24.0 + 2.0)).abs() < 0.5,
+        "章名该贴着带顶（24 + 2），安全区只让一次；实得顶边 {label_top}"
     );
     assert!(
-        (band_bottom - 28.0).abs() < 0.5,
-        "带子底边该正好停在正文让出的那一格（28）；实得 {band_bottom}"
+        (band_bottom - (24.0 + 28.0)).abs() < 0.5,
+        "带子底边该正好停在正文让出的那一格（24 + 28）；实得 {band_bottom}"
+    );
+}
+
+/// 平移翻页里**每一页的整页底图跟着自己那张纸走**。
+///
+/// 2026-11-01 深夜的现场：整页底图只在 `turn.is_none()` 时画，一开翻就整块消失 ——
+/// 读者读到的是「字在滑，纸没动」，于是只有仿真折页（底图烘进了捕获纹理）像一整张纸。
+/// 这条门量三个数：静止时底图在原点；跟手途中**两张纸各有一张底图**；两者相距一屏，
+/// 且旧页在左、新页在右（这一笔是往后翻）。
+#[gpui_kit::test]
+fn a_page_backdrop_rides_its_own_sheet(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::view::body::page_art_element_id;
+    use folio_core::content::format::ImageRes;
+    use gpui_kit::{AppContext as _, test::TestWindowExt as _};
+
+    cx.update(gpui_kit::init);
+    let body = (0..60)
+        .map(|i| {
+            format!("<p>Page art paragraph number {i}, long enough to wrap a line or two.</p>")
+        })
+        .collect::<String>();
+    let flow = FlowDoc {
+        chapters: vec![Chapter::inline("第一章", backdrop_chapter(&body))],
+        // 有一条元数据就够：`book.get(href)` 只按表认这张图（字节在后台那一趟才去读），
+        // 而这里量的是元素树上那一层的位移，不是像素。
+        images: vec![ImageRes {
+            href: "fm1.jpg".into(),
+            source: "fm1.jpg".into(),
+            media_type: "image/jpeg".into(),
+            width: 1080,
+            height: 2400,
+        }],
+        ..Default::default()
+    };
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.page_count()) >= 2,
+        "语料得切出两页，否则这一趟没有「另一张纸」"
+    );
+
+    let at = |cx: &mut TestAppContext, id| {
+        cx.update_window(handle, |_, window, _| window.try_find(id))
+            .expect("窗口应能渲染")
+    };
+    let still = at(cx, page_art_element_id(0, 0)).expect("静止帧该铺这一页的底图");
+    assert_eq!(
+        f32::from(still.bounds().origin.x),
+        0.0,
+        "不翻页时底图就在原点"
+    );
+
+    // 往后翻：从右往左扫。跟手途中页号不动，屏上该同时有两张纸、两张底图。
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 240.0);
+    settle(cx, handle);
+    let (leaving, arriving, width) = cx
+        .update_window(handle, |_, window, _| {
+            let leaving = window
+                .try_find(page_art_element_id(0, 0))
+                .expect("旧页的底图该跟着旧纸走，不该整块消失");
+            let arriving = window
+                .try_find(page_art_element_id(0, 1))
+                .expect("新页的底图该铺在自己那张纸上");
+            (
+                f32::from(leaving.bounds().origin.x),
+                f32::from(arriving.bounds().origin.x),
+                f32::from(window.viewport_size().width),
+            )
+        })
+        .expect("窗口应能渲染");
+    assert!(leaving < 0.0, "往后翻时旧页该往左走，实得 x = {leaving}");
+    assert!(
+        arriving > 0.0,
+        "新页该还在右边等着进来，实得 x = {arriving}"
+    );
+    assert!(
+        ((arriving - leaving) - width).abs() < 1.0,
+        "两张纸始终相距一屏（{width}），实得 {} —— 底图没跟纸走才会对不上",
+        arriving - leaving
+    );
+}
+
+/// 分页档：**有正文**的整页底图章不让带子透明，纯图页才让。
+///
+/// 2026-11-01 白天那版是「不管有没有字都铺满」，当天深夜按读者的口径改回来：有字的
+/// 底图章（人物志那一族）铺满等于章名压在正文上、正文压进页脚。这一条与连续滚动
+/// 那一档共用一个判据（`view::body` 的 `page_art_bare` / `bare_bands`），分页只是
+/// 走每页一份带子。
+#[gpui_kit::test]
+fn a_paged_captioned_backdrop_keeps_its_bands(cx: &mut TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+
+    cx.update(gpui_kit::init);
+    let flow = FlowDoc {
+        chapters: vec![Chapter::inline(
+            "人物志",
+            backdrop_chapter("<p>Character Introduction</p>"),
+        )],
+        ..Default::default()
+    };
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    assert!(
+        view.read_with(cx, |v, _| v
+            .book()
+            .expect("有书")
+            .document()
+            .is_picture_chapter()),
+        "前置：这张底图要被认成整页画"
+    );
+    view.update(cx, |v, cx| {
+        v.set_mode(PageMode::Paged, cx);
+        v.set_chrome_bands(28.0, 28.0, 0.0, cx);
+    });
+    settle(cx, handle);
+    let bare = cx
+        .update_window(handle, |_, window, _| {
+            window.try_find("reader-header-band-bare").is_some()
+                && window.try_find("reader-header-band").is_none()
+        })
+        .expect("窗口应能渲染");
+    assert!(
+        bare,
+        "整页底图章（有字也算）在分页档也让带子透明：底图铺满整窗"
     );
 }
 
@@ -732,7 +858,7 @@ fn a_curl_swipe_in_an_rtl_book_rolls_from_the_left_edge(cx: &mut TestAppContext)
     assert!(turn.forward, "RTL 里往右划该是**往后**翻");
     assert!(t > 0.0, "进度那一步该跟着走，实得 {t}");
     let grip = turn.grip.expect("折页这一档，手是每一步都跟着写的");
-    let area = view.read_with(cx, |v, _| v.page_area);
+    let area = view.read_with(cx, |v, _| v.page_area());
 
     let free_right = Pose::free_edge_right(turn.forward, rtl);
     let cylinder = cylinder_at(t, free_right, area, Some(grip)).expect("量得出圆柱");

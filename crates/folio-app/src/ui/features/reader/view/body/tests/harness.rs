@@ -111,6 +111,33 @@ pub(super) fn open_scroll(
     )
 }
 
+/// 与 [`open_scroll`] 同一条路，但窗口高由调用方给（见 [`build_with_document_sized`]）。
+pub(super) fn open_scroll_sized(
+    cx: &mut TestAppContext,
+    flow: &FlowDoc,
+    format: &str,
+    prefs: Reader,
+    locator: Locator,
+    width: f32,
+    height: f32,
+) -> (Entity<ReaderSession>, AnyWindowHandle) {
+    let doc: Arc<dyn Document> = Arc::from(folio_core::content::document::from_content(
+        meta(format),
+        Content::Reflow(flow.clone()),
+    ));
+    build_with_document_sized(
+        cx,
+        doc,
+        prefs,
+        locator,
+        width,
+        height,
+        None,
+        None,
+        PageTurn::Scroll,
+    )
+}
+
 /// 把这一屏的「翻页方式」改成「上下滚动」，也就是摆法进连续。
 ///
 /// 这一格存在是因为摆法**不再能直接 `set_mode(Continuous)` 拿到**：那一档现在只有
@@ -234,8 +261,29 @@ pub(super) fn build_with_document(
     book_id: Option<i64>,
     turn: PageTurn,
 ) -> (Entity<ReaderSession>, AnyWindowHandle) {
+    build_with_document_sized(cx, doc, prefs, locator, width, 520.0, store, book_id, turn)
+}
+
+/// [`build_with_document`] 的可控窗口高版本。
+///
+/// 手机那一档（魅族 20 逻辑 384×853）与桌面的 520 高差出一个量级：整页图的选源
+/// （`closest_portrait_variant` 按**整窗**宽高比挑）、撑到哪一格 canvas（`screen_height`
+/// 对 `page_height`）、以及读数带透不透明，全都在这个比例上分叉。真机上报的排版错位
+/// 用 520 高的窗口复现不出来，所以这一格得能由测试定。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_with_document_sized(
+    cx: &mut TestAppContext,
+    doc: Arc<dyn Document>,
+    prefs: Reader,
+    locator: Locator,
+    width: f32,
+    height: f32,
+    store: Option<Arc<Store>>,
+    book_id: Option<i64>,
+    turn: PageTurn,
+) -> (Entity<ReaderSession>, AnyWindowHandle) {
     let mut view = None;
-    let handle = cx.open_window(size(px(width), px(520.)), |window, cx| {
+    let handle = cx.open_window(size(px(width), px(height)), |window, cx| {
         // 偏好必须**装进配置**而不是只交给构造函数：会话每帧从 `ConfigHolder`
         // 同步一次偏好（读者在设置页改字号就是这条路），装默认配置就是把这里传的
         // `prefs` 当场冲掉 —— 而画面照样出得来，只有几何不对，最难查的那种红。
@@ -262,6 +310,30 @@ pub(super) fn build_with_document(
     (view, handle.into())
 }
 
+/// 一整页 `fixed` 底图章：`body` 挂满版底图，画上的字由调用方给。
+pub(super) fn backdrop_chapter(body: &str) -> String {
+    format!(
+        "<html><head><style>\
+           html,body{{height:100%;margin:0;padding:0}}\
+           body{{background-image:url(fm1.jpg);background-size:cover;\
+                 background-repeat:no-repeat;background-attachment:fixed;\
+                 background-position:center}}\
+         </style></head><body>{body}</body></html>"
+    )
+}
+
+/// 同上，但底图**不写** `background-attachment: fixed` —— 扉页那种普通底图
+/// （《哈利·波特全集》`v1.xhtml` 的 `body` 就是这一种）。
+pub(super) fn plain_backdrop_chapter(body: &str) -> String {
+    format!(
+        "<html><head><style>\
+           html,body{{height:100%;margin:0;padding:0}}\
+           body{{background-image:url(fm1.jpg);background-size:cover;\
+                 background-repeat:no-repeat;background-position:center}}\
+         </style></head><body>{body}</body></html>"
+    )
+}
+
 /// 两轮「跑空事件 → 渲染一帧」。一轮不够：首帧只是把恢复请求挂上，
 /// 而 `run_until_parked` 只跑事件不画帧。框架自己的 `settle()` 也是这个形状。
 pub(super) fn settle(cx: &mut TestAppContext, handle: AnyWindowHandle) {
@@ -272,6 +344,60 @@ pub(super) fn settle(cx: &mut TestAppContext, handle: AnyWindowHandle) {
     cx.update_window(handle, |_, window, cx| window.render_frame(cx))
         .expect("第二帧应成功");
     cx.run_until_parked();
+}
+
+/// 这个会话出过几次元素树 = 真画了几帧。数由 `render` 开头自己记的（`image_hits_frame`），
+/// 不是测试另起一套计数 —— 量具与被量的那条路同源。
+pub(super) fn draws(cx: &TestAppContext, view: &Entity<ReaderSession>) -> u64 {
+    view.read_with(cx, |v, _| v.image_hits_frame)
+}
+
+/// 走**一**帧「应用自己会要的那一帧」。回 `false` = 既没人 `notify`、也没人
+/// `request_animation_frame` ⇒ 生产里链就断在这一格。
+///
+/// 两条来路都按生产的口径兑现：
+/// - `notify`：测试台在排空副作用那一段会把脏窗口自己画掉（`gpui-pre/src/app.rs` 里
+///   `window.invalidator.is_dirty()` 那一句），所以 `run_until_parked` 一次就是一帧。
+/// - 票（`request_animation_frame` 就是 `on_next_frame(notify)`）：**只有生产的帧循环**会
+///   兑现它（`window.rs` 里 `pending_next_frame_callbacks` 那一段），测试台不兑现，所以这里
+///   手动兑一次；兑完它就成了一发 `notify`，下一帧由上一条去画。
+///
+/// 为什么不用 `render_frame`：它头一句是 `refresh()` —— 无条件把窗口弄脏再画，等于测试白给
+/// 帧。凡是「这一帧之后没人再要帧，于是状态停在半路」的红，用它一律测不出来。
+pub(super) fn app_frame(
+    cx: &mut TestAppContext,
+    handle: AnyWindowHandle,
+    view: &Entity<ReaderSession>,
+) -> bool {
+    let before = draws(cx, view);
+    cx.run_until_parked();
+    if draws(cx, view) > before {
+        return true;
+    }
+    let tickets = cx
+        .update_window(handle, |_, window, cx| window.simulate_next_frame(cx))
+        .unwrap_or_default();
+    if tickets == 0 {
+        return false;
+    }
+    cx.run_until_parked();
+    draws(cx, view) > before
+}
+
+/// 一直走到应用不再要帧（或走满 `max` 帧），回真走掉的帧数。
+///
+/// 生产里链停在哪一帧，这里就停在哪一帧 —— 断言因此说得清「纹理没烘上」是应用的锅，不是夹具的。
+pub(super) fn app_frames(
+    cx: &mut TestAppContext,
+    handle: AnyWindowHandle,
+    view: &Entity<ReaderSession>,
+    max: usize,
+) -> usize {
+    let mut painted = 0;
+    while painted < max && app_frame(cx, handle, view) {
+        painted += 1;
+    }
+    painted
 }
 
 /// 真实滚轮事件投进正文。gpui 的约定是「向下滚为负」，所以往下滚给负的 dy。
@@ -396,7 +522,7 @@ pub(super) fn char_point(
         let char_w = box_.dominant_font_size();
         point(
             px(v.prefs.margin_x + box_.x + char_w * (k as f32 + 0.5)),
-            px(box_.y + box_.height * 0.5 - v.scroll_y + v.header_reserve),
+            px(box_.y + box_.height * 0.5 - v.scroll_y + v.bands.header),
         )
     })
 }

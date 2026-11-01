@@ -47,6 +47,44 @@ impl Snapshot {
             books: BTreeMap::new(),
         }
     }
+
+    /// 把这份快照里的**每一个时间**整体平移到另一个钟面上。
+    ///
+    /// 合并按「每条记录的时间谁新」取胜者，而那些时间是**各自那台设备的钟**写下的：
+    /// 一台飞行模式几小时的手机、一台从没对过表的桌面，都能让「谁改得新」变成「谁的钟快」。
+    /// 局域网是唯一能当场对表的场合 —— 握手的响应里带着对端的 UTC 秒，所以读回对面那份快照
+    /// 时先按 `对端钟 - 本机钟` 平移，再去合并。WebDAV 那条路没有这个条件，只能照旧。
+    ///
+    /// 只平移**读回来**的那一份；本机这一份永远写自己的钟。平移过的记录落库后就是本机的时间，
+    /// 下次传出去时由对面按它自己算出的偏移再搬一次。
+    ///
+    /// 每一步都是饱和加：`delta` 来自对面报文里的一个 `i64`，一个坏值不该把时间绕回 1970 之前。
+    pub fn shift_clock(&mut self, delta: i64) {
+        fn shift(value: &mut i64, delta: i64) {
+            *value = value.saturating_add(delta);
+        }
+
+        shift(&mut self.exported_at, delta);
+        for book in self.books.values_mut() {
+            if let Some(position) = &mut book.position {
+                shift(&mut position.updated_at, delta);
+            }
+            for annotation in &mut book.annotations {
+                shift(&mut annotation.created_at, delta);
+                shift(&mut annotation.updated_at, delta);
+            }
+            for bookmark in &mut book.bookmarks {
+                shift(&mut bookmark.created_at, delta);
+                shift(&mut bookmark.updated_at, delta);
+            }
+            for tombstone in &mut book.tombstones {
+                shift(&mut tombstone.deleted_at, delta);
+            }
+            if let Some(settings) = &mut book.settings {
+                shift(&mut settings.updated_at, delta);
+            }
+        }
+    }
 }
 
 /// 一本书在快照里的全部内容。空字段不写进 JSON（`skip_serializing_if`），
@@ -1065,6 +1103,123 @@ mod tests {
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(json.contains("\"books\":{\"hash\":{}}"), "{json}");
+    }
+
+    /// 平移要一次搬走**所有**时间：漏掉哪一类，那一类就还在用对面的钟参加比较。
+    #[test]
+    fn shifting_the_clock_moves_every_timestamp_at_once() {
+        let mut snapshot = with_book(
+            Snapshot::new("dev-remote", 100),
+            "hash",
+            BookSnapshot {
+                position: Some(position(7, 200)),
+                annotations: vec![annotation("a", 300)],
+                bookmarks: vec![bookmark("b", 400)],
+                tombstones: vec![tombstone(TombstoneKind::Annotation, "c", 500)],
+                settings: Some(settings(600, 22.0)),
+            },
+        );
+
+        snapshot.shift_clock(1_000);
+
+        let book = &snapshot.books["hash"];
+        assert_eq!(snapshot.exported_at, 1_100);
+        assert_eq!(book.position.as_ref().unwrap().updated_at, 1_200);
+        assert_eq!(book.annotations[0].created_at, 1_300);
+        assert_eq!(book.annotations[0].updated_at, 1_300);
+        assert_eq!(book.bookmarks[0].created_at, 1_400);
+        assert_eq!(book.bookmarks[0].updated_at, 1_400);
+        assert_eq!(book.tombstones[0].deleted_at, 1_500);
+        assert_eq!(book.settings.as_ref().unwrap().updated_at, 1_600);
+        // 位置本身不是时间，不该被搬。
+        assert_eq!(book.position.as_ref().unwrap().locator.offset, 7);
+    }
+
+    /// 这一条是平移存在的理由：对面那台钟快一小时，它更早写的那一条在**不平移**时会压过
+    /// 本机更新的一条。先把这个错的结局断下来，再断平移后的对结局 —— 只断后者，
+    /// 测试在实现漏掉平移时也可能因为别的原因通过。
+    #[test]
+    fn a_fast_peer_clock_stops_winning_once_the_snapshot_is_shifted() {
+        // 对端的钟比本机快 3600 秒；它在真实时刻 89_000 写了这一条，落上自己的钟是 92_600。
+        let local = with_book(
+            Snapshot::new("dev-local", 95_000),
+            "hash",
+            BookSnapshot {
+                // 本机在真实时刻 90_000 读到第 12 页。
+                position: Some(position(12, 90_000)),
+                ..BookSnapshot::default()
+            },
+        );
+        let remote = with_book(
+            Snapshot::new("dev-remote", 93_600),
+            "hash",
+            BookSnapshot {
+                position: Some(position(3, 92_600)),
+                ..BookSnapshot::default()
+            },
+        );
+
+        // 本机钟 95_000，对面报文库里写的是 93_600 → 偏移 = 本机 - 对面 = -3600。
+        let unshifted = merge(&local, std::slice::from_ref(&remote), 95_000);
+        assert_eq!(
+            unshifted.stats.positions, 1,
+            "不平移的话，钟快那台那条更早的记录会赢"
+        );
+        assert_eq!(unshifted.plan.positions[0].1.locator.offset, 3);
+
+        let mut corrected = remote.clone();
+        corrected.shift_clock(-3_600);
+        let shifted = merge(&local, std::slice::from_ref(&corrected), 95_000);
+        assert_eq!(shifted.stats.positions, 0, "平移过后本机那条更新的该守住");
+        assert!(shifted.plan.positions.is_empty());
+        assert_eq!(
+            shifted.snapshot.books["hash"]
+                .position
+                .as_ref()
+                .unwrap()
+                .locator
+                .offset,
+            12,
+            "合并结果里留下的必须是本机那一次阅读"
+        );
+    }
+
+    /// 偏移取自对面报文里的一个 `i64`，坏值不能把时间绕回 1970 之前 —— 那会让一份快照
+    /// 里所有记录同时变成「最旧的」，看起来像「对面什么都没改」。
+    #[test]
+    fn a_poisoned_delta_saturates_instead_of_wrapping_time() {
+        let mut forward = with_book(
+            Snapshot::new("dev-remote", 100),
+            "hash",
+            BookSnapshot {
+                position: Some(position(1, i64::MAX - 10)),
+                ..BookSnapshot::default()
+            },
+        );
+        forward.shift_clock(i64::MAX);
+        assert_eq!(forward.exported_at, i64::MAX, "往前搬到底停在上边界");
+        assert_eq!(
+            forward.books["hash"].position.as_ref().unwrap().updated_at,
+            i64::MAX
+        );
+
+        let mut backward = with_book(
+            Snapshot::new("dev-remote", 100),
+            "hash",
+            BookSnapshot {
+                position: Some(position(1, i64::MIN + 10)),
+                ..BookSnapshot::default()
+            },
+        );
+        backward.shift_clock(i64::MIN);
+        // 100 + i64::MIN 落在可表示的范围里，所以按算术走、不钳 —— 要紧的是它仍然是个
+        // 负数，没有一个时间绕回成正的大数。
+        assert_eq!(backward.exported_at, i64::MIN + 100, "能表示的差就照实算");
+        assert_eq!(
+            backward.books["hash"].position.as_ref().unwrap().updated_at,
+            i64::MIN,
+            "真下溢那一条钳在边界，不回绕成正数"
+        );
     }
 }
 

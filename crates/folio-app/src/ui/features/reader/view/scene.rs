@@ -210,6 +210,22 @@ fn background_tile_size(
     }
 }
 
+/// 这一张整页画**宽度铺满了框、而且比框矮**吗。
+///
+/// 滚动档用它决定「贴顶还是居中」：封面那种竖图在手机屏上是宽度先到边（`contain`
+/// 由宽那一轴定），把它贴着屏幕顶边画才有沉浸感；宽度不足（左右留白）或比框还高
+/// （`cover` 纵向溢出）的仍按作者的定位居中 —— 后者贴顶会把溢出的那一截压进下一章。
+pub(in crate::ui::features::reader) fn picture_fills_width(
+    picture: &DecorPicture,
+    width: f32,
+    height: f32,
+    images: &ChapterImages,
+) -> bool {
+    let (natural_w, natural_h) = images.natural_size(&picture.href);
+    background_tile_size(width, height, (natural_w, natural_h), &picture.size)
+        .is_some_and(|(tile_w, tile_h)| tile_w >= width - 0.5 && tile_h <= height + 0.5)
+}
+
 /// 把一条 `Length` 折成 px。`Percent` 按**这一块对应轴**的长折。
 /// `em` / `rem` / `vw` / `vh` 在解析期就没接（见 `css::value::size_axis`），到不了这里。
 fn fold_length(length: Length, basis: f32) -> Option<f32> {
@@ -248,6 +264,10 @@ pub struct VisibleImage {
     pub top: f32,
     pub width: f32,
     pub height: f32,
+    /// 这一张属于哪一叠图（不在叠里 = `None`）。
+    ///
+    /// 三个用途：点开大图时从**这一张**开始、横滑切图认领这一笔、图上那格 `k/n` 角标。
+    pub stack: Option<folio_core::layout::StackMark>,
     /// 这张图的活儿：怎么取字节、按什么格式解、进图集占多少。
     ///
     /// **像素不在这里** —— 场景只负责「这一帧该摆哪张图」，解没解好由
@@ -274,6 +294,12 @@ pub struct Scene {
     pub runs: Vec<GlyphRun>,
     pub images: Vec<VisibleImage>,
     pub decorations: Vec<BlockDecor>,
+    /// 这一叠里**下一张**的图（不在屏上，只为让它提前解码）。
+    ///
+    /// 叠图横滑切一张时，新那一张的字节第一次才去解：大图（1000×1778 那种封面）
+    /// 一下就是几十毫秒，读者读成「卡一下」。这一格在搭场景时顺手收「第 k+1 格」的
+    /// 请求，绘制侧交给图集预热 —— 与翻页预取同一条思路，命中时 `prepare` 什么都不做。
+    pub upcoming: Vec<crate::ui::foundation::images::DecodeRequest>,
 }
 
 impl Scene {
@@ -305,7 +331,7 @@ impl Scene {
         link: Hsla,
         // 章节根的整页底图由阅读器当整窗背板画（见 `body::page_art`），这里跳过它，
         // 别在版心里再画一遍 —— 位置还差着一个页眉与安全区。
-        skip_full_bleed: bool,
+        taken_over: Option<usize>,
     ) -> Self {
         // 等宽偏好与书的字体整份取一次：一个场景里所有 run 共用，别在逐 run 里克隆。
         let mono = SharedString::from(document.prefs().mono_font_family.clone());
@@ -325,6 +351,7 @@ impl Scene {
         };
         let mut runs = Vec::new();
         let mut images = Vec::new();
+        let mut upcoming = Vec::new();
         // 块级装饰与行一样按可见区间裁：只在 cull 覆盖到的盒子上花钱。
         let __t = crate::ui::features::reader::model::perf::Timer::start();
         // 「哪些块带装饰」已经在排版结果换代的同一批里折好了（`Layout::decor_seeds`），
@@ -343,7 +370,7 @@ impl Scene {
             top,
             foreground,
             document.images(),
-            skip_full_bleed,
+            taken_over,
         );
         let __decor = __t.ns();
         crate::ui::features::reader::model::perf::add(|frame| frame.decor_ns += __decor);
@@ -354,6 +381,23 @@ impl Scene {
             // 裁剔问的是**推进轴**上的一段：横排是行顶与行底，竖排是这一列离长条右缘多远。
             let at = layout.flow_start(line);
             if at + layout.flow_thickness(line) < cull.start || at > cull.end {
+                continue;
+            }
+            // 一叠图只画「现在这一张」那一格，其余各张整行跳过 —— 图与它的注都是
+            // 那一叠第 k 格的行，所以切图时图注跟着一起换，不必另立一条规则。
+            // 「看第几张」住界面（`Document::stack_current`）：它变了不许重排、不许改页数。
+            if let Some(mark) = line.stack
+                && document.stack_current(mark.id) != mark.index
+            {
+                // 叠里「再下一张」先预热：这一行走不到绘制，但它的图是读者下一次
+                // 横滑要的那张，提前解掉，切的那一下就是现成的。
+                if mark.index == document.stack_current(mark.id).saturating_add(1) {
+                    for image in line.images() {
+                        if let Some(request) = document.images().decode_request(&image.href) {
+                            upcoming.push(request);
+                        }
+                    }
+                }
                 continue;
             }
             // 章内那一份「这一行摆什么」一章只物化一次（`Document::row_units`）：文本句柄、
@@ -461,6 +505,7 @@ impl Scene {
                                 // `chapter_layout` 摆位时已经折过来），不再 `into` 一次。
                                 fit: placed.fit,
                                 image,
+                                stack: line.stack,
                             });
                         }
                     }
@@ -476,6 +521,7 @@ impl Scene {
         // 滚回走过的地方应当增量 0，往前滚那一趟该付（单元表按行懒物化）。
         Metric::SceneRebuilds.count();
         Self {
+            upcoming,
             runs,
             images,
             decorations,
@@ -512,11 +558,15 @@ fn place_decorations(
     foreground: Hsla,
     // 背景图的固有尺寸与字节都从这里现问（与 `<img>` 那条同一个来路）。
     images: &ChapterImages,
-    skip_full_bleed: bool,
+    // 阅读器已经拿去当**整窗背板**画的那一条根底图，在 `seeds` 里的下标（`None` = 这一章
+    // 没有整页底图）。版心里那一份必须跳过 —— 位置还差着一个页眉与安全区。
+    taken_over: Option<usize>,
 ) -> Vec<BlockDecor> {
     let mut out = Vec::new();
-    for seed in seeds {
-        if skip_full_bleed && seed.full_bleed {
+    for (index, seed) in seeds.iter().enumerate() {
+        // 被背板接管的那一条自己不算；其余 `full_bleed` 的也跟着跳过是既有口径 ——
+        // 那种章的根底图整窗铺，块里再画一遍就是「图多出来一截」。
+        if taken_over == Some(index) || (taken_over.is_some() && seed.full_bleed) {
             continue;
         }
         let (start, thick) = if vertical {
@@ -634,14 +684,17 @@ pub(in crate::ui::features::reader) fn backdrop_decor(
     })
 }
 
-/// 单图页的背板图：一张图按 `cover` 铺满整窗（居中）。
+/// 整页画的背板图：一张图按 `size`（cover / contain）铺满整窗（居中）。
 ///
-/// 盘上的图已经按屏幕比例挑过（见 `body::full_screen_image_href`），所以这一档通常
-/// 不裁也不留边；挑不到整屏变体时才由它兜住「整窗一页」的形状。
-pub(in crate::ui::features::reader) fn full_cover_picture(href: &str) -> DecorPicture {
+/// 盘上的图按屏幕比例挑过；挑不到整屏变体时，比例差得远的用 `contain` —— 宁可上下
+/// 留一条底色，也不把一幅横图裁成中间一条。
+pub(in crate::ui::features::reader) fn full_page_picture(
+    href: &str,
+    size: BackgroundSize,
+) -> DecorPicture {
     DecorPicture {
         href: href.to_string(),
-        size: BackgroundSize::Cover,
+        size,
         position: BackgroundPosition {
             x: BackgroundAxis::Fraction(0.5),
             y: BackgroundAxis::Fraction(0.5),
@@ -683,14 +736,14 @@ mod tests {
             y,
             width: 300.0,
             height,
-            background: Some(Color(193, 204, 192)),
+            background: Some(Color(193, 204, 192, 255)),
             full_bleed: false,
             radius: [0.0; 4],
             border: [
                 (0.0, None, BorderStyle::None),
                 (0.0, None, BorderStyle::None),
                 (2.0, None, BorderStyle::Double),
-                (2.0, Some(Color(12, 34, 56)), BorderStyle::Solid),
+                (2.0, Some(Color(12, 34, 56, 255)), BorderStyle::Solid),
             ],
             pictures: Vec::new(),
         }
@@ -710,7 +763,7 @@ mod tests {
             60.0,
             black(),
             &images(),
-            false,
+            None,
         );
         assert_eq!(decor.len(), 1);
         let decor = &decor[0];
@@ -722,7 +775,7 @@ mod tests {
         assert_eq!((decor.width, decor.height), (300.0, 60.0));
         assert_eq!(
             decor.background,
-            Some(run_color(Some(Color(193, 204, 192)), black())),
+            Some(run_color(Some(Color(193, 204, 192, 255)), black())),
             "背景色按字节转主题色"
         );
         assert_eq!(
@@ -732,7 +785,7 @@ mod tests {
         );
         assert_eq!(
             decor.border[3].1,
-            run_color(Some(Color(12, 34, 56)), black()),
+            run_color(Some(Color(12, 34, 56, 255)), black()),
             "表里已经折好 currentColor 的那一条，色必须是块自己的，不是主题的"
         );
         assert_eq!(decor.border[0].0, 0.0, "宽 0 的边不画");
@@ -751,9 +804,32 @@ mod tests {
             0.0,
             black(),
             &images(),
-            false,
+            None,
         );
         assert_eq!(decor.len(), 1, "900 那条在窗外：{decor:?}");
+    }
+
+    /// 被整窗背板接管的那一条按**下标**跳，不按 `full_bleed` 跳。
+    ///
+    /// 从前这一格只认 `full_bleed`，而《哈利·波特全集》`v1.xhtml` 的根底图没写
+    /// `background-attachment: fixed` —— 于是版心里那一份照旧画了一遍，压在整窗背板与
+    /// 纸底色之上，读者看到的是裁成章高一条的复制品（2026-11-02 真机）。
+    #[test]
+    fn the_taken_over_seed_is_dropped_by_index_not_by_flag() {
+        let decor = place_decorations(
+            &[seed(40.0, 60.0), seed(120.0, 60.0)],
+            (0.0, 700.0),
+            0.0,
+            false,
+            0.0,
+            0.0,
+            0.0,
+            black(),
+            &images(),
+            Some(0),
+        );
+        assert_eq!(decor.len(), 1, "背板接管的那一条不再进版心：{decor:?}");
+        assert_eq!(decor[0].top, 120.0, "跳的是第 0 条，其余照画：{decor:?}");
     }
 
     /// **这条就是「块表不能按 y 二分」的活证据**：一条从很上面就开始的高盒（父盒
@@ -773,7 +849,7 @@ mod tests {
             0.0,
             black(),
             &images(),
-            false,
+            None,
         );
         assert_eq!(decor.len(), 1, "父盒跨着整条带，必须画：{decor:?}");
         assert_eq!(decor[0].height, 5000.0);
@@ -1005,9 +1081,82 @@ mod tests {
                 0.0,
                 black(),
                 &images(),
-                false,
+                None,
             )
             .is_empty()
+        );
+    }
+
+    /// 滚动档那条「宽度铺满就贴顶」的判据：封面那种竖图在手机屏的章框里是**宽度先
+    /// 到边**，该贴顶；左右留白的、以及纵向溢出的（`cover` 比框还高）都不许贴 ——
+    /// 后者贴顶会把多出来的那一截压进下一章。
+    #[test]
+    fn a_page_art_picture_hugs_the_top_only_when_it_fills_the_width() {
+        use super::{
+            BackgroundAxis, BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
+            DecorPicture, picture_fills_width,
+        };
+        use crate::ui::foundation::images::{BookImages, ChapterImages, no_images};
+        use folio_core::content::format::ImageRes;
+        use std::sync::Arc;
+
+        let res = |href: &str, width: u32, height: u32| ImageRes {
+            href: href.into(),
+            source: href.into(),
+            media_type: "image/jpeg".into(),
+            width,
+            height,
+        };
+        let table = vec![
+            // 封面：1000×1778 在 1080×2530 的框里按宽定 → 1080×1920。
+            res("cover.jpg", 1000, 1778),
+            // 竖长条：按高定 → 632×2530，左右留白。
+            res("narrow.jpg", 600, 2400),
+            // 比框还高：cover 按宽定 → 1080×3240，纵向溢出。
+            res("tall.jpg", 1000, 3000),
+        ];
+        let images = ChapterImages::new(
+            Arc::new(BookImages::new(&table, no_images())),
+            "Text/chap.xhtml",
+        );
+        let picture = |href: &str, size: BackgroundSize| DecorPicture {
+            href: href.into(),
+            size,
+            position: BackgroundPosition {
+                x: BackgroundAxis::Fraction(0.5),
+                y: BackgroundAxis::Fraction(0.5),
+            },
+            repeat: BackgroundRepeat {
+                x: BackgroundTile::NoRepeat,
+                y: BackgroundTile::NoRepeat,
+            },
+        };
+        assert!(
+            picture_fills_width(
+                &picture("cover.jpg", BackgroundSize::Contain),
+                1080.0,
+                2530.0,
+                &images
+            ),
+            "宽度到边、比框矮的封面该贴顶"
+        );
+        assert!(
+            !picture_fills_width(
+                &picture("narrow.jpg", BackgroundSize::Contain),
+                1080.0,
+                2530.0,
+                &images
+            ),
+            "左右留白的那一档仍居中"
+        );
+        assert!(
+            !picture_fills_width(
+                &picture("tall.jpg", BackgroundSize::Cover),
+                1080.0,
+                2530.0,
+                &images
+            ),
+            "纵向溢出的那一档不许贴顶（会压进下一章）"
         );
     }
 }

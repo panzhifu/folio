@@ -440,7 +440,7 @@ fn the_footnote_anchor_is_the_marker_not_the_finger(cx: &mut TestAppContext) {
         let box_ = &v.lines()[0];
         let left = px(v.prefs.margin_x + box_.x);
         (
-            px(box_.y + box_.height - v.scroll_y + v.header_reserve),
+            px(box_.y + box_.height - v.scroll_y + v.bands.header),
             left,
             left + px(box_.width),
         )

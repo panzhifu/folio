@@ -8,12 +8,16 @@
 //! - [`update`] —— 检查更新：问发布仓要「最新那版」，比版本、挑这一端的包、验摘要。
 //!   走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测（假传输 + fixture JSON）。
 //! - [`transfer`] —— **Wi-Fi 传书**：设备起一个 HTTP 服务器，局域网浏览器上传书。
+//! - [`lansync`] —— **局域网同步**的协议形状：同账号的两台设备怎么互相发现、怎么把书架
+//!   清单与快照递给对面。它自己不起服务器（挂在 [`transfer`] 上）、不拨连接（走
+//!   [`remote`] 那个 `Transport`），所以这一层离线可测。
 //!
 //! **`tokio` 只许出现在 [`transfer`] 里**。core 其余部分是同步形状，公共签名不漏
 //! `Future`；传书服务器要「少量线程轮转服务大量连接」的现成调度与 multipart 的
 //! 现成流式解析，才把它关在这一个模块内。这条边界写在 [`transfer`] 的模块文档里，
 //! 并由本模块的文档再钉一次。
 
+pub mod lansync;
 pub mod opds;
 pub mod remote;
 pub mod transfer;

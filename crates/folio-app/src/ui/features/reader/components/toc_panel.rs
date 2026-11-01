@@ -717,8 +717,8 @@ impl TocPanel {
         out
     }
 
-    /// 删一行：书签与批注各派各的命令，撤销走同一条路（胶囊由阅读页渲染）。
-    /// 列表下一帧按会话手里的清单重建，这里不用自己摘行。
+    /// 删一行：书签与批注各派各的命令，但只有书签给撤销（胶囊由阅读页渲染）——
+    /// 取消划线是真删。列表下一帧按会话手里的清单重建，这里不用自己摘行。
     fn remove_mark(&mut self, is_bookmark: bool, id: i64, cx: &mut Context<Self>) {
         if is_bookmark {
             self.reader

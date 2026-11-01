@@ -154,6 +154,26 @@ pub struct LineBox {
     /// 两端对齐的摊法；`None` = 这一行不两端对齐（左/右/中/起边，或段末行、`<br>` 行、
     /// RTL 行）。见 [`Justify`]。
     pub justify: Option<Justify>,
+    /// 这一行属于哪一**叠**图。`None` = 不在叠里。
+    ///
+    /// 叠起来的那些行摆在同一个 y 上（见 [`super::collect::Ctx::stack_run`]），排版只留一格的
+    /// 高；「现在看第几张」不在这里 —— 那一格住界面（改了不许重排、不许改页数），
+    /// 绘制侧按它挑着画，所以这一格只说「你是这一叠的第几张、一共几张」。
+    pub stack: Option<StackMark>,
+}
+
+/// 一叠图里的一格：哪一叠、第几张、一共几张。
+///
+/// `id` 只在**这一份排版结果**里作数 —— 它是排版时按起叠的先后现编的序号，重排一次就重新
+/// 编号。所以界面那份「现在第几张」必须在换排版时清掉，留着就是张冠李戴（换一次字号，
+/// 读者看到的成了另一张）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackMark {
+    pub id: u32,
+    /// 0 基。
+    pub index: u16,
+    /// 这一叠一共几张（`>= 2`：一张不叫叠）。
+    pub count: u16,
 }
 
 impl LineBox {
@@ -703,14 +723,23 @@ impl Layout {
             {
                 continue;
             }
-            // 根块 + 整页底图 = 整页画。`fixed` 底图在这里现认；「整幅 cover 封面章」
-            // 那一档排版已经判过（`Layout::root_full_bleed`）。`decor_seeds` 的序就是
-            // 块表的先序，根永远是第 0 块。
-            let full_bleed = index == 0
-                && (self.root_full_bleed
-                    || style.background_layers.iter().any(|layer| {
-                        layer.attachment == BackgroundAttachment::Fixed && layer.image.is_some()
-                    }));
+            // `background-attachment: fixed` 的底图在浏览器里是**贴在视口**上的，所以
+            // 「整章那一盒」上的 fixed 底图要交给绘制侧当整窗背板（`<body class="fm7">`
+            // 从前被当成块背景画在章的内容盒里 —— 章界留白、同一张图上下两截，读者报的
+            // 「图与图之间有间隙」就是它）。
+            //
+            // 但**只有整章那一盒**才算。正文中间的一块（正文之后跟着的插图块、卡片、
+            // 引文框）上写 fixed，浏览器里画出来的仍是「这块自己的框里的底图」——它跟着
+            // 正文流走、排在文字下面；升级成整页画就变成铺满整窗、垫在文字底下的背板，
+            // 暗底上的暗字读不出来（读者报的「图片盖在文字上」）。判据因此多一道
+            // `page_box`：根块，或者从章首起、且几乎占满整章高的那一盒。
+            // 「整幅 cover 封面章」那一档仍由排版判（`Layout::root_full_bleed`）。
+            let fixed_bg = style.background_layers.iter().any(|layer| {
+                layer.attachment == BackgroundAttachment::Fixed && layer.image.is_some()
+            });
+            let page_box =
+                index == 0 || (block.y <= 0.5 && block.height + 0.5 >= self.height * 0.8);
+            let full_bleed = (fixed_bg && page_box) || (index == 0 && self.root_full_bleed);
             out.push(DecorSeed {
                 x: block.x,
                 y: block.y,

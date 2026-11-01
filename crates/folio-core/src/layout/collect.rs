@@ -11,14 +11,14 @@ use unicode_linebreak::linebreaks;
 use super::cache::{BlockCache, BlockKey, CachedBlock};
 use super::font::{RunStyle, StyleArena, StyleRef};
 use super::geometry::{
-    BlockBox, ImageRun, Justify, JustifyMode, LineBox, LineFragment, LineRun, MarkerRun,
+    BlockBox, ImageRun, Justify, JustifyMode, LineBox, LineFragment, LineRun, MarkerRun, StackMark,
 };
 use super::marker::marker_text;
 use super::ports::{ImageProvider, Measure, image_size};
 use super::table;
 use super::wrap::{
-    DropCap, Insets, LineAcc, LinePlace, LinePlan, Sizes, collect, hard_lines, hyphen_break_banned,
-    orig_of, scan_by_char, scan_by_word, trim_end_spaces,
+    DropCap, Insets, LineAcc, LinePlace, LinePlan, Sizes, collect, hanging_width, hangs_at_end,
+    hard_lines, hyphen_break_banned, orig_of, scan_by_char, scan_by_word, trim_end_spaces,
 };
 use crate::content::dom::{Dom, NodeId, NodeKind};
 use crate::content::format::css::computed::{
@@ -36,18 +36,23 @@ pub(super) static DEFAULT_STYLE: LazyLock<ComputedStyle> = LazyLock::new(Compute
 /// 中文书面「圆点贴字」的那种紧凑感靠它，而 `ul` 的 2.5em 左内边距本来就为它留了位置。
 const MARKER_GAP_EM: f32 = 0.25;
 
-/// 同一小节里**相邻的整块插图**叠起来时，后一张只占前一张高的这一成。
+/// 同一小节里**连续的图单元**叠成一格时，占满一屏就不叠：这一成是那条界线。
 ///
-/// 读者要的是画册/相册那种观感：同一个小节里连着三张插图，不必一张占一屏、串成
-/// 一条长长的竖带，而是叠成一堆 —— 后一张盖住前一张的大部分，只露出上缘那一条，
-/// 读者一眼看得出「下面还有图」。
+/// 读者要的是画册/相册那种观感：同一个小节里连着几张插图，不必一张占一屏、串成
+/// 图注的最长字数。超过它就不认为是图注，而是「图后面紧跟的一段正文」—— 那种块
+/// 不进叠（宁严不宽：吞一段正文进叠，读者就少看见一段字）。
+pub(super) const STACK_CAPTION_MAX: usize = 64;
+
+/// 叠图「同尺寸」那一格的容差：高差在**高的这个比例**以内就算一样大。
 ///
-/// 取 **1/3**：再小就成了「只露一道边」，读者分不清有几张；再大（1/2）则叠不出层叠感，
-/// 看着只是「间距变小」。这个数是手感口径，与 `curl::ROLL` 那个同类。
+/// 同一个画廊里的一组封面常常差几像素 —— 《哈利·波特全集》美版那七张是
+/// 1000×441 / 1000×460 / 1000×447，铺到屏宽之后高 476 / 497 / 483。按 0.5 像素比，
+/// 这七张一张都叠不起来，而它们本来就是「同款同尺寸」的一叠。
 ///
-/// 只对**相邻**的两张生效，而且离开这一串之后正文从最后一张的**底边**接着排 ——
-/// 叠图只改插图之间的那一截，不把后面的正文拉到图上去。
-pub(super) const STACK_STEP: f32 = 1.0 / 3.0;
+/// 放宽是有代价的：叠起来同一时刻只显示一张，差这一档在画面上看不出来，**但注释会
+/// 跟着矮的那张往上跑**，所以只放这一档（约半行到一行字的高度），再大就不划算 ——
+/// 横图与竖图混排时仍然挡在门外。
+pub(super) const STACK_SIZE_TOLERANCE: f32 = 0.08;
 
 /// HTML 的 `start` / `value` 属性 → 整数。属性缺失、空串、非数字都给 `None`。
 ///
@@ -103,6 +108,15 @@ pub(super) struct Ctx<'a> {
     /// 它们在 `children` 里被跳过、
     /// 只收在这里，等整章的 `height` 定下来再摆 —— `top` / `bottom` 的百分比基准是包含块高。
     pub(super) absolute: Vec<(NodeId, f32)>,
+    /// 下一叠图的序号。按**起叠的先后**现编，所以它属于这一份排版结果：换一次字号重排，
+    /// 序号从头再来 —— 界面那份「现在看第几张」必须在换排版时清掉（见 `StackMark`）。
+    pub(super) stack_seq: u32,
+    /// 排这一块时要把哪个孩子**挪到队尾**（只在叠图那一趟设置，见 [`Self::children`]）。
+    ///
+    /// 图注统一摆在这一叠的**下面**：作者把注写在图前时（《哈利·波特全集》画廊那种
+    /// `<p>注</p><img>`），排这一块就按「图…注」的顺序来一次。只对当前这一块生效，
+    /// 排完立刻清掉；换过顺序的那一块也**不走块缓存**（缓存键里没有这一格）。
+    pub(super) caption_last: Option<NodeId>,
 }
 
 /// 一个已经摆出去的浮动盒。坐标是章内的**绝对值**，而且记的是**外边距盒** ——
@@ -170,6 +184,23 @@ fn single_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
         }
     }
     found
+}
+
+/// 一棵子树里的非空白字数（图注那一格的长短判据）。
+fn text_len_in(dom: &Dom, node: NodeId) -> usize {
+    let n = dom.get(node);
+    if n.kind == NodeKind::Text {
+        return n.text.chars().filter(|c| !c.is_whitespace()).count();
+    }
+    n.children.iter().map(|c| text_len_in(dom, *c)).sum()
+}
+
+/// 这一块的子树里有没有 `<img>`（图注那一格不许含图，含图就是「图文混排的一块」）。
+fn has_image(dom: &Dom, node: NodeId) -> bool {
+    if dom.is_element(node, "img") {
+        return true;
+    }
+    dom.get(node).children.iter().any(|c| has_image(dom, *c))
 }
 
 /// 「这一格的内容就是一张图」的那一族，交回它的**原始**引用值（给 `images.resolve` 那张表）。
@@ -240,23 +271,14 @@ pub(super) fn bleeds_wide(dom: &Dom, styles: &StyledDom, node: NodeId) -> bool {
 /// 读者报的「切到仿真图变小」就是这一条在两端各判了一次的结果。
 pub(super) fn fills_the_screen(
     wide: bool,
-    style: &ComputedStyle,
     w: f32,
     h: f32,
     column_width: f32,
     page_height: Option<f32>,
     screen_height: Option<f32>,
 ) -> bool {
-    // `object-fit: cover` 是作者**显式**说「这张图要盖住一块区域」，与读者的档位、
-    // 与出血属性都无关：它一直是铺到屏幕宽的那一档。所以这一条排在最前面。
-    if matches!(
-        style.object_fit,
-        crate::content::format::css::computed::ObjectFit::Cover
-    ) {
-        return true;
-    }
-    // 其余情形都要先「该铺」：作者出血，或读者选了「铺满屏幕」（只有块级那一臂会把它
-    // 并进 `wide`；行内那一臂传 `bleed` —— 把一枚夹在字里的图标拉成满屏等于整段顶走）。
+    // `object-fit` 只决定「图在自己的盒里怎么裁/留底」，**不改盒子的宽**。
+    // 盒子的宽听 CSS；要铺到屏幕宽只有作者显式出血（`wide`）这一条。
     if !wide {
         return false;
     }
@@ -612,6 +634,144 @@ impl<'a> Ctx<'a> {
         )
     }
 
+    /// 这一块是不是一个「图单元」：恰好一张图，外加最多一段**短图注**。
+    ///
+    /// 与 [`single_image`] 的分别是后者只认「一个字的字都没有」那一档，而多看/掌阅那族
+    /// 导出的画廊 cell 长这样（《诡秘之主》ffwp000.xhtml「诡秘地理日志」连着九个）：
+    ///
+    /// ```html
+    /// <div class="duokan-image-gallery-cell">
+    ///   <img src="../Images/xm001.jpg"/><p class="tpcrb"><b>灾祸之城</b></p>
+    /// </div>
+    /// ```
+    ///
+    /// 图旁边站着一段注，`single_image` 当场回 `None` —— 这本书的画廊因此从来没叠过，
+    /// 一张注一块地排成一条长带。
+    ///
+    /// **注写在图前也算**（《哈利·波特全集》art.xhtml 的画廊就是
+    /// `<p>美版系列封面</p><img>`）：位置不参与判定，只认「一张图 + 最多一段不超字的注」。
+    /// 摆的时候由 [`Ctx::children`] 把注挪到图后（这一叠的下面），见 [`Ctx::caption_last`]。
+    fn image_unit(&self, node: NodeId) -> Option<NodeId> {
+        self.image_parts(node).map(|(img, _)| img)
+    }
+
+    /// 同 [`Self::image_unit`]，把那段图注也交出来（没有注就是 `None`）。
+    fn image_parts(&self, node: NodeId) -> Option<(NodeId, Option<NodeId>)> {
+        if self.dom.is_element(node, "img") {
+            return Some((node, None));
+        }
+        let mut img: Option<NodeId> = None;
+        let mut caption: Option<NodeId> = None;
+        for &child in self.dom.get(node).children.iter() {
+            let n = self.dom.get(child);
+            if n.kind == NodeKind::Text && n.text.trim().is_empty() {
+                continue; // 标签之间的换行
+            }
+            if let Some(found) = single_image(self.dom, child) {
+                if img.replace(found).is_some() {
+                    return None; // 两张图 → 这是图文混排的一块，不是「图 + 注」
+                }
+                continue;
+            }
+            let style = self.style_of(child);
+            // 图注那一格：块级、不含图、不含标题、字数在 `STACK_CAPTION_MAX` 以内。
+            // 超字数就当成「图后面紧跟的一段正文」，整块不进叠（宁严不宽）。
+            //
+            // **不要求注已经见过图**：注写在图前是同一件事（哈利波特那本就是这样）。
+            let words = text_len_in(self.dom, child);
+            if caption.is_some()
+                || has_image(self.dom, child)
+                || self.is_inline_flow(child, style)
+                || self.is_heading(child)
+                || words == 0
+                || words > STACK_CAPTION_MAX
+            {
+                return None;
+            }
+            caption = Some(child);
+        }
+        img.map(|img| (img, caption))
+    }
+
+    /// 这一块的图注写在图**前**时交回那个孩子（叠图那一趟把它挪到队尾用）。
+    ///
+    /// 「前」按孩子顺序算，不按图的节点位置：图可能裹在一层 `<div>` 里，那一层才是它的
+    /// 位置。注本来就在图后的（诡秘那族）回 `None`，那一趟连缓存都照走。
+    fn caption_before_image(&self, node: NodeId) -> Option<NodeId> {
+        let (img, caption) = self.image_parts(node)?;
+        let caption = caption?;
+        let kids = self.children_of(node);
+        let cap_at = kids.iter().position(|kid| *kid == caption)?;
+        let img_at = kids
+            .iter()
+            .position(|kid| single_image(self.dom, *kid) == Some(img))?;
+        (cap_at < img_at).then_some(caption)
+    }
+
+    /// 一个图单元里那张图的**显示尺寸**，与画出来那一格同源（判据见 [`Self::picture_box`]）。
+    ///
+    /// 量显示尺寸而不是原图像素：读者的「铺满」是默认档，会把一张 80% 宽的图放大到整屏，
+    /// 按像素比就会把「其实一样大」的两张判成不能叠。
+    fn unit_box(&self, img: NodeId, width: f32) -> Option<(f32, f32)> {
+        let src = picture_src(self.dom, img)?;
+        let style = self.style_of(img);
+        let [bt, br, bb, bl] = style.border_drawn();
+        let pl = bl + style.padding_left.resolve(width).max(0.0);
+        let pr = br + style.padding_right.resolve(width).max(0.0);
+        let pt = bt + style.padding_top.resolve(width).max(0.0);
+        let pb = bb + style.padding_bottom.resolve(width).max(0.0);
+        let (w, h, _) = self.picture_box(img, &src, &style, (width - pl - pr).max(1.0), pt + pb)?;
+        Some((w, h))
+    }
+
+    /// 从 `from` 起**连续**可叠的那一串兄弟（返回下标，第一个就是 `from`）。凑不满两张回空。
+    ///
+    /// 两条口径：显示尺寸相同（宽 ±0.5，高差 ≤ [`STACK_SIZE_TOLERANCE`]）、不跨标题。
+    /// 整页大的图也允许叠：一页画廊的每张人物图都可能接近一页高。「同尺寸」是「一张盖得住另一张」的意思 —— 尺寸
+    /// 差得多的两张叠起来，矮的那张会在高的那张身上露出一道边，读者看到的是排版坏了。
+    fn stack_run(&self, kids: &[NodeId], from: usize, width: f32) -> Vec<usize> {
+        let mut run: Vec<usize> = Vec::new();
+        let mut base: Option<(f32, f32)> = None;
+        for at in from..kids.len() {
+            let n = self.dom.get(kids[at]);
+            // 标签之间的换行与缩进不是内容：真书（尤其 Calibre / 多看导出）在每一个
+            // gallery cell 之间都夹着一个纯空白文本节点，把它当成「中断」等于这一叠
+            // 永远只有一格 —— 《诡秘之主》与《哈利·波特全集》的画廊都没叠过，就是它。
+            if n.kind == NodeKind::Text && n.text.trim().is_empty() {
+                continue;
+            }
+            let style = self.style_of(kids[at]);
+            if style.display == Display::None {
+                continue;
+            }
+            if self.is_heading(kids[at]) {
+                break;
+            }
+            let (w, h) = match self
+                .image_unit(kids[at])
+                .and_then(|img| self.unit_box(img, width))
+            {
+                Some(size) => size,
+                None => break,
+            };
+            if h <= 0.0 {
+                break;
+            }
+            match base {
+                None => base = Some((w, h)),
+                Some((w0, h0))
+                    if (w - w0).abs() <= 0.5
+                        && (h - h0).abs() <= (h.max(h0) * STACK_SIZE_TOLERANCE).max(0.5) => {}
+                Some(_) => break,
+            }
+            run.push(at);
+        }
+        if run.len() < 2 {
+            run.clear();
+        }
+        run
+    }
+
     pub(super) fn children(
         &mut self,
         container: NodeId,
@@ -627,10 +787,17 @@ impl<'a> Ctx<'a> {
         let mut cursor = y;
         let mut prev_bottom = 0f32;
         let mut pending: Vec<NodeId> = Vec::new();
-        // 叠图那一串里**最后一张的底边**（绝对 y）。正文/别的块摆放前先夹到它之下：
-        // 叠图只许插图和插图重叠，绝不让后面的正文压到图上（判据见 [`STACK_STEP`]）。
-        let mut stacked_bottom = f32::NEG_INFINITY;
-        let kids: Vec<NodeId> = self.children_of(container).to_vec();
+        let mut kids: Vec<NodeId> = self.children_of(container).to_vec();
+        // 这一趟要把哪个孩子挪到队尾（图注摆到这一叠下面，见 [`Self::caption_last`]）。
+        if let Some(caption) = self.caption_last
+            && let Some(at) = kids.iter().position(|kid| *kid == caption)
+        {
+            let caption = kids.remove(at);
+            kids.push(caption);
+        }
+        // 已经并进上一叠的最后一个兄弟的下标：叠起来的一串只占一格，后面的成员不再
+        // 各自摆一遍。`None` = 这一层没有叠（写 `Some(0)` 或 `0` 会把第一个孩子吃掉）。
+        let mut skip_until: Option<usize> = None;
         // 列表序号。CSS 的列表计数器就是「同层 `display: list-item` 的兄弟按文档序」，
         // `<ol start>` 挪起点（所以先减 1，第一项 ++ 之后正好落回 `start`），
         // `<li value>` 挪这一项并把续值接在它后面。
@@ -638,20 +805,13 @@ impl<'a> Ctx<'a> {
             attr_count(self.dom, container, "start").map_or(0, |start| start - 1);
 
         for (at, &child) in kids.iter().enumerate() {
+            if skip_until.is_some_and(|last| at <= last) {
+                continue;
+            }
             let style = self.style_of(child);
             if style.display == Display::None {
                 continue;
             }
-            // 这一块与**下一个非空兄弟**是不是「连续的整块插图」——叠图只在这一串里生效。
-            // 判据用 `single_image`：`<p><img></p>` 那种一块内容就是一张图的盒子。
-            let stack_with_next = single_image(self.dom, child).is_some()
-                && !self.is_heading(child)
-                && kids[at + 1..]
-                    .iter()
-                    .find(|c| self.style_of(**c).display != Display::None)
-                    .is_some_and(|next| {
-                        single_image(self.dom, *next).is_some() && !self.is_heading(*next)
-                    });
             // 绝对定位：脱流，收起来等整章排完再摆。**排在行内判断之前** ——
             // `<span style="position:absolute">` 也是脱流的，不能当行内内容攒进段落。
             if matches!(style.position, Positioning::Absolute | Positioning::Fixed) {
@@ -686,7 +846,16 @@ impl<'a> Ctx<'a> {
             if is_item {
                 ordinal = attr_count(self.dom, child, "value").unwrap_or(ordinal + 1);
             }
+            // 「这一块里只有一张图」时**上外边距不许是负的**：作者常用 `margin-top: -15px`
+            // 把标题图往上贴，而阅读器顶上那条页眉带是不透明的，图会被它切掉一条
+            // （《哈利·波特全集》`v1.xhtml` 的 `hptitle.png` 顶边正好少 15px）。
+            // 只管「只有图」的块：正文块的负上边距是作者让它压在上一段上，照浏览器办。
             let mt = style.margin_top.resolve(width);
+            let mt = if mt < 0.0 && single_image(self.dom, child).is_some() {
+                0.0
+            } else {
+                mt
+            };
             // 兄弟之间折叠取较大值而不是相加：这是段间距不显松的唯一原因。负数那
             // 三档（一正一负求和、两负取较负）见 [`Self::collapse_margins`]，`0` 是
             // 它的恒等元，所以「前面没有兄弟」这一档不必再单独判。
@@ -706,10 +875,48 @@ impl<'a> Ctx<'a> {
             // 横向那两个数一起解：`width` 写了就按作者的数收窄盒子，`margin: auto`
             // 因此第一次有东西可均分（判据见 [`Self::solve_block_width`]）。
             let (ml, box_width) = self.solve_block_width(style, width, x);
-            // 不是插图（正文、标题、别的块）就别踩进上面那一串叠图里：从那一串的**底边**
-            // 起排。叠图只改「图与图之间」的那一截，不允许正文压到图上。
-            if single_image(self.dom, child).is_none() {
-                cursor = cursor.max(stacked_bottom);
+            // 一整串图叠成**同一格**：所有成员摆在当前 cursor 上，一叠只留一张图的高。
+            // 「现在看第几张」不住这里（那是界面的状态，改了不许重排），排版只给每一行
+            // 标上「这一叠的第几张、一共几张」。图注跟着它那张图走，所以换图就是换注。
+            let run = self.stack_run(&kids, at, width);
+            if run.len() >= 2 {
+                let id = self.stack_seq;
+                self.stack_seq += 1;
+                let count = run.len() as u16;
+                let mut stack_h = 0.0f32;
+                for (k, &member) in run.iter().enumerate() {
+                    let mstyle = self.style_of(kids[member]);
+                    let (mml, mw) = self.solve_block_width(mstyle, width, x);
+                    let start = self.lines.len();
+                    // 图注一律摆在这一叠的**下面**：作者的注写在图前时（哈利波特画廊那种
+                    // `<p>注</p><img>`），排这一块时把它挪到队尾 —— 叠起来只剩一张图，
+                    // 注是这一叠的说明，贴着图的下面读才顺。注本来就在图后的不动。
+                    let caption = self.caption_before_image(kids[member]);
+                    self.caption_last = caption;
+                    let h = if mstyle.display == Display::Table {
+                        self.table(kids[member], x + mml, cursor, mw, width, container_h)
+                    } else if caption.is_some() {
+                        // 换过顺序的这一块**不进缓存**：`BlockKey` 里没有「这一趟换了孩子
+                        // 顺序」这一格，命中一份按原顺序排好的结果就等于没换。
+                        self.block_uncached(kids[member], x + mml, cursor, mw, width, container_h)
+                    } else {
+                        self.block(kids[member], x + mml, cursor, mw, width, container_h)
+                    };
+                    self.caption_last = None;
+                    for line in &mut self.lines[start..] {
+                        line.stack = Some(StackMark {
+                            id,
+                            index: k as u16,
+                            count,
+                        });
+                    }
+                    stack_h = stack_h.max(h);
+                }
+                cursor += stack_h;
+                // 叠内各张的外边距不参与兄弟折叠：它们本来就不是一块接一块排下来的。
+                prev_bottom = 0.0;
+                skip_until = run.last().copied();
+                continue;
             }
             let lines_start = self.lines.len();
             let placed_y = cursor;
@@ -718,15 +925,7 @@ impl<'a> Ctx<'a> {
             } else {
                 self.block(child, x + ml, cursor, box_width, width, container_h)
             };
-            // 相邻插图叠起来：这一块画在自己的 `placed_y`（整张图），但游标只往下走一个
-            // [`STACK_STEP`]，于是下一张压在上头。**串的底边**取最大的那一张 —— 离开这一串
-            // 之后正文从那儿接着排。
-            cursor = if stack_with_next {
-                stacked_bottom = stacked_bottom.max(placed_y + block_h);
-                placed_y + block_h * STACK_STEP
-            } else {
-                placed_y + block_h
-            };
+            cursor = placed_y + block_h;
             // 标记贴在 `block()` **之后**：见 [`Self::attach_marker`] 那三条口径。
             if is_item {
                 self.attach_marker(child, style, ordinal.max(1) as usize, lines_start);
@@ -924,7 +1123,7 @@ impl<'a> Ctx<'a> {
             image.width,
             image.height,
             (basis - d_bl - d_br).max(1.0),
-            self.screen.map(|(w, _)| w),
+            None,
         );
         // 图自己的左右外边距、边框与内边距都要算进来：`.img1` 里那句
         // `margin-right: .8em` 正是靠这一步变成图与字之间的那条缝。
@@ -1711,74 +1910,11 @@ impl<'a> Ctx<'a> {
         // 认的那一族见 [`picture_src`]（`<img>` 与 Calibre 封面那种 `<svg><image>`）。
         if let Some(src) = picture_src(self.dom, node) {
             let content_width = (width - pl - pr).max(1.0);
+            let Some((w, h, wide)) = self.picture_box(node, &src, &style, content_width, pt + pb)
+            else {
+                return 0.0; // 图取不到就整块不留痕，不塌成空盒子
+            };
             let img = self.images.resolve(&src);
-            let aspect = svg_aspect(self.dom, node);
-            // 出血（`duokan-bleed`，写在本节点或包它的任意一层）把这一块的可用宽换成
-            // 屏幕宽；「原始尺寸」那一档压掉它（与 `wrap::push_image` 同一口径）。
-            let bleed = bleeds_wide(self.dom, self.styles, node)
-                && !matches!(
-                    style.image_scale,
-                    crate::infra::config::ImageScale::Original
-                );
-            // 读者选了「铺满屏幕」：与作者出血同一口径，基准直接换成屏幕宽。
-            let wide =
-                bleed || matches!(style.image_scale, crate::infra::config::ImageScale::Screen);
-            let basis_w = if wide {
-                self.screen
-                    .map_or(content_width, |(screen, _)| screen.max(content_width))
-            } else {
-                content_width
-            };
-            let (mut w, mut h) = match (&img, aspect) {
-                // 有 viewBox 的那一档：宽铺满版心（出血时铺满屏）、高按比例，与图解没解出来无关。
-                (_, Some(ratio)) => (basis_w, basis_w * ratio),
-                (Some(img), None) => image_size(
-                    style,
-                    img.width,
-                    img.height,
-                    basis_w,
-                    self.screen.map(|(w, _)| w),
-                ),
-                (None, None) => return 0.0, // 图取不到就整块不留痕，不塌成空盒子
-            };
-            // 大图铺满屏幕（与 `wrap::push_image` 那一段同一条口径）：`object-fit` 说
-            // 「这张图要盖住一块区域」、而且它本来就不小，就按**屏幕宽**重算宽高，
-            // 越过左右页边距铺到边上。块级图片是满版图的绝大多数写法（`p > img` 单独一段）。
-            if let Some(screen) = self.screen.map(|(w, _)| w)
-                && !matches!(
-                    style.image_scale,
-                    crate::infra::config::ImageScale::Original
-                )
-                && (bleed
-                    || matches!(style.image_scale, crate::infra::config::ImageScale::Screen)
-                    || matches!(
-                        style.object_fit,
-                        crate::content::format::css::computed::ObjectFit::Cover
-                            | crate::content::format::css::computed::ObjectFit::Contain
-                    ))
-                && w < screen
-                && h > 0.0
-            {
-                // 「铺满」那一档不看 `object-fit`（读者已经说了要大图），但仍要求**本来就不小**：
-                // 一块只有 24px 的徽标独占一段时也不该被拉成满屏，那不是大图而是排版坏了。
-                // 判据与行内那一支共用 [`fills_the_screen`]：页高缺省时退回屏高，
-                // 两档才量得一样。
-                let big_enough = fills_the_screen(
-                    wide,
-                    style,
-                    w,
-                    h,
-                    content_width,
-                    self.page_height,
-                    self.screen.map(|(_, h)| h),
-                );
-                if big_enough {
-                    h *= screen / w;
-                    w = screen;
-                }
-            }
-            // 页高是硬上限：分片器不会把一张图切成两页。
-            let (w, h) = self.fit_image_height(w, h, pt + pb);
             let fit = style.object_fit;
             let index = self.push_block(node, x, y, width, String::new(), true);
             let Some(img) = img else {
@@ -1819,6 +1955,9 @@ impl<'a> Ctx<'a> {
                 align: style.text_align,
                 // 块级图片独立成行，两端对齐只管字间的余量，对整块不适用。
                 justify: None,
+                // 叠图那一格由 `children` 起叠之后统一回填（这里先给 `None`：
+                // 缓存命中的块直接拿回整段行盒，漏了回填也不会读到脏值）。
+                stack: None,
             });
             return self.close_block(index, pt + h + pb);
         }
@@ -1853,6 +1992,90 @@ impl<'a> Ctx<'a> {
             index,
             pt + Self::used_content_height(style, inner, pt + pb, cb_h) + pb,
         )
+    }
+
+    /// 一张块级图（[`picture_src`] 认的那一族）的**显示尺寸**：作者 CSS 的宽高、出血与
+    /// 「铺满屏幕」那一档、页高硬夹，一路算到底。回 `(宽, 高, 按屏幕宽铺的那一档成立)`。
+    ///
+    /// 块级图那一支（[`Self::block_uncached`]）与叠图的判据（「同尺寸」「不满一屏」）
+    /// 共用这一份：判据量的必须是**画出来那一格**，而不是原图像素 —— `ImageScale::Screen`
+    /// 默认档会把一张 80% 宽的图放大到整屏，按像素比就会把「其实一样大」的两张判成两张。
+    ///
+    /// `content_width` 是这一块的内容宽（已扣边框与内边距），`extra` 是上下那一圈之和：
+    /// 页高硬夹要吃掉它，块本身还得装下边框与内边距。
+    fn picture_box(
+        &self,
+        node: NodeId,
+        src: &str,
+        style: &ComputedStyle,
+        content_width: f32,
+        extra: f32,
+    ) -> Option<(f32, f32, bool)> {
+        let img = self.images.resolve(src);
+        let aspect = svg_aspect(self.dom, node);
+        // 出血（`duokan-bleed`，写在本节点或包它的任意一层）把这一块的可用宽换成屏幕宽。
+        //
+        // 从前这里还叠着读者那一档「图片显示」（原始尺寸压掉出血、铺满屏幕放开基准）。
+        // 2026-11-01 深夜读者明确不要那一档：块级大图一律按屏幕宽那一档摆，判据只剩
+        // 「本来是够大」那一条（见下面 `fills_the_screen`）。
+        let bleed = bleeds_wide(self.dom, self.styles, node);
+        let wide = bleed;
+        let basis_w = if wide {
+            self.screen
+                .map_or(content_width, |(screen, _)| screen.max(content_width))
+        } else {
+            content_width
+        };
+        let (mut w, mut h) = match (&img, aspect) {
+            // 有 viewBox 的那一档：宽铺满版心（出血时铺满屏）、高按比例，与图解没解出来无关。
+            (_, Some(ratio)) => (basis_w, basis_w * ratio),
+            (Some(img), None) => image_size(
+                style,
+                img.width,
+                img.height,
+                basis_w,
+                // 只有出血那一档才把上限换成屏幕宽；普通图的上限是**所在容器**
+                // （画廊的 15% 边距就靠这一格生效）。
+                if wide {
+                    self.screen.map(|(w, _)| w)
+                } else {
+                    None
+                },
+            ),
+            // 图取不到就整块不留痕，不塌成空盒子。
+            (None, None) => return None,
+        };
+        // 大图铺满屏幕（与 `wrap::push_image` 那一段同一条口径）：`object-fit` 说
+        // 「这张图要盖住一块区域」、而且它本来就不小，就按**屏幕宽**重算宽高，
+        // 越过左右页边距铺到边上。块级图片是满版图的绝大多数写法（`p > img` 单独一段）。
+        if let Some(screen) = self.screen.map(|(w, _)| w)
+            && w < screen
+            && h > 0.0
+        {
+            // 「铺满」那一档不看 `object-fit`（读者已经说了要大图），但仍要求**本来就不小**：
+            // 一块只有 24px 的徽标独占一段时也不该被拉成满屏，那不是大图而是排版坏了。
+            // 判据与行内那一支共用 [`fills_the_screen`]：页高缺省时退回屏高，
+            // 两档才量得一样。
+            // 「该铺」恒为真：读者那一档已经撤掉，块级大图一律按屏幕宽铺；
+            // 剩下那一条「本来就不小」由 `fills_the_screen` 里的宽/高八成挡着。
+            let big_enough = fills_the_screen(
+                wide,
+                w,
+                h,
+                content_width,
+                self.page_height,
+                self.screen.map(|(_, h)| h),
+            );
+            if big_enough {
+                h *= screen / w;
+                w = screen;
+            }
+        }
+        // 页高是硬上限：分片器不会把一张图切成两页。
+        let (w, h) = self.fit_image_height(w, h, extra);
+        // 铺到屏宽的那一张按「出血」摆（块级那一支会左右各摊一半溢出，图才居中）。
+        // 从前这一格只看作者的 `duokan-bleed`；读者档撤掉之后，凡是比版心宽的都算。
+        Some((w, h, wide || w > content_width))
     }
 
     /// 把一张图的盒高夹进一页：超过页高按比例缩宽，绝不把页底切掉。
@@ -1895,6 +2118,7 @@ impl<'a> Ctx<'a> {
         if let Some(src) = picture_src(self.dom, node) {
             let content_width = (width - pl - pr).max(1.0);
             let img = self.images.resolve(&src);
+            let wide = bleeds_wide(self.dom, self.styles, node);
             let h = match (img, svg_aspect(self.dom, node)) {
                 (_, Some(ratio)) => content_width * ratio,
                 (Some(img), None) => {
@@ -1903,7 +2127,11 @@ impl<'a> Ctx<'a> {
                         img.width,
                         img.height,
                         content_width,
-                        self.screen.map(|(w, _)| w),
+                        if wide {
+                            self.screen.map(|(w, _)| w)
+                        } else {
+                            None
+                        },
                     )
                     .1
                 }
@@ -2080,7 +2308,13 @@ impl<'a> Ctx<'a> {
             // CJK 里退化成单字。稀疏（平均每词 ≥ 4 字节 —— 拉丁那种词边界断行）走词级
             // 扫描，每个词只做一次溢出判断；密集（CJK 几乎每字一个断点）或带下沉盒时走
             // 逐字符。两条路径输出逐行一致，这个分类只影响性能。
-            let sparse = !breaks.is_empty() && slice.len() >= 4 * (breaks.len() + 1);
+            //
+            // 含可悬挂标点的硬行一律走逐字符：悬挂要在一行末尾「越界一格」再接着判下一个
+            // 字，词级扫描是按整词判的，拆不出标点前后这两步。纯拉丁硬行没有这类标点，
+            // 所以稀疏这条快路不受影响。
+            let sparse = !breaks.is_empty()
+                && slice.len() >= 4 * (breaks.len() + 1)
+                && !slice.chars().any(hangs_at_end);
             // 词级扫描碰到「行首超长词」时把位置交回来，由逐字符那段从那儿接着硬切。
             let fallback = if cap.is_none() && sparse {
                 scan_by_word(
@@ -2290,9 +2524,39 @@ impl<'a> Ctx<'a> {
         let (left, right) = (place.insets.left, place.insets.right);
         // 可用宽把这四段全扣掉：漏一段就是把字写进了不该写字的地方。
         let avail = (place.width - start - reserved - left - right).max(1.0);
-        let offset = style
-            .text_align
-            .offset_in(style.direction, avail, acc.width);
+        // 行尾悬挂（LaTeX xeCJK 的 `kaiming` 那一档）：这一段是**恰好因为末尾收尾标点
+        // 才溢出**的，就把标点的前进量从「该对齐到的宽」里摘出去 —— 内容照样贴到版心
+        // 边缘，标点整格落在外面的留白里。内容本身就溢出时（长词硬切）不挂，否则只是
+        // 把标点推得更远。
+        //
+        // `LineBox::width` 仍记含标点的片段宽之和：命中、选区与墨迹宽要的是字真正画到
+        // 哪儿。`acc.width` 与 `content` 的差就是悬挂量。
+        let hang = if image_only || style.direction.is_rtl() {
+            0.0
+        } else {
+            let width = hanging_width(collected, end);
+            if width > 0.0 && acc.width > avail && acc.width - width <= avail {
+                width
+            } else {
+                0.0
+            }
+        };
+        let content = acc.width - hang;
+        // 纯图片行比可用宽还宽（「铺满」/出血档把图放成屏幕宽，而这一块在画廊那种
+        // `margin: 0 15%` 的容器里）：左右各摊一半溢出，图**居中在这块的内容盒**上。
+        // `offset_in` 把余量夹成 0，照它摆就是整张往右溢出、右半截被屏缘裁掉 ——
+        // 哈利波特画廊那七张「偏右 + 被裁」就是这么来的。块级图片那条路早就是这么摆的
+        // （见 `block_uncached` 的 `-overflow`），行内这一支补上同一口径。
+        let overflow = if image_only {
+            ((acc.width - avail) / 2.0).max(0.0)
+        } else {
+            0.0
+        };
+        let offset = if overflow > 0.0 {
+            -overflow
+        } else {
+            style.text_align.offset_in(style.direction, avail, content)
+        };
         // 两端对齐：不是段末 / 硬行尾、不是纯图片行、且是 LTR 时，把余量摊到行内的隙上。
         // 计数用 `acc.fragments`（**逻辑序**）—— 空格数与字符数都看不出方向，用哪一份序都一样；
         // 下沉首字符那一份跳过（它不占流动宽，走 `reserved` 让位）。
@@ -2311,7 +2575,9 @@ impl<'a> Ctx<'a> {
                     spaces += text.chars().filter(|c| *c == ' ').count() as u32;
                 }
             }
-            justify_plan(style, place.hard_end, avail, acc.width, chars, spaces)
+            // `content` 是不含悬挂量的那一份：标点整格在版心外，余量只摊到正文的隙上；
+            // 悬挂段自己的前进量不进 `content`，所以不会把版心右缘一起推走。
+            justify_plan(style, place.hard_end, avail, content, chars, spaces)
         };
         // 起始边让出的那一段落在哪一侧：LTR 在左，RTL 在右。行盒的 `x` 记的**一直是内容
         // 左缘**，所以 RTL 时这笔让位不加在 `x` 上，而是由上面那份 `offset` 从右缘往回算
@@ -2333,6 +2599,7 @@ impl<'a> Ctx<'a> {
             baseline,
             align: style.text_align,
             justify,
+            stack: None,
         });
         height
     }

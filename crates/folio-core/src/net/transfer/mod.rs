@@ -15,6 +15,11 @@
 //! 安全：八位配对码，URL 不带对一律 403；同一个地址连错配额用完后按指数退避锁起来
 //! （429 + `Retry-After`），锁着的时候连对的码也挡；比较走常数时间；配对码不落日志。
 //! 局域网里的陌生设备因此最多能看见一个上传页，放不进一个字节，也试不出几个码。
+//!
+//! 同一台服务器还挂着**局域网同步**的另一半（同账号的两台设备互拉缺的书与进度），
+//! 它住在 [`lan`] 里：那条路要的是「读」，而它的门是账号证明而不是配对码 —— id 在局域网里
+//! 是广播出去的、抄得来的，所以「是不是同一个账号」必须由那对 nonce 上的双向证明来回答。
+//! 两组路由共用一个端口、共用一本按地址记的失败账，读者在设置页上看到的仍是同一个地址。
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
@@ -34,6 +39,10 @@ use serde::Deserialize;
 
 use crate::infra::error::{Error, IoResultExt as _, Result};
 use crate::infra::paths;
+
+mod lan;
+
+pub use lan::{LanConfig, LanProvider};
 
 /// 上传页。内嵌而非资产：这页只有一个用途，跟着二进制走，部署永远不缺它。
 const UPLOAD_PAGE: &str = include_str!("transfer_page.html");
@@ -70,6 +79,9 @@ pub struct TransferConfig {
     pub pin: String,
     /// 收件箱：上传的字节先落这里。
     pub inbox_dir: PathBuf,
+    /// 局域网同步开不开。**`None` 就是那五条路由一概 404** —— 传书与局域网同步是两个决定，
+    /// 前者只收书、后者还要把本机书架与进度交出去。
+    pub lan: Option<LanConfig>,
 }
 
 /// 一条活着的传书服务。`stop()` 关停（拒绝新连接、收完手上那批）；`Drop` 兜底。
@@ -117,10 +129,11 @@ impl TransferServer {
 
         let (notify, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let inbox = config.inbox_dir.clone();
+        let lan = config.lan.clone();
         let thread_pin = pin.clone();
         let thread = std::thread::Builder::new()
             .name("folio-transfer".to_string())
-            .spawn(move || serve(listener, inbox, thread_pin, on_file, shutdown_rx))
+            .spawn(move || serve(listener, inbox, thread_pin, on_file, lan, shutdown_rx))
             .map_err(|err| Error::Io {
                 path: PathBuf::from("folio-transfer"),
                 source: Box::new(err),
@@ -181,6 +194,7 @@ fn serve(
     inbox_dir: PathBuf,
     pin: String,
     on_file: Arc<dyn Fn(PathBuf) + Send + Sync>,
+    lan: Option<LanConfig>,
     notify: tokio::sync::oneshot::Receiver<()>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -188,15 +202,22 @@ fn serve(
         .enable_all()
         .build()
         .expect("传书服务的 runtime 不该建不起来");
-    let app = Router::new()
+    // 那一 GiB 的请求体上限挂在**上传这一组**路由上，不挂整台服务器：局域网同步的快照只该
+    // 收它自己那一个上限，两组共用一个等于把小的那组放大到大的那组那么大。
+    let upload_routes = Router::new()
         .route("/", get(upload_page))
         .route("/upload", post(upload))
-        .layer(DefaultBodyLimit::max(MAX_UPLOAD))
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD));
+    let app = Router::new()
+        .merge(upload_routes)
+        .merge(lan::routes())
         .with_state(Arc::new(TransferState {
             inbox_dir,
             pin,
             guard: PinGuard::default(),
             on_file,
+            // 开局域网同步就在这一刻把会话表建起来；没开就是 `None`，那五条路由一概 404。
+            lan: lan.map(|config| Arc::new(lan::LanState::new(config))),
         }));
     runtime.block_on(async move {
         // tokio 只收非阻塞的 fd：迁进去之前翻成非阻塞（accept/read 由 runtime 管）。
@@ -223,6 +244,11 @@ struct TransferState {
     pin: String,
     guard: PinGuard,
     on_file: Arc<dyn Fn(PathBuf) + Send + Sync>,
+    /// 局域网同步那一半的运行状态。`None` = 没开，那五条路由一概 404。
+    ///
+    /// 与 `guard` 同一本账：证明反复不过的设备与猜配对码的设备是同一类嫌疑犯，
+    /// 分成两本账只会让其中一本漏挂限流。
+    lan: Option<Arc<lan::LanState>>,
 }
 
 #[derive(Deserialize)]
@@ -651,6 +677,7 @@ mod tests {
                 port: 0,
                 pin: "2468".into(),
                 inbox_dir: inbox.clone(),
+                lan: None,
             },
             Arc::new(move |path| got.lock().unwrap().push(path)),
         )
@@ -734,6 +761,7 @@ mod tests {
                 port: 0,
                 pin: "2468".into(),
                 inbox_dir: inbox.clone(),
+                lan: None,
             },
             Arc::new(|_| {}),
         )
@@ -903,6 +931,8 @@ mod tests {
             pin: pin.to_string(),
             guard: PinGuard::default(),
             on_file: Arc::new(|_| {}),
+            // 这一对助手只测配对码与限速，用不到局域网同步那一半。
+            lan: None,
         }
     }
 
@@ -956,6 +986,7 @@ mod tests {
                 port: 0,
                 pin: "12345678".into(),
                 inbox_dir: tmp.path().join("inbox"),
+                lan: None,
             },
             Arc::new(|_| {}),
         )
@@ -1029,6 +1060,7 @@ mod tests {
                     port: 0,
                     pin: PIN.into(),
                     inbox_dir: tmp.path().join("inbox"),
+                    lan: None,
                 },
                 Arc::new(|_| {}),
             )

@@ -147,31 +147,24 @@ pub(in crate::ui::features::reader) fn paged_targets(
     book: &Book,
     page: usize,
     pages: usize,
-    columns: usize,
     side: PrefetchSide,
 ) -> Vec<PrefetchTarget> {
     let chapter = book.chapter_index();
     match side {
         PrefetchSide::Ahead => {
             if page + 1 < pages {
-                page_band(book, chapter, page + 1, columns)
-                    .into_iter()
-                    .collect()
+                page_band(book, chapter, page + 1).into_iter().collect()
             } else if chapter + 1 < book.chapter_count() {
-                edge(book, chapter + 1, false, columns)
-                    .into_iter()
-                    .collect()
+                edge(book, chapter + 1, false).into_iter().collect()
             } else {
                 Vec::new()
             }
         }
         PrefetchSide::Behind => {
             if page > 0 {
-                page_band(book, chapter, page - 1, columns)
-                    .into_iter()
-                    .collect()
+                page_band(book, chapter, page - 1).into_iter().collect()
             } else if chapter > 0 {
-                edge(book, chapter - 1, true, columns).into_iter().collect()
+                edge(book, chapter - 1, true).into_iter().collect()
             } else {
                 Vec::new()
             }
@@ -180,21 +173,21 @@ pub(in crate::ui::features::reader) fn paged_targets(
 }
 
 /// 第 `index` 章第 `page` 张纸那一片的带。
-fn page_band(book: &Book, index: usize, page: usize, columns: usize) -> Option<PrefetchTarget> {
+fn page_band(book: &Book, index: usize, page: usize) -> Option<PrefetchTarget> {
     let doc = book.span_doc(index)?;
     if !doc.is_current() {
         return None;
     }
-    let slice = doc.slice_of(page, 0, columns.max(1))?;
+    let slice = doc.slice_of(page, 0)?;
     (slice.height > 0.0)
         .then(|| PrefetchTarget::new(index, slice.origin_y..slice.origin_y + slice.height))
 }
 
 /// 某一章的第一张（`last == false`）或最后一张（`true`）纸。
-fn edge(book: &Book, index: usize, last: bool, columns: usize) -> Option<PrefetchTarget> {
+fn edge(book: &Book, index: usize, last: bool) -> Option<PrefetchTarget> {
     let doc = book.span_doc(index)?;
     let pages = doc.page_count().max(1);
-    page_band(book, index, if last { pages - 1 } else { 0 }, columns)
+    page_band(book, index, if last { pages - 1 } else { 0 })
 }
 
 /// 连续滚动：全局 y 上紧挨着当前可见带的那一屏。
@@ -221,9 +214,12 @@ pub(in crate::ui::features::reader) fn scroll_targets(
         let from = placement.base_y.max(window.start);
         let to = (placement.base_y + placement.height).min(window.end);
         if from < to {
+            // 章内排版带 = 全局 y − 章基线。**只减这一格**：绘制那条式子里
+            // `content_top` 与章基线是分开加的，这里再减一次就把预取整体上移一截
+            // （`view::body` 的 `local_band` 记的是同一件事）。
             out.push(PrefetchTarget::new(
                 placement.index,
-                from - placement.base_y..to - placement.base_y,
+                (from - placement.base_y).max(0.0)..(to - placement.base_y).max(0.0),
             ));
         }
     }

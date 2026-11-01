@@ -18,7 +18,7 @@ pub fn run_color(color: Option<Color>, fallback: Hsla) -> Hsla {
             r: c.0 as f32 / 255.0,
             g: c.1 as f32 / 255.0,
             b: c.2 as f32 / 255.0,
-            a: 1.0,
+            a: c.3 as f32 / 255.0,
         }
         .into()
     })
@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn the_author_color_wins_then_the_link_slot_then_the_foreground() {
         let ink = black();
-        let author = Color(12, 34, 56);
+        let author = Color(12, 34, 56, 255);
         assert_eq!(
             run_color_link(Some(author), ink, link(), true),
             run_color(Some(author), ink),

@@ -10,7 +10,7 @@
 //!
 //! 两条带共用 [`band`] 那一层壳：满幅、定高、左右内缩、**不透明**底色。带里的字垂直摆位
 //! 两条不一样：页眉贴带顶（见 [`HEADER_TOP_PAD`]），页脚居中。
-//! 不透明是要害：正文让出的那一段只是按 `header_reserve` / `footer_reserve` 往下错开，
+//! 不透明是要害：正文让出的那一段只是按两条带的高往下错开，
 //! 跨在视口上下沿的那一行照样会被画出来（它的行顶在可见带起点之外），带子透明就等于
 //! 让半行字压在章名上。滚动时字在这里被干净地切掉，才是「让出」这条带的本意。
 
@@ -22,6 +22,7 @@ use gpui_kit::{
 };
 
 use crate::ui::features::reader::model::chrome;
+use crate::ui::features::reader::model::page_geometry::{BandPolicy, PageBox, PageRect};
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::l10n::tf;
 
@@ -34,6 +35,7 @@ use crate::ui::services::l10n::tf;
 const HEADER_TOP_PAD: f32 = 2.0;
 
 /// 这一屏该念出去的三个数。
+#[derive(Clone)]
 pub(in crate::ui::features::reader) struct Readouts {
     /// 当前章的章名。没有章名（书没带目录）时是空串，摆出来就是一块空白。
     pub chapter: SharedString,
@@ -62,6 +64,30 @@ pub(in crate::ui::features::reader) fn readouts_of(reader: &ReaderSession, cx: &
     }
 }
 
+/// 指定页的读数：**只**按这一页自己的章名/页号算，百分比由调用方给（整本书的进度
+/// 在翻页那一刻是同一个数，不值得为一个跨章目标再算一遍）。
+///
+/// 分页每一页一份带子时用它：跨章翻页里左右两页的章名/页号不同，不能都念当前页。
+pub(in crate::ui::features::reader) fn readouts_for(
+    doc: &crate::ui::features::reader::model::chapter_layout::Document,
+    chapter: SharedString,
+    page: usize,
+    percent: SharedString,
+    cx: &App,
+) -> Readouts {
+    let total = doc.page_count().max(1);
+    Readouts {
+        chapter,
+        position: tf(
+            cx,
+            "reader.page_position",
+            &[("index", &(page + 1)), ("total", &total)],
+        )
+        .into(),
+        percent,
+    }
+}
+
 /// 指定章、页的读数：折页翻到一半时，**底下的那一页**不是当前页。
 ///
 /// 双页时 `page` 是一张纸的号（两栏算同一号），与 [`ReaderSession::page`] 同一个口径。
@@ -85,9 +111,8 @@ pub(in crate::ui::features::reader) fn readouts_at(
         };
     };
     let doc = book.span_doc(chapter);
-    let columns = reader.mode().columns();
     let total = doc.map_or(1, |doc| doc.page_count());
-    let offset = doc.map_or(0, |doc| doc.offset_of_page(page, columns));
+    let offset = doc.map_or(0, |doc| doc.offset_of_page(page));
     Readouts {
         chapter: book.chapter_title_at(chapter).into(),
         position: tf(
@@ -119,51 +144,58 @@ fn position(reader: &ReaderSession, cx: &App) -> String {
 /// 一条带的壳。顶边那条贴**这一页的顶边**、底边那条贴屏幕底，宽度与底色两端一致；
 /// 带里的字只有垂直摆位不同：顶边那条靠带顶（[`HEADER_TOP_PAD`]），底边那条居中。
 /// 顶上那条再往上就是阅读层让给系统的那一段，不在纸面里，也不用这条带管。
-fn band(height: f32, at_top: bool, bare: bool, cx: &App) -> Div {
-    let shell = h_flex()
-        .absolute()
-        .left_0()
-        .right_0()
-        .h(px(height))
-        .px_4()
-        // 整页画那一档不铺底：读数直接浮在画上，像 Reeden 那样只留一行小字。
-        // 底色在普通页上是**必需的**（正文从带子底下滚过时要被干净地切掉），所以
-        // 只有调用方明确说「这一屏是整页画」时才让它透明。
-        .when(!bare, |shell| shell.bg(cx.theme().background))
-        .overflow_hidden();
-    if at_top {
-        // `h_flex` 已经把交叉轴设成居中了，这里按同一根轴改到带顶。
-        shell.top_0().items_start().pt(px(HEADER_TOP_PAD))
-    } else {
-        shell.bottom_0().justify_between()
-    }
-}
-
-/// 页眉：只有章名。空章名不占字，摆出来是一块干净的空白。
+/// 用 [`PageBox`] 的矩形画全局那两条带（连续滚动 / 定版式）。
 ///
-/// `margin_y` 是这一边上边距（像素）：带子的**不透明底色**要跟着长高，盖住正文让出的
-/// 那一段。只把正文往下推而不把带子长高，滚动时跨在边上的半行字就会从那条缝里露出来。
-///
-/// 顶上那条系统状态栏 / 挖孔**不归这里让**：阅读层（`shell::reading_overlay`）已经把
-/// 整页往下推过 `top_inset`，带子的顶边就是那一格的下沿。这里再加一次，字会再低一截、
-/// 带子也会向下多盖一条正文（封面那类顶格图正是这样被切掉一截的）。层顶上那一条由
-/// 层自己的底色铺着，与带子同一个色，看上去仍是一整块。
-pub(in crate::ui::features::reader) fn header(
+/// 位置、带高、页边距、手势条内缩全从 `PageBox` 来，不再由调用方一个个传。
+/// 定版式（[`BandPolicy::Overlay`]）带子是半透明浮层，页图仍是整窗。
+pub(in crate::ui::features::reader) fn overlay_in(
+    page: &PageBox,
     readouts: &Readouts,
-    margin_y: f32,
     bare: bool,
     cx: &App,
 ) -> AnyElement {
+    overlay_bands(page, readouts, bare, true, cx)
+}
+
+/// 页内局部版：宽度跟着父容器走（双页时是半页），只读 `PageBox` 的纵向矩形。
+pub(in crate::ui::features::reader) fn overlay_page(
+    page: &PageBox,
+    readouts: &Readouts,
+    bare: bool,
+    cx: &App,
+) -> AnyElement {
+    overlay_bands(page, readouts, bare, false, cx)
+}
+
+fn overlay_bands(
+    page: &PageBox,
+    readouts: &Readouts,
+    bare: bool,
+    full: bool,
+    cx: &App,
+) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .child(header_in(page, readouts, bare, full, cx))
+        .child(footer_in(page, readouts, bare, full, cx))
+        .into_any_element()
+}
+
+fn header_in(page: &PageBox, readouts: &Readouts, bare: bool, full: bool, cx: &App) -> AnyElement {
+    let top_pad = (page.header.y - page.header_paint.y).max(0.0) + HEADER_TOP_PAD;
     let chapter = readouts.chapter.clone();
-    band(chrome::HEADER_HEIGHT + margin_y.max(0.0), true, bare, cx)
-        // 宿主测试要量带子的底边：带子高过 `header_reserve` 就等于盖住正文顶上的字/图。
-        .id("reader-header-band")
+    band_shell(page.header_paint, page.bands, bare, true, full, cx)
+        .pt(px(top_pad))
+        .id(if bare {
+            "reader-header-band-bare"
+        } else {
+            "reader-header-band"
+        })
         .test_support()
         .child(
             div()
                 .id("reader-header-chapter")
-                // 宿主测试量的就是这一格的顶边与带子的底边：字贴着带顶、带子不越进正文。
-                // 非 `test-support` 构建里这一层是透明的，真机不多花一个节点。
                 .test_support()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
@@ -173,18 +205,7 @@ pub(in crate::ui::features::reader) fn header(
         .into_any_element()
 }
 
-/// 页脚：左边章内位置，右边进度。两端各占一条边。
-///
-/// `bottom_inset` 是底下那条系统手势条的高度：带子长高那一段、内容留在带顶，于是地脚那行
-/// 小字在手势条之上，而带子的底色（页底色）一直铺到屏幕底 —— 不让的话，底栏拾起来之后
-/// 那一段就是一条空缝。
-pub(in crate::ui::features::reader) fn footer(
-    readouts: &Readouts,
-    bottom_inset: f32,
-    margin_y: f32,
-    bare: bool,
-    cx: &App,
-) -> AnyElement {
+fn footer_in(page: &PageBox, readouts: &Readouts, bare: bool, full: bool, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let label = |text: SharedString| {
         div()
@@ -193,48 +214,48 @@ pub(in crate::ui::features::reader) fn footer(
             .child(text)
             .into_any_element()
     };
-    // 带子随上下页边距长高：它不透明，长出来的那一截负责盖住正文让出的空白，
-    // 不然滚动时半行字会从那条缝里露出来。
-    //
-    // 读数**不许跟着长高走**：`pt(margin)` 把页边距从内容盒顶上让出去、`pb(inset)`
-    // 让出手势条，内容盒于是仍是原来那 FOOTER 高的一行 —— `h_flex` 的居中只在这
-    // 一截里生效，进度那行于是钉在离屏幕底固定的位置。反过来把页边距塞进 `pb`，
-    // 内容盒会被顶到带子顶上，读者拖上下边距时进度条就跟着上下跑。
-    let margin = margin_y.max(0.0);
-    band(
-        chrome::FOOTER_HEIGHT + margin + bottom_inset,
-        false,
-        bare,
-        cx,
-    )
-    .when(margin > 0.0, |band| band.pt(px(margin)))
-    .when(bottom_inset > 0.0, |band| band.pb(px(bottom_inset)))
-    .child(label(readouts.position.clone()))
-    .child(label(readouts.percent.clone()))
-    .into_any_element()
+    let margin = (page.footer.h - chrome::FOOTER_HEIGHT).max(0.0);
+    let bottom_inset = (page.paper.bottom() - page.footer.bottom()).max(0.0);
+    band_shell(page.footer_paint, page.bands, bare, false, full, cx)
+        .pt(px(margin))
+        .pb(px(bottom_inset))
+        .child(label(readouts.position.clone()))
+        .child(label(readouts.percent.clone()))
+        .into_any_element()
 }
 
-/// 这一页的两条读数带：贴这一页的上下两条边，中间全空。
+/// 一条带的壳：`paint` 是底色铺到纸边的那一块，文字的内缩由调用方用
+/// `pt` / `pb` 让出来。`Reserved` 不透明；`Overlay` 半透明，读成浮在页图上。
 ///
-/// 上面那一条**不碰系统安全区**：阅读层已经把整页推过 `top_inset`（`shell::reading_overlay`），
-/// 带子的顶边就是那一格的下沿，铺到屏幕顶的那一段由层自己的底色负责（与带子同色）。
-/// 下面那一条仍要让过手势条：底边没有层的 padding 可用，带子自己长高、把底色铺到屏幕底。
-///
-/// 折页时它是纸的一部分：同一份会画进主场景（露出那一页的读数），也会画进捕获层（卷起来
-/// 那张纸的读数）。所以参数是**一份快照**而不是会话 —— 同一帧里「底下的页」与「卷着的那页」
-/// 是两页，各自念自己的数。
-pub(in crate::ui::features::reader) fn overlay(
-    readouts: &Readouts,
-    header_margin: f32,
-    footer_margin: f32,
-    bottom_inset: f32,
+/// `full` = 按 `paint` 的 x/宽铺（整窗那一份）；`false` = 宽度交给父容器
+/// （双页的一页那一份，父容器已经是半页宽）。
+fn band_shell(
+    paint: PageRect,
+    policy: BandPolicy,
     bare: bool,
+    at_top: bool,
+    full: bool,
     cx: &App,
-) -> AnyElement {
-    div()
-        .absolute()
-        .inset_0()
-        .child(header(readouts, header_margin, bare, cx))
-        .child(footer(readouts, bottom_inset, footer_margin, bare, cx))
-        .into_any_element()
+) -> Div {
+    let shell = h_flex().absolute().px_4().overflow_hidden();
+    let shell = if full {
+        shell.left(px(paint.x)).w(px(paint.w))
+    } else {
+        shell.left_0().right_0()
+    };
+    let shell = shell.top(px(paint.y)).h(px(paint.h));
+    let shell = if bare {
+        shell
+    } else {
+        match policy {
+            BandPolicy::Reserved => shell.bg(cx.theme().background),
+            // 定版式：页图铺满整窗，带子不铺底，只让文字浮在照片上。
+            BandPolicy::Overlay => shell,
+        }
+    };
+    if at_top {
+        shell.items_start()
+    } else {
+        shell.justify_between()
+    }
 }

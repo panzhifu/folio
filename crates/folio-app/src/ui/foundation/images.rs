@@ -333,6 +333,26 @@ impl ImageEntry {
 ///
 /// `bytes` 是这份索引的「容器」那一半：元数据在 `entries` 里，字节要画的时候才从它读。
 /// 分开之后，打开一本书拿到的是一张很轻的表，而不是整本图的字节。
+/// 文件主干（去掉目录与扩展名）。`0~slim.jpg` → `0~slim`。
+fn file_stem(href: &str) -> Option<&str> {
+    let name = href.rsplit('/').next()?;
+    Some(name.rsplit_once('.').map_or(name, |(stem, _)| stem))
+}
+
+/// 同一张封面的变体：主干相同，或主干后面跟一个非字母数字的分隔符
+/// （`0~slim` / `0_slim` / `0-slim`）。`0.jpg` 与 `0~slim.jpg` 因此算一家，
+/// 而 `01.jpg`、`0abc.jpg` 不算。
+fn same_cover_family(href: &str, base_stem: &str) -> bool {
+    let Some(stem) = file_stem(href) else {
+        return false;
+    };
+    stem == base_stem
+        || stem
+            .strip_prefix(base_stem)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|ch| !ch.is_alphanumeric())
+}
+
 pub struct BookImages {
     entries: Vec<ImageEntry>,
     index: HashMap<String, usize>,
@@ -362,6 +382,38 @@ impl BookImages {
             bytes,
             token,
         }
+    }
+
+    /// 同一张封面的变体里，宽高比最接近 `want` 的那一张。
+    ///
+    /// 真书里常见 `Images/0.jpg` 与 `Images/0~slim.jpg` 并排：前者是 4:3 的桌面版，
+    /// 后者是给手机屏画的那张完整封面。整页画要按屏幕比例挑源，不然 4:3 那张会被
+    /// `cover` 左右裁掉一截（读者报的「封面标题两端被切」）。
+    ///
+    /// 只认**同目录、同主干的竖图**：主干相同，或主干后面紧跟一个非字母数字的分隔符
+    /// （`0~slim` / `0_slim`）。找不到兄弟图、或尺寸没量出来时回 `None`，调用方保留
+    /// 原 href —— 这一格只负责「有更合适的就换」，不负责决定要不要铺满。
+    pub fn closest_portrait_variant(&self, base: &str, want: f32) -> Option<&str> {
+        if !want.is_finite() || want <= 0.0 {
+            return None;
+        }
+        let dir = dir_of(base);
+        let base_stem = file_stem(base)?;
+        let mut best: Option<(&str, f32)> = None;
+        for entry in &self.entries {
+            // 横图不是封面变体；0×0 是 SVG / 量不出尺寸的那一档，不能按比例比。
+            if entry.width <= 0.0 || entry.height <= 0.0 || entry.height < entry.width {
+                continue;
+            }
+            if dir_of(&entry.href) != dir || !same_cover_family(&entry.href, base_stem) {
+                continue;
+            }
+            let diff = ((entry.width / entry.height) - want).abs() / want;
+            if best.is_none_or(|(_, closest)| diff < closest) {
+                best = Some((&entry.href, diff));
+            }
+        }
+        best.map(|(href, _)| href)
     }
 
     /// 那张图在容器里的**原始字节**（不经缩小、不经解码）。
@@ -567,6 +619,16 @@ impl ChapterImages {
             .get(href)
             .map(|entry| (entry.width, entry.height))
             .unwrap_or((0.0, 0.0))
+    }
+
+    /// 同一张封面的变体里，与屏幕宽高比 `want` 最接近的那一张（容器路径）。
+    ///
+    /// 只给整页画用：`doc.images()` 那一层把章节目录折成容器路径之后，问整本书那张表
+    /// 「这张图有没有更像手机屏的兄弟」。找不到就回 `None`。
+    pub fn closest_portrait_variant(&self, href: &str, want: f32) -> Option<String> {
+        self.book
+            .closest_portrait_variant(href, want)
+            .map(str::to_string)
     }
 
     /// 这张图声明的媒体类型（容器路径 → `image/png` 那一格），表里没有给 `None`。
@@ -1061,6 +1123,62 @@ mod tests {
             decoded.width(),
             decoded.height(),
             super::PREVIEW_EDGE,
+        );
+    }
+
+    /// 封面变体按屏幕比例挑：手机屏 0.45 选 `0~slim`，平板 4:3 选 `0`。
+    ///
+    /// 这是读者报的「封面标题两端被切」的根：`0.jpg` 是 4:3，`0~slim.jpg` 是
+    /// 1080×2400 的手机版，两张并排；不挑源就会把 4:3 那张按 cover 裁掉两成。
+    #[test]
+    fn the_cover_variant_closest_to_the_screen_wins() {
+        use folio_core::content::format::ImageRes;
+
+        use crate::ui::foundation::images::{BookImages, ChapterImages, no_images};
+
+        let res = |href: &str, width: u32, height: u32| ImageRes {
+            href: href.into(),
+            source: href.into(),
+            media_type: "image/jpeg".into(),
+            width,
+            height,
+        };
+        let book = BookImages::new(
+            &[
+                res("OEBPS/Images/0.jpg", 1000, 1333),
+                res("OEBPS/Images/0~slim.jpg", 1080, 2400),
+                res("OEBPS/Images/0-other.jpg", 1080, 2400),
+                res("OEBPS/Images/01.jpg", 1000, 2400),
+                res("OEBPS/Images/other/0.jpg", 1000, 2400),
+                res("OEBPS/Images/land.jpg", 2000, 1000),
+            ],
+            no_images(),
+        );
+        let chapter = ChapterImages::new(std::sync::Arc::new(book), "OEBPS/Text/cover.xhtml");
+
+        assert_eq!(
+            chapter
+                .closest_portrait_variant("OEBPS/Images/0.jpg", 1080.0 / 2400.0)
+                .as_deref(),
+            Some("OEBPS/Images/0~slim.jpg"),
+            "手机屏该挑手机版"
+        );
+        assert_eq!(
+            chapter
+                .closest_portrait_variant("OEBPS/Images/0.jpg", 4.0 / 3.0)
+                .as_deref(),
+            Some("OEBPS/Images/0.jpg"),
+            "4:3 的屏该留 4:3 那张"
+        );
+        assert_eq!(
+            chapter.closest_portrait_variant("OEBPS/Images/0.jpg", 0.0),
+            None,
+            "没有屏幕比例就什么都不换"
+        );
+        assert_eq!(
+            chapter.closest_portrait_variant("OEBPS/Images/not-in-book.jpg", 0.45),
+            None,
+            "不在书里的 href 不猜"
         );
     }
 }

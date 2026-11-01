@@ -96,6 +96,35 @@ fn layout_of(cx: &mut TestAppContext, xhtml: &str, prefs: &Reader, width: f32) -
     document
 }
 
+/// 同上，但带一份**真图片索引**：`<img>` 解得出固有尺寸，块文本里才会留下那个哨兵字符。
+///
+/// 判「这一章有没有正文」那一条要的就是这一格：`layout_of` 用的是空索引，那里 `<img>`
+/// 什么都不产出，同一句断言会因为**别的原因**绿（2026-11-02 就这么被骗过一次）。
+fn layout_of_images(
+    cx: &mut TestAppContext,
+    xhtml: &str,
+    prefs: &Reader,
+    width: f32,
+    images: &[folio_core::content::format::ImageRes],
+) -> Document {
+    use crate::ui::foundation::images::{BookImages, no_images};
+
+    let handle = window(cx, width, 900.0);
+    let book = Arc::new(BookImages::new(images, no_images()));
+    let mut document = Document::new(
+        xhtml.to_string(),
+        "",
+        prefs.clone(),
+        Arc::new(ChapterImages::new(book, "c0.xhtml")),
+        Arc::new(BookFonts::empty()),
+    );
+    cx.update_window(handle, |_, win, cx| {
+        document.ensure_layout(win, cx, 0.0);
+    })
+    .expect("窗口应当可排版");
+    document
+}
+
 /// `max_measure == 0` 是「不设上限、随窗口铺满」的**哨兵值**，不是 0 像素的上限。
 /// 当成上限去夹就会塌成 1px 版心、一行只剩一个字 —— 全屏阅读时整个正文会变成一列竖字。
 #[gpui_kit::test]
@@ -1312,7 +1341,10 @@ fn the_wired_queries_answer_like_the_whole_chapter_scan(cx: &mut TestAppContext)
     cx.update(gpui_kit::init);
     let handle = window(cx, 600.0, 900.0);
     let mut document = Document::new(
-        format!("<p>{}</p>", LONG.repeat(6)),
+        // 悬挂标点落进断行之后（2026-11-02），每行能多装一两个收尾标点，同一份
+        // fixture 折出来的行数变少 —— 这里要的是「跨很多行」而不是某个行数，
+        // 多垫两段把门槛稳稳跨过去。
+        format!("<p>{}</p>", LONG.repeat(8)),
         "",
         prefs(),
         Arc::new(ChapterImages::empty()),
@@ -1673,11 +1705,10 @@ fn the_first_typeset_clears_the_font_job(cx: &mut TestAppContext) {
     assert!(book.document().fonts_pending(), "开书时应挂着首趟字体任务");
     let handle = window(cx, 600.0, 800.0);
     let page = || Viewport {
-        reserve: 0.0,
-        columns: 1,
+        width: 600.0,
         height: 700.0,
-        viewport_height: 700.0,
-        gap: 0.0,
+        page_height: Some(700.0),
+        columns: 1,
     };
     cx.update_window(handle, |_, win, cx| {
         book.document_mut().ensure_viewport(win, cx, page());
@@ -1727,11 +1758,10 @@ fn the_first_typeset_warms_hp_fonts(cx: &mut TestAppContext) {
     );
     let handle = window(cx, 600.0, 800.0);
     let page = || Viewport {
-        reserve: 0.0,
-        columns: 1,
+        width: 600.0,
         height: 700.0,
-        viewport_height: 700.0,
-        gap: 0.0,
+        page_height: Some(700.0),
+        columns: 1,
     };
     let started = Instant::now();
     cx.update_window(handle, |_, win, cx| {
@@ -1784,13 +1814,12 @@ fn a_vertical_book_settles_on_the_vertical_axis(cx: &mut TestAppContext) {
         Arc::new(ChapterImages::empty()),
         Arc::new(BookFonts::empty()),
     );
-    // 分页：一片 700 高、单栏、没有侧栏。竖排只在分页那一档落地。
+    // 分页：一列 700 长、整版 100 宽、单栏。竖排只在分页那一档落地。
     let page = || Viewport {
-        reserve: 0.0,
-        columns: 1,
+        width: 100.0,
         height: 700.0,
-        viewport_height: 700.0,
-        gap: 0.0,
+        page_height: Some(700.0),
+        columns: 1,
     };
 
     cx.update_window(handle, |_, win, cx| {
@@ -1913,11 +1942,10 @@ fn the_viewport_reports_the_screen_into_the_layout_key(cx: &mut TestAppContext) 
             win,
             cx,
             Viewport {
-                reserve: 60.0,
-                columns: 1,
+                width: 840.0,
                 height: 700.0,
-                viewport_height: 700.0,
-                gap: 0.0,
+                page_height: Some(700.0),
+                columns: 1,
             },
         );
     })
@@ -1925,8 +1953,8 @@ fn the_viewport_reports_the_screen_into_the_layout_key(cx: &mut TestAppContext) 
     let key = doc.layout_key(600.0, 1, None);
     assert_eq!(
         key.screen_width,
-        Some(840),
-        "屏宽要落成「阅读层那块」（900 − 60 侧栏）"
+        Some(900),
+        "屏宽是整窗：桌面侧栏是压在正文上的浮层，不再从阅读栏里让宽"
     );
 
     // 换一扇窗（转屏那一档）：键跟着变，否则竖屏算好的大图会摆在横屏上。
@@ -1936,11 +1964,10 @@ fn the_viewport_reports_the_screen_into_the_layout_key(cx: &mut TestAppContext) 
             win,
             cx,
             Viewport {
-                reserve: 0.0,
-                columns: 1,
+                width: 1200.0,
                 height: 500.0,
-                viewport_height: 500.0,
-                gap: 0.0,
+                page_height: Some(500.0),
+                columns: 1,
             },
         );
     })
@@ -1949,5 +1976,131 @@ fn the_viewport_reports_the_screen_into_the_layout_key(cx: &mut TestAppContext) 
         doc.layout_key(600.0, 1, None).screen_width,
         Some(1200),
         "屏宽变了键必须跟着变"
+    );
+}
+
+/// 「有字」的判据是**非空白字符**，不是「有宽度的 run」。
+///
+/// 卷首那类纯图页常摆一行 `&nbsp;` 把根撑开（`<body class="cover"><p>&#160;</p></body>`，
+/// 《基督山伯爵》的 `cover.xhtml` 就是这个形状）。那一行有宽度，但一个可读字都没有：
+/// 把它算成正文，整页底图章的读数带就会回到不透明，满屏卷首被上下各切一条。
+#[gpui_kit::test]
+fn a_nbsp_line_is_not_readable_text_but_a_caption_is(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let cover = layout_of(
+        cx,
+        "<html><head><style>\
+           html,body{height:100%;margin:0;padding:0}\
+           body{background-image:url(cover.jpg);background-size:cover;\
+                background-repeat:no-repeat;background-attachment:fixed}\
+         </style></head><body><p>&#160;</p></body></html>",
+        &prefs(),
+        400.0,
+    );
+    assert!(!cover.has_text(), "一行 &nbsp; 读不出字，不算正文");
+    assert!(
+        cover.is_picture_chapter(),
+        "满版底图章照旧是整页画（章间距看这一条）"
+    );
+    assert!(
+        !cover.is_picture_only_page(),
+        "固定底图章不是单图页：它的正文仍按版心坐标画"
+    );
+
+    let captioned = layout_of(
+        cx,
+        "<html><head><style>\
+           html,body{height:100%;margin:0;padding:0}\
+           body{background-image:url(cover.jpg);background-size:cover;\
+                background-repeat:no-repeat;background-attachment:fixed}\
+         </style></head><body><p>Character Introduction</p></body></html>",
+        &prefs(),
+        400.0,
+    );
+    assert!(captioned.has_text(), "卷首上压着的字要算正文");
+    assert!(
+        captioned.is_picture_chapter(),
+        "有字的满版底图章仍是整页画，两张底图相接时照样不留缝"
+    );
+    assert!(
+        !captioned.is_picture_only_page(),
+        "有固定底图的章不按窗口坐标画"
+    );
+}
+
+/// 底图**没写** `fixed`、作者也**没声明** `height:100%` 的无正文扉页，照样要撑到一整窗。
+///
+/// 《哈利·波特全集》`v1.xhtml` 就是这一族：`style="background: url(v1.jpg) no-repeat
+/// center; background-size: cover"`，正文只有两张透明标题图。从前 `is_cover_page` 还要求
+/// 作者自己写一句满页（`height` / `min-height: 100%`），这一章不沾，于是章高只等于那两张
+/// 图的 263 —— 阅读器把底图当整窗背板贴，`cover` 却按这个短盒裁，上下各掉一大截，
+/// 读出来就是「图片不完整」（2026-11-02 真机量的：990×771 物理像素，上下各裁 489）。
+#[gpui_kit::test]
+fn a_plain_cover_backdrop_without_an_author_height_still_fills_a_window(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let res = |href: &str, width: u32, height: u32| folio_core::content::format::ImageRes {
+        href: href.into(),
+        source: href.into(),
+        media_type: "image/jpeg".into(),
+        width,
+        height,
+    };
+    let page = layout_of_images(
+        cx,
+        "<html><head><style>body{padding:0%;margin:0% 1% 0% 1%}</style></head>\
+         <body style=\"background: url(v1.jpg) no-repeat center; background-size: cover;\">\
+         <div><img src=\"hptitle.png\" width=\"90%\"/></div>\
+         <h1><img src=\"hpt1.png\" width=\"100%\"/></h1>\
+         </body></html>",
+        &prefs(),
+        400.0,
+        &[
+            res("v1.jpg", 792, 1400),
+            res("hptitle.png", 736, 433),
+            res("hpt1.png", 700, 81),
+        ],
+    );
+    assert!(
+        !page.has_text(),
+        "两张透明标题图不是一个可读的字：行盒里只有图片片段"
+    );
+    assert!(
+        page.is_picture_chapter(),
+        "整幅 cover 底图 + 无正文 = 整页画，章间距看这一条"
+    );
+    assert!(
+        page.height() >= 900.0 - 1.0,
+        "这一章该被撑到一整窗（屏高 900），实际 {}",
+        page.height()
+    );
+}
+
+/// 选区（与批注底色）的上下边取**字墨**，不取行盒：行距与行内图片撑起来的那一截不算。
+///
+/// 默认行距 1.75em，行盒比字高出一小半；读者报的「选中的区域比文字高」就是这一截。
+/// 行内一张高图会把行盒撑到图高，按行盒画时整条底色会跟着长成图那么高。
+#[gpui_kit::test]
+fn the_selection_band_hugs_the_text_not_the_line_box(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::view::body::text_ink_box;
+
+    cx.update(gpui_kit::init);
+    let doc = layout_of(cx, "<p>于是我们奋力向前，逆水行舟。</p>", &prefs(), 400.0);
+    let line = &doc.lines()[0];
+    let (top, height) = text_ink_box(line).expect("有字的行要给字墨盒");
+    assert!(
+        height < line.height - 2.0,
+        "字墨该比行盒矮（半行距不算）：{height} vs {}",
+        line.height
+    );
+    assert!(
+        top > line.y,
+        "半行距在字上方：字墨顶 {top} 该在行顶 {} 之下",
+        line.y
+    );
+    assert!(
+        top + height < line.y + line.height,
+        "半行距在字下方：字墨底 {} 该在行底 {} 之上",
+        top + height,
+        line.y + line.height
     );
 }
