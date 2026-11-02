@@ -659,7 +659,6 @@ pub fn scroll_note_write(us: u64) {
 }
 
 /// 收表：一个样本进窗口，攒满就出一行。
-#[allow(clippy::too_many_arguments)]
 pub fn scroll_end(
     gap_us: u64,
     handler_us: u64,

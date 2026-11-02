@@ -35,7 +35,6 @@ impl PageRect {
         }
     }
 
-    #[allow(dead_code)] // 命中与裁切接线前只有测试在用。
     pub fn right(&self) -> f32 {
         self.x + self.w
     }
@@ -44,12 +43,12 @@ impl PageRect {
         self.y + self.h
     }
 
-    #[allow(dead_code)] // 命中与裁切接线前只有测试在用。
+    #[allow(dead_code)] // 只有本文件的测试在用。
     pub fn is_empty(&self) -> bool {
         self.w <= 0.0 || self.h <= 0.0
     }
 
-    #[allow(dead_code)] // 命中接线前只有测试在用。
+    #[allow(dead_code)] // 只有本文件的测试在用。
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }

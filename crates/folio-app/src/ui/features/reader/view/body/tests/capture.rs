@@ -338,7 +338,7 @@ fn a_single_page_curl_bakes_the_arriving_page_on_its_back(cx: &mut TestAppContex
     );
 }
 
-/// 捕获矩形按**最终位置**取：横向抵消外壳进场那一段的横移（[`super::super::capture_region`]）。
+/// 捕获矩形按**最终位置**取：横向抵消外壳进场那一段的横移（[`super::super::capture::capture_region`]）。
 ///
 /// 测试台没有外壳，横移不会真的把内容推走，所以这里把两半分开钉：
 /// - 纯函数那一半钉**符号**（往回减，不是往前加）；
@@ -349,17 +349,17 @@ fn a_single_page_curl_bakes_the_arriving_page_on_its_back(cx: &mut TestAppContex
 fn the_capture_rect_is_taken_at_the_resting_position(cx: &mut TestAppContext) {
     use crate::ui::features::reader::motion::turn_animation::Area;
     let area = Area::new(0.0, 40.0, 900.0, 700.0);
-    let rect = super::super::capture_region(area, 300.0);
+    let rect = super::super::capture::capture_region(area, 300.0);
     assert_eq!(f32::from(rect.origin.x), -300.0, "该往回减，不是往前加");
     assert_eq!(f32::from(rect.origin.y), 40.0, "纵向没有横移");
     assert_eq!(f32::from(rect.size.width), 900.0);
     let viewport = (900.0, 700.0);
     assert!(
-        !super::super::in_viewport(rect, viewport),
+        !super::super::capture::in_viewport(rect, viewport),
         "偏出窗口的那一趟不该请求捕获"
     );
-    assert!(super::super::in_viewport(
-        super::super::capture_region(area, 0.0),
+    assert!(super::super::capture::in_viewport(
+        super::super::capture::capture_region(area, 0.0),
         viewport
     ));
 
@@ -533,7 +533,7 @@ impl Render for LayerProbe {
                 |_, _, _| {},
                 move |_, _, window, _| before.borrow_mut()[0] = window.capture_layer(),
             ))
-            .child(super::super::capture_layer(
+            .child(super::super::capture::capture_layer(
                 1,
                 div().size_full().child(canvas(
                     |_, _, _| {},
@@ -616,7 +616,7 @@ fn scratch_phone_insets_capture_commits(cx: &mut TestAppContext) {
 fn the_capture_rect_lands_in_the_window_after_the_safe_area_pushes_the_page_down() {
     use gpui_kit::{Bounds, point, px};
 
-    use super::super::{capture_region, in_viewport, shape_in_window, sheet_area_in_page};
+    use super::super::capture::{capture_region, in_viewport, shape_in_window, sheet_area_in_page};
 
     // 真机那一组数：屏 384×853，状态栏 53.33。
     let viewport = (384.0f32, 853.33f32);

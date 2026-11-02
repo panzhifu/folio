@@ -510,10 +510,6 @@ impl GlyphsElement {
         self
     }
 
-    pub fn push(&mut self, run: GlyphRun) {
-        self.runs.push(run);
-    }
-
     pub fn extend(&mut self, runs: impl IntoIterator<Item = GlyphRun>) {
         self.runs.extend(runs);
     }

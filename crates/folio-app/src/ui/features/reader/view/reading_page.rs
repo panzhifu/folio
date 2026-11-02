@@ -109,11 +109,11 @@ pub struct ReadingPage {
 
 impl ReadingPage {
     pub fn new(
+        reader: Entity<ReaderSession>,
         stack: WeakEntity<NavStackState>,
         shell: WeakEntity<AppShell>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let reader = cx.new(|cx| ReaderSession::boot(cx));
         let progress = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
@@ -186,35 +186,6 @@ impl ReadingPage {
     pub fn open(&mut self, book_id: i64, cx: &mut Context<Self>) {
         self.reader
             .update(cx, |reader, cx| reader.open_book(book_id, cx));
-    }
-
-    /// 把**已经造好**的一份文档开进这一屏（只有回归门用）。
-    ///
-    /// 生产那条路是 [`ReadingPage::open`]：按主键去书库把正文与容器一起取出来。回归门要
-    /// 验的是「退出之后谁重渲染架面」，解 ZIP 那一环与它无关，所以只替掉取正文这一步 ——
-    /// 会话走的仍是生产那一个构造（`ReaderSession::with_document`）。
-    #[cfg(test)]
-    pub(crate) fn open_document(
-        &mut self,
-        doc: std::sync::Arc<dyn folio_core::content::document::Document>,
-        prefs: folio_core::Reader,
-        locator: folio_core::Locator,
-        cx: &mut Context<Self>,
-    ) {
-        let session = crate::ui::features::reader::ReaderSession::with_document(
-            doc, prefs, None, None, locator, cx,
-        );
-        let reading = cx.new(|_| session);
-        *self = Self::new(self.stack.clone(), self.shell.clone(), cx);
-        self.reader = reading;
-        // `new` 订阅的是它自己刚建的那份会话；换过来之后观察要挪到这一份上，
-        // 会话那一侧的重画才转得到这一屏（见 `new` 里那条 `observe`）。
-        self._watches
-            .push(cx.observe(&self.reader, |_, _, cx| cx.notify()));
-        self.reader.update(cx, |reader, _| {
-            reader.set_image_viewer(self.image_viewer.clone())
-        });
-        cx.notify();
     }
 
     /// 落库。外壳在 pop 之前调它。

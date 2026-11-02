@@ -1060,7 +1060,6 @@ impl Document {
         out
     }
 
-    #[allow(dead_code)] // 面板与测试读；渲染路径目前直接走字段
     pub fn prefs(&self) -> &Reader {
         &self.prefs
     }
@@ -1163,7 +1162,7 @@ impl Document {
                 .is_some_and(|slice| !slice.picture_page.is_empty())
     }
 
-    /// 可见带 `[from_y, to_y)` 里那些行的下标区间 —— 绘制那一帧只该遍历这一段。
+    /// 可见带 `band` 里那些行的下标区间 —— 绘制那一帧只该遍历这一段。
     ///
     /// 把 `0..行数` 整个交给场景层再逐行比 y，等于每帧付一次「整章行数」的钱，而其中
     /// 绝大多数行根本不在屏上（`plans/阅读管线.md` §十一 第 4 条）。区间是引擎在排版结果
@@ -1753,7 +1752,6 @@ impl Document {
     /// （连续滚动减 `scroll_y`，分页/双页减片的 `origin_y` 与栏位 `x`）。
     /// 度量现建一个 `GpuiMeasure` —— 与排版用同一个构造参数，字符前进量同源。
     /// 排版还没做过（窗口第一帧之前）时 `lines` 是空的，命中给 `None`。
-    #[allow(dead_code)] // M6 选中接线的入口，先立契约（见 plans/M6-selection.md）
     pub fn hit_test(&self, window: &Window, cx: &App, x: f32, y: f32) -> Option<Hit> {
         folio_core::content::hit::hit_test(
             self.layout(),
@@ -1825,7 +1823,6 @@ impl Document {
     }
 
     /// 长按落点吸到一个词上（纯坐标表运算，不碰度量）。
-    #[allow(dead_code)] // M6 长按选词的入口（见 plans/M6-selection.md）
     pub fn snap_word(&self, offset: usize) -> std::ops::Range<usize> {
         folio_core::content::hit::snap_word(self.text_map(), offset)
     }
@@ -1834,7 +1831,6 @@ impl Document {
     ///
     /// 与排版作业里那个 `GpuiMeasure` 用同一组构造参数 —— 这一点是硬要求：
     /// 「按 A 算宽、按 B 画字」是同源性防线的反面，命中与绘制必须走同一个度量口径。
-    #[allow(dead_code)] // 上面三个 M6 入口共用
     fn measure(&self, window: &Window, cx: &App) -> GpuiMeasure {
         self.measure
             .get_or_init(|| {

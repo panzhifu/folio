@@ -773,7 +773,7 @@ impl ReaderSession {
             let anchor = book.chapter_index();
             if let Some(doc) = book.span_doc(anchor)
                 && doc.is_current()
-                && crate::ui::features::reader::view::body::chapter_is_picture_only_page(doc)
+                && crate::ui::features::reader::view::body::art::chapter_is_picture_only_page(doc)
                 && let Some(base) = book.base_of(anchor, gap)
             {
                 let in_chapter = local_y + self.scroll_painted - base;

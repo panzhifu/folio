@@ -573,7 +573,7 @@ impl ReaderSession {
         self.image_sequence = match &self.source {
             Source::Book(book) => book.build_image_sequence(),
             Source::Fixed(fixed) => fixed.build_image_sequence(),
-            Source::Sample(_) => empty_image_sequence(),
+            Source::Empty => empty_image_sequence(),
         };
     }
 

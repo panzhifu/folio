@@ -295,7 +295,7 @@ impl ReadingPage {
                                 );
                                 return;
                             };
-                            crate::ui::features::reader::view::body::open_picture(
+                            crate::ui::features::reader::view::body::images::open_picture(
                                 &zoom_viewer,
                                 &reader,
                                 &key,

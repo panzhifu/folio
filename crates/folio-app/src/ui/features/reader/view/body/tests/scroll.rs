@@ -778,7 +778,7 @@ fn a_textless_page_with_a_plain_background_goes_full_bleed(cx: &mut TestAppConte
 /// 底图只铺了版心那 990×771 物理像素（左右各让 45、上下各被裁 489），整窗背板根本没画。
 ///
 /// 所以这一条把同一个形状挪到邻章上，问绘制那一帧真正会问的两个问题：
-/// [`super::super::page_backdrop`]（版心里那份要不要跳过）与 [`super::super::page_art_for_doc`]
+/// [`super::super::art::page_backdrop`]（版心里那份要不要跳过）与 [`super::super::art::page_art_for_doc`]
 /// （整窗背板有没有得画）。
 #[gpui_kit::test]
 fn a_plain_backdrop_neighbour_chapter_is_still_a_picture_chapter(cx: &mut TestAppContext) {
@@ -803,8 +803,8 @@ fn a_plain_backdrop_neighbour_chapter_is_still_a_picture_chapter(cx: &mut TestAp
         let doc = book.span_doc(1).expect("邻章该已排版");
         (
             book.chapter_index(),
-            super::super::page_backdrop(doc).is_some(),
-            super::super::page_art_for_doc(1, doc, 384.0 / 853.0).is_some(),
+            super::super::art::page_backdrop(doc).is_some(),
+            super::super::art::page_art_for_doc(1, doc, 384.0 / 853.0).is_some(),
         )
     });
     assert_eq!(anchor, 0, "视口顶该还停在目录，扉页是邻章");
@@ -897,8 +897,8 @@ fn every_plain_backdrop_spelling_is_recognised(cx: &mut TestAppContext) {
             let book = v.book().expect("这本书该开着");
             let doc = book.span_doc(1).expect("邻章该已排版");
             (
-                super::super::page_backdrop(doc).is_some(),
-                super::super::page_art_for_doc(1, doc, 384.0 / 853.0).is_some(),
+                super::super::art::page_backdrop(doc).is_some(),
+                super::super::art::page_art_for_doc(1, doc, 384.0 / 853.0).is_some(),
                 doc.decor_seeds()
                     .iter()
                     .map(|s| (s.x, s.y, s.width, s.height, s.pictures.len(), s.full_bleed))

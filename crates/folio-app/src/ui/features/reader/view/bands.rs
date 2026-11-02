@@ -144,27 +144,26 @@ fn position(reader: &ReaderSession, cx: &App) -> String {
 /// 一条带的壳。顶边那条贴**这一页的顶边**、底边那条贴屏幕底，宽度与底色两端一致；
 /// 带里的字只有垂直摆位不同：顶边那条靠带顶（[`HEADER_TOP_PAD`]），底边那条居中。
 /// 顶上那条再往上就是阅读层让给系统的那一段，不在纸面里，也不用这条带管。
-/// 用 [`PageBox`] 的矩形画全局那两条带（连续滚动 / 定版式）。
+/// 带的宽度跟哪一块走：整张纸（连续滚动 / 定版式 / 捕获层）还是父容器
+/// （双页的一页那一份，父容器已经是半页宽）。
+#[derive(Clone, Copy)]
+pub(in crate::ui::features::reader) enum Width {
+    Paper,
+    Parent,
+}
+
+/// 用 [`PageBox`] 的矩形画读数带。
 ///
 /// 位置、带高、页边距、手势条内缩全从 `PageBox` 来，不再由调用方一个个传。
 /// 定版式（[`BandPolicy::Overlay`]）带子是半透明浮层，页图仍是整窗。
-pub(in crate::ui::features::reader) fn overlay_in(
+pub(in crate::ui::features::reader) fn chrome(
     page: &PageBox,
     readouts: &Readouts,
     bare: bool,
+    width: Width,
     cx: &App,
 ) -> AnyElement {
-    overlay_bands(page, readouts, bare, true, cx)
-}
-
-/// 页内局部版：宽度跟着父容器走（双页时是半页），只读 `PageBox` 的纵向矩形。
-pub(in crate::ui::features::reader) fn overlay_page(
-    page: &PageBox,
-    readouts: &Readouts,
-    bare: bool,
-    cx: &App,
-) -> AnyElement {
-    overlay_bands(page, readouts, bare, false, cx)
+    overlay_bands(page, readouts, bare, matches!(width, Width::Paper), cx)
 }
 
 fn overlay_bands(

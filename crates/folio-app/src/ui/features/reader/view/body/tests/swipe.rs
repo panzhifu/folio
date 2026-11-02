@@ -703,7 +703,7 @@ fn the_header_band_does_not_take_the_safe_area_twice(cx: &mut TestAppContext) {
 /// 且旧页在左、新页在右（这一笔是往后翻）。
 #[gpui_kit::test]
 fn a_page_backdrop_rides_its_own_sheet(cx: &mut TestAppContext) {
-    use crate::ui::features::reader::view::body::page_art_element_id;
+    use crate::ui::features::reader::view::body::art::page_art_element_id;
     use folio_core::content::format::ImageRes;
     use gpui_kit::{AppContext as _, test::TestWindowExt as _};
 
@@ -773,6 +773,74 @@ fn a_page_backdrop_rides_its_own_sheet(cx: &mut TestAppContext) {
         ((arriving - leaving) - width).abs() < 1.0,
         "两张纸始终相距一屏（{width}），实得 {} —— 底图没跟纸走才会对不上",
         arriving - leaving
+    );
+}
+
+/// 带子跟纸走：翻页跟手时，进场页的带子 wrapper 左上角就是 `page_shift`。
+///
+/// 带子有两处来源：实时页的 `page_bands` 与平摊进场页的 `page_band_overlays`；
+/// 这一条两条路径都认，谁在树上就量谁。
+#[gpui_kit::test]
+fn the_incoming_page_bands_follow_their_sheet(cx: &mut TestAppContext) {
+    use gpui_kit::{AppContext as _, test::TestWindowExt as _};
+
+    cx.update(gpui_kit::init);
+    let body = (0..60)
+        .map(|i| format!("<p>Band paragraph {i}, long enough to wrap a line or two.</p>"))
+        .collect::<String>();
+    let flow = FlowDoc {
+        chapters: vec![Chapter::inline("第一章", &body)],
+        ..Default::default()
+    };
+    let (view, handle) = open(cx, &flow, "markdown", prefs(16.0), Locator::start(), 460.0);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.page_count()) >= 2,
+        "语料得切出两页，否则没有进场页的带子"
+    );
+
+    raw_touch(cx, handle, TouchPhase::Started, 360.0);
+    raw_touch(cx, handle, TouchPhase::Moved, 240.0);
+    settle(cx, handle);
+    let shift = view.read_with(cx, |v, _| v.page_shift);
+    assert_ne!(shift, (0.0, 0.0), "跟手时纸该真的挪了");
+
+    let live = crate::ui::features::reader::view::body::paper::band_id(
+        "reader-band-live",
+        crate::ui::features::reader::model::session::PageRef {
+            chapter: 0,
+            page: 1,
+        },
+        0,
+    );
+    let overlay = crate::ui::features::reader::view::body::paper::band_id(
+        "reader-band-overlay",
+        crate::ui::features::reader::model::session::PageRef {
+            chapter: 0,
+            page: 1,
+        },
+        0,
+    );
+    let band = cx
+        .update_window(handle, |_, window, _| {
+            window.try_find(live).or_else(|| window.try_find(overlay))
+        })
+        .expect("窗口应能渲染");
+    let band = band.expect("进场页的带子该在树上");
+    let (x, y) = (
+        f32::from(band.bounds().origin.x),
+        f32::from(band.bounds().origin.y),
+    );
+    assert!(
+        (x - shift.0).abs() < 0.5,
+        "带子 x 该跟 sheet offset 走：带子 {x}，纸 {}",
+        shift.0
+    );
+    assert!(
+        (y - shift.1).abs() < 0.5,
+        "带子 y 该跟 sheet offset 走：带子 {y}，纸 {}",
+        shift.1
     );
 }
 
@@ -935,6 +1003,84 @@ fn a_vertical_drag_follows_the_vertical_style(cx: &mut TestAppContext) {
     );
     turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
     assert_eq!(view.read_with(cx, |v, _| v.page_shift), (0.0, 0.0));
+}
+
+/// 翻页期间正文裁剪跟纸走：静止是版心，跟手是整张纸。
+///
+/// 裁剪钉在静止版心上时，上下平移的纸在动、字的可见范围不动：旧版心的上下边界会把
+/// 正在移动的正文切掉一条，等这一页换成捕获纹理又补回来 —— 真机上读成闪烁。
+#[gpui_kit::test]
+fn a_turning_page_clips_to_the_paper(cx: &mut TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| {
+        v.set_mode(PageMode::Paged, cx);
+        v.set_chrome_bands(28.0, 28.0, 0.0, cx);
+    });
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::SlideUp);
+    });
+    settle(cx, handle);
+    let height = cx
+        .update_window(handle, |_, window, _| {
+            f32::from(window.viewport_size().height)
+        })
+        .expect("量窗口");
+    let clip = |cx: &mut TestAppContext, id: &'static str| {
+        cx.update_window(handle, |_, window, _| {
+            window.try_find(id).map(|element| {
+                (
+                    f32::from(element.bounds().origin.y),
+                    f32::from(element.bounds().size.height),
+                )
+            })
+        })
+        .expect("窗口应能渲染")
+    };
+    let (rest_top, rest_height) = clip(cx, "reader-paper-clip").expect("静止帧该有纸层裁剪");
+    let (global_top, global_height) =
+        clip(cx, "reader-content-clip").expect("静止帧该有全局裁剪层");
+    assert!(
+        (rest_top - global_top).abs() < 0.5 && (rest_height - global_height).abs() < 0.5,
+        "纸层与全局裁剪该同高同顶：纸层 {rest_top}/{rest_height}，全局 {global_top}/{global_height}"
+    );
+    assert!(rest_top > 0.0, "静止帧的裁剪顶该在页眉下面，实得 {rest_top}");
+    assert!(
+        rest_height < height,
+        "静止帧的裁剪高该小于整窗，实得 {rest_height}"
+    );
+
+    raw_touch_at(cx, handle, TouchPhase::Started, point(px(200.0), px(400.0)));
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(260.0)));
+    settle(cx, handle);
+    let (turn_top, turn_height) =
+        clip(cx, "reader-content-clip").expect("跟手帧该有全局裁剪层");
+    // 平摊翻页这一趟正文已经由捕获网格提供，纸层本身不建；若某档仍实时画，
+    // 它的纸层裁剪必须与全局那份同高同顶。
+    if let Some((paper_top, paper_height)) = clip(cx, "reader-paper-clip") {
+        assert!(
+            (paper_top - turn_top).abs() < 0.5 && (paper_height - turn_height).abs() < 0.5,
+            "跟手时纸层与全局裁剪该同高同顶：纸层 {paper_top}/{paper_height}，全局 {turn_top}/{turn_height}"
+        );
+    }
+    assert!(
+        turn_top.abs() < 0.5,
+        "跟手时裁剪该是整张纸，实得顶边 {turn_top}"
+    );
+    assert!(
+        (turn_height - height).abs() < 0.5,
+        "跟手时裁剪该铺满窗口，实得高 {turn_height}"
+    );
 }
 
 /// 轴归**动画档**：选的是「左右平移」（横轴），竖着拖这一笔什么都不该发生。

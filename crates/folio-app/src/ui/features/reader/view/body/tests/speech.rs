@@ -37,7 +37,7 @@ fn the_spoken_lines_are_the_visible_band_and_nothing_else(cx: &mut TestAppContex
             range.map(|ix| doc.layout().line_text(ix)).collect()
         };
         (
-            super::super::spoken_lines(doc, lines.clone()),
+            super::super::a11y::spoken_lines(doc, lines.clone()),
             texts(lines),
             texts(0..doc.line_count()),
         )
@@ -93,7 +93,7 @@ fn a_blank_line_takes_no_spoken_node(cx: &mut TestAppContext) {
         // 带取整章高：这一条要的不是「裁到屏内」，是空行会不会漏进序列。
         let lines = 0..doc.line_count();
         let every: Vec<String> = lines.clone().map(|ix| doc.layout().line_text(ix)).collect();
-        (super::super::spoken_lines(doc, lines), every)
+        (super::super::a11y::spoken_lines(doc, lines), every)
     });
     assert!(
         every_line.iter().any(String::is_empty),

@@ -58,29 +58,27 @@ pub(in crate::ui::features::reader) struct CurlMesh {
 ///
 /// 键与尺寸要一起比，所以合成一个类型：页号章号在分屏 / 折叠展开 / surface 重建后一个字不动，
 /// 只有尺寸这一格拦得住那张被裁过的纹理。
-type CaptureCommit = ((usize, usize), (f32, f32));
+pub(in crate::ui::features::reader) type CaptureCommit = ((usize, usize), (f32, f32));
 
 /// 背面那张纹理里躺着的是哪一格：`(章号, 页号, 物理栏)` + 那一刻的窗口尺寸。
 ///
 /// 比正面那一格多出**栏**：双页折页揭起来那张纸的背面是目标跨页的另一半，同一个页号在
 /// 往前翻与往回翻时要的是左右两栏里不同的那一栏（栏号是物理的，RTL 的书与逻辑序相反）。
-type BackCommit = ((usize, usize, usize), (f32, f32));
+pub(in crate::ui::features::reader) type BackCommit = ((usize, usize, usize), (f32, f32));
 
 /// 进场页那张纹理里躺着的是哪一格：`(章号, 页号)` + 那一刻的窗口尺寸。
 ///
 /// 口径同 [`CaptureCommit`]。只服务平摊翻页（左右平移 / 上下平移 / 覆盖）：那一族没有
 /// 背面与栏可言，进场页整张进纹理，键不需要栏那一格。
-type IncomingCommit = ((usize, usize), (f32, f32));
+pub(in crate::ui::features::reader) type IncomingCommit = ((usize, usize), (f32, f32));
 
 /// 视图现在拿的是什么内容。
 pub enum Source {
-    /// 兜底：一行硬编码文本。找不到任何文档时用它，为的是冷启动失败也能看见画面，
-    /// 而不是一片黑 —— 「装上了但读不到书」和「根本没起来」在 logcat 里很难分开。
-    Sample(SharedString),
+    /// 启动占位：会话已经起来了，但外壳还没把书换上来。零内容，不渲染任何正文。
+    Empty,
     /// 一本打开的书。
     ///
-    /// 装箱是因为两臂差着数量级：`Book` 带着章节表与排版结果，而兜底那一行只要 24。
-    /// 不装箱的话，整个 `Source` 连同它外面的会话都按大的那臂算，每次赋值都在搬一整本书。
+    /// 装箱是因为两臂差着数量级：`Book` 带着章节表与排版结果，而占位那一格没有内容。
     Book(Box<Book>),
     /// 一本打开的定版式书（CBZ / 逐页 SVG 漫画）。页是既定的，没有排版链 —— 见
     /// [`FixedBook`] 与 `content::format::Content` 的两族划分。
@@ -549,9 +547,6 @@ pub(in crate::ui::features::reader) const DRAG_THRESHOLD_PX: f32 = 4.0;
 /// [`ReaderSession::flush_book_settings`] 兜住。
 pub(in crate::ui::features::reader) const SETTINGS_SETTLE_FRAMES: u32 = 24;
 
-/// 兜底用的那行字。中英混排，顺带把 fallback 路径也验一遍。
-const SAMPLE_LINE: &str = "Folio — 中文正文与 Latin 混排的一行";
-
 /// 「读者还在滑」那一条判据的两个数（见 [`ReaderSession::mark_scroll`]）。
 const SCROLL_WINDOW: f32 = 0.15;
 const SCROLL_RATIO: f32 = 0.03;
@@ -602,27 +597,27 @@ impl ReaderSession {
     /// 导入管线把它当一本书收进库。实测症状就是「书架顶上有一本叫『版心样本』的书，
     /// 删掉之后下次全盘扫描又回来」。
     ///
-    /// 兜底那一行仍然要留（`Source::Sample`）：它是「起来了但还没打开书」这一屏，
-    /// 没有它就得让外壳保证永远不先构造阅读页，而那是个更脆的约定。
-    /// 书库句柄照样带上 —— 外壳紧接着就用 `open_book` 换书，句柄丢了那条路读不出东西。
+    /// `Source::Empty` 是「起来了但还没打开书」这一格，零内容。外壳在
+    /// [`open_reading`](crate::ui::shell::AppShell) 里紧接着用 `open_book` 换书，
+    /// 书库句柄照样带上 —— 丢了那条路就永远读不出东西（只报「章节没入库」）。
     pub fn boot(cx: &mut App) -> Self {
         let prefs = ConfigHolder::reader(cx);
         // 书库没装不是 fatal：照样能读，只是进度与偏好落不了盘，
         // 而「读了但没记住」比「直接退出」更可接受。
         let store = crate::ui::services::app_store::handle(cx);
-        tracing::debug!("ReaderSession: 启动进占位屏，等外壳按书架点选换书");
-        Self::sample(&prefs, store, cx)
+        tracing::debug!("ReaderSession: 启动进占位态，等外壳按书架点选换书");
+        Self::booting(&prefs, store, cx)
     }
 
-    /// 只有那一行兜底文本时用。书库句柄**照样带上**：这一屏不是终点，
+    /// 零内容的启动占位。书库句柄**照样带上**：这一屏不是终点，
     /// 外壳紧接着就用 [`Self::open_book`] 把读者点的那本换上来，
     /// 句柄丢了那条路就永远读不出东西（只报「章节没入库」）。
-    fn sample(prefs: &Reader, store: Option<Arc<Store>>, cx: &mut App) -> Self {
+    fn booting(prefs: &Reader, store: Option<Arc<Store>>, cx: &mut App) -> Self {
         let family = device_family(&prefs.font_family, cx);
         let mut effective = prefs.clone();
         effective.font_family = family.clone();
         Self {
-            source: Source::Sample(SAMPLE_LINE.into()),
+            source: Source::Empty,
             wanted_family: prefs.font_family.clone(),
             book_settings_rev: ConfigHolder::book_rev(cx),
             settings_pending: None,
@@ -1038,7 +1033,7 @@ impl ReaderSession {
         // 换书时那一层若还开着，先关掉：查看器手里带的是**上一本**折出来的那一列，
         // 留着它就能继续左右滑到上一本的图上去 —— 计数、分享、定位原文全指着别人的书。
         self.close_image_viewer(cx);
-        // 图的那一列也按新的那一本重折一次（兜底那一行没有列，`Sample` 折成空）。
+        // 图的那一列也按新的那一本重折一次（兜底那一行没有列，折成空）。
         self.rebuild_image_sequence();
         self.scroll_y = 0.0;
         self.page = 0;
@@ -1103,11 +1098,19 @@ impl ReaderSession {
         self.pending_anchor = None;
         self.pending_restore = locator;
     }
+    /// 这一份会话是否已经打开了一本书（可重排或定版式）。
+    ///
+    /// 外壳用它守住「没有书就不构造阅读页」：`Source::Empty` 只允许存在于
+    /// 构造与 `open_book` 之间那一小段，不能变成一屏。
+    pub fn has_book(&self) -> bool {
+        !matches!(self.source, Source::Empty)
+    }
+
     /// 当前那本书的只读借用；兜底那一行与定版式书都没有「可重排的书」，返回 `None`。
     pub(in crate::ui::features::reader) fn book(&self) -> Option<&Book> {
         match &self.source {
             Source::Book(book) => Some(book),
-            Source::Sample(_) | Source::Fixed(_) => None,
+            Source::Empty | Source::Fixed(_) => None,
         }
     }
 
@@ -1130,7 +1133,7 @@ impl ReaderSession {
     pub(in crate::ui::features::reader) fn book_mut(&mut self) -> Option<&mut Book> {
         match &mut self.source {
             Source::Book(book) => Some(book),
-            Source::Sample(_) | Source::Fixed(_) => None,
+            Source::Empty | Source::Fixed(_) => None,
         }
     }
 
@@ -1310,7 +1313,7 @@ impl ReaderSession {
         match &self.source {
             Source::Book(book) => Some(book.opened()),
             Source::Fixed(book) => Some(book.opened()),
-            Source::Sample(_) => None,
+            Source::Empty => None,
         }
     }
 
@@ -1322,7 +1325,7 @@ impl ReaderSession {
 
     pub fn title(&self) -> SharedString {
         match &self.source {
-            Source::Sample(_) => "folio".into(),
+            Source::Empty => "folio".into(),
             Source::Book(book) => book.title().clone(),
             Source::Fixed(book) => book.title().clone(),
         }
@@ -1391,7 +1394,7 @@ impl ReaderSession {
     pub fn page_margins(&self) -> PageMargins {
         match &self.source {
             Source::Book(book) => book.document().page_margins(),
-            Source::Sample(_) | Source::Fixed(_) => PageMargins::default(),
+            Source::Empty | Source::Fixed(_) => PageMargins::default(),
         }
     }
 

@@ -29,7 +29,7 @@ use gpui_kit::{
 };
 
 use crate::ui::features::notes::{NotesEvent, NotesView};
-use crate::ui::features::reader::{Arrow, ReadingPage, Reserve};
+use crate::ui::features::reader::{Arrow, ReaderSession, ReadingPage, Reserve};
 use crate::ui::features::settings::{CompactSettings, SettingsPage, SettingsView};
 use crate::ui::features::shelf::{ShelfEvent, ShelfView};
 use crate::ui::features::stats::StatsView;
@@ -781,7 +781,18 @@ impl AppShell {
         // 这一层自己的返回栈：正文是栈底，从正文压进去的那一屏（设置）叠在它上面。
         let stack = cx.new(|_| NavStackState::new());
         let shell = cx.entity().downgrade();
-        let page = cx.new(|cx| ReadingPage::new(stack.downgrade(), shell, cx));
+        // 书的打开放在阅读页构造之前：`has_book()` 为假就不建这一层，
+        // `Source::Empty` 不允许变成一屏。
+        let reader = cx.new(|cx| {
+            let mut reader = ReaderSession::boot(cx);
+            reader.open_book(book_id, cx);
+            reader
+        });
+        if !reader.read(cx).has_book() {
+            tracing::warn!(book_id, "ReaderSession: 书没打开，不构造阅读页");
+            return;
+        }
+        let page = cx.new(|cx| ReadingPage::new(reader, stack.downgrade(), shell, cx));
         // 栈底那一次压入不给动画：这一层的进场由 [`Presence`] 那口时钟管，两层各动一次是套娃。
         stack.update(cx, |state, cx| {
             state.push(page.clone(), NavMotion::Immediate, cx)
@@ -790,7 +801,6 @@ impl AppShell {
         // 变化，所以这条栈的每一动作用敲一下外壳收尾（层里不需要冻导航栏：那一层的盒子本来就
         // 不因栈的形状而变）。
         let _stack_watch = cx.subscribe(&stack, |_, _, _, cx| cx.notify());
-        page.update(cx, |page, cx| page.open(book_id, cx));
         self.reading = Some(ReadingLayer {
             page,
             stack,
@@ -878,12 +888,13 @@ impl AppShell {
     ) {
         let stack = cx.new(|_| NavStackState::new());
         let shell = cx.entity().downgrade();
-        let page = cx.new(|cx| ReadingPage::new(stack.downgrade(), shell, cx));
+        let session = ReaderSession::with_document(doc, prefs, None, None, locator, cx);
+        let reader = cx.new(|_| session);
+        let page = cx.new(|cx| ReadingPage::new(reader, stack.downgrade(), shell, cx));
         stack.update(cx, |state, cx| {
             state.push(page.clone(), NavMotion::Immediate, cx)
         });
         let _stack_watch = cx.subscribe(&stack, |_, _, _, cx| cx.notify());
-        page.update(cx, |page, cx| page.open_document(doc, prefs, locator, cx));
         self.reading = Some(ReadingLayer {
             page,
             stack,

@@ -613,6 +613,29 @@ mod booted {
         boot(cx, false).0
     }
 
+    /// 给只验层/点击/退场的用例挂一层真实可读的阅读页。
+    ///
+    /// 外壳现在不允许拿假 book id 构造阅读页（`open_reading` 先检查 `has_book`）；
+    /// 这些用例不验内容，给一份最小可重排文档就够了。
+    fn open_test_reading(shell: &Entity<AppShell>, cx: &mut TestAppContext) {
+        let doc: std::sync::Arc<dyn folio_core::content::document::Document> =
+            std::sync::Arc::from(folio_core::content::document::from_content(
+                folio_core::content::format::DocMeta::default(),
+                folio_core::Content::Reflow(folio_core::FlowDoc {
+                    chapters: vec![folio_core::Chapter::inline("第一章", "<p>测试正文。</p>")],
+                    ..Default::default()
+                }),
+            ));
+        shell.update(cx, |shell, cx| {
+            shell.open_reading_for_test(
+                doc,
+                folio_core::Reader::default(),
+                folio_core::Locator::start(),
+                cx,
+            );
+        });
+    }
+
     /// 切到「我的」再画一帧，问那一格里长出的是设置整页还是行列表。
     fn account_shows_the_settings_page(
         cx: &mut TestAppContext,
@@ -625,6 +648,27 @@ mod booted {
             window.try_find("folio-settings").is_some()
         })
         .expect("窗口应能渲染")
+    }
+
+    /// 回归门：书库里没有这一本时，阅读层不许被构造。
+    ///
+    /// `open_reading` 先 `open_book` 再问 `has_book()`；假 id 在空书库里读不出来，
+    /// `Source::Empty` 只能停在会话里，不能变成一屏。这里同时画一帧，
+    /// 确认空态外壳仍能出帧（不是靠 panic 挡住）。
+    #[gpui_kit::test]
+    fn a_missing_book_does_not_mount_the_reading_layer(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        shell.update(cx, |this, cx| this.open_reading(i64::MAX, cx));
+        assert!(
+            !cx.update(|cx| shell.read(cx).reading_mounted_for_test()),
+            "读不出来的书不该构造阅读页"
+        );
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("窗口应能渲染");
+        assert!(
+            !cx.update(|cx| shell.read(cx).reading_mounted_for_test()),
+            "空态渲染之后仍不该有阅读页"
+        );
     }
 
     /// 回归门：自定义标题栏必须挂在视图树里（曾经的 bug 是窗口选项声明了透明标题栏、
@@ -1290,7 +1334,7 @@ mod booted {
     fn reading_layer_still_receives_clicks_when_it_occludes(cx: &mut TestAppContext) {
         let (handle, shell) = boot(cx, false);
         cx.update(|cx| cx.set_reduce_motion(true));
-        shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
+        open_test_reading(&shell, cx);
         for _ in 0..3 {
             cx.update_window(handle, |_, window, cx| window.render_frame(cx))
                 .expect("窗口应能渲染");
@@ -1337,7 +1381,7 @@ mod booted {
     fn a_tap_on_either_system_band_reaches_the_body(cx: &mut TestAppContext) {
         let (handle, shell) = boot(cx, false);
         cx.update(|cx| cx.set_reduce_motion(true));
-        shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
+        open_test_reading(&shell, cx);
         let frames = |cx: &mut TestAppContext| {
             for _ in 0..3 {
                 cx.update_window(handle, |_, window, cx| window.render_frame(cx))
@@ -1397,7 +1441,7 @@ mod booted {
         let stack = shell.read_with(cx, |this, _| {
             this.stacks[Destination::Shelf.index()].clone()
         });
-        shell.update(cx, |this, cx| this.open_reading(1, cx));
+        open_test_reading(&shell, cx);
         assert!(
             shell.read_with(cx, |this, _| this.reading_open()),
             "书该已经盖上来了"
@@ -1573,7 +1617,7 @@ mod booted {
         let stack = shell.read_with(cx, |this, _| {
             this.stacks[Destination::Shelf.index()].clone()
         });
-        shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
+        open_test_reading(&shell, cx);
         cx.update_window(handle, |_, window, cx| window.render_frame(cx))
             .expect("窗口应能渲染");
 
@@ -1622,7 +1666,7 @@ mod booted {
         use std::time::Duration;
 
         let (handle, shell) = boot(cx, false);
-        shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
+        open_test_reading(&shell, cx);
         cx.update_window(handle, |_, window, cx| window.render_frame(cx))
             .expect("窗口应能渲染");
         assert!(
@@ -1683,8 +1727,8 @@ mod booted {
         use std::time::Duration;
 
         let (handle, shell) = boot(cx, false);
-        let page = shell.update(cx, |this, cx| {
-            this.open_reading(NOT_A_BOOK, cx);
+        open_test_reading(&shell, cx);
+        let page = shell.read_with(cx, |this, _| {
             this.reading
                 .as_ref()
                 .map(|layer| layer.page.clone())
@@ -1996,7 +2040,6 @@ mod booted {
     /// 测试里「点开一本读不出来的书」不能撞上那本真的在册的，否则 `open_book` 会把
     /// 源文件不在了的那本**连数据一起删**（那是它对「书从架上消失」的正确处置），
     /// 后面那条会话就插不进外键了。
-    const NOT_A_BOOK: i64 = 9_999;
 
     /// 回归门：关掉一本书之后统计要跟上，不必等读者再切一次目的地。
     ///
@@ -2033,7 +2076,7 @@ mod booted {
             )
             .unwrap();
         let now = folio_core::infra::time::now();
-        shell.update(cx, |this, cx| this.open_reading(NOT_A_BOOK, cx));
+        open_test_reading(&shell, cx);
         store.record_session(book, now - 600, now, 0).unwrap();
         shell.update(cx, |this, cx| this.close_reading(cx));
 

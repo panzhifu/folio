@@ -2081,7 +2081,7 @@ fn a_plain_cover_backdrop_without_an_author_height_still_fills_a_window(cx: &mut
 /// 行内一张高图会把行盒撑到图高，按行盒画时整条底色会跟着长成图那么高。
 #[gpui_kit::test]
 fn the_selection_band_hugs_the_text_not_the_line_box(cx: &mut TestAppContext) {
-    use crate::ui::features::reader::view::body::text_ink_box;
+    use crate::ui::features::reader::view::body::marks::text_ink_box;
 
     cx.update(gpui_kit::init);
     let doc = layout_of(cx, "<p>于是我们奋力向前，逆水行舟。</p>", &prefs(), 400.0);

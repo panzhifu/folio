@@ -319,7 +319,7 @@ fn a_fixed_book_scrolls_continuously_and_tracks_the_page_under_the_viewport(
 #[test]
 fn a_fixed_page_row_is_centred_inside_the_reader_margin() {
     use crate::ui::features::reader::model::fixed_book::PageTile;
-    use crate::ui::features::reader::view::body::fixed_page_tiles_at;
+    use crate::ui::features::reader::view::body::fixed::fixed_page_tiles_at;
     use crate::ui::foundation::images::no_images;
 
     let tile = |width: u32, height: u32| PageTile {
@@ -748,7 +748,7 @@ fn the_zoom_entry_follows_the_page_being_read(cx: &mut TestAppContext) {
     );
 
     cx.update_window(handle, |_, window, cx| {
-        crate::ui::features::reader::view::body::open_picture(
+        crate::ui::features::reader::view::body::images::open_picture(
             &viewer,
             &view.downgrade(),
             &key,

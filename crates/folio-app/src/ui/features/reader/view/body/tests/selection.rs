@@ -333,7 +333,7 @@ fn the_selection_band_is_no_taller_than_the_text(cx: &mut TestAppContext) {
     settle(cx, handle);
     let (line_height, ink, caret_height) = view.read_with(cx, |v, _| {
         let line = &v.lines()[1];
-        let (_, ink) = crate::ui::features::reader::view::body::text_ink_box(line)
+        let (_, ink) = crate::ui::features::reader::view::body::marks::text_ink_box(line)
             .expect("这一行有字，该给字墨盒");
         let hit = v
             .handle_hits
