@@ -27,7 +27,7 @@
 //! - **两根轴都归翻页，跟手只认那一档的轴**。横着拖与竖着拖都是翻一页；但「纸跟着手指走」
 //!   要求拖的那根轴与动画走的那根轴是同一根 —— 纸横着走而手指竖着拖，读起来不是跟手，是画错
 //!   了。轴不合的那一半照旧翻页，只是到松手那一刻才走（与点屏、键盘同一条路）。
-//! - **一笔只认一次**。让开之后（竖轴、章界、定版式）同一趟里的后续增量不再重新起头 ——
+//! - **一笔只认一次**。让开之后（竖轴、章界）同一趟里的后续增量不再重新起头 ——
 //!   一次斜划中途转横不该半路杀出翻页；抬手后惯性那段合成增量也走这一条。
 //!
 //! [`swipe_scroll`]: 事件搬运与累计；[`claim_swipe`]: 定轴与认领；[`swipe_release`]: 落定或弹回。
@@ -251,7 +251,7 @@ enum Claim {
     Claimed,
     /// 还没走够 [`SLOP`]，那一下仍可能是点按：留着跟踪态。
     NotYet,
-    /// 这一趟不归翻页（轴不对 / 书尾 / 定版式）：标记掉，后面每一步都 `Swallow`。
+    /// 这一趟不归翻页（轴不对 / 书尾）：标记掉，后面每一步都 `Swallow`。
     Refused,
 }
 
@@ -313,15 +313,16 @@ impl ReaderSession {
     /// —— 与动画那一头 `area.distance(self.axis())` 同一把尺。从前两头都按手指那根轴量：折页是一笔
     /// 两轴的，于是一笔竖着划的按页高归一，纸几乎没卷、进度却已经过半，松手读出来是「页翻了纸没
     /// 动」。其余几档 `claims` 只认自己那根，两把尺本来就重合。
-    /// `None` = 这一屏没有「翻页」这件事：连续滚动（手指就是滚）、定版式（没有正文切片）、
-    /// 还没量出版心（距离是 0，进度无从归一）、或者没有书。
+    /// `None` = 这一屏没有「翻页」这件事：连续滚动（手指就是滚）、还没量出版心
+    /// （距离是 0，进度无从归一）、或者没有书。定版式**算**有翻页：它的页是一张位图，
+    /// 纸一样跟着手指走（`plan_sheets` 两条臂共走一份计划）。
     pub(in crate::ui::features::reader) fn swipe_geometry(
         &self,
         cx: &App,
         axis: Axis,
         intent: Option<TurnIntent>,
     ) -> Option<(Axis, f32, bool)> {
-        if self.is_fixed() || self.book().is_none() || self.laid_out.mode.is_continuous() {
+        if self.laid_out.mode.is_continuous() || (!self.is_fixed() && self.book().is_none()) {
             return None;
         }
         let style = turn_animation::of(ConfigHolder::appearance(cx).page_turn);

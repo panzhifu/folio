@@ -8,12 +8,12 @@ use std::rc::Rc;
 use crate::ui::features::reader::model::fixed_zoom::FixedZoom;
 use crate::ui::features::reader::model::page_geometry::{BandPolicy, PageBox, PageRect};
 use crate::ui::features::reader::model::session::PageRef;
+use crate::ui::features::reader::motion::turn_animation::{Cut, Sheet};
 use crate::ui::features::reader::view::body::fixed::FixedTileAt;
+use crate::ui::features::reader::view::paint::GlyphsElement;
+use crate::ui::features::reader::view::scene::Scene;
 use folio_core::content::format::PageText;
 use gpui_kit::{AnyElement, Bounds, Pixels};
-use crate::ui::features::reader::view::paint::GlyphsElement;
-use crate::ui::features::reader::motion::turn_animation::{Cut, Sheet};
-use crate::ui::features::reader::view::scene::Scene;
 
 /// 这一栏这一帧归哪一层画。
 ///
@@ -128,6 +128,10 @@ impl Paper {
     }
 
     /// 定版式一页：纸就是整扇窗，两条带浮在页图之上，缩放跟着纸走。
+    ///
+    /// 身份用 `(0, 页号)` 而不是 `(页号, 0)`：捕获与翻页两处的键都是
+    /// `(会话的 chapter_index, 页号)`，定版式的 `chapter_index` 恒为 0（它没有章）。
+    /// 两套写法混着用，`plan_flat` 就找不到同一张纸。
     pub(super) fn fixed(
         body: FixedPaper,
         sheet: Sheet,
@@ -136,7 +140,7 @@ impl Paper {
     ) -> Self {
         let page = body.page;
         Self {
-            identity: PageRef { chapter: page, page: 0 },
+            identity: PageRef { chapter: 0, page },
             paper: PageRect::new(0.0, 0.0, viewport.0, viewport.1),
             content: PageRect::new(0.0, 0.0, viewport.0, viewport.1),
             bands: BandPolicy::Overlay,
@@ -187,4 +191,11 @@ pub(super) struct PaperCapture {
     pub(super) under: Vec<AnyElement>,
     pub(super) over: Vec<AnyElement>,
     pub(super) bands: Option<AnyElement>,
+}
+
+/// 一份只有图、没有字形的捕获副本（定版式的页图）。`GlyphsElement` 仍要占着那一格：
+/// [`PaperCapture`] 的装配顺序是 `under → element → over`，页图排在 `over` ——
+/// 定版式的痕迹压在页图**之上**，所以页图不能进 `under`。
+pub(super) fn empty_capture_element() -> GlyphsElement {
+    GlyphsElement::new().capture()
 }

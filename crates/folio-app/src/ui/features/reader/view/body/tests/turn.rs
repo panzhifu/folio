@@ -934,3 +934,177 @@ fn the_release_leg_clock_starts_at_the_release_not_the_first_frame(cx: &mut Test
         "16 ms 远没到落定"
     );
 }
+
+/// 分页**静止**时每页那份读数带要挂在正文裁切层外面。基线把 `page_bands` 塞进了
+/// 按 `paper.content` 裁切的纸层：元素在树里、`bands_drawn` 也为真，但屏上被裁掉，
+/// 只有翻页途中 clip 放宽到整张纸才露出来（读者看到的「滑动时有、落定就没了」）。
+#[gpui_kit::test]
+fn a_paged_band_is_drawn_without_a_turn(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let (layer, band) = cx
+        .update_window(handle, |_, window, _| {
+            (
+                window.try_find("reader-page-bands").is_some(),
+                window
+                    .try_find(ElementId::from("reader-header-band"))
+                    .map(|element| element.bounds()),
+            )
+        })
+        .expect("窗口应能渲染");
+    assert!(layer, "每页带子该有自己的层（在正文裁切层之外），实得没有");
+    let band = band.expect("页眉带该在树里");
+    assert!(
+        f32::from(band.origin.y) < 120.0 && f32::from(band.origin.x).abs() < 1.0,
+        "静止帧的页眉带该在纸顶（x≈0、y 在带高以内），实得 {:?}",
+        band
+    );
+}
+
+/// 平移翻页时，每页的读数带跟着**自己那张纸**走：进场页从右侧进来，它的带子
+/// x 应该等于纸的位移，而不是钉在 0。
+#[gpui_kit::test]
+fn a_paged_band_rides_its_sheet(cx: &mut TestAppContext) {
+    use super::super::paper::band_id;
+    use crate::ui::features::reader::model::session::PageRef;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    turn_frame(cx, handle, Duration::from_millis(1));
+
+    let arriving = PageRef {
+        chapter: 0,
+        page: 1,
+    };
+    let at = cx
+        .update_window(handle, |_, window, _| {
+            window
+                .try_find(band_id("reader-band-live", arriving, 0))
+                .map(|element| f32::from(element.bounds().origin.x))
+        })
+        .expect("窗口应能渲染")
+        .expect("进场页的带子该在树里");
+    assert!(at > 150.0, "进场页的带子该跟着纸从右侧进来，实得 x = {at}");
+
+    // 进场页改由烘好的纹理画之后，它的带子还得在（那一份是独立的 `Paper`）。
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let after_bake = cx
+        .update_window(handle, |_, window, _| {
+            window
+                .try_find(band_id("reader-band-live", arriving, 0))
+                .map(|element| f32::from(element.bounds().origin.x))
+        })
+        .expect("窗口应能渲染");
+    assert!(
+        after_bake.is_some_and(|x| x > 150.0),
+        "进场页改由纹理画之后，它的带子不该消失，且仍该跟着纸走；实得 {after_bake:?}"
+    );
+
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    let landed = cx
+        .update_window(handle, |_, window, _| {
+            window
+                .try_find(band_id("reader-band-live", arriving, 0))
+                .map(|element| f32::from(element.bounds().origin.x))
+        })
+        .expect("窗口应能渲染")
+        .expect("落定后带子该还在");
+    assert!(
+        landed.abs() < 1.0,
+        "落定后带子该回到纸的静止位置，实得 x = {landed}"
+    );
+}
+
+/// 平移那一趟的进场页纹理里**必须有字**：捕获副本从前只在「只进捕获、不上屏」那一组
+/// 收 `incoming`，而进场页是画在主场景的 `Incoming` 角色 —— 副本被丢掉，纹理照样记成
+/// 「已烘」却只有纸色，滑动时白屏、落定后才重新画出来。
+#[gpui_kit::test]
+fn a_flat_turn_bakes_the_arriving_page_text(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+
+    // 第一帧：进场页还实时画，同时把副本烘进捕获层 3。
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let runs = view.read_with(cx, |v, _| v.incoming_capture_runs);
+    assert!(runs > 0, "进场页的捕获副本里该收进字形，实得 {runs} 条 run");
+
+    // 第二帧起：两张纸都由纹理画，场景一份都不重建。
+    let rebuilds = rebuilds_this_frame(cx, handle, Duration::from_millis(1));
+    assert_eq!(
+        rebuilds, 0,
+        "进场页纹理已烘好，这一帧不该再重建场景（拿到 {rebuilds} 份）"
+    );
+    assert!(flat_incoming_drawn(cx, handle), "进场页该改由烘好的纹理画");
+}
+
+/// 离场页改由正面纹理画之后，它的带子还要在：那一份是独立的「只画带子」的 `Paper`，
+/// 跟着同一张纸往左滑出去。只靠纹理里烘的那一条时，纹理那一趟没带上它，滑动中的
+/// 旧页就没有页眉。
+#[gpui_kit::test]
+fn a_paged_leaving_band_survives_the_flat_capture(cx: &mut TestAppContext) {
+    use super::super::paper::band_id;
+    use crate::ui::features::reader::model::session::PageRef;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    turn_frame(cx, handle, Duration::from_millis(60));
+    assert!(
+        flat_capture_drawn(cx, handle),
+        "前置：出场页这一帧该由正面纹理画"
+    );
+
+    let leaving = PageRef {
+        chapter: 0,
+        page: 0,
+    };
+    let x = cx
+        .update_window(handle, |_, window, _| {
+            window
+                .try_find(band_id("reader-band-live", leaving, 0))
+                .map(|element| f32::from(element.bounds().origin.x))
+        })
+        .expect("窗口应能渲染");
+    assert!(
+        x.is_some_and(|x| x < -1.0),
+        "离场页的带子该跟着纸往左走，实得 {x:?}"
+    );
+}

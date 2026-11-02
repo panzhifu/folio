@@ -53,7 +53,8 @@ impl TurnIntent {
 #[derive(Clone, Copy, Debug)]
 pub(in crate::ui::features::reader) struct PagingFacts {
     pub page: usize,
-    /// 本章页数；双页模式是「张数」。`0` = 还没切出来。
+    /// 本章页数。可重排的双页是「张数」（一张纸两栏）；定版式的双页是**页数**
+    /// （一屏两张相邻页，步进 2）。`0` = 还没切出来。
     pub pages: usize,
     pub scroll: f32,
     pub max_scroll: f32,
@@ -65,6 +66,9 @@ pub(in crate::ui::features::reader) struct PagingFacts {
     /// 定版式没有章节可跨；`can_*_chapter` 在会话侧已经会是 `false`，这一格只为让
     /// `Paged` 的测试能显式表达「没有章」。
     pub fixed: bool,
+    /// 定版式双页：一屏两张**相邻页**，翻页步进 2。可重排的双页不读它 ——
+    /// 那一族的 `page` 本来就是一个跨页的号（两栏同属一张纸），步进仍是 1。
+    pub fixed_spread: bool,
 }
 
 /// 策略给出的下一步。会话负责把它落成状态与动画。
@@ -109,7 +113,8 @@ impl PagingStrategy for Continuous {
     }
 }
 
-/// 分页 / 双页：章内翻页；到章界换章。双页的 `pages` 已经是张数。
+/// 分页 / 双页：章内翻页；到章界换章。可重排双页的 `pages` 已经是张数；
+/// 定版式双页仍是页数、一屏两张，步进由 `fixed_spread` 那一格给。
 pub(in crate::ui::features::reader) struct Paged;
 
 impl PagingStrategy for Paged {
@@ -117,10 +122,18 @@ impl PagingStrategy for Paged {
         if !facts.ready || facts.pages == 0 {
             return TurnPlan::None;
         }
+        // 定版式双页一屏两张相邻页（0/1、2/3……），步进 2；其余组合仍是一张纸一步。
+        let step = if facts.fixed && facts.fixed_spread {
+            2
+        } else {
+            1
+        };
         match intent {
             TurnIntent::Next => {
-                if facts.page + 1 < facts.pages {
-                    TurnPlan::Page { to: facts.page + 1 }
+                if facts.page + step < facts.pages {
+                    TurnPlan::Page {
+                        to: facts.page + step,
+                    }
                 } else if !facts.fixed && facts.can_next_chapter {
                     TurnPlan::Chapter { delta: 1 }
                 } else {
@@ -128,8 +141,10 @@ impl PagingStrategy for Paged {
                 }
             }
             TurnIntent::Previous => {
-                if facts.page > 0 {
-                    TurnPlan::Page { to: facts.page - 1 }
+                if facts.page >= step {
+                    TurnPlan::Page {
+                        to: facts.page - step,
+                    }
                 } else if !facts.fixed && facts.can_prev_chapter {
                     TurnPlan::Chapter { delta: -1 }
                 } else {
@@ -173,6 +188,7 @@ mod tests {
             can_next_chapter: true,
             ready: true,
             fixed: false,
+            fixed_spread: false,
         }
     }
 
@@ -186,6 +202,50 @@ mod tests {
         assert_eq!(
             paged.plan(&facts(1, 4), TurnIntent::Previous),
             TurnPlan::Page { to: 0 }
+        );
+    }
+
+    #[test]
+    fn a_fixed_spread_steps_two_adjacent_pages_at_a_time() {
+        let paged = Paged;
+        let spread = |page: usize, pages: usize| {
+            let mut facts = facts(page, pages);
+            facts.fixed = true;
+            facts.fixed_spread = true;
+            facts.can_prev_chapter = false;
+            facts.can_next_chapter = false;
+            facts
+        };
+        // 0/1 → 2/3 → 4/5。
+        assert_eq!(
+            paged.plan(&spread(0, 6), TurnIntent::Next),
+            TurnPlan::Page { to: 2 }
+        );
+        assert_eq!(
+            paged.plan(&spread(2, 6), TurnIntent::Next),
+            TurnPlan::Page { to: 4 }
+        );
+        assert_eq!(
+            paged.plan(&spread(2, 6), TurnIntent::Previous),
+            TurnPlan::Page { to: 0 }
+        );
+        // 书首 / 书尾一步都不许越出页表。
+        assert_eq!(
+            paged.plan(&spread(0, 6), TurnIntent::Previous),
+            TurnPlan::None
+        );
+        assert_eq!(paged.plan(&spread(4, 6), TurnIntent::Next), TurnPlan::None);
+        // 只剩一张尾页：那一屏仍要能走到（4/5 里 5 越界，左边那张照摆）。
+        assert_eq!(
+            paged.plan(&spread(2, 5), TurnIntent::Next),
+            TurnPlan::Page { to: 4 }
+        );
+        // 单页的定版式仍是一页一步：`fixed` 不自动变成双页。
+        let mut single = facts(1, 4);
+        single.fixed = true;
+        assert_eq!(
+            paged.plan(&single, TurnIntent::Next),
+            TurnPlan::Page { to: 2 }
         );
     }
 

@@ -34,7 +34,7 @@ use super::art::{
 };
 use super::capture::{CaptureView, flat_mesh_canvas};
 use super::turn_view;
-use super::decor::decoration_child;
+use super::decor::{decoration_child, decoration_ready};
 use super::images::{image_child, painted_picture, plain_image, stack_dots, stack_peek};
 use super::marks::{annotation_fills, speech_fill};
 use super::paper::{CaptureRole, PageScene, Paper, PaperBody, PaperCapture};
@@ -78,6 +78,16 @@ struct CaptureSink {
     back_children: Vec<AnyElement>,
     incoming_element: GlyphsElement,
     incoming_children: Vec<AnyElement>,
+    /// 收进进场副本的正文插图张数（背景图不数，它走 `decoration_ready` 那条判据）。
+    incoming_images: u32,
+    /// 这一组里有图还没进图集（且图集没判失败）：捕获副本不完整，这一帧不交。
+    ///
+    /// 纹理一旦记成「已烘」就不会自己重来，缺一张图就一直缺；滑动时读者看到的是
+    /// 正文在、图没了。判据与定版式的 `fixed_capture_ready` 同源：拿到像素或已失败
+    /// 才算落地。
+    front_missing: bool,
+    back_missing: bool,
+    incoming_missing: bool,
 }
 
 impl CaptureSink {
@@ -89,6 +99,10 @@ impl CaptureSink {
             back_children: Vec::new(),
             incoming_element: GlyphsElement::new(),
             incoming_children: Vec::new(),
+            incoming_images: 0,
+            front_missing: false,
+            back_missing: false,
+            incoming_missing: false,
         }
     }
 }
@@ -96,6 +110,10 @@ impl CaptureSink {
 /// 一张纸渲染完的产物：已经裁好、已经带一次纸层位移的显示层，外加正面捕获元素。
 struct PaperRenderOut {
     layers: Vec<AnyElement>,
+    /// 这一张纸自己的读数带（页眉 / 页脚）。**不放进 `layers`**：那一层裁到
+    /// `paper.content`（正文区），带子会被裁掉；返回给 `body` 挂在裁切层外面，
+    /// 静止时看得见，翻页时按 `Sheet::offset` 跟着纸走。
+    page_bands: Vec<AnyElement>,
     front_capture: Option<PaperCapture>,
     back_capture: Option<PaperCapture>,
     incoming_capture: Option<PaperCapture>,
@@ -592,6 +610,7 @@ impl ReaderSession {
             painted_keys,
             bands_drawn,
             paper_layers,
+            page_bands,
         } = arm;
         // —— 分页 / 双页：当前页 +（动画时）同章邻页或跨章目标页 ——
         // 这一档不拼坐标链：章高按「一页」量，页表自己就带着页眉页脚。
@@ -923,6 +942,52 @@ impl ReaderSession {
                     (self.enter_shift, layer_top),
                     self.curl_bake_origin.clone(),
                 ));
+                // 出场页的纹理只管正文；页眉/页脚仍实时画一份放在纹理**之上**，
+                // 跟着同一张纸的 `at` 走。从前只靠正面纹理里烘的那一条，纹理那一趟
+                // 没把它带上（或采样偏了）时，滑动中的旧页就没有页眉。
+                let band_scenes = (0..columns)
+                    .map(|column| PageScene {
+                        identity: page_ref,
+                        column,
+                        origin_y: 0.0,
+                        height: 0.0,
+                        range: 0.0..0.0,
+                        role: CaptureRole::Live,
+                        back_copy: false,
+                        incoming_copy: false,
+                        x: 0.0,
+                        top: 0.0,
+                        cut: None,
+                        picture: None,
+                        art_drawn: false,
+                        scene: Scene::default(),
+                    })
+                    .collect();
+                let mut band_element = GlyphsElement::new();
+                let mut band_overlays = Vec::new();
+                let mut band_column = div().size_full().relative();
+                let mut band_backdrops = Vec::new();
+                let mut band_bands = Vec::new();
+                let out = self.render_paper(
+                    &*book,
+                    Paper::reflowable(page_ref, frame.page_box, at, band_scenes),
+                    &render_frame,
+                    PageSceneTargets {
+                        element: &mut band_element,
+                        overlays: &mut band_overlays,
+                        column: &mut band_column,
+                        backdrops: &mut band_backdrops,
+                        page_bands: &mut band_bands,
+                        page_picture: &mut *page_picture,
+                        bare_bands: &mut *bare_bands,
+                        painted_keys: &mut *painted_keys,
+                    },
+                    &mut *window,
+                    &mut *cx,
+                );
+                paper_layers.extend(out.layers);
+                page_bands.extend(out.page_bands);
+                *bands_drawn |= out.bands_drawn;
                 continue;
             }
             if flat_incoming.is_some() && *turn_arriving == Some(page_ref) {
@@ -979,6 +1044,7 @@ impl ReaderSession {
                     &mut *cx,
                 );
                 paper_layers.extend(out.layers);
+                page_bands.extend(out.page_bands);
                 *bands_drawn |= out.bands_drawn;
                 continue;
             }
@@ -1112,7 +1178,12 @@ impl ReaderSession {
                 };
                 // 背面 / 进场页的捕获还要看这一帧有没有活儿要烘：角色说这一栏属于哪一面，
                 // `back_key` / `incoming_bake` 说这一面这一帧要不要真写。
-                let back_copy = role.writes_back() && back_key.is_some();
+                // 单页折页没有「另一半」那一栏：背面就是目标页整张，所以进场页
+                // 自己也要写一份背面副本（从前只在 `leaf_turn` 的 `Back` 栏收，
+                // 单页那一趟背面因此一直是空的）。双页仍只由 `Back` 那一栏写。
+                let back_copy = back_key.is_some()
+                    && (role.writes_back()
+                        || (!leaf_turn && *turn_arriving == Some(page_ref)));
                 let incoming_copy = role.writes_incoming() && incoming_bake.is_some();
                 if !role.draws_main() && !back_copy {
                     continue;
@@ -1214,6 +1285,7 @@ impl ReaderSession {
             };
             let out = self.render_paper(&*book, paper, &render_frame, targets, &mut *window, &mut *cx);
             paper_layers.extend(out.layers);
+            page_bands.extend(out.page_bands);
             if front_capture.is_none() {
                 *front_capture = out.front_capture;
             }
@@ -1224,6 +1296,21 @@ impl ReaderSession {
                 *incoming_capture = out.incoming_capture;
             }
             *bands_drawn |= out.bands_drawn;
+        }
+        // 背面目标章还没排完版时排不出内容：给一份**空的副本**，请求仍会把纹理
+        // 清成纸色 —— 背面是一张干净的纸，而不是上一趟留下的字。目标页在、只是
+        // 图还没到时 **不** 走这一支（`back_missing` 让这一帧不交，下一帧重试）。
+        if back_key.is_some()
+            && back_capture.is_none()
+            && let Some((chapter, _, _)) = *back_key
+            && book.span_doc(chapter).is_none()
+        {
+            *back_capture = Some(PaperCapture {
+                element: super::paper::empty_capture_element(),
+                under: Vec::new(),
+                over: Vec::new(),
+                bands: None,
+            });
         }
     }
 }
@@ -1285,6 +1372,7 @@ impl ReaderSession {
             }
             return PaperRenderOut {
                 layers: Vec::new(),
+                page_bands: Vec::new(),
                 front_capture: None,
                 back_capture: None,
                 incoming_capture: None,
@@ -1316,6 +1404,7 @@ impl ReaderSession {
         }
         let mut out = PaperRenderOut {
             layers: Vec::new(),
+            page_bands: Vec::new(),
             front_capture: None,
             back_capture: None,
             incoming_capture: None,
@@ -1334,8 +1423,10 @@ impl ReaderSession {
             let mut overlays = Vec::new();
             let mut backdrops = Vec::new();
             let mut page_bands = Vec::new();
-            let has_back = scenes.iter().any(|scene| scene.role.writes_back());
-            let has_incoming = scenes.iter().any(|scene| scene.role.writes_incoming());
+            // 收谁进捕获副本按场景自己的旗子判，不按角色：单页折页的进场页是
+            // `Incoming` 角色，但它同时要写一份背面（目标页整张）。
+            let has_back = scenes.iter().any(|scene| scene.back_copy);
+            let has_incoming = scenes.iter().any(|scene| scene.incoming_copy);
             let mut capture = CaptureSink::new();
             let mut group_targets = PageSceneTargets {
                 element: &mut element,
@@ -1364,38 +1455,45 @@ impl ReaderSession {
             }
             let has_bands = !page_bands.is_empty();
             out.bands_drawn |= has_bands;
+            // 捕获副本**任何一组**里都可能出现：进场页照常画在主场景（`append` 那组），
+            // 它的副本只能在这里收。从前只在 `!append`（只进捕获、不上屏）那组收，
+            // 进场页的副本就被丢掉了 —— 纹理照样请求、照样记成「已烘」，里面却只有
+            // 纸色，下一帧用它替掉实时页就是滑动时的白屏。
+            let CaptureSink {
+                front_decor,
+                front_images,
+                back_element,
+                back_children,
+                incoming_element,
+                incoming_children,
+                incoming_images,
+                front_missing,
+                back_missing,
+                incoming_missing,
+            } = capture;
+            if has_back && !back_missing && out.back_capture.is_none() {
+                out.back_capture = Some(PaperCapture {
+                    element: back_element.capture(),
+                    under: back_children,
+                    over: Vec::new(),
+                    bands: None,
+                });
+            }
+            if has_incoming && !incoming_missing && out.incoming_capture.is_none() {
+                let capture = PaperCapture {
+                    element: incoming_element.capture(),
+                    under: incoming_children,
+                    over: Vec::new(),
+                    bands: None,
+                };
+                self.incoming_capture_runs += capture.element.run_count() as u32;
+                self.incoming_capture_images += incoming_images;
+                out.incoming_capture = Some(capture);
+            }
             if !append {
-                let CaptureSink {
-                    back_element,
-                    back_children,
-                    incoming_element,
-                    incoming_children,
-                    ..
-                } = capture;
-                if has_back {
-                    out.back_capture = Some(PaperCapture {
-                        element: back_element.capture(),
-                        under: back_children,
-                        over: Vec::new(),
-                        bands: None,
-                    });
-                }
-                if has_incoming {
-                    out.incoming_capture = Some(PaperCapture {
-                        element: incoming_element.capture(),
-                        under: incoming_children,
-                        over: Vec::new(),
-                        bands: None,
-                    });
-                }
                 continue;
             }
-            if front && frame.capture_front {
-                let CaptureSink {
-                    front_decor,
-                    front_images,
-                    ..
-                } = capture;
+            if front && frame.capture_front && !front_missing {
                 let readouts = bands::readouts_of(self, cx);
                 let bands = bands::chrome(
                     &frame.page_box,
@@ -1404,6 +1502,15 @@ impl ReaderSession {
                     bands::Width::Paper,
                     cx,
                 );
+                // 捕获副本的带子单独挂一个 id，测试要量它在捕获层里的位置。
+                let bands = div()
+                    .id("reader-front-capture-band")
+                    .test_support()
+                    .absolute()
+                    .inset_0()
+                    .child(bands)
+                    .into_any_element();
+                self.front_capture_images += front_images.len() as u32;
                 out.front_capture = Some(PaperCapture {
                     element: element.capture_copy(),
                     under: front_decor,
@@ -1431,8 +1538,7 @@ impl ReaderSession {
                 .child(element)
                 .child(column)
                 .children(backdrops)
-                .children(overlays)
-                .children(page_bands);
+                .children(overlays);
             let clipped = div()
                 .absolute()
                 .left(px(clip.x))
@@ -1444,6 +1550,20 @@ impl ReaderSession {
                 .test_support()
                 .child(inner.child(paper_layer));
             out.layers.push(clipped.into_any_element());
+            // 带子挂在裁切层**外面**，但仍按这一张纸的位移摆：静止时 offset 是 0，
+            // 翻页时跟着纸走。宽度取整张纸，带子自己的 `Width::Parent` 再按栏切。
+            for band in page_bands {
+                out.page_bands.push(
+                    div()
+                        .absolute()
+                        .left(px(offset.0))
+                        .top(px(offset.1))
+                        .w(px(viewport.w))
+                        .h(px(viewport.h))
+                        .child(band)
+                        .into_any_element(),
+                );
+            }
         }
         out
     }
@@ -1517,6 +1637,7 @@ impl ReaderSession {
             back_children,
             incoming_element,
             incoming_children,
+            ..
         } = capture;
         let is_picture = picture.is_some();
         if let Some((href, page_x, page_w, art_top, contain)) = picture {
@@ -1643,7 +1764,23 @@ impl ReaderSession {
         // 是一个矩形、没有「裁一半」的画法 —— 逐像素的多边形裁剪要的是
         // gpui 没有的东西（`ContentMask` 只有矩形）。留白块比伸到隔壁那
         // 张纸上的色块好读。捕获层里那两份副本照单全收（不裁）。
+        // 只有这一帧真要写捕获副本时才逐块查背景图；实时页那一趟多查一遍
+        // `painted_picture` 是白花钱。
+        let capturing = capture_front || back_copy || incoming_copy;
         for decor in scene.decorations {
+            // 背景图没全到就先把捕获副本标成不完整：缺一张的纹理一旦被记成
+            // 「已烘」，滑动时旧页就永久少一张图。实时那一份照画（该到的会到）。
+            if capturing && !decoration_ready(&decor, &atlas, view, cx) {
+                if capture_front {
+                    capture.front_missing = true;
+                }
+                if back_copy {
+                    capture.back_missing = true;
+                }
+                if incoming_copy {
+                    capture.incoming_missing = true;
+                }
+            }
             if capture_front {
                 front_decor.extend(decoration_child(
                     decor.clone(),
@@ -1699,6 +1836,19 @@ impl ReaderSession {
             let Some(rendered) =
                 painted_picture(&atlas, &image.image, view, cx)
             else {
+                // 图还没到（也没判失败）时捕获副本不完整；失败算落地 —— 实时页
+                // 上它本来也不会出现。
+                if !atlas.read_with(cx, |atlas, _| atlas.failed(&image.image.key)) {
+                    if capture_front {
+                        capture.front_missing = true;
+                    }
+                    if back_copy {
+                        capture.back_missing = true;
+                    }
+                    if incoming_copy {
+                        capture.incoming_missing = true;
+                    }
+                }
                 continue;
             };
             // 捕获层里那两份用不带手势的纯 `img`：同一屏摆两个同 id 的元素，
@@ -1729,6 +1879,7 @@ impl ReaderSession {
                     image.height,
                     rendered.clone(),
                 ));
+                capture.incoming_images += 1;
             }
             if !role.draws_main() || !shown {
                 continue;

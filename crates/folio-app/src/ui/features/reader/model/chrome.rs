@@ -323,24 +323,6 @@ pub fn default_mode(total: f32, gap: f32) -> PageMode {
     }
 }
 
-/// 定版式能选哪几张纸。仿真折页要一张**排版页**的捕获纹理（定版式那一页是位图，
-/// 没有那条捕获链），所以仍然筛掉；其余四档（平移 / 上下平移 / 覆盖 / 上下滚动）
-/// 与「不走动画」都讲得通 —— 「上下滚动」在定版式上也真的有一条纵向页栈可滚。
-pub fn fixed_turn_applies(turn: folio_core::PageTurn) -> bool {
-    turn != folio_core::PageTurn::Curl
-}
-
-/// 定版式实际按哪一档走。读者全局选的是折页时，定版式退到平移 ——
-/// 不是「什么都不做」：同一本书换成流式阅读时那一档照旧生效，这里只换一个当场
-/// 讲得通的形状。
-pub fn fixed_turn_style(turn: folio_core::PageTurn) -> folio_core::PageTurn {
-    if fixed_turn_applies(turn) {
-        turn
-    } else {
-        folio_core::PageTurn::Slide
-    }
-}
-
 /// 「翻页方式」里那一档与摆法之间**唯一**的那条耦合。
 ///
 /// 摆法与动画档是两件事（双页可以配任何一种纸面动画），但有一对组合是自相矛盾的：
@@ -549,8 +531,7 @@ mod tests {
         LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MARGIN_X_RANGE, MARGIN_Y_RANGE, MAX_MEASURE_RANGE,
         MIN_COLUMN_WIDTH, PARAGRAPH_GAP_RANGE, PageMode, TURN_DURATION_RANGE, Zone,
         bands_with_vertical_margins, default_mode, dim_alpha, effective_page_margins,
-        fixed_turn_applies, fixed_turn_style, percent_label, reconcile, spread_fits, spread_gap,
-        tween, zone,
+        percent_label, reconcile, spread_fits, spread_gap, tween, zone,
     };
     use folio_core::PageTurn;
     use folio_core::content::format::css::PageMargins;
@@ -739,30 +720,6 @@ mod tests {
         // 认不出的名字（旧库、手改的 JSON）当默认档，不是 panic、不是双页。
         assert_eq!(PageMode::from_storage_name(""), PageMode::Paged);
         assert_eq!(PageMode::from_storage_name("paginated"), PageMode::Paged);
-    }
-
-    /// 定版式只排除折页；读者选中的折页退到平移，界面上两个可选集与 `turn()` 实际
-    /// 用的那一档因此同源。上下滚动是**真的可走**的一档（连续竖滚）。
-    #[test]
-    fn a_fixed_book_never_takes_a_curl_but_takes_a_scroll() {
-        for turn in PageTurn::ALL.iter().copied() {
-            let wanted = turn != PageTurn::Curl;
-            assert_eq!(
-                fixed_turn_applies(turn),
-                wanted,
-                "{turn:?} 在定版式上该不该出现"
-            );
-            let used = fixed_turn_style(turn);
-            assert!(
-                fixed_turn_applies(used),
-                "{turn:?} 退到了 {used:?}，仍然不是定版式能走的档"
-            );
-            if wanted {
-                assert_eq!(used, turn, "讲得通的档不该被换掉");
-            } else {
-                assert_eq!(used, PageTurn::Slide, "{turn:?} 该退到平移");
-            }
-        }
     }
 
     #[test]

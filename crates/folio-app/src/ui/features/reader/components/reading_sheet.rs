@@ -71,7 +71,6 @@ use crate::ui::features::reader::model::chrome::{
     MARGIN_X_RANGE, MARGIN_Y_RANGE, MAX_MEASURE_RANGE, PARAGRAPH_GAP_RANGE, SliderSteps,
     TURN_DURATION_RANGE,
 };
-use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 
@@ -297,10 +296,6 @@ pub(in crate::ui::features::reader) struct ReadingSheet {
     /// 底部弹层：开合与停在哪一档都在它手里。句柄必须跨帧持有 —— 弹层每帧都要构造
     /// （弹簧的采样在里面），与下面那几条滑条同一条理由。
     sheet: Entity<BottomSheetState>,
-    /// 这一屏背后的会话。只借它问一件事：这一本是不是定版式 —— 翻页动画那个下拉
-    /// 在定版式上要筛掉折页（判据在 `chrome::fixed_turn_applies`；上下滚动在定版式上
-    /// 就是连续竖滚，留着）。
-    reader: Entity<ReaderSession>,
     /// 顶上停在哪一组。跨帧留着：读者刚在排版里调完行距，收起再打开该还在排版。
     tab: SheetTab,
     /// 十条滑条的状态，按 [`Knob::ALL`] 的顺序摆，取用走 [`ReadingSheet::knob`]。
@@ -313,10 +308,7 @@ pub(in crate::ui::features::reader) struct ReadingSheet {
 impl ReadingSheet {
     /// 建这一屏。十条滑条各订阅一次：拖动当场生效（换字号重排 / 换背光 / 下一趟翻页走多久），
     /// 所以这里没有「应用」按钮，也没有改了不生效的中间态。
-    pub(in crate::ui::features::reader) fn new(
-        reader: Entity<ReaderSession>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub(in crate::ui::features::reader) fn new(cx: &mut Context<Self>) -> Self {
         // 十条滑条由 [`Knob`] 那一张表建出来：两端、细档、初值都在表里，这里不再逐格写数。
         let knobs = Knob::ALL.map(|knob| slider(knob, cx));
         // 弹层自己也要观察：它不是这一屏的子视图，`notify` 只有观察方才收得到，
@@ -333,7 +325,6 @@ impl ReadingSheet {
         }
         Self {
             sheet,
-            reader,
             tab: SheetTab::default(),
             knobs,
             _watches: watches,
@@ -557,19 +548,10 @@ impl ReadingSheet {
     ///
     /// 六档**全摆**，不按当前摆法筛：这一条列表就是摆法的上游 —— 选「上下滚动」会把这本
     /// 书带进连续，选任何一张纸的走法会把它带出连续（`chrome::reconcile` 在渲染帧里解）。
-    /// 从前这里筛掉四档，于是同一设置在两处给出两个可选集，读者在两处都能选到一个当场
-    /// 不出场的档。
+    /// 定版式与可重排同一个可选集：折页也从位图页上烘一张捕获纹理来卷。
     fn turn_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let configured = ConfigHolder::appearance(cx).page_turn;
-        let fixed = self.reader.read(cx).is_fixed();
-        // 定版式：折页没有可卷的排版纹理，那一档不摆；配置里若正是它（从流式那一本
-        // 带过来的），按钮念的是实际会走的平移。上下滚动留着 —— 定版式现在也有
-        // 一条纵向页栈可滚。
-        let turn = if fixed {
-            chrome::fixed_turn_style(configured)
-        } else {
-            configured
-        };
+        let turn = configured;
         let label_of = |turn| match turn {
             PageTurn::Slide => tr(cx, "page_turn.slide"),
             PageTurn::SlideUp => tr(cx, "page_turn.slide_up"),
@@ -581,7 +563,6 @@ impl ReadingSheet {
         let items: Vec<(PageTurn, SharedString)> = PageTurn::ALL
             .iter()
             .copied()
-            .filter(|value| !fixed || chrome::fixed_turn_applies(*value))
             .map(|value| (value, label_of(value)))
             .collect();
         let current = label_of(turn);
@@ -1056,7 +1037,6 @@ mod tests {
     use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, TestAppContext, px, size};
 
     use super::{Knob, ReadingSheet, SheetTab};
-    use crate::ui::features::reader::model::session::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
 
     /// 一扇把**这一屏**摆在根上的窗。底部弹层与八条滑条都要真窗口，而这一屏的渲染路径
@@ -1065,8 +1045,7 @@ mod tests {
         let mut built = None;
         let handle = cx.open_window(size(px(390.), px(844.)), |window, cx| {
             ConfigHolder::install(Config::default(), cx);
-            let reader = cx.new(|cx| ReaderSession::boot(cx));
-            let sheet = cx.new(move |cx| ReadingSheet::new(reader, cx));
+            let sheet = cx.new(ReadingSheet::new);
             let root_view = sheet.clone();
             built = Some(sheet);
             Root::new(root_view, window, cx)

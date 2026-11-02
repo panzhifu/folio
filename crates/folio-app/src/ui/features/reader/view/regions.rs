@@ -234,9 +234,10 @@ impl ReadingPage {
         // 「放大整页」那一格**只在定版式那一族摆**：那一族才有「这一页就是一张图」这件
         // 事，可重排那一族的插图另有入口（按宽度退档那一格在正文里，不在这一排）。
         let fixed = self.reader.read(cx).fixed().is_some();
-        // 定版式没有「一屏两页」：它的页是既定的一张位图，双页档对它是无意义的。
-        // 连续竖滚那一档由「翻页方式 → 上下滚动」进入，这一格同样不摆。
-        let spread_shown = spread_mode != PageMode::Continuous && !fixed;
+        // 定版式也摆双页：那一档是**相邻两页各占半张**（`fixed::fixed_slots`），
+        // 不是把一页排成两栏。连续竖滚那一档由「翻页方式 → 上下滚动」进入，
+        // 这一格同样不摆。
+        let spread_shown = spread_mode != PageMode::Continuous;
         // 选中态读**读者选的那一档**而不是生效档：手机上按下去会先亮双页再被宽度退成
         // 分页，读按钮的人要看到自己按着了。
         let spread = spread_mode == PageMode::Spread;

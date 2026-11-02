@@ -270,6 +270,22 @@ pub(super) fn push_border(
 /// （`background-clip` 我们一律按边框盒，所以那道边正好压在底图边上，与浏览器一致）。
 /// 图层倒着摆：`background-image` 列表里最后写的那一层垫底，而 gpui 的子元素是
 /// 「后入树的压在上面」，两个次序正好反。
+/// 这一块背景图是否都能画出来：每张都拿到了像素，或图集已判它失败。
+///
+/// 捕获副本要等它 —— 缺一张就烘出来的纹理永远缺那一张，而纹理一旦记成「已烘」
+/// 不会再自己重来。失败算落地：那种图在实时页上也不会出现，纹理里空着才是实情。
+pub(super) fn decoration_ready(
+    decor: &BlockDecor,
+    atlas: &Entity<ImageAtlas>,
+    view: EntityId,
+    cx: &mut App,
+) -> bool {
+    decor.pictures.iter().all(|picture| {
+        painted_picture(atlas, &picture.image, view, cx).is_some()
+            || atlas.read_with(cx, |atlas, _| atlas.failed(&picture.image.key))
+    })
+}
+
 pub(super) fn decoration_child(
     decor: BlockDecor,
     atlas: &Entity<ImageAtlas>,

@@ -6,7 +6,7 @@
 use folio_core::{Locator, PageTurn};
 use gpui_kit::{App, Context, ScrollDelta, ScrollWheelEvent};
 
-use crate::ui::features::reader::model::chrome::{Arrow, PageMode, fixed_turn_style};
+use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
 use crate::ui::features::reader::model::session::{
     PageRef, ReaderSession, Source, Turn, TurnRun, start_turn,
 };
@@ -133,11 +133,19 @@ impl ReaderSession {
         }
         let facts = self.paging_facts();
         let plan = self.laid_out.mode.paging().plan(&facts, intent);
+        // 定版式翻页回到铺满：读者按的是「看下一页」，不是「在新的一页上接着看这个角」。
+        // 连续滚动那一档（`Scroll`）不在此列 —— 那里挪的是正文自己，缩放该留着。
+        //
+        // 必须排在那道捕获门**之前**：放大着的那几帧不烘纹理（`view::body` 的
+        // `is_zoomed` 闸），若先被门拦下并排队，读者停在放大档里那一趟就永远补不上。
+        if self.is_fixed() && matches!(plan, TurnPlan::Page { .. } | TurnPlan::Chapter { .. }) {
+            self.reset_fixed_zoom();
+        }
         // 旧页纹理没烘好（进书横移还没停、尺寸/偏好刚变）就等一下：折页那张网格按整页采
         // 纹理，拿半张纹理去卷，右侧会直接露出捕获矩形外的黑边。下一帧烘完自然会重试。
         // 只挡真正要上纸的 Page/Chapter；连续滚动不读这张纹理，不能一起挡住。
-        let needs_curl_capture = !self.is_fixed()
-            && ConfigHolder::appearance(cx).page_turn == PageTurn::Curl
+        // 定版式也要过这道门：它的页图同样是先烘一张整页纹理，卷曲才采得到。
+        let needs_curl_capture = ConfigHolder::appearance(cx).page_turn == PageTurn::Curl
             && matches!(plan, TurnPlan::Page { .. } | TurnPlan::Chapter { .. });
         if needs_curl_capture && !self.curl_capture_ready() {
             // 不丢这一下：记下方向，等门开了在渲染帧末补一趟。从前这里直接 return，
@@ -147,11 +155,6 @@ impl ReaderSession {
         }
         // 这一趟已经能走了：之前排队的那一趟作废，别在动画走完后又补一页。
         self.pending_turn = None;
-        // 定版式翻页回到铺满：读者按的是「看下一页」，不是「在新的一页上接着看这个角」。
-        // 连续滚动那一档（`Scroll`）不在此列 —— 那里挪的是正文自己，缩放该留着。
-        if self.is_fixed() && matches!(plan, TurnPlan::Page { .. } | TurnPlan::Chapter { .. }) {
-            self.reset_fixed_zoom();
-        }
         match plan {
             TurnPlan::None => {}
             TurnPlan::Scroll { to } => {
@@ -219,6 +222,7 @@ impl ReaderSession {
             can_next_chapter: !fixed && self.can_advance(1),
             ready,
             fixed,
+            fixed_spread: fixed && self.laid_out.mode == PageMode::Spread,
         }
     }
 
@@ -278,15 +282,9 @@ impl ReaderSession {
     /// 走的也是同一句。两处各写一遍，就是从前那个「第二次跨章不滑」的成因。
     pub(in crate::ui::features::reader) fn begin_turn(&mut self, cx: &App, turn: Turn) {
         let mode = self.laid_out.mode;
-        let configured = ConfigHolder::appearance(cx).page_turn;
-        // 定版式：折页换成平移（定版式没有可卷的排版纹理）。界面上那一档也已经被
-        // `fixed_turn_applies` 筛掉，这里再收一次口，配置是手改的 / 从流式那一本
-        // 带过来的也不会去卷一张位图。上下滚动是连续竖滚，走的是补间那条路。
-        let style = if self.is_fixed() {
-            fixed_turn_style(configured)
-        } else {
-            configured
-        };
+        // 定版式与可重排走同一张档位表：折页要的那张捕获纹理，定版式也烘（页图就是
+        // 那位图，见 `view/body/fixed.rs` 的捕获通道）。上下滚动在定版式上走连续竖滚。
+        let style = ConfigHolder::appearance(cx).page_turn;
         start_turn(
             &mut self.turn,
             &mut self.turn_seq,
@@ -403,6 +401,14 @@ impl ReaderSession {
         // 定版式：页号由页表持有，翻页即改它（进度、恢复都按 `locator.chapter = 页号`）。
         // 连续竖滚里页号只是读数，落页要同时把 `scroll_y` 摆到那一页的页首 ——
         // 目录、进度条、图片定位都从这里走，三处因此都落在「那一页的开头」。
+        //
+        // 定版式双页的页号归**左边那一页**：目录点到奇数页时摊开的是它所在的那一对
+        // （2/3）。不折的话，这一帧的 `page_key` 还是那个奇数，捕获会把它记错一页。
+        let target = if self.is_fixed() && self.laid_out.mode == PageMode::Spread {
+            target & !1
+        } else {
+            target
+        };
         let continuous = self.laid_out.mode.is_continuous();
         let fixed = self.fixed_mut().map(|book| {
             let before = book.page();

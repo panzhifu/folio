@@ -417,6 +417,20 @@ pub struct ReaderSession {
     /// 摆的还是上一页，只记矩形不记页号，长按就会按着新一页的字序去解上一页的盒子。
     /// 空表 = 这一帧没有带文字层的页（漫画、EPUB 的定版式、扫描页），选不出字。
     pub(in crate::ui::features::reader) fixed_text_boxes: Rc<RefCell<FixedTextBoxes>>,
+    /// 这一帧真摆上了几张定版式纸。翻页那一趟旧页走捕获纹理 / 卷曲网格，只剩进场
+    /// 那一张；「同一页在屏上出现两次」这种错法看不见别的证据，只有这一个数。
+    /// `render` 开头清零，`paint_fixed_paper` 每摆一张加一（捕获副本那一趟不算）。
+    pub(in crate::ui::features::reader) fixed_sheets_drawn: u32,
+    /// **累计**收进捕获副本几张页图（正面与背面两趟合计）。捕获纹理「记成已烘、
+    /// 里面却是纸色」是这条链最安静的错法：页号对得上，卷起来一片空白。
+    pub(in crate::ui::features::reader) fixed_capture_images: u32,
+    /// **累计**收进进场页捕获副本的字形 run 数（可重排）。它与 `fixed_capture_images`
+    /// 是同一条门：纹理里没有字，进场页那几帧就是白屏。
+    pub(in crate::ui::features::reader) incoming_capture_runs: u32,
+    /// **累计**收进正面 / 进场捕获副本的正文插图张数（可重排）。纹理里缺图时
+    /// 滑动中就会「字在、图没了」，这一格与 `incoming_capture_runs` 同一条门。
+    pub(in crate::ui::features::reader) front_capture_images: u32,
+    pub(in crate::ui::features::reader) incoming_capture_images: u32,
     /// 定版式这一屏的显示缩放。**只影响画在屏上的那一块**：页栈、`scroll_y` 与位置落库
     /// 都还是 1x 坐标，所以它不参与任何持久化，翻页/换档/换书都清回 1x。
     pub(in crate::ui::features::reader) fixed_zoom: FixedZoom,
@@ -688,6 +702,11 @@ impl ReaderSession {
             image_hits_frame: 0,
             handle_hits: Rc::default(),
             fixed_text_boxes: Rc::default(),
+            fixed_sheets_drawn: 0,
+            fixed_capture_images: 0,
+            incoming_capture_runs: 0,
+            front_capture_images: 0,
+            incoming_capture_images: 0,
             fixed_zoom: FixedZoom::default(),
             fixed_frame: FixedFrame::default(),
             fixed_pan_finger: None,
@@ -871,6 +890,11 @@ impl ReaderSession {
             image_hits_frame: 0,
             handle_hits: Rc::default(),
             fixed_text_boxes: Rc::default(),
+            fixed_sheets_drawn: 0,
+            fixed_capture_images: 0,
+            incoming_capture_runs: 0,
+            front_capture_images: 0,
+            incoming_capture_images: 0,
             fixed_zoom: FixedZoom::default(),
             fixed_frame: FixedFrame::default(),
             fixed_pan_finger: None,
@@ -1016,6 +1040,20 @@ impl ReaderSession {
         self.mode_undecided = mode.is_empty();
         // 换书就是换参照系：上一本放大到哪儿与这一本毫无关系。
         self.reset_fixed_zoom();
+        // 上一本烘好的捕获纹理与这一本没有任何关系。`captured_page` 的键是 (章, 页)，
+        // 两本书恰好都停在第 0 页时它就「对得上」—— 不清的话新书会拿上一本的纹理去卷，
+        // 屏上是一片别的书。清到与刚构造时同一个状态。
+        self.capture_dirty = true;
+        self.captured_page = None;
+        self.captured_size = None;
+        self.captured_back = None;
+        self.captured_incoming = None;
+        self.capture_box_dirty = true;
+        self.capture_committed.set(None);
+        self.capture_back_committed.set(None);
+        self.capture_incoming_committed.set(None);
+        self.curl_bake_origin.set(None);
+        self.incoming_bake_origin.set(None);
         // 上一本那一段必须先结账：`settle_reading` 按 `self.book_id` 归属，
         // 顺序写反了就会把上一本读的时间记到这一本头上（两本的账一起错）。
         self.settle_reading();
@@ -1190,6 +1228,10 @@ impl ReaderSession {
     }
 
     /// 回到铺满。翻页、换档、换书都走这一句。
+    ///
+    /// **不**动捕获纹理：放大着的那几帧本来就不烘（`view::body` 那条 `is_zoomed` 闸），
+    /// 手里那张始终是整页 1x 的，收起缩放之后照样能卷。在这里标脏只会让下一趟翻页
+    /// 白等一次重烘。
     pub(in crate::ui::features::reader) fn reset_fixed_zoom(&mut self) {
         self.fixed_zoom.reset();
         self.fixed_pan_finger = None;

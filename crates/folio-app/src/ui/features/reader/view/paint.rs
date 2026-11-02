@@ -530,6 +530,12 @@ impl GlyphsElement {
         }
     }
 
+    /// 这一份收了几条字形 run。给「捕获副本里到底有没有字」那一条门用：
+    /// 纹理被记成「已烘」而里面只有纸色，屏上就是滑动时的白屏，元素在不在树里查不出来。
+    pub(in crate::ui::features::reader) fn run_count(&self) -> usize {
+        self.runs.len()
+    }
+
     /// 标成「捕获层里的副本」。手写一份进层的内容时用（背面那一页不是从主场景克隆的，
     /// 它是另一页的字）。
     pub(in crate::ui::features::reader) fn capture(mut self) -> Self {

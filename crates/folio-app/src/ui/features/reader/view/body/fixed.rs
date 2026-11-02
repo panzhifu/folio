@@ -7,30 +7,38 @@
 use std::time::Instant;
 
 use folio_core::PageTurn;
+use folio_core::layout::fragment::{column_offset, column_width};
 
 use crate::ui::features::reader::components::image_viewer::ImageViewer;
 use crate::ui::features::reader::components::selection::{self, SelectionVisual};
 use crate::ui::features::reader::model::annotations::Palette;
 use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::fixed_book::{FixedBook, PageTile};
+use crate::ui::features::reader::model::page_geometry::PageBox;
+use crate::ui::features::reader::view::bands;
 use crate::ui::features::reader::model::fixed_zoom::{FixedFrame, FixedZoom, max_scale};
 use crate::ui::features::reader::model::image_atlas::ImageAtlas;
 use crate::ui::features::reader::model::prefetch;
-use crate::ui::features::reader::model::session::{LaidOut, ReaderSession, ScrollMotion};
+use crate::ui::features::reader::model::session::{
+    LaidOut, PageRef, ReaderSession, ScrollMotion, TurnRun,
+};
 use crate::ui::features::reader::motion::turn_animation;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    AnyElement, AppContext as _, Bounds, Context, Entity, EntityId, Pixels, WeakEntity, point, px,
-    size,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, EntityId, ElementId,
+    InteractiveElement as _, IntoElement, PageCurlMesh, ParentElement, Pixels, Styled,
+    TestSupportExt as _, WeakEntity, div, point, px, size,
 };
 
-use super::TurnFrame;
-use super::paper::{FixedPaper, Paper, PaperBody};
 use super::PREFETCH_RADIUS;
+use super::TurnFrame;
+use super::capture::CaptureView;
 use super::images::{
-    RegionAsk, painted, painted_tile, page_image, pinned_region, prepare_tile, zoom_source_width,
+    RegionAsk, page_image, painted, painted_tile, pinned_region, prepare_tile, zoom_source_width,
 };
 use super::marks::{HIGHLIGHT_ALPHA, fixed_marks, marks_above};
+use super::paper::{FixedPaper, Paper, PaperBody, PaperCapture};
+use super::turn_view;
 
 /// 定版式一页里的一格：像素活儿 + 它在这一页里的最终摆位（不含动画位移）。
 pub(super) struct FixedTileAt {
@@ -179,17 +187,168 @@ fn fixed_row_aspect(tiles: &[PageTile], fallback: f32) -> f32 {
         .sum()
 }
 
+/// 这一页能不能烘一张捕获纹理：每一格该画的像素都已经在图集里落地。
+///
+/// 判据落在**格**上而不是「页号对上了」：一页可能摆好几格，只烘到一半时那张纹理里
+/// 有一半是纸色；而捕获纹理一旦记成「已烘」就不会自己重来，读者卷起来的是一张缺角
+/// 的纸。`failed` 也算落地 —— 那一格本来就画不出来，纹理里那一块空着才是屏上的实情。
+/// 还在解（`Loading`）与从没碰过（`None`）都不算：前者下一帧会到，后者这一帧才刚排上。
+pub(super) fn fixed_capture_ready(
+    book: &FixedBook,
+    page: usize,
+    atlas: &Entity<ImageAtlas>,
+    cx: &App,
+) -> bool {
+    let tiles = book.page_tiles(page);
+    !tiles.is_empty()
+        && tiles.iter().all(|tile| match tile.request.as_ref() {
+            Some(request) => atlas.read_with(cx, |atlas, _| {
+                atlas.ready(&request.key) || atlas.failed(&request.key)
+            }),
+            // 这一格没有解码请求（页表读不出这一格）：绘制侧本来就跳过它。
+            None => true,
+        })
+}
+
+/// 整页翻 / 双页这一屏要摆哪几页、每页占哪一段。
+///
+/// 双页就是**相邻两页各占半张**（合订本摊开）：页仍是既定的位图，不重排、不分栏。
+/// `pages` 第二格在只剩一页时是越界页号，`count` 才是真摆几页。
+pub(super) struct FixedSlots {
+    pub(super) pages: [usize; 2],
+    /// 每页那一格在版心里的左缘（已含页边距与中缝）。
+    pub(super) lefts: [f32; 2],
+    /// 每页可用的宽：单页是整块版心，双页是半块。
+    pub(super) width: f32,
+    pub(super) count: usize,
+    pub(super) spread: bool,
+}
+
+pub(super) fn fixed_slots(
+    page: usize,
+    page_count: usize,
+    spread: bool,
+    usable: f32,
+    gap: f32,
+    margin_x: f32,
+) -> FixedSlots {
+    if spread {
+        let width = column_width(usable, 2, gap);
+        let first = page & !1;
+        let second = first + 1;
+        let left_at = |index: usize| margin_x + column_offset(width, gap, index);
+        let count = if first >= page_count {
+            0
+        } else if second < page_count {
+            2
+        } else {
+            1
+        };
+        FixedSlots {
+            pages: [first, second],
+            lefts: [left_at(0), left_at(1)],
+            width,
+            count,
+            spread: true,
+        }
+    } else {
+        FixedSlots {
+            pages: [page, page],
+            lefts: [margin_x, margin_x],
+            width: usable,
+            count: 1,
+            spread: false,
+        }
+    }
+}
+
+/// 这一屏的每页读数带（页眉 / 页脚）。定版式的页图是一整张，带子只是浮在上面的两行字。
+///
+/// `shift` 是这张纸这一帧的位移：静止帧是 0，翻页时跟着 `Sheet::offset` 走。单页给整条；
+/// 双页左右各半条，与可重排分页同一套切法（左页念位置、右页念百分比）。
+fn fixed_page_bands(
+    page_box: &PageBox,
+    slots: &FixedSlots,
+    shift: (f32, f32),
+    viewport_height: f32,
+    id_prefix: &'static str,
+    reader: &ReaderSession,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let mut out = Vec::with_capacity(slots.count);
+    let paper_width = page_box.paper.w;
+    let half = paper_width * 0.5;
+    for index in 0..slots.count {
+        let page = slots.pages[index];
+        let mut readouts = bands::readouts_at(reader, 0, page, cx);
+        let (left, width) = if slots.spread {
+            if index == 0 {
+                readouts.percent = Default::default();
+            } else {
+                readouts.chapter = Default::default();
+                readouts.position = Default::default();
+            }
+            (half * index as f32, half)
+        } else {
+            (0.0, paper_width)
+        };
+        out.push(
+            div()
+                .absolute()
+                .left(px(left + shift.0))
+                .top(px(shift.1))
+                .w(px(width))
+                .h(px(viewport_height))
+                .id(ElementId::from((id_prefix, page as u64)))
+                .test_support()
+                .child(bands::chrome(
+                    page_box,
+                    &readouts,
+                    true,
+                    bands::Width::Parent,
+                    cx,
+                ))
+                .into_any_element(),
+        );
+    }
+    out
+}
+
+/// 定版式这一臂交回公共装配的那几格。
+///
+/// 与 [`super::PagedArm`] 同一条形状：捕获副本、卷曲网格、折页 leaf 与读数都从这里
+/// 交回去，`body::render` 后半段那一套装配（捕获层 / 网格 / 带子）两条臂共用。
+pub(super) struct FixedOut<'a> {
+    pub(super) shades: &'a mut turn_animation::Shades,
+    pub(super) gpu_curl_mesh: &'a mut Option<PageCurlMesh>,
+    pub(super) curl_leaf: &'a mut Option<turn_animation::Area>,
+    pub(super) front_capture: &'a mut Option<PaperCapture>,
+    pub(super) back_capture: &'a mut Option<PaperCapture>,
+    pub(super) back_dx: &'a mut f32,
+    pub(super) back_key: &'a mut Option<(usize, usize, usize)>,
+    pub(super) turn_arriving: &'a mut Option<PageRef>,
+    /// 这一帧有没有画**定版式自己的**每页读数带。`body` 据此跳过全局那一份。
+    pub(super) bands_drawn: &'a mut bool,
+}
+
 /// 定版式这一臂的帧内输入。
 ///
 /// `book` 由调用处从 `Source::Fixed` 借出后单独传入；其余是 `body::render` 在进
-/// match 之前采好的只读快照。`overlays` 与 `fixed_visual` 是这一臂交回公共装配的两份产物。
+/// match 之前采好的只读快照。`overlays` 与 `fixed_visual` 是这一臂交回公共装配的两份产物；
+/// 翻页那一层要的东西收在 [`FixedOut`] 里。
 pub(super) struct FixedArm<'a> {
     pub(super) mode: chrome::PageMode,
     pub(super) usable: f32,
     pub(super) viewport_height: f32,
-    pub(super) content_top: f32,
     pub(super) viewport_width: f32,
+    pub(super) viewport: (f32, f32),
+    pub(super) page_box: PageBox,
+    pub(super) content_top: f32,
     pub(super) area: turn_animation::Area,
+    pub(super) sheet_area: turn_animation::Area,
+    pub(super) gap: f32,
+    pub(super) layer_top: f32,
+    pub(super) capture_front: bool,
     pub(super) turn: Option<TurnFrame>,
     pub(super) motion: ScrollMotion,
     pub(super) now: Instant,
@@ -199,6 +358,17 @@ pub(super) struct FixedArm<'a> {
     pub(super) long_press: bool,
     pub(super) atlas: Entity<ImageAtlas>,
     pub(super) reader_weak: WeakEntity<ReaderSession>,
+    pub(super) paper_layers: &'a mut Vec<AnyElement>,
+    pub(super) out: FixedOut<'a>,
+}
+
+/// 一页这一帧摆好的样子：页号、每格的位置、字层与命中尺。
+struct FixedPageAt {
+    page: usize,
+    tiles: Vec<FixedTileAt>,
+    text: Option<std::rc::Rc<folio_core::content::format::PageText>>,
+    text_key: Option<u64>,
+    placed: Option<Bounds<Pixels>>,
 }
 
 /// 定版式一张纸这一帧的公共画法输入。
@@ -236,9 +406,15 @@ impl ReaderSession {
             mode,
             usable,
             viewport_height,
-            content_top,
             viewport_width,
+            viewport,
+            page_box,
+            content_top,
             area,
+            sheet_area,
+            gap,
+            layer_top,
+            capture_front,
             turn,
             motion,
             now,
@@ -248,6 +424,8 @@ impl ReaderSession {
             long_press,
             atlas,
             reader_weak,
+            paper_layers,
+            out,
         } = arm;
         // 定版式：页是既定的，没有排版链。两档共用同一张页表：
         //
@@ -430,6 +608,7 @@ impl ReaderSession {
                     overlays,
                     &mut boxes,
                     fixed_visual,
+                    None,
                     cx,
                 );
             }
@@ -473,157 +652,159 @@ impl ReaderSession {
                 self.clear_selection();
             }
         } else {
-            self.laid_out = LaidOut {
-                mode: chrome::PageMode::Paged,
-                columns: 1,
-                pages,
-                viewport: viewport_height,
-            };
-            // 恢复落点：定版式的 `locator.chapter` 就是页号。
+            let page_count = pages;
+            let spread = mode == chrome::PageMode::Spread;
+            // 双页的页码落在**左边那一页**：目录 / 书签 / 恢复跳到奇数页时，摊开的是
+            // 它所在的那一对（0/1、2/3……）。页码本身仍按读者要去的那一页落库，
+            // 只是这一屏把它折到左页上。
+            if spread && book.page() & 1 == 1 {
+                book.set_page(book.page() & !1);
+            }
+            // 恢复落点：定版式的 `locator.chapter` 就是页号。换页那一帧把纹理作废 ——
+            // 捕获副本这一帧画的是新页，而 `page_key` 还是打开这一帧之前那个数
+            // （`body::render` 在进这一臂之前就算好了），不作废会把它记成「旧页已烘」。
             if let Some(locator) = self.pending_restore.take() {
                 book.set_page(locator.chapter as usize);
+                if spread {
+                    book.set_page(book.page() & !1);
+                }
+                self.capture_dirty = true;
+                self.captured_back = None;
+                self.captured_incoming = None;
             }
             self.page = book.page();
             self.content_height = 0.0;
             let current = book.page();
+            let slots = fixed_slots(
+                current,
+                page_count,
+                spread,
+                usable,
+                gap,
+                self.prefs.margin_x,
+            );
+            // 这一帧真正摆上屏的是哪一页：**跟手**那一趟页号还没翻（页号只在松手那一刻
+            // 落定），而读者铅笔底下已经该露出目标页了。点屏那趟 `set_page` 先走过，
+            // 两者是同一页。捕获副本只在静止帧烘，那时 `turn` 是 `None`，也同一页。
+            let shown_page = turn
+                .and_then(|frame| frame.arriving)
+                .map_or(current, |page| page.page);
+            let shown_slots = fixed_slots(
+                shown_page,
+                page_count,
+                spread,
+                usable,
+                gap,
+                self.prefs.margin_x,
+            );
+            self.laid_out = LaidOut {
+                mode,
+                columns: mode.columns(),
+                pages: page_count,
+                viewport: viewport_height,
+            };
             // 定版式的下一页先解好：PDF 的一页要回引擎栅格化、CBZ 的一页要读字节 +
             // 解码，从前都要等读者翻过去那一下才开始。静止帧里每帧 prepare 一次，
             // 图集按「这一帧碰过」留住那一格；翻页动画期间不抢这笔活儿。
             if turn.is_none() {
-                let targets = match motion.direction {
+                let mut targets = match motion.direction {
                     Some(direction) => {
-                        prefetch::fixed_targets(current, pages, direction, PREFETCH_RADIUS)
+                        prefetch::fixed_targets(current, page_count, direction, PREFETCH_RADIUS)
                     }
-                    None => prefetch::fixed_target(current, pages).into_iter().collect(),
+                    None => prefetch::fixed_target(current, page_count)
+                        .into_iter()
+                        .collect(),
                 };
+                // 双页里同屏的另一页、以及下一跨页的左页：它们不在 `page ± 1/2` 这条
+                // 数轴上（右页是 `page + 1`），单独补进来。
+                for page in slots.pages[..slots.count].iter().copied() {
+                    if !targets.contains(&page) {
+                        targets.push(page);
+                    }
+                }
                 for target in targets {
                     for tile in book.page_tiles(target) {
                         prepare_tile(&atlas, &tile, view, cx);
                     }
                 }
             }
-            // 这一页有没有字：PDF / AZW4 / DjVu 那一族才有（漫画的一页就是一张图，
-            // EPUB 的定版式字在 XHTML 里而不在页上）。字层只查缓存，没到就先不画、
-            // 交给后台（理由与竖滚那一臂同一条：绘制帧里同步取一页就是 1.5 s）。
-            let has_text = book.page_tiles(current).iter().any(|tile| tile.renders);
-            let cached_text = if has_text {
-                book.page_text_cached(current)
-            } else {
-                None
-            };
-            let text_pending = has_text && cached_text.is_none();
-            let (text, text_key) = match cached_text {
-                Some((text, hash)) => {
-                    let key = text.as_ref().map(|_| hash);
-                    (text, key)
-                }
-                None => (None, None),
-            };
-            if text_pending {
-                request_page_texts(book, [current], &reader_weak, cx);
-            }
-            // 定版式的翻页动画与流式共用同一套纸面位移；折页在 `begin_turn` 里
-            // 已经换成平移，这里再收一次口，配置从别处带进来的怪值也不会去卷一张位图。
-            let mut incoming_shift = (0.0, 0.0);
-            let mut outgoing_page = None;
-            if let Some(frame) = turn {
-                let style = chrome::fixed_turn_style(frame.style);
-                if style != PageTurn::None {
-                    let pose = turn_animation::Pose {
-                        forward: frame.forward,
-                        rtl: frame.rtl,
-                        grip: None,
-                        revert: None,
-                    };
-                    let [incoming, outgoing] =
-                        turn_animation::of(style).sheets_at(frame.progress, area, pose);
-                    incoming_shift = incoming.offset;
-                    if let Some(leaving) = frame.leaving {
-                        outgoing_page = Some((leaving.page, outgoing.offset));
+            // 这一屏摆的每一页：页格、字层与命中尺。双页就是相邻两页各占半张，
+            // 页仍是既定的位图（不重排、不分栏）。
+            let mut pages_at: Vec<FixedPageAt> = Vec::with_capacity(shown_slots.count);
+            let mut pending_text: Vec<usize> = Vec::new();
+            for (index, page) in shown_slots.pages[..shown_slots.count]
+                .iter()
+                .copied()
+                .enumerate()
+            {
+                // 这一页有没有字：PDF / AZW4 / DjVu 那一族才有（漫画的一页就是一张图，
+                // EPUB 的定版式字在 XHTML 里而不在页上）。字层只查缓存，没到就先不画、
+                // 交给后台（理由与竖滚那一臂同一条：绘制帧里同步取一页就是 1.5 s）。
+                let has_text = book.page_tiles(page).iter().any(|tile| tile.renders);
+                let (text, text_key) = if has_text {
+                    match book.page_text_cached(page) {
+                        Some((text, hash)) => {
+                            let key = text.as_ref().map(|_| hash);
+                            (text, key)
+                        }
+                        None => {
+                            pending_text.push(page);
+                            (None, None)
+                        }
                     }
-                }
-            }
-            // 出场页先入树、进场页后入树：覆盖档靠后画的那张压住停着的旧页，
-            // 平移 / 上下平移两张不重叠，顺序无所谓。出场那一页只画像素，不挂
-            // 选中 / 痕迹 / 放大入口 —— 它正在离开，那三样都属于目标页。
-            if let Some((page, shift)) = outgoing_page {
-                let (tiles, _) = fixed_page_tiles(
+                } else {
+                    (None, None)
+                };
+                let (tiles, placed) = fixed_page_tiles(
                     book,
                     page,
-                    usable,
+                    shown_slots.width,
                     viewport_height,
                     content_top,
-                    self.prefs.margin_x,
-                    false,
+                    shown_slots.lefts[index],
+                    text.is_some(),
                 );
-                let outgoing_paper = Paper::fixed(
-                    FixedPaper {
-                        page,
-                        tiles,
-                        text: None,
-                        text_key: None,
-                        placed: None,
-                    },
-                    turn_animation::Sheet {
-                        offset: shift,
-                        z: 0,
-                        cut: None,
-                    },
-                    None,
-                    (viewport_width, viewport_height),
-                );
-                let no_viewer: Option<Entity<ImageViewer>> = None;
-                self.paint_fixed_paper(
-                    &outgoing_paper,
-                    &FixedPaint {
-                        book,
-                        atlas: &atlas,
-                        view,
-                        reader: &reader_weak,
-                        viewer: &no_viewer,
-                        palette,
-                        long_press,
-                        scrolling: motion.scrolling,
-                        now,
-                        viewport: (0.0, content_top, viewport_width, viewport_height),
-                        shift,
-                        zoom: FixedZoom::default(),
-                        pivot: (0.0, content_top),
-                    },
-                    overlays,
-                    &mut Vec::new(),
-                    fixed_visual,
-                    cx,
-                );
+                pages_at.push(FixedPageAt {
+                    page,
+                    tiles,
+                    text,
+                    text_key,
+                    placed,
+                });
             }
-            // 一页可能摆好几格（多图页 / 对开跨页，或渲染型的一整页）：按**共享高度**
-            // 横成一行，整体居中。一格时这条式子退化成「等比缩进视口」，与普通漫画的
-            // 旧表现逐像素相同。
-            // 命中那把尺只在**字层真的取到**时记：字层还没回来与这一页没字
-            // 在屏上是两件事 —— 前者等后台到货后重画这一帧再记，后者永远不记
-            // （没有字就选不出东西，记了只会让长按落到一块空盒上）。
-            let (tiles, placed) = fixed_page_tiles(
-                book,
-                current,
-                usable,
-                viewport_height,
-                content_top,
-                self.prefs.margin_x,
-                text.is_some(),
+            if !pending_text.is_empty() {
+                request_page_texts(book, pending_text, &reader_weak, cx);
+            }
+            // 缩放几何：整页翻看的是**这一屏摆出来的那几页合起来**的那一块；双页绕着
+            // 整跨页的左上角放大，两页才不会各按各的轴心长开。
+            let mut bounds: Option<(f32, f32, f32, f32)> = None;
+            for at in &pages_at {
+                if let Some(((x, y), (w, h))) = fixed_row_bounds(&at.tiles) {
+                    bounds = Some(match bounds {
+                        None => (x, y, x + w, y + h),
+                        Some((left, top, right, bottom)) => {
+                            (left.min(x), top.min(y), right.max(x + w), bottom.max(y + h))
+                        }
+                    });
+                }
+            }
+            let pivot = bounds.map_or((0.0, content_top), |(left, top, _, _)| (left, top));
+            let page_size = bounds.map_or((slots.width, viewport_height), |(l, t, r, b)| {
+                (r - l, b - t)
+            });
+            let source_width = zoom_source_width(
+                pages_at
+                    .iter()
+                    .flat_map(|at| at.tiles.iter().map(|tile| &tile.tile)),
             );
-            // 这一帧的缩放几何（轴心 = 铺满那一页的左上角），再按上限收一次。
-            // 翻页动画在飞的时候倍率已经在 `turn()` 里清回 1x，所以下面两张纸
-            // 都按铺满画；动画之外才真按手指给的倍率映射。
-            let fit = fixed_row_bounds(&tiles);
-            let source_width = zoom_source_width(tiles.iter().map(|at| &at.tile));
             self.fixed_frame = FixedFrame {
                 origin: (0.0, content_top),
-                pivot: fit.map_or((0.0, content_top), |(origin, _)| origin),
-                page: fit.map_or((usable, viewport_height), |(_, size)| size),
+                pivot,
+                page: page_size,
                 area: (viewport_width, viewport_height),
-                row: (self.prefs.margin_x, usable),
+                row: (self.prefs.margin_x, slots.width),
                 total: 0.0,
-                max: fit.map_or(1.0, |(_, size)| max_scale(source_width, size.0)),
+                max: max_scale(source_width, page_size.0),
                 continuous: false,
             };
             // 与连续那一臂同一步：本帧几何收一次，再拿收过的倍率去映射。
@@ -635,67 +816,442 @@ impl ReaderSession {
                 let scale = self.fixed_zoom.scale();
                 self.fixed_zoom.set_pan(frame.clamp_pan(pan, scale));
             }
-            // 纸在几何收口之后才装配：`paper.zoom` 就是这一帧真正上屏的那一份。
-            let current_paper = Paper::fixed(
-                FixedPaper {
-                    page: current,
-                    tiles,
-                    text,
-                    text_key,
-                    placed,
-                },
-                turn_animation::Sheet {
-                    offset: incoming_shift,
-                    z: 1,
-                    cut: None,
-                },
-                Some(self.fixed_zoom),
-                (viewport_width, viewport_height),
-            );
-            // 一屏就是一页：选区挂在别的页上就是「翻走了」，按分页那一族同一条规矩
-            // 收掉（那里的选区也必须落在锚章）。不收会留着一份屏上看不见的选中 ——
-            // 菜单条还开着，而它锚的那一段字已经不在这一帧里了。
-            if self
-                .selection
-                .as_ref()
-                .is_some_and(|selected| selected.chapter != current)
-            {
+            // 选区挂在相邻两页中的哪一页都算「还在这一屏上」；双页里右页选中不该被
+            // 当成「翻走了」清掉。不清理会留着一份屏上看不见的选中 —— 菜单条还开着，
+            // 而它锚的那一段字已经不在这一帧里了。
+            if self.selection.as_ref().is_some_and(|selected| {
+                !shown_slots.pages[..shown_slots.count].contains(&selected.chapter)
+            }) {
                 self.clear_selection();
             }
-            // 命中换算读的那一把尺，与纸里摆出去的那一格同源。每一帧都写：
-            // 没有字的那一页必须把它清干净，否则留着上一页的矩形，长按会按新页的
-            // 字序去解旧页的盒子 —— 症状是色块整片画在别处。
+            let capture = CaptureView::new(
+                self.capture_dirty,
+                self.captured_size,
+                self.captured_page,
+                self.captured_incoming,
+            );
+            let rest = turn_animation::Sheet {
+                offset: (0.0, 0.0),
+                z: 0,
+                cut: None,
+            };
+            let mut incoming_shift = (0.0, 0.0);
+            let mut outgoing_shift = (0.0, 0.0);
+            let mut leaving_page: Option<usize> = None;
+            let mut curl_mesh: Option<PageCurlMesh> = None;
+            let mut flat_leaving: Option<PageCurlMesh> = None;
+            let mut back_page: Option<usize> = None;
+            let mut back_dx = 0.0f32;
+            if let Some(frame) = turn {
+                let style = turn_animation::of(frame.style);
+                // 折线姿态、「一屏有多宽」与两张纸的位移两条臂共走一份计划
+                // （`turn_view::plan_sheets`）。定版式的 `page_area` 就是整张纸
+                // （`content == paper`），所以单页折页的 `curl_area` 天然是整页；
+                // 双页里折页揭的是靠手指那半张 leaf。
+                let plan = turn_view::plan_sheets(&frame, mode, area, area);
+                if frame.style == PageTurn::Curl {
+                    *out.curl_leaf = Some(plan.curl_area);
+                }
+                *out.shades = style.shades_at(frame.progress, plan.curl_area, plan.pose);
+                let fallback = PageRef {
+                    chapter: 0,
+                    page: current,
+                };
+                let leaving = frame.leaving.unwrap_or(fallback);
+                let arriving = frame.arriving.unwrap_or(fallback);
+                leaving_page = Some(leaving.page);
+                *out.turn_arriving = Some(arriving);
+                // 只有这张「出场页」的捕获确实完整时才开 GPU 卷曲。捕获也可能因为
+                // 尺寸刚变或偏好刚重排而不可用；此时强行用旧的纹理，右侧就会采到
+                // 捕获矩形外。没有可用纹理时退回实时画，宁可不卷，也不要那条黑带。
+                if frame.style == PageTurn::Curl && capture.front_valid(leaving, viewport) {
+                    let captured = self.captured_page.unwrap_or((usize::MAX, usize::MAX));
+                    let captured_size = self.captured_size.unwrap_or((-1.0, -1.0));
+                    curl_mesh = turn_view::build_curl_mesh(
+                        &turn_view::CurlAsk {
+                            progress: frame.progress,
+                            released: matches!(frame.run, TurnRun::Released { .. }),
+                            revert: matches!(frame.run, TurnRun::Released { revert: true, .. }),
+                            free_right: plan.free_right,
+                            pose: plan.pose,
+                            curl_area: plan.curl_area,
+                            content_area: area,
+                            viewport,
+                            page_key: (0, current),
+                            captured: (captured.0, captured.1, captured_size.0, captured_size.1),
+                            capture_valid: true,
+                            paper: cx.theme().background.to_rgb(),
+                        },
+                        &mut self.curl_mesh,
+                    );
+                }
+                let [incoming, outgoing] =
+                    style.sheets_at(frame.progress, plan.curl_area, plan.pose);
+                incoming_shift = incoming.offset;
+                outgoing_shift = outgoing.offset;
+                // 卷起来那张纸的背面：单页是目标页整张；双页是目标跨页里**落在 leaf
+                // 那一侧**的那一页（往前翻折右半张，背面就是下一跨页的左页）。
+                // 没烘过才烘，跨帧留着。
+                if curl_mesh.is_some() {
+                    back_page = Some(if slots.spread && !plan.free_right {
+                        arriving.page + 1
+                    } else {
+                        arriving.page
+                    });
+                }
+                // 平摊三档：出场页改用静止帧烘好的整页纹理。定版式与可重排走同一个
+                // 计划，只是「哪一页不许进捕获层」两个闭包答的内容不同：定版式的页图
+                // 就是纹理的全部内容，目标页这一轮不烘（见文档的必须/可省表）。
+                if frame.style != PageTurn::Curl {
+                    let papers = [
+                        Paper::empty(
+                            PageRef {
+                                chapter: 0,
+                                page: arriving.page,
+                            },
+                            incoming,
+                        ),
+                        Paper::empty(
+                            PageRef {
+                                chapter: 0,
+                                page: leaving.page,
+                            },
+                            outgoing,
+                        ),
+                    ];
+                    let count = if leaving == arriving { 1 } else { 2 };
+                    let flat = turn_view::plan_flat(&turn_view::FlatAsk {
+                        turn: Some(frame),
+                        eligible: true,
+                        current: 0,
+                        page_no: current,
+                        papers: &papers,
+                        count,
+                        sheet_area,
+                        area,
+                        capture: &capture,
+                        viewport,
+                        paper: cx.theme().background.to_rgb(),
+                        leaving_ready: &|_| true,
+                        arriving_ready: &|_| false,
+                    });
+                    flat_leaving = flat.leaving;
+                }
+            }
+            let flat_capture_on = flat_leaving.is_some();
+            if let Some(mesh) = flat_leaving {
+                paper_layers.push(super::capture::flat_mesh_canvas(
+                    "reader-flat-capture",
+                    mesh,
+                    (self.enter_shift, layer_top),
+                    self.curl_bake_origin.clone(),
+                ));
+            }
+            // 出场那一屏：走捕获纹理 / 卷曲网格时不再摆一次位图（主 pass 里那张纹理由
+            // 网格画）；纹理不可用那一帧退回实时画 —— 宁可看着没动，也不把两页叠在一起。
+            let outgoing_live = turn.is_some() && !flat_capture_on && curl_mesh.is_none();
+            if let (true, Some(leaving)) = (outgoing_live, leaving_page) {
+                let leaving_slots = fixed_slots(
+                    leaving,
+                    page_count,
+                    spread,
+                    usable,
+                    gap,
+                    self.prefs.margin_x,
+                );
+                for (index, page) in leaving_slots.pages[..leaving_slots.count]
+                    .iter()
+                    .copied()
+                    .enumerate()
+                {
+                    let (tiles, _) = fixed_page_tiles(
+                        book,
+                        page,
+                        leaving_slots.width,
+                        viewport_height,
+                        content_top,
+                        leaving_slots.lefts[index],
+                        false,
+                    );
+                    let paper = Paper::fixed(
+                        FixedPaper {
+                            page,
+                            tiles,
+                            text: None,
+                            text_key: None,
+                            placed: None,
+                        },
+                        turn_animation::Sheet {
+                            offset: outgoing_shift,
+                            z: 0,
+                            cut: None,
+                        },
+                        None,
+                        (viewport_width, viewport_height),
+                    );
+                    let no_viewer: Option<Entity<ImageViewer>> = None;
+                    self.paint_fixed_paper(
+                        &paper,
+                        &FixedPaint {
+                            book,
+                            atlas: &atlas,
+                            view,
+                            reader: &reader_weak,
+                            viewer: &no_viewer,
+                            palette,
+                            long_press,
+                            scrolling: motion.scrolling,
+                            now,
+                            viewport: (0.0, content_top, viewport_width, viewport_height),
+                            shift: outgoing_shift,
+                            zoom: FixedZoom::default(),
+                            pivot: self.fixed_frame.pivot,
+                        },
+                        overlays,
+                        &mut Vec::new(),
+                        fixed_visual,
+                        None,
+                        cx,
+                    );
+                }
+                let bands = fixed_page_bands(
+                    &page_box,
+                    &leaving_slots,
+                    outgoing_shift,
+                    viewport_height,
+                    "fixed-page-band",
+                    self,
+                    cx,
+                );
+                if !bands.is_empty() {
+                    overlays.extend(bands);
+                    *out.bands_drawn = true;
+                }
+            }
+            // 进场 / 当前那一屏：每页一张纸，双页左右两半同屏。命中表收这一屏的所有页。
             let mut boxes = Vec::new();
-            let drew_text = self.paint_fixed_paper(
-                &current_paper,
-                &FixedPaint {
-                    book,
-                    atlas: &atlas,
-                    view,
-                    reader: &reader_weak,
-                    viewer: &viewer,
-                    palette,
-                    long_press,
-                    scrolling: motion.scrolling,
-                    now,
-                    viewport: (0.0, content_top, viewport_width, viewport_height),
-                    shift: incoming_shift,
-                    zoom: self.fixed_zoom,
-                    pivot: self.fixed_frame.pivot,
-                },
-                overlays,
-                &mut boxes,
-                fixed_visual,
+            let mut drew_text = false;
+            for at in pages_at {
+                let paper = Paper::fixed(
+                    FixedPaper {
+                        page: at.page,
+                        tiles: at.tiles,
+                        text: at.text,
+                        text_key: at.text_key,
+                        placed: at.placed,
+                    },
+                    turn_animation::Sheet {
+                        offset: incoming_shift,
+                        z: 1,
+                        cut: None,
+                    },
+                    Some(self.fixed_zoom),
+                    (viewport_width, viewport_height),
+                );
+                drew_text |= self.paint_fixed_paper(
+                    &paper,
+                    &FixedPaint {
+                        book,
+                        atlas: &atlas,
+                        view,
+                        reader: &reader_weak,
+                        viewer: &viewer,
+                        palette,
+                        long_press,
+                        scrolling: motion.scrolling,
+                        now,
+                        viewport: (0.0, content_top, viewport_width, viewport_height),
+                        shift: incoming_shift,
+                        zoom: self.fixed_zoom,
+                        pivot: self.fixed_frame.pivot,
+                    },
+                    overlays,
+                    &mut boxes,
+                    fixed_visual,
+                    None,
+                    cx,
+                );
+            }
+            let bands = fixed_page_bands(
+                &page_box,
+                &shown_slots,
+                incoming_shift,
+                viewport_height,
+                "fixed-page-band",
+                self,
                 cx,
             );
+            if !bands.is_empty() {
+                overlays.extend(bands);
+                *out.bands_drawn = true;
+            }
             *self.fixed_text_boxes.borrow_mut() = boxes;
-            // 选中的那一块：选区挂在它自己那一页上，翻到别页就不再画。
             if drew_text {
                 overlays.push(selection::overlay(
                     fixed_visual.clone().unwrap_or_default(),
                     &reader_weak,
                 ));
             }
+            // 正面捕获副本：静止帧把这一屏的页图收进捕获层 1。只收**位图**；痕迹与
+            // 选中留在实时层 —— 定版式的字在那张栅格图里，痕迹必须压在页图之上，
+            // 烘进纹理等于把一次交互状态钉死在纸上（与可重排相反）。
+            if capture_front {
+                let mut over = Vec::new();
+                for (index, page) in shown_slots.pages[..shown_slots.count]
+                    .iter()
+                    .copied()
+                    .enumerate()
+                {
+                    let (tiles, _) = fixed_page_tiles(
+                        book,
+                        page,
+                        shown_slots.width,
+                        viewport_height,
+                        content_top,
+                        shown_slots.lefts[index],
+                        false,
+                    );
+                    let paper = Paper::fixed(
+                        FixedPaper {
+                            page,
+                            tiles,
+                            text: None,
+                            text_key: None,
+                            placed: None,
+                        },
+                        rest,
+                        None,
+                        (viewport_width, viewport_height),
+                    );
+                    let no_viewer: Option<Entity<ImageViewer>> = None;
+                    self.paint_fixed_paper(
+                        &paper,
+                        &FixedPaint {
+                            book,
+                            atlas: &atlas,
+                            view,
+                            reader: &reader_weak,
+                            viewer: &no_viewer,
+                            palette,
+                            long_press: false,
+                            scrolling: false,
+                            now,
+                            viewport: (0.0, content_top, viewport_width, viewport_height),
+                            shift: (0.0, 0.0),
+                            zoom: FixedZoom::default(),
+                            pivot: self.fixed_frame.pivot,
+                        },
+                        &mut Vec::new(),
+                        &mut Vec::new(),
+                        &mut None,
+                        Some(&mut over),
+                        cx,
+                    );
+                }
+                // 正面纹理也带一份带子：平摊 / 折页时旧页的页眉页脚跟着纸走，
+                // 不是停在窗口上下。
+                let bands = fixed_page_bands(
+                    &page_box,
+                    &shown_slots,
+                    (0.0, 0.0),
+                    viewport_height,
+                    "fixed-page-band-capture",
+                    self,
+                    cx,
+                );
+                let bands = (!bands.is_empty())
+                    .then(|| div().absolute().inset_0().children(bands).into_any_element());
+                *out.front_capture = Some(PaperCapture {
+                    element: super::paper::empty_capture_element(),
+                    under: Vec::new(),
+                    over,
+                    bands,
+                });
+            }
+            // 背面捕获副本：卷曲那一趟把目标页摆进捕获层 2。双页时先把它按**到达那一
+            // 跨页**里的位置画，再由 `back_dx` 挪进 leaf 那一格（网格按 leaf 烘、
+            // 也按 leaf 采）。单页的 leaf 就是整张纸，不挪。
+            if let Some(back) = back_page
+                && self.captured_back != Some(((0, back, 0), viewport))
+            {
+                let key = (0, back, 0);
+                let back_slots =
+                    fixed_slots(back, page_count, spread, usable, gap, self.prefs.margin_x);
+                let index = if spread && back_slots.pages[0] != back {
+                    1
+                } else {
+                    0
+                };
+                let left = back_slots.lefts[index];
+                if spread && let Some(leaf) = *out.curl_leaf {
+                    back_dx = leaf.left - left;
+                }
+                *out.back_dx = back_dx;
+                let (tiles, _) = fixed_page_tiles(
+                    book,
+                    back,
+                    back_slots.width,
+                    viewport_height,
+                    content_top,
+                    left,
+                    false,
+                );
+                // 这一页本来就没有可画的格（越界的尾页）：背面该是一张干净的纸。
+                // 与「像素还没到」分开 —— 后者下一帧再试，前者现在就把纹理清成纸色，
+                // 否则采到的是上一趟留下的那一页。
+                let expects_images = tiles.iter().any(|at| at.tile.request.is_some());
+                let paper = Paper::fixed(
+                    FixedPaper {
+                        page: back,
+                        tiles,
+                        text: None,
+                        text_key: None,
+                        placed: None,
+                    },
+                    rest,
+                    None,
+                    (viewport_width, viewport_height),
+                );
+                let mut over = Vec::new();
+                let no_viewer: Option<Entity<ImageViewer>> = None;
+                self.paint_fixed_paper(
+                    &paper,
+                    &FixedPaint {
+                        book,
+                        atlas: &atlas,
+                        view,
+                        reader: &reader_weak,
+                        viewer: &no_viewer,
+                        palette,
+                        long_press: false,
+                        // 背面只在卷曲那一趟采：高清没在手就用低清那把，别在动画帧里
+                        // 起一趟几百毫秒的栅格化（与 `painted_tile` 的滑动手势同一档）。
+                        scrolling: true,
+                        now,
+                        viewport: (0.0, content_top, viewport_width, viewport_height),
+                        shift: (0.0, 0.0),
+                        zoom: FixedZoom::default(),
+                        pivot: self.fixed_frame.pivot,
+                    },
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    &mut None,
+                    Some(&mut over),
+                    cx,
+                );
+                // 一张图都没收进来、而这一页本该有图的背面不交：记成「已烘」之后它
+                // 不会再试，卷起来的背面就永远是一张纸色。下一帧预览到了再烘。
+                if !over.is_empty() || !expects_images {
+                    *out.back_key = Some(key);
+                    *out.back_capture = Some(PaperCapture {
+                        element: super::paper::empty_capture_element(),
+                        under: Vec::new(),
+                        over,
+                        bands: None,
+                    });
+                }
+            }
+            *out.gpu_curl_mesh = curl_mesh;
         }
     }
 
@@ -704,7 +1260,12 @@ impl ReaderSession {
     /// 连续竖滚与整页翻只在 `paint` 的位移 / 轴心 / 倍率上不同；页格怎么摆、
     /// 「看大图」入口归谁、痕迹压在页图之上，两档只有这一条路。
     ///
+    /// `capture` 是捕获副本那一趟要收的地方：只收**页格位图**（放大重画块与
+    /// 痕迹 / 选中都不收 —— 前者两样极少同时用，后者是交互状态，烘进纹理等于
+    /// 把它钉在纸上）。`None` = 正常上屏那一趟。
+    ///
     /// 返回这一页有没有真的取出字层（调用方据此决定摆不摆选中件）。
+    #[allow(clippy::too_many_arguments)]
     fn paint_fixed_paper(
         &mut self,
         paper: &Paper,
@@ -712,6 +1273,7 @@ impl ReaderSession {
         overlays: &mut Vec<AnyElement>,
         boxes: &mut Vec<(usize, Bounds<Pixels>)>,
         fixed_visual: &mut Option<SelectionVisual>,
+        capture: Option<&mut Vec<AnyElement>>,
         cx: &mut Context<Self>,
     ) -> bool {
         let Paper {
@@ -724,92 +1286,112 @@ impl ReaderSession {
         };
         let zoom = zoom.unwrap_or(paint.zoom);
         let page = fixed.page;
+        let baking = capture.is_some();
+        // 这一帧真摆上了几张纸：卷曲那一趟旧页在捕获纹理里，只该摆一张（门的读数）。
+        if !baking {
+            self.fixed_sheets_drawn += 1;
+        }
         let no_entry: Option<Entity<ImageViewer>> = None;
-        for at in &fixed.tiles {
-            // 解不出像素的那一格空着，但仍然占位：多图页的排版不该因为
-            // 少一张图就把剩下的往左挤。
-            let Some(request) = at.tile.request.as_ref() else {
-                continue;
+        {
+            let target: &mut Vec<AnyElement> = match capture {
+                Some(list) => list,
+                None => overlays,
             };
-            let key = request.key.clone();
-            let Some(image) =
-                painted_tile(paint.atlas, &at.tile, paint.view, cx, paint.scrolling)
-            else {
-                continue;
-            };
-            let rect = zoom.map(
-                Bounds::new(
-                    point(px(at.x + paint.shift.0), px(at.y + paint.shift.1)),
-                    size(px(at.width), px(at.height)),
-                ),
-                paint.pivot,
-            );
-            let selected = fixed.text.is_some() && at.tile.renders;
-            // 「看大图」那一格在这一族里按端分岔（`page_image` 顶上写着）：
-            // 手机上它吃的是**长按**，而那正是选中要的手势 —— 于是有字的
-            // 那一页不再挂它（入口挪进浮层那颗按钮），没字的页照旧。
-            // 桌面那一端挂的是**单击**，与拖选不打架（拖过阈值那一下的合成
-            // 点击由 `open_on_tap` 里那一条吃掉），所以原样留着。
-            let entry = if selected && paint.long_press {
-                &no_entry
-            } else {
-                paint.viewer
-            };
-            let index = overlays.len();
-            overlays.push(page_image(
-                f32::from(rect.origin.x),
-                f32::from(rect.origin.y),
-                f32::from(rect.size.width),
-                f32::from(rect.size.height),
-                image,
-                key,
-                entry,
-                paint.long_press,
-                index,
-                paint.reader,
-            ));
-            // 放大停稳那一档：看得见的那一块按 `REGION_EDGE` 重画，叠在这一页那一张上面。
-            let block = pinned_region(
-                RegionAsk {
-                    book: paint.book,
-                    atlas: paint.atlas,
-                    page,
-                    tile: &at.tile,
-                    rect: (at.x, at.y, at.width, at.height),
-                    pivot: paint.pivot,
-                    viewport: paint.viewport,
-                    zoom,
-                    now: paint.now,
-                },
-                &self.region_moved_at,
-                &self.region_pinned,
-                paint.view,
-                cx,
-            );
-            if let Some(pin) = block {
-                let key = pin.request.key.clone();
-                if let Some(image) = painted(paint.atlas, pin.request, paint.view, cx) {
-                    let zoomed = zoom.map(
-                        Bounds::new(
-                            point(px(pin.rect.0), px(pin.rect.1)),
-                            size(px(pin.rect.2), px(pin.rect.3)),
-                        ),
-                        paint.pivot,
-                    );
-                    overlays.push(page_image(
-                        f32::from(zoomed.origin.x),
-                        f32::from(zoomed.origin.y),
-                        f32::from(zoomed.size.width),
-                        f32::from(zoomed.size.height),
-                        image,
-                        key,
-                        &no_entry,
-                        paint.long_press,
-                        overlays.len(),
-                        paint.reader,
-                    ));
+            for at in &fixed.tiles {
+                // 解不出像素的那一格空着，但仍然占位：多图页的排版不该因为
+                // 少一张图就把剩下的往左挤。
+                let Some(request) = at.tile.request.as_ref() else {
+                    continue;
+                };
+                let key = request.key.clone();
+                let Some(image) =
+                    painted_tile(paint.atlas, &at.tile, paint.view, cx, paint.scrolling)
+                else {
+                    continue;
+                };
+                let rect = zoom.map(
+                    Bounds::new(
+                        point(px(at.x + paint.shift.0), px(at.y + paint.shift.1)),
+                        size(px(at.width), px(at.height)),
+                    ),
+                    paint.pivot,
+                );
+                let selected = fixed.text.is_some() && at.tile.renders;
+                // 「看大图」那一格在这一族里按端分岔（`page_image` 顶上写着）：
+                // 手机上它吃的是**长按**，而那正是选中要的手势 —— 于是有字的
+                // 那一页不再挂它（入口挪进浮层那颗按钮），没字的页照旧。
+                // 桌面那一端挂的是**单击**，与拖选不打架（拖过阈值那一下的合成
+                // 点击由 `open_on_tap` 里那一条吃掉），所以原样留着。
+                // 捕获副本一份手势都不挂：同一屏第二份监听会把点击吃两遍。
+                let entry = if baking || (selected && paint.long_press) {
+                    &no_entry
+                } else {
+                    paint.viewer
+                };
+                let index = target.len();
+                target.push(page_image(
+                    f32::from(rect.origin.x),
+                    f32::from(rect.origin.y),
+                    f32::from(rect.size.width),
+                    f32::from(rect.size.height),
+                    image,
+                    key,
+                    entry,
+                    paint.long_press && !baking,
+                    index,
+                    paint.reader,
+                ));
+                if baking {
+                    self.fixed_capture_images += 1;
+                    continue;
+                }
+                // 放大停稳那一档：看得见的那一块按 `REGION_EDGE` 重画，叠在这一页那一张上面。
+                let block = pinned_region(
+                    RegionAsk {
+                        book: paint.book,
+                        atlas: paint.atlas,
+                        page,
+                        tile: &at.tile,
+                        rect: (at.x, at.y, at.width, at.height),
+                        pivot: paint.pivot,
+                        viewport: paint.viewport,
+                        zoom,
+                        now: paint.now,
+                    },
+                    &self.region_moved_at,
+                    &self.region_pinned,
+                    paint.view,
+                    cx,
+                );
+                if let Some(pin) = block {
+                    let key = pin.request.key.clone();
+                    if let Some(image) = painted(paint.atlas, pin.request, paint.view, cx) {
+                        let zoomed = zoom.map(
+                            Bounds::new(
+                                point(px(pin.rect.0), px(pin.rect.1)),
+                                size(px(pin.rect.2), px(pin.rect.3)),
+                            ),
+                            paint.pivot,
+                        );
+                        let index = target.len();
+                        target.push(page_image(
+                            f32::from(zoomed.origin.x),
+                            f32::from(zoomed.origin.y),
+                            f32::from(zoomed.size.width),
+                            f32::from(zoomed.size.height),
+                            image,
+                            key,
+                            &no_entry,
+                            paint.long_press,
+                            index,
+                            paint.reader,
+                        ));
+                    }
                 }
             }
+        }
+        if baking {
+            return false;
         }
         let Some((text, at)) = fixed.text.as_deref().zip(fixed.placed) else {
             return false;

@@ -75,10 +75,10 @@ mod capture;
 mod decor;
 mod fixed;
 mod gestures;
-mod paper;
-mod reflowable;
 pub(in crate::ui::features::reader) mod images;
 pub(in crate::ui::features::reader) mod marks;
+mod paper;
+mod reflowable;
 mod shape;
 mod turn_view;
 
@@ -115,7 +115,6 @@ struct TurnFrame {
     /// 见 `turn_animation::Pose::free_edge_right`）；平移/覆盖那几档今天还没接这一格。
     rtl: bool,
 }
-
 
 impl ReaderSession {
     /// 采一次翻页的时钟，走完就把动画状态收掉。没有动画在走 ⇒ `None`。
@@ -280,7 +279,6 @@ struct ContinuousArm<'a> {
     upcoming: &'a mut Vec<crate::ui::foundation::images::DecodeRequest>,
 }
 
-
 type IncomingBake = ((usize, usize), (f32, f32));
 
 /// 分页 / 双页这一臂要交回公共装配的产物。
@@ -306,12 +304,15 @@ struct PagedArm<'a> {
     painted_keys: &'a mut Vec<String>,
     bands_drawn: &'a mut bool,
     paper_layers: &'a mut Vec<AnyElement>,
+    /// 每页自己的读数带（页眉 / 页脚）：挂在正文裁切层外面，静止可见、翻页跟着纸走。
+    page_bands: &'a mut Vec<AnyElement>,
 }
-
 
 impl Render for ReaderSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::features::reader::model::perf::reset();
+        // 这一帧真摆上几张定版式纸：翻页那一趟旧页走纹理，只该剩一张。
+        self.fixed_sheets_drawn = 0;
         // 上一帧的绘制回调确认页框完整落在窗口内、并且真的给捕获 pass 排了请求，才把
         // 「已烘」落定。必须放在 `sync_prefs` / 尺寸比较之前：那一帧之后发生的偏好或
         // 尺寸变化要继续把这张纹理标脏，不能被这里晚到的提交覆盖掉。
@@ -385,22 +386,20 @@ impl Render for ReaderSession {
         // 这里直接赋 `self.mode` 会让连续 → 分页那一趟丢掉章内位置 —— 读者在
         // 第 40% 处换回纸面动画，落到的却是这一章的章首。
         // 定版式没有「两栏」这回事：它的页是既定的一张位图，按宽度分成两条窄柱子只会
-        // 把同一页砍成两半。所以这一族的默认档恒为整页翻，读者手动塞进来的双页也按
-        // 分页走；「上下滚动」照旧由 `reconcile` 带进连续。
+        // 把同一页砍成两半。所以这一族的默认档恒为整页翻；读者手动塞进来的双页也按
+        // 相邻两页各占半张来摆（`fixed::fixed_slots`），不是把一页排成两栏。
+        // 「上下滚动」照旧由 `reconcile` 带进连续。
         let fixed_layout = self.is_fixed();
         let by_width = if fixed_layout {
             chrome::PageMode::Paged
         } else {
             chrome::default_mode(usable, gap)
         };
-        let mut wanted = if self.mode_undecided {
+        let wanted = if self.mode_undecided {
             by_width
         } else {
             self.mode
         };
-        if fixed_layout && wanted == chrome::PageMode::Spread {
-            wanted = chrome::PageMode::Paged;
-        }
         self.adopt_mode(chrome::reconcile(page_turn, wanted, by_width), cx);
         let mode = self.mode.effective(usable, gap);
         let columns = mode.columns();
@@ -526,9 +525,31 @@ impl Render for ReaderSession {
             self.captured_back = None;
             self.captured_incoming = None;
         }
-        // 定版式那一族没有排版可等（页是既定的位图），所以那一族恒算「已落地」。
-        let content_ready =
-            self.is_fixed() || self.book().is_none_or(|book| book.document().is_current());
+        // 定版式那一族没有排版可等（页是既定的位图），但它有另一条「这一帧烘出来是不是
+        // 空的」：这一页每一格该画的像素都得先在图集里落地。少一格就烘，纹理里那一块
+        // 是纸色，而它一旦被记成「已烘」就不会自己重来。双页那一趟烘的是**两张**页图，
+        // 右页也得一起等。
+        //
+        // 这一问要逐格查图集，**只在真可能烘的那一帧**才问：动画里、连续滚动里、
+        // 或手里这张纹理本来就是这一页的，`capture_wanted` 都是假，值不必算。
+        let capture_stale = self.capture_dirty || self.captured_page != Some(page_key);
+        let content_ready = if !fixed_layout {
+            self.book().is_none_or(|book| book.document().is_current())
+        } else if turn.is_some() || mode.is_continuous() || !capture_stale {
+            true
+        } else {
+            let left = self.page();
+            let count = self.page_count();
+            let right_ready = mode != chrome::PageMode::Spread
+                || left + 1 >= count
+                || self
+                    .fixed()
+                    .is_some_and(|book| fixed::fixed_capture_ready(book, left + 1, &atlas, cx));
+            right_ready
+                && self
+                    .fixed()
+                    .is_some_and(|book| fixed::fixed_capture_ready(book, left, &atlas, cx))
+        };
         // 进场那 280 ms 里整层在横移：副本按**最终位置**画、上屏那一份按 `+enter_shift` 画
         // （见下面 `capture_region` 那一段）。两条路径画的是同一页字，**只有副本落进主 pass**
         // 才会错开一截印两遍，所以「进场期间不烘」那是临时闸，不是根因的修法：层壳
@@ -541,11 +562,12 @@ impl Render for ReaderSession {
             content_ready,
             self.capture_dirty,
             self.captured_page == Some(page_key),
-        );
-        // 捕获层 1（正面）这一帧要不要画一份副本。只有可重排那一族要：定版式那一族不出卷曲
-        // 网格（它的页面本来就是整张位图），连续滚动那一档根本不烘（上面那条已经挡掉）。
-        // 副本必须自己画一份 —— 主 pass 只画 `order < CAPTURE_ORDER_BASE`，层里的东西不上屏。
-        let capture_front = capture_needed && !self.is_fixed();
+        ) && (!fixed_layout || !self.fixed_zoom.is_zoomed());
+        // 捕获层 1（正面）这一帧要不要画一份副本。两条臂都要：定版式的页图也是
+        // 一份能烘进纹理的位图，折页与平摊三档采的就是它。连续滚动那一档不烘
+        // （上面那条已经挡掉）。副本必须自己画一份 —— 主 pass 只画
+        // `order < CAPTURE_ORDER_BASE`，层里的东西不上屏。
+        let capture_front = capture_needed;
         // 日志里要摆的是「烘那一张时」的两组数，与今天这帧的比一眼就能看出差在哪。`Option` 进不了
         // tracing 的字段，所以摊成数：哨兵 = 还没烘过（那一格正是要盯的状态）。
         let (captured_ch, captured_pg) = self.captured_page.unwrap_or((usize::MAX, usize::MAX));
@@ -676,6 +698,8 @@ impl Render for ReaderSession {
         let mut land_chapter: Option<PageRef> = None;
         let mut bands_drawn = false;
         let mut paper_layers: Vec<AnyElement> = Vec::new();
+        // 每页一份的读数带：与纸同一套位移，但不进正文裁切层。
+        let mut page_bands: Vec<AnyElement> = Vec::new();
         // 这一帧主场景与捕获副本真正交给图集碰过的那些图（容器路径）。预解那一步要跳过它们 ——
         // 「还没进图集」只能这样知道：`painted` 已经把「在场」记上了。
         let mut painted_keys: Vec<String> = Vec::new();
@@ -743,7 +767,13 @@ impl Render for ReaderSession {
                         viewport_height,
                         content_top,
                         viewport_width: f32::from(viewport_size.width),
+                        viewport,
+                        page_box,
                         area,
+                        sheet_area,
+                        gap,
+                        layer_top,
+                        capture_front,
                         turn,
                         motion,
                         now,
@@ -753,6 +783,18 @@ impl Render for ReaderSession {
                         long_press,
                         atlas: atlas.clone(),
                         reader_weak: reader_weak.clone(),
+                        paper_layers: &mut paper_layers,
+                        out: fixed::FixedOut {
+                            shades: &mut shades,
+                            gpu_curl_mesh: &mut gpu_curl_mesh,
+                            curl_leaf: &mut curl_leaf,
+                            front_capture: &mut paged_front_capture,
+                            back_capture: &mut paged_back_capture,
+                            back_dx: &mut back_dx,
+                            back_key: &mut back_key,
+                            turn_arriving: &mut turn_arriving,
+                            bands_drawn: &mut bands_drawn,
+                        },
                     },
                     &mut overlays,
                     &mut fixed_visual,
@@ -808,11 +850,11 @@ impl Render for ReaderSession {
                             painted_keys: &mut painted_keys,
                             bands_drawn: &mut bands_drawn,
                             paper_layers: &mut paper_layers,
+                            page_bands: &mut page_bands,
                         },
                         window,
                         cx,
                     );
-
                 }
             }
         }
@@ -822,6 +864,7 @@ impl Render for ReaderSession {
         // 所以主场景里的两条读数带要念目标页；它们必须在卷曲网格**之前**入树，网格才盖得住
         // 卷着的那张纸，而读者又能从纸底下看见目标页的章名与页码。
         let whole_sheet_curl = gpu_curl_mesh.is_some() && mode != chrome::PageMode::Spread;
+        let band_bare = bare_bands || page_box.bands == BandPolicy::Overlay;
         let band_readouts = if whole_sheet_curl {
             turn_arriving.map_or_else(
                 || bands::readouts_of(self, cx),
@@ -830,11 +873,13 @@ impl Render for ReaderSession {
         } else {
             bands::readouts_of(self, cx)
         };
-        if whole_sheet_curl {
+        // 整张纸折页那一档的带子由这里画（网格盖得住）；定版式自己有每页一份的
+        // live 带子（`bands_drawn`），不再叠这一份。
+        if whole_sheet_curl && !bands_drawn {
             column = column.child(bands::chrome(
                 &page_box,
                 &band_readouts,
-                bare_bands,
+                band_bare,
                 bands::Width::Paper,
                 cx,
             ));
@@ -997,6 +1042,12 @@ impl Render for ReaderSession {
                 cx,
             ));
         }
+        // 只有这一帧真产出了副本才请求捕获。副本那一趟可能因为某一格/某张图还没
+        // 进图集而空着（`painted_tile` / `painted_picture` 那两条早退），请求了就会
+        // 把「烘好」记在一张缺内容（甚至纸色）的纹理上 —— 而门再也不会自己重开。
+        let front_copy_ready = paged_front_capture.is_some();
+        let incoming_copy_ready = paged_incoming_capture.is_some();
+        let back_copy_ready = paged_back_capture.is_some();
         let mut capture_layers = Vec::new();
         if let Some(capture) = paged_front_capture {
             capture_layers.push(turn_view::CaptureLayer {
@@ -1018,7 +1069,9 @@ impl Render for ReaderSession {
         // 捕获层 3（进场页）：副本里的 runs / 装饰 / 图都已带着进场页这一帧的位移，
         // 包裹 div 按 `-offset` 把它退回静止位置、再按 `-enter_shift` 落到最终位置 ——
         // 与正面副本同一把尺（正面烘焙时位移本来就是 0，所以只让横移）。
-        if incoming_bake.is_some() && let Some(capture) = paged_incoming_capture {
+        if incoming_bake.is_some()
+            && let Some(capture) = paged_incoming_capture
+        {
             capture_layers.push(turn_view::CaptureLayer {
                 order: 3,
                 dx: -enter_shift,
@@ -1039,12 +1092,12 @@ impl Render for ReaderSession {
         // 带子随纸移动、自己遮住边缘。裁剪钉在静止版心上时，纸在动而字的可见范围不动，
         // 上下平移会在旧版心的上下边界切掉一条，切掉的部分等纹理接管又补回来 —— 闪。
         // 连续滚动的字本来就该被视口带子夹住，定版式的 `content == paper`，两者保持原样。
-        let clip = if turn.is_some() && !mode.is_continuous() && page_box.bands == BandPolicy::Reserved
-        {
-            page_box.paper
-        } else {
-            page_box.content
-        };
+        let clip =
+            if turn.is_some() && !mode.is_continuous() && page_box.bands == BandPolicy::Reserved {
+                page_box.paper
+            } else {
+                page_box.content
+            };
         column = column.child(
             div()
                 .id("reader-content-clip")
@@ -1093,7 +1146,7 @@ impl Render for ReaderSession {
             clear: capture_clear,
         };
         // 烘一张旧页纹理（捕获层 1）：整张纸（含页眉/页脚），只在定住那一帧请求。
-        if capture_needed {
+        if capture_needed && front_copy_ready {
             column = turn_view::request_front_capture(
                 column,
                 sheet_area,
@@ -1106,6 +1159,7 @@ impl Render for ReaderSession {
         // 背面那张纹理（捕获层 2）：内容与请求排在同一帧，网格这一帧就采得到。
         if let Some(key) = back_key
             && let Some(leaf) = curl_leaf
+            && back_copy_ready
         {
             column = turn_view::request_back_capture(
                 column,
@@ -1117,7 +1171,9 @@ impl Render for ReaderSession {
             );
         }
         // 进场页那张纹理（捕获层 3）：烘焙那一帧与副本同一帧发出请求。
-        if let Some((key, _)) = incoming_bake {
+        if let Some((key, _)) = incoming_bake
+            && incoming_copy_ready
+        {
             column = turn_view::request_incoming_capture(
                 column,
                 sheet_area,
@@ -1143,6 +1199,18 @@ impl Render for ReaderSession {
                 curl_leaf,
                 Rc::clone(&self.curl_bake_origin),
                 pass,
+            );
+        }
+        // 每页一份的读数带压在纸与网格之上、菜单与便签之下。它不在正文裁切层里，
+        // 所以静止帧也看得见；每一份已经按自己那张纸的 `Sheet::offset` 摆好。
+        if !page_bands.is_empty() {
+            column = column.child(
+                div()
+                    .id("reader-page-bands")
+                    .test_support()
+                    .absolute()
+                    .inset_0()
+                    .children(page_bands),
             );
         }
         // 预解下一次翻页要用的那几张图。**必须在 `end_frame` 之前**：那一趟按「离场满几帧」
@@ -1276,7 +1344,6 @@ impl Render for ReaderSession {
         if !page_chrome_drawn && !whole_sheet_curl {
             // 全局那一份带子直接吃 `PageBox`：连续档是占位带，定版式是纯文字浮层。
             // 定版式没有任何底色 —— 页图整屏，读数只是浮在照片上的两行字。
-            let band_bare = bare_bands || page_box.bands == BandPolicy::Overlay;
             body = body.child(bands::chrome(
                 &page_box,
                 &band_readouts,
@@ -1352,25 +1419,6 @@ fn column_cut(
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 mod tests;
 
@@ -1379,9 +1427,9 @@ mod tests;
 #[cfg(test)]
 mod truth_tables {
     use super::capture::{capture_wanted, in_viewport, sheet_area_in_page};
+    use super::column_cut;
     use super::decor::{dash_spans, three_d_tone};
     use super::marks::text_ink_box;
-    use super::column_cut;
     use crate::ui::features::reader::motion::turn_animation::{Crease, Cut, Sheet};
     use folio_core::content::format::css::computed::{ComputedStyle, ObjectFit, TextAlign};
     use folio_core::layout::{ImageRun, LineBox, LineFragment, LineRun, RunStyle};
@@ -1503,7 +1551,8 @@ mod truth_tables {
             stack: None,
         };
         // 度量盒 31.3 > 行盒 27.0：不收就必然吃进下一行。
-        assert!(24.4 + 6.9 > 27.0, "这一条要钉的就是度量盒高出行盒那一格");
+        let ink_height = 24.4_f32 + 6.9;
+        assert!(ink_height > 27.0, "这一条要钉的就是度量盒高出行盒那一格");
         let (first_top, first_height) = text_ink_box(&line(0.0)).expect("有文本片段");
         let (second_top, second_height) = text_ink_box(&line(27.0)).expect("有文本片段");
         for (top, height, y) in [

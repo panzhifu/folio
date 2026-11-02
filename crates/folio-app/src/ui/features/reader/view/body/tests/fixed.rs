@@ -13,8 +13,8 @@ use folio_core::store::Store;
 use folio_core::{Content, Format, Locator, PageTurn};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Entity, InputEvent as _, LongPressEvent, PinchEvent, Pixels,
-    Point, TestAppContext, TouchPhase, point, px,
+    AnyWindowHandle, AppContext as _, ElementId, Entity, InputEvent as _, LongPressEvent,
+    PinchEvent, Pixels, Point, TestAppContext, TouchPhase, point, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -80,6 +80,16 @@ fn open_fixed_pdf_with_turn(
     name: &str,
     turn: PageTurn,
 ) -> (Entity<ReaderSession>, AnyWindowHandle, Arc<Store>, i64) {
+    open_fixed_pdf_at(cx, name, 460.0, turn)
+}
+
+/// 同上，但窗口宽由调用方给：定版式双页要 1200 宽那一档才装得下两页。
+fn open_fixed_pdf_at(
+    cx: &mut TestAppContext,
+    name: &str,
+    width: f32,
+    turn: PageTurn,
+) -> (Entity<ReaderSession>, AnyWindowHandle, Arc<Store>, i64) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
     let (meta, content) = folio_core::content::format::provider_for(&path)
         .expect("PDF 该有 provider")
@@ -96,7 +106,7 @@ fn open_fixed_pdf_with_turn(
         Arc::from(document),
         prefs(16.0),
         Locator::start(),
-        460.0,
+        width,
         Some(store.clone()),
         Some(id),
     );
@@ -532,11 +542,11 @@ fn a_fixed_scroll_position_reopens_on_the_same_page(cx: &mut TestAppContext) {
     });
 }
 
-/// 定版式翻页走流式那一套纸面动画，但**不接仿真折页**：全局选的是折页时，定版式
-/// 退到平移。这里同时钉住「起了一趟动画」与「用的不是折页」，并画一帧确认出场页
-/// 那条绘制路径不炸。
+/// 定版式翻页与流式同一套纸面动画：全局选的是折页时，定版式的**位图页**也烘一张
+/// 捕获纹理来卷 —— 从前那一档被筛掉、退到平移，理由是「没有可卷的排版纹理」。
+/// 现在捕获链补上了，两个可选集也同源。
 #[gpui_kit::test]
-fn a_fixed_page_turn_animates_with_slide_instead_of_curl(cx: &mut TestAppContext) {
+fn a_fixed_page_turn_takes_the_curl_style(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
     cx.update(|app| {
@@ -547,15 +557,235 @@ fn a_fixed_page_turn_animates_with_slide_instead_of_curl(cx: &mut TestAppContext
     let style = view.read_with(cx, |v, _| v.turn.map(|turn| turn.style));
     assert_eq!(
         style,
-        Some(PageTurn::Slide),
-        "定版式把折页换成平移，而不是去卷一张位图"
+        Some(PageTurn::Curl),
+        "定版式与可重排一样走折页，而不是退到平移"
     );
     assert!(
         view.read_with(cx, |v, _| v.turn.is_some()),
         "这一趟该真的在走"
     );
     cx.update_window(handle, |_, window, cx| window.render_frame(cx))
-        .expect("定版式翻页那一帧该画得出来");
+        .expect("定版式卷曲那一帧该画得出来");
+}
+
+/// 定版式起卷要两样东西：正面那张纹理里是**这一页的位图**，背面烘的是**目标页**。
+/// 起卷那一帧只摆进场那一张纸 —— 旧页在纹理里，由 GPU 网格卷走；落定那一帧只剩
+/// 当前那一页，不该出现两张同一页。
+#[gpui_kit::test]
+fn a_fixed_curl_bakes_the_page_bitmap_and_the_target_page_on_its_back(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::turn::TurnIntent;
+
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        PageTurn::Curl,
+    );
+    // 高清像素要真解进图集之后才允许烘（`fixed_capture_ready` 那一格）。
+    let mut ready = false;
+    for _ in 0..20 {
+        settle(cx, handle);
+        if view.read_with(cx, |v, _| v.curl_capture_ready()) {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "前置：这一页每一格的像素都该落地，捕获门才开得了");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some((0, 0)),
+        "前置：正面那张纹理记的是这一页（定版式的章号恒为 0）"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_back),
+        None,
+        "前置：没起趟之前不该烘背面"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.fixed_capture_images) >= 1,
+        "正面捕获副本里该真有一张页图（不是一张纸色）"
+    );
+
+    view.update(cx, |v, cx| v.turn(TurnIntent::Next, cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.pending_turn),
+        None,
+        "纹理在手，这一趟不该排队"
+    );
+    settle(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.page()), 1, "这一趟真翻了页");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.turn.map(|turn| turn.style)),
+        Some(PageTurn::Curl)
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_back.map(|(back, _)| back)),
+        Some((0, 1, 0)),
+        "单页折页的背面该是目标页整张"
+    );
+    assert!(
+        view.read_with(cx, |v, _| v.fixed_capture_images) >= 1,
+        "背面捕获副本里该真有目标页那张图"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.fixed_sheets_drawn),
+        1,
+        "起卷那一帧只摆进场那一张：旧页在捕获纹理里"
+    );
+
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_none()),
+        "走完该收掉这一趟"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.fixed_sheets_drawn),
+        1,
+        "落定那一帧只剩当前这一页，不该出现两张同一页"
+    );
+}
+
+/// 定版式也跟着手指走：页号在松手那一刻才落，跟手期间只摆两张纸。从前这一族在
+/// `swipe_geometry` 里被整条挡掉，读者读到的是「划不动，松手才翻」。
+#[gpui_kit::test]
+fn a_fixed_swipe_follows_the_finger_and_lands_on_release(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::session::TurnRun;
+
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let first = view.read_with(cx, |v, _| v.page());
+    raw_touch_at(cx, handle, TouchPhase::Started, point(px(400.0), px(200.0)));
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(250.0), px(200.0)));
+    let following = view.read_with(cx, |v, _| {
+        v.turn.map(|turn| (turn.run, turn.grip.is_some()))
+    });
+    assert!(
+        matches!(following, Some((TurnRun::Following { t }, true)) if t > 0.0),
+        "这一笔该跟手走起来（拿到的 {following:?}）"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first,
+        "跟手期间页号一个字都不动"
+    );
+
+    raw_touch_at(cx, handle, TouchPhase::Ended, point(px(250.0), px(200.0)));
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first + 1,
+        "拖过落定线，松手那一腿该落到下一页"
+    );
+}
+
+/// 折页那一档也一样跟手：捕获门开着时，这一笔该认领成 `Following`，而不是被
+/// 「旧页纹理还没烘好」挡到松手才补一趟。
+#[gpui_kit::test]
+fn a_fixed_curl_swipe_follows_once_the_texture_is_baked(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::session::TurnRun;
+
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        PageTurn::Curl,
+    );
+    let mut ready = false;
+    for _ in 0..20 {
+        settle(cx, handle);
+        if view.read_with(cx, |v, _| v.curl_capture_ready()) {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "前置：这一页的捕获纹理该烘好");
+
+    let first = view.read_with(cx, |v, _| v.page());
+    raw_touch_at(cx, handle, TouchPhase::Started, point(px(400.0), px(200.0)));
+    raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(200.0)));
+    let following = view.read_with(cx, |v, _| v.turn.map(|turn| (turn.run, turn.style)));
+    assert!(
+        matches!(following, Some((TurnRun::Following { t }, PageTurn::Curl)) if t > 0.0),
+        "折页这一笔该跟手（拿到的 {following:?}）"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        first,
+        "跟手期间页号不动"
+    );
+}
+
+/// 平摊三档也采那张捕获纹理：起滑那一帧旧页由网格画，不再实时摆一遍位图。
+#[gpui_kit::test]
+fn a_fixed_slide_turn_draws_the_baked_page_instead_of_the_bitmap(cx: &mut TestAppContext) {
+    use gpui_kit::ElementId;
+    use gpui_kit::test::TestWindowExt;
+
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let mut ready = false;
+    for _ in 0..20 {
+        settle(cx, handle);
+        if view.read_with(cx, |v, _| v.curl_capture_ready()) {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "前置：这一页的捕获纹理该烘好");
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let flat = cx
+        .update_window(handle, |_, window, _| {
+            window
+                .try_find(ElementId::from("reader-flat-capture"))
+                .is_some()
+        })
+        .expect("窗口应能渲染");
+    assert!(flat, "出场页该走烘好的整页纹理");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.fixed_sheets_drawn),
+        1,
+        "旧页在纹理里，主场景只摆进场那一张"
+    );
+}
+
+/// 定版式双页 = **相邻两页各占半张**（合订本摊开），不是把一页排成两栏：
+/// 一屏摆两张纸，翻页步进 2。
+#[gpui_kit::test]
+fn a_fixed_spread_shows_two_adjacent_pages_and_steps_two(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_at(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        1200.0,
+        PageTurn::Slide,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Spread, cx));
+    settle(cx, handle);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.mode()),
+        PageMode::Spread,
+        "1200 宽的窗装得下两页"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| (v.page(), v.fixed_sheets_drawn)),
+        (0, 2),
+        "一屏相邻两页（0/1），两张纸都得真摆上"
+    );
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        2,
+        "双页一步跨两张相邻页（0/1 → 2/3）"
+    );
+    settle(cx, handle);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.fixed_sheets_drawn),
+        1,
+        "只剩尾页时那一屏只摆一张（第 3 页），另一半留空"
+    );
 }
 
 /// 拖过 `TITLE` 那五个字：选区成立、复制到手的是那一串、划下去真进了库，
@@ -1051,4 +1281,149 @@ fn a_pdf_page_long_press_selects_and_opens_the_menu(cx: &mut TestAppContext) {
         view.read_with(cx, |v, _| v.taps_selection_ui(bounds.center())),
         "落在菜单上的那一击必须先被选中这一套吃掉"
     );
+}
+
+/// 双页的折页只揭**靠手指那半张 leaf**：往前翻折左半张，背面是下一跨页的右页；
+/// 往回翻折右半张，背面是上一跨页的左页。两张相邻页同屏时也照样成立。
+#[gpui_kit::test]
+fn a_fixed_spread_curl_peels_one_leaf_and_bakes_the_neighbouring_page(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::turn::TurnIntent;
+
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_at(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        1200.0,
+        PageTurn::Curl,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Spread, cx));
+    settle(cx, handle);
+    // 走到最后一跨页（第 3 页 + 空白右半），再从那里往回翻：到达那一跨页是 0/1。
+    view.update(cx, |v, cx| v.set_page(2, cx));
+    let mut ready = false;
+    for _ in 0..20 {
+        settle(cx, handle);
+        if view.read_with(cx, |v, _| v.curl_capture_ready()) {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "前置：这一跨页的捕获纹理该烘好");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_page),
+        Some((0, 2)),
+        "前置：正面那张纹理记的是左页（定版式的章号恒为 0）"
+    );
+
+    view.update(cx, |v, cx| v.turn(TurnIntent::Previous, cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.pending_turn),
+        None,
+        "纹理在手，这一趟不该排队"
+    );
+    settle(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.page()), 0);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.turn.map(|turn| turn.style)),
+        Some(PageTurn::Curl)
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.captured_back.map(|(back, _)| back)),
+        Some((0, 1, 0)),
+        "往回翻揭右半张，背面该是到达那一跨页的右页"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.fixed_sheets_drawn),
+        2,
+        "到达那一跨页是相邻两页，两张纸都得摆上"
+    );
+}
+
+/// 放大着的那一帧不烘纹理；读者这时点一下，必须**先收起缩放再排队等门** ——
+/// 顺序反了，这一趟就永远停在「门没开」而页还放大着，捕获永远烘不出来。
+#[gpui_kit::test]
+fn a_zoomed_page_resets_before_the_curl_gate_queues_the_turn(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf_with_turn(
+        cx,
+        "../../tests/fixtures/oss/pdf/three-pages.pdf",
+        PageTurn::Curl,
+    );
+    // 模拟「纹理还没烘上」。
+    view.update(cx, |v, _| {
+        v.capture_dirty = true;
+        v.captured_page = None;
+    });
+    let (x, w, _, _) = page_rect(cx, &view);
+    pinch(cx, handle, 1.0, point(px(x + w / 2.0), px(260.0)));
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.fixed_zoom.scale()) > 1.5,
+        "前置：这一页该是放大着的"
+    );
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.pending_turn),
+        Some(crate::ui::features::reader::model::turn::TurnIntent::Next),
+        "门没开：这一趟该排队"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.fixed_zoom.scale()),
+        1.0,
+        "排队之前先把缩放收回 1x，否则捕获永远烘不出来"
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.page()), 0);
+
+    // 门开之后那一帧末会把排队这一趟补上。
+    for _ in 0..20 {
+        settle(cx, handle);
+        if view.read_with(cx, |v, _| v.page()) == 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        1,
+        "纹理烘好之后排队那一趟该补上"
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.pending_turn), None);
+}
+
+/// 定版式的每页读数带也跟着纸走：翻页那一帧它的 x 等于纸的位移，不是钉在窗口左边。
+/// 从前定版式只有一层全局带，纸在动、带子不动。
+#[gpui_kit::test]
+fn a_fixed_band_rides_its_sheet(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle, _, _) = open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
+    let rest = fixed_band_x(cx, handle, 0).expect("静止帧该有第 0 页的带子");
+    assert!(
+        rest.abs() < 1.0,
+        "静止时带子该贴在纸的左缘，实得 x = {rest}"
+    );
+
+    view.update(cx, |v, cx| v.scroll_page(1, cx));
+    turn_frame(cx, handle, Duration::from_millis(1));
+    let moving = fixed_band_x(cx, handle, 1).expect("进场页的带子该在树里");
+    assert!(
+        moving > 150.0,
+        "进场页的带子该跟着纸从右侧进来，实得 x = {moving}"
+    );
+
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    let landed = fixed_band_x(cx, handle, 1).expect("落定后带子该还在");
+    assert!(
+        landed.abs() < 1.0,
+        "落定后带子该回到纸的静止位置，实得 x = {landed}"
+    );
+}
+
+/// 第 `page` 页那条定版式带子的 x（窗口坐标）。
+fn fixed_band_x(cx: &mut TestAppContext, handle: AnyWindowHandle, page: usize) -> Option<f32> {
+    cx.update_window(handle, |_, window, _| {
+        window
+            .try_find(ElementId::from(("fixed-page-band", page as u64)))
+            .map(|element| f32::from(element.bounds().origin.x))
+    })
+    .expect("窗口应能渲染")
 }

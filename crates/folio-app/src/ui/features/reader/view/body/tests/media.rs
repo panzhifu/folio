@@ -4,12 +4,14 @@ use super::harness::{
     PARA, char_point, meta, offset_of, open, open_with_document, open_with_store, prefs,
     scroll_mode, settle,
 };
+use crate::ui::features::reader::model::chrome::PageMode;
 use folio_core::content::document::Document;
 use folio_core::store::Store;
 use folio_core::{Chapter, Content, DocMeta, FlowDoc, Format, Locator};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext as _, TestAppContext, point, px};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// 一章：两段话中间夹一张 200×100 的插图，第一屏就一定摆得上。
 fn image_flow() -> FlowDoc {
@@ -476,5 +478,69 @@ fn the_footnote_anchor_is_the_marker_not_the_finger(cx: &mut TestAppContext) {
     assert_eq!(
         anchors[0], anchors[1],
         "同一个标记上的两处落点，抬出来的小纸片该在同一个地方"
+    );
+}
+
+/// 正面捕获副本里要有**图**：缺图的纹理一旦记成「已烘」，滑动时旧页就永久少一张图。
+/// `Illustrated` 手里有字节，图会真解出来；捕获必须等它到了再落地。
+#[gpui_kit::test]
+fn the_front_capture_includes_an_illustration(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let doc: Arc<dyn Document> = Arc::new(Illustrated {
+        meta: meta("epub"),
+        content: Content::Reflow(image_flow()),
+    });
+    let (view, handle) =
+        open_with_document(cx, doc, prefs(16.0), Locator::start(), 460.0, None, None);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    let mut baked = false;
+    for _ in 0..40 {
+        settle(cx, handle);
+        if view.read_with(cx, |v, _| {
+            v.captured_page.is_some() && v.front_capture_images > 0
+        }) {
+            baked = true;
+            break;
+        }
+        cx.executor().advance_clock(Duration::from_millis(20));
+    }
+    let images = view.read_with(cx, |v, _| v.front_capture_images);
+    assert!(
+        baked,
+        "正面捕获副本里该有那张插图，实得 {images} 张（捕获 {:?}）",
+        view.read_with(cx, |v, _| v.captured_page)
+    );
+}
+
+/// 解不出来的插图不能把捕获门永远卡死：图集判 `Failed` 之后那张图在实时页上本来
+/// 也不会出现，纹理里空着才是实情。这一条守的是「失败算落地」那一支。
+#[gpui_kit::test]
+fn a_failed_illustration_does_not_block_the_capture(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    // 没有容器 ⇒ `image_bytes` 永远回 `None`，那张图必然失败。
+    let doc: Arc<dyn Document> = Arc::from(folio_core::content::document::from_content(
+        meta("epub"),
+        Content::Reflow(image_flow()),
+    ));
+    let (view, handle) =
+        open_with_document(cx, doc, prefs(16.0), Locator::start(), 460.0, None, None);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    let mut baked = false;
+    for _ in 0..40 {
+        settle(cx, handle);
+        if view.read_with(cx, |v, _| v.captured_page.is_some()) {
+            baked = true;
+            break;
+        }
+        cx.executor().advance_clock(Duration::from_millis(20));
+    }
+    assert!(
+        baked,
+        "解不出来的图不该把正面捕获门卡死（captured_page 仍为 None）"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.front_capture_images),
+        0,
+        "失败的那张不该被数进捕获副本"
     );
 }
