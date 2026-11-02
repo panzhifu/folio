@@ -2461,7 +2461,7 @@ dependencies = [
 [[package]]
 name = "folio-curl"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=8acf2e6284485d3fd8263eff356c56d4638e05be#8acf2e6284485d3fd8263eff356c56d4638e05be"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=892b667adddec23a248cad71dc5ab4fb86867f39#892b667adddec23a248cad71dc5ab4fb86867f39"
 dependencies = [
  "bytemuck",
 ]
@@ -3360,7 +3360,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=8acf2e6284485d3fd8263eff356c56d4638e05be#8acf2e6284485d3fd8263eff356c56d4638e05be"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=892b667adddec23a248cad71dc5ab4fb86867f39#892b667adddec23a248cad71dc5ab4fb86867f39"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3430,7 +3430,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-apple"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=8acf2e6284485d3fd8263eff356c56d4638e05be#8acf2e6284485d3fd8263eff356c56d4638e05be"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=892b667adddec23a248cad71dc5ab4fb86867f39#892b667adddec23a248cad71dc5ab4fb86867f39"
 dependencies = [
  "anyhow",
  "async-task",
@@ -3667,7 +3667,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=8acf2e6284485d3fd8263eff356c56d4638e05be#8acf2e6284485d3fd8263eff356c56d4638e05be"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=892b667adddec23a248cad71dc5ab4fb86867f39#892b667adddec23a248cad71dc5ab4fb86867f39"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3822,7 +3822,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=8acf2e6284485d3fd8263eff356c56d4638e05be#8acf2e6284485d3fd8263eff356c56d4638e05be"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=892b667adddec23a248cad71dc5ab4fb86867f39#892b667adddec23a248cad71dc5ab4fb86867f39"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3849,7 +3849,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.9"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=8acf2e6284485d3fd8263eff356c56d4638e05be#8acf2e6284485d3fd8263eff356c56d4638e05be"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=892b667adddec23a248cad71dc5ab4fb86867f39#892b667adddec23a248cad71dc5ab4fb86867f39"
 dependencies = [
  "accesskit",
  "accesskit_windows",
