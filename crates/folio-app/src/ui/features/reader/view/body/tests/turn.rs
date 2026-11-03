@@ -101,6 +101,48 @@ fn the_arrow_keys_turn_the_pages(cx: &mut TestAppContext) {
     }
 }
 
+/// 浮层（顶栏底栏）压着的时候四颗方向键一步都不翻正文，并且把这一键**交回**焦点元素。
+///
+/// 与横扫、滚轮那两条同一规矩（`body/tests/swipe.rs` 的
+/// `body_turn_inputs_yield_while_the_overlay_is_up`）：工具栏露头之后正文上的输入只表达
+/// 「收浮层」。`handled == false` 那半是要害 —— 外壳那条处理者见 `false` 才 `propagate`，
+/// 底栏的进度滑条与弹层里的列表因此还吃得到左右键。
+#[gpui_kit::test]
+fn the_arrow_keys_yield_while_the_overlay_is_up(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let first = view.read_with(cx, |v, _| v.page());
+
+    view.update(cx, |v, cx| v.set_overlay_open(true, cx));
+    for arrow in [Arrow::Right, Arrow::Down, Arrow::Left, Arrow::Up] {
+        let handled = view.update(cx, |v, cx| v.arrow_turn(arrow, cx));
+        settle(cx, handle);
+        assert!(!handled, "浮层开着时 {arrow:?} 不该归正文翻页");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.page()),
+            first,
+            "浮层开着时 {arrow:?} 一步都不该翻"
+        );
+    }
+
+    view.update(cx, |v, cx| v.set_overlay_open(false, cx));
+    assert!(
+        view.update(cx, |v, cx| v.arrow_turn(Arrow::Right, cx)),
+        "收了浮层该重新归正文"
+    );
+    settle(cx, handle);
+    assert_eq!(view.read_with(cx, |v, _| v.page()), first + 1);
+}
+
 /// 「翻页时长」那一格真管到了点屏那一趟：设成 700 ms 之后，300 ms 时那张纸还在半路，
 /// 走过整趟才落定。
 ///
@@ -549,6 +591,118 @@ fn a_continuous_turn_tweens_the_painted_position(cx: &mut TestAppContext) {
     assert!(
         (painted - target).abs() < 1.0,
         "定住后画的位置就是权威位置：{painted} vs {target}"
+    );
+}
+
+/// 滚轮一格与点屏幕两侧，在**仿真翻页**下必须是同一趟动画。
+///
+/// 从前 `on_scroll` 的分页那一支自己写页号，从不进 `turn`：于是同一本书上点两侧有卷页、
+/// 滚一格是当场跳页，定版式双页还少迈一步（步进被写死成 1）。页号对不对早有用例钉着
+/// （[`a_wheel_notch_turns_exactly_one_page`]），**没钉的是「这一格挂没挂上动画」** ——
+/// 而那恰是读者唯一看得见的差别。
+///
+/// 这里不用 `wheel_lines`：那个助手在投递之后会 `run_until_parked`，把这一趟的时钟推到走完，
+/// 于是问不到「在飞」。这里就地投递、立刻采样，与 `scroll_page` 那一路同一时刻口径。
+#[gpui_kit::test]
+fn a_wheel_notch_and_a_click_start_the_same_turn(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::Curl);
+    });
+    let first = view.read_with(cx, |v, _| v.page());
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_none()),
+        "定住的时候不该有动画挂着"
+    );
+
+    let wheel = {
+        cx.update_window(handle, |_, window, cx| {
+            window.scroll("folio-reader", ScrollDelta::Lines(point(0.0, -1.0)), cx);
+        })
+        .expect("滚轮应送达阅读视图");
+        view.read_with(cx, |v, _| v.turn)
+    }
+    .expect("滚轮一格也该起那趟翻页动画，而不是当场跳页");
+    assert_eq!(wheel.leaving.map(|from| from.page), Some(first));
+    assert_eq!(wheel.arriving.map(|to| to.page), Some(first + 1));
+    assert!(wheel.forward, "往下滚一格是往后翻一页");
+
+    // 等这一趟走完，再用点击那一路走一格：两条入口交出来的必须是同一个形状。
+    turn_frame(cx, handle, NAV_TRANSITION + Duration::from_millis(20));
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.turn.is_none()),
+        "上一趟该已经落定，否则下一次问的是在比两趟重叠"
+    );
+    let second = view.read_with(cx, |v, _| v.page());
+    assert_eq!(second, first + 1, "滚轮那一格落到的页");
+
+    let clicked = {
+        view.update(cx, |v, cx| v.scroll_page(1, cx));
+        view.read_with(cx, |v, _| v.turn)
+    }
+    .expect("点击那一路同样起动画");
+    assert_eq!(clicked.leaving.map(|from| from.page), Some(second));
+    assert_eq!(clicked.arriving.map(|to| to.page), Some(second + 1));
+    assert_eq!(
+        clicked.forward, wheel.forward,
+        "同一方向的两种输入不该给出两种方向"
+    );
+}
+
+/// 滚轮在章末那一格也该由决策层说「换章」，而不是自己判断越界。
+///
+/// [`a_paged_wheel_at_the_chapter_edge_starts_the_chapter_slide`] 投的是**像素**增量（触摸板
+/// 那一路），走的是攒半屏那条分支；这一条投的是 `Lines`，钉的是刚接进 `turn` 的那一支。
+#[gpui_kit::test]
+fn a_wheel_notch_at_the_chapter_edge_turns_the_chapter(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &two_chapter_flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let last = view.read_with(cx, |v, _| v.page_count().saturating_sub(1));
+    view.update(cx, |v, cx| v.set_page(last, cx));
+    settle(cx, handle);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.scroll("folio-reader", ScrollDelta::Lines(point(0.0, -1.0)), cx);
+    })
+    .expect("滚轮应送达阅读视图");
+
+    // 跨章那一趟要等目标章排版，所以「在飞」可能晚几帧才出现——照既有用例那样轮询采样。
+    let mut turn = None;
+    for _ in 0..12 {
+        settle(cx, handle);
+        turn = view.read_with(cx, |v, _| v.turn);
+        if turn.is_some() {
+            break;
+        }
+    }
+    let turn = turn.expect("章末滚轮那一格该起跨章滑动，与点击同一判据");
+    assert_eq!(
+        (
+            turn.arriving.map(|to| to.chapter),
+            turn.arriving.map(|to| to.page)
+        ),
+        (Some(1), Some(0)),
+        "往后那一格该落到第二章第一页"
     );
 }
 

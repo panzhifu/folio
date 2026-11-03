@@ -1451,7 +1451,7 @@ fn the_budget_handed_down_from_the_batch_caps_the_parser() {
         .clamp(1, super::MAX_PARSE_WORKERS);
 
     let picked = |n| {
-        let doc = document::open_with(&book, ParseBudget::AtMost(n)).expect("该打得开");
+        let doc = document::open_with(&book, ParseBudget::AtMost(n), None).expect("该打得开");
         (super::last_workers(), doc)
     };
 

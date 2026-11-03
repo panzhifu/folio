@@ -125,12 +125,18 @@ impl ShelfView {
     }
 
     /// 扫描那一屏在手机上。清单要滚，所以展开那一档比另两屏高。
+    ///
+    /// 这一格必须是 **flex 列**而不是普通块：`scan_body` 交回来的是一棵
+    /// `flex_1()` 的树，列表要靠父层给出确定高度才排得出行；块容器里
+    /// `flex_1` 不生效，虚拟列表会塌成 0 高 —— 屏幕上就是只有标题与底部按钮、
+    /// 中间一行候选都没有（勾选自然也无从谈起）。横向留白也不在这里给：
+    /// `scan_body` 的头部、每行与底部各自带一条 `GUTTER`，这里再加一层就是双倍缩进。
     pub(in crate::ui::features::shelf) fn scan_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
         let body = (!self.scan_sheet.read(cx).is_idle() && self.scan.is_some()).then(|| {
-            div()
+            v_flex()
+                .w_full()
                 .flex_1()
                 .min_h_0()
-                .px(px(GUTTER))
                 .pb_2()
                 .child(self.scan_body(cx))
                 .into_any_element()

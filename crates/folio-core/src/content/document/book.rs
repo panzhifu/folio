@@ -67,17 +67,27 @@ impl BookDocument {
     /// （见 `plans/text-out-of-db.md`），导入时解出来再丢掉等于白付一次全量解压 ——
     /// 一本 1000 多章的 EPUB 就是白解 1000 多个 zip 条目。
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_with(path, format::ParseBudget::Auto)
+        Self::open_with(path, format::ParseBudget::Auto, None)
     }
 
-    /// 同 [`open`](Self::open)，但把这一本**内部**的解析并行度交给调用方分。
+    /// 同 [`open`](Self::open)，但把这一本**内部**的解析并行度交给调用方分，并带上
+    /// 读者手上那份口令（没有就 `None`）。
+    ///
+    /// 口令为什么必须是构造参数而不是「建好之后再补一句」：`index` 就在这趟里跑，
+    /// 而一次失败会记进 provider 那份缓存 —— 后补的那一句救不回已经发生的失败。
     ///
     /// 谁需要它：导入一批书的那一路。一批同时导 M 本、每本内部 I 路，真正抢核的是
     /// M × I，而只有外层知道 M —— 于是它把 I 算好传下来（`ingest::import::split_budget`），
     /// 而不是让两层各自按整机核数猜。读者打开一本书用的是 [`open`]（那时 `Auto` 就是
     /// 整机那一档：它是唯一在跑的那本）。
-    pub fn open_with(path: &Path, budget: format::ParseBudget) -> Result<Self> {
-        let provider = format::provider_for(path).ok_or_else(|| unsupported(path))?;
+    pub fn open_with(
+        path: &Path,
+        budget: format::ParseBudget,
+        passphrase: Option<format::Passphrase>,
+    ) -> Result<Self> {
+        let mut provider = format::provider_for(path).ok_or_else(|| unsupported(path))?;
+        // 在任何读取之前灌进去。只有 PDF 那一族认得它，其余 provider 走默认的空实现。
+        provider.set_passphrase(passphrase);
         tracing::debug!(
             "document: {} 交给 {} provider（只读索引）",
             path.display(),
@@ -121,9 +131,22 @@ impl BookDocument {
     ///
     /// 文件不在了**不是错误**：`provider_for` 只按扩展名认领，真正的读取失败会在
     /// 取字节时回空 —— 表现就是没有插图、没有补缺字的那一份，正文照排。
-    pub fn with_container(meta: DocMeta, content: Content, path: &Path) -> Self {
+    ///
+    /// `passphrase` 那一格是读者手上那份口令：库里这一本的正文是**从原文件现取**的，
+    /// 而带口令的 PDF 取不到口令就是取不到页 —— 库里存过口令的那本一定要把它带回来，
+    /// 否则症状是「这本书在架上能看见、点开是空白、搜也搜不到」。
+    pub fn with_container(
+        meta: DocMeta,
+        content: Content,
+        path: &Path,
+        passphrase: Option<format::Passphrase>,
+    ) -> Self {
+        let mut provider = format::provider_for(path);
+        if let Some(provider) = provider.as_mut() {
+            provider.set_passphrase(passphrase);
+        }
         Self {
-            provider: format::provider_for(path),
+            provider,
             path: Some(path.to_path_buf()),
             container: std::sync::OnceLock::new(),
             image_sources: std::sync::OnceLock::new(),
@@ -594,7 +617,7 @@ mod tests {
                 .all(|c| matches!(c.locator(), Some(ChapterLocator::Section(_)))),
             "单文件格式该按序号存位置"
         );
-        let book = BookDocument::with_container(meta, Content::Reflow(stored), &path);
+        let book = BookDocument::with_container(meta, Content::Reflow(stored), &path, None);
         for (ix, want) in full.iter().enumerate() {
             assert_eq!(&book.chapter_source(ix).unwrap(), want, "第 {ix} 章");
         }
@@ -627,7 +650,7 @@ mod tests {
                 .all(|c| matches!(c.locator(), Some(ChapterLocator::Entry(_)))),
             "EPUB 该按条目名存位置"
         );
-        let book = BookDocument::with_container(meta, Content::Reflow(stored), &path);
+        let book = BookDocument::with_container(meta, Content::Reflow(stored), &path, None);
         assert!(!full.is_empty());
         for (ix, want) in full.iter().enumerate() {
             assert_eq!(&book.chapter_source(ix).unwrap(), want, "第 {ix} 章");
@@ -653,7 +676,7 @@ mod tests {
         let content = at_locators(&content, meta.format);
         std::fs::remove_file(&path).unwrap();
 
-        let book = BookDocument::with_container(meta, Content::Reflow(content), &path);
+        let book = BookDocument::with_container(meta, Content::Reflow(content), &path, None);
         assert!(book.chapter_source(0).is_err(), "文件没了不该当空章");
     }
 
@@ -684,7 +707,7 @@ mod tests {
 
         // 开书的那一份：库里读回来只有清单（save_flow_in 存出来的形状）。
         let (meta, content) = (opened.meta().clone(), flow.clone());
-        let book = BookDocument::with_container(meta, Content::Reflow(content), &path);
+        let book = BookDocument::with_container(meta, Content::Reflow(content), &path, None);
         assert_eq!(
             book.stylesheet(),
             from_index,
@@ -709,6 +732,7 @@ mod tests {
             meta,
             Content::Reflow(content),
             Path::new("/gone/missing.epub"),
+            None,
         );
         assert_eq!(book.stylesheet(), "", "容器丢了就是没有作者样式，正文照排");
     }

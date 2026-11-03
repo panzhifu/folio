@@ -45,7 +45,7 @@ impl Host for MobileHost {
     }
 
     fn mouse_wheel(&self) -> bool {
-        // 那一端的「滚轮」就是手指平移（`gestures.rs` 把 pan 翻成 `ScrollWheelEvent`），
+        // 那一端的「滚轮」就是手指平移（`gestures.rs` 把 pan 翻成 `ScrollEvent`），
         // 它在图片查看器里的含义是平移与横扫切图，不是缩放。
         false
     }

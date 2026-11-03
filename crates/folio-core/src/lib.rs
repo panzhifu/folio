@@ -53,10 +53,10 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
-    Account, Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV,
-    Language, Layer, Library, Logging, Membership, MembershipTier, Mode, Opds, OpdsCatalog,
-    PageTurn, Provenance, Reader, Resolved, Speech, Sync, TextDirection, TocDensity, Translation,
-    TranslationEngine,
+    Account, Ai, Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, ImageScale,
+    LOG_OFF_ENV, Language, Layer, Library, Logging, Membership, MembershipTier, Mode, Novel, Opds,
+    OpdsCatalog, PageTurn, Provenance, Reader, Resolved, Speech, Sync, TextDirection, TocDensity,
+    Translation, TranslationEngine,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;

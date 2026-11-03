@@ -289,3 +289,175 @@ fn every_format_copies_under_an_extension_its_provider_claims() {
         assert_eq!(Format::parse(format.as_str()), Some(format));
     }
 }
+
+/// 真样本矩阵：`tests/fixtures/local/formats/` 下每一族至少一份**别人生产**的文件，
+/// 从判定层一路走到正文 / 首页。
+///
+/// 样本不入库（体积 + 再分发），所以这条只在开发机上手动跑：
+///
+/// ```sh
+/// cargo test -p folio-core --lib -- --ignored the_real_sample_matrix
+/// ```
+///
+/// 判据与 `examples/format-probe.rs` 同源，但这里只做「过不过」：
+/// 判定层必须给 `Readable` 且与 provider 的格式一致；可重排的首页与末章取得到且不空，
+/// 替换字符不成片；定版式的首页画得出来。**样本目录缺失要当场红**，不许「没有样本就算通过」。
+#[test]
+#[ignore = "需要 tests/fixtures/local/formats 下的本机真样本，来源见 tests/fixtures/README.md"]
+fn the_real_sample_matrix_reads_every_shipped_family() {
+    use crate::content::document::{ContentRef, open};
+    use crate::content::format::sniff::{self, Verdict};
+
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/local/formats");
+    assert!(
+        root.is_dir(),
+        "真样本目录不存在：{}（下载命令见 tests/fixtures/README.md 的「线 A」一节）",
+        root.display()
+    );
+
+    let mut files = Vec::new();
+    collect_real_samples(&root, &mut files);
+    files.sort();
+    assert!(
+        files.len() >= 40,
+        "真样本只有 {} 份，矩阵不成立（应至少 40）",
+        files.len()
+    );
+
+    let mut seen: Vec<Format> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+    for path in &files {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let named = format!("{}（{name}）", path.display());
+        let provider = match crate::content::format::provider_for(path) {
+            Some(provider) => provider,
+            None => {
+                problems.push(format!("{named}：没有 provider 认领"));
+                continue;
+            }
+        };
+        match sniff::identify(name, path) {
+            Verdict::Readable(format) => {
+                if format != provider.format() {
+                    problems.push(format!(
+                        "{named}：判定层说 {format:?}，provider 说 {:?}",
+                        provider.format()
+                    ));
+                }
+                if !seen.contains(&format) {
+                    seen.push(format);
+                }
+            }
+            Verdict::Known(why) => problems.push(format!("{named}：判定层认得出但读不了：{why}")),
+            Verdict::NotABook => problems.push(format!("{named}：判定层说不是书")),
+            Verdict::CorruptContainer => problems.push(format!("{named}：判定层说容器坏了")),
+        }
+
+        let doc = match open(path) {
+            Ok(doc) => doc,
+            Err(err) => {
+                problems.push(format!("{named}：打不开：{err}"));
+                continue;
+            }
+        };
+        if doc.meta().title.trim().is_empty() {
+            problems.push(format!("{named}：书名是空串"));
+        }
+        match doc.content() {
+            ContentRef::Reflow(flow) => {
+                if flow.chapters.is_empty() {
+                    problems.push(format!("{named}：可重排却没有章"));
+                    continue;
+                }
+                for index in [0usize, flow.chapters.len() - 1] {
+                    match doc.chapter_source(index) {
+                        Ok(text) => {
+                            if text.trim().is_empty() {
+                                problems.push(format!("{named}：第 {index} 章正文为空"));
+                            }
+                            let broken = text.chars().filter(|ch| *ch == '\u{FFFD}').count();
+                            if broken >= 3 {
+                                problems
+                                    .push(format!("{named}：第 {index} 章有 {broken} 个替换字符"));
+                            }
+                        }
+                        Err(err) => problems.push(format!("{named}：第 {index} 章取不到：{err}")),
+                    }
+                }
+            }
+            ContentRef::Fixed(fixed) => {
+                if fixed.pages.is_empty() {
+                    problems.push(format!("{named}：定版式却没有页"));
+                    continue;
+                }
+                let drawn = match &fixed.pages[0].source {
+                    super::PageSource::Image { href } => {
+                        doc.image_bytes(href).is_some_and(|bytes| !bytes.is_empty())
+                    }
+                    super::PageSource::Render { index, .. } => {
+                        doc.render_page(*index as usize, 256).is_some()
+                    }
+                };
+                if !drawn {
+                    problems.push(format!("{named}：首页画不出来"));
+                }
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "真样本矩阵有 {} 条不成立：\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+
+    // 每一族都要有真样本。AZW4 是唯一豁免的一条：Kindle 印刷版基本都带 DRM，
+    // 公网上拿不到可合法再分发的文件（见 fixtures README 的「还没有真样本的」）。
+    for format in [
+        Format::Markdown,
+        Format::Text,
+        Format::Epub,
+        Format::Fb2,
+        Format::Html,
+        Format::Cbz,
+        Format::Rtf,
+        Format::Chm,
+        Format::Mobi,
+        Format::Pdf,
+        Format::Docx,
+        Format::Doc,
+        Format::Odt,
+        Format::Pdb,
+        Format::Cb7,
+        Format::Cbr,
+        Format::Cbt,
+        Format::Djvu,
+        Format::Htmlz,
+        Format::Mhtml,
+    ] {
+        assert!(
+            seen.contains(&format),
+            "矩阵里没有 {format:?} 的真样本：目录 {} 下缺这一族（样本来源见 fixtures README）",
+            root.display()
+        );
+    }
+}
+
+fn collect_real_samples(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_real_samples(&path, out);
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+}

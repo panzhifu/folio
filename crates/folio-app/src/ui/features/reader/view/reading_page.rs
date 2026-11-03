@@ -17,7 +17,9 @@
 //! 点击分区、浮层开合、模式退档都在 [`chrome`] 里判：那里是纯函数，宿主的 `cargo test`
 //! 直接跑，这一屏只把结果落成动作。
 
+use folio_core::content::format::novel::rules::MatchKind;
 use folio_core::infra::config::Mode;
+use folio_core::net::ai::Ask;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -28,15 +30,17 @@ use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{ActiveTheme, Sizable as _, ThemeMode, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
+    Anchor, AnyElement, App, AppContext as _, AppLifecyclePhase, ClickEvent, Context, Entity,
+    FocusHandle, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
 };
 
 use crate::ui::features::reader::components::image_viewer::{self, ImageViewer};
 use crate::ui::features::reader::components::reading_sheet::ReadingSheet;
 use crate::ui::features::reader::components::toc_panel::{TocEvent, TocPanel};
+use crate::ui::features::reader::model::ai::AiStatus;
 use crate::ui::features::reader::model::chrome::{self, Chrome, Effect, Reserve, zone};
+use crate::ui::features::reader::model::rules_draft::DraftStatus;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::translation::{self, TranslationStatus};
 use crate::ui::features::settings::CompactSettings;
@@ -64,10 +68,13 @@ pub struct ReadingPage {
     pub(in crate::ui::features::reader) enter_shift: f32,
     /// 顶上那条系统状态栏 / 挖孔占掉多高（逻辑像素）。见 [`shell::reading_top_inset`]。
     ///
-    /// 整层已经由外壳按这一个数往下推过了，这里只给顶栏用：那条的表面要**再往上长回屏幕顶边**，
-    /// 不然它投影的上半截会露在条子上方，被条子自己的边切成一条横线（见 [`TopBar::overlay`]）。
+    /// 外壳**不**推整层（两种纸都从窗口 0 起，见 `shell::reading_overlay`），所以这一段
+    /// 由屏幕上每一处自己让：顶栏那条的内容行从让完之后起（[`TopBar::overlay`]，它同时要
+    /// 把表面铺到屏幕顶边，不然投影的上半截会被条子自己的边切成一条横线）、图片查看器那
+    /// 一排控件、正文与会话的 `insets.top`。
     ///
     /// [`shell::reading_top_inset`]: crate::ui::shell::reading_top_inset
+    /// [`TopBar::overlay`]: crate::ui::components::TopBar::overlay
     pub(in crate::ui::features::reader) top_inset: f32,
     /// 底下那条系统手势条占掉多高（逻辑像素）。
     ///
@@ -211,6 +218,20 @@ impl ReadingPage {
         });
     }
 
+    /// 应用生命周期（只有移动平台会发）：后台按离开这一刻结账并停钟，前台续段。
+    pub fn on_app_lifecycle(&mut self, phase: AppLifecyclePhase, cx: &mut Context<Self>) {
+        self.reader.update(cx, |reader, cx| match phase {
+            AppLifecyclePhase::Background => reader.suspend_reading(),
+            AppLifecyclePhase::Active => reader.resume_reading(cx),
+            _ => {}
+        });
+    }
+
+    /// 系统内存告警：丢掉可重建的图像缓存，当前屏由图集保护。
+    pub fn on_memory_warning(&mut self, cx: &mut Context<Self>) {
+        self.reader.update(cx, |reader, cx| reader.trim_caches(cx));
+    }
+
     pub fn book_id(&self, cx: &App) -> Option<i64> {
         self.reader.read(cx).book_id()
     }
@@ -276,6 +297,17 @@ impl ReadingPage {
         if self.reader.read(cx).note_editor_open() {
             self.reader
                 .update(cx, |reader, cx| reader.cancel_note_editor(cx));
+            cx.notify();
+            return true;
+        }
+        if self.reader.read(cx).rules_draft_open() {
+            self.reader
+                .update(cx, |reader, cx| reader.close_rules_draft(cx));
+            cx.notify();
+            return true;
+        }
+        if self.reader.read(cx).ai_open() {
+            self.reader.update(cx, |reader, cx| reader.close_ai(cx));
             cx.notify();
             return true;
         }
@@ -554,6 +586,92 @@ impl ReadingPage {
         )
     }
 
+    /// 「这本书该怎么切」那张卡：与译文、问 AI 同一类「就地升起的一张卡」，所以复用同一套
+    /// 挂载（一张 `Popover`，点外面即收）。它**没有锚点** —— 那一击来自目录右上角的「⋯」，
+    /// 不是屏幕上的某一片字，因此摆在正文上方居中那一处。
+    fn rules_draft_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let reader = self.reader.clone();
+        self.reader.read(cx).rules_draft.as_ref()?;
+        let width = px(f32::from(window.viewport_size().width).max(1.0));
+        Some(
+            div()
+                .absolute()
+                .left(width / 2.0)
+                .top(px(72.0))
+                .child(
+                    Popover::new("reader-rules-draft")
+                        .anchor(Anchor::TopCenter)
+                        .arrow(false)
+                        .open(true)
+                        .on_open_change({
+                            let reader = reader.clone();
+                            move |open, _, cx| {
+                                if !*open {
+                                    reader.update(cx, |reader, cx| reader.close_rules_draft(cx));
+                                }
+                            }
+                        })
+                        .trigger(
+                            Button::new("reader-rules-draft-trigger")
+                                .ghost()
+                                .p_0()
+                                .w(px(0.))
+                                .h(px(0.))
+                                .min_w(px(0.))
+                                .min_h(px(0.)),
+                        )
+                        .content(move |_, _, cx| draft_card(&reader, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 问 AI 的弹层：与译文那张同一条链（零尺寸触发器钉在菜单落地的点上，
+    /// `Popover` 拿它的 bounds 摆位，开关由会话的状态管）。
+    ///
+    /// 不另立第二套卡的形状：头部那颗下拉、引文、正文、滚动区、关闭钮五样与
+    /// [`translation_card`] 一一对应，差别只在头部换的是**问法**而不是目标语言。
+    fn ai_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let reader = self.reader.clone();
+        let anchor = self.reader.read(cx).ai.as_ref()?.anchor;
+        let width = px(f32::from(window.viewport_size().width).max(1.0));
+        let (left, top) = match anchor {
+            Some(at) => (at.x, at.y),
+            None => (width / 2.0, px(72.0)),
+        };
+        Some(
+            div()
+                .absolute()
+                .left(left)
+                .top(top)
+                .child(
+                    Popover::new("reader-ai")
+                        .anchor(Anchor::TopCenter)
+                        .arrow(true)
+                        .open(true)
+                        .on_open_change({
+                            let reader = reader.clone();
+                            move |open, _, cx| {
+                                if !*open {
+                                    reader.update(cx, |reader, cx| reader.close_ai(cx));
+                                }
+                            }
+                        })
+                        .trigger(
+                            Button::new("reader-ai-trigger")
+                                .ghost()
+                                .p_0()
+                                .w(px(0.))
+                                .h(px(0.))
+                                .min_w(px(0.))
+                                .min_h(px(0.)),
+                        )
+                        .content(move |_, _, cx| ai_card(&reader, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// 撤销胶囊：最近一次**拔掉的书签**的原样恢复。取消划线不挂这一槽（真删，
     /// 见 `model/undo.rs`），所以这颗只服务书签。状态与计时都在会话里（`model/undo.rs`），
     /// 这一屏只画它、把「撤销」那一击递回去。
@@ -602,6 +720,54 @@ impl ReadingPage {
                         .on_click(move |_, _, cx| {
                             page.update(cx, |this, cx| {
                                 this.reader.update(cx, |reader, cx| reader.undo_delete(cx))
+                            })
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 「回原处」那一格：从正文点链接/脚注跳出去之后才出现，贴在屏幕右下。
+    ///
+    /// 与撤销胶囊同一族（都是临时的一格），但两块同时在场时这一格**抬到撤销那条之上**
+    /// 而不是并排 —— 那条是 `left: 24 / right: 80` 的横条，并排会撞在一起。
+    ///
+    /// 干净态（底栏收起）与开着底栏两种落点沿用撤销胶囊那两个数，不另起一套。
+    fn jump_back_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (action, undo_up) = {
+            let reader = self.reader.read(cx);
+            // 没有来源就没有这一格：平时屏上不多一枚按钮。
+            reader.jump_back.as_ref()?;
+            (tr(cx, "reader.jump_back.action"), reader.undo.is_some())
+        };
+        let bottom = if self.chrome.is_open() {
+            150.0
+        } else {
+            24.0 + self.bottom_inset
+        };
+        let page = cx.entity().clone();
+        Some(
+            h_flex()
+                .occlude()
+                .absolute()
+                .right(px(24.0))
+                .bottom(px(if undo_up { bottom + 52.0 } else { bottom }))
+                .items_center()
+                .px_3()
+                .py_2()
+                .popover_style(cx)
+                .rounded_full()
+                .child(
+                    Button::new("reader-jump-back")
+                        .ghost()
+                        .small()
+                        .icon(IconName::ArrowLeft)
+                        .label(action.to_string())
+                        .accessibility_label(action)
+                        .on_click(move |_, _, cx| {
+                            page.update(cx, |this, cx| {
+                                this.reader
+                                    .update(cx, |reader, cx| reader.back_to_jump_origin(cx))
                             })
                         }),
                 )
@@ -733,6 +899,8 @@ impl Render for ReadingPage {
             || self.reader.read(cx).footnote().is_some()
             || self.reader.read(cx).note_editor_open()
             || self.reader.read(cx).translation_open()
+            || self.reader.read(cx).ai_open()
+            || self.reader.read(cx).rules_draft_open()
             || self.image_viewer.read(cx).is_open();
         // 上下页边距的默认值来自书的 `@page`；读者的「上下页边距」滑条离开 0 就整个
         // 覆盖它（见 `chrome::effective_page_margins`）。带子自己的高与正文让出的高必须
@@ -835,9 +1003,18 @@ impl Render for ReadingPage {
         // 翻译弹层压在脚注之上：两者都是「从正文里升起的一张卡」，同一时刻只该有
         // 一张在场（开翻译时菜单先收、脚注按各自的路径收）。
         root = root.children(self.translation_popover(window, cx));
+        // 问 AI 那张压在译文之上：两件事共用同一个锚点，后开的盖住先开的那张，
+        // 与「读者最后要看的正是他刚点的那一件事」同一条读法。
+        root = root.children(self.ai_popover(window, cx));
+        // 「这本书该怎么切」那张压在问 AI 之上：同一时刻只该有一张从正文里升起来的卡在场，
+        // 而它是从目录那一侧升起来的，比正文里的一次划词更晚。
+        root = root.children(self.rules_draft_popover(window, cx));
         // 撤销胶囊压在脚注之上：它是「刚删了什么」的回执，比一条注文更要紧；
         // 图片查看器照旧最上面。
         root = root.children(self.undo_pill(cx));
+        // 「回原处」那一格压在撤销之后：两块同时在场时它自己抬到撤销那条之上（见
+        // [`ReadingPage::jump_back_pill`]）。
+        root = root.children(self.jump_back_pill(cx));
         // 查看器最后挂：它盖住的正是顶栏、底栏与弹层，所以谁都不该浮在它上面。
         // 没开着时这一格是空的，一个节点都不多。
         //
@@ -884,6 +1061,310 @@ impl Render for ReadingPage {
 /// 翻译弹层的卡片本体。弹层开着时**每帧现建**：状态（待译 / 到手 / 失败）从会话
 /// 现读，目标语言从配置现读 —— 换语言那一下只写配置并重发请求，这里自然跟上。
 /// 引擎名照实摆着：gtx 是非合同接口，读者该知道这份译文出自谁。
+/// 问 AI 那张卡。头部那颗下拉换的是**问法**（三档，见 `folio_core::net::ai::Ask`），
+/// 换一次重新问一遍 —— 这一族不落缓存，所以「换一档」就是一次真请求，界面上不装作免费。
+fn ai_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverState>) -> AnyElement {
+    let ai_reader = reader.clone();
+    // 当前那一档在**建卡这一刻**读一次就够：菜单每次打开重建的是勾选项，而这张卡本身
+    // 每帧重建（见 `translation_card` 上那条同样的话），闭包里再借 `reader` 就会让
+    // 借用检查把它的生命周期拖进闭包。
+    let current_ask = reader.read(cx).ai.as_ref().map(|state| state.ask);
+    let ask_menu = move |menu: PopupMenu, _: &mut Window, _cx: &mut Context<PopupMenu>| {
+        let mut menu = menu.min_w(px(200.));
+        for ask in Ask::ALL {
+            let item_reader = ai_reader.clone();
+            menu = menu.item(
+                PopupMenuItem::new(tr(_cx, ask_label_key(ask)).to_string())
+                    .checked(Some(ask) == current_ask)
+                    .on_click(move |_, _, cx| {
+                        item_reader.update(cx, |reader, cx| reader.set_ai_ask(ask, cx))
+                    }),
+            );
+        }
+        menu
+    };
+    let Some(state) = reader.read(cx).ai.as_ref() else {
+        // 弹层开着而状态没了（返回键刚收掉那一帧）：画一张空卡比 panic 诚实。
+        return div().into_any_element();
+    };
+    let excerpt: SharedString = {
+        let mut head: String = state.source.chars().take(120).collect();
+        if state.source.chars().count() > 120 {
+            head.push('…');
+        }
+        head.into()
+    };
+    let body = match &state.status {
+        AiStatus::Pending => div()
+            .py_3()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(tr(cx, "reader.ai.pending")),
+        AiStatus::Done { text, tokens } => v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().foreground)
+                    .child(text.clone()),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(state.label.clone()),
+                    )
+                    .children(tokens.map(|count| {
+                        let count = count.to_string();
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tf(cx, "reader.ai.tokens", &[("n", &count)]))
+                    })),
+            ),
+        AiStatus::Failed(reason) => div()
+            .py_3()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(tf(cx, "reader.ai.failed", &[("reason", reason)])),
+    };
+    let close_reader = reader.clone();
+    let close_label = tr(cx, "reader.ai.dismiss");
+    v_flex()
+        .w(TRANSLATION_CARD_W)
+        .gap_2()
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_1()
+                .child(
+                    Button::new("ai-ask")
+                        .ghost()
+                        .small()
+                        .label(tr(cx, ask_label_key(state.ask)).to_string())
+                        .accessibility_label(tr(cx, "reader.ai.ask"))
+                        .dropdown_menu_with_anchor(Anchor::TopLeft, ask_menu),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(state.label.clone()),
+                )
+                .child(
+                    Button::new("ai-close")
+                        .ghost()
+                        .small()
+                        .icon(IconName::X)
+                        .tooltip(close_label.clone().to_string())
+                        .accessibility_label(close_label)
+                        .on_click(move |_, _, cx| {
+                            close_reader.update(cx, |reader, cx| reader.close_ai(cx))
+                        }),
+                ),
+        )
+        .child(
+            // 引文与答案同住一条滚动区，头部钉在它外面：换问法那颗下拉在哪儿都够得着。
+            div()
+                .id("reader-ai-scroll")
+                .max_h(px(280.0))
+                .overflow_y_scrollbar()
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_clamp(2)
+                                .text_color(cx.theme().muted_foreground)
+                                .child(excerpt),
+                        )
+                        .child(body),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 卡片本体。四档状态画四样东西，其中「解开了但切不动」那一档**没有**「用上」那颗按钮：
+/// 判据是引擎按整本书算出来的章数与中位字数（`novel::draft::Preview::is_usable`），
+/// 摆一颗会写坏配置的按钮比不摆更坏 —— 那条规则会全局生效，而这本书只是没切出来。
+fn draft_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverState>) -> AnyElement {
+    let Some(state) = reader.read(cx).rules_draft.as_ref() else {
+        // 弹层开着而状态没了（返回键刚收掉那一帧）：画一张空卡比 panic 诚实。
+        return div().into_any_element();
+    };
+    let head = match &state.status {
+        DraftStatus::Pending => v_flex().gap_1().child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr(cx, "reader.draft.pending")),
+        ),
+        DraftStatus::Ready {
+            draft,
+            preview,
+            usable,
+        } => {
+            let shape = match draft.marker.kind {
+                MatchKind::Regex => draft
+                    .marker
+                    .pattern
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string(),
+                MatchKind::Literal => draft.marker.text.as_deref().unwrap_or_default().to_string(),
+            };
+            let measure = tf(
+                cx,
+                "reader.draft.preview",
+                &[
+                    ("chapters", &preview.chapters.to_string()),
+                    ("median", &preview.median_body_chars.to_string()),
+                ],
+            );
+            let titles = preview.titles.join(" · ");
+            let body = v_flex()
+                .gap_1()
+                // 理由与形状：读者先认「它说的是不是我这本」，再看那条模式。
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().foreground)
+                        .child(draft.reason.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(draft.marker.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .child(shape),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().foreground)
+                        .child(measure),
+                );
+            let body = if titles.is_empty() {
+                body
+            } else {
+                body.child(
+                    div()
+                        .text_xs()
+                        .line_clamp(2)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tf(cx, "reader.draft.titles", &[("titles", &titles)])),
+                )
+            };
+            if *usable {
+                body.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("draft-apply")
+                                .label(tr(cx, "reader.draft.apply").to_string())
+                                .primary()
+                                .on_click({
+                                    let apply = reader.clone();
+                                    move |_, _, cx| {
+                                        apply
+                                            .update(cx, |reader, cx| reader.apply_chapter_rules(cx))
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("draft-keep-away")
+                                .ghost()
+                                .label(tr(cx, "reader.draft.dismiss").to_string())
+                                .on_click({
+                                    let away = reader.clone();
+                                    move |_, _, cx| {
+                                        away.update(cx, |reader, cx| reader.close_rules_draft(cx))
+                                    }
+                                }),
+                        ),
+                )
+            } else {
+                body.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr(cx, "reader.draft.unusable")),
+                )
+            }
+        }
+        DraftStatus::Applied { name } => {
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().text_color(cx.theme().foreground).child(tf(
+                    cx,
+                    "reader.draft.applied",
+                    &[("name", name)],
+                )))
+        }
+        DraftStatus::Failed(reason) => v_flex().gap_1().child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(tf(cx, "reader.draft.failed", &[("reason", reason)])),
+        ),
+    };
+    let close_label = tr(cx, "reader.draft.close");
+    let close_reader = reader.clone();
+    v_flex()
+        .w(TRANSLATION_CARD_W)
+        .gap_2()
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr(cx, "reader.draft.title")),
+                )
+                .child(
+                    Button::new("draft-close")
+                        .ghost()
+                        .small()
+                        .icon(IconName::X)
+                        .tooltip(close_label.clone().to_string())
+                        .accessibility_label(close_label)
+                        .on_click(move |_, _, cx| {
+                            close_reader.update(cx, |reader, cx| reader.close_rules_draft(cx))
+                        }),
+                ),
+        )
+        .child(head)
+        .into_any_element()
+}
+
+/// 三档问法的文案键。住在界面这一侧：键名是文案的事，core 那边只管提示词。
+fn ask_label_key(ask: Ask) -> &'static str {
+    match ask {
+        Ask::Explain => "reader.ai.ask.explain",
+        Ask::Terms => "reader.ai.ask.terms",
+        Ask::Plain => "reader.ai.ask.plain",
+    }
+}
+
 fn translation_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverState>) -> AnyElement {
     let current_lang = translation::target_lang(cx);
     let language_label: SharedString = translation::LANGUAGES

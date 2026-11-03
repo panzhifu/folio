@@ -850,12 +850,13 @@ impl TocPanel {
             .into_any_element()
     }
 
-    /// 目录右上角那颗「⋯」：四件事收进一条 gpui-kit 的 `PopupMenu`。
+    /// 目录右上角那颗「⋯」：四件恒在的事 + 一件按判据出现的，收进一条 gpui-kit 的
+    /// `PopupMenu`。
     ///
     /// 换成组件换来的是**一整套现成的开合**：按下即弹、点别处即收、上下键走位、回车确认，
     /// 全在 `PopupMenu` 里，这一屏不再自己垫底、不再判「点在不在卡片里」。菜单内容在
     /// **每次打开时重建**（`DropdownMenu` 的 builder 是 `Fn`），所以它读到的是当下状态
-    /// （展开 / 折叠、逆向排序开没开），与旧的那块弹层同一套语义。四件事各自把命令派回
+    /// （展开 / 折叠、逆向排序开没开），与旧的那块弹层同一套语义。每件事各自把命令派回
     /// 这一屏的既有方法。
     ///
     /// 锚点选 `BottomRight`：菜单挂在按钮的右下角，往下展开时不会盖住它自己的那张脸。
@@ -881,12 +882,19 @@ impl TocPanel {
                 let reverse_label = tr(cx, "reader.toc.reverse");
                 let style_label = tr(cx, "reader.toc.style");
                 let clear_label = tr(cx, "reader.toc.clear_read");
-                // 四个闭包各自要一份句柄（`Entity` 不 `Copy`），所以一件事一个名字。
+                // 五个闭包各自要一份句柄（`Entity` 不 `Copy`），所以一件事一个名字。
                 let panel_expand = panel.clone();
                 let panel_reverse = panel.clone();
                 let panel_style = panel.clone();
                 let panel_clear = panel.clone();
-                menu.min_w(px(180.))
+                let panel_suggest = panel.clone();
+                // 「这本书该怎么切」只对**这一本** `.txt` 有意义，而且要有填全的端点才问得出去：
+                // 两条判据都在会话那一侧（`rules_draft_available`），这里只照它画 ——
+                // 猜错的下场是一颗按下去只会说一句「没配上」的菜单项。
+                let suggest = panel.read(cx).reader.read(cx).rules_draft_available(cx);
+                let suggest_label = tr(cx, "reader.toc.suggest_rules");
+                let menu = menu
+                    .min_w(px(180.))
                     .item(
                         PopupMenuItem::new(expand_label)
                             .icon(if all_open {
@@ -919,7 +927,19 @@ impl TocPanel {
                             .on_click(move |_, _, cx| {
                                 panel_clear.update(cx, |this, cx| this.clear_read_marks(cx))
                             }),
+                    );
+                // 第五件按判据缺席（`PopupMenu` 只有 `item`，没有可选的 children）。
+                if suggest {
+                    menu.item(
+                        PopupMenuItem::new(suggest_label)
+                            .icon(IconName::Sparkles)
+                            .on_click(move |_, _, cx| {
+                                panel_suggest.update(cx, |this, cx| this.suggest_chapter_rules(cx))
+                            }),
                     )
+                } else {
+                    menu
+                }
             }
         };
         let open_panel = cx.entity().clone();
@@ -945,8 +965,9 @@ impl TocPanel {
 
     /// 头部那一行：「已读 N / M 章」+ 搜索 + ⋯。
     ///
-    /// ⋯ 里放的是这一屏用得上的那四件事（展开目录 / 逆向排序 / 目录样式 / 清除已读痕迹），
-    /// 见 [`Self::more_button`]。原先这里直接是一颗「目录样式」，那是四件事里的一件，
+    /// ⋯ 里放的是这一屏用得上的事（展开目录 / 逆向排序 / 目录样式 / 清除已读痕迹，外加
+    /// 一本 `.txt` 才出现的「这本书该怎么切」），见 [`Self::more_button`]。原先这里直接是
+    /// 一颗「目录样式」，那是那几件里的一件，
     /// 摆成一颗按钮就把其余三件挤没了。
     fn header_row(&mut self, drawer: bool, cx: &mut Context<Self>) -> AnyElement {
         let current = self.reader.read(cx).chapter_index();
@@ -975,7 +996,8 @@ impl TocPanel {
         let on_toc = self.screen == Screen::Toc;
         let on_search = self.screen == Screen::Search;
         let on_marks = self.screen == Screen::Marks;
-        // 「⋯」里那四件事全是目录树自己的（展开 / 逆向 / 样式 / 清除已读痕迹）。全文那一格
+        // 「⋯」里那四件恒在的事全是目录树自己的（展开 / 逆向 / 样式 / 清除已读痕迹）。
+        // 全文那一格
         // 摆着它等于摆四个点了没反应的空位，所以整颗连同样那颗筛标题的放大镜一起收掉。
         let filter = on_toc.then(|| {
             Button::new("toc-search")
@@ -1168,6 +1190,14 @@ impl TocPanel {
         self.reader
             .update(cx, |reader, cx| reader.clear_read_marks(cx));
         cx.notify();
+    }
+
+    /// 菜单里那颗「这本书该怎么切」：把这一本交给会话去问（状态与卡片在
+    /// `model/rules_draft.rs` 与阅读页那一张卡）。这一屏只负责**派**这一击 —— 它手里
+    /// 有 `reader`，而答案那张卡不属于这一屏（它压在整页上，目录收不收都不影响它）。
+    fn suggest_chapter_rules(&mut self, cx: &mut Context<Self>) {
+        self.reader
+            .update(cx, |reader, cx| reader.suggest_chapter_rules(cx));
     }
 
     /// 目录那一格的那行框：按**标题**筛目录条。
@@ -1716,7 +1746,7 @@ mod tests {
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Entity, InputEvent as _, ScrollDelta, ScrollWheelEvent,
+        AnyWindowHandle, AppContext as _, Entity, InputEvent as _, ScrollDelta, ScrollEvent,
         Subscription, TestAppContext, point, px, size,
     };
 
@@ -2227,7 +2257,7 @@ mod tests {
         for _ in 0..FRAMES {
             cx.update_window(handle, |_, window, cx| {
                 window.dispatch_event(
-                    ScrollWheelEvent {
+                    ScrollEvent {
                         position: point(px(120.0), px(300.0)),
                         delta: ScrollDelta::Pixels(point(px(0.0), px(-28.0))),
                         ..Default::default()

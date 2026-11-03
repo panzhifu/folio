@@ -11,6 +11,46 @@
 
 文档与代码冲突时改文档。要扩支持面，先改代码里那两处，再来改这张表。
 
+## 2026-11-04 扩的一刀
+
+这一轮把「有阅读影响的」几条收了：
+
+- **`vertical-align: text-top` / `text-bottom`**：层叠期记成 `ComputedStyle::inline_valign`，
+  排版层按父盒字体的 ascent / descent 折成基线偏移（文字用两段字体的度量，图片用
+  `(高度, 0)`）。《哈利·波特》`sup img` 那 482 个元素从此为 0。
+- **`-webkit-writing-mode` / `-epub-writing-mode`**：与无前缀那条同义。日文竖排样本
+  写的正是 `-webkit-writing-mode: vertical-rl`，从前整本横着排。
+- **`text-orientation: mixed`**：初值，收下等于没改（`upright` / `sideways` 仍未做）。
+- **`font-variant: small-caps`**：收集阶段把小写换成等字节长度的 uppercase、字号乘 0.8；
+  DOM 原文不动，选区与复制仍取原样。《傲慢与偏见》的 9 个 `.smcap` 从此为 0。
+  `ß → SS` 这类会改字节数的映射不换（否则锚点会漂）。
+- **`color: initial`**：落成「读者主题的正文色」（`None`），不是写死黑色 ——
+  暗色主题下写死黑字等于把这一行藏掉。
+- **`position: relative`**：收进 `Positioning::Relative`，偏移由排版层
+  `layout::collect::shift_relative` 读 —— 把这一块**已经排好的那一坨**（块盒与里面的行）
+  整体挪一下，**不动游标**，所以后面的兄弟仍按它没挪时的位置接、两块会压在一起（那正是
+  作者的意图，也是与 `absolute` 唯一的分界）。取用规则照 CSS 2.1 §9.4：`left` 优先、
+  只写 `right` 取其负、两个都写时按这一块自己的 `direction` 判谁作废（LTR 丢 `right`、
+  RTL 丢 `left`），竖轴同理且不看方向；百分比折自**包含块**（横轴与 `padding` 那一族
+  同一把尺，竖轴只在父块明确写过 `height` 时才折得出，没写时按 CSS 那一档当 `auto`
+  = 不挪）；`margin` 不参与，与 `place_absolutes` 相反 —— 位移的基准是「它不位移时的位置」，
+  外边距已经算进那个位置里了。
+  **没跟着挪的三处**：纯行内盒（位移那一刀只有 `block()` 一个入口，行内要挪得把一个行盒里的
+  片段按区间切开）、表格格子（`table()` 那一趟把格子盒钉回行顶，所以只挪内容不挪格子盒）、
+  以及它**不**成为后代绝对定位的包含块 —— 绝对定位仍只认章级那一份（下面「2026-10-29
+  接住的十四条」的 `position` 那一行就是这个口径）。分片也不跟着挪：页按文档序切，
+  被往上挪出行顶之上的那一截由页盒裁掉。`sticky` 仍判不认识 —— 要的是滚动状态。
+  **本机语料就 2 处**（《斗战狂潮》封面 `.container { clear:both; height:0em; position: relative }`
+  与 Reader 脚注标记 `span.reader_footer_note`），两处都不写偏移，所以收值的直接效果是落差表
+  不再报「不认识」，屏上一分不动。参照对象更彻底 —— KOReader 的 crengine 里**连 `position`
+  属性都没有**（样式表里没这一格，分页那段注释自注 relative 不支持），这条没有可借的实现。
+
+另外，`css-gap` 现在能**点名**「连规则都拼不出来」的块了：`RuleSet::ignored_rules`
+保留选择器 / `@` 前导与原文（截断到 160 字符），量具在每本书末尾列一张
+「次数 / 类型 / 选择器 / 原文」的表。第一条量出来的事实：《傲慢与偏见》那 18 处是
+`a:hover` / `a:link` / `a:visited` 三条伪类（各 6 条声明）；《我胆小如鼠》那 12 处是
+一个 `span.reader_footer_note:hover:after` 的脚注浮层。
+
 ## 三档状态
 
 一条声明在我们引擎里只有三种下场。判据函数是 `css::computed::declaration_status`，它内部就是层叠
@@ -48,14 +88,15 @@
 
 | 书 | 声明 | 元素 | 有落差 | 接住 / 认得不生效 / 不认识 | 拼不出规则的块 |
 |---|---|---|---|---|---|
-| 哈利·波特全集 | 294,607 | 51,590 | **241（0.5%）** | 294,366 / 0 / 241 | 3 处 |
-| 《斗战狂潮》 | 708,826 | 80,199 | **1（0.0%）** | 708,825 / 1 / 0 | 0 处 |
+| 哈利·波特全集 | 294,607 | 51,590 | **0（0.0%）** | 294,607 / 0 / 0 | 3 处 |
+| 《斗战狂潮》 | 708,826 | 80,199 | **0（0.0%）** | 708,826 / 0 / 0 | 0 处 |
 | 《诡秘之主》 | 846,678 | 149,606 | **23（0.0%）** | 846,655 / 0 / 23 | 7 处 |
 | 《蛇结》 | 4,963 | 2,440 | **0（0.0%）** | 4,963 / 0 / 0 | 1 处 |
 | 合成测试书 | 31 | 28 | 0 | 31 / 0 / 0 | 1 处 |
 
-哈利·波特剩下的 241 个元素是下面那两条按数否决的写法之一：`vertical-align: text-top`。
-另一半（`padding: … auto` 240 个）2026-10-30 起不再算落差，理由写在下面那一条上。
+哈利·波特最后一档 241 个 `vertical-align: text-top` 在 2026-11-04 接住（图片按父盒字体的
+上沿对齐，见上面那一节），这张表因此归零。`padding: … auto` 那 240 个 2026-10-30 起
+不再算落差。
 
 《诡秘之主》剩下的 23 个元素全是 `box-shadow`（`div.kuang3` 22 + `div.zhizuodA1` 1）。
 这本书是**本机唯一带真 `<ruby>` 的书**（552 组 `<ruby>` / 552 个 `<rt>`，分布在 40 章），
@@ -74,13 +115,13 @@
 | `border-style: dotted` / `dashed` | 带子沿长边切段画：`dotted` 方点边长 = 线宽、隙 = 线宽；`dashed` 段 = 3×线宽、隙 = 3×线宽（CSS 不规定比例，取浏览器那一套）。从一端铺到另一端、**尾巴按剩余长度截短**，不分平。点是方的：绘制原语只有轴对齐四边形，1px 的点分不出圆方。`groove` / `ridge` / `inset` / `outset` 仍判不认识 —— 那四档要的是斜角明暗，纯色带画出来一定是错的 |
 | `border-collapse: collapse` | 相邻两格的公共边只画**一条**：逐边与邻格的对面那一侧比一次，赢的留、输的抹。优先级按 CSS 2.1 §17.6.2 取前三条 —— 宽 > 画法（`double` > `solid` > `dashed` > `dotted` > `none`）> 位置（左右相邻取左格、上下相邻取上格）。`separate` 是默认。**没做的**：几何上相邻两格没有互相让出半个边宽（那条线因此落在赢的那格边内侧，半个像素的偏移看不出来）；表格自己的边框与最外圈格子的边框不合并（CSS 里会）；`border-style: hidden` 折进 `none`，于是「`hidden` 压掉整条线」给不出来 |
 | 表格布局（`display: table` 一族） | UA 表给 `<table>` / `<tr>` / `<td>` / `<th>` / `<thead>` / `<tbody>` / `<tfoot>` 四档 `display`，排版走 `layout::table`：**auto** 布局，每列按「最长不可断段的宽(min) / 整行不折的宽(max)」两条固有宽分配，行高取这一行最高的格子，格内顶对齐、盒子拉到行高（边框与底色因此铺满一行）。`width: auto` 的表**收缩到内容宽**（上限是版心），`margin: auto` 在收缩之后重算中缝。**不做的**：`colspan` / `rowspan`（跨格按 1 格算）、`border-collapse: collapse`（边框按 separate 画，相邻两格各画一条）、`table-layout: fixed`、`display: inline-table`、格内只做顶对齐、`<caption>` 不进网格 |
-| `position: absolute` / `fixed` + `left` / `right` / `top` / `bottom` | 脱流，按四个偏移相对**这一章的盒**摆（`%` 的基准：左右按宽、上下按高），`margin` 加在偏移上 —— 封面那套 `left:50%; margin-left:-9.5em; width:19em` 的居中写法靠的就是它。**只认章级包含块**：CSS 的「最近的定位祖先」没做；没写 `width` 时铺满包含块（没有 shrink-to-fit）；绝对定位不撑高这一章（与 CSS 一致，分页因此不被封面装饰改写）。`relative` / `sticky` 判不认识 |
+| `position: absolute` / `fixed` + `left` / `right` / `top` / `bottom` | 脱流，按四个偏移相对**这一章的盒**摆（`%` 的基准：左右按宽、上下按高），`margin` 加在偏移上 —— 封面那套 `left:50%; margin-left:-9.5em; width:19em` 的居中写法靠的就是它。**只认章级包含块**：CSS 的「最近的定位祖先」没做；没写 `width` 时铺满包含块（没有 shrink-to-fit）；绝对定位不撑高这一章（与 CSS 一致，分页因此不被封面装饰改写）。`sticky` 判不认识；`relative` 2026-11-04 起也收（留在流内、整体位移，见上面那一节） |
 | `currentColor` 在背景色与 `color` 上 | `background-color: currentcolor` 折成本元素自己的 `color`（没写就取继承来的），`color: currentcolor` 就是继承。`color` 在层叠里**单独一批**先落地，所以背景色那句写在 `color` 前面也折得对。边框色里的 `currentColor` 上一轮已经接了 |
 | `word-break: break-all` | 断行机会放开到**任意两个字符之间**（不再只认 UAX #14 的词边界）：拉丁词填不满剩余宽度时也能断，于是同样版心少一行。表格里的格子跟着把「最小宽」从整词降到**一个字符**。`keep-all` 不收（它要的是中文也不许逐字断，与本引擎的断行模型相反） |
 | `border-style` 的 3D 四档（`inset` / `outset` / `groove` / `ridge`） | 由作者的边框色派生亮/暗两档（`three_d_tone`：暗 = 明度 ×0.7、亮 = 朝 1 补 35%，纯黑纯白因此也能各推出一档）：`inset` 上/左暗下/右亮、`outset` 相反、`groove` 每条边外暗内亮、`ridge` 相反。角上仍是四条带子互相压边，与浏览器的 45° 拼角差在角上 |
 | 表格格里的 `vertical-align: top` / `middle` / `bottom` | 格内内容在**行高**里贴哪一边：`top` 是初值也是以前的行为，`middle` 挪一半、`bottom` 挪到底；盒子始终拉满行高，所以边框与底色仍铺满一行。`vertical-align` 不继承，所以整行写 `middle` 不会漏到格子上 —— 浏览器同样如此（Calibre 的书要另写 `inherit` 才生效）。行内盒上的 `top`/`middle`/`bottom`（相对行盒）**还没做**，收下这个值但在行内不产生位移 |
 | `border-spacing` | `separate` 模式下格与格之间的缝（横/纵各一个数），缝算进表盒、列宽在扣掉缝之后分配。塌陷模式里忽略（CSS 2.1 §17.6.1） |
-| 「接受初值」一族：`font-variant: normal` / `font-variant-caps: normal` / `oeb-column-number: 1` / `background: initial` | 这几个值的语义**就是我们做的事**（不启用任何字体特性、不分栏、清空背景图层），所以收下；同属性的其它值判不认识。《乌合之众》157 个 `font-variant: normal`、The Riddle 那本书的 `background: initial` 都落在这里 |
+| 「接受初值」一族：`font-variant: normal` / `font-variant-caps: normal` / `oeb-column-number: 1` / `background: initial` | 这几个值的语义**就是我们做的事**（不启用任何字体特性、不分栏、清空背景图层），所以收下；同属性的其它值判不认识。《乌合之众》157 个 `font-variant: normal`、The Riddle 那本书的 `background: initial` 都落在这里。`font-variant: small-caps` 2026-11-04 起也收（见上面那一节） |
 | `list-style-image: none` / `list-style-position: outside` | 这两个**初值就是我们本来在做的事**（标记只有文字、挂在流动之外），所以只收初值：其余值（`url(…)`、`inside`）判不认识。《蛇结》51 个 `li` 写的正是这两个初值，从前被记成 102 条「认得不生效」；现在这本书的落差归零，屏上一个像素没动 |
 
 两个口径要分清，下面的表都用这两列：
@@ -115,8 +156,8 @@ cargo run -p folio-core --example css-gap -- <书1> <书2> …       # 也可以
 | `background-origin` | 0 | 0 | 同 `background-clip`：基准一律取边框盒，内缩那一档语料里没有 |
 | `columns` | 0 | 0 | 分片器认的是**视口**栏数（`FragmentOptions::columns`，由界面或读者给）。作者写的块级 `columns` 要改排版期的折行宽度，还没接 |
 | `column-gap` | 0 | 0 | `columns` 的另一半，跟着一起欠着 |
-| `text-transform` | 0 | 0 | 它会改变字符本身，而锚点与进度都建立在**源文本字节偏移**上（`Locator` 的坐标系）：`capitalize`、`ß → SS` 这类一改就让偏移对不上。要接得连锚点映射一起定，不是加一条 `to_uppercase()` 的事 |
-| `font-stretch` | 0 | 0 | OpenType 层共用一条理由：要的是 gpui 的 `FontFeatures` 通道，那是接字体文件那一层的事，不是层叠期能折出来的数。（`font-variant` 与 `font-variant-caps` 2026-10-29 移了出去：初值 `normal` 就是我们做的事，改成收初值） |
+| `text-transform` | 0 | 0 | 它会改变字符本身，而锚点与进度都建立在**源文本字节偏移**上（`Locator` 的坐标系）：`capitalize`、`ß → SS` 这类一改就让偏移对不上。要接得连锚点映射一起定，不是加一条 `to_uppercase()` 的事。（`font-variant: small-caps` 2026-11-04 起走的是**等字节长度**的映射：`ß → SS` 不换，所以那条规矩没破） |
+| `font-stretch` | 0 | 0 | OpenType 层共用一条理由：要的是 gpui 的 `FontFeatures` 通道，那是接字体文件那一层的事，不是层叠期能折出来的数。（`font-variant` 与 `font-variant-caps` 已移出：2026-10-29 收初值，2026-11-04 起也收 `small-caps`） |
 | `font-kerning` | 0 | 0 | 与 `font-stretch` 同一条通道，同一个理由 |
 | `font-feature-settings` | 0 | 0 | 与 `font-stretch` 同一条通道，同一个理由 |
 | `cursor` | 5,718（《毛泽东选集》） | 1 | 界面提示，不是排版属性：它说「指针移到这儿该长什么样」。阅读器里能兑现的地方只有链接（桌面端本来就给手形），而书里把它写在几千个元素上只是转换器把网页样式原样带进来。记「认得、不生效」——落差表不再报成「听都没听过」，它也确实不该动版面 |
@@ -221,7 +262,7 @@ cargo run -p folio-core --example css-gap -- <书1> <书2> …       # 也可以
 
 | 写法 | 元素数 | 声明点 | 处置 |
 |---|---|---|---|
-| `vertical-align: text-top`（同族还有 `top` / `bottom` / `middle` / `text-bottom`） | 241（哈利·波特） | 1（另有 1 处 `super`，那条是收的） | 只收长度、百分比与 `super` / `sub`。2026-10-20 用引擎自己的选择器匹配复测过：那 241 个元素全落在 `sup img` 上（`[p>sup>a>img]` 236 条，注号图），而 `layout::collect` 摆图片时逐级累加祖先的 `baseline_shift`，UA 给 `<sup>` 的上标位移早就作用在那张图上 —— 接了几乎不动屏。**这条被数否决过，别顺手加回来** |
+| `vertical-align: top` / `middle` / `bottom`（行内盒） | 0 | 0 | 这三档要对齐**整条行盒**（最高盒 / 最低盒 / 中线），要等一行排完才知道，一期不折成基线偏移；表格格上的同名三档走 `cell_valign`，照旧生效。`text-top` / `text-bottom` 2026-11-04 起已收下（见上面那一节） |
 | `padding: … auto` | 240（哈利·波特）→ **0** | 1 | **2026-10-30 起不再算落差**：`box_sides(..., auto_ok = false)` 现在把 `auto` 折成 0 而不是整条作废。判据写在 `value.rs` 那条注释上 —— 诡秘那本 36 个元素写的是 `padding: 10px auto 10px auto`，整条作废等于**上下内边距一起丢**；而 CSS 里 `padding: auto` 本就非法、浏览器整条丢，所以横向那一截按 0 与浏览器同解，纵向那一截按作者写的数留下。哈利·波特的落差因此从 481 降到 241 |
 | `text-decoration: overline`（与 `blink`） | 0 | 0 | 画不出来就整条判不认识，不许在统计里显示成「接住了」。线型那几个 token（`solid` / `double` / `dashed` / `wavy` / `thick` / `thin`）认得、画法不变（一律按当前文字色画 1px 实线），由 `the_decoration_line_alias_and_the_line_style_tokens` 钉住 |
 | `white-space: nowrap` / `pre-line` | 0 | 0（`white-space` 整条属性在本机语料里 0 处） | `pre` 与 `pre-wrap` 共用一个「保留换行」布尔；`nowrap` / `pre-line` 一期不区分，按不支持计数而不是假装成功。**为 0 次出现把布尔换成五态枚举不值** |
@@ -257,10 +298,14 @@ cargo run -p folio-core --example css-gap -- <书1> <书2> …       # 也可以
 
 ## 四、明确不做（已按数否决）
 
-- **绝对定位整族**（`position: absolute|fixed`、四个偏移、`z-index`）：代价是重排整条流动，
-  本机语料带非 static 定位的元素实测**只有 1 处**。
-- **`vertical-align` 的五个关键字值**：241 个元素落在 `sup img` 上，UA 的上标位移已经作用在那张图，
-  接了几乎不动屏。
+- **定位那一族剩下的三格**：`position: absolute` / `fixed`（2026-10-29）与 `relative`
+  （2026-11-04）都接了，仍不做的这三样各有理由 —— CSS 的「最近的**定位祖先**当包含块」没做
+  （只认章级那一份，本机语料里绝对定位的盒子本来就都是章级装饰）；`sticky` 要滚动状态，
+  不是排版这一层的事；`z-index` 要 z 树，而我们的绘制顺序是「相交即上抬」。
+  当年这条是按「本机语料带非 static 定位的元素实测只有 1 处」整族否决的，2026-10-29 因为
+  封面/标题页那套居中写法（`left:50%; margin-left:-9.5em`）把脱流那一档先接了。
+- **`vertical-align` 的 `top` / `middle` / `bottom`（行内盒）**：要对齐整条行盒，要等一行
+  排完才知道；本机语料 0 处。`text-top` / `text-bottom` 已在 2026-11-04 接住。
 - **`white-space` 的五态**：整条属性在本机四本语料里 0 处。
 - **`hebrew` / `arabic-indic` / `armenian` / `georgian` / `devanagari` 记数**：0 处，且无样本可验。
 
@@ -268,17 +313,19 @@ cargo run -p folio-core --example css-gap -- <书1> <书2> …       # 也可以
 
 `tests/fixtures` 里所有能带 CSS 的 epub 都跑了一遍（20 个文件；`phone/ev3b5ihfkyrsb3us.epub`
 是哈利·波特、`phone/bajfbqrzqsu3tb72.epub` 是斗战狂潮的副本，去重后 18 本）。
-**20 个文件里 11 个落差为 0**；最大的一个（《毛泽东选集》）剩下的全是 `cursor`，
-而它已经判「认得、不生效」。
+**20 个文件里 15 个落差为 0**（2026-11-04 这一轮复跑：哈利·波特与《斗战狂潮》都归零了，
+前者是 `vertical-align: text-top`，后者是封面那句 `position: relative`）；最大的一个（《毛泽东选集》）
+剩下的全是 `cursor`，而它已经判「认得、不生效」。
 
 | 书 | 章 | 落差 | 现在剩下的是什么 |
 |---|---|---|---|
 | 《毛泽东选集》 | 416 | 5,718（23.5%），全在 Inert 档 | `cursor: pointer` —— 界面提示，不动版面 |
 | 《基督山伯爵》 | 135 | 843（3.8%） | `letter-spacing: auto` —— **书写错了**：CSS 只有 `normal` 与长度，浏览器同样整条丢 |
 | 《诡秘之主》（不在仓库语料里，`/home/noke/tmp/guimi/guimi.epub`） | 1592 | 23（0.0%） | `box-shadow` 两条（`div.kuang3` 22 个方框 + `div.zhizuodA1` 1 个卷首块）—— 圆角、底色、边框、满幅底图都已接住，只少那层投影 |
-| 哈利·波特 | 301 | 241（0.5%） | `vertical-align: text-top` 241（UA 的上标位移已经生效）。`padding: … auto` 那 240 个 2026-10-30 起折成 0，不再算落差 |
+| 哈利·波特 | 301 | **0** | 2026-11-04 起 `vertical-align: text-top` 的 482 个元素接住（两副本合计）；`padding: … auto` 那 240 个 2026-10-30 起折成 0 |
 | 《乌合之众》 | 38 | 3（0.1%），全在 Inert 档 | `-webkit-text-combine: horizontal` —— 竖排里把两个数字并成一格那一档。原先那 157 条 `-epub-ruby-position` 2026-10-31 起变成 `Applied`（这本书 `<ruby>` 元素 0 个，所以屏上照旧不动） |
-| 人类简史 / 未来简史 / 世界简史 / 西游记 / 蛇结 / 罗生门 / 别想太多啦 / 我胆小如鼠 / 上瘾式学习 / The Riddle / 合成书 | — | **0** | — |
+| 人类简史 / 未来简史 / 世界简史 / 西游记 / 蛇结 / 罗生门 / 别想太多啦 / 上瘾式学习 / The Riddle / 合成书 | — | **0** | — |
+| 《我胆小如鼠》 | 74 | 1（0.0%） | `height: 100vh` 一条（就是下面「100vh（1）」那一格，判不认识是对的）。这本书的 `span.reader_footer_note` 那句 `position: relative` 2026-11-04 起接住，屏上一分不动 —— 它没写偏移 |
 | 其余（夏天烟火等读客本） | — | 1 | `font-weight: blod` 这类书写错误 |
 
 剩下的都能一眼看出「该不该做」：

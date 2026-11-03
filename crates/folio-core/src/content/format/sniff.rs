@@ -148,10 +148,10 @@ pub(crate) fn identify(display_name: &str, path: &Path) -> Verdict {
     if head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
         return ole2(path);
     }
-    // MHTML 是一个**文本**存档：没有魔数，判据是「头部那些行说得出 `multipart/*` 与
-    // `boundary=`，而文件里切得出至少一份 HTML」。先在 head 上问「像不像信封」，像才读
-    // 全本 —— 不然每一个走到这一层的候选都要多读一遍文件。
-    if declares_multipart(&head) {
+    // MHTML 是一个**文本**存档：没有魔数，判据是「头部那些行说得出信封，而文件里
+    // 读得到 HTML」。先在 head 上问「像不像信封」，像才读全本 —— 不然每一个走到
+    // 这一层的候选都要多读一遍文件。
+    if declares_mhtml(&head) {
         return match super::mhtml::probe(path) {
             super::mhtml::Probe::Book => Verdict::Readable(Format::Mhtml),
             // 边界说得出而一个部分都切不出来：截断或与实际不符，与「这不是书」分开。
@@ -163,13 +163,24 @@ pub(crate) fn identify(display_name: &str, path: &Path) -> Verdict {
     bare_file(display_name, &head)
 }
 
-/// 头部那一段里有没有「我是个 multipart 存档」这句话。
+/// 头部那一段里有没有「我是个 MIME 存档」这句话。
+///
+/// 两种信封都认：`multipart/*` + `boundary=`（Chrome / Word 那一派），以及
+/// **单部分**（IE 9 存单帧页面：`MIME-Version` 或 `X-MimeOLE` + `Content-Type: text/html`，
+/// 没有 boundary）。真样本 `simple_page_ie.mht` 属于后者 —— 只认 multipart 的话，
+/// 判定层对它说「不是书」，而 provider 其实读得动。
 ///
 /// 名字的大小写都认（Outlook 真写 `Content-type:`），值里的引号不管：这一问只决定
 /// **要不要往下读全本**，裁决在 [`super::mhtml::probe`]。
-fn declares_multipart(head: &[u8]) -> bool {
+fn declares_mhtml(head: &[u8]) -> bool {
     let text = String::from_utf8_lossy(head).to_ascii_lowercase();
-    text.contains("multipart/") && text.contains("boundary=")
+    if text.contains("multipart/") && text.contains("boundary=") {
+        return true;
+    }
+    let has_mime = text.contains("mime-version:") || text.contains("x-mimeole:");
+    let has_html = text.contains("content-type: text/html")
+        || text.contains("content-type: application/xhtml+xml");
+    has_mime && has_html
 }
 
 /// PalmDB 的三类书：MOBI 家族（`BOOKMOBI`）、PalmDoc 文本（`TEXt` 或 `BOOK`+`REAd`）。
@@ -368,13 +379,21 @@ pub(crate) fn zip_shape(path: &Path) -> ArchiveShape {
     let names = zip.names();
     let has = |want: &str| names.iter().any(|name| name.eq_ignore_ascii_case(want));
     // ODT 的正解与 EPUB 同一条：第一个条目 `mimetype` 说自己是 OpenDocument。
+    // `.ott` 是模板，mimetype 只多一个 `-template` 后缀，读法一模一样。
     // 兜底认 `content.xml` + `META-INF/manifest.xml` —— 有些转换器不守「mimetype 第一条」。
-    if mimetype.as_deref() == Some("application/vnd.oasis.opendocument.text")
-        || (has("content.xml") && has("META-INF/manifest.xml"))
+    if matches!(
+        mimetype.as_deref(),
+        Some(
+            "application/vnd.oasis.opendocument.text"
+                | "application/vnd.oasis.opendocument.text-template"
+        )
+    ) || (has("content.xml") && has("META-INF/manifest.xml"))
     {
         return ArchiveShape::Book(Format::Odt);
     }
     // DOCX 没有 mimetype 条目：`[Content_Types].xml` + `word/document.xml` 就是它的形状。
+    // `.dotx` / `.docm` 同形：模板与启用宏只改 `[Content_Types].xml` 里那一行声明，
+    // 正文仍在 `word/document.xml`。
     if has("[Content_Types].xml") && has("word/document.xml") {
         return ArchiveShape::Book(Format::Docx);
     }
@@ -1013,10 +1032,32 @@ mod tests {
             crate::content::format::looks_like_a_book(&epub),
             "叫 .zip 的真 EPUB 也要进候选"
         );
+        // 认不出的扩展名仍然开容器看 —— 这是粗筛「对名字不敏感」那一半。
+        // 只有明确列进 `never_holds_a_book` 的媒体/应用类才在开文件之前被否掉。
+        let odd = zip_at(tmp.path(), "书.zzz", EPUB_ENTRIES);
+        assert!(
+            crate::content::format::looks_like_a_book(&odd),
+            "扩展名认不出时也要开容器看里面"
+        );
         let junk = zip_at(tmp.path(), "杂物.zip", &[("data.json", b"{}", true)]);
         assert!(
             !crate::content::format::looks_like_a_book(&junk),
             "普通压缩包不进：粗筛省的就是它那一趟哈希"
+        );
+        // `.fbz`：FB2 社区把「一个 fb2 装进 zip」叫这个名字。粗筛与判定都按内容走，
+        // 不需要为它加一条扩展名（加了反而要一个根本不存在的 provider 认领它）。
+        let fbz = zip_at(
+            tmp.path(),
+            "一本.fbz",
+            &[("一本.fb2", FB2_ENTRY.as_bytes(), true)],
+        );
+        assert!(
+            crate::content::format::looks_like_a_book(&fbz),
+            ".fbz 要进候选：里面躺着一本读得动的书"
+        );
+        assert!(
+            matches!(identify("一本.fbz", &fbz), Verdict::Known(_)),
+            "一个装着书的包交给判定层，答案是「要先抽出来」"
         );
 
         // 扩展名不认的 `.rar` / `.7z` / `.tar` 走同一条：开容器看里面，不靠名字。
@@ -1133,6 +1174,28 @@ mod tests {
         // **故意没有** mht —— 它按定义就是容器，替它猜一个格式等于多一本坏书。
         let bare = file_at(tmp.path(), "假.mht", "其实是一段纯文本\n".as_bytes());
         assert_eq!(identify("假.mht", &bare), Verdict::NotABook);
+
+        // 单部分存档：IE 9 存单帧页面时不写 boundary，信封自己就是 `text/html`。
+        // 只认 multipart 会让这种真文件在导入时说「不是书」，而 provider 读得动。
+        let single = file_at(
+            tmp.path(),
+            "单帧.mht",
+            "From: \"Saved by Windows Internet Explorer 9\"\r\nMIME-Version: 1.0\r\nContent-Type: text/html;\r\n\tcharset=\"Windows-1252\"\r\nContent-Transfer-Encoding: quoted-printable\r\nContent-Location: http://localhost/simple_page.html\r\n\r\n<html><body><p>Hi</p></body></html>\r\n"
+                .as_bytes(),
+        );
+        assert_eq!(
+            identify("单帧.mht", &single),
+            Verdict::Readable(Format::Mhtml),
+            "单部分存档也是网页存档"
+        );
+        // 反过来：只有一行 `Content-Type: text/html` 的普通 HTML 不是存档。
+        let fake = file_at(
+            tmp.path(),
+            "伪存档.mht",
+            "Content-Type: text/html; charset=utf-8\r\n\r\n<html><body><p>Hi</p></body></html>\r\n"
+                .as_bytes(),
+        );
+        assert_eq!(identify("伪存档.mht", &fake), Verdict::NotABook);
     }
 
     /// DOCX：`[Content_Types].xml` + `word/document.xml` 就是形状，名字不参与。
@@ -1148,6 +1211,15 @@ mod tests {
             ],
         );
         assert_eq!(identify("a.zip", &path), Verdict::Readable(Format::Docx));
+        // 模板（`.dotx`）与启用宏（`.docm`）是同一个包：判定只看
+        // `[Content_Types].xml` + `word/document.xml`，名字不参与。
+        for name in ["a.dotx", "a.docm"] {
+            assert_eq!(
+                identify(name, &path),
+                Verdict::Readable(Format::Docx),
+                "{name} 与 .docx 同形"
+            );
+        }
     }
 
     /// ODT：`mimetype` 第一条就是它的正解；`content.xml` + manifest 是兜底。
@@ -1173,6 +1245,21 @@ mod tests {
             ],
         );
         assert_eq!(identify("b.zip", &fallback), Verdict::Readable(Format::Odt));
+
+        // `.ott` 的 mimetype 只多一个 `-template`，读法不变。
+        let template = zip_at(
+            tmp.path(),
+            "c.zip",
+            &[
+                (
+                    "mimetype",
+                    b"application/vnd.oasis.opendocument.text-template",
+                    true,
+                ),
+                ("content.xml", b"<office:document-content/>", true),
+            ],
+        );
+        assert_eq!(identify("a.ott", &template), Verdict::Readable(Format::Odt));
     }
 
     /// HTMLZ：根下有 `index.html` 就按一本书收，不许退层把图片丢掉。
@@ -1215,6 +1302,26 @@ mod tests {
         assert_eq!(identify("书.cb7", &cb7), Verdict::Readable(Format::Cb7));
         let cbt = tar_at(tmp.path(), "书.cbt", pages);
         assert_eq!(identify("书.cbt", &cbt), Verdict::Readable(Format::Cbt));
+    }
+
+    /// 打包工具写出来的 `./` 前缀不是隐藏文件：`tar cf x ./*` 与 `zip -r x .`
+    /// 都真会这么写，而把它当噪音的后果是整个包在判定层静默地「不是书」——
+    /// 真样本 `tests/fixtures/local/formats/cbt/sample.cbt` 就是这么打包的。
+    #[test]
+    fn a_dot_slash_prefix_is_not_a_hidden_file() {
+        let tmp = dir("dot-slash");
+        let pages: &[(&str, &[u8])] = &[("./001.png", b"\x89PNG"), ("./002.jpg", b"\xff\xd8\xff")];
+        let cbt = tar_at(tmp.path(), "书.cbt", pages);
+        assert_eq!(identify("书.cbt", &cbt), Verdict::Readable(Format::Cbt));
+        let cbz = zip_at(
+            tmp.path(),
+            "书.cbz",
+            &[
+                ("./001.png", &b"\x89PNG"[..], true),
+                ("./002.jpg", &b"\xff\xd8\xff"[..], true),
+            ],
+        );
+        assert_eq!(identify("书.cbz", &cbz), Verdict::Readable(Format::Cbz));
     }
 
     /// 同一个壳里装的是书：三条都要**逐条列出来**，判定层说的是「要先抽出来」，

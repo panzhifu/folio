@@ -1,9 +1,10 @@
 //! `Measure` 的 gpui 实现：断行走 App 级 `TextSystem::line_wrapper`，
-//! 整行度量走窗口级 `WindowTextSystem::layout_line`。
+//! 整行度量走 `WindowTextSystem::layout_line`（按线程建，见 `THREAD_WINDOW_TEXTS`）。
 //!
 //! 两者的分工是 spike① 实测出来的，不是猜的：`line_wrapper` / `advance` 挂在
 //! `Arc<TextSystem>` 上（不要求 `&mut Window`，所以能进后台线程），
-//! `shape_line` / `layout_line` 挂在 `Arc<WindowTextSystem>` 上。
+//! `shape_line` / `layout_line` 挂在 `WindowTextSystem` 上；它从 0.3.11 起带线程内
+//! scratch，不能跨线程共享。
 //!
 //! 一个必须同源的细节：**断行用的宽度累加**与**行盒报告的宽度**都来自同一套
 //! 单字 advance，否则会出现「按 A 算说放得下、按 B 量却溢出」。
@@ -12,6 +13,7 @@
 //! `f32::from(x)` 还是 `x.as_f32()`；两件事因此成立：一处改了断行口径两端同时生效，
 //! 以及同一本书在两端折出的行数可以逐行比对（`document.rs` 的 tests 就靠这个前提）。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -466,8 +468,9 @@ type FontExtentsCache = Arc<Mutex<HashMap<(FontKey, u32, u8), (f32, f32)>>>;
 pub struct GpuiMeasure {
     /// 断行用的单字 advance：挂在 App 级 `TextSystem` 上。
     texts: Arc<TextSystem>,
-    /// 整段绘制宽度：`layout_line` 只在窗口级文本系统上。
-    window_texts: Arc<WindowTextSystem>,
+    // 窗口级文本系统不进结构体：0.3.11 的 `WindowTextSystem` 带线程内 scratch
+    // （`Cell` / `RefCell`），不是 `Send + Sync`，而 `Measure` 要求两者。按线程
+    // 建在 TLS 里（见 [`THREAD_WINDOW_TEXTS`]），任何线程调度量都能拿到自己那份。
     /// 样式没写 font-family 时用哪个族。来自读者偏好，不是书的 UA 值。
     body: SharedString,
     /// `monospace` 那一类泛族名换成哪个族。同样是读者偏好。
@@ -494,7 +497,6 @@ pub struct GpuiMeasure {
 impl GpuiMeasure {
     pub fn new(
         texts: Arc<TextSystem>,
-        window_texts: Arc<WindowTextSystem>,
         body: impl Into<SharedString>,
         mono: impl Into<SharedString>,
         faces: Arc<BookFonts>,
@@ -502,7 +504,6 @@ impl GpuiMeasure {
         let known = Arc::new(texts.all_font_names());
         Self {
             texts,
-            window_texts,
             body: body.into(),
             mono: mono.into(),
             faces,
@@ -535,6 +536,31 @@ fn widths_from_edges(edges: &[f32]) -> Vec<f32> {
     edges.windows(2).map(|w| (w[1] - w[0]).max(0.0)).collect()
 }
 
+thread_local! {
+    // 初始化式已经是 `const { .. }`；clippy 1.99 只在 aarch64-linux-android 这一档
+    // 仍报 `missing_const_for_thread_local`（同一份代码桌面 clippy 不报），是那一档
+    // 的误报。allow 必须写在宏里的 static 上 —— 写在宏调用上会被当成未使用属性。
+    #[allow(clippy::missing_const_for_thread_local)]
+    /// 0.3.11 起 `WindowTextSystem` 带线程内 scratch，`Measure` 又要求 `Send + Sync`，
+    /// 于是按线程建一份并缓存。键是 `Arc<TextSystem>` 的地址 —— 同一线程上两本不同
+    /// 文本系统不会互相拿到对方那份。槽里同时存着 `Arc` 克隆，地址因此不会被复用。
+    static THREAD_WINDOW_TEXTS: RefCell<Option<(usize, WindowTextSystem)>> =
+        const { RefCell::new(None) };
+}
+
+impl GpuiMeasure {
+    fn with_window_texts<R>(&self, f: impl FnOnce(&WindowTextSystem) -> R) -> R {
+        THREAD_WINDOW_TEXTS.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let key = Arc::as_ptr(&self.texts) as *const () as usize;
+            if !matches!(slot.as_ref(), Some((current, _)) if *current == key) {
+                *slot = Some((key, WindowTextSystem::new(self.texts.clone())));
+            }
+            f(&slot.as_ref().expect("just filled").1)
+        })
+    }
+}
+
 impl Measure for GpuiMeasure {
     fn char_width(&self, ch: char, font: &FontKey, font_size: f32) -> f32 {
         let font_id = self.texts.resolve_font(&self.font(font));
@@ -549,9 +575,9 @@ impl Measure for GpuiMeasure {
         if text.is_empty() {
             return LineMetrics::default();
         }
-        let layout =
-            self.window_texts
-                .layout_line(text, px(font_size), &[self.run(text, font)], None);
+        let layout = self.with_window_texts(|window_texts| {
+            window_texts.layout_line(text, px(font_size), &[self.run(text, font)], None)
+        });
         LineMetrics {
             width: f32::from(layout.width),
             ascent: f32::from(layout.ascent),
@@ -618,9 +644,9 @@ impl Measure for GpuiMeasure {
         if text.is_empty() {
             return None;
         }
-        let shaped =
-            self.window_texts
-                .shape_line(text.into(), px(font_size), &[self.run(text, font)], None);
+        let shaped = self.with_window_texts(|window_texts| {
+            window_texts.shape_line(text.into(), px(font_size), &[self.run(text, font)], None)
+        });
         let width = f32::from(shaped.width);
         let glyphs: Vec<_> = shaped.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
         if glyphs.is_empty() {
@@ -653,9 +679,9 @@ impl Measure for GpuiMeasure {
         if text.is_empty() {
             return None;
         }
-        let shaped =
-            self.window_texts
-                .shape_line(text.into(), px(font_size), &[self.run(text, font)], None);
+        let shaped = self.with_window_texts(|window_texts| {
+            window_texts.shape_line(text.into(), px(font_size), &[self.run(text, font)], None)
+        });
         let width = f32::from(shaped.width);
         // shaper 交回来的就是**视觉顺序**的 (逻辑起点, x) 对，原样递下去。
         let visual: Vec<(usize, f32)> = shaped

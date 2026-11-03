@@ -11,6 +11,7 @@ mod annotation;
 mod capture;
 mod fixed;
 mod harness;
+mod jump_back;
 mod layout;
 mod library;
 mod media;

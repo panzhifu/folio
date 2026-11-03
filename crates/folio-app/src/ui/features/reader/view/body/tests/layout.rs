@@ -1,7 +1,9 @@
 //! 排版引擎经真实 EPUB provider 与字体栈的集成验收（M1–M3 的门）。
 
 use super::harness::{epub_flow, open, prefs, settle};
+use crate::ui::features::reader::model::session::ReaderSession;
 use folio_core::{Chapter, FlowDoc, Locator, Reader};
+use gpui_kit::AnyWindowHandle;
 #[allow(unused_imports)] // `#[gpui_kit::test]` 展开要它，unused 分析看不见宏里的使用
 use gpui_kit::{AppContext as _, TestAppContext};
 
@@ -219,13 +221,13 @@ fn scratch_probe_h2_metrics(cx: &mut TestAppContext) {
 
 /// 一叠三张图：一帧只画一张（角上有 `k/n`），切一张之后**不许重排**。
 ///
-/// 「现在看第几张」住界面（`Document::stack_current`），它不进 `LayoutKey`、不进样式哈希 ——
-/// 那等于每划一下重排整章，分页档的页数还会跟着变 —— 那是硬约束。
-/// 这条门量的就是这一格：切图前后行数与页数一个数都不许动，而画出来的确实换了一张。
-#[gpui_kit::test]
-fn a_stack_draws_one_member_and_switches_without_relayout(cx: &mut TestAppContext) {
+/// 一叠三张图的画廊那一本：三张 `600×300` 的图各占一段，排完落在**同一叠**里。
+///
+/// 两条关于这一叠的门共用它（切图不重排、浮层压着时不切图），夹具只在这里建一次。
+/// `from_content` 造出来的书没有容器，`Book::new` 会把图片索引换成空表 —— 补上真清单
+/// 与内存字节，走的是生产上 EPUB 那一条（同 `capture.rs` 那一族）。
+fn gallery(cx: &mut TestAppContext) -> (gpui_kit::Entity<ReaderSession>, AnyWindowHandle) {
     use crate::ui::foundation::images::{BookImages, ChapterImages};
-    use gpui_kit::test::TestWindowExt as _;
 
     cx.update(gpui_kit::init);
     let png: Vec<u8> = {
@@ -271,8 +273,6 @@ fn a_stack_draws_one_member_and_switches_without_relayout(cx: &mut TestAppContex
         None,
         folio_core::PageTurn::Slide,
     );
-    // `from_content` 造出来的书没有容器，`Book::new` 会把图片索引换成空表 —— 补上真清单
-    // 与内存字节，走的是生产上 EPUB 那一条（同 `capture.rs` 那一族）。
     view.update(cx, |v, _| {
         let book = match &mut v.source {
             crate::ui::features::reader::model::session::Source::Book(book) => book,
@@ -286,6 +286,17 @@ fn a_stack_draws_one_member_and_switches_without_relayout(cx: &mut TestAppContex
             .set_images(std::sync::Arc::new(ChapterImages::new(index, "c0.xhtml")));
     });
     settle(cx, handle);
+    (view, handle)
+}
+
+/// 「现在看第几张」住界面（`Document::stack_current`），它不进 `LayoutKey`、不进样式哈希 ——
+/// 那等于每划一下重排整章，分页档的页数还会跟着变 —— 那是硬约束。
+/// 这条门量的就是这一格：切图前后行数与页数一个数都不许动，而画出来的确实换了一张。
+#[gpui_kit::test]
+fn a_stack_draws_one_member_and_switches_without_relayout(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+
+    let (view, handle) = gallery(cx);
     let marks = view.read_with(cx, |v, _| {
         v.book()
             .expect("有书")
@@ -376,4 +387,99 @@ fn a_stack_draws_one_member_and_switches_without_relayout(cx: &mut TestAppContex
         .expect("窗口应能渲染");
     assert!(peek, "分页档也该在图下露出「下一张」的卡片边");
     assert!(dots, "分页档也该有这一叠的小点");
+}
+
+/// 浮层（顶栏底栏）压着的时候，横划那一叠**一张都不切**，也不在叠的尽头翻页。
+///
+/// 切图那条路从前绕在认领之外：`swipe_scroll` 开头按「起手压在某一叠上」单独判，
+/// 走的是 `stack_grab` 那一格，`claim_swipe` 里那条「浮层压着不认领」根本管不到它 ——
+/// 于是工具栏露头之后，读者在整页大的图上横扫一下照样换了一张（与「那一击的意思是
+/// 收浮层，不是操作正文」这条规矩相反）。这条门把两半都钉住：浮层开着不切，收了照切。
+#[gpui_kit::test]
+fn swiping_a_stack_yields_while_the_overlay_is_up(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::chrome::PageMode;
+    use gpui_kit::{TouchPhase, point, px};
+
+    let (view, handle) = gallery(cx);
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+
+    // 这一叠在屏上占的那一格：绘制那一趟登记的命中区，窗口坐标。
+    let hit = view
+        .read_with(cx, |v, _| {
+            v.stack_hits
+                .borrow()
+                .iter()
+                .rev()
+                .find(|hit| hit.count > 1)
+                .cloned()
+        })
+        .expect("前置：这一叠的命中区该登记过");
+    let center = point(
+        px(f32::from(hit.rect.origin.x) + f32::from(hit.rect.size.width) / 2.0),
+        px(f32::from(hit.rect.origin.y) + f32::from(hit.rect.size.height) / 2.0),
+    );
+    let (mid_x, mid_y) = (f32::from(center.x), f32::from(center.y));
+    let current = |cx: &mut TestAppContext| {
+        view.read_with(cx, |v, _| {
+            v.book().expect("有书").document().stack_current(hit.id)
+        })
+    };
+
+    // 走的那一截按**那一叠自己的宽**算：`swipe_scroll` 里那条门槛是「图宽的五分之一，
+    // 且不小于 24 逻辑像素」（2026-11-01 真机量出来的档），写死像素的话窗口一改就会
+    // 悄悄落到线的另一边 —— 用例绿着而什么都没钉。
+    let travel = (f32::from(hit.rect.size.width) / 5.0).max(24.0) * 2.0;
+
+    // 先把「收了浮层照切」这一半钉住：往左走过门槛 = 下一张。
+    //
+    // 钟要一格一格推，而且要**分三格走完**：这一路吃的是识别器按帧折出来的 `ScrollEvent`
+    // （原始触摸 → 锁轴 → 增量），钟不动就只有 `Started` 那一条，`stack_grab` 那一格
+    // 永远收不到增量；而折出来的一条比派发晚一帧到手（实测：一次 Moved 之后读 `stack_dx`
+    // 还是 0，下一格才见第一段），一格里走完就少算一段，差的正好是门槛那一截。
+    let swipe = |cx: &mut TestAppContext, dir: f32| {
+        let at = |x: f32| point(px(x), px(mid_y));
+        let frame = std::time::Duration::from_millis(16);
+        let steps = 3.0;
+        super::harness::raw_touch_at(cx, handle, TouchPhase::Started, center);
+        for step in 1..=3 {
+            let frac = step as f32 / steps;
+            cx.executor().advance_clock(frame);
+            super::harness::raw_touch_at(
+                cx,
+                handle,
+                TouchPhase::Moved,
+                at(mid_x + dir * travel * frac),
+            );
+        }
+        super::harness::raw_touch_at(cx, handle, TouchPhase::Ended, at(mid_x + dir * travel));
+        settle(cx, handle);
+    };
+    swipe(cx, -1.0);
+    assert_eq!(current(cx), 1, "前置：浮层收着时横扫该切到第二张");
+
+    view.update(cx, |v, cx| v.set_overlay_open(true, cx));
+    swipe(cx, 1.0);
+    assert_eq!(
+        current(cx),
+        1,
+        "浮层压着的时候横划不该切图 —— 那一划的意思是收浮层"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.page()),
+        0,
+        "叠的尽头那一下也不该顺手翻页"
+    );
+
+    view.update(cx, |v, cx| v.set_overlay_open(false, cx));
+    swipe(cx, 1.0);
+    println!(
+        "第三笔之后: dx={:?} grab={:?} frame={} current={}",
+        view.read_with(cx, |v, _| v.stack_dx),
+        view.read_with(cx, |v, _| v.stack_grab.map(|h| h.frame)),
+        view.read_with(cx, |v, _| v.image_hits_frame),
+        current(cx)
+    );
+
+    assert_eq!(current(cx), 0, "收了浮层，同样的横扫照切");
 }

@@ -852,7 +852,14 @@ enum Landing<'a> {
 /// [`reindex`] 不看它（它要的就是 `Result<()>`）。
 fn index(store: &Store, idx: Indexing<'_>) -> Result<Imported> {
     // 步 6：解析。
-    let mut document = match document::open_with(idx.path, idx.budget) {
+    //
+    // 读者那份口令按**内容身份**查（`idx.hash` 在这一趟已经有了，比解析还早一步算好），
+    // 所以「记住过的那本」被重扫、被再导一次、从手机传过来，都不需要界面再交一遍 ——
+    // 这是这一格挂在管线而不是挂在按钮上的全部理由。
+    let passphrase = idx
+        .hash
+        .and_then(|hash| store.passphrase_for_hash(&hash.to_hex()).ok().flatten());
+    let mut document = match document::open_with(idx.path, idx.budget, passphrase) {
         Ok(document) => document,
         Err(err) => {
             // 新落地那一路只退掉暂存区里那一份，书库根从来没被碰过；重扫那一路不动文件。
@@ -863,12 +870,15 @@ fn index(store: &Store, idx: Indexing<'_>) -> Result<Imported> {
             return Err(Error::Rejected {
                 name: idx.name.to_string(),
                 why,
-                // 加密那一档由 provider 判得出来（它读到了 `encryption.xml`），别把它压成
-                // 「读不动」：前者读者的动作是换一本无 DRM 的书，后者是「重新导入一次试试」。
+                // 加密与「要口令」两档都由 provider 判得出来（它读到了 `encryption.xml` /
+                // 引擎说这是口令锁），别把它们压成「读不动」：前者的动作是换一本无 DRM 的书，
+                // 中间那档的动作是**输一句口令再交一次**，后者才是「重新导入一次试试」。
+                // 三档合成两档，界面上就没有那颗「输入口令」的按钮。
                 // 其余仍算「读不动」—— `UnsupportedFormat` 那一路走的是**容器结构**读不出，
                 // 到这里书已经被判成 EPUB 了，说「格式不支持」会把人引去换格式。
                 reject: match &err {
                     crate::Error::Encrypted { .. } => ImportReject::Encrypted,
+                    crate::Error::NeedsPassword { .. } => ImportReject::NeedsPassword,
                     _ => ImportReject::Unreadable,
                 },
                 source: Some(Box::new(err)),

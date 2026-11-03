@@ -59,6 +59,7 @@ fn a_book_whose_text_is_not_in_the_db_loads_it_from_the_container(cx: &mut TestA
         },
         content,
         &path,
+        None,
     ));
 
     // 字号故意给到 60：这本合成书的三章都只有几行，默认字号下整本书比一个

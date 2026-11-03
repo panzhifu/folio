@@ -18,7 +18,7 @@
 //! - **这一端的指针长按不长按得住**（[`supports_long_press`]），决定读书时「把图放大」
 //!   是按住图片还是点一下图片。
 //! - **这一端的滚轮是不是真鼠标滚轮**（[`has_mouse_wheel`]），决定图片查看器里滚轮是
-//!   缩放还是平移 / 切图 —— 触屏那一端的手指平移与真滚轮走的是同一个 `ScrollWheelEvent`
+//!   缩放还是平移 / 切图 —— 触屏那一端的手指平移与真滚轮走的是同一个 `ScrollEvent`
 //!   通道（见 [`has_mouse_wheel`] 那一段）。
 //! - **选择器交回的路径是不是应用自己的临时副本**（[`picked_files_are_temporary`]），
 //!   决定导入读完后要不要把 `cache/gpui-import-*` 那份拷贝连同目录清掉。桌面选择器
@@ -91,7 +91,7 @@ pub trait Host: 'static {
     fn long_press(&self) -> bool;
     /// 这一端的滚轮是**真鼠标滚轮**吗。
     ///
-    /// 触屏那一端的手指平移在平台层被翻译成同一个 `ScrollWheelEvent`
+    /// 触屏那一端的手指平移在平台层被翻译成同一个 `ScrollEvent`
     /// （`gpui-pre` 的 `gestures.rs`：`TouchGestureState::Panning` 每帧派发一条
     /// `Scroll`，松手后还有一串惯性尾巴），而桌面那一条是读者第二档独立手势 ——
     /// 同一个事件通道在两端说的不是一件事。图片查看器据此决定滚轮是**缩放**

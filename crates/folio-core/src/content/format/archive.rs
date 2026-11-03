@@ -274,11 +274,25 @@ impl std::io::Write for Limited {
 
 /// 归档里的原始名字 → 用来比对/显示的那一串。
 fn display_name(raw: &[u8]) -> String {
-    String::from_utf8_lossy(raw).replace('\\', "/")
+    normalize_entry(&String::from_utf8_lossy(raw))
 }
 
 fn normalize(name: &str) -> String {
-    name.replace('\\', "/")
+    normalize_entry(name)
+}
+
+/// 条目名先折成同一种坐标：`\` → `/`，并剥掉开头的 `./`。
+///
+/// `tar cf x ./*`（本仓造 CBT 样本就是这么打的）与 `zip -r x .` 真会写出
+/// `./页面.png` 这种名字，而 [`super::cbz::is_container_noise`] 把「以点开头」
+/// 当隐藏文件 —— 不剥这一层，一整个包会被判成「全是噪音」，症状是
+/// **真包在扫描里静默地不是书**（判定层 `ArchiveShape::Nothing`）。
+fn normalize_entry(name: &str) -> String {
+    let mut out = name.replace('\\', "/");
+    while let Some(rest) = out.strip_prefix("./") {
+        out = rest.to_string();
+    }
+    out
 }
 
 #[cfg(test)]

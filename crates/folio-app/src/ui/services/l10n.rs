@@ -11,7 +11,6 @@
 
 use std::fmt::Display;
 
-use ely_gpui_component::typography::format::{self, Separators};
 use folio_core::duration_parts;
 use folio_core::infra::i18n::{self, Locale};
 use gpui_kit::{App, SharedString};
@@ -65,11 +64,25 @@ pub fn duration(cx: &App, secs: i64) -> SharedString {
     text.into()
 }
 
+/// 数字分组与小数点。
+///
+/// 从前这两个字符连同格式化算法都来自 `ely-gpui-component::typography::format` ——
+/// 那个依赖一整包组件只为两枚纯函数，却把终端模拟器、LaTeX、Mermaid、QR 那一串
+/// 一起带进依赖图（2026-11-04 量的：78 个独占包）。算法本身只有二十行，抄在自己家里。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Separators {
+    group: char,
+    decimal: char,
+}
+
+/// 排印用的负号（U+2212），与加号等高；ASCII 的 `-` 在表格式数字里会短一截。
+const MINUS: char = '\u{2212}';
+
 /// 每一门语言的**数字分隔符**：千位分隔与小数点。
 ///
 /// 「句子怎么翻」在 `locales/*.toml`，「数字怎么写」不在那里：表里的 `%{n}` 只管插值，
 /// 插进来的是不是 `1 234` 还是 `1,234` 得由界面这一层决定。这份表只有九个字符对，
-/// 其中四门与 Ely 组件库那张逐字对得上（`de-DE`/`fr-FR`/`ja-JP`/`zh-CN`），
+/// 其中四门与 CLDR 的常用值逐字对得上（`de-DE`/`fr-FR`/`ja-JP`/`zh-CN`），
 /// 另外五门按 CLDR 的常用值给。「九门一条不缺」由 `match` 的**穷尽性**钉住：加一门语言时
 /// 这里编不过，而不是静默沿用某一门的写法；[`tests::separators_are_never_the_same_character`]
 /// 钉的是另一件会静默的事 —— 某一门的分组符与小数点撞成同一个字符（德语手滑写成两个点），
@@ -100,16 +113,53 @@ fn separators(locale: Locale) -> Separators {
 }
 
 /// 按当前语言写一个数：`decimals` 位小数，千位按这一门分组。
-///
-/// 走的是 Ely 组件库里那两个**纯函数**（`typography::format`）：不碰它的主题、不需要它的
-/// `init`，所以这一层引过来的只有分组算法本身。
 pub fn number(cx: &App, value: f64, decimals: usize) -> String {
-    format::number(value, decimals, separators(locale(cx)))
+    format_number(value, decimals, separators(locale(cx)))
 }
 
 /// 按当前语言写一个整数（计数那一类：俄语的「2 831 个文件」中间是硬空格，不是逗号）。
 pub fn integer(cx: &App, value: u64) -> String {
-    format::group_digits(&value.to_string(), separators(locale(cx)).group)
+    group_digits(&value.to_string(), separators(locale(cx)).group)
+}
+
+/// 数字的排印：定小数位、千位分组、负号用 U+2212。
+///
+/// 与 `ely-gpui-component` 原来那一份逐字同义（含负零不写负号这条）：
+/// - 非有限值按 Rust 的写法原样交回（`NaN` / `inf` / `-inf`）—— 那是诊断信息，
+///   折成 `0` 会把自己藏起来；
+/// - 先对**绝对值**取整，再决定写不写负号：`-0.001` 保留两位是 `0.00`，不是 `−0.00`；
+/// - 小数位只有 `decimals` 位，不裁尾零（与「统计里那个 12.50」同一口径）。
+fn format_number(value: f64, decimals: usize, separators: Separators) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    let fixed = format!("{:.*}", decimals, value.abs());
+    let (int, fraction) = match fixed.split_once('.') {
+        Some((int, fraction)) => (int, Some(fraction)),
+        None => (fixed.as_str(), None),
+    };
+    let mut out = String::new();
+    if value < 0.0 && fixed.chars().any(|ch| ch.is_ascii_digit() && ch != '0') {
+        out.push(MINUS);
+    }
+    out.push_str(&group_digits(int, separators.group));
+    if let Some(fraction) = fraction {
+        out.push(separators.decimal);
+        out.push_str(fraction);
+    }
+    out
+}
+
+/// 从右往左每三位插一个分组符。
+fn group_digits(digits: &str, group: char) -> String {
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (ix, digit) in digits.chars().enumerate() {
+        if ix > 0 && (digits.len() - ix).is_multiple_of(3) {
+            out.push(group);
+        }
+        out.push(digit);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -134,7 +184,7 @@ mod tests {
     use std::fmt::Write as _;
     use std::path::{Path, PathBuf};
 
-    use super::{duration, separators, tf};
+    use super::{Separators, duration, format_number, group_digits, separators, tf};
     use folio_core::infra::i18n::Locale;
     use folio_core::{Config, Language};
     use gpui_kit::App;
@@ -267,5 +317,40 @@ mod tests {
         // 月标签那一行：中文带「月」，英文就是那个数字（一年十二个数排成一排，
         // 顺序已经把「这是月份」说清了）。
         assert_eq!(cx.read(|cx| tf(cx, "stats.month", &[("month", &3)])), "3");
+    }
+
+    /// 数字分组：从右往左每三位插一个，零位与负数那条由调用方管。
+    #[test]
+    fn grouping_inserts_the_separator_every_three_digits() {
+        assert_eq!(group_digits("7", ','), "7");
+        assert_eq!(group_digits("123", ','), "123");
+        assert_eq!(group_digits("1234", ','), "1,234");
+        assert_eq!(group_digits("1234567", ','), "1,234,567");
+        assert_eq!(group_digits("1234567", '\u{a0}'), "1\u{a0}234\u{a0}567");
+        // 前导零是数字的一部分（`007` 这种编号），不许被当成「没有千位」。
+        assert_eq!(group_digits("0001234", ','), "0,001,234");
+    }
+
+    /// 定小数位与负号的三条边界：四舍五入跨过分组位、负零不写负号、非有限值原样交回。
+    #[test]
+    fn a_number_is_rounded_grouped_and_signed() {
+        let en = Separators {
+            group: ',',
+            decimal: '.',
+        };
+        assert_eq!(format_number(1234567.891, 2, en), "1,234,567.89");
+        assert_eq!(format_number(999.999, 2, en), "1,000.00");
+        assert_eq!(format_number(-1234.5, 1, en), "\u{2212}1,234.5");
+        // 负零：`-0.001` 保留两位是 `0.00`，不是 `−0.00`（那不是欠了钱，是四舍五入）。
+        assert_eq!(format_number(-0.001, 2, en), "0.00");
+        assert_eq!(format_number(0.0, 0, en), "0");
+        assert_eq!(format_number(f64::NAN, 2, en), "NaN");
+        assert_eq!(format_number(f64::INFINITY, 2, en), "inf");
+        // 德语那一对：点分组、逗号小数。
+        let de = Separators {
+            group: '.',
+            decimal: ',',
+        };
+        assert_eq!(format_number(1234.5, 1, de), "1.234,5");
     }
 }

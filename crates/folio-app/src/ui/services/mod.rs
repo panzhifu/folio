@@ -6,11 +6,13 @@
 //!
 //! 这里**不出现元素树**（没有 `AnyElement`、没有 `impl Render`）：服务不知道谁在看它。
 
+pub mod activation;
 pub mod app_store;
 pub mod config;
 pub mod feedback;
 pub mod import_queue;
 pub mod l10n;
+pub mod lansync;
 pub mod library;
 pub mod resident;
 pub mod storage;

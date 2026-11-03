@@ -7,8 +7,9 @@ use crate::content::dom::{Dom, NodeId};
 use crate::content::format::css::computed::{
     BackgroundAttachment, BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundSize,
     BackgroundTile, BorderEdge, BorderStyle, BoxSizing, BreakWhen, Clear, Color, ComputedStyle,
-    DeclStatus, Direction, Display, Float, Hyphens, Length, ListStyle, RubyAlign, RubyPosition,
-    StyledDom, TextAlign, TextJustify, WordBreak, WritingMode, cascade, declaration_status,
+    DeclStatus, Direction, Display, Float, Hyphens, InlineVAlign, Length, ListStyle, RubyAlign,
+    RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode, cascade,
+    declaration_status,
 };
 use crate::content::format::css::{Declaration, Origin, RuleSet};
 
@@ -896,6 +897,7 @@ fn the_position_family_is_applied_except_z_index() {
         ("position", "absolute"),
         ("position", "fixed"),
         ("position", "static"),
+        ("position", "relative"),
         ("left", "0%"),
         ("bottom", "12%"),
     ] {
@@ -906,9 +908,9 @@ fn the_position_family_is_applied_except_z_index() {
         );
     }
     assert_eq!(
-        status("position", "relative"),
+        status("position", "sticky"),
         DeclStatus::Unparsed,
-        "`relative` 要不脱流地挪已排好的子树，还没做 —— 判不认识"
+        "`sticky` 要的是滚动状态，不是排版这一层的事 —— 判不认识"
     );
     assert_eq!(
         status("z-index", "3"),
@@ -985,14 +987,14 @@ fn opentype_font_properties_report_inert_not_unknown() {
         status("font-feature-settings", "\"liga\" 0"),
         DeclStatus::Inert
     );
-    // `font-variant` 与 `font-variant-caps` 2026-10-29 改成只收初值：`normal` 就是
-    // 「不启用任何特性」，正是我们做的事；其余值（`small-caps` 这类）判不认识。
+    // `font-variant` / `font-variant-caps`：2026-10-29 只收初值，2026-11-04 起也收
+    // `small-caps`（排版层把小写换成大写、字号乘 0.8）。其余值仍判不认识。
     assert_eq!(status("font-variant", "normal"), DeclStatus::Applied);
     assert_eq!(status("font-variant-caps", "normal"), DeclStatus::Applied);
-    assert_eq!(status("font-variant", "small-caps"), DeclStatus::Unparsed);
+    assert_eq!(status("font-variant", "small-caps"), DeclStatus::Applied);
     assert_eq!(
         status("font-variant-caps", "small-caps"),
-        DeclStatus::Unparsed
+        DeclStatus::Applied
     );
     assert_eq!(status("font-variant", "全角"), DeclStatus::Unparsed);
     // OEB 1.x 的栏数：`1` 就是不分栏（我们的行为），其余值要作者多栏。
@@ -1932,6 +1934,89 @@ fn style_hash_covers_fields() {
         color: None,
     };
     assert_ne!(h(&base), h(&bordered), "边框变了哈希该变");
+}
+
+/// 手写那份 `Hash` 要逐格盖住 `ComputedStyle` 的 `pub` 字段 —— `computed.rs` 里
+/// 「新增字段时必须在这里补一行」那条规矩的机器版。
+///
+/// 上面 [`style_hash_covers_fields`] 抽几个代表字段验「改了就变」，抓不到「新加一格忘了挂」，
+/// 而漏那一格的症状是**画旧**（块级缓存把上一代的行盒当命中），屏幕上没有任何报错可查。
+/// 所以这条不比行为，直接**比清单**：从自己那份源文件里读出字段表与 `impl Hash` 里出现过的
+/// `self.<字段>`，两份取差集 —— 谁漏了就把名字报出来。
+#[test]
+fn the_style_hash_lists_every_computed_style_field() {
+    let src = include_str!("../computed.rs");
+    let fields = pub_field_names(top_level_block(src, "pub struct ComputedStyle {"));
+    let hashed = self_field_names(top_level_block(
+        src,
+        "impl std::hash::Hash for ComputedStyle {",
+    ));
+    assert!(
+        fields.len() > 50,
+        "字段表该是几十格那一量级，读出 {} 格",
+        fields.len()
+    );
+
+    let mut missing: Vec<_> = fields.iter().filter(|f| !hashed.contains(f)).collect();
+    missing.sort();
+    assert!(
+        missing.is_empty(),
+        "`ComputedStyle` 里这些字段没进手写的 `Hash`：{missing:?} —— 它们改了而哈希不变，块级缓存会读到过期结果"
+    );
+    let mut unknown: Vec<_> = hashed.iter().filter(|n| !fields.contains(n)).collect();
+    unknown.sort();
+    assert!(
+        unknown.is_empty(),
+        "`impl Hash` 里哈希了不属于 `ComputedStyle` 的名字：{unknown:?}"
+    );
+}
+
+/// 从 `head` 那一行起取到本层的收尾 `}`（结构体与 impl 里的内层大括号都带缩进，
+/// 所以顶上缩进的 `\n}` 就是这一层的结尾）。
+fn top_level_block<'a>(src: &'a str, head: &str) -> &'a str {
+    let at = src
+        .find(head)
+        .unwrap_or_else(|| panic!("源文件里该有 `{head}`"));
+    let rest = &src[at..];
+    let end = rest
+        .find("\n}")
+        .unwrap_or_else(|| panic!("`{head}` 没有收尾的那一行 `}}`"));
+    &rest[..end]
+}
+
+/// 结构体那一块里的 `pub 名字:` 字段名（按出现顺序）。
+fn pub_field_names(block: &str) -> Vec<String> {
+    block
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().strip_prefix("pub ")?;
+            let name = rest.split(':').next()?.trim_end();
+            if name.is_empty() || name.contains(' ') {
+                return None;
+            }
+            Some(name.to_string())
+        })
+        .collect()
+}
+
+/// 哈希那一块里出现过的 `self.<名字>`（去重）。
+fn self_field_names(block: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let bytes = block.as_bytes();
+    let mut at = 0;
+    while let Some(found) = block[at..].find("self.") {
+        at += found + "self.".len();
+        let mut end = at;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        let name = &block[at..end];
+        if !name.is_empty() && !out.iter().any(|seen| seen == name) {
+            out.push(name.to_string());
+        }
+        at = end;
+    }
+    out
 }
 
 // ---- 方向：`direction` 与 `start` / `end` ----
@@ -3564,5 +3649,96 @@ fn the_ua_sheet_halves_the_ruby_annotation() {
         style(&authored, tag(&authored, "rt")).font_size,
         8.0,
         "作者写了就照作者的走（20 px 的 0.4 倍）"
+    );
+}
+
+/// `vertical-align: text-top / text-bottom` 不再算「不认识」。
+///
+/// 这两档要贴父盒字体的上下沿，而父盒的度量要到排版层才量得出来，所以层叠只记关键字
+/// （[`InlineVAlign`]），折 px 在 `layout::wrap`。这里钉的是「记下来了、没进 ignored」，
+/// 以及后来的值能把它顶掉 —— 同一属性只留最后一条。
+#[test]
+fn text_top_and_bottom_are_recorded_for_the_layout_to_resolve() {
+    let top = author("<p><span>x</span></p>", "span { vertical-align: text-top }");
+    assert_eq!(
+        style(&top, tag(&top, "span")).inline_valign,
+        InlineVAlign::TextTop
+    );
+    assert_eq!(top.styled.ignored, 0);
+
+    let bottom = author(
+        "<p><span>x</span></p>",
+        "span { vertical-align: text-bottom }",
+    );
+    assert_eq!(
+        style(&bottom, tag(&bottom, "span")).inline_valign,
+        InlineVAlign::TextBottom
+    );
+    assert_eq!(bottom.styled.ignored, 0);
+
+    // `super` 顶掉关键字：关键字归零，数值位移接班。
+    let superseded = author(
+        "<p><span>x</span></p>",
+        "span { vertical-align: text-top; vertical-align: super }",
+    );
+    let span = style(&superseded, tag(&superseded, "span"));
+    assert_eq!(span.inline_valign, InlineVAlign::Baseline);
+    assert!(span.baseline_shift > 0.0, "super 要折成向上的位移");
+    assert_eq!(superseded.styled.ignored, 0);
+}
+
+/// `-webkit-` / `-epub-` 前缀的 `writing-mode` 与无前缀那条同义。
+///
+/// 后果不是排版细节：认不出前缀，整本竖排书会横着排 —— 本机那份日文样本
+/// （`09-ja-vertical.azw3`）写的正是 `-webkit-writing-mode: vertical-rl`。
+#[test]
+fn webkit_and_epub_writing_mode_are_the_same_property() {
+    for property in ["-webkit-writing-mode", "-epub-writing-mode"] {
+        let css = format!("p {{ {property}: vertical-rl }}");
+        let page = author("<p>x</p>", &css);
+        assert_eq!(
+            style(&page, tag(&page, "p")).writing_mode,
+            WritingMode::VerticalRl,
+            "{property} 要认成 writing-mode"
+        );
+        assert_eq!(page.styled.ignored, 0, "{property} 不该进 ignored");
+    }
+}
+
+/// `text-orientation: mixed` 是初值，收下等于没改；`upright` / `sideways` 要逐字形旋转，
+/// 排版层还没有那条路，照实计不认识。
+#[test]
+fn text_orientation_mixed_is_a_no_op_but_upright_is_not() {
+    let mixed = author("<p>x</p>", "p { text-orientation: mixed }");
+    assert_eq!(mixed.styled.ignored, 0);
+    let upright = author("<p>x</p>", "p { text-orientation: upright }");
+    assert_eq!(upright.styled.ignored, 1, "upright 还没做，不许假装接住");
+}
+
+/// `color: initial` 落成「读者主题的正文色」，不是写死黑色。
+///
+/// `ComputedStyle::color` 的 `None` 正是「没有作者色、听主题」的记号；暗色主题下
+/// 写死黑字等于把这一行藏掉。`inherit` / `currentColor` 仍走父级那一档。
+#[test]
+fn color_initial_resets_to_the_theme_default_not_black() {
+    let page = author(
+        "<div><p class=\"a\">x</p></div>",
+        "div { color: red } .a { color: initial }",
+    );
+    assert_eq!(
+        style(&page, class(&page, "a")).color,
+        None,
+        "initial 该回主题色（None），不是父级的红、也不是黑"
+    );
+    assert_eq!(page.styled.ignored, 0);
+
+    let inherit = author(
+        "<div><p class=\"a\">x</p></div>",
+        "div { color: red } .a { color: currentColor }",
+    );
+    assert_eq!(
+        style(&inherit, class(&inherit, "a")).color,
+        style(&inherit, tag(&inherit, "div")).color,
+        "currentColor 仍是父级那一份"
     );
 }

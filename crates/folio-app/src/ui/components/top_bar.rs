@@ -23,7 +23,8 @@ use gpui_kit::component::{ActiveTheme, Sizable, StyledExt as _, ThemeStyled as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, Corners, ElementId, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, SharedString, Styled, Window, div, hsla, px, rems,
+    ParentElement, RenderOnce, SharedString, Styled, TestSupportExt as _, Window, div, hsla, px,
+    rems,
 };
 
 /// 这一条的带高：44 是拇指稳定命中的下限，三处用同一个数（原来一处按内容撑、一处 44、
@@ -80,8 +81,8 @@ pub struct TopBar {
     strong: bool,
     /// 压在内容之上的那一档。
     overlay: bool,
-    /// `overlay` 那一档：这一条**上方**被系统让开的那一段（状态栏 / 挖孔，逻辑像素）。
-    /// 表面向上长回这一段，贴住窗口顶边；内容仍留在原来的位置。
+    /// `overlay` 那一档：这一条自己要让给系统的那一段（状态栏 / 挖孔，逻辑像素）。
+    /// 表面从调用方顶边起，内容行从让完之后那条边起。
     overlay_top: f32,
     on_back: Option<OnBack>,
     trailing: Vec<AnyElement>,
@@ -157,10 +158,11 @@ impl TopBar {
     /// 换成压在内容之上的那一档：满宽吸顶、popover 表面、只圆下面两个角、
     /// 拦住落在它空隙里的一击。
     ///
-    /// `top_inset` 是调用方在这一条**上方**让给系统的那一段（状态栏 / 挖孔，逻辑像素；
-    /// 桌面上是 0）。表面向上长回这一段，从窗口顶边长出来 —— 上面不该有缝，
+    /// `top_inset` 是这一条**自己**要让给系统的那一段（状态栏 / 挖孔，逻辑像素；
+    /// 桌面上是 0）。表面从调用方的顶边起 —— 阅读页那一层从窗口 0 起（外壳不再推整层，
+    /// 见 `shell::reading_overlay`），所以这一条是从屏幕顶边长出来的，上面不该有缝，
     /// 而投影上渗的那一段也因此落在屏幕外，不会在条子上方压出一条横线（见
-    /// [`overlay_shadow`]）。内容仍摆在原来那 44 里，位置一点不动。
+    /// [`overlay_shadow`]）。内容行让开这一段：返回那颗不许压在状态栏或挖孔下面。
     pub fn overlay(mut self, top_inset: f32) -> Self {
         self.overlay = true;
         self.overlay_top = top_inset.max(0.0);
@@ -189,7 +191,10 @@ impl RenderOnce for TopBar {
         let raised = if self.overlay { self.overlay_top } else { 0.0 };
         // 内容那一行：返回、标题、副题、右端那几颗共用一条基线，行高是 [`ROW`] 那一个数
         // （不是按最高的孩子自己撑 —— 那样带小按钮的那几条会把标题摆在另一个 `y` 上）。
+        // 挂个名给宿主测试：这一行的顶边在不在系统那一段下面，就是「有没有让开安全区」。
         let mut row = h_flex()
+            .id("top-bar-row")
+            .test_support()
             .w_full()
             .h(rems(ROW))
             .items_center()
@@ -219,9 +224,11 @@ impl RenderOnce for TopBar {
                 // `Stateful<Div>` 的方法）。
                 this.block_mouse_except_scroll()
                     .absolute()
-                    // 往上长回系统让开的那一段：`top_0` 是**让完之后**的顶，那条边在屏幕里，
-                    // 投影渗到它上方就会被切成一条横线。
-                    .top(px(-raised))
+                    // 吸在调用方给的那一条顶边上：阅读页那一层从窗口 0 起（外壳不再按
+                    // `reading_top_inset` 推整层，纸面铺到系统边），所以这一条的顶边就是
+                    // 屏幕顶边。让给系统的那一段在下面用 `pt` 让，不靠这一格往上长 ——
+                    // 往上长回去的话，内容行正好落回窗口 0，返回那颗就压在状态栏／挖孔下面。
+                    .top_0()
                     .left_0()
                     .right_0()
                     .popover_style(cx)
@@ -288,4 +295,88 @@ fn title_cell(strong: bool, title: SharedString) -> AnyElement {
         .when(strong, |this| this.font_weight(FontWeight::SEMIBOLD))
         .child(title)
         .into_any_element()
+}
+
+#[cfg(all(test, not(mobile)))]
+mod view_tests {
+    //! `overlay` 那一档的几何：表面贴窗口顶边，内容行让开系统那一段。
+    //!
+    //! 这条从前是反的：阅读页那一层已经不再按 `shell::reading_top_inset` 往下推（纸面从
+    //! 窗口 0 起），而这一条还按「父层已经让过」往上长回 `-inset`，于是 `top(-inset)` 与
+    //! `pt(inset)` 互相抵消 —— 返回那颗正好落在窗口第 0 行，也就是状态栏／挖孔下面。
+    //! 判据量的是**内容行**的顶边，不是条子自己的顶边：只有前者说得清「有没有让开」。
+
+    use gpui_kit::component::Root;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Context, InteractiveElement as _, IntoElement,
+        ParentElement as _, Render, Styled as _, Window, div, px, size,
+    };
+
+    use super::TopBar;
+
+    /// 顶上那条系统边有多高：真机上大约是状态栏 + 一点余量，取一个不属于 44 的整数倍、
+    /// 也不等于 0 的数，免得抵消掉了还量不出来。
+    const TOP_INSET: f32 = 41.0;
+
+    struct BarHost {
+        /// 这一条要不要按 `overlay` 那一档画，以及它让给系统的那一段有多高。
+        inset: Option<f32>,
+    }
+
+    impl Render for BarHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let mut bar = TopBar::new("test-top-bar")
+                .title("《猫城记》")
+                .back_tooltip("返回");
+            if let Some(inset) = self.inset {
+                bar = bar.overlay(inset);
+            }
+            div().id("bar-host").size_full().relative().child(bar)
+        }
+    }
+
+    fn boot(cx: &mut gpui_kit::TestAppContext, inset: Option<f32>) -> AnyWindowHandle {
+        cx.update(gpui_kit::init);
+        cx.open_window(size(px(400.0), px(600.0)), |window, cx| {
+            let view = cx.new(|_| BarHost { inset });
+            Root::new(view, window, cx)
+        })
+        .into()
+    }
+
+    /// 内容行那一格的顶边（窗口坐标，实测）。
+    fn row_top(cx: &mut gpui_kit::TestAppContext, handle: AnyWindowHandle) -> f32 {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            f32::from(window.find("top-bar-row").bounds().origin.y)
+        })
+        .expect("渲染应成功")
+    }
+
+    /// `overlay` 那一档：内容行从让完之后那条边起 —— 返回那颗不压在状态栏／挖孔下面。
+    #[gpui_kit::test]
+    fn the_overlay_row_yields_the_system_band(cx: &mut gpui_kit::TestAppContext) {
+        let handle = boot(cx, Some(TOP_INSET));
+        assert_eq!(
+            row_top(cx, handle),
+            TOP_INSET,
+            "让开那一段之后内容行才落在系统边下面"
+        );
+    }
+
+    /// 桌面上那一段是 0：内容行贴条子自己的顶边，一个像素都不多让。
+    #[gpui_kit::test]
+    fn the_overlay_row_does_not_invent_an_inset_on_desktop(cx: &mut gpui_kit::TestAppContext) {
+        let handle = boot(cx, Some(0.0));
+        assert_eq!(row_top(cx, handle), 0.0);
+    }
+
+    /// 在流里的那一条（架面、书信息、紧凑设置）不认这一档：顶边就是它自己的顶边，
+    /// 带高也仍是 `HEIGHT`，没有被系统那一段撑高。
+    #[gpui_kit::test]
+    fn the_in_flow_row_keeps_its_own_top(cx: &mut gpui_kit::TestAppContext) {
+        let handle = boot(cx, None);
+        assert_eq!(row_top(cx, handle), 0.0);
+    }
 }

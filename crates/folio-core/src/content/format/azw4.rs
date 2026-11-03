@@ -10,23 +10,28 @@
 //! 与「把格式报成 Azw4」。
 
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 
 use super::palmdb::PalmDb;
-use super::pdf::{failure, page_text, read_pdf, render_png};
-use super::{Content, DocMeta, DocumentProvider, Format, PageText, stem_of};
+use super::pdf::{PdfHandle, failure, page_text, read_pdf, render_png};
+use super::{Content, DocMeta, DocumentProvider, Format, PageText, Passphrase, stem_of};
 use crate::Result;
 
 pub struct Azw4Adapter {
-    /// 这一本书的解析句柄，与 [`super::pdf::PdfAdapter`] 同形：`None` = 打不开。
+    /// 这一本书的解析句柄，与 [`super::pdf::PdfAdapter`] 同形（含同一份负缓存与同一套
+    /// 口令作废规则，实现见 [`super::pdf::PdfHandle`]）。
     ///
     /// 从前这一族每问一次都重新从 PalmDB 里拷一遍 payload 再解一遍结构，理由是「hayro 要
     /// 一份独立的整本字节，导入时为一张封面多拷一份不值」。换成一台引擎之后这条理由不成立
     /// 了 —— 一次打开就是一份句柄，之后取页、抽字、封面都共用它，峰值驻留反而只有一份。
-    document: OnceLock<Option<Pdf>>,
+    document: PdfHandle,
+    /// 读者给的那份口令。AZW4 里那份 PDF 完全可以带 `/Encrypt`，所以这一族与 `.pdf`
+    /// 共用同一条口令路 —— 两条路各判一次「要不要问口令」，屏上就是同一本书在两种来源下
+    /// 一种能问一种不能。
+    passphrase: Option<Passphrase>,
     /// 与 `document` 配套的解释器设置（克隆只是几条 `Arc`）。
     settings: InterpreterSettings,
 }
@@ -34,15 +39,16 @@ pub struct Azw4Adapter {
 impl Default for Azw4Adapter {
     fn default() -> Self {
         Self {
-            document: OnceLock::new(),
+            document: PdfHandle::new(),
+            passphrase: None,
             settings: InterpreterSettings::default(),
         }
     }
 }
 
 impl Azw4Adapter {
-    fn document(&self, path: &Path) -> Option<&Pdf> {
-        self.document.get_or_init(|| open(path).ok()).as_ref()
+    fn document(&self, path: &Path) -> Option<Arc<Pdf>> {
+        self.document.get(|| open(path, self.passphrase.as_ref()))
     }
 }
 
@@ -55,27 +61,25 @@ impl DocumentProvider for Azw4Adapter {
         matches!(super::extension_of(path).as_deref(), Some("azw4"))
     }
 
+    fn set_passphrase(&mut self, passphrase: Option<Passphrase>) {
+        // 与 `.pdf` 同一条：先作废再存，否则下一次问会用旧口令重开并把结果当作这一代的。
+        self.document.invalidate();
+        self.passphrase = passphrase;
+    }
+
     fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
         let (db, _) = pdf_payload(path)?;
-        // 与 `.pdf` 那边同一条：失败记下来（`None`），别每帧重试。
-        if self.document.get().is_none() {
-            match open(path) {
-                Ok(document) => {
-                    let _ = self.document.set(Some(document));
-                }
-                Err(err) => {
-                    let _ = self.document.set(None);
-                    return Err(err);
-                }
-            }
-        }
-        // `index` 是第一次问、句柄刚刚放进去，所以 `get_or_init` 不会落进 `open` 那一支。
-        let document = self.document(path).ok_or_else(|| {
-            crate::Error::UnsupportedFormat(format!(
-                "{}：结构读不出来，PalmDB 里那份 PDF 可能被截断过",
-                file_name(path)
-            ))
-        })?;
+        // 与 `.pdf` 那边同一条：`get_or_try` 的 `Err` 只在刚失败这一趟出现，
+        // 而失败本身记进负缓存（`None`），别每帧重试。
+        let document = self
+            .document
+            .get_or_try(|| open(path, self.passphrase.as_ref()))?
+            .ok_or_else(|| {
+                crate::Error::UnsupportedFormat(format!(
+                    "{}：结构读不出来，PalmDB 里那份 PDF 可能被截断过",
+                    file_name(path)
+                ))
+            })?;
         let title = if db.db_name().trim().is_empty() {
             stem_of(path)
         } else {
@@ -83,7 +87,7 @@ impl DocumentProvider for Azw4Adapter {
         };
         read_pdf(
             path,
-            document,
+            &document,
             Format::Azw4,
             title,
             std::fs::metadata(path)
@@ -91,18 +95,20 @@ impl DocumentProvider for Azw4Adapter {
                 .unwrap_or(0),
             // 封面这一趟只在导入时跑一次。封面与阅读页走同一条链（`render_png`），
             // 字节也共用同一份句柄 —— 不再有「另一台引擎要独立字节」那一笔。
-            render_png(document, 0, super::pdf::COVER_EDGE, &self.settings),
+            render_png(&document, 0, super::pdf::COVER_EDGE, &self.settings),
         )
     }
 
     /// 取页：与 `.pdf` 同一个句柄、同一条栅格化。
     fn render_page(&self, path: &Path, page: usize, edge: u32) -> Option<Vec<u8>> {
-        render_png(self.document(path)?, page, edge, &self.settings)
+        let document = self.document(path)?;
+        render_png(&document, page, edge, &self.settings)
     }
 
     /// 文字层同一份：Kindle 印刷版里那份 PDF 与普通 `.pdf` 只差字节从哪儿来。
     fn page_text(&self, path: &Path, page: usize) -> Option<PageText> {
-        page_text(self.document(path)?, page, &self.settings)
+        let document = self.document(path)?;
+        page_text(&document, page, &self.settings)
     }
 
     /// 整本一次：句柄开一趟，然后逐页抽字。搜索那一趟走的必须是这一条。
@@ -110,7 +116,7 @@ impl DocumentProvider for Azw4Adapter {
         let document = self.document(path)?;
         Some(
             (0..document.pages().len())
-                .map(|page| super::pdf::page_texts_one(document, page, &self.settings))
+                .map(|page| super::pdf::page_texts_one(&document, page, &self.settings))
                 .collect(),
         )
     }
@@ -121,10 +127,13 @@ pub(crate) fn pdf_record(db: &PalmDb) -> Option<usize> {
     db.find_record_starting_with(b"%PDF-")
 }
 
-/// 从 PalmDB 里取出那份 PDF 并打开。
-fn open(path: &Path) -> Result<Pdf> {
+/// 从 PalmDB 里取出那份 PDF 并打开，带上读者手上那份口令。
+///
+/// 取字节这一趟与口令无关：`/Encrypt` 是 PDF 自己那一层的事，藏在记录里那串字节
+/// 读出来是同一份，所以只有 `Pdf::new_with_password` 那一问需要口令。
+fn open(path: &Path, passphrase: Option<&Passphrase>) -> Result<Pdf> {
     let (_, bytes) = pdf_payload(path)?;
-    Pdf::new(bytes).map_err(|err| failure(path, err))
+    super::pdf::PdfAdapter::from_bytes_with(bytes, passphrase).map_err(|err| failure(path, err))
 }
 
 /// 打开容器并取出 PDF 记录。

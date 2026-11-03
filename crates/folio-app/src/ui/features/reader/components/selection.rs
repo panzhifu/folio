@@ -44,8 +44,10 @@
 //! 右边五枚颜色圆点，各自带一份表面色与投影，顶到整块菜单的左右两边；两块与下面那条
 //! 动作条同一档投影，中间留一道 6 像素的缝。
 //!
-//! 那一行比动作条宽，所以整块菜单的宽由它定（[`card_width`] 取两者的较大者），动作条在它
-//! 下面自己居中 ——「两端对齐」说的是那一行里那两组各顶各的边，不是三块同宽。
+//! 整块菜单的宽由「那一行」与「动作条」里较宽的一边定（[`card_width`] 取两者的较大者）：
+//! 今天那一行是 260，动作条按可选那两格摆不摆是 208 / 248 / 288 —— 桌面上分享那一格不摆，
+//! 所以永远窄于那一行；手机上两格都摆时反过来由动作条定。动作条在它下面自己居中 ——
+//! 「两端对齐」说的是那一行里那两组各顶各的边，不是三块同宽。
 //!
 //! 第二格跟着选区自己是谁换：选区**正好等于**库里某一条划线时它是「取消划线」
 //! （[`ReaderSession::selection_annotation`]）；改过范围的选区就是普通选区，那一格回到
@@ -1028,11 +1030,14 @@ const MENU_GAP: f32 = 6.0;
 /// 叠在圆点上的那枚勾的字号（`Icon` 取当前文字号）。
 const SWATCH_CHECK: f32 = 13.0;
 
-/// 动作条的格子数：复制、划线（或取消）、笔记、翻译、清除，加上**只有能离屏渲染那一端才有**的
-/// 「分享卡片」。判据在 [`crate::ui::platform::RENDERS_SHARE_CARDS`]，只写一次：桌面上
-/// 那一按渲不出字节，摆出来就是一个坏按钮。
-fn action_cells(share: bool) -> f32 {
-    if share { 6.0 } else { 5.0 }
+/// 动作条的格子数：复制、划线（或取消）、笔记、翻译、清除，加上两格**按端与按配置缺席**
+/// 的：「分享卡片」只在能离屏渲染的那一端摆（判据在
+/// [`crate::ui::platform::RENDERS_SHARE_CARDS`]，桌面上那一按渲不出字节，摆出来就是
+/// 一个坏按钮）；「问 AI」只在端点填全的那一台机器上摆（判据在 `ReaderSession::ai_available`，
+/// 与真发请求共用同一份）。两处不一致的后果不是难看，是**摆一颗按下去只会报错的按钮**
+/// 或者反过来 —— 明明问得出去却没有入口。
+fn action_cells(share: bool, ai: bool) -> f32 {
+    5.0 + share as u8 as f32 + ai as u8 as f32
 }
 
 /// 整块菜单占的高（含尾巴）：摆位与「放不下就翻面」都按这个数算。
@@ -1052,23 +1057,23 @@ fn swatch_pill_width() -> f32 {
     SWATCH_PAD * 2.0 + SWATCH_CELL * ANNOTATION_COLORS.len() as f32
 }
 
-/// 顶端那一行的宽：两条胶囊 + 中间那道缝。这一行现在**是整块菜单最宽的一行**，
-/// 所以它决定了横向占位 —— 但下面那句 `max` 不许把这层关系当成已知，见 [`card_width`]。
+/// 顶端那一行的宽：两条胶囊 + 中间那道缝。不摆「问 AI」那一格时它是整块菜单最宽的一行，
+/// 所以它常常决定横向占位 —— 但下面那句 `max` 不许把这层关系当成已知，见 [`card_width`]。
 fn mark_row_width() -> f32 {
     style_pill_width() + MARK_GAP + swatch_pill_width()
 }
 
 /// 整块菜单的宽 = 顶端那一行与动作条里的**较宽者**。
 ///
-/// 为什么不写死其中一个：动作条的宽跟着「摆不摆分享卡片那一格」变（208 / 248），
-/// 而那一行的宽跟着「几档画法、几档颜色」变。今天那一行更宽，于是摆位与夹边按它算，
-/// 动作条居中在它下面；哪天颜色减到三枚而画法只留两格，那条关系就反过来 —— 写死任何
-/// 一边都会让另一顶出屏幕或摆歪。
+/// 为什么不写死其中一个：动作条的宽跟着那两格可选的摆不摆变（208 / 248 / 288），而那一行
+/// 的宽跟着「几档画法、几档颜色」变（今天 260）。不摆「问 AI」那一格时那一行更宽，摆上
+/// 之后动作条反过来更宽 —— 写死任何一边都会让另一边探出去或摆歪。见
+/// [`the_card_is_as_wide_as_whichever_row_is_wider`](tests)。
 ///
-/// `share` 是这一端摆不摆「分享卡片」那一格（与渲染那一侧读同一个判据），
-/// 横向居中与夹边都按它算 —— 两处不一致同样会摆歪。
-pub(in crate::ui::features::reader) fn card_width(share: bool) -> f32 {
-    (ACTION_CELL * action_cells(share) + BAR_PAD * 2.0).max(mark_row_width())
+/// `share` 与 `ai` 是这一端、这一台机器上摆不摆那两格（与渲染、与真发请求读同一份判据），
+/// 横向居中与夹边都按它们算 —— 两处不一致同样会摆歪。
+pub(in crate::ui::features::reader) fn card_width(share: bool, ai: bool) -> f32 {
+    (ACTION_CELL * action_cells(share, ai) + BAR_PAD * 2.0).max(mark_row_width())
 }
 
 /// 这一帧菜单该摆在哪。
@@ -1172,6 +1177,9 @@ impl ReaderSession {
             .as_ref()
             .map(|row| row.style)
             .unwrap_or_else(|| self.pending_style(cx));
+        // 「问 AI」那一格摆不摆，与卡片按几格算宽，读的是同一个值：取两次就可能一次说
+        // 有、一次按没有算，卡片于是正好窄掉那一格。
+        let ai = ReaderSession::ai_available(cx);
         let actions = h_flex()
             .p(px(BAR_PAD))
             .gap_0()
@@ -1208,6 +1216,20 @@ impl ReaderSession {
                 reader.clone(),
                 |r, _, cx| r.open_translation(cx),
             ))
+            // 问 AI：与翻译同一类「就地做一件事」的入口，排在它旁边。端点没填全时
+            // 这一格整个缺席（判据与真发请求用的是同一份，见 `model/ai.rs`），
+            // 所以它也是 `children(Option)` 而不是一个按下去报错的按钮。
+            .children(ai.then(|| {
+                action_cell(
+                    "selection-ai",
+                    IconName::Sparkles,
+                    tr(cx, "reader.ask_ai"),
+                    foreground,
+                    hover,
+                    reader.clone(),
+                    |r, _, cx| r.open_ai_question(cx),
+                )
+            }))
             // 渲不出图的那一端这一格直接缺席（见 [`crate::ui::platform::RENDERS_SHARE_CARDS`]），
             // 所以它是 `children(Option)` 而不是一个禁用的按钮。
             .children(platform::RENDERS_SHARE_CARDS.then(|| {
@@ -1245,16 +1267,17 @@ impl ReaderSession {
         // 横向对着选区中线；中线不在手上（首帧还没画过）就居中在正文那一条上。
         // 两种摆法都夹在页内，不把卡片顶出屏幕。
         let page_width = f32::from(self.content_bounds.get().size.width);
-        let width = card_width(platform::RENDERS_SHARE_CARDS);
+        let width = card_width(platform::RENDERS_SHARE_CARDS, ai);
         let left = menu_left(page_width, self.prefs.margin_x, width, anchor_x);
         // 顶端那一行摆在上头，动作条贴着尾巴。理由是那一行的点击**直接写库或写配置**：
         // 挑中某条划线时点画法即改那一条、点色即换色，普通选区点哪格就用那一档新划一条
         // （见 [`style_row`] 与 [`swatch_row`] 里的 `on_click`），中间没有预览也没有撤销
         // 台阶 —— 于是把它推到离选区、离拇指远的那一头。
         //
-        // 两条胶囊顶到整块菜单的左右两端（`justify_between` + 显式给宽）：这一行今天比
-        // 动作条宽，所以它就是 [`card_width`] 那一侧；宽给足之后两边各顶各的边，
-        // 「两端对齐」这件事就写在布局里而不是靠常数凑。
+        // 两条胶囊顶到整块菜单的左右两端（`justify_between` + 显式给宽）：宽给足之后两边
+        // 各顶各的边，「两端对齐」这件事就写在布局里而不是靠常数凑。哪一边定下这个宽见
+        // [`card_width`] —— 摆上「问 AI」那一格之后是动作条更宽，这一行被拉宽、两条胶囊
+        // 之间的缝跟着变大，仍然各顶各的边。
         let marks = h_flex()
             .w(px(width))
             .items_center()
@@ -1601,36 +1624,51 @@ mod tests {
 
     /// 整块菜单的宽是「顶端那一行」与「动作条」里的**较宽者**，两者都不许探出去。
     ///
-    /// 这条今天钉的是较宽者**换了人**这件事：顶端那一行（三格画法 + 五枚颜色 = 260）比
-    /// 动作条最宽那一档（带分享格 = 208）还宽，所以摆位与夹边按那一行算。哪天颜色减到
-    /// 三枚、画法只留两格，那条关系反过来，`card_width` 里那句 `max` 仍然对 ——
-    /// 写死任何一边都会让另一边顶出屏幕，而 `menu_left` 的夹边只保证整块不出界，
-    /// 出了那一截的元素本身已经被裁掉。
+    /// 两格可选的（分享、问 AI）各加**正好一格**：渲染那一侧与摆位那一侧读同一个判据，
+    /// 各算一次就会摆歪 —— 卡片按五格算宽而动作条摆了七格，多出来的那格是被裁掉的一段，
+    /// 读者看到的是「翻译」右边什么都没有。
     ///
-    /// 顺带钉住动作条自己的账：摆不摆「分享卡片」那一格差**正好一格**（渲染那一侧与
-    /// 摆位那一侧读同一个判据，各算一次就会摆歪）。
+    /// 今天四档里决定宽的是**哪一边**也钉住：不带 AI 那一格时是顶端那一行（260）更宽，
+    /// 带上七格动作条（288）之后动作条反过来成了较宽的一边。这条会红的日子就是胶囊那两条
+    /// 不再顶到卡片两边的日子（`justify_between` 只会把它们之间的缝拉开），
+    /// 到时候看一眼那两条胶囊该不该跟着加宽。
     #[test]
     fn the_card_is_as_wide_as_whichever_row_is_wider() {
         for share in [false, true] {
-            let actions = ACTION_CELL * action_cells(share) + BAR_PAD * 2.0;
-            assert!(
-                card_width(share) >= actions && card_width(share) >= mark_row_width(),
-                "窄的一边被当成了整块的宽：{} 格动作条 = {actions}，那一行 = {}",
-                action_cells(share),
-                mark_row_width()
-            );
-            // 取的是较宽者而不是两者相加 —— 多算一项就会白白把菜单推到边外。
-            assert_eq!(card_width(share), actions.max(mark_row_width()));
+            for ai in [false, true] {
+                let actions = ACTION_CELL * action_cells(share, ai) + BAR_PAD * 2.0;
+                assert!(
+                    card_width(share, ai) >= actions && card_width(share, ai) >= mark_row_width(),
+                    "窄的一边被当成了整块的宽：{} 格动作条 = {actions}，那一行 = {}",
+                    action_cells(share, ai),
+                    mark_row_width()
+                );
+                // 取的是较宽者而不是两者相加 —— 多算一项就会白白把菜单推到边外。
+                assert_eq!(card_width(share, ai), actions.max(mark_row_width()));
+            }
         }
-        assert_eq!(
-            ACTION_CELL * action_cells(true) - ACTION_CELL * action_cells(false),
-            ACTION_CELL
+        for share in [false, true] {
+            assert_eq!(
+                ACTION_CELL * action_cells(share, true) - ACTION_CELL * action_cells(share, false),
+                ACTION_CELL,
+                "「问 AI」那一格该正好多占一格宽"
+            );
+        }
+        for ai in [false, true] {
+            assert_eq!(
+                ACTION_CELL * action_cells(true, ai) - ACTION_CELL * action_cells(false, ai),
+                ACTION_CELL,
+                "「分享卡片」那一格该正好多占一格宽"
+            );
+        }
+        assert_eq!(card_width(true, false), mark_row_width());
+        assert!(
+            card_width(true, true) > mark_row_width(),
+            "七格时动作条更宽"
         );
-        // 今天决定宽的是**那一行**而不是动作条。哪天颜色减到三枚、画法只留两格，`max`
-        // 那句照旧对，而这一句会红 —— 那是提示「两端对齐」那一行的读法要重新看一眼：
-        // 动作条反过来变成较宽的一边时，顶端那两条胶囊就不再顶到卡片的两个边了。
-        assert_eq!(card_width(true), mark_row_width());
-        assert!(card_width(false) > ACTION_CELL * action_cells(false) + BAR_PAD * 2.0);
+        assert!(
+            card_width(false, false) > ACTION_CELL * action_cells(false, false) + BAR_PAD * 2.0
+        );
     }
 
     /// 加画法那一档**不该把卡片撑高**：三格画法与五枚颜色同住顶端那一行（同一份 32 高），

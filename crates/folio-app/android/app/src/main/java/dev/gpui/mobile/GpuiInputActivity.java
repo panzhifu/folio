@@ -292,4 +292,16 @@ public class GpuiInputActivity extends NativeActivity {
 
     /** A back gesture / back button arrived; the native side turns it into BACK. */
     private static native void nativeBackGesture();
+
+    /**
+     * The OS is under memory pressure. Forward the level; the native side hands
+     * it to the app's memory-warning observer on the GPUI thread.
+     */
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        nativeTrimMemory(level);
+    }
+
+    private static native void nativeTrimMemory(int level);
 }

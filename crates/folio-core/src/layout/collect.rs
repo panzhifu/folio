@@ -1747,7 +1747,29 @@ impl<'a> Ctx<'a> {
     /// `cb_h` 是竖轴上同一件事的那一份：包含块的高，仅在父块**明确写过** `height` 时
     /// 是 `Some`（判据见 [`Self::child_height_basis`]）。它同样进缓存键 —— 同一块在
     /// 「父块写了高」与「父块由内容撑高」两种容器里折出的高不是一个数。
+    ///
+    /// 排完统一过一遍 [`Self::shift_relative`]：`position: relative` 挪的是**已经排好的
+    /// 这一坨**，所以两张表的起点要在进任何一条路（包括缓存命中）之前记。缓存里存的还是
+    /// 没挪的那一份（[`Self::stash_block`] 在位移之前就收口），命中与未命中拿到同一个画面；
+    /// 里外两层各挪一次，也正是 CSS 里嵌套 relative 的叠加结果。
     pub(super) fn block(
+        &mut self,
+        node: NodeId,
+        x: f32,
+        y: f32,
+        width: f32,
+        basis: f32,
+        cb_h: Option<f32>,
+    ) -> f32 {
+        let lines_start = self.lines.len();
+        let blocks_start = self.blocks.len();
+        let height = self.place_block(node, x, y, width, basis, cb_h);
+        self.shift_relative(node, blocks_start, lines_start, basis, cb_h);
+        height
+    }
+
+    /// [`Self::block`] 的内层：查缓存或实排，不做相对位移。
+    fn place_block(
         &mut self,
         node: NodeId,
         x: f32,
@@ -1768,6 +1790,67 @@ impl<'a> Ctx<'a> {
         let height = self.block_uncached(node, x, y, width, basis, cb_h);
         self.stash_block(key, lines_start, blocks_start, floats_start, x, y, height);
         height
+    }
+
+    /// `position: relative`：把 `blocks_start` / `lines_start` 之后的这一坨整体挪一下，
+    /// **不动游标** —— 后面的兄弟仍按它没挪时的位置接，这正是与 `absolute` 的分界。
+    ///
+    /// 偏移的取用照 CSS 2.1 §9.4：`left` 写了就取它，没写而 `right` 写了取其负，两个都没写
+    /// 就不挪；两个都写了时按这一块的 `direction` 判谁作废（LTR 丢 `right`、RTL 丢 `left`）。
+    /// 竖轴同理（`top` 优先）。百分比折自**包含块**而不是自己：横轴是 `basis`（与
+    /// `padding` 那一族同一把尺），竖轴是 `cb_h` —— 父块没写过 `height` 时那一格是 `None`，
+    /// 而 CSS 就说这个百分比按 `auto` 处理，也就是不挪。
+    ///
+    /// `margin` 不参与（与 [`Self::place_absolutes`] 相反）：位移的基准是「它不位移时的位置」，
+    /// 而外边距已经算进那个位置里了。
+    ///
+    /// 挪完之后这一坨可能与前后的行带压在一起，`Layout::assemble` 折的 `stacked` 那一格因此
+    /// 自己落到线性扫描那一条 —— 命中、可见行区间、分片读的都是挪完的坐标，不需要额外登记。
+    fn shift_relative(
+        &mut self,
+        node: NodeId,
+        blocks_start: usize,
+        lines_start: usize,
+        basis: f32,
+        cb_h: Option<f32>,
+    ) {
+        let style = self.style_of(node);
+        if style.position != Positioning::Relative {
+            return;
+        }
+        let left = style.left.map(|length| length.resolve(basis));
+        let right = style.right.map(|length| length.resolve(basis));
+        let height_basis = cb_h.unwrap_or(0.0);
+        let top = style.top.map(|length| length.resolve(height_basis));
+        let bottom = style.bottom.map(|length| length.resolve(height_basis));
+        let dx = match (left, right) {
+            (Some(l), Some(r)) => {
+                if style.direction.is_rtl() {
+                    -r
+                } else {
+                    l
+                }
+            }
+            (Some(l), None) => l,
+            (None, Some(r)) => -r,
+            (None, None) => 0.0,
+        };
+        let dy = match (top, bottom) {
+            (Some(t), _) => t,
+            (None, Some(b)) => -b,
+            (None, None) => 0.0,
+        };
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        for line in &mut self.lines[lines_start..] {
+            line.x += dx;
+            line.y += dy;
+        }
+        for block in &mut self.blocks[blocks_start..] {
+            block.x += dx;
+            block.y += dy;
+        }
     }
 
     /// 这一块的缓存键；没开缓存时给 `None`（直接走实排）。

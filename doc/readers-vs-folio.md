@@ -31,7 +31,7 @@ Folio 这一列复扫了一遍**，动了的格子：版式可调（补定版式
 |---|---|
 | 总体 | **阅读内核已站进第一梯队，差距集中在外向生态。** |
 | 领先 / 独有 | 格式矩阵最宽（21 provider 全纯 Rust）；自研排版引擎、零 WebView；双页自动退档、仿真卷页、Wi-Fi 传书（局域网 + PIN）、字符偏移 Locator（换字号换窗口不漂移）、**听读一体**（五家里只有 Folio 与 Readest 有朗读，且只有 Folio 把听书计入统计） |
-| 差距（按补齐划算程度） | ① **批注闭环** —— 列表屏（书内「批注」格 + 跨书「笔记」屏，后者一屏一本一张卡、可搜）、导出（txt/MD/HTML）、书签、删除撤销**已补齐**；剩批注导入互通；② **同步** —— WebDAV 手动版已接（进度 / 批注 / 书签 + 每本书的阅读设置）；书文件与自动同步未做；③ **OPDS 书源** —— 1.x Atom + 2.0 JSON 的浏览与下载已接，搜索 / OPDS-PSE 未做；④ **TTS** 补平台与句级；⑤ **AI 与词典** —— 选区翻译弹窗（Google 免 key / OpenAI 兼容 / DeepL 三档）**第 2 期已补**，本地词典与 AI 是战略级选择，暂缓不动摇内核；⑥ **跨书全文搜索** —— 书内那一趟已落地（现读现扫、零索引），全库那一趟还没接 |
+| 差距（按补齐划算程度） | ① **批注闭环** —— 列表屏（书内「批注」格 + 跨书「笔记」屏，后者一屏一本一张卡、可搜）、导出（txt/MD/HTML）、书签、删除撤销**已补齐**；剩批注导入互通；② **同步** —— WebDAV 手动版已接（进度 / 批注 / 书签 + 每本书的阅读设置），**局域网那一条也接上了**：同账号两台设备一趟互合四样，并把本机缺的书拉过来；两条都还是手动，自动 / 后台同步与扫码配对未做；③ **OPDS 书源** —— 1.x Atom + 2.0 JSON 的浏览与下载已接，搜索 / OPDS-PSE 未做；④ **TTS** 补平台与句级；⑤ **AI 与词典** —— 选区翻译弹窗（Google 免 key / OpenAI 兼容 / DeepL 三档）**第 2 期已补**，本地词典与 AI 是战略级选择，暂缓不动摇内核；⑥ **跨书全文搜索** —— 书内那一趟已落地（现读现扫、零索引），全库那一趟还没接 |
 | 不追 | Okular 的表单 / 签名 / 打印 / 演示模式是文档查看器的物种能力；KOReader 的 Kindle/Kobo/ReMarkable 那一串墨水屏宿主是它物种的一部分 —— 都与 Folio 的定位无关，不进 roadmap |
 
 ## 功能矩阵
@@ -40,7 +40,7 @@ Folio 这一列复扫了一遍**，动了的格子：版式可调（补定版式
 
 | 功能 | **Folio** | Okular | Foliate | Readest | Anx Reader | KOReader |
 |---|---|---|---|---|---|---|
-| 格式数量 | **21 provider**（测试钉住 30 个扩展名） | 14 后端（PDF 系为主） | 6 种 | 14 种 | 白名单 6 种 | 最宽一族：crengine 30+ 扩展名 + PDF/DjVu/图片 |
+| 格式数量 | **21 provider**（测试钉住 33 个扩展名） | 14 后端（PDF 系为主） | 6 种 | 14 种 | 白名单 6 种 | 最宽一族：crengine 30+ 扩展名 + PDF/DjVu/图片 |
 | DOCX / ODT / RTF / CHM | ✅ | ❌ | ❌ | ❌ | ❌ | ✅（crengine） |
 | HTMLZ / MHTML | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ HTMLZ 有，MHTML 无 |
 | DjVu / AZW4 | ✅ | ❌ 或靠转换 | ❌ 或靠转换 | ❌ 或靠转换 | ❌ 或靠转换 | ⚠️ DjVu 有，AZW4 无 |
@@ -135,16 +135,26 @@ Folio 这一列复扫了一遍**，动了的格子：版式可调（补定版式
 
 | 功能 | **Folio** | Okular | Foliate | Readest | Anx Reader | KOReader |
 |---|---|---|---|---|---|---|
-| 进度 / 批注 / 书库同步 | ⚠️ 进度 / 批注 / 书签 + **每本书的阅读设置**（手动 WebDAV；书文件与自动同步未接） | ❌ | ❌（官方口径：把 JSON 复制走） | ✅ 官方云 | ✅ WebDAV 整库（书 + 进度 + 批注 + 云端书按需下载） | ⚠️ 进度走 KOSync（可自建服务器）；批注仅文件级导出 / 导入合并 |
-| 同步协议 | WebDAV（手动；每设备一份 JSON 快照，按记录更新时间合并） | — | — | KOSync / WebDAV / S3 / OneDrive / iCloud（5 类） | WebDAV | KOSync |
+| 进度 / 批注 / 书库同步 | ⚠️ 进度 / 批注 / 书签 + **每本书的阅读设置**，两条路都**手动**：WebDAV（不传书文件）与**局域网**（同账号两台设备互合四样，并把本机缺的书拉过来） | ❌ | ❌（官方口径：把 JSON 复制走） | ✅ 官方云 | ✅ WebDAV 整库（书 + 进度 + 批注 + 云端书按需下载） | ⚠️ 进度走 KOSync（可自建服务器）；批注仅文件级导出 / 导入合并 |
+| 同步协议 | WebDAV（每设备一份 JSON 快照，按记录更新时间合并）· 局域网（同一套合并规则，两台各写各的、一趟互推；书按 `content_hash` 对账下拉） | — | — | KOSync / WebDAV / S3 / OneDrive / iCloud（5 类） | WebDAV | KOSync |
 
 > Folio 的同步已经接线，但**只做手动**：远端每台设备写自己的一份 JSON，合并按每条记录的
 > 更新时间取新，删除用墓碑传播。搬的四样是进度、批注、书签，以及 2026-10-27 加上的
 > **每本书的阅读设置** —— 那一格走的是差量：库里存的本来就是「这一本与全局默认不同的
 > 那几格」（逐格比对接 serde 走，不手写 `Reader` 字段清单；`mode` / `light` / `dark`
 > 三格语义上不给单本书覆盖，用排除表挡住），所以同步出去的是整本差量 + 一个
-> `updated_at`，没单独设过的书不会被一份快照绑死在全局默认之外。**书文件与自动 / 后台
-> 同步仍未做** —— 它与 Anx 的整库 WebDAV 不是一个量级。
+> `updated_at`，没单独设过的书不会被一份快照绑死在全局默认之外。
+>
+> 2026-11-03 接上**局域网那一条**（`crates/folio-core/src/net/lansync.rs` 的客户端编排 +
+> `net/transfer/lan.rs` 挂在传书服务器上的五条路由 + `account.rs` 那把 128-bit 账号密钥）：
+> 同账号的两台设备各写各的、一趟互推，谁也不覆盖谁；书的下拉按 `content_hash` 对账，
+> 走的还是那条导入管线。**局域网是唯一能当场对表的场合** —— `/hello` 带回对面那一刻的
+> UTC 秒，读回来的那份快照先整体搬到本机钟面上再合并，于是「谁改得新」不是「谁的钟快」
+> （WebDAV 那条路没有这个条件，只能照各自的钟比）。
+>
+> 仍然没做的：**自动 / 后台同步**；**配对**（两台要填同一串 32 个十六进制字符的密钥，
+> 扫码与自动发现没接）；WebDAV 那一侧的**书文件**。局域网那条与 Anx 的整库 WebDAV
+> 不是一个量级 —— 它只在同一网段里两台都在场时才走。
 
 ### 平台
 
@@ -168,7 +178,7 @@ Folio 这一列复扫了一遍**，动了的格子：版式可调（补定版式
 |---|---|---|---|---|---|
 | 1 | ~~**批注闭环**：列表屏、导出、书签、删除撤销~~ **已补（2026-10-26）**：书内「批注」格 + 跨书「笔记」屏、txt/MD/HTML 三档导出、顶栏书签开关、6 秒撤销胶囊；**2026-10-27 那一屏又补了搜索**（一屏一本一张卡，命中面是书名 / 引文 / 笔记 / 出处章名） | 后端原样（5 色 3 画法 + SQLite + 版本化锚点），UI 四件套已接 | ✅ 已完成 | 列表照 Okular、导出照 Foliate、撤销照 Okular 命令层 | Okular `part/side_reviews.cpp`、`core/documentcommands_p.h`；Foliate `annotations.js` |
 | 2 | **批注导入互通**（Moon+ Reader / ReadEra / JSON） | 无 | ❌ 未做 | Readest 已趟出格式兼容的面；KOReader 的 `.annotations.lua` 是「文件级搬家 + 合并」的另一条路 | Readest 的 Moon+ / ReadEra 导入；KOReader `.annotations.lua`（路径待盘点） |
-| 3 | ~~**同步**：接线 WebDAV，做进度 + 批注整库同步~~ **手动版已补（2026-10-26）**：进度 / 批注 / 书签，每设备一份快照，按记录更新时间合并；**2026-10-27 再带上每本书的阅读设置**（整本差量 + 一个 `updated_at`）；书文件与自动同步未接 | `crates/folio-core/src/sync.rs`（快照与合并）+ `net/remote/dav.rs`（传输）；设置页可测试连接 / 立即同步 | ⚠️ 部分：手动已接四样，书文件 / 自动未做 | 形态照 Anx 的整库同步 | 自家 `folio-core/src/sync.rs`、`net/remote/dav.rs`、`infra/book_settings.rs`；第二步 KOSync（KOReader 生态事实标准） |
+| 3 | ~~**同步**：接线 WebDAV，做进度 + 批注整库同步~~ **手动版已补（2026-10-26）**：进度 / 批注 / 书签，每设备一份快照，按记录更新时间合并；**2026-10-27 再带上每本书的阅读设置**（整本差量 + 一个 `updated_at`）；**2026-11-03 接上局域网那一条**（同账号两台设备互合四样 + 按 `content_hash` 把本机缺的书拉过来，`/hello` 当场对表）；自动 / 后台同步与 WebDAV 那侧的书文件仍未接 | `crates/folio-core/src/sync.rs`（快照与合并）+ `net/remote/dav.rs`（WebDAV 传输）+ `net/lansync.rs`（协议与客户端编排）+ `net/transfer/lan.rs`（挂在传书服务器上的五条路由）+ `account.rs`（128-bit 账号密钥）；设置页「同步」那一屏两组各一颗钮 | ⚠️ 部分：两条都**手动**；自动 / 后台、配对（密钥要手抄）、WebDAV 侧书文件未做 | 形态照 Anx 的整库同步 | 自家 `folio-core/src/sync.rs`、`net/remote/dav.rs`、`infra/book_settings.rs`；第二步 KOSync（KOReader 生态事实标准） |
 | 4 | ~~**OPDS 书源**~~ **已补（2026-10-26）**：1.x Atom + 2.0 JSON，书源管理 / 封面 / 下载入书库 / 翻页，Basic 认证；搜索与 OPDS-PSE 未做 | 架面「⋮」→ OPDS 书源；core `net/opds.rs` | ⚠️ 部分：浏览与下载已接，搜索 / PSE 未做 | Foliate（1.x + 2.0 一并支持）；KOReader 连 PSE 都有 | Foliate `src/opds/`；KOReader `plugins/opds.koplugin/`；Readest 的 OPDS-PSE |
 | 5 | **TTS**：段级 → 句级高亮，补 macOS / Windows 后端 | 段级 utterance，仅 Linux / Android | ⚠️ 部分：段级已做，句级 / macOS / Windows 未做 | Foliate 的句级高亮 | folio-core 的行盒已在手；之后补 EPUB 3 Media Overlays |
 | 6 | ~~**选区翻译**：Google 免 key / OpenAI 兼容 / DeepL 三档 + v24 缓存 + 弹层内换语 + 设置页配引擎~~ **已补（2026-10-26）**；剩 **本地词典**、**AI 陪读** | 翻译三引擎已接；词典 / AI 仍无 | ⚠️ 部分：翻译完成，词典 / AI 未做 | 翻译照 Foliate / Readest，端点照 KOReader；词典照 KOReader 的 Stardict + sdcv；AI 陪读照 Readest 的防剧透 RAG | `net/translate/`、`store/translations.rs`；KOReader `frontend/ui/translator.lua`；Readest `services/translators/`（词典 / AI 上游路径待盘点） |

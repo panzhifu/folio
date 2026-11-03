@@ -6,6 +6,7 @@
 //! 两条例外写在 `plans/目录架构.md` §六：`measure` 因为排版要量字而碰 `TextSystem`；
 //! `session` 会持 `Entity<NoteEditor>` 这类组件句柄（只持有、不 `render`）。
 
+pub(in crate::ui::features::reader) mod ai;
 pub(in crate::ui::features::reader) mod annotations;
 pub(in crate::ui::features::reader) mod book;
 pub(in crate::ui::features::reader) mod book_fonts;
@@ -24,6 +25,7 @@ pub(in crate::ui::features::reader) mod perf;
 pub(in crate::ui::features::reader) mod position;
 pub(in crate::ui::features::reader) mod prefetch;
 pub(in crate::ui::features::reader) mod reading_time;
+pub(in crate::ui::features::reader) mod rules_draft;
 pub(in crate::ui::features::reader) mod session;
 pub(in crate::ui::features::reader) mod speech;
 pub(in crate::ui::features::reader) mod swipe;

@@ -256,12 +256,17 @@ pub fn open(path: &Path) -> Result<Box<dyn Document>> {
     Ok(Box::new(BookDocument::open(path)?))
 }
 
-/// 同 [`open`]，但把这一本内部的解析并行度交给调用方分（[`ParseBudget`]）。
+/// 同 [`open`]，但把这一本内部的解析并行度交给调用方分（[`ParseBudget`]），并带上
+/// 读者手上那份口令（没有就 `None`，见 [`BookDocument::open_with`]）。
 ///
 /// 只有导入一批书时该用它：那时「同时有几本在飞」是外层知道的数，每本内部几路必须由它
 /// 一并算出，两层相乘才不超过这台机器。单本打开（读者点开了一个文件）用 [`open`] 就对。
-pub fn open_with(path: &Path, budget: ParseBudget) -> Result<Box<dyn Document>> {
-    Ok(Box::new(BookDocument::open_with(path, budget)?))
+pub fn open_with(
+    path: &Path,
+    budget: ParseBudget,
+    passphrase: Option<crate::content::format::Passphrase>,
+) -> Result<Box<dyn Document>> {
+    Ok(Box::new(BookDocument::open_with(path, budget, passphrase)?))
 }
 
 /// 从已经解析好的内容建一份文档，**没有容器**。
@@ -278,8 +283,18 @@ pub fn from_content(meta: DocMeta, content: Content) -> Box<dyn Document> {
 /// 而正经的正文、图片字节、内嵌字体都要回到容器里读 —— 前者按
 /// [`format::ChapterLocator`]，后两者按 `href`（见 `format::ImageRes` /
 /// `format::FontBytes`）。
-pub fn with_container(meta: DocMeta, content: Content, path: &Path) -> Box<dyn Document> {
-    Box::new(BookDocument::with_container(meta, content, path))
+///
+/// `passphrase` = 库里替读者记住的那份口令（`store::passphrase_for_book`）。带口令的
+/// PDF 少了这一格，取正文与取页都会回空 —— 见 [`BookDocument::with_container`]。
+pub fn with_container(
+    meta: DocMeta,
+    content: Content,
+    path: &Path,
+    passphrase: Option<crate::content::format::Passphrase>,
+) -> Box<dyn Document> {
+    Box::new(BookDocument::with_container(
+        meta, content, path, passphrase,
+    ))
 }
 
 /// 只取书目元信息，不建正文模型 —— 书库列书目时用这一条。

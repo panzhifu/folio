@@ -18,6 +18,17 @@
 //! 3. **没有的指标不编**。库里只有会话时长，没有逐页翻页数、没有已读字数，所以这一屏
 //!    不摆「翻页次数 / 字数」；对应位置换成真实的「阅读次数 / 阅读天数」。
 //!
+//! 第四条是这一屏的**摆法**：块分两种占宽 —— [`Block::Full`] 跨整幅（年度热力图、
+//! 排行这类本来就要横向空间的），[`Block::Half`] 只占一栏（总览、时间分析、日历、
+//! 行为、毅力、时段这类成对看的）。分几栏按**内容区实际宽度**现算（[`columns_for`]），
+//! 不按设备名，也不按 `SizeClass` 那三档 —— 触屏端被 `SizeClass::of` 夹到至多 Medium，
+//! 11 寸平板横屏（1024 逻辑像素）拿到的仍是 Medium，按档分栏的话平板横屏永远只有中间
+//! 那一条。
+//!
+//! 宽屏不是把手机那一列拉宽：那样 7 列的日历、两格的时间分析只是被放大，一屏还是只装
+//! 得下三块。两栏把短块并排之后同样的高度能放两倍的内容，所以宽屏的块序也是按**成对**
+//! 排的（总览配时间分析、日历配行为、毅力配心跳），跨幅的只有排行那张表。
+//!
 //! 图的下面永远跟一句 muted 的结论；页面标题不写「统计」二字 —— 导航已经点亮了这一格。
 
 use gpui_kit::assets::IconName;
@@ -34,9 +45,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Background, Context, InteractiveElement as _, IntoElement, ParentElement,
-    Render, SharedString, Styled, TestSupportExt as _, Window, div, linear_color_stop,
-    linear_gradient, px,
+    AnyElement, App, Background, Context, ElementId, InteractiveElement as _, IntoElement,
+    ParentElement, Render, SharedString, Styled, TestSupportExt as _, Window, div,
+    linear_color_stop, linear_gradient, px,
 };
 
 use super::model::{Bucket, DayStat, Range, Snapshot};
@@ -45,14 +56,129 @@ use crate::ui::services::app_store;
 use crate::ui::services::l10n::{duration, tf, tr};
 use crate::ui::shell::navigation::{self, SizeClass};
 
-/// 内容列的最大宽度。统计是报表面，拉太宽只会让数字之间隔出一片海。
+/// 单栏时内容列的最大宽度。统计是报表面，一张表里的数字被拉到 1300 像素两头就是两片海。
 const COLUMN_MAX: f32 = 760.0;
+/// 两栏时整幅的最大宽度。超过这个数的窗口只多留白，不再把每栏拉得更宽 ——
+/// 栏宽的上限由 [`MIN_COLUMN`] 保证，而不是靠栏数无限增。
+const PAGE_MAX: f32 = 1180.0;
+/// 一栏至少要多宽才值得单独成一栏。低于这个数的两块并排，图表就会被压到读不出刻度。
+///
+/// 300 这一档是给平板竖屏留的门：800 逻辑像素扣掉悬浮侧栏（96 + 两侧 12）与两条
+/// 留白之后剩 648，刚好放得下两个 318 的栏。再往上（PC 那两栏）每栏 568 左右，
+/// 卡片里的读数密度由 [`Frame::column`] 现算，不靠这一个数一次定死。
+const MIN_COLUMN: f32 = 300.0;
 /// 左右留白，与书架共用同一个数：切目的地时那条对齐脊线不该跳。
 const GUTTER: f32 = 16.0;
-/// 卡片之间的呼吸。
+/// 卡片之间的呼吸。横竖用同一个数：一屏只有一种缝，读者才不用猜哪条缝意味着哪一层。
 const CARD_GAP: f32 = 12.0;
 /// 热力图五档的分界（秒）：<30m、30–60m、1–3h、>3h。与图例一字不差。
 const HEAT_STEPS: [i64; 3] = [1_800, 3_600, 10_800];
+
+/// 一屏里一块东西**占多宽**的意图。由产出那一侧说话，不在渲染端再猜一次。
+enum Block {
+    /// 跨整幅：要横向空间的图（年度热力图 31 列、排行那张表），以及宽屏顶上那一条。
+    Full(AnyElement),
+    /// 只占一栏：够短、适合与另一块并排看的卡（总览、时间分析、日历、行为、毅力、
+    /// 时段、单次分布…）。窄窗口里没有第二栏，它与 `Full` 同一条堆叠序，读起来不留洞。
+    Half(AnyElement),
+}
+
+/// 这一帧的摆法：分几栏、内容列实际有多宽。
+///
+/// 卡片里「一排摆几格读数」看的是**一栏**的宽而不是窗口的档：同一张总览卡在 PC 两栏里
+/// 有 560，在平板竖屏那两栏里只有 318 —— 后者四格横排会把「12 小时 25 分钟」压到读不出
+/// 位数。块序（哪些成对）也由这里决定，所以把它连同块一起往下传，而不是每层各算一次。
+#[derive(Clone, Copy)]
+struct Frame {
+    columns: usize,
+    /// 内容列的内宽（已经扣掉两侧 `GUTTER`）。
+    inner: f32,
+}
+
+impl Frame {
+    /// 一栏的宽。一栏时就是整条内容列；两栏时扣掉中间那条缝再平分。
+    fn column(self) -> f32 {
+        if self.columns <= 1 {
+            self.inner
+        } else {
+            (self.inner - CARD_GAP * (self.columns - 1) as f32) / self.columns as f32
+        }
+    }
+}
+
+/// 这屏分几栏：按**内容区实际宽度**算，不按设备名也不按 `SizeClass` 的档。
+///
+/// 上限 2 栏是刻意的：这屏多数块是图，三栏会把刻度压到读不出来，而栏数变多并不会让
+/// 「我这个月读了多少」这个问题回答得更快。
+///
+/// 判据写成「装得下几栏」而不是「窗口超过某个魔法宽度」：`MIN_COLUMN + CARD_GAP` 是每栏
+/// 连缝的最小代价，所以窗口变窄时先掉回一栏，不会挤出一栏读不出刻度的图。
+fn columns_for(available: f32, size: SizeClass) -> usize {
+    if size.is_compact() {
+        return 1;
+    }
+    // 第 n 栏要占 n 个栏宽加 n−1 条缝，所以分子补回一条 CARD_GAP（与架面同一算法）。
+    let fitted = ((available + CARD_GAP) / (MIN_COLUMN + CARD_GAP)).floor();
+    (fitted as usize).clamp(1, 2)
+}
+
+/// 把一串 [`Block`] 落成实际的孩子：`Full` 一块一个孩子；连续的 `Half` 攒成一段，
+/// 均分成 `columns` 栏。只有一栏时不裹盒子 —— 外面那一列已经有同样的缝，再套一层是双重留白。
+///
+/// 均分按**序号轮转**（第 i 块进第 `i % columns` 栏），所以阅读序仍是先左后右、自上而下。
+/// 各栏自己往下流，因此某一栏长一点只让它自己长一点，不会在另一栏中间留出一个洞 ——
+/// 那是「按等高格子一行行摆」才会有的毛病，而这屏的卡片本来高低不一。
+fn layout(blocks: Vec<Block>, columns: usize) -> Vec<AnyElement> {
+    fn flush(
+        run: &mut Vec<AnyElement>,
+        out: &mut Vec<AnyElement>,
+        columns: usize,
+        row: &mut usize,
+    ) {
+        if run.is_empty() {
+            return;
+        }
+        if columns == 1 {
+            out.append(run);
+            return;
+        }
+        let mut columns_of: Vec<Vec<AnyElement>> = (0..columns).map(|_| Vec::new()).collect();
+        for (ix, element) in run.drain(..).enumerate() {
+            columns_of[ix % columns].push(element);
+        }
+        out.push(
+            h_flex()
+                // 挂个名给宿主测试：「宽屏真排成了两栏」只有从这一层才数得出来
+                // （卡片的 id 在成对之后每条栏里各有一份）。生产构建里这一层是透明的。
+                .id(ElementId::named_usize("stats-halves", *row))
+                .test_support()
+                .w_full()
+                .items_start()
+                .gap(px(CARD_GAP))
+                .children(
+                    columns_of
+                        .into_iter()
+                        .map(|col| v_flex().flex_1().min_w_0().gap(px(CARD_GAP)).children(col)),
+                )
+                .into_any_element(),
+        );
+    }
+
+    let mut out: Vec<AnyElement> = Vec::new();
+    let mut run: Vec<AnyElement> = Vec::new();
+    let mut row = 0usize;
+    for block in blocks {
+        match block {
+            Block::Full(element) => {
+                flush(&mut run, &mut out, columns, &mut row);
+                out.push(element);
+            }
+            Block::Half(element) => run.push(element),
+        }
+    }
+    flush(&mut run, &mut out, columns, &mut row);
+    out
+}
 
 #[derive(Default)]
 pub struct StatsView {
@@ -134,16 +260,56 @@ impl Render for StatsView {
         } else {
             0.0
         };
+        // 内容区实际宽度：扣掉导航栏那条与两侧留白。算式与架面同一条，而预留宽只有
+        // `shell::navigation` 那一份真相 —— 两处各写一个数的话，改一侧忘另一侧表现为
+        // 「统计的栏数莫名其妙」，而且那条对齐脊线会与架面错开。
+        let available = (f32::from(window.viewport_size().width)
+            - navigation::reserved_width(size)
+            - GUTTER * 2.0)
+            .max(0.0);
+        let columns = columns_for(available, size);
+        // 一栏时整幅限到 `COLUMN_MAX`（报表拉宽是海），两栏时限到 `PAGE_MAX`：
+        // 宽窗口再宽也只多给留白，不把每一栏里的数字越拉越远。
+        let measure = if columns == 1 { COLUMN_MAX } else { PAGE_MAX };
+        let inner = available.min(measure - GUTTER * 2.0).max(0.0);
+        let frame = Frame { columns, inner };
 
-        let mut sections = vec![self.range_tabs(cx)];
-        if let Some(snapshot) = &self.snapshot {
-            if !snapshot.range.is_total() {
-                sections.push(self.period_bar(snapshot, cx));
-            }
-            sections.extend(self.report(snapshot, size, cx));
+        // 顶上那一条：宽桌面上区间开关与周期导航并成一行（各占自己需要的宽度，中间
+        // 那段空着）。平板竖屏那两栏只有 648，480 + 320 放不下，照旧上下两行。
+        let period = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| !snapshot.range.is_total())
+            .map(|snapshot| self.period_bar(snapshot, cx));
+        let tabs = self.range_tabs(cx);
+        let top: AnyElement = if inner >= 900.0 {
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_3()
+                .child(div().flex_none().w(px(480.0)).child(tabs))
+                .child(div().flex_1())
+                .when_some(period, |el, period| {
+                    el.child(div().flex_none().w(px(320.0)).child(period))
+                })
+                .into_any_element()
         } else {
-            sections.push(self.unavailable(cx));
-        }
+            v_flex()
+                .w_full()
+                .gap(px(CARD_GAP))
+                .child(tabs)
+                // 周期条在窄档不拉满：它是「‹ 2026-10 ›」一行，页面再宽也只该有那一段，
+                // 拉满之后两个箭头离标签半屏远。手机上 360 已经多过可用宽，仍是满幅。
+                .when_some(period, |el, period| {
+                    el.child(div().w_full().max_w(px(360.0)).child(period))
+                })
+                .into_any_element()
+        };
+
+        let blocks = match &self.snapshot {
+            Some(snapshot) => self.report(snapshot, frame, cx),
+            None => vec![Block::Full(self.unavailable(cx))],
+        };
 
         v_flex()
             .id("folio-stats")
@@ -163,12 +329,13 @@ impl Render for StatsView {
                         v_flex().w_full().items_center().child(
                             v_flex()
                                 .w_full()
-                                .max_w(px(COLUMN_MAX))
+                                .max_w(px(measure))
                                 .px(px(GUTTER))
                                 .pt(px(8.0))
                                 .pb(px(GUTTER + tail))
                                 .gap(px(CARD_GAP))
-                                .children(sections),
+                                .child(top)
+                                .children(layout(blocks, columns)),
                         ),
                     ),
             )
@@ -241,64 +408,83 @@ impl StatsView {
             .into_any_element()
     }
 
-    fn report(
-        &self,
-        snapshot: &Snapshot,
-        size: SizeClass,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    fn report(&self, snapshot: &Snapshot, frame: Frame, cx: &mut Context<Self>) -> Vec<Block> {
         match snapshot.range {
-            Range::Total => self.total_report(snapshot, cx),
+            Range::Total => self.total_report(snapshot, frame, cx),
             Range::Day => self.day_report(snapshot, cx),
-            Range::Week | Range::Month | Range::Year => self.period_report(snapshot, size, cx),
+            Range::Week | Range::Month | Range::Year => self.period_report(snapshot, frame, cx),
         }
     }
 
-    /// 「总」：相识天数、四个大数、最近 10/30 天、单次时长分布、时长排行。
-    fn total_report(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// 「总」：相识天数、四个大数、最近 10 天的面积图、最近 30 天的格子、单次时长分布、
+    /// 时长排行。
+    ///
+    /// 三块跨整幅：四个大数是一排读数，面积图要横向空间，排行是一张表。两块小的并排 ——
+    /// 30 天格子与单次分布都是「看一眼就有结论」的短块，各占一半反而更接近它们本来该有
+    /// 的宽度。排行放在最后跨幅，是因为 10 行书名压进半栏会挤成两行标题，而表本来就要
+    /// 一条能对齐的右边界。
+    fn total_report(
+        &self,
+        snapshot: &Snapshot,
+        frame: Frame,
+        cx: &mut Context<Self>,
+    ) -> Vec<Block> {
         vec![
-            self.since_first(snapshot, cx),
-            self.total_overview(snapshot, cx),
-            self.recent_area(snapshot, cx),
-            self.recent_grid(snapshot, cx),
-            self.session_histogram(snapshot, cx),
-            self.ranking(snapshot, 10, cx),
+            Block::Full(self.since_first(snapshot, cx)),
+            Block::Full(self.total_overview(snapshot, frame, cx)),
+            Block::Full(self.recent_area(snapshot, cx)),
+            Block::Half(self.recent_grid(snapshot, frame, cx)),
+            Block::Half(self.session_histogram(snapshot, cx)),
+            Block::Full(self.ranking(snapshot, 10, cx)),
         ]
     }
 
     /// 「日」：当日总览、效率指标、当日之最、当日书目。
-    fn day_report(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    ///
+    /// 宽屏上效率与「当日之最」并排：两张都是几行读数，横着放正好；宽屏的排行也跨幅。
+    fn day_report(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Vec<Block> {
         vec![
-            self.day_overview(snapshot, cx),
-            self.efficiency(snapshot, cx),
-            self.day_best(snapshot, cx),
-            self.ranking(snapshot, 10, cx),
+            Block::Full(self.day_overview(snapshot, cx)),
+            Block::Half(self.efficiency(snapshot, cx)),
+            Block::Half(self.day_best(snapshot, cx)),
+            Block::Full(self.ranking(snapshot, 10, cx)),
         ]
     }
 
-    /// 「周 / 月 / 年」：总览、时间分析、热力图、行为、毅力、排行；「年」多两块。
+    /// 「周 / 月 / 年」：总览、时间分析、日历 / 年度热力图、行为、毅力、心跳、排行。
+    ///
+    /// 周 / 月的六块短卡按「总览配时间分析、日历配行为、毅力配心跳」的顺序排 ——
+    /// `layout` 在两条竖栏里轮流放，这个顺序让两栏的高度差不多（总览 + 日历 + 毅力
+    /// 对时间分析 + 行为 + 心跳）。排行那张表跨整幅。
     fn period_report(
         &self,
         snapshot: &Snapshot,
-        size: SizeClass,
+        frame: Frame,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let mut out = Vec::new();
-        out.push(self.period_overview(snapshot, size, cx));
-        out.push(self.time_analysis(snapshot, cx));
-        out.push(match snapshot.range {
-            Range::Year => self.year_heatmap(snapshot, cx),
-            Range::Week => self.week_calendar(snapshot, cx),
-            _ => self.month_calendar(snapshot, cx),
-        });
+    ) -> Vec<Block> {
+        let mut out = vec![
+            Block::Half(self.period_overview(snapshot, frame, cx)),
+            Block::Half(self.time_analysis(snapshot, cx)),
+        ];
         if snapshot.range == Range::Year {
-            out.push(self.monthly_read(snapshot, cx));
-            out.push(self.hour_chart(snapshot, cx));
-            out.push(self.year_records(snapshot, cx));
+            out.push(Block::Full(self.year_heatmap(snapshot, cx)));
+            out.push(Block::Half(self.monthly_read(snapshot, cx)));
+            out.push(Block::Half(self.hour_chart(snapshot, cx)));
+            // 「年度之最」与排行都跨整幅：它们是行/表，压进一栏要竖着排很久。
+            out.push(Block::Full(self.year_records(snapshot, cx)));
+            out.push(Block::Half(self.behavior(snapshot, cx)));
+            out.push(Block::Half(self.persistence(snapshot, cx)));
+        } else {
+            out.push(Block::Half(match snapshot.range {
+                Range::Week => self.week_calendar(snapshot, cx),
+                _ => self.month_calendar(snapshot, cx),
+            }));
+            out.push(Block::Half(self.behavior(snapshot, cx)));
+            out.push(Block::Half(self.persistence(snapshot, cx)));
+            // 单次时长分布与「总」页同一块：会话表本来就在这一趟快照里，不是新埋点。
+            out.push(Block::Half(self.session_histogram(snapshot, cx)));
         }
-        out.push(self.behavior(snapshot, cx));
-        out.push(self.persistence(snapshot, cx));
-        out.push(self.ranking(snapshot, 10, cx));
+        out.push(Block::Full(self.ranking(snapshot, 10, cx)));
         out
     }
 
@@ -344,7 +530,12 @@ impl StatsView {
         card_plain().child(body).into_any_element()
     }
 
-    fn total_overview(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+    fn total_overview(
+        &self,
+        snapshot: &Snapshot,
+        frame: Frame,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let cells = [
             (
                 tr(cx, "stats.total_time"),
@@ -363,8 +554,11 @@ impl StatsView {
                 count_text(snapshot.lifetime_sessions, "stats.count_sessions", cx),
             ),
         ];
-        grid(2)
+        // 四个大数：只有整幅宽到 900 才摊成一排四个；平板竖屏那张整幅只有 664，
+        // 四格一行会把「12 小时 25 分钟」压到读不出位数，所以仍排两格一行。
+        grid(if frame.inner >= 900.0 { 4 } else { 2 })
             .w_full()
+            .gap_3()
             .children(cells.into_iter().map(|(label, value)| {
                 v_flex()
                     .gap_1()
@@ -425,12 +619,14 @@ impl StatsView {
             .into_any_element()
     }
 
-    fn recent_grid(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+    fn recent_grid(&self, snapshot: &Snapshot, frame: Frame, cx: &mut Context<Self>) -> AnyElement {
         let fills = heat_ramp(cx);
         let radius = cx.theme().radius_tokens().sm;
+        // 一栏够宽时 30 天摊成一整行：手机那一档 15 列两行，宽屏看着像一条时间带。
+        let cols = if frame.column() >= 480.0 { 30 } else { 15 };
         card(cx, tr(cx, "stats.recent_30"), tr(cx, "stats.daily_hours"))
             .child(
-                grid(15)
+                grid(cols)
                     .w_full()
                     .gap_1()
                     .children(snapshot.recent.iter().map(|day| {
@@ -634,7 +830,7 @@ impl StatsView {
     fn period_overview(
         &self,
         snapshot: &Snapshot,
-        size: SizeClass,
+        frame: Frame,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let cells = [
@@ -669,7 +865,10 @@ impl StatsView {
                 tr(cx, "stats.longest_streak"),
             ),
         ];
-        let columns = if size == SizeClass::Expanded { 3 } else { 2 };
+        // 六格读数排成几横排：一栏宽到 480 才给 3 列（PC 那两栏每栏约 568），
+        // 平板竖屏那两栏只有约 318 —— 3 列会把数字顶出格子，仍排 2 列。
+        // 判据是**栏宽**而不是 SizeClass：平板横屏拿不到 Expanded，按档分的话它永远只有两列。
+        let cells_per_row = if frame.column() >= 480.0 { 3 } else { 2 };
         card(
             cx,
             SharedString::from(tf(
@@ -680,7 +879,7 @@ impl StatsView {
             tr(cx, "stats.overview_hint"),
         )
         .child(
-            grid(columns)
+            grid(cells_per_row)
                 .w_full()
                 .gap_3()
                 .children(cells.into_iter().map(|(icon, value, label)| {
@@ -1472,7 +1671,173 @@ struct ChartPoint {
 
 #[cfg(test)]
 mod tests {
-    use super::{heat_level, hours_text};
+    use super::{Block, Frame, StatsView, columns_for, heat_level, hours_text, layout};
+    use crate::ui::services::app_store;
+    use crate::ui::services::config::ConfigHolder;
+    use crate::ui::shell::navigation::SizeClass;
+    use folio_core::{Config, Store};
+    use gpui_kit::component::Root;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AnyElement, AnyWindowHandle, AppContext as _, Entity, IntoElement as _, ParentElement as _,
+        TestAppContext, div, px, size,
+    };
+
+    /// 起一扇把统计屏摆在根上的窗。宽高由用例给：这一屏的分栏判据只看宽度。
+    fn boot_stats(
+        cx: &mut TestAppContext,
+        width: f32,
+        height: f32,
+    ) -> (Entity<StatsView>, AnyWindowHandle) {
+        cx.update(gpui_kit::init);
+        let mut view = None;
+        let handle: AnyWindowHandle = cx
+            .open_window(size(px(width), px(height)), |window, cx| {
+                app_store::install(Store::in_memory().expect("内存库"), cx);
+                ConfigHolder::install(Config::default(), cx);
+                let stats = cx.new(|_| StatsView::new());
+                view = Some(stats.clone());
+                Root::new(stats, window, cx)
+            })
+            .into();
+        let stats = view.expect("这一屏该建起来");
+        cx.update_window(handle, |_, _, cx| {
+            stats.update(cx, |stats, cx| stats.refresh(cx));
+        })
+        .expect("窗口应能渲染");
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("首帧应画出来");
+        (stats, handle)
+    }
+
+    /// 平板竖屏（800 逻辑像素）也要两栏：手机那一条单列搬到平板上只是被放大。
+    ///
+    /// 钉的是 `columns_for` 与 `layout` 之间的接线：800 扣掉悬浮侧栏与留白剩 648，
+    /// 刚好过 `2 × 300 + 12` 那条线；手机宽度只剩 268，仍是单列。
+    #[gpui_kit::test]
+    fn a_tablet_portrait_pairs_the_short_cards(cx: &mut TestAppContext) {
+        let (_view, handle) = boot_stats(cx, 800.0, 1_280.0);
+        cx.update_window(handle, |_, window, _| {
+            assert!(
+                window.try_find(("stats-halves", 0usize)).is_some(),
+                "800 宽的平板竖屏算得下两栏，短卡要并排"
+            );
+        })
+        .expect("窗口应能渲染");
+    }
+
+    /// 手机宽度仍是单列：那一档的版式是定稿，两栏会把图和日历压到读不出刻度。
+    #[gpui_kit::test]
+    fn a_phone_width_keeps_the_single_column(cx: &mut TestAppContext) {
+        let (_view, handle) = boot_stats(cx, 420.0, 900.0);
+        cx.update_window(handle, |_, window, _| {
+            assert!(
+                window.try_find(("stats-halves", 0usize)).is_none(),
+                "手机那一档不该出现两栏盒子"
+            );
+        })
+        .expect("窗口应能渲染");
+    }
+
+    /// 一块假卡，只为数得清孩子：内容不参与这两条判据。
+    fn block(marker: usize) -> AnyElement {
+        div().child(marker.to_string()).into_any_element()
+    }
+
+    /// 分几栏看的是**内容区宽度**，不是设备名 —— 平板横屏在触屏端被夹成 Medium，
+    /// 按档分栏它就永远只有中间那一条。
+    ///
+    /// 三条都要钉住：栏数算错不会报错，只会让某一档窗口宽度上的图表挤到读不出刻度，
+    /// 或者把两侧留白拉成一片海。
+    #[test]
+    fn the_column_count_follows_the_content_width() {
+        // 手机：无论窗口多宽都只有一栏（那一档的版式是定稿）。
+        assert_eq!(columns_for(1_000.0, SizeClass::Compact), 1);
+        // 装不下两栏：两栏的代价是 `2 × MIN_COLUMN + CARD_GAP` = 612，差一像素都不排。
+        assert_eq!(columns_for(500.0, SizeClass::Medium), 1);
+        assert_eq!(columns_for(611.0, SizeClass::Medium), 1);
+        assert_eq!(
+            columns_for(612.0, SizeClass::Medium),
+            2,
+            "刚好装得下两栏的那一条线"
+        );
+        // 平板竖屏（800 逻辑像素）扣掉悬浮侧栏与留白之后剩 648 —— 两栏各 318。
+        assert_eq!(columns_for(648.0, SizeClass::Medium), 2);
+        // 平板横屏（1024 逻辑像素）扣掉悬浮侧栏与留白之后落进这一档。
+        assert_eq!(columns_for(872.0, SizeClass::Medium), 2);
+        // 上限 2：2560 的窗口也不排第三栏，多的地方给留白。
+        assert_eq!(columns_for(2_500.0, SizeClass::Expanded), 2);
+    }
+
+    /// 一栏的宽：两栏把中间那条缝扣掉再平分；一栏就是整条内容列。
+    ///
+    /// 卡片里「一排摆几格读数」看的就是这个数，算错不会报错，只会把平板竖屏的
+    /// 「12 小时 25 分钟」压出格子。
+    #[test]
+    fn the_column_width_follows_the_frame() {
+        assert_eq!(
+            Frame {
+                columns: 1,
+                inner: 648.0
+            }
+            .column(),
+            648.0
+        );
+        assert_eq!(
+            Frame {
+                columns: 2,
+                inner: 648.0
+            }
+            .column(),
+            318.0
+        );
+        assert_eq!(
+            Frame {
+                columns: 2,
+                inner: 1_148.0
+            }
+            .column(),
+            568.0
+        );
+    }
+
+    /// `Full` 跨整幅、连续的 `Half` 并排成栏，而一栏的窗口里两者同一条堆叠序。
+    ///
+    /// 钉的是结构而不是像素：`layout` 把「一段 Half」攒成一个孩子（那一行），所以
+    /// `[Full, Half, Half, Half, Full]` 在两栏时是 3 个孩子、一栏时是 5 个。
+    /// 攒段这件事一旦被改坏（比如每个 Half 各起一行），症状是宽窗口里两张短卡之间
+    /// 突然多出整幅的空隙，而那在测试截图里很像「正常」。
+    #[test]
+    fn halves_pair_into_a_row_while_full_blocks_span() {
+        let blocks = || {
+            vec![
+                Block::Full(block(0)),
+                Block::Half(block(1)),
+                Block::Half(block(2)),
+                Block::Half(block(3)),
+                Block::Full(block(4)),
+            ]
+        };
+
+        let wide = layout(blocks(), 2);
+        assert_eq!(
+            wide.len(),
+            3,
+            "跨幅两块 + 一段并排（三块 Half 均成两栏），所以是 3 个孩子"
+        );
+
+        let narrow = layout(blocks(), 1);
+        assert_eq!(
+            narrow.len(),
+            5,
+            "一栏时不裹盒子：五块各自一个孩子，否则外层的缝会在段里再套一层缝"
+        );
+
+        // 一段里只有一块时也照常成行，不该因为凑不成对就被丢掉。
+        let single = layout(vec![Block::Half(block(0))], 2);
+        assert_eq!(single.len(), 1);
+        assert!(layout(Vec::new(), 2).is_empty(), "没有块就不该编出一个空行");
+    }
 
     /// 五档的分界就是图例上那几句话；改档位时图例必须跟着改，所以钉在这里。
     #[test]

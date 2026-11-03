@@ -41,7 +41,9 @@ impl DocumentProvider for OdtAdapter {
     }
 
     fn supports(&self, path: &Path) -> bool {
-        matches!(super::extension_of(path).as_deref(), Some("odt"))
+        // `.ott` 是同一个 ODF 包，`mimetype` 换成 `…opendocument.text-template`，
+        // `content.xml` / `styles.xml` 的形状不变。
+        matches!(super::extension_of(path).as_deref(), Some("odt" | "ott"))
     }
 
     fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
@@ -841,6 +843,24 @@ mod tests {
         assert_eq!(flow.images.len(), 1);
         assert_eq!(flow.images[0].href, "Pictures/pic.png");
         assert_eq!((flow.images[0].width, flow.images[0].height), (20, 10));
+    }
+
+    /// `.ott` 是模板版 ODT：扩展名要认领，正文也要真读得出来。
+    #[test]
+    fn a_template_package_reads_like_an_odt() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = odt(dir.path());
+        let path = dir.path().join("书.ott");
+        std::fs::copy(&source, &path).unwrap();
+        let provider = crate::content::format::provider_for(&path).expect(".ott 该有 provider");
+        assert_eq!(provider.format(), Format::Odt);
+        let (_, content) = provider
+            .index(&path)
+            .unwrap_or_else(|err| panic!(".ott 该读得开：{err}"));
+        let Content::Reflow(flow) = content else {
+            panic!(".ott 该读成可重排")
+        };
+        assert!(!flow.chapters.is_empty(), ".ott 的章要读得出来");
     }
 
     /// 一份部件完全由调用方摆的 odt（列表与注那两族要的是 `styles.xml` 与 `content.xml`

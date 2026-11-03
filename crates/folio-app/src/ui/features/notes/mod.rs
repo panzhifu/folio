@@ -14,9 +14,13 @@
 //!   不是被裁得只剩那一句。
 //! - **逐条那一层是一块底部弹层，不是新的一页**：与目录、更新日志同一个容器，下拉过头、
 //!   点遮罩、按返回三条路都收它。导出的「⋯」挂在弹层 header 上 —— 它的作用对象是「这一本」。
+//!   头部摆的是**这一本**的身份（封面、书名、几条几枚、累计时长），逐条那几行才是内容；
+//!   引文与自己的笔记必须一眼分得开（前者是正文色、后者是次要色），否则一列同色的字
+//!   读起来像两段引用。
 //! - **每行可跳**：点一条 = 开那本书落到那一处（锚点里带着章与偏移，目标章多半还没排版，
 //!   落点交给会话挂恢复请求）。跳之前先把弹层收掉：阅读层盖在整窗之上，两层遮罩叠着，
-//!   返回键与点击命中都得各判一次谁是顶。
+//!   返回键与点击命中都得各判一次谁是顶。行尾那颗删除是**跳转区的兄弟**而不是它的孩子
+//!   （gpui 把一次点击发给每个命中的 hitbox；套在里面的话删一条也顺带跳一次）。
 //! - **拔书签有撤销，删批注没有**：行尾那颗删除是即下的；拔掉的那一枚靠底部那颗 6 秒的
 //!   胶囊带回（与阅读页同一套语义，各屏各一颗：删除的现场在哪屏，胶囊就在哪屏）。
 //!   批注不给这一窗 —— 取消划线是真删，反悔的路是重新划一次。
@@ -228,6 +232,14 @@ impl NotesView {
             book_id,
             jump: (chapter, offset),
         });
+    }
+
+    /// 清单里那一本。弹层头部与逐条都按它取数：头部要封面与累计时长，逐条要行。
+    fn group(&self, book_id: i64) -> Option<&BookGroup> {
+        self.data
+            .as_ref()?
+            .iter()
+            .find(|group| group.book_id == book_id)
     }
 
     /// 列表上现在该摆的那几本：没在搜就全摆，搜了就只摆对得上的（顺序不变，仍然是
@@ -466,36 +478,96 @@ impl NotesView {
         let Some((book_id, title)) = self.sheet_book.clone() else {
             return sheet.into_any_element();
         };
+        // 头部那几格（封面、条数、累计时长）只在清单里查得到这一本时才有；退场那半程
+        // 里最后一本被删空、从 `data` 掉出去时退回只剩标题 —— 标题在开层那一刻抄过。
+        let group = self.group(book_id);
+        let (cover, counts_text, read_time): (
+            Option<Arc<Image>>,
+            Option<SharedString>,
+            Option<SharedString>,
+        ) = match group {
+            Some(group) => {
+                let (notes_count, bookmarks_count) = counts(group);
+                (
+                    group.cover.clone(),
+                    Some(
+                        tf(
+                            cx,
+                            "notes.group_counts",
+                            &[("notes", &notes_count), ("bookmarks", &bookmarks_count)],
+                        )
+                        .into(),
+                    ),
+                    (group.seconds > 0).then(|| duration(cx, group.seconds)),
+                )
+            }
+            None => (None, None, None),
+        };
         let header = h_flex()
             .w_full()
             .items_center()
-            .gap_2()
+            .gap_3()
             // `header` 那一槽只做「不跟着滚」，内缩由调用侧给 —— 这里给 `GUTTER`，
             // 于是弹层里的行与底下那列卡片是同一条左边界。
             .px(px(GUTTER))
             .pt_1()
-            .pb_2()
+            .pb_3()
+            // 头部与逐条之间一条发丝线：它们是两层东西（这一本的身份 / 这一本的话），
+            // 靠留白分不开时，一条线比再垫一层底更轻。
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(cover_slot(cover, cx))
             .child(
-                div()
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_base()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(title),
+                    .gap_1()
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .when_some(counts_text, |el, counts| {
+                        el.child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .child(Icon::new(IconName::Highlighter).xsmall()),
+                                )
+                                .child(div().min_w_0().truncate().child(counts))
+                                .when_some(read_time, |el, read_time| {
+                                    el.child(div().flex_none().child("·"))
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .child(Icon::new(IconName::Clock).xsmall()),
+                                        )
+                                        .child(div().flex_none().child(read_time))
+                                }),
+                        )
+                    }),
             )
-            .child(self.export_button(book_id, cx));
+            .child(self.export_button(book_id, cx))
+            .into_any_element();
         // 这一本的行，从清单里按 id 现查。查不到只有一种来路：最后一条正是在这一层里
         // 被删掉的 —— 那就摆一句「还没有」，别摆一片看起来像坏了的空白。
-        let rows: Vec<AnyElement> = self
-            .data
-            .as_ref()
-            .and_then(|groups| groups.iter().find(|group| group.book_id == book_id))
+        let rows: Vec<AnyElement> = group
             .map(|group| {
+                let last = group.marks.len().saturating_sub(1);
                 group
                     .marks
                     .iter()
-                    .map(|entry| self.mark_row(group, entry, cx))
+                    .enumerate()
+                    .map(|(index, entry)| self.mark_row(group, entry, index == last, cx))
                     .collect()
             })
             .unwrap_or_default();
@@ -522,7 +594,20 @@ impl NotesView {
             })
             .children(rows)
             .into_any_element();
-        sheet.header(header).child(body).into_any_element()
+        // 桌面上这块弹层是满窗宽的（它挂在外壳那一层，不跟内容列走）。逐条是长句子，
+        // 拉到 1900 宽一行就再也找不到行首 —— 内容夹在与这一屏卡片同一个 `COLUMN_MAX`
+        // 里居中，弹层的表面仍是满幅：那是遮罩的一部分，不是内容的容器。
+        let centered = |inner: AnyElement| {
+            h_flex()
+                .w_full()
+                .justify_center()
+                .child(v_flex().w_full().max_w(px(COLUMN_MAX)).child(inner))
+                .into_any_element()
+        };
+        sheet
+            .header(centered(header))
+            .child(centered(body))
+            .into_any_element()
     }
 
     /// 「把这一本的批注导出成文件」那颗「⋯」。挂在弹层 header 上：它的作用对象是整本，
@@ -562,23 +647,30 @@ impl NotesView {
             .into_any_element()
     }
 
-    /// 一行：识别物（书签图标 / 颜色点）+ 引文一行 + 出处与笔记一行 + 行尾删除。
-    /// 点行本身 = 跳回原文。
-    fn mark_row(&self, group: &BookGroup, entry: &MarkEntry, cx: &mut Context<Self>) -> AnyElement {
+    /// 一行：左缘一条色标（批注的颜色 / 书签用次要色）+ 引文两行 + 笔记两行 + 出处与日期，
+    /// 行尾一颗删除。点文字那半张 = 跳回原文。
+    ///
+    /// 引文与笔记用两种字色分开：引文是读者划下的**正文**，笔记是他自己写的话；
+    /// 同色同号的两行摆在一起，读起来像同一条内容的续行。截断给到两行 —— 一行只够
+    /// 认出「这是哪句」，而读者点开一本书往往正是要看自己当时写了什么。
+    fn mark_row(
+        &self,
+        group: &BookGroup,
+        entry: &MarkEntry,
+        last: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
-        let badge = if entry.is_bookmark {
-            Icon::new(IconName::Bookmark)
-                .small()
-                .text_color(theme.muted_foreground)
-                .into_any_element()
+        // 颜色按 `ANNOTATION_COLORS` 里的位置对上主题色，与正文回显同一份顺序；
+        // 认不出的名字（库里不该有）落默认那枚红。
+        let rail = if entry.is_bookmark {
+            theme.muted_foreground
         } else {
-            // 颜色按 `ANNOTATION_COLORS` 里的位置对上主题色，与正文回显同一份顺序；
-            // 认不出的名字（库里不该有）落默认那枚红。
             let index = folio_core::ANNOTATION_COLORS
                 .iter()
                 .position(|name| Some(*name) == entry.color.as_deref())
                 .unwrap_or(0);
-            let color = [
+            [
                 theme.red,
                 theme.magenta,
                 theme.cyan,
@@ -587,14 +679,7 @@ impl NotesView {
             ]
             .get(index)
             .copied()
-            .unwrap_or(theme.red);
-            div()
-                .flex_none()
-                .w(px(8.0))
-                .h(px(8.0))
-                .rounded_full()
-                .bg(color)
-                .into_any_element()
+            .unwrap_or(theme.red)
         };
         let place: Option<SharedString> = if entry.place.is_empty() {
             None
@@ -603,74 +688,103 @@ impl NotesView {
         } else {
             Some(entry.place.clone().into())
         };
+        let (quote, note) = row_text(entry, place.as_ref(), tr(cx, "reader.bookmark"));
         let view = cx.entity().clone();
+        let delete_view = view.clone();
         let (book_id, chapter, offset) = (group.book_id, entry.chapter, entry.offset);
-        let (delete_view, is_bookmark, id) = (view.clone(), entry.is_bookmark, entry.id);
-        let note: Option<SharedString> = if entry.note.is_empty() {
-            None
-        } else {
-            Some(entry.note.clone().into())
-        };
-        v_flex()
-            .id(ElementId::named_usize("notes-row", entry.id as usize))
+        let (is_bookmark, id) = (entry.is_bookmark, entry.id);
+        let delete_label = tr(cx, "shelf.book_delete");
+        let date_line = h_flex()
             .w_full()
             .items_center()
-            .flex()
-            .gap_2()
-            .py_2()
-            .overflow_hidden()
-            .child(badge)
+            .gap_1()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .when(entry.is_bookmark, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .child(Icon::new(IconName::Bookmark).xsmall()),
+                )
+            })
+            .when_some(place, |el, place| {
+                el.child(div().min_w_0().truncate().child(place))
+                    .child(div().flex_none().child("·"))
+            })
+            .child(div().flex_none().child(date_label(entry.created_at)));
+        h_flex()
+            .id(ElementId::named_usize("notes-row", entry.id as usize))
+            .w_full()
+            .items_stretch()
+            .gap_3()
+            .py_3()
+            // 行与行之间一条发丝线：这是清单，不是一摞卡。最后一行不画，免得它贴着
+            // 弹层下沿多出一条悬空的线。
+            .when(!last, |el| el.border_b_1().border_color(theme.border))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .w_full()
-                            .text_sm()
-                            .text_color(theme.foreground)
-                            .truncate()
-                            .child(if entry.quote.is_empty() {
-                                note.clone().unwrap_or_else(|| "".into())
-                            } else {
-                                entry.quote.clone().into()
-                            }),
-                    )
-                    .when_some(note, |el, note| {
-                        el.child(
-                            div()
-                                .w_full()
-                                .text_sm()
-                                .text_color(theme.foreground)
-                                .truncate()
-                                .child(note),
-                        )
-                    })
-                    .when_some(place, |el, place| {
-                        el.child(
-                            div()
-                                .w_full()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .truncate()
-                                .child(place),
-                        )
-                    }),
+                // 左缘那条色标：哪一种划线、这一组里哪几行是同一种，一眼认得出；
+                // 它也把一列行的左边界钉在同一条脊线上。
+                div().flex_none().w(px(3.0)).rounded_full().bg(rail),
             )
             .child(
-                Button::new("notes-row-delete")
+                // 可跳的那半张：文字区是跳转的命中区，删除是它的**兄弟**而不是孩子
+                // （gpui 把一次点击发给每个命中的 hitbox，套在里面删一条会顺带跳一次）。
+                h_flex()
+                    .id(ElementId::named_usize("notes-jump", entry.id as usize))
+                    .test_support()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap_3()
+                    .cursor_pointer()
+                    .active(|style| style.opacity(0.7))
+                    .on_click(move |_, _, cx| {
+                        view.update(cx, |this, cx| this.open_entry(book_id, chapter, offset, cx))
+                    })
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .text_sm()
+                                    .text_color(theme.foreground)
+                                    .line_clamp(2)
+                                    .child(quote),
+                            )
+                            .when_some(note, |el, note| {
+                                el.child(
+                                    div()
+                                        .w_full()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .line_clamp(2)
+                                        .child(note),
+                                )
+                            })
+                            .child(date_line),
+                    ),
+            )
+            .child(
+                // 外层这格跟着行高拉伸，按钮自己居中：否则 `items_stretch` 会把一颗
+                // 小钮竖着撑满整行，悬停底比旁边的字高出一截。
+                v_flex().flex_none().justify_center().child(
+                    Button::new(ElementId::named_usize(
+                        "notes-row-delete",
+                        entry.id as usize,
+                    ))
                     .ghost()
                     .small()
                     .icon(IconName::Trash)
+                    .tooltip(delete_label.clone().to_string())
+                    .accessibility_label(delete_label)
                     .on_click(move |_, _, cx| {
                         delete_view.update(cx, |this, cx| this.remove_entry(is_bookmark, id, cx))
                     }),
+                ),
             )
-            .on_click(move |_, _, cx| {
-                view.update(cx, |this, cx| this.open_entry(book_id, chapter, offset, cx))
-            })
             .into_any_element()
     }
 }
@@ -917,6 +1031,43 @@ fn load_groups(store: &folio_core::Store) -> folio_core::Result<Vec<BookGroup>> 
     let mut out: Vec<BookGroup> = groups.into_values().collect();
     out.sort_by(|a, b| b.latest.cmp(&a.latest).then_with(|| a.title.cmp(&b.title)));
     Ok(out)
+}
+
+/// 一行里那两句话怎么摆：主行（引文；引文空着时退到笔记 / 出处 / 「书签」）与第二行
+/// （读者自己写的笔记）。
+///
+/// 这两句是这一行里唯一分得开的层次（正文色 / 次要色）。「引文那格空着时笔记已经顶上
+/// 去当主行」这条判错一个 `&&`，屏幕上就是同一句话念两遍 —— 而那种重影在代码里看不出来。
+fn row_text(
+    entry: &MarkEntry,
+    place: Option<&SharedString>,
+    bookmark_label: SharedString,
+) -> (SharedString, Option<SharedString>) {
+    // 书签的锚点常常没有 exact（它钉的是位置，不是一句原文）：主行就念「书签」，
+    // 别留一条空白的主行让这一格看起来像没加载完。
+    let quote: SharedString = if !entry.quote.is_empty() {
+        entry.quote.clone().into()
+    } else if !entry.note.is_empty() {
+        entry.note.clone().into()
+    } else if entry.is_bookmark {
+        bookmark_label
+    } else {
+        place.cloned().unwrap_or_default()
+    };
+    // 引文与笔记同一句时不摆第二行（老库里笔记可能就是把原文抄了一遍）；引文那格
+    // 空着时笔记已经顶上去当主行，也不许再摆一遍。
+    let note: Option<SharedString> =
+        (!entry.quote.is_empty() && !entry.note.is_empty() && entry.quote != entry.note)
+            .then(|| entry.note.clone().into());
+    (quote, note)
+}
+
+/// 一条是在哪天留下的（本地日）。读者回来找的是「哪一天写的」，不是精确到秒；
+/// 这一屏跨全库、可能跨年，所以年份要带上 —— 只有月日的话，去年的「10-28」看起来像昨天的。
+fn date_label(created_at: i64) -> SharedString {
+    let day = folio_core::local_day(created_at, crate::ui::host::local_offset_secs());
+    let date = folio_core::civil_from_days(day);
+    format!("{:04}-{:02}-{:02}", date.year, date.month, date.day).into()
 }
 
 /// 一句原文在清单里显多长。`exact` 可能带着排版换行，先折空白再截 —— 与目录面板

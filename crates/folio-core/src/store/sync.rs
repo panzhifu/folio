@@ -12,6 +12,7 @@ use super::{AnnotationStyle, Store};
 use crate::Result;
 use crate::content::anchor::TextAnchor;
 use crate::infra::book_settings::BookSettings;
+use crate::net::lansync::BookEntry;
 use crate::position::Locator;
 use crate::sync::{
     AnnotationRecord, BookSnapshot, BookmarkRecord, LocalSnapshot, Plan, PositionRecord,
@@ -196,6 +197,36 @@ impl Store {
             },
             skipped_books: skipped_books as usize,
         })
+    }
+
+    /// 局域网同步的本机书架清单：本机**认得出身份**的那些书（`content_hash` 是对面
+    /// 用来认书与当 `/file` 的键的，没有它的行递过去只会让对面白开一次连接）。
+    ///
+    /// 只查库、不看盘：副本此刻还在不在，由 `LanProvider::file` 那一次现问现答 —— 清单与
+    /// 盘上的差别是秒级的，而这里为每一本 `metadata` 一次会把整趟拉慢，且挡不住「报完清单
+    /// 的那一秒文件被移走」那一种。
+    ///
+    /// 大小原样交出去：`missing()` 那一侧不认识 0 字节的条目，那是「对面自己算错或被改过
+    /// 报文」的信号，判据只写一处。
+    pub fn lan_manifest(&self) -> Result<Vec<BookEntry>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT content_hash, size, title FROM books
+              WHERE content_hash IS NOT NULL AND content_hash <> ''
+              ORDER BY title, id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(BookEntry {
+                hash: r.get(0)?,
+                size: r.get::<_, i64>(1)? as u64,
+                title: r.get(2)?,
+            })
+        })?;
+        let mut books = Vec::new();
+        for row in rows {
+            books.push(row?);
+        }
+        Ok(books)
     }
 
     /// 把合并结果写回本机。整批一个事务：写了一半就失败时不会留下「进度到了、
@@ -808,5 +839,43 @@ mod tests {
             })
             .unwrap();
         assert_eq!(kept(), Some(local + 50), "更新的一条该收下");
+    }
+
+    /// 局域网同步的书架清单：只交得出**有内容身份**的那些书，一格不多一格不少。
+    ///
+    /// `content_hash` 是对面认书与当 `/file` 的键的，没有它的行递过去只会让对面白开一次连接，
+    /// 而那一本在本机这边也不该被当成「有副本可拉」。
+    #[test]
+    fn the_lan_manifest_carries_only_books_with_a_content_identity() {
+        let (store, _) = store_with_book();
+        let second = store
+            .add_book(Path::new("/books/b.epub"), &meta("书乙"))
+            .unwrap();
+        // 这一本还没算过身份（懒补的那一列可为空）。
+        let unnamed = store
+            .add_book(Path::new("/books/c.epub"), &meta("书丙"))
+            .unwrap();
+
+        let mut books = store.lan_manifest().unwrap();
+        assert_eq!(
+            books.iter().map(|b| b.hash.as_str()).collect::<Vec<_>>(),
+            vec!["hash-a"],
+            "没有身份的那一本不该出现在清单里"
+        );
+        assert_eq!(books[0].size, 4096, "对面按大小决定要不要开这一次连接");
+        assert_eq!(books[0].title, "书甲", "报表要说得出是哪一本");
+
+        store.set_content_hash(second, "hash-b", "sha256").unwrap();
+        books = store.lan_manifest().unwrap();
+        assert_eq!(books.len(), 2, "补上身份的那一本下一轮就该在清单里");
+        assert!(books.iter().any(|book| book.hash == "hash-b"));
+
+        // 空串也算「没有身份」：老库里那一列可能留的是空串而不是 NULL。
+        store.set_content_hash(unnamed, "", "sha256").unwrap();
+        assert_eq!(
+            store.lan_manifest().unwrap().len(),
+            2,
+            "空串不是身份，它进不了清单"
+        );
     }
 }

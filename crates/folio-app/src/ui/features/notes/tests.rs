@@ -11,7 +11,7 @@ use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
 
-use super::{NotesView, load_groups, matches_query, snippet};
+use super::{MarkEntry, NotesView, load_groups, matches_query, row_text, snippet};
 use crate::ui::services::app_store;
 use crate::ui::services::config::ConfigHolder;
 
@@ -117,6 +117,56 @@ fn the_group_with_the_latest_activity_comes_first() {
     assert_eq!(groups.len(), 2);
     assert_eq!(groups[0].title, "书乙", "最近留过话的书排最前");
     assert_eq!(groups[1].title, "书甲");
+}
+
+/// 一行里主行与第二行怎么分：笔记只能出现在其中一行。
+///
+/// 引文那格空着时笔记顶上去当主行 —— 这条判错一个 `&&`，同一句话就在屏幕上念两遍，
+/// 而代码里只差一个条件。四种来路都钉住。
+#[test]
+fn the_note_is_never_both_the_headline_and_the_second_line() {
+    let entry = |is_bookmark: bool, quote: &str, note: &str| MarkEntry {
+        is_bookmark,
+        id: 1,
+        chapter: 0,
+        offset: 0,
+        place: "第一章".into(),
+        quote: quote.into(),
+        note: note.into(),
+        color: None,
+        stale: false,
+        created_at: 0,
+    };
+    let place: gpui_kit::SharedString = "第一章".into();
+    let bookmark: gpui_kit::SharedString = "书签".into();
+
+    let (headline, second) = row_text(
+        &entry(false, "原文", "我的话"),
+        Some(&place),
+        bookmark.clone(),
+    );
+    assert_eq!(headline.to_string(), "原文");
+    assert_eq!(
+        second.map(|second| second.to_string()).as_deref(),
+        Some("我的话"),
+        "引文与笔记各占一行"
+    );
+
+    let (headline, second) = row_text(&entry(false, "", "我的话"), Some(&place), bookmark.clone());
+    assert_eq!(headline.to_string(), "我的话", "引文空着时笔记顶上去");
+    assert!(second.is_none(), "同一句笔记不许摆两遍");
+
+    let (headline, second) = row_text(
+        &entry(false, "同一句", "同一句"),
+        Some(&place),
+        bookmark.clone(),
+    );
+    assert_eq!(headline.to_string(), "同一句");
+    assert!(second.is_none(), "引文与笔记同一句时只留主行");
+
+    let (headline, second) = row_text(&entry(true, "", ""), Some(&place), bookmark);
+    assert_eq!(headline.to_string(), "书签", "书签没有原文时主行念「书签」");
+    assert!(second.is_none());
 }
 
 #[test]
@@ -337,6 +387,76 @@ fn tapping_a_card_raises_that_books_notes(cx: &mut TestAppContext) {
         assert!(
             window.try_find("notes-sheet-body").is_some(),
             "抬起来时要把逐条那一栏交给弹层，不能只升一块空壳"
+        );
+    })
+    .expect("窗口应能渲染");
+}
+
+/// 行尾那颗删除与「点文字跳原文」是两块**兄弟**命中区：删一条不该顺手把那本书打开。
+///
+/// gpui 把一次点击发给每个含按下点的 hitbox（不沿祖先链冒泡）。删除钮从前挂在可跳的
+/// 那一层里，同一指下去删完还跳一次 —— 屏幕上就是「删掉一条笔记，书也开了」。这里
+/// 钉住删除只删：事件不 `Open`、行从清单里消失、弹层还留在原地。
+#[gpui_kit::test]
+fn deleting_a_row_does_not_open_the_book(cx: &mut TestAppContext) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use super::NotesEvent;
+
+    let store = Store::in_memory().unwrap();
+    let a = book(&store, "书甲", "/books/a.epub", &["第一章"]);
+    let id = store
+        .add_annotation(
+            a,
+            &anchor(0, 0),
+            "甲的话",
+            "rose",
+            AnnotationStyle::default(),
+        )
+        .unwrap();
+    let (view, handle) = boot_window(cx, store);
+    let opened = Rc::new(Cell::new(0usize));
+    let _watch = cx.update({
+        let opened = opened.clone();
+        |cx| {
+            cx.subscribe(&view, move |_, _: &NotesEvent, _| {
+                opened.set(opened.get() + 1)
+            })
+        }
+    });
+
+    cx.update_window(handle, |_, window, cx| {
+        window.click(format!("notes-card-{a}"), cx);
+    })
+    .expect("窗口应能渲染");
+    for _ in 0..40 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("渲染应成功");
+    }
+
+    cx.update_window(handle, |_, window, cx| {
+        assert!(
+            window.try_find(("notes-jump", id as usize)).is_some(),
+            "弹层里该有这一条"
+        );
+        window.click(("notes-row-delete", id as usize), cx);
+    })
+    .expect("窗口应能渲染");
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(opened.get(), 0, "删一条不该同时打开那本书");
+        assert!(
+            window.try_find(("notes-jump", id as usize)).is_none(),
+            "删掉的那一条该从清单里消失"
+        );
+        assert!(
+            window.try_find("notes-sheet-body").is_some(),
+            "删一条不该顺手把弹层收掉"
         );
     })
     .expect("窗口应能渲染");

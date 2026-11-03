@@ -926,14 +926,23 @@ fn a_landed_copy_is_still_recognisable_as_that_book() {
     }
 }
 
-/// 一本 `.fb2.zip` 走完整条管线：收进库、副本改名成 `<哈希>.fb2`，而**那份副本还认得自己**。
+/// 一本 `.fb2.zip` / `.fbz` 走完整条管线：收进库、副本改名成 `<哈希>.fb2`，而**那份副本还认得自己**。
 ///
 /// 这一条盯的是判定层与 provider 之间那条缝：判定按内容认出压缩过的 FB2，落地却按
 /// `Format::Fb2` 问注册表要扩展名 —— 于是副本是一个躺在 `.fb2` 这个名字里的 ZIP。
 /// 「名字仍被 Fb2 认领」与「按头部字节真的读得出正文」两件事必须同时成立，
 /// 否则就是上一那条门点名的那具空壳：导进去过，再也打不开。
+///
+/// `.fbz` 是同一个容器的另一个常见名字（FB2 社区自己的打包习惯），粗筛不看扩展名、
+/// 判定看内容，所以两条名字走的是同一条路 —— 这里直接两条都跑。
 #[test]
 fn a_zipped_fb2_lands_and_still_opens() {
+    for source_name in ["一本.fb2.zip", "一本.fbz"] {
+        assert_zipped_fb2_lands(source_name);
+    }
+}
+
+fn assert_zipped_fb2_lands(source_name: &str) {
     use std::io::Write as _;
 
     use crate::content::format::{Content, Format, provider_for, sniff};
@@ -949,7 +958,7 @@ fn a_zipped_fb2_lands_and_still_opens() {
 <description><title-info><book-title>压缩过的一本</book-title></title-info></description>
 <body><section><title><p>第一章</p></title><p>正文</p></section></body>
 </FictionBook>"#;
-    let path = picked.join("一本.fb2.zip");
+    let path = picked.join(source_name);
     let file = std::fs::File::create(&path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default();
@@ -977,7 +986,7 @@ fn a_zipped_fb2_lands_and_still_opens() {
     let copy_name = &names[0];
     assert!(
         copy_name.ends_with(".fb2"),
-        "副本的扩展名来自判定，不是来源那个 `.zip`：{copy_name}"
+        "副本的扩展名来自判定，不是来源那个 {source_name}：{copy_name}"
     );
     let copy = lib.join(copy_name);
 
@@ -1511,6 +1520,65 @@ fn cbz_book(dir: &Path) -> std::path::PathBuf {
     }
     zip.finish().unwrap();
     path
+}
+
+/// `.zip` 里全是图：判定层按内容当 CBZ，落地副本叫 `.cbz`。
+///
+/// 这条门钉的是「扩展名只是粗筛、装书的包不看名字」在**导入**那一侧也成立 ——
+/// 判定层那几条已经覆盖了形状，这里覆盖的是「副本改名成哪个扩展名、下一次还开不开得动」。
+#[test]
+fn a_plain_zip_of_pages_lands_as_a_comic() {
+    use std::io::Write as _;
+
+    use crate::content::format::{Content, Format, provider_for, sniff};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let picked = tmp.path().join("原处");
+    std::fs::create_dir_all(&picked).unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let path = picked.join("漫画.zip");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    for (name, bytes) in [("01.png", png(8, 8)), ("02.png", png(8, 8))] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&bytes).unwrap();
+    }
+    zip.finish().unwrap();
+
+    let outcomes = import_from(
+        &PathsSource::picked(vec![path]),
+        &lib,
+        &store,
+        &StageCtx::detached(),
+    );
+    assert_eq!(
+        ImportReport::tally(&outcomes).added,
+        1,
+        "全是图的 zip 要按 CBZ 收下：{:?}",
+        outcomes.iter().map(|o| &o.result).collect::<Vec<_>>()
+    );
+    let names = copies(&lib);
+    assert_eq!(names.len(), 1, "只该落一份副本：{names:?}");
+    let copy_name = &names[0];
+    assert!(
+        copy_name.ends_with(".cbz"),
+        "副本该按判定改名成 .cbz，不是来源的 .zip：{copy_name}"
+    );
+    let copy = lib.join(copy_name);
+    assert_eq!(
+        sniff::identify(copy_name, &copy).format(),
+        Some(Format::Cbz),
+        "副本过不了自己那道判定"
+    );
+    let provider = provider_for(&copy).expect("副本该有 provider 认领");
+    let (_, content) = provider.index(&copy).expect("副本要读得开");
+    let Content::Fixed(fixed) = content else {
+        panic!("漫画该读成定版式")
+    };
+    assert_eq!(fixed.pages.len(), 2, "两页都在");
 }
 
 /// 两页的 CB7（7z 漫画包）：条目与 `cbz_book` 同形，只是容器换成只能顺序解压的那一种。
@@ -2572,6 +2640,7 @@ fn the_rejection_line_names_only_the_categories_that_are_not_zero() {
         duplicate: 4,
         unsupported: 3,
         encrypted: 5,
+        needs_password: 0,
         corrupt: 1,
         unreadable: 2,
     };

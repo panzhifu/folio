@@ -127,10 +127,79 @@ cargo test -p folio-core --lib -- --ignored the_real_word_documents
   同一条理由也适用于那张 `folder.jpg` / `cover.jpg`：约定是公开的，但带它的真包没合法取得到，
   所以封面的门（`cbz::tests::the_cover_sidecar_is_the_cover_not_an_extra_page` 那四条 +
   `cb7::tests::the_cover_sidecar_is_picked_out_of_the_cache`）目前是合成的。
-- **还只有合成夹具的几族**：HTMLZ、AZW4、CB7 / CBT、ComicInfo.xml、漫画的封面缓存、
+- **还只有合成夹具的几族**：HTMLZ、AZW4、ComicInfo.xml、漫画的封面缓存、
   ODT 的 `text:note`。它们的门目前是「自己写的夹具刚好符合自己的解析」—— 撞到真文件形状之前
   别当成已验过。（公网上找一个**可自由再分发**的 .odt / .htmlz / .azw4 比想象困难：HTMLZ 是
   Calibre 私有产物，AZW4 是 Kindle 印刷版，天然带 DRM。）
+- **真格式矩阵（2026-11-04）**：`tests/fixtures/local/formats/` 下 20 族 / 69 份真文件，
+  一条门统跑：
+
+  ```bash
+  cargo run -p folio-core --example format-probe -- tests/fixtures/local/formats   # 逐本读数
+  cargo test -p folio-core --lib -- --ignored the_real_sample_matrix                # 过/不过
+  ```
+
+  门在 `content::format::tests::the_real_sample_matrix_reads_every_shipped_family`，
+  写死「每一族至少一份」：目录缺失、少一族、判定层与 provider 说法不一致、正文空、
+  U+FFFD 成片、首页画不出来，任何一条都红。**AZW4 是唯一豁免的一族**：拿不到可合法
+  再分发的样本，所以它目前仍是「合成自证」。
+  取法（全部只进 `local/`，不入库）：
+
+  ```bash
+  F=tests/fixtures/local/formats
+  mkdir -p $F/{fb2,rtf,chm,mobi,pdb,docx,odt,doc,pdf,djvu,cbz,cbr,cb7,cbt,htmlz,mhtml,html,md,txt,epub}
+
+  # FB2 / MOBI / PDB：reference/ 那三份只读克隆（crengine、readest、libmobi）
+  cp reference/koreader/base/thirdparty/kpvcrlib/crengine/crengine/Tools/Fb2Linux/example.fb2 $F/fb2/
+  cp reference/koreader/base/thirdparty/kpvcrlib/crengine/cr3gui/data/manual/cr3-manual-ru.fb2 $F/fb2/
+  cp reference/readest/apps/readest-app/src/__tests__/fixtures/data/sample-kosync.fb2 $F/fb2/
+  cp reference/readest/apps/readest-app/src/__tests__/fixtures/data/sample-war-peace.mobi $F/mobi/
+  cp reference/readest/apps/readest-app/src/__tests__/fixtures/data/repro-5918.azw3 $F/mobi/
+  cp reference/libmobi/tests/samples/sample-textread.mobi $F/pdb/sample-textread.pdb
+
+  # 另外八份 Calibre 产的 AZW3（字体 / 图片 / 脚注 / 三级目录 / 简中 / 日文竖排 /
+  # 百万字单章）与 libmobi 的 HUFF/CDIC 样本：GMD170629/ermao-library 的
+  # test-data/library/mobi（CORPUS.md 写明是自撰 + Calibre 产出）
+  # RTF：LibreOffice core 的 RTF 导入语料（MPL-2.0）
+  for n in hello chtoutline cp950listleveltext1 tblrepeat inline-formula-text-mode; do
+    curl -sSL -o $F/rtf/$n.rtf \
+      "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/rtfimport/data/$n.rtf"
+  done
+  # MHTML：Chromium web_tests（BSD-3-Clause），含 IE9 单部分存档与 Chrome 多部分
+  for n in data-uri-font page_with_css_and_js_ie multi_frames_contentid simple_page_ie; do
+    curl -sSL -o $F/mhtml/$n.mht \
+      "https://raw.githubusercontent.com/chromium/chromium/main/third_party/blink/web_tests/mhtml/$n.mht"
+  done
+  # HTML：Project Gutenberg #1342（公版）；MD：rust-lang/book、BurntSushi/ripgrep
+  curl -sSL -o $F/html/pride.html https://www.gutenberg.org/cache/epub/1342/pg1342-images.html
+  # CBZ：readest / okular 的测试夹具；CBR / CB7 / CBT 用那几页图分别交给
+  # rar 7.x（rarlab 的参考实现）、`7z a -t7z -ms=on`、`tar cf` 打包
+  # HTMLZ：没有装 Calibre（官方便携包 200 MB），按
+  # src/calibre/ebooks/conversion/plugins/htmlz_output.py 的布局手造：
+  # 单份 index.html + style.css + images/NNNNNN.ext + metadata.opf
+  ```
+
+  `.ott` / `.dotx` / `.docm` 是 `.odt` / `.docx` 同一只 ZIP 包的另一组扩展名，
+  矩阵里不单列（族相同）。它们的门是合成的：`odt::tests::a_template_package_reads_like_an_odt`
+  与 `docx::tests::template_and_macro_packages_read_like_a_docx`，判定层那两条在
+  `sniff::tests::odt_is_decided_by_its_mimetype_or_manifest` /
+  `…::docx_is_decided_by_its_parts_not_the_extension`。**真模板没验过正文**：
+  aspose 语料里那几份 `.dotx` / `.docm` 打开来 body 只有空段落，provider 正确地说
+  「`word/document.xml` 里没有正文」，所以那一档没进矩阵。
+
+  量出来两条真 bug（都已修，门在默认套件里）：
+  - **IE 9 的单部分 `.mht` 判定层与 provider 都读不了**（`simple_page_ie.mht`：
+    `From: "Saved by Windows Internet Explorer 9"` + `MIME-Version` + 直接一份
+    `text/html`，没有 boundary）。以前只认 `multipart/` + `boundary=` 的信封，
+    症状是导入时说「不是书」。现在单部分也收：`mime-version`/`x-mimeole` 加
+    `content-type: text/html` 就是信封，正文当一章（`mhtml::tests::a_single_part_ie_archive_reads_as_one_chapter`、
+    `sniff::tests::an_mhtml_is_decided_by_its_envelope_not_by_its_name` 的新增两段）。
+  - **`tar cf x ./*` 写出的 `./页面.png` 被当成隐藏文件**（`cbt/sample.cbt`）。
+    `is_container_noise` 把「以点开头」整条否掉，于是整包在判定层
+    `ArchiveShape::Nothing`，症状是扫描时这套漫画包**静默地不是书**。现在条目名先
+    剥掉开头的 `./` 再判点号（`archive::normalize_entry` 与 `cbz::is_container_noise`），
+    门：`sniff::tests::a_dot_slash_prefix_is_not_a_hidden_file`。ZIP 的 `zip -r x .`
+    是同一个形状，一起修了。
 - **PalmDOC —— 两本 `TEXt`/`REAd`**（libmobi 的 `tests/samples`，随 `reference/` 那一份克隆在
   本机，不入库）：文件名后缀是 `.mobi`，但**容器类型字段说的才是它是什么**，判定层按那一格
   走，所以 `sample-textread.mobi` 判成 PDB。量出来三条：① 书名在 PalmDB 头偏移 0..32

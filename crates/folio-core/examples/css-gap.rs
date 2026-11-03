@@ -37,7 +37,7 @@ use folio_core::content::format::FlowDoc;
 use folio_core::content::format::css::computed::{
     ComputedStyle, DeclStatus, cascade, declaration_status, inline_declarations,
 };
-use folio_core::content::format::css::{Origin, RuleSet, chapter_style_rules};
+use folio_core::content::format::css::{IgnoredRule, Origin, RuleSet, chapter_style_rules};
 
 /// 一个属性的落地面。`elements` 是**这个属性上有任何一条胜出且没接住的声明**的元素数。
 #[derive(Debug, Default)]
@@ -175,6 +175,20 @@ fn survey(path: &Path) -> Result<String, String> {
     if rows.is_empty() {
         out.push_str("| — | 0 | 0 | — | 全部接住 |\n");
     }
+    if !stats.ignored_rules.is_empty() {
+        out.push_str("\n### 连规则都拼不出来的\n\n");
+        out.push_str("| 次数 | 类型 | 选择器 / 前导 | 原文 |\n|---|---|---|---|\n");
+        let mut ignored: Vec<_> = stats.ignored_rules.iter().collect();
+        ignored.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(b.0)));
+        for ((kind, prelude, source), (count, declarations)) in ignored {
+            out.push_str(&format!(
+                "| {count}（{declarations} 条声明） | {kind} | `{}` | `{}` |\n",
+                md_cell(prelude),
+                md_cell(source)
+            ));
+        }
+        out.push('\n');
+    }
     out.push_str(&impact(doc.as_ref(), flow, &rules));
     Ok(out)
 }
@@ -190,6 +204,22 @@ struct Totals {
     elements_hit: usize,
     /// 连规则都拼不出来的块：清单里那几份算一次，每一章自己那块 `<style>` 各算一次。
     ignored: usize,
+    /// 那些块的原文：(类型, 前导, 原文) → (出现次数, 声明数)。
+    ///
+    /// `ignored` 只有计数，读者看到「18 处」不知道是哪 18 处；这一格由
+    /// `RuleSet::ignored_rules` 来，按内容去重，同一份 CSS 在每章都出现时计次数。
+    ignored_rules: BTreeMap<(&'static str, String, String), (usize, usize)>,
+}
+
+fn note_ignored(tot: &mut Totals, rules: &[IgnoredRule]) {
+    for rule in rules {
+        let entry = tot
+            .ignored_rules
+            .entry((rule.kind, rule.prelude.clone(), rule.source.clone()))
+            .or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += rule.declarations;
+    }
 }
 
 /// 逐章逐元素地数。清单里那几份样式表只解析一次、全书共用，但**每一章**还要并入它自己
@@ -201,6 +231,7 @@ fn measure(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> Totals {
         ignored: rules.ignored,
         ..Default::default()
     };
+    note_ignored(&mut tot, &rules.ignored_rules);
     let base = ComputedStyle::default();
     let root_px = base.font_size;
     for (index, chapter) in flow.chapters.iter().enumerate() {
@@ -212,6 +243,7 @@ fn measure(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> Totals {
         let base_dir = folio_core::content::format::dir_of(&chapter.spine_href);
         let own = chapter_style_rules(&dom, &base_dir);
         tot.ignored += own.ignored;
+        note_ignored(&mut tot, &own.ignored_rules);
         let mut used = rules.clone();
         used.extend(own);
         let styled = cascade(&dom, &used, &base, &base_dir);
@@ -368,6 +400,8 @@ fn without_unsupported(rules: &RuleSet) -> RuleSet {
         // 页边距同样不落在元素上；这一臂量的是元素级声明的排版差，照原样带过去。
         page_margins: rules.page_margins,
         ignored: rules.ignored,
+        // 诊断原文不参与「丢掉没接住的声明」这一臂的对比。
+        ignored_rules: Vec::new(),
     }
 }
 
@@ -480,4 +514,9 @@ fn impact(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> String {
         left_now - left_then,
         ink_now - ink_then,
     )
+}
+
+/// Markdown 表格单元格：竖线与换行会把一列撑破，替换掉。
+fn md_cell(text: &str) -> String {
+    text.replace('|', "\\|").replace(['\n', '\r'], " ")
 }

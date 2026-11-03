@@ -27,8 +27,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use folio_core::{
-    Appearance, BookSettings, Config, Env, Language, Layer, Library, Membership, Opds, Provenance,
-    Reader, Resolved, Speech, Sync, Translation,
+    Account, Appearance, BookSettings, Config, Env, Language, Layer, Library, Membership, Novel,
+    Opds, Provenance, Reader, Resolved, Speech, Sync, Translation,
 };
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
@@ -279,6 +279,12 @@ impl ConfigHolder {
         Self::snapshot(cx).sync.clone()
     }
 
+    /// 局域网同步的账号那一节（密钥 + 开关 + 对端地址）。设置页每次渲染读一次，
+    /// 每一趟同步在发起前读一次。
+    pub fn account(cx: &App) -> Account {
+        Self::snapshot(cx).account.clone()
+    }
+
     /// OPDS 书源列表。浏览页建屏时读一次。
     pub fn opds(cx: &App) -> Opds {
         Self::snapshot(cx).opds.clone()
@@ -358,8 +364,40 @@ impl ConfigHolder {
         Self::edit(cx, |config| f(&mut config.sync));
     }
 
+    /// 局域网同步账号那一节的写入口。密钥与对端地址都从这一格进配置（落盘 0600，
+    /// 与 WebDAV 密码同一个待遇）。
+    pub fn edit_account(cx: &mut App, f: impl FnOnce(&mut Account)) {
+        Self::edit(cx, |config| f(&mut config.account));
+    }
+
+    /// 「选区问 AI」那一节：只有「要不要用」与「用哪只模型」两格。服务地址与密钥
+    /// **共用翻译那一档**（`ConfigHolder::translation`），所以这里不设第二份密钥 ——
+    /// 同一个端点填两遍就是两处真相，而密钥每多存一处就多一处泄漏面。
+    pub fn ai(cx: &App) -> folio_core::Ai {
+        Self::entity(cx).read(cx).config.ai.clone()
+    }
+
+    pub fn edit_ai(cx: &mut App, f: impl FnOnce(&mut folio_core::Ai)) {
+        Self::edit(cx, |config| f(&mut config.ai));
+    }
+
     pub fn edit_opds(cx: &mut App, f: impl FnOnce(&mut Opds)) {
         Self::edit(cx, |config| f(&mut config.opds));
+    }
+
+    /// `.txt` 小说分章规则的读者那一层（关掉的条目 / 自定义的条目 / 阈值）。
+    ///
+    /// **改完要重启才生效**，这不是漏：分章跑在导入与重扫的工作线程里，中途换表会切出
+    /// 「前半本按旧表、后半本按新表」的章表，而盖在索引上的 `rules_hash` 只有一份、
+    /// 判失效时它对得上，于是没有任何东西回来修它。理由与判据都在
+    /// [`folio_core::content::format::novel::rules::install`]，界面上那一行也照着说。
+    pub fn edit_novel(cx: &mut App, f: impl FnOnce(&mut Novel)) {
+        Self::edit(cx, |config| f(&mut config.novel));
+    }
+
+    /// 读者那一层小说规则（只读取值闭包用）。
+    pub fn novel(cx: &App) -> Novel {
+        Self::entity(cx).read(cx).config.novel.clone()
     }
 
     /// 会员那一节的写入口。与其它节同一条：写的是**用户层**，`edit` 收尾 `notify`，
@@ -427,6 +465,10 @@ fn recompute(state: &mut ConfigState) {
     };
     state.defaults = defaults;
     state.config = effective;
+    // 把生效那层小说规则交给引擎。**一个进程只装得上第一次**（`OnceLock`），所以这句既是
+    // 启动时的那一次，也是之后每一次改动时的「装不上、什么也不动」—— 那正是重启才生效
+    // 这件事的实现处：不 hot 换页，是为了不让一本书的章表被切成两半。
+    folio_core::content::format::novel::rules::install(&state.config.novel.edits);
 }
 
 #[cfg(test)]

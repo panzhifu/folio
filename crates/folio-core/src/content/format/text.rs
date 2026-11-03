@@ -86,11 +86,11 @@ const TEXT: PlainFamily = PlainFamily {
 };
 
 pub(crate) fn book_info_by_rules(source: &str, stem: &str) -> novel::detect::BookInfo {
-    novel::detect::book_info(source, stem, &novel::rules::CompiledRules::builtin())
+    novel::detect::book_info(source, stem, &novel::rules::effective())
 }
 
 pub(crate) fn split_by_rules(source: &str, stem: &str) -> Vec<Chapter> {
-    novel::detect::split_with(source, stem, &novel::rules::CompiledRules::builtin())
+    novel::detect::split_with(source, stem, &novel::rules::effective())
 }
 
 /// 读一遍并按 [`normalize`] 折好：两族共用的起点。

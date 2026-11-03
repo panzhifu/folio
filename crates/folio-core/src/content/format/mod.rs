@@ -84,7 +84,7 @@ pub use content::{
     PageSource, PageText,
 };
 pub use provider::{
-    DocumentProvider, ParseBudget, looks_like_a_book, provider_for, providers,
+    DocumentProvider, ParseBudget, Passphrase, looks_like_a_book, provider_for, providers,
     supported_extensions, supports_extension,
 };
 
@@ -363,11 +363,7 @@ pub const INDEX_VERSION: i64 = 13;
 pub fn rules_hash(format: Format) -> Option<String> {
     match format {
         // PalmDoc 的正文是纯文本，分章与书目同样交给那张规则表。
-        Format::Text | Format::Pdb => Some(
-            novel::rules::CompiledRules::builtin()
-                .content_hash()
-                .to_string(),
-        ),
+        Format::Text | Format::Pdb => Some(novel::rules::effective().content_hash().to_string()),
         _ => None,
     }
 }

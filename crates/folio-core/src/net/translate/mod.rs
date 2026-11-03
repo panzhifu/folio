@@ -160,6 +160,24 @@ pub fn source_hash(text: &str) -> String {
     sha256_of_bytes(text.as_bytes()).to_hex()
 }
 
+/// BCP-47 码 → 提示词里的语言名。认不出的码原样递过去：模型对 `yue` 这类标签的理解
+/// 通常好过我们临时编一个名字。翻译与 [`crate::net::ai`] 共用这一份 —— 两条链都要对模型
+/// 说「用这种语言回答」，两份表迟早有一处漏掉一门语言。
+pub(crate) fn language_name(code: &str) -> &str {
+    match code {
+        "zh-CN" | "zh-Hans" => "Simplified Chinese",
+        "zh-TW" | "zh-Hant" => "Traditional Chinese",
+        "en" => "English",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "de" => "German",
+        "fr" => "French",
+        "es" => "Spanish",
+        "ru" => "Russian",
+        other => other,
+    }
+}
+
 /// 每一趟真正送去引擎的源文：超过 [`MAX_SOURCE_CHARS`] 的部分截掉。
 pub(crate) fn source_slice(text: &str) -> String {
     text.chars().take(MAX_SOURCE_CHARS).collect()

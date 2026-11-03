@@ -581,7 +581,7 @@ pub(super) fn turn_frame(cx: &mut TestAppContext, handle: AnyWindowHandle, wait:
 }
 
 /// 一根手指的原始触摸，与真机同一入口：识别器就在这条路上跑（`gestures.rs` 把一笔折成
-/// `Started` 一整截 + `Moved` 若干步 + `Ended` 收尾的 `ScrollWheelEvent`，横轴锁死）。
+/// `Started` 一整截 + `Moved` 若干步 + `Ended` 收尾的 `ScrollEvent`，横轴锁死）。
 /// 横扫那两条门都从这里发事件，所以它们验的是真路，不是绕开识别器直发事件。
 pub(super) fn raw_touch(
     cx: &mut TestAppContext,

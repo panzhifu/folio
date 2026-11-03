@@ -9,7 +9,7 @@
 
 use serde_json::{Value, json};
 
-use super::{TranslateError, Translation, Translator, parse_json, source_slice};
+use super::{TranslateError, Translation, Translator, language_name, parse_json, source_slice};
 use crate::ingest::identity::sha256_of_bytes;
 use crate::net::remote::{Method, Request, Transport};
 
@@ -101,23 +101,6 @@ fn prompt(from: &str, to: &str) -> String {
             "Translate the text from {} into {target}. Reply with the translation only.",
             language_name(from)
         )
-    }
-}
-
-/// BCP-47 码 → 提示词里的语言名。认不出的码原样递过去：模型对 `yue` 这类标签的
-/// 理解通常好过我们临时编一个名字。
-fn language_name(code: &str) -> &str {
-    match code {
-        "zh-CN" | "zh-Hans" => "Simplified Chinese",
-        "zh-TW" | "zh-Hant" => "Traditional Chinese",
-        "en" => "English",
-        "ja" => "Japanese",
-        "ko" => "Korean",
-        "de" => "German",
-        "fr" => "French",
-        "es" => "Spanish",
-        "ru" => "Russian",
-        other => other,
     }
 }
 

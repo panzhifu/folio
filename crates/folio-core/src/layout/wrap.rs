@@ -7,11 +7,44 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::collect::{Collected, DEFAULT_STYLE, IMAGE_GLYPH, ImageAtom, Piece};
-use super::font::{RunStyle, StyleArena, StyleRef, cjk_latin_gap};
+use super::font::{FontKey, RunStyle, StyleArena, StyleRef, cjk_latin_gap};
 use super::geometry::{ImageRun, LineFragment, LineRun};
 use super::ports::{ImageProvider, Measure, image_size};
 use crate::content::dom::{Dom, NodeId, NodeKind};
-use crate::content::format::css::computed::{Hyphens, RubyPosition, StyledDom};
+use crate::content::format::css::computed::{
+    ComputedStyle, Hyphens, InlineVAlign, RubyPosition, StyledDom,
+};
+
+/// `font-variant: small-caps` 的小写字号比例。
+///
+/// 0.8 是各家排版系统常用的那档（TeX 的 `\scshape` 与浏览器合成 small-caps 都在
+/// 0.7–0.8 之间）。整段乘这个数而不是逐字分档：逐字分档要把一个文本 piece 拆成
+/// 「本来大写 / 本来小写」两段、各自一份宽度与行盒，收益是首字母回到 1em ，
+/// 代价是收集、断行、命中三处都要多一套区间 —— 书名与人物名上不值得。
+const SMALL_CAPS_SCALE: f32 = 0.8;
+
+/// 把小写换成大写，**只做等字节长度的映射**。
+///
+/// 偏移（`norm` / `orig`）是按字节走的：`ß → SS`、`ﬁ → FI` 这种长度会变，换了之后
+/// 选区与锚点全都会漂。那些字符原样留着，渲染上少一个字母的大写，比整段错位轻得多。
+fn small_caps_upper(src: &str) -> Option<String> {
+    let mut out = String::with_capacity(src.len());
+    let mut changed = false;
+    for ch in src.chars() {
+        if ch.is_lowercase() {
+            let mut upper = ch.to_uppercase();
+            if let (Some(first), None) = (upper.next(), upper.next())
+                && first.len_utf8() == ch.len_utf8()
+            {
+                out.push(first);
+                changed = true;
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    changed.then_some(out)
+}
 
 /// 注音与基字之间的缝，按容器自己的字号折算。
 ///
@@ -693,7 +726,89 @@ impl<'a> Collector<'a> {
     fn intern_style(&mut self, node: NodeId) -> StyleRef {
         // 不克隆 `ComputedStyle`：`RunStyle::new` 只读它。
         let computed = self.styles.get(node).unwrap_or(&DEFAULT_STYLE);
-        self.arena.intern(RunStyle::new(computed))
+        let mut run = RunStyle::new(computed);
+        // `vertical-align` 不继承，而文本节点的样式是整份克隆父元素的（见 `cascade`），
+        // 所以「自己的位移 + 各级祖先的位移」只能在这里按节点算一遍；再往后每一份
+        // `RunStyle` 都已经是一个定数。
+        run.baseline_shift = self.effective_baseline_shift(node, computed);
+        self.arena.intern(run)
+    }
+
+    /// 这一节点落在行里时相对基线的总位移（px，正数往上）。
+    ///
+    /// 文本节点的 `style` 是它所在元素的整份克隆：`baseline_shift` 那一格已经等于元素
+    /// 自己的位移，所以往上只加到元素的**祖先**；元素节点则从父级开始加。
+    /// `text-top` / `text-bottom` 先按父盒的字体上下沿折出一个自己的位移，再叠祖先。
+    fn effective_baseline_shift(&self, node: NodeId, style: &ComputedStyle) -> f32 {
+        let is_text = self.dom.get(node).kind != NodeKind::Element;
+        let mut shift = match style.inline_valign {
+            InlineVAlign::Baseline => style.baseline_shift,
+            InlineVAlign::TextTop | InlineVAlign::TextBottom => {
+                let (ascent, descent) =
+                    self.measure
+                        .font_extents("x", &FontKey::of(style), style.font_size);
+                self.inline_valign_shift(node, style, is_text, ascent, descent)
+            }
+        };
+        if is_text {
+            // 祖先链的第一个就是文本所在元素 —— 它的位移已经在 `style.baseline_shift` 里。
+            for ancestor in self.dom.ancestors(node).skip(1) {
+                shift += self
+                    .styles
+                    .get(ancestor)
+                    .map_or(0.0, |style| style.baseline_shift);
+            }
+        } else {
+            for ancestor in self.dom.ancestors(node) {
+                shift += self
+                    .styles
+                    .get(ancestor)
+                    .map_or(0.0, |style| style.baseline_shift);
+            }
+        }
+        shift
+    }
+
+    /// `vertical-align: text-top / text-bottom` 折成 px。
+    ///
+    /// 对齐的参照是**声明所在行内盒的父盒**：盒顶（`text-top`）贴父盒字体的顶，
+    /// 盒底（`text-bottom`）贴父盒字体的底。度量必须按真实字体量 —— 中英混排时
+    /// 父盒声明的拉丁字体不等于汉字实际用的那张脸（与 `Measure::font_extents` 同一条）。
+    ///
+    /// `own_ascent` / `own_descent` 由调用方给：文字是这段字的字体度量，图片是
+    /// `(高度, 0)` —— 图片占满基线以上、基线以下没有东西，与 CSS 的替换盒同一口径。
+    fn inline_valign_shift(
+        &self,
+        node: NodeId,
+        style: &ComputedStyle,
+        is_text: bool,
+        own_ascent: f32,
+        own_descent: f32,
+    ) -> f32 {
+        let owner = if is_text {
+            self.dom.get(node).parent
+        } else {
+            Some(node)
+        };
+        let Some(owner) = owner else {
+            return 0.0;
+        };
+        let Some(reference) = self
+            .dom
+            .get(owner)
+            .parent
+            .and_then(|parent| self.styles.get(parent))
+        else {
+            return 0.0;
+        };
+        let parent = self
+            .measure
+            .font_extents("x", &FontKey::of(reference), reference.font_size);
+        match style.inline_valign {
+            InlineVAlign::TextTop => parent.0 - own_ascent,
+            InlineVAlign::TextBottom => own_descent - parent.1,
+            InlineVAlign::Baseline => 0.0,
+        }
     }
 
     /// 为新追加的 `text[start..]` 算每字符前进量，推进 `widths`。
@@ -853,6 +968,23 @@ impl<'a> Collector<'a> {
         let dom_node = self.dom.get(node);
         if dom_node.kind == NodeKind::Text {
             let src = dom_node.text.as_str();
+            // `font-variant: small-caps`：原文换成 uppercase（等字节长度才换），
+            // 这一段字号乘 0.8。DOM 里那份原文不动 —— 选区与复制读的是它。
+            let mut upper = None;
+            let mut style = style;
+            if self.arena.get(style).is_some_and(|run| run.small_caps)
+                && let Some(text) = small_caps_upper(src)
+            {
+                upper = Some(text);
+                let mut run = self
+                    .arena
+                    .get(style)
+                    .cloned()
+                    .expect("push_node 收到的 style 一定已在 arena 里");
+                run.font_size = (run.font_size * SMALL_CAPS_SCALE).max(1.0);
+                style = self.arena.intern(run);
+            }
+            let src = upper.as_deref().unwrap_or(src);
             let norm_start = self.text.len();
             let orig = if pre {
                 self.text.push_str(src);
@@ -1165,12 +1297,19 @@ impl<'a> Collector<'a> {
         let x_offset = sup_font.map_or(0.0, |cap| (cap * 0.18).max(1.5)) - overflow;
         let advance = w + x_offset * 2.0;
         // `vertical-align` 不继承，但图片在 `sup` 里面时，那个上标位移属于它所在的行内盒。
-        // 逐级把祖先的基线偏移加回来，`<sup><a><img></a></sup>` 这条链才不会丢。
-        let mut baseline_shift = style.baseline_shift;
-        for anc in self.dom.ancestors(node) {
+        // 逐级把祖先的基线偏移加回来，`<sup><a><img></a></sup>` 这条链才不会丢；
+        // `text-top` / `text-bottom` 也在这一个入口折成像素 —— 图片的「自己的上下沿」
+        // 是 `(高度, 0)`，不是字体度量。
+        let mut baseline_shift = match style.inline_valign {
+            InlineVAlign::Baseline => style.baseline_shift,
+            InlineVAlign::TextTop | InlineVAlign::TextBottom => {
+                self.inline_valign_shift(node, style, false, h, 0.0)
+            }
+        };
+        for ancestor in self.dom.ancestors(node) {
             baseline_shift += self
                 .styles
-                .get(anc)
+                .get(ancestor)
                 .map_or(0.0, |style| style.baseline_shift);
         }
         let href = match resolved {

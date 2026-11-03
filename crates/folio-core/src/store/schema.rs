@@ -549,4 +549,29 @@ ALTER TABLE books ADD COLUMN settings_updated_at INTEGER NOT NULL DEFAULT 0;
     r#"
 ALTER TABLE books ADD COLUMN font_charset TEXT NOT NULL DEFAULT '[]';
 "#,
+    // v29：**读者自己持有的那份口令**，按书的 content_hash 存，只在本机。
+    //
+    // 存在的理由：带口令的 PDF 每次开书、每取一页都要口令（正文与像素都不入库），
+    // 每次都问一遍读者会立刻弃用这条路。
+    //
+    // 为什么是一张**独立的表**而不是 `books` 上多一列：同步那条链的取数面是逐条 SELECT
+    // 写死的（`store::sync::collect_sync` 只碰 books / positions / annotations /
+    // bookmarks / sync_tombstones），快照是明文 JSON PUT 到 WebDAV，所以「口令不上同步」
+    // 这句话今天靠的是那份清单的纪律，而 `BOOK_COLUMNS` 多处共用、`book_by_hash` 正是
+    // 哪天最可能改成 `SELECT *` 的位置。独立一张表把这件事变成结构：它不在清单里，
+    // 也不会被顺手 JOIN 进 books。
+    //
+    // 键是 content_hash 而不是 book_id：导入在**落库之前**就要用它查（那一趟已经先算好了
+    // 哈希，见 `ingest::identity::sha256_of_path`），而哈希本来就是跨设备认书的唯一钥匙。
+    // 换一本书 = 换一个哈希 = 要重新输一次口令，这是刻意的：口令属于那份文件，不是那行记录。
+    //
+    // 明文存。与 `config.json` 里那几份 WebDAV 口令 / API key 同一信任域（同一个数据目录、
+    // 同一台设备、没有任何钥匙串可用），风险不新增。代价写在注释里，别处别再复制这份判断。
+    r#"
+CREATE TABLE book_passphrases (
+    book_hash  TEXT PRIMARY KEY,
+    passphrase TEXT    NOT NULL,
+    set_at     INTEGER NOT NULL
+);
+"#,
 ];

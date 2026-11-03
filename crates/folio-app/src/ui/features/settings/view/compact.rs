@@ -271,6 +271,9 @@ pub(crate) struct CompactSettings {
     /// 对「WebDAV 同步」状态实体的订阅。同步那趟在后台线程上结束，状态与计数靠
     /// 实体 notify 才能出现在设置页上。
     _sync_watch: Subscription,
+    /// 对「会员兑换」状态实体的订阅。那一趟在后台线程上结束，到期日与结果那句都要靠
+    /// 实体 notify 才出现在这一屏上。
+    _activation_watch: Subscription,
     /// 「更新日志」那张卡片。**本屏一份**：与桌面那一屏同一个形状 —— 关于那一页的按钮拿的是
     /// 这一个句柄，挂的也是这一屏，所以两屏同时活着时各收各的（理由写在 `notes_sheet` 顶部）。
     notes: Entity<NotesSheet>,
@@ -293,6 +296,8 @@ impl CompactSettings {
         let feedback_watch = cx.observe(&feedback, |_, _, cx| cx.notify());
         let sync = crate::ui::services::sync::entity(cx);
         let sync_watch = cx.observe(&sync, |_, _, cx| cx.notify());
+        let activation = crate::ui::services::activation::entity(cx);
+        let activation_watch = cx.observe(&activation, |_, _, cx| cx.notify());
         let notes = cx.new(NotesSheet::new);
         Self {
             screen: Screen::Root,
@@ -300,6 +305,7 @@ impl CompactSettings {
             _update_watch: update_watch,
             _feedback_watch: feedback_watch,
             _sync_watch: sync_watch,
+            _activation_watch: activation_watch,
             notes,
         }
     }
@@ -893,18 +899,21 @@ mod tests {
         let press =
             |cx: &mut TestAppContext| cx.update(|cx| view.update(cx, |this, cx| this.go_back(cx)));
         let shown = |cx: &mut TestAppContext| cx.read(|cx| view.read(cx).screen);
+        // 按页名取序号，不写死的 `2`：这一条问的是层级（选项屏 → 那一页 → 根屏），
+        // 与「第几页」无关，而导航顺序调过一次（会员置顶）之后写死的数就指到别处去了。
+        let page = SettingsPage::Layout.index();
 
         cx.update(|cx| {
             view.update(cx, |this, _| {
                 this.screen = Screen::Pick {
-                    page: 2,
+                    page,
                     group: 1,
                     row: 0,
                 };
             })
         });
         assert!(press(cx), "选项屏上按返回该被这一屏吃掉");
-        assert_eq!(shown(cx), Screen::Page(2), "退回的是它来的那一页");
+        assert_eq!(shown(cx), Screen::Page(page), "退回的是它来的那一页");
         assert!(press(cx), "子屏上按返回也该被吃掉");
         assert_eq!(shown(cx), Screen::Root);
         assert!(!press(cx), "已经在根屏就不该吞下返回，让外壳接着决定");
@@ -926,13 +935,15 @@ mod tests {
             |cx: &mut TestAppContext| cx.update(|cx| view.update(cx, |this, cx| this.go_back(cx)));
 
         assert!(!pushed(cx), "根屏就是「我的」这一格，底栏该在");
-        cx.update(|cx| view.update(cx, |this, cx| this.open(2, cx)));
+        // 同样按页名取：这一格不能是 Storage（`open` 对它另有安排），Layout 是一页普通的整屏。
+        let page = SettingsPage::Layout.index();
+        cx.update(|cx| view.update(cx, |this, cx| this.open(page, cx)));
         assert!(pushed(cx), "钻进某一页要吃满整窗");
 
         cx.update(|cx| {
             view.update(cx, |this, _| {
                 this.screen = Screen::Pick {
-                    page: 2,
+                    page,
                     group: 0,
                     row: 0,
                 };
@@ -1028,5 +1039,54 @@ mod tests {
             raised(cx),
             "手机那一屏也要挂上这张卡片，不然抬起来没有落位的地方"
         );
+    }
+
+    /// 手机端把「TXT 分章规则」这一屏**真画一帧**：一组里有一条关掉的出厂规则，
+    /// 另一组里有一条自定义规则（带模式与那颗删除钮）。
+    ///
+    /// 这条钉的不是画面而是「画得出」：那一屏的开关、名字、匹配方式、模式、编号、删除六格
+    /// 全是渲染时才跑的闭包，编译过不等于画得出来 —— 少一格在两端之一炸，真机上就是
+    /// 一点进去就闪退，而那正是最贵的一种红。
+    #[gpui_kit::test]
+    fn the_rules_screen_paints_a_frame_with_a_custom_rule(cx: &mut TestAppContext) {
+        use folio_core::content::format::novel::rules::{MatchKind, NumberingStyle};
+
+        cx.update(gpui_kit::init);
+        let mut built = None;
+        let handle: AnyWindowHandle = cx
+            .open_window(size(px(390.), px(844.)), |window, cx| {
+                ConfigHolder::install(Config::default(), cx);
+                let view = cx.new(CompactSettings::new);
+                built = Some(view.clone());
+                Root::new(view, window, cx)
+            })
+            .into();
+        let view = built.expect("这一屏该建起来");
+
+        cx.update(|app| {
+            view.update(app, |this, cx| {
+                this.open(SettingsPage::TxtRules.index(), cx)
+            });
+            ConfigHolder::edit_novel(app, |novel| {
+                novel.edits.off.push("番外".to_string());
+                novel
+                    .edits
+                    .extra
+                    .push(folio_core::content::format::novel::rules::Marker {
+                        name: "幕".to_string(),
+                        kind: MatchKind::Regex,
+                        pattern: Some(r"^\s*第[一二三]幕".to_string()),
+                        text: None,
+                        level: 1,
+                        numbering: NumberingStyle::Arabic,
+                        examples: Default::default(),
+                    });
+            });
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .expect("关一条 + 加一条之后，这一屏该画得出一帧");
     }
 }

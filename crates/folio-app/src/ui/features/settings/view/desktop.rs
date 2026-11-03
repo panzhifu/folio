@@ -41,6 +41,9 @@ pub struct SettingsView {
     /// 对「WebDAV 同步」状态实体的订阅。同步那趟在后台线程上结束，状态与计数靠
     /// 实体 notify 才能出现在设置页上。
     _sync_watch: Subscription,
+    /// 对「会员兑换」状态实体的订阅。那一趟在后台线程上结束，到期日与结果那句都要靠
+    /// 实体 notify 才出现在这一屏上。
+    _activation_watch: Subscription,
     /// 「更新日志」那张卡片。**本屏一份**：关于那一页的按钮拿的是这一个句柄，挂的也是这一屏，
     /// 所以从阅读页压进来的那一屏关掉卡片时，不会把底下那一屏的退场动画一起接管过去。
     notes: Entity<NotesSheet>,
@@ -64,12 +67,15 @@ impl SettingsView {
         let feedback_watch = cx.observe(&feedback, |_, _, cx| cx.notify());
         let sync = crate::ui::services::sync::entity(cx);
         let sync_watch = cx.observe(&sync, |_, _, cx| cx.notify());
+        let activation = crate::ui::services::activation::entity(cx);
+        let activation_watch = cx.observe(&activation, |_, _, cx| cx.notify());
         let notes = cx.new(NotesSheet::new);
         Self {
             _storage_watch: watch,
             _update_watch: update_watch,
             _feedback_watch: feedback_watch,
             _sync_watch: sync_watch,
+            _activation_watch: activation_watch,
             notes,
             initial: Some(page.index()),
         }

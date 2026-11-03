@@ -6,8 +6,8 @@
 use super::{
     BackgroundAttachment, BackgroundLayer, BackgroundPosition, BackgroundRepeat, BackgroundSize,
     BackgroundTile, BorderEdge, BorderStyle, BoxSizing, CellVAlign, Color, ComputedStyle,
-    Direction, Display, Hyphens, KNOWN_UNIMPLEMENTED, ObjectFit, Positioning, RubyAlign,
-    RubyPosition, TextAlign, TextJustify, WordBreak,
+    Direction, Display, Hyphens, InlineVAlign, KNOWN_UNIMPLEMENTED, ObjectFit, Positioning,
+    RubyAlign, RubyPosition, TextAlign, TextJustify, WordBreak,
 };
 use crate::content::format::css::Declaration;
 use crate::content::format::css::value::{
@@ -87,6 +87,8 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         line_height: parent.line_height,
         font_weight: parent.font_weight,
         font_italic: parent.font_italic,
+        // `font-variant` 在 CSS 里可继承：书里常在 `<body>` 或整段上写一次。
+        small_caps: parent.small_caps,
         font_family: parent.font_family.clone(),
         font_families: parent.font_families.clone(),
         text_align: parent.text_align,
@@ -525,13 +527,20 @@ pub(super) fn apply(
             // 所以写 `auto` 进样式表算「这条没接住」，进 ignored 计数。
             _ => false,
         },
-        "writing-mode" => match parse_writing_mode(value) {
-            Some(mode) => {
-                style.writing_mode = mode;
-                true
+        // 三个前缀都写同一格：EPUB / WebKit 的书常写 `-epub-` 或 `-webkit-`，
+        // 认不出前缀的后果是**整本竖排书横着排**（日文那本样本就是 `-webkit-`）。
+        "writing-mode" | "-epub-writing-mode" | "-webkit-writing-mode" => {
+            match parse_writing_mode(value) {
+                Some(mode) => {
+                    style.writing_mode = mode;
+                    true
+                }
+                None => false,
             }
-            None => false,
-        },
+        }
+        // `mixed` 是初值（横排字在竖排里不转、竖排标点按竖排摆），接受它等于没改任何东西；
+        // `upright` / `sideways` 要逐字形旋转，排版层还没有那条路，照实计不认识。
+        "text-orientation" => value.eq_ignore_ascii_case("mixed"),
         "text-align" => match value.to_ascii_lowercase().as_str() {
             // `start` / `end` 与 `left` / `right` 分开存：前者跟着 `direction` 翻边，
             // 后者是作者钉死的物理方向。合并成一档就是把 RTL 的书全左对齐的那处错。
@@ -633,27 +642,47 @@ pub(super) fn apply(
         }
         // `vertical-align` 有两副面孔：关键字是**表格格**的贴边（这一格不继承），
         // 长度 / 百分比 / `super` / `sub` 是行内盒相对基线的位移（`baseline_shift`）。
+        // `text-top` / `text-bottom` 要对齐父盒的字体上下沿，层叠期拿不到那份度量，
+        // 所以只记关键字，排版层折成像素（见 `ComputedStyle::inline_valign`）。
         "vertical-align" => match value.to_ascii_lowercase().as_str() {
             "top" => {
                 style.cell_valign = CellVAlign::Top;
+                style.inline_valign = InlineVAlign::Baseline;
+                style.baseline_shift = 0.0;
                 true
             }
             "middle" => {
                 style.cell_valign = CellVAlign::Middle;
+                style.inline_valign = InlineVAlign::Baseline;
+                style.baseline_shift = 0.0;
                 true
             }
             "bottom" => {
                 style.cell_valign = CellVAlign::Bottom;
+                style.inline_valign = InlineVAlign::Baseline;
+                style.baseline_shift = 0.0;
+                true
+            }
+            "text-top" => {
+                style.inline_valign = InlineVAlign::TextTop;
+                style.baseline_shift = 0.0;
+                true
+            }
+            "text-bottom" => {
+                style.inline_valign = InlineVAlign::TextBottom;
+                style.baseline_shift = 0.0;
                 true
             }
             "baseline" => {
                 style.cell_valign = CellVAlign::Top;
                 style.baseline_shift = 0.0;
+                style.inline_valign = InlineVAlign::Baseline;
                 true
             }
             _ => match parse_baseline_shift(value, own, root_px, style.line_height) {
                 Some(px) => {
                     style.baseline_shift = px;
+                    style.inline_valign = InlineVAlign::Baseline;
                     true
                 }
                 None => false,
@@ -945,7 +974,8 @@ pub(super) fn apply(
             style.link = link;
             true
         }
-        // 定位。`static` 是初值；`absolute` / `fixed` 脱流并按四个偏移摆（见 [`Positioning`]）。
+        // 定位。`static` 是初值；`absolute` / `fixed` 脱流并按四个偏移摆（见 [`Positioning`]）；
+        // `relative` 留在流内，只把自己那一坨整体挪一下（偏移读在 `layout::collect`）。
         "position" => match value.to_ascii_lowercase().as_str() {
             "static" => {
                 style.position = Positioning::Static;
@@ -957,6 +987,10 @@ pub(super) fn apply(
             }
             "fixed" => {
                 style.position = Positioning::Fixed;
+                true
+            }
+            "relative" => {
+                style.position = Positioning::Relative;
                 true
             }
             _ => false,
@@ -1057,6 +1091,12 @@ pub(super) fn apply(
             style.color = parent.color;
             true
         }
+        // `initial` 是 CSS 的初始值。这里落成 `None` 而不是写死黑色：`None` 的意思
+        // 正是「读者主题的正文色」，暗色主题下写死黑字等于把这一行藏掉。
+        "color" if value.eq_ignore_ascii_case("initial") => {
+            style.color = None;
+            true
+        }
         "color" => match parse_color(value) {
             Some(c) => {
                 style.color = Some(c);
@@ -1118,10 +1158,22 @@ pub(super) fn apply(
         // 所以这两个值判「接住了」，其余值（`url(…)`、`inside`）判不认识 —— 与
         // `background-clip: border-box` 那一档同一条规矩：值的效果等于默认行为才算接住。
         // 《蛇结》51 个 `li` 写的正是这两个初值，从前被记成 102 条「认得不生效」。
-        // 字体特性那两档的**初值**就是我们做的事（不启用任何特性），所以只收 `normal`，
-        // 其余值判不认识 —— 与 `list-style` 的先例同一条规矩。
-        // 《乌合之众》157 个元素写的正是 `font-variant: normal`。
-        "font-variant" | "font-variant-caps" => value.eq_ignore_ascii_case("normal"),
+        // 字体特性那一档只收两条：`normal`（初值，什么都不启用）与 `small-caps`
+        // （排版层把小写换成大写、字号乘 0.8）。其余 `petite-caps` / `all-small-caps`
+        // 那一族判不认识 —— 与 `list-style` 的先例同一条规矩。
+        // 《乌合之众》157 个元素写的正是 `font-variant: normal`；
+        // 《傲慢与偏见》9 个 `.smcap` 写的是 `small-caps`。
+        "font-variant" | "font-variant-caps" => match value.to_ascii_lowercase().as_str() {
+            "normal" => {
+                style.small_caps = false;
+                true
+            }
+            "small-caps" => {
+                style.small_caps = true;
+                true
+            }
+            _ => false,
+        },
         // OEB 1.x 的栏数（`columns` 的前身）。`1` 就是不分栏 —— 正是我们的行为；
         // 其余值要的是作者块级多栏，还没接。《西游记》2 个元素写的 `oeb-column-number: 1`。
         "oeb-column-number" => value.trim() == "1",

@@ -12,6 +12,7 @@
 //! - [`types`] —— 对外那一行的形状。
 //! - [`books`] —— 书目与书架：入库、查询、删除、进度、分组。
 //! - [`content`] —— 正文与页表：整本落库/读回、正文压缩。
+//! - [`passphrases`] —— 读者自己那份口令（本机、按 content_hash，**刻意不进同步**）。
 //! - [`annotations`] / [`bookmarks`] / [`collections`] / [`reading`] / [`translations`] —— 批注 / 书签 / 集合 / 阅读统计 / 翻译缓存。
 //!
 //! 拆文件不拆实体：`Store` 还是一个类型、一把锁。**跨文件访问 `conn` 是允许的**
@@ -31,6 +32,7 @@ mod bookmarks;
 mod books;
 mod collections;
 mod content;
+mod passphrases;
 mod reading;
 mod schema;
 mod sync;

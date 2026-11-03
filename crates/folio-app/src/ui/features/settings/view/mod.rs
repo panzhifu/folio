@@ -65,6 +65,7 @@ use pages::storage::storage_page;
 use pages::sync::sync_page;
 use pages::toc::toc_page;
 use pages::translation::translation_page;
+use pages::txt_rules::txt_rules_page;
 use pages::typography::typography_page;
 
 /// 「打开所在文件夹」那颗按钮：设置页两格共用（配置文件在哪儿、自定义主题往哪个目录放
@@ -91,6 +92,7 @@ pub(in crate::ui::features::settings) fn open_folder_button(
 /// 并与 [`ALL`](Self::ALL)、[`spec_pages`] 一起动。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsPage {
+    Membership,
     Appearance,
     Typography,
     Layout,
@@ -99,9 +101,9 @@ pub enum SettingsPage {
     Translation,
     Sync,
     Library,
+    TxtRules,
     Toc,
     Storage,
-    Membership,
     About,
 }
 
@@ -109,13 +111,19 @@ impl SettingsPage {
     /// 全部页面，按导航顺序。
     ///
     /// `About` 排在末尾是刻意的：这一页不改任何东西，是读者**办完事顺手看一眼**的东西，
-    /// 摆在最上面等于让每天要调的那几页往下挪一格。`Membership` 紧挨着它，理由同一半：
-    /// 读者一天不会调两次会员，而手机上那一屏另有根屏那张卡片当入口（见 `compact.rs`）。
+    /// 摆在最上面等于让每天要调的那几页往下挪一格。
+    ///
+    /// `Membership` 排在最上面（2026-11-03 这一版定的）。这一格从前紧挨 `About`，理由是
+    /// 「一天不会调两次会员」；把它抬到第一格的是产品口径不是使用频次 —— 会员是**要不要开通**
+    /// 的那个决定，读者找它时不该先扫过十来格才看见。手机端不受这条影响：那一屏的会员是
+    /// 根顶上单独一张卡（当场念等级与到期日），入口列表按 [`SettingsPage::index`] 把它跳过
+    /// （见 `compact.rs` 的 `root_screen`），所以置顶在手机上只是列表里少一格，画面不变。
     ///
     /// 变体顺序就是侧栏顺序，而深链靠 [`index`](Self::index) 现算 —— 挪位置不会指错页，
     /// 但会让「第 N 页」这句话在别处（测试、日志、旧截图）对不上，所以三处顺序
-    /// （本枚举、`ALL`、[`spec_pages`]）必须一起动。
-    pub const ALL: [SettingsPage; 12] = [
+    /// （本枚举、`ALL`、[`spec_pages`]）必须一起动；用例里也别写死的序号，要按页名取。
+    pub const ALL: [SettingsPage; 13] = [
+        SettingsPage::Membership,
         SettingsPage::Appearance,
         SettingsPage::Typography,
         SettingsPage::Layout,
@@ -124,9 +132,9 @@ impl SettingsPage {
         SettingsPage::Translation,
         SettingsPage::Sync,
         SettingsPage::Library,
+        SettingsPage::TxtRules,
         SettingsPage::Toc,
         SettingsPage::Storage,
-        SettingsPage::Membership,
         SettingsPage::About,
     ];
 
@@ -139,6 +147,8 @@ impl SettingsPage {
 
 /// 两端共用的页面规格。手机（[`compact`]）直接渲染这一份，桌面经 [`pages`] 映射。
 ///
+/// 顺序与 [`SettingsPage::ALL`] 一格对一格 —— 那一头的下标就是从这份 Vec 的位置来的。
+///
 /// `notes` 是**调用那一屏自己的**「更新日志」卡片句柄：只有「关于」那一页用它，而那一页的
 /// 每一格是在渲染时才跑取值闭包的，规格里没法事后去找「我挂在哪一屏上」。
 pub(in crate::ui::features::settings) fn spec_pages(
@@ -146,6 +156,7 @@ pub(in crate::ui::features::settings) fn spec_pages(
     notes: &Entity<NotesSheet>,
 ) -> Vec<spec::Page> {
     vec![
+        membership_page(cx),
         appearance_page(cx),
         typography_page(cx),
         layout_page(cx),
@@ -154,9 +165,9 @@ pub(in crate::ui::features::settings) fn spec_pages(
         translation_page(cx),
         sync_page(cx),
         library_page(cx),
+        txt_rules_page(cx),
         toc_page(cx),
         storage_page(cx),
-        membership_page(cx),
         about_page(cx, notes),
     ]
 }
@@ -366,6 +377,12 @@ mod tests {
                 tr(cx, "page.membership"),
                 "`SettingsPage::ALL` 里会员的位置与 `spec_pages` 组装的顺序错开了"
             );
+            // 置顶本身也是钉住的东西：这是 2026-11-03 定下的产品位置（要开通的那一格摆在
+            // 第一眼看得到处），谁顺手把它挪回末尾都不该没人说。
+            assert_eq!(
+                ix, 0,
+                "会员现在是侧栏第一格；真要把每天调的那几页提到它前面，得先改掉这条"
+            );
         });
     }
 
@@ -379,29 +396,225 @@ mod tests {
             let index = SettingsPage::Translation.index();
             let notes = card(cx);
 
+            let titles = |cx: &App| {
+                spec_pages(cx, &notes)[index]
+                    .groups
+                    .iter()
+                    .map(|group| group.title.clone())
+                    .collect::<Vec<_>>()
+            };
+
             let google = spec_pages(cx, &notes);
             let page = &google[index];
             assert_eq!(page.title, tr(cx, "page.translation"));
-            assert_eq!(page.groups.len(), 1, "Google 免 key 没有私有参数");
+            assert_eq!(page.groups.len(), 2, "输出 + AI（AI 那一组永远在尾上）");
             assert_eq!(page.groups[0].rows.len(), 2, "译成 + 引擎");
+            assert_eq!(
+                page.groups[1].title,
+                tr(cx, "group.ai"),
+                "Google 免 key 没有私有参数，但 AI 那一组照摆 —— 「要不要用」与端点无关"
+            );
+            assert_eq!(page.groups[1].rows.len(), 3, "启用 / 模型 / 端点在哪儿");
 
             ConfigHolder::edit_translation(cx, |translation| {
                 translation.engine = folio_core::TranslationEngine::OpenAi
             });
             let openai = spec_pages(cx, &notes);
             let page = &openai[index];
-            assert_eq!(page.groups.len(), 2);
+            assert_eq!(page.groups.len(), 3);
             assert_eq!(page.groups[1].title, tr(cx, "group.translation_openai"));
             assert_eq!(page.groups[1].rows.len(), 3, "地址 / 模型 / Key");
+            assert_eq!(page.groups[2].title, tr(cx, "group.ai"), "AI 仍排在最后");
 
             ConfigHolder::edit_translation(cx, |translation| {
                 translation.engine = folio_core::TranslationEngine::DeepL
             });
             let deepl = spec_pages(cx, &notes);
             let page = &deepl[index];
-            assert_eq!(page.groups.len(), 2);
+            assert_eq!(page.groups.len(), 3);
             assert_eq!(page.groups[1].title, tr(cx, "group.translation_deepl"));
             assert_eq!(page.groups[1].rows.len(), 1, "只有 Key");
+
+            // 翻译用 DeepL 而 AI 开着：端点那三格必须有落点，否则「共用一份端点」
+            // 这句话就没有兑现的地方 —— 那条句写在 `ai_group` 上，这里钉它。
+            ConfigHolder::edit_ai(cx, |ai| ai.enabled = true);
+            assert_eq!(
+                titles(cx),
+                vec![
+                    tr(cx, "group.translation_output"),
+                    tr(cx, "group.translation_deepl"),
+                    tr(cx, "group.translation_openai"),
+                    tr(cx, "group.ai"),
+                ],
+                "AI 开着时 OpenAI 那一组长出来，且排在 AI 之前"
+            );
+        });
+    }
+
+    /// 同步那一屏固定三组：WebDAV 的字段、WebDAV 的状态与两颗钮、然后是局域网那一整组。
+    ///
+    /// 钉的是**形状与顺序**：局域网那一组少了，读者就没有地方填那串要抄到对面去的密钥；而它
+    /// 排在**最后**，因为读者熟悉的「测试连接 / 立即同步」一往下挪，在放不下整页的窗口里就
+    /// 落到折叠线以下 —— 症状是「按钮不见了」。「有密钥」与「没有密钥」之间行数不该变：变的
+    /// 是校验码那一行的内容（没有密钥时那里是那颗生成钮，有了之后那颗钮必须消失，再留着就是
+    /// 递给读者一把能把自己从账号里摘出去的东西）。整趟往返的门在 `folio_core::net::lansync`
+    /// 与 `net::transfer::lan` 那两条用例里，这里不重复。
+    #[gpui_kit::test]
+    fn the_sync_page_carries_both_routes_with_the_local_one_last(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            let notes = card(cx);
+            let index = SettingsPage::Sync.index();
+
+            let page = &spec_pages(cx, &notes)[index];
+            assert_eq!(page.title, tr(cx, "page.sync"));
+            assert_eq!(page.groups.len(), 3, "WebDAV / 状态 / 局域网");
+            assert_eq!(page.groups[0].title, tr(cx, "group.sync_server"));
+            assert_eq!(
+                page.groups[0].rows.len(),
+                5,
+                "WebDAV 那一组不该被新增的一组挤掉任何一行：开关 / 地址 / 账号 / 密码 / 目录"
+            );
+            // 状态那一组紧跟 WebDAV 的字段：读者熟悉的「测试连接 / 立即同步」不该往下挪。
+            assert_eq!(page.groups[1].title, tr(cx, "group.sync_state"));
+            assert_eq!(page.groups[2].title, tr(cx, "group.sync_lan"));
+            assert_eq!(
+                page.groups[2].rows.len(),
+                5,
+                "开关 / 校验码 / 密钥 / 对端地址 / 状态"
+            );
+
+            ConfigHolder::edit_account(cx, |account| {
+                account.enabled = true;
+                account.key = "0123456789abcdef0123456789abcdef".into();
+                account.peer = "192.168.1.5:8410".into();
+            });
+            let page = &spec_pages(cx, &notes)[index];
+            assert_eq!(
+                page.groups[2].rows.len(),
+                5,
+                "填上密钥不该让这一组多一行或少一行"
+            );
+            assert_eq!(page.groups.len(), 3, "两边都在屏上，不是一家独大");
+        });
+    }
+
+    /// TXT 分章规则那一屏的**行数规矩**：出厂那一组不随开关变少（列里没了就没法再打开），
+    /// 阈值那一组永远五格，自定义那一组只往尾上加。
+    ///
+    /// 两端的输入框状态按（页、组、行）键控，所以这三条破任何一条，读者正打字的那一格就会
+    /// 错位到别的规则上去 —— 症状是名字填进了另一条规则，那是最难从截图看出来的错。
+    #[gpui_kit::test]
+    fn the_rules_page_keeps_its_rows_while_the_reader_edits(cx: &mut TestAppContext) {
+        use folio_core::content::format::novel::rules;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            let notes = card(cx);
+            let index = SettingsPage::TxtRules.index();
+            let counts = |cx: &App| {
+                spec_pages(cx, &notes)[index]
+                    .groups
+                    .iter()
+                    .map(|group| group.rows.len())
+                    .collect::<Vec<_>>()
+            };
+            let before = counts(cx);
+            assert_eq!(
+                before.len(),
+                4,
+                "四组：出厂规则 / 阈值 / 这张表 / 我加的规则"
+            );
+            assert_eq!(
+                before[0],
+                rules::builtin_table().markers.len(),
+                "出厂那十几条该一条不落全摆出来"
+            );
+            assert_eq!(
+                before[1], 5,
+                "阈值五格：最少章节、章名最长、中位最短、目录连排、目录间隔"
+            );
+            assert_eq!(
+                before[3], 1,
+                "还没有自定义条目时，那一组只剩「加一条」那颗钮"
+            );
+
+            ConfigHolder::edit_novel(cx, |novel| novel.edits.off.push("番外".to_string()));
+            assert_eq!(
+                counts(cx),
+                before,
+                "关掉一条不许让那一组少一行，否则再也打不开它"
+            );
+
+            ConfigHolder::edit_novel(cx, |novel| {
+                novel.edits.extra.push(rules::Marker {
+                    name: "幕".to_string(),
+                    kind: rules::MatchKind::Literal,
+                    pattern: None,
+                    text: Some("幕".to_string()),
+                    level: 1,
+                    numbering: rules::NumberingStyle::Either,
+                    examples: Default::default(),
+                });
+            });
+            let after = counts(cx);
+            assert_eq!(
+                &after[..3],
+                &before[..3],
+                "自定义条目只进最后一组：插在前面会把正打字那一格错位到别的规则上"
+            );
+            assert_eq!(
+                after[3],
+                before[3] + 6,
+                "一条自定义规则该有六格：开关 / 名字 / 怎么匹配 / 模式 / 编号怎么读 / 删除"
+            );
+        });
+    }
+
+    /// 阈值填成**与出厂那个数一样**时，配置里不该留下这条改动。
+    ///
+    /// 差量里存一条与出厂相同的值没有任何作用，却会让以后出厂调那一格时被这份旧数盖回去 ——
+    /// 那一格从此对这位读者永久失效，而屏上看着是他自己填的。
+    #[gpui_kit::test]
+    fn a_gate_value_equal_to_the_shipped_one_is_not_recorded(cx: &mut TestAppContext) {
+        use folio_core::content::format::novel::rules;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            let notes = card(cx);
+            let title = tr(cx, "field.rules_min_chapters");
+            let shipped = rules::builtin_table().gates.min_chapters as f32;
+            let write = |cx: &mut App, value: f32| {
+                let pages = spec_pages(cx, &notes);
+                let page = &pages[SettingsPage::TxtRules.index()];
+                for row in page.groups.iter().flat_map(|group| &group.rows) {
+                    if row.title == title {
+                        let spec::RowKind::Number { set, .. } = &row.kind else {
+                            panic!("这一格该是数值行");
+                        };
+                        set(value, cx);
+                        return;
+                    }
+                }
+                panic!("阈值那一组里找不着「{title}」这一行");
+            };
+
+            write(cx, shipped);
+            assert_eq!(
+                ConfigHolder::novel(cx).edits.gates.min_chapters,
+                None,
+                "填回出厂那个数不该在差量里留一条改动"
+            );
+
+            write(cx, shipped + 4.0);
+            assert_eq!(
+                ConfigHolder::novel(cx).edits.gates.min_chapters,
+                Some(shipped as usize + 4),
+                "真的改了数就该记下来，而且记的是**新值**不是差值"
+            );
         });
     }
 }

@@ -202,6 +202,9 @@ pub struct ImportReport {
     pub duplicate: usize,
     pub unsupported: usize,
     pub encrypted: usize,
+    /// 要读者手上那份口令。与 `encrypted` 分开只为一句话：**这一档可以再交一次**。
+    /// 界面据它决定要不要问口令并把同一批重跑；`encrypted` 那一档永远没有这个按钮。
+    pub needs_password: usize,
     pub corrupt: usize,
     pub unreadable: usize,
 }
@@ -217,6 +220,7 @@ impl ImportReport {
                 Err(err) => match err.import_reject() {
                     Some(ImportReject::UnsupportedFormat) => report.unsupported += 1,
                     Some(ImportReject::Encrypted) => report.encrypted += 1,
+                    Some(ImportReject::NeedsPassword) => report.needs_password += 1,
                     Some(ImportReject::CorruptContainer) => report.corrupt += 1,
                     // 认不出类别的也算「读不动」：它确实没能变成一行记录，而报表不许
                     // 悄悄少算一本 —— 少算的那本读者只会看见「少了几本」。
@@ -229,16 +233,17 @@ impl ImportReport {
 
     /// 被拒的总数，报表那句「拒绝 K」。
     pub fn rejected(&self) -> usize {
-        self.unsupported + self.encrypted + self.corrupt + self.unreadable
+        self.unsupported + self.encrypted + self.needs_password + self.corrupt + self.unreadable
     }
 
     /// 一句给人看的话（进日志；屏幕上那句是 [`Self::rejection_line`]，按 locale 组）。
     pub fn summary(&self) -> String {
         format!(
-            "成功 {} / 已存在 {} / 拒绝 {}（不支持 {}、加密 {}、坏包 {}、读不动 {}）",
+            "成功 {} / 已存在 {} / 拒绝 {}（要口令 {}、不支持 {}、加密 {}、坏包 {}、读不动 {}）",
             self.added,
             self.duplicate,
             self.rejected(),
+            self.needs_password,
             self.unsupported,
             self.encrypted,
             self.corrupt,
@@ -249,10 +254,13 @@ impl ImportReport {
     /// 屏幕上那一句「有几本没进来、为什么」。全批没有拒绝时是 `None` —— 没事不要说话。
     ///
     /// 形状是「总数 · 类别 · 类别」，只摆**非零**的那几格，顺序固定：
-    /// 加密 → 坏包 → 不支持 → 读不动。逐本的名字不在这里（那要在日志里，
+    /// 要口令 → 加密 → 坏包 → 不支持 → 读不动。逐本的名字不在这里（那要在日志里，
     /// `ShelfView: 导入《名字》失败`），屏幕上读者要的是「几本、为什么」。
     ///
-    /// 四格与 [`Self`] 那四个类别一一对应，**加一类要同时加文案键**：漏一格的后果是
+    /// 「要口令」排最前是有意的：它是这几格里**唯一读者动手就能救回来**的一档
+    /// （输进去就导入成功），排在最后等于让读者先读完四条「没救」再看到那条有救的。
+    ///
+    /// 五格与 [`Self`] 那五个类别一一对应，**加一类要同时加文案键**：漏一格的后果是
     /// 这一类书被静默少算，而读者只会看见「少了几本」。
     pub fn rejection_line(&self, locale: Locale) -> Option<String> {
         let total = self.rejected();
@@ -261,6 +269,7 @@ impl ImportReport {
         }
         let mut line = phrase(locale, "shelf.import_rejected", total);
         for (key, count) in [
+            ("shelf.reject_needs_password", self.needs_password),
             ("shelf.reject_encrypted", self.encrypted),
             ("shelf.reject_corrupt", self.corrupt),
             ("shelf.reject_unsupported", self.unsupported),

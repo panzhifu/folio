@@ -21,7 +21,7 @@ DOM → CSS 子集 → 排版的流水线，踩在 GPUI 的文本原语（shapin
 
 - **懂书的引擎** —— 可重排与定版式两种文档共用同一套锚点；阅读位置记的是章内字符
   偏移而不是页码，所以改字号、拖窗口之后还能回到原处。
-- **21 种格式、30 个扩展名** —— 见下面那张表。
+- **21 种格式、33 个扩展名** —— 见下面那张表。
 - **三种阅读模式** —— 连续滚动、分页、双页对开（窗口不够宽时自动退回单页）；
   定版式的书走逐页模式，能放大、能分享、能保存。
 - **听书** —— 底栏一颗键，从你正在看的那一段念起：念完自动接下一段、翻到那一屏，
@@ -36,7 +36,7 @@ DOM → CSS 子集 → 排版的流水线，踩在 GPUI 的文本原语（shapin
 
 | 状态 | 格式 |
 |---|---|
-| 可重排，完整可读 | EPUB（含定版式）、MOBI / AZW / AZW3 / PRC（KF7 + KF8，含 hybrid）、FB2、TXT、Markdown、HTML / MHTML / HTMLZ、RTF、DOCX、老 DOC、ODT、PDB / PalmDoc、CHM |
+| 可重排，完整可读 | EPUB（含定版式）、MOBI / AZW / AZW3 / PRC（KF7 + KF8，含 hybrid）、FB2（含 `.fb2.zip` / `.fbz`）、TXT、Markdown、HTML / MHTML / HTMLZ、RTF、DOCX（含 `.dotx` / `.docm`）、老 DOC、ODT（含 `.ott`）、PDB / PalmDoc、CHM |
 | 定版式，逐页 | PDF、AZW4（PalmDB 内嵌 PDF）、DjVu（纯 Rust 解码，两种容器形状都读；NAVM 书签上屏当目录）、CBZ / CB7 / CBR / CBT（CBR 走纯 Rust 的 RAR 读取） |
 | 部分支持 | PDF / AZW4 / DjVu 在文件自带文字层时能选中、能批注、能搜到；没有字的那一页（扫描件没带 OCR，或 PDF 页的 `/Rotate` 不为 0）选不出东西。Word 靠样式间接触发的编号与每节从头再数的编号、ODT 的 `text:continue-numbering` 暂不跟随 |
 | 不支持 | 加 DRM 的书（DRM 标记的 PDB 会认出来并报告，不解密）、加密 RAR |

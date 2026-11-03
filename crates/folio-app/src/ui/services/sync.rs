@@ -136,6 +136,24 @@ fn client(config: &SyncConfig) -> Result<dav::Client, Failure> {
     Ok(dav::Client::new(endpoint, transport()))
 }
 
+/// 这台安装的稳定 id：第一次要用到时生成并留下，之后每一趟都读同一个。
+///
+/// 它在 WebDAV 那一侧是远端那份快照的文件名（`<device_id>.json`），在局域网那一侧是快照上的署名
+/// —— 「这台安装」是同一件事，所以两条路共用一份 id、只生成一次。
+///
+/// 回 `None` 只在**配置里那一格已经写了东西、而它不成形状**时：人改过的文件不该被我们悄悄换成
+/// 一个新 id（那等于把读者在远端留下的那一份孤儿化，从此对面读不到它），也不该继续用它 —— 这一格
+/// 要当文件名，一个斜杠就能把一台设备写到别的目录去。报错比猜意图便宜。
+pub fn ensure_device_id(cx: &mut App) -> Option<String> {
+    let current = ConfigHolder::sync(cx).device_id;
+    if !current.is_empty() {
+        return sync::valid_device_id(&current).then_some(current);
+    }
+    let id = sync::new_device_id();
+    ConfigHolder::edit_sync(cx, |config| config.device_id = id.clone());
+    Some(id)
+}
+
 /// 「立即同步」。已经在飞时什么都不做（按钮那边同时会禁用）。
 pub fn sync_now(cx: &mut App) {
     let state = entity(cx);
@@ -163,17 +181,13 @@ pub fn sync_now(cx: &mut App) {
             return;
         }
     };
-    if config.device_id.is_empty() {
-        let id = sync::new_device_id();
-        ConfigHolder::edit_sync(cx, |sync| sync.device_id = id.clone());
-        config.device_id = id;
-    }
-    if !sync::valid_device_id(&config.device_id) {
+    let Some(id) = ensure_device_id(cx) else {
         state.update(cx, |state, cx| {
             state.begin(Status::Failed(Failure::Config), cx)
         });
         return;
-    }
+    };
+    config.device_id = id;
 
     state.update(cx, |state, cx| state.begin(Status::Syncing, cx));
     let dir = config.remote_dir.clone();

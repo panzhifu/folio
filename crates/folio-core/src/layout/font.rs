@@ -61,6 +61,10 @@ pub struct RunStyle {
     pub font_size: f32,
     /// 倍数，不是像素。
     pub line_height: f32,
+    /// `font-variant: small-caps`。文本在收集阶段已经换成 uppercase、字号乘了
+    /// [`SMALL_CAPS_SCALE`]；这一格留着是给绘制与命中的旁路读（例如将来要按原始
+    /// 大小写画不同字形时）。原文仍在 DOM 里，选区与复制不受影响。
+    pub small_caps: bool,
     pub color: Option<Color>,
     /// 每个空格之后额外加的宽度（px），来自 CSS 的 `word-spacing`。
     pub word_spacing: f32,
@@ -90,6 +94,7 @@ impl std::hash::Hash for RunStyle {
         // 而样式值来自层叠结果、不会是 NaN（分母已在计算处兜底）。
         self.font.hash(state);
         self.font_size.to_bits().hash(state);
+        self.small_caps.hash(state);
         self.line_height.to_bits().hash(state);
         self.color.hash(state);
         self.word_spacing.to_bits().hash(state);
@@ -171,6 +176,7 @@ impl RunStyle {
         Self {
             font: Arc::new(FontKey::of(style)),
             font_size: style.font_size,
+            small_caps: style.small_caps,
             line_height: style.line_height,
             color: style.color,
             word_spacing: style.word_spacing.max(0.0),

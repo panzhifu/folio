@@ -50,6 +50,19 @@ pub enum Error {
     #[error("《{name}》带 DRM 加密，读不了：换一本没有加密的文件")]
     Encrypted { name: String, method: String },
 
+    /// 文件用**读者手里的那份口令**锁着：输对了就是一本正常的书。
+    ///
+    /// 与 [`Error::Encrypted`] 分成两条，理由只有一句：**这一条重做一次可能会成**。
+    /// 那边的意思是「这本书永远解不开，读者的动作是换一本」，这边的意思是「界面该问
+    /// 一句口令」。合成一条的后果是报表里那一栏既不能提示输入、也不能提示换文件。
+    ///
+    /// 只有 PDF 那一族会从这里冒出来（`format::pdf::failure`，且只认引擎的
+    /// `DecryptionError::PasswordProtected` 那一档）。MOBI / EPUB 的 DRM 走
+    /// [`Error::Encrypted`] 且永远不走这一条：那边的密钥要从读者的**注册身份**（PID）
+    /// 派生，不是他手上的一份口令。
+    #[error("《{name}》要口令才能打开")]
+    NeedsPassword { name: String },
+
     #[error("没有这本书：{0}")]
     NoSuchBook(i64),
 
@@ -115,6 +128,10 @@ pub enum ImportReject {
     /// 容器读得动，内容被 DRM 锁着。与上面三档的区别是**重扫一万次也不会变好**：
     /// 「这一版读不动」是我们将来的事，「有 DRM」是这本书永远的事。
     Encrypted,
+    /// 要读者手里那份口令。从 `Encrypted` 分出来只为一件事：**这一档可以再交一次**
+    /// （界面问一句口令、重跑同一批），而 `Encrypted` 永远不可以。报表、文案、
+    /// 界面上那颗按钮的语义全都挂在这一条分界上。
+    NeedsPassword,
 }
 
 impl Error {
@@ -127,6 +144,7 @@ impl Error {
             Error::Rejected { reject, .. } => Some(*reject),
             Error::UnsupportedFormat(_) => Some(ImportReject::UnsupportedFormat),
             Error::Encrypted { .. } => Some(ImportReject::Encrypted),
+            Error::NeedsPassword { .. } => Some(ImportReject::NeedsPassword),
             _ => None,
         }
     }

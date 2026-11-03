@@ -7,7 +7,7 @@
 //!
 //! 手势与键鼠两端的含义：
 //!
-//! - **触屏**：手指平移（平台把它翻成 `ScrollWheelEvent`）在铺满那一档横扫切一张、
+//! - **触屏**：手指平移（平台把它翻成 `ScrollEvent`）在铺满那一档横扫切一张、
 //!   放大之后两轴平移，而**一趟手势只切一张**（见 [`Looking::swiped`]）；捏合缩放。
 //! - **桌面**：滚轮缩放（横向滚轮切图）、按住拖动平移、左右方向键切图、`ctrl`/`cmd` +
 //!   滚轮也缩放。轮盘与手指走的是同一个事件通道，判据在 `crate::ui::host::has_mouse_wheel`。
@@ -55,9 +55,9 @@ use gpui_kit::component::{Icon, h_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EntityId, FocusHandle,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, PinchEvent, ScrollDelta,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled, StyledImage,
-    TestSupportExt as _, TouchPhase, Window, canvas, div, hsla, img, px,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, PinchEvent, ScrollDelta, ScrollEvent,
+    SharedString, StatefulInteractiveElement as _, Styled, StyledImage, TestSupportExt as _,
+    TouchPhase, Window, canvas, div, hsla, img, px,
 };
 
 use crate::ui::features::reader::model::session::{ReaderSession, Source};
@@ -717,7 +717,7 @@ pub fn overlay(
         // 这一端是不是真鼠标滚轮。每帧读一次而不是事件里现问：`has_mouse_wheel`
         // 读的是应用全局，两处都是同一条路。
         let wheel = crate::ui::host::has_mouse_wheel(cx);
-        move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut App| {
+        move |event: &ScrollEvent, window: &mut Window, cx: &mut App| {
             let (dx, dy) = match event.delta {
                 ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
                 ScrollDelta::Lines(delta) => (delta.x * WHEEL_STEP, delta.y * WHEEL_STEP),
@@ -888,7 +888,7 @@ pub fn overlay(
             // `dismiss_chrome` 会先收这一层）关掉这一层。点空白关掉会让读者
             // 「缩着缩着松手一下就退出」，而移动端上没有右键撤销这一档。
             .on_pinch(on_pinch)
-            .on_scroll_wheel(on_scroll)
+            .on_scroll(on_scroll)
             .on_mouse_down(MouseButton::Left, on_down)
             .on_mouse_move(on_move)
             .on_mouse_up(MouseButton::Left, on_up)
@@ -950,7 +950,7 @@ pub fn overlay(
 ///
 /// 缩放量按像素比例给（一「格」滚轮 = [`WHEEL_STEP`] 像素 ⇒ [`ZOOM_STEP`] 成），
 /// 所以触控板的连续滚动不会一下冲到底。
-fn on_wheel(viewer: &mut ImageViewer, event: &ScrollWheelEvent, dx: f32, dy: f32) -> bool {
+fn on_wheel(viewer: &mut ImageViewer, event: &ScrollEvent, dx: f32, dy: f32) -> bool {
     if event.modifiers.control || event.modifiers.platform {
         return viewer.zoom_by(if dy > 0.0 { -ZOOM_STEP } else { ZOOM_STEP });
     }
@@ -1232,7 +1232,7 @@ mod view_tests {
         AnyWindowHandle, AppContext as _, Context, Entity, EntityId, FocusHandle, InputEvent as _,
         InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
         MouseUpEvent, ParentElement as _, PinchEvent, Pixels, PlatformInput, Point, Render,
-        ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Subscription,
+        ScrollDelta, ScrollEvent, StatefulInteractiveElement as _, Styled as _, Subscription,
         TestAppContext, TouchPhase, Window, div, point, px, size,
     };
 
@@ -1513,7 +1513,7 @@ mod view_tests {
         dispatch(
             cx,
             handle,
-            ScrollWheelEvent {
+            ScrollEvent {
                 position: CENTER,
                 delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
                 touch_phase,
@@ -1529,7 +1529,7 @@ mod view_tests {
         dispatch(
             cx,
             handle,
-            ScrollWheelEvent {
+            ScrollEvent {
                 position: CENTER,
                 delta: ScrollDelta::Lines(point(dx, dy)),
                 touch_phase: TouchPhase::Moved,

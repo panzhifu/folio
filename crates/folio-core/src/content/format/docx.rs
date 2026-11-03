@@ -47,7 +47,13 @@ impl DocumentProvider for DocxAdapter {
     }
 
     fn supports(&self, path: &Path) -> bool {
-        matches!(super::extension_of(path).as_deref(), Some("docx"))
+        // `.dotx` / `.docm` 是同一个 OOXML 包：正文都在 `word/document.xml`，
+        // 差别只在 `[Content_Types].xml` 里声明的文档类型（模板 / 启用宏），
+        // 对读数没有影响。
+        matches!(
+            super::extension_of(path).as_deref(),
+            Some("docx" | "dotx" | "docm")
+        )
     }
 
     fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
@@ -1043,6 +1049,29 @@ mod tests {
         }
         zip.finish().unwrap();
         path
+    }
+
+    /// `.dotx` / `.docm` 与 `.docx` 同一个包：扩展名要认领，正文也要真读得出来。
+    /// 这里直接把一份合成 docx 改成那两个名字 —— 判定层另有门钉包内形状。
+    #[test]
+    fn template_and_macro_packages_read_like_a_docx() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = docx(dir.path());
+        for ext in ["dotx", "docm"] {
+            let path = dir.path().join("书").with_extension(ext);
+            std::fs::copy(&source, &path).unwrap();
+            let provider = crate::content::format::provider_for(&path)
+                .unwrap_or_else(|| panic!(".{ext} 该有 provider 认领"));
+            assert_eq!(provider.format(), Format::Docx);
+            let (meta, content) = provider
+                .index(&path)
+                .unwrap_or_else(|err| panic!(".{ext} 该读得开：{err}"));
+            assert_eq!(meta.title, "样书");
+            let Content::Reflow(flow) = content else {
+                panic!(".{ext} 该读成可重排")
+            };
+            assert!(flow.chapters.len() >= 2, ".{ext} 的章要读得出来");
+        }
     }
 
     /// 一份带表格的 docx：形状照 Word 写出来的样子（格子里是完整的 `<w:p>`，

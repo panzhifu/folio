@@ -4,7 +4,7 @@
 //! 位置本身存在 [`crate::ui::features::reader::model::session::ReaderSession`] 上，方法的可见性靠 `pub(in crate::ui::features::reader)`。
 
 use folio_core::{Locator, PageTurn};
-use gpui_kit::{App, Context, ScrollDelta, ScrollWheelEvent};
+use gpui_kit::{App, Context, ScrollDelta, ScrollEvent};
 
 use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
 use crate::ui::features::reader::model::session::{
@@ -81,9 +81,9 @@ impl ReaderSession {
     }
 
     /// 按「一屏」翻正文。这一趟**会**播动画（分页沿当前轴平移两张纸，连续滚动补间
-    /// 画出来的那个 y），因为这一句的来路都是「一次离散动作」：点屏幕左右两边、
-    /// 音量键。滚轮与触摸拖动走 [`ReaderSession::on_scroll`]，那一趟是手在直接控制，
-    /// 不该有东西追在手指后面补间。
+    /// 画出来的那个 y），因为这一句的来路都是「一次离散动作」：点屏幕左右两边、音量键、
+    /// 鼠标滚轮一格。手指触摸拖动走 [`ReaderSession::on_scroll`] 的跟手那一路，那是手在
+    /// 直接控制纸，不该有东西追在手指后面补间。
     ///
     /// 连续滚动走 90% 而不是 100%：整屏跳会让上一屏的末行彻底消失，读者找不到接续的那句。
     /// 分页 / 双页是一页一号，跳半页在这里没有意义。
@@ -101,6 +101,12 @@ impl ReaderSession {
             .as_ref()
             .is_some_and(|viewer| viewer.read(cx).is_open())
         {
+            return false;
+        }
+        // 浮层（顶栏底栏 / 两块弹层 / 脚注）压着的时候这一键也不翻正文：与 `claim_swipe`、
+        // 滚轮那两条同一规矩 —— 工具栏露头之后正文上的输入只表达「收浮层」。放手给焦点元素，
+        // 底栏那条进度滑条与弹层里的列表正该接这一键。
+        if self.overlay_open {
             return false;
         }
         let delta = arrow.turn(self.progression_rtl());
@@ -121,7 +127,10 @@ impl ReaderSession {
     /// 一次离散翻页的唯一入口。
     ///
     /// 决策在 [`crate::ui::features::reader::model::turn`] 里（连续 / 分页 / 双页 + 章界），这里只负责把
-    /// `TurnPlan` 落成状态与动画。方向键、点击分区、音量键都从这里过；滚轮章界也会。
+    /// `TurnPlan` 落成状态与动画。方向键、点击分区、音量键、**鼠标滚轮一格**都从这里过 ——
+    /// 四种输入答的是同一个问题（「往哪边走一步」），所以只该有一份答案：谁绕过它自己写
+    /// 页号，谁就跟其余三个不一致（动画、章界、双页步进、缩放复位都会分叉）。
+    /// 触摸板的像素增量不走这一句，理由写在 [`Self::on_scroll`] 的分页那一段。
     pub(in crate::ui::features::reader) fn turn(
         &mut self,
         intent: TurnIntent,
@@ -462,7 +471,7 @@ impl ReaderSession {
     /// 触摸向下滑（dy > 0）时内容跟着手指往下走 ⇒ 露出的行号变小，所以是减。
     pub(in crate::ui::features::reader) fn on_scroll(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         cx: &mut Context<Self>,
     ) -> bool {
         // ── 临时探针（量完随 `perf::scroll_*` 整块摘掉）──
@@ -499,7 +508,7 @@ impl ReaderSession {
         let wheel = matches!(event.delta, ScrollDelta::Lines(_));
         // 落在**可拖动的插图**上：这一笔归「拖图」，不翻页也不滚。
         //
-        // 判据按**按下点**（`ScrollWheelEvent.position` 在一整趟拖动里恒等于按下点，
+        // 判据按**按下点**（`ScrollEvent.position` 在一整趟拖动里恒等于按下点，
         // 见 `SwipeTrack` 的注释），而命中区是上一帧画图时登记下来的窗口矩形 —— 两处
         // 同一套坐标。只接管「图比框大」的那些（`slack > 0`，即 `object-fit: cover`
         // 被裁掉的那一圈），图刚好装满框时读者拖它仍然翻页。
@@ -616,10 +625,14 @@ impl ReaderSession {
         } else {
             // 分页 / 双页 / 定版式：这里不「滚」，它翻页。两种来源分两种算法：
             //
-            // - **鼠标滚轮**（按「行」给）一格一页。攒半屏那条规矩对滚轮是错的：
-            //   一格 1 行折成 16px，而半屏阈值是几百像素 —— 转二十五格才翻一页。
-            // - **平台的像素增量**（触摸板 / 没有阶段信息的合成滚动）照旧攒半屏翻一页：
-            //   一次横扫会发几十条增量，一增量一页就是几十页。
+            // - **鼠标滚轮**（按「行」给）一格一页 —— 与点屏幕两边、方向键、音量键是同一类
+            //   **离散动作**，所以走同一个入口 [`Self::turn`]。章界往哪边换、定版式双页步进
+            //   是 2 还是 1、动画起不起、落页与清选中、进度落库，全在那一条路上算一次。
+            //   从前这里自己写页号，于是同一本书上「点」有卷页而「滚」没有，定版式双页还
+            //   少迈一步（步进被写死成 1）—— 读者看到的就是两条输入逻辑不一致。
+            // - **平台的像素增量**（触摸板 / 没有阶段信息的合成滚动）攒半屏翻一页：一次横扫
+            //   会发几十条增量，一增量一页就是几十页。那是连续输入流而不是离散动作，所以
+            //   不进 `turn` —— 一趟一条动画的话，读者攒出来的那几页只会剩最后一次的过场。
             //
             // 手指拖动**到不了这里**：`swipe_scroll` 已经把它接走（`Turn` / `Swallow`）。
             // 从前它漏进来，惯性把余量推过半屏就又翻一页 —— 那是「竖向滑动影响竖向翻页」
@@ -629,11 +642,8 @@ impl ReaderSession {
             let mut page = from;
             if wheel {
                 let step = if dy > 0.0 { -1 } else { 1 };
-                let next = page + step;
-                if next < 0 || next > last {
-                    boundary = (!self.is_fixed()).then_some(step);
-                } else {
-                    page = next;
+                if let Some(intent) = TurnIntent::from_delta(step) {
+                    self.turn(intent, cx);
                 }
             } else {
                 self.wheel_accum -= dy;
@@ -650,12 +660,11 @@ impl ReaderSession {
                 }
             }
             if page != from {
-                if let Some(fixed) = self.fixed_mut() {
-                    fixed.set_page(page as usize);
-                }
-                self.page = page as usize;
-                // 翻走即清选中（与 `set_page` 同一条规矩；这里直接动页号，绕过了它）。
-                self.clear_selection();
+                // 落页也走 [`Self::set_page`]：定版式的页表与双页对齐（页号归左边那一张）、
+                // `laid_out.pages` 跟着页表走、清选中、进度落库、`cx.notify()` 都在它里面。
+                // 从前这里直接写 `self.page` 与 `fixed.set_page`，等于在旁边抄了一份
+                // `set_page` 的简化版 —— 少抄的那几格就是「触摸板翻页后缩放还留着」这类事。
+                self.set_page(page as usize, cx);
             }
             if let Some(step) = boundary {
                 self.begin_chapter_turn(step, cx);

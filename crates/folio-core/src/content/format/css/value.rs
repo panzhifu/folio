@@ -200,8 +200,10 @@ pub(super) fn sub_shift(font_size: f32) -> f32 {
 /// - `<length>` → 直接按长度；`<percentage>` → 按 CSS 相对**自己的 line-height**
 ///   （`line_height` 是倍数，所以基准是 `font_size × line_height`）。
 /// - `top` / `bottom` / `middle` / `text-top` / `text-bottom` → 返回 `None`：
-///   它们要的是行盒对齐机制（拿整行的 tallest box 对齐），悄悄当 0 会把作者的
-///   表格基线写成正常位置还查不出来。
+///   `text-top` / `text-bottom` 由 `apply` 先一步收成 `InlineVAlign`（对齐父盒字体的
+///   上下沿，要排版层的度量才折得动），不会走到这里；`top` / `bottom` / `middle` 要对齐
+///   整条行盒，一期不折成这个数，并且按不认识计数 —— 悄悄当 0 会把作者的上标写成正常
+///   位置还查不出来。
 pub(super) fn parse_baseline_shift(
     value: &str,
     own: f32,

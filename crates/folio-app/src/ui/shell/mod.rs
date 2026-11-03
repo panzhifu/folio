@@ -23,9 +23,9 @@ use gpui_kit::base::motion::{
 use gpui_kit::base::{NavMotion, NavOperation, NavPage, NavStack, NavStackEvent, NavStackState};
 use gpui_kit::component::{ActiveTheme, ThemeMode, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AnyView, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled, Subscription, Task,
-    Window, actions, div, px,
+    AnyElement, AnyView, App, AppContext as _, AppLifecyclePhase, Context, ElementId, Entity,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
+    Subscription, Task, Window, actions, div, px,
 };
 
 use crate::ui::features::notes::{NotesEvent, NotesView};
@@ -39,9 +39,6 @@ use crate::ui::host;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::storage;
 use navigation::{Destination, SizeClass, navigation};
-
-#[cfg(not(mobile))]
-use gpui_kit::TestSupportExt as _;
 
 // 系统返回。Android 上 gpui-mobile 把 `AKEYCODE_BACK`（含边缘滑动）与
 // `OnBackInvokedCallback` 都翻成 **escape**，所以绑住 escape 就接住了返回。
@@ -393,6 +390,10 @@ pub struct AppShell {
     /// 而一屏静止的文字自己不会要求重画 —— 不接这一条，「跟随系统」就只有改偏好或重启
     /// 才看得见。这里只要一次 `notify`：该不该重涂、涂成哪一档，判据都在渲染那一处。
     _appearance_watch: Subscription,
+    /// 移动端应用生命周期（桌面平台不发）：后台结账、前台续段。
+    _lifecycle_watch: Subscription,
+    /// 系统内存告警（Android `onTrimMemory`）：丢掉可重建的图像缓存。
+    _memory_watch: Subscription,
     /// 上一次涂到界面上的外观配置，**连同它解析出来的浅深**。渲染时比较这一对：只比配置
     /// 的话，系统翻了面而偏好一个字没动，这一帧就永远不会重涂。
     applied: Option<(Appearance, ThemeMode)>,
@@ -472,6 +473,19 @@ impl AppShell {
         // gpui 刷新这一窗口的缓存 —— 剩下的「那一下要重画」归这里，因为缓存自己不会让一屏
         // 静止的文字重新渲染。判据不在这条回调里做：只递一次 `notify`，比较留在渲染那一处。
         let _appearance_watch = cx.observe_window_appearance(window, |_, _, cx| cx.notify());
+
+        // 移动端生命周期与内存告警：事件只有移动平台会发（桌面平台是空实现，永远不会响）。
+        // 只转给当前打开着的那本书；没在读书时什么都不做。
+        let shell = cx.entity().downgrade();
+        let _lifecycle_watch = cx.on_app_lifecycle({
+            let shell = shell.clone();
+            move |phase, cx| {
+                let _ = shell.update(cx, |this, cx| this.on_app_lifecycle(phase, cx));
+            }
+        });
+        let _memory_watch = cx.on_memory_warning(move |cx| {
+            let _ = shell.update(cx, |this, cx| this.on_memory_warning(cx));
+        });
 
         // 先把主题的应用字体换成这台设备真能解析出的家族，再建任何用文字的视图：
         // 顺序反了，第一帧就会拿一个不存在的家族去 resolve 而 panic。
@@ -715,6 +729,8 @@ impl AppShell {
             _notes_watch,
             _stack_watch,
             _appearance_watch,
+            _lifecycle_watch,
+            _memory_watch,
             applied: None,
             watched_library: ConfigHolder::library(cx),
             _save_debounce: None,
@@ -927,6 +943,24 @@ impl AppShell {
         // 差量的真相在库里，这里只撤内存里那一份，不需要落盘。
         ConfigHolder::set_book(cx, None);
         true
+    }
+
+    /// 应用生命周期：后台按离开这一刻结账并停钟，前台续段。
+    fn on_app_lifecycle(&mut self, phase: AppLifecyclePhase, cx: &mut Context<Self>) {
+        let Some(layer) = self.reading.as_ref() else {
+            return;
+        };
+        layer
+            .page
+            .update(cx, |page, cx| page.on_app_lifecycle(phase, cx));
+    }
+
+    /// 系统内存告警：把可重建的图像缓存交还系统，当前屏由图集保护。
+    fn on_memory_warning(&mut self, cx: &mut Context<Self>) {
+        let Some(layer) = self.reading.as_ref() else {
+            return;
+        };
+        layer.page.update(cx, |page, cx| page.on_memory_warning(cx));
     }
 
     /// 是不是正在读书（挂着、且没在退场）。音量键那一条按它分流：翻正文的页，还是把这一按
@@ -1420,15 +1454,8 @@ impl Render for AppShell {
             let stack = if immersive {
                 stack
             } else {
-                stack.child(
-                    gpui_kit::component::TitleBar::new().child(
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .gap_2()
-                            .child(div().id("app-title").test_support().child("Folio")),
-                    ),
-                )
+                // 左侧不摆任何字样：那一段只留作拖窗与双击最大化的热区。
+                stack.child(gpui_kit::component::TitleBar::new())
             };
             // 正文那一格给 `flex_1` 而不是让它自己 `size_full`：标题栏已经占掉一段高，
             // 再按 100% 算就会把页面底边（连同底栏）挤出窗口外。

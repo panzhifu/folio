@@ -736,6 +736,78 @@ impl ImageAtlas {
         }
     }
 
+    /// 系统内存告警时的一刀：留住最近两帧上过屏的，其余 `Held` 放掉，未落地的解码取消。
+    ///
+    /// 与 [`Self::end_frame`] 的区别是不按帧龄、也不按软顶算 —— 压力已经来了，只问
+    /// 「这一帧还在不在屏上」。同样守两条规矩：在屏的不碰、`Arc::strong_count > 1`
+    /// （放大查看那一层还握着）的不碰。
+    pub fn trim_for_memory_pressure(&mut self, cx: &mut App) {
+        let mut protected = std::mem::take(&mut self.on_screen_prev);
+        protected.extend(self.on_screen.iter().cloned());
+        let keys: Vec<String> = self
+            .slots
+            .iter()
+            .filter(|(key, slot)| match slot {
+                Slot::Held { .. } => !protected.contains(key.as_str()),
+                Slot::Loading { .. } => !protected.contains(key.as_str()),
+                Slot::Failed { .. } => false,
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut freed = 0usize;
+        for key in keys {
+            match self.slots.remove(&key) {
+                Some(Slot::Held {
+                    image,
+                    bytes,
+                    uploaded,
+                    seen,
+                }) => {
+                    if Arc::strong_count(&image) > 1 {
+                        // 还有别人握着这份像素，放回去等它松手。
+                        self.slots.insert(
+                            key,
+                            Slot::Held {
+                                image,
+                                bytes,
+                                uploaded,
+                                seen,
+                            },
+                        );
+                        continue;
+                    }
+                    match tier_of(&key) {
+                        Tier::Full => self.bytes = self.bytes.saturating_sub(bytes),
+                        Tier::Preview => {
+                            self.preview_bytes = self.preview_bytes.saturating_sub(bytes)
+                        }
+                    }
+                    if uploaded {
+                        cx.drop_image(image, None);
+                        Metric::AtlasFreed.add(bytes as u64);
+                        freed += bytes;
+                    }
+                }
+                Some(Slot::Loading { cancel, .. }) => cancel.trigger(),
+                Some(slot) => {
+                    self.slots.insert(key, slot);
+                }
+                None => {}
+            }
+        }
+        // 这一帧若还没画完，`end_frame` 还要用这两份集合；放回去。
+        self.on_screen_prev = protected;
+        if freed > 0 {
+            tracing::debug!(
+                "图集: 内存告警放掉 {} 字节，还剩 高清 {} / 低清 {} 字节 / {} 张",
+                freed,
+                self.bytes,
+                self.preview_bytes,
+                self.slots.len()
+            );
+        }
+    }
+
     /// 换一本书 / 退出阅读页：手里全部像素都放掉。
     ///
     /// 会话换书时 `source` 是**原地被替换**的（`session.rs` 那句 `self.source = ...`），
@@ -1304,6 +1376,46 @@ mod tests {
         assert!(
             reads.load(Ordering::Relaxed) >= count,
             "{count} 张图一次都没被问过字节，说明这一趟根本没走进图集"
+        );
+    }
+
+    /// 内存告警那一刀：这一帧在场的留住，离场的放掉，而且不顺手重解。
+    #[gpui_kit::test]
+    fn a_memory_warning_keeps_the_visible_frame_and_frees_the_rest(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (atlas, table, reads) = cx.update(|cx| book(cx, 2, 64, 64));
+        let first = table["pic-0.png"].key.clone();
+        let second = table["pic-1.png"].key.clone();
+        let window = cx.open_window(size(px(64.0), px(64.0)), {
+            let atlas = atlas.clone();
+            move |_, _| Screen {
+                atlas,
+                table,
+                showing: vec!["pic-0.png".into(), "pic-1.png".into()],
+            }
+        });
+        let handle: AnyWindowHandle = window.into();
+        paint(handle, cx);
+        settle(handle, cx);
+        assert!(held(&atlas, &first, cx).is_some(), "前提：两张都进了图集");
+        assert!(held(&atlas, &second, cx).is_some(), "前提：两张都进了图集");
+
+        // 只留第一张在场，再画一帧：第二张变成「离场」。
+        window
+            .update(cx, |screen, _, _| screen.showing = vec!["pic-0.png".into()])
+            .expect("窗口应当可改");
+        paint(handle, cx);
+
+        let reads_before = reads.load(Ordering::Relaxed);
+        cx.update(|cx| {
+            atlas.update(cx, |atlas, cx| atlas.trim_for_memory_pressure(cx));
+        });
+        assert!(held(&atlas, &first, cx).is_some(), "在场的被放掉了");
+        assert!(held(&atlas, &second, cx).is_none(), "离场的没放掉");
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            reads_before,
+            "裁缓存不该顺手重解：回屏时的那一帧才该重新要字节"
         );
     }
 

@@ -340,6 +340,193 @@ impl CompiledRules {
     }
 }
 
+/// 读者那一层改动：叠在出厂表之上的**差量**，不是整份表。
+///
+/// 存差量而不是整份，三条理由：以后出厂表加了新条目，读者那份不会把表冻在他改动那一刻
+/// （整份存就得有人手动合并）；「恢复出厂」= 清空这一格，不用另存一份出厂的副本；
+/// 屏上每一条也都答得出「这条是出厂的还是我加的、我关过哪条」。
+///
+/// 关条目按**名字**而不是下标：出厂表重排或插一条，不会因此关掉读者本意之外的另一条。
+/// 自定义条目追加在表尾 —— `markers` 的顺序就是优先级，出厂那几条先碰到的赢。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edits {
+    /// 关掉的那些条目的 `name`（出厂的与自定义的一律适用）。
+    #[serde(default)]
+    pub off: Vec<String>,
+    /// 读者自己加的那些条。
+    #[serde(default)]
+    pub extra: Vec<Marker>,
+    /// 改了的那几格阈值（`None` = 用出厂那个数）。
+    #[serde(default)]
+    pub gates: GateEdits,
+}
+
+/// 阈值那五格的差量。逐格 `Option` 而不是整份 `Gates`：整份存的话，出厂表以后调了某个
+/// 读者压根没碰过的数，他那份会按老数把它覆盖回去。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateEdits {
+    pub min_chapters: Option<usize>,
+    pub title_max_chars: Option<usize>,
+    pub min_median_chapter_chars: Option<usize>,
+    pub toc_min_run: Option<usize>,
+    pub toc_max_gap_chars: Option<usize>,
+}
+
+impl Edits {
+    /// 这一层等于没改过吗。空的时候生效那份直接是出厂那份，连合成都不用走。
+    pub fn is_empty(&self) -> bool {
+        self.off.is_empty() && self.extra.is_empty() && self.gates == GateEdits::default()
+    }
+
+    /// 名字是不是这一层占着的（关过的、或自己加的）。界面上「另起一个名字」要避免撞它，
+    /// 因为 `off` 按名字作用 —— 撞了就会有一条关不掉的条目。
+    pub fn holds(&self, name: &str) -> bool {
+        self.off.iter().any(|off| off == name) || self.extra.iter().any(|m| m.name == name)
+    }
+}
+
+/// 出厂那份的**结构体**（进程内解一次）。合成时的底本与界面列清单都读它，
+/// 而不是把那份 JSON 字符串再解一遍。
+pub fn builtin_table() -> &'static Rules {
+    static TABLE: OnceLock<Rules> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        serde_json::from_str(BUILTIN_ZH_HANS).expect("出厂那份小说规则解不开，这是仓库内数据的问题")
+    })
+}
+
+/// 出厂 + 差量 = 生效那份的**形状**（还没编译）。关掉的按名字剔，自定义的追加在表尾，
+/// 阈值逐格取。分卷那一族同样按名字哑掉 —— 它也是 `Marker`，关掉了还留着反而说不清。
+pub fn merged(edits: &Edits) -> Rules {
+    let mut out = builtin_table().clone();
+    out.markers
+        .retain(|marker| !edits.off.iter().any(|off| off == &marker.name));
+    out.volumes
+        .retain(|marker| !edits.off.iter().any(|off| off == &marker.name));
+    for marker in &edits.extra {
+        if !edits.off.contains(&marker.name) {
+            out.markers.push(marker.clone());
+        }
+    }
+    let gates = &mut out.gates;
+    gates.min_chapters = edits.gates.min_chapters.unwrap_or(gates.min_chapters);
+    gates.title_max_chars = edits.gates.title_max_chars.unwrap_or(gates.title_max_chars);
+    gates.min_median_chapter_chars = edits
+        .gates
+        .min_median_chapter_chars
+        .unwrap_or(gates.min_median_chapter_chars);
+    gates.toc_min_run = edits.gates.toc_min_run.unwrap_or(gates.toc_min_run);
+    gates.toc_max_gap_chars = edits
+        .gates
+        .toc_max_gap_chars
+        .unwrap_or(gates.toc_max_gap_chars);
+    out
+}
+
+/// 进程内那一份生效表：**装一次、读多次、中途不换**。没装过就是出厂那份。
+static EFFECTIVE: OnceLock<Arc<CompiledRules>> = OnceLock::new();
+
+/// 当前生效的那份。引擎那一族的三个取表点（`format::text` 的 split 与 info、
+/// `format::rules_hash`）都只问这一句。
+pub fn effective() -> Arc<CompiledRules> {
+    EFFECTIVE.get_or_init(CompiledRules::builtin).clone()
+}
+
+/// 把读者那一层差量装成生效表。**一个进程只装得上一次**（`OnceLock`），调用点是启动时
+/// 把配置读回来那一下；装过了再叫返回 `false`，配置那一层照旧存着新改动，下次启动生效。
+///
+/// 为什么不做成能换页的槽 —— 这一层要的是**一致**而不是热：分章跑在导入与重扫的工作线程
+/// 里，一本书要切几十几百个文件，换页换在中途就会得到「前半本按旧表、后半本按新表」的章表，
+/// 而盖在它上面的 `rules_hash` 只有一份、判失效时它对得上，于是没有任何东西会再来扫一遍。
+/// 所以这一格的生效时机写在 [`crate::infra::config`] 那个字段旁边，也写在设置页那一行上。
+///
+/// 「改了表之后已经入库的那一本怎么办」不用在这里管：生效表换了内容哈希就动，
+/// `store::stale_reason` 认 `RulesChanged`，开书那一趟自己投后台重扫（见模块头那条链）。
+pub fn install(edits: &Edits) -> bool {
+    let table = if edits.is_empty() {
+        CompiledRules::builtin()
+    } else {
+        compiled(edits)
+    };
+    EFFECTIVE.set(table).is_ok()
+}
+
+/// 按给定那一层合成 → 序列化 → [`compile`]，交回编译好的那张表**而不碰生效那一份**。
+/// 预览一条草案走的就是这一格（[`super::draft::preview`]）：它要的是「按这条切会得到什么」，
+/// 不是「从现在起这么切」。
+///
+/// 不自己拼 `CompiledRules`：校验、逐条降级、拿每条自己的正反例当面具、算内容哈希这一整
+/// 套路都在 `compile` 里，第二处长出来就会与它分叉 —— 而分叉的表现是「界面上说这条能用、
+/// 引擎里它已经被作废」。
+pub fn compiled(edits: &Edits) -> Arc<CompiledRules> {
+    let json = match serde_json::to_string(&merged(edits)) {
+        Ok(json) => json,
+        Err(err) => {
+            // `Rules` 里全是字符串/整数/布尔/字符，正常不会失败；真失败了说明形状里进了
+            // 序列化不了的字段，那时候按出厂那份分章是唯一安全的下场。
+            tracing::warn!("小说规则的合成结果序列化不开，已按出厂那份分章：{err}");
+            return CompiledRules::builtin();
+        }
+    };
+    let (table, warnings) = compile(&json);
+    for warn in warnings {
+        tracing::debug!("读者那层小说规则合成之后有声：{warn}");
+    }
+    table
+}
+
+/// 生效那张表的内容哈希（12 位十六进制）。设置页把它念在明面上，是为了「改了却没换」
+/// 这句话有证据可查：改完、重启、开一本 `.txt`，那 12 位还是原来的，问题就说清了。
+pub fn effective_hash() -> String {
+    effective().content_hash().to_string()
+}
+
+/// 界面上那一行的形状：一条规则给人看的那几格 + 三个状态。
+///
+/// 只给这一份视图而不是把 `Rules` 整个交出去：读者在这一屏要做的就三件事（看名字、
+/// 开关、增删自定义条目），而把整张表交出去就会有人在界面上改模式串改到一半 ——
+/// 那种半套改法正是 [`compile`] 逐条降级要防的东西。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleRow {
+    pub name: String,
+    pub kind: MatchKind,
+    /// `kind = literal` 时的整行内容（其余为空串）。
+    pub text: String,
+    /// `kind = regex` 时那条模式（其余为空串）。
+    pub pattern: String,
+    pub numbering: NumberingStyle,
+    /// 开着（没被这一层关掉）。
+    pub enabled: bool,
+    /// 读者自己加的那条，可以删；出厂那条只能关不能删。
+    pub custom: bool,
+    /// 生效表里这一条被自己的正反例或坏模式作废了。界面要说得出「这条没在用」，
+    /// 而不是让读者以为开关开着就生效。
+    pub rejected: bool,
+}
+
+/// 界面上那一列：出厂那十几条在前、读者的自定义在后，顺序就是 [`merged`] 的优先级顺序。
+///
+/// `rejected` 读的是**已装进去的那份**生效表，所以正在编辑、还没重启的那几条显的是
+/// 「上一次装进去时它好不好用」—— 这一屏不预测未来，预测要付一次编译的代价给每帧。
+pub fn rows(edits: &Edits) -> Vec<RuleRow> {
+    let rejected = effective().bad_entries().to_vec();
+    let one = |marker: &Marker, custom: bool| RuleRow {
+        name: marker.name.clone(),
+        kind: marker.kind,
+        text: marker.text.clone().unwrap_or_default(),
+        pattern: marker.pattern.clone().unwrap_or_default(),
+        numbering: marker.numbering,
+        enabled: !edits.off.contains(&marker.name),
+        custom,
+        rejected: rejected.contains(&marker.name),
+    };
+    builtin_table()
+        .markers
+        .iter()
+        .map(|marker| one(marker, false))
+        .chain(edits.extra.iter().map(|marker| one(marker, true)))
+        .collect()
+}
+
 /// 解一份 JSON、校验、编译正则、算内容哈希。
 ///
 /// 返回 `(那份表, 给读者看的警告)`。**整份解不开**才退回出厂那份；**单条坏**只剔那一条。
@@ -558,7 +745,204 @@ fn short_hash(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Compiled, CompiledRules, compile, marker_name};
+    use super::{
+        Compiled, CompiledRules, Edits, GateEdits, MatchKind, NumberingStyle, compile, marker_name,
+        merged,
+    };
+
+    /// 一条自定义条目要用的那几格。读者在这一屏能填的就这些：名字、怎么匹配、带不带号。
+    fn custom(name: &str, pattern: &str) -> super::Marker {
+        super::Marker {
+            name: name.to_string(),
+            kind: MatchKind::Regex,
+            pattern: Some(pattern.to_string()),
+            text: None,
+            level: 1,
+            numbering: NumberingStyle::Arabic,
+            examples: Default::default(),
+        }
+    }
+
+    fn builtin_len() -> usize {
+        super::builtin_table().markers.len()
+    }
+
+    /// 关掉一条 = 生效表少那一条，而内容哈希跟着动。
+    /// 哈希那一半是重点：少一条规则就是少切一些章，那一刻不动哈希，老库的进度就
+    /// 安静地指着隔壁那一章，而屏上没有任何东西会说。
+    #[test]
+    fn a_disabled_rule_leaves_the_table_and_moves_the_hash() {
+        let edits = Edits {
+            off: vec!["番外".to_string()],
+            ..Default::default()
+        };
+        let table = super::compiled(&edits);
+        assert_eq!(
+            table.markers().count(),
+            builtin_len() - 1,
+            "关一条该少一条，而不是整份退回出厂"
+        );
+        assert_ne!(
+            table.content_hash(),
+            CompiledRules::builtin().content_hash(),
+            "生效表少了一条，哈希必须动"
+        );
+        assert!(
+            table.bad_entries().is_empty(),
+            "关掉不等于这条坏了，不该有作废声：{:?}",
+            table.bad_entries()
+        );
+    }
+
+    /// 空差量必须合成出**与出厂那份同一个哈希**：「没改过」与「按了恢复出厂」要收敛到
+    /// 同一个数，否则读者撤销了自己的改动，整库的 `.txt` 还要为一份一模一样的表重扫一遍。
+    #[test]
+    fn empty_edits_compile_to_the_builtin_table() {
+        let edits = Edits::default();
+        assert!(edits.is_empty());
+        assert_eq!(
+            super::compiled(&edits).content_hash(),
+            CompiledRules::builtin().content_hash(),
+            "空差量合出来的表该与出厂那份一字不差"
+        );
+        assert_eq!(
+            merged(&edits).markers.len(),
+            builtin_len(),
+            "合成不许改到底本"
+        );
+    }
+
+    /// 阈值那一格只覆盖它自己那一格。这一条是给「整份存」那种设计准备的：那种存法会把
+    /// 出厂表冻在读者改动那一刻，以后出厂调了他没碰过的数也会被盖回去。
+    #[test]
+    fn a_gate_edit_overrides_only_the_cell_it_touches() {
+        let base = super::builtin_table();
+        let edits = Edits {
+            gates: GateEdits {
+                title_max_chars: Some(24),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let table = merged(&edits);
+        assert_eq!(table.gates.title_max_chars, 24, "改过的那格要跟上");
+        assert_eq!(
+            table.gates.min_chapters, base.gates.min_chapters,
+            "没碰的那格照出厂"
+        );
+        assert_eq!(table.gates.toc_min_run, base.gates.toc_min_run);
+        assert_eq!(
+            table.markers.len(),
+            base.markers.len(),
+            "只动阈值不该动条目表"
+        );
+        assert_ne!(
+            super::compiled(&edits).content_hash(),
+            CompiledRules::builtin().content_hash(),
+            "经读者这一层改阈值，同样要动到重扫的信号上"
+        );
+    }
+
+    /// 读者加的那条**真的在切章**，而不是列表里多一行字。
+    ///
+    /// 挑英文那套写法（`Chapter 1`），因为出厂那份是简中的表、里面 15 条一条都不认它 ——
+    /// 这一层的存在理由正是「你手里那本书的写法不在出厂表里」。正文每章给足 200 字以上：
+    /// 不然红的是中位数那道门，而不是这条规则，那样这条测试什么也没钉住。
+    #[test]
+    fn a_custom_rule_cuts_lines_the_builtin_table_misses() {
+        let body = "于是我们奋力向前".repeat(30);
+        let source =
+            format!("Chapter 1 起风\n{body}\nChapter 2 落雨\n{body}\nChapter 3 停\n{body}\n");
+        let plain = CompiledRules::builtin();
+        assert_eq!(
+            crate::content::format::novel::detect::split_with(&source, "书", &plain).len(),
+            1,
+            "出厂那份简中的表该认不下英文写法 —— 这条前提不成立，下面那条断言就是白写的"
+        );
+        let edits = Edits {
+            extra: vec![custom("Chapter", r"^\s*Chapter\s+([0-9]+)")],
+            ..Default::default()
+        };
+        let table = super::compiled(&edits);
+        let chapters = crate::content::format::novel::detect::split_with(&source, "书", &table);
+        assert_eq!(chapters.len(), 3, "加的那条该切出三章：{chapters:?}");
+        assert_ne!(
+            table.content_hash(),
+            CompiledRules::builtin().content_hash(),
+            "多一条规则就是多切一些章，重扫的信号必须跟着动"
+        );
+    }
+
+    /// 自定义那条模式坏掉，**只作废它自己**，出厂那十几条照用。
+    /// 守的是「读者写坏一个字符的下场是少一条规则，不是看不见目录」。
+    #[test]
+    fn a_broken_custom_rule_voids_only_itself() {
+        let edits = Edits {
+            extra: vec![custom("坏的一条", r"^\s*(第[幕+")],
+            ..Default::default()
+        };
+        let table = super::compiled(&edits);
+        assert_eq!(
+            table.bad_entries(),
+            vec!["坏的一条".to_string()],
+            "该只剔这一条：{:?}",
+            table.bad_entries()
+        );
+        assert_eq!(
+            table.markers().count(),
+            builtin_len() + 1,
+            "条目还在原位（下标不许漂），只是降级"
+        );
+        assert_eq!(
+            table.gates().min_chapters,
+            super::builtin_table().gates.min_chapters
+        );
+    }
+
+    /// 界面上那一列：出厂的在前、自定义的在后，各自带着「开着吗」「是不是我加的」。
+    /// 关掉的那条**仍要在列里** —— 列里没了它就没办法再把它打开。
+    #[test]
+    fn the_row_list_keeps_disabled_entries_visible() {
+        let edits = Edits {
+            off: vec!["附录".to_string()],
+            extra: vec![custom("幕", r"^\s*第[0-9]+幕")],
+            ..Default::default()
+        };
+        let rows = super::rows(&edits);
+        let appendix = rows
+            .iter()
+            .find(|row| row.name == "附录")
+            .expect("关掉的那条该还在列里");
+        assert!(!appendix.enabled, "关着的要显出关着");
+        assert!(!appendix.custom, "出厂那条只能关不能删");
+        let mu = rows
+            .iter()
+            .find(|row| row.name == "幕")
+            .expect("自定义那条该在列里");
+        assert!(mu.enabled && mu.custom);
+        assert_eq!(
+            rows.last().expect("非空").name,
+            "幕",
+            "读者加的那几条排在表尾（顺序就是优先级）"
+        );
+    }
+
+    /// 装上去的是空差量，生效表就该还是出厂那份；而第二次装不上（`OnceLock`）是设计，
+    /// 不是缺陷 —— 这一层要的是「一趟扫描之内表不变」，热换页会切出半旧半新的章表。
+    ///
+    /// 这一条不与其他几条争顺序：空差量装出来的就是 `effective()` 兜底的那一份，
+    /// 谁先初始化都不改变结果。
+    #[test]
+    fn installing_empty_edits_keeps_the_builtin_table() {
+        let want = CompiledRules::builtin().content_hash().to_string();
+        super::install(&Edits::default());
+        assert_eq!(super::effective().content_hash(), want.as_str());
+        assert!(
+            !super::install(&Edits::default()),
+            "第二次装不上，返回要说清楚"
+        );
+        assert_eq!(super::effective().content_hash(), want.as_str());
+    }
 
     #[test]
     fn the_builtin_rules_compile_every_entry() {

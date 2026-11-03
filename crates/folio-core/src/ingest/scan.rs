@@ -9,8 +9,15 @@
 //! 毁掉整轮；隐藏目录与噪音清单挡住 `.git`、`Android/data` 这些明知没书的地方；
 //! 深度与数量预算防一次扫描走完几十万条目录。符号链接的**目录**不跟进（环会
 //! 自我循环），链接的**文件**照收（拷副本时读得到就行）。
+//!
+//! **目录遍历是并行的**（见 `MAX_WALKERS`）：整机扫描的成本在 `readdir` 与
+//! `stat` 上，不在 CPU 上，几条线程一起读不同目录能把墙钟时间按线程数压下去。
+//! 候选最后按路径排一次序 —— 并行之后「同目录的挨在一起」不再由遍历顺序白给，
+//! 而清单页的分组头要靠它。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use crate::Result;
 use crate::content::format::looks_like_a_book;
@@ -27,10 +34,16 @@ const DEFAULT_MAX_VISITED: u64 = 200_000;
 /// 候选数上限。超过它说明这台设备的「书」多得该让读者换个扫法，而不是全摆出来。
 const DEFAULT_MAX_CANDIDATES: usize = 5_000;
 
+/// 一次扫描最多起几条遍历线程。**封顶 4**：这一路是 IO 密集的 `readdir` / `stat`，
+/// 4 条已经能把一块共享存储的并发队列喂满；再多只会让同一次扫描与正在翻页的
+/// 那一本抢调度（作业池本身还占着一条 worker）。单核机器回退到 1，整趟串行走。
+const MAX_WALKERS: usize = 4;
+
 /// 一轮扫描的产出。
 #[derive(Debug, Default)]
 pub struct ScanReport {
-    /// 找到的候选，按遍历顺序（同目录的挨在一起，清单页按目录分组正好用）。
+    /// 找到的候选，按**完整路径**排序（同目录的挨在一起，清单页按目录分组正好用）。
+    /// 并行遍历之后排序还顺带把结果钉成稳定的：同一台设备扫两次，清单顺序一样。
     pub candidates: Vec<Candidate>,
     /// 读不了（权限不足、竞态）的条目数。规则性跳过（隐藏、噪音、被排除）
     /// **不**计入 —— 那些是「明知没书」，不是「没看见」；界面上那句
@@ -82,24 +95,82 @@ pub fn find_with(
     limits: Limits,
     ctx: &StageCtx,
 ) -> ScanReport {
-    let mut walker = Walker {
+    let walk = Walk {
         exclude,
         noise_exempt,
         limits,
-        report: ScanReport::default(),
-        visited: 0,
-        found: 0,
+        ctx,
+        queue: Mutex::new(Queue {
+            dirs: roots.iter().rev().cloned().map(|root| (root, 0)).collect(),
+            active: 0,
+        }),
+        ready: Condvar::new(),
+        visited: AtomicU64::new(0),
+        found: AtomicU64::new(0),
+        skipped: AtomicUsize::new(0),
+        truncated: AtomicBool::new(false),
+        candidates: Mutex::new(Vec::new()),
     };
-    for root in roots {
-        if ctx.cancel().triggered() || walker.report.truncated {
-            break;
+    if roots.is_empty() {
+        if !ctx.cancel().triggered() {
+            ctx.item(0, 0);
         }
-        walker.walk_dir(root, 0, ctx);
+        return ScanReport::default();
     }
+    let workers = walkers();
+    if workers > 1 {
+        // span 要跟着进 worker：`thread::scope` 起的线程不继承调用线程的 span，
+        // 不接一句的话「这一趟扫描」在日志里只剩调用线程上那一小段。
+        let span = tracing::Span::current();
+        std::thread::scope(|scope| {
+            let span = &span;
+            let walk = &walk;
+            let handles: Vec<_> = (0..workers)
+                .map(|_| scope.spawn(move || span.in_scope(|| walk.worker())))
+                .collect();
+            for handle in handles {
+                if handle.join().is_err() {
+                    // 一条线程崩了不带走别的：它们各自手里的目录会走完，剩下没走到的
+                    // 在 `truncated` 上不置位 —— 这是「部分结果」而不是「扫全了」，
+                    // 但没有更好的信号可以交给界面，至少别把整轮结果丢掉。
+                    tracing::error!("scan: 一条遍历线程崩了，结果可能不完整");
+                }
+            }
+        });
+    } else {
+        walk.worker();
+    }
+    let mut candidates = walk
+        .candidates
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 并行之后「同目录的挨在一起」不再由遍历顺序白给，而清单页的分组头靠它。
+    // 按完整路径排一遍：同目录自然相邻，跨目录也稳定，读者两次扫描看到同一张清单。
+    candidates.sort_by(|a, b| candidate_path(a).cmp(candidate_path(b)));
+    let report = ScanReport {
+        candidates,
+        skipped: walk.skipped.load(Ordering::Relaxed),
+        truncated: walk.truncated.load(Ordering::Relaxed),
+    };
     if !ctx.cancel().triggered() {
-        ctx.item(walker.found, 0);
+        ctx.item(report.candidates.len() as u64, 0);
     }
-    walker.report
+    report
+}
+
+/// 并行遍历的线程数：可用核数，封顶 [`MAX_WALKERS`]。单核就是一（串行）。
+fn walkers() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, MAX_WALKERS)
+}
+
+/// 候选的排序键。扫描只产出本地文件；远端那一族留在这里是为了让排序键不必 unwrap。
+fn candidate_path(candidate: &Candidate) -> &Path {
+    match &candidate.origin {
+        Origin::Local(path) => path,
+        Origin::Remote { .. } => Path::new(""),
+    }
 }
 
 /// 名字或位置明摆着没书的地方。点开头（`.git`、`.cache`、`.Trash`）由
@@ -135,18 +206,89 @@ fn is_under_android_private(path: &Path) -> bool {
     false
 }
 
-struct Walker<'a> {
+/// 待走的目录，以及**正在走**的目录数。
+///
+/// 两件事必须共用一把锁：判「走完了没有」要同时看「队列空」与「没有人在走」，
+/// 分两把锁的话，一次 push 可以正好落进两次读之间，于是所有线程都以为可以收工。
+struct Queue {
+    dirs: Vec<(PathBuf, usize)>,
+    active: usize,
+}
+
+/// 一趟扫描的全部共享状态。每条 worker 都拿 `&Walk`，没有单独的可变状态。
+struct Walk<'a> {
     exclude: &'a [PathBuf],
     noise_exempt: &'a [PathBuf],
     limits: Limits,
-    report: ScanReport,
-    visited: u64,
-    found: u64,
+    ctx: &'a StageCtx,
+    queue: Mutex<Queue>,
+    ready: Condvar,
+    visited: AtomicU64,
+    found: AtomicU64,
+    skipped: AtomicUsize,
+    truncated: AtomicBool,
+    candidates: Mutex<Vec<Candidate>>,
 }
 
-impl Walker<'_> {
-    fn walk_dir(&mut self, dir: &Path, depth: usize, ctx: &StageCtx) {
-        if ctx.cancel().triggered() || self.report.truncated {
+/// 一条 worker 手上有目录时把 `active` 加一；它离手时（正常返回与 panic 两条路）
+/// 都要减回去。没有这道守卫，一条线程在 `read_dir` 里 panic 之后别的线程会永远等着
+/// 一个不会归零的 `active` —— 症状不是报错，是整轮扫描停在屏幕上。
+struct Active<'a, 'b> {
+    walk: &'a Walk<'b>,
+}
+
+impl Drop for Active<'_, '_> {
+    fn drop(&mut self) {
+        let mut queue = self
+            .walk
+            .queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        queue.active -= 1;
+        drop(queue);
+        self.walk.ready.notify_all();
+    }
+}
+
+impl Walk<'_> {
+    /// 一条遍历线程：取一个目录、走完、再取。队列空且没有别的线程在走时收工。
+    fn worker(&self) {
+        loop {
+            if self.stopping() {
+                return;
+            }
+            let (dir, depth) = {
+                let mut queue = self
+                    .queue
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                loop {
+                    if let Some(next) = queue.dirs.pop() {
+                        queue.active += 1;
+                        break next;
+                    }
+                    if queue.active == 0 {
+                        // 叫醒其余线程一起收工：它们可能正等在「队列空」上。
+                        self.ready.notify_all();
+                        return;
+                    }
+                    queue = self
+                        .ready
+                        .wait(queue)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            };
+            let _active = Active { walk: self };
+            self.walk_dir(&dir, depth);
+        }
+    }
+
+    fn stopping(&self) -> bool {
+        self.ctx.cancel().triggered() || self.truncated.load(Ordering::Relaxed)
+    }
+
+    fn walk_dir(&self, dir: &Path, depth: usize) {
+        if self.stopping() {
             return;
         }
         if depth > self.limits.max_depth || self.excluded(dir) {
@@ -155,60 +297,81 @@ impl Walker<'_> {
         // 读不了（权限、不是目录）都记一笔然后走人：一次扫描的成败不押在
         // 任何一处读不了的目录上。
         let Ok(entries) = std::fs::read_dir(dir) else {
-            self.report.skipped += 1;
+            self.skipped.fetch_add(1, Ordering::Relaxed);
             return;
         };
         for entry in entries {
-            if ctx.cancel().triggered() || self.report.truncated {
+            if self.stopping() {
                 return;
             }
-            self.visited += 1;
-            if self.visited > self.limits.max_visited {
-                self.report.truncated = true;
+            let visited = self.visited.fetch_add(1, Ordering::Relaxed) + 1;
+            if visited > self.limits.max_visited {
+                self.truncated.store(true, Ordering::Relaxed);
                 return;
             }
             let Ok(entry) = entry else {
-                self.report.skipped += 1;
+                self.skipped.fetch_add(1, Ordering::Relaxed);
                 continue;
             };
             let Ok(file_type) = entry.file_type() else {
-                self.report.skipped += 1;
+                self.skipped.fetch_add(1, Ordering::Relaxed);
                 continue;
             };
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = entry.file_name();
             if file_type.is_dir() {
-                if name.starts_with('.')
-                    || is_noise(&path, &name, self.noise_exempt)
-                    || self.excluded(&path)
-                {
+                let shown = name.to_string_lossy();
+                if shown.starts_with('.') {
+                    continue;
+                }
+                let path = dir.join(&name);
+                if is_noise(&path, &shown, self.noise_exempt) || self.excluded(&path) {
                     continue;
                 }
                 // 目录符号链接不跟进：指向祖先的链接会自我循环。
                 if !file_type.is_symlink() {
-                    self.walk_dir(&path, depth + 1, ctx);
+                    self.push_dir(path, depth + 1);
                 }
             } else {
+                let path = dir.join(&name);
                 if !looks_like_a_book(&path) {
                     continue;
                 }
-                if self.report.candidates.len() >= self.limits.max_candidates {
-                    self.report.truncated = true;
+                // 名额先领再落：并行时两个 worker 都看见「还差一个」的话会各写一本，
+                // 于是清单比预算多出一本。领到超额的直接停，不再往里写。
+                let seat = self.found.fetch_add(1, Ordering::Relaxed);
+                if seat as usize >= self.limits.max_candidates {
+                    self.truncated.store(true, Ordering::Relaxed);
                     return;
                 }
-                let size = std::fs::metadata(&path).ok().map(|m| m.len());
-                self.report.candidates.push(Candidate {
-                    origin: Origin::Local(path),
-                    name,
-                    size,
-                });
-                self.found += 1;
-                // 每 25 本报一次：一次扫描几秒到几十秒，界面得看见它在动。
-                if self.found.is_multiple_of(25) {
-                    ctx.item(self.found, 0);
+                // `DirEntry::metadata` 走目录项自己的句柄，比再按路径 stat 一趟省一次
+                // 路径解析；大小只是卡片上那一格，读不到就空着。
+                let size = entry.metadata().ok().map(|meta| meta.len());
+                self.candidates
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(Candidate {
+                        origin: Origin::Local(path),
+                        name: name.to_string_lossy().into_owned(),
+                        size,
+                    });
+                // 每 25 本报一次：一次扫描几秒到几十秒，界面得看见它在动。`seat` 是全局
+                // 唯一的，所以这条不会重复报同一个数。
+                let found = seat + 1;
+                if found.is_multiple_of(25) {
+                    self.ctx.item(found, 0);
                 }
             }
         }
+    }
+
+    fn push_dir(&self, path: PathBuf, depth: usize) {
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        queue.dirs.push((path, depth));
+        drop(queue);
+        self.ready.notify_one();
     }
 
     fn excluded(&self, path: &Path) -> bool {
@@ -345,6 +508,35 @@ mod tests {
             "普通压缩包不进候选：粗筛省的就是它那一趟哈希，实际 {got:?}"
         );
         assert_eq!(report.skipped, 0, "规则性跳过不算「读不了」");
+        assert!(!report.truncated);
+    }
+
+    /// 并行遍历不许把同一本书找两遍，也不许漏掉任何一条分支：64 个目录各一本，
+    /// 交回来必须正好 64 本。队列那套「目录空 + 没人在走」的收工判据写错的症状
+    /// 是少几本或死等，而两者都不会报错 —— 只能这样量。
+    #[test]
+    fn a_parallel_walk_visits_every_directory_exactly_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for n in 0..64 {
+            touch(root, &format!("目录{n}/书{n}.epub"), "x");
+        }
+
+        let ctx = StageCtx::detached();
+        let base = root.to_path_buf();
+        let report = find_with(
+            std::slice::from_ref(&base),
+            &[],
+            &[],
+            Limits::default(),
+            &ctx,
+        );
+        let mut got = names(&report);
+        got.sort();
+        // 排序键是字符串，「书10」排在「书2」前面 —— 期望值也按同一条排。
+        let mut want: Vec<String> = (0..64).map(|n| format!("书{n}.epub")).collect();
+        want.sort();
+        assert_eq!(got, want, "每个目录该恰好交一本，不多不少");
         assert!(!report.truncated);
     }
 

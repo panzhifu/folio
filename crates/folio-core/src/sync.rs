@@ -53,7 +53,11 @@ impl Snapshot {
     /// 合并按「每条记录的时间谁新」取胜者，而那些时间是**各自那台设备的钟**写下的：
     /// 一台飞行模式几小时的手机、一台从没对过表的桌面，都能让「谁改得新」变成「谁的钟快」。
     /// 局域网是唯一能当场对表的场合 —— 握手的响应里带着对端的 UTC 秒，所以读回对面那份快照
-    /// 时先按 `对端钟 - 本机钟` 平移，再去合并。WebDAV 那条路没有这个条件，只能照旧。
+    /// 时先按 `本机钟 - 对端钟` 平移，再去合并。WebDAV 那条路没有这个条件，只能照旧。
+    ///
+    /// `delta` 的符号由这一条定盘：`exported_at` 就是**对端钟**在导出那一刻的读数，搬完它必须
+    /// 等于本机那一刻的读数。于是 `本机钟 - 对端钟` 是唯一说得通的方向，反着搬会把对端的
+    /// 一小时快钟放大成两小时。
     ///
     /// 只平移**读回来**的那一份；本机这一份永远写自己的钟。平移过的记录落库后就是本机的时间，
     /// 下次传出去时由对面按它自己算出的偏移再搬一次。
@@ -85,6 +89,22 @@ impl Snapshot {
             }
         }
     }
+}
+
+/// 把**别人写的那一份**搬到本机钟面上，另给一份新的。
+///
+/// 合并的判据是「谁的记录时间更晚」，而两台设备的钟本来就对不上，所以读回来的那一份
+/// 必须先搬一次再进 [`merge`] —— 搬晚了或忘了搬，「谁改得新」就成了「谁的钟快」。
+///
+/// `peer_clock` 是**对面**写下这些时间那一刻它自己的 UTC 秒，来源按那一条路能给的东西而定：
+/// 局域网的 `/hello` 回包里有当场量的 `now`；`PUT /snapshot` 那一侧只拿得出快照自己带的
+/// `exported_at`（那是导出方的读数）。两个都是「对面那一头的钟」，所以同一句公式走得通。
+///
+/// 内容与先后顺序一条都不动，动的只是时间读数。
+pub fn retimed(snapshot: &Snapshot, peer_clock: i64, now: i64) -> Snapshot {
+    let mut copy = snapshot.clone();
+    copy.shift_clock(now.saturating_sub(peer_clock));
+    copy
 }
 
 /// 一本书在快照里的全部内容。空字段不写进 JSON（`skip_serializing_if`），
@@ -542,6 +562,31 @@ fn tombstone_kind_rank(kind: TombstoneKind) -> u8 {
     }
 }
 
+/// 快照 ⇄ JSON 的两个出口。
+///
+/// 装配层（`folio-app`）为「线上长什么样」再引一份 `serde_json` 不值：形状的真相源是这个
+/// 模块，编解码也就住在这里。两条都只走 `serde_json` 的默认约定，不自定字段名 ——
+/// 远端那些文件要能被以后版本的 folio 读，字段名一改就再也对不上了。
+pub fn snapshot_to_json(snapshot: &Snapshot) -> Result<String, Error> {
+    Ok(serde_json::to_string(snapshot)?)
+}
+
+/// 解一份**别人写的**快照。
+///
+/// 版本高于本机的直接拒：它的字段语义可能是两套，合错了没人看得出来（WebDAV 那条路对读不懂
+/// 的文件也是跳过而不是猜，见 [`sync_once`]）。
+pub fn snapshot_from_json(bytes: &[u8]) -> Result<Snapshot, Error> {
+    let snapshot: Snapshot = serde_json::from_slice(bytes)?;
+    if snapshot.version != SNAPSHOT_VERSION {
+        use serde::de::Error as _;
+        return Err(Error::Json(serde_json::Error::custom(format!(
+            "快照是第 {} 版，本机只认第 {SNAPSHOT_VERSION} 版",
+            snapshot.version
+        ))));
+    }
+    Ok(snapshot)
+}
+
 /// 一次手动同步的计数，给设置页念。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -714,7 +759,7 @@ mod tests {
     use crate::position::Locator;
     use crate::sync::{
         AnnotationRecord, BookSnapshot, BookmarkRecord, SettingsRecord, Snapshot, Tombstone,
-        TombstoneKind, merge, new_device_id, normalize_remote_dir, valid_device_id,
+        TombstoneKind, merge, new_device_id, normalize_remote_dir, retimed, valid_device_id,
     };
     use crate::{BookSettings, Reader};
 
@@ -1219,6 +1264,51 @@ mod tests {
             backward.books["hash"].position.as_ref().unwrap().updated_at,
             i64::MIN,
             "真下溢那一条钳在边界，不回绕成正数"
+        );
+    }
+
+    /// 对表搬的是**读数**：对面的钟快一小时，那一头的「刚刚」搬过来就是「一小时前」，
+    /// 于是它赢不过本机一小时前的那一条 —— 这一格错了，合并挑出来的就是「谁的钟快」。
+    #[test]
+    fn rebasing_moves_every_timestamp_onto_the_local_clock() {
+        let remote = retimed(
+            &with_book(
+                Snapshot::new("dev-peer", 5_000),
+                "hash",
+                BookSnapshot {
+                    position: Some(position(30, 4_000)),
+                    annotations: vec![annotation("a", 4_000)],
+                    bookmarks: vec![bookmark("b", 4_000)],
+                    tombstones: vec![tombstone(TombstoneKind::Bookmark, "c", 4_000)],
+                    settings: Some(settings(4_000, 22.0)),
+                },
+            ),
+            // 对面导出那一刻它的钟是 5_000，而本机此刻读到的自己那一个是 4_000。
+            5_000,
+            4_000,
+        );
+
+        assert_eq!(remote.exported_at, 4_000, "导出的读数也跟着搬到本机钟面");
+        let book = &remote.books["hash"];
+        assert_eq!(book.position.as_ref().unwrap().updated_at, 3_000);
+        assert_eq!(book.annotations[0].updated_at, 3_000);
+        assert_eq!(book.bookmarks[0].updated_at, 3_000);
+        assert_eq!(book.tombstones[0].deleted_at, 3_000);
+        assert_eq!(book.settings.as_ref().unwrap().updated_at, 3_000);
+
+        // 搬到本机钟面之后，本机那条 3_500 的进度就是更新的，不该被盖掉。
+        let local = with_book(
+            Snapshot::new("dev-local", 4_100),
+            "hash",
+            BookSnapshot {
+                position: Some(position(10, 3_500)),
+                ..BookSnapshot::default()
+            },
+        );
+        let merged = merge(&local, &[remote], 4_100);
+        assert!(
+            merged.plan.positions.is_empty(),
+            "对过表就知道本机这条更新，不该认错赢者"
         );
     }
 }

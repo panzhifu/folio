@@ -19,6 +19,7 @@ use gpui_kit::App;
 use super::app_store;
 use super::config::ConfigHolder;
 use super::import_queue::auto_import_sender;
+use super::lansync;
 use super::library::target_dir;
 use super::resident;
 
@@ -40,7 +41,12 @@ pub fn running() -> Option<TransferStatus> {
 }
 
 /// 按开关起停。书库没装、位置没确认过就不起 —— 收下的书总得有个去处。
-pub fn set_enabled(on: bool, cx: &App) {
+///
+/// **局域网同步那五条路由跟着这一台服务器起**：它们寄生在同一端口、同一本按地址记的失败账上
+/// （见 `folio_core::net::transfer::lan` 的模块文档），所以「这一台设备肯不肯被同账号的设备
+/// 读走书架与进度」除了 `account.enabled` 与密钥，还要读者**此刻**开着传书 —— 服务不写进配置，
+/// 重启不会自己开，那是「我在局域网里裸着」的状态，本该由读者每次亲手点。
+pub fn set_enabled(on: bool, cx: &mut App) {
     if !on {
         resident::services().set_transfer(None);
         return;
@@ -78,9 +84,9 @@ pub fn set_enabled(on: bool, cx: &App) {
             port: DEFAULT_PORT,
             pin: String::new(),
             inbox_dir,
-            // 局域网同步要另一把钥匙（账号密钥）与一个能读本机书架的角色，那两样还没接进
-            // 这一层的装配里 —— 接上之前这一格保持 `None`：传书照常开，那五条路由一概 404。
-            lan: None,
+            // 局域网同步：开着账号、且这一把密钥解得开时才挂上那五条路由。
+            // `None` 就是它们一概 404 —— 传书照常开，两个决定各管各的。
+            lan: lansync::server_config(cx),
         },
         on_file,
     ) {

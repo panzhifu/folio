@@ -22,10 +22,10 @@ use folio_core::content::format::{ParseBudget, guess_media_type, thumb};
 use folio_core::infra::paths::THUMB_LIST_PX;
 use folio_core::ingest::identity::sha256_of_bytes;
 use folio_core::{Cancel, Candidate, Priority, ScanReport, Store, TaskEvent, TaskManager, find};
-use gpui_kit::base::v_virtual_list;
+use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, FontWeight, Image, InteractiveElement as _, IntoElement,
@@ -116,6 +116,10 @@ pub(crate) enum ScanPhase {
         /// 按目录分组摊平的列表项，与每项的高度 —— 结果到手时算一次。
         entries: Rc<Vec<ListEntry>>,
         sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
+        /// 清单的滚动句柄。**必须跨帧持有**（与目录那屏同一条，见 `toc_panel` 的
+        /// `scroll` 字段）：`v_virtual_list` 每次调用都新建一份内部句柄，不拿 `.track_scroll`
+        /// 顶掉它，偏移就每帧归零 —— 手指滑了、下一帧弹回原处，屏幕上就是「滑不动」。
+        scroll: VirtualListScrollHandle,
         /// 已经开出真书目的那几本：本地路径 → 读数。**不在表里**就是还在路上，
         /// 那一行退回文件名 + 灰底 —— 这不是坏状态，而是清单正在一本一本亮起来的中途。
         peeked: HashMap<PathBuf, Rc<Peek>>,
@@ -197,7 +201,7 @@ fn peek_one(
             cover: cover.map(|bytes| shrink_cover(book_dir, bytes)),
         });
     }
-    let doc = folio_core::content::document::open_with(path, ParseBudget::AtMost(1)).ok()?;
+    let doc = folio_core::content::document::open_with(path, ParseBudget::AtMost(1), None).ok()?;
     let meta = doc.meta();
     let cover = doc.cover().map(<[u8]>::to_vec);
     Some(Peeked {
@@ -300,11 +304,7 @@ impl ShelfView {
                     return;
                 }
             }
-            let _ = this.update(cx, |this, cx| {
-                if this.scan.take().is_some() {
-                    cx.notify();
-                }
-            });
+            let _ = this.update(cx, |this, cx| this.scan_stream_closed(cx));
         }));
         cx.notify();
     }
@@ -315,7 +315,9 @@ impl ShelfView {
             TaskEvent::Started => {}
             TaskEvent::Progress(progress) => {
                 if let Some(ScanPhase::Scanning { found, .. }) = &mut self.scan {
-                    *found = progress.done;
+                    // 并行遍历下几条 worker 的读数会交错到达：只许往前，不许让屏幕上
+                    // 那句「已找到 N 本」在 40 与 25 之间来回跳。
+                    *found = (*found).max(progress.done);
                     cx.notify();
                 }
             }
@@ -325,20 +327,32 @@ impl ShelfView {
                 self.stop_peeks();
                 // 「已在书架」按副本路径判：候选落进书库时的那个路径。顺带把库里那一行的
                 // 主键拿住 —— 开容器那一路据此决定这一本要不要真的去开文件。
+                //
+                // **一次把库里的路径读成表**，不逐本 `book_by_path`：候选可能有几千条，
+                // 而结果到手这一下本来就在界面线程上重活；几千次 SQL 会把读者刚要开始
+                // 勾选的清单钉住好几秒。架上的书通常只有几百条，一次 `list_books` 便宜。
                 let book_dir = target_dir(&ConfigHolder::library(cx));
                 let store = app_store::handle(cx);
+                let on_shelf: HashMap<String, i64> = match (&store, &book_dir) {
+                    (Some(store), Some(_)) => store
+                        .list_books()
+                        .map(|books| books.into_iter().map(|row| (row.path, row.id)).collect())
+                        .unwrap_or_else(|err| {
+                            tracing::warn!(
+                                "ShelfView: 读架上的路径表失败，逐本按未上架处理：{err:#}"
+                            );
+                            HashMap::new()
+                        }),
+                    _ => HashMap::new(),
+                };
                 let rows: Vec<ScanRow> = report
                     .candidates
                     .into_iter()
                     .map(|candidate| {
-                        let shelf = match (&store, &book_dir) {
-                            (Some(store), Some(dir)) => store
-                                .book_by_path(&dir.join(&candidate.name))
-                                .ok()
-                                .flatten()
-                                .map(|row| row.id),
-                            _ => None,
-                        };
+                        let shelf = book_dir.as_ref().and_then(|dir| {
+                            let path = dir.join(&candidate.name);
+                            on_shelf.get(path.to_string_lossy().as_ref()).copied()
+                        });
                         ScanRow { candidate, shelf }
                     })
                     .collect();
@@ -350,6 +364,7 @@ impl ShelfView {
                     truncated: report.truncated,
                     entries,
                     sizes,
+                    scroll: VirtualListScrollHandle::new(),
                     peeked: HashMap::new(),
                 });
                 // 清单到手 = 有东西可看了，这一屏就抬起来。读者若在扫的途中关掉过它，
@@ -441,6 +456,20 @@ impl ShelfView {
         cx.notify();
     }
 
+    /// 扫描那条事件流走到头了。`Finished` / `Cancelled` 自己会收摊；走到这里还停在
+    /// `Scanning` 只有一种来路：作业被丢掉、没交终局事件 —— 那时把这个壳收掉，免得
+    /// 「正在扫」停在屏幕上。
+    ///
+    /// **只收 `Scanning`**：`Finished(Ok)` 已经把清单换进 [`Self::scan`] 并把面板抬起来，
+    /// 顺手把它一起 take 掉，读者看到的就是「扫完了，弹层里一片空白」。
+    fn scan_stream_closed(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.scan, Some(ScanPhase::Scanning { .. })) {
+            self.scan = None;
+            self.scan_open = false;
+            cx.notify();
+        }
+    }
+
     /// 面板顶上那颗「停止扫描」。
     fn cancel_scan(&mut self, cx: &mut Context<Self>) {
         if let Some(ScanPhase::Scanning { cancel, .. }) = &self.scan {
@@ -484,7 +513,9 @@ impl ShelfView {
             .collect();
         let all = !eligible.is_empty() && eligible.iter().all(|p| checked.contains(p));
         if all {
-            checked.retain(|p| !eligible.contains(p));
+            // 逐本 `retain` 在几千行时是平方级；一张集合表是线性的。
+            let eligible: HashSet<&PathBuf> = eligible.iter().collect();
+            checked.retain(|path| !eligible.contains(path));
         } else {
             checked.extend(eligible);
         }
@@ -544,6 +575,12 @@ impl ShelfView {
         self.import_checked(cx);
     }
 
+    /// 回归门用：模拟扫描事件流收尾（真实的收尾在 `begin_scan` 那条 spawn 的末尾）。
+    #[cfg(all(test, not(mobile)))]
+    pub(crate) fn close_scan_stream_for_test(&mut self, cx: &mut Context<Self>) {
+        self.scan_stream_closed(cx);
+    }
+
     /// 回归门用：现在勾中了几本。门要的是「点卡面这一下**净**勾上了一本」——
     /// 勾选框若嵌在卡面的 hitbox 里，gpui 会把同一次点击也发给它，两下相抵就成了
     /// 「按了没反应」，而那只差一个嵌套层级的事在屏幕上最难查。
@@ -601,11 +638,19 @@ impl ShelfView {
                 skipped,
                 truncated,
                 sizes,
+                scroll,
                 ..
             }) => {
                 let count = checked.len();
                 let eligible: usize = rows.iter().filter(|row| row.shelf.is_none()).count();
-                let all_checked = eligible > 0 && count >= eligible;
+                // 判「全选」要看**可勾的那几本**是不是都勾了，而不是「勾了几本 ≥ 几本」：
+                // 读者手点了一本已在架上的，一样会让两个数相等，那时按钮不该变成「清除」。
+                let eligible_checked = rows
+                    .iter()
+                    .filter(|row| row.shelf.is_none())
+                    .filter(|row| row.path().is_some_and(|path| checked.contains(path)))
+                    .count();
+                let all_checked = eligible > 0 && eligible_checked == eligible;
                 let entity = cx.entity().clone();
                 let close_entity = entity.clone();
                 let select_entity = entity.clone();
@@ -662,6 +707,9 @@ impl ShelfView {
                                 sizes.clone(),
                                 move |this, range, _window, cx| scan_rows(this, range, cx),
                             )
+                            // 句柄由 `ScanPhase::Results` 跨帧持有：不顶掉这一句，清单
+                            // 每帧把偏移抹回 0，手机上就上下滑不动。
+                            .track_scroll(scroll)
                             .flex_1(),
                         )
                     }))
@@ -686,6 +734,9 @@ impl ShelfView {
                                 foot.child(
                                     Button::new("shelf-scan-select")
                                         .ghost()
+                                        // 全屏都是「已在架上」时这两颗都没有对象可作用：
+                                        // 一颗禁用的按钮比一次「按了没反应」说得清楚。
+                                        .disabled(eligible == 0)
                                         .label(select_label.to_string())
                                         .accessibility_label(select_label)
                                         .on_click(move |_, _, cx| {
@@ -696,6 +747,7 @@ impl ShelfView {
                                 .child(
                                     Button::new("shelf-scan-import")
                                         .primary()
+                                        .disabled(count == 0)
                                         .label(import_label.to_string())
                                         .accessibility_label(import_label)
                                         .on_click(move |_, _, cx| {
@@ -732,6 +784,7 @@ fn scan_rows(
     let foreground = cx.theme().foreground;
     let muted = cx.theme().muted_foreground;
     let border = cx.theme().border;
+    let primary = cx.theme().primary;
     let card_radius = cx.theme().radius_lg;
     let placeholder = cx.theme().muted;
     let entity = cx.entity().clone();
@@ -742,7 +795,11 @@ fn scan_rows(
                 out.push(
                     div()
                         .h(px(HEADER_HEIGHT))
+                        .w_full()
                         .px(px(super::GUTTER))
+                        // 真机路径是 `/storage/emulated/0/Download/…` 这一种长度：
+                        // 分组头只报「这批在哪个目录」，截断比折行好 —— 行高是定死的。
+                        .truncate()
                         .text_color(muted)
                         .child(dir.clone())
                         .into_any_element(),
@@ -793,6 +850,12 @@ fn scan_rows(
                                 .overflow_hidden()
                                 .border_1()
                                 .border_color(border)
+                                // 勾中这件事要落在**卡自己的表面**上，不能只靠右边那颗
+                                // 小小的勾选框：一屏十几行时，读者扫一眼就该知道哪几本
+                                // 会被导进去。选中的底色压得很薄，不与卡片本身的层次打架。
+                                .when(picked, |this| {
+                                    this.border_color(primary).bg(primary.opacity(0.06))
+                                })
                                 .child(
                                     // 点得着的那半张卡：封面 + 那三行。勾选框是它的**兄弟**
                                     // 而不是孩子 —— gpui 把一次点击发给每一个 hitbox 含按下点

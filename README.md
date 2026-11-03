@@ -24,7 +24,7 @@ footnotes, vertical writing.
 - **An engine that knows books** — reflowable and fixed-layout documents share one
   anchor system; reading positions survive font-size and window-resize changes
   because they are chapter-internal character offsets, never page numbers.
-- **21 formats, 30 file extensions** — see the table below.
+- **21 formats, 33 file extensions** — see the table below.
 - **Three reading modes** — continuous scroll, paged, and two-page spread (it steps
   down automatically when the window is too narrow). Fixed-layout books get a
   page-by-page mode with zoom, share and save.
@@ -43,7 +43,7 @@ footnotes, vertical writing.
 
 | State | Formats |
 |---|---|
-| Reflowable, fully readable | EPUB (incl. fixed-layout), MOBI / AZW / AZW3 / PRC (KF7 & KF8, incl. hybrid files), FB2, TXT, Markdown, HTML / MHTML / HTMLZ, RTF, DOCX, legacy DOC, ODT, PDB / PalmDoc, CHM |
+| Reflowable, fully readable | EPUB (incl. fixed-layout), MOBI / AZW / AZW3 / PRC (KF7 & KF8, incl. hybrid files), FB2 (incl. `.fb2.zip` / `.fbz`), TXT, Markdown, HTML / MHTML / HTMLZ, RTF, DOCX (incl. `.dotx` / `.docm`), legacy DOC, ODT (incl. `.ott`), PDB / PalmDoc, CHM |
 | Fixed-layout, page-by-page | PDF, AZW4 (PalmDB-embedded PDF), DjVu (pure-Rust decoder, both container shapes; NAVM bookmarks become the TOC), CBZ / CB7 / CBR / CBT (CBR via a pure-Rust RAR reader) |
 | Partial | PDF / AZW4 / DjVu carry a text layer when the file has one — selection, annotations and search work inside them. A page with no text (a scan without OCR, or a PDF page whose `/Rotate` is not 0) has nothing to select. Word lists driven by styles (and per-section restart numbering) and ODT `text:continue-numbering` are not followed |
 | Not supported | DRM-protected books (a DRM-flagged PDB is detected and reported, not decrypted), encrypted RAR archives |

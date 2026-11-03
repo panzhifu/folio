@@ -4,13 +4,13 @@
 //! 「是不是在拖」、[`dominant`] 定轴、[`toward`] 折阅读方向、[`progress`] 归一、[`snap`]
 //! 判落点），能在宿主的 `cargo test` 里表驱动钉住；[`swipe_scroll`] 那一头只做
 //! 事件搬运，被 `on_scroll` 在滚轮监听里调（`view.rs` 挂在 `folio-reader` 那个 `div` 上的
-//! `.on_scroll_wheel`），所以这一层自己不再 `on_mouse_event`。松手速度也在事件搬运那一头量
-//! （[`SwipeTrack::note_step`]：`ScrollWheelEvent` 自己不带时间戳，钟取
+//! `.on_scroll`），所以这一层自己不再 `on_mouse_event`。松手速度也在事件搬运那一头量
+//! （[`SwipeTrack::note_step`]：`ScrollEvent` 自己不带时间戳，钟取
 //! `cx.background_executor().now()`），折成沿已认领那一步的那个数之后与距离一起喂 [`snap`]。
 //!
 //! **事件走的是滚动那一路，不是 `TouchDragEvent`。** 识别器在手指走过 `touch_slop` 那一刻
 //! 就把这一笔判给了某一个轴（`gpui-pre-0.3.9/src/gestures.rs` 的 `Panning`：`dominant_axis`
-//! 定轴、`lock_delta_to_axis` 锁死），此后一路只发锁了轴的 `ScrollWheelEvent`，抬手再补一条
+//! 定轴、`lock_delta_to_axis` 锁死），此后一路只发锁了轴的 `ScrollEvent`，抬手再补一条
 //! `Ended`。而 `TouchDragEvent` 只在**按下那一下**递一次探针（`window.rs:5816` 那句
 //! `offer_touch_drag`），接不接要在还看不出这一下是点按还是拖动的那一刻用 `prevent_default`
 //! 答 —— 一接就把点屏翻页与长按吸词一起吃掉。横扫本来就已经作为滚动事件送到了
@@ -421,6 +421,16 @@ impl ReaderSession {
                     return SwipeStep::Swallow;
                 }
                 TouchPhase::Ended | TouchPhase::Cancelled => {
+                    // 这一条 `Ended` 有可能属于**上一笔**：识别器是在新按下那一刻才把旧账
+                    // 结掉的（`on_scroll` 开头那条「上一笔的惯性被这一按接走」说的就是同一件
+                    // 事），而此刻 `stack_grab` 装的已经是新一笔的。判据用「这一笔一步都没
+                    // 走过」：按下那一格把 `stack_dx` 归零过，所以旧账到达时它恒为 0。
+                    // 不清是对的 —— 清了读者就撞上「连着划第二下切不动」，而那一叠图上
+                    // 没有任何迹象说明为什么（2026-11-05 门 `swiping_a_stack_yields_while_the_overlay_is_up`
+                    // 量出来的就是这一条）。
+                    if self.stack_dx == 0.0 {
+                        return SwipeStep::Swallow;
+                    }
                     self.stack_grab = None;
                     let dx = std::mem::take(&mut self.stack_dx);
                     self.stack_dy = 0.0;
@@ -507,7 +517,7 @@ impl ReaderSession {
 
     /// 把这一步记进累计，然后按累计值决定：还没定性的试着定性，已认领的摆跟手。
     ///
-    /// 手指此刻的位置**不能**读 `ScrollWheelEvent.position`：那一格在整趟拖动里
+    /// 手指此刻的位置**不能**读 `ScrollEvent.position`：那一格在整趟拖动里
     /// 恒等于按下点（见 [`SwipeTrack`] 的注释）。优先用原始触摸流给的那一个点（两个轴都在），
     /// 拿不到才退回「起手点 + 累计位移」反推 —— 后者只有一个自由度，识别器把另一根的增量抹成
     /// 了 0。两条来源都每一步写回 [`SwipeTrack::at`]：那条律的**朝向**与**推进量**全读划动向量，

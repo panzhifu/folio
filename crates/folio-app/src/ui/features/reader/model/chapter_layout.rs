@@ -33,7 +33,7 @@ use folio_core::layout::{
     LineBox, LineFragment, content_hash, layout_with_blocks, quantize_px,
 };
 use folio_core::{Reader, TextDirection};
-use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window, WindowTextSystem};
+use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window};
 
 use crate::ui::features::reader::model::book_fonts::{BookFonts, FontLoadJob};
 use crate::ui::features::reader::model::measure::GpuiMeasure;
@@ -440,8 +440,9 @@ struct Typeset {
     fonts: Option<Arc<BookFonts>>,
 }
 
-/// 作业的输入。度量要的两份文本系统以 `Arc` 搬进后台线程 —— spike① 验证过
-/// `Arc<WindowTextSystem>` 可以 move 出去用，这正是排版能出渲染帧的前提。
+/// 作业的输入。只把 App 级 `TextSystem`（`Arc`，`Send + Sync`）搬进后台；窗口级
+/// `WindowTextSystem` 从 0.3.11 起带线程内 scratch，不能再跨线程，作业在自己的线程上
+/// 用这份 `TextSystem` 现造一份。
 struct TypesetInput {
     /// 从 `Document` 搬来的块级缓存，随结果搬回（见 [`Typeset::blocks`]）。
     blocks: BlockCache,
@@ -468,7 +469,6 @@ struct TypesetInput {
     prefs: Reader,
     images: Arc<ChapterImages>,
     texts: Arc<TextSystem>,
-    window_texts: Arc<WindowTextSystem>,
     body_family: String,
     mono_family: String,
     faces: Arc<BookFonts>,
@@ -539,7 +539,6 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
     }
     let measure = GpuiMeasure::new(
         input.texts,
-        input.window_texts,
         input.body_family,
         input.mono_family,
         input.faces,
@@ -1278,13 +1277,7 @@ impl Document {
     /// 请求一次排版（不阻塞）：键没变就什么都不做，变了就把层叠 + 排版丢给后台队列
     /// （解析按需 —— 产物对得上就不重解析，见 [`typeset_job`]），渲染帧照常用上一份结果画。
     /// 测试里同步跑同一段作业体，结果当帧可断言 —— 覆盖的代码与线上同一条。
-    fn request_typeset(
-        &mut self,
-        key: LayoutKey,
-        allow_vertical: bool,
-        texts: Arc<TextSystem>,
-        window_texts: Arc<WindowTextSystem>,
-    ) {
+    fn request_typeset(&mut self, key: LayoutKey, allow_vertical: bool, texts: Arc<TextSystem>) {
         if self.applied == Some(key) {
             return; // 已应用的这份就是想要的
         }
@@ -1306,7 +1299,6 @@ impl Document {
             prefs: self.prefs.clone(),
             images: self.images.clone(),
             texts,
-            window_texts,
             body_family: self.prefs.font_family.clone(),
             mono_family: self.prefs.mono_font_family.clone(),
             faces: self.faces.clone(),
@@ -1510,12 +1502,7 @@ impl Document {
         if let Some(applied) = self.poll_typeset() {
             key = applied;
         }
-        self.request_typeset(
-            key,
-            vertical,
-            cx.text_system().clone(),
-            window.text_system().clone(),
-        );
+        self.request_typeset(key, vertical, cx.text_system().clone());
         // 作业在飞就必须再要一帧：`poll_typeset` 只有渲染帧会调，而后台那一份完成时
         // 没有任何人知道。不主动要帧的话，「排版早就排好了、屏上却一个字都没有」会一直
         // 挂着，直到读者随手碰一下屏幕 —— 平板上尤其明显（没有键盘与鼠标带来的零散重绘）。
@@ -1831,12 +1818,11 @@ impl Document {
     ///
     /// 与排版作业里那个 `GpuiMeasure` 用同一组构造参数 —— 这一点是硬要求：
     /// 「按 A 算宽、按 B 画字」是同源性防线的反面，命中与绘制必须走同一个度量口径。
-    fn measure(&self, window: &Window, cx: &App) -> GpuiMeasure {
+    fn measure(&self, _window: &Window, cx: &App) -> GpuiMeasure {
         self.measure
             .get_or_init(|| {
                 GpuiMeasure::new(
                     cx.text_system().clone(),
-                    window.text_system().clone(),
                     self.prefs.font_family.clone(),
                     self.prefs.mono_font_family.clone(),
                     self.faces.clone(),

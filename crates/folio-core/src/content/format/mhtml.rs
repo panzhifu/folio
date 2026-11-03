@@ -31,6 +31,11 @@
 //! 的地址）、`Content-Transfer-Encoding`（`quoted-printable` / `base64` / `7bit` / `8bit`）、
 //! `Content-Type` 里那个 `charset`（交给 [`super::charset::decode`] 当「容器报的码页」那一档）。
 //!
+//! 还有**单部分**的形状：IE 9 存单帧页面时不写 boundary，信封本身就是那份 `text/html`，
+//! 正文紧跟空行 —— 见 [`looks_like_mime_archive`] 那一条判据。这类文件在真样本里是
+//! `simple_page_ie.mht`（Chromium web_tests），按 multipart 的门槛读只会得到
+//! 「没有 MIME 信封」。
+//!
 //! ## 键怎么定
 //!
 //! 生产者写下的 `Content-Location` 是**来源机器上的地址**（IE/Word 写 `file:///C:/…`、
@@ -362,6 +367,30 @@ fn scan(bytes: &[u8]) -> Scan {
     let envelope = headers(&lines[..blank]);
     let content_type = value_of(&envelope, "content-type").unwrap_or_default();
     if !content_type.starts_with("multipart/") {
+        // IE9（以及 Windows 上那一代的「网页，单个文件」）存的是**单部分**存档：
+        // 信封本身就是那份 `text/html`，正文紧跟在空行后面，没有 boundary。
+        // RFC 2557 允许这种形状（一个 MIME 实体就是整个存档），而按 multipart
+        // 那条判据要求它，读到的只有「没有 MIME 信封」。
+        //
+        // 收下的门槛比 multipart 那条高一点：光有 `Content-Type: text/html` 还不够，
+        // 得有一条只有 MIME 存档才会写的头（`MIME-Version` / `X-MimeOLE` /
+        // `Content-Location` + `Content-Transfer-Encoding`），否则一个碰巧以
+        // 「Content-Type:」打头的普通 HTML 也会被当成存档。
+        if is_html_media_type(&content_type) && looks_like_mime_archive(&envelope) {
+            let mut scan = Scan {
+                envelope: true,
+                ..Scan::default()
+            };
+            scan.envelope_location = value_of(&envelope, "content-base")
+                .or_else(|| value_of(&envelope, "content-location"));
+            scan.envelope_charset = parameter(&content_type, "charset")
+                .and_then(|name| Encoding::for_label(name.as_bytes()));
+            // 把信封头与正文拼回「一个部分」交给同一条切分逻辑：头部、空行、正文。
+            let mut whole: Vec<&[u8]> = lines[..=blank].to_vec();
+            whole.extend_from_slice(&lines[blank + 1..]);
+            push_part(&mut scan, whole);
+            return scan;
+        }
         return Scan::default();
     }
     let Some(boundary) = parameter(&content_type, "boundary") else {
@@ -590,6 +619,22 @@ fn file_stem(key: &str) -> Option<String> {
 ///
 /// RFC 822 的折叠（以空白开头的行接在上一行后面）真会出现：IE 那条又长又带百分号的
 /// `Content-Type` 经邮件客户端一转就被折断，而折断的那一半里恰好写着 `charset`。
+/// 单部分存档的正文类型：只有这两族才是「网页」。
+fn is_html_media_type(content_type: &str) -> bool {
+    let media = content_type.split(';').next().unwrap_or_default().trim();
+    media.eq_ignore_ascii_case("text/html") || media.eq_ignore_ascii_case("application/xhtml+xml")
+}
+
+/// 这一组头是不是 MIME 存档写的 —— 不是「有没有 `Content-Type`」，那个普通 HTML
+/// 也可能以一行假头打头。`MIME-Version` / `X-MimeOLE` 是 IE / Word 那两家的签名，
+/// `Content-Location` + `Content-Transfer-Encoding` 同时出现则是别家的常见搭配。
+fn looks_like_mime_archive(head: &[(String, String)]) -> bool {
+    head.iter()
+        .any(|(name, _)| name == "mime-version" || name == "x-mimeole")
+        || (value_of(head, "content-location").is_some()
+            && value_of(head, "content-transfer-encoding").is_some())
+}
+
 fn headers(lines: &[&[u8]]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for raw in lines {
@@ -914,6 +959,52 @@ Content-Transfer-Encoding: base64
                 .entry_text(&path, "页.htm")
                 .is_some_and(|text| text.contains("<h1>第一章</h1>")),
             "按部分键现取一章"
+        );
+    }
+
+    /// 单部分存档：IE 9 存单帧页面时**不写 boundary**，信封自己就是那份 `text/html`，
+    /// 正文紧跟空行。真样本 `simple_page_ie.mht` 就是这个形状（Chromium web_tests），
+    /// 而按 multipart 那条判据读，得到的是「没有 MIME 信封」。
+    #[test]
+    fn a_single_part_ie_archive_reads_as_one_chapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_mht(
+            dir.path(),
+            "单帧.mht",
+            "From: \"Saved by Windows Internet Explorer 9\"\n\
+             Subject: A simple page\n\
+             MIME-Version: 1.0\n\
+             Content-Type: text/html;\n\
+             \tcharset=\"Windows-1252\"\n\
+             Content-Transfer-Encoding: quoted-printable\n\
+             Content-Location: http://localhost/simple_page.html\n\
+             X-MimeOLE: Produced By Microsoft MimeOLE V6.1.7600.16776\n\
+             \n\
+             <html><head><title>简单页</title></head><body><p>Hello=20world</p></body></html>\n",
+        );
+        let (meta, flow) = reflow(&path);
+        assert_eq!(meta.format, Format::Mhtml);
+        assert_eq!(meta.title, "简单页");
+        assert_eq!(flow.chapters.len(), 1, "单部分就是一章");
+        let body = flow.chapters[0].source();
+        assert!(body.contains("Hello world"), "QP 的 =20 要落地：{body}");
+        assert!(!body.contains("=20"), "转义不许留在正文里：{body}");
+        assert_eq!(flow.chapters[0].spine_href, "simple_page.html");
+    }
+
+    /// 反过来：只有一行 `Content-Type: text/html` 的普通 HTML 不是存档。那个头
+    /// 谁都能写在第一行，光凭它收下就把「一份 HTML」认成了「一份网页存档」。
+    #[test]
+    fn a_plain_html_with_a_content_type_line_is_not_an_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_mht(
+            dir.path(),
+            "伪存档.mht",
+            "Content-Type: text/html; charset=utf-8\n\n<html><body><p>正文</p></body></html>\n",
+        );
+        assert!(
+            MhtmlAdapter.index(&path).is_err(),
+            "没有 MIME 版本、没有 Content-Location/CTE 的，不该当存档"
         );
     }
 

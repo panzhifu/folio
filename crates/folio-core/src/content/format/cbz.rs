@@ -188,6 +188,9 @@ fn unsupported(path: &Path, why: &str) -> crate::Error {
 /// 「这一条算不算一页」与「这一条该不该参与判断」。混在一起的话，一个装着
 /// `__MACOSX/._001.jpg` 的正常漫画包会因为那条噪音被评成「不是漫画包」。
 pub(crate) fn is_container_noise(name: &str) -> bool {
+    // 开头的 `./` 是打包工具写出来的目录前缀（`tar cf x ./*`、`zip -r x .`），
+    // 不是「这是个隐藏文件」—— 先剥掉再判点号，否则一整包页面都会被当成噪音。
+    let name = name.trim_start_matches("./");
     if name.ends_with('/') || name.starts_with('.') || name.contains("__MACOSX/") {
         return true;
     }

@@ -11,7 +11,7 @@ use super::images::open_picture;
 
 /// 把**原始**触摸流记进会话的那块监听。
 ///
-/// 为什么非要这一路：跟手翻页吃的是识别器折出来的 `ScrollWheelEvent`，而它在把一笔定性成
+/// 为什么非要这一路：跟手翻页吃的是识别器折出来的 `ScrollEvent`，而它在把一笔定性成
 /// 某一轴的那一刻就把另一轴的增量抹成 0（`lock_delta_to_axis`）。于是「起手点 + 累计位移」
 /// 反推出来的手指此刻只剩一个自由度，折线转不起来。同一笔的原始触摸是唯一还带着第二个自由
 /// 度的地方。
@@ -38,7 +38,17 @@ pub(super) fn touch_follow(reader: WeakEntity<ReaderSession>) -> AnyElement {
                         TouchPhase::Started => {
                             // 起手落在某一叠上：这一笔先按「切图」记账（`swipe_scroll`
                             // 那一头决定它到底算切图还是算滚）。
-                            let grab = session.stack_hit_at(event.position);
+                            //
+                            // 浮层（顶栏底栏）压着的时候不记这一笔：横划切图、以及划到叠的
+                            // 尽头那一下交回翻页（`swipe_scroll` 末尾那句 `turn`）都是翻页，
+                            // 而工具栏露头之后正文上的输入只表达「收浮层」—— 与
+                            // `claim_swipe`、滚轮那两条同一规矩。不认领这一叠，这一笔随后落回
+                            // 那两条已经会让位的路。
+                            let grab = if session.overlay_open {
+                                None
+                            } else {
+                                session.stack_hit_at(event.position)
+                            };
                             session.stack_grab = grab;
                             session.stack_dx = 0.0;
                             session.stack_dy = 0.0;

@@ -100,7 +100,7 @@ fn open_fixed_pdf_at(
     store
         .save_content(id, &content, Format::Pdf)
         .expect("页表入库");
-    let document = folio_core::content::document::with_container(meta, content, &path);
+    let document = folio_core::content::document::with_container(meta, content, &path, None);
     let (view, handle) = open_with_document(
         cx,
         Arc::from(document),
@@ -131,7 +131,7 @@ fn reopen_fixed_pdf(
         .expect("PDF 该有 provider")
         .index(&path)
         .expect("入库的那份真样本该读得开");
-    let document = folio_core::content::document::with_container(meta, content, &path);
+    let document = folio_core::content::document::with_container(meta, content, &path, None);
     let locator = store
         .position(id)
         .ok()
@@ -176,7 +176,7 @@ fn a_bookmark_in_a_pdf_moves_the_screen_to_that_page(cx: &mut TestAppContext) {
         .save_content(id, &content, folio_core::content::format::Format::Pdf)
         .expect("页表入库");
 
-    let document = folio_core::content::document::with_container(meta, content, &path);
+    let document = folio_core::content::document::with_container(meta, content, &path, None);
     let (view, handle) = open_with_document(
         cx,
         Arc::from(document),

@@ -1,4 +1,4 @@
-//! 十二个设置页：每页一个文件，产出的是 [`super::super::model::spec`] 里的中立规格。
+//! 十三个设置页：每页一个文件，产出的是 [`super::super::model::spec`] 里的中立规格。
 //!
 //! 加一页动三处：新文件、这里一行、`super::SettingsPage` 里一个变体（顺序即侧栏顺序）。
 
@@ -13,4 +13,5 @@ pub(in crate::ui::features::settings) mod storage;
 pub(in crate::ui::features::settings) mod sync;
 pub(in crate::ui::features::settings) mod toc;
 pub(in crate::ui::features::settings) mod translation;
+pub(in crate::ui::features::settings) mod txt_rules;
 pub(in crate::ui::features::settings) mod typography;

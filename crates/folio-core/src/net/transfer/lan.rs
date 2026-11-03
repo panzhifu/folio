@@ -45,7 +45,7 @@ use super::{Gate, Refusal, TransferState};
 use crate::account::{AccountKey, Nonce, Proof, Side};
 use crate::net::lansync::{
     Auth, BookEntry, Hello, HelloReply, MAX_PUSH_BYTES, Manifest, PROTOCOL_VERSION, ROUTE_AUTH,
-    ROUTE_FILE, ROUTE_HELLO, ROUTE_MANIFEST, ROUTE_SNAPSHOT,
+    ROUTE_FILE, ROUTE_HELLO, ROUTE_MANIFEST, ROUTE_SNAPSHOT, is_book_hash,
 };
 
 /// 一次局域网同步会话的存活时长。局域网里一趟往返在秒级，给到十分钟只为了让「拉书拉到一半
@@ -356,7 +356,7 @@ async fn file(
     if let Some(refusal) = check_token(lan, query.token.as_deref(), peer.ip()) {
         return refusal;
     }
-    let Some(hash) = query.hash.filter(|hash| is_hash_hex(hash)) else {
+    let Some(hash) = query.hash.filter(|hash| is_book_hash(hash)) else {
         // 形状不对的 hash 连库都不必问：它不可能是本机任何一本书的身份。
         return not_found();
     };
@@ -445,11 +445,6 @@ fn unix_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
         .unwrap_or_default()
-}
-
-/// 书的身份那一格长什么样：64 个十六进制字符。大小写都认，因为这一串可能被人从屏幕上抄过。
-fn is_hash_hex(hash: &str) -> bool {
-    hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -867,5 +862,112 @@ mod tests {
             200,
             "局域网同步没开不该把传书一起关掉"
         );
+    }
+
+    /// **客户端那一半与这台上的一半真在一根套接头上遇一次。**
+    ///
+    /// 上面那几条测的都是「手写的请求打得过服务器」，而界面将来发的是
+    /// [`crate::net::lansync::sync_one`] 拼出来的请求 —— 两边各写各的时，查询串里叫
+    /// `token` 还是 `tok`、PUT 的 body 是不是那份合并后的快照，都只有跑通一次才看得见。
+    #[test]
+    fn the_client_half_meets_the_server_half_over_a_real_socket() {
+        use std::sync::Mutex;
+
+        use super::unix_now;
+        use crate::net::lansync::{self, Applied, LanLocal};
+        use crate::net::remote::ureq;
+
+        /// 发起那一台：记下被要求下拉的 URL，合并那一步只交出一样东西 —— 一句「这是本机
+        /// 合完的那一份」，好让断言落在**推回去的到底是哪一份**上。
+        struct ClientLocal {
+            pulls: Mutex<Vec<String>>,
+            /// 交到合并那一步的对面快照，序列化成串存下来（断言 `dev-a` 与那两个时间戳）。
+            merged: Mutex<Vec<String>>,
+        }
+
+        impl LanLocal for ClientLocal {
+            fn local_hashes(&self) -> std::collections::HashSet<String> {
+                // 本机只有 `a` 那一本：所以对面清单里的 `b` 是该拉的，而 `a` 不该再问。
+                [hash_of('a')].into_iter().collect()
+            }
+
+            fn pull_book(&self, url: &str) -> bool {
+                self.pulls.lock().unwrap().push(url.to_string());
+                true
+            }
+
+            fn merge_and_apply(
+                &self,
+                remotes: &[crate::sync::Snapshot],
+                _now: i64,
+            ) -> std::result::Result<Applied, String> {
+                let mut dumped = self.merged.lock().unwrap();
+                for remote in remotes {
+                    dumped.push(serde_json::to_string(remote).expect("测试里的快照解得开"));
+                }
+                Ok(Applied {
+                    json: r#"{"marker":"from-client"}"#.to_string(),
+                    positions: 1,
+                    annotations: 0,
+                    bookmarks: 0,
+                })
+            }
+        }
+
+        let key = AccountKey::generate().unwrap();
+        let rig = Rig::start(Some(key));
+        let local = ClientLocal {
+            pulls: Mutex::new(Vec::new()),
+            merged: Mutex::new(Vec::new()),
+        };
+        let base = format!("http://{}", rig.server.addr());
+        // 本机的钟故意报成「比这台服务器快一千秒」：对表那一步要在那份快照上留下这一千秒。
+        let now = unix_now() + 1_000;
+        let report = lansync::sync_one(&local, ureq::shared(), &base, &key, now)
+            .expect("客户端那一半该与这台服务器走通整趟");
+
+        assert_eq!(report.pulled, 1, "对面两本、本机有一本，就该只补那缺的一本");
+
+        // 客户端拼出来的下载地址，在这台真服务器上读得出**那本书的字节**：
+        // 查询串里那两个名字、token 的来源、hash 的传法，全在这一句里对上。
+        let pulls = local.pulls.lock().unwrap();
+        assert_eq!(pulls.len(), 1);
+        assert!(
+            !pulls[0].contains(&hash_of('a')),
+            "本机有的那一本不该出现在下拉里：{}",
+            pulls[0]
+        );
+        let wanted = std::fs::read(rig._tmp.path().join("second")).unwrap();
+        let served = rig
+            .client
+            .get(&pulls[0])
+            .call()
+            .expect("客户端给出的 URL 就该打得通");
+        assert_eq!(served.into_string().unwrap().into_bytes(), wanted);
+        drop(pulls);
+
+        // GET /snapshot 走通了：交到合并那一步的，是这台写的那一份。而它 `exported_at` 是
+        // 对面钟上的数（夹具手写的 7），搬到本机这一千秒快的钟面上应当变成 1007 ——
+        // 差一秒是往返本身，所以放开两秒。
+        let merged = local.merged.lock().unwrap();
+        assert_eq!(merged.len(), 1, "一趟只合对面那一份");
+        assert!(
+            merged[0].contains("dev-a"),
+            "该读到服务器的快照：{}",
+            merged[0]
+        );
+        let rebased = serde_json::from_str::<crate::sync::Snapshot>(&merged[0])
+            .unwrap()
+            .exported_at;
+        assert!(
+            (rebased - 1_007).abs() <= 2,
+            "对表要把对面那份搬到本机钟面上，实际搬到 {rebased}（该在 1007 上下）"
+        );
+        drop(merged);
+
+        // 推回去的是**客户端合并后的那一份**（那一句 marker），不是原样转发的服务器快照。
+        let applied = rig.log.lock().unwrap().applied.clone();
+        assert_eq!(applied.len(), 1, "一趟只推一次");
+        assert_eq!(applied[0], br#"{"marker":"from-client"}"#.to_vec());
     }
 }

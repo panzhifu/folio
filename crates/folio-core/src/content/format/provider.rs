@@ -59,6 +59,21 @@ pub trait DocumentProvider: Send + Sync {
         100
     }
 
+    /// 灌进读者自己持有的口令，**必须在任何读取之前**调。默认什么都不做。
+    ///
+    /// 挂在实例上而不是给上面那十几条方法各加一个参数，是因为这个实例本来就是一本私有的
+    /// （见 [`providers`] 那段「每次调用现造一遍」）：口令的生命周期与那一本完全一样，
+    /// 而 `index` / `chapter_source` / `render_page` / `page_texts` 全都要用它 —— 加参数
+    /// 会把每一条都改脏，还把「谁在什么时候知道口令」摊到所有调用方身上。
+    ///
+    /// **认得它的只有 PDF 那一族**（`format::pdf` 与 `format::azw4`）：那边的引擎本来就收
+    /// 口令。DRM 那些格式永不覆盖这一条 —— 覆盖了等于把「读者手里有口令」这条路挪去解
+    /// 那些本来就不该解的东西。
+    ///
+    /// 覆盖时必须让已缓存的解析句柄作废：一份「按空口令打开失败」的负结果留着，读者输对
+    /// 口令也还是打不开，得等进程换掉这个实例。
+    fn set_passphrase(&mut self, _passphrase: Option<Passphrase>) {}
+
     /// 只读**索引**：章表（只有标题与位置）、CSS、目录、图片元数据、封面。
     ///
     /// **不产出正文**：章表里的每一章是 [`ChapterText::At`]，正文得叫
@@ -309,6 +324,35 @@ pub trait DocumentProvider: Send + Sync {
     }
 }
 
+/// 读者**自己持有**的那份口令 —— 出版方给读者的 user password，不是从任何身份复算出来的密钥。
+///
+/// 只覆盖这一种：PDF 的 `/Encrypt` 用户口令。MOBI 的 `mobipocket-encryption-1/2` 与 EPUB 的
+/// `encryption.xml` 那一族，密钥要拿读者的注册身份（PID）去派生，那属于规避技术措施，
+/// 本仓库不做，也永远不会从这里走。
+///
+/// `Debug` 手写而不是 derive：默认那份会把口令原文写进日志，而 `tracing` 里
+/// 「《x.pdf》打不开」这一句就在旁边。
+#[derive(Clone, PartialEq, Eq)]
+pub struct Passphrase(String);
+
+impl Passphrase {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+
+    /// 引擎要的本来就是 `&str`，这一格不给它多一层含义。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Passphrase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 长度留着：它是有没有输进东西的唯一线索，而那个数看不出内容。
+        write!(formatter, "Passphrase(***{}**)", self.0.len())
+    }
+}
+
 /// 全部已注册的 provider。顺序 = 注册顺序 = 同权重时的优先级。
 ///
 /// 每次调用现造一遍而不是存一张全局表，换来的是没有全局可变状态。多数 provider 是
@@ -365,8 +409,8 @@ pub fn provider_for(path: &Path) -> Option<Box<dyn DocumentProvider>> {
 pub fn supported_extensions() -> &'static [&'static str] {
     &[
         "epub", "fb2", "html", "htm", "xhtml", "md", "markdown", "txt", "rtf", "cbz", "chm",
-        "mobi", "azw", "azw3", "prc", "pdf", "docx", "doc", "dot", "odt", "pdb", "azw4", "cb7",
-        "cbr", "cbt", "djvu", "djv", "htmlz", "mhtml", "mht",
+        "mobi", "azw", "azw3", "prc", "pdf", "docx", "dotx", "docm", "doc", "dot", "odt", "ott",
+        "pdb", "azw4", "cb7", "cbr", "cbt", "djvu", "djv", "htmlz", "mhtml", "mht",
     ]
 }
 
@@ -375,6 +419,151 @@ pub fn supports_extension(ext: &str) -> bool {
     supported_extensions()
         .iter()
         .any(|known| known.eq_ignore_ascii_case(ext))
+}
+
+/// 明摆着不会装书的扩展名。**整机扫描的粗筛先过这一张表**：`looks_like_a_book`
+/// 对认不出的名字要开一次文件读头（`sniff::archive_shape`），而 Android 的共享存储
+/// 走 FUSE，一次 `open` 是毫秒级 —— 一台普通手机相册里几万张 `.jpg` 就能把一次扫描
+/// 拖成几十秒。这张表把最常见的几类挡在 `open` 之前。
+///
+/// 代价写清楚：一本**被改名**成 `.jpg` 的真 EPUB 扫不到。这是有意的取舍 ——
+/// 认得出书名的人本来就会把扩展名留对，而扫描一次要过的是整台设备。
+/// 表里只放「从来不是书，也不是 zip/rar/7z/tar 那几种装书的包」的名字：
+/// `.zip` / `.rar` / `.7z` / `.tar` 与认不出的扩展名都不在这里，照旧开容器看。
+fn never_holds_a_book(ext: &str) -> bool {
+    const NEVER: &[&str] = &[
+        // 图片
+        "jpg",
+        "jpeg",
+        "png",
+        "gif",
+        "webp",
+        "bmp",
+        "tif",
+        "tiff",
+        "heic",
+        "heif",
+        "avif",
+        "ico",
+        "svg",
+        "psd",
+        "raw",
+        "dng",
+        "cr2",
+        "nef",
+        "arw",
+        "orf",
+        "rw2",
+        "ai",
+        "eps",
+        // 视频
+        "mp4",
+        "m4v",
+        "mkv",
+        "avi",
+        "mov",
+        "wmv",
+        "flv",
+        "webm",
+        "3gp",
+        "3g2",
+        "mpg",
+        "mpeg",
+        "ts",
+        "m2ts",
+        "vob",
+        "ogv",
+        // 音频
+        "mp3",
+        "m4a",
+        "aac",
+        "flac",
+        "ogg",
+        "oga",
+        "opus",
+        "wav",
+        "wma",
+        "amr",
+        "mid",
+        "midi",
+        "aiff",
+        // 应用与二进制
+        "apk",
+        "apks",
+        "xapk",
+        "aab",
+        "obb",
+        "dex",
+        "so",
+        "dylib",
+        "dll",
+        "exe",
+        "msi",
+        "dmg",
+        "pkg",
+        "jar",
+        "class",
+        "bin",
+        "iso",
+        "img",
+        "vhd",
+        "vmdk",
+        "qcow2",
+        // 编译产物（桌面上 `target/` 一类目录里成千上万）
+        "o",
+        "obj",
+        "a",
+        "lib",
+        "rlib",
+        "rmeta",
+        "pdb",
+        "d",
+        "pyc",
+        "pyo",
+        "pyd",
+        "wasm",
+        "map",
+        // 压缩档：`archive_shape` 只认 zip / rar / 7z / tar 四种，这几样
+        // 解不出「包里有没有书」，开一次也只会得到「不是书」。
+        "gz",
+        "tgz",
+        "bz2",
+        "xz",
+        "zst",
+        "lz4",
+        "lzma",
+        // 字体
+        "ttf",
+        "otf",
+        "woff",
+        "woff2",
+        // 字幕
+        "srt",
+        "vtt",
+        "ass",
+        "ssa",
+        // 数据与配置
+        "db",
+        "db-shm",
+        "db-wal",
+        "sqlite",
+        "sqlite3",
+        "json",
+        "xml",
+        "yaml",
+        "yml",
+        "toml",
+        "ini",
+        "css",
+        "lock",
+        "log",
+        "tmp",
+        "bak",
+        "part",
+        "crdownload",
+        "torrent",
+    ];
+    NEVER.iter().any(|known| known.eq_ignore_ascii_case(ext))
 }
 
 /// 粗筛：这个文件值不值得哈希一趟、走一遍三层判定。
@@ -399,6 +588,11 @@ pub fn looks_like_a_book(path: &Path) -> bool {
         .unwrap_or_default();
     if supports_extension(ext) {
         return true;
+    }
+    // 相册、视频、应用安装包这些占整台设备的大头：名字已经说明它不是书，
+    // 就不必为它开一次文件（Android 共享存储上一次 `open` 是毫秒级）。
+    if never_holds_a_book(ext) {
+        return false;
     }
     // 只有扩展名不认的那一族才值得开容器，所以这一问排在后面。
     matches!(
@@ -510,9 +704,12 @@ mod tests {
             ("a.azw3", Format::Mobi),
             ("a.pdf", Format::Pdf),
             ("a.docx", Format::Docx),
+            ("a.dotx", Format::Docx),
+            ("a.docm", Format::Docx),
             ("a.doc", Format::Doc),
             ("a.dot", Format::Doc),
             ("a.odt", Format::Odt),
+            ("a.ott", Format::Odt),
             ("a.pdb", Format::Pdb),
             ("a.azw4", Format::Azw4),
             ("a.cb7", Format::Cb7),
@@ -550,6 +747,14 @@ mod tests {
         );
         assert!(!looks_like_a_book(Path::new("/x/报告.lit")));
         assert!(!looks_like_a_book(Path::new("/x/无扩展名")));
+        // 常见的非书文件必须在**开文件之前**就否掉：整机扫描里它们是绝大多数，
+        // 而 Android 共享存储上一次 `open` 是毫秒级。大小写不敏感。
+        for ext in [
+            "jpg", "JPG", "png", "mp4", "mp3", "apk", "db", "json", "xml",
+        ] {
+            let probe = Path::new("/x/相册").with_extension(ext);
+            assert!(!looks_like_a_book(&probe), ".{ext} 不该走到开容器那一步");
+        }
         assert!(
             looks_like_a_book(Path::new("/x/漫画.cbr")),
             "漫画包不管容器解不解得动都要过粗筛：过不了筛的书连一句「这本读不动」都收不到"

@@ -255,7 +255,7 @@ fn a_short_horizontal_swipe_bounces_back(cx: &mut TestAppContext) {
 /// 只有「一甩不翻」这一种表现，而它与「这一律压根没生效」在屏幕上看不出差别：钟没走、
 /// 取样窗口写反、抬手那一条零增量把最近一次有位移的速度抹掉，三种都红在这里。
 ///
-/// 走的是真机那条路（原始触摸 → 识别器 → 锁了轴的 `ScrollWheelEvent`），钟按 16ms 一格推：
+/// 走的是真机那条路（原始触摸 → 识别器 → 锁了轴的 `ScrollEvent`），钟按 16ms 一格推：
 /// 一笔的第一格只立分母起点，所以速度来自第二格那一段。
 #[gpui_kit::test]
 fn a_short_but_fast_flick_lands(cx: &mut TestAppContext) {
@@ -1266,7 +1266,7 @@ fn momentum_after_a_swipe_neither_turns_again_nor_cuts_the_animation(cx: &mut Te
 /// 斜着那一笔的**第二个自由度**只能来自原始触摸流。
 ///
 /// 识别器把一笔定性成某一轴之后，就把另一根的增量抹成 0（`lock_delta_to_axis`）：只靠它折
-/// 出来的 `ScrollWheelEvent`，「起手点 + 累计位移」反推出的手指此刻永远停在按下那一格的纵
+/// 出来的 `ScrollEvent`，「起手点 + 累计位移」反推出的手指此刻永远停在按下那一格的纵
 /// 坐标上，折线转不起来。这一条同时是给元素订阅 `TouchEvent` 那个口子留的门 —— 口子没开，
 /// `finger` 就是 `None`，`at.1` 与 `from.1` 逐字相同，这里当场红。
 #[gpui_kit::test]

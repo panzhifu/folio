@@ -194,13 +194,28 @@ pub(super) fn annotation_fills(
         } else {
             solid
         };
-        // 带文字笔记的那一条：在**真正末尾**补一枚便签图标。用最后一个字的矩形来定，
-        // 而不是这一趟画出的最后一块 —— 长批注跨屏/跨页时，每一带都会画出「最后一块」，
-        // 按它摆就会在每个接缝处都长出一枚图标。最后一个字不落在这一带就整枚不画。
+        // 带文字笔记的那一条：在**这一片最后一行的左下角**补一枚便签图标。
+        //
+        // 锚点仍由**末字**那一格决定：长批注跨栏/跨页时，每一带都会算出「自己这一段的最后一
+        // 块」，按那块摆就会在每个接缝处都长出一枚图标 —— 末字只落在其中一带，所以整条只有
+        // 一枚。摆的位置取末字所在那一行里最左的那一块的左端（读者的阅读起点那一侧），
+        // 垂直落在那一行的下缘之内，不越到下一行上去。
         let note_anchor = if !span.note.trim().is_empty() && span.end > span.start {
             let mut tail = Vec::new();
             highlight_rects(spot, (span.end - 1)..span.end, &mut tail);
-            tail.last().copied()
+            tail.last().copied().and_then(|last| {
+                let mut rows = Vec::new();
+                highlight_rects(spot, span.start..span.end, &mut rows);
+                let mid = f32::from(last.center().y);
+                rows.into_iter()
+                    .filter(|row| {
+                        f32::from(row.origin.y) <= mid
+                            && mid < f32::from(row.origin.y + row.size.height)
+                    })
+                    .map(|row| f32::from(row.origin.x))
+                    .reduce(f32::min)
+                    .map(|left| (left, last))
+            })
         } else {
             None
         };
@@ -217,33 +232,30 @@ pub(super) fn annotation_fills(
                 Mark::Quad(line, color)
             });
         }
-        if let Some(last) = note_anchor {
-            let center = last.center();
+        if let Some((left, last)) = note_anchor {
+            let icon = note_icon_bounds(left, last);
+            // 让位判据量的是**图标自己**的中心：它现在贴在末行的左端，与末字不在同一格，
+            // 按末字那一格判会把「图标已被折走、字还在」那一帧画出来。
+            let center = icon.center();
             if cut.is_none_or(|cut| cut.keeps(f32::from(center.x), f32::from(center.y))) {
-                element.note(Mark::Note(note_icon_bounds(last, span.style), solid));
+                element.note(Mark::Note(icon, solid));
             }
         }
     }
 }
 
-/// 笔记图标的外盒：12×12，贴在划线末端的右侧。
+/// 笔记图标的外盒：12×12，落在**这一片最后一行的左下角** —— 贴那一行的左端，垂直落在那一行
+/// 的下缘之内（不越到下一行上去）。
 ///
-/// 高亮带的末块是整行盒，取它的竖直中线；字下实线/波浪的末块只是贴着盒底的一条
-/// 细线，拿它的中线会把图标画进字里，所以改成在线**上方**落。
-fn note_icon_bounds(last: Bounds<Pixels>, style: AnnotationStyle) -> Bounds<Pixels> {
+/// 为什么靠左不靠右：一枚挂在末字右侧的图标，行长时会在屏幕外那一侧、跨栏时跑到下一栏去，
+/// 而每一片标记的左端都是读者的阅读起点，位置与批注长短无关。
+///
+/// 末字那一格（`last`）恒由 [`highlight_rects`] 算，所以三档画法用的是同一个行盒底边 ——
+/// 画法条只有 2px 高，不能拿它自己当垂直基准。
+fn note_icon_bounds(left: f32, last: Bounds<Pixels>) -> Bounds<Pixels> {
     const ICON: f32 = 12.0;
-    let top = match style {
-        AnnotationStyle::Highlight => f32::from(last.center().y) - ICON * 0.5,
-        // `last` 是末字的整行盒；字下实线/波浪贴着盒底，图标落在线之上、盒底之内。
-        _ => f32::from(last.origin.y) + f32::from(last.size.height) - ICON - 2.0,
-    };
-    Bounds::new(
-        point(
-            px(f32::from(last.origin.x) + f32::from(last.size.width) + 2.0),
-            px(top),
-        ),
-        size(px(ICON), px(ICON)),
-    )
+    let top = f32::from(last.origin.y) + f32::from(last.size.height) - ICON - 1.0;
+    Bounds::new(point(px(left), px(top)), size(px(ICON), px(ICON)))
 }
 
 /// 听书这一段底色的透明度。比选区（[`HIGHLIGHT_ALPHA`]）淡：它是背景里的一条
@@ -350,20 +362,24 @@ pub(super) fn fixed_marks(
     out
 }
 
-/// 定版式那一页上的便签图标：贴在末字右侧，夹在**页框**里 —— PDF 页几乎铺满屏，
-/// 不做这一道夹，选到行尾时图标会被切在屏幕外。
+/// 定版式那一页上的便签图标：贴在这一片**最后一行的左端**，垂直落在行盒下缘之内，
+/// 并夹在**页框**里 —— PDF 页几乎铺满屏，作者写的页边距又可以是 0，不做这一道夹，
+/// 图标会被切在屏幕外。
+///
+/// 这一族的 mark 压在**页图之上**（那些字本来就在栅格出来的图里），所以左下角这一枚会盖住
+/// 该行第一个字的下角；流式那一族的同一枚压在字形之下，没有这个问题。
 fn page_note_icon(last: Bounds<Pixels>, page: Bounds<Pixels>) -> Bounds<Pixels> {
     const ICON: f32 = 12.0;
     let page_left = f32::from(page.origin.x);
     let page_top = f32::from(page.origin.y);
     let page_right = page_left + f32::from(page.size.width);
     let page_bottom = page_top + f32::from(page.size.height);
-    let left = (f32::from(last.right()) + 2.0)
-        .min(page_right - ICON - 1.0)
-        .max(page_left + 1.0);
-    let top = (f32::from(last.center().y) - ICON * 0.5)
-        .min(page_bottom - ICON - 1.0)
-        .max(page_top + 1.0);
+    let left = f32::from(last.origin.x)
+        .max(page_left + 1.0)
+        .min(page_right - ICON - 1.0);
+    let top = (f32::from(last.origin.y) + f32::from(last.size.height) - ICON - 1.0)
+        .max(page_top + 1.0)
+        .min(page_bottom - ICON - 1.0);
     Bounds::new(point(px(left), px(top)), size(px(ICON), px(ICON)))
 }
 
@@ -460,5 +476,58 @@ fn annotation_underline_rects(
             ),
             size(px(rect.width), px(thickness)),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{note_icon_bounds, page_note_icon};
+    use gpui_kit::{Bounds, point, px, size};
+
+    /// 可重排那一族：便签图标落在那一行的**左端**，垂直落在行盒下缘之内，不越到下一行。
+    ///
+    /// 钉的是几何规则本身（左端 + 行底），不是「画没画出来」—— 那一层要真排版与一个带
+    /// 批注的章才能问，这里给的是合成的一行盒。
+    #[test]
+    fn note_icon_sits_at_the_bottom_left_of_its_row() {
+        let row = Bounds::new(point(px(24.0), px(100.0)), size(px(300.0), px(28.0)));
+        let icon = note_icon_bounds(24.0, row);
+        assert_eq!(
+            (f32::from(icon.origin.x), f32::from(icon.origin.y)),
+            (24.0, 115.0),
+            "左端与那一行对齐，顶 = 行底 128 − 12 − 1"
+        );
+        assert_eq!(
+            (f32::from(icon.size.width), f32::from(icon.size.height)),
+            (12.0, 12.0)
+        );
+        assert!(
+            f32::from(icon.origin.y) + f32::from(icon.size.height)
+                <= f32::from(row.origin.y) + f32::from(row.size.height),
+            "图标整枚留在这一行盒之内，不许压到下一行的字"
+        );
+    }
+
+    /// 定版式那一族：左端与行底之外，还要夹在页框里 —— 作者把页边距写成 0 时，
+    /// 行盒的左端就是页框的左沿，图标整枚会骑出页外。
+    #[test]
+    fn fixed_note_icon_stays_inside_the_page_box() {
+        let page = Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(300.0)));
+        let row = Bounds::new(point(px(0.0), px(280.0)), size(px(200.0), px(28.0)));
+        let icon = page_note_icon(row, page);
+        assert_eq!(
+            f32::from(icon.origin.x),
+            1.0,
+            "左端顶到页框左沿，夹回页内 1px"
+        );
+        assert_eq!(
+            f32::from(icon.origin.y),
+            287.0,
+            "行贴在页底：按行底摆是 295，越过页底那一档要夹成 300 − 12 − 1"
+        );
+        assert!(
+            f32::from(icon.origin.y) + f32::from(icon.size.height) <= 300.0,
+            "整枚留在页框里"
+        );
     }
 }

@@ -69,6 +69,29 @@ impl ReaderSession {
         self.reading_clock = None;
     }
 
+    /// 进入后台：按**离开这一刻**结账，并停掉 60 秒时钟。
+    ///
+    /// 与 [`Self::end_reading`] 的区别是书还开着：前台回来时 [`Self::resume_reading`]
+    /// 重新起一段。没有这一刀时，切后台最多会被宽限线多算 5 分钟（见 [`IDLE_GRACE`]）。
+    pub(in crate::ui::features::reader) fn suspend_reading(&mut self) {
+        self.settle_reading();
+        self.reading_segment_start = 0;
+        self.reading_clock = None;
+    }
+
+    /// 回到前台：若这一段已经被 suspend 掉，重新起一段并挂回时钟。
+    pub(in crate::ui::features::reader) fn resume_reading(&mut self, cx: &mut Context<Self>) {
+        if self.reading_segment_start == 0 {
+            self.begin_reading(cx);
+        }
+    }
+
+    /// 系统内存告警：只丢可重建的图像；当前屏与放大查看那一层由图集自己保护。
+    pub(in crate::ui::features::reader) fn trim_caches(&mut self, cx: &mut Context<Self>) {
+        self.atlas
+            .update(cx, |atlas, cx| atlas.trim_for_memory_pressure(cx));
+    }
+
     /// 把「从 [`Self::reading_segment_start`] 到此刻、且不超过宽限线」那一段写进库，
     /// 然后把段首推到此刻。
     pub(in crate::ui::features::reader) fn settle_reading(&mut self) {
@@ -156,6 +179,15 @@ mod tests {
         assert_eq!(settled_at(0, 100, 500), Some(100 + IDLE_GRACE));
         // 结账点来得比宽限线早时，线还够不着：整段照记（这就是慢读不被裁掉的那一侧）。
         assert_eq!(settled_at(0, 100, 300), Some(300));
+    }
+
+    /// 切后台时按离开那一刻结账：多算从「最多一个宽限期」降到 0。
+    #[test]
+    fn background_settles_at_the_leave_moment() {
+        // t=240 切后台：新路径就结在 240。
+        assert_eq!(settled_at(0, 240, 240), Some(240));
+        // 没有这一刀时，同一个离开点要等 60 秒时钟在 540 才结，会写到宽限线 540。
+        assert_eq!(settled_at(0, 240, 540), Some(240 + IDLE_GRACE));
     }
 
     #[test]

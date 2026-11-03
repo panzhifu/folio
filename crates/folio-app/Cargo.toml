@@ -27,13 +27,12 @@ folio-core.workspace = true
 # 仿真翻页那一档的页面网格与 uniform 的纯 CPU 定义：这里只拿数据，不拿 GPU 类型。
 # 它住在 `panzhifu/gpui-folio` 那个 workspace 里，rev 必须跟根
 # `[patch.crates-io]` 那五条同一个数 —— 一份 fork 六个成员，钉成两个 rev 就是两份代码。
-folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "9bce97a85e32aaba0563c360c5927f407c893ad2" }
+folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "9df6f753841792b73d7357edf480dbb85fb71818" }
 gpui-kit.workspace = true
-# Ely 那一整族（fork 在 `panzhifu/Ely-GPUI-Components`，钉 rev 与上面几条同一写法）。
-# 它与 gpui-kit 同吃 `gpui-pre =0.3.9` 那一颗快照，所以是一棵 gpui、不是第二份框架；
-# 但它是**一个 crate 整包**：30 多族组件、一份自带的 rust-embed 资源（2.6 MiB 字体），
-# 按模块取用取不掉依赖 —— 用不用它，依赖都在图里。
-ely-gpui-component = { git = "https://github.com/panzhifu/Ely-GPUI-Components", rev = "e06a404e0ce7c86444d45b86780e9a0f1228c262" }
+# 曾经有一条 `ely-gpui-component`：全仓库只用它的 `typography::format` 写两个纯函数
+# （千位分组、定小数位），它却独占 78 个包 —— 终端模拟器、LaTeX、Mermaid、QR 解码、
+# 邮件 / 日历 / 财务组件全在依赖图里。2026-11-04 把那二十行抄进
+# `ui/services/l10n.rs` 之后删掉。不要为「就一个格式化函数」再把它加回来。
 # 只依赖 gpui-kit 一个门面：它顶层 `pub use ::gpui::*`，把移动端那份 `gpui-pre` 整个
 # 转了出来，所以两端都用 `use gpui_kit::…`，不再单独声明一条 `gpui` 依赖。
 # 以前移动端要显式引 `gpui-pre` 是因为它是独立 workspace、拿不到 gpui-kit。
@@ -172,7 +171,7 @@ image = "0.25.10"
 # XComponent。原先每帧无条件 re-arm，等于按 60Hz 撞满那条队列。现在 `demand` / `armed` 两格
 # 说了算，GPUI 那头本来就按这套契约升 demand（`frame_waker` / `schedule_frame` /
 # `wake_platform`）。）
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "ad8fb25993f1aa3e0d2ee6e5d3220fcc1dd63298", features = [
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "87b2b48732561c9ccf4f5e0619f6a6e6c597b370", features = [
     "permission_handler",
     # 把视图渲成图（分享卡片那一格的地基）。要的是打了补丁的渲染器，见根上那条 patch。
     "offscreen",

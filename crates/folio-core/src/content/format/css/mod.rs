@@ -155,6 +155,40 @@ pub struct RuleSet {
     pub page_margins: PageMargins,
     /// 被丢弃的声明数，用于「这本书有多少样式我们不支持」的诊断与文档。
     pub ignored: usize,
+    /// 连**规则**都拼不出来的那几处原文（选择器不认识、`@` 规则没有去处、
+    /// 只给纸的 `@media`）。[`Self::ignored`] 只有计数，量具点不出名字；
+    /// 这一列让 `css-gap` 能把「哪条规则」说出来。
+    ///
+    /// 只在失败路径上 push，正常书是空表；每个条目都截断过（见 [`IgnoredRule`]），
+    /// 不会把整份 30 MB 的样式表搬进内存。
+    pub ignored_rules: Vec<IgnoredRule>,
+}
+
+/// 一条被整块丢掉的规则的原文（截断过）。
+///
+/// `kind` 是失败的那一层：`selector`（选择器不认识）、`at-rule`（`@keyframes` 之类
+/// 没有去处的块）、`print-media`（只给纸的 `@media`）。`declarations` 是这条规则下面
+/// 丢掉的声明数，与 [`RuleSet::ignored`] 的口径对得上。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IgnoredRule {
+    pub kind: &'static str,
+    /// 选择器或 `@` 规则的前导。
+    pub prelude: String,
+    /// 原文片段（截断到 [`IGNORED_SNIPPET_CHARS`] 个字符）。
+    pub source: String,
+    pub declarations: usize,
+}
+
+/// 诊断原文截断到多少个字符：够认出是哪条规则，又不至于把长选择器整份搬走。
+pub const IGNORED_SNIPPET_CHARS: usize = 160;
+
+fn snippet(text: &str) -> String {
+    let text = text.trim();
+    let mut out: String = text.chars().take(IGNORED_SNIPPET_CHARS).collect();
+    if text.chars().count() > IGNORED_SNIPPET_CHARS {
+        out.push('…');
+    }
+    out
 }
 
 impl RuleSet {
@@ -177,6 +211,19 @@ impl RuleSet {
         self.font_faces.append(&mut other.font_faces);
         self.page_margins.merge(other.page_margins);
         self.ignored += other.ignored;
+        self.ignored_rules.append(&mut other.ignored_rules);
+    }
+
+    /// 记一条「整块都没接住」的原文。计数与原文分开：`ignored` 是既有口径，
+    /// `ignored_rules` 只服务点名的量具；两处的增减必须同批（所有调用点都在
+    /// `ignored +=` 旁边）。
+    fn note_rule(&mut self, kind: &'static str, prelude: &str, source: &str, declarations: usize) {
+        self.ignored_rules.push(IgnoredRule {
+            kind,
+            prelude: snippet(prelude),
+            source: snippet(source),
+            declarations,
+        });
     }
 
     fn consume(&mut self, text: &str, origin: Origin) {
@@ -194,6 +241,7 @@ impl RuleSet {
                 && let Some(semi) = find_unquoted(&rest[..open], ';')
             {
                 self.ignored += 1;
+                self.note_rule("at-rule", prelude, rest[..semi].trim(), 1);
                 rest = &rest[semi + 1..];
                 continue;
             }
@@ -221,6 +269,7 @@ impl RuleSet {
                             // 丢掉一个块不算「一条声明没接住」，但也不是没看见 ——
                             // 计一条，让 `css-gap` 的 ignored 说出这本书里有打印样式。
                             self.ignored += 1;
+                            self.note_rule("print-media", &prelude, body, 1);
                         } else {
                             self.consume(body, origin);
                         }
@@ -243,12 +292,16 @@ impl RuleSet {
                         self.ignored += dropped;
                     }
                     // @keyframes 之类的声明确实没有去处。
-                    _ => self.ignored += 1,
+                    _ => {
+                        self.ignored += 1;
+                        self.note_rule("at-rule", prelude, body, 1);
+                    }
                 }
                 continue;
             }
             let Some(selector) = Selector::parse(prelude) else {
                 self.ignored += count_declarations(body);
+                self.note_rule("selector", prelude, body, count_declarations(body));
                 continue;
             };
             let mut declarations = Vec::new();

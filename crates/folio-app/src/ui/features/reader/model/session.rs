@@ -254,7 +254,7 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) incoming_bake_origin: Rc<Cell<Option<(f32, f32)>>>,
     /// 眼下按在正文上的那根手指：编号 + 此刻在 [`ReaderSession::page_area`] 里的位置。
     ///
-    /// 只给折页那一档用。跟手翻页吃的是识别器折出来的 `ScrollWheelEvent`，而它在定性那一刻
+    /// 只给折页那一档用。跟手翻页吃的是识别器折出来的 `ScrollEvent`，而它在定性那一刻
     /// 就把另一根的增量抹成 0，所以「起手点 + 累计位移」反推出的那一格只有一个自由度，
     /// 折痕转不起来 —— 原始触摸流是唯一还留着第二个自由度的地方。
     pub(in crate::ui::features::reader) finger: Option<(gpui_kit::TouchId, (f32, f32))>,
@@ -324,6 +324,16 @@ pub struct ReaderSession {
     /// 与 `pending_restore` 同生共死：挂新请求必须把它清掉，否则上一次没落地的
     /// 锚点会跟着下一次恢复跳错地方。清它的活儿收在 [`Self::pend_restore`] 里。
     pub(in crate::ui::features::reader) pending_anchor: Option<String>,
+    /// 从正文点链接/脚注跳出去**之前**那一处的位置。`None` = 屏上没有「回原处」那一格。
+    ///
+    /// 只留一层，不做历史栈：读者要的是「跳过去看完回来」，而多层会把「自己翻到的那一页」
+    /// 也记进去，回来时落点就成了谜（浏览器那套后退在这个界面里没有对应的动作）。
+    /// 再点一条链接就把来处换成最新那一处。
+    ///
+    /// 存的是 [`Locator`]（哪一章 + 章内第几个字）而不是页号或像素：改字号、缩窗口、
+    /// 换摆法都不动它，落回时由 [`Self::goto_offset`] 那条链路现算。
+    /// 记账的口子全在 [`crate::ui::features::reader::model::links`]。
+    pub(in crate::ui::features::reader) jump_back: Option<Locator>,
     /// 到过的章（`chapters.idx`）。目录那一屏按它把来过的画成浅色。
     ///
     /// 开书时从 `chapter_read` 读一次，之后只增。这张集合同时是「要不要再写一笔」的
@@ -487,6 +497,16 @@ pub struct ReaderSession {
         Option<crate::ui::features::reader::model::translation::TranslationState>,
     /// 翻译的计数：每开一次弹层一个号，晚到的旧结果在事件入口按号丢弃。
     pub(in crate::ui::features::reader) translation_seq: u64,
+    /// 选区问 AI 的弹层状态。状态与命令在 `model/ai.rs`。
+    pub(in crate::ui::features::reader) ai: Option<crate::ui::features::reader::model::ai::AiState>,
+    /// 问 AI 的计数，与翻译那一格同一个用途。
+    pub(in crate::ui::features::reader) ai_seq: u64,
+    /// 「这本书该怎么切」那一格的状态（`.txt` 分章规则草案）。判断在 core 的
+    /// `novel::draft`，命令与状态迁移在 `model/rules_draft.rs`。
+    pub(in crate::ui::features::reader) rules_draft:
+        Option<crate::ui::features::reader::model::rules_draft::RulesDraft>,
+    /// 草案那一趟的计数：与问 AI 同一个用途 —— 晚到的旧结果按号丢掉。
+    pub(in crate::ui::features::reader) rules_draft_seq: u64,
 
     // ---- 阅读时长（统计页的数据源）：状态在这里，判断在 modules/reading_time.rs ----
     /// 这一段还没结账的阅读从哪一刻起算（Unix 秒）。0 = 此刻没在读任何书。
@@ -676,6 +696,7 @@ impl ReaderSession {
             bands: ChromeBands::default(),
             pending_restore: None,
             pending_anchor: None,
+            jump_back: None,
             read: HashSet::new(),
             saved_chapter: 0,
             saved_offset: 0,
@@ -722,6 +743,10 @@ impl ReaderSession {
             undo_seq: 0,
             translation: None,
             translation_seq: 0,
+            ai: None,
+            ai_seq: 0,
+            rules_draft: None,
+            rules_draft_seq: 0,
             // 时长不在这里起算：构造的那一刻读者还没真的翻开任何东西。
             // 起点由 `open_book` 里的 `begin_reading` 定，兜底那一屏则永远不进账。
             reading_segment_start: 0,
@@ -864,6 +889,7 @@ impl ReaderSession {
             // 请求，把「这一章的开头」摆到它拼出来的位置 —— 上一章可能正占着上方。
             pending_restore: (wanted_mode.is_continuous() || locator.offset > 0).then_some(locator),
             pending_anchor: None,
+            jump_back: None,
             read: read_at_open(book_id, store.as_ref()),
             saved_chapter: locator.chapter as usize,
             saved_offset: locator.offset,
@@ -910,6 +936,10 @@ impl ReaderSession {
             undo_seq: 0,
             translation: None,
             translation_seq: 0,
+            ai: None,
+            ai_seq: 0,
+            rules_draft: None,
+            rules_draft_seq: 0,
             // 时长不在这里起算：构造的那一刻读者还没真的翻开任何东西。
             // 起点由 `open_book` 里的 `begin_reading` 定，兜底那一屏则永远不进账。
             reading_segment_start: 0,
@@ -978,6 +1008,8 @@ impl ReaderSession {
                 .ok()
                 .flatten()
                 .unwrap_or((String::new(), Locator::start()));
+            // 库里替读者记住的那份口令：带口令的 PDF 少了它，正文与取页都回空。
+            let passphrase = store.passphrase_for_book(book_id).ok().flatten();
             Some((
                 DocMeta {
                     title: row.title,
@@ -990,9 +1022,10 @@ impl ReaderSession {
                 row.path,
                 mode,
                 locator,
+                passphrase,
             ))
         });
-        let Some((meta, content, path, mode, locator)) = opened else {
+        let Some((meta, content, path, mode, locator, passphrase)) = opened else {
             tracing::error!(
                 book_id,
                 "ReaderSession: 书库里读不出来（章节没入库或格式不认识）"
@@ -1000,9 +1033,13 @@ impl ReaderSession {
             return;
         };
         // 库里只有章节位置，正文按位置回容器取；图片与内嵌字体同样不入库，也现取。
-        let doc: std::sync::Arc<dyn OpenedDocument> = std::sync::Arc::from(
-            folio_core::content::document::with_container(meta, content, Path::new(&path)),
-        );
+        let doc: std::sync::Arc<dyn OpenedDocument> =
+            std::sync::Arc::from(folio_core::content::document::with_container(
+                meta,
+                content,
+                Path::new(&path),
+                passphrase,
+            ));
         // 后台先把这一本的解析句柄备好（PDF 要读整本，手机上要一两秒）。它与首帧的
         // 取页并行跑，首图不必再把那一趟算进去；别的格式 `warm` 是空的。
         let warm = doc.clone();
@@ -1033,6 +1070,8 @@ impl ReaderSession {
         self.clear_selection();
         // 换书那一刻屏上不该还浮着上一本的脚注。
         self.footnote = None;
+        // 同理：上一本的「回原处」指的是上一本的坐标系，留着它落点会跳进这一本的某一章。
+        self.jump_back = None;
         // 上次是以哪一档读的，这次还用那一档：进度存的是「第几个字」，与模式无关，
         // 但读者认得的是那**一张纸**的样子。没存过就当读者还没选，
         // 交给渲染帧按窗口宽定默认档。
@@ -1068,6 +1107,11 @@ impl ReaderSession {
         self.undo = None;
         // 译文弹层同理：锚点是上一本屏上的像素，答案跟的也是上一本里选中的字。
         self.translation = None;
+        // 问 AI 那一层同一条理由，一并收掉。
+        self.ai = None;
+        // 分章草案那一层也收：那张卡攥的是**上一本**的样本与章数，挂在这本书的屏上
+        // 说的是别的事，而「用上」会写一份对两本都生效的配置。
+        self.rules_draft = None;
         // 换书时那一层若还开着，先关掉：查看器手里带的是**上一本**折出来的那一列，
         // 留着它就能继续左右滑到上一本的图上去 —— 计数、分享、定位原文全指着别人的书。
         self.close_image_viewer(cx);
@@ -1905,7 +1949,7 @@ impl Default for Turn {
 /// 放在会话而不是监听闭包里：监听每帧重建一次，而一趟手势横跨很多帧。
 ///
 /// 记的是**累计**位移而不是按下点：这一趟的增量是一段一段从滚动事件里来的（识别器把
-/// 一笔折成 `Started` 一整截 + `Moved` 若干步 + `Ended` 收尾），而 `ScrollWheelEvent`
+/// 一笔折成 `Started` 一整截 + `Moved` 若干步 + `Ended` 收尾），而 `ScrollEvent`
 /// 自带的 `position` 在整趟里恒等于按下点，拿不到手指眼下在哪。
 ///
 /// 横扫与竖划都归翻页，但「走了多远」按定性那一次锁下的那根轴算。

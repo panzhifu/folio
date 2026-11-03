@@ -662,6 +662,34 @@ impl Translation {
     }
 }
 
+/// 选区问 AI 与切章规则草案那一节。只有两格：**要不要用**与**用哪只模型**。
+///
+/// 服务地址与密钥**不在这里** —— 共用 [`Translation::openai`] 那一档。理由有两条：
+/// 同一个端点填两遍就是两处真相（改了翻译忘改 AI，症状是「翻译能用、问 AI 连不上」），
+/// 而密钥每多存一处就多一处泄漏面。要换端点的人改的是翻译那一屏。
+///
+/// [`Ai::enabled`] 默认 **false**：新装的机器不出现任何 AI 入口，读者填好端点也不算
+/// 「他要」。这一格不是「还没开」的占位，是一个明确的选择。
+///
+/// **生效时机：热** —— 与翻译同一条，每一次请求按当时的配置现建 provider
+/// （[`crate::net::ai::configured`]）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ai {
+    /// 允许不允许用 AI。见上。
+    pub enabled: bool,
+    /// 空 = 用翻译那一档填的模型；填了就只覆盖模型（地址与密钥仍共用）。
+    /// 允许覆盖是因为「翻译用小模型、解释用大模型」是真需求，而重写一遍地址不是。
+    pub model: String,
+}
+
+impl Ai {
+    pub fn normalized(mut self) -> Self {
+        self.model = self.model.trim().to_string();
+        self
+    }
+}
+
 /// 正文按哪根轴排。
 ///
 /// `Auto` 认书自己的 `writing-mode`，是默认那档；另两档由读者层用
@@ -942,13 +970,30 @@ pub struct Account {
     /// 那把密钥的十六进制（32 个字符）。**空串或解不出 = 这台安装还没有账号**，
     /// 判「有没有」要用 [`crate::account::AccountKey::from_hex`]，这里只存这一串。
     pub key: String,
+    /// 要去连的那一台的地址（`192.168.1.5:8410` 这样的一句，形状见
+    /// [`crate::net::lansync::normalize_peer`]）。
+    ///
+    /// 只有一格而不是一个列表：局域网里能当场连上的对端本来就是「另一台设备」，
+    /// 三台要收敛就点两次，每次填对面那一个地址 —— 列表要增删改的界面比这一格贵，
+    /// 而它买回来的东西一趟往返也能做到。
+    pub peer: String,
 }
 
 impl Account {
     /// 与其它节同一条：手填或粘贴进来的密钥去掉误带的首尾空白。
     pub fn normalized(mut self) -> Self {
         self.key = self.key.trim().to_string();
+        self.peer = self.peer.trim().to_string();
         self
+    }
+
+    /// 这台设备**现在**能不能走局域网同步：开着、且手里真有一把解得开的密钥。
+    ///
+    /// 判据用 [`crate::account::AccountKey::from_hex`] 而不是「这一格非空」：手抄进来少一位
+    /// 的密钥存得住、解不出，那时屏幕上该说的是「还没有账号」，而不是让后面每一趟都撞在
+    /// 一个解不开的形状上。
+    pub fn lan_ready(&self) -> bool {
+        self.enabled && crate::account::AccountKey::from_hex(&self.key).is_some()
     }
 }
 
@@ -980,17 +1025,6 @@ pub enum MembershipTier {
 }
 
 impl Membership {
-    /// 本机试用给的天数。界面上那句「试用 N 天」与写进配置的到期日从同一个数来。
-    pub const TRIAL_DAYS: i64 = 30;
-
-    /// 从今天起一段试用，到期日该写什么：今天算第一天，所以是今天 + 天数 - 1。
-    ///
-    /// 这一格算术只写在这一处。写成 `today + TRIAL_DAYS` 实际给的是 31 天，
-    /// 而屏幕上那句「30 天」就成了假话 —— 差的那一天在界面上量不出来。
-    pub fn trial_until_day(today: i64) -> i64 {
-        today + Self::TRIAL_DAYS - 1
-    }
-
     /// 在 `today`（本地日序号）这一天算哪一档。含当天。
     pub fn tier_on(&self, today: i64) -> MembershipTier {
         if today <= self.until_day {
@@ -1000,9 +1034,24 @@ impl Membership {
         }
     }
 
-    /// 离到期还有几天（含当天）；已经过期或从没开过回 `None`。
-    pub fn days_left_on(&self, today: i64) -> Option<i64> {
-        matches!(self.tier_on(today), MembershipTier::Premium).then(|| self.until_day - today + 1)
+    /// 续上 `days` 天，返回新的到期日（本地日序号，含当天）。
+    ///
+    /// 两条起算路分别算，因为「含当天」在两种情形下位置不同：
+    /// - 还在有效期内 —— 剩下那段一天不许少给，直接在旧到期日后面接：`until_day + days`；
+    /// - 已过期或从没开过 —— 今天就是买到的第一天，`today + days - 1`（提前续费不亏剩下的天数，
+    ///   过期那段也不继续吃掉刚买的时间）。
+    ///
+    /// `days` 为 0（同一单重交）时**原样返回**：那一档的权益在第一次就给出去了，
+    /// 接上去等于白送，把 `today` 收进来则会在已过期时凭空多给一天。
+    pub fn extended_on(&self, days: i64, today: i64) -> i64 {
+        if days <= 0 {
+            return self.until_day;
+        }
+        if self.until_day >= today {
+            self.until_day + days
+        } else {
+            today + days - 1
+        }
     }
 }
 
@@ -1034,6 +1083,65 @@ pub struct OpdsCatalog {
     pub url: String,
     pub username: String,
     pub password: String,
+}
+
+/// `.txt` 小说分章规则的**读者那一层差量**：叠在出厂那张表之上（关掉的条目、自己加的条目、
+/// 改过的阈值），形状与合成的规则住在 [`crate::content::format::novel::rules`]。
+///
+/// 存差量而不是整份表，是为了「以后出厂表加了新条目，读者那份不会把表冻在他改动那一刻」——
+/// 整份存的话那条链就断了，而他没碰过的那些数还会按老值盖回去。
+///
+/// **生效时机：重启**。这一格不属于「改了没反应就是坏」那一类，它属于「改了要重扫才对」：
+/// 分章跑在导入与重扫的工作线程里，一本书要过几十几百个文件，中途换表会切出
+/// 「前半本按旧表、后半本按新表」的章表，而盖在索引上的 `rules_hash` 只有一份、
+/// 判失效时它对得上，于是没有任何东西回来修它。理由与判据都在 `novel::rules::install` 上。
+/// 已经入库的那一本什么时候换新表不用在这里操心：生效表换了内容哈希就动，
+/// `Store::stale_reason` 认 `RulesChanged`，开书那一趟自己投后台重扫。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Novel {
+    /// 差量摊平在这一节下（`novel.off` / `novel.extra` / `novel.gates`），
+    /// 不再多一层 `rules` 的名字：这一节除了那张表没有别的东西。
+    #[serde(flatten)]
+    pub edits: crate::content::format::novel::rules::Edits,
+}
+
+impl Novel {
+    /// 名字与模式去掉误带的空白。空名字的那条自定义条目丢掉 —— 关掉条目是按名字作用的，
+    /// 一条没有名字的条目既关不掉也说不清，留着就是给读者埋坑。
+    pub fn normalized(mut self) -> Self {
+        self.edits.off.retain(|name| !name.trim().is_empty());
+        self.edits.off = self
+            .edits
+            .off
+            .iter()
+            .map(|name| name.trim().to_string())
+            .collect();
+        let mut kept: Vec<_> = Vec::new();
+        for marker in self.edits.extra {
+            let name = marker.name.trim().to_string();
+            if name.is_empty() {
+                tracing::warn!("小说规则里有一条自定义条目没有名字，已丢掉");
+                continue;
+            }
+            let pattern = marker
+                .pattern
+                .map(|pattern| pattern.trim().to_string())
+                .filter(|pattern| !pattern.is_empty());
+            let text = marker
+                .text
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty());
+            kept.push(crate::content::format::novel::rules::Marker {
+                name,
+                pattern,
+                text,
+                ..marker
+            });
+        }
+        self.edits.extra = kept;
+        self
+    }
 }
 
 /// 排版输入。全部是纯数据、不含任何 UI 类型，因此同一份配置既能在桌面端用，
@@ -1364,9 +1472,11 @@ pub struct Config {
     pub language: Language,
     pub speech: Speech,
     pub translation: Translation,
+    pub ai: Ai,
     pub sync: Sync,
     pub account: Account,
     pub opds: Opds,
+    pub novel: Novel,
     pub membership: Membership,
     pub logging: Logging,
 }
@@ -1383,9 +1493,11 @@ impl Default for Config {
             language: Language::default(),
             speech: Speech::default(),
             translation: Translation::default(),
+            ai: Ai::default(),
             sync: Sync::default(),
             account: Account::default(),
             opds: Opds::default(),
+            novel: Novel::default(),
             membership: Membership::default(),
             logging: Logging::default(),
         }
@@ -1403,9 +1515,11 @@ impl Config {
         self.appearance = self.appearance.normalized();
         self.speech = self.speech.normalized();
         self.translation = self.translation.normalized();
+        self.ai = self.ai.normalized();
         self.sync = self.sync.normalized();
         self.account = self.account.normalized();
         self.opds = self.opds.normalized();
+        self.novel = self.novel.normalized();
         // 书库位置去掉首尾空白：填成 "  /x  " 会让 `is_confirmed` 说「确认过」，
         // 而后面按这个串去找目录会找不到。
         self.library.dir = self.library.dir.trim().to_string();
@@ -2413,18 +2527,36 @@ mod tests {
         );
     }
 
-    /// 试用那 30 天**把今天算成第一天**：写 `+ 30` 就给成 31 天，而屏幕上那句
-    /// 「30 天」会说不清差的那一天。剩下的天数含到期日当天。
+    /// 兑来的天数接在哪一天之后。三条都会把钱算少或算多，所以各自钉一次：
+    /// 从没开过时今天算第一天、有效期内续期不亏剩下的、过期了不从旧到期日起算。
     #[test]
-    fn the_trial_is_exactly_thirty_days_counting_today_as_the_first() {
+    fn redeemed_days_are_counted_from_whichever_day_the_reader_is_actually_on() {
         let today = 20_500;
-        let until = Membership::trial_until_day(today);
-        assert_eq!(until, today + 29, "含今天正好 30 天");
-        let left = |day| Membership { until_day: until }.days_left_on(day);
-        assert_eq!(left(today), Some(30), "开通那天还剩整 30 天");
-        assert_eq!(left(until), Some(1), "到期那天还剩 1 天");
-        assert_eq!(left(until + 1), None, "过了一天就没有「还剩」可言");
-        assert_eq!(Membership::default().days_left_on(today), None);
+        // 从没开过：30 天就是今天起 30 个日子，最后一天是今天 + 29。
+        assert_eq!(Membership::default().extended_on(30, today), today + 29);
+        // 第一天就到期的极端：只给一天，到期日就是今天。
+        assert_eq!(Membership::default().extended_on(1, today), today);
+        // 还剩 10 天时续 30：旧的 10 天一天不少，新到期日在旧的后面。
+        let active = Membership {
+            until_day: today + 9,
+        };
+        assert_eq!(active.extended_on(30, today), today + 39);
+        // 过期一年后再兑：不从旧到期日起算，否则白送了中间那三百多天。
+        let stale = Membership {
+            until_day: today - 365,
+        };
+        assert_eq!(stale.extended_on(30, today), today + 29);
+        // 同一单重交：天数不动，且**不许**把过期的到期日拉回今天。
+        assert_eq!(stale.extended_on(0, today), today - 365);
+        assert_eq!(active.extended_on(0, today), today + 9);
+        // 兑完仍在有效期内这一条，由新到期日自己说话。
+        assert_eq!(
+            Membership::default().extended_on(30, today),
+            Membership {
+                until_day: today + 29
+            }
+            .until_day
+        );
     }
 
     /// 「图片缩放」那一格：三档各认自己的键，认不出的回落**初始那一档**，而**同一节里别的键
@@ -2528,6 +2660,7 @@ mod account_config_tests {
         let config: Config = serde_json::from_str(r#"{"version":1}"#).unwrap();
         assert!(!config.account.enabled);
         assert!(config.account.key.is_empty());
+        assert!(config.account.peer.is_empty());
     }
 
     #[test]
@@ -2536,11 +2669,32 @@ mod account_config_tests {
             account: Account {
                 enabled: true,
                 key: "  0123456789abcdef  ".into(),
+                peer: "  192.168.1.5:8410  ".into(),
             },
             ..Config::default()
         }
         .normalized();
         assert_eq!(config.account.key, "0123456789abcdef");
+        assert_eq!(config.account.peer, "192.168.1.5:8410");
+    }
+
+    /// 「有账号」的判据是**解得开**，不是那一格非空：手抄进来少一位的密钥存得住，
+    /// 而后面每一趟都只会撞在一个解不开的形状上 —— 界面得在那一刻就说「还没有账号」。
+    #[test]
+    fn an_unparsable_key_is_not_an_account() {
+        let mut account = Account {
+            enabled: true,
+            key: "0123456789abcdef".into(),
+            peer: "192.168.1.5:8410".into(),
+        };
+        assert!(!account.lan_ready(), "16 个字符不是那把 128-bit 密钥");
+        account.key = "0123456789abcdef0123456789abcdef".into();
+        assert!(account.lan_ready(), "32 个十六进制字符才是");
+        account.enabled = false;
+        assert!(
+            !account.lan_ready(),
+            "有密钥但没开：这台不参与，也不该被读到"
+        );
     }
 
     #[test]
@@ -2549,6 +2703,7 @@ mod account_config_tests {
             account: Account {
                 enabled: true,
                 key: "0123456789abcdef0123456789abcdef".into(),
+                peer: "192.168.1.5:8410".into(),
             },
             ..Config::default()
         };

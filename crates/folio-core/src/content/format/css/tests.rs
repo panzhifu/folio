@@ -287,6 +287,32 @@ fn unsupported_selector_discards_the_whole_rule_body() {
     assert_eq!(set.ignored, 2, "两条声明都该被计成被忽略");
 }
 
+/// 被整块丢掉的规则要留下原文：`ignored` 只有计数，`css-gap` 点名靠的是这一列。
+#[test]
+fn an_ignored_rule_keeps_its_source_for_the_probe() {
+    let set =
+        rules("p:hover { color: red; font-size: 1px } @keyframes spin { from { opacity: 0 } }");
+    assert_eq!(set.ignored, 3, "两条声明 + 一条没有去处的 @ 规则");
+    assert_eq!(set.ignored_rules.len(), 2, "按规则去重，不是按声明");
+    let selector = &set.ignored_rules[0];
+    assert_eq!(selector.kind, "selector");
+    assert_eq!(selector.prelude, "p:hover");
+    assert_eq!(selector.declarations, 2);
+    assert!(
+        selector.source.contains("color: red"),
+        "原文要留下来：{}",
+        selector.source
+    );
+    let at_rule = &set.ignored_rules[1];
+    assert_eq!(at_rule.kind, "at-rule");
+    assert_eq!(at_rule.prelude, "@keyframes spin");
+    assert!(
+        at_rule.source.contains("opacity: 0"),
+        "块内原文要留下来：{}",
+        at_rule.source
+    );
+}
+
 #[test]
 fn malformed_tail_does_not_panic() {
     for text in [

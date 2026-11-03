@@ -691,14 +691,23 @@ impl ComputedStyle {
 /// **落地范围**：绝对定位的盒脱流、按 `left` / `right` / `top` / `bottom`（`%` 折自
 /// **这一章的盒**）摆，`margin` 加在偏移上（封面那套 `left:50%; margin-left:-9.5em` 的居中
 /// 写法就是靠它）。**只认章级包含块**：CSS 的「最近的定位祖先」没做，所以嵌在别的定位盒
-/// 里的绝对定位元素仍然按这一章摆。`relative` / `sticky` 判不认识 —— 前者要不脱流地挪
-/// 已排好的子树（命中与锚点都得跟着），后者要滚动状态，两样都不是排版这一层的事。
+/// （包括 `relative` 盒）里的绝对定位元素仍然按这一章摆。
+///
+/// [`Self::Relative`] 那一档见 [`Positioning::Relative`]：流内整体位移，不脱流。
+/// `sticky` 判不认识 —— 它要的是滚动状态，不是排版这一层的事。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Positioning {
     #[default]
     Static,
     Absolute,
     Fixed,
+    /// `position: relative`：**留在常规流里**，只把自己已经排好的那一坨整体挪一下。
+    ///
+    /// 与 [`Self::Absolute`] 的分界就在游标：排完这一块的兄弟仍按它**没挪**时的位置接，
+    /// 所以挪出去的那一截会压在邻居身上（浏览器同样如此，那是作者要的效果）。
+    /// 偏移的取用规则、百分比基准与不跟着挪的那几路，全写在 `layout::collect` 的
+    /// `shift_relative` 与 `doc/css-没接住.md`。
+    Relative,
 }
 
 /// `vertical-align` 的**表格格**那一档：格里的内容在行高里贴哪一边。
@@ -717,6 +726,23 @@ pub enum CellVAlign {
     Top,
     Middle,
     Bottom,
+}
+
+/// `vertical-align` 落在**行内盒**上的那两档「对齐父盒字体上下沿」的关键字。
+///
+/// `super` / `sub` / 长度 / 百分比在层叠期就能折成 px（[`ComputedStyle::baseline_shift`]），
+/// 所以不在这里；`top` / `bottom` / `middle` 要对齐**整条行盒**，得等一行排完才知道，
+/// 仍在 `KNOWN_UNIMPLEMENTED` 那一档。这里只收真书里出现的那两条：
+/// `text-top`（《哈利·波特》`sup img` 482 个元素）与 `text-bottom`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InlineVAlign {
+    /// 贴基线，也就是初值。
+    #[default]
+    Baseline,
+    /// 盒顶对齐父盒的字体顶（父盒的 ascent）。
+    TextTop,
+    /// 盒底对齐父盒的字体底（父盒的 descent，基线以下）。
+    TextBottom,
 }
 
 /// `ruby-align`：注音（`<rt>`）在它的基字上方横向摆在哪一段。
@@ -817,6 +843,11 @@ pub struct ComputedStyle {
     pub line_height: f32,
     pub font_weight: u16,
     pub font_italic: bool,
+    /// `font-variant: small-caps`（可继承）。
+    ///
+    /// 排版层把小写字母换成等字节长度的 uppercase，并把这一段字号乘 0.8；
+    /// 原文不动（选区与复制仍取 DOM 那一份），见 `layout::wrap` 的 `small_caps_text`。
+    pub small_caps: bool,
     pub font_family: String,
     /// `font-family` 的**整条候选链**，按书写顺序；`font_family` 就是它的第一个。
     ///
@@ -944,12 +975,20 @@ pub struct ComputedStyle {
     /// 「断行提前了、字却还挤在一起」，比不做更糟。绘制按字形所在字符序号右推，
     /// 命中/选区按同一偏移推 `char_edges`。
     pub letter_spacing: f32,
-    /// 基线偏移，px，**正数往上**。`vertical-align: super` 折出来的就是它。
+    /// 基线偏移，px，**正数往上**。`vertical-align: super` / `sub` / 长度 / 百分比
+    /// 折出来的就是它；`text-top` / `text-bottom` 另走 [`Self::inline_valign`]。
     ///
     /// 0 意味着「贴基线」（CSS 的 `baseline`）。`top` / `bottom` / `middle` 要的是
     /// 行盒对齐机制，一期不折成这个数，并且按不认识计数 —— 悄悄当 0 会把作者的
     /// 上标写成正常位置还查不出来。
     pub baseline_shift: f32,
+    /// `vertical-align: text-top` / `text-bottom` —— 这两档**不能**在层叠期折成一个
+    /// px 数：它们要对齐的是父盒的字体上下沿，而父盒的字体度量要到排版层才量得出来。
+    /// 记下关键字，[`crate::layout`] 在收集行内片段时用真正的 `Measure::font_extents`
+    /// 折成该片段（`RunStyle` / `ImageAtom`）的基线偏移。
+    ///
+    /// 与 [`CellVAlign`] 是同一属性名的两副面孔：那一边管表格格，这一边管行内盒。
+    pub inline_valign: InlineVAlign,
     /// `text-decoration` 的下划线与删除线。绘制层用它画线；CSS 里装饰线**不计入行盒高**，
     /// 所以排版层只用它透传到 run 上。
     pub underline: bool,
@@ -1029,6 +1068,7 @@ impl Default for ComputedStyle {
             line_height: 1.75,
             font_weight: 400,
             font_italic: false,
+            small_caps: false,
             font_family: String::new(),
             font_families: Vec::new(),
             direction: Direction::Ltr,
@@ -1069,6 +1109,7 @@ impl Default for ComputedStyle {
             word_spacing: 0.0,
             letter_spacing: 0.0,
             baseline_shift: 0.0,
+            inline_valign: InlineVAlign::Baseline,
             underline: false,
             line_through: false,
             link: false,
@@ -1158,6 +1199,7 @@ impl std::hash::Hash for ComputedStyle {
         f(self.line_height, h);
         self.font_weight.hash(h);
         self.font_italic.hash(h);
+        self.small_caps.hash(h);
         self.font_family.hash(h);
         self.font_families.hash(h);
         (self.direction as u8).hash(h);
@@ -1210,8 +1252,14 @@ impl std::hash::Hash for ComputedStyle {
         f(self.word_spacing, h);
         f(self.letter_spacing, h);
         f(self.baseline_shift, h);
+        (self.inline_valign as u8).hash(h);
         self.underline.hash(h);
         self.line_through.hash(h);
+        // 「在一条链接里」这一格 2026-11-04 之前漏在清单外。漏掉的不是「画错」而是「画旧」：
+        // 它决定绘制层要不要换成主题的链接色，而块级缓存按这份哈希判命中。
+        self.link.hash(h);
+        // 「在一条链接里」这一格 2026-11-04 之前漏在清单外。漏掉的不是「画错」而是「画旧」：
+        // 它决定绘制层要不要换成主题的链接色，而块级缓存按这份哈希判命中。
         self.white_space_pre.hash(h);
         opt_len(&self.width, h);
         opt_len(&self.min_width, h);
@@ -1342,7 +1390,8 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 仍判不认识，理由写在各自枚举的文档上。
     // 定位一族 2026-10-29 接上了（`position: absolute|fixed` 与四个偏移，见
     // [`Positioning`]）—— 落点是封面/标题页那几块装饰（`left:50%; margin-left:-9.5em`
-    // 那套居中写法）。`relative` / `sticky` 判不认识。
+    // 那套居中写法）。`relative` 2026-11-04 起也收（流内整体位移，见 [`Positioning::Relative`]）；
+    // `sticky` 判不认识，它要滚动状态。
     // `z-index` 留着：我们的绘制顺序是「相交即上抬」，不是 z 树，绝对定位盒的层序
     // 按文档序走。
     "z-index",

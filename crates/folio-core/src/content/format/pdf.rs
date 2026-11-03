@@ -53,7 +53,8 @@
 //! 120 ppi 的 JPEG，`Microsoft: Print To PDF` 生产）实测**每页 816–932 ms**、PNG 平均
 
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use hayro::hayro_interpret::text::TextLayerRecorder;
 use hayro::hayro_interpret::{
@@ -62,7 +63,7 @@ use hayro::hayro_interpret::{
 use hayro::hayro_syntax::object::Rect;
 use hayro::hayro_syntax::outline::Dest;
 use hayro::hayro_syntax::page::{Page as PdfPage, Rotation};
-use hayro::hayro_syntax::{LoadPdfError, Pdf as RasterPdf};
+use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf as RasterPdf};
 use hayro::kurbo::{Affine, Rect as KurboRect};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit};
@@ -70,7 +71,7 @@ use hayro::{RenderCache, RenderSettings, render_into};
 
 use super::{
     Content, DocMeta, DocumentProvider, FixedDoc, FixedPage, Format, PageChar, PageRect,
-    PageRegion, PageSource, PageText, TocEntry, extension_of, stem_of,
+    PageRegion, PageSource, PageText, Passphrase, TocEntry, extension_of, stem_of,
 };
 use crate::Result;
 
@@ -198,9 +199,86 @@ impl PageBoxes<'_> {
 ///
 /// 一个句柄管两件事（解析与画像素），所以不必再像从前那样「两个引擎各存一份字节」：
 /// 峰值驻留只剩一份整本。
+/// 一份 PDF 解析句柄的缓存，`PdfAdapter` 与 [`super::azw4::Azw4Adapter`] 共用。
+///
+/// 为什么不是从前的 `OnceLock<Option<RasterPdf>>`：
+///
+/// - **口令可能中途才到手**。[`DocumentProvider::set_passphrase`](super::DocumentProvider::set_passphrase)
+///   一调用就得让手里那份作废，**包括「打不开」那个负结果** —— 留着它的症状是读者输对了
+///   口令仍旧打不开，要等进程换掉整个实例才见得到。代号（generation）就是为这一句存在的。
+/// - **`Pdf` 没有 `derive(Clone)`**（`hayro-syntax/src/pdf.rs:15`：`xref` + `pages` + `data`
+///   三份），所以缓存的只能是 `Arc`，而取的人拿到的是**一次引用计数**、守卫已经放掉：
+///   界面那一侧同时发着预览 / 整页 / 局部重画三路请求
+///   （`folio-app` 的 `reader/model/fixed_book.rs`），握着锁交出 `&Pdf` 会把三路串成一列。
+/// - **负缓存必须留着**：`render_page` 是逐帧问的，「开一次且失败」如果记不住，
+///   就是每一帧重读整本一遍（`hugG.pdf` 实测 13.9 MB）。
+pub(crate) struct PdfHandle {
+    /// `set_passphrase` 一次 +1。槽里那一份的代号对不上就不作数。
+    generation: AtomicU64,
+    /// `None` = 这一代还没试过；`Some((代号, None))` = 试过且开不了。
+    slot: Mutex<Option<(u64, Option<Arc<RasterPdf>>)>>,
+}
+
+impl PdfHandle {
+    pub(crate) fn new() -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            slot: Mutex::new(None),
+        }
+    }
+
+    /// 让手里那份作废（口令换了）。下一次问会重开。
+    pub(crate) fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// 句柄；`open` 只在**这一代还没试过**时跑。
+    ///
+    /// `Ok(None)` = 这一代已经试过且开不了（不再重开整本）；`Err` 只在刚失败的那一趟出现，
+    /// 让 `index` 把引擎的原始结论（要口令 / 结构坏了）交出去 —— 那是唯一分得开两档的地方。
+    pub(crate) fn get_or_try(
+        &self,
+        open: impl FnOnce() -> Result<RasterPdf>,
+    ) -> Result<Option<Arc<RasterPdf>>> {
+        let generation = self.generation.load(Ordering::Acquire);
+        // 守卫只在「查槽 + 至多一次打开」这段时间里握着：打开本来就该只发生一次，
+        // 而拿到句柄之后栅格化那几十毫秒不占锁（交的是 Arc）。
+        let mut slot = self
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(&*slot, Some((tried, _)) if *tried == generation) {
+            // 上一代的结论（含那份负结果）在这一代不作数。
+            *slot = None;
+        }
+        if let Some((_, document)) = &*slot {
+            return Ok(document.clone());
+        }
+        match open() {
+            Ok(document) => {
+                let document = Arc::new(document);
+                *slot = Some((generation, Some(document.clone())));
+                Ok(Some(document))
+            }
+            Err(err) => {
+                *slot = Some((generation, None));
+                Err(err)
+            }
+        }
+    }
+
+    /// 只要句柄、不问错在哪（取页与抽字那一路，失败就是那块地方空着）。
+    pub(crate) fn get(&self, open: impl FnOnce() -> Result<RasterPdf>) -> Option<Arc<RasterPdf>> {
+        self.get_or_try(open).ok().flatten()
+    }
+}
+
 pub struct PdfAdapter {
-    /// `None` = 打不开（坏文件 / 加密）。连着失败一起记住，免得每帧重试一次。
-    document: OnceLock<Option<RasterPdf>>,
+    /// 这一本的句柄；`None` = 打不开（坏文件 / 要口令而手上没有）。连着失败一起记住。
+    document: PdfHandle,
+    /// 读者给的那份口令，由 [`set_passphrase`](DocumentProvider::set_passphrase) 灌。
+    /// `None` = 没给过（包括「这本本来就没锁」）。只在这一本的生命里被读，不进日志、不落库。
+    passphrase: Option<Passphrase>,
     /// 与 `document` 配套的解释器设置（内嵌字体 / CMap 的 resolver）。克隆只是几条 `Arc`。
     raster_settings: InterpreterSettings,
 }
@@ -208,23 +286,33 @@ pub struct PdfAdapter {
 impl Default for PdfAdapter {
     fn default() -> Self {
         Self {
-            document: OnceLock::new(),
+            document: PdfHandle::new(),
+            passphrase: None,
             raster_settings: InterpreterSettings::default(),
         }
     }
 }
 
 impl PdfAdapter {
-    /// 从**字节**建一份：`.pdf` 读文件、AZW4 从 PalmDB 记录里取出来，都走这一条。
-    pub(crate) fn from_bytes(bytes: Vec<u8>) -> std::result::Result<RasterPdf, LoadPdfError> {
-        RasterPdf::new(bytes)
+    /// 从**字节**建一份：`.pdf` 读文件与 AZW4 从 PalmDB 记录里取出来都走这一格，
+    /// `passphrase` 是 `None` 就是没口令（调用方不必另走一条路）。
+    ///
+    /// 引擎那边的 `Pdf::new` 就是 `new_with_password(data, "")`，所以没有口令时两问
+    /// 落到同一条路上，不存在「第二种开法」。
+    pub(crate) fn from_bytes_with(
+        bytes: Vec<u8>,
+        passphrase: Option<&Passphrase>,
+    ) -> std::result::Result<RasterPdf, LoadPdfError> {
+        match passphrase {
+            Some(passphrase) => RasterPdf::new_with_password(bytes, passphrase.as_str()),
+            None => RasterPdf::new(bytes),
+        }
     }
 
     /// 这一份句柄；`None` = 打不开。
-    fn document(&self, path: &Path) -> Option<&RasterPdf> {
+    fn document(&self, path: &Path) -> Option<Arc<RasterPdf>> {
         self.document
-            .get_or_init(|| open_document(path).ok())
-            .as_ref()
+            .get(|| open_document(path, self.passphrase.as_ref()))
     }
 
     /// 先把句柄备好（页面预取那一趟会用）。
@@ -242,32 +330,30 @@ impl DocumentProvider for PdfAdapter {
         matches!(extension_of(path).as_deref(), Some("pdf"))
     }
 
+    fn set_passphrase(&mut self, passphrase: Option<Passphrase>) {
+        // 先作废再存：顺序反了的话，下一次问会拿旧口令把句柄再开一次并当作那一代的结论
+        // 记住，读者输对了口令也还是打不开。
+        self.document.invalidate();
+        self.passphrase = passphrase;
+    }
+
     /// 索引 = 页表 + 书签 + 书目 + 封面。PDF 没有「章」，也没有正文可取。
     ///
     /// 封面要栅格化首页，所以这一趟比 CBZ 那趟贵（实测首页在 512 那一档约 40 ms，
     /// `sample.pdf` 那种图多的书约 200 ms）。贵得值：书架上没有封面就是一片占位图，
     /// 而一本 PDF 的第一页通常就是封面。
     fn index(&self, path: &Path) -> Result<(DocMeta, Content)> {
-        // 第一次打开走 `open_document`：加密与「结构读不出来」是两档不同的结论，
-        // 只有那条路带着引擎的原始错误。失败也记下来（`None`），别每帧重试。
-        if self.document.get().is_none() {
-            match open_document(path) {
-                Ok(document) => {
-                    let _ = self.document.set(Some(document));
-                }
-                Err(err) => {
-                    let _ = self.document.set(None);
-                    return Err(err);
-                }
-            }
-        }
+        // 第一次打开走 `open_document`：要口令、加密、结构读不出来是三档不同的结论，
+        // 只有那一趟带着引擎的原始错误（`get_or_try` 的 `Err` 只出现在刚失败这一次）。
+        // 失败一起记进负缓存，别每帧重试。
         let document = self
-            .document(path)
+            .document
+            .get_or_try(|| open_document(path, self.passphrase.as_ref()))?
             .ok_or_else(|| unsupported(path, "结构读不出来，文件可能被截断过"))?;
-        let cover = render_png(document, 0, COVER_EDGE, &self.raster_settings);
+        let cover = render_png(&document, 0, COVER_EDGE, &self.raster_settings);
         read_pdf(
             path,
-            document,
+            &document,
             Format::Pdf,
             stem_of(path),
             std::fs::metadata(path)
@@ -291,11 +377,11 @@ impl DocumentProvider for PdfAdapter {
 
     fn render_page(&self, path: &Path, page: usize, edge: u32) -> Option<Vec<u8>> {
         let document = self.document(path)?;
-        let (width, height) = raster_size(document, page, edge);
+        let (width, height) = raster_size(&document, page, edge);
         if width == 0 || height == 0 {
             return None;
         }
-        paint_page(document, page, width, height, &self.raster_settings)
+        paint_page(&document, page, width, height, &self.raster_settings)
             .and_then(|pixmap| encode_png(&pixmap))
     }
 
@@ -314,7 +400,14 @@ impl DocumentProvider for PdfAdapter {
         height: u32,
     ) -> Option<Vec<u8>> {
         let document = self.document(path)?;
-        render_region(document, page, region, width, height, &self.raster_settings)
+        render_region(
+            &document,
+            page,
+            region,
+            width,
+            height,
+            &self.raster_settings,
+        )
     }
 
     /// 这一页的文字层（选中与划线要的那个序 + 逐字盒）。
@@ -323,7 +416,8 @@ impl DocumentProvider for PdfAdapter {
     /// 文字层、这一族也没有密码入口）。抽取是**第二遍**解释同一页内容流，见模块头
     /// 「每本一份解析句柄」最后那一段。
     fn page_text(&self, path: &Path, page: usize) -> Option<PageText> {
-        page_text(self.document(path)?, page, &self.raster_settings)
+        let document = self.document(path)?;
+        page_text(&document, page, &self.raster_settings)
     }
 
     /// 全书每一页的字序，**容器只开一次**（契约与那条「必须与逐页问逐字节相同」写在
@@ -335,7 +429,7 @@ impl DocumentProvider for PdfAdapter {
         let document = self.document(path)?;
         Some(
             (0..document.pages().len())
-                .map(|page| page_texts_one(document, page, &self.raster_settings))
+                .map(|page| page_texts_one(&document, page, &self.raster_settings))
                 .collect(),
         )
     }
@@ -576,22 +670,35 @@ pub(crate) fn read_pdf(
     Ok((meta, Content::Fixed(fixed)))
 }
 
-/// 打开一份 PDF。
+/// 打开一份 PDF，带上读者手上那份口令（没有就给 `None` = 空口令）。
 ///
-/// 口令加密的 PDF 到这一步就会报错（`LoadPdfError::Decryption`），所以 `Encrypted` 这一条
-/// 只从这里冒出来；[`failure`] 是唯一的分档口，报表里那一栏不会从加密滑进读不动。
-fn open_document(path: &Path) -> Result<RasterPdf> {
+/// 口令加密的 PDF 到这一步就会报错（`LoadPdfError::Decryption`），所以 [`failure`] 是
+/// 唯一的分档口：报表里那一栏不会从「要口令」滑进「加密」，也不会反过来。
+///
+/// 权限加密（只锁了打印/复制、没锁打开）在这一条上**不需要口令**：引擎的 `Pdf::new`
+/// 就是空口令那一路，本来就开得动，所以不会弹框。
+fn open_document(path: &Path, passphrase: Option<&Passphrase>) -> Result<RasterPdf> {
     let bytes =
         std::fs::read(path).map_err(|err| unsupported(path, &format!("文件读不出来（{err}）")))?;
-    PdfAdapter::from_bytes(bytes).map_err(|err| failure(path, err))
+    PdfAdapter::from_bytes_with(bytes, passphrase).map_err(|err| failure(path, err))
 }
 
-/// 引擎的错误 → 我们的两档：加密（换一本）与读不动（重导一次试试）。
+/// 引擎的错误 → 我们的三档：要口令（输对了就开得动）、加密（换一本）与读不动（重导一次试试）。
+///
+/// **只有 `PasswordProtected` 能往「问口令」那一档放**。`DecryptionError` 有四档
+/// （`hayro-syntax/src/crypto/mod.rs:37-47`），另外三档是 `MissingIDEntry` /
+/// `InvalidEncryption` / `UnsupportedAlgorithm` —— 意思是「这份加密我们自己读不懂」，
+/// 把它误判成可重试的症状是**弹一个永远输不对的框**，比不开框更糟。
 pub(crate) fn failure(path: &Path, err: LoadPdfError) -> crate::Error {
     match err {
-        LoadPdfError::Decryption(_) => crate::Error::Encrypted {
+        LoadPdfError::Decryption(DecryptionError::PasswordProtected) => {
+            crate::Error::NeedsPassword {
+                name: file_name(path),
+            }
+        }
+        LoadPdfError::Decryption(err) => crate::Error::Encrypted {
             name: file_name(path),
-            method: "PDF /Encrypt（口令或权限加密）".to_string(),
+            method: format!("PDF /Encrypt（{err:?}）"),
         },
         LoadPdfError::Invalid => {
             unsupported(path, "结构读不出来（文件被截断或不是 PDF），可能被截断过")
@@ -903,6 +1010,17 @@ pub fn render_region_probe(
     render_region(document, page, region, width, height, settings)
 }
 
+/// 缓存是**每次现建**的：它内部是 `Rc<RefCell<_>>`，不是 `Send`，而这一趟会被几个
+/// 后台线程同时叫（预览、高清、下一屏的预取）。共享一份要一把锁，等于把三条并行
+/// 画页串成一条；每次现建的代价在 `opt-level = 3` 的基准里是 22 → 37 ms（720 档，
+/// 仓库那份 `opt-level = "z"` 没单独量过这一格），远比串行便宜。
+///
+/// 这条结论是 0.8 时量的；0.9 默认开了 glyph cache，跨页复用是否反超由
+/// `pdf_bench::pdf_render_baseline` 重测（见那一条的 `shared` 一列）。
+fn fresh_render_cache<'a>() -> RenderCache<'a> {
+    RenderCache::new()
+}
+
 /// 画一页并交回 PNG 字节；任何一步读不出来都只给 `None`。
 ///
 /// 尺寸不在这儿算 —— 调用方给的是页表里存的那个数（[`raster_size`]），页表与画出来的
@@ -952,7 +1070,16 @@ fn paint_page(
         f64::from(width) / f64::from(page_width),
         f64::from(height) / f64::from(page_height),
     ) * initial_of(target);
-    paint_with(target, width, height, transform, settings)
+    let cache = fresh_render_cache();
+    paint_with(
+        target,
+        width,
+        height,
+        transform,
+        settings,
+        &RenderSettings::default(),
+        &cache,
+    )
 }
 
 /// 画一页的**一块矩形**，交回 PNG（放大那一档，见 [`REGION_EDGE`] 与 [`PageRegion`]）。
@@ -1003,8 +1130,17 @@ pub(crate) fn render_region(
         ))
         * initial_of(target);
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        paint_with(target, width, height, transform, settings)
-            .and_then(|pixmap| encode_png(&pixmap))
+        let cache = fresh_render_cache();
+        paint_with(
+            target,
+            width,
+            height,
+            transform,
+            settings,
+            &RenderSettings::default(),
+            &cache,
+        )
+        .and_then(|pixmap| encode_png(&pixmap))
     }))
     .ok()
     .flatten()
@@ -1020,27 +1156,24 @@ fn initial_of(target: &PdfPage<'_>) -> Affine {
 /// [`paint_page`] 与 [`render_region`] 只差**那一个矩阵**，其余每一步都一样 —— 分成两份
 /// 写就会有一份先改掉（白底、`TargetInit`、缓存的建法），而那类差在屏上是
 /// 「放大后那张的颜色和整页那张不一样」，说不清是谁的错。
-fn paint_with(
-    target: &PdfPage<'_>,
+fn paint_with<'a>(
+    target: &'a PdfPage<'a>,
     width: u32,
     height: u32,
     transform: Affine,
     settings: &InterpreterSettings,
+    render_settings: &RenderSettings,
+    cache: &RenderCache<'a>,
 ) -> Option<Pixmap> {
     let width = u16::try_from(width).ok().filter(|width| *width > 0)?;
     let height = u16::try_from(height).ok().filter(|height| *height > 0)?;
 
-    // 缓存是**每次现建**的：它内部是 `Rc<RefCell<_>>`，不是 `Send`，而这一趟会被几个
-    // 后台线程同时叫（预览、高清、下一屏的预取）。共享一份要一把锁，等于把三条并行
-    // 画页串成一条；每次现建的代价在 `opt-level = 3` 的基准里是 22 → 37 ms（720 档，
-    // 仓库那份 `opt-level = "z"` 没单独量过这一格），远比串行便宜。
-    let cache = RenderCache::new();
     let mut ctx = RenderContext::new(width, height);
     render_into(
         target,
-        &cache,
+        cache,
         settings,
-        &RenderSettings::default(),
+        render_settings,
         &mut ctx,
         transform,
     );
@@ -2258,12 +2391,14 @@ mod tests {
         assert!(PdfAdapter::default().render_page(&path, 0, 512).is_none());
     }
 
-    /// 加密与「读不动」是两档说法：前者读者的动作是换一本无口令的文件，后者是重导一次。
+    /// 口令与「读不动」是两档说法：前者读者的动作是**再交一次带口令的导入**，后者是重导一次也
+    /// 没用。`PasswordProtected` 在 [`failure`] 里落进 `NeedsPassword`（可以从这一档重来），
+    /// DRM 那一族才落进 `Encrypted`（永远不能从客户端重算钥）。
     ///
     /// 这一条门钉的是**映射表**而不是某个假的 `/Encrypt` 头：pdf_oxide 打开带口令的文件
     /// 常常不报错（文件结构是明文，加密的只是对象流），失败推迟到读页树那一趟 —— 于是
-    /// `EncryptedPdf` 可能从 [`open_document`] 冒出来，也可能从 [`page_count`] 冒出来。
-    /// 两个调用点都过 [`failure`] 这**一个**函数，所以「报表里那一栏从加密滑进读不动」
+    /// `NeedsPassword` 可能从 [`open_document`] 冒出来，也可能从 [`page_count`] 冒出来。
+    /// 两个调用点都过 [`failure`] 这**一个**函数，所以「报表里那一栏从口令滑进读不动」
     /// 在结构上就不会发生，这比用一个假头去碰某一条路径更硬。
     /// 真加密样本要等一个能加密的工具（本机没有 `qpdf`，Ghostscript 造得出来但不是能入库的公版夹具）。
     #[test]
@@ -2277,9 +2412,9 @@ mod tests {
                         hayro::hayro_syntax::DecryptionError::PasswordProtected
                     )
                 ),
-                crate::Error::Encrypted { .. }
+                crate::Error::NeedsPassword { .. }
             ),
-            "加密要落进加密那一档"
+            "带口令要落进「再交一次口令」那一档"
         );
         let err = failure(path, LoadPdfError::Invalid);
         assert!(
@@ -2358,7 +2493,7 @@ mod tests {
             .line(72, 700, 24.0, "Heading alpha")
             .line(72, 660, 12.0, "body beta");
         let path = write_fixture(dir.path(), "文字.pdf", &[page], &[], &[]);
-        let document = PdfAdapter::from_bytes(std::fs::read(&path).unwrap()).unwrap();
+        let document = PdfAdapter::from_bytes_with(std::fs::read(&path).unwrap(), None).unwrap();
         let text =
             page_text(&document, 0, &InterpreterSettings::default()).expect("这一页写着两行字");
         assert_eq!((text.width, text.height), (612.0, 792.0), "框就是可见框");
@@ -2441,7 +2576,7 @@ mod tests {
             "inside the crop",
         );
         let path = write_fixture(dir.path(), "裁过的.pdf", &[page], &[], &[]);
-        let document = PdfAdapter::from_bytes(std::fs::read(&path).unwrap()).unwrap();
+        let document = PdfAdapter::from_bytes_with(std::fs::read(&path).unwrap(), None).unwrap();
         let text =
             page_text(&document, 0, &InterpreterSettings::default()).expect("裁完还留着这一行");
         assert_eq!((text.width, text.height), (512.0, 692.0));
@@ -2478,7 +2613,7 @@ mod tests {
             .rotate(90)
             .line(72, 700, 24.0, "Heading alpha");
         let path = write_fixture(dir.path(), "转过的.pdf", &[straight, turned], &[], &[]);
-        let document = PdfAdapter::from_bytes(std::fs::read(&path).unwrap()).unwrap();
+        let document = PdfAdapter::from_bytes_with(std::fs::read(&path).unwrap(), None).unwrap();
         assert!(
             page_text(&document, 0, &InterpreterSettings::default()).is_some(),
             "没转的那一页读得出字"
@@ -2510,7 +2645,7 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/oss/pdf/wps-paper.pdf");
         assert!(path.exists(), "真样本夹具不许丢：{}", path.display());
-        let document = open_document(&path).expect("WPS 那本该开得动");
+        let document = open_document(&path, None).expect("WPS 那本该开得动");
         let text = page_text(&document, 0, &InterpreterSettings::default()).expect("这一页写着字");
         assert_eq!(
             (text.width, text.height),
@@ -2600,7 +2735,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // 本仓库那套三页夹具只有灰矩形，一个字符都没有。
         let path = three_pages(dir.path());
-        let document = PdfAdapter::from_bytes(std::fs::read(&path).unwrap()).unwrap();
+        let document = PdfAdapter::from_bytes_with(std::fs::read(&path).unwrap(), None).unwrap();
         assert_eq!(
             page_text(&document, 0, &InterpreterSettings::default()),
             None
@@ -2617,7 +2752,7 @@ mod tests {
     fn an_inherited_media_box_is_not_read_as_a_missing_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = three_pages(dir.path());
-        let document = PdfAdapter::from_bytes(std::fs::read(&path).unwrap()).unwrap();
+        let document = PdfAdapter::from_bytes_with(std::fs::read(&path).unwrap(), None).unwrap();
         let rotated = page_boxes_at(&document, 2).expect("继承来的 MediaBox 也该读得出");
         assert_eq!(
             (rotated.visible_width, rotated.visible_height),
@@ -2796,5 +2931,240 @@ mod tests {
             vec![false, true, true],
             "铺满的那页按源图密度封了顶（不重画）；只盖住三成的与转过 90 度的没封（重画补得出细节）"
         );
+    }
+}
+
+/// 真书 PDF 的测量台。默认 `#[ignore]`，只在本地跑：
+///
+/// ```text
+/// cargo test -p folio-core --lib pdf_render_baseline -- --ignored --nocapture
+/// ```
+///
+/// 环境变量：
+/// - `FOLIO_PDF_BENCH`：逗号分隔的文件列表（默认 `tests/fixtures/local` 里那四本）
+/// - `FOLIO_PDF_BENCH_EDGE`：栅格长边（默认 720）
+/// - `FOLIO_PDF_BENCH_PAGES`：每本量前几页（默认 12）
+/// - `FOLIO_PDF_BENCH_ALIASING`：`none` 或 0–255
+/// - `FOLIO_PDF_BENCH_HINTING` / `FOLIO_PDF_BENCH_INTERP`：`0` / `1`
+#[cfg(test)]
+mod pdf_bench {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    fn env_u32(name: &str, default: u32) -> u32 {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    }
+
+    fn bench_files() -> Vec<PathBuf> {
+        if let Ok(list) = std::env::var("FOLIO_PDF_BENCH") {
+            return list
+                .split(',')
+                .map(|entry| PathBuf::from(entry.trim()))
+                .filter(|path| path.is_file())
+                .collect();
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/local");
+        [
+            "pdf/hugG.pdf",
+            "phone/2fs3x2spyvy535gi.pdf",
+            "phone/i7xm5eccgranzqna.pdf",
+            "phone/wm5ig72fzwcomrbm.pdf",
+        ]
+        .iter()
+        .map(|entry| root.join(entry))
+        .filter(|path| path.is_file())
+        .collect()
+    }
+
+    fn bench_settings() -> RenderSettings {
+        let mut settings = RenderSettings::default();
+        if let Ok(value) = std::env::var("FOLIO_PDF_BENCH_ALIASING") {
+            settings.aliasing_threshold = if value == "none" {
+                None
+            } else {
+                value.parse().ok()
+            };
+        }
+        if let Ok(value) = std::env::var("FOLIO_PDF_BENCH_HINTING") {
+            settings.hinting = value != "0";
+        }
+        if let Ok(value) = std::env::var("FOLIO_PDF_BENCH_INTERP") {
+            settings.force_image_interpolation = value == "1";
+        }
+        settings
+    }
+
+    /// 跑画一页 + 编码成 PNG 的整趟；返回 `(raster, encode)`。
+    fn render_one<'a>(
+        document: &'a RasterPdf,
+        page: usize,
+        edge: u32,
+        render_settings: &RenderSettings,
+        cache: &RenderCache<'a>,
+    ) -> Option<(Duration, Duration)> {
+        let target = document.pages().get(page)?;
+        let (page_width, page_height) = target.render_dimensions();
+        if page_width <= 0.0 || page_height <= 0.0 {
+            return None;
+        }
+        let (width, height) = raster_size(document, page, edge);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let transform = Affine::scale_non_uniform(
+            f64::from(width) / f64::from(page_width),
+            f64::from(height) / f64::from(page_height),
+        ) * initial_of(target);
+
+        let raster_started = Instant::now();
+        let pixmap = paint_with(
+            target,
+            width,
+            height,
+            transform,
+            &InterpreterSettings::default(),
+            render_settings,
+            cache,
+        );
+        let raster = raster_started.elapsed();
+        let pixmap = pixmap?;
+        let encode_started = Instant::now();
+        let _png = encode_png(&pixmap);
+        Some((raster, encode_started.elapsed()))
+    }
+
+    fn stats(samples: &[Duration]) -> (Duration, Duration, Duration) {
+        if samples.is_empty() {
+            return (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let median = sorted[sorted.len() / 2];
+        let p95 = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+        let total = samples.iter().sum();
+        (median, p95, total)
+    }
+
+    fn rss_and_hwm() -> (Option<u64>, Option<u64>) {
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return (None, None);
+        };
+        let read = |key: &str| {
+            status.lines().find_map(|line| {
+                line.strip_prefix(key)
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+        };
+        (read("VmRSS:"), read("VmHWM:"))
+    }
+
+    fn ms(duration: Duration) -> f64 {
+        duration.as_secs_f64() * 1000.0
+    }
+
+    #[test]
+    #[ignore = "真书 PDF 测量台：本地跑，CI 不跑"]
+    fn pdf_render_baseline() {
+        let edge = env_u32("FOLIO_PDF_BENCH_EDGE", 720);
+        let page_limit = env_u32("FOLIO_PDF_BENCH_PAGES", 12) as usize;
+        let render_settings = bench_settings();
+        let files = bench_files();
+        assert!(
+            !files.is_empty(),
+            "FOLIO_PDF_BENCH 没指到文件，且默认夹具不在"
+        );
+
+        println!(
+            "settings: edge={edge} pages<={page_limit} aliasing={:?} hinting={} interp={}",
+            render_settings.aliasing_threshold,
+            render_settings.hinting,
+            render_settings.force_image_interpolation
+        );
+
+        for path in files {
+            let bytes = std::fs::read(&path).expect("read pdf");
+            let open_started = Instant::now();
+            let document = RasterPdf::new(bytes).expect("open pdf");
+            let open_ms = ms(open_started.elapsed());
+            let page_count = document.pages().len();
+            let pages: Vec<usize> = (0..page_count.min(page_limit)).collect();
+
+            let (rss_before, _) = rss_and_hwm();
+
+            // 生产口径：每页现建缓存。
+            let mut fresh_raster = Vec::new();
+            let mut fresh_encode = Vec::new();
+            for &page in &pages {
+                let cache = fresh_render_cache();
+                if let Some((raster, encode)) =
+                    render_one(&document, page, edge, &render_settings, &cache)
+                {
+                    fresh_raster.push(raster);
+                    fresh_encode.push(encode);
+                }
+            }
+
+            // 0.9 glyph cache 的上界：同一线程复用一份缓存画完整本。
+            let shared_cache = fresh_render_cache();
+            let mut shared_raster = Vec::new();
+            for &page in &pages {
+                if let Some((raster, _)) =
+                    render_one(&document, page, edge, &render_settings, &shared_cache)
+                {
+                    shared_raster.push(raster);
+                }
+            }
+
+            // 同一页连画三次：量「每次现建」的固定开销。
+            let mut repeat = Vec::new();
+            for _ in 0..3 {
+                let cache = fresh_render_cache();
+                if let Some((raster, _)) = render_one(&document, 0, edge, &render_settings, &cache)
+                {
+                    repeat.push(raster);
+                }
+            }
+
+            let (rss_after, hwm) = rss_and_hwm();
+            let (fresh_median, fresh_p95, fresh_total) = stats(&fresh_raster);
+            let (shared_median, shared_p95, shared_total) = stats(&shared_raster);
+            let (repeat_median, _, _) = stats(&repeat);
+
+            println!(
+                "\n== {} ==\npages={page_count} measured={} open={open_ms:.1} ms",
+                path.display(),
+                fresh_raster.len(),
+            );
+            println!(
+                "fresh : median={:.1} p95={:.1} total={:.1} ms  (first={:.1}, last={:.1})",
+                ms(fresh_median),
+                ms(fresh_p95),
+                ms(fresh_total),
+                fresh_raster.first().map_or(0.0, |d| ms(*d)),
+                fresh_raster.last().map_or(0.0, |d| ms(*d)),
+            );
+            println!(
+                "shared: median={:.1} p95={:.1} total={:.1} ms",
+                ms(shared_median),
+                ms(shared_p95),
+                ms(shared_total),
+            );
+            println!(
+                "encode: total={:.1} ms (fresh pass)",
+                ms(fresh_encode.iter().sum())
+            );
+            println!("repeat page0 x3: median={:.1} ms", ms(repeat_median));
+            match (rss_before, rss_after, hwm) {
+                (Some(before), Some(after), Some(hwm)) => {
+                    println!("rss: {} -> {} KiB, hwm={} KiB", before, after, hwm)
+                }
+                _ => println!("rss: n/a"),
+            }
+        }
     }
 }

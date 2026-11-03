@@ -3008,6 +3008,76 @@ fn a_superscript_marker_image_is_capped_and_lifted_with_its_line() {
     );
 }
 
+/// `vertical-align: text-top` / `text-bottom` 落在图片上：对齐的是**父盒字体的上下沿**，
+/// 不是图片自己的固有高度。
+///
+/// 《哈利·波特》那本 `sup img { height: 1em; vertical-align: text-top }` 的 482 个元素
+/// 就是这一条：以前整条按「不认识」丢掉，图片贴着基线，比周围的字低一截。
+#[test]
+fn text_top_and_bottom_images_hang_from_the_parent_font_edges() {
+    let imgs = MockImages(vec![("pic.png", 40.0, 40.0)]);
+    // 父盒 20px：ascent 16 / descent 4（测试度量 0.8 / 0.2）。
+    let (_, top) = typeset_images(
+        "<p><img src=\"pic.png\"></p>",
+        "p { font-size: 20px } img { height: 10px; width: auto; vertical-align: text-top }",
+        300.0,
+        &imgs,
+    );
+    let img = top.lines[0].images().next().unwrap();
+    assert_eq!(
+        img.baseline_shift, 6.0,
+        "盒顶贴父盒字顶：16 - 10 = +6（正数往上）"
+    );
+    assert_eq!(
+        top.lines[0].baseline - (img.height + img.baseline_shift),
+        top.lines[0].baseline - 16.0,
+        "图片上沿与父盒字顶同高"
+    );
+
+    let (_, bottom) = typeset_images(
+        "<p><img src=\"pic.png\"></p>",
+        "p { font-size: 20px } img { height: 10px; width: auto; vertical-align: text-bottom }",
+        300.0,
+        &imgs,
+    );
+    let img = bottom.lines[0].images().next().unwrap();
+    assert_eq!(
+        img.baseline_shift, -4.0,
+        "盒底贴父盒字底：0 - 4 = -4（负数往下）"
+    );
+    assert_eq!(
+        bottom.lines[0].baseline - img.baseline_shift,
+        bottom.lines[0].baseline + 4.0,
+        "图片下沿与父盒字底同高"
+    );
+}
+
+/// 同一组关键字落在**文字**上：位移按「父盒字体度量 − 自己字体度量」折。
+#[test]
+fn text_top_and_bottom_runs_use_the_two_font_metrices() {
+    let (_, layout) = typeset(
+        "<p><span class=\"s\">x</span></p>",
+        "p { font-size: 20px } .s { font-size: 10px; vertical-align: text-top }",
+        300.0,
+    );
+    let run = layout.lines[0].text_runs().next().unwrap();
+    assert_eq!(
+        run.style.baseline_shift, 8.0,
+        "父盒 ascent 16 − 自己 ascent 8 = +8"
+    );
+
+    let (_, layout) = typeset(
+        "<p><span class=\"s\">x</span></p>",
+        "p { font-size: 20px } .s { font-size: 10px; vertical-align: text-bottom }",
+        300.0,
+    );
+    let run = layout.lines[0].text_runs().next().unwrap();
+    assert_eq!(
+        run.style.baseline_shift, -2.0,
+        "自己 descent 2 − 父盒 descent 4 = -2"
+    );
+}
+
 /// `max-width` 夹小图片，高度按纵横比跟着缩。
 #[test]
 fn max_width_clamps_and_scales_height() {
@@ -5009,28 +5079,130 @@ fn absolute_offsets_are_margin_edges_so_negative_margins_center_the_box() {
     assert_eq!((div.width, div.height), (304.0, 128.0), "19em × 8em");
 }
 
-/// `position: relative` 判不认识（它要不脱流地挪已排好的子树，命中与锚点都得跟着）；
-/// 认不出时整条作废、块照常留在流里。
+/// `position: relative`：把这一块**已经排好的那一坨**整体挪一下，**不动游标** ——
+/// 后面的兄弟仍按它没挪时的位置接（这正是与 `absolute` 的分界），所以两块会压在一起。
+///
+/// 行盒跟着走，命中测试因此也跟着走：`line_at` 量的就是挪完的那一格。锚点不受影响，
+/// 它走的是源文本字节偏移。
 #[test]
-fn relative_positioning_is_still_rejected() {
-    let dom = Dom::parse("<p style=\"position: relative\">正文</p>".as_bytes());
-    let styles = cascade(&dom, &RuleSet::default(), &ComputedStyle::default(), "");
-    assert_eq!(styles.ignored, 1, "`relative` 还没做，判不认识");
-    let laid = layout(
-        &dom,
-        &styles,
-        find(&dom, "body"),
-        LayoutOptions::with_width(200.0),
-        &Mono,
-        &NoImages,
+fn relative_shifts_its_own_box_and_leaves_the_next_sibling_at_its_flow_spot() {
+    let (dom, laid) = typeset(
+        "<p class=r>甲</p><p>乙</p>",
+        ".r { position: relative; top: 30px; left: 10px }",
+        200.0,
+    );
+    let boxes: Vec<&BlockBox> = laid.blocks.iter().filter(|b| !b.text.is_empty()).collect();
+    assert_eq!(boxes.len(), 2);
+    assert_eq!(
+        (boxes[0].x, boxes[0].y),
+        (10.0, 46.0),
+        "常规流那一格 (0, 16) 加上偏移"
     );
     assert_eq!(
-        laid.blocks
+        (boxes[1].x, boxes[1].y),
+        (0.0, 60.0),
+        "后一块照旧接在没挪时的位置之后，一点没跟着挪"
+    );
+    let at = laid.line_at(47.0).expect("挪下来的那一行该被命中");
+    assert_eq!(laid.line_text(at), "甲");
+    assert_eq!(laid.line_text(laid.line_at(80.0).unwrap()), "乙");
+    assert!(
+        !laid.stacked(),
+        "两块压在一起了：16 + 30 + 28 的下缘越过后一块的 60"
+    );
+    assert_eq!(dom.text_of_subtree(find(&dom, "p")), "甲", "原文一个字没动");
+}
+
+/// 偏移的取用照 CSS 2.1 §9.4：`left` 优先，只写 `right` 时取它的负；两个都写了时
+/// 按这一块的 `direction` 判谁作废（LTR 丢 `right`、RTL 丢 `left`）。竖轴同理。
+///
+/// 最后那一档是**本机两本真身的形态**（《斗战狂潮》封面那个 `.container` 与 Reader
+/// 脚注标记的 `span`）：只写 `position: relative`、一个偏移都不写 —— 那就是一分不动。
+#[test]
+fn relative_offsets_follow_css_when_both_sides_are_written() {
+    let spot = |css: &str| {
+        let (_, laid) = typeset("<p>甲</p>", css, 200.0);
+        let block = laid
+            .blocks
             .iter()
-            .find(|b| b.border_box && dom.tag_name(b.node) == Some("p"))
-            .map(|b| b.y),
-        Some(16.0),
-        "作废的定位不改这一块的常规流位置"
+            .find(|b| !b.text.is_empty())
+            .expect("一行该有一个块");
+        (block.x, block.y)
+    };
+    assert_eq!(
+        spot("p { position: relative; left: 10px; right: 40px }"),
+        (10.0, 16.0),
+        "LTR 下 `right` 作废，取 `left`"
+    );
+    assert_eq!(
+        spot("p { position: relative; right: 40px }"),
+        (-40.0, 16.0),
+        "只写 `right`：往回挪它那么多"
+    );
+    assert_eq!(
+        spot("p { position: relative; left: 10px; right: 40px; direction: rtl }"),
+        (-40.0, 16.0),
+        "RTL 下换成 `left` 作废"
+    );
+    assert_eq!(
+        spot("p { position: relative; top: 5px; bottom: 40px }"),
+        (0.0, 21.0),
+        "竖轴不看方向：`top` 优先"
+    );
+    assert_eq!(
+        spot("p { position: relative; bottom: 40px }"),
+        (0.0, -24.0),
+        "只写 `bottom` 抬上去"
+    );
+    assert_eq!(
+        spot("p { position: relative }"),
+        (0.0, 16.0),
+        "零偏移一分不动"
+    );
+}
+
+/// 百分比折自**包含块**而不是盒子自己：横轴与 `padding` 那一族同一把尺（父块内容宽），
+/// 竖轴只在父块明确写过 `height` 时才折得出 —— 没写时 CSS 就说这个百分比按 `auto`
+/// 处理，也就是不挪（与 [`a_percent_height_needs_an_explicit_parent_height`] 同一条）。
+#[test]
+fn relative_percentages_fold_against_the_containing_block() {
+    let spot = |css: &str| {
+        let (_, laid) = typeset("<div class=a><p class=r>甲</p></div>", css, 600.0);
+        let block = laid
+            .blocks
+            .iter()
+            .find(|b| b.text == "甲")
+            .expect("甲那一块");
+        (block.x, block.y)
+    };
+    assert_eq!(
+        spot(".a { height: 200px } .r { position: relative; left: 50%; top: 50% }"),
+        (300.0, 116.0),
+        "横按版心 600 折 300、竖按父块写的 200 折 100"
+    );
+    assert_eq!(
+        spot(".r { position: relative; left: 50%; top: 50% }"),
+        (300.0, 16.0),
+        "父块没写高：竖轴那一档当 `auto`，不挪"
+    );
+}
+
+/// 行内盒上的 `position: relative`：值收下（不再算落差），但位移只走块级那一个入口。
+///
+/// 钉成测试而不是只写在文档里，是因为将来补行内那一档（要把一个行盒里的片段按区间切开
+/// 挪）时，这条会红着提醒改哪一格。本机两处真身一处是块、一处是零偏移的行内标记，
+/// 所以这一档在屏上看不出差别。
+#[test]
+fn relative_on_an_inline_box_is_accepted_without_a_shift() {
+    let (_, laid) = typeset(
+        "<p>前<span class=s>中</span>后</p>",
+        ".s { position: relative; top: 30px }",
+        200.0,
+    );
+    assert_eq!(
+        laid.lines.iter().map(|line| line.y).collect::<Vec<_>>(),
+        vec![16.0],
+        "行盒没挪：位移那一刀走的是块级入口"
     );
 }
 
@@ -5425,5 +5597,67 @@ fn a_negative_top_margin_does_not_lift_a_lone_image() {
         ys[0] >= -0.01,
         "只有图的块不许被负上外边距顶到 0 以上：{}",
         ys[0]
+    );
+}
+
+/// `font-variant: small-caps`：小写换成大写、字号乘 0.8；DOM 原文不动。
+///
+/// 原文不动是这条实现的硬条件：选区与复制取的是 `Dom` 那一份（`selected_text` 走
+/// `text_map`），换成大写再写回 DOM 会让复制出来的名字全是大写，而读者要的是原样。
+#[test]
+fn small_caps_uppercases_and_shrinks_without_touching_the_source() {
+    let (dom, layout) = typeset(
+        "<p><span class=\"s\">Walt</span></p>",
+        ".s { font-variant: small-caps }",
+        300.0,
+    );
+    assert_eq!(layout.line_text(0), "WALT", "屏上是 uppercase");
+    let run = layout.lines[0].text_runs().next().unwrap();
+    assert_eq!(run.style.font_size, 12.8, "16px × 0.8");
+    assert!(run.style.small_caps);
+    assert_eq!(
+        run.width,
+        4.0 * 12.8 * 0.5,
+        "宽度按缩小后的字号算（拉丁 0.5 em）"
+    );
+    assert_eq!(
+        dom.text_of_subtree(find(&dom, "span")),
+        "Walt",
+        "DOM 原文保持小写，复制与锚点读的是它"
+    );
+}
+
+/// 全是大写的文字在 `small-caps` 下不缩：CSS 里本来就没有可换的小写，
+/// 把标题整段乘 0.8 才是凭空改版。
+#[test]
+fn small_caps_leaves_already_uppercase_text_alone() {
+    let (_, layout) = typeset(
+        "<p><span class=\"s\">WALT</span></p>",
+        ".s { font-variant: small-caps }",
+        300.0,
+    );
+    assert_eq!(layout.line_text(0), "WALT");
+    let run = layout.lines[0].text_runs().next().unwrap();
+    assert_eq!(run.style.font_size, 16.0);
+    assert!(run.style.small_caps, "作者那条声明仍然记着");
+    assert_eq!(run.width, 4.0 * 16.0 * 0.5, "字号没缩，宽度也就没变");
+}
+
+/// 长度会变的 uppercase 映射（`ß → SS`）不换：换了字节数变化，选区与锚点会漂。
+#[test]
+fn small_caps_skips_mappings_that_change_the_byte_length() {
+    let (_, layout) = typeset(
+        "<p><span class=\"s\">straße</span></p>",
+        ".s { font-variant: small-caps }",
+        300.0,
+    );
+    let text = layout.line_text(0);
+    assert_eq!(text.chars().count(), 6, "字符数不变：{text}");
+    assert!(text.contains('ß'), "ß 原样留着：{text}");
+    let run = layout.lines[0].text_runs().next().unwrap();
+    assert_eq!(
+        run.width,
+        6.0 * 12.8 * 0.5,
+        "其余字母仍按 0.8 排（拉丁 0.5 em）"
     );
 }

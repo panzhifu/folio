@@ -39,9 +39,9 @@ use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
     A11ySubtreeBuilder, AnyElement, App, Bounds, Context, ElementId, Entity, EntityId, Hsla,
-    InteractiveElement as _, IntoElement, PageCurlMesh, ParentElement, Render, Role,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _,
-    WeakEntity, Window, accesskit, div, point, px, size,
+    InteractiveElement as _, IntoElement, PageCurlMesh, ParentElement, Render, Role, ScrollEvent,
+    SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window,
+    accesskit, div, point, px, size,
 };
 
 use crate::ui::features::reader::components::image_viewer::ImageViewer;
@@ -1388,7 +1388,7 @@ impl Render for ReaderSession {
         // 进书横移那 280 ms 里被旧页纹理门拒掉的那一趟，到这里再补。放在元素树搭完
         // 之后：`turn()` 会改页号与 `laid_out`，中途调会让同一帧上下半截按两页画。
         self.drain_pending_turn(cx);
-        let listener = cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _window, cx| {
+        let listener = cx.listener(|this: &mut Self, event: &ScrollEvent, _window, cx| {
             // 挪动了才重画：滚到章尾夹住、分页没攒够半屏时一整帧的重建可以整份省掉
             // （判据与 gpui 的 `div` 滚动容器、zed editor 的 `scroll` 一致）。
             if this.on_scroll(event, cx) {
@@ -1415,7 +1415,7 @@ impl Render for ReaderSession {
             .test_support()
             .size_full()
             .relative()
-            .on_scroll_wheel(listener)
+            .on_scroll(listener)
             .children(backdrops)
             .child(column.overflow_hidden());
         // 不是整张纸折页的那几档，读数带照旧压在正文与浮层之上。整张纸那一档要它们在

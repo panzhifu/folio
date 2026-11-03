@@ -553,7 +553,9 @@ mod booted {
     };
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, point, px, size};
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Entity, ScrollDelta, TestAppContext, point, px, size,
+    };
 
     /// 起一版外壳，顺带把它那个实体也交出来 —— 「切个目的地」这个动作要从它上面调，
     /// 而设置整页正站在「我的」那一个目的地里。
@@ -672,17 +674,18 @@ mod booted {
     }
 
     /// 回归门：自定义标题栏必须挂在视图树里（曾经的 bug 是窗口选项声明了透明标题栏、
-    /// 却没有任何人绘制它，于是顶上什么都没有）。
+    /// 却没有任何人绘制它，于是顶上什么都没有）。判据是 `TitleBar` 自己的 `title-bar`
+    /// 那格，不是里面摆的孩子 —— 左侧的品牌字样已经撤掉，栏本身仍要在。
     #[gpui_kit::test]
     fn the_app_renders_a_custom_title_bar(cx: &mut TestAppContext) {
         let handle = open_app(cx);
         let present = cx
             .update_window(handle, |_, window, cx| {
                 window.render_frame(cx);
-                window.try_find("app-title").is_some()
+                window.try_find("title-bar").is_some()
             })
             .expect("窗口应能渲染");
-        assert!(present, "标题栏里的应用标题应出现在视图树中");
+        assert!(present, "自绘标题栏应出现在视图树中");
     }
 
     /// 回归门：≥840 时导航栏是**嵌入**的那一列，宽就是 96（三档统一之后不再是 260）。
@@ -1006,6 +1009,69 @@ mod booted {
         .expect("窗口应能渲染");
     }
 
+    /// 回归门：扫描事件流收尾不能把刚到手的结果清单一起收走。
+    ///
+    /// 真实的收尾在 `begin_scan` 那条 spawn 的末尾（通道关了就跑一次「还在扫就收摊」）。
+    /// 从前的写法是 `scan.take()`，而 `Finished(Ok)` 刚把清单换进同一个槽 —— 于是清单
+    /// 前脚到手、后脚被这一下抽走，弹层留在屏幕上一片空白。这里按真实顺序喂一遍：
+    /// 结果事件 → 流收尾 → 清单还要在。
+    #[gpui_kit::test]
+    fn closing_the_scan_stream_keeps_the_results(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("下载");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "第一本\n").unwrap();
+        let report = ScanReport {
+            candidates: vec![Candidate {
+                origin: folio_core::Origin::Local(dir.join("a.txt")),
+                name: "a.txt".into(),
+                size: Some(8),
+            }],
+            skipped: 0,
+            truncated: false,
+        };
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let shelf = stack
+                .read(cx)
+                .current()
+                .cloned()
+                .and_then(|top| top.downcast::<ShelfView>().ok())
+                .expect("书架栈底就是架面本身");
+            shelf.update(cx, |shelf, cx| {
+                shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
+            });
+            // `Popover` 那一层要先量一帧触发器的 bounds 才把卡挂进弹窗层。
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-scan-panel").is_some(),
+                "结果到手面板要出现"
+            );
+            assert!(
+                window.try_find("shelf-scan-pick-0").is_some(),
+                "清单第一行该画出来"
+            );
+
+            shelf.update(cx, |shelf, cx| shelf.close_scan_stream_for_test(cx));
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-scan-panel").is_some(),
+                "收尾那一下不许把扫完的面板抽成空壳"
+            );
+            assert!(
+                window.try_find("shelf-scan-pick-0").is_some(),
+                "结果行要还在"
+            );
+        })
+        .expect("窗口应能渲染");
+    }
+
     /// 回归门：点卡面那一下**净**勾上一本，不是勾上又取消。
     ///
     /// 勾选框必须是卡面的**兄弟**而不是孩子：gpui 把一次点击发给每一个 hitbox 含按下点的
@@ -1075,6 +1141,84 @@ mod booted {
             );
             window.click("shelf-scan-check-0", cx);
             assert_eq!(shelf.read(cx).checked_rows_for_test(), 0, "再点一下该取消");
+        })
+        .expect("窗口应能渲染");
+    }
+
+    /// 回归门：清单滑得动 —— 滚动偏移必须跨帧留住。
+    ///
+    /// `v_virtual_list` 每帧新建一份内部滚动句柄，不拿 `.track_scroll` 顶掉它，偏移就每帧
+    /// 归零：手指滑了、下一帧弹回原处，屏幕上正是「上下滑不动」。三十本只画得下开头那几行，
+    /// 所以判据是「滚一把第 20 本要进视口、第 0 本要出去」—— 每帧抹回 0 的话两头都不成立。
+    #[gpui_kit::test]
+    fn the_scan_list_keeps_its_scroll_offset(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("下载");
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = ScanReport {
+            candidates: (0..30)
+                .map(|ix| {
+                    let name = format!("{ix}.txt");
+                    std::fs::write(dir.join(&name), "正文\n").unwrap();
+                    Candidate {
+                        origin: folio_core::Origin::Local(dir.join(&name)),
+                        name: format!("{ix:02}.txt"),
+                        size: Some(8),
+                    }
+                })
+                .collect(),
+            skipped: 0,
+            truncated: false,
+        };
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let shelf = stack
+                .read(cx)
+                .current()
+                .cloned()
+                .and_then(|top| top.downcast::<ShelfView>().ok())
+                .expect("书架栈底就是架面本身");
+            shelf.update(cx, |shelf, cx| {
+                shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
+            });
+            // 浮层那张卡要先量一次触发器，虚拟列表要先有一次实测的视口才排得出行。
+            for _ in 0..4 {
+                window.render_frame(cx);
+            }
+
+            assert!(
+                window.try_find("shelf-scan-pick-0").is_some(),
+                "前置：第一本在视口里"
+            );
+            assert!(
+                window.try_find("shelf-scan-pick-10").is_none(),
+                "前置：第 11 本还在视口外"
+            );
+
+            // 向下滚 1000（gpui 的约定是向下为负）：行高 92、分组头 28，够把第 11 本抬进
+            // 这一屏。落点取第 0 行那一格的中心 —— 它压在列表那条 `overflow_scroll` 里面。
+            window.scroll(
+                "shelf-scan-pick-0",
+                ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
+                cx,
+            );
+            for _ in 0..4 {
+                window.render_frame(cx);
+            }
+
+            assert!(
+                window.try_find("shelf-scan-pick-10").is_some(),
+                "滚一把之后第 11 本该进视口；不在这里就是偏移每帧被抹回 0"
+            );
+            assert!(
+                window.try_find("shelf-scan-pick-0").is_none(),
+                "第一本该滚出视口"
+            );
         })
         .expect("窗口应能渲染");
     }
@@ -2027,13 +2171,18 @@ mod booted {
                 (
                     window.try_find("folio-stats").is_some(),
                     window.try_find("stats-heatmap").is_some(),
+                    window.try_find(("stats-halves", 0usize)).is_some(),
                     shell.read(cx).stats.read(cx).has_heatmap(),
                 )
             })
             .expect("窗口应能渲染");
         assert!(drawn.0, "统计那一格应画出自己的根");
         assert!(drawn.1, "拿到快照就该画出那张热力图");
-        assert!(drawn.2, "切进来就要拿到一份快照，等下一帧再去查库就晚了");
+        assert!(
+            drawn.2,
+            "900 宽的内容区算得下两栏：短卡要并排，不许把手机那一列直接拉宽"
+        );
+        assert!(drawn.3, "切进来就要拿到一份快照，等下一帧再去查库就晚了");
     }
 
     // 一个库里必然不存在的 `book_id`。自增键从 1 起，所以登记一本拿到的就是 1 ——
