@@ -21,12 +21,12 @@ use crate::ui::features::reader::model::session::{
 };
 use crate::ui::features::reader::motion::turn_animation::{self, Tint};
 
+use super::TurnFrame;
 use super::capture::{
     CaptureView, capture_layer, capture_region, flat_capture_mesh, in_viewport, shape_in_window,
 };
 use super::decor::paint_fold;
 use super::paper::{Paper, PaperCapture};
-use super::TurnFrame;
 
 /// 一份捕获副本要挂进哪一层、横向偏移多少。
 pub(super) struct CaptureLayer {
@@ -55,12 +55,13 @@ pub(super) fn mount_capture_layers(column: Div, layers: Vec<CaptureLayer>) -> Di
         let CaptureLayer {
             order,
             dx,
-            capture: PaperCapture {
-                element,
-                under,
-                over,
-                bands,
-            },
+            capture:
+                PaperCapture {
+                    element,
+                    under,
+                    over,
+                    bands,
+                },
         } = layer;
         column.child(capture_layer(
             order,
@@ -165,55 +166,62 @@ pub(super) fn request_front_capture(
 ) -> Div {
     // 捕获矩形按**最终位置**取：副本按 `-enter_shift` 画在最终位置上，两处必须同一个数。
     let region = capture_region(sheet_area, pass.layer.0);
-    let CapturePass { layer, viewport, clear } = pass;
+    let CapturePass {
+        layer,
+        viewport,
+        clear,
+    } = pass;
     column.child(
-        canvas(|_, _, _| {}, move |bounds, _, window, _| {
-            // `region` 是阅读页坐标，`bounds.origin` 是窗口坐标：先把这一层自己的
-            // 平移（进场横移）还掉，两者才同一套尺。
-            let shaped = shape_in_window(bounds.origin, layer, region);
-            let at = shaped.origin;
-            // 捕获纹理只有整窗大：页框有一截在窗外，那一截就永远烘不进去，而网格仍按
-            // 完整页宽采 UV，边上便采到矩形外（真机读数是一条黑色横带）。此时**不请求
-            // 捕获**，下一帧重试。进场那一段的横移已经在 `region` 里抵消掉了，走到这儿
-            // 还不合身的只剩「窗口本身比这一页窄」（分屏、桌面把窗口拖小）。
-            if !in_viewport(shaped, viewport) {
-                tracing::warn!(
-                    target: "folio_app::debug",
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                // `region` 是阅读页坐标，`bounds.origin` 是窗口坐标：先把这一层自己的
+                // 平移（进场横移）还掉，两者才同一套尺。
+                let shaped = shape_in_window(bounds.origin, layer, region);
+                let at = shaped.origin;
+                // 捕获纹理只有整窗大：页框有一截在窗外，那一截就永远烘不进去，而网格仍按
+                // 完整页宽采 UV，边上便采到矩形外（真机读数是一条黑色横带）。此时**不请求
+                // 捕获**，下一帧重试。进场那一段的横移已经在 `region` 里抵消掉了，走到这儿
+                // 还不合身的只剩「窗口本身比这一页窄」（分屏、桌面把窗口拖小）。
+                if !in_viewport(shaped, viewport) {
+                    tracing::warn!(
+                        target: "folio_app::debug",
+                        x = f32::from(at.x),
+                        y = f32::from(at.y),
+                        w = f32::from(shaped.size.width),
+                        h = f32::from(shaped.size.height),
+                        vw = viewport.0,
+                        vh = viewport.1,
+                        layer_y = layer.1,
+                        bounds_y = f32::from(bounds.origin.y),
+                        "正面捕获被拒：矩形出窗"
+                    );
+                    return;
+                }
+                // 记下这一刻的原点：画网格那一趟取 uv 要用它，而不是本帧的。
+                bake_origin.set(Some((f32::from(at.x), f32::from(at.y))));
+                // 捕获矩形落在窗口哪儿 —— 这一格与网格取 uv 用的 `page_origin` 必须是
+                // 同一个数，差多少像素，那条边上就有多少像素是采在未写区域（读成黑）。
+                tracing::debug!(
+                    target: "folio_app::perf",
                     x = f32::from(at.x),
                     y = f32::from(at.y),
                     w = f32::from(shaped.size.width),
                     h = f32::from(shaped.size.height),
-                    vw = viewport.0,
-                    vh = viewport.1,
-                    layer_y = layer.1,
-                    bounds_y = f32::from(bounds.origin.y),
-                    "正面捕获被拒：矩形出窗"
+                    "烘这一页：捕获矩形"
                 );
-                return;
-            }
-            // 记下这一刻的原点：画网格那一趟取 uv 要用它，而不是本帧的。
-            bake_origin.set(Some((f32::from(at.x), f32::from(at.y))));
-            // 捕获矩形落在窗口哪儿 —— 这一格与网格取 uv 用的 `page_origin` 必须是
-            // 同一个数，差多少像素，那条边上就有多少像素是采在未写区域（读成黑）。
-            tracing::debug!(
-                target: "folio_app::perf",
-                x = f32::from(at.x),
-                y = f32::from(at.y),
-                w = f32::from(shaped.size.width),
-                h = f32::from(shaped.size.height),
-                "烘这一页：捕获矩形"
-            );
-            window.capture_page_region_with_color(shaped, clear);
-            committed.set(Some((page_key, viewport)));
-            // 提交落在**下一帧**的 `render` 开头，所以发出请求的这一帧之后还得再有
-            // 一帧。这一帧没人买：`capture_page_region_with_color` 只把矩形写进
-            // `next_frame.scene`，gpui 也不为触摸或滚动事件重画，而翻页落定那一帧
-            // 补的 `notify` 只买得到「发出请求」的这一帧。少了下面这一发，提交一直
-            // 挂着落不进 `captured_page` ⇒ 仿真折页那道门（`curl_capture_ready`）
-            // 永远不开 ⇒ 读者的下一划在 `claim_swipe` 里整趟被吞。与
-            // `chapter_layout` 那条「作业在飞就必须再要一帧」同一个口径。
-            window.request_animation_frame();
-        })
+                window.capture_page_region_with_color(shaped, clear);
+                committed.set(Some((page_key, viewport)));
+                // 提交落在**下一帧**的 `render` 开头，所以发出请求的这一帧之后还得再有
+                // 一帧。这一帧没人买：`capture_page_region_with_color` 只把矩形写进
+                // `next_frame.scene`，gpui 也不为触摸或滚动事件重画，而翻页落定那一帧
+                // 补的 `notify` 只买得到「发出请求」的这一帧。少了下面这一发，提交一直
+                // 挂着落不进 `captured_page` ⇒ 仿真折页那道门（`curl_capture_ready`）
+                // 永远不开 ⇒ 读者的下一划在 `claim_swipe` 里整趟被吞。与
+                // `chapter_layout` 那条「作业在飞就必须再要一帧」同一个口径。
+                window.request_animation_frame();
+            },
+        )
         .absolute()
         .inset_0(),
     )
@@ -236,7 +244,11 @@ pub(super) fn request_back_capture(
     pass: CapturePass,
 ) -> Div {
     let region = capture_region(leaf, pass.layer.0);
-    let CapturePass { layer, viewport, clear } = pass;
+    let CapturePass {
+        layer,
+        viewport,
+        clear,
+    } = pass;
     column.child(
         canvas(
             |_, _, _| {},
@@ -282,7 +294,11 @@ pub(super) fn request_incoming_capture(
     pass: CapturePass,
 ) -> Div {
     let region = capture_region(sheet_area, pass.layer.0);
-    let CapturePass { layer, viewport, clear } = pass;
+    let CapturePass {
+        layer,
+        viewport,
+        clear,
+    } = pass;
     column.child(
         canvas(
             |_, _, _| {},
@@ -345,17 +361,16 @@ pub(super) fn paint_curl_mesh(
                 // 走到这里必须已经切回主场景：漏了收尾那道闸，网格的 primitive 会排进
                 // 捕获那一段、主 pass 一个都不画 —— 翻页就读成「字消失了但没有纸在卷」，
                 // 而且不报错。
-                debug_assert_eq!(
-                    window.capture_layer(),
-                    0,
-                    "捕获层没切回主场景就画了网格"
-                );
+                debug_assert_eq!(window.capture_layer(), 0, "捕获层没切回主场景就画了网格");
                 let mut mesh = mesh.clone();
                 // `page_bounds` 是从 `page_area` 出来的**阅读页局部**坐标，而
                 // `bounds.origin` 是窗口坐标；采样原点与几何原点都按窗口坐标算，
                 // 所以这里也走同一套：先把这一层自己的平移还掉。
                 let origin = point(bounds.origin.x - px(layer.0), bounds.origin.y - px(layer.1));
-                mesh.bounds.origin = point(mesh.bounds.origin.x + origin.x, mesh.bounds.origin.y + origin.y);
+                mesh.bounds.origin = point(
+                    mesh.bounds.origin.x + origin.x,
+                    mesh.bounds.origin.y + origin.y,
+                );
                 mesh.page_bounds.origin = point(
                     mesh.page_bounds.origin.x + origin.x,
                     mesh.page_bounds.origin.y + origin.y,
@@ -431,10 +446,7 @@ pub(super) struct CurlAsk {
 /// `cache` 是会话里那一格顶点缓存：顶点与索引只由页宽页高决定，进度改的是 uniform。
 /// 尺寸没变就接着用缓存那一份 —— 每帧重造是 9409 个顶点加 55296 个索引（近 1 MB）的
 /// 分配与拷贝，全在这一帧的绘制里跑。
-pub(super) fn build_curl_mesh(
-    ask: &CurlAsk,
-    cache: &mut Option<CurlMesh>,
-) -> Option<PageCurlMesh> {
+pub(super) fn build_curl_mesh(ask: &CurlAsk, cache: &mut Option<CurlMesh>) -> Option<PageCurlMesh> {
     let cylinder = turn_animation::cylinder_for(ask.progress, ask.curl_area, ask.pose)?;
     // 途中那一帧的读数。「页边有时候一条黑带」这种抱怨没法用眼睛验，也没法在
     // headless 里画出来，只能把这几组同源约束一起落进日志：几何（轴 / 卷径）、
@@ -541,12 +553,7 @@ pub(super) fn build_curl_mesh(
             // 水平分量只给 0.10：影子的偏移量是 `水平分量 × 纸抬起来的高度`，给到 0.25
             // 时柱顶那一段的影还会从折痕外探出六十来像素；0.10 只探出二十来像素 —— 影
             // 基本压在纸底下，只在折痕那一线露出一点。竖直分量稍大一点，影往下方沉。
-            light_dir: [
-                cylinder.nx * 0.10,
-                cylinder.ny * 0.10 - 0.08,
-                1.0,
-                0.0,
-            ],
+            light_dir: [cylinder.nx * 0.10, cylinder.ny * 0.10 - 0.08, 1.0, 0.0],
             cone_a: [
                 cylinder.cone_apex_s,
                 cylinder.cone_far_s,
@@ -610,9 +617,8 @@ pub(super) fn plan_sheets(
                 (frame_grip, Some(u))
             } else {
                 (
-                    frame_grip.map(|grip| {
-                        turn_animation::release_grip(grip, u, free_right, curl_area)
-                    }),
+                    frame_grip
+                        .map(|grip| turn_animation::release_grip(grip, u, free_right, curl_area)),
                     None,
                 )
             }

@@ -19,4 +19,3 @@ pub(super) fn shape_runs(scene: &mut Scene, doc: &Document, window: &Window) {
         run.shaped = Some(shaped);
     }
 }
-

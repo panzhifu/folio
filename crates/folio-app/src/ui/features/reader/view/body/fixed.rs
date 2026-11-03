@@ -14,18 +14,18 @@ use crate::ui::features::reader::components::selection::{self, SelectionVisual};
 use crate::ui::features::reader::model::annotations::Palette;
 use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::fixed_book::{FixedBook, PageTile};
-use crate::ui::features::reader::model::page_geometry::PageBox;
-use crate::ui::features::reader::view::bands;
 use crate::ui::features::reader::model::fixed_zoom::{FixedFrame, FixedZoom, max_scale};
 use crate::ui::features::reader::model::image_atlas::ImageAtlas;
+use crate::ui::features::reader::model::page_geometry::PageBox;
 use crate::ui::features::reader::model::prefetch;
 use crate::ui::features::reader::model::session::{
     LaidOut, PageRef, ReaderSession, ScrollMotion, TurnRun,
 };
 use crate::ui::features::reader::motion::turn_animation;
+use crate::ui::features::reader::view::bands;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, EntityId, ElementId,
+    AnyElement, App, AppContext as _, Bounds, Context, ElementId, Entity, EntityId,
     InteractiveElement as _, IntoElement, PageCurlMesh, ParentElement, Pixels, Styled,
     TestSupportExt as _, WeakEntity, div, point, px, size,
 };
@@ -33,8 +33,8 @@ use gpui_kit::{
 use super::PREFETCH_RADIUS;
 use super::capture::CaptureView;
 use super::images::{
-    ImageSpot, ImageTap, RegionAsk, page_image, painted, painted_tile, pinned_region,
-    prepare_tile, zoom_source_width,
+    ImageSpot, ImageTap, RegionAsk, page_image, painted, painted_tile, pinned_region, prepare_tile,
+    zoom_source_width,
 };
 use super::marks::{HIGHLIGHT_ALPHA, fixed_marks, marks_above};
 use super::paper::{FixedPaper, Paper, PaperBody, PaperCapture};
@@ -578,9 +578,7 @@ impl ReaderSession {
             .map(|stack| {
                 stack
                     .visible(self.scroll_painted, band)
-                    .filter_map(|page| {
-                        Some((page, stack.top_of(page)?, stack.height_of(page)?))
-                    })
+                    .filter_map(|page| Some((page, stack.top_of(page)?, stack.height_of(page)?)))
                     .collect()
             })
             .unwrap_or_default();
@@ -665,9 +663,7 @@ impl ReaderSession {
             && let Some(last) = visible_pages.last().copied()
         {
             let targets = match motion.direction {
-                Some(direction) => {
-                    prefetch::fixed_targets(last, pages, direction, PREFETCH_RADIUS)
-                }
+                Some(direction) => prefetch::fixed_targets(last, pages, direction, PREFETCH_RADIUS),
                 None => prefetch::fixed_target(last, pages).into_iter().collect(),
             };
             for target in targets {
@@ -983,8 +979,7 @@ impl ReaderSession {
                     &mut self.curl_mesh,
                 );
             }
-            let [incoming, outgoing] =
-                style.sheets_at(frame.progress, plan.curl_area, plan.pose);
+            let [incoming, outgoing] = style.sheets_at(frame.progress, plan.curl_area, plan.pose);
             incoming_shift = incoming.offset;
             outgoing_shift = outgoing.offset;
             // 卷起来那张纸的背面：单页是目标页整张；双页是目标跨页里**落在 leaf
@@ -1225,8 +1220,13 @@ impl ReaderSession {
                 self,
                 cx,
             );
-            let bands = (!bands.is_empty())
-                .then(|| div().absolute().inset_0().children(bands).into_any_element());
+            let bands = (!bands.is_empty()).then(|| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .children(bands)
+                    .into_any_element()
+            });
             paint.front = Some(PaperCapture {
                 element: super::paper::empty_capture_element(),
                 under: Vec::new(),

@@ -1054,7 +1054,10 @@ fn a_turning_page_clips_to_the_paper(cx: &mut TestAppContext) {
         (rest_top - global_top).abs() < 0.5 && (rest_height - global_height).abs() < 0.5,
         "纸层与全局裁剪该同高同顶：纸层 {rest_top}/{rest_height}，全局 {global_top}/{global_height}"
     );
-    assert!(rest_top > 0.0, "静止帧的裁剪顶该在页眉下面，实得 {rest_top}");
+    assert!(
+        rest_top > 0.0,
+        "静止帧的裁剪顶该在页眉下面，实得 {rest_top}"
+    );
     assert!(
         rest_height < height,
         "静止帧的裁剪高该小于整窗，实得 {rest_height}"
@@ -1063,8 +1066,7 @@ fn a_turning_page_clips_to_the_paper(cx: &mut TestAppContext) {
     raw_touch_at(cx, handle, TouchPhase::Started, point(px(200.0), px(400.0)));
     raw_touch_at(cx, handle, TouchPhase::Moved, point(px(200.0), px(260.0)));
     settle(cx, handle);
-    let (turn_top, turn_height) =
-        clip(cx, "reader-content-clip").expect("跟手帧该有全局裁剪层");
+    let (turn_top, turn_height) = clip(cx, "reader-content-clip").expect("跟手帧该有全局裁剪层");
     // 平摊翻页这一趟正文已经由捕获网格提供，纸层本身不建；若某档仍实时画，
     // 它的纸层裁剪必须与全局那份同高同顶。
     if let Some((paper_top, paper_height)) = clip(cx, "reader-paper-clip") {

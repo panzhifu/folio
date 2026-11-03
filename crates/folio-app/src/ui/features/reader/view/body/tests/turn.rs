@@ -1144,8 +1144,5 @@ fn a_paged_book_at_a_later_chapter_draws_its_own_page(cx: &mut TestAppContext) {
                 .is_some()
         })
         .expect("窗口应能渲染");
-    assert!(
-        found,
-        "第二章打开时分页帧摆的该是第二章的页，不是第 0 章"
-    );
+    assert!(found, "第二章打开时分页帧摆的该是第二章的页，不是第 0 章");
 }

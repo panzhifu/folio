@@ -10,9 +10,8 @@ use crate::ui::features::reader::model::image_atlas::ImageAtlas;
 use crate::ui::features::reader::view::scene::{BlockDecor, BlockPicture};
 use folio_core::content::format::css::computed::BorderStyle;
 use gpui_kit::{
-    AnyElement, App, Background, Corners, Entity, EntityId, Hsla, IntoElement,
-    ParentElement as _, PathBuilder, Pixels, Point, RenderImage, Styled, Window, div, img, point,
-    px,
+    AnyElement, App, Background, Corners, Entity, EntityId, Hsla, IntoElement, ParentElement as _,
+    PathBuilder, Pixels, Point, RenderImage, Styled, Window, div, img, point, px,
 };
 
 /// 把要盖在纸上的那一个多边形填进场景。顶点已经带在元素坐标里（与字形的 `run.x` /
@@ -45,7 +44,6 @@ pub(super) fn paint_fold(
         window.paint_path(built, color);
     }
 }
-
 
 /// 一块背景图：外壳是那一块的边框盒、带矩形裁剪，里面按 `scene` 算好的格子摆图。
 ///
@@ -81,12 +79,10 @@ pub(super) fn background_child(
         .into_any_element()
 }
 
-
 /// 一块实心矩形（背景或一条边框）。
 fn fill_quad(x: f32, top: f32, width: f32, height: f32, color: Hsla) -> AnyElement {
     fill_rounded_quad(x, top, width, height, color, [0.0; 4])
 }
-
 
 /// 同 [`fill_quad`]，多给四个圆角半径（`[左上, 右上, 右下, 左下]`，px）。
 ///
@@ -116,7 +112,6 @@ pub(super) fn fill_rounded_quad(
         .into_any_element()
 }
 
-
 /// 沿一条边框带子的长边切出「实、空、实…」，返回每段的 `(起点, 长度)`。
 ///
 /// **不平分**：从起点按 `dash + gap` 一路铺，最后一段按剩余长度截短 —— CSS 的虚线本来
@@ -139,7 +134,6 @@ pub(super) fn dash_spans(length: f32, dash: f32, gap: f32) -> Vec<(f32, f32)> {
     spans
 }
 
-
 /// 3D 边框的亮/暗两档：从作者的边框色派生。
 ///
 /// 浏览器在 HSL 空间里调明度；这里同一条思路，但两档都写成**朝目标补**而不是加减常数 ——
@@ -153,7 +147,6 @@ pub(super) fn three_d_tone(color: Hsla, light: bool) -> Hsla {
     };
     Hsla { l, ..color }
 }
-
 
 /// 把一条边框带子沿**厚度**方向切成外、内两半 → `(外, 内)` 两个盒子。
 ///
@@ -178,7 +171,6 @@ fn split_outer_inner(x: f32, y: f32, width: f32, height: f32, side: usize) -> ([
         ),
     }
 }
-
 
 /// 一条边框带子。`side` 是 `[上, 右, 下, 左]` 的下标 —— 3D 那四档要靠它分「哪条边暗」，
 /// `dotted` / `dashed` 靠它分切段方向。
@@ -362,4 +354,3 @@ pub(super) fn decoration_child(
     }
     parts
 }
-

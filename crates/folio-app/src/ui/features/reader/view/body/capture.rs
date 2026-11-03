@@ -10,10 +10,10 @@ use std::sync::Arc;
 use crate::ui::features::reader::model::session::PageRef;
 use crate::ui::features::reader::motion::turn_animation;
 use gpui_kit::{
-    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
-    InteractiveElement as _, LayoutId, PageCurlMesh, PageCurlUniforms, PageCurlVertex,
-    ParentElement as _, Pixels, Point, Styled, TestSupportExt as _, Window, canvas, div, point,
-    px, size,
+    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId,
+    InteractiveElement as _, IntoElement, LayoutId, PageCurlMesh, PageCurlUniforms, PageCurlVertex,
+    ParentElement as _, Pixels, Point, Styled, TestSupportExt as _, Window, canvas, div, point, px,
+    size,
 };
 
 /// 这一帧页面捕获的状态快照。
@@ -48,9 +48,7 @@ impl CaptureView {
         page: PageRef,
         viewport: (f32, f32),
     ) -> bool {
-        !self.dirty
-            && self.size == Some(viewport)
-            && self.front == Some((page.chapter, page.page))
+        !self.dirty && self.size == Some(viewport) && self.front == Some((page.chapter, page.page))
     }
 
     pub(in crate::ui::features::reader) fn incoming_valid(
@@ -275,10 +273,8 @@ pub(in crate::ui::features::reader) fn flat_mesh_canvas(
                 |_, _, _| {},
                 move |bounds, _, window, _| {
                     let mut mesh = mesh.clone();
-                    let origin = point(
-                        bounds.origin.x - px(layer.0),
-                        bounds.origin.y - px(layer.1),
-                    );
+                    let origin =
+                        point(bounds.origin.x - px(layer.0), bounds.origin.y - px(layer.1));
                     mesh.bounds.origin = point(
                         mesh.bounds.origin.x + origin.x,
                         mesh.bounds.origin.y + origin.y,

@@ -44,7 +44,6 @@ pub(super) fn plain_image(
         .into_any_element()
 }
 
-
 /// 这一帧这张图画得出来吗 —— 顺手把「这一帧在场」记进图集（帧末的回收按这个数放人）。
 ///
 /// 还在解 / 解不出来的给 `None`：那一块空着，正文照排（与从前容器丢失时同一个表现），
@@ -61,7 +60,6 @@ pub(super) fn painted(
     crate::ui::features::reader::model::perf::add(|frame| frame.image_ns += __image);
     image
 }
-
 
 /// 一格的像素：先画低清预览，高清到了再换。
 ///
@@ -112,7 +110,6 @@ pub(super) fn painted_tile(
         .and_then(|request| painted(atlas, request.clone(), view, cx))
 }
 
-
 /// 正文插图（与 CSS 背景图）那一格：先画低清预览，高清到了再换。
 ///
 /// 这是 [`painted_tile`] 给定版式那一族早就在做的事，2026-10-31 搬到可重排正文上：
@@ -152,7 +149,6 @@ pub(super) fn painted_picture(
     painted(atlas, request.clone(), view, cx)
 }
 
-
 /// 预取一格：只排**预览**那一趟，而且排进 [`Priority::Prewarm`] 档。
 ///
 /// 高清是翻到那一页时才值得花的钱 —— 预取高清会把下一趟翻页的首帧又拖回几百毫秒
@@ -161,13 +157,17 @@ pub(super) fn painted_picture(
 /// 档位降一档是为了**池子里的取活顺序**：读者手上这一页的预览/高清是 `Interactive`，
 /// 预取两页是 `Prewarm`，于是「翻过去那一下」不会被排在两页预取后面（见
 /// `folio_core::Priority` 的档序）。
-pub(super) fn prepare_tile(atlas: &Entity<ImageAtlas>, tile: &PageTile, view: EntityId, cx: &mut App) {
+pub(super) fn prepare_tile(
+    atlas: &Entity<ImageAtlas>,
+    tile: &PageTile,
+    view: EntityId,
+    cx: &mut App,
+) {
     if let Some(request) = tile.preview.as_ref().or(tile.request.as_ref()) {
         let request = request.clone().with_priority(folio_core::Priority::Prewarm);
         atlas.update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
     }
 }
-
 
 /// 放大上限要的「源宽」。
 ///
@@ -186,7 +186,6 @@ pub(super) fn zoom_source_width<'a>(tiles: impl IntoIterator<Item = &'a PageTile
     base * boost
 }
 
-
 /// 页表像素那一块 → **1x 内容坐标**里的那一块（同一张纸的同一个地方，两把尺）。
 pub(super) fn region_rect(
     tile: (f32, f32, f32, f32),
@@ -199,7 +198,6 @@ pub(super) fn region_rect(
     let (x1, y1) = (frac(region.x1, source.0), frac(region.y1, source.1));
     (tx + x0 * tw, ty + y0 * th, (x1 - x0) * tw, (y1 - y0) * th)
 }
-
 
 /// 一次「放大停稳了没有、该重画哪一块」的输入。
 ///
@@ -218,7 +216,6 @@ pub(super) struct RegionAsk<'a> {
     pub(super) zoom: FixedZoom,
     pub(super) now: std::time::Instant,
 }
-
 
 /// 放大那一档：这一帧该不该排「看得见的那一块按 `REGION_EDGE` 重画」，以及钉着的那一张
 /// 该叠在哪。交回 `Some(PinnedRegion)` 只表示**这一帧该去问图集要那一块的像素**
@@ -692,7 +689,6 @@ pub(super) fn open_on_tap(
         // 挂在最外层：宿主的测试要按 `("reader-image", 序)` 点在这张图上。
         .test_support()
 }
-
 
 /// 窗口视口，两个轴都是 CSS 像素。查看器第一帧拿它当摆位的格子，之后由那一层自己
 /// 量出来的宽高校正（见 `image_viewer::overlay` 里那块 `canvas`）。

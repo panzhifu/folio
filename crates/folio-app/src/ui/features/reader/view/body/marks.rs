@@ -172,9 +172,7 @@ pub(super) fn annotation_fills(
     for span in spans.iter().filter(|span| !span.is_stale()) {
         let mut lines = Vec::new();
         match span.style {
-            AnnotationStyle::Highlight => {
-                highlight_rects(spot, span.start..span.end, &mut lines)
-            }
+            AnnotationStyle::Highlight => highlight_rects(spot, span.start..span.end, &mut lines),
             AnnotationStyle::Line => annotation_underline_rects(
                 spot,
                 span.start..span.end,
@@ -464,4 +462,3 @@ fn annotation_underline_rects(
         ));
     }
 }
-

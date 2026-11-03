@@ -3,7 +3,6 @@
 //! 两条臂仍然各自装配元素树，共用输入 / 产物结构体暂留在 `body`；
 //! 下一步把它们收进 `Paper` / `PageScene` 后，这一层只保留按模式选臂。
 
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -14,7 +13,7 @@ use folio_core::layout::fragment::column_offset;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
     AnyElement, App, Context, Div, Entity, EntityId, InteractiveElement as _, IntoElement,
-    ParentElement, PageCurlMesh, SharedString, Styled, TestSupportExt as _, WeakEntity, Window,
+    PageCurlMesh, ParentElement, SharedString, Styled, TestSupportExt as _, WeakEntity, Window,
     div, px,
 };
 
@@ -36,20 +35,18 @@ use crate::ui::features::reader::view::scene::{BlockDecor, Scene, VisibleImage};
 
 use super::a11y::spoken_lines;
 use super::art::{
-    current_page_art, page_art_contain, page_art_element_id, page_art_for_doc,
-    page_backdrop_index, scroll_art_pictures,
+    current_page_art, page_art_contain, page_art_element_id, page_art_for_doc, page_backdrop_index,
+    scroll_art_pictures,
 };
 use super::capture::{CaptureView, flat_mesh_canvas};
-use super::turn_view;
 use super::decor::{decoration_child, decoration_ready};
 use super::images::{
     ImageDrag, ImageTap, image_child, painted_picture, plain_image, stack_dots, stack_peek,
 };
 use super::marks::{MarkSpot, annotation_fills, speech_fill};
-use super::paper::{
-    CaptureRole, PageScene, Paper, PaperBody, PaperCapture, Picture,
-};
+use super::paper::{CaptureRole, PageScene, Paper, PaperBody, PaperCapture, Picture};
 use super::shape::shape_runs;
+use super::turn_view;
 use super::{
     ContinuousArm, FrameOut, PagedArm, RenderFrame, TurnFrame, TurnPaint, column_cut, local_band,
 };
@@ -203,7 +200,6 @@ struct BandOnlyPaper<'a> {
     bake_origin: std::rc::Rc<std::cell::Cell<Option<(f32, f32)>>>,
 }
 
-
 impl ReaderSession {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_continuous(
@@ -292,9 +288,7 @@ impl ReaderSession {
             );
         }
         let __layout = __t.ns();
-        crate::ui::features::reader::model::perf::add(|frame| {
-            frame.layout_ns += __layout
-        });
+        crate::ui::features::reader::model::perf::add(|frame| frame.layout_ns += __layout);
         // 4–7. 坐标链那一段：补偿、恢复落点、锚章迁移、总高与夹取。
         let __spine = crate::ui::features::reader::model::perf::Timer::start();
         let before_compensate = self.scroll_y;
@@ -316,8 +310,7 @@ impl ReaderSession {
         };
         // 5. 恢复落点：全局 y = 章基线 + 章内行顶。请求可能指向邻章
         //    （跨章进度、换模式、跳章），先把锚章挪过去。
-        if let Some(target) =
-            self.pending_restore.map(|locator| locator.chapter as usize)
+        if let Some(target) = self.pending_restore.map(|locator| locator.chapter as usize)
             && target != book.chapter_index()
             && target < book.chapter_count()
         {
@@ -327,11 +320,7 @@ impl ReaderSession {
             let locator = self.pending_restore.take().expect("上面刚判过 Some");
             let locator = land_at_anchor(self.pending_anchor.take(), locator, book);
             self.scroll_y = book
-                .global_y_of_offset(
-                    locator.chapter as usize,
-                    locator.offset,
-                    chapter_gap,
-                )
+                .global_y_of_offset(locator.chapter as usize, locator.offset, chapter_gap)
                 .unwrap_or_else(|| book.document().y_at_offset(locator.offset));
             // 恢复是一次跳转（开书、跳目录、换摆法），不是翻一页：让一张从旧位置
             // 起点的纸平移过来，读者看见的就是自己刚选的那一秒在飞。
@@ -352,8 +341,7 @@ impl ReaderSession {
         // 整页画（固定底图章 / 单图页）：判定放在锚章迁移之后，读的就是这一帧
         // 视口顶所在的那一章。宽高比用整窗：同一本书里 `0.jpg` / `0~slim.jpg`
         // 谁更像这块屏，就挑谁。
-        let want_aspect =
-            viewport_width / window_height.max(1.0);
+        let want_aspect = viewport_width / window_height.max(1.0);
         out.page_art = current_page_art(book, want_aspect);
         // 7. 总高与夹取：全局坐标里「滚到底」是整条链的末端。
         self.content_height = book.content_height(chapter_gap);
@@ -417,18 +405,15 @@ impl ReaderSession {
             if top > window_h || top + height < 0.0 {
                 continue;
             }
-            let pictures =
-                scroll_art_pictures(&art, f32::from(size.width), height, doc.images());
-            if let Some(decor) =
-                crate::ui::features::reader::view::scene::backdrop_decor(
-                    &pictures,
-                    0.0,
-                    top,
-                    f32::from(size.width),
-                    height,
-                    doc.images(),
-                )
-            {
+            let pictures = scroll_art_pictures(&art, f32::from(size.width), height, doc.images());
+            if let Some(decor) = crate::ui::features::reader::view::scene::backdrop_decor(
+                &pictures,
+                0.0,
+                top,
+                f32::from(size.width),
+                height,
+                doc.images(),
+            ) {
                 backdrops.extend(decoration_child(decor, &atlas, view, cx));
                 out.neighbour_backdrop = true;
             }
@@ -445,18 +430,15 @@ impl ReaderSession {
             } else {
                 art_h(window_h)
             };
-            let pictures =
-                scroll_art_pictures(art, f32::from(size.width), height, doc.images());
-            if let Some(decor) =
-                crate::ui::features::reader::view::scene::backdrop_decor(
-                    &pictures,
-                    0.0,
-                    art_top(base),
-                    f32::from(size.width),
-                    height,
-                    doc.images(),
-                )
-            {
+            let pictures = scroll_art_pictures(art, f32::from(size.width), height, doc.images());
+            if let Some(decor) = crate::ui::features::reader::view::scene::backdrop_decor(
+                &pictures,
+                0.0,
+                art_top(base),
+                f32::from(size.width),
+                height,
+                doc.images(),
+            ) {
                 backdrops.extend(decoration_child(decor, &atlas, view, cx));
             }
         }
@@ -471,9 +453,7 @@ impl ReaderSession {
             (self.content_height - viewport_height).max(0.0),
         );
         let __spine = __spine.ns();
-        crate::ui::features::reader::model::perf::add(|frame| {
-            frame.spine_ns += __spine
-        });
+        crate::ui::features::reader::model::perf::add(|frame| frame.spine_ns += __spine);
         // 8. 可见带 → 逐章切场景：每章用自己的排版与图片索引，
         //    换算只差一个章基线。没排完的章不进链，自然一帧都不画。
         let band = painted_y..(painted_y + viewport_height);
@@ -498,8 +478,10 @@ impl ReaderSession {
             // 这一章的整页画（固定底图 / 单图页）。固定底图还要画正文，
             // 只有 picture page 才整章跳过；两者的根底图都交给背板，不许在
             // 版心里再画一遍 —— 那会把整窗背板裁成章高那一块，章界留白。
-            let page_art_here =
-                out.page_art.as_ref().filter(|art| art.chapter == placed.index);
+            let page_art_here = out
+                .page_art
+                .as_ref()
+                .filter(|art| art.chapter == placed.index);
             let picture_only = page_art_here.is_some_and(|art| art.picture_only);
             if picture_only {
                 continue;
@@ -558,11 +540,8 @@ impl ReaderSession {
             let __sh = crate::ui::features::reader::model::perf::Timer::start();
             shape_runs(&mut scene, doc, window);
             let __sh = __sh.ns();
-            crate::ui::features::reader::model::perf::add(|frame| {
-                frame.shape_runs_ns += __sh
-            });
-            let (__runs, __images) =
-                (scene.runs.len() as u32, scene.images.len() as u32);
+            crate::ui::features::reader::model::perf::add(|frame| frame.shape_runs_ns += __sh);
+            let (__runs, __images) = (scene.runs.len() as u32, scene.images.len() as u32);
             crate::ui::features::reader::model::perf::add(|frame| {
                 frame.scene_ns += __scene;
                 frame.scenes += 1;
@@ -739,8 +718,7 @@ impl ReaderSession {
         let column_width = book.document_mut().ensure_viewport(window, cx, paged);
         let pages = book.document().page_count();
         // 整页图按整窗比例挑源（单页与双页分别铺满一帧 / 半帧）。
-        let want_aspect =
-            viewport_width / window_height.max(1.0);
+        let want_aspect = viewport_width / window_height.max(1.0);
         // `background-attachment: fixed` 的底图章按**这一页**摊（见下面 `papers`
         // 那一趟）：翻页途中两张纸各带各的底图走，平移 / 覆盖才像一整张纸在动，
         // 而不是「字在滑、画留在原地」。从前这一块只在 `turn.is_none()` 时画，
@@ -755,8 +733,7 @@ impl ReaderSession {
 
         // 上次读到第几个字 → 该摆在哪一页。恢复请求可能指向邻章
         // （跨章进度）：先把锚章挪过去，等它的排版做完那一帧再落地。
-        if let Some(target) =
-            self.pending_restore.map(|locator| locator.chapter as usize)
+        if let Some(target) = self.pending_restore.map(|locator| locator.chapter as usize)
             && target != book.chapter_index()
             && target < book.chapter_count()
         {
@@ -779,12 +756,8 @@ impl ReaderSession {
         // 图预解：这一屏上下紧挨着的那一张纸（章末那一头换到邻章去，见
         // `prefetch::paged_targets`）。`pages` 双页时是张数，这里不与它挂钩：
         // 预解只关心「还有没有下一次翻页」。
-        frame_out.prefetch_side = prefetch::side_for_paged(
-            self.page,
-            pages,
-            book.chapter_index(),
-            book.chapter_count(),
-        );
+        frame_out.prefetch_side =
+            prefetch::side_for_paged(self.page, pages, book.chapter_index(), book.chapter_count());
 
         // 邻章预排版：跨章滑动要两张纸同时上屏，目标章必须先有排版与切页。
         // 当前章排完才铺邻章，避免刚换章时把三章的重排一起压进队列。
@@ -897,8 +870,7 @@ impl ReaderSession {
             },
             arriving_ready: &|page| {
                 book.span_doc(page.chapter).is_some_and(|doc| {
-                    doc.is_current()
-                        && page_art_for_doc(page.chapter, doc, want_aspect).is_none()
+                    doc.is_current() && page_art_for_doc(page.chapter, doc, want_aspect).is_none()
                 })
             },
         });
@@ -978,16 +950,14 @@ impl ReaderSession {
                 let size = window.viewport_size();
                 let width = f32::from(size.width);
                 let height = f32::from(size.height);
-                if let Some(decor) =
-                    crate::ui::features::reader::view::scene::backdrop_decor(
-                        &art.pictures,
-                        0.0,
-                        0.0,
-                        width,
-                        height,
-                        doc.images(),
-                    )
-                {
+                if let Some(decor) = crate::ui::features::reader::view::scene::backdrop_decor(
+                    &art.pictures,
+                    0.0,
+                    0.0,
+                    width,
+                    height,
+                    doc.images(),
+                ) {
                     // 位移挂在这一层上、里面那张画按 0 画：平移 / 覆盖的位移
                     // 与正文用的是同一个数（`Sheet::offset`），宿主测试也量得到
                     // 这张画到底走没走 —— 从前它只在静止帧画，翻页一开始就整个
@@ -1086,8 +1056,7 @@ impl ReaderSession {
                 // 自己也要写一份背面副本（从前只在 `leaf_turn` 的 `Back` 栏收，
                 // 单页那一趟背面因此一直是空的）。双页仍只由 `Back` 那一栏写。
                 let back_copy = paint.back_key.is_some()
-                    && (role.writes_back()
-                        || (!leaf_turn && paint.arriving == Some(page_ref)));
+                    && (role.writes_back() || (!leaf_turn && paint.arriving == Some(page_ref)));
                 let incoming_copy = role.writes_incoming() && paint.incoming_bake.is_some();
                 if !role.draws_main() && !back_copy {
                     continue;
@@ -1125,7 +1094,9 @@ impl ReaderSession {
                 // 逻辑顺序 —— 与那一栏画在左边还是右边无关。只为**上屏**的那一栏
                 // 收集：背面那一栏不在屏上，念出来就是把同一句话念两遍。
                 if speaking && role.draws_main() {
-                    frame_out.spoken.extend(spoken_lines(doc, slice.lines.clone()));
+                    frame_out
+                        .spoken
+                        .extend(spoken_lines(doc, slice.lines.clone()));
                 }
                 let font_cache = &mut self.font_cache;
                 let mut scene = Scene::build(
@@ -1145,9 +1116,7 @@ impl ReaderSession {
                 let __sh = crate::ui::features::reader::model::perf::Timer::start();
                 shape_runs(&mut scene, doc, window);
                 let __sh = __sh.ns();
-                crate::ui::features::reader::model::perf::add(|f| {
-                    f.shape_runs_ns += __sh
-                });
+                crate::ui::features::reader::model::perf::add(|f| f.shape_runs_ns += __sh);
                 // 整页图：清掉排版层那张流内图，换成铺满这一页的纸面图；
                 // 外面再压一层同图的背板，专门把状态栏 / 手势条那两条也铺到。
                 // 背板只在这一页上屏时加（leaf 被捕获带走的那一帧不再画它，
@@ -1170,12 +1139,7 @@ impl ReaderSession {
                 };
                 body.push(page_scene);
             }
-            let paper = Paper::reflowable(
-                page_ref,
-                frame.page_box,
-                at,
-                body,
-            );
+            let paper = Paper::reflowable(page_ref, frame.page_box, at, body);
 
             let targets = PageSceneTargets {
                 element: &mut *element,
@@ -1185,7 +1149,14 @@ impl ReaderSession {
                 page_bands: &mut target_page_bands,
                 out: &mut *frame_out,
             };
-            let out = self.render_paper(&*book, paper, &render_frame, targets, &mut *window, &mut *cx);
+            let out = self.render_paper(
+                &*book,
+                paper,
+                &render_frame,
+                targets,
+                &mut *window,
+                &mut *cx,
+            );
             paper_layers.extend(out.layers);
             page_bands.extend(out.page_bands);
             if paint.front.is_none() {
@@ -1246,9 +1217,7 @@ impl ReaderSession {
         let area = frame.area();
         let viewport = frame.viewport();
         let page_key = frame.page_key;
-        let (captured_ch, captured_pg) = self
-            .captured_page
-            .unwrap_or((usize::MAX, usize::MAX));
+        let (captured_ch, captured_pg) = self.captured_page.unwrap_or((usize::MAX, usize::MAX));
         let (captured_w, captured_h) = self.captured_size.unwrap_or((-1.0, -1.0));
         // 要摆的那几页：定住时只有当前这一页；动画在走时**多出另一张纸**
         // （同章邻页，或跨章的目标页），两张各自怎么摆由这一趟带上来的那一档
@@ -1375,7 +1344,11 @@ impl ReaderSession {
             // 同侧半页）都得留着，网格只盖住被揭起来的那一张 leaf。两张纸都不裁，
             // 由下面的逐栏跳过把 leaf 正面与背面取掉。
             if paint.mesh.is_some() && mode != chrome::PageMode::Spread {
-                let arriving_slot = if papers[0].identity == arriving_ref { 0 } else { 1 };
+                let arriving_slot = if papers[0].identity == arriving_ref {
+                    0
+                } else {
+                    1
+                };
                 papers.swap(0, arriving_slot);
                 count = 1;
             }
@@ -1459,9 +1432,7 @@ impl ReaderSession {
                 bands_drawn: !page_bands.is_empty(),
             };
         }
-        let PageSceneTargets {
-            out: frame_out, ..
-        } = targets;
+        let PageSceneTargets { out: frame_out, .. } = targets;
         let mut moving = Vec::new();
         let mut still = Vec::new();
         let mut capture_only = Vec::new();
@@ -1856,7 +1827,14 @@ impl ReaderSession {
             .filter(|(chapter, _)| *chapter == page_ref.chapter)
             .map(|(_, range)| range.clone());
         if role.draws_main() {
-            self.paint_marks(element, &spot, page_ref.chapter, palette, speech.clone(), cut);
+            self.paint_marks(
+                element,
+                &spot,
+                page_ref.chapter,
+                palette,
+                speech.clone(),
+                cut,
+            );
         }
         if back_copy {
             self.paint_marks(
@@ -1879,9 +1857,7 @@ impl ReaderSession {
             );
         }
         let __fills = __fills.ns();
-        crate::ui::features::reader::model::perf::add(|f| {
-            f.fills_ns += __fills
-        });
+        crate::ui::features::reader::model::perf::add(|f| f.fills_ns += __fills);
     }
 }
 
@@ -1941,8 +1917,7 @@ fn paint_picture_page(
             } else {
                 BackgroundSize::Cover
             };
-            let picture =
-                crate::ui::features::reader::view::scene::full_page_picture(&href, size);
+            let picture = crate::ui::features::reader::view::scene::full_page_picture(&href, size);
             if let Some(decor) = crate::ui::features::reader::view::scene::backdrop_decor(
                 &[picture],
                 page_x,
@@ -2033,10 +2008,7 @@ fn paint_scene_decorations(
             continue;
         }
         if cut.is_some_and(|cut| {
-            !cut.keeps(
-                decor.x + decor.width * 0.5,
-                decor.top + decor.height * 0.5,
-            )
+            !cut.keeps(decor.x + decor.width * 0.5, decor.top + decor.height * 0.5)
         }) {
             continue;
         }
@@ -2118,10 +2090,7 @@ fn paint_scene_images(
         // 但 `painted` 照问 —— 那一问就是「这一帧在场」的记账，跳过它
         // 会让被折走的图在 17 帧里被判离场，露出来时再白上传一趟。
         let shown = cut.is_none_or(|cut| {
-            cut.keeps(
-                image.x + image.width * 0.5,
-                image.top + image.height * 0.5,
-            )
+            cut.keeps(image.x + image.width * 0.5, image.top + image.height * 0.5)
         });
         targets.out.painted_keys.push(image.image.key.clone());
         let Some(rendered) = painted_picture(atlas, &image.image, view, cx) else {

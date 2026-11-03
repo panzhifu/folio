@@ -232,11 +232,7 @@ impl ReaderSession {
                         // 松手那一腿不是从 0 走的：从手指那一点接着走完或走回，否则读者会
                         // 看见自己握过的那一截被重放一遍。
                         let progress = chrome::tween(from, if revert { 0.0 } else { 1.0 }, eased);
-                        (
-                            progress,
-                            cx.reduce_motion() || elapsed >= over,
-                            Some(eased),
-                        )
+                        (progress, cx.reduce_motion() || elapsed >= over, Some(eased))
                     }
                     _ => (sampled.progress, sampled.progress >= 1.0, None),
                 }
@@ -375,8 +371,8 @@ impl ReaderSession {
                     // 分页 / 双页：翻走即清，选区必在锚章 —— 逐栏求交照搬。
                     let layout = doc.layout();
                     let total = doc.text_map().chars();
-                    let width = folio_core::layout::fragment::column_width(usable, columns, gap)
-                        .max(1.0);
+                    let width =
+                        folio_core::layout::fragment::column_width(usable, columns, gap).max(1.0);
                     for index in 0..columns {
                         let Some(slice) = doc.slice_of(self.page, index) else {
                             continue;
@@ -443,11 +439,7 @@ impl ReaderSession {
             .first()
             .zip(visual.highlights.last())
             .map(|(first, last)| (f32::from(first.center().x) + f32::from(last.center().x)) * 0.5);
-        SelectionFrame {
-            visual,
-            anchor,
-            x,
-        }
+        SelectionFrame { visual, anchor, x }
     }
 }
 
