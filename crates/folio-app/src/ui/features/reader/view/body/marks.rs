@@ -52,31 +52,50 @@ pub(in crate::ui::features::reader) fn text_ink_box(line: &LineBox) -> Option<(f
     (up + down > 0.0).then_some((line.y + line.baseline - up, up + down))
 }
 
+/// 一条痕迹在屏上的落脚点：哪份排版、摆在哪儿、这一帧可见的是哪一段。
+///
+/// 选区、批注底色、语音高亮、字下实线四个换算入口共用这一份，省得每处再传
+/// 七个位置参数；字段名替调用点记住「哪一格是哪一格」。
+#[derive(Clone)]
+pub(super) struct MarkSpot<'a> {
+    pub(super) doc: &'a Document,
+    pub(super) window: &'a Window,
+    pub(super) cx: &'a App,
+    /// 这一栏（片）在元素坐标里的左缘。
+    pub(super) x: f32,
+    /// 这一栏在排版坐标里的顶（片的 `origin_y`）。
+    pub(super) origin_y: f32,
+    /// 本片沿推进轴的长度（`Fragment::height`）。连续滚动那一档递整章的长，
+    /// 而竖排只存在于分页，所以那一档里这一格根本不参与。
+    pub(super) flow_len: f32,
+    /// 元素坐标里正文顶那一截（页眉带 + 安全区）。
+    pub(super) header: f32,
+    /// 可见带，说的是**推进轴**上的一段（横排 = 章内 y，竖排 = 从长条右缘往里数）。
+    pub(super) band: std::ops::Range<f32>,
+}
+
 /// 把「选区 ∩ 一个可见带」换成元素局部的矩形，追加进 `out`。
 ///
-/// `x` / `origin_y` 是这一栏（片）的摆位，与 `Scene::build` 同一套换算；
-/// `band` 是排版坐标里的可见 y 区间——夹进 `sub` 的字符区间在带与带的接缝处
-/// 可能越进下一带（`coordinate_of_line` 给的是下一带首字符），矩形再按 y 滤一遍。
+/// `spot` 是这一栏的摆位与可见带；`sub` 是选区与可见带求交后的字符区间。
 ///
 /// 行号在进 `rects_for_range_in` **之前**就按这两条夹好（字符索引 ∩ 可见带，
 /// `Document::selection_rects_in_band`），所以下面那道 y 滤是重复的一道：留着，
 /// 因为「窄化算错就少一块底色」这种账只能靠两道独立的不等式互相兜。
-#[allow(clippy::too_many_arguments)]
 pub(super) fn highlight_rects(
-    doc: &Document,
-    window: &Window,
-    cx: &App,
+    spot: &MarkSpot<'_>,
     sub: std::ops::Range<usize>,
-    x: f32,
-    origin_y: f32,
-    // 本片沿推进轴的长度（`Fragment::height`）。连续滚动那一档递整章的长，
-    // 而竖排只存在于分页，所以那一档里这一格根本不参与。
-    flow_len: f32,
-    header: f32,
-    // 可见带，说的是**推进轴**上的一段（横排 = 章内 y，竖排 = 从长条右缘往里数）。
-    band: std::ops::Range<f32>,
     out: &mut Vec<Bounds<Pixels>>,
 ) {
+    let MarkSpot {
+        doc,
+        window,
+        cx,
+        x,
+        origin_y,
+        flow_len,
+        header,
+        band,
+    } = spot.clone();
     if sub.start >= sub.end {
         return;
     }
@@ -135,25 +154,16 @@ pub(super) fn highlight_rects(
 ///
 /// 缓存与那一份库里的批注按字段分开递进来而不是拿 `&self`：调用点在 `match &mut self.source`
 /// 的那一臂里，整个 `self` 已经借不出了。
-#[allow(clippy::too_many_arguments)]
 pub(super) fn annotation_fills(
     element: &mut GlyphsElement,
-    doc: &Document,
-    window: &Window,
-    cx: &App,
+    spot: &MarkSpot<'_>,
     cache: &RefCell<AnnotationSpans>,
     stored: &[Annotation],
     palette: &Palette,
     chapter: usize,
-    x: f32,
-    origin_y: f32,
-    // 本片沿推进轴的长度（`Fragment::height`）。只有底色带那一档要它：那一档走
-    // `highlight_rects`。连续滚动永远横排，那一档里这一格不参与。
-    flow_len: f32,
-    header: f32,
-    band: Range<f32>,
     cut: Option<crate::ui::features::reader::motion::turn_animation::Cut>,
 ) {
+    let MarkSpot { doc, band, .. } = spot.clone();
     if stored.is_empty() || band.start >= band.end {
         return;
     }
@@ -162,39 +172,18 @@ pub(super) fn annotation_fills(
     for span in spans.iter().filter(|span| !span.is_stale()) {
         let mut lines = Vec::new();
         match span.style {
-            AnnotationStyle::Highlight => highlight_rects(
-                doc,
-                window,
-                cx,
-                span.start..span.end,
-                x,
-                origin_y,
-                flow_len,
-                header,
-                band.clone(),
-                &mut lines,
-            ),
+            AnnotationStyle::Highlight => {
+                highlight_rects(spot, span.start..span.end, &mut lines)
+            }
             AnnotationStyle::Line => annotation_underline_rects(
-                doc,
-                window,
-                cx,
+                spot,
                 span.start..span.end,
-                x,
-                origin_y,
-                header,
-                band.clone(),
                 UNDERLINE_THICKNESS,
                 &mut lines,
             ),
             AnnotationStyle::Wavy => annotation_underline_rects(
-                doc,
-                window,
-                cx,
+                spot,
                 span.start..span.end,
-                x,
-                origin_y,
-                header,
-                band.clone(),
                 paint::WAVE_HEIGHT,
                 &mut lines,
             ),
@@ -212,18 +201,7 @@ pub(super) fn annotation_fills(
         // 按它摆就会在每个接缝处都长出一枚图标。最后一个字不落在这一带就整枚不画。
         let note_anchor = if !span.note.trim().is_empty() && span.end > span.start {
             let mut tail = Vec::new();
-            highlight_rects(
-                doc,
-                window,
-                cx,
-                (span.end - 1)..span.end,
-                x,
-                origin_y,
-                flow_len,
-                header,
-                band.clone(),
-                &mut tail,
-            );
+            highlight_rects(spot, (span.end - 1)..span.end, &mut tail);
             tail.last().copied()
         } else {
             None
@@ -283,20 +261,13 @@ const SPEECH_ALPHA: f32 = 0.2;
 /// 颜色用主题的 `primary` 而不是 `selection`：前者念出来是「在念这里」，后者是
 /// 「人挑了这里」，两种意思不该同色。`cut` 与批注同一条规矩：中心落在被裁掉那一侧
 /// 的矩形不画，别让底色浮在已经折走的那半张纸上。
-#[allow(clippy::too_many_arguments)]
 pub(super) fn speech_fill(
     element: &mut GlyphsElement,
-    doc: &Document,
-    window: &Window,
-    cx: &App,
+    spot: &MarkSpot<'_>,
     speaking: Option<Range<usize>>,
-    x: f32,
-    origin_y: f32,
-    flow_len: f32,
-    header: f32,
-    band: Range<f32>,
     cut: Option<crate::ui::features::reader::motion::turn_animation::Cut>,
 ) {
+    let MarkSpot { cx, band, .. } = spot.clone();
     let Some(sub) = speaking else {
         return;
     };
@@ -304,9 +275,7 @@ pub(super) fn speech_fill(
         return;
     }
     let mut rects = Vec::new();
-    highlight_rects(
-        doc, window, cx, sub, x, origin_y, flow_len, header, band, &mut rects,
-    );
+    highlight_rects(spot, sub, &mut rects);
     let color = cx.theme().primary.opacity(SPEECH_ALPHA);
     for rect in rects {
         let center = rect.center();
@@ -455,19 +424,22 @@ pub(super) const HIGHLIGHT_ALPHA: f32 = 0.35;
 /// 没有这个信息（要问的是推进轴上的 `line.baseline`），所以竖排的书只有底色带那一档
 /// 是对的（它复用 [`highlight_rects`]，那条认轴）。字下那两档在竖排里照旧画进行盒的
 /// `y` 那一维 —— 已知限制，与盒模型那几族边一起留给竖排的第二轮。
-#[allow(clippy::too_many_arguments)]
 fn annotation_underline_rects(
-    doc: &Document,
-    window: &Window,
-    cx: &App,
+    spot: &MarkSpot<'_>,
     range: std::ops::Range<usize>,
-    x: f32,
-    origin_y: f32,
-    header: f32,
-    band: std::ops::Range<f32>,
     thickness: f32,
     out: &mut Vec<Bounds<Pixels>>,
 ) {
+    let MarkSpot {
+        doc,
+        window,
+        cx,
+        x,
+        origin_y,
+        header,
+        band,
+        ..
+    } = spot.clone();
     if range.start >= range.end {
         return;
     }

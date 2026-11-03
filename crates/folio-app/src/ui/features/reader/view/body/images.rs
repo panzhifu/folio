@@ -290,6 +290,32 @@ pub(super) fn pinned_region(
     Some(pin)
 }
 
+/// 一张图在屏上的摆位矩形（定版式那一臂按格给，正文插图自带在 `VisibleImage` 里）。
+#[derive(Clone, Copy)]
+pub(super) struct ImageSpot {
+    pub(super) x: f32,
+    pub(super) y: f32,
+    pub(super) width: f32,
+    pub(super) height: f32,
+}
+
+/// 「点这张图」要的那几格：入口实体、按端分岔、命中表序号、会话句柄。
+pub(super) struct ImageTap<'a> {
+    pub(super) viewer: &'a Option<Entity<ImageViewer>>,
+    pub(super) long_press: bool,
+    pub(super) index: usize,
+    pub(super) reader: &'a WeakEntity<ReaderSession>,
+}
+
+/// 拖动看大图那一侧的记账：平移偏移与这一帧的命中表。
+pub(super) struct ImageDrag<'a> {
+    pub(super) pan: (f32, f32),
+    pub(super) hits: &'a Rc<RefCell<Vec<ImageHit>>>,
+    pub(super) frame_no: u64,
+    pub(super) chapter: usize,
+    pub(super) stack_hits: &'a Rc<RefCell<Vec<StackHit>>>,
+}
+
 /// 一片里的一张图：绝对摆位交给 gpui 的 `img`，外加「点一下摊开看」。
 ///
 /// 一张图若是**脚注标记**（老书把标记做成一张小「注」图），那一击归脚注 —— 抬起注文，
@@ -302,20 +328,25 @@ pub(super) fn pinned_region(
 ///
 /// `rendered` 是图集那一层交回来的像素：`image` 里只有摆位与那条活儿（`DecodeRequest`），
 /// 像素不随场景走（见 [`crate::ui::features::reader::model::image_atlas`]）。
-#[allow(clippy::too_many_arguments)]
 pub(super) fn image_child(
     image: VisibleImage,
     rendered: Arc<RenderImage>,
-    viewer: &Option<Entity<ImageViewer>>,
-    long_press: bool,
-    index: usize,
-    reader: &WeakEntity<ReaderSession>,
-    pan: (f32, f32),
-    hits: &Rc<RefCell<Vec<ImageHit>>>,
-    frame_no: u64,
-    chapter: usize,
-    stack_hits: &Rc<RefCell<Vec<StackHit>>>,
+    tap: ImageTap<'_>,
+    drag: ImageDrag<'_>,
 ) -> AnyElement {
+    let ImageTap {
+        viewer,
+        long_press,
+        index,
+        reader,
+    } = tap;
+    let ImageDrag {
+        pan,
+        hits,
+        frame_no,
+        chapter,
+        stack_hits,
+    } = drag;
     // `object-fit`：图按哪一块区域采样进这个盒。`Fill`（初值）与前一字不差的
     // `size_full()`；`Contain` 留底、`Cover` 裁、`None` 原尺寸 —— 三种都要先算出一个
     // 可能超出盒的矩形，再靠盒的 `overflow_hidden` 裁。
@@ -548,19 +579,24 @@ pub(super) fn footnote_marker(
 /// 翻页本身。按得住长按的那一端把入口挂在长按上（单击一个字都不动，翻页照常）；
 /// 按不住的那一端（桌面鼠标根本没有长按）挂单击，翻页让给页外的留白与音量键。
 /// 判据在 [`crate::ui::host::supports_long_press`]，这一层不写 `cfg`。
-#[allow(clippy::too_many_arguments)]
 pub(super) fn page_image(
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+    spot: ImageSpot,
     image: Arc<RenderImage>,
     key: String,
-    viewer: &Option<Entity<ImageViewer>>,
-    long_press: bool,
-    index: usize,
-    reader: &WeakEntity<ReaderSession>,
+    tap: ImageTap<'_>,
 ) -> AnyElement {
+    let ImageSpot {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = spot;
+    let ImageTap {
+        viewer,
+        long_press,
+        index,
+        reader,
+    } = tap;
     let frame = div()
         .absolute()
         .left(px(x))

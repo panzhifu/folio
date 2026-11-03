@@ -57,8 +57,13 @@ impl CaptureRole {
 
 /// 一张纸里装的内容。
 pub(super) enum PaperBody {
-    Reflowable(Vec<PageScene>),
-    Continuous(Vec<PageScene>),
+    /// 可重排正文。`packed == false` 是分页 / 双页（一纸一景、按栏切）；
+    /// `packed == true` 是连续滚动（一章一景、纵向拼在一条链上，不按章裁切）。
+    /// 两档的数据形状相同，绘制时只差这一个开关。
+    Flow {
+        scenes: Vec<PageScene>,
+        packed: bool,
+    },
     Fixed(FixedPaper),
 }
 
@@ -91,7 +96,10 @@ impl Paper {
             bands: BandPolicy::Reserved,
             sheet,
             zoom: None,
-            body: PaperBody::Reflowable(Vec::new()),
+            body: PaperBody::Flow {
+                scenes: Vec::new(),
+                packed: false,
+            },
         }
     }
 
@@ -102,7 +110,15 @@ impl Paper {
         sheet: Sheet,
         scenes: Vec<PageScene>,
     ) -> Self {
-        Self::scenes(identity, page_box, sheet, PaperBody::Reflowable(scenes))
+        Self::scenes(
+            identity,
+            page_box,
+            sheet,
+            PaperBody::Flow {
+                scenes,
+                packed: false,
+            },
+        )
     }
 
     /// 连续滚动里的一章（一摞栏场景，纵向拼在一条链上）。
@@ -112,7 +128,15 @@ impl Paper {
         sheet: Sheet,
         scenes: Vec<PageScene>,
     ) -> Self {
-        Self::scenes(identity, page_box, sheet, PaperBody::Continuous(scenes))
+        Self::scenes(
+            identity,
+            page_box,
+            sheet,
+            PaperBody::Flow {
+                scenes,
+                packed: true,
+            },
+        )
     }
 
     fn scenes(identity: PageRef, page_box: PageBox, sheet: Sheet, body: PaperBody) -> Self {

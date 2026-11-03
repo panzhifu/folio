@@ -10,14 +10,14 @@ use folio_core::layout::fragment::column_offset;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
     AnyElement, App, Context, Div, InteractiveElement as _, IntoElement, ParentElement,
-    SharedString, Styled, TestSupportExt as _, Window, div, px,
+    PageCurlMesh, SharedString, Styled, TestSupportExt as _, Window, div, px,
 };
 
 use crate::ui::features::reader::model::annotations::Palette;
 use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chapter_layout::{Document, Viewport};
 use crate::ui::features::reader::model::chrome;
-use crate::ui::features::reader::model::page_geometry::BandPolicy;
+use crate::ui::features::reader::model::page_geometry::{BandPolicy, PageBox};
 use crate::ui::features::reader::model::prefetch;
 use crate::ui::features::reader::model::session::{
     PageRef, ReaderSession, Turn, TurnRun, land_at_anchor, start_turn,
@@ -35,12 +35,14 @@ use super::art::{
 use super::capture::{CaptureView, flat_mesh_canvas};
 use super::turn_view;
 use super::decor::{decoration_child, decoration_ready};
-use super::images::{image_child, painted_picture, plain_image, stack_dots, stack_peek};
-use super::marks::{annotation_fills, speech_fill};
+use super::images::{
+    ImageDrag, ImageTap, image_child, painted_picture, plain_image, stack_dots, stack_peek,
+};
+use super::marks::{MarkSpot, annotation_fills, speech_fill};
 use super::paper::{CaptureRole, PageScene, Paper, PaperBody, PaperCapture};
 use super::shape::shape_runs;
 use super::{
-    ContinuousArm, PagedArm, RenderFrame, column_cut, local_band,
+    ContinuousArm, FrameOut, PagedArm, RenderFrame, column_cut, local_band,
 };
 
 /// 一栏渲染要往里写的产物。
@@ -50,9 +52,7 @@ struct PageSceneTargets<'a> {
     column: &'a mut Div,
     backdrops: &'a mut Vec<AnyElement>,
     page_bands: &'a mut Vec<AnyElement>,
-    page_picture: &'a mut bool,
-    bare_bands: &'a mut bool,
-    painted_keys: &'a mut Vec<String>,
+    out: &'a mut FrameOut,
 }
 
 impl<'a> PageSceneTargets<'a> {
@@ -63,9 +63,7 @@ impl<'a> PageSceneTargets<'a> {
             column: &mut *self.column,
             backdrops: &mut *self.backdrops,
             page_bands: &mut *self.page_bands,
-            page_picture: &mut *self.page_picture,
-            bare_bands: &mut *self.bare_bands,
-            painted_keys: &mut *self.painted_keys,
+            out: &mut *self.out,
         }
     }
 }
@@ -120,6 +118,83 @@ struct PaperRenderOut {
     bands_drawn: bool,
 }
 
+/// 一页读数带要的那几格输入。做成结构体而不是七个参数：两个调用点（逐栏实时画、
+/// 只画带子的进场/出场页）本来就在不同深度上，传值比传一串位置参数好对。
+struct PageBandAsk<'a> {
+    book: &'a Book,
+    doc: &'a Document,
+    page: PageRef,
+    /// 物理栏序：双页里左半 0、右半 1。
+    column: usize,
+    columns: usize,
+    page_box: &'a PageBox,
+    page_percent: &'a SharedString,
+    /// 这一页自己有整页画时读数带透明（画铺到了状态栏那一条）。
+    bare: bool,
+}
+
+/// 一页的读数带（页眉 / 页脚），坐标已经按这一栏摆好。元素本体的层由调用方决定：
+/// 实时页把它挂进每页一份的带子层，只画带子的纸把它包进那张纸的位移里。
+fn page_band_element(ask: PageBandAsk<'_>, cx: &App) -> AnyElement {
+    let PageBandAsk {
+        book,
+        doc,
+        page,
+        column,
+        columns,
+        page_box,
+        page_percent,
+        bare,
+    } = ask;
+    let readouts = bands::readouts_for(
+        doc,
+        book.chapter_title_at(page.chapter).into(),
+        page.page,
+        page_percent.clone(),
+        cx,
+    );
+    let page_w = page_box.paper.w / columns.max(1) as f32;
+    let page_x = page_w * column as f32;
+    let mut half = readouts;
+    if columns > 1 {
+        if column == 0 {
+            half.percent = SharedString::default();
+        } else {
+            half.chapter = SharedString::default();
+            half.position = SharedString::default();
+        }
+    }
+    div()
+        .absolute()
+        .left(px(page_x))
+        .top(px(0.0))
+        .w(px(page_w))
+        .h_full()
+        .id(super::paper::band_id("reader-band-live", page, column))
+        .test_support()
+        .child(bands::chrome(
+            page_box,
+            &half,
+            bare,
+            bands::Width::Parent,
+            cx,
+        ))
+        .into_any_element()
+}
+
+/// 一张只画读数带的纸：出场页改由平摊纹理画之后，文字与图都在纹理里，页眉页脚
+/// 仍要跟同一张纸走。两张（出场 / 进场）只有网格 id 与采样原点不同。
+struct BandOnlyPaper<'a> {
+    book: &'a Book,
+    page: PageRef,
+    sheet: Sheet,
+    frame: &'a RenderFrame<'a>,
+    mesh_id: &'static str,
+    mesh: PageCurlMesh,
+    bake_origin: std::rc::Rc<std::cell::Cell<Option<(f32, f32)>>>,
+}
+
+
 impl ReaderSession {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_continuous(
@@ -134,15 +209,15 @@ impl ReaderSession {
         cx: &mut Context<Self>,
     ) {
         let render_frame = frame.clone();
+        let columns = frame.columns();
+        let viewport_width = frame.viewport_width();
+        let window_height = frame.window_height();
         let RenderFrame {
             mode,
-            columns,
             viewport_height,
             content_top,
             chapter_gap,
             page_box,
-            viewport_width,
-            window_height,
             turn,
             speaking,
             family,
@@ -152,16 +227,7 @@ impl ReaderSession {
             view,
             ..
         } = frame;
-        let ContinuousArm {
-            backdrops,
-            page_art,
-            bare_bands,
-            neighbour_backdrop,
-            spoken,
-            prefetch_side,
-            painted_keys,
-            upcoming,
-        } = arm;
+        let ContinuousArm { backdrops, out } = arm;
         let font_cache = &mut self.font_cache;
         // —— 连续滚动：锚章 ± 窗口拼成一条全局坐标 ——
         // 0. 章盒里正文之前那一截（页眉带 + 安全区）先报进链：`placements` 的
@@ -279,7 +345,7 @@ impl ReaderSession {
         // 谁更像这块屏，就挑谁。
         let want_aspect =
             viewport_width / window_height.max(1.0);
-        *page_art = current_page_art(book, want_aspect);
+        out.page_art = current_page_art(book, want_aspect);
         // 7. 总高与夹取：全局坐标里「滚到底」是整条链的末端。
         self.content_height = book.content_height(chapter_gap);
         let max_scroll = (self.content_height - viewport_height).max(0.0);
@@ -355,10 +421,10 @@ impl ReaderSession {
                 )
             {
                 backdrops.extend(decoration_child(decor, &atlas, view, cx));
-                *neighbour_backdrop = true;
+                out.neighbour_backdrop = true;
             }
         }
-        if let Some(art) = &page_art
+        if let Some(art) = &out.page_art
             && let Some(doc) = book.span_doc(art.chapter)
         {
             let base = book.base_of(art.chapter, chapter_gap).unwrap_or(0.0);
@@ -391,7 +457,7 @@ impl ReaderSession {
         // 连续滚动里「下一张纸」是下面那一屏：只要这一章还没滚到底，就往下预解；
         // 滚到底之后往回看上一屏。判据只看坐标链的两端，不看章 —— 章界那一头
         // 由 `prefetch::scroll_targets` 按全局带换到邻章去。
-        *prefetch_side = prefetch::side_for_scroll(
+        out.prefetch_side = prefetch::side_for_scroll(
             self.scroll_y,
             (self.content_height - viewport_height).max(0.0),
         );
@@ -413,7 +479,7 @@ impl ReaderSession {
         // 卷首常摆一行 `&nbsp;` 把根撑开，那种仍算没有正文。
         // 整页画一律让读数带透明：底图铺到状态栏与手势条，字压在画上是
         // 作者自己的摆法（2026-11-01 深夜读者重新拍板：诡秘分页也要全屏）。
-        *bare_bands = page_art.is_some();
+        out.bare_bands = out.page_art.is_some();
         // 整页画那一章按**窗口**坐标画，可见的不是内容区那 719，而是整扇窗：
         // 上沿多安全区、下沿多页脚那一段。它的裁剔带要跟着加长，否则页底
         // 那一截（人物志那几行字正落在那里）会被悄悄裁掉。
@@ -424,7 +490,7 @@ impl ReaderSession {
             // 只有 picture page 才整章跳过；两者的根底图都交给背板，不许在
             // 版心里再画一遍 —— 那会把整窗背板裁成章高那一块，章界留白。
             let page_art_here =
-                page_art.as_ref().filter(|art| art.chapter == placed.index);
+                out.page_art.as_ref().filter(|art| art.chapter == placed.index);
             let picture_only = page_art_here.is_some_and(|art| art.picture_only);
             if picture_only {
                 continue;
@@ -460,7 +526,7 @@ impl ReaderSession {
             // 念出来的与画出来的就会差一行。
             let lines = doc.visible_lines(local.clone());
             if speaking {
-                spoken.extend(spoken_lines(doc, lines.clone()));
+                out.spoken.extend(spoken_lines(doc, lines.clone()));
             }
             let __t = crate::ui::features::reader::model::perf::Timer::start();
             let mut scene = Scene::build(
@@ -494,7 +560,7 @@ impl ReaderSession {
                 frame.scene_runs += __runs;
                 frame.images += __images;
             });
-            upcoming.append(&mut scene.upcoming);
+            out.upcoming.append(&mut scene.upcoming);
             scenes.push(PageScene {
                 identity: PageRef {
                     chapter: placed.index,
@@ -529,18 +595,74 @@ impl ReaderSession {
             scenes,
         );
         let mut page_bands = Vec::new();
-        let mut page_picture = false;
         let targets = PageSceneTargets {
             element: &mut *element,
             overlays: &mut *overlays,
             column: &mut *column,
             backdrops,
             page_bands: &mut page_bands,
-            page_picture: &mut page_picture,
-            bare_bands,
-            painted_keys,
+            out,
         };
         let _ = self.render_paper(&*book, paper, &render_frame, targets, window, cx);
+    }
+}
+
+impl ReaderSession {
+    /// 画一张只有读数带的纸：出场页 / 进场页改由平摊纹理画之后，文字与图都在纹理里，
+    /// 页眉页脚仍要跟同一张纸走。两张只有网格 id 与采样原点不同。
+    fn render_band_only_paper(
+        &self,
+        ask: BandOnlyPaper<'_>,
+        paper_layers: &mut Vec<AnyElement>,
+        page_bands: &mut Vec<AnyElement>,
+        bands_drawn: &mut bool,
+        cx: &App,
+    ) {
+        let BandOnlyPaper {
+            book,
+            page,
+            sheet,
+            frame,
+            mesh_id,
+            mesh,
+            bake_origin,
+        } = ask;
+        paper_layers.push(flat_mesh_canvas(
+            mesh_id,
+            mesh,
+            (self.enter_shift, frame.layer_top),
+            bake_origin,
+        ));
+        let Some(doc) = book.span_doc(page.chapter) else {
+            return;
+        };
+        let columns = frame.columns();
+        for column in 0..columns {
+            let band = page_band_element(
+                PageBandAsk {
+                    book,
+                    doc,
+                    page,
+                    column,
+                    columns,
+                    page_box: &frame.page_box,
+                    page_percent: &frame.page_percent,
+                    bare: false,
+                },
+                cx,
+            );
+            page_bands.push(
+                div()
+                    .absolute()
+                    .left(px(sheet.offset.0))
+                    .top(px(sheet.offset.1))
+                    .w(px(frame.page_box.paper.w))
+                    .h(px(frame.page_box.paper.h))
+                    .child(band)
+                    .into_any_element(),
+            );
+            *bands_drawn = true;
+        }
     }
 }
 
@@ -557,29 +679,28 @@ impl ReaderSession {
         cx: &mut Context<Self>,
     ) {
         let render_frame = frame.clone();
+        let columns = frame.columns();
+        let viewport_width = frame.viewport_width();
+        let window_height = frame.window_height();
+        let area = frame.area();
+        let sheet_area = frame.sheet_area();
+        let page_area = frame.page_area();
+        let viewport = frame.viewport();
+        let (captured_ch, captured_pg) = self
+            .captured_page
+            .unwrap_or((usize::MAX, usize::MAX));
+        let (captured_w, captured_h) = self.captured_size.unwrap_or((-1.0, -1.0));
         let RenderFrame {
             mode,
-            columns,
             viewport_height,
             content_top,
-            viewport_width,
-            window_height,
-            area,
-            sheet_area,
-            page_area,
             page_box,
             page_key,
-            viewport,
             turn,
             page_turn,
             turn_over,
             gap,
             fixed_layout,
-            layer_top,
-            captured_ch,
-            captured_pg,
-            captured_w,
-            captured_h,
             family,
             foreground,
             link,
@@ -590,27 +711,10 @@ impl ReaderSession {
         } = frame;
         let PagedArm {
             backdrops,
-            page_art,
-            bare_bands,
-            page_picture,
-            shades,
-            gpu_curl_mesh,
-            curl_leaf,
-            front_capture,
-            back_capture,
-            back_dx,
-            back_key,
-            incoming_capture,
-            incoming_bake,
-            mesh_page_drawn,
-            turn_arriving,
-            spoken,
-            prefetch_side,
-            land_chapter,
-            painted_keys,
-            bands_drawn,
+            paint,
             paper_layers,
             page_bands,
+            out: frame_out,
         } = arm;
         // —— 分页 / 双页：当前页 +（动画时）同章邻页或跨章目标页 ——
         // 这一档不拼坐标链：章高按「一页」量，页表自己就带着页眉页脚。
@@ -672,7 +776,7 @@ impl ReaderSession {
         // 图预解：这一屏上下紧挨着的那一张纸（章末那一头换到邻章去，见
         // `prefetch::paged_targets`）。`pages` 双页时是张数，这里不与它挂钩：
         // 预解只关心「还有没有下一次翻页」。
-        *prefetch_side = prefetch::side_for_paged(
+        frame_out.prefetch_side = prefetch::side_for_paged(
             self.page,
             pages,
             book.chapter_index(),
@@ -741,7 +845,7 @@ impl ReaderSession {
                 // pending 已经清掉、又没有动画走完那一帧去调 `finish_chapter_turn`
                 // —— 这一步就静默丢了，读者读到的是「章末点两侧没反应」。
                 if !started {
-                    *land_chapter = Some(arriving);
+                    frame_out.land_chapter = Some(arriving);
                 }
                 // 这一帧的 `turn` 已经在上面采过样了；再要一帧才轮到这次滑动。
                 window.request_animation_frame();
@@ -781,7 +885,7 @@ impl ReaderSession {
                 pose,
             } = turn_view::plan_sheets(&frame, mode, page_area, area);
             if frame.style == PageTurn::Curl {
-                *curl_leaf = Some(curl_area);
+                paint.leaf = Some(curl_area);
             }
             // 只有这张「出场页」的捕获确实完整时才开 GPU 卷曲。捕获也可能因为
             // 进场横移还没停、尺寸刚变或偏好刚重排而不可用；此时强行用半张/旧的
@@ -794,7 +898,7 @@ impl ReaderSession {
             // 只有这张「出场页」的捕获确实完整时才开 GPU 卷曲；几何、顶点缓存与
             // uniform 的装配两条臂共用（见 `turn_view::build_curl_mesh`）。
             if frame.style == PageTurn::Curl && capture.front_valid(leaving_ref, viewport) {
-                *gpu_curl_mesh = turn_view::build_curl_mesh(
+                paint.mesh = turn_view::build_curl_mesh(
                     &turn_view::CurlAsk {
                         progress: frame.progress,
                         released: matches!(frame.run, TurnRun::Released { .. }),
@@ -816,7 +920,7 @@ impl ReaderSession {
             // （见 `curl.rs`、`page_curl.wgsl`）。`shades_at` 的默认实现给回空清单，
             // 所以这一句对别的几档就是「照旧」。`pose` 是上面拼的那一份：带着**补间
             // 之后**的手与弹回的时钟，网格与摆位层读的都是它。
-            *shades = style.shades_at(frame.progress, curl_area, pose);
+            paint.shades = style.shades_at(frame.progress, curl_area, pose);
             let [incoming, outgoing] = style.sheets_at(frame.progress, curl_area, pose);
             let leaving_ref = frame.leaving.unwrap_or(PageRef {
                 chapter: current,
@@ -836,20 +940,20 @@ impl ReaderSession {
             leaf_column = if free_right { 1 } else { 0 };
             other_column = 1 - leaf_column;
             turn_leaving = Some(leaving_ref);
-            *turn_arriving = Some(arriving_ref);
+            paint.arriving = Some(arriving_ref);
             // 这一趟要烘的背面（捕获层 2）：揭起来那张纸的背面 = 目标跨页的另一半
             // （双页）/ 目标页整张（单页）。网格真画出来了才有采样它的人；同一趟里
             // 目标不变、纹理跨帧留着，所以只对**没烘过**的那一格烘一趟。
             // 跨章那一趟的目标章可能还没排完版：那一栏排不出内容，背面就只是一张
             // 清成纸色的空纹理（与同一帧底下那张目标页同样空着是一致的）。
-            if gpu_curl_mesh.is_some() {
+            if paint.mesh.is_some() {
                 let key = (
                     arriving_ref.chapter,
                     arriving_ref.page,
                     if leaf_turn { other_column } else { 0 },
                 );
                 if self.captured_back != Some((key, viewport)) {
-                    *back_key = Some(key);
+                    paint.back_key = Some(key);
                 }
             }
             if arriving_ref.chapter != current {
@@ -872,7 +976,7 @@ impl ReaderSession {
             // 双页不能只摆一张：静态页（当前跨页的另一半）与底层新页（下一跨页的
             // 同侧半页）都得留着，网格只盖住被揭起来的那一张 leaf。两张纸都不裁，
             // 由下面的逐栏跳过把 leaf 正面与背面取掉。
-            if gpu_curl_mesh.is_some() && mode != chrome::PageMode::Spread {
+            if paint.mesh.is_some() && mode != chrome::PageMode::Spread {
                 let arriving_slot = if papers[0].identity == arriving_ref { 0 } else { 1 };
                 papers.swap(0, arriving_slot);
                 count = 1;
@@ -904,7 +1008,7 @@ impl ReaderSession {
             // 还没有捕获链、整页画铺在元素树外面，烘进去只有纸色。
             eligible: turn.is_some_and(|frame| frame.style != PageTurn::Curl)
                 && !fixed_layout
-                && page_art.is_none(),
+                && frame_out.page_art.is_none(),
             current,
             page_no,
             papers: &papers,
@@ -927,8 +1031,8 @@ impl ReaderSession {
         });
         let flat_capture = flat.leaving;
         let flat_incoming = flat.arriving;
-        *incoming_bake = flat.incoming_bake;
-        *mesh_page_drawn = flat.mesh_drawn;
+        paint.incoming_bake = flat.incoming_bake;
+        paint.mesh_page_drawn = flat.mesh_drawn;
         let mut target_column = div().size_full().relative();
         let mut target_page_bands = Vec::new();
         for which in order.into_iter().take(count) {
@@ -936,116 +1040,43 @@ impl ReaderSession {
             let mut body = Vec::new();
             if flat_capture.is_some() && turn_leaving == Some(page_ref) {
                 let mesh = flat_capture.clone().expect("上一行刚判过 Some");
-                paper_layers.push(flat_mesh_canvas(
-                    "reader-flat-capture",
-                    mesh,
-                    (self.enter_shift, layer_top),
-                    self.curl_bake_origin.clone(),
-                ));
                 // 出场页的纹理只管正文；页眉/页脚仍实时画一份放在纹理**之上**，
                 // 跟着同一张纸的 `at` 走。从前只靠正面纹理里烘的那一条，纹理那一趟
                 // 没把它带上（或采样偏了）时，滑动中的旧页就没有页眉。
-                let band_scenes = (0..columns)
-                    .map(|column| PageScene {
-                        identity: page_ref,
-                        column,
-                        origin_y: 0.0,
-                        height: 0.0,
-                        range: 0.0..0.0,
-                        role: CaptureRole::Live,
-                        back_copy: false,
-                        incoming_copy: false,
-                        x: 0.0,
-                        top: 0.0,
-                        cut: None,
-                        picture: None,
-                        art_drawn: false,
-                        scene: Scene::default(),
-                    })
-                    .collect();
-                let mut band_element = GlyphsElement::new();
-                let mut band_overlays = Vec::new();
-                let mut band_column = div().size_full().relative();
-                let mut band_backdrops = Vec::new();
-                let mut band_bands = Vec::new();
-                let out = self.render_paper(
-                    &*book,
-                    Paper::reflowable(page_ref, frame.page_box, at, band_scenes),
-                    &render_frame,
-                    PageSceneTargets {
-                        element: &mut band_element,
-                        overlays: &mut band_overlays,
-                        column: &mut band_column,
-                        backdrops: &mut band_backdrops,
-                        page_bands: &mut band_bands,
-                        page_picture: &mut *page_picture,
-                        bare_bands: &mut *bare_bands,
-                        painted_keys: &mut *painted_keys,
+                self.render_band_only_paper(
+                    BandOnlyPaper {
+                        book: &*book,
+                        page: page_ref,
+                        sheet: at,
+                        frame: &render_frame,
+                        mesh_id: "reader-flat-capture",
+                        mesh,
+                        bake_origin: self.curl_bake_origin.clone(),
                     },
-                    &mut *window,
-                    &mut *cx,
+                    paper_layers,
+                    page_bands,
+                    &mut frame_out.bands_drawn,
+                    cx,
                 );
-                paper_layers.extend(out.layers);
-                page_bands.extend(out.page_bands);
-                *bands_drawn |= out.bands_drawn;
                 continue;
             }
-            if flat_incoming.is_some() && *turn_arriving == Some(page_ref) {
+            if flat_incoming.is_some() && paint.arriving == Some(page_ref) {
                 let mesh = flat_incoming.clone().expect("上一行刚判过 Some");
-                paper_layers.push(flat_mesh_canvas(
-                    "reader-flat-incoming",
-                    mesh,
-                    (self.enter_shift, layer_top),
-                    self.incoming_bake_origin.clone(),
-                ));
-                let band_scenes = (0..columns)
-                    .map(|column| PageScene {
-                        identity: page_ref,
-                        column,
-                        origin_y: 0.0,
-                        height: 0.0,
-                        range: 0.0..0.0,
-                        role: CaptureRole::Live,
-                        back_copy: false,
-                        incoming_copy: false,
-                        x: 0.0,
-                        top: 0.0,
-                        cut: None,
-                        picture: None,
-                        art_drawn: false,
-                        scene: Scene::default(),
-                    })
-                    .collect();
-                let mut band_element = GlyphsElement::new();
-                let mut band_overlays = Vec::new();
-                let mut band_column = div().size_full().relative();
-                let mut band_backdrops = Vec::new();
-                let mut band_bands = Vec::new();
-                let out = self.render_paper(
-                    &*book,
-                    Paper::reflowable(
-                        page_ref,
-                        frame.page_box,
-                        at,
-                        band_scenes,
-                    ),
-                    &render_frame,
-                    PageSceneTargets {
-                        element: &mut band_element,
-                        overlays: &mut band_overlays,
-                        column: &mut band_column,
-                        backdrops: &mut band_backdrops,
-                        page_bands: &mut band_bands,
-                        page_picture: &mut *page_picture,
-                        bare_bands: &mut *bare_bands,
-                        painted_keys: &mut *painted_keys,
+                self.render_band_only_paper(
+                    BandOnlyPaper {
+                        book: &*book,
+                        page: page_ref,
+                        sheet: at,
+                        frame: &render_frame,
+                        mesh_id: "reader-flat-incoming",
+                        mesh,
+                        bake_origin: self.incoming_bake_origin.clone(),
                     },
-                    &mut *window,
-                    &mut *cx,
+                    paper_layers,
+                    page_bands,
+                    &mut frame_out.bands_drawn,
+                    cx,
                 );
-                paper_layers.extend(out.layers);
-                page_bands.extend(out.page_bands);
-                *bands_drawn |= out.bands_drawn;
                 continue;
             }
             let Some(doc) = book.span_doc(page_ref.chapter) else {
@@ -1065,7 +1096,7 @@ impl ReaderSession {
                 None
             };
             let art_drawn = art.as_ref().is_some_and(|art| !art.picture_only)
-                && (gpu_curl_mesh.is_none() || *turn_arriving == Some(page_ref));
+                && (paint.mesh.is_none() || paint.arriving == Some(page_ref));
             // 这一页的根底图由阅读器当整窗背板画（就是下面这一块），版心里那份
             // 别再画一遍 —— 位置还差着一个页眉与安全区。**按页**判，不是按屏：
             // 翻页途中两张纸是两章。
@@ -1101,10 +1132,10 @@ impl ReaderSession {
                             .into_any_element(),
                     );
                 }
-                *page_picture = true;
+                frame_out.page_picture = true;
                 // 底图铺到了状态栏与手势条那两条：读数带得透明，不然会在画上
                 // 盖出两块底色（这一页自己的带子按 `art_drawn` 判）。
-                *bare_bands = true;
+                frame_out.bare_bands = true;
             } else if count == 2 && art.is_none() {
                 // 另一张纸的整页画已经铺上整窗（`page_picture` 让正文盒的底色
                 // 让开了），这一页自己却没有画：给它垫一块不透明的纸色，否则
@@ -1161,17 +1192,17 @@ impl ReaderSession {
                 //    取，主场景不再画它；CPU 兜底（纹理不可用那一帧）仍画，按折线裁字。
                 //  - 背面那一栏（目标跨页的另一半）任何情况下都不进主场景 —— 它是纸
                 //    的背面，只该出现在卷起来的那一片上。
-                let role = if leaf_turn && *turn_arriving == Some(page_ref) && is_other {
+                let role = if leaf_turn && paint.arriving == Some(page_ref) && is_other {
                     CaptureRole::Back
                 } else if leaf_turn
-                    && gpu_curl_mesh.is_some()
+                    && paint.mesh.is_some()
                     && turn_leaving == Some(page_ref)
                     && is_leaf
                 {
                     CaptureRole::Front
                 } else if leaf_turn && is_other {
                     CaptureRole::StaticOther
-                } else if *turn_arriving == Some(page_ref) {
+                } else if paint.arriving == Some(page_ref) {
                     CaptureRole::Incoming
                 } else {
                     CaptureRole::Live
@@ -1181,10 +1212,10 @@ impl ReaderSession {
                 // 单页折页没有「另一半」那一栏：背面就是目标页整张，所以进场页
                 // 自己也要写一份背面副本（从前只在 `leaf_turn` 的 `Back` 栏收，
                 // 单页那一趟背面因此一直是空的）。双页仍只由 `Back` 那一栏写。
-                let back_copy = back_key.is_some()
+                let back_copy = paint.back_key.is_some()
                     && (role.writes_back()
-                        || (!leaf_turn && *turn_arriving == Some(page_ref)));
-                let incoming_copy = role.writes_incoming() && incoming_bake.is_some();
+                        || (!leaf_turn && paint.arriving == Some(page_ref)));
+                let incoming_copy = role.writes_incoming() && paint.incoming_bake.is_some();
                 if !role.draws_main() && !back_copy {
                     continue;
                 }
@@ -1212,7 +1243,7 @@ impl ReaderSession {
                 // 背面那一栏要横向挪进 leaf 那一格：背面纹理按 leaf 那块矩形烘、网格
                 // 也按 leaf 的尺寸采，而这一栏算出来的 x 是它自己那一栏的位置。
                 if back_copy && leaf_turn {
-                    *back_dx = column_offset(column_width, gap, leaf_column)
+                    paint.back_dx = column_offset(column_width, gap, leaf_column)
                         - column_offset(column_width, gap, slice.column);
                 }
                 // 分页/双页这一臂的「在屏」就是这一片自己的行区间（片是引擎切的，
@@ -1221,7 +1252,7 @@ impl ReaderSession {
                 // 逻辑顺序 —— 与那一栏画在左边还是右边无关。只为**上屏**的那一栏
                 // 收集：背面那一栏不在屏上，念出来就是把同一句话念两遍。
                 if speaking && role.draws_main() {
-                    spoken.extend(spoken_lines(doc, slice.lines.clone()));
+                    frame_out.spoken.extend(spoken_lines(doc, slice.lines.clone()));
                 }
                 let font_cache = &mut self.font_cache;
                 let mut scene = Scene::build(
@@ -1279,33 +1310,31 @@ impl ReaderSession {
                 column: &mut target_column,
                 backdrops: &mut *backdrops,
                 page_bands: &mut target_page_bands,
-                page_picture: &mut *page_picture,
-                bare_bands: &mut *bare_bands,
-                painted_keys: &mut *painted_keys,
+                out: &mut *frame_out,
             };
             let out = self.render_paper(&*book, paper, &render_frame, targets, &mut *window, &mut *cx);
             paper_layers.extend(out.layers);
             page_bands.extend(out.page_bands);
-            if front_capture.is_none() {
-                *front_capture = out.front_capture;
+            if paint.front.is_none() {
+                paint.front = out.front_capture;
             }
-            if back_capture.is_none() {
-                *back_capture = out.back_capture;
+            if paint.back.is_none() {
+                paint.back = out.back_capture;
             }
-            if incoming_capture.is_none() {
-                *incoming_capture = out.incoming_capture;
+            if paint.incoming.is_none() {
+                paint.incoming = out.incoming_capture;
             }
-            *bands_drawn |= out.bands_drawn;
+            frame_out.bands_drawn |= out.bands_drawn;
         }
         // 背面目标章还没排完版时排不出内容：给一份**空的副本**，请求仍会把纹理
         // 清成纸色 —— 背面是一张干净的纸，而不是上一趟留下的字。目标页在、只是
         // 图还没到时 **不** 走这一支（`back_missing` 让这一帧不交，下一帧重试）。
-        if back_key.is_some()
-            && back_capture.is_none()
-            && let Some((chapter, _, _)) = *back_key
+        if paint.back_key.is_some()
+            && paint.back.is_none()
+            && let Some((chapter, _, _)) = paint.back_key
             && book.span_doc(chapter).is_none()
         {
-            *back_capture = Some(PaperCapture {
+            paint.back = Some(PaperCapture {
                 element: super::paper::empty_capture_element(),
                 under: Vec::new(),
                 over: Vec::new(),
@@ -1326,8 +1355,7 @@ impl ReaderSession {
         cx: &mut Context<Self>,
     ) -> PaperRenderOut {
         let (scenes, continuous) = match paper.body {
-            PaperBody::Reflowable(scenes) => (scenes, false),
-            PaperBody::Continuous(scenes) => (scenes, true),
+            PaperBody::Flow { scenes, packed } => (scenes, packed),
             // 定版式纸由 `fixed::paint_fixed_paper` 画：它要页表（`FixedBook`）
             // 与缩放几何，不走这趟按栏拆分的字形装配。
             PaperBody::Fixed(_) => unreachable!("定版式纸由 paint_fixed_paper 画"),
@@ -1340,9 +1368,7 @@ impl ReaderSession {
                 column,
                 backdrops,
                 page_bands,
-                page_picture,
-                bare_bands,
-                painted_keys,
+                out: frame_out,
             } = targets;
             let mut capture = CaptureSink::new();
             let mut group_targets = PageSceneTargets {
@@ -1351,9 +1377,7 @@ impl ReaderSession {
                 column: &mut *column,
                 backdrops: &mut *backdrops,
                 page_bands: &mut *page_bands,
-                page_picture: &mut *page_picture,
-                bare_bands: &mut *bare_bands,
-                painted_keys: &mut *painted_keys,
+                out: &mut *frame_out,
             };
             for scene in scenes {
                 let Some(doc) = book.span_doc(scene.identity.chapter) else {
@@ -1380,10 +1404,7 @@ impl ReaderSession {
             };
         }
         let PageSceneTargets {
-            page_picture,
-            bare_bands,
-            painted_keys,
-            ..
+            out: frame_out, ..
         } = targets;
         let mut moving = Vec::new();
         let mut still = Vec::new();
@@ -1434,9 +1455,7 @@ impl ReaderSession {
                 column: &mut column,
                 backdrops: &mut backdrops,
                 page_bands: &mut page_bands,
-                page_picture: &mut *page_picture,
-                bare_bands: &mut *bare_bands,
-                painted_keys: &mut *painted_keys,
+                out: &mut *frame_out,
             };
             for scene in scenes {
                 let Some(doc) = book.span_doc(scene.identity.chapter) else {
@@ -1498,7 +1517,7 @@ impl ReaderSession {
                 let bands = bands::chrome(
                     &frame.page_box,
                     &readouts,
-                    *bare_bands,
+                    frame_out.bare_bands,
                     bands::Width::Paper,
                     cx,
                 );
@@ -1598,11 +1617,12 @@ impl ReaderSession {
             art_drawn,
             mut scene,
         } = page;
+        let columns = ctx.columns();
+        let paper_bands = ctx.paper_bands();
+        let curl_turn = ctx.curl_turn();
+        let window_height = ctx.window_height();
         let RenderFrame {
-            columns,
-            paper_bands,
             capture_front,
-            curl_turn,
             palette,
             speech_span,
             atlas,
@@ -1616,7 +1636,6 @@ impl ReaderSession {
             image_pans,
             page_percent,
             page_box,
-            window_height,
             turn,
             ..
         } = ctx;
@@ -1626,9 +1645,7 @@ impl ReaderSession {
             column,
             backdrops,
             page_bands,
-            page_picture,
-            bare_bands,
-            painted_keys,
+            out: frame_out,
         } = targets;
         let CaptureSink {
             front_decor,
@@ -1641,8 +1658,8 @@ impl ReaderSession {
         } = capture;
         let is_picture = picture.is_some();
         if let Some((href, page_x, page_w, art_top, contain)) = picture {
-            *page_picture = true;
-            *bare_bands = true;
+            frame_out.page_picture = true;
+            frame_out.bare_bands = true;
             scene.images.clear();
             if let Some(image) = doc.images().decode_request(&href) {
                 let page_h = window_height;
@@ -1695,48 +1712,21 @@ impl ReaderSession {
         // 只有带子的 `Paper` 画；Curl 的带子由 `whole_sheet_curl`
         // 那一层负责。这里只画实时页，不重复。
         if role.draws_main() && !curl_turn && paper_bands {
-            let readouts = bands::readouts_for(
-                doc,
-                book.chapter_title_at(page_ref.chapter).into(),
-                page_ref.page,
-                page_percent.clone(),
+            page_bands.push(page_band_element(
+                PageBandAsk {
+                    book,
+                    doc,
+                    page: page_ref,
+                    column: scene_column,
+                    columns,
+                    page_box: &page_box,
+                    page_percent: &page_percent,
+                    // 这一页自己有整页画时读数带透明：画铺到了状态栏
+                    // 那一条，不透明的带子会在顶上盖出一块底色。
+                    bare: is_picture || art_drawn,
+                },
                 cx,
-            );
-            let page_w = page_box.paper.w / columns.max(1) as f32;
-            let page_x = page_w * scene_column as f32;
-            let mut half = readouts;
-            if columns > 1 {
-                if scene_column == 0 {
-                    half.percent = SharedString::default();
-                } else {
-                    half.chapter = SharedString::default();
-                    half.position = SharedString::default();
-                }
-            }
-            page_bands.push(
-                div()
-                    .absolute()
-                    .left(px(page_x))
-                    .top(px(0.0))
-                    .w(px(page_w))
-                    .h_full()
-                    .id(super::paper::band_id(
-                        "reader-band-live",
-                        page_ref,
-                        scene_column,
-                    ))
-                    .test_support()
-                    .child(bands::chrome(
-                        &page_box,
-                        &half,
-                        // 这一页自己有整页画时读数带透明：画铺到了状态栏
-                        // 那一条，不透明的带子会在顶上盖出一块底色。
-                        is_picture || art_drawn,
-                        bands::Width::Parent,
-                        cx,
-                    ))
-                    .into_any_element(),
-            );
+            ));
         }
         // 背面那一份不裁：整张纸的背面都得在纹理里，卷到哪儿就采到哪儿。
         // 克隆只到 run 这一层（`shaped` 是 `Arc<LineLayout>`），不重跑 shaping。
@@ -1832,7 +1822,7 @@ impl ReaderSession {
                     image.top + image.height * 0.5,
                 )
             });
-            painted_keys.push(image.image.key.clone());
+            frame_out.painted_keys.push(image.image.key.clone());
             let Some(rendered) =
                 painted_picture(&atlas, &image.image, view, cx)
             else {
@@ -1904,41 +1894,60 @@ impl ReaderSession {
             overlays.push(image_child(
                 image,
                 rendered,
-                &viewer,
-                long_press,
-                index,
-                &reader_weak,
-                pan,
-                &image_hits,
-                image_hits_frame,
-                page_ref.chapter,
-                &stack_hits,
+                ImageTap {
+                    viewer: &viewer,
+                    long_press,
+                    index,
+                    reader: &reader_weak,
+                },
+                ImageDrag {
+                    pan,
+                    hits: &image_hits,
+                    frame_no: image_hits_frame,
+                    chapter: page_ref.chapter,
+                    stack_hits: &stack_hits,
+                },
             ));
             if let Some((x, bottom, w, mark)) = dots {
                 overlays.push(stack_dots(x, bottom, w, mark, cx));
             }
         }
+        let spot = MarkSpot {
+            doc,
+            window: &*window,
+            cx,
+            x,
+            origin_y,
+            flow_len: height,
+            header: top,
+            band: range,
+        };
         let __fills = crate::ui::features::reader::model::perf::Timer::start();
         let speech = speech_span
             .as_ref()
             .filter(|(chapter, _)| *chapter == page_ref.chapter)
             .map(|(_, range)| range.clone());
         if role.draws_main() {
-            self.paint_marks(
-                element, doc, page_ref.chapter, x, origin_y, height, top,
-                range.clone(), cut, palette, speech.clone(), window, cx,
-            );
+            self.paint_marks(element, &spot, page_ref.chapter, palette, speech.clone(), cut);
         }
         if back_copy {
             self.paint_marks(
-                back_element, doc, page_ref.chapter, x, origin_y, height, top,
-                range.clone(), None, palette, speech.clone(), window, cx,
+                back_element,
+                &spot,
+                page_ref.chapter,
+                palette,
+                speech.clone(),
+                None,
             );
         }
         if incoming_copy {
             self.paint_marks(
-                incoming_element, doc, page_ref.chapter, x, origin_y, height, top,
-                range, None, palette, speech, window, cx,
+                incoming_element,
+                &spot,
+                page_ref.chapter,
+                palette,
+                speech,
+                None,
             );
         }
         let __fills = __fills.ns();
@@ -1949,41 +1958,24 @@ impl ReaderSession {
 }
 
 impl ReaderSession {
-    #[allow(clippy::too_many_arguments)]
     fn paint_marks(
         &self,
         target: &mut GlyphsElement,
-        doc: &Document,
+        spot: &MarkSpot<'_>,
         page: usize,
-        x: f32,
-        origin_y: f32,
-        height: f32,
-        top: f32,
-        range: std::ops::Range<f32>,
-        cut: Option<turn_animation::Cut>,
         palette: &Palette,
         speech: Option<std::ops::Range<usize>>,
-        window: &mut Window,
-        cx: &mut App,
+        cut: Option<turn_animation::Cut>,
     ) {
         annotation_fills(
             target,
-            doc,
-            window,
-            cx,
+            spot,
             &self.annotation_spans,
             &self.annotations,
             palette,
             page,
-            x,
-            origin_y,
-            height,
-            top,
-            range.clone(),
             cut,
         );
-        speech_fill(
-            target, doc, window, cx, speech, x, origin_y, height, top, range, cut,
-        );
+        speech_fill(target, spot, speech, cut);
     }
 }

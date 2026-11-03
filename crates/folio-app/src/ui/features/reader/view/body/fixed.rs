@@ -31,10 +31,10 @@ use gpui_kit::{
 };
 
 use super::PREFETCH_RADIUS;
-use super::TurnFrame;
 use super::capture::CaptureView;
 use super::images::{
-    RegionAsk, page_image, painted, painted_tile, pinned_region, prepare_tile, zoom_source_width,
+    ImageSpot, ImageTap, RegionAsk, page_image, painted, painted_tile, pinned_region,
+    prepare_tile, zoom_source_width,
 };
 use super::marks::{HIGHLIGHT_ALPHA, fixed_marks, marks_above};
 use super::paper::{FixedPaper, Paper, PaperBody, PaperCapture};
@@ -98,6 +98,30 @@ pub(super) fn request_page_texts(
     }
 }
 
+/// 这一页的字层：缓存里有就给，没有就记一笔待取。
+///
+/// 只查缓存 —— PDF 一页字层桌面要 1.5 s，在绘制帧里同步取就是打开书卡十秒
+/// （见 [`FixedBook::page_text_cached`]）；没到的页由调用方循环走完统一交给后台。
+fn page_text_or_pending(
+    book: &FixedBook,
+    page: usize,
+    pending: &mut Vec<usize>,
+) -> (
+    Option<std::rc::Rc<folio_core::content::format::PageText>>,
+    Option<u64>,
+) {
+    match book.page_text_cached(page) {
+        Some((text, hash)) => {
+            let key = text.as_ref().map(|_| hash);
+            (text, key)
+        }
+        None => {
+            pending.push(page);
+            (None, None)
+        }
+    }
+}
+
 pub(super) fn fixed_page_tiles(
     book: &FixedBook,
     page: usize,
@@ -132,7 +156,6 @@ pub(super) fn fixed_row_bounds(tiles: &[FixedTileAt]) -> Option<((f32, f32), (f3
 
 /// 一条页栈里的一页：高度已经由 [`crate::ui::features::reader::model::fixed_book::FixedStack`]
 /// 按版心宽算好，这里只把每一格按同一高度横排、摆到 `top` 上。
-#[allow(clippy::too_many_arguments)]
 pub(super) fn fixed_page_tiles_at(
     tiles: Vec<PageTile>,
     usable: f32,
@@ -318,48 +341,19 @@ fn fixed_page_bands(
 ///
 /// 与 [`super::PagedArm`] 同一条形状：捕获副本、卷曲网格、折页 leaf 与读数都从这里
 /// 交回去，`body::render` 后半段那一套装配（捕获层 / 网格 / 带子）两条臂共用。
-pub(super) struct FixedOut<'a> {
-    pub(super) shades: &'a mut turn_animation::Shades,
-    pub(super) gpu_curl_mesh: &'a mut Option<PageCurlMesh>,
-    pub(super) curl_leaf: &'a mut Option<turn_animation::Area>,
-    pub(super) front_capture: &'a mut Option<PaperCapture>,
-    pub(super) back_capture: &'a mut Option<PaperCapture>,
-    pub(super) back_dx: &'a mut f32,
-    pub(super) back_key: &'a mut Option<(usize, usize, usize)>,
-    pub(super) turn_arriving: &'a mut Option<PageRef>,
-    /// 这一帧有没有画**定版式自己的**每页读数带。`body` 据此跳过全局那一份。
-    pub(super) bands_drawn: &'a mut bool,
-}
-
 /// 定版式这一臂的帧内输入。
 ///
-/// `book` 由调用处从 `Source::Fixed` 借出后单独传入；其余是 `body::render` 在进
-/// match 之前采好的只读快照。`overlays` 与 `fixed_visual` 是这一臂交回公共装配的两份产物；
-/// 翻页那一层要的东西收在 [`FixedOut`] 里。
+/// 只留三格本臂独有的一次性输入；其余全是 [`super::RenderFrame`] 的同一份快照。
 pub(super) struct FixedArm<'a> {
-    pub(super) mode: chrome::PageMode,
+    pub(super) frame: &'a super::RenderFrame<'a>,
     pub(super) usable: f32,
-    pub(super) viewport_height: f32,
-    pub(super) viewport_width: f32,
-    pub(super) viewport: (f32, f32),
-    pub(super) page_box: PageBox,
-    pub(super) content_top: f32,
-    pub(super) area: turn_animation::Area,
-    pub(super) sheet_area: turn_animation::Area,
-    pub(super) gap: f32,
-    pub(super) layer_top: f32,
-    pub(super) capture_front: bool,
-    pub(super) turn: Option<TurnFrame>,
     pub(super) motion: ScrollMotion,
     pub(super) now: Instant,
-    pub(super) view: EntityId,
-    pub(super) viewer: Option<Entity<ImageViewer>>,
-    pub(super) palette: &'a Palette,
-    pub(super) long_press: bool,
-    pub(super) atlas: Entity<ImageAtlas>,
-    pub(super) reader_weak: WeakEntity<ReaderSession>,
     pub(super) paper_layers: &'a mut Vec<AnyElement>,
-    pub(super) out: FixedOut<'a>,
+    /// 这一帧的翻页产物（与可重排两臂同一份）。
+    pub(super) paint: &'a mut super::TurnPaint,
+    /// 这一帧的非纸面产物（读数带旗、选中几何、章界落点）。
+    pub(super) out: &'a mut super::FrameOut,
 }
 
 /// 一页这一帧摆好的样子：页号、每格的位置、字层与命中尺。
@@ -380,7 +374,7 @@ pub(super) struct FixedPaint<'a> {
     pub(super) atlas: &'a Entity<ImageAtlas>,
     pub(super) view: EntityId,
     pub(super) reader: &'a WeakEntity<ReaderSession>,
-    pub(super) viewer: &'a Option<Entity<ImageViewer>>,
+    pub(super) viewer: Option<Entity<ImageViewer>>,
     pub(super) palette: &'a Palette,
     pub(super) long_press: bool,
     pub(super) scrolling: bool,
@@ -393,40 +387,100 @@ pub(super) struct FixedPaint<'a> {
     pub(super) pivot: (f32, f32),
 }
 
+/// 一臂一帧共用的那几格。`FixedPaint` 的五处构造只有 viewer / 手势 / 位移 / 倍率
+/// 逐趟不同，其余都从这一份出发。
+struct FixedPass<'a> {
+    book: &'a FixedBook,
+    atlas: &'a Entity<ImageAtlas>,
+    view: EntityId,
+    reader: &'a WeakEntity<ReaderSession>,
+    palette: &'a Palette,
+    now: Instant,
+    viewport: (f32, f32, f32, f32),
+    pivot: (f32, f32),
+}
+
+impl<'a> FixedPass<'a> {
+    /// 实时上屏那一趟的底：不缩放、不带位移、不挂手势。
+    fn live(&self) -> FixedPaint<'a> {
+        FixedPaint {
+            book: self.book,
+            atlas: self.atlas,
+            view: self.view,
+            reader: self.reader,
+            viewer: None,
+            palette: self.palette,
+            long_press: false,
+            scrolling: false,
+            now: self.now,
+            viewport: self.viewport,
+            shift: (0.0, 0.0),
+            zoom: FixedZoom::default(),
+            pivot: self.pivot,
+        }
+    }
+
+    /// 捕获副本那一趟：手势、放大重画块都不进纹理，只留页格位图。
+    fn bake(&self, scrolling: bool) -> FixedPaint<'a> {
+        FixedPaint {
+            scrolling,
+            ..self.live()
+        }
+    }
+}
+
 impl ReaderSession {
     pub(super) fn render_fixed(
         &mut self,
         book: &mut FixedBook,
         arm: FixedArm<'_>,
         overlays: &mut Vec<AnyElement>,
-        fixed_visual: &mut Option<SelectionVisual>,
         cx: &mut Context<Self>,
     ) {
         let FixedArm {
-            mode,
+            frame,
             usable,
+            motion,
+            now,
+            paper_layers,
+            paint,
+            out,
+        } = arm;
+        let super::RenderFrame {
+            mode,
             viewport_height,
-            viewport_width,
-            viewport,
             page_box,
             content_top,
-            area,
-            sheet_area,
             gap,
             layer_top,
             capture_front,
             turn,
-            motion,
-            now,
             view,
             viewer,
             palette,
             long_press,
             atlas,
             reader_weak,
-            paper_layers,
-            out,
-        } = arm;
+            ..
+        } = frame;
+        let mode = *mode;
+        let viewport_height = *viewport_height;
+        let viewport_width = frame.viewport_width();
+        let viewport = frame.viewport();
+        let page_box = *page_box;
+        let content_top = *content_top;
+        let area = frame.area();
+        let sheet_area = frame.sheet_area();
+        let gap = *gap;
+        let layer_top = *layer_top;
+        let capture_front = *capture_front;
+        let turn = *turn;
+        let view = *view;
+        let palette = *palette;
+        let long_press = *long_press;
+        let viewer = viewer.clone();
+        let atlas = atlas.clone();
+        let reader_weak = reader_weak.clone();
         // 定版式：页是既定的，没有排版链。两档共用同一张页表：
         //
         // - 连续竖滚：页按版心宽铺开、纵向排成一条栈，位置是栈上的像素；
@@ -538,6 +592,16 @@ impl ReaderSession {
             // 字层还没取到的页：这一帧先不画，循环走完统一交给后台
             // （见 `request_page_texts` 与 `FixedBook::page_text_cached`）。
             let mut pending_text: Vec<usize> = Vec::new();
+            let pass = FixedPass {
+                book,
+                atlas: &atlas,
+                view,
+                reader: &reader_weak,
+                palette,
+                now,
+                viewport: (0.0, content_top, viewport_width, viewport_height),
+                pivot: (0.0, content_top),
+            };
             for (page, top, height) in rows {
                 visible_pages.push(page);
                 let page_tiles = book.page_tiles(page);
@@ -553,20 +617,9 @@ impl ReaderSession {
                     fallback_aspect,
                     has_text,
                 );
-                // 只查缓存：PDF 一页字层桌面要 1.5 s，在绘制帧里同步取就是
-                // 打开书卡十秒（见 `FixedBook::page_text_cached` 那一段）。
-                // 没到的页记下来，循环走完丢给后台，取回来重画。
+                // 字层没到就先空着，循环走完统一交给后台取；取回来再补一帧。
                 let (text, text_key) = if has_text {
-                    match book.page_text_cached(page) {
-                        Some((text, hash)) => {
-                            let key = text.as_ref().map(|_| hash);
-                            (text, key)
-                        }
-                        None => {
-                            pending_text.push(page);
-                            (None, None)
-                        }
-                    }
+                    page_text_or_pending(book, page, &mut pending_text)
                 } else {
                     (None, None)
                 };
@@ -591,23 +644,15 @@ impl ReaderSession {
                 self.paint_fixed_paper(
                     &paper,
                     &FixedPaint {
-                        book,
-                        atlas: &atlas,
-                        view,
-                        reader: &reader_weak,
-                        viewer: &viewer,
-                        palette,
+                        viewer: viewer.clone(),
                         long_press,
                         scrolling: motion.scrolling,
-                        now,
-                        viewport: (0.0, content_top, viewport_width, viewport_height),
-                        shift: (0.0, 0.0),
                         zoom: self.fixed_zoom,
-                        pivot: (0.0, content_top),
+                        ..pass.live()
                     },
                     overlays,
                     &mut boxes,
-                    fixed_visual,
+                    &mut out.fixed_visual,
                     None,
                     cx,
                 );
@@ -638,7 +683,7 @@ impl ReaderSession {
             // 这一页起手选」由上面那张多页表回答。没有带字的页就整层不摆。
             if !self.fixed_text_boxes.borrow().is_empty() {
                 overlays.push(selection::overlay(
-                    fixed_visual.clone().unwrap_or_default(),
+                    out.fixed_visual.clone().unwrap_or_default(),
                     &reader_weak,
                 ));
             }
@@ -742,16 +787,7 @@ impl ReaderSession {
                 // 交给后台（理由与竖滚那一臂同一条：绘制帧里同步取一页就是 1.5 s）。
                 let has_text = book.page_tiles(page).iter().any(|tile| tile.renders);
                 let (text, text_key) = if has_text {
-                    match book.page_text_cached(page) {
-                        Some((text, hash)) => {
-                            let key = text.as_ref().map(|_| hash);
-                            (text, key)
-                        }
-                        None => {
-                            pending_text.push(page);
-                            (None, None)
-                        }
-                    }
+                    page_text_or_pending(book, page, &mut pending_text)
                 } else {
                     (None, None)
                 };
@@ -842,6 +878,16 @@ impl ReaderSession {
             let mut flat_leaving: Option<PageCurlMesh> = None;
             let mut back_page: Option<usize> = None;
             let mut back_dx = 0.0f32;
+            let pass = FixedPass {
+                book,
+                atlas: &atlas,
+                view,
+                reader: &reader_weak,
+                palette,
+                now,
+                viewport: (0.0, content_top, viewport_width, viewport_height),
+                pivot: self.fixed_frame.pivot,
+            };
             if let Some(frame) = turn {
                 let style = turn_animation::of(frame.style);
                 // 折线姿态、「一屏有多宽」与两张纸的位移两条臂共走一份计划
@@ -850,9 +896,9 @@ impl ReaderSession {
                 // 双页里折页揭的是靠手指那半张 leaf。
                 let plan = turn_view::plan_sheets(&frame, mode, area, area);
                 if frame.style == PageTurn::Curl {
-                    *out.curl_leaf = Some(plan.curl_area);
+                    paint.leaf = Some(plan.curl_area);
                 }
-                *out.shades = style.shades_at(frame.progress, plan.curl_area, plan.pose);
+                paint.shades = style.shades_at(frame.progress, plan.curl_area, plan.pose);
                 let fallback = PageRef {
                     chapter: 0,
                     page: current,
@@ -860,7 +906,7 @@ impl ReaderSession {
                 let leaving = frame.leaving.unwrap_or(fallback);
                 let arriving = frame.arriving.unwrap_or(fallback);
                 leaving_page = Some(leaving.page);
-                *out.turn_arriving = Some(arriving);
+                paint.arriving = Some(arriving);
                 // 只有这张「出场页」的捕获确实完整时才开 GPU 卷曲。捕获也可能因为
                 // 尺寸刚变或偏好刚重排而不可用；此时强行用旧的纹理，右侧就会采到
                 // 捕获矩形外。没有可用纹理时退回实时画，宁可不卷，也不要那条黑带。
@@ -989,27 +1035,17 @@ impl ReaderSession {
                         None,
                         (viewport_width, viewport_height),
                     );
-                    let no_viewer: Option<Entity<ImageViewer>> = None;
                     self.paint_fixed_paper(
                         &paper,
                         &FixedPaint {
-                            book,
-                            atlas: &atlas,
-                            view,
-                            reader: &reader_weak,
-                            viewer: &no_viewer,
-                            palette,
                             long_press,
                             scrolling: motion.scrolling,
-                            now,
-                            viewport: (0.0, content_top, viewport_width, viewport_height),
                             shift: outgoing_shift,
-                            zoom: FixedZoom::default(),
-                            pivot: self.fixed_frame.pivot,
+                            ..pass.live()
                         },
                         overlays,
                         &mut Vec::new(),
-                        fixed_visual,
+                        &mut out.fixed_visual,
                         None,
                         cx,
                     );
@@ -1025,7 +1061,7 @@ impl ReaderSession {
                 );
                 if !bands.is_empty() {
                     overlays.extend(bands);
-                    *out.bands_drawn = true;
+                    out.bands_drawn = true;
                 }
             }
             // 进场 / 当前那一屏：每页一张纸，双页左右两半同屏。命中表收这一屏的所有页。
@@ -1051,23 +1087,16 @@ impl ReaderSession {
                 drew_text |= self.paint_fixed_paper(
                     &paper,
                     &FixedPaint {
-                        book,
-                        atlas: &atlas,
-                        view,
-                        reader: &reader_weak,
-                        viewer: &viewer,
-                        palette,
+                        viewer: viewer.clone(),
                         long_press,
                         scrolling: motion.scrolling,
-                        now,
-                        viewport: (0.0, content_top, viewport_width, viewport_height),
                         shift: incoming_shift,
                         zoom: self.fixed_zoom,
-                        pivot: self.fixed_frame.pivot,
+                        ..pass.live()
                     },
                     overlays,
                     &mut boxes,
-                    fixed_visual,
+                    &mut out.fixed_visual,
                     None,
                     cx,
                 );
@@ -1083,12 +1112,12 @@ impl ReaderSession {
             );
             if !bands.is_empty() {
                 overlays.extend(bands);
-                *out.bands_drawn = true;
+                out.bands_drawn = true;
             }
             *self.fixed_text_boxes.borrow_mut() = boxes;
             if drew_text {
                 overlays.push(selection::overlay(
-                    fixed_visual.clone().unwrap_or_default(),
+                    out.fixed_visual.clone().unwrap_or_default(),
                     &reader_weak,
                 ));
             }
@@ -1123,24 +1152,9 @@ impl ReaderSession {
                         None,
                         (viewport_width, viewport_height),
                     );
-                    let no_viewer: Option<Entity<ImageViewer>> = None;
                     self.paint_fixed_paper(
                         &paper,
-                        &FixedPaint {
-                            book,
-                            atlas: &atlas,
-                            view,
-                            reader: &reader_weak,
-                            viewer: &no_viewer,
-                            palette,
-                            long_press: false,
-                            scrolling: false,
-                            now,
-                            viewport: (0.0, content_top, viewport_width, viewport_height),
-                            shift: (0.0, 0.0),
-                            zoom: FixedZoom::default(),
-                            pivot: self.fixed_frame.pivot,
-                        },
+                        &pass.bake(false),
                         &mut Vec::new(),
                         &mut Vec::new(),
                         &mut None,
@@ -1161,7 +1175,7 @@ impl ReaderSession {
                 );
                 let bands = (!bands.is_empty())
                     .then(|| div().absolute().inset_0().children(bands).into_any_element());
-                *out.front_capture = Some(PaperCapture {
+                paint.front = Some(PaperCapture {
                     element: super::paper::empty_capture_element(),
                     under: Vec::new(),
                     over,
@@ -1183,10 +1197,10 @@ impl ReaderSession {
                     0
                 };
                 let left = back_slots.lefts[index];
-                if spread && let Some(leaf) = *out.curl_leaf {
+                if spread && let Some(leaf) = paint.leaf {
                     back_dx = leaf.left - left;
                 }
-                *out.back_dx = back_dx;
+                paint.back_dx = back_dx;
                 let (tiles, _) = fixed_page_tiles(
                     book,
                     back,
@@ -1213,26 +1227,11 @@ impl ReaderSession {
                     (viewport_width, viewport_height),
                 );
                 let mut over = Vec::new();
-                let no_viewer: Option<Entity<ImageViewer>> = None;
+                // 背面只在卷曲那一趟采：高清没在手就用低清那把，别在动画帧里
+                // 起一趟几百毫秒的栅格化（与 `painted_tile` 的滑动手势同一档）。
                 self.paint_fixed_paper(
                     &paper,
-                    &FixedPaint {
-                        book,
-                        atlas: &atlas,
-                        view,
-                        reader: &reader_weak,
-                        viewer: &no_viewer,
-                        palette,
-                        long_press: false,
-                        // 背面只在卷曲那一趟采：高清没在手就用低清那把，别在动画帧里
-                        // 起一趟几百毫秒的栅格化（与 `painted_tile` 的滑动手势同一档）。
-                        scrolling: true,
-                        now,
-                        viewport: (0.0, content_top, viewport_width, viewport_height),
-                        shift: (0.0, 0.0),
-                        zoom: FixedZoom::default(),
-                        pivot: self.fixed_frame.pivot,
-                    },
+                    &pass.bake(true),
                     &mut Vec::new(),
                     &mut Vec::new(),
                     &mut None,
@@ -1242,8 +1241,8 @@ impl ReaderSession {
                 // 一张图都没收进来、而这一页本该有图的背面不交：记成「已烘」之后它
                 // 不会再试，卷起来的背面就永远是一张纸色。下一帧预览到了再烘。
                 if !over.is_empty() || !expects_images {
-                    *out.back_key = Some(key);
-                    *out.back_capture = Some(PaperCapture {
+                    paint.back_key = Some(key);
+                    paint.back = Some(PaperCapture {
                         element: super::paper::empty_capture_element(),
                         under: Vec::new(),
                         over,
@@ -1251,7 +1250,7 @@ impl ReaderSession {
                     });
                 }
             }
-            *out.gpu_curl_mesh = curl_mesh;
+            paint.mesh = curl_mesh;
         }
     }
 
@@ -1326,20 +1325,24 @@ impl ReaderSession {
                 let entry = if baking || (selected && paint.long_press) {
                     &no_entry
                 } else {
-                    paint.viewer
+                    &paint.viewer
                 };
                 let index = target.len();
                 target.push(page_image(
-                    f32::from(rect.origin.x),
-                    f32::from(rect.origin.y),
-                    f32::from(rect.size.width),
-                    f32::from(rect.size.height),
+                    ImageSpot {
+                        x: f32::from(rect.origin.x),
+                        y: f32::from(rect.origin.y),
+                        width: f32::from(rect.size.width),
+                        height: f32::from(rect.size.height),
+                    },
                     image,
                     key,
-                    entry,
-                    paint.long_press && !baking,
-                    index,
-                    paint.reader,
+                    ImageTap {
+                        viewer: entry,
+                        long_press: paint.long_press && !baking,
+                        index,
+                        reader: paint.reader,
+                    },
                 ));
                 if baking {
                     self.fixed_capture_images += 1;
@@ -1375,16 +1378,20 @@ impl ReaderSession {
                         );
                         let index = target.len();
                         target.push(page_image(
-                            f32::from(zoomed.origin.x),
-                            f32::from(zoomed.origin.y),
-                            f32::from(zoomed.size.width),
-                            f32::from(zoomed.size.height),
+                            ImageSpot {
+                                x: f32::from(zoomed.origin.x),
+                                y: f32::from(zoomed.origin.y),
+                                width: f32::from(zoomed.size.width),
+                                height: f32::from(zoomed.size.height),
+                            },
                             image,
                             key,
-                            &no_entry,
-                            paint.long_press,
-                            index,
-                            paint.reader,
+                            ImageTap {
+                                viewer: &no_entry,
+                                long_press: paint.long_press,
+                                index,
+                                reader: paint.reader,
+                            },
                         ));
                     }
                 }

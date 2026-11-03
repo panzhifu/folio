@@ -1,8 +1,10 @@
 //! 阅读视图：把会话的状态摆成元素——逐行画字形、把图片绝对定位、接住滚轮。
 //!
-//! 这里是**纯渲染**：排版不在这里（在 [`crate::ui::features::reader::model::chapter_layout`]），
-//! 状态与命令不在这里（在 [`crate::ui::features::reader::model::session`]）。`render` 只按当前
-//! 模式挑出要摆的那几「片」，把排版行摊成 [`Scene`]，再挂上滚轮监听。
+//! 这一层是**每帧控制器 + 绘制器**：排版本身不在这里（在
+//! [`crate::ui::features::reader::model::chapter_layout`]），状态与命令也不在这里
+//! （在 [`crate::ui::features::reader::model::session`]），但这一帧要排的作业、
+//! 要补的坐标链、要落的章界，以及它们的提交都在这里结算。`render` 按当前模式
+//! 挑出要摆的那几「片」，把排版行摊成 [`Scene`]，再挂上滚轮监听。
 //!
 //! 三种模式只差 [`Viewport`] 的那三个数，切片由核心分片器给出：
 //!
@@ -85,7 +87,7 @@ mod turn_view;
 use art::PageArt;
 use capture::{capture_wanted, sheet_area_in_page};
 use gestures::{fixed_gestures, touch_follow};
-use marks::highlight_rects;
+use marks::{MarkSpot, highlight_rects};
 
 const PREFETCH_RADIUS: usize = 2;
 
@@ -114,6 +116,55 @@ struct TurnFrame {
     /// `true` = 这一本从右往左读。只有折页那一档读它（它决定纸的**自由边**在哪一侧，
     /// 见 `turn_animation::Pose::free_edge_right`）；平移/覆盖那几档今天还没接这一格。
     rtl: bool,
+}
+
+/// 一次翻页在这一帧产出的全部东西：纸面阴影、卷曲网格、三份捕获副本与它们的目标页。
+///
+/// 两臂（可重排 / 定版式）写同一份，`body::render` 后半段的装配只读它。从前这是
+/// 十五个并列的 `&mut` 出参，每加一层捕获就要在七个结构体里各加一格。
+struct TurnPaint {
+    /// 盖在两张纸之上的折面投影与纸边光；其余档位是空清单。
+    shades: turn_animation::Shades,
+    /// 这一帧要画的卷曲网格。网格取代旧页的字形与图片 —— 旧页已经烘进纹理。
+    mesh: Option<PageCurlMesh>,
+    /// 被揭起来的那一张 leaf（双页 = 半张跨页，单页 = 整张纸）。捕获纹理、网格与
+    /// 手指归一化三处共用这一块；`None` = 这一帧没有折页在飞。
+    leaf: Option<turn_animation::Area>,
+    /// 捕获层 1：正面（旧页）。
+    front: Option<paper::PaperCapture>,
+    /// 捕获层 2：背面（卷起来那张纸的另一面）。
+    back: Option<paper::PaperCapture>,
+    /// 捕获层 3：进场页。
+    incoming: Option<paper::PaperCapture>,
+    /// 背面那一栏要横向挪进 leaf 那一格：纹理按 leaf 那块矩形烘，网格也按 leaf 的尺寸采。
+    back_dx: f32,
+    /// 这一帧要烘进捕获层 2 的是哪一格（`(章, 页, 物理栏)`）。`None` = 这一帧不烘背面。
+    back_key: Option<(usize, usize, usize)>,
+    /// 这一帧要烘进场页的是哪一格（`(章, 页)`）+ 烘那一帧进场页自己的位移。
+    incoming_bake: Option<((usize, usize), (f32, f32))>,
+    /// 这一帧有没有页面走平摊网格：网格纹理里已经含读数带，末端就不补全局兜底带。
+    mesh_page_drawn: bool,
+    /// 这一趟翻到哪一页。翻页途中**底下那一页**的页眉/页脚要按它念，而捕获层 2
+    /// 烘过一次之后 `back_key` 就不再是 `Some` 了。
+    arriving: Option<PageRef>,
+}
+
+impl TurnPaint {
+    fn new() -> Self {
+        Self {
+            shades: turn_animation::Shades::new(),
+            mesh: None,
+            leaf: None,
+            front: None,
+            back: None,
+            incoming: None,
+            back_dx: 0.0,
+            back_key: None,
+            incoming_bake: None,
+            mesh_page_drawn: false,
+            arriving: None,
+        }
+    }
 }
 
 impl ReaderSession {
@@ -224,19 +275,11 @@ impl ReaderSession {
 #[derive(Clone)]
 struct RenderFrame<'a> {
     mode: chrome::PageMode,
-    columns: usize,
-    paper_bands: bool,
     viewport_height: f32,
     content_top: f32,
-    viewport_width: f32,
-    window_height: f32,
     chapter_gap: f32,
-    area: turn_animation::Area,
-    sheet_area: turn_animation::Area,
-    page_area: turn_animation::Area,
     page_box: PageBox,
     page_key: (usize, usize),
-    viewport: (f32, f32),
     capture_front: bool,
     turn: Option<TurnFrame>,
     page_turn: PageTurn,
@@ -244,11 +287,6 @@ struct RenderFrame<'a> {
     gap: f32,
     fixed_layout: bool,
     layer_top: f32,
-    curl_turn: bool,
-    captured_ch: usize,
-    captured_pg: usize,
-    captured_w: f32,
-    captured_h: f32,
     family: &'a SharedString,
     page_percent: SharedString,
     foreground: Hsla,
@@ -267,45 +305,112 @@ struct RenderFrame<'a> {
     long_press: bool,
 }
 
+impl RenderFrame<'_> {
+    /// 一页几栏。双页在装不下两栏时会自己退回一栏（`PageMode::columns`）。
+    fn columns(&self) -> usize {
+        self.mode.columns()
+    }
+
+    /// 这一档是不是按「页」画读数带：连续滚动没有页，带子是浮在正文上的占位。
+    fn paper_bands(&self) -> bool {
+        !self.mode.is_continuous()
+    }
+
+    /// 窗口尺寸。纸就是窗口矩形（定版式的 `Paper::fixed` 也这么填），所以纸宽高
+    /// 与窗口是同一个数，不必各存一份。
+    fn viewport(&self) -> (f32, f32) {
+        (self.page_box.paper.w, self.page_box.paper.h)
+    }
+
+    fn viewport_width(&self) -> f32 {
+        self.page_box.paper.w
+    }
+
+    fn window_height(&self) -> f32 {
+        self.page_box.paper.h
+    }
+
+    /// 翻页几何用的那一块：连续滚动是正文版心，其余是整张纸。
+    fn page_area(&self) -> turn_animation::Area {
+        let rect = if self.mode.is_continuous() {
+            self.page_box.content
+        } else {
+            self.page_box.paper
+        };
+        turn_animation::Area::new(rect.x, rect.y, rect.right(), rect.bottom())
+    }
+
+    /// 整张纸：从窗口顶铺到窗口底。仿真折页揭的就是这一整张。
+    fn sheet_area(&self) -> turn_animation::Area {
+        sheet_area_in_page(self.viewport())
+    }
+
+    /// 正文那一块（页眉带下面那一条），翻页时按它归一。
+    fn area(&self) -> turn_animation::Area {
+        turn_animation::Area::new(
+            0.0,
+            self.content_top,
+            self.viewport_width(),
+            self.content_top + self.viewport_height,
+        )
+    }
+
+    /// 这一帧是不是仿真折页（含松手那一腿）。
+    fn curl_turn(&self) -> bool {
+        self.turn.map_or(self.page_turn, |frame| frame.style) == PageTurn::Curl
+    }
+}
+
+/// 这一帧画出来的非纸面产物：整页画、读数带旗、读屏文本、图集账与章界落点。
+///
+/// 页面树本身（字形元素、装饰、图片、纸层）仍由 `body` 的局部变量装着：它们要按
+/// 「一张纸」分组，装进同一个结构体反而切不开借用。两臂写同一份 `FrameOut`。
+struct FrameOut {
+    page_art: Option<PageArt>,
+    page_picture: bool,
+    bare_bands: bool,
+    neighbour_backdrop: bool,
+    bands_drawn: bool,
+    spoken: Vec<SharedString>,
+    painted_keys: Vec<String>,
+    upcoming: Vec<crate::ui::foundation::images::DecodeRequest>,
+    prefetch_side: Option<PrefetchSide>,
+    land_chapter: Option<PageRef>,
+    fixed_visual: Option<SelectionVisual>,
+}
+
+impl FrameOut {
+    fn new() -> Self {
+        Self {
+            page_art: None,
+            page_picture: false,
+            bare_bands: false,
+            neighbour_backdrop: false,
+            bands_drawn: false,
+            spoken: Vec::new(),
+            painted_keys: Vec::new(),
+            upcoming: Vec::new(),
+            prefetch_side: None,
+            land_chapter: None,
+            fixed_visual: None,
+        }
+    }
+}
+
 /// 连续滚动这一臂要交回公共装配的产物。
 struct ContinuousArm<'a> {
     backdrops: &'a mut Vec<AnyElement>,
-    page_art: &'a mut Option<PageArt>,
-    bare_bands: &'a mut bool,
-    neighbour_backdrop: &'a mut bool,
-    spoken: &'a mut Vec<SharedString>,
-    prefetch_side: &'a mut Option<PrefetchSide>,
-    painted_keys: &'a mut Vec<String>,
-    upcoming: &'a mut Vec<crate::ui::foundation::images::DecodeRequest>,
+    out: &'a mut FrameOut,
 }
-
-type IncomingBake = ((usize, usize), (f32, f32));
 
 /// 分页 / 双页这一臂要交回公共装配的产物。
 struct PagedArm<'a> {
     backdrops: &'a mut Vec<AnyElement>,
-    page_art: &'a Option<PageArt>,
-    bare_bands: &'a mut bool,
-    page_picture: &'a mut bool,
-    shades: &'a mut turn_animation::Shades,
-    gpu_curl_mesh: &'a mut Option<PageCurlMesh>,
-    curl_leaf: &'a mut Option<turn_animation::Area>,
-    front_capture: &'a mut Option<paper::PaperCapture>,
-    back_capture: &'a mut Option<paper::PaperCapture>,
-    back_dx: &'a mut f32,
-    back_key: &'a mut Option<(usize, usize, usize)>,
-    incoming_capture: &'a mut Option<paper::PaperCapture>,
-    incoming_bake: &'a mut Option<IncomingBake>,
-    mesh_page_drawn: &'a mut bool,
-    turn_arriving: &'a mut Option<PageRef>,
-    spoken: &'a mut Vec<SharedString>,
-    prefetch_side: &'a mut Option<PrefetchSide>,
-    land_chapter: &'a mut Option<PageRef>,
-    painted_keys: &'a mut Vec<String>,
-    bands_drawn: &'a mut bool,
+    paint: &'a mut TurnPaint,
     paper_layers: &'a mut Vec<AnyElement>,
     /// 每页自己的读数带（页眉 / 页脚）：挂在正文裁切层外面，静止可见、翻页跟着纸走。
     page_bands: &'a mut Vec<AnyElement>,
+    out: &'a mut FrameOut,
 }
 
 impl Render for ReaderSession {
@@ -439,17 +544,6 @@ impl Render for ReaderSession {
         // 存一份给会话：命中、选区、`content_top()` 的替代都读它，不必每处再拼一次。
         self.page_box = page_box;
 
-        // 翻页几何用的那一块：连续滚动是正文版心，其余是整张纸。与 `ReaderSession::page_area()`
-        // 同一个式子；这里先算成局部值，下面 `font_cache` 把 `self` 借走之后就不能再调方法了。
-        let page_area = {
-            let rect = if mode.is_continuous() {
-                page_box.content
-            } else {
-                page_box.paper
-            };
-            turn_animation::Area::new(rect.x, rect.y, rect.right(), rect.bottom())
-        };
-
         // 那一页纸占的矩形，**元素坐标**（与字形的 `run.x` / `run.baseline` 同一把尺）：
         // 折线、逐字裁剪、折面多边形、网格的页框、手指坐标的归一化，全算在这一套里。
         //
@@ -568,10 +662,6 @@ impl Render for ReaderSession {
         // （上面那条已经挡掉）。副本必须自己画一份 —— 主 pass 只画
         // `order < CAPTURE_ORDER_BASE`，层里的东西不上屏。
         let capture_front = capture_needed;
-        // 日志里要摆的是「烘那一张时」的两组数，与今天这帧的比一眼就能看出差在哪。`Option` 进不了
-        // tracing 的字段，所以摊成数：哨兵 = 还没烘过（那一格正是要盯的状态）。
-        let (captured_ch, captured_pg) = self.captured_page.unwrap_or((usize::MAX, usize::MAX));
-        let (captured_w, captured_h) = self.captured_size.unwrap_or((-1.0, -1.0));
 
         let foreground = cx.theme().foreground;
         // 链接色：书面 CSS 十有八九不给链接上色（出版工具的目录页就是这么交的），所以这一格
@@ -620,7 +710,6 @@ impl Render for ReaderSession {
         // 读数带在 `font_cache` 那句之前算：那一句把 `self` 可变借走，之后再借整份
         // 会话就过不去（进度要读整本书）。每页的章名/页号在循环里按 page_ref 算，
         // 跨章翻页时左右两页才各念各的。
-        let curl_turn = turn.as_ref().map_or(page_turn, |frame| frame.style) == PageTurn::Curl;
         let page_percent: SharedString = chrome::percent_label(self.progress()).into();
         // 页面底色放在 `column` 自己身上（父背景先于所有子节点画）：字形元素铺满
         // 整个版心，若把不透明背景挂在它身上、它又在图片之后才入树，白底会把先画的
@@ -632,51 +721,19 @@ impl Render for ReaderSession {
         // 让窗口背板透上来。
         let mut element = GlyphsElement::new();
         let mut column = div().size_full().relative();
-        // 这一帧有没有**邻章**的整窗背板。锚章那一格由 `page_art` 自己说话，而邻章的画
-        // 也铺在同一扇窗上（`placements` 那条循环），纸底色若照旧挂在 `column` 上就会
-        // 把它整个盖住 —— 读者于是只看得见版心里那份被裁成章高一条的复制品
+        // 这一帧的非纸面产物（整页画、读数带旗、读屏文本、图集账、章界落点）。
+        // 邻章那张整窗背板也记在里面：纸底色若照旧挂在 `column` 上会把它整个盖住
         // （2026-11-02 真机《哈利·波特全集》`v1.xhtml`：视口顶还在目录，封面已经在屏上）。
-        let mut neighbour_backdrop = false;
+        let mut frame_out = FrameOut::new();
         // 图片永远压在字形之上：收集起来，等 `element` 入树之后再挂。
         let mut overlays: Vec<AnyElement> = Vec::new();
-        // 整页画（`background-attachment: fixed` 底图章 / 单图页）：背板元素与这一帧的判定。
+        // 整页画（`background-attachment: fixed` 底图章 / 单图页）的背板元素。
         // 背板挂在 `column` **之前**、`body` 之下 —— 压着页底色、让正文与读数带浮在上面；
         // `body` 自己不再裁切，所以背板可以向上铺到安全区里（见函数末尾的装配）。
         let mut backdrops: Vec<AnyElement> = Vec::new();
-        let mut page_art: Option<PageArt> = None;
-        let mut bare_bands = false;
-        // 分页里出现了整页图/固定底图：这一帧的底色要让开，整窗背板才透得上来。
-        let mut page_picture = false;
-        // 固定底图章（带正文）也要让读数带透明浮在画上；它没有 `picture_page` 旗。
-        // 分页档按**页**判（见下面 `slots` 里的 `art_drawn`）。
-        // 这一档这一帧要盖在两张纸之上的那几块：折页的纸面与折谷四道，覆盖/层叠的前缘
-        // 投影与纸边光。其余档位给的是空清单，所以下面那一块一个形状都不会入树。
-        let mut shades = turn_animation::Shades::new();
-        // C 方案：这一帧要画的卷曲网格，以及它对应的进场页。网格取代旧页的
-        // 字形与图片 —— 旧页已经烘进页面纹理，网格自己把它卷起来。
-        let mut gpu_curl_mesh: Option<PageCurlMesh> = None;
-        // 折页这一趟被揭起来的那一张 leaf（双页 = 半张跨页，单页 = 整张纸，含页眉/页脚）。
-        // 捕获纹理、卷曲网格、手指归一化三处共用这一块；`None` = 这一帧没有折页在飞。
-        let mut curl_leaf: Option<turn_animation::Area> = None;
-        let mut paged_front_capture: Option<paper::PaperCapture> = None;
-        let mut paged_back_capture: Option<paper::PaperCapture> = None;
-        let mut paged_incoming_capture: Option<paper::PaperCapture> = None;
-        // 背面那一栏要横向挪进 leaf 那一格：纹理按 leaf 那块矩形烘，网格也按 leaf 的尺寸采，
-        // 而这一栏的字与图算出来的 x 是它**自己**那一栏的位置。
-        let mut back_dx = 0.0f32;
-        // 这一趟要烘进捕获层 2 的是哪一格（`(章, 页, 物理栏)`）。`None` = 这一帧不烘背面。
-        let mut back_key: Option<(usize, usize, usize)> = None;
-        // 这一帧要烘进场页的是哪一格（`(章, 页)`）+ 烘那一帧进场页自己的位移（副本按
-        // `-offset` 退回静止位置再烘）。`None` = 这一帧不烘。
-        let mut incoming_bake: Option<((usize, usize), (f32, f32))> = None;
-        // 进场页已经烘好：这一帧起整页跳过，由平摊网格采那张纹理（`incoming = 1`）。
-        // 分页臂里无条件重赋，初值在那条路上没人读 —— 其余臂（样本 / 定版式 / 连续滚动）
-        // 靠它保持 `None`。
-        // 这一帧有没有页面走平摊网格：网格纹理里已经含读数带，末端就不补全局兜底带。
-        let mut mesh_page_drawn = false;
-        // 这一趟翻到哪一页。放在 `match` 之外：翻页途中**底下的那一页**的页眉/页脚
-        // 要按它念，而捕获层 2 烘过一次之后 `back_key` 就不再是 `Some` 了。
-        let mut turn_arriving: Option<PageRef> = None;
+        // 这一档这一帧的翻页产物（折面投影、卷曲网格、三份捕获副本与目标页）。
+        // 两臂写同一份，装配那一段只读它。
+        let mut turn_paint = TurnPaint::new();
         // 「点这张图」要写出去的那个状态，由阅读页持有（见 `image_viewer`）。没挂上的
         // 会话（单独的渲染测试）图片就不可点。
         let viewer = self.image_viewer.clone();
@@ -688,41 +745,16 @@ impl Render for ReaderSession {
         // 会强制重画一次，所以这一格不需要自己盯变化（`Window::is_a11y_active` 的文档写的
         // 就是这套）。收集到的那份在树根那一头交给 `a11y_synthetic_children`。
         let speaking = window.is_a11y_active();
-        let mut spoken: Vec<SharedString> = Vec::new();
-        // `&mut self.source` 只借用这一个字段，所以臂里写 `self.content_height`、
-        // 读 `self.scroll_y` 都不冲突（前提是别把 `self` 整个传进函数）。
-        let mut prefetch_side: Option<PrefetchSide> = None;
-        // 章界那一笔落在哪：只有「这一档在这种摆法下不挂时钟」（不走动画）时才会有值。
-        // 真换锚要等这一帧的元素树搭完（与 `drain_pending_turn` 同一处），中途换会让
-        // 同一帧上下半截按两章画。
-        let mut land_chapter: Option<PageRef> = None;
-        let mut bands_drawn = false;
         let mut paper_layers: Vec<AnyElement> = Vec::new();
         // 每页一份的读数带：与纸同一套位移，但不进正文裁切层。
         let mut page_bands: Vec<AnyElement> = Vec::new();
-        // 这一帧主场景与捕获副本真正交给图集碰过的那些图（容器路径）。预解那一步要跳过它们 ——
-        // 「还没进图集」只能这样知道：`painted` 已经把「在场」记上了。
-        let mut painted_keys: Vec<String> = Vec::new();
-        // 叠图里「下一张」的活儿：搭场景时顺手收下（`Scene::upcoming`），帧末交给图集
-        // 预热。切图那一下就不用等解码 —— 大图首解一次几十毫秒，读者读成「卡一下」。
-        let mut upcoming: Vec<crate::ui::foundation::images::DecodeRequest> = Vec::new();
-        // 定版式这一臂算出的高亮几何要活到 match 外面：菜单条与可重排共用同一段摆位。
-        let mut fixed_visual: Option<SelectionVisual> = None;
         let frame = RenderFrame {
             mode,
-            columns,
-            paper_bands: !mode.is_continuous(),
             viewport_height,
             content_top,
-            viewport_width: f32::from(viewport_size.width),
-            window_height: f32::from(viewport_size.height),
             chapter_gap,
-            area,
-            sheet_area,
-            page_area,
             page_box,
             page_key,
-            viewport,
             capture_front,
             turn,
             page_turn,
@@ -730,11 +762,6 @@ impl Render for ReaderSession {
             gap,
             fixed_layout,
             layer_top,
-            curl_turn,
-            captured_ch,
-            captured_pg,
-            captured_w,
-            captured_h,
             family: &family,
             page_percent: page_percent.clone(),
             foreground,
@@ -762,42 +789,15 @@ impl Render for ReaderSession {
                 self.render_fixed(
                     book,
                     fixed::FixedArm {
-                        mode,
+                        frame: &frame,
                         usable,
-                        viewport_height,
-                        content_top,
-                        viewport_width: f32::from(viewport_size.width),
-                        viewport,
-                        page_box,
-                        area,
-                        sheet_area,
-                        gap,
-                        layer_top,
-                        capture_front,
-                        turn,
                         motion,
                         now,
-                        view,
-                        viewer: viewer.clone(),
-                        palette: &palette,
-                        long_press,
-                        atlas: atlas.clone(),
-                        reader_weak: reader_weak.clone(),
                         paper_layers: &mut paper_layers,
-                        out: fixed::FixedOut {
-                            shades: &mut shades,
-                            gpu_curl_mesh: &mut gpu_curl_mesh,
-                            curl_leaf: &mut curl_leaf,
-                            front_capture: &mut paged_front_capture,
-                            back_capture: &mut paged_back_capture,
-                            back_dx: &mut back_dx,
-                            back_key: &mut back_key,
-                            turn_arriving: &mut turn_arriving,
-                            bands_drawn: &mut bands_drawn,
-                        },
+                        paint: &mut turn_paint,
+                        out: &mut frame_out,
                     },
                     &mut overlays,
-                    &mut fixed_visual,
                     cx,
                 );
             }
@@ -811,13 +811,7 @@ impl Render for ReaderSession {
                         &mut overlays,
                         ContinuousArm {
                             backdrops: &mut backdrops,
-                            page_art: &mut page_art,
-                            bare_bands: &mut bare_bands,
-                            neighbour_backdrop: &mut neighbour_backdrop,
-                            spoken: &mut spoken,
-                            prefetch_side: &mut prefetch_side,
-                            painted_keys: &mut painted_keys,
-                            upcoming: &mut upcoming,
+                            out: &mut frame_out,
                         },
                         window,
                         cx,
@@ -830,27 +824,10 @@ impl Render for ReaderSession {
                         &mut overlays,
                         PagedArm {
                             backdrops: &mut backdrops,
-                            page_art: &page_art,
-                            bare_bands: &mut bare_bands,
-                            page_picture: &mut page_picture,
-                            shades: &mut shades,
-                            gpu_curl_mesh: &mut gpu_curl_mesh,
-                            curl_leaf: &mut curl_leaf,
-                            front_capture: &mut paged_front_capture,
-                            back_capture: &mut paged_back_capture,
-                            back_dx: &mut back_dx,
-                            back_key: &mut back_key,
-                            incoming_capture: &mut paged_incoming_capture,
-                            incoming_bake: &mut incoming_bake,
-                            mesh_page_drawn: &mut mesh_page_drawn,
-                            turn_arriving: &mut turn_arriving,
-                            spoken: &mut spoken,
-                            prefetch_side: &mut prefetch_side,
-                            land_chapter: &mut land_chapter,
-                            painted_keys: &mut painted_keys,
-                            bands_drawn: &mut bands_drawn,
+                            paint: &mut turn_paint,
                             paper_layers: &mut paper_layers,
                             page_bands: &mut page_bands,
+                            out: &mut frame_out,
                         },
                         window,
                         cx,
@@ -859,6 +836,34 @@ impl Render for ReaderSession {
             }
         }
         self.source = source;
+        // 两臂都把产物写进 `turn_paint`；装配这一段仍按原来的名字读，省得在
+        // 一百多行几何代码里逐处改字段路径。
+        let TurnPaint {
+            shades,
+            mesh: gpu_curl_mesh,
+            leaf: curl_leaf,
+            front: paged_front_capture,
+            back: mut paged_back_capture,
+            incoming: paged_incoming_capture,
+            back_dx,
+            back_key,
+            incoming_bake,
+            mesh_page_drawn,
+            arriving: turn_arriving,
+        } = turn_paint;
+        let FrameOut {
+            page_art,
+            page_picture,
+            bare_bands,
+            neighbour_backdrop,
+            bands_drawn,
+            spoken,
+            painted_keys,
+            mut upcoming,
+            prefetch_side,
+            land_chapter,
+            fixed_visual,
+        } = frame_out;
         column = column.children(paper_layers);
         // 单页仿真折页时，卷起来的是**整张纸**（含页眉/页脚），而纸底下露出来的是目标那一页。
         // 所以主场景里的两条读数带要念目标页；它们必须在卷曲网格**之前**入树，网格才盖得住
@@ -938,16 +943,18 @@ impl Render for ReaderSession {
                             total
                         });
                     highlight_rects(
-                        doc,
-                        window,
-                        cx,
+                        &MarkSpot {
+                            doc,
+                            window: &*window,
+                            cx,
+                            x: self.prefs.margin_x,
+                            origin_y: band_top,
+                            // 连续滚动永远走横排（竖排只在分页那一档落地），长度这一格不参与。
+                            flow_len: band_bottom - band_top,
+                            header: content_top,
+                            band: band_top..band_bottom,
+                        },
                         sub,
-                        self.prefs.margin_x,
-                        band_top,
-                        // 连续滚动永远走横排（竖排只在分页那一档落地），长度这一格不参与。
-                        band_bottom - band_top,
-                        content_top,
-                        band_top..band_bottom,
                         &mut visual.highlights,
                     );
                 } else {
@@ -978,20 +985,22 @@ impl Render for ReaderSession {
                                     total
                                 });
                         highlight_rects(
-                            doc,
-                            window,
-                            cx,
+                            &MarkSpot {
+                                doc,
+                                window: &*window,
+                                cx,
+                                // 与 `Scene::build` 那两个参数同源：正文偏了多少，高亮就跟着偏。
+                                x: self.prefs.margin_x
+                                    + column_offset(width, gap, slice.column)
+                                    + self.page_shift.0,
+                                origin_y: slice.origin_y,
+                                flow_len: slice.height,
+                                header: content_top + self.page_shift.1,
+                                // 带说的是推进轴：递分片自己那一段，比从首末行盒再折一次准，
+                                // 而横排下这两个数是同一个区间（片的长就是末行底减首行顶）。
+                                band: first_box.y..(last_box.y + last_box.height),
+                            },
                             sub,
-                            // 与 `Scene::build` 那两个参数同源：正文偏了多少，高亮就跟着偏。
-                            self.prefs.margin_x
-                                + column_offset(width, gap, slice.column)
-                                + self.page_shift.0,
-                            slice.origin_y,
-                            slice.height,
-                            content_top + self.page_shift.1,
-                            // 带说的是推进轴：递分片自己那一段，比从首末行盒再折一次准，
-                            // 而横排下这两个数是同一个区间（片的长就是末行底减首行顶）。
-                            first_box.y..(last_box.y + last_box.height),
                             &mut visual.highlights,
                         );
                     }
