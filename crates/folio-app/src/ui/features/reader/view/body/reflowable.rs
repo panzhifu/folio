@@ -4,28 +4,35 @@
 //! 下一步把它们收进 `Paper` / `PageScene` 后，这一层只保留按模式选臂。
 
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use folio_core::PageTurn;
 use folio_core::content::format::css::computed::BackgroundSize;
 use folio_core::layout::fragment::column_offset;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    AnyElement, App, Context, Div, InteractiveElement as _, IntoElement, ParentElement,
-    PageCurlMesh, SharedString, Styled, TestSupportExt as _, Window, div, px,
+    AnyElement, App, Context, Div, Entity, EntityId, InteractiveElement as _, IntoElement,
+    ParentElement, PageCurlMesh, SharedString, Styled, TestSupportExt as _, WeakEntity, Window,
+    div, px,
 };
 
+use crate::ui::features::reader::components::image_viewer::ImageViewer;
 use crate::ui::features::reader::model::annotations::Palette;
 use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chapter_layout::{Document, Viewport};
 use crate::ui::features::reader::model::chrome;
+use crate::ui::features::reader::model::image_atlas::ImageAtlas;
 use crate::ui::features::reader::model::page_geometry::{BandPolicy, PageBox};
 use crate::ui::features::reader::model::prefetch;
 use crate::ui::features::reader::model::session::{
-    PageRef, ReaderSession, Turn, TurnRun, land_at_anchor, start_turn,
+    ImageHit, PageRef, ReaderSession, StackHit, Turn, TurnRun, land_at_anchor, start_turn,
 };
 use crate::ui::features::reader::motion::turn_animation::{self, Sheet};
 use crate::ui::features::reader::view::bands;
 use crate::ui::features::reader::view::paint::GlyphsElement;
-use crate::ui::features::reader::view::scene::{Scene, VisibleImage};
+use crate::ui::features::reader::view::scene::{BlockDecor, Scene, VisibleImage};
 
 use super::a11y::spoken_lines;
 use super::art::{
@@ -39,10 +46,12 @@ use super::images::{
     ImageDrag, ImageTap, image_child, painted_picture, plain_image, stack_dots, stack_peek,
 };
 use super::marks::{MarkSpot, annotation_fills, speech_fill};
-use super::paper::{CaptureRole, PageScene, Paper, PaperBody, PaperCapture};
+use super::paper::{
+    CaptureRole, PageScene, Paper, PaperBody, PaperCapture, Picture,
+};
 use super::shape::shape_runs;
 use super::{
-    ContinuousArm, FrameOut, PagedArm, RenderFrame, column_cut, local_band,
+    ContinuousArm, FrameOut, PagedArm, RenderFrame, TurnFrame, TurnPaint, column_cut, local_band,
 };
 
 /// 一栏渲染要往里写的产物。
@@ -684,18 +693,12 @@ impl ReaderSession {
         let window_height = frame.window_height();
         let area = frame.area();
         let sheet_area = frame.sheet_area();
-        let page_area = frame.page_area();
         let viewport = frame.viewport();
-        let (captured_ch, captured_pg) = self
-            .captured_page
-            .unwrap_or((usize::MAX, usize::MAX));
-        let (captured_w, captured_h) = self.captured_size.unwrap_or((-1.0, -1.0));
         let RenderFrame {
             mode,
             viewport_height,
             content_top,
             page_box,
-            page_key,
             turn,
             page_turn,
             turn_over,
@@ -852,144 +855,14 @@ impl ReaderSession {
             }
         }
 
-        // 要摆的那几页：定住时只有当前这一页；动画在走时**多出另一张纸**
-        // （同章邻页，或跨章的目标页），两张各自怎么摆由这一趟带上来的那一档
-        // 决定 —— 位移与层级都来自 [`turn_animation`]。
-        let rest = Sheet {
-            offset: (0.0, 0.0),
-            z: 0,
-            cut: None,
-        };
-        let mut papers: [Paper; 2] = std::array::from_fn(|_| {
-            Paper::empty(
-                PageRef {
-                    chapter: current,
-                    page: self.page,
-                },
-                rest,
-            )
-        });
-        let mut count = 1usize;
-        let mut cross_chapter = false;
-        // 双页折页这一趟的逐栏取舍要在 `if let Some(frame)` 之外读，先把这几格提出来。
-        let mut leaf_turn = false;
-        let mut leaf_column = 0usize;
-        let mut other_column = 1usize;
-        let mut turn_leaving: Option<PageRef> = None;
-        if let Some(frame) = turn {
-            let style = turn_animation::of(frame.style);
-            // 折线姿态与「这一屏有多宽」两条臂共走一份计划（见 `turn_view::plan_sheets`）。
-            let turn_view::SheetPlan {
-                curl_area,
-                free_right,
-                pose,
-            } = turn_view::plan_sheets(&frame, mode, page_area, area);
-            if frame.style == PageTurn::Curl {
-                paint.leaf = Some(curl_area);
-            }
-            // 只有这张「出场页」的捕获确实完整时才开 GPU 卷曲。捕获也可能因为
-            // 进场横移还没停、尺寸刚变或偏好刚重排而不可用；此时强行用半张/旧的
-            // 纹理，右侧就会采到捕获矩形外。没有可用纹理时退回 CPU 裁页，宁可不
-            // 卷，也不要那条黑带。
-            let leaving_ref = frame.leaving.unwrap_or(PageRef {
-                chapter: current,
-                page: self.page,
-            });
-            // 只有这张「出场页」的捕获确实完整时才开 GPU 卷曲；几何、顶点缓存与
-            // uniform 的装配两条臂共用（见 `turn_view::build_curl_mesh`）。
-            if frame.style == PageTurn::Curl && capture.front_valid(leaving_ref, viewport) {
-                paint.mesh = turn_view::build_curl_mesh(
-                    &turn_view::CurlAsk {
-                        progress: frame.progress,
-                        released: matches!(frame.run, TurnRun::Released { .. }),
-                        revert: matches!(frame.run, TurnRun::Released { revert: true, .. }),
-                        free_right,
-                        pose,
-                        curl_area,
-                        content_area: area,
-                        viewport,
-                        page_key,
-                        captured: (captured_ch, captured_pg, captured_w, captured_h),
-                        capture_valid: true,
-                        paper: cx.theme().background.to_rgb(),
-                    },
-                    &mut self.curl_mesh,
-                );
-            }
-            // 折页那一档不再给 CPU 影子：纸面与圆柱受光都在 GPU 那张网格里
-            // （见 `curl.rs`、`page_curl.wgsl`）。`shades_at` 的默认实现给回空清单，
-            // 所以这一句对别的几档就是「照旧」。`pose` 是上面拼的那一份：带着**补间
-            // 之后**的手与弹回的时钟，网格与摆位层读的都是它。
-            paint.shades = style.shades_at(frame.progress, curl_area, pose);
-            let [incoming, outgoing] = style.sheets_at(frame.progress, curl_area, pose);
-            let leaving_ref = frame.leaving.unwrap_or(PageRef {
-                chapter: current,
-                page: self.page,
-            });
-            let arriving_ref = frame.arriving.unwrap_or(PageRef {
-                chapter: current,
-                page: self.page,
-            });
-            // 同一张纸既当出场又当进场时不拆栏：正常走不到（`turn()` 只按
-            // `TurnPlan` 里真会换页那几支起趟），但真走到了，拆栏会把两栏都判给
-            // 捕获层，主场景一片空白。
-            // 这一趟是不是「双页里只揭靠手指那一张 leaf」—— 只有仿真折页是，判据在
-            // [`turn_animation::paper_area`]，这里读它盖上的那一格。它管的是**哪一栏
-            // 在纸上**：其余几档在双页里两栏同属那张移动的纸，谁都不许停在原地。
-            leaf_turn = curl_area.spread_leaf && leaving_ref != arriving_ref;
-            leaf_column = if free_right { 1 } else { 0 };
-            other_column = 1 - leaf_column;
-            turn_leaving = Some(leaving_ref);
-            paint.arriving = Some(arriving_ref);
-            // 这一趟要烘的背面（捕获层 2）：揭起来那张纸的背面 = 目标跨页的另一半
-            // （双页）/ 目标页整张（单页）。网格真画出来了才有采样它的人；同一趟里
-            // 目标不变、纹理跨帧留着，所以只对**没烘过**的那一格烘一趟。
-            // 跨章那一趟的目标章可能还没排完版：那一栏排不出内容，背面就只是一张
-            // 清成纸色的空纹理（与同一帧底下那张目标页同样空着是一致的）。
-            if paint.mesh.is_some() {
-                let key = (
-                    arriving_ref.chapter,
-                    arriving_ref.page,
-                    if leaf_turn { other_column } else { 0 },
-                );
-                if self.captured_back != Some((key, viewport)) {
-                    paint.back_key = Some(key);
-                }
-            }
-            if arriving_ref.chapter != current {
-                // 跨章：源页往外走、目标页往里走，各用各的章。
-                cross_chapter = true;
-                papers[0] = Paper::empty(leaving_ref, outgoing);
-                papers[1] = Paper::empty(arriving_ref, incoming);
-                count = 2;
-            } else {
-                // 同章：`slots[0]` 恒是进场那一张 —— 命中与 `page_shift` 归它。
-                // 入树顺序另按 `z` 排（见下），两者不必一致：覆盖档要把这张
-                // 抬到停着的旧页之上，而它始终是「这一屏的当前页」。
-                papers[0] = Paper::empty(arriving_ref, incoming);
-                if leaving_ref != arriving_ref {
-                    papers[1] = Paper::empty(leaving_ref, outgoing);
-                    count = 2;
-                }
-            }
-            // 单页 C 方案只摆进场那一张：旧页已经在捕获纹理里，由 GPU 网格卷。
-            // 双页不能只摆一张：静态页（当前跨页的另一半）与底层新页（下一跨页的
-            // 同侧半页）都得留着，网格只盖住被揭起来的那一张 leaf。两张纸都不裁，
-            // 由下面的逐栏跳过把 leaf 正面与背面取掉。
-            if paint.mesh.is_some() && mode != chrome::PageMode::Spread {
-                let arriving_slot = if papers[0].identity == arriving_ref { 0 } else { 1 };
-                papers.swap(0, arriving_slot);
-                count = 1;
-            }
-        }
-        // 当前页这一帧偏了多少。命中换算读这一格（`to_layout` 里减掉它）：
-        // 跨章时两张纸的章不同，命中在 [`Self::turn_in_flight`] 已经让位，
-        // 这里给 0 是让旧坐标不再被减第二次。
-        self.page_shift = if cross_chapter {
-            (0.0, 0.0)
-        } else {
-            papers[0].sheet.offset
-        };
+        let TurnPapers {
+            papers,
+            count,
+            leaf_turn,
+            leaf_column,
+            other_column,
+            turn_leaving,
+        } = self.plan_turn_papers(&render_frame, &capture, paint, cx);
 
         // 入树顺序就是绘制层级（后入树的压在上面）。两张同层时保持上面的
         // 原顺序，所以平移仍然读成一条纸带整体在走。
@@ -1344,6 +1217,187 @@ impl ReaderSession {
     }
 }
 
+/// 这一趟要摆哪两张纸、各自带哪张 `Sheet`，以及双页折页的逐栏取舍。
+struct TurnPapers {
+    papers: [Paper; 2],
+    count: usize,
+    leaf_turn: bool,
+    leaf_column: usize,
+    other_column: usize,
+    turn_leaving: Option<PageRef>,
+}
+
+impl ReaderSession {
+    /// 把「这一趟怎么摆」从渲染臂里分出来：只读 `RenderFrame` 与捕获状态，
+    /// 写回 `paint`（网格 / 阴影 / 目标页）与 `page_shift`，其余交给逐纸绘制。
+    fn plan_turn_papers(
+        &mut self,
+        frame: &RenderFrame<'_>,
+        capture: &CaptureView,
+        paint: &mut TurnPaint,
+        cx: &App,
+    ) -> TurnPapers {
+        let current = self.chapter_index();
+        let page = self.page;
+        let mode = frame.mode;
+        let page_area = frame.page_area();
+        let area = frame.area();
+        let viewport = frame.viewport();
+        let page_key = frame.page_key;
+        let (captured_ch, captured_pg) = self
+            .captured_page
+            .unwrap_or((usize::MAX, usize::MAX));
+        let (captured_w, captured_h) = self.captured_size.unwrap_or((-1.0, -1.0));
+        // 要摆的那几页：定住时只有当前这一页；动画在走时**多出另一张纸**
+        // （同章邻页，或跨章的目标页），两张各自怎么摆由这一趟带上来的那一档
+        // 决定 —— 位移与层级都来自 [`turn_animation`]。
+        let rest = Sheet {
+            offset: (0.0, 0.0),
+            z: 0,
+            cut: None,
+        };
+        let mut papers: [Paper; 2] = std::array::from_fn(|_| {
+            Paper::empty(
+                PageRef {
+                    chapter: current,
+                    page: self.page,
+                },
+                rest,
+            )
+        });
+        let mut count = 1usize;
+        let mut cross_chapter = false;
+        // 双页折页这一趟的逐栏取舍要在 `if let Some(frame)` 之外读，先把这几格提出来。
+        let mut leaf_turn = false;
+        let mut leaf_column = 0usize;
+        let mut other_column = 1usize;
+        let mut turn_leaving: Option<PageRef> = None;
+        if let Some(turn_frame) = frame.turn {
+            let style = turn_animation::of(turn_frame.style);
+            // 折线姿态与「这一屏有多宽」两条臂共走一份计划（见 `turn_view::plan_sheets`）。
+            let turn_view::SheetPlan {
+                curl_area,
+                free_right,
+                pose,
+            } = turn_view::plan_sheets(&turn_frame, mode, page_area, area);
+            if turn_frame.style == PageTurn::Curl {
+                paint.leaf = Some(curl_area);
+            }
+            // 只有这张「出场页」的捕获确实完整时才开 GPU 卷曲。捕获也可能因为
+            // 进场横移还没停、尺寸刚变或偏好刚重排而不可用；此时强行用半张/旧的
+            // 纹理，右侧就会采到捕获矩形外。没有可用纹理时退回 CPU 裁页，宁可不
+            // 卷，也不要那条黑带。
+            let leaving_ref = turn_frame.leaving.unwrap_or(PageRef {
+                chapter: current,
+                page,
+            });
+            // 只有这张「出场页」的捕获确实完整时才开 GPU 卷曲；几何、顶点缓存与
+            // uniform 的装配两条臂共用（见 `turn_view::build_curl_mesh`）。
+            if turn_frame.style == PageTurn::Curl && capture.front_valid(leaving_ref, viewport) {
+                paint.mesh = turn_view::build_curl_mesh(
+                    &turn_view::CurlAsk {
+                        progress: turn_frame.progress,
+                        released: matches!(turn_frame.run, TurnRun::Released { .. }),
+                        revert: matches!(turn_frame.run, TurnRun::Released { revert: true, .. }),
+                        free_right,
+                        pose,
+                        curl_area,
+                        content_area: area,
+                        viewport,
+                        page_key,
+                        captured: (captured_ch, captured_pg, captured_w, captured_h),
+                        capture_valid: true,
+                        paper: cx.theme().background.to_rgb(),
+                    },
+                    &mut self.curl_mesh,
+                );
+            }
+            // 折页那一档不再给 CPU 影子：纸面与圆柱受光都在 GPU 那张网格里
+            // （见 `curl.rs`、`page_curl.wgsl`）。`shades_at` 的默认实现给回空清单，
+            // 所以这一句对别的几档就是「照旧」。`pose` 是上面拼的那一份：带着**补间
+            // 之后**的手与弹回的时钟，网格与摆位层读的都是它。
+            paint.shades = style.shades_at(turn_frame.progress, curl_area, pose);
+            let [incoming, outgoing] = style.sheets_at(turn_frame.progress, curl_area, pose);
+            let leaving_ref = turn_frame.leaving.unwrap_or(PageRef {
+                chapter: current,
+                page,
+            });
+            let arriving_ref = turn_frame.arriving.unwrap_or(PageRef {
+                chapter: current,
+                page,
+            });
+            // 同一张纸既当出场又当进场时不拆栏：正常走不到（`turn()` 只按
+            // `TurnPlan` 里真会换页那几支起趟），但真走到了，拆栏会把两栏都判给
+            // 捕获层，主场景一片空白。
+            // 这一趟是不是「双页里只揭靠手指那一张 leaf」—— 只有仿真折页是，判据在
+            // [`turn_animation::paper_area`]，这里读它盖上的那一格。它管的是**哪一栏
+            // 在纸上**：其余几档在双页里两栏同属那张移动的纸，谁都不许停在原地。
+            leaf_turn = curl_area.spread_leaf && leaving_ref != arriving_ref;
+            leaf_column = if free_right { 1 } else { 0 };
+            other_column = 1 - leaf_column;
+            turn_leaving = Some(leaving_ref);
+            paint.arriving = Some(arriving_ref);
+            // 这一趟要烘的背面（捕获层 2）：揭起来那张纸的背面 = 目标跨页的另一半
+            // （双页）/ 目标页整张（单页）。网格真画出来了才有采样它的人；同一趟里
+            // 目标不变、纹理跨帧留着，所以只对**没烘过**的那一格烘一趟。
+            // 跨章那一趟的目标章可能还没排完版：那一栏排不出内容，背面就只是一张
+            // 清成纸色的空纹理（与同一帧底下那张目标页同样空着是一致的）。
+            if paint.mesh.is_some() {
+                let key = (
+                    arriving_ref.chapter,
+                    arriving_ref.page,
+                    if leaf_turn { other_column } else { 0 },
+                );
+                if self.captured_back != Some((key, viewport)) {
+                    paint.back_key = Some(key);
+                }
+            }
+            if arriving_ref.chapter != current {
+                // 跨章：源页往外走、目标页往里走，各用各的章。
+                cross_chapter = true;
+                papers[0] = Paper::empty(leaving_ref, outgoing);
+                papers[1] = Paper::empty(arriving_ref, incoming);
+                count = 2;
+            } else {
+                // 同章：`slots[0]` 恒是进场那一张 —— 命中与 `page_shift` 归它。
+                // 入树顺序另按 `z` 排（见下），两者不必一致：覆盖档要把这张
+                // 抬到停着的旧页之上，而它始终是「这一屏的当前页」。
+                papers[0] = Paper::empty(arriving_ref, incoming);
+                if leaving_ref != arriving_ref {
+                    papers[1] = Paper::empty(leaving_ref, outgoing);
+                    count = 2;
+                }
+            }
+            // 单页 C 方案只摆进场那一张：旧页已经在捕获纹理里，由 GPU 网格卷。
+            // 双页不能只摆一张：静态页（当前跨页的另一半）与底层新页（下一跨页的
+            // 同侧半页）都得留着，网格只盖住被揭起来的那一张 leaf。两张纸都不裁，
+            // 由下面的逐栏跳过把 leaf 正面与背面取掉。
+            if paint.mesh.is_some() && mode != chrome::PageMode::Spread {
+                let arriving_slot = if papers[0].identity == arriving_ref { 0 } else { 1 };
+                papers.swap(0, arriving_slot);
+                count = 1;
+            }
+        }
+        // 当前页这一帧偏了多少。命中换算读这一格（`to_layout` 里减掉它）：
+        // 跨章时两张纸的章不同，命中在 [`Self::turn_in_flight`] 已经让位，
+        // 这里给 0 是让旧坐标不再被减第二次。
+        self.page_shift = if cross_chapter {
+            (0.0, 0.0)
+        } else {
+            papers[0].sheet.offset
+        };
+
+        TurnPapers {
+            papers,
+            count,
+            leaf_turn,
+            leaf_column,
+            other_column,
+            turn_leaving,
+        }
+    }
+}
+
 impl ReaderSession {
     fn render_paper(
         &mut self,
@@ -1654,56 +1708,28 @@ impl ReaderSession {
             back_children,
             incoming_element,
             incoming_children,
-            ..
+            incoming_images,
+            front_missing,
+            back_missing,
+            incoming_missing,
         } = capture;
         let is_picture = picture.is_some();
-        if let Some((href, page_x, page_w, art_top, contain)) = picture {
-            frame_out.page_picture = true;
-            frame_out.bare_bands = true;
-            scene.images.clear();
-            if let Some(image) = doc.images().decode_request(&href) {
-                let page_h = window_height;
-                let fit = if contain {
-                    crate::ui::foundation::images::ObjectFit::Contain
-                } else {
-                    crate::ui::foundation::images::ObjectFit::Cover
-                };
-                scene.images.push(VisibleImage {
-                    x: page_x,
-                    top: art_top,
-                    width: page_w,
-                    height: page_h,
-                    image,
-                    footnote: None,
-                    fit,
-                    // 这一张是「铺满这一页的整页图」，不是哪一叠里的一张。
-                    stack: None,
-                });
-                if role.draws_main() && turn.is_none() {
-                    let size = if contain {
-                        BackgroundSize::Contain
-                    } else {
-                        BackgroundSize::Cover
-                    };
-                    let picture =
-                        crate::ui::features::reader::view::scene::full_page_picture(
-                            &href, size,
-                        );
-                    if let Some(decor) =
-                        crate::ui::features::reader::view::scene::backdrop_decor(
-                            &[picture],
-                            page_x,
-                            art_top,
-                            page_w,
-                            page_h,
-                            doc.images(),
-                        )
-                    {
-                        backdrops
-                            .extend(decoration_child(decor, &atlas, view, cx));
-                    }
-                }
-            }
+        if let Some(picture) = picture {
+            paint_picture_page(
+                PicturePageAsk {
+                    doc,
+                    picture,
+                    window_height,
+                    role,
+                    turn,
+                },
+                &mut scene,
+                &mut *backdrops,
+                &mut *frame_out,
+                &atlas,
+                view,
+                cx,
+            );
         }
         // 读数带：一页一份，跟着这一页的位移走。单页时就是一整条；
         // 双页时左右各半条 —— 左页念位置，右页念百分比，章名只留在
@@ -1749,169 +1775,69 @@ impl ReaderSession {
             }
             element.extend(scene.runs);
         }
-        // 块级装饰（`background-color`、`border`、`<hr>`）也跟着那张纸
-        // 走：中心落在裁掉那一侧就整块不画。字是逐点裁的，而一个装饰块
-        // 是一个矩形、没有「裁一半」的画法 —— 逐像素的多边形裁剪要的是
-        // gpui 没有的东西（`ContentMask` 只有矩形）。留白块比伸到隔壁那
-        // 张纸上的色块好读。捕获层里那两份副本照单全收（不裁）。
-        // 只有这一帧真要写捕获副本时才逐块查背景图；实时页那一趟多查一遍
-        // `painted_picture` 是白花钱。
-        let capturing = capture_front || back_copy || incoming_copy;
-        for decor in scene.decorations {
-            // 背景图没全到就先把捕获副本标成不完整：缺一张的纹理一旦被记成
-            // 「已烘」，滑动时旧页就永久少一张图。实时那一份照画（该到的会到）。
-            if capturing && !decoration_ready(&decor, &atlas, view, cx) {
-                if capture_front {
-                    capture.front_missing = true;
-                }
-                if back_copy {
-                    capture.back_missing = true;
-                }
-                if incoming_copy {
-                    capture.incoming_missing = true;
-                }
-            }
-            if capture_front {
-                front_decor.extend(decoration_child(
-                    decor.clone(),
-                    &atlas,
-                    view,
-                    cx,
-                ));
-            }
-            if back_copy {
-                back_children.extend(decoration_child(
-                    decor.clone(),
-                    &atlas,
-                    view,
-                    cx,
-                ));
-            }
-            if incoming_copy {
-                incoming_children.extend(decoration_child(
-                    decor.clone(),
-                    &atlas,
-                    view,
-                    cx,
-                ));
-            }
-            if !role.draws_main() {
-                continue;
-            }
-            if cut.is_some_and(|cut| {
-                !cut.keeps(
-                    decor.x + decor.width * 0.5,
-                    decor.top + decor.height * 0.5,
-                )
-            }) {
-                continue;
-            }
-            column.extend(decoration_child(decor, &atlas, view, cx));
-        }
-        // 两张栏的图都要摆进同一份 `overlays`；跨章滑动时目标章那几张
-        // 也按「这一帧在场」记账，帧末回收就不会把还在画的图放掉。
-        for image in scene.images {
-            // 中心落在折线哪一侧，就按那一侧决定画不画。整张一起收而不
-            // 是切一半：切一半要逐像素的多边形裁剪，而 gpui 的 `ContentMask`
-            // 只有矩形（gpui-pre-0.3.9 `src/window.rs:2226` 那条注释）。
-            // 但 `painted` 照问 —— 那一问就是「这一帧在场」的记账，跳过它
-            // 会让被折走的图在 17 帧里被判离场，露出来时再白上传一趟。
-            let shown = cut.is_none_or(|cut| {
-                cut.keeps(
-                    image.x + image.width * 0.5,
-                    image.top + image.height * 0.5,
-                )
-            });
-            frame_out.painted_keys.push(image.image.key.clone());
-            let Some(rendered) =
-                painted_picture(&atlas, &image.image, view, cx)
-            else {
-                // 图还没到（也没判失败）时捕获副本不完整；失败算落地 —— 实时页
-                // 上它本来也不会出现。
-                if !atlas.read_with(cx, |atlas, _| atlas.failed(&image.image.key)) {
-                    if capture_front {
-                        capture.front_missing = true;
-                    }
-                    if back_copy {
-                        capture.back_missing = true;
-                    }
-                    if incoming_copy {
-                        capture.incoming_missing = true;
-                    }
-                }
-                continue;
-            };
-            // 捕获层里那两份用不带手势的纯 `img`：同一屏摆两个同 id 的元素，
-            // 命中区就叠了一份，「看大图」那一击会落到纹理的副本上。
-            if capture_front {
-                front_images.push(plain_image(
-                    image.x,
-                    image.top,
-                    image.width,
-                    image.height,
-                    rendered.clone(),
-                ));
-            }
-            if back_copy {
-                back_children.push(plain_image(
-                    image.x,
-                    image.top,
-                    image.width,
-                    image.height,
-                    rendered.clone(),
-                ));
-            }
-            if incoming_copy {
-                incoming_children.push(plain_image(
-                    image.x,
-                    image.top,
-                    image.width,
-                    image.height,
-                    rendered.clone(),
-                ));
-                capture.incoming_images += 1;
-            }
-            if !role.draws_main() || !shown {
-                continue;
-            }
-            let index = overlays.len();
-            let pan = image_pans
-                .get(&image.image.key)
-                .copied()
-                .unwrap_or((0.0, 0.0));
-            // 叠图那一叠的「下面还有一张」提示与一排小点：与连续滚动
-            // 那一档同一套（`stack_peek` / `stack_dots`）。分页这一臂
-            // 从前只画当前那张，叠起来的几张看起来就是一整张 ——
-            // 读者在分页档根本看不出还能横滑。
-            let dots = image.stack.filter(|mark| mark.count > 1).map(|mark| {
-                (image.x, image.top + image.height, image.width, mark)
-            });
-            if let Some((x, bottom, w, mark)) = dots
-                && mark.index + 1 < mark.count
-            {
-                overlays.push(stack_peek(x, bottom, w, cx));
-            }
-            overlays.push(image_child(
-                image,
-                rendered,
-                ImageTap {
-                    viewer: &viewer,
-                    long_press,
-                    index,
-                    reader: &reader_weak,
-                },
-                ImageDrag {
-                    pan,
-                    hits: &image_hits,
-                    frame_no: image_hits_frame,
-                    chapter: page_ref.chapter,
-                    stack_hits: &stack_hits,
-                },
-            ));
-            if let Some((x, bottom, w, mark)) = dots {
-                overlays.push(stack_dots(x, bottom, w, mark, cx));
-            }
-        }
+        paint_scene_decorations(
+            &atlas,
+            view,
+            std::mem::take(&mut scene.decorations),
+            SceneDecorFacts {
+                cut,
+                role,
+                capture_front,
+                back_copy,
+                incoming_copy,
+            },
+            &mut *column,
+            SceneDecorCapture {
+                front_decor: &mut *front_decor,
+                back_children: &mut *back_children,
+                incoming_children: &mut *incoming_children,
+                front_missing: &mut *front_missing,
+                back_missing: &mut *back_missing,
+                incoming_missing: &mut *incoming_missing,
+            },
+            cx,
+        );
+        let images = std::mem::take(&mut scene.images);
+        paint_scene_images(
+            SceneImagesCtx {
+                atlas: &atlas,
+                view,
+                viewer: &viewer,
+                long_press,
+                reader_weak: &reader_weak,
+                image_pans,
+                image_hits: &image_hits,
+                image_hits_frame,
+                stack_hits: &stack_hits,
+                capture_front,
+            },
+            SceneImagesFacts {
+                page: page_ref,
+                cut,
+                role,
+                back_copy,
+                incoming_copy,
+            },
+            images,
+            &mut PageSceneTargets {
+                element: &mut *element,
+                overlays: &mut *overlays,
+                column: &mut *column,
+                backdrops: &mut *backdrops,
+                page_bands: &mut *page_bands,
+                out: &mut *frame_out,
+            },
+            SceneImageCapture {
+                front_images: &mut *front_images,
+                back_children: &mut *back_children,
+                incoming_children: &mut *incoming_children,
+                incoming_images: &mut *incoming_images,
+                front_missing: &mut *front_missing,
+                back_missing: &mut *back_missing,
+                incoming_missing: &mut *incoming_missing,
+            },
+            cx,
+        );
         let spot = MarkSpot {
             doc,
             window: &*window,
@@ -1954,6 +1880,335 @@ impl ReaderSession {
         crate::ui::features::reader::model::perf::add(|f| {
             f.fills_ns += __fills
         });
+    }
+}
+
+/// 整页图这一栏要的那几格输入。
+struct PicturePageAsk<'a> {
+    doc: &'a Document,
+    picture: Picture,
+    window_height: f32,
+    role: CaptureRole,
+    turn: Option<TurnFrame>,
+}
+
+/// 整页图：把排版层那张流内图换成铺满这一页的纸面图，外面再压一层同图的背板
+/// （专门把状态栏 / 手势条那两条也铺到）。背板只在这一页上屏时加 —— 被捕获
+/// 带走的那一帧不再画它，否则纸已经卷起来了、顶上那条还留着原图。
+fn paint_picture_page(
+    ask: PicturePageAsk<'_>,
+    scene: &mut Scene,
+    backdrops: &mut Vec<AnyElement>,
+    out: &mut FrameOut,
+    atlas: &Entity<ImageAtlas>,
+    view: EntityId,
+    cx: &mut App,
+) {
+    let PicturePageAsk {
+        doc,
+        picture,
+        window_height,
+        role,
+        turn,
+    } = ask;
+    let (href, page_x, page_w, art_top, contain) = picture;
+    out.page_picture = true;
+    out.bare_bands = true;
+    scene.images.clear();
+    if let Some(image) = doc.images().decode_request(&href) {
+        let page_h = window_height;
+        let fit = if contain {
+            crate::ui::foundation::images::ObjectFit::Contain
+        } else {
+            crate::ui::foundation::images::ObjectFit::Cover
+        };
+        scene.images.push(VisibleImage {
+            x: page_x,
+            top: art_top,
+            width: page_w,
+            height: page_h,
+            image,
+            footnote: None,
+            fit,
+            // 这一张是「铺满这一页的整页图」，不是哪一叠里的一张。
+            stack: None,
+        });
+        if role.draws_main() && turn.is_none() {
+            let size = if contain {
+                BackgroundSize::Contain
+            } else {
+                BackgroundSize::Cover
+            };
+            let picture =
+                crate::ui::features::reader::view::scene::full_page_picture(&href, size);
+            if let Some(decor) = crate::ui::features::reader::view::scene::backdrop_decor(
+                &[picture],
+                page_x,
+                art_top,
+                page_w,
+                page_h,
+                doc.images(),
+            ) {
+                backdrops.extend(decoration_child(decor, atlas, view, cx));
+            }
+        }
+    }
+}
+
+/// 一栏的装饰这一帧归谁、按哪条折线裁。
+struct SceneDecorFacts {
+    cut: Option<turn_animation::Cut>,
+    role: CaptureRole,
+    capture_front: bool,
+    back_copy: bool,
+    incoming_copy: bool,
+}
+
+/// 装饰要写的那几格捕获副本。
+struct SceneDecorCapture<'a> {
+    front_decor: &'a mut Vec<AnyElement>,
+    back_children: &'a mut Vec<AnyElement>,
+    incoming_children: &'a mut Vec<AnyElement>,
+    front_missing: &'a mut bool,
+    back_missing: &'a mut bool,
+    incoming_missing: &'a mut bool,
+}
+
+/// 块级装饰（`background-color`、`border`、`<hr>`）也跟着那张纸走：中心落在
+/// 裁掉那一侧就整块不画。字是逐点裁的，而一个装饰块是一个矩形、没有「裁一半」
+/// 的画法 —— 逐像素的多边形裁剪要的是 gpui 没有的东西（`ContentMask` 只有矩形）。
+/// 留白块比伸到隔壁那张纸上的色块好读。捕获层里那两份副本照单全收（不裁）。
+///
+/// 只有这一帧真要写捕获副本时才逐块查背景图；实时页那一趟多查一遍
+/// `painted_picture` 是白花钱。
+fn paint_scene_decorations(
+    atlas: &Entity<ImageAtlas>,
+    view: EntityId,
+    decorations: Vec<BlockDecor>,
+    facts: SceneDecorFacts,
+    column: &mut Div,
+    capture: SceneDecorCapture<'_>,
+    cx: &mut App,
+) {
+    let SceneDecorFacts {
+        cut,
+        role,
+        capture_front,
+        back_copy,
+        incoming_copy,
+    } = facts;
+    let capturing = capture_front || back_copy || incoming_copy;
+    for decor in decorations {
+        // 背景图没全到就先把捕获副本标成不完整：缺一张的纹理一旦被记成
+        // 「已烘」，滑动时旧页就永久少一张图。实时那一份照画（该到的会到）。
+        if capturing && !decoration_ready(&decor, atlas, view, cx) {
+            if capture_front {
+                *capture.front_missing = true;
+            }
+            if back_copy {
+                *capture.back_missing = true;
+            }
+            if incoming_copy {
+                *capture.incoming_missing = true;
+            }
+        }
+        if capture_front {
+            capture
+                .front_decor
+                .extend(decoration_child(decor.clone(), atlas, view, cx));
+        }
+        if back_copy {
+            capture
+                .back_children
+                .extend(decoration_child(decor.clone(), atlas, view, cx));
+        }
+        if incoming_copy {
+            capture
+                .incoming_children
+                .extend(decoration_child(decor.clone(), atlas, view, cx));
+        }
+        if !role.draws_main() {
+            continue;
+        }
+        if cut.is_some_and(|cut| {
+            !cut.keeps(
+                decor.x + decor.width * 0.5,
+                decor.top + decor.height * 0.5,
+            )
+        }) {
+            continue;
+        }
+        column.extend(decoration_child(decor, atlas, view, cx));
+    }
+}
+
+/// 一屏插图要的那几格只读输入（从 `RenderFrame` 里拆出来，避免整包借用打架）。
+struct SceneImagesCtx<'a> {
+    atlas: &'a Entity<ImageAtlas>,
+    view: EntityId,
+    viewer: &'a Option<Entity<ImageViewer>>,
+    long_press: bool,
+    reader_weak: &'a WeakEntity<ReaderSession>,
+    image_pans: &'a HashMap<String, (f32, f32)>,
+    image_hits: &'a Rc<RefCell<Vec<ImageHit>>>,
+    image_hits_frame: u64,
+    stack_hits: &'a Rc<RefCell<Vec<StackHit>>>,
+    capture_front: bool,
+}
+
+/// 一栏的图这一帧归谁、按哪条折线裁。
+struct SceneImagesFacts {
+    page: PageRef,
+    cut: Option<turn_animation::Cut>,
+    role: CaptureRole,
+    back_copy: bool,
+    incoming_copy: bool,
+}
+
+/// 一栏的图要写的那几格捕获副本（从 `CaptureSink` 里按字段借出来，
+/// 与 `render_page_scene` 后面的装饰 / 文字副本共用同一个 sink）。
+struct SceneImageCapture<'a> {
+    front_images: &'a mut Vec<AnyElement>,
+    back_children: &'a mut Vec<AnyElement>,
+    incoming_children: &'a mut Vec<AnyElement>,
+    incoming_images: &'a mut u32,
+    front_missing: &'a mut bool,
+    back_missing: &'a mut bool,
+    incoming_missing: &'a mut bool,
+}
+
+/// 一栏里的图：实时层、三份捕获副本与叠图提示。
+///
+/// 「这一帧在场」的记账（`painted_keys`）与捕获副本缺图的标记必须在同一趟里做：
+/// 前者撑住图集回收，后者挡住一张缺图的纹理被记成「已烘」。中心落在折线哪一侧
+/// 决定实时层画不画；捕获副本那一份照收，否则折走的图会在回收里被判离场。
+fn paint_scene_images(
+    ctx: SceneImagesCtx<'_>,
+    facts: SceneImagesFacts,
+    images: Vec<VisibleImage>,
+    targets: &mut PageSceneTargets<'_>,
+    capture: SceneImageCapture<'_>,
+    cx: &mut App,
+) {
+    let SceneImagesCtx {
+        atlas,
+        view,
+        viewer,
+        long_press,
+        reader_weak,
+        image_pans,
+        image_hits,
+        image_hits_frame,
+        stack_hits,
+        capture_front,
+    } = ctx;
+    let SceneImagesFacts {
+        page,
+        cut,
+        role,
+        back_copy,
+        incoming_copy,
+    } = facts;
+    for image in images {
+        // 中心落在折线哪一侧，就按那一侧决定画不画。整张一起收而不
+        // 是切一半：切一半要逐像素的多边形裁剪，而 gpui 的 `ContentMask`
+        // 只有矩形（gpui-pre-0.3.9 `src/window.rs:2226` 那条注释）。
+        // 但 `painted` 照问 —— 那一问就是「这一帧在场」的记账，跳过它
+        // 会让被折走的图在 17 帧里被判离场，露出来时再白上传一趟。
+        let shown = cut.is_none_or(|cut| {
+            cut.keeps(
+                image.x + image.width * 0.5,
+                image.top + image.height * 0.5,
+            )
+        });
+        targets.out.painted_keys.push(image.image.key.clone());
+        let Some(rendered) = painted_picture(atlas, &image.image, view, cx) else {
+            // 图还没到（也没判失败）时捕获副本不完整；失败算落地 —— 实时页
+            // 上它本来也不会出现。
+            if !atlas.read_with(cx, |atlas, _| atlas.failed(&image.image.key)) {
+                if capture_front {
+                    *capture.front_missing = true;
+                }
+                if back_copy {
+                    *capture.back_missing = true;
+                }
+                if incoming_copy {
+                    *capture.incoming_missing = true;
+                }
+            }
+            continue;
+        };
+        // 捕获层里那两份用不带手势的纯 `img`：同一屏摆两个同 id 的元素，
+        // 命中区就叠了一份，「看大图」那一击会落到纹理的副本上。
+        if capture_front {
+            capture.front_images.push(plain_image(
+                image.x,
+                image.top,
+                image.width,
+                image.height,
+                rendered.clone(),
+            ));
+        }
+        if back_copy {
+            capture.back_children.push(plain_image(
+                image.x,
+                image.top,
+                image.width,
+                image.height,
+                rendered.clone(),
+            ));
+        }
+        if incoming_copy {
+            capture.incoming_children.push(plain_image(
+                image.x,
+                image.top,
+                image.width,
+                image.height,
+                rendered.clone(),
+            ));
+            *capture.incoming_images += 1;
+        }
+        if !role.draws_main() || !shown {
+            continue;
+        }
+        let index = targets.overlays.len();
+        let pan = image_pans
+            .get(&image.image.key)
+            .copied()
+            .unwrap_or((0.0, 0.0));
+        // 叠图那一叠的「下面还有一张」提示与一排小点：与连续滚动
+        // 那一档同一套（`stack_peek` / `stack_dots`）。分页这一臂
+        // 从前只画当前那张，叠起来的几张看起来就是一整张 ——
+        // 读者在分页档根本看不出还能横滑。
+        let dots = image
+            .stack
+            .filter(|mark| mark.count > 1)
+            .map(|mark| (image.x, image.top + image.height, image.width, mark));
+        if let Some((x, bottom, w, mark)) = dots
+            && mark.index + 1 < mark.count
+        {
+            targets.overlays.push(stack_peek(x, bottom, w, cx));
+        }
+        targets.overlays.push(image_child(
+            image,
+            rendered,
+            ImageTap {
+                viewer,
+                long_press,
+                index,
+                reader: reader_weak,
+            },
+            ImageDrag {
+                pan,
+                hits: image_hits,
+                frame_no: image_hits_frame,
+                chapter: page.chapter,
+                stack_hits,
+            },
+        ));
+        if let Some((x, bottom, w, mark)) = dots {
+            targets.overlays.push(stack_dots(x, bottom, w, mark, cx));
+        }
     }
 }
 
