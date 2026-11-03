@@ -62,7 +62,7 @@ pub(in crate::ui::features::reader) struct Pose {
     pub rtl: bool,
     /// 读者这一笔的手；`None` = 不是手指起的（点屏 / 按键 / 滚轮）。
     pub grip: Option<Grip>,
-    /// 弹回那一腿自己走了几成（[`super::release_clock`] 给的那一个数）。`Some` = 这一趟正在往
+    /// 弹回那一腿自己走了几成（松手那一腿的时钟给的那一个数）。`Some` = 这一趟正在往
     /// 回退、手指已经不在上了，那一腿**不借手**：折线保持松手那一刻的朝向与卷径，只沿自己的法向
     /// 一路退到「一个角都没折走」之外。
     ///

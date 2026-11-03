@@ -38,7 +38,7 @@ use folio_core::layout::fragment::column_offset;
 use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    A11ySubtreeBuilder, AnyElement, Bounds, Context, ElementId, Entity, EntityId, Hsla,
+    A11ySubtreeBuilder, AnyElement, App, Bounds, Context, ElementId, Entity, EntityId, Hsla,
     InteractiveElement as _, IntoElement, PageCurlMesh, ParentElement, Render, Role,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _,
     WeakEntity, Window, accesskit, div, point, px, size,
@@ -111,6 +111,11 @@ struct TurnFrame {
     grip: Option<crate::ui::features::reader::motion::turn_animation::Grip>,
     /// 这一趟的进度由谁给（松手那一腿要把「手指此刻」补间到落点，所以要看见 `Released`）。
     run: crate::ui::features::reader::model::session::TurnRun,
+    /// 松手那一腿自己走了几成（缓动之后，0 = 松手那一刻、1 = 走完）。只有 `Released`
+    /// 那一腿有值；折页拿它当手指的时钟 —— 这一格**不能**从 `progress` 反解：折页的
+    /// 视觉走量比 `progress` 的归一化长（见 `turn_view::plan_sheets`），拖过头时
+    /// `from = 1`，反解的分母被夹成 `1e-3` 会恒得 0，纸就定在松手那一格不动。
+    release: Option<f32>,
     /// `true` = 往后走（下一页 / 往下滚）。
     forward: bool,
     /// `true` = 这一本从右往左读。只有折页那一档读它（它决定纸的**自由边**在哪一侧，
@@ -184,8 +189,8 @@ impl ReaderSession {
         //
         // 手指还握着时**不采时钟**：`Presence` 的意义是「自己续帧追一个终点」，而此刻终点
         // 在手指上，两头一起动就是画面在拉扯。
-        let (progress, walked) = match turn.run {
-            TurnRun::Following { t } => (t, false),
+        let (progress, walked, release) = match turn.run {
+            TurnRun::Following { t } => (t, false, None),
             run => {
                 // `present` 给 `true`：这一趟只需要「进场」那半 —— 走了多少就是 `progress`，
                 // 出场那一页由同一个数反着算（`turn_animation::slide::slide_shifts` 那两个返回值），
@@ -227,9 +232,13 @@ impl ReaderSession {
                         // 松手那一腿不是从 0 走的：从手指那一点接着走完或走回，否则读者会
                         // 看见自己握过的那一截被重放一遍。
                         let progress = chrome::tween(from, if revert { 0.0 } else { 1.0 }, eased);
-                        (progress, cx.reduce_motion() || elapsed >= over)
+                        (
+                            progress,
+                            cx.reduce_motion() || elapsed >= over,
+                            Some(eased),
+                        )
                     }
-                    _ => (sampled.progress, sampled.progress >= 1.0),
+                    _ => (sampled.progress, sampled.progress >= 1.0, None),
                 }
             }
         };
@@ -265,9 +274,180 @@ impl ReaderSession {
             scroll: turn.scroll,
             grip: turn.grip,
             run: turn.run,
+            release,
             forward: turn.forward,
             rtl: self.progression_rtl(),
         })
+    }
+}
+
+/// 选区这一帧的屏幕几何输入。
+struct SelectionGeom {
+    mode: chrome::PageMode,
+    columns: usize,
+    usable: f32,
+    gap: f32,
+    page_shift: (f32, f32),
+    content_top: f32,
+    viewport_height: f32,
+    chapter_gap: f32,
+}
+
+/// 选区这一帧的产物：高亮/把手，外加菜单条的锚位。
+struct SelectionFrame {
+    visual: SelectionVisual,
+    /// 首行高亮的顶与末行高亮的底（菜单条放不下时往下掉）。
+    anchor: (Option<f32>, Option<f32>),
+    /// 首末高亮中心的横向中点。
+    x: Option<f32>,
+}
+
+impl ReaderSession {
+    /// 把「选区 ∩ 可见范围」换成元素局部矩形，并算出菜单条锚位。
+    ///
+    /// `book` 只在可重排那一族给：定版式的高亮已经由它自己那一臂算好（`fixed_visual`），
+    /// 这里只接过来补把手与锚位。两端都滚出可视范围就没有把手，与 gpui-kit
+    /// 「端点跟着它标记的字消失」同一套规矩。
+    fn selection_frame(
+        &self,
+        book: Option<&Book>,
+        window: &Window,
+        cx: &App,
+        geom: SelectionGeom,
+        fixed_visual: Option<SelectionVisual>,
+    ) -> SelectionFrame {
+        let SelectionGeom {
+            mode,
+            columns,
+            usable,
+            gap,
+            page_shift,
+            content_top,
+            viewport_height,
+            chapter_gap,
+        } = geom;
+        let mut visual = fixed_visual.unwrap_or_else(|| SelectionVisual {
+            color: cx.theme().selection,
+            ..Default::default()
+        });
+        if let (Some(book), Some(selected)) = (book, self.selection.clone()) {
+            if let Some(doc) = book.span_doc(selected.chapter)
+                && doc.is_current()
+            {
+                if mode.is_continuous() {
+                    // 章基线把视口顶换算成章内坐标：可见带 → 覆盖它的字符区间；
+                    // 选区与它求交，矩形只扫可见的那几行。
+                    let base = book.base_of(selected.chapter, chapter_gap).unwrap_or(0.0);
+                    let layout = doc.layout();
+                    let total = doc.text_map().chars();
+                    // 章内排版坐标 = 全局 y − 章基线（与 `local_band` 同一口径：
+                    // `content_top` 在绘制式子里已经加过一次，这里不许再减）。
+                    let band = local_band(
+                        self.scroll_painted..(self.scroll_painted + viewport_height),
+                        base,
+                    );
+                    let band_top = band.start;
+                    let band_bottom = band.end;
+                    let first = line_at_y(layout, band_top);
+                    let last = line_at_y(layout, band_bottom);
+                    let sub = selected.range.start.max(doc.coordinate_of_line(first))
+                        ..selected.range.end.min(if last + 1 < layout.lines.len() {
+                            doc.coordinate_of_line(last + 1)
+                        } else {
+                            total
+                        });
+                    highlight_rects(
+                        &MarkSpot {
+                            doc,
+                            window,
+                            cx,
+                            x: self.prefs.margin_x,
+                            origin_y: band_top,
+                            // 连续滚动永远走横排（竖排只在分页那一档落地），长度这一格不参与。
+                            flow_len: band_bottom - band_top,
+                            header: content_top,
+                            band: band_top..band_bottom,
+                        },
+                        sub,
+                        &mut visual.highlights,
+                    );
+                } else {
+                    // 分页 / 双页：翻走即清，选区必在锚章 —— 逐栏求交照搬。
+                    let layout = doc.layout();
+                    let total = doc.text_map().chars();
+                    let width = folio_core::layout::fragment::column_width(usable, columns, gap)
+                        .max(1.0);
+                    for index in 0..columns {
+                        let Some(slice) = doc.slice_of(self.page, index) else {
+                            continue;
+                        };
+                        if slice.empty || slice.lines.is_empty() {
+                            continue;
+                        }
+                        let first_box = &layout.lines[slice.lines.start];
+                        let last_box = &layout.lines[slice.lines.end - 1];
+                        let sub = selected
+                            .range
+                            .start
+                            .max(doc.coordinate_of_line(slice.lines.start))
+                            ..selected
+                                .range
+                                .end
+                                .min(if slice.lines.end < layout.lines.len() {
+                                    doc.coordinate_of_line(slice.lines.end)
+                                } else {
+                                    total
+                                });
+                        highlight_rects(
+                            &MarkSpot {
+                                doc,
+                                window,
+                                cx,
+                                // 与 `Scene::build` 那两个参数同源：正文偏了多少，高亮就跟着偏。
+                                x: self.prefs.margin_x
+                                    + column_offset(width, gap, slice.column)
+                                    + page_shift.0,
+                                origin_y: slice.origin_y,
+                                flow_len: slice.height,
+                                header: content_top + page_shift.1,
+                                // 带说的是推进轴：递分片自己那一段，比从首末行盒再折一次准，
+                                // 而横排下这两个数是同一个区间（片的长就是末行底减首行顶）。
+                                band: first_box.y..(last_box.y + last_box.height),
+                            },
+                            sub,
+                            &mut visual.highlights,
+                        );
+                    }
+                }
+            }
+            if let Some(first) = visual.highlights.first().copied() {
+                visual.start_caret =
+                    Some(Bounds::new(first.origin, size(px(0.0), first.size.height)));
+            }
+            if let Some(last) = visual.highlights.last().copied() {
+                visual.end_caret = Some(Bounds::new(
+                    point(last.right(), last.top()),
+                    size(px(0.0), last.size.height),
+                ));
+            }
+        }
+        let anchor = (
+            visual.highlights.first().map(|rect| f32::from(rect.top())),
+            visual
+                .highlights
+                .last()
+                .map(|rect| f32::from(rect.bottom())),
+        );
+        let x = visual
+            .highlights
+            .first()
+            .zip(visual.highlights.last())
+            .map(|(first, last)| (f32::from(first.center().x) + f32::from(last.center().x)) * 0.5);
+        SelectionFrame {
+            visual,
+            anchor,
+            x,
+        }
     }
 }
 
@@ -912,126 +1092,25 @@ impl Render for ReaderSession {
         // 定版式的高亮算在页那一臂里，菜单条却和可重排共用后面这段摆位；不把它接回来，
         // `visual.highlights` 永远是空的，`selection::slot` 判 Hidden —— 屏上选区在、
         // 菜单不出现（手机 PDF 长按的症状）。可重排那一臂仍是空的起手，下面自己填。
-        let mut visual = fixed_visual.unwrap_or_else(|| SelectionVisual {
-            color: cx.theme().selection,
-            ..Default::default()
-        });
-        if let (Source::Book(book), Some(selected)) = (&self.source, self.selection.clone()) {
-            if let Some(doc) = book.span_doc(selected.chapter)
-                && doc.is_current()
-            {
-                if mode.is_continuous() {
-                    // 章基线把视口顶换算成章内坐标：可见带 → 覆盖它的字符区间；
-                    // 选区与它求交，矩形只扫可见的那几行。
-                    let base = book.base_of(selected.chapter, chapter_gap).unwrap_or(0.0);
-                    let layout = doc.layout();
-                    let total = doc.text_map().chars();
-                    // 章内排版坐标 = 全局 y − 章基线（与上面那句 `local_band` 同一口径：
-                    // `content_top` 在绘制式子里已经加过一次，这里不许再减）。
-                    let band = local_band(
-                        self.scroll_painted..(self.scroll_painted + viewport_height),
-                        base,
-                    );
-                    let band_top = band.start;
-                    let band_bottom = band.end;
-                    let first = line_at_y(layout, band_top);
-                    let last = line_at_y(layout, band_bottom);
-                    let sub = selected.range.start.max(doc.coordinate_of_line(first))
-                        ..selected.range.end.min(if last + 1 < layout.lines.len() {
-                            doc.coordinate_of_line(last + 1)
-                        } else {
-                            total
-                        });
-                    highlight_rects(
-                        &MarkSpot {
-                            doc,
-                            window: &*window,
-                            cx,
-                            x: self.prefs.margin_x,
-                            origin_y: band_top,
-                            // 连续滚动永远走横排（竖排只在分页那一档落地），长度这一格不参与。
-                            flow_len: band_bottom - band_top,
-                            header: content_top,
-                            band: band_top..band_bottom,
-                        },
-                        sub,
-                        &mut visual.highlights,
-                    );
-                } else {
-                    // 分页 / 双页：翻走即清，选区必在锚章 —— 逐栏求交照搬。
-                    let layout = doc.layout();
-                    let total = doc.text_map().chars();
-                    let width =
-                        folio_core::layout::fragment::column_width(usable, columns, gap).max(1.0);
-                    for index in 0..columns {
-                        let Some(slice) = doc.slice_of(self.page, index) else {
-                            continue;
-                        };
-                        if slice.empty || slice.lines.is_empty() {
-                            continue;
-                        }
-                        let first_box = &layout.lines[slice.lines.start];
-                        let last_box = &layout.lines[slice.lines.end - 1];
-                        let sub = selected
-                            .range
-                            .start
-                            .max(doc.coordinate_of_line(slice.lines.start))
-                            ..selected
-                                .range
-                                .end
-                                .min(if slice.lines.end < layout.lines.len() {
-                                    doc.coordinate_of_line(slice.lines.end)
-                                } else {
-                                    total
-                                });
-                        highlight_rects(
-                            &MarkSpot {
-                                doc,
-                                window: &*window,
-                                cx,
-                                // 与 `Scene::build` 那两个参数同源：正文偏了多少，高亮就跟着偏。
-                                x: self.prefs.margin_x
-                                    + column_offset(width, gap, slice.column)
-                                    + self.page_shift.0,
-                                origin_y: slice.origin_y,
-                                flow_len: slice.height,
-                                header: content_top + self.page_shift.1,
-                                // 带说的是推进轴：递分片自己那一段，比从首末行盒再折一次准，
-                                // 而横排下这两个数是同一个区间（片的长就是末行底减首行顶）。
-                                band: first_box.y..(last_box.y + last_box.height),
-                            },
-                            sub,
-                            &mut visual.highlights,
-                        );
-                    }
-                }
-            }
-            // 把手长在首末高亮的字缘上（0 宽、一行高）；两端都滚出可视范围就没有把手，
-            // 与 gpui-kit「端点跟着它标记的字消失」同一套规矩。
-            if let Some(first) = visual.highlights.first().copied() {
-                visual.start_caret =
-                    Some(Bounds::new(first.origin, size(px(0.0), first.size.height)));
-            }
-            if let Some(last) = visual.highlights.last().copied() {
-                visual.end_caret = Some(Bounds::new(
-                    point(last.right(), last.top()),
-                    size(px(0.0), last.size.height),
-                ));
-            }
-        }
-        // 菜单条锚在首行高亮之上，放不下就掉到末行高亮之下；横向则对着选区中线。
-        let menu_anchor = (
-            visual.highlights.first().map(|rect| f32::from(rect.top())),
-            visual
-                .highlights
-                .last()
-                .map(|rect| f32::from(rect.bottom())),
+        let selection = self.selection_frame(
+            self.book(),
+            window,
+            cx,
+            SelectionGeom {
+                mode,
+                columns,
+                usable,
+                gap,
+                page_shift: self.page_shift,
+                content_top,
+                viewport_height,
+                chapter_gap,
+            },
+            fixed_visual,
         );
-        let menu_x = visual
-            .highlights
-            .first()
-            .zip(visual.highlights.last())
-            .map(|(first, last)| (f32::from(first.center().x) + f32::from(last.center().x)) * 0.5);
+        let visual = selection.visual;
+        let menu_anchor = selection.anchor;
+        let menu_x = selection.x;
         // 外壳进场那 280 ms 的横移：捕获层里的副本按 `-enter_shift` 画在**最终位置**上，捕获
         // 矩形也按最终位置取（[`capture_region`]）。两处必须同一个数 —— 副本画在最终位置而矩形
         // 按当下位置取，烘出来的就是错位的一页。

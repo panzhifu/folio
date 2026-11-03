@@ -599,7 +599,13 @@ pub(super) fn plan_sheets(
     // [`turn_animation::release_clock`] 给（两边的尺不一样：那一腿 `progress` 是往 0 退的）。
     let (grip, revert) = match frame.run {
         TurnRun::Released { from, revert, .. } => {
-            let u = turn_animation::release_clock(frame.progress, from, revert);
+            // 松手那一刻的时钟由 `turn_frame` 直接给：折页的视觉走量与 `progress`
+            // 的归一化不是同一把尺，拖过头时 `from = 1`，再从 `progress` 反解会
+            // 恒得 0（分母被夹成 `1e-3`）—— 纸定在松手那一格等完整条腿，读者读到
+            // 的是「抬手后停一下再落定」。`release_clock` 只留作兜底。
+            let u = frame
+                .release
+                .unwrap_or_else(|| turn_animation::release_clock(frame.progress, from, revert));
             if revert {
                 (frame_grip, Some(u))
             } else {
@@ -732,5 +738,47 @@ pub(super) fn plan_flat(ask: &FlatAsk<'_>) -> FlatPlan {
         arriving: flat_arriving,
         incoming_bake,
         mesh_drawn,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::features::reader::model::chrome::PageMode;
+    use crate::ui::features::reader::model::session::TurnRun;
+    use crate::ui::features::reader::motion::turn_animation::Grip;
+    use folio_core::PageTurn;
+    use std::time::{Duration, Instant};
+
+    /// 双页折页拖过头（`progress` 已被夹到 1）再松手：纸仍要沿这条腿继续折完。
+    ///
+    /// 修复前 `u` 从 `progress` 反解，`from = 1` 时分母被夹成 `1e-3`、恒得 0 ——
+    /// 手指停在松手那一格，纸定在原地等完整条腿才落定。真机读成「抬手后停一下」。
+    #[test]
+    fn a_release_past_the_end_still_moves_the_grip() {
+        let area = turn_animation::Area::new(0.0, 0.0, 1000.0, 800.0);
+        let frame = TurnFrame {
+            progress: 1.0,
+            style: PageTurn::Curl,
+            leaving: None,
+            arriving: None,
+            scroll: None,
+            grip: Some(Grip::new((0.9, 0.5), (0.6, 0.5))),
+            run: TurnRun::Released {
+                from: 1.0,
+                revert: false,
+                over: Duration::from_millis(200),
+                since: Instant::now(),
+            },
+            release: Some(0.5),
+            forward: true,
+            rtl: false,
+        };
+        let plan = plan_sheets(&frame, PageMode::Spread, area, area);
+        let at = plan.pose.grip.expect("折页该有手指").at.0;
+        assert!(
+            at < 0.0,
+            "松手后手指该沿原方向继续走（实得 at.x = {at}），不能停在松手那一格"
+        );
     }
 }
