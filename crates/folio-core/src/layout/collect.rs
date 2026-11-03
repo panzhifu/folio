@@ -720,7 +720,7 @@ impl<'a> Ctx<'a> {
         let pr = br + style.padding_right.resolve(width).max(0.0);
         let pt = bt + style.padding_top.resolve(width).max(0.0);
         let pb = bb + style.padding_bottom.resolve(width).max(0.0);
-        let (w, h, _) = self.picture_box(img, &src, &style, (width - pl - pr).max(1.0), pt + pb)?;
+        let (w, h, _) = self.picture_box(img, &src, style, (width - pl - pr).max(1.0), pt + pb)?;
         Some((w, h))
     }
 
@@ -732,23 +732,23 @@ impl<'a> Ctx<'a> {
     fn stack_run(&self, kids: &[NodeId], from: usize, width: f32) -> Vec<usize> {
         let mut run: Vec<usize> = Vec::new();
         let mut base: Option<(f32, f32)> = None;
-        for at in from..kids.len() {
-            let n = self.dom.get(kids[at]);
+        for (at, kid) in kids.iter().enumerate().skip(from) {
+            let n = self.dom.get(*kid);
             // 标签之间的换行与缩进不是内容：真书（尤其 Calibre / 多看导出）在每一个
             // gallery cell 之间都夹着一个纯空白文本节点，把它当成「中断」等于这一叠
             // 永远只有一格 —— 《诡秘之主》与《哈利·波特全集》的画廊都没叠过，就是它。
             if n.kind == NodeKind::Text && n.text.trim().is_empty() {
                 continue;
             }
-            let style = self.style_of(kids[at]);
+            let style = self.style_of(*kid);
             if style.display == Display::None {
                 continue;
             }
-            if self.is_heading(kids[at]) {
+            if self.is_heading(*kid) {
                 break;
             }
             let (w, h) = match self
-                .image_unit(kids[at])
+                .image_unit(*kid)
                 .and_then(|img| self.unit_box(img, width))
             {
                 Some(size) => size,
@@ -1910,7 +1910,7 @@ impl<'a> Ctx<'a> {
         // 认的那一族见 [`picture_src`]（`<img>` 与 Calibre 封面那种 `<svg><image>`）。
         if let Some(src) = picture_src(self.dom, node) {
             let content_width = (width - pl - pr).max(1.0);
-            let Some((w, h, wide)) = self.picture_box(node, &src, &style, content_width, pt + pb)
+            let Some((w, h, wide)) = self.picture_box(node, &src, style, content_width, pt + pb)
             else {
                 return 0.0; // 图取不到就整块不留痕，不塌成空盒子
             };
