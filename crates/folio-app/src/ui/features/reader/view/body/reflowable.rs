@@ -1237,8 +1237,10 @@ impl ReaderSession {
         paint: &mut TurnPaint,
         cx: &App,
     ) -> TurnPapers {
-        let current = self.chapter_index();
-        let page = self.page;
+        // `self.source` 在渲染期间被换成了 `Empty`，`self.chapter_index()` 这时恒给 0；
+        // 章号与页号取 `frame.page_key` —— 它在换 source **之前**就抄好了。
+        let current = frame.page_key.0;
+        let page = frame.page_key.1;
         let mode = frame.mode;
         let page_area = frame.page_area();
         let area = frame.area();

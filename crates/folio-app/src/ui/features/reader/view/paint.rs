@@ -55,7 +55,7 @@ pub struct GlyphRun {
     ///
     /// 影子必须在**整条 run 的正文字画完之前**先铺完：逐字「先画影子再画字」时，
     /// 后一个字的影子会盖住前一个字的笔画（偏移只有一两 px，字形本身就互相压边）。
-    /// 所以 [`paint_run`] 在影子非空时走两趟。
+    /// 所以 [`paint_shadows`] 单独走一趟，而且走在字形那一层**之外**。
     pub text_shadows: Arc<[TextShadow]>,
     /// 这个 run 的 inline box 高（`font_size × line-height`），只用来定装饰线的纵向落点。
     ///
@@ -437,6 +437,22 @@ impl Element for GlyphsElement {
         // 同一帧里同一种 `Font` 只问一次「有没有真粗体面」：`resolve_font` 是
         // fontdb 的一次查询，不能每个字形都付。
         let mut synthetic_bold = HashMap::new();
+        // 影子铺在层**外**。层里所有 primitive 共用同一个 `order`（就是 `push_layer`
+        // 领到的那个），而场景按 `(order, 图集 tile 号)` 给精灵排序（`scene.rs:233`）——
+        // 同一层里，影子与字谁先画完全取决于它们各自落在图集的哪一块。`text-shadow`
+        // 的模糊拆解会给出 ±0.5px 的偏移，影子因此换到别的子像素档位、拿到另一个 tile：
+        // 只要那个 tile 的号大于字的，白影就排在字**之后**，把笔画内部冲淡（细笔画最
+        // 明显，看上去像那个字单独变了颜色）。层外的 primitive 各拿一个递增的 `order`，
+        // 天然落在这一层之下，与入队顺序一致。
+        //
+        // 只有带影子的 run 付这笔钱（真书里就是标题那几行），其余 run 一次都不多插。
+        for run in &self.runs {
+            if !run.text_shadows.is_empty() {
+                let __t = crate::ui::features::reader::model::perf::Timer::start();
+                paint_shadows(window, bounds.origin, run);
+                __shape_ns.set(__shape_ns.get() + __t.ns());
+            }
+        }
         window.paint_layer(bounds, |window| {
             for run in &self.runs {
                 let __t = crate::ui::features::reader::model::perf::Timer::start();
@@ -750,6 +766,42 @@ fn for_each_glyph(
     kept
 }
 
+/// 把一条 run 的 `text-shadow` 铺到当前的绘制位置（通常是**字形那一层之前**）。
+///
+/// 逐字「先影子后字」的写法不行：后一个字的影子会压住前一个字的笔画 —— 偏移只有一两 px，
+/// 而字形本来就互相压边。所以整条 run 的影子先铺完，字再统一画一遍。
+///
+/// 调用点必须在 `paint_layer` **外面**，原因见 [`GlyphsElement::paint`] 里那段注释：
+/// 层里所有精灵共用一个 `order`，场景会按图集 tile 号再排一次，白影可能排到字后面去。
+fn paint_shadows(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) {
+    if run.text.is_empty() || run.text_shadows.is_empty() {
+        return;
+    }
+    let font_size = px(run.font_size);
+    let shaped = match &run.shaped {
+        Some(layout) => layout.clone(),
+        None => shape(window, run),
+    };
+    for shadow in run.text_shadows.iter() {
+        let base = crate::ui::foundation::style::run_color(shadow.color, run.color);
+        for (dx, dy, alpha) in shadow_copies(*shadow) {
+            let shade = Hsla {
+                a: base.a * alpha,
+                ..base
+            };
+            for_each_glyph(run, &shaped, |x, y, shaped_run, glyph| {
+                let _ = window.paint_glyph(
+                    point(origin.x + px(x + dx), origin.y + px(y + dy)),
+                    shaped_run.font_id,
+                    glyph.id,
+                    font_size,
+                    shade,
+                );
+            });
+        }
+    }
+}
+
 fn paint_run(
     window: &mut Window,
     origin: Point<Pixels>,
@@ -774,26 +826,6 @@ fn paint_run(
     let (run_inline, run_cross) = flow.project(run.x, run.baseline);
     let embolden = needs_synthetic_bold(window, &run.font, synthetic_bold);
     let __t_glyph = crate::ui::features::reader::model::perf::Timer::start();
-    // 影子先铺：整条 run 的影子必须都在正文字**之下**。逐字「先影子后字」的写法里，
-    // 后一个字的影子会压住前一个字的笔画 —— 偏移只有一两 px，而字形本来就互相压边。
-    for shadow in run.text_shadows.iter() {
-        let base = crate::ui::foundation::style::run_color(shadow.color, run.color);
-        for (dx, dy, alpha) in shadow_copies(*shadow) {
-            let shade = Hsla {
-                a: base.a * alpha,
-                ..base
-            };
-            for_each_glyph(run, &shaped, |x, y, shaped_run, glyph| {
-                let _ = window.paint_glyph(
-                    point(origin.x + px(x + dx), origin.y + px(y + dy)),
-                    shaped_run.font_id,
-                    glyph.id,
-                    font_size,
-                    shade,
-                );
-            });
-        }
-    }
     let glyphs = for_each_glyph(run, &shaped, |x, y, shaped_run, glyph| {
         let at = point(origin.x + px(x), origin.y + px(y));
         // 单个字形画不出去（缺字形、图集满）不该让整帧失败：与 gpui 自己的

@@ -1108,3 +1108,44 @@ fn a_paged_leaving_band_survives_the_flat_capture(cx: &mut TestAppContext) {
         "离场页的带子该跟着纸往左走，实得 {x:?}"
     );
 }
+
+/// 分页在非首章时，静态帧必须摆**本书当前章**的页，而不是第 0 章。
+///
+/// `plan_turn_papers` 曾经用 `self.chapter_index()`；渲染期间 `self.source` 被换成
+/// `Empty`，它恒给 0 —— 第二章打开时整屏空白，滑动（走 `TurnFrame` 里正确的
+/// `PageRef`）又能显示。每页读数带的元素 id 带着章号，正好把「摆的是哪一章」量出来。
+#[gpui_kit::test]
+fn a_paged_book_at_a_later_chapter_draws_its_own_page(cx: &mut TestAppContext) {
+    use super::super::paper::band_id;
+    use crate::ui::features::reader::model::session::PageRef;
+
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &two_chapter_flow(),
+        "markdown",
+        prefs(16.0),
+        Locator {
+            chapter: 1,
+            offset: 0,
+        },
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let at = PageRef {
+        chapter: 1,
+        page: 0,
+    };
+    let found = cx
+        .update_window(handle, |_, window, _| {
+            window
+                .try_find(band_id("reader-band-live", at, 0))
+                .is_some()
+        })
+        .expect("窗口应能渲染");
+    assert!(
+        found,
+        "第二章打开时分页帧摆的该是第二章的页，不是第 0 章"
+    );
+}
