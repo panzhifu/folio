@@ -1,7 +1,8 @@
-//! 关于：这份二进制是什么、界面说什么语言。
+//! 关于：这份二进制是什么。
 //!
-//! 分组照的是参照应用同一页的形状 —— **版本与语言在同一页**，语言不自成一页：读者到这一页
-//! 要问的是「关于这个应用」这两件事，而字、版面那些是要改的东西，各归各页。
+//! 分组照的是参照应用同一页的形状 —— **版本与更新在这一页**，界面语言不自成一页：读者到这一页
+//! 要问的是「关于这个应用」这两件事。 **界面语言 2026-11-05 搬去了「外观」**：它是要改的
+//! 东西，不是一条关于这份二进制的事实。
 //!
 //! 这里没有那颗「检查更新」的开关，也没有许可证那一组：本应用还没有更新检查与授权子系统，
 //! 为了对齐样式先摆一颗点了没用的控件是错的。依赖那几行版本（GPUI 本体、组件层、移动平台层
@@ -18,7 +19,6 @@
 //! 撤掉这一格**不产生孤儿代码**：`open_folder_button` 仍在「存储」与「外观」两屏用着
 //! （数据目录、主题目录）。
 
-use folio_core::infra::i18n::Locale;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
@@ -38,11 +38,7 @@ pub(in crate::ui::features::settings) fn about_page(cx: &App, notes: &Entity<Not
     page(
         tr(cx, "page.about"),
         IconName::Info,
-        vec![
-            version_group(cx),
-            update_group(cx, notes),
-            language_group(cx),
-        ],
+        vec![version_group(cx), update_group(cx, notes)],
     )
 }
 
@@ -77,82 +73,6 @@ fn value_item(
         row = row.description(description);
     }
     row.keywords(keywords)
-}
-
-/// 「界面语言」这一格的搜索词：通用几个，加上**每一门在选的语言**的本族名与标签。
-///
-/// 这一份是 [`Locale::ALL`] 的第二份副本，会有漂移风险，所以 `tests` 里有一条测试
-/// 逐个核对 `code()` 与 `endonym()` 都在列 —— 加一门语言忘了补词，搜索框就搜不到这一格。
-const LANGUAGE_KEYWORDS: &[&str] = &[
-    "language",
-    "locale",
-    "语言",
-    "中文",
-    "简体",
-    "繁体",
-    "简体中文",
-    "繁體中文",
-    "English",
-    "日本語",
-    "한국어",
-    "Français",
-    "Deutsch",
-    "Español",
-    "Русский",
-    "zh-CN",
-    "zh-TW",
-    "en",
-    "ja",
-    "ko",
-    "fr",
-    "de",
-    "es",
-    "ru",
-];
-
-/// 界面语言。选项用**该语言自己的写法**标注：用户切换语言往往正是在看不懂
-/// 当前界面的时候，把 "English" 翻成「英语」反而认不出来。
-fn language_group(cx: &App) -> Group {
-    group(
-        tr(cx, "field.language"),
-        vec![
-            Row::dropdown(
-                tr(cx, "field.language"),
-                language_options(),
-                false,
-                |cx: &App| SharedString::from(ConfigHolder::language(cx).locale.code()),
-                |val: SharedString, cx| {
-                    // 认不出的值不改：下拉框给不出认不出的值，
-                    // 真出现时保留当前语言比切成未知语言好。
-                    if let Some(locale) = Locale::from_label(&val) {
-                        ConfigHolder::edit_language(cx, |l| l.locale = locale);
-                    }
-                },
-            )
-            .description(tr(cx, "field.language.desc"))
-            .keywords(LANGUAGE_KEYWORDS),
-        ],
-    )
-}
-
-/// 语言下拉框的选项：`(值, 标签)`，值是 BCP-47 码（配置里存的就是它），
-/// 标签是语言自己的名字。
-///
-/// **值必须在第一位**：下拉框的约定是元组首项作为选中值（与取值闭包给出的
-/// `locale.code()` 对得上）与写回 setter 的实参，次项才是按钮和菜单里显示的文字。
-/// 写反了会出现两重故障：当前语言对不上任何一个选项值，按钮只能显示裸代码；
-/// 点菜单项传给 setter 的是语言名，`from_label` 之外的路径认不出来，改动被静默
-/// 丢弃 —— 读者点什么语言都不生效。
-fn language_options() -> Vec<(SharedString, SharedString)> {
-    Locale::ALL
-        .iter()
-        .map(|locale| {
-            (
-                SharedString::from(locale.code()),
-                SharedString::from(locale.endonym()),
-            )
-        })
-        .collect()
 }
 
 /// 「更新」这一组：一颗检查按钮，与它念出来的那句状态。
@@ -458,9 +378,8 @@ fn when_self_install(download: &update::Download, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    //! 下拉框的选项是一份 (值, 标签) 的表格，写错顺序不会有任何编译期或运行期报错
-    //! —— setter 对认不出的值是**静默丢弃**（见 [`language_group`] 的取值对）。
-    //! 这里把「值必须认得回来、标签必须是语言自己的名字」钉成会失败的测试。
+    //! 「关于」那一屏只剩版本与更新：语言那一格 2026-11-05 搬去「外观」，
+    //! 它的选项表与搜索词由那边的测试看着。
 
     use super::*;
 
@@ -474,55 +393,6 @@ mod tests {
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext, px, size};
-
-    /// 每个选项的值都要能被写回路径（`Locale::from_label`）认出来，
-    /// 且认出来的就是标签写的那个语言。这里曾经把 (值, 标签) 写反：
-    /// 值成了语言名，setter 认不出，点什么语言都不生效。
-    #[test]
-    fn every_language_option_round_trips_through_its_own_value() {
-        for (value, label) in language_options() {
-            let locale = Locale::from_label(&value)
-                .unwrap_or_else(|| panic!("选项值 {value:?} 必须被写回路径认出来"));
-            assert_eq!(
-                label,
-                locale.endonym(),
-                "{value:?} 的标签应是这个语言自己的名字"
-            );
-        }
-    }
-
-    /// 取值闭包给出的是 `locale.code()`，它必须对得上某个选项值，
-    /// 否则按钮显示的不是当前语言的标签，而是裸代码的兜底。
-    #[test]
-    fn the_current_locale_is_always_representable_as_an_option_value() {
-        let values: Vec<_> = language_options().into_iter().map(|(v, _)| v).collect();
-        for locale in Locale::ALL {
-            assert!(
-                values.iter().any(|value| *value == locale.code()),
-                "{} 应该作为选项值出现",
-                locale.code()
-            );
-        }
-    }
-
-    /// 每一门在选的语言都要能被搜索词命中：[`LANGUAGE_KEYWORDS`] 是 `Locale::ALL`
-    /// 的第二份副本，加一门语言时最容易漏的就是这里 —— 漏了不会有任何报错，
-    /// 只是那一格在搜索框里搜不到。
-    #[test]
-    fn every_language_on_offer_is_findable_in_the_search_box() {
-        for locale in Locale::ALL {
-            assert!(
-                LANGUAGE_KEYWORDS.contains(&locale.code()),
-                "{} 的标签没进搜索词",
-                locale.code()
-            );
-            assert!(
-                LANGUAGE_KEYWORDS.contains(&locale.endonym()),
-                "{} 的本族名没进搜索词",
-                locale.code()
-            );
-        }
-    }
 
     /// 把「关于」那一屏真画一帧，问三颗按钮在不在。
     ///

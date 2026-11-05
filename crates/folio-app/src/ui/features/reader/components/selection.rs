@@ -45,9 +45,9 @@
 //! 动作条同一档投影，中间留一道 6 像素的缝。
 //!
 //! 整块菜单的宽由「那一行」与「动作条」里较宽的一边定（[`card_width`] 取两者的较大者）：
-//! 今天那一行是 260，动作条按可选那两格摆不摆是 208 / 248 / 288 —— 桌面上分享那一格不摆，
-//! 所以永远窄于那一行；手机上两格都摆时反过来由动作条定。动作条在它下面自己居中 ——
-//! 「两端对齐」说的是那一行里那两组各顶各的边，不是三块同宽。
+//! 今天那一行是 260，动作条按可选那三格摆不摆是 208 / 248 / 288 / 328 —— 桌面上分享
+//! 那一格不摆，所以常常窄于那一行；手机上几格都摆时反过来由动作条定。动作条在它下面
+//! 自己居中 ——「两端对齐」说的是那一行里那两组各顶各的边，不是三块同宽。
 //!
 //! 第二格跟着选区自己是谁换：选区**正好等于**库里某一条划线时它是「取消划线」
 //! （[`ReaderSession::selection_annotation`]）；改过范围的选区就是普通选区，那一格回到
@@ -598,7 +598,7 @@ impl ReaderSession {
     ///    这一条不分左中右三区：落在底色上的那一击归选中，两侧照常翻页。
     pub fn tap_on_body(
         &mut self,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
         at: Point<Pixels>,
     ) -> bool {
@@ -1030,14 +1030,15 @@ const MENU_GAP: f32 = 6.0;
 /// 叠在圆点上的那枚勾的字号（`Icon` 取当前文字号）。
 const SWATCH_CHECK: f32 = 13.0;
 
-/// 动作条的格子数：复制、划线（或取消）、笔记、翻译、清除，加上两格**按端与按配置缺席**
+/// 动作条的格子数：复制、划线（或取消）、笔记、翻译、清除，加上三格**按端与按配置缺席**
 /// 的：「分享卡片」只在能离屏渲染的那一端摆（判据在
 /// [`crate::ui::platform::RENDERS_SHARE_CARDS`]，桌面上那一按渲不出字节，摆出来就是
 /// 一个坏按钮）；「问 AI」只在端点填全的那一台机器上摆（判据在 `ReaderSession::ai_available`，
-/// 与真发请求共用同一份）。两处不一致的后果不是难看，是**摆一颗按下去只会报错的按钮**
-/// 或者反过来 —— 明明问得出去却没有入口。
-fn action_cells(share: bool, ai: bool) -> f32 {
-    5.0 + share as u8 as f32 + ai as u8 as f32
+/// 与真发请求共用同一份）；「词典」只在导入过本地词典的那一台摆（判据在
+/// [`crate::ui::services::dictionary::available`]）。三处不一致的后果不是难看，是
+/// **摆一颗按下去只会报错的按钮**或者反过来 —— 明明查得出去却没有入口。
+fn action_cells(share: bool, ai: bool, dict: bool) -> f32 {
+    5.0 + share as u8 as f32 + ai as u8 as f32 + dict as u8 as f32
 }
 
 /// 整块菜单占的高（含尾巴）：摆位与「放不下就翻面」都按这个数算。
@@ -1065,15 +1066,15 @@ fn mark_row_width() -> f32 {
 
 /// 整块菜单的宽 = 顶端那一行与动作条里的**较宽者**。
 ///
-/// 为什么不写死其中一个：动作条的宽跟着那两格可选的摆不摆变（208 / 248 / 288），而那一行
-/// 的宽跟着「几档画法、几档颜色」变（今天 260）。不摆「问 AI」那一格时那一行更宽，摆上
-/// 之后动作条反过来更宽 —— 写死任何一边都会让另一边探出去或摆歪。见
+/// 为什么不写死其中一个：动作条的宽跟着那三格可选的摆不摆变（208 / 248 / 288 / 328），
+/// 而那一行的宽跟着「几档画法、几档颜色」变（今天 260）。不摆可选格时那一行更宽，
+/// 摆上两三格之后动作条反过来更宽 —— 写死任何一边都会让另一边探出去或摆歪。见
 /// [`the_card_is_as_wide_as_whichever_row_is_wider`](tests)。
 ///
-/// `share` 与 `ai` 是这一端、这一台机器上摆不摆那两格（与渲染、与真发请求读同一份判据），
-/// 横向居中与夹边都按它们算 —— 两处不一致同样会摆歪。
-pub(in crate::ui::features::reader) fn card_width(share: bool, ai: bool) -> f32 {
-    (ACTION_CELL * action_cells(share, ai) + BAR_PAD * 2.0).max(mark_row_width())
+/// `share` / `ai` / `dict` 是这一端、这一台机器上摆不摆那三格（与渲染、与真发请求、
+/// 与有没有词典读同一份判据），横向居中与夹边都按它们算 —— 两处不一致同样会摆歪。
+pub(in crate::ui::features::reader) fn card_width(share: bool, ai: bool, dict: bool) -> f32 {
+    (ACTION_CELL * action_cells(share, ai, dict) + BAR_PAD * 2.0).max(mark_row_width())
 }
 
 /// 这一帧菜单该摆在哪。
@@ -1180,6 +1181,8 @@ impl ReaderSession {
         // 「问 AI」那一格摆不摆，与卡片按几格算宽，读的是同一个值：取两次就可能一次说
         // 有、一次按没有算，卡片于是正好窄掉那一格。
         let ai = ReaderSession::ai_available(cx);
+        // 词典那一格同理：本地一本都没导入时整个缺席，判据与查词那一趟读同一份配置。
+        let dict = crate::ui::services::dictionary::available(cx);
         let actions = h_flex()
             .p(px(BAR_PAD))
             .gap_0()
@@ -1216,6 +1219,19 @@ impl ReaderSession {
                 reader.clone(),
                 |r, _, cx| r.open_translation(cx),
             ))
+            // 词典：查的是本地 StarDict，和翻译一样是「就地做一件事」的入口。一本都没
+            // 导入时整格缺席 —— 摆一颗按下去只会说「没有词典」的按钮没有意义。
+            .children(dict.then(|| {
+                action_cell(
+                    "selection-dictionary",
+                    IconName::BookOpen,
+                    tr(cx, "reader.dictionary"),
+                    foreground,
+                    hover,
+                    reader.clone(),
+                    |r, _, cx| r.open_dictionary(cx),
+                )
+            }))
             // 问 AI：与翻译同一类「就地做一件事」的入口，排在它旁边。端点没填全时
             // 这一格整个缺席（判据与真发请求用的是同一份，见 `model/ai.rs`），
             // 所以它也是 `children(Option)` 而不是一个按下去报错的按钮。
@@ -1267,7 +1283,7 @@ impl ReaderSession {
         // 横向对着选区中线；中线不在手上（首帧还没画过）就居中在正文那一条上。
         // 两种摆法都夹在页内，不把卡片顶出屏幕。
         let page_width = f32::from(self.content_bounds.get().size.width);
-        let width = card_width(platform::RENDERS_SHARE_CARDS, ai);
+        let width = card_width(platform::RENDERS_SHARE_CARDS, ai, dict);
         let left = menu_left(page_width, self.prefs.margin_x, width, anchor_x);
         // 顶端那一行摆在上头，动作条贴着尾巴。理由是那一行的点击**直接写库或写配置**：
         // 挑中某条划线时点画法即改那一条、点色即换色，普通选区点哪格就用那一档新划一条
@@ -1624,50 +1640,69 @@ mod tests {
 
     /// 整块菜单的宽是「顶端那一行」与「动作条」里的**较宽者**，两者都不许探出去。
     ///
-    /// 两格可选的（分享、问 AI）各加**正好一格**：渲染那一侧与摆位那一侧读同一个判据，
-    /// 各算一次就会摆歪 —— 卡片按五格算宽而动作条摆了七格，多出来的那格是被裁掉的一段，
-    /// 读者看到的是「翻译」右边什么都没有。
+    /// 三格可选的（分享、问 AI、词典）各加**正好一格**：渲染那一侧与摆位那一侧读同一个
+    /// 判据，各算一次就会摆歪 —— 卡片按五格算宽而动作条摆了八格，多出来的那一格是被
+    /// 裁掉的一段，读者看到的是「翻译」右边什么都没有。
     ///
-    /// 今天四档里决定宽的是**哪一边**也钉住：不带 AI 那一格时是顶端那一行（260）更宽，
-    /// 带上七格动作条（288）之后动作条反过来成了较宽的一边。这条会红的日子就是胶囊那两条
-    /// 不再顶到卡片两边的日子（`justify_between` 只会把它们之间的缝拉开），
-    /// 到时候看一眼那两条胶囊该不该跟着加宽。
+    /// 今天哪几档里决定宽的是**哪一边**也钉住：五到六格时顶端那一行（260）更宽，七到八格
+    /// 之后动作条反过来成了较宽的一边。这条会红的日子就是胶囊那两条不再顶到卡片两边的日子
+    /// （`justify_between` 只会把它们之间的缝拉开），到时候看一眼那两条胶囊该不该跟着加宽。
     #[test]
     fn the_card_is_as_wide_as_whichever_row_is_wider() {
         for share in [false, true] {
             for ai in [false, true] {
-                let actions = ACTION_CELL * action_cells(share, ai) + BAR_PAD * 2.0;
-                assert!(
-                    card_width(share, ai) >= actions && card_width(share, ai) >= mark_row_width(),
-                    "窄的一边被当成了整块的宽：{} 格动作条 = {actions}，那一行 = {}",
-                    action_cells(share, ai),
-                    mark_row_width()
-                );
-                // 取的是较宽者而不是两者相加 —— 多算一项就会白白把菜单推到边外。
-                assert_eq!(card_width(share, ai), actions.max(mark_row_width()));
+                for dict in [false, true] {
+                    let actions = ACTION_CELL * action_cells(share, ai, dict) + BAR_PAD * 2.0;
+                    assert!(
+                        card_width(share, ai, dict) >= actions
+                            && card_width(share, ai, dict) >= mark_row_width(),
+                        "窄的一边被当成了整块的宽：{} 格动作条 = {actions}，那一行 = {}",
+                        action_cells(share, ai, dict),
+                        mark_row_width()
+                    );
+                    // 取的是较宽者而不是两者相加 —— 多算一项就会白白把菜单推到边外。
+                    assert_eq!(card_width(share, ai, dict), actions.max(mark_row_width()));
+                }
             }
         }
         for share in [false, true] {
-            assert_eq!(
-                ACTION_CELL * action_cells(share, true) - ACTION_CELL * action_cells(share, false),
-                ACTION_CELL,
-                "「问 AI」那一格该正好多占一格宽"
-            );
+            for dict in [false, true] {
+                assert_eq!(
+                    ACTION_CELL * action_cells(share, true, dict)
+                        - ACTION_CELL * action_cells(share, false, dict),
+                    ACTION_CELL,
+                    "「问 AI」那一格该正好多占一格宽"
+                );
+            }
         }
         for ai in [false, true] {
-            assert_eq!(
-                ACTION_CELL * action_cells(true, ai) - ACTION_CELL * action_cells(false, ai),
-                ACTION_CELL,
-                "「分享卡片」那一格该正好多占一格宽"
-            );
+            for dict in [false, true] {
+                assert_eq!(
+                    ACTION_CELL * action_cells(true, ai, dict)
+                        - ACTION_CELL * action_cells(false, ai, dict),
+                    ACTION_CELL,
+                    "「分享卡片」那一格该正好多占一格宽"
+                );
+            }
         }
-        assert_eq!(card_width(true, false), mark_row_width());
+        for share in [false, true] {
+            for ai in [false, true] {
+                assert_eq!(
+                    ACTION_CELL * action_cells(share, ai, true)
+                        - ACTION_CELL * action_cells(share, ai, false),
+                    ACTION_CELL,
+                    "「词典」那一格该正好多占一格宽"
+                );
+            }
+        }
+        assert_eq!(card_width(true, false, false), mark_row_width());
         assert!(
-            card_width(true, true) > mark_row_width(),
+            card_width(true, false, true) > mark_row_width(),
             "七格时动作条更宽"
         );
         assert!(
-            card_width(false, false) > ACTION_CELL * action_cells(false, false) + BAR_PAD * 2.0
+            card_width(false, false, false)
+                > ACTION_CELL * action_cells(false, false, false) + BAR_PAD * 2.0
         );
     }
 

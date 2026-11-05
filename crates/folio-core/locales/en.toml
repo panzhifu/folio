@@ -88,6 +88,12 @@ translate = "Translate"
 "translation.failed" = "Translation failed: %{reason}"
 "translation.cached" = "from cache"
 "translation.dismiss" = "Close translation"
+dictionary = "Dictionary"
+"dict.pending" = "Looking up…"
+"dict.empty" = "No entry for “%{word}”"
+"dict.failed" = "Lookup failed: %{reason}"
+"dict.dismiss" = "Close dictionary"
+"dict.none" = "No dictionary installed"
 "search.label" = "Full text"
 "search.placeholder" = "Search the text of this book"
 "search.hint" = "Type what you are looking for"
@@ -97,7 +103,7 @@ translate = "Translate"
 "search.none" = "Nothing was found in the text of this book"
 "search.scanning" = "Scanned %{done} of %{total}"
 "search.hits" = "%{hits} matches"
-"search.capped" = "Only the first %{hits} matches"
+"search.loaded" = "Loaded %{hits} so far"
 night = "Night"
 day = "Day"
 progress = "Progress"
@@ -172,6 +178,8 @@ follow_app = "Match app"
 follow_system = "Follow system"
 light = "Light"
 dark = "Dark"
+ink_wash = "Ink wash"
+no_themes = "No themes found"
 
 # The two settings of the contents row height ("Row density").
 [density]
@@ -179,6 +187,8 @@ compact = "Compact"
 comfortable = "Comfortable"
 
 [page]
+backup = "Backup"
+dictionary = "Dictionary"
 sync = "Sync"
 storage = "Storage"
 typography = "Text"
@@ -205,6 +215,10 @@ reading = "Reading"
 translation_ai = "Translation & AI"
 books_data = "Books & data"
 [group]
+backup_create = "Create a backup"
+backup_list = "Saved backups"
+dictionary_installed = "Installed"
+dictionary_import = "Import"
 membership_devices = "This device"
 sync_server = "WebDAV"
 sync_state = "Sync status"
@@ -241,6 +255,8 @@ rules_custom = "Rules I added"
 ai = "AI"
 ai_endpoint = "Endpoint (shared with translation)"
 [field]
+backup_include_files = "Include book files"
+"backup_include_files.desc" = "Adds book files, covers and imported dictionaries. Off means the archive holds only the library database and settings."
 sync_enabled = "Enable sync"
 "sync_enabled.desc" = "Progress, annotations and bookmarks only. Book files never leave this device."
 sync_url = "Server address"
@@ -347,6 +363,9 @@ translation_openai_key = "API Key"
 "translation_openai_key.desc" = "Stored only in this device's config.json. Leave empty if the service needs no key."
 translation_deepl_key = "API Key"
 "translation_deepl_key.desc" = "Your DeepL key. Free keys end with :fx and automatically use the free endpoint."
+dictionary_empty = "No dictionaries yet. Choose a folder with StarDict dictionaries to import."
+dictionary_import = "Choose dictionary folder…"
+"dictionary_import.desc" = "The folder needs a .ifo plus .idx / .dict (or .idx.gz / .dict.dz). A copy is imported; the originals stay untouched."
 membership_tier = "Membership"
 membership_expiry = "Valid until"
 rules_on = "On"
@@ -700,6 +719,18 @@ info_series_ordinal = "%{name} #%{position}"
 
 # 书库管理。`library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置
 # 确认：移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
+# 多选态：架上那条「选择」与顶掉底部导航的那条工具栏。计数是这一屏唯一要读的
+# 读数，所以摆在正中间；删除那一句要说清「连着什么一起没了」，它是不可撤销的。
+select = "Select"
+selection_count = "%{n} selected"
+selection_exit = "Done"
+select_all = "Select all"
+select_none = "Deselect all"
+selection_group = "Add to group"
+selection_delete_title = "Delete %{n} books?"
+selection_delete_body = "Their covers, notes and reading positions go with them. This cannot be undone."
+selection_delete_confirm = "Delete"
+
 [library]
 "access.title" = "This device doesn't have All files access"
 "access.body" = "Books copied into a folder you pick here mostly fail to write - only Download, Documents and this app's own folder are writable. Turn the access on first, or pick a folder anyway."
@@ -752,6 +783,7 @@ nothing_to_clean = "Nothing to clear right now"
 # Button labels stay to two or three words: four of these rows stack up, and a long
 # verb phrase would push the byte figure off the right edge.
 [action]
+backup_now = "Back up now"
 grant_access = "Turn it on"
 pick_anyway = "Pick anyway"
 release = "Deactivate"
@@ -863,6 +895,14 @@ deleted_bookmark = "Bookmark removed"
 [font_picker]
 search = "Search fonts"
 
+[dictionary]
+words = "%{count} words"
+enable = "Enable %{name}"
+delete = "Delete %{name}"
+importing = "Importing…"
+import_failed = "Import failed: %{reason}"
+delete_failed = "Delete failed: %{reason}"
+
 [translation]
 follow_ui = "Follow interface language"
 engine_google = "Google (no key)"
@@ -969,3 +1009,21 @@ redeem_unconfigured = "The activation service isn’t set up yet — try again l
 redeem_upstream = "The activation service is unavailable right now — try again later"
 redeem_unreachable = "Couldn’t reach the activation service — check your connection and try again"
 redeem_malformed = "The activation service sent a response that can’t be read — try again later"
+
+# 备份那一页（`settings/pages/backup.rs`）。
+[backup]
+"create.desc" = "Writes a zip into the backups folder. The library is snapshotted first, so reading while it runs is safe."
+secrets = "The archive contains config.json, including sync passwords and API keys. Keep it somewhere safe."
+creating = "Backing up…"
+last = "Last backup: %{when} · %{size}"
+failed = "Couldn't create the backup: %{reason}"
+loading = "Reading backups…"
+empty = "No backups yet"
+"entry.full" = "%{size} · %{files} files"
+"entry.data" = "%{size}"
+"scope.files" = "Full"
+"scope.data" = "Data only"
+"delete.title" = "Delete this backup?"
+"delete.body" = "Deletes the backup from %{when} (%{size}). Your library is not touched."
+"delete.action" = "Delete backup"
+folder = "Backup folder"

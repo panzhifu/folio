@@ -287,21 +287,36 @@ impl ReaderSession {
     /// 那一击的语义是收浮层。
     pub(in crate::ui::features::reader) fn reselect_annotation(
         &mut self,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
         at: Point<Pixels>,
     ) -> bool {
         if self.overlay_open {
             return false;
         }
-        let Some((chapter, range, _)) = self.annotation_at(window, cx, at) else {
+        let Some((chapter, range, id)) = self.annotation_at(window, cx, at) else {
             return false;
         };
         // 先走 `clear_selection` 那一趟：把上一手拖选/拖把手攒下的临时态一并作废，
         // 这一次是「挑中留在书上的那一条」，不是接着上一手拖。
         self.clear_selection();
         self.selection = Some(Selection { chapter, range });
-        self.selection_menu_open = true;
+        // **写过笔记的那一条直接进编辑器**：那一按要的是改自己写过的那几行字，进去就看见
+        // 原文引句与已有的笔记（`open_note_editor` 取的就是这两个）。中间不再摆一张只读
+        // 浮层 —— 看过一版：多一层既挡住正文，那颗「编辑」又只是把读者送到本来该一步到位的地方。
+        //
+        // 没写过笔记的照旧开动作条：进去编辑器就是一张空白便签，而读者点一条光秃秃的划线
+        // 时更可能是想改颜色、加笔记或取消划线 —— 那些都在动作条上。
+        // 选区在两句之前都已经设上（少这一步 `open_note_editor` 会直接返回）。
+        if self
+            .annotations
+            .iter()
+            .any(|row| row.id == id && !row.note.trim().is_empty())
+        {
+            self.open_note_editor(window, cx);
+        } else {
+            self.selection_menu_open = true;
+        }
         cx.notify();
         true
     }

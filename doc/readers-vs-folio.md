@@ -31,7 +31,7 @@ Folio 这一列复扫了一遍**，动了的格子：版式可调（补定版式
 |---|---|
 | 总体 | **阅读内核已站进第一梯队，差距集中在外向生态。** |
 | 领先 / 独有 | 格式矩阵最宽（21 provider 全纯 Rust）；自研排版引擎、零 WebView；双页自动退档、仿真卷页、Wi-Fi 传书（局域网 + PIN）、字符偏移 Locator（换字号换窗口不漂移）、**听读一体**（五家里只有 Folio 与 Readest 有朗读，且只有 Folio 把听书计入统计） |
-| 差距（按补齐划算程度） | ① **批注闭环** —— 列表屏（书内「批注」格 + 跨书「笔记」屏，后者一屏一本一张卡、可搜）、导出（txt/MD/HTML）、书签、删除撤销**已补齐**；剩批注导入互通；② **同步** —— WebDAV 手动版已接（进度 / 批注 / 书签 + 每本书的阅读设置），**局域网那一条也接上了**：同账号两台设备一趟互合四样，并把本机缺的书拉过来；两条都还是手动，自动 / 后台同步与扫码配对未做；③ **OPDS 书源** —— 1.x Atom + 2.0 JSON 的浏览与下载已接，搜索 / OPDS-PSE 未做；④ **TTS** 补平台与句级；⑤ **AI 与词典** —— 选区翻译弹窗（Google 免 key / OpenAI 兼容 / DeepL 三档）**第 2 期已补**，本地词典与 AI 是战略级选择，暂缓不动摇内核；⑥ **跨书全文搜索** —— 书内那一趟已落地（现读现扫、零索引），全库那一趟还没接 |
+| 差距（按补齐划算程度） | ① **批注闭环** —— 列表屏（书内「批注」格 + 跨书「笔记」屏，后者一屏一本一张卡、可搜）、导出（txt/MD/HTML）、书签、删除撤销**已补齐**；剩批注导入互通；② **同步** —— WebDAV 手动版已接（进度 / 批注 / 书签 + 每本书的阅读设置），**局域网那一条也接上了**：同账号两台设备一趟互合四样，并把本机缺的书拉过来；两条都还是手动，自动 / 后台同步与扫码配对未做；③ **OPDS 书源** —— 1.x Atom + 2.0 JSON 的浏览与下载已接，搜索 / OPDS-PSE 未做；④ **TTS** 补平台与句级；⑤ **AI 与词典** —— 选区翻译弹窗（Google 免 key / OpenAI 兼容 / DeepL 三档）**第 2 期已补**，本地词典（StarDict 导入）**已补**，AI 陪读仍是战略级选择、暂缓不动摇内核；⑥ **跨书全文搜索** —— 书内那一趟已落地（现读现扫、零索引），全库那一趟还没接 |
 | 不追 | Okular 的表单 / 签名 / 打印 / 演示模式是文档查看器的物种能力；KOReader 的 Kindle/Kobo/ReMarkable 那一串墨水屏宿主是它物种的一部分 —— 都与 Folio 的定位无关，不进 roadmap |
 
 ## 功能矩阵
@@ -97,7 +97,7 @@ Folio 这一列复扫了一遍**，动了的格子：版式可调（补定版式
 
 | 功能 | **Folio** | Okular | Foliate | Readest | Anx Reader | KOReader |
 |---|---|---|---|---|---|---|
-| 本地词典 | ❌ | ❌ | ❌ | ✅（词典生态） | ❌ | ✅ Stardict + sdcv |
+| 本地词典 | ✅ 导入 StarDict（`.ifo` / `.idx` / `.dict`，含 `.idx.gz` / `.dict.dz`），逐本开关；纯离线 | ❌ | ❌ | ✅（词典生态） | ❌ | ✅ Stardict + sdcv |
 | 选区翻译弹窗 | ✅ 三引擎可配 + SQLite 缓存 + 弹层内换语言 | ❌ | ✅ | ✅ 多引擎可配 | ❌ | ✅ 翻译仅 Google 一个引擎 |
 | 翻译引擎可配 / 自定义 | ✅ Google 免 key、OpenAI 兼容（自填地址 / 模型 / Key）、DeepL；缓存键带引擎与模型指纹 | ❌ | ❌ | ✅ 4 内置 + 自定义 OpenAI 兼容 | ✅ 6 种 provider | ⚠️ 服务器可换，仅 Google 系 |
 | AI 陪读（防剧透 RAG，只许讨论已读页码） | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
@@ -181,7 +181,7 @@ Folio 这一列复扫了一遍**，动了的格子：版式可调（补定版式
 | 3 | ~~**同步**：接线 WebDAV，做进度 + 批注整库同步~~ **手动版已补（2026-10-26）**：进度 / 批注 / 书签，每设备一份快照，按记录更新时间合并；**2026-10-27 再带上每本书的阅读设置**（整本差量 + 一个 `updated_at`）；**2026-11-03 接上局域网那一条**（同账号两台设备互合四样 + 按 `content_hash` 把本机缺的书拉过来，`/hello` 当场对表）；自动 / 后台同步与 WebDAV 那侧的书文件仍未接 | `crates/folio-core/src/sync.rs`（快照与合并）+ `net/remote/dav.rs`（WebDAV 传输）+ `net/lansync.rs`（协议与客户端编排）+ `net/transfer/lan.rs`（挂在传书服务器上的五条路由）+ `account.rs`（128-bit 账号密钥）；设置页「同步」那一屏两组各一颗钮 | ⚠️ 部分：两条都**手动**；自动 / 后台、配对（密钥要手抄）、WebDAV 侧书文件未做 | 形态照 Anx 的整库同步 | 自家 `folio-core/src/sync.rs`、`net/remote/dav.rs`、`infra/book_settings.rs`；第二步 KOSync（KOReader 生态事实标准） |
 | 4 | ~~**OPDS 书源**~~ **已补（2026-10-26）**：1.x Atom + 2.0 JSON，书源管理 / 封面 / 下载入书库 / 翻页，Basic 认证；搜索与 OPDS-PSE 未做 | 架面「⋮」→ OPDS 书源；core `net/opds.rs` | ⚠️ 部分：浏览与下载已接，搜索 / PSE 未做 | Foliate（1.x + 2.0 一并支持）；KOReader 连 PSE 都有 | Foliate `src/opds/`；KOReader `plugins/opds.koplugin/`；Readest 的 OPDS-PSE |
 | 5 | **TTS**：段级 → 句级高亮，补 macOS / Windows 后端 | 段级 utterance，仅 Linux / Android | ⚠️ 部分：段级已做，句级 / macOS / Windows 未做 | Foliate 的句级高亮 | folio-core 的行盒已在手；之后补 EPUB 3 Media Overlays |
-| 6 | ~~**选区翻译**：Google 免 key / OpenAI 兼容 / DeepL 三档 + v24 缓存 + 弹层内换语 + 设置页配引擎~~ **已补（2026-10-26）**；剩 **本地词典**、**AI 陪读** | 翻译三引擎已接；词典 / AI 仍无 | ⚠️ 部分：翻译完成，词典 / AI 未做 | 翻译照 Foliate / Readest，端点照 KOReader；词典照 KOReader 的 Stardict + sdcv；AI 陪读照 Readest 的防剧透 RAG | `net/translate/`、`store/translations.rs`；KOReader `frontend/ui/translator.lua`；Readest `services/translators/`（词典 / AI 上游路径待盘点） |
+| 6 | ~~**选区翻译**：Google 免 key / OpenAI 兼容 / DeepL 三档 + v24 缓存 + 弹层内换语 + 设置页配引擎~~ **已补（2026-10-26）**；~~**本地词典**~~ **已补（2026-11-05，StarDict 导入）**；剩 **AI 陪读** | 翻译三引擎已接；词典已接（StarDict）；AI 陪读仍无 | ⚠️ 部分：翻译 / 词典完成，AI 陪读未做 | 翻译照 Foliate / Readest，端点照 KOReader；词典照 KOReader 的 Stardict + sdcv；AI 陪读照 Readest 的防剧透 RAG | `net/translate/`、`store/translations.rs`、`dict/`、`ui/services/dictionary.rs`；KOReader `frontend/ui/translator.lua`；Readest `services/translators/`（AI 上游路径待盘点） |
 | 7 | **跨书全文搜索**：在整架书里找一段字，而不是一本书里找 | 书内那一趟已落地 —— `folio-core/src/search.rs` 现读现扫、零索引，文件头带着三本真书的量（典型一本 10 ms 内、最坏那本全本 274 ms；FTS5 trigram 因「两个字的中文查询静默返回 0 行」与 3.2–4.4× 体积被否）。`scan` 的形状是「交出单本文档」，界面那侧也只有 `toc_panel` 一处用它 | ❌ 未做（只到单本） | Readest 的跨库搜索；KOReader 只有文件名搜索，不是标杆 | 自家 `crates/folio-core/src/search.rs`；缺的「逐本开容器」那队列 2026-10-27 已经在架面落了一半（`shelf/view/scan.rs`：在架的读库不重开文件、没入库的按 `ParseBudget::AtMost(1)` 顺序开 + `Priority::Prewarm`），全库扫描可以直接长在同一套地基与作业池上 |
 | 8 | **正文预处理那一层**：简繁转换、Bionic Reading 这类「进排版之前改一遍文本」 | 没有插槽。CSS 侧 `text-transform` 在**忽略清单**里，理由已经写在代码上：它会改变字符本身，而锚点与进度都建立在源文本字节偏移上（`Locator` 的坐标系）—— 见 `content/format/css/computed.rs` 那条注释。`.txt` 小说那一族有规则化的路（`content/format/novel/` 的 detect / rules），但那是**分章与书目提取**，不是文本变换 | ❌ 未做，且不是加一条 `to_uppercase()` 的事：要接就得连锚点那套字节偏移映射一起定 | Readest 的 12 个 transformer（含简繁）、Anx 的 Bionic | Readest 的 transformer 那一层（上游路径待盘点）；自家 `content/format/css/computed.rs` 的忽略清单注释、[`Locator.md`](Locator.md) 那套字节偏移坐标系 |
 

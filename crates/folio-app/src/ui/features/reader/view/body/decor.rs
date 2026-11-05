@@ -278,6 +278,25 @@ pub(super) fn decoration_ready(
     })
 }
 
+/// 水墨那一档此刻开着没有。
+///
+/// 每帧**画装饰之前**由绘制侧写一次（见 `view::body` 里挨着 `set_screen_width` 那一句），
+/// 这一张表逐块读它。为什么不直接问配置：`ConfigHolder::appearance` 交回的是**一份副本**
+/// （两侧主题名那两条 `String` 都在里面），一章几百块各拷一次是白付一遍。手法与理由同
+/// `model::image_atlas::set_screen_width`。
+static INK_PAPER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 绘制侧每帧推进来一次。写的是**阅读页生效**的那一档：按书差量已经把「这一本单独设过」
+/// 折进 `reading_mode`，而软件全局那一格在书合上之前不该管正文。
+pub(in crate::ui::features::reader) fn set_ink_paper(ink: bool) {
+    INK_PAPER.store(ink, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 这一档要不要把作者声明的底色让给宣纸。
+fn ink_paper() -> bool {
+    INK_PAPER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(super) fn decoration_child(
     decor: BlockDecor,
     atlas: &Entity<ImageAtlas>,
@@ -285,7 +304,12 @@ pub(super) fn decoration_child(
     cx: &mut App,
 ) -> Vec<AnyElement> {
     let mut parts = Vec::new();
-    if let Some(background) = decor.background {
+    // 水墨那一档把**作者声明的底色**整体让给宣纸：书里 `body { background: … }` 那一块
+    // 不透明四边形盖在主题纸面上，选这一档的全部意思就是「纸与墨」。
+    //
+    // 压的只是底色：边框、圆角与 `background-image` 那些图照旧 —— 那三样不是「一块底色」，
+    // 压掉它们只会把书里的线与图弄没，而不是换来一张宣纸。
+    if let Some(background) = decor.background.filter(|_| !ink_paper()) {
         parts.push(fill_rounded_quad(
             decor.x,
             decor.top,

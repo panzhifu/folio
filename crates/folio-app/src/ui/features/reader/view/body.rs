@@ -875,6 +875,20 @@ impl Render for ReaderSession {
         crate::ui::features::reader::model::image_atlas::set_screen_width(f32::from(
             viewport_size.width,
         ));
+        // 水墨那一档有两处要它：压掉作者声明的底色（`decor::set_ink_paper`），以及把解好的
+        // 像素压成半灰（`image_atlas::set_ink_pixels`）。这里折的是**阅读页
+        // 生效**的那一档：`reading_mode` 是这一本单独设过的浅深，没设过才跟着软件走 ——
+        // 与外壳换肤那一句 `themed_appearance` 同一个折法，两处各写一份就会漂。
+        let appearance = ConfigHolder::appearance(cx);
+        let ink = appearance.reading_mode.unwrap_or(appearance.mode)
+            == folio_core::infra::config::Mode::Ink;
+        decor::set_ink_paper(ink);
+        // 翻档的那一帧清一次图集：表里存的是**已经解好的像素**，不清就会顶着上一档的
+        // 颜色画到那本图离场为止。翻页那几层用的是烘出来的纹理，同一张纸也变了，跟着作废。
+        if crate::ui::features::reader::model::image_atlas::set_ink_pixels(ink) {
+            self.atlas.update(cx, |atlas, cx| atlas.clear(cx));
+            self.capture_dirty = true;
+        }
         // 两章之间的缝：拼接坐标用它隔开相邻的章（口径在 `Book::chapter_gap`）。
         let chapter_gap = Book::chapter_gap(&self.prefs);
         // `FontKey → Font` 的解析每帧对每条可见 run 都要一次，交给会话持有的缓存

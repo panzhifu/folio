@@ -275,7 +275,7 @@ fn control_cell(id: SharedString, inner: impl IntoElement) -> AnyElement {
 
 /// 根屏那条入口列表的分块：块名 + 落进这一块的页。
 ///
-/// 为什么要块：[`SettingsPage::ALL`] 已经 14 格，从前除会员外全拍成一条平铺列表 —— 十三行
+/// 为什么要块：[`SettingsPage::ALL`] 已经 16 格，从前除会员外全拍成一条平铺列表 —— 十四行
 /// 同一个字号、同一种行、只靠发丝线分开，读者要找「行距」得把整列读完才知道它在第几格。
 /// 分块把这条改成「先落到哪一类，再在那一类里找」，与规范那条「一个个看起来合理的控件凑在
 /// 一起仍可能失败，因为它们没有形成一个阅读顺序」对得上。
@@ -296,6 +296,7 @@ const ROOT_BLOCKS: [(&str, &[SettingsPage]); 3] = [
             SettingsPage::Layout,
             SettingsPage::Fonts,
             SettingsPage::Speech,
+            SettingsPage::Dictionary,
         ],
     ),
     (
@@ -310,6 +311,7 @@ const ROOT_BLOCKS: [(&str, &[SettingsPage]); 3] = [
             SettingsPage::Toc,
             SettingsPage::Sync,
             SettingsPage::Storage,
+            SettingsPage::Backup,
         ],
     ),
 ];
@@ -405,6 +407,11 @@ pub(crate) struct CompactSettings {
     _activation_watch: Subscription,
     /// 对「没拿到所有文件访问」那一问的订阅：面板的摆与收都靠它 notify 这一屏。
     _access_watch: Subscription,
+    /// 对本地词典状态实体的订阅：导入 / 删除那一趟在后台线程上结束，状态行与列表
+    /// 靠它 notify 才能翻过来。
+    _dictionary_watch: Subscription,
+    /// 对「备份」状态实体的订阅：读目录与打包都在后台线程上结束，清单与结果句靠它唤醒。
+    _backup_watch: Subscription,
     /// 「更新日志」那张卡片。**本屏一份**：与桌面那一屏同一个形状 —— 关于那一页的按钮拿的是
     /// 这一个句柄，挂的也是这一屏，所以两屏同时活着时各收各的（理由写在 `notes_sheet` 顶部）。
     notes: Entity<NotesSheet>,
@@ -444,6 +451,10 @@ impl CompactSettings {
         // 这一屏就得重画（与上面那几条订阅同一理由）。
         let question = crate::ui::services::library::access(cx);
         let question_watch = cx.observe(&question, |_, _, cx| cx.notify());
+        let dictionary = crate::ui::services::dictionary::entity(cx);
+        let dictionary_watch = cx.observe(&dictionary, |_, _, cx| cx.notify());
+        let backup = crate::ui::services::backup::entity(cx);
+        let backup_watch = cx.observe(&backup, |_, _, cx| cx.notify());
         Self {
             screen: Screen::Root,
             _storage_watch: watch,
@@ -452,6 +463,8 @@ impl CompactSettings {
             _sync_watch: sync_watch,
             _activation_watch: activation_watch,
             _access_watch: question_watch,
+            _dictionary_watch: dictionary_watch,
+            _backup_watch: backup_watch,
             notes,
             search: None,
             query: SharedString::default(),
@@ -465,6 +478,10 @@ impl CompactSettings {
         // （[`storage::request`] 那头拦），所以反复进出同一页不会叠出第二条线。
         if page_ix == SettingsPage::Storage.index() {
             storage::request(cx, Job::Rescan);
+        }
+        // 备份那一页同理：清单是磁盘上的现在，不是建规格那一刻读到的旧表。
+        if page_ix == SettingsPage::Backup.index() {
+            crate::ui::services::backup::request(cx, crate::ui::services::backup::Job::List);
         }
         cx.notify();
     }
@@ -1141,7 +1158,7 @@ impl CompactSettings {
                             .child(value.clone()),
                     ),
             ),
-            RowKind::Custom { title, render } => {
+            RowKind::Custom { title, render, .. } => {
                 let content = render(cx);
                 let title = title.clone();
                 control_cell(
@@ -1533,5 +1550,42 @@ mod tests {
             window.render_frame(cx);
         })
         .expect("关一条 + 加一条之后，这一屏该画得出一帧");
+    }
+
+    /// 手机那一档的外观页也要把主题画成卡，而且走的是**两列**那条分支。
+    /// 找的是卡片自己的元素 id：桌面与手机共用同一份规格，分叉只发生在渲染时。
+    #[gpui_kit::test]
+    fn the_appearance_screen_draws_theme_cards(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(crate::ui::foundation::theme::register_builtin_themes);
+        let mut built = None;
+        let handle: AnyWindowHandle = cx
+            .open_window(size(px(390.), px(844.)), |window, cx| {
+                ConfigHolder::install(Config::default(), cx);
+                let view = cx.new(CompactSettings::new);
+                built = Some(view.clone());
+                Root::new(view, window, cx)
+            })
+            .into();
+        let view = built.expect("这一屏该建起来");
+        cx.update(|app| {
+            view.update(app, |this, cx| {
+                this.open(SettingsPage::Appearance.index(), cx)
+            })
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            for name in [
+                crate::ui::foundation::theme::DEFAULT_LIGHT,
+                crate::ui::foundation::theme::DEFAULT_DARK,
+            ] {
+                assert!(
+                    window.try_find(format!("theme-card-{name}")).is_some(),
+                    "手机外观页找不到主题卡 {name}"
+                );
+            }
+        })
+        .expect("外观页该画得出一帧");
     }
 }

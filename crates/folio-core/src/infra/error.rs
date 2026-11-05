@@ -113,6 +113,26 @@ pub enum Error {
         #[source]
         source: Option<Source>,
     },
+
+    /// StarDict 词典读不动：缺文件、版本不认识、索引与数据对不上。
+    ///
+    /// 单独立一条而不是复用 [`Error::Io`]：设置页要按「这一本词典坏了」提示并让读者
+    /// 删掉重导，而不是把一份路径拼进通用的读盘错误里；导入那一趟也要能原样把它
+    /// 交给弹层。
+    #[error("词典 {path:?} 读不动：{why}")]
+    Dictionary {
+        path: PathBuf,
+        why: String,
+        #[source]
+        source: Option<Source>,
+    },
+
+    /// 备份包这一层的语义错误：路径不在备份目录里、清单不认识。
+    ///
+    /// 不混进 [`Error::Io`]：这一条说的是「这一份东西不是本应用这一版认得的备份」，
+    /// 读者要做的不是检查网盘权限，而是换一份包或换一个版本。
+    #[error("备份包 {path:?} 用不了：{why}")]
+    Backup { path: PathBuf, why: String },
 }
 
 /// 导入拒绝的类别。第四类 `Cancelled` 不在这里：取消由作业层

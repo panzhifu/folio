@@ -264,6 +264,21 @@ impl ConfigHolder {
         Self::snapshot(cx).translation.clone()
     }
 
+    /// 本地词典那一节：已导入书目、关掉的 id 与导入根目录。
+    pub fn dictionary(cx: &App) -> folio_core::Dictionary {
+        Self::snapshot(cx).dictionary.clone()
+    }
+
+    /// 备份那一页记住的选择（要不要把书文件与词典一起打包）。
+    pub fn backup(cx: &App) -> folio_core::Backup {
+        Self::snapshot(cx).backup
+    }
+
+    /// 用户层配置（不含环境覆盖与某本书的差量）。备份包里的 `config.json` 写它。
+    pub fn user_config(cx: &App) -> Config {
+        Self::entity(cx).read(cx).user.clone()
+    }
+
     /// 书库位置那一节。导入前要先问它确认过没有（见 `library::target_dir`）。
     pub fn library(cx: &App) -> Library {
         Self::snapshot(cx).library.clone()
@@ -361,6 +376,14 @@ impl ConfigHolder {
 
     pub fn edit_translation(cx: &mut App, f: impl FnOnce(&mut Translation)) {
         Self::edit(cx, |config| f(&mut config.translation));
+    }
+
+    pub fn edit_dictionary(cx: &mut App, f: impl FnOnce(&mut folio_core::Dictionary)) {
+        Self::edit(cx, |config| f(&mut config.dictionary));
+    }
+
+    pub fn edit_backup(cx: &mut App, f: impl FnOnce(&mut folio_core::Backup)) {
+        Self::edit(cx, |config| f(&mut config.backup));
     }
 
     pub fn edit_sync(cx: &mut App, f: impl FnOnce(&mut Sync)) {

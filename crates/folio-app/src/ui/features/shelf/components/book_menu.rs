@@ -45,6 +45,8 @@ pub(in crate::ui::features::shelf) type GroupRow = (i64, SharedString, bool);
 /// 各条的文案。整个架面取一次（[`Labels::resolve`]），逐卡 clone 进 [`build`]。
 #[derive(Clone)]
 pub(in crate::ui::features::shelf) struct Labels {
+    /// 「选择」—— 从这一本起进入多选，底栏随之换成批量工具栏。
+    select: SharedString,
     info: SharedString,
     /// 「分享这本书」那一条。摆不摆由 [`crate::ui::platform::HAS_SHARE_SHEET`] 决定，
     /// 但文案两端都取一次：取与摆分在两处，判据就只有一条。
@@ -62,6 +64,7 @@ impl Labels {
     /// 「书籍信息」一处写「信息」会让读者以为是两件事。
     pub(in crate::ui::features::shelf) fn resolve(cx: &App) -> Self {
         Self {
+            select: tr(cx, "shelf.select"),
             info: tr(cx, "shelf.info_title"),
             share: tr(cx, "shelf.share"),
             delete: tr(cx, "shelf.book_delete"),
@@ -91,12 +94,20 @@ pub(in crate::ui::features::shelf) fn build(
     groups: Vec<GroupRow>,
 ) -> PopupMenu {
     let info = shelf.clone();
+    let select = shelf.clone();
     let share = shelf.clone();
     let create = shelf.clone();
     let delete = shelf.clone();
     // 先摆信息与分组那一节，最后才垫上删除：`fold` 是因为组的条数是运行时才知道的。
     let menu = menu
         .min_w(px(MIN_WIDTH))
+        .item(
+            PopupMenuItem::new(labels.select.clone())
+                .icon(IconName::ListChecks)
+                .on_click(move |_, _, cx| {
+                    select.update(cx, |this, cx| this.begin_selection(Some(book_id), cx));
+                }),
+        )
         .item(
             PopupMenuItem::new(labels.info.clone())
                 .icon(IconName::Info)

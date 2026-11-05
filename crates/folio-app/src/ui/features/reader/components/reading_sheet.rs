@@ -481,7 +481,7 @@ impl ReadingSheet {
             .into_any_element()
     }
 
-    /// 「阅读浅深」那一格：跟随软件 / 跟随系统 / 浅色 / 深色，**按下的这一格是这一本书的**。
+    /// 「阅读浅深」那一格：跟随软件 / 跟随系统 / 浅色 / 深色 / 水墨，**按下的这一格是这一本书的**。
     ///
     /// 与设置屏那一屏的「外观」分文不远但各管各的：那一格定的是整个应用（书架、弹窗、
     /// 下一次开书之前），这一格只定阅读页 —— 关掉书，屏上回到那一格选的样子。
@@ -494,12 +494,14 @@ impl ReadingSheet {
             Some(Mode::System) => tr(cx, "appearance.follow_system"),
             Some(Mode::Light) => tr(cx, "appearance.light"),
             Some(Mode::Dark) => tr(cx, "appearance.dark"),
+            Some(Mode::Ink) => tr(cx, "appearance.ink_wash"),
         };
         let items: Vec<(Option<Mode>, SharedString)> = [
             None,
             Some(Mode::System),
             Some(Mode::Light),
             Some(Mode::Dark),
+            Some(Mode::Ink),
         ]
         .into_iter()
         .map(|value| (value, label_of(value)))

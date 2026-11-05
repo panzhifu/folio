@@ -88,6 +88,40 @@ pub(in crate::ui::features::reader) const TILT_FOLLOW: f32 = 0.35;
 /// 这两个读数中间的一个，还要不要再细，等下一张截图说话。
 pub(in crate::ui::features::reader) const ROLL: f32 = 0.14;
 
+/// 满幅拖（`dist = 一整页宽`）时，折线走到**页宽的几分之几**。
+///
+/// 取 **0.85**。从前这一格不是常数，而是律自己算出来的：`(1 + πR/W)/2 = 0.72`，而从屏幕
+/// 中部起手那一笔最多只拖得动 `0.5W`，量下来是 0.47 页宽 —— 手机上读成「折线过不去半页」。
+/// 现在走量由这一个数定，其余三个点从它推出来（见 [`fold_advance`]）。
+const FOLD_LEAD: f32 = 0.85;
+
+/// 柱顶之后折线的推进量。三个点定这条折线（`arc = πR`，都是页宽的几分之几）：
+///
+/// 1. `(arc, arc)` —— 与柱面那一段**接得上**：那一段在 `dist = arc` 时给 `advance = dist`
+///    （`sin(π·1) = 0`）。接不上就会在过半那一刻把折线甩跳一格，纸看着抖一下 —— 这是
+///    为什么不能只把 `(dist + curl_len)/2` 里那个 `0.5` 改掉：任何别的数都在这一点上不连续。
+/// 2. `(页宽, FOLD_LEAD·页宽)` —— 这一条要的走量：满幅拖一次，折线走到 0.85 页宽。
+/// 3. `(2·页宽 − arc, 页宽)` —— **落位那一刻轴正好压在书脊上**。走完那一腿的终点就是这一格
+///    （见 [`release_grip`] 里的 `end`），所以落点不用夹也恰好为零。
+///
+/// 过了第 3 点仍按后一段的斜率继续往里走。这一点是修好的地方：原式
+/// `(dist + curl_len)/2` 在第 3 点之后同时给出 `curl_len = 2·页宽 − dist`，代进去
+/// `advance ≡ 页宽` 而与走了多远无关 —— 手指再划、折线钉死在书脊，真机 17 帧里有 5 帧
+/// 画的是同一格（那条代数退化记在 `folio-page-turn-tap-measured`）。
+///
+/// 两段斜率都从这三个点算，不在别处再写一遍分数：动 [`FOLD_LEAD`] 或 [`ROLL`] 任何一格，
+/// 接缝与落点会跟着一起挪，写死的数就会漂。
+fn fold_advance(dist: f32, width: f32, arc: f32) -> f32 {
+    // 两段共用的分母：`页宽 − arc`。`arc >= 页宽` 时（`ROLL >= 1/π`）这一段没有空间，
+    // 直接按线性给 —— 那一档本来就在参照警告过的「整页都在柱面上」之外。
+    let span = (width - arc).max(1.0);
+    if dist <= width {
+        arc + (dist - arc) * (FOLD_LEAD * width - arc) / span
+    } else {
+        FOLD_LEAD * width + (dist - width) * (width - FOLD_LEAD * width) / span
+    }
+}
+
 /// 没有手指那一条路的折线（点屏 / 按键 / 滚轮）。
 ///
 /// `None` = 这块版心还没量出面积。
@@ -250,7 +284,11 @@ fn curl_of(progress: f32, area: Area, grip: Option<Grip>) -> Option<Roll> {
     let (nx, ny) = (-ux, -uy);
     let pi = std::f32::consts::PI;
     let mut radius = ROLL * width;
-    let mut curl_len = pi * radius;
+    // 柱顶之后那一段要的是**起手那一档**的弧长：下面那一句会把 `curl_len` 换成
+    // 「两页宽 − 走了多远」，那是给卷径收零用的，不是给走量用的。两处共用一个被改过的
+    // 数，症状是走量随手指抖动。
+    let arc = pi * radius;
+    let mut curl_len = arc;
     // 拖到快够着对边之外：还能卷的弧长只剩「两页宽 − 走了多远」，卷径跟着收到 0。
     if dist > 2.0 * width - curl_len {
         curl_len = (2.0 * width - dist).max(0.0);
@@ -259,7 +297,7 @@ fn curl_of(progress: f32, area: Area, grip: Option<Grip>) -> Option<Roll> {
     // 轴从锚点往划动方向推进多少，两段各一条。
     let advance = if dist >= curl_len {
         // 绕过柱顶：推进量退到手指**后面**去，纸铺平盖到下面那一张上。
-        (dist + curl_len) * 0.5
+        fold_advance(dist, width, arc)
     } else {
         // 还在柱面上：多走一截 `R·sin(π·sqrt(dist/curlLen))`，轴跑在手指前面。
         dist + radius * (pi * (dist / curl_len).sqrt()).sin()
@@ -500,12 +538,15 @@ pub(in crate::ui::features::reader) fn release_grip(
         (-1.0, 0.0)
     };
     let u = u.clamp(0.0, 1.0);
-    // 走完这一页要划过多远：那条律的推进量在 `dist` 超过 `2·页宽 − πR` 之后**恒等于一个页宽**
-    // （`(dist + curl_len)/2` 里代进 `curl_len = 2·页宽 − dist` 就是这个数），所以落点得按
-    // **当前卷径**算、不能写死一个页宽 —— 那只在 R = 页宽/3 时刚好够。多让 8 像素把 `dist` 推过
-    // 饱和点，落位那一刻收回来的是卷径（少收 `8/π`）而不是轴：平拖时轴正好停在书脊，斜拖时停在
-    // 离书脊还有 `1 − |ux|` 成页宽的地方 —— 后者是参照那条律本身的边界，不在这一格里治。
-    let end = (2.0 * width - std::f32::consts::PI * ROLL * width).max(width) + 8.0;
+    // 走完这一页要划过多远：`2·页宽 − πR` 正是 [`fold_advance`] 第 3 个点，在那里推进量
+    // 恰好等于一个页宽 ⇒ 落位那一刻轴压在书脊上，不用夹也正好为零。落点因此必须按
+    // **起手那一档的卷径**算，写死一个页宽只在 `R = 页宽/3` 时刚好够。
+    //
+    // 从前这里多让 8 像素（「把 `dist` 推过饱和点，落位收回来的是卷径而不是轴」）。那句
+    // 在原式下是空话 —— 饱和之后 `advance ≡ 页宽`，那 8 像素只把卷径从 54.6 收到 52.05，
+    // 轴一个字没动（2026-10-22 实测记下）。换成两段折线之后它反而**有害**：多走 8 像素
+    // 会把轴推过书脊 2.1 像素，而这一腿承诺的是「停在书脊」。
+    let end = (2.0 * width - std::f32::consts::PI * ROLL * width).max(width);
     let travelled = long + (end - long) * u;
     // 起点必须是**按下点**而不是页边锚点，否则 u = 0 那一格手指会先跳一下。
     let landed = (start.0 + ux * travelled * sign, start.1 + uy * travelled);
@@ -615,6 +656,7 @@ mod tests {
 
     use crate::ui::features::reader::motion::turn_animation::PageTurnStyle as _;
     use crate::ui::features::reader::motion::turn_animation::curl::Curl;
+    use crate::ui::features::reader::motion::turn_animation::curl::FOLD_LEAD;
     use crate::ui::features::reader::motion::turn_animation::curl::MAX_TILT;
     use crate::ui::features::reader::motion::turn_animation::curl::ROLL;
     use crate::ui::features::reader::motion::turn_animation::curl::TILT_FOLLOW;
@@ -1057,6 +1099,58 @@ mod tests {
             assert!(
                 now >= previous - 1.0,
                 "t = {t} 时已经卷走的面积反而变小了：{previous} → {now}"
+            );
+            previous = now;
+        }
+    }
+
+    /// 走量那三个点：满幅拖到 **0.85 页宽**、接缝连续、走完那一腿正好压在书脊上，
+    /// 而且全程不原地不动。
+    ///
+    /// [`FOLD_LEAD`] 就是照着第一句倒推的，挪了它这一条该红 —— 而不是等到真机上又看见
+    /// 「折线过不去半页」。第三句钉的是 [`release_grip`] 里那个 `end` 与折线的第 3 个点
+    /// **同源**：两处各写一份就会漂，而漂的症状是落位那一刻轴越过书脊几像素。
+    /// 第四句钉的是原式那一处代数退化的替代：`dist > 2·页宽 − πR` 之后原式给
+    /// `advance ≡ 页宽`（手指再划、折线钉死），换两段之后它必须继续跟着手指走。
+    #[test]
+    fn the_fold_travels_to_85_percent_without_stalling() {
+        let area = page();
+        // 手势那一套是**归一**页坐标（`(1.0, 0.5)` = 自由边中点），`dist` 才是像素。
+        let travel = |dist: f32| -> f32 {
+            let grip = Grip::new((1.0, 0.5), (1.0 - dist / W, 0.5));
+            let c = cylinder_at(0.0, true, area, Some(grip)).expect("量得出圆柱");
+            // 平拖那一路折线是竖线：`d / nx` 就是它的横坐标，走量 = 页宽 − 那一格。
+            W - c.d / c.nx
+        };
+        let arc = std::f32::consts::PI * ROLL * W;
+
+        assert!(
+            (travel(W) - FOLD_LEAD * W).abs() < 1.0,
+            "满幅拖之后折线走了 {:.1}，该是 {:.1}（{FOLD_LEAD} 页宽）",
+            travel(W),
+            FOLD_LEAD * W
+        );
+        assert!(
+            (travel(arc) - arc).abs() < 1.0,
+            "两段在 dist = πR 没接上：走了 {:.1}，该是 {:.1}",
+            travel(arc),
+            arc
+        );
+        assert!(
+            (travel(2.0 * W - arc) - W).abs() < 1.0,
+            "走完那一腿的终点该正好把一个页宽走完（轴压在书脊），实得 {:.1}",
+            travel(2.0 * W - arc)
+        );
+
+        // 从 `dist = 页宽/24` 起算：`dist < 1e-3` 那一格律给的是「折线停在页外一格」，
+        // 那是设计（一个角都没揭起），不是这一条要问的「走过之后还在不在走」。
+        let mut previous = travel(W / 24.0);
+        for step in 2..=64 {
+            let now = travel(step as f32 * W / 24.0);
+            assert!(
+                now > previous + 0.5,
+                "dist = {:.1} 这一格折线没往前走：{previous:.1} → {now:.1}",
+                step as f32 * W / 24.0
             );
             previous = now;
         }

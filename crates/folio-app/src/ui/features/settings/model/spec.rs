@@ -99,6 +99,11 @@ pub(crate) enum RowKind {
     /// 标题 + 内容的行用 [`Row::custom_titled`]。
     Custom {
         title: Option<SharedString>,
+        /// 桌面把这一行排成「标题在上、内容在下」，还是「标题在左、内容在右」。
+        ///
+        /// 网格、预览这类**宽**内容要整条铺开；默认的左右两栏会把三列主题卡挤进控件那
+        /// 一栏里。手机端不受这一格影响（它本来就把标题摆在上方）。
+        vertical: bool,
         render: Rc<dyn Fn(&App) -> AnyElement>,
     },
 }
@@ -221,6 +226,7 @@ impl Row {
             keywords: &[],
             kind: RowKind::Custom {
                 title: None,
+                vertical: false,
                 render: Rc::new(render),
             },
         }
@@ -236,6 +242,25 @@ impl Row {
             keywords: &[],
             kind: RowKind::Custom {
                 title: Some(title),
+                vertical: false,
+                render: Rc::new(render),
+            },
+        }
+    }
+
+    /// 标题在上、内容整条铺开的一行。主题网格、图库这类**内容本身有版式**的格子用它；
+    /// 默认的「标题在左、控件在右」只适合一个开关或一个下拉框。
+    pub(in crate::ui::features::settings) fn custom_block(
+        title: SharedString,
+        render: impl Fn(&App) -> AnyElement + 'static,
+    ) -> Self {
+        Self {
+            title: SharedString::default(),
+            desc: None,
+            keywords: &[],
+            kind: RowKind::Custom {
+                title: Some(title),
+                vertical: true,
                 render: Rc::new(render),
             },
         }

@@ -9,6 +9,7 @@
 
 mod annotation;
 mod capture;
+mod dictionary;
 mod fixed;
 mod harness;
 mod jump_back;

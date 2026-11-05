@@ -57,6 +57,8 @@ use crate::ui::platform;
 use pages::about::about_page;
 use pages::ai::ai_page;
 use pages::appearance::appearance_page;
+use pages::backup::backup_page;
+use pages::dictionary::dictionary_page;
 use pages::fonts::fonts_page;
 use pages::layout::layout_page;
 use pages::library::library_page;
@@ -99,6 +101,7 @@ pub enum SettingsPage {
     Layout,
     Fonts,
     Speech,
+    Dictionary,
     Translation,
     Ai,
     Sync,
@@ -106,6 +109,7 @@ pub enum SettingsPage {
     TxtRules,
     Toc,
     Storage,
+    Backup,
     About,
 }
 
@@ -124,13 +128,14 @@ impl SettingsPage {
     /// 变体顺序就是侧栏顺序，而深链靠 [`index`](Self::index) 现算 —— 挪位置不会指错页，
     /// 但会让「第 N 页」这句话在别处（测试、日志、旧截图）对不上，所以三处顺序
     /// （本枚举、`ALL`、[`spec_pages`]）必须一起动；用例里也别写死的序号，要按页名取。
-    pub const ALL: [SettingsPage; 14] = [
+    pub const ALL: [SettingsPage; 16] = [
         SettingsPage::Membership,
         SettingsPage::Appearance,
         SettingsPage::Typography,
         SettingsPage::Layout,
         SettingsPage::Fonts,
         SettingsPage::Speech,
+        SettingsPage::Dictionary,
         SettingsPage::Translation,
         SettingsPage::Ai,
         SettingsPage::Sync,
@@ -138,6 +143,7 @@ impl SettingsPage {
         SettingsPage::TxtRules,
         SettingsPage::Toc,
         SettingsPage::Storage,
+        SettingsPage::Backup,
         SettingsPage::About,
     ];
 
@@ -165,6 +171,7 @@ pub(in crate::ui::features::settings) fn spec_pages(
         layout_page(cx),
         fonts_page(cx),
         speech_page(cx),
+        dictionary_page(cx),
         translation_page(cx),
         ai_page(cx),
         sync_page(cx),
@@ -172,6 +179,7 @@ pub(in crate::ui::features::settings) fn spec_pages(
         txt_rules_page(cx),
         toc_page(cx),
         storage_page(cx),
+        backup_page(cx),
         about_page(cx, notes),
     ]
 }
@@ -188,7 +196,7 @@ use gpui_kit::component::h_flex;
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_kit::{ParentElement, Styled, div};
+use gpui_kit::{Axis, ParentElement, Styled, div};
 
 /// 一页规格 → 组件的一页。**分组必须带标题**：一页只有一组时侧栏不列子项，
 /// 一页有多组时子项就是这些标题，没有标题的那一组等于在导航里消失。
@@ -311,13 +319,22 @@ fn setting_item(row: &spec::Row) -> SettingItem {
                 }),
             )
         }
-        RowKind::Custom { title, render } => match title {
+        RowKind::Custom {
+            title,
+            vertical,
+            render,
+        } => match title {
             Some(title) => {
                 let render = render.clone();
-                SettingItem::new(
+                let item = SettingItem::new(
                     title.clone(),
                     SettingField::render(move |_, _, cx| render(cx)),
-                )
+                );
+                if *vertical {
+                    item.layout(Axis::Vertical)
+                } else {
+                    item
+                }
             }
             None => {
                 let render = render.clone();
@@ -359,6 +376,31 @@ mod tests {
                 pages(cx, &notes).len(),
                 SettingsPage::ALL.len(),
                 "`pages` 组出来的页数与 `SettingsPage::ALL` 对不上"
+            );
+        });
+    }
+
+    /// 「词典」那一页在两份顺序里必须是同一格，而且摆着两组（已导入 / 导入）。
+    ///
+    /// 手机根屏按 [`SettingsPage::index`] 把页面塞进 `ROOT_BLOCKS`，桌面按 [`spec_pages`]
+    /// 组装；两边错一格，点「词典」会落到「翻译」上。这条只测规格本身，渲染在各自那几条用例里。
+    #[gpui_kit::test]
+    fn the_dictionary_page_sits_where_its_index_points(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            let notes = card(cx);
+            let pages = spec_pages(cx, &notes);
+            let ix = SettingsPage::Dictionary.index();
+            assert_eq!(
+                pages[ix].title,
+                tr(cx, "page.dictionary"),
+                "`SettingsPage::ALL` 里词典的位置与 `spec_pages` 组装的顺序错开了"
+            );
+            assert_eq!(
+                pages[ix].groups.len(),
+                2,
+                "词典页该有「已导入」与「导入」两组"
             );
         });
     }

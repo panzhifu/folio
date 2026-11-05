@@ -8,9 +8,10 @@
 //! 点遮罩关闭、关闭回调的先后次序都在它手里），拖动与弹簧自己接。
 //!
 //! **动的量是「露出多高」，不是「往下挪了多少」**。Material 那张卡片的底边一直钉在屏幕
-//! 底，手指拖的是顶边，所以半屏态与全屏态是同一块底边的两种高。按偏移量算的话，半屏态会
-//! 把卡片的下沿推出屏幕外 —— 那是另一种东西。停靠位因此是一列高度（[`BottomSheet::expanded`]
-//! 最高、[`BottomSheet::peek`] 更低），[`settle`] 判松手之后落回哪一档、还是干脆关掉。
+//! 底（输入法开着时钉在键盘上沿，见 [`BottomSheet::render`] 里那一段 `lift`），手指拖的是顶边，
+//! 所以半屏态与全屏态是同一块底边的两种高。按偏移量算的话，半屏态会把卡片的下沿推出屏幕外 ——
+//! 那是另一种东西。停靠位因此是一列高度（[`BottomSheet::expanded`] 最高、[`BottomSheet::peek`]
+//! 更低），[`settle`] 判松手之后落回哪一档、还是干脆关掉。
 //!
 //! 三处值得先说清的判断：
 //!
@@ -662,6 +663,18 @@ impl RenderOnce for BottomSheet {
         // 夹这一段给两种边角兜底：视口忽然变矮时上一帧的露出高会大于当帧的最高档，
         // 而收成 0 那一程的负高度会让整层画不出来。
         let height = shown.clamp(SETTLED_EPSILON, top);
+        // **键盘顶起来**：输入法那一段高度早就从宿主送到 Rust 了（`GpuiInputActivity` 的
+        // inset 监听 → `nativeWindowInsets` → `host::ime_insets`），但从前全仓库没有一处读它
+        // —— 于是弹层里那个填写框被键盘整条盖住，读者看不见自己在打什么字。
+        //
+        // 抬的只有底边，露出高那一格不动（`shown` 与停靠位那套算式都不受影响），所以拖动、
+        // 回弹、`settle` 判档全都照旧。上界是「顶边不许越过可用区上沿」：状态栏 / 挖孔那一条
+        // 由外壳让，这里跟着一起让开。夹在最高档之下是不行的 —— 面板已经停在最高档时
+        // `top − height = 0`，键盘照样压在表单下沿上。
+        let view_h = f32::from(window.viewport_size().height);
+        let ime = crate::ui::host::ime_insets(window, cx).bottom;
+        let room = (view_h - height - crate::ui::host::safe_area(window, cx).top).max(0.0);
+        let lift = ime.max(0.0).min(room);
 
         let surface = v_flex()
             .id("bottom-sheet-surface")
@@ -670,7 +683,7 @@ impl RenderOnce for BottomSheet {
             .absolute()
             .left_0()
             .right_0()
-            .bottom_0()
+            .bottom(px(lift))
             .h(px(height))
             .popover_style(cx)
             .corner_radii(Corners {

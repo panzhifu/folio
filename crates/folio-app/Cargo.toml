@@ -24,6 +24,12 @@ test = false
 
 [dependencies]
 folio-core.workspace = true
+# 解出来的那一本像素要按水墨那一档压成半灰（`reader::model::image_atlas::desaturate`），
+# 而 `gpui::RenderImage::new` 收的是 `image::Frame` —— 像素层的重建绕不开这个类型。
+# 从前它只挂在移动目标上（离屏那一帧要编码成 PNG 才递得出去）；这一档三端都要，所以
+# 挪到公共那一段。版本与锁里那一份一致（folio-core 已在用），不引入新 crate、不产生
+# 双版本；PNG 那一档由 workspace 根的 feature 统一打开。
+image.workspace = true
 # 仿真翻页那一档的页面网格与 uniform 的纯 CPU 定义：这里只拿数据，不拿 GPU 类型。
 # 它住在 `panzhifu/gpui-folio` 那个 workspace 里，rev 必须跟根
 # `[patch.crates-io]` 那五条同一个数 —— 一份 fork 六个成员，钉成两个 rev 就是两份代码。
@@ -87,10 +93,6 @@ write-fonts = "0.55"
 # TODO：这条依赖默认挂着 30 多个平台插件 feature，开发方案 §2.2b 要求关掉
 #       （`default-features = false`），还没落实。
 [target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
-# 离屏渲出来的那一帧要编码成 PNG 才递得出去（`platform::render_png_offscreen`）。桌面
-# 没有那条路，所以这条也只挂在移动目标上。版本与锁里那一份一致（folio-core 已在用），
-# 不引入新 crate、不产生双版本；PNG 那一档由 workspace 根的 feature 统一打开。
-image = "0.25.10"
 # rev 取的是 fork 的 `line/gpui-pre`：在 `5843b657`（延迟退出重试）之上多了
 # `057c103`（`prompt_for_paths{directories:true}` 走 ACTION_OPEN_DOCUMENT_TREE，路径提示能选文件夹）、
 # `c694ec8`（rustfmt 收尾）与 `29f19d3`（permission_handler 增加 MANAGE_EXTERNAL_STORAGE，

@@ -46,6 +46,10 @@ pub struct SettingsView {
     /// 对「会员兑换」状态实体的订阅。那一趟在后台线程上结束，到期日与结果那句都要靠
     /// 实体 notify 才出现在这一屏上。
     _activation_watch: Subscription,
+    /// 对本地词典状态实体的订阅：导入 / 删除在后台跑完要靠它唤醒这一屏。
+    _dictionary_watch: Subscription,
+    /// 对「备份」状态实体的订阅：读目录与打包在后台跑完要靠它唤醒这一屏。
+    _backup_watch: Subscription,
     /// 「更新日志」那张卡片。**本屏一份**：关于那一页的按钮拿的是这一个句柄，挂的也是这一屏，
     /// 所以从阅读页压进来的那一屏关掉卡片时，不会把底下那一屏的退场动画一起接管过去。
     notes: Entity<NotesSheet>,
@@ -76,6 +80,10 @@ impl SettingsView {
         // 重画（与上面那几条订阅同一理由，也与 [`super::compact::CompactSettings`] 那份成对）。
         let question = crate::ui::services::library::access(cx);
         let question_watch = cx.observe(&question, |_, _, cx| cx.notify());
+        let dictionary = crate::ui::services::dictionary::entity(cx);
+        let dictionary_watch = cx.observe(&dictionary, |_, _, cx| cx.notify());
+        let backup = crate::ui::services::backup::entity(cx);
+        let backup_watch = cx.observe(&backup, |_, _, cx| cx.notify());
         Self {
             _storage_watch: watch,
             _update_watch: update_watch,
@@ -83,6 +91,8 @@ impl SettingsView {
             _sync_watch: sync_watch,
             _activation_watch: activation_watch,
             _access_watch: question_watch,
+            _dictionary_watch: dictionary_watch,
+            _backup_watch: backup_watch,
             notes,
             initial: Some(page.index()),
         }
@@ -211,5 +221,34 @@ mod tests {
             shown(cx),
             "账交上去之后那一格大读数该画出来：它不在，说明这一页根本没渲染"
         );
+    }
+
+    /// 外观页的每一套主题都要真的长成一张卡，而不是又退回一列下拉框：
+    /// 注册框架主题之后按卡片的元素 id 找得到默认那两套。桌面这一档是三列网格。
+    #[gpui_kit::test]
+    async fn the_appearance_page_draws_one_card_per_theme(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(crate::ui::foundation::theme::register_builtin_themes);
+        let handle = cx
+            .open_window(size(px(900.), px(700.)), |window, cx| {
+                ConfigHolder::install(Config::default(), cx);
+                let settings = cx.new(|cx| SettingsView::new(SettingsPage::Appearance, cx));
+                Root::new(settings, window, cx)
+            })
+            .into();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            for name in [
+                crate::ui::foundation::theme::DEFAULT_LIGHT,
+                crate::ui::foundation::theme::DEFAULT_DARK,
+            ] {
+                assert!(
+                    window.try_find(format!("theme-card-{name}")).is_some(),
+                    "找不到主题卡 {name}：这一页没有把主题画成卡片"
+                );
+            }
+        })
+        .expect("窗口应能渲染");
     }
 }

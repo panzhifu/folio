@@ -31,7 +31,7 @@ use gpui_kit::component::{ActiveTheme, Sizable as _, ThemeMode, ThemeStyled as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, AppLifecyclePhase, ClickEvent, Context, Entity,
-    FocusHandle, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
+    FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
     SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
 };
 
@@ -40,6 +40,7 @@ use crate::ui::features::reader::components::reading_sheet::ReadingSheet;
 use crate::ui::features::reader::components::toc_panel::{TocEvent, TocPanel};
 use crate::ui::features::reader::model::ai::AiStatus;
 use crate::ui::features::reader::model::chrome::{self, Chrome, Effect, Reserve, zone};
+use crate::ui::features::reader::model::dictionary::DictionaryStatus;
 use crate::ui::features::reader::model::rules_draft::DraftStatus;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::translation::{self, TranslationStatus};
@@ -57,6 +58,8 @@ const FOOTNOTE_GAP: Pixels = px(10.);
 /// 翻译弹层那张卡的宽：引文与译文都按「一句到一段」估，320 装得下中英两栏
 /// 各约 20 字 —— 与脚注那张同一族的尺寸。
 const TRANSLATION_CARD_W: Pixels = px(320.);
+/// 词典弹层那张卡的宽：释义比译文长，给宽一点；仍是与脚注、译文同一族的尺寸。
+const DICTIONARY_CARD_W: Pixels = px(340.);
 
 pub struct ReadingPage {
     pub(in crate::ui::features::reader) reader: Entity<ReaderSession>,
@@ -308,6 +311,12 @@ impl ReadingPage {
         }
         if self.reader.read(cx).ai_open() {
             self.reader.update(cx, |reader, cx| reader.close_ai(cx));
+            cx.notify();
+            return true;
+        }
+        if self.reader.read(cx).dictionary_open() {
+            self.reader
+                .update(cx, |reader, cx| reader.close_dictionary(cx));
             cx.notify();
             return true;
         }
@@ -581,6 +590,49 @@ impl ReadingPage {
                         // 会话一 notify 重画自然带过来；元素也不是 Clone，闭包里重建
                         // 是唯一不撒谎的写法。
                         .content(move |_, _, cx| translation_card(&reader, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 查词典的弹层：与译文同一套挂载（零尺寸触发器 + `Popover` + 顶边中点锚），
+    /// 内容换成 [`dictionary_card`]。
+    fn dictionary_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let reader = self.reader.clone();
+        let anchor = self.reader.read(cx).dictionary.as_ref()?.anchor;
+        let width = px(f32::from(window.viewport_size().width).max(1.0));
+        let (left, top) = match anchor {
+            Some(at) => (at.x, at.y),
+            None => (width / 2.0, px(72.0)),
+        };
+        Some(
+            div()
+                .absolute()
+                .left(left)
+                .top(top)
+                .child(
+                    Popover::new("reader-dictionary")
+                        .anchor(Anchor::TopCenter)
+                        .arrow(true)
+                        .open(true)
+                        .on_open_change({
+                            let reader = reader.clone();
+                            move |open, _, cx| {
+                                if !*open {
+                                    reader.update(cx, |reader, cx| reader.close_dictionary(cx));
+                                }
+                            }
+                        })
+                        .trigger(
+                            Button::new("reader-dictionary-trigger")
+                                .ghost()
+                                .p_0()
+                                .w(px(0.))
+                                .h(px(0.))
+                                .min_w(px(0.))
+                                .min_h(px(0.)),
+                        )
+                        .content(move |_, _, cx| dictionary_card(&reader, cx)),
                 )
                 .into_any_element(),
         )
@@ -899,6 +951,7 @@ impl Render for ReadingPage {
             || self.reader.read(cx).footnote().is_some()
             || self.reader.read(cx).note_editor_open()
             || self.reader.read(cx).translation_open()
+            || self.reader.read(cx).dictionary_open()
             || self.reader.read(cx).ai_open()
             || self.reader.read(cx).rules_draft_open()
             || self.image_viewer.read(cx).is_open();
@@ -1003,6 +1056,8 @@ impl Render for ReadingPage {
         // 翻译弹层压在脚注之上：两者都是「从正文里升起的一张卡」，同一时刻只该有
         // 一张在场（开翻译时菜单先收、脚注按各自的路径收）。
         root = root.children(self.translation_popover(window, cx));
+        // 词典那张与译文同一层：开词典时菜单先收，两者不会同时在场。
+        root = root.children(self.dictionary_popover(window, cx));
         // 问 AI 那张压在译文之上：两件事共用同一个锚点，后开的盖住先开的那张，
         // 与「读者最后要看的正是他刚点的那一件事」同一条读法。
         root = root.children(self.ai_popover(window, cx));
@@ -1363,6 +1418,95 @@ fn ask_label_key(ask: Ask) -> &'static str {
         Ask::Terms => "reader.ai.ask.terms",
         Ask::Plain => "reader.ai.ask.plain",
     }
+}
+
+fn dictionary_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverState>) -> AnyElement {
+    let Some(state) = reader.read(cx).dictionary.as_ref() else {
+        // 弹层开着而状态没了（返回键刚收掉的那一帧）：画一张空卡比 panic 诚实。
+        return div().into_any_element();
+    };
+    let close_label = tr(cx, "reader.dict.dismiss");
+    let body = match &state.status {
+        DictionaryStatus::Pending => div()
+            .py_3()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(tr(cx, "reader.dict.pending")),
+        DictionaryStatus::Done { hits } if hits.is_empty() => div()
+            .py_3()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(tf(cx, "reader.dict.empty", &[("word", &state.query)])),
+        DictionaryStatus::Done { hits } => v_flex().gap_3().children(hits.iter().map(|hit| {
+            v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .items_baseline()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(hit.word.clone()),
+                        )
+                        .children(hit.phonetic.clone().map(|phonetic| {
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(phonetic)
+                        })),
+                )
+                .child(div().text_sm().child(hit.meaning.clone()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(hit.source.clone()),
+                )
+        })),
+        DictionaryStatus::Failed(reason) => div()
+            .py_3()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(tf(cx, "reader.dict.failed", &[("reason", reason)])),
+    };
+    let close_reader = reader.clone();
+    v_flex()
+        .w(DICTIONARY_CARD_W)
+        .gap_2()
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(tr(cx, "reader.dictionary")),
+                )
+                .child(div().flex_1())
+                .child(
+                    Button::new("dictionary-close")
+                        .ghost()
+                        .small()
+                        .icon(IconName::X)
+                        .tooltip(close_label.clone().to_string())
+                        .accessibility_label(close_label)
+                        .on_click(move |_, _, cx| {
+                            close_reader.update(cx, |reader, cx| reader.close_dictionary(cx))
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .id("reader-dictionary-scroll")
+                .max_h(px(320.0))
+                .overflow_y_scrollbar()
+                .child(body),
+        )
+        .into_any_element()
 }
 
 fn translation_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverState>) -> AnyElement {

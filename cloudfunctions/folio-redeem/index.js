@@ -25,6 +25,37 @@ const PG_ROWS = `https://${ENV_ID}.api.tcloudbasegateway.com/v1/rdb/rest/folio_r
 // 订单号是 29 位数字。形状不对直接拒，省掉一次上游请求，也不给日志喂脏数据。
 const ORDER_SHAPE = /^[0-9]{16,40}$/;
 
+// ── 测试订单 ────────────────────────────────────────────────────────────────
+//
+// 只在**同时**满足下面三件事时生效，任何一条缺失都当没配：
+//
+// 1. `FOLIO_ALLOW_TEST_ORDERS=1` —— 显式的开关，默认关；
+// 2. `FOLIO_TEST_ORDERS="<订单号>=<天数>,..."` —— 只认表里列出的号；
+// 3. `FOLIO_TEST_ORDER_UNTIL=<ISO 时刻>` —— 过了这一刻全部失效（解析不出来也当没有）。
+//
+// 这是给自建 / 测试环境做端到端实验用的，**不要在生产环境打开**。测试单走的仍是下面
+// 同一条 claim 通道：一单只发一次、一单只绑一台设备，解除与换设备的语义也一样，
+// 所以它能验完整条链路，而不是在客户端假装会员。
+function testOrderDays(orderNo) {
+  if (String(process.env.FOLIO_ALLOW_TEST_ORDERS || "").trim() !== "1") {
+    return 0;
+  }
+  const until = Date.parse(process.env.FOLIO_TEST_ORDER_UNTIL || "");
+  if (!Number.isFinite(until) || Date.now() > until) {
+    return 0;
+  }
+  for (const pair of (process.env.FOLIO_TEST_ORDERS || "").split(",")) {
+    const at = pair.indexOf("=");
+    if (at < 1) continue;
+    const order = pair.slice(0, at).trim();
+    const days = Number(pair.slice(at + 1));
+    if (ORDER_SHAPE.test(order) && Number.isInteger(days) && days > 0 && order === orderNo) {
+      return days;
+    }
+  }
+  return 0;
+}
+
 function planDays() {
   // AFDIAN_PLAN_DAYS 形如 "<方案id>=365,<另一个id>=30"，逗号分隔。
   //
@@ -222,7 +253,9 @@ async function release(device, at) {
     "PATCH",
     url,
     { Authorization: `Bearer ${PG_KEY}`, Prefer: "return=representation", Accept: "application/json" },
-    JSON.stringify({ released_at: at }),
+    // `released_at` 是 TIMESTAMPTZ：PostgREST 收到毫秒数会按无效时间拒掉（PATCH 回 400，
+    // 界面看到的就是 `storage`）。这里显式转 ISO 串，别让数据库去猜。
+    JSON.stringify({ released_at: new Date(at).toISOString() }),
   );
   return { status: res.status, rows: Array.isArray(res.data) ? res.data.length : 0 };
 }
@@ -256,8 +289,9 @@ async function redeem(req, res, body) {
   if (String(body.action || "").trim() === "release") {
     return await releaseFlow(res, body);
   }
-  if (!AFDIAN_USER_ID || !AFDIAN_TOKEN || !PG_KEY || !ENV_ID || Object.keys(planDays()).length === 0) {
-    // 配置没齐就把单判成无效会误导读者；这里如实说服务端还没准备好。
+  // 库的连接是两条路都需要的；爱发电那一套只有真单才需要。测试单因此能在没有
+  // AFDIAN_* 的开发环境里跑通「发放 → 设备绑定 → 解除 / 换设备」整条链路。
+  if (!PG_KEY || !ENV_ID) {
     return json(res, 200, { ok: false, state: "unconfigured" });
   }
   const orderNo = String(body.order || "").trim();
@@ -269,22 +303,40 @@ async function redeem(req, res, body) {
     return json(res, 200, { ok: false, state: "bad_device" });
   }
 
-  const found = await queryOrder(orderNo);
-  if (found.error) {
-    console.log(`query-order 失败 ec=${found.ec}`);
-    return json(res, 200, { ok: false, state: "upstream" });
-  }
-  const order = found.order;
-  if (!order) {
-    return json(res, 200, { ok: false, state: "not_found" });
-  }
-  // 平台只把交易成功的单推给 webhook，但查询 API 会把待付/退款的也带回来。
-  if (order.status !== 2) {
-    return json(res, 200, { ok: false, state: "unpaid" });
-  }
-  const matched = matchPlan(order);
-  if (!matched) {
-    return json(res, 200, { ok: false, state: "plan" });
+  let order;
+  let matched;
+  const testDays = testOrderDays(orderNo);
+  if (testDays > 0) {
+    // 只在这个号被明确列进 `FOLIO_TEST_ORDERS`、开关打开、且没过截止时刻时才走到这里。
+    console.log(`test order granted days=${testDays}`);
+    order = {
+      out_trade_no: orderNo,
+      user_private_id: "test",
+      total_amount: 0,
+    };
+    matched = { id: "test", days: testDays };
+  } else {
+    if (!AFDIAN_USER_ID || !AFDIAN_TOKEN || Object.keys(planDays()).length === 0) {
+      // 配置没齐就把单判成无效会误导读者；这里如实说服务端还没准备好。
+      return json(res, 200, { ok: false, state: "unconfigured" });
+    }
+    const found = await queryOrder(orderNo);
+    if (found.error) {
+      console.log(`query-order 失败 ec=${found.ec}`);
+      return json(res, 200, { ok: false, state: "upstream" });
+    }
+    order = found.order;
+    if (!order) {
+      return json(res, 200, { ok: false, state: "not_found" });
+    }
+    // 平台只把交易成功的单推给 webhook，但查询 API 会把待付/退款的也带回来。
+    if (order.status !== 2) {
+      return json(res, 200, { ok: false, state: "unpaid" });
+    }
+    matched = matchPlan(order);
+    if (!matched) {
+      return json(res, 200, { ok: false, state: "plan" });
+    }
   }
 
   // `redeemed_at` 由表自己的 DEFAULT now() 填 —— 那是「这一单第一次发货」的那一刻，
@@ -362,4 +414,10 @@ const server = http.createServer(async (req, res) => {
   return json(res, 404, { ok: false, state: "route" });
 });
 
-server.listen(9000);
+// 直接被 `node index.js` 启动时才监听；被测试 `require` 时只导出纯函数，
+// 不去占 9000 端口。CloudBase 的 `scf_bootstrap` 走的就是前一条。
+if (require.main === module) {
+  server.listen(9000);
+}
+
+module.exports = { testOrderDays };

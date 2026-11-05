@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Folio 设置界面（compact 档）SVG 设计稿生成器。
 
-十三个屏的几何常量、主题 token、Lucide 图标表与行构造器全部来自 [`../_kit.py`](../_kit.py)
+十七个屏的几何常量、主题 token、Lucide 图标表与行构造器全部来自 [`../_kit.py`](../_kit.py)
 —— 那一份是各屏共用的尺，本文件只写「设置这一屏摆哪几行」。按 2026-11-05 的定稿：
 **行内不摆灰色说明文字、卡片上方摆节头（同一屏只有一块时不摆）** —— 每行只有标题与控件，
 块与块之间 32 的缝，节头到自己那张卡 8。几何数字来自 crates/folio-app/src/ui/features/settings/view/compact.rs
@@ -83,17 +83,19 @@ def root_screen(T):
     `SettingsPage::ALL`。两格不进列表：**会员**顶在根上单独一张卡（当场念等级与到期日），
     **「关于」**落末尾那张无节头的卡 —— 一块只剩一行时，块名念的就是那一行自己的名字。
 
-    实现里现在是 14 页，这份稿画到 13 格：`Logging` 那一页在稿上是「稿先到」（界面上还没有
+    实现里现在是 16 页，这份稿画到 15 格：`Logging` 那一页在稿上是「稿先到」（界面上还没有
     入口，只能改 config.json 或环境变量），而它从前占的那一格现在由「TXT 分章规则」与「AI」
     这些真页顶上。整屏的内容比 853 那块画布高 —— 这一屏**滚**（分了块就装不下），最后一张卡
     落在折叠底下，画布到这儿裁掉，不是版式画错了。
     """
     blocks = [
         ("阅读", [("palette", "外观"), ("type", "文字"), ("columns-3", "版面"),
-                  ("a-large-small", "字体"), ("book-headphones", "听书")]),
+                  ("a-large-small", "字体"), ("book-headphones", "听书"),
+                  ("book-open", "词典")]),
         ("翻译与 AI", [("languages", "翻译"), ("sparkles", "AI")]),
         ("书与数据", [("folder-open", "书库"), ("file-text", "TXT 分章规则"),
-                     ("list-tree", "目录"), ("arrow-down-up", "同步"), ("hard-drive", "存储")]),
+                     ("list-tree", "目录"), ("arrow-down-up", "同步"), ("hard-drive", "存储"),
+                     ("archive", "备份")]),
     ]
     e = status_bar(T)
     y = STATUS + 8
@@ -144,20 +146,81 @@ def search_screen(T):
     return svg("14-search", e, T["label"], "搜索：页命中给入口，行命中直接摆那一格的控件", T)
 
 
+def contrast_on(hex_color):
+    """压在某个底色上的字该用黑还是白：预览里的勾不能跟着主色一起消失。"""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return "#0a0a0a" if lum > 0.55 else "#ffffff"
+
+
+def theme_card(x, y, w, name, bg, primary, fg, selected, T):
+    """一张主题卡（compact 两列网格里的一格）。
+
+    实现里卡片内容按端分叉：手机只有「预览三条色带 + 名字」，桌面多一行浅深标签与一块
+    `Aa`。这里画的是手机那一档，所以没有标签行 —— 浅深由上方「浅色主题 / 深色主题」
+    两个行标题说。选中描边用**当前界面**的主色，勾用被预览主题的主色 + 反差墨色。
+    """
+    h = 80
+    border = T["primary"] if selected else T["border"]
+    e = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="8" fill="{T["popover"]}" '
+         f'stroke="{border}" stroke-width="1"/>']
+    # 预览：主题自己的底色；三条色带依次是主色与两档墨色。
+    e.append(f'<rect x="{x + 8}" y="{y + 8}" width="{w - 16}" height="36" rx="4" fill="{bg}"/>')
+    for bar_y, bar_w, color, opacity in [
+        (y + 14, 40, primary, None),
+        (y + 22, 58, fg, 0.35),
+        (y + 30, 32, fg, 0.18),
+    ]:
+        alpha = "" if opacity is None else f' opacity="{opacity}"'
+        e.append(f'<rect x="{x + 14}" y="{bar_y}" width="{bar_w}" height="4" rx="2" '
+                 f'fill="{color}"{alpha}/>')
+    if selected:
+        e.append(f'<circle cx="{x + w - 16}" cy="{y + 16}" r="8" fill="{primary}"/>')
+        e.extend(resolve([icon("check", x + w - 21, y + 11, 10, contrast_on(primary))], T))
+    e.append(text(x + 8, y + 62, name, 14, T["fg"]))
+    return e, h
+
+
+def theme_grid_row(title, cards, T):
+    """一行「标题 + 两列主题卡」。手机那一档的网格是两列，桌面才是三列。
+
+    `cards` 每项是 `(名字, 底色, 主色, 墨色, 是否选中)`。稿子每个方向只画两格：
+    真机上每侧有十来套，这一屏本来就是滚的，画满会把下面「亮度」与自定义主题挤出画布，
+    反而看不出这一块的形状。
+    """
+    e = [text(PAD + PAD, 20, title, 16, T["fg"])]
+    gap = 8
+    w = (RIGHT - (PAD + PAD) - gap) / 2
+    for i, (name, bg, primary, fg, selected) in enumerate(cards[:2]):
+        x = PAD + PAD + i * (w + gap)
+        els, _ = theme_card(x, 30, w, name, bg, primary, fg, selected, T)
+        e.extend(els)
+    return e, 30 + 80 + 8
+
+
 def appearance_screen(T):
     # 「亮度」这一格实现里只在阅读面板那条滑条上（`regions.rs:365-393`），设置页进不去；
     # 稿子把它提到这一页，控件**照抄面板那一条滑条**而不是另配一颗步进 —— 同一个
     # `appearance.brightness` 在两处出现两种控件，读者就得学两套操作。
     # 顶格那一档（1.0）在配置里归成 `None`＝「跟随系统」（config.rs:447-449,477-483），
     # 所以值那一端写的可以是百分比，也可以是那三个字，轨道铺满。
+    # 主题不再用下拉框：每一套一张卡，预览用的是那套主题自己的颜色（`pages/appearance.rs`）。
     e = page_screen(T, "外观", [
+        [popup_row("界面语言", "简体中文")],
         [popup_row("浅深", "跟随系统"),
-         popup_row("浅色主题", "Default Light"),
-         popup_row("深色主题", "Default Dark"),
+         theme_grid_row("浅色主题", [
+             ("Default Light", "#ffffff", "#171717", "#0a0a0a", True),
+             ("Adventure", "#fdf6e3", "#e07a5f", "#3d405b", False),
+         ], T),
+         theme_grid_row("深色主题", [
+             ("Adventure Dark", "#0b0b0f", "#e07a5f", "#e5e5e5", True),
+             ("Ascii", "#111111", "#fafafa", "#d4d4d4", False),
+         ], T),
          slider_row("亮度", "80%", 0.8)],
         [titled_row("主题目录", content_path_button("~/.config/folio/themes"))],
-    ], heads=["主题", "自定义主题"])
-    return svg("02-appearance", e, T["label"], "外观：浅深与两侧主题、亮度、主题目录", T)
+    ], heads=["语言", "主题", "自定义主题"])
+    return svg("02-appearance", e, T["label"], "外观：界面语言、浅深、主题卡网格、亮度、主题目录", T)
 
 
 def typography_screen(T):
@@ -349,9 +412,41 @@ def about_screen(T):
         [titled_row("更新", content_status_ghost("还没查过", "检查更新", None)),
          titled_row("更新日志", content_status_ghost("看这一版改了什么", "查看", None)),
          titled_row("反馈日志", content_status_ghost("还没发过", "发送日志", None))],
-        [popup_row("界面语言", "简体中文")],
     ])
-    return svg("09-about", e, T["label"], "关于：版本、更新与反馈、界面语言", T)
+    return svg("09-about", e, T["label"], "关于：版本、更新与反馈", T)
+
+
+def backup_screen(T):
+    """备份页：打一份、列已有的、以及包落在哪儿。
+
+    开关那一格是这一页唯一记住的选择（带不带书文件）；删除在实现里是整行换成确认面板，
+    稿子只画常态那一行 —— 确认态与存储页的五档同一形状，不重复画。
+    """
+    e = page_screen(T, "备份", [
+        [switch_row("包含书文件", True),
+         content_button_leading("立即备份"),
+         _muted_line("包里有 config.json，带着同步密码与"),
+         _muted_line("API 密钥，请放在稳妥的地方。")],
+        [clean_row("2026-11-05 20:30", "1.2 GB", "trash", "删除"),
+         clean_row("2026-11-01 09:12", "48 MB", "trash", "删除")],
+        [titled_row("备份文件夹", content_path_button("~/.local/share/folio/backups"))],
+    ], heads=["创建备份", "已有备份", "位置"])
+    return svg("17-backup", e, T["label"], "备份：包含书文件、立即备份、已有备份与目录", T)
+
+
+def dictionary_screen(T):
+    """词典页：已导入空状态 + 导入入口。
+
+    空状态不是「还没有内容」的占位，而是第一次进来唯一能做的事：这一页不内置任何词典，
+    读者手里那个文件夹才是数据源。行内那句只说「要有什么文件」，不写「本产品不提供词典」
+    这种解释。
+    """
+    e = page_screen(T, "词典", [
+        [_muted_line("还没有词典。选一个放着 StarDict 词典的文件夹导入。")],
+        [content_button_leading("选择词典文件夹…"),
+         _muted_line("文件夹里要有 .ifo，连同 .idx / .dict（或 .idx.gz / .dict.dz）。")],
+    ], heads=["已导入", "导入"])
+    return svg("16-dictionary", e, T["label"], "词典：空状态与导入入口", T)
 
 
 def pick_screen(T):
@@ -380,6 +475,8 @@ SCREENS = [
     ("13-logging.svg", logging_screen, LIGHT),
     ("14-search.svg", search_screen, LIGHT),
     ("15-access-question.svg", access_screen, LIGHT),
+    ("16-dictionary.svg", dictionary_screen, LIGHT),
+    ("17-backup.svg", backup_screen, LIGHT),
 ]
 
 if __name__ == "__main__":

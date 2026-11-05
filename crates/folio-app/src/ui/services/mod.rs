@@ -8,7 +8,9 @@
 
 pub mod activation;
 pub mod app_store;
+pub mod backup;
 pub mod config;
+pub mod dictionary;
 pub mod feedback;
 pub mod import_queue;
 pub mod l10n;

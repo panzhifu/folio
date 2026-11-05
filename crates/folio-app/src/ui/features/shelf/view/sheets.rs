@@ -6,7 +6,7 @@
 use super::super::overlay;
 use crate::ui::components::{access_question, muted_label, waiting_for};
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::services::l10n::tr;
+use crate::ui::services::l10n::{tf, tr};
 use crate::ui::services::library::{Pick, suggested_dir};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
@@ -19,6 +19,66 @@ use gpui_kit::{
 use super::{GUTTER, ShelfView};
 
 impl ShelfView {
+    /// 多选删除前的确认。两端都用居中的那一张：它问的是一句话，不是一块要滚的清单；
+    /// 手机上底部弹层已经把底栏盖住，再抬一张只会多一层要读的东西。
+    pub(in crate::ui::features::shelf) fn selection_delete_popover(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let count = self.selected.len();
+        let shelf = cx.entity().clone();
+        let cancel = shelf.clone();
+        let confirm = shelf.clone();
+        let cancel_label = tr(cx, "shelf.cancel");
+        let confirm_label = tr(cx, "shelf.selection_delete_confirm");
+        let body = v_flex()
+            .id("shelf-selection-delete")
+            .test_support()
+            .w(px(overlay::FORM_WIDTH))
+            .min_h(px(overlay::FORM_HEIGHT))
+            .gap_3()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(tf(
+                cx,
+                "shelf.selection_delete_title",
+                &[("n", &count)],
+            )))
+            .child(muted_label(
+                tf(cx, "shelf.selection_delete_body", &[("n", &count)]),
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Button::new("shelf-selection-delete-cancel")
+                            .ghost()
+                            .label(cancel_label.clone().to_string())
+                            .accessibility_label(cancel_label)
+                            .on_click(move |_, _, cx| {
+                                cancel.update(cx, |this, cx| this.cancel_delete_selection(cx))
+                            }),
+                    )
+                    .child(
+                        Button::new("shelf-selection-delete-confirm")
+                            .danger()
+                            .label(confirm_label.clone().to_string())
+                            .accessibility_label(confirm_label)
+                            .on_click(move |_, _, cx| {
+                                confirm.update(cx, |this, cx| this.confirm_delete_selection(cx))
+                            }),
+                    ),
+            )
+            .into_any_element();
+        overlay::centered(
+            "shelf-selection-delete-popover",
+            overlay::FORM_HEIGHT,
+            &shelf,
+            |this, cx| this.cancel_delete_selection(cx),
+            body,
+        )
+    }
+
     /// 「从链接导入」那一屏的内容。与建组那一屏同一形状，也只有容器不同。
     pub(in crate::ui::features::shelf) fn url_form(
         &self,

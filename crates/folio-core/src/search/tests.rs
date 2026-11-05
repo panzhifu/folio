@@ -181,6 +181,63 @@ fn the_cap_stops_the_sweep_and_says_so() {
     );
 }
 
+/// 续扫**接着上一批的尾巴**：一批一批接上去的命中，必须与一趟扫完全书逐字相同。
+///
+/// 钉的是两种相反的坏法，界面两边都会看见却都不报错：续扫的落点写成「下一章开头」
+/// ⇒ 被上限截断那一章剩下的命中整章丢掉（列表永远数不到）；写成「同一章从头重扫」
+/// ⇒ 已经摆出去的那几处再报一遍（同一行出现两次，点下去跳的是同一个地方）。
+/// 逐字比一整串 `(章, 偏移)` 同时挡得住这两边。
+#[test]
+fn resuming_a_batch_continues_where_the_last_one_stopped() {
+    let doc = book(&[
+        ("一", "<p>猫猫猫猫猫</p>"),
+        ("二", "<p>猫猫猫猫猫</p>"),
+        ("三", "<p>猫猫</p>"),
+    ]);
+    let whole = sweep_with(
+        doc.as_ref(),
+        "猫",
+        &Options {
+            max_hits: 200,
+            ..Options::default()
+        },
+        &StageCtx::detached(),
+    );
+    assert_eq!(whole.hits.len(), 12, "前置：样本一共 12 处");
+    assert!(!whole.truncated, "前置：这一趟是扫完的");
+
+    let starts = |out: &Found| out.hits.iter().map(|h| (h.chapter, h.start)).collect();
+    let mut got: Vec<(usize, usize)> = Vec::new();
+    let mut resume = None;
+    let mut batches = 0;
+    loop {
+        let out = sweep_with(
+            doc.as_ref(),
+            "猫",
+            &Options {
+                max_hits: 2,
+                resume,
+                ..Options::default()
+            },
+            &StageCtx::detached(),
+        );
+        batches += 1;
+        assert!(!out.cancelled);
+        got.extend(starts(&out));
+        if !out.truncated {
+            break;
+        }
+        assert!(
+            out.cursor.is_some(),
+            "被截断的这一批没给落点，界面只能从全书开头重扫：第 {batches} 批"
+        );
+        resume = out.cursor;
+        assert!(batches < 20, "批数失控（{batches} 批还没扫完），续扫没接上");
+    }
+    let want: Vec<(usize, usize)> = starts(&whole);
+    assert_eq!(got, want, "{batches} 批接起来的与一趟扫完的不是同一串");
+}
+
 /// 取消在**每一章的开头**看一眼，于是它既停得下来，也不会停在半章上。
 #[test]
 fn a_triggered_cancel_stops_at_the_first_chapter() {

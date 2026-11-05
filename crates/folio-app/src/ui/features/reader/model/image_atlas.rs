@@ -161,6 +161,65 @@ pub(in crate::ui::features::reader) fn set_screen_width(width: f32) {
     }
 }
 
+/// 水墨那一档此刻开着没有。与 [`SCREEN_WIDTH`] 同一手法、同一理由：去不去彩度是**这一档**
+/// 的属性而不是「这一本图集」的属性，而解像素那一路在后台线程里、手上没有 `&App`。
+static INK_PIXELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 绘制侧每帧推一次，返回**这一帧是不是翻了档**（`true` = 与上一帧不同）。
+///
+/// 翻了档要清一次图集：表里存的键是「哪一本图的哪一路」，里面没有「哪一档」这一格，
+/// 所以彩色那一份会原样留着继续画。清与调这一句都在 `view::body` 那一处，两处不必各存
+/// 一份「上一帧是什么」。
+pub(in crate::ui::features::reader) fn set_ink_pixels(ink: bool) -> bool {
+    INK_PIXELS.swap(ink, std::sync::atomic::Ordering::Relaxed) != ink
+}
+
+fn ink_pixels() -> bool {
+    INK_PIXELS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 把一本已经解好的图按水墨那一档压成半灰。
+///
+/// 落点在**像素**而不是字节：这一格是正文插图、定版式那一页与 `background-image` 三路
+/// 共同经过的唯一出口（架面上那小块封面走 gpui 自己的资产表，不经过这里），写在这里
+/// 三路一起生效，也不必把 JPEG 再编一遍 —— 那是又一次全图往返加一档画质损失。
+///
+/// 缓冲里是 **BGRA**（`to_image_data` 里那句 `pixel.swap(0, 2)` 换好的），所以亮度权重
+/// 按 B 0.114 / G 0.587 / R 0.299 对位取；alpha 那一格原样留着，否则透明底会被填成一堵灰。
+///
+/// **只折单帧那一本**：`image::Frame` 的 `delay`、`left`、`top` 三格既读不到也写不进
+/// （只有 `Frame::new(buffer)` 这一个构造口），而 gpui 那边除了 `as_bytes` 没有别的取像素
+/// 的路 —— 重建一次就把动图的节拍与每帧的偏移全丢了。所以多帧的那一本原样交回去，
+/// 水墨那一档下动画留着颜色：错位的动画比一处彩色坏得多。
+fn desaturate(pixels: Arc<RenderImage>) -> Arc<RenderImage> {
+    if pixels.frame_count() != 1 {
+        return pixels;
+    }
+    let (Some(bytes), size) = (pixels.as_bytes(0), pixels.size(0)) else {
+        return pixels;
+    };
+    let (width, height) = (
+        u32::try_from(size.width.0).unwrap_or(0),
+        u32::try_from(size.height.0).unwrap_or(0),
+    );
+    let mut grey = bytes.to_vec();
+    for chunk in grey.as_chunks_mut::<4>().0 {
+        let luma = (0.114 * f32::from(chunk[0])
+            + 0.587 * f32::from(chunk[1])
+            + 0.299 * f32::from(chunk[2])) as u8;
+        chunk[0] = luma;
+        chunk[1] = luma;
+        chunk[2] = luma;
+    }
+    let Some(buffer) =
+        image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, grey)
+    else {
+        // 像素数与宽高对不上：原样交回去，为了一格对不上的账把整本图弄没是更大的错。
+        return pixels;
+    };
+    Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
 /// 配置文件里那一格（`reader.image_cache_bytes`）想直接定住软顶时用；`0` 与「没装配置
 /// 全局」（纯视图测试）都是「没覆盖」，于是走 [`soft_limit`] 的设备分档。
 ///
@@ -466,6 +525,9 @@ impl ImageAtlas {
         });
         // 那条线程不留句柄：它跑完由内核回收，而它最后一件事就是写下这一格并摇铃。
         let decode_cancel = cancel.clone();
+        // 开没开水墨在**派这一趟之前**就取定：解的一趟可能跑到一半读者才翻档，那种时候
+        // 翻档那一句会清表，这一趟的产物正好作废，不必再问「解完是不是已经旧了」。
+        let ink = ink_pixels();
         let decoded = cx.background_spawn(async move {
             // 解码头留在 UI 侧那条异步链上（gpui 的 `to_image_data` 要 `SvgRenderer`），
             // 与从前逐字相同；前面那一截取字节走的是作业池。耗时单独记一笔
@@ -482,6 +544,8 @@ impl ImageAtlas {
                     let image = gpui_kit::Image::from_bytes(format, bytes);
                     match image.to_image_data(renderer) {
                         Ok(pixels) => {
+                            // 水墨那一档：像素到手就压成半灰，压完再记账。
+                            let pixels = if ink { desaturate(pixels) } else { pixels };
                             // 记的是**解出来之后**的真像素数（不是请求里那份估的），与图集
                             // 记账同一把尺 —— 两把尺差多少，正是那笔「虚报名额」的量。
                             super::perf::note_image_decode(
@@ -1881,5 +1945,54 @@ mod tests {
             held(&atlas, &key, cx).is_some(),
             "JPEG 插图必须解得出来；解码头写死 PNG 时这一句会红"
         );
+    }
+
+    /// 一本（或几本）帧长一样的图，按 BGRA 字节摆出来。`frames > 1` 就是动图那一形状。
+    fn ink_fixture(pixels: Vec<u8>, width: u32, frames: usize) -> Arc<RenderImage> {
+        let height = u32::try_from(pixels.len() / 4 / width as usize).expect("整除");
+        let list: Vec<_> = (0..frames)
+            .map(|_| {
+                let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(
+                    width,
+                    height,
+                    pixels.clone(),
+                )
+                .expect("像素数与宽高对得上");
+                image::Frame::new(buffer)
+            })
+            .collect();
+        Arc::new(RenderImage::new(list))
+    }
+
+    /// 水墨那一档的像素折法：三通道压成同一个数、alpha 原样留着、权重按 **BGRA** 对位取。
+    ///
+    /// 三条纯色各钉一个数，是因为写成 RGBA 的权重只会把红与蓝那两个系数互换 —— 出来的
+    /// 仍旧是一片灰，屏上看不出对错，而数值当场就错了（暖图偏冷）。多帧那一本必须
+    /// **整个原样交回去**：重建一次就把动图的节拍与每帧偏移弄丢了。
+    #[test]
+    fn ink_folds_colour_into_grey_and_leaves_animation_alone() {
+        for (bgra, want) in [
+            ([255u8, 0, 0, 255], 29u8), // 纯蓝：0.114 × 255
+            ([0, 255, 0, 255], 149),    // 纯绿：0.587 × 255
+            ([0, 0, 255, 255], 76),     // 纯红：0.299 × 255
+        ] {
+            let out = super::desaturate(ink_fixture(bgra.to_vec(), 1, 1));
+            let bytes = out.as_bytes(0).expect("单帧该读得出像素");
+            assert_eq!(
+                &bytes[..3],
+                &[want; 3],
+                "{bgra:?} 折出来的三通道不是同一个数"
+            );
+            assert_eq!(bytes[3], 255, "alpha 那一格被跟着折了");
+        }
+
+        // 透明那一格：压成灰不等于填成实，alpha 得留着 0。
+        let out = super::desaturate(ink_fixture(vec![10, 20, 30, 0], 1, 1));
+        assert_eq!(out.as_bytes(0).expect("像素")[3], 0, "透明被填成一堵灰");
+
+        // 动图那一本：帧数一多就不是「一格缓冲」，重建会把 delay 与 left/top 全弄丢。
+        let moving = ink_fixture(vec![200, 40, 40, 255, 10, 200, 10, 255], 2, 2);
+        let out = super::desaturate(Arc::clone(&moving));
+        assert!(Arc::ptr_eq(&out, &moving), "多帧那一本被重写了，动图会错位");
     }
 }

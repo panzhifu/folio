@@ -499,7 +499,10 @@ impl ShelfView {
     }
 
     /// 全选 / 清除（已在架上的不参与 —— 见模块注释）。
-    fn toggle_select_all(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// 名字与架面那本 `ShelfView::toggle_select_all` 分开：那一颗管的是**多选的书**，
+    /// 这一颗管的是扫描清单上的**勾**，两者都在 `impl ShelfView` 里，同名就是两条定义撞车。
+    fn toggle_all_checked(&mut self, cx: &mut Context<Self>) {
         let Some(ScanPhase::Results { rows, checked, .. }) = &mut self.scan else {
             return;
         };
@@ -741,7 +744,7 @@ impl ShelfView {
                                         .accessibility_label(select_label)
                                         .on_click(move |_, _, cx| {
                                             select_entity
-                                                .update(cx, |this, cx| this.toggle_select_all(cx))
+                                                .update(cx, |this, cx| this.toggle_all_checked(cx))
                                         }),
                                 )
                                 .child(

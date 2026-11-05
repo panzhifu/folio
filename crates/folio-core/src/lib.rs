@@ -24,7 +24,9 @@ rust_i18n::i18n!("locales", fallback = "en");
 // `ingest` 同时碰容器、文件系统与数据库（那是它的职责）；`infra` 谁都不依赖。
 // 这条方向是「引擎能在没有数据库的情况下跑」与「core 能被 cargo test 全量覆盖」的前提。
 pub mod account;
+pub mod backup;
 pub mod content;
+pub mod dict;
 pub mod group;
 pub mod infra;
 pub mod ingest;
@@ -53,14 +55,16 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
-    Account, Ai, Appearance, CONFIG_VERSION, Config, Env, IGNORE_CONFIG_ENV, ImageScale,
-    LOG_OFF_ENV, Language, Layer, Library, Logging, Membership, MembershipTier, Mode, Novel, Opds,
-    OpdsCatalog, PageTurn, Provenance, Reader, Resolved, Speech, Sync, TextDirection, TocDensity,
-    Translation, TranslationEngine,
+    Account, Ai, Appearance, Backup, CONFIG_VERSION, Config, Dictionary, DictionaryEntry, Env,
+    IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV, Language, Layer, Library, Logging, Membership,
+    MembershipTier, Mode, Novel, Opds, OpdsCatalog, PageTurn, Provenance, Reader, Resolved, Speech,
+    Sync, TextDirection, TocDensity, Translation, TranslationEngine,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
-pub use infra::paths::{config_dir, config_path, data_dir, db_path, log_dir, themes_dir};
+pub use infra::paths::{
+    backups_dir, config_dir, config_path, data_dir, db_path, dicts_dir, log_dir, themes_dir,
+};
 pub use infra::services::Services;
 pub use infra::task::{
     ByteProgress, Cancel, Priority, StageCtx, TaskError, TaskEvent, TaskHandle, TaskId, TaskManager,

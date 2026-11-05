@@ -1,10 +1,12 @@
-//! 十四个设置页：每页一个文件，产出的是 [`super::super::model::spec`] 里的中立规格。
+//! 十六个设置页：每页一个文件，产出的是 [`super::super::model::spec`] 里的中立规格。
 //!
 //! 加一页动三处：新文件、这里一行、`super::SettingsPage` 里一个变体（顺序即侧栏顺序）。
 
 pub(in crate::ui::features::settings) mod about;
 pub(in crate::ui::features::settings) mod ai;
 pub(in crate::ui::features::settings) mod appearance;
+pub(in crate::ui::features::settings) mod backup;
+pub(in crate::ui::features::settings) mod dictionary;
 pub(in crate::ui::features::settings) mod fonts;
 pub(in crate::ui::features::settings) mod layout;
 pub(in crate::ui::features::settings) mod library;

@@ -264,6 +264,23 @@ impl Store {
         Ok(before.saturating_sub(after))
     }
 
+    /// 把这一份库写成一份**一致的单文件副本**（SQLite 的 `VACUUM INTO`）。
+    ///
+    /// 为什么不是 `fs::copy`：WAL 模式下主文件里可能还缺最后一截，热备份更可能读到
+    /// 半页；`VACUUM INTO` 走的是同一条读事务，读者继续翻页也不会写出一个坏包。
+    /// 目标文件必须不存在 —— 调用方先删掉上一次的同名临时文件。
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|err| crate::Error::Io {
+                path: path.to_path_buf(),
+                source: Box::new(err),
+            })?;
+        }
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])?;
+        Ok(())
+    }
+
     /// freelist 折成字节。私有助手：只接 `&Connection`，自己不上锁（那条纪律见模块头）。
     fn freeable_in(conn: &Connection) -> Result<u64> {
         let pages: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;

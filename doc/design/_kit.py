@@ -120,6 +120,7 @@ ICONS = {
     "a-large-small": {"p": ['m15 16 2.536-7.328a1.02 1.02 1 0 1 1.928 0L22 16', 'M15.697 14h5.606',
                             'm2 16 4.039-9.69a.5.5 0 0 1 .923 0L11 16', 'M3.304 13h6.392']},
     "folder-open": {"p": ['m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2']},
+    "archive": {"rect": (2, 3, 20, 5, 1), "p": ['M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8', 'M10 12h4']},
     "list-tree": {"p": ['M8 5h13', 'M13 12h8', 'M13 19h8', 'M3 10a2 2 0 0 0 2 2h3', 'M3 5v12a2 2 0 0 0 2 2h3']},
     "hard-drive": {"p": ['M10 16h.01', 'M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z', 'M21.946 12.013H2.054', 'M6 16h.01']},
     "info": {"p": ['M12 16v-4', 'M12 8h.01'], "circles": [(12, 12, 10)]},
@@ -647,10 +648,14 @@ def ghost_button(label, icon_name, right):
     return e, bx
 
 
-def clean_row(title, bytes_text, icon_name):
-    """存储·清理的一行：名字 | 字节(右对齐在钮左侧 72 列) | ghost 小钮。"""
+def clean_row(title, bytes_text, icon_name, label="清掉"):
+    """存储·清理的一行：名字 | 字节(右对齐在钮左侧 72 列) | ghost 小钮。
+
+    `label` 默认是存储那五档的「清掉」；备份那一页是「删除」—— 同一个位置，
+    但删的是一份完整的包，不是可再生缓存。
+    """
     e = [r_title(title)]
-    btn, bx = ghost_button("清掉", icon_name, RIGHT)
+    btn, bx = ghost_button(label, icon_name, RIGHT)
     e += btn
     e.append(text(bx - 12, ROW / 2 + 5.5, bytes_text, 16, "__FG__", anchor="end"))
     return e, ROW

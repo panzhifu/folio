@@ -146,6 +146,22 @@ pub fn books_dir() -> PathBuf {
     data_dir().join("books")
 }
 
+/// 本地词典：`<数据根>/dicts/<id>/`。每本一个目录，里面是 StarDict 的
+/// `.ifo` / `.idx`（或 `.idx.gz`）/ `.dict`（或 `.dict.dz`）。
+///
+/// 与 [`books_dir`] 同一条：路径的名字只在这里拼，别处不许再写一份 `join("dicts")`。
+pub fn dicts_dir() -> PathBuf {
+    data_dir().join("dicts")
+}
+
+/// 备份包：`<数据根>/backups/<时间戳>.zip`。
+///
+/// 与 [`dicts_dir`] 同一条：路径只在核心拼一次。备份里装的是**数据根的一部分**
+/// （库、书副本、词典）加一份配置，不装日志与缩略图缓存。
+pub fn backups_dir() -> PathBuf {
+    data_dir().join("backups")
+}
+
 /// 建出 `path` 的父目录。写文件前都要过一次：首次启动时这些根目录还不存在。
 ///
 /// 返回的是 [`crate::Error`] 而不是 `std::io::Error`：后端对外只有一套错误词汇，

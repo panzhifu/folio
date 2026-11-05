@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use folio_core::Priority;
 use folio_core::infra::task::{Cancel, TaskEvent, TaskHandle};
-use folio_core::search::{Found, Hit, Options, Query, scan};
+use folio_core::search::{Cursor, Found, Hit, Options, Query, scan};
 use folio_core::store::{Annotation, BookRow};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
@@ -98,12 +98,21 @@ const TOC_DRAWER_TOP: f32 = 56.0;
 /// 目录列表底部留出的空隙：滚到最后一条时，那一行不贴着弹层下沿（否则最后一行
 /// 与手势条/圆角挤在一起，读起来像被切掉了）。
 const TOC_BOTTOM_SPACE: f32 = 24.0;
-/// 全文那一档每一行的高：两行字（上面那行章名，下面那行上下文）。
+/// 全文那一档每一行的高：两行字（上面那行出处，下面那行上下文）加行尾那个右对齐的数。
 ///
-/// **这个数没在 Meizu 20 上量过** —— `TOC_*` 那几档刻度都是从参照 App 的墨迹边界数出来的，
-/// 这一屏没有参照可比。它比目录那两档（38 / 46）高出一截是应当的，因为多一行字；真机上
-/// 要核对的是这一行高与「一句上下文摆得下几个字」之间的关系（那由核心那两档裁切决定）。
-const SEARCH_ROW: f32 = 52.0;
+/// **46 不是新造的数**：它是目录那一屏「宽松」那一档在真上量过的行高（紧凑那档 38），
+/// 而这两屏在同一块面板里上下滚 —— 同一个面板里两屏两种行距，滚动时那条对齐脊线就断了。
+/// 从前这一格写的是 52，注释自己承认没量过：它比目录那一档高出一截，两屏之间像换了尺子。
+const SEARCH_ROW: f32 = 46.0;
+/// 一批摆多少处命中。续扫那一档（[`super::super::super::core::search::Options::max_hits`]）
+/// 就是它：列表滑到尾巴附近再要下一批，而不是一开始就把全书的命中都搬进这一屏。
+///
+/// 60 是「两三屏」那一档：第一眼看得到进度，而每一批的扫描仍然只是一本书的一小截
+/// （整本最坏实测 274 ms，批到 60 处那一截远小于一帧能忍的）。
+const SEARCH_PAGE: usize = 60;
+/// 离列表尾巴还剩几行就提前去要下一批。留一行都不到的话，读者会在最后那一行上
+/// 看见一次「等结果」的空档 —— 提前几行正是为了让下一批在他到得了之前已经进来。
+const SEARCH_LOOKAHEAD: usize = 6;
 /// 「批注」那一格每一行的高：与全文那一档同一族的两行字（原文/笔记一行，出处一行）。
 /// 同样没有参照可比 —— 它随批注闭环一起进来，真机上要一起核。
 const MARK_ROW: f32 = 56.0;
@@ -133,8 +142,17 @@ struct Search {
     /// 进度读数：扫到第几章 / 一共几章。总章数由那趟扫描的第一条进度事件带来。
     scanned: usize,
     chapters: usize,
-    /// 到了命中上限就收的手 —— 后面**可能还有**，读数里要说清。
-    capped: bool,
+    /// 已经提交的那个词。**每一批都要重用它**：续扫的那一趟没有新的输入，
+    /// 而 `Query` 不是 `Copy`，存着解析好的那一颗就得让它跨帧活着（存字串、每批重解析
+    /// 一次是同一件事的便宜写法，解析本身是几个字符的事）。
+    word: SharedString,
+    /// 上一批**最后一处**的落点，下一批从它往后接。`None` = 还没报出过任何一处。
+    cursor: Option<Cursor>,
+    /// 后面还可能有：上一批是被命中上限截断的。滑到尾巴就按这一格决定要不要再扫一批。
+    more: bool,
+    /// 在跑的这一批是**续扫**而不是换了词。回来的那一趟要接着摆而不是整个换掉 ——
+    /// 少了这一格，续扫的结果会把已经摆着的几十行一次抹掉，列表看着像在倒退。
+    continuing: bool,
     /// 有没有一趟在跑（顶上那一句念它）。
     running: bool,
 }
@@ -147,7 +165,10 @@ impl Search {
             hits: Vec::new(),
             scanned: 0,
             chapters: 0,
-            capped: false,
+            word: SharedString::default(),
+            cursor: None,
+            more: false,
+            continuing: false,
             running: false,
         }
     }
@@ -158,7 +179,9 @@ impl Search {
         self.hits.clear();
         self.scanned = 0;
         self.chapters = 0;
-        self.capped = false;
+        self.cursor = None;
+        self.more = false;
+        self.continuing = false;
     }
 
     /// 只在跑的那一趟作废，读数留着 —— 这一层收起来不等于读者放弃了那个词。
@@ -185,12 +208,13 @@ impl Search {
             return "".into();
         }
         let hits = self.hits.len();
-        // 到上限收手的那一趟不报「命中 N 处」了事 —— 那一屏得说「只看了前 N 处」，
-        // 否则读者以为全书就这几处，而真实数是没数过的。
+        // 后面还有没数过的命中时不报「命中 N 处」了事 —— 那一屏报的是**已经摆出来的**几处。
+        // 从前这里念的是「只看前 200 处」，那是上限的说法；现在剩下的那一截是读者自己
+        // 滑出来的，不是被谁挡住的，所以说法跟着换。
         tf(
             cx,
-            if self.capped {
-                "reader.search.capped"
+            if self.more {
+                "reader.search.loaded"
             } else {
                 "reader.search.hits"
             },
@@ -1288,16 +1312,29 @@ impl TocPanel {
     /// `[range.start, range.end)` 那几处命中：上面一行章名，下面一行那句上下文，
     /// 命中的那几个字单独着色。
     fn hit_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        // 滑到离尾巴不到 [`SEARCH_LOOKAHEAD`] 行就接着数下一批。这一一手放在**构造行的这一层**
+        // 而不是 `render` 里：只有这里知道当帧真的看到了第几行，而 `render` 只知道整屏。
+        // 重入由 `load_more` 里「在跑的那一批没落地就不再提交」那一格挡着，所以每帧都问
+        // 不会把同一批提交两次。
         let end = range.end.min(self.search.hits.len());
+        if end + SEARCH_LOOKAHEAD >= self.search.hits.len() {
+            self.load_more(cx);
+        }
         if range.start >= end {
             return Vec::new();
         }
         let reader = self.reader.clone();
-        let (foreground, muted, mark_color) = (
+        // 命中那几个字用的是**选区那一档底色**，与划词选中同一个 token：这一屏里满屏都是
+        // 命中，每处都上强色 + 加粗的话就没有任何东西是重点（设计规范那条「strong color
+        // 与 bold 要稀缺」）。底色不改变字色，长译文与大字号下也不会被吃掉。
+        let (foreground, muted, mark_bg) = (
             cx.theme().foreground,
             cx.theme().muted_foreground,
-            cx.theme().primary,
+            cx.theme().selection,
         );
+        // 行尾那个数的分母：这一本几章 / 几页。`Hit::chapter` 在两族各说一个数
+        // （可重排是章下标、定版式是页号），所以这一格念的也是各自的单位。
+        let total = self.search.chapters;
         let panel = cx.entity().clone();
         self.search
             .hits
@@ -1318,6 +1355,12 @@ impl TocPanel {
                     .take(hit.mark.end - hit.mark.start)
                     .collect();
                 let post: String = hit.snippet.chars().skip(hit.mark.end).collect();
+                let place = if total == 0 {
+                    SharedString::default()
+                } else {
+                    // 不带千分位：行尾那一格是一根可以扫的脊线，宽度稳定比读起来顺眼要紧。
+                    format!("{} / {}", hit.chapter + 1, total).into()
+                };
                 let chapter = hit.chapter;
                 let at = hit.start;
                 let panel_jump = panel.clone();
@@ -1326,38 +1369,47 @@ impl TocPanel {
                     .w_full()
                     .h(px(SEARCH_ROW))
                     .flex()
-                    .flex_col()
-                    .justify_center()
-                    .gap_1()
+                    .items_center()
+                    // 行尾那个数与句子之间留 `gap_2`：再小就贴在一起，看不出它是另一件事。
+                    .gap_2()
                     .px(px(TOC_GUTTER))
                     .overflow_hidden()
                     .child(
-                        div()
-                            .w_full()
-                            .text_xs()
-                            .text_color(muted)
-                            .truncate()
-                            .child(title),
-                    )
-                    .child(
-                        // 三段摆在同一条横排里：字号与颜色从这条继承，只有中间那段自己改。
-                        // 读者一眼要认的是「哪几个字是搜到的」，上下文只是它的邻居。
-                        h_flex()
-                            .w_full()
-                            .overflow_hidden()
-                            .items_center()
-                            .text_sm()
-                            .text_color(foreground)
-                            .child(div().flex_none().child(pre))
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .justify_center()
+                            .gap_1()
                             .child(
                                 div()
-                                    .flex_none()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(mark_color)
-                                    .child(mid),
+                                    .w_full()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .truncate()
+                                    .child(title),
                             )
-                            .child(div().flex_1().min_w_0().overflow_hidden().child(post)),
+                            .child(
+                                // 三段摆在同一条横排里：字号与颜色从这条继承，只有中间那段自己上色。
+                                // 读者一眼要认的是「哪几个字是搜到的」，上下文只是它的邻居。
+                                h_flex()
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .items_center()
+                                    .text_sm()
+                                    .text_color(foreground)
+                                    .child(div().flex_none().child(pre))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            // 圆角不给：那一块只有几个字高，带上圆角就读成一枚
+                                            // 徽章，而它是句子的一部分。
+                                            .bg(mark_bg)
+                                            .child(mid),
+                                    )
+                                    .child(div().flex_1().min_w_0().overflow_hidden().child(post)),
+                            ),
                     )
+                    .child(div().flex_none().text_xs().text_color(muted).child(place))
                     .on_click(move |_, _, cx| {
                         panel_jump.update(cx, |this, cx| this.jump_to_hit(chapter, at, cx))
                     })
@@ -1381,16 +1433,11 @@ impl TocPanel {
         cx.notify();
     }
 
-    /// 提交一趟扫描。**同一时刻只允许一趟在跑**：新的查询先作废上一趟，而不是排队。
-    ///
-    /// 判据与 `plans/阅读管线.md` §10.3 合并那一档同一条：读者连打五个字会产出五趟请求，
-    /// 排队的结果是列表停在第一个字的那两百处上，而那早已不是他要看的了。让在跑的那趟自己
-    /// 看见旗标收手（协作式取消，不在半章中间打断），列表由回来的那一趟整个换掉。
     /// 搜索框每变一次都走这里：**先不扫**。那一趟最坏实测 274 ms（那张表在
     /// `folio_core::search` 的模块头），而一次输入是十几个字 —— 逐字提交就是每字扫一遍
     /// 全书，而且旧的那一趟还没跑完新的一趟又开始了。安静满这一档才真的提交。
     ///
-    /// 清空（空词）不 delay：那一条本来就走 `submit` 里的「没词就不跑」那支，
+    /// 清空（空词）不 delay：那一条本来就走 `sweep_now` 里的「没词就不跑」那支，
     /// 当场把上一次的清掉才是读者要的。
     fn search_soon(&mut self, raw: &str, cx: &mut Context<Self>) {
         if let Some(word) = self.search_debounce.typed(raw) {
@@ -1401,10 +1448,41 @@ impl TocPanel {
         cx.notify();
     }
 
+    /// 换了一个词：把上一趟整个作废，从这本书开头扫第一批。
     fn submit(&mut self, raw: &str, cx: &mut Context<Self>) {
         self.search.reset();
-        let (Some(query), Some(doc)) = (Query::parse(raw), self.reader.read(cx).searchable())
-        else {
+        self.search.word = raw.into();
+        self.sweep_now(None, cx);
+    }
+
+    /// 滑到列表尾巴附近就接着数下一批。
+    ///
+    /// 三道闸，每一道都挡一种坏法：在跑的那一批没落地就不再提交（否则同屏挂两趟，
+    /// 回来的顺序会乱）；`more` 为假就是已经数到底了，再扫一批是空跑一趟全书；词为空
+    /// 时根本没有可续的查询（这一屏刚被清过）。
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        if self.search.running || !self.search.more || self.search.word.is_empty() {
+            return;
+        }
+        self.search.continuing = true;
+        let cursor = self.search.cursor;
+        self.sweep_now(cursor, cx);
+    }
+
+    /// 提交一趟扫描。**同一时刻只允许一趟在跑**：新的查询先作废上一趟，而不是排队。
+    ///
+    /// 判据与 `plans/阅读管线.md` §10.3 合并那一档同一条：读者连打五个字会产出五趟请求，
+    /// 排队的结果是列表停在第一个字的那两百处上，而那早已不是他要看的了。让在跑的那趟自己
+    /// 看见旗标收手（协作式取消，不在半章中间打断），列表由回来的那一趟整个换掉。
+    ///
+    /// `resume` 是上一批的落点：`None` 从这本书开头扫（新词那一批），`Some` 从那一处往后接
+    /// （续扫那一批）。两批走的是同一条链，区别只在回来的那一趟是换掉列表还是接上去
+    /// （见 [`Self::search_event`] 里 `continuing` 那一句）。
+    fn sweep_now(&mut self, resume: Option<Cursor>, cx: &mut Context<Self>) {
+        let (Some(query), Some(doc)) = (
+            Query::parse(&self.search.word),
+            self.reader.read(cx).searchable(),
+        ) else {
             // 没词、或这一屏根本没有正文可搜（定版式与兜底那一行）：不跑那一趟注定为空的。
             cx.notify();
             return;
@@ -1414,9 +1492,14 @@ impl TocPanel {
 
         // 取正文、折可见文本、找命中全在作业线程上（最坏实测 274 ms，那张表在
         // `folio_core::search` 的模块头）；界面线程一帧都不该为它停。
+        let options = Options {
+            max_hits: SEARCH_PAGE,
+            resume,
+            ..Options::default()
+        };
         let handle: TaskHandle<Found> = resident::pool()
             .submit_with(Priority::Interactive, move |ctx| {
-                Ok(scan(&*doc, &query, &Options::default(), ctx))
+                Ok(scan(&*doc, &query, &options, ctx))
             });
         self.search.cancel = Some(handle.cancel.clone());
 
@@ -1462,10 +1545,21 @@ impl TocPanel {
                 cx.notify();
             }
             TaskEvent::Finished(Ok(found)) => {
-                self.search.hits = found.hits;
+                // 续扫那一批**接**在已有的那些行后面；新词那一批整个换掉。判据是提交时
+                // 记下的那一格，而不是「hits 现在空不空」：一批一个命中都没报也会走到这里。
+                if self.search.continuing {
+                    self.search.hits.extend(found.hits);
+                } else {
+                    self.search.hits = found.hits;
+                }
+                self.search.continuing = false;
                 self.search.scanned = found.scanned;
                 self.search.chapters = found.chapters;
-                self.search.capped = found.truncated;
+                self.search.more = found.truncated;
+                // 空的那一批不给落点（它没报出任何一处），但也**不该**把已有的那个抹掉：
+                // 抹掉之后 `more` 已经是假，不会再续扫，症状要等到下一次换词才消 —— 而
+                // 那一刻没人会想起这里。
+                self.search.cursor = found.cursor.or(self.search.cursor);
                 self.search.running = false;
                 self.search.cancel = None;
                 cx.notify();
@@ -1741,7 +1835,7 @@ mod tests {
     use folio_core::content::document::Document;
     use folio_core::content::format::TocEntry;
     use folio_core::infra::task::TaskEvent;
-    use folio_core::search::{Found, Hit};
+    use folio_core::search::{Cursor, Found, Hit};
     use folio_core::{Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator, Reader};
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
@@ -1973,6 +2067,97 @@ mod tests {
         assert!(panel.read_with(cx, |panel, cx| panel.is_open(cx)));
     }
 
+    /// 一批接一批那套状态机：**截断的那一批要留下落点并说「后面还有」，续扫回来的那一
+    /// 批是接上去而不是换掉。**
+    ///
+    /// 少任何一格的屏上形状都一样 —— 列表滑到尾巴不再动，读者分不清那是「就这几处」还是
+    /// 「卡住了」。所以这一条不靠看图：三格状态各自钉住。
+    #[gpui_kit::test]
+    fn a_second_batch_appends_instead_of_replacing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_session, panel, handle, _events, _watch) = open_panel(cx, 460.);
+        panel.update(cx, |panel, cx| {
+            panel.toggle(cx);
+            panel.set_screen(Screen::Search, cx);
+        });
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("这一格该画得出来");
+
+        let hit = |chapter: usize, start: usize| Hit {
+            chapter,
+            start,
+            end: start + 1,
+            snippet: "字".into(),
+            mark: 0..1,
+        };
+        let batch = |hits: Vec<Hit>, truncated, cursor| Found {
+            hits,
+            chapters: 2,
+            scanned: 2,
+            truncated,
+            cursor,
+            cancelled: false,
+        };
+
+        // 第一批就被上限截断。
+        panel.update(cx, |panel, cx| {
+            panel.search_event(
+                TaskEvent::Finished(Ok(batch(
+                    vec![hit(0, 0)],
+                    true,
+                    Some(Cursor {
+                        chapter: 0,
+                        offset: 0,
+                    }),
+                ))),
+                cx,
+            )
+        });
+        assert_eq!(panel.read_with(cx, |panel, _| panel.search.hits.len()), 1);
+        assert!(
+            panel.read_with(cx, |panel, _| panel.search.more),
+            "截断的那一批必须说「后面还有」，否则滑到尾巴再也不会提交下一批"
+        );
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.search.cursor),
+            Some(Cursor {
+                chapter: 0,
+                offset: 0
+            }),
+            "落点没记下来，下一批只能从全书开头重扫"
+        );
+
+        // 续扫回来的一批（`continuing` 就是提交那一趟时记下的那一格）。
+        panel.update(cx, |panel, cx| {
+            panel.search.continuing = true;
+            panel.search_event(
+                TaskEvent::Finished(Ok(batch(
+                    vec![hit(1, 3)],
+                    false,
+                    Some(Cursor {
+                        chapter: 1,
+                        offset: 3,
+                    }),
+                ))),
+                cx,
+            )
+        });
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel
+                .search
+                .hits
+                .iter()
+                .map(|hit| (hit.chapter, hit.start))
+                .collect::<Vec<_>>()),
+            vec![(0, 0), (1, 3)],
+            "续扫那一批把第一批整个换掉了"
+        );
+        assert!(
+            !panel.read_with(cx, |panel, _| panel.search.more),
+            "没被截断的那一批就是数到底了"
+        );
+    }
+
     /// 点一处命中：会话收到的落点是**那一章的第几个字**，而不是那一章的开头。
     ///
     /// 这一条是全文检索在产品上成不成立的判据：只跳章的话，搜「孙悟空」跳回那一章第一行，
@@ -2002,6 +2187,7 @@ mod tests {
             chapters: 2,
             scanned: 2,
             truncated: false,
+            cursor: None,
             cancelled: false,
         };
         panel.update(cx, |panel, cx| {

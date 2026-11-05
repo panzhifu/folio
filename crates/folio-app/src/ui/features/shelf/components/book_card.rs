@@ -23,10 +23,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use folio_core::store::ShelfItem;
+use gpui_kit::assets::IconName;
 use gpui_kit::base::motion::{Easing, Spring, Stagger, StaggerOrigin, Timing, spring};
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::h_flex;
 use gpui_kit::component::menu::ContextMenuExt;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, Context, Image, InteractiveElement, IntoElement, MouseButton,
@@ -37,7 +38,7 @@ use gpui_kit::{
 use crate::ui::foundation::images::cover_image;
 use crate::ui::services::l10n::tf;
 
-use super::super::view::{ShelfEvent, ShelfView};
+use super::super::view::ShelfView;
 use super::book_menu;
 
 /// 封面格的宽高比（宽 ÷ 高），出版物的通行比例。
@@ -305,6 +306,10 @@ impl ShelfView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let book_id = card.id;
+        let selecting = self.selecting;
+        let selected = self.selected.contains(&book_id);
+        // 多选态里没勾中的那几本压暗：一屏书太多时，读者要一眼看出「哪些已经进了这一批」。
+        let selection_dim = if selecting && !selected { 0.52 } else { 1.0 };
         // 按住的封面收一档、松开弹回：指针按下即回执，弹簧从当前值接着走（可打断）。
         // 与滚动那一档相乘 —— 一张卡同一时刻只该有一个缩放值。
         let pressed = self.pressed_card == Some(book_id);
@@ -324,6 +329,13 @@ impl ShelfView {
         let placeholder_bg = cx.theme().muted;
         let muted_fg = cx.theme().muted_foreground;
         let ring_hover = cx.theme().border;
+        let primary = cx.theme().primary;
+        let primary_fg = cx.theme().primary_foreground;
+        let select_border = if selected {
+            primary
+        } else {
+            cx.theme().transparent
+        };
         let tapped = cx.entity().clone();
         let menu_entity = cx.entity().clone();
         let press_in = cx.entity().clone();
@@ -335,7 +347,7 @@ impl ShelfView {
         // 两者得认同一格，不然指书名那一行时封面毫无反应。串在重查那一趟就拼好了
         // （`Card::group`），这里只 clone。
         let group: SharedString = card.group.clone();
-        div()
+        let card_element = div()
             // 元素 id 用书库主键而不是标题：重新查库它不变，而标题会随导入更新，
             // 拿标题当键会让一张卡片每次改名都丢掉自己的按下态。
             .id(group.clone())
@@ -350,7 +362,7 @@ impl ShelfView {
             // 两端都吃得到。抬起不做动画而是立刻给 —— 指针跟着手指走，慢半拍的
             // 高亮比没有高亮更容易指错。
             .active(|style| style.opacity(0.75))
-            .opacity(enter.progress(index))
+            .opacity(enter.progress(index) * selection_dim)
             // 按下记「哪一张被按住了」，抬起或按到别处就清 —— 封面靠这一格收一档。
             // 移动端的轻点会合成成 MouseDown/MouseUp（`plans/facts.md`），两端都吃得到。
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -378,13 +390,14 @@ impl ShelfView {
                     }
                 });
             })
-            .on_click(move |_, _, cx| tapped.update(cx, |_, cx| cx.emit(ShelfEvent::Open(book_id))))
+            .on_click(move |_, _, cx| tapped.update(cx, |this, cx| this.tap_card(book_id, cx)))
             .child(
                 div()
                     // 宿主门按封面这一格的真实坐标点下去，就能钉住「阅读层盖着时
                     // 这一击到不了书架」。生产构建里 `test_support` 原样返回元素。
                     .id(card.cover_id.clone())
                     .test_support()
+                    .relative()
                     .w_full()
                     .h(px(cover_height))
                     // 图片按缩放值收在容器里、居中：容器尺寸不变，所以缩放不碰整排的
@@ -393,14 +406,16 @@ impl ShelfView {
                     .items_center()
                     .justify_center()
                     // 描边常驻，只是平时透明：悬停时改的是颜色，不是这一格占多宽。
-                    // 留着这一像素位才不会一指过去整排封面就抖一下。
-                    .border_1()
-                    .border_color(cx.theme().transparent)
+                    // 留着这两像素位才不会一指过去整排封面就抖一下。
+                    .border_2()
+                    .border_color(select_border)
                     .rounded_md()
                     .overflow_hidden()
                     .when(!has_cover, |this| this.bg(placeholder_bg))
-                    .group_hover(group, |style| {
-                        style.border_color(ring_hover).shadow(hover_shadow())
+                    .when(!selected, |this| {
+                        this.group_hover(group, |style| {
+                            style.border_color(ring_hover).shadow(hover_shadow())
+                        })
                     })
                     .when_some(cover, |this, image| {
                         this.child(
@@ -424,6 +439,25 @@ impl ShelfView {
                                 .text_color(muted_fg)
                                 .child(title.clone()),
                         )
+                    })
+                    .when(selecting && selected, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(px(6.))
+                                .right(px(6.))
+                                .size(px(22.))
+                                .rounded_full()
+                                .bg(primary)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(IconName::Check)
+                                        .with_size(px(14.))
+                                        .text_color(primary_fg),
+                                ),
+                        )
                     }),
             )
             .child(
@@ -443,17 +477,24 @@ impl ShelfView {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .child(authors),
-            )
-            // 长按（移动端）或右键（桌面端）开管理菜单，条目见 [`super::book_menu`]。
-            // 与右上角那颗三点按钮的导入菜单是同一套组件，只是触发从点击换成了长按，
-            // 两档浮层同宽（[`book_menu::MIN_WIDTH`]）。
-            .context_menu(move |menu, _, cx| {
-                // 组的名分在**打开这一刻**现查：菜单里那几条打勾必须反映刚才那一刻的库，
-                // 而不是上一次重查架面时的那一份。
-                let groups = menu_entity.read_with(cx, |this, _| this.group_items(book_id));
-                book_menu::build(menu, &labels, book_id, &menu_entity, groups)
-            })
-            .into_any_element()
+            );
+        // 长按（移动端）或右键（桌面端）开管理菜单，条目见 [`super::book_menu`]。
+        // 多选态里不挂菜单：这时长按/右键要么什么都不做，要么会把「勾选」打断成
+        // 一条浮层，而读者此刻要的是批量操作，不是单本管理。
+        // 分成两条路而不是 `.when(!selecting, …)`：`context_menu` 会换掉元素的类型，
+        // 而 `when` 要求闭包原样还回同一种元素。
+        if selecting {
+            card_element.into_any_element()
+        } else {
+            card_element
+                .context_menu(move |menu, _, cx| {
+                    // 组的名分在**打开这一刻**现查：菜单里那几条打勾必须反映刚才那一刻的库，
+                    // 而不是上一次重查架面时的那一份。
+                    let groups = menu_entity.read_with(cx, |this, _| this.group_items(book_id));
+                    book_menu::build(menu, &labels, book_id, &menu_entity, groups)
+                })
+                .into_any_element()
+        }
     }
 
     /// 一张组卡 → 一格元素。
@@ -483,89 +524,93 @@ impl ShelfView {
         let tapped = cx.entity().clone();
         let group: SharedString = tile.group.clone();
         let cell = tile_height(cover_height);
-        div()
+        let selecting = self.selecting;
+        let mut card = div()
             .id(group.clone())
             .group(group.clone())
             .w_full()
             .flex()
             .flex_col()
             .gap_1()
-            .cursor_pointer()
-            .active(|style| style.opacity(0.75))
-            .opacity(enter.progress(index))
-            .on_click(move |_, window, cx| {
-                tapped.update(cx, |this, cx| {
-                    this.open_page(super::super::view::ShelfScope::Collection(id), window, cx)
-                })
-            })
-            .child(
-                div()
-                    .id(tile.face_id.clone())
-                    .test_support()
-                    .w_full()
-                    .h(px(cover_height))
-                    .p(px(TILE_PAD))
-                    .border_1()
-                    .border_color(cx.theme().transparent)
-                    .rounded_md()
-                    .overflow_hidden()
-                    .bg(card_bg)
-                    .group_hover(group, |style| {
-                        style.border_color(ring).shadow(hover_shadow())
+            // 多选态里组卡不参与：点进去会把读者带离这一片书，而这一批勾选还没做完。
+            .opacity(enter.progress(index) * if selecting { 0.38 } else { 1.0 });
+        if !selecting {
+            card = card
+                .cursor_pointer()
+                .active(|style| style.opacity(0.75))
+                .on_click(move |_, window, cx| {
+                    tapped.update(cx, |this, cx| {
+                        this.open_page(super::super::view::ShelfScope::Collection(id), window, cx)
                     })
-                    // 四格一律摆满：只有一本时那一本仍占左上那一格，而不是被
-                    // `flex_1` 拉成半张卡宽 —— 卡上那几格的尺寸在组与组之间得是同一个数，
-                    // 读者才比得出「这两组看着差不多满」。
-                    .children((0..TILE_ROWS).map(|row| {
-                        h_flex()
-                            .w_full()
-                            .h(px(cell))
-                            .gap(px(TILE_GAP))
-                            .when(row + 1 < TILE_ROWS, |this| this.pb(px(TILE_GAP)))
-                            .children((0..TILE_COLS).map(|col| {
-                                let slot = row * TILE_COLS + col;
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .size_full()
-                                    .rounded(px(2.0))
-                                    .overflow_hidden()
-                                    .when_some(
-                                        tile.covers.get(slot).cloned().flatten(),
-                                        |this, image| {
-                                            this.child(
-                                                img(image).size_full().object_fit(ObjectFit::Cover),
-                                            )
-                                        },
-                                    )
-                                    // 画不出图的那一格退成一块比卡面更深的底：留白看着像卡还没画完，
-                                    // 一块底才像「这里有一本，只是它没有封面」。
-                                    .when(
-                                        tile.covers.get(slot).is_none_or(|c| c.is_none()),
-                                        |this| this.bg(empty_bg),
-                                    )
-                            }))
-                    })),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(name),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .text_xs()
-                    .text_color(muted_fg)
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(count_label),
-            )
-            .into_any_element()
+                });
+        }
+        card.child(
+            div()
+                .id(tile.face_id.clone())
+                .test_support()
+                .w_full()
+                .h(px(cover_height))
+                .p(px(TILE_PAD))
+                .border_1()
+                .border_color(cx.theme().transparent)
+                .rounded_md()
+                .overflow_hidden()
+                .bg(card_bg)
+                .group_hover(group, |style| {
+                    style.border_color(ring).shadow(hover_shadow())
+                })
+                // 四格一律摆满：只有一本时那一本仍占左上那一格，而不是被
+                // `flex_1` 拉成半张卡宽 —— 卡上那几格的尺寸在组与组之间得是同一个数，
+                // 读者才比得出「这两组看着差不多满」。
+                .children((0..TILE_ROWS).map(|row| {
+                    h_flex()
+                        .w_full()
+                        .h(px(cell))
+                        .gap(px(TILE_GAP))
+                        .when(row + 1 < TILE_ROWS, |this| this.pb(px(TILE_GAP)))
+                        .children((0..TILE_COLS).map(|col| {
+                            let slot = row * TILE_COLS + col;
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .size_full()
+                                .rounded(px(2.0))
+                                .overflow_hidden()
+                                .when_some(
+                                    tile.covers.get(slot).cloned().flatten(),
+                                    |this, image| {
+                                        this.child(
+                                            img(image).size_full().object_fit(ObjectFit::Cover),
+                                        )
+                                    },
+                                )
+                                // 画不出图的那一格退成一块比卡面更深的底：留白看着像卡还没画完，
+                                // 一块底才像「这里有一本，只是它没有封面」。
+                                .when(tile.covers.get(slot).is_none_or(|c| c.is_none()), |this| {
+                                    this.bg(empty_bg)
+                                })
+                        }))
+                })),
+        )
+        .child(
+            div()
+                .w_full()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(name),
+        )
+        .child(
+            div()
+                .w_full()
+                .text_xs()
+                .text_color(muted_fg)
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(count_label),
+        )
+        .into_any_element()
     }
 }
 

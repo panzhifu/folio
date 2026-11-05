@@ -220,6 +220,11 @@ pub enum Mode {
     System,
     Light,
     Dark,
+    /// 水墨：宣纸底、近黑的墨、去彩度的插图，**不**跟随系统翻面。
+    ///
+    /// 它排在浅/深旁边而不是「浅侧的一本书」：浅深那一档只答「取哪一侧」，而水墨是一档
+    /// 固定的样子 —— 落在主题名上就选不到它、也进不了按书差量那一格。
+    Ink,
 }
 
 impl Mode {
@@ -229,6 +234,7 @@ impl Mode {
             Self::System => "system",
             Self::Light => "light",
             Self::Dark => "dark",
+            Self::Ink => "ink",
         }
     }
 
@@ -237,6 +243,7 @@ impl Mode {
         match value {
             "light" => Self::Light,
             "dark" => Self::Dark,
+            "ink" => Self::Ink,
             _ => Self::System,
         }
     }
@@ -687,6 +694,106 @@ impl Ai {
     pub fn normalized(mut self) -> Self {
         self.model = self.model.trim().to_string();
         self
+    }
+}
+
+/// 本地 StarDict 词典。
+///
+/// `installed` 是**界面列表的真相源**：导入完成时写一条，删除时摘一条；启动时不扫
+/// 数据目录。这样设置页与选区分词条看到的是同一份数，测试也不会因为开发机上恰好放了
+/// 词典而变宽 / 多出一行。
+///
+/// 文件落在 `dir/<id>/`；`dir` 为空表示还没导入过，用 [`crate::infra::paths::dicts_dir`]。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dictionary {
+    /// 导入根目录；空串 = 还没导入过。
+    pub dir: String,
+    /// 已导入的词典。
+    pub installed: Vec<DictionaryEntry>,
+    /// 读者关掉的那几本（按 id）。默认全开 —— 导入就是为了查。
+    pub disabled: Vec<String>,
+}
+
+/// 一本已导入词典在配置里的书目信息。文件本身在 `<dir>/<id>/`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DictionaryEntry {
+    /// 目录名，也是界面开关与删除操作用的键。
+    pub id: String,
+    /// `.ifo` 里的书名；空时回落到 id。
+    pub name: String,
+    /// `.ifo` 声明的词条数；读不出来时是 0。
+    pub words: u64,
+}
+
+impl Dictionary {
+    pub fn normalized(mut self) -> Self {
+        self.dir = self.dir.trim().to_string();
+        let mut seen = BTreeSet::new();
+        let mut installed = Vec::with_capacity(self.installed.len());
+        for mut entry in self.installed {
+            entry.id = entry.id.trim().to_string();
+            entry.name = entry.name.trim().to_string();
+            if entry.id.is_empty() || !seen.insert(entry.id.clone()) {
+                continue;
+            }
+            if entry.name.is_empty() {
+                entry.name = entry.id.clone();
+            }
+            installed.push(entry);
+        }
+        self.installed = installed;
+        let installed_ids: BTreeSet<&str> = self
+            .installed
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        let mut seen = BTreeSet::new();
+        self.disabled = self
+            .disabled
+            .into_iter()
+            .filter_map(|id| {
+                let id = id.trim();
+                (!id.is_empty() && installed_ids.contains(id) && seen.insert(id.to_string()))
+                    .then(|| id.to_string())
+            })
+            .collect();
+        self
+    }
+
+    /// 词典文件落在哪儿：读者确认过的那个根，或数据目录下的 `dicts/`。
+    pub fn root(&self) -> std::path::PathBuf {
+        if self.dir.is_empty() {
+            crate::infra::paths::dicts_dir()
+        } else {
+            std::path::PathBuf::from(&self.dir)
+        }
+    }
+
+    /// 这一本现在能不能查。
+    pub fn is_enabled(&self, id: &str) -> bool {
+        self.installed.iter().any(|entry| entry.id == id) && !self.disabled.iter().any(|d| d == id)
+    }
+}
+
+/// 备份那一页的两格选择。
+///
+/// 只有「要不要把书文件与词典一起装进去」这一格需要记住：它决定备份包的大小，
+/// 而读者在慢网络 / 空间紧的那台机器上会一直选小档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Backup {
+    /// 导出时是否把书库文件、封面与已导入词典一起打包。
+    pub include_files: bool,
+}
+
+impl Default for Backup {
+    fn default() -> Self {
+        // 默认完整备份：备份的第一目的是「换一台机器还能读」，只有库没有书做不到。
+        Self {
+            include_files: true,
+        }
     }
 }
 
@@ -1530,6 +1637,8 @@ pub struct Config {
     pub speech: Speech,
     pub translation: Translation,
     pub ai: Ai,
+    pub dictionary: Dictionary,
+    pub backup: Backup,
     pub sync: Sync,
     pub account: Account,
     pub opds: Opds,
@@ -1551,6 +1660,8 @@ impl Default for Config {
             speech: Speech::default(),
             translation: Translation::default(),
             ai: Ai::default(),
+            dictionary: Dictionary::default(),
+            backup: Backup::default(),
             sync: Sync::default(),
             account: Account::default(),
             opds: Opds::default(),
@@ -1573,6 +1684,7 @@ impl Config {
         self.speech = self.speech.normalized();
         self.translation = self.translation.normalized();
         self.ai = self.ai.normalized();
+        self.dictionary = self.dictionary.normalized();
         self.sync = self.sync.normalized();
         self.account = self.account.normalized();
         self.opds = self.opds.normalized();
@@ -2289,6 +2401,7 @@ mod tests {
             Mode::System
         );
         assert_eq!(Mode::parse("dark"), Mode::Dark);
+        assert_eq!(Mode::parse("ink"), Mode::Ink);
         assert_eq!(Mode::default(), Mode::System);
     }
 
@@ -2409,7 +2522,7 @@ mod tests {
         assert_eq!(Layer::Book.as_str(), "book");
     }
 
-    /// 「跟随软件」那一档在**界面值与 `Option<Mode>`** 之间往返，四档互不相同。
+    /// 「跟随软件」那一档在**界面值与 `Option<Mode>`** 之间往返，五格互不相同。
     ///
     /// 下拉与菜单的选项只有字符串一种形状，而配置里 `None` 表示「没选过」—— 这一对
     /// 函数是两者之间唯一的翻译。翻错的症状是「选了跟随软件，落盘却钉成跟随系统」。
@@ -2417,7 +2530,7 @@ mod tests {
     fn the_reading_mode_round_trips_through_its_interface_value() {
         assert_eq!(Mode::reading_value(None), Mode::FOLLOW_APP);
         assert_eq!(Mode::parse_reading(Mode::FOLLOW_APP), None);
-        for mode in [Mode::System, Mode::Light, Mode::Dark] {
+        for mode in [Mode::System, Mode::Light, Mode::Dark, Mode::Ink] {
             assert_eq!(
                 Mode::parse_reading(Mode::reading_value(Some(mode))),
                 Some(mode),
@@ -2426,17 +2539,19 @@ mod tests {
         }
         // 认不出的值与配置文件同一口径：落到「跟随系统」，不许变成「跟随软件」。
         assert_eq!(Mode::parse_reading("sepia"), Some(Mode::System));
-        // 四档的界面值互不相同，否则下拉里会有两行指向同一个选择。
+        // 五格的界面值互不相同，否则下拉里会有两行指向同一个选择（多一档就要多一格，
+        // 少一格就是那一档在选择器里根本摆不出来）。
         let values = [
             None,
             Some(Mode::System),
             Some(Mode::Light),
             Some(Mode::Dark),
+            Some(Mode::Ink),
         ]
         .map(Mode::reading_value);
         assert_eq!(
             values.iter().collect::<BTreeSet<_>>().len(),
-            4,
+            5,
             "界面值撞了：{values:?}"
         );
     }

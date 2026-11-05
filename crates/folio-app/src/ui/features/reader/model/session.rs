@@ -501,6 +501,11 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) ai: Option<crate::ui::features::reader::model::ai::AiState>,
     /// 问 AI 的计数，与翻译那一格同一个用途。
     pub(in crate::ui::features::reader) ai_seq: u64,
+    /// 选区查本地词典的弹层状态。状态与命令在 `model/dictionary.rs`。
+    pub(in crate::ui::features::reader) dictionary:
+        Option<crate::ui::features::reader::model::dictionary::DictionaryState>,
+    /// 查词典的计数：与翻译同一个用途 —— 晚到的旧结果按号丢掉。
+    pub(in crate::ui::features::reader) dictionary_seq: u64,
     /// 「这本书该怎么切」那一格的状态（`.txt` 分章规则草案）。判断在 core 的
     /// `novel::draft`，命令与状态迁移在 `model/rules_draft.rs`。
     pub(in crate::ui::features::reader) rules_draft:
@@ -745,6 +750,8 @@ impl ReaderSession {
             translation_seq: 0,
             ai: None,
             ai_seq: 0,
+            dictionary: None,
+            dictionary_seq: 0,
             rules_draft: None,
             rules_draft_seq: 0,
             // 时长不在这里起算：构造的那一刻读者还没真的翻开任何东西。
@@ -938,6 +945,8 @@ impl ReaderSession {
             translation_seq: 0,
             ai: None,
             ai_seq: 0,
+            dictionary: None,
+            dictionary_seq: 0,
             rules_draft: None,
             rules_draft_seq: 0,
             // 时长不在这里起算：构造的那一刻读者还没真的翻开任何东西。
@@ -1109,6 +1118,8 @@ impl ReaderSession {
         self.translation = None;
         // 问 AI 那一层同一条理由，一并收掉。
         self.ai = None;
+        // 查词典那一层也收：锚点是上一本屏上的像素，词也来自上一本。
+        self.dictionary = None;
         // 分章草案那一层也收：那张卡攥的是**上一本**的样本与章数，挂在这本书的屏上
         // 说的是别的事，而「用上」会写一份对两本都生效的配置。
         self.rules_draft = None;

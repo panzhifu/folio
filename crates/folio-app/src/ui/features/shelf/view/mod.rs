@@ -34,7 +34,7 @@ pub(in crate::ui::features::shelf) mod scan;
 pub(in crate::ui::features::shelf) mod sheets;
 pub(in crate::ui::features::shelf) mod toolbar;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -123,6 +123,20 @@ pub enum ShelfEvent {
     Open(i64),
     /// 删掉了一本。外壳需要这条：正文可能正开着这一本，书没了，那一层就该退回架面。
     Deleted(i64),
+    /// 多选态变了（进入 / 退出 / 勾选）。外壳据此把底部导航换成多选工具栏。
+    SelectionChanged,
+}
+
+/// 外壳渲染多选工具栏要的几格。**一次读齐**：分几次 `read` 的话，同一个句柄上读到的
+/// 可能是两次改动之间的两种状态（多选计数与全选标记对不上）。
+pub struct SelectionSummary {
+    pub active: bool,
+    pub count: usize,
+    pub all_selected: bool,
+    /// 只选了一本时是它的主键 —— 「信息」那一格只对这一档有意义。
+    pub single: Option<i64>,
+    /// 可加入的分组（按库里的序）。没有分组时工具栏那一颗按不动。
+    pub groups: Vec<(i64, SharedString)>,
 }
 
 /// 「分享这本书」递出去时用的文件名：书名的干（过滤与划词分享卡共用一份，
@@ -298,6 +312,13 @@ pub struct ShelfView {
     pub(in crate::ui::features::shelf) flow: Rc<[Cell]>,
     /// 上面那条流该重拼了。
     pub(in crate::ui::features::shelf) flow_dirty: bool,
+    /// 多选态：`true` 时点卡片是勾选而不是开书，底部导航换成工具栏。
+    pub(in crate::ui::features::shelf) selecting: bool,
+    /// 勾中的书（库主键）。用 `BTreeSet` 而不是 `HashSet`：删除时按主键从小到大做，
+    /// 同一批书的日志与报错顺序稳定，测试也不必容忍随机序。
+    pub(in crate::ui::features::shelf) selected: BTreeSet<i64>,
+    /// 多选删除那张确认面板摆没摆。批量删是不可撤销的，比单本菜单多问一句。
+    selection_delete_confirm: bool,
     /// 格子「落定」那段动画的起算时刻，第一次真画出格子时才记。
     ///
     /// 只为**第一次**上屏留的，之后不再重放（理由见 [`super::book_card::Enter`]）。
@@ -431,6 +452,9 @@ impl ShelfView {
             pending_reload: false,
             flow: Rc::from(Vec::new()),
             flow_dirty: true,
+            selecting: false,
+            selected: BTreeSet::new(),
+            selection_delete_confirm: false,
             enter_at: None,
         };
         this.reload(&SharedString::default(), cx);
@@ -1046,6 +1070,239 @@ impl ShelfView {
 
     /// 这本书在各分组里的名分：`(组 id, 组名, 在不在里面)`，供卡片菜单在**打开那一刻**现查。
     ///
+    /// 进入多选态。`with` 是长按菜单里选中那一本时顺手勾上的那一本；不传就是空的，
+    /// 进来等读者逐本点。
+    pub(in crate::ui::features::shelf) fn begin_selection(
+        &mut self,
+        with: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        self.selecting = true;
+        self.selected.clear();
+        if let Some(id) = with {
+            self.selected.insert(id);
+        }
+        self.selection_delete_confirm = false;
+        self.notify_selection(cx);
+    }
+
+    /// 退出多选态。取消 / 返回 / 做完批量动作都走这一条。
+    pub(in crate::ui::features::shelf) fn exit_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.selecting && self.selected.is_empty() && !self.selection_delete_confirm {
+            return;
+        }
+        self.selecting = false;
+        self.selected.clear();
+        self.selection_delete_confirm = false;
+        self.notify_selection(cx);
+    }
+
+    /// 退出多选态：根实例与栈上那一页都走这一条，由 [`Self::selection_page`] 决定退谁。
+    ///
+    /// 与那条栏上那颗「退出」（[`Self::selection_action`] 的 `Exit` 一支）同一件事，
+    /// 只是这一条**不要窗口** —— 系统返回那一路是应用级的动作，手上没有 `Window`
+    /// （见 `shell::AppShell::back` 的注册处）。
+    pub fn drop_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = self.selection_page(cx) {
+            page.update(cx, |page, cx| page.exit_selection(cx));
+            return;
+        }
+        self.exit_selection(cx);
+    }
+
+    /// 眼下是不是多选态，**栈上那一组那一页也算**。外壳据此决定底部那一条画导航还是画工具栏。
+    pub fn selection_on(&self, cx: &App) -> bool {
+        self.selecting || self.selection_page(cx).is_some()
+    }
+
+    /// 外壳每帧取一份：计数、全选、单本、可加入的分组。
+    ///
+    /// 栈上那一组那一页是**另一块架面**，勾中的那批书长在它身上，而外壳手上只有根实例
+    /// 这一条句柄 —— 那一页自己进了多选态时这里就报它那份，与 [`Self::force_reload`] 转
+    /// 一道是同一个道理。两处都不在多选态时报根架面那份（`active` 为 `false`）。
+    pub fn selection_summary(&self, cx: &App) -> SelectionSummary {
+        self.selection_page(cx)
+            .map(|page| page.read(cx).own_selection_summary())
+            .unwrap_or_else(|| self.own_selection_summary())
+    }
+
+    /// 眼下握着多选那批书的那一页：压在栈上的那一组还开着、并且自己进了多选态时才是它。
+    ///
+    /// 只往下一层：那一页摆的是某一组里的书，`scope` 是 `Collection`，架面上没有组卡，
+    /// 读者在那一页上点不到第三层架面，所以不存在「孙页也在多选」那种形状。
+    fn selection_page(&self, cx: &App) -> Option<Entity<ShelfView>> {
+        self.group_page
+            .as_ref()
+            .and_then(|page| page.upgrade())
+            .filter(|page| page.read(cx).selecting)
+    }
+
+    fn own_selection_summary(&self) -> SelectionSummary {
+        let count = self.selected.len();
+        SelectionSummary {
+            active: self.selecting,
+            count,
+            all_selected: self.all_selected(),
+            single: (count == 1)
+                .then(|| self.selected.iter().next().copied())
+                .flatten(),
+            groups: self
+                .collections
+                .iter()
+                .map(|group| (group.id, SharedString::from(group.name.clone())))
+                .collect(),
+        }
+    }
+
+    /// 点卡片：多选态切勾，平时开书。两个动作同一个入口，卡片那一层不必知道当前是哪一档。
+    pub(in crate::ui::features::shelf) fn tap_card(
+        &mut self,
+        book_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selecting {
+            if !self.selected.remove(&book_id) {
+                self.selected.insert(book_id);
+            }
+            self.notify_selection(cx);
+        } else {
+            cx.emit(ShelfEvent::Open(book_id));
+        }
+    }
+
+    /// 全选 / 全不选（当前这一片书，不含组卡）。
+    pub(in crate::ui::features::shelf) fn toggle_select_all(&mut self, cx: &mut Context<Self>) {
+        if self.all_selected() {
+            self.selected.clear();
+        } else {
+            self.selected = self.items.iter().map(|card| card.id).collect();
+        }
+        self.notify_selection(cx);
+    }
+
+    fn all_selected(&self) -> bool {
+        !self.items.is_empty()
+            && self
+                .items
+                .iter()
+                .all(|card| self.selected.contains(&card.id))
+    }
+
+    /// 多选工具栏派下来的一件事。`pub`：那条栏画在外壳那一层（它才拿得到整窗的几何），
+    /// 而动作本体在架面 —— 外壳只有根实例这一条句柄，所以转给眼下握着那批书的一页。
+    pub fn selection_action(
+        &mut self,
+        action: navigation::SelectionAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(page) = self.selection_page(cx) {
+            page.update(cx, |page, cx| page.own_selection_action(action, window, cx));
+            return;
+        }
+        self.own_selection_action(action, window, cx);
+    }
+
+    fn own_selection_action(
+        &mut self,
+        action: navigation::SelectionAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            navigation::SelectionAction::Exit => self.exit_selection(cx),
+            navigation::SelectionAction::ToggleAll => self.toggle_select_all(cx),
+            navigation::SelectionAction::Group(collection_id) => {
+                self.add_selection_to_collection(collection_id, cx)
+            }
+            navigation::SelectionAction::Info => self.show_selected_info(window, cx),
+            navigation::SelectionAction::Delete => self.ask_delete_selection(cx),
+        }
+    }
+
+    fn notify_selection(&mut self, cx: &mut Context<Self>) {
+        cx.emit(ShelfEvent::SelectionChanged);
+        cx.notify();
+    }
+
+    /// 把勾中的书全部加进某个组。已经在里面的由 `INSERT OR IGNORE` 吞掉，不重复。
+    fn add_selection_to_collection(&mut self, collection_id: i64, cx: &mut Context<Self>) {
+        let Some(store) = self.store.clone() else {
+            tracing::error!("ShelfView: 没有书库，多选的书加不进第 {collection_id} 组");
+            return;
+        };
+        let ids: Vec<i64> = self.selected.iter().copied().collect();
+        for id in &ids {
+            if let Err(err) = store
+                .add_to_collection(collection_id, *id)
+                .with_context(|| format!("把第 {id} 本加进第 {collection_id} 组"))
+            {
+                report("ShelfView", &err);
+            }
+        }
+        self.exit_selection(cx);
+        self.force_reload(cx);
+    }
+
+    fn show_selected_info(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.own_selection_summary().single else {
+            return;
+        };
+        self.exit_selection(cx);
+        self.show_info(id, window, cx);
+    }
+
+    /// 删除前先问一句：批量删是不可撤销的，而工具栏那颗「删除」离手指很近。
+    fn ask_delete_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            return;
+        }
+        self.selection_delete_confirm = true;
+        cx.notify();
+    }
+
+    pub(in crate::ui::features::shelf) fn confirm_delete_selection(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.selection_delete_confirm = false;
+        self.delete_selection(cx);
+    }
+
+    pub(in crate::ui::features::shelf) fn cancel_delete_selection(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selection_delete_confirm {
+            self.selection_delete_confirm = false;
+            cx.notify();
+        }
+    }
+
+    fn delete_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.store.clone() else {
+            tracing::error!("ShelfView: 没有书库，多选的书删不掉");
+            return;
+        };
+        let ids: Vec<i64> = self.selected.iter().copied().collect();
+        let root = target_dir(&ConfigHolder::library(cx));
+        for id in ids {
+            match delete_book(&store, id, root.as_deref()).with_context(|| format!("删第 {id} 本"))
+            {
+                Ok(()) => {
+                    self.covers.remove(&id);
+                    cx.emit(ShelfEvent::Deleted(id));
+                }
+                Err(err) => report("ShelfView", &err),
+            }
+        }
+        self.selected.clear();
+        self.selecting = false;
+        // 清空是为了绕过 `reload` 的去重：搜索词没变，但架面少了几本，必须重查一次。
+        self.force_reload(cx);
+        self.notify_selection(cx);
+    }
+
     /// 现查而不是用架面那份 [`Self::collections`]：读者可能刚在另一本书的菜单里建了一个组，
     /// 这一本紧接着就该看得见它，而那份清单只在重查架面时更新一次。库里的组是几十行的量，
     /// 一次点击查两趟比缓存它便宜。
@@ -1186,6 +1443,8 @@ impl ShelfView {
         // 不转这一道，在组里点封面开不了书，删掉开着的那本也不退那一层。
         self._group_watch = Some(cx.subscribe(&page, |this, _, event, cx| match event {
             ShelfEvent::Open(book_id) => cx.emit(ShelfEvent::Open(*book_id)),
+            // 那一页进了多选态：外壳要据此把底部导航换成工具栏，所以这一声也转一道。
+            ShelfEvent::SelectionChanged => cx.emit(ShelfEvent::SelectionChanged),
             ShelfEvent::Deleted(book_id) => {
                 // 删掉一本改的是**两片**：那一页自己已经重查过了，身后的整架还留着那一格。
                 this.items.clear();
@@ -1548,9 +1807,11 @@ impl Render for ShelfView {
         };
         let spec = grid_spec(f32::from(window.viewport_size().width), size);
         // 悬浮底栏压在内容上（Compact 档），滚动内容得自己空出那一段 —— 加在容器的
-        // 留白上会把视口切短，格子就再也到不了栏底下。侧栏两档是嵌入的、由外壳让位，
-        // 这里不再加。
-        let tail = if size.is_compact() {
+        // 留白上会把视口切短，格子就再也到不了栏底下。侧栏两档平时是嵌入的、由外壳让位，
+        // 这里不加；但多选那一态在哪个档位都是同一条浮在底边的工具栏（见
+        // `shell::navigation::selection_bar`），所以那一态下三档一起让位，否则最后一排
+        // 永远停在栏底下滚不出去。
+        let tail = if size.is_compact() || self.selecting {
             navigation::clearance(crate::ui::host::safe_area(window, cx).bottom)
         } else {
             0.0
@@ -1610,7 +1871,7 @@ impl Render for ShelfView {
         });
         // 那三块「答一句话」的面板：桌面是一张浮层，手机是同一份内容压进底部弹层。
         self.sync_panels(size.is_compact(), cx);
-        let overlays: Vec<AnyElement> = if size.is_compact() {
+        let mut overlays: Vec<AnyElement> = if size.is_compact() {
             // 三块弹层每帧都交元素：弹簧的采样在里面，收稳的那些只是不给内容。
             vec![
                 self.group_sheet(cx),
@@ -1634,6 +1895,9 @@ impl Render for ShelfView {
             }
             overlays
         };
+        if self.selection_delete_confirm {
+            overlays.push(self.selection_delete_popover(cx));
+        }
         let tree = v_flex()
             .id("folio-shelf")
             // 那几张居中的浮层要有一个「内容区」可以居中，而这一格就是内容区：
@@ -1679,6 +1943,7 @@ mod tests {
     use super::{ShelfScope, cover_scale, share_file_name};
     // 这三条是留给其余用例的：它们散在测试模块里几处（架面起窗、切目的地、压页）。
     use crate::ui::services::config::ConfigHolder;
+    use crate::ui::shell::navigation;
     use crate::ui::shell::navigation::SizeClass;
     use gpui_kit::base::NavMotion;
 
@@ -2235,6 +2500,187 @@ mod tests {
             );
         })
         .expect("窗口应可更新");
+    }
+
+    /// 多选态里点一张卡是**勾选**，不是开书：两条路共用 `tap_card` 这一个入口，走错一条
+    /// 读者就会在批量删到一半的时候被推进一本书里。
+    #[gpui_kit::test]
+    fn a_checked_card_is_not_an_opened_book(cx: &mut TestAppContext) {
+        let (shelf, _, store, _) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        let b = add(&store, "乙");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+
+        // 平时那一下开书：勾选那一串该一直空着。
+        shelf.update(cx, |this, cx| this.tap_card(a, cx));
+        assert!(
+            shelf.read_with(cx, |this, _| this.selected.is_empty()),
+            "没进多选态的点击不该往勾选里塞东西"
+        );
+
+        shelf.update(cx, |this, cx| this.begin_selection(None, cx));
+        shelf.update(cx, |this, cx| this.tap_card(a, cx));
+        shelf.update(cx, |this, cx| this.tap_card(b, cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this
+                .selected
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()),
+            vec![a, b]
+        );
+
+        // 再点回甲：把那一本退出来，而不是顺手把整态也退掉。
+        shelf.update(cx, |this, cx| this.tap_card(a, cx));
+        let summary = shelf.read_with(cx, |this, app| this.selection_summary(app));
+        assert!(summary.active, "还剩一本，这一态不该跟着没");
+        assert_eq!(summary.count, 1);
+        assert_eq!(summary.single, Some(b), "只剩一本时「信息」那一格才有对象");
+    }
+
+    /// 全选只覆盖**这一片书**：组卡摆的是「一组」而不是一本，把它算进勾选中就是拿一个
+    /// 并不存在的书行主键去删库。
+    #[gpui_kit::test]
+    fn select_all_counts_books_and_never_the_group_tiles(cx: &mut TestAppContext) {
+        let (shelf, _, store, _) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        add(&store, "乙");
+        let group = store.create_collection("想读").expect("建组");
+        store.add_to_collection(group, a).expect("挂进去");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        // 前置：整架只摆未分组的那一本，外加一张组卡。
+        assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 1);
+        assert_eq!(shelf.read_with(cx, |this, _| this.tile_count()), 1);
+
+        shelf.update(cx, |this, cx| this.begin_selection(None, cx));
+        shelf.update(cx, |this, cx| this.toggle_select_all(cx));
+        let summary = shelf.read_with(cx, |this, app| this.selection_summary(app));
+        assert_eq!(summary.count, 1, "全选只勾这一片书，那张组卡不参与");
+        assert!(summary.all_selected);
+        assert_eq!(
+            summary.groups.len(),
+            1,
+            "工具栏那颗「加入分组」该看得见库里现成的组"
+        );
+
+        // 再按一次是全不选：清勾而已，不是把这一态也退掉。
+        shelf.update(cx, |this, cx| this.toggle_select_all(cx));
+        let summary = shelf.read_with(cx, |this, app| this.selection_summary(app));
+        assert!(!summary.all_selected);
+        assert_eq!(summary.count, 0);
+        assert!(summary.active, "全不选之后栏还杵在那儿，读者接着挑");
+    }
+
+    /// 某一组那一页是**另一块架面**，勾中的那几本长在它身上，而外壳手上只有根实例这一条
+    /// 句柄：读要转一道，按下去的动作也要转回到同一页，否则那条栏在组里读到的永远是零。
+    #[gpui_kit::test]
+    fn the_group_page_holds_the_selection_the_bar_reads(cx: &mut TestAppContext) {
+        let (shelf, handle, store, stack) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        add(&store, "乙");
+        let group = store.create_collection("想读").expect("建组");
+        store.add_to_collection(group, a).expect("挂进去");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        cx.update_window(handle, |_, window, cx| {
+            shelf.update(cx, |this, cx| {
+                this.open_page(ShelfScope::Collection(group), window, cx)
+            });
+        })
+        .expect("窗口应可更新");
+        // 那条栈要在手上：那一页是栈养着的，句柄一撒weak 就升级不回来了（这不是缺陷，
+        // 是「弹掉的那一页不该留下东西」那一条的另一面）。
+        assert_eq!(stack.read_with(cx, |state, _| state.depth()), 2);
+        let page = shelf
+            .read_with(cx, |this, _| {
+                this.group_page.as_ref().and_then(|page| page.upgrade())
+            })
+            .expect("那一页应已挂上");
+
+        assert!(
+            !shelf.read_with(cx, |this, app| this.selection_on(app)),
+            "前置：压上那一页本身不算多选"
+        );
+        page.update(cx, |this, cx| this.begin_selection(Some(a), cx));
+
+        let summary = shelf.read_with(cx, |this, app| this.selection_summary(app));
+        assert!(summary.active, "根实例要替那一页报这一态");
+        assert_eq!(summary.count, 1);
+        assert_eq!(summary.single, Some(a));
+
+        // 动作同样转一道：在根实例上派「退出」，退掉的是那一页的多选。
+        let root = shelf.clone();
+        cx.update_window(handle, |_, window, cx| {
+            root.update(cx, |this, cx| {
+                this.selection_action(navigation::SelectionAction::Exit, window, cx)
+            });
+        })
+        .expect("窗口应可更新");
+        assert!(
+            !page.read_with(cx, |this, _| this.selecting),
+            "退出派下去的那一页该真的退了"
+        );
+        assert!(!shelf.read_with(cx, |this, app| this.selection_on(app)));
+    }
+
+    /// 批量删除：那颗「删除」只是把确认摆出来，落库在读者点头之后；删完退出这一态并重查。
+    #[gpui_kit::test]
+    fn a_batch_delete_takes_every_checked_book_off_the_shelf(cx: &mut TestAppContext) {
+        let (shelf, _, store, _) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        let b = add(&store, "乙");
+        add(&store, "丙");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        shelf.update(cx, |this, cx| this.begin_selection(Some(a), cx));
+        shelf.update(cx, |this, cx| this.tap_card(b, cx));
+
+        shelf.update(cx, |this, cx| this.ask_delete_selection(cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_count()),
+            3,
+            "问的那一帧一本都还没没"
+        );
+        assert!(shelf.read_with(cx, |this, _| this.selection_delete_confirm));
+
+        shelf.update(cx, |this, cx| this.confirm_delete_selection(cx));
+        assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 1);
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_title(0)),
+            Some("丙".into()),
+            "没勾中的那一本该留在架上"
+        );
+        assert!(store.book(a).expect("查库").is_none(), "甲那一行该真的没了");
+        assert!(
+            !shelf.read_with(cx, |this, app| this.selection_on(app)),
+            "这批做完就退出多选态"
+        );
+    }
+
+    /// 把勾中的那一批一次加进某个组：两条都落库，然后退出这一态（读者已经不需要再挑了）。
+    #[gpui_kit::test]
+    fn the_batch_group_add_lands_every_checked_book(cx: &mut TestAppContext) {
+        let (shelf, _, store, _) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        let b = add(&store, "乙");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+        let group = store.create_collection("想读").expect("建组");
+        shelf.update(cx, |this, cx| this.begin_selection(Some(a), cx));
+        shelf.update(cx, |this, cx| this.tap_card(b, cx));
+
+        shelf.update(cx, |this, cx| this.add_selection_to_collection(group, cx));
+        for id in [a, b] {
+            assert!(
+                store
+                    .collections_of_book(id)
+                    .expect("查名分")
+                    .iter()
+                    .any(|mine| mine.id == group),
+                "第 {id} 本该在这一批里落进组"
+            );
+        }
+        assert!(
+            !shelf.read_with(cx, |this, app| this.selection_on(app)),
+            "加完组就退出这一态"
+        );
     }
 
     /// 「分享这本书」递出去的文件名：书名过一遍那道过滤，后缀问 `Format::copy_extension`

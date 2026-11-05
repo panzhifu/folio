@@ -1,0 +1,51 @@
+{
+  "$schema": "https://github.com/longbridge/gpui-kit/raw/refs/heads/main/.theme-schema.json",
+  "name": "Folio Ink Wash",
+  "author": "Folio",
+  "url": "https://github.com/panzhifu/folio",
+  "themes": [
+    {
+      "name": "Ink Wash",
+      "mode": "light",
+      "colors": {
+        "accent.background": "#E4DFCD",
+        "accent.foreground": "#1E1C18",
+        "background": "#F4F1E4",
+        "base.blue": "#46626D",
+        "base.cyan": "#5A7A80",
+        "base.green": "#5C6B4C",
+        "base.magenta": "#6B4A5A",
+        "base.red": "#8A5A44",
+        "base.yellow": "#A98A3E",
+        "border": "#DCD7C6",
+        "foreground": "#1E1C18",
+        "info.background": "#46626D",
+        "input.border": "#DCD7C6",
+        "list.active.background": "#46626D20",
+        "list.active.border": "#46626D",
+        "list.background": "#F4F1E4",
+        "list.even.background": "#EEEAD9",
+        "muted.background": "#E9E5D6",
+        "muted.foreground": "#6E6A5E",
+        "primary.background": "#46626D",
+        "primary.foreground": "#F4F1E4",
+        "ring": "#4E6E75",
+        "scrollbar.background": "#F4F1E400",
+        "scrollbar.thumb.background": "#DCD7C6",
+        "scrollbar.thumb.hover.background": "#D3CDBA",
+        "secondary.active.background": "#D3CDBA",
+        "secondary.background": "#E9E5D6",
+        "secondary.foreground": "#1E1C18",
+        "secondary.hover.background": "#DCD7C6",
+        "selection.background": "#46626D55",
+        "tab.active.background": "#F4F1E4",
+        "tab.active.foreground": "#1E1C18",
+        "tab.background": "#F4F1E400",
+        "tab.foreground": "#7C7768",
+        "tab_bar.background": "#EEEAD9",
+        "title_bar.background": "#EEEAD9",
+        "title_bar.border": "#D3CDBA"
+      }
+    }
+  ]
+}

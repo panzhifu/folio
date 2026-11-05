@@ -170,6 +170,18 @@ pub struct Hit {
     pub mark: Range<usize>,
 }
 
+/// 续扫的落点：上一批**最后报出来的那一处**。
+///
+/// 记的是「章 + 那一章里的第几个字」而不是「扫到第几章」：一批在某一章中间截断时，
+/// 从下一章起扫会把这一章剩下的命中整章丢掉，从同一章重扫又会把已经摆出去的那几处
+/// 再报一遍。`offset` 用的就是 [`Hit::start`] 那把尺，所以两侧对得上、跳过的那一步
+/// 不需要再换算。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub chapter: usize,
+    pub offset: usize,
+}
+
 /// 一趟扫描的读数。
 #[derive(Clone, Debug, Default)]
 pub struct Found {
@@ -184,6 +196,11 @@ pub struct Found {
     /// 这一格只能说「没扫完」，不能说「还有 N 处」—— 想知道就得把全书扫完，
     /// 那正是上限要省掉的力气。
     pub truncated: bool,
+    /// 这一批**最后一处**的落点，下一次带进 [`Options::resume`] 就接着这一批往后扫。
+    ///
+    /// `None` = 一批一个命中都没报（这本书没这个词、或剩下的章节都取不到正文）。
+    /// 与 `truncated` 是两件事：`truncated` 说「后面可能还有」，这一格说「从哪儿接」。
+    pub cursor: Option<Cursor>,
     /// 被读者（或下一次输入）取消。
     pub cancelled: bool,
 }
@@ -194,6 +211,12 @@ pub struct Options {
     pub max_hits: usize,
     pub before: usize,
     pub after: usize,
+    /// 续扫的落点。`None` = 从这本书开头扫（默认那一档，也是从前唯一的那一档）。
+    ///
+    /// 一批一批扫而不是一趟扫完，为的是「随着滑动逐渐摆出来」：读者看到的第一批
+    /// 只要几十处那么长的一截，剩下的等他滑到列表尾巴再接着数，而不是一开始就把
+    /// 全书的命中搬进这一屏（[`DEFAULT_MAX_HITS`] 那个上限本来就是替这一屏挡的）。
+    pub resume: Option<Cursor>,
 }
 
 impl Default for Options {
@@ -202,6 +225,7 @@ impl Default for Options {
             max_hits: DEFAULT_MAX_HITS,
             before: DEFAULT_BEFORE,
             after: DEFAULT_AFTER,
+            resume: None,
         }
     }
 }
@@ -245,11 +269,16 @@ pub fn scan(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageCtx
         return scan_pages(doc, query, options, ctx);
     }
     let chapters = doc.flow().map_or(0, |flow| flow.chapters.len());
+    // 续扫从**报出最后一处的那一章**起，而不是下一章：那一章多半是被上限截断的，
+    // 剩下的命中还在里面。已经报出去的那几处在 `scan_chapter` 里按偏移跳过。
+    let from = options.resume.map_or(0, |cursor| cursor.chapter);
     let mut out = Found {
         chapters,
+        // 进度读数接着上一批的尾巴走：从 0 重数的话，顶上那句会先倒退再往前。
+        scanned: from,
         ..Default::default()
     };
-    for index in 0..chapters {
+    for index in from..chapters {
         if ctx.cancel().triggered() {
             out.cancelled = true;
             break;
@@ -275,6 +304,7 @@ pub fn scan(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageCtx
             ctx.item(out.scanned as u64, chapters as u64);
         }
     }
+    set_cursor(&mut out);
     out
 }
 
@@ -295,14 +325,18 @@ fn scan_pages(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageC
     // 页数取页表那一份（库里躺着的事实），不是取回的那一列的长度：provider 少给一页
     // 是多嘴，多给一页是违约，两种都不该把「这本书几页」改掉。
     let pages = doc.fixed().map_or(0, |fixed| fixed.pages.len());
+    // 续扫那一档与可重排同一口径：从报出最后一处的那一**页**起，已经报出去的那些字
+    // 在 `scan_chapter` 里按偏移跳过。
+    let from = options.resume.map_or(0, |cursor| cursor.chapter);
     let mut out = Found {
         chapters: pages,
+        scanned: from,
         ..Default::default()
     };
     let Some(texts) = doc.page_texts() else {
         return out;
     };
-    for (page, text) in texts.iter().enumerate().take(pages) {
+    for (page, text) in texts.iter().enumerate().take(pages).skip(from) {
         if ctx.cancel().triggered() {
             out.cancelled = true;
             break;
@@ -319,7 +353,19 @@ fn scan_pages(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageC
             ctx.item(out.scanned as u64, pages as u64);
         }
     }
+    set_cursor(&mut out);
     out
+}
+
+/// 把「这一批报到哪儿了」写回读数里，下一批照着它接。
+///
+/// 两族共用这一份而不是各自写一遍：漏掉任何一族，症状都是界面那一头每一次续扫都从
+/// 全书开头重扫，列表永远在最前面那几十处打转 —— 而且不报错。
+fn set_cursor(out: &mut Found) {
+    out.cursor = out.hits.last().map(|hit| Cursor {
+        chapter: hit.chapter,
+        offset: hit.start,
+    });
 }
 
 /// 扫一章（或定版式的一页）的可见文本，命中追加进 `hits`。返回 `true` = 到了上限，别再往下扫了。
@@ -339,6 +385,14 @@ pub fn scan_chapter(
 ) -> bool {
     let mut full = false;
     each_hit(text, query, &mut |from, to, start| {
+        // 续扫那一章里，上一批已经报出去的那几处不再报第二遍。判据放在 `snippet` 之前：
+        // 接上的那一章可能正是命中最密的那一章，白算几十条片段是这一格的全部开销。
+        if options
+            .resume
+            .is_some_and(|cursor| cursor.chapter == chapter && start <= cursor.offset)
+        {
+            return true;
+        }
         let (snippet, mark) = snippet(text, from, to, options.before, options.after);
         hits.push(Hit {
             chapter,

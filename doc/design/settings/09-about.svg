@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="384" height="853" viewBox="0 0 384 853">
 <title>Folio 设置 · 浅色 · Default Light</title>
-<desc>关于：版本、更新与反馈、界面语言</desc>
+<desc>关于：版本、更新与反馈</desc>
 <rect width="384" height="853" fill="#ffffff"/>
 <rect x="0" y="0" width="384" height="28" fill="#ffffff"/>
 <text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
@@ -20,6 +20,4 @@
 <g transform="translate(0,227.00)"><text x="32" y="24" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">更新日志</text><g transform="translate(32,34.0)"><text x="0" y="18.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">看这一版改了什么</text><text x="284" y="18.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">查看</text></g></g>
 <rect x="33" y="297.5" width="334" height="0.5" fill="#e5e5e5"/>
 <g transform="translate(0,297.50)"><text x="32" y="24" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">反馈日志</text><g transform="translate(32,34.0)"><text x="0" y="18.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#737373" text-anchor="start">还没发过</text><text x="256" y="18.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">发送日志</text></g></g>
-<rect x="16" y="400.0" width="352" height="44.0" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
-<g transform="translate(0,400.00)"><text x="32" y="27.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">界面语言</text><rect x="252" y="8.0" width="100.0" height="28" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/><text x="264" y="26.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="#0a0a0a" text-anchor="start">简体中文</text><g transform="translate(326.00,15.00) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></g></g>
 </svg>

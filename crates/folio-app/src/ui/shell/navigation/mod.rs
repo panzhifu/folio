@@ -22,10 +22,13 @@
 
 mod bottom_bar;
 mod fold;
+mod selection_bar;
 mod side_nav;
 mod surface;
 
 pub(in crate::ui::shell) use fold::FoldTracker;
+pub use selection_bar::SelectionAction;
+pub(in crate::ui::shell) use selection_bar::selection_bar;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{App, IntoElement, Window};

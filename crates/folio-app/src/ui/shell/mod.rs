@@ -591,6 +591,9 @@ impl AppShell {
                     this.close_reading(cx);
                 }
             }
+            // 多选态一起一落都要重画这一帧：那条工具栏画在外壳这一层（见
+            // [`AppShell::selection_bar`]），架面自己 `notify` 只会重画架面那片格子。
+            ShelfEvent::SelectionChanged => cx.notify(),
         });
 
         // 架面那条栈的形状变了 = 导航栏该不该收回来。压进去的是「信息」那一页与某一组
@@ -1003,6 +1006,12 @@ impl AppShell {
         if crate::ui::components::dismiss_top(cx) {
             return;
         }
+        // 架面的多选态先退这一态：勾选做到一半时那一按该放下的是这一批，而不是把读者
+        // 连人带勾选弹出这一片书（手机上栈底那一档更是直接丢回后台）。
+        if self.destination == Destination::Shelf && self.shelf.read(cx).selection_on(cx) {
+            self.shelf.update(cx, |shelf, cx| shelf.drop_selection(cx));
+            return;
+        }
         let stack = self.stacks[self.destination.index()].clone();
         if stack.read(cx).depth() > 1 {
             stack.update(cx, |state, cx| {
@@ -1060,6 +1069,8 @@ impl AppShell {
         // 「这一端塞不塞得下两栏」仍然问 host，与上面建两屏时同一个判据，不写 `cfg(mobile)`。
         if destination == Destination::Account && host::supports_overlay_controls(cx) {
             storage::request(cx, storage::Job::Rescan);
+            // 备份那一页的清单同样只认磁盘上的现在：进「我的」时重读一次目录。
+            crate::ui::services::backup::request(cx, crate::ui::services::backup::Job::List);
         }
         self.destination = destination;
         // 换屏 = 那一屏的内容位置与这里无关，让位状态回零（判据见 [`Self::unfold_nav`]）。
@@ -1283,6 +1294,32 @@ impl AppShell {
             },
         )
     }
+
+    /// 架面进了多选态：浮在底边的那一条换成这一批书的工具栏。
+    ///
+    /// 画在这里而不是架面自己的渲染里，是因为它顶替的就是导航那一格 —— 那条栏的几何
+    /// （左右留白、离手势条多远、胶囊表面）三档共用一份，都在 `navigation` 那一层。
+    /// 动作照样只把 [`SelectionAction`](navigation::SelectionAction) 递回架面：它才知道
+    /// 勾中的是哪几本、书库在哪儿。
+    ///
+    /// 三档都摆：Compact 是**顶掉**底栏（那条栏本来就在底边同一个位置），侧栏两档是
+    /// **另起一条**浮在底边 —— 侧栏是嵌入的、占布局行，收掉它会让整架横着抖一下，
+    /// 而读者在这一态里照样该能切目的地。
+    fn selection_bar(&self, safe: &host::Insets, cx: &mut Context<Self>) -> impl IntoElement {
+        let summary = self.shelf.read(cx).selection_summary(cx);
+        let shelf = self.shelf.clone();
+        navigation::selection_bar(
+            cx,
+            summary.count,
+            summary.all_selected,
+            summary.single.is_some(),
+            summary.groups,
+            navigation::bar_offset(safe.bottom),
+            move |action, window, cx| {
+                shelf.update(cx, |shelf, cx| shelf.selection_action(action, window, cx))
+            },
+        )
+    }
 }
 
 impl Render for AppShell {
@@ -1322,6 +1359,15 @@ impl Render for AppShell {
 
         let size = SizeClass::of(window);
         let safe = host::safe_area(window, cx);
+        // 架面的多选态：底部那一条不画导航、改画这一批书的工具栏（见 [`AppShell::selection_bar`]）。
+        // 只跟着书架这一个目的地 —— 侧栏两档的导航在多选态里照常能按，切去统计再切回来时
+        // 勾选还留在架面上，但那一屏上不该挂着一条属于别处的工具栏。
+        //
+        // 底部弹层开着时不摆：那条栏浮在一切之上，而弹层是要盖住导航那一层的模态（同一个
+        // 判据见 [`AppShell::nav_gone`] 第三条）。删除那一问用的是 Popover，不算弹层。
+        let selecting = self.destination == Destination::Shelf
+            && !crate::ui::components::any_sheet_open(cx)
+            && self.shelf.read(cx).selection_on(cx);
         // 要吃满整屏的那一屏在前面 → 导航栏整条收起。今天走这一条的有两处：架面那条栈上压上来
         // 的「信息」那一页，和「我的」自己钻进详情的那一屏（两条判据见 [`AppShell::nav_gone`]）。
         // 书不在这条栈上（它盖在整层之上），而书里「更多设置」压进去用的是那一层自己的子栈，
@@ -1436,7 +1482,12 @@ impl Render for AppShell {
                     .text_color(cx.theme().foreground)
                     .pt(px(safe.top))
                     .child(div().size_full().min_h_0().overflow_hidden().child(content));
-                if !nav_gone {
+                // 多选态里这条栏**顶掉**底栏：两者占的是同一个位置，摆两条就是叠在一起。
+                // 栈上压了页时导航栏已经收起，但工具栏照样要摆 —— 读者在某一组那一页里
+                // 勾选，退路只有这一条栏上那颗「退出」。
+                if selecting {
+                    page = page.child(self.selection_bar(&safe, cx));
+                } else if !nav_gone {
                     page = page.child(self.nav(size, &safe, self.nav.folded(), window, cx));
                 }
                 page.into_any_element()
@@ -1444,13 +1495,14 @@ impl Render for AppShell {
                 // 阅读页在最上面时这条侧栏整条不画（不是留个空位）：它占的那段宽
                 // 要还给正文，双页才摆得开。
                 let mut row = h_flex()
+                    .relative()
                     .size_full()
                     .bg(cx.theme().background)
                     .text_color(cx.theme().foreground);
                 if !nav_gone {
                     row = row.child(self.nav(size, &safe, self.nav.folded(), window, cx));
                 }
-                row.child(
+                row = row.child(
                     div()
                         // `h_full` 不能省：`h_flex` 在交叉轴上是**居中**而不是拉伸的
                         // （与 `v_flex` 不对称），所以这一格不给高度就只按内容高、
@@ -1464,8 +1516,14 @@ impl Render for AppShell {
                         .pt(px(safe.top))
                         .pb(px(safe.bottom))
                         .child(content),
-                )
-                .into_any_element()
+                );
+                // 侧栏两档不动那条嵌入的导航（收掉它整架会横向抖一下，而多选态里读者
+                // 照样该能切目的地），工具栏另起一条浮在底边。架面在这一态下也给自己
+                // 加上那一段尾部留白，最后一排才滚得出来。
+                if selecting {
+                    row = row.child(self.selection_bar(&safe, cx));
+                }
+                row.into_any_element()
             }
         };
 
