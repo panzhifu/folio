@@ -1,16 +1,20 @@
 //! Compact 档（手机）的设置：与桌面**同一份页面规格**，版式按 Apple 的分组列表。
 //!
 //! 桌面的 `Settings` 组件是「侧栏 + 正文」两栏，塞不进一块 360dp 的小屏；这里吃
-//! 同一份 [`spec_pages`]，渲染成「页列表 → 全屏子页 → 选项子页」三层：
+//! 同一份 [`spec_pages`]，渲染成「页列表 → 全屏子页 → 选项子页」三层，外加根屏顶上那颗
+//! 搜索框（框里有词时整屏换成结果那一屏）：
 //!
-//! - 根屏一张内嵌分组，一行一页，末尾只留一枚进去的箭头。**顶上不再摆一个大标题**：这一屏
+//! - 根屏一张会员卡 + 三块带节头的入口 + 末尾一张无节头的卡，一行一页，末尾只留一枚进去的
+//!   箭头；分了块这一屏就装不下，所以它跟着子页一起滚。**顶上不再摆一个大标题**：这一屏
 //!   在底栏里就叫「我的」，再写一句「设置」是同一个入口的两个名字。右端也**不挂这一页的
 //!   当前值**：入口列表那一行管的是「去哪儿」，不是「现在是多少」，而一页几十行里只能挑一个
 //!   数当代表（「文字」那页从前露字号、看不到行距），念不准还看着像已经调过了；
-//! - 子页顶部一条 [`TopBar`]（返回 + 页名），下面按规格里的组各成一张分组卡，**卡上方不摆
-//!   节头**：组与组只靠 32 那一道缝分开，整页是一串光卡。钻进子页（以及它的选项屏）时**整窗
-//!   都是它**：底下那条应用导航栏由外壳收起，判据是 [`CompactSettings::pushed`]，退回根屏
-//!   那一趟它自己回来；
+//! - 子页顶部一条 [`TopBar`]（返回 + 页名），下面按规格里的组各成一张分组卡，**多于一组时
+//!   卡上方摆一句节头**（就是规格里那句组标题，桌面侧栏早就在用它）：32 的缝只说得出「换了
+//!   一块」，说不出这一块叫什么，而文字页四张卡、存储页两张卡的时候，读者得把每行标题读完才
+//!   知道自己在哪一格。只有一组时不摆 —— 那句话和顶栏上的页名是同一个东西。钻进子页（以及
+//!   它的选项屏）时**整窗都是它**：底下那条应用导航栏由外壳收起，判据是 [`CompactSettings::pushed`]，
+//!   退回根屏那一趟它自己回来；
 //! - **行内不摆灰色说明**：每行只有标题与控件，44 一行。规格里那句「这一格干什么用、取值范围
 //!   是什么意思」（[`spec::Row::desc`]）只有桌面渲染 —— 代价是「最大行长 0 表示随窗口铺满」
 //!   这类约定在这一屏没有界面内的解释，靠各控件自己的语义兜住。服务状态字（Wi-Fi 传书没开时
@@ -38,7 +42,9 @@
 //! | 行的可命中高 44×44（HIG 明文） | [`ROW_HIT`]，`px` | 命中容差是规范点名的 `px` 例外 |
 //! | 横向内缩 16（UIKit 观测） | `px_4`（1rem） | 正好同值，走 rem |
 //! | 图标槽 29、图标到文字 12（观测） | `size_7`（28）、`gap_3`（12） | 29 不在阶上，取 28 |
-//! | 组与组的缝 35（观测） | `mt_8`（32） | 35 不在阶上，取最近那一档 |
+//! | 组与组的缝 35（观测） | 带节头 `mt_4`（16）；不带节头 `mt_8`（32） | 节头就是「换了一块」那句话，缝只需要说「这块不属于上一张卡」；只剩缝在说话时留大的一档 |
+//! | 节头 13pt semibold、灰（UIKit 观测） | `text_sm`（14）+ 600 + `muted_foreground` | 字号阶是 12/14/16/18/20，取 14 那一档 |
+//! | 节头到自己那张卡 8（观测） | `pb_2`（8） | 块内比块间小，「先认块、再认行」那条路才走得通 |
 //! | 顶栏到第一张卡 | `mt_2`（8） | Material 的列表贴着顶栏那一档；分隔线去掉后由这段留白换段 |
 //! | 正文 17（HIG body） | `text_base`（16） | 字号阶是 12/14/16/18/20 |
 //! | 分组卡圆角 10（观测） | `theme.radius_lg`（8） | 规范：圆角只从主题那几档里挑 |
@@ -57,9 +63,10 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, TestSupportExt as _, Window, div, px, rems,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, TestSupportExt as _, Window, div, px,
+    rems,
 };
 
 use std::rc::Rc;
@@ -68,7 +75,7 @@ use super::SettingsPage;
 use super::pages::membership::status_line;
 use super::spec::{self, RowKind};
 use super::{NotesSheet, spec_pages};
-use crate::ui::components::{FontPicker, TopBar, muted_label};
+use crate::ui::components::{FontPicker, SearchBox, SearchBoxEvent, TopBar, muted_label};
 use crate::ui::services::l10n::tr;
 use crate::ui::services::storage::{self, Job};
 use crate::ui::shell::navigation;
@@ -108,6 +115,33 @@ fn card(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
         .border_1()
         .border_color(cx.theme().border)
         .children(rows)
+        .into_any_element()
+}
+
+/// 卡上方那一句节头：说出下面这一块里的行有什么共同点。
+///
+/// 这一句早就在规格里（[`spec::Group::title`]），只是从前只有桌面的侧栏读它（拿它当页的
+/// 子项，见 `view/mod.rs` 的 `setting_page`），手机那一屏整页是「一串光卡」—— 32 的缝说得
+/// 出「这里换了一块」，说不出这一块叫什么。文字页四张卡、存储页两张卡的时候，读者得把每行
+/// 的标题读完才知道自己在哪一格。所以这里不新增文案，只把已有那一句摆回来。
+///
+/// 层次靠字级、字重与留白，不靠容器与颜色：`text_sm` 比正文小一档，`muted_foreground` 比
+/// 正文淡一档，字重加一档。不做大写与小字距那一档 —— 九门语言里四门是 CJK，没有大小写可
+/// 用，而 CJK 加字距只会散（规范「avoid excessive uppercase or letter spacing, especially
+/// for CJK」）。
+///
+/// 左端与卡片同一条 16 的脊柱，由调用方那一层 `px_4` 给（`card` 自己也不带内缩）：节头与
+/// 卡是同一层的兄弟，缩到行文字那一列的 56 会让它看起来像卡里的一行，而两处各垫一次 `px_4`
+/// 就变成 32 —— 规范那条「已经垫过内缩的面板里别再垫一整份」。
+fn section_header(title: SharedString, cx: &App) -> AnyElement {
+    div()
+        .w_full()
+        .pb_2()
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .text_ellipsis()
+        .child(title)
         .into_any_element()
 }
 
@@ -239,6 +273,101 @@ fn control_cell(id: SharedString, inner: impl IntoElement) -> AnyElement {
         .into_any_element()
 }
 
+/// 根屏那条入口列表的分块：块名 + 落进这一块的页。
+///
+/// 为什么要块：[`SettingsPage::ALL`] 已经 14 格，从前除会员外全拍成一条平铺列表 —— 十三行
+/// 同一个字号、同一种行、只靠发丝线分开，读者要找「行距」得把整列读完才知道它在第几格。
+/// 分块把这条改成「先落到哪一类，再在那一类里找」，与规范那条「一个个看起来合理的控件凑在
+/// 一起仍可能失败，因为它们没有形成一个阅读顺序」对得上。
+///
+/// 两块不在这里。**会员**在根顶单独一张卡（要当场念等级与到期日，见 [`root_screen`]）。
+/// **「关于」**在末尾那张无节头的卡：一块只剩一行时，节头念的就是那一行自己的名字，那句是
+/// 重复（规范「上下文已经建立的信息不要再讲一遍」）。
+///
+/// **没登记的页不会从屏上消失**：它落进末尾那张无节头的卡，同时
+/// `every_page_lands_in_a_root_block` 那条用例红 —— 加一页忘了分块，症状是「它少一句块名」，
+/// 不是「它不见了」。
+const ROOT_BLOCKS: [(&str, &[SettingsPage]); 3] = [
+    (
+        "section.reading",
+        &[
+            SettingsPage::Appearance,
+            SettingsPage::Typography,
+            SettingsPage::Layout,
+            SettingsPage::Fonts,
+            SettingsPage::Speech,
+        ],
+    ),
+    (
+        "section.translation_ai",
+        &[SettingsPage::Translation, SettingsPage::Ai],
+    ),
+    (
+        "section.books_data",
+        &[
+            SettingsPage::Library,
+            SettingsPage::TxtRules,
+            SettingsPage::Toc,
+            SettingsPage::Sync,
+            SettingsPage::Storage,
+        ],
+    ),
+];
+
+/// 这一页落进根屏的哪一块；`None` = 末尾那张无节头的卡。
+///
+/// 按**页**查而不是按下标：块里写的是目的地，`ALL` 挪顺序时块跟着走，不会指错格子。
+fn root_block(page: SettingsPage) -> Option<usize> {
+    ROOT_BLOCKS
+        .iter()
+        .position(|(_, members)| members.contains(&page))
+}
+
+/// 一次搜索的命中。
+///
+/// 两种命中要的东西不同，所以不是一种东西：`Page` 是「知道有这一页、忘了它叫什么」，进去
+/// 那一屏就完事；`Row` 是「知道要调哪一格」，于是把**那一格连同它的控件**直接摆在这里，
+/// 当场就能改 —— 搜索结果不是链接列表。
+enum Hit {
+    Page(usize),
+    Row(usize, usize, usize),
+}
+
+/// 按页序扫一遍规格，挑出整页名字对上的页，以及标题或关键词对上的行。
+///
+/// 匹配只有一条规则：**忽略大小写的子串**。拼音、缩写那种「猜词」不做 —— 那份要先养一张
+/// 拼音表，而它一错就是「明明有却搜不到」，比少一种匹配方式贵得多。
+///
+/// 扫的是**当前这一份规格**：被关掉的那一档根本不在规格里（见 `pages/translation.rs` 的
+/// 「只摆选中的那套引擎的设置」），所以没选 DeepL 时搜「DeepL」不会摆出一格按不动的字段 ——
+/// 结果不会指向进不去的地方。
+fn search_hits(pages: &[spec::Page], query: &str) -> Vec<Hit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for (page_ix, page) in pages.iter().enumerate() {
+        if page.title.to_lowercase().contains(&needle) {
+            hits.push(Hit::Page(page_ix));
+        }
+        for (group_ix, group) in page.groups.iter().enumerate() {
+            for (row_ix, row) in group.rows.iter().enumerate() {
+                let title = row.title.to_lowercase();
+                let said = title.contains(&needle)
+                    || row
+                        .keywords
+                        .iter()
+                        .any(|word| word.to_lowercase().contains(&needle));
+                if said {
+                    hits.push(Hit::Row(page_ix, group_ix, row_ix));
+                }
+            }
+        }
+    }
+    hits
+}
+
 /// 「我的」这一格里现在站着哪一屏。页用**序号**寻址 —— 与桌面深链同一条
 /// `SettingsPage::index` 顺序，规格数组的下标就是它。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,9 +403,21 @@ pub(crate) struct CompactSettings {
     /// 对「会员兑换」状态实体的订阅。那一趟在后台线程上结束，到期日与结果那句都要靠
     /// 实体 notify 才出现在这一屏上。
     _activation_watch: Subscription,
+    /// 对「没拿到所有文件访问」那一问的订阅：面板的摆与收都靠它 notify 这一屏。
+    _access_watch: Subscription,
     /// 「更新日志」那张卡片。**本屏一份**：与桌面那一屏同一个形状 —— 关于那一页的按钮拿的是
     /// 这一个句柄，挂的也是这一屏，所以两屏同时活着时各收各的（理由写在 `notes_sheet` 顶部）。
     notes: Entity<NotesSheet>,
+    /// 顶上那颗搜索框：`(框, 订阅, 建它时那句占位文案)`。
+    ///
+    /// 建它要 `window`，而外壳那头 `cx.new(CompactSettings::new)` 手里没有 window，所以第一帧
+    /// 就地建（与文本行那格 `InputState` 同一形状）。第三格不是装饰：占位文案是建框那一刻
+    /// 译的，切语言后规格整份重译，只有这句跟着旧语言 —— 拿它比一次就知道该不该重建。
+    search: Option<(Entity<SearchBox>, Subscription, SharedString)>,
+    /// 框里当前那句查询词。空串 = 没在搜，根屏摆分块的入口列表。
+    ///
+    /// 真源在这一格而不是框里：返回键收掉搜索态时改的是它，下一帧把框里的字拉回来。
+    query: SharedString,
 }
 
 impl CompactSettings {
@@ -299,6 +440,10 @@ impl CompactSettings {
         let activation = crate::ui::services::activation::entity(cx);
         let activation_watch = cx.observe(&activation, |_, _, cx| cx.notify());
         let notes = cx.new(NotesSheet::new);
+        // 「没拿到所有文件访问」那一问：面板摆不摆由这份实体说了算，所以它一 notify
+        // 这一屏就得重画（与上面那几条订阅同一理由）。
+        let question = crate::ui::services::library::access(cx);
+        let question_watch = cx.observe(&question, |_, _, cx| cx.notify());
         Self {
             screen: Screen::Root,
             _storage_watch: watch,
@@ -306,7 +451,10 @@ impl CompactSettings {
             _feedback_watch: feedback_watch,
             _sync_watch: sync_watch,
             _activation_watch: activation_watch,
+            _access_watch: question_watch,
             notes,
+            search: None,
+            query: SharedString::default(),
         }
     }
 
@@ -331,6 +479,13 @@ impl CompactSettings {
     pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) -> bool {
         if self.notes.read(cx).is_open(cx) {
             self.notes.update(cx, |card, cx| card.hide(cx));
+            cx.notify();
+            return true;
+        }
+        // 搜索态是这一屏最外面的一层：根屏上先按一次收掉查询词，再按一次才轮到外壳
+        // （最终是退出应用）。与「更新日志」那张卡片同一规矩 —— 一次只退一层。
+        if matches!(self.screen, Screen::Root) && !self.query.is_empty() {
+            self.query = SharedString::default();
             cx.notify();
             return true;
         }
@@ -363,22 +518,43 @@ impl CompactSettings {
         self.pushed()
     }
 
-    /// 根屏：一张会员卡 + 一张分组卡，一行一页，右端只留那枚进去的箭头。
+    /// 根屏：搜索框 + 一张会员卡 + 三块带节头的入口 + 末尾一张无节头的卡，一行一页，右端只留那枚进去的箭头。
     ///
     /// 会员那一格**不摆在入口列表里**，而是单独一张卡顶在列表上面：它要当场露出等级与
     /// 到期日，而列表那一行按定稿是不挂当前值的（见文件头）。两处摆同一个目的地是噪声，
     /// 所以列表里跳过它。
-    fn root_screen(&self, cx: &mut Context<Self>) -> AnyElement {
+    ///
+    /// 框里有词时整屏换成结果那一屏（[`Self::search_results`]）：块结构回答的是「这一类里有
+    /// 什么」，回答不了「我知道要找『行距』，但不知道它在哪一页」。
+    fn root_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // 悬浮底栏（Compact 档）压在内容上：滚动内容自己要在尾部让出那一段。判据只在
+        // 根屏为真 —— 钻进来的子页由外壳把栏整条收起，那一屏吃满整窗（`pushed`）。
+        let tail = navigation::clearance(crate::ui::host::safe_area(window, cx).bottom);
+        let field = self.search_field(window, cx);
+        if !self.query.is_empty() {
+            return v_flex()
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .child(field)
+                .child(self.search_results(window, tail, cx))
+                .into_any_element();
+        }
         let entity = cx.entity().clone();
         let pages = spec_pages(cx, &self.notes);
         let membership_ix = SettingsPage::Membership.index();
-        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut blocks: Vec<Vec<AnyElement>> = ROOT_BLOCKS.iter().map(|_| Vec::new()).collect();
+        let mut unblocked: Vec<AnyElement> = Vec::new();
         for (ix, page) in pages.iter().enumerate() {
             if ix == membership_ix {
                 continue;
             }
-            // 分隔线按「前面有没有行」摆，而不是按页序：跳过会员那一格以后，
-            // 列表的第一行不再是从前那个 `ix == 0`。
+            // 分隔线按「这一块前面有没有行」摆，不按页序：跳过会员那一格以后，第一块的
+            // 第一行不再是从前那个 `ix == 0`。
+            let rows = match SettingsPage::ALL.get(ix).and_then(|p| root_block(*p)) {
+                Some(block) => &mut blocks[block],
+                None => &mut unblocked,
+            };
             if !rows.is_empty() {
                 rows.push(separator(3.5, cx).into_any_element());
             }
@@ -393,19 +569,180 @@ impl CompactSettings {
             ));
         }
         // 大标题不摆了：这一屏在底部导航里就叫「我的」，顶上再写一句「设置」是同一个入口
-        // 的两个名字，读者先看见的是那句和底栏对不上的字。两张卡各自就是这一屏。
-        // 卡与卡之间是组与组那一道 32 的缝，与子页里组间同一档。
+        // 的两个名字，读者先看见的是那句和底栏对不上的字。
+        // 缝的档位由**这一块自己带不带节头**决定，与上一块是什么无关：会员卡与「关于」那张
+        // 都没有节头，所以它们下面那一块照旧按下一块的档位走（带节头的 16）。
+        let mut body = v_flex().w_full().child(
+            div()
+                .w_full()
+                .px_4()
+                .mt_2()
+                .child(card(vec![self.membership_cell(cx)], cx)),
+        );
+        for (block, (key, _)) in ROOT_BLOCKS.iter().enumerate() {
+            let rows = std::mem::take(&mut blocks[block]);
+            // 空块不摆：它连一道缝都不该占。这一档在今天的页表里不会发生，但根屏是读者唯一的
+            // 入口，宁可少一块，也别摆一张空卡。
+            if rows.is_empty() {
+                continue;
+            }
+            body = body.child(
+                v_flex()
+                    .w_full()
+                    .px_4()
+                    .mt_4()
+                    .child(section_header(tr(cx, key), cx))
+                    .child(card(rows, cx)),
+            );
+        }
+        // 末尾那一张不摆节头：里头只有「关于」，而一块只剩一行时，块名念的就是那一行自己的
+        // 名字。将来若有没登记的页也落在这里 —— 少一句块名，不少一个入口。
+        // 正因为它没有节头，这一道缝留大的一档（32）：这一处只剩缝在说「这是另一件事」。
+        if !unblocked.is_empty() {
+            body = body.child(div().w_full().px_4().mt_8().child(card(unblocked, cx)));
+        }
+        // 分了块之后这一屏装不下（13 行 + 三句节头 + 五道缝，比魅族 20 那一档去掉状态栏与
+        // 底栏的可用高度还高），所以根屏也跟着滚起来。底栏那一段留白交给 `scrollable`
+        // 垫在滚动内容里（见那一格的注释）。
+        // 搜索框不进滚动区：它是要反复用的输入口，滚一下就没得输入不叫「省一格」。
         v_flex()
             .w_full()
-            .child(
+            .flex_1()
+            .min_h_0()
+            .child(field)
+            .child(Self::scrollable(body, tail))
+            .into_any_element()
+    }
+
+    /// 顶上那颗搜索框：第一帧就地建，换了语言重建，并把 `query` 拉回框里。
+    fn search_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let placeholder = tr(cx, "account.search_placeholder");
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|(_, _, built)| *built != placeholder)
+        {
+            // 语言换了。占位文案是建框那一刻译的，不重建就成了「整屏是新语言、框里那句还是
+            // 旧语言」。查询词留在 `query` 那一格，跟着带进新框。
+            self.search = None;
+        }
+        if self.search.is_none() {
+            let boxed = cx.new(|cx| SearchBox::new(placeholder.clone(), window, cx));
+            let watch = cx.subscribe(&boxed, move |this, _, event: &SearchBoxEvent, cx| {
+                let SearchBoxEvent::Change(query) = event;
+                if this.query != *query {
+                    this.query = query.clone();
+                    cx.notify();
+                }
+            });
+            self.search = Some((boxed, watch, placeholder));
+        }
+        let (boxed, _, _) = self.search.as_ref().expect("上面要么建好、要么本来就有");
+        // 框里的字与 `query` 走偏时以 `query` 为准（返回键收掉搜索态走的就是这一格）——
+        // 与文本行那格「配置在他处被改时把显示拉回来」同一条做法。
+        let query = self.query.clone();
+        boxed.update(cx, |search, cx| search.set_value(query, window, cx));
+        div()
+            .w_full()
+            .px_4()
+            .py_2()
+            .child(boxed.clone())
+            .into_any_element()
+    }
+
+    /// 搜出来那一屏：页命中一张卡，行命中按页归堆、每堆一句节头（页名）加一张卡。
+    ///
+    /// 卡里摆的是**那一格自己** —— 开关就是开关、步进就是步进，当场能改。把结果做成一串
+    /// 链接，读者按完还得在那一屏里把同一句话再找一遍，而这次搜索要治的就是「找不到」。
+    fn search_results(&self, window: &mut Window, tail: f32, cx: &mut Context<Self>) -> AnyElement {
+        let pages = spec_pages(cx, &self.notes);
+        let hits = search_hits(&pages, &self.query);
+        let opened: Vec<usize> = hits
+            .iter()
+            .filter_map(|hit| match hit {
+                Hit::Page(page_ix) => Some(*page_ix),
+                Hit::Row(..) => None,
+            })
+            .collect();
+        let mut grouped: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
+        for hit in &hits {
+            if let Hit::Row(page_ix, group_ix, row_ix) = hit {
+                match grouped.iter_mut().find(|(page, _)| *page == *page_ix) {
+                    Some((_, rows)) => rows.push((*group_ix, *row_ix)),
+                    None => grouped.push((*page_ix, vec![(*group_ix, *row_ix)])),
+                }
+            }
+        }
+        let mut body = v_flex().w_full();
+        let mut first = true;
+        if !opened.is_empty() {
+            let entity = cx.entity().clone();
+            let mut rows: Vec<AnyElement> = Vec::new();
+            for page_ix in opened.iter().copied() {
+                if !rows.is_empty() {
+                    rows.push(separator(3.5, cx).into_any_element());
+                }
+                let page = &pages[page_ix];
+                let entity = entity.clone();
+                rows.push(push_cell(
+                    SharedString::from(format!("settings-hit-page-{page_ix}")),
+                    Some(page.icon),
+                    page.title.clone(),
+                    None,
+                    move |_, _, app| entity.update(app, |this, cx| this.open(page_ix, cx)),
+                    cx,
+                ));
+            }
+            let gap = if first {
+                v_flex().w_full().mt_2()
+            } else {
+                v_flex().w_full().mt_8()
+            };
+            first = false;
+            body = body.child(gap.child(div().w_full().px_4().child(card(rows, cx))));
+        }
+        for (page_ix, found) in &grouped {
+            let mut rows: Vec<AnyElement> = Vec::new();
+            for (group_ix, row_ix) in found {
+                if !rows.is_empty() {
+                    rows.push(separator(1.0, cx).into_any_element());
+                }
+                rows.push(self.row(
+                    *page_ix,
+                    *group_ix,
+                    *row_ix,
+                    &pages[*page_ix].groups[*group_ix].rows[*row_ix],
+                    window,
+                    cx,
+                ));
+            }
+            let mut block = if first {
+                v_flex().w_full().mt_2()
+            } else {
+                // 结果里每一堆都带节头（那句就是页名），所以缝走 16 那一档，与子页同一数。
+                v_flex().w_full().mt_4()
+            };
+            first = false;
+            block = block
+                .child(
+                    div()
+                        .w_full()
+                        .px_4()
+                        .child(section_header(pages[*page_ix].title.clone(), cx)),
+                )
+                .child(div().w_full().px_4().child(card(rows, cx)));
+            body = body.child(block);
+        }
+        if opened.is_empty() && grouped.is_empty() {
+            body = body.child(
                 div()
                     .w_full()
                     .px_4()
                     .mt_2()
-                    .child(card(vec![self.membership_cell(cx)], cx)),
-            )
-            .child(div().w_full().px_4().mt_8().child(card(rows, cx)))
-            .into_any_element()
+                    .child(muted_label(tr(cx, "account.search_empty"), cx)),
+            );
+        }
+        Self::scrollable(body, tail)
     }
 
     /// 会员卡那一行：图标 + 两行字（页名，与「哪天到期 / 未开通」那一句）+ 一枚进去的箭头。
@@ -482,10 +819,11 @@ impl CompactSettings {
             })
     }
 
-    /// 子页正文：规格里的每个组各成一张卡，卡上方不摆节头 —— 整页是一串光卡。
+    /// 子页正文：规格里的每个组各成一张卡，**多于一组时卡上方摆节头**。
     ///
-    /// 组标题在这一屏**不被读**：它归桌面的侧栏当子项（见 `view/mod.rs` 的 `setting_page`），
-    /// 而这边一行小灰字换成 32 的缝之后，「换了一块」由留白自己说。
+    /// 节头就是规格里那句组标题（[`spec::Group::title`]），从前只有桌面侧栏读它。只有一组时
+    /// 不摆：那一句话和顶栏上的页名是同一个东西，摆两遍是重复（规范「上下文已经建立的信息
+    /// 不要再讲一遍」）—— 版面、字体、目录那些页就吃这一条。
     fn page_screen(
         &self,
         page_ix: usize,
@@ -493,6 +831,7 @@ impl CompactSettings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let headed = page.groups.len() > 1;
         let mut body = v_flex().w_full();
         for (group_ix, group) in page.groups.iter().enumerate() {
             let mut rows: Vec<AnyElement> = Vec::new();
@@ -502,16 +841,28 @@ impl CompactSettings {
                 }
                 rows.push(self.row(page_ix, group_ix, row_ix, row, window, cx));
             }
-            // 第一张卡与顶栏只留 8（Material 的列表贴着顶栏的那一档），组与组之间仍是 32
-            // 那一道缝。分隔线去掉以后，这两段留白就是「换了一块」唯一说话的地方。
+            // 第一块与顶栏只留 8（Material 的列表贴着顶栏的那一档）。块与块之间**分两种**：
+            // 带节头的 16，不带节头的仍然 32 —— 节头自己就是「这里换了一块」那句话，缝只需要
+            // 再说一句「这块不属于上一张卡」；没有节头时只剩缝在说话，那就得留大的一档
+            // （规范那条：相等的留白会被读成相等的关系）。
+            //
+            // 从前带节头也留 32，量出来上一张卡底到下一张卡顶是 32 + 22 = 54，比 Apple 那一档
+            // （约 35）宽一半。现在 16 + 22 = 38，与它同一档。
             let gap = if group_ix == 0 {
                 v_flex().w_full().mt_2()
+            } else if headed {
+                v_flex().w_full().mt_4()
             } else {
                 v_flex().w_full().mt_8()
             };
-            body = body.child(gap.child(div().w_full().px_4().child(card(rows, cx))));
+            let mut block = div().w_full().px_4();
+            if headed {
+                block = block.child(section_header(group.title.clone(), cx));
+            }
+            body = body.child(gap.child(block.child(card(rows, cx))));
         }
-        Self::scrollable(body)
+        // 子页由外壳收起底栏、吃满整窗，尾部不必再让那一段。
+        Self::scrollable(body, 0.0)
     }
 
     /// 选项屏：一项一行，当前那项右侧一枚勾。选中即写回并退回上一屏，没有「确定」按钮。
@@ -529,7 +880,7 @@ impl CompactSettings {
         else {
             // 只有「多选一」那一行会推到这一屏。类型对不上是调用方写错了，这里摆空屏
             // 而不是 panic：这一屏在读者眼前，崩了比空着更难查。
-            return Self::scrollable(div().w_full());
+            return Self::scrollable(div().w_full(), 0.0);
         };
         let current = get(cx);
         let entity = cx.entity().clone();
@@ -557,7 +908,7 @@ impl CompactSettings {
                 cx,
             ));
         }
-        Self::scrollable(div().w_full().mt_2().px_4().child(card(rows, cx)))
+        Self::scrollable(div().w_full().mt_2().px_4().child(card(rows, cx)), 0.0)
     }
 
     /// 一个字段行。控件的种类决定右端摆什么（或整行摆什么）。
@@ -810,7 +1161,12 @@ impl CompactSettings {
     }
 
     /// 内容区的通用外壳：可滚动。左右内缩归各屏自己（分组卡要贴着 16 那一档铺）。
-    fn scrollable(body: impl IntoElement) -> AnyElement {
+    ///
+    /// `tail` 是悬浮底栏要的那一段（Compact 档的根屏，见 `navigation::clearance`）。它垫在
+    /// **滚动内容里**，与架子 / 统计 / 笔记同一份写法：垫在视口外面时视口被永久截短，底栏
+    /// 一让位（往下读）底部就空出一条，内容怎么滚都到不了屏幕底；垫在内容里，滚动途中内容
+    /// 从栏底下穿过去，滚到底时最后一排正好停在栏的上沿。
+    fn scrollable(body: impl IntoElement, tail: f32) -> AnyElement {
         div()
             .id("settings-compact-scroll")
             .overflow_y_scroll()
@@ -819,6 +1175,7 @@ impl CompactSettings {
             .w_full()
             .pb_8()
             .child(body)
+            .child(div().w_full().h(px(tail)))
             .into_any_element()
     }
 }
@@ -828,24 +1185,15 @@ impl Render for CompactSettings {
         // 宿主测试按这一格确认「我的」那一个目的地画的是分组列表（同 `SettingsView`）。
         // 底色与外壳涂在状态栏那一条 `safe.top` 下面的那一档**同一个角色**：这一屏比它深一档
         // 时，屏幕顶就是一道色（理由写在 `card` 那段）。
-        // 根屏底下那条导航栏是浮的（Compact 档），这一屏又**不滚动** —— 不在这里让出
-        // 那一段，最后一行会压到胶囊底下。钻进来的子页反而要让满整窗（导航栏这时由外壳
-        // 收起），所以只有根屏加。
-        let tail = if matches!(self.screen, Screen::Root) {
-            navigation::clearance(crate::ui::host::safe_area(window, cx).bottom)
-        } else {
-            0.0
-        };
         let mut root = v_flex()
             .id("settings-compact")
             // 卡片那一层是绝对定位的，要有一个能落位的父盒子（与架面那三块同一形状）。
             .relative()
             .size_full()
-            .pb(px(tail))
             .bg(cx.theme().background)
             .test_support();
         match self.screen {
-            Screen::Root => root = root.child(self.root_screen(cx)),
+            Screen::Root => root = root.child(self.root_screen(window, cx)),
             Screen::Page(page_ix) => {
                 let page = spec_pages(cx, &self.notes).swap_remove(page_ix);
                 // 顶栏底下**不画分隔线**：Material 3 的顶栏不带 divider，容器色一滚起来才变。
@@ -883,9 +1231,106 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
 
-    use super::{CompactSettings, Screen, SettingsPage};
+    use super::{
+        CompactSettings, Hit, NotesSheet, ROOT_BLOCKS, Screen, SettingsPage, root_block,
+        search_hits, spec_pages,
+    };
     use crate::ui::services::config::ConfigHolder;
     use crate::ui::services::update::Notes;
+
+    /// 分块不许漏页：除会员（根顶那张卡）外，每一页要么落进 `ROOT_BLOCKS` 的一块，要么落进
+    /// 末尾那张无节头的卡 —— 而后者今天只该站着「关于」。
+    ///
+    /// 这条用例管的是「加一页忘了登记」。那种页不会从屏上消失（它掉进无节头那一张），但它
+    /// 没有块名，而根屏那条列表又会重新变回「一串看不出类的行」—— 正是这次分块要治的那个病。
+    /// 红在这里比红在「读者扫不到那一格」便宜得多。
+    #[test]
+    fn every_page_lands_in_a_root_block() {
+        let unblocked: Vec<SettingsPage> = SettingsPage::ALL
+            .iter()
+            .filter(|page| root_block(**page).is_none())
+            .copied()
+            .collect();
+        assert_eq!(
+            unblocked,
+            vec![SettingsPage::Membership, SettingsPage::About],
+            "除会员与关于之外，每一页都要登记进 ROOT_BLOCKS 的某一块"
+        );
+        // 同一页不许落进两块：`root_block` 用 `position` 只认第一次，所以登记总数与块里的
+        // 名额对不上就是重复 —— 重复的症状是那一页在屏上出现两次。
+        let registered = SettingsPage::ALL
+            .iter()
+            .filter(|page| root_block(**page).is_some())
+            .count();
+        let slots: usize = ROOT_BLOCKS.iter().map(|(_, members)| members.len()).sum();
+        assert_eq!(registered, slots, "ROOT_BLOCKS 里有一页被登记了两次");
+    }
+
+    /// 搜一行标题要带出**它在哪一页**：`Row` 命中摆的是那一格本身，而读者要的是「它归哪页管」
+    /// 那一句；`Page` 命中则只给页。两头都用规格里现取的文案当查询词，不写死任何一句话 ——
+    /// 这一条问的是命中的形状，与九门语言各自怎么措辞无关。
+    #[gpui_kit::test]
+    async fn a_hit_carries_the_page_it_lives_on(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| ConfigHolder::install(Config::default(), cx));
+        let notes = cx.update(|cx| cx.new(NotesSheet::new));
+        let (hits, text_ix, storage_ix) = cx.read(|cx| {
+            let pages = spec_pages(cx, &notes);
+            let text_ix = SettingsPage::Typography.index();
+            let storage_ix = SettingsPage::Storage.index();
+            let needle = pages[text_ix].groups[0].rows[0].title.clone();
+            let mut hits = search_hits(&pages, &needle);
+            hits.extend(search_hits(&pages, &pages[storage_ix].title.clone()));
+            (hits, text_ix, storage_ix)
+        });
+        assert!(
+            hits.iter().any(|hit| matches!(
+                hit,
+                Hit::Row(page, 0, 0) if *page == text_ix
+            )),
+            "拿「文字」页第一格的标题搜，该命中它自己那一格"
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| matches!(hit, Hit::Page(page) if *page == storage_ix)),
+            "拿一整页的页名搜，该把那一页本身摆出来"
+        );
+    }
+
+    /// 空串与全空格不搜：那不是一个查询词，而根屏该回到分块的入口列表。
+    #[gpui_kit::test]
+    async fn an_empty_query_hits_nothing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| ConfigHolder::install(Config::default(), cx));
+        let notes = cx.update(|cx| cx.new(NotesSheet::new));
+        cx.read(|cx| {
+            let pages = spec_pages(cx, &notes);
+            assert!(search_hits(&pages, "").is_empty());
+            assert!(search_hits(&pages, "   ").is_empty());
+        });
+    }
+
+    /// 带着查询词按返回，先收掉搜索态；第二下才递给外壳（最终是退出应用）。
+    ///
+    /// 收的是 `query` 那一格，框里的字由下一帧拉回来 —— 少这一步就成了「按了一下什么都没变，
+    /// 只是屏外的东西没了」。
+    #[gpui_kit::test]
+    async fn back_clears_the_search_before_it_leaves_the_screen(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| cx.new(CompactSettings::new));
+        cx.update(|cx| view.update(cx, |this, _| this.query = "字".into()));
+        let eaten = cx.update(|cx| view.update(cx, |this, cx| this.go_back(cx)));
+        assert!(
+            eaten,
+            "根屏上带着查询词时那一按该先收搜索态，不该直接递给外壳"
+        );
+        let query = cx.read(|cx| view.read(cx).query.clone());
+        assert!(query.is_empty(), "收掉的是查询词，屏还停在根屏");
+        assert!(
+            !cx.update(|cx| view.update(cx, |this, cx| this.go_back(cx))),
+            "搜索态收干净之后，第二下才轮到外壳"
+        );
+    }
 
     /// 返回键一层一层往外退：选项屏退回它来的那一页，那一页退回根屏，根屏那一次让给
     /// 外壳（最终是退出应用）。

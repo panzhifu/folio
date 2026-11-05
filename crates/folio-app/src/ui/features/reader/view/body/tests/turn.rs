@@ -798,6 +798,71 @@ fn the_disabled_style_lands_the_page_without_a_second_sheet(cx: &mut TestAppCont
     assert_eq!(page, first + 1, "页号照旧往前");
 }
 
+/// 静止帧的整页画也按整张纸裁：封面铺满整窗，不是只铺版心。
+///
+/// 「不走动画」当场落定，屏上只有当前这一页，走的是静止帧那条装配。纸张裁切层
+/// （`reader-paper-clip`）从前只在翻页途中放开到整张纸，静止帧按版心裁 —— 于是
+/// 铺满整窗的封面背板被上下两条带子与左右页边距切掉，读者读到的是「封面没有全屏」。
+/// 这里量裁切层本身：整页画那一页的顶是 0、高是整窗。
+#[gpui_kit::test]
+fn a_cover_page_fills_the_whole_sheet_without_animation(cx: &mut TestAppContext) {
+    use folio_core::content::format::ImageRes;
+
+    cx.update(gpui_kit::init);
+    let flow = FlowDoc {
+        chapters: vec![
+            Chapter::inline(
+                "封面",
+                "<div style=\"margin:0;padding:0\"><img src=\"cover.jpg\" alt=\"\" /></div>",
+            ),
+            Chapter::inline("正文", format!("<p>{PARA}</p>")),
+        ],
+        images: vec![ImageRes {
+            href: "cover.jpg".into(),
+            source: "cover.jpg".into(),
+            media_type: "image/jpeg".into(),
+            width: 1000,
+            height: 1500,
+        }],
+        ..Default::default()
+    };
+    let (view, handle) = open(cx, &flow, "epub", prefs(16.0), Locator::start(), 460.0);
+    view.update(cx, |v, cx| {
+        v.set_mode(PageMode::Paged, cx);
+        v.set_chrome_bands(28.0, 28.0, 0.0, cx);
+    });
+    cx.update(|app| {
+        ConfigHolder::edit_appearance(app, |a| a.page_turn = PageTurn::None);
+    });
+    settle(cx, handle);
+
+    assert!(
+        view.read_with(cx, |v, _| v
+            .book()
+            .expect("这本书该开着")
+            .document()
+            .is_picture_only_page()),
+        "前置：封面那一章要被认成整页只有一张图"
+    );
+    let (top, height, window_height) = cx
+        .update_window(handle, |_, window, _| {
+            let clip = window
+                .try_find("reader-paper-clip")
+                .expect("静止帧该有纸层裁剪");
+            (
+                f32::from(clip.bounds().origin.y),
+                f32::from(clip.bounds().size.height),
+                f32::from(window.viewport_size().height),
+            )
+        })
+        .expect("窗口应能渲染");
+    assert!(top.abs() < 0.5, "整页画的裁切顶该是纸顶（0），实得 {top}");
+    assert!(
+        (height - window_height).abs() < 0.5,
+        "整页画的裁切该铺满整窗（{window_height}），实得 {height}"
+    );
+}
+
 /// 覆盖档仍然摆两张纸（新页盖在**停着不动**的旧页之上），而 `page_shift` 归进场那一张：
 /// 命中要减的是当前页的位移，与谁后画无关。这两条各钉一半 —— 只验「两张」的话，把
 /// `slots[0]` 换成出场页也不会报错，但横扫之后点字就点偏了。

@@ -285,6 +285,9 @@ pub struct ShelfView {
     _opds_watch: Option<Subscription>,
     /// 「书要拷到哪儿」那块面板里，系统文件夹选择器那条异步链。与 `_import` 同理，要活到选完。
     _pick: Option<Task<()>>,
+    /// 对「没拿到所有文件访问」那一问的订阅：那一问摆不摆由服务那份实体说了算，它一
+    /// `notify` 架面就得重画，否则答完面板还杵在那儿，看着像按了没反应。
+    _access_watch: Subscription,
     /// 导入完成后的**下一帧兜底重查**。选择器把应用切到后台，恢复前台的那一帧上
     /// 后台期间发的 notify 可能丢（真机实测：导入后卡片要重新进书架才出现），
     /// render 里见到这面旗就强制重查一次 —— 代价只是多查一遍库。
@@ -362,6 +365,10 @@ impl ShelfView {
         // 三块弹层各订阅一次「读者自己把它关掉了」：下拉过头、点遮罩、按返回都只报这一条。
         // 不据此清架面那一侧的状态的话，下一帧 [`Self::sync_sheet`] 看着「面板还开着」
         // 又把弹层抬起来 —— 在读者手里就成了「这层关不掉」。
+        // 「没拿到所有文件访问」那一问：与那三块弹层同一立场——状态归服务那份实体，画不画
+        // 归架面，所以这里必须观察它，否则答完不重画。
+        let question = crate::ui::services::library::access(cx);
+        let access_watch = cx.observe(&question, |_, _, cx| cx.notify());
         let group_sheet = cx.new(BottomSheetState::closed);
         let url_sheet = cx.new(BottomSheetState::closed);
         let scan_sheet = cx.new(BottomSheetState::closed);
@@ -420,6 +427,7 @@ impl ShelfView {
             _info_watch: None,
             _opds_watch: None,
             _pick: None,
+            _access_watch: access_watch,
             pending_reload: false,
             flow: Rc::from(Vec::new()),
             flow_dirty: true,

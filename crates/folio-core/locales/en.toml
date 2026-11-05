@@ -198,7 +198,14 @@ translation = "Translation"
 membership = "Premium"
 txt_rules = "TXT chapter rules"
 ai = "AI"
+# Blocks of the destination list on the phone's "Me" screen. A block whose only
+# row is itself gets no name — the heading would just repeat the row's label.
+[section]
+reading = "Reading"
+translation_ai = "Translation & AI"
+books_data = "Books & data"
 [group]
+membership_devices = "This device"
 sync_server = "WebDAV"
 sync_state = "Sync status"
 sync_lan = "Local network"
@@ -315,6 +322,8 @@ toc_dim_read = "Dim chapters you have read"
 "toc_dim_read.desc" = "Chapters you have opened are drawn faded in the contents list."
 page_turn = "Page-turn animation"
 "page_turn.desc" = "How the page moves when you turn it: slide, cover, or not at all. Choosing “scroll” switches this book to continuous scrolling; choosing any paper animation switches it back to paged or spread. Changing it never re-typesets a chapter."
+turn_duration = "Page turn duration"
+"turn_duration.desc" = "How long one page turn takes, in milliseconds: 120 is snappy, 700 is slow, 280 is the shipped default. It only changes the pace, not how the page moves."
 highlight_style = "Highlight style"
 "highlight_style.desc" = "Which mark a new highlight leaves in the text: a colour band behind the glyphs, a straight line under them, or a wavy one. Marks already in the book keep whichever they were drawn with, and changing this re-typesets nothing."
 
@@ -400,6 +409,8 @@ original = "Original size"
 
 [account]
 settings = "Settings"
+search_placeholder = "Search settings"
+search_empty = "No setting matches that"
 
 [import]
 title = "Import book"
@@ -690,6 +701,8 @@ info_series_ordinal = "%{name} #%{position}"
 # 书库管理。`library.title` / `hint` / `confirm` / `cancel` 是导入前的那道书库位置
 # 确认：移动端把它画在架面上，桌面端把它做成对话框，同一套措辞。
 [library]
+"access.title" = "This device doesn't have All files access"
+"access.body" = "Books copied into a folder you pick here mostly fail to write - only Download, Documents and this app's own folder are writable. Turn the access on first, or pick a folder anyway."
 delete_failed = "Could not delete this book: %{reason}"
 title = "Where should imported books be copied?"
 hint = "Importing copies the file into this folder. Moving or deleting your original afterwards will not affect the book on the shelf."
@@ -739,6 +752,9 @@ nothing_to_clean = "Nothing to clear right now"
 # Button labels stay to two or three words: four of these rows stack up, and a long
 # verb phrase would push the byte figure off the right edge.
 [action]
+grant_access = "Turn it on"
+pick_anyway = "Pick anyway"
+release = "Deactivate"
 sync_now = "Sync now"
 sync_test = "Test connection"
 lan_generate = "Create key"
@@ -765,6 +781,8 @@ rules_add = "Add a rule"
 rules_delete = "Remove this rule"
 delete = "Delete"
 [confirm]
+"release.title" = "Deactivate this device?"
+"release.body" = "The premium time left on this device is cleared. The order can be redeemed on another device; you'll need its order number there."
 "thumbs.title" = "Clear the thumbnail cache?"
 "comics.title" = "Clear the comic unpack cache?"
 "partials.title" = "Clear the unfinished imports?"
@@ -909,6 +927,17 @@ library_missing = "Confirm the library folder first"
 
 # Membership: the only local record is an expiry day; the tier is derived from it.
 [membership]
+device_id = "Device ID"
+device_id_none = "Not created yet"
+claim_order = "Order …%{tail}"
+claim_value = "%{days} days · %{date}"
+no_claims = "No redemption recorded on this device. Orders redeemed before this version aren't listed here."
+release = "Deactivate"
+release_idle = "Move this order to another device"
+release_running = "Releasing…"
+release_done = "Released. That order can be redeemed on another device now."
+release_none = "Nothing was activated on this device."
+release_failed = "Couldn't release it. Check your connection and try again."
 "never" = "Not activated"
 "tier_premium" = "Premium"
 "tier_standard" = "Standard"
@@ -928,12 +957,14 @@ redeem = "Redeem"
 redeem_idle = "Paste the number, then choose Redeem — membership starts right away"
 redeem_running = "Checking the order…"
 redeem_granted = "Added — the expiry date above has moved"
+redeem_moved = "Moved here from another device — only the days left on it came over."
 redeem_replay = "This order has already been redeemed"
 redeem_bad_order = "That doesn’t look like an Afdian order number — copy it from “My orders”"
 redeem_not_found = "No such order number — check it again"
 redeem_unpaid = "This order hasn’t been paid yet"
 redeem_wrong_plan = "This order isn’t a membership plan"
 redeem_bound = "This order number was already redeemed on another device"
+redeem_spent = "That order's premium time is already used up."
 redeem_unconfigured = "The activation service isn’t set up yet — try again later"
 redeem_upstream = "The activation service is unavailable right now — try again later"
 redeem_unreachable = "Couldn’t reach the activation service — check your connection and try again"

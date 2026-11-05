@@ -1471,6 +1471,12 @@ impl ReaderSession {
             let mut overlays = Vec::new();
             let mut backdrops = Vec::new();
             let mut page_bands = Vec::new();
+            // 这一组里有没有整页画（单图页 / 固定底图）。它的背板按**整窗**铺，
+            // 所以裁切层也得放开到整张纸 —— 否则静止帧按版心裁，封面四周与上下
+            // 两条带子被切掉，读者看到的就是「封面没有全屏」。
+            let bare_page = scenes
+                .iter()
+                .any(|scene| scene.picture.is_some() || scene.art_drawn);
             // 收谁进捕获副本按场景自己的旗子判，不按角色：单页折页的进场页是
             // `Incoming` 角色，但它同时要写一份背面（目标页整张）。
             let has_back = scenes.iter().any(|scene| scene.back_copy);
@@ -1564,7 +1570,8 @@ impl ReaderSession {
                     bands: Some(bands),
                 });
             }
-            let clip = if frame.turn.is_some() && paper.bands == BandPolicy::Reserved {
+            let clip = if (frame.turn.is_some() || bare_page) && paper.bands == BandPolicy::Reserved
+            {
                 paper.paper
             } else {
                 paper.content

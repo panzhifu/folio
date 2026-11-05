@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="384" height="853" viewBox="0 0 384 853">
+<title>Folio 设置 · 浅色 · Default Light</title>
+<desc>书库：没拿到所有文件访问时先问一句，选择器不抢在那前面</desc>
+<rect width="384" height="853" fill="#ffffff"/>
+<rect x="0" y="0" width="384" height="28" fill="#ffffff"/>
+<text x="16" y="18.5" font-family="Noto Sans CJK SC" font-size="13" font-weight="500" fill="#0a0a0a" text-anchor="start">12:30</text>
+<circle cx="192.0" cy="14" r="5.5" fill="#000" stroke="#d4d4d4" stroke-width="1"/>
+<g transform="translate(308.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/></g>
+<g transform="translate(328.00,7.50) scale(0.58333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h.01"/><path d="M7 20v-4"/><path d="M12 20v-8"/><path d="M17 20V8"/></g>
+<rect x="344" y="8" width="18" height="10" rx="2.5" fill="none" stroke="#0a0a0a" stroke-width="1.6"/>
+<rect x="346" y="10" width="12" height="6" rx="1" fill="#0a0a0a"/>
+<rect x="363.5" y="11" width="2" height="4" rx="1" fill="#0a0a0a"/>
+<g transform="translate(22.00,34.00) scale(0.83333)" fill="none" stroke="#0a0a0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></g>
+<text x="56" y="49.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="600" fill="#0a0a0a" text-anchor="start">书库</text>
+<g transform="translate(0,80.00)"><text x="16" y="14" font-family="Noto Sans CJK SC" font-size="14" font-weight="600" fill="#737373" text-anchor="start">位置</text></g>
+<rect x="16" y="102" width="352" height="224.5" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+<g transform="translate(0,102.00)"><text x="32" y="24" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">书库位置</text><rect x="32" y="34" width="320" height="36" rx="6" fill="none" stroke="#e5e5e5" stroke-width="1"/><text x="44" y="57" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">/storage/emulated/0/Documents/Folio</text></g>
+<rect x="33" y="180.5" width="334" height="0.5" fill="#e5e5e5"/>
+<text x="32" y="204.5" font-family="Noto Sans CJK SC" font-size="16" font-weight="600" fill="__FG__" text-anchor="start">这台设备还没有所有文件访问</text>
+<text x="32" y="232.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="__MUTED__" text-anchor="start">从这里挑的目录，往里拷书多半会写失败 —— 只有 </text>
+<text x="32" y="252.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="__MUTED__" text-anchor="start">Download、Documents 和这个应用自己的目录写</text>
+<text x="32" y="272.5" font-family="Noto Sans CJK SC" font-size="14" font-weight="400" fill="__MUTED__" text-anchor="start">得进。可以先去开这一项，也可以照样挑一个。</text>
+<rect x="32.00" y="286.5" width="52.00" height="32" rx="6" fill="#f5f5f5"/>
+<text x="42" y="308.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">取消</text>
+<rect x="92.00" y="286.5" width="68.00" height="32" rx="6" fill="#f5f5f5"/>
+<text x="102" y="308.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#0a0a0a" text-anchor="start">照样挑</text>
+<rect x="168.00" y="286.5" width="68.00" height="32" rx="6" fill="#171717"/>
+<text x="178" y="308.0" font-family="Noto Sans CJK SC" font-size="16" font-weight="400" fill="#fafafa" text-anchor="start">去开启</text>
+</svg>

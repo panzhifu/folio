@@ -11,8 +11,10 @@ use gpui_kit::component::button::Button;
 use gpui_kit::{FontWeight, IntoElement as _, ParentElement, SharedString, Styled, div};
 
 use super::super::*;
-use crate::ui::components::muted_label;
-use crate::ui::services::library::{choose_dir, pick_dir, suggested_dir, suggested_watch_dir};
+use crate::ui::components::{access_question, muted_label, waiting_for};
+use crate::ui::services::library::{
+    Pick, choose_dir, pick_dir, suggested_dir, suggested_watch_dir,
+};
 use crate::ui::services::transfer as wifi;
 
 pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
@@ -28,7 +30,11 @@ pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
 
     // 用系统文件夹选择器挑任意目录。静态设置页每帧重建、拿不住 `Task`，所以 `detach()`
     // 让这次选择跑完（取消或选区结束都不需要回调界面）。
+    // 没拿到「所有文件访问」时这一格摆的是那一问（`access_panel`），不是选择器按钮。
     let pick = Row::custom(move |cx| {
+        if waiting_for(Pick::Library, cx) {
+            return access_question(cx);
+        }
         Button::new("library-pick-dir")
             .label(tr(cx, "field.library_dir.pick").to_string())
             .on_click(|_, _, cx| {
@@ -68,6 +74,9 @@ pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
     .keywords(&["watch", "监听", "inbox", "收件箱", "自动"]);
 
     let watch_pick = Row::custom(move |cx| {
+        if waiting_for(Pick::Watch, cx) {
+            return access_question(cx);
+        }
         let dir = ConfigHolder::library(cx)
             .watch
             .map(|w| w.dir)
@@ -82,7 +91,7 @@ pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
                 .to_string(),
             )
             .on_click(|_, _, cx| {
-                choose_dir(cx, |cx, dir| {
+                choose_dir(cx, Pick::Watch, |cx, dir| {
                     let path = dir.display().to_string();
                     tracing::info!("watch: 监听目录选为 {path}");
                     ConfigHolder::edit_library(cx, |library| {

@@ -14,13 +14,14 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Icon, Sizable, v_flex};
 use gpui_kit::{
-    Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render, Styled, Task,
-    TestSupportExt as _, Window, div, px,
+    Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render, Styled,
+    Subscription, Task, TestSupportExt as _, Window, div, px,
 };
 
+use crate::ui::components::{access_question, waiting_for};
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::tr;
-use crate::ui::services::library::{pick_dir, suggested_dir};
+use crate::ui::services::library::{Pick, pick_dir, suggested_dir};
 
 /// 内容列的两侧留白（逻辑像素）。手机上让按钮离屏幕边有距离，不至于顶到边。
 const GUTTER: f32 = 24.0;
@@ -32,11 +33,19 @@ pub struct WelcomeView {
     /// 系统文件夹选择器那条异步链。`Task` 一 drop 任务就取消，所以要活到选完 ——
     /// 选中结果由 [`pick_dir`] 自己写进配置，外壳观察到「位置已确认」后把这一屏换掉。
     _pick: Option<Task<()>>,
+    /// 对「没拿到所有文件访问」那一问的订阅：那一问摆不摆由服务那份实体说了算，它一
+    /// `notify` 这一屏就得重画，否则答完还是原来那张按钮，看着像按了没反应。
+    _access_watch: Subscription,
 }
 
 impl WelcomeView {
-    pub fn boot(_cx: &mut Context<Self>) -> Self {
-        Self { _pick: None }
+    pub fn boot(cx: &mut Context<Self>) -> Self {
+        let question = crate::ui::services::library::access(cx);
+        let watch = cx.observe(&question, |_, _, cx| cx.notify());
+        Self {
+            _pick: None,
+            _access_watch: watch,
+        }
     }
 
     /// 用系统文件夹选择器挑一个书库目录。
@@ -79,7 +88,11 @@ impl Render for WelcomeView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(tr(cx, "welcome.title")),
             )
-            .child(
+            .child(if waiting_for(Pick::Library, cx) {
+                // 那一问整块换掉这两颗钮：它的三条回答里已经有「照样挑」，两处并排摆
+                // 同一个入口，读者数不清该按哪个。
+                access_question(cx)
+            } else {
                 v_flex()
                     .w_full()
                     .max_w(px(COLUMN))
@@ -103,8 +116,9 @@ impl Render for WelcomeView {
                             .on_click(move |_, _, cx| {
                                 default_entity.update(cx, |this, cx| this.use_default(cx))
                             }),
-                    ),
-            )
+                    )
+                    .into_any_element()
+            })
             // 外壳的宿主测试按这一格确认「首次启动停在欢迎页」（同 `SettingsView`）。
             .test_support()
     }

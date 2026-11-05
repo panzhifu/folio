@@ -31,6 +31,8 @@ pub struct SettingsView {
     /// 退订（`impl Drop for Subscription` 里直接调 `unsubscribe`），绑成局部变量等于没订阅。
     /// 少了它，后台扫完那一趟永远不会让这一屏重画。
     _storage_watch: Subscription,
+    /// 对「没拿到所有文件访问」那一问的订阅：面板的摆与收都靠它 notify 这一屏。
+    _access_watch: Subscription,
     /// 对「检查更新」状态实体的订阅，理由与上面那条一模一样：一次 GitHub 往返在**后台线程**
     /// 上结束，那一格要从「正在检查…」变成结果，只能靠实体 `notify` 唤醒这一屏。
     /// 少了这条订阅，症状是按钮按下去就永远停在「正在检查…」，而日志里那次检查是成功的。
@@ -70,12 +72,17 @@ impl SettingsView {
         let activation = crate::ui::services::activation::entity(cx);
         let activation_watch = cx.observe(&activation, |_, _, cx| cx.notify());
         let notes = cx.new(NotesSheet::new);
+        // 「没拿到所有文件访问」那一问：面板摆不摆由这份实体说了算，它一 notify 这一屏就得
+        // 重画（与上面那几条订阅同一理由，也与 [`super::compact::CompactSettings`] 那份成对）。
+        let question = crate::ui::services::library::access(cx);
+        let question_watch = cx.observe(&question, |_, _, cx| cx.notify());
         Self {
             _storage_watch: watch,
             _update_watch: update_watch,
             _feedback_watch: feedback_watch,
             _sync_watch: sync_watch,
             _activation_watch: activation_watch,
+            _access_watch: question_watch,
             notes,
             initial: Some(page.index()),
         }

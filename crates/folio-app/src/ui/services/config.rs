@@ -291,10 +291,13 @@ impl ConfigHolder {
     }
 
     /// 会员那一节。**只有本机这一份**：等级由这里的 `until_day` 与今天比出来，
-    /// 界面上没有第二个来源（见 `folio_core::Membership`）。`Membership` 是 `Copy`，
-    /// 所以不必像别的节那样 `clone` 一个 `Vec` 或 `String` 出来。
+    /// 界面上没有第二个来源（见 `folio_core::Membership`）。
+    ///
+    /// 从前 `Membership` 是 `Copy`，这一格可以直接从快照里搬出来；它加了台账（一个 `Vec`）
+    /// 之后只能 `clone` —— 每帧多拷一个空 `Vec` 不是开销，真正要避免的是**两处各读一遍**：
+    /// 一屏里「已到账」与上面那句到期日必须来自同一次读，否则会出现两格说两套话的那一帧。
     pub fn membership(cx: &App) -> Membership {
-        Self::snapshot(cx).membership
+        Self::snapshot(cx).membership.clone()
     }
 
     /// 每一项的配置来自哪一层（§2.1）。诊断 dump 用。

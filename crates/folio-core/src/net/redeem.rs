@@ -27,6 +27,12 @@ pub const ENDPOINT: &str = "https://shocked-roundworm-d1dqjn15d00708-1476411022.
 pub enum Outcome {
     /// 这一单第一次被兑现，换到这么多天。
     Granted(i64),
+    /// 这一单在**另一台**上兑过、后来被软解除，现在由这台认领过来。`days` 是**还剩下的那几天**
+    /// —— 服务端按当初的发货时刻数出来，客户端接在今天后面。
+    ///
+    /// 单独一档而不是并回 [`Outcome::Granted`]：并回去就看不出「这一趟没发新货」，而更要紧的是
+    /// 那一单的整笔天数**不许**再给一次 —— 给一次，「解除 → 重兑」每轮就白得一整年。
+    Moved(i64),
     /// 同一台设备把同一单重交了一次：不加天数，因为第一次就已经给了。
     ///
     /// 单独一档而不是并回 [`Outcome::Granted(0)`]：界面要说的是「已经兑过了」，
@@ -56,6 +62,13 @@ pub enum Error {
     #[error("这个订单号已经在另一台设备上兑过了")]
     Bound,
 
+    /// 这一单的会员时间已经走完，搬不过来。
+    ///
+    /// 与 [`Error::Bound`] 分开：那一档是「这单还绑在别的设备上」，去找回原来那台；这一档是
+    /// 「就算搬过来也是零天」，读者要做的是再买一次，而不是去找谁。
+    #[error("这一单的会员时间已经用完了")]
+    Spent,
+
     /// 服务端没配齐（缺 token、缺方案表、缺库密钥）。
     ///
     /// 与下面那档分开：这一档是作者这边的事，读者重试一百次也不会好，
@@ -79,13 +92,16 @@ pub enum Error {
     Malformed(String),
 }
 
-/// 服务端那一格回应的形状。`days` 只有 `granted` 与 `replay` 两档用得到，缺了按 0。
+/// 服务端那一格回应的形状。`days` 只有 `granted` / `moved` / `replay` 三档用得到，缺了按 0；
+/// `released` 只有解除那两档用得到。
 #[derive(Debug, Deserialize)]
 struct Wire {
     ok: bool,
     state: String,
     #[serde(default)]
     days: i64,
+    #[serde(default)]
+    released: i64,
 }
 
 /// 订单号的形状：爱发电的 `out_trade_no` 是一串 29 位数字。
@@ -128,17 +144,65 @@ pub fn parse(response: &Response) -> Result<Outcome, Error> {
     }
     let wire: Wire = serde_json::from_slice(&response.body)
         .map_err(|error| Error::Malformed(format!("响应不是预期的 JSON：{error}")))?;
-    classify(wire.ok, &wire.state, wire.days)
+    classify(wire)
 }
 
-fn classify(ok: bool, state: &str, days: i64) -> Result<Outcome, Error> {
-    match (ok, state) {
+/// 一次解除的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    /// 这台设备名下原本挂着这么多笔激活，现在都被标成已解除：那些单可以在新设备上认领。
+    Released(i64),
+    /// 这台设备名下本来就没有行。当成「已经干净」而不是错误 —— 调用方要的就是一个干净的
+    /// 这台，而连按第二次那颗钮正好落在这里。把它报成失败会让读者以为没解除成功，再按第三下。
+    NothingBound,
+}
+
+/// 解除**这台设备**名下的激活。`device` 就是兑换时送上去的那一个：服务端靠它认「哪几行是这台」。
+///
+/// 这里不收订单号，是有意的：本机从来没存过它（草稿落盘只会让 config.json 多出一串别人看不懂
+/// 的数字，那条决定写在 `folio-app` 的 `services/activation.rs` 顶上），而重装之后连草稿都没了 ——
+/// 要求交出订单号，等于让最需要这个功能的人正好交不出来。
+pub fn release(transport: &dyn Transport, device: &str) -> Result<Release, Error> {
+    if device.is_empty() {
+        return Err(Error::Malformed("没有可用的设备 id".to_owned()));
+    }
+    let body = serde_json::json!({ "device": device, "action": "release" }).to_string();
+    let request = Request::new(Method::Post, ENDPOINT.to_owned())
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .body(body.into_bytes());
+    let response = transport
+        .request(request)
+        .map_err(|error| Error::Unreachable(error.to_string()))?;
+    parse_release(&response)
+}
+
+/// 解除那一段回应的形状。与 [`parse`] 分开，因为两趟的档位不是一套：解除不向爱发电查单，
+/// 所以 `not_found` / `unpaid` / `plan` / `bound` 出现在这里只可能是两边形状对不上。
+pub fn parse_release(response: &Response) -> Result<Release, Error> {
+    if response.status != 200 {
+        return Err(Error::Upstream);
+    }
+    let wire: Wire = serde_json::from_slice(&response.body)
+        .map_err(|error| Error::Malformed(format!("响应不是预期的 JSON：{error}")))?;
+    classify_release(wire.ok, &wire.state, wire.released)
+}
+
+fn classify(wire: Wire) -> Result<Outcome, Error> {
+    let Wire {
+        ok, state, days, ..
+    } = wire;
+    match (ok, state.as_str()) {
         (true, "granted") if days > 0 => Ok(Outcome::Granted(days)),
+        // 认领那一档同样要求 `days > 0`：服务端在剩下 0 天时回的是 `spent`，走到这一档而
+        // 天数又是 0，说明两边形状对不上 —— 宁可报读不懂，也不要悄悄记一笔空账。
+        (true, "moved") if days > 0 => Ok(Outcome::Moved(days)),
         (true, "replay") => Ok(Outcome::Replay),
         (false, "not_found") => Err(Error::NotFound),
         (false, "unpaid") => Err(Error::Unpaid),
         (false, "plan") => Err(Error::WrongPlan),
         (false, "bound") => Err(Error::Bound),
+        (false, "spent") => Err(Error::Spent),
         (false, "unconfigured") => Err(Error::Unconfigured),
         // 上游、写库、异常三种坏法对读者是同一句话，但对得上不同的排查方向，所以档位留着，
         // 在这里收成一条：界面那一层不需要知道是爱发电没回还是库写坏了。
@@ -146,6 +210,22 @@ fn classify(ok: bool, state: &str, days: i64) -> Result<Outcome, Error> {
         // bad_code / bad_device / bad_body / route / method 都只会在客户端自己坏了时出现，
         // 走到这里说明两边对不上形状 —— 按读不懂处理，而不是假装是一次正常的拒绝。
         _ => Err(Error::Malformed(format!("不认识的状态 {state}"))),
+    }
+}
+
+fn classify_release(ok: bool, state: &str, released: i64) -> Result<Release, Error> {
+    match (ok, state) {
+        (true, "released") => Ok(Release::Released(released)),
+        (true, "nothing_bound") => Ok(Release::NothingBound),
+        (false, "unconfigured") => Err(Error::Unconfigured),
+        // 与兑换同一口径：上游、写库、异常对读者是同一句话，但排查方向不同，所以档位留着，
+        // 在这一层收成一条。
+        (false, "upstream" | "storage" | "internal") => Err(Error::Upstream),
+        // bad_device / bad_body / route / method，以及兑换那一段才有的档位（not_found、
+        // unpaid、plan、bound）走到这里，都说明两边对不上形状 —— 按读不懂处理。
+        _ => Err(Error::Malformed(format!(
+            "解除的回应里出现了不认识的状态 {state}"
+        ))),
     }
 }
 
@@ -160,7 +240,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use super::{Outcome, parse, redeem, valid_order};
+    use super::{Outcome, Release, parse, parse_release, redeem, release, valid_order};
     use crate::net::remote::{Cancel, Method, Request, Response, Sink, Transport};
 
     /// 一次性假传输：把要回的东西排好队，同时留下发出去的请求供用例检查。
@@ -275,6 +355,7 @@ mod tests {
             (r#"{"ok":false,"state":"unpaid"}"#, "还没有成交"),
             (r#"{"ok":false,"state":"plan"}"#, "不是会员方案"),
             (r#"{"ok":false,"state":"bound"}"#, "已经在另一台设备"),
+            (r#"{"ok":false,"state":"spent"}"#, "已经用完"),
             (r#"{"ok":false,"state":"unconfigured"}"#, "还没配置好"),
             (r#"{"ok":false,"state":"upstream"}"#, "暂时不可用"),
             (r#"{"ok":false,"state":"storage"}"#, "暂时不可用"),
@@ -307,6 +388,89 @@ mod tests {
         assert!(parse(&response("not json at all")).is_err());
         assert!(matches!(
             parse(&Response::new(503, Vec::new())).unwrap_err(),
+            super::Error::Upstream
+        ));
+    }
+
+    /// 认领那一档带的是**还剩下的天数**，不是当初那一整笔。剩下 0 天时服务端不走这一档
+    /// （它回 `spent`），所以「moved 而 days 是 0」只可能是两边形状对不上 —— 按读不懂处理，
+    /// 而不是悄悄记一笔空账。
+    #[test]
+    fn a_takeover_carries_the_days_left_and_never_a_fresh_grant() {
+        assert_eq!(
+            parse(&response(r#"{"ok":true,"state":"moved","days":200}"#)).unwrap(),
+            Outcome::Moved(200),
+        );
+        assert!(
+            matches!(
+                parse(&response(r#"{"ok":true,"state":"moved","days":0}"#)).unwrap_err(),
+                super::Error::Malformed(_)
+            ),
+            "0 天的 moved 该按读不懂处理"
+        );
+    }
+
+    /// 解除送出去的是**设备 id 加一个 action**，没有订单号：本机从来没存过那一串（见
+    /// `services/activation.rs` 顶上那条），而这一趟的判据本来就是「哪几行属于这台」。
+    #[test]
+    fn the_release_carries_the_device_and_no_order() {
+        let mock = Mock::new(&[r#"{"ok":true,"state":"released","released":1}"#]);
+        assert_eq!(release(&mock, "dev-42").unwrap(), Release::Released(1));
+        let sent = mock.sent().remove(0);
+        assert_eq!(sent.method, Method::Post);
+        assert!(sent.url.starts_with("https://"), "设备 id 不许走明文");
+        let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(body["device"], "dev-42");
+        assert_eq!(body["action"], "release");
+        assert!(body.get("order").is_none(), "解除不该带订单号");
+    }
+
+    /// 没有设备 id 就不出门：那会在台账上留一个谁也认领不上的洞（与兑换同一条理由）。
+    #[test]
+    fn a_release_without_a_device_never_reaches_the_network() {
+        let mock = Mock::new(&[]);
+        assert!(matches!(
+            release(&mock, "").unwrap_err(),
+            super::Error::Malformed(_)
+        ));
+        assert!(mock.sent().is_empty());
+    }
+
+    /// 解除那一段每一档的落点。`nothing_bound` 是**成功**而不是错误：调用方要的就是一个
+    /// 干净的这台，把它报成失败会让读者再按一次那颗钮。
+    #[test]
+    fn every_release_state_lands_where_it_should() {
+        let ok_cases: &[(&str, Release)] = &[
+            (
+                r#"{"ok":true,"state":"released","released":2}"#,
+                Release::Released(2),
+            ),
+            (
+                r#"{"ok":true,"state":"nothing_bound","released":0}"#,
+                Release::NothingBound,
+            ),
+            // 老服务端没带 `released` 这一格也认：缺了按 0，落进「解除了一笔但数不清」而不是坏掉。
+            (r#"{"ok":true,"state":"released"}"#, Release::Released(0)),
+        ];
+        for (json, want) in ok_cases {
+            assert_eq!(&parse_release(&response(json)).unwrap(), want, "{json}");
+        }
+        let err_cases: &[(&str, &str)] = &[
+            (r#"{"ok":false,"state":"unconfigured"}"#, "还没配置好"),
+            (r#"{"ok":false,"state":"storage"}"#, "暂时不可用"),
+            (r#"{"ok":false,"state":"internal"}"#, "暂时不可用"),
+            // 兑换那一段才有的档位出现在解除的回应里 = 两边形状对不上，按读不懂处理。
+            (r#"{"ok":false,"state":"not_found"}"#, "不认识的状态"),
+        ];
+        for (json, expect) in err_cases {
+            let err = parse_release(&response(json)).unwrap_err();
+            assert!(
+                err.to_string().contains(expect),
+                "{json} 落到了「{err}」，句里没有「{expect}」"
+            );
+        }
+        assert!(matches!(
+            parse_release(&Response::new(503, Vec::new())).unwrap_err(),
             super::Error::Upstream
         ));
     }

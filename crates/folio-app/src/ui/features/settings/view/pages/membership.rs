@@ -1,11 +1,16 @@
-//! 高级会员：本机只记一个**到期日**，等级是渲染时按今天现算出来的。
+//! 高级会员：本机记一个**到期日**加一份**这台的兑换台账**，等级是渲染时按今天现算出来的。
 //!
 //! 这一屏**不自己收钱**：开通那一颗钮把读者交给爱发电；成交之后回到这一屏，在「激活会员」
 //! 那一组填爱发电的订单编号兑换 —— 付没付过钱由 `folio-redeem` 那支函数向平台查（爱发电的
-//! api token 不能进客户端），本地这一层只管形状与结果句子。兑成了写进配置的仍是
-//! `membership.until_day` 这一格。权益那一组只是把「会员将来覆盖哪些功能」摆在同一处，
-//! **现在一个都不挡** —— 所以整组标「规划中」，并写明当前版本都能直接用，不让读者把清单
-//! 当成已经生效的承诺。
+//! api token 不能进客户端），本地这一层只管形状与结果句子。兑成了写进配置的是
+//! `membership.until_day` 与 `membership.claims` 这两格。权益那一组只是把「会员将来覆盖哪些
+//! 功能」摆在同一处，**现在一个都不挡** —— 所以整组标「规划中」，并写明当前版本都能直接用，
+//! 不让读者把清单当成已经生效的承诺。
+//!
+//! 「这台设备」那一组管换机：解除是**按设备**而不是按订单号的（本机从来没存过订单号，而重装
+//! 之后连草稿都没了），而且是**软解除** —— 服务端留下那一行只标一个时间戳，删不得：删了
+//! 「这单兑过」这个事实就没了，同一单可以反复再兑、每次领一整笔。搬过来的那一单只带**剩下的
+//! 那几天**（服务端按 `redeemed_at` 数），所以「解除 → 重兑」每转一轮只会更少。
 //!
 //! 「今天」由 [`today`] 现取，偏移来自 [`crate::ui::host::local_offset_secs`]：日界线跟着
 //! 读者走，写死 UTC 会让跨过日界线那一天的读数差一格。统计那几屏按同一条取偏移。
@@ -14,7 +19,7 @@ use super::super::*;
 use crate::ui::components::muted_label;
 use crate::ui::host::local_offset_secs;
 use crate::ui::platform;
-use crate::ui::services::activation::{self, Status};
+use crate::ui::services::activation::{self, ReleaseStatus, Status};
 use folio_core::{Membership, MembershipTier, infra::time, net::redeem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
@@ -64,11 +69,169 @@ fn action_label(premium: bool, cx: &App) -> SharedString {
 }
 
 pub(in crate::ui::features::settings) fn membership_page(cx: &App) -> Page {
-    page(
-        tr(cx, "page.membership"),
-        IconName::Crown,
-        vec![status_group(cx), redeem_group(cx), benefit_group(cx)],
-    )
+    // 会员那一节在这一屏**只读一遍**：`until_day` 与台账同时决定「那一组摆不摆」和「组里念哪
+    // 几笔」，读两次就可能出现两次答案不一样的那一帧（同 [`status_line_for`] 那条理由）。
+    let membership = ConfigHolder::membership(cx);
+    let mut groups = vec![status_group(cx), redeem_group(cx)];
+    // 从没激活过的这台**没有那一组**：摆出来只会是一句「没有留痕」加一颗按不动的钮，而规范那条
+    // 是「不适用就藏起来，或 disable 掉并给出为什么」。激活过一次之后这一组自己出现；解除干净
+    // 之后它自己退场。
+    if membership.until_day > 0 || !membership.claims.is_empty() {
+        groups.push(device_group(&membership, cx));
+    }
+    groups.push(benefit_group(cx));
+    page(tr(cx, "page.membership"), IconName::Crown, groups)
+}
+
+/// 「这台设备」那一组：设备标识、这台名下的每一笔兑换、以及解除那颗钮（按下先问一句）。
+///
+/// 为什么按**设备**解除而不是按订单：本机从来没存过订单号（那条决定写在
+/// `services/activation.rs` 顶上），而重装之后连草稿都没了 —— 要订单号才能解除，等于让最
+/// 需要它的人正好交不出来。服务端那一侧的事实本来也就是「哪几行绑在这一台」。
+///
+/// 台账（`membership.claims`）是这一版才开始记的，所以老安装在这里只会是一句「没有留痕」——
+/// 那是实话，不是一个坏掉的列表。
+fn device_group(membership: &Membership, cx: &App) -> Group {
+    let mut rows = vec![
+        Row::info(tr(cx, "membership.device_id"), device_label(cx)).keywords(&[
+            "device", "unbind", "release", "afdian", "设备", "解除", "激活", "换机",
+        ]),
+    ];
+    if membership.claims.is_empty() {
+        rows.push(Row::custom(no_claims_line));
+    } else {
+        for claim in &membership.claims {
+            let tail = order_tail(&claim.order);
+            rows.push(Row::info(
+                tf(cx, "membership.claim_order", &[("tail", &tail)]).into(),
+                tf(
+                    cx,
+                    "membership.claim_value",
+                    &[
+                        ("days", &claim.days),
+                        ("date", &time::civil_date(claim.on_day)),
+                    ],
+                ),
+            ));
+        }
+    }
+    // 面板开着时那一格摆的是面板，平时摆的是钮：两样占同一个位置，屏不会在按下那一刻跳一格。
+    rows.push(Row::custom(|cx: &App| {
+        if activation::confirming(cx) {
+            release_panel(cx).into_any_element()
+        } else {
+            release_row(cx).into_any_element()
+        }
+    }));
+    group(tr(cx, "group.membership_devices"), rows)
+}
+
+/// 这台设备的标识。空串 = 还没生成过（从没同步也没兑过的新安装）。
+fn device_label(cx: &App) -> String {
+    let id = ConfigHolder::sync(cx).device_id;
+    if id.is_empty() {
+        return tr(cx, "membership.device_id_none").to_string();
+    }
+    id
+}
+
+/// 订单号的尾四位。整串编号是那一单的凭据，屏上没必要念全；要念全的地方是爱发电自己的订单页。
+fn order_tail(order: &str) -> String {
+    let chars: Vec<char> = order.chars().collect();
+    let take = chars.len().min(4);
+    chars[chars.len() - take..].iter().collect()
+}
+
+/// 「这台没有兑换留痕」那一句。
+fn no_claims_line(cx: &App) -> gpui_kit::AnyElement {
+    div()
+        .w_full()
+        .child(muted_label(tr(cx, "membership.no_claims"), cx))
+        .into_any_element()
+}
+
+/// 结果句 + 那颗钮。形状与「激活会员」那一格同一套：句子在左，动作在右。
+///
+/// 钮取 `ghost` 而不是 `danger`：按它还只是**要问一句**，真正的承诺在面板里那一颗。
+/// 一屏里两颗红钮会互相抢强调，而这一屏的焦点预算已经花在 hero 上。
+fn release_row(cx: &App) -> gpui_kit::AnyElement {
+    let status = activation::release_status(cx);
+    let busy = status == ReleaseStatus::Running;
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(muted_label(release_line(&status, cx), cx)),
+        )
+        .child(
+            Button::new("settings-membership-release")
+                .label(tr(cx, "membership.release").to_string())
+                .ghost()
+                .small()
+                .disabled(busy)
+                .on_click(|_, _, cx| activation::ask_release(cx)),
+        )
+        .into_any_element()
+}
+
+/// 确认面板：一句问的是什么、一句后果、两颗钮（取消在左，结果在右、`danger`）。
+///
+/// 与「存储」那几颗清理钮同一形状（`pages/storage.rs` 的 `confirm_panel`）：标题与正文各是
+/// **一条整句**，不拼「通用问句 + 档位名」—— 德语动词要落句尾、俄语要看性数，拼出来的是一句
+/// 不像界面语言的机器话。
+fn release_panel(cx: &App) -> gpui_kit::AnyElement {
+    v_flex()
+        .w_full()
+        .gap_2()
+        .child(
+            div()
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(tr(cx, "confirm.release.title")),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr(cx, "confirm.release.body")),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    Button::new("settings-release-cancel")
+                        .ghost()
+                        .label(tr(cx, "shelf.cancel").to_string())
+                        .on_click(|_, _, cx| activation::cancel_release(cx)),
+                )
+                .child(
+                    // 结果那颗写动词：对象已经问在标题里了，再摆一遍名字就是两个名词并排。
+                    Button::new("settings-release-go")
+                        .danger()
+                        .label(tr(cx, "action.release").to_string())
+                        .disabled(activation::release_status(cx) == ReleaseStatus::Running)
+                        .on_click(|_, _, cx| activation::release_now(cx)),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 那一格此刻该念哪一句。句子从**档位**来而不是从 `error.to_string()` 来 —— 同
+/// [`redeem_line`] 那条理由（core 那些 Display 是中文写死的）。
+fn release_line(status: &ReleaseStatus, cx: &App) -> SharedString {
+    let key = match status {
+        ReleaseStatus::Idle => "membership.release_idle",
+        ReleaseStatus::Running => "membership.release_running",
+        ReleaseStatus::Done(redeem::Release::Released(_)) => "membership.release_done",
+        ReleaseStatus::Done(redeem::Release::NothingBound) => "membership.release_none",
+        ReleaseStatus::Failed(_) => "membership.release_failed",
+    };
+    tr(cx, key)
 }
 
 /// 「激活会员」那一组：一格订单编号 + 一颗兑换钮，结果就落在同一格里。
@@ -145,6 +308,9 @@ fn redeem_line(status: &Status, cx: &App) -> SharedString {
         Status::Idle => "membership.redeem_idle",
         Status::Running => "membership.redeem_running",
         Status::Done(redeem::Outcome::Granted(_)) => "membership.redeem_granted",
+        // 认领来的那一单单独一句：这一趟没有新买的时间，说的是「那一单现在在这台上」。
+        // 念成「已到账」会让人以为自己又付了一次。
+        Status::Done(redeem::Outcome::Moved(_)) => "membership.redeem_moved",
         Status::Done(redeem::Outcome::Replay) => "membership.redeem_replay",
         Status::Failed(error) => match error {
             redeem::Error::BadOrder => "membership.redeem_bad_order",
@@ -152,6 +318,7 @@ fn redeem_line(status: &Status, cx: &App) -> SharedString {
             redeem::Error::Unpaid => "membership.redeem_unpaid",
             redeem::Error::WrongPlan => "membership.redeem_wrong_plan",
             redeem::Error::Bound => "membership.redeem_bound",
+            redeem::Error::Spent => "membership.redeem_spent",
             redeem::Error::Unconfigured => "membership.redeem_unconfigured",
             redeem::Error::Upstream => "membership.redeem_upstream",
             redeem::Error::Unreachable(_) => "membership.redeem_unreachable",
@@ -371,6 +538,9 @@ mod tests {
     /// 三组：状态（一张 hero）、激活（编号那一格 + 动作那一格）、权益（规划中一句 + 五条）。
     /// 试用与取消两颗钮撤掉、兑换接上之后，这里钉的是当前形状：谁把两行读数或一颗试用钮
     /// 加回来，都得先改这条。
+    ///
+    /// 第四组「这台设备」是**条件出现**的：从没激活过的这台没什么可管，摆出来只会是一句
+    /// 「没有留痕」加一颗按不动的钮。所以这里两个分支都钉一次。
     #[gpui_kit::test]
     fn the_state_group_is_one_hero_and_the_benefits_carry_the_planned_note(
         cx: &mut TestAppContext,
@@ -379,7 +549,7 @@ mod tests {
         cx.update(|cx| {
             install(cx);
             let page = membership_page(cx);
-            assert_eq!(page.groups.len(), 3, "状态 + 激活 + 权益");
+            assert_eq!(page.groups.len(), 3, "没激活过：状态 + 激活 + 权益");
             assert_eq!(page.groups[0].rows.len(), 1, "状态那一组只剩一张 hero");
             assert!(matches!(
                 &page.groups[0].rows[0].kind,
@@ -396,6 +566,25 @@ mod tests {
                 &page.groups[2].rows[0].kind,
                 RowKind::Custom { .. }
             ));
+
+            // 激活过一次：第四组「这台设备」插在激活与权益之间，摆设备标识、那一笔台账、
+            // 以及解除那一格。
+            ConfigHolder::edit_membership(cx, |membership| {
+                membership.record("3".repeat(29), 30, today())
+            });
+            let page = membership_page(cx);
+            assert_eq!(page.groups.len(), 4, "状态 + 激活 + 这台设备 + 权益");
+            assert_eq!(
+                page.groups[2].rows.len(),
+                3,
+                "设备标识 + 那一笔 + 解除那一格"
+            );
+            assert!(matches!(&page.groups[2].rows[0].kind, RowKind::Info { .. }));
+            assert_eq!(page.groups[3].rows.len(), 6, "权益那一组不许被挤掉");
+
+            // 解除干净之后它自己退场：留着就是一颗按不动的钮。
+            ConfigHolder::edit_membership(cx, |membership| membership.clear_activation());
+            assert_eq!(membership_page(cx).groups.len(), 3, "解除后回到三组");
         });
     }
 
@@ -415,6 +604,7 @@ mod tests {
                 Status::Idle,
                 Status::Running,
                 Status::Done(Outcome::Granted(365)),
+                Status::Done(Outcome::Moved(200)),
                 Status::Done(Outcome::Replay),
                 Status::Failed(Error::BadOrder),
                 Status::Failed(Error::NotFound),

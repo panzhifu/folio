@@ -7,10 +7,11 @@
 //! 移掉一本书不等于把人家硬盘上的文件删了。
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use folio_core::Library;
 use folio_core::Store;
-use gpui_kit::{App, AppContext as _, PathPromptOptions, Task};
+use gpui_kit::{App, AppContext as _, Entity, Global, PathPromptOptions, Task};
 
 use super::config::ConfigHolder;
 use crate::ui::foundation::error::{Context as _, Result};
@@ -110,18 +111,6 @@ pub fn candidate_dirs() -> Vec<PathBuf> {
     out
 }
 
-/// 打开系统文件夹选择器，选中就把书库位置写进配置。返回的 `Task` 要不要持有由调用方定：
-/// 静态设置页拿不住句柄，用 `detach()` 让它跑完即可；有实体的页面可以存起来随页面一起取消。
-///
-/// 取消（`Ok(None)`）与出错都只记一条日志，不改配置 —— 读者点「取消」不该把书库位置清空。
-pub fn pick_dir(cx: &mut App) -> Task<()> {
-    choose_dir(cx, |cx, dir| {
-        let path = dir.display().to_string();
-        tracing::info!("pick_dir: 书库位置选为 {path}");
-        ConfigHolder::edit_library(cx, |library| library.dir = path);
-    })
-}
-
 /// 打开系统文件夹选择器，选中把目录交给 `picked`（在界面线程上执行）。
 /// 取消与出错只记日志 —— 读者点「取消」不该清掉任何东西。
 ///
@@ -135,15 +124,136 @@ pub fn pick_dir(cx: &mut App) -> Task<()> {
 /// 而 logcat 里 MediaProvider 报 `Primary directory folio not allowed … allowed
 /// directories are [Download, Documents]`。请求本身是阻塞的（把调用线程停在闩上，
 /// 直到读者从系统设置页回来），所以照书架「扫描」那道门（`start_scan`）的规矩只能
-/// 丢给后台线程；要不到授权也照开选择器 —— 退化路径仍有写得进的位置可挑，
-/// 与扫描同一条立场。
-pub fn choose_dir(cx: &mut App, picked: impl Fn(&mut App, &std::path::Path) + 'static) -> Task<()> {
-    // 授权尘埃落定之后才开选择器：读者可能先去系统设置页绕一圈，选择器不该抢在那前面。
+/// 丢给后台线程。
+///
+/// **没拿到授权不再照样开选择器**（2026-11-05 改的）：那条退化把失败从「按下这一格」
+/// 推到「导入跑完」才爆，界面上看不出为什么。现在把这一问问出来，要不要走退化路径由
+/// 读者自己说（[`answer`]）。
+pub fn choose_dir(
+    cx: &mut App,
+    pick: Pick,
+    picked: impl Fn(&mut App, &Path) + 'static,
+) -> Task<()> {
+    run(cx, pick, true, Rc::new(picked))
+}
+
+/// 「选文件夹」按下时没拿到「所有文件访问」，这一问在等回答。
+///
+/// 分两格是因为两格后面要做的事不同：书库位置是往里**拷书**（`std::fs` 写），监听目录是
+/// 往里**读与改名**。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pick {
+    Library,
+    Watch,
+}
+
+/// 挑中目录之后要做的第一件事（在界面线程上执行）。这一族签名在两处重复，写全
+/// `Rc<dyn Fn(&mut App, &Path)>` 会被 clippy 报 `type_complexity` —— 与 `spec::Setter`
+/// 同一处理：起个名字比数它的复杂度便宜。
+type Picked = Rc<dyn Fn(&mut App, &Path)>;
+
+/// 待答的问题连着**当初那个回调**一起存：答「去开启」或「照样挑」要重跑的是同一趟，
+/// 而只有按下那一格的那一层知道往里写什么。
+struct Pending {
+    pick: Pick,
+    picked: Picked,
+}
+
+/// 那一问的状态。**必须挂实体**：静态设置页每帧重建规格，面板摆不摆得有个实体能被
+/// `notify`（形状抄 `services/storage.rs` 的确认面板，`ask` / `answer` 同一对名字）。
+#[derive(Default)]
+pub struct AccessQuestion {
+    pending: Option<Pending>,
+}
+
+impl AccessQuestion {
+    /// 现在等着回答的是哪一格。
+    pub fn pending(&self) -> Option<Pick> {
+        self.pending.as_ref().map(|pending| pending.pick)
+    }
+}
+
+pub struct AccessHolder(pub Entity<AccessQuestion>);
+
+impl Global for AccessHolder {}
+
+/// 取实体，没有就建（同 `storage::entity`：设置页构造时手里就是 `&mut App`，不必等外壳装）。
+pub fn access(cx: &mut App) -> Entity<AccessQuestion> {
+    if let Some(holder) = cx.try_global::<AccessHolder>() {
+        return holder.0.clone();
+    }
+    let entity = cx.new(|_| AccessQuestion::default());
+    cx.set_global(AccessHolder(entity.clone()));
+    entity
+}
+
+/// 当前等着回答的是哪一格；没装实体就是 `None`。渲染每帧现读，不捕获建规格那一刻的数。
+pub fn pending_pick(cx: &App) -> Option<Pick> {
+    cx.try_global::<AccessHolder>()
+        .and_then(|holder| holder.0.read(cx).pending())
+}
+
+/// 只把这一问收掉，什么都不做 —— 读者还没决定。「去开启」那颗走 [`answer`]，
+/// 别用这一条：那条要重跑那道门。
+pub fn dismiss(cx: &mut App) {
+    let entity = access(cx);
+    entity.update(cx, |state, cx| {
+        if state.pending.take().is_some() {
+            cx.notify();
+        }
+    });
+}
+
+/// 回答那一问。`grant_first = false` 是「照样挑」：明知道多半写不进去也让他挑 ——
+/// 退化路径留着，但这一句要**读者自己说**，不再由代码替他默认。
+pub fn answer(cx: &mut App, grant_first: bool) {
+    let entity = access(cx);
+    let taken = entity.update(cx, |state, cx| {
+        let taken = state.pending.take();
+        if taken.is_some() {
+            cx.notify();
+        }
+        taken
+    });
+    let Some(Pending { pick, picked }) = taken else {
+        return;
+    };
+    run(cx, pick, grant_first, picked).detach();
+}
+
+/// 没拿到授权时开不开选择器。这一格唯一的一条判断，单独抽出来是为了能被钉住。
+///
+/// 从前它写死成「照开」，于是「挑了个写不进去的目录」要等到导入跑完才露出来，界面上书架
+/// 纹丝不动（`2026-10-24 Meizu 20` 那次）。现在它由读者的回答决定：没拿到又没说过「照样挑」,
+/// 就把这一问问出来。
+fn opens_picker(granted: bool, grant_first: bool) -> bool {
+    granted || !grant_first
+}
+
+/// 走那道门，再按回答决定开不开选择器。`grant_first` 是「没拿到就把这一问问出来」，
+/// `false` 是读者已经说过「照样挑」。
+fn run(cx: &mut App, pick: Pick, grant_first: bool, picked: Picked) -> Task<()> {
+    let entity = access(cx);
     let requested =
         cx.background_spawn(async move { crate::ui::platform::request_storage_access() });
+    let holder = entity.clone();
     cx.spawn(async move |cx| {
         let granted = requested.await;
-        tracing::info!("choose_dir: 存储授权 = {granted}");
+        tracing::info!(
+            "choose_dir: 存储授权 = {granted}，没授权也开 = {}",
+            !grant_first
+        );
+        if !opens_picker(granted, grant_first) {
+            // 摆出这一问，而不是悄悄照开。
+            holder.update(cx, |state, cx| {
+                state.pending = Some(Pending {
+                    pick,
+                    picked: picked.clone(),
+                });
+                cx.notify();
+            });
+            return;
+        }
         // 这一版的 `AsyncApp::update` 直接把闭包的值交回来（不包 `Result`）。
         let receiver = cx.update(|cx| {
             cx.prompt_for_paths(PathPromptOptions {
@@ -165,6 +275,18 @@ pub fn choose_dir(cx: &mut App, picked: impl Fn(&mut App, &std::path::Path) + 's
         if let Some(dir) = picked_dir {
             cx.update(|cx| picked(cx, &dir));
         }
+    })
+}
+
+/// 打开系统文件夹选择器，选中就把书库位置写进配置。返回的 `Task` 要不要持有由调用方定：
+/// 静态设置页拿不住句柄，用 `detach()` 让它跑完即可；有实体的页面可以存起来随页面一起取消。
+///
+/// 取消（`Ok(None)`）与出错都只记一条日志，不改配置 —— 读者点「取消」不该把书库位置清空。
+pub fn pick_dir(cx: &mut App) -> Task<()> {
+    choose_dir(cx, Pick::Library, |cx, dir| {
+        let path = dir.display().to_string();
+        tracing::info!("pick_dir: 书库位置选为 {path}");
+        ConfigHolder::edit_library(cx, |library| library.dir = path);
     })
 }
 
@@ -400,5 +522,52 @@ mod tests {
 
         assert!(store.book(id).unwrap().is_none(), "从书库里移掉……");
         assert!(original.exists(), "……不等于把读者的原文件删了");
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    //! 这一格能钉的只有**那条判断**：拿没拿到授权 × 读者有没有说「照样挑」。
+    //! 网络与选择器不在这里 —— 它们没有分支，而且测试里一次真的都不该发：
+    //! `request_storage_access` 会把读者送去系统设置页，`prompt_for_paths` 会起系统选择器。
+
+    use super::{Pick, dismiss, opens_picker, pending_pick};
+    use gpui_kit::{App, TestAppContext};
+
+    /// 四格全钉。只有「没拿到 且 读者没答」那一格该把问题摆出来而不开选择器 ——
+    /// 那一格从前是「照样开」，症状就是读者的原话：还没给权限就直接跳到文件夹选择了。
+    #[test]
+    fn the_picker_opens_only_when_it_should() {
+        let table = [
+            (true, true, true, "拿到了就直接开"),
+            (true, false, true, "拿到了，「照样挑」那一答用不上"),
+            (false, true, false, "没拿到、读者还没答：摆问题，不开选择器"),
+            (false, false, true, "没拿到，但读者说了照样挑：开"),
+        ];
+        for (granted, grant_first, want, note) in table {
+            assert_eq!(opens_picker(granted, grant_first), want, "{note}");
+        }
+    }
+
+    /// `dismiss` 只收问题：待答清空，不碰配置、不发请求。
+    #[gpui_kit::test]
+    fn dismissing_the_question_leaves_nothing_behind(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx: &mut App| {
+            let entity = super::access(cx);
+            entity.update(cx, |state, _| {
+                state.pending = Some(super::Pending {
+                    pick: Pick::Library,
+                    picked: std::rc::Rc::new(|_, _| {}),
+                });
+            });
+            assert_eq!(
+                pending_pick(cx),
+                Some(Pick::Library),
+                "前置：这一问该在等着回答"
+            );
+            dismiss(cx);
+            assert_eq!(pending_pick(cx), None, "收掉之后不该留下待答的问题");
+        });
     }
 }

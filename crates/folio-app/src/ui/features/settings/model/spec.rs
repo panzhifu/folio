@@ -282,8 +282,9 @@ pub(crate) fn group(title: impl Into<SharedString>, rows: Vec<Row>) -> Group {
 /// 一页的快捷构造：标题 + 图标 + 组。
 ///
 /// 组标题**桌面的侧栏要用它当子项**（见 `view/mod.rs` 里 `setting_page` 那句「分组必须带
-/// 标题」），所以这一格不许省；手机那一档则整屏只留卡片，组与组靠 32 的缝分开 —— 两边各自
-/// 怎么用这一份数据，写在各自的渲染里。
+/// 标题」），所以这一格不许省；手机那一档在**同一屏多于一组**时把它摆成卡上方的节头
+/// （`view/compact.rs` 的 `section_header`），只有一组时不摆 —— 那句话与顶栏上的页名是
+/// 同一个东西。两边各自怎么用这一份数据，写在各自的渲染里。
 pub(crate) fn page(title: impl Into<SharedString>, icon: IconName, groups: Vec<Group>) -> Page {
     Page {
         title: title.into(),

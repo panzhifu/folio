@@ -36,7 +36,9 @@ ROW = 44             # 单行行高（可命中），compact.rs 的 ROW_HIT
 ICON_SLOT = 28       # 行首图标槽，compact.rs 的 size_7
 PAD = 16             # 卡片横向内缩 / 屏幕边距（px_4）
 CARD_R = 8           # 分组卡圆角（theme.radius_lg）
-GAP_SECT = 32        # 卡与卡的缝（mt_8）
+GAP_SECT = 32        # 不带节头的两张卡之间的缝（mt_8）
+GAP_HEAD = 16        # 带节头那一块上方那道缝（mt_4）：节头自己就是「换了一块」那句话
+SECT_HEAD = 22       # 卡上方那句节头的高：14 的字 + 与自己那张卡之间 8（pb_2）
 FONT = "Noto Sans CJK SC"
 # 真机渲染分辨率：魅族 20 是 1080×2400 @ 450dpi，2.8125x 正好把 384×853 铺满。
 PX_W, PX_H = 1080, 2400
@@ -196,6 +198,18 @@ ICONS = {
                                 'M21 13V9a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 15 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6.5']},
     "logs": {"p": ['M3 5h1', 'M3 12h1', 'M3 19h1', 'M8 5h1', 'M8 12h1', 'M8 19h1',
                    'M13 5h8', 'M13 12h8', 'M13 19h8']},
+    # 设置根屏那四格（会员 / 翻译 / AI / 同步）用的图标，从前表里没有，稿子就画不出那四行。
+    # 形状逐字取自应用真用的那一份资产（`gpui-kit-assets/assets/icons/{crown,languages,
+    # sparkles,arrow-down-up}.svg`，`IconName::Crown` / `Languages` / `Sparkles` /
+    # `ArrowDownUp` 由 build.rs 按文件名生成），不是凭印象补的。
+    "crown": {"p": ['M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z',
+                    'M5 21h14']},
+    "languages": {"p": ['m5 8 6 6', 'm4 14 6-6 2-3', 'M2 5h12', 'M7 2h1',
+                        'm22 22-5-10-5 10', 'M14 18h6']},
+    "sparkles": {"p": ['M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z',
+                       'M20 2v4', 'M22 4h-4'],
+                 "circles": [(4, 20, 2)]},
+    "arrow-down-up": {"p": ['m3 16 4 4 4-4', 'M7 20V4', 'm21 8-4-4-4 4', 'M17 4v16']},
 }
 
 
@@ -764,8 +778,23 @@ def resolve(els, T):
     return out
 
 
-def draw_card(e, y, rows, T):
-    """在 y 画一张卡：行依次平移落位，行间发丝线（缩进 16），返回下一张卡的 y。"""
+def section_header(label, T):
+    """卡上方那一句节头：说出下面这一块里的行有什么共同点。
+
+    比正文小一档（14 对 16）、淡一档（`muted`）、字重加一档（600）；层次靠字级、字重与留白，
+    不靠容器与颜色 —— 与 `compact.rs` 的 `section_header` 同一套。左端落在 `PAD`，与卡片
+    同一条 16 的脊柱（不是行文字那一列），因为节头与卡是同一层的兄弟。
+    返回 (元素, 这一格占的高)。
+    """
+    return [text(PAD, 14, label, 14, "__MUTED__", weight=600)], SECT_HEAD
+
+
+def draw_card(e, y, rows, T, gap=GAP_SECT):
+    """在 y 画一张卡：行依次平移落位，行间发丝线（缩进 16），返回下一块的 y。
+
+    返回的 y 已经带上后面那道缝，而**缝的档位归下一块决定**（它带不带节头），所以调用方
+    按下一块传 `gap`；最后一张后面没人接，给哪一档都不出现在图上。
+    """
     h = sum(rh for _, rh in rows) + (len(rows) - 1) * 0.5
     e.append(card(PAD, y, W - 2 * PAD, h, T))
     ry = y
@@ -774,16 +803,31 @@ def draw_card(e, y, rows, T):
             e.append(hairline(ry, PAD + 1 + PAD, W - PAD - 1, T))
         e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(ry, "".join(resolve(row, T))))
         ry += rh + 0.5
-    return ry + GAP_SECT
+    return ry + gap
 
 
-def page_screen(T, title, cards):
-    """子页骨架：状态栏 + 顶栏 + 一串无节头的卡。"""
+def page_screen(T, title, cards, heads=None):
+    """子页骨架：状态栏 + 顶栏 + 一串卡；`heads` 与 `cards` 同长，逐张给节头。
+
+    只有一张卡时不给节头 —— 那一句话与顶栏上的页名是同一个东西，摆两遍是重复
+    （实现同一处：`compact.rs` 的 `page_screen`，`headed = page.groups.len() > 1`）。
+
+    那道缝跟着「这一块带不带节头」走：带节头 16（`GAP_HEAD`），不带 32（`GAP_SECT`）。
+    从前两处都是 32，量出来上一张卡底到下一张卡顶是 32 + 22 = 54，比 Apple 那一档约 35
+    宽一半 —— 节头已经把「换了一块」说出来了，缝只需要再说一句「这块不属于上一张卡」。
+    """
     e = status_bar(T)
     e += top_bar(title, T)
     y = STATUS + TOPBAR + 8
-    for rows in cards:
-        y = draw_card(e, y, rows, T)
+    headed = len(cards) > 1
+    labels = [heads[i] if headed and heads else None for i in range(len(cards))]
+    for i, (rows, label) in enumerate(zip(cards, labels)):
+        if label:
+            els, hh = section_header(label, T)
+            e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(els, T))))
+            y += hh
+        nxt = labels[i + 1] if i + 1 < len(labels) else None
+        y = draw_card(e, y, rows, T, gap=GAP_HEAD if nxt else GAP_SECT)
     return e
 
 

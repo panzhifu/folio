@@ -110,6 +110,25 @@ impl SearchBox {
         self.input.read(cx).value()
     }
 
+    /// 从外面把框里的字换成另一个值。
+    ///
+    /// 给「查询词的真源不在框里」那一类调用方：设置那一屏按返回先收掉搜索态，收的是自己
+    /// 那份 `query`，框里的字得跟着回来，否则读者看到的是一个还写着词的框配一屏分块列表。
+    /// 与 `Input` 字段同一做法 —— 那边也是「配置在他处被改时把显示拉回来」，只在两边走偏
+    /// 的那一帧才写。
+    pub fn set_value(
+        &mut self,
+        value: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = value.into();
+        if self.input.read(cx).value() != value {
+            self.input
+                .update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+    }
+
     /// 把焦点放进框里。手机上焦点一进框软键盘就出来，不必再调什么「弹键盘」。
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |input, cx| input.focus(window, cx));

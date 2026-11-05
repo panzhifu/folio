@@ -34,7 +34,7 @@ pub(in crate::ui::features::settings) use crate::ui::features::settings::model::
     Group, NumberSpec, Page, Row, group, number, page,
 };
 pub(in crate::ui::features::settings) use folio_core::{
-    ImageScale, Mode, PageTurn, Reader, TextDirection,
+    Appearance, ImageScale, Mode, PageTurn, Reader, TextDirection,
 };
 pub(in crate::ui::features::settings) use gpui_kit::assets::IconName;
 pub(in crate::ui::features::settings) use gpui_kit::component::ThemeMode;
@@ -386,6 +386,72 @@ mod tests {
             assert_eq!(
                 ix, 0,
                 "会员现在是侧栏第一格；真要把每天调的那几页提到它前面，得先改掉这条"
+            );
+        });
+    }
+
+    /// 「这台设备」那一组只在**这台激活过**之后出现：没激活过时摆出来只会是一句「没有留痕」
+    /// 加一颗按不动的钮。这一屏的解除是**按设备**的，所以界面上不该出现「先交订单号才能解除」
+    /// 那种要求 —— 本机从来没存过那一串，而最需要解除的人正好是手里没有它的人（重装过的那位）。
+    #[gpui_kit::test]
+    fn the_membership_page_carries_the_device_group_once_activated(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            let notes = card(cx);
+            let devices = tr(cx, "group.membership_devices");
+            let titles = |cx: &App| -> Vec<SharedString> {
+                spec_pages(cx, &notes)[SettingsPage::Membership.index()]
+                    .groups
+                    .iter()
+                    .map(|group| group.title.clone())
+                    .collect()
+            };
+
+            // 从没开过：那一组不该在。
+            assert!(
+                !titles(cx).contains(&devices),
+                "没激活过的这台没有可管的设备，组标题：{:?}",
+                titles(cx)
+            );
+
+            // 记一笔到账之后它自己出现，而且第一行是设备标识、最后一格摆解除的钮。
+            ConfigHolder::edit_membership(cx, |membership| {
+                membership.record("2".repeat(29), 30, 20_000)
+            });
+            assert!(
+                titles(cx).contains(&devices),
+                "激活过就该有「这台设备」那一组，组标题：{:?}",
+                titles(cx)
+            );
+            let pages = spec_pages(cx, &notes);
+            let page = &pages[SettingsPage::Membership.index()];
+            let group = page
+                .groups
+                .iter()
+                .find(|group| group.title == devices)
+                .expect("上面刚断言过它在");
+            assert!(
+                group
+                    .rows
+                    .iter()
+                    .any(|row| row.title == tr(cx, "membership.device_id")),
+                "那一组第一行该是设备标识"
+            );
+            // 解除那一格是自定义行（没有标题位）：摆的是「此刻那句状态 + 那颗钮」。
+            assert!(
+                group.rows.iter().any(|row| matches!(
+                    &row.kind,
+                    spec::RowKind::Custom { title, .. } if title.is_none()
+                )),
+                "那一组该有一格摆解除的钮"
+            );
+
+            // 解除干净之后它该跟着没：留着就是一颗按不动的钮。
+            ConfigHolder::edit_membership(cx, |membership| membership.clear_activation());
+            assert!(
+                !titles(cx).contains(&devices),
+                "清零后台账与权益都没了，那一组该跟着退场"
             );
         });
     }

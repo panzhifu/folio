@@ -6,12 +6,14 @@
 //!
 //! 这里的一切都不许 `use crate::ui::features::…`：组件不知道有哪几个功能。
 
+mod access_question;
 mod bottom_sheet;
 mod font_picker;
 mod primitives;
 mod search_box;
 mod top_bar;
 
+pub use access_question::{access_question, waiting_for};
 pub use bottom_sheet::{
     BottomSheet, BottomSheetEvent, BottomSheetState, any_sheet_open, dismiss_top,
 };

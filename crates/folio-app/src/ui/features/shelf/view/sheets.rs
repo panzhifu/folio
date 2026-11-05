@@ -4,10 +4,10 @@
 //! 这一份只管每张卡里装什么、按下去做什么。
 
 use super::super::overlay;
-use crate::ui::components::muted_label;
+use crate::ui::components::{access_question, muted_label, waiting_for};
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::tr;
-use crate::ui::services::library::suggested_dir;
+use crate::ui::services::library::{Pick, suggested_dir};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
@@ -274,7 +274,7 @@ impl ShelfView {
         } else {
             chosen
         };
-        v_flex()
+        let mut panel = v_flex()
             .id("library-confirm-panel")
             .flex_1()
             .min_h_0()
@@ -329,7 +329,12 @@ impl ShelfView {
                                 cancel_entity.update(cx, |this, cx| this.cancel_confirm(cx))
                             }),
                     ),
-            )
-            .into_any_element()
+            );
+        // 按了「选择文件夹」而那道门没拿到授权：这一问摆在这排钮下面，而不是让那颗钮按下去
+        // 什么都不发生（架面这一头是内联面板，不是浮层，摆得下）。
+        if waiting_for(Pick::Library, cx) {
+            panel = panel.child(access_question(cx));
+        }
+        panel.into_any_element()
     }
 }

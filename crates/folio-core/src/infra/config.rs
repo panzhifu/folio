@@ -1006,12 +1006,32 @@ impl Account {
 ///
 /// 也不存「等级」那一格：它能由到期日算出来，存两份就会对上「高级会员 + 已过期」这种界面
 /// 上说不出来的组合。以后接真支付，写进的还是同一个字段。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Membership {
     /// 还算数的最后那一天，本地日序号。`0` 就是从没开过 —— 1970-01-01 对任何今天都已是过去，
     /// 所以这一档不需要单独的哨兵值。
     pub until_day: i64,
+    /// 这台设备上兑过的那几笔，见 [`Claim`]。
+    ///
+    /// **只用来给「这台设备」那一屏说话**：到期日不从它重算。台账是从这一版才开始记的，
+    /// 之前买的那些年不在里面 —— 拿它重放会把老安装的权益吃掉。解除走的是整段清零那一条
+    /// （[`Membership::clear_activation`]），所以这里不需要一份完整的账。
+    pub claims: Vec<Claim>,
+}
+
+/// 一笔到账的留痕。
+///
+/// `order` 是爱发电那一单的编号，只留在本机 0600 的 `config.json` 里：不上同步（同步只带
+/// 进度、批注、书签与每本书的设置），不进日志。留着它的理由是「换设备」那一趟要说清
+/// 解除的是哪一单，而读者自己往往只记得住尾号。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Claim {
+    pub order: String,
+    pub days: i64,
+    /// 到账那一天，本地日序号 —— 与 [`Membership::until_day`] 同一个口径。
+    pub on_day: i64,
 }
 
 /// 会员等级。**是派生值，不落盘**（见 [`Membership`] 的说明），所以没有 `Serialize`。
@@ -1052,6 +1072,43 @@ impl Membership {
         } else {
             today + days - 1
         }
+    }
+
+    /// 记一笔到账：天数按 [`extended_on`](Self::extended_on) 接上去，同时在台账里留一行。
+    ///
+    /// `today` 必须是**出发那一刻**取好的那一个（与 `services/activation.rs` 那条同一口径）：
+    /// 回来再取会让跨日界线那一天的「买到的第一天」差一格。
+    ///
+    /// `days <= 0`（同一单重交）与空订单号都不记：前者那一笔的权益在第一次就给出去了，
+    /// 记了会让「这台设备名下的几笔」里出现一行 0 天的东西；后者没什么可认的。
+    pub fn record(&mut self, order: impl Into<String>, days: i64, today: i64) {
+        let order = order.into();
+        if days <= 0 || order.is_empty() {
+            return;
+        }
+        self.until_day = self.extended_on(days, today);
+        // 同一单再记一次（解除后在这台重新兑）以最后一次为准，不叠成两行 —— 台账是给人读的，
+        // 不是流水账。
+        if let Some(existing) = self.claims.iter_mut().find(|claim| claim.order == order) {
+            existing.days = days;
+            existing.on_day = today;
+        } else {
+            self.claims.push(Claim {
+                order,
+                days,
+                on_day: today,
+            });
+        }
+    }
+
+    /// 解除这台设备的激活：权益清零、台账清空。
+    ///
+    /// 整段清零而不是「扣掉那一笔的天数」，是因为扣不动也说不清：一笔 365 天买了两个月，
+    /// 该退回来的到底是 365 还是 300？而服务端那一侧只有「这一单还绑不绑在这台」这一个事实。
+    /// 界面在按下去之前就把这一句摆出来了（`confirm.release.*`）。
+    pub fn clear_activation(&mut self) {
+        self.until_day = 0;
+        self.claims.clear();
     }
 }
 
@@ -2512,7 +2569,10 @@ mod tests {
     /// 到期日**含当天**：那一天还算会员，第二天就不算了。界面上那句「到期日」全靠这一条。
     #[test]
     fn the_expiry_day_still_counts_and_the_day_after_does_not() {
-        let member = Membership { until_day: 20_500 };
+        let member = Membership {
+            until_day: 20_500,
+            ..Membership::default()
+        };
         assert_eq!(member.tier_on(20_499), MembershipTier::Premium);
         assert_eq!(
             member.tier_on(20_500),
@@ -2522,7 +2582,11 @@ mod tests {
         assert_eq!(member.tier_on(20_501), MembershipTier::Standard);
         // 手改出来的负数不当「永远有效」：那只是过去的一天。
         assert_eq!(
-            Membership { until_day: -5 }.tier_on(0),
+            Membership {
+                until_day: -5,
+                ..Membership::default()
+            }
+            .tier_on(0),
             MembershipTier::Standard
         );
     }
@@ -2539,11 +2603,13 @@ mod tests {
         // 还剩 10 天时续 30：旧的 10 天一天不少，新到期日在旧的后面。
         let active = Membership {
             until_day: today + 9,
+            ..Membership::default()
         };
         assert_eq!(active.extended_on(30, today), today + 39);
         // 过期一年后再兑：不从旧到期日起算，否则白送了中间那三百多天。
         let stale = Membership {
             until_day: today - 365,
+            ..Membership::default()
         };
         assert_eq!(stale.extended_on(30, today), today + 29);
         // 同一单重交：天数不动，且**不许**把过期的到期日拉回今天。
@@ -2553,9 +2619,86 @@ mod tests {
         assert_eq!(
             Membership::default().extended_on(30, today),
             Membership {
-                until_day: today + 29
+                until_day: today + 29,
+                ..Membership::default()
             }
             .until_day
+        );
+    }
+
+    /// 记一笔到账：天数按 [`Membership::extended_on`] 接上去，台账留一行。
+    /// **同一单再记一次不叠成两行** —— 解除之后在同一台重新兑，屏上要看的还是那一单，
+    /// 两行就成了「这台名下有两笔」，而服务端只有一行。
+    #[test]
+    fn recording_a_claim_extends_the_balance_and_keeps_one_line_per_order() {
+        let order = "1".repeat(29);
+        let mut got = Membership::default();
+        got.record(&order, 30, 20_000);
+        assert_eq!(
+            got.until_day, 20_029,
+            "从没开过那一档：今天就是买到的第一天"
+        );
+        assert_eq!(got.claims.len(), 1);
+        assert_eq!(got.claims[0].days, 30);
+
+        got.record(&order, 30, 20_010);
+        assert_eq!(
+            got.claims.len(),
+            1,
+            "同一单记成两行，「这台名下有什么」就没人读得懂了"
+        );
+        assert_eq!(got.claims[0].on_day, 20_010, "留的是最后一次那一趟");
+        // 同一单第二次「发货」在这一版之后不会再发生（服务端把重复那一趟回成 `moved` 或
+        // `replay`），所以这里续上的 30 天钉的是「万一两边形状对不上，数字要看得见」，
+        // 而不是让它悄悄翻倍。
+        assert_eq!(got.until_day, 20_059);
+
+        // 重交（0 天）与没号的单都不进台账：前者没给新东西，后者没什么可认。
+        got.record(&order, 0, 20_040);
+        got.record("", 30, 20_040);
+        assert_eq!(got.claims.len(), 1);
+        assert_eq!(got.until_day, 20_059, "0 天不该把到期日往后挪");
+    }
+
+    /// 解除是**整段清零**：剩下的时间与台账一起没。
+    ///
+    /// 「扣掉那一笔的天数」那条路走不通：一笔 365 天买了两个月，该退 365 还是 300？谁也算不
+    /// 清，而服务端那一侧只有「这一单还绑不绑在这台」一个事实。界面在按下去之前就把这一句
+    /// 摆出来了（`confirm.release.body`）。
+    #[test]
+    fn clearing_activation_forfeits_the_balance_and_the_ledger() {
+        let mut got = Membership::default();
+        got.record("9".repeat(29), 365, 20_000);
+        assert!(got.until_day > 20_300);
+        got.clear_activation();
+        assert_eq!(got.until_day, 0);
+        assert!(got.claims.is_empty());
+        assert_eq!(got.tier_on(20_001), MembershipTier::Standard);
+    }
+
+    /// 台账要能从 JSON 读回来；**老配置里没有 `claims` 这一格，按空表读**，不许把整个
+    /// `membership` 判成读坏了 —— 那会顺手抹掉读者的到期日。
+    #[test]
+    fn the_ledger_round_trips_and_an_older_config_without_it_still_loads() {
+        let with = load(
+            r#"{"membership":{"until_day":20500,"claims":[{"order":"111","days":30,"on_day":20470}]}}"#,
+        );
+        assert_eq!(with.membership.claims.len(), 1);
+        assert_eq!(with.membership.claims[0].days, 30);
+        assert_eq!(with.membership.until_day, 20_500);
+        assert_eq!(
+            load(r#"{"membership":{"until_day":20500}}"#)
+                .membership
+                .claims
+                .len(),
+            0,
+            "这一版之前写下的配置，读回来不该丢掉到期日"
+        );
+        assert_eq!(
+            load(r#"{"membership":{"until_day":20500}}"#)
+                .membership
+                .until_day,
+            20_500
         );
     }
 

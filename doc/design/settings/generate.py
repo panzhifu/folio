@@ -2,14 +2,14 @@
 """Folio 设置界面（compact 档）SVG 设计稿生成器。
 
 十三个屏的几何常量、主题 token、Lucide 图标表与行构造器全部来自 [`../_kit.py`](../_kit.py)
-—— 那一份是各屏共用的尺，本文件只写「设置这一屏摆哪几行」。按 2026-10-24 的定稿：
-**行内不摆灰色说明文字、卡片上方不摆节头** —— 每行只有标题与控件，组与组只靠
-32 的缝分开。几何数字来自 crates/folio-app/src/ui/features/settings/view/compact.rs
+—— 那一份是各屏共用的尺，本文件只写「设置这一屏摆哪几行」。按 2026-11-05 的定稿：
+**行内不摆灰色说明文字、卡片上方摆节头（同一屏只有一块时不摆）** —— 每行只有标题与控件，
+块与块之间 32 的缝，节头到自己那张卡 8。几何数字来自 crates/folio-app/src/ui/features/settings/view/compact.rs
 的真实实现；颜色取 gpui-kit Default Light / Default Dark 的 token 值；
 文案取 locales/zh-CN.toml，取值取 folio-core 配置默认值。
 **哪几格实现里还没有，逐条写在各自那一段的注释里**：日志那一整页、字体页的等宽那一格、
-外观页的亮度与文字页的翻页时长（配置里有值、界面上进不去），以及根屏列表里的「听书」
-那一行（页在，根屏的稿以前漏了）。
+外观页的亮度（配置里有值、界面上进不去）。文字页的「翻页时长」与根屏列表里的「听书」那两格
+从前也缺，2026-11-05 各补了一头 —— 前者接进了设置，后者补进了稿。
 画布 384×853 = 魅族 20（1080×2400 @ 450dpi）的逻辑分辨率。
 """
 
@@ -60,26 +60,88 @@ def _muted_line(s):
 
 # ── 各屏 ──────────────────────────────────────────────────────────────────────
 
+def membership_row():
+    """会员卡那一行：图标 + 两行字（页名、哪天到期）+ 箭头。
+
+    高 60 而不是 44 —— 实现里那一格是 `min_h(44)` 撑到两行（`compact.rs` 的
+    `membership_cell`），多一句字这一行长一点，44 那一档不缩。
+    """
+    tx = PAD + PAD
+    cy = 60.0
+    return [
+        icon("crown", tx + 6, 14, 16, "__FG__"),
+        text(tx + ICON_SLOT + 12, 27, "高级会员", 16, "__FG__"),
+        text(tx + ICON_SLOT + 12, 47, "30 天后到期", 14, "__MUTED__"),
+        icon("chevron-right", RIGHT - 14, cy / 2 - 7, 14, "__MUTED__"),
+    ], 60.0
+
+
 def root_screen(T):
-    # 顺序 = `SettingsPage::ALL`（`settings/view/mod.rs:81-134`）：听书在字体之后、书库之前。
-    # 「日志」这一页**实现里还没有**：`Logging` 那一节（config.rs:716-736）现在只能改
-    # config.json 或环境变量，界面上没有入口 —— 这一格是稿先到。图标取 `IconName::Logs`
-    # （`gpui-kit-assets/assets/icons/logs.svg`，枚举由 build.rs 按文件名生成，取得到）。
-    pages = [("palette", "外观"), ("type", "文字"), ("columns-3", "版面"), ("a-large-small", "字体"),
-             ("book-headphones", "听书"), ("folder-open", "书库"), ("list-tree", "目录"),
-             ("hard-drive", "存储"), ("logs", "日志"), ("info", "关于")]
+    """根屏：一张会员卡 + 三块带节头的入口 + 末尾一张无节头的卡。
+
+    块与块名 = `compact.rs` 的 `ROOT_BLOCKS`（阅读 / 翻译与 AI / 书与数据），页序仍跟
+    `SettingsPage::ALL`。两格不进列表：**会员**顶在根上单独一张卡（当场念等级与到期日），
+    **「关于」**落末尾那张无节头的卡 —— 一块只剩一行时，块名念的就是那一行自己的名字。
+
+    实现里现在是 14 页，这份稿画到 13 格：`Logging` 那一页在稿上是「稿先到」（界面上还没有
+    入口，只能改 config.json 或环境变量），而它从前占的那一格现在由「TXT 分章规则」与「AI」
+    这些真页顶上。整屏的内容比 853 那块画布高 —— 这一屏**滚**（分了块就装不下），最后一张卡
+    落在折叠底下，画布到这儿裁掉，不是版式画错了。
+    """
+    blocks = [
+        ("阅读", [("palette", "外观"), ("type", "文字"), ("columns-3", "版面"),
+                  ("a-large-small", "字体"), ("book-headphones", "听书")]),
+        ("翻译与 AI", [("languages", "翻译"), ("sparkles", "AI")]),
+        ("书与数据", [("folder-open", "书库"), ("file-text", "TXT 分章规则"),
+                     ("list-tree", "目录"), ("arrow-down-up", "同步"), ("hard-drive", "存储")]),
+    ]
     e = status_bar(T)
     y = STATUS + 8
-    card_h = len(pages) * ROW + (len(pages) - 1) * 0.5
-    e.append(card(PAD, y, W - 2 * PAD, card_h, T))
-    for i, (ic, label) in enumerate(pages):
-        ry = y + i * (ROW + 0.5)
-        row, _ = push_row(label, icon_name=ic)
-        e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(ry, "".join(resolve(row, T))))
-        if i:
-            e.append(hairline(ry, PAD + 1 + 56, W - PAD - 1, T))
+    # 搜索框固定在滚动区**外面**：它是反复用的输入口，滚一下就没得输入不叫省一格。高 32 是
+    # Medium 那一档的组件数（`INPUT_SIZES`），不是挑的。
+    e += search_box(T, PAD, y, W - 2 * PAD, "", "搜索设置项")
+    y += INPUT_SIZES["medium"][0] + 8
+    row, rh = membership_row()
+    e.append(card(PAD, y, W - 2 * PAD, rh, T))
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(row, T))))
+    # 会员卡后面是第一块，它带节头 → 那道缝归 16 那一档（缝跟着「下一块带不带节头」走）。
+    y += rh + GAP_HEAD
+    for i, (head, pages) in enumerate(blocks):
+        els, hh = section_header(head, T)
+        e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(els, T))))
+        # 最后一块后面接的是没有节头的「关于」那张 → 留大的一档。
+        nxt = GAP_HEAD if i + 1 < len(blocks) else GAP_SECT
+        y = draw_card(e, y + hh, [push_row(label, icon_name=ic) for ic, label in pages], T, gap=nxt)
+    y = draw_card(e, y, [push_row("关于", icon_name="info")], T)
     e += bottom_bar(T)
-    return svg("01-root", e, T["label"], "根屏：入口列表，一行一页，右端只有箭头", T)
+    return svg("01-root", e, T["label"],
+               "根屏：会员卡 + 三块带节头的入口（阅读 / 翻译与 AI / 书与数据）+ 无节头的关于；整屏滚动", T)
+
+
+def search_screen(T):
+    """搜出来那一屏：框里有词时整屏换成结果，块结构让位。
+
+    两类命中摆成两种东西，因为读者要的两件事不同：页名对上 → 一行带箭头的入口（进去那一屏）；
+    某一格的标题对上 → **那一格自己**（这里摆的是「翻页动画」的弹层行与「翻页时长」的步进行），
+    当场能改，不必再钻一页去找回刚才那句话。卡上方的节头是命中的那一页的页名。
+    """
+    e = status_bar(T)
+    y = STATUS + 8
+    e += search_box(T, PAD, y, W - 2 * PAD, "翻页", "搜索设置项")
+    y += INPUT_SIZES["medium"][0] + 8
+    # 页命中：一张卡，一行一页。
+    row, rh = push_row("文字", icon_name="type")
+    e.append(card(PAD, y, W - 2 * PAD, rh, T))
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(row, T))))
+    # 页命中那张卡没有节头，但它下面那一堆带节头 → 缝按下一块走，16 那一档。
+    y += rh + GAP_HEAD
+    # 行命中：按页归堆，节头就是页名，卡里摆的是那一格本身。
+    els, hh = section_header("文字", T)
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(els, T))))
+    draw_card(e, y + hh, [popup_row("翻页动画", "左右平移"),
+                          stepper_row("翻页时长", "280 ms")], T)
+    e += bottom_bar(T)
+    return svg("14-search", e, T["label"], "搜索：页命中给入口，行命中直接摆那一格的控件", T)
 
 
 def appearance_screen(T):
@@ -94,7 +156,7 @@ def appearance_screen(T):
          popup_row("深色主题", "Default Dark"),
          slider_row("亮度", "80%", 0.8)],
         [titled_row("主题目录", content_path_button("~/.config/folio/themes"))],
-    ])
+    ], heads=["主题", "自定义主题"])
     return svg("02-appearance", e, T["label"], "外观：浅深与两侧主题、亮度、主题目录", T)
 
 
@@ -112,7 +174,7 @@ def typography_screen(T):
         [push_row("翻页动画", "左右平移"),
          stepper_row("翻页时长", "280 ms")],
         [push_row("划线方式", "高亮")],
-    ])
+    ], heads=["正文", "段落", "翻页", "划线"])
     return svg("03-typography", e, T["label"], "文字：字号行距段距、缩进对齐、翻页与时长、划线", T)
 
 
@@ -149,7 +211,7 @@ def speech_screen(T):
         [stepper_row("语速", "1.00"),
          stepper_row("音高", "1.00")],
         [switch_row("念到哪翻到哪", False)],
-    ])
+    ], heads=["声音", "朗读时"])
     return svg("12-speech", e, T["label"], "听书：语速与音高两格步进、念到哪翻到哪一开关", T)
 
 
@@ -191,8 +253,46 @@ def library_screen(T):
          caption_value_row("建议的收件箱", "/storage/emulated/0/Documents/Folio/收件箱")],
         [switch_row("Wi-Fi 传书", False),
          _muted_line("开关打开后，这里会显示能打开的地址与配对码。")],
-    ])
+    ], heads=["位置", "文件夹监听", "Wi-Fi 传书"])
     return svg("06-library", e, T["label"], "书库：位置、文件夹监听、Wi-Fi 传书", T)
+
+
+def access_screen(T):
+    """书库页按了「选择文件夹…」而那道门没拿到授权：这一问摆在卡里，选择器不打开。
+
+    三颗钮按重量排：`取消` 与 `照样挑` 是 ghost，`去开启` 是 primary —— 这一组里默认要走的那
+    一条。`取消` 只收面板；另两颗各重跑一次那道门，差别只在没拿到授权时开不开选择器。
+    画的是「位置」那一组里的情形：这一问在实现里顶掉的是**按钮那一行**，卡里其余的行不动。
+    """
+    e = status_bar(T)
+    e += top_bar("书库", T)
+    y = STATUS + TOPBAR + 8
+    els, hh = section_header("位置", T)
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(els, T))))
+    y += hh
+    title = "这台设备还没有所有文件访问"
+    body = ("从这里挑的目录，往里拷书多半会写失败 —— 只有 Download、Documents 和这个应用"
+            "自己的目录写得进。可以先去开这一项，也可以照样挑一个。")
+    lines = wrap_cjk(body, 14, W - 4 * PAD, 4)
+    panel_h = 8 + 22 + 8 + 20 * len(lines) + 8 + BUTTON_H + 8
+    row, rh = text_row("书库位置", "/storage/emulated/0/Documents/Folio")
+    e.append(card(PAD, y, W - 2 * PAD, rh + 0.5 + panel_h, T))
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(row, T))))
+    ry = y + rh + 0.5
+    e.append(hairline(ry, PAD + 1 + PAD, W - PAD - 1, T))
+    py = ry + 8
+    e.append(text(PAD + PAD, py + 16, title, 16, "__FG__", 600))
+    by = py + 22 + 8
+    for i, line in enumerate(lines):
+        e.append(text(PAD + PAD, by + 14 + i * 20, line, 14, "__MUTED__"))
+    x = PAD + PAD
+    bx = by + 20 * len(lines) + 8
+    for label, kind in [("取消", "ghost"), ("照样挑", "ghost"), ("去开启", "primary")]:
+        els, bw = button(T, x, bx, label, kind)
+        e.extend(resolve(els, T))
+        x += bw + 8
+    return svg("15-access-question", e, T["label"],
+               "书库：没拿到所有文件访问时先问一句，选择器不抢在那前面", T)
 
 
 def toc_screen(T):
@@ -209,11 +309,15 @@ def storage_screen(T):
     e += top_bar("存储", T)
     y = STATUS + TOPBAR + 8
     # 占用：一整格 —— 读数、环、明细。
-    cap_y, total_y, ring_cy = y + 22, y + 58, y + 160
-    legend_y = y + 264
-    card_h = 264 + len(STORAGE_SLICES) * 24 + 8
+    # 「占用」那一句从前画在卡**里面**：它就是规格里那个组标题（`group.usage`），只是手机那屏
+    # 不摆节头，于是借了卡内的一行。现在它回到卡上方，与清理、位置那两块同一档；卡内的
+    # 读数、环、明细各上移 36（那一句连同它的下垫），卡高跟着减 36。
+    els, hh = section_header("占用", T)
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(els, T))))
+    y += hh
+    total_y, ring_cy, legend_y = y + 40, y + 142, y + 246
+    card_h = 374  # 读数那一句要留在卡内 18 的上垫之下，明细走完再留 8
     e.append(card(PAD, y, W - 2 * PAD, card_h, T))
-    e.append(text(PAD + PAD, cap_y, "占用", 14, T["muted"]))
     e.append(text(PAD + PAD, total_y, "1.2 GB", 30, T["fg"], 600))
     e += donut(W / 2, ring_cy, 82, 54, T)
     for i, (name, bytes_, pct) in enumerate(STORAGE_SLICES):
@@ -222,17 +326,21 @@ def storage_screen(T):
         e.append(text(PAD + PAD + 16, ly + 16.5, name, 16, T["fg"]))
         e.append(text(280, ly + 16, pct, 14, T["muted"], anchor="end"))
         e.append(text(RIGHT, ly + 16.5, f"{bytes_} MB", 16, T["fg"], anchor="end"))
-    y += card_h + GAP_SECT
+    y += card_h + GAP_HEAD
     # 清理：一档一行，右端字节 + ghost 小钮。
+    els, hh = section_header("清理", T)
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(els, T))))
     clean = [clean_row("缩略图缓存", "214 MB", "broom"),
              clean_row("漫画解压缓存", "96 MB", "broom"),
              clean_row("旧日志", "4.2 MB", "broom"),
              clean_row("整理数据库", "12 MB", "database")]
-    y = draw_card(e, y, clean, T)
+    y = draw_card(e, y + hh, clean, T)
     # 位置：两行「路径 + 打开所在文件夹」。
-    y = draw_card(e, y, [titled_row("软件数据目录", content_path_button("/home/reader/.local/share/folio")),
-                         titled_row("日志目录", content_path_button("/home/reader/.local/share/folio/logs"))], T)
-    return svg("08-storage", e, T["label"], "存储：占用环图、清理、数据目录", T)
+    els, hh = section_header("位置", T)
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(els, T))))
+    y = draw_card(e, y + hh, [titled_row("软件数据目录", content_path_button("/home/reader/.local/share/folio")),
+                              titled_row("日志目录", content_path_button("/home/reader/.local/share/folio/logs"))], T)
+    return svg("08-storage", e, T["label"], "存储：占用环图、清理、数据目录（三块各带节头）", T)
 
 
 def about_screen(T):
@@ -270,6 +378,8 @@ SCREENS = [
     ("11-typography-dark.svg", typography_screen, DARK),
     ("12-speech.svg", speech_screen, LIGHT),
     ("13-logging.svg", logging_screen, LIGHT),
+    ("14-search.svg", search_screen, LIGHT),
+    ("15-access-question.svg", access_screen, LIGHT),
 ]
 
 if __name__ == "__main__":

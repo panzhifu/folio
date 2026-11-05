@@ -150,6 +150,24 @@ pub(in crate::ui::features::settings) fn typography_page(cx: &App) -> Page {
                         "动画",
                         "平移",
                     ]),
+                    // 一格纸走多久。配置里早就有这一格（`Appearance::turn_duration`，
+                    // 120..700 ms，默认 280），从前只有阅读面板那条滑条能改，设置页进不去 ——
+                    // 于是「翻页快一点」这件事在设置里搜不到、也说不清归谁管。
+                    // 步长 20 ms：两端拉开是 29 档，按到最慢那一头约三十下，而 10 ms 一档
+                    // 按六七十下才到底 —— 这一格的差别肉眼本来就只有几十毫秒，值不当那个次数。
+                    number(
+                        cx,
+                        NumberSpec {
+                            title: "field.turn_duration",
+                            description: "field.turn_duration.desc",
+                            keywords: &["duration", "speed", "时长", "速度", "毫秒", "ms"],
+                            min: Appearance::TURN_DURATION_MIN,
+                            max: Appearance::TURN_DURATION_MAX,
+                            step: 20.0,
+                        },
+                        |cx| ConfigHolder::default_appearance(cx).turn_duration,
+                        |v, cx| ConfigHolder::edit_appearance(cx, |a| a.turn_duration = v),
+                    ),
                 ],
             ),
             group(
