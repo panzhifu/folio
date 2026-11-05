@@ -1258,6 +1258,85 @@ mod booted {
         .expect("窗口应能渲染");
     }
 
+    /// 导航栏让位这件事现在**四屏共用一句判据**：目的地里面那块 `overflow_y_scroll` 的滚动
+    /// 要冒到外壳的监听上（`on_scroll` 挂在 bubble 相）。这条钉的是接线本身 —— 挑「统计」
+    /// 而不是架面：架面从前自己判过，统计是这次才接上的一屏，冒泡接不通就红在这里，
+    /// 而屏幕上的表现只是「那一屏的栏不会收」。
+    ///
+    /// 窗口开在 700 宽：桌面上那是悬浮侧栏那一档（参与让位）。默认那扇 900 宽是常驻侧栏的
+    /// Expanded 档，本来就不参与，在那儿测只会得到「什么都没发生」的假绿。
+    ///
+    /// 事件按**位置**发（不是按元素 id）：id 那条路只认登记了 `.test_support()` 的元素，
+    /// 而这一屏的滚动容器是裸 `div` —— 按位置发才是真机上发生的事（指针在那里，滚动到那里）。
+    #[gpui_kit::test]
+    fn a_scroll_inside_a_destination_folds_the_navigation(cx: &mut TestAppContext) {
+        use gpui_kit::{
+            InputEvent as _, MouseMoveEvent, ScrollDelta, ScrollEvent, point, px, size,
+        };
+
+        cx.update(gpui_kit::init);
+        let mut shell = None;
+        let handle = cx
+            .open_window(size(px(700.), px(900.)), |window, cx| {
+                crate::ui::services::app_store::install(Store::in_memory().expect("内存库"), cx);
+                ConfigHolder::install(confirmed_config(), cx);
+                let view = cx.new(|cx| AppShell::boot(window, cx));
+                shell = Some(view.clone());
+                Root::new(view, window, cx)
+            })
+            .into();
+        let shell = shell.expect("外壳应已建起");
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            shell.update(cx, |this, cx| this.go(Destination::Stats, window, cx));
+            for _ in 0..3 {
+                window.render_frame(cx);
+            }
+            let at = point(px(350.), px(450.));
+            // 指针先落在那一屏上：`should_handle_scroll` 读的是命中与悬停态。
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: at,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            // 命中表是**上一帧**算出来的：挪完指针不画一帧，`should_handle_scroll` 还按
+            // 老位置判，事件会在监听器门口被拒（gpui 的 `move_pointer` 后面紧跟着就是一帧）。
+            window.render_frame(cx);
+            let scroll = |window: &mut gpui_kit::Window, cx: &mut gpui_kit::App, dy: f32| {
+                window.dispatch_event(
+                    ScrollEvent {
+                        position: at,
+                        delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.render_frame(cx);
+            };
+            assert!(!shell.read(cx).nav.folded(), "开局不该是让位状态");
+
+            // gpui 的约定是向下为负：先回拨一点，不该让位。
+            scroll(window, cx, 60.0);
+            assert!(!shell.read(cx).nav.folded(), "往回拨不该让位");
+
+            // 往下读过线（18 逻辑像素）：栏让开。
+            scroll(window, cx, -40.0);
+            assert!(
+                shell.read(cx).nav.folded(),
+                "统计那屏往下滚该让导航栏让位 —— 接不通就是冒泡没到外壳，屏幕上只是那一屏不会收"
+            );
+
+            // 往回拨够那 8 像素就放回来。
+            scroll(window, cx, 20.0);
+            assert!(!shell.read(cx).nav.folded(), "回拨该把栏放回来");
+        })
+        .expect("窗口应能渲染");
+    }
+
     /// 方向键翻页（PC）——从键绑定一路扎到页号上。
     ///
     /// `reader::view` 那条钉的是 `arrow_turn` 本身；这一条钉的是它**接得上键**：

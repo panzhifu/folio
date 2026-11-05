@@ -21,8 +21,11 @@
 //! [`SizeClass::of`] 在桌面把结果夹到至少 `Medium`。
 
 mod bottom_bar;
+mod fold;
 mod side_nav;
 mod surface;
+
+pub(in crate::ui::shell) use fold::FoldTracker;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{App, IntoElement, Window};
@@ -182,8 +185,10 @@ impl SizeClass {
 /// 调用方在外层决定它占哪条边。`safe` 是宿主的系统 inset：底栏靠 `bottom` 那一条离开
 /// 手势条，嵌入侧栏靠 `top` 那一条让开状态栏 / 挖孔。
 ///
-/// `folded` = 内容正在往下读、导航该让开。浮起来的那两档（Compact 底栏、Medium 卡片）
-/// 各自用弹簧把位移做出来；Expanded（桌面）不参与 —— 那是常驻导航，鼠标滚轮又频繁。
+/// `folded` = 内容正在往下读、导航该让开。判据在一处：外壳听内容那一路的滚动增量
+/// （[`FoldTracker]`），所以**四个目的地同一档行为**，不再是只有架面会收。浮起来的那两档
+/// （Compact 底栏、Medium 卡片）各自用弹簧把位移做出来；Expanded（桌面）不参与 ——
+/// 那是常驻导航，鼠标滚轮又频繁。
 pub fn navigation<F>(
     cx: &mut App,
     current: Destination,

@@ -24,8 +24,8 @@ use gpui_kit::base::{NavMotion, NavOperation, NavPage, NavStack, NavStackEvent, 
 use gpui_kit::component::{ActiveTheme, ThemeMode, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, AppLifecyclePhase, Context, ElementId, Entity,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
-    Subscription, Task, Window, actions, div, px,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, ScrollEvent,
+    SharedString, Styled, Subscription, Task, WeakEntity, Window, actions, canvas, div, px,
 };
 
 use crate::ui::features::notes::{NotesEvent, NotesView};
@@ -38,7 +38,7 @@ use crate::ui::foundation::theme;
 use crate::ui::host;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::storage;
-use navigation::{Destination, SizeClass, navigation};
+use navigation::{Destination, FoldTracker, SizeClass, navigation};
 
 // 系统返回。Android 上 gpui-mobile 把 `AKEYCODE_BACK`（含边缘滑动）与
 // `OnBackInvokedCallback` 都翻成 **escape**，所以绑住 escape 就接住了返回。
@@ -438,11 +438,15 @@ pub struct AppShell {
     chrome_painted: ChromeState,
     /// 到点放开 `chrome_frozen` 的那个闹钟。`Task` 一 drop 就取消计时，所以要存着。
     _chrome_release: Option<Task<()>>,
-    /// 架面在往下读，导航栏暂时让开（`ShelfEvent::Fold` 报进来）。
+    /// 导航栏让位的判据本体（[`FoldTracker`]，住在导航栏那一层）。
+    ///
+    /// 四个目的地共用这一句：内容那一路的滚动增量冒泡到 [`AppShell::note_scroll`]，
+    /// 攒够就收、回拨就放。从前只有架面自己判（它读虚拟列表的位移再报进来），于是别的
+    /// 屏不让位、切回架面又让，读起来像 bug。
     ///
     /// 只影响 Compact 的悬浮底栏与 Medium 的悬浮卡片：Expanded（桌面）的侧栏是常驻
     /// 导航，不参与。真正的位移在 `navigation` 里由弹簧每帧求值 —— 这一格只是目标。
-    nav_folded: bool,
+    nav: FoldTracker,
 }
 
 impl AppShell {
@@ -587,13 +591,6 @@ impl AppShell {
                     this.close_reading(cx);
                 }
             }
-            // 架面滚动换向：导航栏让开 / 放回来。只在状态真的变了时才会收到。
-            ShelfEvent::Fold(folded) => {
-                if this.nav_folded != *folded {
-                    this.nav_folded = *folded;
-                    cx.notify();
-                }
-            }
         });
 
         // 架面那条栈的形状变了 = 导航栏该不该收回来。压进去的是「信息」那一页与某一组
@@ -609,11 +606,8 @@ impl AppShell {
                 // 弹回整架这一刻重查一遍。在那一页里做的事改的是**库**：把最后一本移出
                 // 那个组、新建一个组 —— 而身后那块架面手上还是压页那一刻的组清单，不敲
                 // 这一下，读者回到整架看到的还是那个已经空了的组（它不该再摆出来了）。
-                this.shelf.update(cx, |shelf, cx| {
-                    shelf.force_reload(cx);
-                    shelf.reset_fold(cx);
-                });
-                this.nav_folded = false;
+                this.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+                this.unfold_nav(cx);
                 // 导航栏画不画看栈上压了几页，所以栈一变这一帧就得重画 ——
                 // 不敲这一下，pop 回架面后那条底栏不会自己回来。
                 cx.notify();
@@ -748,7 +742,7 @@ impl AppShell {
                 immersive: false,
             },
             _chrome_release: None,
-            nav_folded: false,
+            nav: FoldTracker::default(),
         }
     }
 
@@ -865,11 +859,8 @@ impl AppShell {
         // 架面的顺序与进度同理：开书把这一本的 `last_opened_at` 顶到最前、退场那一刻
         // 位置刚落库，而架面查库有去重（词没变、架非空就不重查）—— 不在这儿推它一把，
         // 读者读完退回来看到的还是开书前的旧顺序，「最近阅读」排不到前面。
-        self.shelf.update(cx, |shelf, cx| {
-            shelf.force_reload(cx);
-            shelf.reset_fold(cx);
-        });
-        self.nav_folded = false;
+        self.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+        self.unfold_nav(cx);
         // 「笔记」也刚过时了：读者在书里划的线、钉的签，都要等这一下才进那一屏。
         self.notes.update(cx, |notes, cx| notes.refresh(cx));
         cx.notify();
@@ -1071,7 +1062,44 @@ impl AppShell {
             storage::request(cx, storage::Job::Rescan);
         }
         self.destination = destination;
+        // 换屏 = 那一屏的内容位置与这里无关，让位状态回零（判据见 [`Self::unfold_nav`]）。
+        self.unfold_nav(cx);
         cx.notify();
+    }
+
+    /// 内容滚了一点：导航栏该让位就让，该回来就回来。判据在 [`FoldTracker`]。
+    ///
+    /// 三处不参与，各有一条理由：
+    ///
+    /// - **书开着**：阅读层盖在导航栏之上，它那些滚动是翻页与竖滚，与那条栏无关；合书
+    ///   那一刻 [`AppShell::unfold_nav`] 把状态放回来。
+    /// - **Expanded 档**：桌面那条是常驻侧栏，鼠标滚轮又频繁，收掉只会让人找不着北
+    ///   （`navigation` 那一头同样传 `false`，这里连攒都不攒，免得白敲重画）。
+    /// - **减动效档**：让位是一次空间变化，不是必须传达的信息 —— 交回 tracker 处理。
+    fn note_scroll(&mut self, delta_y: f32, window: &Window, cx: &mut Context<Self>) {
+        if self.reading.is_some() || matches!(SizeClass::of(window), SizeClass::Expanded) {
+            return;
+        }
+        if self.nav.scroll(delta_y, cx.reduce_motion()) {
+            self.push_nav_fold(cx);
+        }
+    }
+
+    /// 把让位状态报两处：导航栏（这一格是弹簧的目标）与架面（它那一行搜索带跟着收放 ——
+    /// 它读的是自己手上那份投影，判据不再由它自己算）。
+    fn push_nav_fold(&mut self, cx: &mut Context<Self>) {
+        let folded = self.nav.folded();
+        self.shelf
+            .update(cx, |shelf, cx| shelf.set_fold(folded, cx));
+        cx.notify();
+    }
+
+    /// 回到「没让位」：换目的地、弹回整架、合上一本书。留着不管的症状是读者切到「统计」
+    /// 看见一条藏起来的栏，而那一屏他一眼都没滚过。
+    fn unfold_nav(&mut self, cx: &mut Context<Self>) {
+        if self.nav.reset() {
+            self.push_nav_fold(cx);
+        }
     }
 
     /// 当前目的地那条栈：用 `NavStack` 画栈顶（带转场）。
@@ -1409,7 +1437,7 @@ impl Render for AppShell {
                     .pt(px(safe.top))
                     .child(div().size_full().min_h_0().overflow_hidden().child(content));
                 if !nav_gone {
-                    page = page.child(self.nav(size, &safe, self.nav_folded, window, cx));
+                    page = page.child(self.nav(size, &safe, self.nav.folded(), window, cx));
                 }
                 page.into_any_element()
             } else {
@@ -1420,7 +1448,7 @@ impl Render for AppShell {
                     .bg(cx.theme().background)
                     .text_color(cx.theme().foreground);
                 if !nav_gone {
-                    row = row.child(self.nav(size, &safe, self.nav_folded, window, cx));
+                    row = row.child(self.nav(size, &safe, self.nav.folded(), window, cx));
                 }
                 row.child(
                     div()
@@ -1495,10 +1523,48 @@ impl Render for AppShell {
                     cx.propagate();
                 }
             }))
+            // 四屏共用的那一只耳朵，**画在所有内容之前**：目的地里面的滚动不会冒给祖先的
+            // `on_scroll`（gpui 只把它交给被指定的那一个滚动容器），所以要走
+            // `window.on_mouse_event` 这条窗口级的路 —— 与阅读层记原始触摸的 `touch_follow`
+            // 同一套路。而监听表按绘制顺序排，画在前面才轮得到它第一个收。
+            .child(nav_watch(cx.weak_entity()))
             .child(body)
             .children(overlay)
             .into_any_element()
     }
+}
+
+/// 把窗口级的滚动监听挂上外壳的根。
+///
+/// `canvas` 的绘制回调里注册才活得过一帧：`window.on_mouse_event` 只活到本帧事件分发结束，
+/// 每个绘制帧都要重挂一遍（与阅读层 `body/gestures.rs` 那条 `touch_follow` 同一条规矩）。
+///
+/// 这一格**不吃命中**：canvas 不插 hitbox，所以它摆在最后也不会把目的地与导航栏的点击挡掉；
+/// 它只是听。两相都收的话一次滚动会被记两次，故只认 bubble 那一次（与 `touch_follow` 同一判据）。
+fn nav_watch(shell: WeakEntity<AppShell>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _cx| {
+            let shell = shell.clone();
+            window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                // 只认 capture 那一次：这一格画在最前面，capture 相它是第一个收到事件的
+                // （bubble 相反着走，而目的地那边自己的滚动容器会在那之前把传播停掉 ——
+                // 实测挂在后面的窗口级监听一次都收不到 `ScrollEvent`）。两相都算会把
+                // 同一格增量记两次。
+                if phase.bubble() {
+                    return;
+                }
+                // 行的增量按当前行高折算成像素，与 gpui 自己给滚动容器的那一份同一个换算。
+                let dy = event.delta.pixel_delta(window.line_height()).y;
+                let _ = shell.update(cx, |this, cx| {
+                    this.note_scroll(f32::from(dy), window, cx);
+                });
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
 }
 
 #[cfg(test)]

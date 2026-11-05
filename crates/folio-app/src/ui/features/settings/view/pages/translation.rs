@@ -24,7 +24,7 @@ pub(in crate::ui::features::settings) fn translation_page(cx: &App) -> Page {
         TranslationEngine::OpenAi
     );
     if openai_used {
-        groups.push(openai_group(cx));
+        groups.push(openai_group(cx, tr(cx, "group.translation_openai")));
     }
     if matches!(
         ConfigHolder::translation(cx).engine,
@@ -32,47 +32,10 @@ pub(in crate::ui::features::settings) fn translation_page(cx: &App) -> Page {
     ) {
         groups.push(deepl_group(cx));
     }
-    // AI 与翻译**共用同一份 OpenAI 兼容配置**（地址与密钥只存一处）。读者如果翻译用
-    // Google / DeepL 而 AI 要接自己的服务，那三格在别处没有落点 —— 所以「AI 开着」
-    // 就把它们摆出来，标题照旧：这是同一个端点的两个用途，不是两份设置。
-    let ai = ConfigHolder::ai(cx);
-    if ai.enabled && !openai_used {
-        groups.push(openai_group(cx));
-    }
-    groups.push(ai_group(cx));
+    // AI 那一节早先挂在这一屏末尾，现在它有自己的一屏（`pages/ai.rs`）：那一格换的是
+    // 划词卡片上有没有「问 AI」，跟「这段话由哪只引擎译」不是同一件事，藏在别的屏末尾的
+    // 症状就是找不到。
     page(tr(cx, "page.translation"), IconName::Languages, groups)
-}
-
-/// AI 那一组：只有「要不要」与「用哪只模型」两格，加一行说清地址与密钥在哪填。
-///
-/// **排在最后**：两端的输入框状态按（页、组、行）键控，往前插会把读者正打字那一格错位到
-/// 另一项上（与引擎那一组同一条理由）。
-fn ai_group(cx: &App) -> Group {
-    group(
-        tr(cx, "group.ai"),
-        vec![
-            Row::toggle(
-                tr(cx, "field.ai_enabled"),
-                |cx| ConfigHolder::ai(cx).enabled,
-                |on, cx| ConfigHolder::edit_ai(cx, |ai| ai.enabled = on),
-            )
-            .description(tr(cx, "field.ai_enabled.desc"))
-            .keywords(&["ai", "ask", "gpt", "问 ai", "人工智能"]),
-            Row::text(
-                tr(cx, "field.ai_model"),
-                |cx| SharedString::from(ConfigHolder::ai(cx).model),
-                |value, cx| ConfigHolder::edit_ai(cx, |ai| ai.model = value.to_string()),
-            )
-            .description(tr(cx, "field.ai_model.desc"))
-            .keywords(&["ai", "model", "模型"]),
-            Row::info(
-                tr(cx, "field.ai_endpoint"),
-                tr(cx, "field.ai_endpoint.value"),
-            )
-            .description(tr(cx, "field.ai_endpoint.desc"))
-            .keywords(&["ai", "endpoint", "base url", "地址"]),
-        ],
-    )
 }
 
 /// 目标语言。空串是「跟随界面语言」—— 与配置里的语义同一份，不另造一个布尔。
@@ -130,9 +93,16 @@ fn engine(cx: &App) -> Row {
 
 /// OpenAI 兼容那一档的三格。地址与模型清空时引擎会在发请求前报「还没填」，
 /// 这里不补默认值 —— 边打边存时补回去，读者就删不空这一格。
-fn openai_group(cx: &App) -> Group {
+///
+/// 组标题由调用方给：「翻译」屏叫「OpenAI 兼容」，「AI」屏叫「端点（与翻译共用）」，
+/// 两屏摆的是**同一份配置**（`infra::config::OpenAi` 那三个字段）。分成两份表单的话，
+/// 以后加一格只会加进一屏，两屏就说两套话，而那种分叉在屏上看不出来。
+pub(in crate::ui::features::settings::view::pages) fn openai_group(
+    cx: &App,
+    title: impl Into<SharedString>,
+) -> Group {
     group(
-        tr(cx, "group.translation_openai"),
+        title.into(),
         vec![
             Row::text(
                 tr(cx, "field.translation_openai_base"),

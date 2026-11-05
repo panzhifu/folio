@@ -24,17 +24,37 @@ const PG_ROWS = `https://${ENV_ID}.api.tcloudbasegateway.com/v1/rdb/rest/folio_r
 const ORDER_SHAPE = /^[0-9]{16,40}$/;
 
 function planDays() {
-  // AFDIAN_PLAN_DAYS 形如 {"<plan_id>":365}。读不成 JSON 就当没配 —— 宁可拒所有单，
-  // 不要因为一个手抖的引号把免费单当成付费单放行。
-  try {
-    const parsed = JSON.parse(process.env.AFDIAN_PLAN_DAYS || "{}");
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed;
-    }
-  } catch (_) {
-    /* 落回空表 */
+  // AFDIAN_PLAN_DAYS 形如 "<方案id>=365,<另一个id>=30"，逗号分隔。
+  //
+  // 不用 JSON 是实测挡出来的：值里一带花括号，`tcb config update fn` 就把它当对象送上去，
+  // 回 `Environment.Variables.N.Value ... input type should be string`（2026-11-05），
+  // 于是这张表只能到控制台里手填。写成没有分隔歧义的 kv，整条配置就还能留在脚本里。
+  //
+  // 认不出任何一条就当没配 —— 宁可拒所有单，不要因为一个手抖的引号把免费单当成付费单放行。
+  const table = {};
+  for (const pair of (process.env.AFDIAN_PLAN_DAYS || "").split(",")) {
+    const at = pair.indexOf("=");
+    if (at < 1) continue;
+    const id = pair.slice(0, at).trim();
+    const days = Number(pair.slice(at + 1));
+    if (id && Number.isInteger(days) && days > 0) table[id] = days;
   }
-  return {};
+  return table;
+}
+
+// 这单该兑几天。id 在订单里有两个可能的位置：方案单在 plan_id，单商品（专辑）
+// 在 sku_detail[].album_id（官方示例里后者的 plan_id 是空串）。只认 plan_id 的话，
+// 商品那一类全部落到「不是会员方案」—— 那是收了钱不给货。
+function matchPlan(order) {
+  const table = planDays();
+  const ids = [order.plan_id, ...(order.sku_detail || []).map((s) => s.album_id)].filter(Boolean);
+  for (const id of ids) {
+    const days = Number(table[id]);
+    if (Number.isInteger(days) && days > 0) {
+      return { id, days };
+    }
+  }
+  return null;
 }
 
 function json(res, code, body) {
@@ -186,17 +206,17 @@ async function redeem(req, res, body) {
   if (order.status !== 2) {
     return json(res, 200, { ok: false, state: "unpaid" });
   }
-  const days = Number(planDays()[order.plan_id]);
-  if (!Number.isInteger(days) || days <= 0) {
+  const matched = matchPlan(order);
+  if (!matched) {
     return json(res, 200, { ok: false, state: "plan" });
   }
 
   const claimed = await claim({
     out_trade_no: order.out_trade_no,
     device,
-    plan_id: order.plan_id,
+    plan_id: matched.id,
     buyer_id: order.user_private_id || order.user_id || "",
-    granted_days: days,
+    granted_days: matched.days,
     paid_amount: order.total_amount,
   });
   if (claimed.status >= 400) {
@@ -204,7 +224,7 @@ async function redeem(req, res, body) {
     return json(res, 200, { ok: false, state: "storage" });
   }
   if (claimed.inserted) {
-    return json(res, 200, { ok: true, state: "granted", days });
+    return json(res, 200, { ok: true, state: "granted", days: matched.days });
   }
 
   // 主键撞了：这单被谁用过、是不是同一台设备，回读那行才知道。

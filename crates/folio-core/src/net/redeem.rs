@@ -13,10 +13,12 @@ use super::remote::{Method, Request, Response, Transport};
 
 /// 兑换服务端的入口。挂在 CloudBase HTTP 网关的默认域名上，路径 `folio-redeem`。
 ///
+/// 主机名里那段 `-1476411022` 是账号 UIN，不是可选装饰：不带它的 `shocked-roundworm-d1dqjn15d00708.ap-shanghai...`
+/// 实测回 404 `INVALID_ENV`（2026-11-05），因为环境根本没解析到。
+///
 /// 写死而不是开一格配置：读者能填任意 URL 的话，那格就成了「把订单号发给谁」的开关 ——
 /// 兑换请求带着订单号与设备 id，填错一格等于把这两样交给别人的服务器。
-pub const ENDPOINT: &str =
-    "https://shocked-roundworm-d1dqjn15d00708.ap-shanghai.app.tcloudbase.com/folio-redeem/redeem";
+pub const ENDPOINT: &str = "https://shocked-roundworm-d1dqjn15d00708-1476411022.ap-shanghai.app.tcloudbase.com/folio-redeem/redeem";
 
 /// 一次兑换的三个好结果。
 ///

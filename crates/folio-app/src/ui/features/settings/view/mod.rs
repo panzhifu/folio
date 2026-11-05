@@ -55,6 +55,7 @@ use crate::ui::platform;
 
 // 每一页的构造函数只在 [`spec_pages`] 里用，所以是私有导入而不是再导出。
 use pages::about::about_page;
+use pages::ai::ai_page;
 use pages::appearance::appearance_page;
 use pages::fonts::fonts_page;
 use pages::layout::layout_page;
@@ -99,6 +100,7 @@ pub enum SettingsPage {
     Fonts,
     Speech,
     Translation,
+    Ai,
     Sync,
     Library,
     TxtRules,
@@ -122,7 +124,7 @@ impl SettingsPage {
     /// 变体顺序就是侧栏顺序，而深链靠 [`index`](Self::index) 现算 —— 挪位置不会指错页，
     /// 但会让「第 N 页」这句话在别处（测试、日志、旧截图）对不上，所以三处顺序
     /// （本枚举、`ALL`、[`spec_pages`]）必须一起动；用例里也别写死的序号，要按页名取。
-    pub const ALL: [SettingsPage; 13] = [
+    pub const ALL: [SettingsPage; 14] = [
         SettingsPage::Membership,
         SettingsPage::Appearance,
         SettingsPage::Typography,
@@ -130,6 +132,7 @@ impl SettingsPage {
         SettingsPage::Fonts,
         SettingsPage::Speech,
         SettingsPage::Translation,
+        SettingsPage::Ai,
         SettingsPage::Sync,
         SettingsPage::Library,
         SettingsPage::TxtRules,
@@ -163,6 +166,7 @@ pub(in crate::ui::features::settings) fn spec_pages(
         fonts_page(cx),
         speech_page(cx),
         translation_page(cx),
+        ai_page(cx),
         sync_page(cx),
         library_page(cx),
         txt_rules_page(cx),
@@ -388,6 +392,9 @@ mod tests {
 
     /// 翻译页只在选中那一档时摆引擎私有参数：Google 免 key 没有可填的，切到
     /// OpenAI / DeepL 各多出一组。组排在最后，前面两行的下标不随引擎切换而变。
+    ///
+    /// 「AI 开着就把 OpenAI 那三格也长出来」那条权宜已经撤了 —— AI 有自己的一屏
+    /// （`pages/ai.rs`），所以这一屏的组数只该跟着**翻译用的引擎**走。最后一句钉的就是这件事。
     #[gpui_kit::test]
     fn the_translation_page_reveals_only_the_selected_engines_settings(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -395,7 +402,6 @@ mod tests {
             ConfigHolder::install(Config::default(), cx);
             let index = SettingsPage::Translation.index();
             let notes = card(cx);
-
             let titles = |cx: &App| {
                 spec_pages(cx, &notes)[index]
                     .groups
@@ -407,47 +413,73 @@ mod tests {
             let google = spec_pages(cx, &notes);
             let page = &google[index];
             assert_eq!(page.title, tr(cx, "page.translation"));
-            assert_eq!(page.groups.len(), 2, "输出 + AI（AI 那一组永远在尾上）");
-            assert_eq!(page.groups[0].rows.len(), 2, "译成 + 引擎");
             assert_eq!(
-                page.groups[1].title,
-                tr(cx, "group.ai"),
-                "Google 免 key 没有私有参数，但 AI 那一组照摆 —— 「要不要用」与端点无关"
+                titles(cx),
+                vec![tr(cx, "group.translation_output")],
+                "Google 免 key 没有私有参数，这一屏就只有「译成 + 引擎」那一组"
             );
-            assert_eq!(page.groups[1].rows.len(), 3, "启用 / 模型 / 端点在哪儿");
+            assert_eq!(page.groups[0].rows.len(), 2, "译成 + 引擎");
 
             ConfigHolder::edit_translation(cx, |translation| {
                 translation.engine = folio_core::TranslationEngine::OpenAi
             });
-            let openai = spec_pages(cx, &notes);
-            let page = &openai[index];
-            assert_eq!(page.groups.len(), 3);
+            let page = &spec_pages(cx, &notes)[index];
+            assert_eq!(page.groups.len(), 2);
             assert_eq!(page.groups[1].title, tr(cx, "group.translation_openai"));
             assert_eq!(page.groups[1].rows.len(), 3, "地址 / 模型 / Key");
-            assert_eq!(page.groups[2].title, tr(cx, "group.ai"), "AI 仍排在最后");
 
             ConfigHolder::edit_translation(cx, |translation| {
                 translation.engine = folio_core::TranslationEngine::DeepL
             });
-            let deepl = spec_pages(cx, &notes);
-            let page = &deepl[index];
-            assert_eq!(page.groups.len(), 3);
+            let page = &spec_pages(cx, &notes)[index];
+            assert_eq!(page.groups.len(), 2);
             assert_eq!(page.groups[1].title, tr(cx, "group.translation_deepl"));
             assert_eq!(page.groups[1].rows.len(), 1, "只有 Key");
 
-            // 翻译用 DeepL 而 AI 开着：端点那三格必须有落点，否则「共用一份端点」
-            // 这句话就没有兑现的地方 —— 那条句写在 `ai_group` 上，这里钉它。
+            // 翻译用 DeepL 而 AI 开着：这一屏**不该**长出 OpenAI 那三格了。它们有自己的
+            // 落点（AI 屏），而挂在别人屏末尾的那一组，读者找不到的症状就是「功能没做」。
             ConfigHolder::edit_ai(cx, |ai| ai.enabled = true);
             assert_eq!(
                 titles(cx),
                 vec![
                     tr(cx, "group.translation_output"),
                     tr(cx, "group.translation_deepl"),
-                    tr(cx, "group.translation_openai"),
-                    tr(cx, "group.ai"),
                 ],
-                "AI 开着时 OpenAI 那一组长出来，且排在 AI 之前"
+                "AI 那一组已经从翻译屏搬走，这里不许因为它开着就多长一组"
             );
+        });
+    }
+
+    /// 「AI」那一屏固定两组：AI 自己的两格（要不要 / 问哪只模型）＋ 与翻译共用的端点三格。
+    ///
+    /// 组数与标题都钉住：端点那一组少了，读者就没有地方填地址与密钥，而划词卡片上那一格
+    /// 是按「端点填全了」才出现的 —— 缺落点的症状是「开关拨了却没入口」。
+    #[gpui_kit::test]
+    fn the_ai_page_carries_the_switch_and_the_shared_endpoint(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            let index = SettingsPage::Ai.index();
+            let notes = card(cx);
+            let page = &spec_pages(cx, &notes)[index];
+            assert_eq!(page.title, tr(cx, "page.ai"));
+            assert_eq!(
+                page.groups
+                    .iter()
+                    .map(|group| group.title.clone())
+                    .collect::<Vec<_>>(),
+                vec![tr(cx, "group.ai"), tr(cx, "group.ai_endpoint")],
+                "两组：AI 自己的一组与那份共用端点"
+            );
+            assert_eq!(page.groups[0].rows.len(), 2, "开关 + AI 用的模型");
+            assert_eq!(page.groups[1].rows.len(), 3, "地址 / 模型 / Key");
+
+            // 端点那一组与翻译引擎无关：翻译用 Google（免 key）时 AI 也要能填自己的端点。
+            let again = spec_pages(cx, &notes);
+            assert_eq!(again[index].groups.len(), 2);
+
+            // 页数与导航对得上：这一屏插在翻译之后，深链靠 index 现算。
+            assert!(SettingsPage::Ai.index() > SettingsPage::Translation.index());
         });
     }
 

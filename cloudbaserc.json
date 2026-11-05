@@ -1,4 +1,18 @@
 {
   "$schema": "https://static.cloudbase.net/cli/cloudbaserc.schema.json",
-  "envId": "shocked-roundworm-d1dqjn15d00708"
+  "envId": "shocked-roundworm-d1dqjn15d00708",
+  "functionRoot": "cloudfunctions",
+  "functions": [
+    {
+      "name": "folio-redeem",
+      "isHTTP": true,
+      "runtime": "Nodejs18.15",
+      "timeout": 30,
+      "memorySize": 256,
+      "installDependency": false,
+      "ignore": [
+        "node_modules/**"
+      ]
+    }
+  ]
 }
