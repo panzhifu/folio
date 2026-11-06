@@ -99,8 +99,9 @@ turn_duration = "Duración al pasar de página"
 measure_fill = "Ancho completo"
 # 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
 page_position = "Página %{index} de %{total}"
-# 底栏那一格：一页两栏的对开。窄窗口按不下去时自动退回单页，名字不必跟着改。
+# 「分页」那一行里的一档：一页两栏的对开。窄窗口放不下两栏时自动退回单页，名字不必跟着改。
 mode_spread = "Dos páginas"
+mode_single = "Una página"
 # 选中菜单条（M6/M7）：一条只有图标的动作浮条 + 一条颜色胶囊，就地压在正文上。
 sel_copy = "Copiar"
 sel_highlight = "Resaltar"
@@ -313,6 +314,8 @@ toc_max_lines = "Líneas por título"
 "toc_max_lines.desc" = "Cuántas líneas puede ocupar un título largo antes de cortarse con puntos suspensivos."
 toc_dim_read = "Atenuar capítulos leídos"
 "toc_dim_read.desc" = "Los capítulos que ya abriste se dibujan apagados en el índice."
+# 阅读设置「排版」里那一行的标题：一张纸上摆几栏。摆法跟着阅读位置一起落库，不在配置里。
+page_mode = "Páginas"
 page_turn = "Animación de cambio"
 "page_turn.desc" = "Cómo se mueve la hoja al pasarla: deslizar, cubrir o nada. «Desplazar hacia abajo» cambia este libro a desplazamiento continuo; cualquier animación de papel lo devuelve a paginado o doble página. Cambiarlo no recompone ningún capítulo."
 turn_duration = "Duración al pasar de página"

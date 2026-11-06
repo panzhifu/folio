@@ -116,9 +116,10 @@ turn_duration = "Page turn duration"
 measure_fill = "Full width"
 # The scale for paged / spread; continuous scroll reads "section" instead.
 page_position = "Page %{index} of %{total}"
-# The bottom-bar entry: two pages side by side. Narrow windows fall back to one
-# page on their own, so the label does not change with it.
+# One arm of the `Pages` row: two pages side by side.
+# Narrow windows fall back to one page on their own, so the label does not change with it.
 mode_spread = "Two pages"
+mode_single = "Single page"
 # Selection menu bar (M6/M7): icon-only action bar plus a colour capsule, in place.
 sel_copy = "Copy"
 sel_highlight = "Highlight"
@@ -336,6 +337,8 @@ toc_max_lines = "Title lines"
 "toc_max_lines.desc" = "How many lines a long title may take before it is truncated with an ellipsis."
 toc_dim_read = "Dim chapters you have read"
 "toc_dim_read.desc" = "Chapters you have opened are drawn faded in the contents list."
+# Title of the row in the reading settings that says how many pages fit on one sheet.
+page_mode = "Pages"
 page_turn = "Page-turn animation"
 "page_turn.desc" = "How the page moves when you turn it: slide, cover, or not at all. Choosing “scroll” switches this book to continuous scrolling; choosing any paper animation switches it back to paged or spread. Changing it never re-typesets a chapter."
 turn_duration = "Page turn duration"

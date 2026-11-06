@@ -142,7 +142,7 @@ impl ReadingPage {
         })];
         // 阅读设置那一屏自己的实体：弹层的开合与换档都要重画这一屏（`layers_up` 那个数
         // 与底栏那一格的选中态读的是它），所以观察一道，与目录同一形状。
-        let settings = cx.new(ReadingSheet::new);
+        let settings = cx.new(|cx| ReadingSheet::new(reader.clone(), cx));
         watches.push(cx.observe(&settings, |_, _, cx| cx.notify()));
         // 目录那一屏自己的实体：它要观察它（弹层的开合与换档都得重画这一屏，
         // `layers_up` 那个数与顶栏底栏的挂载都读它），也要听它报回来的两件事。
@@ -511,14 +511,6 @@ impl ReadingPage {
         }
         self.toc.update(cx, |panel, cx| panel.toggle(cx));
         cx.notify();
-    }
-
-    /// 连续 ⇄ 双页。换档不动位置：进度是「第几个字」，两档之间搬的是同一句话。
-    pub(in crate::ui::features::reader) fn toggle_spread(&mut self, cx: &mut Context<Self>) {
-        let wanted = self.reader.read(cx).wanted_mode();
-        let next = wanted.next();
-        self.reader
-            .update(cx, |reader, cx| reader.set_mode(next, cx));
     }
 
     /// 听书那一下：没念 → 从视口当前段开口；念着 → 暂停；暂停 → 这一段从头再念。

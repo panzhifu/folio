@@ -5,7 +5,7 @@
 //! `chrome` 里判，两块弹层开没开在它们自己的实体里判，这里只画。
 
 use crate::ui::components::TopBar;
-use crate::ui::features::reader::model::chrome::{self, PageMode};
+use crate::ui::features::reader::model::chrome;
 
 use crate::ui::features::reader::view::bands;
 use crate::ui::services::l10n::tr;
@@ -216,37 +216,25 @@ impl ReadingPage {
     }
 
     /// 一排入口。两块带档位的（目录、设置）各是一块盖住整屏的弹层，选中态读弹层自己的状态；
-    /// 夜间是当场生效的动作，双页是当场换摆法 —— 四件事不同，所以只有带档位的那三格吃 `selected`。
+    /// 夜间是当场生效的动作 —— 三件事不同，所以只有带档位的那两格吃 `selected`。
     ///
     /// 「排版」那一格早在 2026-10-16 并进了设置那块面板；那一块面板现在又是底部弹层
     /// （见 [`ReadingSheet`](crate::ui::features::reader::components::reading_sheet::ReadingSheet)），
     /// 行距、段距、版心、字体家族都搬了进去，所以这一排不再有「更多设置」那一格。
+    /// 「双页」那一格这一轮也搬了进去，落在设置里「分页」那一行 —— 那一排每多一格，手机上
+    /// 每一格就更窄一分，而换摆法不是翻几页就要碰一次的动作。
     /// 听书在卡片上方那颗圆钮（[`Self::speech_fab`]）。
     pub(in crate::ui::features::reader) fn entry_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let toc_open = self.toc.read(cx).is_open(cx);
         let settings_open = self.settings.read(cx).is_open(cx);
         let dark = cx.theme().mode == ThemeMode::Dark;
-        // 「双页」这一格只管单页 ⇄ 双页，连续滚动不归它 —— 那一档现在只有「翻页方式」
-        // 那条列表里「上下滚动」这一格进得去（`chrome::reconcile`）。所以读者选了上下
-        // 滚动时这一格整个不摆：摆一颗按下去只会把书从滚动里踢回分页的键，读起来是两
-        // 个控件在抢同一件事。
-        let spread_mode = self.reader.read(cx).wanted_mode();
         // 「放大整页」那一格**只在定版式那一族摆**：那一族才有「这一页就是一张图」这件
         // 事，可重排那一族的插图另有入口（按宽度退档那一格在正文里，不在这一排）。
         let fixed = self.reader.read(cx).fixed().is_some();
-        // 定版式也摆双页：那一档是**相邻两页各占半张**（`fixed::fixed_slots`），
-        // 不是把一页排成两栏。连续竖滚那一档由「翻页方式 → 上下滚动」进入，
-        // 这一格同样不摆。
-        let spread_shown = spread_mode != PageMode::Continuous;
-        // 选中态读**读者选的那一档**而不是生效档：手机上按下去会先亮双页再被宽度退成
-        // 分页，读按钮的人要看到自己按着了。
-        let spread = spread_mode == PageMode::Spread;
         let page_toc = cx.entity().clone();
         let page_night = cx.entity().clone();
-        let page_spread = cx.entity().clone();
         let page_settings = cx.entity().clone();
         let night_label = tr(cx, if dark { "reader.day" } else { "reader.night" });
-        let spread_label = tr(cx, "reader.mode_spread");
         let zoom_label = tr(cx, "reader.zoom_page");
         h_flex()
             .w_full()
@@ -269,8 +257,7 @@ impl ReadingPage {
             // 长按就是挑字），于是那一击不能再拿去看图。入口得有个不跟选中抢的地方，
             // 而底栏这一排正是读者已经在找功能的位置。
             //
-            // 只给图标，与「双页」那一格同一条理由：一排几格各带两个字，手机上每格会被
-            // 挤到点不准。
+            // 只给图标：这一排几格各带两个字的话，手机上每格会被挤到点不准。
             .when(fixed, |row| {
                 let zoom_reader = self.reader.clone();
                 let zoom_viewer = self.image_viewer.clone();
@@ -303,24 +290,6 @@ impl ReadingPage {
                                 window,
                                 cx,
                             );
-                        }),
-                )
-            })
-            .when(spread_shown, |row| {
-                row.child(
-                    // 这一格只给图标：一排几格入口再各带两个字，手机上每格会被挤到点不准。
-                    // 双页按宽度退档，所以这格在窄屏上也仍然按得下去（按下去就是分页）。
-                    Button::new("entry-spread")
-                        .ghost()
-                        .small()
-                        .flex_1()
-                        .justify_center()
-                        .selected(spread)
-                        .icon(IconName::Columns3)
-                        .tooltip(spread_label.clone().to_string())
-                        .accessibility_label(spread_label.clone())
-                        .on_click(move |_, _, cx| {
-                            page_spread.update(cx, |this, cx| this.toggle_spread(cx))
                         }),
                 )
             })
@@ -360,7 +329,7 @@ impl ReadingPage {
 
     /// 听书那颗圆钮：浮在底栏卡片**上方的右端**。
     ///
-    /// 原来它只是入口排里的一格图标。那一排现在有四格（目录 / 双页 / 夜间 / 设置），
+    /// 原来它只是入口排里的一格图标。那一排当时已经摆到四格（目录 / 双页 / 夜间 / 设置），
     /// 再挤一格在手机上每格就被挤到按不准；而听书与它们不同类 —— 它是有状态的开关
     /// （念着 / 停了），圆钮比一排里的图标更像开关。位置贴着底栏右缘、压在卡片上方的
     /// 正文上：拇指从右下角自然够得到，也不占卡片里已经排满的那一行。

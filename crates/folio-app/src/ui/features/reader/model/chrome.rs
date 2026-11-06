@@ -280,18 +280,12 @@ impl PageMode {
         }
     }
 
-    /// 点一下「双页」那颗切到哪一档：单页 ⇄ 双页。
+    /// 阅读设置里「分页」那一行摆出来的两档：一页一栏与一页两栏。
     ///
-    /// **连续滚动不在这一循环里**：那一档现在由「翻页方式」那条列表里唯一的入口决定
-    /// （选「上下滚动」，见 [`reconcile`]），按钮不再顺手把读者从滚动里踢出来。从前它是
-    /// 连续 ⇄ 双页，于是手机上那颗按钮同时管着两件不相干的事：既要决定滚还是翻，
-    /// 又要决定一屏一页还是一屏两页。
-    pub fn next(self) -> Self {
-        match self {
-            Self::Paged | Self::Continuous => Self::Spread,
-            Self::Spread => Self::Paged,
-        }
-    }
+    /// **连续滚动不在这一行里**：那一档只由「翻页方式」那条列表里唯一的入口决定
+    /// （选「上下滚动」，见 [`reconcile`]）。一行里出现两栏与滚动，读者按下哪一格都会
+    /// 把另一件事顶掉，那就是两个控件在抢同一件事。
+    pub const PAGE_ROW: [Self; 2] = [Self::Paged, Self::Spread];
 }
 
 /// 双页的中缝：取读者自己那条页边距，并给一条下限。
@@ -690,12 +684,6 @@ mod tests {
                     turn == PageTurn::Scroll,
                     "{turn:?} 从 {started:?} 出发落进了 {mode:?}：连续滚动与纸面动画同时成立"
                 );
-                // 双页那颗按钮不该把读者送回连续里（那一档只有列表管得着）。
-                assert_ne!(
-                    mode.next(),
-                    PageMode::Continuous,
-                    "{turn:?} + {started:?} 落进 {mode:?} 之后点双页会掉回连续"
-                );
             }
         }
         // 装不下两栏的那本（默认档是单页）从连续里走出去时，落的是单页不是双页。
@@ -705,10 +693,16 @@ mod tests {
         );
     }
 
+    /// 「分页」那一行摆的两档：只有单页与双页，**永不含连续滚动** —— 那一格按下去只会把
+    /// 读者从滚动里踢回纸面，是两件不相干的事挤在同一个入口里。这条从前由那颗按钮的
+    /// 循环律（`next`）答，按钮搬进设置、改成显式选档之后，由这一行摆哪两档答。
     #[test]
-    fn the_spread_button_only_cycles_between_single_and_double() {
-        assert_eq!(PageMode::Paged.next(), PageMode::Spread);
-        assert_eq!(PageMode::Spread.next(), PageMode::Paged);
+    fn the_page_row_offers_single_and_double_but_never_continuous() {
+        assert_eq!(
+            PageMode::PAGE_ROW,
+            [PageMode::Paged, PageMode::Spread],
+            "「分页」那一行该摆单页与双页两档"
+        );
         for mode in [PageMode::Continuous, PageMode::Paged, PageMode::Spread] {
             assert_eq!(
                 PageMode::from_storage_name(mode.storage_name()),

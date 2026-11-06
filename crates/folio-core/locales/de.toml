@@ -99,8 +99,9 @@ turn_duration = "Dauer des Umblätterns"
 measure_fill = "Volle Breite"
 # 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
 page_position = "Seite %{index} von %{total}"
-# 底栏那一格：一页两栏的对开。窄窗口按不下去时自动退回单页，名字不必跟着改。
+# 「分页」那一行里的一档：一页两栏的对开。窄窗口放不下两栏时自动退回单页，名字不必跟着改。
 mode_spread = "Zwei Seiten"
+mode_single = "Eine Seite"
 # 选中菜单条（M6/M7）：一条只有图标的动作浮条 + 一条颜色胶囊，就地压在正文上。
 sel_copy = "Kopieren"
 sel_highlight = "Hervorheben"
@@ -313,6 +314,8 @@ toc_max_lines = "Zeilen pro Titel"
 "toc_max_lines.desc" = "Wie viele Zeilen ein langer Titel im Verzeichnis belegen darf; darüber wird mit Auslassungszeichen gekürzt."
 toc_dim_read = "Gelesene Kapitel abdunkeln"
 "toc_dim_read.desc" = "Kapitel, die du schon aufgeschlagen hast, werden im Verzeichnis blasser gezeichnet."
+# 阅读设置「排版」里那一行的标题：一张纸上摆几栏。摆法跟着阅读位置一起落库，不在配置里。
+page_mode = "Seiten"
 page_turn = "Blätteranimation"
 "page_turn.desc" = "Wie das Blatt beim Umblättern wandert: wischen, überdecken oder gar nicht. „Nach unten scrollen“ schaltet dieses Buch auf fortlaufendes Scrollen um; jede Papieranimation schaltet es zurück auf seitenweise oder doppelseitig. Der Wechsel setzt kein Kapitel neu."
 turn_duration = "Dauer des Umblätterns"

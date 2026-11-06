@@ -71,6 +71,7 @@ use crate::ui::features::reader::model::chrome::{
     MARGIN_X_RANGE, MARGIN_Y_RANGE, MAX_MEASURE_RANGE, PARAGRAPH_GAP_RANGE, SliderSteps,
     TURN_DURATION_RANGE,
 };
+use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 
@@ -293,6 +294,9 @@ fn slider(knob: Knob, cx: &mut Context<ReadingSheet>) -> Entity<SliderState> {
 
 /// 阅读设置那一屏自己的状态。跨帧持有，一页一个（阅读页建它，随阅读页一起活）。
 pub(in crate::ui::features::reader) struct ReadingSheet {
+    /// 那一本书。「分页」那一格读它此刻选的摆法、也把它写回去 —— 那一档不在配置里，
+    /// 它跟着阅读位置一起落库（`PageMode::storage_name`），与目录那一屏同一个形状。
+    reader: Entity<ReaderSession>,
     /// 底部弹层：开合与停在哪一档都在它手里。句柄必须跨帧持有 —— 弹层每帧都要构造
     /// （弹簧的采样在里面），与下面那几条滑条同一条理由。
     sheet: Entity<BottomSheetState>,
@@ -308,13 +312,20 @@ pub(in crate::ui::features::reader) struct ReadingSheet {
 impl ReadingSheet {
     /// 建这一屏。十条滑条各订阅一次：拖动当场生效（换字号重排 / 换背光 / 下一趟翻页走多久），
     /// 所以这里没有「应用」按钮，也没有改了不生效的中间态。
-    pub(in crate::ui::features::reader) fn new(cx: &mut Context<Self>) -> Self {
+    pub(in crate::ui::features::reader) fn new(
+        reader: Entity<ReaderSession>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // 十条滑条由 [`Knob`] 那一张表建出来：两端、细档、初值都在表里，这里不再逐格写数。
         let knobs = Knob::ALL.map(|knob| slider(knob, cx));
         // 弹层自己也要观察：它不是这一屏的子视图，`notify` 只有观察方才收得到，
         // 而开合、换档、读者一把下拉关掉全靠随后那一次重画。
         let sheet = cx.new(BottomSheetState::closed);
         let mut watches = vec![cx.observe(&sheet, |_, _, cx| cx.notify())];
+        // 会话也要观察一道：「分页」那一格念的是它此刻的摆法，而换摆法不止这一格会触发
+        // ——「翻页方式」选「上下滚动」会把这本书带进连续，那一跳发生在渲染帧里
+        // （`view::body` 的 `adopt_mode`），这一屏不听就还按上一档摆选中态。
+        watches.push(cx.observe(&reader, |_, _, cx| cx.notify()));
         // 一条滑条订阅一次：拖出来的那个数交给 [`Knob::apply`] —— 与 `−` / `+` 同一扇门。
         for (state, knob) in knobs.iter().zip(Knob::ALL) {
             watches.push(cx.subscribe(state, move |_, _, event, cx| {
@@ -324,6 +335,7 @@ impl ReadingSheet {
             }));
         }
         Self {
+            reader,
             sheet,
             tab: SheetTab::default(),
             knobs,
@@ -603,6 +615,69 @@ impl ReadingSheet {
     /// （见 `folio_core::infra::config::PageTurn` 为什么这一格不在 `Reader` 里）。
     fn set_page_turn(&mut self, turn: PageTurn, cx: &mut Context<Self>) {
         ConfigHolder::edit_book_appearance(cx, |appearance| appearance.page_turn = turn);
+        cx.notify();
+    }
+
+    /// 「分页」那一格：一张纸上摆几栏。它与「翻页方式」那一格（在「外观」那一段里）各管
+    /// 一件事 —— 那一条是一张纸怎么走，这一条是纸上分几栏；两格合起来就是从前底栏那颗
+    /// 一键切换的钮管所管的事。
+    ///
+    /// 连续滚动**不归这一格**（它只从「翻页方式 → 上下滚动」进），那一档下这一格按不动而
+    /// 且念「上下滚动」：摆一颗按下去只会把这本书踢回纸面的钮，读起来是两个控件在抢同一件
+    /// 事；而把这一格藏掉，读者在设置里就会以为应用没有这个开关。
+    ///
+    /// 两格的落点也不同：「翻页方式」写进这一本的配置差量，这一格跟着**阅读位置**一起落库
+    /// （`PageMode::storage_name`），所以换一本、关掉再开都还在，而全局默认永远是一页一栏。
+    fn page_mode_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.reader.read(cx).wanted_mode();
+        let label_of = |mode| match mode {
+            chrome::PageMode::Continuous => tr(cx, "page_turn.scroll"),
+            chrome::PageMode::Spread => tr(cx, "reader.mode_spread"),
+            chrome::PageMode::Paged => tr(cx, "reader.mode_single"),
+        };
+        // 菜单闭包是 `Fn`、拿不到 `cx`，所以文案在开菜单之前就取好（与「翻页方式」同一形）。
+        // 摆哪两档由 `PageMode::PAGE_ROW` 答，不在这里抄第二份。
+        let items: Vec<(chrome::PageMode, SharedString)> = chrome::PageMode::PAGE_ROW
+            .into_iter()
+            .map(|mode| (mode, label_of(mode)))
+            .collect();
+        let title = tr(cx, "field.page_mode");
+        let sheet = cx.entity().clone();
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .child(div().flex_1().min_w_0().text_base().child(title.clone()))
+            .child(
+                Button::new("reader-page-mode")
+                    .outline()
+                    .small()
+                    .disabled(current == chrome::PageMode::Continuous)
+                    .label(label_of(current).to_string())
+                    .dropdown_caret(true)
+                    .accessibility_label(title)
+                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                        items.iter().fold(menu, |menu, (mode, label)| {
+                            let checked = *mode == current;
+                            let mode = *mode;
+                            // 菜单闭包是 `Fn`，每一项的回调要各自一份句柄（`Entity` 不 `Copy`）。
+                            let sheet = sheet.clone();
+                            menu.item(PopupMenuItem::new(label.clone()).checked(checked).on_click(
+                                move |_, _, cx| {
+                                    sheet.update(cx, |this, cx| this.set_page_mode(mode, cx))
+                                },
+                            ))
+                        })
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// 换摆法走会话那条 `set_mode`，不是直接改字段：那一趟把「读到第几个字」从旧摆法的
+    /// 坐标搬到新摆法里。直接赋值会让「分页切双页」把位置丢回章首（见 `paging::change_mode`）。
+    fn set_page_mode(&mut self, mode: chrome::PageMode, cx: &mut Context<Self>) {
+        self.reader
+            .update(cx, |reader, cx| reader.set_mode(mode, cx));
         cx.notify();
     }
 
@@ -935,6 +1010,8 @@ impl ReadingSheet {
             .px_4()
             .pt_1()
             .pb_6()
+            // 摆法排在「两端对齐」之前：它定的是这一页有几栏，字怎么对齐是栏里的事。
+            .child(self.page_mode_row(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -1039,20 +1116,38 @@ mod tests {
     use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, TestAppContext, px, size};
 
     use super::{Knob, ReadingSheet, SheetTab};
+    use crate::ui::features::reader::model::chrome::PageMode;
+    use crate::ui::features::reader::model::session::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
 
     /// 一扇把**这一屏**摆在根上的窗。底部弹层与八条滑条都要真窗口，而这一屏的渲染路径
-    /// 正是这里要测的那条。
-    fn open_sheet(cx: &mut TestAppContext) -> (Entity<ReadingSheet>, AnyWindowHandle) {
+    /// 正是这里要测的那条。「分页」那一格读的是会话，所以会话也得真建一台 ——
+    /// `boot` 那一格是「起来了但还没打开书」，摆法落在默认档。
+    fn open_sheet_and_book(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ReadingSheet>, Entity<ReaderSession>, AnyWindowHandle) {
         let mut built = None;
+        let mut reader_of = None;
         let handle = cx.open_window(size(px(390.), px(844.)), |window, cx| {
             ConfigHolder::install(Config::default(), cx);
-            let sheet = cx.new(ReadingSheet::new);
+            let reader = cx.new(|cx| ReaderSession::boot(cx));
+            let sheet = cx.new(|cx| ReadingSheet::new(reader.clone(), cx));
             let root_view = sheet.clone();
             built = Some(sheet);
+            reader_of = Some(reader);
             Root::new(root_view, window, cx)
         });
-        (built.expect("这一屏该建起来"), handle.into())
+        (
+            built.expect("这一屏该建起来"),
+            reader_of.expect("会话该建起来"),
+            handle.into(),
+        )
+    }
+
+    /// 同一扇窗，只交这一屏与窗口句柄：会话留在弹层手里，不需要它的那几条不必接。
+    fn open_sheet(cx: &mut TestAppContext) -> (Entity<ReadingSheet>, AnyWindowHandle) {
+        let (sheet, _reader, handle) = open_sheet_and_book(cx);
+        (sheet, handle)
     }
 
     /// 滑条此刻指着哪儿。
@@ -1351,6 +1446,50 @@ mod tests {
             cx.update(|cx| ConfigHolder::default_reader(cx)).image_scale,
             ImageScale::Screen,
             "书里那一格不许改到全局默认；默认档是「铺满」（2026-10-31 从跟书换过来）"
+        );
+    }
+
+    /// 「分页」那一格：两档都选得动，而落点是**那一本书的摆法**（跟着阅读位置一起落库），
+    /// 不是配置。两条红路各在一头：只写配置不写会话，按下去书里不换栏；接了线却从没画
+    /// 出来 —— 所以先把三段各画一帧再按。
+    #[gpui_kit::test]
+    fn the_page_row_writes_the_book_itself(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (sheet, reader, handle) = open_sheet_and_book(cx);
+
+        sheet.update(cx, |sheet, cx| sheet.toggle(cx));
+        for tab in SheetTab::ALL {
+            sheet.update(cx, |sheet, cx| sheet.select_tab(tab, cx));
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("这一屏该画得出来");
+        }
+
+        for mode in PageMode::PAGE_ROW {
+            sheet.update(cx, |sheet, cx| sheet.set_page_mode(mode, cx));
+            assert_eq!(
+                reader.read_with(cx, |session, _| session.wanted_mode()),
+                mode,
+                "按下去这本书该落在 {mode:?}，实得别的档就是没写进会话"
+            );
+        }
+    }
+
+    /// 摆法落在连续那一档时「排版」那一段仍画得出来，而且画一帧不许把读者的摆法改掉。
+    /// 这一格此刻念「上下滚动」并按不动 —— 那一档只由「翻页方式」那条列表管，画它走的
+    /// 是禁用态那一条路，与另外三段同一份「先画出来再说」。
+    #[gpui_kit::test]
+    fn the_page_row_draws_while_the_book_is_scrolling(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (sheet, reader, handle) = open_sheet_and_book(cx);
+        sheet.update(cx, |sheet, cx| sheet.toggle(cx));
+        sheet.update(cx, |sheet, cx| sheet.select_tab(SheetTab::Layout, cx));
+        reader.update(cx, |session, cx| session.set_mode(PageMode::Continuous, cx));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("连续那一档下「排版」该画得出来");
+        assert_eq!(
+            reader.read_with(cx, |session, _| session.wanted_mode()),
+            PageMode::Continuous,
+            "画一帧不许顺手把摆法改掉"
         );
     }
 }
