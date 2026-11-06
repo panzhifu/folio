@@ -780,6 +780,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitvec"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1489fcb93a5bb47da0462ca93ad252ad6af2145cce58d10d46a83931ba9f016b"
+dependencies = [
+ "funty",
+ "radium",
+ "tap",
+ "wyz",
+]
+
+[[package]]
 name = "block"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -869,13 +881,34 @@ dependencies = [
 
 [[package]]
 name = "brotli"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc97b8f16f944bba54f0433f07e30be199b6dc2bd25937444bbad560bcea29bd"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor 4.0.3",
+]
+
+[[package]]
+name = "brotli"
 version = "8.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
- "brotli-decompressor",
+ "brotli-decompressor 5.0.3",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a334ef7c9e23abf0ce748e8cd309037da93e606ad52eb372e4ce327a0dcfbdfd"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
 ]
 
 [[package]]
@@ -2055,7 +2088,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2271,6 +2304,7 @@ dependencies = [
  "libc",
  "log",
  "read-fonts 0.46.0",
+ "serde_json",
  "skera",
  "tempfile",
  "tracing",
@@ -2322,19 +2356,21 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "ttf-parser",
  "tts",
  "unicode-bidi",
  "unicode-linebreak",
  "unicode-script",
  "ureq",
  "url",
+ "woff2-patched",
  "zip",
 ]
 
 [[package]]
 name = "folio-curl"
 version = "0.1.0"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9df6f753841792b73d7357edf480dbb85fb71818#9df6f753841792b73d7357edf480dbb85fb71818"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=5631b68d91fa09ae2081f6eef366cd484e157947#5631b68d91fa09ae2081f6eef366cd484e157947"
 dependencies = [
  "bytemuck",
 ]
@@ -2417,6 +2453,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "four-cc"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
+
+[[package]]
 name = "freetype-sys"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2435,6 +2477,12 @@ checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "funty"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
 name = "futf"
@@ -2737,13 +2785,13 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.58.0",
+ "windows 0.62.2",
 ]
 
 [[package]]
 name = "gpui-base"
 version = "0.9.0"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#1c902056e22090a9ca0dba66cca3281f035235c5"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#b92bb66d148fca10e15d1e3fb77d565ac4d306ec"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2784,7 +2832,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.0"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#1c902056e22090a9ca0dba66cca3281f035235c5"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#b92bb66d148fca10e15d1e3fb77d565ac4d306ec"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2831,7 +2879,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.9.0"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#1c902056e22090a9ca0dba66cca3281f035235c5"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#b92bb66d148fca10e15d1e3fb77d565ac4d306ec"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3156,7 +3204,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.9.0"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#1c902056e22090a9ca0dba66cca3281f035235c5"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#b92bb66d148fca10e15d1e3fb77d565ac4d306ec"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -3172,7 +3220,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.9.0"
-source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#1c902056e22090a9ca0dba66cca3281f035235c5"
+source = "git+https://github.com/longbridge/gpui-kit.git?branch=main#b92bb66d148fca10e15d1e3fb77d565ac4d306ec"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -3186,7 +3234,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.11"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9df6f753841792b73d7357edf480dbb85fb71818#9df6f753841792b73d7357edf480dbb85fb71818"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=5631b68d91fa09ae2081f6eef366cd484e157947#5631b68d91fa09ae2081f6eef366cd484e157947"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3257,7 +3305,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-apple"
 version = "0.3.11"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9df6f753841792b73d7357edf480dbb85fb71818#9df6f753841792b73d7357edf480dbb85fb71818"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=5631b68d91fa09ae2081f6eef366cd484e157947#5631b68d91fa09ae2081f6eef366cd484e157947"
 dependencies = [
  "anyhow",
  "async-task",
@@ -3506,7 +3554,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.11"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9df6f753841792b73d7357edf480dbb85fb71818#9df6f753841792b73d7357edf480dbb85fb71818"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=5631b68d91fa09ae2081f6eef366cd484e157947#5631b68d91fa09ae2081f6eef366cd484e157947"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3662,7 +3710,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.11"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9df6f753841792b73d7357edf480dbb85fb71818#9df6f753841792b73d7357edf480dbb85fb71818"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=5631b68d91fa09ae2081f6eef366cd484e157947#5631b68d91fa09ae2081f6eef366cd484e157947"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3689,7 +3737,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.11"
-source = "git+https://github.com/panzhifu/gpui-folio?rev=9df6f753841792b73d7357edf480dbb85fb71818#9df6f753841792b73d7357edf480dbb85fb71818"
+source = "git+https://github.com/panzhifu/gpui-folio?rev=5631b68d91fa09ae2081f6eef366cd484e157947#5631b68d91fa09ae2081f6eef366cd484e157947"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3841,7 +3889,7 @@ dependencies = [
 [[package]]
 name = "hayro"
 version = "0.9.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=cedf813b#cedf813b78def437a94a461cdd76c12fdb4d127f"
+source = "git+https://github.com/panzhifu/hayro.git?rev=6aa497f9f29af2734de73166d6eb93d62512d619#6aa497f9f29af2734de73166d6eb93d62512d619"
 dependencies = [
  "ab_glyph_rasterizer",
  "bytemuck",
@@ -3857,21 +3905,21 @@ dependencies = [
 [[package]]
 name = "hayro-ccitt"
 version = "0.5.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=cedf813b#cedf813b78def437a94a461cdd76c12fdb4d127f"
+source = "git+https://github.com/panzhifu/hayro.git?rev=6aa497f9f29af2734de73166d6eb93d62512d619#6aa497f9f29af2734de73166d6eb93d62512d619"
 
 [[package]]
 name = "hayro-cmap"
 version = "0.1.1"
-source = "git+https://github.com/panzhifu/hayro.git?rev=cedf813b#cedf813b78def437a94a461cdd76c12fdb4d127f"
+source = "git+https://github.com/panzhifu/hayro.git?rev=6aa497f9f29af2734de73166d6eb93d62512d619#6aa497f9f29af2734de73166d6eb93d62512d619"
 dependencies = [
- "brotli",
+ "brotli 8.0.4",
  "hayro-postscript",
 ]
 
 [[package]]
 name = "hayro-font"
 version = "0.5.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=cedf813b#cedf813b78def437a94a461cdd76c12fdb4d127f"
+source = "git+https://github.com/panzhifu/hayro.git?rev=6aa497f9f29af2734de73166d6eb93d62512d619#6aa497f9f29af2734de73166d6eb93d62512d619"
 dependencies = [
  "bitflags 2.13.2",
  "hayro-cmap",
@@ -3886,7 +3934,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.9.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=cedf813b#cedf813b78def437a94a461cdd76c12fdb4d127f"
+source = "git+https://github.com/panzhifu/hayro.git?rev=6aa497f9f29af2734de73166d6eb93d62512d619#6aa497f9f29af2734de73166d6eb93d62512d619"
 dependencies = [
  "bitflags 2.13.2",
  "hayro-cmap",
@@ -3902,7 +3950,7 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.4.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=cedf813b#cedf813b78def437a94a461cdd76c12fdb4d127f"
+source = "git+https://github.com/panzhifu/hayro.git?rev=6aa497f9f29af2734de73166d6eb93d62512d619#6aa497f9f29af2734de73166d6eb93d62512d619"
 dependencies = [
  "fearless_simd 1.2.0",
  "hayro-ccitt",
@@ -3911,7 +3959,7 @@ dependencies = [
 [[package]]
 name = "hayro-jpeg2000"
 version = "0.5.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=cedf813b#cedf813b78def437a94a461cdd76c12fdb4d127f"
+source = "git+https://github.com/panzhifu/hayro.git?rev=6aa497f9f29af2734de73166d6eb93d62512d619#6aa497f9f29af2734de73166d6eb93d62512d619"
 dependencies = [
  "fearless_simd 1.2.0",
 ]
@@ -3919,12 +3967,12 @@ dependencies = [
 [[package]]
 name = "hayro-postscript"
 version = "0.2.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=cedf813b#cedf813b78def437a94a461cdd76c12fdb4d127f"
+source = "git+https://github.com/panzhifu/hayro.git?rev=6aa497f9f29af2734de73166d6eb93d62512d619#6aa497f9f29af2734de73166d6eb93d62512d619"
 
 [[package]]
 name = "hayro-syntax"
 version = "0.9.0"
-source = "git+https://github.com/panzhifu/hayro.git?rev=cedf813b#cedf813b78def437a94a461cdd76c12fdb4d127f"
+source = "git+https://github.com/panzhifu/hayro.git?rev=6aa497f9f29af2734de73166d6eb93d62512d619#6aa497f9f29af2734de73166d6eb93d62512d619"
 dependencies = [
  "flate2",
  "hayro-ccitt",
@@ -4138,7 +4186,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -6581,7 +6629,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6604,6 +6652,12 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "radium"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
@@ -7173,7 +7227,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7294,6 +7348,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "safer-bytes"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9814c78d534f27a438fcb57091d6deed0634b60e4e500fee28fe5990adf5ea54"
+dependencies = [
+ "bytes",
+ "paste",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -8217,6 +8282,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tap"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
 name = "tar"
 version = "0.4.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8248,7 +8319,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9556,7 +9627,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10266,6 +10337,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "woff2-patched"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb9e0d17aedee2afac15749407e107edce8485f57b7ad9fb929f0bbdf2c28f24"
+dependencies = [
+ "bitvec",
+ "brotli 7.0.0",
+ "bytes",
+ "four-cc",
+ "safer-bytes",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "write-fonts"
 version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10283,6 +10368,15 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "wyz"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
+dependencies = [
+ "tap",
+]
 
 [[package]]
 name = "x11"

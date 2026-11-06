@@ -7,10 +7,10 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use super::{Found, Hit, Options, Query, fold, scan, scan_book_at, scan_chapter};
+use super::{Found, Hit, Options, Query, fold, scan, scan_book_at, scan_chapter, scan_with_sink};
 use crate::content::document::{Document, from_content};
 use crate::content::format::epub::tests::published_shape_epub;
-use crate::content::format::{Chapter, Content, DocMeta, FlowDoc, visible_text};
+use crate::content::format::{Chapter, Content, DocMeta, FlowDoc, visible_text, visible_text_only};
 use crate::infra::task::StageCtx;
 
 /// 一本正文就在手上的书：每对 `(章名, XHTML)` 一章。
@@ -720,4 +720,73 @@ fn a_wordless_book_scans_to_nothing_and_still_counts_its_pages() {
     assert_eq!(out.chapters, 3, "三页照实报 —— 界面念得出「这一本没有字」");
     assert_eq!(out.scanned, 3, "三页都扫过（每页都是空串）");
     assert!(!out.truncated && !out.cancelled);
+}
+
+/// 流式回调：命中一出现就报，而不是等这一批扫完。
+///
+/// 界面那一屏靠它边扫边摆；如果 `scan_with_sink` 只在最后回调一次，症状就是
+/// 「词很稀的书要等全书扫完才看见第一行」—— 与改之前一模一样。
+#[test]
+fn hits_are_reported_chapter_by_chapter_before_the_scan_returns() {
+    let doc = book(&[
+        ("第一章", "<p>猫在窗台上。</p>"),
+        ("第二章", "<p>另一只猫在门口。</p>"),
+        ("第三章", "<p>狗在院子里。</p>"),
+    ]);
+    let query = Query::parse("猫").unwrap();
+    let mut batches: Vec<Vec<(usize, usize)>> = Vec::new();
+    let out = scan_with_sink(
+        doc.as_ref(),
+        &query,
+        &Options::default(),
+        &StageCtx::detached(),
+        &mut |batch| {
+            batches.push(batch.iter().map(|hit| (hit.chapter, hit.start)).collect());
+        },
+    );
+
+    assert_eq!(out.hits.len(), 2, "前置：两处命中");
+    assert_eq!(batches.len(), 2, "两章各报一次，空的那一章不报");
+    assert_eq!(batches[0], vec![(0, 0)], "第一章的命中先到");
+    assert_eq!(
+        batches[1],
+        vec![(0, 0), (1, 3)],
+        "第二批送的是**累计**，不是增量"
+    );
+}
+
+/// 不带 sink 的那条路与带一个空 sink 的那条路必须给出同一份读数。
+#[test]
+fn the_plain_scan_and_the_sink_scan_agree() {
+    let doc = book(&[("第一章", "<p>猫、猫、猫。</p>")]);
+    let query = Query::parse("猫").unwrap();
+    let options = Options::default();
+    let ctx = StageCtx::detached();
+    let plain = scan(doc.as_ref(), &query, &options, &ctx);
+    let with_sink = scan_with_sink(doc.as_ref(), &query, &options, &ctx, &mut |_| {});
+    assert_eq!(plain.hits.len(), with_sink.hits.len());
+    assert_eq!(plain.scanned, with_sink.scanned);
+    assert_eq!(plain.chapters, with_sink.chapters);
+    assert_eq!(plain.truncated, with_sink.truncated);
+    assert_eq!(plain.cursor, with_sink.cursor);
+}
+
+/// 搜索走的纯文本折叠必须与带坐标表的那一条**逐字节相同**：偏移是同一把尺，
+/// 差一个字就会「搜到猫、跳过去是狗」。
+#[test]
+fn visible_text_only_matches_the_text_map() {
+    let samples = [
+        "<p>她的猫，睡了。</p>",
+        "<html><head><style>p{color:red}</style></head><body><p>正文</p><script>x()</script></body></html>",
+        "<div>上<span>下</span>左<b>右</b></div>",
+        "<p>没有 body 的裸片段 &amp; 实体</p>",
+        "<p>  空白\n  照原样  </p>",
+    ];
+    for sample in samples {
+        assert_eq!(
+            visible_text_only(sample),
+            visible_text(sample),
+            "两条折叠在 {sample:?} 上不一致"
+        );
+    }
 }

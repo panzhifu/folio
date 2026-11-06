@@ -24,6 +24,11 @@ pub mod ios;
 #[cfg(target_env = "ohos")]
 pub mod ohos;
 
+// 系统字体全量扫描：实体只在 Android 上走（fontdb 明确不扫 Android 路径，fork 的
+// 手动清单只有 ~24 个），桌面 / iOS / HarmonyOS 不需要这一趟。模块本身不分档编译，
+// 纯函数与测试在桌面也要跑。
+pub mod system_fonts;
+
 // ── 移动三端共用的启动 ────────────────────────────────────────────────────────
 
 #[cfg(mobile)]

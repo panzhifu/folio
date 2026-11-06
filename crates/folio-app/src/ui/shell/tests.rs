@@ -546,10 +546,10 @@ mod booted {
     use crate::ui::shell::AppShell;
     use crate::ui::shell::navigation::Destination;
     use folio_core::infra::i18n::{Locale, t_in};
-    use folio_core::infra::task::ProgressEvent;
+    use folio_core::infra::task::{ByteProgress, ProgressEvent};
     use folio_core::{
-        Candidate, Config, Language, Library, PathsSource, ScanReport, Store, TaskEvent,
-        TaskManager, submit_import,
+        Candidate, Config, ImportLanding, ImportLogEntry, Language, Library, PathsSource,
+        ScanReport, Store, TaskEvent, TaskManager, submit_import,
     };
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
@@ -567,10 +567,20 @@ mod booted {
     /// [`the_welcome_screen_gates_the_app_until_a_library_is_chosen`]），
     /// 既有用例要验的是正常的壳路径，不能被欢迎页挡在门外。
     fn boot(cx: &mut TestAppContext, desktop_host: bool) -> (AnyWindowHandle, Entity<AppShell>) {
+        boot_sized(cx, size(px(900.), px(600.)), desktop_host)
+    }
+
+    /// 同一套壳，但视口由调用方给：导航栏让位只在 Compact / Medium 两档发生（`SizeClass::of`
+    /// 把 840 宽以上判成 Expanded，那一档 `note_scroll` 直接返回），要验让位就得把窗口开窄。
+    fn boot_sized(
+        cx: &mut TestAppContext,
+        window_size: gpui_kit::Size<gpui_kit::Pixels>,
+        desktop_host: bool,
+    ) -> (AnyWindowHandle, Entity<AppShell>) {
         cx.update(gpui_kit::init);
         let mut shell = None;
         let handle = cx
-            .open_window(size(px(900.), px(600.)), |window, cx| {
+            .open_window(window_size, |window, cx| {
                 crate::ui::services::app_store::install(Store::in_memory().expect("内存库"), cx);
                 ConfigHolder::install(confirmed_config(), cx);
                 if desktop_host {
@@ -582,6 +592,79 @@ mod booted {
             })
             .into();
         (handle, shell.expect("外壳应已建起"))
+    }
+
+    /// 起一版「扫描结果已经到手、架上有 40 本」的架面：扫描那几条回归门共用的前置。
+    ///
+    /// 视口由调用方给 —— 导航栏让位只在 840 宽以下发生（`SizeClass::of`）。
+    fn boot_scanned_shelf(
+        cx: &mut TestAppContext,
+        window_size: gpui_kit::Size<gpui_kit::Pixels>,
+    ) -> (
+        AnyWindowHandle,
+        Entity<AppShell>,
+        Entity<ShelfView>,
+        tempfile::TempDir,
+    ) {
+        let (handle, shell) = boot_sized(cx, window_size, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("下载");
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = ScanReport {
+            candidates: (0..30)
+                .map(|ix| {
+                    let name = format!("{ix}.txt");
+                    std::fs::write(dir.join(&name), "正文\n").unwrap();
+                    Candidate {
+                        origin: folio_core::Origin::Local(dir.join(&name)),
+                        name: format!("{ix:02}.txt"),
+                        size: Some(8),
+                    }
+                })
+                .collect(),
+            skipped: 0,
+            truncated: false,
+        };
+        let shelf = stack
+            .read_with(cx, |stack, _| {
+                stack
+                    .current()
+                    .cloned()
+                    .and_then(|top| top.downcast::<ShelfView>().ok())
+            })
+            .expect("书架栈底就是架面本身");
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            shelf.update(cx, |shelf, cx| {
+                shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
+            });
+            // 架面自己也要滚得动，否则「架面不动」那一半量的是空气。
+            let store = crate::ui::services::app_store::handle(cx).expect("书库应已装上");
+            for ix in 0..40 {
+                let path = dir.join(format!("架上{ix:02}.txt"));
+                std::fs::write(&path, "正文\n").unwrap();
+                store
+                    .add_book(
+                        &path,
+                        &folio_core::content::format::DocMeta {
+                            title: format!("架上{ix:02}"),
+                            format: folio_core::Format::Text,
+                            size: 6,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+            for _ in 0..4 {
+                window.render_frame(cx);
+            }
+        })
+        .expect("窗口应能渲染");
+        (handle, shell, shelf, tmp)
     }
 
     /// 已确认书库位置的一份配置。壳里的正常用例都从这里起。
@@ -893,7 +976,7 @@ mod booted {
                 .expect("书架栈底就是架面本身");
             assert_eq!(shelf.read(cx).card_count(), 0, "还没导书时架上是空的");
             assert!(
-                window.try_find("shelf-importing").is_none(),
+                window.try_find("shelf-import-records").is_none(),
                 "没在导入时不该有那一行读数"
             );
 
@@ -907,24 +990,297 @@ mod booted {
                     cx,
                 );
             });
+            // 连画两帧：`Popover` 的那一层要先量一次触发器的 bounds 才把卡挂进弹窗层，
+            // 「开」与「看得见」之间隔了一帧 —— 与上面那条扫描门同一口径。
+            window.render_frame(cx);
             window.render_frame(cx);
             assert!(
-                window.try_find("shelf-importing").is_some(),
-                "进度读数要画出来：这几秒里架面不动，读者只有这一行可看"
+                window.try_find("shelf-import-records").is_some(),
+                "进度那张卡要画出来：这几秒里架面不动，读者只有它可看"
             );
 
             shelf.update(cx, |shelf, cx| {
                 shelf.feed_import_event(TaskEvent::Finished(Ok(outcomes)), cx);
             });
+            // 连画两帧：清单是一条虚拟列表，要先量一帧才排得出行。
             window.render_frame(cx);
-            assert!(
-                window.try_find("shelf-importing").is_none(),
-                "导完那一行读数要收掉"
-            );
+            window.render_frame(cx);
             assert_eq!(
                 shelf.read(cx).card_count(),
                 1,
                 "好的那本要立刻成为架上一格，坏的那本不该把它挡在架外"
+            );
+            // 一批跑完这张卡**不收**：它换成交代那一种内容 —— 一行一本书，结清的先后倒过来排，
+            // 所以第 0 行是那本后端不认的 `.mobi`，第 1 行才是落地的《第一本》。
+            assert!(
+                window.try_find("shelf-import-records").is_some(),
+                "结清之后这张卡还在：它现在说的是哪几本怎么样了"
+            );
+            assert!(
+                window.try_find("shelf-record-open-1").is_some(),
+                "落定的那一本要有一颗「打开」"
+            );
+            assert!(
+                window.try_find("shelf-record-open-0").is_none(),
+                "没进来的那一本没有对象可作用，那颗钮就不该摆上去"
+            );
+
+            // 屏幕上这一列是内存里的，进程一没就没了 —— 这一批同时进了库才叫「记录」。
+            // 「重开一次库还在」由 core 那族门钉（`store::import_log`），这条钉的是**接线**：
+            // 结清的那一批确实写进去了，逐本的结局也带过去了。
+            let log = crate::ui::services::app_store::handle(cx)
+                .expect("书库应已装上")
+                .import_log(10)
+                .unwrap();
+            assert_eq!(log.len(), 2, "这一批两本都该进库");
+            assert!(
+                log.iter()
+                    .any(|entry| entry.landing == folio_core::ImportLanding::Added),
+                "落地的那本要带着「成功」回来"
+            );
+            assert!(
+                log.iter().any(|entry| entry.landing
+                    == folio_core::ImportLanding::Rejected(
+                        folio_core::ImportReject::UnsupportedFormat
+                    )),
+                "没进来的那本要带着它那一档原因回来"
+            );
+        })
+        .expect("窗口应能渲染");
+    }
+
+    /// 回归门：字节读数怎么长成「书名下面那条进度条」。
+    ///
+    /// 记录行不是界面上预摆的（`shelf::view::status` 模块头写了为什么不摆），是
+    /// [`ByteProgress`] 喂出来的：名字对不上就新开一行，那一行下面那条子读的就是这两个数。
+    /// 这条钉住三件事 —— 行确实从字节里长出来、报过的每一本各占一行、第二本不许落在
+    /// 第一本那一条上（那才是「哪一本在传」这个问题的答案）。
+    #[gpui_kit::test]
+    fn the_byte_readout_grows_a_row_with_its_own_bar(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let shelf = stack
+                .read(cx)
+                .current()
+                .cloned()
+                .and_then(|top| top.downcast::<ShelfView>().ok())
+                .expect("书架栈底就是架面本身");
+            assert!(
+                window.try_find("shelf-import-records").is_none(),
+                "没在导入时不该有这张卡"
+            );
+
+            shelf.update(cx, |this, cx| {
+                this.feed_import_event(
+                    TaskEvent::Progress(ProgressEvent {
+                        done: 0,
+                        total: 3,
+                        message: String::new(),
+                    }),
+                    cx,
+                );
+                this.feed_import_event(
+                    TaskEvent::Bytes(ByteProgress {
+                        done: 1 << 20,
+                        total: Some(4 << 20),
+                        name: "基督山伯爵.epub".into(),
+                    }),
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-record-bar-0").is_some(),
+                "报过字节的那一本要有一行，名字下面是按字节走的那条子"
+            );
+
+            // 第二本（总数不知道那一档：服务器没给 `Content-Length`）。
+            shelf.update(cx, |this, cx| {
+                this.feed_import_event(
+                    TaskEvent::Bytes(ByteProgress {
+                        done: 7,
+                        total: None,
+                        name: "没有长度的一本书.bin".into(),
+                    }),
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-record-bar-1").is_some(),
+                "第二本另起一行，不许把读数记到第一本那一条上"
+            );
+        })
+        .expect("窗口应能渲染");
+    }
+
+    /// 回归门：这张卡**由读者关掉**之后剩下的那两条语义。
+    ///
+    /// 从前那两行读数摆在架面上，读者躲不开；换成浮层就多了「关掉」这一手，于是关掉的
+    /// 范围必须说清楚：关掉的是「别一直报进度」，不是「这笔账不用说」。所以同一批的
+    /// 下一条读数不再把卡叫回来，而那一批跑完真有几本没进来时，卡要再出来交代一次。
+    #[gpui_kit::test]
+    fn the_dismissed_import_card_goes_quiet_until_the_batch_reports(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let picked = tmp.path().join("原处");
+        std::fs::create_dir_all(&picked).unwrap();
+        std::fs::write(picked.join("a.txt"), "第一本\n").unwrap();
+        std::fs::write(picked.join("b.mobi"), "后端不认这个扩展名\n").unwrap();
+        let manager = TaskManager::new(1);
+        let store = cx
+            .update(|cx| crate::ui::services::app_store::handle(cx))
+            .expect("书库应已装上");
+        let job = submit_import(
+            &manager,
+            Box::new(PathsSource::picked(vec![
+                picked.join("a.txt"),
+                picked.join("b.mobi"),
+            ])),
+            tmp.path().join("books"),
+            store,
+        );
+        let outcomes = job
+            .events
+            .into_iter()
+            .find_map(|event| match event {
+                TaskEvent::Finished(Ok(outcomes)) => Some(outcomes),
+                _ => None,
+            })
+            .expect("导入作业要以 Finished(Ok(..)) 收尾");
+
+        let progress = |done: u64, total: u64| {
+            TaskEvent::Progress(ProgressEvent {
+                done,
+                total,
+                message: "".into(),
+            })
+        };
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let shelf = stack
+                .read(cx)
+                .current()
+                .cloned()
+                .and_then(|top| top.downcast::<ShelfView>().ok())
+                .expect("书架栈底就是架面本身");
+
+            shelf.update(cx, |this, cx| this.feed_import_event(progress(1, 2), cx));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-import-records").is_some(),
+                "先看一眼：这会儿那张卡在屏幕上"
+            );
+
+            shelf.update(cx, |this, cx| this.dismiss_import_status_for_test(cx));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-import-records").is_none(),
+                "读者关掉这张卡，它就该从屏幕上没了"
+            );
+
+            shelf.update(cx, |this, cx| this.feed_import_event(progress(2, 2), cx));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-import-records").is_none(),
+                "同一批的下一条读数不该把刚关掉的那张卡叫回来"
+            );
+
+            shelf.update(cx, |this, cx| {
+                this.feed_import_event(TaskEvent::Finished(Ok(outcomes)), cx)
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-import-records").is_some(),
+                "一批跑完有了逐本的着落：那一幕是新信息，卡要再出来交代一次"
+            );
+
+            // 读者把这张卡关掉之后，三点菜单里那颗「导入记录」要还能把它翻回来：
+            // `dismiss` 挡的是**自动**冒出来那几次，不挡主动要看的那一次。
+            shelf.update(cx, |this, cx| this.dismiss_import_status_for_test(cx));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-import-records").is_none(),
+                "关掉之后先确认它真的不在了 —— 下一条断言才有意义"
+            );
+            shelf.update(cx, |this, cx| this.open_import_records_for_test(cx));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-import-records").is_some(),
+                "从菜单翻开导入记录：主动要看的那一次不该被上一次的关掉挡住"
+            );
+        })
+        .expect("窗口应能渲染");
+    }
+
+    /// 回归门：**重启之后不许自己弹导入记录。**
+    ///
+    /// 库里那份历史是启动时读回来的（`load_import_log`），它只说明「以前导过」，不是
+    /// 「现在有话要说」。从前判据把「历史非空」也算进自动抬卡那一档，于是每次开软件
+    /// 都先弹一张昨天的记录。这一条钉：历史在库里 → 卡不自己出来；从菜单点名 →
+    /// 还是要能翻出来（历史没丢，只是不吵）。
+    #[gpui_kit::test]
+    fn the_import_log_from_the_last_run_does_not_pop_the_card(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        // 上一次运行留下的那一笔：现在就在库里，架面起来时会被读回来。
+        let store = cx
+            .update(|cx| crate::ui::services::app_store::handle(cx))
+            .expect("书库应已装上");
+        store
+            .record_imports(&[ImportLogEntry {
+                made_at: 0,
+                name: "昨天的.epub".into(),
+                format: Some("EPUB".into()),
+                size: Some(1024),
+                landing: ImportLanding::Added,
+                book_id: None,
+                secs: 1.0,
+            }])
+            .expect("写一条记录");
+
+        cx.update_window(handle, |_, window, cx| {
+            // 多画几帧：读库发生在第一帧渲染里，卡若会自己冒出来也得给它一帧。
+            for _ in 0..4 {
+                window.render_frame(cx);
+            }
+            assert!(
+                window.try_find("shelf-import-records").is_none(),
+                "历史非空不是「现在有话要说」：重启之后不该自动弹导入记录"
+            );
+
+            let shelf = stack
+                .read(cx)
+                .current()
+                .cloned()
+                .and_then(|top| top.downcast::<ShelfView>().ok())
+                .expect("书架栈底就是架面本身");
+            shelf.update(cx, |this, cx| this.open_import_records_for_test(cx));
+            for _ in 0..2 {
+                window.render_frame(cx);
+            }
+            assert!(
+                window.try_find("shelf-import-records").is_some(),
+                "从菜单点名要看的那一次，历史还得翻得出来"
             );
         })
         .expect("窗口应能渲染");
@@ -935,8 +1291,8 @@ mod booted {
     ///
     /// 扫描结果由 [`ShelfView::feed_scan_event`] 喂进来（真实的整机扫描要扫
     /// 测试机的家目录，那条不是门该扫的），**勾选之后的导入是真跑**：
-    /// `import_checked` 把勾中的路径交给后端管线，架上要出现「导入中」的读数。
-    /// 面板要在扫描结果到手时出现、在读数出现时收掉 —— 清单在时盖着架面，
+    /// `import_checked` 把勾中的路径交给后端管线，屏幕正中要出现「正在导入」那张状态卡。
+    /// 面板要在扫描结果到手时出现、在导入开始时收掉 —— 清单在时盖着架面，
     /// 导入开始就该换回「导入中」那一行。
     #[gpui_kit::test]
     fn the_scan_panel_hands_the_checked_rows_to_the_pipeline(cx: &mut TestAppContext) {
@@ -996,10 +1352,12 @@ mod booted {
             // 勾第一行（a.txt）。清单两项同目录：一条头 + 两行，第 1 项就是 a.txt。
             shelf.update(cx, |shelf, cx| shelf.check_scan_row(1, true, cx));
             shelf.update(cx, |shelf, cx| shelf.import_checked_for_test(cx));
+            // 同上一条门：浮层要先量一帧触发器才挂得上。
+            window.render_frame(cx);
             window.render_frame(cx);
             assert!(
-                window.try_find("shelf-importing").is_some(),
-                "导入所选要接上管线：读数行要出现"
+                window.try_find("shelf-import-records").is_some(),
+                "导入所选要接上管线：那张状态卡要出现"
             );
             assert!(
                 window.try_find("shelf-scan-panel").is_none(),
@@ -1145,6 +1503,170 @@ mod booted {
         .expect("窗口应能渲染");
     }
 
+    /// 回归门：清单的搜索与筛选。
+    ///
+    /// 判据（格式怎么认、大小怎么切）在 `folio_core::ScanFilter` 里，core 那边有单元测试；
+    /// 这一条钉的是**接线**：搜索只筛文件名、格式格只筛真扩展名、筛空了说的是「没有符合
+    /// 条件的书」而不是「设备里没找到书」—— 两句话说的不是一回事。也钉了「筛掉的只是
+    /// 摆不摆出来」：结果还在，清掉条件就回来。
+    #[gpui_kit::test]
+    fn the_scan_list_is_filtered_by_name_and_format(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("下载");
+        std::fs::create_dir_all(&dir).unwrap();
+        let books = [
+            ("三体.epub", 5u64 * 1024 * 1024),
+            ("球状闪电.pdf", 50 * 1024 * 1024),
+            ("笔记.txt", 1024),
+        ];
+        let report = ScanReport {
+            candidates: books
+                .iter()
+                .map(|(name, size)| {
+                    std::fs::write(dir.join(name), "正文\n").unwrap();
+                    Candidate {
+                        origin: folio_core::Origin::Local(dir.join(name)),
+                        name: name.to_string(),
+                        size: Some(*size),
+                    }
+                })
+                .collect(),
+            skipped: 0,
+            truncated: false,
+        };
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let shelf = stack
+                .read(cx)
+                .current()
+                .cloned()
+                .and_then(|top| top.downcast::<ShelfView>().ok())
+                .expect("书架栈底就是架面本身");
+            shelf.update(cx, |shelf, cx| {
+                shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
+            });
+            for _ in 0..4 {
+                window.render_frame(cx);
+            }
+            assert_eq!(
+                shelf.read(cx).visible_scan_names_for_test().len(),
+                3,
+                "前置：三本都摆出来"
+            );
+            assert!(
+                window.try_find("shelf-scan-filter-panel").is_none(),
+                "前置：筛选浮层默认收着"
+            );
+
+            // 漏斗打开那张浮层；它开着的时候才在树上。
+            shelf.update(cx, |shelf, cx| {
+                shelf.set_scan_filter_open_for_test(true, cx)
+            });
+            for _ in 0..3 {
+                window.render_frame(cx);
+            }
+            assert!(
+                window.try_find("shelf-scan-filter-panel").is_some(),
+                "点开漏斗该挂出筛选浮层"
+            );
+            shelf.update(cx, |shelf, cx| {
+                shelf.set_scan_filter_open_for_test(false, cx)
+            });
+            for _ in 0..3 {
+                window.render_frame(cx);
+            }
+            assert!(
+                window.try_find("shelf-scan-filter-panel").is_none(),
+                "收起来之后浮层不该还留在树上"
+            );
+
+            // 搜索只筛文件名（不区分大小写之外不做别的）：一个词留下一本。
+            shelf.update(cx, |shelf, cx| shelf.set_scan_query_for_test("闪电", cx));
+            for _ in 0..2 {
+                window.render_frame(cx);
+            }
+            assert_eq!(
+                shelf.read(cx).visible_scan_names_for_test(),
+                vec!["球状闪电.pdf".to_string()]
+            );
+
+            // 清词，改按格式筛。
+            shelf.update(cx, |shelf, cx| shelf.set_scan_query_for_test("", cx));
+            shelf.update(cx, |shelf, cx| {
+                shelf.toggle_scan_format_for_test("epub", cx)
+            });
+            for _ in 0..2 {
+                window.render_frame(cx);
+            }
+            assert_eq!(
+                shelf.read(cx).visible_scan_names_for_test(),
+                vec!["三体.epub".to_string()]
+            );
+            assert!(
+                window.try_find("shelf-scan-pick-0").is_some(),
+                "筛剩的那一本还要画成一张卡"
+            );
+
+            // 筛到空：一句灰字，且清单里一张卡都不剩。
+            shelf.update(cx, |shelf, cx| {
+                shelf.toggle_scan_format_for_test("epub", cx)
+            });
+            shelf.update(cx, |shelf, cx| {
+                shelf.toggle_scan_format_for_test("mobi", cx)
+            });
+            for _ in 0..2 {
+                window.render_frame(cx);
+            }
+            assert!(
+                shelf.read(cx).visible_scan_names_for_test().is_empty(),
+                "这台机器上没有 mobi，筛出来该是空的"
+            );
+            assert!(
+                window.try_find("shelf-scan-empty").is_some(),
+                "筛空了要说「没有符合条件的书」，不能留一屏空白"
+            );
+            assert!(
+                window.try_find("shelf-scan-pick-0").is_none(),
+                "筛掉的行不该还画在清单里"
+            );
+
+            // 大小上限：只留小于 1 MB 的那一本。
+            shelf.update(cx, |shelf, cx| shelf.clear_scan_filter_for_test(window, cx));
+            shelf.update(cx, |shelf, cx| {
+                shelf.set_scan_size_for_test(Some(1024 * 1024), cx)
+            });
+            for _ in 0..2 {
+                window.render_frame(cx);
+            }
+            assert_eq!(
+                shelf.read(cx).visible_scan_names_for_test(),
+                vec!["笔记.txt".to_string()],
+                "小于 1 MB 的只剩那本 1 KB 的"
+            );
+
+            // 结果没有丢：条件清掉就回来。
+            shelf.update(cx, |shelf, cx| shelf.clear_scan_filter_for_test(window, cx));
+            for _ in 0..2 {
+                window.render_frame(cx);
+            }
+            assert_eq!(
+                shelf.read(cx).visible_scan_names_for_test().len(),
+                3,
+                "清掉条件该回到全部三本"
+            );
+            assert!(
+                window.try_find("shelf-scan-empty").is_none(),
+                "有行可摆时那句灰字该收起来"
+            );
+        })
+        .expect("窗口应能渲染");
+    }
+
     /// 回归门：清单滑得动 —— 滚动偏移必须跨帧留住。
     ///
     /// `v_virtual_list` 每帧新建一份内部滚动句柄，不拿 `.track_scroll` 顶掉它，偏移就每帧
@@ -1186,10 +1708,34 @@ mod booted {
             shelf.update(cx, |shelf, cx| {
                 shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
             });
+
+            // 架面先要**自己滚得动**，否则下面那条「卡里滚、架面不动」的断言是空的：
+            // 往库里塞够一屏的副本，再逼架面重查一次。
+            let store = crate::ui::services::app_store::handle(cx).expect("书库应已装上");
+            for ix in 0..40 {
+                let path = dir.join(format!("架上{ix:02}.txt"));
+                std::fs::write(&path, "正文\n").unwrap();
+                store
+                    .add_book(
+                        &path,
+                        &folio_core::content::format::DocMeta {
+                            title: format!("架上{ix:02}"),
+                            format: folio_core::Format::Text,
+                            size: 6,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+
             // 浮层那张卡要先量一次触发器，虚拟列表要先有一次实测的视口才排得出行。
             for _ in 0..4 {
                 window.render_frame(cx);
             }
+
+            // 架面这一头先要**真的滚得动**，否则下面那条「架面不动」连对象都没有。
+            assert_eq!(shelf.read(cx).card_count(), 40, "架上那 40 本要成为格子");
 
             assert!(
                 window.try_find("shelf-scan-pick-0").is_some(),
@@ -1200,16 +1746,30 @@ mod booted {
                 "前置：第 11 本还在视口外"
             );
 
-            // 向下滚 1000（gpui 的约定是向下为负）：行高 92、分组头 28，够把第 11 本抬进
-            // 这一屏。落点取第 0 行那一格的中心 —— 它压在列表那条 `overflow_scroll` 里面。
+            // 向下滚 400（gpui 的约定是向下为负）：行高 64、分组头 28，第 11 本的头落在
+            // 668 —— 400 这一把刚好把它抬进这一屏，而第 1 本（28..92）已经滚出上沿。
+            // 落点取第 0 行那一格的中心 —— 它压在列表那条 `overflow_scroll` 里面。
+            let grid_before = shelf.read(cx).grid_offset_for_test();
             window.scroll(
                 "shelf-scan-pick-0",
-                ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
+                ScrollDelta::Pixels(point(px(0.0), px(-400.0))),
                 cx,
             );
             for _ in 0..4 {
                 window.render_frame(cx);
             }
+
+            // 卡里滚的这一把不该带动身后的架面。**这条在无头窗口里抓不住那个 bug**：
+            // `window.scroll` 按元素中心派发的一次滚轮本来就没落到架面（摘掉 `.occlude()` /
+            // `scroll_guard` 实测都照过）。真机那条路（触摸折出来的滚动）与「顶栏别跟着
+            // 让位」分别由 `the_scan_card_takes_the_touch_scroll_and_the_shelf_does_not`
+            // 与 `scrolling_the_scan_card_does_not_fold_the_nav_bar` 钉住；这一条留着是为了
+            // 别让「清单自己滚不动」在将来某次改动里悄悄成立。
+            assert_eq!(
+                shelf.read(cx).grid_offset_for_test(),
+                grid_before,
+                "清单滚了一把，架面跟着动了 —— 卡盖着的那片格子不该收到这次滚轮"
+            );
 
             assert!(
                 window.try_find("shelf-scan-pick-10").is_some(),
@@ -1221,6 +1781,239 @@ mod booted {
             );
         })
         .expect("窗口应能渲染");
+    }
+
+    /// 回归门：真机那条路（raw `TouchEvent` → 手势识别器）在扫描卡上滑。
+    ///
+    /// 与上一条是两回事，别删其一：`window.scroll` 是按元素中心**直发滚轮**，而真机上是
+    /// 一根手指被识别器折成 `ScrollEvent`（落点是起手点、带 `touch_phase`、之后还有惯性），
+    /// 走的是另一条派发。这条门钉住两头：卡里那一列**滚得动**（否则「架面不动」是空的），
+    /// 架面的偏移**一动不动**；最后在卡外再滑一笔，架面要动 —— 证明触摸这条路本身是通的，
+    /// 前面那条「不动」不是因为事件根本没送到。
+    #[gpui_kit::test]
+    fn the_scan_card_takes_the_touch_scroll_and_the_shelf_does_not(cx: &mut TestAppContext) {
+        use gpui_kit::{InputEvent as _, Pixels, Point, TouchEvent, TouchId, TouchPhase};
+
+        /// 真机那条入口：raw `TouchEvent` 交给 gpui 的手势识别器。
+        fn touch(
+            cx: &mut TestAppContext,
+            handle: AnyWindowHandle,
+            phase: TouchPhase,
+            at: Point<Pixels>,
+        ) {
+            cx.update_window(handle, |_, window, cx| {
+                window.dispatch_event(
+                    TouchEvent {
+                        id: TouchId(1),
+                        phase,
+                        position: at,
+                        predicted_position: None,
+                        force: None,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .expect("事件应送达窗口");
+            cx.run_until_parked();
+        }
+
+        fn render(cx: &mut TestAppContext, handle: AnyWindowHandle, frames: usize) {
+            cx.update_window(handle, |_, window, cx| {
+                for _ in 0..frames {
+                    window.render_frame(cx);
+                }
+            })
+            .expect("窗口应能渲染");
+        }
+
+        let (handle, shell) = boot(cx, false);
+        let stack = shell.read_with(cx, |this, _| {
+            this.stacks[Destination::Shelf.index()].clone()
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("下载");
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = ScanReport {
+            candidates: (0..30)
+                .map(|ix| {
+                    let name = format!("{ix}.txt");
+                    std::fs::write(dir.join(&name), "正文\n").unwrap();
+                    Candidate {
+                        origin: folio_core::Origin::Local(dir.join(&name)),
+                        name: format!("{ix:02}.txt"),
+                        size: Some(8),
+                    }
+                })
+                .collect(),
+            skipped: 0,
+            truncated: false,
+        };
+        let shelf = stack
+            .read_with(cx, |stack, _| {
+                stack
+                    .current()
+                    .cloned()
+                    .and_then(|top| top.downcast::<ShelfView>().ok())
+            })
+            .expect("书架栈底就是架面本身");
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            shelf.update(cx, |shelf, cx| {
+                shelf.feed_scan_event(TaskEvent::Finished(Ok(report)), cx)
+            });
+            // 架面自己也要滚得动，否则「架面不动」那一半量的是空气。
+            let store = crate::ui::services::app_store::handle(cx).expect("书库应已装上");
+            for ix in 0..40 {
+                let path = dir.join(format!("架上{ix:02}.txt"));
+                std::fs::write(&path, "正文\n").unwrap();
+                store
+                    .add_book(
+                        &path,
+                        &folio_core::content::format::DocMeta {
+                            title: format!("架上{ix:02}"),
+                            format: folio_core::Format::Text,
+                            size: 6,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+            for _ in 0..4 {
+                window.render_frame(cx);
+            }
+        })
+        .expect("窗口应能渲染");
+
+        // 起手点取第 0 行那张卡的中心：它压在清单里面。
+        let start = cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window
+                    .try_find("shelf-scan-pick-0")
+                    .expect("第一本要在视口里")
+                    .bounds()
+                    .center()
+            })
+            .expect("窗口应能渲染");
+
+        let grid_before = cx.update(|cx| shelf.read(cx).grid_offset_for_test());
+        let scan_before = cx.update(|cx| shelf.read(cx).scan_offset_for_test());
+
+        touch(cx, handle, TouchPhase::Started, start);
+        touch(
+            cx,
+            handle,
+            TouchPhase::Moved,
+            start - point(px(0.0), px(120.0)),
+        );
+        touch(
+            cx,
+            handle,
+            TouchPhase::Moved,
+            start - point(px(0.0), px(240.0)),
+        );
+        touch(
+            cx,
+            handle,
+            TouchPhase::Ended,
+            start - point(px(0.0), px(240.0)),
+        );
+        render(cx, handle, 20);
+
+        assert!(
+            cx.update(|cx| shelf.read(cx).scan_offset_for_test()) > scan_before,
+            "卡里那一列该跟着手指滚，实测 {} → {}",
+            scan_before,
+            cx.update(|cx| shelf.read(cx).scan_offset_for_test())
+        );
+        assert_eq!(
+            cx.update(|cx| shelf.read(cx).grid_offset_for_test()),
+            grid_before,
+            "卡上的这一笔漏到了身后的架面 —— 它该到卡的清单为止"
+        );
+        // 反向：落在卡外（架面右侧）的同一笔，架面要动。
+        let outside = point(px(800.0), px(300.0));
+        touch(cx, handle, TouchPhase::Started, outside);
+        touch(
+            cx,
+            handle,
+            TouchPhase::Moved,
+            outside - point(px(0.0), px(120.0)),
+        );
+        touch(
+            cx,
+            handle,
+            TouchPhase::Ended,
+            outside - point(px(0.0), px(120.0)),
+        );
+        render(cx, handle, 20);
+        assert!(
+            cx.update(|cx| shelf.read(cx).grid_offset_for_test()) > grid_before,
+            "卡外这一笔该滚架面；没动就说明触摸这条路没送到，上面那条断言是空的"
+        );
+    }
+
+    /// 回归门：滑浮层里的清单，导航栏**不该**让位。
+    ///
+    /// 让位那条监听挂在窗口的捕获相（`AppShell::nav_watch`），比面板自己的
+    /// `stop_propagation` 早跑 —— `occlude` 与 `scroll_guard` 都拦不住它。它会把这笔
+    /// 当成「读者在翻架面」，顶栏收起来、格子的上沿跟着抬，屏幕上就是「滑卡片，后面的
+    /// 书架在动」。`scroll_guard` 每帧报上来的那几块（`ScrollShields`）就是给它判据用的。
+    #[gpui_kit::test]
+    fn scrolling_the_scan_card_does_not_fold_the_nav_bar(cx: &mut TestAppContext) {
+        // 视口开窄：840 宽以上是 Expanded 档，那一档根本不让位（`note_scroll` 直接返回），
+        // 1200 那种窗口上这条门是空的。
+        let (handle, shell, _shelf, _tmp) = boot_scanned_shelf(cx, size(px(700.), px(600.)));
+
+        let start = cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window
+                    .try_find("shelf-scan-pick-0")
+                    .expect("第一本要在视口里")
+                    .bounds()
+                    .center()
+            })
+            .expect("窗口应能渲染");
+
+        /// 在 `at` 处滚 `times` 下（向下 120，gpui 的约定是向下为负）。
+        fn wheel(
+            cx: &mut TestAppContext,
+            handle: AnyWindowHandle,
+            at: gpui_kit::Point<gpui_kit::Pixels>,
+            times: usize,
+        ) {
+            for _ in 0..times {
+                cx.update_window(handle, |_, window, cx| {
+                    window.dispatch_event(
+                        gpui_kit::PlatformInput::Scroll(gpui_kit::ScrollEvent {
+                            position: at,
+                            delta: gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    window.render_frame(cx);
+                })
+                .expect("窗口应能渲染");
+            }
+        }
+
+        wheel(cx, handle, start, 3);
+        assert!(
+            !cx.update(|cx| shell.read(cx).nav.folded()),
+            "卡上的这一笔不是在翻架面：顶栏不该收起来（收起来就是「滑卡片，后面的书架在动」）"
+        );
+
+        // 卡外那一笔才是翻架面。它在的时候不让位，就说明上面那条只是「什么都没发生」。
+        wheel(cx, handle, point(px(650.), px(300.)), 3);
+        assert!(
+            cx.update(|cx| shell.read(cx).nav.folded()),
+            "卡外这一笔该让顶栏收起来；没让位说明这条门根本没接上"
+        );
     }
 
     /// 回归门：切目的地时输入框的编辑态要跟着退。

@@ -361,7 +361,7 @@ pub(crate) fn published_shape_epub(dir: &tempfile::TempDir) -> PathBuf {
             "META-INF/container.xml".to_string(),
             CONTAINER.as_bytes().to_vec(),
         ),
-        ("OEBPS/content.opf".to_string(), opf.into_bytes()),
+        ("OEBPS/content.opf".to_string(), opf.as_bytes().to_vec()),
         ("OEBPS/toc.ncx".to_string(), ncx.into_bytes()),
         (
             "OEBPS/Styles/style.css".to_string(),
@@ -966,7 +966,7 @@ fn forced_parallel_indexing_matches_the_sequential_result() {
             "META-INF/container.xml".to_string(),
             CONTAINER.as_bytes().to_vec(),
         ),
-        ("OEBPS/content.opf".to_string(), opf.into_bytes()),
+        ("OEBPS/content.opf".to_string(), opf.as_bytes().to_vec()),
     ];
     for n in 1..=CHAPTERS {
         entries.push((
@@ -2548,5 +2548,90 @@ fn fixed_layout_still_comes_out_of_the_same_collector() {
     assert_eq!(
         fxl.title, "画书",
         "同一段里既采声明又采书目，两边都不该受影响"
+    );
+}
+
+/// media-type 认不出时按扩展名兜底，WOFF2 与 `font/collection`（TTC 的标准声明）
+/// 都要收。实书常态是乱标：大量书籍把字体写成 `application/octet-stream`，只认
+/// 声明会把作者随书交来的字体整份跳过。三种声明各放一份，`font_refs` 与
+/// `font_bytes` 两趟都要见全 —— 收与读共用同一套判据，分叉过就会
+/// 「收的时候认、读的时候丢」。
+#[test]
+fn fonts_are_collected_when_the_media_type_lies_or_is_modern() {
+    use std::path::Path;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fonts-media-types.epub");
+
+    let ttf = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/glyf-min.ttf"),
+    )
+    .unwrap();
+    let packed = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/oss/fonts/glyf-min.woff2"),
+    )
+    .unwrap();
+    // TTC 在这一层只过判据不解析：'ttcf' 起头的占位字节就够。
+    let fake_ttc: Vec<u8> = b"ttcf\0\0\0\0".to_vec();
+
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>字体声明</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="f-coll" href="Fonts/coll.ttc" media-type="font/collection"/>
+    <item id="f-lie" href="Fonts/sneaky.ttf" media-type="application/octet-stream"/>
+    <item id="f-web" href="Fonts/web.woff2" media-type="font/woff2"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+
+    let entries: Vec<(String, Vec<u8>)> = vec![
+        ("mimetype".to_string(), b"application/epub+zip".to_vec()),
+        (
+            "META-INF/container.xml".to_string(),
+            CONTAINER.as_bytes().to_vec(),
+        ),
+        ("OEBPS/content.opf".to_string(), opf.as_bytes().to_vec()),
+        (
+            "OEBPS/Text/chap1.xhtml".to_string(),
+            b"<html><body><p>x</p></body></html>".to_vec(),
+        ),
+        ("OEBPS/Fonts/coll.ttc".to_string(), fake_ttc),
+        ("OEBPS/Fonts/sneaky.ttf".to_string(), ttf.clone()),
+        ("OEBPS/Fonts/web.woff2".to_string(), packed),
+    ];
+    let refs: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
+    write_epub(&path, &refs);
+
+    let wanted: Vec<String> = vec![
+        "OEBPS/Fonts/coll.ttc".into(),
+        "OEBPS/Fonts/sneaky.ttf".into(),
+        "OEBPS/Fonts/web.woff2".into(),
+    ];
+    let identities = super::font_refs(&path, &wanted);
+    assert_eq!(
+        identities.len(),
+        3,
+        "font/collection、乱标的 octet-stream 与 woff2 都要进身份表"
+    );
+
+    let bytes = super::font_bytes(&path, &wanted);
+    assert_eq!(bytes.len(), 3, "三份都要读得回来");
+    let web = bytes
+        .iter()
+        .find(|font| font.href.ends_with("web.woff2"))
+        .expect("woff2 那一份在场");
+    assert_eq!(&web.bytes[..4], &[0, 0x01, 0, 0], "WOFF2 真解回了 sfnt");
+    let original = ttf_parser::Face::parse(&ttf, 0).unwrap();
+    let decoded = ttf_parser::Face::parse(&web.bytes, 0).unwrap();
+    assert_eq!(
+        original.number_of_glyphs(),
+        decoded.number_of_glyphs(),
+        "解回的 sfnt 与原字体同字形数"
     );
 }

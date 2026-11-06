@@ -41,7 +41,8 @@ use super::art::{
 use super::capture::{CaptureView, flat_mesh_canvas};
 use super::decor::{decoration_child, decoration_ready};
 use super::images::{
-    ImageDrag, ImageTap, image_child, painted_picture, plain_image, stack_dots, stack_peek,
+    ImageDrag, ImageTap, image_child, painted, painted_picture, picture_wants_preview, plain_image,
+    stack_dots, stack_peek,
 };
 use super::marks::{MarkSpot, annotation_fills, speech_fill};
 use super::paper::{CaptureRole, PageScene, Paper, PaperBody, PaperCapture, Picture};
@@ -535,6 +536,9 @@ impl ReaderSession {
                 foreground,
                 link,
                 taken_over,
+                frame.ink,
+                placed.index,
+                frame.stack_motion,
             );
             let __scene = __t.ns();
             let __sh = crate::ui::features::reader::model::perf::Timer::start();
@@ -686,6 +690,8 @@ impl ReaderSession {
             family,
             foreground,
             link,
+            ink,
+            stack_motion,
             atlas,
             view,
             speaking,
@@ -1112,6 +1118,9 @@ impl ReaderSession {
                     foreground,
                     link,
                     taken_over,
+                    ink,
+                    page_ref.chapter,
+                    stack_motion,
                 );
                 let __sh = crate::ui::features::reader::model::perf::Timer::start();
                 shape_runs(&mut scene, doc, window);
@@ -1588,8 +1597,29 @@ impl ReaderSession {
                 .left(px(offset.0))
                 .top(px(offset.1))
                 .size_full()
+                // 装饰层（作者写的底色、边框、背景图）必须**绝对定位**地铺在纸的原点：
+                // `div` 默认按块自上而下摆，字形那一层（`GlyphsElement`）又要
+                // 100% × 100%，两个兄弟一前一后写，后一个就被排到纸的**下面一整张纸高**
+                // 之外（宿主测试量到 y = 520，纸高也正好 520），再被外层 `overflow_hidden`
+                // 裁掉。字形自己按绝对坐标自绘，所以屏上「字的排版还在」，消失的只是
+                // 装饰那些普通 `div` —— 症状正是「标题的底色与边框整块不见」。
+                //
+                // 顺序在字形**之前**：底色在字下，与浏览器一致；边框虽然可以压在字上，
+                // 但同一层里没这个区分，垫在底下最安全（旧那一版的 `column` 装配也是
+                // 先装饰、后字形）。
+                //
+                // 这一层挂 id 是给宿主测试量原点用的：字形那一层按绝对坐标自绘，位置
+                // 挪了也看不出来；装饰是普通 `div`，被挤出去就整块消失 —— 正是这次的
+                // 病。`a_paged_paper_puts_its_decor_layer_at_the_paper_origin` 钉着它。
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .id("reader-paper-under")
+                        .test_support()
+                        .child(column),
+                )
                 .child(element)
-                .child(column)
                 .children(backdrops)
                 .children(overlays);
             let clipped = div()
@@ -1917,6 +1947,8 @@ fn paint_picture_page(
             fit,
             // 这一张是「铺满这一页的整页图」，不是哪一叠里的一张。
             stack: None,
+            stack_slide: 0.0,
+            stack_incoming: false,
         });
         if role.draws_main() && turn.is_none() {
             let size = if contain {
@@ -2100,7 +2132,17 @@ fn paint_scene_images(
             cut.keeps(image.x + image.width * 0.5, image.top + image.height * 0.5)
         });
         targets.out.painted_keys.push(image.image.key.clone());
-        let Some(rendered) = painted_picture(atlas, &image.image, view, cx) else {
+        // 一叠图是「同一格里横滑切下一张」，那一格从来不是空白页，而 `Scene::upcoming`
+        // 已经把左右邻居的**全清**解好了。这里若还走 `painted_picture` 的
+        // 「低清预览先顶着、高清到了再换」，切过去的一瞬就是先糊再清楚
+        // （读者 2026-11-06 要改掉的观感）。叠图因此直接问全清：没在手就等那一趟，
+        // 不排一张注定要被换掉的糊图；普通插图仍用预览档（快滑时屏上不是白纸）。
+        let rendered = if picture_wants_preview(image.stack) {
+            painted_picture(atlas, &image.image, view, cx)
+        } else {
+            painted(atlas, image.image.clone(), view, cx)
+        };
+        let Some(rendered) = rendered else {
             // 图还没到（也没判失败）时捕获副本不完整；失败算落地 —— 实时页
             // 上它本来也不会出现。
             if !atlas.read_with(cx, |atlas, _| atlas.failed(&image.image.key)) {
@@ -2120,7 +2162,7 @@ fn paint_scene_images(
         // 命中区就叠了一份，「看大图」那一击会落到纹理的副本上。
         if capture_front {
             capture.front_images.push(plain_image(
-                image.x,
+                image.x + image.stack_slide,
                 image.top,
                 image.width,
                 image.height,
@@ -2129,7 +2171,7 @@ fn paint_scene_images(
         }
         if back_copy {
             capture.back_children.push(plain_image(
-                image.x,
+                image.x + image.stack_slide,
                 image.top,
                 image.width,
                 image.height,
@@ -2138,7 +2180,7 @@ fn paint_scene_images(
         }
         if incoming_copy {
             capture.incoming_children.push(plain_image(
-                image.x,
+                image.x + image.stack_slide,
                 image.top,
                 image.width,
                 image.height,
@@ -2158,9 +2200,10 @@ fn paint_scene_images(
         // 那一档同一套（`stack_peek` / `stack_dots`）。分页这一臂
         // 从前只画当前那张，叠起来的几张看起来就是一整张 ——
         // 读者在分页档根本看不出还能横滑。
+        let animated = image.stack_slide.abs() > 0.01 || image.stack_incoming;
         let dots = image
             .stack
-            .filter(|mark| mark.count > 1)
+            .filter(|mark| mark.count > 1 && !animated)
             .map(|mark| (image.x, image.top + image.height, image.width, mark));
         if let Some((x, bottom, w, mark)) = dots
             && mark.index + 1 < mark.count

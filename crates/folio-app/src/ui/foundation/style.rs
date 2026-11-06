@@ -37,6 +37,31 @@ pub fn run_color_link(color: Option<Color>, foreground: Hsla, link: Hsla, in_lin
     }
 }
 
+/// 水墨：把任意颜色压成**同观感亮度**的灰，alpha 原样留着。
+///
+/// 用的是 Rec. 709 那三个系数（与 `theme.rs` 里主题去饱和同一把尺）：只拿掉色相，
+/// 不把深底变成浅底、也不让白字在灰底上失掉对比。已经是灰的颜色过这一趟数值不变。
+pub fn desaturate(color: Hsla) -> Hsla {
+    let rgba = gpui_kit::Rgba::from(color);
+    let luma = 0.2126 * rgba.r + 0.7152 * rgba.g + 0.0722 * rgba.b;
+    gpui_kit::Rgba {
+        r: luma,
+        g: luma,
+        b: luma,
+        a: rgba.a,
+    }
+    .into()
+}
+
+/// 作者声明的一格颜色（引擎的 0–255 u8）→ 同亮度的灰。`Scene` 里那几张
+/// `text-shadow` 表只存这种形状，所以单独给一格。
+pub fn desaturate_author(color: Color) -> Color {
+    let luma =
+        (0.2126 * f32::from(color.0) + 0.7152 * f32::from(color.1) + 0.0722 * f32::from(color.2))
+            .round() as u8;
+    Color(luma, luma, luma, color.3)
+}
+
 #[cfg(test)]
 mod tests {
     // 这个 crate 里 `use super::*` 会把 lib test 目标弄挂（`plans/testing.md`），逐条引。

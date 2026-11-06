@@ -1,15 +1,26 @@
-//! 进程级「能当 gpui primary 的家族名」登记表。
+//! 进程级「没有拉丁 `m` 的家族名」登记表 —— **字体选择器的闸**。
 //!
-//! gpui 的 `CosmicTextSystem::load_family` 会把没有拉丁 `m` 的脸从 primary 候选里
-//! 剔掉（`charmap().map('m') == 0`）；剔空后 `resolve_font` 只试全局回退栈，而
-//! Android 上那串名字一个都不存在，直接 SIGABRT。这里记下每份内嵌字体注册时报出来的
-//! 家族名与「有没有 m」，字体选择器、host 的兜底家族与 `gpui_font` 的读者链都先问
-//! 这一句，避免把一个 gpui 用不了的家族交出去。
+//! 从前它还兼管「能不能当 gpui primary」：gpui 的 `CosmicTextSystem::load_family`
+//! 会把无 `m` 的脸从 primary 候选里剔掉，剔空后 `resolve_font` 在 Android 上直接
+//! SIGABRT。那一格随 gpui-folio be92574 删除（过滤器没了，primary 未覆盖的字符走
+//! 补缺链），这张表的剩余职责只有一条：**emoji 与符号字体不该出现在读者的正文字体
+//! 可选列表里** —— 它们没有拉丁字形，选了当正文，数字与英文全靠回退兜。
 //!
-//! 设备字体（没有随书字节、没走过注册）不在这里：它们按可用处理，与没有这道判断时
+//! 随书内嵌字体当 primary 不再问这张表（见 `book_fonts::primary_usable`）；
+//! 字体选择器与 host 的兜底家族仍先问这一句。
+//!
+//! 这里另有两份进程级状态，都是给字体选择器用的：
+//!
+//! - **随书家族登记表**（`note_book_family` / `is_book_family`）：哪几个家族名来自随书
+//!   注册，选择器靠它把「书籍字体」从「系统字体」里拆出来。
+//! - **可选字体表版本号**（`families_revision`）：字体表变了（随书注册、移动端系统
+//!   字体扫描完成）就推一格，选择器对账后重取名单。
+//!
+//! 设备字体（没有随书字节、没走过注册）不在登记表里：它们按可用处理，与没有这道判断时
 //! 同一条路。表是进程级的，因为字体注册进 `TextSystem` 本身就是进程级的。
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// 子集字体家族名的标记（见 `book_fonts::rename_subset_family`）。这些名字只属于某一本
@@ -19,6 +30,54 @@ pub const SUBSET_MARKER: &str = "#folio";
 fn registry() -> &'static Mutex<HashSet<String>> {
     static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 进程级「哪些家族名来自随书注册」登记表 —— 字体选择器分组的依据。
+///
+/// `book_fonts::register_batch` 每注册成功一份字体就记一次（子集字体除外：它们带
+/// [`SUBSET_MARKER`]，本来就被 [`usable`] 挡在选择器外，记进来只会造成假分组）。表是
+/// 进程级的、关书不清 —— gpui 的字体注册本身就不撤，撤了登记反而和现实对不上。
+fn book_families() -> &'static Mutex<HashSet<String>> {
+    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 记一个「来自随书注册」的家族名。带 [`SUBSET_MARKER`] 的名字直接忽略。
+pub fn note_book_family(name: &str) {
+    if name.contains(SUBSET_MARKER) {
+        return;
+    }
+    book_families()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(name.to_string());
+}
+
+/// 这个家族名是不是随书注册进来的。
+pub fn is_book_family(name: &str) -> bool {
+    book_families()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(name)
+}
+
+/// 可选字体表的变化版本号。字体选择器拿它对账：数字变了就重取
+/// `all_font_names()` 重建分组列表，不用自己盯着字体系统。
+///
+/// 两处会推它：随书注册（`book_fonts::register_batch`）与移动端的系统字体全量扫描
+/// （`system_fonts`）。走原子而不是 gpui Global，因为 register_batch 在排版 worker
+/// 线程上跑，够不着主线程的 `App`。
+fn revision() -> &'static AtomicU64 {
+    static REV: AtomicU64 = AtomicU64::new(0);
+    &REV
+}
+
+pub fn families_revision() -> u64 {
+    revision().load(Ordering::Relaxed)
+}
+
+pub fn bump_families_revision() {
+    revision().fetch_add(1, Ordering::Relaxed);
 }
 
 /// 记一份字体报出来的家族名与它能不能当 primary。同名后来出现带 `m` 的脸时撤销。
@@ -31,8 +90,8 @@ pub fn note_face(name: &str, latin: bool) {
     }
 }
 
-/// 这个家族名能不能交给 gpui 当 primary。没登记过（设备字体）按可用；子集字体
-/// （带 [`SUBSET_MARKER`]）永远不进读者可选的家族表。
+/// 这个家族名能不能进**字体选择器**（读者可选的正文家族）。没登记过（设备字体）按
+/// 可用；子集字体（带 [`SUBSET_MARKER`]）永远不进。
 pub fn usable(name: &str) -> bool {
     if name.contains(SUBSET_MARKER) {
         return false;
@@ -48,7 +107,10 @@ pub fn usable_names(names: Vec<String>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{note_face, usable, usable_names};
+    use super::{
+        bump_families_revision, families_revision, is_book_family, note_book_family, note_face,
+        usable, usable_names,
+    };
 
     /// 没有 `m` 的名字被登记后要从候选里消失；同名后来出现带 `m` 的脸时要能撤销。
     /// 名字取一个只在本测试里用的串，避免与并行测试互相影响。
@@ -70,5 +132,28 @@ mod tests {
             !usable("Book Face#folio0001"),
             "书内子集字体不能出现在读者可选的家族里"
         );
+    }
+
+    /// 随书注册的家族名进了登记表就能被认出来；子集字体（带 `#folio`）不收。
+    #[test]
+    fn a_book_registered_family_is_known_and_subsets_are_ignored() {
+        let name = "Folio Test Book Family";
+        assert!(!is_book_family(name), "没登记过不算");
+        note_book_family(name);
+        assert!(is_book_family(name));
+        note_book_family("Folio Test Subset#folio0007");
+        assert!(
+            !is_book_family("Folio Test Subset#folio0007"),
+            "子集字体不该被当成可选的书籍字体"
+        );
+    }
+
+    /// 版本号推一下就变。用偶数倍的推法免得和并行测试互踩。
+    #[test]
+    fn bumping_moves_the_revision() {
+        let before = families_revision();
+        bump_families_revision();
+        bump_families_revision();
+        assert!(families_revision() >= before + 2);
     }
 }

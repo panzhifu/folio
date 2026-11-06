@@ -28,6 +28,7 @@ use gpui_kit::{
     SharedString, Styled, Subscription, Task, WeakEntity, Window, actions, canvas, div, px,
 };
 
+use crate::ui::components::ScrollShields;
 use crate::ui::features::notes::{NotesEvent, NotesView};
 use crate::ui::features::reader::{Arrow, ReaderSession, ReadingPage, Reserve};
 use crate::ui::features::settings::{CompactSettings, SettingsPage, SettingsView};
@@ -496,6 +497,11 @@ impl AppShell {
         let wanted = ConfigHolder::reader(cx).font_family;
         let family: SharedString = host::device_family(&wanted, cx).into();
         theme::set_application_font(&family, cx);
+
+        // Android：fork 那份手动清单之外的系统字体在后台补注册（fontdb 不扫 Android
+        // 路径，见 `platform::system_fonts` 模块文档）；完成时推字体表版本并刷新窗口，
+        // 已建好的字体选择器会自己重取名单。桌面在 fontdb 里已经全量扫过，这里直接让路。
+        crate::ui::platform::system_fonts::load_all_system_fonts(cx);
 
         // 首次启动：书库位置没确认过就先画欢迎页（见 [`welcome`](crate::ui::features::welcome)）。
         // 判据取自配置实体，与「导入要不要拦住」用的是同一条 `is_confirmed()`。
@@ -1602,7 +1608,11 @@ impl Render for AppShell {
 fn nav_watch(shell: WeakEntity<AppShell>) -> impl IntoElement {
     canvas(
         |_, _, _| {},
-        move |_, _, window, _cx| {
+        move |_, _, window, cx| {
+            // 新的一帧开始收「谁自己吃滚动」的名单（面板关掉之后，它那块矩形不许留到
+            // 下一帧继续吞滚动）。外壳的根画在内容之前，记在这儿正好：下面的目的地与浮层
+            // 随后各自把自己那一块报进来（`components::scroll_guard`）。
+            ScrollShields::begin_frame(cx);
             let shell = shell.clone();
             window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                 // 只认 capture 那一次：这一格画在最前面，capture 相它是第一个收到事件的
@@ -1610,6 +1620,15 @@ fn nav_watch(shell: WeakEntity<AppShell>) -> impl IntoElement {
                 // 实测挂在后面的窗口级监听一次都收不到 `ScrollEvent`）。两相都算会把
                 // 同一格增量记两次。
                 if phase.bubble() {
+                    return;
+                }
+                // 落在「自己吃滚动」的面板上的那一笔不是在翻这一屏：浮层里的清单滚到底，
+                // 顶栏不该跟着收起来。捕获相比面板自己的 `stop_propagation` 早，只有这份
+                // 名单拦得住它。
+                if cx
+                    .try_global::<ScrollShields>()
+                    .is_some_and(|shields| shields.covers(event.position))
+                {
                     return;
                 }
                 // 行的增量按当前行高折算成像素，与 gpui 自己给滚动容器的那一份同一个换算。

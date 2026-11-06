@@ -574,4 +574,35 @@ CREATE TABLE book_passphrases (
     set_at     INTEGER NOT NULL
 );
 "#,
+    // v30：**导入记录**。一批跑完之后，逐本的着落留在本机，重启还在。
+    //
+    // 存在的理由：那张卡从前只活在这一次运行里，读者关掉应用、手机切个后台，「刚才那几本
+    // 怎么样了」就没了 —— 而那正是导入这件事唯一要回答的问题。
+    //
+    // 又是一张**独立的表**，理由与 v29 那张同一条：同步那条链的取数面是逐条 SELECT 写死的
+    // （`store::sync` 只碰 books / positions / annotations / bookmarks / sync_tombstones），
+    // 而这份记录里带着读者手上那些文件的**原始文件名**（`name`），那是本机的事，不该跟着
+    // 快照传到 WebDAV 上去。这条由 `store::sync` 那族测试里的「清单没多出门」钉着。
+    //
+    // `status` 存**文本码**而不是整数：它对应的是 `ImportLanding` 那一族（新增 / 已存在 /
+    // 各类被拒），整数会把表的形状绑死在枚举的排列顺序上，而那个顺序哪天动一下，老行就
+    // 集体改口。认不出来的码读回来算「读不动」那一档 —— 与报表不许悄悄少算一本同一条口径。
+    //
+    // `book_id` 可空（NULL = 这本没进来，或进来过又被删了）。不建外键：删书那条路是逐条
+    // `DELETE`，而记录要留的是「当时导入过这件事」，书没了不等于那件事没发生过 —— 读的时候
+    // 用一条 LEFT JOIN 把已经没有的那本的空位归成 `None`，屏幕上就不摆那颗「打开」。
+    r#"
+CREATE TABLE import_records (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    made_at INTEGER NOT NULL,
+    name    TEXT    NOT NULL,
+    format  TEXT,
+    size    INTEGER,
+    status  TEXT    NOT NULL,
+    book_id INTEGER,
+    secs    REAL    NOT NULL DEFAULT 0
+);
+
+CREATE INDEX import_records_recent ON import_records (id DESC);
+"#,
 ];

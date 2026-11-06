@@ -27,9 +27,18 @@ use crate::ui::services::l10n::tr;
 const ICON: f32 = 24.0;
 /// 玻璃的模糊半径（逻辑像素）。参照的是系统级毛玻璃那一档：够把封面与字压成一片色块，
 /// 又不至于让底栏看起来像一块磨砂塑料。
-const BLUR_RADIUS: f32 = 28.0;
-/// tint 的不透明度。有模糊兜着才敢压到 0.90 以下；再往下 12px 的标签就开始吃底下的对比度。
-const GLASS_TINT: f32 = 0.62;
+///
+/// 从 28 加到 40 是跟着下面那一档 tint 一起动的：tint 越薄，底下的封面就越要靠模糊
+/// 抹平，否则 12px 的标签压在一堆书名上会读成一团噪点。两趟可分离高斯 + 降采样，
+/// 半径再大也只是多采几次纹理，不是多画一遍内容。
+const BLUR_RADIUS: f32 = 40.0;
+/// tint 的不透明度。
+///
+/// 0.62 → 0.45：读者要的是「看得见底下滚过去的是什么」。模糊把底下压成色块之后，
+/// 0.45 的白（或黑）已经够把标签托住；再薄下去浅色主题里那条发丝线就成了唯一的边界。
+const GLASS_TINT: f32 = 0.45;
+/// 描边的浓度。玻璃的边要比实心卡片轻一档，否则中间再透、四周围一圈实线还是读成一块板。
+const GLASS_EDGE: f32 = 0.65;
 /// 侧栏那一格的尺寸。
 const TILE_W: f32 = 80.0;
 const TILE_H: f32 = 56.0;
@@ -42,7 +51,7 @@ const CARD_PAD: f32 = 8.0;
 ///
 /// 玻璃与 tint 是两层：`.backdrop_blur()` 把底下已经画上屏的那一块糊掉，`.bg()` 那层
 /// 半透明色再压在它上面。所以「糊多少」与「透多少」各自可调，互不牵制。有了模糊兜底，
-/// tint 才敢从 0.90 压到 [`GLASS_TINT`] —— 从前那版没有模糊，压到 0.7 以下 12px 的字
+/// tint 才敢从 0.90 一路压到 [`GLASS_TINT`] —— 从前那版没有模糊，压到 0.7 以下 12px 的字
 /// 就会在封面图上糊成一片。
 ///
 /// 只有走 wgpu 渲染器的那两端（Android 与 Linux 桌面）真做模糊；Metal 与 DirectX 跳过
@@ -58,7 +67,7 @@ pub(super) fn floating(cx: &App) -> Div {
         .backdrop_blur(px(BLUR_RADIUS))
         .bg(cx.theme().sidebar.opacity(GLASS_TINT))
         .border_1()
-        .border_color(cx.theme().sidebar_border)
+        .border_color(cx.theme().sidebar_border.opacity(GLASS_EDGE))
 }
 
 /// 嵌入档的表面：整列不透明，右边一条发丝线把它与内容分开。

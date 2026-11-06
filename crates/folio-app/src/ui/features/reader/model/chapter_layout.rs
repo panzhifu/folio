@@ -23,7 +23,7 @@ use folio_core::content::format::css::computed::{
     Color, ComputedStyle, Length, StyledDom, TextAlign, TextShadow, WritingMode, cascade,
 };
 use folio_core::content::format::css::{Origin, PageMargins, RuleSet, chapter_style_rules};
-use folio_core::content::hit::{Hit, paragraph_after_indexed, paragraph_range_indexed};
+use folio_core::content::hit::{Hit, paragraph_range_indexed};
 use folio_core::infra::metrics::Metric;
 use folio_core::infra::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
 use folio_core::layout::fragment::{Fragment, FragmentOptions, fragments};
@@ -1875,18 +1875,6 @@ impl Document {
             self.dom(),
             self.text_map(),
             offset,
-            Some(&index),
-        )
-    }
-
-    /// 从 `from` 之后找第一段。语义与 `hit::paragraph_after` 逐字相同，只是走索引。
-    pub fn paragraph_after(&self, from: Range<usize>) -> Option<Range<usize>> {
-        let index = self.char_lines();
-        paragraph_after_indexed(
-            self.layout(),
-            self.dom(),
-            self.text_map(),
-            from,
             Some(&index),
         )
     }

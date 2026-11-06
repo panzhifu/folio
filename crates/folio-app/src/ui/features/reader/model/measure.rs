@@ -145,15 +145,16 @@ fn cjk_class(family: &str) -> Option<&'static [&'static str]> {
 /// - `faces` 是这本书注册成功的内嵌字体。作者的候选链里任何一个声明名在表里查得到，
 ///   那份字节就是作者要的正文 —— `@font-face` 的 `src: url(...)` 指的是他随书交来的
 ///   文件，比「这台机器上恰好也叫这个名字」更贴近作者的意思，所以它排第一，
-///   连设备上装着的同名家族也让它一档。**只挑带拉丁 `m` 的那一张脸**：没有 `m` 的
-///   家族 gpui 会从 primary 候选里剔掉（剔空了就 panic），这类字体只能整份不用，见
-///   [`FaceName`](super::book_fonts::FaceName)；
+///   连设备上装着的同名家族也让它一档。**优先挑带拉丁 `m` 的那一张脸**，一张都没有
+///   时纯中文的也照当 primary：gpui 那侧的过滤器已删（`gpui-pre-wgpu` 的
+///   `pick_covering_slot` 对未覆盖字符——ASCII 在内——走补缺链），缺的字形由读者
+///   字体兜住，见 [`FaceName`](super::book_fonts::FaceName)；
 /// - primary 是书里那一份时，读者那一档（同类映射 + 等宽偏好 + 正文偏好）整体降到
-///   `fallbacks` 上补缺：书里的字体常常不带全部拉丁与生僻字，gpui 在 shaping 时逐字符
+///   `fallbacks` 上补缺：书里的字体常常缺拉丁与生僻字，gpui 在 shaping 时逐字符
 ///   挑覆盖得住的那一份（`cosmic_text_system.rs` 的 `pick_covering_slot`）。
-///   ASCII 永远留在 primary 上 —— 那是 gpui 的规则，不是这里的取舍，所以随书那一份
-///   必须自己带拉丁，否则数字与英文会掉成方框（`load_family` 还会把不带 `m` 的脸直接
-///   从 primary 候选里剔掉，见同文件 424 行那段 HACK）；
+///   ASCII 与其余字符同一待遇——primary 覆盖得住就留在 primary，覆盖不住照样
+///   沿补缺链走（从前 gpui 把 ASCII 钉死在 primary 上，无拉丁的 primary 会把数字
+///   与英文画成方框，那记早退也一并删了）；
 /// - 泛族名（`serif` 那一族）不许从设备注册表里当 primary（交出去就是一条断掉的回退链），
 ///   但作者给泛族名挂上随书那份字体时照认 —— 那是他写明的正文用字。
 pub fn gpui_font(
@@ -164,20 +165,22 @@ pub fn gpui_font(
     known: &[String],
 ) -> Font {
     // 作者随书带的那一份：整条候选链里第一个在别名表里查到的声明名，值就是注册成功的
-    // 内部家族名。**只有带拉丁 `m` 的那张脸能当 primary**：gpui 的 `load_family` 会把
-    // 没有 `m` 的脸从 primary 候选里整个剔掉（`CosmicTextSystem` 里那段 HACK），剔空了
-    // `resolve_font` 就 panic —— 桌面被 fontconfig 的回退表接住，Android 上 gpui 那套
-    // 全局回退名一个都不存在，直接 SIGABRT（2026-10-30《诡秘之主》的 `sy.ttf` 实测）。
-    // 一张带 `m` 的都没有时按「这本书没有这份字体」走：把没有 `m` 的脸挂到补缺链上也
-    // 没用，gpui 建补缺链走的是同一个 `load_family`，一样会被剔掉。
-    // 一个声明名可能对多份内部家族（一份字体文件带好几个名字），第一张能用的当 primary、
-    // 其余仍挂在补缺链上。
+    // 内部家族名。gpui 的 primary 候选不再剔无拉丁 `m` 的脸（过滤器已随 gpui-folio
+    // be92574 删除；从前剔空了 `resolve_font` 会 panic——桌面被 fontconfig 的回退表
+    // 接住，Android 上 gpui 那套全局回退名一个都不存在，直接 SIGABRT，2026-10-30
+    // 《诡秘之主》的 `sy.ttf` 实测）——纯中文的随书字体因此也能当 primary，缺的字符
+    // 由补缺链兜住。
+    // 一个声明名可能对多份内部家族（一份字体文件带好几个名字），带拉丁的那张优先当
+    // primary（它自己接得住数字与英文），没有才轮到第一张；其余仍挂在补缺链上。
     let requested = key
         .candidates()
         .iter()
         .find_map(|name| faces.families_for(name));
     let shipped = requested.and_then(|names| {
-        let primary = names.iter().find(|face| face.latin)?;
+        let primary = names
+            .iter()
+            .find(|face| face.latin)
+            .or_else(|| names.first())?;
         Some((primary, names))
     });
     // 作者点名的是一整条候选链（`"MyFont", "Noto Serif CJK SC", serif`），逐个试，
@@ -227,8 +230,9 @@ pub fn gpui_font(
     .into_iter()
     .flatten()
     {
-        // 读者偏好也可能是随书注册进来的那一份：没有 `m` 的脸当 primary 会被 gpui
-        // 剔空，剔空就 panic。整条链都过同一道判据，空出来的位置由后面的可用名字补。
+        // 读者偏好也可能是随书注册进来的那一份。整条链都过同一道判据
+        // （`primary_usable`：书表内的名字一律可用，设备随机名仍由登记表把关——
+        // emoji 与符号字体不该被当成正文），空出来的位置由后面的可用名字补。
         if !faces.primary_usable(&name) {
             continue;
         }
@@ -275,18 +279,9 @@ pub fn gpui_font(
             }
             Some(FontFallbacks::from_fonts(chain))
         }
-        // 作者点名的家族只有没有 `m` 的脸：primary 仍是读者那一条可用链，这些脸
-        // 挂到**补缺链**上。gpui 的 `load_family` 现在允许 fallback 收无 `m` 的脸，
-        // 所以它们能补主字体缺的字形，而不是整份丢掉。
-        None => requested.map(|names| {
-            let mut chain: Vec<String> = names.iter().map(|face| face.name.clone()).collect();
-            for name in &reader_chain {
-                if name.as_str() != family.as_ref() && !chain.contains(name) {
-                    chain.push(name.clone());
-                }
-            }
-            FontFallbacks::from_fonts(chain)
-        }),
+        // 走到这里就是这本书没有可用的内嵌字体（表里的名字非空，`shipped` 必为
+        // Some）——与「没有内嵌字体」同一表现，不给元素塞它没点名的字体。
+        None => None,
     };
     Font {
         family,
@@ -988,15 +983,13 @@ mod tests {
         );
     }
 
-    /// **没有拉丁 `m` 的脸一张都不能当 primary**：gpui 的 `load_family` 会把它从候选里
-    /// 剔掉，剔空了 `resolve_font` 就 panic；桌面由 fontconfig 的回退表接着，Android 上
-    /// 那串回退名一个都不存在，整台进程 SIGABRT —— 2026-10-30《诡秘之主》的 `sy.ttf`
-    /// 就是这么闪退的（18 个字形：数字、方括号与几个汉字，没有 `m`）。
-    ///
-    /// **不能当 primary** 仍成立；但它不再整份丢掉：fork 的 `load_family` 现在只对
-    /// primary 要求拉丁 `m`，fallback 链保留这些脸，主字体缺的字形可以由它补。
+    /// 没有拉丁 `m` 的随书字体如今**照当 primary**：gpui-folio be92574 删掉了
+    /// `load_family` 的过滤器（从前剔空候选后 `resolve_font` 在 Android 上直接
+    /// SIGABRT —— 2026-10-30《诡秘之主》的 `sy.ttf` 就是这么闪退的），未覆盖的
+    /// 字符（ASCII 在内）由 `pick_covering_slot` 沿补缺链走。作者点名 `sy`，正文
+    /// 就该是他带来的那份；读者的字体整体降到补缺位。
     #[test]
-    fn a_shipped_face_without_latin_never_becomes_the_primary() {
+    fn a_shipped_face_without_latin_becomes_the_primary() {
         let fonts = faces_with(&[("sy", &[("FZShuSong-Z01_Unicode_Medium", false)])]);
         let font = gpui_font(
             &key("sy"),
@@ -1010,22 +1003,22 @@ mod tests {
             ]),
         );
         assert_eq!(
-            font.family,
-            body(),
-            "没有 m 的脸交给 resolve_font 就是 abort，必须落回读者的字体"
+            font.family, "FZShuSong-Z01_Unicode_Medium",
+            "无拉丁的随书字体当 primary，不再静默换成读者的"
         );
         assert_eq!(
             chain(&font),
-            vec!["FZShuSong-Z01_Unicode_Medium".to_string()],
-            "无 m 的脸留在补缺链上，主字体缺的字形还能由它补"
+            vec![body().to_string()],
+            "读者的字体降到补缺位，主字体缺的字形由它补"
         );
     }
 
     /// 这就是 `sy.ttf` 的第二条路：CSS 直接写了**内部家族名**（没走 `@font-face` 的
-    /// 声明名别名），于是 `known` 里真有它。`chosen` 也只认「能当 primary」的名字，
-    /// 不能因为它在这台设备的字体表里就选中一张没有 `m` 的脸。
+    /// 声明名别名），于是 `known` 里真有它。gpui 那侧的 m 过滤器删掉后，无拉丁的
+    /// 随书字体也能当 primary：作者点名它就是他要的正文，缺的字符由 shaping 的
+    /// 逐字符回退兜住，不再静默换成读者字体。
     #[test]
-    fn a_no_latin_internal_name_is_not_chosen_even_when_it_is_in_known() {
+    fn a_no_latin_internal_name_named_by_css_becomes_primary() {
         let fonts = faces_with(&[("sy", &[("FZShuSong-Z01_Unicode_Medium", false)])]);
         let font = gpui_font(
             &key("FZShuSong-Z01_Unicode_Medium"),
@@ -1039,16 +1032,16 @@ mod tests {
             ]),
         );
         assert_eq!(
-            font.family,
-            body(),
-            "CSS 直接点名内部名，也不能把它交给 gpui"
+            font.family, "FZShuSong-Z01_Unicode_Medium",
+            "CSS 点名的随书字体（无拉丁）照当 primary"
         );
     }
 
-    /// 读者的正文偏好本身落在没有 `m` 的那一档上时（字体选择器把随书字体也列进去了），
-    /// 不能让整本书的 `resolve_font` 都撞上去：从设备表里挑第一个可用的名字。
+    /// 读者的正文偏好本身落在没有 `m` 的那一档上时（旧版本的配置、或手改的
+    /// config.json），照旧尊重它：选择器不会再列出这类名字，但已存的偏好不该被
+    /// 静默换掉 —— primary 缺的字符由 shaping 的回退兜住，panic 的前提已不存在。
     #[test]
-    fn a_no_latin_body_preference_falls_back_to_a_known_usable_face() {
+    fn a_no_latin_body_preference_is_still_honored() {
         let fonts = faces_with(&[("sy", &[("FZShuSong-Z01_Unicode_Medium", false)])]);
         let body: SharedString = "FZShuSong-Z01_Unicode_Medium".into();
         let font = gpui_font(
@@ -1060,8 +1053,8 @@ mod tests {
         );
         assert_eq!(
             font.family.as_ref(),
-            "Noto Sans CJK SC",
-            "读者偏好不可用时挑第一个可用设备名，而不是把 panic 留在路上"
+            "FZShuSong-Z01_Unicode_Medium",
+            "已存的读者偏好照用，不再因无拉丁被换掉"
         );
     }
 

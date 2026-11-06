@@ -129,3 +129,45 @@ fn a_second_jump_replaces_the_single_origin(cx: &mut TestAppContext) {
         "来处换成刚离开的那一处，而不是第一跳那一处"
     );
 }
+
+/// 按那一格右边的 ×：只收掉「回原处」，读者停在原地。
+///
+/// 这一条钉的是那颗 × 的语义 —— 它不是「返回」，按下去不该带着读者跳回去；
+/// 也不该把撤销一起清掉（那是另一件事）。
+#[gpui_kit::test]
+fn dismissing_the_jump_back_pill_keeps_the_reader_in_place(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &chapters_flow(4),
+        "epub",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    scroll_mode(cx, handle);
+    scroll_down(cx, handle, 400.0);
+    settle(cx, handle);
+
+    view.update(cx, |v, cx| {
+        v.remember_jump_origin(3);
+        v.goto_entry(3, None, cx);
+    });
+    settle(cx, handle);
+    let (chapter, offset) = view
+        .read_with(cx, |v, _| v.resolve_position())
+        .expect("跳过去之后该问得出位置");
+
+    view.update(cx, |v, cx| v.dismiss_jump_back(cx));
+    settle(cx, handle);
+
+    assert!(
+        view.read_with(cx, |v, _| v.jump_back).is_none(),
+        "按了 × 那一格该收掉"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.resolve_position()),
+        Some((chapter, offset)),
+        "× 只收那一格，不带着读者跳回原处"
+    );
+}

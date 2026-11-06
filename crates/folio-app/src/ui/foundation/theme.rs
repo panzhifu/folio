@@ -1,8 +1,12 @@
-//! 主题：用 UI 框架自己的主题系统选配色，本应用**不定义任何颜色值**。两处例外：
+//! 主题：用 UI 框架自己的主题系统选配色，本应用**不定义任何颜色值**。唯一的例外是
 //! 滚动条那一条的**浓度**（`SCROLLBAR_TINT` 那三个 alpha：色相照样从当下生效那本主题的
 //! `foreground` 现取，这里只答「墨压到纸上是几成」，所以浅深两套与读者自己 `themes/` 里
-//! 那几本 JSON 都跟着走），以及水墨那一档的配色（`INK_THEME_JSON`，一份主题文件，
-//! 装载与查找仍走 `ThemeRegistry`，见 [`INK_LIGHT`]）。
+//! 那几本 JSON 都跟着走）。
+//!
+//! 水墨那一档**不是另一本主题**：它复用读者选的那本浅色主题，把每一个颜色 token 的
+//! 饱和度压到 0（亮度与 alpha 原样留着），版式与组件形状因此与正常档一模一样。
+//! 换回正常档时 `Theme::change` 会从 registry 重新铺一遍，颜色自己回来 —— 这里不存
+//! 第二份状态，也不改 `appearance.light`。
 //!
 //! 模型和 gpui-kit 一致，分两层：
 //!
@@ -26,16 +30,6 @@ use gpui_kit::{App, SharedString, Window, WindowAppearance};
 pub const DEFAULT_LIGHT: &str = "Default Light";
 pub const DEFAULT_DARK: &str = "Default Dark";
 
-/// 水墨那一档在 registry 里的名字。`folio_core::infra::config::Mode::Ink` 认的就是这一个。
-pub const INK_LIGHT: &str = "Ink Wash";
-
-/// 本仓库自己写的那一本宣纸 + 墨的配色。
-///
-/// 这是 `theme.rs` 头部那句「本应用不定义任何颜色值」**唯一**的一处数据例外：水墨是一档
-/// 固定的样子，不是「浅侧多一本可选的主题」，所以在依赖源码里没有它的位置。写色值的仍然
-/// 是主题文件而不是 Rust —— 装载、按名字取、回落全都走 `ThemeRegistry` 那一条路。
-const INK_THEME_JSON: &str = include_str!("../../../assets/ink-wash.json");
-
 // `BUILTIN_THEME_JSON` 由 build.rs 从依赖源码里的 `themes/` 生成。
 include!(concat!(env!("OUT_DIR"), "/folio_themes.rs"));
 
@@ -43,8 +37,8 @@ include!(concat!(env!("OUT_DIR"), "/folio_themes.rs"));
 /// registry 这个 Global 建出来。
 pub fn register_builtin_themes(cx: &mut App) {
     let registry = ThemeRegistry::global_mut(cx);
-    // 上游那几本由 build.rs 从依赖源码嵌进来，水墨那一本由本仓库写着（见 [`INK_THEME_JSON`]）。
-    for json in BUILTIN_THEME_JSON.iter().chain(&[INK_THEME_JSON]) {
+    // 上游那几本由 build.rs 从依赖源码嵌进来；水墨不在这里 —— 它复用读者的浅色主题。
+    for json in BUILTIN_THEME_JSON.iter() {
         if let Err(error) = registry.load_themes_from_str(json) {
             tracing::warn!("theme: 加载内置主题失败：{error}");
         }
@@ -151,14 +145,59 @@ fn apply_scrollbar_tint(cx: &mut App) {
 
 /// 存下来的浅深选择，配上操作系统的当前外观，实际解析成哪一档。
 ///
-/// 水墨解析到**浅**那一侧：它是宣纸底，跟着系统翻面就没有「水墨」可言了。真正的颜色
-/// 由 [`repaint`] 那一头换成 [`INK_LIGHT`] 那本，这一句只管「哪一侧」。
+/// 水墨解析到**浅**那一侧：它复用浅色主题再整体去饱和，跟着系统翻到深色就没有
+/// 「黑白」可言了（深色纸面去饱和之后是一片黑，正文读不了）。这一句只管「哪一侧」，
+/// 颜色由 [`repaint`] 里那句 `desaturate_active_theme` 负责。
 pub fn resolve_mode(appearance: Mode, os: WindowAppearance) -> ThemeMode {
     match appearance {
         Mode::System => ThemeMode::from(os),
         Mode::Light | Mode::Ink => ThemeMode::Light,
         Mode::Dark => ThemeMode::Dark,
     }
+}
+
+/// 水墨：把当下生效的每一个颜色 token 的饱和度压到 0，亮度与 alpha 原样留着。
+///
+/// 只动颜色，不动字号、圆角、间距与字体 —— 这一档要的是「与正常档一模一样，只是黑白」。
+/// 走的是 `ThemeColor` 的 Serde 形状（`Hsla` 序列化成 `#rrggbbaa`），因为框架没有提供
+/// 按字段遍历的口；`Theme::update` 之后 `tokens` 那一侧会按 `colors` 对齐，底层滚动条
+/// 也就一起变灰了。
+fn desaturate_active_theme(cx: &mut App) {
+    Theme::update(cx, |theme| {
+        let mut json = serde_json::to_value(theme.colors).expect("ThemeColor 序列化");
+        desaturate_json(&mut json);
+        theme.colors = serde_json::from_value(json).expect("ThemeColor 反序列化");
+    });
+}
+
+/// 递归把 JSON 里所有 `#rrggbbaa` 换成同亮度的灰。认不出的字符串原样留着
+/// （主题里还有字体名一类的纯文本）。
+fn desaturate_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some(gray) = desaturate_hex(text) {
+                *text = gray;
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(desaturate_json),
+        serde_json::Value::Object(map) => map.values_mut().for_each(desaturate_json),
+        _ => {}
+    }
+}
+
+/// `#rrggbbaa` → 同亮度的灰（alpha 不变）。形状不对返回 `None`。
+fn desaturate_hex(text: &str) -> Option<String> {
+    let hex = text.strip_prefix('#')?;
+    if hex.len() != 8 || !hex.is_ascii() {
+        return None;
+    }
+    let byte = |at: usize| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok();
+    let (r, g, b, a) = (byte(0)?, byte(2)?, byte(4)?, byte(6)?);
+    // 感知亮度（Rec. 709 系数）。走灰阶之后对比关系与原来同一档，不会出现
+    // 「按钮上的白字忽然压在浅灰底上」。
+    let luma =
+        (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)).round() as u8;
+    Some(format!("#{luma:02x}{luma:02x}{luma:02x}{a:02x}"))
 }
 
 /// 按外观配置换肤，并刷所有窗口。
@@ -195,21 +234,10 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
             name.and_then(|name| registry.themes().get(name).cloned())
                 .or_else(|| registry.themes().get(fallback).cloned())
         };
+        // 水墨**不换主题**：还是读者选的那一本浅色，只是下面把它的颜色统一去饱和。
+        // 认不出那一本时回落到框架默认 —— 让偏好继续管用比让界面整齐要紧。
         (
-            // 水墨那一档把浅侧那一格**换成** [`INK_LIGHT`] 那本。`appearance.light` 里存的
-            // 还是读者自己选过的那本：两侧的主题每次 repaint 都从 registry 重取，所以出了
-            // 这一档下一帧就照旧生效，不必把名字存回去、也没有第二份状态要维护。
-            // 认不出那一本时（嵌进来的文件缺了一格 = 构建问题）回落到读者原本选的那本，
-            // 而不是回落到框架默认 —— 让偏好继续管用比让界面整齐要紧。
-            if appearance.mode == Mode::Ink {
-                registry
-                    .themes()
-                    .get(INK_LIGHT)
-                    .cloned()
-                    .or_else(|| pick(appearance.light.as_deref(), DEFAULT_LIGHT))
-            } else {
-                pick(appearance.light.as_deref(), DEFAULT_LIGHT)
-            },
+            pick(appearance.light.as_deref(), DEFAULT_LIGHT),
             pick(appearance.dark.as_deref(), DEFAULT_DARK),
         )
     };
@@ -223,6 +251,16 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
     }
 
     Theme::change(mode, window, cx);
+    // 水墨：在**已经解析好的**这一本上把颜色统一去饱和。放在 `Theme::change` 之后是因为
+    // 那一步才从主题文件把色值铺进来（`Theme::update` 里 `apply_config` 的注释写着
+    // 「closure 之后编辑的东西会被文件里的值盖回去」，反过来写就没用）。
+    // 换回正常档时这里什么都不做，下一趟 `Theme::change` 会重新从 registry 铺一遍。
+    if appearance.mode == Mode::Ink {
+        desaturate_active_theme(cx);
+    }
+    // 封面那一类图（架面 / 书头 / OPDS）走 gpui 自己的 `Image`，不经过正文图集：
+    // 灰度落回字节上，翻档那一下由这一句广播出去。
+    crate::ui::foundation::images::set_ink_images(appearance.mode == Mode::Ink);
     // 滚动条那一格跟着同一档现取：`Theme::change` 之后 `cx.theme()` 才是这一屏真正生效的那本。
     apply_scrollbar_tint(cx);
     // 状态栏图标跟着刚定下的这一档翻。挂在换肤这里而不是某个屏幕上：浅深是应用级的，
@@ -234,12 +272,18 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_DARK, DEFAULT_LIGHT, INK_LIGHT, SCROLLBAR_TINT, register_builtin_themes, repaint,
+        DEFAULT_DARK, DEFAULT_LIGHT, SCROLLBAR_TINT, register_builtin_themes, repaint,
         resolve_mode, theme_names,
     };
     use folio_core::infra::config::Mode;
     use gpui_kit::component::{Theme, ThemeMode};
-    use gpui_kit::{Background, TestAppContext, WindowAppearance};
+    use gpui_kit::{Background, Hsla, Rgba, TestAppContext, WindowAppearance};
+
+    /// 一个颜色看起来有多亮（0–1）。去饱和只该动色相，这一格必须留在原地。
+    fn luma(color: Hsla) -> f32 {
+        let rgba = Rgba::from(color);
+        0.2126 * rgba.r + 0.7152 * rgba.g + 0.0722 * rgba.b
+    }
 
     /// registry 是用这两个名字播种的；上游改了名字，这里必须跟着改，
     /// 否则每一次查找回落都静默命中「查不到」，读者选的主题就不再生效。
@@ -339,56 +383,85 @@ mod tests {
         );
     }
 
-    /// 水墨那一档**真的换到宣纸那本**，而且出了这一档能回到读者自己选过的那本。
+    /// 水墨那一档：还是读者选的那一本浅色主题，纸与字的亮度不动，只把色相拿掉；
+    /// 出了这一档颜色原样回来。
     ///
-    /// 这一条钉的是第四档唯一的可见后果。三种会安静坏掉的样子：`INK_LIGHT` 那个名字与
-    /// 主题文件里的对不上（`repaint` 的回落把它变成「什么都没换」）；`resolve_mode` 把
-    /// 它接到深侧（宣纸底配一套深色 token，屏上半浅半深）；`repaint` 里那一支写成了
-    /// 改 `appearance.light`（出档时回不来，读者的偏好也被改掉）。
+    /// 三种会安静坏掉的样子：去饱和放在了 `Theme::change` **之前**（主题文件立刻把色
+    /// 铺回去，屏上一点变化都没有）；只改了 `colors` 而 `tokens` 那一侧没跟上（底层滚动条
+    /// 还是品牌色）；这一档被接到了深侧（`resolve_mode` 那条门单独钉）。
     #[gpui_kit::test]
-    fn ink_mode_swaps_the_light_side_and_back(cx: &mut TestAppContext) {
+    fn ink_mode_desaturates_the_readers_light_theme(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(register_builtin_themes);
         cx.update(|app| {
-            assert!(
-                theme_names(app, ThemeMode::Light)
-                    .iter()
-                    .any(|name| name.as_ref() == INK_LIGHT),
-                "水墨那一本没进 registry：`INK_LIGHT` 与文件里的名字对不上，或它没被装载"
-            );
-            // 这一档不跟着系统翻面：系统正深色时它仍旧走浅侧。
             assert_eq!(
                 resolve_mode(Mode::Ink, WindowAppearance::Dark),
-                ThemeMode::Light
+                ThemeMode::Light,
+                "水墨不跟着系统翻面"
             );
 
             let mut appearance = folio_core::Config::default().appearance;
             appearance.mode = Mode::Light;
             appearance.light = Some(DEFAULT_LIGHT.into());
-            let before = {
-                repaint(&appearance, None, app);
-                Theme::global(app).colors.background
-            };
+            repaint(&appearance, None, app);
+            let before = Theme::global(app).colors;
 
             appearance.mode = Mode::Ink;
             repaint(&appearance, None, app);
             let theme = Theme::global(app);
-            let (paper, ink) = (theme.colors.background, theme.colors.foreground);
-            assert_ne!(paper, before, "选了水墨，纸面却还是原来那一本的颜色");
-            // 墨要比纸暗、纸要真是浅色那一头：写反了就是亮字压在一面白纸上，
-            // 而 `resolve_mode` 把这一档接到深侧时 `paper.l` 会先掉下来。
-            assert!(ink.l < paper.l, "水墨这本的底色比字还亮");
-            assert!(paper.l > 0.85, "宣纸底不是一张浅纸：l = {paper:?}");
+            // 纸还是那一张纸：水墨不换主题。
+            assert!(
+                (theme.colors.background.l - before.background.l).abs() < 0.01,
+                "水墨换了纸色，这一档只该去色：{} vs {}",
+                theme.colors.background,
+                before.background
+            );
+            // 带着色相的那几格（主色、强调、选区）全变灰，亮度差不多。
+            for (name, gray, colored) in [
+                ("primary", theme.colors.primary, before.primary),
+                ("accent", theme.colors.accent, before.accent),
+                ("selection", theme.colors.selection, before.selection),
+            ] {
+                assert_eq!(gray.s, 0.0, "{name} 没去饱和：{gray:?}");
+                assert!(
+                    (luma(gray) - luma(colored)).abs() < 0.02,
+                    "{name} 的观感亮度被改了：{gray:?} 原 {colored:?}"
+                );
+                assert!(
+                    (gray.a - colored.a).abs() < 0.005,
+                    "{name} 的 alpha 被改了：{gray:?} 原 {colored:?}"
+                );
+            }
+            assert_eq!(
+                theme.colors.foreground.s, 0.0,
+                "正文色该是灰的（它本来就近黑，但走灰阶这一步不能漏）"
+            );
 
-            // 出档：`appearance.light` 那本照旧，而不是停在宣纸上、也不是落到框架默认。
+            // 出档：主题文件原样铺回来，读者的浅色没被改成灰的存下去。
             appearance.mode = Mode::Light;
             repaint(&appearance, None, app);
             assert_eq!(
-                Theme::global(app).colors.background,
+                Theme::global(app).colors,
                 before,
-                "退出水墨之后浅侧没回到读者自己选过的那本"
+                "退出水墨之后浅侧没回到原来那一本"
             );
         });
+    }
+
+    /// 去饱和的纯函数：`#rrggbbaa` 换成同亮度的灰，alpha 不动；别的字符串原样留着。
+    #[test]
+    fn the_hex_desaturator_keeps_luma_and_alpha() {
+        assert_eq!(
+            super::desaturate_hex("#c1ccc0ff").as_deref(),
+            Some("#c9c9c9ff"),
+            "（0.2126×193 + 0.7152×204 + 0.0722×192）≈ 200.8 → 201"
+        );
+        assert_eq!(
+            super::desaturate_hex("#ff000080").as_deref(),
+            Some("#36363680")
+        );
+        assert_eq!(super::desaturate_hex("#fff"), None);
+        assert_eq!(super::desaturate_hex("Default Light"), None);
     }
 
     /// 每个 mode 都至少能选到两套，且默认名一定在里面 —— 「选不中」在界面上

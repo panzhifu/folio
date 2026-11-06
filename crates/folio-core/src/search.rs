@@ -90,7 +90,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use crate::content::document::Document;
-use crate::content::format::visible_text;
+use crate::content::format::visible_text_only;
 use crate::infra::task::StageCtx;
 
 /// 一次扫描默认最多报多少处。
@@ -263,10 +263,29 @@ pub fn scan_book_at(
 /// [`Document::chapter_source`] 那句「是 `ChapterUnavailable` 不是空串」同一口径 ——
 /// 「这几章搜不了」与「这本书没了」是两件事。
 pub fn scan(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageCtx) -> Found {
+    scan_with_sink(doc, query, options, ctx, &mut |_| {})
+}
+
+/// 与 [`scan`] 同一条路，只是每扫出一段新命中就把**这一批到目前为止的全部命中**交给
+/// `sink`。界面那一档靠它「边扫边显示」：读者不用等 24 处凑满才看见第一行。
+///
+/// 送的是**累计**而不是增量：同一条 `&[Hit]` 重复送到（每章一次）时，接收方按
+/// `hits.truncate(base); hits.extend(batch)` 吸收即可，晚到的批次不会把结果翻倍。
+/// 空批次不回调 —— 一本四百多万字的书里，大多数章一次都不命中。
+///
+/// 取消与上限的语义与 [`scan`] 完全一致：`sink` 拿到的是已经进了 `Found.hits` 的那几条，
+/// 上限一到就停手，不会先送出去再收回去。
+pub fn scan_with_sink(
+    doc: &dyn Document,
+    query: &Query,
+    options: &Options,
+    ctx: &StageCtx,
+    sink: &mut dyn FnMut(&[Hit]),
+) -> Found {
     // 两族文档各有各的「一段字」：可重排按章取正文，定版式按页取文字层。分岔只看
     // `doc.flow()` 在不在 —— 那正是 `Content` 的两族划分，不看格式、也不看扩展名。
     if doc.flow().is_none() {
-        return scan_pages(doc, query, options, ctx);
+        return scan_pages(doc, query, options, ctx, sink);
     }
     let chapters = doc.flow().map_or(0, |flow| flow.chapters.len());
     // 续扫从**报出最后一处的那一章**起，而不是下一章：那一章多半是被上限截断的，
@@ -288,9 +307,13 @@ pub fn scan(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageCtx
         // 不是空串」同一口径 ——「这几章搜不了」与「这本书没了」是两件事。
         match doc.chapter_source(index) {
             Ok(source) if !source.is_empty() => {
-                let text = visible_text(&source);
+                let text = visible_text_only(&source);
+                let before = out.hits.len();
                 if scan_chapter(index, &text, query, options, &mut out.hits) {
                     out.truncated = true;
+                }
+                if out.hits.len() > before {
+                    sink(&out.hits[..]);
                 }
             }
             _ => {}
@@ -321,7 +344,13 @@ pub fn scan(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageCtx
 /// 给不出文字层的那一本（漫画包、没带 OCR 的扫描本）命中是空的而**页数照实报**：
 /// 界面因此分得出「这本书一页字都没有」与「这个词不在书里」那两句话。
 /// 一页没字是空串而不是缺项，所以 `scanned` 数的是真扫过的页。
-fn scan_pages(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageCtx) -> Found {
+fn scan_pages(
+    doc: &dyn Document,
+    query: &Query,
+    options: &Options,
+    ctx: &StageCtx,
+    sink: &mut dyn FnMut(&[Hit]),
+) -> Found {
     // 页数取页表那一份（库里躺着的事实），不是取回的那一列的长度：provider 少给一页
     // 是多嘴，多给一页是违约，两种都不该把「这本书几页」改掉。
     let pages = doc.fixed().map_or(0, |fixed| fixed.pages.len());
@@ -341,8 +370,14 @@ fn scan_pages(doc: &dyn Document, query: &Query, options: &Options, ctx: &StageC
             out.cancelled = true;
             break;
         }
-        if !text.is_empty() && scan_chapter(page, text, query, options, &mut out.hits) {
-            out.truncated = true;
+        if !text.is_empty() {
+            let before = out.hits.len();
+            if scan_chapter(page, text, query, options, &mut out.hits) {
+                out.truncated = true;
+            }
+            if out.hits.len() > before {
+                sink(&out.hits[..]);
+            }
         }
         out.scanned += 1;
         if out.truncated || out.hits.len() >= options.max_hits {

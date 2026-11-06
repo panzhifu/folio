@@ -19,9 +19,16 @@ use gpui_kit::{Hsla, SharedString, hsla};
 
 use crate::ui::features::reader::model::chapter_layout::{Document, RowFragment};
 use crate::ui::features::reader::model::measure::FontCache;
+use crate::ui::features::reader::model::session::StackMotionView;
 use crate::ui::features::reader::view::paint::GlyphRun;
 use crate::ui::foundation::images::ChapterImages;
-use crate::ui::foundation::style::{run_color, run_color_link};
+use crate::ui::foundation::style::{desaturate, desaturate_author, run_color, run_color_link};
+
+/// 这一行是不是当前那张的左右邻居。两头之外的不预解：一叠可能有八张，
+/// 全排全清会把图集 24 MB 的封顶挤爆，反而把眼前这一张挤走。
+fn stack_neighbor(index: u16, current: u16) -> bool {
+    index == current.saturating_add(1) || index + 1 == current
+}
 
 /// 可见范围内一块盒子的块级装饰：背景色与四边边框（实心画）。
 ///
@@ -286,6 +293,14 @@ pub struct VisibleImage {
     /// 修图书里 `width:100%; object-fit:cover` 的图会被拉成扁的（读者 2026-10-30 报的
     /// 「图片显示效果」）。
     pub fit: crate::ui::foundation::images::ObjectFit,
+    /// 叠图切图那一笔里，这一张要平移多少（逻辑像素）；0 = 不动。
+    ///
+    /// 只有动画在跑时才非 0：旧图往手指那一侧滑走、新图从另一侧进来，两图都画，
+    /// 由 [`super::body::images::image_child`] 的裁切层把超出那一格的部分切掉。
+    pub stack_slide: f32,
+    /// 这一张是不是动画里「正在进来」的那一张。角标 `k/n` 只画在其中一张上，
+    /// 免得动画那 180 ms 里屏上出现两个同样的角标。
+    pub stack_incoming: bool,
 }
 
 /// 一屏（或一栏）要画的全部单元。
@@ -332,6 +347,13 @@ impl Scene {
         // 章节根的整页底图由阅读器当整窗背板画（见 `body::page_art`），这里跳过它，
         // 别在版心里再画一遍 —— 位置还差着一个页眉与安全区。
         taken_over: Option<usize>,
+        // 水墨那一档：这一帧要画的**作者颜色**（文字色、底色、边框、影子）全部按亮度
+        // 去饱和。主题那边已经在换肤时变灰了，两条路各管各的一半。
+        ink: bool,
+        // 哪一章（`StackMark.id` 只在一章的一份排版里作数）。
+        chapter: usize,
+        // 叠图切图那一笔的位移快照。`None` = 静态，只画当前那一张。
+        stack_motion: Option<StackMotionView>,
     ) -> Self {
         // 等宽偏好与书的字体整份取一次：一个场景里所有 run 共用，别在逐 run 里克隆。
         let mono = SharedString::from(document.prefs().mono_font_family.clone());
@@ -386,19 +408,32 @@ impl Scene {
             // 一叠图只画「现在这一张」那一格，其余各张整行跳过 —— 图与它的注都是
             // 那一叠第 k 格的行，所以切图时图注跟着一起换，不必另立一条规则。
             // 「看第几张」住界面（`Document::stack_current`）：它变了不许重排、不许改页数。
-            if let Some(mark) = line.stack
-                && document.stack_current(mark.id) != mark.index
-            {
-                // 叠里「再下一张」先预热：这一行走不到绘制，但它的图是读者下一次
-                // 横滑要的那张，提前解掉，切的那一下就是现成的。
-                if mark.index == document.stack_current(mark.id).saturating_add(1) {
-                    for image in line.images() {
-                        if let Some(request) = document.images().decode_request(&image.href) {
-                            upcoming.push(request);
+            let current = document.stack_current(line.stack.map(|mark| mark.id).unwrap_or(0));
+            let motion = stack_motion.filter(|motion| {
+                motion.chapter == chapter
+                    && line.stack.is_some_and(|mark| mark.id == motion.id)
+                    && motion.progress > 0.0
+            });
+            if let Some(mark) = line.stack {
+                // 动画在跑时，除了当前那一张，还要把「滑走的那张」与「进来的那张」
+                // 一并画出来；静态时仍然只画当前这一格。
+                let drawn = match motion {
+                    Some(m) => mark.index == current || mark.index == m.from || mark.index == m.to,
+                    None => mark.index == current,
+                };
+                if !drawn {
+                    // 叠里**左右两张邻居**先预热：这一行走不到绘制，但它们的图是读者
+                    // 下一次横滑（往前往后都一样）要的那张，提前按全清解掉，切的那一下
+                    // 直接是清晰的，不用先拿一张 360px 的糊图顶着再换。
+                    if stack_neighbor(mark.index, current) {
+                        for image in line.images() {
+                            if let Some(request) = document.images().decode_request(&image.href) {
+                                upcoming.push(request);
+                            }
                         }
                     }
+                    continue;
                 }
-                continue;
             }
             // 章内那一份「这一行摆什么」一章只物化一次（`Document::row_units`）：文本句柄、
             // 字体描述、行内 x、基线偏移、盒高、装饰布尔、CSS 色全在那里。每帧只往上加
@@ -483,6 +518,22 @@ impl Scene {
                             request.is_some()
                         );
                         if let Some(image) = request {
+                            // 切图那一笔：旧图往手指那一侧滑走，新图从另一侧进来。
+                            // `dir` 是「往下一张」还是「往上一张」，由 from/to 定，不用
+                            // 再读一次手势方向 —— 两处各读一遍就会在 RTL 书上打架。
+                            let (stack_slide, stack_incoming) = match (line.stack, motion) {
+                                (Some(mark), Some(m)) if m.progress > 0.0 => {
+                                    let dir = if m.to > m.from { 1.0 } else { -1.0 };
+                                    if mark.index == m.from {
+                                        (-m.progress * placed.width * dir, false)
+                                    } else if mark.index == m.to {
+                                        ((1.0 - m.progress) * placed.width * dir, true)
+                                    } else {
+                                        (0.0, false)
+                                    }
+                                }
+                                _ => (0.0, false),
+                            };
                             // 竖排里的图片**不转置也不旋转**：矩形按原尺寸画，只是
                             // 「底贴基线」换成「左缘贴基线」（rl 的起点边在右，图朝起点边那侧
                             // 长出去）。列的厚度是行高，图比它宽时会压到邻列 —— 显式降级，
@@ -506,6 +557,8 @@ impl Scene {
                                 fit: placed.fit,
                                 image,
                                 stack: line.stack,
+                                stack_slide,
+                                stack_incoming,
                             });
                         }
                     }
@@ -520,11 +573,43 @@ impl Scene {
         // 行单元」，那笔钱在 `Document::row_units` 里付，计数也就跟着挪到那一处。
         // 滚回走过的地方应当增量 0，往前滚那一趟该付（单元表按行懒物化）。
         Metric::SceneRebuilds.count();
-        Self {
+        let mut scene = Self {
             upcoming,
             runs,
             images,
             decorations,
+        };
+        if ink {
+            scene.desaturate();
+        }
+        scene
+    }
+
+    /// 水墨：把这一帧的作者颜色全部压成同亮度的灰。
+    ///
+    /// 只管**书里写死的**那几格；主题色（正文色、链接色、选区）在换肤那一步已经去过
+    /// 饱和，这里再过一遍是幂等的。图片不走这里 —— 它们在图集里按灰度解码。
+    fn desaturate(&mut self) {
+        for run in &mut self.runs {
+            run.color = desaturate(run.color);
+            if run.text_shadows.iter().any(|shadow| shadow.color.is_some()) {
+                run.text_shadows = run
+                    .text_shadows
+                    .iter()
+                    .map(|shadow| {
+                        let mut shadow = *shadow;
+                        shadow.color = shadow.color.map(desaturate_author);
+                        shadow
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+            }
+        }
+        for decor in &mut self.decorations {
+            decor.background = decor.background.map(desaturate);
+            for edge in &mut decor.border {
+                edge.1 = desaturate(edge.1);
+            }
         }
     }
 }
@@ -716,9 +801,12 @@ mod tests {
     //! 这一层剩下的几件事必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、主题色，
     //! 以及背景图的固有尺寸与字节。
 
-    use super::DecorSeed;
     use super::place_decorations;
+    use super::{BlockDecor, DecorSeed, Scene, stack_neighbor};
+    use crate::ui::features::reader::view::paint::GlyphRun;
     use crate::ui::foundation::images::ChapterImages;
+    use folio_core::content::format::css::computed::TextShadow;
+    use gpui_kit::{Font, Rgba, SharedString, hsla};
 
     /// 一本「一张图都没有」的书：`place_decorations` 现在要拿它现问固有尺寸与字节，
     /// 而这几条测试只管底色、边框与裁剔，背景图那一格一律走「取不到就跳过」那一条。
@@ -1158,5 +1246,79 @@ mod tests {
             ),
             "纵向溢出的那一档不许贴顶（会压进下一章）"
         );
+    }
+
+    /// 水墨：作者写的文字色、底色、边框与 text-shadow 全部按观感亮度变灰，alpha 不动。
+    ///
+    /// 钉的是「水墨等于正常版式，只是黑白」：底色**不能**被撤掉（那是上一版的做法），
+    /// 也不能留着色相。主题色不在这里测 —— 它在换肤那一步处理。
+    #[test]
+    fn ink_scrubs_author_colours_without_dropping_the_backdrop() {
+        let colored = hsla(0.33, 0.62, 0.48, 0.8);
+        let shadow = TextShadow {
+            dx: 1.0,
+            dy: 1.0,
+            blur: 0.0,
+            color: Some(Color(255, 0, 0, 200)),
+        };
+        let run = GlyphRun::new(SharedString::from("字"), Font::default(), 16.0)
+            .color(colored)
+            .shadowed(vec![shadow].into());
+        let mut scene = Scene {
+            runs: vec![run],
+            decorations: vec![BlockDecor {
+                x: 0.0,
+                top: 0.0,
+                width: 300.0,
+                height: 40.0,
+                background: Some(colored),
+                radius: [0.0; 4],
+                border: [(2.0, colored, BorderStyle::Solid); 4],
+                pictures: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        scene.desaturate();
+
+        let run = &scene.runs[0];
+        assert_eq!(run.color.s, 0.0, "正文 run 还带着色相：{:?}", run.color);
+        assert!(
+            (run.color.a - colored.a).abs() < 1e-6,
+            "去饱和改掉了 alpha：{:?}",
+            run.color
+        );
+        // 观感亮度不能变：底色是浅绿，去饱和之后仍该是一块浅灰，而不是黑。
+        let gray = Rgba::from(run.color);
+        let before = Rgba::from(colored);
+        let luma = 0.2126 * before.r + 0.7152 * before.g + 0.0722 * before.b;
+        assert!(
+            (0.2126 * gray.r + 0.7152 * gray.g + 0.0722 * gray.b - luma).abs() < 0.01,
+            "亮度被改了：{gray:?} 原 {before:?}"
+        );
+        assert_eq!(
+            run.text_shadows[0].color,
+            Some(Color(54, 54, 54, 200)),
+            "影子颜色没按亮度变灰（0.2126×255 ≈ 54），或 alpha 被改了"
+        );
+
+        let decor = &scene.decorations[0];
+        let background = decor.background.expect("底色被撤掉了，水墨该留着它");
+        assert_eq!(background.s, 0.0, "底色还带着色相：{background:?}");
+        for edge in &decor.border {
+            assert_eq!(edge.1.s, 0.0, "边框还带着色相：{edge:?}");
+            assert!((edge.1.a - colored.a).abs() < 1e-6, "边框 alpha 被改了");
+        }
+    }
+
+    /// 叠图只预解左右两张邻居：往前滑、往回滑都一样直接清晰；隔了一张的不预解
+    /// （一叠可能有八张，全排全清会把图集的封顶挤爆）。
+    #[test]
+    fn only_the_two_neighbours_of_a_stack_are_prefetched() {
+        assert!(stack_neighbor(1, 0), "下一张");
+        assert!(stack_neighbor(0, 1), "上一张");
+        assert!(stack_neighbor(2, 1), "下一张");
+        assert!(!stack_neighbor(3, 1), "隔了一张不预解");
+        assert!(!stack_neighbor(0, 0), "当前这张不在这里预解");
+        assert!(!stack_neighbor(0, u16::MAX), "末尾不回绕");
     }
 }

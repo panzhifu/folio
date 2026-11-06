@@ -154,6 +154,49 @@ impl ReaderSession {
         }
     }
 
+    /// 这句的行顶现在**看得见吗**：连续滚动看它的行顶 y 是否落在视口带内；分页看它
+    /// 所在的页是不是当前页。
+    ///
+    /// 跟读的「该不该动」用它，而不是「是不是同一段」——同一段从这一页漫到下一页、
+    /// 或一段长过一屏时，只看段落记号会把屏留在原地，读者看着上一页听下一段的声音
+    /// （真机「声音在念、正文不动」）。
+    ///
+    /// 排版数据没就位（章不在链上、基线没有、这一章还没排出行）时按**看得见**处理：
+    /// 跟读只在该动的时候动，数据缺斤短两时宁可不动 —— 这时动了，`jump_to_offset`
+    /// 的兜底会把屏拽回章首。
+    pub(in crate::ui::features::reader) fn offset_visible(
+        &self,
+        chapter: usize,
+        offset: usize,
+    ) -> bool {
+        if self.is_fixed() {
+            return true;
+        }
+        let Source::Book(book) = &self.source else {
+            return true;
+        };
+        if self.laid_out.mode.is_continuous() {
+            let gap = Book::chapter_gap(&self.prefs);
+            let (Some(doc), Some(base)) = (book.span_doc(chapter), book.base_of(chapter, gap))
+            else {
+                return true;
+            };
+            if doc.lines().is_empty() {
+                return true;
+            }
+            let y = doc.y_at_offset(offset);
+            let top = self.scroll_y - base;
+            y >= top && y < top + self.laid_out.viewport
+        } else {
+            // 分页模式的排版物是锚章自己的：念的章不是锚章，这一句必然不在屏上。
+            if chapter != book.chapter_index() {
+                return false;
+            }
+            let line = book.document().line_at_offset(offset);
+            book.document().page_of_line(line) == self.page
+        }
+    }
+
     /// 跳到**锚章**内第 `offset` 个字所在的那一屏。目录跳转、书签、恢复进度共用这一个入口。
     pub fn jump_to_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
         // 定版式没有「章内第几个字」这个坐标：位置按页号走，恢复在渲染帧里直接落页。

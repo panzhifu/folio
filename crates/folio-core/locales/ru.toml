@@ -20,6 +20,17 @@
 # **这一门语言用不到的臂照抄 `_other`** —— key 集合一致那条测试要求每一份都有这四行，
 # 宁可重复也不能少一行。
 
+# 听书那一屏：两种面孔、三颗控制键与段位置。
+"listen.cover" = "Обложка"
+"listen.text" = "Рукопись"
+"listen.prev" = "Предыдущее предложение"
+"listen.next" = "Следующее предложение"
+"listen.close" = "Закрыть"
+"listen.loading" = "Подготовка…"
+"listen.position" = "Предложение %{index} / %{total}"
+"listen.engine_preparing" = "Подготовка синтеза речи…"
+"listen.engine_unavailable" = "На этом устройстве нет доступного синтезатора речи"
+
 [sidebar]
 import = "Импорт книги"
 account = "Аккаунт"
@@ -67,6 +78,7 @@ toc = "Оглавление"
 "marks.stale" = "⚠️ %{place} · позиция потеряна"
 bookmark = "Закладка"
 "jump_back.action" = "Назад"
+"jump_back.close" = "Закрыть"
 "undo.action" = "Отменить"
 "undo.bookmark" = "Закладка удалена"
 translate = "Перевести"
@@ -584,11 +596,27 @@ search_placeholder = "Поиск по названию или автору"
 # 无障碍标签与桌面的 tooltip 上。
 more = "Способы импорта"
 import = "Импорт"
-# 导入进行中的那一行读数，摆在命令行与架面之间。后端报的第一条读数还没上来时总数
-# 不知道，那一句不带数字。
-importing = "Идёт импорт…"
-importing_of = "Идёт импорт %{done}/%{total}"
-# Строка после импорта: сколько книг не вошло и почему. Здесь все четыре
+# 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）的两句：标题说这件事在跑，读数说已完成几本。
+# 后端第一条读数还没上来时总数不知道，那一档只有标题与一条不定进度的 bar，读数不给。
+status_importing = "Идёт импорт"
+status_progress = "%{done} из %{total} импортировано"
+# 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
+# 数已经在行里了），与「没进来」那几档的复数句子（`reject_*`）各管各的场合。
+record_title = "Журнал импорта"
+status_added = "Готово"
+status_duplicate = "Уже на полке"
+status_needs_password = "Нужен пароль"
+status_encrypted = "Защищено DRM"
+status_corrupt = "Файл повреждён"
+status_unsupported = "Формат не поддерживается"
+status_unreadable = "Не удалось прочитать"
+record_open = "Открыть"
+record_clear = "Очистить"
+record_added_one = "%{count} книга импортирована"
+record_added_few = "%{count} книги импортировано"
+record_added_many = "%{count} книг импортировано"
+record_added_other = "%{count} книга импортировано"
+# Карточка после импорта, по строке на причину: сколько книг не вошло и почему. Здесь все четыре
 # ветки настоящие (CLDR для русского).
 import_rejected_one = "%{count} книга не импортирована"
 import_rejected_few = "%{count} книги не импортировано"
@@ -622,10 +650,16 @@ scan_title = "Найти книги на устройстве"
 scan_running = "Идёт поиск…"
 scan_found = "Идёт поиск… найдено %{n}"
 scan_stop = "Остановить"
-scan_none = "На устройстве не найдено книг для импорта"
-scan_summary = "Найдено %{n} — отметьте нужные"
-scan_skipped = "Пропущено %{n} недоступных мест (права)"
-scan_truncated = "Книг слишком много — показана только часть"
+scan_none = "На этом устройстве не найдено книг для импорта"
+scan_search_placeholder = "Поиск по имени файла"
+scan_filter = "Фильтр"
+scan_filter_format = "Формат"
+scan_filter_size = "Размер"
+scan_filter_size_under = "Меньше (MB)"
+scan_filter_state = "Состояние"
+scan_filter_not_on_shelf = "Нет на полке"
+scan_filter_clear = "Сбросить фильтры"
+scan_empty_filtered = "Нет книг, подходящих под фильтры"
 scan_on_shelf = "Уже на полке"
 scan_select_all = "Отметить все"
 scan_clear = "Снять отметки"
@@ -856,6 +890,8 @@ deleted_bookmark = "Закладка удалена"
 
 [font_picker]
 search = "Поиск шрифтов"
+group.book = "Шрифты книги"
+group.system = "Системные шрифты"
 
 [dictionary]
 words = "%{count} слов"

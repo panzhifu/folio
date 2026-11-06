@@ -325,7 +325,8 @@ impl ReaderSession {
         if self.laid_out.mode.is_continuous() || (!self.is_fixed() && self.book().is_none()) {
             return None;
         }
-        let style = turn_animation::of(ConfigHolder::appearance(cx).page_turn);
+        let style =
+            turn_animation::of(super::chrome::effective_turn(&ConfigHolder::appearance(cx)));
         if !style.claims(axis) {
             return None;
         }
@@ -416,7 +417,27 @@ impl ReaderSession {
                     self.stack_dy += step_y;
                     if self.stack_dy.abs() > self.stack_dx.abs().max(8.0) {
                         self.stack_grab = None;
+                        // 改判成竖滚：跟手那一笔作废，别让图停在半路上。
+                        self.stack_motion = None;
+                        cx.notify();
                         return SwipeStep::Ignore;
+                    }
+                    // 跟手：累计位移 / 阈值 = 0..1 的进度。方向与下面松手判定用的是
+                    // 同一套读法（左右手、RTL 都在那一处折一次）。
+                    let edge = (f32::from(hit.rect.size.width) / 5.0).max(24.0);
+                    if self.stack_dx.abs() > 0.5 {
+                        let progress = (self.stack_dx.abs() / edge).min(1.0);
+                        let delta = if self.stack_dx < 0.0 { 1 } else { -1 };
+                        let delta = if self.progression_rtl() {
+                            -delta
+                        } else {
+                            delta
+                        };
+                        self.drag_stack(&hit, progress, delta, cx);
+                    } else {
+                        // 识别器折出来的第一段可能还是 0（原始触摸 → 事件有一帧
+                        // 延迟）：这时别拿 dx=0 猜方向，先不动画，等有真位移的那一帧。
+                        self.stack_motion = None;
                     }
                     return SwipeStep::Swallow;
                 }
@@ -435,7 +456,8 @@ impl ReaderSession {
                     let dx = std::mem::take(&mut self.stack_dx);
                     self.stack_dy = 0.0;
                     let edge = (f32::from(hit.rect.size.width) / 5.0).max(24.0);
-                    if dx.abs() >= edge {
+                    let commit = dx.abs() >= edge;
+                    if commit {
                         // 手指往左 = 下一张；阿拉伯语那一族反过来（与翻页同一套读法）。
                         let delta = if dx < 0.0 { 1 } else { -1 };
                         let delta = if self.progression_rtl() {
@@ -451,6 +473,9 @@ impl ReaderSession {
                             self.turn(intent, cx);
                         }
                     }
+                    // 松手补完：过了阈值就把这一笔推到 1（切过去），没过就推回 0
+                    // （弹回原图）。两端都是同一段 180 ms 动画，不再「整张换掉」硬切。
+                    self.settle_stack(commit, cx);
                     return SwipeStep::Swallow;
                 }
             }
@@ -679,7 +704,7 @@ impl ReaderSession {
         }
         // 旧页捕获还没完整落地时不让这一笔起跟手翻页。否则兜底会退回 CPU 裁页，两张正常
         // 页面叠在一起；等入场动画结束、捕获完整后再划才有那张带正文的卷曲纸。
-        let style = ConfigHolder::appearance(cx).page_turn;
+        let style = super::chrome::effective_turn(&ConfigHolder::appearance(cx));
         if style == PageTurn::Curl && !self.curl_capture_ready() {
             // 这一笔先不跟手，但**别吞掉**：方向记下来，松手时 `turn()` 会在门开的那一帧
             // 补一趟。返回 `Claimed` 让识别器把整笔归给翻页（不落到滚动），页号仍然不动。

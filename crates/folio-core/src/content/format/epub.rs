@@ -155,10 +155,11 @@ const COVER_MAX_EDGE: u32 = 512;
 /// 所以这一格跟着 `pub(crate)`，不再抄第二份。
 pub(crate) const IMAGE_HEAD_BYTES: u64 = 32 * 1024;
 
-/// 认得哪些 media-type 是字体，以及要不要先过一道 WOFF。
+/// 认得哪些 media-type 是字体，以及要不要先过一道解压。
 ///
-/// `woff2` **认得出但不取**：gpui 那侧的 fontdb 用 ttf-parser 解字节，只吃 TTF/OTF，
-/// WOFF2 还要 brotli，一期不引这个依赖。
+/// WOFF 在收下后由 [`super::woff`] 解回 sfnt；WOFF2 由 [`super::woff2`] 同样处理
+/// （从前「认得出但不取」—— fontdb 只吃 TTF/OTF，brotli 依赖一期没引，如今
+/// `format::woff2` 接了）。`font/collection` 是 EPUB 给 TTC 集合的标准声明。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FontKind {
     Sfnt,
@@ -179,6 +180,7 @@ fn font_kind(media_type: &str) -> FontKind {
         "font/ttf"
         | "font/otf"
         | "font/opentype"
+        | "font/collection"
         | "application/font-sfnt"
         | "application/vnd.ms-opentype"
         | "application/x-font-ttf"
@@ -186,6 +188,27 @@ fn font_kind(media_type: &str) -> FontKind {
         | "application/x-font-otf" => FontKind::Sfnt,
         "font/woff" | "application/font-woff" | "application/x-font-woff" => FontKind::Woff,
         "font/woff2" | "application/font-woff2" => FontKind::Woff2,
+        _ => FontKind::Other,
+    }
+}
+
+/// 清单条目的字体种类：media-type 说了算，认不出时按**扩展名**兜底判一次。
+///
+/// 兜底的理由是实书常态：大量书籍把字体标成 `application/octet-stream` 或干脆乱写，
+/// 只认声明会把作者明明随书交来的字体整份跳过。扩展名只认字体的那几个，别的不猜。
+fn item_font_kind(media_type: &str, href: &str) -> FontKind {
+    match font_kind(media_type) {
+        FontKind::Other => font_kind_by_extension(href),
+        kind => kind,
+    }
+}
+
+fn font_kind_by_extension(href: &str) -> FontKind {
+    let name = href.rsplit(['/', '\\']).next().unwrap_or(href);
+    match name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()) {
+        Some(ext) if matches!(ext.as_str(), "ttf" | "otf" | "ttc" | "otc") => FontKind::Sfnt,
+        Some(ext) if ext == "woff" => FontKind::Woff,
+        Some(ext) if ext == "woff2" => FontKind::Woff2,
         _ => FontKind::Other,
     }
 }
@@ -217,8 +240,8 @@ fn font_bytes(path: &Path, wanted: &[String]) -> Vec<FontBytes> {
     let mut out = Vec::new();
     let mut total = 0usize;
     for item in &items {
-        let kind = font_kind(&item.media_type);
-        if matches!(kind, FontKind::Other | FontKind::Woff2) {
+        let kind = item_font_kind(&item.media_type, &item.href);
+        if matches!(kind, FontKind::Other) {
             continue;
         }
         // `src` 解出来的是容器绝对路径，`locate` 那一步已经把大小写与反斜杠抹平了，
@@ -256,13 +279,14 @@ fn font_bytes(path: &Path, wanted: &[String]) -> Vec<FontBytes> {
             );
             break;
         }
-        // WOFF 先解回 sfnt；解不开就当这个 item 不存在，继续找下一个声明的字体。
+        // WOFF/WOFF2 先解回 sfnt；解不开就当这个 item 不存在，继续找下一个声明的字体。
         let bytes = match kind {
             FontKind::Woff => crate::content::format::woff::decode(&bytes),
+            FontKind::Woff2 => crate::content::format::woff2::decode(&bytes),
             _ => Some(bytes),
         };
         let Some(bytes) = bytes else {
-            tracing::debug!("epub: 字体 {name} 声明是 WOFF，但解不回 sfnt");
+            tracing::debug!("epub: 字体 {name} 声明是 WOFF/WOFF2，但解不回 sfnt");
             continue;
         };
         total += bytes.len();
@@ -290,8 +314,8 @@ fn font_refs(path: &Path, wanted: &[String]) -> Vec<FontRef> {
 fn collect_font_refs(zip: &mut Zip, items: &[Item], base_dir: &str) -> Vec<FontRef> {
     let mut out = Vec::new();
     for item in items {
-        let kind = font_kind(&item.media_type);
-        if matches!(kind, FontKind::Other | FontKind::Woff2) {
+        let kind = item_font_kind(&item.media_type, &item.href);
+        if matches!(kind, FontKind::Other) {
             continue;
         }
         let name = resolve(base_dir, &item.href);
@@ -316,8 +340,8 @@ fn collect_font_refs_in(
 ) -> Vec<FontRef> {
     let mut out = Vec::new();
     for item in items {
-        let kind = font_kind(&item.media_type);
-        if matches!(kind, FontKind::Other | FontKind::Woff2) {
+        let kind = item_font_kind(&item.media_type, &item.href);
+        if matches!(kind, FontKind::Other) {
             continue;
         }
         let name = resolve(base_dir, &item.href);
@@ -376,7 +400,7 @@ fn manifest_in(container: &super::container::Container) -> Option<(Vec<Item>, St
     Some((opf.items, dir_of(&opf_path)))
 }
 
-/// 按身份读一份字体（WOFF 解回 sfnt）；未命中别名缓存时才走这里。
+/// 按身份读一份字体（WOFF/WOFF2 解回 sfnt）；未命中别名缓存时才走这里。
 fn read_font(path: &Path, font: &FontRef) -> Option<Vec<u8>> {
     let mut zip = Zip::open(path).ok()?;
     let name = zip.locate(&font.href)?;
@@ -384,10 +408,13 @@ fn read_font(path: &Path, font: &FontRef) -> Option<Vec<u8>> {
     if bytes.len() > MAX_ONE {
         return None;
     }
-    let bytes = match font_kind(&font.media_type) {
+    // 身份里的 media_type 是清单上的声明；收字体那两趟按扩展名兜过底，这里同一套
+    // 判据，两条路才不会「收的时候认、读的时候丢」。
+    let bytes = match item_font_kind(&font.media_type, &font.href) {
         FontKind::Sfnt => Some(bytes),
         FontKind::Woff => crate::content::format::woff::decode(&bytes),
-        FontKind::Woff2 | FontKind::Other => None,
+        FontKind::Woff2 => crate::content::format::woff2::decode(&bytes),
+        FontKind::Other => None,
     }?;
     (bytes.len() <= MAX_ONE).then_some(bytes)
 }

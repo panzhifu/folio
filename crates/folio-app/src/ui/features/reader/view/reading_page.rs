@@ -17,22 +17,30 @@
 //! 点击分区、浮层开合、模式退档都在 [`chrome`] 里判：那里是纯函数，宿主的 `cargo test`
 //! 直接跑，这一屏只把结果落成动作。
 
+use std::time::{Duration, Instant};
+
 use folio_core::content::format::novel::rules::MatchKind;
 use folio_core::infra::config::Mode;
 use folio_core::net::ai::Ask;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::motion::{Spring, spring};
 use gpui_kit::base::{NavMotion, NavStackState};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::{Popover, PopoverState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
-use gpui_kit::component::{ActiveTheme, Sizable as _, ThemeMode, ThemeStyled as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, Disableable as _, Sizable as _, ThemeMode, ThemeStyled as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, AppLifecyclePhase, ClickEvent, Context, Entity,
-    FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
+    Anchor, AnyElement, App, AppContext as _, AppLifecyclePhase, AbsoluteLength, ClickEvent,
+    Context, DefiniteLength, Entity, FocusHandle, Font, FontWeight, HighlightStyle, Hsla, Image,
+    InteractiveElement, InteractiveText, IntoElement, ObjectFit, ParentElement, Pixels, Render,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, StyledImage as _, StyledText,
+    Subscription, TestSupportExt as _, TextRun, TextStyle, WeakEntity, Window, WrappedLine, div,
+    img, point, px,
 };
 
 use crate::ui::features::reader::components::image_viewer::{self, ImageViewer};
@@ -43,8 +51,11 @@ use crate::ui::features::reader::model::chrome::{self, Chrome, Effect, Reserve, 
 use crate::ui::features::reader::model::dictionary::DictionaryStatus;
 use crate::ui::features::reader::model::rules_draft::DraftStatus;
 use crate::ui::features::reader::model::session::ReaderSession;
+use crate::ui::features::reader::model::speech::split_sentences;
 use crate::ui::features::reader::model::translation::{self, TranslationStatus};
 use crate::ui::features::settings::CompactSettings;
+use crate::ui::features::shelf::AUTHOR_SEP;
+use crate::ui::foundation::images::cover_image;
 use crate::ui::platform;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
@@ -58,6 +69,74 @@ const FOOTNOTE_GAP: Pixels = px(10.);
 /// 翻译弹层那张卡的宽：引文与译文都按「一句到一段」估，320 装得下中英两栏
 /// 各约 20 字 —— 与脚注那张同一族的尺寸。
 const TRANSLATION_CARD_W: Pixels = px(320.);
+/// 听书那一屏的两种面孔：封面 / 文字（Apple Music 歌词那种）。
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ListenFace {
+    #[default]
+    Cover,
+    Text,
+}
+
+/// 封面那一档的封面尺寸（3:4 左右，与架面同一条比例）。
+const LISTEN_COVER_W: f32 = 208.0;
+const LISTEN_COVER_H: f32 = 288.0;
+
+/// 文稿那一列左右各让出多宽（`px_3` 那一档）。**摆上去与量折行的用的是这一个数**：
+/// 页边与列宽的算式分在两处写，改一处就会让字顶出屏幕或者白留一条边。
+const LISTEN_PAGE_X: f32 = 12.0;
+/// 滚动条那一格（列表右缘让出来的宽）。
+const LISTEN_SCROLLBAR: f32 = 8.0;
+/// 文稿那一列的最大宽：平板 / 桌面上不让一行拉到一千多，视线要在一行里折返。
+const LISTEN_TEXT_W: f32 = 640.0;
+/// 书页文稿的字号。与歌词流那 22px 不同：这一面是**整段连续排版**，一行装得下
+/// 三十来个字，22px 会挤成书本正文的密度反而难读；17px 与阅读设置默认正文字号一档。
+const LISTEN_BOOK_PX: f32 = 17.0;
+/// 文稿的行高。**量折行与画出来必须同一个数**：跟读的落点按「第几行 × 行高」算，
+/// 画的那一侧若用了另一个行高，焦点就会一行一行地漂。段间空行也是它（`\n\n`）。
+const LISTEN_LINE_H: f32 = 30.0;
+/// 跟读那一趟弹簧的周期。句间平均 2–4 s（真机量到 227 ms/字），这半秒在下一句开口
+/// 之前走完，读者的眼睛不用追声音。阻尼 0.85 = 过一点点就回来，不像定时器那样硬停。
+const LISTEN_FOLLOW: Duration = Duration::from_millis(380);
+/// 读者手动划过文稿之后让位多久，过了这一格自动跟读才接着抢 —— 与「手动翻页不暂停
+/// 听书」同一条口径：读的人说了算。
+const LISTEN_HAND_OVER: Duration = Duration::from_secs(4);
+
+/// 听书文稿里的一句话：两套坐标。
+#[derive(Clone)]
+struct ListenSentence {
+    /// 章内字符区间 —— TTS 的落点，直接可以交给 [`ReaderSession::speak_from`]。
+    chapter: std::ops::Range<usize>,
+    /// 文稿文本内的 **UTF-8 字节区间** —— 与 gpui 文本下标同一口径
+    /// （`TextRun::len`、`position_for_index`、`InteractiveText` 的命中全是字节），
+    /// 当前句高亮与「点哪句念哪句」都落在这上面。
+    script: std::ops::Range<usize>,
+}
+
+/// 听书那一屏缓存的文稿：整章拼成一段连续文本，书页一样自然折行。
+struct ListenScript {
+    chapter: usize,
+    /// 整章文稿文本。段间 `\n\n` —— 空行就是段距，书页感由它来。
+    text: SharedString,
+    /// 每一句的两套区间（章内 / 文稿内），顺序即朗读顺序。
+    sentences: Vec<ListenSentence>,
+    /// 每一句的文稿文本落在第几行（整章一次排版后数出来的）。跟读的落点按它算。
+    line_of: Vec<usize>,
+    /// 建表时这一列多宽（逻辑像素）—— 变了要重建，不然折点会落到屏幕外面。
+    width: f32,
+    /// 这张表是**整章**的吗。排版还没给段界时兜底摆出来的单句表是 `false`：它只够
+    /// 把「正在念的那句」摆上屏，绝不能进缓存 —— 判据里放它一眼看中的
+    /// `!sentences.is_empty()`，单句表就把整章的位置占了，焦点从此钉死在一句上，
+    /// 声音念到哪文稿都不动（真机「文稿不跟读」的一种）。不完整就每帧重建，
+    /// 段界一到整章的表自然落地。
+    complete: bool,
+}
+
+/// 听书屏书头要的三样：一次查询就够，不每帧摸 SQLite。
+struct ListenBook {
+    title: SharedString,
+    authors: SharedString,
+    cover: Option<std::sync::Arc<Image>>,
+}
 /// 词典弹层那张卡的宽：释义比译文长，给宽一点；仍是与脚注、译文同一族的尺寸。
 const DICTIONARY_CARD_W: Pixels = px(340.);
 
@@ -114,6 +193,24 @@ pub struct ReadingPage {
     /// 每帧造的元素树里的 `track_focus`，句柄得属于**这一棵**元素树的那个视图，
     /// 方向键那几条事件才能沿祖先链派发到它（见 `image_viewer::overlay`）。
     pub(in crate::ui::features::reader) image_viewer_focus: FocusHandle,
+    /// 听书那一屏开着没有。它盖整屏（opaque），返回键第一下先收它。
+    listen_open: bool,
+    /// 听书屏现在是哪一面：封面 / 文字。
+    listen_face: ListenFace,
+    /// 文字那一档的滚动句柄（跨帧持有，理由同目录列表）。文稿是**一块**连续文本放在
+    /// 普通滚动容器里，不再是等格虚拟列表 —— 这里要的就是普通 `ScrollHandle` 的那几样：
+    /// 读实测位移、读 max_offset、每帧写位移。
+    listen_scroll: ScrollHandle,
+    /// 上一帧我们替文稿写进列表的滚动位移（逻辑像素，向下为正）。它与列表此刻实测到的
+    /// 值对不上，就是读者手动划过 —— 那一段位移归读者，自动跟读让位
+    /// [`LISTEN_HAND_OVER`]。
+    listen_written: Option<f32>,
+    /// 最近一次读者手动划过文稿的时刻。`None` = 没划过，或者已经让位够了。
+    listen_manual_at: Option<Instant>,
+    /// 当前章的文稿（换章或换宽重建）。
+    listen_script: Option<std::rc::Rc<ListenScript>>,
+    /// 书头三样。`None` = 还没查；`Some(None)` = 这本书没有可查的那一行。
+    listen_book: Option<Option<ListenBook>>,
     pub(in crate::ui::features::reader) _watches: Vec<Subscription>,
 }
 
@@ -185,6 +282,13 @@ impl ReadingPage {
             toc,
             image_viewer,
             image_viewer_focus,
+            listen_open: false,
+            listen_face: ListenFace::default(),
+            listen_scroll: ScrollHandle::new(),
+            listen_written: None,
+            listen_manual_at: None,
+            listen_script: None,
+            listen_book: None,
             _watches: watches,
         }
     }
@@ -290,6 +394,11 @@ impl ReadingPage {
     /// 焦点的归还不在这里做 —— 这条路上没有 `&mut Window`（`App::on_action` 的派发里窗口是
     /// 借着的），弹层自己在下一帧的 `render` 里还。
     pub fn dismiss_chrome(&mut self, cx: &mut Context<Self>) -> bool {
+        // 听书那一屏盖着整窗：返回键第一下先收它。
+        if self.listen_open {
+            self.close_listen(cx);
+            return true;
+        }
         if self.image_viewer.read(cx).is_open() {
             self.image_viewer.update(cx, |viewer, _| viewer.close());
             cx.notify();
@@ -513,11 +622,635 @@ impl ReadingPage {
         cx.notify();
     }
 
-    /// 听书那一下：没念 → 从视口当前段开口；念着 → 暂停；暂停 → 这一段从头再念。
+    /// 听书那一下：没念 → 从视口当前句开口；念着 → 暂停；暂停 → 这一句从头再念。
     /// 状态机全在会话里（`model/speech.rs`），这一屏只把那一击递过去。
     pub(in crate::ui::features::reader) fn toggle_speech(&mut self, cx: &mut Context<Self>) {
         self.reader
             .update(cx, |reader, cx| reader.toggle_speech(cx));
+    }
+
+    /// 打开听书那一屏：**只把门推开，不开口**。待念的位置当场摆好（视口当前句，
+    /// `arm_speech`）—— 文稿那一面有东西可定位，但声音要等读者按下圆钮才出来。
+    ///
+    /// 这一屏是**专用的**听书面孔（封面 / 文字两面），圆钮只负责把门推开 ——
+    /// 从前那一颗直接 toggle，读者想换一面看时没有地方按。
+    pub(in crate::ui::features::reader) fn open_listen(&mut self, cx: &mut Context<Self>) {
+        if !self.reader.read(cx).speech_entry_visible() {
+            return;
+        }
+        self.reader.update(cx, |reader, cx| reader.arm_speech(cx));
+        // 顶栏底栏收干净：这一层盖整屏，留着它们只会在底下闪。
+        self.chrome = Chrome::default();
+        self.listen_open = true;
+        self.listen_book = None;
+        // 文稿那一面的两格账本重开：列表句柄里的位移是上一次留下的，而弹簧的状态随
+        // 元素树一起没了。留着旧账，第一帧会把「我们自己上一帧写的」当成参照，
+        // 把没动过的列表误判成读者手动划过，让位整整四秒。
+        self.listen_written = None;
+        self.listen_manual_at = None;
+        cx.notify();
+    }
+
+    fn close_listen(&mut self, cx: &mut Context<Self>) {
+        if self.listen_open {
+            self.listen_open = false;
+            cx.notify();
+        }
+    }
+
+    /// 上一句 / 下一句：按**这一章**的文稿走一步。到头就停在头尾。
+    ///
+    /// 只把「念哪一句」交出去，不动列表：文稿那一面的居中与滚动在 [`Self::listen_overlay`]
+    /// 里按正在念的那一句算，这里再滚一次就是把同一个决定做两遍。让位那格要清掉 ——
+    /// 读者按下一句就是要让屏跟着走，不是还在自己翻。
+    fn listen_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some((chapter, range)) = self.reader.read(cx).speech_range() else {
+            return;
+        };
+        let Some(script) = self.listen_script.clone() else {
+            return;
+        };
+        if script.chapter != chapter {
+            return;
+        }
+        let Some(ix) = sentence_index(&script.sentences, range.start) else {
+            return;
+        };
+        let last = script.sentences.len().saturating_sub(1) as isize;
+        let target = (ix as isize + delta).clamp(0, last) as usize;
+        if target == ix {
+            return;
+        }
+        let want = script.sentences[target].chapter.clone();
+        self.listen_manual_at = None;
+        self.reader
+            .update(cx, |reader, cx| reader.speak_from(chapter, want, cx));
+    }
+
+    /// 书头三样查一次：书名 / 作者 / 封面。查询走与目录书头同一条（`store.book` +
+    /// `store.book_cover`），结果缓存在这一屏 —— 听书屏开着的时候不每帧摸 SQLite。
+    fn ensure_listen_book(&mut self, cx: &App) {
+        if self.listen_book.is_some() {
+            return;
+        }
+        let reader = self.reader.read(cx);
+        let fallback = reader
+            .book()
+            .map(|book| book.title().clone())
+            .unwrap_or_default();
+        let Some(id) = reader.book_id() else {
+            self.listen_book = Some(None);
+            return;
+        };
+        let Some(store) = reader.store.clone() else {
+            self.listen_book = Some(Some(ListenBook {
+                title: fallback,
+                authors: SharedString::default(),
+                cover: None,
+            }));
+            return;
+        };
+        let row = store.book(id).ok().flatten();
+        let cover = store
+            .book_cover(id)
+            .ok()
+            .flatten()
+            .and_then(|bytes| cover_image(&bytes));
+        let title = row
+            .as_ref()
+            .map(|row| SharedString::from(row.title.clone()))
+            .unwrap_or(fallback);
+        let authors = row
+            .as_ref()
+            .map(|row| SharedString::from(row.authors.join(AUTHOR_SEP)))
+            .unwrap_or_default();
+        self.listen_book = Some(Some(ListenBook {
+            title,
+            authors,
+            cover,
+        }));
+    }
+
+    /// 当前章的文稿行表。**换章或换宽才重建**：一章几千字，逐帧重排是白付。
+    ///
+    /// 与 `model::speech` 同一个尺：`split_sentences` 给出的字符区间就是引擎那一条
+    /// utterance 的范围，点哪一格就从它那一句念。每一句按**真实排版**切成若干行
+    /// （见 [`build_listen_script`]）：整章拼成一段连续文本，书页一样自然折行。
+    /// 换宽（转屏 / 平板）要重建，不然折点会落到屏幕外面。
+    ///
+    /// 返回「这一帧是不是重建了」。重建那一帧弹簧要当场落定（换章可能差出几屏），
+    /// 让它当场落定 —— 换章演成一段长途滚动是假的：读者的确跳到了别处，但那不是滑行。
+    fn ensure_listen_script(
+        &mut self,
+        chapter: usize,
+        fallback: std::ops::Range<usize>,
+        width: f32,
+        family: &SharedString,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        if self.listen_script.as_ref().is_some_and(|script| {
+            script.chapter == chapter
+                && script.width == width
+                && script.complete
+                && !script.sentences.is_empty()
+        }) {
+            return false;
+        }
+        let built = self
+            .reader
+            .read(cx)
+            .book()
+            .and_then(|book| book.span_doc(chapter))
+            .map(|doc| {
+                let text = doc.text_map().text();
+                let chars: Vec<char> = text.chars().collect();
+                let (script_text, mut sentences) =
+                    build_listen_script(&chars, |at| doc.paragraph_range(at));
+                let (script_text, sentences, complete) = if sentences.is_empty() {
+                    // 排版还没给段界（或这一章还没排完）时，至少把「正在念的这一句」
+                    // 摆出来：文稿那一面不该因为整张表建不起来就写着「正在准备」。
+                    // 这张单句表**不完整**，缓存判据会拒绝它 —— 每帧重建，直到段界
+                    // 落地整章的表建出来为止。
+                    let only: String = doc.text_map().slice(fallback.clone());
+                    let only = only.trim();
+                    if only.is_empty() {
+                        (script_text, sentences, true)
+                    } else {
+                        // 每帧可能连发（表不完整就不进缓存），压在 debug 档。
+                        tracing::debug!("文稿：段界未就绪，先摆当前一句（表不完整，不进缓存）");
+                        let mut text = String::from(only);
+                        // 兜底表按「句间原样拼接」的口径走；trim 过的单句不会带空白，
+                        // 字节区间因此正好是整段 0..len。
+                        let script = 0..text.len();
+                        sentences.push(ListenSentence {
+                            chapter: fallback,
+                            script,
+                        });
+                        (std::mem::take(&mut text), sentences, false)
+                    }
+                } else {
+                    (script_text, sentences, true)
+                };
+                // 整章排一次：每一句落在第几行（跟读的落点）。折行点只由字体、字号、
+                // 行宽决定 —— 高亮只换颜色不换字重，换句不重排。
+                let shaped = listen_shape_script(&script_text, width, family, window);
+                let line_lens: Vec<usize> = shaped.iter().map(|line| line.text.len()).collect();
+                let line_of = sentences
+                    .iter()
+                    .map(|sentence| line_index_at(&line_lens, sentence.script.start))
+                    .collect();
+                std::rc::Rc::new(ListenScript {
+                    chapter,
+                    text: script_text.into(),
+                    sentences,
+                    line_of,
+                    width,
+                    complete,
+                })
+            });
+        self.listen_script = built;
+        true
+    }
+
+    /// 听书那一屏。两面共用同一条顶栏与同一条控制排，中间那块换。
+    ///
+    /// 文字那一面是一张书页：整章连续排版、自然折行，字号统一；正在念的那一句换上实色，
+    /// 其余沉在次要色里，读到哪儿由一根弹簧把那一行滑到屏的正中。读者手动划过文稿的那
+    /// 几秒不抢。点哪一句就从哪一句念。从前这一面是 Apple Music 歌词流（逐行缩放调透明），
+    /// 读者读到的是「满屏只有一行」—— 明暗的邻居看不清，长句还常被折行预算吃掉；
+    /// 2026-11-07 换成书页（读者要的「文稿要看得到上下文」）。
+    fn listen_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.listen_open {
+            return None;
+        }
+        let Some((chapter, range)) = self.reader.read(cx).speech_range() else {
+            // 念的位置没了（一章都没有 / 会话停了）：这一层自己收起来。
+            self.listen_open = false;
+            return None;
+        };
+        let playing = self.reader.read(cx).speech_playing();
+        // 封面那一面根本没有那条列表，「上一帧我们写了多少位移」的账就此断了：切回文稿
+        // 时不能拿旧账当参照，否则列表里没动过的位移会被读成「读者手动划过」，让位整整
+        // 四秒 —— 那正是「切过去不跟读」的一种。
+        if self.listen_face != ListenFace::Text {
+            self.listen_written = None;
+        }
+        // 文稿那一列多宽：页边与滚动条都从这一算里扣，折行与摆出来共用同一个数（见
+        // [`listen_column_width`]）。
+        let width = listen_column_width(f32::from(window.viewport_size().width));
+        // 量的尺与画的尺必须连字体都同一个：主题那一份 UI 字体。
+        let family = cx.theme().font_family.clone();
+        let rebuilt = self.ensure_listen_script(chapter, range.clone(), width, &family, window, cx);
+        self.ensure_listen_book(cx);
+        let script = self.listen_script.clone();
+        // 正在念的那一句是文稿里的第几句。`None` = 这一章的文稿还没建出来。
+        let active = script
+            .as_ref()
+            .and_then(|script| sentence_index(&script.sentences, range.start));
+
+        let (
+            background,
+            foreground,
+            muted,
+            primary,
+            primary_foreground,
+            primary_hover,
+            primary_active,
+        ) = {
+            let theme = cx.theme();
+            (
+                theme.background,
+                theme.foreground,
+                theme.muted_foreground,
+                theme.primary,
+                theme.primary_foreground,
+                theme.primary_hover,
+                theme.primary_active,
+            )
+        };
+        let close_label = tr(cx, "listen.close");
+        let page_close = cx.entity().clone();
+        let page_face = cx.entity().clone();
+        // 顶栏中间只有**一颗**分段胶囊：左「封面」、右「文稿」，选中那半用主题主色
+        // 填实。左右各一段等宽的 `flex_1`，胶囊因此正落在屏中；标题那行「听书」
+        // 字样去掉 —— 这一屏是干什么的，两格按钮已经说清楚了。
+        let cover_label = tr(cx, "listen.cover");
+        let manuscript_label = tr(cx, "listen.text");
+        let segment = |id: &'static str,
+                       label: SharedString,
+                       target: ListenFace,
+                       on: bool,
+                       page: gpui_kit::Entity<ReadingPage>| {
+            div()
+                .id(id)
+                .test_support()
+                .px(px(14.))
+                .py(px(6.))
+                .rounded_full()
+                .text_sm()
+                .when(on, |this| this.bg(primary).text_color(primary_foreground))
+                .when(!on, |this| this.text_color(muted))
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    page.update(cx, |this, cx| {
+                        this.listen_face = target;
+                        cx.notify();
+                    })
+                })
+                .into_any_element()
+        };
+        let face_switch = h_flex()
+            .id("listen-face-switch")
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .px(px(2.))
+            .py(px(2.))
+            .rounded_full()
+            .bg(cx.theme().muted)
+            .child(segment(
+                "listen-face-cover",
+                cover_label,
+                ListenFace::Cover,
+                self.listen_face == ListenFace::Cover,
+                page_face.clone(),
+            ))
+            .child(segment(
+                "listen-face-text",
+                manuscript_label,
+                ListenFace::Text,
+                self.listen_face == ListenFace::Text,
+                page_face,
+            ));
+        let top = h_flex()
+            .w_full()
+            .items_center()
+            .gap_1()
+            .child(
+                div().flex_1().child(
+                    Button::new("listen-close")
+                        .ghost()
+                        .small()
+                        .icon(IconName::ChevronDown)
+                        .tooltip(close_label.clone().to_string())
+                        .accessibility_label(close_label)
+                        .on_click(move |_, _, cx| {
+                            page_close.update(cx, |this, cx| this.close_listen(cx))
+                        }),
+                ),
+            )
+            .child(face_switch)
+            .child(div().flex_1());
+
+        let book = self.listen_book.as_ref().and_then(|book| book.as_ref());
+        let title: SharedString = book.map(|book| book.title.clone()).unwrap_or_default();
+        let authors: SharedString = book.map(|book| book.authors.clone()).unwrap_or_default();
+        let chapter_title: SharedString = self
+            .reader
+            .read_with(cx, |reader, _| reader.chapter_title_at(chapter))
+            .into();
+        let position: SharedString = self
+            .listen_script
+            .as_ref()
+            .zip(active)
+            .map(|(script, ix)| {
+                SharedString::from(tf(
+                    cx,
+                    "listen.position",
+                    &[("index", &(ix + 1)), ("total", &script.sentences.len())],
+                ))
+            })
+            .unwrap_or_else(|| SharedString::from(&*chapter_title));
+
+        let body = match self.listen_face {
+            ListenFace::Cover => {
+                let placeholder = cx.theme().muted;
+                let cover = book.and_then(|book| book.cover.clone());
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(LISTEN_COVER_W))
+                            .h(px(LISTEN_COVER_H))
+                            .overflow_hidden()
+                            .rounded(px(10.))
+                            .bg(placeholder)
+                            .when_some(cover, |this, image| {
+                                this.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .max_w_full()
+                            .truncate()
+                            .text_size(px(20.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .when(!authors.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .max_w_full()
+                                .truncate()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(authors),
+                        )
+                    })
+                    .child(div().text_sm().text_color(muted).child(chapter_title))
+                    .child(div().text_xs().text_color(muted).child(position))
+                    .into_any_element()
+            }
+            ListenFace::Text => {
+                if let Some(script) = script.clone() {
+                    // ── 跟读的一根弹簧 ────────────────────────────────────────────────
+                    // 目标位移 = 正在念的那一句落在第几行 × 行高，让那一行居中。视口多高
+                    // 要容器自己量过才算数：第一帧那个数还是 0，按 0 算会把内容顶出屏外
+                    // —— 所以这一帧先不驱动，再要一帧。
+                    let viewport = f32::from(self.listen_scroll.bounds().size.height);
+                    if viewport <= 0.0 {
+                        window.request_animation_frame();
+                    }
+                    // 实测到的位移与上一帧我们自己写下去的对不上，就是读者手动划过（触屏
+                    // 的惯性也算：每动一次续一次让位）。第一帧没有参照，不判。
+                    //
+                    // 门取 0.75 像素：上面记下的是容器自己钳过的那一个数，剩下的出入只有
+                    // 浮点表示那一级，比一次真实划动小三个数量级 —— 既不会把「没人动」读成
+                    // 划过，也不会漏掉读者慢慢拖着看的那一笔。
+                    let measured = -f32::from(self.listen_scroll.offset().y);
+                    if self
+                        .listen_written
+                        .is_some_and(|written| (measured - written).abs() > 0.75)
+                    {
+                        // 逐帧可能连发（这正是它要抓的症状），压在 debug 档。
+                        tracing::debug!(
+                            measured,
+                            written = ?self.listen_written,
+                            "文稿：位移对不上，按读者手动划过让位"
+                        );
+                        self.listen_manual_at = Some(Instant::now());
+                    }
+                    let handed_over = viewport <= 0.0
+                        || active.is_none()
+                        || self
+                            .listen_manual_at
+                            .is_some_and(|at| at.elapsed() < LISTEN_HAND_OVER);
+                    let follow = Spring::new(LISTEN_FOLLOW).with_damping(0.85);
+                    // 让位的那几秒目标就钉在实测到的那一个数上，弹簧停在原地；让位一过，
+                    // 从读者停住的地方接着往念到的那一句滑。重建那一帧（换章 / 换宽）
+                    // 当场落定 —— 跨章可能差出几屏，把它演成一段长途滚动是假的。
+                    let top = spring(
+                        "listen-scroll-top",
+                        if handed_over {
+                            measured
+                        } else {
+                            listen_focus_offset(&script, active.unwrap_or(0), viewport)
+                        },
+                        if handed_over || rebuilt {
+                            follow.with_travel(false)
+                        } else {
+                            follow.with_epsilon(0.5)
+                        },
+                        window,
+                        cx,
+                    );
+                    // 记下来的必须是**容器自己会留下的那一个数**：它在绘制那一趟把写进去
+                    // 的位移按它自己量到的 `max_offset` 再钳一次 —— 与我们按行数 × 行高推
+                    // 的有零点几像素的出入，章越长积得越多。拿没钳过的那个数当参照，
+                    // 每一帧都会被读成「读者手动划过」，跟读自己停住 —— 症状与从前那条
+                    // 「不跟着声音走」一模一样。
+                    let written = top.min(f32::from(self.listen_scroll.max_offset().y).max(0.0));
+                    self.listen_written = Some(written);
+                    self.listen_scroll.set_offset(point(px(0.0), -px(written)));
+
+                    // 当前句高亮：只换颜色（muted → foreground）。**不换字重** —— 折行点
+                    // 只由字体、字号、行宽决定，换句不重排整章，弹簧的落点才不会漂。
+                    // 真机上若觉得不够醒目，下一步是叠 `HighlightStyle::background_color`
+                    // （与正文屏 `speech_fill` 同语义）：背景色同样不进折行。
+                    let text_style = TextStyle {
+                        color: muted,
+                        font_family: family.clone(),
+                        font_size: AbsoluteLength::Pixels(px(LISTEN_BOOK_PX)),
+                        line_height: DefiniteLength::Absolute(AbsoluteLength::Pixels(px(
+                            LISTEN_LINE_H,
+                        ))),
+                        ..Default::default()
+                    };
+                    let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = active
+                        .and_then(|ix| script.sentences.get(ix))
+                        .map(|sentence| {
+                            (
+                                sentence.script.clone(),
+                                HighlightStyle {
+                                    color: Some(foreground),
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .into_iter()
+                        .collect();
+                    let sentences = script.sentences.clone();
+                    let ranges = sentences
+                        .iter()
+                        .map(|sentence| sentence.script.clone())
+                        .collect::<Vec<_>>();
+                    let jump = cx.entity().clone();
+                    let text_element = InteractiveText::new(
+                        "listen-script",
+                        StyledText::new(script.text.clone())
+                            .with_default_highlights(&text_style, highlights),
+                    )
+                    .on_click(ranges, move |ix, _, cx| {
+                        // 点哪一句就从那一句念。让位清掉：这一击要的就是「屏跟着走」。
+                        let Some(entry) = sentences.get(ix) else {
+                            return;
+                        };
+                        let want = entry.chapter.clone();
+                        jump.update(cx, |this, cx| {
+                            this.listen_manual_at = None;
+                            this.reader
+                                .update(cx, |reader, cx| reader.speak_from(chapter, want, cx));
+                        });
+                    });
+                    // 文稿必须包在 `flex_1 + min_h_0` 的壳里：整屏是
+                    // 顶栏 / 内容 / 控制排三兄弟，直接给滚动容器 `h_full` 的父格没高度，
+                    // 屏上就是一片空白 —— 真机上「切到文稿，文字不显示」的那一半原因
+                    // 在这里。列宽封顶（[`listen_column_width`]），宽屏上整块居中。
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .relative()
+                        .child(
+                            div()
+                                .id("listen-script-scroll")
+                                .h_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.listen_scroll)
+                                .vertical_scrollbar(&self.listen_scroll)
+                                .child(div().w(px(width)).mx_auto().child(text_element)),
+                        )
+                        .into_any_element()
+                } else {
+                    let loading = tr(cx, "listen.loading");
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(loading)
+                        .into_any_element()
+                }
+            }
+        };
+
+        let page_play = cx.entity().clone();
+        let page_prev = cx.entity().clone();
+        let page_next = cx.entity().clone();
+        let play_style = ButtonCustomVariant::new(cx)
+            .color(primary)
+            .foreground(primary_foreground)
+            .hover(primary_hover)
+            .active(primary_active)
+            .shadow(true);
+        let can_prev = active.is_some_and(|ix| ix > 0);
+        let can_next = self
+            .listen_script
+            .as_ref()
+            .zip(active)
+            .is_some_and(|(script, ix)| ix + 1 < script.sentences.len());
+        // 引擎现状：点圆钮那一刻才起的探测，几秒内见分晓。两格没就绪都要在屏上说清
+        // ——「按下去什么都不发生的按钮，读者读到的是坏了」。
+        let engine_ready = self.reader.read(cx).speech_available();
+        let engine_note = match engine_ready {
+            Some(true) => None,
+            Some(false) => Some(tr(cx, "listen.engine_unavailable")),
+            None => Some(tr(cx, "listen.engine_preparing")),
+        };
+        let prev_label = tr(cx, "listen.prev");
+        let next_label = tr(cx, "listen.next");
+        let controls = h_flex()
+            .w_full()
+            .items_center()
+            .justify_center()
+            .gap_6()
+            .child(
+                Button::new("listen-prev")
+                    .ghost()
+                    .icon(IconName::SkipBack)
+                    .tooltip(prev_label.clone().to_string())
+                    .accessibility_label(prev_label)
+                    .disabled(!can_prev)
+                    .on_click(move |_, _, cx| {
+                        page_prev.update(cx, |this, cx| this.listen_step(-1, cx))
+                    }),
+            )
+            .child(
+                Button::new("listen-play")
+                    .custom(play_style)
+                    .rounded_full()
+                    .w(px(64.))
+                    .h(px(64.))
+                    .p_0()
+                    .justify_center()
+                    .icon(if playing {
+                        IconName::Pause
+                    } else {
+                        IconName::Play
+                    })
+                    .disabled(engine_ready != Some(true))
+                    .on_click(move |_, _, cx| {
+                        page_play.update(cx, |this, cx| this.toggle_speech(cx))
+                    }),
+            )
+            .child(
+                Button::new("listen-next")
+                    .ghost()
+                    .icon(IconName::SkipForward)
+                    .tooltip(next_label.clone().to_string())
+                    .accessibility_label(next_label)
+                    .disabled(!can_next)
+                    .on_click(move |_, _, cx| {
+                        page_next.update(cx, |this, cx| this.listen_step(1, cx))
+                    }),
+            );
+
+        Some(
+            v_flex()
+                .id("reader-listen")
+                .occlude()
+                .absolute()
+                .inset_0()
+                .bg(background)
+                .text_color(foreground)
+                .px(px(LISTEN_PAGE_X))
+                .pt(px(self.top_inset + 10.))
+                .pb(px(self.bottom_inset + 16.))
+                .child(top)
+                .child(body)
+                .children(engine_note.map(|note| {
+                    div()
+                        .w_full()
+                        .pb_2()
+                        .text_center()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(note)
+                }))
+                .child(controls)
+                .into_any_element(),
+        )
     }
 
     /// 书签那一下：钉 / 拔当前位置。状态机在会话里（`model/bookmarks.rs`），
@@ -771,18 +1504,24 @@ impl ReadingPage {
         )
     }
 
-    /// 「回原处」那一格：从正文点链接/脚注跳出去之后才出现，贴在屏幕右下。
+    /// 「回原处」那一格：从正文点链接/脚注跳出去之后才出现，**底部居中**。
     ///
     /// 与撤销胶囊同一族（都是临时的一格），但两块同时在场时这一格**抬到撤销那条之上**
-    /// 而不是并排 —— 那条是 `left: 24 / right: 80` 的横条，并排会撞在一起。
+    /// 而不是并排 —— 那条是 `left: 24 / right: 80` 的横条，居中之后并排会撞在一起。
+    /// 右侧那颗 × 只收这一格，不跳转：读者读完了、不想回去时得有个明确的出口，
+    /// 否则这一格要等到下一次点链接才换掉。
     ///
     /// 干净态（底栏收起）与开着底栏两种落点沿用撤销胶囊那两个数，不另起一套。
     fn jump_back_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (action, undo_up) = {
+        let (action, close, undo_up) = {
             let reader = self.reader.read(cx);
             // 没有来源就没有这一格：平时屏上不多一枚按钮。
             reader.jump_back.as_ref()?;
-            (tr(cx, "reader.jump_back.action"), reader.undo.is_some())
+            (
+                tr(cx, "reader.jump_back.action"),
+                tr(cx, "reader.jump_back.close"),
+                reader.undo.is_some(),
+            )
         };
         let bottom = if self.chrome.is_open() {
             150.0
@@ -790,30 +1529,52 @@ impl ReadingPage {
             24.0 + self.bottom_inset
         };
         let page = cx.entity().clone();
+        let dismiss = page.clone();
         Some(
+            // 外层只管居中（铺满一条、不 occlude）：真正吃点击的只有里头那颗胶囊。
             h_flex()
-                .occlude()
                 .absolute()
-                .right(px(24.0))
+                .left_0()
+                .right_0()
                 .bottom(px(if undo_up { bottom + 52.0 } else { bottom }))
-                .items_center()
-                .px_3()
-                .py_2()
-                .popover_style(cx)
-                .rounded_full()
+                .justify_center()
                 .child(
-                    Button::new("reader-jump-back")
-                        .ghost()
-                        .small()
-                        .icon(IconName::ArrowLeft)
-                        .label(action.to_string())
-                        .accessibility_label(action)
-                        .on_click(move |_, _, cx| {
-                            page.update(cx, |this, cx| {
-                                this.reader
-                                    .update(cx, |reader, cx| reader.back_to_jump_origin(cx))
-                            })
-                        }),
+                    h_flex()
+                        .occlude()
+                        .items_center()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .popover_style(cx)
+                        .rounded_full()
+                        .child(
+                            Button::new("reader-jump-back")
+                                .ghost()
+                                .small()
+                                .icon(IconName::ArrowLeft)
+                                .label(action.to_string())
+                                .accessibility_label(action)
+                                .on_click(move |_, _, cx| {
+                                    page.update(cx, |this, cx| {
+                                        this.reader
+                                            .update(cx, |reader, cx| reader.back_to_jump_origin(cx))
+                                    })
+                                }),
+                        )
+                        .child(
+                            Button::new("reader-jump-back-dismiss")
+                                .ghost()
+                                .small()
+                                .icon(IconName::X)
+                                .tooltip(close.clone().to_string())
+                                .accessibility_label(close)
+                                .on_click(move |_, _, cx| {
+                                    dismiss.update(cx, |this, cx| {
+                                        this.reader
+                                            .update(cx, |reader, cx| reader.dismiss_jump_back(cx))
+                                    })
+                                }),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -923,6 +1684,157 @@ impl ReadingPage {
     }
 }
 
+/// 文稿那一列多宽：整屏减去页边（[`LISTEN_PAGE_X`] 两侧）与滚动条
+/// ([`LISTEN_SCROLLBAR`])，再按 [`LISTEN_TEXT_W`] 封顶。折行量的宽与摆出来的宽是同一个
+/// 数，所以一格的宽就是字能用的宽；宽过上限之后不再增长 —— 折点不该跟着屏幕无限变。
+fn listen_column_width(viewport_width: f32) -> f32 {
+    (viewport_width - 2.0 * LISTEN_PAGE_X - LISTEN_SCROLLBAR).clamp(0.0, LISTEN_TEXT_W)
+}
+
+/// 把一章拼成书页文稿：段落依次相连，段间 `\n\n`（空行即段距）；段内句子**原样**相连，
+/// 句间的原始空白（拉丁文的词间空格、源里的硬换行）照抄 —— 中文两句连排，英文不粘连。
+///
+/// `paragraph_at(at)` 给「`at` 这个字符所在的段界」；拿不到（章首是无字块、块还没排完）
+/// 就**逐字探过去**，与 `model::speech` 的 `sentence_from` 同一条走法 —— 从前这一步是
+/// `break`，章首一碰壁整章的文稿就只剩一句（真机「文稿只有一行」的那一半根因）。
+///
+/// 返回 `(文稿文本, 每句的两套区间)`。区间按朗读顺序排；文稿内区间是 **UTF-8 字节**
+/// 偏移，与 gpui 文本下标（`TextRun::len`、`position_for_index`、`InteractiveText`）
+/// 同一口径。
+fn build_listen_script(
+    chars: &[char],
+    mut paragraph_at: impl FnMut(usize) -> Option<std::ops::Range<usize>>,
+) -> (String, Vec<ListenSentence>) {
+    let mut text = String::new();
+    let mut sentences: Vec<ListenSentence> = Vec::new();
+    let mut at = 0usize;
+    while at < chars.len() {
+        let Some(paragraph) = paragraph_at(at) else {
+            // 段界拿不到的格子（图、空白块）跳过一个字符再探 —— 不是整章放弃。
+            at += 1;
+            continue;
+        };
+        if paragraph.end <= at {
+            at = paragraph.end.max(at + 1);
+            continue;
+        }
+        // 段落先拼进临时串：空段（全是空白）不落 `\n\n` 那条缝。
+        let mut piece = String::new();
+        let first_new = sentences.len();
+        // 首句之前的空白（段首缩进之类）不进文稿；句间空白照抄，词间空格才留得住。
+        let mut gap_from = None;
+        for sentence in split_sentences(chars, paragraph.clone()) {
+            let chapter = sentence.clone();
+            if let Some(from) = gap_from {
+                for ch in &chars[from..chapter.start] {
+                    piece.push(*ch);
+                }
+            }
+            let script_start = piece.len();
+            for ch in &chars[chapter.clone()] {
+                piece.push(*ch);
+            }
+            sentences.push(ListenSentence {
+                chapter,
+                script: script_start..piece.len(),
+            });
+            gap_from = Some(sentence.end);
+        }
+        at = paragraph.end;
+        while at < chars.len() && chars[at].is_whitespace() {
+            at += 1;
+        }
+        if piece.is_empty() {
+            // 空段进不了文稿，它那几句也不算数。
+            sentences.truncate(first_new);
+            continue;
+        }
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        // 文稿内区间整体平移到本章文稿文本的坐标系里（字节口径）。
+        let base = text.len();
+        text.push_str(&piece);
+        for sentence in &mut sentences[first_new..] {
+            sentence.script.start += base;
+            sentence.script.end += base;
+        }
+    }
+    (text, sentences)
+}
+
+/// 整章排一次：gpui 的 text system 在哪儿折，文稿就到哪儿折 —— 量的尺与画出来的尺
+/// 必须完全一致（同一字体族、[`LISTEN_BOOK_PX`]、同一列宽；行高不影响折点，画的那侧
+/// 由 `TextStyle::line_height` 走 [`LISTEN_LINE_H`]）。量出来的每一条行给「每句落在
+/// 第几行」与内容高用。
+///
+/// 排不出来（字体没落地、text system 报错）返回空：那一句的行号全部按第 0 行算，
+/// 文稿仍摆得出来，只是跟读的落点停在顶部 —— 不如整面空白。
+fn listen_shape_script(
+    text: &str,
+    width: f32,
+    family: &SharedString,
+    window: &Window,
+) -> Vec<WrappedLine> {
+    let run = TextRun {
+        len: text.len(),
+        font: Font {
+            family: family.clone(),
+            weight: FontWeight::NORMAL,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    window
+        .text_system()
+        .shape_text(
+            SharedString::from(text),
+            px(LISTEN_BOOK_PX),
+            &[run],
+            Some(px(width.max(1.0))),
+            None,
+        )
+        .map(|lines| lines.into_iter().collect::<Vec<_>>())
+        .unwrap_or_default()
+}
+
+/// `at`（文稿文本内的字节下标）落在第几行：逐行累加字节长，换行符本身不进任何一行的
+/// 文本但要占一格下标 —— 与 `TextLayout::position_for_index` 同一条走法，两边的行号
+/// 才对得上。越界的下标（量过的行数与建表之间差了一格时）钉在最后一行，不漂出去。
+fn line_index_at(line_lens: &[usize], at: usize) -> usize {
+    let mut line_ix = 0usize;
+    let mut start = 0usize;
+    for len in line_lens {
+        let end = start + len;
+        if at <= end {
+            return line_ix;
+        }
+        start = end + 1;
+        line_ix += 1;
+    }
+    line_lens.len().saturating_sub(1)
+}
+
+/// 让第 `ix` 句所在的那一行落在视口正中要滚多少。下端不在这里钳：容器绘制时自己按
+/// `max_offset` 钳，跟读那格账记的也是钳过的数。
+fn listen_focus_offset(script: &ListenScript, ix: usize, viewport: f32) -> f32 {
+    let line = script.line_of.get(ix).copied().unwrap_or(0);
+    let want = line as f32 * LISTEN_LINE_H + LISTEN_LINE_H * 0.5 - viewport * 0.5;
+    want.max(0.0)
+}
+
+/// 这一句在文稿里的下标：`at` 落在哪一句（按章内区间对账）就返回哪一句。
+fn sentence_index(sentences: &[ListenSentence], at: usize) -> Option<usize> {
+    sentences
+        .iter()
+        .position(|sentence| sentence.chapter.start <= at && at < sentence.chapter.end)
+        .or_else(|| {
+            sentences
+                .iter()
+                .rposition(|sentence| sentence.chapter.start <= at)
+        })
+}
+
 impl Render for ReadingPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 正文让出干净态那两条带。浮层不参与：它压字，不推字。
@@ -946,7 +1858,8 @@ impl Render for ReadingPage {
             || self.reader.read(cx).dictionary_open()
             || self.reader.read(cx).ai_open()
             || self.reader.read(cx).rules_draft_open()
-            || self.image_viewer.read(cx).is_open();
+            || self.image_viewer.read(cx).is_open()
+            || self.listen_open;
         // 上下页边距的默认值来自书的 `@page`；读者的「上下页边距」滑条离开 0 就整个
         // 覆盖它（见 `chrome::effective_page_margins`）。带子自己的高与正文让出的高必须
         // 是同一对数，否则滚动时那半行字会从缝里露出来。
@@ -1101,6 +2014,9 @@ impl Render for ReadingPage {
                 .bg(Hsla { a: dim, ..overlay })
                 .into_any_element()
         });
+        // 听书那一屏压在所有弹层与图片查看器之上：它是一块整窗的专用屏，开着的时候
+        // 底下那些浮层都不该再露出来。亮度那一层照旧最上面（它说的是「这块屏」）。
+        root = root.children(self.listen_overlay(window, cx));
         root.children(scrim)
     }
 }
@@ -1647,4 +2563,170 @@ fn translation_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverStat
                 ),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    //! 听书那一屏里几件不用窗口就能钉死的事：那一列多宽、整章怎么拼成书页文稿（段界
+    //! 拿不到时逐字探，不整章放弃）、「每句落在第几行」怎么数、跟读的落点怎么算、以及
+    //! 「现在念到第几句」。摆出来好不好看只有真机量得出来，但这几格错了会直接对上读者
+    //! 的两句抱怨：文稿只有一行，或者文稿根本不跟着声音走。
+
+    use super::{
+        LISTEN_LINE_H, LISTEN_TEXT_W, ListenScript, ListenSentence, build_listen_script,
+        line_index_at, listen_column_width, listen_focus_offset, sentence_index,
+    };
+
+    /// 列宽：手机窄、平板宽；宽过 [`LISTEN_TEXT_W`] 之后不再增长（折点不跟着屏幕无限变）。
+    #[test]
+    fn the_column_grows_with_the_window_then_stops_at_the_cap() {
+        let phone = listen_column_width(384.0);
+        let desktop = listen_column_width(1280.0);
+        assert!(phone > 0.0, "再窄也得摆得下几个字：{phone}");
+        assert!(desktop > phone, "宽屏一行摆得更多");
+        assert_eq!(desktop, LISTEN_TEXT_W, "封顶就是那一列的宽");
+        assert_eq!(
+            desktop,
+            listen_column_width(800.0),
+            "宽过上限之后不再跟着窗口长"
+        );
+    }
+
+    /// 整章拼成书页文稿：段与段之间空一行（`\n\n`），句间原始空白照抄（拉丁词距留得住），
+    /// 段首空白不进文稿；每句的两套区间——章内（喂 TTS）与文稿内（高亮与点击，UTF-8
+    /// 字节偏移）——都要指得回同一句话。
+    #[test]
+    fn the_chapter_is_stitched_into_one_page_with_paragraph_gaps() {
+        // char 下标：0-1 两个空格，2-5「甲一句。」，6 空格，7-10「甲二句。」，
+        // 11-14「乙一句。」，15-18「乙二句。」。
+        let chars: Vec<char> = "  甲一句。 甲二句。乙一句。乙二句。".chars().collect();
+        let (text, sentences) = build_listen_script(&chars, |at| match at {
+            0..=10 => Some(0..11),
+            11..=18 => Some(11..19),
+            _ => None,
+        });
+        assert_eq!(
+            text,
+            "甲一句。 甲二句。\n\n乙一句。乙二句。",
+            "段首空白丢掉，句间空格照抄，段间空一行"
+        );
+        let expect = [
+            (2..6, "甲一句。"),
+            (7..11, "甲二句。"),
+            (11..15, "乙一句。"),
+            (15..19, "乙二句。"),
+        ];
+        assert_eq!(sentences.len(), expect.len());
+        for (sentence, (chapter, display)) in sentences.iter().zip(expect) {
+            assert_eq!(sentence.chapter, chapter, "章内区间是 TTS 的落点");
+            assert_eq!(
+                &text[sentence.script.clone()],
+                display,
+                "文稿内字节区间切出来必须还是那一句"
+            );
+        }
+    }
+
+    /// 段界拿不到的字符**逐字探过去**，不整章放弃 —— 章首是无字块（图、空白）时，
+    /// 从前的 `break` 让整章文稿只剩一句，这是「文稿只有一行」的那一半根因。
+    #[test]
+    fn characters_without_a_paragraph_are_probed_past_not_abandoned() {
+        let chars: Vec<char> = "图图图甲一句。乙一句。".chars().collect();
+        let (text, sentences) = build_listen_script(&chars, |at| {
+            if at < 3 {
+                None // 前三个字符落在无字块上，段界给不出
+            } else {
+                Some(3..chars.len())
+            }
+        });
+        assert_eq!(text, "甲一句。乙一句。");
+        assert_eq!(sentences.len(), 2, "整章的句子一句不能少");
+        assert_eq!(sentences[0].chapter, 3..7);
+        assert_eq!(sentences[1].chapter, 7..11);
+    }
+
+    /// 全是空白的段不落 `\n\n` 那条缝：文稿里不该出现凭空的空行。
+    #[test]
+    fn a_whitespace_paragraph_leaves_no_gap() {
+        let chars: Vec<char> = "  甲一句。".chars().collect();
+        let (text, sentences) = build_listen_script(&chars, |at| match at {
+            0..=1 => Some(0..2), // 只有空白的段
+            2..=5 => Some(2..6),
+            _ => None,
+        });
+        assert_eq!(text, "甲一句。");
+        assert_eq!(sentences.len(), 1);
+        assert_eq!(&text[sentences[0].script.clone()], "甲一句。");
+    }
+
+    /// 「第几行」的数法与 `TextLayout::position_for_index` 同一条：行末的下标算那一行，
+    /// 换行符本身占一格下标。数错了，跟读的落点就一行一行地漂。
+    #[test]
+    fn the_line_index_walks_bytes_the_way_the_text_layout_does() {
+        let lens = [5usize, 3, 4];
+        assert_eq!(line_index_at(&lens, 0), 0);
+        assert_eq!(line_index_at(&lens, 4), 0);
+        assert_eq!(line_index_at(&lens, 5), 0, "行末下标算这一行");
+        assert_eq!(line_index_at(&lens, 6), 1, "换行符占一格下标");
+        assert_eq!(line_index_at(&lens, 9), 1);
+        assert_eq!(line_index_at(&lens, 10), 2);
+        assert_eq!(line_index_at(&lens, 999), 2, "越过末尾钉在最后一行");
+        assert_eq!(line_index_at(&[], 0), 0, "没量到排版时落在第一行");
+    }
+
+    /// 跟读的落点：让当句那一行落在视口正中；顶到头时钳在 0（不出现负位移）；
+    /// 下一句的落点必须比上一句远，否则屏不会动。下端交给容器自己钳。
+    #[test]
+    fn the_focus_offset_centers_the_line_and_never_goes_negative() {
+        let script = ListenScript {
+            chapter: 0,
+            text: "".into(),
+            sentences: vec![],
+            line_of: vec![0, 20, 30],
+            width: 300.0,
+            complete: true,
+        };
+        let viewport = 600.0;
+        assert_eq!(
+            listen_focus_offset(&script, 0, viewport),
+            0.0,
+            "第一行居中会顶出上界，钳在 0"
+        );
+        let middle = listen_focus_offset(&script, 1, viewport);
+        let target = 20.0 * LISTEN_LINE_H + LISTEN_LINE_H * 0.5 - viewport * 0.5;
+        assert!((middle - target).abs() < 0.01, "第 20 行要落在视口正中");
+        assert!(
+            listen_focus_offset(&script, 2, viewport) > middle,
+            "念到下一句落点必须变，不然文稿根本不跟手"
+        );
+        assert_eq!(
+            listen_focus_offset(&script, 999, viewport),
+            0.0,
+            "下标越界按第一行算，不 panic"
+        );
+    }
+
+    /// 当前句的落点：落在句内直接命中；落在句间的空白里回到刚念完那一句；
+    /// 越过最后一句钉在末尾（列表不会滚出界）。
+    #[test]
+    fn the_active_sentence_is_the_one_containing_the_offset() {
+        let entry = |chapter: std::ops::Range<usize>| ListenSentence {
+            chapter,
+            script: 0..0,
+        };
+        let sentences = vec![entry(0..3), entry(5..10), entry(13..16)];
+        assert_eq!(sentence_index(&sentences, 1), Some(0));
+        assert_eq!(
+            sentence_index(&sentences, 4),
+            Some(0),
+            "句间空白归刚念完那一句"
+        );
+        assert_eq!(sentence_index(&sentences, 7), Some(1));
+        assert_eq!(
+            sentence_index(&sentences, 999),
+            Some(2),
+            "越过末尾钉在最后一句"
+        );
+        assert_eq!(sentence_index(&[], 0), None);
+    }
 }

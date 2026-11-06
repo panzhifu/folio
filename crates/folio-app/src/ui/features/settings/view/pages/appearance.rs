@@ -229,7 +229,7 @@ struct Swatch {
 
 /// 把一个主题配置解析成具体颜色，**不动全局 `Theme`**：照框架主题选择器自己的做法，
 /// 从浅 / 深的基础色起一份临时主题，`apply_config` 之后取它算出来的 `colors`。
-fn swatch_of(config: &Rc<ThemeConfig>) -> Swatch {
+fn swatch_of(config: &Rc<ThemeConfig>, ink: bool) -> Swatch {
     let base = if config.mode.is_dark() {
         ThemeColor::dark()
     } else {
@@ -237,12 +237,24 @@ fn swatch_of(config: &Rc<ThemeConfig>) -> Swatch {
     };
     let mut theme = Theme::from(base.as_ref());
     theme.apply_config(config);
-    Swatch {
+    // 水墨那一档整个应用都去饱和，预览卡也不例外：不这么写，读者会在「全是黑白」
+    // 的外壳里看见一屏彩色小方块，以为哪些主题还能出颜色。
+    let gray = crate::ui::foundation::style::desaturate;
+    let mut swatch = Swatch {
         background: theme.colors.background,
         primary: theme.colors.primary,
         primary_foreground: theme.colors.primary_foreground,
         foreground: theme.colors.foreground,
+    };
+    if ink {
+        swatch = Swatch {
+            background: gray(swatch.background),
+            primary: gray(swatch.primary),
+            primary_foreground: gray(swatch.primary_foreground),
+            foreground: gray(swatch.foreground),
+        };
     }
+    swatch
 }
 
 /// 这一侧现在算哪一套。存的名字可能已经被删掉：与下拉框时代同一条回落，
@@ -268,13 +280,14 @@ fn selected_name(cx: &App, mode: ThemeMode) -> SharedString {
 /// 一套主题的网格。桌面三列、手机两列 —— 手机那块 393dp 的宽度放三列会把名字挤成
 /// 省略号，而名字正是让人分辨两套相近配色的最后一格。
 fn theme_grid(cx: &App, mode: ThemeMode) -> AnyElement {
+    let ink = ConfigHolder::default_appearance(cx).mode == folio_core::infra::config::Mode::Ink;
     let themes: Vec<(SharedString, Swatch)> = {
         let registry = ThemeRegistry::global(cx);
         registry
             .sorted_themes()
             .into_iter()
             .filter(|config| config.mode == mode)
-            .map(|config| (config.name.clone(), swatch_of(config)))
+            .map(|config| (config.name.clone(), swatch_of(config, ink)))
             .collect()
     };
     if themes.is_empty() {
@@ -565,8 +578,8 @@ mod tests {
                 .get(crate::ui::foundation::theme::DEFAULT_DARK)
                 .expect("框架默认深色主题要在 registry 里")
                 .clone();
-            let light = swatch_of(&light);
-            let dark = swatch_of(&dark);
+            let light = swatch_of(&light, false);
+            let dark = swatch_of(&dark, false);
             assert!(
                 light.background.l > dark.background.l,
                 "浅色主题的预览底色该比深色亮：{light:?} / {dark:?}"

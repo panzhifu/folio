@@ -483,3 +483,83 @@ fn swiping_a_stack_yields_while_the_overlay_is_up(cx: &mut TestAppContext) {
 
     assert_eq!(current(cx), 0, "收了浮层，同样的横扫照切");
 }
+
+/// 叠图跟手动画：写会话状态，不碰排版（行数页数一个数都不许动）；
+/// 松手补完到 1 之后动画自己清掉，静态地只画目标那张。
+#[gpui_kit::test]
+fn a_stack_drag_animates_without_relayout_and_settles(cx: &mut TestAppContext) {
+    let (view, handle) = gallery(cx);
+    settle(cx, handle);
+    let hit = view
+        .read_with(cx, |v, _| {
+            v.stack_hits
+                .borrow()
+                .iter()
+                .rev()
+                .find(|hit| hit.count > 1)
+                .cloned()
+        })
+        .expect("前置：这一叠的命中区该登记过");
+    let (lines, pages) = view.read_with(cx, |v, _| (v.lines().len(), v.page_count()));
+
+    view.update(cx, |v, cx| v.drag_stack(&hit, 0.5, 1, cx));
+    let (from, to, progress) = view.read_with(cx, |v, _| {
+        let m = v.stack_motion.as_ref().expect("跟手那一笔该记下");
+        (m.from, m.to, m.progress)
+    });
+    assert_eq!((from, to), (0, 1), "从当前那张滑向下一张");
+    assert!((progress - 0.5).abs() < 1e-6, "进度跟着手指走");
+    assert_eq!(
+        view.read_with(cx, |v, _| (v.lines().len(), v.page_count())),
+        (lines, pages),
+        "切图不许重排"
+    );
+
+    // 目标全清还没到手时，快照把进度封顶 0.4：旧图不会整张被推走，屏上至少有一张图。
+    let clamped = view.read_with(cx, |v, cx| v.stack_motion_view(cx));
+    assert!(clamped.is_some(), "动画在跑时该给绘制层一份快照");
+    assert!(
+        clamped.expect("上面刚判过").progress <= 0.4,
+        "目标没解码好时不能把旧图推到屏外"
+    );
+
+    // 松手：补完到 1，走完时长后动画清账。
+    view.update(cx, |v, cx| v.settle_stack(true, cx));
+    let (started, duration) = view.read_with(cx, |v, _| {
+        let m = v.stack_motion.as_ref().expect("补完该起表");
+        (m.started, m.duration)
+    });
+    view.update(cx, |v, cx| v.advance_stack_motion(started + duration, cx));
+    assert!(
+        view.read_with(cx, |v, _| v.stack_motion.is_none()),
+        "补完到 1 之后动画自己清掉，静态只画目标那张"
+    );
+}
+
+/// 没过阈值那一笔补完到 0（弹回原图），同样会清账；动画不会挂在屏上不走。
+#[gpui_kit::test]
+fn a_cancelled_stack_drag_springs_back_to_the_original(cx: &mut TestAppContext) {
+    let (view, handle) = gallery(cx);
+    settle(cx, handle);
+    let hit = view
+        .read_with(cx, |v, _| {
+            v.stack_hits
+                .borrow()
+                .iter()
+                .rev()
+                .find(|hit| hit.count > 1)
+                .cloned()
+        })
+        .expect("前置：命中区该登记过");
+    view.update(cx, |v, cx| {
+        v.drag_stack(&hit, 0.3, 1, cx);
+        v.settle_stack(false, cx);
+    });
+    let (started, duration) = view.read_with(cx, |v, _| {
+        let m = v.stack_motion.as_ref().expect("补完该起表");
+        assert_eq!(m.settle_to, 0.0, "没过阈值就弹回 0");
+        (m.started, m.duration)
+    });
+    view.update(cx, |v, cx| v.advance_stack_motion(started + duration, cx));
+    assert!(view.read_with(cx, |v, _| v.stack_motion.is_none()));
+}

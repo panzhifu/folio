@@ -20,6 +20,17 @@
 # **这一门语言用不到的臂照抄 `_other`** —— key 集合一致那条测试要求每一份都有这四行，
 # 宁可重复也不能少一行。
 
+# 听书那一屏：两种面孔、三颗控制键与段位置。
+"listen.cover" = "表紙"
+"listen.text" = "本文"
+"listen.prev" = "前の文"
+"listen.next" = "次の文"
+"listen.close" = "閉じる"
+"listen.loading" = "準備中…"
+"listen.position" = "文 %{index} / %{total}"
+"listen.engine_preparing" = "音声エンジンを準備中…"
+"listen.engine_unavailable" = "この端末で利用できる音声エンジンがありません"
+
 [sidebar]
 import = "本を追加"
 account = "アカウント"
@@ -69,6 +80,7 @@ toc = "目次"
 "marks.stale" = "⚠️ %{place} · 位置を見失いました"
 bookmark = "しおり"
 "jump_back.action" = "戻る"
+"jump_back.close" = "閉じる"
 "undo.action" = "元に戻す"
 "undo.bookmark" = "しおりを削除しました"
 translate = "翻訳"
@@ -583,11 +595,27 @@ search_placeholder = "タイトルまたは著者を検索"
 # アクセシビリティラベルとデスクトップのツールチップに使う。
 more = "追加方法"
 import = "追加"
-# 导入进行中的那一行读数，摆在命令行与架面之间。后端报的第一条读数还没上来时总数
-# 不知道，那一句不带数字。
-importing = "追加中…"
-importing_of = "追加中 %{done}/%{total}"
-# インポート後に「何冊追加できず、なぜか」を書く一行。日本語は四臂同文。
+# 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）的两句：标题说这件事在跑，读数说已完成几本。
+# 后端第一条读数还没上来时总数不知道，那一档只有标题与一条不定进度的 bar，读数不给。
+status_importing = "追加中"
+status_progress = "%{total} 冊中 %{done} 冊完了"
+# 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
+# 数已经在行里了），与「没进来」那几档的复数句子（`reject_*`）各管各的场合。
+record_title = "追加履歴"
+status_added = "完了"
+status_duplicate = "書架にあり"
+status_needs_password = "パスワードが必要"
+status_encrypted = "DRM 保護付き"
+status_corrupt = "ファイルが壊れています"
+status_unsupported = "未対応の形式"
+status_unreadable = "読み取れませんでした"
+record_open = "開く"
+record_clear = "すべて消去"
+record_added_one = "%{count} 冊完了"
+record_added_few = "%{count} 冊完了"
+record_added_many = "%{count} 冊完了"
+record_added_other = "%{count} 冊完了"
+# インポート後に「何冊追加できず、なぜか」を書くカード（理由ごとに一行）。日本語は四臂同文。
 import_rejected_one = "%{count} 冊を登録できませんでした"
 import_rejected_few = "%{count} 冊を登録できませんでした"
 import_rejected_many = "%{count} 冊を登録できませんでした"
@@ -618,10 +646,16 @@ scan_title = "端末内の本を探す"
 scan_running = "検索中…"
 scan_found = "検索中… %{n} 件見つかりました"
 scan_stop = "中止"
-scan_none = "この端末に追加できる本は見つかりませんでした"
-scan_summary = "%{n} 件見つかりました — 追加するものにチェック"
-scan_skipped = "読めない場所が %{n} か所ありました（権限）— スキップ"
-scan_truncated = "本が多すぎるため一部のみ表示しています"
+scan_none = "この端末に取り込める本が見つかりません"
+scan_search_placeholder = "ファイル名を検索"
+scan_filter = "絞り込み"
+scan_filter_format = "形式"
+scan_filter_size = "サイズ"
+scan_filter_size_under = "（MB）未満"
+scan_filter_state = "状態"
+scan_filter_not_on_shelf = "本棚にない"
+scan_filter_clear = "絞り込みを解除"
+scan_empty_filtered = "条件に合う本がありません"
 scan_on_shelf = "追加済み"
 scan_select_all = "すべて選択"
 scan_clear = "解除"
@@ -857,6 +891,8 @@ deleted_bookmark = "しおりを削除しました"
 
 [font_picker]
 search = "フォントを検索"
+group.book = "書籍フォント"
+group.system = "システムフォント"
 
 [dictionary]
 words = "%{count} 語"

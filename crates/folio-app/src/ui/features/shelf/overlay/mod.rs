@@ -43,6 +43,16 @@ pub(in crate::ui::features::shelf) const FORM_HEIGHT: f32 = 152.0;
 pub(in crate::ui::features::shelf) const SCAN_WIDTH: f32 = 460.0;
 pub(in crate::ui::features::shelf) const SCAN_HEIGHT: f32 = 460.0;
 
+/// 导入记录那张卡的**上限**宽与高。
+///
+/// 宽是上限而不是定值：420 是桌面与平板那一档，手机上视口只有 384 逻辑像素，照搬会把卡
+/// 顶成满幅还溢出 —— 右边那两颗钮（关闭与清空）就掉到屏幕外，读者看到的是「这张卡关不掉」。
+/// 所以调用方按视口现算（`status::record_width`），这里只给上限。
+///
+/// 高同理：卡要贴着内容长（一本书就是一本书的高），只有清单长到封顶才开始滚。
+pub(in crate::ui::features::shelf) const RECORD_MAX_WIDTH: f32 = 420.0;
+pub(in crate::ui::features::shelf) const RECORD_MAX_HEIGHT: f32 = 420.0;
+
 /// 底部弹层展开那一档占视口高的比例。
 ///
 /// 比目录那一屏（九成）矮一档：这三块是「答一句话就走」的层，压掉九成屏幕等于把架面
@@ -59,7 +69,7 @@ pub(in crate::ui::features::shelf) const SCAN_SHEET_EXPANDED: f32 = 0.85;
 /// （`reader::page` 的 `footnote_popover`）。
 ///
 /// `offset` 沿锚轴方向，可以为负：居中那两张靠它往上抬掉半张卡的高。
-fn popover(
+pub(in crate::ui::features::shelf) fn popover(
     key: &'static str,
     anchor: Anchor,
     offset: f32,

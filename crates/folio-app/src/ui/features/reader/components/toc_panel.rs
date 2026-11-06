@@ -24,13 +24,14 @@ use std::sync::Arc;
 
 use folio_core::Priority;
 use folio_core::infra::task::{Cancel, TaskEvent, TaskHandle};
-use folio_core::search::{Cursor, Found, Hit, Options, Query, scan};
+use folio_core::search::{Cursor, Found, Hit, Options, Query, scan_with_sink};
 use folio_core::store::{Annotation, BookRow};
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
+use gpui_kit::base::{VirtualList, VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme, Icon, Selectable, Sizable, ThemeStyled as _, h_flex, v_flex,
 };
@@ -42,9 +43,7 @@ use gpui_kit::{
     Subscription, Task, WeakEntity, Window, div, hsla, img, px, size,
 };
 
-use crate::ui::components::{
-    BottomSheet, BottomSheetState, SearchBox, SearchBoxEvent, SearchDebounce,
-};
+use crate::ui::components::{BottomSheet, BottomSheetState, SearchBox, SearchBoxEvent};
 use crate::ui::features::reader::model::annotations::Palette;
 use crate::ui::features::reader::model::chrome::percent_label;
 use crate::ui::features::reader::model::session::ReaderSession;
@@ -104,12 +103,24 @@ const TOC_BOTTOM_SPACE: f32 = 24.0;
 /// 而这两屏在同一块面板里上下滚 —— 同一个面板里两屏两种行距，滚动时那条对齐脊线就断了。
 /// 从前这一格写的是 52，注释自己承认没量过：它比目录那一档高出一截，两屏之间像换了尺子。
 const SEARCH_ROW: f32 = 46.0;
+/// 全文那一格打完字之后等多久才真的扫。
+///
+/// **按时间，不按帧**：按帧那一条只在有人 notify 时才走，而读者打完最后一个字之后
+/// 屏上可能什么都不动（没有动画、输入框的闪烁只通知它自己），于是「安静满 8 帧」
+/// 永远等不到 —— 第一行要等到下一次重画才出现。手机上读起来就是「敲完字没反应」。
+///
+/// 120 ms 比书架那颗（15 帧 ≈ 250 ms）短一档：这边读的是手里这本书、找的是同一份字，
+/// 读者最在意的是「多久看见结果」；250 ms 那一档是给整库查询 + 逐本解封面的。
+const FULLTEXT_SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// 一批摆多少处命中。续扫那一档（[`super::super::super::core::search::Options::max_hits`]）
 /// 就是它：列表滑到尾巴附近再要下一批，而不是一开始就把全书的命中都搬进这一屏。
 ///
-/// 60 是「两三屏」那一档：第一眼看得到进度，而每一批的扫描仍然只是一本书的一小截
-/// （整本最坏实测 274 ms，批到 60 处那一截远小于一帧能忍的）。
-const SEARCH_PAGE: usize = 60;
+/// 24 是「一屏半」那一档（手机一屏约 12 行）：这批数直接决定**第一屏要等多久** ——
+/// 常见字（「你」那种）得一章一章折可见文本，凑到 60 处要折的地方差不多是凑 24 处的
+/// 两倍半。而它只是「先摆多少」，读者往下滑时下一批已经在路上了，这里省下的时间
+/// 换到的正是「敲完字多久看见结果」。
+const SEARCH_PAGE: usize = 24;
 /// 离列表尾巴还剩几行就提前去要下一批。留一行都不到的话，读者会在最后那一行上
 /// 看见一次「等结果」的空档 —— 提前几行正是为了让下一批在他到得了之前已经进来。
 const SEARCH_LOOKAHEAD: usize = 6;
@@ -148,11 +159,15 @@ struct Search {
     word: SharedString,
     /// 上一批**最后一处**的落点，下一批从它往后接。`None` = 还没报出过任何一处。
     cursor: Option<Cursor>,
+    /// 这一批在 `hits` 里的起点。流式回调每章送的是**这一批到目前为止的全部命中**，
+    /// 界面按「先截回起点、再整批接上」吸收 —— 晚到的批次因此是幂等的。
+    /// 新词那一批是 0（`reset` 清过），续扫那一批是上一批的尾巴。
+    batch_base: usize,
+    /// 收流式命中的那条异步链。与 [`Self::stream`] 同生共灭：换词或收屏时一起 drop，
+    /// 后台那一头 `send_blocking` 随即报错收手。
+    hits_stream: Option<Task<()>>,
     /// 后面还可能有：上一批是被命中上限截断的。滑到尾巴就按这一格决定要不要再扫一批。
     more: bool,
-    /// 在跑的这一批是**续扫**而不是换了词。回来的那一趟要接着摆而不是整个换掉 ——
-    /// 少了这一格，续扫的结果会把已经摆着的几十行一次抹掉，列表看着像在倒退。
-    continuing: bool,
     /// 有没有一趟在跑（顶上那一句念它）。
     running: bool,
 }
@@ -167,10 +182,20 @@ impl Search {
             chapters: 0,
             word: SharedString::default(),
             cursor: None,
+            batch_base: 0,
+            hits_stream: None,
             more: false,
-            continuing: false,
             running: false,
         }
+    }
+
+    /// 吸收一批「到目前为止的全部命中」：先截回这一批的起点，再整批接上。
+    ///
+    /// 流式回调与最终那一条 `Finished` 都走这里，所以两者谁先到都得到同一份结果 ——
+    /// 晚到的批次不会把同样的行摆两遍（送的是累计，不是增量）。
+    fn absorb(&mut self, batch: Vec<Hit>) {
+        self.hits.truncate(self.batch_base);
+        self.hits.extend(batch);
     }
 
     /// 作废在跑的那一趟并把读数清零。换查询走它（新的词与旧的命中不能同桌摆着）。
@@ -180,8 +205,8 @@ impl Search {
         self.scanned = 0;
         self.chapters = 0;
         self.cursor = None;
+        self.batch_base = 0;
         self.more = false;
-        self.continuing = false;
     }
 
     /// 只在跑的那一趟作废，读数留着 —— 这一层收起来不等于读者放弃了那个词。
@@ -189,8 +214,9 @@ impl Search {
         if let Some(cancel) = self.cancel.take() {
             cancel.trigger();
         }
-        // 断开那条桥：接收端一没，后台那一头的 `send_blocking` 就报错自己收手。
+        // 断开那两条桥：接收端一没，后台那一头的 `send_blocking` 就报错自己收手。
         self.stream = None;
+        self.hits_stream = None;
         self.running = false;
     }
 
@@ -289,7 +315,10 @@ pub(in crate::ui::features::reader) struct TocPanel {
     /// 正文全文那一档的状态。
     search: Search,
     /// 还没到期的那一次整本扫描（每敲一个字重新起表，安静满那一档才交）。
-    search_debounce: SearchDebounce,
+    /// 去抖那一趟的序号：每敲一个字加一，计时器醒来时对不上就什么都不做。
+    /// 用序号而不是持有 `Task` 句柄 —— 计时器是从「当前这一趟」里发起的，句柄存回
+    /// 自己身上再 drop 等于自己取消自己。
+    settle_seq: u64,
     /// 「批注」那一格的行表。每帧在 [`Self::marks_pieces`] 里重建一次 —— 书签与批注
     /// 都是几十条的量级，重建比「记得哪一格脏了」便宜，也不会有忘了失效的缓存。
     marks: Vec<MarkRow>,
@@ -322,6 +351,25 @@ pub(in crate::ui::features::reader) struct TocPanel {
     _watches: Vec<Subscription>,
 }
 
+/// 一屏虚拟列表 + 它自己那条滚动条。
+///
+/// `v_virtual_list` 自己就是滚动容器，却没有挂轴的口子（`VirtualList` 不是
+/// `InteractiveElement`，`.vertical_scrollbar` 够不着）。所以轴挂在这层与它**同框**的
+/// `div` 上：`inset_0` 量到的是这块滚动区，不是整张弹层；轴贴着面板右边那一列留白，
+/// 不会浮到内容中间（设计规范那条「scrollbar belongs to the region that scrolls」）。
+///
+/// 底部那截呼吸位（[`TOC_BOTTOM_SPACE`]）写在列表自己身上而不是外层：它属于内容，
+/// 不属于视口。写在外面会把轨道拉长 24，拇指滑到底时停在离屏底一截的地方。
+fn scroll_list(list: VirtualList, handle: &VirtualListScrollHandle) -> AnyElement {
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .child(list.track_scroll(handle).pb(px(TOC_BOTTOM_SPACE)))
+        .vertical_scrollbar(handle)
+        .into_any_element()
+}
+
 impl TocPanel {
     /// 建这一屏。弹层状态订阅一次：它不是这一屏的子视图，`notify` 只有观察方才收得到，
     /// 而开合、换档、读者一把下拉关掉全靠随后那一次重画。
@@ -337,7 +385,7 @@ impl TocPanel {
             tree: None,
             screen: Screen::default(),
             search: Search::new(),
-            search_debounce: SearchDebounce::default(),
+            settle_seq: 0,
             marks: Vec::new(),
             search_open: false,
             sizes: Rc::new(Vec::new()),
@@ -623,20 +671,15 @@ impl TocPanel {
                 .into_any_element();
         }
         let view = cx.entity().clone();
-        div()
-            .flex_1()
-            .min_h_0()
-            .pb(px(TOC_BOTTOM_SPACE))
-            .child(
-                v_virtual_list(
-                    view,
-                    "reader-marks",
-                    self.sizes.clone(),
-                    |panel, range, _, cx| panel.mark_rows(range, cx),
-                )
-                .track_scroll(&self.scroll),
-            )
-            .into_any_element()
+        scroll_list(
+            v_virtual_list(
+                view,
+                "reader-marks",
+                self.sizes.clone(),
+                |panel, range, _, cx| panel.mark_rows(range, cx),
+            ),
+            &self.scroll,
+        )
     }
 
     /// `[range.start, range.end)` 那几行：左侧颜色点或书签图标，原文/笔记一行，
@@ -799,7 +842,10 @@ impl TocPanel {
     fn sheet_element(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let sheet = BottomSheet::new(&self.sheet, "reader-toc")
             .expanded(TOC_EXPANDED)
-            .peek(TOC_PEEK);
+            .peek(TOC_PEEK)
+            // 搜索框钉在顶部，键盘弹出来时它已经在键盘上方；这一抬只会让整屏内容
+            // 往上跳一下（读者报的「键盘一弹，字就往上蹦」）。
+            .ime_lift(false);
         // 收稳了就不白算这一屏：整棵树要逐层展开成可见行、尺寸表要比对、搜索框要回读。
         // 元素照旧构造（弹簧的采样在里面），只是这一帧不给内容。
         if self.sheet.read(cx).is_idle() {
@@ -1292,21 +1338,15 @@ impl TocPanel {
                 .into_any_element();
         }
         let view = cx.entity().clone();
-        div()
-            .flex_1()
-            .min_h_0()
-            .pb(px(TOC_BOTTOM_SPACE))
-            .child(
-                v_virtual_list(
-                    view,
-                    "reader-fulltext",
-                    self.sizes.clone(),
-                    |panel, range, _, cx| panel.hit_rows(range, cx),
-                )
-                // 句柄跨帧持有，理由与目录那条一模一样：不顶掉它就每帧归零，列表滑不动。
-                .track_scroll(&self.search_scroll),
-            )
-            .into_any_element()
+        scroll_list(
+            v_virtual_list(
+                view,
+                "reader-fulltext",
+                self.sizes.clone(),
+                |panel, range, _, cx| panel.hit_rows(range, cx),
+            ),
+            &self.search_scroll,
+        )
     }
 
     /// `[range.start, range.end)` 那几处命中：上面一行章名，下面一行那句上下文，
@@ -1397,6 +1437,9 @@ impl TocPanel {
                                     .items_center()
                                     .text_sm()
                                     .text_color(foreground)
+                                    // **一句话只占一行**：折行会让这一格长出 46 的高度，
+                                    // 多出来的那几行压到下一处命中上（整屏字叠在一起）。
+                                    .whitespace_nowrap()
                                     .child(div().flex_none().child(pre))
                                     .child(
                                         div()
@@ -1406,7 +1449,16 @@ impl TocPanel {
                                             .bg(mark_bg)
                                             .child(mid),
                                     )
-                                    .child(div().flex_1().min_w_0().overflow_hidden().child(post)),
+                                    // 尾巴按宽度截断并给省略号：这一行读不完是常事，
+                                    // 但「读不完」得看得出来，不能靠画到框外面去表示。
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .truncate()
+                                            .child(post),
+                                    ),
                             ),
                     )
                     .child(div().flex_none().text_xs().text_color(muted).child(place))
@@ -1440,12 +1492,32 @@ impl TocPanel {
     /// 清空（空词）不 delay：那一条本来就走 `sweep_now` 里的「没词就不跑」那支，
     /// 当场把上一次的清掉才是读者要的。
     fn search_soon(&mut self, raw: &str, cx: &mut Context<Self>) {
-        if let Some(word) = self.search_debounce.typed(raw) {
-            self.submit(&word, cx);
+        self.settle_seq = self.settle_seq.wrapping_add(1);
+        let seq = self.settle_seq;
+        // 空词不 delay：当场把上一次的清掉才是读者要的。
+        if raw.is_empty() {
+            self.submit("", cx);
             return;
         }
-        // 没到点：画一帧，去抖在 `render` 里按帧结算。
-        cx.notify();
+        let word: SharedString = raw.into();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FULLTEXT_SETTLE).await;
+            let _ = this.update(cx, |this, cx| {
+                // 这一趟已经过时（又敲了字 / 换了格 / 收起了这一层）：什么都不做。
+                if this.settle_seq != seq
+                    || this.screen != Screen::Search
+                    || !this.sheet.read(cx).is_open()
+                {
+                    return;
+                }
+                // 同一个词再报一次（输入法常见）：不重扫，别把已经摆出来的那几行
+                // 清掉重来。
+                if this.search.word != word {
+                    this.submit(&word, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// 换了一个词：把上一趟整个作废，从这本书开头扫第一批。
@@ -1464,7 +1536,6 @@ impl TocPanel {
         if self.search.running || !self.search.more || self.search.word.is_empty() {
             return;
         }
-        self.search.continuing = true;
         let cursor = self.search.cursor;
         self.sweep_now(cursor, cx);
     }
@@ -1476,8 +1547,8 @@ impl TocPanel {
     /// 看见旗标收手（协作式取消，不在半章中间打断），列表由回来的那一趟整个换掉。
     ///
     /// `resume` 是上一批的落点：`None` 从这本书开头扫（新词那一批），`Some` 从那一处往后接
-    /// （续扫那一批）。两批走的是同一条链，区别只在回来的那一趟是换掉列表还是接上去
-    /// （见 [`Self::search_event`] 里 `continuing` 那一句）。
+    /// （续扫那一批）。两批走的是同一条链，区别只在 `batch_base`：新词那一批从 0 起算，
+    /// 续扫那一批接在已经摆出来的那几行后面（见 [`Search::absorb`]）。
     fn sweep_now(&mut self, resume: Option<Cursor>, cx: &mut Context<Self>) {
         let (Some(query), Some(doc)) = (
             Query::parse(&self.search.word),
@@ -1497,11 +1568,32 @@ impl TocPanel {
             resume,
             ..Options::default()
         };
-        let handle: TaskHandle<Found> = resident::pool()
-            .submit_with(Priority::Interactive, move |ctx| {
-                Ok(scan(&*doc, &query, &options, ctx))
+        // 流式命中走**另一条**通道：`TaskEvent` 只带得动进度，带不动「这一批到目前为止
+        // 找到了哪几处」。发送端随作业闭包一起活，作业一结束就 drop，接收端自然收尾。
+        self.search.batch_base = self.search.hits.len();
+        let (hit_tx, hit_rx) = async_channel::unbounded::<Vec<Hit>>();
+        let handle: TaskHandle<Found> =
+            resident::pool().submit_with(Priority::Interactive, move |ctx| {
+                Ok(scan_with_sink(&*doc, &query, &options, ctx, &mut |batch| {
+                    // 接收端已经没了（换词、收屏）：送不出去就由取消旗标让这一趟自己停。
+                    let _ = hit_tx.send_blocking(batch.to_vec());
+                }))
             });
         self.search.cancel = Some(handle.cancel.clone());
+
+        self.search.hits_stream = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            while let Ok(batch) = hit_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.search.absorb(batch);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }));
 
         // `std::sync::mpsc` 的接收端只会阻塞读它的那条线程，而界面线程一阻塞整个窗口就停：
         // 所以把读的那一手搬到后台，每条事件转成一次界面更新 —— 与架面那条导入链同一条形状。
@@ -1545,14 +1637,10 @@ impl TocPanel {
                 cx.notify();
             }
             TaskEvent::Finished(Ok(found)) => {
-                // 续扫那一批**接**在已有的那些行后面；新词那一批整个换掉。判据是提交时
-                // 记下的那一格，而不是「hits 现在空不空」：一批一个命中都没报也会走到这里。
-                if self.search.continuing {
-                    self.search.hits.extend(found.hits);
-                } else {
-                    self.search.hits = found.hits;
-                }
-                self.search.continuing = false;
+                // 流式那一头已经把同样的几条摆进去了；这里再吸收一次是**幂等**的
+                // （`absorb` 先截回这一批的起点）。谁先到都得到同一份结果，晚到的那一份
+                // 不会把行摆两遍。新词与续扫的区别只在 `batch_base` 那一格。
+                self.search.absorb(found.hits);
                 self.search.scanned = found.scanned;
                 self.search.chapters = found.chapters;
                 self.search.more = found.truncated;
@@ -1618,22 +1706,15 @@ impl TocPanel {
                 .into_any_element();
         }
         let view = cx.entity().clone();
-        div()
-            .flex_1()
-            .min_h_0()
-            .pb(px(TOC_BOTTOM_SPACE))
-            .child(
-                v_virtual_list(
-                    view,
-                    "reader-toc",
-                    self.sizes.clone(),
-                    |panel, range, _, cx| panel.rows(range, cx),
-                )
-                // 句柄跨帧持有（见字段 `toc_scroll`）：不顶掉 `v_virtual_list` 每帧新建的
-                // 那一份，滚动偏移每帧归零，目录就滑不动。
-                .track_scroll(&self.scroll),
-            )
-            .into_any_element()
+        scroll_list(
+            v_virtual_list(
+                view,
+                "reader-toc",
+                self.sizes.clone(),
+                |panel, range, _, cx| panel.rows(range, cx),
+            ),
+            &self.scroll,
+        )
     }
 
     /// `[range.start, range.end)` 这几行目录。
@@ -1781,10 +1862,6 @@ impl Render for TocPanel {
     /// 左边一张带遮罩的抽屉（正文一寸不让）。哪些行看得见、折了哪几枝、搜的是什么词、
     /// 跳到哪一条 —— 全部只有一份，两种摆法读的是同一个 `TocView`。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 欠着的那一次扫描在这里结算（按帧，理由见 `SearchDebounce`）。
-        if let Some(word) = self.search_debounce.due() {
-            self.submit(&word, cx);
-        }
         if SizeClass::of(window).is_compact() {
             // 弹层**每帧都构造**，收着时也构造 —— 弹簧的采样在里面，只在开着时构造会把
             // 退场动画连状态一起丢（见 `widgets::bottom_sheet` 那段模块注释）。
@@ -1845,7 +1922,7 @@ mod tests {
     };
 
     use super::{SEARCH_ROW, Screen, TOC_DRAWER, TOC_DRAWER_INSET, TocEvent, TocPanel};
-    use crate::ui::components::SEARCH_SETTLE_FRAMES;
+
     use crate::ui::features::reader::model::session::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
 
@@ -1954,6 +2031,41 @@ mod tests {
             .expect("这一屏该画得出来");
         let rows = panel.update(cx, |panel, cx| panel.rows(0..4, cx));
         assert_eq!(rows.len(), 2, "两条目录都该摆出来");
+    }
+
+    /// 目录列表要有一条自己的滚动条：这一屏动辄上千章，没有轴既看不出「还有多少」，
+    /// 也认不出自己停在全书哪一段。
+    ///
+    /// 钉两件事：轴真挂上了（这条之前根本没有），且它的框与**列表视口**同框 ——
+    /// 挂到外面那层带底部呼吸位的容器上，轨道会多出那 24，拇指滑到底时停早一截。
+    /// 视口不另找一个 id：`VirtualListScrollHandle` 自己记着列表布局到的那块矩形。
+    #[gpui_kit::test]
+    fn a_long_toc_puts_a_scrollbar_on_its_list(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let toc = (0..40)
+            .map(|ix| TocEntry {
+                title: format!("第 {ix} 章"),
+                href: "c0.xhtml".into(),
+                ..Default::default()
+            })
+            .collect();
+        let (_session, panel, handle, _events, _watch) = open_panel_with(cx, 460., toc);
+        panel.update(cx, |panel, cx| panel.toggle(cx));
+        // 弹层的弹簧要几帧才铺开，一帧量到的可能还是收起的那一档。
+        for _ in 0..3 {
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("这一屏该画得出来");
+        }
+        let viewport = panel.read_with(cx, |panel, _| panel.scroll.bounds());
+        let bar = gpui_kit::VisualTestContext::from_window(handle, cx)
+            .debug_bounds("scrollbar-overlay")
+            .expect("目录这一屏该画出滚动条");
+        assert!(
+            (f32::from(bar.origin.x) - f32::from(viewport.origin.x)).abs() < 1.0
+                && (f32::from(bar.origin.y) - f32::from(viewport.origin.y)).abs() < 1.0
+                && (f32::from(bar.size.height) - f32::from(viewport.size.height)).abs() < 1.0,
+            "轴该与列表视口同框；轴 {bar:?}，视口 {viewport:?}"
+        );
     }
 
     /// 宽档上同一份状态换的是**容器**，不是内容：目录是一张压在正文上的抽屉，
@@ -2127,9 +2239,9 @@ mod tests {
             "落点没记下来，下一批只能从全书开头重扫"
         );
 
-        // 续扫回来的一批（`continuing` 就是提交那一趟时记下的那一格）。
+        // 续扫回来的一批（`batch_base` 就是提交那一趟时记下的起点）。
         panel.update(cx, |panel, cx| {
-            panel.search.continuing = true;
+            panel.search.batch_base = 1;
             panel.search_event(
                 TaskEvent::Finished(Ok(batch(
                     vec![hit(1, 3)],
@@ -2228,7 +2340,10 @@ mod tests {
     ///
     /// 判据取自 `plans/阅读管线.md` §10.3 合并那一档：只丢请求、让在跑的那趟自己收手。
     /// 这里断的是**同步**那一半（旗标置位、新的一趟接手），回来的结果由上一条验。
-    /// 打一个字不扫一遍全书：那一趟要等安静满 `SEARCH_DEBOUNCE` 才起（SR-1）。
+    ///
+    /// 注意这条**不靠画帧**推进：计时器是 `cx.spawn` 里那条背景计时，屏上没人 notify
+    /// 它也照样到点 —— 那正是从「按帧去抖」改成「按时间去抖」要修的病。
+    /// 打一个字不扫一遍全书：那一趟要等安静满 [`super::FULLTEXT_SETTLE`] 才起（SR-1）。
     ///
     /// 钉的是入口 `search_soon`（搜索框那颗 `SearchBoxEvent::Change` 只做转发）。三个
     /// 方向各一格：① 连打三字都不许已经开扫；② 时钟过那一档之后要真的开扫；③ 清空
@@ -2252,16 +2367,24 @@ mod tests {
             );
         }
 
-        // 到点：画满那 15 帧（去抖按渲染帧数，理由见 `SearchDebounce`）。
-        for _ in 0..SEARCH_SETTLE_FRAMES {
-            cx.update_window(handle, |_, window, cx| {
-                window.render_frame(cx);
-            })
+        // 先把那几条 `cx.spawn` 轮询起来（计时器是在 future 第一次被 poll 时才登记的）。
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
             .expect("这一屏该画得出来");
-        }
-        assert!(
-            panel.update(cx, |panel, _| panel.search.running),
-            "安静满了也没去扫：到点那一趟被整个跳过了"
+        // 到点：把测试时钟推过 120 ms，再走一帧让前台那条链跑完。
+        // **不靠 notify** —— 生产上读者打完字之后屏上可能一帧都不再重画，
+        // 这一条正是要钉住「没有人点、没有人滚，它也自己去扫」。
+        cx.executor()
+            .advance_clock(super::FULLTEXT_SETTLE + std::time::Duration::from_millis(20));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("这一屏该画得出来");
+        cx.run_until_parked();
+        // 判据是**已提交的那个词**，不是 `running`：这台夹具只有两章、命中很快，
+        // `run_until_parked` 会把那一趟连同 `Finished` 一起跑完，`running` 已经落回 false。
+        // 提交与不提交的分界在 `search.word` 上，它不会被那一趟回写。
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.search.word.clone()),
+            "第一章的",
+            "计时器到点了也没去扫：安静那一档没接上"
         );
 
         panel.update(cx, |panel, cx| panel.search_soon("", cx));
@@ -2517,6 +2640,40 @@ mod tests {
             visible_us * 2.0,
             visible_us * 2.0 / frame_us * 100.0,
             rows_us / frame_us * 100.0,
+        );
+    }
+
+    /// 流式那一头送的是**累计**：同一批重复到两次，列表里也只留一份；
+    /// 而这一批起点之前的旧命中（上一批续下来的）不许被截掉。
+    ///
+    /// 这一条钉的是 [`super::Search::absorb`]：收流式回调与收最后的 `Finished`
+    /// 走同一个口，谁先到、重复到几次，摆出来的都是同一份列表。
+    #[test]
+    fn absorbing_the_same_batch_twice_keeps_one_copy_and_the_old_rows() {
+        fn hit(chapter: usize, start: usize) -> Hit {
+            Hit {
+                chapter,
+                start,
+                end: start + 1,
+                snippet: "上下文".into(),
+                mark: 0..1,
+            }
+        }
+
+        let mut search = super::Search::new();
+        search.hits = vec![hit(0, 0)];
+        search.batch_base = 1;
+        let batch = vec![hit(1, 3), hit(1, 9)];
+        search.absorb(batch.clone());
+        search.absorb(batch);
+        assert_eq!(
+            search
+                .hits
+                .iter()
+                .map(|hit| (hit.chapter, hit.start))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (1, 3), (1, 9)],
+            "重复吸收同一批只留一份，且不能抹掉上一批"
         );
     }
 }

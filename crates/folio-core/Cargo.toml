@@ -78,6 +78,12 @@ png.workspace = true
 # CB7：纯 Rust 的 7z 解压；CBR：纯 Rust 的 RAR（rars），两者都不带 C/C++。
 sevenz-rust2.workspace = true
 rars.workspace = true
+# WOFF2 → sfnt 的解压。WOFF2 的载荷是 brotli 压缩加表变换（glyf/loca/hmtx 重建），
+# 手写等于把 W3C 规范实现一遍，用现成的移植。选 `woff2-patched`（同 API 的修复分支）
+# 而不是 `woff2` 0.3：后者按 2022 年的 rustc 写的，现在的编译器在 trait 方法与固有
+# 方法的歧义上直接拒编（E0034/E0277，23 个错），修它就得 fork。代价：它要 brotli ^7，
+# 与锁里 hayro-cmap 那份 8.x 并存两份主版本 —— 换取不自己养变换重建那份代码。
+woff2-patched = "0.4"
 # CBT：tar 漫画包（纯 Rust）。
 tar.workspace = true
 # DjVu：纯 Rust 解码/渲染（MIT，无 GPL）。
@@ -127,6 +133,9 @@ tts.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# WOFF2 往返测试里把解出的 sfnt 重新解析、与原字体逐项对 —— 锁里 fontdb 已带它，
+# 这里只是声明成测试依赖，不新增包。
+ttf-parser = "0.25"
 # 测试里合成 CBR 夹具；生产只用读，不开 write。
 rars = { workspace = true, features = ["write"] }
 # 测试里合成「OLE2 但不是 Word」的负样本，用的就是普通依赖那一份 `cfb`。

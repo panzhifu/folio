@@ -4,16 +4,20 @@
 //! 这里回答「念什么、念到哪儿、什么时候停」。设计稿在本机 `plans/听书.md`（不入库），
 //! 几条落进实现的口径：
 //!
-//! - **段，不是句。** 一段 = `hit::paragraph_range` 给出的字符区间（排版已经算过的
-//!   事实），一段一条 utterance，`Done` 里推下一段，不做预排 —— 「读者手动翻页时
-//!   队列里那三段怎么办」这个分支整个不存在。
-//! - **听的位置与读的位置是同一个东西。** `auto_scroll` 开着时每开一段
-//!   `jump_to_offset` 把那一屏摆过来（它自带落库），停听时再按段起点补一账
+//! - **句，不是段。** 一句 = `hit::paragraph_range` 给出的段再按句末标点切开的字符
+//!   区间（长句再按句内停顿标点下刀，切法见本模块的 `split_sentences`），一句一条
+//!   utterance，`Done` 里推下一句，
+//!   不做预排 —— 「读者手动翻页时队列里那几句怎么办」这个分支整个不存在。
+//!   粒度下沉到句是为了文稿那一面能像 Apple Music 歌词那样让当前行跟着声音走；
+//!   正文屏按「这句看得见才不动」跟（同一段跨页、长段超屏也要动，见
+//!   `speak_sentence` 与 `position::offset_visible`）。
+//! - **听的位置与读的位置是同一个东西。** `auto_scroll` 开着时每开新的一段
+//!   `jump_to_offset` 把那一屏摆过来（它自带落库），停听时再按句起点补一账
 //!   —— `positions` 表里从此只有一个答案。不新开表。
 //! - **停不依赖回调。** 引擎侧的静音窗（`speech::gate::reduce`）负责吞掉 Stop 之后
 //!   的回调；这一侧的另一半是：`Done` 只在 `Playing` 里推进，暂停/停止之后撞到的
 //!   尾巴在这里被挡住。两边各有一条测试钉着。
-//! - **听就是读。** 每段 `Done` 记一次 `note_reading_activity`，阅读时长的宽限线
+//! - **听就是读。** 每句 `Done` 记一次 `note_reading_activity`，阅读时长的宽限线
 //!   照常接住，不新写计时。
 //!
 //! 手动翻页/滚动**不**暂停听书：播放中的位置归听书管（下一段开念时 `auto_scroll`
@@ -31,15 +35,24 @@ use crate::ui::features::reader::model::chapter_layout::Document;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
 
+/// 新会话接手时，通道里那些「上一本留下的」事件该怎么处理。
+///
+/// `Done` / `Begin` 属于旧会话，丢掉；`Ready` 是进程级引擎**唯一**一次的可用性
+/// 结论，必须回放 —— 引擎线程可能比这个监听任务的首次 poll 更快，那时它已经在
+/// 通道里等着了，抽干时丢掉它 `available` 就永远停在 `None`。
+fn attach_replay(event: Event) -> Option<Event> {
+    matches!(event, Event::Ready(_)).then_some(event)
+}
+
 /// 播放状态。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::ui::features::reader) enum Listen {
     /// 可用但没在念。引擎不存在时也停在这一态 —— 入口摆不摆看
     /// [`ReaderSession::speech_entry_visible`]，不看这里。
     Idle,
-    /// 正在念哪一章的哪一段。这一段同时是给视图画整段高亮的全部信息。
+    /// 正在念哪一章的哪一句。这一句同时是给视图画当前行高亮的全部信息。
     Playing { chapter: usize, range: Range<usize> },
-    /// 停在了哪一段。恢复 = 从这段开头再念（引擎没有段内暂停，见引擎模块文档）。
+    /// 停在了哪一句。恢复 = 从这句开头再念（引擎没有句内暂停，见引擎模块文档）。
     Paused { chapter: usize, range: Range<usize> },
 }
 
@@ -47,12 +60,13 @@ pub(in crate::ui::features::reader) enum Listen {
 pub(in crate::ui::features::reader) struct Speech {
     /// 引擎句柄。`None` = 没挂上（还没开过书）或探测失败。
     engine: Option<Engine>,
-    /// 引擎的 `Ready` 到了没有。`None` = 还在探测（入口先不摆，免得闪一下）；
-    /// `Some(false)` = 这台设备没有可用的引擎（Linux 没有 speechd / stub 平台）。
+    /// 引擎的 `Ready` 到了没有。`None` = 还没点过听书钮，或点了还在探测（几秒内
+    /// 见分晓）；`Some(false)` = **上一次**点开的探测终审失败 —— 圆钮仍常在，下一
+    /// 次点开听书屏就是重试。屏内用「准备中 / 没有可用的语音引擎」把这两格说清。
     available: Option<bool>,
     state: Listen,
     /// 跨章续读的接力棒：`advance_chapter` 之后新章还没排完，这一格挂着
-    /// 「排版落地就念这一章的第一段」。轮询见 [`Self::wait_for_chapter_then_speak`]。
+    /// 「排版落地就念这一章的第一句」。轮询见 [`Self::wait_for_chapter_then_speak`]。
     pending_chapter_start: bool,
     /// 事件接收任务。开书时挂一次；会话被扔掉时随字段 drop（任务取消）。
     listening: Option<Task<()>>,
@@ -71,30 +85,50 @@ impl Default for Speech {
 }
 
 impl ReaderSession {
-    /// 挂引擎、起事件循环。开书时调（`open_book`），幂等 —— 引擎进程级只有一份，
-    /// 每个会话挂的是自己的事件循环。
+    /// 挂引擎、起事件循环。**点开听书那一屏时调**（`arm_speech`），幂等 —— 引擎
+    /// 进程级只有一份，每个会话挂的是自己的事件循环。
+    ///
+    /// 上一次探测**终审失败**（`available == Some(false)`）时不是跳过，而是整个重来：
+    /// 核心侧会把死掉的引擎换新（见 `folio_core::speech::engine`），事件循环也要跟着
+    /// 换到新引擎的通道上 —— 旧循环捧着的旧通道已经没人写了，随任务替换自然收场。
+    /// 这就是「圆钮常在，点了再试」的那一下。
     pub(in crate::ui::features::reader) fn speech_attach(&mut self, cx: &mut Context<Self>) {
-        if self.speech.listening.is_some() {
+        if self.speech.listening.is_some() && self.speech.available != Some(false) {
             return;
         }
-        // 定版式书没有可念的排版链（段落区间那一套不成立），这一格不摆。
-        // `available` 给 `Some(false)` 而不是 `None`：别让读者等一场注定不来的探测。
-        if self.is_fixed() {
-            self.speech.available = Some(false);
-            return;
-        }
+        // 定版式书没有可念的排版链（段落区间那一套不成立），入口由
+        // [`Self::speech_entry_visible`] 里 `book().is_some()` 那一格挡住，
+        // 走不到这里 —— 别在这里替它把 `available` 写成什么。
         let Some(engine) = folio_core::speech::engine() else {
-            // stub 平台，或这个进程里探测已经失败过（进程内缓存）。
+            // Mutex 被毒化才会到这（引擎线程不碰这个锁）。按不可用降级，屏内说明。
             self.speech.available = Some(false);
             return;
         };
+        // 先读**持久快照**：`Event::Ready` 全进程只发一次，可能早就被上一个会话
+        // 取走（或在这个任务的首次 poll 之前就到了）。赌事件还在管道里，赌输的那
+        // 一次就是真机上「听书按钮有时候不显示」。
+        if let Some(ok) = engine.ready() {
+            self.speech.available = Some(ok);
+            if !ok {
+                self.speech.engine = None;
+            }
+            cx.notify();
+        }
         self.speech.engine = Some(engine.clone());
         let rx = engine.events();
         let weak = cx.entity().downgrade();
         self.speech.listening = Some(cx.spawn(async move |_, cx| {
-            // 事件管道是进程级的一条：上一个会话可能留了尾巴，先抽干，
-            // 别把上一本书的 `Done` 当成这一本的开场。
-            while rx.try_recv().is_ok() {}
+            // 事件管道是进程级的一条：上一个会话可能留了尾巴，先抽干。
+            // `Done` / `Begin` 属于旧会话，丢掉；`Ready` 是唯一的可用性结论，
+            // 回放给这一本 —— 它可能在监听挂上来之前就已经在通道里了。
+            while let Ok(event) = rx.try_recv() {
+                if let Some(ready) = attach_replay(event) {
+                    let Ok(()) = weak.update(cx, |session, cx| session.on_speech_event(ready, cx))
+                    else {
+                        return;
+                    };
+                }
+            }
             while let Ok(event) = rx.recv().await {
                 // 会话没了（阅读页被弹掉）就退出：这是这条循环唯一的正常出口。
                 let Ok(()) = weak.update(cx, |session, cx| session.on_speech_event(event, cx))
@@ -106,10 +140,13 @@ impl ReaderSession {
         cx.notify();
     }
 
-    /// 入口摆不摆。引擎不可用、没有书（兜底那一屏）都不摆 —— 按「拿不到引擎」设计，
-    /// 不弹错误，这与「这台设备根本没有这一格」共用同一条判据。
+    /// 入口摆不摆。**只看有没有一本可念的书**：引擎可不可用不再决定圆钮的生死 ——
+    /// 从前开书时探一次针，撞上 TTS 冷启动的 500ms 窗口就误判失败并进程级钉死，
+    /// 圆钮整轮消失（真机 2026-11-07）。现在圆钮常在，点它才起引擎；探测中与终审
+    /// 失败都在听书屏里说清楚（「准备中」/「没有可用的语音引擎」），失败后下一次
+    /// 点击就是重试。
     pub fn speech_entry_visible(&self) -> bool {
-        self.speech.available == Some(true) && self.book().is_some()
+        self.book().is_some()
     }
 
     /// 正在播放吗。入口的图标切换与「这一格现在是什么」都问它。
@@ -117,7 +154,13 @@ impl ReaderSession {
         matches!(self.speech.state, Listen::Playing { .. })
     }
 
-    /// 现在念到（或停在）哪一段：`(章, 字符区间)`。视图拿它画整段高亮。
+    /// 引擎这一刻的结论。`None` = 还没点过听书钮、或点了还在探测；`Some(false)` =
+    /// 上一次点开的探测终审失败。听书屏拿它在播放键旁边把现状说清，圆钮不看它。
+    pub(in crate::ui::features::reader) fn speech_available(&self) -> Option<bool> {
+        self.speech.available
+    }
+
+    /// 现在念到（或停在）哪一句：`(章, 字符区间)`。视图拿它画当前句高亮。
     pub(in crate::ui::features::reader) fn speech_range(&self) -> Option<(usize, Range<usize>)> {
         match &self.speech.state {
             Listen::Playing { chapter, range } | Listen::Paused { chapter, range } => {
@@ -127,7 +170,23 @@ impl ReaderSession {
         }
     }
 
-    /// 入口那一下：没念 → 从视口当前段开始念；念着 → 暂停；暂停 → 这一段从头再念。
+    /// 听书那一屏里点某一句：直接从这一句开头念（与暂停恢复同一个入口）。
+    ///
+    /// 外面只给「哪一章 + 这一句在章内的字符区间」，不碰引擎那一侧的队列 —— 与
+    /// [`Self::toggle_speech`] 走同一条 `speak_sentence`，两条路的行为不会分叉。
+    pub(in crate::ui::features::reader) fn speak_from(
+        &mut self,
+        chapter: usize,
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.speech_entry_visible() {
+            return;
+        }
+        self.speak_sentence(chapter, range, cx);
+    }
+
+    /// 入口那一下：没念 → 从视口当前句开始念；念着 → 暂停；暂停 → 这一句从头再念。
     pub fn toggle_speech(&mut self, cx: &mut Context<Self>) {
         if !self.speech_entry_visible() {
             return;
@@ -135,11 +194,46 @@ impl ReaderSession {
         match self.speech.state.clone() {
             Listen::Idle => self.start_speech(cx),
             Listen::Playing { .. } => self.pause_speech(),
-            Listen::Paused { chapter, range } => self.speak_paragraph(chapter, range, cx),
+            Listen::Paused { chapter, range } => self.speak_sentence(chapter, range, cx),
         }
     }
 
-    /// 停：离开阅读页（`Drop`）与换书（`open_book`）都走它。位置按当前段起点落库
+    /// 打开听书那一屏时把「将从哪句开始」摆好：**不开口**，只把待念的位置定位出来。
+    /// 从前打开那一屏就顺势起播 —— 读者想先看看文稿再决定从哪听，门一推开声音就
+    /// 出来了。起播交给圆钮：摆好的这一句按下去（[`Self::toggle_speech`]）从它开口。
+    ///
+    /// 引擎也在这扇门被推开的那一刻才第一次碰（[`Self::speech_attach`]）：开书路径
+    /// 不为 TTS 付一分钱，冷启动的那一两秒被「读者找播放键」的时间盖掉。
+    ///
+    /// 「停在一句、还没念」的形状与暂停（[`Listen::Paused`]）完全相同，推进、文稿
+    /// 定位、上一句/下一句全部共用同一套，不另立状态。已经有位置（在念 / 暂停过）
+    /// 就不动：重开那一屏，停的地方还在原地。
+    pub(in crate::ui::features::reader) fn arm_speech(&mut self, cx: &mut Context<Self>) {
+        if !self.speech_entry_visible() {
+            return;
+        }
+        // 引擎在这里才第一次被碰：点圆钮 = 初始化（幂等；上一次终审失败的话这一次
+        // 就是重试）。开书路径因此一个字节都不为 TTS 付出。
+        self.speech_attach(cx);
+        if self.speech_range().is_some() {
+            return;
+        }
+        // 与 start_speech 同一个起点：视口顶所在的那一句（含头）。
+        let Some((chapter, offset)) = self.resolve_position() else {
+            return;
+        };
+        let Some(range) = self
+            .book()
+            .and_then(|book| book.span_doc(chapter))
+            .and_then(|doc| sentence_from(doc, offset))
+        else {
+            return;
+        };
+        self.speech.state = Listen::Paused { chapter, range };
+        cx.notify();
+    }
+
+    /// 停：离开阅读页（`Drop`）与换书（`open_book`）都走它。位置按当前句起点落库
     /// —— 「听到哪儿」从此在 `positions` 里有数，与读书共用一个坐标系。
     pub(in crate::ui::features::reader) fn stop_speech(&mut self) {
         self.speech.pending_chapter_start = false;
@@ -187,7 +281,7 @@ impl ReaderSession {
     }
 
     fn start_speech(&mut self, cx: &mut Context<Self>) {
-        // 从读者此刻看着的地方开口：视口顶所在的那一段（含头）。
+        // 从读者此刻看着的地方开口：视口顶所在的那一句（含头）。
         let Some((chapter, offset)) = self.resolve_position() else {
             return;
         };
@@ -196,11 +290,11 @@ impl ReaderSession {
         };
         let found = book
             .span_doc(chapter)
-            .and_then(|doc| paragraph_from(doc, offset));
+            .and_then(|doc| sentence_from(doc, offset));
         let Some(range) = found else {
             return;
         };
-        self.speak_paragraph(chapter, range, cx);
+        self.speak_sentence(chapter, range, cx);
     }
 
     fn pause_speech(&mut self) {
@@ -210,15 +304,38 @@ impl ReaderSession {
             }
             self.speech.state = Listen::Paused { chapter, range };
             // 暂停不落库：位置那一行跟着 `auto_scroll` 的逐段跳转已经在了，
-            // 而停听（`stop_speech`）才是设计稿里「落库」的那一刻。
+            // 而停听（`stop_speech`）才是设计稿里「落库」的那一刻。句比段密，
+            // 逐句落库会把 positions 写成高频流水账，所以屏仍按段跟。
         }
     }
 
-    /// 念一段。`auto_scroll` 开着就把那一屏摆过来：同一章里是就地滚到那一段，
-    /// 跨了章就换锚章（走目录跳转那条落点）。语速/音高每段随发 —— 设置页改了配置，
-    /// 下一段自然生效，不需要另开一条命令通路。
-    fn speak_paragraph(&mut self, chapter: usize, range: Range<usize>, cx: &mut Context<Self>) {
-        if ConfigHolder::speech(cx).auto_scroll {
+    /// 念一句。`auto_scroll` 开着又把读者带到这一句：跨了段动；同一段里、这句的
+    /// 行顶还**看得见**就不动 —— 句比段密得多，每句都 `jump_to_offset` 会每几秒
+    /// 写一次 `positions` 并把屏翻来翻去。但「看不见」时（同一段从这页漫到下一页、
+    /// 一段长过一屏）也必须动：屏要跟的是声音，不是段落记号。听书文稿那一面自己
+    /// 按句滚，不受这一格管。跨了章就换锚章（走目录跳转那条落点）。语速/音高每句
+    /// 随发 —— 设置页改了配置，下一句自然生效，不需要另开一条命令通路。
+    fn speak_sentence(&mut self, chapter: usize, range: Range<usize>, cx: &mut Context<Self>) {
+        // 同一段里就不为换句动屏；这一句看不见（跨页/长段）时例外。
+        let same_paragraph = self.speech_range().is_some_and(|(old_chapter, old)| {
+            old_chapter == chapter
+                && self.book().is_some_and(|book| {
+                    book.span_doc(chapter).is_some_and(|doc| {
+                        doc.paragraph_range(old.start) == doc.paragraph_range(range.start)
+                    })
+                })
+        });
+        if ConfigHolder::speech(cx).auto_scroll
+            && (!same_paragraph || !self.offset_visible(chapter, range.start))
+        {
+            // 跟读的决定一句一条：真机上「声音在念、画面不动」时，这一行与引擎的
+            // Done 一对照，是引擎没回事件还是跟读没动屏一望可知。
+            tracing::info!(
+                chapter,
+                at = range.start,
+                same_paragraph,
+                "跟读：把屏带过去"
+            );
             if self.chapter_index() == chapter {
                 self.jump_to_offset(range.start, cx);
             } else {
@@ -243,23 +360,23 @@ impl ReaderSession {
         cx.notify();
     }
 
-    /// 从刚念完的那一段往后推进：下一个非空段 → 念；这一章到头 → 下一章的接力；
+    /// 从刚念完的那一句往后推进：段内的下一句 → 念；这一章到头 → 下一章的接力；
     /// 最后一章到头 → 停。
     fn advance_from(&mut self, chapter: usize, after: Range<usize>, cx: &mut Context<Self>) {
-        // 先在不可变借用里把「下一段是什么」算完，再动状态 —— 直接在循环里改
+        // 先在不可变借用里把「下一句是什么」算完，再动状态 —— 直接在循环里改
         // 会跟 `self.book()` 打架。
         let next = self
             .book()
             .and_then(|book| book.span_doc(chapter))
-            .and_then(|doc| next_paragraph(doc, after));
+            .and_then(|doc| next_sentence(doc, after));
         match next {
-            Some(range) => self.speak_paragraph(chapter, range, cx),
+            Some(range) => self.speak_sentence(chapter, range, cx),
             None => {
                 let has_next = self
                     .book()
                     .is_some_and(|book| chapter + 1 < book.chapter_count());
                 if !has_next {
-                    // 整本书念完：位置已经随每一段落过库，这里只管停下。
+                    // 整本书念完：位置已经随段落的跳转落过库，这里只管停下。
                     self.stop_speech();
                     cx.notify();
                     return;
@@ -271,7 +388,7 @@ impl ReaderSession {
         }
     }
 
-    /// 跨章续读的接力：新章排版落地（恢复请求落定、行盒非空）就念它的第一段。
+    /// 跨章续读的接力：新章排版落地（恢复请求落定、行盒非空）就念它的第一句。
     ///
     /// 轮询而不是挂回调，因为「排完了」此刻没有事件可订；100 ms 一拍、至多五秒，
     /// 超时就停在那章开头 —— 比念错安全。真机上换章排版远快于这个上限。
@@ -313,16 +430,16 @@ impl ReaderSession {
         .detach();
     }
 
-    /// 从某章的某个偏移起（含）念第一个非空段。章首接力与「从视口开口」共用。
+    /// 从某章的某个偏移起（含）念第一个非空句。章首接力与「从视口开口」共用。
     fn speak_from_offset(&mut self, chapter: usize, offset: usize, cx: &mut Context<Self>) {
         let found = self
             .book()
             .and_then(|book| book.span_doc(chapter))
-            .and_then(|doc| paragraph_from(doc, offset));
+            .and_then(|doc| sentence_from(doc, offset));
         let Some(range) = found else {
             return;
         };
-        self.speak_paragraph(chapter, range, cx);
+        self.speak_sentence(chapter, range, cx);
     }
 }
 
@@ -333,36 +450,188 @@ impl Drop for ReaderSession {
     }
 }
 
-/// 从 `offset` 起（含）的第一个**非空**段。纯文本空白段（pretty-print 的换行缩进
-/// 是文本节点，自己就能成「段」）跳过 —— 念它出来的是一段静默。`None` = 这一章
-/// 从这里往后没有可念的了。
-fn paragraph_from(doc: &Document, offset: usize) -> Option<Range<usize>> {
-    let mut probe = offset;
-    while probe < doc.text_map().chars() {
-        match doc.paragraph_range(probe) {
-            Some(range) => {
-                if doc.text_map().slice(range.clone()).trim().is_empty() {
-                    probe = range.end.max(probe + 1);
-                } else {
-                    return Some(range);
-                }
-            }
-            None => probe += 1,
+/// 句末标点。`；` 与 ASCII 的 `.` 不在内：前者是并列分句（长句下刀的刀口，见
+/// [`CLAUSE_ENDERS`]），后者要看后面是不是空白（小数点、缩写不切，英文句末才切）。
+const SENTENCE_ENDERS: &[char] = &['。', '！', '？', '!', '?', '…'];
+
+/// 句末标点后面跟的引号 / 括号归前一句：`他说：“走吧。”` 的 `。”` 不能拆到下一句。
+const CLOSERS: &[char] = &[
+    '”', '’', '」', '』', '）', ')', '】', '》', '〕', '］', ']', '"', '\'',
+];
+
+/// 长句下刀的档：一句超过这个字数，就在句内的停顿标点处再切成几片。念与显共用
+/// [`split_sentences`] 这一把尺，所以 TTS 的 utterance 与文稿的行同一时刻变细。
+/// 24 个字上下的依据：文稿亮的那句在一两行以内（Apple Music 那面歌词的行感），
+/// 引擎一次也念不到半分钟。
+const SENTENCE_PIECE_MAX: usize = 24;
+
+/// 句内的停顿标点（长句下刀处）。`，` 与 `、` 是最自然的换气口；`；` 在句末那把尺里
+/// 刻意不切（并列分句常长过一屏，把整句拖成一句），在句内这一把里算一刀；ASCII 的
+/// `,` 与 `;` 同理 —— 英文除句末标点外只有它们算停顿。
+const CLAUSE_ENDERS: &[char] = &['，', '、', '；', ',', ';'];
+
+fn is_clause_ender(chars: &[char], at: usize) -> bool {
+    match chars[at] {
+        // 千分位逗号不是停顿：1,000 不能切成两半。
+        ',' => {
+            !chars.get(at.wrapping_sub(1)).is_some_and(|prev| prev.is_ascii_digit())
+                && !chars.get(at + 1).is_some_and(|next| next.is_ascii_digit())
         }
+        ch => CLAUSE_ENDERS.contains(&ch),
+    }
+}
+
+fn is_sentence_ender(chars: &[char], at: usize) -> bool {
+    match chars[at] {
+        '.' => chars.get(at + 1).is_none_or(|next| next.is_whitespace()),
+        ch => SENTENCE_ENDERS.contains(&ch),
+    }
+}
+
+fn is_closer(ch: char) -> bool {
+    CLOSERS.contains(&ch)
+}
+
+fn push_trimmed(out: &mut Vec<Range<usize>>, chars: &[char], start: usize, end: usize) {
+    let mut a = start;
+    let mut b = end;
+    while a < b && chars[a].is_whitespace() {
+        a += 1;
+    }
+    while b > a && chars[b - 1].is_whitespace() {
+        b -= 1;
+    }
+    if a < b {
+        out.push(a..b);
+    }
+}
+
+fn push_sentence(out: &mut Vec<Range<usize>>, chars: &[char], range: Range<usize>) {
+    let mut start = range.start;
+    let mut end = range.end;
+    while start < end && chars[start].is_whitespace() {
+        start += 1;
+    }
+    while end > start && chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    if start >= end {
+        return;
+    }
+    if end - start <= SENTENCE_PIECE_MAX {
+        out.push(start..end);
+        return;
+    }
+    push_clauses(out, chars, start, end);
+}
+
+/// 把一句长的按句内停顿标点解成小段（标点连同连续标点与尾随的引号/括号归前片），再
+/// 贪心地把放得进一档的相邻段并回去 —— 片界只落在停顿标点上。单片本身长过一档时
+/// 原样保留：中间没有刀口，切在字中间比长更糟。
+fn push_clauses(out: &mut Vec<Range<usize>>, chars: &[char], start: usize, end: usize) {
+    let mut pieces: Vec<Range<usize>> = Vec::new();
+    let mut piece = start;
+    let mut at = start;
+    while at < end {
+        if is_clause_ender(chars, at) {
+            let mut boundary = at + 1;
+            while boundary < end
+                && (CLAUSE_ENDERS.contains(&chars[boundary]) || is_closer(chars[boundary]))
+            {
+                boundary += 1;
+            }
+            pieces.push(piece..boundary);
+            piece = boundary;
+            at = boundary;
+        } else {
+            at += 1;
+        }
+    }
+    pieces.push(piece..end);
+
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for piece in pieces {
+        match merged.last_mut() {
+            Some(last) if piece.end - last.start <= SENTENCE_PIECE_MAX => last.end = piece.end,
+            _ => merged.push(piece),
+        }
+    }
+    for piece in merged {
+        push_trimmed(out, chars, piece.start, piece.end);
+    }
+}
+
+/// 把 `range` 切成句子：句末标点（连同连续的标点与尾随的引号 / 括号）之后断，
+/// 换行也断；首尾与句间的空白不进任何一句。长过 [`SENTENCE_PIECE_MAX`] 的句再在
+/// 句内停顿标点处切成几片（见 [`push_clauses`]）。返回的是章内字符区间，可以直接
+/// 交给 `Command::Speak` —— 与文稿那一面同一把尺，念的 utterance 与文稿的行
+/// 同一时刻变细。
+pub(in crate::ui::features::reader) fn split_sentences(
+    chars: &[char],
+    range: Range<usize>,
+) -> Vec<Range<usize>> {
+    let end = range.end.min(chars.len());
+    let mut out = Vec::new();
+    let mut start = range.start.min(end);
+    let mut at = start;
+    while at < end {
+        if is_sentence_ender(chars, at) {
+            let mut boundary = at + 1;
+            while boundary < end
+                && (SENTENCE_ENDERS.contains(&chars[boundary]) || is_closer(chars[boundary]))
+            {
+                boundary += 1;
+            }
+            push_sentence(&mut out, chars, start..boundary);
+            start = boundary;
+            at = boundary;
+        } else if chars[at] == '\n' {
+            push_sentence(&mut out, chars, start..at);
+            start = at + 1;
+            at += 1;
+        } else {
+            at += 1;
+        }
+    }
+    push_sentence(&mut out, chars, start..end);
+    out
+}
+
+/// 从 `offset` 起（含）的第一句。空白与空段跳过；`offset` 落在段间空白时取下一句。
+/// `None` = 这一章从这里往后没有可念的了。
+pub(in crate::ui::features::reader) fn sentence_from(
+    doc: &Document,
+    offset: usize,
+) -> Option<Range<usize>> {
+    let chars: Vec<char> = doc.text_map().text().chars().collect();
+    let mut probe = offset;
+    while probe < chars.len() {
+        let Some(paragraph) = doc.paragraph_range(probe) else {
+            probe += 1;
+            continue;
+        };
+        if paragraph.end <= probe {
+            probe = paragraph.end.max(probe + 1);
+            continue;
+        }
+        let sentences = split_sentences(&chars, paragraph.clone());
+        if let Some(hit) = sentences
+            .iter()
+            .find(|sentence| sentence.start <= probe && probe < sentence.end)
+        {
+            return Some(hit.clone());
+        }
+        if let Some(next) = sentences.iter().find(|sentence| sentence.start >= probe) {
+            return Some(next.clone());
+        }
+        probe = paragraph.end.max(probe + 1);
     }
     None
 }
 
-/// [`paragraph_from`] 的「下一段」版：从刚念完的那一段往后找。空段连环跳。
-fn next_paragraph(doc: &Document, after: Range<usize>) -> Option<Range<usize>> {
-    let mut cursor = after;
-    while let Some(range) = doc.paragraph_after(cursor.clone()) {
-        if !doc.text_map().slice(range.clone()).trim().is_empty() {
-            return Some(range);
-        }
-        cursor = range;
-    }
-    None
+/// [`sentence_from`] 的「下一句」版：从刚念完的那一句往后找。
+fn next_sentence(doc: &Document, after: Range<usize>) -> Option<Range<usize>> {
+    sentence_from(doc, after.end)
 }
 
 #[cfg(test)]
@@ -381,7 +650,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
 
-    use super::{Listen, next_paragraph, paragraph_from};
+    use super::{Listen, attach_replay, next_sentence, sentence_from, split_sentences};
     use crate::ui::features::reader::model::session::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
 
@@ -461,8 +730,8 @@ mod tests {
             .expect("渲染应成功");
     }
 
-    /// 第 `index` 个非空段的区间（0 起），从排版产物里解出来当断言的基准。
-    fn paragraph(
+    /// 第 `index` 个非空句的区间（0 起），从排版产物里解出来当断言的基准。
+    fn sentence(
         view: &Entity<ReaderSession>,
         chapter: usize,
         index: usize,
@@ -473,9 +742,9 @@ mod tests {
                 .book()
                 .and_then(|book| book.span_doc(chapter))
                 .expect("这一章应该在拼接窗口里");
-            let mut found = super::paragraph_from(doc, 0).expect("至少应有一段");
+            let mut found = super::sentence_from(doc, 0).expect("至少应有一句");
             for _ in 0..index {
-                found = super::next_paragraph(doc, found).expect("段应存在");
+                found = super::next_sentence(doc, found).expect("句应存在");
             }
             found
         })
@@ -499,9 +768,9 @@ mod tests {
     /// 从前的判据是「锚章 == 正在念的章才摆屏」。跨章那一帧里恢复请求与锚章迁移
     /// 有先后，锚章可能还留在上一章 —— 于是音频继续念下一章，画面却停在原地，
     /// 读者看到的就是「跨章时往回跳」。这一条把状态直接摆成「audio 在第二章、
-    /// 锚章还停在第一章」，再问一次 `speak_paragraph`：锚章必须被带过去。
+    /// 锚章还停在第一章」，再问一次 `speak_sentence`：锚章必须被带过去。
     #[gpui_kit::test]
-    fn speaking_a_paragraph_in_another_chapter_brings_the_view_along(cx: &mut TestAppContext) {
+    fn speaking_a_sentence_in_another_chapter_brings_the_view_along(cx: &mut TestAppContext) {
         use crate::ui::features::reader::model::chrome::PageMode;
         use folio_core::infra::config::PageTurn;
 
@@ -533,10 +802,9 @@ mod tests {
             "前置：锚章还在第一章"
         );
 
-        let first = paragraph(&view, 1, 0, cx);
+        let first = sentence(&view, 1, 0, cx);
         view.update(cx, |session, cx| {
-            session.speech.available = Some(true);
-            session.speak_paragraph(1, first.clone(), cx);
+            session.speak_sentence(1, first.clone(), cx);
         });
         settle(cx, handle);
 
@@ -551,18 +819,18 @@ mod tests {
         );
     }
 
-    /// 逐段推进 + 跨章续读 + 念完整本书停下。`Done` 是唯一的推进事件，
-    /// 推到哪儿断言就落到哪儿 —— 全程没有引擎在场。
+    /// 逐句推进 + 跨章续读 + 念完整本书停下。`Done` 是唯一的推进事件，
+    /// 推到哪儿断言就落到哪儿 —— 全程没有引擎在场。语料每段正好一句，
+    /// 所以这条与「逐段推进」的落点相同；段内多句那条见下面 `sentence_flow`。
     #[gpui_kit::test]
-    fn done_advances_paragraph_by_paragraph_until_the_book_ends(cx: &mut TestAppContext) {
+    fn done_advances_sentence_by_sentence_until_the_book_ends(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let flow = speech_flow();
         let (store, book_id) = store_with_book(&flow);
         let (view, handle) = open(cx, &flow, Some((store.clone(), book_id)));
 
-        let first = paragraph(&view, 0, 0, cx);
+        let first = sentence(&view, 0, 0, cx);
         view.update(cx, |session, _| {
-            session.speech.available = Some(true);
             session.speech.state = Listen::Playing {
                 chapter: 0,
                 range: first,
@@ -617,9 +885,8 @@ mod tests {
         let (store, book_id) = store_with_book(&flow);
         let (view, _handle) = open(cx, &flow, Some((store.clone(), book_id)));
 
-        let first = paragraph(&view, 0, 0, cx);
+        let first = sentence(&view, 0, 0, cx);
         view.update(cx, |session, _| {
-            session.speech.available = Some(true);
             session.speech.state = Listen::Playing {
                 chapter: 0,
                 range: first.clone(),
@@ -644,16 +911,15 @@ mod tests {
         assert_eq!(again, locator, "停了之后位置不该再动");
     }
 
-    /// 暂停留在本段；`Done` 撞上暂停不推进；恢复从同一段开头再念。
+    /// 暂停留在本句；`Done` 撞上暂停不推进；恢复从同一句开头再念。
     #[gpui_kit::test]
-    fn pausing_holds_the_paragraph_and_resuming_repeats_it(cx: &mut TestAppContext) {
+    fn pausing_holds_the_sentence_and_resuming_repeats_it(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let flow = speech_flow();
         let (view, _handle) = open(cx, &flow, None);
 
-        let first = paragraph(&view, 0, 0, cx);
+        let first = sentence(&view, 0, 0, cx);
         view.update(cx, |session, _| {
-            session.speech.available = Some(true);
             session.speech.state = Listen::Playing {
                 chapter: 0,
                 range: first.clone(),
@@ -664,7 +930,7 @@ mod tests {
         assert_eq!(
             view.read_with(cx, |session, _| session.speech_range()),
             Some((0, first.clone())),
-            "暂停留在本段"
+            "暂停留在本句"
         );
 
         view.update(cx, |session, cx| session.on_speech_event(Event::Done, cx));
@@ -686,27 +952,79 @@ mod tests {
         );
     }
 
-    /// 降级（验收门）：引擎不在 / 没有书，入口都不摆 —— 不弹错误。
+    /// 打开听书屏的那一下只摆位置不开口：摆好之后停在第一句（暂停的形状），按下
+    /// 播放才从它开口 —— 「点了开始才开始」。
     #[gpui_kit::test]
-    fn the_entry_stays_hidden_without_an_engine(cx: &mut TestAppContext) {
+    fn arming_positions_the_sentence_without_speaking_and_playing_starts_it(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let flow = speech_flow();
+        let (view, _handle) = open(cx, &flow, None);
+        let first = sentence(&view, 0, 0, cx);
+        view.update(cx, |session, cx| session.arm_speech(cx));
+        assert_eq!(
+            view.read_with(cx, |session, _| session.speech_range()),
+            Some((0, first.clone())),
+            "摆好的就是视口那句"
+        );
+        assert!(
+            !view.read_with(cx, |session, _| session.speech_playing()),
+            "摆位置不开口"
+        );
+
+        view.update(cx, |session, cx| session.toggle_speech(cx));
+        assert!(
+            view.read_with(cx, |session, _| session.speech_playing()),
+            "按下播放才开口"
+        );
+        assert_eq!(
+            view.read_with(cx, |session, _| session.speech_range()),
+            Some((0, first)),
+            "从摆好的那句开口"
+        );
+    }
+
+    /// 已经有位置（暂停过）再摆就不动：重开那一屏，停的地方还在原地。
+    #[gpui_kit::test]
+    fn arming_keeps_an_existing_position(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let flow = speech_flow();
+        let (view, _handle) = open(cx, &flow, None);
+        let second = sentence(&view, 0, 1, cx);
+        view.update(cx, |session, _| {
+            session.speech.state = Listen::Paused {
+                chapter: 0,
+                range: second.clone(),
+            };
+        });
+        view.update(cx, |session, cx| session.arm_speech(cx));
+        assert_eq!(
+            view.read_with(cx, |session, _| session.speech_range()),
+            Some((0, second)),
+            "已有的位置不被摆场覆盖"
+        );
+    }
+
+    /// 入口的显隐只看有没有一本可念的书：引擎探测的三种结论（还没探 / 失败 / 可用）
+    /// 都不改变圆钮的生死。从前开书时探一次针，撞上 TTS 冷启动的 500ms 窗口就误判
+    /// 失败并钉死，圆钮整轮消失（真机 2026-11-07）—— 现在结论只落在会话上，由听书
+    /// 屏在播放键旁说明，下一次点开就是重试。没有书（兜底那一屏）依旧不摆。
+    #[gpui_kit::test]
+    fn the_entry_stays_up_through_every_probe_verdict(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let flow = speech_flow();
         let (view, _handle) = open(cx, &flow, None);
 
         assert!(
-            !view.read_with(cx, |session, _| session.speech_entry_visible()),
-            "探测没回来（available = None）时先不摆"
+            view.read_with(cx, |session, _| session.speech_entry_visible()),
+            "书开着，探测没回来（None）圆钮也摆"
         );
         view.update(cx, |session, _| session.speech.available = Some(false));
         assert!(
-            !view.read_with(cx, |session, _| session.speech_entry_visible()),
-            "引擎不可用不摆"
+            view.read_with(cx, |session, _| session.speech_entry_visible()),
+            "终审失败圆钮也不收 —— 下一次点开听书屏就是重试"
         );
         view.update(cx, |session, _| session.speech.available = Some(true));
-        assert!(
-            view.read_with(cx, |session, _| session.speech_entry_visible()),
-            "可用且有书才摆"
-        );
+        assert!(view.read_with(cx, |session, _| session.speech_entry_visible()));
 
         // 兜底那一屏没有书：同样不摆。
         let sample = cx.update(|cx| cx.new(|cx| ReaderSession::boot(cx)));
@@ -716,14 +1034,83 @@ mod tests {
         );
     }
 
-    /// 段推进的两个纯函数：空段（pretty-print 的空白文本节点）跳过，章尾给 `None`。
+    /// 句切分：句末标点、连续标点、尾随引号、换行与空白；小数点与 `；` 不切。
+    #[test]
+    fn sentences_break_on_end_punctuation_but_not_inside_numbers_or_after_semicolons() {
+        let text = "他说：“走吧。”然后走了。价格 3.14 元；不算新句！真的？\n最后一行";
+        let chars: Vec<char> = text.chars().collect();
+        let ranges = split_sentences(&chars, 0..chars.len());
+        let got: Vec<String> = ranges
+            .iter()
+            .map(|range| chars[range.clone()].iter().collect())
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "他说：“走吧。”",
+                "然后走了。",
+                "价格 3.14 元；不算新句！",
+                "真的？",
+                "最后一行",
+            ]
+        );
+    }
+
+    /// 长句下刀：超过一档的句在句内停顿标点处再切，每一片都落在停顿上，放得进
+    /// 一档的相邻段并回去；短句（≤一档）一个字不动。
+    #[test]
+    fn a_long_sentence_is_cut_at_clause_pauses_but_a_short_one_is_not() {
+        let long = "由于莫雷蒂家家境贫寒，克莱恩生活上非常节俭，再加上克莱恩对金钱的爱好，导致每一便士都如数家珍的性格非常深入人心。";
+        let chars: Vec<char> = long.chars().collect();
+        let ranges = split_sentences(&chars, 0..chars.len());
+        let got: Vec<String> = ranges
+            .iter()
+            .map(|range| chars[range.clone()].iter().collect())
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "由于莫雷蒂家家境贫寒，克莱恩生活上非常节俭，",
+                "再加上克莱恩对金钱的爱好，",
+                "导致每一便士都如数家珍的性格非常深入人心。",
+            ]
+        );
+
+        let short = "克莱恩生活上非常节俭。";
+        let chars: Vec<char> = short.chars().collect();
+        let ranges = split_sentences(&chars, 0..chars.len());
+        assert_eq!(ranges.len(), 1, "短句整句保留");
+    }
+
+    /// 千分位逗号不是刀口：`1,000` 必须整段保留，`，` 才是停顿。
+    #[test]
+    fn thousand_separator_commas_do_not_become_clause_cuts() {
+        let text = "这件货一共 1,000 件，再加上仓库里剩下的全部存货，统统都要在明天之前如数交割清楚才行。";
+        let chars: Vec<char> = text.chars().collect();
+        let ranges = split_sentences(&chars, 0..chars.len());
+        let got: Vec<String> = ranges
+            .iter()
+            .map(|range| chars[range.clone()].iter().collect())
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "这件货一共 1,000 件，",
+                "再加上仓库里剩下的全部存货，",
+                "统统都要在明天之前如数交割清楚才行。",
+            ]
+        );
+    }
+
+    /// 推进的两个纯函数：空段（pretty-print 的空白文本节点）跳过，章尾给 `None`；
+    /// 段内的多句按句走，不整段吞。
     #[gpui_kit::test]
-    fn empty_paragraphs_are_skipped_and_the_chapter_end_holds(cx: &mut TestAppContext) {
+    fn empty_paragraphs_are_skipped_and_sentences_advance_one_at_a_time(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let flow = FlowDoc {
             chapters: vec![Chapter::inline(
                 "空白章",
-                "<p>有字的一段。</p><p>   </p><p>收尾。</p>",
+                "<p>甲一。甲二！甲三？</p><p>   </p><p>收尾。</p>",
             )],
             ..Default::default()
         };
@@ -733,13 +1120,63 @@ mod tests {
                 .book()
                 .and_then(|book| book.span_doc(0))
                 .expect("应有一章");
-            let first = paragraph_from(doc, 0).expect("首段应可解");
-            assert_eq!(doc.text_map().slice(first.clone()), "有字的一段。");
+            let first = sentence_from(doc, 0).expect("首句应可解");
+            assert_eq!(doc.text_map().slice(first.clone()), "甲一。");
 
-            let second = next_paragraph(doc, first).expect("下一段应跳过空白段");
-            assert_eq!(doc.text_map().slice(second.clone()), "收尾。");
+            let second = next_sentence(doc, first).expect("段内下一句");
+            assert_eq!(doc.text_map().slice(second.clone()), "甲二！");
 
-            assert!(next_paragraph(doc, second).is_none(), "章尾停住");
+            let third = next_sentence(doc, second).expect("段内最后一句");
+            assert_eq!(doc.text_map().slice(third.clone()), "甲三？");
+
+            let fourth = next_sentence(doc, third).expect("下一段（跳过空白段）");
+            assert_eq!(doc.text_map().slice(fourth.clone()), "收尾。");
+
+            assert!(next_sentence(doc, fourth).is_none(), "章尾停住");
         });
+    }
+
+    /// 抽干那条不能把 `Ready` 一起丢掉：它全进程只发一次，丢了就是「有时候按钮不显示」。
+    #[test]
+    fn draining_old_events_replays_ready_and_only_ready() {
+        assert_eq!(attach_replay(Event::Ready(true)), Some(Event::Ready(true)));
+        assert_eq!(
+            attach_replay(Event::Ready(false)),
+            Some(Event::Ready(false))
+        );
+        assert_eq!(attach_replay(Event::Begin), None);
+        assert_eq!(attach_replay(Event::Done), None);
+    }
+
+    /// 可用性结论落在会话上（与它是不是「早于监听到达」无关），听书屏拿它说明现状：
+    /// 还没探 / 可用 / 终审失败三格都要能落到 [`ReaderSession::speech_available`]。
+    #[gpui_kit::test]
+    fn a_ready_that_arrived_before_the_listener_still_lands_on_the_session(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let flow = speech_flow();
+        let (view, _handle) = open(cx, &flow, None);
+        assert_eq!(
+            view.read_with(cx, |session, _| session.speech_available()),
+            None,
+            "前置：还没点过听书钮"
+        );
+        // 模拟「Ready 在监听挂上来之前就到了」：直接喂事件，不管它从哪条路来的。
+        view.update(cx, |session, cx| {
+            session.on_speech_event(Event::Ready(true), cx)
+        });
+        assert_eq!(
+            view.read_with(cx, |session, _| session.speech_available()),
+            Some(true),
+            "结论到了就落在会话上；从前这一条被抽干吞掉，按钮永久不出现"
+        );
+        view.update(cx, |session, cx| {
+            session.on_speech_event(Event::Ready(false), cx)
+        });
+        assert_eq!(
+            view.read_with(cx, |session, _| session.speech_available()),
+            Some(false)
+        );
     }
 }

@@ -529,6 +529,54 @@ fn format_of(media_type: &str) -> ImageFormat {
     format_of_mime(media_type).unwrap_or(ImageFormat::Png)
 }
 
+/// 水墨那一档此刻开着没有。
+///
+/// 正文里的图走 `image_atlas` 那条像素路（它自己有一格旗）；**封面**不经过那里 ——
+/// 架面、书头与 OPDS 都是 gpui 自己的 `Image`（`Image::from_bytes` 解），所以在
+/// 这一层只能把灰度落回**字节**上。
+static INK_IMAGES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 换肤那一步推一次（`foundation::theme::repaint`）。
+///
+/// 返回**这一句有没有翻档**：翻档之后架面那份封面缓存得清掉，否则彩色的那一份会
+/// 原样留着继续画（缓存键是书号，里面没有「哪一档」这一格）。
+pub fn set_ink_images(ink: bool) -> bool {
+    INK_IMAGES.swap(ink, std::sync::atomic::Ordering::Relaxed) != ink
+}
+
+/// 封面解码这一趟要不要去彩度。
+pub fn ink_images() -> bool {
+    INK_IMAGES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 一张已经编好的图（PNG / JPEG / …）→ 同尺寸的**灰度 PNG**。
+///
+/// 只在墨水下走：多一趟解码 + 一次 PNG 重编，换来的是 gpui 那条 `Image` 路不用改 ——
+/// 它只认字节，没有「画的时候带个滤镜」这回事。封面（尤其是导入时生成的 320px 缩略图）
+/// 尺寸本来就不大，而结果会落进架面那份缓存，一本书只付这一次。
+fn grayscale_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageEncoder as _;
+
+    let mut pixels = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (width, height) = pixels.dimensions();
+    for pixel in pixels.pixels_mut() {
+        let [r, g, b, a] = pixel.0;
+        let luma =
+            (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)).round() as u8;
+        *pixel = image::Rgba([luma, luma, luma, a]);
+    }
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(
+            pixels.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .ok()?;
+    Some(out)
+}
+
 /// 封面字节 → 可画的 `Image`；格式认不出时返回 `None`。
 ///
 /// 返回 `None` 而不是按 PNG 试一把，是因为 `Image::from_bytes` 之后 gpui 就按那个
@@ -537,15 +585,19 @@ fn format_of(media_type: &str) -> ImageFormat {
 /// 而界面已经分不清这两件事了。认不出时调用方要画显式的占位块。
 pub fn cover_image(bytes: &[u8]) -> Option<Arc<Image>> {
     // SVG 封面：先栅格化成 PNG 再交给 gpui（它不认 SVG）。
-    if folio_core::content::format::svg::looks_like_svg(bytes) {
+    let (format, data) = if folio_core::content::format::svg::looks_like_svg(bytes) {
         let (png, _) = folio_core::content::format::svg::rasterize(bytes, Some((512, 512)))?;
-        return Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)));
+        (ImageFormat::Png, png)
+    } else {
+        let media_type = folio_core::content::format::guess_media_type(bytes)?;
+        (format_of(media_type), bytes.to_vec())
+    };
+    // 水墨：灰度落在字节上（这条路的出口只有 `Image::from_bytes`）。重编之后一律是 PNG。
+    if ink_images() {
+        let gray = grayscale_image_bytes(&data)?;
+        return Some(Arc::new(Image::from_bytes(ImageFormat::Png, gray)));
     }
-    let media_type = folio_core::content::format::guess_media_type(bytes)?;
-    Some(Arc::new(Image::from_bytes(
-        format_of(media_type),
-        bytes.to_vec(),
-    )))
+    Some(Arc::new(Image::from_bytes(format, data)))
 }
 
 /// 一章的图片视图：`src` 相对本章目录解析成容器路径后查 `BookImages`。
@@ -714,7 +766,7 @@ mod tests {
     //! 的字节里把格式猜出来。它错了不会报错，只会让书架上那张卡片永远画不出来，
     //! 所以按契约钉住：认得出的要给出图，认不出的要给 `None` 而不是「按 PNG 试一把」。
 
-    use crate::ui::foundation::images::{bgra_render_image, cover_image};
+    use crate::ui::foundation::images::{bgra_render_image, cover_image, grayscale_image_bytes};
     use folio_core::layout::ImageProvider as _;
 
     /// 够 `with_guessed_format` 探测的一段 PNG 头。
@@ -1179,6 +1231,43 @@ mod tests {
             chapter.closest_portrait_variant("OEBPS/Images/not-in-book.jpg", 0.45),
             None,
             "不在书里的 href 不猜"
+        );
+    }
+
+    /// 水墨那一档封面走的是**字节**灰度：解一遍、按 Rec.709 压成灰、再编回 PNG。
+    ///
+    /// 钉三件事：三个通道相等（不去彩度就白改）、亮度按观感系数（红 255 该落 54，
+    /// 而不是把红的平均值算成 85）、alpha 原样（透明封面不该变实心）。
+    #[test]
+    fn a_cover_is_reencoded_to_grayscale_with_its_alpha_intact() {
+        use image::ImageEncoder as _;
+
+        let mut source = image::RgbaImage::new(2, 1);
+        source.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        source.put_pixel(1, 0, image::Rgba([0, 0, 0, 0]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(source.as_raw(), 2, 1, image::ExtendedColorType::Rgba8)
+            .expect("编一张测试 PNG");
+
+        let gray = grayscale_image_bytes(&bytes).expect("一张真 PNG 该能去彩度");
+        let decoded = image::load_from_memory(&gray)
+            .expect("产物该仍是解得开的 PNG")
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1), "尺寸不许变");
+        assert_eq!(
+            decoded.get_pixel(0, 0).0,
+            [54, 54, 54, 255],
+            "红 255 的观感亮度是 0.2126×255 ≈ 54，而且三通道必须相等"
+        );
+        assert_eq!(
+            decoded.get_pixel(1, 0).0,
+            [0, 0, 0, 0],
+            "透明那一格连 alpha 一起留着"
+        );
+        assert!(
+            grayscale_image_bytes(b"not an image").is_none(),
+            "不是图就给 None，别把字节原样交回去"
         );
     }
 }

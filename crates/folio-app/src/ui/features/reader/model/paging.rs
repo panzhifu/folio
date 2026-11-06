@@ -154,7 +154,9 @@ impl ReaderSession {
         // 纹理，拿半张纹理去卷，右侧会直接露出捕获矩形外的黑边。下一帧烘完自然会重试。
         // 只挡真正要上纸的 Page/Chapter；连续滚动不读这张纹理，不能一起挡住。
         // 定版式也要过这道门：它的页图同样是先烘一张整页纹理，卷曲才采得到。
-        let needs_curl_capture = ConfigHolder::appearance(cx).page_turn == PageTurn::Curl
+        let needs_curl_capture = crate::ui::features::reader::model::chrome::effective_turn(
+            &ConfigHolder::appearance(cx),
+        ) == PageTurn::Curl
             && matches!(plan, TurnPlan::Page { .. } | TurnPlan::Chapter { .. });
         if needs_curl_capture && !self.curl_capture_ready() {
             // 不丢这一下：记下方向，等门开了在渲染帧末补一趟。从前这里直接 return，
@@ -293,7 +295,9 @@ impl ReaderSession {
         let mode = self.laid_out.mode;
         // 定版式与可重排走同一张档位表：折页要的那张捕获纹理，定版式也烘（页图就是
         // 那位图，见 `view/body/fixed.rs` 的捕获通道）。上下滚动在定版式上走连续竖滚。
-        let style = ConfigHolder::appearance(cx).page_turn;
+        let style = crate::ui::features::reader::model::chrome::effective_turn(
+            &ConfigHolder::appearance(cx),
+        );
         start_turn(
             &mut self.turn,
             &mut self.turn_seq,

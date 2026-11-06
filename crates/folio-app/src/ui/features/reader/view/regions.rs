@@ -346,20 +346,16 @@ impl ReadingPage {
         let playing = self.reader.read(cx).speech_playing();
         let label = tr(cx, "reader.tts");
         let page = cx.entity().clone();
-        // 圆卡的面用 `button_secondary` 那一档，不用 `popover`。
-        //
-        // 原因是量出来的：夜读的正文底与底栏卡片都是 `neutral-950`（(10,10,10)），
-        // 而 `popover` 在这套主题里**也是那个值** —— 第一版拿它做钮面，真机上圆钮
-        // 整颗看不见，只剩正文右缘那片空白（截图里钮所在的那 52×52 一格与页边距
-        // 同一个颜色）。`button_secondary` 是 `neutral-800` 量级，浅色主题下同样
-        // 比正文底深一档，两套主题都看得见，且它自带前景 / hover / active 三档。
+        // 圆钮的面走**主题主色**：这一颗是「听书」唯一常驻的入口，读者要一眼看见它。
+        // 从前那版用 `button_secondary`，在浅色与宣纸两套底上只比背景深一点，实机上
+        // 读起来就是「没有底色」；主色与它的前景是主题里唯一保证成对对比的一档。
         let (surface, foreground, hover, active, radius) = {
             let theme = cx.theme();
             (
-                theme.button_secondary,
-                theme.button_secondary_foreground,
-                theme.button_secondary_hover,
-                theme.button_secondary_active,
+                theme.primary,
+                theme.primary_foreground,
+                theme.primary_hover,
+                theme.primary_active,
                 theme.radius_full(),
             )
         };
@@ -390,9 +386,7 @@ impl ReadingPage {
                         })
                         .tooltip(label.clone().to_string())
                         .accessibility_label(label)
-                        .on_click(move |_, _, cx| {
-                            page.update(cx, |this, cx| this.toggle_speech(cx))
-                        }),
+                        .on_click(move |_, _, cx| page.update(cx, |this, cx| this.open_listen(cx))),
                 )
                 .into_any_element(),
         )

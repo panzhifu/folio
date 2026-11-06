@@ -20,6 +20,17 @@
 # **这一门语言用不到的臂照抄 `_other`** —— key 集合一致那条测试要求每一份都有这四行，
 # 宁可重复也不能少一行。
 
+# 听书那一屏：两种面孔、三颗控制键与段位置。
+"listen.cover" = "표지"
+"listen.text" = "원고"
+"listen.prev" = "이전 문장"
+"listen.next" = "다음 문장"
+"listen.close" = "닫기"
+"listen.loading" = "준비 중…"
+"listen.position" = "문장 %{index} / %{total}"
+"listen.engine_preparing" = "음성 엔진 준비 중…"
+"listen.engine_unavailable" = "이 기기에서 사용할 수 있는 음성 엔진이 없습니다"
+
 [sidebar]
 import = "책 가져오기"
 account = "계정"
@@ -67,6 +78,7 @@ toc = "목차"
 "marks.stale" = "⚠️ %{place} · 위치를 찾을 수 없음"
 bookmark = "책갈피"
 "jump_back.action" = "돌아가기"
+"jump_back.close" = "닫기"
 "undo.action" = "실행 취소"
 "undo.bookmark" = "책갈피가 삭제되었습니다"
 translate = "번역"
@@ -584,11 +596,27 @@ search_placeholder = "제목 또는 저자 검색"
 # 无障碍标签与桌面的 tooltip 上。
 more = "가져오기 방식"
 import = "가져오기"
-# 导入进行中的那一行读数，摆在命令行与架面之间。后端报的第一条读数还没上来时总数
-# 不知道，那一句不带数字。
-importing = "가져오는 중…"
-importing_of = "가져오는 중 %{done}/%{total}"
-# 가져오기 뒤에「몇 권 들어오지 못했고 왜냐」를 알리는 한 줄. 한국어는 네 갈래 같은 글.
+# 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）的两句：标题说这件事在跑，读数说已完成几本。
+# 后端第一条读数还没上来时总数不知道，那一档只有标题与一条不定进度的 bar，读数不给。
+status_importing = "가져오는 중"
+status_progress = "%{total}권 중 %{done}권 완료"
+# 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
+# 数已经在行里了），与「没进来」那几档的复数句子（`reject_*`）各管各的场合。
+record_title = "가져오기 기록"
+status_added = "완료"
+status_duplicate = "서가에 있음"
+status_needs_password = "암호 필요"
+status_encrypted = "DRM 보호됨"
+status_corrupt = "파일이 손상됨"
+status_unsupported = "지원하지 않는 형식"
+status_unreadable = "읽을 수 없음"
+record_open = "열기"
+record_clear = "비우기"
+record_added_one = "%{count}권 완료"
+record_added_few = "%{count}권 완료"
+record_added_many = "%{count}권 완료"
+record_added_other = "%{count}권 완료"
+# 가져오기 뒤에「몇 권 들어오지 못했고 왜냐」를 알리는 카드(이유마다 한 줄). 한국어는 네 갈래 같은 글.
 import_rejected_one = "%{count}권을 추가하지 못했습니다"
 import_rejected_few = "%{count}권을 추가하지 못했습니다"
 import_rejected_many = "%{count}권을 추가하지 못했습니다"
@@ -621,10 +649,16 @@ scan_title = "기기에서 책 찾기"
 scan_running = "검사 중…"
 scan_found = "검사 중… %{n}권 발견"
 scan_stop = "중지"
-scan_none = "기기에서 가져올 책을 찾지 못했습니다"
-scan_summary = "%{n}권 발견 — 선택한 뒤 가져오기"
-scan_skipped = "%{n}곳을 읽을 수 없어(권한) 건너뛰었습니다"
-scan_truncated = "책이 많아 일부만 표시했습니다 — 결과가 완전하지 않습니다"
+scan_none = "이 기기에서 가져올 수 있는 책을 찾지 못했습니다"
+scan_search_placeholder = "파일 이름 검색"
+scan_filter = "필터"
+scan_filter_format = "형식"
+scan_filter_size = "크기"
+scan_filter_size_under = "(MB) 미만"
+scan_filter_state = "상태"
+scan_filter_not_on_shelf = "서가에 없음"
+scan_filter_clear = "필터 지우기"
+scan_empty_filtered = "조건에 맞는 책이 없습니다"
 scan_on_shelf = "서가에 있음"
 scan_select_all = "모두 선택"
 scan_clear = "선택 해제"
@@ -855,6 +889,8 @@ deleted_bookmark = "책갈피가 삭제되었습니다"
 
 [font_picker]
 search = "글꼴 검색"
+group.book = "책 글꼴"
+group.system = "시스템 글꼴"
 
 [dictionary]
 words = "%{count}개 단어"

@@ -237,6 +237,34 @@ fn visible_text_nodes(dom: &Dom, root: NodeId) -> Vec<NodeId> {
     out
 }
 
+/// 与 [`TextMap::build`] 完全同一条遍历，但**只拼文本**：不建 `spans`、不克隆每个文本
+/// 节点的 `path`。搜索一次要折一整本书的可见文本，而它一处坐标都不需要 —— 命中偏移
+/// 是在同一份 `text` 上量的，与锚点那把尺仍然是同一个字符串。
+///
+/// 输出必须与 `TextMap::text()` 逐字节相同（两边同一套跳过规则、同一个文档序），
+/// 否则「搜到的位置」与「跳过去选中的字」会错开。等价性由 `search` 那一侧的
+/// `visible_text_only_matches_the_text_map` 钉着。
+pub fn visible_text_only(dom: &Dom, root: NodeId) -> String {
+    let mut out = String::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let node = dom.get(id);
+        match node.kind {
+            NodeKind::Text => out.push_str(&node.text),
+            NodeKind::Element => {
+                if let Some(tag) = dom.tag_name(id)
+                    && ua::is_skipped_tag(tag)
+                {
+                    continue;
+                }
+                stack.extend(node.children.iter().rev().copied());
+            }
+            _ => stack.extend(node.children.iter().rev().copied()),
+        }
+    }
+    out
+}
+
 /// 一条锚点：坐标 + 用来找回坐标的文本指纹。
 ///
 /// `exact` / `prefix` / `suffix` / `path` 都是**冗余**的（都能从 `start..end` 推出来），

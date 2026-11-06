@@ -61,6 +61,15 @@ pub(super) fn painted(
     image
 }
 
+/// 这一格该不该走「低清先顶着、高清到了再换」的两档路径。
+///
+/// 一叠图（同一格里横滑切下一张）**不走**：那一格从来不是空白页，而 `Scene::upcoming`
+/// 已经把左右邻居的全清解好了；先摆一张 360px 的糊图再换清楚，读起来就是「切一下糊一下」。
+/// 其余正文插图仍走预览档 —— 快滑时那一档的作用是不让屏上出现白纸。
+pub(super) fn picture_wants_preview(stack: Option<folio_core::layout::StackMark>) -> bool {
+    stack.is_none()
+}
+
 /// 一格的像素：先画低清预览，高清到了再换。
 ///
 /// 两档**不同时起**：高清那一趟的回开容器 + 栅格化要几秒，先起它会把低清挤在同一批
@@ -361,6 +370,11 @@ pub(super) fn image_child(
     let key = image.image.key.clone();
     // 叠里的图带一点圆角（Reeden 图册那个形状）；单张图仍按原样直角。
     let radius = if image.stack.is_some() { 8.0 } else { 0.0 };
+    // 切图那一笔是**两张图同时画**：旧图往手指那一侧滑走、新图从另一侧进来。
+    // 外层这一格永远钉在排版给的框上并裁掉溢出的部分；里层按 `stack_slide` 平移。
+    // 静态时 slide 为 0，等价于从前那一层，只是多一个不占位的裁切壳。
+    let animated = image.stack_slide.abs() > 0.01 || image.stack_incoming;
+    let slide = if animated { image.stack_slide } else { 0.0 };
     let frame = div()
         .absolute()
         .left(px(image.x))
@@ -370,12 +384,22 @@ pub(super) fn image_child(
         .rounded(px(radius))
         .overflow_hidden()
         .child(
-            img(rendered)
+            div()
                 .absolute()
-                .left(px(ox + px_off))
-                .top(px(oy + py_off))
-                .w(px(w))
-                .h(px(h)),
+                .left(px(slide))
+                .top(px(0.0))
+                .w(px(image.width))
+                .h(px(image.height))
+                .rounded(px(radius))
+                .overflow_hidden()
+                .child(
+                    img(rendered)
+                        .absolute()
+                        .left(px(ox + px_off))
+                        .top(px(oy + py_off))
+                        .w(px(w))
+                        .h(px(h)),
+                ),
         );
     // 脚注标记优先：它是「注」图，不是插图，点它要的是注文而不是放大。
     if let Some(note) = image.footnote {
@@ -395,20 +419,27 @@ pub(super) fn image_child(
     // 角标不是装饰 —— 一叠只占一格，屏上看着就是一张图，不标一下读者不知道
     // 这里还有四张 —— 没有出口，折叠就等于把 8 张压成 1 张。
     let frame = match image.stack {
-        Some(mark) if mark.count > 1 => frame
-            .child(stack_zone(mark, chapter, stack_hits.clone(), frame_no))
-            .child(
-                div()
-                    .id("reader-stack-badge")
-                    .test_support()
-                    .absolute()
-                    .top(px(6.0))
-                    .right(px(6.0))
-                    .px(px(6.0))
-                    .rounded(px(8.0))
-                    .text_xs()
-                    .child(format!("{} / {}", mark.index + 1, mark.count)),
-            ),
+        Some(mark) if mark.count > 1 => {
+            // 命中区两张都登记（同一格、帧内后写的那条胜出），角标只画在
+            // 「正在进来」的那一张上 —— 动画那 180 ms 里不该出现两个 k/n。
+            let frame = frame.child(stack_zone(mark, chapter, stack_hits.clone(), frame_no));
+            if animated && !image.stack_incoming {
+                frame
+            } else {
+                frame.child(
+                    div()
+                        .id("reader-stack-badge")
+                        .test_support()
+                        .absolute()
+                        .top(px(6.0))
+                        .right(px(6.0))
+                        .px(px(6.0))
+                        .rounded(px(8.0))
+                        .text_xs()
+                        .child(format!("{} / {}", mark.index + 1, mark.count)),
+                )
+            }
+        }
         _ => frame,
     };
     match viewer {
@@ -695,4 +726,28 @@ pub(super) fn open_on_tap(
 pub(super) fn viewport_size(window: &Window) -> (f32, f32) {
     let size = window.viewport_size();
     (f32::from(size.width), f32::from(size.height))
+}
+
+#[cfg(test)]
+mod tests {
+    //! 两档路径的判据：哪一类图要「先糊后清」，哪一类直接上全清。
+
+    use super::picture_wants_preview;
+    use folio_core::layout::StackMark;
+
+    #[test]
+    fn a_stack_image_goes_straight_to_the_full_tier() {
+        assert!(
+            !picture_wants_preview(Some(StackMark {
+                id: 7,
+                index: 1,
+                count: 3,
+            })),
+            "叠图横滑切过去要直接清晰，不许先摆低清预览"
+        );
+        assert!(
+            picture_wants_preview(None),
+            "普通插图仍用预览档：快滑时屏上不该是白纸"
+        );
+    }
 }

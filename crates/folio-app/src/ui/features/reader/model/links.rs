@@ -86,6 +86,14 @@ impl ReaderSession {
         self.goto_offset(want.chapter as usize, want.offset, cx);
     }
 
+    /// 收起「回原处」那一格：读者按了 ×。**不跳转**，当前这一页一个字都不动；
+    /// 读者下一次点链接跳出去时会重新记一条。
+    pub(in crate::ui::features::reader) fn dismiss_jump_back(&mut self, cx: &mut Context<Self>) {
+        if self.jump_back.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// 屏幕点 → 命中的那个链接的 `(章号, href)`（不在链接里就是 `None`）。
     fn link_href_at(
         &self,

@@ -32,6 +32,7 @@ mod bookmarks;
 mod books;
 mod collections;
 mod content;
+mod import_log;
 mod passphrases;
 mod reading;
 mod schema;
@@ -43,6 +44,8 @@ mod types;
 mod tests;
 
 pub use books::StaleReason;
+// 导入记录那一列的形状：界面上那张卡与结清时写库那一手共用同一份类型。
+pub use import_log::{IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry};
 // 封面落盘与缩略图都要按「这本副本在哪儿」反推书库根，而书库位置不在 `Store` 上
 // （那是读者确认过的目录）—— 这个函数就是那条反推规则。公开它是因为界面侧也要用：
 // 缩略图缓存目录挂在书库底下，而界面手上只有副本路径。

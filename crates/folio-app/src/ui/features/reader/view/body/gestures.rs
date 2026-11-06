@@ -50,6 +50,8 @@ pub(super) fn touch_follow(reader: WeakEntity<ReaderSession>) -> AnyElement {
                                 session.stack_hit_at(event.position)
                             };
                             session.stack_grab = grab;
+                            // 新起手压掉还没走完的补完动画：这一笔从头算。
+                            session.stack_motion = None;
                             session.stack_dx = 0.0;
                             session.stack_dy = 0.0;
                             if bounds.contains(&event.position) {

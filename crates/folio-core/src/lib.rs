@@ -78,11 +78,12 @@ pub use ingest::import::{
     PathsSource, Registered, Source, UrlSource, backfill_copies, forward, import_from, reindex,
     schedule_reindex, submit_import, sweep_partials,
 };
-pub use ingest::scan::{ScanReport, ScanSource, find};
+pub use ingest::scan::{ScanFilter, ScanReport, ScanSource, find, format_of};
 pub use position::{LOCATOR_FORMAT_VERSION, Locator};
 pub use speech::{Command, Engine, Event};
 pub use store::StaleReason;
 pub use store::{
     ANNOTATION_COLORS, Annotation, AnnotationStyle, BookReading, Collection, DailyReading,
-    ReadingRank, ReadingSession, ReadingSummary, ReadingTotals, ShelfItem, Store,
+    IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry, ReadingRank, ReadingSession, ReadingSummary,
+    ReadingTotals, ShelfItem, Store,
 };

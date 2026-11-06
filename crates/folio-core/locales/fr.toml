@@ -20,6 +20,17 @@
 # **这一门语言用不到的臂照抄 `_other`** —— key 集合一致那条测试要求每一份都有这四行，
 # 宁可重复也不能少一行。
 
+# 听书那一屏：两种面孔、三颗控制键与段位置。
+"listen.cover" = "Couverture"
+"listen.text" = "Manuscrit"
+"listen.prev" = "Phrase précédente"
+"listen.next" = "Phrase suivante"
+"listen.close" = "Fermer"
+"listen.loading" = "Préparation…"
+"listen.position" = "Phrase %{index} / %{total}"
+"listen.engine_preparing" = "Préparation du moteur de synthèse…"
+"listen.engine_unavailable" = "Aucun moteur de synthèse vocale disponible sur cet appareil"
+
 [sidebar]
 import = "Importer un livre"
 account = "Compte"
@@ -67,6 +78,7 @@ toc = "Sommaire"
 "marks.stale" = "⚠️ %{place} · position perdue"
 bookmark = "Marque-page"
 "jump_back.action" = "Revenir"
+"jump_back.close" = "Fermer"
 "undo.action" = "Annuler"
 "undo.bookmark" = "Marque-page supprimé"
 translate = "Traduire"
@@ -584,11 +596,27 @@ search_placeholder = "Rechercher un titre ou un auteur"
 # 无障碍标签与桌面的 tooltip 上。
 more = "Façons d’importer"
 import = "Importer"
-# 导入进行中的那一行读数，摆在命令行与架面之间。后端报的第一条读数还没上来时总数
-# 不知道，那一句不带数字。
-importing = "Importation en cours…"
-importing_of = "Importation %{done}/%{total}"
-# La ligne après un lot : combien de livres ne sont pas arrivés, et pourquoi.
+# 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）的两句：标题说这件事在跑，读数说已完成几本。
+# 后端第一条读数还没上来时总数不知道，那一档只有标题与一条不定进度的 bar，读数不给。
+status_importing = "Importation en cours"
+status_progress = "%{done} sur %{total} importés"
+# 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
+# 数已经在行里了），与「没进来」那几档的复数句子（`reject_*`）各管各的场合。
+record_title = "Historique d’importation"
+status_added = "Terminé"
+status_duplicate = "Déjà sur l’étagère"
+status_needs_password = "Mot de passe requis"
+status_encrypted = "Protégé par DRM"
+status_corrupt = "Le fichier est endommagé"
+status_unsupported = "Format non pris en charge"
+status_unreadable = "Lecture impossible"
+record_open = "Ouvrir"
+record_clear = "Vider"
+record_added_one = "%{count} importé"
+record_added_few = "%{count} importés"
+record_added_many = "%{count} importés"
+record_added_other = "%{count} importés"
+# La carte après un lot, une ligne par motif : combien de livres ne sont pas arrivés, et pourquoi.
 # `_few` / `_many` ne sont jamais choisis (le français n'a que one/other) ;
 # ils répètent `_other` pour que chaque langue porte les mêmes clés.
 import_rejected_one = "%{count} livre n'a pas été importé"
@@ -624,9 +652,15 @@ scan_running = "Analyse en cours…"
 scan_found = "Analyse en cours… %{n} trouvés"
 scan_stop = "Arrêter"
 scan_none = "Aucun livre importable trouvé sur cet appareil"
-scan_summary = "%{n} trouvés — cochez ceux à importer"
-scan_skipped = "%{n} emplacements illisibles (autorisations), ignorés"
-scan_truncated = "Trop de livres — résultat partiel"
+scan_search_placeholder = "Rechercher des noms de fichiers"
+scan_filter = "Filtrer"
+scan_filter_format = "Format"
+scan_filter_size = "Taille"
+scan_filter_size_under = "Moins de (MB)"
+scan_filter_state = "État"
+scan_filter_not_on_shelf = "Pas sur l’étagère"
+scan_filter_clear = "Effacer les filtres"
+scan_empty_filtered = "Aucun livre ne correspond à ces filtres"
 scan_on_shelf = "Déjà sur l’étagère"
 scan_select_all = "Tout cocher"
 scan_clear = "Décocher"
@@ -857,6 +891,8 @@ deleted_bookmark = "Marque-page supprimé"
 
 [font_picker]
 search = "Rechercher une police"
+group.book = "Polices du livre"
+group.system = "Polices du système"
 
 [dictionary]
 words = "%{count} mots"

@@ -17,6 +17,7 @@
 
 pub mod error;
 pub mod file_stem;
+pub mod font_names;
 pub mod font_primary;
 pub mod images;
 pub mod style;

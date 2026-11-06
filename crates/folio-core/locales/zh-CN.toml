@@ -20,6 +20,17 @@
 # **这一门语言用不到的臂照抄 `_other`** —— key 集合一致那条测试要求每一份都有这四行，
 # 宁可重复也不能少一行。
 
+# 听书那一屏：两种面孔、三颗控制键与段位置。
+"listen.cover" = "封面"
+"listen.text" = "文稿"
+"listen.prev" = "上一句"
+"listen.next" = "下一句"
+"listen.close" = "关闭"
+"listen.loading" = "正在准备这一句…"
+"listen.position" = "第 %{index} / %{total} 句"
+"listen.engine_preparing" = "正在准备语音引擎…"
+"listen.engine_unavailable" = "这台设备没有可用的语音引擎"
+
 [sidebar]
 import = "导入书籍"
 account = "账号"
@@ -73,6 +84,7 @@ toc = "目录"
 "marks.stale" = "⚠️ %{place} · 位置已失效"
 bookmark = "书签"
 "jump_back.action" = "回原处"
+"jump_back.close" = "关闭"
 "undo.action" = "撤销"
 "undo.bookmark" = "已删除一枚书签"
 translate = "翻译"
@@ -595,11 +607,27 @@ search_placeholder = "搜索书名或作者"
 # 无障碍标签与桌面的 tooltip 上。
 more = "导入方式"
 import = "导入"
-# 导入进行中的那一行读数，摆在命令行与架面之间。后端报的第一条读数还没上来时总数
-# 不知道，那一句不带数字。
-importing = "导入中…"
-importing_of = "导入中 %{done}/%{total}"
-# 导入结束后那一行「几本没进来、为什么」。中文四臂同文（这一门语言只有一臂）。
+# 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）的两句：标题说这件事在跑，读数说已完成几本。
+# 后端第一条读数还没上来时总数不知道，那一档只有标题与一条不定进度的 bar，读数不给。
+status_importing = "正在导入"
+status_progress = "已完成 %{done} / 共 %{total} 本"
+# 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
+# 数已经在行里了），与「没进来」那几档的复数句子（`reject_*`）各管各的场合。
+record_title = "导入记录"
+status_added = "成功"
+status_duplicate = "已在架上"
+status_needs_password = "要口令"
+status_encrypted = "带 DRM 加密"
+status_corrupt = "文件已损坏"
+status_unsupported = "格式暂不支持"
+status_unreadable = "读不动"
+record_open = "打开"
+record_clear = "清空"
+record_added_one = "成功 %{count}"
+record_added_few = "成功 %{count}"
+record_added_many = "成功 %{count}"
+record_added_other = "成功 %{count}"
+# 导入结束后那一张卡「几本没进来、为什么」，逐类一行。中文四臂同文（这一门语言只有一臂）。
 import_rejected_one = "未导入 %{count} 本"
 import_rejected_few = "未导入 %{count} 本"
 import_rejected_many = "未导入 %{count} 本"
@@ -633,9 +661,15 @@ scan_running = "正在扫描…"
 scan_found = "正在扫描… 已找到 %{n} 本"
 scan_stop = "停止扫描"
 scan_none = "设备里没找到可导入的书"
-scan_summary = "找到 %{n} 本，勾选后导入"
-scan_skipped = "有 %{n} 处读不了（权限），已跳过"
-scan_truncated = "书太多，只列了一部分 —— 结果不完整"
+scan_search_placeholder = "搜索文件名"
+scan_filter = "筛选"
+scan_filter_format = "格式"
+scan_filter_size = "大小"
+scan_filter_size_under = "小于（MB）"
+scan_filter_state = "状态"
+scan_filter_not_on_shelf = "未在书架"
+scan_filter_clear = "清除筛选"
+scan_empty_filtered = "没有符合条件的书"
 scan_on_shelf = "已在书架"
 scan_select_all = "全选"
 scan_clear = "清除"
@@ -872,6 +906,8 @@ deleted_bookmark = "已删除一枚书签"
 
 [font_picker]
 search = "搜索字体"
+group.book = "书籍字体"
+group.system = "系统字体"
 
 [dictionary]
 words = "%{count} 词"

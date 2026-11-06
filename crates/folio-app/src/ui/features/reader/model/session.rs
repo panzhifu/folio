@@ -154,6 +154,37 @@ pub(in crate::ui::features::reader) struct StackHit {
     pub frame: u64,
 }
 
+/// 叠图切图那一笔的动画状态。只活在这一笔与松手后的补完里：
+/// **不进排版、不进 `LayoutKey`、不落库**，页数与行数一个数都不该动。
+#[derive(Clone, Debug)]
+pub(in crate::ui::features::reader) struct StackMotion {
+    pub chapter: usize,
+    pub id: u32,
+    /// 从哪一张滑走 / 滑到哪一张（都是叠内 0 基下标）。
+    pub from: u16,
+    pub to: u16,
+    /// 0 = 还停在 `from`；1 = 已经切到 `to`。
+    pub progress: f32,
+    /// 松手补完的起止与起表时刻。
+    pub settle_from: f32,
+    pub settle_to: f32,
+    pub started: std::time::Instant,
+    pub duration: std::time::Duration,
+    pub settling: bool,
+    /// 这一笔最后是不是真的换了一张。补完到 1 之后据此清掉动画。
+    pub committed: bool,
+}
+
+/// [`StackMotion`] 交给排版/绘制那一层的只读快照。
+#[derive(Clone, Copy, Debug)]
+pub struct StackMotionView {
+    pub chapter: usize,
+    pub id: u32,
+    pub from: u16,
+    pub to: u16,
+    pub progress: f32,
+}
+
 pub struct ReaderSession {
     pub(in crate::ui::features::reader) source: Source,
     /// 上一次同步下来的读者偏好。与 [`ConfigHolder`] 里的不一致就推给排版状态。
@@ -404,6 +435,8 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) stack_dx: f32,
     /// 同一笔的纵向累计：与 `stack_dx` 比大小，决定这一笔是「切图」还是「滚」。
     pub(in crate::ui::features::reader) stack_dy: f32,
+    /// 横滑切图那一笔的位移动画（跟手 → 松手补完）。`None` = 没在动。
+    pub(in crate::ui::features::reader) stack_motion: Option<StackMotion>,
     /// 每张被拖过的图当前的偏移（`key` → `(x, y)`，已夹在 `slack` 以内）。
     ///
     /// 与页面位置无关、也不落库：读者松手之后它就停在那儿，翻页回来还在 —— 这是他刚
@@ -723,6 +756,7 @@ impl ReaderSession {
             stack_hits: Rc::default(),
             stack_grab: None,
             stack_dx: 0.0,
+            stack_motion: None,
             stack_dy: 0.0,
             image_pans: std::collections::HashMap::new(),
             image_hits_frame: 0,
@@ -918,6 +952,7 @@ impl ReaderSession {
             stack_hits: Rc::default(),
             stack_grab: None,
             stack_dx: 0.0,
+            stack_motion: None,
             stack_dy: 0.0,
             image_pans: std::collections::HashMap::new(),
             image_hits_frame: 0,
@@ -1128,6 +1163,8 @@ impl ReaderSession {
         self.close_image_viewer(cx);
         // 图的那一列也按新的那一本重折一次（兜底那一行没有列，折成空）。
         self.rebuild_image_sequence();
+        // 换书就是换了参照系：上一本没走完的切图动画不该挂在这一本上。
+        self.stack_motion = None;
         self.scroll_y = 0.0;
         self.page = 0;
         self.wheel_accum = 0.0;
@@ -1137,9 +1174,9 @@ impl ReaderSession {
         // 章内偏移还是要等第一帧排版做完才能落地。连续模式哪怕偏移是 0 也挂请求：
         // 落点是全局 y，章首未必拼在 0 的位置。
         self.pend_restore((self.mode.is_continuous() || locator.offset > 0).then_some(locator));
-        // 听书：引擎进程级只有一份，这里挂的是事件循环（幂等；探测在引擎线程里做，
-        // 界面线程不被 Android 那至多 500 ms 的初始化阻塞）。
-        self.speech_attach(cx);
+        // 听书引擎**不在这里碰**：开书路径不为 TTS 付一分钱（Android 上那是一根 JNI
+        // 线程 + 至多 500 ms 的服务绑定）。点开听书那一屏（`arm_speech`）才是它该
+        // 出场的时候。
         cx.notify();
     }
 
@@ -1654,6 +1691,128 @@ impl ReaderSession {
             cx.notify();
         }
         moved
+    }
+
+    /// 手指在叠图上横着拖：把这一笔的累计位移折成 0..1 的进度，并记下要滑到哪一张。
+    ///
+    /// 只写会话状态并 `notify`：叠的「第几张」不进排版，动的是**画出来的位置**，不是
+    /// 行盒。到这一叠的头/尾时 `to == from`，不启动动画（松手那一笔照旧交回翻页层）。
+    pub(in crate::ui::features::reader) fn drag_stack(
+        &mut self,
+        hit: &StackHit,
+        progress: f32,
+        delta: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .book()
+            .and_then(|book| book.span_doc(hit.chapter))
+            .map(|doc| doc.stack_current(hit.id))
+            .unwrap_or(0);
+        let last = hit.count.saturating_sub(1) as i32;
+        let to = (current as i32 + delta).clamp(0, last) as u16;
+        if to == current {
+            self.stack_motion = None;
+            return;
+        }
+        self.stack_motion = Some(StackMotion {
+            chapter: hit.chapter,
+            id: hit.id,
+            from: current,
+            to,
+            progress: progress.clamp(0.0, 1.0),
+            settle_from: 0.0,
+            settle_to: 0.0,
+            started: std::time::Instant::now(),
+            duration: std::time::Duration::from_millis(180),
+            settling: false,
+            committed: false,
+        });
+        cx.notify();
+    }
+
+    /// 松手：过阈值就补完到 1（切过去），没过就补完到 0（弹回原图）。
+    pub(in crate::ui::features::reader) fn settle_stack(
+        &mut self,
+        commit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(motion) = self.stack_motion.as_mut() else {
+            return;
+        };
+        motion.settle_from = motion.progress;
+        motion.settle_to = if commit { 1.0 } else { 0.0 };
+        motion.started = std::time::Instant::now();
+        motion.settling = true;
+        motion.committed = commit;
+        cx.notify();
+    }
+
+    /// 每帧推一次补完进度。补完到 1 之后清掉动画 —— 那时 `stack_current` 已经是目标
+    /// 那一张，静态地只画它即可。补完到 0 也清掉（弹回原图）。
+    pub(in crate::ui::features::reader) fn advance_stack_motion(
+        &mut self,
+        now: std::time::Instant,
+        cx: &mut Context<Self>,
+    ) {
+        let done = match self.stack_motion.as_mut() {
+            Some(motion) if motion.settling => {
+                let t = (now.saturating_duration_since(motion.started).as_secs_f32()
+                    / motion.duration.as_secs_f32())
+                .clamp(0.0, 1.0);
+                // ease-out cubic：手指刚松那一下最快，尾上自己放慢。
+                let eased = 1.0 - (1.0 - t).powi(3);
+                motion.progress =
+                    motion.settle_from + (motion.settle_to - motion.settle_from) * eased;
+                t >= 1.0
+            }
+            _ => false,
+        };
+        if done {
+            self.stack_motion = None;
+        }
+        if self.stack_motion.is_some() {
+            cx.notify();
+        }
+    }
+
+    /// 交给排版/绘制层的只读快照。
+    ///
+    /// 目标那张的**全清**还没到手时，进度封顶 0.4：旧图不整张推走，屏上永远至少
+    /// 有一张图，不会在切图那一帧闪出空白。左右邻居的全清预取在那里把它补上。
+    pub fn stack_motion_view(&self, cx: &App) -> Option<StackMotionView> {
+        let motion = self.stack_motion.as_ref()?;
+        let ready = self.stack_target_ready(motion, cx);
+        let progress = if ready {
+            motion.progress
+        } else {
+            motion.progress.min(0.4)
+        };
+        Some(StackMotionView {
+            chapter: motion.chapter,
+            id: motion.id,
+            from: motion.from,
+            to: motion.to,
+            progress,
+        })
+    }
+
+    /// 目标那一张的全清像素到手没有。按排版里那一格的 `href` 问图集，不猜。
+    fn stack_target_ready(&self, motion: &StackMotion, cx: &App) -> bool {
+        let Some(doc) = self.book().and_then(|book| book.span_doc(motion.chapter)) else {
+            return false;
+        };
+        let line = doc.layout().lines.iter().find(|line| {
+            line.stack
+                .is_some_and(|mark| mark.id == motion.id && mark.index == motion.to)
+        });
+        let Some(href) = line.and_then(|line| line.images().next()) else {
+            return false;
+        };
+        let Some(request) = doc.images().decode_request(&href.href) else {
+            return false;
+        };
+        self.atlas.read(cx).ready(&request.key)
     }
 
     /// 把一张图拖 `(dx, dy)`：偏移跟着手指走，夹在 `slack` 以内（图不能被拖出自己的内容）。

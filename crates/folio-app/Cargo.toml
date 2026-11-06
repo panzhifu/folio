@@ -33,7 +33,7 @@ image.workspace = true
 # 仿真翻页那一档的页面网格与 uniform 的纯 CPU 定义：这里只拿数据，不拿 GPU 类型。
 # 它住在 `panzhifu/gpui-folio` 那个 workspace 里，rev 必须跟根
 # `[patch.crates-io]` 那五条同一个数 —— 一份 fork 六个成员，钉成两个 rev 就是两份代码。
-folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "9df6f753841792b73d7357edf480dbb85fb71818" }
+folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "5631b68d91fa09ae2081f6eef366cd484e157947" }
 gpui-kit.workspace = true
 # 曾经有一条 `ely-gpui-component`：全仓库只用它的 `typography::format` 写两个纯函数
 # （千位分组、定小数位），它却独占 78 个包 —— 终端模拟器、LaTeX、Mermaid、QR 解码、
@@ -52,6 +52,9 @@ log.workspace = true
 # 后端那层的 `thiserror` 枚举不需要在这里被认识：`folio_core::Error` 是个标准的
 # `std::error::Error`，`?` 自动把它接进 anyhow 的链，`{err:#}` 于是能一路看到底。
 anyhow.workspace = true
+# 水墨那一档要把主题里一百多个颜色 token 统一去饱和。`ThemeColor` 只有 Serde 一条
+# 批量遍历的路（没有字段迭代口），所以这里拿 `serde_json` 走一趟 Value。
+serde_json.workspace = true
 # 导入作业的事件从 `folio_core::task` 的工作线程搬回界面线程（用它的原因见 workspace 根
 # 那段说明：`std::sync::mpsc` 的 `recv` 只能阻塞，界面线程不能阻塞）。挂在
 # `ui::features::shelf::view` 的导入链上。

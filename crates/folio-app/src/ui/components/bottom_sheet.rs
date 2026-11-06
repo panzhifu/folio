@@ -30,7 +30,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::base::Sheet as BaseSheet;
-use gpui_kit::base::motion::{Spring, spring};
+use gpui_kit::base::motion::{Spring, Transition, spring, transition};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, ThemeStyled as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -121,6 +121,17 @@ pub fn nearest_anchor(shown: f32, anchors: &[f32]) -> usize {
 ///
 /// `peek` 不低于 `expanded` 时不进这一列：两档一样高就成了一档，与其让「最低那档的一半」
 /// 那条判据去猜哪颗是最低的，不如只留一处可停。
+/// 这一帧整张弹层该抬多少。
+///
+/// 夹在 `room`（「顶边不许越过可用区上沿」）之下，且**关掉时恒为 0** —— 目录那一张
+/// 的搜索框在顶部，键盘出来本来就在它上方，不需要这一抬。
+fn ime_lift(ime: f32, room: f32, enabled: bool) -> f32 {
+    if !enabled {
+        return 0.0;
+    }
+    ime.max(0.0).min(room.max(0.0))
+}
+
 pub fn anchors(viewport_height: f32, expanded: f32, peek: Option<f32>) -> Vec<f32> {
     let top = viewport_height * expanded;
     let mut list = vec![top];
@@ -491,6 +502,8 @@ pub struct BottomSheet {
     children: Vec<AnyElement>,
     surface_draggable: bool,
     overlay_closable: bool,
+    /// 键盘弹出时整张弹层要不要往上抬。默认抬（表单底部的输入框靠它露出来）。
+    ime_lift: bool,
     style: StyleRefinement,
 }
 
@@ -506,6 +519,7 @@ impl BottomSheet {
             children: Vec::new(),
             surface_draggable: false,
             overlay_closable: true,
+            ime_lift: true,
             style: StyleRefinement::default(),
         }
     }
@@ -513,6 +527,16 @@ impl BottomSheet {
     /// 展开那一档占视口高的比例，夹在 5%–95%。
     pub fn expanded(mut self, fraction: f32) -> Self {
         self.expanded = fraction.clamp(0.05, 0.95);
+        self
+    }
+
+    /// 键盘弹出时整张弹层往不往上抬。默认抬。
+    ///
+    /// 目录那一张关掉：它的搜索框钉在弹层**顶部**，展开档又占 85% 视口，键盘出来时
+    /// 它本来就在键盘上方；再抬一次只是让整屏内容往上跳一下（读者报的「键盘一弹，
+    /// 字就往上蹦」）。需要露出底部输入框的弹层保持默认。
+    pub fn ime_lift(mut self, enabled: bool) -> Self {
+        self.ime_lift = enabled;
         self
     }
 
@@ -674,7 +698,15 @@ impl RenderOnce for BottomSheet {
         let view_h = f32::from(window.viewport_size().height);
         let ime = crate::ui::host::ime_insets(window, cx).bottom;
         let room = (view_h - height - crate::ui::host::safe_area(window, cx).top).max(0.0);
-        let lift = ime.max(0.0).min(room);
+        // 键盘不是「换了一档」，而是一段手指感觉得到的高度变化：直接赋值整层会跳一下。
+        // 走 180 ms 缓出（与底栏让位那一程同一档），上抬与回落都从当前值接着走。
+        let lift = transition(
+            SharedString::from(format!("{}-ime", self.key)),
+            ime_lift(ime, room, self.ime_lift),
+            Transition::new(Duration::from_millis(180)),
+            window,
+            cx,
+        );
 
         let surface = v_flex()
             .id("bottom-sheet-surface")
@@ -873,7 +905,8 @@ mod tests {
     //! 叫 `test` 的属性宏，glob 会让下面的 `#[test]` 递归展开成它。
 
     use super::{
-        HANDLE_BAND, Stop, anchors, drag_band, follow, nearest_anchor, scrim_alpha, settle,
+        HANDLE_BAND, Stop, anchors, drag_band, follow, ime_lift, nearest_anchor, scrim_alpha,
+        settle,
     };
     use gpui_kit::{Bounds, point, px, size};
 
@@ -978,6 +1011,19 @@ mod tests {
             size: size(px(400.0), px(PEEK)),
         };
         assert_eq!(f32::from(drag_band(peeked, false).origin.y), 330.0);
+    }
+
+    /// 键盘那一段抬高：默认夹在「顶边不许越过可用区」之下；关掉的那一档恒为 0。
+    ///
+    /// 目录那一张关掉它 —— 搜索框在顶部，键盘出来本来就在它上方。这一条钉的就是
+    /// 「关掉之后不许再偷偷抬一点点」。
+    #[test]
+    fn ime_lift_can_be_turned_off() {
+        assert_eq!(ime_lift(120.0, 300.0, true), 120.0);
+        assert_eq!(ime_lift(400.0, 88.0, true), 88.0, "不许把顶边顶出可用区");
+        assert_eq!(ime_lift(-5.0, 300.0, true), 0.0, "负的 inset 当 0");
+        assert_eq!(ime_lift(120.0, 300.0, false), 0.0, "关掉之后不许抬");
+        assert_eq!(ime_lift(120.0, -8.0, false), 0.0);
     }
 }
 

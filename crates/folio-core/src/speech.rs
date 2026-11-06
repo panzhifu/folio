@@ -49,9 +49,15 @@
 //! 界面按「这一格不存在」降级。鸿蒙同属这一档 —— 它的三元组报 linux，被
 //! `not(target_env = "ohos")` 挡在门外，听书要等 NAPI / ArkTS 那层另起后端。
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI8, Ordering};
+
 use async_channel::{Receiver, Sender};
 
 use self::gate::Input;
+
+/// `Ready` 快照的三态：-1 还在探测 / 0 不可用 / 1 可用。
+const READY_UNKNOWN: i8 = -1;
 
 /// 引擎线程收到的命令。语速/音高是**语义值**，换算住在引擎线程（见模块文档）。
 #[derive(Debug, Clone, PartialEq)]
@@ -88,9 +94,26 @@ pub enum Event {
 pub struct Engine {
     input_tx: Sender<Input>,
     event_rx: Receiver<Event>,
+    /// 探测结论的**持久快照**。`Event::Ready` 全进程只发一次，而它的消费者是「当前
+    /// 那个阅读会话」—— 会话一走，那条事件就跟着没了。新会话接手时读这一格，
+    /// 不必赌事件还在不在管道里（真机上赌输了就是「听书按钮有时候不显示」）。
+    ready: Arc<AtomicI8>,
 }
 
 impl Engine {
+    /// 引擎探测完没有。`None` = 还在探测（等 [`Event::Ready`]），`Some(ok)` = 已有结论。
+    pub fn ready(&self) -> Option<bool> {
+        match self.ready.load(Ordering::Relaxed) {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
+        }
+    }
+
+    fn set_ready(&self, ok: bool) {
+        self.ready.store(if ok { 1 } else { 0 }, Ordering::Relaxed);
+    }
+
     /// 发一条命令。引擎线程已经退场（探测失败、进程收尾）时安静丢弃：调用方不需要
     /// 为此分支，可用性只看 [`Event::Ready`]。
     pub fn send(&self, command: Command) {
@@ -105,9 +128,9 @@ impl Engine {
 }
 
 /// 进程级引擎句柄。第一次调用起引擎线程，探测结果经 [`Event::Ready`] **异步**到达
-/// （`Tts::default()` 在引擎线程里调，调用方不被阻塞）；探测失败即进程内缓存，
-/// [`engine`] 此后恒回 `None` —— 重试留给下一次启动，Linux 上先跑起 `speechd`
-/// 再开应用即可。
+/// （`Tts::default()` 在引擎线程里调，调用方不被阻塞）。探测终审失败后句柄留在槽里，
+/// 但下一次调用会把它整个换掉重新拉起 —— 重试留给下一次点开听书屏，Linux 上也可以
+/// 先跑起 `speechd` 再点一次。
 pub fn engine() -> Option<Engine> {
     imp::engine()
 }
@@ -231,35 +254,49 @@ pub mod gate {
     target_os = "android"
 ))]
 mod imp {
-    use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicI8;
+    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::time::Duration;
 
     use async_channel::{Receiver, Sender};
     use tts::Tts;
 
     use super::gate::{self, Action, Callback, Gate};
-    use super::{Engine, Event, Input};
+    use super::{Engine, Event, Input, READY_UNKNOWN};
 
-    static FAILED: AtomicBool = AtomicBool::new(false);
-    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    /// 进程里那份引擎句柄。`None` = 还没起过；`Some(false)` 结论的句柄 = 它的线程已经
+    /// 退出（[`run`] 里 `set_ready(false)` 之后必然 `return`），下一次 [`engine`] 会把
+    /// 它整个换掉 —— 探测失败不再是进程级终审，「点了听书钮」就是重试。
+    static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
+
+    /// 引擎探测的总次数与两次之间的间隔。Google TTS 冷启动 1–3 s 就绪（真机量过
+    /// 服务端建连到回调的间隔），4 次 × 每次窗口 0.5 s + 间隔 0.9 s ≈ 4.7 s 到终审。
+    const PROBE_ATTEMPTS: u32 = 4;
+    const PROBE_RETRY_GAP: Duration = Duration::from_millis(900);
 
     pub(super) fn engine() -> Option<Engine> {
-        if FAILED.load(Ordering::Relaxed) {
-            return None;
+        let mut slot: MutexGuard<Option<Engine>> = ENGINE.lock().ok()?;
+        match &*slot {
+            // 探测在途（`ready == None`）或可用（`Some(true)`）：复用，不双开线程。
+            Some(engine) if engine.ready() != Some(false) => Some(engine.clone()),
+            // 没起过，或上一次探测终审失败（旧线程已退）：重新拉起。
+            _ => {
+                let (input_tx, input_rx) = async_channel::unbounded::<Input>();
+                let (event_tx, event_rx) = async_channel::unbounded::<Event>();
+                let engine = Engine {
+                    input_tx: input_tx.clone(),
+                    event_rx,
+                    ready: Arc::new(AtomicI8::new(READY_UNKNOWN)),
+                };
+                let callback_tx = input_tx;
+                let run_engine = engine.clone();
+                let _ = std::thread::Builder::new()
+                    .name("folio-speech".into())
+                    .spawn(move || run(callback_tx, input_rx, event_tx, run_engine));
+                *slot = Some(engine.clone());
+                Some(engine)
+            }
         }
-        Some(
-            ENGINE
-                .get_or_init(|| {
-                    let (input_tx, input_rx) = async_channel::unbounded::<Input>();
-                    let (event_tx, event_rx) = async_channel::unbounded::<Event>();
-                    let callback_tx = input_tx.clone();
-                    let _ = std::thread::Builder::new()
-                        .name("folio-speech".into())
-                        .spawn(move || run(callback_tx, input_rx, event_tx));
-                    Engine { input_tx, event_rx }
-                })
-                .clone(),
-        )
     }
 
     /// 引擎线程的主循环：建句柄、挂回调、收输入走 `reduce`。
@@ -267,22 +304,48 @@ mod imp {
     /// `Tts::default()` 必须在这一根线程里调：Android 的 `Android::new()` 阻塞至多
     /// 500 ms 并 `attach_current_thread_permanently`（0.26.3 `android.rs:185-220`），
     /// 放到界面线程就是开书卡半秒、外加一根永不归还的线程。
-    fn run(callback_tx: Sender<Input>, input_rx: Receiver<Input>, event_tx: Sender<Event>) {
-        let mut tts = match Tts::default() {
-            Ok(tts) => tts,
-            Err(err) => {
-                tracing::warn!("听书引擎不可用：{err}");
-                FAILED.store(true, Ordering::Relaxed);
-                let _ = event_tx.send_blocking(Event::Ready(false));
-                return;
+    fn run(
+        callback_tx: Sender<Input>,
+        input_rx: Receiver<Input>,
+        event_tx: Sender<Event>,
+        engine: Engine,
+    ) {
+        // tts 0.26.3 给初始化的窗口只有 **500 ms**（`android.rs:206` 的
+        // `MAX_WAIT_TIME`）。Google TTS 的服务进程被系统收走之后，下一次连接是
+        // 冷启动 —— 绑定成功、初始化回调却赶不上这半秒（真机 2026-11-07 实测：
+        // bound → 476 ms 后报 `Operation failed`，服务日志同刻有 DeadObjectException）。
+        // 这只是**这一次**没赶上，不是这台设备没有引擎，所以在这里隔一小段重试几遍。
+        // 真没有引擎的设备（Linux 没有 speechd、探测秒失败）多花的只是几次立刻返回
+        // 的空试；4 次全败按终审处理，圆钮仍在，下一次点开听书屏再来（见 [`engine`]）。
+        let mut tts = None;
+        for attempt in 1..=PROBE_ATTEMPTS {
+            match Tts::default() {
+                Ok(ready) => {
+                    tts = Some(ready);
+                    break;
+                }
+                Err(err) => {
+                    tracing::warn!("听书引擎探测第 {attempt}/{PROBE_ATTEMPTS} 次失败：{err}");
+                    if attempt < PROBE_ATTEMPTS {
+                        std::thread::sleep(PROBE_RETRY_GAP);
+                    }
+                }
             }
+        }
+        let Some(mut tts) = tts else {
+            tracing::warn!("听书引擎不可用：{PROBE_ATTEMPTS} 次探测全部失败");
+            engine.set_ready(false);
+            let _ = event_tx.send_blocking(Event::Ready(false));
+            return;
         };
         if let Err(err) = register_callbacks(&tts, callback_tx) {
             tracing::warn!("听书回调挂不上（{err}），引擎按不可用处理");
-            FAILED.store(true, Ordering::Relaxed);
+            engine.set_ready(false);
             let _ = event_tx.send_blocking(Event::Ready(false));
             return;
         }
+        engine.set_ready(true);
+        tracing::info!("听书引擎可用");
         let _ = event_tx.send_blocking(Event::Ready(true));
 
         let mut gate = Gate::Idle;
@@ -293,6 +356,9 @@ mod imp {
                 apply(&mut tts, action);
             }
             if let Some(event) = event {
+                // 一句一条的低频事件，info 档常开：真机上「念完不推进」这类问题，
+                // logcat 里 Done 来没来一眼可辨。
+                tracing::info!(?event, "听书引擎事件");
                 let _ = event_tx.send_blocking(event);
             }
         }
@@ -341,7 +407,10 @@ mod imp {
 
     fn apply(tts: &mut Tts, action: Action) {
         let result = match action {
-            Action::Speak(text) => tts.speak(text, true).map(|_| ()),
+            Action::Speak(text) => {
+                tracing::info!(chars = text.chars().count(), "听书开口");
+                tts.speak(text, true).map(|_| ())
+            }
             Action::Stop => tts.stop().map(|_| ()),
             // set_rate / set_pitch 成功时回 `Result<&Tts>`（链式调用的形状），收成 ()。
             Action::Rate(value) => tts.set_rate(gate::rate_to_engine(value)).map(|_| ()),
@@ -369,10 +438,36 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    use crate::speech::gate::{Action, Callback, Gate, pitch_to_engine, rate_to_engine, reduce};
-    use crate::speech::{Command, Event};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicI8;
 
-    use super::gate::Input;
+    use crate::speech::gate::{Action, Callback, Gate, pitch_to_engine, rate_to_engine, reduce};
+    use crate::speech::{Command, Engine, Event, Input, READY_UNKNOWN};
+
+    /// 一条不带真引擎的句柄，只为验「结论快照」这一格。
+    fn engine_with_ready(value: i8) -> Engine {
+        let (input_tx, _input_rx) = async_channel::unbounded::<Input>();
+        let (_event_tx, event_rx) = async_channel::unbounded::<Event>();
+        Engine {
+            input_tx,
+            event_rx,
+            ready: Arc::new(AtomicI8::new(value)),
+        }
+    }
+
+    /// 结论是**持久**的：新会话接手时读它，不必赌那条只发一次的 `Ready` 还在不在
+    /// 事件管道里（赌输了就是真机上「听书按钮有时候不显示」）。
+    #[test]
+    fn the_ready_snapshot_outlives_the_single_event() {
+        assert_eq!(engine_with_ready(READY_UNKNOWN).ready(), None, "还在探测");
+        assert_eq!(engine_with_ready(0).ready(), Some(false), "探测失败");
+        assert_eq!(engine_with_ready(1).ready(), Some(true), "探测成功");
+        let engine = engine_with_ready(READY_UNKNOWN);
+        engine.set_ready(true);
+        assert_eq!(engine.clone().ready(), Some(true), "克隆也读同一份结论");
+        engine.set_ready(false);
+        assert_eq!(engine.ready(), Some(false), "结论只写一次，之后不变");
+    }
 
     fn speak(text: &str) -> Input {
         Input::Cmd(Command::Speak {

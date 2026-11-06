@@ -32,6 +32,7 @@ pub(in crate::ui::features::shelf) mod book_info;
 pub(in crate::ui::features::shelf) mod grid;
 pub(in crate::ui::features::shelf) mod scan;
 pub(in crate::ui::features::shelf) mod sheets;
+pub(in crate::ui::features::shelf) mod status;
 pub(in crate::ui::features::shelf) mod toolbar;
 
 use std::collections::{BTreeSet, HashMap};
@@ -46,30 +47,29 @@ use folio_core::{
     UrlSource, submit_import,
 };
 use gpui_kit::base::motion::{Transition, transition};
-use gpui_kit::base::{NavMotion, NavStackState};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::base::{NavMotion, NavStackState, VirtualListScrollHandle};
+use gpui_kit::component::input::InputEvent;
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Sizable as _, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Image, InteractiveElement,
     IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
-    Task, TestSupportExt as _, UniformListScrollHandle, WeakEntity, Window, canvas, div, px,
-    uniform_list,
+    Task, UniformListScrollHandle, WeakEntity, Window, canvas, div, px, uniform_list,
 };
 
 use super::components::book_card::{Card, Enter, GroupCard, TILE_SLOTS};
 use super::components::book_menu;
 use crate::ui::components::{
     BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, SearchDebounce, TopBar,
-    empty_state, muted_label,
+    empty_state,
 };
 use crate::ui::features::opds::{OpdsEvent, OpdsView};
 use crate::ui::foundation::error::{Context as _, report};
 use crate::ui::foundation::file_stem::title_stem;
 use crate::ui::host;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::services::l10n::{book_count, locale, tf, tr};
+use crate::ui::services::l10n::{book_count, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::services::resident;
 use crate::ui::shell::navigation::{self, SizeClass};
@@ -236,6 +236,9 @@ pub struct ShelfView {
     ///
     /// `pub(in crate::ui::features::shelf)` 只为 [`super::book_card`] 那一格：它按需解码，缓存得跟着架面活。
     pub(in crate::ui::features::shelf) covers: HashMap<i64, Option<Arc<Image>>>,
+    /// 上面那份封面是在哪一档下解的（水墨 / 正常）。翻档之后整份丢掉重解：缓存键是
+    /// 书号，里面没有「哪一档」这一格，彩色那几份会原样留着继续画。
+    pub(in crate::ui::features::shelf) covers_ink: bool,
     _search_watch: Subscription,
     /// 导入那条异步链：等选择器 → 把选中的文件交给后端管线 → 收事件直到这批结束。
     /// Task 一 drop 链就断，于是「选了文件但界面已经忘了」；而断在管线跑到一半时，
@@ -244,30 +247,59 @@ pub struct ShelfView {
     _import: Option<Task<()>>,
     /// 正在进行的那批导入的读数：`(已完成, 总数)`。`total == 0` 是不定进度 ——
     /// 刚提交、管线第一条读数还没上来时就是这个样子；`None` 表示没在导入。
-    /// 读数来自后端报的 `Progress` 事件，画在哪一处见 `Render` 那一段。
+    /// 读数来自后端报的 `Progress` 事件，画在哪儿见 [`super::status`]。
     pub(in crate::ui::features::shelf) importing: Option<(u64, u64)>,
     /// 正在进行的这批导入的取消旗标，来自 [`TaskHandle`](folio_core::infra::task::TaskHandle)。
-    /// 读数行旁那颗「取消」按钮置位它；管线在两本书之间看见，已落库的那些是真的
+    /// 状态卡上那颗「取消」按钮置位它；管线在两本书之间看见，已落库的那些是真的
     /// （`Cancelled` 事件来了重查一次架面就有）。
     import_cancel: Option<Cancel>,
-    /// 上一批导入「几本没进来、为什么」那一句，来自
-    /// [`ImportReport::rejection_line`](folio_core::ImportReport::rejection_line)。
-    /// `None` = 没有要交代的失败。
+    /// 正在跑的这一批的记录行，按字节读数长出来（见 [`super::status`]）。
+    import_live: Vec<status::Record>,
+    /// 已经结清的那几批的记录行，新的在前。这一次运行里跑完的那些在内存里，重启之前读过
+    /// 库里那一份接在后面（见 [`super::status::ShelfView::load_import_log`]）。
+    import_history: Vec<status::Record>,
+    /// 库里那份记录读回来了没有。一次就够；库还没装上时保持 `false`，下一帧再来。
+    import_log_loaded: bool,
+    /// 记录那张卡里那条清单的滚动位置，跨帧握着（与架面那片格子同一个理由）。
+    record_scroll: VirtualListScrollHandle,
+    /// 读者从三点菜单里**点名**要看导入记录（历史那一份）。
     ///
-    /// 画在导入读数那一行的**同一个格子**里（见 `Render` 那一段），所以新的一批一提交
-    /// 就被顶掉。它是这一批的交代，不是常驻状态：逐本的名字仍然只在日志里。
-    import_note: Option<SharedString>,
+    /// 与 [`Self::importing`] / [`Self::import_live`] 分开：那两格是「这一批正在跑 / 刚跑完，
+    /// 有话要说」，这一格是「读者自己把历史翻了出来」。库里那份历史是**重启之后才读回来**的，
+    /// 只凭它非空就把卡抬起来 —— 每次开软件都先弹一张昨天的记录，那不是读者要的。
+    pub(in crate::ui::features::shelf) import_records_open: bool,
+    /// 这一次运行里**已经有活干完了**：那一批的逐本着落值得再交代一次。
+    ///
+    /// 与「历史非空」分开：库里那份是重启之后读回来的（只说「以前导过」），这一格只说
+    /// 「刚刚这一批结了」。只有它能让卡自己冒出来；两者的差正是「打开软件先弹昨天的
+    /// 记录」那个 bug。
+    pub(in crate::ui::features::shelf) import_settled: bool,
+    /// 读者自己把导入状态那张卡关掉过（点卡外面、按返回）。
+    ///
+    /// 只在**这一批**有效：提交下一批时清掉，一批跑完发现有几本没进来也清掉 ——
+    /// 那一幕是新信息，值得再说一次。判据与置位都在 [`super::status`]。
+    import_status_dismissed: bool,
     /// 整机扫描那一屏的意图（内容在 [`Self::scan`]）。见 [`Self::group_open`] 那一段为什么分两半。
     pub(in crate::ui::features::shelf) scan_open: bool,
     /// 整机扫描那一屏的状态：正在扫 / 已出清单。`None` = 这一屏没东西可画了。
     /// 面板本体与全部动作在 [`super::scan`]。
     pub(in crate::ui::features::shelf) scan: Option<ScanPhase>,
+    /// 扫描清单顶上那颗搜索框：按**文件名**筛（清单那份在内存里，逐字筛得动，
+    /// 不必像架面那样等安静）。
+    pub(in crate::ui::features::shelf) scan_search: Entity<SearchBox>,
+    /// 扫描清单的筛选条件（格式 / 大小上限 / 在架）。判据在 `folio_core::ScanFilter` 里 ——
+    /// 「哪种文件算哪种格式」与扫描自己那套口径同一处。
+    pub(in crate::ui::features::shelf) scan_filter: folio_core::ScanFilter,
+    /// 大小上限那个输入框（MB）：只留**小于**它的候选。读者的手写的是「5」，
+    /// 条件里存的是字节 —— 换算只在那句订阅里做一次。
+    pub(in crate::ui::features::shelf) scan_size: Entity<InputState>,
+    /// 筛选那一排展开着没有。只是界面上的开合，条件本身在 [`Self::scan_filter`]。
+    pub(in crate::ui::features::shelf) scan_filter_open: bool,
     /// 扫描那条异步链（事件桥）。与 `_import` 同理，要活到整轮结束。
     pub(in crate::ui::features::shelf) _scan: Option<Task<()>>,
-    /// 清单出来之后那一路「一本一本开容器取真书名与封面」的作业。`None` = 没有在跑。
-    /// 关掉那一屏、导入起走、换新一批结果都要停它（见 [`super::scan`] 里那个
-    /// `stop_peeks`）—— 一路不停就是白烧核。
-    pub(in crate::ui::features::shelf) peek: Option<scan::PeekRun>,
+    /// 扫描搜索框与大小输入的订阅：一断，框里打字就不再筛清单。
+    _scan_search_watch: Subscription,
+    _scan_size_watch: Vec<Subscription>,
     /// 自动导入（监听 / 传书）事件的订阅链。这些批次不是这个视图提交的，
     /// 靠共享事件通道流回来 —— 处理与手工导入同一套（读数、重查架面）。
     _auto_import: Option<Task<()>>,
@@ -393,6 +425,24 @@ impl ShelfView {
         let group_sheet = cx.new(BottomSheetState::closed);
         let url_sheet = cx.new(BottomSheetState::closed);
         let scan_sheet = cx.new(BottomSheetState::closed);
+        // 扫描清单的搜索框：与架面顶上那颗分开（一个查库、一个筛内存里的候选）。
+        // 小一档：它坐在卡片里，与旁边那颗筛选按钮同高。
+        let scan_search = cx
+            .new(|cx| SearchBox::new(tr(cx, "shelf.scan_search_placeholder"), window, cx).small());
+        let _scan_search_watch = cx.subscribe(&scan_search, |this, _, event, cx| {
+            let SearchBoxEvent::Change(query) = event;
+            this.set_scan_query(query.clone(), cx);
+        });
+        // 大小上限一个框：打字即筛（清单在内存里），换算 MB → 字节在这里做一次。
+        let scan_size = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr(cx, "shelf.scan_filter_size_under"))
+        });
+        let _scan_size_watch = vec![cx.subscribe(&scan_size, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let text = this.scan_size.read(cx).value();
+                this.set_scan_size(&text, cx);
+            }
+        })];
         let _sheet_watches = vec![
             cx.subscribe(&group_sheet, |this, _, event, _| {
                 if matches!(event, BottomSheetEvent::Dismissed) {
@@ -428,15 +478,27 @@ impl ShelfView {
             group_open: false,
             confirming: false,
             covers: HashMap::new(),
+            covers_ink: false,
             _search_watch,
             _import: None,
             importing: None,
             import_cancel: None,
-            import_note: None,
+            import_live: Vec::new(),
+            import_history: Vec::new(),
+            import_log_loaded: false,
+            record_scroll: VirtualListScrollHandle::new(),
+            import_records_open: false,
+            import_settled: false,
+            import_status_dismissed: false,
             scan: None,
             scan_open: false,
+            scan_search,
+            scan_filter: folio_core::ScanFilter::default(),
+            scan_size,
+            scan_filter_open: false,
+            _scan_search_watch,
+            _scan_size_watch,
             _scan: None,
-            peek: None,
             _auto_import: None,
             url_entry: None,
             url_open: false,
@@ -651,7 +713,7 @@ impl ShelfView {
     ///
     /// 一批还没导完时这一颗按不动：再开一个选择器会把上一条链挤掉（`_import` 只有一格），
     /// 而链断在管线跑到一半时，后台那份拷贝照样跑完、结果却没人登记 —— 书库目录里就多了
-    /// 几本架上看不见的副本。命令行下面那一行读数（见 `Render`）就是「等一下再点」的提示。
+    /// 几本架上看不见的副本。那张导入状态卡（见 [`super::status`]）就是「等一下再点」的提示。
     fn import(&mut self, cx: &mut Context<Self>) {
         if self.importing.is_some() {
             return;
@@ -760,9 +822,8 @@ impl ShelfView {
         let cancel = handle.cancel.clone();
         self.importing = Some((0, 0));
         self.import_cancel = Some(cancel);
-        // 上一批那句话让位给这一批的读数：同一个格子，两句话不该叠着说。
-        self.import_note = None;
-        cx.notify();
+        // 这一批的记录行重开一列，「读者关掉过这张卡」也只到上一批为止：新的批次要重新说话。
+        self.begin_import_records(cx);
 
         // 管线交回的是 `std::sync::mpsc` 的接收端：它只会阻塞读它的那条线程，
         // 而界面线程一阻塞整个窗口就停了。所以把读的那一手整个搬到后台，每条事件
@@ -868,12 +929,13 @@ impl ShelfView {
     /// 后端导入管线的一条事件 → 架面的一次变化。
     fn import_event(&mut self, event: TaskEvent<Vec<ImportOutcome>>, cx: &mut Context<Self>) {
         match event {
-            // 开始那条不带读数：提交的那一行已经把架面标成「导入中」了。
+            // 开始那条不带读数：提交的那一手已经把状态卡标成不定进度了（`super::status`）。
             TaskEvent::Started => {}
             TaskEvent::Progress(progress) => {
                 self.importing = Some((progress.done, progress.total));
-                // 管线附送的文案只进日志：它是 core 里的事实描述，屏幕上的一句话
-                // 要走 locale（见 `shelf.importing_of`），否则英文界面上会冒出中文来。
+                // 管线附送的文案只进日志：它是 core 里的事实描述，屏幕上那张卡说的每一句
+                // 都要走 locale（`shelf.status_importing` 与 `shelf.status_progress`），
+                // 否则英文界面上会冒出中文来。
                 if !progress.message.is_empty() {
                     tracing::info!(
                         "ShelfView: 导入进度 {}/{} —— {}",
@@ -885,9 +947,9 @@ impl ShelfView {
                 cx.notify();
             }
             TaskEvent::Bytes(bytes) => {
-                // 字节级读数（下载 / 拷贝）。本地导入不报这一级；等链接下载
-                // 接上后这里换画「正在传《名字》」的读数。
-                tracing::debug!("ShelfView: 字节进度 {}（{:?}）", bytes.done, bytes.total);
+                // 字节级读数带着书名（`ByteProgress::name`），所以记录行是它喂大的：
+                // 那一本的名字下面那条进度条读的就是这两个数。从前这一手只进日志。
+                self.note_import_bytes(&bytes.name, bytes.done, bytes.total, cx);
             }
             TaskEvent::Finished(Ok(outcomes)) => self.finish_import(outcomes, cx),
             TaskEvent::Finished(Err(err)) => {
@@ -904,6 +966,9 @@ impl ShelfView {
                 tracing::info!("ShelfView: 导入被取消，已登记的那些保留");
                 self.importing = None;
                 self.import_cancel = None;
+                // 在跑那一列没有结论可写（结果表不会来了），所以不留一排「还在传」的行骗人。
+                // 已经进去的那些本来就上了架 —— 那才是取消之后给读者的答案。
+                self.import_live.clear();
                 self.force_reload(cx);
                 self.pending_reload = true;
                 cx.notify();
@@ -945,8 +1010,8 @@ impl ShelfView {
             outcomes.len(),
             report.summary()
         );
-        // 全批成功时这一格清空：上一批的失败不该挂在下一批后面说。
-        self.import_note = report.rejection_line(locale(cx)).map(SharedString::from);
+        // 逐本长成记录行（新的接到历史头上），在跑那一列就此清空。
+        self.finish_import_records(&outcomes, cx);
         // 新入库的书要立刻上架，但搜索词得留着：读者可能正搜到一半。走 `force_reload`
         // 那一手（清空逼它重查，顺带敲一下压着的那一页 —— 监听目录与传书那几本只有根实例
         // 接得到事件，压着的那一页要由这一手带着重查）。
@@ -1619,6 +1684,13 @@ impl ShelfView {
         -f32::from(self.grid_scroll.0.borrow().base_handle.offset().y)
     }
 
+    /// 回归门用：架面这片格子已经往下滚了多远。浮层那张卡里的清单滚动时**不该**带动它，
+    /// 而那条判据只有在这儿量得出来。
+    #[cfg(all(test, not(mobile)))]
+    pub(crate) fn grid_offset_for_test(&self) -> f32 {
+        self.scroll_offset()
+    }
+
     /// 外壳递来的让位投影：顶栏那一行跟着收放。只在状态真变了时敲重画 —— 滚动每帧都
     /// 在报增量，而让位是低频事件。
     pub(crate) fn set_fold(&mut self, folded: bool, cx: &mut Context<Self>) {
@@ -1757,6 +1829,20 @@ impl Render for ShelfView {
             self.pending_reload = false;
             self.force_reload(cx);
         }
+        // 水墨翻档：封面是在 `reload` 那一步解的（`Card` 里存的是解好的 `Image`），
+        // 缓存键里又没有「哪一档」这一格 —— 只清缓存不够，得让这一屏把封面重解一遍。
+        // 走 `force_reload` 这一条现成的重查路：书卡与组卡一起重拼，下一趟 `resolve_cover`
+        // 就会按新的旗子把封面压成灰。
+        let ink = crate::ui::foundation::images::ink_images();
+        if self.covers_ink != ink {
+            self.force_reload(cx);
+            self.covers_ink = ink;
+        }
+        // 库里那份导入记录只读一次（重启之后那张卡还要接着说话）。判据是「库装上了没有」：
+        // 没装上时这一手什么都不做，下一帧再来，慢机器与快机器看到的是同一个结果。
+        if !self.import_log_loaded {
+            self.load_import_log(cx);
+        }
         let render_started = Instant::now();
         // 这一帧的格子流与入场时钟各取一次：两者从前都住在每个可见排的 item 闭包里，
         // 一排一份 —— 滚动时每帧要付「重拼整条流 / 每排各取一次时钟」两笔白账。
@@ -1816,59 +1902,9 @@ impl Render for ShelfView {
         } else {
             0.0
         };
-        // 导入进行中的那一句读数摆在命令行与架面之间：这几秒里架面是不动的，读者要确认
-        // 的是「它还在干活」，而不是又看见一片和点导入之前一模一样的格子。
-        // `total == 0` 是不定进度（刚提交、第一条读数还没上来），那句不带数字。
-        // 旁边一颗「取消」：管线在两本书之间看见旗标，已落库的那些是真的。
-        let status = self.importing.map(|(done, total)| {
-            let text: SharedString = if total == 0 {
-                tr(cx, "shelf.importing")
-            } else {
-                tf(
-                    cx,
-                    "shelf.importing_of",
-                    &[("done", &done), ("total", &total)],
-                )
-                .into()
-            };
-            let entity = cx.entity().clone();
-            let cancel_label = tr(cx, "shelf.cancel_import");
-            h_flex()
-                .id("shelf-importing")
-                // 外壳那扇回归门要按 id 认出这一行画没画出来。非 `test-support` 构建里
-                // 这一层是透明的（`Observed` 原样转交内部元素），真机不多花一个节点。
-                .test_support()
-                .px(px(GUTTER))
-                .pb_1()
-                .gap_2()
-                .child(muted_label(text, cx))
-                .child(
-                    Button::new("shelf-import-cancel")
-                        .ghost()
-                        .small()
-                        .label(cancel_label.clone().to_string())
-                        .accessibility_label(cancel_label)
-                        .on_click(move |_, _, cx| {
-                            entity.update(cx, |this, cx| this.cancel_import(cx))
-                        }),
-                )
-                .into_any_element()
-        });
-        // 没在导入、而上一批有几本没进来时，同一格接着说那一句。不带「取消」那颗：
-        // 事已经过去，这一行只是交代，读者下一次导入或搜索时它就让位。
-        let status = status.or_else(|| {
-            let note = self.import_note.clone()?;
-            Some(
-                div()
-                    .id("shelf-import-note")
-                    // 与上面那一行同一口径：外壳那扇回归门按 id 认这一行画没画出来。
-                    .test_support()
-                    .px(px(GUTTER))
-                    .pb_1()
-                    .child(muted_label(note, cx))
-                    .into_any_element(),
-            )
-        });
+        // 导入这件事的两句话（正在跑的读数 + 取消、上一批「几本没进来、为什么」）不再占
+        // 顶栏与格子之间那一格：它们是同一张状态卡的内容，摆在屏幕正中，见 [`super::status`]。
+        // 从前那样摆，读数每报一次就要把整片架子往下顶一行，而这句话说的事离左上角最远。
         // 那三块「答一句话」的面板：桌面是一张浮层，手机是同一份内容压进底部弹层。
         self.sync_panels(size.is_compact(), cx);
         let mut overlays: Vec<AnyElement> = if size.is_compact() {
@@ -1895,6 +1931,13 @@ impl Render for ShelfView {
             }
             overlays
         };
+        // 导入记录那一张：两端都是屏幕正中那张浮层，所以它不进上面那个档位分支。
+        // 宽要按视口现算 —— 手机上照搬 420 的上限会把右边那两颗钮顶到屏幕外（见
+        // `status::record_width`），那张卡最主要的动作就是那两颗。
+        let viewport = f32::from(window.viewport_size().width);
+        if let Some(card) = self.import_status_popover(viewport, cx) {
+            overlays.push(card);
+        }
         if self.selection_delete_confirm {
             overlays.push(self.selection_delete_popover(cx));
         }
@@ -1905,7 +1948,6 @@ impl Render for ShelfView {
             .relative()
             .size_full()
             .child(top)
-            .children(status)
             .child(self.body(flow, enter, cx, spec, tail))
             .children(overlays)
             // 帧探针：这一格排在最后，绘制回调跑在别的孩子之后，两条回调之间的间隔

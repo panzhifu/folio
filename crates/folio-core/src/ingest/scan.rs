@@ -71,6 +71,92 @@ impl Default for Limits {
     }
 }
 
+/// 候选的扩展名：小写、不带点。没有扩展名（`README`、`.epub` 这种）返回 `None`。
+///
+/// 与界面「名字削掉扩展名」那一步（`split_display_name`）同一个读法：最后一个点后面的
+/// 那一段。多两道形状检查（1–8 位字母数字、至少一个字母）是因为清单里混着 `第1卷.2024`
+/// 这类文件名 —— 把 `2024` 当格式摆进筛选栏，读者看到的是一个不存在的「格式」。
+pub fn format_of(name: &str) -> Option<String> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    if stem.is_empty() || ext.is_empty() || ext.len() > 8 {
+        return None;
+    }
+    if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    // 纯数字不是格式（`2024`、`001`）：真扩展名至少带一个字母（`7z`、`mp3` 也算）。
+    if !ext.chars().any(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(ext.to_ascii_lowercase())
+}
+
+/// 扫描清单的筛选条件：格式 + 大小上限 + 在不在架上 + 关键字。
+///
+/// 判据放在 core 而不是界面：**哪种文件算哪种格式**与扫描自己「什么算一本书」是同一套
+/// 口径（[`format_of`] 与 `split_display_name` 读的是同一个点），写在界面里迟早漂移。
+/// 这里只做**过滤**，不再碰磁盘 —— 清单是扫描已经交上来的，筛一次是内存里走一遍，
+/// 与「重新扫一遍设备」是两件事（后者会为一次输入重新读几千个目录）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScanFilter {
+    /// 要留的扩展名（[`format_of`] 的产物，小写）。空 = 不按格式筛。
+    pub formats: std::collections::BTreeSet<String>,
+    /// 只留**小于**这个字节数的候选。`None` = 不按大小筛。
+    pub under: Option<u64>,
+    /// 关键字：对**文件名**（含扩展名）做不区分大小写的子串匹配。空串 = 不筛。
+    pub query: String,
+    /// `Some(true)` 只留已在架上的，`Some(false)` 只留不在架上的，`None` = 都留。
+    pub shelf: Option<bool>,
+}
+
+impl ScanFilter {
+    /// 一条候选留不留。`on_shelf` 由调用方给 —— 这一层不认识书库。
+    ///
+    /// 三条筛法都是「空 = 不筛」，所以默认值（[`Default`]）留全部，界面上「没有勾任何
+    /// 一格」与「全部勾上」是同一件事。
+    pub fn matches(&self, candidate: &Candidate, on_shelf: bool) -> bool {
+        if self.shelf.is_some_and(|want| want != on_shelf) {
+            return false;
+        }
+        if !self.formats.is_empty() {
+            let Some(format) = format_of(&candidate.name) else {
+                return false;
+            };
+            if !self.formats.contains(&format) {
+                return false;
+            }
+        }
+        if let Some(cap) = self.under {
+            // 大小没报上来的（远端候选、`stat` 失败的）在按大小筛时一律不留：
+            // 「不到 1 MB」里放一条不知道多大的，比少一条更糟。
+            let Some(bytes) = candidate.size else {
+                return false;
+            };
+            if bytes >= cap {
+                return false;
+            }
+        }
+        let query = self.query.trim();
+        if !query.is_empty()
+            && !candidate
+                .name
+                .to_lowercase()
+                .contains(&query.to_lowercase())
+        {
+            return false;
+        }
+        true
+    }
+
+    /// 一条筛法都没勾（等于不筛）。
+    pub fn is_empty(&self) -> bool {
+        self.formats.is_empty()
+            && self.under.is_none()
+            && self.query.trim().is_empty()
+            && self.shelf.is_none()
+    }
+}
+
 /// 走一遍给定的根目录，交出候选清单。多根共享同一份预算与同一张清单。
 ///
 /// `noise_exempt` 是噪音规则的豁免区：`Android/data` 整体没书，但**本应用自己的**
@@ -650,6 +736,111 @@ mod tests {
         let ctx = StageCtx::detached();
         let report = find_with(&[root.to_path_buf()], &[], &[ours], Limits::default(), &ctx);
         assert_eq!(names(&report), vec!["push进来的.epub"]);
+    }
+
+    /// 扩展名那一步：真机上常见的四种文件名形状都要读对，混在名字里的版本号不许
+    /// 冒充格式。
+    #[test]
+    fn the_extension_is_the_last_dot_and_nothing_else() {
+        assert_eq!(super::format_of("基督山伯爵.EPUB").as_deref(), Some("epub"));
+        assert_eq!(super::format_of("book.tar.md").as_deref(), Some("md"));
+        assert_eq!(super::format_of("README"), None, "没有点就没有格式");
+        assert_eq!(
+            super::format_of(".epub"),
+            None,
+            "点开头的是隐藏文件，不是扩展名"
+        );
+        assert_eq!(super::format_of("第1卷."), None, "点后面是空的不算");
+        assert_eq!(
+            super::format_of("第 1 卷.2024"),
+            None,
+            "2024 是版本号，摆进筛选栏就是一个不存在的格式"
+        );
+    }
+
+    fn candidate(name: &str, size: Option<u64>) -> super::Candidate {
+        super::Candidate {
+            origin: crate::Origin::Local(std::path::PathBuf::from("/tmp").join(name)),
+            name: name.to_string(),
+            size,
+        }
+    }
+
+    /// 几种筛法各自管自己那一格，都不设就是全留。
+    #[test]
+    fn the_scan_filter_matches_one_facet_at_a_time() {
+        use super::ScanFilter;
+
+        let epub_big = candidate("三体.epub", Some(5 * 1024 * 1024));
+        let txt_small = candidate("笔记.txt", Some(1024));
+        let no_size = candidate("没报大小.mobi", None);
+
+        let none = ScanFilter::default();
+        assert!(none.is_empty());
+        for c in [&epub_big, &txt_small, &no_size] {
+            assert!(none.matches(c, false), "默认一分都不筛");
+        }
+
+        let mut formats = ScanFilter::default();
+        formats.formats.insert("epub".into());
+        assert!(formats.matches(&epub_big, false));
+        assert!(!formats.matches(&txt_small, false));
+
+        // 上限是**不含**的：恰好等于那一本不留。
+        let under_a_megabyte = ScanFilter {
+            under: Some(1024 * 1024),
+            ..Default::default()
+        };
+        assert!(
+            under_a_megabyte.matches(&txt_small, false),
+            "1 KB 在 1 MB 以内"
+        );
+        assert!(!under_a_megabyte.matches(&epub_big, false));
+        assert!(
+            !under_a_megabyte.matches(&no_size, false),
+            "大小未知的候选在按大小筛时一律不留"
+        );
+        let exact = ScanFilter {
+            under: Some(1024),
+            ..Default::default()
+        };
+        assert!(
+            !exact.matches(&txt_small, false),
+            "恰好等于上限的那一本不算「小于」"
+        );
+
+        let on_shelf = ScanFilter {
+            shelf: Some(true),
+            ..Default::default()
+        };
+        assert!(on_shelf.matches(&epub_big, true));
+        assert!(!on_shelf.matches(&epub_big, false));
+    }
+
+    /// 关键字：不分大小写、只看文件名，几格合起来是「都要满足」。
+    #[test]
+    fn the_scan_filter_joins_its_facets_with_and() {
+        use super::ScanFilter;
+
+        let mut filter = ScanFilter {
+            query: " 三体 ".into(),
+            ..Default::default()
+        };
+        let hit = candidate("三体·黑暗森林.EPUB", Some(2 * 1024 * 1024));
+        let miss = candidate("球状闪电.epub", Some(2 * 1024 * 1024));
+        assert!(filter.matches(&hit, false), "关键字前后的空白要忽略");
+        assert!(!filter.matches(&miss, false));
+
+        filter.formats.insert("epub".into());
+        filter.under = Some(3 * 1024 * 1024);
+        assert!(
+            filter.matches(&hit, false),
+            "各格都满足才留（2 MB 在 3 MB 以内）"
+        );
+        filter.under = Some(1024 * 1024);
+        assert!(!filter.matches(&hit, false), "2 MB 不在 1 MB 以内");
+
+        assert!(!filter.is_empty());
     }
 
     /// 扫描这一类来源交得出「这是扫描」这一个身份，别的立场它说了不算。

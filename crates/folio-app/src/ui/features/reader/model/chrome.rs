@@ -7,7 +7,21 @@
 //! 正文让出的只有干净态那两行小字的高度（[`HEADER_HEIGHT`] / [`FOOTER_HEIGHT`]）。
 
 use folio_core::content::format::css::PageMargins;
+use folio_core::infra::config::{Appearance, Mode, PageTurn};
 use folio_core::layout::fragment::column_width;
+
+/// 这一帧**实际**用哪一档翻页动效。
+///
+/// 水墨那一档把「一张纸在走」的几档（平移 / 上移 / 覆盖 / 折页）落成当场落定，读者
+/// 选的那一格**不写回配置** —— 退出水墨之后原来选的那一档照旧生效。`Scroll` 原样：
+/// 它是摆法（连续滚动），不是翻页动效。
+pub fn effective_turn(appearance: &Appearance) -> PageTurn {
+    if appearance.reading_mode.unwrap_or(appearance.mode) == Mode::Ink {
+        appearance.page_turn.still()
+    } else {
+        appearance.page_turn
+    }
+}
 
 /// 顶栏高（逻辑像素，不含系统状态栏）。
 pub const TOP_BAR_HEIGHT: f32 = 44.0;
@@ -525,7 +539,7 @@ mod tests {
         LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MARGIN_X_RANGE, MARGIN_Y_RANGE, MAX_MEASURE_RANGE,
         MIN_COLUMN_WIDTH, PARAGRAPH_GAP_RANGE, PageMode, TURN_DURATION_RANGE, Zone,
         bands_with_vertical_margins, default_mode, dim_alpha, effective_page_margins,
-        percent_label, reconcile, spread_fits, spread_gap, tween, zone,
+        effective_turn, percent_label, reconcile, spread_fits, spread_gap, tween, zone,
     };
     use folio_core::PageTurn;
     use folio_core::content::format::css::PageMargins;
@@ -879,5 +893,52 @@ mod tests {
             effective_page_margins(999.0, book, 600.0),
             (Reader::MARGIN_Y_MAX, Reader::MARGIN_Y_MAX)
         );
+    }
+
+    /// 水墨只把「一张纸在走」的几档落成当场落定，`Scroll`（连续滚动）与 `None` 原样。
+    ///
+    /// 这一条钉的是**别把摆法也一起停掉**：水墨下读者选着上下滚动时，那一档既是动效
+    /// 也是摆法，落成 `None` 会把他踢回分页 —— 位置还在，翻页方式却变了。
+    #[test]
+    fn ink_stills_paper_turns_but_keeps_scrolling() {
+        use folio_core::infra::config::{Appearance, Mode};
+
+        let mut appearance = Appearance {
+            mode: Mode::Light,
+            page_turn: PageTurn::Curl,
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_turn(&appearance),
+            PageTurn::Curl,
+            "正常档照读者选的走"
+        );
+
+        appearance.mode = Mode::Ink;
+        for turn in [
+            PageTurn::Slide,
+            PageTurn::SlideUp,
+            PageTurn::Cover,
+            PageTurn::Curl,
+        ] {
+            appearance.page_turn = turn;
+            assert_eq!(
+                effective_turn(&appearance),
+                PageTurn::None,
+                "{turn:?} 在墨水下该当场落定"
+            );
+        }
+        appearance.page_turn = PageTurn::Scroll;
+        assert_eq!(
+            effective_turn(&appearance),
+            PageTurn::Scroll,
+            "上下滚动是摆法，墨水不该把它停掉"
+        );
+
+        // 书内单独钉的阅读模式优先于软件全局，与正文那一层的折法同一条。
+        appearance.mode = Mode::Light;
+        appearance.reading_mode = Some(Mode::Ink);
+        appearance.page_turn = PageTurn::Slide;
+        assert_eq!(effective_turn(&appearance), PageTurn::None);
     }
 }

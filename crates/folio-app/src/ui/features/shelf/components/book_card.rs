@@ -250,6 +250,12 @@ impl ShelfView {
         &mut self,
         item: &ShelfItem,
     ) -> Option<Arc<Image>> {
+        // 水墨翻档：上一档解出来的封面整份作废（缓存键里没有「哪一档」这一格）。
+        let ink = crate::ui::foundation::images::ink_images();
+        if self.covers_ink != ink {
+            self.covers.clear();
+            self.covers_ink = ink;
+        }
         if let Some(cached) = self.covers.get(&item.id) {
             return cached.clone();
         }

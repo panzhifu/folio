@@ -42,6 +42,17 @@ pub fn book_count(cx: &App, count: usize) -> String {
     i18n::t_in(locale, &key, &[("count", &count)])
 }
 
+/// 任意一条带复数四臂的文案，`stem` 是那四条臂共同的前缀（`shelf.reject_encrypted` 这样写）。
+///
+/// 与 [`book_count`] 同一条选臂规则，只是句子由调用方给：屏幕上「几本没进来、为什么」那一
+/// 张卡的标题与逐类明细都读 `ImportReport` 的计数，两处都得按语言的复数规则走，不该各记一遍
+/// 「英文有单复数、俄语有三种、中文没有」。数同时塞进模板的 `count`。
+pub fn tplural(cx: &App, stem: &str, count: usize) -> String {
+    let locale = locale(cx);
+    let key = format!("{stem}_{}", locale.plural(count).key_suffix());
+    i18n::t_in(locale, &key, &[("count", &count)])
+}
+
 /// 一段时长的读数，按语言的形状挑句式。
 ///
 /// 数由 `folio_core::duration_parts` 拆，这里只决定说哪一句：整点不提分钟、
@@ -174,7 +185,8 @@ mod tests {
     //! 语言从三份加到九份之后，第二种成了常态，而它**用返回值是查不出来的**（回落也算解开了），
     //! 所以判据是「这门语言自己那份表里有没有这一行」，见 [`keys_in_language`]。
     //!
-    //! 做法是把视图源码里以 `tr`/`tf` 加一个字面量键的那些调用全扫出来逐个问一遍。
+    //! 做法是把视图源码里以 `tr`/`tf` 加一个字面量键的那些调用全扫出来逐个问一遍，
+    //! 词干形式（`tplural` 那一族四条臂共同的前缀）另扫一遍、按四臂各问一遍。
     //! 这一行不能再举出带引号的实际形状：本文件此刻也在被扫的 `src/` 里，注释里出现
     //! needle 就会把它自己抠成一个「查不到的键」，这条测试会红在自己身上。
     //! 扫不到的是**通过变量传进来的键**（`Tab::label_key()` 那种），它们各自的字面量在
@@ -193,21 +205,58 @@ mod tests {
 
     /// 收集 `src/` 下所有 `.rs` 里以字面量出现的文案键。
     fn keys_in_source() -> BTreeSet<String> {
+        literals(&["tr", "tf"])
+    }
+
+    /// 界面里 `tplural` 用到的那些**词干**：每一个当场展开成 `{词干}_{臂}` 四条键去查表。
+    fn stems_in_source() -> BTreeSet<String> {
+        literals(&["tplural"])
+    }
+
+    /// 扫出这些函数名形如「名字 + 左括号 + cx + 逗号 + 一个字面量」的那些字面量。
+    ///
+    /// 每一步之间都允许空白：带参数的调用（`tf` 那一族）会被 rustfmt 拆成多行，按原样连着
+    /// 搜就一格也扫不到 —— 那是静默漏，比扫出错的东西更糟。走变量的那些（`tr(cx, key)`）
+    /// 在「必须是开引号」这一步解不开，跳过。
+    ///
+    /// 函数名在这里拼成前缀，而不是把完整形状写进数组：本文件此刻也在被扫的 `src/` 里，
+    /// 数组里摆出「名字 + 左括号」紧跟一个引号那一串，就会被抠成一个查不到的键，这条测试
+    /// 红在自己身上（模块头那条警告说的正是这件事）。
+    fn literals(calls: &[&str]) -> BTreeSet<String> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         collect_rs(&root, &mut files);
         assert!(files.len() > 10, "扫不到几个源文件说明路径不对：{root:?}");
 
+        /// 跳过一段空白。
+        fn skip_ws(text: &str) -> &str {
+            text.trim_start_matches(char::is_whitespace)
+        }
+
+        /// 从「函数名 + 左括号」之后那一截按上面那条形状走一遍，走通了交出里面的字面量。
+        fn take_key(tail: &str) -> Option<String> {
+            let tail = skip_ws(tail);
+            let tail = tail
+                .strip_prefix("cx")
+                .or_else(|| tail.strip_prefix("_cx"))?;
+            let tail = skip_ws(tail).strip_prefix(',')?;
+            let tail = skip_ws(tail).strip_prefix('"')?;
+            let end = tail.find('"')?;
+            Some(tail[..end].to_string())
+        }
+
         let mut keys = BTreeSet::new();
         for file in files {
             let text = std::fs::read_to_string(&file).unwrap();
-            for needle in ["tr(cx, \"", "tr(_cx, \"", "tf(cx, \""] {
-                let mut rest = text.as_str();
-                while let Some(at) = rest.find(needle) {
-                    let tail = &rest[at + needle.len()..];
-                    let Some(end) = tail.find('"') else { break };
-                    keys.insert(tail[..end].to_string());
-                    rest = &tail[end..];
+            for call in calls {
+                let needle = format!("{call}(");
+                let mut at = 0;
+                while let Some(found) = text[at..].find(&needle) {
+                    let start = at + found + needle.len();
+                    if let Some(key) = take_key(&text[start..]) {
+                        keys.insert(key);
+                    }
+                    at = start;
                 }
             }
         }
@@ -226,6 +275,35 @@ mod tests {
                 out.push(path);
             }
         }
+    }
+
+    /// 界面 `tplural` 用到的每一个词干，四条臂在每一份语言表里都得齐全。
+    ///
+    /// 核心那条 `every_plural_key_has_all_four_arms_in_every_language` 是从**表**这头扫的：
+    /// 表里有 `_one` 就要求另三臂也在。它查不到的是反过来的那一半 —— 界面问了一个表里
+    /// 根本没有的词干（键名写错、改了表没改调用处），屏幕上就原样画出一串键名，
+    /// 而编译与另外几条测试都是绿的。
+    #[test]
+    fn every_plural_stem_used_by_the_ui_has_all_four_arms_in_every_language() {
+        const ARMS: [&str; 4] = ["one", "few", "many", "other"];
+        let stems = stems_in_source();
+        assert!(
+            !stems.is_empty(),
+            "一个词干都没扫到，说明这条测试的形状和用法脱钩了"
+        );
+        let mut broken = String::new();
+        for stem in &stems {
+            for locale in Locale::ALL {
+                let table = keys_in_language(locale.code());
+                for arm in ARMS {
+                    let key = format!("{stem}_{arm}");
+                    if !table.contains(&key) {
+                        let _ = writeln!(broken, "{}  缺 {key}", locale.code());
+                    }
+                }
+            }
+        }
+        assert!(broken.is_empty(), "复数那一组键不齐：\n{broken}");
     }
 
     /// 每一门的分组符与小数点不许是同一个字符。

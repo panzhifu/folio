@@ -16,6 +16,8 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::content::document;
 use crate::content::format::Format;
@@ -218,9 +220,9 @@ impl Batch<'_> {
             if at >= self.candidates.len() {
                 return;
             }
-            let books = self.import_at(at);
+            let (books, duration) = self.import_at(at);
             let mut landed = self.landed.lock().unwrap_or_else(|e| e.into_inner());
-            self.record(&mut landed, at, books);
+            self.record(&mut landed, at, books, duration);
         }
     }
 
@@ -229,7 +231,13 @@ impl Batch<'_> {
     /// 读数按**结清**的数报，不按领号报：并行时领号在前、结清在后，
     /// 用领号数会画出一条会后退的进度。一个包算一格 —— 总数数的是候选，
     /// 不是抽出来的本数，否则一个 900 条目的合集包会把进度条顶过 100%。
-    fn import_at(&self, at: usize) -> Vec<(String, Result<Imported>)> {
+    ///
+    /// 一并交回的是**这一趟**花了多久。一个包算一趟：包里抽出来的那几条记的是同一个数
+    /// —— 逐条各计一次要往 `import_candidate` 里面铺表，而那层现在的返回形状
+    /// （`Vec<(String, Result<Imported>)>`）连不上「哪一段是谁花的」。屏幕上把这一格
+    /// 说成「这个包用了 8.8 秒」是对的，把同一个数说成每条 8.8 秒就不是。
+    fn import_at(&self, at: usize) -> (Vec<(String, Result<Imported>)>, Duration) {
+        let started = Instant::now();
         // 一本把自己那一路弄崩了（来源或 provider 里一句 `unwrap` 就是这个形状）：只让它
         // 自己那一条 Err。**不接这一句整批跟着崩** —— `thread::scope` 结束时会把 scoped
         // 线程的 panic 再传回调用线程（实测：钉 1 路与钉 2 路都整批红），那时候 `landed` 里
@@ -268,9 +276,10 @@ impl Batch<'_> {
                 )]
             }
         };
+        let elapsed = started.elapsed();
         let done = self.done.fetch_add(1, Ordering::Relaxed) as u64 + 1;
         self.ctx.item(done, self.candidates.len() as u64);
-        books
+        (books, elapsed)
     }
 
     /// 把一本的结论记进表里。每条结果顶着自己那个名字（包里的条目名），
@@ -283,6 +292,7 @@ impl Batch<'_> {
         into: &mut Vec<(usize, ImportOutcome)>,
         at: usize,
         books: Vec<(String, Result<Imported>)>,
+        duration: Duration,
     ) {
         for (name, result) in books {
             let mut from = self.candidates[at].clone();
@@ -292,6 +302,7 @@ impl Batch<'_> {
                 ImportOutcome {
                     candidate: from,
                     result,
+                    duration,
                 },
             ));
         }
@@ -320,8 +331,8 @@ impl Batch<'_> {
                 if present.contains(&at) {
                     continue;
                 }
-                let books = self.import_at(at);
-                self.record(&mut rows, at, books);
+                let (books, duration) = self.import_at(at);
+                self.record(&mut rows, at, books, duration);
                 present.insert(at);
             }
         }

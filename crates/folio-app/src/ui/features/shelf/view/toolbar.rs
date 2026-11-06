@@ -1,7 +1,7 @@
 //! 架面顶上那一行：搜索框、三点菜单。
 //!
-//! 三种导入方式（选文件 / URL / 整机扫描）收在三点菜单里，手机上只剩一颗搜索框 ——
-//! 收与不收的判据是窗口档位，见 `columns_for` 与调用点。
+//! 导入的四条来路（选文件 / 链接 / 整机扫描 / OPDS 书源）与「看导入记录」收在三点菜单里，
+//! 手机上只剩一颗搜索框 —— 收与不收的判据是窗口档位，见 `columns_for` 与调用点。
 
 use super::super::components::book_menu;
 use crate::ui::services::l10n::tr;
@@ -68,7 +68,9 @@ impl ShelfView {
     /// 所以两端共用这一颗。
     ///
     /// 菜单项各自把命令派回本视图的既有方法（`import` / `open_url_panel` /
-    /// `start_scan`），门禁照旧：书库位置没确认过先摆确认面板，一批没导完就按不动。
+    /// `start_scan` / `open_opds`），门禁照旧：书库位置没确认过先摆确认面板，一批没导完就
+    /// 按不动。分隔线下面那一颗是 `open_import_records`：它不导东西，只把这张运行里已经
+    /// 报过的那些行翻回屏幕上（无话可说时按不动）。
     /// 菜单每次打开都会重建一遍（builder 是 `Fn`），所以闭包里先 clone 再 move：
     /// 从捕获的句柄里现摘一份，而不是把上次那一份搬走。
     pub(in crate::ui::features::shelf) fn more_button(
@@ -79,11 +81,16 @@ impl ShelfView {
         let url_entity = entity.clone();
         let scan_entity = entity.clone();
         let opds_entity = entity.clone();
+        let record_entity = entity.clone();
         let import_label = tr(cx, "shelf.import");
         let scan_label = tr(cx, "shelf.scan");
         let url_label = tr(cx, "shelf.url_import");
         let opds_label = tr(cx, "shelf.opds");
         let more_label = tr(cx, "shelf.more");
+        let record_label = tr(cx, "shelf.record_title");
+        // 记录那颗与上面四条不是一件事：那四条是**怎么导**，这一颗是**刚才导的那些怎么样了**。
+        // 有没有话可说在这里判一次：无话可说时它按不动，而不是点开一张空卡。
+        let records_wanted = self.import_records_wanted();
         Button::new("shelf-more")
             .ghost()
             .small()
@@ -95,12 +102,22 @@ impl ShelfView {
                 let url_entity = url_entity.clone();
                 let scan_entity = scan_entity.clone();
                 let opds_entity = opds_entity.clone();
+                let record_entity = record_entity.clone();
                 menu.min_w(px(book_menu::MIN_WIDTH))
                     .item(
                         PopupMenuItem::new(import_label.clone())
                             .icon(IconName::Plus)
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |this, cx| this.import(cx))
+                            }),
+                    )
+                    // 扫描紧跟在「导入」下面：这两条说的是同一件事——从这台机器上已有的文件
+                    // 里挑一本进来；网络那两条（链接、OPDS）排在它们之后。
+                    .item(
+                        PopupMenuItem::new(scan_label.clone())
+                            .icon(IconName::ScanSearch)
+                            .on_click(move |_, _, cx| {
+                                scan_entity.update(cx, |this, cx| this.start_scan(cx))
                             }),
                     )
                     .item(
@@ -111,17 +128,21 @@ impl ShelfView {
                             }),
                     )
                     .item(
-                        PopupMenuItem::new(scan_label.clone())
-                            .icon(IconName::ScanSearch)
-                            .on_click(move |_, _, cx| {
-                                scan_entity.update(cx, |this, cx| this.start_scan(cx))
-                            }),
-                    )
-                    .item(
                         PopupMenuItem::new(opds_label.clone())
                             .icon(IconName::BookOpen)
                             .on_click(move |_, window, cx| {
                                 opds_entity.update(cx, |this, cx| this.open_opds(window, cx))
+                            }),
+                    )
+                    // 分隔线以下不是「怎么导」，是「刚才导的那些怎么样了」：两件事不该排在
+                    // 同一口气里。没话可说时这一颗按不动 —— 点开一张空卡比按不动更糟。
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(record_label.clone())
+                            .icon(IconName::ListChecks)
+                            .disabled(!records_wanted)
+                            .on_click(move |_, _, cx| {
+                                record_entity.update(cx, |this, cx| this.open_import_records(cx))
                             }),
                     )
             })

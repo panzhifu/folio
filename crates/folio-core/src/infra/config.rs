@@ -376,6 +376,17 @@ pub enum PageTurn {
 }
 
 impl PageTurn {
+    /// 水墨那一档实际走哪一种动效：任何「一张纸在走」的档都落成**当场落定**。
+    ///
+    /// `Scroll` 与 `None` 原样返回 —— 前者是摆法（连续滚动），不是翻页动效；
+    /// 后者本来就不动。这一问不碰配置，读者选的档位照旧存着，退出水墨就回来。
+    pub fn still(self) -> Self {
+        match self {
+            Self::Scroll | Self::None => self,
+            _ => Self::None,
+        }
+    }
+
     /// 全部档位，按设置界面该出现的顺序。加一档忘了在这里挂，界面上就永远选不到它。
     pub const ALL: &'static [Self] = &[
         Self::Slide,

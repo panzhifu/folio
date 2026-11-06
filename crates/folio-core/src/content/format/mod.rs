@@ -76,6 +76,7 @@ pub mod svg;
 pub mod text;
 pub mod thumb;
 pub mod woff;
+pub mod woff2;
 pub mod xhtml;
 pub(crate) mod zip;
 
@@ -628,16 +629,30 @@ pub fn visible_text(xhtml: &str) -> String {
     text_map(xhtml).text().to_string()
 }
 
+/// 同一条可见文本，但**不建坐标表**：搜索只认字，不认「第 N 个字落在哪个节点」。
+///
+/// 与 [`visible_text`] 逐字节相同时才允许替换 —— 两边多跳过或漏跳过一处，命中偏移
+/// 就会与锚点那把尺错开。这条等价性由 `search::tests` 里那条用例钉着。
+///
+/// 省下的是每个文本节点一次 `path.clone()` 与一张按 DOM 节点数分配的 `spans` 表：
+/// 一本一千多章的书，一趟搜索每章都要付一次。
+pub fn visible_text_only(xhtml: &str) -> String {
+    let dom = crate::content::dom::Dom::parse(xhtml.as_bytes());
+    crate::content::anchor::visible_text_only(&dom, body_of(&dom))
+}
+
 /// 两条路共用的那一次解析：折出这一章的可见文本与它的坐标表。
 fn text_map(xhtml: &str) -> crate::content::anchor::TextMap {
     let dom = crate::content::dom::Dom::parse(xhtml.as_bytes());
-    // 没有 `<body>` 的片段（FB2 / Markdown 的包装产物都带，但裸片段不带）
-    // 就整棵当正文根 —— `TextMap::build` 自己会跳过 `<script>` / `<style>`。
-    let body = dom
-        .elements()
+    crate::content::anchor::TextMap::build(&dom, body_of(&dom))
+}
+
+/// 正文根：有 `<body>` 用 `<body>`，裸片段（FB2 / Markdown 的包装产物、片段本身）
+/// 就整棵当正文 —— `TextMap` 与 `visible_text_only` 自己会跳过 `<script>` / `<style>`。
+fn body_of(dom: &crate::content::dom::Dom) -> crate::content::dom::NodeId {
+    dom.elements()
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))
-        .map_or(dom.document, |(id, _)| id);
-    crate::content::anchor::TextMap::build(&dom, body)
+        .map_or(dom.document, |(id, _)| id)
 }
 
 /// 一章正文在容器里的位置 —— 库里只存这个，不存正文。

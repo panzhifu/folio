@@ -1189,6 +1189,42 @@ fn a_paged_band_is_drawn_without_a_turn(cx: &mut TestAppContext) {
     );
 }
 
+/// 分页那一张纸里，装饰层（作者的底色、边框、背景图）必须铺在**纸的原点**。
+///
+/// 钉的是那条真机病：纸层按块自上而下摆，字形那一层（100% × 100%）先摆，装饰层
+/// 就被排到纸高**之外**（实测 y = 520、纸高 520），再被裁切层剪掉 —— 字还看得见
+/// （字形按绝对坐标自绘，摆哪儿都一样画），标题的底色与边框整块不见。装饰是普通
+/// `div`，所以量它的边界就能分辨「铺在纸上」与「被排到纸外」。
+#[gpui_kit::test]
+fn a_paged_paper_puts_its_decor_layer_at_the_paper_origin(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, handle) = open(
+        cx,
+        &flow(),
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+    );
+    view.update(cx, |v, cx| v.set_mode(PageMode::Paged, cx));
+    settle(cx, handle);
+    let layer = cx
+        .update_window(handle, |_, window, _| {
+            window.try_find("reader-paper-under").map(|e| e.bounds())
+        })
+        .expect("窗口应能渲染")
+        .expect("装饰层该在树里");
+    let (x, y, width) = (
+        f32::from(layer.origin.x),
+        f32::from(layer.origin.y),
+        f32::from(layer.size.width),
+    );
+    assert!(
+        x.abs() < 0.5 && y.abs() < 0.5 && width > 1.0,
+        "装饰层该铺满纸的可见宽、贴着原点（x≈0、y≈0），实得 x={x} y={y} w={width}"
+    );
+}
+
 /// 平移翻页时，每页的读数带跟着**自己那张纸**走：进场页从右侧进来，它的带子
 /// x 应该等于纸的位移，而不是钉在 0。
 #[gpui_kit::test]

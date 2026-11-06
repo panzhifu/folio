@@ -30,6 +30,7 @@ use read_fonts::types::{NameId, Tag};
 use skera::{DEFAULT_DROP_TABLES, DEFAULT_LAYOUT_FEATURES, Plan, SubsetFlags};
 
 use super::measure::is_generic;
+use crate::ui::foundation::font_names::{LatinCoverage, latin_by_family};
 use crate::ui::foundation::font_primary;
 
 /// 进程级「字体注册事件」计数：每成功往文本系统里注册一批字体就 +1。
@@ -59,18 +60,21 @@ pub struct BookFonts {
     revision: u32,
 }
 
-/// 注册成功后设备报回来的一个内部家族名，以及它能不能当 gpui 的 **primary**。
+/// 注册成功后设备报回来的一个内部家族名，以及它有没有拉丁 `m` 的字形。
 ///
-/// 能不能当 primary 的判据只有一个：字体里有没有拉丁 `m` 的字形 —— gpui 的
-/// `CosmicTextSystem::load_family` 会把没有 `m` 的脸从 primary 候选里剔掉
-/// （gpui-pre-wgpu `cosmic_text_system.rs` 里那段 HACK，注释写着编辑器要量 `m` 的宽），
-/// 剔完候选为空时 `resolve_font` 直接 panic。桌面端那一 panic 会被 fontconfig 的回退表
-/// 接住，Android 上 gpui 的全局回退表（`.ZedMono`、Helvetica、Noto Sans…）一个都不存在，
-/// 于是整台进程 SIGABRT —— 2026-10-30《诡秘之主》的 `sy.ttf`（只有 18 个字形：
-/// 几个数字、方括号与十个汉字，没有拉丁 `m`）在 Meizu 20 上就是这么闪退的。
+/// `latin` 从前决定「能不能当 gpui 的 primary」：gpui 的 `CosmicTextSystem::load_family`
+/// 会把没有 `m` 的脸从 primary 候选里剔掉，剔空后 `resolve_font` 直接 panic——桌面被
+/// fontconfig 的回退表接住，Android 上 gpui 的全局回退表一个都不存在，整台进程
+/// SIGABRT（2026-10-30《诡秘之主》的 `sy.ttf`：只有 18 个字形、没有拉丁 `m`，在
+/// Meizu 20 上就是这么闪退的）。那一格随 gpui-folio be92574 删除：过滤器没了，
+/// primary 未覆盖的字符也改走补缺链。
 ///
-/// 判据必须与 gpui 那一句逐字同源（`charmap.map('m') == 0`）：我们放过去的家族它照剔，
-/// 它剔空的那个家族我们不能挑。
+/// `latin` 现在只剩一个消费者：[`font_primary`](crate::ui::foundation::font_primary)
+/// 登记表，供**字体选择器**把 emoji 与符号字体挡在读者可选列表之外（无拉丁的脸不该
+/// 当正文字体的候选）；随书字体当 primary 不再受它管。
+///
+/// 判据仍与 gpui 上游那句同源（`charmap.map('m') == 0`）：登记表记的是同一件事，
+/// 选择器的口径才有据可依。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FaceName {
     pub name: String,
@@ -304,22 +308,19 @@ impl BookFonts {
 
     /// 这个家族名能不能交给 gpui 当 primary。
     ///
-    /// 两条都要：进程登记表里没被标成「没有拉丁 `m`」，以及**这本书自己的表**里同名
-    /// 的脸至少有一张带 `m`（这张表可能是测试直接构造的，没走过注册登记）。
-    /// 名字不在这本书的表里时按「设备字体」处理，由登记表说话。
+    /// **这本书自己的表**里查得到的名字（容器字体与作者点名的设备别名）一律可用：
+    /// gpui 侧的「无拉丁 `m` 不当 primary」过滤器已随 gpui-folio be92574 删除，
+    /// primary 缺的字符（ASCII 与生僻字都在内）由补缺链兜住。名字不在这本书的表里
+    /// （读者偏好、设备随机名）才问进程登记表 —— 那一条现在服务的是字体选择器，
+    /// emoji 与符号字体不该出现在可选列表里。
     pub fn primary_usable(&self, name: &str) -> bool {
-        let mut shipped = false;
-        for face in self.families.values().flatten() {
-            if face.name.eq_ignore_ascii_case(name) {
-                shipped = true;
-                if face.latin {
-                    return true;
-                }
-            }
-        }
-        // 书里同名脸一张带 m 的都没有：不交。名字不在这本书的表里（设备字体）才问
-        // 进程登记表 —— 那条路要拿锁，别让每次排版都走它。
-        !shipped && font_primary::usable(name)
+        let shipped = self
+            .families
+            .values()
+            .flatten()
+            .any(|face| face.name.eq_ignore_ascii_case(name));
+        // 不在表里才走登记表 —— 那条路要拿锁，别让每次排版都走它。
+        shipped || font_primary::usable(name)
     }
 
     /// 只有测试在调（钉「空表读不出别名」那一格），生产这一侧没人问。
@@ -806,6 +807,8 @@ fn register_batch(
     let family_sets = texts.add_fonts_with_families(bytes).ok()?;
     // 字体表真的变宽了：让后续建的表都带上新版本。一批只记一次事件。
     face_registered();
+    // 选择器那份可选名单也变了（书籍字体分组、列表刷新都以它对账）。
+    font_primary::bump_families_revision();
     Some(
         meta.into_iter()
             .zip(coverages)
@@ -821,6 +824,8 @@ fn register_batch(
                 store_names(id, &names);
                 for face in &names {
                     font_primary::note_face(&face.name, face.latin);
+                    // 非子集的名字进「书籍字体」登记表（子集名带标记，函数里自己会拒）。
+                    font_primary::note_book_family(&face.name);
                 }
                 (declared, names)
             })
@@ -830,8 +835,9 @@ fn register_batch(
 
 /// 子集化用的字符集：书的可见字符 + 可见 ASCII。
 ///
-/// ASCII 必须无条件下进去：gpui 的 primary 过滤要求一张脸带 `m`，而「这本书恰好没有
-/// 英文/数字」不代表作者带来的字体要因此失去 primary 资格。
+/// ASCII 无条件下进去，与 primary 资格无关（那道过滤已经不存在）：书的可见字符集
+/// 只有正文出现过的字，字体里真有的拉丁与数字字形若不补进请求集，切出来就丢了——
+/// 而它们恰恰是书里英文与数字该用的那份字形。
 fn charset_with_ascii(charset: &[u32]) -> Vec<u32> {
     let mut out = charset.to_vec();
     out.extend(0x20..=0x7e);
@@ -936,52 +942,6 @@ fn rename_subset_family(bytes: &[u8], tag: u64) -> Option<Vec<u8>> {
     builder.add_table(&name).ok()?;
     builder.copy_missing_tables(font);
     Some(builder.build())
-}
-
-/// 一份字体字节里每个家族名带不带拉丁 `m`。
-///
-/// 名字按 name 表 1（family）与 16（typographic family）的记录找，**任何语言**都算 ——
-/// fontdb 报回来的可能是本地化那一条。一条都对不上时退回「这份字体里有没有任何一张脸
-/// 带 m」：比对失败不该把作者带来的字体整个丢掉，而单脸的字体（真书里的常态）两种问法
-/// 是同一个答案。
-struct LatinCoverage {
-    by_family: HashMap<String, bool>,
-    any: bool,
-}
-
-impl LatinCoverage {
-    fn covers(&self, family: &str) -> bool {
-        self.by_family.get(family).copied().unwrap_or(self.any)
-    }
-}
-
-fn latin_by_family(bytes: &[u8]) -> LatinCoverage {
-    let mut coverage = LatinCoverage {
-        by_family: HashMap::new(),
-        any: false,
-    };
-    let count = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
-    for index in 0..count {
-        let Ok(face) = ttf_parser::Face::parse(bytes, index) else {
-            continue;
-        };
-        let has_m = face.glyph_index('m').is_some();
-        coverage.any |= has_m;
-        for name in face.names() {
-            if !matches!(name.name_id, 1 | 16) {
-                continue;
-            }
-            let Some(text) = name.to_string() else {
-                continue;
-            };
-            coverage
-                .by_family
-                .entry(text)
-                .and_modify(|known| *known |= has_m)
-                .or_insert(has_m);
-        }
-    }
-    coverage
 }
 
 /// 进程级登记表：字体内容身份 → 注册成功后设备新增的家族名（带「能不能当 primary」）。
@@ -1211,7 +1171,7 @@ mod tests {
             !latin_by_family(&bytes).covers("A Family That Is Not In This Font"),
             "名字对不上时退回整份字体：这份里一张带 m 的脸都没有"
         );
-        assert!(!latin_by_family(b"not a font").any, "认不出的字节不 panic");
+        assert!(!latin_by_family(b"not a font").any(), "认不出的字节不 panic");
     }
 
     fn face(href: &str, crc32: u32, raw_len: u64) -> FontBytes {
@@ -1413,7 +1373,7 @@ mod tests {
             );
             let renamed = rename_subset_family(&subset, subset_family_tag(id, hash)).expect("改名");
             let coverage = latin_by_family(&renamed);
-            let names: Vec<String> = coverage.by_family.keys().cloned().collect();
+            let names: Vec<String> = coverage.families().map(str::to_string).collect();
             assert!(
                 names.iter().all(|name| name.contains(SUBSET_MARKER)),
                 "子集家族名必须带唯一后缀：{names:?}"
@@ -1483,13 +1443,13 @@ mod tests {
             // 不带 `m` 的脸 gpui 会整张从 primary 里剔掉（判据见 [`FaceName`]），
             // 所以这一列直接说明「作者带来的这份字体用得上用不上」。
             let coverage = latin_by_family(&face.bytes);
-            let mut names: Vec<String> = coverage.by_family.keys().cloned().collect();
+            let mut names: Vec<String> = coverage.families().map(str::to_string).collect();
             names.sort();
             println!(
                 "  {:<28} {:>9} B  any_m={}  {}{}",
                 face.href,
                 face.bytes.len(),
-                coverage.any,
+                coverage.any(),
                 names
                     .iter()
                     .map(|name| format!("{name}={}", coverage.covers(name)))

@@ -28,7 +28,7 @@
 //! `Window::is_a11y_active()` 为真时跑 —— 没有读屏连着就一个节点都不建，也不为它分配。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -57,7 +57,7 @@ use crate::ui::features::reader::model::page_geometry::{
 use crate::ui::features::reader::model::paging::PrefetchSide;
 use crate::ui::features::reader::model::prefetch;
 use crate::ui::features::reader::model::session::{
-    ImageHit, PageRef, ReaderSession, Source, StackHit, TurnRun,
+    ImageHit, PageRef, ReaderSession, Source, StackHit, StackMotionView, TurnRun,
 };
 use crate::ui::features::reader::model::swipe::{release_easing, release_transition};
 use crate::ui::features::reader::motion::turn_animation;
@@ -455,6 +455,11 @@ struct RenderFrame<'a> {
     capture_front: bool,
     turn: Option<TurnFrame>,
     page_turn: PageTurn,
+    /// 水墨那一档：正文里那些**作者声明**的颜色（文字色、底色、边框、影子）要去饱和。
+    /// 主题色不在这里 —— 换肤那一步已经处理过了。
+    ink: bool,
+    /// 叠图切图那一笔的位移快照（跟手 / 松手补完都在里面）。静态时 `None`。
+    stack_motion: Option<StackMotionView>,
     turn_over: std::time::Duration,
     gap: f32,
     fixed_layout: bool,
@@ -643,7 +648,10 @@ impl Render for ReaderSession {
         let turn = self.turn_frame(window, cx);
         // 章界那一趟起时要抄的档位与时长。在 `self` 被拆成字段借之前采好：`begin_turn` 那种
         // 要整块 `&mut self` 的方法在下面那臂里调不动。
-        let page_turn = ConfigHolder::appearance(cx).page_turn;
+        let configured_turn = ConfigHolder::appearance(cx).page_turn;
+        // 摆法仍按**读者选的那一档**解（水墨不该把连续滚动踢回分页）；进到帧里的
+        // 那一格是实际动效，墨水下已经落成当场落定。
+        let page_turn = chrome::effective_turn(&ConfigHolder::appearance(cx));
         let turn_over = turn_duration(cx);
         let gap = chrome::spread_gap(self.prefs.margin_x);
         // 退档判据与排版必须量同一个版心宽，所以用 `Document` 的那个式子算，不在这里另定一套。
@@ -677,7 +685,7 @@ impl Render for ReaderSession {
         } else {
             self.mode
         };
-        self.adopt_mode(chrome::reconcile(page_turn, wanted, by_width), cx);
+        self.adopt_mode(chrome::reconcile(configured_turn, wanted, by_width), cx);
         let mode = self.mode.effective(usable, gap);
         let columns = mode.columns();
 
@@ -859,7 +867,7 @@ impl Render for ReaderSession {
         let fresh = image_hits_frame.saturating_sub(2);
         image_hits.borrow_mut().retain(|hit| hit.frame >= fresh);
         let image_pans = self.image_pans.clone();
-        // 听书正在念的那一段（哪一章的哪个字符区间）。要在 `font_cache` 的可变借用
+        // 听书正在念的那一句（哪一章的哪个字符区间）。要在 `font_cache` 的可变借用
         // 与 `match &mut self.source` 之前解出来：进了那两道门 `self` 都借不出，
         // 而 `speech_range()` 是个 `&self` 方法。
         let speech_span = self.speech_range();
@@ -875,14 +883,14 @@ impl Render for ReaderSession {
         crate::ui::features::reader::model::image_atlas::set_screen_width(f32::from(
             viewport_size.width,
         ));
-        // 水墨那一档有两处要它：压掉作者声明的底色（`decor::set_ink_paper`），以及把解好的
-        // 像素压成半灰（`image_atlas::set_ink_pixels`）。这里折的是**阅读页
+        // 水墨那一档在这里只推**图片**那一格：解好的像素压成半灰
+        // （`image_atlas::set_ink_pixels`）。作者声明的文字色/底色/边框在
+        // `Scene::build` 里按这一帧的 `ink` 去饱和。这里折的是**阅读页
         // 生效**的那一档：`reading_mode` 是这一本单独设过的浅深，没设过才跟着软件走 ——
         // 与外壳换肤那一句 `themed_appearance` 同一个折法，两处各写一份就会漂。
         let appearance = ConfigHolder::appearance(cx);
         let ink = appearance.reading_mode.unwrap_or(appearance.mode)
             == folio_core::infra::config::Mode::Ink;
-        decor::set_ink_paper(ink);
         // 翻档的那一帧清一次图集：表里存的是**已经解好的像素**，不清就会顶着上一档的
         // 颜色画到那本图离场为止。翻页那几层用的是烘出来的纹理，同一张纸也变了，跟着作废。
         if crate::ui::features::reader::model::image_atlas::set_ink_pixels(ink) {
@@ -934,7 +942,12 @@ impl Render for ReaderSession {
         let mut paper_layers: Vec<AnyElement> = Vec::new();
         // 每页一份的读数带：与纸同一套位移，但不进正文裁切层。
         let mut page_bands: Vec<AnyElement> = Vec::new();
+        // 松手补完那一笔按时间推进：每隔一帧算出新的 progress 并再要一帧，
+        // 不另起定时器（渲染帧本来就在走）。
+        self.advance_stack_motion(std::time::Instant::now(), cx);
+        let stack_motion = self.stack_motion_view(cx);
         let frame = RenderFrame {
+            stack_motion,
             mode,
             viewport_height,
             content_top,
@@ -944,6 +957,7 @@ impl Render for ReaderSession {
             capture_front,
             turn,
             page_turn,
+            ink,
             turn_over,
             gap,
             fixed_layout,
@@ -1320,6 +1334,9 @@ impl Render for ReaderSession {
         // 那几张挤出去（这一条理由从 2026-10-28 起就写在这里，封顶分档之后它对高清仍然成立）。
         // 叠图里「下一张」先预热（见 `Scene::upcoming`）：与下面那条翻页预取同一个图集、
         // 同一条 `prepare`，已经在图集里时它什么都不做。这一条决定横滑切图那一瞬卡不卡。
+        // 叠图邻居已经按**全清**排过了：记下它们的键，下面那条翻页预取就不必再为
+        // 同一张图排一张注定不会被画出来的低清（叠图切过去不走预览档）。
+        let stack_neighbors: HashSet<String> = upcoming.iter().map(|r| r.key.clone()).collect();
         for request in std::mem::take(&mut upcoming) {
             self.atlas
                 .update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
@@ -1342,7 +1359,9 @@ impl Render for ReaderSession {
                 painted_keys.iter().any(|k| k == href)
             });
             if let Some(request) = picked {
-                if let Some(low) = request.preview() {
+                if !stack_neighbors.contains(&request.key)
+                    && let Some(low) = request.preview()
+                {
                     self.atlas
                         .update(cx, |atlas, cx| atlas.prepare(&low, view, cx));
                 }

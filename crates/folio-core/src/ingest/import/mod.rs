@@ -64,10 +64,10 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::infra::error::ImportReject;
 use crate::infra::error::Result;
-use crate::infra::i18n::Locale;
 use crate::infra::task::Priority;
 use crate::infra::task::StageCtx;
 use crate::infra::task::TaskEvent;
@@ -185,10 +185,14 @@ pub enum Imported {
 }
 
 /// 一个候选的结果。`Err` = 这一本坏了，不拖累整批。
+///
+/// `duration` 是跑完**它那一格**花了多久（见 `Batch::import_at`：一个包算一趟，包里那几条
+/// 记同一个数）。交的是时长而不是「8.8s」那样一句话 —— 屏幕上怎么说由界面按 locale 组。
 #[derive(Debug)]
 pub struct ImportOutcome {
     pub candidate: Candidate,
     pub result: Result<Imported>,
+    pub duration: Duration,
 }
 
 /// 一批导入的分类计数。界面上那句「成功 N / 已存在 M / 拒绝 K（按类别）」读它，
@@ -236,7 +240,9 @@ impl ImportReport {
         self.unsupported + self.encrypted + self.needs_password + self.corrupt + self.unreadable
     }
 
-    /// 一句给人看的话（进日志；屏幕上那句是 [`Self::rejection_line`]，按 locale 组）。
+    /// 一句给日志看的话。屏幕上那句「几本没进来、为什么」不在 core 组：那是一张浮层卡，
+    /// 标题说总数、逐类各占一行，各条按语言的复数规则现挑臂
+    /// （`folio_app::ui::features::shelf::view::status`）。
     pub fn summary(&self) -> String {
         format!(
             "成功 {} / 已存在 {} / 拒绝 {}（要口令 {}、不支持 {}、加密 {}、坏包 {}、读不动 {}）",
@@ -250,47 +256,6 @@ impl ImportReport {
             self.unreadable
         )
     }
-
-    /// 屏幕上那一句「有几本没进来、为什么」。全批没有拒绝时是 `None` —— 没事不要说话。
-    ///
-    /// 形状是「总数 · 类别 · 类别」，只摆**非零**的那几格，顺序固定：
-    /// 要口令 → 加密 → 坏包 → 不支持 → 读不动。逐本的名字不在这里（那要在日志里，
-    /// `ShelfView: 导入《名字》失败`），屏幕上读者要的是「几本、为什么」。
-    ///
-    /// 「要口令」排最前是有意的：它是这几格里**唯一读者动手就能救回来**的一档
-    /// （输进去就导入成功），排在最后等于让读者先读完四条「没救」再看到那条有救的。
-    ///
-    /// 五格与 [`Self`] 那五个类别一一对应，**加一类要同时加文案键**：漏一格的后果是
-    /// 这一类书被静默少算，而读者只会看见「少了几本」。
-    pub fn rejection_line(&self, locale: Locale) -> Option<String> {
-        let total = self.rejected();
-        if total == 0 {
-            return None;
-        }
-        let mut line = phrase(locale, "shelf.import_rejected", total);
-        for (key, count) in [
-            ("shelf.reject_needs_password", self.needs_password),
-            ("shelf.reject_encrypted", self.encrypted),
-            ("shelf.reject_corrupt", self.corrupt),
-            ("shelf.reject_unsupported", self.unsupported),
-            ("shelf.reject_unreadable", self.unreadable),
-        ] {
-            if count > 0 {
-                line.push_str(&format!(" · {}", phrase(locale, key, count)));
-            }
-        }
-        Some(line)
-    }
-}
-
-/// 取一头的复数文案：`{key}_{一臂}` 那四条臂按 `Locale::plural` 选一条，数塞进 `count`。
-///
-/// 为什么现拼键名而不是给一个 `count` 参数：`rust_i18n` 4 不做复数，「选哪一臂」这件事
-/// 本来就归 [`Locale::plural`]，而表里的四条臂是 CLDR 的那四类（用不到的臂照抄 `_other`，
-/// 由 `every_plural_key_has_all_four_arms_in_every_language` 钉着）。
-fn phrase(locale: Locale, key: &str, count: usize) -> String {
-    let arm = format!("{key}_{}", locale.plural(count).key_suffix());
-    crate::infra::i18n::t_in(locale, &arm, &[("count", &count)])
 }
 
 /// 把一个来源包成一个后台作业交给 `manager`。返回的 [`TaskHandle`] 就是这批导入的

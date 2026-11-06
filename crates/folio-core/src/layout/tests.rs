@@ -5661,3 +5661,63 @@ fn small_caps_skips_mappings_that_change_the_byte_length() {
         "其余字母仍按 0.8 排（拉丁 0.5 em）"
     );
 }
+
+/// 《斗战狂潮》的章标题（`h2.titlel2std`）必须带着作者的底色与左右边框进装饰表。
+///
+/// 真机报过「标题的底色/边框不渲染」：那份 CSS 里 `.titletoc, .titlel1std, …, .titlel2std`
+/// 写的是 `background-color: #C1CCC0` 与 `border-width: 0 5px 0 20px`。层叠结果对不代表
+/// 画得出来 —— 盒没登记成边框盒、或被零高/内容盒那三条筛子挡掉，装饰表里就没有它。
+///
+/// 真书不入库，文件不在时跳过（与这一层其它真书用例同一条）。
+#[test]
+fn a_real_epub_chapter_heading_keeps_its_background_and_border() {
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/local/斗战狂潮校对版全本.epub");
+    if !path.is_file() {
+        eprintln!("{} 不在，跳过（真书不入库）", path.display());
+        return;
+    }
+    let doc = crate::content::document::open(&path).expect("打开《斗战狂潮》");
+    let rules = RuleSet::parse(&doc.stylesheet(), Origin::Author);
+    let flow = doc.flow().expect("这本书是可重排");
+    let index = (0..flow.chapters.len())
+        .find(|index| {
+            doc.chapter_source(*index)
+                .is_ok_and(|source| source.contains("titlel2std"))
+        })
+        .expect("这本书有带 titlel2std 的章标题");
+
+    let source = doc.chapter_source(index).expect("取那一章正文");
+    let dom = Dom::parse(source.as_bytes());
+    let styles = cascade(&dom, &rules, &ComputedStyle::default(), "OEBPS/");
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions {
+            width: 384.0,
+            light: false,
+            allow_vertical: false,
+            page_height: None,
+            screen_width: None,
+            screen_height: None,
+        },
+        &Mono,
+        &NoImages,
+    );
+
+    let seeds = laid.decor_seeds(&styles);
+    let title = seeds
+        .iter()
+        .find(|seed| seed.background == Some(Color(193, 204, 192, 255)))
+        .unwrap_or_else(|| {
+            panic!(
+                "章标题那块 #C1CCC0 底色没进装饰表；这一章一共 {} 条种子：{seeds:?}",
+                seeds.len()
+            )
+        });
+    assert!(title.border[1].0 > 0.0, "右边框要进表：{title:?}");
+    assert!(title.border[3].0 > 0.0, "左边框要进表：{title:?}");
+}

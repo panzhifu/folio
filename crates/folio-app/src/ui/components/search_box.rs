@@ -38,10 +38,21 @@ use gpui_kit::{
 /// （`TestAppContext::advance_clock` 推不动它），于是那一档**没法有门** —— 配置落盘的
 /// `shell::SAVE_DEBOUNCE` 就是这么一条至今没有门的代码。按帧的话，测试画几帧就是过几帧。
 /// 代价是「停手之后一帧都不画」就不搜：读者正盯着那颗输入框，改动本身就逼出一帧。
-#[derive(Default)]
 pub struct SearchDebounce {
     /// 等着去搜的那个词，与已经安静了几帧。`None` = 没有欠着的搜索。
     pending: Option<(SharedString, u32)>,
+    /// 安静多少帧才去搜。默认是 [`SEARCH_SETTLE_FRAMES`]；书内全文那一趟用更短的一档
+    /// （见 `SearchDebounce::with_settle`）。
+    settle: u32,
+}
+
+impl Default for SearchDebounce {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            settle: SEARCH_SETTLE_FRAMES,
+        }
+    }
 }
 
 /// 安静多少帧才去搜：15 帧约 250 ms，与配置落盘那一档同一量级 —— 再短挡不住一次连击，
@@ -49,6 +60,15 @@ pub struct SearchDebounce {
 pub const SEARCH_SETTLE_FRAMES: u32 = 15;
 
 impl SearchDebounce {
+    /// 换一档安静帧数。给**读的是同一本书内存里那份字**的调用方用（书内全文）：那边
+    /// 每敲一个字要付的是「折一段可见文本 + 找字」，不值得等满书架的 250 ms。
+    pub fn with_settle(frames: u32) -> Self {
+        Self {
+            pending: None,
+            settle: frames.max(1),
+        }
+    }
+
     /// 读者改了词。回 `Some(词)` = 当场就去搜；`None` = 还没到点，调用方只要 `notify`
     /// 让自己再画一帧。
     ///
@@ -65,7 +85,7 @@ impl SearchDebounce {
     /// 每一渲染帧问一次：安静满了就交出该去搜的那个词并清账（没满就继续等）。
     pub fn due(&mut self) -> Option<SharedString> {
         let (word, waited) = self.pending.take()?;
-        if waited + 1 < SEARCH_SETTLE_FRAMES {
+        if waited + 1 < self.settle {
             self.pending = Some((word, waited + 1));
             return None;
         }
@@ -340,6 +360,19 @@ mod tests {
             "到点该交最后一个词，而且只交一次"
         );
         assert_eq!(debounce.due(), None, "同一笔不许重复触发");
+    }
+
+    /// 书内全文那一档用短一点的那一档：同一份字、同一本书，250 ms 的安静期读者是白等的。
+    #[test]
+    fn a_shortened_settle_hands_the_word_over_sooner() {
+        let mut debounce = SearchDebounce::with_settle(2);
+        assert_eq!(debounce.typed("你"), None);
+        assert_eq!(debounce.due(), None, "第一帧还在安静期里");
+        assert_eq!(
+            debounce.due().map(|word| word.to_string()),
+            Some("你".into()),
+            "第二帧该交出去（这一档是 2 帧，不是默认那 15 帧）"
+        );
     }
 
     /// 清空不等：那是「立刻回到整份列表」，而最坏情况也只是多查一次空。
