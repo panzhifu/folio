@@ -133,6 +133,20 @@ pub enum Error {
     /// 读者要做的不是检查网盘权限，而是换一份包或换一个版本。
     #[error("备份包 {path:?} 用不了：{why}")]
     Backup { path: PathBuf, why: String },
+
+    /// 字体这一层的语义错误：清单里没有这个 id、下载下来的字节大小对不上、
+    /// 目录里的文件不是认得的字体。
+    ///
+    /// 单独立一条而不是复用 [`Error::Io`]：与 [`Error::Dictionary`] 同一条理由 ——
+    /// 设置页要按「这一份字体装坏了」提示并让读者删掉重装，而不是把一条路径拼进
+    /// 通用的读盘错误里。
+    #[error("字体 {path:?} 装不上：{why}")]
+    Font {
+        path: PathBuf,
+        why: String,
+        #[source]
+        source: Option<Source>,
+    },
 }
 
 /// 导入拒绝的类别。第四类 `Cancelled` 不在这里：取消由作业层

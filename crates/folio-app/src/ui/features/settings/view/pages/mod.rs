@@ -7,6 +7,7 @@ pub(in crate::ui::features::settings) mod ai;
 pub(in crate::ui::features::settings) mod appearance;
 pub(in crate::ui::features::settings) mod backup;
 pub(in crate::ui::features::settings) mod dictionary;
+pub(in crate::ui::features::settings) mod font_store;
 pub(in crate::ui::features::settings) mod fonts;
 pub(in crate::ui::features::settings) mod layout;
 pub(in crate::ui::features::settings) mod library;

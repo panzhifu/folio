@@ -503,6 +503,10 @@ impl AppShell {
         // 已建好的字体选择器会自己重取名单。桌面在 fontdb 里已经全量扫过，这里直接让路。
         crate::ui::platform::system_fonts::load_all_system_fonts(cx);
 
+        // 读者昨天装的字体今天还要在：配置里点过名的自装字体（下载 / 导入）照清单
+        // 重注册进文本系统（fontdb 的注册是进程级的，见 `platform::user_fonts`）。
+        crate::ui::platform::user_fonts::load_user_fonts(cx);
+
         // 首次启动：书库位置没确认过就先画欢迎页（见 [`welcome`](crate::ui::features::welcome)）。
         // 判据取自配置实体，与「导入要不要拦住」用的是同一条 `is_confirmed()`。
         let welcome = cx.new(WelcomeView::boot);

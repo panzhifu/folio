@@ -1,12 +1,16 @@
-//! 「字体」页：正文家族与字重。
+//! 「字体」页：正文家族与字重，加上读者自己装的字体（下载 / 导入 / 删除）。
 //!
 //! 家族不再是自由文本：列的是**这台设备此刻真注册着的**家族（`TextSystem::all_font_names()`
-//! 现算，含随包字体与打开这本书时注册的内嵌字体）。手打一个不存在的名字不会报错，排版层
-//! 只会静默退回读者的字体 —— 读者以为自己改成功了，这正是表单不该给的那条路。
+//! 现算，含随包字体、打开这本书时注册的内嵌字体与自装字体）。手打一个不存在的名字不会
+//! 报错，排版层只会静默退回读者的字体 —— 读者以为自己改成功了，这正是表单不该给的那条路。
 //!
 //! 字重是三档下拉：档位住在 `Reader::FONT_WEIGHT_PRESETS`，与阅读页那张卡片共用一份。
+//!
+//! 「获取字体」与「已装字体」两组住在 [`font_store`]：清单与动作接 `services::user_fonts`，
+//! 已装列表的真相源是配置 —— 与词典页同一条。
 
 use super::super::*;
+use super::font_store;
 
 /// 一档字重在界面上的名字。档位之间的数（手改配置）按下拉里实际会选中的那一档念，
 /// 判据是 [`Reader::nearest_font_weight`]。
@@ -62,6 +66,13 @@ pub(in crate::ui::features::settings) fn fonts_page(cx: &App) -> Page {
     page(
         tr(cx, "page.fonts"),
         IconName::ALargeSmall,
-        vec![group(tr(cx, "group.family"), vec![family, weight])],
+        vec![
+            group(tr(cx, "group.family"), vec![family, weight]),
+            group(tr(cx, "group.fonts_store"), vec![font_store::store_row()]),
+            group(
+                tr(cx, "group.fonts_installed"),
+                vec![font_store::installed_row()],
+            ),
+        ],
     )
 }

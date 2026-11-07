@@ -738,6 +738,59 @@ pub struct DictionaryEntry {
     pub words: u64,
 }
 
+/// 读者自己装进来的字体（在线下载或本地导入）。
+///
+/// 列表的**真相源是配置**，不是磁盘扫描 —— 与 [`Dictionary`] 同一条：设置页与字体
+/// 选择器读的是同一份，开发机上恰好放了什么不会多出一行。文件落在
+/// [`crate::infra::paths::fonts_dir`] 的 `<id>/<file>`；`family` 是注册进文本系统后
+/// 设备报回来的家族名（不是下载时清单里那个展示名），选择器按它出条目。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Fonts {
+    /// 已安装的字体。
+    pub installed: Vec<FontEntry>,
+}
+
+/// 一份已装字体在配置里的条目。文件本身在 `<fonts 根>/<id>/<file>`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FontEntry {
+    /// 目录名，也是删除操作用的键。
+    pub id: String,
+    /// 注册后设备报回来的家族名；空表示这份还没注册成功过（重启前没有家族名）。
+    pub family: String,
+    /// 目录里的字体文件名。
+    pub file: String,
+    /// 字节数；设置页展示与占用统计用。
+    pub size_bytes: u64,
+}
+
+impl Fonts {
+    pub fn normalized(mut self) -> Self {
+        let mut seen = BTreeSet::new();
+        let mut installed = Vec::with_capacity(self.installed.len());
+        for mut entry in self.installed {
+            entry.id = entry.id.trim().to_string();
+            entry.family = entry.family.trim().to_string();
+            entry.file = entry.file.trim().to_string();
+            if entry.id.is_empty()
+                || entry.file.is_empty()
+                || !seen.insert(entry.id.clone())
+            {
+                continue;
+            }
+            installed.push(entry);
+        }
+        self.installed = installed;
+        self
+    }
+
+    /// 这一份现在装着吗（按 id）。
+    pub fn has(&self, id: &str) -> bool {
+        self.installed.iter().any(|entry| entry.id == id)
+    }
+}
+
 impl Dictionary {
     pub fn normalized(mut self) -> Self {
         self.dir = self.dir.trim().to_string();
@@ -1649,6 +1702,8 @@ pub struct Config {
     pub translation: Translation,
     pub ai: Ai,
     pub dictionary: Dictionary,
+    /// 读者自己装进来的字体（下载或导入），见 [`Fonts`]。
+    pub fonts: Fonts,
     pub backup: Backup,
     pub sync: Sync,
     pub account: Account,
@@ -1672,6 +1727,7 @@ impl Default for Config {
             translation: Translation::default(),
             ai: Ai::default(),
             dictionary: Dictionary::default(),
+            fonts: Fonts::default(),
             backup: Backup::default(),
             sync: Sync::default(),
             account: Account::default(),
@@ -1696,6 +1752,7 @@ impl Config {
         self.translation = self.translation.normalized();
         self.ai = self.ai.normalized();
         self.dictionary = self.dictionary.normalized();
+        self.fonts = self.fonts.normalized();
         self.sync = self.sync.normalized();
         self.account = self.account.normalized();
         self.opds = self.opds.normalized();

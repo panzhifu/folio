@@ -1,13 +1,15 @@
-//! 系统字体选择器：一个可搜索、分两组（书籍字体 / 系统字体）的家族下拉。
+//! 系统字体选择器：一个可搜索、分三组（我的字体 / 书籍字体 / 系统字体）的家族下拉。
 //!
 //! 它只回答「这台设备此刻注册了哪些家族」。列表在建实体那一刻取一次
 //! （`TextSystem::all_font_names()` 枚举整张字体表、排序、去重，不是每帧做得起的活），
 //! 之后由 `Combobox` 自己的搜索框过滤。字体表变宽（开书注册内嵌字体、移动端系统字体
-//! 扫描完成，见 `platform::system_fonts`）时由 `font_primary::families_revision` 对账，
-//! 版本变了就在下一次渲染里重取名单、重建分组 —— 已建的实体不必等重建。
+//! 扫描完成、读者装上自装字体，见 `platform::system_fonts` 与 `platform::user_fonts`）
+//! 时由 `font_primary::families_revision` 对账，版本变了就在下一次渲染里重取名单、
+//! 重建分组 —— 已建的实体不必等重建。
 //!
-//! 分组：随书注册进进程的家族进「书籍字体」（`font_primary::is_book_family`），其余是
-//! 「系统字体」；书籍组为空时整组不出现，那时它与一个普通下拉无异。当前值不在表里时
+//! 分组：读者自己装（下载 / 导入）的家族进「我的字体」（`font_primary::is_user_family`，
+//! 排最前 —— 那是读者亲手挑的），随书注册的进「书籍字体」（`font_primary::is_book_family`），
+//! 其余是「系统字体」；空组不出现，全空时它与一个普通下拉无异。当前值不在表里时
 //! 补进它所属的那组第一项 —— 配置里手写了一个这台机器没有的名字时，触发器上仍要
 //! 看得见它，而不是显示成一个空白下拉。
 //!
@@ -56,6 +58,7 @@ impl FontPicker {
         let (groups, families) = font_groups(
             font_primary::usable_names(cx.text_system().all_font_names()),
             &current,
+            &l10n::tr(cx, "font_picker.group.mine"),
             &l10n::tr(cx, "font_picker.group.book"),
             &l10n::tr(cx, "font_picker.group.system"),
         );
@@ -92,6 +95,7 @@ impl FontPicker {
         let (groups, families) = font_groups(
             font_primary::usable_names(cx.text_system().all_font_names()),
             current,
+            &l10n::tr(cx, "font_picker.group.mine"),
             &l10n::tr(cx, "font_picker.group.book"),
             &l10n::tr(cx, "font_picker.group.system"),
         );
@@ -102,30 +106,38 @@ impl FontPicker {
     }
 }
 
-/// 分组：随书注册的进「书籍字体」（排在前面），其余进「系统字体」；空组不出现。
-/// 当前值不在表里时补进它所属的那组第一项 —— 分组判据同为 [`font_primary::is_book_family`]。
+/// 分组：读者自装的进「我的字体」（排最前 —— 那是读者亲手挑的），随书注册的进
+/// 「书籍字体」，其余进「系统字体」；空组不出现。当前值不在表里时补进它所属的那组
+/// 第一项 —— 分组判据同 `font_primary` 的三张登记表。
 ///
 /// 交回 `(分组, 平打名单)`：平打名单给选中同步判「在不在表里」用，顺序与分组一致。
 fn font_groups(
     installed: Vec<String>,
     current: &str,
+    mine_title: &str,
     book_title: &str,
     system_title: &str,
 ) -> (Vec<SearchableGroup<String>>, Vec<String>) {
+    let mut mine = Vec::new();
     let mut book = Vec::new();
     let mut system = Vec::new();
     for name in installed {
-        if font_primary::is_book_family(&name) {
+        if font_primary::is_user_family(&name) {
+            mine.push(name);
+        } else if font_primary::is_book_family(&name) {
             book.push(name);
         } else {
             system.push(name);
         }
     }
-    let mut flat = Vec::with_capacity(book.len() + system.len() + 1);
+    let mut flat = Vec::with_capacity(mine.len() + book.len() + system.len() + 1);
+    flat.extend(mine.iter().cloned());
     flat.extend(book.iter().cloned());
     flat.extend(system.iter().cloned());
     if !current.trim().is_empty() && !flat.iter().any(|name| name == current) {
-        let group = if font_primary::is_book_family(current) {
+        let group = if font_primary::is_user_family(current) {
+            &mut mine
+        } else if font_primary::is_book_family(current) {
             &mut book
         } else {
             &mut system
@@ -134,6 +146,9 @@ fn font_groups(
         flat.insert(0, current.to_string());
     }
     let mut groups = Vec::new();
+    if !mine.is_empty() {
+        groups.push(SearchableGroup::new(mine_title).items(mine));
+    }
     if !book.is_empty() {
         groups.push(SearchableGroup::new(book_title).items(book));
     }
@@ -169,39 +184,45 @@ impl Render for FontPicker {
 #[cfg(test)]
 mod tests {
     use super::font_groups;
-    use crate::ui::foundation::font_primary::note_book_family;
+    use crate::ui::foundation::font_primary::{note_book_family, note_user_family};
 
-    /// 书籍组在前、系统组在后；书籍组为空时整组不出现（与一个普通下拉无异）。
-    /// 组内保持 `all_font_names()` 递进来的排序。
+    /// 我的组在最前、书籍组其次、系统组最后；空组不出现（没有自装与随书字体时，
+    /// 与一个普通下拉无异）。组内保持 `all_font_names()` 递进来的排序。
     #[test]
     fn a_registered_book_font_gets_its_own_group_on_top() {
-        // 名字取只在本测试里用的串，避免与并行测试互踩登记表。
+        // 名字取只在本测试里用的串，避免与并行测试互相影响。
         note_book_family("Folio Test Picker Book Serif");
+        note_user_family("Folio Test Picker Mine Serif");
 
         let (groups, flat) = font_groups(
             vec![
                 "LXGW WenKai".to_string(),
+                "Folio Test Picker Mine Serif".to_string(),
                 "Folio Test Picker Book Serif".to_string(),
                 "Noto Serif".to_string(),
             ],
             "LXGW WenKai",
+            "我的字体",
             "书籍字体",
             "系统字体",
         );
-        assert_eq!(groups.len(), 2, "书籍组与系统组都在场");
-        assert_eq!(groups[0].title, "书籍字体");
-        assert_eq!(
-            groups[0].items,
-            vec!["Folio Test Picker Book Serif".to_string()]
-        );
-        assert_eq!(groups[1].title, "系统字体");
+        assert_eq!(groups.len(), 3, "三组都在场");
+        assert_eq!(groups[0].title, "我的字体");
+        assert_eq!(groups[0].items, vec!["Folio Test Picker Mine Serif"]);
+        assert_eq!(groups[1].title, "书籍字体");
         assert_eq!(
             groups[1].items,
+            vec!["Folio Test Picker Book Serif".to_string()]
+        );
+        assert_eq!(groups[2].title, "系统字体");
+        assert_eq!(
+            groups[2].items,
             vec!["LXGW WenKai".to_string(), "Noto Serif".to_string()]
         );
         assert_eq!(
             flat,
             vec![
+                "Folio Test Picker Mine Serif".to_string(),
                 "Folio Test Picker Book Serif".to_string(),
                 "LXGW WenKai".to_string(),
                 "Noto Serif".to_string(),
@@ -212,20 +233,27 @@ mod tests {
         let (groups, _) = font_groups(
             vec!["Noto Serif".to_string()],
             "Noto Serif",
+            "我的字体",
             "书籍字体",
             "系统字体",
         );
-        assert_eq!(groups.len(), 1, "没有随书字体时只剩系统组");
+        assert_eq!(groups.len(), 1, "没有自装与随书字体时只剩系统组");
         assert_eq!(groups[0].title, "系统字体");
     }
 
-    /// 当前值不在表里时补进它所属那组的第一项：普通名字进系统组，随书名字进书籍组。
-    /// 配置里手写了一个这台机器没有的名字时，触发器不能是空白下拉。
+    /// 当前值不在表里时补进它所属那组的第一项：普通名字进系统组，随书名字进书籍组，
+    /// 自装名字进我的组。配置里手写了一个这台机器没有的名字时，触发器不能是空白下拉。
     #[test]
     fn a_current_font_missing_from_the_device_stays_visible() {
         let installed = vec!["Noto Serif".to_string(), "LXGW WenKai".to_string()];
 
-        let (groups, flat) = font_groups(installed.clone(), "Book Body", "书籍字体", "系统字体");
+        let (groups, flat) = font_groups(
+            installed.clone(),
+            "Book Body",
+            "我的字体",
+            "书籍字体",
+            "系统字体",
+        );
         assert_eq!(
             flat,
             vec![
@@ -234,24 +262,51 @@ mod tests {
                 "LXGW WenKai".to_string(),
             ]
         );
-        assert_eq!(groups[0].title, "系统字体", "Book Body 不是随书注册的");
-        assert_eq!(groups[0].items[0], "Book Body");
+        assert_eq!(
+            groups[groups.len() - 1].title,
+            "系统字体",
+            "Book Body 既不是自装也不是随书的"
+        );
+        assert_eq!(groups[groups.len() - 1].items[0], "Book Body");
 
         note_book_family("Folio Test Picker Missing Book Face");
         let (groups, flat) = font_groups(
             installed.clone(),
             "Folio Test Picker Missing Book Face",
+            "我的字体",
             "书籍字体",
             "系统字体",
         );
-        assert_eq!(groups[0].title, "书籍字体", "随书名字补进书籍组第一项");
+        assert_eq!(
+            groups[0].title,
+            "书籍字体",
+            "随书名字补进书籍组第一项"
+        );
         assert_eq!(groups[0].items[0], "Folio Test Picker Missing Book Face");
         assert_eq!(flat[0], "Folio Test Picker Missing Book Face");
 
-        let (_, flat) = font_groups(installed.clone(), "Noto Serif", "书籍字体", "系统字体");
+        note_user_family("Folio Test Picker Missing Mine Face");
+        let (groups, flat) = font_groups(
+            installed.clone(),
+            "Folio Test Picker Missing Mine Face",
+            "我的字体",
+            "书籍字体",
+            "系统字体",
+        );
+        assert_eq!(groups[0].title, "我的字体", "自装名字补进我的组第一项");
+        assert_eq!(groups[0].items[0], "Folio Test Picker Missing Mine Face");
+        assert_eq!(flat[0], "Folio Test Picker Missing Mine Face");
+
+        let (_, flat) = font_groups(
+            installed.clone(),
+            "Noto Serif",
+            "我的字体",
+            "书籍字体",
+            "系统字体",
+        );
         assert_eq!(flat, installed, "已经在表里就不重复");
 
-        let (_, flat) = font_groups(installed, "  ", "书籍字体", "系统字体");
+        let (_, flat) = font_groups(installed, "  ", "我的字体", "书籍字体", "系统字体");
         assert_eq!(flat.len(), 2, "空值不补一项空白");
     }
 }

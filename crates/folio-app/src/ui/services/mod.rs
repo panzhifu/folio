@@ -21,4 +21,5 @@ pub mod storage;
 pub mod sync;
 pub mod transfer;
 pub mod update;
+pub mod user_fonts;
 pub mod watch;

@@ -27,6 +27,7 @@ pub mod account;
 pub mod backup;
 pub mod content;
 pub mod dict;
+pub mod fonts;
 pub mod group;
 pub mod infra;
 pub mod ingest;
@@ -56,14 +57,15 @@ pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
     Account, Ai, Appearance, Backup, CONFIG_VERSION, Config, Dictionary, DictionaryEntry, Env,
-    IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV, Language, Layer, Library, Logging, Membership,
-    MembershipTier, Mode, Novel, Opds, OpdsCatalog, PageTurn, Provenance, Reader, Resolved, Speech,
-    Sync, TextDirection, TocDensity, Translation, TranslationEngine,
+    FontEntry, Fonts, IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV, Language, Layer, Library, Logging,
+    Membership, MembershipTier, Mode, Novel, Opds, OpdsCatalog, PageTurn, Provenance, Reader,
+    Resolved, Speech, Sync, TextDirection, TocDensity, Translation, TranslationEngine,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
 pub use infra::paths::{
-    backups_dir, config_dir, config_path, data_dir, db_path, dicts_dir, log_dir, themes_dir,
+    backups_dir, config_dir, config_path, data_dir, db_path, dicts_dir, fonts_dir, log_dir,
+    themes_dir,
 };
 pub use infra::services::Services;
 pub use infra::task::{

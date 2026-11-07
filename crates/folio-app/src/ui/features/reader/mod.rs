@@ -22,3 +22,8 @@ mod view;
 pub use model::ReaderSession;
 pub use model::chrome::{Arrow, Reserve};
 pub use view::ReadingPage;
+
+// 「读者自己装了一份字体」的排版失效口。字体表版本计数（`FACE_EVENTS`）住在
+// `model::book_fonts`，但装字体这件事发生在 feature 外（`platform::user_fonts` 的
+// boot 重注册与会话内安装）—— 在这里开一条窄口，不把整个 `model` 摆成 pub(crate)。
+pub(crate) use model::book_fonts::note_external_registration;

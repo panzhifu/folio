@@ -154,6 +154,16 @@ pub fn dicts_dir() -> PathBuf {
     data_dir().join("dicts")
 }
 
+/// 读者自己装进来的字体：`<数据根>/fonts/<id>/<文件>`。一份字体一个目录，
+/// 里面是下载或导入的那一份 ttf / otf / ttc / woff2。
+///
+/// 与 [`dicts_dir`] 同一条：路径的名字只在这里拼，别处不许再写一份 `join("fonts")`。
+/// 一份一目录而不是平铺一份一个文件，为的是重名、删除与「半份字体」都收敛在目录
+/// 这一层（导入中先落 `<id>` 旁的临时目录再整体改名，见 `folio_app` 的 user_fonts）。
+pub fn fonts_dir() -> PathBuf {
+    data_dir().join("fonts")
+}
+
 /// 备份包：`<数据根>/backups/<时间戳>.zip`。
 ///
 /// 与 [`dicts_dir`] 同一条：路径只在核心拼一次。备份里装的是**数据根的一部分**

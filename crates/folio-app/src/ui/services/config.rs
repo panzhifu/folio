@@ -269,6 +269,11 @@ impl ConfigHolder {
         Self::snapshot(cx).dictionary.clone()
     }
 
+    /// 读者自装字体那一节：已装清单（id / 家族名 / 文件 / 字节数）。
+    pub fn fonts(cx: &App) -> folio_core::Fonts {
+        Self::snapshot(cx).fonts.clone()
+    }
+
     /// 备份那一页记住的选择（要不要把书文件与词典一起打包）。
     pub fn backup(cx: &App) -> folio_core::Backup {
         Self::snapshot(cx).backup
@@ -380,6 +385,10 @@ impl ConfigHolder {
 
     pub fn edit_dictionary(cx: &mut App, f: impl FnOnce(&mut folio_core::Dictionary)) {
         Self::edit(cx, |config| f(&mut config.dictionary));
+    }
+
+    pub fn edit_fonts(cx: &mut App, f: impl FnOnce(&mut folio_core::Fonts)) {
+        Self::edit(cx, |config| f(&mut config.fonts));
     }
 
     pub fn edit_backup(cx: &mut App, f: impl FnOnce(&mut folio_core::Backup)) {

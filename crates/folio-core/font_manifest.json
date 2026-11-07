@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "lxgw-wenkai",
+      "name": "霞鹜文楷",
+      "desc": "楷体骨架的手写风正文，长文读着不累眼；基于 Fontworks 的 Klee One 补全字重与简繁。",
+      "desc_en": "A handwriting-flavored kaiti for long-form reading; extended from Fontworks' Klee One.",
+      "size": 25928940,
+      "url": "https://github.com/lxgw/LxgwWenKai/releases/download/v1.530/LXGWWenKai-Regular.ttf",
+      "official": "https://github.com/lxgw/LxgwWenKai",
+      "license": {
+        "name": "SIL OFL 1.1",
+        "url": "https://github.com/lxgw/LxgwWenKai/blob/main/OFL.txt"
+      }
+    },
+    {
+      "id": "lxgw-wenkai-medium",
+      "name": "霞鹜文楷 Medium",
+      "desc": "同文楷的加重字重，小字号与标题下笔画更立得住。",
+      "desc_en": "The same kaiti at a heavier weight; holds up better at small sizes and in headings.",
+      "size": 25800076,
+      "url": "https://github.com/lxgw/LxgwWenKai/releases/download/v1.530/LXGWWenKai-Medium.ttf",
+      "official": "https://github.com/lxgw/LxgwWenKai",
+      "license": {
+        "name": "SIL OFL 1.1",
+        "url": "https://github.com/lxgw/LxgwWenKai/blob/main/OFL.txt"
+      }
+    },
+    {
+      "id": "noto-serif-cjk-sc",
+      "name": "思源宋体 SC",
+      "desc": "Adobe 与 Google 联合出品的简体中文衬线（即 Noto Serif CJK SC）；系统里最常缺的就是这一档。",
+      "desc_en": "The Simplified Chinese serif from Adobe & Google (Noto Serif CJK SC) — the weight class stock systems most often lack.",
+      "size": 24543080,
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Serif2.003/Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Regular.otf",
+      "official": "https://github.com/notofonts/noto-cjk",
+      "license": {
+        "name": "SIL OFL 1.1",
+        "url": "https://github.com/notofonts/noto-cjk/blob/Serif2.003/Serif/LICENSE"
+      }
+    },
+    {
+      "id": "noto-sans-cjk-sc",
+      "name": "思源黑体 SC",
+      "desc": "同一联盟的简体中文黑体（即 Noto Sans CJK SC）；桌面 Linux 上缺中文黑体时的兜底。",
+      "desc_en": "The companion sans from the same project (Noto Sans CJK SC); a solid fallback where desktop Linux lacks a CJK sans.",
+      "size": 16437364,
+      "url": "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@Serif2.003/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+      "mirrors": [
+        "https://raw.githubusercontent.com/notofonts/noto-cjk/Serif2.003/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
+      ],
+      "official": "https://github.com/notofonts/noto-cjk",
+      "license": {
+        "name": "SIL OFL 1.1",
+        "url": "https://github.com/notofonts/noto-cjk/blob/Serif2.003/Sans/LICENSE"
+      }
+    }
+  ]
+}

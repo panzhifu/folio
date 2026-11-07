@@ -51,6 +51,14 @@ fn face_registered() {
     FACE_EVENTS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// 记一次「字体表因为**书外**的原因变宽了」：读者自己下载或导入了一份字体
+/// （见 `platform::user_fonts`）。与 [`face_registered`] 记的是同一个事件，只是入口
+/// 在本模块之外 —— 开个口子而不是把 [`FACE_EVENTS`] 摆出去，数数的那杆秤留在
+/// 这一个文件里。
+pub(crate) fn note_external_registration() {
+    face_registered();
+}
+
 /// 声明名 → 设备家族名。`Send + Sync`：会在后台线程的度量里被拿着。
 pub struct BookFonts {
     /// 一个声明名可能对应多份内部家族（一份字体文件带好几个名字），
