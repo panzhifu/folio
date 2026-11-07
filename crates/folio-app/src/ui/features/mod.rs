@@ -4,6 +4,7 @@
 //! `super::platform`（入口与原生桥）。阅读界面以前是第三处（桌面一套渲染、移动一套），
 //! 现在两端共用逐字形那一份，见 [`reader`]。
 
+pub mod cloud;
 pub mod notes;
 pub mod opds;
 pub mod reader;

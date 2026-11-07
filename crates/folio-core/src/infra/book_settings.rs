@@ -9,7 +9,7 @@
 //! 新增一格时抄的那份必然漏，症状是「这一格在全局有用、在这本书里没反应」。
 //! 现在的写法是：默认值序列化成对象 → 差量盖上去 → 解回来，新增字段天然可覆盖。
 //!
-//! 唯一的例外是 [`APPEARANCE_GLOBAL_ONLY`] 那三格。它们不是「还没抄进来」，而是**语义上
+//! 唯一的例外是 [`APPEARANCE_GLOBAL_ONLY`] 那五格。它们不是「还没抄进来」，而是**语义上
 //! 不该给单本书覆盖**（见那条常量的文档），所以用一张排除表挡住；有测试盯着这张表里的
 //! 名字都还在，以及「除它们以外全部可覆盖」。
 //!
@@ -22,19 +22,24 @@ use std::collections::BTreeMap;
 
 use crate::infra::config::{Appearance, Reader};
 
-/// `Appearance` 里**只归软件**、单本书不许覆盖的那几格。
+/// `Appearance` 里**只归全局**、单本书不许覆盖的那几格。
 ///
 /// - [`mode`](Appearance::mode) —— 软件外观的浅深。这一格管的是书架、设置、弹窗；把它
 ///   交给一本书，等于「读过这一本之后整个应用被钉在夜里」，而读者要的只是这一本夜里读。
-///   阅读页自己的浅深走 [`reading_mode`](Appearance::reading_mode)（全局默认）与本书差量
-///   那一路。
+///   阅读页自己的浅深走 [`reading_mode`](Appearance::reading_mode)。
 /// - `light` / `dark` —— 两套主题的名字。它们与「这一本书」没有对应关系：选的是应用画
 ///   哪套配色，不是这一本的字怎么排。
+/// - [`reading_mode`](Appearance::reading_mode) / [`reading_theme`](Appearance::reading_theme)
+///   —— 阅读页的浅深与纸色。曾经可按书覆盖，但「每本书一个样式」让读者在两处各答一遍
+///   同一个问题，还得多记一层折叠规则（本书差量盖全局默认），2026-11-07 起收归全局：
+///   夜里看书、白天刷架、读什么纸，软件里只有一份答案。库里旧差量若还存着这两格，
+///   会被 [`overlay`] 挡掉，安静失效、不需要迁移。
 ///
-/// 反过来，`Appearance` 里其余的格子（阅读浅深、亮度、翻页方式与时长、划词默认样式）
-/// **默认就可覆盖** —— 新增一格时不用回来改这里，除非它像上面三格一样属于整个应用。
+/// 反过来，`Appearance` 里其余的格子（亮度、翻页方式与时长、划词默认样式）
+/// **默认就可覆盖** —— 新增一格时不用回来改这里，除非它像上面五格一样不归单本书。
 /// 有测试钉住这条口径，见本文件底部。
-pub const APPEARANCE_GLOBAL_ONLY: &[&str] = &["mode", "light", "dark"];
+pub const APPEARANCE_GLOBAL_ONLY: &[&str] =
+    &["mode", "light", "dark", "reading_mode", "reading_theme"];
 
 /// 一本书的差量。两张表都只装**与当前全局默认不同**的格子。
 ///
@@ -239,7 +244,7 @@ mod tests {
         }
     }
 
-    /// 外观那半的同一条规矩：**连只归软件的三格也填成非默认值**。
+    /// 外观那半的同一条规矩：**连只归全局的五格也填成非默认值**。
     ///
     /// 只有它们的值与默认不同，「一本书改不动它们」才测得到东西 —— 样件里留默认值的话，
     /// 「被排除」和「值本来就一样」这两种情况在断言里长得一模一样。
@@ -249,6 +254,8 @@ mod tests {
             reading_mode: Some(Mode::Light),
             light: Some("Gruvbox".into()),
             dark: Some("Molokai".into()),
+            // 正文主题名同样只归全局；这里填非默认值，为的是「被排除」测得出。
+            reading_theme: Some("sepia".into()),
             page_turn: PageTurn::Cover,
             turn_duration: 500.0,
             highlight_style: AnnotationStyle::Wavy,
@@ -313,7 +320,7 @@ mod tests {
         );
 
         // 排版那一节的每一格都进了差量（样件就是按「每格都不同」写的）；
-        // 外观那一节只进可覆盖的那五格。
+        // 外观那一节只进可覆盖的那四格。
         assert_eq!(
             settings.reader.len(),
             into_object(&Reader::default()).unwrap().len(),
@@ -326,10 +333,9 @@ mod tests {
                 "brightness",
                 "highlight_style",
                 "page_turn",
-                "reading_mode",
                 "turn_duration"
             ]),
-            "只归软件的那三格不该出现在外观差量里"
+            "只归全局的那五格不该出现在外观差量里"
         );
     }
 
@@ -407,7 +413,8 @@ mod tests {
         }
     }
 
-    /// 软件浅深与两套主题名不许被一本书写进差量，也不许被差量盖到生效值上。
+    /// 浅深、两套主题名与阅读页自己的浅深 / 纸色，都不许被一本书写进差量，也不许被差量
+    /// 盖到生效值上。
     #[test]
     fn the_global_only_fields_are_ignored_in_both_directions() {
         let base = Appearance::default();
@@ -420,15 +427,17 @@ mod tests {
                 .filter(|name| APPEARANCE_GLOBAL_ONLY.contains(&name.as_str()))
                 .count(),
             0,
-            "记差量时混进了只归软件的格子：{:?}",
+            "记差量时混进了只归全局的格子：{:?}",
             settings.appearance.keys().collect::<Vec<_>>()
         );
 
-        // 反向：手改库塞进来的那三格也不许落到生效值上。
+        // 反向：手改库塞进来的那五格也不许落到生效值上。
         for (name, value) in [
             ("mode", json!("dark")),
             ("light", json!("Gruvbox")),
             ("dark", json!("Molokai")),
+            ("reading_mode", json!("dark")),
+            ("reading_theme", json!("sepia")),
         ] {
             settings.appearance.insert(name.into(), value);
         }
@@ -436,11 +445,17 @@ mod tests {
         assert_eq!(effective.mode, base.mode, "一本书的差量改到全局浅深了");
         assert_eq!(effective.light, base.light);
         assert_eq!(effective.dark, base.dark);
+        assert_eq!(effective.reading_mode, base.reading_mode, "阅读浅深只归全局");
         assert_eq!(
-            effective.reading_mode,
-            Some(Mode::Light),
-            "那三格坏值不该把同节里可覆盖的那一格一起吃掉"
+            effective.reading_theme, base.reading_theme,
+            "正文主题只归全局"
         );
+        assert_eq!(
+            effective.brightness,
+            Some(0.4),
+            "那五格坏值不该把同节里可覆盖的那几格一起吃掉"
+        );
+        assert_eq!(effective.page_turn, PageTurn::Cover);
     }
 
     /// 调回与默认同值 = 那一格自己从差量里消失，不需要「恢复默认」那一刀。

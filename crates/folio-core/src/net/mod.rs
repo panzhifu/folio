@@ -16,6 +16,9 @@
 //! - [`lansync`] —— **局域网同步**的协议形状：同账号的两台设备怎么互相发现、怎么把书架
 //!   清单与快照递给对面。它自己不起服务器（挂在 [`transfer`] 上）、不拨连接（走
 //!   [`remote`] 那个 `Transport`），所以这一层离线可测。
+//! - [`cloud`] —— **网盘取书**：把「另一头存着书的存储」抽象成一个 `Drive`
+//!   （列一层、流式下载），WebDAV 与百度各一份实现，给浏览界面与导入来源共用。
+//!   走的也是 [`remote`] 那个 `Transport`，离线可测。
 //!
 //! **`tokio` 只许出现在 [`transfer`] 里**。core 其余部分是同步形状，公共签名不漏
 //! `Future`；传书服务器要「少量线程轮转服务大量连接」的现成调度与 multipart 的
@@ -23,6 +26,7 @@
 //! 并由本模块的文档再钉一次。
 
 pub mod ai;
+pub mod cloud;
 pub mod lansync;
 pub mod opds;
 pub mod redeem;

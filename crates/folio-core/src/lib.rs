@@ -56,10 +56,11 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
-    Account, Ai, Appearance, Backup, CONFIG_VERSION, Config, Dictionary, DictionaryEntry, Env,
-    FontEntry, Fonts, IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV, Language, Layer, Library, Logging,
-    Membership, MembershipTier, Mode, Novel, Opds, OpdsCatalog, PageTurn, Provenance, Reader,
-    Resolved, Speech, Sync, TextDirection, TocDensity, Translation, TranslationEngine,
+    Account, Ai, Appearance, Backup, BaiduDrive, Cloud, CONFIG_VERSION, Config, Dictionary,
+    DictionaryEntry, Env, FontEntry, Fonts, IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV, Language,
+    Layer, Library, Logging, Membership, MembershipTier, Mode, Novel, Opds, OpdsCatalog, PageTurn,
+    Provenance, Reader, Resolved, Speech, Sync, TextDirection, TocDensity, Translation,
+    TranslationEngine, WebDavDrive,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
@@ -76,9 +77,9 @@ pub use infra::time::{
     days_in_month, duration_parts, local_day, local_hour, weekday_monday0,
 };
 pub use ingest::import::{
-    BackfillReport, Candidate, ImportKind, ImportOutcome, ImportReport, Imported, Origin,
-    PathsSource, Registered, Source, UrlSource, backfill_copies, forward, import_from, reindex,
-    schedule_reindex, submit_import, sweep_partials,
+    BackfillReport, Candidate, CloudItem, CloudSource, ImportKind, ImportOutcome, ImportReport,
+    Imported, Origin, PathsSource, Registered, Source, UrlSource, backfill_copies, forward,
+    import_from, reindex, schedule_reindex, submit_import, sweep_partials,
 };
 pub use ingest::scan::{ScanFilter, ScanReport, ScanSource, find, format_of};
 pub use position::{LOCATOR_FORMAT_VERSION, Locator};

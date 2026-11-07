@@ -15,6 +15,14 @@ use folio_core::net::translate::TARGET_LANGUAGES;
 use super::super::*;
 
 pub(in crate::ui::features::settings) fn translation_page(cx: &App) -> Page {
+    // 门禁：划词翻译是会员功能（AI 屏共用同一份端点，门禁也同一条）。非会员整页换成引导。
+    if !crate::ui::services::activation::premium(cx) {
+        return page(
+            tr(cx, "page.translation"),
+            IconName::Languages,
+            vec![super::membership::gate_group("membership.gate_ai", cx)],
+        );
+    }
     let mut groups = vec![group(
         tr(cx, "group.translation_output"),
         vec![target_language(cx), engine(cx)],

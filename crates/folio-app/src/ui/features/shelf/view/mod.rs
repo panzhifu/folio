@@ -64,6 +64,7 @@ use crate::ui::components::{
     BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, SearchDebounce, TopBar,
     empty_state,
 };
+use crate::ui::features::cloud::{CloudEvent, CloudView};
 use crate::ui::features::opds::{OpdsEvent, OpdsView};
 use crate::ui::foundation::error::{Context as _, report};
 use crate::ui::foundation::file_stem::title_stem;
@@ -329,6 +330,8 @@ pub struct ShelfView {
     pub(in crate::ui::features::shelf) _info_watch: Option<Subscription>,
     /// OPDS 浏览器那一页的导入事件：有书进了库，架面要重查。
     _opds_watch: Option<Subscription>,
+    /// 网盘浏览器那一页的导入事件：同一条，谁进了库都报同一声。
+    _cloud_watch: Option<Subscription>,
     /// 「书要拷到哪儿」那块面板里，系统文件夹选择器那条异步链。与 `_import` 同理，要活到选完。
     _pick: Option<Task<()>>,
     /// 对「没拿到所有文件访问」那一问的订阅：那一问摆不摆由服务那份实体说了算，它一
@@ -509,6 +512,7 @@ impl ShelfView {
             _group_watch: None,
             _info_watch: None,
             _opds_watch: None,
+            _cloud_watch: None,
             _pick: None,
             _access_watch: access_watch,
             pending_reload: false,
@@ -614,6 +618,26 @@ impl ShelfView {
         let page = cx.new(|cx| OpdsView::new(self.stack.clone(), cx));
         self._opds_watch = Some(cx.subscribe(&page, |this, _, event, cx| {
             if matches!(event, OpdsEvent::Imported) {
+                this.force_reload(cx);
+                this.pending_reload = true;
+            }
+        }));
+        let _ = self
+            .stack
+            .update(cx, |state, cx| state.push(page, NavMotion::Animated, cx));
+    }
+
+    /// 架面「⋮」菜单里的网盘取书：把浏览器压成一整页。接线与 [`Self::open_opds`]
+    /// 同一条 —— 系统返回键弹掉整页，浏览器内部自己管目录层级；下载成功报
+    /// [`CloudEvent::Imported`]，架面重查。
+    pub(in crate::ui::features::shelf) fn open_cloud(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page = cx.new(|cx| CloudView::new(self.stack.clone(), cx));
+        self._cloud_watch = Some(cx.subscribe(&page, |this, _, event, cx| {
+            if matches!(event, CloudEvent::Imported) {
                 this.force_reload(cx);
                 this.pending_reload = true;
             }

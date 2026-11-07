@@ -75,13 +75,29 @@ function planDays() {
   return table;
 }
 
-// 这单该兑几天。id 在订单里有两个可能的位置：方案单在 plan_id，单商品（专辑）
+// 买断档的方案 id，形如 "<方案id>,<另一个id>"。买断没有天数可言：库里 granted_days 记
+// -1 当哨兵，客户端收到的是 `lifetime:true` 而不是一个数。与天数表同一套解析规矩。
+function lifetimePlans() {
+  const set = new Set();
+  for (const pair of (process.env.AFDIAN_PLAN_LIFETIME || "").split(",")) {
+    const id = pair.trim();
+    if (id) set.add(id);
+  }
+  return set;
+}
+
+// 这单该兑什么。id 在订单里有两个可能的位置：方案单在 plan_id，单商品（专辑）
 // 在 sku_detail[].album_id（官方示例里后者的 plan_id 是空串）。只认 plan_id 的话，
 // 商品那一类全部落到「不是会员方案」—— 那是收了钱不给货。
+// 买断表先看：一个 id 两边都配时按买断算（配置写重了是配置的错，但权益给多的那档不算亏）。
 function matchPlan(order) {
+  const lifetimes = lifetimePlans();
   const table = planDays();
   const ids = [order.plan_id, ...(order.sku_detail || []).map((s) => s.album_id)].filter(Boolean);
   for (const id of ids) {
+    if (lifetimes.has(id)) {
+      return { id, lifetime: true };
+    }
     const days = Number(table[id]);
     if (Number.isInteger(days) && days > 0) {
       return { id, days };
@@ -316,7 +332,11 @@ async function redeem(req, res, body) {
     };
     matched = { id: "test", days: testDays };
   } else {
-    if (!AFDIAN_USER_ID || !AFDIAN_TOKEN || Object.keys(planDays()).length === 0) {
+    if (
+      !AFDIAN_USER_ID ||
+      !AFDIAN_TOKEN ||
+      (Object.keys(planDays()).length === 0 && lifetimePlans().size === 0)
+    ) {
       // 配置没齐就把单判成无效会误导读者；这里如实说服务端还没准备好。
       return json(res, 200, { ok: false, state: "unconfigured" });
     }
@@ -341,12 +361,13 @@ async function redeem(req, res, body) {
 
   // `redeemed_at` 由表自己的 DEFAULT now() 填 —— 那是「这一单第一次发货」的那一刻，
   // 之后认领过去时按它数还剩几天，所以这一列**只在第一次写**，谁都不许再改它。
+  // 买断单的 `granted_days` 记 -1：不是零天，是「没有天数这个概念」。
   const claimed = await claim({
     out_trade_no: order.out_trade_no,
     device,
     plan_id: matched.id,
     buyer_id: order.user_private_id || order.user_id || "",
-    granted_days: matched.days,
+    granted_days: matched.lifetime ? -1 : matched.days,
     paid_amount: order.total_amount,
   });
   if (claimed.status >= 400) {
@@ -354,6 +375,9 @@ async function redeem(req, res, body) {
     return json(res, 200, { ok: false, state: "storage" });
   }
   if (claimed.inserted) {
+    if (matched.lifetime) {
+      return json(res, 200, { ok: true, state: "granted", days: 0, lifetime: true });
+    }
     return json(res, 200, { ok: true, state: "granted", days: matched.days });
   }
 
@@ -370,7 +394,16 @@ async function redeem(req, res, body) {
     return json(res, 200, { ok: true, state: "replay", days: 0 });
   }
   if (existing.released_at !== null && existing.released_at !== undefined) {
-    // 软解除过：这一单可以从新那一台认领。搬过去的是**剩下的那几天**，一次都不多给。
+    // 软解除过：这一单可以从新那一台认领。买断单认领的还是永久（`granted_days` 是 -1，
+    // 没有天数可数）；天数单搬过去的是**剩下的那几天**，一次都不多给。
+    if (Number(existing.granted_days) === -1) {
+      const moved = await takeOver(order.out_trade_no, device);
+      if (moved.status >= 400 || moved.rows === 0) {
+        console.log(`takeOver 写库失败 status=${moved.status}`);
+        return json(res, 200, { ok: false, state: "storage" });
+      }
+      return json(res, 200, { ok: true, state: "moved", days: 0, lifetime: true });
+    }
     const left = daysLeft(existing, Date.now());
     if (left === 0) {
       // 时间已经走完：那一行原样留着（搬过去也只是把「过期」挪个名字），如实说一句。

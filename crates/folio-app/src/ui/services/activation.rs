@@ -17,11 +17,29 @@
 
 use folio_core::infra::time;
 use folio_core::net::redeem::{self, Outcome};
+use folio_core::MembershipTier;
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString};
 
 use super::config::ConfigHolder;
 use super::sync::ensure_device_id;
 use super::update::transport;
+
+/// 创作者的爱发电主页。开通（含各处会员引导卡上那一颗）把读者交给这一页；
+/// 成交之后的订单号兑换流程另算。
+pub const AFDIAN_PAGE: &str = "https://ifdian.net/a/nokenice";
+
+/// 今天，本地日序号。门禁与会员屏共用的那一格「现在」，偏移由平台给
+/// （日界线跟着读者走，写死 UTC 会让跨日界线那一天的读数差一格）。
+fn today() -> i64 {
+    time::local_day(time::now(), crate::ui::host::local_offset_secs())
+}
+
+/// 这台安装**现在**算不算高级会员。全 app 门禁共用的那一格判据：买断位或天数档
+/// 任一在就算（[`folio_core::Membership::tier_on`]）。各功能入口问这一格，
+/// 不自己读第二遍配置 —— 读两次就可能出现两次答案不一样的那一帧。
+pub fn premium(cx: &App) -> bool {
+    ConfigHolder::membership(cx).tier_on(today()) == MembershipTier::Premium
+}
 
 /// 兑换那一格当前该念哪一句。
 ///
@@ -96,9 +114,11 @@ impl ActivationState {
             Ok(got) => {
                 match got {
                     Outcome::Granted(_) => tracing::info!("会员兑换到账"),
+                    Outcome::GrantedLifetime => tracing::info!("会员买断到账（永久）"),
                     // 一句单独的：这一趟没发新货，只是把已有那一单挪到这台。日志里能分清
                     // 「又买了一次」与「换了台设备」，出问题时是两条不同的线索。
                     Outcome::Moved(_) => tracing::info!("会员兑换由另一台认领到这台"),
+                    Outcome::MovedLifetime => tracing::info!("买断单由另一台认领到这台"),
                     Outcome::Replay => {}
                 }
                 self.status = Status::Done(got);
@@ -193,22 +213,37 @@ pub fn redeem_now(cx: &mut App) {
     let weak = state.downgrade();
     cx.spawn(async move |cx| {
         let outcome = work.await;
-        // 两条到账的路在这一层合流：`Granted` 给的是那一单的整笔，`Moved` 给的是**服务端数出来的
-        // 剩下那几天**。本地拿到的都是「从今天起接几天」这一个数，所以走同一格 `record` ——
-        // 刷不出天数的责任在服务端那一次 `daysLeft`，不在这里再算一遍。
+        // 三条到账的路在这一层分账：天数档（`Granted` / `Moved`）拿「从今天起接几天」这一个数
+        // 走 `record` —— 刷不出天数的责任在服务端那一次 `daysLeft`，不在这里再算一遍；
+        // 买断档（`GrantedLifetime` / `MovedLifetime`）没有天数可接，置永久位走 `record_lifetime`。
+        enum Grant {
+            Days(String, i64),
+            Lifetime(String),
+        }
         let grant = match &outcome {
             Ok((order, Outcome::Granted(days))) | Ok((order, Outcome::Moved(days))) => {
-                Some((order.clone(), *days))
+                Some(Grant::Days(order.clone(), *days))
+            }
+            Ok((order, Outcome::GrantedLifetime)) | Ok((order, Outcome::MovedLifetime)) => {
+                Some(Grant::Lifetime(order.clone()))
             }
             _ => None,
         };
         // 在这个 `cx.update` 里才第一次拿到 `&mut App`：写配置与翻句子都只有 App 能做，
         // `AsyncApp` 这一层做不了（同 `services/update.rs` 里那条注释）。
         cx.update(|cx| {
-            if let Some((order, days)) = grant {
-                ConfigHolder::edit_membership(cx, |membership| {
-                    membership.record(&order, days, today)
-                });
+            match grant {
+                Some(Grant::Days(order, days)) => {
+                    ConfigHolder::edit_membership(cx, |membership| {
+                        membership.record(&order, days, today)
+                    });
+                }
+                Some(Grant::Lifetime(order)) => {
+                    ConfigHolder::edit_membership(cx, |membership| {
+                        membership.record_lifetime(&order, today)
+                    });
+                }
+                None => {}
             }
             let _ = weak.update(cx, |state, cx| {
                 state.settle(outcome.map(|(_, got)| got), cx)

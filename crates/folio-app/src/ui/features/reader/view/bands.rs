@@ -14,7 +14,7 @@
 //! 跨在视口上下沿的那一行照样会被画出来（它的行顶在可见带起点之外），带子透明就等于
 //! 让半行字压在章名上。滚动时字在这里被干净地切掉，才是「让出」这条带的本意。
 
-use gpui_kit::component::{ActiveTheme, h_flex};
+use gpui_kit::component::h_flex;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, Entity, InteractiveElement as _, IntoElement, ParentElement,
@@ -24,7 +24,16 @@ use gpui_kit::{
 use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::page_geometry::{BandPolicy, PageBox, PageRect};
 use crate::ui::features::reader::model::session::ReaderSession;
+use crate::ui::foundation::reading_theme;
+use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::tf;
+
+/// 这一笔带子用的正文调色板。带子浮在纸上：纸色与淡墨跟**正文主题**走，
+/// 壳的 `muted_foreground` 是界面那一层的淡墨，与纸不是一个底。每处现取 ——
+/// 一帧最多画两三条带，查表换算的量级可以忽略。
+fn reading_palette(cx: &App) -> reading_theme::ReadingPalette {
+    reading_theme::resolve(&ConfigHolder::appearance(cx), cx)
+}
 
 /// 页眉那条带里，字的上沿离带顶留多少（逻辑像素）。
 ///
@@ -184,6 +193,7 @@ fn overlay_bands(
 fn header_in(page: &PageBox, readouts: &Readouts, bare: bool, full: bool, cx: &App) -> AnyElement {
     let top_pad = (page.header.y - page.header_paint.y).max(0.0) + HEADER_TOP_PAD;
     let chapter = readouts.chapter.clone();
+    let muted = reading_palette(cx).muted;
     band_shell(page.header_paint, page.bands, bare, true, full, cx)
         .pt(px(top_pad))
         .id(if bare {
@@ -197,7 +207,7 @@ fn header_in(page: &PageBox, readouts: &Readouts, bare: bool, full: bool, cx: &A
                 .id("reader-header-chapter")
                 .test_support()
                 .text_xs()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(muted)
                 .whitespace_nowrap()
                 .when(!chapter.is_empty(), |label| label.child(chapter)),
         )
@@ -205,7 +215,7 @@ fn header_in(page: &PageBox, readouts: &Readouts, bare: bool, full: bool, cx: &A
 }
 
 fn footer_in(page: &PageBox, readouts: &Readouts, bare: bool, full: bool, cx: &App) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
+    let muted = reading_palette(cx).muted;
     let label = |text: SharedString| {
         div()
             .text_xs()
@@ -247,7 +257,7 @@ fn band_shell(
         shell
     } else {
         match policy {
-            BandPolicy::Reserved => shell.bg(cx.theme().background),
+            BandPolicy::Reserved => shell.bg(reading_palette(cx).bg),
             // 定版式：页图铺满整窗，带子不铺底，只让文字浮在照片上。
             BandPolicy::Overlay => shell,
         }

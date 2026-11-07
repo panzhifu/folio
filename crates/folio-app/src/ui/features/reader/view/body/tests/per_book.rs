@@ -1,13 +1,16 @@
 //! 每本书一份阅读设置：开书叠差量、弹层那一格落进那一本、换一本回到默认。
 //!
-//! 这一组测的是**接线**而不是差量本身 —— `folio_core::infra::book_settings` 那 12 条
+//! 这一组测的是**接线**而不是差量本身 —— `folio_core::infra::book_settings` 那 13 条
 //! 管「默认 + 差量算得对不对」，这里管「屏幕上那一下改动到底进了哪一层」。走错一层的
 //! 症状是读者的每次微调都改到了所有书，或者改完关掉书就没了。
+//!
+//! 外观那一节自 2026-11-07 起只剩排版差量可按书（亮度、翻页、划线样式这几格）；
+//! 浅深与正文主题收归全局（`APPEARANCE_GLOBAL_ONLY`），相关几条门按新口径钉。
 
 use super::harness::{flow, meta, open_with_store};
 use crate::ui::services::config::ConfigHolder;
 use folio_core::store::Store;
-use folio_core::{Appearance, BookSettings, Locator, Mode, Reader};
+use folio_core::{BookSettings, Locator, Mode, Reader};
 #[allow(unused_imports)] // `#[gpui_kit::test]` 展开要它，unused 分析看不见宏里的使用
 use gpui_kit::test::TestWindowExt;
 #[allow(unused_imports)] // 同上：`AppContext` 给 `cx.update` 用
@@ -243,49 +246,38 @@ fn two_books_keep_their_own_settings(cx: &mut TestAppContext) {
     );
 }
 
-/// 这一本的夜里**不碰软件外观的浅深**，只落在自己那一行上。
+/// 阅读浅深**不碰软件外观的浅深**，也**不进一本书的差量**。
 ///
-/// 「阅读页夜里读、关掉书书架还是白天」这一件事的写入侧；读侧的门槛在外壳那一条
-/// （`reading_mounted` 才顶掉 `mode`）。
+/// 「阅读页夜里读、关掉书书架还是白天」这一件事的写入侧：这一格归全局
+/// （`APPEARANCE_GLOBAL_ONLY`），壳那一头的翻面门槛在「层盖满」（`themed_appearance`），
+/// 配置里 `mode` 与 `reading_mode` 各答各的。
 #[gpui_kit::test]
-fn a_books_night_setting_stays_off_the_app_mode(cx: &mut TestAppContext) {
+fn the_reader_mode_stays_off_the_app_mode(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (store, id) = store_with_book("甲本");
     open(cx, store.clone(), id);
 
-    cx.update(|cx| ConfigHolder::edit_book_appearance(cx, |a| a.reading_mode = Some(Mode::Dark)));
+    cx.update(|cx| ConfigHolder::edit_appearance(cx, |a| a.reading_mode = Some(Mode::Dark)));
 
     cx.update(|cx| {
         assert_eq!(
             ConfigHolder::appearance(cx).reading_mode,
             Some(Mode::Dark),
-            "这一本的阅读浅深该在生效值上"
+            "阅读浅深该在生效值上"
         );
         assert_eq!(
             ConfigHolder::appearance(cx).mode,
             Mode::default(),
-            "全局浅深归设置屏那一格管，这本书碰不到它"
+            "全局浅深归设置屏那一格管，阅读浅深碰不到它"
         );
     });
-    assert_eq!(
+    assert!(
         store
             .book_settings(id)
             .expect("这一本的差量")
-            .effective_appearance(&Appearance::default())
-            .mode,
-        Mode::default(),
-        "叠完之后的生效值里，只归软件那一格也要还是默认"
+            .is_empty(),
+        "阅读浅深只归全局，一本书的差量里不该有它"
     );
-}
-
-/// 把一份外观选择记成差量。
-fn appearance_patch(set: impl FnOnce(&mut Appearance)) -> BookSettings {
-    let base = Appearance::default();
-    let mut wanted = base.clone();
-    set(&mut wanted);
-    let mut patch = BookSettings::default();
-    patch.record_appearance(&base, &wanted);
-    patch
 }
 
 /// 画到「差量该落库」那一档：会话每帧比较一次 `book_rev`，而停手之后要**安静满
@@ -306,12 +298,11 @@ fn clearing_a_book_returns_it_to_the_defaults(cx: &mut TestAppContext) {
     let handle = open(cx, store.clone(), id);
     cx.update(|cx| {
         ConfigHolder::edit_book_reader(cx, |p| p.font_size = 26.0);
-        ConfigHolder::edit_book_appearance(cx, |a| a.reading_mode = Some(Mode::Dark));
     });
     draw(cx, handle);
     assert!(
         !store.book_settings(id).expect("这一本的差量").is_empty(),
-        "前置：那两格改动该已经落库"
+        "前置：字号改动该已经落库"
     );
 
     cx.update(ConfigHolder::clear_book);
@@ -327,16 +318,13 @@ fn clearing_a_book_returns_it_to_the_defaults(cx: &mut TestAppContext) {
             Reader::default().font_size,
             "生效值该回到默认档"
         );
-        assert_eq!(ConfigHolder::appearance(cx).reading_mode, None);
     });
 }
 
-/// 设置屏那一档**传到没单独设过的书**，而设过的那一本盖住它。
-///
-/// 这一条是「只存差量」而不是「第一次改动就快照整份」要买到的东西：快照那一版写出来，
-/// 老书从此不再跟默认走，而读者看不出为什么。
+/// 阅读浅深全局一份，管到每一本书；库里旧差量若还存着这一格（2026-11-07 之前按书
+/// 覆盖时代的遗留），overlay 把它挡掉 —— 老数据安静失效，全局默认说了算。
 #[gpui_kit::test]
-fn the_default_reading_mode_reaches_books_that_never_set_their_own(cx: &mut TestAppContext) {
+fn the_reader_mode_is_global_and_legacy_book_rows_are_inert(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let store = Arc::new(Store::in_memory().expect("内存库"));
     let mut meta_a = meta("epub");
@@ -349,9 +337,19 @@ fn the_default_reading_mode_reaches_books_that_never_set_their_own(cx: &mut Test
     let b = store
         .add_book(std::path::Path::new("/books/b.epub"), &meta_b)
         .unwrap();
-    // 甲本自己钉了浅色；乙本那一列是空的。
+    // 甲本那一行还留着按书覆盖时代的浅色。现在的 record 路写不出这种差量（排除表挡着），
+    // 所以直接塞 JSON 模拟库里已有的老数据。
     store
-        .set_book_settings(a, &appearance_patch(|x| x.reading_mode = Some(Mode::Light)))
+        .set_book_settings(
+            a,
+            &BookSettings {
+                appearance: std::collections::BTreeMap::from([(
+                    "reading_mode".into(),
+                    serde_json::json!("light"),
+                )]),
+                ..Default::default()
+            },
+        )
         .unwrap();
 
     open(cx, store.clone(), b);
@@ -361,14 +359,24 @@ fn the_default_reading_mode_reaches_books_that_never_set_their_own(cx: &mut Test
     assert_eq!(
         cx.update(|cx| ConfigHolder::appearance(cx).reading_mode),
         Some(Mode::Dark),
-        "乙本没单独设过，该跟着设置屏那一档"
+        "乙本跟着全局档"
     );
 
+    // 甲本另开一窗：夹具每窗装一份新配置，全局档回零。库里那一行带着按书覆盖时代的
+    // 浅色 —— overlay 把它挡掉，生效值不是浅色；全局钉成夜里之后就是夜里。
     open(cx, store, a);
-    assert_eq!(
+    assert_ne!(
         cx.update(|cx| ConfigHolder::appearance(cx).reading_mode),
         Some(Mode::Light),
-        "甲本自己钉过浅色，默认档改成夜里也不该跟着翻"
+        "遗留的那一格不该翻到生效值上"
+    );
+    cx.update(|cx| {
+        ConfigHolder::edit_appearance(cx, |a| a.reading_mode = Some(Mode::Dark));
+    });
+    assert_eq!(
+        cx.update(|cx| ConfigHolder::appearance(cx).reading_mode),
+        Some(Mode::Dark),
+        "全局夜里说了算 —— 老数据安静失效"
     );
 }
 

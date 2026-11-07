@@ -218,6 +218,80 @@ fn url_import_streams_into_a_hash_named_copy_and_registers() {
     );
 }
 
+/// 网盘导入端到端（假网盘）：浏览界面上勾下的条目，经 [`Drive`] 流式下载 → 暂存 →
+/// 算哈希 → 落地成哈希名 → 解析入库，出处记成 [`Origin::Cloud`]。
+///
+/// 管线对来源无感知，所以这里钉的与 URL 那条是同一批契约，只是来源换成了
+/// 「勾选条目 + 假网盘」—— 多钉的一条是：`Origin::Cloud` 带着网盘名与网盘内路径，
+/// 不带 url（网盘条目没有可单独重放的直链）。
+#[test]
+fn cloud_import_downloads_picks_into_a_hash_named_copy_and_registers() {
+    use crate::net::cloud::{Drive, Entry};
+    use crate::net::remote::{Cancel, Error as RemoteError, Result as RemoteResult, Sink};
+
+    /// 假网盘：`download` 把固定字节按 4 字节一块送进 sink。
+    struct FakeDrive;
+    impl Drive for FakeDrive {
+        fn label(&self) -> &'static str {
+            "webdav"
+        }
+        fn list(&self, _path: &str) -> RemoteResult<Vec<Entry>> {
+            Ok(Vec::new())
+        }
+        fn download(
+            &self,
+            _path: &str,
+            sink: &mut dyn Sink,
+            _cancel: &Cancel,
+        ) -> RemoteResult<u64> {
+            let data = b"cloud body";
+            for chunk in data.chunks(4) {
+                sink.write(chunk).map_err(RemoteError::Io)?;
+            }
+            sink.finish().map_err(RemoteError::Io)?;
+            Ok(data.len() as u64)
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("books");
+    let store = Store::in_memory().unwrap();
+
+    let source = super::CloudSource::new(
+        Box::new(FakeDrive),
+        vec![super::CloudItem {
+            path: "books/书.txt".into(),
+            name: "书.txt".into(),
+            size: Some(10),
+        }],
+    );
+    let outcomes = import_from(&source, &lib, &store, &StageCtx::detached());
+    assert_eq!(outcomes.len(), 1);
+    let super::Origin::Cloud { drive, path, size } = &outcomes[0].candidate.origin else {
+        panic!("出处要记成 Origin::Cloud，实际 {:?}", outcomes[0].candidate.origin)
+    };
+    assert_eq!(*drive, "webdav");
+    assert_eq!(path, "books/书.txt");
+    assert_eq!(*size, Some(10));
+    let registered = added(&outcomes);
+    assert_eq!(registered.dest.parent(), Some(lib.as_ref()));
+    let name = registered
+        .dest
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(name.rsplit_once('.').unwrap().1, "txt");
+    assert_eq!(name.split('.').next().unwrap().len(), 16);
+    assert!(!name.contains('书'), "建议名不许混进最终文件名：{name}");
+    assert_eq!(store.shelf("").unwrap().len(), 1);
+    assert!(
+        staged(&lib).is_empty(),
+        "落地之后暂存区不该留东西：{:?}",
+        staged(&lib)
+    );
+}
+
 /// picked 语义的端到端：好的登记上架（书目 + 章节都落库），坏的那本只留一条
 /// `Err`；副本按内容命名落进书库目录，原件原封不动。
 ///

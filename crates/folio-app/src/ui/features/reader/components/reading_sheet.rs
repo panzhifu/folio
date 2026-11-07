@@ -59,19 +59,25 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement,
+    PathPromptOptions, Render, SharedString, Styled, Subscription, Window, div,
 };
 
+use folio_core::infra::config::ThemeBackground;
+use folio_core::infra::reading_theme as reading_theme_table;
 use folio_core::{ImageScale, Mode, PageTurn, Reader, TextDirection};
 
-use crate::ui::components::{BottomSheet, BottomSheetState, FontFamilySetter, FontPicker};
+use crate::ui::components::{
+    BottomSheet, BottomSheetState, FontFamilySetter, FontPicker, ReadingThemePicker,
+};
 use crate::ui::features::reader::model::chrome::{
     self, BRIGHTNESS_RANGE, FONT_SIZE_RANGE, INDENT_RANGE, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE,
     MARGIN_X_RANGE, MARGIN_Y_RANGE, MAX_MEASURE_RANGE, PARAGRAPH_GAP_RANGE, SliderSteps,
     TURN_DURATION_RANGE,
 };
 use crate::ui::features::reader::model::session::ReaderSession;
+use crate::ui::foundation::error::Context as _;
+use crate::ui::foundation::reading_theme;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 
@@ -306,6 +312,13 @@ pub(in crate::ui::features::reader) struct ReadingSheet {
     /// 这里刻意不留十个字段加十个各自的写入口：值只有一份，拖动、`−` / `+`、`sync`
     /// 三条路都改同一格、都从同一扇门写回配置。
     knobs: [Entity<SliderState>; 10],
+    /// 背景图不透明度那条滑条。**不在** [`Knob`] 表里：表里十格写的是本书差量，
+    /// 而背景图挂**主题名**上（全局配置根节），不属于任何一本书 —— 硬塞进表等于
+    /// 让「这本书的背景图透明度」假装存在。
+    bg_opacity: Entity<SliderState>,
+    /// 挑图那一趟的失败句（格式不收、读不出来）。挂在背景图那一格下面，
+    /// 下一次挑图或清除时清掉。
+    bg_error: Option<SharedString>,
     _watches: Vec<Subscription>,
 }
 
@@ -318,6 +331,14 @@ impl ReadingSheet {
     ) -> Self {
         // 十条滑条由 [`Knob`] 那一张表建出来：两端、细档、初值都在表里，这里不再逐格写数。
         let knobs = Knob::ALL.map(|knob| slider(knob, cx));
+        // 背景图不透明度单独一条：区间与写入口都跟那十条不一样（见字段注释）。
+        let bg_opacity = cx.new(|_| {
+            SliderState::new()
+                .max(ThemeBackground::OPACITY_FULL)
+                .min(ThemeBackground::OPACITY_MIN)
+                .step(0.05)
+                .default_value(ThemeBackground::OPACITY_FULL)
+        });
         // 弹层自己也要观察：它不是这一屏的子视图，`notify` 只有观察方才收得到，
         // 而开合、换档、读者一把下拉关掉全靠随后那一次重画。
         let sheet = cx.new(BottomSheetState::closed);
@@ -334,11 +355,24 @@ impl ReadingSheet {
                 }
             }));
         }
+        // 背景图不透明度：拖出来的数写进**当前主题**的图配置。没选主题时滑条本来
+        // 就不该出现（背景图那一格整块收起），这一条只是兜底。
+        watches.push(cx.subscribe(&bg_opacity, |_, _, event, cx| {
+            if let SliderEvent::Change(value) = event {
+                if let Some(name) = picked_reading_theme(cx) {
+                    ConfigHolder::edit_reading_background(cx, name, |background| {
+                        background.opacity = value.end();
+                    });
+                }
+            }
+        }));
         Self {
             reader,
             sheet,
             tab: SheetTab::default(),
             knobs,
+            bg_opacity,
+            bg_error: None,
             _watches: watches,
         }
     }
@@ -404,6 +438,19 @@ impl ReadingSheet {
             if (state.read(cx).value().end() - value).abs() > 0.005 {
                 state.update(cx, |state, cx| state.set_value(value, window, cx));
             }
+        }
+        // 背景图不透明度跟着**当前主题**的图配置走：换主题（或别处改了图）滑条跳到
+        // 那一套的值。没选主题时图配置整格收起，这里归回满不透明度的原位。
+        let wanted = picked_reading_theme(cx)
+            .and_then(|name| {
+                ConfigHolder::reading_backgrounds(cx)
+                    .get(name)
+                    .map(|background| background.opacity)
+            })
+            .unwrap_or(ThemeBackground::OPACITY_FULL);
+        if (self.bg_opacity.read(cx).value().end() - wanted).abs() > 0.005 {
+            self.bg_opacity
+                .update(cx, |state, cx| state.set_value(wanted, window, cx));
         }
     }
 
@@ -549,9 +596,257 @@ impl ReadingSheet {
             .into_any_element()
     }
 
-    /// 这一本的阅读浅深。`None` = 跟随软件外观，那一档**不落进差量**（与默认同值）。
+    /// 阅读浅深。写**全局默认**（`edit_appearance`）：这一格 2026-11-07 起不再按书覆盖
+    /// （`APPEARANCE_GLOBAL_ONLY`），弹层与设置页两处写的是同一份 —— 界面照旧，
+    /// 「每本书一个样式」那层账没有了。`None` = 跟随软件外观。
     fn set_reading_mode(&mut self, reading: Option<Mode>, cx: &mut Context<Self>) {
-        ConfigHolder::edit_book_appearance(cx, |appearance| appearance.reading_mode = reading);
+        ConfigHolder::edit_appearance(cx, |appearance| appearance.reading_mode = reading);
+        cx.notify();
+    }
+
+    /// 「正文主题」那一格：一排小卡（首卡「跟随软件」），选中写的是**全局默认**
+    /// （与 [`set_reading_mode`](Self::set_reading_mode) 同一份账）：设置页与弹层两处
+    /// 挑的是同一张纸。日 / 夜不在卡上重复：样卡画当前生效那一侧，翻面翻的是
+    /// 同一套主题的深侧（见 [`reading_theme`] 模块注释）。
+    fn reading_theme_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let appearance = ConfigHolder::appearance(cx);
+        let current = appearance
+            .reading_theme
+            .clone()
+            .filter(|name| reading_theme_table::find(name).is_some());
+        let desktop = crate::ui::host::supports_overlay_controls(cx);
+        let dark = reading_theme::dark_side(&appearance, cx);
+        let sheet = cx.entity().clone();
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(div().text_base().child(tr(cx, "reading_theme.title")))
+            .child(
+                ReadingThemePicker {
+                    selected: current.as_deref(),
+                    dark,
+                    desktop,
+                    on_pick: std::rc::Rc::new(move |name, cx| {
+                        sheet.update(cx, |this, cx| this.set_reading_theme(name, cx));
+                    }),
+                }
+                .render(cx),
+            )
+            .into_any_element()
+    }
+
+    /// 正文主题。写**全局默认**（理由见 [`set_reading_mode`](Self::set_reading_mode)）。
+    /// `None` = 跟随软件。
+    fn set_reading_theme(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        ConfigHolder::edit_appearance(cx, |appearance| {
+            appearance.reading_theme = name.filter(|name| !name.is_empty());
+        });
+        self.bg_error = None;
+        cx.notify();
+    }
+
+    /// 「背景图」那一块：只在选中了一套具体主题时出现 —— 图挂主题名上，
+    /// 「跟随软件」没有主题名可挂。日 / 夜各一槽，外加一条不透明度。
+    fn background_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(name) = picked_reading_theme(cx) else {
+            return div().into_any_element();
+        };
+        let background = ConfigHolder::reading_backgrounds(cx)
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let opacity = background.opacity;
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(div().text_base().child(tr(cx, "reading_theme.background")))
+            .child(self.background_slot_row(&name, true, background.light.clone(), cx))
+            .child(self.background_slot_row(&name, false, background.dark.clone(), cx))
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_base()
+                            .child(tr(cx, "reading_theme.opacity")),
+                    )
+                    .child(
+                        Slider::new(&self.bg_opacity)
+                            .flex_1()
+                            .min_w_0()
+                            .accessibility_label(tr(cx, "reading_theme.opacity")),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{}%", (opacity * 100.0).round() as i64)),
+                    ),
+            )
+            .children(
+                self.bg_error
+                    .clone()
+                    .map(|text| div().text_sm().text_color(cx.theme().danger).child(text)),
+            )
+            .into_any_element()
+    }
+
+    /// 日 / 夜一个槽的行：槽名 + 现在指着哪张图 + 「选图」「清除」。
+    ///
+    /// 清除只把**引用**放掉，不删文件：文件按内容哈希命名，两套主题（甚至同一套的
+    /// 两侧）可能共用同一份字节 —— 见 `infra::backgrounds` 模块注释第三条。
+    fn background_slot_row(
+        &self,
+        theme: &str,
+        light_side: bool,
+        current: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = if light_side {
+            tr(cx, "reading_theme.background_light")
+        } else {
+            tr(cx, "reading_theme.background_dark")
+        };
+        let theme = theme.to_string();
+        let pick_theme = theme.clone();
+        let clear_theme = theme.clone();
+        let sheet = cx.entity().clone();
+        let pick_sheet = sheet.clone();
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_ellipsis()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(current.clone().unwrap_or_else(|| {
+                                tr(cx, "reading_theme.background_none").to_string()
+                            })),
+                    )
+                    .child(
+                        Button::new(format!(
+                            "bg-pick-{}",
+                            if light_side { "light" } else { "dark" }
+                        ))
+                        .outline()
+                        .small()
+                        .label(tr(cx, "reading_theme.pick_image").to_string())
+                        .on_click(move |_, _, cx| {
+                            pick_sheet.update(cx, |this, cx| {
+                                this.pick_background(&pick_theme, light_side, cx)
+                            });
+                        }),
+                    )
+                    .child(
+                        Button::new(format!(
+                            "bg-clear-{}",
+                            if light_side { "light" } else { "dark" }
+                        ))
+                        .ghost()
+                        .small()
+                        .label(tr(cx, "reading_theme.clear_image").to_string())
+                        .disabled(current.is_none())
+                        .on_click(move |_, _, cx| {
+                            sheet.update(cx, |this, cx| {
+                                this.clear_background(&clear_theme, light_side, cx)
+                            });
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 开系统文件选择器挑一张图，收进 `backgrounds/` 后把**文件名**写进这一侧。
+    ///
+    /// 读盘与落盘在后台（导入管线同一条理由）；扩展名不收时把那一句人话摆到
+    /// [`Self::bg_error`]，不打断读者手上的动作。
+    fn pick_background(&mut self, theme: &str, light_side: bool, cx: &mut Context<Self>) {
+        let theme = theme.to_string();
+        let sheet = cx.entity().downgrade();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |_this, cx| {
+            let path = match receiver.await {
+                Ok(Ok(Some(mut paths))) => paths.pop(),
+                _ => None,
+            };
+            let Some(path) = path else {
+                return;
+            };
+            let theme = theme.clone();
+            let stored = cx.background_spawn(async move {
+                let extension = path
+                    .extension()
+                    .map(|ext| ext.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                std::fs::read(&path)
+                    .context("读背景图失败")
+                    .and_then(|bytes| {
+                        folio_core::infra::backgrounds::store(&bytes, &extension)
+                            .context("收背景图失败")
+                    })
+            });
+            let stored = stored.await;
+            let _ = sheet.update(cx, |this, cx| {
+                match stored {
+                    Ok(name) => {
+                        this.bg_error = None;
+                        ConfigHolder::edit_reading_background(cx, &theme, |background| {
+                            if light_side {
+                                background.light = Some(name);
+                            } else {
+                                background.dark = Some(name);
+                            }
+                        });
+                    }
+                    // 界面对错误只有两个动作:说清一句,决定拦不拦。这里不拦 ——
+                    // 那一格照旧,失败句挂在下面,下一次挑图或清除时清掉。
+                    Err(err) => {
+                        this.bg_error =
+                            Some(crate::ui::foundation::error::shown(&err.into()).into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 清掉一个槽：只放引用（理由见 [`Self::background_slot_row`]）。
+    fn clear_background(&mut self, theme: &str, light_side: bool, cx: &mut Context<Self>) {
+        let theme = theme.to_string();
+        ConfigHolder::edit_reading_background(cx, &theme, |background| {
+            if light_side {
+                background.light = None;
+            } else {
+                background.dark = None;
+            }
+        });
+        self.bg_error = None;
         cx.notify();
     }
 
@@ -949,6 +1244,8 @@ impl ReadingSheet {
             .pt_1()
             .pb_6()
             .child(self.reading_mode_row(cx))
+            .child(self.reading_theme_row(cx))
+            .child(self.background_block(cx))
             .child(self.stepper_row(
                 Knob::Brightness,
                 tr(cx, "reader.brightness"),
@@ -1100,6 +1397,13 @@ impl Render for ReadingSheet {
     }
 }
 
+/// 当前选中、且**表里真有**的那套正文主题名。「跟随软件」（`None`）与手改坏的名字
+/// 都没有图可配 —— 背景图那一格整块收起。
+fn picked_reading_theme(cx: &App) -> Option<&'static str> {
+    let name = ConfigHolder::appearance(cx).reading_theme?;
+    reading_theme_table::find(&name).map(|theme| theme.name)
+}
+
 #[cfg(test)]
 mod tests {
     //! 这一屏能在宿主上跑完的部分：开合、三段各画一帧不炸，以及「十条滑条各接哪一格
@@ -1148,6 +1452,65 @@ mod tests {
     fn open_sheet(cx: &mut TestAppContext) -> (Entity<ReadingSheet>, AnyWindowHandle) {
         let (sheet, _reader, handle) = open_sheet_and_book(cx);
         (sheet, handle)
+    }
+
+    /// 挑正文主题写的是**全局默认**：这一格 2026-11-07 起收归全局（`APPEARANCE_GLOBAL_ONLY`），
+    /// 弹层与设置页两处写同一份 —— 挂着书也不落进本书差量。
+    #[gpui_kit::test]
+    fn a_picked_reading_theme_lands_on_the_global_defaults(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (sheet, _reader, _window) = open_sheet_and_book(cx);
+        cx.update(|cx| ConfigHolder::set_book(cx, Some(folio_core::BookSettings::default())));
+        sheet.update(cx, |sheet, cx| {
+            sheet.set_reading_theme(Some("sepia".into()), cx)
+        });
+        // 生效值里看得见（全局默认换了，差量为空，生效值就是它）。
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::appearance(cx).reading_theme)
+                .as_deref(),
+            Some("sepia"),
+        );
+        // 写的是默认层：default_appearance 也变成羊皮。
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::default_appearance(cx).reading_theme)
+                .as_deref(),
+            Some("sepia"),
+        );
+        // 本书差量**不收**这一格 —— 它在全局锁定表里，旧读者存过的那格也由 overlay 挡掉。
+        assert!(
+            !cx.update(|cx| ConfigHolder::book(cx))
+                .expect("书挂着")
+                .appearance
+                .contains_key("reading_theme"),
+            "这一格收归全局了，不该再进本书差量",
+        );
+
+        // 退回「跟随软件」= 默认值，全局默认那一格归位。
+        sheet.update(cx, |sheet, cx| sheet.set_reading_theme(None, cx));
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::appearance(cx).reading_theme),
+            None,
+        );
+    }
+
+    /// 表里没有的名字不落库：选择器只会交内置名，但手改的差量与未来的调用点
+    /// 都可能塞进坏名字 —— 落库之前这一格自己挡一道。
+    #[gpui_kit::test]
+    fn an_unknown_reading_theme_name_stays_out_of_the_config(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (sheet, _reader, _window) = open_sheet_and_book(cx);
+        cx.update(|cx| ConfigHolder::set_book(cx, Some(folio_core::BookSettings::default())));
+        sheet.update(cx, |sheet, cx| {
+            sheet.set_reading_theme(Some("没有这套".into()), cx)
+        });
+        // 生效值仍是 None？—— 不，名字进了配置；挡的是**背景图**那一格（`picked_reading_theme`
+        // 查表查不到就收起），以及取色那一层（查不到回落壳主题）。这里钉的是：
+        // 名字原样进差量，由 resolve 的回落兜底，不在这一格上做第二次判断。
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::appearance(cx).reading_theme)
+                .as_deref(),
+            Some("没有这套"),
+        );
     }
 
     /// 滑条此刻指着哪儿。
@@ -1342,21 +1705,21 @@ mod tests {
         );
     }
 
-    /// 阅读设置里那一格浅深只写**这一本书**：软件外观 `mode` 与全局默认都不许动。
+    /// 阅读设置里那一格浅深写**全局默认**：软件外观 `mode` 不许动，本书差量也不许收它。
     ///
-    /// 这条钉的是读者报过的那件事：在书里点一下夜间，退出之后整个软件都黑着。现在它连
-    /// 「往后每一本都黑着」也不会了 —— 落点是这一本的差量，与默认同值时那一格自动消失。
+    /// 从前钉的是读者报过的那件事：在书里点一下夜间，退出之后整个软件都黑着 —— 那一版
+    /// 的落点是这一本的差量。2026-11-07 起这一格收归全局（`APPEARANCE_GLOBAL_ONLY`），
+    /// 弹层与设置屏写的是同一份，「每本书一个样式」那层账没有了；差量那一头由排除表
+    /// 挡着，旧读者存过的残格也会在下一次落库时清出去。
     #[gpui_kit::test]
-    fn the_reader_mode_row_writes_this_book_and_nothing_else(cx: &mut TestAppContext) {
+    fn the_reader_mode_row_writes_the_global_defaults(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (sheet, _handle) = open_sheet(cx);
         cx.update(|cx| {
             ConfigHolder::edit_appearance(cx, |appearance| {
                 appearance.mode = folio_core::Mode::Light
             });
-            // 这一格写的是「这一本」，所以得先有一本书挂着：没挂着时
-            // `edit_book_appearance` 只留一句 warn 就返回（见 `services::config`），
-            // 少了这一步下面全是空跑。
+            // 挂一本书，为的是钉「写这一格不动本书差量」。
             ConfigHolder::set_book(cx, Some(folio_core::BookSettings::default()));
         });
 
@@ -1373,25 +1736,20 @@ mod tests {
         assert_eq!(
             cx.update(|cx| ConfigHolder::default_appearance(cx))
                 .reading_mode,
-            None,
-            "按下去只动这一本：设置屏那个全局默认要还空着"
+            Some(folio_core::Mode::Dark),
+            "落点是全局默认：设置屏同一格读到夜里"
         );
         assert!(
             cx.update(|cx| ConfigHolder::book(cx))
-                .is_some_and(|patch| !patch.is_empty()),
-            "这一本的差量里该落下这一格"
+                .is_some_and(|patch| patch.is_empty()),
+            "这一格只归全局，不许落进本书差量",
         );
 
         sheet.update(cx, |sheet, cx| sheet.set_reading_mode(None, cx));
         assert_eq!(
             cx.update(|cx| ConfigHolder::appearance(cx)).reading_mode,
             None,
-            "「跟随软件」在差量里只有一个写法：不落字"
-        );
-        assert!(
-            cx.update(|cx| ConfigHolder::book(cx))
-                .is_none_or(|patch| patch.is_empty()),
-            "选回「跟随软件」后这本书该回到完全跟随默认，差量里不许留着残格"
+            "「跟随软件」还是那一个写法：默认层不落字"
         );
     }
 

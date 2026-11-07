@@ -36,6 +36,9 @@ pub enum Error {
     #[error("不支持的书籍格式：{0}")]
     UnsupportedFormat(String),
 
+    #[error("不支持的背景图格式：{0}")]
+    UnsupportedImageFormat(String),
+
     /// 容器完好、判定也放行了，但 `META-INF/encryption.xml` 里写的是 DRM 而不是字体
     /// 去混淆 —— 正文那些字节**永远**解不开。
     ///

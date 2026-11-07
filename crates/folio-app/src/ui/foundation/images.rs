@@ -600,6 +600,29 @@ pub fn cover_image(bytes: &[u8]) -> Option<Arc<Image>> {
     Some(Arc::new(Image::from_bytes(format, data)))
 }
 
+/// 读者给正文主题配的背景图字节 → 可画的 `Image`；格式认不出时返回 `None`。
+///
+/// 与 [`cover_image`] 同一条出口（认格式、SVG 栅格化、水墨灰度），两处不一样：
+///
+/// - **水墨由调用方点名**而不是问 [`ink_images`] 那个全局旗：正文主题是按书覆盖的，
+///   一本书单独开水墨时壳还是彩的 —— 全局旗认的是壳那一档，认不出书内的那一档。
+/// - SVG 栅格到 1024 而不是封面的 512：这张图要铺满整窗，512 的矢量纸纹拉到
+///   桌面全屏就是糊的。
+pub fn reading_background(bytes: &[u8], ink: bool) -> Option<Arc<Image>> {
+    let (format, data) = if folio_core::content::format::svg::looks_like_svg(bytes) {
+        let (png, _) = folio_core::content::format::svg::rasterize(bytes, Some((1024, 1024)))?;
+        (ImageFormat::Png, png)
+    } else {
+        let media_type = folio_core::content::format::guess_media_type(bytes)?;
+        (format_of(media_type), bytes.to_vec())
+    };
+    if ink {
+        let gray = grayscale_image_bytes(&data)?;
+        return Some(Arc::new(Image::from_bytes(ImageFormat::Png, gray)));
+    }
+    Some(Arc::new(Image::from_bytes(format, data)))
+}
+
 /// 一章的图片视图：`src` 相对本章目录解析成容器路径后查 `BookImages`。
 pub struct ChapterImages {
     book: Arc<BookImages>,

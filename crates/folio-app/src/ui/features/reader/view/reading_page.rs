@@ -35,7 +35,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, AppLifecyclePhase, AbsoluteLength, ClickEvent,
+    AbsoluteLength, Anchor, AnyElement, App, AppContext as _, AppLifecyclePhase, ClickEvent,
     Context, DefiniteLength, Entity, FocusHandle, Font, FontWeight, HighlightStyle, Hsla, Image,
     InteractiveElement, InteractiveText, IntoElement, ObjectFit, ParentElement, Pixels, Render,
     ScrollHandle, SharedString, StatefulInteractiveElement, Styled, StyledImage as _, StyledText,
@@ -56,9 +56,16 @@ use crate::ui::features::reader::model::translation::{self, TranslationStatus};
 use crate::ui::features::settings::CompactSettings;
 use crate::ui::features::shelf::AUTHOR_SEP;
 use crate::ui::foundation::images::cover_image;
+use crate::ui::foundation::reading_theme;
 use crate::ui::platform;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
+
+/// 阅读页这一帧的正文调色板。根底色（纸）与兜底文字色都从它取 ——
+/// 壳主题只管浮上来的那几层界面，不再管纸。
+fn reading_palette(cx: &gpui_kit::App) -> reading_theme::ReadingPalette {
+    reading_theme::resolve(&ConfigHolder::appearance(cx), cx)
+}
 use crate::ui::shell::AppShell;
 use crate::ui::shell::navigation::SizeClass;
 
@@ -624,7 +631,12 @@ impl ReadingPage {
 
     /// 听书那一下：没念 → 从视口当前句开口；念着 → 暂停；暂停 → 这一句从头再念。
     /// 状态机全在会话里（`model/speech.rs`），这一屏只把那一击递过去。
+    ///
+    /// 会员门禁在视图层拦一道：圆钮缺席之后，能摸到这一下的只剩快捷键。
     pub(in crate::ui::features::reader) fn toggle_speech(&mut self, cx: &mut Context<Self>) {
+        if !crate::ui::services::activation::premium(cx) {
+            return;
+        }
         self.reader
             .update(cx, |reader, cx| reader.toggle_speech(cx));
     }
@@ -635,7 +647,8 @@ impl ReadingPage {
     /// 这一屏是**专用的**听书面孔（封面 / 文字两面），圆钮只负责把门推开 ——
     /// 从前那一颗直接 toggle，读者想换一面看时没有地方按。
     pub(in crate::ui::features::reader) fn open_listen(&mut self, cx: &mut Context<Self>) {
-        if !self.reader.read(cx).speech_entry_visible() {
+        if !self.reader.read(cx).speech_entry_visible() || !crate::ui::services::activation::premium(cx)
+        {
             return;
         }
         self.reader.update(cx, |reader, cx| reader.arm_speech(cx));
@@ -1926,12 +1939,15 @@ impl Render for ReadingPage {
             .when(self.chrome.is_open() && toc_up, |this| {
                 this.child(self.bottom_bar(cx))
             });
+        // 阅读页的根底色是**正文纸**：跟随正文主题（选了哪套就是哪张纸），不再
+        // 跟壳主题走 —— 设置页弹到纸上面时，白壳配羊皮纸正是分离想要的样子。
+        let paper = reading_palette(cx);
         let mut root = div()
             .id("reader-page")
             .size_full()
             .relative()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
+            .bg(paper.bg)
+            .text_color(paper.fg)
             .child(column);
         // 目录那一屏最后挂：`anchored` 层按登记的先后决定谁在上面，它盖的是整块窗口，
         // 顶栏底栏因此压在遮罩下面（让那 172 像素反而会让读者以为底栏还能点，而那一击的
@@ -2606,8 +2622,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            text,
-            "甲一句。 甲二句。\n\n乙一句。乙二句。",
+            text, "甲一句。 甲二句。\n\n乙一句。乙二句。",
             "段首空白丢掉，句间空格照抄，段间空一行"
         );
         let expect = [

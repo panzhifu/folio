@@ -20,5 +20,6 @@ pub mod file_stem;
 pub mod font_names;
 pub mod font_primary;
 pub mod images;
+pub mod reading_theme;
 pub mod style;
 pub mod theme;

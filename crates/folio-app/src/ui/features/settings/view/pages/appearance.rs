@@ -31,14 +31,16 @@ use crate::ui::components::muted_label;
 use super::super::*;
 
 pub(in crate::ui::features::settings) fn appearance_page(cx: &App) -> Page {
+    // 顺序照改外观的目光走：浅深与主题是这一页的正事，语言一年也碰不上一回，
+    // 压到最后 —— 别让它占着第一格。
     page(
         tr(cx, "page.appearance"),
         IconName::Palette,
         vec![
-            language_group(cx),
             mode_group(cx),
             themes_group(cx),
-            custom_group(cx),
+            reading_theme_group(cx),
+            language_group(cx),
         ],
     )
 }
@@ -215,6 +217,47 @@ fn theme_cards_row(cx: &App, mode: ThemeMode) -> Row {
     Row::custom_block(tr(cx, title), move |cx| theme_grid(cx, mode))
         .description(tr(cx, hint))
         .keywords(&["theme", "color", "主题", "配色", "外观"])
+}
+
+/// 「正文主题」这一组：阅读界面（纸/墨/链接）自己的配色，与上面那两排**壳**主题分离
+/// —— 壳管设置页与书架画哪套，这一格只管正文纸上是什么颜色。写入的是全局默认，
+/// 阅读面板里那一格写的是本书差量（可覆盖全局）。
+fn reading_theme_group(cx: &App) -> Group {
+    group(
+        tr(cx, "group.reading_theme"),
+        vec![
+            Row::custom_block(tr(cx, "reading_theme.title"), move |cx| {
+                reading_theme_row(cx)
+            })
+            .description(tr(cx, "reading_theme.desc"))
+            .keywords(&[
+                "theme", "paper", "sepia", "纸", "纸色", "正文", "羊皮", "夜间", "背景",
+            ]),
+        ],
+    )
+}
+
+/// 全局默认的正文主题卡条。样卡画**全局默认**解析出来的那一侧：软件浅深钉在哪侧
+/// 就画哪侧，「跟随系统」按这台机器当下的外观折（与壳主题网格同一条读法）。
+fn reading_theme_row(cx: &App) -> AnyElement {
+    let appearance = ConfigHolder::default_appearance(cx);
+    let current = appearance
+        .reading_theme
+        .clone()
+        .filter(|name| folio_core::infra::reading_theme::find(name).is_some());
+    let dark = crate::ui::foundation::reading_theme::dark_side(&appearance, cx);
+    let desktop = crate::ui::host::supports_overlay_controls(cx);
+    crate::ui::components::ReadingThemePicker {
+        selected: current.as_deref(),
+        dark,
+        desktop,
+        on_pick: std::rc::Rc::new(|name, cx| {
+            ConfigHolder::edit_appearance(cx, |appearance| {
+                appearance.reading_theme = name.filter(|name| !name.is_empty());
+            });
+        }),
+    }
+    .render(cx)
 }
 
 /// 一套主题在卡片里要用的四种颜色。只留 `Copy` 的小东西，`ThemeConfig` 那一大坨
@@ -515,41 +558,6 @@ fn apply_choice(appearance: &mut Appearance, mode: ThemeMode, name: String) {
             Mode::Light
         };
     }
-}
-
-/// 读者自己的配色往哪个目录放，加一颗「打开所在文件夹」—— 与配置文件那一格同一个动作
-/// （共用 [`super::super::open_folder_button`]）。
-///
-/// 点了它**不会**当场重扫：那一份是启动时读的（`theme::register_user_themes`），所以说明
-/// 写的仍是「下次启动」。按钮只负责把人送到那个目录跟前，放 JSON 进去还是要读者自己做。
-fn custom_group(cx: &App) -> Group {
-    let dir = folio_core::infra::paths::themes_dir();
-    group(
-        tr(cx, "group.custom_themes"),
-        vec![
-            Row::custom_titled(tr(cx, "field.theme_dir"), move |cx| {
-                let dir = dir.clone();
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(muted_label(dir.display().to_string(), cx)),
-                    )
-                    .child(super::super::open_folder_button(
-                        "appearance-open-themes-dir",
-                        dir,
-                        cx,
-                    ))
-                    .into_any_element()
-            })
-            .description(tr(cx, "field.theme_dir.desc"))
-            .keywords(&["theme", "folder", "目录", "配色", "打开"]),
-        ],
-    )
 }
 
 #[cfg(test)]

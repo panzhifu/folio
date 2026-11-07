@@ -194,7 +194,7 @@ fn the_brightness_follows_the_book_and_hands_back_when_it_closes() {
 /// 是浅色 —— 读者只会以为设置没生效。这条也钉在自由函数上：外壳那一帧在测试里摸不到
 /// `Window::appearance()` 的系统档位。
 #[test]
-fn the_reader_mode_only_wins_while_the_book_is_mounted() {
+fn the_reader_mode_only_wins_while_the_layer_covers() {
     use super::themed_appearance;
     use folio_core::infra::config::{Appearance, Mode};
 
@@ -205,19 +205,19 @@ fn the_reader_mode_only_wins_while_the_book_is_mounted() {
     assert_eq!(
         themed_appearance(appearance.clone(), false).mode,
         Mode::Light,
-        "没有书时软件外观说了算，哪怕配置里记着一档阅读浅深"
+        "层没盖满时软件外观说了算，哪怕配置里记着一档阅读浅深"
     );
 
     appearance.reading_mode = Some(Mode::Dark);
     assert_eq!(
         themed_appearance(appearance.clone(), true).mode,
         Mode::Dark,
-        "书挂着时阅读页自己那一档覆盖软件外观"
+        "层盖满时阅读页自己那一档覆盖软件外观"
     );
     assert_eq!(
         themed_appearance(appearance, false).mode,
         Mode::Light,
-        "关书后回到软件外观"
+        "层没盖满（进场中 / 退场中 / 没开书）回到软件外观"
     );
 
     let inherited = Appearance {
@@ -392,18 +392,17 @@ fn the_layer_reads_presence_and_writes_distance_apart() {
     }
 }
 
-/// 回归门：读夜里的书退出来，架面**当场**就是白天的。
+/// 回归门：读夜里的书，架面在**转场全程**都是白天的；退场起步那一帧就翻回来。
 ///
-/// 失败的样子读者报过（Android 真机）：书是黑夜模式，退出阅读后书架仍然一片深色，点一下
-/// 才变回来。成因不在判据 —— [`themed_appearance`] 那一头是对的 —— 而在**谁重渲染架面**：
-/// 阅读层盖着的时候架面那条栈整个不画，栈底下那一屏的渲染缓存停在上一次画它的外观上
-/// （读书之前）。退场走完那一帧撤掉差量、主题换回白天，可那一屏既没进脏表、尺寸与
-/// `text_style` 也没变，`prepaint_view` 就把旧图原样放回去 —— 要等下一次交互让某个视图
-/// 重新渲染，屏幕才跟着变。
+/// 失败的样子读者报过（Android 真机）：书是黑夜模式，退出阅读时架面先跟着深一整段
+/// 退场动画、层放完才翻回白天 —— 那一翻就是一记闪。成因是折档判据跟着「层挂着」走：
+/// 层还在往外滑，壳就还涂着夜里，架面以深色露出来，等 `Presence` 走完才换肤。
 ///
-/// 修法是把「撤差量、换肤」挪到 [`AppShell::render`] 的最前面（书放掉的那一帧，架面还没画）：
-/// 那一帧的架面是**这一帧自己渲染**的，读的一定是刚换好的外观。这一条钉的就是那个时刻：
-/// 书一放掉，差量与解析出来的浅深在**同一次渲染调用之内**就已经是白天，不必等下一次交互。
+/// 现在的不变量是**全局主题只在层盖满的那段时间里是阅读档**（[`themed_appearance`]）：
+/// 进场没盖满不折（架面白天、深页从右盖上来），盖满那一帧才翻夜里（被挡住，看不见）；
+/// 退场起步那一帧就翻回白天（层还全盖着，看不见），架面全程是白天。正文自己的颜色
+/// 不跟壳走（`foundation::reading_theme` 取侧自持），差量也仍等退场走完才撤 —— 页面
+/// 在动画里保持夜里。这一条钉的是这几个时刻。
 #[cfg(not(mobile))]
 #[gpui_kit::test]
 fn leaving_a_night_book_repaints_the_shelf_in_the_app_mode(cx: &mut gpui_kit::TestAppContext) {
@@ -483,13 +482,23 @@ fn leaving_a_night_book_repaints_the_shelf_in_the_app_mode(cx: &mut gpui_kit::Te
     .expect("开书这一步该跑得起来");
     // 生产那条路是会话建起来时就挂上差量；这里递进来的文档不带书库主键，补上那一挂。
     cx.update(|cx| ConfigHolder::set_book(cx, Some(BookSettings::default())));
-    // 这一本单独选过夜里：与读者在弹层里点「夜里」写进去的是同一格。
-    cx.update(|cx| ConfigHolder::edit_book_appearance(cx, |a| a.reading_mode = Some(Mode::Dark)));
+    // 阅读浅深钉成夜里：与读者在弹层或设置页里点「夜里」写进去的是同一格
+    // （2026-11-07 起这一格只归全局，写默认层）。
+    cx.update(|cx| ConfigHolder::edit_appearance(cx, |a| a.reading_mode = Some(Mode::Dark)));
     cx.run_until_parked();
-    // 画够几帧：层停稳之后架面那条栈**不再被画**，它的渲染缓存就停在此刻这一档上。
-    for _ in 0..8 {
+    // 进场还没走完：层没盖满，壳**不折** —— 架面（此刻在层身后）仍是白天的软件外观。
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .expect("开书那一屏该画得出来");
+    assert_eq!(
+        cx.update(|cx| Theme::global(cx).mode),
+        ThemeMode::Light,
+        "进场没盖满，壳还是白天 —— 翻面要等盖满那一帧"
+    );
+    // 走完进场：盖满那一帧才折到夜里，此刻层正挡着整窗，读者看不见这一翻。
+    cx.executor().advance_clock(std::time::Duration::from_millis(400));
+    for _ in 0..4 {
         cx.update_window(handle, |_, window, cx| window.render_frame(cx))
-            .expect("开书那一屏该画得出来");
+            .expect("进场走完那一屏该画得出来");
         cx.run_until_parked();
     }
     let (mounted, reading_mode, theme_mode) = cx.update(|cx| {
@@ -501,10 +510,18 @@ fn leaving_a_night_book_repaints_the_shelf_in_the_app_mode(cx: &mut gpui_kit::Te
     });
     assert!(mounted, "书该挂着");
     assert_eq!(reading_mode, Some(Mode::Dark), "这一本该是夜里");
-    assert_eq!(theme_mode, ThemeMode::Dark, "书挂着的时候该是夜里");
+    assert_eq!(theme_mode, ThemeMode::Dark, "盖满之后该是夜里");
 
-    // 读者按返回：退场开始，`Presence` 走完那一段才放手。
+    // 读者按返回：退场开始。**起步那一帧**壳就翻回白天 —— 层还全盖着，看不见这一翻；
+    // 架面从这一帧起就是白天，那一记「层放完才翻」的闪没有了。
     cx.update(|cx| shell.update(cx, |shell, cx| shell.close_reading(cx)));
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .expect("退场起步那一屏该画得出来");
+    assert_eq!(
+        cx.update(|cx| Theme::global(cx).mode),
+        ThemeMode::Light,
+        "退场起步壳就回到白天 —— 层还盖着，读者看不见这一翻"
+    );
     cx.run_until_parked();
     let park = std::time::Duration::from_millis(500);
     for _ in 0..400 {

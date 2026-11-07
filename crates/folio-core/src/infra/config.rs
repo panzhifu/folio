@@ -458,24 +458,41 @@ impl<'de> Deserialize<'de> for PageTurn {
 #[serde(default)]
 pub struct Appearance {
     pub mode: Mode,
-    /// 阅读页的浅深，**全局默认那一档**：没单独设过的书在阅读层挂着时按它走。
+    /// 阅读页的浅深，全局只有这一份：夜里看书、白天刷架，软件里一个答案。
     ///
     /// `None` = 跟随软件外观 [`mode`](Self::mode)（默认）；`Some(System)` = 阅读页跟着
     /// 系统走；`Some(Light)` / `Some(Dark)` = 钉死一档。它存在这一节而不是 [`Reader`]：
     /// `Reader` 整份是排版失效键，而换浅深不该让任何一章重排（与
     /// [`page_turn`](Self::page_turn) 同一条理由）。
     ///
-    /// 阅读页盖满整窗，所以「只在阅读时覆盖」在画面上与全局换肤几乎一样；区别在
+    /// 阅读页盖满整窗，所以「只在阅读时翻面」在画面上与全局换肤几乎一样；区别在
     /// **关书之后**：书架、设置、下一次开书之前都还是读者在设置里选的
-    /// [`mode`](Self::mode)。
+    /// [`mode`](Self::mode)。壳的翻面时机归外壳（「层盖满才折」，见
+    /// `folio_app` 的 `themed_appearance`），配置里只存读者选了什么。
     ///
-    /// 单本书可以盖掉这一格（[`BookSettings`](crate::BookSettings) 的 `appearance` 差量），
-    /// 盖掉之后**也不碰 [`mode`](Self::mode)**：那一格只归软件。
+    /// **在 [`crate::infra::book_settings::APPEARANCE_GLOBAL_ONLY`]
+    /// 里**：曾经可按书覆盖，「每本书一个样式」让读者在两处各答一遍同一个问题，
+    /// 2026-11-07 起收归全局；库里旧差量若还存着这一格，overlay 会把它挡掉。
     pub reading_mode: Option<Mode>,
     /// 解析到浅色时用的主题名。
     pub light: Option<String>,
     /// 解析到深色时用的主题名。
     pub dark: Option<String>,
+    /// 正文主题名（[`crate::infra::reading_theme`] 的内置表里查），全局只有这一份。
+    ///
+    /// `None` = **跟随软件**：正文纸色用当前生效那本壳主题的底/墨色 —— 这是本格加上
+    /// 之前的老行为，也是选择器里的第一档。壳主题管「界面画哪套配色」，这一格管
+    /// 「正文纸上是什么颜色」：两者分离后，换壳主题不再牵着纸一起变。
+    ///
+    /// 存在这一节而不是 [`Reader`]：换纸色与一行字折在哪里毫无关系（与
+    /// [`page_turn`](Self::page_turn) 同一条理由），不该让任何一章重排。
+    ///
+    /// **在 [`crate::infra::book_settings::APPEARANCE_GLOBAL_ONLY`] 里**：曾经可按书
+    /// 覆盖（漫画挑深底、小说挑羊皮），与 [`reading_mode`](Self::reading_mode) 一起在
+    /// 2026-11-07 收归全局 —— 弹层与设置页两处写的是同一份。日 / 夜翻面不走这一格 ——
+    /// 那是浅深轴（[`reading_mode`](Self::reading_mode) 与 [`mode`](Self::mode)），
+    /// 正文主题自己带日夜两份配色，翻面翻的是同一套主题的深侧。
+    pub reading_theme: Option<String>,
     /// 正文翻页沿哪根轴平移（见 [`PageTurn`] 为什么这一格不在 `Reader` 里）。
     pub page_turn: PageTurn,
     /// 一次翻页动画走多久，单位**毫秒**（跟手那一截不算：它 1:1 跟着手指，没有时长可言）。
@@ -538,7 +555,7 @@ impl Appearance {
 
     /// 空串按「没设」处理：`""` 既不是合法主题名，又会让下拉框显示成空白。
     pub fn normalized(mut self) -> Self {
-        for name in [&mut self.light, &mut self.dark] {
+        for name in [&mut self.light, &mut self.dark, &mut self.reading_theme] {
             *name = name
                 .take()
                 .map(|s| s.trim().to_string())
@@ -575,10 +592,64 @@ impl Default for Appearance {
             reading_mode: None,
             light: None,
             dark: None,
+            reading_theme: None,
             page_turn: PageTurn::default(),
             turn_duration: Self::TURN_DURATION_DEFAULT,
             highlight_style: AnnotationStyle::default(),
             brightness: None,
+        }
+    }
+}
+
+/// 一套正文主题的背景图配置：日 / 夜各一张 + 铺到纸上的不透明度。
+///
+/// 挂在**主题名**上（[`Config::reading_backgrounds`] 的键），不挂在书或全局单格上：
+/// 纸纹是纸的一部分，换主题就换纸，书只挑主题（书的差量在
+/// [`crate::infra::book_settings`]），图跟着主题名走。日 / 夜各留一格而不是共用
+/// 一张：浅色纸纹压在深色纸上就是一块亮斑，两侧各配才都读得下去；只配了日图时
+/// 夜侧就是干净的纯色，不硬套。
+///
+/// 文件名是 [`crate::infra::backgrounds::store`] 交回来的那份（内容哈希 + 白名单
+/// 扩展名），`None` = 这一侧没配图。
+///
+/// 只 `PartialEq` 而不带 `Eq`：`opacity` 是浮点数（与 [`Appearance`] 那条同一口径）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeBackground {
+    /// 日侧（浅色那半边）的背景图文件名。
+    pub light: Option<String>,
+    /// 夜侧（深色那半边）的背景图文件名。
+    pub dark: Option<String>,
+    /// 图铺到纸上的不透明度，0.0–1.0。纸纹类的小图通常配个低不透明度，
+    /// 让它垫在墨色底下而不是盖在墨色上面。
+    pub opacity: f32,
+}
+
+impl ThemeBackground {
+    /// 满不透明度。滑条与归一共用这一个原点。
+    pub const OPACITY_FULL: f32 = 1.0;
+    /// 不透明度滑条的下限：再往下就是「看不见」，那一档由「清掉图」表达。
+    pub const OPACITY_MIN: f32 = 0.05;
+
+    /// 非有限值退回满不透明度（与 `turn_duration` 那条同一口径：坏数据不当成选择），
+    /// 其余夹进区间。
+    pub fn normalized_opacity(value: f32) -> f32 {
+        if !value.is_finite() {
+            Self::OPACITY_FULL
+        } else {
+            value.clamp(Self::OPACITY_MIN, Self::OPACITY_FULL)
+        }
+    }
+}
+
+impl Default for ThemeBackground {
+    /// 手写而不是 derive：`opacity` 的默认是**满不透明**，不是浮点的零值 ——
+    /// derive 出来的那份会把每张背景图读成全透明，读者只会觉得「这功能是坏的」。
+    fn default() -> Self {
+        Self {
+            light: None,
+            dark: None,
+            opacity: Self::OPACITY_FULL,
         }
     }
 }
@@ -1182,7 +1253,15 @@ impl Account {
 pub struct Membership {
     /// 还算数的最后那一天，本地日序号。`0` 就是从没开过 —— 1970-01-01 对任何今天都已是过去，
     /// 所以这一档不需要单独的哨兵值。
+    ///
+    /// 这是**天数档**的权益位。买断制上线后的新订单走 [`Membership::lifetime`]，这一格只
+    /// 服务老订单与「 lifetime 记账前买的时间」—— 两种权益并存，谁在谁都不重复给。
     pub until_day: i64,
+    /// 买断档：一次购买，权益跟设备绑定走，没有到期日。
+    ///
+    /// 与 [`Self::until_day`] 并列而不是互斥：老的天数订单照常记到期日，买断单置这一位。
+    /// `tier_on` 只要有任意一份权益在就算 Premium。
+    pub lifetime: bool,
     /// 这台设备上兑过的那几笔，见 [`Claim`]。
     ///
     /// **只用来给「这台设备」那一屏说话**：到期日不从它重算。台账是从这一版才开始记的，
@@ -1203,6 +1282,8 @@ pub struct Claim {
     pub days: i64,
     /// 到账那一天，本地日序号 —— 与 [`Membership::until_day`] 同一个口径。
     pub on_day: i64,
+    /// 这一笔是买断单。`days` 在买断单上是 0，屏上的句子由这一位决定，不由天数。
+    pub lifetime: bool,
 }
 
 /// 会员等级。**是派生值，不落盘**（见 [`Membership`] 的说明），所以没有 `Serialize`。
@@ -1217,8 +1298,11 @@ pub enum MembershipTier {
 
 impl Membership {
     /// 在 `today`（本地日序号）这一天算哪一档。含当天。
+    ///
+    /// 买断位与到期日**并存不互斥**：老订单在 `until_day` 里过日子，买断单一票通过 ——
+    /// 到期日早就不算数的读者，只要他买过一次断，就还是 Premium。
     pub fn tier_on(&self, today: i64) -> MembershipTier {
-        if today <= self.until_day {
+        if self.lifetime || today <= self.until_day {
             MembershipTier::Premium
         } else {
             MembershipTier::Standard
@@ -1268,6 +1352,31 @@ impl Membership {
                 order,
                 days,
                 on_day: today,
+                lifetime: false,
+            });
+        }
+    }
+
+    /// 记一笔**买断**到账：置永久位，台账里留一行（`days` 为 0，句子由 [`Claim::lifetime`] 说）。
+    ///
+    /// `today` 的口径与 [`Self::record`] 相同：出发那一刻取好的那一个。
+    /// 空订单号不记 —— 没什么可认的。
+    pub fn record_lifetime(&mut self, order: impl Into<String>, today: i64) {
+        let order = order.into().trim().to_string();
+        if order.is_empty() {
+            return;
+        }
+        self.lifetime = true;
+        if let Some(existing) = self.claims.iter_mut().find(|claim| claim.order == order) {
+            existing.days = 0;
+            existing.lifetime = true;
+            existing.on_day = today;
+        } else {
+            self.claims.push(Claim {
+                order,
+                days: 0,
+                on_day: today,
+                lifetime: true,
             });
         }
     }
@@ -1276,9 +1385,11 @@ impl Membership {
     ///
     /// 整段清零而不是「扣掉那一笔的天数」，是因为扣不动也说不清：一笔 365 天买了两个月，
     /// 该退回来的到底是 365 还是 300？而服务端那一侧只有「这一单还绑不绑在这台」这一个事实。
-    /// 界面在按下去之前就把这一句摆出来了（`confirm.release.*`）。
+    /// 界面在按下去之前就把这一句摆出来了（`confirm.release.*`）。买断位一并清 ——
+    /// 服务端把那一单标回「可认领」，权益跟着设备走，不跟这台的过去走。
     pub fn clear_activation(&mut self) {
         self.until_day = 0;
+        self.lifetime = false;
         self.claims.clear();
     }
 }
@@ -1311,6 +1422,80 @@ pub struct OpdsCatalog {
     pub url: String,
     pub username: String,
     pub password: String,
+}
+
+/// 网盘取书：**独立于同步那一节**的账号配置（[`Sync`] 只管进度/批注快照，两边常常
+/// 不是同一个目录、也不假设是同一家服务商）。协议客户端住在 [`crate::net::cloud`]，
+/// 这里只存「连谁、用哪个身份」。
+///
+/// 凭据与 WebDAV 同步密码、OPDS 书源密码同住 `config.json`：落盘已经收在 0600
+/// （见 [`Config::save_to`]），不单开秘密文件 —— 密钥每多存一处就多一处泄漏面。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Cloud {
+    pub webdav: WebDavDrive,
+    pub baidu: BaiduDrive,
+}
+
+impl Cloud {
+    /// 地址、用户名、目录去掉误带的首尾空白；密码原样保留 —— 空格可能是密码的一部分。
+    /// token 不同：那是机器签发的密文，本来就不可能含空格，粘贴带进来的首尾空白
+    /// 清掉才是帮读者。
+    pub fn normalized(mut self) -> Self {
+        self.webdav = self.webdav.normalized();
+        self.baidu = self.baidu.normalized();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebDavDrive {
+    /// 入口根地址（建议 https）。浏览器从它下面的 [`WebDavDrive::dir`] 打开。
+    pub url: String,
+    pub username: String,
+    pub password: String,
+    /// 打开浏览器时落在哪一级目录；空串 = 从根开始。
+    pub dir: String,
+}
+
+impl WebDavDrive {
+    pub fn normalized(mut self) -> Self {
+        self.url = self.url.trim().to_string();
+        self.username = self.username.trim().to_string();
+        // 去掉两端斜杠，拼路径时只由浏览器层补一次 —— 与 [`Sync::normalized`] 对
+        // `remote_dir` 同一条规矩。
+        self.dir = self.dir.trim().trim_matches('/').to_string();
+        self
+    }
+
+    /// 有地址且至少填了用户名，才谈得上浏览。
+    pub fn configured(&self) -> bool {
+        !self.url.is_empty() && !self.username.is_empty()
+    }
+}
+
+/// 百度网盘。一期只存读者**整段粘贴进来**的 `access_token`（约 30 天有效）：换新
+/// token 要 `client_id` / `client_secret`，那是开发者侧的事，等云函数中转那条路
+/// 落地再扩（届时加字段，老配置靠 serde 缺省补齐）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BaiduDrive {
+    pub access_token: String,
+}
+
+impl BaiduDrive {
+    /// token 是机器签发的密文，粘贴带进来的首尾空白清掉 —— 与「密码原样」
+    /// 相反的一条，判据是 token 不可能含空格（见 [`Cloud::normalized`]）。
+    pub fn normalized(mut self) -> Self {
+        self.access_token = self.access_token.trim().to_string();
+        self
+    }
+
+    /// 有一段 token，才谈得上浏览；过没过期不用在这里管，请求自己会说。
+    pub fn configured(&self) -> bool {
+        !self.access_token.is_empty()
+    }
 }
 
 /// `.txt` 小说分章规则的**读者那一层差量**：叠在出厂那张表之上（关掉的条目、自己加的条目、
@@ -1708,9 +1893,16 @@ pub struct Config {
     pub sync: Sync,
     pub account: Account,
     pub opds: Opds,
+    /// 网盘取书的账号（WebDAV + 百度）。与 [`Sync`] 独立成节，理由见 [`Cloud`]。
+    pub cloud: Cloud,
     pub novel: Novel,
     pub membership: Membership,
     pub logging: Logging,
+    /// 正文主题的背景图，按**主题名**索引（见 [`ThemeBackground`]）。
+    ///
+    /// 存在根节而不在 [`Appearance`] 里：Appearance 整节是按书差量的底表，图配置
+    /// 挂进去就会被逐格比进每本书的差量 —— 图是主题的属性，不是某一本书的。
+    pub reading_backgrounds: BTreeMap<String, ThemeBackground>,
 }
 
 impl Default for Config {
@@ -1732,9 +1924,11 @@ impl Default for Config {
             sync: Sync::default(),
             account: Account::default(),
             opds: Opds::default(),
+            cloud: Cloud::default(),
             novel: Novel::default(),
             membership: Membership::default(),
             logging: Logging::default(),
+            reading_backgrounds: BTreeMap::new(),
         }
     }
 }
@@ -1756,6 +1950,7 @@ impl Config {
         self.sync = self.sync.normalized();
         self.account = self.account.normalized();
         self.opds = self.opds.normalized();
+        self.cloud = self.cloud.normalized();
         self.novel = self.novel.normalized();
         // 书库位置去掉首尾空白：填成 "  /x  " 会让 `is_confirmed` 说「确认过」，
         // 而后面按这个串去找目录会找不到。
@@ -1770,6 +1965,17 @@ impl Config {
             }
         }
         self.logging = self.logging.normalized();
+        // 背景图配置：不透明度归一（坏值不当成选择），空文件名按「没配」处理 ——
+        // 与 Appearance 里主题名那两条同一口径。
+        for background in self.reading_backgrounds.values_mut() {
+            background.opacity = ThemeBackground::normalized_opacity(background.opacity);
+            for slot in [&mut background.light, &mut background.dark] {
+                *slot = slot
+                    .take()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            }
+        }
         self
     }
 
@@ -1979,11 +2185,12 @@ mod tests {
     //! 这些测试盯的是「用户手改这个 JSON 之后程序会怎样」，所以全部从 JSON 文本出发，
     //! 不去直接改结构体 —— 结构体改不出坏输入。
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
     use crate::infra::config::{
-        Config, Env, Layer, Membership, MembershipTier, TranslationEngine, WatchDir,
+        Config, Env, Layer, Membership, MembershipTier, ThemeBackground, TranslationEngine,
+        WatchDir,
     };
     use crate::infra::i18n::Locale;
     use crate::{
@@ -2202,6 +2409,7 @@ mod tests {
                 light: Some("Gruvbox".into()),
                 dark: Some("Molokai".into()),
                 // 故意不是默认值：这一趟要把新键真写出去再读回来，填默认值等于没测到它。
+                reading_theme: Some("sepia".into()),
                 page_turn: PageTurn::SlideUp,
                 turn_duration: 420.0,
                 highlight_style: AnnotationStyle::Wavy,
@@ -2243,6 +2451,43 @@ mod tests {
         assert!(
             got.library.dir.is_empty(),
             "没确认过书库位置就是空串，不是某个默认目录"
+        );
+    }
+
+    /// 背景图那一节的归一：非有限与越界的不透明度退回能用的档，空文件名按「没配」算
+    /// —— 与 `Appearance` 里主题名那两条同一口径。没有这一节的老配置照常读。
+    #[test]
+    fn a_reading_background_entry_is_normalized() {
+        let got = load(
+            r#"{"reading_backgrounds":{"sepia":{"light":"abc.png","dark":"","opacity":7.0}}}"#,
+        );
+        let background = &got.reading_backgrounds["sepia"];
+        assert_eq!(background.light.as_deref(), Some("abc.png"));
+        assert_eq!(background.dark, None, "空文件名不是一张图");
+        assert_eq!(
+            background.opacity,
+            ThemeBackground::OPACITY_FULL,
+            "越界归满"
+        );
+
+        // 非有限值 JSON 写不出来（"NaN" 是个字符串，整键在 serde 那层就回落默认），
+        // 只能从程序路径进来 —— 直接构造一份过归一，钉住「坏数据不当成选择」。
+        let mut backgrounds = BTreeMap::new();
+        backgrounds.insert(
+            "sepia".to_string(),
+            ThemeBackground {
+                opacity: f32::NAN,
+                ..ThemeBackground::default()
+            },
+        );
+        let nan = Config {
+            reading_backgrounds: backgrounds,
+            ..Config::default()
+        }
+        .normalized();
+        assert_eq!(
+            nan.reading_backgrounds["sepia"].opacity,
+            ThemeBackground::OPACITY_FULL,
         );
     }
 
@@ -2774,6 +3019,35 @@ mod tests {
         );
     }
 
+    /// 买断位与到期日**并存不互斥**：老的天数订单过期后，只要买过一次断就还是 Premium；
+    /// 解除时两位一起清。台账那一行由 `lifetime` 位说话，`days` 为 0。
+    #[test]
+    fn a_lifetime_bit_outlives_an_expired_days_order_and_clears_with_it() {
+        let mut member = Membership {
+            until_day: 100,
+            ..Membership::default()
+        };
+        member.record_lifetime("3".repeat(29), 50);
+        assert!(member.lifetime);
+        assert_eq!(member.claims.len(), 1);
+        assert!(member.claims[0].lifetime);
+        assert_eq!(member.claims[0].days, 0);
+
+        // 天数早过去了，买断还在。
+        assert_eq!(member.tier_on(20_501), MembershipTier::Premium);
+
+        // 解除是整段清零：买断位跟着走，服务端那一单标回可认领。
+        member.clear_activation();
+        assert!(!member.lifetime);
+        assert_eq!(member.tier_on(50), MembershipTier::Standard);
+
+        // 空订单号不记，也不置位。
+        let mut member = Membership::default();
+        member.record_lifetime("  ", 50);
+        assert!(!member.lifetime);
+        assert!(member.claims.is_empty());
+    }
+
     /// 兑来的天数接在哪一天之后。三条都会把钱算少或算多，所以各自钉一次：
     /// 从没开过时今天算第一天、有效期内续期不亏剩下的、过期了不从旧到期日起算。
     #[test]
@@ -3062,5 +3336,62 @@ mod opds_config_tests {
         assert_eq!(catalog.url, "https://catalog.test/opds/");
         assert_eq!(catalog.username, "reader");
         assert_eq!(catalog.password, "  pass with spaces  ");
+    }
+
+    use super::{BaiduDrive, Cloud, WebDavDrive};
+
+    #[test]
+    fn cloud_trims_fields_but_keeps_the_secrets() {
+        let config = Config {
+            cloud: Cloud {
+                webdav: WebDavDrive {
+                    url: "  https://dav.jianguoyun.com/dav/  ".into(),
+                    username: "  reader  ".into(),
+                    password: "  pass with spaces  ".into(),
+                    dir: "  /我的书/  ".into(),
+                },
+                baidu: BaiduDrive {
+                    access_token: "  121.xyz789  ".into(),
+                },
+            },
+            ..Config::default()
+        }
+        .normalized();
+        assert_eq!(config.cloud.webdav.url, "https://dav.jianguoyun.com/dav/");
+        assert_eq!(config.cloud.webdav.username, "reader");
+        assert_eq!(config.cloud.webdav.password, "  pass with spaces  ");
+        assert_eq!(config.cloud.webdav.dir, "我的书");
+        // token 是机器签发的密文，粘贴带进来的首尾空白清掉 —— 与密码相反的一条。
+        assert_eq!(config.cloud.baidu.access_token, "121.xyz789");
+    }
+
+    #[test]
+    fn cloud_configured_needs_an_identity() {
+        let webdav = WebDavDrive::default();
+        assert!(!webdav.configured());
+        let webdav = WebDavDrive {
+            url: "https://dav.example/".into(),
+            ..WebDavDrive::default()
+        };
+        assert!(!webdav.configured(), "有地址没用户名不算配置好");
+        assert!(WebDavDrive {
+            url: "https://dav.example/".into(),
+            username: "reader".into(),
+            ..WebDavDrive::default()
+        }
+        .configured());
+
+        assert!(!BaiduDrive::default().configured());
+        assert!(BaiduDrive {
+            access_token: "121.abc".into(),
+        }
+        .configured());
+    }
+
+    #[test]
+    fn a_cloud_section_defaults_in_when_the_json_lacks_it() {
+        // 老配置文件没有 cloud 节：serde 缺省整节，别让它拖垮整份配置。
+        let config: Config = serde_json::from_str(r#"{"version":1,"reader":{}}"#).unwrap();
+        assert_eq!(config.cloud, Cloud::default());
     }
 }

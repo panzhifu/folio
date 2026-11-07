@@ -27,6 +27,14 @@ use super::super::*;
 use super::translation;
 
 pub(in crate::ui::features::settings) fn ai_page(cx: &App) -> Page {
+    // 门禁：选区问 AI 与划词翻译同一档会员（同一份端点配置，理由见 ConfigHolder::ai）。
+    if !crate::ui::services::activation::premium(cx) {
+        return page(
+            tr(cx, "page.ai"),
+            IconName::Sparkles,
+            vec![super::membership::gate_group("membership.gate_ai", cx)],
+        );
+    }
     page(
         tr(cx, "page.ai"),
         IconName::Sparkles,
@@ -105,6 +113,9 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.update(|cx: &mut App| {
             ConfigHolder::install(Config::default(), cx);
+            // 翻译与 AI 是会员功能（门禁见 activation::premium）：这两条测的是页内容
+            // 而不是门禁，所以先把永久位摆上，让两屏以会员的样子构造。
+            ConfigHolder::edit_membership(cx, |membership| membership.lifetime = true);
             // 翻译屏那组端点只在选中 OpenAI 兼容那一档时摆（引擎私有的参数藏在别的档不该
             // 露出来），所以这一条要先把引擎换过去 —— AI 屏那一组是**恒摆**的，它不看翻译
             // 用哪只引擎。
@@ -141,6 +152,8 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.update(|cx: &mut App| {
             ConfigHolder::install(Config::default(), cx);
+            // 同上：测的是页内容，先把会员位摆上绕开门禁。
+            ConfigHolder::edit_membership(cx, |membership| membership.lifetime = true);
             let page = ai_page(cx);
             let switch = row(&page, "AI 屏", tr(cx, "field.ai_enabled").as_str());
             let (get, set) = match &switch.kind {

@@ -256,6 +256,7 @@ fn candidate_path(candidate: &Candidate) -> &Path {
     match &candidate.origin {
         Origin::Local(path) => path,
         Origin::Remote { .. } => Path::new(""),
+        Origin::Cloud { .. } => Path::new(""),
     }
 }
 

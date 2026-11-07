@@ -40,6 +40,10 @@ pub(crate) struct Row {
     /// 不等于在宽屏上也不该有：「最大行长 0 表示随窗口铺满」这类约定只有这一处解释。
     pub desc: Option<SharedString>,
     pub keywords: &'static [&'static str],
+    /// 手机端把这行变成**无标签**的一格：这句进输入框当占位虚字，标题不再摆出来。
+    /// 桌面不受影响（标题照旧在左）。给「框本身就是全部说明」的场合用 —— 会员页
+    /// 那格订单编号，标题挡在框上反而多一层。
+    pub placeholder: Option<SharedString>,
     pub kind: RowKind,
 }
 
@@ -118,6 +122,7 @@ impl Row {
             title,
             desc: None,
             keywords: &[],
+            placeholder: None,
             kind: RowKind::Toggle {
                 get: Rc::new(get),
                 set: Rc::new(set),
@@ -160,6 +165,7 @@ impl Row {
             title,
             desc: None,
             keywords: &[],
+            placeholder: None,
             kind: RowKind::Dropdown {
                 options: Rc::new(options),
                 scrollable,
@@ -179,6 +185,7 @@ impl Row {
             title,
             desc: None,
             keywords: &[],
+            placeholder: None,
             kind: RowKind::Text {
                 get: Rc::new(get),
                 set: Rc::new(set),
@@ -196,6 +203,7 @@ impl Row {
             title,
             desc: None,
             keywords: &[],
+            placeholder: None,
             kind: RowKind::Font {
                 get: Rc::new(get),
                 set: Rc::new(set),
@@ -211,6 +219,7 @@ impl Row {
             title,
             desc: None,
             keywords: &[],
+            placeholder: None,
             kind: RowKind::Info {
                 value: value.into(),
             },
@@ -224,6 +233,7 @@ impl Row {
             title: SharedString::default(),
             desc: None,
             keywords: &[],
+            placeholder: None,
             kind: RowKind::Custom {
                 title: None,
                 vertical: false,
@@ -240,6 +250,7 @@ impl Row {
             title: SharedString::default(),
             desc: None,
             keywords: &[],
+            placeholder: None,
             kind: RowKind::Custom {
                 title: Some(title),
                 vertical: false,
@@ -258,6 +269,7 @@ impl Row {
             title: SharedString::default(),
             desc: None,
             keywords: &[],
+            placeholder: None,
             kind: RowKind::Custom {
                 title: Some(title),
                 vertical: true,
@@ -274,6 +286,15 @@ impl Row {
         self
     }
 
+    /// 手机端把标题收进输入框当占位虚字（见 [`Row::placeholder`]）。
+    pub(in crate::ui::features::settings) fn placeholder(
+        mut self,
+        placeholder: impl Into<SharedString>,
+    ) -> Self {
+        self.placeholder = Some(placeholder.into());
+        self
+    }
+
     pub(in crate::ui::features::settings) fn keywords(
         mut self,
         keywords: &'static [&'static str],
@@ -287,6 +308,10 @@ impl Row {
 pub(crate) struct Group {
     pub title: SharedString,
     pub rows: Vec<Row>,
+    /// 裸组：两端都不给这一组套卡、不画节头与行间发丝线。给**自带完整视觉的
+    /// 自定义行**用 —— 会员页那张黑金卡自己就是一张卡，再套一层卡就成了
+    /// 「卡中卡」，反而说不清哪层是边界。
+    pub bare: bool,
 }
 
 /// 一页 = 标题 + 图标 + 若干组。
@@ -301,6 +326,15 @@ pub(crate) fn group(title: impl Into<SharedString>, rows: Vec<Row>) -> Group {
     Group {
         title: title.into(),
         rows,
+        bare: false,
+    }
+}
+
+impl Group {
+    /// 标成裸组：渲染端不套卡（见 [`Group::bare`]）。
+    pub(crate) fn bare(mut self) -> Self {
+        self.bare = true;
+        self
     }
 }
 
@@ -331,6 +365,7 @@ pub(crate) fn number(
         title: tr(cx, spec.title),
         desc: Some(tr(cx, spec.description)),
         keywords: spec.keywords,
+        placeholder: None,
         kind: RowKind::Number {
             spec,
             get: Rc::new(get),

@@ -19,6 +19,7 @@
 //! 这一区**不依赖 [`crate::store`]**（[`services`] 收的是调用方给的句柄），
 //! 也不依赖 [`crate::layout`]：它服务所有人，所以谁都不许反过来要求它懂业务。
 
+pub mod backgrounds;
 pub mod book_settings;
 pub mod budget;
 pub mod config;
@@ -28,6 +29,7 @@ pub mod i18n;
 pub mod logging;
 pub mod metrics;
 pub mod paths;
+pub mod reading_theme;
 pub mod services;
 pub mod task;
 pub mod time;

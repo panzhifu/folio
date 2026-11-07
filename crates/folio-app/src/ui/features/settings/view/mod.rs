@@ -508,6 +508,8 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
             ConfigHolder::install(Config::default(), cx);
+            // 翻译是会员功能：这条测的是页内容，先把永久位摆上绕开门禁（同 ai.rs 那两条）。
+            ConfigHolder::edit_membership(cx, |membership| membership.lifetime = true);
             let index = SettingsPage::Translation.index();
             let notes = card(cx);
             let titles = |cx: &App| {
@@ -567,6 +569,8 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
             ConfigHolder::install(Config::default(), cx);
+            // 同上：测的是页内容，先把会员位摆上。
+            ConfigHolder::edit_membership(cx, |membership| membership.lifetime = true);
             let index = SettingsPage::Ai.index();
             let notes = card(cx);
             let page = &spec_pages(cx, &notes)[index];
@@ -604,6 +608,8 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
             ConfigHolder::install(Config::default(), cx);
+            // WebDAV 那一路是会员功能：这条测的是双路线形，先把永久位摆上绕开门禁。
+            ConfigHolder::edit_membership(cx, |membership| membership.lifetime = true);
             let notes = card(cx);
             let index = SettingsPage::Sync.index();
 

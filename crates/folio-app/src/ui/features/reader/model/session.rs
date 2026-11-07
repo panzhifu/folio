@@ -185,6 +185,27 @@ pub struct StackMotionView {
     pub progress: f32,
 }
 
+/// 正文背景图的会话内状态：按 key 装进来的那一份解好的图。
+///
+/// key 变了（换主题、翻面换侧、换图、水墨翻档）就整份作废重读 —— 图挂在
+/// **主题名**上（`config.reading_backgrounds`），所以书换了主题就换了纸纹，
+/// 会话这边只认 key，不需要知道是哪一格变了。
+#[derive(Clone)]
+pub(in crate::ui::features::reader) struct ReadingBg {
+    /// 这一格是按哪张图装进来的。
+    pub(in crate::ui::features::reader) key: ReadingBgKey,
+    /// 解好的图；还没解完、读不到、或 key 本来就是「没配图」时是 `None`。
+    pub(in crate::ui::features::reader) image: Option<Arc<gpui_kit::Image>>,
+}
+
+/// 背景图的装填键。`name = None` = 当前主题没配这一侧的图。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(in crate::ui::features::reader) struct ReadingBgKey {
+    pub(in crate::ui::features::reader) name: Option<String>,
+    /// 水墨那一档图要走灰度，进 key：同一张图在两档下是两份像素。
+    pub(in crate::ui::features::reader) ink: bool,
+}
+
 pub struct ReaderSession {
     pub(in crate::ui::features::reader) source: Source,
     /// 上一次同步下来的读者偏好。与 [`ConfigHolder`] 里的不一致就推给排版状态。
@@ -223,6 +244,13 @@ pub struct ReaderSession {
     pub(in crate::ui::features::reader) pending_turn: Option<TurnIntent>,
     /// 页面捕获纹理的脏标记：偏好/主题/排版变了就置真，下一帧重烘。
     pub(in crate::ui::features::reader) capture_dirty: bool,
+    /// 上一帧正文用的纸色。换纸（正文主题、浅深、水墨翻档）的那一帧把
+    /// [`Self::capture_dirty`] 置真：翻页那几层烘出来的纹理与捕获清屏色都拿着
+    /// 上一张纸的颜色。`None` = 这一帧是头一帧，无从比起。
+    pub(in crate::ui::features::reader) applied_reading_bg: Option<gpui_kit::Hsla>,
+    /// 读者给当前正文主题配的背景图（纸纹）。见 [`ReadingBg`] 与
+    /// [`Self::sync_reading_bg`]；`None` = 还没装过第一份（首帧纸色照旧）。
+    pub(in crate::ui::features::reader) reading_bg: Option<ReadingBg>,
     /// 纸张几何（页眉/页脚带、手势条、外壳占位）变了。
     ///
     /// 与 [`Self::capture_dirty`] 分开是因为时序：这些数由阅读页在**子视图 render 之前**
@@ -708,6 +736,8 @@ impl ReaderSession {
             turn: None,
             pending_turn: None,
             capture_dirty: true,
+            applied_reading_bg: None,
+            reading_bg: None,
             capture_box_dirty: false,
             captured_page: None,
             captured_size: None,
@@ -901,6 +931,8 @@ impl ReaderSession {
             turn: None,
             pending_turn: None,
             capture_dirty: true,
+            applied_reading_bg: None,
+            reading_bg: None,
             capture_box_dirty: false,
             captured_page: None,
             captured_size: None,
@@ -1912,6 +1944,52 @@ impl ReaderSession {
                 book.set_prefs_on_all(effective);
             }
         }
+    }
+
+    /// 读者给当前正文主题配的背景图（纸纹）：key 变了就作废重读。
+    ///
+    /// 读盘与解码在后台（`background_spawn`）：一张纸纹几百 KB 到几 MB，串在绘制
+    /// 帧上就是「换主题那一帧顿一下」。解好落回会话时**先比 key 再落**：读者连换
+    /// 两套主题时，先出发的那一趟不许把后一套的图盖上（它解完时屏幕要的已经不是它）。
+    ///
+    /// `cx.notify` 只在真落图的那一下发：等待期间帧照旧画（纸色顶着），不空转重画。
+    pub(in crate::ui::features::reader) fn sync_reading_bg(
+        &mut self,
+        key: ReadingBgKey,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reading_bg.as_ref().is_some_and(|bg| bg.key == key) {
+            return;
+        }
+        self.reading_bg = Some(ReadingBg {
+            key: key.clone(),
+            image: None,
+        });
+        let Some(name) = key.name.clone() else {
+            return;
+        };
+        let path = folio_core::infra::backgrounds::path_of(&name);
+        let ink = key.ink;
+        cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_spawn(async move {
+                    std::fs::read(&path).ok().and_then(|bytes| {
+                        crate::ui::foundation::images::reading_background(&bytes, ink)
+                    })
+                })
+                .await;
+            this.update(cx, |session, cx| {
+                let fresh = session.reading_bg.as_ref().is_some_and(|bg| bg.key == key);
+                if fresh {
+                    if let Some(reading_bg) = session.reading_bg.as_mut() {
+                        reading_bg.image = loaded;
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// 开书时把这一本自己的阅读设置差量从库里读出来、叠到生效层上。

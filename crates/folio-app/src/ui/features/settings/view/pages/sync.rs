@@ -12,7 +12,9 @@
 //! 桌面那套设置行没有密码档，为它单独造一种只在一端生效的样子不值。
 
 use super::super::*;
+use super::membership;
 use crate::ui::components::muted_label;
+use crate::ui::services::activation;
 use crate::ui::services::lansync::{self, Status as LanStatus};
 use crate::ui::services::sync::{self, Failure, Status};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -20,14 +22,19 @@ use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{AnyElement, FontWeight};
 
 pub(in crate::ui::features::settings) fn sync_page(cx: &App) -> Page {
-    page(
-        tr(cx, "page.sync"),
-        IconName::ArrowDownUp,
-        // 顺序按「一条路连着摆」：WebDAV 的字段紧接它的状态与两颗钮，局域网那一组整体排在
-        // 最后。把新东西插在中间会把读者已经熟悉的「测试连接 / 立即同步」往下推 —— 首屏
-        // 放不下时那就是「按钮不见了」。
-        vec![server_group(cx), action_group(cx), lan_group(cx)],
-    )
+    // 门禁：WebDAV 快照同步是会员功能（判据只有 activation::premium 一条）。非会员这一路
+    // 整段换成一句引导，局域网同步照旧 —— 收费的是「进度批注跟着走」那一档，
+    // 不是「局域网里两台设备」本身。
+    let mut groups = if activation::premium(cx) {
+        vec![server_group(cx), action_group(cx)]
+    } else {
+        vec![membership::gate_group("membership.gate_sync", cx)]
+    };
+    // 顺序按「一条路连着摆」：WebDAV 的字段紧接它的状态与两颗钮，局域网那一组整体排在
+    // 最后。把新东西插在中间会把读者已经熟悉的「测试连接 / 立即同步」往下推 —— 首屏
+    // 放不下时那就是「按钮不见了」。
+    groups.push(lan_group(cx));
+    page(tr(cx, "page.sync"), IconName::ArrowDownUp, groups)
 }
 
 fn server_group(cx: &App) -> Group {
@@ -405,6 +412,8 @@ mod tests {
             // 虚拟列表根本不摆它出来 —— 那时 `try_find` 说「没有」，而那句不是关于代码的。
             .open_window(size(px(900.), px(1400.)), |window, cx| {
                 ConfigHolder::install(Config::default(), cx);
+                // WebDAV 那一路是会员功能：这条测的是行渲染，先把永久位摆上绕开门禁。
+                ConfigHolder::edit_membership(cx, |membership| membership.lifetime = true);
                 // 落点直接给「同步」那一页：那两行自定义才会进树。
                 let view = cx.new(|cx| SettingsView::new(SettingsPage::Sync, cx));
                 Root::new(view, window, cx)

@@ -1180,7 +1180,10 @@ impl ReaderSession {
             .unwrap_or_else(|| self.pending_style(cx));
         // 「问 AI」那一格摆不摆，与卡片按几格算宽，读的是同一个值：取两次就可能一次说
         // 有、一次按没有算，卡片于是正好窄掉那一格。
-        let ai = ReaderSession::ai_available(cx);
+        // 会员门禁与端点配置同一条资格线：不是会员时翻译与 AI 两格整段缺席 ——
+        // 「能力不存在时这一格不出现」，与词典那一格同一判据，不摆按下去才报错的按钮。
+        let premium = crate::ui::services::activation::premium(cx);
+        let ai = premium && ReaderSession::ai_available(cx);
         // 词典那一格同理：本地一本都没导入时整个缺席，判据与查词那一趟读同一份配置。
         let dict = crate::ui::services::dictionary::available(cx);
         let actions = h_flex()
@@ -1210,15 +1213,18 @@ impl ReaderSession {
             ))
             // 翻译：把选区交给外部引擎，弹层锚在菜单落地的那一处（菜单先收）。
             // 与笔记那格同一类「就地做一件事」的入口，所以排在它旁边。
-            .child(action_cell(
-                "selection-translate",
-                IconName::Languages,
-                tr(cx, "reader.translate"),
-                foreground,
-                hover,
-                reader.clone(),
-                |r, _, cx| r.open_translation(cx),
-            ))
+            // 会员门禁：非会员整格缺席（与 AI 那格同一条资格线）。
+            .children(premium.then(|| {
+                action_cell(
+                    "selection-translate",
+                    IconName::Languages,
+                    tr(cx, "reader.translate"),
+                    foreground,
+                    hover,
+                    reader.clone(),
+                    |r, _, cx| r.open_translation(cx),
+                )
+            }))
             // 词典：查的是本地 StarDict，和翻译一样是「就地做一件事」的入口。一本都没
             // 导入时整格缺席 —— 摆一颗按下去只会说「没有词典」的按钮没有意义。
             .children(dict.then(|| {

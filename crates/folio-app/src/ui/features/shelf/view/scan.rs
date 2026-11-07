@@ -101,6 +101,7 @@ impl ScanRow {
         match &self.candidate.origin {
             folio_core::Origin::Local(path) => Some(path),
             folio_core::Origin::Remote { .. } => None,
+            folio_core::Origin::Cloud { .. } => None,
         }
     }
 }

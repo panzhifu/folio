@@ -540,3 +540,43 @@ fn log_level(level: &tracing::Level) -> log::Level {
         tracing::Level::TRACE => log::Level::Trace,
     }
 }
+
+/// 这台 Android 设备是不是墨水屏：EPD 探针 + 厂商 / 型号名单。
+///
+/// Android 没有公开的「墨水屏」判定口，判据是两条拼的：
+///
+/// - **探针**：主流墨水屏的内核都把 EPD 驱动挂在 `/sys/class/epd`，这一条不用维护；
+/// - **名单**：[`super::classify_eink`] 认厂商与型号，名单那一头维护。
+///
+/// 读不到属性、探针不中，就按「不是」算：宁可让读者自己去设置里点一档水墨，也不在
+/// LCD 手机上替他定成黑白。进程内只判一次（[`api_level`] 同款 OnceLock）。
+pub(crate) fn is_eink_device() -> bool {
+    static IS_EINK: OnceLock<bool> = OnceLock::new();
+    *IS_EINK.get_or_init(|| {
+        if std::path::Path::new("/sys/class/epd").exists() {
+            return true;
+        }
+        let identity = ["ro.product.manufacturer", "ro.product.model", "ro.product.device"]
+            .into_iter()
+            .filter_map(system_property)
+            .collect::<Vec<_>>()
+            .join(" ");
+        super::classify_eink(&identity)
+    })
+}
+
+/// 读一条系统属性；属性不存在或不是 UTF-8 回 `None`。
+///
+/// 与 [`api_level`] 同一条路（`__system_property_get` 自 API 1 就有，不引新符号），
+/// 键是运行时给的所以过一遍 `CString`。
+fn system_property(key: &str) -> Option<String> {
+    let mut value = [0u8; libc::PROP_VALUE_MAX as usize];
+    let key = std::ffi::CString::new(key).ok()?;
+    let len = unsafe { libc::__system_property_get(key.as_ptr(), value.as_mut_ptr().cast()) };
+    if len <= 0 {
+        return None;
+    }
+    std::str::from_utf8(&value[..len as usize])
+        .ok()
+        .map(str::to_string)
+}

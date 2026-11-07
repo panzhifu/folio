@@ -335,12 +335,15 @@ impl ReadingPage {
     /// 正文上：拇指从右下角自然够得到，也不占卡片里已经排满的那一行。
     ///
     /// 摆不摆的判据仍在会话侧（`speech_entry_visible`：引擎不可用 / 定版式书 /
-    /// 还没探到 → 不摆），与原来那一格同一个。
+    /// 还没探到 → 不摆），与原来那一格同一个。会员门禁在这上面再叠一条：
+    /// 非会员圆钮整颗缺席 —— 「能力不存在时这一格不出现」。
     pub(in crate::ui::features::reader) fn speech_fab(
         &self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.reader.read(cx).speech_entry_visible() {
+        if !self.reader.read(cx).speech_entry_visible()
+            || !crate::ui::services::activation::premium(cx)
+        {
             return None;
         }
         let playing = self.reader.read(cx).speech_playing();

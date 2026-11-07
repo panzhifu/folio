@@ -113,19 +113,24 @@ pub fn reading_brightness(reading_mounted: bool, prefs: Option<f32>) -> Option<f
     reading_mounted.then_some(prefs).flatten()
 }
 
-/// 这一帧要涂哪一档浅深：书挂着时读**阅读页自己**那一格，书收了就回到软件外观。
+/// 这一帧要涂哪一档浅深：**阅读层完整盖满屏幕**时读阅读页自己那一档，其余时刻（进场中、
+/// 退场中、没开书）回到软件外观。
 ///
 /// 交进来的那份是**生效值**，所以「这一本单独选过夜里」已经折在 `reading_mode` 里了
 /// （见 `services::config` 那两层怎么叠）。
 ///
-/// 阅读页盖满整窗，换肤仍是应用级的一次切换；所以只在交出去的那份副本上把 `mode`
-/// 换成阅读页的档位，配置里的全局 `mode` 一个字节都不动 —— 关书后架面与设置还是
-/// 读者在设置里选的那一档。
+/// **不变量：全局主题只在层盖满的那段时间里是阅读档。** 进场走完那一帧才翻过去 —— 此刻
+/// 层正盖着整窗，读者看不见这一翻；退场起步那一帧就翻回来 —— 层还没挪动，同样看不见。
+/// 转场全程架面都停在读者在设置里选的那一档，深书退回白天书架的那一闪就没有了
+/// （正文自己的颜色不跟壳走，见 `foundation::reading_theme` 的取侧自持）。
 ///
-/// 与 [`reading_brightness`] 同一条口径：只在层挂着（含退场）时接管，不在时交还。
-pub(crate) fn themed_appearance(mut appearance: Appearance, reading_mounted: bool) -> Appearance {
-    if reading_mounted {
-        appearance.mode = appearance.reading_mode.unwrap_or(appearance.mode);
+/// 与 [`reading_brightness`] 同一条口径的变形：亮度只认「层挂着」（含退场），浅深只认
+/// 「层盖满」—— 背光在退场动画里还得压着，主题却要当场交还。
+pub(crate) fn themed_appearance(mut appearance: Appearance, layer_present: bool) -> Appearance {
+    if layer_present {
+        // 折叠本身在 `foundation::reading_theme::effective_mode` 一处：正文取色与
+        // 水墨判断都调它 —— 三处各写一份就会漂。
+        appearance.mode = crate::ui::foundation::reading_theme::effective_mode(&appearance);
     }
     appearance
 }
@@ -924,29 +929,21 @@ impl AppShell {
         cx.notify();
     }
 
-    /// 退场走完了就把那一层放掉，并把这一本书的差量撤下来；返回这一次有没有撤。
+    /// 退场走完：把这一层放掉、撤掉这一本书的差量。
     ///
-    /// 时刻由 [`Presence`] 的采样决定：`closing` 把目标翻成「不在」，它自己走完退场，走到
-    /// `Absent` 那一帧 `should_render()` 才是假。**必须在架面渲染之前**问 —— 见 `render` 里
-    /// 调用点那段注释：这一层盖着时架面那条栈不画，缓存里留的是读书之前的外观。
-    /// 落库与统计早在 [`AppShell::close_reading`] 记过了，这里不记第二笔。
-    fn release_reading_if_done(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(layer) = self.reading.as_ref() else {
-            return false;
-        };
-        let sample = Presence::new(reading_layer_id(&layer.page), !layer.closing)
-            .transition(nav_transition(cx))
-            .sample(window, cx);
-        if sample.should_render() {
-            return false;
+    /// **采样在调用方**（`render` 最前面那一口）：这一格只管放手。撤差量撤在**退场走完**
+    /// 这一帧而不是 [`AppShell::close_reading`] 那一刻 —— 正文那一页的颜色还读着生效层
+    /// （本书的夜里也许就折在那里），层还在往外滑就把差量撤了，正文当场翻色。
+    /// 差量的真相在库里，这里只撤内存里那一份，不需要落盘。
+    ///
+    /// 主题的翻回**不在这里**：外壳的折档判据是「层盖满」（[`themed_appearance`]），
+    /// 离场起步那一帧架面就已经回到软件外观 —— 那一下层还全盖着，读者看不见。
+    fn release_reading(&mut self, cx: &mut Context<Self>) {
+        if self.reading.is_none() {
+            return;
         }
         self.reading = None;
-        // 撤掉这一本书的差量：从这一刻起屏幕上没有那一本了，生效层回到默认层。
-        // 撤在**退场走完**这一帧而不是 [`AppShell::close_reading`] 那一刻 —— 书还在
-        // 往外滑的时候把架面换成白天，读者看到的是两层各种颜色。
-        // 差量的真相在库里，这里只撤内存里那一份，不需要落盘。
         ConfigHolder::set_book(cx, None);
-        true
     }
 
     /// 应用生命周期：后台按离开这一刻结账并停钟，前台续段。
@@ -1339,6 +1336,12 @@ impl Render for AppShell {
         // 亮度那一格先抠出来：下面整个 `appearance` 要按阅读层解析、再挪进 `applied`。
         let mut appearance = ConfigHolder::appearance(cx);
         let brightness_pref = appearance.brightness;
+        // **时钟先问一口**：放手、折档、挂层三处用的是同一份采样，一帧之内不问第二次。
+        let reading_sample = self.reading.as_ref().map(|layer| {
+            Presence::new(reading_layer_id(&layer.page), !layer.closing)
+                .transition(nav_transition(cx))
+                .sample(window, cx)
+        });
         // **书要在算外观之前撤掉**。这一层盖在架面上时不画架面那条栈（见 `content` 的调用点），
         // 而栈底下那一屏的渲染缓存还停在书上屏**之前**的外观上（书一落下，主题就不是架面那一档）：
         // `view.rs` 的 `prepaint_view` 命中缓存时只看尺寸、`content_mask`、`text_style` 与
@@ -1349,12 +1352,17 @@ impl Render for AppShell {
         //
         // 撤掉差量会在**这一次 `render` 里**就换掉生效层，所以那份外观要重新取一次
         // （通知要等这一帧画完才送到，不能指望有人替我们重画）。
-        if self.release_reading_if_done(window, cx) {
+        if reading_sample.is_some_and(|sample| !sample.should_render()) {
+            self.release_reading(cx);
             appearance = ConfigHolder::appearance(cx);
         }
-        // 书挂着时用阅读页自己的浅深，书收了回到软件外观（见 [`themed_appearance`]）。
+        // 书**盖满**时用阅读页自己的浅深，进场中 / 退场中都回到软件外观（见
+        // [`themed_appearance`] 的不变量）：翻面都落在层盖满屏的时刻，读者看不见。
         // 这一本自己选过夜里时，`reading_mode` 已经在生效层里了（见 `services::config`）。
-        let appearance = themed_appearance(appearance, self.reading_mounted());
+        let appearance = themed_appearance(
+            appearance,
+            reading_sample.is_some_and(|sample| sample.phase == PresencePhase::Present),
+        );
         // 比较的是「配置 + 它解析出来的浅深」那一对：偏好一个字没动、只有系统翻了面，
         // 变的就只有后面那一格。
         let resolved = theme::resolve_mode(appearance.mode, window.appearance());
@@ -1396,19 +1404,12 @@ impl Render for AppShell {
             immersive,
         } = chrome;
 
-        // 先问时钟再决定挂不挂：`closing` 把 `Presence` 的目标翻成「不在」，它自己走完退场，
-        // 走到 `Absent` 那一帧才真的放手。落库与统计早在 [`AppShell::close_reading`] 记过了，
-        // 这里不再记第二笔。
-        let reading_sample = self.reading.as_ref().map(|layer| {
-            Presence::new(reading_layer_id(&layer.page), !layer.closing)
-                .transition(nav_transition(cx))
-                .sample(window, cx)
-        });
+        // 放手的判据在 `render` 最前面已经按同一份采样判过（`closing` 把 `Presence` 的目标
+        // 翻成「不在」，它自己走完退场，走到 `Absent` 那一帧放手）。这里再查一遍是给采样
+        // 迟到的那一帧兜底 —— 那时这一帧还没画出架面，撤掉差量重画一遍比让屏幕多停一帧
+        // 旧主题便宜。
         if reading_sample.is_some_and(|sample| !sample.should_render()) {
-            // 平时不会走到这里：那一层在 `render` 的最前面就撤了（见 `release_reading_if_done`
-            // 与上面那段注释）。留着是给采样**迟到**的那一帧兜底 —— 那时这一帧还没画出
-            // 架面，撤掉差量重画一遍比让屏幕多停一帧旧主题便宜。
-            self.release_reading_if_done(window, cx);
+            self.release_reading(cx);
         }
         // 报给正文的那一条是顶上那一条（层自己让）加底下那一条（底栏与页脚自己让，见
         // `reader::page` 的 `bottom_inset`）。同一个数还要给摆层用（[`reading_top_inset`]）。

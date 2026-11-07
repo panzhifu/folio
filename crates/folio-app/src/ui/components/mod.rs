@@ -9,7 +9,9 @@
 mod access_question;
 mod bottom_sheet;
 mod font_picker;
+mod gate_banner;
 mod primitives;
+mod reading_theme_picker;
 mod scroll_guard;
 mod search_box;
 mod top_bar;
@@ -19,7 +21,9 @@ pub use bottom_sheet::{
     BottomSheet, BottomSheetEvent, BottomSheetState, any_sheet_open, dismiss_top,
 };
 pub use font_picker::{FontFamilySetter, FontPicker};
+pub use gate_banner::gate_banner;
 pub use primitives::{empty_state, hairline, muted_label};
+pub use reading_theme_picker::ReadingThemePicker;
 pub use scroll_guard::{ScrollShields, scroll_guard};
 pub use search_box::{SEARCH_SETTLE_FRAMES, SearchBox, SearchBoxEvent, SearchDebounce};
 pub use top_bar::TopBar;

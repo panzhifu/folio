@@ -123,6 +123,14 @@ pub fn themes_dir() -> PathBuf {
     config_dir().join("themes")
 }
 
+/// 正文主题的背景图：`<数据根>/backgrounds/`。
+///
+/// 放在数据根而不是配置根：图是程序从系统选择器**收进来**的字节（按内容哈希落盘，
+/// 见 [`crate::infra::backgrounds`]），不是读者亲手编辑的文件 —— 与日志同一条理由。
+pub fn backgrounds_dir() -> PathBuf {
+    data_dir().join("backgrounds")
+}
+
 /// 书库数据库：`<数据根>/folio.db`。
 pub fn db_path() -> PathBuf {
     data_dir().join("folio.db")

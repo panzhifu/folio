@@ -10,7 +10,6 @@ use std::rc::Rc;
 use folio_core::PageTurn;
 use folio_core::content::format::css::computed::BackgroundSize;
 use folio_core::layout::fragment::column_offset;
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
     AnyElement, App, Context, Div, Entity, EntityId, InteractiveElement as _, IntoElement,
     PageCurlMesh, ParentElement, SharedString, Styled, TestSupportExt as _, WeakEntity, Window,
@@ -227,8 +226,7 @@ impl ReaderSession {
             turn,
             speaking,
             family,
-            foreground,
-            link,
+            reading,
             atlas,
             view,
             ..
@@ -533,8 +531,8 @@ impl ReaderSession {
                 doc.height(),
                 self.prefs.margin_x,
                 top,
-                foreground,
-                link,
+                reading.fg,
+                reading.link,
                 taken_over,
                 frame.ink,
                 placed.index,
@@ -688,8 +686,7 @@ impl ReaderSession {
             gap,
             fixed_layout,
             family,
-            foreground,
-            link,
+            reading,
             ink,
             stack_motion,
             atlas,
@@ -841,7 +838,7 @@ impl ReaderSession {
             leaf_column,
             other_column,
             turn_leaving,
-        } = self.plan_turn_papers(&render_frame, &capture, paint, cx);
+        } = self.plan_turn_papers(&render_frame, &capture, paint);
 
         // 入树顺序就是绘制层级（后入树的压在上面）。两张同层时保持上面的
         // 原顺序，所以平移仍然读成一条纸带整体在走。
@@ -869,7 +866,7 @@ impl ReaderSession {
             area,
             capture: &capture,
             viewport,
-            paper: cx.theme().background.to_rgb(),
+            paper: frame.reading.bg.to_rgb(),
             leaving_ready: &|page| {
                 book.span_doc(page.chapter)
                     .is_some_and(|doc| page_art_for_doc(page.chapter, doc, want_aspect).is_none())
@@ -997,7 +994,7 @@ impl ReaderSession {
                         .top(px(at.offset.1))
                         .w(px(f32::from(size.width)))
                         .h(px(f32::from(size.height)))
-                        .bg(cx.theme().background)
+                        .bg(frame.reading.bg)
                         .into_any_element(),
                 );
             }
@@ -1115,8 +1112,8 @@ impl ReaderSession {
                     slice.height,
                     x,
                     top,
-                    foreground,
-                    link,
+                    reading.fg,
+                    reading.link,
                     taken_over,
                     ink,
                     page_ref.chapter,
@@ -1215,7 +1212,6 @@ impl ReaderSession {
         frame: &RenderFrame<'_>,
         capture: &CaptureView,
         paint: &mut TurnPaint,
-        cx: &App,
     ) -> TurnPapers {
         // `self.source` 在渲染期间被换成了 `Empty`，`self.chapter_index()` 这时恒给 0；
         // 章号与页号取 `frame.page_key` —— 它在换 source **之前**就抄好了。
@@ -1287,7 +1283,7 @@ impl ReaderSession {
                         page_key,
                         captured: (captured_ch, captured_pg, captured_w, captured_h),
                         capture_valid: true,
-                        paper: cx.theme().background.to_rgb(),
+                        paper: frame.reading.bg.to_rgb(),
                     },
                     &mut self.curl_mesh,
                 );

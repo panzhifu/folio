@@ -38,10 +38,10 @@ use folio_core::layout::fragment::column_offset;
 use gpui_kit::base::motion::{Presence, TransitionId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    A11ySubtreeBuilder, AnyElement, App, Bounds, Context, ElementId, Entity, EntityId, Hsla,
-    InteractiveElement as _, IntoElement, PageCurlMesh, ParentElement, Render, Role, ScrollEvent,
-    SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window,
-    accesskit, div, point, px, size,
+    A11ySubtreeBuilder, AnyElement, App, Bounds, Context, ElementId, Entity, EntityId,
+    InteractiveElement as _, IntoElement, ObjectFit, PageCurlMesh, ParentElement, Render, Role,
+    ScrollEvent, SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _,
+    TestSupportExt as _, WeakEntity, Window, accesskit, div, img, point, px, size,
 };
 
 use crate::ui::features::reader::components::image_viewer::ImageViewer;
@@ -63,6 +63,7 @@ use crate::ui::features::reader::model::swipe::{release_easing, release_transiti
 use crate::ui::features::reader::motion::turn_animation;
 use crate::ui::features::reader::view::bands;
 use crate::ui::features::reader::view::paint::GlyphsElement;
+use crate::ui::foundation::reading_theme::{self, ReadingPalette};
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::{turn_duration, turn_transition};
 
@@ -466,8 +467,10 @@ struct RenderFrame<'a> {
     layer_top: f32,
     family: &'a SharedString,
     page_percent: SharedString,
-    foreground: Hsla,
-    link: Hsla,
+    /// 这一帧的正文调色板（纸/墨/链接/淡墨），由 `foundation::reading_theme::resolve`
+    /// 折出来。`fg`/`link` 就是旧字段 `foreground`/`link` 的来路，只是纸色与淡墨
+    /// 也一起跟着正文主题走，不再摸 `cx.theme()`。
+    reading: ReadingPalette,
     palette: &'a Palette,
     image_pans: &'a HashMap<String, (f32, f32)>,
     viewer: Option<Entity<ImageViewer>>,
@@ -843,16 +846,15 @@ impl Render for ReaderSession {
         // `order < CAPTURE_ORDER_BASE`，层里的东西不上屏。
         let capture_front = capture_needed;
 
-        let foreground = cx.theme().foreground;
-        // 链接色：书面 CSS 十有八九不给链接上色（出版工具的目录页就是这么交的），所以这一格
-        // 只能由阅读器给，而给的是什么色得**由主题定**（深浅两套各自对），不在这里嵌数。
+        // 正文调色板：这一帧纸/墨/链接/淡墨的**唯一来源**。选了正文主题（按书差量
+        // 可覆盖）走内置表的日夜配对；「跟随软件」那一档回落壳主题的同四格 —— 消费点
+        // 自己再摸 `cx.theme()` 等于把「纸色跟着壳」从后门接回来。
         //
-        // 取的是主题的 `blue` 那一格，**不是语义上的 `link`** —— 后者在框架自带的两套默认主题里
-        // 与正文色是同一个值（2026-10-16 在 `TestAppContext` 上量的：浅色 `link` = Hsla{l:0.09,s:0}
-        // 而 `foreground` = l:0.039；深色 `link` = l:0.98 与 `foreground` 逐字段相同），拿它上色
-        // 等于没接：装上真机看目录那三条仍然是黑的。`blue` 两档都是真蓝（浅 h0.614 s0.832 l0.533 /
-        // 深 h0.592 s0.939 l0.678），且仍随主题走，读者换肤不会把它钉死。
-        let link = cx.theme().blue;
+        // 外观在这里取一次，水墨判断与调色板共用；折叠（书内浅深盖软件浅深）本身在
+        // `effective_mode` 一处，外壳那句 `themed_appearance` 也调它 —— 三处各写一份
+        // 就会漂。
+        let appearance = ConfigHolder::appearance(cx);
+        let reading = reading_theme::resolve(&appearance, cx);
         // 批注划线只有那五种（`ANNOTATION_COLORS`），一次取好，逐条画时查表。
         let palette = Palette::of(cx.theme());
         let family = self.family.clone();
@@ -885,18 +887,47 @@ impl Render for ReaderSession {
         ));
         // 水墨那一档在这里只推**图片**那一格：解好的像素压成半灰
         // （`image_atlas::set_ink_pixels`）。作者声明的文字色/底色/边框在
-        // `Scene::build` 里按这一帧的 `ink` 去饱和。这里折的是**阅读页
-        // 生效**的那一档：`reading_mode` 是这一本单独设过的浅深，没设过才跟着软件走 ——
-        // 与外壳换肤那一句 `themed_appearance` 同一个折法，两处各写一份就会漂。
-        let appearance = ConfigHolder::appearance(cx);
-        let ink = appearance.reading_mode.unwrap_or(appearance.mode)
-            == folio_core::infra::config::Mode::Ink;
+        // `Scene::build` 里按这一帧的 `ink` 去饱和；正文调色板的去饱和在
+        // `reading_theme::resolve` 里同一帧折好。折叠用 `effective_mode` ——
+        // 与外壳换肤那一句同一个折法，见上面那条注释。
+        let ink =
+            reading_theme::effective_mode(&appearance) == folio_core::infra::config::Mode::Ink;
         // 翻档的那一帧清一次图集：表里存的是**已经解好的像素**，不清就会顶着上一档的
-        // 颜色画到那本图离场为止。翻页那几层用的是烘出来的纹理，同一张纸也变了，跟着作废。
+        // 颜色画到那本图离场为止。
         if crate::ui::features::reader::model::image_atlas::set_ink_pixels(ink) {
             self.atlas.update(cx, |atlas, cx| atlas.clear(cx));
             self.capture_dirty = true;
         }
+        // 换纸的那一帧作废捕获：翻页那几层烘出来的纹理与捕获清屏色都拿着上一张纸的
+        // 颜色（清屏色在下面的 `capture_clear`）。水墨翻档也落进这一支 —— 纸色在
+        // 浅侧原色与去饱和灰之间变了。
+        if self.applied_reading_bg != Some(reading.bg) {
+            self.applied_reading_bg = Some(reading.bg);
+            self.capture_dirty = true;
+        }
+        // 读者给当前主题配的纸纹：日/夜各一张挂**主题名**上，「跟随软件」没有图
+        // （没有主题名可挂）。key 变了才重读重解，解好前纸色照旧。
+        let reading_bg_cfg = appearance
+            .reading_theme
+            .as_deref()
+            .and_then(|name| ConfigHolder::reading_backgrounds(cx).get(name).cloned());
+        let reading_bg_opacity = reading_bg_cfg
+            .as_ref()
+            .map(|bg| bg.opacity)
+            .unwrap_or(folio_core::infra::config::ThemeBackground::OPACITY_FULL);
+        let reading_bg_key = crate::ui::features::reader::model::session::ReadingBgKey {
+            name: reading_bg_cfg
+                .and_then(|bg| {
+                    if reading_theme::dark_side(&appearance, cx) {
+                        bg.dark.clone()
+                    } else {
+                        bg.light.clone()
+                    }
+                })
+                .filter(|name| !name.is_empty()),
+            ink,
+        };
+        self.sync_reading_bg(reading_bg_key, cx);
         // 两章之间的缝：拼接坐标用它隔开相邻的章（口径在 `Book::chapter_gap`）。
         let chapter_gap = Book::chapter_gap(&self.prefs);
         // `FontKey → Font` 的解析每帧对每条可见 run 都要一次，交给会话持有的缓存
@@ -964,8 +995,7 @@ impl Render for ReaderSession {
             layer_top,
             family: &family,
             page_percent: page_percent.clone(),
-            foreground,
-            link,
+            reading,
             palette: &palette,
             image_pans: &image_pans,
             viewer: viewer.clone(),
@@ -1231,7 +1261,7 @@ impl Render for ReaderSession {
             shades,
             gpu_curl_mesh.is_some(),
             (self.enter_shift, layer_top),
-            cx.theme().background,
+            reading.bg,
         );
         // 图片最后入树：绝对定位不参与布局，却要压住上面所有层级。
         for image in overlays {
@@ -1245,7 +1275,7 @@ impl Render for ReaderSession {
         // 捕获区清屏色必须取纸张底色；闭包里的 `window` 拿不到主题，所以先取好。卷曲网格取 uv
         // 落在捕获矩形外半像素时，透明黑就是页边那条黑带的来源（参照实现的
         // `glClearColor(mBackgroundColor)` 用同一个口径）。
-        let capture_clear = cx.theme().background.to_rgb();
+        let capture_clear = reading.bg.to_rgb();
         // 三块捕获纹理与网格共用这一份坐标口径：`layer` 是这一层自己的平移，
         // `viewport` 用来拒掉出窗的矩形，`clear` 必须是纸底色。
         let pass = turn_view::CapturePass {
@@ -1434,13 +1464,29 @@ impl Render for ReaderSession {
         // 让开与否问的是「这一帧画没画背板」，不是「锚章是不是整页画」：邻章那张整窗背板
         // 铺在同一扇窗上，锚章的纸底色压着它就等于没画（`neighbour_backdrop`）。
         if page_art.is_none() && !page_picture && !neighbour_backdrop {
-            column = column.bg(cx.theme().background);
+            column = column.bg(reading.bg);
         }
         // 页面自己带读数带：实时绘制的那一页走 `page_bands`；出场页走捕获网格时
         // 带子烘在正面捕获纹理里（`PaperCapture.bands`）；进场页走平摊网格时由那张
         // 只有带子的 `Paper` 实时画回来。
         // 只有一页都没画出来（连续滚动、定版式、排版未就绪）才补窗口坐标的全局带子。
         let page_chrome_drawn = mesh_page_drawn || bands_drawn;
+        // 读者给当前主题配的纸纹：背板**最底一格** —— 纸色之上、作者自己的整页画
+        // 之下（书里带底图的章节以书为准）。定版式的页图不透明，铺了也看不见，
+        // 那一档直接不铺。进不了树的时候（图还在解）纸色就是整张背板，无碍。
+        if !fixed_layout {
+            if let Some(image) = self.reading_bg.as_ref().and_then(|bg| bg.image.clone()) {
+                backdrops.insert(
+                    0,
+                    img(image)
+                        .absolute()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .opacity(reading_bg_opacity)
+                        .into_any_element(),
+                );
+            }
+        }
         let mut body = div()
             .id("folio-reader")
             // 宿主的测试要按 id 把滚轮事件投到这里。非 `test-support` 构建里这一层是透明的

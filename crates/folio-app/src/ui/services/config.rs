@@ -23,12 +23,14 @@
 //! 落盘目标是另一个 Global [`ConfigPath`]，默认 `None`。测试里保持 `None`，
 //! 于是 `save` 直接跳过 —— 测试绝不会写到用户的真实配置目录。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use folio_core::infra::config::ThemeBackground;
 use folio_core::{
-    Account, Appearance, BookSettings, Config, Env, Language, Layer, Library, Membership, Novel,
-    Opds, Provenance, Reader, Resolved, Speech, Sync, Translation,
+    Account, Appearance, BookSettings, Cloud, Config, Env, Language, Layer, Library, Membership,
+    Mode, Novel, Opds, Provenance, Reader, Resolved, Speech, Sync, Translation,
 };
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
@@ -91,7 +93,27 @@ impl ConfigHolder {
     /// 装一份**读过盘**的配置：保留用户层与 provenance（§2.1）。入口用它 —— 用户层是
     /// 落盘内容，provenance 是诊断内容，都得从读盘那一刻一起交进来。
     pub fn install_resolved(resolved: Resolved, cx: &mut App) -> Entity<ConfigState> {
+        let mut resolved = resolved;
+        Self::preselect_for_device(&mut resolved, cx);
         Self::install_inner(resolved, Env::from_env(), cx)
+    }
+
+    /// 墨水屏设备的首启预选：配置文件还不存在（第一次跑）而设备是墨水屏时，把软件浅深
+    /// 预选成水墨。水墨本就是为墨水屏备的那一档（去彩度、不随系统翻面），检测到了就替
+    /// 读者把第一档点好 —— 配置一落盘这就是他自己的选择，想改随时在设置里改。
+    ///
+    /// 只在**文件不存在**时动手：老用户改过配置的不动，非墨水屏设备不动。落盘目标没设
+    /// （测试）时同样不动 —— `ConfigPath` 是 `None`，`exists()` 走不到。
+    fn preselect_for_device(resolved: &mut Resolved, cx: &App) {
+        let configured = cx
+            .try_global::<ConfigPath>()
+            .and_then(|path| path.0.as_ref())
+            .is_some_and(|path| path.exists());
+        if configured || !crate::ui::platform::is_eink_device() {
+            return;
+        }
+        tracing::info!("config: 墨水屏设备首启，软件浅深预选成水墨");
+        resolved.user.appearance.mode = Mode::Ink;
     }
 
     fn install_inner(resolved: Resolved, env: Env, cx: &mut App) -> Entity<ConfigState> {
@@ -279,6 +301,26 @@ impl ConfigHolder {
         Self::snapshot(cx).backup
     }
 
+    /// 正文主题的背景图配置（按主题名索引）。阅读层挑图与画背板都读它。
+    pub fn reading_backgrounds(cx: &App) -> BTreeMap<String, ThemeBackground> {
+        Self::snapshot(cx).reading_backgrounds.clone()
+    }
+
+    /// 改**一套正文主题**的背景图。图是主题的属性，不是书的那一格：
+    /// 这里写的是全局配置根节，不落进任何一本书的差量。
+    pub fn edit_reading_background(
+        cx: &mut App,
+        theme: &str,
+        f: impl FnOnce(&mut ThemeBackground),
+    ) {
+        Self::edit(cx, |config| {
+            f(config
+                .reading_backgrounds
+                .entry(theme.to_string())
+                .or_default());
+        });
+    }
+
     /// 用户层配置（不含环境覆盖与某本书的差量）。备份包里的 `config.json` 写它。
     pub fn user_config(cx: &App) -> Config {
         Self::entity(cx).read(cx).user.clone()
@@ -418,6 +460,15 @@ impl ConfigHolder {
 
     pub fn edit_opds(cx: &mut App, f: impl FnOnce(&mut Opds)) {
         Self::edit(cx, |config| f(&mut config.opds));
+    }
+
+    /// 网盘取书的账号那一节。浏览页建屏时读一次；百度换到新 token 也从这一格写回。
+    pub fn cloud(cx: &App) -> Cloud {
+        Self::snapshot(cx).cloud.clone()
+    }
+
+    pub fn edit_cloud(cx: &mut App, f: impl FnOnce(&mut Cloud)) {
+        Self::edit(cx, |config| f(&mut config.cloud));
     }
 
     /// `.txt` 小说分章规则的读者那一层（关掉的条目 / 自定义的条目 / 阈值）。
@@ -593,10 +644,11 @@ mod tests {
 
     /// 挂上一本书的差量：生效值跟着走，而**默认层一个字都不动**；撤掉之后生效值回默认。
     ///
-    /// 「阅读页夜里读，关掉书书架还是白天」这件事的形状就在这里，而不在外壳：外壳只是
-    /// 读生效值，「写进去的是哪一层」才决定关掉书之后屏幕上是什么。
+    /// 「这一本书的排版跟着这一本走，关掉书架子还是原样」这件事的形状在这里，而不在外壳：
+    /// 外壳只是读生效值，「写进去的是哪一层」才决定关掉书之后屏幕上是什么。
     ///
-    /// 那一格 `mode` 被界面**顺手**改成夜里 —— 差量不许带走它，这条断言就是钉这一点的。
+    /// `mode` 与阅读浅深被界面**顺手**改成夜里 —— 差量都不许带走它们（两格都只归全局，
+    /// 见 `APPEARANCE_GLOBAL_ONLY`）；可覆盖的那一格（亮度）照常落。
     #[gpui_kit::test]
     fn a_book_overlay_moves_the_effective_values_and_leaves_the_defaults(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -609,6 +661,7 @@ mod tests {
         let mut wanted_appearance = base_appearance.clone();
         wanted_appearance.reading_mode = Some(Mode::Dark);
         wanted_appearance.mode = Mode::Dark;
+        wanted_appearance.brightness = Some(0.4);
 
         let mut patch = BookSettings::default();
         patch.record_reader(&base_reader, &wanted_reader);
@@ -617,7 +670,15 @@ mod tests {
 
         let effective = cx.update(|cx| (ConfigHolder::reader(cx), ConfigHolder::appearance(cx)));
         assert_eq!(effective.0.font_size, 26.0, "这本书的字号该落在生效值上");
-        assert_eq!(effective.1.reading_mode, Some(Mode::Dark));
+        assert_eq!(
+            effective.1.brightness,
+            Some(0.4),
+            "可覆盖的那一格该落在生效值上"
+        );
+        assert_eq!(
+            effective.1.reading_mode, base_appearance.reading_mode,
+            "阅读浅深只归全局，一本书的差量带不动它"
+        );
         assert_eq!(
             effective.1.mode, base_appearance.mode,
             "一本书不许改到软件外观的浅深"
@@ -635,8 +696,8 @@ mod tests {
         cx.update(|cx| ConfigHolder::set_book(cx, None));
         assert_eq!(cx.update(|cx| ConfigHolder::reader(cx)), base_reader);
         assert_eq!(
-            cx.update(|cx| ConfigHolder::appearance(cx).reading_mode),
-            None
+            cx.update(|cx| ConfigHolder::appearance(cx).brightness),
+            base_appearance.brightness
         );
     }
 

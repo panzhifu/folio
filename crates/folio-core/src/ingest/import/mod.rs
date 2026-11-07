@@ -25,7 +25,7 @@
 //! 动作是一次 rename**，所以崩溃时书库里只可能出现没人认领的 `.part`（由
 //! [`sweep_partials`] 清），不会出现「库里有行而文件不在」之外的那种半成品。
 //!
-//! 七种来源的差别只剩 `candidates` 与 `stage` 两个方法，管线只有 [`import_from`] 一写。
+//! 八种来源的差别只剩 `candidates` 与 `stage` 两个方法，管线只有 [`import_from`] 一写。
 //! 共同的那半件事（写进暂存）现在**契约上**仍归来源，但只能落在 `.staging` 里：
 //!
 //! | 来源 | candidates | stage |
@@ -36,14 +36,14 @@
 //! | 文件夹监听 `Watch` | inotify 事件攒出的新文件 | 同上 |
 //! | Wi-Fi 传书 `Transfer` | 传书服务器收到的每份上传 | 同上 |
 //! | 链接下载 `Url` | 一条 URL | 流式 GET 写进 `.staging` |
-//! | WebDAV `WebDav` | PROPFIND ∩ 需要下载的条目 | DAV 下载写进 `.staging` |
+//! | 网盘取书 `Cloud` | 浏览界面上勾下的条目 | 经 [`crate::net::cloud::Drive`] 流式下载写进 `.staging` |
 //!
 //! **与文档的偏离一处**（第七节差额表第 4 行剩下的那半）：文档要求来源只交
 //! `stream: Box<dyn Read>`、写盘完全归管线。那一步要先给 `remote` 加一个返回流的方法
 //! （网络那半边现在是 `Sink` 驱动的），留到下一轮。现在这个形状已经买到文档要的全部
 //! **效果**：判定排在落地之前、身份算在自己写下的字节上、副本名由内容决定。
 //!
-//! 监听、传书、WebDAV 同步自己都不是管线的一部分 —— 它们是往队列塞活的**驱动者**
+//! 监听、传书、网盘浏览自己都不是管线的一部分 —— 它们是往队列塞活的**驱动者**
 //! （见 `crate::ingest::watch`），把 [`Source`] 交给 [`submit_import`] 就行。
 
 //! **这一区现在分四个文件**（`import/`）：
@@ -85,6 +85,8 @@ pub use maintenance::sweep_partials;
 pub use pipeline::import_from;
 pub use pipeline::reindex;
 pub use pipeline::schedule_reindex;
+pub use sources::CloudItem;
+pub use sources::CloudSource;
 pub use sources::PathsSource;
 pub use sources::UrlSource;
 // `scan` 与 `watch` 都靠这一句把本地候选落进暂存区。
@@ -107,6 +109,8 @@ pub enum ImportKind {
     Url,
     /// WebDAV 同步的下载半边。
     WebDav,
+    /// 网盘里勾选的条目（浏览 → 勾选 → 下载）。
+    Cloud,
 }
 
 /// 本地和远端
@@ -115,6 +119,14 @@ pub enum Origin {
     Local(PathBuf),
     Remote {
         url: String,
+        path: String,
+        size: Option<u64>,
+    },
+    /// 网盘里的一个条目。它**没有**可以单独重放的直链 —— 再取一次要凭据与协议
+    /// 客户端（[`crate::net::cloud::Drive`]），所以不落 `url`：`drive` 是哪家的
+    /// （日志与报表给人看），`path` 是网盘内路径。
+    Cloud {
+        drive: &'static str,
         path: String,
         size: Option<u64>,
     },

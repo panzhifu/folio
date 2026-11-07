@@ -851,6 +851,19 @@ impl CompactSettings {
         let headed = page.groups.len() > 1;
         let mut body = v_flex().w_full();
         for (group_ix, group) in page.groups.iter().enumerate() {
+            // 裸组：不套卡、不摆节头、行间不发丝线 —— 组里的行自带完整视觉
+            // （会员页那张黑金卡），再包一层卡就成了卡中卡。
+            if group.bare {
+                let mut block = v_flex().w_full().px_4().mt_2();
+                for (row_ix, row) in group.rows.iter().enumerate() {
+                    if row_ix > 0 {
+                        block = block.child(v_flex().h_2());
+                    }
+                    block = block.child(self.row(page_ix, group_ix, row_ix, row, window, cx));
+                }
+                body = body.child(block);
+                continue;
+            }
             let mut rows: Vec<AnyElement> = Vec::new();
             for (row_ix, row) in group.rows.iter().enumerate() {
                 if row_ix > 0 {
@@ -1079,8 +1092,17 @@ impl CompactSettings {
                 let value = get(cx);
                 let state = window.use_keyed_state(id("text"), cx, {
                     let value = value.clone();
+                    let placeholder = row.placeholder.clone();
                     move |window, cx| {
-                        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+                        let input = cx.new(|cx| {
+                            let state = InputState::new(window, cx).default_value(value);
+                            // 占位虚字：带它的行标题不摆出来（见下面那一分叉）。
+                            if let Some(placeholder) = placeholder {
+                                state.placeholder(placeholder)
+                            } else {
+                                state
+                            }
+                        });
                         // 输入即写配置：外壳那份订阅会落盘并重排。订阅句柄必须跟着
                         // 状态一起活，掉了事件就断 —— 与框架的 string 字段同一形状。
                         // 订阅回调要 `'static`，所以给它一份自己的克隆，而不是从
@@ -1105,6 +1127,11 @@ impl CompactSettings {
                     }
                 });
                 let (input, _) = state.read(cx);
+                // 带占位字的一行：标题不摆出来，那句虚字进框里 —— 框本身就是全部说明
+                // （会员页的订单编号）。没带占位字的照旧标题在上。
+                if row.placeholder.is_some() {
+                    return control_cell(id("text-row"), Input::new(input).w_full());
+                }
                 control_cell(
                     id("text-row"),
                     v_flex()

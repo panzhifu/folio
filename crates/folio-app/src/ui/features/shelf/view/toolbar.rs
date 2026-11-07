@@ -58,7 +58,7 @@ impl ShelfView {
             .child(self.more_button(cx))
     }
 
-    /// 右上角那颗三点按钮：本体不做任何事，点开一条菜单，三种导入方式摆在菜单里。
+    /// 右上角那颗三点按钮：本体不做任何事，点开一条菜单，几种导入方式摆在菜单里。
     ///
     /// 三颗按钮并排把搜索框挤成一条缝，而导入是偶尔才用一次的命令 —— 收进一条
     /// 「⋮」后面，这一行就只剩「搜书」与「更多」两件事。组件是 gpui-kit 的
@@ -68,9 +68,9 @@ impl ShelfView {
     /// 所以两端共用这一颗。
     ///
     /// 菜单项各自把命令派回本视图的既有方法（`import` / `open_url_panel` /
-    /// `start_scan` / `open_opds`），门禁照旧：书库位置没确认过先摆确认面板，一批没导完就
-    /// 按不动。分隔线下面那一颗是 `open_import_records`：它不导东西，只把这张运行里已经
-    /// 报过的那些行翻回屏幕上（无话可说时按不动）。
+    /// `start_scan` / `open_opds` / `open_cloud`），门禁照旧：书库位置没确认过先摆确认面板，
+    /// 一批没导完就按不动。分隔线下面那一颗是 `open_import_records`：它不导东西，只把这张
+    /// 运行里已经报过的那些行翻回屏幕上（无话可说时按不动）。
     /// 菜单每次打开都会重建一遍（builder 是 `Fn`），所以闭包里先 clone 再 move：
     /// 从捕获的句柄里现摘一份，而不是把上次那一份搬走。
     pub(in crate::ui::features::shelf) fn more_button(
@@ -81,11 +81,13 @@ impl ShelfView {
         let url_entity = entity.clone();
         let scan_entity = entity.clone();
         let opds_entity = entity.clone();
+        let cloud_entity = entity.clone();
         let record_entity = entity.clone();
         let import_label = tr(cx, "shelf.import");
         let scan_label = tr(cx, "shelf.scan");
         let url_label = tr(cx, "shelf.url_import");
         let opds_label = tr(cx, "shelf.opds");
+        let cloud_label = tr(cx, "shelf.cloud");
         let more_label = tr(cx, "shelf.more");
         let record_label = tr(cx, "shelf.record_title");
         // 记录那颗与上面四条不是一件事：那四条是**怎么导**，这一颗是**刚才导的那些怎么样了**。
@@ -102,6 +104,7 @@ impl ShelfView {
                 let url_entity = url_entity.clone();
                 let scan_entity = scan_entity.clone();
                 let opds_entity = opds_entity.clone();
+                let cloud_entity = cloud_entity.clone();
                 let record_entity = record_entity.clone();
                 menu.min_w(px(book_menu::MIN_WIDTH))
                     .item(
@@ -132,6 +135,14 @@ impl ShelfView {
                             .icon(IconName::BookOpen)
                             .on_click(move |_, window, cx| {
                                 opds_entity.update(cx, |this, cx| this.open_opds(window, cx))
+                            }),
+                    )
+                    // 网盘与 OPDS 同属「书在远端」：一个是自己存的书，一个是别人的目录。
+                    .item(
+                        PopupMenuItem::new(cloud_label.clone())
+                            .icon(IconName::Cloud)
+                            .on_click(move |_, window, cx| {
+                                cloud_entity.update(cx, |this, cx| this.open_cloud(window, cx))
                             }),
                     )
                     // 分隔线以下不是「怎么导」，是「刚才导的那些怎么样了」：两件事不该排在

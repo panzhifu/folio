@@ -34,7 +34,6 @@ pub fn decode(data: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{decode, is_woff2};
-    use std::collections::HashMap;
     use std::path::Path;
 
     fn fixture_ttf() -> Vec<u8> {

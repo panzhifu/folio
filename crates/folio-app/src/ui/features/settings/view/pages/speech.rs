@@ -15,6 +15,14 @@ use folio_core::Speech;
 use super::super::*;
 
 pub(in crate::ui::features::settings) fn speech_page(cx: &App) -> Page {
+    // 门禁：听书是会员功能。非会员整页换成一句引导（判据只有 activation::premium 一条）。
+    if !crate::ui::services::activation::premium(cx) {
+        return page(
+            tr(cx, "page.speech"),
+            IconName::BookHeadphones,
+            vec![super::membership::gate_group("membership.gate_speech", cx)],
+        );
+    }
     page(
         tr(cx, "page.speech"),
         IconName::BookHeadphones,

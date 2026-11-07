@@ -588,3 +588,72 @@ fn open_main_window(cx: &mut App) {
         Err(err) => tracing::error!("open_main_window: 打开失败：{err:#}"),
     }
 }
+
+// ── 墨水屏 ────────────────────────────────────────────────────────────────────
+
+/// 这台设备是不是墨水屏。只有 Android 判（见 [`android::is_eink_device`] 的两条判据）；
+/// 桌面 / iOS / OHOS 恒否 —— 那几端的读者在设置里自己点水墨那一档。
+///
+/// 调用方只有一个：配置装载时的**首启预选**（`services::config`），所以这里允许阻塞的
+/// 文件探针 —— 那一趟跑在启动线上，一次而已。
+pub(crate) fn is_eink_device() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        android::is_eink_device()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
+/// 厂商 / 型号名单的**纯函数**分类器：给拼起来的设备身份，认不认得出是墨水屏。
+///
+/// Android 的 [`is_eink_device`] 用它；函数放在不分档编译的这一层，桌面测试才跑得到。
+/// 名单是维护出来的 —— Android 没有公开的「墨水屏」判定口，主流厂商靠名字认
+/// （文石 Onyx / BOOX、海信、掌阅、汉王、Bigme、Meebook、博阅、大上、PocketBook、
+/// Likebook）。认不出的设备宁可让读者自己去设置里点一档水墨，也不在 LCD 手机上
+/// 替他定成黑白，所以名单**只进不滥**。
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn classify_eink(identity: &str) -> bool {
+    const MARKS: &[&str] = &[
+        "onyx", "boox", "hisense", "ireader", "hanwang", "bigme", "meebook", "boyue", "dasung",
+        "pocketbook", "likebook",
+    ];
+    let id = identity.to_ascii_lowercase();
+    MARKS.iter().any(|mark| id.contains(mark))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_eink;
+
+    /// 名单认得出主流墨水屏厂，也不把普通厂误判进去 —— 预选错一次，读者开机就是
+    /// 一屏黑白，这一格必须是准的。
+    #[test]
+    fn the_eink_roster_recognises_the_big_vendors_and_nothing_else() {
+        for identity in [
+            "ONYX BOOX Poke 5",
+            "OnyxInternational",
+            "HISENSE Touch",
+            "iReader Smart",
+            "Hanwang N10",
+            "Bigme B751",
+            "Meebook M8",
+            "PocketBook Era",
+            "likebook Muses",
+        ] {
+            assert!(classify_eink(identity), "{identity} 该认成墨水屏");
+        }
+        for identity in [
+            "Xiaomi 23049PCD8G",
+            "google Pixel 8",
+            "samsung SM-S9180",
+            "HUAWEI Mate 60",
+            "meizu 20",
+        ] {
+            assert!(!classify_eink(identity), "{identity} 不该认成墨水屏");
+        }
+        assert!(!classify_eink(""), "空身份不该认成墨水屏");
+    }
+}

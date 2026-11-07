@@ -1,4 +1,4 @@
-//! 七个来源共用的那半边：把候选的字节**送到**暂存区。
+//! 八个来源共用的那半边：把候选的字节**送到**暂存区。
 //!
 //! 这里没有哈希、没有格式判定、没有数据库（§二 不变量三）——只有「拷贝 / 下载 / 起临时名 /
 //! 洗名」这四件对所有来源完全一样的事。契约（[`Source`]）在上一级，批次引擎在
@@ -13,6 +13,7 @@ use crate::infra::error::IoResultExt as _;
 use crate::infra::error::Result;
 use crate::infra::paths;
 use crate::infra::task::StageCtx;
+use crate::net::cloud::Drive;
 use crate::net::remote::Method;
 use crate::net::remote::Request;
 use crate::net::remote::Sink;
@@ -86,7 +87,7 @@ pub(crate) fn staged_name(display_name: &str) -> String {
     format!(".{stem}.{n}.part")
 }
 
-/// 一批**现成的本地路径** —— 七种来源里六种最终都落成它：选择器交回的算
+/// 一批**现成的本地路径** —— 八种来源里六种最终都落成它：选择器交回的算
 /// [`ImportKind::Picked`]，其余（清单勾选、传书、监听）由调用方带着自己的 [`ImportKind`] 进来。
 ///
 /// 旧形状里那份 `Policy`（立场）现在整条不需要了：副本叫什么由内容哈希定，所以没有
@@ -395,4 +396,76 @@ impl Source for UrlSource {
 /// 日志里的 URL：查询串里常有凭证（签名直链的 token），打进日志前掐掉。
 fn url_for_log(url: &str) -> String {
     url.split(['?', '#']).next().unwrap_or(url).to_string()
+}
+
+/// 浏览界面上勾下的一个网盘条目。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudItem {
+    /// 网盘内路径（[`crate::net::cloud::Drive`] 的 `path` 语义）。
+    pub path: String,
+    /// 建议名：就是列表里显示的那一行。扩展名只是判定层的线索，
+    /// 最终文件名由内容哈希决定。
+    pub name: String,
+    pub size: Option<u64>,
+}
+
+/// 从网盘勾的几本书：候选在浏览界面上就定死了（勾了哪些），`stage` 把每一本经
+/// [`Drive`] 流式下载进暂存区 —— 与 [`UrlSource`] 同一条落盘策略（[`FileSink`]：
+/// `.part` 起步、下完改名、半途清场），取消也在块与块之间生效。
+///
+/// `drive` 是**为这一批现造的**（凭据与传输都定死在里面），随源对象一起 Drop ——
+/// 网盘凭据不该比一次下载活得更久。
+pub struct CloudSource {
+    drive: Box<dyn Drive>,
+    items: Vec<CloudItem>,
+}
+
+impl CloudSource {
+    pub fn new(drive: Box<dyn Drive>, items: Vec<CloudItem>) -> Self {
+        Self { drive, items }
+    }
+}
+
+impl Source for CloudSource {
+    fn kind(&self) -> ImportKind {
+        ImportKind::Cloud
+    }
+
+    fn candidates(&self, _book_dir: &Path, ctx: &StageCtx) -> Result<Vec<Candidate>> {
+        let label = self.drive.label();
+        let candidates: Vec<Candidate> = self
+            .items
+            .iter()
+            .map(|item| {
+                tracing::debug!("import: 网盘候选 {} ← {label}:{}", item.name, item.path);
+                Candidate {
+                    origin: Origin::Cloud {
+                        drive: label,
+                        path: item.path.clone(),
+                        size: item.size,
+                    },
+                    name: item.name.clone(),
+                    size: item.size,
+                }
+            })
+            .collect();
+        // label 是给日志与出处用的 ASCII 名，不拼进给读者看的那行字。
+        ctx.message(format!("准备取 {} 本", candidates.len()));
+        Ok(candidates)
+    }
+
+    fn stage(&self, candidate: &Candidate, staging_dir: &Path, ctx: &StageCtx) -> Result<PathBuf> {
+        let Origin::Cloud { path, .. } = &candidate.origin else {
+            return Err(Error::Io {
+                path: PathBuf::from(&candidate.name),
+                source: "网盘候选不该是本地出处".to_string().into(),
+            });
+        };
+        std::fs::create_dir_all(staging_dir).io_path(staging_dir)?;
+        let dest = staging_dir.join(staged_name(&candidate.name));
+        let mut sink = FileSink::start(dest.clone())?;
+        let total = self.drive.download(path, &mut sink, ctx.cancel())?;
+        ctx.bytes(total, Some(total), &candidate.name);
+        Ok(dest)
+    }
 }

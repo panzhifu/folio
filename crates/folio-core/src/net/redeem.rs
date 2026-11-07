@@ -20,19 +20,26 @@ use super::remote::{Method, Request, Response, Transport};
 /// 兑换请求带着订单号与设备 id，填错一格等于把这两样交给别人的服务器。
 pub const ENDPOINT: &str = "https://shocked-roundworm-d1dqjn15d00708-1476411022.ap-shanghai.app.tcloudbase.com/folio-redeem/redeem";
 
-/// 一次兑换的三个好结果。
+/// 一次兑换的好结果。
 ///
 /// `Bound` 不在这一档：它不是「兑成了什么」，而是「这单不是你的」，所以是错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// 这一单第一次被兑现，换到这么多天。
     Granted(i64),
+    /// 这一单第一次被兑现，且是**买断档**：不做为期限，权益跟设备绑定走。
+    ///
+    /// 单独一档而不是并回 [`Outcome::Granted`]：天数那一档的「接在今天后面」整套算法
+    /// 对买断没有意义，而台账与状态句也要各说各的话。
+    GrantedLifetime,
     /// 这一单在**另一台**上兑过、后来被软解除，现在由这台认领过来。`days` 是**还剩下的那几天**
     /// —— 服务端按当初的发货时刻数出来，客户端接在今天后面。
     ///
     /// 单独一档而不是并回 [`Outcome::Granted`]：并回去就看不出「这一趟没发新货」，而更要紧的是
     /// 那一单的整笔天数**不许**再给一次 —— 给一次，「解除 → 重兑」每轮就白得一整年。
     Moved(i64),
+    /// 同 [`Outcome::Moved`]，但认领的是一单**买断**：认领过来的是永久权益，不是剩下的天数。
+    MovedLifetime,
     /// 同一台设备把同一单重交了一次：不加天数，因为第一次就已经给了。
     ///
     /// 单独一档而不是并回 [`Outcome::Granted(0)`]：界面要说的是「已经兑过了」，
@@ -93,7 +100,8 @@ pub enum Error {
 }
 
 /// 服务端那一格回应的形状。`days` 只有 `granted` / `moved` / `replay` 三档用得到，缺了按 0；
-/// `released` 只有解除那两档用得到。
+/// `released` 只有解除那两档用得到；`lifetime` 只在买断档出现，缺了按 false（老服务端没有
+/// 这一格，天数档照旧）。
 #[derive(Debug, Deserialize)]
 struct Wire {
     ok: bool,
@@ -102,6 +110,8 @@ struct Wire {
     days: i64,
     #[serde(default)]
     released: i64,
+    #[serde(default)]
+    lifetime: bool,
 }
 
 /// 订单号的形状：爱发电的 `out_trade_no` 是一串 29 位数字。
@@ -190,12 +200,21 @@ pub fn parse_release(response: &Response) -> Result<Release, Error> {
 
 fn classify(wire: Wire) -> Result<Outcome, Error> {
     let Wire {
-        ok, state, days, ..
+        ok,
+        state,
+        days,
+        lifetime,
+        ..
     } = wire;
     match (ok, state.as_str()) {
+        // 买断档先行：它带 days=0（天数算法对它没有意义），按天数那一档的 `days > 0`
+        // 去挡会把它错杀成「读不懂」。
+        (true, "granted") if lifetime => Ok(Outcome::GrantedLifetime),
         (true, "granted") if days > 0 => Ok(Outcome::Granted(days)),
         // 认领那一档同样要求 `days > 0`：服务端在剩下 0 天时回的是 `spent`，走到这一档而
         // 天数又是 0，说明两边形状对不上 —— 宁可报读不懂，也不要悄悄记一笔空账。
+        // 买断的认领不带天数，先行。
+        (true, "moved") if lifetime => Ok(Outcome::MovedLifetime),
         (true, "moved") if days > 0 => Ok(Outcome::Moved(days)),
         (true, "replay") => Ok(Outcome::Replay),
         (false, "not_found") => Err(Error::NotFound),
@@ -407,6 +426,32 @@ mod tests {
                 super::Error::Malformed(_)
             ),
             "0 天的 moved 该按读不懂处理"
+        );
+    }
+
+    /// 买断档带 `days: 0`（天数算法对它没有意义），落在自己的两个结果上；
+    /// 老服务端没有 `lifetime` 这一格，天数档照旧 —— serde 缺省 false 就是要保这条退路。
+    #[test]
+    fn a_lifetime_order_is_its_own_outcome_and_days_stay_days() {
+        assert_eq!(
+            parse(&response(r#"{"ok":true,"state":"granted","days":0,"lifetime":true}"#)).unwrap(),
+            Outcome::GrantedLifetime
+        );
+        assert_eq!(
+            parse(&response(r#"{"ok":true,"state":"moved","days":0,"lifetime":true}"#)).unwrap(),
+            Outcome::MovedLifetime
+        );
+        assert_eq!(
+            parse(&response(r#"{"ok":true,"state":"granted","days":30}"#)).unwrap(),
+            Outcome::Granted(30)
+        );
+        assert!(
+            matches!(
+                parse(&response(r#"{"ok":true,"state":"granted","days":0,"lifetime":false}"#))
+                    .unwrap_err(),
+                super::Error::Malformed(_)
+            ),
+            "不带 lifetime 的 0 天 granted 仍是两边形状对不上"
         );
     }
 

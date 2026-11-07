@@ -459,6 +459,100 @@ def pick_screen(T):
     return svg("10-pick", e, T["label"], "选项屏：推一屏勾选，选中即写回", T)
 
 
+GOLD = "#d9a119"      # 会员卡的点睛金。全稿唯一一处 token 之外的颜色（membership.rs 的 gold()）。
+
+
+def membership_screen(T):
+    """高级会员页：黑金卡 + 权益网格 + 免费线 + 激活。
+
+    2026-11-07 买断制定稿（会员页整屏重做，`pages/membership.rs`）：hero 是一张
+    **反色卡**（卡底取 `foreground`、卡上的字取 `background`，浅色主题下是黑卡、
+    深色主题下翻成浅卡 —— 两端都是页面上唯一一张反色卡），金色只落在边、章与
+    PRO 签上。权益网格是真门禁（云同步 / 网盘取书 / 听书 / 翻译与 AI 的入口都问
+    `activation::premium`）。画的是**未开通**那一态：
+    CTA 是 primary 整宽的「一次买断 · 永久有效」；买断到手后这颗钮自己退场
+    （`membership_page` 的条件行），天数档在卡上第二行看到的是到期日。
+
+    布局不走 `page_screen`：hero 与网格是整卡自绘（`Row::custom` 在实现里也是整行
+    自绘），只有激活那一张走普通卡。金色与几何都对齐实现：卡圆角 16、
+    网格圆角 12、CTA 高 44（`Button::large`）。
+    """
+    e = status_bar(T)
+    e += top_bar("高级会员", T)
+    y = STATUS + TOPBAR + 8
+
+    # ── hero：反色卡（浅色主题下黑底） ────────────────────────────────────────
+    ch = 118.0
+    e.append(f'<rect x="{PAD}" y="{y:.2f}" width="{W - 2 * PAD}" height="{ch}" rx="16" '
+             f'fill="{T["fg"]}" stroke="{GOLD}" stroke-opacity="0.38" stroke-width="1"/>')
+    ink, ink_muted = T["bg"], T["bg"]
+    # 卡上的次级字靠透明度而不是第二枚 token：实现里是 background.opacity(0.62)。
+    e.append(f'<circle cx="{PAD + 34}" cy="{y + 34}" r="18" fill="{ink}" fill-opacity="0.12"/>')
+    e.append(icon("crown", PAD + 34 - 10, y + 34 - 10, 20, GOLD))
+    tx = PAD + 34 + 18 + 12
+    e.append(text(tx, y + 30, "高级会员", 16, ink, 600))
+    e.append(f'<text x="{tx}" y="{y + 50}" font-size="13" fill="{ink}" '
+             f'fill-opacity="0.62" font-family="{FONT}">未开通 · 一次买断永久有效</text>')
+    bw, bh = 40.0, 20.0
+    bx, by = PAD + W - 2 * PAD - 16 - bw, y + 24
+    e.append(f'<rect x="{bx:.2f}" y="{by:.2f}" width="{bw}" height="{bh}" rx="6" fill="none" '
+             f'stroke="{GOLD}" stroke-opacity="0.5" stroke-width="1"/>')
+    e.append(text(bx + bw / 2, by + 13.5, "PRO", 10, GOLD, 600, anchor="middle"))
+    fy = y + ch - 34
+    e.append(f'<line x1="{PAD + 16}" y1="{fy:.2f}" x2="{W - PAD - 16}" y2="{fy:.2f}" '
+             f'stroke="{GOLD}" stroke-opacity="0.18" stroke-width="1"/>')
+    e.append(f'<text x="{W - PAD - 16}" y="{fy + 19}" font-size="11" fill="{ink}" '
+             f'fill-opacity="0.62" font-family="{FONT}" text-anchor="end">'
+             f'爱发电订单即激活码，绑定设备</text>')
+    y += ch + 12
+
+    # ── CTA：整宽 primary（未开通这一态） ─────────────────────────────────────
+    e.append(f'<rect x="{PAD}" y="{y:.2f}" width="{W - 2 * PAD}" height="44" rx="10" '
+             f'fill="{T["primary"]}"/>')
+    e.append(text(W / 2, y + 27.5, "一次买断 · 永久有效", 15, T["primary_fg"], 500, anchor="middle"))
+    y += 44 + 16
+
+    # ── 会员权益：节头 + 2×3 网格 + 免费线 ────────────────────────────────────
+    els, hh = section_header("会员权益", T)
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(els, T))))
+    y += hh
+    tile_w, tile_h, gap = (W - 2 * PAD - 8) / 2, 58.0, 8.0
+    tiles = [
+        ("cloud", "云同步", "进度批注多端跟手"),
+        ("hard-drive", "网盘取书", "WebDAV · 百度直取"),
+        ("headphones", "听书", "整章朗读后台播"),
+        ("languages", "翻译 · AI", "划词即译 · 选中即问"),
+        ("smartphone", "多设备", "换机自由解绑"),
+        ("sparkles", "未来新权益", "后续新增自动含"),
+    ]
+    for i, (ic, name, desc) in enumerate(tiles):
+        col, row_i = i % 2, i // 2
+        x = PAD + col * (tile_w + gap)
+        ty = y + row_i * (tile_h + gap)
+        e.append(f'<rect x="{x:.2f}" y="{ty:.2f}" width="{tile_w:.2f}" height="{tile_h}" '
+                 f'rx="12" fill="{T["btn_bg"]}"/>')
+        e.append(icon(ic, x + 10, ty + 10, 15, T["fg"]))
+        e.append(text(x + 32, ty + 22, name, 13, T["fg"], 500))
+        e.append(text(x + 10, ty + 46, desc, 11, T["muted"]))
+    y += 3 * tile_h + 2 * gap + GAP_SECT
+
+    # ── 激活会员：占位字进框 + 兑换居中 ──────────────────────────────────────
+    els, hh = section_header("激活会员", T)
+    e.append('<g transform="translate(0,{:.2f})">{}</g>'.format(y, "".join(resolve(els, T))))
+    y += hh
+    # 兑换钮在输入框正下方居中（2026-11-07 定稿）：激活是这一格里唯一的动作。
+    # ghost_button 按「右缘」定位，给它算好居中的右缘。
+    label = "兑换"
+    bw = 8 + 14 + 6 + tw(label, 14) + 8
+    redeem_btn, _bx = ghost_button(label, "ticket", (W + bw) / 2)
+    rows = [
+        (input_box(T, PAD + PAD, 6, W - 2 * PAD, placeholder="爱发电订单编号"), 44.0),
+        (redeem_btn, ROW),
+    ]
+    y = draw_card(e, y, rows, T, gap=GAP_SECT)
+    return svg("18-membership", e, T["label"], "高级会员：黑金反色卡、买断 CTA、权益网格、订单激活", T)
+
+
 SCREENS = [
     ("01-root-light.svg", root_screen, LIGHT),
     ("02-appearance.svg", appearance_screen, LIGHT),
@@ -477,6 +571,7 @@ SCREENS = [
     ("15-access-question.svg", access_screen, LIGHT),
     ("16-dictionary.svg", dictionary_screen, LIGHT),
     ("17-backup.svg", backup_screen, LIGHT),
+    ("18-membership.svg", membership_screen, LIGHT),
 ]
 
 if __name__ == "__main__":
