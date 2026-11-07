@@ -173,7 +173,7 @@ pub fn import_from_picker(cx: &mut App) {
         if paths.is_empty() {
             return;
         }
-        let _ = cx.update(|cx| import(cx, paths));
+        cx.update(|cx| import(cx, paths));
     })
     .detach();
 }
@@ -298,7 +298,10 @@ fn busy(status: &Status) -> bool {
 
 /// 一份落好盘的字体 → 配置条目。注册（字节进文本系统）也在这半程里：
 /// 报不出家族名的份按「装失败」处理，目录由调用方收走。
-fn install_outcome(path: &std::path::Path, texts: &gpui_kit::TextSystem) -> folio_core::Result<FontEntry> {
+fn install_outcome(
+    path: &std::path::Path,
+    texts: &gpui_kit::TextSystem,
+) -> folio_core::Result<FontEntry> {
     let families = user_fonts::register_file(texts, path).ok_or_else(|| {
         let _ = std::fs::remove_dir_all(path.parent().unwrap_or(path));
         folio_core::Error::Font {

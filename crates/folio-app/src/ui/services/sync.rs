@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use folio_core::Sync as SyncConfig;
-use folio_core::net::remote::{self, Transport, dav};
+use folio_core::SyncProvider;
+use folio_core::net::cloud::baidu::{self, BaiduDrive};
+use folio_core::net::remote::{self, RemoteStore, Transport, dav};
 use folio_core::sync::{self, Report};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global};
 
@@ -127,13 +129,39 @@ fn transport() -> Arc<dyn Transport> {
     update::transport()
 }
 
-fn client(config: &SyncConfig) -> Result<dav::Client, Failure> {
-    let url = config.url.trim();
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(Failure::Config);
+/// 书架传书要的「按当前配置现造一台仓库」。`None` = 没配好（地址缺失、百度没登录）。
+/// 返回的第二格是这一台的远端目录 —— 书文件落在它下面的 `books/`。
+pub fn remote_store(cx: &App) -> Option<(Box<dyn RemoteStore>, String)> {
+    let config = ConfigHolder::sync(cx);
+    let remote = client(&config, cx).ok()?;
+    Some((remote, config.remote_dir))
+}
+
+/// 按配置现造一台远端仓库。WebDAV 走地址与账号；百度网盘复用「网盘取书」那一份
+/// token，根钉在应用目录（`/apps/<应用名>/`，第三方应用唯一可写的地方）。
+fn client(config: &SyncConfig, cx: &App) -> Result<Box<dyn RemoteStore>, Failure> {
+    match config.provider {
+        SyncProvider::WebDav => {
+            let url = config.url.trim();
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err(Failure::Config);
+            }
+            let endpoint =
+                dav::Endpoint::new(url, config.username.clone(), config.password.clone());
+            Ok(Box::new(dav::Client::new(endpoint, transport())))
+        }
+        SyncProvider::Baidu => {
+            let cloud = ConfigHolder::cloud(cx);
+            if !cloud.baidu.configured() {
+                return Err(Failure::Config);
+            }
+            Ok(Box::new(BaiduDrive::with_root(
+                cloud.baidu.access_token,
+                transport(),
+                baidu::APP_ROOT,
+            )))
+        }
     }
-    let endpoint = dav::Endpoint::new(url, config.username.clone(), config.password.clone());
-    Ok(dav::Client::new(endpoint, transport()))
 }
 
 /// 这台安装的稳定 id：第一次要用到时生成并留下，之后每一趟都读同一个。
@@ -174,7 +202,7 @@ pub fn sync_now(cx: &mut App) {
         });
         return;
     }
-    let client = match client(&config) {
+    let client = match client(&config, cx) {
         Ok(client) => client,
         Err(failure) => {
             state.update(cx, |state, cx| state.begin(Status::Failed(failure), cx));
@@ -193,10 +221,9 @@ pub fn sync_now(cx: &mut App) {
     let dir = config.remote_dir.clone();
     let device = config.device_id.clone();
     let now = folio_core::infra::time::now();
-    let work =
-        cx.background_spawn(
-            async move { sync::sync_once(store.as_ref(), &client, &dir, &device, now) },
-        );
+    let work = cx.background_spawn(async move {
+        sync::sync_once(store.as_ref(), client.as_ref(), &dir, &device, now)
+    });
     let weak = state.downgrade();
     cx.spawn(async move |cx| {
         let outcome = work.await;
@@ -212,7 +239,7 @@ pub fn test_now(cx: &mut App) {
         return;
     }
     let config = ConfigHolder::sync(cx);
-    let client = match client(&config) {
+    let client = match client(&config, cx) {
         Ok(client) => client,
         Err(failure) => {
             state.update(cx, |state, cx| state.begin(Status::Failed(failure), cx));
@@ -221,7 +248,7 @@ pub fn test_now(cx: &mut App) {
     };
     state.update(cx, |state, cx| state.begin(Status::Testing, cx));
     let dir = config.remote_dir.clone();
-    let work = cx.background_spawn(async move { sync::test_connection(&client, &dir) });
+    let work = cx.background_spawn(async move { sync::test_connection(client.as_ref(), &dir) });
     let weak = state.downgrade();
     cx.spawn(async move |cx| {
         let outcome = work.await;

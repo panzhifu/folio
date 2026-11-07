@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::{Drive, Entry};
 use crate::net::remote::{
-    Cancel, Result, Sink, Transport,
+    Cancel, RemoteStore, Result, Sink, Transport,
     dav::{self, Client},
 };
 
@@ -34,17 +34,31 @@ impl DavDrive {
     }
 }
 
-impl Drive for DavDrive {
-    fn label(&self) -> &'static str {
-        "webdav"
-    }
-
+impl RemoteStore for DavDrive {
     fn list(&self, path: &str) -> Result<Vec<Entry>> {
         self.client.list(path)
     }
 
+    fn get(&self, path: &str) -> Result<Vec<u8>> {
+        self.client.get(path)
+    }
+
+    fn put(&self, path: &str, body: Vec<u8>) -> Result<()> {
+        self.client.put(path, body)
+    }
+
+    fn mkdir(&self, path: &str) -> Result<()> {
+        self.client.mkdir(path)
+    }
+
     fn download(&self, path: &str, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64> {
         self.client.download(path, sink, cancel)
+    }
+}
+
+impl Drive for DavDrive {
+    fn label(&self) -> &'static str {
+        "webdav"
     }
 }
 
@@ -55,9 +69,9 @@ mod tests {
 
     use std::sync::Arc;
 
-    use super::{DavDrive, Drive};
-    use crate::net::remote::{Cancel, Sink, Transport};
+    use super::DavDrive;
     use crate::net::remote::dav::Mock;
+    use crate::net::remote::{Cancel, RemoteStore, Sink, Transport};
 
     /// 攒字节的落点，让「下了什么」能被断言。
     struct Buffer(Vec<u8>);
@@ -98,7 +112,12 @@ mod tests {
     fn drive(responses: Vec<crate::net::remote::Response>) -> (DavDrive, Arc<Mock>) {
         let mock = Arc::new(Mock::new(responses));
         (
-            DavDrive::open("https://dav.example.com/dav", "noke", "app-pass", Arc::clone(&mock) as Arc<dyn Transport>),
+            DavDrive::open(
+                "https://dav.example.com/dav",
+                "noke",
+                "app-pass",
+                Arc::clone(&mock) as Arc<dyn Transport>,
+            ),
             mock,
         )
     }
@@ -141,9 +160,7 @@ mod tests {
             "路径要逐段编码后拼到 Base 上"
         );
         assert!(
-            req.headers
-                .iter()
-                .any(|(k, _)| k == "Authorization"),
+            req.headers.iter().any(|(k, _)| k == "Authorization"),
             "下载请求要带上认证"
         );
     }

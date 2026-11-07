@@ -19,15 +19,7 @@ use crate::ui::services::user_fonts::{self, Status};
 
 pub(in crate::ui::features::settings) fn store_row() -> Row {
     Row::custom(store_control).keywords(&[
-        "font",
-        "download",
-        "store",
-        "字体",
-        "下载",
-        "霞鹜",
-        "文楷",
-        "思源",
-        "OFL",
+        "font", "download", "store", "字体", "下载", "霞鹜", "文楷", "思源", "OFL",
     ])
 }
 
@@ -126,19 +118,17 @@ fn font_card(cx: &App, item: FontItem) -> AnyElement {
                         .loading(fraction.is_none())
                         .value(fraction.unwrap_or(0.0)),
                 )
-                .child(
-                    muted_label(
-                        tf(
-                            cx,
-                            "font_store.received",
-                            &[
-                                ("received", &human_bytes(received)),
-                                ("total", &human_bytes(total)),
-                            ],
-                        ),
+                .child(muted_label(
+                    tf(
                         cx,
+                        "font_store.received",
+                        &[
+                            ("received", &human_bytes(received)),
+                            ("total", &human_bytes(total)),
+                        ],
                     ),
-                )
+                    cx,
+                ))
                 .child(
                     Button::new(format!("font-cancel-{}", item.id))
                         .ghost()

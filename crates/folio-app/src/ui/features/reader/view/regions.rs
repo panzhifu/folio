@@ -310,6 +310,23 @@ impl ReadingPage {
                         page_night.update(cx, |this, cx| this.toggle_night(cx))
                     }),
             )
+            // 「自动」那一格：自动前进 on/off，开着时亮着 —— 它是会话里的一格状态，
+            // 与夜间同一类当场生效的开关。方向永远朝阅读前方（`scroll_page(1)` 那一路），
+            // RTL 的书自动往左走，图标不换。
+            .child({
+                let page_auto = cx.entity().clone();
+                let auto_on = self.reader.read(cx).auto_on();
+                Button::new("entry-auto")
+                    .ghost()
+                    .small()
+                    .flex_1()
+                    .justify_center()
+                    .selected(auto_on)
+                    .icon(IconName::FastForward)
+                    .label(tr(cx, "reader.auto").to_string())
+                    .accessibility_label(tr(cx, "reader.auto"))
+                    .on_click(move |_, _, cx| page_auto.update(cx, |this, cx| this.toggle_auto(cx)))
+            })
             // 设置放最右：翻页、夜间这些当场生效的开关留在中间，设置单独占一端。
             .child(
                 Button::new("entry-settings")

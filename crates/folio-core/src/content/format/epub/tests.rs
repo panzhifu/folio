@@ -2568,8 +2568,7 @@ fn fonts_are_collected_when_the_media_type_lies_or_is_modern() {
     )
     .unwrap();
     let packed = std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/oss/fonts/glyf-min.woff2"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/fonts/glyf-min.woff2"),
     )
     .unwrap();
     // TTC 在这一层只过判据不解析：'ttcf' 起头的占位字节就够。

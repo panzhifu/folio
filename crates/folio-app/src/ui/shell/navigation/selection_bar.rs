@@ -1,8 +1,8 @@
 //! 书架进入多选态时顶替底部导航的那条工具栏。
 //!
-//! 形状与 [`super::bottom_bar`] 同一个胶囊、同一套留白，只是四格目的地换成这一批书的
-//! 动作：退出、全选 / 全不选、加入分组、信息（只选一本时）、删除。计数摆在正中间，
-//! 它是这一屏唯一要读的读数。
+//! 形状与 [`super::bottom_bar`] 同一个胶囊、同一套留白，只是那几格目的地换成这一批书的
+//! 动作：退出、全选 / 全不选、加入分组、信息（只选一本时）、上传到网盘、删除。计数摆在
+//! 正中间，它是这一屏唯一要读的读数。
 //!
 //! 这里**只画按钮**：动作本体在 [`crate::ui::features::shelf::ShelfView`] —— 它知道
 //! 哪些书被勾中、书库在哪儿、删完要不要重查。外壳把两边接起来，与打开一本书走同一条路。
@@ -27,6 +27,7 @@ pub enum SelectionAction {
     ToggleAll,
     Group(i64),
     Info,
+    Upload,
     Delete,
 }
 
@@ -57,12 +58,14 @@ where
     };
     let group_label = tr(cx, "shelf.selection_group");
     let info_label = tr(cx, "shelf.info_title");
+    let upload_label = tr(cx, "shelf.selection_upload");
     let delete_label = tr(cx, "shelf.book_delete");
     let count_text = tf(cx, "shelf.selection_count", &[("n", &count)]);
 
     let exit = on_action.clone();
     let toggle = on_action.clone();
     let info = on_action.clone();
+    let upload = on_action.clone();
     let delete = on_action.clone();
     let group_rows = groups;
     let group_on = on_action.clone();
@@ -144,6 +147,15 @@ where
     }
 
     bar.child(
+        Button::new("shelf-selection-upload")
+            .ghost()
+            .small()
+            .icon(IconName::CloudUpload)
+            .tooltip(upload_label.clone().to_string())
+            .accessibility_label(upload_label)
+            .on_click(move |_, window, cx| upload(SelectionAction::Upload, window, cx)),
+    )
+    .child(
         Button::new("shelf-selection-delete")
             .ghost()
             .small()

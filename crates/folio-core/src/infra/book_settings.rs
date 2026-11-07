@@ -257,6 +257,7 @@ mod tests {
             // 正文主题名同样只归全局；这里填非默认值，为的是「被排除」测得出。
             reading_theme: Some("sepia".into()),
             page_turn: PageTurn::Cover,
+            auto_advance_speed: 24.0,
             turn_duration: 500.0,
             highlight_style: AnnotationStyle::Wavy,
             brightness: Some(0.4),
@@ -330,6 +331,7 @@ mod tests {
         assert_eq!(
             overridden,
             BTreeSet::from([
+                "auto_advance_speed",
                 "brightness",
                 "highlight_style",
                 "page_turn",
@@ -445,7 +447,10 @@ mod tests {
         assert_eq!(effective.mode, base.mode, "一本书的差量改到全局浅深了");
         assert_eq!(effective.light, base.light);
         assert_eq!(effective.dark, base.dark);
-        assert_eq!(effective.reading_mode, base.reading_mode, "阅读浅深只归全局");
+        assert_eq!(
+            effective.reading_mode, base.reading_mode,
+            "阅读浅深只归全局"
+        );
         assert_eq!(
             effective.reading_theme, base.reading_theme,
             "正文主题只归全局"

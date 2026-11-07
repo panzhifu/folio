@@ -474,7 +474,9 @@ fn is_clause_ender(chars: &[char], at: usize) -> bool {
     match chars[at] {
         // 千分位逗号不是停顿：1,000 不能切成两半。
         ',' => {
-            !chars.get(at.wrapping_sub(1)).is_some_and(|prev| prev.is_ascii_digit())
+            !chars
+                .get(at.wrapping_sub(1))
+                .is_some_and(|prev| prev.is_ascii_digit())
                 && !chars.get(at + 1).is_some_and(|next| next.is_ascii_digit())
         }
         ch => CLAUSE_ENDERS.contains(&ch),
@@ -955,7 +957,9 @@ mod tests {
     /// 打开听书屏的那一下只摆位置不开口：摆好之后停在第一句（暂停的形状），按下
     /// 播放才从它开口 —— 「点了开始才开始」。
     #[gpui_kit::test]
-    fn arming_positions_the_sentence_without_speaking_and_playing_starts_it(cx: &mut TestAppContext) {
+    fn arming_positions_the_sentence_without_speaking_and_playing_starts_it(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(gpui_kit::init);
         let flow = speech_flow();
         let (view, _handle) = open(cx, &flow, None);
@@ -1085,7 +1089,8 @@ mod tests {
     /// 千分位逗号不是刀口：`1,000` 必须整段保留，`，` 才是停顿。
     #[test]
     fn thousand_separator_commas_do_not_become_clause_cuts() {
-        let text = "这件货一共 1,000 件，再加上仓库里剩下的全部存货，统统都要在明天之前如数交割清楚才行。";
+        let text =
+            "这件货一共 1,000 件，再加上仓库里剩下的全部存货，统统都要在明天之前如数交割清楚才行。";
         let chars: Vec<char> = text.chars().collect();
         let ranges = split_sentences(&chars, 0..chars.len());
         let got: Vec<String> = ranges
@@ -1177,6 +1182,64 @@ mod tests {
         assert_eq!(
             view.read_with(cx, |session, _| session.speech_available()),
             Some(false)
+        );
+    }
+
+    /// 分页档也跟读：念到下一页的那一句，屏要翻过去，高亮区间跟着走。
+    /// 连续滚动那条在 `speaking_a_sentence_in_another_chapter_brings_the_view_along`；
+    /// 这一条钉「听书自动翻页」不是滚动模式独有的。
+    #[gpui_kit::test]
+    fn following_a_sentence_on_a_later_page_turns_the_page(cx: &mut TestAppContext) {
+        use crate::ui::features::reader::model::chrome::PageMode;
+        use folio_core::infra::config::PageTurn;
+
+        cx.update(gpui_kit::init);
+        let body = "<p>这是一段用来把章节撑过一屏的正文，重复许多次。</p>".repeat(30);
+        let flow = FlowDoc {
+            chapters: vec![Chapter::inline("第一章", &body)],
+            ..Default::default()
+        };
+        let (store, book_id) = store_with_book(&flow);
+        let (view, handle) = open(cx, &flow, Some((store, book_id)));
+        cx.update(|app| {
+            ConfigHolder::edit_book_appearance(app, |a| a.page_turn = PageTurn::Cover);
+        });
+        settle(cx, handle);
+        assert!(
+            view.read_with(cx, |session, _| session.mode() == PageMode::Paged),
+            "前置：这一屏该站在分页档里"
+        );
+
+        // 找一句落在第一页之后的：它的行顶在下一页，屏必须动。
+        let (range, target) = view.read_with(cx, |session, _| {
+            let doc = session
+                .book()
+                .and_then(|book| book.span_doc(0))
+                .expect("这一章应该在拼接窗口里");
+            let mut found = super::sentence_from(doc, 0).expect("至少应有一句");
+            loop {
+                let page = doc.page_of_line(doc.line_at_offset(found.start));
+                if page > 0 {
+                    return (found, page);
+                }
+                found = super::next_sentence(doc, found).expect("后面应该还有句子");
+            }
+        });
+
+        view.update(cx, |session, cx| {
+            session.speak_sentence(0, range.clone(), cx);
+        });
+        settle(cx, handle);
+
+        assert_eq!(
+            view.read_with(cx, |session, _| session.page()),
+            target,
+            "念到下一页时屏要翻过去"
+        );
+        assert_eq!(
+            view.read_with(cx, |session, _| session.speech_range()),
+            Some((0, range)),
+            "高亮区间跟着声音走"
         );
     }
 }

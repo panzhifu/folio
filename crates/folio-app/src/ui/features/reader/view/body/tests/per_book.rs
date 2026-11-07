@@ -272,10 +272,7 @@ fn the_reader_mode_stays_off_the_app_mode(cx: &mut TestAppContext) {
         );
     });
     assert!(
-        store
-            .book_settings(id)
-            .expect("这一本的差量")
-            .is_empty(),
+        store.book_settings(id).expect("这一本的差量").is_empty(),
         "阅读浅深只归全局，一本书的差量里不该有它"
     );
 }

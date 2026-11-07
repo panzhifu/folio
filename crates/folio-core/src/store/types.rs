@@ -9,6 +9,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::anchor::TextAnchor;
 
+/// 书架多选传书要的一行。远端文件名用 `hash`（跨设备认书的唯一钥匙），
+/// 本地要读的是 `path` —— 两样都不在 [`BookRow`] 里同时具备。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadBook {
+    pub id: i64,
+    pub hash: String,
+    pub path: String,
+    pub title: String,
+    pub format: String,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookRow {
     pub id: i64,

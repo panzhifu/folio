@@ -82,7 +82,7 @@ pub(crate) fn load_all_system_fonts(cx: &mut App) {
             summary.unreadable,
         );
         if summary.registered_files > 0 {
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 font_primary::bump_families_revision();
                 cx.refresh_windows();
             });
@@ -254,7 +254,9 @@ mod tests {
     #[test]
     fn only_font_extensions_pass_the_gate() {
         assert!(is_font_file(Path::new("/system/fonts/Roboto-Regular.ttf")));
-        assert!(is_font_file(Path::new("/system/fonts/NotoSansCJK-Regular.TTC")));
+        assert!(is_font_file(Path::new(
+            "/system/fonts/NotoSansCJK-Regular.TTC"
+        )));
         assert!(is_font_file(Path::new("/product/fonts/MiSans.otf")));
         assert!(!is_font_file(Path::new("/system/fonts/fonts.xml")));
         assert!(!is_font_file(Path::new("/system/fonts/README")));

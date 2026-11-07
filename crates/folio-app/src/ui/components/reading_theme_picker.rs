@@ -23,6 +23,9 @@ use gpui_kit::{
 use crate::ui::foundation::reading_theme;
 use crate::ui::services::l10n::tr;
 
+/// 点了一张卡的回调形状：参数是主题名，「跟随软件」给 `None`。
+type PickHandler = Rc<dyn Fn(Option<String>, &mut App)>;
+
 /// 一张卡在两个家（阅读面板的横滑条、设置页的网格）里都要的信息。
 pub struct ReadingThemePicker<'a> {
     /// 当前选中的主题名；`None` = 「跟随软件」那张卡选中。
@@ -32,7 +35,7 @@ pub struct ReadingThemePicker<'a> {
     /// 桌面卡略大、带「Aa」字样；手机卡只有色带。
     pub desktop: bool,
     /// 点了一张卡。参数是**主题名**；「跟随软件」给 `None`。
-    pub on_pick: Rc<dyn Fn(Option<String>, &mut App)>,
+    pub on_pick: PickHandler,
 }
 
 impl ReadingThemePicker<'_> {

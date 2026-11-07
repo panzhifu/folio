@@ -22,9 +22,7 @@ use crate::ui::platform;
 use crate::ui::services::activation::{self, AFDIAN_PAGE, ReleaseStatus, Status};
 use folio_core::{Membership, MembershipTier, infra::time, net::redeem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{
-    ActiveTheme, Disableable as _, Icon, Sizable as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, div, px, rgb,
 };
@@ -145,22 +143,26 @@ pub(in crate::ui::features::settings) fn gate_group(text_key: &'static str, cx: 
 /// 不画组卡与节头；桌面端维持组件的原样。
 fn status_group(membership: &Membership, cx: &App) -> Group {
     let lifetime = membership.lifetime;
-    let mut rows = vec![Row::custom(|cx: &App| hero(cx).into_any_element()).keywords(&[
-        "membership",
-        "premium",
-        "会员",
-        "开通",
-        "买断",
-        "永久",
-    ])];
-    if !lifetime {
-        rows.push(Row::custom(|cx: &App| cta_row(cx).into_any_element()).keywords(&[
+    let mut rows = vec![
+        Row::custom(|cx: &App| hero(cx).into_any_element()).keywords(&[
             "membership",
-            "buy",
+            "premium",
             "会员",
+            "开通",
             "买断",
-            "购买",
-        ]));
+            "永久",
+        ]),
+    ];
+    if !lifetime {
+        rows.push(
+            Row::custom(|cx: &App| cta_row(cx).into_any_element()).keywords(&[
+                "membership",
+                "buy",
+                "会员",
+                "买断",
+                "购买",
+            ]),
+        );
     }
     group(tr(cx, "group.membership_state"), rows).bare()
 }
@@ -174,7 +176,7 @@ fn hero(cx: &App) -> impl IntoElement {
     let membership = ConfigHolder::membership(cx);
     let ink = cx.theme().background;
     let ink_muted = cx.theme().background.opacity(0.62);
-    let card = v_flex()
+    v_flex()
         .w_full()
         .gap_3()
         .rounded(px(16.0))
@@ -210,13 +212,11 @@ fn hero(cx: &App) -> impl IntoElement {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(tr(cx, "page.membership")),
                         )
-                        .child(
-                            div().text_sm().text_color(ink_muted).child(hero_status(
-                                &membership,
-                                today(),
-                                cx,
-                            )),
-                        ),
+                        .child(div().text_sm().text_color(ink_muted).child(hero_status(
+                            &membership,
+                            today(),
+                            cx,
+                        ))),
                 )
                 .child(
                     div()
@@ -256,8 +256,7 @@ fn hero(cx: &App) -> impl IntoElement {
                         .text_color(ink_muted)
                         .child(tr(cx, "membership.hero_footer_right")),
                 ),
-        );
-    card
+        )
 }
 
 /// 「会员权益」那一组：一格 2×3 权益网格。
@@ -269,12 +268,14 @@ fn hero(cx: &App) -> impl IntoElement {
 fn benefit_group(cx: &App) -> Group {
     group(
         tr(cx, "group.membership_benefits"),
-        vec![Row::custom(|cx: &App| benefits_row(cx).into_any_element()).keywords(&[
-            "membership",
-            "benefits",
-            "会员",
-            "权益",
-        ])],
+        vec![
+            Row::custom(|cx: &App| benefits_row(cx).into_any_element()).keywords(&[
+                "membership",
+                "benefits",
+                "会员",
+                "权益",
+            ]),
+        ],
     )
 }
 
@@ -311,7 +312,11 @@ fn benefit_tile(icon: IconName, name: &str, desc: &str, cx: &App) -> impl IntoEl
 /// 权益网格，独占一个自定义行。
 fn benefits_row(cx: &App) -> impl IntoElement {
     let tiles = [
-        (IconName::Cloud, "membership.grid_sync", "membership.grid_sync_desc"),
+        (
+            IconName::Cloud,
+            "membership.grid_sync",
+            "membership.grid_sync_desc",
+        ),
         (
             IconName::HardDrive,
             "membership.grid_cloud",
@@ -322,7 +327,11 @@ fn benefits_row(cx: &App) -> impl IntoElement {
             "membership.grid_speech",
             "membership.grid_speech_desc",
         ),
-        (IconName::Languages, "membership.grid_ai", "membership.grid_ai_desc"),
+        (
+            IconName::Languages,
+            "membership.grid_ai",
+            "membership.grid_ai_desc",
+        ),
         (
             IconName::Smartphone,
             "membership.grid_devices",

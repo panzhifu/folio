@@ -24,6 +24,7 @@
 use folio_core::infra::config::{Appearance, Mode};
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::{App, SharedString, Window, WindowAppearance};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 框架内置的默认主题名，存在 `ThemeRegistry` 里，不由我们嵌入。
 /// 没设过主题、或设过的名字已经不存在时用它们兜底。
@@ -143,6 +144,26 @@ fn apply_scrollbar_tint(cx: &mut App) {
     });
 }
 
+// ── 墨水屏上的动效 ────────────────────────────────────────────────────────────
+
+/// 墨水屏这一档要不要把动效收掉。换肤那一步（[`repaint`]）推一遍：**设备是墨水屏**
+/// （平台层探出来的那格），或读者**选了水墨档** —— 两者居其一就算。前者是硬件逼的
+/// （电子纸上每一帧重绘都看得见），后者是读者自己挑的那一档本就是「墨水屏的样子」。
+///
+/// 走全局旗而不是每帧问配置：[`crate::ui::shell`] 的 `nav_transition` 与 `turn_duration`
+/// 在一帧里被调很多次，读这里是一次原子读；旗的真相只有 `repaint` 那一处。
+static CALM_MOTION: AtomicBool = AtomicBool::new(false);
+
+/// 推一遍墨水屏动效旗，返回这一下有没有翻档。
+pub fn set_calm_motion(calm: bool) -> bool {
+    CALM_MOTION.swap(calm, Ordering::Relaxed) != calm
+}
+
+/// 这一帧动效该不该收（整屏进出、阅读层进出、翻页）。界面侧只问这一格。
+pub fn calm_motion() -> bool {
+    CALM_MOTION.load(Ordering::Relaxed)
+}
+
 /// 存下来的浅深选择，配上操作系统的当前外观，实际解析成哪一档。
 ///
 /// 水墨解析到**浅**那一侧：它复用浅色主题再整体去饱和，跟着系统翻到深色就没有
@@ -258,6 +279,9 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
     if appearance.mode == Mode::Ink {
         desaturate_active_theme(cx);
     }
+    // 墨水屏的动效旗跟着同一档推：设备是墨水屏、或读者选了水墨，转场与翻页都收成零
+    // —— `shell` 的 `nav_transition` / `turn_duration` / `turn_transition` 读这一格。
+    set_calm_motion(appearance.mode == Mode::Ink || crate::ui::platform::is_eink_device());
     // 封面那一类图（架面 / 书头 / OPDS）走 gpui 自己的 `Image`，不经过正文图集：
     // 灰度落回字节上，翻档那一下由这一句广播出去。
     crate::ui::foundation::images::set_ink_images(appearance.mode == Mode::Ink);

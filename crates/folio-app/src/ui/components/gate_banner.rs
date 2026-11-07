@@ -39,13 +39,7 @@ pub fn gate_banner(text: impl Into<SharedString>, cx: &App) -> AnyElement {
                         .text_color(cx.theme().primary),
                 ),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_sm()
-                .child(text),
-        )
+        .child(div().flex_1().min_w_0().text_sm().child(text))
         .child(
             Button::new("gate-banner-open")
                 .small()

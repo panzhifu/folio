@@ -29,6 +29,7 @@ crc32fast.workspace = true
 base64.workspace = true
 # 内容哈希（`identity`）：书的身份是它的内容，不是文件路径。
 sha2.workspace = true
+md-5.workspace = true
 # 账号密钥（`account`）：HMAC-SHA256 与 OS 熵。为什么这里用 `ring` 而不是 `hmac`，
 # 连同 Android 编译图的实测一起写在根 Cargo.toml 那一条。
 ring.workspace = true

@@ -14,7 +14,9 @@ use std::collections::VecDeque;
 #[cfg(test)]
 use std::sync::Mutex;
 
-use super::{Cancel, Error, Method, Request, Response, Result, Sink, Transport};
+use super::{
+    Cancel, Error, Method, RemoteStore, Request, Response, Result, Sink, Source, Transport,
+};
 
 /// PROPFIND 的请求体。
 ///
@@ -191,6 +193,46 @@ impl Client {
             Request::new(method, self.endpoint.url(path, dir)).header("Authorization", header);
         tracing::debug!("dav: {} {}", method.as_str(), url_for_log(&req.url));
         req
+    }
+}
+
+impl RemoteStore for Client {
+    fn list(&self, path: &str) -> Result<Vec<Entry>> {
+        Client::list(self, path)
+    }
+
+    fn get(&self, path: &str) -> Result<Vec<u8>> {
+        Client::get(self, path)
+    }
+
+    fn put(&self, path: &str, body: Vec<u8>) -> Result<()> {
+        Client::put(self, path, body)
+    }
+
+    fn mkdir(&self, path: &str) -> Result<()> {
+        Client::mkdir(self, path)
+    }
+
+    fn download(&self, path: &str, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64> {
+        Client::download(self, path, sink, cancel)
+    }
+
+    /// 书文件按流发：`Client::put` 收一整块 `Vec`，那是给同步快照那种几 KB 的
+    /// 小对象用的；一本几百 MB 的书走这条。
+    fn put_file(
+        &self,
+        path: &str,
+        source: &mut dyn Source,
+        size: u64,
+        _cancel: &Cancel,
+    ) -> Result<u64> {
+        let mut req = self.authed(Method::Put, path, false);
+        req.headers
+            .push(("Content-Type".into(), "application/octet-stream".into()));
+        let mut reader = super::SourceReader(source);
+        let resp = self.transport.upload(req, &mut reader, size)?;
+        check_status(&resp, &[201, 204, 200])?;
+        Ok(size)
     }
 }
 
@@ -581,6 +623,11 @@ impl Mock {
             .last()
             .cloned()
             .expect("假传输没有收到任何请求")
+    }
+
+    /// 这一趟收到的全部请求（按发出顺序）。多步上传要逐条看。
+    pub(crate) fn requests(&self) -> Vec<Request> {
+        self.seen.lock().unwrap().clone()
     }
 
     fn answer(&self, req: Request) -> Result<Response> {

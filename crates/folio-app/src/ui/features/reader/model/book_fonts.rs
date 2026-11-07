@@ -1179,7 +1179,10 @@ mod tests {
             !latin_by_family(&bytes).covers("A Family That Is Not In This Font"),
             "名字对不上时退回整份字体：这份里一张带 m 的脸都没有"
         );
-        assert!(!latin_by_family(b"not a font").any(), "认不出的字节不 panic");
+        assert!(
+            !latin_by_family(b"not a font").any(),
+            "认不出的字节不 panic"
+        );
     }
 
     fn face(href: &str, crc32: u32, raw_len: u64) -> FontBytes {

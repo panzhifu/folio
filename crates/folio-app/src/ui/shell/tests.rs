@@ -192,6 +192,34 @@ fn the_brightness_follows_the_book_and_hands_back_when_it_closes() {
 ///
 /// 失败的样子与背光那条同族：读着夜读的书退回架面，整屏还是黑的，而软件外观明明选的
 /// 是浅色 —— 读者只会以为设置没生效。这条也钉在自由函数上：外壳那一帧在测试里摸不到
+/// 墨水屏（或减动效）把三个时钟收成零：判据是纯函数芯，全局旗在 `repaint` 那头推。
+/// 电子纸上每一帧重绘都看得见，转场与翻页在那端不是动效是闪烁。
+#[test]
+fn the_motion_clocks_collapse_when_calm() {
+    use super::{Duration, NAV_TRANSITION, nav_duration_for, turn_duration_for, turn_over_for};
+
+    // 整屏进出 / 阅读层进出：calm 与 reduce 两者居其一即零，平常档是 280。
+    assert_eq!(nav_duration_for(false, true), Duration::ZERO, "calm");
+    assert_eq!(nav_duration_for(true, false), Duration::ZERO, "reduce");
+    assert_eq!(
+        nav_duration_for(false, false),
+        NAV_TRANSITION,
+        "平常档还是整屏进出那一个数"
+    );
+    // 翻页时长：calm 归零，平常档照配置走。
+    assert_eq!(turn_duration_for(280.0, true), Duration::ZERO);
+    assert_eq!(turn_duration_for(280.0, false), Duration::from_millis(280));
+    // 翻页曲线：calm 之下纸当场落定，给多长都不滑。
+    assert_eq!(
+        turn_over_for(Duration::from_millis(400), false, true),
+        Duration::ZERO
+    );
+    assert_eq!(
+        turn_over_for(Duration::from_millis(400), false, false),
+        Duration::from_millis(400)
+    );
+}
+
 /// `Window::appearance()` 的系统档位。
 #[test]
 fn the_reader_mode_only_wins_while_the_layer_covers() {
@@ -495,7 +523,8 @@ fn leaving_a_night_book_repaints_the_shelf_in_the_app_mode(cx: &mut gpui_kit::Te
         "进场没盖满，壳还是白天 —— 翻面要等盖满那一帧"
     );
     // 走完进场：盖满那一帧才折到夜里，此刻层正挡着整窗，读者看不见这一翻。
-    cx.executor().advance_clock(std::time::Duration::from_millis(400));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
     for _ in 0..4 {
         cx.update_window(handle, |_, window, cx| window.render_frame(cx))
             .expect("进场走完那一屏该画得出来");

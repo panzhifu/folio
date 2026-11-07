@@ -434,11 +434,17 @@ mod tests {
     #[test]
     fn a_lifetime_order_is_its_own_outcome_and_days_stay_days() {
         assert_eq!(
-            parse(&response(r#"{"ok":true,"state":"granted","days":0,"lifetime":true}"#)).unwrap(),
+            parse(&response(
+                r#"{"ok":true,"state":"granted","days":0,"lifetime":true}"#
+            ))
+            .unwrap(),
             Outcome::GrantedLifetime
         );
         assert_eq!(
-            parse(&response(r#"{"ok":true,"state":"moved","days":0,"lifetime":true}"#)).unwrap(),
+            parse(&response(
+                r#"{"ok":true,"state":"moved","days":0,"lifetime":true}"#
+            ))
+            .unwrap(),
             Outcome::MovedLifetime
         );
         assert_eq!(
@@ -447,8 +453,10 @@ mod tests {
         );
         assert!(
             matches!(
-                parse(&response(r#"{"ok":true,"state":"granted","days":0,"lifetime":false}"#))
-                    .unwrap_err(),
+                parse(&response(
+                    r#"{"ok":true,"state":"granted","days":0,"lifetime":false}"#
+                ))
+                .unwrap_err(),
                 super::Error::Malformed(_)
             ),
             "不带 lifetime 的 0 天 granted 仍是两边形状对不上"

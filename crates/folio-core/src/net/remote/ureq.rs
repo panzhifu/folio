@@ -9,7 +9,7 @@
 //! 超时、流式响应体（逐块交给 [`Sink`]，块间查取消）。Digest 认证不支持 ——
 //! 那条 [`Error::DigestRequired`] 单独一支，遇上时界面有明确的话可说。
 
-use std::io::Read as _;
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,20 +42,12 @@ impl UreqTransport {
 impl Transport for UreqTransport {
     fn request(&self, req: Request) -> Result<Response> {
         let call = self.call(&req)?;
-        if !(200..300).contains(&call.status()) {
-            return Err(status_error(call.status(), call.header("WWW-Authenticate")));
-        }
-        let status = call.status();
-        let headers = collect_headers(&call);
-        let mut body = Vec::new();
-        call.into_reader()
-            .read_to_end(&mut body)
-            .map_err(|err| Error::Transport(err.to_string()))?;
-        Ok(Response {
-            status,
-            headers,
-            body,
-        })
+        Self::finish(call)
+    }
+
+    fn upload(&self, req: Request, source: &mut dyn Read, len: u64) -> Result<Response> {
+        let call = self.call_with(&req, Some(source), len)?;
+        Self::finish(call)
     }
 
     fn download(&self, req: Request, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64> {
@@ -104,6 +96,17 @@ impl UreqTransport {
     /// 统一摊平成「拿得到状态的响应」，让 [`Self::request`] 与 [`Self::download`]
     /// 走同一条错误路。
     fn call(&self, req: &Request) -> Result<ureq::Response> {
+        self.call_with(req, None, 0)
+    }
+
+    /// 发一次请求。`source` 非空时按流发（`Content-Length` 由调用方给）—— 一本
+    /// 几百 MB 的书不该先读成 `Vec<u8>`。
+    fn call_with(
+        &self,
+        req: &Request,
+        source: Option<&mut dyn Read>,
+        len: u64,
+    ) -> Result<ureq::Response> {
         let call = self
             .agent
             .request(req.method.as_str(), &req.url)
@@ -113,16 +116,34 @@ impl UreqTransport {
             .iter()
             .fold(call, |call, (name, value)| call.set(name, value));
         // 空体 = 没有 body 的请求（GET / PROPFIND）；非空体一律按字节发。
-        let call = if req.body.is_empty() {
-            call.call()
-        } else {
-            call.send(&req.body[..])
+        let call = match source {
+            Some(source) => call.set("Content-Length", &len.to_string()).send(source),
+            None if req.body.is_empty() => call.call(),
+            None => call.send(&req.body[..]),
         };
         match call {
             Ok(response) => Ok(response),
             Err(ureq::Error::Status(_, response)) => Ok(response),
             Err(ureq::Error::Transport(err)) => Err(Error::Transport(err.to_string())),
         }
+    }
+
+    /// 拿到响应之后共用的那一步：状态挡板 + 收头 + 读完响应体。
+    fn finish(call: ureq::Response) -> Result<Response> {
+        if !(200..300).contains(&call.status()) {
+            return Err(status_error(call.status(), call.header("WWW-Authenticate")));
+        }
+        let status = call.status();
+        let headers = collect_headers(&call);
+        let mut body = Vec::new();
+        call.into_reader()
+            .read_to_end(&mut body)
+            .map_err(|err| Error::Transport(err.to_string()))?;
+        Ok(Response {
+            status,
+            headers,
+            body,
+        })
     }
 }
 

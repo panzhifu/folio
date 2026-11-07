@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use rusqlite::{OptionalExtension, params};
 
 use super::annotations::color_of;
-use super::{AnnotationStyle, Store};
+use super::{AnnotationStyle, Store, UploadBook};
 use crate::Result;
 use crate::content::anchor::TextAnchor;
 use crate::infra::book_settings::BookSettings;
@@ -197,6 +197,37 @@ impl Store {
             },
             skipped_books: skipped_books as usize,
         })
+    }
+
+    /// 书架多选传书：按 id 取「能上传的那几本」。
+    ///
+    /// 没有 `content_hash` 的行**不进来**：远端文件名就是它，缺了它传上去另一台设备
+    /// 也认不回是哪一本。调用方那侧按 `ids.len() - 结果.len()` 数「跳过了几本」。
+    pub fn upload_books(&self, ids: &[i64]) -> Result<Vec<UploadBook>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, content_hash, path, title, format, size FROM books
+              WHERE id = ?1 AND content_hash IS NOT NULL AND content_hash <> ''",
+        )?;
+        let mut books = Vec::new();
+        for id in ids {
+            let row = stmt
+                .query_row(params![id], |r| {
+                    Ok(UploadBook {
+                        id: r.get(0)?,
+                        hash: r.get(1)?,
+                        path: r.get(2)?,
+                        title: r.get(3)?,
+                        format: r.get(4)?,
+                        size: r.get::<_, i64>(5)? as u64,
+                    })
+                })
+                .optional()?;
+            if let Some(book) = row {
+                books.push(book);
+            }
+        }
+        Ok(books)
     }
 
     /// 局域网同步的本机书架清单：本机**认得出身份**的那些书（`content_hash` 是对面
@@ -478,6 +509,22 @@ mod tests {
             .unwrap();
         store.set_content_hash(book, "hash-a", "sha256").unwrap();
         (store, book)
+    }
+
+    /// 传书清单只收认得出身份的：没有 `content_hash` 的行传上去对面也认不回，
+    /// 不存在的 id 安静跳过（多选与删除并发时会出现）。
+    #[test]
+    fn upload_books_returns_only_rows_with_an_identity() {
+        let (store, book) = store_with_book();
+        let unnamed = store
+            .add_book(Path::new("/books/b.epub"), &meta("书乙"))
+            .unwrap();
+        let books = store.upload_books(&[book, unnamed, 9999]).unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].id, book);
+        assert_eq!(books[0].hash, "hash-a");
+        assert_eq!(books[0].path, "/books/a.epub");
+        assert_eq!(books[0].title, "书甲");
     }
 
     #[test]

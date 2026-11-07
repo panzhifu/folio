@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 
 use folio_core::net::cloud::baidu::BaiduDrive;
+use folio_core::net::cloud::baidu_auth;
 use folio_core::net::cloud::dav::DavDrive;
 use folio_core::net::cloud::{Drive, Entry};
 use folio_core::net::remote::Error as RemoteError;
@@ -77,6 +78,11 @@ struct WebDavForm {
 
 struct BaiduForm {
     token: Entity<InputState>,
+    /// OAuth 授权码：读者从授权页粘回来的那一串。非空时保存走「换 token」那一路，
+    /// token 框空着也行 —— 两条来路在保存那一格分岔。
+    code: Entity<InputState>,
+    /// 换 token 的请求在路上：保存与「打开授权页」都按住，不叠第二发。
+    linking: bool,
     error: Option<SharedString>,
 }
 
@@ -100,6 +106,8 @@ pub struct CloudView {
     loading: bool,
     error: Option<Failure>,
     importing: Option<ImportState>,
+    /// 这一轮浏览里 token 已经静默续过一次：刷新再失败就把错误亮出来，不无限转。
+    refreshed: bool,
 }
 
 impl EventEmitter<CloudEvent> for CloudView {}
@@ -121,6 +129,7 @@ impl CloudView {
             loading: false,
             error: None,
             importing: None,
+            refreshed: false,
         }
     }
 
@@ -179,7 +188,13 @@ impl CloudView {
         let url = form.url.read(cx).value().trim().to_string();
         let username = form.username.read(cx).value().trim().to_string();
         let password = form.password.read(cx).value().to_string();
-        let dir = form.dir.read(cx).value().trim().trim_matches('/').to_string();
+        let dir = form
+            .dir
+            .read(cx)
+            .value()
+            .trim()
+            .trim_matches('/')
+            .to_string();
         if !(url.starts_with("http://") || url.starts_with("https://")) || username.is_empty() {
             if let Some(form) = self.form.as_mut() {
                 form.error = Some(tr(cx, "cloud.form_invalid"));
@@ -209,8 +224,11 @@ impl CloudView {
     fn open_baidu_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let token =
             cx.new(|cx| InputState::new(window, cx).default_value(self.baidu.access_token.clone()));
+        let code = cx.new(|cx| InputState::new(window, cx));
         self.baidu_form = Some(BaiduForm {
             token,
+            code,
+            linking: false,
             error: None,
         });
         self.screen = Screen::BaiduForm;
@@ -221,7 +239,16 @@ impl CloudView {
         let Some(form) = self.baidu_form.as_ref() else {
             return;
         };
+        if form.linking {
+            return;
+        }
+        let code = form.code.read(cx).value().trim().to_string();
         let token = form.token.read(cx).value().trim().to_string();
+        if !code.is_empty() {
+            // 授权码那一路：换 token 在网络上，去后台走（见 [`Self::link_baidu`]）。
+            self.link_baidu(code, cx);
+            return;
+        }
         if token.is_empty() {
             if let Some(form) = self.baidu_form.as_mut() {
                 form.error = Some(tr(cx, "cloud.token_missing"));
@@ -229,17 +256,109 @@ impl CloudView {
             cx.notify();
             return;
         }
-        ConfigHolder::edit_cloud(cx, |cloud| {
-            cloud.baidu = folio_core::BaiduDrive {
-                access_token: token.clone(),
-            };
-        });
-        self.baidu = folio_core::BaiduDrive {
+        // 手贴 token 的老路：没有刷新凭据，过期了界面请他重贴。
+        let baidu = folio_core::BaiduDrive {
             access_token: token,
+            ..folio_core::BaiduDrive::default()
         };
+        ConfigHolder::edit_cloud(cx, |cloud| cloud.baidu = baidu.clone());
+        self.baidu = baidu;
         self.baidu_form = None;
         self.screen = Screen::Drives;
         cx.notify();
+    }
+
+    /// 授权码那一路：换 token（网络）→ 问账号名 → 落盘 → 回账号页。
+    ///
+    /// 换出来的 `refresh_token` 是今后唯一有效的那支（百度会轮换），必须落盘；
+    /// 账号名问不到不挡路 —— 显示名空着，token 照常能用。
+    fn link_baidu(&mut self, code: String, cx: &mut Context<Self>) {
+        if let Some(form) = self.baidu_form.as_mut() {
+            form.linking = true;
+            form.error = None;
+        }
+        cx.notify();
+        let work = cx.background_spawn(async move {
+            baidu_auth::exchange_code(&code, crate::ui::services::update::transport()).map(
+                |tokens| {
+                    let account = baidu_auth::account_name(
+                        &tokens.access_token,
+                        crate::ui::services::update::transport(),
+                    )
+                    .unwrap_or_default();
+                    (tokens, account)
+                },
+            )
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<CloudView>, cx| {
+            let result = work.await;
+            let _ = weak.update(cx, |this, cx| this.settle_link(result, cx));
+        })
+        .detach();
+    }
+
+    fn settle_link(
+        &mut self,
+        result: Result<(baidu_auth::BaiduTokens, String), RemoteError>,
+        cx: &mut Context<Self>,
+    ) {
+        let (tokens, account) = match result {
+            Ok(pair) => pair,
+            Err(error) => {
+                tracing::warn!("cloud: 百度授权换 token 失败：{error}");
+                if let Some(form) = self.baidu_form.as_mut() {
+                    form.linking = false;
+                    form.error = Some(failure_text(failure_of(&error), cx));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let baidu = linked_drive(&tokens, account, self.baidu.account.clone());
+        ConfigHolder::edit_cloud(cx, |cloud| cloud.baidu = baidu.clone());
+        self.baidu = baidu;
+        self.baidu_form = None;
+        self.screen = Screen::Drives;
+        cx.notify();
+    }
+
+    /// token 过期（errno 111 那一档）而有刷新凭据：静默续一次再重列。
+    /// 读者不该为「30 天到了」再跑一趟授权。
+    fn refresh_baidu(&mut self, cx: &mut Context<Self>) {
+        let refresh_token = self.baidu.refresh_token.clone();
+        self.loading = true;
+        cx.notify();
+        let work = cx.background_spawn(async move {
+            baidu_auth::refresh_tokens(&refresh_token, crate::ui::services::update::transport())
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<CloudView>, cx| {
+            let result = work.await;
+            let _ = weak.update(cx, |this, cx| this.settle_refresh(result, cx));
+        })
+        .detach();
+    }
+
+    fn settle_refresh(
+        &mut self,
+        result: Result<baidu_auth::BaiduTokens, RemoteError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(tokens) => {
+                let baidu = linked_drive(&tokens, String::new(), self.baidu.account.clone());
+                ConfigHolder::edit_cloud(cx, |cloud| cloud.baidu = baidu.clone());
+                self.baidu = baidu;
+                self.load_dir(cx);
+            }
+            Err(error) => {
+                tracing::warn!("cloud: 百度 token 续期失败：{error}");
+                self.loading = false;
+                self.error = Some(failure_of(&error));
+                cx.notify();
+            }
+        }
     }
 
     /// 进一台网盘的目录树。没配账号就先带去表单 —— 这是能力不存在时的统一降级，
@@ -257,6 +376,7 @@ impl CloudView {
             return;
         }
         self.kind = kind;
+        self.refreshed = false;
         // WebDAV 的默认目录是配置里那格；百度没有这格，从根开始。
         self.path = match kind {
             Kind::WebDav => self.webdav.dir.clone(),
@@ -298,6 +418,15 @@ impl CloudView {
             }
             Err(error) => {
                 tracing::warn!("cloud: 列 {:?} 失败：{error}", self.path);
+                if failure_of(&error) == Failure::Auth
+                    && self.kind == Kind::Baidu
+                    && self.baidu.refreshable()
+                    && !self.refreshed
+                {
+                    self.refreshed = true;
+                    self.refresh_baidu(cx);
+                    return;
+                }
                 self.error = Some(failure_of(&error));
             }
         }
@@ -452,18 +581,43 @@ fn build_drive(kind: Kind, cx: &App) -> Option<Box<dyn Drive>> {
                 transport,
             ))
         }
-        Kind::Baidu if cloud.baidu.configured() => Box::new(BaiduDrive::new(
-            cloud.baidu.access_token,
-            transport,
-        )),
+        Kind::Baidu if cloud.baidu.configured() => {
+            Box::new(BaiduDrive::new(cloud.baidu.access_token, transport))
+        }
         _ => return None,
     })
+}
+
+/// 换到 / 刷新到的一对 token → 落盘形状：到期时刻在此刻折算（Unix 秒）。
+///
+/// 账号名问到了就用新的；没问到（uinfo 失败不挡路）沿用已存的那一条 —— 账号列表
+/// 上「这是谁」不该因为一次续期就变成空白。
+fn linked_drive(
+    tokens: &baidu_auth::BaiduTokens,
+    account: String,
+    fallback: String,
+) -> folio_core::BaiduDrive {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    folio_core::BaiduDrive {
+        access_token: tokens.access_token.clone(),
+        refresh_token: tokens.refresh_token.clone(),
+        expires_at: now + tokens.expires_in.max(0),
+        account: if account.is_empty() {
+            fallback
+        } else {
+            account
+        },
+    }
 }
 
 fn failure_of(error: &RemoteError) -> Failure {
     match error {
         RemoteError::Transport(_) => Failure::Network,
-        RemoteError::Unauthorized { .. } | RemoteError::Forbidden { .. }
+        RemoteError::Unauthorized { .. }
+        | RemoteError::Forbidden { .. }
         | RemoteError::DigestRequired => Failure::Auth,
         _ => Failure::Remote,
     }
@@ -576,7 +730,10 @@ impl CloudView {
             tr(cx, "cloud.not_configured")
         };
         let baidu_subtitle = if self.baidu.configured() {
-            tr(cx, "cloud.token_saved")
+            match self.baidu.account.as_str() {
+                "" => tr(cx, "cloud.token_saved"),
+                account => account.to_string().into(),
+            }
         } else {
             tr(cx, "cloud.not_configured")
         };
@@ -623,9 +780,8 @@ impl CloudView {
                             .tooltip(tr(cx, "cloud.edit").to_string())
                             .accessibility_label(tr(cx, "cloud.edit"))
                             .on_click(move |_, window, cx| {
-                                view_edit_webdav.update(cx, |this, cx| {
-                                    this.open_webdav_form(window, cx)
-                                });
+                                view_edit_webdav
+                                    .update(cx, |this, cx| this.open_webdav_form(window, cx));
                             }),
                     ),
             )
@@ -662,9 +818,8 @@ impl CloudView {
                             .tooltip(tr(cx, "cloud.edit").to_string())
                             .accessibility_label(tr(cx, "cloud.edit"))
                             .on_click(move |_, window, cx| {
-                                view_edit_baidu.update(cx, |this, cx| {
-                                    this.open_baidu_form(window, cx)
-                                });
+                                view_edit_baidu
+                                    .update(cx, |this, cx| this.open_baidu_form(window, cx));
                             }),
                     ),
             )
@@ -756,6 +911,31 @@ impl CloudView {
         };
         let view_save = cx.entity().clone();
         let view_cancel = cx.entity().clone();
+        // 授权那一路：应用凭据内置了才有得点 —— 没配就说一声，token 手贴那条路仍在。
+        let auth_block = match baidu_auth::credentials() {
+            Some((client_id, _)) => v_flex()
+                .w_full()
+                .max_w(px(FORM_WIDTH))
+                .gap_1()
+                .child(div().text_sm().child(tr(cx, "cloud.baidu_code")))
+                .child(muted_label(tr(cx, "cloud.baidu_code_hint"), cx))
+                .child(Input::new(&form.code).w_full())
+                .child(
+                    Button::new("cloud-baidu-open-page")
+                        .outline()
+                        .small()
+                        .label(tr(cx, "cloud.baidu_open_page").to_string())
+                        .disabled(form.linking)
+                        .on_click(move |_, _, _cx| {
+                            crate::ui::platform::open_url(&baidu_auth::authorize_url(client_id));
+                        }),
+                ),
+            None => v_flex()
+                .w_full()
+                .max_w(px(FORM_WIDTH))
+                .gap_1()
+                .child(muted_label(tr(cx, "cloud.baidu_no_credentials"), cx)),
+        };
         let mut body = v_flex()
             .id("cloud-baidu-form")
             .flex_1()
@@ -765,6 +945,7 @@ impl CloudView {
             .px_4()
             .py_4()
             .gap_3()
+            .child(auth_block)
             .child(
                 v_flex()
                     .w_full()
@@ -796,7 +977,12 @@ impl CloudView {
                 .child(
                     Button::new("cloud-baidu-save")
                         .small()
-                        .label(tr(cx, "cloud.save").to_string())
+                        .label(if form.linking {
+                            tr(cx, "cloud.baidu_linking")
+                        } else {
+                            tr(cx, "cloud.save")
+                        })
+                        .disabled(form.linking)
                         .on_click(move |_, _, cx| {
                             view_save.update(cx, |this, cx| this.save_baidu(cx));
                         }),

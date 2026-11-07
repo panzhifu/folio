@@ -101,8 +101,9 @@ impl FontPicker {
         );
         self.families = families;
         self.revision = font_primary::families_revision();
-        self.state
-            .update(cx, |state, cx| state.set_items(SearchableVec::new(groups), window, cx));
+        self.state.update(cx, |state, cx| {
+            state.set_items(SearchableVec::new(groups), window, cx)
+        });
     }
 }
 
@@ -277,11 +278,7 @@ mod tests {
             "书籍字体",
             "系统字体",
         );
-        assert_eq!(
-            groups[0].title,
-            "书籍字体",
-            "随书名字补进书籍组第一项"
-        );
+        assert_eq!(groups[0].title, "书籍字体", "随书名字补进书籍组第一项");
         assert_eq!(groups[0].items[0], "Folio Test Picker Missing Book Face");
         assert_eq!(flat[0], "Folio Test Picker Missing Book Face");
 

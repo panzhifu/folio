@@ -112,6 +112,10 @@ base64 = "0.22"
 # 少一个工具链变量。`cpufeatures` 是运行时探测，x86 的 SHA-NI 与 aarch64 的 ARMv8
 # SHA 扩展都在覆盖范围内，所以不要预设「手机上只能软算」。
 sha2 = "0.11"
+# 百度网盘的分块上传：precreate 的 block_list 要每一块的 MD5。**图上已有的就不再引**：
+# `oo7`（secret service）拉的是 `md-5` 0.10 这一支（`cargo tree -i md-5@0.10` 可验），
+# 与上面 `resvg` / `sha2` 同一条口径 —— 转直接依赖，不开新树。
+md-5 = "0.10"
 # 局域网同步的账号密钥要 HMAC-SHA256 与 OS 熵（见 `account`）。
 #
 # **这一条选 `ring`，和上面那条拒掉 `ring` 的理由不冲突，差别在量出来的事实**：

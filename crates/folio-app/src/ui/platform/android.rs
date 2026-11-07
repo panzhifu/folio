@@ -556,11 +556,15 @@ pub(crate) fn is_eink_device() -> bool {
         if std::path::Path::new("/sys/class/epd").exists() {
             return true;
         }
-        let identity = ["ro.product.manufacturer", "ro.product.model", "ro.product.device"]
-            .into_iter()
-            .filter_map(system_property)
-            .collect::<Vec<_>>()
-            .join(" ");
+        let identity = [
+            "ro.product.manufacturer",
+            "ro.product.model",
+            "ro.product.device",
+        ]
+        .into_iter()
+        .filter_map(system_property)
+        .collect::<Vec<_>>()
+        .join(" ");
         super::classify_eink(&identity)
     })
 }

@@ -132,14 +132,15 @@ enum Knob {
     MarginX,
     MarginY,
     TurnDuration,
+    AutoAdvance,
 }
 
 /// `ReadingSheet::knobs` 那个数组的长度必须与 [`Knob::ALL`] 一致。
-const _: () = assert!(Knob::ALL.len() == 10);
+const _: () = assert!(Knob::ALL.len() == 11);
 
 impl Knob {
     /// 顺序就是 `knobs` 数组的顺序。
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Brightness,
         Self::FontSize,
         Self::LineHeight,
@@ -150,6 +151,7 @@ impl Knob {
         Self::MarginX,
         Self::MarginY,
         Self::TurnDuration,
+        Self::AutoAdvance,
     ];
 
     fn index(self) -> usize {
@@ -164,6 +166,7 @@ impl Knob {
             Self::MarginX => 7,
             Self::MarginY => 8,
             Self::TurnDuration => 9,
+            Self::AutoAdvance => 10,
         }
     }
 
@@ -180,6 +183,7 @@ impl Knob {
             Self::MarginX => "margin-x",
             Self::MarginY => "margin-y",
             Self::TurnDuration => "turn-duration",
+            Self::AutoAdvance => "auto-advance",
         }
     }
 
@@ -196,6 +200,7 @@ impl Knob {
             Self::MarginX => MARGIN_X_RANGE,
             Self::MarginY => MARGIN_Y_RANGE,
             Self::TurnDuration => TURN_DURATION_RANGE,
+            Self::AutoAdvance => chrome::AUTO_ADVANCE_RANGE,
         }
     }
 
@@ -212,6 +217,7 @@ impl Knob {
             Self::MarginX => chrome::MARGIN_X_STEPS,
             Self::MarginY => chrome::MARGIN_Y_STEPS,
             Self::TurnDuration => chrome::TURN_DURATION_STEPS,
+            Self::AutoAdvance => chrome::AUTO_ADVANCE_STEPS,
         }
     }
 
@@ -225,6 +231,7 @@ impl Knob {
                 .brightness
                 .unwrap_or(BRIGHTNESS_RANGE.1),
             Self::TurnDuration => ConfigHolder::appearance(cx).turn_duration,
+            Self::AutoAdvance => ConfigHolder::appearance(cx).auto_advance_speed,
             Self::FontSize => ConfigHolder::reader(cx).font_size,
             Self::LineHeight => ConfigHolder::reader(cx).line_height,
             Self::LetterSpacing => ConfigHolder::reader(cx).letter_spacing_em,
@@ -251,6 +258,9 @@ impl Knob {
             }),
             Self::TurnDuration => ConfigHolder::edit_book_appearance(cx, |appearance| {
                 appearance.turn_duration = value
+            }),
+            Self::AutoAdvance => ConfigHolder::edit_book_appearance(cx, |appearance| {
+                appearance.auto_advance_speed = value
             }),
             Self::FontSize => ConfigHolder::edit_book_reader(cx, |prefs| prefs.font_size = value),
             Self::LineHeight => {
@@ -311,7 +321,7 @@ pub(in crate::ui::features::reader) struct ReadingSheet {
     /// 十条滑条的状态，按 [`Knob::ALL`] 的顺序摆，取用走 [`ReadingSheet::knob`]。
     /// 这里刻意不留十个字段加十个各自的写入口：值只有一份，拖动、`−` / `+`、`sync`
     /// 三条路都改同一格、都从同一扇门写回配置。
-    knobs: [Entity<SliderState>; 10],
+    knobs: [Entity<SliderState>; 11],
     /// 背景图不透明度那条滑条。**不在** [`Knob`] 表里：表里十格写的是本书差量，
     /// 而背景图挂**主题名**上（全局配置根节），不属于任何一本书 —— 硬塞进表等于
     /// 让「这本书的背景图透明度」假装存在。
@@ -358,12 +368,12 @@ impl ReadingSheet {
         // 背景图不透明度：拖出来的数写进**当前主题**的图配置。没选主题时滑条本来
         // 就不该出现（背景图那一格整块收起），这一条只是兜底。
         watches.push(cx.subscribe(&bg_opacity, |_, _, event, cx| {
-            if let SliderEvent::Change(value) = event {
-                if let Some(name) = picked_reading_theme(cx) {
-                    ConfigHolder::edit_reading_background(cx, name, |background| {
-                        background.opacity = value.end();
-                    });
-                }
+            if let SliderEvent::Change(value) = event
+                && let Some(name) = picked_reading_theme(cx)
+            {
+                ConfigHolder::edit_reading_background(cx, name, |background| {
+                    background.opacity = value.end();
+                });
             }
         }));
         Self {
@@ -660,8 +670,8 @@ impl ReadingSheet {
             .w_full()
             .gap_2()
             .child(div().text_base().child(tr(cx, "reading_theme.background")))
-            .child(self.background_slot_row(&name, true, background.light.clone(), cx))
-            .child(self.background_slot_row(&name, false, background.dark.clone(), cx))
+            .child(self.background_slot_row(name, true, background.light.clone(), cx))
+            .child(self.background_slot_row(name, false, background.dark.clone(), cx))
             .child(
                 h_flex()
                     .w_full()
@@ -826,8 +836,7 @@ impl ReadingSheet {
                     // 界面对错误只有两个动作:说清一句,决定拦不拦。这里不拦 ——
                     // 那一格照旧,失败句挂在下面,下一次挑图或清除时清掉。
                     Err(err) => {
-                        this.bg_error =
-                            Some(crate::ui::foundation::error::shown(&err.into()).into());
+                        this.bg_error = Some(crate::ui::foundation::error::shown(&err).into());
                     }
                 }
                 cx.notify();
@@ -1257,6 +1266,19 @@ impl ReadingSheet {
                 Knob::TurnDuration,
                 tr(cx, "reader.turn_duration"),
                 format!("{:.0} ms", ConfigHolder::appearance(cx).turn_duration),
+                cx,
+            ))
+            .child(self.stepper_row(
+                Knob::AutoAdvance,
+                tr(cx, "reader.auto_advance"),
+                tf(
+                    cx,
+                    "reader.auto_advance.value",
+                    &[(
+                        "n",
+                        &format!("{:.0}", ConfigHolder::appearance(cx).auto_advance_speed),
+                    )],
+                ),
                 cx,
             ))
             .into_any_element()

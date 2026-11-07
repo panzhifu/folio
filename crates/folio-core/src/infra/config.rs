@@ -521,6 +521,13 @@ pub struct Appearance {
     /// 各答各的问题、不冲突：那一列答「v21 之前划的那些条当时长什么样」（答案确定是实线），
     /// 这一格答「往后的新条目长什么样」。见 `store::schema` 的 v21 那条。
     pub highlight_style: AnnotationStyle,
+    /// 自动前进的速度：**每分钟几页 / 几屏**。入口在阅读底栏那一格「自动」，这里只存
+    /// 读者调的快慢：连续滚动档折成每秒推进的像素（一「页」= 一屏高），分页档折成
+    /// 两次翻页的间隔。
+    ///
+    /// 存这一节而不是 `Reader`：它不是排版失效键，调快慢不该让任何一章重排
+    /// （与 [`page_turn`](Self::page_turn) 同一条理由）。
+    pub auto_advance_speed: f32,
     /// 阅读界面的亮度，`None` = **不接管**（跟随系统）。
     ///
     /// 与 [`page_turn`](Self::page_turn) 同一个理由存在这一节而不是 [`Reader`]：`Reader`
@@ -553,6 +560,14 @@ impl Appearance {
     /// 上限：长到这一档以上就不是「慢一点」而是「纸自己在磨」。
     pub const TURN_DURATION_MAX: f32 = 700.0;
 
+    /// 自动前进的默认档：一分钟 12 页 / 屏（一页 5 秒）。这一档比「读书」快一点、
+    /// 比「扫」慢一点 —— 读者开了它多半是想让手歇着，不是想把书读完。
+    pub const AUTO_ADVANCE_DEFAULT: f32 = 12.0;
+    /// 下限：再慢就不是「在前进」了，读者会忘了它开着。
+    pub const AUTO_ADVANCE_MIN: f32 = 2.0;
+    /// 上限：一秒半一页已经读不成句子，再快不如自己翻。
+    pub const AUTO_ADVANCE_MAX: f32 = 40.0;
+
     /// 空串按「没设」处理：`""` 既不是合法主题名，又会让下拉框显示成空白。
     pub fn normalized(mut self) -> Self {
         for name in [&mut self.light, &mut self.dark, &mut self.reading_theme] {
@@ -567,6 +582,13 @@ impl Appearance {
             Some(v) if v >= 1.0 || !v.is_finite() => None,
             Some(v) => Some(v.clamp(Self::BRIGHTNESS_MIN, 1.0)),
             None => None,
+        };
+        // 自动前进：非有限值退回默认档，越界夹进量程 —— 与翻页时长同一条规矩。
+        self.auto_advance_speed = if !self.auto_advance_speed.is_finite() {
+            Self::AUTO_ADVANCE_DEFAULT
+        } else {
+            self.auto_advance_speed
+                .clamp(Self::AUTO_ADVANCE_MIN, Self::AUTO_ADVANCE_MAX)
         };
         // 非有限值退回**默认档**而不是夹到某个端点：`NaN` 被读成「推到最慢」等于把坏数据
         // 当成一个选择。区间两端则照亮度那条老规矩夹住，手改 `config.json` 越界不改语义。
@@ -594,6 +616,7 @@ impl Default for Appearance {
             dark: None,
             reading_theme: None,
             page_turn: PageTurn::default(),
+            auto_advance_speed: Self::AUTO_ADVANCE_DEFAULT,
             turn_duration: Self::TURN_DURATION_DEFAULT,
             highlight_style: AnnotationStyle::default(),
             brightness: None,
@@ -844,10 +867,7 @@ impl Fonts {
             entry.id = entry.id.trim().to_string();
             entry.family = entry.family.trim().to_string();
             entry.file = entry.file.trim().to_string();
-            if entry.id.is_empty()
-                || entry.file.is_empty()
-                || !seen.insert(entry.id.clone())
-            {
+            if entry.id.is_empty() || entry.file.is_empty() || !seen.insert(entry.id.clone()) {
                 continue;
             }
             installed.push(entry);
@@ -1149,10 +1169,23 @@ pub struct DeepL {
 /// 密码与翻译 key 同住 `config.json`：落盘已经收在 0600（见 [`Config::save_to`]），
 /// 再拆一个秘密文件只会让「备份/恢复」多一处要记得的地方。`device_id` 由 app 在第一次
 /// 同步时生成（见 `folio_core::sync::new_device_id`），它不是读者要填的东西。
+/// 同步这一趟往哪家存储走。默认 WebDAV；老配置没有这一格，靠 serde 默认补齐。
+/// 百度网盘复用「网盘取书」那一份 token（见 [`Cloud::baidu`]），只能写应用目录
+/// （`/apps/<应用名>/`），所以它的 `remote_dir` 是应用目录里的相对路径。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncProvider {
+    #[default]
+    WebDav,
+    Baidu,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Sync {
     pub enabled: bool,
+    /// 往哪一家走：WebDAV（默认）或百度网盘。
+    pub provider: SyncProvider,
     /// WebDAV 入口根地址（建议 https）。同步文件挂在它下面的 `remote_dir`。
     pub url: String,
     pub username: String,
@@ -1167,6 +1200,7 @@ impl Default for Sync {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: SyncProvider::WebDav,
             url: String::new(),
             username: String::new(),
             password: String::new(),
@@ -1187,9 +1221,14 @@ impl Sync {
         self
     }
 
-    /// 有地址且打开了开关，才谈得上同步。
+    /// 有去处且打开了开关，才谈得上同步。百度那一头不看地址 —— 它的凭据在
+    /// [`Cloud::baidu`] 里，缺没缺由同步服务那一层报。
     pub fn configured(&self) -> bool {
-        self.enabled && !self.url.is_empty()
+        self.enabled
+            && match self.provider {
+                SyncProvider::WebDav => !self.url.is_empty(),
+                SyncProvider::Baidu => true,
+            }
     }
 }
 
@@ -1475,26 +1514,49 @@ impl WebDavDrive {
     }
 }
 
-/// 百度网盘。一期只存读者**整段粘贴进来**的 `access_token`（约 30 天有效）：换新
-/// token 要 `client_id` / `client_secret`，那是开发者侧的事，等云函数中转那条路
-/// 落地再扩（届时加字段，老配置靠 serde 缺省补齐）。
+/// 百度网盘。token 有两条来路：
+///
+/// - **OAuth 授权**（[`crate::net::cloud::baidu_auth`]）：应用内拿授权码换出来的
+///   `access_token` + `refresh_token`（约 30 天有效），过期了拿 `refresh_token`
+///   换新的，读者无感。`account` 是换 token 时顺手问到的账号名，账号列表给读者看
+///   「这是谁」。`expires_at` 记到期时刻（Unix 秒；0 = 未知），只作提示，
+///   过没过期最终由请求自己说。
+/// - **手贴 token**（老路，保留）：读者从别处拿一整段贴进来，没有刷新凭据，
+///   过期了（`errno 111`）界面请他重贴。
+///
+/// 扩字段靠 serde 缺省补齐，老配置照读。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BaiduDrive {
     pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: i64,
+    pub account: String,
 }
 
 impl BaiduDrive {
-    /// token 是机器签发的密文，粘贴带进来的首尾空白清掉 —— 与「密码原样」
-    /// 相反的一条，判据是 token 不可能含空格（见 [`Cloud::normalized`]）。
+    /// token 与刷新凭据都是机器签发的密文，粘贴带进来的首尾空白清掉 —— 与「密码原样」
+    /// 相反的一条，判据是密文不可能含空格（见 [`Cloud::normalized`]）。账号名是给人看的，
+    /// 照地址那条规矩修剪。
     pub fn normalized(mut self) -> Self {
         self.access_token = self.access_token.trim().to_string();
+        self.refresh_token = self.refresh_token.trim().to_string();
+        self.account = self.account.trim().to_string();
+        // 到期时刻只认正数：手贴 token 那条路没有这个数，坏数据归 0（未知）。
+        if self.expires_at <= 0 {
+            self.expires_at = 0;
+        }
         self
     }
 
     /// 有一段 token，才谈得上浏览；过没过期不用在这里管，请求自己会说。
     pub fn configured(&self) -> bool {
         !self.access_token.is_empty()
+    }
+
+    /// 有没有 OAuth 的刷新凭据 —— 有它，token 过期才能自己续。
+    pub fn refreshable(&self) -> bool {
+        !self.refresh_token.is_empty()
     }
 }
 
@@ -2411,6 +2473,7 @@ mod tests {
                 // 故意不是默认值：这一趟要把新键真写出去再读回来，填默认值等于没测到它。
                 reading_theme: Some("sepia".into()),
                 page_turn: PageTurn::SlideUp,
+                auto_advance_speed: 24.0,
                 turn_duration: 420.0,
                 highlight_style: AnnotationStyle::Wavy,
                 brightness: Some(0.6),
@@ -3196,13 +3259,14 @@ mod tests {
 
 #[cfg(test)]
 mod sync_config_tests {
-    use super::{Config, Sync};
+    use super::{Config, Sync, SyncProvider};
 
     #[test]
     fn sync_trims_the_address_and_dir_but_not_the_password() {
         let config = Config {
             sync: Sync {
                 enabled: true,
+                provider: SyncProvider::WebDav,
                 url: "  https://dav.example/dav/  ".into(),
                 username: "  reader  ".into(),
                 password: "  pass with spaces  ".into(),
@@ -3230,11 +3294,31 @@ mod sync_config_tests {
         assert!(sync.configured());
     }
 
+    /// 后端名按界面那两个字写（`webdav` / `baidu`），不按变体名拆出 `web_dav`。
+    #[test]
+    fn the_sync_provider_uses_lowercase_names() {
+        let sync = Sync {
+            provider: SyncProvider::Baidu,
+            ..Sync::default()
+        };
+        let json = serde_json::to_string(&sync).unwrap();
+        assert!(json.contains("\"provider\":\"baidu\""), "{json}");
+        let sync = Sync {
+            provider: SyncProvider::WebDav,
+            ..Sync::default()
+        };
+        let json = serde_json::to_string(&sync).unwrap();
+        assert!(json.contains("\"provider\":\"webdav\""), "{json}");
+        let back: Sync = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.provider, SyncProvider::WebDav);
+    }
+
     #[test]
     fn a_sync_section_round_trips_through_json() {
         let config = Config {
             sync: Sync {
                 enabled: true,
+                provider: SyncProvider::WebDav,
                 url: "https://dav.example/".into(),
                 username: "u".into(),
                 password: "p".into(),
@@ -3352,6 +3436,9 @@ mod opds_config_tests {
                 },
                 baidu: BaiduDrive {
                     access_token: "  121.xyz789  ".into(),
+                    refresh_token: "  122.r  ".into(),
+                    expires_at: 0,
+                    account: "  山间的读客  ".into(),
                 },
             },
             ..Config::default()
@@ -3361,8 +3448,12 @@ mod opds_config_tests {
         assert_eq!(config.cloud.webdav.username, "reader");
         assert_eq!(config.cloud.webdav.password, "  pass with spaces  ");
         assert_eq!(config.cloud.webdav.dir, "我的书");
-        // token 是机器签发的密文，粘贴带进来的首尾空白清掉 —— 与密码相反的一条。
+        // token 与刷新凭据是机器签发的密文，粘贴带进来的首尾空白清掉 —— 与密码相反的一条；
+        // 账号名照地址那条修剪。到期时刻 0（未知）原样过。
         assert_eq!(config.cloud.baidu.access_token, "121.xyz789");
+        assert_eq!(config.cloud.baidu.refresh_token, "122.r");
+        assert_eq!(config.cloud.baidu.account, "山间的读客");
+        assert_eq!(config.cloud.baidu.expires_at, 0);
     }
 
     #[test]
@@ -3374,18 +3465,23 @@ mod opds_config_tests {
             ..WebDavDrive::default()
         };
         assert!(!webdav.configured(), "有地址没用户名不算配置好");
-        assert!(WebDavDrive {
-            url: "https://dav.example/".into(),
-            username: "reader".into(),
-            ..WebDavDrive::default()
-        }
-        .configured());
+        assert!(
+            WebDavDrive {
+                url: "https://dav.example/".into(),
+                username: "reader".into(),
+                ..WebDavDrive::default()
+            }
+            .configured()
+        );
 
         assert!(!BaiduDrive::default().configured());
-        assert!(BaiduDrive {
-            access_token: "121.abc".into(),
-        }
-        .configured());
+        assert!(
+            BaiduDrive {
+                access_token: "121.abc".into(),
+                ..BaiduDrive::default()
+            }
+            .configured()
+        );
     }
 
     #[test]

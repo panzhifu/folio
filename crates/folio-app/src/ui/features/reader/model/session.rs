@@ -36,6 +36,7 @@ use crate::ui::features::reader::model::fixed_zoom::{
 };
 use crate::ui::features::reader::model::measure::FontCache;
 use crate::ui::features::reader::model::page_geometry::{ChromeBands, PageBox, PageInsets};
+use crate::ui::features::reader::model::paging::AutoState;
 use crate::ui::features::reader::model::turn::TurnIntent;
 use crate::ui::features::reader::motion::turn_animation::Area;
 use crate::ui::host::device_family;
@@ -242,6 +243,12 @@ pub struct ReaderSession {
     /// 读者读到的是「第一划没反应，过一会儿才行」。现在把意图留在这里：不跟手，但门一开
     /// 就按同一方向补一趟。偏好/模式/换书把它清掉，免得把上一个参照系的方向带过来。
     pub(in crate::ui::features::reader) pending_turn: Option<TurnIntent>,
+    /// 自动前进的在途状态：`None` = 关。上一拍的时刻与分页档攒下的间隔债都在这里。
+    /// 拍子循环在 [`crate::ui::features::reader::model::paging`] 那一头（`spawn_auto`）。
+    pub(in crate::ui::features::reader) auto: Option<AutoState>,
+    /// 自动前进那一拍**自己**发起翻页/滚动时为真：`turn` / `on_scroll` 的入口看着它，
+    /// 分不清「读者动了」还是「自动前进了」—— 只有前者停表。
+    pub(in crate::ui::features::reader) auto_driving: bool,
     /// 页面捕获纹理的脏标记：偏好/主题/排版变了就置真，下一帧重烘。
     pub(in crate::ui::features::reader) capture_dirty: bool,
     /// 上一帧正文用的纸色。换纸（正文主题、浅深、水墨翻档）的那一帧把
@@ -735,6 +742,8 @@ impl ReaderSession {
             page_shift: (0.0, 0.0),
             turn: None,
             pending_turn: None,
+            auto: None,
+            auto_driving: false,
             capture_dirty: true,
             applied_reading_bg: None,
             reading_bg: None,
@@ -930,6 +939,8 @@ impl ReaderSession {
             page_shift: (0.0, 0.0),
             turn: None,
             pending_turn: None,
+            auto: None,
+            auto_driving: false,
             capture_dirty: true,
             applied_reading_bg: None,
             reading_bg: None,
@@ -1231,6 +1242,9 @@ impl ReaderSession {
         now: std::time::Instant,
         viewport: f32,
     ) -> ScrollMotion {
+        if let Some(auto) = self.auto.as_mut() {
+            auto.viewport = viewport;
+        }
         let (anchor_y, anchor_at) = self.scroll_probe;
         let direction = if self.scroll_y > self.scroll_last + 0.5 {
             Some(crate::ui::features::reader::model::prefetch::FixedDirection::Ahead)

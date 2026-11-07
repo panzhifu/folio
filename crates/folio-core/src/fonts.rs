@@ -152,13 +152,11 @@ pub fn download_item(
     let file_name = file_name_of(&item.url)?;
     let staging = root.join(format!(".part-{}", item.id));
     if staging.exists() {
-        std::fs::remove_dir_all(&staging)
-            .map_err(|err| io_error(&staging, err))?;
+        std::fs::remove_dir_all(&staging).map_err(|err| io_error(&staging, err))?;
     }
     std::fs::create_dir_all(&staging).map_err(|err| io_error(&staging, err))?;
 
-    let urls =
-        std::iter::once(item.url.as_str()).chain(item.mirrors.iter().map(String::as_str));
+    let urls = std::iter::once(item.url.as_str()).chain(item.mirrors.iter().map(String::as_str));
     let mut last_err = None;
     for (nth, url) in urls.enumerate() {
         match download_one(
@@ -570,7 +568,10 @@ mod tests {
         let root = tempfile::tempdir().expect("字体根");
         let body = vec![7u8; 2048];
         let transport = Chunked::with(body.clone(), 300);
-        let item = item_with("https://example.test/fonts/Demo-Regular.ttf", body.len() as u64);
+        let item = item_with(
+            "https://example.test/fonts/Demo-Regular.ttf",
+            body.len() as u64,
+        );
 
         let mut last = 0u64;
         let landed = download_item(&item, &transport, root.path(), &Cancel::new(), |received| {
@@ -613,8 +614,8 @@ mod tests {
         *transport.cancel_after.lock().unwrap() = Some(2);
         let item = item_with("https://example.test/Demo-Regular.ttf", 0);
         let cancel = Cancel::new();
-        let err = download_item(&item, &transport, root.path(), &cancel, |_| {})
-            .expect_err("取消要报错");
+        let err =
+            download_item(&item, &transport, root.path(), &cancel, |_| {}).expect_err("取消要报错");
         assert!(err.to_string().contains("已取消"), "{}", err);
         assert!(!root.path().join("sample").exists(), "正式目录不能出现");
         assert!(
@@ -629,7 +630,12 @@ mod tests {
         let good = Chunked::with(vec![1u8; 10], 100);
         let item = item_with("https://example.test/Demo-Regular.ttf", 10);
         download_item(&item, &good, root.path(), &Cancel::new(), |_| {}).expect("重装要成");
-        assert!(root.path().join("sample").join("Demo-Regular.ttf").is_file());
+        assert!(
+            root.path()
+                .join("sample")
+                .join("Demo-Regular.ttf")
+                .is_file()
+        );
     }
 
     /// 导入：拷进 `<root>/<id>/<file>`；重名 id 加后缀；删掉之后根下无痕；
@@ -672,11 +678,11 @@ mod tests {
     /// `dir_id` 的洗法：不落盘的字符换 `_`、首尾空白与点去掉、洗空回落 `font`。
     #[test]
     fn dir_id_washes_unsafe_characters() {
-    assert_eq!(dir_id("a/b:c"), "a_b_c");
-    // 换成 `_` 之后不是空串的，就是个合法目录名，不硬回落。
-    assert_eq!(dir_id("///"), "___");
-    assert_eq!(dir_id(" . "), "font");
-    assert_eq!(dir_id(""), "font");
+        assert_eq!(dir_id("a/b:c"), "a_b_c");
+        // 换成 `_` 之后不是空串的，就是个合法目录名，不硬回落。
+        assert_eq!(dir_id("///"), "___");
+        assert_eq!(dir_id(" . "), "font");
+        assert_eq!(dir_id(""), "font");
     }
 
     /// 残渣目录（上次取消留下的 `.part-<id>`）在重装开头被清掉 —— 用文件系统

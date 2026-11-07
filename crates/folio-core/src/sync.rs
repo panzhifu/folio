@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::anchor::TextAnchor;
 use crate::infra::book_settings::BookSettings;
-use crate::net::remote::{self, dav};
+use crate::net::remote::{self, RemoteStore};
 use crate::position::Locator;
 use crate::store::Store;
 
@@ -659,7 +659,7 @@ pub fn new_device_id() -> String {
 /// 一次完整往返。**同步**：调用方负责放到后台线程。
 pub fn sync_once(
     store: &Store,
-    client: &dav::Client,
+    remote: &dyn RemoteStore,
     remote_dir: &str,
     device_id: &str,
     now: i64,
@@ -668,9 +668,9 @@ pub fn sync_once(
         return Err(Error::Config("设备 id 不合法"));
     }
     let dir = normalize_remote_dir(remote_dir)?;
-    ensure_dir(client, &dir)?;
+    remote.mkdir_all(&dir)?;
     let own_name = format!("{device_id}.json");
-    let entries = client.list(&dir)?;
+    let entries = remote.list(&dir)?;
 
     let mut remotes = Vec::new();
     let mut skipped_files = 0usize;
@@ -681,7 +681,7 @@ pub fn sync_once(
         if entry.is_dir || !file_name.ends_with(".json") || file_name == own_name {
             continue;
         }
-        let bytes = client.get(&entry.path)?;
+        let bytes = remote.get(&entry.path)?;
         match serde_json::from_slice::<Snapshot>(&bytes) {
             Ok(snapshot) if snapshot.version == SNAPSHOT_VERSION => remotes.push(snapshot),
             Ok(snapshot) => {
@@ -709,7 +709,7 @@ pub fn sync_once(
     } else {
         format!("{dir}/{own_name}")
     };
-    client.put(&path, body.clone())?;
+    remote.put(&path, body.clone())?;
     tracing::info!(
         "sync: {} 台远端设备 → 应用 {} 条，删除 {} 条，上传 {} 字节",
         remotes.len(),
@@ -731,23 +731,11 @@ pub fn sync_once(
     })
 }
 
-fn ensure_dir(client: &dav::Client, dir: &str) -> Result<(), Error> {
-    let mut prefix = String::new();
-    for part in dir.split('/').filter(|part| !part.is_empty()) {
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(part);
-        client.mkdir(&prefix)?;
-    }
-    Ok(())
-}
-
 /// 只连一下、建一下远端目录：设置页的「测试连接」。不读不写任何书籍数据。
-pub fn test_connection(client: &dav::Client, remote_dir: &str) -> Result<(), Error> {
+pub fn test_connection(remote: &dyn RemoteStore, remote_dir: &str) -> Result<(), Error> {
     let dir = normalize_remote_dir(remote_dir)?;
-    ensure_dir(client, &dir)?;
-    client.list(&dir)?;
+    remote.mkdir_all(&dir)?;
+    remote.list(&dir)?;
     Ok(())
 }
 

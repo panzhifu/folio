@@ -5,6 +5,7 @@
 
 use super::super::overlay;
 use crate::ui::components::{access_question, muted_label, waiting_for};
+use crate::ui::services::cloud_upload;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 use crate::ui::services::library::{Pick, suggested_dir};
@@ -76,6 +77,73 @@ impl ShelfView {
             &shelf,
             |this, cx| this.cancel_delete_selection(cx),
             body,
+        )
+    }
+
+    /// 多选上传的进度与结果。运行中不给关闭键 —— 那一批还在跑，收掉面板不会让它停下，
+    /// 留一张「正在传」比让读者猜要诚实；完成之后一颗「关闭」。
+    pub(in crate::ui::features::shelf) fn upload_popover(
+        &self,
+        progress: cloud_upload::Progress,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use cloud_upload::{Failure, Progress};
+
+        let shelf = cx.entity().clone();
+        let close_label = tr(cx, "shelf.upload_close");
+        let (title, body) = match &progress {
+            Progress::Running { total } => (
+                tr(cx, "shelf.upload_title").to_string(),
+                tf(cx, "shelf.upload_running", &[("n", total)]),
+            ),
+            Progress::Done {
+                uploaded,
+                failed,
+                skipped,
+            } => (
+                tr(cx, "shelf.upload_done_title").to_string(),
+                tf(
+                    cx,
+                    "shelf.upload_done",
+                    &[("ok", uploaded), ("failed", failed), ("skipped", skipped)],
+                ),
+            ),
+            Progress::Failed(Failure::Config) => (
+                tr(cx, "shelf.upload_title").to_string(),
+                tr(cx, "shelf.upload_failed_config").to_string(),
+            ),
+            Progress::Failed(Failure::Store) => (
+                tr(cx, "shelf.upload_title").to_string(),
+                tr(cx, "shelf.upload_failed_store").to_string(),
+            ),
+            Progress::Failed(Failure::Remote) => (
+                tr(cx, "shelf.upload_title").to_string(),
+                tr(cx, "shelf.upload_failed_remote").to_string(),
+            ),
+        };
+        let mut card = v_flex()
+            .id("shelf-upload")
+            .test_support()
+            .w(px(overlay::FORM_WIDTH))
+            .min_h(px(overlay::FORM_HEIGHT))
+            .gap_3()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(muted_label(body, cx));
+        if !matches!(progress, Progress::Running { .. }) {
+            card = card.child(
+                Button::new("shelf-upload-close")
+                    .ghost()
+                    .label(close_label.clone().to_string())
+                    .accessibility_label(close_label)
+                    .on_click(|_, _, cx| cloud_upload::dismiss(cx)),
+            );
+        }
+        overlay::centered(
+            "shelf-upload-popover",
+            overlay::FORM_HEIGHT,
+            &shelf,
+            |_, cx| cloud_upload::dismiss(cx),
+            card.into_any_element(),
         )
     }
 

@@ -167,8 +167,8 @@ pub fn usable_names(names: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bump_families_revision, families_revision, is_book_family, is_user_family, note_book_family,
-        note_face, note_user_family, retire_family, usable, usable_names,
+        bump_families_revision, families_revision, is_book_family, is_user_family,
+        note_book_family, note_face, note_user_family, retire_family, usable, usable_names,
     };
 
     /// 没有 `m` 的名字被登记后要从候选里消失；同名后来出现带 `m` 的脸时要能撤销。
@@ -227,10 +227,7 @@ mod tests {
         assert!(usable(name));
 
         retire_family(name);
-        assert!(
-            !usable(name),
-            "退休后选择器要立刻看不见它，不能等重启"
-        );
+        assert!(!usable(name), "退休后选择器要立刻看不见它，不能等重启");
         assert!(
             !usable_names(vec![name.to_string()])
                 .iter()

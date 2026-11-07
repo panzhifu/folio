@@ -56,11 +56,11 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
-    Account, Ai, Appearance, Backup, BaiduDrive, Cloud, CONFIG_VERSION, Config, Dictionary,
+    Account, Ai, Appearance, Backup, BaiduDrive, CONFIG_VERSION, Cloud, Config, Dictionary,
     DictionaryEntry, Env, FontEntry, Fonts, IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV, Language,
     Layer, Library, Logging, Membership, MembershipTier, Mode, Novel, Opds, OpdsCatalog, PageTurn,
-    Provenance, Reader, Resolved, Speech, Sync, TextDirection, TocDensity, Translation,
-    TranslationEngine, WebDavDrive,
+    Provenance, Reader, Resolved, Speech, Sync, SyncProvider, TextDirection, TocDensity,
+    Translation, TranslationEngine, WebDavDrive,
 };
 pub use infra::error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
@@ -88,5 +88,5 @@ pub use store::StaleReason;
 pub use store::{
     ANNOTATION_COLORS, Annotation, AnnotationStyle, BookReading, Collection, DailyReading,
     IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry, ReadingRank, ReadingSession, ReadingSummary,
-    ReadingTotals, ShelfItem, Store,
+    ReadingTotals, ShelfItem, Store, UploadBook,
 };

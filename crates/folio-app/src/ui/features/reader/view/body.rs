@@ -1474,18 +1474,18 @@ impl Render for ReaderSession {
         // 读者给当前主题配的纸纹：背板**最底一格** —— 纸色之上、作者自己的整页画
         // 之下（书里带底图的章节以书为准）。定版式的页图不透明，铺了也看不见，
         // 那一档直接不铺。进不了树的时候（图还在解）纸色就是整张背板，无碍。
-        if !fixed_layout {
-            if let Some(image) = self.reading_bg.as_ref().and_then(|bg| bg.image.clone()) {
-                backdrops.insert(
-                    0,
-                    img(image)
-                        .absolute()
-                        .size_full()
-                        .object_fit(ObjectFit::Cover)
-                        .opacity(reading_bg_opacity)
-                        .into_any_element(),
-                );
-            }
+        if !fixed_layout
+            && let Some(image) = self.reading_bg.as_ref().and_then(|bg| bg.image.clone())
+        {
+            backdrops.insert(
+                0,
+                img(image)
+                    .absolute()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .opacity(reading_bg_opacity)
+                    .into_any_element(),
+            );
         }
         let mut body = div()
             .id("folio-reader")

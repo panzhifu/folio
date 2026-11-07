@@ -69,6 +69,7 @@ use crate::ui::features::opds::{OpdsEvent, OpdsView};
 use crate::ui::foundation::error::{Context as _, report};
 use crate::ui::foundation::file_stem::title_stem;
 use crate::ui::host;
+use crate::ui::services::cloud_upload;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{book_count, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
@@ -332,6 +333,9 @@ pub struct ShelfView {
     _opds_watch: Option<Subscription>,
     /// 网盘浏览器那一页的导入事件：同一条，谁进了库都报同一声。
     _cloud_watch: Option<Subscription>,
+    /// 上传实体那一条观察：后台那趟回来要重画进度浮层。与 `_cloud_watch` 同一条
+    /// 「订阅活到这一屏结束」的规矩。
+    _upload_watch: Option<Subscription>,
     /// 「书要拷到哪儿」那块面板里，系统文件夹选择器那条异步链。与 `_import` 同理，要活到选完。
     _pick: Option<Task<()>>,
     /// 对「没拿到所有文件访问」那一问的订阅：那一问摆不摆由服务那份实体说了算，它一
@@ -513,6 +517,7 @@ impl ShelfView {
             _info_watch: None,
             _opds_watch: None,
             _cloud_watch: None,
+            _upload_watch: None,
             _pick: None,
             _access_watch: access_watch,
             pending_reload: false,
@@ -1305,6 +1310,7 @@ impl ShelfView {
                 self.add_selection_to_collection(collection_id, cx)
             }
             navigation::SelectionAction::Info => self.show_selected_info(window, cx),
+            navigation::SelectionAction::Upload => self.upload_selection(cx),
             navigation::SelectionAction::Delete => self.ask_delete_selection(cx),
         }
     }
@@ -1339,6 +1345,17 @@ impl ShelfView {
         };
         self.exit_selection(cx);
         self.show_info(id, window, cx);
+    }
+
+    /// 把勾中的书传进网盘同步仓库（`<remote_dir>/books/<content_hash>.<ext>`）。
+    /// 后端与目录跟着设置里的同步配置走；没配好由那张浮层说，不在这里拦。
+    fn upload_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            return;
+        }
+        let ids: Vec<i64> = self.selected.iter().copied().collect();
+        cloud_upload::start(cx, ids);
+        cx.notify();
     }
 
     /// 删除前先问一句：批量删是不可撤销的，而工具栏那颗「删除」离手指很近。
@@ -1867,6 +1884,13 @@ impl Render for ShelfView {
         if !self.import_log_loaded {
             self.load_import_log(cx);
         }
+        // 上传实体是全进程那一份：换了这一屏实例、或后台那趟在别处发起，这一帧第一次
+        // 看到它时挂上观察，完成时才有一次重画把「正在传」换成结果。
+        if self._upload_watch.is_none()
+            && let Some(upload) = cloud_upload::handle(cx)
+        {
+            self._upload_watch = Some(cx.observe(&upload, |_, _, cx| cx.notify()));
+        }
         let render_started = Instant::now();
         // 这一帧的格子流与入场时钟各取一次：两者从前都住在每个可见排的 item 闭包里，
         // 一排一份 —— 滚动时每帧要付「重拼整条流 / 每排各取一次时钟」两笔白账。
@@ -1964,6 +1988,11 @@ impl Render for ShelfView {
         }
         if self.selection_delete_confirm {
             overlays.push(self.selection_delete_popover(cx));
+        }
+        if let Some(progress) =
+            cloud_upload::handle(cx).and_then(|entity| entity.read(cx).progress().cloned())
+        {
+            overlays.push(self.upload_popover(progress, cx));
         }
         let tree = v_flex()
             .id("folio-shelf")

@@ -227,16 +227,24 @@ fn url_import_streams_into_a_hash_named_copy_and_registers() {
 #[test]
 fn cloud_import_downloads_picks_into_a_hash_named_copy_and_registers() {
     use crate::net::cloud::{Drive, Entry};
-    use crate::net::remote::{Cancel, Error as RemoteError, Result as RemoteResult, Sink};
+    use crate::net::remote::{
+        Cancel, Error as RemoteError, RemoteStore, Result as RemoteResult, Sink,
+    };
 
     /// 假网盘：`download` 把固定字节按 4 字节一块送进 sink。
     struct FakeDrive;
-    impl Drive for FakeDrive {
-        fn label(&self) -> &'static str {
-            "webdav"
-        }
+    impl RemoteStore for FakeDrive {
         fn list(&self, _path: &str) -> RemoteResult<Vec<Entry>> {
             Ok(Vec::new())
+        }
+        fn get(&self, _path: &str) -> RemoteResult<Vec<u8>> {
+            Err(RemoteError::Malformed("假网盘不读小对象".into()))
+        }
+        fn put(&self, _path: &str, _body: Vec<u8>) -> RemoteResult<()> {
+            Err(RemoteError::Malformed("假网盘不写小对象".into()))
+        }
+        fn mkdir(&self, _path: &str) -> RemoteResult<()> {
+            Err(RemoteError::Malformed("假网盘不建目录".into()))
         }
         fn download(
             &self,
@@ -250,6 +258,11 @@ fn cloud_import_downloads_picks_into_a_hash_named_copy_and_registers() {
             }
             sink.finish().map_err(RemoteError::Io)?;
             Ok(data.len() as u64)
+        }
+    }
+    impl Drive for FakeDrive {
+        fn label(&self) -> &'static str {
+            "webdav"
         }
     }
 
@@ -268,7 +281,10 @@ fn cloud_import_downloads_picks_into_a_hash_named_copy_and_registers() {
     let outcomes = import_from(&source, &lib, &store, &StageCtx::detached());
     assert_eq!(outcomes.len(), 1);
     let super::Origin::Cloud { drive, path, size } = &outcomes[0].candidate.origin else {
-        panic!("出处要记成 Origin::Cloud，实际 {:?}", outcomes[0].candidate.origin)
+        panic!(
+            "出处要记成 Origin::Cloud，实际 {:?}",
+            outcomes[0].candidate.origin
+        )
     };
     assert_eq!(*drive, "webdav");
     assert_eq!(path, "books/书.txt");

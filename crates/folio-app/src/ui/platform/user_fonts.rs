@@ -56,7 +56,7 @@ pub(crate) fn load_user_fonts(cx: &mut App) {
             summary.unreadable
         );
         if summary.registered_files > 0 {
-            let _ = cx.update(|cx| cx.refresh_windows());
+            cx.update(|cx| cx.refresh_windows());
         }
     })
     .detach();
@@ -137,7 +137,9 @@ pub(crate) fn register_file(texts: &TextSystem, path: &Path) -> Option<Vec<Strin
     };
     // 覆盖要在注册**前**读：add_fonts 拿走字节的所有权。
     let coverage: LatinCoverage = latin_by_family(&bytes);
-    let family_sets = texts.add_fonts_with_families(vec![Cow::Owned(bytes)]).ok()?;
+    let family_sets = texts
+        .add_fonts_with_families(vec![Cow::Owned(bytes)])
+        .ok()?;
     let families = family_sets.into_iter().next()?;
     for name in &families {
         font_primary::note_face(name, coverage.covers(name));
@@ -159,9 +161,18 @@ mod tests {
         assert!(matches!(kind_of(b"wOFF\x00"), super::Kind::Woff));
         assert!(matches!(kind_of(b"ttcf\x00"), super::Kind::Sfnt));
         assert!(matches!(kind_of(b"OTTO\x00"), super::Kind::Sfnt));
-        assert!(matches!(kind_of(&[0x00, 0x01, 0x00, 0x00]), super::Kind::Sfnt));
-        assert!(matches!(kind_of(b"PK\x03\x04"), super::Kind::Unknown), "zip 不收");
+        assert!(matches!(
+            kind_of(&[0x00, 0x01, 0x00, 0x00]),
+            super::Kind::Sfnt
+        ));
+        assert!(
+            matches!(kind_of(b"PK\x03\x04"), super::Kind::Unknown),
+            "zip 不收"
+        );
         assert!(matches!(kind_of(b"nope"), super::Kind::Unknown));
-        assert!(matches!(kind_of(b"abc"), super::Kind::Unknown), "不足四字节不收");
+        assert!(
+            matches!(kind_of(b"abc"), super::Kind::Unknown),
+            "不足四字节不收"
+        );
     }
 }

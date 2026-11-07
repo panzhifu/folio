@@ -637,8 +637,20 @@ impl ReadingPage {
         if !crate::ui::services::activation::premium(cx) {
             return;
         }
-        self.reader
-            .update(cx, |reader, cx| reader.toggle_speech(cx));
+        // 听书起念就把自动前进停掉：两个「推位置」的东西同时在跑，读者分不清是谁在翻。
+        self.reader.update(cx, |reader, cx| {
+            reader.stop_auto(cx);
+            reader.toggle_speech(cx);
+        });
+    }
+
+    /// 底栏那一格「自动」：自动前进 on/off。状态与拍子都在会话里（`model/paging` 的
+    /// `set_auto` / `auto_step`），这一屏只把那一击递过去。
+    pub(in crate::ui::features::reader) fn toggle_auto(&mut self, cx: &mut Context<Self>) {
+        self.reader.update(cx, |reader, cx| {
+            reader.set_auto(!reader.auto_on(), cx);
+        });
+        cx.notify();
     }
 
     /// 打开听书那一屏：**只把门推开，不开口**。待念的位置当场摆好（视口当前句，
@@ -647,7 +659,8 @@ impl ReadingPage {
     /// 这一屏是**专用的**听书面孔（封面 / 文字两面），圆钮只负责把门推开 ——
     /// 从前那一颗直接 toggle，读者想换一面看时没有地方按。
     pub(in crate::ui::features::reader) fn open_listen(&mut self, cx: &mut Context<Self>) {
-        if !self.reader.read(cx).speech_entry_visible() || !crate::ui::services::activation::premium(cx)
+        if !self.reader.read(cx).speech_entry_visible()
+            || !crate::ui::services::activation::premium(cx)
         {
             return;
         }
@@ -1815,15 +1828,13 @@ fn listen_shape_script(
 /// 文本但要占一格下标 —— 与 `TextLayout::position_for_index` 同一条走法，两边的行号
 /// 才对得上。越界的下标（量过的行数与建表之间差了一格时）钉在最后一行，不漂出去。
 fn line_index_at(line_lens: &[usize], at: usize) -> usize {
-    let mut line_ix = 0usize;
     let mut start = 0usize;
-    for len in line_lens {
+    for (line_ix, len) in line_lens.iter().enumerate() {
         let end = start + len;
         if at <= end {
             return line_ix;
         }
         start = end + 1;
-        line_ix += 1;
     }
     line_lens.len().saturating_sub(1)
 }

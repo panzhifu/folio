@@ -17,6 +17,7 @@ use crate::ui::components::muted_label;
 use crate::ui::services::activation;
 use crate::ui::services::lansync::{self, Status as LanStatus};
 use crate::ui::services::sync::{self, Failure, Status};
+use folio_core::SyncProvider;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{AnyElement, FontWeight};
@@ -38,54 +39,103 @@ pub(in crate::ui::features::settings) fn sync_page(cx: &App) -> Page {
 }
 
 fn server_group(cx: &App) -> Group {
-    group(
-        tr(cx, "group.sync_server"),
-        vec![
-            Row::toggle(
-                tr(cx, "field.sync_enabled"),
-                |cx: &App| ConfigHolder::sync(cx).enabled,
-                |on, cx| ConfigHolder::edit_sync(cx, |sync| sync.enabled = on),
-            )
-            .description(tr(cx, "field.sync_enabled.desc"))
-            .keywords(&["sync", "webdav", "同步", "备份"]),
-            Row::text(
-                tr(cx, "field.sync_url"),
-                |cx: &App| SharedString::from(ConfigHolder::sync(cx).url),
-                |value: SharedString, cx| {
-                    ConfigHolder::edit_sync(cx, |sync| sync.url = value.to_string())
-                },
-            )
-            .description(tr(cx, "field.sync_url.desc"))
-            .keywords(&["url", "webdav", "server", "地址", "服务器"]),
-            Row::text(
-                tr(cx, "field.sync_user"),
-                |cx: &App| SharedString::from(ConfigHolder::sync(cx).username),
-                |value: SharedString, cx| {
-                    ConfigHolder::edit_sync(cx, |sync| sync.username = value.to_string())
-                },
-            )
-            .description(tr(cx, "field.sync_user.desc"))
-            .keywords(&["user", "username", "账号", "用户名"]),
-            Row::text(
-                tr(cx, "field.sync_password"),
-                |cx: &App| SharedString::from(ConfigHolder::sync(cx).password),
-                |value: SharedString, cx| {
-                    ConfigHolder::edit_sync(cx, |sync| sync.password = value.to_string())
-                },
-            )
-            .description(tr(cx, "field.sync_password.desc"))
-            .keywords(&["password", "密码", "口令"]),
-            Row::text(
-                tr(cx, "field.sync_dir"),
-                |cx: &App| SharedString::from(ConfigHolder::sync(cx).remote_dir),
-                |value: SharedString, cx| {
-                    ConfigHolder::edit_sync(cx, |sync| sync.remote_dir = value.to_string())
-                },
-            )
-            .description(tr(cx, "field.sync_dir.desc"))
-            .keywords(&["dir", "folder", "目录", "远端"]),
-        ],
-    )
+    let provider = ConfigHolder::sync(cx).provider;
+    let mut rows = vec![
+        Row::choice(
+            tr(cx, "field.sync_provider"),
+            vec![
+                (SharedString::from("webdav"), tr(cx, "sync.provider_webdav")),
+                (SharedString::from("baidu"), tr(cx, "sync.provider_baidu")),
+            ],
+            false,
+            |cx: &App| SharedString::from(provider_key(ConfigHolder::sync(cx).provider)),
+            |value: SharedString, cx| {
+                ConfigHolder::edit_sync(cx, |sync| {
+                    sync.provider = if value.as_ref() == "baidu" {
+                        SyncProvider::Baidu
+                    } else {
+                        SyncProvider::WebDav
+                    }
+                })
+            },
+        )
+        .description(tr(cx, "field.sync_provider.desc"))
+        .keywords(&["provider", "webdav", "baidu", "网盘", "同步", "后端"]),
+        Row::toggle(
+            tr(cx, "field.sync_enabled"),
+            |cx: &App| ConfigHolder::sync(cx).enabled,
+            |on, cx| ConfigHolder::edit_sync(cx, |sync| sync.enabled = on),
+        )
+        .description(tr(cx, "field.sync_enabled.desc"))
+        .keywords(&["sync", "webdav", "同步", "备份"]),
+    ];
+    match provider {
+        SyncProvider::WebDav => {
+            rows.push(
+                Row::text(
+                    tr(cx, "field.sync_url"),
+                    |cx: &App| SharedString::from(ConfigHolder::sync(cx).url),
+                    |value: SharedString, cx| {
+                        ConfigHolder::edit_sync(cx, |sync| sync.url = value.to_string())
+                    },
+                )
+                .description(tr(cx, "field.sync_url.desc"))
+                .keywords(&["url", "webdav", "server", "地址", "服务器"]),
+            );
+            rows.push(
+                Row::text(
+                    tr(cx, "field.sync_user"),
+                    |cx: &App| SharedString::from(ConfigHolder::sync(cx).username),
+                    |value: SharedString, cx| {
+                        ConfigHolder::edit_sync(cx, |sync| sync.username = value.to_string())
+                    },
+                )
+                .description(tr(cx, "field.sync_user.desc"))
+                .keywords(&["user", "username", "账号", "用户名"]),
+            );
+            rows.push(
+                Row::text(
+                    tr(cx, "field.sync_password"),
+                    |cx: &App| SharedString::from(ConfigHolder::sync(cx).password),
+                    |value: SharedString, cx| {
+                        ConfigHolder::edit_sync(cx, |sync| sync.password = value.to_string())
+                    },
+                )
+                .description(tr(cx, "field.sync_password.desc"))
+                .keywords(&["password", "密码", "口令"]),
+            );
+        }
+        SyncProvider::Baidu => {
+            // 百度那一头的凭据不在这里填：与「网盘取书」共用一份登录，少一处要维护的
+            // token。这一行只说清它落在哪个目录。
+            rows.push(
+                Row::custom(move |cx| {
+                    muted_label(tr(cx, "field.sync_baidu_hint"), cx).into_any_element()
+                })
+                .keywords(&["baidu", "百度", "网盘", "登录", "token"]),
+            );
+        }
+    }
+    rows.push(
+        Row::text(
+            tr(cx, "field.sync_dir"),
+            |cx: &App| SharedString::from(ConfigHolder::sync(cx).remote_dir),
+            |value: SharedString, cx| {
+                ConfigHolder::edit_sync(cx, |sync| sync.remote_dir = value.to_string())
+            },
+        )
+        .description(tr(cx, "field.sync_dir.desc"))
+        .keywords(&["dir", "folder", "目录", "远端"]),
+    );
+    group(tr(cx, "group.sync_server"), rows)
+}
+
+/// 写回配置的形态（[`SyncProvider`] 的 serde 名）。
+fn provider_key(provider: SyncProvider) -> &'static str {
+    match provider {
+        SyncProvider::WebDav => "webdav",
+        SyncProvider::Baidu => "baidu",
+    }
 }
 
 fn action_group(cx: &App) -> Group {

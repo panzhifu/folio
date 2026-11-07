@@ -617,8 +617,17 @@ pub(crate) fn is_eink_device() -> bool {
 #[cfg(any(target_os = "android", test))]
 pub(crate) fn classify_eink(identity: &str) -> bool {
     const MARKS: &[&str] = &[
-        "onyx", "boox", "hisense", "ireader", "hanwang", "bigme", "meebook", "boyue", "dasung",
-        "pocketbook", "likebook",
+        "onyx",
+        "boox",
+        "hisense",
+        "ireader",
+        "hanwang",
+        "bigme",
+        "meebook",
+        "boyue",
+        "dasung",
+        "pocketbook",
+        "likebook",
     ];
     let id = identity.to_ascii_lowercase();
     MARKS.iter().any(|mark| id.contains(mark))

@@ -365,6 +365,30 @@ fn put_and_mkdir_target_the_same_escaped_url() {
     );
 }
 
+/// 书文件走 `put_file`：一条 PUT、长度照传、字节原样。这条是流式那一支的入口，
+/// `Client::put`（收整块 `Vec`）只管同步快照那种小对象。
+#[test]
+fn put_file_sends_one_streamed_put() {
+    let (client, mock) = client(vec![Response::new(201, Vec::new())]);
+    let mut source = std::io::Cursor::new(b"book-bytes".to_vec());
+    let written = RemoteStore::put_file(&client, "books/a.epub", &mut source, 10, &Cancel::new())
+        .expect("上传应当成功");
+    assert_eq!(written, 10);
+
+    let seen = mock.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].method, Method::Put);
+    assert!(seen[0].url.ends_with("/books/a.epub"), "{}", seen[0].url);
+    assert_eq!(seen[0].body, b"book-bytes");
+    assert!(
+        seen[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Content-Type" && v == "application/octet-stream"),
+        "书文件按二进制声明"
+    );
+}
+
 #[test]
 fn mkdir_on_an_existing_collection_counts_as_success() {
     // 第二次跑备份会撞「目录已存在」，各家给的状态码不统一，流程不该因此中断。

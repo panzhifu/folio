@@ -201,6 +201,13 @@ pub const BRIGHTNESS_STEPS: SliderSteps = SliderSteps {
     nudge: 0.1,
 };
 
+/// 自动前进：满程 38 个细档（2..40 页/分），± 一档就是一分钟一页。
+pub const AUTO_ADVANCE_RANGE: (f32, f32) = (2.0, 40.0);
+pub const AUTO_ADVANCE_STEPS: SliderSteps = SliderSteps {
+    slide: 1.0,
+    nudge: 1.0,
+};
+
 /// 桌面上「压暗那一层」的透明度。`None`（跟随系统）与顶格都是 0 —— 不压。
 ///
 /// 为什么桌面上要有这一层：背光不是窗口能改的东西（那是显示器的地盘，gpui 没有这个口），

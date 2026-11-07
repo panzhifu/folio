@@ -37,13 +37,17 @@ mod tests {
     use std::path::Path;
 
     fn fixture_ttf() -> Vec<u8> {
-        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/glyf-min.ttf"))
-            .expect("仓库里的合成 TTF")
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/glyf-min.ttf"),
+        )
+        .expect("仓库里的合成 TTF")
     }
 
     fn fixture_woff2() -> Vec<u8> {
-        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/oss/fonts/glyf-min.woff2"))
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/oss/fonts/glyf-min.woff2"),
+        )
         .expect("ttf2woff2 切出来的 WOFF2")
     }
 
@@ -83,11 +87,7 @@ mod tests {
         let original = fixture_ttf();
         let a = ttf_parser::Face::parse(&original, 0).expect("原字体可解析");
         let b = ttf_parser::Face::parse(&decoded, 0).expect("解出的 sfnt 可解析");
-        assert_eq!(
-            a.number_of_glyphs(),
-            b.number_of_glyphs(),
-            "字形数一致"
-        );
+        assert_eq!(a.number_of_glyphs(), b.number_of_glyphs(), "字形数一致");
         assert_eq!(
             a.names().into_iter().count(),
             b.names().into_iter().count(),

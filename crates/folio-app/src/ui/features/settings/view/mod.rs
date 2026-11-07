@@ -619,9 +619,18 @@ mod tests {
             assert_eq!(page.groups[0].title, tr(cx, "group.sync_server"));
             assert_eq!(
                 page.groups[0].rows.len(),
-                5,
-                "WebDAV 那一组不该被新增的一组挤掉任何一行：开关 / 地址 / 账号 / 密码 / 目录"
+                6,
+                "WebDAV 那一组不该被新增的一组挤掉任何一行：后端 / 开关 / 地址 / 账号 / 密码 / 目录"
             );
+            // 百度那一档不摆地址三格：凭据与「网盘取书」共用，只剩后端 / 开关 / 提示 / 目录。
+            ConfigHolder::edit_sync(cx, |sync| sync.provider = folio_core::SyncProvider::Baidu);
+            let page = &spec_pages(cx, &notes)[index];
+            assert_eq!(
+                page.groups[0].rows.len(),
+                4,
+                "百度那一档：后端 / 开关 / 提示 / 目录"
+            );
+            ConfigHolder::edit_sync(cx, |sync| sync.provider = folio_core::SyncProvider::WebDav);
             // 状态那一组紧跟 WebDAV 的字段：读者熟悉的「测试连接 / 立即同步」不该往下挪。
             assert_eq!(page.groups[1].title, tr(cx, "group.sync_state"));
             assert_eq!(page.groups[2].title, tr(cx, "group.sync_lan"));

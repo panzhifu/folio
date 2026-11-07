@@ -205,7 +205,10 @@ fn item_font_kind(media_type: &str, href: &str) -> FontKind {
 
 fn font_kind_by_extension(href: &str) -> FontKind {
     let name = href.rsplit(['/', '\\']).next().unwrap_or(href);
-    match name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()) {
+    match name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+    {
         Some(ext) if matches!(ext.as_str(), "ttf" | "otf" | "ttc" | "otc") => FontKind::Sfnt,
         Some(ext) if ext == "woff" => FontKind::Woff,
         Some(ext) if ext == "woff2" => FontKind::Woff2,

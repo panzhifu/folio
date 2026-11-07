@@ -12,6 +12,7 @@
 pub mod dav;
 pub mod ureq;
 
+use std::io::{Read, Seek};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -31,6 +32,14 @@ pub trait Transport: Send + Sync + 'static {
     /// **同步签名是有意的**：管线的作业跑在后台线程上，「一个请求流到底」的形状
     /// 用阻塞读最直白（见 `crate::ingest::import`）；`UreqTransport` 就是为此而来的实现。
     fn download(&self, req: Request, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64>;
+
+    /// 带请求体上传。默认把源整个读进内存再走 [`Transport::request`]；能流式发的实现
+    /// 应覆盖它 —— 一本几百 MB 的书不该先变成一块 `Vec<u8>` 才出网。
+    fn upload(&self, req: Request, source: &mut dyn Read, _len: u64) -> Result<Response> {
+        let mut body = Vec::new();
+        source.read_to_end(&mut body)?;
+        self.request(req.body(body))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -156,6 +165,87 @@ impl Response {
             .iter()
             .find(|(k, _)| k.to_ascii_lowercase() == want)
             .map(|(_, v)| v.as_str())
+    }
+}
+
+/// 远端仓库：同步快照与书文件共用的一层。
+///
+/// 五个动作就是「远端存着书与阅读状态」要的全部；WebDAV（[`dav::Client`]）与百度网盘
+/// （[`crate::net::cloud::baidu::BaiduDrive`]）各一份实现。`path` 与 [`dav::Entry`] 同义：
+/// 相对这一台仓库的根、用 `/` 分隔、不带首尾斜杠；空串就是根。
+pub trait RemoteStore: Send + Sync + 'static {
+    /// 列一层。
+    fn list(&self, path: &str) -> Result<Vec<dav::Entry>>;
+    /// 读一个小对象（同步快照）。整本书走 [`RemoteStore::download`]。
+    fn get(&self, path: &str) -> Result<Vec<u8>>;
+    /// 写一个小对象。父目录必须已存在，所以流程上是 [`RemoteStore::mkdir`] 在前。
+    fn put(&self, path: &str, body: Vec<u8>) -> Result<()>;
+    /// 建一层目录。已经存在算成功。
+    fn mkdir(&self, path: &str) -> Result<()>;
+    /// 流式下载。字节怎么落地是 [`Sink`] 的事。
+    fn download(&self, path: &str, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64>;
+
+    /// 逐层建目录：`a/b/c` 的三段各建一次。深度只有同步目录那几层，空段跳过。
+    fn mkdir_all(&self, dir: &str) -> Result<()> {
+        let mut prefix = String::new();
+        for part in dir.split('/').filter(|part| !part.is_empty()) {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            self.mkdir(&prefix)?;
+        }
+        Ok(())
+    }
+
+    /// 从可定位的源上传。默认整份读进内存再 [`RemoteStore::put`]；百度那一头
+    /// 覆盖成三步分片，不把一本几百 MB 的书整个装进内存。
+    fn put_file(
+        &self,
+        path: &str,
+        source: &mut dyn Source,
+        _size: u64,
+        _cancel: &Cancel,
+    ) -> Result<u64> {
+        let mut body = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = source.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&buf[..n]);
+        }
+        let len = body.len() as u64;
+        self.put(path, body)?;
+        Ok(len)
+    }
+}
+
+/// [`RemoteStore::put_file`] 的源：分片上传要能倒回去再读一遍 —— 先算每片 MD5，
+/// 再逐片发出去。读与定位显式列出来，而不是挂 `Read + Seek` 两个超 trait：`dyn
+/// Source` 上转 `dyn Read` 要 trait upcasting，当前这条链上不依赖它。
+pub trait Source {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+    fn seek_start(&mut self, pos: u64) -> std::io::Result<u64>;
+}
+
+impl<T: Read + Seek> Source for T {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        Read::read(self, buf)
+    }
+
+    fn seek_start(&mut self, pos: u64) -> std::io::Result<u64> {
+        Seek::seek(self, std::io::SeekFrom::Start(pos))
+    }
+}
+
+/// 把 [`Source`] 借成只读流，交给 [`Transport::upload`]（它不需要倒回去）。
+pub struct SourceReader<'a>(pub &'a mut dyn Source);
+
+impl Read for SourceReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
     }
 }
 

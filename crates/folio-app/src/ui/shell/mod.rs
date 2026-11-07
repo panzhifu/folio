@@ -178,11 +178,28 @@ pub(crate) const NAV_TRANSITION: Duration = Duration::from_millis(280);
 ///
 /// 减动效那一档给零时长 —— `NavStack` 内部本来就是这个判据（它的 `immediate` 那一条），
 /// 阅读层在这里跟着同一件事，才不会出现在「系统不许动」的时候还硬滑 280 毫秒。
+/// 墨水屏那一档同理（[`theme::calm_motion`]：设备是墨水屏、或读者选了水墨）—— 电子纸
+/// 上每一帧重绘都看得见，转场在那一端不是动效是闪烁。
 pub(crate) fn nav_transition(cx: &App) -> Transition {
-    if cx.reduce_motion() {
-        Transition::new(Duration::ZERO)
+    let over = nav_duration_for(cx.reduce_motion(), theme::calm_motion());
+    build_transition(over)
+}
+
+/// [`nav_transition`] 的纯函数芯：判据递进来，测试不碰全局旗。
+fn nav_duration_for(reduce_motion: bool, calm: bool) -> Duration {
+    if reduce_motion || calm {
+        Duration::ZERO
     } else {
-        Transition::new(NAV_TRANSITION).easing(Easing::EaseInOut)
+        NAV_TRANSITION
+    }
+}
+
+/// 零时长裸给（`NavStack` 的 `immediate` 那条路认它），非零带整屏进出同一条曲线。
+fn build_transition(over: Duration) -> Transition {
+    if over.is_zero() {
+        Transition::new(over)
+    } else {
+        Transition::new(over).easing(Easing::EaseInOut)
     }
 }
 
@@ -195,11 +212,24 @@ pub(crate) fn nav_transition(cx: &App) -> Transition {
 /// 管到的那两腿是点屏 / 按键 / 滚轮起的那一趟，以及松手惯性那一腿的**上限**（那一腿按剩余
 /// 行程与手指速度自己算，见 `reader::model::swipe::release_duration`）。跟手那一截不在这里：
 /// 它 1:1 跟着手指，没有时长可言。
+///
+/// 墨水屏那一档给零时长（[`theme::calm_motion`]）：纸上落定不该在电子纸上滑。
 pub(crate) fn turn_duration(cx: &App) -> Duration {
+    turn_duration_for(
+        ConfigHolder::appearance(cx).turn_duration,
+        theme::calm_motion(),
+    )
+}
+
+/// [`turn_duration`] 的纯函数芯：配置里的数与墨水屏判据递进来，测试不碰全局旗。
+fn turn_duration_for(configured: f32, calm: bool) -> Duration {
+    if calm {
+        return Duration::ZERO;
+    }
     // 取整毫秒而不是 `from_secs_f32`：`280 / 1000` 在 f32 里不是 0.28，绕一圈回来会变成
     // 280.000001 ms —— 动画上没人看得出差一微秒，但默认档与 `NAV_TRANSITION` 那一条等式
     // 就是靠逐毫秒相等钉住的。
-    Duration::from_millis(ConfigHolder::appearance(cx).turn_duration.round() as u64)
+    Duration::from_millis(configured.round() as u64)
 }
 
 /// 翻页那一趟的时钟：时长由读者那一格给，曲线与整屏进出同一条。
@@ -209,12 +239,18 @@ pub(crate) fn turn_duration(cx: &App) -> Duration {
 /// （[`nav_transition`] 那条注释里的同一个理由）中途换档会让轴与两张纸的入树顺序同时改。
 ///
 /// 减动效那一档照旧给零时长，判据与 [`nav_transition`] 完全一致：系统不许动的时候两端都不该
-/// 硬滑。
+/// 硬滑。墨水屏同一档（[`theme::calm_motion`]）。
 pub(crate) fn turn_transition(over: Duration, cx: &App) -> Transition {
-    if cx.reduce_motion() {
-        Transition::new(Duration::ZERO)
+    let over = turn_over_for(over, cx.reduce_motion(), theme::calm_motion());
+    build_transition(over)
+}
+
+/// [`turn_transition`] 的纯函数芯：纸上落定该不该滑，判据递进来。
+fn turn_over_for(over: Duration, reduce_motion: bool, calm: bool) -> Duration {
+    if reduce_motion || calm {
+        Duration::ZERO
     } else {
-        Transition::new(over).easing(Easing::EaseInOut)
+        over
     }
 }
 

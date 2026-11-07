@@ -15,9 +15,9 @@
 //! 顺序是有意的：先写 `Membership::until_day`，再换 [`Status`]。反过来的话，屏幕上会出现
 //! 一帧「已到账」而上面那句到期日还没动 —— 那正是这一屏唯一能自证成交的地方。
 
+use folio_core::MembershipTier;
 use folio_core::infra::time;
 use folio_core::net::redeem::{self, Outcome};
-use folio_core::MembershipTier;
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString};
 
 use super::config::ConfigHolder;
