@@ -4,7 +4,10 @@
 //! 判据是这一趟读不读**来源**：两趟都只面对库里那一行与它记的那个路径，所以都不进暂存区，
 //! 也不走 `ingest` / `index`（重扫那条在 [`pipeline`](super::pipeline)）。
 
+use std::collections::HashSet;
 use std::path::Path;
+use std::time::Duration;
+use std::time::SystemTime;
 
 use crate::content::format::Format;
 use crate::infra::error::IoResultExt as _;
@@ -188,6 +191,93 @@ fn extension_of(row: &BookRow, path: &Path) -> String {
 /// 永远不会被当成一本书 —— 这一条不靠这里删得干净。
 pub fn sweep_partials(book_dir: &Path) -> usize {
     sweep_partials_in(book_dir) + empty_dir(&paths::staging_dir(book_dir))
+}
+
+/// 崩溃在「rename 进书库根 → `add_book`」之间会留下的一份**哈希名副本**，而库里没有
+/// 对应的行：这一趟把它收掉，返回删掉几份。
+///
+/// 为什么需要它：导入那一段的磁盘动作是「解析 → 改名进书库根 → 落行」。改名是原子的，
+/// 但改名与落行之间不是 —— 进程在这两步之间被杀，书库根上就多一份没人认领的副本。
+/// 它不影响正确性（书库里没有行，谁也打不开它），但会永远占着那一份字节；而且下一次
+/// 导入同一本书时，落地的目标名与它相同，读者看到的是「又占了一份」。
+///
+/// **只认我们自己的命名**：`<16 位 base32>.<已注册扩展名>`（[`identity::is_hash_stem`]
+/// 与 provider 注册表各答一半，与写侧同源）。读者自己放进来、恰好叫
+/// `我自己的书.epub` 的那一份不在这个形状里，一根汗毛都不动。
+///
+/// 认领按**文件名**而不是完整路径：书库位置可能在两次启动之间被改过，同一个副本换个
+/// 写法还是同一份；而哈希名按内容唯一，同名即同一份字节。这样最坏也只是**少删**一份
+/// （另一个目录里有同名副本），不会误删正在用的那一份。
+///
+/// 一小时的宽限是给**第二个实例**的：本进程在启动时没有任何导入在飞，但同一份书库可能
+/// 正被另一个进程导入（它正停在改名之后、落行之前的窗口里）。崩溃留下的那一份要等到
+/// 再下一次启动才收掉，这是刻意的取舍 —— 多留一份文件没有可见后果，删错一份正在用的
+/// 副本是另一回事。
+pub fn sweep_orphan_copies(store: &Store, book_dir: &Path) -> usize {
+    const ORPHAN_GRACE: Duration = Duration::from_secs(60 * 60);
+
+    // 问不出「哪些副本有人认领」就不动：少删一次永远比删错安全。
+    let claimed: HashSet<String> = match store.list_books() {
+        Ok(books) => books
+            .into_iter()
+            .filter_map(|row| {
+                Path::new(&row.path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect(),
+        Err(err) => {
+            tracing::warn!("import: 问不出「哪些副本有人认领」，这一趟不清孤儿副本：{err:#}");
+            return 0;
+        }
+    };
+    let Ok(entries) = std::fs::read_dir(book_dir) else {
+        return 0;
+    };
+    let now = SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        // 只碰书库根上**普通文件**：目录、符号链接一律不认。
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !is_copy_name(&name) || claimed.contains(name.as_ref()) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= ORPHAN_GRACE);
+        if !old {
+            tracing::debug!("import: {name} 没人认领，但还新，先留着");
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => {
+                removed += 1;
+                tracing::info!("import: 清掉没人认领的副本 {name}");
+            }
+            Err(err) => tracing::warn!("import: 没人认领的副本 {name} 没删掉：{err}"),
+        }
+    }
+    removed
+}
+
+/// `<哈希主体>.<已注册扩展名>` —— 与 [`identity::ContentHash::file_name`] 拼出来的
+/// 那一种同形。扩展名那一半问 provider 注册表，`copy_extension` 与它同源。
+fn is_copy_name(name: &str) -> bool {
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    // 写侧只产出小写扩展名（`ContentHash::file_name` 归一化过）；大写那一档留给读者自己
+    // 的文件，不在这趟清理的范围内。
+    identity::is_hash_stem(stem)
+        && !ext.chars().any(|c| c.is_ascii_uppercase())
+        && crate::content::format::supports_extension(ext)
 }
 
 /// 清一个目录里没人认领的 `.part`（**只删这一种名字**）。

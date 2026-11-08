@@ -27,6 +27,9 @@ pub const HASH_ALGO: &str = "sha256";
 /// 文件名取哈希的前几个字节。10 字节 = 80 位 = base32 的 16 个字符。
 const NAME_BYTES: usize = 10;
 
+/// 文件名主体有几个字符（`NAME_BYTES` 的 8 位一组折成 5 位一组）。
+const NAME_CHARS: usize = NAME_BYTES * 8 / 5;
+
 /// RFC 4648 的 base32 字母表（小写）。
 const ALPHABET: [u8; 32] = *b"abcdefghijklmnopqrstuvwxyz234567";
 
@@ -52,9 +55,9 @@ impl ContentHash {
         for byte in &self.0[..NAME_BYTES] {
             bits = (bits << 8) | u128::from(*byte);
         }
-        let mut out = String::with_capacity(16);
-        // 高位起取组：第 15 组从第 0 位开始，所以位移是 `35 - 5 * i` 的倒序写法。
-        for i in (0..16).rev() {
+        let mut out = String::with_capacity(NAME_CHARS);
+        // 从最高 5 位往下取：`i` 从 15 数到 0，`5 * i` 就是这一组在 80 位里的起点。
+        for i in (0..NAME_CHARS).rev() {
             let index = usize::try_from((bits >> (5 * i)) & 0b11111).expect("5 位必定是 0..31");
             out.push(ALPHABET[index] as char);
         }
@@ -73,6 +76,15 @@ impl ContentHash {
             format!("{}.{ext}", self.file_stem())
         }
     }
+}
+
+/// 文件名的**主体**是不是 [`ContentHash::file_stem`] 会产出的那一种形状
+/// （[`NAME_CHARS`] 个小写 base32 字符）。
+///
+/// 只认形状、不认内容：这一问的用途是「在书库根上认出我们自己写的副本名」，
+/// 判据必须与写侧同源 —— 两处各写一遍字母表，改日加一位就漂成「孤儿副本永远认不出」。
+pub fn is_hash_stem(stem: &str) -> bool {
+    stem.len() == NAME_CHARS && stem.bytes().all(|byte| ALPHABET.contains(&byte))
 }
 
 /// 已经在内存里的那段字节（封面原图）算身份。
@@ -195,6 +207,20 @@ mod tests {
             format!("{}.epub", hash.file_stem())
         );
         assert_eq!(hash.file_name(""), hash.file_stem());
+    }
+
+    /// 认副本名只看形状：长度、字母表两格都要对，且与写侧同一份 `NAME_CHARS`。
+    #[test]
+    fn copy_file_stems_are_recognised_by_shape() {
+        let stem = sha256_of_bytes("一本书".as_bytes()).file_stem();
+        assert!(super::is_hash_stem(&stem));
+        assert!(!super::is_hash_stem(&stem[..stem.len() - 1]));
+        assert!(!super::is_hash_stem(&format!("{stem}0")));
+        // 大写不是我们写的（`file_stem` 只产出小写）；`0` / `1` / `8` / `9` 不在字母表里。
+        assert!(!super::is_hash_stem("ABCDEFGHIJKLMNOP"));
+        assert!(!super::is_hash_stem("abcdefghijklmn0p"));
+        assert!(!super::is_hash_stem("abcdefghijklmn1p"));
+        assert!(!super::is_hash_stem("abcdefghijklmn8p"));
     }
 
     /// 算法名是存进库里那一列的取值，换算法要看得见换过。

@@ -25,6 +25,10 @@
 "listen.text" = "文稿"
 "listen.prev" = "上一句"
 "listen.next" = "下一句"
+"listen.rate" = "语速"
+# 听书屏进度条旁那颗快进：一次跳过多少秒。秒数由界面按实测语速折成「至少要跳
+# 那么久的第一句」，这里只负责把它念出来。
+"listen.forward" = "快进 %{seconds} 秒"
 "listen.close" = "关闭"
 "listen.loading" = "正在准备这一句…"
 "listen.position" = "第 %{index} / %{total} 句"
@@ -119,6 +123,8 @@ turn_duration = "翻页时长"
 auto = "自动"
 auto_advance = "自动前进"
 "auto_advance.value" = "%{n} 页/分"
+# 自动阅读工具栏那颗退出：停掉自动前进，浮层换回普通底栏。
+auto_exit = "退出自动"
 measure_fill = "铺满"
 # 分页 / 双页那一档的刻度（连续滚动念「节」，这两档念「页」）。
 page_position = "第 %{index} / %{total} 页"

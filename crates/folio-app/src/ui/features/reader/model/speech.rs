@@ -25,7 +25,7 @@
 //! 每个输入口各插一刀。
 
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use folio_core::speech::{Command, Event};
 use folio_core::{Engine, Locator};
@@ -65,6 +65,14 @@ pub(in crate::ui::features::reader) struct Speech {
     /// 次点开听书屏就是重试。屏内用「准备中 / 没有可用的语音引擎」把这两格说清。
     available: Option<bool>,
     state: Listen,
+    /// 这一句开口的时刻。`Done` 拿它与此刻的差当这一句的实测时长（喂给
+    /// [`Self::chars_per_sec`]）；暂停/停止时清掉，暂停的那段不混进时长里。
+    speaking_since: Option<Instant>,
+    /// 实测语速：**字/秒，已归一到 1×**。引擎、语言、音色之间能差三倍（实测
+    /// 227–604 ms/字），听书屏的「快进 N 秒」靠它把秒折成字；还没念完过一句时
+    /// 为 `None`，由视图拿兜底值算。每句 `Done` 按三成权重并进去（见
+    /// [`blend_chars_per_sec`]），单句的抖动不会让下一跳飘走。
+    chars_per_sec: Option<f32>,
     /// 跨章续读的接力棒：`advance_chapter` 之后新章还没排完，这一格挂着
     /// 「排版落地就念这一章的第一句」。轮询见 [`Self::wait_for_chapter_then_speak`]。
     pending_chapter_start: bool,
@@ -78,10 +86,30 @@ impl Default for Speech {
             engine: None,
             available: None,
             state: Listen::Idle,
+            speaking_since: None,
+            chars_per_sec: None,
             pending_chapter_start: false,
             listening: None,
         }
     }
+}
+
+/// 一句念完，把实测时长并进语速估计（字/秒，1×）。
+///
+/// 丢掉三类样本：字数 0（空白句）、时长过短（引擎抖动或立即回 `Done`）、
+/// 时长过长（读者中途暂停过、或进程被挂起）—— 它们会把估计拉歪。其余按
+/// 0.7 / 0.3 加权：一次换声/换语言的阶跃，三句之内就跟上，而单句的噪声
+/// 只让它走三成。
+fn blend_chars_per_sec(previous: Option<f32>, chars: usize, secs: f32, rate: f32) -> Option<f32> {
+    if chars == 0 || secs < 0.5 || secs > 120.0 {
+        return previous;
+    }
+    let rate = rate.max(0.01);
+    let sample = (chars as f32 / secs / rate).clamp(0.5, 60.0);
+    Some(match previous {
+        Some(old) => old * 0.7 + sample * 0.3,
+        None => sample,
+    })
 }
 
 impl ReaderSession {
@@ -158,6 +186,12 @@ impl ReaderSession {
     /// 上一次点开的探测终审失败。听书屏拿它在播放键旁边把现状说清，圆钮不看它。
     pub(in crate::ui::features::reader) fn speech_available(&self) -> Option<bool> {
         self.speech.available
+    }
+
+    /// 实测语速（字/秒，1× 档）。听书屏「快进 N 秒」拿它把秒折算成字；
+    /// `None` = 还没念完过一句，视图用兜底值。
+    pub(in crate::ui::features::reader) fn speech_chars_per_sec(&self) -> Option<f32> {
+        self.speech.chars_per_sec
     }
 
     /// 现在念到（或停在）哪一句：`(章, 字符区间)`。视图拿它画当前句高亮。
@@ -237,6 +271,7 @@ impl ReaderSession {
     /// —— 「听到哪儿」从此在 `positions` 里有数，与读书共用一个坐标系。
     pub(in crate::ui::features::reader) fn stop_speech(&mut self) {
         self.speech.pending_chapter_start = false;
+        self.speech.speaking_since = None;
         if let Listen::Playing { chapter, range } | Listen::Paused { chapter, range } =
             &self.speech.state
         {
@@ -274,6 +309,16 @@ impl ReaderSession {
                 let Listen::Playing { chapter, range } = self.speech.state.clone() else {
                     return;
                 };
+                // 这一句念了多久：并进实测语速，供听书屏的「快进 N 秒」把秒折成字。
+                // 放在 advance 之前：advance 会重置 `speaking_since`（下一句开口）。
+                if let Some(since) = self.speech.speaking_since.take() {
+                    self.speech.chars_per_sec = blend_chars_per_sec(
+                        self.speech.chars_per_sec,
+                        range.end.saturating_sub(range.start),
+                        since.elapsed().as_secs_f32(),
+                        ConfigHolder::speech(cx).rate,
+                    );
+                }
                 self.note_reading_activity();
                 self.advance_from(chapter, range, cx);
             }
@@ -303,6 +348,8 @@ impl ReaderSession {
                 engine.send(Command::Stop);
             }
             self.speech.state = Listen::Paused { chapter, range };
+            // 暂停的那段不算进这一句的实测时长：恢复时 `speak_sentence` 会重新记起点。
+            self.speech.speaking_since = None;
             // 暂停不落库：位置那一行跟着 `auto_scroll` 的逐段跳转已经在了，
             // 而停听（`stop_speech`）才是设计稿里「落库」的那一刻。句比段密，
             // 逐句落库会把 positions 写成高频流水账，所以屏仍按段跟。
@@ -356,6 +403,8 @@ impl ReaderSession {
             engine.send(Command::SetRate(settings.rate));
             engine.send(Command::SetPitch(settings.pitch));
             engine.send(Command::Speak { text });
+            // 实测时长的起点：挂在真正送出这一句的时刻，探测/空句都不算。
+            self.speech.speaking_since = Some(Instant::now());
         }
         cx.notify();
     }
@@ -652,7 +701,9 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
 
-    use super::{Listen, attach_replay, next_sentence, sentence_from, split_sentences};
+    use super::{
+        Listen, attach_replay, blend_chars_per_sec, next_sentence, sentence_from, split_sentences,
+    };
     use crate::ui::features::reader::model::session::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
 
@@ -763,6 +814,31 @@ mod tests {
                     .unwrap_or_default(),
             )
         })
+    }
+
+    /// 语速估计：第一句直接采信实测，之后按 0.7 / 0.3 并进去；坏样本（0 字、
+    /// 过短、过长）不碰估计 —— 听书屏「快进 N 秒」的落点全靠这一个数，抖一下
+    /// 就是多跳或少跳几句。
+    #[test]
+    fn the_measured_rate_blends_and_ignores_bad_samples() {
+        // 20 字念 5 秒 = 4 字/秒（250 ms/字）：没有旧值，直接就是它。
+        assert_eq!(blend_chars_per_sec(None, 20, 5.0, 1.0), Some(4.0));
+        // 倍率归一：同样 20 字 5 秒、但在 2× 下念完 → 1× 档是 2 字/秒。
+        assert_eq!(blend_chars_per_sec(None, 20, 5.0, 2.0), Some(2.0));
+        // 并进去：旧 4、新样本 8 → 4×0.7 + 8×0.3 = 5.2，单句只让估计走三成。
+        let blended = blend_chars_per_sec(Some(4.0), 40, 5.0, 1.0).expect("样本有效");
+        assert!((blended - 5.2).abs() < 1e-4, "实测并出来是 {blended}");
+        // 坏样本原样交回：空白句、0.2 秒的引擎抖动、200 秒的挂起都不算数。
+        for (chars, secs) in [(0, 5.0), (20, 0.2), (20, 200.0)] {
+            assert_eq!(
+                blend_chars_per_sec(Some(4.0), chars, secs, 1.0),
+                Some(4.0),
+                "{chars} 字 / {secs} 秒不该改动估计"
+            );
+        }
+        // 越界样本夹回可用段：天文数字不把下一跳扔到章外。
+        assert_eq!(blend_chars_per_sec(None, 1_000_000, 120.0, 1.0), Some(60.0));
+        assert_eq!(blend_chars_per_sec(None, 10, 120.0, 1.0), Some(0.5));
     }
 
     /// 上下滚动里，朗读跨到别的章：屏要跟过去，不能停在上一章。

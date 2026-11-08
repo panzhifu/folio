@@ -6,6 +6,11 @@
 //! 卡面垫一层灰底 + 写着「已在书架」：灰底是扫一眼就分得出来的那一档，字是说得出那一档的
 //! 那一档 —— 只靠颜色不算交代（色盲、深色模式、截图给别人看，三头都会丢）。
 //!
+//! 「已在书架」认的是**内容**：导入后的副本叫 `<哈希>.ext`，原文件名已经不在库里，
+//! 按 `dir/<候选名>` 去比永远落空。所以清单先摆出来、那一格随后到（只对尺寸撞上的候选
+//! 读一遍算 sha256，见 [`ShelfView::probe_on_shelf`]）。在它亮起来之前勾上那一本，
+//! 只会白拷一遍字节然后撞在判重上，不会落第二份。
+//!
 //! 每一张卡只有两行：**上面是书名，下面是类型与大小**。从前这里还多摆一件——开容器取
 //! 真书名、真作者、真封面（一路单独的作业，一本一次 IO，`find` 只列目录不碰内容），
 //! 几千本的机器上那一趟比扫描本身还慢，而它换到的只是清单更好看。现在一行都不开：
@@ -71,6 +76,32 @@ fn fact_line(ext: Option<&str>, size: Option<u64>, on_shelf: Option<&str>) -> St
     }
     facts.extend(on_shelf.map(str::to_string));
     facts.join(" · ")
+}
+
+/// 按「尺寸预筛 + 内容哈希」算出哪些候选已经在架上。
+///
+/// 拆成纯函数是为了钉住那两条判据（尺寸对不上就不读、哈希对不上就不认），而不必在
+/// 测试里起一个后台线程去读真实文件。`hash` 交给调用方：生产那条路是 sha256，
+/// 测试里给个假的就能把两条分支都摆出来。
+fn on_shelf_hits(
+    wanted: &[(PathBuf, u64)],
+    by_size: &HashMap<u64, Vec<(String, i64)>>,
+    hash: impl Fn(&Path) -> Option<String>,
+) -> HashMap<PathBuf, i64> {
+    let mut hits = HashMap::new();
+    for (path, size) in wanted {
+        // 架上一本书都不是这个尺寸：同内容必同尺寸，连读都不必读。
+        let Some(known) = by_size.get(size) else {
+            continue;
+        };
+        let Some(digest) = hash(path) else {
+            continue;
+        };
+        if let Some((_, id)) = known.iter().find(|(candidate, _)| *candidate == digest) {
+            hits.insert(path.clone(), *id);
+        }
+    }
+    hits
 }
 
 /// 筛选浮层的大致高（含它自己的内边距）：居中要往上抬掉半张。报的是估计值 ——
@@ -235,9 +266,13 @@ impl ShelfView {
             }
             TaskEvent::Bytes(_) => {}
             TaskEvent::Finished(Ok(report)) => {
-                // 上一批的读数还没开完就换了新清单：旧路径的读数落在新清单上是白做的。
-                // 「已在书架」按副本路径判：候选落进书库时的那个路径。顺带把库里那一行的
-                // 主键拿住 —— 开容器那一路据此决定这一本要不要真的去开文件。
+                // 「已在书架」有两档判据，便宜的在前面，贵一点的由 [`Self::probe_on_shelf`]
+                // 在后台补上：
+                //
+                // 1. **按路径**：老库里有些行是就地登记的（`books.path` 就是读者那个文件），
+                //    候选路径与它相同就直接认下。
+                // 2. **按内容**：内容寻址之后副本叫 `<哈希>.ext`，原文件名已经不在库里，
+                //    这一档只能读文件算哈希。
                 //
                 // **一次把库里的路径读成表**，不逐本 `book_by_path`：候选可能有几千条，
                 // 而结果到手这一下本来就在界面线程上重活；几千次 SQL 会把读者刚要开始
@@ -283,6 +318,8 @@ impl ShelfView {
                 // `scan.is_some()`），改的是容器不是这条。真要「扫完不打扰」，那是另一个
                 // 决定：得让关掉那一下顺手把作业也停了。
                 self.scan_open = true;
+                // 按内容那一档：清单已经摆出来了，读盘与算哈希放后台，回来只补那几格。
+                self.probe_on_shelf(cx);
                 cx.notify();
             }
             TaskEvent::Finished(Err(err)) => {
@@ -299,6 +336,95 @@ impl ShelfView {
                 cx.notify();
             }
         }
+    }
+
+    /// 清单已经摆出来之后，用**内容**核对「哪些候选其实已经在架上」。
+    ///
+    /// 为什么不能只按路径比：导入后的副本是 `<哈希>.<扩展名>`（内容寻址），
+    /// `books.path` 里没有读者那个原始文件名，`dir.join(candidate.name)` 对它们永远落空。
+    /// 唯一认得出来的是字节本身。
+    ///
+    /// 代价用尺寸预筛压住：同内容必同尺寸，所以只有尺寸与架上一本书相同的候选才值得
+    /// 读一遍算 sha256 —— 整机扫几千本时真正要读的通常是个位数。算哈希在后台线程上做，
+    /// 界面这一侧只在结果回来时补那几格。
+    fn probe_on_shelf(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = app_store::handle(cx) else {
+            return;
+        };
+        let Some(ScanPhase::Results { rows, .. }) = &self.scan else {
+            return;
+        };
+        let wanted: Vec<(PathBuf, u64)> = rows
+            .iter()
+            .filter(|row| row.shelf.is_none())
+            .filter_map(|row| match &row.candidate.origin {
+                folio_core::Origin::Local(path) => Some((path.clone(), row.candidate.size?)),
+                _ => None,
+            })
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+
+        let work = cx.background_spawn(async move {
+            let index = match store.identities_by_size() {
+                Ok(index) => index,
+                Err(err) => {
+                    tracing::warn!(
+                        "ShelfView: 读「尺寸 → 哈希」表失败，这一屏不标「已在书架」：{err:#}"
+                    );
+                    return HashMap::new();
+                }
+            };
+            let mut by_size: HashMap<u64, Vec<(String, i64)>> = HashMap::new();
+            for (size, hash, id) in index {
+                by_size.entry(size).or_default().push((hash, id));
+            }
+            on_shelf_hits(&wanted, &by_size, |path| {
+                folio_core::ingest::identity::sha256_of_path(path)
+                    .ok()
+                    .map(|hash| hash.to_hex())
+            })
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx| {
+            let hits = work.await;
+            if hits.is_empty() {
+                return;
+            }
+            let _ = weak.update(cx, |this, cx| this.apply_on_shelf(hits, cx));
+        })
+        .detach();
+    }
+
+    /// 把探测交回的几格补进当前清单。
+    ///
+    /// 按**路径**对：探测回来时清单可能已经换过一轮（读者又扫了一次），对不上的直接丢。
+    /// 只改「已在书架」那一格；筛选条若正按它筛，版面（`visible` / 分组头）要重算一遍，
+    /// 否则算完反而与筛选条件对不上。
+    fn apply_on_shelf(&mut self, hits: HashMap<PathBuf, i64>, cx: &mut Context<Self>) {
+        let Some(ScanPhase::Results { rows, .. }) = &mut self.scan else {
+            return;
+        };
+        let mut changed = false;
+        for row in rows.iter_mut() {
+            if row.shelf.is_some() {
+                continue;
+            }
+            if let folio_core::Origin::Local(path) = &row.candidate.origin
+                && let Some(id) = hits.get(path)
+            {
+                row.shelf = Some(*id);
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        if self.scan_filter.shelf.is_some() {
+            self.rebuild_scan_list();
+        }
+        cx.notify();
     }
 
     /// 扫描那条事件流走到头了。`Finished` / `Cancelled` 自己会收摊；走到这里还停在
@@ -1248,7 +1374,7 @@ mod tests {
     //! 名字那一格用的是文件名削掉扩展名 —— 起得不好的文件名（`12345.epub`）在这儿说的
     //! 就不是书名，这是这一刀的代价，写在模块头。
 
-    use super::{fact_line, scan_size_bytes, split_display_name};
+    use super::{fact_line, on_shelf_hits, scan_size_bytes, split_display_name};
 
     /// 框里那行字按 MB 读：空 = 不限，逗号当小数点，负号与字母当「不限」。
     #[test]
@@ -1276,6 +1402,34 @@ mod tests {
         );
         assert_eq!(fact_line(Some("mobi"), None, None), "MOBI");
         assert_eq!(fact_line(None, None, None), "", "三格都没有就没话可说");
+    }
+
+    /// 尺寸没撞上就一次也不读；撞上了只认哈希相同的那一本；读不出来就不认。
+    #[test]
+    fn the_on_shelf_probe_hashes_only_size_matches_and_trusts_the_hash() {
+        use std::collections::HashMap;
+        use std::path::{Path, PathBuf};
+
+        let mut by_size: HashMap<u64, Vec<(String, i64)>> = HashMap::new();
+        by_size.insert(4096, vec![("aa".into(), 7)]);
+        let wanted = vec![
+            (PathBuf::from("/下载/甲.pdf"), 4096),
+            (PathBuf::from("/下载/乙.pdf"), 4096),
+            // 这个尺寸架上一本也没有：连读都不该读。
+            (PathBuf::from("/下载/丙.pdf"), 8192),
+        ];
+        let hashed = std::cell::Cell::new(0usize);
+        let hits = on_shelf_hits(&wanted, &by_size, |path: &Path| {
+            hashed.set(hashed.get() + 1);
+            match path.file_name().and_then(|name| name.to_str()) {
+                Some("甲.pdf") => Some("aa".into()),
+                Some("乙.pdf") => Some("bb".into()),
+                _ => None,
+            }
+        });
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits.get(Path::new("/下载/甲.pdf")), Some(&7));
+        assert_eq!(hashed.get(), 2, "尺寸没撞上的那本读都不该读");
     }
 
     /// 名字与扩展名的那一刀：真机上常见的三种形状。

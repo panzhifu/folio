@@ -25,6 +25,8 @@
 "listen.text" = "Manuscript"
 "listen.prev" = "Previous sentence"
 "listen.next" = "Next sentence"
+"listen.rate" = "Speed"
+"listen.forward" = "Skip ahead %{seconds} s"
 "listen.close" = "Close"
 "listen.loading" = "Preparing…"
 "listen.position" = "Sentence %{index} / %{total}"
@@ -128,6 +130,8 @@ turn_duration = "Page turn duration"
 auto = "Auto"
 auto_advance = "Auto-advance"
 "auto_advance.value" = "%{n} pages/min"
+# Exit on the auto-reading toolbar: stops auto-advance and brings the regular bottom bar back.
+auto_exit = "Exit auto"
 measure_fill = "Full width"
 # The scale for paged / spread; continuous scroll reads "section" instead.
 page_position = "Page %{index} of %{total}"

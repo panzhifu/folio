@@ -22,8 +22,10 @@
 //! ```
 //!
 //! 前四步与格式无关、失败就删该删的那一份；后三步完全依赖格式。**两步之间唯一的磁盘
-//! 动作是一次 rename**，所以崩溃时书库里只可能出现没人认领的 `.part`（由
-//! [`sweep_partials`] 清），不会出现「库里有行而文件不在」之外的那种半成品。
+//! 动作是一次 rename**，所以崩溃时书库里只可能出现两种半成品：暂存区里没人认领的
+//! `.part`（[`sweep_partials`] 清），以及「改名已落地、行还没写」的哈希名副本
+//! （[`sweep_orphan_copies`] 清）。反方向的「库里有行而文件不在」由
+//! `Store::prune_missing` 在启动时收掉。
 //!
 //! 八种来源的差别只剩 `candidates` 与 `stage` 两个方法，管线只有 [`import_from`] 一写。
 //! 共同的那半件事（写进暂存）现在**契约上**仍归来源，但只能落在 `.staging` 里：
@@ -81,6 +83,7 @@ mod sources;
 
 pub use maintenance::BackfillReport;
 pub use maintenance::backfill_copies;
+pub use maintenance::sweep_orphan_copies;
 pub use maintenance::sweep_partials;
 pub use pipeline::import_from;
 pub use pipeline::reindex;

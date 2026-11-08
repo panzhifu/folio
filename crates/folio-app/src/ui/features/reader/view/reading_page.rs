@@ -28,6 +28,7 @@ use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::{Popover, PopoverState};
+use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{
@@ -65,6 +66,25 @@ use crate::ui::services::l10n::{tf, tr};
 /// 壳主题只管浮上来的那几层界面，不再管纸。
 fn reading_palette(cx: &gpui_kit::App) -> reading_theme::ReadingPalette {
     reading_theme::resolve(&ConfigHolder::appearance(cx), cx)
+}
+
+/// 正文上的一击落到哪一区。
+///
+/// 自动阅读跑着、底栏又收着时，左中右三区并成一档：这一击唯一的意思是「把自动的
+/// 工具栏叫出来」。自动自己会翻页，不该在这一刻替它翻一页；底栏已经露着时那一层本身
+/// 是模态的，任何一击都只收浮层，照旧把三区交给 [`zone`]。
+fn body_tap_zone(
+    auto_running: bool,
+    chrome_open: bool,
+    x: f32,
+    width: f32,
+    rtl: bool,
+) -> chrome::Zone {
+    if auto_running && !chrome_open {
+        chrome::Zone::ToggleChrome
+    } else {
+        zone(x, width, rtl)
+    }
 }
 use crate::ui::shell::AppShell;
 use crate::ui::shell::navigation::SizeClass;
@@ -108,6 +128,22 @@ const LISTEN_FOLLOW: Duration = Duration::from_millis(380);
 /// 听书」同一条口径：读的人说了算。
 const LISTEN_HAND_OVER: Duration = Duration::from_secs(4);
 
+/// 听书屏语速菜单的档。设置页那条连续滑条仍可按 0.05 微调；这里给的是「一眼能挑」
+/// 的几档 —— 顶栏右侧那颗钮打开的就是这张小单子，不逼读者去设置页找。
+const LISTEN_RATES: [f32; 7] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
+/// 听书屏「快进」一次跳多少秒。
+///
+/// 朗读是**句级**的，落不进半句里：跳过 N 秒的落点是「起点至少走过 N 秒的第一句」，
+/// 秒数按实测语速折成字数（见 [`ReaderSession::speech_chars_per_sec`] 与
+/// [`skip_target`]）。一章剩下的时长不够 N 秒时就停在最后一句，跨章仍归 `Done`
+/// 那一条接力。
+const LISTEN_SKIP_SECONDS: f32 = 15.0;
+
+/// 还没念完过一句时的兜底语速（字/秒，1× 档）。真机实测跨引擎能差三倍
+/// （227–604 ms/字），取 250 ms/字 这一档；第一句 `Done` 之后就用实测值。
+const LISTEN_FALLBACK_CPS: f32 = 4.0;
+
 /// 听书文稿里的一句话：两套坐标。
 #[derive(Clone)]
 struct ListenSentence {
@@ -128,6 +164,11 @@ struct ListenScript {
     sentences: Vec<ListenSentence>,
     /// 每一句的文稿文本落在第几行（整章一次排版后数出来的）。跟读的落点按它算。
     line_of: Vec<usize>,
+    /// 每一句在文稿文本里的**字符**起点（与 `sentences` 平行）。听书屏那条章内进度
+    /// 按它算 —— 字节区间不能直接除总长，中文一个字占三字节，比例会偏。
+    chars_at: Vec<usize>,
+    /// 整章文稿有多少字符（进度条的分母）。`0` = 这一章还没排出可念的文本。
+    chars: usize,
     /// 建表时这一列多宽（逻辑像素）—— 变了要重建，不然折点会落到屏幕外面。
     width: f32,
     /// 这张表是**整章**的吗。排版还没给段界时兜底摆出来的单句表是 `false`：它只够
@@ -182,6 +223,10 @@ pub struct ReadingPage {
     pub(in crate::ui::features::reader) shell: WeakEntity<AppShell>,
     /// 浮层（顶栏与底栏这一层）的开合。见 [`chrome`]。
     pub(in crate::ui::features::reader) chrome: Chrome,
+    /// 自动阅读工具栏那条速度滑条。与底栏进度条同理：`Slider` 是有状态组件，句柄必须
+    /// 跨帧持有。数与阅读设置里「自动前进」那一格同源（`Appearance::auto_advance_speed`）：
+    /// 拖动即写本书差量，别处改了由 [`ReadingPage::sync_sliders`] 推回来。
+    pub(in crate::ui::features::reader) auto_speed: Entity<SliderState>,
     /// 进度滑条，底栏那一格。`Slider` 是有状态组件，句柄必须跨帧持有 —— 每帧新建会把拖动打断。
     pub(in crate::ui::features::reader) progress: Entity<SliderState>,
     /// 阅读设置那一屏。七条滑条、那颗翻页下拉、那只字体输入框与弹层档位都装在它自己
@@ -244,6 +289,26 @@ impl ReadingPage {
                     .update(cx, |reader, cx| reader.seek_ratio(value.end(), cx));
             }
         })];
+        // 自动阅读工具栏那条速度滑条：量程与细档借阅读设置里「自动前进」那一格的同一份
+        // 数据（见 [`chrome::AUTO_ADVANCE_RANGE`]）。初值停在量程下界，第一帧
+        // [`ReadingPage::sync_sliders`] 就把配置里的真值推上来 —— 与进度条同一条路。
+        let (min, max) = chrome::AUTO_ADVANCE_RANGE;
+        let auto_speed = cx.new(|_| {
+            SliderState::new()
+                .min(min)
+                .max(max)
+                .step(chrome::AUTO_ADVANCE_STEPS.slide)
+                .default_value(min)
+        });
+        // 拖动即写**这一本**的差量：与设置卡片里那一格同一条写入口
+        // （`Knob::AutoAdvance`），两端都没有「应用」按钮。
+        watches.push(cx.subscribe(&auto_speed, |_, _, event, cx| {
+            if let SliderEvent::Change(value) = event {
+                ConfigHolder::edit_book_appearance(cx, |appearance| {
+                    appearance.auto_advance_speed = value.end();
+                });
+            }
+        }));
         // 阅读设置那一屏自己的实体：弹层的开合与换档都要重画这一屏（`layers_up` 那个数
         // 与底栏那一格的选中态读的是它），所以观察一道，与目录同一形状。
         let settings = cx.new(|cx| ReadingSheet::new(reader.clone(), cx));
@@ -284,6 +349,7 @@ impl ReadingPage {
             stack,
             shell,
             chrome: Chrome::default(),
+            auto_speed,
             progress,
             settings,
             toc,
@@ -572,9 +638,26 @@ impl ReadingPage {
         let width = f32::from(window.viewport_size().width).max(1.0);
         // 左右两档意味着什么，跟着整本的翻页方向走（`zone` 里那一条）。
         let rtl = self.reader.read(cx).progression_rtl();
-        let tap = zone(f32::from(position.x), width, rtl);
+        // 自动阅读跑着、底栏又收着时，这一击的唯一语义是「把自动的工具栏叫出来」：
+        // 自动自己会翻页，不该在这一刻再替它翻一页；左中右三区都并成一档。
+        // 底栏已经露着时恢复常态（那一层本身就是模态的，任何一击都只收浮层）。
+        let auto_running = self.reader.read(cx).auto_on();
+        let tap = body_tap_zone(
+            auto_running,
+            self.chrome.is_open(),
+            f32::from(position.x),
+            width,
+            rtl,
+        );
         match self.chrome.handle_body_tap(tap) {
-            Effect::OpenChrome | Effect::DismissChrome => cx.notify(),
+            Effect::OpenChrome => {
+                // 自动阅读在跑时，抬起来的那一层就是自动工具栏（速度 + 退出），
+                // 由渲染按 `auto_on` 选 bar；这里只开浮层。
+                cx.notify();
+            }
+            Effect::DismissChrome => {
+                cx.notify();
+            }
             Effect::PrevPage => {
                 self.reader
                     .update(cx, |reader, cx| reader.scroll_page(-1, cx));
@@ -586,13 +669,14 @@ impl ReadingPage {
         }
     }
 
-    /// 把「别处也改得动」的数推回底栏那条进度滑块：正文滚了要挪它。
+    /// 把「别处也改得动」的数推回这一屏持有的两条滑条：正文滚了要挪进度条，设置卡片里
+    /// 改了自动前进的速度要挪自动工具栏那条速度滑条。
     ///
     /// 设置卡片里那七条滑条不归这里 —— 它们对齐的是配置而不是正文，各自住在
     /// [`ReadingSheet::sync`] 里。
     ///
-    /// 带阈值比较：拖动的时候滑条自己就是权威，每帧再按正文读回来的数写回去，
-    /// 就是拿手指算出来的值和滚动算出来的值互相追。
+    /// 带阈值比较：拖动的时候滑条自己就是权威，每帧再按别处读回来的数写回去，
+    /// 就是拿手指算出来的值和那边算出来的值互相追。
     pub(in crate::ui::features::reader) fn sync_sliders(
         &mut self,
         window: &mut Window,
@@ -604,6 +688,11 @@ impl ReadingPage {
         if (self.progress.read(cx).value().end() - progress).abs() > 0.005 {
             self.progress
                 .update(cx, |state, cx| state.set_value(progress, window, cx));
+        }
+        let speed = ConfigHolder::appearance(cx).auto_advance_speed;
+        if (self.auto_speed.read(cx).value().end() - speed).abs() > 0.005 {
+            self.auto_speed
+                .update(cx, |state, cx| state.set_value(speed, window, cx));
         }
     }
 
@@ -644,8 +733,9 @@ impl ReadingPage {
         });
     }
 
-    /// 底栏那一格「自动」：自动前进 on/off。状态与拍子都在会话里（`model/paging` 的
-    /// `set_auto` / `auto_step`），这一屏只把那一击递过去。
+    /// 自动那一下：自动前进 on/off。状态与拍子都在会话里（`model/paging` 的
+    /// `set_auto` / `auto_step`），这一屏只把那一击递过去。浮层露着时渲染按 `auto_on`
+    /// 选 bar：开了换自动工具栏，停了换回普通底栏，不必在这里收任何东西。
     pub(in crate::ui::features::reader) fn toggle_auto(&mut self, cx: &mut Context<Self>) {
         self.reader.update(cx, |reader, cx| {
             reader.set_auto(!reader.auto_on(), cx);
@@ -707,6 +797,40 @@ impl ReadingPage {
         if target == ix {
             return;
         }
+        let want = script.sentences[target].chapter.clone();
+        self.listen_manual_at = None;
+        self.reader
+            .update(cx, |reader, cx| reader.speak_from(chapter, want, cx));
+    }
+
+    /// 快进 N 秒：把秒折成字（实测语速 × 当前倍率），落到 [`skip_target`] 算出的那一句，
+    /// 从它的开头念。走的是与上一句/下一句同一条 `speak_from` —— 暂停时按下去也从那
+    /// 一句开口，三个跳转口行为一致。只在**这一章**里跳：章末剩下的时长不够就停在
+    /// 最后一句，跨章仍归 `Done` 那一条接力。
+    fn listen_skip_forward(&mut self, cx: &mut Context<Self>) {
+        let Some((chapter, range)) = self.reader.read(cx).speech_range() else {
+            return;
+        };
+        let Some(script) = self.listen_script.clone() else {
+            return;
+        };
+        if script.chapter != chapter {
+            return;
+        }
+        let Some(ix) = sentence_index(&script.sentences, range.start) else {
+            return;
+        };
+        let rate = ConfigHolder::speech(cx).rate.max(0.01);
+        let chars_per_sec = self
+            .reader
+            .read(cx)
+            .speech_chars_per_sec()
+            .unwrap_or(LISTEN_FALLBACK_CPS)
+            * rate;
+        let Some(target) = skip_target(&script.sentences, ix, LISTEN_SKIP_SECONDS, chars_per_sec)
+        else {
+            return;
+        };
         let want = script.sentences[target].chapter.clone();
         self.listen_manual_at = None;
         self.reader
@@ -820,6 +944,7 @@ impl ReadingPage {
                 };
                 // 整章排一次：每一句落在第几行（跟读的落点）。折行点只由字体、字号、
                 // 行宽决定 —— 高亮只换颜色不换字重，换句不重排。
+                let (chars_at, chars) = sentence_char_positions(&script_text, &sentences);
                 let shaped = listen_shape_script(&script_text, width, family, window);
                 let line_lens: Vec<usize> = shaped.iter().map(|line| line.text.len()).collect();
                 let line_of = sentences
@@ -831,6 +956,8 @@ impl ReadingPage {
                     text: script_text.into(),
                     sentences,
                     line_of,
+                    chars_at,
+                    chars,
                     width,
                     complete,
                 })
@@ -953,6 +1080,44 @@ impl ReadingPage {
                 self.listen_face == ListenFace::Text,
                 page_face,
             ));
+        // 语速：顶栏右端那颗钮（仪表盘图标 + 当前倍率）。从前它挤在播放键上方那条
+        // 进度旁边 —— 倍率与「这一章念到哪儿」互不相干，不该抢同一条视线；提到顶栏
+        // 之后，底部只剩进度与快进、播放那一排。
+        let rate = ConfigHolder::speech(cx).rate;
+        let speed_label: SharedString = rate_label(rate).into();
+        let rate_name = tr(cx, "listen.rate");
+        let rate_a11y = format!("{rate_name} {speed_label}");
+        let page_rate = cx.entity().clone();
+        // 语速这张小单子用标准的 `PopupMenu`：选中一档由 `checked` 画勾（不靠颜色
+        // 猜），点外面 / 按返回的收场也归组件自己。锚在**右上** = 往下开、右对齐，
+        // 钮在顶栏右端，单子不该往上飞出屏幕。
+        let speed_menu = move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
+            let current = ConfigHolder::speech(cx).rate;
+            let mut menu = menu.min_w(px(112.));
+            for option in LISTEN_RATES {
+                let page = page_rate.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(rate_label(option))
+                        .checked((current - option).abs() < 0.001)
+                        .on_click(move |_, _, cx| {
+                            // 下一句开口时 `speak_sentence` 会随发 `SetRate`：这里只改配置，
+                            // 不另开一条命令通路（与设置页同一条口径）。
+                            ConfigHolder::edit_speech(cx, |speech| speech.rate = option);
+                            page.update(cx, |_, cx| cx.notify());
+                        }),
+                );
+            }
+            menu
+        };
+        let speed = Button::new("listen-rate")
+            .ghost()
+            .small()
+            .rounded_full()
+            .icon(IconName::Gauge)
+            .label(speed_label)
+            .tooltip(rate_name.clone().to_string())
+            .accessibility_label(rate_a11y)
+            .dropdown_menu_with_anchor(Anchor::TopRight, speed_menu);
         let top = h_flex()
             .w_full()
             .items_center()
@@ -971,7 +1136,9 @@ impl ReadingPage {
                 ),
             )
             .child(face_switch)
-            .child(div().flex_1());
+            // 右端与左端对称（各占一段 `flex_1`）：语速贴着右缘，中间那颗胶囊因此
+            // 正落在屏中。
+            .child(h_flex().flex_1().justify_end().child(speed));
 
         let book = self.listen_book.as_ref().and_then(|book| book.as_ref());
         let title: SharedString = book.map(|book| book.title.clone()).unwrap_or_default();
@@ -1033,7 +1200,7 @@ impl ReadingPage {
                         )
                     })
                     .child(div().text_sm().text_color(muted).child(chapter_title))
-                    .child(div().text_xs().text_color(muted).child(position))
+                    .child(div().text_xs().text_color(muted).child(position.clone()))
                     .into_any_element()
             }
             ListenFace::Text => {
@@ -1252,6 +1419,55 @@ impl ReadingPage {
                     }),
             );
 
+        // 播放键上方那一条：**这一章**念到哪儿 + 快进。
+        //
+        // 比例按**字符**算，不按句数：同一章里句子的长短差得远，按「第几句 / 共几句」
+        // 画会在长句章里走得像卡住。分母是文稿字符数（`sentence_char_positions`），
+        // 逐帧只查一个数，不重扫整章。
+        let chapter_progress = self
+            .listen_script
+            .as_ref()
+            .zip(active)
+            .filter(|(script, _)| script.chars > 0)
+            .map(|(script, ix)| {
+                let done = script.chars_at.get(ix).copied().unwrap_or(0);
+                (done as f32 / script.chars as f32 * 100.0).clamp(0.0, 100.0)
+            })
+            .unwrap_or(0.0);
+        // 快进：与「下一句」同一个方向，只是按秒走（[`LISTEN_SKIP_SECONDS`]，秒数
+        // 折成句级落点见 [`skip_target`]）。条上已经在章末时就禁用 —— 没有可跳的。
+        let skip_label = tf(
+            cx,
+            "listen.forward",
+            &[("seconds", &format!("{LISTEN_SKIP_SECONDS:.0}"))],
+        );
+        let page_skip = cx.entity().clone();
+        let skip = Button::new("listen-skip-forward")
+            .ghost()
+            .icon(IconName::FastForward)
+            .tooltip(skip_label.clone().to_string())
+            .accessibility_label(skip_label)
+            .disabled(!can_next)
+            .on_click(move |_, _, cx| {
+                page_skip.update(cx, |this, cx| this.listen_skip_forward(cx))
+            });
+        let chapter_row = h_flex()
+            .w_full()
+            .max_w(px(LISTEN_TEXT_W))
+            .mx_auto()
+            .items_center()
+            .gap_3()
+            .pb_4()
+            .child(
+                div().flex_1().min_w_0().child(
+                    Progress::new("listen-chapter-progress")
+                        .small()
+                        .value(chapter_progress)
+                        .accessibility_label(position.clone()),
+                ),
+            )
+            .child(skip);
+
         Some(
             v_flex()
                 .id("reader-listen")
@@ -1274,6 +1490,7 @@ impl ReadingPage {
                         .text_color(muted)
                         .child(note)
                 }))
+                .child(chapter_row)
                 .child(controls)
                 .into_any_element(),
         )
@@ -1530,6 +1747,32 @@ impl ReadingPage {
         )
     }
 
+    /// 自动前进那一档挪一格（页/分）。写的是**这一本**的差量 —— 与阅读设置里
+    /// 那一格同一条路（`Knob::AutoAdvance`），换本书不会跟着变。
+    ///
+    /// 滑条与配置两笔都写（与 [`ReadingSheet::nudge`] 同一条规矩）：`set_value` 不发
+    /// `Change`，少写配置那一笔就是滑块动了而翻页速度没变；只写配置不写滑块，
+    /// 钮按下去那一帧滑块还停在旧处。
+    pub(in crate::ui::features::reader) fn nudge_auto(
+        &mut self,
+        delta: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = ConfigHolder::appearance(cx).auto_advance_speed;
+        let (min, max) = chrome::AUTO_ADVANCE_RANGE;
+        let next = (current + delta).clamp(min, max);
+        if (next - current).abs() < 0.001 {
+            return;
+        }
+        self.auto_speed
+            .update(cx, |state, cx| state.set_value(next, window, cx));
+        ConfigHolder::edit_book_appearance(cx, |appearance| {
+            appearance.auto_advance_speed = next;
+        });
+        cx.notify();
+    }
+
     /// 「回原处」那一格：从正文点链接/脚注跳出去之后才出现，**底部居中**。
     ///
     /// 与撤销胶囊同一族（都是临时的一格），但两块同时在场时这一格**抬到撤销那条之上**
@@ -1615,12 +1858,15 @@ impl ReadingPage {
     /// 把书架与设置也一起拧黑，而关掉书之后那一档要还在设置屏选的位置上。
     pub(in crate::ui::features::reader) fn toggle_night(&mut self, cx: &mut Context<Self>) {
         let dark = cx.theme().mode == ThemeMode::Dark;
-        ConfigHolder::edit_book_appearance(cx, |appearance| {
+        // **写全局**，不写本书差量：`reading_mode` 自 2026-11-07 起收归全局
+        // （`APPEARANCE_GLOBAL_ONLY`），`edit_book_appearance` 会把这一格挡掉 ——
+        // 从前这里走的是那一条，于是按下「日间/夜间」什么都不发生。
+        ConfigHolder::edit_appearance(cx, |appearance| {
             appearance.reading_mode = if dark {
                 Some(Mode::Light)
             } else {
                 Some(Mode::Dark)
-            }
+            };
         });
     }
 
@@ -1789,6 +2035,43 @@ fn build_listen_script(
     (text, sentences)
 }
 
+/// 每一句在文稿里的**字符**起点与整章字符数。字节区间进、字符数出。
+///
+/// 为什么不在渲染时按句起点现数：中文一个字三字节，`script.start / text.len()` 算出来
+/// 的比例是错的；而逐帧把整章 `chars().count()` 一遍又是白付。文稿一建就折成字符，
+/// 进度条每次只查一个数。
+fn sentence_char_positions(text: &str, sentences: &[ListenSentence]) -> (Vec<usize>, usize) {
+    let mut starts = Vec::with_capacity(sentences.len());
+    let mut chars = 0usize;
+    let mut cursor = 0usize;
+    for sentence in sentences {
+        // 上一句结尾到这一句开头之间的空白也算走过 —— 它确实夹在念的内容之间。
+        chars += text[cursor..sentence.script.start].chars().count();
+        starts.push(chars);
+        chars += text[sentence.script.start..sentence.script.end]
+            .chars()
+            .count();
+        cursor = sentence.script.end;
+    }
+    chars += text[cursor..].chars().count();
+    (starts, chars)
+}
+
+/// 语速的显示名：去掉小数点后的尾零（`1.00` → `1`，`0.75` 原样），再接一个 `×`。
+///
+/// 只做显示这一层：配置里存的仍是 0.05 一档的浮点，设置页那条滑条与本屏这张单子
+/// 读写同一列。
+fn rate_label(rate: f32) -> String {
+    let mut text = format!("{rate:.2}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    format!("{text}×")
+}
+
 /// 整章排一次：gpui 的 text system 在哪儿折，文稿就到哪儿折 —— 量的尺与画出来的尺
 /// 必须完全一致（同一字体族、[`LISTEN_BOOK_PX`]、同一列宽；行高不影响折点，画的那侧
 /// 由 `TextStyle::line_height` 走 [`LISTEN_LINE_H`]）。量出来的每一条行给「每句落在
@@ -1859,6 +2142,33 @@ fn sentence_index(sentences: &[ListenSentence], at: usize) -> Option<usize> {
         })
 }
 
+/// 「快进 N 秒」落到哪一句：从第 `from` 句的**开头**起算，逐句累加估算时长
+/// （字数 ÷ `chars_per_sec`），取第一句起点已经走过 `seconds` 秒的那一句。
+///
+/// 朗读是句级的，落不进半句里：正在念的这一句整句计入（不知道念到句内哪儿），
+/// 所以跳过的内容**不少于** N 秒，最多多出一句。一章剩下的时长不够 N 秒时停在
+/// 最后一句；已经在最后一句就返回 `None`（没有可跳的，按钮当场禁用）。
+fn skip_target(
+    sentences: &[ListenSentence],
+    from: usize,
+    seconds: f32,
+    chars_per_sec: f32,
+) -> Option<usize> {
+    if from + 1 >= sentences.len() {
+        return None;
+    }
+    let cps = chars_per_sec.max(0.1);
+    let mut elapsed = 0.0;
+    for (ix, sentence) in sentences.iter().enumerate().skip(from) {
+        // `from` 自己那一句是起点，不算「已经走过的路」：这一格只在再看下一句时判。
+        if ix > from && elapsed >= seconds {
+            return Some(ix);
+        }
+        elapsed += sentence.chapter.len() as f32 / cps;
+    }
+    Some(sentences.len() - 1)
+}
+
 impl Render for ReadingPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 正文让出干净态那两条带。浮层不参与：它压字，不推字。
@@ -1917,6 +2227,10 @@ impl Render for ReadingPage {
         // 才是「这一层是临时抬起来的」的正确读法，而当初那句「让那 172 像素反而让人以为
         // 还能点」的担心对顶栏不成立 —— 抬上来之后它是真能点。
         let toc_up = toc_open && self.chrome.is_open();
+        // 自动跑着时，浮层里摆的是自动那条工具栏（速度 + 退出），普通底栏整个让位 ——
+        // 不是底栏之上再叠一张小卡。自动被别处停掉（滚了一下 / 听书起念 / 读到书末）
+        // 时这一格当场变 false，下一帧底栏自己回来，不必逐个停自动的入口补一句。
+        let auto_on = self.reader.read(cx).auto_on();
         let column = div()
             .absolute()
             .top_0()
@@ -1944,11 +2258,18 @@ impl Render for ReadingPage {
             // 顶栏在目录那一层开着时不在这里画 —— 抬到遮罩之上去了（见下面
             // `toc_up` 那一段）。底栏照旧压在遮罩下。
             .when(self.chrome.is_open() && !toc_up, |this| {
-                this.child(self.top_bar(wide, cx))
-                    .child(self.bottom_bar(cx))
+                this.child(self.top_bar(wide, cx)).child(if auto_on {
+                    self.auto_bar(cx)
+                } else {
+                    self.bottom_bar(cx)
+                })
             })
             .when(self.chrome.is_open() && toc_up, |this| {
-                this.child(self.bottom_bar(cx))
+                this.child(if auto_on {
+                    self.auto_bar(cx)
+                } else {
+                    self.bottom_bar(cx)
+                })
             });
         // 阅读页的根底色是**正文纸**：跟随正文主题（选了哪套就是哪张纸），不再
         // 跟壳主题走 —— 设置页弹到纸上面时，白壳配羊皮纸正是分离想要的样子。
@@ -2599,10 +2920,31 @@ mod tests {
     //! 「现在念到第几句」。摆出来好不好看只有真机量得出来，但这几格错了会直接对上读者
     //! 的两句抱怨：文稿只有一行，或者文稿根本不跟着声音走。
 
+    use super::chrome;
     use super::{
-        LISTEN_LINE_H, LISTEN_TEXT_W, ListenScript, ListenSentence, build_listen_script,
-        line_index_at, listen_column_width, listen_focus_offset, sentence_index,
+        LISTEN_LINE_H, LISTEN_TEXT_W, ListenScript, ListenSentence, ReadingPage, body_tap_zone,
+        build_listen_script, line_index_at, listen_column_width, listen_focus_offset, rate_label,
+        sentence_char_positions, sentence_index, skip_target,
     };
+    use crate::ui::features::reader::model::session::ReaderSession;
+    use crate::ui::services::config::ConfigHolder;
+    use folio_core::infra::config::Mode;
+    use folio_core::{Appearance, BookSettings, Config};
+    use gpui_kit::base::NavStackState;
+    use gpui_kit::component::Root;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Entity, TestAppContext, WeakEntity, px, size,
+    };
+
+    /// 一扇**不带书**的阅读页：只用到视图自己的状态（日间/夜间、自动前进那条工具栏），
+    /// 不碰排版。`ReaderSession::boot` 给的就是「没有书」的那一屏。
+    fn a_reading_page(cx: &mut TestAppContext) -> Entity<ReadingPage> {
+        let reader = cx.update(|cx| cx.new(|cx| ReaderSession::boot(cx)));
+        let stack = cx.update(|cx| cx.new(|_| NavStackState::new()));
+        cx.update(|cx| {
+            cx.new(|cx| ReadingPage::new(reader, stack.downgrade(), WeakEntity::new_invalid(), cx))
+        })
+    }
 
     /// 列宽：手机窄、平板宽；宽过 [`LISTEN_TEXT_W`] 之后不再增长（折点不跟着屏幕无限变）。
     #[test]
@@ -2709,6 +3051,8 @@ mod tests {
             text: "".into(),
             sentences: vec![],
             line_of: vec![0, 20, 30],
+            chars_at: vec![],
+            chars: 0,
             width: 300.0,
             complete: true,
         };
@@ -2754,5 +3098,159 @@ mod tests {
             "越过末尾钉在最后一句"
         );
         assert_eq!(sentence_index(&[], 0), None);
+    }
+
+    /// 语速的显示名：尾零去掉，小数保留（`1.00` 念成 `1×`，`0.75` 一字不动）。
+    #[test]
+    fn rate_labels_drop_trailing_zeros() {
+        assert_eq!(rate_label(1.0), "1×");
+        assert_eq!(rate_label(0.75), "0.75×");
+        assert_eq!(rate_label(1.25), "1.25×");
+        assert_eq!(rate_label(0.5), "0.5×");
+        assert_eq!(rate_label(2.0), "2×");
+    }
+
+    /// 「快进 N 秒」的落点：从这一句**开头**起算，跳过句子的估算时长，取第一句起点
+    /// 已经走过 N 秒的那一句；章末剩下的不够就停在最后一句，已经在最后一句就 `None`。
+    #[test]
+    fn skipping_forward_lands_on_the_first_sentence_past_the_seconds() {
+        // 六句、每句 20 字；4 字/秒 → 每句 5 秒。
+        let script: Vec<ListenSentence> = (0..6)
+            .map(|ix| ListenSentence {
+                chapter: ix * 20..ix * 20 + 20,
+                script: 0..0,
+            })
+            .collect();
+        // 15 秒 = 三句：第 0、1、2 句的时长都不够，第 3 句起点正好走过 15 秒。
+        assert_eq!(skip_target(&script, 0, 15.0, 4.0), Some(3));
+        // 倍率翻倍（每句 2.5 秒）：15 秒要走六句，章里不够 → 停在最后一句。
+        assert_eq!(skip_target(&script, 0, 15.0, 8.0), Some(5));
+        // 从中间起算同理：第 2 句起走满 15 秒落到第 5 句；第 3 句起不够，也停在它。
+        assert_eq!(skip_target(&script, 2, 15.0, 4.0), Some(5));
+        assert_eq!(skip_target(&script, 3, 15.0, 4.0), Some(5));
+        // 已经在最后一句：没有可跳的（按钮当场禁用）。
+        assert_eq!(skip_target(&script, 5, 15.0, 4.0), None);
+        // 空表 / 越界起点不 panic。
+        assert_eq!(skip_target(&[], 0, 15.0, 4.0), None);
+        assert_eq!(skip_target(&script, 99, 15.0, 4.0), None);
+    }
+
+    /// 听书屏那条章内进度按**字符**算：中文一个字三字节，拿字节数当分母会偏到一倍以上。
+    #[test]
+    fn chapter_positions_count_characters_not_bytes() {
+        let chars: Vec<char> = "  甲一句。乙二句。".chars().collect();
+        let (text, sentences) = build_listen_script(&chars, |at| match at {
+            0..=9 => Some(0..10),
+            _ => None,
+        });
+        let (starts, total) = sentence_char_positions(&text, &sentences);
+        assert_eq!(total, text.chars().count());
+        assert_eq!(starts.len(), sentences.len());
+        assert_eq!(starts[0], 0, "第一句从文稿第一个字起");
+        assert_eq!(starts[1], 4, "第二句在「甲一句。」之后，按字数不是字节");
+        assert_eq!(total, 8, "段首空白不进文稿");
+    }
+
+    /// 日间 / 夜间那一下必须写**全局**阅读浅深。
+    ///
+    /// `reading_mode` 自 2026-11-07 起收归全局（`APPEARANCE_GLOBAL_ONLY`），本书差量里
+    /// 那一格会被 `record_appearance` 挡掉。这一击从前还挂在 `edit_book_appearance` 上，
+    /// 于是按下什么都不发生 —— 真机读到的正是「白天/夜间切换没反应」。
+    #[gpui_kit::test]
+    fn the_day_button_writes_the_global_reading_mode(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| ConfigHolder::install(Config::default(), cx));
+        let page = a_reading_page(cx);
+
+        // 测试窗口装的是浅色主题：按一下应写成「夜间」。
+        page.update(cx, |page, cx| page.toggle_night(cx));
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::appearance(cx).reading_mode),
+            Some(Mode::Dark),
+            "写进全局阅读浅深，而不是被本书差量挡掉的那一格"
+        );
+    }
+
+    /// 自动阅读跑着、底栏收着时，**任意**一击都只叫出工具栏：左右两区不再翻页。
+    /// 底栏露着 / 自动没跑时，三区照旧（左翻、中叫出、右翻）。
+    #[test]
+    fn a_tap_in_auto_mode_opens_the_toolbar_instead_of_turning_a_page() {
+        // 300 宽：左区 0–90、中区 90–210、右区 210–300（`zone` 的三分）。
+        let left = 30.0;
+        let right = 270.0;
+        // 自动 + 底栏收着：左右两档都被收成「叫出浮层」。
+        assert_eq!(
+            body_tap_zone(true, false, left, 300.0, false),
+            chrome::Zone::ToggleChrome,
+            "自动跑着时点左边不该翻页"
+        );
+        assert_eq!(
+            body_tap_zone(true, false, right, 300.0, false),
+            chrome::Zone::ToggleChrome,
+            "自动跑着时点右边也不该翻页"
+        );
+        // 底栏已经露着：左区照旧是往回翻。
+        assert_eq!(
+            body_tap_zone(true, true, left, 300.0, false),
+            chrome::Zone::PrevPage
+        );
+        // 自动没跑：点右边照旧往前翻。
+        assert_eq!(
+            body_tap_zone(false, false, right, 300.0, false),
+            chrome::Zone::NextPage
+        );
+    }
+
+    /// 自动前进那一档：两头夹住，且写的是**这一本**的差量，不动全局默认；
+    /// 滑条与配置必须同一步落到同一处 —— 少写任何一笔都是「滑块动了速度没变」
+    /// 或反过来的坏法（与阅读设置里 `ReadingSheet::nudge` 那条门同一份口径）。
+    #[gpui_kit::test]
+    fn nudging_auto_advance_clamps_and_stays_on_the_book(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            ConfigHolder::set_book(cx, Some(BookSettings::default()));
+        });
+        let page = a_reading_page(cx);
+        // `set_value` 要一扇窗口：把这一页挂上去，挪档在窗口里做。
+        let handle: AnyWindowHandle = cx
+            .open_window(size(px(400.0), px(600.0)), |window, cx| {
+                Root::new(page.clone(), window, cx)
+            })
+            .into();
+
+        cx.update_window(handle, |_, window, cx| {
+            page.update(cx, |page, cx| page.nudge_auto(-1000.0, window, cx));
+        })
+        .expect("窗口应能渲染");
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::appearance(cx).auto_advance_speed),
+            chrome::AUTO_ADVANCE_RANGE.0,
+            "慢到端就停在量程下界"
+        );
+        assert_eq!(
+            page.read_with(cx, |page, cx| page.auto_speed.read(cx).value().end()),
+            chrome::AUTO_ADVANCE_RANGE.0,
+            "滑条该跟着落到下界，而不是停在旧处"
+        );
+        cx.update_window(handle, |_, window, cx| {
+            page.update(cx, |page, cx| page.nudge_auto(1000.0, window, cx));
+        })
+        .expect("窗口应能渲染");
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::appearance(cx).auto_advance_speed),
+            chrome::AUTO_ADVANCE_RANGE.1,
+            "快到端就停在量程上界"
+        );
+        assert_eq!(
+            page.read_with(cx, |page, cx| page.auto_speed.read(cx).value().end()),
+            chrome::AUTO_ADVANCE_RANGE.1,
+            "滑条该跟着落到上界"
+        );
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::default_appearance(cx).auto_advance_speed),
+            Appearance::AUTO_ADVANCE_DEFAULT,
+            "这是这一本的差量，全局默认不该跟着变"
+        );
     }
 }

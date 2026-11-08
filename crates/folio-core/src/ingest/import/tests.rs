@@ -7,7 +7,7 @@ use super::pipeline::{Budget, MAX_IMPORT_BOOKS, import_batch, split_budget};
 use super::{
     BackfillReport, Candidate, ImportKind, ImportOutcome, ImportReport, Imported, PathsSource,
     Source, backfill_copies, import_from, schedule_reindex, stage_local, submit_import,
-    sweep_partials,
+    sweep_orphan_copies, sweep_partials,
 };
 use crate::infra::metrics::{Metric, take_local};
 use crate::infra::task::{StageCtx, TaskEvent, TaskManager};
@@ -812,6 +812,67 @@ fn sweep_clears_staging_and_legacy_partials_but_keeps_copies() {
         0,
         "读不到目录就当没得清"
     );
+}
+
+/// 崩溃在「rename 进书库根 → `add_book`」之间留下的那一份：哈希名副本、库里没有行。
+/// 只收它 —— 有人认领的、刚落地的、名字不像我们写的、以及同名目录都不动。
+#[test]
+fn sweep_orphan_copies_takes_only_unclaimed_old_hash_copies() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("books");
+    std::fs::create_dir_all(&lib).unwrap();
+    let store = Store::in_memory().unwrap();
+    let meta = || crate::content::format::DocMeta {
+        title: "有人认领".into(),
+        format: crate::content::format::Format::Epub,
+        size: 7,
+        ..crate::content::format::DocMeta::default()
+    };
+
+    // 有人认领的那一份：名字就是库里那一行记着的。
+    let claimed = lib.join("4oymiquy7qobjgx3.epub");
+    std::fs::write(&claimed, b"claimed").unwrap();
+    store.add_book(&claimed, &meta()).unwrap();
+
+    // 孤儿：形状对、没人认领、放够了一小时。
+    let orphan = lib.join("7777777777777777.epub");
+    std::fs::write(&orphan, b"orphan").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&orphan)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60))
+        .unwrap();
+
+    // 刚落地的那一份：宽限期里先留着 —— 可能是另一个实例正停在改名与落行之间。
+    let fresh = lib.join("abcdefghijklmnop.epub");
+    std::fs::write(&fresh, b"fresh").unwrap();
+
+    // 读者自己的文件：名字不在我们的形状里，一根汗毛都不动。
+    let foreign = lib.join("我自己的书.epub");
+    std::fs::write(&foreign, b"mine").unwrap();
+
+    // 大写扩展名也不在我们这一趟的范围内：写侧只产出小写。
+    let upper = lib.join("cdefghijklmnopqr.EPUB");
+    std::fs::write(&upper, b"upper").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&upper)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60))
+        .unwrap();
+
+    // 名字像副本、其实是目录：不在这一趟的管辖里。
+    let dir_like = lib.join("bcdefghijklmnopq.epub");
+    std::fs::create_dir_all(&dir_like).unwrap();
+
+    assert_eq!(sweep_orphan_copies(&store, &lib), 1);
+    assert!(!orphan.exists(), "没人认领的那一份该收掉");
+    assert!(claimed.exists(), "有人认领的副本不许动");
+    assert!(fresh.exists(), "宽限期里的那一份先留着");
+    assert!(foreign.exists(), "读者自己的文件不许动");
+    assert!(upper.exists(), "大写扩展名不是我们写的");
+    assert!(dir_like.is_dir(), "目录不在这一趟的管辖里");
 }
 
 /// 老库那一批「旧名字副本 + 没有身份」的行：补齐一趟之后身份有了、副本改成哈希名、

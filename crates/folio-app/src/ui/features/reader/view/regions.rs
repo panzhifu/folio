@@ -1,4 +1,4 @@
-//! 阅读页上那几条**界面带**：顶栏、底栏、状态行、进度行、入口行、听书那颗圆钮。
+//! 阅读页上那几条**界面带**：顶栏、底栏、状态行、进度行、入口行、听书与自动那两颗浮钮。
 //!
 //! 它们都挂在 `ReadingPage` 这一屏上，读的是同一个会话的状态；拆出来是为了让
 //! `reading_page.rs` 只剩「什么时候挂哪一条」。每条自己不带状态 —— 顶栏底栏开没开在
@@ -8,18 +8,18 @@ use crate::ui::components::TopBar;
 use crate::ui::features::reader::model::chrome;
 
 use crate::ui::features::reader::view::bands;
-use crate::ui::services::l10n::tr;
+use crate::ui::services::l10n::{tf, tr};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::slider::Slider;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Selectable, Sizable, StyledExt as _, ThemeMode, ThemeStyled as _,
-    h_flex, v_flex,
+    ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt as _, ThemeMode,
+    ThemeStyled as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Corners, InteractiveElement, IntoElement, ParentElement, Styled,
-    TestSupportExt as _, div, px,
+    AnyElement, Context, Corners, Hsla, InteractiveElement, IntoElement, ParentElement,
+    SharedString, Styled, TestSupportExt as _, div, px,
 };
 
 use super::reading_page::ReadingPage;
@@ -120,15 +120,140 @@ impl ReadingPage {
             .child(self.status_row(cx))
             .child(self.progress_row(cx))
             .child(self.entry_row(cx));
-        // 听书那颗圆钮挂在卡片上、压着卡片上缘的右端（`speech_fab` 自己绝对定位）。
-        // 它不占入口排那一行的位置：听书是开关，不是入口 —— 一排里再挤一格图标，
-        // 手机上每格就被挤到按不准。
-        let card = match self.speech_fab(cx) {
-            Some(fab) => card.child(fab),
-            None => card,
-        };
+        // 听书与「自动」都挂在卡片上方：听书是开关、自动也是开关，两颗并成一排贴在
+        // 卡片上缘的右端（`listen_fabs` 自己绝对定位）。它们不占入口排那一行的位置
+        // —— 一排里再挤两格，手机上每格就被挤到按不准。
+        let card = card.child(self.listen_fabs(cx));
         card
             // 宿主门：阅读层整层 occlude 之后，正文自己的点击必须还能把它叫出来。
+            .test_support()
+            .into_any_element()
+    }
+
+    /// 自动阅读跑着时**顶替底栏**的那一条：速度的一格加一颗退出。
+    ///
+    /// 自动自己会翻页，这一层露着时读者要做的只有两件事 —— 快一点 / 慢一点，或者
+    /// 不自动了。所以这一条不摆目录、夜间那些入口：退出自动，原来那条底栏就回来。
+    /// 速度那一格与阅读设置里「自动前进」是同一副形状（标签在左、读数在右，下面
+    /// `−` 滑条 `+`），同一份量程与步长（[`chrome::AUTO_ADVANCE_RANGE`] /
+    /// [`chrome::AUTO_ADVANCE_STEPS`]），不另起一套。
+    ///
+    /// 卡片壳与底栏完全同款（贴底、铺满、上圆角、让开系统手势条）：换的只是内容，
+    /// 不是又浮起来一张小卡。
+    pub(in crate::ui::features::reader) fn auto_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let radius = cx.theme().radius_lg;
+        let speed = crate::ui::services::config::ConfigHolder::appearance(cx).auto_advance_speed;
+        let (min, max) = chrome::AUTO_ADVANCE_RANGE;
+        let title = tr(cx, "reader.auto_advance");
+        let value: SharedString = tf(
+            cx,
+            "reader.auto_advance.value",
+            &[("n", &format!("{speed:.0}"))],
+        )
+        .into();
+        let down = tf(cx, "reader.nudge_down", &[("field", &title)]);
+        let up = tf(cx, "reader.nudge_up", &[("field", &title)]);
+        let exit_label = tr(cx, "reader.auto_exit");
+        let page_down = cx.entity().clone();
+        let page_up = cx.entity().clone();
+        let page_exit = cx.entity().clone();
+        v_flex()
+            .id("reader-auto-bar")
+            // 与底栏同理：正文的 hitbox 是整屏的，不拦住空隙里的一击，它会顺着打到
+            // 正文上把刚叫出来的这一条当场收掉。滚动留着。
+            .block_mouse_except_scroll()
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .right_0()
+            .px_4()
+            .pt_3()
+            .pb(px(8.0 + self.bottom_inset))
+            .gap_3()
+            .popover_style(cx)
+            .corner_radii(Corners {
+                top_left: radius,
+                top_right: radius,
+                bottom_left: px(0.),
+                bottom_right: px(0.),
+            })
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .child(div().text_base().child(title.clone()))
+                            .child(
+                                div()
+                                    .text_base()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(value),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("auto-bar-slower")
+                                    .ghost()
+                                    .large()
+                                    // 到端就禁用：这一格到底了没有，读者要从控件本身读出来。
+                                    .disabled(speed <= min + 0.001)
+                                    .icon(IconName::Minus)
+                                    .accessibility_label(down)
+                                    .on_click(move |_, window, cx| {
+                                        page_down.update(cx, |this, cx| {
+                                            this.nudge_auto(
+                                                -chrome::AUTO_ADVANCE_STEPS.nudge,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                    }),
+                            )
+                            .child(
+                                Slider::new(&self.auto_speed)
+                                    .flex_1()
+                                    .min_w_0()
+                                    .accessibility_label(title),
+                            )
+                            .child(
+                                Button::new("auto-bar-faster")
+                                    .ghost()
+                                    .large()
+                                    .disabled(speed >= max - 0.001)
+                                    .icon(IconName::Plus)
+                                    .accessibility_label(up)
+                                    .on_click(move |_, window, cx| {
+                                        page_up.update(cx, |this, cx| {
+                                            this.nudge_auto(
+                                                chrome::AUTO_ADVANCE_STEPS.nudge,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                    }),
+                            ),
+                    ),
+            )
+            .child(
+                // 退出是这一条唯一的主操作，居中落在拇指自然够得到的位置，别贴右缘。
+                h_flex().w_full().justify_center().child(
+                    Button::new("auto-exit")
+                        .outline()
+                        .label(exit_label.to_string())
+                        .accessibility_label(exit_label)
+                        .on_click(move |_, _, cx| {
+                            page_exit.update(cx, |this, cx| this.toggle_auto(cx))
+                        }),
+                ),
+            )
             .test_support()
             .into_any_element()
     }
@@ -223,7 +348,7 @@ impl ReadingPage {
     /// 行距、段距、版心、字体家族都搬了进去，所以这一排不再有「更多设置」那一格。
     /// 「双页」那一格这一轮也搬了进去，落在设置里「分页」那一行 —— 那一排每多一格，手机上
     /// 每一格就更窄一分，而换摆法不是翻几页就要碰一次的动作。
-    /// 听书在卡片上方那颗圆钮（[`Self::speech_fab`]）。
+    /// 听书与「自动」都在卡片上方的浮钮里（[`Self::listen_fabs`]）。
     pub(in crate::ui::features::reader) fn entry_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let toc_open = self.toc.read(cx).is_open(cx);
         let settings_open = self.settings.read(cx).is_open(cx);
@@ -236,6 +361,9 @@ impl ReadingPage {
         let page_settings = cx.entity().clone();
         let night_label = tr(cx, if dark { "reader.day" } else { "reader.night" });
         let zoom_label = tr(cx, "reader.zoom_page");
+        // 图标与文字同一档墨色：ghost 按钮自己的前景色，`Icon` 不继承文字样式，
+        // 所以显式递进去（两处同色才不会一个深一个浅）。
+        let ink = cx.theme().secondary_foreground;
         h_flex()
             .w_full()
             .items_center()
@@ -244,10 +372,11 @@ impl ReadingPage {
                     .ghost()
                     .small()
                     .flex_1()
+                    .h(px(52.))
                     .justify_center()
                     .selected(toc_open)
-                    .icon(IconName::ListTree)
-                    .label(tr(cx, "reader.toc").to_string())
+                    .accessibility_label(tr(cx, "reader.toc"))
+                    .child(entry_cell(IconName::ListTree, tr(cx, "reader.toc"), ink))
                     .on_click(move |_, _, cx| page_toc.update(cx, |this, cx| this.toggle_toc(cx))),
             )
             // 「放大整页」只在定版式那一族摆（判据在上面那一格 `fixed`）。
@@ -257,7 +386,8 @@ impl ReadingPage {
             // 长按就是挑字），于是那一击不能再拿去看图。入口得有个不跟选中抢的地方，
             // 而底栏这一排正是读者已经在找功能的位置。
             //
-            // 只给图标：这一排几格各带两个字的话，手机上每格会被挤到点不准。
+            // 这一格也走「图标在上、文字在下」：同排四格等高，各占等分宽；「放大整页」
+            // 四个字在 320 宽的屏上也放得下（11px 一行约 44px）。
             .when(fixed, |row| {
                 let zoom_reader = self.reader.clone();
                 let zoom_viewer = self.image_viewer.clone();
@@ -266,10 +396,11 @@ impl ReadingPage {
                         .ghost()
                         .small()
                         .flex_1()
+                        .h(px(52.))
                         .justify_center()
-                        .icon(IconName::Maximize)
                         .tooltip(zoom_label.clone().to_string())
-                        .accessibility_label(zoom_label)
+                        .accessibility_label(zoom_label.clone())
+                        .child(entry_cell(IconName::Maximize, zoom_label, ink))
                         .on_click(move |_, window, cx| {
                             // 键按**按下这一刻**问：从渲染到这一击之间读者可能已经翻过页，
                             // 把键烘进闭包会开成上一页的那一张。
@@ -293,50 +424,45 @@ impl ReadingPage {
                         }),
                 )
             })
-            // 听书不在这一排：它是一颗浮在卡片上方右端的圆钮（见 `speech_fab`）。
+            // 听书与「自动」都不在这一排：两颗浮在卡片上方右端（见 `listen_fabs`）。
             .child(
                 Button::new("entry-night")
                     .ghost()
                     .small()
                     .flex_1()
+                    .h(px(52.))
                     .justify_center()
-                    .icon(if dark {
-                        IconName::SunMedium
-                    } else {
-                        IconName::Moon
-                    })
-                    .label(night_label.to_string())
+                    .accessibility_label(night_label.clone())
+                    .child(entry_cell(
+                        if dark {
+                            IconName::SunMedium
+                        } else {
+                            IconName::Moon
+                        },
+                        night_label.clone(),
+                        ink,
+                    ))
                     .on_click(move |_, _, cx| {
                         page_night.update(cx, |this, cx| this.toggle_night(cx))
                     }),
             )
-            // 「自动」那一格：自动前进 on/off，开着时亮着 —— 它是会话里的一格状态，
-            // 与夜间同一类当场生效的开关。方向永远朝阅读前方（`scroll_page(1)` 那一路），
-            // RTL 的书自动往左走，图标不换。
-            .child({
-                let page_auto = cx.entity().clone();
-                let auto_on = self.reader.read(cx).auto_on();
-                Button::new("entry-auto")
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .justify_center()
-                    .selected(auto_on)
-                    .icon(IconName::FastForward)
-                    .label(tr(cx, "reader.auto").to_string())
-                    .accessibility_label(tr(cx, "reader.auto"))
-                    .on_click(move |_, _, cx| page_auto.update(cx, |this, cx| this.toggle_auto(cx)))
-            })
+            // 「自动」那一格提到卡片上方、听书圆钮的右侧（`listen_fabs`）：它和听书
+            // 一样是**开关**，不是入口，放在那一排里既挤又和「翻到哪」的读数隔得远。
             // 设置放最右：翻页、夜间这些当场生效的开关留在中间，设置单独占一端。
             .child(
                 Button::new("entry-settings")
                     .ghost()
                     .small()
                     .flex_1()
+                    .h(px(52.))
                     .justify_center()
                     .selected(settings_open)
-                    .icon(IconName::Settings)
-                    .label(tr(cx, "account.settings").to_string())
+                    .accessibility_label(tr(cx, "account.settings"))
+                    .child(entry_cell(
+                        IconName::Settings,
+                        tr(cx, "account.settings"),
+                        ink,
+                    ))
                     .on_click(move |_, _, cx| {
                         page_settings.update(cx, |this, cx| this.toggle_settings(cx))
                     }),
@@ -344,71 +470,163 @@ impl ReadingPage {
             .into_any_element()
     }
 
-    /// 听书那颗圆钮：浮在底栏卡片**上方的右端**。
+    /// 卡片上方那两颗浮钮：听书在左，「自动」在右，同一副安静的纸白面孔。
     ///
-    /// 原来它只是入口排里的一格图标。那一排当时已经摆到四格（目录 / 双页 / 夜间 / 设置），
-    /// 再挤一格在手机上每格就被挤到按不准；而听书与它们不同类 —— 它是有状态的开关
-    /// （念着 / 停了），圆钮比一排里的图标更像开关。位置贴着底栏右缘、压在卡片上方的
-    /// 正文上：拇指从右下角自然够得到，也不占卡片里已经排满的那一行。
+    /// 听书原来只是入口排里的一格图标。那一排摆到四格时手机每格就按不准了，而听书是
+    /// **开关**不是入口，于是提到卡片上缘。现在「自动」也走同一条判据 —— 它同样是开关
+    /// （开着就一直往前翻），放进那一排既挤、又和「翻到哪」的读数隔着一整块屏。
+    /// 两颗贴着右缘上方，读者从右下角一抬手就够得到。
     ///
-    /// 摆不摆的判据仍在会话侧（`speech_entry_visible`：引擎不可用 / 定版式书 /
-    /// 还没探到 → 不摆），与原来那一格同一个。会员门禁在这上面再叠一条：
-    /// 非会员圆钮整颗缺席 —— 「能力不存在时这一格不出现」。
-    pub(in crate::ui::features::reader) fn speech_fab(
+    /// 两颗是同一类表面，共用一副底色：不透明的纸白外壳、墨色图标、一圈墨色细描边与
+    /// xs 投影。底色本身不制造对比，靠描边 + 投影把圆片从纸上托起来；实心墨底只留给
+    /// 「正在念」这一个状态，不是听书常驻的重量。参考界面的三颗圆钮就是这么处理的，
+    /// 设计指南也要求同类表面同款处理、强调是有限预算。
+    ///
+    /// 底色必须画在 Button **外面**的一层不透明外壳上（[`Self::listen_fabs`] 里的
+    /// `fab_shell`）：`ButtonCustomVariant` 会把底色混 20% 透明，直接给 Button 上色时
+    /// 浅纸底压在正文上，黑字会透进圆片里。
+    ///
+    /// 听书的摆不摆仍在会话侧（`speech_entry_visible`：定版式书 / 还没开书 → 不摆），
+    /// 会员门禁再叠一条；**自动不受这两条管** —— 它对每一本可读的书都成立，所以听书
+    /// 缺席时它自己还在原位，只是往右补齐。
+    ///
+    /// 自动这颗只有「开自动」这一张面孔：自动跑着时整张卡片被 [`Self::auto_bar`] 顶替，
+    /// 浮钮连同卡片一起不在场，退出那条路上有明确的出口，不必在这里再留一个态。
+    pub(in crate::ui::features::reader) fn listen_fabs(
         &self,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.reader.read(cx).speech_entry_visible()
-            || !crate::ui::services::activation::premium(cx)
-        {
-            return None;
-        }
+    ) -> AnyElement {
+        let radius = cx.theme().radius_full();
         let playing = self.reader.read(cx).speech_playing();
-        let label = tr(cx, "reader.tts");
-        let page = cx.entity().clone();
-        // 圆钮的面走**主题主色**：这一颗是「听书」唯一常驻的入口，读者要一眼看见它。
-        // 从前那版用 `button_secondary`，在浅色与宣纸两套底上只比背景深一点，实机上
-        // 读起来就是「没有底色」；主色与它的前景是主题里唯一保证成对对比的一档。
-        let (surface, foreground, hover, active, radius) = {
-            let theme = cx.theme();
-            (
-                theme.primary,
-                theme.primary_foreground,
-                theme.primary_hover,
-                theme.primary_active,
-                theme.radius_full(),
-            )
-        };
-        let style = ButtonCustomVariant::new(cx)
-            .color(surface)
-            .foreground(foreground)
-            .hover(hover)
-            .active(active)
+        let page_auto = cx.entity().clone();
+        // 这两颗浮钮压在**纸**上（卡片上缘之外），底色跟正文的纸墨走，不跟壳主题：
+        // 壳的 `primary` / `button_secondary` 在浅色与宣纸两套底上只比纸深一点，
+        // 实机上就是两颗看不清的钮。纸墨是一对保证对比的颜色，换阅读主题时一起换，
+        // 换壳主题时也不会再飘一层与纸无关的颜色上来。
+        let paper = crate::ui::foundation::reading_theme::resolve(
+            &crate::ui::services::config::ConfigHolder::appearance(cx),
+            cx,
+        );
+        let (ink, sheet) = (paper.fg, paper.bg);
+        // 静止时的同一副面孔：外壳画不透明纸白底，Button 只留墨色图标、一圈墨色细
+        // 描边、xs 投影与 hover / active 两档。描边要留到真机上仍读得出是按钮（从前
+        // `button_secondary` 就栽在淡到没有），又不能重到把圆片框成一枚徽章。
+        let idle_style = ButtonCustomVariant::new(cx)
+            .foreground(ink)
+            .hover(ink.opacity(0.06))
+            .active(ink.opacity(0.12))
             .shadow(true);
-        Some(
-            div()
-                .absolute()
-                .right(px(16.))
-                // 钮高 52，再留 12 的缝：整颗都在卡片上缘之外，不压住状态行。
-                .top(px(-64.))
-                .child(
-                    Button::new("entry-speech")
-                        .custom(style)
-                        .rounded(radius)
-                        .w(px(52.))
-                        .h(px(52.))
-                        .p_0()
-                        .justify_center()
-                        .icon(if playing {
-                            IconName::Pause
-                        } else {
-                            IconName::BookHeadphones
-                        })
-                        .tooltip(label.clone().to_string())
-                        .accessibility_label(label)
-                        .on_click(move |_, _, cx| page.update(cx, |this, cx| this.open_listen(cx))),
-                )
-                .into_any_element(),
-        )
+        // 「正在念」那一档：外壳填实墨、图标翻成纸色。强调是状态，不是常驻重量。
+        // 听书屏一开这颗圆钮就被整窗层盖住，能看见实心底的只有快捷键起念、圆钮还
+        // 露在底栏上这一种。
+        let playing_style = ButtonCustomVariant::new(cx)
+            .foreground(sheet)
+            .hover(ink.opacity(0.88))
+            .active(ink.opacity(0.78))
+            .shadow(true);
+        let fab_border = ink.opacity(0.30);
+        // **底色由这层不透明外壳画，不能交给 Button**：gpui-kit 的
+        // `ButtonCustomVariant::bg_color()`（`button.rs:1028`）把底色
+        // `mix_oklab(transparent, 0.2)` —— custom 按钮的底永远只有八成不透明，纸白底
+        // 压在正文上黑字会整个透上来（真机 2026-11-08）。外壳与 Button 同尺寸同圆角，
+        // Button 的描边 / 投影 / 命中 / 图标 / hover-active 照旧叠在它上面。
+        let fab_shell = |base: Hsla, child: AnyElement| {
+            h_flex()
+                .w(px(52.))
+                .h(px(52.))
+                .rounded(radius)
+                .bg(base)
+                .items_center()
+                .justify_center()
+                .child(child)
+                .into_any_element()
+        };
+        let auto_label = tr(cx, "reader.auto");
+        let mut group = h_flex()
+            // **这一排要自己声明挡住身后的 hitbox**：它挂在卡片上缘之外，不在 card 的
+            // bounds 里，card 那道 `block_mouse_except_scroll` 护不到。少了这一句，一击会
+            // 同时落到正文的整屏 hitbox 上，右下角按 `chrome::zone` 判成「下一页」——
+            // 点听书 / 自动会把书翻过去（真机 2026-11-08）。拦截只作用于比它更早绘制的
+            // hitbox，两颗钮自己的点击、hover 与从这一片起手的滚动都不受影响。
+            .block_mouse_except_scroll()
+            // 钮高 52，再留 12 的缝：整颗都在卡片上缘之外，不压住状态行。
+            .absolute()
+            .right(px(16.))
+            .top(px(-64.))
+            .items_center()
+            .gap_2();
+        if self.reader.read(cx).speech_entry_visible()
+            && crate::ui::services::activation::premium(cx)
+        {
+            let label = tr(cx, "reader.tts");
+            let page = cx.entity().clone();
+            let style = if playing { playing_style } else { idle_style };
+            let button = Button::new("entry-speech")
+                .custom(style)
+                .rounded(radius)
+                .w(px(52.))
+                .h(px(52.))
+                .p_0()
+                .justify_center()
+                // 实心那一档不需要边框；静止档与「自动」同款细描边。
+                .when(!playing, |button| {
+                    button.border_1().border_color(fab_border)
+                })
+                .icon(if playing {
+                    IconName::Pause
+                } else {
+                    IconName::BookHeadphones
+                })
+                .tooltip(label.clone().to_string())
+                .accessibility_label(label)
+                .on_click(move |_, _, cx| page.update(cx, |this, cx| this.open_listen(cx)));
+            // 播放档整颗填实墨，静止档纸白 —— 两档都不透明，正文透不上来。
+            let base = if playing { ink } else { sheet };
+            group = group.child(fab_shell(base, button.into_any_element()));
+        }
+        let auto_button = Button::new("entry-auto")
+            .custom(idle_style)
+            .rounded(radius)
+            .w(px(52.))
+            .h(px(52.))
+            .p_0()
+            .justify_center()
+            .border_1()
+            .border_color(fab_border)
+            .icon(IconName::FastForward)
+            // 钮上只留图标（与听书那颗同宽）：胶囊里写「自动」在手机上会把这一排
+            // 挤宽，而这一格的动作由图标 + tooltip + 无障碍名说清。
+            .tooltip(auto_label.clone().to_string())
+            .accessibility_label(auto_label)
+            .on_click(move |_, _, cx| page_auto.update(cx, |this, cx| this.toggle_auto(cx)));
+        group
+            .child(fab_shell(sheet, auto_button.into_any_element()))
+            .into_any_element()
     }
+}
+
+/// 入口排的一格：图标在上、文字在下。
+///
+/// 为什么不直接给 `Button` 加 `.icon().label()`：那两样在组件的内容层里是**横排**的
+/// `h_flex`，而这一排要的是导航栏那种「图标压着两个字」的格子。`Button` 实现了
+/// `ParentElement`，把这一格作为**一个** child 塞进去 —— 命中区、hover / selected
+/// 与无障碍仍归组件，不必另画一颗按钮、也不必手工复刻那几档状态。
+///
+/// `ink` 显式给：`Icon` 的着色不走文字继承（它取 `window.text_style()` 的兜底色），
+/// 与旁边那行字各写各的就会一深一浅。
+fn entry_cell(icon: IconName, label: SharedString, ink: Hsla) -> AnyElement {
+    v_flex()
+        .items_center()
+        .justify_center()
+        .gap(px(3.))
+        .child(Icon::new(icon).with_size(px(20.)).text_color(ink))
+        .child(
+            div()
+                .text_size(px(11.))
+                .line_height(px(13.))
+                .whitespace_nowrap()
+                .text_color(ink)
+                .child(label),
+        )
+        .into_any_element()
 }

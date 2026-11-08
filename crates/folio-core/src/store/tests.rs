@@ -1544,6 +1544,37 @@ fn the_v12_migration_adds_identity_columns_without_backfilling_them() {
     assert!(again.rows_missing_hash().unwrap().is_empty());
 }
 
+/// 「尺寸 → 哈希」那张表只收**有身份**且**尺寸非零**的行：扫描面板拿它预筛候选。
+///
+/// 少收一行的后果是那一本永远标不上「已在书架」；多收一行（比如把没身份的行也当成
+/// 尺寸命中）只会让扫描多读一遍文件 —— 所以判据收在库里，别让界面各筛一遍。
+#[test]
+fn the_identity_index_skips_rows_without_a_hash_or_size() {
+    let store = Store::in_memory().unwrap();
+    let hashed = store.add_book(&path("甲.epub"), &meta("甲")).unwrap();
+    let unhashed = store.add_book(&path("乙.epub"), &meta("乙")).unwrap();
+    let zero = store
+        .add_book(
+            &path("丙.epub"),
+            &DocMeta {
+                size: 0,
+                ..meta("丙")
+            },
+        )
+        .unwrap();
+    let hash = "aa".repeat(32);
+    store
+        .set_content_hash(hashed, &hash, crate::ingest::identity::HASH_ALGO)
+        .unwrap();
+
+    assert_eq!(
+        store.identities_by_size().unwrap(),
+        vec![(1234, hash, hashed)]
+    );
+    assert_ne!(hashed, unhashed);
+    assert_ne!(hashed, zero);
+}
+
 /// v14 迁移：请回 `chapters.char_len`，**老行留 NULL**（懒补），新行才带真数。
 ///
 /// 这一条钉的是「`NULL` 与 `0` 必须分得开」这件事，因为它是这一列唯一容易做错的地方：

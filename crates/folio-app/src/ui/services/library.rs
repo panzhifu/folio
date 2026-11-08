@@ -31,9 +31,12 @@ pub fn suggested_dir() -> PathBuf {
     folio_core::infra::paths::books_dir()
 }
 
-/// 启动时清掉书库目录里上次崩溃留下的 `.part` 半成品（`plans/基础设施.md` §1.3 末条）。
+/// 启动时清掉书库目录里上次崩溃留下的半成品（`plans/基础设施.md` §1.3 末条）。
 ///
-/// 位置没确认过就没什么可清的。清掉几个只记日志 —— 这是自愈动作，不该刷屏。
+/// 两档：`.part`（暂存区里没写完的字节）与**没人认领的哈希名副本**（改名进书库根之后、
+/// 落行之前被杀留下的那一种）。后者需要库才问得出「哪些副本有人认领」，所以放在
+/// `app_store` 装上之后；位置没确认过就两档都不做。清掉几个只记日志 —— 这是自愈
+/// 动作，不该刷屏。
 pub fn sweep_partials(cx: &App) {
     let Some(dir) = target_dir(&ConfigHolder::library(cx)) else {
         return;
@@ -44,6 +47,17 @@ pub fn sweep_partials(cx: &App) {
             "library: 清掉 {removed} 个上次留下的 .part 半成品（{}）",
             dir.display()
         );
+    }
+    // 崩溃在「rename 进书库根 → add_book」之间留下的副本：库里没有行，谁也打不开它。
+    // 只认我们自己的命名，见 `folio_core::sweep_orphan_copies`。
+    if let Some(store) = crate::ui::services::app_store::handle(cx) {
+        let orphans = folio_core::sweep_orphan_copies(&store, &dir);
+        if orphans > 0 {
+            tracing::warn!(
+                "library: 清掉 {orphans} 份没人认领的副本（{}）",
+                dir.display()
+            );
+        }
     }
 }
 

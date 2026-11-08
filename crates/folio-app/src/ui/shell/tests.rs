@@ -2426,6 +2426,66 @@ mod booted {
         );
     }
 
+    /// 自动阅读跑着时，浮层里摆的是自动那条工具栏（速度 + 退出），普通底栏整个让位；
+    /// 按下「退出自动」，自动停表，底栏回来。整条走真实点击：开浮层 → 点「自动」浮钮
+    /// → 点退出，钉的是「替代」而不是「叠加」—— 从前那一版是底栏之上再浮一张小卡。
+    ///
+    /// 顺带钉住浮钮的命中边界：那一排浮在卡片上缘之外，自己声明挡住身后的正文
+    /// hitbox（见 `regions.rs::listen_fabs`）。这一击只落在浮钮上，浮层不收、正文不
+    /// 翻页；从前穿透到整屏正文时，点「自动」会连带把书翻到下一页。
+    #[gpui_kit::test]
+    fn auto_mode_replaces_the_bottom_bar_and_exit_brings_it_back(cx: &mut TestAppContext) {
+        let (handle, shell) = boot(cx, false);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        open_test_reading(&shell, cx);
+        let frames = |cx: &mut TestAppContext| {
+            for _ in 0..3 {
+                cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                    .expect("窗口应能渲染");
+                cx.run_until_parked();
+            }
+        };
+        let has = |cx: &mut TestAppContext, id: &'static str| {
+            cx.update_window(handle, |_, window, _| window.try_find(id).is_some())
+                .expect("窗口应能渲染")
+        };
+        frames(cx);
+        // 开浮层：点正文中心，普通底栏先露着，自动那条还不在。
+        cx.update_window(handle, |_, window, cx| window.click("folio-reader", cx))
+            .expect("窗口应能渲染");
+        frames(cx);
+        assert!(has(cx, "reader-bottom-bar"), "前置：普通底栏先露着");
+        assert!(
+            !has(cx, "reader-auto-bar"),
+            "前置：自动没跑，那条工具栏不该在"
+        );
+
+        // 点「自动」浮钮起自动。浮钮挡住身后的正文 hitbox，这一击不叫浮层、也不翻页：
+        // 浮层还在，auto_bar 当场顶替底栏露出来，不必再点一下正文把工具栏叫出来。
+        // （穿透还在时，那一击会先收掉浮层，只能再点正文把它叫回来。）
+        cx.update_window(handle, |_, window, cx| window.click("entry-auto", cx))
+            .expect("窗口应能渲染");
+        frames(cx);
+        assert!(
+            has(cx, "reader-auto-bar"),
+            "自动跑着时浮层该换成自动那条工具栏"
+        );
+        assert!(
+            !has(cx, "reader-bottom-bar"),
+            "自动那条在场时普通底栏该整个让位，而不是叠在下面"
+        );
+
+        // 退出：自动停表，底栏回来。
+        cx.update_window(handle, |_, window, cx| window.click("auto-exit", cx))
+            .expect("窗口应能渲染");
+        frames(cx);
+        assert!(has(cx, "reader-bottom-bar"), "退出自动之后普通底栏该回来");
+        assert!(
+            !has(cx, "reader-auto-bar"),
+            "自动停了，那条工具栏没有对象了"
+        );
+    }
+
     /// 整屏一张纸的另一半：**顶上状态栏那一条与底下手势条那一条也在正文的命中面里**。
     ///
     /// 「整屏一张纸」改的是纸面几何（`page_area` 从正文盒扩到整窗，见 `view::body` 的

@@ -79,7 +79,7 @@ pub use infra::time::{
 pub use ingest::import::{
     BackfillReport, Candidate, CloudItem, CloudSource, ImportKind, ImportOutcome, ImportReport,
     Imported, Origin, PathsSource, Registered, Source, UrlSource, backfill_copies, forward,
-    import_from, reindex, schedule_reindex, submit_import, sweep_partials,
+    import_from, reindex, schedule_reindex, submit_import, sweep_orphan_copies, sweep_partials,
 };
 pub use ingest::scan::{ScanFilter, ScanReport, ScanSource, find, format_of};
 pub use position::{LOCATOR_FORMAT_VERSION, Locator};

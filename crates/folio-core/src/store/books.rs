@@ -474,6 +474,35 @@ impl Store {
         Ok(())
     }
 
+    /// 有身份的那些书：`(字节数, 完整哈希, 行号)`。
+    ///
+    /// 整机扫描那一屏拿它核对「这个候选其实已经在架上」：副本按内容改成
+    /// `<哈希>.ext` 之后，`books.path` 里已经没有读者那个原始文件名，唯一认得出
+    /// 「同一本」的是**内容哈希**。调用方先按 `size` 预筛（同内容必同尺寸），只对
+    /// 尺寸撞上的那几本算一遍 sha256 —— 整机扫几千本时真正要读的通常是个位数。
+    ///
+    /// `size = 0` 的行不进表：那是「不知道字节数」的老行，它与任何候选都不该因为
+    /// 一个 0 被当成同一本。没有身份的行同样不进（判重本来就认不出它们）。
+    pub fn identities_by_size(&self) -> Result<Vec<(u64, String, i64)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT size, content_hash, id FROM books
+              WHERE content_hash IS NOT NULL AND content_hash <> '' AND size > 0",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as u64,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 把那一行的「副本在哪儿」改成新位置。身份那一列不动 —— 内容没变，变的是它躺在哪。
     ///
     /// 两个用处：补齐作业把旧名字副本改成哈希名之后回写；以及判重命中**但旧副本文件已经不
