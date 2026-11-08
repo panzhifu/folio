@@ -14,10 +14,14 @@ use super::absolutize_css_urls;
 use super::zip::Zip;
 use super::{
     Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes, asset_href, dir_of,
-    image_dims, media_type_of, resolve_href, stem_of,
+    image_dims, media_type_of, resolve_href, shrink_image, stem_of,
 };
 use crate::Result;
 use crate::content::dom::Dom;
+
+/// 封面缩略的长边上限。与 EPUB / CBZ / FB2 同一个数：封面落盘是缩略图，
+/// 原图留在容器里随正文那一路取。
+const COVER_MAX_EDGE: u32 = 512;
 
 pub struct HtmlzAdapter;
 
@@ -74,6 +78,7 @@ impl DocumentProvider for HtmlzAdapter {
             return Err(unsupported(path, "ZIP 里的 HTML 一份都读不出来"));
         }
 
+        let cover = cover_of(&mut zip);
         let meta = DocMeta {
             title,
             format: Format::Htmlz,
@@ -89,6 +94,7 @@ impl DocumentProvider for HtmlzAdapter {
                 toc: Vec::new(),
                 css,
                 images,
+                cover,
                 ..Default::default()
             }),
         ))
@@ -231,6 +237,64 @@ fn image_uses(raw: &str, entry: &str) -> Vec<crate::content::scan::ImageUse> {
         .collect()
 }
 
+/// OPF 声明的那张封面：先认 `<meta name="cover">` 指的那一条，没有就认 EPUB3 的
+/// `properties="cover-image"`。读出字节缩到 [`COVER_MAX_EDGE`] 以内，缩不动（SVG、
+/// 已经够小）就原样留 —— 与 EPUB 的 `parse_cover` 同一条口径。
+///
+/// HTMLZ 的容器形状是 Calibre 定的：`META-INF/container.xml` 指到 `OEBPS/content.opf`。
+/// container 解不出来或指空时退到「第一个 `.opf` 条目」，两处都落空（ZIP 里根本没有
+/// OPF）就是没有封面 —— **不猜图**：把正文第一张 `<img>` 当封面，书架很快会变成垃圾场。
+///
+/// 判定与解析都走 [`super::epub::parse_opf`]（HTMLZ 转出来的就是同一份 OPF），声明
+/// 指到容器里不存在的条目（真书里有：Calibre 转换会留幽灵 manifest 条目）按读不到
+/// 处理，同「没声明」。
+fn cover_of(zip: &mut Zip) -> Option<Vec<u8>> {
+    let opf_path = opf_path_of(zip)?;
+    let text = zip.read_text(&opf_path)?;
+    let opf = super::epub::parse_opf(&text);
+    let base = dir_of(&opf_path);
+    let item = opf
+        .cover_id
+        .as_deref()
+        .and_then(|id| opf.items.iter().find(|i| i.id == id))
+        .or_else(|| {
+            opf.items
+                .iter()
+                .find(|i| i.properties.iter().any(|p| p == "cover-image"))
+        })?;
+    let href = resolve_href(&base, &item.href);
+    let bytes = zip.read(&href)?;
+    Some(match shrink_image(&bytes, COVER_MAX_EDGE) {
+        Some((small, _mime)) => small,
+        None => bytes,
+    })
+}
+
+/// OPF 条目的容器路径：先按 container.xml 的 `rootfile full-path` 走，指空或缺席时
+/// 退到第一个 `.opf` 条目（按名字自然序，Calibre 的形状 `OEBPS/content.opf` 排最前
+/// 没有歧义；真有多个 .opf 的书取哪个都算猜测，取第一个并且不再兜第二层）。
+fn opf_path_of(zip: &mut Zip) -> Option<String> {
+    if let Some(container) = zip.read_text("META-INF/container.xml") {
+        let dom = Dom::parse(container.as_bytes());
+        for (id, _) in dom.elements() {
+            if dom
+                .tag_name(id)
+                .is_some_and(|t| t.eq_ignore_ascii_case("rootfile"))
+                && let Some(path) = dom
+                    .attr(id, "full-path")
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                && zip.names().iter().any(|name| name == path)
+            {
+                return Some(path.to_string());
+            }
+        }
+    }
+    zip.names()
+        .into_iter()
+        .find(|name| name.to_ascii_lowercase().ends_with(".opf"))
+}
+
 fn unsupported(path: &Path, why: &str) -> crate::Error {
     crate::Error::UnsupportedFormat(format!(
         "{}：{why}",
@@ -336,5 +400,149 @@ mod tests {
             flow.chapters[1].locator(),
             Some(crate::content::format::ChapterLocator::Entry(entry)) if entry == "chapter1.html"
         ));
+    }
+
+    /// 一份带 OPF 的 HTMLZ（Calibre 形状：container.xml → OEBPS/content.opf）。
+    /// `declared` 控封面怎么声明：`meta` / `property` / 不声明。
+    fn htmlz_with_opf(dir: &Path, declared: &str) -> std::path::PathBuf {
+        let path = dir.join("书.htmlz");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        let cover_item = match declared {
+            "meta" => r#"<item id="cover" href="Images/cover.jpg" media-type="image/jpeg"/>"#,
+            "property" => {
+                r#"<item id="c0" href="Images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>"#
+            }
+            _ => "",
+        };
+        let meta_line = match declared {
+            "meta" => r#"<meta name="cover" content="cover"/>"#,
+            _ => "",
+        };
+        for (name, body) in [
+            ("META-INF/container.xml", br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#.to_vec()),
+            (
+                "OEBPS/content.opf",
+                format!(
+                    r#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>样书</dc:title>{meta_line}</metadata><manifest>{cover_item}<item id="c1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#
+                )
+                .into_bytes(),
+            ),
+            (
+                "OEBPS/Text/ch1.xhtml",
+                r#"<html><head><title>第一章</title></head><body><p>正文</p></body></html>"#.as_bytes().to_vec(),
+            ),
+            ("OEBPS/Images/cover.jpg", png(1000, 2000)),
+        ] {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(&body).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    }
+
+    fn max_edge(bytes: &[u8]) -> u32 {
+        let decoded = image::load_from_memory(bytes).unwrap();
+        let (w, h) = (decoded.width(), decoded.height());
+        w.max(h)
+    }
+
+    /// `<meta name="cover">` 指的那一张进 `FlowDoc.cover`，且已经缩到长边上限以内 ——
+    /// 封面落盘是缩略图，1000×2000 的原图不该原样进库。
+    #[test]
+    fn a_meta_declared_cover_is_read_and_shrunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = htmlz_with_opf(dir.path(), "meta");
+        let (_, content) = HtmlzAdapter.index(&path).unwrap();
+        let Content::Reflow(flow) = content else {
+            panic!("该读成可重排");
+        };
+        let cover = flow.cover.expect("OPF 声明了封面");
+        assert!(
+            flow.images
+                .iter()
+                .all(|image| image.href != "OEBPS/Images/cover.jpg"),
+            "封面没进正文 <img> 清单，就该只走封面那一路"
+        );
+        assert!(
+            max_edge(&cover) <= 512,
+            "封面该缩到 512 以内，实测 {}",
+            max_edge(&cover)
+        );
+    }
+
+    /// EPUB3 的 `properties="cover-image"` 是同一件事的另一种写法，同样认。
+    #[test]
+    fn a_property_declared_cover_is_read_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = htmlz_with_opf(dir.path(), "property");
+        let (_, content) = HtmlzAdapter.index(&path).unwrap();
+        let Content::Reflow(flow) = content else {
+            panic!("该读成可重排");
+        };
+        assert!(flow.cover.is_some(), "properties 声明的封面也该进库");
+    }
+
+    /// 没声明就是没有：`cover` 是 `None`，导入照常成功 —— 不把正文首图当封面猜。
+    #[test]
+    fn an_undeclared_cover_leaves_the_field_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = htmlz_with_opf(dir.path(), "none");
+        let (_, content) = HtmlzAdapter.index(&path).unwrap();
+        let Content::Reflow(flow) = content else {
+            panic!("该读成可重排");
+        };
+        assert!(flow.cover.is_none(), "没声明时不该猜一张图当封面");
+    }
+
+    /// 连 OPF 都没有的 HTMLZ（只有散装 HTML）照旧能导 —— 封面那一路只是空手而归，
+    /// 不该把整本拖死。
+    #[test]
+    fn a_zip_without_an_opf_still_imports_without_a_cover() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = htmlz(dir.path());
+        let (_, content) = HtmlzAdapter.index(&path).unwrap();
+        let Content::Reflow(flow) = content else {
+            panic!("该读成可重排");
+        };
+        assert!(flow.cover.is_none());
+        assert_eq!(flow.chapters.len(), 2);
+    }
+
+    /// 真书对拍：Calibre 转出的《藩屏》—— `<meta name="cover" content="f0">` 与
+    /// `properties="cover-image"` 双声明都在，封面 1230×1756 的 progressive JPEG；
+    /// manifest 里还挂着一条容器里不存在的幽灵条目（`Images/f2.jpg`）。三件事一起钉：
+    /// 封面读得到、缩到上限以内且解得动；幽灵条目不拖垮导入。
+    ///
+    /// 样本不入库（63 MB），开发机上手动跑：
+    ///
+    /// ```sh
+    /// cargo test -p folio-core --lib -- --ignored the_real_calibre_htmlz_cover
+    /// ```
+    #[test]
+    #[ignore = "需要 tests/fixtures/local/formats/htmlz 下的本机真样本，来源见 tests/fixtures/README.md"]
+    fn the_real_calibre_htmlz_cover_is_read_and_shrunk() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/local/formats/htmlz/calibre-shape.htmlz");
+        assert!(
+            path.is_file(),
+            "真样本不存在：{}（手机书库拉取，见 tests/fixtures/README.md）",
+            path.display()
+        );
+        let (meta, content) = HtmlzAdapter.index(&path).unwrap();
+        assert_eq!(meta.format, Format::Htmlz);
+        assert_eq!(meta.title, "藩屏：明代藩王的艺术与权力");
+        let Content::Reflow(flow) = content else {
+            panic!("该读成可重排");
+        };
+        let cover = flow.cover.expect("双声明都在，封面该读出来");
+        let decoded = image::load_from_memory(&cover).expect("缩完的封面必须解得动");
+        let edge = decoded.width().max(decoded.height());
+        assert!(edge <= 512, "封面该缩到 512 以内，实测 {edge}");
+        assert!(
+            !flow.images.is_empty(),
+            "正文图片清单与封面是两路，正文那路照旧要全"
+        );
     }
 }

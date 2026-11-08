@@ -14,6 +14,8 @@
 //! - [`content`] —— 正文与页表：整本落库/读回、正文压缩。
 //! - [`passphrases`] —— 读者自己那份口令（本机、按 content_hash，**刻意不进同步**）。
 //! - [`annotations`] / [`bookmarks`] / [`collections`] / [`reading`] / [`translations`] —— 批注 / 书签 / 集合 / 阅读统计 / 翻译缓存。
+//! - [`notes`] —— 跨书聚合：按书折成清单（分组、排序、封面字节），笔记屏直接摆的那份数据。
+//! - [`stats`] —— 阅读统计口径（分桶、补零、连签），统计屏直接摆的那份数据。
 //!
 //! 拆文件不拆实体：`Store` 还是一个类型、一把锁。**跨文件访问 `conn` 是允许的**
 //! （子模块看得见父模块的私有字段），但那条锁纪律在拆开之后更要紧 ——
@@ -33,9 +35,11 @@ mod books;
 mod collections;
 mod content;
 mod import_log;
+pub mod notes;
 mod passphrases;
 mod reading;
 mod schema;
+pub mod stats;
 mod sync;
 mod translations;
 mod types;

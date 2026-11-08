@@ -378,6 +378,20 @@ pub(crate) fn zip_shape(path: &Path) -> ArchiveShape {
     }
     let names = zip.names();
     let has = |want: &str| names.iter().any(|name| name.eq_ignore_ascii_case(want));
+    // EPUB 还有一条**比 mimetype 更结实**的骨架：`META-INF/container.xml` 指到一份
+    // OPF。多看、部分 Calibre 输出与手工打包的书不写 mimetype（或没把它放在第一条），
+    // 只按 mimetype 认会一路落到下面的 HTMLZ 分支（ZIP 里有 HTML + 图），于是同一本
+    // EPUB 被当 HTMLZ 读：章表按文件名排、OPF 的 spine 与 NCX 全丢，症状是前几章
+    // 只有标题（真书《藩屏》2026-11-09 撞过）。container.xml + 任意 `.opf` 是规范
+    // 骨架，优先级高于「根下有 index.html」那种形状。只认条目存在，不解析 XML：
+    // 这一步只决定**谁来读**，解析失败会在 EPUB 适配器那边报出来。
+    if has("META-INF/container.xml")
+        && names
+            .iter()
+            .any(|name| name.to_ascii_lowercase().ends_with(".opf"))
+    {
+        return ArchiveShape::Book(Format::Epub);
+    }
     // ODT 的正解与 EPUB 同一条：第一个条目 `mimetype` 说自己是 OpenDocument。
     // `.ott` 是模板，mimetype 只多一个 `-template` 后缀，读法一模一样。
     // 兜底认 `content.xml` + `META-INF/manifest.xml` —— 有些转换器不守「mimetype 第一条」。
@@ -826,6 +840,35 @@ mod tests {
             identify("c.epub", &fake),
             Verdict::NotABook,
             "穿着容器扩展名的裸文件不当书收：容器没了就是坏了，替它猜一个格式只会多一本坏书"
+        );
+    }
+
+    /// 没有 `mimetype`、但有 `META-INF/container.xml` + OPF 的 ZIP 仍是 EPUB。
+    ///
+    /// 这是《藩屏》那一本：多看导出、ZIP 里有 HTML 与图片但没有 mimetype 条目，
+    /// 从前一路落到 HTMLZ 分支，按文件名把 28 个 xhtml 排成章 —— spine 与 NCX 全丢，
+    /// 前七章只剩标题。判据必须认规范骨架，而不是只认 `mimetype` 那一条。
+    #[test]
+    fn epub_is_recognised_by_container_and_opf_without_mimetype() {
+        let tmp = dir("epub-skeleton");
+        let path = zip_at(
+            tmp.path(),
+            "book.htmlz",
+            &[
+                ("META-INF/container.xml", b"<container/>", true),
+                ("OEBPS/content.opf", b"<package/>", true),
+                (
+                    "OEBPS/Text/ch1.xhtml",
+                    b"<html><body>hi</body></html>",
+                    true,
+                ),
+                ("OEBPS/Images/a.jpg", b"\xff\xd8\xff\xd9", true),
+            ],
+        );
+        assert_eq!(zip_shape(&path), ArchiveShape::Book(Format::Epub));
+        assert_eq!(
+            identify("book.htmlz", &path),
+            Verdict::Readable(Format::Epub)
         );
     }
 

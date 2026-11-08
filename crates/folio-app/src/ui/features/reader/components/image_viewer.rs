@@ -901,6 +901,12 @@ pub fn overlay(
                     .top(px(y))
                     .w(px(width))
                     .h(px(height))
+                    // 这一格自己铺黑：`Contain` 在上下（或左右）留出的那条 letterbox
+                    // 用的是**这一格**的底，不是外层那一片黑。不给它填，留白就露出
+                    // 外层黑与格边之间那半像素的缝（真机上读成「上下各透一条细白光」）。
+                    // 填成黑之后那条留白本身也是黑，缝再多半个像素也看不出来 —— 与整层
+                    // 底色同一个颜色（`overlay_shell` 那一片也是纯黑）。
+                    .bg(hsla(0.0, 0.0, 0.0, 1.0))
                     .child(img(image).size_full().object_fit(ObjectFit::Contain))
                     .into_any_element()
             }))
@@ -1041,6 +1047,34 @@ mod tests {
     fn unknown_sizes_fill_or_give_nothing() {
         assert_eq!(fit_size((800.0, 600.0), (0.0, 0.0)), (800.0, 600.0));
         assert_eq!(fit_size((0.0, 0.0), (1080.0, 2400.0)), (0.0, 0.0));
+    }
+
+    /// 放大的图那一格永远**落在视口里**：`Contain` 的 letterbox 因此只会出现在格的内部。
+    ///
+    /// 这一条是「全屏图片上下透一条细白光」的几何那一半：格的底现在填黑（见 `overlay`），
+    /// 但前提是格本身没被推出视口 —— 推出去了，那一条露的就是框外的东西。
+    #[test]
+    fn the_picture_box_never_exits_the_viewport() {
+        let area = (384.0, 853.0);
+        for natural in [(1080.0, 2400.0), (2400.0, 1080.0), (0.0, 0.0)] {
+            let fit = fit_size(area, natural);
+            let scale = 1.0;
+            let (pan_x, pan_y) = super::clamp_pan_to((0.0, 0.0), fit, scale, area);
+            let width = fit.0 * scale;
+            let height = fit.1 * scale;
+            let x = (area.0 - width) / 2.0 + pan_x;
+            let y = (area.1 - height) / 2.0 + pan_y;
+            assert!(
+                x >= -0.01 && y >= -0.01,
+                "{natural:?}: 左上角出了视口：{x} / {y}"
+            );
+            assert!(
+                x + width <= area.0 + 0.01 && y + height <= area.1 + 0.01,
+                "{natural:?}: 右下角出了视口：{} / {}",
+                x + width,
+                y + height
+            );
+        }
     }
 
     /// 放大上限就是「一个源像素对一个 CSS 像素」那一刻，而且不许低于铺满那一档。

@@ -307,6 +307,15 @@ fn setting_item(row: &spec::Row) -> SettingItem {
                 SettingField::input(move |cx| get(cx), move |val, cx| set(val, cx)),
             )
         }
+        RowKind::TextAction { get, set, .. } => {
+            // 桌面端没有把动作钮塞进输入框那一行；会员页在桌面走的是原来的
+            // 「输入框一行 + 动作一行」形状。这里只把输入框交出去。
+            let (get, set) = (get.clone(), set.clone());
+            SettingItem::new(
+                row.title.clone(),
+                SettingField::input(move |cx| get(cx), move |val, cx| set(val, cx)),
+            )
+        }
         RowKind::Info { value } => {
             let value = value.clone();
             SettingItem::new(
@@ -457,13 +466,14 @@ mod tests {
                 titles(cx)
             );
 
-            // 记一笔到账之后它自己出现，而且第一行是设备标识、最后一格摆解除的钮。
+            // 记一笔到账之后它自己出现：就一行「设备名 + 解除」的自定义行，
+            // 名字不再是 device_id 那串标识，右侧是一颗解除钮。
             ConfigHolder::edit_membership(cx, |membership| {
                 membership.record("2".repeat(29), 30, 20_000)
             });
             assert!(
                 titles(cx).contains(&devices),
-                "激活过就该有「这台设备」那一组，组标题：{:?}",
+                "激活过就该有「设备」那一组，组标题：{:?}",
                 titles(cx)
             );
             let pages = spec_pages(cx, &notes);
@@ -473,20 +483,13 @@ mod tests {
                 .iter()
                 .find(|group| group.title == devices)
                 .expect("上面刚断言过它在");
+            assert_eq!(group.rows.len(), 1, "设备那一组只有一行：名字 + 解除");
             assert!(
-                group
-                    .rows
-                    .iter()
-                    .any(|row| row.title == tr(cx, "membership.device_id")),
-                "那一组第一行该是设备标识"
-            );
-            // 解除那一格是自定义行（没有标题位）：摆的是「此刻那句状态 + 那颗钮」。
-            assert!(
-                group.rows.iter().any(|row| matches!(
-                    &row.kind,
-                    spec::RowKind::Custom { title, .. } if title.is_none()
-                )),
-                "那一组该有一格摆解除的钮"
+                matches!(
+                    &group.rows[0].kind,
+                    spec::RowKind::Custom { title: None, .. }
+                ),
+                "那一行是自定义行：左边设备名，右边解除钮"
             );
 
             // 解除干净之后它该跟着没：留着就是一颗按不动的钮。
@@ -604,54 +607,38 @@ mod tests {
     /// 递给读者一把能把自己从账号里摘出去的东西）。整趟往返的门在 `folio_core::net::lansync`
     /// 与 `net::transfer::lan` 那两条用例里，这里不重复。
     #[gpui_kit::test]
-    fn the_sync_page_carries_both_routes_with_the_local_one_last(cx: &mut TestAppContext) {
+    fn the_sync_page_puts_the_provider_capsules_first_and_has_no_lan_group(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
             ConfigHolder::install(Config::default(), cx);
-            // WebDAV 那一路是会员功能：这条测的是双路线形，先把永久位摆上绕开门禁。
+            // 同步是会员功能：先把永久位摆上绕开门禁。
             ConfigHolder::edit_membership(cx, |membership| membership.lifetime = true);
             let notes = card(cx);
             let index = SettingsPage::Sync.index();
 
             let page = &spec_pages(cx, &notes)[index];
             assert_eq!(page.title, tr(cx, "page.sync"));
-            assert_eq!(page.groups.len(), 3, "WebDAV / 状态 / 局域网");
+            assert_eq!(page.groups.len(), 2, "配置 / 状态；局域网那一组已删");
             assert_eq!(page.groups[0].title, tr(cx, "group.sync_server"));
             assert_eq!(
                 page.groups[0].rows.len(),
                 6,
-                "WebDAV 那一组不该被新增的一组挤掉任何一行：后端 / 开关 / 地址 / 账号 / 密码 / 目录"
+                "顶部胶囊 / 开关 / 地址 / 账号 / 密码 / 目录"
             );
-            // 百度那一档不摆地址三格：凭据与「网盘取书」共用，只剩后端 / 开关 / 提示 / 目录。
+            // 第一行就是那颗胶囊，不再是旧的 choice 行。
+            assert!(matches!(
+                &page.groups[0].rows[0].kind,
+                spec::RowKind::Custom { title: None, .. }
+            ));
+            // 百度那一档不摆地址三格：凭据与「网盘取书」共用，只剩胶囊 / 开关 / 提示 / 目录。
             ConfigHolder::edit_sync(cx, |sync| sync.provider = folio_core::SyncProvider::Baidu);
             let page = &spec_pages(cx, &notes)[index];
-            assert_eq!(
-                page.groups[0].rows.len(),
-                4,
-                "百度那一档：后端 / 开关 / 提示 / 目录"
-            );
+            assert_eq!(page.groups[0].rows.len(), 4, "胶囊 / 开关 / 提示 / 目录");
             ConfigHolder::edit_sync(cx, |sync| sync.provider = folio_core::SyncProvider::WebDav);
-            // 状态那一组紧跟 WebDAV 的字段：读者熟悉的「测试连接 / 立即同步」不该往下挪。
+            // 状态那一组紧跟配置：读者熟悉的「测试连接 / 立即同步」不该往下挪。
             assert_eq!(page.groups[1].title, tr(cx, "group.sync_state"));
-            assert_eq!(page.groups[2].title, tr(cx, "group.sync_lan"));
-            assert_eq!(
-                page.groups[2].rows.len(),
-                5,
-                "开关 / 校验码 / 密钥 / 对端地址 / 状态"
-            );
-
-            ConfigHolder::edit_account(cx, |account| {
-                account.enabled = true;
-                account.key = "0123456789abcdef0123456789abcdef".into();
-                account.peer = "192.168.1.5:8410".into();
-            });
-            let page = &spec_pages(cx, &notes)[index];
-            assert_eq!(
-                page.groups[2].rows.len(),
-                5,
-                "填上密钥不该让这一组多一行或少一行"
-            );
-            assert_eq!(page.groups.len(), 3, "两边都在屏上，不是一家独大");
         });
     }
 

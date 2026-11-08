@@ -345,11 +345,18 @@ impl Format {
 /// 一页 816 ms 对 106 ms、位图 11.3 MB 对 4.1 MB。代价按 v8 那一条口径付：整库重扫一次，
 /// 开书时由 `stale_reason` 认成 `OldIndex` 投递。
 ///
+/// v14：**ZIP 的归属按容器骨架重判**。两条一起：`sniff::zip_shape` 认
+/// `META-INF/container.xml` + 任意 `.opf` 为 EPUB（不再只看 `mimetype` 是否第一条），
+/// 且 `provider_for` 对真实文件先嗅容器、再退扩展名。老库里那些被误判成 HTMLZ 的
+/// EPUB（真书《藩屏》：多看导出、无 mimetype 条目）会从「按文件名排 28 个 xhtml」
+/// 变成「按 OPF spine 读」，章数、章序、章内文本与 locator 全变 —— 不 bump 的话
+/// 进度与批注会落在错的章。同 v8 口径：整库重扫，开书时逐本付。
+///
 /// **这一格从此只管引擎，不管数据**：改 `assets/novel-rules.*.json` 里的任何一条模式或
 /// 阈值不必 bump —— [`rules_hash`] 那一格会说「规则表换了」，老库在开书时逐本重扫，
 /// 不必为一套正则发一版。要 bump 的仍然是动那台引擎：四条否决门的编排、号怎么读、
 /// 切点怎么落（`novel::detect`），因为那是「同一份表算出什么」变了。
-pub const INDEX_VERSION: i64 = 13;
+pub const INDEX_VERSION: i64 = 14;
 
 /// 这一格式的索引算自哪一份小说规则表 —— 交出**此刻生效**那一份的内容哈希。
 ///

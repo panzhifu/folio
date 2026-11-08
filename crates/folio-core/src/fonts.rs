@@ -409,8 +409,65 @@ fn transport_error(path: &Path, err: TransportError) -> Error {
     }
 }
 
+/// 一份字体文件的字节是哪一种（按头四个字节的魔数认）。判据与
+/// [`crate::content::format::woff(2)::is_*`] 同源：那两份只认自己的魔数，
+/// 这里把五类收齐 —— 注册入口只该有一个。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontFileKind {
+    /// WOFF 1.0，注册前解回 sfnt。
+    Woff,
+    /// WOFF 2.0，同上。
+    Woff2,
+    /// sfnt 一族（TTF / OTF / TTC），原样注册。
+    Sfnt,
+    /// 不是认得的字体。
+    Unknown,
+}
+
+/// 按头四个字节的魔数认。
+pub fn font_kind(bytes: &[u8]) -> FontFileKind {
+    if bytes.len() < 4 {
+        return FontFileKind::Unknown;
+    }
+    match &bytes[..4] {
+        b"wOFF" => FontFileKind::Woff,
+        b"wOF2" => FontFileKind::Woff2,
+        b"ttcf" | b"OTTO" | [0x00, 0x01, 0x00, 0x00] => FontFileKind::Sfnt,
+        _ => FontFileKind::Unknown,
+    }
+}
+
+/// 把一份字体文件的字节解成可注册的 sfnt：woff / woff2 解回，sfnt 原样交出，
+/// 认不出的回 `None`。自装字体的注册入口（开机重注册与装完当场注册）共用这一脚 ——
+/// 从前「按魔数分五类」与「解回 sfnt」写在 app 侧一处，现在与清单/下载同住这里。
+pub fn decode_font_file(raw: &[u8]) -> Option<Vec<u8>> {
+    match font_kind(raw) {
+        FontFileKind::Sfnt => Some(raw.to_vec()),
+        FontFileKind::Woff => crate::content::format::woff::decode(raw),
+        FontFileKind::Woff2 => crate::content::format::woff2::decode(raw),
+        FontFileKind::Unknown => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// 魔数认五类：woff / woff2 要解，ttf / otf / ttc 原样，其余不收。
+    /// 2026-11-09 从 `folio_app::…::platform::user_fonts` 搬来（`kind_of` 下沉为
+    /// [`font_kind`]，见上）。
+    #[test]
+    fn the_magic_sniffer_sorts_the_five_kinds() {
+        use super::{FontFileKind, font_kind};
+        use FontFileKind::{Sfnt, Unknown, Woff, Woff2};
+        assert!(matches!(font_kind(b"wOF2\x00"), Woff2));
+        assert!(matches!(font_kind(b"wOFF\x00"), Woff));
+        assert!(matches!(font_kind(b"ttcf\x00"), Sfnt));
+        assert!(matches!(font_kind(b"OTTO\x00"), Sfnt));
+        assert!(matches!(font_kind(&[0x00, 0x01, 0x00, 0x00]), Sfnt));
+        assert!(matches!(font_kind(b"PK\x03\x04"), Unknown), "zip 不收");
+        assert!(matches!(font_kind(b"nope"), Unknown));
+        assert!(matches!(font_kind(b"abc"), Unknown), "不足四字节不收");
+    }
+
     use super::{
         FontItem, Manifest, dir_id, download_item, install_copy, manifest, remove, unique_id,
     };

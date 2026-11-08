@@ -34,7 +34,7 @@ use crate::ui::features::reader::view::scene::{BlockDecor, Scene, VisibleImage};
 
 use super::a11y::spoken_lines;
 use super::art::{
-    current_page_art, page_art_contain, page_art_element_id, page_art_for_doc, page_backdrop_index,
+    current_page_art, page_art_element_id, page_art_for_doc, page_backdrop_index,
     scroll_art_pictures,
 };
 use super::capture::{CaptureView, flat_mesh_canvas};
@@ -1082,7 +1082,9 @@ impl ReaderSession {
                         .images()
                         .closest_portrait_variant(base, want_aspect)
                         .unwrap_or_else(|| base.clone());
-                    let contain = page_art_contain(doc, &href, want_aspect);
+                    // 与滚动档同一条：整页图一律 `contain`，不裁。见
+                    // `art::page_art_for_doc` 里「不裁」那一段的理由。
+                    let contain = true;
                     (href, page_x, page_w, 0.0, contain)
                 });
                 // 背面那一栏要横向挪进 leaf 那一格：背面纹理按 leaf 那块矩形烘、网格

@@ -1,17 +1,19 @@
-//! 「笔记」那一屏的折堆：`load_groups` 的分组、组内排序、出处填法与卡片上那个时长，
-//! 加上搜索那一条判据。只依赖公开 API，库用 `Store::in_memory()` —— 不碰真实书库。
+//! 「笔记」那一屏的折堆：纯聚合那半（分组、组内排序、出处填法、搜索判据）随实现
+//! 搬进了 `folio_core::store::notes` 的测试；这里留的是要真窗口的那半 —— 弹层的
+//! 升降、命中区的兄弟关系。库用 `Store::in_memory()` —— 不碰真实书库。
 
 use std::path::Path;
 
 use folio_core::Config;
 use folio_core::content::anchor::TextAnchor;
 use folio_core::content::format::{Chapter, DocMeta, FlowDoc, Format};
+use folio_core::store::notes::MarkEntry;
 use folio_core::store::{AnnotationStyle, Store};
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
 
-use super::{MarkEntry, NotesView, load_groups, matches_query, row_text, snippet};
+use super::{NotesEvent, NotesView, row_text};
 use crate::ui::services::app_store;
 use crate::ui::services::config::ConfigHolder;
 
@@ -52,71 +54,6 @@ fn book(store: &Store, title: &str, file: &str, chapters: &[&str]) -> i64 {
         )
         .unwrap();
     id
-}
-
-#[test]
-fn groups_by_book_with_bookmarks_first_and_places_resolved() {
-    let store = Store::in_memory().unwrap();
-    let a = book(&store, "书甲", "/books/a.epub", &["第一章", "第二章"]);
-    let b = book(&store, "书乙", "/books/b.epub", &["乙一"]);
-    store
-        .add_annotation(
-            a,
-            &anchor(1, 10),
-            "甲的笔记",
-            "rose",
-            AnnotationStyle::default(),
-        )
-        .unwrap();
-    store.add_bookmark(a, &anchor(1, 0)).unwrap();
-    store
-        .add_annotation(
-            b,
-            &anchor(0, 0),
-            "乙的笔记",
-            "amber",
-            AnnotationStyle::default(),
-        )
-        .unwrap();
-
-    let groups = load_groups(&store).unwrap();
-    assert_eq!(groups.len(), 2, "按书分组");
-    let ga = groups.iter().find(|g| g.book_id == a).unwrap();
-    assert_eq!(ga.marks.len(), 2);
-    assert!(ga.marks[0].is_bookmark, "书签在前");
-    assert!(!ga.marks[1].is_bookmark);
-    assert_eq!(ga.marks[0].place, "第二章", "出处来自库里的章标题表");
-    assert_eq!(ga.marks[1].place, "第二章");
-    let gb = groups.iter().find(|g| g.book_id == b).unwrap();
-    assert_eq!(gb.marks[0].place, "乙一");
-}
-
-/// 组间排序：最近有动静的书在最前 —— 读者回来先看到他刚才在读的那本。
-#[test]
-fn the_group_with_the_latest_activity_comes_first() {
-    let store = Store::in_memory().unwrap();
-    let a = book(&store, "书甲", "/books/a.epub", &["一"]);
-    let b = book(&store, "书乙", "/books/b.epub", &["一"]);
-    store
-        .add_annotation(
-            a,
-            &anchor(0, 0),
-            "早的",
-            "amber",
-            AnnotationStyle::default(),
-        )
-        .unwrap();
-    // `now()` 是秒级时钟，同一秒内靠 id 兜底；这里靠「两条一批、后写的 id 更大」
-    // 不够稳，直接按创建条数把先后写死：给乙的那条是第二批，created_at >= 甲的那条。
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    store
-        .add_annotation(b, &anchor(0, 0), "晚的", "rose", AnnotationStyle::default())
-        .unwrap();
-
-    let groups = load_groups(&store).unwrap();
-    assert_eq!(groups.len(), 2);
-    assert_eq!(groups[0].title, "书乙", "最近留过话的书排最前");
-    assert_eq!(groups[1].title, "书甲");
 }
 
 /// 一行里主行与第二行怎么分：笔记只能出现在其中一行。
@@ -167,89 +104,6 @@ fn the_note_is_never_both_the_headline_and_the_second_line() {
     let (headline, second) = row_text(&entry(true, "", ""), Some(&place), bookmark);
     assert_eq!(headline.to_string(), "书签", "书签没有原文时主行念「书签」");
     assert!(second.is_none());
-}
-
-#[test]
-fn an_excerpt_folds_whitespace_and_truncates() {
-    assert_eq!(snippet("甲 乙\n丙丁"), "甲 乙 丙丁");
-    let long = "字".repeat(60);
-    let got = snippet(&long);
-    assert_eq!(got.chars().count(), 49, "48 字加一个省略号");
-    assert!(got.ends_with('…'));
-}
-
-/// 卡片上那句「读了多久」的数从哪来：`reading_sessions` 里**这一本**的合计，按本落到
-/// 它自己那一组上。两条都要钉 —— 只断言甲那个数，「每组都填全库合计」这种错查不出来
-/// （甲的 5640 恰好也是全库的合计）。
-#[test]
-fn each_card_carries_its_own_books_total_seconds() {
-    let store = Store::in_memory().unwrap();
-    let a = book(&store, "书甲", "/books/a.epub", &["一"]);
-    let b = book(&store, "书乙", "/books/b.epub", &["一"]);
-    store
-        .add_annotation(
-            a,
-            &anchor(0, 0),
-            "甲的话",
-            "rose",
-            AnnotationStyle::default(),
-        )
-        .unwrap();
-    store
-        .add_annotation(
-            b,
-            &anchor(0, 0),
-            "乙的话",
-            "amber",
-            AnnotationStyle::default(),
-        )
-        .unwrap();
-    store.record_session(a, 1_000, 6_040, 1_200).unwrap();
-    store.record_session(a, 9_000, 9_600, 100).unwrap();
-
-    let groups = load_groups(&store).unwrap();
-    let ga = groups.iter().find(|g| g.book_id == a).unwrap();
-    let gb = groups.iter().find(|g| g.book_id == b).unwrap();
-    assert_eq!(ga.seconds, 5_640, "两次会话的合计");
-    assert_eq!(gb.seconds, 0, "另一本没读过就是 0，不许借别人的数");
-}
-
-/// 搜索词对上一本书的几条路：书名、某一条的引文、某一条自己写的笔记、某一条的出处
-/// 章名；三条都对不上就不摆这一本。
-///
-/// 词那一侧的小写由调用方折（`NotesView::query` 那格在订阅时就折了），这里折的是候选
-/// 那一边 —— 所以拉丁书名那一条要拿**已经小写**的词来问，大小写不敏感才是这样来的。
-#[test]
-fn a_search_word_finds_a_book_by_title_quote_note_or_chapter() {
-    let store = Store::in_memory().unwrap();
-    let a = book(&store, "书甲", "/books/a.epub", &["第三章"]);
-    let b = book(&store, "书乙", "/books/b.epub", &["第一章"]);
-    let c = book(&store, "Moby Dick", "/books/c.epub", &["一"]);
-    for id in [a, b, c] {
-        store
-            .add_annotation(
-                id,
-                &anchor(0, 0),
-                if id == a { "我的一句话" } else { "" },
-                "rose",
-                AnnotationStyle::default(),
-            )
-            .unwrap();
-    }
-
-    let groups = load_groups(&store).unwrap();
-    let find = |id: i64| groups.iter().find(|g| g.book_id == id).unwrap();
-    assert!(matches_query(find(a), "书甲"), "书名对上");
-    assert!(
-        matches_query(find(a), "重点句子"),
-        "引文对上（锚点里 exact 那句截出来的）"
-    );
-    assert!(matches_query(find(a), "我的"), "自己写的笔记对上");
-    assert!(matches_query(find(b), "第一章"), "出处那个章名也算对上");
-    assert!(matches_query(find(c), "moby"), "候选那一边折小写");
-    assert!(!matches_query(find(b), "书甲"), "书名不在另一本上");
-    assert!(!matches_query(find(b), "我的"), "那句笔记只在甲那一本里");
-    assert!(!matches_query(find(b), "不存在"), "三条都对不上就不摆");
 }
 
 /// 起一扇把「笔记」那一屏摆在根上的窗。底部弹层要真窗口才量得到视口高，而这一屏
@@ -401,8 +255,6 @@ fn tapping_a_card_raises_that_books_notes(cx: &mut TestAppContext) {
 fn deleting_a_row_does_not_open_the_book(cx: &mut TestAppContext) {
     use std::cell::Cell;
     use std::rc::Rc;
-
-    use super::NotesEvent;
 
     let store = Store::in_memory().unwrap();
     let a = book(&store, "书甲", "/books/a.epub", &["第一章"]);

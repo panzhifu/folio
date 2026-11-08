@@ -29,7 +29,7 @@ use gpui_kit::{App, AppContext as _, Bounds, Context, Entity, Pixels, Point, Sha
 
 use crate::ui::features::reader::components::note_editor::NoteEditor;
 use crate::ui::features::reader::model::book::Book;
-use crate::ui::features::reader::model::chrome::{PageMode, Reserve, reconcile};
+use crate::ui::features::reader::model::chrome::{AutoReadMode, PageMode, Reserve, reconcile};
 use crate::ui::features::reader::model::fixed_book::FixedBook;
 use crate::ui::features::reader::model::fixed_zoom::{
     FixedFrame, FixedZoom, anchor_pan, anchor_scroll,
@@ -249,6 +249,14 @@ pub struct ReaderSession {
     /// 自动前进那一拍**自己**发起翻页/滚动时为真：`turn` / `on_scroll` 的入口看着它，
     /// 分不清「读者动了」还是「自动前进了」—— 只有前者停表。
     pub(in crate::ui::features::reader) auto_driving: bool,
+    /// 这一趟自动阅读用哪种推进（翻页 / 连续滚动），见 [`AutoReadMode`]。跑着的时候由
+    /// 自动工具栏那两格切；不落库，跟着会话走。默认翻页，于是第一击直接开始时读法不跳。
+    pub(in crate::ui::features::reader) auto_mode: AutoReadMode,
+    /// 开自动之前的摆法，连「读者选过档没有」那面旗。自动那两档会临时改摆法，退出时
+    /// **原样还回去** —— 停表的路上不只 `set_auto(false)`，读者一划、滚到底都是直接清
+    /// `auto`，所以还原挂在渲染帧（`view::body` 的摆法解算），不挂在某个停表入口上。
+    /// `Some` 只在这一趟自动期间（以及退出后还没被渲染帧收走的那一瞬）挂着。
+    pub(in crate::ui::features::reader) auto_saved_layout: Option<(PageMode, bool)>,
     /// 页面捕获纹理的脏标记：偏好/主题/排版变了就置真，下一帧重烘。
     pub(in crate::ui::features::reader) capture_dirty: bool,
     /// 上一帧正文用的纸色。换纸（正文主题、浅深、水墨翻档）的那一帧把
@@ -744,6 +752,8 @@ impl ReaderSession {
             pending_turn: None,
             auto: None,
             auto_driving: false,
+            auto_mode: AutoReadMode::default(),
+            auto_saved_layout: None,
             capture_dirty: true,
             applied_reading_bg: None,
             reading_bg: None,
@@ -941,6 +951,8 @@ impl ReaderSession {
             pending_turn: None,
             auto: None,
             auto_driving: false,
+            auto_mode: AutoReadMode::default(),
+            auto_saved_layout: None,
             capture_dirty: true,
             applied_reading_bg: None,
             reading_bg: None,
@@ -1055,6 +1067,8 @@ impl ReaderSession {
     /// 读不到的一切情况都只写日志、不动当前那一屏：读者正在读的书不该因为点错一本
     /// 坏记录而变成空白页。
     pub fn open_book(&mut self, book_id: i64, cx: &mut Context<Self>) {
+        // 换书先清掉上一本的整页底色：下面任何一条早退路径都不该让旧书色串过来。
+        crate::ui::foundation::reading_theme::set_page_bg(None);
         // 正文只在源文件里，所以「文件还是那份文件吗」是能不能读的前提。
         // 不可信的那几种各自处置：文件不在 → 连数据一起删（读者看见的是这本书从架上消失，
         // 而不是点开一片空白）；文件换了 / 索引是旧引擎算的 / 那套分章规则换了 →
@@ -1119,6 +1133,17 @@ impl ReaderSession {
             );
             return;
         };
+        // 书自己声明的整页底色：`books.css` 那一列在开书时已经在手，同步扫一遍
+        // 根规则，让 `reading_theme::resolve` 的每一个消费点（根底 / 版心 / 捕获
+        // 清屏色 / 读数带）**首帧**就是书色。从前要等异步排版把 `<body
+        // background-color>` 折成装饰块才从半路盖上来，读者先看见自己选的纸色、
+        // 再跳成书里那一档 —— 那个两段跳变就是这一刀要拆掉的。
+        crate::ui::foundation::reading_theme::set_page_bg(
+            content
+                .as_flow()
+                .and_then(|flow| folio_core::content::format::css::page_background_color(&flow.css))
+                .map(crate::ui::foundation::reading_theme::to_hsla),
+        );
         // 库里只有章节位置，正文按位置回容器取；图片与内嵌字体同样不入库，也现取。
         let doc: std::sync::Arc<dyn OpenedDocument> =
             std::sync::Arc::from(folio_core::content::document::with_container(
@@ -1235,12 +1260,17 @@ impl ReaderSession {
     /// 但那种滑几乎察觉不到，没必要为它把高清那几趟压下去；而一次惯性滑动里每帧只有
     /// 一两 px、累计却跨过半屏，判据必须看窗口。
     ///
+    /// `auto_on` 说这一帧的位移是不是**自动推进**的：自动期间 `scrolling` 恒 false，
+    /// 否则 [`SCROLL_RATIO`] 会把匀速自动滚动读成「一直在快滑」，图集一直停在预览档、
+    /// 预取方向跟着翻 —— 自动阅读里图片发抖的那一半就来自这里。
+    ///
     /// 这个数只喂给「排哪一档」（见 `view::body` 的 `fixed` 那一臂），**不参与排版**，
     /// 也不进位置落库。
     pub(in crate::ui::features::reader) fn mark_scroll(
         &mut self,
         now: std::time::Instant,
         viewport: f32,
+        auto_on: bool,
     ) -> ScrollMotion {
         if let Some(auto) = self.auto.as_mut() {
             auto.viewport = viewport;
@@ -1255,11 +1285,14 @@ impl ReaderSession {
         };
         let elapsed = anchor_at.map(|at| now.duration_since(at).as_secs_f32());
         let moved = (self.scroll_y - anchor_y).abs();
-        let scrolling = match elapsed {
-            Some(elapsed) if elapsed <= SCROLL_WINDOW => moved >= viewport.max(1.0) * SCROLL_RATIO,
-            // 窗口过完了还没挪够：这一帧算静止，窗口从这里重新起算（`anchor_y` 换成此刻）。
-            _ => false,
-        };
+        let scrolling = !auto_on
+            && match elapsed {
+                Some(elapsed) if elapsed <= SCROLL_WINDOW => {
+                    moved >= viewport.max(1.0) * SCROLL_RATIO
+                }
+                // 窗口过完了还没挪够：这一帧算静止，窗口从这里重新起算（`anchor_y` 换成此刻）。
+                _ => false,
+            };
         if elapsed.is_none_or(|elapsed| elapsed > SCROLL_WINDOW) {
             self.scroll_probe = (self.scroll_y, Some(now));
         }
@@ -2358,14 +2391,14 @@ mod tests {
 
         // 起表那一帧：窗口还没开始走，判静止。
         reader.scroll_y = 0.0;
-        let first = reader.mark_scroll(at(0), VIEWPORT);
+        let first = reader.mark_scroll(at(0), VIEWPORT, false);
         assert!(!first.scrolling, "刚起表还没有窗口，不该判成在滑");
         assert_eq!(first.direction, None, "位置没动就不该有方向");
 
         // 窗口内只挪了 5 px（阈值 30）：还不算在滑，窗口也不重新起表。
         reader.scroll_y = 5.0;
         assert!(
-            !reader.mark_scroll(at(50), VIEWPORT).scrolling,
+            !reader.mark_scroll(at(50), VIEWPORT, false).scrolling,
             "5 px 不到阈值，不该算在滑"
         );
 
@@ -2373,18 +2406,18 @@ mod tests {
         // 这一格钉的是「锚点只在窗口走完之后才重起」：把它改成每帧重起，这里就红。
         reader.scroll_y = 25.0;
         assert!(
-            !reader.mark_scroll(at(70), VIEWPORT).scrolling,
+            !reader.mark_scroll(at(70), VIEWPORT, false).scrolling,
             "累计 25 px 还差 5 px 到阈值"
         );
         reader.scroll_y = 45.0;
         assert!(
-            reader.mark_scroll(at(80), VIEWPORT).scrolling,
+            reader.mark_scroll(at(80), VIEWPORT, false).scrolling,
             "窗口内累计 45 px 该判在滑 —— 按单帧看的话这两帧各 20 px 永远不算滑"
         );
 
         // 同一个窗口里累计到 100 px：判在滑，方向是往前。
         reader.scroll_y = 100.0;
-        let moving = reader.mark_scroll(at(100), VIEWPORT);
+        let moving = reader.mark_scroll(at(100), VIEWPORT, false);
         assert!(moving.scrolling, "{SCROLL_WINDOW} 内挪过阈值就是还在滑");
         assert_eq!(
             moving.direction,
@@ -2394,13 +2427,13 @@ mod tests {
 
         // 位置停住、窗口过完：这一帧起算静止，窗口从这一刻重新起表。
         assert!(
-            !reader.mark_scroll(at(400), VIEWPORT).scrolling,
+            !reader.mark_scroll(at(400), VIEWPORT, false).scrolling,
             "停住超过 {SCROLL_WINDOW} 秒该判静止 —— 高清那一档就是在这里才开始排"
         );
 
         // 往回滑：方向跟着**这一帧**的位移走，窗口用刚重起的那一格。
         reader.scroll_y = 0.0;
-        let back = reader.mark_scroll(at(500), VIEWPORT);
+        let back = reader.mark_scroll(at(500), VIEWPORT, false);
         assert!(back.scrolling, "从静止又挪过阈值，该重新判在滑");
         assert_eq!(
             back.direction,
@@ -2419,17 +2452,44 @@ mod tests {
         let mut reader = cx.update(session);
         let zero = Instant::now();
         reader.scroll_y = 0.0;
-        reader.mark_scroll(zero, VIEWPORT);
+        reader.mark_scroll(zero, VIEWPORT, false);
         let mut saw_moving = false;
         for frame in 1..20 {
             reader.scroll_y = 2.0 * frame as f32;
             saw_moving |= reader
-                .mark_scroll(zero + Duration::from_millis(10 * frame), VIEWPORT)
+                .mark_scroll(zero + Duration::from_millis(10 * frame), VIEWPORT, false)
                 .scrolling;
         }
         assert!(
             saw_moving,
             "每帧 2 px、累计到 38 px 都没被判过一次在滑：判据在按单帧看，不是按窗口"
         );
+    }
+
+    /// 自动前进开着时，那一帧的位移是自动推的，不是读者在快滑。
+    ///
+    /// 否则匀速自动滚动会被 [`SCROLL_RATIO`] 读成「一直在滑」，图集一直停在
+    /// 预览档、预取方向跟着翻 —— 自动阅读里图片发抖的那一半就来自这里。
+    #[gpui_kit::test]
+    fn an_auto_driven_frame_is_not_reported_as_user_scrolling(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut reader = cx.update(session);
+        let zero = Instant::now();
+        let at = |ms: u64| zero + Duration::from_millis(ms);
+
+        // 同一串位移、同一扇窗口，只换 auto_on 这一格。
+        let verdict = |reader: &mut ReaderSession, auto_on: bool| {
+            reader.scroll_y = 0.0;
+            reader.scroll_probe = (0.0, Some(at(0)));
+            reader.scroll_last = 0.0;
+            reader.mark_scroll(at(10), VIEWPORT, auto_on);
+            reader.scroll_y = THRESHOLD + 5.0;
+            reader.mark_scroll(at(80), VIEWPORT, auto_on).scrolling
+        };
+        assert!(
+            verdict(&mut reader, false),
+            "前置：{SCROLL_WINDOW} ms 内挪过阈值，手动那一档该判在滑"
+        );
+        assert!(!verdict(&mut reader, true), "自动推进不许被读成读者在快滑");
     }
 }

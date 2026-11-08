@@ -27,8 +27,8 @@ use gpui_kit::{
     Subscription, Window,
 };
 
-use crate::ui::foundation::font_primary;
 use crate::ui::services::l10n;
+use folio_core::text as font_primary;
 
 pub struct FontPicker {
     state: Entity<ComboboxState<SearchableVec<SearchableGroup<String>>>>,
@@ -185,7 +185,7 @@ impl Render for FontPicker {
 #[cfg(test)]
 mod tests {
     use super::font_groups;
-    use crate::ui::foundation::font_primary::{note_book_family, note_user_family};
+    use folio_core::text::{note_book_family, note_user_family};
 
     /// 我的组在最前、书籍组其次、系统组最后；空组不出现（没有自装与随书字体时，
     /// 与一个普通下拉无异）。组内保持 `all_font_names()` 递进来的排序。

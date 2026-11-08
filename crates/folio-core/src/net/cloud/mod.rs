@@ -13,13 +13,19 @@
 //! [`crate::infra::config::Sync`] 互不相干：取书与同步可以指同一家服务商，但谁也不
 //! 假设对方存在。
 
+pub mod aliyun;
+pub mod aliyun_auth;
+pub mod auth;
 pub mod baidu;
 pub mod baidu_auth;
 pub mod dav;
+pub mod provider;
+pub mod upload;
 
 use crate::net::remote::RemoteStore;
 
 pub use crate::net::remote::dav::Entry;
+pub use provider::CloudProvider;
 
 /// 一种网盘。仓库能力（列一层、取一个、写一个、建目录、下载）全在
 /// [`RemoteStore`] 里；这一层只补一个给人看的名字。

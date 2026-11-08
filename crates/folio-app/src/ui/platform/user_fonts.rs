@@ -22,13 +22,12 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use folio_core::content::format::{woff, woff2};
 use gpui_kit::{App, AppContext as _, TextSystem};
 
 use crate::ui::features::reader::note_external_registration;
-use crate::ui::foundation::font_names::{LatinCoverage, latin_by_family};
-use crate::ui::foundation::font_primary;
 use crate::ui::services::config::ConfigHolder;
+use folio_core::text as font_primary;
+use folio_core::text::{LatinCoverage, latin_by_family};
 
 /// 开机把配置里记着的自装字体再注册一遍。在 `AppShell::boot` 里调，紧挨
 /// [`system_fonts::load_all_system_fonts`]；重活在 `background_spawn` 上跑，
@@ -92,32 +91,6 @@ fn register_all(texts: &TextSystem, installed: &[PathBuf]) -> Summary {
     summary
 }
 
-/// 这份文件的字节是哪一种字体。
-enum Kind {
-    /// WOFF 1.0，注册前解回 sfnt。
-    Woff,
-    /// WOFF 2.0，同上。
-    Woff2,
-    /// sfnt 一族（TTF / OTF / TTC），原样注册。
-    Sfnt,
-    /// 不是认得的字体。
-    Unknown,
-}
-
-/// 按头四个字节的魔数认。判据与 `folio_core::content::format::woff(2)::is_*` 同源：
-/// 那两份只认自己的魔数，这里把五类收齐 —— 注册入口只该有一个。
-fn kind_of(bytes: &[u8]) -> Kind {
-    if bytes.len() < 4 {
-        return Kind::Unknown;
-    }
-    match &bytes[..4] {
-        b"wOFF" => Kind::Woff,
-        b"wOF2" => Kind::Woff2,
-        b"ttcf" | b"OTTO" | [0x00, 0x01, 0x00, 0x00] => Kind::Sfnt,
-        _ => Kind::Unknown,
-    }
-}
-
 /// 把一份字体文件注册进文本系统，交回报出来的家族名。
 ///
 /// 会话内下载 / 导入完成后与开机扫描共用这一脚。注册成功顺手做三件事：
@@ -126,14 +99,9 @@ fn kind_of(bytes: &[u8]) -> Kind {
 /// 别的字体照走。
 pub(crate) fn register_file(texts: &TextSystem, path: &Path) -> Option<Vec<String>> {
     let raw = std::fs::read(path).ok()?;
-    let bytes = match kind_of(&raw) {
-        Kind::Sfnt => raw,
-        Kind::Woff => woff::decode(&raw)?,
-        Kind::Woff2 => woff2::decode(&raw)?,
-        Kind::Unknown => {
-            tracing::warn!("user_fonts: {} 不是认得的字体文件，跳过", path.display());
-            return None;
-        }
+    let Some(bytes) = folio_core::fonts::decode_font_file(&raw) else {
+        tracing::warn!("user_fonts: {} 不是认得的字体文件，跳过", path.display());
+        return None;
     };
     // 覆盖要在注册**前**读：add_fonts 拿走字节的所有权。
     let coverage: LatinCoverage = latin_by_family(&bytes);
@@ -148,31 +116,4 @@ pub(crate) fn register_file(texts: &TextSystem, path: &Path) -> Option<Vec<Strin
     note_external_registration();
     font_primary::bump_families_revision();
     Some(families)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::kind_of;
-
-    /// 魔数认五类：woff / woff2 要解，ttf / otf / ttc 原样，其余不收。
-    #[test]
-    fn the_magic_sniffer_sorts_the_five_kinds() {
-        assert!(matches!(kind_of(b"wOF2\x00"), super::Kind::Woff2));
-        assert!(matches!(kind_of(b"wOFF\x00"), super::Kind::Woff));
-        assert!(matches!(kind_of(b"ttcf\x00"), super::Kind::Sfnt));
-        assert!(matches!(kind_of(b"OTTO\x00"), super::Kind::Sfnt));
-        assert!(matches!(
-            kind_of(&[0x00, 0x01, 0x00, 0x00]),
-            super::Kind::Sfnt
-        ));
-        assert!(
-            matches!(kind_of(b"PK\x03\x04"), super::Kind::Unknown),
-            "zip 不收"
-        );
-        assert!(matches!(kind_of(b"nope"), super::Kind::Unknown));
-        assert!(
-            matches!(kind_of(b"abc"), super::Kind::Unknown),
-            "不足四字节不收"
-        );
-    }
 }

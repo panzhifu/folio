@@ -30,10 +30,10 @@
 //! 分享面板。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use folio_core::store::notes::{self, BookGroup, MarkEntry, counts, matches_query};
 use folio_core::{AnnotationExportFormat, DocMeta, Format, annotations_export};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -86,37 +86,6 @@ pub enum NotesEvent {
     },
 }
 
-/// 清单里的一行。书签与批注各占一行，字段是两族的并集 —— 与目录面板「批注」那一格
-/// 同一个形状，只是出处那句在这里由库里的章标题表给（这一屏没有排版可问）。
-struct MarkEntry {
-    is_bookmark: bool,
-    id: i64,
-    chapter: usize,
-    offset: usize,
-    /// 章名。库里没有那一行（定版式没有章表、老库缺号）时是空串，界面就不显出处。
-    place: String,
-    quote: String,
-    note: String,
-    color: Option<String>,
-    stale: bool,
-    created_at: i64,
-}
-
-/// 一本书的那一组，也就是列表上的那张卡。
-struct BookGroup {
-    book_id: i64,
-    title: String,
-    /// 组内最近一次动静。组间按它倒序：最近留过话的书在最前。
-    latest: i64,
-    marks: Vec<MarkEntry>,
-    /// 这一本的**累计**阅读秒数（`reading_sessions` 合计）。取不到按 0 处理：
-    /// 「这本书还没读过」是常见状态，不是异常，卡片就念「0 秒」那一档的句子。
-    seconds: i64,
-    /// 卡片左边那一格封面（列表档缩略图，取不到时是原图）。`None` = 画一块灰底占位，
-    /// 封面是装饰，不是内容的入口。
-    cover: Option<Arc<Image>>,
-}
-
 /// 本屏自己的撤销槽：拔掉的书签整份抄着，窗口内按原行插回。
 struct PendingUndo {
     row: folio_core::store::Bookmark,
@@ -128,6 +97,9 @@ pub struct NotesView {
     /// 按书分好组的清单。`None` = 还没取到（读不到库，或那一趟查询失败）——
     /// 这一格与「库里还没有批注」是两句话。
     data: Option<Vec<BookGroup>>,
+    /// 已解好的封面，按书库主键。core 那份清单交的是**编码字节**（聚合不碰 gpui），
+    /// 字节 → 可画的图只在 [`Self::refresh`] 里解一次，渲染帧不干解码。
+    covers: HashMap<i64, Arc<Image>>,
     store_missing: bool,
     undo: Option<PendingUndo>,
     undo_seq: u64,
@@ -174,6 +146,7 @@ impl NotesView {
         });
         Self {
             data: None,
+            covers: HashMap::new(),
             store_missing: false,
             undo: None,
             undo_seq: 0,
@@ -195,9 +168,17 @@ impl NotesView {
             cx.notify();
             return;
         };
-        match load_groups(&store) {
+        match notes::load_groups(&store) {
             Ok(groups) => {
                 self.store_missing = false;
+                self.covers = groups
+                    .iter()
+                    .filter_map(|group| {
+                        let bytes = group.cover.as_ref()?;
+                        let image = cover_image(bytes)?;
+                        Some((group.book_id, image))
+                    })
+                    .collect();
                 self.data = Some(groups);
             }
             Err(err) => {
@@ -401,7 +382,7 @@ impl NotesView {
         .into();
         let read_time = duration(cx, group.seconds);
         let title: SharedString = group.title.clone().into();
-        let cover = group.cover.clone();
+        let cover = self.covers.get(&group.book_id).cloned();
         let book_id = group.book_id;
         let tapped = cx.entity().clone();
         // 闭包要的是**值**：`cx.theme()` 借来的那一份活不到下一帧。
@@ -489,7 +470,7 @@ impl NotesView {
             Some(group) => {
                 let (notes_count, bookmarks_count) = counts(group);
                 (
-                    group.cover.clone(),
+                    self.covers.get(&group.book_id).cloned(),
                     Some(
                         tf(
                             cx,
@@ -937,102 +918,6 @@ fn export_file_name(title: &str, format: AnnotationExportFormat) -> String {
     format!("《{cleaned}》批注.{}", format.ext())
 }
 
-/// 从库里折出按书分组的清单。组内：书签在前、批注在后，各自按章序排（同章按钉下
-/// 的顺序）；组间按最近动静倒序。
-///
-/// 卡片上那两格新数（累计时长与封面）也在这里一并取好 —— 整趟只在 [`NotesView::refresh`]
-/// 里跑一次，`render` 拿到的已经是能直接画的东西。
-fn load_groups(store: &folio_core::Store) -> folio_core::Result<Vec<BookGroup>> {
-    let mut groups: HashMap<i64, BookGroup> = HashMap::new();
-    for card in store.all_annotations()? {
-        let annotation = &card.annotation;
-        let group = groups
-            .entry(annotation.book_id)
-            .or_insert_with(|| BookGroup {
-                book_id: annotation.book_id,
-                title: card.book_title.clone(),
-                latest: annotation.created_at,
-                marks: Vec::new(),
-                seconds: 0,
-                cover: None,
-            });
-        group.latest = group.latest.max(annotation.created_at);
-        group.marks.push(MarkEntry {
-            is_bookmark: false,
-            id: annotation.id,
-            chapter: annotation.chapter as usize,
-            offset: annotation.anchor.start,
-            place: String::new(),
-            quote: snippet(&annotation.anchor.exact),
-            note: annotation.note.trim().to_string(),
-            color: Some(annotation.color.clone()),
-            stale: annotation.stale,
-            created_at: annotation.created_at,
-        });
-    }
-    for card in store.all_bookmarks()? {
-        let bookmark = &card.bookmark;
-        let group = groups.entry(bookmark.book_id).or_insert_with(|| BookGroup {
-            book_id: bookmark.book_id,
-            title: card.book_title.clone(),
-            latest: bookmark.created_at,
-            marks: Vec::new(),
-            seconds: 0,
-            cover: None,
-        });
-        group.latest = group.latest.max(bookmark.created_at);
-        group.marks.push(MarkEntry {
-            is_bookmark: true,
-            id: bookmark.id,
-            chapter: bookmark.chapter as usize,
-            offset: bookmark.anchor.start,
-            place: String::new(),
-            quote: snippet(&bookmark.anchor.exact),
-            note: String::new(),
-            color: None,
-            stale: false,
-            created_at: bookmark.created_at,
-        });
-    }
-    // 封面的那两格描述（书库根 + 封面名分）只有 `shelf()` 一条语句给，所以取一次整架再
-    // 只留下这一屏用得到的那几本：界面不该自己再从 `books.path` 反推一遍书库根 ——
-    // 那是第二处真相。
-    let mut cover_refs: HashMap<i64, (PathBuf, folio_core::content::format::cover::CoverRef)> =
-        HashMap::new();
-    for item in store.shelf("").unwrap_or_default() {
-        if let (Some(root), Some(cover)) = (item.cover_root, item.cover_ref)
-            && groups.contains_key(&item.id)
-        {
-            cover_refs.insert(item.id, (root, cover));
-        }
-    }
-    // 每组一张章标题表：出处那一句在这里填 —— 这一屏没有排版可问，库里那张表是权威。
-    for group in groups.values_mut() {
-        let titles = store.chapter_titles(group.book_id).unwrap_or_default();
-        // 累计时长是每本一条聚合语句，行数就是「留过话的书」那几本；读不到按 0 处理
-        // （「还没读过」不是异常）。
-        group.seconds = store
-            .book_reading(group.book_id)
-            .map(|reading| reading.seconds)
-            .unwrap_or_default();
-        group.cover = list_cover(store, cover_refs.get(&group.book_id), group.book_id);
-        // 书签在前、批注在后（与目录面板「批注」那一格同一份读法），各自按章序排，
-        // 同章按钉下的顺序。
-        group
-            .marks
-            .sort_by_key(|m| (!m.is_bookmark, m.chapter, m.created_at));
-        for mark in &mut group.marks {
-            mark.place = titles
-                .get(mark.chapter)
-                .map(|chapter| chapter.title.trim().to_string())
-                .unwrap_or_default();
-        }
-    }
-    let mut out: Vec<BookGroup> = groups.into_values().collect();
-    out.sort_by(|a, b| b.latest.cmp(&a.latest).then_with(|| a.title.cmp(&b.title)));
-    Ok(out)
-}
-
 /// 一行里那两句话怎么摆：主行（引文；引文空着时退到笔记 / 出处 / 「书签」）与第二行
 /// （读者自己写的笔记）。
 ///
@@ -1068,63 +953,6 @@ fn date_label(created_at: i64) -> SharedString {
     let day = folio_core::local_day(created_at, crate::ui::host::local_offset_secs());
     let date = folio_core::civil_from_days(day);
     format!("{:04}-{:02}-{:02}", date.year, date.month, date.day).into()
-}
-
-/// 一句原文在清单里显多长。`exact` 可能带着排版换行，先折空白再截 —— 与目录面板
-/// 「批注」那一格同一条口径。
-fn snippet(exact: &str) -> String {
-    let folded: String = exact.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out: String = folded.chars().take(48).collect();
-    if folded.chars().count() > 48 {
-        out.push('…');
-    }
-    out
-}
-
-/// 卡片上那行读数的两个数：批注几条、书签几枚。就在本屏那份清单里数，不另查库。
-fn counts(group: &BookGroup) -> (usize, usize) {
-    let notes = group.marks.iter().filter(|mark| !mark.is_bookmark).count();
-    (notes, group.marks.len() - notes)
-}
-
-/// 搜索词落在一本书上算不算对上：书名，或这一本里任何一条引文、笔记与出处。
-///
-/// 词在订阅那一刻已经折成小写，这里只折候选。出处也要对：读者记不住的往往是「这句
-/// 出在第几章」，而章名是他手上唯一的名词。
-fn matches_query(group: &BookGroup, query: &str) -> bool {
-    let hits = |text: &str| text.to_lowercase().contains(query);
-    hits(&group.title)
-        || group
-            .marks
-            .iter()
-            .any(|mark| hits(&mark.quote) || hits(&mark.note) || hits(&mark.place))
-}
-
-/// 一张卡那一格封面的字节 → 可画的图。
-///
-/// **先试磁盘上那一份列表档缩略图**（`.thumbs/96/`，导入时与卡片档一起生成，专为
-/// 「一行一本」那种小图）：卡片那一格只有 48×72，用不上原图的像素，而 `Image` 持有的
-/// 是编码字节，省下来的是整列的常驻内存。取不到（老库没生成、写不进目录）就**退回原图**
-/// —— 缩略图是可丢弃的加速品，不是功能的入口。原图字节只在缩略图这条路走不通时才去读，
-/// 免得为一格小图做两次文件 IO。
-fn list_cover(
-    store: &folio_core::Store,
-    cover: Option<&(PathBuf, folio_core::content::format::cover::CoverRef)>,
-    book_id: i64,
-) -> Option<Arc<Image>> {
-    let small = cover.and_then(|(root, description)| {
-        let path = folio_core::content::format::thumb::thumb_path(
-            root,
-            folio_core::infra::paths::THUMB_LIST_PX,
-            description,
-        );
-        std::fs::read(path).ok()
-    });
-    if let Some(image) = small.as_deref().and_then(cover_image) {
-        return Some(image);
-    }
-    let full = store.book_cover(book_id).ok().flatten();
-    full.as_deref().and_then(cover_image)
 }
 
 /// 封面那一格：有图铺图，没图画一块灰底。旁边那三行写着这本书叫什么、留了多少话，

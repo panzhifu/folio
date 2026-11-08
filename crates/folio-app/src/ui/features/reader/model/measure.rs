@@ -765,7 +765,7 @@ mod tests {
         ALL_SCRIPTS, BookFonts, Font, FontKey, Script, SharedString, gpui_font, merge_extents,
         representative, script_mask, script_of, widths_from_edges,
     };
-    use crate::ui::features::reader::model::book_fonts::FaceName;
+    use folio_core::text::load::FaceName;
 
     fn key(family: &str) -> FontKey {
         FontKey {

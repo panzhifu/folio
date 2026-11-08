@@ -2288,7 +2288,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "folio-app"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "folio-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-channel",
  "axum",
@@ -2339,6 +2339,7 @@ dependencies = [
  "png 0.18.1",
  "quick-xml 0.42.0",
  "rars",
+ "read-fonts 0.46.0",
  "regex",
  "resvg 0.46.0",
  "ring",
@@ -2350,6 +2351,7 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "sha2 0.11.0",
+ "skera",
  "tar",
  "tempfile",
  "thiserror 2.0.21",
@@ -2365,6 +2367,7 @@ dependencies = [
  "ureq",
  "url",
  "woff2-patched",
+ "write-fonts",
  "zip",
 ]
 

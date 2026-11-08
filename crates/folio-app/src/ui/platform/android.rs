@@ -66,6 +66,10 @@ fn android_main(app: android_activity::AndroidApp) {
             return;
         }
     };
+    // 网盘授权的回跳（`folio://aliyun/callback?code=…`）：平台把 URL 交给 Rust，
+    // 这里接一手送进队列（见 `services::cloud_link`）。装在 `run` 之前 —— 应用可能
+    // 就是**被这条链接拉起**的，那一条要在第一帧之前就排上。
+    crate::ui::services::cloud_link::install();
     tracing::info!("android_main: creating GPUI Application");
     Application::with_platform(shared.into_rc())
         .with_assets(AllAssets)
@@ -567,6 +571,16 @@ pub(crate) fn is_eink_device() -> bool {
         .join(" ");
         super::classify_eink(&identity)
     })
+}
+
+/// 读者认得的设备名：`ro.product.model`（如 `MEIZU 20`）。
+///
+/// 不返回 `ro.product.device` / 序列号：前者是主板代号（`m86`），后者不是给界面看的。
+/// 读不到就交 `None`，由调用方回落到「设备」这个通用名 —— 不拿 `device_id` 冒充。
+pub(crate) fn device_name() -> Option<String> {
+    system_property("ro.product.model")
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 /// 读一条系统属性；属性不存在或不是 UTF-8 回 `None`。

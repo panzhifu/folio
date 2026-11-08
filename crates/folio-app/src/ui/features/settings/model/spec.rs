@@ -91,6 +91,18 @@ pub(crate) enum RowKind {
         get: Rc<dyn Fn(&App) -> SharedString>,
         set: Setter<SharedString>,
     },
+    /// 自由文本 + 右侧动作钮（手机端的「订单编号 + 兑换」）。
+    ///
+    /// 与 [`RowKind::Text`] 共用输入状态那一套，只是控件里多一颗钮：动作与输入框
+    /// 同处一行，键盘弹起时不必再往下找那颗钮。桌面端暂按 [`RowKind::Text`] 渲染
+    /// （会员页在桌面走的是另一条带动作行的形状）。
+    TextAction {
+        get: Rc<dyn Fn(&App) -> SharedString>,
+        set: Setter<SharedString>,
+        label: SharedString,
+        action: Rc<dyn Fn(&mut App)>,
+        disabled: Rc<dyn Fn(&App) -> bool>,
+    },
     /// 系统字体：这台设备注册的家族，可搜索。两端的落点都是同一份家族名。
     Font {
         get: Rc<dyn Fn(&App) -> SharedString>,
@@ -189,6 +201,30 @@ impl Row {
             kind: RowKind::Text {
                 get: Rc::new(get),
                 set: Rc::new(set),
+            },
+        }
+    }
+
+    /// 自由文本 + 右侧动作钮。手机端把两颗摆成一行；桌面端按纯文本渲染。
+    pub(in crate::ui::features::settings) fn text_action(
+        title: SharedString,
+        get: impl Fn(&App) -> SharedString + 'static,
+        set: impl Fn(SharedString, &mut App) + 'static,
+        label: SharedString,
+        action: impl Fn(&mut App) + 'static,
+        disabled: impl Fn(&App) -> bool + 'static,
+    ) -> Self {
+        Self {
+            title,
+            desc: None,
+            keywords: &[],
+            placeholder: None,
+            kind: RowKind::TextAction {
+                get: Rc::new(get),
+                set: Rc::new(set),
+                label,
+                action: Rc::new(action),
+                disabled: Rc::new(disabled),
             },
         }
     }
@@ -308,10 +344,6 @@ impl Row {
 pub(crate) struct Group {
     pub title: SharedString,
     pub rows: Vec<Row>,
-    /// 裸组：两端都不给这一组套卡、不画节头与行间发丝线。给**自带完整视觉的
-    /// 自定义行**用 —— 会员页那张黑金卡自己就是一张卡，再套一层卡就成了
-    /// 「卡中卡」，反而说不清哪层是边界。
-    pub bare: bool,
 }
 
 /// 一页 = 标题 + 图标 + 若干组。
@@ -326,15 +358,6 @@ pub(crate) fn group(title: impl Into<SharedString>, rows: Vec<Row>) -> Group {
     Group {
         title: title.into(),
         rows,
-        bare: false,
-    }
-}
-
-impl Group {
-    /// 标成裸组：渲染端不套卡（见 [`Group::bare`]）。
-    pub(crate) fn bare(mut self) -> Self {
-        self.bare = true;
-        self
     }
 }
 

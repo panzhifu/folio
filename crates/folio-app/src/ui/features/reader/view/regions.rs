@@ -19,7 +19,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Corners, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Styled, TestSupportExt as _, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _, div, px,
 };
 
 use super::reading_page::ReadingPage;
@@ -130,10 +130,12 @@ impl ReadingPage {
             .into_any_element()
     }
 
-    /// 自动阅读跑着时**顶替底栏**的那一条：速度的一格加一颗退出。
+    /// 自动阅读跑着、读者**第二击**叫出来的那一条：推进方式两格 + 速度一格 + 退出。
     ///
-    /// 自动自己会翻页，这一层露着时读者要做的只有两件事 —— 快一点 / 慢一点，或者
-    /// 不自动了。所以这一条不摆目录、夜间那些入口：退出自动，原来那条底栏就回来。
+    /// 第一击只负责开始、不把设置摆到脸上（见 `ReadingPage::toggle_auto`）；这一层是
+    /// 运行中再点一次才露出来的设置工具。自动自己会翻页，露着时读者要做的只有三件事 ——
+    /// 换推进方式（翻页 / 滚动）、快一点 / 慢一点，或者不自动了。所以这一条不摆目录、
+    /// 夜间那些入口：退出自动，原来那条底栏就回来。
     /// 速度那一格与阅读设置里「自动前进」是同一副形状（标签在左、读数在右，下面
     /// `−` 滑条 `+`），同一份量程与步长（[`chrome::AUTO_ADVANCE_RANGE`] /
     /// [`chrome::AUTO_ADVANCE_STEPS`]），不另起一套。
@@ -154,6 +156,68 @@ impl ReadingPage {
         let down = tf(cx, "reader.nudge_down", &[("field", &title)]);
         let up = tf(cx, "reader.nudge_up", &[("field", &title)]);
         let exit_label = tr(cx, "reader.auto_exit");
+        // 模式那两格：与听书屏「封面 / 文稿」同一副分段胶囊 —— 两格等宽、选中那半用
+        // 主色填实、外层 muted 底 + 全圆角。这一条本身就是「运行中再点一次才叫出来」的
+        // 设置工具，第一击只负责开始、不把它摆到脸上。选中态靠色 + `aria_selected`
+        // 两处表达，不是只靠颜色（读屏也要分得清哪一格生效）。
+        let mode = self.reader.read(cx).auto_mode();
+        let primary = cx.theme().primary;
+        let primary_fg = cx.theme().primary_foreground;
+        let muted = cx.theme().muted;
+        let muted_fg = cx.theme().muted_foreground;
+        let mode_a11y = tr(cx, "reader.auto_mode");
+        let page_label = tr(cx, "reader.auto_mode_page");
+        let scroll_label = tr(cx, "reader.auto_mode_scroll");
+        let page_mode = cx.entity().clone();
+        let page_scroll = cx.entity().clone();
+        let segment = |id: &'static str,
+                       label: SharedString,
+                       target: chrome::AutoReadMode,
+                       on: bool,
+                       page: gpui_kit::Entity<ReadingPage>| {
+            div()
+                .id(id)
+                .test_support()
+                .flex_1()
+                .px(px(14.))
+                .py(px(6.))
+                .rounded_full()
+                .text_sm()
+                .text_center()
+                .when(on, |this| this.bg(primary).text_color(primary_fg))
+                .when(!on, |this| this.text_color(muted_fg))
+                .aria_selected(on)
+                .aria_label(label.clone())
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    page.update(cx, |this, cx| this.set_auto_read_mode(target, cx))
+                })
+                .into_any_element()
+        };
+        let mode_switch = h_flex()
+            .id("reader-auto-mode")
+            .w_full()
+            .items_center()
+            .gap_1()
+            .px(px(2.))
+            .py(px(2.))
+            .rounded_full()
+            .bg(muted)
+            .aria_label(mode_a11y)
+            .child(segment(
+                "auto-mode-page",
+                page_label,
+                chrome::AutoReadMode::Page,
+                mode == chrome::AutoReadMode::Page,
+                page_mode,
+            ))
+            .child(segment(
+                "auto-mode-scroll",
+                scroll_label,
+                chrome::AutoReadMode::Scroll,
+                mode == chrome::AutoReadMode::Scroll,
+                page_scroll,
+            ));
         let page_down = cx.entity().clone();
         let page_up = cx.entity().clone();
         let page_exit = cx.entity().clone();
@@ -177,6 +241,7 @@ impl ReadingPage {
                 bottom_left: px(0.),
                 bottom_right: px(0.),
             })
+            .child(mode_switch)
             .child(
                 v_flex()
                     .w_full()
@@ -490,8 +555,9 @@ impl ReadingPage {
     /// 会员门禁再叠一条；**自动不受这两条管** —— 它对每一本可读的书都成立，所以听书
     /// 缺席时它自己还在原位，只是往右补齐。
     ///
-    /// 自动这颗只有「开自动」这一张面孔：自动跑着时整张卡片被 [`Self::auto_bar`] 顶替，
-    /// 浮钮连同卡片一起不在场，退出那条路上有明确的出口，不必在这里再留一个态。
+    /// 自动这颗只有「开自动」这一张面孔：第一击进入自动、浮层整层收掉，这一颗随卡片
+    /// 一起不在场；设置工具是运行中再点一次正文才叫出来的（见 [`Self::auto_bar`]），
+    /// 退出那条路上有明确的出口，不必在这里再留一个态。
     pub(in crate::ui::features::reader) fn listen_fabs(
         &self,
         cx: &mut Context<Self>,

@@ -8,6 +8,8 @@
 //! 最近 30 天、单次时长分布）。一次读回同一批行再在内存里切，既省往返，也保证这一屏
 //! 上的每个数来自同一份事实 —— 与 `Store::reading_summary` 的文件头同一条理由。
 
-pub(in crate::ui::features::stats) mod snapshot;
-
-pub(in crate::ui::features::stats) use snapshot::{Bucket, DayStat, Range, Snapshot};
+// 快照本体已下沉 core（`folio_core::store::stats`，2026-11-09）：全部是 Store 查数 +
+// 纯聚合，统计口径能脱离窗口测。这里只转一遍名，view 的调用点不动。
+pub(in crate::ui::features::stats) use folio_core::store::stats::{
+    Bucket, DayStat, Range, Snapshot,
+};

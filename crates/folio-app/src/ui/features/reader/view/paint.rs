@@ -917,7 +917,7 @@ fn paint_run(
 
 #[cfg(test)]
 mod tests {
-    //! 装饰线的纵向落点。gpui 的 `TestWindow` 不暴露绘制场景（`plans/M5-refactor.md` 当年就
+    //! 装饰线的纵向落点。gpui 的 `TestWindow` 不暴露绘制场景（M5 重构时就
     //! 因此把「下划线该画出来」退成真机冒烟），所以这里钉的是**那条式子**；
     //! 「`paint_run` 真的调了它」仍然只有真机能证。
     //!

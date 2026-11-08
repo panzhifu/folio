@@ -35,7 +35,7 @@ use folio_core::layout::{
 use folio_core::{Reader, TextDirection};
 use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window};
 
-use crate::ui::features::reader::model::book_fonts::{BookFonts, FontLoadJob};
+use crate::ui::features::reader::model::book_fonts::{BookFonts, FontLoadJob, TextSystemSink};
 use crate::ui::features::reader::model::measure::GpuiMeasure;
 use crate::ui::foundation::images::ChapterImages;
 
@@ -530,9 +530,29 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
     );
     // 首趟作业顺带把内嵌字体读回来并注册；必须在 `GpuiMeasure::new` 之前 ——
     // 那一趟要按新的设备字体表量宽度。作业跑完把新表随 `Typeset` 带回 UI。
+    // `log_font_load` 从前在 `run` 内部记账；下沉 core 后改在调用侧按 `cached_run`
+    // 决定记不记（缓存的第二趟不重记一遍同样的数）。
     let mut loaded_fonts = None;
     if let Some(job) = input.font_job.take() {
-        let (fonts, _stats) = job.run(&input.texts);
+        let sink = TextSystemSink(Arc::clone(&input.texts));
+        let (fonts, stats) = job.run(&sink);
+        if !stats.cached_run {
+            super::perf::log_font_load(
+                stats.parse_ns,
+                stats.refs_ns,
+                stats.subset_ns,
+                stats.bytes_ns,
+                stats.register_ns,
+                stats.faces,
+                stats.cache_hits,
+                stats.bytes_read,
+                stats.failed,
+                stats.empty_diff,
+                stats.subset_bytes_before,
+                stats.subset_bytes_after,
+                stats.subset_failures,
+            );
+        }
         input.key.fonts_rev = fonts.revision();
         input.faces = fonts.clone();
         loaded_fonts = Some(fonts);

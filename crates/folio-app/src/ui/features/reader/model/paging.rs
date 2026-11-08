@@ -6,7 +6,7 @@
 use folio_core::{Locator, PageTurn};
 use gpui_kit::{App, Context, ScrollDelta, ScrollEvent};
 
-use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
+use crate::ui::features::reader::model::chrome::{Arrow, AutoReadMode, PageMode};
 use crate::ui::features::reader::model::session::{
     PageRef, ReaderSession, Source, Turn, TurnRun, start_turn,
 };
@@ -15,13 +15,33 @@ use crate::ui::features::reader::model::turn::{PagingFacts, TurnIntent, TurnPlan
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::turn_duration;
 
-/// 自动前进的拍子间隔。连续滚动按真实 dt 推进，掉拍就是少滚一点，不追赶。
-const AUTO_TICK: std::time::Duration = std::time::Duration::from_millis(16);
-
-/// 自动前进那一拍的在途状态：上一拍的时刻与分页档攒下的间隔债。
+/// 自动前进那一帧的在途状态：上一帧的时刻、分页档攒下的间隔债、滚动档攒下的
+/// 不足 1px 的余数。
+///
+/// 推进由**渲染帧**驱动（`view::body::render`），不再有 16ms 后台定时器：那条
+/// 定时器与 vsync 的 16.67ms 互相拍频，有的帧收到 0 次推进、有的收到 2 次，
+/// 读起来就是「自动滚动在抖」。帧驱动保证每画一帧恰好推一次。
 pub(in crate::ui::features::reader) struct AutoState {
     last: std::time::Instant,
     debt: f32,
+    /// 滚动档不足 1 逻辑像素的那点位移：攒到整 1px 才落到 `scroll_y`。
+    /// 慢速档（2 页/分 ≈ 每帧 0.3px）才不会被 0.5px 死区逐帧吞掉、
+    /// 攒几帧突然跳一下。
+    remainder: f32,
+    /// 滚动档这一趟的时间轴起点：推进量按 `speed × (now − origin) + origin_scroll` 算，
+    /// 而不是逐帧累加 dt。
+    ///
+    /// 逐帧累加的问题在**抖动**：`now` 来自 `Instant::now()`，帧间隔本身在
+    /// 16.0 / 16.8 / 17.2 ms 之间跳，累加出来的位移跟着一帧快一帧慢。时间轴每帧只
+    /// 重新折一次「从起点到现在走了多远」，帧间隔跳多少都不影响这一帧该在的位置 ——
+    /// 掉帧时它自己追上，停顿一段再回来也不会多推。
+    origin: std::time::Instant,
+    /// 时间轴起点对应的那个 `scroll_y`。读者手动滚动、或坐标链补偿挪了位置时，
+    /// 这一格跟着重设 —— 否则「读者拖了 100px」会被下一帧的时间轴抹掉。
+    origin_scroll: f32,
+    /// 时间轴是否已经起表。`false` = 刚开自动 / 刚切到滚动档 / 刚被挪过，下一帧
+    /// 才把起点与基准一起记下。
+    timed: bool,
     /// 视口高（逻辑像素），折「一页 = 一屏」用。会话自己不存屏高 —— `mark_scroll`
     /// 每帧从视图递进来，开着自动时顺手喂一份；默认 600 是第一次推进前的兜底。
     pub(in crate::ui::features::reader) viewport: f32,
@@ -32,6 +52,10 @@ impl Default for AutoState {
         Self {
             last: std::time::Instant::now(),
             debt: 0.0,
+            remainder: 0.0,
+            origin: std::time::Instant::now(),
+            origin_scroll: 0.0,
+            timed: false,
             viewport: 600.0,
         }
     }
@@ -151,7 +175,16 @@ impl ReaderSession {
         self.auto.is_some()
     }
 
+    /// 这一趟的推进方式（自动工具栏那两格读它来画选中态）。
+    pub(in crate::ui::features::reader) fn auto_mode(&self) -> AutoReadMode {
+        self.auto_mode
+    }
+
     /// 读者动了（或听书起念）：自动前进停表。见 [`Self::set_auto`] 那条注释里的清单。
+    ///
+    /// 只清 `auto`，不碰 `auto_saved_layout`：还原摆法交给下一帧渲染帧统一做，因为停表
+    /// 的路不止这一条（读者自己划一下、自动走到头都直接清 `auto`），挂在任何单一入口
+    /// 上都会漏。
     pub(in crate::ui::features::reader) fn stop_auto(&mut self, cx: &mut Context<Self>) {
         if self.auto.take().is_some() {
             cx.notify();
@@ -161,6 +194,10 @@ impl ReaderSession {
     /// 自动前进 on/off。开的那一下起一条拍子循环（[`AUTO_TICK`] 一拍），关的那一下
     /// 只清状态 —— 循环下一拍看到 `None` 自己退场。
     ///
+    /// 开的时候多两件事：记下读者原本的摆法（退出时还回去），并按这一趟的
+    /// [`AutoReadMode`] 把正文切到它要的参照系。两档的推进算法不同，摆法不同，
+    /// 彼此不共用一套坐标。
+    ///
     /// 谁会关它：读者自己（底栏那一格再按一下）、或任何一次手动的翻页与滚动
     /// （[`Self::turn`] / [`Self::on_scroll`] 入口的那条闸）、听书起念（`ReadingPage`
     /// 那一头递的）—— 两个「推位置」的东西同时在跑，读者分不清是谁在翻。
@@ -168,43 +205,51 @@ impl ReaderSession {
         if on == self.auto_on() {
             return;
         }
-        self.auto = on.then_some(AutoState::default());
-        cx.notify();
         if on {
-            self.spawn_auto(cx);
+            self.auto_saved_layout = Some((self.mode, self.mode_undecided));
+            self.auto = Some(AutoState::default());
+            // 换摆法走 adopt_mode：它把「第几个字」从旧坐标搬到新坐标，直接赋 self.mode
+            // 会让读者从这一章的章首重新开始。
+            let target = self.auto_mode.layout(self.mode);
+            self.adopt_mode(target, cx);
+        } else {
+            self.auto = None;
         }
+        // 第一帧由这一下 notify 唤起，往后每一步都由渲染帧自己续
+        // （`view::body::render` 里的 `request_animation_frame`）；起一条独立的
+        // 后台定时器只会多一把与 vsync 不同步的钟。
+        cx.notify();
     }
 
-    /// 拍子循环：16 ms 一拍，实体没了或被关了就退。
+    /// 自动工具栏那两格：换这一趟的推进方式。跑着的时候切，摆法跟着换、拍子重新起算 ——
+    /// 翻页档攒下的间隔债不能带到滚动档去，反过来也一样。
     ///
-    /// 滚动那一档的推进量按真实流逝的 dt 算（[`Self::auto_step`]），所以拍子不必精准 ——
-    /// 掉几拍就是那一段少滚一点，下一拍追不上也不追赶（阅读不是追求匀速的运动）。
-    fn spawn_auto(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(AUTO_TICK).await;
-                let mut alive = false;
-                let Ok(_) = this.update(cx, |session, cx| {
-                    alive = session.auto.is_some();
-                    if alive {
-                        session.auto_step_at(std::time::Instant::now(), cx);
-                    }
-                }) else {
-                    break;
-                };
-                if !alive {
-                    break;
-                }
-            }
-        })
-        .detach();
+    /// `auto_saved_layout` 在这里**不动**：它记的是开自动之前的摆法，不是上一档模式的。
+    pub(in crate::ui::features::reader) fn set_auto_read_mode(
+        &mut self,
+        mode: AutoReadMode,
+        cx: &mut Context<Self>,
+    ) {
+        if mode == self.auto_mode {
+            return;
+        }
+        self.auto_mode = mode;
+        if self.auto.is_some() {
+            self.auto = Some(AutoState::default());
+            let target = mode.layout(self.mode);
+            self.adopt_mode(target, cx);
+        }
+        cx.notify();
     }
 
-    /// 一拍的决策：连续滚动推进像素；分页 / 双页攒间隔债，攒够一次翻一张。
-    /// 上一张还在走（翻页动画在途）的那一拍跳过 —— 不打断读者看得见的那一趟。
+    /// 一帧的决策：按这一趟的 [`AutoReadMode`] 走，不看书的摆法 ——
+    /// 滚动档按这一帧的真实 dt 推进像素（不足 1px 的攒着），翻页档攒间隔债、
+    /// 攒够一次翻一张。摆法在 `set_auto` / `set_auto_read_mode` 里已经切到对应
+    /// 参照系，这里两条腿的坐标才都成立。
     ///
-    /// 时刻显式递进来：拍子循环那把钟（`background_executor().timer`）不吃测试的
-    /// 假钟（见 `components/search_box.rs` 那条），可测缝只能开在这里。
+    /// 由 `view::body::render` **每帧调一次**：推进与绘制严格 1:1，也不再有第二条
+    /// 时钟同时写 `scroll_y`。上一张还在走（翻页动画在途）的那一帧跳过 —— 不打断
+    /// 读者看得见的那一趟。时刻显式递进来，测试才能按自己的假钟一步步推。
     pub(in crate::ui::features::reader) fn auto_step_at(
         &mut self,
         now: std::time::Instant,
@@ -215,27 +260,66 @@ impl ReaderSession {
         };
         let dt = now.duration_since(state.last).as_secs_f32();
         state.last = now;
+        // 视口高与 `scroll_y` 先抄出来：下面 `paging_facts()` / `auto_scroll_by()`
+        // 都要 `self`，而 `state` 那一笔可变借用还活着。
+        let scroll_y = self.scroll_y;
         if self.turn.is_some() {
             return;
         }
         let speed = ConfigHolder::appearance(cx).auto_advance_speed;
-        if matches!(self.mode, PageMode::Continuous) {
-            // 连续滚动：一「页」= 一屏高，折成每秒像素。dp/dt 与手指滚动同一条
-            // 落点（[`Self::set_scroll_y`]），夹取、落库、定版式页号同步都在那头。
-            let viewport = state.viewport.max(1.0);
-            let dpx = speed * viewport / 60.0 * dt;
+        if self.auto_mode == AutoReadMode::Scroll {
+            // 起点报进来等于**换了基准**：读者刚拖过、或这一帧还停在开自动那一格。
+            // 起表就是「这一帧不动，从现在开始算」—— 时间轴从这一格起，位移从这一格计。
+            let state = self.auto.as_mut().expect("上面刚判过 Some");
+            if !state.timed {
+                state.timed = true;
+                state.origin = now;
+                state.origin_scroll = scroll_y;
+                state.remainder = 0.0;
+            }
             // 已经到底就停表：再推也没有新字，留着「开着」只会让按钮一直亮、屏却不动。
-            // 排版没就绪（视口还是 0）不算到底，下一拍再试。
+            // 两道「还没就绪」的闸：排版结果没回来（`ready` 为假）、或刚切到滚动档、
+            // `laid_out` 还停在上一档分页（`max_scroll` 是旧坐标里的 0）—— 都不算到底。
+            // 少了后一条，切档那一帧会被误判成「滚到底」当场停表。
             let facts = self.paging_facts();
-            if facts.ready && facts.max_scroll - self.scroll_y <= 0.5 {
+            if facts.ready
+                && self.laid_out.mode.is_continuous()
+                && facts.max_scroll - scroll_y <= 0.5
+            {
                 self.auto = None;
                 cx.notify();
                 return;
             }
-            self.auto_driving = true;
-            self.set_scroll_y(self.scroll_y + dpx, cx);
-            self.auto_driving = false;
+            // 时间轴：这一帧该在哪 = 起点 + 速度 × 从起点到现在的时长。**不累加 dt。**
+            // 帧间隔跳多少（16.0 / 16.8 / 17.2ms）都不改变这一帧落在哪儿，掉一帧时
+            // 下一帧自己补上；这是「自动滚动有种抖动」的正解 —— 逐帧累加时，位移的
+            // 二阶差就是帧间隔的二阶差，读起来一快一慢。
+            //
+            // 小时长那一小段（不到 1px）直接丢掉，**不留余数**：余数若带着时间轴一起
+            // 攒，攒够 1px 那一帧就会「一次跳两像素」；丢掉的那点由下一帧的时间轴自己
+            // 补回来（`elapsed` 是从起点算的，不是从上一帧算的）。
+            let state = self.auto.as_mut().expect("上面刚判过 Some");
+            let viewport = state.viewport.max(1.0);
+            let px_per_sec = speed * viewport / 60.0;
+            let elapsed = now.duration_since(state.origin).as_secs_f32();
+            let ahead = px_per_sec * elapsed;
+            let step = ahead.trunc();
+            let _ = state.remainder;
+            if step >= 1.0 {
+                // 时间轴挪到「已走到的那个整像素」那一刻：`origin_scroll` 跟着整像素走，
+                // `origin` 挪到「本该走到这一格」的时刻（`origin + step / px_per_sec`），
+                // 不是 `now` —— 用 `now` 会把这一帧剩下的小数时间也丢掉，慢速档逐帧丢
+                // 一点，读起来就是「一顿一顿」。
+                if px_per_sec > 0.0 {
+                    state.origin += std::time::Duration::from_secs_f32(step / px_per_sec);
+                } else {
+                    state.origin = now;
+                }
+                state.origin_scroll += step;
+                self.auto_scroll_by(step);
+            }
         } else {
+            let state = self.auto.as_mut().expect("上面刚判过 Some");
             state.debt += dt;
             let interval = 60.0 / speed;
             if state.debt >= interval {
@@ -499,7 +583,10 @@ impl ReaderSession {
         self.goto_offset(chapter, offset, cx);
     }
 
-    /// 两条滚动入口共用的落点：夹进范围、落库、重画。
+    /// 读者那两条滚动入口共用的落点：夹进范围、落库、重画。
+    ///
+    /// 0.5px 死区是给**手指**的：手势报上来的亚像素抖动不该每帧都摇一帧。
+    /// 自动那一帧走 [`Self::auto_scroll_by`]，绕过死区也绕过 `cx.notify()`。
     pub(in crate::ui::features::reader) fn set_scroll_y(
         &mut self,
         target: f32,
@@ -509,6 +596,37 @@ impl ReaderSession {
         if (clamped - self.scroll_y).abs() < 0.5 {
             return;
         }
+        self.apply_scroll_y(clamped);
+        // 读者自己把位置挪了：自动前进那条时间轴的起点跟着这一格走，否则下一帧
+        // 会把读者拖出来的这一段当成「时间轴走出来的」再算一遍 —— 拖一下，屏幕跳回去。
+        if let Some(state) = self.auto.as_mut() {
+            state.origin_scroll = clamped;
+            state.timed = false;
+        }
+        cx.notify();
+    }
+
+    /// 自动那一帧推进 `scroll_y`：与手动同一条落点，但不打 0.5px 死区
+    /// （余数已经攒到整 1px）、不 `cx.notify()`（推进本来就在渲染帧里，
+    /// 下一帧由 `request_animation_frame` 续）。
+    fn auto_scroll_by(&mut self, step: f32) {
+        let before = self.scroll_y;
+        let clamped = (self.scroll_y + step).clamp(0.0, self.max_scroll());
+        self.apply_scroll_y(clamped);
+        // 落到 `max_scroll` 上被夹住了：时间轴那本账会把「没走成的那一段」当成已经
+        // 走完（`origin_scroll` 照加），下一次读者拖回去时会被一个凭空多出来的基准
+        // 拽一下。这里把基准贴回真正落下的那个数 —— 到底之后自动本来就停表，这一格
+        // 只在「到底那一帧」有一点点用，但少了它就是一次看得见的跳。
+        let landed = clamped - before;
+        if (landed - step).abs() > 0.01
+            && let Some(state) = self.auto.as_mut()
+        {
+            state.origin_scroll = clamped;
+        }
+    }
+
+    /// 写 `scroll_y` 之后的那一串账，两条入口共用，别写第二份。
+    fn apply_scroll_y(&mut self, clamped: f32) {
         self.scroll_y = clamped;
         // 定版式的页号是「视口里占得最多的那一页」，滚动之后要跟着改写；
         // 可重排那一族由 `resolve_position` 当场反解，不必存第二份。
@@ -516,7 +634,6 @@ impl ReaderSession {
             self.sync_fixed_page();
         }
         self.persist_if_moved();
-        cx.notify();
     }
 
     /// 连续竖滚：把「视口里占得最多的那一页」写回页表。页号变了才清选中 ——
@@ -965,8 +1082,11 @@ mod tests {
         view.expect("ReaderSession 应该被创建")
     }
 
+    /// 滚动档：按真实 dt 把 scroll_y 往前推；读者自己一动就停表。
+    /// 这一档现在由 `AutoReadMode` 显式选定，不再跟着书的摆法猜 —— 默认翻页档会让
+    /// 连续摆法的书起自动时先被切回分页，这条门就钉住「选滚动才是真滚动」。
     #[gpui_kit::test]
-    fn auto_advance_creeps_then_user_input_stops_it(cx: &mut TestAppContext) {
+    fn auto_advance_scroll_mode_creeps_then_user_input_stops_it(cx: &mut TestAppContext) {
         use folio_core::infra::config::PageTurn;
 
         cx.update(gpui_kit::init);
@@ -987,10 +1107,20 @@ mod tests {
             "前置：这本该已经折到连续滚动档"
         );
 
-        // 连续滚动：显式递时刻（假钟不吃 background timer，见 auto_step_at 那条）。
-        // 速度默认 12 页/分，视口 600 兜底 → 一秒推 120px。
-        cx.update(|app| session.update(app, |s, cx| s.set_auto(true, cx)));
+        // 显式选滚动档再开自动：起表那一瞬摆法跟着这一档切过去，拍子按像素推。
+        cx.update(|app| {
+            session.update(app, |s, cx| {
+                s.set_auto_read_mode(AutoReadMode::Scroll, cx);
+                s.set_auto(true, cx);
+            })
+        });
         assert!(session.read_with(cx, |s, _| s.auto_on()));
+        assert!(
+            matches!(session.read_with(cx, |s, _| s.mode), PageMode::Continuous),
+            "滚动档该把正文摆在连续一列上"
+        );
+        // 显式递时刻（假钟不吃 background timer，见 auto_step_at 那条）。
+        // 速度默认 12 页/分，视口 600 兜底 → 一秒推 120px。
         let before = session.read_with(cx, |s, _| s.scroll_y);
         let at = std::time::Instant::now();
         for step in 1..=3 {
@@ -1000,7 +1130,7 @@ mod tests {
         let after = session.read_with(cx, |s, _| s.scroll_y);
         assert!(
             after > before,
-            "三秒的自动前进该把正文往前爬：{before} → {after}"
+            "三秒的滚动自动该把正文往前爬：{before} → {after}"
         );
 
         // 读者自己翻一下（连续档的 scroll_page 也是 turn 那条路）：自动停表。
@@ -1009,13 +1139,216 @@ mod tests {
             !session.read_with(cx, |s, _| s.auto_on()),
             "读者的任何一次翻页都要停掉自动前进"
         );
+    }
 
-        // 分页档：攒间隔债，攒够 5 秒（12 页/分）翻一张。
+    /// 慢速档的「抖」：2 页/分每帧只推约 0.3px，从前全被 `set_scroll_y` 的
+    /// 0.5px 死区吞掉，攒几帧突然跳一下（甚至整段不动）。余数进位之后总量
+    /// 贴着理论值走，一帧都不丢。
+    #[gpui_kit::test]
+    fn a_slow_auto_scroll_keeps_its_subpixel_remainder(cx: &mut TestAppContext) {
+        use folio_core::infra::config::PageTurn;
+
+        cx.update(gpui_kit::init);
+        let body = "<p>这是一段用来把章节撑过一屏的正文，重复许多次。</p>".repeat(30);
+        let flow = FlowDoc {
+            chapters: vec![Chapter::inline("第一章", &body)],
+            ..Default::default()
+        };
+        let (store, id) = store_with_book(&flow);
+        let session = open(cx, &flow, Some((store, id)));
+        cx.update(|app| {
+            ConfigHolder::edit_book_appearance(app, |a| {
+                a.page_turn = PageTurn::Scroll;
+                a.auto_advance_speed =
+                    crate::ui::features::reader::model::chrome::AUTO_ADVANCE_RANGE.0;
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|app| {
+            session.update(app, |s, cx| {
+                s.set_auto_read_mode(AutoReadMode::Scroll, cx);
+                s.set_auto(true, cx);
+            })
+        });
+        let at = std::time::Instant::now();
+        let start = session.read_with(cx, |s, _| s.scroll_y);
+        let mut prev = start;
+        for step in 1..=60 {
+            let now = at + Duration::from_millis(16 * step);
+            cx.update(|app| session.update(app, |s, cx| s.auto_step_at(now, cx)));
+            let y = session.read_with(cx, |s, _| s.scroll_y);
+            assert!(y >= prev, "第 {step} 帧不许往回跳：{prev} → {y}");
+            prev = y;
+        }
+        // 量**增量**：`scroll_y` 是全局坐标，开书那一帧未必从 0 起。
+        // 2 页/分 × 600px 视口 = 20 px/s，60 帧 × 16ms = 0.96s ≈ 19px。
+        // 旧实现（死区逐帧吞）这里是 0，所以这一条同时是「余数进位」的门。
+        let moved = prev - start;
+        assert!(
+            moved > 8.0 && moved < 30.0,
+            "慢档增量该贴着理论值，不追赶也不丢：{moved}"
+        );
+    }
+
+    /// 帧间隔**不匀**时，位移仍然贴着时间轴走 —— 「自动滚动有种抖动」那一半的门。
+    ///
+    /// 逐帧累加的写法（`dpx = v × dt` 每帧加一笔）在这里会露馅：16ms 一帧与
+    /// 33ms 一帧交替时，每帧的位移一快一慢，二阶差就是帧间隔的二阶差。时间轴写法
+    /// 只问「从起点到今天走了多久」，帧间隔在哪儿跳都不影响该落在的位置。
+    ///
+    /// 判据用**每帧位移的方差**：等间隔时钟下它该是 0（除了 1px 取整那一步），
+    /// 而交替间隔的逐帧累加至少会出现两种明显不同的步长。
+    #[gpui_kit::test]
+    fn an_uneven_clock_still_advances_by_the_timeline(cx: &mut TestAppContext) {
+        use folio_core::infra::config::PageTurn;
+
+        cx.update(gpui_kit::init);
+        let body = "<p>这是一段用来把章节撑过一屏的正文，重复许多次。</p>".repeat(30);
+        let flow = FlowDoc {
+            chapters: vec![Chapter::inline("第一章", &body)],
+            ..Default::default()
+        };
+        let (store, id) = store_with_book(&flow);
+        let session = open(cx, &flow, Some((store, id)));
+        cx.update(|app| {
+            ConfigHolder::edit_book_appearance(app, |a| {
+                a.page_turn = PageTurn::Scroll;
+                a.auto_advance_speed =
+                    crate::ui::features::reader::model::chrome::AUTO_ADVANCE_RANGE.1;
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|app| {
+            session.update(app, |s, cx| {
+                s.set_auto_read_mode(AutoReadMode::Scroll, cx);
+                s.set_auto(true, cx);
+            })
+        });
+        let at = std::time::Instant::now();
+        let start = session.read_with(cx, |s, _| s.scroll_y);
+        let mut prev = start;
+        let mut elapsed_ms = 0u64;
+        let mut steps = Vec::new();
+        // 16 / 17 / 33 / 16 这样交替：真实帧间隔的粗略样子。
+        for ms in [16u64, 17, 33, 16, 17, 33, 16, 17, 33, 16, 17, 33] {
+            elapsed_ms += ms;
+            let now = at + Duration::from_millis(elapsed_ms);
+            cx.update(|app| session.update(app, |s, cx| s.auto_step_at(now, cx)));
+            let y = session.read_with(cx, |s, _| s.scroll_y);
+            assert!(y >= prev, "不许往回跳：{prev} → {y}");
+            steps.push(y - prev);
+            prev = y;
+        }
+        // 40 页/分 × 600px = 400 px/s，每个固定时长的间隔里该走一样多的像素。
+        // 「同样时长的两帧位移相同」就是这条门：16ms 那几帧彼此相等、33ms 那几帧
+        // 彼此相等，且后者约是前者的两倍。
+        let sixteen: Vec<f32> = steps.iter().copied().step_by(3).collect();
+        let thirty_three: Vec<f32> = steps.iter().copied().skip(2).step_by(3).collect();
+        let spread = |xs: &[f32]| {
+            let max = xs.iter().cloned().fold(f32::MIN, f32::max);
+            let min = xs.iter().cloned().fold(f32::MAX, f32::min);
+            max - min
+        };
+        assert!(
+            spread(&sixteen) <= 1.01,
+            "同样 16ms 的帧位移该一致（1px 取整那一档）：{sixteen:?}"
+        );
+        assert!(
+            spread(&thirty_three) <= 1.01,
+            "同样 33ms 的帧位移该一致：{thirty_three:?}"
+        );
+        // 位移的**分布**是这一条真正要钉的：逐帧累加时 33ms 与 16ms 会拉开明显距离，
+        // 时间轴写法里每一帧的位移只由「这一帧跨了多久」决定，两种间隔各自内部一致，
+        // 比值取决于起点对齐，不必钉死到 2 倍 —— 钉的是**总量**（下面那句）。
+        assert!(
+            thirty_three.iter().sum::<f32>() > sixteen.iter().sum::<f32>(),
+            "33ms 那几帧加起来该比 16ms 那几帧多：{thirty_three:?} vs {sixteen:?}"
+        );
+        // 总量贴着时间轴：400 px/s × 0.234s ≈ 93px。
+        let moved = prev - start;
+        assert!(
+            (85.0..110.0).contains(&moved),
+            "总量该贴着时间轴算出来的值：{moved}"
+        );
+    }
+
+    /// 帧驱动：等间隔的每一帧都推进一次、位移单调、总量贴着 dt 算出来的值。
+    /// 定时器那条路会与 vsync 拍频（有的帧 0 次、有的帧 2 次），这条门钉的是
+    /// 「每画一帧恰好推一次」这条契约。
+    #[gpui_kit::test]
+    fn a_frame_driven_auto_scroll_advances_once_per_frame(cx: &mut TestAppContext) {
+        use folio_core::infra::config::PageTurn;
+
+        cx.update(gpui_kit::init);
+        let body = "<p>这是一段用来把章节撑过一屏的正文，重复许多次。</p>".repeat(30);
+        let flow = FlowDoc {
+            chapters: vec![Chapter::inline("第一章", &body)],
+            ..Default::default()
+        };
+        let (store, id) = store_with_book(&flow);
+        let session = open(cx, &flow, Some((store, id)));
+        cx.update(|app| {
+            ConfigHolder::edit_book_appearance(app, |a| a.page_turn = PageTurn::Scroll);
+        });
+        cx.run_until_parked();
+        cx.update(|app| {
+            session.update(app, |s, cx| {
+                s.set_auto_read_mode(AutoReadMode::Scroll, cx);
+                s.set_auto(true, cx);
+            })
+        });
+        let at = std::time::Instant::now();
+        let start = session.read_with(cx, |s, _| s.scroll_y);
+        let mut prev = start;
+        let mut advances = 0;
+        for step in 1..=60 {
+            let now = at + Duration::from_millis(16 * step);
+            cx.update(|app| session.update(app, |s, cx| s.auto_step_at(now, cx)));
+            let y = session.read_with(cx, |s, _| s.scroll_y);
+            assert!(y >= prev, "第 {step} 帧不许往回跳：{prev} → {y}");
+            if y > prev {
+                advances += 1;
+            }
+            prev = y;
+        }
+        assert!(advances >= 55, "默认速度下几乎每帧都该挪：{advances}/60");
+        // 12 页/分 × 600px = 120 px/s，0.96s ≈ 115px。同样只量增量。
+        let moved = prev - start;
+        assert!(
+            moved > 90.0 && moved < 140.0,
+            "增量贴着 dt 算出来的值，不多也不少：{moved}"
+        );
+    }
+
+    /// 翻页档：攒够间隔债翻一张，翻完还开着 —— 自动那一拍带着 auto_driving，
+    /// 不该被 `turn` 入口「读者动了就停表」那道闸误杀。
+    #[gpui_kit::test]
+    fn auto_advance_page_mode_turns_a_page_and_keeps_running(cx: &mut TestAppContext) {
+        use folio_core::infra::config::PageTurn;
+
+        cx.update(gpui_kit::init);
+        let body = "<p>这是一段用来把章节撑过一屏的正文，重复许多次。</p>".repeat(30);
+        let flow = FlowDoc {
+            chapters: vec![Chapter::inline("第一章", &body)],
+            ..Default::default()
+        };
+        let (store, id) = store_with_book(&flow);
+        let session = open(cx, &flow, Some((store, id)));
+
         cx.update(|app| {
             ConfigHolder::edit_book_appearance(app, |a| a.page_turn = PageTurn::Cover);
         });
         cx.run_until_parked();
-        cx.update(|app| session.update(app, |s, cx| s.set_auto(true, cx)));
+        cx.update(|app| {
+            session.update(app, |s, cx| {
+                s.set_auto_read_mode(AutoReadMode::Page, cx);
+                s.set_auto(true, cx);
+            })
+        });
+        assert!(
+            !matches!(session.read_with(cx, |s, _| s.mode), PageMode::Continuous),
+            "翻页档该站在分页上，不是连续一列"
+        );
         let at = std::time::Instant::now();
         for step in 1..=6 {
             let now = at + Duration::from_millis(1000 * step);
@@ -1027,11 +1360,69 @@ mod tests {
         );
         assert!(
             session.read_with(cx, |s, _| s.auto_on()),
-            "自动前进的分页档翻完一张还该开着 —— 自动那一拍带着 auto_driving，不该被 turn 入口的闸误杀"
+            "翻页档翻完一张还该开着 —— 自动那一拍带着 auto_driving，不该被 turn 入口的闸误杀"
         );
     }
 
-    /// 走到头就停表：连续滚动到底与分页档的最后一页都不该让按钮一直亮着。
+    /// 运行中切档：摆法跟着换、拍子重新起算，开自动之前那一份摆法不动 —— 退出时还的是
+    /// 读者原本的读法，不是上一档模式的。
+    #[gpui_kit::test]
+    fn switching_auto_modes_while_running_keeps_the_saved_layout(cx: &mut TestAppContext) {
+        use folio_core::infra::config::PageTurn;
+
+        cx.update(gpui_kit::init);
+        let body = "<p>这是一段用来把章节撑过一屏的正文，重复许多次。</p>".repeat(30);
+        let flow = FlowDoc {
+            chapters: vec![Chapter::inline("第一章", &body)],
+            ..Default::default()
+        };
+        let (store, id) = store_with_book(&flow);
+        let session = open(cx, &flow, Some((store, id)));
+        cx.update(|app| {
+            ConfigHolder::edit_book_appearance(app, |a| a.page_turn = PageTurn::Cover);
+        });
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            session.update(app, |s, cx| {
+                s.set_auto_read_mode(AutoReadMode::Page, cx);
+                s.set_auto(true, cx);
+            })
+        });
+        let saved = session.read_with(cx, |s, _| s.auto_saved_layout);
+        assert_eq!(
+            saved.map(|(mode, _)| mode),
+            Some(PageMode::Paged),
+            "开自动前这本站在分页上，记下的该是它"
+        );
+
+        cx.update(|app| {
+            session.update(app, |s, cx| s.set_auto_read_mode(AutoReadMode::Scroll, cx))
+        });
+        assert!(
+            matches!(session.read_with(cx, |s, _| s.mode), PageMode::Continuous),
+            "运行中切到滚动档，正文该换到连续一列"
+        );
+        assert_eq!(
+            session.read_with(cx, |s, _| s.auto_saved_layout),
+            saved,
+            "切档不该改写开自动之前的摆法"
+        );
+        assert!(
+            session.read_with(cx, |s, _| s.auto_on()),
+            "切档不该把拍子停掉"
+        );
+        // 切回翻页档又站回分页；停表后还原交给渲染帧（那里才收 auto_saved_layout）。
+        cx.update(|app| session.update(app, |s, cx| s.set_auto_read_mode(AutoReadMode::Page, cx)));
+        assert!(
+            matches!(session.read_with(cx, |s, _| s.mode), PageMode::Paged),
+            "切回翻页档又该是分页"
+        );
+        cx.update(|app| session.update(app, |s, cx| s.set_auto(false, cx)));
+        assert!(!session.read_with(cx, |s, _| s.auto_on()), "停表");
+    }
+
+    /// 走到头就停表：滚动档滚到底、翻页档翻到最后一页，都不该让按钮一直亮着。
     #[gpui_kit::test]
     fn auto_advance_stops_at_the_end_of_the_book(cx: &mut TestAppContext) {
         use folio_core::infra::config::PageTurn;
@@ -1045,11 +1436,17 @@ mod tests {
         let (store, id) = store_with_book(&flow);
         let session = open(cx, &flow, Some((store, id)));
 
+        // 滚动档：显式选中，一拍之后该停表。
         cx.update(|app| {
             ConfigHolder::edit_book_appearance(app, |a| a.page_turn = PageTurn::Scroll);
         });
         cx.run_until_parked();
-        cx.update(|app| session.update(app, |s, cx| s.set_auto(true, cx)));
+        cx.update(|app| {
+            session.update(app, |s, cx| {
+                s.set_auto_read_mode(AutoReadMode::Scroll, cx);
+                s.set_auto(true, cx);
+            })
+        });
         let at = std::time::Instant::now();
         cx.update(|app| {
             session.update(app, |s, cx| {
@@ -1058,14 +1455,20 @@ mod tests {
         });
         assert!(
             !session.read_with(cx, |s, _| s.auto_on()),
-            "连续滚动已经在底，一拍之后该停表"
+            "滚动档已经在底，一拍之后该停表"
         );
 
+        // 翻页档：显式选中，攒够间隔债也没有下一张，该停表。
         cx.update(|app| {
             ConfigHolder::edit_book_appearance(app, |a| a.page_turn = PageTurn::Cover);
         });
         cx.run_until_parked();
-        cx.update(|app| session.update(app, |s, cx| s.set_auto(true, cx)));
+        cx.update(|app| {
+            session.update(app, |s, cx| {
+                s.set_auto_read_mode(AutoReadMode::Page, cx);
+                s.set_auto(true, cx);
+            })
+        });
         let at = std::time::Instant::now();
         for step in 1..=6 {
             let now = at + Duration::from_millis(1000 * step);

@@ -4,7 +4,7 @@ default-members = ["crates/folio-app"]
 members = ["crates/folio-core", "crates/folio-app"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -76,6 +76,11 @@ resvg = { version = "=0.46.0" }
 # **不是新依赖树**：锁里已有 0.25.1，`fontdb`（cosmic-text 那一链）与 resvg 都在用它，
 # 这里只是把图上已有的一份转成直接依赖。
 ttf-parser = "0.25"
+# 随书字体的子集化（skera）与 name 表重建（read-fonts / write-fonts）。原在 folio-app
+# 直连；`text::load` 下沉 core 之后两端都要，收进 workspace 统一版本。
+skera = "0.9"
+read-fonts = "0.46"
+write-fonts = "0.55"
 # ZIP 的压缩方法。**只开纯 Rust 的那几族**：deflate（flate2/zlib-rs + zopfli）、
 # bzip2（bzip2 0.6 的默认后端是 libbz2-rs-sys）、lzma / xz（lzma-rust2）、
 # ppmd（ppmd-rust）、deflate64（纯 Rust 解码器）。7-Zip / WinRAR 做的这几类 zip

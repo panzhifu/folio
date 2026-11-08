@@ -182,8 +182,14 @@ fn collect_headers(response: &ureq::Response) -> Vec<(String, String)> {
 }
 
 /// 供 app 侧共享（`Arc<dyn Transport>` 的形状在这里定）。
+///
+/// 外面套一层 [`Retrying`](super::retry::Retrying)：429 / 5xx / 连不上时按
+/// 300 ms → 600 ms 退避重发两次。流式下载与大体量上传不重试，理由见 retry 模块头。
 pub fn shared() -> Arc<dyn Transport> {
-    Arc::new(UreqTransport::new())
+    Arc::new(super::retry::Retrying::new(
+        UreqTransport::new(),
+        super::retry::RetryPolicy::default(),
+    ))
 }
 
 #[cfg(test)]

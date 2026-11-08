@@ -138,7 +138,7 @@ impl NotesSheet {
             Notes::Ready(body) if body.trim().is_empty() => {
                 return measure(muted_label(tr(cx, "update.notes_missing").to_string(), cx));
             }
-            Notes::Ready(body) => body.trim().to_owned(),
+            Notes::Ready(body) => without_checksums(body),
         };
         // `pb_6`：滚到最末一行时别让文字贴着卡片下沿，与目录那屏底部那 24 同一档。
         // 那一格挂个名并 `test_support`：宿主测试就靠它判「卡片升起来的时候内容真给了」，
@@ -183,6 +183,45 @@ fn measure(body: impl IntoElement) -> AnyElement {
         .justify_center()
         .child(div().w_full().max_w(rems(MEASURE_REMS)).px_4().child(body))
         .into_any_element()
+}
+
+/// 更新日志正文里**不摆**校验和那一截。
+///
+/// 发版 workflow 曾经把 `sha256sums.txt` 整份贴在 release 正文末尾，于是应用里这张
+/// 「更新日志」卡片也跟着念一串六十四位的十六进制。校验和是给下载器与手工验包的人看的，
+/// 不是读者要读的「这一版改了什么」—— 在这里截掉，且对**老 release** 同样生效（正文已经
+/// 在 GitHub 上了，客户端不能指望它被重写）。
+///
+/// 两道判据：见到「校验和 / checksum / sha256sums」的标题就整段不要；正文里混进来的
+/// 「64 位十六进制 + 文件名」也逐行丢掉。两者都只认形状，不改其余一个字。
+fn without_checksums(text: &str) -> String {
+    let mut kept = Vec::new();
+    for line in text.lines() {
+        if is_checksum_heading(line) {
+            break;
+        }
+        if looks_like_checksum_line(line) {
+            continue;
+        }
+        kept.push(line);
+    }
+    kept.join("\n").trim_end().to_string()
+}
+
+fn is_checksum_heading(line: &str) -> bool {
+    let title = line
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .to_ascii_lowercase();
+    title.starts_with("校验和") || title.contains("checksum") || title.contains("sha256sums")
+}
+
+fn looks_like_checksum_line(line: &str) -> bool {
+    let Some(hash) = line.split_whitespace().next() else {
+        return false;
+    };
+    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -302,5 +341,18 @@ mod tests {
         rise(cx, &sheet, handle, Notes::Ready("   ".into()));
         assert!(mounted(cx, handle), "没有正文也要开得出那一屏的说明");
         assert!(!body_shown(cx, handle), "空的正文不进 Markdown 那一栏");
+    }
+
+    /// 校验和不是更新日志：标题那一整段与散落的「64 位十六进制 + 文件名」都不进卡片。
+    #[test]
+    fn checksum_lines_and_sections_are_not_shown_as_notes() {
+        let body = "- 修了翻页。\n\n### 校验和（`sha256sums.txt`）\n\n```\n\
+                    e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  folio.apk\n\
+                    ```\n";
+        assert_eq!(super::without_checksums(body), "- 修了翻页。");
+
+        let stray = "- 一条正文\n\
+                     e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  folio.deb\n";
+        assert_eq!(super::without_checksums(stray), "- 一条正文");
     }
 }

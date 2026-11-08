@@ -1178,6 +1178,7 @@ pub enum SyncProvider {
     #[default]
     WebDav,
     Baidu,
+    Aliyun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1221,13 +1222,13 @@ impl Sync {
         self
     }
 
-    /// 有去处且打开了开关，才谈得上同步。百度那一头不看地址 —— 它的凭据在
-    /// [`Cloud::baidu`] 里，缺没缺由同步服务那一层报。
+    /// 有去处且打开了开关，才谈得上同步。两家网盘都不看地址 —— 它们的凭据在
+    /// [`Cloud::baidu`] / [`Cloud::aliyun`] 里，缺没缺由同步服务那一层报。
     pub fn configured(&self) -> bool {
         self.enabled
             && match self.provider {
                 SyncProvider::WebDav => !self.url.is_empty(),
-                SyncProvider::Baidu => true,
+                SyncProvider::Baidu | SyncProvider::Aliyun => true,
             }
     }
 }
@@ -1474,6 +1475,7 @@ pub struct OpdsCatalog {
 pub struct Cloud {
     pub webdav: WebDavDrive,
     pub baidu: BaiduDrive,
+    pub aliyun: AliyunDrive,
 }
 
 impl Cloud {
@@ -1483,6 +1485,7 @@ impl Cloud {
     pub fn normalized(mut self) -> Self {
         self.webdav = self.webdav.normalized();
         self.baidu = self.baidu.normalized();
+        self.aliyun = self.aliyun.normalized();
         self
     }
 }
@@ -1555,6 +1558,52 @@ impl BaiduDrive {
     }
 
     /// 有没有 OAuth 的刷新凭据 —— 有它，token 过期才能自己续。
+    pub fn refreshable(&self) -> bool {
+        !self.refresh_token.is_empty()
+    }
+}
+
+/// 阿里云盘（Alipan）的账号格。
+///
+/// 与百度的 [`BaiduDrive`] 同一个形状，多一格 `drive_id`：阿里云盘的**每一个**
+/// 文件请求都要带它（`drive_id` 是那一份云盘的编号，普通用户只有一个，
+/// 但它不是常量，只能授权后问 `getDriveInfo` 拿到）。少这一格，请求会回
+/// `InvalidParameter`，而错误信息里不会直说缺了它 —— 所以这一格与 token 一起落盘。
+///
+/// 取书浏览用 `root`（整个网盘），同步与传书落在应用自己的目录
+/// （[`crate::net::cloud::aliyun::APP_ROOT`]）—— 与百度那边同一条取舍。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AliyunDrive {
+    pub access_token: String,
+    pub refresh_token: String,
+    /// 到期时刻（Unix 秒）。0 = 未知（老配置 / 手贴 token）。
+    pub expires_at: i64,
+    /// 云盘编号。授权后由 `getDriveInfo` 问一次，之后随配置走。
+    pub drive_id: String,
+    /// 账号名（昵称），账号列表上给读者看「这一格是谁」。
+    pub account: String,
+}
+
+impl AliyunDrive {
+    /// 与 [`BaiduDrive::normalized`] 同一条规矩：密文修剪、账号名修剪、到期时刻只认正数。
+    pub fn normalized(mut self) -> Self {
+        self.access_token = self.access_token.trim().to_string();
+        self.refresh_token = self.refresh_token.trim().to_string();
+        self.drive_id = self.drive_id.trim().to_string();
+        self.account = self.account.trim().to_string();
+        if self.expires_at <= 0 {
+            self.expires_at = 0;
+        }
+        self
+    }
+
+    /// token 与 `drive_id` **都**要有，才谈得上浏览：缺 drive_id 的请求一定被拒，
+    /// 与其让读者看见一串看不懂的 `InvalidParameter`，不如在入口处就当没配好。
+    pub fn configured(&self) -> bool {
+        !self.access_token.is_empty() && !self.drive_id.is_empty()
+    }
+
     pub fn refreshable(&self) -> bool {
         !self.refresh_token.is_empty()
     }
@@ -3422,7 +3471,7 @@ mod opds_config_tests {
         assert_eq!(catalog.password, "  pass with spaces  ");
     }
 
-    use super::{BaiduDrive, Cloud, WebDavDrive};
+    use super::{AliyunDrive, BaiduDrive, Cloud, WebDavDrive};
 
     #[test]
     fn cloud_trims_fields_but_keeps_the_secrets() {
@@ -3440,6 +3489,13 @@ mod opds_config_tests {
                     expires_at: 0,
                     account: "  山间的读客  ".into(),
                 },
+                aliyun: AliyunDrive {
+                    access_token: "  ali.tok  ".into(),
+                    refresh_token: "  ali.r  ".into(),
+                    expires_at: -5,
+                    drive_id: "  1234567  ".into(),
+                    account: "  阿里的读者  ".into(),
+                },
             },
             ..Config::default()
         }
@@ -3454,6 +3510,11 @@ mod opds_config_tests {
         assert_eq!(config.cloud.baidu.refresh_token, "122.r");
         assert_eq!(config.cloud.baidu.account, "山间的读客");
         assert_eq!(config.cloud.baidu.expires_at, 0);
+        // 阿里云盘同一条：token / drive_id / 账号名修剪，负的到期时刻归 0。
+        assert_eq!(config.cloud.aliyun.access_token, "ali.tok");
+        assert_eq!(config.cloud.aliyun.drive_id, "1234567");
+        assert_eq!(config.cloud.aliyun.account, "阿里的读者");
+        assert_eq!(config.cloud.aliyun.expires_at, 0);
     }
 
     #[test]
@@ -3479,6 +3540,26 @@ mod opds_config_tests {
             BaiduDrive {
                 access_token: "121.abc".into(),
                 ..BaiduDrive::default()
+            }
+            .configured()
+        );
+
+        // 阿里云盘要两样：token 与 drive_id。少一样就不算配好 —— 缺 drive_id 的
+        // 请求一定被拒，让读者在这儿看见「没配好」比让他去猜 `InvalidParameter` 强。
+        assert!(!AliyunDrive::default().configured());
+        assert!(
+            !AliyunDrive {
+                access_token: "ali.tok".into(),
+                ..AliyunDrive::default()
+            }
+            .configured(),
+            "只有 token 没有 drive_id，请求必被拒"
+        );
+        assert!(
+            AliyunDrive {
+                access_token: "ali.tok".into(),
+                drive_id: "123".into(),
+                ..AliyunDrive::default()
             }
             .configured()
         );

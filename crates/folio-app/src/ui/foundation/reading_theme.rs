@@ -16,8 +16,11 @@
 //! 正文后画曾经只是帧序上的现状，离场改造之后壳在离场起步那一帧就翻回软件外观，正文
 //! 还要按自己的夜里画完最后一段动画，侧必须与壳的档位解耦。
 //!
-//! 这一层不做 IO（背景图的读盘与解码在消费方），不存状态：每帧现问现算，查一张
-//! 常量表与几次浮点换算，量级与壳每帧读主题相同。
+//! 这一层不做 IO（背景图的读盘与解码在消费方）。配色每帧现问现算，查一张
+//! 常量表与几次浮点换算，量级与壳每帧读主题相同；**唯一例外**是 [`set_page_bg`]
+//! 那一格「当前这本书自己声明的整页底色」—— 它由开书同步设一次，必须让
+//! [`resolve`] 的每一个消费点（根底、版心、捕获清屏色、读数带）同时看到，
+//! 否则作者写的底色会在排版结果回来后从半路盖上来，读者先看见自己选的纸色。
 
 use folio_core::infra::config::{Appearance, Mode};
 use folio_core::infra::reading_theme::{BUILT_IN, Rgba8};
@@ -74,12 +77,41 @@ pub fn to_hsla(color: Rgba8) -> Hsla {
     .into()
 }
 
+/// 当前这一本**自己声明**的整页底色。
+///
+/// 见模块头：这是本模块唯一的一格状态，由 `ReaderSession::open_book` 在开书时
+/// 从 `books.css` 同步扫出来设一次（换书覆盖、没有声明就设 `None`）。
+static PAGE_BG: std::sync::RwLock<Option<Hsla>> = std::sync::RwLock::new(None);
+
+/// 开书 / 换书时推一次；`None` = 这本没在 CSS 里写整页底色，回落读者选的纸。
+pub fn set_page_bg(bg: Option<Hsla>) {
+    if let Ok(mut slot) = PAGE_BG.write() {
+        *slot = bg;
+    }
+}
+
+fn page_bg() -> Option<Hsla> {
+    PAGE_BG.read().ok().and_then(|slot| *slot)
+}
+
 /// 这一帧正文用哪套颜色。外观由调用方递进来（生效值含本书差量），这里不摸配置层
 /// —— 本模块住在 `foundation`，不 import 上面任何一层；壳主题那一侧仍从 `cx` 现取。
 ///
 /// 查无此名回落「跟随软件」：手改坏的名字让纸回到壳主题，而不是变白屏。
+/// 书自己声明了整页底色时，**纸这一格以书为准**：作者写了 `body { background: … }`
+/// 就是不让读者那套纸盖上去（层叠本来也是如此），而首帧就得是这个色。
 pub fn resolve(appearance: &Appearance, cx: &App) -> ReadingPalette {
-    pick(appearance.reading_theme.as_deref(), appearance, cx)
+    let mut palette = pick(appearance.reading_theme.as_deref(), appearance, cx);
+    if let Some(bg) = page_bg() {
+        // 水墨档把作者色也压成灰（与 `pick` 里那几格同一把尺），否则一本棕底
+        // 书在水墨下会突然冒出一块彩色。
+        palette.bg = if effective_mode(appearance) == Mode::Ink {
+            desaturate(bg)
+        } else {
+            bg
+        };
+    }
+    palette
 }
 
 fn pick(name: Option<&str>, appearance: &Appearance, cx: &App) -> ReadingPalette {
@@ -183,7 +215,8 @@ pub fn built_in_names() -> impl Iterator<Item = &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MUTED_ALPHA, ReadingPalette, built_in_names, effective_mode, pick, resolve, swatch,
+        MUTED_ALPHA, ReadingPalette, built_in_names, effective_mode, pick, resolve, set_page_bg,
+        swatch, to_hsla,
     };
     use folio_core::infra::config::{Appearance, Mode};
     use gpui_kit::TestAppContext;
@@ -212,6 +245,38 @@ mod tests {
             assert_eq!(palette.fg, theme.colors.foreground);
             assert_eq!(palette.link, theme.colors.blue);
             assert_eq!(palette.muted, theme.colors.muted_foreground);
+        });
+    }
+
+    /// 书自己声明了整页底色时，纸这一格**首帧**就以书为准。
+    ///
+    /// 这就是「先变成读者设置的背景色、再变成书籍自带的背景色」那一段跳变的门：
+    /// 设一次书色，`resolve` 当场就得返回它，而不是等异步排版把装饰块盖上来。
+    /// 只换 `bg`，墨 / 链接 / 淡墨仍归读者那套；换到没声明的书立刻回落。
+    #[gpui_kit::test]
+    fn a_book_page_background_wins_from_the_first_frame(cx: &mut TestAppContext) {
+        use folio_core::infra::reading_theme::Rgba8;
+
+        cx.update(gpui_kit::init);
+        cx.update(register_builtin_themes);
+        let appearance = sepia(Mode::Light);
+        cx.update(|app| {
+            set_page_bg(None);
+            let base = resolve(&appearance, app);
+            let book = to_hsla(Rgba8 {
+                r: 0xc4,
+                g: 0xaa,
+                b: 0x87,
+                a: 255,
+            });
+            set_page_bg(Some(book));
+            let got = resolve(&appearance, app);
+            assert_eq!(got.bg, book, "首帧就得以书色铺纸");
+            assert_ne!(got.bg, base.bg, "不该先铺读者选的那张纸");
+            assert_eq!(got.fg, base.fg, "书只声明了底色，墨色不跟着换");
+            // 换到没声明整页底色的书：立刻回落，旧书色不许串过来。
+            set_page_bg(None);
+            assert_eq!(resolve(&appearance, app).bg, base.bg);
         });
     }
 

@@ -70,6 +70,45 @@ pub(super) fn picture_wants_preview(stack: Option<folio_core::layout::StackMark>
     stack.is_none()
 }
 
+/// 这一帧该不该停在低清预览：只有在滑、且高清**不在手**时才是。
+///
+/// 高清已经在手时不拦 —— 那只是换一次纹理，不花钱；停下来之后也不拦，该排
+/// 高清、该换高清照旧。定版式 [`painted_tile`] 与可重排 [`painted_picture`]
+/// 共用这一份判据，别让两处各写一遍慢慢漂。
+fn stay_on_preview(scrolling: bool, high_ready: bool) -> bool {
+    scrolling && !high_ready
+}
+
+/// 滑动停下的头几帧里，这一格还先画低清。
+///
+/// 换档那一帧是一次**纹理替换**（低清那一格放掉、高清那一格传上去），中间那一帧
+/// gpui 手里没有可画的像素。静止时这一空只是一下微闪，而**刚停下那一两帧**正是
+/// 读者的眼睛还盯着那一块的时候 —— 「滑过去、闪一下、才清楚」就是它。
+///
+/// 只等几帧（约 50ms）：再久就是「图一直糊着」，而低清那一档也多占几帧内存。
+const PREVIEW_SETTLE_FRAMES: u32 = 3;
+
+/// 换档的时间闸：`scrolling` 为真，或者**离开滑动还不到 [`PREVIEW_SETTLE_FRAMES`] 帧**。
+///
+/// 帧号由绘制侧每帧推一次（`view::body` 算完 `motion` 之后调 [`note_scroll_frame`]），
+/// 与 [`crate::ui::features::reader::model::image_atlas::set_scrolling`] 同一手法 ——
+/// 画不画高清是「这一帧」的属性，不是图集的属性。
+static SCROLL_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// 这一帧是不是还该按「刚停下」处理（见 [`PREVIEW_SETTLE_FRAMES`]）。
+pub(super) fn settling() -> bool {
+    SCROLL_EPOCH.load(std::sync::atomic::Ordering::Relaxed) < PREVIEW_SETTLE_FRAMES
+}
+
+/// 绘制侧每帧推一次：`scrolling` 为真就把计时归零，否则 +1。
+pub(super) fn note_scroll_frame(scrolling: bool) {
+    if scrolling {
+        SCROLL_EPOCH.store(0, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        SCROLL_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// 一格的像素：先画低清预览，高清到了再换。
 ///
 /// 两档**不同时起**：高清那一趟的回开容器 + 栅格化要几秒，先起它会把低清挤在同一批
@@ -91,12 +130,11 @@ pub(super) fn painted_tile(
             // ms 的栅格化，滑动中起它等于把「下一帧」的钱挪到「这一帧」上 —— 读者看见
             // 的是滑动卡顿，而他要的那张图本来也还在下面好几屏外。停下 150 ms 之后
             // 那一帧 `scrolling` 为假，这里才排高清（`atlas.prepare` 自己会去重）。
-            let high = tile.request.as_ref();
-            if scrolling
-                && !high.is_some_and(|request| {
-                    atlas.read_with(cx, |atlas, _| atlas.ready(&request.key))
-                })
-            {
+            let high_ready = tile
+                .request
+                .as_ref()
+                .is_some_and(|request| atlas.read_with(cx, |atlas, _| atlas.ready(&request.key)));
+            if stay_on_preview(scrolling, high_ready) {
                 return Some(low);
             }
             if let Some(image) = tile
@@ -145,6 +183,16 @@ pub(super) fn painted_picture(
         return painted(atlas, request.clone(), view, cx);
     };
     if let Some(low) = painted(atlas, preview.clone(), view, cx) {
+        // 滑动中只要高清已经在手就换，但**不去起它**：那一趟栅格化几十到几百 ms，
+        // 起在运动里等于把下一帧的钱挪到这一帧；而低清 → 高清在运动里换档，
+        // 正是读者说的「闪一下再加载出来」。判据与定版式 [`painted_tile`] 同一份。
+        let high_ready = atlas.read_with(cx, |atlas, _| atlas.ready(&request.key));
+        if stay_on_preview(
+            crate::ui::features::reader::model::image_atlas::scrolling() || settling(),
+            high_ready,
+        ) {
+            return Some(low);
+        }
         if let Some(high) = painted(atlas, request.clone(), view, cx) {
             return Some(high);
         }
@@ -732,7 +780,7 @@ pub(super) fn viewport_size(window: &Window) -> (f32, f32) {
 mod tests {
     //! 两档路径的判据：哪一类图要「先糊后清」，哪一类直接上全清。
 
-    use super::picture_wants_preview;
+    use super::{picture_wants_preview, stay_on_preview};
     use folio_core::layout::StackMark;
 
     #[test]
@@ -749,5 +797,36 @@ mod tests {
             picture_wants_preview(None),
             "普通插图仍用预览档：快滑时屏上不该是白纸"
         );
+    }
+
+    /// 滑动中停在低清的判据：只在「在滑」且「高清没在手」时拦。
+    /// 高清已经在手、或已经停下，都该照常换 / 排高清 —— 拦过头会让图永远糊着。
+    #[test]
+    fn a_scrolling_frame_stays_on_preview_only_until_high_is_ready() {
+        assert!(stay_on_preview(true, false), "在滑 + 高清没到 → 停在低清");
+        assert!(!stay_on_preview(true, true), "高清已在手 → 换档不花钱");
+        assert!(!stay_on_preview(false, false), "停下了 → 该排高清");
+        assert!(!stay_on_preview(false, true));
+    }
+
+    /// 停下之后的头几帧还要按「在滑」处理，过了那几帧才放行换高清。
+    ///
+    /// 这一条钉的是「滑过去、闪一下、才清楚」：换档那一帧是一次纹理替换，中间
+    /// 那一空不该落在读者刚停下、还盯着那一块的时候。
+    #[test]
+    fn the_first_frames_after_a_scroll_still_hold_the_preview() {
+        // 测试并行跑，别的用例也会推这一格：先把它推到「很久没滑」的稳定态。
+        for _ in 0..(super::PREVIEW_SETTLE_FRAMES + 2) {
+            super::note_scroll_frame(false);
+        }
+        assert!(!super::settling(), "上一轮之后早就该放行了");
+        super::note_scroll_frame(true);
+        assert!(super::settling(), "停下那一帧仍是「刚停下」");
+        for _ in 0..(super::PREVIEW_SETTLE_FRAMES - 1) {
+            super::note_scroll_frame(false);
+        }
+        assert!(super::settling(), "还差一帧");
+        super::note_scroll_frame(false);
+        assert!(!super::settling(), "够了那几帧就该换高清");
     }
 }

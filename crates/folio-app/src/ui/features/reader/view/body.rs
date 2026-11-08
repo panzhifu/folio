@@ -683,12 +683,31 @@ impl Render for ReaderSession {
         } else {
             chrome::default_mode(usable, gap)
         };
-        let wanted = if self.mode_undecided {
+        //
+        // 自动阅读开着时，摆法由这一趟的 [`chrome::AutoReadMode`] 定，`reconcile`（翻页
+        // 方式对摆法的否决权）让路：选了「连续滚动」就得是连续，哪怕这本书配的是仿真
+        // 折页 —— 否则刚切过去下一帧就被推回分页，滚动那档只是名义上存在。
+        // 刚退出自动的那一帧：把开自动前的摆法与「读者选过档没有」那面旗原样还回去，
+        // 同样先不让 reconcile 插手（下一帧它照常接手）。还原挂在渲染帧而不是某个停表
+        // 入口上，因为停表的路有好几条（读者一划、滚到底、听书起念），挂一处就会漏。
+        let auto_override = if self.auto.is_some() {
+            Some(self.auto_mode.layout(self.mode))
+        } else if let Some((mode, undecided)) = self.auto_saved_layout.take() {
+            self.mode_undecided = undecided;
+            Some(mode)
+        } else {
+            None
+        };
+        let wanted = auto_override.unwrap_or(if self.mode_undecided {
             by_width
         } else {
             self.mode
+        });
+        let resolved = match auto_override {
+            Some(mode) => mode,
+            None => chrome::reconcile(configured_turn, wanted, by_width),
         };
-        self.adopt_mode(chrome::reconcile(configured_turn, wanted, by_width), cx);
+        self.adopt_mode(resolved, cx);
         let mode = self.mode.effective(usable, gap);
         let columns = mode.columns();
 
@@ -879,7 +898,26 @@ impl Render for ReaderSession {
         // 放在 `font_cache` 那个可变借用**之前**：进了 `match &mut self.source` 与
         // 那几个 `&mut self.xxx` 之后 `self` 整体借不出，`&mut self` 的方法就调不了。
         let now = std::time::Instant::now();
-        let motion = self.mark_scroll(now, viewport_height);
+        // 自动前进由**渲染帧**推，不再由 16ms 后台定时器推：两条时钟（16ms 与
+        // vsync 的 16.67ms）互相拍频时，有的帧收到 0 次推进、有的收到 2 次，
+        // 读起来就是抖。帧驱动保证每画一帧恰好推一次，且 `scroll_y` 只有这一个
+        // 写入者 —— 下面 `reflowable` 的坐标链在同一帧里读到的是推完的值。
+        let auto_on = self.auto.is_some();
+        if auto_on {
+            self.auto_step_at(now, cx);
+            // 循环由帧自己续：关掉自动之后不再请求，重绘自然停下来。
+            window.request_animation_frame();
+        }
+        // 自动推进不是「读者在滑」：别让它把图集的滑动态翻开又合上
+        // （那会让预览 / 高清档位在自动阅读里来回切，读作抖）。
+        let motion = self.mark_scroll(now, viewport_height, auto_on);
+        // 把「这一帧在不在快滑」推给图集：`painted_picture` 在滑动中只画低清、
+        // 不排高清也不换档。与下面那格屏幕宽同一手法，每帧推一次。
+        crate::ui::features::reader::model::image_atlas::set_scrolling(motion.scrolling);
+        // 停下之后还要多等几帧才许从低清换高清：换档那一帧是一次纹理替换，中间
+        // 那一空正好落在读者还盯着那一块的时候（「滑过去、闪一下、才清楚」）。
+        // 与上面那一格同一手法，每帧推一次。
+        images::note_scroll_frame(motion.scrolling);
         // 图集的内存档位要按设备分（手机 24 MB / 平板 48 / 桌面 128），而设备那一格
         // 只有窗口量得出来：每帧推一次逻辑宽度，档位随窗口变化也跟着走。
         crate::ui::features::reader::model::image_atlas::set_screen_width(f32::from(
@@ -1374,28 +1412,31 @@ impl Render for ReaderSession {
         if let Some(side) = prefetch_side
             && let Some(book) = self.book()
         {
+            // 快滑时把「下一屏」扩成两屏、每帧多排几张**低清**：滑得比画得快时，
+            // 只预解一张会在读者到那一屏时还在画。全档仍只在静止帧排 —— 那一趟
+            // 贵，起在运动里会把眼前这张挤出去。
+            let radius = if motion.scrolling { 2.0 } else { 1.0 };
+            let limit = if motion.scrolling { 4 } else { 1 };
             // 「还没进图集」只能这么知道：`painted` 那一问已经把「在场」记上了。
             let targets = if mode.is_continuous() {
                 prefetch::scroll_targets(
                     &book.placements(chapter_gap),
                     self.scroll_painted..(self.scroll_painted + viewport_height),
-                    viewport_height,
+                    viewport_height * radius,
                     side,
                 )
             } else {
                 prefetch::paged_targets(book, self.page, self.laid_out.pages, side)
             };
-            let picked = prefetch::first_unseen(book, &targets, |href| {
-                painted_keys.iter().any(|k| k == href)
-            });
-            if let Some(request) = picked {
+            let seen = |href: &str| painted_keys.iter().any(|k| k == href);
+            for request in prefetch::unseen(book, &targets, seen, limit) {
                 if !stack_neighbors.contains(&request.key)
                     && let Some(low) = request.preview()
                 {
                     self.atlas
                         .update(cx, |atlas, cx| atlas.prepare(&low, view, cx));
                 }
-                if turn.is_none() {
+                if turn.is_none() && !motion.scrolling {
                     self.atlas
                         .update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
                 }

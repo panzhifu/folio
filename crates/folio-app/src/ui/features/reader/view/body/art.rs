@@ -18,18 +18,6 @@ pub(super) struct PageArt {
     pub(super) picture_only: bool,
 }
 
-/// 整页图该不该用 `contain`：比例和屏幕差得远时，宁可留底色也不裁掉内容。
-///
-/// 封面有 `0~slim` 这种同比例兄弟，走 `cover` 仍然不裁；正文里的横图/方图没有兄弟，
-/// `cover` 会只剩中间一条 —— 读者报的「图片显示不全」就是它。
-pub(super) fn page_art_contain(doc: &Document, href: &str, want_aspect: f32) -> bool {
-    let (w, h) = doc.images().natural_size(href);
-    if w <= 0.0 || h <= 0.0 || !want_aspect.is_finite() || want_aspect <= 0.0 {
-        return false;
-    }
-    ((w / h) - want_aspect).abs() / want_aspect > 0.15
-}
-
 /// 这一帧的整页画：当前章（视口顶所在的那章）是一整页底图、或整章只有一张满宽图。
 ///
 /// 阅读器把它贴到**整窗**上、读数带浮在上面（Reeden 那种画法），而不是排进版心：
@@ -123,11 +111,17 @@ pub(super) fn page_art_for_doc(
         .images()
         .closest_portrait_variant(href, want_aspect)
         .unwrap_or_else(|| href.clone());
-    let fit = if page_art_contain(doc, &href, want_aspect) {
-        BackgroundSize::Contain
-    } else {
-        BackgroundSize::Cover
-    };
+    // 铺满那一档一律 `contain`：**不裁**。
+    //
+    // 从前后是按比例分两档 —— 比例和屏幕差得远就用 `contain`，差得近就用 `cover`。
+    // `cover` 会把图按屏幕比例放大，再被外框裁掉超出那一条：封面那种竖图在手机
+    // 屏上左右各切一截，标题两端就没了。读者报的「封面被裁切」正是这一档。
+    //
+    // 现在改成：图**完整显示**，四周不够的地方由纸色补（`contain` 居中，上下或
+    // 左右留出的就是纸色）。代价是宽高比和屏幕差得远的图会留出明显的边，但那是
+    // 看得见的纸色，而不是「看不见的那一截内容」。整窗背板本来就是一张图铺一屏，
+    // 读者要的是「看到整张」而不是「铺满但被切」。
+    let fit = BackgroundSize::Contain;
     Some(PageArt {
         chapter,
         pictures: vec![crate::ui::features::reader::view::scene::full_page_picture(

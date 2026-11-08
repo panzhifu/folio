@@ -271,8 +271,7 @@ pub(crate) fn family_has_m(cx: &App, name: &str) -> bool {
 /// 候选要同时过两道：进程登记表里不是「随书字体没有 `m`」的那一类，以及
 /// [`family_has_m`] 真解析得出一张带 `m` 的脸。
 pub(crate) fn find_family(wanted: &str, cx: &App) -> Option<String> {
-    let names =
-        crate::ui::foundation::font_primary::usable_names(cx.text_system().all_font_names());
+    let names = folio_core::text::usable_names(cx.text_system().all_font_names());
     let find = |want: &str| {
         names
             .iter()

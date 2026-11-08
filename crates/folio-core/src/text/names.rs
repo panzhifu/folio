@@ -1,9 +1,10 @@
 //! 字体字节的名字表解析：一份 ttf/otf/ttc 里有哪些家族名、各带不带拉丁 `m`。
 //!
 //! 纯字节解析，不碰文件系统、不碰 `TextSystem` —— 消费方有两处：
-//! `book_fonts`（随书注册后按家族名记「能不能当 primary」）与 `platform::system_fonts`
-//! （Android 全量扫描时判「这份字体是不是已经注册过」）。住在地基里的理由同
-//! [`super::font_primary`]：两处都要用，而它谁也不认识。
+//! `text::load`（随书注册后按家族名记「能不能当 primary」）与 app 侧的系统字体
+//! 全量扫描（`platform::system_fonts`，判「这份字体是不是已经注册过」）。
+//! 2026-11-09 从 `folio_app::ui::foundation::font_names` 搬来：它谁也不认识，
+//! 而两处消费方都在问同一个问题。
 
 use std::collections::HashMap;
 

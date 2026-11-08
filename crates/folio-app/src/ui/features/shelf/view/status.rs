@@ -1,9 +1,14 @@
 //! 导入那一张记录卡：一行一本书。
 //!
-//! 还在跑的那本，**名字下面是一条按字节走的进度条**（字节读数本来就带书名，见
-//! `ByteProgress::name`）；结清的那本，名字下面说「成功 · EPUB · 666.63 MB · 9 秒」，
-//! 右边一颗「打开」。一批跑完，卡从「在跑」换成「结清」，读者要答的那三问 ——
-//! 哪几本进来了、哪几本没进、为什么 —— 在同一屏里看完。
+//! 卡头**只有一行标题**：成功几本 / 没进来几本不再在这儿重数一遍 —— 逐行自己带状态，
+//! 汇总与逐行说的是同一批账，摆两处只是让读者数两次。在跑那一档的进度同样交给每本
+//! 名字下面那条按字节走的进度条（`ByteProgress::name` 本来就带书名）。
+//!
+//! 一行里的主次：书名是唯一焦点（中字重、占满剩余宽），结清那一档里**要读者处理**
+//! 的那几类（没进来 / 要口令）做成右侧一枚**语义色标签**，「成功 / 已在架上」不占标签位
+//! —— 它们落进 `状态 · 日期 · 格式 · 大小 · 时长` 那一行小字的头一个词，「打开」是行尾
+//! 的次要动作。一批跑完，卡从「在跑」换成「结清」，读者要答的那三问 —— 哪几本进来了、
+//! 哪几本没进、为什么 —— 在同一屏里看完，而屏上只有书名一个视觉焦点。
 //!
 //! 从前那两句摆在顶栏与格子之间、靠左上角，各占一行：读数每报一次就把整片架子往下顶一行，
 //! 而它说的事离左上角最远。现在它是屏幕正中那一张卡，与建组、链接导入、扫描结果同一个容器
@@ -22,7 +27,7 @@ use folio_core::{ImportLanding, ImportOutcome, ImportReject, Imported};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::{Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -33,15 +38,16 @@ use super::super::overlay;
 use super::scan::fmt_size;
 use super::{ShelfEvent, ShelfView};
 use crate::ui::components::{muted_label, scroll_guard};
-use crate::ui::services::l10n::{duration, tf, tplural, tr};
+use crate::ui::services::l10n::{duration, tr};
 use crate::ui::{host, services};
 
 /// 一行的高：名字 + 下面那一行（进度条或读数）+ 上下留白。定死，虚拟列表要能滚就得
 /// 有一张等高的高度表（与扫描那一屏同一条理由）。
 const ROW_HEIGHT: f32 = 76.0;
 
-/// 头顶那一段：标题 + 汇总 + 上下留白。
-const HEAD_HEIGHT: f32 = 68.0;
+/// 头顶那一段：只有一行标题 + 上下留白。汇总那一行去掉之后收紧，别在标题下面
+/// 留一大块空 —— 报上来的高（[`record_height`]）得跟画出来的对得上。
+const HEAD_HEIGHT: f32 = 52.0;
 
 /// 脚下那一段：只有「在跑」那一档有（一颗「取消导入」），结清那一档不给动作。
 const FOOT_HEIGHT: f32 = 36.0;
@@ -442,13 +448,13 @@ impl ShelfView {
         self.open_import_records(cx);
     }
 
-    /// 卡的内容：头顶一句汇总，中间那条清单，脚下一排动作。
+    /// 卡的内容：头顶一行标题，中间那条清单，脚下一排动作。
     fn record_body(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let running = self.importing.is_some();
         let rows = self.record_rows(running);
         let count = rows.len();
         let height = record_height(count, running);
-        let head = self.record_head(running, rows, cx);
+        let head = self.record_head(running, cx);
         let foot = self.record_foot(running, cx);
         let list_entity = cx.entity().clone();
         let sizes = Rc::new(
@@ -521,63 +527,37 @@ impl ShelfView {
             .collect()
     }
 
-    /// 头顶那一句：在跑的是「正在导入 + 已完成 3 / 共 10 本」，结清的是「导入记录 + 成功 3 · 没进来 2」。
-    fn record_head(&self, running: bool, rows: &[Record], cx: &mut Context<Self>) -> AnyElement {
+    /// 头顶那一行：**只有标题**，右上两颗动作。
+    ///
+    /// 成功几本 / 没进来几本、在跑那一档的「已完成 / 共」都不在这儿摆：逐行自己带
+    /// 状态与进度条，卡头再汇总一遍只是让读者把同一批账数两次。标题因此是这一屏
+    /// 唯一的大字，层级由它定；次要的数字一律下沉到行里。
+    fn record_head(&self, running: bool, cx: &mut Context<Self>) -> AnyElement {
         let title: SharedString = if running {
             tr(cx, "shelf.status_importing")
         } else {
             tr(cx, "shelf.record_title")
         };
-        let summary: Option<SharedString> = if running {
-            match self.importing {
-                // `total == 0` 是不定进度（刚提交、第一条读数还没上来）：标题已经说了
-                // 「正在导入」，那一行不带数字的重复话就不摆了。
-                Some((_, 0)) | None => None,
-                Some((done, total)) => Some(
-                    tf(
-                        cx,
-                        "shelf.status_progress",
-                        &[("done", &done), ("total", &total)],
-                    )
-                    .into(),
-                ),
-            }
-        } else {
-            let added = rows
-                .iter()
-                .filter(|row| matches!(row.landed, Some(Landed::Added { .. })))
-                .count();
-            let failed = rows
-                .iter()
-                .filter(|row| matches!(row.landed, Some(Landed::Rejected(..))))
-                .count();
-            let mut line = tplural(cx, "shelf.record_added", added);
-            if failed > 0 {
-                // 总数与逐行那句是同一批账：读者在这儿看到的数，往下数得出来。
-                line.push_str(&format!(
-                    " · {}",
-                    tplural(cx, "shelf.import_rejected", failed)
-                ));
-            }
-            Some(line.into())
-        };
         let clear_entity = cx.entity().clone();
         let close_entity = cx.entity().clone();
         h_flex()
+            .id("shelf-record-head")
+            .test_support()
             .w_full()
             .flex_shrink_0()
-            .items_start()
+            .items_center()
             .justify_between()
             .gap_2()
             .px(px(super::grid::GUTTER))
             .pt_3()
             .pb_2()
             .child(
-                v_flex()
+                div()
+                    .id("shelf-record-title")
+                    .test_support()
                     .min_w_0()
-                    .gap_1()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                    .children(summary.map(|line| muted_label(line, cx))),
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
             )
             .child(
                 // 右上角那两颗：垃圾桶只管这一列记录（一本书都不动），× 收掉这张卡。
@@ -637,13 +617,14 @@ impl ShelfView {
             .into_any_element()
     }
 
-    /// 一格：名字在上面，下面那一行是进度条（还在跑）或读数（已结清）。
+    /// 一格：书名是唯一焦点，右边一枚状态标签与「打开」，下面一行次要读数。
     ///
-    /// 右边那颗「打开」只在有书可开时摆：没进来的那几本没有对象可作用，一颗按不动的钮
+    /// 「打开」只在有书可开时摆：没进来的那几本没有对象可作用，一颗按不动的钮
     /// 比不摆更糟。元素 id 带上行号 —— 一列里同一个动作会出现很多次，共用一个 id 会让
     /// gpui 把相邻几行的状态串在一起。
     fn record_cell(&self, ix: usize, row: &Record, cx: &mut Context<Self>) -> AnyElement {
         let meta = self.record_meta(ix, row, cx);
+        let status = self.record_status(ix, row, cx);
         let opener = match row.landed {
             Some(Landed::Added {
                 book_id: Some(book_id),
@@ -683,17 +664,56 @@ impl ShelfView {
                             .flex_1()
                             .overflow_hidden()
                             .text_ellipsis()
+                            .font_weight(FontWeight::MEDIUM)
                             .child(row.name.clone()),
                     )
+                    .children(status)
                     .children(opener),
             )
             .child(meta)
             .into_any_element()
     }
 
-    /// 名字下面那一行。
+    /// 结清那一档的状态：**只有要读者处理的那几类**才出一枚语义色标签。
+    ///
+    /// 成功与「已在架上」不在这儿出标签：它们在名字右边排成一列中性胶囊，把书名的
+    /// 层级压下去（设计指南：强调是有限预算），而这两件事本来也不需要读者做什么 ——
+    /// 行尾那颗「打开」已经说明这本书进来了。这两句改走 [`Self::record_meta`] 那一行
+    /// 的**文字**（`成功 · 11-04 · EPUB`），信息不丢、视觉压力降一档。
+    ///
+    /// 真正要读者处理的（没进来 / 要口令 / 带加密 …）仍是一枚语义色标签：那一档的
+    /// 读者需要**一眼看见**，压进小字反而藏起来了。文字本身就是读屏读到的那一句，
+    /// 不再额外挂一份 aria 名。
+    fn record_status(&self, ix: usize, row: &Record, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let label = match row.landed? {
+            // 成功 / 已在架上不占标签位：它们进 `record_meta` 那一行（见本函数文档）。
+            Landed::Added { .. } | Landed::Duplicate { .. } => return None,
+            Landed::Rejected(kind) => reject_label(kind, cx),
+        };
+        let fg = cx.theme().danger;
+        Some(
+            div()
+                .id(format!("shelf-record-status-{ix}"))
+                .test_support()
+                .flex_shrink_0()
+                .px(px(8.))
+                .py(px(2.))
+                .rounded_full()
+                .bg(cx.theme().muted)
+                .text_size(px(11.))
+                .text_color(fg)
+                .child(label)
+                .into_any_element(),
+        )
+    }
+
+    /// 名字下面那一行：进度条（还在跑）或一串次要读数（已结清）。
+    ///
+    /// 要读者处理的那几档（没进来 / 要口令）状态在名字右边那枚语义色标签上；**成功 /
+    /// 已在架上**没有标签，这两句落成这一行的**第一个词**（`成功 · 11-04 · EPUB`）——
+    /// 信息不丢，而整张卡的视觉焦点仍是书名（见 [`Self::record_status`]）。
     fn record_meta(&self, ix: usize, row: &Record, cx: &mut Context<Self>) -> AnyElement {
-        let Some(landed) = row.landed else {
+        if row.landed.is_none() {
             // 还在路上：条子按字节走。总数不知道（`None`）就是不定进度那一档。
             let fraction = match (row.done, row.size) {
                 (Some(done), Some(total)) if total > 0 => {
@@ -711,20 +731,24 @@ impl ShelfView {
                 )
                 .into_any_element();
         };
-        let status: SharedString = match landed {
-            Landed::Added { .. } => tr(cx, "shelf.status_added"),
-            Landed::Duplicate { .. } => tr(cx, "shelf.status_duplicate"),
-            Landed::Rejected(kind) => reject_label(kind, cx),
+        // 「成功 · 11-04 · EPUB · 666.63 MB · 9 秒」：状态词打头（成功 / 已在架上），
+        // 之后是说得出着落的那些格子；今天那一批不带日期（见 `record_date`）。
+        let status = match row.landed {
+            Some(Landed::Added { .. }) => Some(tr(cx, "shelf.status_added")),
+            Some(Landed::Duplicate { .. }) => Some(tr(cx, "shelf.status_duplicate")),
+            // 没进来的那几档不吃这一行：它们在名字右边那枚语义色标签上，句子更长
+            // （`文件已损坏` 那几句），塞进这一行会把后面几格挤没。
+            Some(Landed::Rejected(_)) | None => None,
         };
-        // 「11-04 · 成功 · EPUB · 666.63 MB · 9 秒」：只有说得出着落的那些格子才进这一行，
-        // 而今天那一批不带日期（见 `record_date`）。
         let today =
             folio_core::local_day(folio_core::infra::time::now(), host::local_offset_secs());
         let mut parts: Vec<String> = Vec::new();
+        if let Some(status) = status {
+            parts.push(status.to_string());
+        }
         if let Some(day) = record_date(row.made_at, today) {
             parts.push(day.to_string());
         }
-        parts.push(status.to_string());
         if let Some(format) = row.format.as_ref() {
             parts.push(format.to_string());
         }
@@ -780,5 +804,16 @@ mod tests {
         assert_eq!(record_height(500, true), overlay::RECORD_MAX_HEIGHT);
         // 刚提交、一行都还没有：给那条等着的条子留一格，不是零高。
         assert!(record_height(0, true) > record_height(0, false));
+    }
+
+    /// 卡头只剩一行标题：报上来的高得跟着收紧，否则 `overlay::centered` 把卡摆偏
+    /// （[`record_height`] 那条注释）。旧的两行（标题 + 汇总）是 68。
+    #[test]
+    fn the_head_reports_only_one_line() {
+        // 常量折叠会把 `HEAD_HEIGHT < 60.0` 变成「断言的真值是常量」—— 那正是这一条
+        // 要的：改了那个数就让这条红，而不是让 clippy 去猜。写成运行时比较是为了让
+        // 失败信息里带上当前的数（常量断言的失败信息是最短那一句）。
+        let head = std::hint::black_box(super::HEAD_HEIGHT);
+        assert!(head < 60.0, "卡头只剩一行标题，不该还按两行给高：{head}");
     }
 }

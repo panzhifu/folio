@@ -414,6 +414,74 @@ pub fn style_tag_text(dom: &Dom) -> String {
     css
 }
 
+/// 书级 CSS 里，根元素声明的**整页底色**。
+///
+/// 阅读页第一帧就得知道这个色：从前它要等异步排版把 `<body background-color>`
+/// 折成 `BlockDecor` 才画上去，于是读者先看见自己选的纸色、再跳成书里那一档。
+/// `open_book` 手上已经有 `FlowDoc.css`（`books.css` 那一列，导入时拼好的全部样式），
+/// 同步扫一遍根规则就能在首帧把纸铺对 —— 不落库、不缓存、换书不会串色。
+///
+/// 只认作用在根上的规则：`body` / `html`，或只带 class / id 的选择器
+/// （`<body class="brownll">` 配 `.brownll { … }` 那类真书）。`p.foo`、后代
+/// 选择器、伪元素一律不算 —— 那是正文里某一块的底色，不是整页。同名声明按
+/// CSS 顺序后者胜；`transparent` / `currentcolor` 当「没写」。
+pub fn page_background_color(css: &str) -> Option<crate::infra::reading_theme::Rgba8> {
+    use crate::content::format::css::selector::{Complex, Simple};
+    use crate::infra::reading_theme::Rgba8;
+
+    fn targets_root(complex: &Complex) -> bool {
+        // 后代 / 子代选择器命中的是根下面某一块，不是整页。
+        if !complex.left.is_empty() {
+            return false;
+        }
+        let mut has_type = false;
+        let mut root_type = false;
+        for simple in &complex.right.simples {
+            match simple {
+                Simple::Type(tag)
+                    if tag.eq_ignore_ascii_case("body") || tag.eq_ignore_ascii_case("html") =>
+                {
+                    has_type = true;
+                    root_type = true;
+                }
+                Simple::Type(_) => has_type = true,
+                // 光带 class / id 而没有标签：`.brownll` 那一档，当作根
+                _ => {}
+            }
+        }
+        root_type || !has_type
+    }
+
+    let set = RuleSet::parse(css, Origin::Author);
+    let mut found = None;
+    for rule in &set.rules {
+        if !rule
+            .selector
+            .complexes
+            .iter()
+            .any(|complex| complex.pseudo.is_none() && targets_root(complex))
+        {
+            continue;
+        }
+        for decl in &rule.declarations {
+            let value = decl.value.trim();
+            let color = match decl.property.as_str() {
+                "background-color" => value::parse_color(value),
+                // `background` 简写里只取颜色那一段 —— 与层叠那一侧
+                // （`computed/apply.rs` 的 `background` 那一臂）同一条取舍。
+                "background" => value.split_whitespace().find_map(value::parse_color),
+                _ => None,
+            };
+            if let Some(computed::Color(r, g, b, a)) = color
+                && a > 0
+            {
+                found = Some(Rgba8 { r, g, b, a });
+            }
+        }
+    }
+    found
+}
+
 /// 一章自己写的 `<style>` → 作者层规则表。`base_dir` 是**这一章**在容器里的目录。
 ///
 /// 样式表**文件**按位置清单回容器现取（见 `content::document::Document::stylesheet`），

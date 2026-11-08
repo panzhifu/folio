@@ -1238,8 +1238,9 @@ impl ReadingSheet {
         }
     }
 
-    /// 外观：阅读页自己的浅深；亮度跟着光线走；翻页那两张纸怎么走、走多久，
-    /// 是钉下来就不常碰的一对。
+    /// 外观：亮度跟着环境光走，是这一组里唯一会**当场、反复**调的一格，摆第一行抬手就够到；
+    /// 往下才是阅读页自己的浅深、纸色与背景（钉下来就不常碰），最后是翻页那两张纸怎么走、
+    /// 走多久。
     fn appearance_rows(&self, cx: &mut Context<Self>) -> AnyElement {
         // 「跟随系统」念成一句话而不是「100%」：那一档应用确实什么都没接管。
         let brightness_label = match ConfigHolder::appearance(cx).brightness {
@@ -1252,15 +1253,15 @@ impl ReadingSheet {
             .px_4()
             .pt_1()
             .pb_6()
-            .child(self.reading_mode_row(cx))
-            .child(self.reading_theme_row(cx))
-            .child(self.background_block(cx))
             .child(self.stepper_row(
                 Knob::Brightness,
                 tr(cx, "reader.brightness"),
                 brightness_label,
                 cx,
             ))
+            .child(self.reading_mode_row(cx))
+            .child(self.reading_theme_row(cx))
+            .child(self.background_block(cx))
             .child(self.turn_row(cx))
             .child(self.stepper_row(
                 Knob::TurnDuration,
@@ -1582,6 +1583,33 @@ mod tests {
                 .unwrap_or_else(|_| panic!("{tab:?} 这一组该画得出来"));
             assert_eq!(sheet.read_with(cx, |sheet, _| sheet.tab), tab);
         }
+    }
+
+    /// 外观组第一行是亮度：跟着环境光走、当场反复调的那一格，抬手就够得到。
+    /// 钉的是**纵向次序**而不是「亮度存在」—— 挪回浅深后面就该红。
+    #[gpui_kit::test]
+    fn brightness_is_the_first_row_of_the_appearance_tab(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (sheet, handle) = open_sheet(cx);
+        sheet.update(cx, |sheet, cx| sheet.toggle(cx));
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .expect("这一屏该画得出来");
+        let (brightness_y, reading_mode_y) = cx
+            .update_window(handle, |_, window, _| {
+                let y = |id: &'static str| {
+                    window
+                        .try_find(id)
+                        .map(|snap| f32::from(snap.bounds().origin.y))
+                };
+                (y("brightness-minus"), y("reader-reading-mode"))
+            })
+            .expect("窗口应能渲染");
+        let brightness_y = brightness_y.expect("亮度那一格该在外观组里");
+        let reading_mode_y = reading_mode_y.expect("阅读浅深那一格该在外观组里");
+        assert!(
+            brightness_y < reading_mode_y,
+            "亮度该排在阅读浅深之上：亮度 {brightness_y} / 浅深 {reading_mode_y}"
+        );
     }
 
     /// 每一条滑条的初值必须就是这一本书此刻用的那一格。

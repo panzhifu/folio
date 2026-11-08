@@ -422,12 +422,14 @@ fn read_font(path: &Path, font: &FontRef) -> Option<Vec<u8>> {
     (bytes.len() <= MAX_ONE).then_some(bytes)
 }
 
+/// manifest 里的一项。`pub(crate)`：HTMLZ 是 Calibre 转出的 EPUB 形状（同一个 OPF），
+/// 封面声明那一问只有一份实现（`parse_opf` + `cover_id` / `properties`），不抄第二份。
 #[derive(Debug, Default)]
-struct Item {
-    id: String,
-    href: String,
-    media_type: String,
-    properties: Vec<String>,
+pub(crate) struct Item {
+    pub(crate) id: String,
+    pub(crate) href: String,
+    pub(crate) media_type: String,
+    pub(crate) properties: Vec<String>,
     /// `<item fallback="<另一个 item 的 id>">`：这一份解不动时该读哪一份。
     ///
     /// EPUB3 的降级声明，用在作者知道读者不一定解得动的场合（SVG 是主流那一个）。
@@ -444,13 +446,13 @@ struct SpineRef {
 }
 
 #[derive(Debug, Default)]
-struct Opf {
+pub(crate) struct Opf {
     title: String,
     authors: Vec<String>,
-    items: Vec<Item>,
+    pub(crate) items: Vec<Item>,
     spine: Vec<SpineRef>,
     /// `<meta name="cover" content="<item id>">`
-    cover_id: Option<String>,
+    pub(crate) cover_id: Option<String>,
     /// `<guide><reference type="cover" href="…">`：封面**页**（一个 xhtml）的相对路径。
     ///
     /// 与 [`Self::cover_id`] 是两件事：`cover_id` 指的是那张**图**（拿去做书架缩略图），
@@ -772,7 +774,9 @@ fn refine(host: &RawMeta, metas: &[RawMeta], key: &str) -> String {
         .unwrap_or_default()
 }
 
-fn parse_opf(xml: &str) -> Opf {
+/// 解一份 OPF。`pub(crate)`：HTMLZ 那一族转出来的就是同一份 OPF（见 [`Item`]），
+/// 封面声明的读法只有这一处。
+pub(crate) fn parse_opf(xml: &str) -> Opf {
     let mut out = Opf::default();
     let mut reader = Reader::from_str(xml);
     let mut section = String::new();

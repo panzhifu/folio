@@ -1062,6 +1062,30 @@ mod booted {
                 window.try_find("shelf-import-records").is_some(),
                 "结清之后这张卡还在：它现在说的是哪几本怎么样了"
             );
+            // 卡头只有一行标题：成功几本 / 没进来几本不再在这儿重数一遍（逐行自己带状态）。
+            // 门量的是**高度** —— 两行文字（标题 + 汇总）会把这一条撑到 60 以上，
+            // 一行标题连上下留白不到 52。把汇总加回去这条当场红。
+            let head_h = window
+                .try_find("shelf-record-head")
+                .map(|snap| f32::from(snap.bounds().size.height));
+            assert!(
+                head_h.is_some_and(|h| h > 0.0 && h < 52.0),
+                "卡头只该有一行标题，汇总那一行不该再摆：{head_h:?}"
+            );
+            assert!(
+                window.try_find("shelf-record-title").is_some(),
+                "标题该独占了卡头那一行"
+            );
+            // 结清那一档只有**要读者处理**的那几类出标签（这里第 0 行是后端不认的
+            // `.mobi`）；成功 / 已在架上不占标签位，它们落进名字下面那行小字的头一个词。
+            assert!(
+                window.try_find("shelf-record-status-0").is_some(),
+                "没进来的那一行要有一枚语义色标签：读者得一眼看见它没进来"
+            );
+            assert!(
+                window.try_find("shelf-record-status-1").is_none(),
+                "落地那一行不该再挂中性标签：书名才是这一屏的唯一焦点"
+            );
             assert!(
                 window.try_find("shelf-record-open-1").is_some(),
                 "落定的那一本要有一颗「打开」"
@@ -2426,15 +2450,15 @@ mod booted {
         );
     }
 
-    /// 自动阅读跑着时，浮层里摆的是自动那条工具栏（速度 + 退出），普通底栏整个让位；
-    /// 按下「退出自动」，自动停表，底栏回来。整条走真实点击：开浮层 → 点「自动」浮钮
-    /// → 点退出，钉的是「替代」而不是「叠加」—— 从前那一版是底栏之上再浮一张小卡。
+    /// 自动阅读是**两段式**：第一击（浮钮）只进入自动、直接开始，浮层整层收掉，设置栏
+    /// 不上脸；运行中再点一次正文，才把自动那条工具栏叫出来。退出之后普通底栏回来。
+    /// 整条走真实点击，钉的是「先开始、后配置」—— 从前那一版第一击就把速度滑条和
+    /// 退出摆到读者脸上，书还没读到一个字。
     ///
     /// 顺带钉住浮钮的命中边界：那一排浮在卡片上缘之外，自己声明挡住身后的正文
-    /// hitbox（见 `regions.rs::listen_fabs`）。这一击只落在浮钮上，浮层不收、正文不
-    /// 翻页；从前穿透到整屏正文时，点「自动」会连带把书翻到下一页。
+    /// hitbox（见 `regions.rs::listen_fabs`）。点「自动」只落在浮钮上，正文不翻页。
     #[gpui_kit::test]
-    fn auto_mode_replaces_the_bottom_bar_and_exit_brings_it_back(cx: &mut TestAppContext) {
+    fn auto_starts_without_settings_and_a_second_tap_opens_them(cx: &mut TestAppContext) {
         let (handle, shell) = boot(cx, false);
         cx.update(|cx| cx.set_reduce_motion(true));
         open_test_reading(&shell, cx);
@@ -2460,10 +2484,23 @@ mod booted {
             "前置：自动没跑，那条工具栏不该在"
         );
 
-        // 点「自动」浮钮起自动。浮钮挡住身后的正文 hitbox，这一击不叫浮层、也不翻页：
-        // 浮层还在，auto_bar 当场顶替底栏露出来，不必再点一下正文把工具栏叫出来。
-        // （穿透还在时，那一击会先收掉浮层，只能再点正文把它叫回来。）
+        // 第一击点「自动」浮钮：自动开始，浮层整层收干净 —— 设置不上脸。
+        // 浮钮挡住身后的正文 hitbox，这一击只落在浮钮上，正文不翻页。
         cx.update_window(handle, |_, window, cx| window.click("entry-auto", cx))
+            .expect("窗口应能渲染");
+        frames(cx);
+        assert!(
+            !has(cx, "reader-auto-bar"),
+            "第一击只该开始，不该把设置顶到脸上"
+        );
+        assert!(
+            !has(cx, "reader-bottom-bar"),
+            "第一击该把浮层收干净，正文干净地读"
+        );
+        assert!(!has(cx, "entry-auto"), "浮钮随卡片一起不在场");
+
+        // 第二击（运行中、正文任意处）：才叫出自动那条工具栏。
+        cx.update_window(handle, |_, window, cx| window.click("folio-reader", cx))
             .expect("窗口应能渲染");
         frames(cx);
         assert!(
@@ -2473,6 +2510,10 @@ mod booted {
         assert!(
             !has(cx, "reader-bottom-bar"),
             "自动那条在场时普通底栏该整个让位，而不是叠在下面"
+        );
+        assert!(
+            has(cx, "auto-mode-page") && has(cx, "auto-mode-scroll"),
+            "两格分段（翻页 / 滚动）是设置工具的一部分"
         );
 
         // 退出：自动停表，底栏回来。

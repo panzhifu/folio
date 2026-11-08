@@ -8,7 +8,7 @@
 //! 谁在谁就算数。权益网格那六格是**真的门禁**：云同步、网盘取书、听书、翻译与 AI 的入口
 //! 都问 [`activation::premium`]。
 //!
-//! 「这台设备」那一组管换机：解除是**按设备**而不是按订单号的（本机从来没存过订单号，而重装
+//! 「设备」那一组管换机：解除是**按设备**而不是按订单号的（本机从来没存过订单号，而重装
 //! 之后连草稿都没了），而且是**软解除** —— 服务端留下那一行只标一个时间戳，删不得。买断单
 //! 解除后到新设备上**认领的还是永久**；天数单搬过去的只带剩下的几天。
 //!
@@ -90,7 +90,7 @@ fn cta_label(premium: bool, cx: &App) -> SharedString {
     }
 }
 
-/// 那颗买断钮：**永远黑色**（primary）、整宽居中 —— 买断是这一屏唯一的主推，
+/// 那颗买断钮：**黑色实心**（primary）、整宽居中 —— 买断是这一屏唯一的主推，
 /// 不给「已开通的人」换描边款。天数档在期是「升级买断」，措辞换、强调不换；
 /// 买断到手的读者整颗退场（见 [`membership_page`]），永久位就是结果本身。
 /// 点击交给爱发电 —— 这一屏不收钱，理由见模块头。
@@ -100,6 +100,7 @@ fn cta_row(cx: &App) -> impl IntoElement {
     Button::new("settings-membership-buy")
         .large()
         .w_full()
+        .primary()
         .label(cta_label(premium, cx).to_string())
         .on_click(|_, _, _| {
             if !platform::open_url(AFDIAN_PAGE) {
@@ -137,10 +138,8 @@ pub(in crate::ui::features::settings) fn gate_group(text_key: &'static str, cx: 
     )
 }
 
-/// 「当前状态」那一组：一张黑金会员卡 + 一颗买断钮（买断到手后这一颗自己退场）。
-///
-/// **裸组**（[`spec::Group::bare`]）：卡自己就是卡，外头不再套一层 —— 手机端
-/// 不画组卡与节头；桌面端维持组件的原样。
+/// 「当前状态」那一组：一张黑金会员卡 + 一颗买断钮，两者装进**同一张设置卡**，
+/// 与「会员权益」「激活会员」那几组同形（买断到手后这一颗自己退场）。
 fn status_group(membership: &Membership, cx: &App) -> Group {
     let lifetime = membership.lifetime;
     let mut rows = vec![
@@ -164,7 +163,7 @@ fn status_group(membership: &Membership, cx: &App) -> Group {
             ]),
         );
     }
-    group(tr(cx, "group.membership_state"), rows).bare()
+    group(tr(cx, "group.membership_state"), rows)
 }
 
 /// 会员卡：黑底（深色主题下翻成浅底）+ 金边 + 皇冠 + 状态 + 页脚那句「一次购买 · 永久有效」。
@@ -239,8 +238,6 @@ fn hero(cx: &App) -> impl IntoElement {
                 .border_color(gold().opacity(0.18))
                 .pt_2p5()
                 .child(
-                    // 页脚左边那句只有买断到手的读者有：没有永久位可报的人，
-                    // 位子让给右边那句「订单即激活码」；天数档的到期日在卡上第二行。
                     div()
                         .text_xs()
                         .text_color(ink_muted)
@@ -350,7 +347,7 @@ fn benefits_row(cx: &App) -> impl IntoElement {
     grid.into_any_element()
 }
 
-/// 「这台设备」那一组：设备标识 + 解除那一格（按下先问一句）。就这两行 ——
+/// 「设备」那一组：左边设备名，右边「解除」。按下先问一句，面板开着时整行换成面板。
 ///
 /// 台账（`membership.claims`）不再逐笔摆上屏：读者要的答案是「我现在是不是会员」，
 /// 那句在黑金卡上（永久 / 到期日）；「哪一单兑的」是排查时才要的东西，在日志与
@@ -363,47 +360,61 @@ fn device_group(_membership: &Membership, cx: &App) -> Group {
     group(
         tr(cx, "group.membership_devices"),
         vec![
-            Row::info(tr(cx, "membership.device_id"), device_label(cx)).keywords(&[
-                "device", "unbind", "release", "afdian", "设备", "解除", "激活", "换机",
-            ]),
-            // 面板开着时那一格摆的是面板，平时摆的是钮：两样占同一个位置，屏不会在按下那一刻跳一格。
             Row::custom(|cx: &App| {
                 if activation::confirming(cx) {
                     release_panel(cx).into_any_element()
                 } else {
-                    release_row(cx).into_any_element()
+                    device_row(cx).into_any_element()
                 }
-            }),
+            })
+            .keywords(&[
+                "device", "unbind", "release", "afdian", "设备", "解除", "激活", "换机",
+            ]),
         ],
     )
 }
 
-/// 这台设备的标识。空串 = 还没生成过（从没同步也没兑过的新安装）。
-fn device_label(cx: &App) -> String {
-    let id = ConfigHolder::sync(cx).device_id;
-    if id.is_empty() {
-        return tr(cx, "membership.device_id_none").to_string();
-    }
-    id
+/// 设备名：Android 读 `ro.product.model`，桌面读主机名；都拿不到就用组名「设备」。
+///
+/// 读者要认的是「哪一台手机 / 哪一台电脑」，不是 `device_id` 那串哈希 —— 后者只在
+/// 排查同步文件时有用，摆在这一行只会让人以为自己看到的是设备名。
+fn device_label(cx: &App) -> SharedString {
+    platform::device_name()
+        .map(SharedString::from)
+        .unwrap_or_else(|| tr(cx, "group.membership_devices"))
 }
 
-/// 解除那一格：状态句 + 整宽居中的解除钮。
+/// 设备那一行：左边设备名，右边一颗小「解除」。只有解除那一趟有话说时才在名字下面
+/// 补一句状态：空闲时不摆「把这一单挪到另一台设备」这类解释，读者要看的只是设备名。
 ///
 /// 钮取 `ghost` 而不是 `danger`：按它还只是**要问一句**，真正的承诺在面板里那一颗。
 /// 一屏里两颗红钮会互相抢强调，而这一屏的焦点预算已经花在买断钮上。
-fn release_row(cx: &App) -> gpui_kit::AnyElement {
+fn device_row(cx: &App) -> gpui_kit::AnyElement {
     let status = activation::release_status(cx);
     let busy = status == ReleaseStatus::Running;
-    v_flex()
+    let name = v_flex().flex_1().min_w_0().gap_0p5().child(
+        div()
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(device_label(cx)),
+    );
+    let name = if status == ReleaseStatus::Idle {
+        name
+    } else {
+        name.child(muted_label(release_line(&status, cx), cx))
+    };
+    h_flex()
         .w_full()
         .items_center()
-        .gap_2()
-        .child(muted_label(release_line(&status, cx), cx))
+        .justify_between()
+        .gap_3()
+        .child(name)
         .child(
             Button::new("settings-membership-release")
-                .label(tr(cx, "membership.release").to_string())
+                .label(tr(cx, "action.release").to_string())
                 .ghost()
-                .w_full()
+                .small()
+                .flex_shrink_0()
                 .disabled(busy)
                 .on_click(|_, _, cx| activation::ask_release(cx)),
         )
@@ -466,16 +477,53 @@ fn release_line(status: &ReleaseStatus, cx: &App) -> SharedString {
     tr(cx, key)
 }
 
-/// 「激活会员」那一组：一格订单编号 + 一颗兑换钮，结果就落在同一格里。
+/// 「激活会员」那一组：订单编号 + 兑换钮，结果就落在同一组里。
 ///
 /// 编号那一行**不带标题**（[`spec::Row::placeholder`]）：「爱发电订单编号」这六个字
 /// 进框里当占位虚字 —— 框本身就是全部说明，标题挡在框上反而多一层。桌面端没有
 /// 这条渲染路，标题照旧摆在框旁。
+///
+/// 手机端把「兑换」摆进编号那一行的右侧（[`spec::Row::text_action`]）：键盘弹起时
+/// 输入框与动作在同一行，不必再往下找那颗钮。桌面端仍是「输入框一行 + 动作一行」。
 /// 买断单也从这一格进：订单编号就是激活码，验过了置的是永久位。
 fn redeem_group(cx: &App) -> Group {
-    group(
-        tr(cx, "membership.redeem_group"),
-        vec![
+    let mut rows = Vec::new();
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        rows.push(
+            Row::text_action(
+                tr(cx, "membership.order"),
+                activation::draft,
+                activation::set_draft,
+                tr(cx, "membership.redeem"),
+                activation::redeem_now,
+                |cx| redeem_status(cx) == Status::Running,
+            )
+            .placeholder(tr(cx, "membership.order"))
+            .keywords(&[
+                "membership",
+                "redeem",
+                "order",
+                "afdian",
+                "会员",
+                "激活",
+                "兑换",
+                "订单",
+                "爱发电",
+            ]),
+        );
+        // 空闲时不摆任何提示句：编号框与右边的兑换钮已经把这件事说完。
+        // 在飞 / 结果 / 失败才补一句，落在同一张卡里。
+        if redeem_status(cx) != Status::Idle {
+            rows.push(Row::custom(|cx: &App| {
+                v_flex()
+                    .w_full()
+                    .items_center()
+                    .child(muted_label(redeem_line(&redeem_status(cx), cx), cx))
+                    .into_any_element()
+            }));
+        }
+    } else {
+        rows.push(
             Row::text(
                 tr(cx, "membership.order"),
                 activation::draft,
@@ -493,9 +541,16 @@ fn redeem_group(cx: &App) -> Group {
                 "订单",
                 "爱发电",
             ]),
-            Row::custom(redeem_row),
-        ],
-    )
+        );
+        rows.push(Row::custom(redeem_row));
+    }
+    group(tr(cx, "membership.redeem_group"), rows)
+}
+
+fn redeem_status(cx: &App) -> Status {
+    activation::handle(cx)
+        .map(|entity| entity.read(cx).status().clone())
+        .unwrap_or_default()
 }
 
 /// 结果句 + 那颗钮：**两样都居中**，摆输入框的正下方 —— 激活是这一格里唯一的动作，

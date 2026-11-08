@@ -601,15 +601,6 @@ jobs:
           python3 packaging/changelog_section.py \
             --version "$FOLIO_VERSION" \
             --out body.md CHANGELOG.md
-          # 正文末尾自动挂上校验和：读者手工下载时那串字就在同一页上。
-          {
-            echo ""
-            echo "### 校验和（\`sha256sums.txt\`）"
-            echo ""
-            echo '```'
-            cat dist/sha256sums.txt
-            echo '```'
-          } >> body.md
 
       - name: 建 release 并上传资产
         # GH_TOKEN 不给，gh CLI 在 Actions 里一步都跑不动 —— 0.1.1 的 run 7 四端

@@ -55,6 +55,33 @@ pub struct BaiduTokens {
     pub expires_in: i64,
 }
 
+impl From<BaiduTokens> for super::auth::Token {
+    /// `expires_in` 折成绝对时刻（Unix 秒）—— [`super::auth::Token`] 的口径。
+    fn from(tokens: BaiduTokens) -> Self {
+        Self {
+            access: tokens.access_token,
+            refresh: tokens.refresh_token,
+            expires_at: crate::infra::time::now() + tokens.expires_in.max(0),
+        }
+    }
+}
+
+/// 百度那一支的 [`super::auth::Refresher`]：包住 [`refresh_tokens`]。
+///
+/// 轮换出来的新 refresh_token 原样进 [`super::auth::Token`] —— 落盘是
+/// `TokenStore` 的事，这里只管换。
+pub struct BaiduRefresher;
+
+impl super::auth::Refresher for BaiduRefresher {
+    fn refresh(
+        &self,
+        refresh_token: &str,
+        transport: Arc<dyn Transport>,
+    ) -> Result<super::auth::Token> {
+        refresh_tokens(refresh_token, transport).map(Into::into)
+    }
+}
+
 /// 授权码换 token。`code` 是读者从授权页粘回来的那一串。
 pub fn exchange_code(code: &str, transport: Arc<dyn Transport>) -> Result<BaiduTokens> {
     let (client_id, client_secret) = credentials()
@@ -141,9 +168,11 @@ fn token_request(url: &str, transport: Arc<dyn Transport>) -> Result<BaiduTokens
 ///
 /// 换 token 成功后问一次，账号列表上给读者看「这一格是谁」；不是每次请求都问。
 pub fn account_name(access_token: &str, transport: Arc<dyn Transport>) -> Result<String> {
-    let url = format!(
-        "https://pan.baidu.com/rest/2.0/xpan/nas?method=uinfo&access_token={}",
-        query_encode(access_token),
+    // token 的拼法走 `baidu::with_token`：日志脱敏只认那一种形状（`access_token=`），
+    // 这里自己拼一遍就多一处遮不住的地方。
+    let url = super::baidu::with_token(
+        "https://pan.baidu.com/rest/2.0/xpan/nas?method=uinfo".to_string(),
+        access_token,
     );
     let req = Request::new(Method::Get, url).header("User-Agent", USER_AGENT);
     let resp = transport.request(req)?;

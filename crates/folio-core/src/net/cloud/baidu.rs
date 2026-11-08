@@ -100,10 +100,12 @@ impl BaiduDrive {
     /// 列一层。`path` 为空就是根；返回的条目记进 id 缓存。
     fn list_inner(&self, path: &str) -> Result<Vec<Entry>> {
         let dir = absolute(&self.rooted(path));
-        let url = format!(
-            "{API}/xpan/file?method=list&order=name&limit={LIST_LIMIT}&dir={}&access_token={}",
-            query_encode(&dir),
-            query_encode(&self.access_token),
+        let url = with_token(
+            format!(
+                "{API}/xpan/file?method=list&order=name&limit={LIST_LIMIT}&dir={}",
+                query_encode(&dir),
+            ),
+            &self.access_token,
         );
         tracing::debug!("baidu: list {dir}");
         let req = Request::new(Method::Get, url).header("User-Agent", USER_AGENT);
@@ -176,9 +178,9 @@ impl BaiduDrive {
 
     /// 问一次 `filemetas` 拿下载直链。
     fn fetch_dlink(&self, fs_id: u64) -> Result<String> {
-        let url = format!(
-            "{API}/xpan/multimedia?method=filemetas&access_token={}",
-            query_encode(&self.access_token),
+        let url = with_token(
+            format!("{API}/xpan/multimedia?method=filemetas"),
+            &self.access_token,
         );
         let body = format!("fsids=[{fs_id}]&dlink=1");
         tracing::debug!("baidu: filemetas fs_id={fs_id}");
@@ -212,9 +214,9 @@ impl BaiduDrive {
 
     /// 写接口的 URL：`{API}/xpan/file?method=<method>&access_token=<token>`。
     fn write_url(&self, method: &str) -> String {
-        format!(
-            "{API}/xpan/file?method={method}&access_token={}",
-            query_encode(&self.access_token),
+        with_token(
+            format!("{API}/xpan/file?method={method}"),
+            &self.access_token,
         )
     }
 
@@ -257,11 +259,13 @@ impl BaiduDrive {
         body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
         body.extend_from_slice(bytes);
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-        let url = format!(
-            "{PCS}/superfile2?method=upload&access_token={}&type=tmpfile&path={}&uploadid={}&partseq={partseq}",
-            query_encode(&self.access_token),
-            query_encode(target),
-            query_encode(uploadid),
+        let url = with_token(
+            format!(
+                "{PCS}/superfile2?method=upload&type=tmpfile&path={}&uploadid={}&partseq={partseq}",
+                query_encode(target),
+                query_encode(uploadid),
+            ),
+            &self.access_token,
         );
         let req = Request::new(Method::Post, url)
             .header("User-Agent", USER_AGENT)
@@ -420,10 +424,9 @@ impl RemoteStore for BaiduDrive {
 
     fn download(&self, path: &str, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64> {
         let fs_id = self.resolve_id(path)?;
-        let mut dlink = self.fetch_dlink(fs_id)?;
+        let dlink = self.fetch_dlink(fs_id)?;
         // dlink 自带一串查询参数；access_token 以追加参数的方式带上。
-        dlink.push_str("&access_token=");
-        dlink.push_str(&query_encode(&self.access_token));
+        let dlink = with_token(dlink, &self.access_token);
         let req = Request::new(Method::Get, dlink.clone()).header("User-Agent", USER_AGENT);
         tracing::debug!(
             "baidu: download {}（fs_id {fs_id}）",
@@ -547,6 +550,22 @@ pub(super) fn query_encode(value: &str) -> String {
         }
     }
     out
+}
+
+/// 把 `access_token` 追加到一条已经拼好的 URL 上。
+///
+/// 百度这条 API 只认 query 里的 token（`Authorization` 头它不认），所以每一处请求都得带。
+/// 拼法收在这一个函数里有两个理由：
+///
+/// - **少一处漏带**：从前五处各写一遍 `format!("…&access_token={}", query_encode(…))`，
+///   新增一个接口时最容易忘的就是这一段；
+/// - **脱敏只认一种形状**：日志脱敏（[`crate::net::remote::Request`] 的 `Debug`）按
+///   `access_token=` 这个键名遮值，拼法多一种就多一处遮不住的地方。
+///
+/// 已经带查询串的 URL 用 `&` 接，否则用 `?` —— dlink 那种自带一长串参数的正好走前一支。
+pub(super) fn with_token(url: String, token: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}access_token={}", query_encode(token))
 }
 
 #[derive(Debug, serde::Deserialize)]

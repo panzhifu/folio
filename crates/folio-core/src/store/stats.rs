@@ -2,15 +2,18 @@
 //!
 //! 输入是库里的全部会话行，输出是**当前区间**已经切好、补过零、排好序的形状。
 //! 界面只负责把这里的字段摆到屏上，不再算任何除法或分组。
+//!
+//! 2026-11-09 从 `folio_app::ui::features::stats::model::snapshot` 搬来：全部是
+//! `Store` 查数 + 纯聚合（0 个 gpui 类型），统计口径从此能脱离窗口测。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use folio_core::infra::time::{
+use crate::infra::time::{
     HOURS_PER_DAY, civil_from_days, days_from_civil, days_in_month, local_day, local_hour,
     weekday_monday0,
 };
-use folio_core::store::{ReadingRecord, Store};
+use crate::store::{ReadingRecord, Store};
 
 /// 里的一档。「总」看全部历史，「日 / 周 / 月 / 年」看一个可翻页的窗口。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -231,7 +234,7 @@ impl Snapshot {
                 Vec::new()
             }
         };
-        let today = local_day(folio_core::infra::time::now(), tz_offset_secs);
+        let today = local_day(crate::infra::time::now(), tz_offset_secs);
         Self::build(records, range, anchor, today, tz_offset_secs)
     }
 
@@ -607,8 +610,8 @@ fn streaks(days: &[DayStat], today: i64) -> (usize, usize, Option<(i64, i64)>) {
 #[cfg(test)]
 mod tests {
     use super::{Range, SESSION_BUCKETS, Snapshot, days_from_civil, weekday_monday0};
-    use folio_core::infra::time::day_start;
-    use folio_core::store::ReadingRecord;
+    use crate::infra::time::day_start;
+    use crate::store::ReadingRecord;
 
     fn record(book_id: i64, title: &str, day: i64, hour: i64, seconds: i64) -> ReadingRecord {
         ReadingRecord {

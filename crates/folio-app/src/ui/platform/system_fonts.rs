@@ -28,21 +28,17 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui_kit::{App, AppContext as _, TextSystem};
 
-use crate::ui::foundation::font_names::{LatinCoverage, latin_by_family};
-use crate::ui::foundation::font_primary;
+use folio_core::text as font_primary;
+use folio_core::text::{LatinCoverage, latin_by_family};
 
 /// 扫描哪些目录。`/product/fonts` 在不少设备上装着厂商字体（有的 CJK 衬线就在那里）。
 const FONT_DIRS: &[&str] = &["/system/fonts", "/product/fonts"];
-
-/// 只认这三种扩展名。fontdb 解析不了的反正会被 [`latin_by_family`] 拦下，这里只是省得
-/// 把目录里偶见的杂项也读进来。
-const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc"];
 
 /// 一批注册的字节数上限：到了就先注册再继续。批太大会把峰值内存顶上去
 /// （批次字节 + fontdb 复制的那一份同时在场），批太小就退回 `register_batch`
@@ -108,15 +104,6 @@ struct Pending {
     len: usize,
 }
 
-/// 目录里看着像字体的文件：扩展名是 `.ttf/.otf/.ttc`（不分大小写）。
-fn is_font_file(path: &Path) -> bool {
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase());
-    matches!(ext.as_deref(), Some(ext) if FONT_EXTENSIONS.contains(&ext))
-}
-
 /// 扫描目录并把白名单外的字体注册进 `texts`。在后台线程上跑
 /// （`all_font_names` / `add_fonts_with_families` 都是 `&self`，度量 worker 那条路
 /// 已经这么用了）。
@@ -137,7 +124,7 @@ fn scan_and_register(texts: &TextSystem) -> ScanSummary {
         // 先收齐再排序：注册顺序确定，日志在两台设备上才对得上。
         let mut files: Vec<PathBuf> = entries
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.is_file() && is_font_file(path))
+            .filter(|path| path.is_file() && folio_core::text::scan::is_font_file(path))
             .collect();
         files.sort();
         summary.enumerated += files.len();
@@ -153,16 +140,16 @@ fn scan_and_register(texts: &TextSystem) -> ScanSummary {
                 summary.unreadable += 1;
                 continue;
             }
-            match verdict(&families, &known) {
-                Verdict::AlreadyRegistered => {
+            match folio_core::text::scan::scan_verdict(&families, &known) {
+                folio_core::text::scan::ScanVerdict::AlreadyRegistered => {
                     summary.known_skipped += 1;
                     continue;
                 }
-                Verdict::Emoji => {
+                folio_core::text::scan::ScanVerdict::Emoji => {
                     summary.emoji_skipped += 1;
                     continue;
                 }
-                Verdict::Keep => {}
+                folio_core::text::scan::ScanVerdict::Keep => {}
             }
             // 记进 known：同一字体出现在两个目录（或一份拆成多张）时，第二份走跳过。
             known.extend(families.iter().map(|name| (*name).to_string()));
@@ -182,27 +169,6 @@ fn scan_and_register(texts: &TextSystem) -> ScanSummary {
     }
     register_batch(texts, batch, &mut summary);
     summary
-}
-
-/// 这一份字体注册不注册。判据按「最想写进日志的原因」排先后。
-fn verdict(families: &[&str], known: &HashSet<String>) -> Verdict {
-    if families
-        .iter()
-        .any(|name| name.to_ascii_lowercase().contains("emoji"))
-    {
-        return Verdict::Emoji;
-    }
-    // fontdb 报的名字可能是本地化那一条，所以解析出的**任何一个**名字命中都算注册过。
-    if families.iter().any(|name| known.contains(*name)) {
-        return Verdict::AlreadyRegistered;
-    }
-    Verdict::Keep
-}
-
-enum Verdict {
-    Keep,
-    AlreadyRegistered,
-    Emoji,
 }
 
 /// 注册一批。家族名以 `add_fonts_with_families` 报回来的为准（fontdb 解出的那张
@@ -237,61 +203,4 @@ fn register_batch(texts: &TextSystem, batch: Vec<Pending>, summary: &mut ScanSum
     }
     summary.registered_files += files;
     summary.registered_bytes += total;
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-    use std::path::Path;
-
-    use super::{Verdict, is_font_file, verdict};
-
-    fn known(names: &[&str]) -> HashSet<String> {
-        names.iter().map(|name| (*name).to_string()).collect()
-    }
-
-    /// 只有三类扩展名过闸，大小写不论；其余（xml、无扩展名）不读。
-    #[test]
-    fn only_font_extensions_pass_the_gate() {
-        assert!(is_font_file(Path::new("/system/fonts/Roboto-Regular.ttf")));
-        assert!(is_font_file(Path::new(
-            "/system/fonts/NotoSansCJK-Regular.TTC"
-        )));
-        assert!(is_font_file(Path::new("/product/fonts/MiSans.otf")));
-        assert!(!is_font_file(Path::new("/system/fonts/fonts.xml")));
-        assert!(!is_font_file(Path::new("/system/fonts/README")));
-    }
-
-    /// emoji 名字优先于「已注册」判：已经从 APK 注册过 CBDT 版的设备上，系统的
-    /// COLRv1 版两判都命中，日志里要看到的是「为什么跳」里最具体的那一个。
-    #[test]
-    fn an_emoji_family_is_skipped_even_when_already_registered() {
-        assert!(matches!(
-            verdict(&["Noto Color Emoji"], &known(&["Noto Color Emoji"])),
-            Verdict::Emoji
-        ));
-        assert!(matches!(
-            verdict(&["HMOSColorEmojiCompat"], &known(&[])),
-            Verdict::Emoji
-        ));
-    }
-
-    /// fork 白名单里那批文件二次扫描时必须全部命中「已注册」——19MB 的 CJK ttc
-    /// 不能因为换个判法就驻留两份。
-    #[test]
-    fn a_family_already_on_the_device_is_skipped() {
-        assert!(matches!(
-            verdict(&["Roboto", "Roboto Condensed"], &known(&["Roboto"])),
-            Verdict::AlreadyRegistered
-        ));
-        assert!(matches!(
-            // fontdb 报回来的可能是本地化那一条，任何语言的命中都算。
-            verdict(&["小米兰亭 Pro"], &known(&["小米兰亭 Pro"])),
-            Verdict::AlreadyRegistered
-        ));
-        assert!(matches!(
-            verdict(&["Some Vendor Serif"], &known(&["Roboto", "Noto Sans"])),
-            Verdict::Keep
-        ));
-    }
 }

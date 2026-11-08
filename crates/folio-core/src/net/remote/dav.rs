@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 use super::{
     Cancel, Error, Method, RemoteStore, Request, Response, Result, Sink, Source, Transport,
+    redact_url,
 };
 
 /// PROPFIND 的请求体。
@@ -191,7 +192,7 @@ impl Client {
         let header = self.endpoint.basic_header();
         let req =
             Request::new(method, self.endpoint.url(path, dir)).header("Authorization", header);
-        tracing::debug!("dav: {} {}", method.as_str(), url_for_log(&req.url));
+        tracing::debug!("dav: {} {}", method.as_str(), redact_url(&req.url));
         req
     }
 }
@@ -236,29 +237,13 @@ impl RemoteStore for Client {
     }
 }
 
-/// 日志里能出现的 URL：把 `https://用户:密码@host/…` 那一段凭据换成 `***`。
-///
-/// 有人习惯把用户名密码直接写进地址（各家 WebDAV 都接受这种写法），而日志文件是会被
-/// 贴进工单、传给别人看的东西。URL 剩下的部分照原样留着 —— 排查要的正是路径。
-fn url_for_log(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
-    };
-    // `@` 只在authority 里、下一个 `/` 之前才算凭据。
-    let head = rest.split('/').next().unwrap_or(rest);
-    match head.split_once('@') {
-        Some((_, host)) => format!("{scheme}://***@{host}{}", &rest[head.len()..]),
-        None => url.to_string(),
-    }
-}
-
 /// 组装一次 `Depth: 1` 的 PROPFIND。
 ///
 /// `Depth` 是建议而不是命令，网盘类实现尤其会无视它并递归返回整棵树 —— 所以「只取一层」
 /// 最终由 [`children`] 按相对路径的段数裁，而不是指望这个头。
 fn propfind_request(endpoint: &Endpoint, path: &str) -> Request {
     let url = endpoint.url(path, true);
-    tracing::debug!("dav: PROPFIND {} (Depth: 1)", url_for_log(&url));
+    tracing::debug!("dav: PROPFIND {} (Depth: 1)", redact_url(&url));
     Request::new(Method::Propfind, url)
         .header("Authorization", endpoint.basic_header())
         .header("Depth", "1")

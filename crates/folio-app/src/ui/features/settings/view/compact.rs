@@ -61,14 +61,15 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, Focusable as _, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled, Subscription, TestSupportExt as _, Window, div, px,
     rems,
 };
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use super::SettingsPage;
@@ -83,6 +84,23 @@ use crate::ui::shell::navigation;
 /// 一行的可命中高度。Apple HIG 明文那条 44×44；规范点名的 `px` 例外之一就是
 /// 「最小命中容差」，所以这一格不跟着 rem 走。
 const ROW_HIT: f32 = 44.0;
+
+/// 输入框外面点一下就把焦点收掉：设置页没有「提交」钮，不收焦点键盘会一直顶着。
+///
+/// 用 `on_mouse_down_out` 挂在框自己的容器上，而不是给整页加`on_click`：后者会把
+/// 点在按钮、下拉、另一颗输入框上的那一击也当成「空白」，与控件抢同一事件。
+fn dismissible_input(input: &Entity<InputState>, cx: &App) -> AnyElement {
+    let handle = input.read(cx).focus_handle(cx).clone();
+    div()
+        .w_full()
+        .on_mouse_down_out(move |_, window, cx| {
+            if handle.is_focused(window) {
+                window.blur(cx);
+            }
+        })
+        .child(Input::new(input).w_full())
+        .into_any_element()
+}
 
 /// 分组卡里那条发丝线：一个物理像素（也是规范点名的 `px` 例外），颜色取 `border`。
 ///
@@ -388,6 +406,18 @@ enum Screen {
 
 pub(crate) struct CompactSettings {
     screen: Screen,
+    /// 子页滚动句柄：输入法弹起时把内容整体上移，别让键盘盖住正在填的框。
+    scroll: ScrollHandle,
+    /// 上一次看到的键盘高度（逻辑像素）。只在高度变化那一帧动滚动偏移，
+    /// 否则每一帧都加一次会把内容一路推上去。
+    ime_bottom: Cell<f32>,
+    /// 当前拿到焦点的输入框在哪一组（组下标）。`None` = 焦点不在文本输入上。
+    ///
+    /// 键盘弹起时按它把那一组滚到可见区顶端：只按键盘高度整页上移的话，
+    /// 订单框这种贴着卡底的控件仍可能压在下沿上。
+    focus_group: Rc<Cell<Option<usize>>>,
+    /// 上一次因为键盘 / 焦点滚动到的组。相同就不重复滚，避免把读者的手动滚动顶回去。
+    scrolled_group: Cell<Option<usize>>,
     /// 对「存储」那一屏读数实体的订阅。**必须是个字段**：gpui 的 `Subscription` 一掉就退订
     /// （它的 `Drop` 直接调 `unsubscribe`），绑成局部变量等于没订阅 —— 少了它，后台扫完那一趟
     /// 永远不会让这一屏重画，读者看到的是一句「还没统计」。
@@ -457,6 +487,10 @@ impl CompactSettings {
         let backup_watch = cx.observe(&backup, |_, _, cx| cx.notify());
         Self {
             screen: Screen::Root,
+            scroll: ScrollHandle::new(),
+            ime_bottom: Cell::new(0.0),
+            focus_group: Rc::new(Cell::new(None)),
+            scrolled_group: Cell::new(None),
             _storage_watch: watch,
             _update_watch: update_watch,
             _feedback_watch: feedback_watch,
@@ -627,7 +661,7 @@ impl CompactSettings {
             .flex_1()
             .min_h_0()
             .child(field)
-            .child(Self::scrollable(body, tail))
+            .child(Self::scrollable(body, tail, None))
             .into_any_element()
     }
 
@@ -759,7 +793,7 @@ impl CompactSettings {
                     .child(muted_label(tr(cx, "account.search_empty"), cx)),
             );
         }
-        Self::scrollable(body, tail)
+        Self::scrollable(body, tail, None)
     }
 
     /// 会员卡那一行：图标 + 两行字（页名，与「哪天到期 / 未开通」那一句）+ 一枚进去的箭头。
@@ -849,21 +883,8 @@ impl CompactSettings {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let headed = page.groups.len() > 1;
-        let mut body = v_flex().w_full();
+        let mut blocks: Vec<AnyElement> = Vec::with_capacity(page.groups.len());
         for (group_ix, group) in page.groups.iter().enumerate() {
-            // 裸组：不套卡、不摆节头、行间不发丝线 —— 组里的行自带完整视觉
-            // （会员页那张黑金卡），再包一层卡就成了卡中卡。
-            if group.bare {
-                let mut block = v_flex().w_full().px_4().mt_2();
-                for (row_ix, row) in group.rows.iter().enumerate() {
-                    if row_ix > 0 {
-                        block = block.child(v_flex().h_2());
-                    }
-                    block = block.child(self.row(page_ix, group_ix, row_ix, row, window, cx));
-                }
-                body = body.child(block);
-                continue;
-            }
             let mut rows: Vec<AnyElement> = Vec::new();
             for (row_ix, row) in group.rows.iter().enumerate() {
                 if row_ix > 0 {
@@ -889,10 +910,31 @@ impl CompactSettings {
             if headed {
                 block = block.child(section_header(group.title.clone(), cx));
             }
-            body = body.child(gap.child(block.child(card(rows, cx))));
+            blocks.push(gap.child(block.child(card(rows, cx))).into_any_element());
         }
+        // 键盘顶起来的那一截：宿主把 IME inset 送到 Rust（`host::ime_insets`），这里
+        // 不再整页盲移，而是**把拿到焦点的那一组滚到可见区顶端**。只按高度上移的话，
+        // 订单框这种贴着卡底的控件仍可能压在下沿；按组定位则与组高无关。
+        //
+        // `scroll_to_top_of_item` 的组下标依赖「组卡是滚动容器的直接子元素」——
+        // 所以这一屏走 `scrollable_blocks`，不是把整页塞进一个 body。
+        let ime = crate::ui::host::ime_insets(window, cx).bottom;
+        let previous = self.ime_bottom.get();
+        let focus = self.focus_group.get();
+        if ime > 0.5 {
+            if (ime - previous).abs() > 0.5 || focus != self.scrolled_group.get() {
+                match focus {
+                    Some(group) => self.scroll.scroll_to_top_of_item(group),
+                    None => self.scroll.scroll_to_bottom(),
+                }
+                self.scrolled_group.set(focus);
+            }
+        } else if previous > 0.5 {
+            self.scrolled_group.set(None);
+        }
+        self.ime_bottom.set(ime);
         // 子页由外壳收起底栏、吃满整窗，尾部不必再让那一段。
-        Self::scrollable(body, 0.0)
+        Self::scrollable_blocks(blocks, ime, &self.scroll)
     }
 
     /// 选项屏：一项一行，当前那项右侧一枚勾。选中即写回并退回上一屏，没有「确定」按钮。
@@ -910,7 +952,7 @@ impl CompactSettings {
         else {
             // 只有「多选一」那一行会推到这一屏。类型对不上是调用方写错了，这里摆空屏
             // 而不是 panic：这一屏在读者眼前，崩了比空着更难查。
-            return Self::scrollable(div().w_full(), 0.0);
+            return Self::scrollable(div().w_full(), 0.0, None);
         };
         let current = get(cx);
         let entity = cx.entity().clone();
@@ -938,7 +980,11 @@ impl CompactSettings {
                 cx,
             ));
         }
-        Self::scrollable(div().w_full().mt_2().px_4().child(card(rows, cx)), 0.0)
+        Self::scrollable(
+            div().w_full().mt_2().px_4().child(card(rows, cx)),
+            0.0,
+            None,
+        )
     }
 
     /// 一个字段行。控件的种类决定右端摆什么（或整行摆什么）。
@@ -1090,9 +1136,11 @@ impl CompactSettings {
             RowKind::Text { get, set } => {
                 let (get, set) = (get.clone(), set.clone());
                 let value = get(cx);
+                let focus_group = self.focus_group.clone();
                 let state = window.use_keyed_state(id("text"), cx, {
                     let value = value.clone();
                     let placeholder = row.placeholder.clone();
+                    let focus_group = focus_group.clone();
                     move |window, cx| {
                         let input = cx.new(|cx| {
                             let state = InputState::new(window, cx).default_value(value);
@@ -1108,13 +1156,22 @@ impl CompactSettings {
                         // 订阅回调要 `'static`，所以给它一份自己的克隆，而不是从
                         // 建状态的那层闭包里把 `set` 挪走。
                         let set = set.clone();
-                        let watch =
-                            cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
-                                if let InputEvent::Change = event {
+                        let watch = cx.subscribe(
+                            &input,
+                            move |_, input, event: &InputEvent, cx| match event {
+                                InputEvent::Change => {
                                     let value = input.read(cx).value();
                                     set(value, cx);
                                 }
-                            });
+                                InputEvent::Focus => focus_group.set(Some(group_ix)),
+                                InputEvent::Blur => {
+                                    if focus_group.get() == Some(group_ix) {
+                                        focus_group.set(None);
+                                    }
+                                }
+                                InputEvent::PressEnter { .. } => {}
+                            },
+                        );
                         (input, watch)
                     }
                 });
@@ -1130,7 +1187,7 @@ impl CompactSettings {
                 // 带占位字的一行：标题不摆出来，那句虚字进框里 —— 框本身就是全部说明
                 // （会员页的订单编号）。没带占位字的照旧标题在上。
                 if row.placeholder.is_some() {
-                    return control_cell(id("text-row"), Input::new(input).w_full());
+                    return control_cell(id("text-row"), dismissible_input(input, cx));
                 }
                 control_cell(
                     id("text-row"),
@@ -1138,7 +1195,87 @@ impl CompactSettings {
                         .w_full()
                         .gap_1()
                         .child(label_block(row.title.clone()))
-                        .child(Input::new(input).w_full()),
+                        .child(dismissible_input(input, cx)),
+                )
+            }
+            RowKind::TextAction {
+                get,
+                set,
+                label,
+                action,
+                disabled,
+            } => {
+                let (get, set) = (get.clone(), set.clone());
+                let (label, action, disabled) = (label.clone(), action.clone(), disabled.clone());
+                let value = get(cx);
+                let focus_group = self.focus_group.clone();
+                let state = window.use_keyed_state(id("text"), cx, {
+                    let value = value.clone();
+                    let placeholder = row.placeholder.clone();
+                    let focus_group = focus_group.clone();
+                    move |window, cx| {
+                        let input = cx.new(|cx| {
+                            let state = InputState::new(window, cx).default_value(value);
+                            if let Some(placeholder) = placeholder {
+                                state.placeholder(placeholder)
+                            } else {
+                                state
+                            }
+                        });
+                        let set = set.clone();
+                        let watch = cx.subscribe(
+                            &input,
+                            move |_, input, event: &InputEvent, cx| match event {
+                                InputEvent::Change => {
+                                    let value = input.read(cx).value();
+                                    set(value, cx);
+                                }
+                                InputEvent::Focus => focus_group.set(Some(group_ix)),
+                                InputEvent::Blur => {
+                                    if focus_group.get() == Some(group_ix) {
+                                        focus_group.set(None);
+                                    }
+                                }
+                                InputEvent::PressEnter { .. } => {}
+                            },
+                        );
+                        (input, watch)
+                    }
+                });
+                state.update(cx, |(input, _), cx| {
+                    if input.read(cx).value() != value {
+                        input.update(cx, |input, cx| {
+                            input.set_value(value.clone(), window, cx);
+                        });
+                    }
+                });
+                let (input, _) = state.read(cx);
+                let input = if row.placeholder.is_some() {
+                    dismissible_input(input, cx)
+                } else {
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(label_block(row.title.clone()))
+                        .child(dismissible_input(input, cx))
+                        .into_any_element()
+                };
+                control_cell(
+                    id("text-action-row"),
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().min_w_0().child(input))
+                        .child(
+                            Button::new(id("text-action"))
+                                .label(label.to_string())
+                                .ghost()
+                                .small()
+                                .flex_shrink_0()
+                                .disabled(disabled(cx))
+                                .on_click(move |_, _, cx| action(cx)),
+                        ),
                 )
             }
             RowKind::Font { get, set } => {
@@ -1210,17 +1347,38 @@ impl CompactSettings {
     /// **滚动内容里**，与架子 / 统计 / 笔记同一份写法：垫在视口外面时视口被永久截短，底栏
     /// 一让位（往下读）底部就空出一条，内容怎么滚都到不了屏幕底；垫在内容里，滚动途中内容
     /// 从栏底下穿过去，滚到底时最后一排正好停在栏的上沿。
-    fn scrollable(body: impl IntoElement, tail: f32) -> AnyElement {
-        div()
+    fn scrollable(body: impl IntoElement, tail: f32, scroll: Option<&ScrollHandle>) -> AnyElement {
+        let mut root = div()
+            .id("settings-compact-scroll")
+            .overflow_y_scroll()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .pb_8();
+        if let Some(scroll) = scroll {
+            root = root.track_scroll(scroll);
+        }
+        root.child(body)
+            .child(div().w_full().h(px(tail)))
+            .into_any_element()
+    }
+
+    /// 与 [`Self::scrollable`] 同形，但把每个组卡作为滚动容器的**直接子元素**：
+    /// `ScrollHandle::scroll_to_item` 只认直接子元素的 bounds，`page_screen` 的键盘避让
+    /// 要靠这个下标把聚焦的那一组滚到顶上。
+    fn scrollable_blocks(blocks: Vec<AnyElement>, tail: f32, scroll: &ScrollHandle) -> AnyElement {
+        let mut root = div()
             .id("settings-compact-scroll")
             .overflow_y_scroll()
             .flex_1()
             .min_h_0()
             .w_full()
             .pb_8()
-            .child(body)
-            .child(div().w_full().h(px(tail)))
-            .into_any_element()
+            .track_scroll(scroll);
+        for block in blocks {
+            root = root.child(block);
+        }
+        root.child(div().w_full().h(px(tail))).into_any_element()
     }
 }
 

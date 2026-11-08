@@ -74,10 +74,10 @@ chrono.workspace = true
 ttf-parser.workspace = true
 # 内嵌字体子集化：Google fontations 的 skera（纯 Rust、TTF/CFF/TTC，GSUB/GPOS 与
 # 竖排 metrics 都跟着字形走）。自己只剪 glyf 还要重映射布局表与复合字形，等于重写它。
-skera = "0.9"
+skera.workspace = true
 # skera 的输入类型与「每书唯一家族名」的 name 表重建用这两份（已在 skera 的依赖树里）。
-read-fonts = "0.46"
-write-fonts = "0.55"
+read-fonts.workspace = true
+write-fonts.workspace = true
 
 
 # ── 移动端平台层：只在移动目标上链，桌面端根本不编译它 ──
@@ -180,6 +180,10 @@ gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "87b2
     "permission_handler",
     # 把视图渲成图（分享卡片那一格的地基）。要的是打了补丁的渲染器，见根上那条 patch。
     "offscreen",
+    # 网盘授权的回跳：授权页回到应用时那条 `folio://aliyun/callback?code=…` 要能
+    # 递到 Rust（`services::cloud_link` 接这一手）。没有它，阿里云盘那条授权链
+    # 到「页面回来了」就断了 —— 码拿不到，界面一直等。
+    "deeplink",
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]

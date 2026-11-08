@@ -96,6 +96,8 @@ pub fn run_desktop() {
             // 常驻资源（导入作业池 + 监听 + 传书）收拢到一个进程级句柄里；书库句柄也交过去，
             // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
             crate::ui::services::resident::install(cx);
+            // 网盘凭据的轮换落盘（后台线程续期 → 通道 → 主线程写回 config）。
+            crate::ui::services::cloud_auth::install(cx);
             // 诊断 dump（§5.8）：`FOLIO_DUMP=1` 时把生效配置 + 库版本 + 队列长度打一份。
             if folio_core::infra::diagnostics::enabled() {
                 let provenance = ConfigHolder::provenance(cx);

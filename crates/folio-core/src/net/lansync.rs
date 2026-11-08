@@ -435,7 +435,7 @@ impl Peer {
     /// 那一本书的下载地址。
     ///
     /// token 与 hash 都是十六进制，拼进查询串不需要再转义；而 token 在查询里，日志侧
-    /// [`crate::ingest::import`] 那句 `url_for_log` 会掐掉整个查询串 —— 抓日志的人拿不到它。
+    /// [`crate::net::remote::strip_query`] 会掐掉整个查询串 —— 抓日志的人拿不到它。
     pub fn file_url(&self, hash: &str) -> String {
         format!(
             "{}{ROUTE_FILE}?token={}&hash={}",

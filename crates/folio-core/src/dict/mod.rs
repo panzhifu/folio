@@ -10,6 +10,10 @@
 //! 每次查词都回到磁盘，收益在手机上抵不过那一跳。上限写死在 [`MAX_IDX_BYTES`] /
 //! [`MAX_DICT_BYTES`]，超了就在导入那一步拒掉，而不是运行到一半 OOM。
 
+pub mod library;
+
+pub use library::{Hit, ImportedDict, Source};
+
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{BufReader, Read};

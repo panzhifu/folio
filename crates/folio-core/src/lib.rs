@@ -25,6 +25,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 // 这条方向是「引擎能在没有数据库的情况下跑」与「core 能被 cargo test 全量覆盖」的前提。
 pub mod account;
 pub mod backup;
+pub mod cache;
 pub mod content;
 pub mod dict;
 pub mod fonts;
@@ -34,10 +35,12 @@ pub mod ingest;
 pub mod layout;
 pub mod net;
 pub mod position;
+pub mod reader;
 pub mod search;
 pub mod speech;
 pub mod store;
 pub mod sync;
+pub mod text;
 
 pub use content::anchor::{
     Confidence, Relocated, TextAnchor, TextMap, line_at_offset, line_at_y, line_chars, line_offset,
@@ -56,10 +59,10 @@ pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
-    Account, Ai, Appearance, Backup, BaiduDrive, CONFIG_VERSION, Cloud, Config, Dictionary,
-    DictionaryEntry, Env, FontEntry, Fonts, IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV, Language,
-    Layer, Library, Logging, Membership, MembershipTier, Mode, Novel, Opds, OpdsCatalog, PageTurn,
-    Provenance, Reader, Resolved, Speech, Sync, SyncProvider, TextDirection, TocDensity,
+    Account, Ai, AliyunDrive, Appearance, Backup, BaiduDrive, CONFIG_VERSION, Cloud, Config,
+    Dictionary, DictionaryEntry, Env, FontEntry, Fonts, IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV,
+    Language, Layer, Library, Logging, Membership, MembershipTier, Mode, Novel, Opds, OpdsCatalog,
+    PageTurn, Provenance, Reader, Resolved, Speech, Sync, SyncProvider, TextDirection, TocDensity,
     Translation, TranslationEngine, WebDavDrive,
 };
 pub use infra::error::{Error, ImportReject, Result};

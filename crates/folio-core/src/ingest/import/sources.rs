@@ -358,7 +358,10 @@ impl Source for UrlSource {
 
     fn candidates(&self, _book_dir: &Path, ctx: &StageCtx) -> Result<Vec<Candidate>> {
         let name = url_name(&self.url);
-        tracing::debug!("import: URL 候选 {name} ← {}", url_for_log(&self.url));
+        tracing::debug!(
+            "import: URL 候选 {name} ← {}",
+            crate::net::remote::strip_query(&self.url)
+        );
         ctx.message(format!("下载《{name}》"));
         Ok(vec![Candidate {
             origin: Origin::Remote {
@@ -391,11 +394,6 @@ impl Source for UrlSource {
         ctx.bytes(total, Some(total), &candidate.name);
         Ok(dest)
     }
-}
-
-/// 日志里的 URL：查询串里常有凭证（签名直链的 token），打进日志前掐掉。
-fn url_for_log(url: &str) -> String {
-    url.split(['?', '#']).next().unwrap_or(url).to_string()
 }
 
 /// 浏览界面上勾下的一个网盘条目。

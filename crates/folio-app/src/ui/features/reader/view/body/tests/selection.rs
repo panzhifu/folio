@@ -12,7 +12,7 @@ use gpui_kit::{
 };
 use std::time::Duration;
 
-// ---- M6 选中：真实指针/手势事件驱动的状态机（见 plans/M6-selection.md） ----
+// ---- M6 选中：真实指针/手势事件驱动的状态机 ----
 /// 拉丁词的语料：长按吸词的验收要「吸出整词」可判定。
 fn latin_flow() -> FlowDoc {
     FlowDoc {

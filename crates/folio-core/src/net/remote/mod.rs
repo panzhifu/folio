@@ -2,14 +2,17 @@
 //!
 //! 这个模块只定义**传输**（[`Transport`]）和它的请求/响应形状，不含任何 `gpui` 类型。
 //! 原因是 `folio-core` 与 `folio-app` 之间那条硬边界：core 不许依赖 gpui（见 `lib.rs`
-//! 顶部），而真正能把字节发出去的那份实现要用 `App::http_client()`，只能住在 app 侧。
-//! 于是 core 负责「该发什么、回来的东西怎么读」，app 负责「怎么发」。
+//! 顶部）。**实现也在 core**（[`ureq::UreqTransport`]），它只需要一个阻塞的 HTTP 客户端，
+//! 不需要 `App`；app 侧只是持有它、把调用放到后台线程上。所以这里的口径是
+//! 「core 既定义形状也发请求，app 只决定什么时候发」—— `App::http_client()` 那条路
+//! **没有**被用上，别再照旧注释去 app 里找实现。
 //!
 //! 拆成 trait 之后，协议里那些真正容易踩空的规则 —— 路径逐段转义、`Depth: 1` 的语义
 //! 不齐、207 多状态里每个资源自己的状态码、`href` 的基准各家不同 —— 都能在
 //! 无网络、无窗口、假传输的条件下测（见 [`dav`] 的测试）。
 
 pub mod dav;
+pub mod retry;
 pub mod ureq;
 
 use std::io::{Read, Seek};
@@ -112,7 +115,12 @@ impl Method {
 }
 
 /// 一条已经拼好的请求：URL 已逐段转义，头已带齐。实现只管发，不再碰字符串。
-#[derive(Debug, Clone)]
+///
+/// `Debug` 是**手写**的（见下面的 `impl`）：这条结构里三处都可能带着凭据 —— URL 查询串
+/// （百度那套把 `access_token` 拼在 query 上）、`Authorization` 头（WebDAV 的 Basic）、
+/// 请求体（阿里云盘换 token 是 JSON POST，里面就有 `client_secret` 与 `code`）。
+/// 派生出来的 `Debug` 会把它们原样交给任何一句 `tracing::debug!("{req:?}")`。
+#[derive(Clone)]
 pub struct Request {
     pub method: Method,
     pub url: String,
@@ -139,13 +147,49 @@ impl Request {
         self.body = body;
         self
     }
+
+    /// 打日志用的 URL：查询串里的凭据换成 `***`，其余原样。
+    pub fn redacted_url(&self) -> String {
+        redact_url(&self.url)
+    }
 }
 
-#[derive(Debug, Clone)]
+/// 手写的 `Debug`：**只给形状，不给凭据**。
+///
+/// 三条规矩：
+/// - URL 过 [`redact_url`]（username:password@ 与 `access_token=` 一类参数都换成 `***`）；
+/// - 头部的值一律不进输出（`Authorization` 的值是 base64 的 `user:password`，最不该进日志），
+///   只留名字；
+/// - 请求体只报字节数 —— 它是 JSON 的时候里面就有 `client_secret`。
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("url", &redact_url(&self.url))
+            .field("headers", &headers)
+            .field("body", &format_args!("<{} bytes>", self.body.len()))
+            .finish()
+    }
+}
+
+/// 响应体同样不进 `Debug`：换 token 的应答里就有 `access_token` / `refresh_token`。
+#[derive(Clone)]
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("Response")
+            .field("status", &self.status)
+            .field("headers", &headers)
+            .field("body", &format_args!("<{} bytes>", self.body.len()))
+            .finish()
+    }
 }
 
 impl Response {
@@ -166,6 +210,92 @@ impl Response {
             .find(|(k, _)| k.to_ascii_lowercase() == want)
             .map(|(_, v)| v.as_str())
     }
+}
+
+/// 会出现在查询串里的敏感参数名（比较时不分大小写）。
+///
+/// 一张**白名单式的黑名单**：只有明确知道是凭据的那些才遮。宁可少遮一个不认识的参数，
+/// 也不要按前缀猜（`--data` 这类参数会被误伤，日志反而不像真的）。
+const SECRET_QUERY_KEYS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "token",
+    "code",
+    "sign",
+    "signature",
+    "password",
+];
+
+fn is_secret_query_key(name: &str) -> bool {
+    SECRET_QUERY_KEYS
+        .iter()
+        .any(|key| name.eq_ignore_ascii_case(key))
+}
+
+/// 打日志用的 URL：**两处凭据都换成 `***`**，其余原样。
+///
+/// - authority 里的 userinfo：`https://user:pass@host/x` → `https://***@host/x`
+///   （WebDAV 的账号密码会出现在这里，见 [`dav::Endpoint::url`]）；
+/// - 查询串里 [`SECRET_QUERY_KEYS`] 那些参数的值：`?access_token=121.abc` → `?access_token=***`
+///   （百度那套把 token 拼在 URL 上）。
+///
+/// 路径、其余参数、片段都原样保留 —— 日志要能看出「请求的是哪个文件」，
+/// 遮过头就查不动了。
+pub fn redact_url(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    // —— authority 里的 userinfo ——
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            out.push_str(scheme);
+            out.push_str("://");
+            // `@` 只在 authority 里、下一个 `/` 之前才算凭据。
+            let head_len = rest.find('/').unwrap_or(rest.len());
+            let (head, tail) = rest.split_at(head_len);
+            match head.split_once('@') {
+                Some((_, host)) => {
+                    out.push_str("***@");
+                    out.push_str(host);
+                }
+                None => out.push_str(head),
+            }
+            out.push_str(tail);
+        }
+        None => out.push_str(url),
+    }
+    // —— 查询串里的敏感参数 ——
+    let Some((head, query)) = out.split_once('?') else {
+        return out;
+    };
+    let mut redacted = String::with_capacity(out.len());
+    redacted.push_str(head);
+    redacted.push('?');
+    for (index, pair) in query.split('&').enumerate() {
+        if index > 0 {
+            redacted.push('&');
+        }
+        match pair.split_once('=') {
+            Some((name, _)) if is_secret_query_key(name) => {
+                redacted.push_str(name);
+                redacted.push_str("=***");
+            }
+            _ => redacted.push_str(pair),
+        }
+    }
+    redacted
+}
+
+/// 只留「协议 + 主机 + 路径」的 URL：**整个查询串与片段都扔掉**。
+///
+/// 与 [`redact_url`] 的差别是保守程度，用途也不同：
+///
+/// - [`redact_url`] 用在**我们自己拼的** URL 上（token 是哪几个参数名我们说了算），
+///   所以只遮白名单那几个，其余参数留着便于排查；
+/// - 这一条用在**别人给的** URL 上（分享直链、预签名地址），那些地址的签名参数名
+///   五花八门（`sign` / `auth_key` / `X-Amz-Signature` / 一长串十六进制），
+///   白名单挡不住，所以整段丢掉。
+pub fn strip_query(url: &str) -> String {
+    url.split(['?', '#']).next().unwrap_or(url).to_string()
 }
 
 /// 远端仓库：同步快照与书文件共用的一层。
@@ -272,5 +402,109 @@ impl Cancel {
 
     pub fn triggered(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 脱敏那一条：日志文件会被贴进工单、传给别人看，凭据不该跟着走。
+
+    use super::{Method, Request, Response, redact_url};
+
+    /// 查询串里的凭据值换成 `***`，其余参数与路径原样。
+    #[test]
+    fn a_token_in_the_query_is_masked() {
+        let url = "https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=%2F%E4%B9%A6&access_token=121.abc";
+        let got = redact_url(url);
+        assert!(!got.contains("121.abc"), "token 还在：{got}");
+        assert!(got.contains("access_token=***"), "{got}");
+        assert!(got.contains("method=list"), "其余参数不该动：{got}");
+        assert!(got.contains("dir=%2F%E4%B9%A6"), "路径不该动：{got}");
+    }
+
+    /// 换 token 的那两条 URL：`client_secret` / `code` / `refresh_token` 一起遮。
+    #[test]
+    fn the_oauth_body_parameters_are_masked_too() {
+        let got = redact_url(
+            "https://openapi.baidu.com/oauth/2.0/token?grant_type=authorization_code&code=THE-CODE&client_id=id&client_secret=SECRET&redirect_uri=oob",
+        );
+        assert!(!got.contains("THE-CODE"), "{got}");
+        assert!(!got.contains("SECRET"), "{got}");
+        assert!(got.contains("code=***"), "{got}");
+        assert!(got.contains("client_secret=***"), "{got}");
+        assert!(got.contains("client_id=id"), "client_id 不是秘密：{got}");
+    }
+
+    /// authority 里的 `user:password@` 也遮 —— WebDAV 允许把账号写进地址。
+    #[test]
+    fn userinfo_in_the_authority_is_masked() {
+        let got = redact_url("https://noke:app-pass@dav.example.com/remote.php/dav/");
+        assert!(!got.contains("app-pass"), "{got}");
+        assert_eq!(got, "https://***@dav.example.com/remote.php/dav/");
+    }
+
+    /// `@` 出现在路径里（不是 authority）时不许误遮。
+    #[test]
+    fn an_at_sign_in_the_path_is_not_credentials() {
+        let url = "https://dav.example.com/dav/a@b.epub";
+        assert_eq!(redact_url(url), url);
+    }
+
+    /// `Request` 的 `Debug`：URL 遮过、头部只留名字、请求体只报字节数。
+    ///
+    /// 这一条是「任何一句 `debug!("{req:?}")` 都不会泄漏凭据」的总门 ——
+    /// 三处泄漏面一次钉住。
+    #[test]
+    fn the_request_debug_prints_shape_not_secrets() {
+        let req = Request::new(
+            Method::Get,
+            "https://pan.baidu.com/x?access_token=121.abc".to_string(),
+        )
+        .header("Authorization", "Basic bm9rZTphcHAtcGFzcw==")
+        .header("User-Agent", "pan.baidu.com")
+        .body(br#"{"client_secret":"S3CR3T","code":"THE-CODE"}"#.to_vec());
+        let printed = format!("{req:?}");
+        assert!(!printed.contains("121.abc"), "{printed}");
+        assert!(
+            !printed.contains("bm9rZTphcHAtcGFzcw=="),
+            "Basic 的 base64 漏了：{printed}"
+        );
+        assert!(!printed.contains("S3CR3T"), "请求体漏了：{printed}");
+        assert!(!printed.contains("THE-CODE"), "{printed}");
+        // 形状还得在：方法（`Debug` 打的是枚举名）、域名、头名、字节数。
+        assert!(printed.contains("method: Get"), "{printed}");
+        assert!(printed.contains("pan.baidu.com/x"), "{printed}");
+        assert!(printed.contains("Authorization"), "头名要留：{printed}");
+        assert!(
+            printed.contains("<44 bytes>"),
+            "请求体只报字节数：{printed}"
+        );
+    }
+
+    /// 应答体同样不进 `Debug`：换 token 的应答里就有 `access_token`。
+    #[test]
+    fn the_response_debug_prints_shape_not_the_body() {
+        let resp = Response::new(
+            200,
+            br#"{"access_token":"121.abc","refresh_token":"122.cd"}"#.to_vec(),
+        );
+        let printed = format!("{resp:?}");
+        assert!(!printed.contains("121.abc"), "{printed}");
+        assert!(!printed.contains("122.cd"), "{printed}");
+        assert!(printed.contains("200"), "{printed}");
+    }
+
+    /// `redacted_url()` 与 `Debug` 走的是同一条规则：日志里手写 URL 也用这一份。
+    #[test]
+    fn the_accessor_matches_the_debug_rule() {
+        let req = Request::new(
+            Method::Get,
+            "https://dav.example.com/x?refresh_token=abc".to_string(),
+        );
+        assert_eq!(
+            req.redacted_url(),
+            "https://dav.example.com/x?refresh_token=***"
+        );
+        assert!(format!("{req:?}").contains("refresh_token=***"));
     }
 }

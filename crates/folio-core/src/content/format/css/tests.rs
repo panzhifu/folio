@@ -492,3 +492,46 @@ fn print_only_media_blocks_are_dropped_while_screen_ones_are_kept() {
         "含 all 的照收"
     );
 }
+
+/// 阅读页首帧要从 `books.css` 里同步认出「整页底色」：从前它得等异步排版
+/// 把 `<body background-color>` 折成装饰块才画上去，读者先看见自己选的纸色、
+/// 再跳成书里那一档。这几条钉住「只认根规则、后者胜、透明当没写」。
+#[test]
+fn the_page_background_is_read_from_root_rules_only() {
+    use crate::content::format::css::page_background_color;
+    use crate::infra::reading_theme::Rgba8;
+
+    let bg = |css: &str| page_background_color(css);
+    let brown = Some(Rgba8 {
+        r: 0xc4,
+        g: 0xaa,
+        b: 0x87,
+        a: 255,
+    });
+
+    assert_eq!(bg("body { background-color: #c4aa87 }"), brown);
+    assert_eq!(bg("html, body { background-color: #c4aa87 }"), brown);
+    // `<body class="brownll">` 配 `.brownll { … }`：《人类简史》那一档。
+    assert_eq!(bg(".brownll { background: #c4aa87 }"), brown);
+    assert_eq!(bg("body.brownll { background-color: #c4aa87 }"), brown);
+
+    // 正文里某一块的底色不算整页。
+    assert_eq!(bg("p.foo { background-color: #c4aa87 }"), None);
+    assert_eq!(bg("div p { background-color: #c4aa87 }"), None);
+    assert_eq!(bg("body { color: #c4aa87 }"), None);
+    // transparent / currentcolor 当「没写」。
+    assert_eq!(bg("body { background-color: transparent }"), None);
+    assert_eq!(bg("body { background-color: currentcolor }"), None);
+    assert_eq!(bg(""), None);
+
+    // 两条同名声明后者胜。
+    assert_eq!(
+        bg("body { background-color: #111111 } body { background-color: #222222 }"),
+        Some(Rgba8 {
+            r: 0x22,
+            g: 0x22,
+            b: 0x22,
+            a: 255
+        })
+    );
+}

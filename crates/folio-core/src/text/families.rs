@@ -1,4 +1,6 @@
 //! 进程级「没有拉丁 `m` 的家族名」登记表 —— **字体选择器的闸**。
+//! （2026-11-09 从 `folio_app::ui::foundation::font_primary` 搬来：全部是
+//! `HashSet` / `AtomicU64`，0 个 gpui 类型，而消费方除选择器外还有 core 的加载管线。）
 //!
 //! 从前它还兼管「能不能当 gpui primary」：gpui 的 `CosmicTextSystem::load_family`
 //! 会把无 `m` 的脸从 primary 候选里剔掉，剔空后 `resolve_font` 在 Android 上直接
@@ -6,7 +8,7 @@
 //! 补缺链），这张表的剩余职责只有一条：**emoji 与符号字体不该出现在读者的正文字体
 //! 可选列表里** —— 它们没有拉丁字形，选了当正文，数字与英文全靠回退兜。
 //!
-//! 随书内嵌字体当 primary 不再问这张表（见 `book_fonts::primary_usable`）；
+//! 随书内嵌字体当 primary 不再问这张表（`text::load` 的 `BookFonts::primary_usable`）；
 //! 字体选择器与 host 的兜底家族仍先问这一句。
 //!
 //! 这里另有两份进程级状态，都是给字体选择器用的：
@@ -25,7 +27,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// 子集字体家族名的标记（见 `book_fonts::rename_subset_family`）。这些名字只属于某一本
+/// 子集字体家族名的标记（见 `text::load::rename_subset_family`）。这些名字只属于某一本
 /// 书的某个字符集，不能出现在「读者可选的正文家族」里。
 pub const SUBSET_MARKER: &str = "#folio";
 
@@ -36,7 +38,7 @@ fn registry() -> &'static Mutex<HashSet<String>> {
 
 /// 进程级「哪些家族名来自随书注册」登记表 —— 字体选择器分组的依据。
 ///
-/// `book_fonts::register_batch` 每注册成功一份字体就记一次（子集字体除外：它们带
+/// `text::load::register_batch` 每注册成功一份字体就记一次（子集字体除外：它们带
 /// [`SUBSET_MARKER`]，本来就被 [`usable`] 挡在选择器外，记进来只会造成假分组）。表是
 /// 进程级的、关书不清 —— gpui 的字体注册本身就不撤，撤了登记反而和现实对不上。
 fn book_families() -> &'static Mutex<HashSet<String>> {
@@ -65,7 +67,7 @@ pub fn is_book_family(name: &str) -> bool {
 
 /// 进程级「哪些家族名是读者自己装的」登记表 —— 选择器「我的字体」组的依据。
 ///
-/// `platform::user_fonts` 每注册成功一份下载 / 导入的字体就记一次。与随书表同一条
+/// app 侧 `platform::user_fonts` 每注册成功一份下载 / 导入的字体就记一次。与随书表同一条
 /// 生命周期：进程级、不撤 —— gpui 的注册撤不回来，登记跟着现实走。
 fn user_families() -> &'static Mutex<HashSet<String>> {
     static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -116,7 +118,7 @@ pub fn retire_family(name: &str) {
 /// 可选字体表的变化版本号。字体选择器拿它对账：数字变了就重取
 /// `all_font_names()` 重建分组列表，不用自己盯着字体系统。
 ///
-/// 两处会推它：随书注册（`book_fonts::register_batch`）与移动端的系统字体全量扫描
+/// 两处会推它：随书注册（`text::load::register_batch`）与移动端的系统字体全量扫描
 /// （`system_fonts`）。走原子而不是 gpui Global，因为 register_batch 在排版 worker
 /// 线程上跑，够不着主线程的 `App`。
 fn revision() -> &'static AtomicU64 {

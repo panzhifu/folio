@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use folio_core::Sync as SyncConfig;
 use folio_core::SyncProvider;
-use folio_core::net::cloud::baidu::{self, BaiduDrive};
 use folio_core::net::remote::{self, RemoteStore, Transport, dav};
 use folio_core::sync::{self, Report};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global};
@@ -150,15 +149,27 @@ fn client(config: &SyncConfig, cx: &App) -> Result<Box<dyn RemoteStore>, Failure
                 dav::Endpoint::new(url, config.username.clone(), config.password.clone());
             Ok(Box::new(dav::Client::new(endpoint, transport())))
         }
+        // 两家网盘都套上凭据续期（`AuthedStore`）：同步那趟跑在后台，token 过期时
+        // 自己续、401 强刷重放一次，轮换结果经通道写回 config。手贴 token（没有
+        // refresh_token）续不了就交回原 401 —— 设置页的「登录被拒」照旧翻得出来。
         SyncProvider::Baidu => {
             let cloud = ConfigHolder::cloud(cx);
             if !cloud.baidu.configured() {
                 return Err(Failure::Config);
             }
-            Ok(Box::new(BaiduDrive::with_root(
-                cloud.baidu.access_token,
+            Ok(Box::new(super::cloud_auth::baidu_sync(
+                &cloud.baidu,
                 transport(),
-                baidu::APP_ROOT,
+            )))
+        }
+        SyncProvider::Aliyun => {
+            let cloud = ConfigHolder::cloud(cx);
+            if !cloud.aliyun.configured() {
+                return Err(Failure::Config);
+            }
+            Ok(Box::new(super::cloud_auth::aliyun_sync(
+                &cloud.aliyun,
+                transport(),
             )))
         }
     }

@@ -536,6 +536,8 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
     // 常驻资源（导入作业池 + 监听 + 传书）收拢到一个进程级句柄里；书库句柄也交过去，
     // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
     crate::ui::services::resident::install(cx);
+    // 网盘凭据的轮换落盘（后台线程续期 → 通道 → 主线程写回 config）。
+    crate::ui::services::cloud_auth::install(cx);
     // 诊断 dump（§5.8）：`FOLIO_DUMP=1` 时把生效配置 + 库版本 + 队列长度打一份。
     if folio_core::infra::diagnostics::enabled() {
         let provenance = ConfigHolder::provenance(cx);
@@ -586,6 +588,33 @@ fn open_main_window(cx: &mut App) {
     ) {
         Ok(_handle) => tracing::info!("open_main_window: 窗口已打开"),
         Err(err) => tracing::error!("open_main_window: 打开失败：{err:#}"),
+    }
+}
+
+// ── 设备名 ────────────────────────────────────────────────────────────────────
+
+/// 读者认得的设备名。Android 读型号码；桌面读主机名；iOS / OHOS 拿不到就交 `None`，
+/// 由界面回落到「设备」这个通用名。
+///
+/// 只用于展示（会员页那一行），不参与任何身份判定 —— 书的身份是 content_hash，
+/// 设备的身份是 `sync.device_id`，两者都不该被一个可改的主机名影响。
+pub(crate) fn device_name() -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        return android::device_name();
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        std::env::var("HOSTNAME")
+            .ok()
+            .or_else(|| std::env::var("COMPUTERNAME").ok())
+            .or_else(|| {
+                std::fs::read_to_string("/etc/hostname")
+                    .ok()
+                    .map(|name| name.trim().to_string())
+            })
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
     }
 }
 

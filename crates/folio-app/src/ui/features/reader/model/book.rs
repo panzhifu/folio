@@ -23,11 +23,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use folio_core::content::document::Document as OpenedDocument;
+use folio_core::content::format::TocEntry;
 use folio_core::content::format::css::RuleSet;
-use folio_core::content::format::{TocEntry, dir_of, fragment_of, resolve_href};
 use folio_core::layout::ImageProvider;
 use folio_core::{Chapter, Locator, Reader};
 use gpui_kit::SharedString;
+
+use folio_core::reader::book as spine;
 
 use crate::ui::features::reader::components::image_viewer::{ImageSlot, Place, file_name};
 use crate::ui::features::reader::model::book_fonts::{BookFonts, FontLoadJob, FontRequest};
@@ -36,23 +38,9 @@ use crate::ui::features::reader::model::perf;
 use crate::ui::features::reader::model::toc_tree::{self, TocRow};
 use crate::ui::foundation::images::{BookImages, ChapterImages, document_source};
 
-/// 拼进连续坐标的邻章半窗宽：锚章上下**至少**预排这么多章。
-///
-/// 读者会狂飙滚动：窗口给到 ±2，配合后台单线程排版队列（毫秒级一章），正常速度
-/// 下接缝永远提前排好；狂飙时也至少还有一章的余量，滚到未就绪的边界只会停一拍，
-/// 不会白屏。这是条**下限**：真正的边界由 [`Book::window_range`] 按像素预算再往外铺，
-/// 上界是单侧 [`SPAN_MAX_AHEAD`] 章 —— 常数量级，不随书的长度长。
-const SPAN_WINDOW: usize = 2;
-
-/// 拼接窗口**前向**的像素预算，按屏给：**视口底**再往下还要铺这么多，读者才滚得动、
-/// 锚章才迁移。它必须不止一屏：迁移的判据是「视口顶进了下一章」，而视口顶最远只走得到
-/// 链尾减一屏 —— 链尾不伸出下一章一屏，那个判据就永远够不着，读者钉在链尾那一屏上
-/// （见 [`Book::window_range`]）。
-const SPAN_AHEAD_SCREENS: f32 = 1.5;
-/// 拼接窗口**后向**的像素预算，按屏给。视口顶往上铺够这么多，往回滚不至于两下就到链头。
-const SPAN_BEHIND_SCREENS: f32 = 0.5;
-/// 前向窗口的**章数**上限：像素预算之外再兜一道，防一屏能放下几十个一行章时铺太多。
-const SPAN_MAX_AHEAD: usize = 16;
+// 拼接坐标的公式、窗口边界、进度口径与链接解析住在 `folio_core::reader::book`
+// （§3.8 下沉：纯层离线可测）；app 里 `model::book::{Link, Placement}` 旧路径照旧可用。
+pub use folio_core::reader::book::{Link, Placement};
 
 /// 拼接坐标里的一个邻章：哪一章 + 它自己的排版状态。
 ///
@@ -60,64 +48,6 @@ const SPAN_MAX_AHEAD: usize = 16;
 pub(in crate::ui::features::reader) struct Span {
     pub(in crate::ui::features::reader) index: usize,
     doc: Document,
-}
-
-/// 一章在全局坐标里的摆位（只读投影）：起点、高度，都是排版像素。
-#[derive(Debug)]
-pub(in crate::ui::features::reader) struct Placement {
-    pub(in crate::ui::features::reader) index: usize,
-    pub(in crate::ui::features::reader) base_y: f32,
-    pub(in crate::ui::features::reader) height: f32,
-}
-
-/// 把「章高 + 是不是整页画」按章号顺序叠成全局坐标。
-///
-/// **两条满版图之间不留缝**。章间距是一层底色，夹在两章中间给正文透气；而两张整页图
-/// 上下相接时，那一条底色就成了一道白/黑带（读者报的「图片之间有间隙」——《诡秘之主》
-/// 第 4、5 节的 `fm1.jpg` / `fmc1.jpg`）。两边都要成立：只有一侧是图时，缝隙仍留在
-/// 正文与图之间。
-fn stack(entries: Vec<(Placement, bool)>, gap: f32) -> Vec<Placement> {
-    let count = entries.len();
-    let picture: Vec<bool> = entries.iter().map(|(_, flag)| *flag).collect();
-    let mut out: Vec<Placement> = entries
-        .into_iter()
-        .map(|(placement, _)| placement)
-        .collect();
-    let mut y = 0.0;
-    for (i, placement) in out.iter_mut().enumerate() {
-        placement.base_y = y;
-        y += placement.height;
-        let seam = picture[i] && picture.get(i + 1).copied().unwrap_or(false);
-        if i + 1 < count && !seam {
-            y += gap;
-        }
-    }
-    out
-}
-
-/// 正文里一条 `<a href>` 的去向（[`Book::resolve_link`] 的结果）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Link {
-    /// 书内位置：某一章，加上可选的章内锚点（`#id`）。
-    Internal {
-        chapter: usize,
-        fragment: Option<String>,
-    },
-    /// 书外地址（`http:` / `mailto:` / `tel:` 等）。一期只解出来，收不收由调用方定。
-    External { url: String },
-}
-
-/// `before` 里 `:` 前若是一个 URL scheme 就返回它，否则 `None`。
-///
-/// 判定照 RFC 3986：首字符字母，其余是字母数字或 `+` `-` `.`。文件名里出现 `:`
-/// 极少见，而真正要拦的是 `http://…` 这种 —— 不拦就会被当相对路径去解、解不出。
-fn external_scheme(before: &str) -> Option<&str> {
-    let (scheme, _) = before.split_once(':')?;
-    let mut chars = scheme.chars();
-    let first = chars.next()?;
-    (first.is_ascii_alphabetic()
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-    .then_some(scheme)
 }
 
 /// 一台设备上打开着的一本书：章节表、锚章、以及锚章 ± 窗口的排版状态。
@@ -299,7 +229,7 @@ impl Book {
     /// 拼接坐标里两章之间的缝。跟着字号走（2em）并给一条下限：它是「上一章结束、
     /// 下一章开始」的呼吸空隙，不是装饰条。
     pub(in crate::ui::features::reader) fn chapter_gap(prefs: &Reader) -> f32 {
-        (prefs.font_size * 2.0).max(24.0)
+        spine::chapter_gap(prefs)
     }
 
     /// 把绘制侧那一段「正文让给页眉与安全区」的高度报进来（见 [`Self::chapter_top`]）。
@@ -428,41 +358,20 @@ impl Book {
     ///
     /// 没排完的章按一屏估：宁可多铺一章，也不要少铺。
     fn window_range(&self, gap: f32, viewport_top: f32) -> (usize, usize) {
-        let last = self.chapters.len().saturating_sub(1);
-        let height = |index: usize| -> f32 {
-            self.span_doc(index)
-                .map(|doc| doc.height())
-                .filter(|h| *h > 0.0)
-                .unwrap_or(self.window_px)
-        };
-        // 视口顶在锚章里的位置。锚章还没排完（base 问不出来）时按章首算：两条夹取
-        // 都往「少要一点」那一侧靠，多铺的那几章下一帧自己会补齐。
-        let top = self
-            .base_of(self.chapter, gap)
-            .map(|base| (viewport_top - base).clamp(0.0, height(self.chapter)))
-            .unwrap_or(0.0);
-        // 前向：一屏（视口自己）+ `SPAN_AHEAD_SCREENS` 屏的余量，都从视口顶往下量。
-        let ahead = top + (self.window_px * (1.0 + SPAN_AHEAD_SCREENS)).max(1.0);
-        let behind = (self.window_px * SPAN_BEHIND_SCREENS).max(1.0);
-
-        let mut hi = self.chapter;
-        let mut covered = height(self.chapter);
-        while hi < last && (hi - self.chapter) < SPAN_MAX_AHEAD && covered < ahead {
-            hi += 1;
-            covered += height(hi) + gap;
-        }
-        hi = hi.max((self.chapter + SPAN_WINDOW).min(last));
-
-        // 后向：视口顶之上已经铺了 `above` 像素（锚章露在视口上方的那一截先算进去）。
-        let mut lo = self.chapter;
-        let mut above = top;
-        while lo > 0 && (self.chapter - lo) < SPAN_MAX_AHEAD && above < behind {
-            lo -= 1;
-            above += height(lo) + gap;
-        }
-        lo = lo.min(self.chapter.saturating_sub(SPAN_WINDOW));
-
-        (lo, hi)
+        spine::window_range(
+            self.chapter,
+            self.chapters.len(),
+            gap,
+            self.window_px,
+            viewport_top,
+            self.base_of(self.chapter, gap),
+            |index| {
+                self.span_doc(index)
+                    .map(|doc| doc.height())
+                    .filter(|h| *h > 0.0)
+                    .unwrap_or(self.window_px)
+            },
+        )
     }
 
     /// 只留 `[lo, hi]` 里的邻居（锚章自己不会住在 `spans` 里）。
@@ -569,7 +478,7 @@ impl Book {
             ));
         }
         entries.sort_by_key(|(placement, _)| placement.index);
-        stack(entries, gap)
+        spine::stack(entries, gap)
     }
     /// 全局 y 落在哪一章。两章之间的缝归**后一章**：视口顶进了缝，
     /// 前一章的最后一行已经在视口之上了。
@@ -621,16 +530,6 @@ impl Book {
     /// 不是 0 —— 当成 0 会让分母偏小、百分比偏大，而那种偏差在屏上**看不出来**（页脚照样
     /// 是一个像样的百分数）。为什么把「不知道」与「这一章真的是空的」分成两格，见
     /// [`Chapter::char_len`]。
-    pub(in crate::ui::features::reader) fn char_measure(&self) -> Option<(Vec<usize>, usize)> {
-        let mut before = Vec::with_capacity(self.chapters.len());
-        let mut total = 0usize;
-        for chapter in &self.chapters {
-            before.push(total);
-            total += chapter.char_len?;
-        }
-        (total > 0).then_some((before, total))
-    }
-
     /// 全书进度：`(前面各章字数之和 + 章内偏移) ÷ 全书总字数`。
     ///
     /// 与架上卡片那一格（`store::books::progress_of`）**同一个式子、同一份 `char_len`**：
@@ -645,10 +544,7 @@ impl Book {
         chapter: usize,
         offset: usize,
     ) -> Option<f32> {
-        let (before, total) = self.char_measure()?;
-        let len = *self.chapters.get(chapter)?.char_len.as_ref()?;
-        let read = before.get(chapter)? + offset.min(len);
-        Some((read as f32 / total as f32).clamp(0.0, 1.0))
+        spine::progress_at(&self.chapters, chapter, offset)
     }
 
     /// 全书进度的反函数：比例 → 落点 `(哪一章, 章内第几个字)`。进度条那一拖走它。
@@ -659,14 +555,7 @@ impl Book {
         &self,
         ratio: f32,
     ) -> Option<(usize, usize)> {
-        let (before, total) = self.char_measure()?;
-        let want = (ratio.clamp(0.0, 1.0) * total as f32) as usize;
-        // 第一个「严格大于 want」的前缀就是目标章的下一章。
-        let chapter = before
-            .partition_point(|base| *base <= want)
-            .saturating_sub(1);
-        let len = *self.chapters.get(chapter)?.char_len.as_ref()?;
-        Some((chapter, (want - before[chapter]).min(len)))
+        spine::locate_progress(&self.chapters, ratio)
     }
 
     /// 「第 `offset` 个字（`chapter` 章内坐标）」的全局行顶。恢复落点用。
@@ -824,14 +713,7 @@ impl Book {
     /// 就等于「所有目录条目都指向第 0 章」—— 那是比跳错更糟的错，因为它看着是好的。
     /// 同一条 href 出现两次时留文档序在前的那一章。
     fn toc_hrefs(&self) -> HashMap<String, usize> {
-        let mut map = HashMap::new();
-        for (index, chapter) in self.chapters.iter().enumerate() {
-            if chapter.spine_href.is_empty() {
-                continue;
-            }
-            map.entry(chapter.spine_href.clone()).or_insert(index);
-        }
-        map
+        spine::toc_hrefs(&self.chapters)
     }
 
     /// 正文里一条 `<a href>` 的去向。
@@ -839,38 +721,7 @@ impl Book {
     /// 只分「书内」与「书外」两类。书内落成 `(章号, 可选锚点)` —— 与目录条目走的是
     /// 同一套坐标（`goto_entry` / `pending_anchor`），所以正文链接与目录链接跳得一样。
     pub fn resolve_link(&self, chapter: usize, href: &str) -> Option<Link> {
-        let href = href.trim();
-        if href.is_empty() {
-            return None;
-        }
-        let fragment = fragment_of(href);
-        // `#` 之前那一截：空 = 纯章内锚点（`#m1`），否则是路径或外部地址。
-        // 纯锚点是**先**判的：`resolve_href` 把 `#…` 整条剥掉之后会拿 base 目录
-        // 当结果，对纯锚点给出一个指不到任何章的假路径。
-        let before = href.split('#').next().unwrap_or("").trim();
-        if before.is_empty() {
-            return Some(Link::Internal { chapter, fragment });
-        }
-        if external_scheme(before).is_some() {
-            return Some(Link::External {
-                url: href.to_string(),
-            });
-        }
-        // 相对路径按**这一章**所在目录解析（书内目录页写的是 `part0004.xhtml`，
-        // 不是容器全路径），再回章节表查目标章。
-        let base = self
-            .chapters
-            .get(chapter)
-            .map(|c| dir_of(&c.spine_href))
-            .unwrap_or_default();
-        let path = resolve_href(&base, href);
-        self.toc_hrefs()
-            .get(&path)
-            .copied()
-            .map(|target| Link::Internal {
-                chapter: target,
-                fragment,
-            })
+        spine::resolve_link(&self.chapters, chapter, href)
     }
 
     /// 目录那一屏要的行，带层级。**每次问都重算**：树只有几十到几百条，
@@ -969,77 +820,5 @@ impl Book {
             .iter_mut()
             .find(|span| span.index == index)
             .map(|span| &mut span.doc)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Placement, stack};
-
-    fn placed(index: usize, height: f32) -> Placement {
-        Placement {
-            index,
-            base_y: 0.0,
-            height,
-        }
-    }
-
-    /// 中间那一对整页图相接、不留缝；图与正文之间照旧留。
-    #[test]
-    fn two_full_page_pictures_touch_and_the_others_keep_their_gap() {
-        let out = stack(
-            vec![
-                (placed(0, 100.0), false),
-                (placed(1, 500.0), true),
-                (placed(2, 500.0), true),
-                (placed(3, 100.0), false),
-            ],
-            40.0,
-        );
-        assert_eq!(
-            out.iter().map(|p| p.base_y).collect::<Vec<_>>(),
-            vec![0.0, 140.0, 640.0, 1180.0],
-            "图 1 与图 2 之间不留章间距，图与正文之间仍留"
-        );
-        assert_eq!(
-            out.last().map(|p| p.base_y + p.height),
-            Some(1280.0),
-            "整条链的末端跟着少掉那一格缝"
-        );
-    }
-
-    /// 一侧是图、另一侧是正文：缝隙仍在 —— 那一格底色是图与正文的分界。
-    #[test]
-    fn a_picture_next_to_text_keeps_its_seam() {
-        let out = stack(
-            vec![
-                (placed(0, 200.0), false),
-                (placed(1, 300.0), true),
-                (placed(2, 200.0), false),
-            ],
-            24.0,
-        );
-        assert_eq!(
-            out.iter().map(|p| p.base_y).collect::<Vec<_>>(),
-            vec![0.0, 224.0, 548.0],
-            "两张图的边界留缝、图与正文的边界也留缝"
-        );
-    }
-
-    /// 整条链都是图：每一处都不留缝，链就是一串紧挨着的画面。
-    #[test]
-    fn a_run_of_pictures_has_no_seam_anywhere() {
-        let out = stack(
-            vec![
-                (placed(0, 300.0), true),
-                (placed(1, 300.0), true),
-                (placed(2, 300.0), true),
-            ],
-            40.0,
-        );
-        assert_eq!(
-            out.iter().map(|p| p.base_y).collect::<Vec<_>>(),
-            vec![0.0, 300.0, 600.0]
-        );
     }
 }

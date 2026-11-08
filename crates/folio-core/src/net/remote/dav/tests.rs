@@ -9,17 +9,17 @@ fn endpoint() -> Endpoint {
 #[test]
 fn a_url_with_credentials_in_it_logs_without_them() {
     assert_eq!(
-        url_for_log("https://noke:app-pass@dav.example.com/dav/books/蜗牛.epub"),
+        redact_url("https://noke:app-pass@dav.example.com/dav/books/蜗牛.epub"),
         "https://***@dav.example.com/dav/books/蜗牛.epub"
     );
     // 没写凭据时要原样，不能把主机当 userinfo 吃掉。
     assert_eq!(
-        url_for_log("https://dav.example.com/dav/books/蜗牛.epub"),
+        redact_url("https://dav.example.com/dav/books/蜗牛.epub"),
         "https://dav.example.com/dav/books/蜗牛.epub"
     );
     // 路径里的 `@`（邮箱式目录名）不算凭据。
     assert_eq!(
-        url_for_log("https://dav.example.com/a@b/c"),
+        redact_url("https://dav.example.com/a@b/c"),
         "https://dav.example.com/a@b/c"
     );
 }

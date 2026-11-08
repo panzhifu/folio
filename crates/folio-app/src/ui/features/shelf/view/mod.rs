@@ -963,8 +963,8 @@ impl ShelfView {
             TaskEvent::Progress(progress) => {
                 self.importing = Some((progress.done, progress.total));
                 // 管线附送的文案只进日志：它是 core 里的事实描述，屏幕上那张卡说的每一句
-                // 都要走 locale（`shelf.status_importing` 与 `shelf.status_progress`），
-                // 否则英文界面上会冒出中文来。
+                // 都要走 locale（卡头是 `shelf.status_importing`），否则英文界面上会冒出中文来。
+                // 进度不进卡头 —— 它归每行名字下面那条 bar。
                 if !progress.message.is_empty() {
                     tracing::info!(
                         "ShelfView: 导入进度 {}/{} —— {}",

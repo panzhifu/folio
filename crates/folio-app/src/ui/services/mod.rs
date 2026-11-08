@@ -9,6 +9,9 @@
 pub mod activation;
 pub mod app_store;
 pub mod backup;
+pub mod cloud_auth;
+pub mod cloud_link;
+pub mod cloud_providers;
 pub mod cloud_upload;
 pub mod config;
 pub mod dictionary;

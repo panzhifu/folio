@@ -384,8 +384,45 @@ pub fn providers() -> Vec<Box<dyn DocumentProvider>> {
     ]
 }
 
-/// 认下这个文件的 provider；权重大的优先，同权重按注册顺序。
+/// 认下这个文件的 provider；**内容优先，扩展名兜底**。
+///
+/// 扩展名只说明别人怎么命名它，不说明它是什么：一本书被改名成 `.htmlz`、`.bin`
+/// 或干脆没有扩展名，打开时仍该按容器里的骨架选适配器。ZIP 那一族有可靠的判据
+/// （`META-INF/container.xml` + OPF、mimetype、`[Content_Types].xml` 等，见
+/// [`super::sniff::zip_shape`]），所以真实存在的文件先问一次容器；不是 ZIP、
+/// 或容器里认不出书，再退回扩展名。
+///
+/// 测试里那些不落盘的探针路径（`probe.epub`、`a.chm`）`is_file()` 为假，走的仍是
+/// 纯扩展名那条老路。
 pub fn provider_for(path: &Path) -> Option<Box<dyn DocumentProvider>> {
+    if let Some(format) = sniffed_book_format(path)
+        && let Some(provider) = provider_by_format(format)
+    {
+        return Some(provider);
+    }
+    provider_for_extension(path)
+}
+
+/// 容器说的是哪一种书；不是 ZIP 或不是书都是 `None`。
+fn sniffed_book_format(path: &Path) -> Option<Format> {
+    if !path.is_file() {
+        return None;
+    }
+    match super::sniff::zip_shape(path) {
+        super::sniff::ArchiveShape::Book(format) => Some(format),
+        _ => None,
+    }
+}
+
+/// 按格式找 provider。内容嗅探认出来以后走这一条 —— 不再拼一个假扩展名去问。
+pub fn provider_by_format(format: Format) -> Option<Box<dyn DocumentProvider>> {
+    providers()
+        .into_iter()
+        .find(|candidate| candidate.format() == format)
+}
+
+/// 纯扩展名的选择规则（权重大的优先，同权重按注册顺序）。
+fn provider_for_extension(path: &Path) -> Option<Box<dyn DocumentProvider>> {
     let mut best: Option<Box<dyn DocumentProvider>> = None;
     let mut best_weight = 0u32;
     for candidate in providers() {
@@ -606,6 +643,7 @@ mod tests {
     //! 注册表：认领与权重。用一个只认 `.zzz` 的假 provider 钉住选择规则 ——
     //! 真实 provider 的扩展名不该被这些断言绑死。
 
+    use std::io::Write as _;
     use std::path::Path;
 
     use super::{
@@ -727,6 +765,34 @@ mod tests {
         }
         assert!(provider_for(Path::new("a.lit")).is_none(), "没注册就是不认");
         assert_eq!(providers().len(), 21);
+    }
+
+    /// 真实存在的 ZIP：**容器骨架说了算**。一个被改名成 `.htmlz` 的 EPUB 打开时
+    /// 该交给 EPUB 适配器，而不是按扩展名去 HTMLZ 那边按文件名排章。
+    #[test]
+    fn a_real_zip_is_read_by_its_container_not_its_extension() {
+        let tmp = tempfile::tempdir().expect("临时目录");
+        let path = tmp.path().join("book.htmlz");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, body) in [
+            ("META-INF/container.xml", &b"<container/>"[..]),
+            ("OEBPS/content.opf", &b"<package/>"[..]),
+            ("OEBPS/Text/ch1.xhtml", &b"<html><body>hi</body></html>"[..]),
+            ("OEBPS/Images/a.jpg", &b"\xff\xd8\xff\xd9"[..]),
+        ] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let provider = provider_for(&path).expect("该有 provider");
+        assert_eq!(
+            provider.format(),
+            Format::Epub,
+            "扩展名是 .htmlz，但 META-INF/container.xml + OPF 说明它是 EPUB"
+        );
     }
 
     /// 粗筛那一道门的**名字那一半**：注册表清单里的每一个仍然过，认不出的名字不过。

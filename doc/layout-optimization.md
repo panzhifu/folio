@@ -616,12 +616,11 @@ let index = self.push_block(owner, x, y, width, collected.text.clone());
 | `crates/folio-core/src/css/computed.rs` | `ComputedStyle` 手写 `Hash`（§7.2 的键要它）；`StyledDom::len/iter`、`Display::Hash`、`Color::Hash`（P0/P1 需要，保留） |
 | `crates/folio-core/src/validate.rs` | 格式校验（独立功能，保留） |
 | `crates/folio-core/examples/bench-layout.rs` | 基准（保留） |
-| `plans/layout-engine-refactoring.md` | 早先的方案文档（本文档取代它） |
 
 ### 建议动作
 
 1. ~~回退 §5.4 的合并遍历~~ → **不采纳**：本机 A/B 证明合并版更快（§九.1），保留合并版。
-2. ~~删除 `plans/layout-engine-refactoring.md`~~ → 暂留（尚未确认）。
+2. ~~删除早先的方案文档~~ → **已删除**（`layout-engine-refactoring.md`，本文档取代它）。
 3. §七 顺序：**§7.4 ✅**、**§7.3 ✅**（§九.2）、**§7.2 ✅**（§九.4）、**§7.5 ✅**（§九.5）、
    **§7.1 ✅**（§九.6）；剩 §7.6 页位图缓存、§7.7 布局磁盘缓存（都属高风险大工程）。
 

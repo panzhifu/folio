@@ -13,7 +13,8 @@
 //! 图集的封顶是手机上 24 MiB（`image_atlas::soft_limit`，桌面 128、平板 48），而放掉一格的判据是「离场满
 //! `HELD_AFTER_LEAVE` 帧」。预取进来的那一格要**每帧被碰到**才活得下来，被碰到的次数就是
 //! 它与当前屏的距离 —— 预取太远，还没翻到就被 `end_frame` 收走了，等于白解一趟。
-//! 所以这里只取紧挨着的下一次翻页，而且每帧至多起一趟（[`first_unseen`] 只回第一张）。
+//! 所以静止帧只取紧挨着的下一次翻页、每帧至多起一趟；快滑时把窗口翻倍、多排几张
+//! 低清（见 [`unseen`] 的 `limit` 与调用处 `view::body` 的 `radius`）。
 //!
 //! ## 分页与连续滚动各取哪一张
 //!
@@ -226,24 +227,33 @@ pub(in crate::ui::features::reader) fn scroll_targets(
     out
 }
 
-/// 这些带里、**这一帧还没碰过**的第一张图的活儿。
+/// 这些带里、**这一帧还没碰过**的前 `limit` 张图的活儿。
 ///
 /// `seen` 是调用方这一帧已经交给图集碰过的那些容器路径（主场景与捕获副本 `painted` 过的），
-/// 这里跳过它们 —— 那些已经在场，再问一次只是白查。剩下的第一张交给
-/// `ImageAtlas::prepare` 起活；已经在图集里的那一张 `prepare` 也认（它查得到格就不重解，
-/// 只把「在场」记上），所以这里不必自己查图集。
+/// 这里跳过它们 —— 那些已经在场，再问一次只是白查。剩下的交给 `ImageAtlas::prepare`
+/// 起活；已经在图集里的那一张 `prepare` 也认（它查得到格就不重解，只把「在场」记上），
+/// 所以这里不必自己查图集。
 ///
-/// 每帧只回一张：起两趟解压在 24 MiB 的封顶下会把读者正在看的那张挤出去。
-pub(in crate::ui::features::reader) fn first_unseen(
+/// `limit` 由调用方按「这一帧在不在快滑」给：静止帧仍是 1（起两趟全档解压在
+/// 24 MiB 的封顶下会把读者正在看的那张挤出去），快滑时多给几张**低清** ——
+/// 滑得比画得快的时候，只预解一张会在读者到那一屏时还在画。
+pub(in crate::ui::features::reader) fn unseen(
     book: &Book,
     targets: &[PrefetchTarget],
     seen: impl Fn(&str) -> bool,
-) -> Option<DecodeRequest> {
-    targets.iter().find_map(|target| {
-        let doc = book.span_doc(target.chapter)?;
+    limit: usize,
+) -> Vec<DecodeRequest> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for target in targets {
+        let Some(doc) = book.span_doc(target.chapter) else {
+            continue;
+        };
         // 没排完的章里行盒还是上一代 —— 预解出来的可能是已经不存在的图。等它落地再取。
         if !doc.is_current() {
-            return None;
+            continue;
         }
         // 图片只住在行的片段里。**这里不物化**：`row_units` 会把那一行的文本句柄也建出来
         // （一章一次、跨帧留着），而预取只需要「这行有没有图」—— 读排版自己的片段就够
@@ -257,13 +267,21 @@ pub(in crate::ui::features::reader) fn first_unseen(
         let first = layout.line_covering_or_above(target.band.start);
         let last = layout.line_covering_or_above(target.band.end.max(target.band.start));
         let end = (last + 1).min(layout.lines.len());
-        (first.min(end)..end)
-            .filter_map(|line| layout.lines.get(line))
-            .flat_map(|line| line.images())
-            .map(|image| image.href.clone())
-            .find(|href| !seen(href))
-            .and_then(|href| doc.images().decode_request(&href))
-    })
+        for line in (first.min(end)..end).filter_map(|line| layout.lines.get(line)) {
+            for image in line.images() {
+                if seen(&image.href) {
+                    continue;
+                }
+                if let Some(request) = doc.images().decode_request(&image.href) {
+                    out.push(request);
+                    if out.len() >= limit {
+                        return out;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -308,6 +326,22 @@ mod tests {
         );
         let top = scroll_targets(&placed, 0.0..600.0, 600.0, PrefetchSide::Behind);
         assert!(top.is_empty(), "书首往上没有可预解的那一屏");
+    }
+
+    /// 快滑时调用方把 viewport 翻倍，窗口就盖住两屏：滑得比画得快时才有缓冲，
+    /// 只预解下一屏会在读者到那一屏时图还在画。
+    #[test]
+    fn a_doubled_viewport_prefetches_two_screens_ahead() {
+        let placed = [placement(0, 0.0, 1000.0), placement(1, 1200.0, 800.0)];
+        let ahead = scroll_targets(&placed, 0.0..600.0, 1200.0, PrefetchSide::Ahead);
+        assert_eq!(
+            ahead,
+            vec![
+                PrefetchTarget::new(0, 600.0..1000.0),
+                PrefetchTarget::new(1, 0.0..600.0),
+            ],
+            "两屏该跨过章缝、落进下一章"
+        );
     }
 
     /// 两个方向都选得到，而且**只选一个**：拖到最底才回头看，否则一律往前。

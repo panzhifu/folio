@@ -122,7 +122,7 @@ fn fallback_body_family(wanted: &str, cx: &App) -> String {
     log_no_family(cx);
     // 没有拉丁 `m` 的随书字体会被 gpui 从 primary 里剔掉，不能拿来兜底；名字在册
     // 之后还要真解析一遍（设备字体没有登记表可查）。
-    crate::ui::foundation::font_primary::usable_names(cx.text_system().all_font_names())
+    folio_core::text::usable_names(cx.text_system().all_font_names())
         .into_iter()
         .find(|name| super::family_has_m(cx, name))
         .unwrap_or_else(|| wanted.to_string())

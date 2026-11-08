@@ -733,12 +733,36 @@ impl ReadingPage {
         });
     }
 
-    /// 自动那一下：自动前进 on/off。状态与拍子都在会话里（`model/paging` 的
-    /// `set_auto` / `auto_step`），这一屏只把那一击递过去。浮层露着时渲染按 `auto_on`
-    /// 选 bar：开了换自动工具栏，停了换回普通底栏，不必在这里收任何东西。
+    /// 自动那一下。第一击只表达「进入自动阅读、直接开始」—— 状态与拍子在会话里
+    /// （`model/paging` 的 `set_auto` / `auto_step`），这一屏还负责把浮层收干净：**不能**
+    /// 让自动那条设置栏当场顶上来。
+    ///
+    /// 设置选项是运行中**再点一次**才叫出来的：底栏收着时 `body_tap_zone` 把任意一击
+    /// 判成 `ToggleChrome`，渲染按 `auto_on` 选 `auto_bar`。这就是「先开始、后配置」
+    /// （渐进式披露，Progressive Disclosure）—— 从前那一版第一击就把速度滑条和退出
+    /// 摆到脸上，读者还没读到一个字。
+    ///
+    /// 关闭（自动工具栏里的「退出自动」）不收浮层：那一层换回普通底栏，读者正好接着用。
     pub(in crate::ui::features::reader) fn toggle_auto(&mut self, cx: &mut Context<Self>) {
+        let turning_on = !self.reader.read(cx).auto_on();
         self.reader.update(cx, |reader, cx| {
-            reader.set_auto(!reader.auto_on(), cx);
+            reader.set_auto(turning_on, cx);
+        });
+        if turning_on {
+            self.chrome = Chrome::default();
+        }
+        cx.notify();
+    }
+
+    /// 自动工具栏那两格：换这一趟的推进方式（翻页 / 连续滚动）。状态在会话里，
+    /// 这一屏只把那一击递过去。
+    pub(in crate::ui::features::reader) fn set_auto_read_mode(
+        &mut self,
+        mode: chrome::AutoReadMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.reader.update(cx, |reader, cx| {
+            reader.set_auto_read_mode(mode, cx);
         });
         cx.notify();
     }

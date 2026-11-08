@@ -132,11 +132,16 @@ async-channel.workspace = true
 [target.'cfg(any(all(target_os = "linux", not(target_env = "ohos")), target_os = "android"))'.dependencies]
 tts.workspace = true
 
+# 名字表解析（`text::names` 的拉丁 `m` 覆盖率）要用：锁里 fontdb 已带它，
+# 这里只是把图上已有的一份转成直接依赖（此前只声明为测试依赖）。
+ttf-parser.workspace = true
+# 随书字体加载管线（`text::load`）：子集化、name 表读与改。
+skera.workspace = true
+read-fonts.workspace = true
+write-fonts.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
-# WOFF2 往返测试里把解出的 sfnt 重新解析、与原字体逐项对 —— 锁里 fontdb 已带它，
-# 这里只是声明成测试依赖，不新增包。
-ttf-parser = "0.25"
 # 测试里合成 CBR 夹具；生产只用读，不开 write。
 rars = { workspace = true, features = ["write"] }
 # 测试里合成「OLE2 但不是 Word」的负样本，用的就是普通依赖那一份 `cfb`。

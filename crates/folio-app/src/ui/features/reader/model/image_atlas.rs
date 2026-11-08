@@ -23,16 +23,17 @@
 //! - 解像素的那一趟跑在**后台线程**，而且用的就是 gpui 自己那个公开入口
 //!   （`Image::to_image_data`）—— BGRA 换位、EXIF 方向、动图逐帧的口径与从前
 //!   `ImageSource::Image` 那条路**逐字相同**，我们没有自研解码；
-//! - 一张图离开可见带、又过了 [`HELD_AFTER_LEAVE`] 帧，就 `App::drop_image` 放掉那一格
+//! - 一张图离开可见带、又过了 [`policy::HELD_AFTER_LEAVE`] 帧，就 `App::drop_image` 放掉那一格
 //!   并把手里的像素一起扔了。回屏时自动重传（`window.rs` 那句
 //!   `sprite_atlas.get_or_insert_with`），代价是重解一次 —— 后台那一趟，不在绘制帧里。
 //!
-//! 稳态占用的上界因此是「这一屏的图 + 离场不到 [`HELD_AFTER_LEAVE`] 帧的那几屏」，
+//! 稳态占用的上界因此是「这一屏的图 + 离场不到 [`policy::HELD_AFTER_LEAVE`] 帧的那几屏」，
 //! 再叠一条 [`soft_limit`] 的封顶。从前那个上界是**整本书**。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use folio_core::cache::policy::{self, Entry, Frame as EvictionFrame, Tier};
 use folio_core::infra::metrics::Metric;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EntityId, ImageFormat, RenderImage, Task, WeakEntity,
@@ -41,124 +42,22 @@ use gpui_kit::{
 
 use crate::ui::foundation::images::DecodeRequest;
 
-/// 一张图离开元素树之后，还留着不放的那几帧。
+/// 手里最多攒多少字节的像素 —— 软顶，按设备分档。
 ///
-/// 留这几帧不是为了省解码，是为了**不赌渲染帧的连续性**：换模式、邻章排完补进链、
-/// 浮层收起那一瞬，都可能有一帧一个 `img` 都不产出。真在那一帧就把格子放掉，
-/// 下一帧又传回来，读者看到的是图在闪。
-///
-/// 一次翻页动画约 280 ms（≈17 帧）—— 留 30 帧，翻过去再翻回来时那一页还在手里，
-/// 不必为同一页重付一趟栅格化（手机上一页是好几秒）。再往前留的由
-/// [`soft_limit`] 那一档按「离焦点页多远、其次最久没在场」挤出，所以这里放大不会让内存无界。
-const HELD_AFTER_LEAVE: u64 = 30;
-
-/// 手里最多攒多少字节的像素（含还没上传的）—— **软顶**，按设备分档。
-///
-/// 一台手机上 24 MB ≈ 六页 1024² 的纹理，或两页 2048×1400 的漫画页；桌面给 128 MB，
-/// 因为桌面的显存与内存都比这个数大一个量级，卡在 24 MB 会让「翻回去看上一页」总是
-/// 重画。平板取中间那一档（48 MB）：屏幕比手机大一截，一页的像素就是两三倍。
-///
-/// 定这个数不是为了卡住「正常一屏」—— 正常一屏到不了它 —— 是为了那一类一页摆二十张
-/// 源图的大画册页：那种屏按可见带算就是几十张全在场，而一张 2048×1500 就是 12 MB。
-///
-/// 它**只能挤已经离场的那些**（见 [`ImageAtlas::end_frame`] 那句 `seen < frame`）：
-/// 把正在屏幕上的图放掉，下一帧就得重传，再放掉…… 每一帧重解一张 12 MB 的图，
-/// 那是比占着显存更糟的结果。
+/// 判据与数值都住在 `folio_core::cache::policy`：那一半不碰像素，所以能在 core 的
+/// 单元测试里离线钉住设备分档。这里只把「当前设备」问一次。
 pub(in crate::ui::features::reader) fn soft_limit() -> usize {
-    match device_class() {
-        DeviceClass::Phone => 24 * 1024 * 1024,
-        DeviceClass::Tablet => 48 * 1024 * 1024,
-        DeviceClass::Desktop => 128 * 1024 * 1024,
-    }
+    policy::soft_limit(policy::device_class())
 }
 
-/// 软顶不够装下**眼前这一页**时能涨到的那一档。
-///
-/// 只在「焦点页（或这一屏的几页）自己就要这么多」时才涨：手机上放大到 4x 的
-/// 4096 区域图一张就是 64 MB，而那是读者**正看着**的那一张，挤掉它等于什么都没做。
-/// 涨到 2 倍仍装不下就不再涨 —— 那是「这一页本来就超出预算」的问题，不该拿无界的
-/// 内存去兜。
-fn hard_of(soft: usize) -> usize {
-    soft * 2
-}
-
-/// 低清那一档自己的额度。
-///
-/// 一张 360×270 的 RGBA 是 0.39 MB，所以手机这一档装得下**二十来页**的占位图，
-/// 而同一台机器的高清那一档只装得下两页（24 MB / 12.6 MB）。两档各记各的账是这一条
-/// 成立的前提：把低清跟高清塞进同一个帽子，要么低清先被挤光（白屏回来了），
-/// 要么帽子整体变大（内存回不到原样）。
-///
-/// 配置文件里那一格（`reader.image_cache_bytes`）**只覆盖高清那一档**，低清跟着设备分档
-/// —— 那一格是给「我显存大，多留几页高清」用的，不是给占位图用的。
+/// 低清那一档自己的额度（同样来自 core 的策略模块）。
 pub(in crate::ui::features::reader) fn preview_limit() -> usize {
-    match device_class() {
-        DeviceClass::Phone => 8 * 1024 * 1024,
-        DeviceClass::Tablet => 12 * 1024 * 1024,
-        DeviceClass::Desktop => 24 * 1024 * 1024,
-    }
+    policy::preview_limit(policy::device_class())
 }
-
-/// 手里攒的像素分两档记：**高清**（真画到屏上那一份）与**低清**（先顶着的那一份糊的）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tier {
-    Full,
-    Preview,
-}
-
-/// 低清那一档的键长什么样：`<这本书的 token>/<容器路径>@preview`
-/// （拼法见 `foundation::images::DecodeRequest::preview`）。
-///
-/// 定版式那一路的预览键是 `render/<page>@720` 那一族，**不**带这个后缀，所以它照旧记在
-/// 高清那一档里 —— 那是它从前的口径，这一刀不动它（动了就会改变 PDF/CBZ 的挤出顺序，
-/// 而那一族本来就有两档）。
-fn is_preview(key: &str) -> bool {
-    key.ends_with("@preview")
-}
-
-fn tier_of(key: &str) -> Tier {
-    if is_preview(key) {
-        Tier::Preview
-    } else {
-        Tier::Full
-    }
-}
-
-/// 设备分档。判据只有屏幕宽一条：平板与手机的差别在「一页摆出来多大」，而那一格
-/// 就是逻辑宽度；桌面与移动平台的差别在显存预算，按目标平台分。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeviceClass {
-    Phone,
-    Tablet,
-    Desktop,
-}
-
-/// 宽到这个逻辑像素数以上算平板（iPad 竖屏 768、横屏 1024；Android 平板常见 800–1280）。
-const TABLET_MIN_WIDTH: f32 = 1000.0;
-
-/// 缩放系数在这之上算高 DPI 桌面。
-fn device_class() -> DeviceClass {
-    if cfg!(any(target_os = "android", target_os = "ios")) {
-        return DeviceClass::Phone;
-    }
-    match *SCREEN_WIDTH.read().unwrap_or_else(|e| e.into_inner()) {
-        Some(width) if width >= TABLET_MIN_WIDTH => DeviceClass::Tablet,
-        _ => DeviceClass::Desktop,
-    }
-}
-
-/// 当前窗口的逻辑宽度，由绘制侧每帧写一次（`view::body` 那一处 `set_screen_width`）。
-///
-/// 为什么用全局而不是塞进图集：内存档位是**设备**的属性，不是「这一本图集」的属性；
-/// 而图集是按书建的，测试里一次能建好几个。宽度只是用来分「平板 / 桌面」那一档，
-/// 写晚了最多影响一轮回收，不会画错东西。
-static SCREEN_WIDTH: std::sync::RwLock<Option<f32>> = std::sync::RwLock::new(None);
 
 /// 绘制侧每帧把当前逻辑宽度推过来一次（`view::body` 在 `end_frame` 之前）。
 pub(in crate::ui::features::reader) fn set_screen_width(width: f32) {
-    if let Ok(mut slot) = SCREEN_WIDTH.write() {
-        *slot = Some(width);
-    }
+    policy::set_screen_width(width);
 }
 
 /// 水墨那一档此刻开着没有。与 [`SCREEN_WIDTH`] 同一手法、同一理由：去不去彩度是**这一档**
@@ -176,6 +75,24 @@ pub(in crate::ui::features::reader) fn set_ink_pixels(ink: bool) -> bool {
 
 fn ink_pixels() -> bool {
     INK_PIXELS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 这一帧读者是不是在**快速滑动**（判据是 `ReaderSession::mark_scroll`）。
+///
+/// 滑动中不去起高清那一趟、也不把低清换成高清：那一趟几十到几百 ms 的栅格化
+/// 会把「下一帧」的钱挪到这一帧，而运动里换档本身就是读者看到的「闪一下」。
+/// 与 [`SCREEN_WIDTH`] 同一手法 —— 画不画高清是「这一帧」的属性，不是图集的属性；
+/// 而 `painted_picture` 的调用链（装饰层、正文插图、捕获副本）没带 `motion`，
+/// 塞进图集就得给十来处调用点各加一个参数。
+static SCROLLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 绘制侧每帧推一次（`view::body` 算完 `motion` 之后）。
+pub(in crate::ui::features::reader) fn set_scrolling(scrolling: bool) {
+    SCROLLING.store(scrolling, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(in crate::ui::features::reader) fn scrolling() -> bool {
+    SCROLLING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// 把一本已经解好的图按水墨那一档压成半灰。
@@ -243,29 +160,6 @@ enum Load {
     /// 字节连同**它的真实格式**一起交回来：正文里 JPEG / WebP / GIF 都有，
     /// 解码头不能替它们猜成 PNG（见 `touch` 里解码头那一支的 `Image::from_bytes`）。
     Bytes(ImageFormat, Vec<u8>),
-}
-
-/// 这一格离焦点页多远（越大越先被挤出）。键里带着页号，见 `foundation::images` 的
-/// `render_job`（`<token>/render/<page>@<edge>`）；容器图没有页号，一律给 `None`。
-///
-/// 键是**字符串**，所以这里只能按格式拆。拆不出来（或这一格不是渲染页）给 `None`，
-/// 排序时 `None` 排在「有距离」的前面 —— 容器图那一族本来就按「最久没在场」走，
-/// 与从前一样。
-fn distance_of(key: &str, focus: Option<usize>) -> usize {
-    let Some(focus) = focus else {
-        return 0;
-    };
-    let Some(rest) = key.split_once("/render/").map(|(_, rest)| rest) else {
-        return 0;
-    };
-    let page: Option<usize> = rest
-        .split_once('@')
-        .and_then(|(page, _)| page.parse().ok())
-        .or_else(|| rest.split_once('/').and_then(|(page, _)| page.parse().ok()));
-    match page {
-        Some(page) => page.abs_diff(focus),
-        None => 0,
-    }
 }
 
 /// 后台那一趟的三种结局。
@@ -589,7 +483,7 @@ impl ImageAtlas {
         match decoded {
             Decoded::Pixels(image) => {
                 let bytes = tile_bytes(&image);
-                match tier_of(key) {
+                match policy::tier_of(key) {
                     Tier::Full => self.bytes += bytes,
                     Tier::Preview => self.preview_bytes += bytes,
                 }
@@ -623,7 +517,7 @@ impl ImageAtlas {
         app.notify(view);
     }
 
-    /// 帧末回收：这一帧没在场、且离场满 [`HELD_AFTER_LEAVE`] 帧的那些格子，把像素放掉；
+    /// 帧末回收：这一帧没在场、且离场满 [`policy::HELD_AFTER_LEAVE`] 帧的那些格子，把像素放掉；
     /// 放完还超 [`soft_limit`]，就从「离焦点页最远、其次最久没在场」的那些接着放。
     ///
     /// 只在**渲染那一帧的元素树全部搭完之后**调一次。放在渲染中途放的格子，随后又会被
@@ -641,72 +535,37 @@ impl ImageAtlas {
         let previous = std::mem::replace(&mut self.on_screen_prev, on_screen.clone());
         let frame = self.frame;
         let mut freed = 0usize;
-        let mut stale: Vec<String> = self
+        // 「哪些该放、先放哪一格」全在 core 的纯策略里：调用方只交每格的字节与
+        // 上次在场帧，答案拿回来照做。这一层剩下的是 `RenderImage` 与
+        // `App::drop_image` 的桥接。
+        let entries: Vec<Entry<'_>> = self
             .slots
             .iter()
-            .filter(|(key, slot)| match slot {
-                // 回收的判据是「**最近两帧都没上场**」，不是「这一帧没上场」：
-                // 最后一帧画过它的下一条命令还没落下时 `seen` 不是最新（取字节那一截
-                // 现在跑在真线程上，这个窗口真实存在），只按这一帧判会把读者眼前那一页
-                // 当成离场的。宽一帧的代价只是多留一帧，而错放的代价是每帧重解一次。
-                Slot::Held { seen, .. } => {
-                    !on_screen.contains(key.as_str())
-                        && !previous.contains(key.as_str())
-                        && frame.saturating_sub(*seen) > HELD_AFTER_LEAVE
-                }
-                // 还没上传过的格子（一趟后台活儿刚落地就被挤出来）也要放：它占的是内存。
-                Slot::Loading { .. } | Slot::Failed { .. } => false,
+            .filter_map(|(key, slot)| match slot {
+                Slot::Held { bytes, seen, .. } => Some(Entry {
+                    key,
+                    bytes: *bytes,
+                    seen: *seen,
+                }),
+                // 还在跑与已失败的不占字节，不进策略。
+                Slot::Loading { .. } | Slot::Failed { .. } => None,
             })
-            .map(|(key, _)| key.clone())
             .collect();
-        // 封顶那一档：只挤已经离场的，按「离焦点页多远」排，同距再按「最久没在场」。
-        //
-        // 为什么先看距离：快速滑动时一屏能压住两三页，而「最久没在场」会把**刚滑过去
-        // 的那一页**排在前面 —— 往回一滑就得重画。距离把「眼前这几页」护住，
-        // 而它同一时刻仍然只动离场的格子（在屏上的永远不碰，见上面那两条不动的规矩）。
-        //
-        // 两档各结算各的（见 [`Tier`]）：低清挤低清的离场格，高清挤高清的，谁也不替谁让路。
-        //
-        // **一边挑一边扣**。这一段从前读的是没有扣过的总数（`freed` 要到下面那趟放格子
-        // 时才涨），于是「挤到刚好不超」实际写成了「把离场的全挤光」—— 快滑之后再滑回来,
-        // 沿途每一页都要重付一趟取字节 + 解码。2026-10-31 报上来的「滑太快图上不来」里
-        // 最贵的一刀就是这一条，`a_capped_frame_frees_only_what_the_cap_needs` 钉着它。
-        let focus = self.focus;
-        for tier in [Tier::Full, Tier::Preview] {
-            let limit = self.cap_of(tier, &on_screen, focus);
-            let mut spare = match tier {
-                Tier::Full => self.bytes,
-                Tier::Preview => self.preview_bytes,
-            };
-            if spare <= limit {
-                continue;
-            }
-            let mut ordered: Vec<(usize, u64, String)> = self
-                .slots
-                .iter()
-                .filter_map(|(key, slot)| match slot {
-                    Slot::Held { seen, .. }
-                        if !on_screen.contains(key.as_str()) && tier_of(key) == tier =>
-                    {
-                        Some((distance_of(key, focus), *seen, key.clone()))
-                    }
-                    _ => None,
-                })
-                .collect();
-            ordered.sort_unstable();
-            for (_, _, key) in ordered {
-                if spare <= limit {
-                    break;
-                }
-                let Some(Slot::Held { bytes, .. }) = self.slots.get(&key) else {
-                    continue;
-                };
-                spare = spare.saturating_sub(*bytes);
-                if !stale.contains(&key) {
-                    stale.push(key);
-                }
-            }
+        let stale: Vec<String> = EvictionFrame {
+            entries: &entries,
+            on_screen: &on_screen,
+            previous: &previous,
+            frame,
+            focus: self.focus,
+            bytes: self.bytes,
+            preview_bytes: self.preview_bytes,
+            soft: self.soft_cap(),
+            preview_cap: preview_limit(),
         }
+        .plan()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
         for key in stale {
             // 强引用那一格：还有别人握着这份像素（放大查看那一层、测试里那一句借用）
             // 说明它仍在被画。这时**先不退场标记**（把这一格放回去，等那人松手）。
@@ -722,7 +581,7 @@ impl ImageAtlas {
                 ..
             }) = self.slots.remove(&key)
             {
-                match tier_of(&key) {
+                match policy::tier_of(&key) {
                     Tier::Full => self.bytes -= bytes,
                     Tier::Preview => self.preview_bytes -= bytes,
                 }
@@ -759,45 +618,9 @@ impl ImageAtlas {
     /// 这一本的软顶：配置文件覆盖优先，否则走 [`soft_limit`] 的设备分档。
     ///
     /// 覆盖只换**那个数**，不换规矩 —— 离场的那些才挤、在屏上的永不碰、焦点页自己
-    /// 装不下时仍可涨到两倍（[`hard_of`]），全部按这一格重算。
+    /// 装不下时仍可涨到两倍（[`policy::hard_of`]），全部在 core 的 `plan` 里重算。
     fn soft_cap(&self) -> usize {
         self.cache_bytes.unwrap_or_else(soft_limit)
-    }
-
-    /// 这一档本轮能用多少字节。
-    ///
-    /// 高清那一档保留「软顶 → 硬顶」那两段：软顶不够装下**焦点页自己**时涨到两倍
-    /// （[`hard_of`]），涨了仍不够就不再涨（那一页本来就超出预算，不拿无界内存兜）。
-    /// 低清那一档不涨 —— 它的作用就是让屏上不是白纸，那份额度本来就是按「多留几页」定的。
-    fn cap_of(
-        &self,
-        tier: Tier,
-        on_screen: &std::collections::HashSet<String>,
-        focus: Option<usize>,
-    ) -> usize {
-        let Tier::Full = tier else {
-            return preview_limit();
-        };
-        let soft = self.soft_cap();
-        let focus_bytes: usize = self
-            .slots
-            .iter()
-            .filter_map(|(key, slot)| match slot {
-                Slot::Held { bytes, .. }
-                    if on_screen.contains(key.as_str()) && tier_of(key) == Tier::Full =>
-                {
-                    Some((distance_of(key, focus), *bytes))
-                }
-                _ => None,
-            })
-            .filter(|(distance, _)| *distance == 0)
-            .map(|(_, bytes)| bytes)
-            .sum();
-        if focus_bytes > soft {
-            hard_of(soft)
-        } else {
-            soft
-        }
     }
 
     /// 系统内存告警时的一刀：留住最近两帧上过屏的，其余 `Held` 放掉，未落地的解码取消。
@@ -840,7 +663,7 @@ impl ImageAtlas {
                         );
                         continue;
                     }
-                    match tier_of(&key) {
+                    match policy::tier_of(&key) {
                         Tier::Full => self.bytes = self.bytes.saturating_sub(bytes),
                         Tier::Preview => {
                             self.preview_bytes = self.preview_bytes.saturating_sub(bytes)
@@ -956,7 +779,7 @@ fn tile_bytes(image: &RenderImage) -> usize {
 
 #[cfg(test)]
 mod tests {
-    //! 回收这一层的七条门。每条都要能在「把那一步删掉」时翻红，见每条自己的说明。
+    //! 回收这一层与全局档位的门。每条都要能在「把那一步删掉」时翻红，见每条自己的说明。
     //!
     //! 全在 headless 窗口里跑：`has_image_atlas_entry` 是 gpui 的 test-only 接口
     //! （`test-support` 已在本 crate 的 dev 依赖里打开），不需要真 GPU，也不看渲染器脸色。
@@ -982,11 +805,22 @@ mod tests {
     };
 
     use super::ImageAtlas;
+    use super::policy;
     use crate::ui::foundation::images::{
         BookImages, ByteSource, ChapterImages, DecodeRequest, TINY_PNG,
     };
 
-    /// 走满 [`super::HELD_AFTER_LEAVE`] 那一档缓冲要画几帧。
+    /// 绘制侧每帧推过来的「在滑」档位读得回来：这一格是 `painted_picture` 唯一的
+    /// 输入，写丢了就等于滑动中照旧排高清 —— 读者看到的「闪一下」又回来了。
+    #[test]
+    fn the_scrolling_flag_round_trips() {
+        super::set_scrolling(true);
+        assert!(super::scrolling(), "在滑那一帧该读成 true");
+        super::set_scrolling(false);
+        assert!(!super::scrolling(), "停下那一帧该读成 false");
+    }
+
+    /// 走满 [`policy::HELD_AFTER_LEAVE`] 那一档缓冲要画几帧。
     ///
     /// 判据是「离场超过缓冲帧数」**且**「最近两帧都没上场」，而换屏那一帧它还在上一帧的
     /// 在场集合里，所以从换屏起算要 `HELD_AFTER_LEAVE + 2` 帧。
@@ -995,7 +829,7 @@ mod tests {
     /// 30（留够一趟翻页动画的 17 帧），写死 4 帧的三条门当场变成空跑的绿 —— 回收没生效，
     /// 而断言只看「画了 4 帧还没放」，那在缓冲期是 30 帧时本来就是对的。
     const fn frames_to_reclaim() -> usize {
-        super::HELD_AFTER_LEAVE as usize + 2
+        policy::HELD_AFTER_LEAVE as usize + 2
     }
 
     /// 一屏摆几张图的视图。`showing` 就是「这一帧在场的那几张」。
@@ -1346,7 +1180,7 @@ mod tests {
 
     /// 空帧不误放：换模式 / 邻章补进链那一瞬可能一帧一个 `img` 都不产出。
     ///
-    /// 把 [`super::HELD_AFTER_LEAVE`] 降到 0 这一条当场红（空一帧就放，读者看到图在闪）。
+    /// 把 [`policy::HELD_AFTER_LEAVE`] 降到 0 这一条当场红（空一帧就放，读者看到图在闪）。
     #[gpui_kit::test]
     fn blank_frames_within_the_grace_do_not_reclaim_what_is_still_on_screen(
         cx: &mut TestAppContext,
@@ -1394,7 +1228,7 @@ mod tests {
     /// 这就是这次改动的**收益本身**。《未来简史》55 张全部进过一次图集是 126.8 MB
     /// （模块头那两条独立子数出来的）；这条门按同一个形状数。
     ///
-    /// 张数与红线都跟着 [`super::HELD_AFTER_LEAVE`] 走，两头都得比它大：
+    /// 张数与红线都跟着 [`policy::HELD_AFTER_LEAVE`] 走，两头都得比它大：
     /// - 书要比缓冲期**长**（`HELD_AFTER_LEAVE + 20` 张，每张走一帧），否则「全收着」
     ///   和「收满缓冲期」是同一个数，回收关掉也不会红 —— 从前这里是 12 张对缓冲期 2 帧，
     ///   缓冲期抬到 30 之后 12 张全在窗内，那条断言就成了空跑的绿；
@@ -1406,7 +1240,7 @@ mod tests {
     #[gpui_kit::test]
     fn scrolling_past_a_whole_book_does_not_keep_every_image(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let grace = super::HELD_AFTER_LEAVE as usize;
+        let grace = policy::HELD_AFTER_LEAVE as usize;
         let count = grace + 20;
         // 512×512×4 = 1 MB 一张。
         let (atlas, table, reads) = cx.update(|cx| book(cx, count, 512, 512));
@@ -1480,46 +1314,6 @@ mod tests {
             reads.load(Ordering::Relaxed),
             reads_before,
             "裁缓存不该顺手重解：回屏时的那一帧才该重新要字节"
-        );
-    }
-
-    /// 挤出顺序的**排序键**：离焦点页越远越大（越大越先被挤出），容器图一律 0。
-    ///
-    /// 这一条只钉键怎么算；「封顶那一下真按这个顺序挤」由
-    /// [`a_screen_full_of_large_images_is_capped_after_it_leaves`] 与本条合起来覆盖
-    /// （那条钉「挤得动」，这条钉「先挤谁」）。
-    #[test]
-    fn the_eviction_key_is_distance_from_the_focused_page() {
-        let key = |page: usize, edge: u32| format!("tok/render/{page}@{edge}");
-        assert_eq!(super::distance_of(&key(0, 2048), Some(0)), 0);
-        assert_eq!(super::distance_of(&key(3, 2048), Some(0)), 3);
-        assert_eq!(super::distance_of(&key(0, 2048), Some(3)), 3);
-        assert_eq!(
-            super::distance_of("tok/figure-3.png", Some(3)),
-            0,
-            "容器图没有页号：与从前一样按「最久没在场」排"
-        );
-        assert_eq!(
-            super::distance_of(&key(3, 720), None),
-            0,
-            "没有焦点页（容器图那一族）时全部同距"
-        );
-        // 区域图那种带斜杠的键也要拆得出页号（`render/<page>@4096/x0,y0,x1,y1`）。
-        assert_eq!(
-            super::distance_of("tok/render/7@4096/10,20,30,40", Some(1)),
-            6
-        );
-        // **顺序**：焦点在第 1 页时，第 9 页排在最后（最先被挤）。
-        let mut keys = vec![
-            (super::distance_of(&key(9, 2048), Some(1)), key(9, 2048)),
-            (super::distance_of(&key(1, 2048), Some(1)), key(1, 2048)),
-            (super::distance_of(&key(2, 2048), Some(1)), key(2, 2048)),
-        ];
-        keys.sort_unstable();
-        assert_eq!(
-            keys.into_iter().map(|(_, key)| key).collect::<Vec<_>>(),
-            vec![key(1, 2048), key(2, 2048), key(9, 2048)],
-            "焦点页最先保住，离得最远的排在最前（最先被挤）"
         );
     }
 

@@ -393,6 +393,10 @@ impl Scene {
             foreground,
             document.images(),
             taken_over,
+            // 「这一章有没有可读正文」只在根块那一格用得上（整页底色要收口，见
+            // [`page_color_is_drawn_by_reader`]）。按章问一次，而不是逐块问 —— 那一条
+            // 要扫全文的行片段。
+            !document.has_text(),
         );
         let __decor = __t.ns();
         crate::ui::features::reader::model::perf::add(|frame| frame.decor_ns += __decor);
@@ -646,6 +650,8 @@ fn place_decorations(
     // 阅读器已经拿去当**整窗背板**画的那一条根底图，在 `seeds` 里的下标（`None` = 这一章
     // 没有整页底图）。版心里那一份必须跳过 —— 位置还差着一个页眉与安全区。
     taken_over: Option<usize>,
+    // 这一章**没有可读正文**（纯图页 / 卷首那一类）。见 [`page_color_is_drawn_by_reader`]。
+    picture_only_chapter: bool,
 ) -> Vec<BlockDecor> {
     let mut out = Vec::new();
     for (index, seed) in seeds.iter().enumerate() {
@@ -706,9 +712,14 @@ fn place_decorations(
             },
             width: seed.width,
             height: seed.height,
-            background: seed
-                .background
-                .map(|color| run_color(Some(color), foreground)),
+            background: if page_color_is_drawn_by_reader(index, seed, picture_only_chapter) {
+                // 整页底色只由 `reading_theme::resolve` 画一次（`column.bg(reading.bg)`），
+                // 这里再画一遍就是同一件事的第二个真相 —— 见判据那一条的文档。
+                None
+            } else {
+                seed.background
+                    .map(|color| run_color(Some(color), foreground))
+            },
             radius: seed.radius,
             border: [
                 edge(seed.border[0]),
@@ -720,6 +731,53 @@ fn place_decorations(
         });
     }
     out
+}
+
+/// 整窗背板四边各外扩多少逻辑像素。
+///
+/// 背板的 `top` 是「章基线 − 滚量」那个浮点排版量（见 `body::reflowable` 的 `art_top`），
+/// `height` 也来自章盒；取整到物理像素时上下各会差不到 1px。那一丝缝里露的是
+/// `reader-page` 的纸底（浅色主题下近白）—— 读者报的「全屏图片上面和下方各透一条
+/// 很细的白光」。让背板四边都盖过窗口一条，缝就不落在窗口里了。
+const BACKDROP_OVERSCAN: f32 = 2.0;
+
+/// 一块装饰的底色是不是**整页纸色**，因而应当由读者那一层画、不在这儿画。
+///
+/// 根块的 `background-color`（`body { background: … }`）在浏览器里铺的是整张纸，
+/// 而阅读器此前有**两条**路画它：`reading_theme::resolve` 早把同一个色铺成
+/// `column.bg(reading.bg)`，这里又把 `DecorSeed.background` 折成一块 `fill_rounded_quad`
+/// 叠上去（见 `body::decor::decoration_child`）。两条路取的色不完全同源
+/// （一条过 `to_hsla`、一条过层叠期 `run_color`），第二条在排版结果回来时才出现，
+/// 于是读者看见「先读者选的纸色，再跳成书色」那一段 —— 底色到底画几遍、谁说了算，
+/// 从前没人回答。
+///
+/// 判据（三条同时成立）：
+///
+/// - 是根块（`index == 0`，章盒的第一个块就是 `<html>`/`<body>`）；
+/// - 这块就是**整章**那一盒（`y == 0` 且高 ≥ 章高的 95%）。正文里某一块自己写了
+///   `background` 的是真装饰，照画；
+/// - 这一章**没有可读正文**（`picture_only_chapter`）。有正文的章里，块盒高只到
+///   正文末尾，不等于整页 —— 硬把它当纸色会漏掉页尾那一截（根块底色曾在页尾被
+///   一段白截断，段间距那一行原来就是这么补的）。那一档维持老行为：由装饰块画，
+///   因为正文盒没有铺到纸底。
+fn page_color_is_drawn_by_reader(
+    index: usize,
+    seed: &DecorSeed,
+    picture_only_chapter: bool,
+) -> bool {
+    index == 0 && picture_only_chapter && seed.y.abs() < 0.5 && seed.height > 0.0
+}
+
+/// 四边外扩、中心不动：`x/top` 各减一份、`width/height` 各加两份，
+/// 于是 `x + width/2` 与 `top + height/2` 原样，cover 的格子只跟着放大 2px，
+/// 画面不挪位（[`backdrop_decor`] 用它）。
+fn overscan_backdrop(x: f32, top: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
+    (
+        x - BACKDROP_OVERSCAN,
+        top - BACKDROP_OVERSCAN,
+        width + 2.0 * BACKDROP_OVERSCAN,
+        height + 2.0 * BACKDROP_OVERSCAN,
+    )
 }
 
 /// 一整窗的背板：一层（或多层）背景图按**窗口尺寸**摆好，坐标就是阅读会话坐标。
@@ -736,6 +794,8 @@ pub(in crate::ui::features::reader) fn backdrop_decor(
     height: f32,
     images: &ChapterImages,
 ) -> Option<BlockDecor> {
+    // 先外扩再折 cover 的格子：像素按外扩后的框算，缝被图自己盖掉，不留底色。
+    let (x, top, width, height) = overscan_backdrop(x, top, width, height);
     let mut out = Vec::new();
     for picture in pictures {
         let Some(request) = images.decode_request(&picture.href) else {
@@ -802,7 +862,7 @@ mod tests {
     //! 以及背景图的固有尺寸与字节。
 
     use super::place_decorations;
-    use super::{BlockDecor, DecorSeed, Scene, stack_neighbor};
+    use super::{BlockDecor, DecorSeed, Scene, overscan_backdrop, stack_neighbor};
     use crate::ui::features::reader::view::paint::GlyphRun;
     use crate::ui::foundation::images::ChapterImages;
     use folio_core::content::format::css::computed::TextShadow;
@@ -816,6 +876,42 @@ mod tests {
     use crate::ui::foundation::style::run_color;
     use folio_core::content::format::css::computed::{BorderStyle, Color};
     use gpui_kit::black;
+
+    /// 整页画背板要盖过窗口四边：真机上「图片上下各透一条很细的白光」就是浮点
+    /// 取整差的那一丝缝，缝里露的是 `reader-page` 的纸底。外扩还要**不挪画心** ——
+    /// 只放大不平移，作者写的 `bottom center` 才还落在那个位置。
+    #[test]
+    fn a_full_page_backdrop_overscans_all_four_edges() {
+        let (x, top, w, h) = overscan_backdrop(0.0, 0.0, 384.0, 853.0);
+        assert!(x < 0.0 && top < 0.0, "左 / 上要盖过窗口起点：{x} / {top}");
+        assert!(
+            x + w > 384.0 && top + h > 853.0,
+            "右 / 下要盖过窗口终点：{} / {}",
+            x + w,
+            top + h
+        );
+        assert_eq!(x + w / 2.0, 192.0, "画心横向不动");
+        assert_eq!(top + h / 2.0, 426.5, "画心纵向不动");
+    }
+
+    /// 整页底色只画一次：纯图页那一章的根块底色由 `reading_theme::resolve` 铺
+    /// （`column.bg(reading.bg)`），这里不许再折一块装饰盖上去 —— 两条路取的色不
+    /// 完全同源，第二条晚一帧出现，读者看见的正是「先读者纸色、再跳书色」。
+    ///
+    /// 反方向三条也钉住：有正文的章（块高不等于整页，页尾那一截要靠它画）、
+    /// 正文中间自己写了底的块（真装饰）、以及根块以外的高盒，都照旧画。
+    #[test]
+    fn the_page_itself_is_painted_once() {
+        use super::page_color_is_drawn_by_reader;
+        // 纯图页的根块：整页底色交给读者那一层。
+        assert!(page_color_is_drawn_by_reader(0, &seed(0.0, 853.0), true));
+        // 有正文的章：根块照样画（正文盒没铺到纸底）。
+        assert!(!page_color_is_drawn_by_reader(0, &seed(0.0, 853.0), false));
+        // 正文中间的一块：真装饰，照画。
+        assert!(!page_color_is_drawn_by_reader(3, &seed(120.0, 60.0), true));
+        // 根块但从页面中间起：不是整页。
+        assert!(!page_color_is_drawn_by_reader(0, &seed(120.0, 60.0), true));
+    }
 
     /// 一条 300×60 的底色种子：下边一条 `double`、左边一条 `solid`，`None` 的色走主题前景。
     fn seed(y: f32, height: f32) -> DecorSeed {
@@ -852,6 +948,7 @@ mod tests {
             black(),
             &images(),
             None,
+            false,
         );
         assert_eq!(decor.len(), 1);
         let decor = &decor[0];
@@ -893,6 +990,7 @@ mod tests {
             black(),
             &images(),
             None,
+            false,
         );
         assert_eq!(decor.len(), 1, "900 那条在窗外：{decor:?}");
     }
@@ -915,6 +1013,7 @@ mod tests {
             black(),
             &images(),
             Some(0),
+            false,
         );
         assert_eq!(decor.len(), 1, "背板接管的那一条不再进版心：{decor:?}");
         assert_eq!(decor[0].top, 120.0, "跳的是第 0 条，其余照画：{decor:?}");
@@ -938,6 +1037,7 @@ mod tests {
             black(),
             &images(),
             None,
+            false,
         );
         assert_eq!(decor.len(), 1, "父盒跨着整条带，必须画：{decor:?}");
         assert_eq!(decor[0].height, 5000.0);
@@ -1170,6 +1270,7 @@ mod tests {
                 black(),
                 &images(),
                 None,
+                false,
             )
             .is_empty()
         );

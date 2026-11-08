@@ -11,10 +11,9 @@
 
 use std::collections::HashSet;
 
-use folio_core::net::cloud::baidu::BaiduDrive;
+use folio_core::net::cloud::aliyun_auth;
 use folio_core::net::cloud::baidu_auth;
-use folio_core::net::cloud::dav::DavDrive;
-use folio_core::net::cloud::{Drive, Entry};
+use folio_core::net::cloud::{CloudProvider, Drive, Entry};
 use folio_core::net::remote::Error as RemoteError;
 use folio_core::{
     CloudItem, CloudSource, ImportOutcome, ImportReport, TaskEvent, WebDavDrive, submit_import,
@@ -50,6 +49,7 @@ enum Screen {
     Drives,
     WebDavForm,
     BaiduForm,
+    AliyunForm,
     Browse,
 }
 
@@ -62,10 +62,26 @@ enum Failure {
 
 /// 网盘有哪几台。要标「这是谁交的」时由那台 [`Drive::label`] 自报，
 /// 这里只负责分流账号表单与客户端构造。
+///
+/// **行为**全部问 [`CloudProvider`]（见 [`Kind::provider`]）：配没配好、浏览起点、
+/// 怎么造客户端，都在 `services::cloud_providers` 的那张表上 —— 这个枚举剩下的
+/// 职责只有**界面路由**（没配好带去哪张表单，那是逐家不同的屏）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     WebDav,
     Baidu,
+    Aliyun,
+}
+
+impl Kind {
+    /// 这一台的 [`CloudProvider`]（`services::cloud_providers` 表里的静态条目）。
+    fn provider(self) -> &'static dyn CloudProvider {
+        match self {
+            Kind::WebDav => &crate::ui::services::cloud_providers::WEBDAV,
+            Kind::Baidu => &crate::ui::services::cloud_providers::BAIDU,
+            Kind::Aliyun => &crate::ui::services::cloud_providers::ALIYUN,
+        }
+    }
 }
 
 struct WebDavForm {
@@ -86,6 +102,18 @@ struct BaiduForm {
     error: Option<SharedString>,
 }
 
+/// 阿里云盘的账号表单。
+///
+/// 与百度那张相比**没有 `drive_id` 那一格**：读者不该知道那是什么。手贴 token 的
+/// 老路在保存时顺手问一次 `getDriveInfo` 把 `drive_id` 补上（一次网络往返，走后台），
+/// 授权那条路本来就会带回来。
+struct AliyunForm {
+    token: Entity<InputState>,
+    code: Entity<InputState>,
+    linking: bool,
+    error: Option<SharedString>,
+}
+
 struct ImportState {
     message: SharedString,
     done: bool,
@@ -96,8 +124,10 @@ pub struct CloudView {
     screen: Screen,
     webdav: WebDavDrive,
     baidu: folio_core::BaiduDrive,
+    aliyun: folio_core::AliyunDrive,
     form: Option<WebDavForm>,
     baidu_form: Option<BaiduForm>,
+    aliyun_form: Option<AliyunForm>,
     kind: Kind,
     /// 当前目录（Drive 的相对路径语义，空 = 根）。
     path: String,
@@ -106,8 +136,11 @@ pub struct CloudView {
     loading: bool,
     error: Option<Failure>,
     importing: Option<ImportState>,
-    /// 这一轮浏览里 token 已经静默续过一次：刷新再失败就把错误亮出来，不无限转。
-    refreshed: bool,
+    /// 深链回跳带回来、还没填进表单的授权码（见 [`crate::ui::services::cloud_link`]）。
+    ///
+    /// 不直接写输入框：写它要窗口，而回跳发生在 JNI 线程上。这里只排队，等下一次
+    /// 有窗口的渲染帧取用（[`Self::take_pending_aliyun_code`]）。
+    pending_aliyun_code: Option<String>,
 }
 
 impl EventEmitter<CloudEvent> for CloudView {}
@@ -120,8 +153,10 @@ impl CloudView {
             screen: Screen::Drives,
             webdav: cloud.webdav,
             baidu: cloud.baidu,
+            aliyun: cloud.aliyun,
             form: None,
             baidu_form: None,
+            aliyun_form: None,
             kind: Kind::WebDav,
             path: String::new(),
             entries: Vec::new(),
@@ -129,15 +164,16 @@ impl CloudView {
             loading: false,
             error: None,
             importing: None,
-            refreshed: false,
+            pending_aliyun_code: None,
         }
     }
 
     fn back(&mut self, cx: &mut Context<Self>) {
         match self.screen {
-            Screen::WebDavForm | Screen::BaiduForm => {
+            Screen::WebDavForm | Screen::BaiduForm | Screen::AliyunForm => {
                 self.form = None;
                 self.baidu_form = None;
+                self.aliyun_form = None;
                 self.screen = Screen::Drives;
                 cx.notify();
             }
@@ -268,6 +304,199 @@ impl CloudView {
         cx.notify();
     }
 
+    fn open_aliyun_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let token = cx
+            .new(|cx| InputState::new(window, cx).default_value(self.aliyun.access_token.clone()));
+        // 回跳可能已经先到了（读者先点了授权、再回到这一屏）：开表单时就把它填上。
+        let pending = self.pending_aliyun_code.take();
+        let code = cx.new(|cx| InputState::new(window, cx));
+        if let Some(code_value) = pending {
+            code.update(cx, |state, cx| state.set_value(code_value, window, cx));
+        }
+        self.aliyun_form = Some(AliyunForm {
+            token,
+            code,
+            linking: false,
+            error: None,
+        });
+        self.screen = Screen::AliyunForm;
+        cx.notify();
+    }
+
+    /// 把深链回跳带回来的授权码取出来，填进已经开着的阿里云盘表单。
+    ///
+    /// 在 `render` 里调 —— 那一帧同时握着窗口与 `&mut self`，而
+    /// `InputState::set_value` 要窗口。回跳本身发生在 JNI 线程上，那一刻既没有窗口
+    /// 也没有 `App`，所以那里只排队（见 [`crate::ui::services::cloud_link`]），
+    /// 到这一帧才落地。
+    ///
+    /// 表单没开着就先留着：读者点「编辑」开表单时由 [`Self::open_aliyun_form`] 填。
+    fn take_pending_aliyun_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for url in crate::ui::services::cloud_link::drain() {
+            let Some(code) = crate::ui::services::cloud_link::parse_code(&url) else {
+                tracing::debug!(
+                    "cloud: 收到一条不是网盘授权的深链，忽略：{}",
+                    folio_core::net::remote::redact_url(&url)
+                );
+                continue;
+            };
+            tracing::info!("cloud: 阿里云盘授权的回跳到了");
+            if self.screen != Screen::AliyunForm || self.aliyun_form.is_none() {
+                // 表单没开着：先存着，等它开的时候填进去。
+                self.pending_aliyun_code = Some(code);
+                continue;
+            }
+            if let Some(form) = self.aliyun_form.as_ref() {
+                form.code
+                    .update(cx, |state, cx| state.set_value(code, window, cx));
+            }
+            cx.notify();
+        }
+    }
+
+    fn save_aliyun(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.aliyun_form.as_ref() else {
+            return;
+        };
+        if form.linking {
+            return;
+        }
+        let code = form.code.read(cx).value().trim().to_string();
+        let token = form.token.read(cx).value().trim().to_string();
+        if !code.is_empty() {
+            self.link_aliyun(code, cx);
+            return;
+        }
+        if token.is_empty() {
+            if let Some(form) = self.aliyun_form.as_mut() {
+                form.error = Some(tr(cx, "cloud.token_missing"));
+            }
+            cx.notify();
+            return;
+        }
+        // 手贴 token：`drive_id` 缺着请求必被拒，所以顺手问一次 getDriveInfo 补上。
+        // 这一趟要出网，走后台；问不到就报错 —— 存一份「有 token 但用不了」的配置
+        // 比让读者现在知道不行更糟。
+        self.probe_aliyun(token, cx);
+    }
+
+    /// 手贴 token 那一路：问一次 `getDriveInfo` 换 `drive_id` 与账号名。
+    fn probe_aliyun(&mut self, token: String, cx: &mut Context<Self>) {
+        if let Some(form) = self.aliyun_form.as_mut() {
+            form.linking = true;
+            form.error = None;
+        }
+        cx.notify();
+        let ask = token.clone();
+        let work = cx.background_spawn(async move {
+            aliyun_auth::drive_info(&ask, crate::ui::services::update::transport())
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<CloudView>, cx| {
+            let result = work.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.settle_probe_aliyun(token, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn settle_probe_aliyun(
+        &mut self,
+        token: String,
+        result: Result<aliyun_auth::DriveInfo, RemoteError>,
+        cx: &mut Context<Self>,
+    ) {
+        let info = match result {
+            Ok(info) => info,
+            Err(error) => {
+                tracing::warn!("cloud: 阿里云盘 getDriveInfo 失败：{error}");
+                if let Some(form) = self.aliyun_form.as_mut() {
+                    form.linking = false;
+                    form.error = Some(failure_text(failure_of(&error), cx));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let account = aliyun_account_of(&info);
+        let aliyun = folio_core::AliyunDrive {
+            access_token: token,
+            drive_id: info.drive_id,
+            account,
+            ..folio_core::AliyunDrive::default()
+        };
+        ConfigHolder::edit_cloud(cx, |cloud| cloud.aliyun = aliyun.clone());
+        self.aliyun = aliyun;
+        self.aliyun_form = None;
+        self.screen = Screen::Drives;
+        cx.notify();
+    }
+
+    /// 授权码那一路：换 token（带回 `drive_id`）→ 问账号名 → 落盘 → 回账号页。
+    fn link_aliyun(&mut self, code: String, cx: &mut Context<Self>) {
+        if let Some(form) = self.aliyun_form.as_mut() {
+            form.linking = true;
+            form.error = None;
+        }
+        cx.notify();
+        let work = cx.background_spawn(async move {
+            aliyun_auth::exchange_code(&code, crate::ui::services::update::transport()).map(
+                |tokens| {
+                    let info = aliyun_auth::drive_info(
+                        &tokens.access_token,
+                        crate::ui::services::update::transport(),
+                    );
+                    (tokens, info.ok())
+                },
+            )
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<CloudView>, cx| {
+            let result = work.await;
+            let _ = weak.update(cx, |this, cx| this.settle_link_aliyun(result, cx));
+        })
+        .detach();
+    }
+
+    fn settle_link_aliyun(
+        &mut self,
+        result: Result<(aliyun_auth::AliyunTokens, Option<aliyun_auth::DriveInfo>), RemoteError>,
+        cx: &mut Context<Self>,
+    ) {
+        let (tokens, info) = match result {
+            Ok(pair) => pair,
+            Err(error) => {
+                tracing::warn!("cloud: 阿里云盘授权换 token 失败：{error}");
+                if let Some(form) = self.aliyun_form.as_mut() {
+                    form.linking = false;
+                    form.error = Some(failure_text(failure_of(&error), cx));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        // `drive_id` 优先用 getDriveInfo 那一份（刷新应答里可能没有），
+        // 再退 token 那一步带回来的。两份都空就是真拿不到，存下去也用不了 ——
+        // 但此时 token 是真的换到了，存着让读者下一次重开还能补问一遍。
+        let drive_id = info
+            .as_ref()
+            .map(|info| info.drive_id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| tokens.drive_id.clone());
+        let account = info
+            .as_ref()
+            .map(aliyun_account_of)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.aliyun.account.clone());
+        let aliyun = linked_aliyun(&tokens, drive_id, account);
+        ConfigHolder::edit_cloud(cx, |cloud| cloud.aliyun = aliyun.clone());
+        self.aliyun = aliyun;
+        self.aliyun_form = None;
+        self.screen = Screen::Drives;
+        cx.notify();
+    }
+
     /// 授权码那一路：换 token（网络）→ 问账号名 → 落盘 → 回账号页。
     ///
     /// 换出来的 `refresh_token` 是今后唯一有效的那支（百度会轮换），必须落盘；
@@ -323,65 +552,24 @@ impl CloudView {
         cx.notify();
     }
 
-    /// token 过期（errno 111 那一档）而有刷新凭据：静默续一次再重列。
-    /// 读者不该为「30 天到了」再跑一趟授权。
-    fn refresh_baidu(&mut self, cx: &mut Context<Self>) {
-        let refresh_token = self.baidu.refresh_token.clone();
-        self.loading = true;
-        cx.notify();
-        let work = cx.background_spawn(async move {
-            baidu_auth::refresh_tokens(&refresh_token, crate::ui::services::update::transport())
-        });
-        let weak = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<CloudView>, cx| {
-            let result = work.await;
-            let _ = weak.update(cx, |this, cx| this.settle_refresh(result, cx));
-        })
-        .detach();
-    }
-
-    fn settle_refresh(
-        &mut self,
-        result: Result<baidu_auth::BaiduTokens, RemoteError>,
-        cx: &mut Context<Self>,
-    ) {
-        match result {
-            Ok(tokens) => {
-                let baidu = linked_drive(&tokens, String::new(), self.baidu.account.clone());
-                ConfigHolder::edit_cloud(cx, |cloud| cloud.baidu = baidu.clone());
-                self.baidu = baidu;
-                self.load_dir(cx);
-            }
-            Err(error) => {
-                tracing::warn!("cloud: 百度 token 续期失败：{error}");
-                self.loading = false;
-                self.error = Some(failure_of(&error));
-                cx.notify();
-            }
-        }
-    }
-
     /// 进一台网盘的目录树。没配账号就先带去表单 —— 这是能力不存在时的统一降级，
     /// 不是一句报错。
+    ///
+    /// 「配没配好」「从哪里开始浏览」问的是 [`CloudProvider`]（`services::cloud_providers`
+    /// 那张表）；这里的 match 只剩**界面**那一半 —— 没配好带去哪张表单，那是逐家不同的屏。
     fn browse(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
-        let configured = match kind {
-            Kind::WebDav => self.webdav.configured(),
-            Kind::Baidu => self.baidu.configured(),
-        };
-        if !configured {
+        let cloud = ConfigHolder::cloud(cx);
+        let provider = kind.provider();
+        if !provider.configured(&cloud) {
             match kind {
                 Kind::WebDav => self.open_webdav_form(window, cx),
                 Kind::Baidu => self.open_baidu_form(window, cx),
+                Kind::Aliyun => self.open_aliyun_form(window, cx),
             }
             return;
         }
         self.kind = kind;
-        self.refreshed = false;
-        // WebDAV 的默认目录是配置里那格；百度没有这格，从根开始。
-        self.path = match kind {
-            Kind::WebDav => self.webdav.dir.clone(),
-            Kind::Baidu => String::new(),
-        };
+        self.path = provider.default_dir(&cloud);
         self.selected.clear();
         self.entries.clear();
         self.screen = Screen::Browse;
@@ -418,15 +606,9 @@ impl CloudView {
             }
             Err(error) => {
                 tracing::warn!("cloud: 列 {:?} 失败：{error}", self.path);
-                if failure_of(&error) == Failure::Auth
-                    && self.kind == Kind::Baidu
-                    && self.baidu.refreshable()
-                    && !self.refreshed
-                {
-                    self.refreshed = true;
-                    self.refresh_baidu(cx);
-                    return;
-                }
+                // 认证被拒在这里就是终态：`AuthedStore` 已经在请求层续过一次、重放过
+                // 一次（见 `services::cloud_auth`），走到这一步说明 refresh_token 也
+                // 不行了 —— 界面上只剩「请重新授权」这一个动作。
                 self.error = Some(failure_of(&error));
             }
         }
@@ -568,24 +750,17 @@ impl CloudView {
 
 /// 按当时的配置现造一台网盘客户端。凭据只在这一批活里活着 —— 改了账号、清了
 /// token，旧的那台随对象一起消失。
+/// 按当时的配置现造一台网盘客户端。凭据只在这一批活里活着 —— 改了账号、清了
+/// token，旧的那台随对象一起消失。
+///
+/// 「怎么造」全在 [`CloudProvider`] 的实现里（`services::cloud_providers`）：两家网盘
+/// 套着凭据续期（`AuthedStore`），过期先续、401 强刷重放一次；手贴 token（没有
+/// refresh_token）的那一路同样从那里过 —— 续不了就把原来的 401 交回界面，读者重贴。
+/// 这一层不再按家写 `match`。
 fn build_drive(kind: Kind, cx: &App) -> Option<Box<dyn Drive>> {
     let cloud = ConfigHolder::cloud(cx);
-    let transport = crate::ui::services::update::transport();
-    Some(match kind {
-        Kind::WebDav if cloud.webdav.configured() => {
-            let webdav = cloud.webdav;
-            Box::new(DavDrive::open(
-                webdav.url,
-                webdav.username,
-                webdav.password,
-                transport,
-            ))
-        }
-        Kind::Baidu if cloud.baidu.configured() => {
-            Box::new(BaiduDrive::new(cloud.baidu.access_token, transport))
-        }
-        _ => return None,
-    })
+    kind.provider()
+        .build_drive(&cloud, crate::ui::services::update::transport())
 }
 
 /// 换到 / 刷新到的一对 token → 落盘形状：到期时刻在此刻折算（Unix 秒）。
@@ -610,6 +785,40 @@ fn linked_drive(
         } else {
             account
         },
+    }
+}
+
+/// 换到 / 刷新到的一对 token → 阿里云盘的落盘形状。
+///
+/// `drive_id` 由调用方挑好（授权时来自 `getDriveInfo`，刷新时沿用已存的那一份）——
+/// 这一格不是 token 的附赠品，它是每个文件请求都要带的一个参数。
+fn linked_aliyun(
+    tokens: &aliyun_auth::AliyunTokens,
+    drive_id: String,
+    account: String,
+) -> folio_core::AliyunDrive {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    folio_core::AliyunDrive {
+        access_token: tokens.access_token.clone(),
+        refresh_token: tokens.refresh_token.clone(),
+        expires_at: now + tokens.expires_in.max(0),
+        drive_id,
+        account,
+    }
+}
+
+/// `getDriveInfo` 的昵称：昵称 > 用户名 > 手机号，与 [`aliyun_auth::account_name`]
+/// 同一套优先级 —— 两处各写一份就会一边空一边不空。
+fn aliyun_account_of(info: &aliyun_auth::DriveInfo) -> String {
+    if !info.nick_name.trim().is_empty() {
+        info.nick_name.clone()
+    } else if !info.user_name.trim().is_empty() {
+        info.user_name.clone()
+    } else {
+        info.phone.clone()
     }
 }
 
@@ -657,10 +866,14 @@ fn size_label(size: Option<u64>) -> String {
 
 impl Render for CloudView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 深链回跳的授权码：只有这一帧同时握着窗口与 `&mut self`，所以在这一格里
+        // 把它填进表单（见 `take_pending_aliyun_code`）。一次性 —— 队列取完就空。
+        self.take_pending_aliyun_code(window, cx);
         let title = match self.screen {
             Screen::Drives => tr(cx, "cloud.title"),
             Screen::WebDavForm => tr(cx, "cloud.webdav"),
             Screen::BaiduForm => tr(cx, "cloud.baidu"),
+            Screen::AliyunForm => tr(cx, "cloud.aliyun"),
             Screen::Browse => {
                 let name = self.path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("");
                 if name.is_empty() {
@@ -682,6 +895,7 @@ impl Render for CloudView {
             Screen::Drives => self.drives_body(window, cx),
             Screen::WebDavForm => self.webdav_form_body(window, cx),
             Screen::BaiduForm => self.baidu_form_body(window, cx),
+            Screen::AliyunForm => self.aliyun_form_body(window, cx),
             Screen::Browse => self.browse_body(cx),
         };
         v_flex()
@@ -720,6 +934,8 @@ impl CloudView {
         let view_edit_webdav = cx.entity().clone();
         let view_browse_baidu = cx.entity().clone();
         let view_edit_baidu = cx.entity().clone();
+        let view_browse_aliyun = cx.entity().clone();
+        let view_edit_aliyun = cx.entity().clone();
         let webdav_subtitle = if self.webdav.configured() {
             if self.webdav.dir.is_empty() {
                 SharedString::from(self.webdav.url.clone())
@@ -731,6 +947,14 @@ impl CloudView {
         };
         let baidu_subtitle = if self.baidu.configured() {
             match self.baidu.account.as_str() {
+                "" => tr(cx, "cloud.token_saved"),
+                account => account.to_string().into(),
+            }
+        } else {
+            tr(cx, "cloud.not_configured")
+        };
+        let aliyun_subtitle = if self.aliyun.configured() {
+            match self.aliyun.account.as_str() {
                 "" => tr(cx, "cloud.token_saved"),
                 account => account.to_string().into(),
             }
@@ -820,6 +1044,44 @@ impl CloudView {
                             .on_click(move |_, window, cx| {
                                 view_edit_baidu
                                     .update(cx, |this, cx| this.open_baidu_form(window, cx));
+                            }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                Button::new("cloud-drive-aliyun")
+                                    .ghost()
+                                    .w_full()
+                                    .justify_start()
+                                    .icon(IconName::Cloud)
+                                    .label(tr(cx, "cloud.aliyun").to_string())
+                                    .on_click(move |_, window, cx| {
+                                        view_browse_aliyun.update(cx, |this, cx| {
+                                            this.browse(Kind::Aliyun, window, cx)
+                                        });
+                                    }),
+                            )
+                            .child(muted_label(aliyun_subtitle, cx)),
+                    )
+                    .child(
+                        Button::new("cloud-aliyun-edit")
+                            .ghost()
+                            .small()
+                            .icon(IconName::NotebookPen)
+                            .tooltip(tr(cx, "cloud.edit").to_string())
+                            .accessibility_label(tr(cx, "cloud.edit"))
+                            .on_click(move |_, window, cx| {
+                                view_edit_aliyun
+                                    .update(cx, |this, cx| this.open_aliyun_form(window, cx));
                             }),
                     ),
             )
@@ -985,6 +1247,95 @@ impl CloudView {
                         .disabled(form.linking)
                         .on_click(move |_, _, cx| {
                             view_save.update(cx, |this, cx| this.save_baidu(cx));
+                        }),
+                ),
+        )
+        .into_any_element()
+    }
+
+    /// 阿里云盘的账号表单。
+    ///
+    /// 与百度那张同形，差别只在一处提示：阿里云盘的授权**必须**回跳到应用登记的
+    /// 那个地址，授权页不会像百度那样直接把 code 摆在页面上。所以这一格除了
+    /// 「打开授权页」，还写清「授权完回到应用，码会自动填进来 / 也可以手贴」。
+    fn aliyun_form_body(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.aliyun_form.as_ref() else {
+            return div().into_any_element();
+        };
+        let view_save = cx.entity().clone();
+        let view_cancel = cx.entity().clone();
+        let auth_block = match aliyun_auth::credentials() {
+            Some((client_id, _)) => v_flex()
+                .w_full()
+                .max_w(px(FORM_WIDTH))
+                .gap_1()
+                .child(div().text_sm().child(tr(cx, "cloud.aliyun_code")))
+                .child(muted_label(tr(cx, "cloud.aliyun_code_hint"), cx))
+                .child(Input::new(&form.code).w_full())
+                .child(
+                    Button::new("cloud-aliyun-open-page")
+                        .outline()
+                        .small()
+                        .label(tr(cx, "cloud.aliyun_open_page").to_string())
+                        .disabled(form.linking)
+                        .on_click(move |_, _, _cx| {
+                            crate::ui::platform::open_url(&aliyun_auth::authorize_url(client_id));
+                        }),
+                ),
+            None => v_flex()
+                .w_full()
+                .max_w(px(FORM_WIDTH))
+                .gap_1()
+                .child(muted_label(tr(cx, "cloud.aliyun_no_credentials"), cx)),
+        };
+        let mut body = v_flex()
+            .id("cloud-aliyun-form")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .px_4()
+            .py_4()
+            .gap_3()
+            .child(auth_block)
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(FORM_WIDTH))
+                    .gap_1()
+                    .child(div().text_sm().child(tr(cx, "cloud.token")))
+                    .child(muted_label(tr(cx, "cloud.aliyun_token_hint"), cx))
+                    .child(Input::new(&form.token).w_full()),
+            );
+        if let Some(error) = &form.error {
+            body = body.child(muted_label(error.clone(), cx));
+        }
+        body.child(
+            h_flex()
+                .w_full()
+                .max_w(px(FORM_WIDTH))
+                .justify_end()
+                .gap_2()
+                .child(
+                    Button::new("cloud-aliyun-cancel")
+                        .ghost()
+                        .small()
+                        .label(tr(cx, "cloud.cancel").to_string())
+                        .on_click(move |_, _, cx| {
+                            view_cancel.update(cx, |this, cx| this.back(cx));
+                        }),
+                )
+                .child(
+                    Button::new("cloud-aliyun-save")
+                        .small()
+                        .label(if form.linking {
+                            tr(cx, "cloud.aliyun_linking")
+                        } else {
+                            tr(cx, "cloud.save")
+                        })
+                        .disabled(form.linking)
+                        .on_click(move |_, _, cx| {
+                            view_save.update(cx, |this, cx| this.save_aliyun(cx));
                         }),
                 ),
         )
