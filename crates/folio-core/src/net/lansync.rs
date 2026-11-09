@@ -26,6 +26,11 @@ use super::remote::{self, Method, Request, Response, Transport};
 use crate::account::{AccountKey, Nonce, Proof, Side};
 use crate::sync::{SNAPSHOT_VERSION, Snapshot};
 
+// 清单条目的数据形状归 sync（评审稿 Stage 2.2）：读侧要它的是 `store` 的
+// 「本机有哪些可同步的书」，而 store 不许认识网络模块。这里沿用旧路径，
+// `net::lansync::BookEntry` 的既有写法（`net/transfer/lan.rs`、界面侧）一行不改。
+pub use crate::sync::BookEntry;
+
 /// 这一版局域网协议。两端各带在自己每一条报文里，`version` 比本机高的对端直接拒：
 /// 猜字段比连不上更难查。
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -96,15 +101,6 @@ pub struct Auth {
 pub struct Manifest {
     pub version: u32,
     pub books: Vec<BookEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BookEntry {
-    /// `books.content_hash` 那一格：64 个小写十六进制字符。
-    pub hash: String,
-    pub size: u64,
-    /// 只用于日志与报表，让「这次拉了 3 本」说得出具体的书。
-    pub title: String,
 }
 
 /// 本机缺哪几本。`local_hashes` 是本机 `books.content_hash` 的集合，

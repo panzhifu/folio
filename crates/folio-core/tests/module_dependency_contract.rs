@@ -19,14 +19,7 @@ const BANS: &[(&str, &[&str], &[(&str, &str)])] = &[
         &[],
     ),
     // 存储层不认识网络协议：同步 DTO 归 sync，SQL 只吃数据形状。
-    (
-        "store",
-        &["crate::net"],
-        &[
-            // 刀 4 还：BookEntry 搬进 sync 后改 crate::sync::BookEntry。
-            ("store/sync.rs", "同步 DTO 还住在 net::lansync"),
-        ],
-    ),
+    ("store", &["crate::net"], &[]),
     // infra 是叶子，被所有人依赖而不依赖任何功能分区；组合根与错误聚合
     // 搬到 crate 根之后（刀 5），这里剩下的应该只有 config 的 account 一处
     // （account 不在禁单里，见 infra/mod.rs 头注释的 settings 层欠账）。

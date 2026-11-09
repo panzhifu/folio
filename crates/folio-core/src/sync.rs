@@ -28,6 +28,23 @@ use crate::store::Store;
 /// 远端 JSON 的格式版本。读到更高版本的文件跳过，不猜它的字段。
 pub const SNAPSHOT_VERSION: u32 = 1;
 
+/// 局域网清单里**一条可拉的书**：`GET /manifest` 响应里 `books` 的元素。
+///
+/// 只带 `content_hash`、大小与书名。`hash` 就是请求 `/file` 用的键，路径由对端按自己的
+/// 数据库解 —— 书库目录在哪儿、副本叫什么名，都是各台自己的事，不该跨机说。
+///
+/// 数据形状归这里而不是 `net::lansync`：读侧要它的是 `store` 的「本机有哪些可同步的书」
+/// （`Store::collect_sync` 那一族），而 store 不许认识网络模块 —— DTO 住在两边都依赖的
+/// sync，协议侧 re-export 沿旧路径。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookEntry {
+    /// `books.content_hash` 那一格：64 个小写十六进制字符。
+    pub hash: String,
+    pub size: u64,
+    /// 只用于日志与报表，让「这次拉了 3 本」说得出具体的书。
+    pub title: String,
+}
+
 /// 一台设备的全量快照。书以 `content_hash` 为键 —— 本地 id 跨设备没有意义。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
