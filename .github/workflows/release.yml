@@ -305,7 +305,10 @@ jobs:
   macos:
     name: macOS
     needs: [version, preflight]
-    runs-on: macos-14
+    # `macos-14` 在 2026-11-09 被 GitHub 报成不支持的 runner 配置
+    # （`macos-14-arm64-us-default`）；`macos-latest` 走默认的 arm64 池，
+    # 产物仍是 aarch64，读法与下面这几步一致。
+    runs-on: macos-latest
     env:
       FOLIO_VERSION: ${{ needs.version.outputs.version }}
     steps:
