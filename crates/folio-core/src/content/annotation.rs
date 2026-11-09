@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use crate::content::anchor::{Confidence, TextMap, relocate};
 use crate::content::format::{Chapter, DocMeta};
-use crate::store::{Annotation, AnnotationStyle};
+use folio_model::types::{Annotation, AnnotationStyle};
 
 /// 一条锚点落到本章坐标上的结果。界面拿它画痕迹、列侧栏、标 stale。
 ///
@@ -350,7 +350,7 @@ mod tests {
     };
     use crate::content::dom::Dom;
     use crate::content::format::{Chapter, DocMeta, Format};
-    use crate::store::{Annotation, AnnotationStyle};
+    use folio_model::types::{Annotation, AnnotationStyle};
 
     /// 一段正文的可见文本坐标表。`TextMap` 自己持有文本，不借 `Dom`。
     fn map_of(html: &str) -> TextMap {

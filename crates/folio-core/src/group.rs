@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::store::ShelfItem;
+use folio_model::types::ShelfItem;
 
 /// 没有作者的书落进的组名。
 ///
@@ -77,7 +77,7 @@ mod tests {
     //! 分组：三种依据、缺作者的回落、组名顺序与组内顺序。
 
     use crate::group::{GroupBy, UNKNOWN_AUTHOR, group_shelf};
-    use crate::store::ShelfItem;
+    use folio_model::types::ShelfItem;
 
     fn item(id: i64, authors: &[&str], format: &str) -> ShelfItem {
         ShelfItem {

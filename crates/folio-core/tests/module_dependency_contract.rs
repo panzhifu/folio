@@ -16,10 +16,7 @@ const BANS: &[(&str, &[&str], &[(&str, &str)])] = &[
     (
         "content",
         &["crate::store", "crate::ingest"],
-        &[
-            // 刀 3 还：批注类型已在 folio-model，改 folio_model 路径后删。
-            ("content/annotation.rs", "批注类型还走 store 旧路径"),
-        ],
+        &[],
     ),
     // 存储层不认识网络协议：同步 DTO 归 sync，SQL 只吃数据形状。
     (
@@ -49,8 +46,6 @@ const BANS: &[(&str, &[&str], &[(&str, &str)])] = &[
             ("infra/error.rs", "错误聚合还住在 infra"),
             // 刀 6 还：novel / ImageScale 类型搬 folio-model。
             ("infra/config.rs", "novel 与 ImageScale 还引用 content/store 类型"),
-            // 刀 3 还：测试里的 AnnotationStyle 改 folio_model 路径。
-            ("infra/book_settings.rs", "测试引用 AnnotationStyle 走 store 路径"),
         ],
     ),
 ];

@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::infra::error::IoResultExt as _;
 use crate::infra::i18n::Locale;
 use crate::infra::paths;
-use crate::store::AnnotationStyle;
+use folio_model::types::AnnotationStyle;
 
 pub use folio_base::logging::Logging;
 pub use folio_format::css::ImageScale;

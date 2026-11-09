@@ -207,7 +207,7 @@ mod tests {
     use crate::infra::config::{
         Appearance, ImageScale, Mode, PageTurn, Reader, TextDirection, TocDensity,
     };
-    use crate::store::AnnotationStyle;
+    use folio_model::types::AnnotationStyle;
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
 
