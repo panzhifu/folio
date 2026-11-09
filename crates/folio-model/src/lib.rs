@@ -17,14 +17,18 @@
 //! - [`char_class`] —— 词 / 空白 / 换行 / 其他：划词吸附共用的字符分类。
 //! - [`content`] —— 内容两族：可重排 [`content::FlowDoc`] 与定版式 [`content::FixedDoc`]。
 //! - [`format`] —— 章表与书目：[`format::Format`]、[`format::Chapter`]、[`format::DocMeta`]。
+//! - [`novel`] —— `.txt` 分章规则的读者差量（出厂表与引擎在 folio-format）。
 //! - [`position`] —— 阅读位置：存字符偏移，不认页码。
+//! - [`reading`] —— 阅读偏好的档位词汇（如图往哪块尺寸折）。
 //! - [`types`] —— 书库记录的行形状（批注 / 书签 / 集合 / 统计）。
 
 pub mod anchor;
 pub mod char_class;
 pub mod content;
 pub mod format;
+pub mod novel;
 pub mod position;
+pub mod reading;
 pub mod types;
 
 pub use anchor::TextAnchor;
