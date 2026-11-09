@@ -101,7 +101,7 @@ pub fn sha256_of_bytes(bytes: &[u8]) -> ContentHash {
 ///
 /// 读不下去就是**算不出身份**，所以往外传 `io::Error` 而不是给出一个数：把半截内容
 /// 的哈希当成结果，等于让一个坏文件与一个真空文件可能同名 —— 那是最坏的一种错。
-/// 调用方手里有路径，套 `io_path` 再往外传（见 `crate::infra::error::IoResultExt`）。
+/// 调用方手里有路径，套上「哪个路径」的上下文再往外传。
 pub fn sha256_of_path(path: &Path) -> std::io::Result<ContentHash> {
     const CHUNK: usize = 64 * 1024;
     let file = std::fs::File::open(path)?;

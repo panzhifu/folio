@@ -6,12 +6,14 @@
 //! - [`scan`] —— 整机扫描：**找书不导入**，候选清单勾选后再走管线。
 //! - [`watch`] —— 文件夹监听：inotify 事件攒批自动入库（`notify`）。
 //! - [`identity`] —— 书的身份：内容哈希（书的身份是它的内容，不是文件路径）。
+//!   实现在 `folio-base`，这里沿用旧路径，区内的 `identity::…` 一行不改。
 //!
 //! 这一区是**唯一**允许同时碰容器、文件系统与数据库的地方 —— 它的产物就是
 //! [`crate::store`] 里的那些行。阅读路径上不再有「按格式分支」这回事
 //! （见 [`crate::content`]）。
 
-pub mod identity;
 pub mod import;
 pub mod scan;
 pub mod watch;
+
+pub use crate::infra::identity;

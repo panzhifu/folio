@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::Result;
-use crate::ingest::identity::ContentHash;
+use crate::infra::identity::ContentHash;
 
 pub use folio_format::CoverRef;
 
@@ -57,7 +57,7 @@ pub fn cover_path(root: &Path, hash_hex: &str, mime: &str) -> PathBuf {
 ///
 /// 失败一律回 `Err`，由调用方决定降级（`save_flow_in` 那边只记一句日志）。
 pub fn write(root: &Path, bytes: &[u8], mime: &str) -> Result<ContentHash> {
-    let hash = crate::ingest::identity::sha256_of_bytes(bytes);
+    let hash = crate::infra::identity::sha256_of_bytes(bytes);
     let dest = cover_path(root, &hash.to_hex(), mime);
     if dest.exists() {
         // 哈希相同 = 字节相同，重写一遍只是白付一次 IO（还可能把 mtime 搅动，

@@ -459,7 +459,7 @@ CREATE INDEX idx_bookmarks_book ON bookmarks(book_id);
     // 一段译文就是来回打 Google 的门，撞上 429（非浏览器客户端被限流）只是时间问题。
     //
     // 键是四元组的 UNIQUE：引擎名（换引擎等于换答案，不许混）、源语、目标语、
-    // **源文哈希**（SHA-256，`ingest::identity` 同一个函数）。源文本身不进库 ——
+    // **源文哈希**（SHA-256，`folio_base::identity` 同一个函数）。源文本身不进库 ——
     // 调用方手里就有，库里只留钥匙与答案，缓存表不随读书量膨胀。
     //
     // 没有 `book_id`、没有任何外键：译文只跟文本走，跟「哪本书里划的」无关 ——
@@ -562,7 +562,7 @@ ALTER TABLE books ADD COLUMN font_charset TEXT NOT NULL DEFAULT '[]';
     // 也不会被顺手 JOIN 进 books。
     //
     // 键是 content_hash 而不是 book_id：导入在**落库之前**就要用它查（那一趟已经先算好了
-    // 哈希，见 `ingest::identity::sha256_of_path`），而哈希本来就是跨设备认书的唯一钥匙。
+    // 哈希，见 `folio_base::identity::sha256_of_path`），而哈希本来就是跨设备认书的唯一钥匙。
     // 换一本书 = 换一个哈希 = 要重新输一次口令，这是刻意的：口令属于那份文件，不是那行记录。
     //
     // 明文存。与 `config.json` 里那几份 WebDAV 口令 / API key 同一信任域（同一个数据目录、

@@ -1512,7 +1512,7 @@ fn the_v12_migration_adds_identity_columns_without_backfilling_them() {
     // 补上之后：从「缺身份」那张清单里消失，而按哈希能找回来。
     let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     store
-        .set_content_hash(rows[0].id, hash, crate::ingest::identity::HASH_ALGO)
+        .set_content_hash(rows[0].id, hash, crate::infra::identity::HASH_ALGO)
         .unwrap();
     assert!(store.rows_missing_hash().unwrap().is_empty());
     assert_eq!(
@@ -1526,7 +1526,7 @@ fn the_v12_migration_adds_identity_columns_without_backfilling_them() {
         .unwrap()
         .query_row("SELECT hash_algo FROM books WHERE id = 1", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(algo, crate::ingest::identity::HASH_ALGO);
+    assert_eq!(algo, crate::infra::identity::HASH_ALGO);
 
     // 索引只建在非空那一段上：老库此刻绝大多数行是 NULL，全表索引是给空值建 B 树。
     let indexed: i64 = rusqlite::Connection::open(&db)
@@ -1566,7 +1566,7 @@ fn the_identity_index_skips_rows_without_a_hash_or_size() {
         .unwrap();
     let hash = "aa".repeat(32);
     store
-        .set_content_hash(hashed, &hash, crate::ingest::identity::HASH_ALGO)
+        .set_content_hash(hashed, &hash, crate::infra::identity::HASH_ALGO)
         .unwrap();
 
     assert_eq!(

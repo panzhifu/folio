@@ -37,7 +37,7 @@ const CHECK_CODE_BYTES: usize = 5;
 /// 肉眼校验码的字符数。
 pub const CHECK_CODE_LEN: usize = 8;
 
-/// RFC 4648 的 base32 字母表（小写），与 `ingest::identity` 给内容哈希起文件名用的是同一张表。
+/// RFC 4648 的 base32 字母表（小写），与 `folio_base::identity` 给内容哈希起文件名用的是同一张表。
 const BASE32: [u8; 32] = *b"abcdefghijklmnopqrstuvwxyz234567";
 
 /// 派生各取一个域分隔串：同一把密钥在不同用途下必须算出不同的值，否则一处泄露的 MAC

@@ -10,7 +10,7 @@
 use serde_json::{Value, json};
 
 use super::{TranslateError, Translation, Translator, language_name, parse_json, source_slice};
-use crate::ingest::identity::sha256_of_bytes;
+use crate::infra::identity::sha256_of_bytes;
 use crate::net::remote::{Method, Request, Transport};
 
 /// 一只 OpenAI 兼容引擎。字段都是建的那一刻的快照；会话把整只搬进后台作业。

@@ -31,7 +31,7 @@ pub mod deepl;
 pub mod openai;
 
 use crate::infra::config::{Translation as TranslationConfig, TranslationEngine};
-use crate::ingest::identity::sha256_of_bytes;
+use crate::infra::identity::sha256_of_bytes;
 use crate::net::remote::{Error, Method, Request, Transport};
 
 /// 源文超过多长就截断（字符）。Google 那档走 GET，查询串有总长上限；一整页选中

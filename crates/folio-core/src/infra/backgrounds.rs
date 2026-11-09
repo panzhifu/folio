@@ -66,7 +66,7 @@ pub fn store_in(dir: &std::path::Path, bytes: &[u8], raw_ext: &str) -> Result<St
     let Some(ext) = extension(raw_ext) else {
         return Err(crate::Error::UnsupportedImageFormat(raw_ext.to_string()));
     };
-    let hash = crate::ingest::identity::sha256_of_bytes(bytes);
+    let hash = crate::infra::identity::sha256_of_bytes(bytes);
     let name = format!("{}.{}", stem(&hash.to_hex()), ext);
     let dest = dir.join(&name);
     if dest.exists() {

@@ -28,7 +28,7 @@
 use serde_json::{Value, json};
 
 use crate::infra::config::{Ai, OpenAi, Translation as TranslationConfig};
-use crate::ingest::identity::sha256_of_bytes;
+use crate::infra::identity::sha256_of_bytes;
 use crate::net::remote::{Error, Method, Request, Response, Transport};
 use crate::net::translate::{TranslateError, language_name};
 

@@ -22,6 +22,9 @@ publish = false
 # `clock` feature 由根 `Cargo.toml` 统一开着（`Utc::now()` 要用），时区仍由调用方给偏移秒数。
 chrono.workspace = true
 dirs.workspace = true
+# 内容寻址（`identity`）：一本书的字节算成 SHA-256 身份。**不是新依赖树** ——
+# 根上那条 `sha2 = "0.11"` 的钉法与选型理由（纯 Rust、无 `cc`）写在那里，照用。
+sha2.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 # 日志：地基只装配 subscriber 与提供配置类型，`tracing` 的宏在地基之外照旧可用。

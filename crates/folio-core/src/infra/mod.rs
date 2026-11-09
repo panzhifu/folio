@@ -23,4 +23,4 @@ pub use folio_format::metrics;
 pub mod reading_theme;
 pub mod services;
 
-pub use folio_base::{budget, paths, task, time, usage};
+pub use folio_base::{budget, identity, paths, task, time, usage};
