@@ -13,6 +13,9 @@ publish = false
 # 依赖 PDF / 漫画 / Office / CHM / 字体格式的编解码库，格式能力经 `folio-format` 进来。
 
 [dependencies]
+# 地基：时间、路径、作业池、日志、占用统计。这一层不认识业务类型，
+# 也就装不下 config 的 schema（它引 store / format / account）。
+folio-base.workspace = true
 folio-format.workspace = true
 rusqlite.workspace = true
 dirs.workspace = true

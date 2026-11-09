@@ -87,7 +87,7 @@ impl Pressure {
 /// 每一步都是**可再生产物** —— 丢了下次用得上时重新算/重新取，只是慢一点。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvictStep {
-    /// 图片纹理（gpui 的 atlas / [`crate::content::format::shrink_image`] 那一层）。
+    /// 图片纹理（gpui 的 atlas / `content::format::shrink_image` 那一层）。
     Textures,
     /// shaping 结果（字体度量缓存）。
     Shaping,

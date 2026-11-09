@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::infra::error::IoResultExt as _;
+use crate::error::{Error, Result};
 
 /// 各标准目录下用来分隔本应用的子目录名。
 pub const APP_DIR: &str = "folio";
@@ -126,7 +126,7 @@ pub fn themes_dir() -> PathBuf {
 /// 正文主题的背景图：`<数据根>/backgrounds/`。
 ///
 /// 放在数据根而不是配置根：图是程序从系统选择器**收进来**的字节（按内容哈希落盘，
-/// 见 [`crate::infra::backgrounds`]），不是读者亲手编辑的文件 —— 与日志同一条理由。
+/// 见 `folio-core` 的 `infra::backgrounds`），不是读者亲手编辑的文件 —— 与日志同一条理由。
 pub fn backgrounds_dir() -> PathBuf {
     data_dir().join("backgrounds")
 }
@@ -139,7 +139,7 @@ pub fn db_path() -> PathBuf {
 /// 日志目录：`<数据根>/logs`。
 ///
 /// 放在数据根而不是配置根：它是程序自己产出的东西，不是读者编辑的东西，
-/// 而且会一直长。[`crate::infra::logging`] 按它排 `folio.log`，写满了轮转成 `.1`、`.2`。
+/// 而且会一直长。[`crate::logging`] 按它排 `folio.log`，写满了轮转成 `.1`、`.2`。
 pub fn log_dir() -> PathBuf {
     data_dir().join("logs")
 }
@@ -182,14 +182,17 @@ pub fn backups_dir() -> PathBuf {
 
 /// 建出 `path` 的父目录。写文件前都要过一次：首次启动时这些根目录还不存在。
 ///
-/// 返回的是 [`crate::Error`] 而不是 `std::io::Error`：后端对外只有一套错误词汇，
+/// 返回的是 [`Error`] 而不是 `std::io::Error`：这一层对外只有一套错误词汇，
 /// 而套上路径的那一条正好说清「哪个目录建不出来」——这在只读文件系统与 Android
 /// 沙箱目录那两类真机上是最常撞到的第一步。
-pub fn prepare_dir(path: &Path) -> crate::Result<()> {
+pub fn prepare_dir(path: &Path) -> Result<()> {
     let Some(dir) = path.parent() else {
         return Ok(());
     };
-    std::fs::create_dir_all(dir).io_path(path)
+    std::fs::create_dir_all(dir).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    })
 }
 
 /// 这个名字字符落不了盘：控制字符，加上文件系统保留的那九个 `/ \ : * ? " < > |`。
@@ -246,7 +249,7 @@ pub fn inbox_dir() -> PathBuf {
 /// 它是缓存，不是数据，与 [`thumbs_dir`] 同一档。
 ///
 /// 路径的**名字**归这里（与 `logs`、`books` 同一条规矩：别处不许拼路径），而
-/// [`crate::content::format::comic_cache`] 仍管它在测试里被指到哪儿。
+/// `comic_cache` 仍管它在测试里被指到哪儿。
 pub fn comics_cache_dir() -> PathBuf {
     data_dir().join("cache").join("comics")
 }

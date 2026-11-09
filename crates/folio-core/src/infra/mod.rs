@@ -1,36 +1,26 @@
-//! 横切基础设施：不解决任何业务问题，但每一条业务线都要用。
+//! core 的横切模块。地基已经搬进 `folio-base`，这里只留两类：
 //!
-//! - [`config`] —— 三层来源（内置默认 < 用户文件 < 环境变量）字段级合并 + provenance。
-//! - [`book_settings`] —— 每本书一份的阅读设置**差量**：默认 + 差量 → 生效值。
-//! - [`logging`] —— `tracing` subscriber 的装配：文件 / stderr / 宿主三处出口。
-//! - [`paths`] —— **唯一的路径来源**：数据根、库文件、日志目录、封面与缩略图目录。
-//!   别处不许拼路径（`plans/基础设施.md` §2.7）。
-//! - [`error`] —— 后端的错误枚举（`thiserror`，每个变体自带上下文、底层原因留在
-//!   `source` 链上）。
-//! - [`task`] —— 后台作业管线：可取消、可报进度、四档优先级。
-//! - [`services`] —— 常驻服务的生命周期与关闭次序（服务 → 作业池 → 库连接）。
-//! - [`budget`] —— 内存预算与降级顺序。
-//! - [`metrics`] —— 三个计数器的量具（测试断言用计数而不是计时）。
-//! - [`diagnostics`] —— 诊断 dump（`FOLIO_DUMP`）。
-//! - [`i18n`] —— 文案表的语言标签与占位符校验（表在 crate 根的 `locales/`）。
-//! - [`time`] —— 日历换算：Unix 秒 ↔ 本地日 ↔ `YYYY-MM-DD`。**其余地方不许自己除 86400。**
-//! - [`usage`] —— 磁盘占用按去处分类数一遍（设置里「存储」那一屏的量具）。
+//! - **配置与它带出来的一层**：[`config`]（三层来源字段级合并 + provenance）、
+//!   [`book_settings`]（每本书的阅读设置差量）、[`logging`]（`init_from_config` 与
+//!   反馈快照的薄壳）、[`diagnostics`]（诊断 dump）。
+//! - **业务侧的横切**：[`error`]（后端的错误词汇表）、[`i18n`]（文案表与 `Locale`）、
+//!   [`backgrounds`]（正文主题背景图的落盘）、[`reading_theme`]（外观 → 主题名解析）、
+//!   [`services`]（常驻服务的组合根）、[`metrics`]（格式层的计数型量具，来自 folio-format）。
 //!
-//! 这一区**不依赖 [`crate::store`]**（[`services`] 收的是调用方给的句柄），
-//! 也不依赖 [`crate::layout`]：它服务所有人，所以谁都不许反过来要求它懂业务。
+//! 下面这几条是 re-export，实现在 `folio-base`：`crate::infra::time::…` 这类旧写法不改。
+//! 判据是它们不认识任何业务类型。`config` 之所以没跟着下去，是因为它的 schema 引了
+//! `store::AnnotationStyle`、`format::novel::Edits` 与 `account::AccountKey` —— 那属于
+//! 第二步 `settings` 层，不在这一次的刀口上。
 
 pub mod backgrounds;
 pub mod book_settings;
-pub mod budget;
 pub mod config;
 pub mod diagnostics;
 pub mod error;
 pub mod i18n;
 pub mod logging;
 pub use folio_format::metrics;
-pub mod paths;
 pub mod reading_theme;
 pub mod services;
-pub mod task;
-pub mod time;
-pub mod usage;
+
+pub use folio_base::{budget, paths, task, time, usage};

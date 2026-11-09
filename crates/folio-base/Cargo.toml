@@ -1,0 +1,35 @@
+[package]
+name = "folio-base"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 本 crate 是地基：不解决任何业务问题，但每条业务线都要用。边界由依赖图强制 ——
+# 这里不认识书本、格式、SQLite、网络与界面，也不依赖 folio-format / folio-core。
+# 往这里加东西之前先问一句：它与「一本书」有没有关系？有就别放。
+#
+# 刻意缺席的三样，都是有理由的：
+# - `rust-i18n`：文案是界面资产，只有 `Locale` 与配置有关；需要它的 `feedback_snapshot`
+#   留在 folio-core 的薄壳里，不把整张文案表拖进地基。
+# - `serde_json`：这里不读 JSON（配置的 schema 在 folio-core）。
+# - `folio-format`：解析层在这一层之上；地基反过来依赖它就不再是地基。
+
+[dependencies]
+# 日历算术（日序号 ↔ 年月日、星期几）。**不是新依赖树**：`folio-app` 已经在用它取
+# 系统时区偏移、`gpui-base` 也带着同一份 0.4.45；这里只是把图上已有的一份转成直接依赖。
+# `clock` feature 由根 `Cargo.toml` 统一开着（`Utc::now()` 要用），时区仍由调用方给偏移秒数。
+chrono.workspace = true
+dirs.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+# 日志：地基只装配 subscriber 与提供配置类型，`tracing` 的宏在地基之外照旧可用。
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# `log` → `tracing` 的桥（桌面把依赖库的记录也收进同一份日志）。Android 上装不上，
+# 那边 `log` 的全局位给了 `android_logger`（见 `logging::init` 那段注释）。
+tracing-log.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

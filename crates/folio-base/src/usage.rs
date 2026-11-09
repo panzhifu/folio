@@ -1,7 +1,7 @@
 //! 磁盘上那一遍账：本应用占了多少，分别占在哪些去处。
 //!
 //! 为什么要有这一层：设置里的「存储」要把占用摆成图，而「哪一类多大」这件事只有一个
-//! 说得出口的判据 —— **按目录归属分**。 [`crate::infra::paths`] 是唯一的路径来源，所以
+//! 说得出口的判据 —— **按目录归属分**。 [`crate::paths`] 是唯一的路径来源，所以
 //! 这一层的分类规则就是它那份形状的镜像；别处（界面、测试、将来的诊断 dump）不该再拼
 //! 一遍路径、再各自数一遍。
 //!
@@ -92,21 +92,21 @@ pub struct Areas {
 }
 
 impl Areas {
-    /// 按 [`crate::infra::paths`] 填一份，只把两处**依配置而定**的入参留给调用方：
+    /// 按 [`crate::paths`] 填一份，只把两处**依配置而定**的入参留给调用方：
     /// 书库位置（读者在设置里确认的那个）与日志落在哪儿（`logging.dir` 可以指到别处，
     /// 关掉文件日志时根本没有那一份）。界面要的正是这一句；测试自己拼 [`Areas`]。
     pub fn from_app(library: Option<PathBuf>, log_active: Option<PathBuf>) -> Self {
-        let data = crate::infra::paths::data_dir();
+        let data = crate::paths::data_dir();
         let logs = log_active
             .as_ref()
             .and_then(|path| path.parent())
             .map(|dir| dir.to_path_buf())
-            .unwrap_or_else(crate::infra::paths::log_dir);
+            .unwrap_or_else(crate::paths::log_dir);
         Self {
-            config: crate::infra::paths::config_dir(),
-            db: crate::infra::paths::db_path(),
-            inbox: crate::infra::paths::inbox_dir(),
-            comics: crate::infra::paths::comics_cache_dir(),
+            config: crate::paths::config_dir(),
+            db: crate::paths::db_path(),
+            inbox: crate::paths::inbox_dir(),
+            comics: crate::paths::comics_cache_dir(),
             logs,
             log_active,
             data,
@@ -138,13 +138,13 @@ impl Areas {
             return Area::Comics;
         }
         if let Some(root) = self.library_root() {
-            if file.starts_with(crate::infra::paths::staging_dir(root)) {
+            if file.starts_with(crate::paths::staging_dir(root)) {
                 return Area::Staging;
             }
-            if file.starts_with(crate::infra::paths::covers_dir(root)) {
+            if file.starts_with(crate::paths::covers_dir(root)) {
                 return Area::Covers;
             }
-            if file.starts_with(crate::infra::paths::thumbs_dir(root)) {
+            if file.starts_with(crate::paths::thumbs_dir(root)) {
                 return Area::Thumbnails;
             }
             if file.starts_with(root) {
@@ -571,8 +571,8 @@ mod tests {
     /// 确认过时那三个区不认领任何字节。
     #[test]
     fn the_app_defaults_follow_paths_and_only_take_the_two_config_dirs() {
-        use super::super::paths;
-        use crate::infra::paths::APP_DIR;
+        use crate::paths;
+        use crate::paths::APP_DIR;
 
         let areas = Areas::from_app(None, None);
         let data = paths::data_dir();

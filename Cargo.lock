@@ -2276,6 +2276,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "folio-base"
+version = "0.1.4"
+dependencies = [
+ "chrono",
+ "dirs 6.0.0",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "folio-core"
 version = "0.1.4"
 dependencies = [
@@ -2284,6 +2298,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
  "flate2",
+ "folio-base",
  "folio-format",
  "futures-util",
  "hayro",

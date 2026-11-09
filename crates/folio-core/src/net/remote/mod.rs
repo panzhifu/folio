@@ -16,8 +16,6 @@ pub mod retry;
 pub mod ureq;
 
 use std::io::{Read, Seek};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 /// 一层「把请求发出去、把响应拿回来」的能力。
 ///
@@ -388,22 +386,9 @@ pub trait Sink: Send {
 }
 
 /// 取消标志。界面上的「取消」按钮置位，传输在下一次块边界看见它。
-#[derive(Debug, Default, Clone)]
-pub struct Cancel(Arc<AtomicBool>);
-
-impl Cancel {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn trigger(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn triggered(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
+///
+/// 实现住在 `folio-base`：导入、排版预热与网络共用同一个旗标，它不属于任何一家。
+pub use folio_base::cancel::Cancel;
 
 #[cfg(test)]
 mod tests {

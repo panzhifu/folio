@@ -391,7 +391,7 @@ impl ImageAtlas {
                             finished
                         }
                         None => Some(
-                            job(&folio_core::StageCtx::detached_for_tests())
+                            job(&folio_core::StageCtx::detached())
                                 .map_err(|err| err.to_string()),
                         ),
                     };

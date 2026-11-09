@@ -31,6 +31,7 @@ use crate::infra::i18n::Locale;
 use crate::infra::paths;
 use crate::store::AnnotationStyle;
 
+pub use folio_base::logging::Logging;
 pub use folio_format::css::ImageScale;
 
 /// 配置文件的**格式版本**。加字段、改某个键的含义时 +1。
@@ -1834,84 +1835,6 @@ impl Library {
 #[serde(default)]
 pub struct Language {
     pub locale: Locale,
-}
-
-/// 日志：调试时要不要落盘、写到哪儿、每一支代码说到多细。
-///
-/// 这一节存在理由是**不改代码就能调级**：真机上出问题往往是「这次什么都不显示」，
-/// 而重新编一遍 Android 是十几分钟加一次签名重装。手改 `config.json` 里的一行、重启，
-/// 就拿到现场了。（要连依赖库一起打开，仍然有 `FOLIO_LOG` 那条环境变量，见 [`crate::infra::logging`]。）
-///
-/// 默认值分平台：桌面 stderr 本来就开着，而移动平台上没人对着控制台。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Logging {
-    /// folio 自己的代码（`folio_core` / `folio_app`）说到多细：
-    /// `off` `error` `warn` `info` `debug` `trace`。**依赖库不跟着走**，它们固定在
-    /// `warn` 以上 —— 否则「打开 debug」等于把整个 GPU 栈的日志一起打开，两秒就写满一份文件。
-    /// 认不出的值回落 `info`，不是整档关掉。
-    pub level: String,
-    /// 按模块覆盖，写法同 `RUST_LOG` 的逗号分隔那一段：`"folio_core::layout=trace"`。
-    /// 前缀要**整段对上模块边界**，最深的那一条赢。
-    pub targets: Vec<String>,
-    /// 落盘到 `<数据根>/logs/folio.log`（或 [`Self::dir`] 指的地点）。
-    pub file: bool,
-    /// 同时写 stderr。桌面默认开（是终端才带颜色），移动平台默认关。
-    pub stderr: bool,
-    /// 日志目录。空串 = 用默认的 `<数据根>/logs`。
-    ///
-    /// 单独给一格是因为设备上的数据根常常拿不到：Android 上把它指到
-    /// `/storage/emulated/0/Android/data/dev.folio.reader/files` 那一类位置，
-    /// `adb pull` 直接就能取走。
-    pub dir: String,
-    /// 一次运行最多写多少字节，写满就停手（`0` = 不限）。
-    ///
-    /// 上限是「本轮」的，不是文件的：上一次运行那份在开机时被挪成 `.1`，
-    /// 所以磁盘上总量是这个数乘以 [`Self::keep`] 加一。
-    pub max_bytes: u64,
-    /// 保留几份历史运行（`.1`、`.2`……）。`0` 就只留当前这一份。
-    pub keep: usize,
-}
-
-impl Default for Logging {
-    fn default() -> Self {
-        Self {
-            // debug 构建默认开到 debug：本地跑一次就该看见排版与容器里发生了什么。
-            // release 默认 info：只留生命周期与「静默降级」那几条，不刷正文。
-            level: if cfg!(debug_assertions) {
-                "debug"
-            } else {
-                "info"
-            }
-            .into(),
-            targets: Vec::new(),
-            file: true,
-            stderr: !cfg!(any(
-                target_os = "android",
-                target_os = "ios",
-                target_env = "ohos"
-            )),
-            dir: String::new(),
-            // 4 MiB 一份：一次长会话把 trace 全开也够用，而 `adb pull` 不用等。
-            max_bytes: 4 * 1024 * 1024,
-            keep: 3,
-        }
-    }
-}
-
-impl Logging {
-    /// 去掉各处的手滑空白。`level` 的**取值**不在这里判：认不出是 [`crate::infra::logging`]
-    /// 装配过滤器时的事，那一处已经有「回落 info 并在 stderr 说一句」的口径，
-    /// 在这里再判一遍就成了两份会各自漂移的规则。
-    pub fn normalized(mut self) -> Self {
-        self.level = self.level.trim().to_ascii_lowercase();
-        self.dir = self.dir.trim().to_string();
-        self.targets.retain(|piece| !piece.trim().is_empty());
-        self.targets
-            .iter_mut()
-            .for_each(|piece| *piece = piece.trim().to_string());
-        self
-    }
 }
 
 /// 一份完整的应用配置。

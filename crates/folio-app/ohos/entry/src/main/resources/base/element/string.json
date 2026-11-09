@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "Folio"
+    },
+    {
+      "name": "read_pasteboard_reason",
+      "value": "Folio reads the clipboard so you can paste text into search, notes, and settings."
     }
   ]
 }

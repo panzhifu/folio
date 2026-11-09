@@ -1,13 +1,13 @@
 //! 后台任务管线：把「可取消、可报进度」的作业丢到后台线程上跑，事件经通道回流。
 //!
-//! 只依赖 `std`（`thread` + `mpsc` + `Condvar`）—— 与 `folio-core` 其余部分一致，
-//! 不引 tokio / crossbeam，也不依赖 gpui。界面侧收到 [`TaskEvent`] 后自己决定怎么画。
+//! 只依赖 `std`（`thread` + `mpsc` + `Condvar`）：不引 tokio / crossbeam，也不依赖 gpui。
+//! 界面侧收到 [`TaskEvent`] 后自己决定怎么画。
 //!
 //! 形状是「**一个作业一条通道**」：每次 [`TaskManager::submit`] 都新开一条 `mpsc` 通道，
 //! 事件不共用、不带 id 路由 —— 交出去的那个 [`TaskHandle`] 就是这条作业的全部接口
 //! （看进度、取消、等在完成上）。
 //!
-//! 取消沿用远程下载那个标志 [`Cancel`](crate::net::remote::Cancel)：它是「置位、由作业在
+//! 取消沿用 [`Cancel`]：它是「置位、由作业在
 //! 检查点自己看见」的协作式取消，不是抢占，所以最多晚一个检查点生效。作业应当把
 //! `cancel.triggered()` 当作「尽快返回」的信号，取消的最终定性由本模块给出：
 //! 作业返回时若 `cancel` 已置位，一律落成 [`TaskEvent::Cancelled`]，哪怕它其实跑完了。
@@ -18,9 +18,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-pub use crate::net::remote::Cancel;
+pub use crate::cancel::Cancel;
 
-/// 作业的失败原因。用装箱错误而不是某个具体枚举：core 这一层不该规定上层怎么建模错误，
+/// 作业的失败原因。用装箱错误而不是某个具体枚举：这一层不该规定上层怎么建模错误，
 /// 而 `anyhow::Error` 本身就是这个类型，界面侧收成因果链时不用再包一层。
 pub type TaskError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -156,15 +156,10 @@ impl StageCtx {
 }
 
 impl StageCtx {
-    /// [`Self::detached`] 的公开版本：给「不在作业池里跑、但作业体要求一个读数口」
-    /// 的调用方（界面那一侧就地跑一个作业时）。
-    pub fn detached_for_tests() -> Self {
-        Self::detached()
-    }
-
     /// 造一个**没有接收端**、取消未置位的读数口（发出去的静默丢弃）。给两类
-    /// 调用方：测试里直接测管线本体，以及「没人看进度」的后台驱动（监听的初扫）。
-    pub(crate) fn detached() -> Self {
+    /// 调用方：测试里直接测管线本体，以及「没人看进度」的后台驱动（监听的初扫、
+    /// 界面就地跑一个作业时）。
+    pub fn detached() -> Self {
         Self {
             item_tx: Box::new(|_| {}),
             bytes_tx: Box::new(|_| {}),
@@ -261,7 +256,7 @@ impl Queue {
         self.ready.notify_all();
     }
 
-    /// 还排着队、没被取走的作业数（诊断用，见 `crate::infra::diagnostics`）。
+    /// 还排着队、没被取走的作业数（诊断用：`dump` 读 [`Self::queued`]）。
     fn depth(&self) -> usize {
         let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         jobs.iter().map(VecDeque::len).sum()

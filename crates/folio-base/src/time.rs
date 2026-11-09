@@ -1,14 +1,23 @@
 //! 日历换算：Unix 秒 ↔ 本地日序号 ↔ `YYYY-MM-DD`。
 //!
-//! core 里只有阅读统计这一处需要「今天是哪天」。为它拉一棵 `chrono` / `time` 依赖树
-//! 不划算，而这件事本身就是一段几十行的定点算术 —— Hinnant 的 `civil_from_days`
-//! 已经是公开领域的标准解法，逐键测清楚比信任某个库的默认行为更容易。
+//! **日历算术交给 `chrono`**：日序号 ↔ 公历年月日的两半、星期几都由它算，手写的
+//! Hinnant 定点算术已经删掉。留着的是三件它不替我们做的事：
 //!
-//! **时区一律是调用方给的偏移秒数**，不用系统时区：core 不该依赖进程环境，
-//! 而「读者在哪个时区」是界面侧才知道的事（设备可能刚跨过日界线）。
+//! - **时区一律是调用方给的偏移秒数**（[`local_hour`] / [`local_day`] / [`day_start`]），
+//!   不读系统时区：地基不该依赖进程环境，而「读者在哪个时区」是界面侧才知道的事。
+//! - **时长只拆分量、不拼文字**：措辞属于文案，不属于日历算术。
+//! - **月长与闰年**是一条两行的规则，比从日期对象反推更直接，也接受任意 `i32` 年份。
+//!
+//! chrono 已经在产品图里（`folio-app` 直接用它取系统时区偏移，`gpui-base` 也带着），
+//! 这里只是把图上已有的一份转成 `folio-base` 的直接依赖，没有新增包。
+
+use chrono::{Datelike as _, NaiveDate, TimeDelta, Utc};
 
 /// 一天的秒数。放在这里，省得 `86400` 这个魔数散落到各调用点。
 pub const DAY: i64 = 86_400;
+
+/// 1970-01-01 距 0001-01-01 的天数（`NaiveDate::num_days_from_ce` 的口径）。
+const CE_DAYS_AT_EPOCH: i64 = 719_163;
 
 /// 当前 Unix 秒。
 ///
@@ -16,10 +25,7 @@ pub const DAY: i64 = 86_400;
 /// 起止、统计页算「今天」也读它。两处各读一遍 `SystemTime` 迟早会漂出几十秒,
 /// 而那种漂移在屏幕上表现为「时长比自己算的少一点」，没有任何报错。
 pub fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    Utc::now().timestamp()
 }
 
 /// 一小时的秒数。与 [`DAY`] 配对，省得 `3600` 散落到各调用点。
@@ -86,38 +92,44 @@ pub struct CivilDate {
     pub day: u32,
 }
 
-/// 日序号 → 公历年月日（Hinnant `civil_from_days`）。
+/// 日序号 → `NaiveDate`。超出 chrono 支持范围（约 ±262,000 年）时夹到端点 ——
+/// 这个函数对外是**无失败**的，调用方不该为「年份太大」写一条分支。
+fn date_from_epoch_day(epoch_day: i64) -> NaiveDate {
+    let ce = epoch_day.saturating_add(CE_DAYS_AT_EPOCH);
+    i32::try_from(ce)
+        .ok()
+        .and_then(NaiveDate::from_num_days_from_ce_opt)
+        .unwrap_or(if epoch_day < 0 {
+            NaiveDate::MIN
+        } else {
+            NaiveDate::MAX
+        })
+}
+
+/// 日序号 → 公历年月日。
 ///
 /// 不处理儒略历：Unix 时间戳的用途里没有 1582 年以前的书。
 pub fn civil_from_days(epoch_day: i64) -> CivilDate {
-    // 把纪元挪到 0000-03-01，让闰日落在年末，后面的除法才是齐的。
-    let z = epoch_day + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097); // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]，3 月是 0
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let y = if m <= 2 { y + 1 } else { y };
+    let date = date_from_epoch_day(epoch_day);
     CivilDate {
-        year: y as i32,
-        month: m as u32,
-        day: d as u32,
+        year: date.year(),
+        month: date.month(),
+        day: date.day(),
     }
 }
 
 /// 公历年月日 → 日序号。年份按**天文纪年**写（0 年是公元前 1 年），
 /// 与 [`civil_from_days`] 是同一套算术的两半。
+///
+/// `day` 允许越界（32 日 = 下个月 1 日，0 日 = 上个月最后一天）：调用方算月份边界时
+/// 靠这一条做进位，所以从月初起再加天数，而不是要求合法日期。
 pub fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let y = i64::from(year) - i64::from(month <= 2);
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400); // [0, 399]
-    let m = i64::from(month);
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    let first = NaiveDate::from_ymd_opt(year, month.clamp(1, 12), 1)
+        .unwrap_or(if year < 0 { NaiveDate::MIN } else { NaiveDate::MAX });
+    let date = first
+        .checked_add_signed(TimeDelta::days(i64::from(day) - 1))
+        .unwrap_or(first);
+    i64::from(date.num_days_from_ce()) - CE_DAYS_AT_EPOCH
 }
 
 pub fn is_leap_year(year: i32) -> bool {
@@ -137,7 +149,7 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
 
 /// 日序号是星期几。0 = 周一 … 6 = 周日（1970-01-01 是周四，所以偏 3）。
 pub fn weekday_monday0(epoch_day: i64) -> usize {
-    (epoch_day + 3).rem_euclid(7) as usize
+    date_from_epoch_day(epoch_day).weekday().num_days_from_monday() as usize
 }
 
 /// 日序号 → `YYYY-MM-DD`。
@@ -150,7 +162,7 @@ pub fn civil_date(epoch_day: i64) -> String {
 mod tests {
     //! 日历换算：已知日期、闰年、以及 1970 年前后的负日序号。
 
-    use crate::infra::time::{
+    use super::{
         DAY, civil_date, civil_from_days, day_start, days_from_civil, days_in_month,
         duration_parts, local_day, local_hour, weekday_monday0,
     };

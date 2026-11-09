@@ -1,7 +1,12 @@
 [workspace]
 resolver = "2"
 default-members = ["crates/folio-app"]
-members = ["crates/folio-core", "crates/folio-format", "crates/folio-app"]
+members = [
+    "crates/folio-base",
+    "crates/folio-format",
+    "crates/folio-core",
+    "crates/folio-app",
+]
 
 [workspace.package]
 version = "0.1.4"
@@ -12,6 +17,7 @@ license = "MIT"
 # 只列已经在用的依赖；PDF 的 pdfium-render 等各自里程碑真正要用时再加，
 # 避免空挂依赖。
 [workspace.dependencies]
+folio-base = { path = "crates/folio-base" }
 folio-core = { path = "crates/folio-core" }
 folio-format = { path = "crates/folio-format" }
 

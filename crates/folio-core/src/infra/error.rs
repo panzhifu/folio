@@ -186,9 +186,17 @@ impl Error {
     }
 }
 
-impl From<tracing::subscriber::SetGlobalDefaultError> for Error {
-    fn from(err: tracing::subscriber::SetGlobalDefaultError) -> Self {
-        Self::Logging(Box::new(err))
+/// 地层的错误 1:1 映射回 core 的变体：调用方 match 的分支与字段都不变。
+///
+/// 写穷尽 `match` 而不是 `_ =>`：`folio-base` 新增变体时，这里必须编译红 ——
+/// 否则新变体会被静默吞成别的类别。
+impl From<folio_base::error::Error> for Error {
+    fn from(err: folio_base::error::Error) -> Self {
+        use folio_base::error::Error as Base;
+        match err {
+            Base::Io { path, source } => Self::Io { path, source },
+            Base::Logging(source) => Self::Logging(Box::new(source)),
+        }
     }
 }
 

@@ -32,6 +32,14 @@ declare module 'libfolio_app.so' {
     nativeDeliverPick(requestId: number, paths: string): void;
     /** Fail a picker request with a reason the app can show. */
     nativeFailPick(requestId: number, reason: string): void;
+    /**
+     * Register the clipboard write bridge. Native calls `cb(text)` to put text on
+     * the system pasteboard; the host should also watch the pasteboard and push
+     * changes back through `nativeClipboardChanged`.
+     */
+    nativeSetClipboard(cb: (text: string) => void): void;
+    /** Push the current pasteboard text ('' ⇒ cleared or non-text) into native. */
+    nativeClipboardChanged(text: string): void;
   }
 
   const native: FolioNative;

@@ -1,6 +1,7 @@
 import native from 'libfolio_app.so';
 import { picker, fileUri, Environment, fileIo } from '@kit.CoreFileKit';
-import { deviceInfo } from '@kit.BasicServicesKit';
+import { deviceInfo, pasteboard } from '@kit.BasicServicesKit';
+import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const DOMAIN: number = 0x0000;
@@ -55,6 +56,44 @@ struct Index {
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'nativeSetFolderPicker failed');
     }
+
+    this.registerClipboard();
+  }
+
+  // The system clipboard. GPUI's `read_from_clipboard` is synchronous, so native
+  // keeps a cache that ArkTS refreshes from two directions: `nativeSetClipboard`
+  // carries native writes out to the pasteboard, and the `update` watcher pushes
+  // every change (including copies made in other apps) back through
+  // `nativeClipboardChanged`. Reading needs READ_PASTEBOARD (user_grant,
+  // system_basic ACL — the signing profile must list it under `acls`).
+  private registerClipboard(): void {
+    const systemPasteboard = pasteboard.getSystemPasteboard();
+    const push = () => {
+      systemPasteboard.getData()
+        .then((data) => native.nativeClipboardChanged(data.getPrimaryText()))
+        .catch(() => native.nativeClipboardChanged(''));
+    };
+    try {
+      native.nativeSetClipboard((text: string) => {
+        const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
+        systemPasteboard.setData(data).catch((err: Error) => {
+          hilog.warn(DOMAIN, TAG, 'pasteboard setData failed: %{public}s', err?.message ?? 'unknown');
+        });
+      });
+      systemPasteboard.on('update', push);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'clipboard bridge registration failed');
+      return;
+    }
+    const context = getContext(this) as common.UIAbilityContext;
+    const permissions: Permissions[] = ['ohos.permission.READ_PASTEBOARD'];
+    abilityAccessCtrl.createAtManager()
+      .requestPermissionsFromUser(context, permissions)
+      .then(() => push())
+      .catch((err: Error) => {
+        hilog.warn(DOMAIN, TAG, 'READ_PASTEBOARD request failed: %{public}s', err?.message ?? 'unknown');
+        push();
+      });
   }
 
   private openPicker(requestId: number, mode: string): void {
