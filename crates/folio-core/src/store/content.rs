@@ -11,6 +11,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::Store;
+use folio_format::ext::ChapterExt;
 use crate::Result;
 use crate::content::format::{
     Chapter, ChapterLocator, ChapterText, Content, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
@@ -480,6 +481,7 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
+    use crate::ChapterExt;
     use crate::Store;
     use crate::content::format::{
         Chapter, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, PageImage, PageSource,

@@ -11,6 +11,9 @@ publish = false
 # axum / ureq / notify / dirs 之前，先问那件事还成不成立。
 
 [dependencies]
+# 章表与书目的类型（`Chapter` / `Format` / `Content` 那一族）住在这里；本 crate 产它们，
+# 不再独自占有它们 —— 书库与排版引擎只认 folio-model。
+folio-model.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

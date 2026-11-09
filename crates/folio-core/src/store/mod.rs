@@ -27,6 +27,7 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, params};
 
+use folio_format::ext::ChapterExt;
 use crate::Result;
 
 mod annotations;
@@ -42,7 +43,8 @@ mod schema;
 pub mod stats;
 mod sync;
 mod translations;
-mod types;
+// 类型住进了 folio-model；这里沿用旧路径，5 个查询模块的 `super::types::{…}` 一行不动。
+pub use folio_model::types;
 
 #[cfg(test)]
 mod tests;

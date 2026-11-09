@@ -6,6 +6,7 @@ use super::harness::{
 };
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
+use folio_core::ChapterExt;
 use folio_core::store::Store;
 use folio_core::{AnnotationStyle, Chapter, FlowDoc, Format, Locator};
 use gpui_kit::{

@@ -47,6 +47,7 @@ use super::{
     absolutize_css_urls, asset_href, dir_of, extension_of, image_dims, media_type_of, resolve_href,
     stem_of,
 };
+use crate::ext::ChapterExt;
 use crate::Result;
 
 /// `#SYSTEM` 里那几种条目的号（下面这份走法是从两份实测样本上倒推出来的，
@@ -604,6 +605,7 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
+    use crate::ext::FlowDocExt;
     use super::{Chm, ChmAdapter, is_html, lookup_names, ours, system_entries, unsupported};
     use crate::{Content, DocumentProvider, Format, provider_for};
 

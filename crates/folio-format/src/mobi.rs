@@ -93,6 +93,7 @@ use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, FontBytes, FontRef,
     Format, HeadDims, ImageRes, image_dims, image_dims_from_head, shrink_image, stem_of,
 };
+use crate::ext::ChapterExt;
 use crate::Result;
 
 /// 封面上限与 EPUB / FB2 同一条口径。
@@ -1159,6 +1160,7 @@ mod tests {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
 
+    use crate::ext::ChapterExt;
     use super::{MobiAdapter, Rewrite, header, rawml, rewrite_html};
     use crate::{Content, DocumentProvider, Format};
 

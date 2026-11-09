@@ -693,6 +693,7 @@ mod tests {
 
     use std::sync::Arc;
 
+    use folio_core::ChapterExt;
     use folio_core::content::document::Document;
     use folio_core::speech::Event;
     use folio_core::store::Store;

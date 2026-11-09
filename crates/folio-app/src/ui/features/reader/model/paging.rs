@@ -3,6 +3,8 @@
 //! 这些是**纯状态迁移**：给定当前模式与视口，动 `scroll_y` / `page` 并顺手落库。
 //! 位置本身存在 [`crate::ui::features::reader::model::session::ReaderSession`] 上，方法的可见性靠 `pub(in crate::ui::features::reader)`。
 
+#[cfg(test)]
+use folio_core::ChapterExt;
 use folio_core::{Locator, PageTurn};
 use gpui_kit::{App, Context, ScrollDelta, ScrollEvent};
 

@@ -7,6 +7,7 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use crate::ChapterExt;
 use super::{Found, Hit, Options, Query, fold, scan, scan_book_at, scan_chapter, scan_with_sink};
 use crate::content::document::{Document, from_content};
 use crate::content::format::{Chapter, Content, DocMeta, FlowDoc, visible_text, visible_text_only};

@@ -437,6 +437,7 @@ fn leaving_a_night_book_repaints_the_shelf_in_the_app_mode(cx: &mut gpui_kit::Te
     use crate::ui::services::config::ConfigHolder;
     use crate::ui::shell::AppShell;
     use folio_core::content::document::Document;
+    use folio_core::ChapterExt;
     use folio_core::{
         Appearance, BookSettings, Chapter, Config, Content, DocMeta, FlowDoc, Format, Locator,
         Mode, Reader,
@@ -586,6 +587,7 @@ fn leaving_a_night_book_repaints_the_shelf_in_the_app_mode(cx: &mut gpui_kit::Te
 
 #[cfg(not(mobile))]
 mod booted {
+    use folio_core::ChapterExt;
     use crate::ui::components::BottomSheetState;
     use crate::ui::features::shelf::ShelfView;
     use crate::ui::services::config::ConfigHolder;

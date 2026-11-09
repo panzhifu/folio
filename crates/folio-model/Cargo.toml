@@ -1,0 +1,26 @@
+[package]
+name = "folio-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 本 crate 是公共词汇表：文档、书目、锚点、位置与记录的**类型**，是「只有数据」的
+# 一层 —— 供 folio-format（产）、排版引擎（排）与书库（存）共用同一套词，谁都不必
+# 为了几个类型依赖另一家的实现。边界由依赖图强制：这里没有解析（DOM / 格式）、
+# 没有排版、没有 SQLite 与网络，也不依赖 folio-base / folio-format / folio-core。
+# 往这里加东西之前先过 `lib.rs` 里那三问：只有数据吗？两个以上 crate 要用吗？
+# 换 crate 不换 serde 形状吗？
+#
+# 刻意缺席的几样，都是有理由的：
+# - `thiserror`：错误各层自己定义（folio-base 是地层，folio-format / folio-core 是
+#   各自领域），数据类型不携带错误。
+# - `chrono` / `rusqlite`：时间戳一律 `i64` Unix 秒；SQL 映射住在书库那一层，
+#   不进类型本身。
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# 仅 `Locator` 的 JSON 迁移提示（位置串比本程序新 / 旧时 warn / debug 一条）。
+tracing.workspace = true

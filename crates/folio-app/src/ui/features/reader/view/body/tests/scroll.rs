@@ -8,6 +8,7 @@ use super::harness::{
 use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chrome::PageMode;
 use crate::ui::features::reader::model::session::ReaderSession;
+use folio_core::ChapterExt;
 use folio_core::store::Store;
 use folio_core::{Chapter, FlowDoc, Format, Locator};
 #[allow(unused_imports)] // `#[gpui_kit::test]` 展开要它，unused 分析看不见宏里的使用

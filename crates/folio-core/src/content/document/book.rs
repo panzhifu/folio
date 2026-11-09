@@ -496,6 +496,7 @@ mod tests {
     use std::io::Write as _;
     use std::path::Path;
 
+    use crate::ChapterExt;
     use crate::content::document::{BookDocument, ContentRef, Document, LocatorKind, metadata};
     use crate::content::format::{ChapterLocator, Content, ContentKind, Format};
 

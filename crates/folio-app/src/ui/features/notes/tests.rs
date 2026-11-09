@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use folio_core::ChapterExt;
 use folio_core::Config;
 use folio_core::content::anchor::TextAnchor;
 use folio_core::content::format::{Chapter, DocMeta, FlowDoc, Format};

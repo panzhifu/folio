@@ -12,6 +12,7 @@ use crate::ui::features::reader::model::session::AnnotationSpans;
 use crate::ui::features::reader::view::paint::{self, GlyphsElement, Mark};
 use folio_core::content::anchor::line_at_y;
 use folio_core::layout::{LineBox, LineFragment};
+use folio_core::PageTextExt;
 use folio_core::store::{Annotation, AnnotationStyle};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{

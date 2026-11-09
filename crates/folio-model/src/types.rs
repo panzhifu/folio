@@ -1,13 +1,16 @@
-//! 存储层对外的数据类型。
+//! 书库记录对外的数据类型。
 //!
-//! 这里只有「一行的形状」，没有一条 SQL —— 查询在各自的主题模块里
-//! （`books` / `content` / `annotations` / `collections` / `reading`）。
+//! 这里只有「一行的形状」，没有一条 SQL —— 查询住在书库那一层的各主题模块里
+//! （`books` / `content` / `annotations` / `collections` / `reading`）。类型放进
+//! folio-model 是因为批注 / 书签 / 统计的行被 store、同步与界面三方共用。
 //!
 //! 唯一值得解释的是 [`ShelfItem`] 为什么不是 `BookRow` 加一列：见它自己的文档。
 
 use serde::{Deserialize, Serialize};
 
-use crate::content::anchor::TextAnchor;
+use super::anchor::TextAnchor;
+use super::content::CoverRef;
+use super::format::Series;
 
 /// 书架多选传书要的一行。远端文件名用 `hash`（跨设备认书的唯一钥匙），
 /// 本地要读的是 `path` —— 两样都不在 [`BookRow`] 里同时具备。
@@ -57,7 +60,7 @@ pub struct BookMeta {
     pub isbn: String,
     pub dctype: String,
     pub rights: String,
-    pub series: Option<crate::content::format::Series>,
+    pub series: Option<Series>,
     pub format: String,
     pub size: u64,
 }
@@ -91,7 +94,7 @@ pub struct ShelfItem {
     pub progress: Option<f32>,
     /// 封面在 `covers/` 里的描述（哈希 + MIME）。`None` = 老库那一档，封面只在
     /// [`ShelfItem::cover`] 那个 BLOB 里。
-    pub cover_ref: Option<crate::content::assets::cover::CoverRef>,
+    pub cover_ref: Option<CoverRef>,
     /// **书库根**（副本所在的那一层）。缩略图缓存目录挂在它底下
     /// （`<书库>/.thumbs/<尺寸>/`），而界面手上只有副本路径，所以这一格由库里
     /// 那一列 `books.path` 反推出来（`store::book_root`）一起带出来 ——
@@ -115,8 +118,8 @@ pub const ANNOTATION_COLORS: &[&str] = &["ruby", "rose", "sky", "lime", "amber"]
 ///
 /// 这一档同时是全局偏好里那一格（`infra::config::Appearance::highlight_style`，
 /// 「新划的一条默认用哪种」）—— 两件事共用一个枚举是本意的：偏好问的就是「下一条款式」，
-/// 而库里那条记的就是「这一条款式」，中间不该隔一层翻译。它**不**进 `Reader` 那一节：
-/// `Reader` 整份是排版失效键，一条痕迹怎么画与一行字折在哪里毫无关系（同 `PageTurn`）。
+/// 而库里那条记的就是「这一条款式」，中间不该隔一层翻译。它**不**进排版那一节配置：
+/// 排版整份是失效键，一条痕迹怎么画与一行字折在哪里毫无关系（同 `PageTurn`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AnnotationStyle {
     /// 铺在字底的一条色带（整行行盒那块矩形，压透明度）。默认档。
@@ -144,7 +147,7 @@ impl AnnotationStyle {
     }
 
     /// 认不出的值回落 [`Self::default`]：手改坏一个键不该让整节配置退回默认，而「没有有效
-    /// 值」这一格全书只该有一个答案 —— 与 [`PageTurn::parse`](crate::PageTurn::parse) 同一条理由。
+    /// 值」这一格全书只该有一个答案 —— 与 `PageTurn::parse`（folio-core）同一条理由。
     pub fn parse(value: &str) -> Self {
         match value {
             "line" => Self::Line,
@@ -155,7 +158,7 @@ impl AnnotationStyle {
     }
 }
 
-/// 自己实现序列化，理由与 [`Mode`](crate::Mode)、[`PageTurn`](crate::PageTurn) 那两条一样：
+/// 自己实现序列化，理由与 `Mode`、`PageTurn`（都在 folio-core）那两条一样：
 /// derive 碰到认不出的字符串会报错，而报错的代价是**整节** `Appearance` 退回默认。
 impl Serialize for AnnotationStyle {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -252,8 +255,8 @@ impl Collection {
     /// 时未必想连组一起去掉，而他下次给别的书挂同一个组名，`create_collection` 照旧复用
     /// 那一行（同名即复用）。
     ///
-    /// 「按组清点」那份数据形状（[`Store::collection_groups`](crate::Store::collection_groups)）
-    /// 不归这条判据管：那一串是每组一串书，不是架面顶部那一排组卡。
+    /// 「按组清点」那份数据形状（书库的 `Store::collection_groups`）不归这条判据管：
+    /// 那一串是每组一串书，不是架面顶部那一排组卡。
     pub fn is_shown(&self) -> bool {
         self.book_count > 0
     }

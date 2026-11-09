@@ -17,6 +17,7 @@ publish = false
 # 也就装不下 config 的 schema（它引 store / format / account）。
 folio-base.workspace = true
 folio-format.workspace = true
+folio-model.workspace = true
 rusqlite.workspace = true
 dirs.workspace = true
 serde.workspace = true

@@ -6,6 +6,7 @@ use super::harness::{
 };
 use crate::ui::features::reader::model::chrome::PageMode;
 use crate::ui::shell::NAV_TRANSITION;
+use folio_core::ChapterExt;
 use folio_core::{Chapter, FlowDoc, Locator};
 use gpui_kit::{
     AppContext as _, InputEvent as _, LongPressEvent, TestAppContext, TouchPhase, point, px,

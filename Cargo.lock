@@ -2300,6 +2300,7 @@ dependencies = [
  "flate2",
  "folio-base",
  "folio-format",
+ "folio-model",
  "futures-util",
  "hayro",
  "image",
@@ -2352,6 +2353,7 @@ dependencies = [
  "djvu-rs",
  "encoding_rs",
  "flate2",
+ "folio-model",
  "hayro",
  "html5ever 0.40.1",
  "image",
@@ -2375,6 +2377,15 @@ dependencies = [
  "unicode-bidi",
  "woff2-patched",
  "zip",
+]
+
+[[package]]
+name = "folio-model"
+version = "0.1.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

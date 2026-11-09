@@ -437,6 +437,7 @@ mod tests {
 
     use std::path::Path;
 
+    use folio_core::ChapterExt;
     use crate::ui::services::library::{delete_book, owned_copy, target_dir};
     use folio_core::content::format::{Chapter, DocMeta, FlowDoc, Format};
     use folio_core::{Library, Store};

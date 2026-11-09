@@ -20,6 +20,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::content::document;
+use folio_format::ext::FormatExt;
 use crate::content::format::Format;
 use crate::content::format::ParseBudget;
 use crate::content::format::epub::MAX_PARSE_WORKERS;

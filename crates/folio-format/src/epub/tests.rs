@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::ext::ChapterExt;
 use super::read_with;
 use crate::css::computed::{ComputedStyle, Length, TextAlign, cascade};
 use crate::css::{Origin, RuleSet};

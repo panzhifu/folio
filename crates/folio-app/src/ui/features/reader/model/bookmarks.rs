@@ -17,6 +17,7 @@
 
 use folio_core::content::anchor::{TextAnchor, line_at_offset, line_chars, relocate};
 use folio_core::store::Bookmark;
+use folio_core::TextAnchorExt;
 use gpui_kit::{Context, SharedString};
 
 use crate::ui::features::reader::model::session::ReaderSession;

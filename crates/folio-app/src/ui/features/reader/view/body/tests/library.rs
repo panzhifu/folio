@@ -5,6 +5,7 @@ use super::harness::{
     progress_of, scroll_down, settle,
 };
 use crate::ui::features::reader::model::chrome::PageMode;
+use folio_core::ChapterExt;
 use folio_core::content::document::Document;
 use folio_core::store::Store;
 use folio_core::{Content, DocMeta, Format, Locator};

@@ -20,7 +20,11 @@ Folio：Rust + [gpui-kit](https://gpui-kit.com) 写的原生 GPU 阅读器，覆
 ```
 crates/folio-base/   地基：时间、路径、作业池、取消、日志装配、占用统计、内存预算；
                      不认识业务类型，也不依赖 format / core
-crates/folio-format/ 文件格式解析：21 个 provider、容器/判定、DOM、CSS、scan、字符坐标
+crates/folio-model/  公共数据模型：文档 / 书目 / 锚点 / 位置 / 书库记录的**类型**，只有数据；
+                     三条规矩见其 lib.rs（只有数据 / 两个以上消费方才进 / 换 crate 不换形状）
+crates/folio-format/ 文件格式解析：21 个 provider、容器/判定、DOM、CSS、scan、字符坐标；
+                     搬进 model 的类型经 re-export 沿用旧路径，与解析绑定的行为
+                     （Chapter::inline / copy_extension / text_map）是 src/ext.rs 的扩展 trait
 crates/folio-core/   引擎：排版、锚点与批注、SQLite、配置；内容经 folio-format 取
 crates/folio-app/    应用壳；src/ui/ 下 shared / widgets / features / shell / host / platform
                      features 按功能纵切：reader / shelf / notes / stats / settings / welcome

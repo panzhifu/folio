@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use folio_core::content::document::{ContentRef, open};
 use folio_core::content::format::{PageSource, provider_for};
+use folio_core::FlowDocExt as _;
 
 /// 一本的读数。
 struct Row {

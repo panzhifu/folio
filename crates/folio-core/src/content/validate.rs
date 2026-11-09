@@ -253,6 +253,7 @@ fn check_fixed(fixed: &FixedDoc, issues: &mut Issues) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ChapterExt;
 
     use crate::content::format::Chapter;
     #[test]

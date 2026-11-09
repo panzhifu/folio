@@ -39,7 +39,7 @@ use html5ever::tendril::StrTendril;
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
 };
-use serde::{Deserialize, Serialize};
+
 
 use crate::css::ua;
 
@@ -93,27 +93,9 @@ pub(crate) fn is_stylesheet_rel(rel: &str) -> bool {
 
 /// 正文里的一处图片引用：作者写下的原样 `src`，加上它在这一章里的位置。
 ///
-/// 存在的理由是一件排版给不出来的事：**整本书**那一列图要在读者走到它之前就知道
-/// 「一共有几张、这一张在第几章第几个字」。排版只认识「已经排好的那一章」，
-/// 而这一列要的是清单 —— 导入那一趟已经在逐章跑 [`ChapterScan`]，顺手记下来是
-/// 一趟扫描的价钱，换掉的是「为下一张图把一章排一遍」。
-///
-/// `src` 是**未解析**的那一条原样引用（`<img src="images/a.png">` 里那一段），
-/// 与 [`crate::layout::ports::ResolvedImage::href`] 不同：后者要按本章目录解一遍、
-/// 还要对得上那本书的图片表，那是界面侧 [`ChapterImages::resolve`] 的口径。这里存原样
-/// 是因为扫描器不认容器 —— 而**同一句解析只做一次**才不会出现「列里画得出、正文里画不出」
-/// 那种两本账。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImageUse {
-    /// 作者写下的那一条引用（相对本章目录）。
-    pub src: String,
-    /// 这一处前面已经数到的可见字符数 —— 与 `Locator.offset` 同一个轴。
-    ///
-    /// 指到图片**之前**那一个字：图片自己在那个轴上不占一格（它是 U+FFFC 一个替换元素，
-    /// 由排版插在文本流里，不由这里的字数器数进来）。差这一个字落在同一个行盒里，
-    /// 「定位原文」要的就是那一行。
-    pub offset: usize,
-}
+/// 类型住进了 folio-model（[`folio_model::format::ImageUse`]，`Chapter::images` 的载荷）；
+/// 这里沿用旧路径，扫描引擎（[`ChapterSummary`]）留在本层。
+pub use folio_model::format::ImageUse;
 
 /// HTML 的空元素。树构造不会把它们压进「打开的元素」栈：后面出现的文本是它们的
 /// **兄弟**，不是孩子。跳过名单里的 `br` 与那几个元信息标签都在这一列里 ——

@@ -16,6 +16,7 @@
 use folio_core::infra::task::{Priority, TaskEvent, TaskHandle};
 use folio_core::net::ai::{Ask, Asked, configured, selection_prompt};
 use gpui_kit::{App, AppContext as _, Context, Pixels, Point};
+use folio_core::PageTextExt;
 
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;

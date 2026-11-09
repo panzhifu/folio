@@ -3,6 +3,7 @@ resolver = "2"
 default-members = ["crates/folio-app"]
 members = [
     "crates/folio-base",
+    "crates/folio-model",
     "crates/folio-format",
     "crates/folio-core",
     "crates/folio-app",
@@ -18,6 +19,7 @@ license = "MIT"
 # 避免空挂依赖。
 [workspace.dependencies]
 folio-base = { path = "crates/folio-base" }
+folio-model = { path = "crates/folio-model" }
 folio-core = { path = "crates/folio-core" }
 folio-format = { path = "crates/folio-format" }
 

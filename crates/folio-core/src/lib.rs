@@ -34,7 +34,6 @@ pub mod infra;
 pub mod ingest;
 pub mod layout;
 pub mod net;
-pub mod position;
 pub mod reader;
 pub mod search;
 pub mod speech;
@@ -43,8 +42,8 @@ pub mod sync;
 pub mod text;
 
 pub use content::anchor::{
-    Confidence, Relocated, TextAnchor, TextMap, line_at_offset, line_at_y, line_chars, line_offset,
-    relocate,
+    Confidence, Relocated, TextAnchor, TextAnchorExt, TextMap, line_at_offset, line_at_y,
+    line_chars, line_offset, relocate,
 };
 pub use content::annotation::{
     AnnotationExportFormat, ResolvedAnnotation, annotations_by_chapter, annotations_export,
@@ -55,6 +54,13 @@ pub use content::format::{
     Chapter, ChapterLocator, ChapterText, Content, ContentKind, DocMeta, DocumentProvider,
     FixedDoc, FixedPage, FlowDoc, Format, PageSource, Series,
 };
+// 阅读位置与书库记录的**类型**住进了 folio-model（公共词汇表）；这里沿用旧路径，
+// 生产消费点（`crate::position::Locator`、`super::types::{…}`）一行都不用改。
+pub use folio_model::position;
+// folio-model 类型上与解析侧绑定的行为（`Chapter::inline` / `char_len`、
+// `copy_extension`、`PageText::text_map`）是 folio-format 的扩展 trait；core 与 app
+// 从这里拿，不必直接依赖 folio-format。
+pub use folio_format::ext::{ChapterExt, FlowDocExt, FormatExt, PageTextExt};
 pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};

@@ -6,6 +6,7 @@ use super::harness::{
 use crate::ui::features::reader::model::chrome::{Arrow, PageMode};
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::shell::{NAV_TRANSITION, turn_duration};
+use folio_core::ChapterExt;
 use folio_core::infra::metrics::{Metric, take_local};
 use folio_core::{Chapter, FlowDoc, Locator, PageTurn};
 use gpui_kit::test::TestWindowExt;

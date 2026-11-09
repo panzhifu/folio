@@ -1,6 +1,7 @@
 //! 朗读：念哪些行、空行不占格。
 
 use super::harness::{PARA, flow, open, prefs, settle};
+use folio_core::ChapterExt;
 use folio_core::{Chapter, FlowDoc, Locator};
 use gpui_kit::TestAppContext;
 

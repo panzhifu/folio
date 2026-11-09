@@ -2,6 +2,7 @@
 
 use super::harness::{epub_flow, open, prefs, settle};
 use crate::ui::features::reader::model::session::ReaderSession;
+use folio_core::ChapterExt;
 use folio_core::{Chapter, FlowDoc, Locator, Reader};
 use gpui_kit::AnyWindowHandle;
 #[allow(unused_imports)] // `#[gpui_kit::test]` 展开要它，unused 分析看不见宏里的使用

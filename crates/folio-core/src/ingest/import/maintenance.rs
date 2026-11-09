@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use folio_format::ext::FormatExt;
 use crate::content::format::Format;
 use crate::infra::error::IoResultExt as _;
 use crate::infra::paths;

@@ -1909,6 +1909,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
+    use folio_core::ChapterExt;
     use folio_core::content::document::Document;
     use folio_core::content::format::TocEntry;
     use folio_core::infra::task::TaskEvent;

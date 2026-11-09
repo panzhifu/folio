@@ -35,6 +35,7 @@ use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
     extension_of, image_dims, stem_of,
 };
+use crate::ext::ChapterExt;
 use crate::IoResultExt as _;
 use crate::Result;
 
@@ -1367,6 +1368,7 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
+    use crate::ext::ChapterExt;
     use super::{
         RtfAdapter, body_font_size, ends_sentence, heading_in_style, heading_in_text,
         heading_level, parse,

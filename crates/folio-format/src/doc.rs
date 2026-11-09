@@ -52,6 +52,7 @@ use super::{
     ListWriter, Marker, chapter_images, escape_attr, escape_into, escape_text, extension_of,
     guess_media_type, image_dims, stem_of, visible_chars, visible_text,
 };
+use crate::ext::ChapterExt;
 use crate::IoResultExt as _;
 use crate::Result;
 
@@ -615,6 +616,7 @@ pub(crate) fn ole2_shape(path: &Path) -> Ole2 {
 mod tests {
     use std::path::Path;
 
+    use crate::ext::ChapterExt;
     use super::{DocAdapter, Ole2, bullet_marker, leading_number, main_blocks, ole2_shape};
     use crate::{Chapter, ChapterLocator, Content, DocumentProvider, FlowDoc, Format, Marker};
     use rwml::{

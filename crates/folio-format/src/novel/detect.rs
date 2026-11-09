@@ -29,6 +29,7 @@
 //! 加的那个换行是空白，同样不动可见文本。
 
 use super::rules::{Compiled, CompiledRules, MetaKeys};
+use crate::ext::ChapterExt;
 use crate::{Chapter, TocEntry};
 
 /// 一枚命中的章标记。

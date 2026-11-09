@@ -31,7 +31,7 @@
 
 use std::ops::Range;
 
-use serde::{Deserialize, Serialize};
+
 
 use crate::content::dom::Dom;
 use crate::layout::{Layout, LineFragment};
@@ -43,31 +43,19 @@ pub use folio_format::text_map::{CONTEXT_CHARS, TextMap, visible_text_only};
 /// 再大就会开始跟远处重复出现的短语抢命中。
 const NEIGHBORHOOD: usize = 400;
 
-/// 一条锚点：坐标 + 用来找回坐标的文本指纹。
-///
-/// `exact` / `prefix` / `suffix` / `path` 都是**冗余**的（都能从 `start..end` 推出来），
-/// 冗余正是它的用途：源文本变了（不同版本、重新导出、章节顺序动了）时，
-/// 只有坐标就只知道「指错了」，而有指纹才能把它找回来。
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct TextAnchor {
-    pub chapter: u32,
-    /// 可见文本的字符偏移，含。
-    pub start: usize,
-    /// 不含。`start == end` 表示一个插入点（进度就是这个形状）。
-    pub end: usize,
-    /// 选中的原文。进度用不到它，批注与书签用它找回位置。
-    pub exact: String,
-    /// `exact` 之前的 `CONTEXT_CHARS` 字。
-    pub prefix: String,
-    /// `exact` 之后的 `CONTEXT_CHARS` 字。
-    pub suffix: String,
-    /// `start` 所在文本节点的 DOM 路径。
-    pub path: String,
+/// 锚点类型住进了 folio-model（公共词汇表：书库与界面都不必为了它依赖算法这一层）。
+/// 这里沿用旧路径；数据只有形状，从一张现成的坐标表上**取指纹**的构造是行为 ——
+/// 构造要读 [`TextMap`]（folio-format），所以住在算法这一侧。
+pub use folio_model::TextAnchor;
+
+/// 从一张现成的坐标表上建锚点。类型与行为分居两个 crate，这是行为的那一半。
+pub trait TextAnchorExt {
+    /// 从坐标建一条锚点，指纹由 `map` 现取。
+    fn new(map: &TextMap, chapter: u32, start: usize, end: usize) -> Self;
 }
 
-impl TextAnchor {
-    /// 从坐标建一条锚点，指纹由 `map` 现取。
-    pub fn new(map: &TextMap, chapter: u32, start: usize, end: usize) -> Self {
+impl TextAnchorExt for TextAnchor {
+    fn new(map: &TextMap, chapter: u32, start: usize, end: usize) -> Self {
         let end = end.max(start);
         let (prefix, suffix) = map.context(start, end);
         Self {
@@ -83,26 +71,6 @@ impl TextAnchor {
                 .unwrap_or("")
                 .to_string(),
         }
-    }
-
-    /// 只有坐标、没有指纹的那一种（进度）：`Locator` 的一个字符偏移就够。
-    pub fn point(chapter: u32, offset: usize) -> Self {
-        Self {
-            chapter,
-            start: offset,
-            end: offset,
-            ..Default::default()
-        }
-    }
-
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
-    }
-
-    /// 读不回来的 JSON 一律当「没有锚点」，不是 panic 也不是半份数据。
-    /// 数据库里这一列来自旧版本或别的机器，坏一条不该让整本书的标注列表打不开。
-    pub fn from_json(json: &str) -> Option<TextAnchor> {
-        serde_json::from_str(json).ok()
     }
 }
 

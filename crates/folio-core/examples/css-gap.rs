@@ -28,6 +28,7 @@
 //!
 //! 栏宽、分栏这类**视口**参数与作者的块级多栏是两件事，这里只统计声明本身。
 
+use folio_core::FlowDocExt as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
