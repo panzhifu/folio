@@ -601,7 +601,7 @@ fn open_main_window(cx: &mut App) {
 pub(crate) fn device_name() -> Option<String> {
     #[cfg(target_os = "android")]
     {
-        return android::device_name();
+        android::device_name()
     }
     #[cfg(not(target_os = "android"))]
     {

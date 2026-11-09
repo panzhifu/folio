@@ -113,6 +113,16 @@ tracing-log = { workspace = true }
 # 注释写了出处），这里只是把图上已有的这份转成 folio-core 的直接依赖。
 async-channel.workspace = true
 
+# 名字表解析（`text::names` 的拉丁 `m` 覆盖率）要用：锁里 fontdb 已带它，
+# 这里只是把图上已有的一份转成直接依赖（此前只声明为测试依赖）。
+ttf-parser.workspace = true
+# 随书字体加载管线（`text::load`）：子集化、name 表读与改。**这几条必须留在
+# 主依赖区**：`text::load` 不分平台，Windows / macOS 也要用；从前误放在下面的
+# `[target.'cfg(linux/android)'.dependencies]` 里，桌面两端因此缺 crate 编不过。
+skera.workspace = true
+read-fonts.workspace = true
+write-fonts.workspace = true
+
 # 听书（合成朗读）的后端。为什么只挂这两个平台、Linux 构建要 libclang + libspeechd 头、
 # Android 随包要有 `rs/tts/Bridge` 类，全部写在根 `Cargo.toml` 的 `tts` 那条注释里。
 #
@@ -131,14 +141,6 @@ async-channel.workspace = true
 # 听书在鸿蒙上要等 NAPI / ArkTS 那一层（`@ohos.textToSpeech`）另起一条后端，不在这里。
 [target.'cfg(any(all(target_os = "linux", not(target_env = "ohos")), target_os = "android"))'.dependencies]
 tts.workspace = true
-
-# 名字表解析（`text::names` 的拉丁 `m` 覆盖率）要用：锁里 fontdb 已带它，
-# 这里只是把图上已有的一份转成直接依赖（此前只声明为测试依赖）。
-ttf-parser.workspace = true
-# 随书字体加载管线（`text::load`）：子集化、name 表读与改。
-skera.workspace = true
-read-fonts.workspace = true
-write-fonts.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
