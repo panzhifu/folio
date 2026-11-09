@@ -15,40 +15,7 @@
 //! 由阅读器给（`body.rs` 取色处的注释）；哪一格是「点得出来的」与纸色强相关，米黄
 //! 纸配青蓝、黑纸配琥珀，各侧各写，不在代码里算。
 
-/// 一格颜色：RGBA，各 0–255。
-///
-/// 自立一份而不借用引擎的 `css::computed::Color`：这一区（`infra`）服务所有业务线，
-/// 不反过来依赖排版那侧的类型。字段摊开而不是数组：表里的色值一眼读得出通道。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rgba8 {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub a: u8,
-}
-
-impl Rgba8 {
-    /// 不透明的一格。
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b, a: 255 }
-    }
-
-    /// 感知亮度（Rec. 709 系数）压成的灰，alpha 原样留着。
-    ///
-    /// 与壳那边 `theme.rs::desaturate_hex`、`style.rs::desaturate` 同一把尺：水墨档
-    /// 只拿掉色相，不把深底变成浅底、也不让浅字在灰底上失掉对比。
-    pub fn luma(self) -> Self {
-        let gray =
-            (0.2126 * f32::from(self.r) + 0.7152 * f32::from(self.g) + 0.0722 * f32::from(self.b))
-                .round() as u8;
-        Self {
-            r: gray,
-            g: gray,
-            b: gray,
-            a: self.a,
-        }
-    }
-}
+pub use folio_format::css::Rgba8;
 
 /// 一侧（日或夜）的正文配色：纸底、正文墨色、链接。
 ///

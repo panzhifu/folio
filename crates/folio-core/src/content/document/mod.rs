@@ -300,7 +300,7 @@ pub fn with_container(
 /// 只取书目元信息，不建正文模型 —— 书库列书目时用这一条。
 pub fn metadata(path: &Path) -> Result<DocMeta> {
     let provider = crate::content::format::provider_for(path).ok_or_else(|| unsupported(path))?;
-    provider.metadata(path)
+    provider.metadata(path).map_err(Into::into)
 }
 
 /// 「一个 provider 都没认上」是导入失败里最常见的一种，留一句日志：

@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use super::{Found, Hit, Options, Query, fold, scan, scan_book_at, scan_chapter, scan_with_sink};
 use crate::content::document::{Document, from_content};
-use crate::content::format::epub::tests::published_shape_epub;
 use crate::content::format::{Chapter, Content, DocMeta, FlowDoc, visible_text, visible_text_only};
 use crate::infra::task::StageCtx;
+use folio_format::fixtures::published_shape_epub;
 
 /// 一本正文就在手上的书：每对 `(章名, XHTML)` 一章。
 fn book(chapters: &[(&str, &str)]) -> Box<dyn Document> {
@@ -335,7 +335,10 @@ fn an_empty_query_is_not_a_search() {
 fn one_book_per_path_with_its_own_hits() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
-    let paths = [published_shape_epub(&first), published_shape_epub(&second)];
+    let paths = [
+        published_shape_epub(first.path()),
+        published_shape_epub(second.path()),
+    ];
     let query = Query::parse("正文").expect("前置：查询不可能是空的");
     for path in &paths {
         let found = scan_book_at(path, &query, &Options::default(), &StageCtx::detached())
@@ -410,7 +413,7 @@ fn a_fixed_book_answers_with_nothing_to_read() {
 #[test]
 fn the_synthetic_published_book_answers_with_chapter_and_offset() {
     let dir = tempfile::tempdir().unwrap();
-    let path = published_shape_epub(&dir);
+    let path = published_shape_epub(dir.path());
     let doc = crate::content::document::open(&path).expect("合成容器应能打开");
     let out = sweep(doc.as_ref(), "正文");
     assert_eq!(out.chapters, 28, "前置：28 章");

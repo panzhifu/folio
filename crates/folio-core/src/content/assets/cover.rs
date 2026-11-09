@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use crate::Result;
 use crate::ingest::identity::ContentHash;
 
+pub use folio_format::CoverRef;
+
 /// 封面文件名的主名：哈希十六进制的前 20 字（= 10 字节 = 80 位）。
 ///
 /// 与书目副本那边的 `ContentHash::file_stem` 同一条口径（前 10 字节），只是不用
@@ -88,14 +90,6 @@ pub fn resolve(root: &Path, hash: &str, mime: &str) -> Option<PathBuf> {
         crate::content::format::media_extension(mime)
     ));
     path.is_file().then_some(path)
-}
-
-/// 一条封面记录的描述（库里那几列）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoverRef {
-    /// 十六进制哈希。是**这一份字节**的身份，不是书的。
-    pub hash: String,
-    pub mime: String,
 }
 
 #[cfg(test)]

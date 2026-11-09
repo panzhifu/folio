@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub use folio_format::ImportReject;
+
 /// 一条被套上上下文的底层错误。
 ///
 /// 用 `Box<dyn Error + Send + Sync>` 而不是 `to_string()`：文字信息一点没少（Display
@@ -152,23 +154,20 @@ pub enum Error {
     },
 }
 
-/// 导入拒绝的类别。第四类 `Cancelled` 不在这里：取消由作业层
-/// （`crate::infra::task::TaskEvent::Cancelled`）报，那是一次中断而不是一句判决。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImportReject {
-    /// 三层判定认得出但这一版读不动，或者根本认不出来。
-    UnsupportedFormat,
-    /// 头四字节说它是个 ZIP，中央目录却读不出来 —— 文件可能是坏的，值得留档查。
-    CorruptContainer,
-    /// 收得下、也认得出，但打开 / 解析失败。副本是那份刚拷进来的字节，问题在字节里。
-    Unreadable,
-    /// 容器读得动，内容被 DRM 锁着。与上面三档的区别是**重扫一万次也不会变好**：
-    /// 「这一版读不动」是我们将来的事，「有 DRM」是这本书永远的事。
-    Encrypted,
-    /// 要读者手里那份口令。从 `Encrypted` 分出来只为一件事：**这一档可以再交一次**
-    /// （界面问一句口令、重跑同一批），而 `Encrypted` 永远不可以。报表、文案、
-    /// 界面上那颗按钮的语义全都挂在这一条分界上。
-    NeedsPassword,
+/// 解析层的错误 1:1 映射回 core 的变体：调用方 match 的分支与字段都不变。
+impl From<folio_format::Error> for Error {
+    fn from(err: folio_format::Error) -> Self {
+        use folio_format::Error as Format;
+        match err {
+            Format::Io { path, source } => Self::Io { path, source },
+            Format::UnsupportedFormat(format) => Self::UnsupportedFormat(format),
+            Format::ChapterUnavailable { path, index, at } => {
+                Self::ChapterUnavailable { path, index, at }
+            }
+            Format::Encrypted { name, method } => Self::Encrypted { name, method },
+            Format::NeedsPassword { name } => Self::NeedsPassword { name },
+        }
+    }
 }
 
 impl Error {

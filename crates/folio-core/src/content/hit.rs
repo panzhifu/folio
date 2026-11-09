@@ -23,6 +23,7 @@ use crate::content::anchor::{
 use crate::content::dom::{Dom, NodeId};
 use crate::infra::metrics::Metric;
 use crate::layout::{Layout, LineFragment, Measure, cjk_latin_gap, has_cjk_latin_boundary};
+pub(crate) use folio_format::char_class::CharClass;
 
 /// 命中结果：行盒下标 + 覆盖该位置的字符偏移。
 ///
@@ -464,52 +465,6 @@ pub fn snap_word(map: &TextMap, offset: usize) -> Range<usize> {
         end += 1;
     }
     start..end
-}
-
-/// 与 gpui-kit `text/selection.rs` 同一套分类（词 / 空白 / 换行 / 其他）。
-///
-/// `pub(crate)` 的理由是**只有一份**：定版式那一族（PDF / DjVu 的文字层，
-/// [`crate::content::format::PageText::snap`]）要收的是同一个边 —— 中文与标点单字自为界、
-/// 拉丁连成词。两处各写一遍分类表，就会有一处的双击在中文里选中一整句、另一处只选一个字。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CharClass {
-    Word,
-    Whitespace,
-    Newline,
-    Other,
-}
-
-impl CharClass {
-    pub(crate) fn of(ch: char) -> Self {
-        if is_word_char(ch) {
-            Self::Word
-        } else if ch == '\n' || ch == '\r' {
-            Self::Newline
-        } else if ch.is_whitespace() {
-            Self::Whitespace
-        } else {
-            Self::Other
-        }
-    }
-
-    /// 同类字符连成一段。换行与 CJK/标点不连。
-    pub(crate) fn is_connectable(self) -> bool {
-        matches!(self, Self::Word | Self::Whitespace)
-    }
-}
-
-/// 词字符的集合。抄自 gpui-kit 的 `is_word_char`：ASCII 字母数字与下划线之外，
-/// 把拉丁扩展（法德西等）、西里尔、越南文与组合记号也算进来 ——
-/// 这几种文种的词同样靠空格分界，长按应该吸出整个词。
-fn is_word_char(c: char) -> bool {
-    matches!(c, '_')
-        || c.is_ascii_alphanumeric()
-        || matches!(c, '\u{00C0}'..='\u{00FF}')
-        || matches!(c, '\u{0100}'..='\u{017F}')
-        || matches!(c, '\u{0180}'..='\u{024F}')
-        || matches!(c, '\u{0400}'..='\u{04FF}')
-        || matches!(c, '\u{1E00}'..='\u{1EFF}')
-        || matches!(c, '\u{0300}'..='\u{036F}')
 }
 
 /// 第 `line` 行的行首字符偏移的薄包装，给选择模块对齐拖动起点用。

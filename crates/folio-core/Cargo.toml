@@ -10,6 +10,7 @@ publish = false
 # 也是「书库 / 锚点 / 解析 / 进度」将来能在移动端复用的前提。
 
 [dependencies]
+folio-format.workspace = true
 rusqlite.workspace = true
 dirs.workspace = true
 serde.workspace = true

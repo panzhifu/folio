@@ -1,0 +1,473 @@
+//! href 的 fragment 拆分、目录条目在 SQLite 那一列上的往返，以及分章位置的存法。
+
+use super::{
+    Chapter, ChapterLocator, ChapterText, Format, HeadDims, TocEntry, fragment_of,
+    image_dims_from_head, locator_for, media_extension, shrink_image,
+};
+
+/// 造一张真位图 —— `shrink_image` 要真的解码+重编，够 header 的假字节过不了。
+fn png(width: u32, height: u32) -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let img = image::RgbaImage::from_pixel(width, height, image::Rgba([10, 20, 30, 255]));
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgba8)
+        .expect("合成 PNG 应能编码");
+    out
+}
+
+/// 大图缩下来、小图原样：这是手机上图片能不能上屏的那一条。
+#[test]
+fn covers_are_bounded_and_re_encoded_as_jpeg() {
+    // 解不出来的字节不动：不能把「不是图」当成「要缩的图」。
+    assert!(shrink_image(b"not an image", 256).is_none());
+    // 0 是「不设上限」的哨兵，不能被当成要缩到 0。
+    assert!(shrink_image(&png(100, 80), 0).is_none());
+    // 无字可压缩的极小图：重编反而更大，退回原图（`None` = 用原字节）。
+    assert!(shrink_image(&png(2, 2), 256).is_none());
+
+    // 超长边：缩到上限内，纵横比保住，而且**一律 JPEG** —— 带 alpha 的封面
+    // 铺白底再编，不然透明区会变黑。
+    let (small, mime) = shrink_image(&png(1024, 512), 256).expect("大图该被缩");
+    let decoded = image::load_from_memory(&small).expect("缩过的字节要还能解");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (256, 128),
+        "纵横比要保住"
+    );
+    assert_eq!(mime, "image/jpeg");
+
+    // **没超过上限**的也要重编：封面的问题是「按原格式存」，不是「太大」——
+    // 一张 800×1200 的 PNG 原样进库就是 400 KB。
+    let (_, mime) = shrink_image(&png(400, 600), 512).expect("没过上限也要重编");
+    assert_eq!(mime, "image/jpeg");
+}
+
+/// 竖版与不成整除的比例都要守住：**长边正好到上限、宽高比不变**。
+///
+/// 这条不是给「Triangle 换成 `thumbnail`」准备的回归断言 —— 两种滤波在这几种形状上
+/// 出来的像素尺寸本来就一样（实测 1535×2200 都是 357×512），换的是清晰度与耗时。
+/// 它守的是这一层对封面形状的真正承诺：横的竖的都不许被拉变形。
+#[test]
+fn the_shrunk_cover_hits_the_cap_on_its_long_edge_and_keeps_the_ratio() {
+    for (src, cap) in [
+        ((1024u32, 512u32), 256u32),
+        ((512, 1024), 256),
+        ((333, 777), 512),
+        ((400, 600), 200),
+    ] {
+        let (small, mime) = shrink_image(&noise_png(src.0, src.1), cap)
+            .unwrap_or_else(|| panic!("{src:?} 缩到长边 {cap} 该有产出"));
+        let decoded = image::load_from_memory(&small).expect("缩过的字节要还能解");
+        let (w, h) = (decoded.width(), decoded.height());
+        assert_eq!(w.max(h), cap, "{src:?} 的长边该正好是 {cap}，实际 {w}×{h}");
+        let want = src.0 as f64 / src.1 as f64;
+        let got = w as f64 / h as f64;
+        assert!(
+            (got - want).abs() / want < 0.02,
+            "{src:?} 缩完比例该仍是 {want:.3}，实际 {got:.3}"
+        );
+        assert_eq!(mime, "image/jpeg");
+    }
+}
+
+/// 一张压不出多少的图：纯色 PNG 缩完可能比原字节还小得离谱，那条「重编反而更大就退回
+/// 原图」的分支会抢先命中，量的就不是缩放本身了。
+fn noise_png(width: u32, height: u32) -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let img = image::RgbaImage::from_fn(width, height, |x, y| {
+        image::Rgba([
+            ((x * 7 + y * 13) % 256) as u8,
+            (((x * 37) ^ (y * 91)) % 256) as u8,
+            (((x + y) * 3) % 256) as u8,
+            255,
+        ])
+    });
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgba8)
+        .expect("合成 PNG 应能编码");
+    out
+}
+
+/// 只喂前缀时，「没读出尺寸」必须分得清是**哪一种**：这两种的下一步完全相反。
+///
+/// 这条断的是 [`HeadDims`] 的三档分类本身。EPUB 的插图清单按它决定要不要多读一整条
+/// （见 `epub::parse_image`），分错一档就是白花一次解压，或者把能定尺寸的图记成 0×0。
+#[test]
+fn a_short_buffer_tells_whether_reading_more_would_buy_anything() {
+    let whole = png(64, 32);
+    // IHDR 本身在第 8-33 字节，但解码器要多读一点才肯认这段头（实测 48 字节起才行）：
+    // 只有头、不够解码器起步的字节，仍然是「再读才有意义」。
+    match image_dims_from_head(&whole[..33]) {
+        HeadDims::NeedsMore => {}
+        other => panic!("只有 IHDR 的前缀该是 NeedsMore，实际 {other:?}"),
+    }
+    match image_dims_from_head(&whole[..48]) {
+        HeadDims::Sized(dims) => assert_eq!(dims, (64, 32), "头齐的前缀就该定出尺寸"),
+        other => panic!("48 字节的前缀该是 Sized，实际 {other:?}"),
+    }
+    // 整条在手也是同一个答案。
+    match image_dims_from_head(&whole) {
+        HeadDims::Sized(dims) => assert_eq!(dims, (64, 32)),
+        other => panic!("完整字节该是 Sized，实际 {other:?}"),
+    }
+    // 不是位图：SVG 与非图像字节，读完整条也拿不到尺寸，别再为它解压。
+    let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>"#;
+    for not_a_bitmap in [&svg[..], b"not an image"] {
+        match image_dims_from_head(not_a_bitmap) {
+            HeadDims::NotABitmap => {}
+            other => panic!("{not_a_bitmap:?} 该是 NotABitmap，实际 {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn fragments_are_taken_after_the_first_hash() {
+    assert_eq!(
+        fragment_of("Text/chap2.xhtml#court").as_deref(),
+        Some("court")
+    );
+    assert_eq!(fragment_of("Text/chap1.xhtml"), None, "没有 # 就是章首");
+    assert_eq!(
+        fragment_of("Text/chap1.xhtml#"),
+        None,
+        "空 fragment 也是章首"
+    );
+    // fragment 是第一个 # 之后的全部：它自己可以含 #（`a#b#c` 的落点是 `b#c`）。
+    assert_eq!(fragment_of("a.xhtml#b#c").as_deref(), Some("b#c"));
+    assert_eq!(fragment_of("a.xhtml#%20x").as_deref(), Some(" x"));
+    // 只有第一段是元素 id，后面的 xpointer 部分丢掉。
+    assert_eq!(
+        fragment_of("a.xhtml#sec,xpointer()").as_deref(),
+        Some("sec")
+    );
+}
+
+/// 认不出来的两套 fragment 语法都当「没有」，也就是落到章首，而不是跳到一个错的位置。
+#[test]
+fn unsupported_fragments_read_as_chapter_start() {
+    assert_eq!(fragment_of("a.xhtml#epubcfi(/6/8[chap2]!4:12)"), None);
+}
+
+/// 库里已有的 `toc_json` 没有 fragment 这一项。解不开旧数据比少一个落点严重得多 ——
+/// 那是一整本书的目录凭空消失。
+#[test]
+fn toc_entries_without_a_fragment_field_still_load() {
+    let old = r#"[{"title":"第一章","href":"OEBPS/Text/chap1.xhtml","children":[]}]"#;
+    let entries: Vec<TocEntry> = serde_json::from_str(old).expect("旧 toc_json 要能解");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].fragment, None);
+    assert_eq!(entries[0].href, "OEBPS/Text/chap1.xhtml");
+}
+
+/// 名单式容器按**条目名**存位置：EPUB 的 spine 项与 CHM 的 topic 条目同一条规则。
+/// 写歪的那一档是 `Inline("")` —— 症状是「书在架上而每一章空白」，且一路不报错。
+///
+/// 这里用 `Chapter` 的手搓构造，因为 provider 的正常路径（`Chapter::entry`）已经把
+/// locator 填好了、`locator_for` 会原样保留它 —— 这一格测的是**规则本身**。
+#[test]
+fn list_style_containers_are_located_by_entry_name_including_chm() {
+    let with_href = Chapter {
+        title: "第一章".into(),
+        spine_href: "c1.htm".into(),
+        text: ChapterText::Inline(String::new()),
+        char_len: None,
+        images: Vec::new(),
+    };
+    for format in [Format::Epub, Format::Chm] {
+        assert_eq!(
+            locator_for(format, &with_href, 0),
+            ChapterLocator::Entry("c1.htm".into()),
+            "{format:?} 的章要按条目名存位置"
+        );
+    }
+    // 没有条目名的（单文件那一族）按序号存。
+    let bare = Chapter {
+        spine_href: String::new(),
+        ..with_href.clone()
+    };
+    assert_eq!(
+        locator_for(Format::Text, &bare, 2),
+        ChapterLocator::Section(2),
+        "单文件按第几章存"
+    );
+    // 带了条目名却撞上没有条目名那一档的格式：只能说正文在手上，不许凭空编一个序号。
+    assert!(
+        matches!(
+            locator_for(Format::Chm, &bare, 2),
+            ChapterLocator::Inline(_)
+        ),
+        "没有条目名时 CHM 退到 Inline —— 正常路径走不到这一档"
+    );
+}
+
+/// 一本书递给系统那侧时，收件应用是按 media type 筛的：注册表里每一种格式都各报一个
+/// 说得清的书的类型（现在 21 种，逐条列在 `Format::mime` 那个 match 里）。
+///
+/// 钉的是两条会静默坏掉的形状 —— 空串（Android 的 `GpuiSystemUi.shareImage` 把空 mime 退成
+/// `image/*`，一本 `.epub` 顶着它出去，弹出来的是整排相册），以及 `application/` 那种
+/// 副型空白的半截串（写进 intent-filter 没人认领）。真正的漏项由 `Format::mime` 那个
+/// 不写 `_ =>` 的 match 兜：加一种格式而忘了给它类型，编译就过不去。
+#[test]
+fn every_format_reports_a_book_media_type() {
+    for format in [
+        Format::Markdown,
+        Format::Text,
+        Format::Epub,
+        Format::Fb2,
+        Format::Html,
+        Format::Cbz,
+        Format::Rtf,
+        Format::Chm,
+        Format::Mobi,
+        Format::Pdf,
+        Format::Docx,
+        Format::Doc,
+        Format::Odt,
+        Format::Pdb,
+        Format::Azw4,
+        Format::Cb7,
+        Format::Cbr,
+        Format::Cbt,
+        Format::Djvu,
+        Format::Htmlz,
+        Format::Mhtml,
+    ] {
+        let mime = format.mime();
+        let (top, sub) = mime
+            .split_once('/')
+            .unwrap_or_else(|| panic!("{format:?} 报的不是 type/subtype：{mime:?}"));
+        assert!(!top.is_empty() && !sub.is_empty(), "{format:?} → {mime:?}");
+        // DjVu 的注册类型本身就是 `image/vnd.djvu`；其余书格式不能报成图片，
+        // 否则分享面板会把它交给相册。
+        if format != Format::Djvu {
+            assert_ne!(top, "image", "{format:?} 不能报成图片：{mime:?}");
+        }
+    }
+    // 两条抽出来钉死：EPUB 是 IANA 注册过的那个，MOBI 是各家文件管理器都在认的那个。
+    assert_eq!(Format::Epub.mime(), "application/epub+zip");
+    assert_eq!(Format::Mobi.mime(), "application/x-mobipocket-ebook");
+}
+
+/// `copy_extension` 必须落到 provider 注册表真正认的那个扩展名：
+/// 副本按它命名，下一次按扩展名打开时认不出来就是「导进去一本、再也打不开」。
+#[test]
+fn every_format_copies_under_an_extension_its_provider_claims() {
+    for format in [
+        Format::Markdown,
+        Format::Text,
+        Format::Epub,
+        Format::Fb2,
+        Format::Html,
+        Format::Cbz,
+        Format::Rtf,
+        Format::Chm,
+        Format::Mobi,
+        Format::Pdf,
+        Format::Docx,
+        Format::Doc,
+        Format::Odt,
+        Format::Pdb,
+        Format::Azw4,
+        Format::Cb7,
+        Format::Cbr,
+        Format::Cbt,
+        Format::Djvu,
+        Format::Htmlz,
+        Format::Mhtml,
+    ] {
+        let ext = format.copy_extension();
+        let path = std::path::Path::new("probe").with_extension(ext);
+        let provider = crate::provider_for(&path)
+            .unwrap_or_else(|| panic!("{format:?} 的副本扩展名 .{ext} 没有 provider 认领"));
+        assert_eq!(
+            provider.format(),
+            format,
+            "{format:?} 的副本被认成了别的格式"
+        );
+        assert_eq!(Format::parse(format.as_str()), Some(format));
+    }
+}
+
+/// 真样本矩阵：`tests/fixtures/local/formats/` 下每一族至少一份**别人生产**的文件，
+/// 从判定层一路走到正文 / 首页。
+///
+/// 样本不入库（体积 + 再分发），所以这条只在开发机上手动跑：
+///
+/// ```sh
+/// cargo test -p folio-core --lib -- --ignored the_real_sample_matrix
+/// ```
+///
+/// 判据与 `examples/format-probe.rs` 同源，但这里只做「过不过」：
+/// 判定层必须给 `Readable` 且与 provider 的格式一致；可重排的首页与末章取得到且不空，
+/// 替换字符不成片；定版式的首页画得出来。**样本目录缺失要当场红**，不许「没有样本就算通过」。
+#[test]
+#[ignore = "需要 tests/fixtures/local/formats 下的本机真样本，来源见 tests/fixtures/README.md"]
+fn the_real_sample_matrix_reads_every_shipped_family() {
+    use crate::sniff::{self, Verdict};
+    use crate::test_support::Doc;
+
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/local/formats");
+    assert!(
+        root.is_dir(),
+        "真样本目录不存在：{}（下载命令见 tests/fixtures/README.md 的「线 A」一节）",
+        root.display()
+    );
+
+    let mut files = Vec::new();
+    collect_real_samples(&root, &mut files);
+    files.sort();
+    assert!(
+        files.len() >= 40,
+        "真样本只有 {} 份，矩阵不成立（应至少 40）",
+        files.len()
+    );
+
+    let mut seen: Vec<Format> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+    for path in &files {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let named = format!("{}（{name}）", path.display());
+        let provider = match crate::provider_for(path) {
+            Some(provider) => provider,
+            None => {
+                problems.push(format!("{named}：没有 provider 认领"));
+                continue;
+            }
+        };
+        match sniff::identify(name, path) {
+            Verdict::Readable(format) => {
+                if format != provider.format() {
+                    problems.push(format!(
+                        "{named}：判定层说 {format:?}，provider 说 {:?}",
+                        provider.format()
+                    ));
+                }
+                if !seen.contains(&format) {
+                    seen.push(format);
+                }
+            }
+            Verdict::Known(why) => problems.push(format!("{named}：判定层认得出但读不了：{why}")),
+            Verdict::NotABook => problems.push(format!("{named}：判定层说不是书")),
+            Verdict::CorruptContainer => problems.push(format!("{named}：判定层说容器坏了")),
+        }
+
+        let doc = match Doc::try_open(path) {
+            Ok(doc) => doc,
+            Err(err) => {
+                problems.push(format!("{named}：打不开：{err}"));
+                continue;
+            }
+        };
+        if doc.meta().title.trim().is_empty() {
+            problems.push(format!("{named}：书名是空串"));
+        }
+        match doc.content() {
+            super::Content::Reflow(flow) => {
+                if flow.chapters.is_empty() {
+                    problems.push(format!("{named}：可重排却没有章"));
+                    continue;
+                }
+                for index in [0usize, flow.chapters.len() - 1] {
+                    match doc.chapter_source(index) {
+                        Ok(text) => {
+                            if text.trim().is_empty() {
+                                problems.push(format!("{named}：第 {index} 章正文为空"));
+                            }
+                            let broken = text.chars().filter(|ch| *ch == '\u{FFFD}').count();
+                            if broken >= 3 {
+                                problems
+                                    .push(format!("{named}：第 {index} 章有 {broken} 个替换字符"));
+                            }
+                        }
+                        Err(err) => problems.push(format!("{named}：第 {index} 章取不到：{err}")),
+                    }
+                }
+            }
+            super::Content::Fixed(fixed) => {
+                if fixed.pages.is_empty() {
+                    problems.push(format!("{named}：定版式却没有页"));
+                    continue;
+                }
+                let drawn = match &fixed.pages[0].source {
+                    super::PageSource::Image { href } => {
+                        doc.image_bytes(href).is_some_and(|bytes| !bytes.is_empty())
+                    }
+                    super::PageSource::Render { index, .. } => {
+                        doc.render_page(*index as usize, 256).is_some()
+                    }
+                };
+                if !drawn {
+                    problems.push(format!("{named}：首页画不出来"));
+                }
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "真样本矩阵有 {} 条不成立：\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+
+    // 每一族都要有真样本。AZW4 是唯一豁免的一条：Kindle 印刷版基本都带 DRM，
+    // 公网上拿不到可合法再分发的文件（见 fixtures README 的「还没有真样本的」）。
+    for format in [
+        Format::Markdown,
+        Format::Text,
+        Format::Epub,
+        Format::Fb2,
+        Format::Html,
+        Format::Cbz,
+        Format::Rtf,
+        Format::Chm,
+        Format::Mobi,
+        Format::Pdf,
+        Format::Docx,
+        Format::Doc,
+        Format::Odt,
+        Format::Pdb,
+        Format::Cb7,
+        Format::Cbr,
+        Format::Cbt,
+        Format::Djvu,
+        Format::Htmlz,
+        Format::Mhtml,
+    ] {
+        assert!(
+            seen.contains(&format),
+            "矩阵里没有 {format:?} 的真样本：目录 {} 下缺这一族（样本来源见 fixtures README）",
+            root.display()
+        );
+    }
+}
+
+fn collect_real_samples(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_real_samples(&path, out);
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+}
+
+/// MIME 认不出时回 `bin` 而不是空串：空串会让文件名以点结尾。
+#[test]
+fn media_extension_never_yields_an_empty_suffix() {
+    assert_eq!(media_extension("image/jpeg"), "jpg");
+    assert_eq!(media_extension("IMAGE/PNG"), "png", "大小写不该影响");
+    assert_eq!(media_extension("image/jpg"), "jpg", "写错的那种也认");
+    assert_eq!(media_extension("application/octet-stream"), "bin");
+    assert_eq!(media_extension(""), "bin");
+}

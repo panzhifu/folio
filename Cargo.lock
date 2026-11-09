@@ -2328,6 +2328,7 @@ dependencies = [
  "djvu-rs",
  "encoding_rs",
  "flate2",
+ "folio-format",
  "futures-util",
  "hayro",
  "html5ever 0.40.1",
@@ -2377,6 +2378,42 @@ version = "0.1.0"
 source = "git+https://github.com/panzhifu/gpui-folio?rev=5631b68d91fa09ae2081f6eef366cd484e157947#5631b68d91fa09ae2081f6eef366cd484e157947"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "folio-format"
+version = "0.1.4"
+dependencies = [
+ "base64 0.22.1",
+ "cfb",
+ "chardetng",
+ "crc32fast",
+ "djvu-rs",
+ "encoding_rs",
+ "flate2",
+ "hayro",
+ "html5ever 0.40.1",
+ "image",
+ "libchm",
+ "markdown",
+ "png 0.18.1",
+ "quick-xml 0.42.0",
+ "rars",
+ "regex",
+ "resvg 0.46.0",
+ "rwml",
+ "serde",
+ "serde_json",
+ "sevenz-rust2",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "ttf-parser",
+ "unicode-bidi",
+ "woff2-patched",
+ "zip",
 ]
 
 [[package]]

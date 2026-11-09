@@ -882,16 +882,20 @@ mod tests {
             fn supports(&self, _path: &Path) -> bool {
                 true
             }
-            fn index(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
+            fn index(&self, _path: &Path) -> folio_format::Result<(DocMeta, FormatContent)> {
                 Ok((meta(), positions()))
             }
-            fn read(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
+            fn read(&self, _path: &Path) -> folio_format::Result<(DocMeta, FormatContent)> {
                 Ok((meta(), positions()))
             }
-            fn chapter_source(&self, _path: &Path, at: &ChapterLocator) -> crate::Result<String> {
+            fn chapter_source(
+                &self,
+                _path: &Path,
+                at: &ChapterLocator,
+            ) -> folio_format::Result<String> {
                 PROBE_READS.with(|n| n.set(n.get() + 1));
                 let ChapterLocator::Section(ix) = at else {
-                    return Err(crate::Error::ChapterUnavailable {
+                    return Err(folio_format::Error::ChapterUnavailable {
                         path: PathBuf::from("/x.txt"),
                         index: 0,
                         at: format!("{at:?}"),
@@ -991,10 +995,10 @@ mod tests {
             fn supports(&self, _path: &Path) -> bool {
                 true
             }
-            fn index(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
+            fn index(&self, _path: &Path) -> folio_format::Result<(DocMeta, FormatContent)> {
                 Ok((meta(), positions()))
             }
-            fn read(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
+            fn read(&self, _path: &Path) -> folio_format::Result<(DocMeta, FormatContent)> {
                 FULL_READS.with(|n| n.set(n.get() + 1));
                 Ok((
                     meta(),

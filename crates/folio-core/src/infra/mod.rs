@@ -27,7 +27,7 @@ pub mod diagnostics;
 pub mod error;
 pub mod i18n;
 pub mod logging;
-pub mod metrics;
+pub use folio_format::metrics;
 pub mod paths;
 pub mod reading_theme;
 pub mod services;

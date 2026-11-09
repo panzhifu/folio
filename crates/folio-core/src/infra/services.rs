@@ -38,6 +38,9 @@ pub struct Services {
 impl Services {
     /// 用一条作业池建起来。池是别的服务的共用去处，所以由调用方建好后交进来。
     pub fn new(pool: Arc<TaskManager>) -> Self {
+        // 格式层的漫画解压缓存只认宿主注入的数据根：路径的名字仍归
+        // [`crate::infra::paths`]，格式 crate 自己不拼。
+        folio_format::comic_cache::set_root_resolver(crate::infra::paths::comics_cache_dir);
         Self {
             pool,
             watch: Mutex::new(None),

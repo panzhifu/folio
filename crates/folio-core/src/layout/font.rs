@@ -277,3 +277,43 @@ fn is_letter_or_number(c: char) -> bool {
     ) || matches!(c, '#' | '$' | '%' | '&')
         || c.is_ascii_digit()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::RunStyle;
+    use crate::content::format::css::computed::{ComputedStyle, TextShadow};
+
+    fn shadow(dy: f32) -> TextShadow {
+        TextShadow {
+            dx: 0.0,
+            dy,
+            blur: 1.0,
+            color: None,
+        }
+    }
+
+    /// 影子列表进 `RunStyle` 之后仍要能去重：同值并成一格、不同值各占一格。
+    #[test]
+    fn the_run_style_carries_text_shadows_and_the_arena_tells_them_apart() {
+        let one = ComputedStyle {
+            text_shadows: Arc::from([shadow(1.0)]),
+            ..Default::default()
+        };
+        let two = ComputedStyle {
+            text_shadows: Arc::from([shadow(2.0)]),
+            ..Default::default()
+        };
+
+        let a = RunStyle::new(&one);
+        let a_again = RunStyle::new(&one);
+        let b = RunStyle::new(&two);
+        assert_eq!(a.text_shadows.len(), 1);
+        assert_eq!(a, a_again, "同值要能并成一格（Hash + Eq 覆盖了新字段）");
+        assert_ne!(a, b, "位移不同就是不同样式");
+        let plain = RunStyle::new(&ComputedStyle::default());
+        assert!(plain.text_shadows.is_empty());
+        assert_ne!(a, plain);
+    }
+}

@@ -1,0 +1,64 @@
+[package]
+name = "folio-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 本 crate 只认字节与路径：不依赖 sqlite、网络、语音、文件监听与字体子集化。
+# 「后端解析能脱离 app 单独用」的落点就在这一行 —— 往这里加 rusqlite / tokio /
+# axum / ureq / notify / dirs 之前，先问那件事还成不成立。
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# DOM / HTML 扫描。
+html5ever.workspace = true
+# 位图解码、缩小、编码（封面、正文插图、漫画、PDF 页）。
+image.workspace = true
+# SVG 栅格化（封面 / 逐页漫画 / 正文内联 SVG）。
+resvg.workspace = true
+# ZIP 与 EPUB / OOXML / ODT / HTMLZ / MHTML 的容器。
+zip.workspace = true
+flate2.workspace = true
+crc32fast.workspace = true
+# MHTML 的 Content-Transfer-Encoding。
+base64.workspace = true
+# 漫画解压缓存的键与小说规则哈希。
+sha2.workspace = true
+# 码页判定：RTF / CHM / 裸文本。
+encoding_rs.workspace = true
+chardetng.workspace = true
+# CHM 的 ITSF + LZX。
+libchm.workspace = true
+# FB2 / EPUB 的 XML。
+quick-xml.workspace = true
+# CSS 的 `dir=auto` 首强字符判定。
+unicode-bidi.workspace = true
+# 小说规则的模式串。
+regex.workspace = true
+# `.md` 正文的标记 → XHTML。
+markdown.workspace = true
+# PDF 的解析与栅格化。
+hayro.workspace = true
+png.workspace = true
+# CB7 / CBR / CBT。
+sevenz-rust2.workspace = true
+rars.workspace = true
+tar.workspace = true
+# DjVu。
+djvu-rs.workspace = true
+# `.doc` 的 OLE2 与 [MS-DOC]。
+rwml.workspace = true
+cfb.workspace = true
+# WOFF2 → sfnt 与字体表读取（MOBI / EPUB 内嵌字体）。
+woff2-patched = "0.4"
+ttf-parser.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# 测试里合成 CBR 夹具；生产只用读，不开 write。
+rars = { workspace = true, features = ["write"] }

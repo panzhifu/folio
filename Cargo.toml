@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 default-members = ["crates/folio-app"]
-members = ["crates/folio-core", "crates/folio-app"]
+members = ["crates/folio-core", "crates/folio-format", "crates/folio-app"]
 
 [workspace.package]
 version = "0.1.4"
@@ -13,6 +13,7 @@ license = "MIT"
 # 避免空挂依赖。
 [workspace.dependencies]
 folio-core = { path = "crates/folio-core" }
+folio-format = { path = "crates/folio-format" }
 
 # 走 git main 而不是 crates.io：上游每周发版，发布版落后一到两周，且主题目录
 # `themes/` 只存在于源码树里（发布出去的 crate 不带）。Cargo.lock 记录具体 commit，

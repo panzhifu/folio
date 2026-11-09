@@ -581,3 +581,83 @@ fn overlapping_entries_return_the_higher_line_like_the_scan_does() {
         "并集行段要含第 0 到第 6 行：中间那行的行号在两端之间"
     );
 }
+
+/// 一页的**字序、锚点坐标系、色块**三件事必须是同一个序：界面拿 `hit` 得到的那个数
+/// 直接建锚点、直接喂 `rects`，中间没有人换轴。
+///
+/// 这条门存在的理由是一次失败要长什么样：换了轴的症状是「色块画在别的字上」与
+/// 「划线翻回原文时对不上」，两处都不报错。而两族文档共用一把尺（可重排的坐标系
+/// 数的是 DOM 文本节点拼起来的字，定版式数的是栅格引擎交出的字），两侧只要有一侧
+/// 把断行也数进去，同一份批注 JSON 在两种书上就指两个地方。
+#[test]
+fn a_page_offsets_are_the_same_number_in_the_text_layer_and_the_anchor() {
+    use crate::content::anchor::{Confidence, TextAnchor, relocate};
+    use crate::content::format::{PageChar, PageRect, PageText};
+
+    /// 两行、九格字：第 0 行 y=10，第 1 行 y=30；每格 10pt 宽。
+    fn two_lines() -> PageText {
+        let mut chars: Vec<PageChar> = Vec::new();
+        for (ch, line) in [
+            ('a', 0u32),
+            ('b', 0),
+            (' ', 0),
+            ('c', 0),
+            ('d', 0),
+            ('中', 1),
+            ('文', 1),
+            ('字', 1),
+            ('词', 1),
+        ] {
+            let column = chars.iter().filter(|item| item.line == line).count();
+            chars.push(PageChar {
+                ch,
+                rect: PageRect {
+                    x: column as f32 * 10.0,
+                    y: 10.0 + line as f32 * 20.0,
+                    width: 10.0,
+                    height: 12.0,
+                },
+                line,
+            });
+        }
+        PageText {
+            width: 100.0,
+            height: 60.0,
+            chars,
+        }
+    }
+
+    let page = two_lines();
+    let map = page.text_map();
+    assert_eq!(map.text(), page.text(), "坐标系的那一串就是摊平的字序");
+    assert_eq!(map.chars(), page.char_count());
+    // 断行只在复制那一头还给读者：同一区间两份串，差的就是那一个换行。
+    assert_eq!(map.slice(0..page.char_count()), page.text());
+    assert_eq!(page.slice(0..page.char_count()), "ab cd\n中文字词");
+
+    // 第二行那四个汉字：`hit` 给的插入点、`rects` 画的色块、锚点存的区间三个数同形。
+    let start = page.hit(4.0, 34.0).expect("第二行行首该命中");
+    let end = page.hit(36.0, 34.0).expect("第二行行尾该命中");
+    assert_eq!((start, end), (5, 9));
+    assert_eq!(page.rects(start..end).len(), 1, "同一行并成一条色块");
+    let anchor = TextAnchor::new(&map, 3, start, end);
+    assert_eq!(anchor.exact, "中文字词", "快照存的是字序那一串");
+    assert_eq!(anchor.chapter, 3, "定版式里那一格就是页号");
+    assert!(anchor.path.is_empty(), "一页没有 DOM 路径可指");
+
+    // 原样读回：第一级就中，不必降级。
+    let back = relocate(&anchor, &page.text_map());
+    assert_eq!(
+        (back.start, back.end, back.confidence),
+        (5, 9, Confidence::Exact)
+    );
+    // 页首多出一个字（文字层换了一版引擎、前面那点字被认成别的）：偏移漂了，
+    // 靠指纹从附近找回来 —— 这一级只做子串匹配，没有 DOM 也照样成立。
+    let shifted = TextMap::from_visible_text(String::from("x") + page.text().as_str());
+    let moved = relocate(&anchor, &shifted);
+    assert_eq!(moved.confidence, Confidence::Nearby);
+    assert_eq!((moved.start, moved.end), (6, 10), "整串跟着平移一格");
+    // 那一串字整页没了：显式判 stale，而不是猜一个位置。
+    let gone = TextMap::from_visible_text(String::from("完全没有那几个字"));
+    assert_eq!(relocate(&anchor, &gone).confidence, Confidence::Stale);
+}
