@@ -12,17 +12,28 @@
 
 use std::path::{Path, PathBuf};
 
-/// 引擎的三层。`content/format/` 与 `content/document/` 不在其列：前者正是干
-/// 「认格式」这件事的地方，后者是格式差异的出口。
+/// 引擎的三层已经分居两个 crate：排版本体（`layout`）在 folio-core，样式与 DOM
+/// （`css/`、`dom.rs`）随 folio-format 抽取搬了过去 —— 它们是**排版用的样式层**，
+/// 与「哪个 provider 读容器」无关，所以契约跟着边界走，扫描一并覆盖过去。
+/// `content/document/` 不在其列：那是格式差异的出口。
 ///
-/// 路径跟着 `content/` 那次分区走（`css/` 与 `dom/` 现在都在 `src/content/` 底下，
-/// 而 `css/` 进一步收在 `content/format/` 里 —— 它是**排版用的样式层**，
-/// 与格式无关，但和 `format` 一起被搬了）。这条断言本身就是「路径写错了会红」，
-/// 所以它在分区之后立刻红了一次，是它该做的事。
-const ENGINE_DIRS: &[&str] = &["src/layout", "src/content/format/css", "src/content/dom"];
+/// 这条断言本身就是「路径写错了会红」（「一个 .rs 都没有」就是路径错了，不是过了）。
+/// 它在 `content/` 分区与 folio-format 抽取之后各红过一次，都是它该做的事。
+const ENGINE_DIRS: &[(&str, &str)] = &[
+    ("folio-core", "src/layout"),
+    ("folio-format", "src/css"),
+    ("folio-format", "src/dom.rs"),
+];
 
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+fn rust_files(path: &Path, out: &mut Vec<PathBuf>) {
+    if path.is_file() {
+        // 单文件也允许直接进清单（`dom.rs` 是一个文件，不是一个目录）。
+        if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path.to_path_buf());
+        }
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
         return;
     };
     for entry in entries.flatten() {
@@ -30,7 +41,7 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             rust_files(&path, out);
         } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
+            out.push(path.to_path_buf());
         }
     }
 }
@@ -38,12 +49,16 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn the_layout_engine_never_learns_about_formats() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crates_dir = root.parent().expect("core 上一级是 crates/");
     let mut offenses = Vec::new();
 
-    for dir in ENGINE_DIRS {
+    for (crate_dir, sub) in ENGINE_DIRS {
         let mut files = Vec::new();
-        rust_files(&root.join(dir), &mut files);
-        assert!(!files.is_empty(), "{dir} 里一个 .rs 都没有，路径写错了？");
+        rust_files(&crates_dir.join(crate_dir).join(sub), &mut files);
+        assert!(
+            !files.is_empty(),
+            "{crate_dir}/{sub} 里一个 .rs 都没有，路径写错了？"
+        );
 
         for file in files {
             let text = std::fs::read_to_string(&file).expect("源码该是 UTF-8");
@@ -53,7 +68,7 @@ fn the_layout_engine_never_learns_about_formats() {
                 if code.contains("Format") {
                     offenses.push(format!(
                         "{}:{}  {}",
-                        file.strip_prefix(root).unwrap_or(&file).display(),
+                        file.strip_prefix(crates_dir).unwrap_or(&file).display(),
                         ix + 1,
                         line.trim()
                     ));
