@@ -4,10 +4,11 @@
 //! 也不是**书怎么进来**（那是 [`crate::ingest`]）：
 //!
 //! - [`document`] —— 统一文档接口：`Document` trait（可重排 / 定版式）+ 门面。
-//! - [`format`] —— provider 注册表与各格式的解析（EPUB / FB2 / HTML / Markdown / TXT / CBZ），
-//!   以及容器层（zip / container）。
+//! - [`format`] —— 已独立成 `folio-format`：provider 注册表、各格式解析与容器层；
+//!   这里只是重导出，`content::format::…` 的路径不变。
 //! - [`assets`] —— 书库资产：封面与缩略图的落盘约定（不是格式解析）。
-//! - [`dom`] —— html5ever 的 arena DOM。
+//! - [`dom`] —— html5ever 的 arena DOM（来自 `folio-format`）。
+//! - [`scan`] —— 一趟 tokenizer 出章摘要（来自 `folio-format`）。
 //! - [`anchor`] —— 可见文本坐标系（`TextMap` / `TextAnchor`）与四级降级重定位。
 //! - [`hit`] —— 引擎查询接口：命中、选区矩形、词边界吸附。
 //! - [`annotation`] —— 批注读侧：批量解算、按章分组、Markdown 导出。

@@ -57,7 +57,7 @@ axum = { version = "0.8", features = ["multipart"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 html5ever = "0.40"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
-# PNG 编码：只给 `content::format::pdf` 那条栅格化用（hayro 交回的是像素，页的契约是
+# PNG 编码：只给 `folio_format::pdf` 那条栅格化用（hayro 交回的是像素，页的契约是
 # PNG 字节）。**不新增任何包**：`image` 自己就依赖 png 0.18.1，这里面只有一条直接边。
 # 为什么不走 `image::codecs::png`：同一张 1810×2048 的页，这一层实测 10 ms / 566 KB，
 # 而 `image` 那层封装 169 ms / 568 KB —— 体积一样、慢 17 倍（它把 `Fast` 映射到了
@@ -145,7 +145,7 @@ ring = "0.17"
 # 不引 `rtf-parser`（198k 下载、还在更新）那类现成解析器：它只给 AST 不给语义 ——
 # 码页、`\ucN` 回退字节、`*\目标` 跳过、分章仍然一处都得自己写，省下的恰是省事最少的
 # 那一截，而它的 default feature 挂着 wasm-bindgen，得为关掉它再写一段声明。
-# 词法自己写的理由写在 `content::format::rtf` 的模块头。
+# 词法自己写的理由写在 `folio_format::rtf` 的模块头。
 encoding_rs = "0.8"
 # CHM（Microsoft Compiled HTML Help）的容器层：ITSF/ITSP 头 + PMGL/PMGI 目录 + LZX 解压。
 # 纯 Rust、MIT、`#![forbid(unsafe_code)]`，依赖只有 bitflags 与 thiserror（两个都已在图上），
@@ -154,7 +154,7 @@ encoding_rs = "0.8"
 # **钉死 `=0.3.0`**：它 2025-12 才有第一个版本，上游仓库里没有真实世界编出的 CHM 样本
 # （只有单元测试）。版本一跳就把「我们对拍过的那份解码器」换成另一个东西，而症状是
 # 某本书突然读不出 —— 钉法与上面 `reqwest_client` 那条 `=0.3.11` 同理。
-# 换掉它的成本有出口：容器寻址住在一层之后（`format::container` 的 ITSF 那一支），
+# 换掉它的成本有出口：容器寻址住在一层之后（`folio_format::container` 的 ITSF 那一支），
 # 自己写一份只动那一处。
 libchm = "=0.3.0"
 quick-xml = "0.42"
@@ -187,7 +187,7 @@ unicode-script = "0.5"
 # **为什么这一格不是我们自己写**：实测过两条更便宜的判据都不成立。字节合法性分不开
 # —— 一段简体 GBK 的字节流拿 Big5 解**同样一个坏字节都没有**，得到的却是一串夹着注音
 # 符号的怪汉字；「取坏字节最少」因此是掷硬币（纯 ASCII 同时是五种码页的合法输入）。
-# 而误读的产物在屏幕上查不出错，正是 `content::format::charset` 模块头那句话防的那种
+# 而误读的产物在屏幕上查不出错，正是 `folio_format::charset` 模块头那句话防的那种
 # 事故。剩下唯一能分开它们的办法就是按字符序列做统计，那件事已经有人按 WHATWG 的规格
 # 写完并测过，不必重做一遍。
 #

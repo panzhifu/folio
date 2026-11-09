@@ -1377,3 +1377,38 @@ mod contract;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod boundary_tests {
+    /// 这一层只认字节与路径：清单里出现数据库、网络、语音、文件监听或字体子集化，
+    /// 就说明依赖又漏了。逐行看键名而不是子串：`tts` 会撞进注释里的英文单词。
+    #[test]
+    fn the_manifest_stays_free_of_app_backends() {
+        let manifest = include_str!("../Cargo.toml");
+        let forbidden = [
+            "rusqlite",
+            "libsqlite3-sys",
+            "tokio",
+            "axum",
+            "ureq",
+            "notify",
+            "dirs",
+            "tts",
+            "skera",
+            "read-fonts",
+            "write-fonts",
+        ];
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+                continue;
+            }
+            let key = line.split(['=', '.', ' ']).next().unwrap_or("");
+            assert!(
+                !forbidden.contains(&key),
+                "folio-format 的清单里出现了 `{key}`：这一层的边界是不认数据库 / 网络 / \
+                 语音 / 文件监听 / 字体子集化"
+            );
+        }
+    }
+}

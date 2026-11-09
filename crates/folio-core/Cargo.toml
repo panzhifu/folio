@@ -7,7 +7,10 @@ license.workspace = true
 publish = false
 
 # 本 crate 禁止依赖 gpui：这是 folio-core 与 folio-app 之间唯一的架构边界，
-# 也是「书库 / 锚点 / 解析 / 进度」将来能在移动端复用的前提。
+# 也是「书库 / 锚点 / 进度」将来能在移动端复用的前提。
+#
+# 文件格式解析已独立成 `folio-format`（见 `crates/folio-format`）：这一层不再直接
+# 依赖 PDF / 漫画 / Office / CHM / 字体格式的编解码库，格式能力经 `folio-format` 进来。
 
 [dependencies]
 folio-format.workspace = true
@@ -16,16 +19,12 @@ dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-html5ever.workspace = true
+# 封面缩略图（`content::assets::thumb`）要解码与缩放位图。
 image.workspace = true
-# SVG 栅格化（`format::svg`）：封面 / 正文内联 / 逐页漫画的 SVG 都要画成位图。
-# 锁里已有这份且本来在编译（gpui-pre 那条链），不新增依赖树 —— 见根 Cargo.toml。
-resvg.workspace = true
+# 备份包（`backup`）与导入时的容器读取。
 zip.workspace = true
-# WOFF1 的表是逐表 zlib 压的，解回 sfnt 要用它（见 `format::woff`）。
+# 词典包（`dict`）的 gzip 解压。
 flate2.workspace = true
-# 见根 Cargo.toml：区间读要自己校 CRC32。
-crc32fast.workspace = true
 # Basic 认证头（`remote::dav`）。锁里已有这份，不新增依赖树。
 base64.workspace = true
 # 内容哈希（`identity`）：书的身份是它的内容，不是文件路径。
@@ -34,12 +33,6 @@ md-5.workspace = true
 # 账号密钥（`account`）：HMAC-SHA256 与 OS 熵。为什么这里用 `ring` 而不是 `hmac`，
 # 连同 Android 编译图的实测一起写在根 Cargo.toml 那一条。
 ring.workspace = true
-# RTF 正文的码页解码（`\ansicpg936` 的 GBK 双字节 / cp1252 / UTF-8），见 `format::rtf`；
-# CHM 的 topic 与 `#SYSTEM` 字符串也走同一族判据（BOM / `<meta charset>` / 容器报的 LCID），
-# 见 `format::charset`。锁里已有这份且本来在编译 —— 见根 Cargo.toml 那条，不新增依赖树。
-encoding_rs.workspace = true
-# CHM 的容器与 LZX 解压（`format::chm`）。见根 Cargo.toml 为什么钉死版本。
-libchm.workspace = true
 # 文件夹监听（`watch`）：事件驱动的新书自动入库。
 notify.workspace = true
 # 同步 HTTP（`remote::ureq`）。
@@ -50,53 +43,12 @@ tokio.workspace = true
 axum.workspace = true
 # 传书那台服务器上局域网同步的路由要流式送一本书（见根 Cargo.toml 为什么它不新增依赖树）。
 futures-util.workspace = true
+# WebDAV / OPDS 的 XML。
 quick-xml.workspace = true
-cssparser.workspace = true
-selectors.workspace = true
+# 排版断行（`layout::collect`）。
 unicode-linebreak.workspace = true
-# `dir="auto"` 的首强字符判定与 `unicode-bidi` 的字符类，见根 Cargo.toml 那条；不新增依赖树。
-unicode-bidi.workspace = true
-# 纯文本小说按哪种文字的章标记切章，要按 Unicode 的 Script 属性数出 CJK / 假名 / 谚文 /
-# 拉丁的占比。图上已有的一份（`resvg → usvg → rustybuzz`），理由与版本对齐写在根 Cargo.toml。
+# 字体回退：按 Unicode Script 数出 CJK / 假名 / 谚文（`layout::font`）。
 unicode-script.workspace = true
-# 「没有 BOM、没有声明、又不是合法 UTF-8」的裸文本按哪一码页解。自己写的两条判据
-# （字节合法性、坏字节最少）都被实测否了，理由与「只多 1 个包」那组数写在根 Cargo.toml。
-chardetng.workspace = true
-# 章标记与书目字段的别名是存在外部数据里的模式串（规则表按语言换、可被读者整份替换），
-# 只有正则能吃字符串模式。**这条是 core 的运行时图里新增的**（不是第三个 crate 版本），
-# 为什么与「图上已有」那几条不同、以及逐条才编译的用法，全写在根 Cargo.toml 那条上。
-regex.workspace = true
-# `.md` 正文的标记 → XHTML。CommonMark 那台状态机不自己写（flanking 规则、围栏里的 `#`、
-# 缩进代码这类没试过的形状是坑），理由与「锁里已有、一条新包都不带」那组实测写在根 Cargo.toml。
-markdown.workspace = true
-# PDF（M9）：`hayro` 一台引擎管完，走根 `Cargo.toml` 那条 fork 依赖。解析那一半
-# （页表 / 书签 / 文字层 / 加密判定）与画像素那一半都在它身上，为什么从「两台引擎」换成
-# 「一台」、fork 上补的是哪三格，全写在根 `Cargo.toml` 的 `hayro` 那一条上。
-# 这一层只用它的三个入口：`Pdf::pages()` / `hayro_interpret::text` /
-# `hayro_syntax::outline`。
-hayro.workspace = true
-# 页的 PNG 编码（hayro 交像素、契约要 PNG）。为什么不用 `image` 那层封装见根 Cargo.toml。
-png.workspace = true
-# CB7：纯 Rust 的 7z 解压；CBR：纯 Rust 的 RAR（rars），两者都不带 C/C++。
-sevenz-rust2.workspace = true
-rars.workspace = true
-# WOFF2 → sfnt 的解压。WOFF2 的载荷是 brotli 压缩加表变换（glyf/loca/hmtx 重建），
-# 手写等于把 W3C 规范实现一遍，用现成的移植。选 `woff2-patched`（同 API 的修复分支）
-# 而不是 `woff2` 0.3：后者按 2022 年的 rustc 写的，现在的编译器在 trait 方法与固有
-# 方法的歧义上直接拒编（E0034/E0277，23 个错），修它就得 fork。代价：它要 brotli ^7，
-# 与锁里 hayro-cmap 那份 8.x 并存两份主版本 —— 换取不自己养变换重建那份代码。
-woff2-patched = "0.4"
-# CBT：tar 漫画包（纯 Rust）。
-tar.workspace = true
-# DjVu：纯 Rust 解码/渲染（MIT，无 GPL）。
-djvu-rs.workspace = true
-# `.doc`（Word 97-2003，[MS-DOC]）：piece table / FIB / PAPX-CHPX 那套二进制表不自己读，
-# 理由与「为什么关掉 docx 那一半的 feature」「净新增 3 个包」那笔账写在根 Cargo.toml。
-# 它只管**解码字节**成 docx.rs 同形状的东西（`DocModel`：段落 + run 的粗斜体 + 列表 + 表格 +
-# 图片字节 + OLE2 元数据），归约成引擎就绪的 XHTML 仍然是我们这一层的事，见 `format::doc`。
-rwml = { workspace = true }
-# OLE2 目录：判定层认「这是不是一本 Word」（见根 Cargo.toml 那条与 `format::doc::is_word`）。
-cfb = { workspace = true }
 rust-i18n.workspace = true
 # 日志：core 这边只管「说了什么」——`tracing` 的宏与 span，配置在 `Config::logging`，
 # 装配 subscriber 的入口在 `src/logging.rs`。（不依赖 gpui 这条边界照旧成立：
@@ -147,6 +99,10 @@ tts.workspace = true
 tempfile = "3"
 # 测试里合成 CBR 夹具；生产只用读，不开 write。
 rars = { workspace = true, features = ["write"] }
-# 测试里合成「OLE2 但不是 Word」的负样本，用的就是普通依赖那一份 `cfb`。
+# 测试里合成 CB7 / tar 夹具（导入的容器门）。
+sevenz-rust2.workspace = true
+tar.workspace = true
+# `examples/pdf-probe.rs` 的量具：库本体不碰 PDF。
+hayro.workspace = true
 # `rust-i18n` 不再单列：文案表那几条断言搬进 `src/i18n.rs` 之后就是本 crate 的代码，
 # 而它本来就是普通依赖 —— 集成测试时代的那条 dev-dependency 到此作废。

@@ -18,7 +18,8 @@ Folio：Rust + [gpui-kit](https://gpui-kit.com) 写的原生 GPU 阅读器，覆
 ## 仓库布局
 
 ```
-crates/folio-core/   引擎：21 个格式 provider、排版、锚点与批注、SQLite、日志
+crates/folio-format/ 文件格式解析：21 个 provider、容器/判定、DOM、CSS、scan、字符坐标
+crates/folio-core/   引擎：排版、锚点与批注、SQLite、日志；内容经 folio-format 取
 crates/folio-app/    应用壳；src/ui/ 下 shared / widgets / features / shell / host / platform
                      features 按功能纵切：reader / shelf / notes / stats / settings / welcome
 doc/                 面向人的文档
