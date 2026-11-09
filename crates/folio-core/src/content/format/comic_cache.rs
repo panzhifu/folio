@@ -169,7 +169,7 @@ pub(crate) fn relocate(from: &Path, to: &Path) {
 /// 删掉这本书的解压缓存。界面上「删书」连着副本文件一起清的那一步调它。
 ///
 /// 失败只记日志：这是可丢弃的缓存，删不掉的最坏结果是多占一点空间，而下一次
-/// [`ensure`] 会发现标记还在、根本不会重做（与 `format::thumb::purge` 同一条纪律）。
+/// [`ensure`] 会发现标记还在、根本不会重做（与 `content::assets::thumb::purge` 同一条纪律）。
 pub fn drop_for(path: &Path) {
     let dir = dir_for(path);
     if !dir.exists() {

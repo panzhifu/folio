@@ -429,7 +429,7 @@ impl Builder {
                 let href = format!(
                     "img-{}.{}",
                     self.images.len(),
-                    super::cover::extension(&media_type)
+                    super::media_extension(&media_type)
                 );
                 let (width, height) = image_dims(bytes);
                 self.image_of.insert(bytes.clone(), self.images.len());

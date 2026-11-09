@@ -214,14 +214,14 @@ impl Document for BookDocument {
         }
     }
 
-    fn cover_ref(&self) -> Option<&crate::content::format::cover::CoverRef> {
+    fn cover_ref(&self) -> Option<&crate::content::assets::cover::CoverRef> {
         match &self.content {
             Content::Reflow(flow) => flow.cover_ref.as_ref(),
             Content::Fixed(fixed) => fixed.cover_ref.as_ref(),
         }
     }
 
-    fn set_cover_ref(&mut self, cover: Option<crate::content::format::cover::CoverRef>) {
+    fn set_cover_ref(&mut self, cover: Option<crate::content::assets::cover::CoverRef>) {
         // 两族都填：封面落盘那条路与「字节是从容器抽的还是栅格化出来的」无关，
         // 写的都是同一个 `covers/<hash>.<ext>`，记的都是同两列。
         match &mut self.content {

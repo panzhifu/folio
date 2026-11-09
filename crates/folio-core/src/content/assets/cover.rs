@@ -40,26 +40,11 @@ fn stem(hex: &str) -> String {
 /// `root` 是书库根（`paths::covers_dir` 要的那一个），调用方从**这本书自己的副本
 /// 路径**推出来 —— 库层不持有书库位置，那是读者确认过的目录，只有界面/管线知道。
 pub fn cover_path(root: &Path, hash_hex: &str, mime: &str) -> PathBuf {
-    crate::infra::paths::covers_dir(root).join(format!("{}.{}", stem(hash_hex), extension(mime)))
-}
-
-/// 从 MIME 推文件扩展名。认不出的回 `bin` 而不是空串 —— 空串会让文件名以点结尾，
-/// 那种名字在某些文件系统上直接创建失败。
-///
-/// 真书里 `image/jpg`、`IMAGE/PNG`、`image/octet-stream` 这类写错很常见，
-/// 所以这里只做小写归一化与前缀忽略，不试图猜内容（猜错了会影响文件管理器双击打开）。
-pub fn extension(mime: &str) -> &'static str {
-    let m = mime.trim().to_ascii_lowercase();
-    match m.as_str() {
-        "image/jpeg" | "image/jpg" | "image/pjpeg" => "jpg",
-        "image/png" => "png",
-        "image/webp" => "webp",
-        "image/gif" => "gif",
-        "image/bmp" | "image/x-ms-bmp" => "bmp",
-        "image/svg+xml" => "svg",
-        "image/avif" => "avif",
-        _ => "bin",
-    }
+    crate::infra::paths::covers_dir(root).join(format!(
+        "{}.{}",
+        stem(hash_hex),
+        crate::content::format::media_extension(mime)
+    ))
 }
 
 /// 把一份封面写进 `covers/`，交回它的哈希。
@@ -97,8 +82,11 @@ pub fn write(root: &Path, bytes: &[u8], mime: &str) -> Result<ContentHash> {
 /// 一份封面文件还在不在。读那一侧的第一步：在就交回路径，不在就退回 BLOB。
 pub fn resolve(root: &Path, hash: &str, mime: &str) -> Option<PathBuf> {
     // 与写入侧同一个 `stem`：截断口径必须一致，否则「文件明明在却读不出来」。
-    let path =
-        crate::infra::paths::covers_dir(root).join(format!("{}.{}", stem(hash), extension(mime)));
+    let path = crate::infra::paths::covers_dir(root).join(format!(
+        "{}.{}",
+        stem(hash),
+        crate::content::format::media_extension(mime)
+    ));
     path.is_file().then_some(path)
 }
 
@@ -112,18 +100,8 @@ pub struct CoverRef {
 
 #[cfg(test)]
 mod tests {
-    use super::{cover_path, extension, resolve, write};
+    use super::{cover_path, resolve, write};
     use crate::infra::metrics::Metric;
-
-    /// MIME 认不出时回 `bin` 而不是空串：空串会让文件名以点结尾。
-    #[test]
-    fn unknown_mime_still_yields_a_usable_extension() {
-        assert_eq!(extension("image/jpeg"), "jpg");
-        assert_eq!(extension("IMAGE/PNG"), "png", "大小写不该影响");
-        assert_eq!(extension("image/jpg"), "jpg", "写错的那种也认");
-        assert_eq!(extension("application/octet-stream"), "bin");
-        assert_eq!(extension(""), "bin");
-    }
 
     /// **已存在就不写**：同一份封面第二次导入不该重写文件（系列书共用封面、
     /// 重扫整库都会走到这条）。数的是写入次数而不是时间，所以在哪台机器上都一样。

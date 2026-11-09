@@ -1868,12 +1868,12 @@ fn a_cover_lives_in_a_file_and_never_in_the_database() {
 
     // 两本共用同一份封面字节。
     let cover = b"pretend-jpeg-cover-bytes";
-    let hash = crate::content::format::cover::write(root, cover, "image/jpeg").unwrap();
+    let hash = crate::content::assets::cover::write(root, cover, "image/jpeg").unwrap();
     let hash_hex = hash.to_hex();
 
     let mut with_cover = flow(&[("一", "正文")]);
     with_cover.cover = Some(cover.to_vec());
-    with_cover.cover_ref = Some(crate::content::format::cover::CoverRef {
+    with_cover.cover_ref = Some(crate::content::assets::cover::CoverRef {
         hash: hash_hex.clone(),
         mime: "image/jpeg".into(),
     });
@@ -1888,7 +1888,7 @@ fn a_cover_lives_in_a_file_and_never_in_the_database() {
     assert_eq!(store.book_cover(b).unwrap().as_deref(), Some(&cover[..]));
 
     // 两本指向**同一个**文件 —— 这是「按封面自己的字节哈希命名」的全部收益。
-    let file_a = crate::content::format::cover::cover_path(root, &hash_hex, "image/jpeg");
+    let file_a = crate::content::assets::cover::cover_path(root, &hash_hex, "image/jpeg");
     assert!(file_a.is_file(), "封面该真的落盘了");
 
     // 2) 两本共用一张时删掉一本不能把文件带走（封面是**它自己字节**的身份，

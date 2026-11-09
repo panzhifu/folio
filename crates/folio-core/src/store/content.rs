@@ -97,7 +97,7 @@ impl Store {
         // 就是几百 MB 的库，只为架上那一格画什么。
         //
         // 哈希是那一份**字节**的身份而不是这本书的，所以两本书共用一张封面时
-        // 磁盘上只有一个文件（`format::cover::write` 那边保证）。
+        // 磁盘上只有一个文件（`content::assets::cover::write` 那边保证）。
         tx.execute(
             "UPDATE books
                 SET css = ?2, toc_json = ?3, index_version = ?4,
@@ -227,7 +227,7 @@ impl Store {
         // 拼不出路径 —— 当没有处理，退回 BLOB，别拿半个描述去猜路径。
         let cover_ref = match (cover_hash, cover_mime) {
             (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
-                Some(crate::content::format::cover::CoverRef { hash, mime })
+                Some(crate::content::assets::cover::CoverRef { hash, mime })
             }
             _ => None,
         };
@@ -427,7 +427,7 @@ impl Store {
         // —— 两格要么都有，只剩一格就当没有（拿半个描述去猜路径是更糟的那个错）。
         let cover_ref = match (cover_hash, cover_mime) {
             (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
-                Some(crate::content::format::cover::CoverRef { hash, mime })
+                Some(crate::content::assets::cover::CoverRef { hash, mime })
             }
             _ => None,
         };
@@ -519,7 +519,7 @@ mod tests {
             // 存的时候会由页表重建，这里故意留空。
             images: Vec::new(),
             // 封面落盘之后的那两格描述（`covers/<hash>.<ext>` 的拼名材料）。
-            cover_ref: Some(crate::content::format::cover::CoverRef {
+            cover_ref: Some(crate::content::assets::cover::CoverRef {
                 hash: "0123456789abcdef".into(),
                 mime: "image/png".into(),
             }),

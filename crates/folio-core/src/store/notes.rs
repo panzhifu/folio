@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::content::format::cover::CoverRef;
+use crate::content::assets::cover::CoverRef;
 use crate::store::Store;
 
 /// 清单里的一行。书签与批注各占一行，字段是两族的并集 —— 与目录面板「批注」那一格
@@ -178,7 +178,7 @@ fn cover_bytes(
     book_id: i64,
 ) -> Option<Vec<u8>> {
     let small = cover.and_then(|(root, description)| {
-        let path = crate::content::format::thumb::thumb_path(
+        let path = crate::content::assets::thumb::thumb_path(
             root,
             crate::infra::paths::THUMB_LIST_PX,
             description,

@@ -63,10 +63,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use folio_core::content::assets::cover::{self, CoverRef};
+use folio_core::content::assets::thumb;
 use folio_core::content::document::{self, ContentRef};
 use folio_core::content::dom::Dom;
-use folio_core::content::format::cover::{self, CoverRef};
-use folio_core::content::format::{shrink_image, thumb};
+use folio_core::content::format::shrink_image;
 use folio_core::infra::metrics::{Metric, global};
 use folio_core::ingest::identity;
 use folio_core::{ImportKind, PathsSource, Source, Store, TaskEvent, TaskManager, submit_import};

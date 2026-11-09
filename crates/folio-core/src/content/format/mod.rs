@@ -28,7 +28,6 @@ pub mod comic_cache;
 pub(crate) mod comicinfo;
 pub mod container;
 pub mod content;
-pub mod cover;
 pub mod css;
 /// DjVu：定版式扫描书/漫画，页是既定的画布（纯 Rust `djvu-rs`）。
 pub mod djvu;
@@ -74,7 +73,6 @@ pub mod svg;
 /// 纯文本那一族（`.txt`），以及它与 Markdown 共用的那条链（读成文本 → 规范化 →
 /// 折成章表 → 包装）。共用件只在这一份里有一份。
 pub mod text;
-pub mod thumb;
 pub mod woff;
 pub mod woff2;
 pub mod xhtml;
@@ -870,9 +868,28 @@ pub fn guess_media_type(bytes: &[u8]) -> Option<&'static str> {
     decodable_bitmap_mime(guessed)
 }
 
+/// 从 MIME 推文件扩展名。认不出的回 `bin` 而不是空串 —— 空串会让文件名以点结尾，
+/// 那种名字在某些文件系统上直接创建失败。
+///
+/// 真书里 `image/jpg`、`IMAGE/PNG`、`image/octet-stream` 这类写错很常见，
+/// 所以这里只做小写归一化与前缀忽略，不试图猜内容（猜错了会影响文件管理器双击打开）。
+pub fn media_extension(mime: &str) -> &'static str {
+    let m = mime.trim().to_ascii_lowercase();
+    match m.as_str() {
+        "image/jpeg" | "image/jpg" | "image/pjpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" | "image/x-ms-bmp" => "bmp",
+        "image/svg+xml" => "svg",
+        "image/avif" => "avif",
+        _ => "bin",
+    }
+}
+
 // `COVER_SPEC_VERSION` 在 v16 作废：它记的是「这份封面字节是按哪一版规格生成的」，
 // 用来让 `stale_reason` 认出该重生成的封面。封面改成 `covers/` 里的文件之后，
-// 换规格只要重新生成缩略图（`format::thumb::purge` + 重新生成），
+// 换规格只要重新生成缩略图（`content::assets::thumb::purge` + 重新生成），
 // 不需要「按规格重扫全书」这个概念了。
 
 /// 一张位图缩到长边不超过 `max_edge`，再编码回一个紧凑格式。
@@ -935,7 +952,7 @@ pub fn shrink_image(bytes: &[u8], max_edge: u32) -> Option<(Vec<u8>, &'static st
     // 一个目标像素，边缘用线性补），官方文档自己标了「新尺寸接近旧尺寸时可能有锯齿」。
     // 快是真快：实测 1535×2200 那一张 127.8 ms → 44.3 ms，538×720 那一张 26.5 ms → 7.7 ms
     // （两条臂交替跑 7 轮取中位）。代价是缩放质量换了档：小比例缩放（1.4×）那一头最容易看出。
-    // 与 `thumb::encode_from` 同一道滤波也算一条理由：库里那份和磁盘那两档不该长得不一样。
+    // 与 `content::assets::thumb::encode_from` 同一道滤波也算一条理由：库里那份和磁盘那两档不该长得不一样。
     let image = if longest > max_edge {
         image.thumbnail(max_edge, max_edge)
     } else {

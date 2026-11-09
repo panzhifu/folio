@@ -2,7 +2,7 @@
 
 use super::{
     Chapter, ChapterLocator, ChapterText, Format, HeadDims, TocEntry, fragment_of,
-    image_dims_from_head, locator_for, shrink_image,
+    image_dims_from_head, locator_for, media_extension, shrink_image,
 };
 
 /// 造一张真位图 —— `shrink_image` 要真的解码+重编，够 header 的假字节过不了。
@@ -460,4 +460,14 @@ fn collect_real_samples(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>
             out.push(path);
         }
     }
+}
+
+/// MIME 认不出时回 `bin` 而不是空串：空串会让文件名以点结尾。
+#[test]
+fn media_extension_never_yields_an_empty_suffix() {
+    assert_eq!(media_extension("image/jpeg"), "jpg");
+    assert_eq!(media_extension("IMAGE/PNG"), "png", "大小写不该影响");
+    assert_eq!(media_extension("image/jpg"), "jpg", "写错的那种也认");
+    assert_eq!(media_extension("application/octet-stream"), "bin");
+    assert_eq!(media_extension(""), "bin");
 }

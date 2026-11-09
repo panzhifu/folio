@@ -5,7 +5,8 @@
 //!
 //! - [`document`] —— 统一文档接口：`Document` trait（可重排 / 定版式）+ 门面。
 //! - [`format`] —— provider 注册表与各格式的解析（EPUB / FB2 / HTML / Markdown / TXT / CBZ），
-//!   以及容器层（zip / container / cover / thumb）。
+//!   以及容器层（zip / container）。
+//! - [`assets`] —— 书库资产：封面与缩略图的落盘约定（不是格式解析）。
 //! - [`dom`] —— html5ever 的 arena DOM。
 //! - [`anchor`] —— 可见文本坐标系（`TextMap` / `TextAnchor`）与四级降级重定位。
 //! - [`hit`] —— 引擎查询接口：命中、选区矩形、词边界吸附。
@@ -18,6 +19,7 @@
 
 pub mod anchor;
 pub mod annotation;
+pub mod assets;
 pub mod document;
 pub mod dom;
 pub mod format;

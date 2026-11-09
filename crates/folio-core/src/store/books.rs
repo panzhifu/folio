@@ -215,7 +215,7 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     // 两格要么都有、要么都没有：只剩一格拼不出文件名（见 `load_flow_in` 同一句）。
     let cover_ref = match (cover_hash, cover_mime) {
         (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
-            Some(crate::content::format::cover::CoverRef { hash, mime })
+            Some(crate::content::assets::cover::CoverRef { hash, mime })
         }
         _ => None,
     };
@@ -426,7 +426,7 @@ impl Store {
             return Ok(None);
         };
         let root = book_root(Path::new(&path));
-        let Some(found) = crate::content::format::cover::resolve(&root, &hash, &mime) else {
+        let Some(found) = crate::content::assets::cover::resolve(&root, &hash, &mime) else {
             // 描述在、文件不在：`covers/` 被清过，或库是别处拷来的（没有 `covers/`）。
             // 这一档**只记 debug**：它是「这本书现在没有封面」的正常状态，
             // 而每一帧的书架都会问一遍，warn 会刷爆日志。
@@ -701,7 +701,7 @@ impl Store {
         if others > 0 {
             return Ok(None);
         }
-        Ok(Some(crate::content::format::cover::cover_path(
+        Ok(Some(crate::content::assets::cover::cover_path(
             &book_root(Path::new(&path)),
             &hash,
             &mime,
@@ -1246,7 +1246,7 @@ pub enum StaleReason {
     /// 分开的代价是零：两者的处置本来相同（重扫），只是出处不同。
     RulesChanged,
     // 曾经还有一档 `OldCover`（封面按旧规格生成）：v16 之后封面是一个文件，
-    // 换规格只要重新生成缩略图（`format::thumb`），不必重扫全书 —— 所以这一档
+    // 换规格只要重新生成缩略图（`content::assets::thumb`），不必重扫全书 —— 所以这一档
     // 连同它的判据（`cover_spec` 那一列）一起作废了。
 }
 
@@ -1271,7 +1271,7 @@ impl Store {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
             // `cover_hash` 只用来在下面判「这一本有没有封面」——v16 之后封面规格那一档
             // （`cover_spec`）连同 BLOB 一起没了：封面现在是一个文件，换规格只要重新生成
-            // 缩略图（`format::thumb::purge` + 懒生成），不必重扫全书。
+            // 缩略图（`content::assets::thumb::purge` + 懒生成），不必重扫全书。
             conn.query_row(
                 "SELECT path, format, size, mtime, index_version, cover_hash, rules_hash
                    FROM books WHERE id = ?1",

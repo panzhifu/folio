@@ -271,7 +271,7 @@ impl ShelfView {
                     .as_deref()
                     .zip(item.cover_ref.as_ref())
                     .and_then(|(root, cover)| {
-                        let path = folio_core::content::format::thumb::thumb_path(
+                        let path = folio_core::content::assets::thumb::thumb_path(
                             root,
                             folio_core::infra::paths::THUMB_CARD_PX,
                             cover,

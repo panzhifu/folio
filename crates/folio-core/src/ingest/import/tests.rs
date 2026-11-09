@@ -2316,7 +2316,7 @@ fn a_pdf_walks_the_whole_import_pipeline_including_its_cover() {
     let cover = fixed
         .cover_ref
         .expect("首页栅格该落进 covers/ 并被库里指着");
-    let dest = crate::content::format::cover::cover_path(&lib, &cover.hash, &cover.mime);
+    let dest = crate::content::assets::cover::cover_path(&lib, &cover.hash, &cover.mime);
     assert!(
         dest.exists(),
         "封面文件该在 {}，covers/ 里实际 {:?}",

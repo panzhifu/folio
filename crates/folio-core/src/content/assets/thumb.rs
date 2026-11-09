@@ -18,8 +18,8 @@
 
 use std::path::Path;
 
+use super::cover::CoverRef;
 use crate::Result;
-use crate::content::format::cover::CoverRef;
 
 /// 卡片档：书架上那一格的大图。与 `paths::THUMB_CARD_PX` 是同一个数。
 const CARD: u32 = crate::infra::paths::THUMB_CARD_PX;
@@ -179,7 +179,7 @@ fn encode_from(image: &image::DynamicImage, size: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// 哈希的文件名主名 —— 与 `format::cover` 同一个截断口径（前 20 字）。
+/// 哈希的文件名主名 —— 与 `cover` 模块同一个截断口径（前 20 字）。
 ///
 /// 两处必须一致：缩略图是按封面哈希命名的，口径漂了就会「同一张封面各缩一份」。
 fn stem(hash: &str) -> String {
@@ -220,7 +220,7 @@ pub fn purge(root: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::{DECODES, SIZES, ensure, ensure_all, purge, thumb_path};
-    use crate::content::format::cover::CoverRef;
+    use crate::content::assets::cover::CoverRef;
 
     /// 读并清零解码计数。每条测试开头先清一次：cargo 让同一条线程跑过多条测试，
     /// 不清就会读到上一条的账。

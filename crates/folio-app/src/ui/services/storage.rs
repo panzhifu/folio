@@ -24,7 +24,8 @@
 
 use std::path::PathBuf;
 
-use folio_core::content::format::{comic_cache, thumb};
+use folio_core::content::assets::thumb;
+use folio_core::content::format::comic_cache;
 use folio_core::infra::logging::{log_file, purge_rotated};
 use folio_core::infra::usage::{self, Area, Areas, Usage};
 use folio_core::{Priority, Store, TaskEvent, sweep_partials};

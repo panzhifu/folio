@@ -1027,7 +1027,7 @@ fn land_cover(root: &Path, doc: &mut dyn crate::content::document::Document) {
         return;
     }
     let mime = cover_mime(&bytes);
-    let written = match crate::content::format::cover::write(root, &bytes, &mime) {
+    let written = match crate::content::assets::cover::write(root, &bytes, &mime) {
         Ok(hash) => hash.to_hex(),
         Err(err) => {
             // 字节不进库（v16），所以这一次失败就是「这本书没有封面」——
@@ -1039,7 +1039,7 @@ fn land_cover(root: &Path, doc: &mut dyn crate::content::document::Document) {
             return;
         }
     };
-    let cover = crate::content::format::cover::CoverRef {
+    let cover = crate::content::assets::cover::CoverRef {
         hash: written,
         mime,
     };
@@ -1056,7 +1056,7 @@ fn land_cover(root: &Path, doc: &mut dyn crate::content::document::Document) {
     //
     // 用 `ensure_all` 而不是逐档 `ensure`：同一份封面字节只该解一次图（实测省下的
     // 那一次解码约 3-7 ms/本，而两档的产出逐字节不变）。
-    crate::content::format::thumb::ensure_all(root, &cover, &bytes);
+    crate::content::assets::thumb::ensure_all(root, &cover, &bytes);
     doc.set_cover_ref(Some(cover));
 }
 

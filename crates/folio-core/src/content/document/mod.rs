@@ -188,13 +188,13 @@ pub trait Document: Send + Sync {
     ///
     /// **由导入管线填，不是 provider 填**：provider 只交字节，它不知道书库在哪儿。
     /// 默认 `None` = 没有封面文件，读那一侧退回 `books.cover` 那个 BLOB。
-    fn cover_ref(&self) -> Option<&crate::content::format::cover::CoverRef> {
+    fn cover_ref(&self) -> Option<&crate::content::assets::cover::CoverRef> {
         None
     }
 
     /// 填上封面描述。两族都填：封面落盘写的是同一个 `covers/<哈希>.<后缀>`、
     /// 记的是库里同两列，与「那张图是从容器抽的还是栅格化出来的」无关。
-    fn set_cover_ref(&mut self, _cover: Option<crate::content::format::cover::CoverRef>) {}
+    fn set_cover_ref(&mut self, _cover: Option<crate::content::assets::cover::CoverRef>) {}
 
     fn cover(&self) -> Option<&[u8]> {
         match self.content() {
