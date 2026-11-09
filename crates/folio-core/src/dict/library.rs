@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::dict::{Cache, StarDict};
-use crate::infra::error::{Error, Result};
+use crate::error::{Error, Result};
 
 /// 导入完成后交回调用方的一条书目。
 #[derive(Debug, Clone, PartialEq, Eq)]

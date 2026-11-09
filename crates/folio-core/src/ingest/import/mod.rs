@@ -68,8 +68,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::infra::error::ImportReject;
-use crate::infra::error::Result;
+use crate::error::ImportReject;
+use crate::error::Result;
 use crate::infra::task::Priority;
 use crate::infra::task::StageCtx;
 use crate::infra::task::TaskEvent;
@@ -213,7 +213,7 @@ pub struct ImportOutcome {
 /// 一批导入的分类计数。界面上那句「成功 N / 已存在 M / 拒绝 K（按类别）」读它，
 /// 而不是逐条 toast（`plans/基础设施.md` §3.2：批量作业的错误要能聚合报表）。
 ///
-/// 类别取自 [`crate::infra::error::Error::import_reject`]，是类型而不是文案 —— 改中文措辞
+/// 类别取自 [`crate::error::Error::import_reject`]，是类型而不是文案 —— 改中文措辞
 /// 不会把报表的分组改散。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ImportReport {

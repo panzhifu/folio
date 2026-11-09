@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::infra::config::Config;
-use crate::infra::error::{Error, IoResultExt as _};
+use crate::error::{Error, IoResultExt as _};
 use crate::infra::time::{self, DAY};
 use crate::{Result, Store};
 

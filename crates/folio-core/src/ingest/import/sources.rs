@@ -8,9 +8,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::infra::error::Error;
-use crate::infra::error::IoResultExt as _;
-use crate::infra::error::Result;
+use crate::error::Error;
+use crate::error::IoResultExt as _;
+use crate::error::Result;
 use crate::infra::paths;
 use crate::infra::task::StageCtx;
 use crate::net::cloud::Drive;

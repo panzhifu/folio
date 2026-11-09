@@ -14,7 +14,7 @@
 
 use rusqlite::params;
 
-use crate::infra::error::ImportReject;
+use crate::error::ImportReject;
 
 use super::Store;
 
@@ -155,7 +155,7 @@ mod tests {
     use std::path::Path;
 
     use crate::content::format::{DocMeta, Format};
-    use crate::infra::error::ImportReject;
+    use crate::error::ImportReject;
     use crate::store::{IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry, Store};
 
     fn open(dir: &Path) -> Store {

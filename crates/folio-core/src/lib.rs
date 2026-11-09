@@ -28,6 +28,7 @@ pub mod backup;
 pub mod cache;
 pub mod content;
 pub mod dict;
+pub mod error;
 pub mod fonts;
 pub mod group;
 pub mod infra;
@@ -36,6 +37,7 @@ pub mod layout;
 pub mod net;
 pub mod reader;
 pub mod search;
+pub mod services;
 pub mod speech;
 pub mod store;
 pub mod sync;
@@ -71,13 +73,13 @@ pub use infra::config::{
     PageTurn, Provenance, Reader, Resolved, Speech, Sync, SyncProvider, TextDirection, TocDensity,
     Translation, TranslationEngine, WebDavDrive,
 };
-pub use infra::error::{Error, ImportReject, Result};
+pub use error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
 pub use infra::paths::{
     backups_dir, config_dir, config_path, data_dir, db_path, dicts_dir, fonts_dir, log_dir,
     themes_dir,
 };
-pub use infra::services::Services;
+pub use services::Services;
 pub use infra::task::{
     ByteProgress, Cancel, Priority, StageCtx, TaskError, TaskEvent, TaskHandle, TaskId, TaskManager,
 };

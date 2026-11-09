@@ -26,7 +26,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::infra::error::IoResultExt as _;
+use crate::error::IoResultExt as _;
 use crate::infra::i18n::Locale;
 use crate::infra::paths;
 use folio_model::types::AnnotationStyle;

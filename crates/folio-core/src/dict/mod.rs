@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
 
-use crate::infra::error::{Error, Result};
+use crate::error::{Error, Result};
 
 /// `.idx` 解压后的上限。词表按 4/8 字节偏移 + 词本身算，32 MiB 已经覆盖百万词级。
 const MAX_IDX_BYTES: u64 = 32 * 1024 * 1024;

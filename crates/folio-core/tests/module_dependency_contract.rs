@@ -33,10 +33,6 @@ const BANS: &[(&str, &[&str], &[(&str, &str)])] = &[
             "crate::layout",
         ],
         &[
-            // 刀 5 还：组合根整体搬 crate 根。
-            ("infra/services.rs", "组合根还住在 infra"),
-            // 刀 5 还：错误聚合随组合根出 infra。
-            ("infra/error.rs", "错误聚合还住在 infra"),
             // 刀 6 还：novel / ImageScale 类型搬 folio-model。
             ("infra/config.rs", "novel 与 ImageScale 还引用 content/store 类型"),
         ],

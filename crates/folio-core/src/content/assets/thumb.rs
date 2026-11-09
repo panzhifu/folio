@@ -191,7 +191,7 @@ fn stem(hash: &str) -> String {
 /// 返回删掉的文件数。删失败只记日志：这是可丢弃的缓存，
 /// **删不掉不是错误**（最坏是多占一点空间，下次 `ensure` 会发现文件已存在）。
 pub fn purge(root: &Path) -> Result<usize> {
-    use crate::infra::error::IoResultExt as _;
+    use crate::error::IoResultExt as _;
 
     let dir = crate::infra::paths::thumbs_dir(root);
     if !dir.is_dir() {

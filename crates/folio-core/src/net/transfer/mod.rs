@@ -37,7 +37,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 
-use crate::infra::error::{Error, IoResultExt as _, Result};
+use crate::error::{Error, IoResultExt as _, Result};
 use crate::infra::paths;
 
 mod lan;

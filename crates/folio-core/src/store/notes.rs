@@ -47,7 +47,7 @@ pub struct BookGroup {
 
 /// 从库里折出按书分组的清单。整趟只在切进这一屏（或本屏删改之后）跑一次，
 /// `render` 拿到的已经是能直接画的东西。
-pub fn load_groups(store: &Store) -> crate::infra::error::Result<Vec<BookGroup>> {
+pub fn load_groups(store: &Store) -> crate::error::Result<Vec<BookGroup>> {
     let mut groups: HashMap<i64, BookGroup> = HashMap::new();
     for card in store.all_annotations()? {
         let annotation = &card.annotation;
