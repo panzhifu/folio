@@ -6,8 +6,9 @@
 //! 「跟随系统」那张劈成左浅右深两半。样张用固定色而不取当前主题 —— 这一格
 //! 回答「取哪一侧」，下面的主题网格才回答「那一侧用哪套」，跟着换色两排会互相抢话。
 //!
-//! 卡片的版式按**窗口宽窄**分档（`SizeClass::of`），不是按编译目标：手机一档
-//! （两列、样张无头条），桌面与平板同档（四列、样张带头条）—— 平板不该被
+//! 卡片的版式按**窗口宽窄**分档（`SizeClass::of`），不是按编译目标：四档
+//! **一排四列**手机桌面同排（2026-11-12 起改的 —— 原来手机两列的大卡把一屏
+//! 占掉一半），窄档样张更小且无头条，桌面与平板同档样张带头条 —— 平板不该被
 //! 当成手机。
 //!
 //! 主题网格两侧各有一条**可折叠**的头：浅深钉在哪侧，哪侧的网格摊开、另一侧收起
@@ -192,7 +193,9 @@ fn mode_group(cx: &App) -> Group {
 
 /// 「界面浅深」这一行：每一档画成一张**预览缩略图卡**（浅 / 深 / 水墨 / 跟随系统），
 /// 照 OpenLogi 外观页与 macOS 系统设置的做法 —— 选之前就能看见每一档长什么样，
-/// 不用先选中再反悔。桌面与平板四列、手机两列（按窗口宽窄分档，不按编译目标）。
+/// 不用先选中再反悔。四档一排四列，手机桌面同排：手机上两列的大卡把一屏占掉
+/// 一半（2026-11-12 读者反馈），缩成一排小卡后这一行只占一条；窄窄一格里
+/// 预览照旧说话，选中态仍走描边 + 勾两条通路。
 fn mode_cards_row(window: &mut Window, cx: &mut App) -> AnyElement {
     let compact = SizeClass::of(window).is_compact();
     let current = ConfigHolder::default_appearance(cx).mode;
@@ -206,12 +209,7 @@ fn mode_cards_row(window: &mut Window, cx: &mut App) -> AnyElement {
             tr(cx, "appearance.follow_system"),
         ),
     ];
-    let mut grid = div().w_full().grid().gap_2();
-    grid = if compact {
-        grid.grid_cols(2)
-    } else {
-        grid.grid_cols(4)
-    };
+    let mut grid = div().w_full().grid().gap_2().grid_cols(4);
     for (mode, id, label) in cards {
         let selected = current == mode;
         grid = grid.child(mode_card(cx, mode, id, label, selected, compact));
@@ -269,7 +267,15 @@ fn mode_card(
             div()
                 .min_w_0()
                 .w_full()
-                .text_sm()
+                // 一排四格之后窄卡装不下 text_sm 的「跟随系统」（四字 56px 贴边），
+                // 手机档落到 text_xs，桌面仍与主题卡的标签同档。
+                .map(|style| {
+                    if compact {
+                        style.text_xs()
+                    } else {
+                        style.text_sm()
+                    }
+                })
                 .text_ellipsis()
                 .text_color(ink)
                 .child(label),
@@ -286,14 +292,18 @@ fn mode_card(
 /// 固定色让这一行在任何主题下读起来都一样。裸色值在这里放行是 design guides 里
 /// 「颜色本身是数据」的那条例外 —— 预览画的就是那几格固定的明暗。
 fn mode_preview(mode: Mode, selected: bool, compact: bool) -> AnyElement {
-    // 手机档的样张矮一截、不带头条（纯书页）；桌面档高一些、带一条头条小横条，
-    // 让它读作「应用里的一页」。
+    // 窄卡档（一排四列的手机行）样张矮一截、不带头条（纯书页）：预览在 ~70px 宽的
+    // 卡里只说「这一侧明还是暗」，再大就把一行顶成两屏；桌面档高一些、带一条头条
+    // 小横条，让它读作「应用里的一页」。
     let (frame_h, page_w, page_h, page_bar) = if compact {
-        (px(100.), 60., 84., false)
+        (px(64.), 36., 52., false)
     } else {
         (px(120.), 72., 104., true)
     };
-    let badge = if compact { 14. } else { 16. };
+    let badge = if compact { 12. } else { 16. };
+    // 「跟随系统」的半幅页随档缩：窄卡那格两半各剩 ~30px，页样张再按全幅的比画
+    // 就糊成一团。
+    let (half_w, half_h) = if compact { (24., 36.) } else { (52., 80.) };
     // 壁纸框：整幅预览的底，样张居中。
     let frame = |wallpaper: Hsla| {
         div()
@@ -317,7 +327,7 @@ fn mode_preview(mode: Mode, selected: bool, compact: bool) -> AnyElement {
             .flex()
             .items_center()
             .justify_center()
-            .child(mini_page(pal, 52., 80., page_bar))
+            .child(mini_page(pal, half_w, half_h, page_bar))
     };
     match mode {
         Mode::Light => frame(light_preview().wallpaper)
@@ -359,9 +369,11 @@ fn mode_preview(mode: Mode, selected: bool, compact: bool) -> AnyElement {
 
 /// 一页竖版样张：纸底、几条按**页宽比例**走的文本线（首条强调色），桌面档多一条
 /// 头条小横条让它读作应用里的一页。行数由页高推出 —— 同一个函数画全幅桌面页、
-/// 全幅手机页与「跟随系统」的半幅页，线宽随页宽缩放，哪一档都装得下。
+/// 窄卡的小页与「跟随系统」的半幅页，内边距与线宽都随页宽缩放，哪一档都装得下。
 fn mini_page(pal: PreviewPalette, w: f32, h: f32, bar: bool) -> AnyElement {
-    let pad = 7.;
+    // 内边距跟页宽走：全幅页 7px、窄卡的 24px 小页压到 3px —— 固定 7px 会把
+    // 小页的内容挤没。
+    let pad = (w / 8.).round().clamp(3., 7.);
     let header = if bar { 8. } else { 0. };
     // h 3 的线 + 4 的行距；留一行的余量防凑整越界。
     let line_count = (((h - pad * 2. - header) + 1.) / 7.).floor().max(3.) as usize;
@@ -488,7 +500,10 @@ fn ink_preview() -> PreviewPalette {
 fn themes_group(cx: &App) -> Group {
     group(
         tr(cx, "group.themes"),
-        vec![theme_cards_row(ThemeMode::Light), theme_cards_row(ThemeMode::Dark)],
+        vec![
+            theme_cards_row(ThemeMode::Light),
+            theme_cards_row(ThemeMode::Dark),
+        ],
     )
 }
 
@@ -528,7 +543,10 @@ fn theme_section(window: &mut Window, cx: &mut App, mode: ThemeMode) -> AnyEleme
     let (title, hint) = if mode.is_dark() {
         (tr(cx, "field.theme_dark"), tr(cx, "field.theme_dark.desc"))
     } else {
-        (tr(cx, "field.theme_light"), tr(cx, "field.theme_light.desc"))
+        (
+            tr(cx, "field.theme_light"),
+            tr(cx, "field.theme_light.desc"),
+        )
     };
     let fold_state = fold.clone();
 
